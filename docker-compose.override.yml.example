@@ -1,0 +1,68 @@
+# docker-compose.override.yml - Local environment overrides & examples
+# This file allows customization without modifying the main docker-compose.yml
+# Copy this file to 'docker-compose.override.yml' and uncomment/modify sections as needed.
+# Remember to run './startup.sh --force-restart' after making changes here.
+
+version: "3.9"
+
+services:
+  # --- VaultWarden Overrides ---
+  # vaultwarden:
+  #   # Example: Enable debug logging for VaultWarden
+  #   environment:
+  #     - LOG_LEVEL=debug
+  #     - EXTENDED_LOGGING=true # Already true in main file, but shown for example
+  #
+  #   # Example: Adjust resource limits for a more powerful server (e.g., 4GB RAM for VW)
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         memory: 4g
+  #         cpus: '1.0' # Allow up to 1 full CPU core
+  #       reservations:
+  #         memory: 512m # Reserve 512MB RAM
+  #         cpus: '0.2'
+  #
+  #   # --- WARNING: FOR LOCAL DEBUGGING ONLY. DO NOT EXPOSE ON A PRODUCTION SERVER. ---
+  #   # --- THIS BYPASSES ALL CADDY SECURITY, AUTH, AND RATE LIMITS. ---
+  #   # Example: Expose VaultWarden ports directly on localhost for debugging
+  #   ports:
+  #     - "127.0.0.1:8080:80"    # Direct HTTP access to VaultWarden
+  #     - "127.0.0.1:3012:3012"  # Direct WebSocket access
+
+  # --- Caddy Overrides ---
+  # caddy:
+  #   # Example: Use a custom Caddyfile for development or specific rules
+  #   volumes:
+  #     - ./caddy/Caddyfile.dev:/etc/caddy/Caddyfile:ro # Mount custom Caddyfile
+  #
+  #   # Example: Expose Caddy ports on different host ports (e.g., if 80/443 are taken)
+  #   ports:
+  #     - "8081:80"   # Map host port 8081 to container port 80
+  #     - "8443:443"  # Map host port 8443 to container port 443
+  #     - "127.0.0.1:2019:2019" # Expose Caddy Admin API on localhost (use with caution)
+
+  # --- Fail2ban Overrides ---
+  # fail2ban:
+  #   # Example: Increase Fail2ban logging verbosity for debugging filters
+  #   environment:
+  #     - F2B_LOG_LEVEL=DEBUG # Set log level to DEBUG (very verbose)
+  #
+  #   # Example: Mount a custom jail configuration for testing
+  #   volumes:
+  #     - ./fail2ban/jail.d/custom.conf:/config/jail.d/custom.conf:ro
+
+  # --- ddclient Overrides ---
+  # ddclient:
+  #   # Example: Run ddclient in debug mode, query every 60 seconds
+  #   # Note: This increases API calls to Cloudflare
+  #   command: ["-daemon", "60", "-debug", "-verbose", "-noquiet"]
+
+# --- Networks Definition ---
+# If you *only* use overrides for existing services, you usually don't need this.
+# However, if you add new services that need to connect, define the network as external.
+# networks:
+#   vaultwarden_network: # Ensure this matches the network name in the main compose file or .env
+#     name: ${DOCKER_NETWORK_NAME:-vaultwarden_network}
+#     external: true # Use the existing network created by the main compose file
+

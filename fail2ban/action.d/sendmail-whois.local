@@ -1,0 +1,29 @@
+[Definition]
+actionstart = printf %%b "Hi,\n
+              The jail <name> has been started successfully.\n
+              Regards,\n
+              Fail2Ban" | mail -s "[Fail2Ban] <name>: started" <dest>
+
+actionstop = printf %%b "Hi,\n
+             The jail <name> has been stopped.\n
+             Regards,\n
+             Fail2Ban" | mail -s "[Fail2Ban] <name>: stopped" <dest>
+
+actioncheck = 
+
+actionban = printf %%b "Hi,\n
+            The IP <ip> has just been banned by Fail2Ban after
+            <failures> attempts against <name>.\n\n
+            Here is more information about <ip>:\n
+            `/usr/bin/whois <ip> | grep -E '^(OrgName|Organization|OrgId|Address|City|StateProv|PostalCode|Country|Phone|Comment)'`\n
+            Regards,\n
+            Fail2Ban" | mail -s "[Fail2Ban] <name>: banned <ip>" <dest>
+
+actionunban = printf %%b "Hi,\n
+              The IP <ip> has just been unbanned by Fail2Ban.\n
+              Regards,\n
+              Fail2Ban" | mail -s "[Fail2Ban] <name>: unbanned <ip>" <dest>
+
+[Init]
+name = default
+dest = root

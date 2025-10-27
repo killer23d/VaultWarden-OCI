@@ -1,0 +1,151 @@
+# Caddyfile for VaultWarden-OCI-NG
+# Automatic HTTPS with security headers and rate limiting
+# Addresses v4 review: Simplified WebSocket handling, restored security features
+
+# Import Cloudflare IP ranges for trusted proxies
+import cloudflare-ips.caddy
+
+{$DOMAIN} {
+    # Trusted proxies (CRITICAL: Restores Cloudflare IP trust)
+    trusted_proxies @cloudflare
+
+    # Global logging
+    log {
+        output file /logs/access.log {
+            roll_size 10MB
+            roll_keep 5
+            roll_keep_for 24h
+        }
+        format json {
+            time_format "2006-01-02T15:04:05Z07:00"
+            fields {
+                request>remote_ip @
+                request>method @
+                request>uri @
+                request>headers>User-Agent >user_agent
+                response>status @
+                response>size @
+                latency @
+            }
+        }
+    }
+
+    # Security headers
+    header {
+        # HTTPS Security
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+
+        # Content Security  
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        X-XSS-Protection "1; mode=block"
+        Referrer-Policy "strict-origin-when-cross-origin"
+
+        # Content Security Policy (VaultWarden optimized)
+        Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: https:; frame-src 'self'; object-src 'none'; base-uri 'self';"
+
+        # Remove server identification
+        -Server
+        -X-Powered-By
+    }
+
+    # Admin panel protection (CRITICAL: Restored from review)
+    @admin {
+        path /admin*
+    }
+
+    # Admin Basic Authentication using bcrypt hash from secrets
+    basicauth @admin {
+        admin {env.ADMIN_BASIC_AUTH_HASH}
+    }
+
+    # Rate limiting for admin endpoints
+    rate_limit @admin {
+        zone admin_zone {
+            key {http.request.header.CF-Connecting-IP}
+            key {remote_host}
+            events 5
+            window 10m
+        }
+        response 429 {
+            body "Too many admin login attempts. Please wait before trying again."
+        }
+    }
+
+    # General rate limiting for API endpoints
+    @api {
+        path /api* /identity*
+    }
+
+    rate_limit @api {
+        zone api_zone {
+            key {http.request.header.CF-Connecting-IP}
+            key {remote_host}
+            events 20
+            window 1m
+        }
+    }
+
+    # Block common attack paths and scanners
+    @blocked {
+        path /.env* /config* /.git* /.htaccess* /wp-admin* /wp-login* /phpMyAdmin* /admin.php* /.well-known/security.txt
+        path *.php *.asp *.jsp *.cgi
+    }
+
+    # Return 404 for blocked paths (don't reveal they exist)
+    respond @blocked 404 {
+        body "Not Found"
+    }
+
+    # Block obviously malicious user agents
+    @malicious_ua {
+        header User-Agent *sqlmap* *nikto* *nmap* *masscan* *zap* *burp*
+    }
+
+    respond @malicious_ua 403 {
+        body "Forbidden"
+    }
+
+    # Main reverse proxy to VaultWarden
+    # Simplified: Single proxy handles both HTTP and WebSocket (per v4 review)
+    reverse_proxy vaultwarden:80 {
+        # Preserve real client IP from Cloudflare
+        header_up X-Real-IP {http.request.header.CF-Connecting-IP}
+        header_up X-Forwarded-For {http.request.header.CF-Connecting-IP}
+        header_up X-Forwarded-Proto {scheme}
+        header_up Host {host}
+
+        # Health monitoring
+        health_uri /alive
+        health_interval 30s
+        health_timeout 10s
+        health_status 200
+
+        # Connection optimization
+        transport http {
+            keepalive 30s
+            keepalive_idle_conns 10
+            compression off
+        }
+
+        # Handle large uploads (attachments)
+        flush_interval -1
+    }
+}
+
+# Redirect www subdomain to apex domain
+www.{$DOMAIN} {
+    log {
+        output discard
+    }
+    redir https://{$DOMAIN}{uri} 301
+}
+
+# Catch-all for other subdomains or IPs (security)
+:80, :443 {
+    log {
+        output file /logs/blocked.log
+        level ERROR
+    }
+    respond "Not Found" 404
+}
