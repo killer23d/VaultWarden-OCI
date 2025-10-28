@@ -4,6 +4,5 @@
 
 @cloudflare {
     # Placeholder - IPs will be added by the script
-    remote_ip 1.1.1.1/32 # Example placeholder
+    # Example: remote_ip 1.1.1.1/32
 }
-
