@@ -194,7 +194,7 @@ services:
 
   ddclient:
     # Changed default from specific version to 'latest'
-    image: ddclient/ddclient:${DDCLIENT_VERSION:-latest}
+    image: linuxserver/ddclient:${DDCLIENT_VERSION:-latest}
     container_name: vaultwarden_ddclient
     restart: unless-stopped
     # --- START FIX: Use PUID/PGID ---
