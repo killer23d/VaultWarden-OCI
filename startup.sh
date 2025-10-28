@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # startup.sh - Simplified VaultWarden stack orchestration
-# Uses centralized library functions
 
 set -euo pipefail
 trap "rm -rf '$PROJECT_ROOT/secrets/.docker_secrets' 2>/dev/null" EXIT HUP INT TERM
@@ -61,6 +60,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # --- Prepare Docker Secrets ---
+# Writes necessary files for secrets not passed via environment
 prepare_docker_secrets() {
     log_info "Preparing Docker secrets..."
 
@@ -91,29 +91,36 @@ prepare_docker_secrets() {
         return 1
     }
 
-    local secrets=("admin_token" "smtp_password" "push_installation_id" "push_installation_key" "admin_basic_auth_hash" "ddclient_api_token" "fail2ban_api_token")
+    # Secrets that NEED files (vs being passed via env)
+    local secrets_needing_files=("admin_token" "smtp_password" "push_installation_id" "push_installation_key")
+    # Critical secrets (passed via env but need validation)
+    local critical_env_secrets=("admin_basic_auth_hash" "ddclient_api_token" "fail2ban_api_token")
     local secret_file_path
-    local missing_secrets=() # Array to track unconfigured secrets
+    local missing_secrets=() # Array to track unconfigured critical secrets
 
-    for secret in "${secrets[@]}"; do
+    # Write files for secrets that need them
+    for secret in "${secrets_needing_files[@]}"; do
         local value
         secret_file_path="$docker_secrets_dir/$secret"
-
-        # Use jq to safely extract the value, defaulting to "CHANGE_ME" if null/missing
         value=$(echo "$decrypted_json" | jq -r --arg secret "$secret" '.[$secret] // "CHANGE_ME"')
 
         if [[ -n "$value" ]] && [[ "$value" != "CHANGE_ME"* ]] && [[ "$value" != "null" ]]; then
             echo "$value" > "$secret_file_path"
         else
-            echo "CHANGE_ME" > "$secret_file_path"
-            # Flag critical secrets if they still have placeholder values
-            if [[ "$secret" == "admin_basic_auth_hash" || "$secret" == "ddclient_api_token" || "$secret" == "fail2ban_api_token" ]]; then
-                log_warn "Critical secret '$secret' not configured or has placeholder value"
-                missing_secrets+=("$secret") # Add to the list of missing secrets
-            fi
+            # For optional secrets, create empty file if not set
+            echo "" > "$secret_file_path"
         fi
-
         secure_file "$secret_file_path" 600 || { log_error "Failed to secure temporary secret file: $secret"; return 1; }
+    done
+
+    # Validate critical secrets that are passed via environment
+    for secret in "${critical_env_secrets[@]}"; do
+        local value
+        value=$(echo "$decrypted_json" | jq -r --arg secret "$secret" '.[$secret] // "CHANGE_ME"')
+        if [[ -z "$value" ]] || [[ "$value" == "CHANGE_ME"* ]] || [[ "$value" == "null" ]]; then
+             log_warn "Critical secret '$secret' not configured or has placeholder value"
+             missing_secrets+=("$secret") # Add to the list of missing secrets
+        fi
     done
 
     # --- START VALIDATION ---
@@ -127,11 +134,12 @@ prepare_docker_secrets() {
     fi
     # --- END VALIDATION ---
 
-    log_success "Docker secrets prepared"
+    log_success "Docker secrets prepared and validated"
     return 0
 }
 
 # --- Prepare Environment Variables ---
+# Exports necessary secrets as environment variables for docker-compose
 prepare_environment_variables() {
     log_info "Preparing environment variables for containers..."
 
@@ -144,34 +152,20 @@ prepare_environment_variables() {
 
     local admin_basic_auth_hash
     admin_basic_auth_hash=$(echo "$decrypted_json" | jq -r '.admin_basic_auth_hash // ""')
-    if [[ -n "$admin_basic_auth_hash" ]] && [[ "$admin_basic_auth_hash" != "CHANGE_ME"* ]]; then
-        export ADMIN_BASIC_AUTH_HASH="$admin_basic_auth_hash"
-        log_success "Admin basic auth hash loaded"
-    else
-        # This will be caught by prepare_docker_secrets validation, but log warning here too
-        log_warn "Admin basic auth hash not configured - admin panel protection will be disabled!"
-        export ADMIN_BASIC_AUTH_HASH=""
-    fi
+    # Validation already happened in prepare_docker_secrets, just export
+    export ADMIN_BASIC_AUTH_HASH="$admin_basic_auth_hash"
+    log_debug "Exported ADMIN_BASIC_AUTH_HASH"
+
 
     local ddclient_token
     ddclient_token=$(echo "$decrypted_json" | jq -r '.ddclient_api_token // ""')
-    if [[ -n "$ddclient_token" ]] && [[ "$ddclient_token" != "CHANGE_ME"* ]] && [[ "$ddclient_token" != "" ]]; then
-        export DDCLIENT_API_TOKEN="$ddclient_token"
-        log_success "DDClient API token loaded"
-    else
-        export DDCLIENT_API_TOKEN=""
-         log_warn "DDClient API token not configured - Dynamic DNS updates might fail!"
-    fi
+    export DDCLIENT_API_TOKEN="$ddclient_token"
+    log_debug "Exported DDCLIENT_API_TOKEN"
 
     local fail2ban_token
     fail2ban_token=$(echo "$decrypted_json" | jq -r '.fail2ban_api_token // ""')
-    if [[ -n "$fail2ban_token" ]] && [[ "$fail2ban_token" != "CHANGE_ME"* ]] && [[ "$fail2ban_token" != "" ]]; then
-        export FAIL2BAN_API_TOKEN="$fail2ban_token"
-        log_success "Fail2Ban/Caddy API token loaded"
-    else
-        export FAIL2BAN_API_TOKEN=""
-        log_warn "Fail2Ban/Caddy API token not configured - Fail2Ban bans and Caddy ACME DNS challenge might fail!"
-    fi
+    export FAIL2BAN_API_TOKEN="$fail2ban_token"
+    log_debug "Exported FAIL2BAN_API_TOKEN"
 
     log_success "Secrets exported to environment"
     return 0
