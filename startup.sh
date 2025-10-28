@@ -3,6 +3,7 @@
 # Uses centralized library functions
 # Removed redundant secrets file creation for env-passed secrets
 # FIX: Define PROJECT_ROOT before trap command
+# FIX: Explicitly request JSON output for jq parsing
 
 set -euo pipefail
 
@@ -23,6 +24,11 @@ source "lib/common.sh"
 init_common_lib "$0" # init_common_lib now correctly uses PROJECT_ROOT if needed
 source "lib/docker.sh"
 source "lib/crypto.sh"
+# --- START FIX: Export SOPS_AGE_KEY_FILE if edit-secrets set it ---
+# Ensure the key file env var is set if possible for library calls
+export SOPS_AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-"$PROJECT_ROOT/secrets/keys/age-key.txt"}"
+# --- END FIX ---
+
 
 # --- Configuration ---
 FORCE_RESTART=false
@@ -94,12 +100,22 @@ prepare_docker_secrets() {
         return 1
     fi
 
-    local decrypted_json
-    # Use SOPS_AGE_KEY_FILE environment variable set by edit-secrets.sh caller potentially
-    # Or rely on .sops.yaml if variable not set. sops_decrypt handles this.
-    decrypted_json=$(sops_decrypt "secrets/secrets.yaml" "" 2>/dev/null) || {
-        log_error "Failed to decrypt secrets. Check age key and sops config."
+    local decrypted_json exit_status
+    # --- START JSON FIX for startup.sh ---
+    log_debug "Decrypting secrets to JSON format..."
+    decrypted_json=$(sops --decrypt --output-type json "secrets/secrets.yaml" 2>&1)
+    exit_status=$?
+    if [[ $exit_status -ne 0 ]]; then
+        log_error "Failed to decrypt secrets using key $SOPS_AGE_KEY_FILE."
+        log_error "SOPS Output: $decrypted_json"
         log_info "Try running './edit-secrets.sh --test' first."
+        return 1
+    fi
+    # --- END JSON FIX ---
+    # Validate decrypted content is JSON
+    echo "$decrypted_json" | jq . > /dev/null 2>&1 || {
+        log_error "Decrypted secrets content is not valid JSON. File might be corrupted."
+        log_debug "Content was: $decrypted_json"
         return 1
     }
 
@@ -166,12 +182,24 @@ prepare_docker_secrets() {
 prepare_environment_variables() {
     log_info "Preparing environment variables for containers..."
 
-    local decrypted_json
-    # Decrypt again, ensure SOPS_AGE_KEY_FILE is available if needed
-    decrypted_json=$(sops_decrypt "secrets/secrets.yaml" "" 2>/dev/null) || {
-        log_error "Failed to decrypt secrets for environment variables. Check age key and sops config."
+    local decrypted_json exit_status
+    # --- START JSON FIX for startup.sh ---
+    log_debug "Decrypting secrets to JSON format for environment variables..."
+    decrypted_json=$(sops --decrypt --output-type json "secrets/secrets.yaml" 2>&1)
+    exit_status=$?
+    if [[ $exit_status -ne 0 ]]; then
+        log_error "Failed to decrypt secrets for environment variables using key $SOPS_AGE_KEY_FILE."
+        log_error "SOPS Output: $decrypted_json"
+        return 1
+    fi
+    # --- END JSON FIX ---
+     # Validate decrypted content is JSON
+    echo "$decrypted_json" | jq . > /dev/null 2>&1 || {
+        log_error "Decrypted secrets content for env vars is not valid JSON. File might be corrupted."
+        log_debug "Content was: $decrypted_json"
         return 1
     }
+
 
     local admin_basic_auth_hash
     admin_basic_auth_hash=$(echo "$decrypted_json" | jq -r '.admin_basic_auth_hash // ""')
@@ -329,10 +357,6 @@ main() {
     echo "  • After editing secrets, always use: make restart"
 }
 
-# --- START FIX: Export SOPS_AGE_KEY_FILE if edit-secrets set it ---
-# This ensures sops_decrypt within prepare_docker_secrets/prepare_environment_variables uses the correct key
-export SOPS_AGE_KEY_FILE
-# --- END FIX ---
 
 main "$@"
 
