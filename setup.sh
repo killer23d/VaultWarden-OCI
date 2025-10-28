@@ -197,6 +197,7 @@ install_dependencies() {
     log_info "Installing basic dependencies..."
     local basic_packages=(
         "age"           # Encryption tool
+        "make"          # Build utility (for Makefile shortcuts)
         "nano"          # Text editor
         "rclone"        # Cloud sync tool
         "sqlite3"       # Database tool
@@ -253,6 +254,7 @@ verify_dependencies() {
         "docker"
         "age"
         "sops"
+        "make" # Verify make is present
         "sqlite3"
         "curl"
         "jq"
@@ -283,6 +285,7 @@ verify_dependencies() {
     echo "  Docker Compose: $(docker compose version --short)"
     echo "  Age: $(age --version | head -1)"
     echo "  SOPS: $(sops --version)"
+    echo "  Make: $(make --version | head -1)"
     echo "  SQLite: $(sqlite3 --version | cut -d' ' -f1)"
 }
 
@@ -838,3 +841,4 @@ main() {
 
 # --- Execution ---
 main "$@"
+
