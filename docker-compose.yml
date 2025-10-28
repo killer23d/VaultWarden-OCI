@@ -8,7 +8,9 @@ services:
     image: vaultwarden/server:${VAULTWARDEN_VERSION:-latest}
     container_name: vaultwarden_app
     restart: unless-stopped
-    user: "${UID:-1000}:${GID:-1000}"
+    # --- START FIX: Use PUID/PGID ---
+    user: "${PUID:-1000}:${PGID:-1000}"
+    # --- END FIX ---
 
     environment:
       - DOMAIN=https://${DOMAIN}
@@ -87,7 +89,9 @@ services:
     image: caddy:${CADDY_VERSION:-latest}
     container_name: vaultwarden_caddy
     restart: unless-stopped
-    user: "${UID:-1000}:${GID:-1000}"
+    # --- START FIX: Use PUID/PGID ---
+    user: "${PUID:-1000}:${PGID:-1000}"
+    # --- END FIX ---
 
     environment:
       - DOMAIN=${DOMAIN}
@@ -195,7 +199,9 @@ services:
     image: ddclient/ddclient:${DDCLIENT_VERSION:-latest}
     container_name: vaultwarden_ddclient
     restart: unless-stopped
-    user: "${UID:-1000}:${GID:-1000}"
+    # --- START FIX: Use PUID/PGID ---
+    user: "${PUID:-1000}:${PGID:-1000}"
+    # --- END FIX ---
 
     volumes:
       - ./ddclient/ddclient.conf:/etc/ddclient/ddclient.conf:ro
