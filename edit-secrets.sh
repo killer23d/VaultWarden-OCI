@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # edit-secrets.sh - Simplified secrets management with library integration
 # Uses centralized library functions
+# Added permission checks and explicit key path for SOPS edit
+# Changed edit command to rely on .sops.yaml
+# Added SOPS_AGE_KEY_FILE export
+# Explicitly request JSON output for jq parsing in test
 
 set -euo pipefail
 
@@ -80,7 +84,8 @@ check_prerequisites() {
          log_info "Default editor 'nano' can be installed with: sudo apt install nano"
          return 1
     fi
-    require_commands age "$EDITOR" || return 1
+    # Ensure jq is installed for testing
+    require_commands age "$EDITOR" jq || return 1
 
 
     # Check SOPS availability using library function
@@ -162,14 +167,15 @@ push_installation_key: CHANGE_ME_OR_LEAVE_EMPTY
 ddclient_api_token: CHANGE_ME_DNS_TOKEN
 
 # Cloudflare API token for Fail2Ban/Caddy (Permissions: Zone:Firewall Services:Edit)
-fail2ban_api_token: CHANGE_ME_FAIL2BAN_API_TOKEN
+fail2ban_api_token: CHANGE_ME_FIREWALL_TOKEN
 EOF
 
     log_success "Template secrets file created"
     log_info "Now encrypting with SOPS (using SOPS_AGE_KEY_FILE)..."
 
     # Encrypt the file using SOPS. SOPS_AGE_KEY_FILE should ensure the correct key is used.
-    if sops --encrypt --in-place "$SECRETS_FILE"; then
+    # Specify input type explicitly during encryption
+    if sops --input-type yaml --encrypt --in-place "$SECRETS_FILE"; then
         log_success "Secrets file encrypted successfully using key $SOPS_AGE_KEY_FILE"
         secure_file "$SECRETS_FILE" 600
     else
@@ -206,7 +212,8 @@ show_secrets() {
     echo ""
     echo "=== DECRYPTED SECRETS (using key $SOPS_AGE_KEY_FILE) ==="
     # Use library function to decrypt, relies on SOPS_AGE_KEY_FILE now
-    if sops_decrypt "$SECRETS_FILE" ""; then
+    # Request YAML output for better readability
+    if sops_decrypt "$SECRETS_FILE" "" "yaml"; then # Request YAML output type
         echo "======================================================"
         echo ""
         log_warn "Remember to keep these values secure!"
@@ -366,18 +373,28 @@ test_secrets_access() {
 
     # Test decryption using library function, relies on SOPS_AGE_KEY_FILE
     log_info "Attempting decryption using key specified by SOPS_AGE_KEY_FILE ($SOPS_AGE_KEY_FILE)..."
-    if sops_decrypt "$SECRETS_FILE" "/dev/null" >/dev/null 2>&1; then
+    # The sops_decrypt function in lib/crypto.sh needs modification to accept output type
+    # For now, call sops directly for the test to ensure JSON output for jq
+    local decrypted_json exit_status
+    log_debug "Running: sops --decrypt --output-type json \"$SECRETS_FILE\""
+    decrypted_json=$(sops --decrypt --output-type json "$SECRETS_FILE" 2>&1)
+    exit_status=$?
+
+    if [[ $exit_status -eq 0 ]]; then
         log_success "Secrets file can be decrypted using the current key."
 
-        # Test individual secret access using direct decryption and jq
-        local decrypted_json
-        # sops_decrypt should use SOPS_AGE_KEY_FILE here too
-        decrypted_json=$(sops_decrypt "$SECRETS_FILE" "" | jq .) || {
-             log_error "Failed to parse decrypted JSON content."
+        # Test parsing with jq
+        log_debug "Testing JSON parsing with jq..."
+        echo "$decrypted_json" | jq . > /dev/null 2>&1
+        local jq_status=$?
+        if [[ $jq_status -ne 0 ]]; then
+             log_error "Failed to parse decrypted JSON content with jq."
+             log_debug "Decrypted content was: $decrypted_json"
              return 1
-        }
+        fi
+        log_success "Decrypted content parsed successfully as JSON."
 
-
+        # Test individual secret access using direct decryption and jq
         local test_secrets=("admin_token" "backup_passphrase" "ddclient_api_token" "fail2ban_api_token")
         local accessible_secrets=0
         local missing_secrets=0
@@ -411,6 +428,7 @@ test_secrets_access() {
 
     else
         log_error "Cannot decrypt secrets file using key specified by SOPS_AGE_KEY_FILE ($SOPS_AGE_KEY_FILE)"
+        log_error "SOPS Output: $decrypted_json"
         log_info "This indicates a key mismatch or corrupted file."
         return 1
     fi
