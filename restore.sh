@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # restore.sh - Simplified VaultWarden restore with library integration
+# Uses centralized backup listing function
 
 set -euo pipefail
 
@@ -13,6 +14,7 @@ source "lib/common.sh"
 init_common_lib "$0"
 source "lib/docker.sh"
 source "lib/crypto.sh"
+source "lib/backup_utils.sh" # Source the new backup utils library
 
 # --- Configuration ---
 RESTORE_TYPE="auto"  # auto, db, full, emergency
@@ -86,72 +88,15 @@ if [[ -z "$BACKUP_FILE" ]]; then
 fi
 
 
-# --- List Backups Function (Duplicated from backup.sh) ---
-list_backups_for_restore() {
-    log_info "Scanning for available local backups..."
-    local backup_base_dir="$PROJECT_ROOT/backups"
-    local found_backups=() # Array to store file paths
-    declare -g BACKUP_LIST_DETAILS=() # Global associative array for details map
-    BACKUP_LIST_DETAILS=() # Reset global array
-    local counter=1
-
-    # --- START FIX #2: NUL/newline mismatch ---
-    local find_cmd="find \"$backup_base_dir/db\" \"$backup_base_dir/full\" \"$backup_base_dir/emergency\" -maxdepth 1 -name '*.age' -type f -printf '%T@ %p\n' 2>/dev/null"
-    local sorted_files=$(eval "$find_cmd" | sort -nr)
-    # --- END FIX #2 ---
-
-    if [[ -z "$sorted_files" ]]; then
-        log_warn "No local backups found in ./backups/{db,full,emergency}/"
-        return 1
-    fi
-
-    local details_lines=() # Temp array for formatted lines
-    local max_lines=0
-    while IFS= read -r line; do
-        [[ -z "$line" ]] && continue
-        local file="${line#* }"
-        local filename type timestamp date_str time_str size
-        filename=$(basename "$file")
-        size=$(du -h "$file" | cut -f1)
-
-        # --- START FIX #1: BASH_REMATCH check (Regex remains, indices were correct) ---
-        if [[ $filename =~ ^vw-(db|full)-backup-([0-9]{8})-([0-9]{6})\.sqlite3\.gz\.age$ ]]; then
-            type="${BASH_REMATCH[1]}"; date_str="${BASH_REMATCH[2]}"; time_str="${BASH_REMATCH[3]}"
-        elif [[ $filename =~ ^emergency-kit-([0-9]{8})-([0-9]{6})\.tar\.gz\.age$ ]]; then
-            type="emergency"; date_str="${BASH_REMATCH[1]}"; time_str="${BASH_REMATCH[2]}"
-        else
-            type="unknown"; date_str="--------"; time_str="------"
-        fi
-        # --- END FIX #1 ---
-
-        local formatted_date="${date_str:0:4}-${date_str:4:2}-${date_str:6:2}"
-        local formatted_time="${time_str:0:2}:${time_str:2:2}:${time_str:4:2}"
-        local padded_type; printf -v padded_type "%-11s" "$type"
-
-        details_lines+=("$(printf "%3d | %s | %s | %s | %6s | %s" "$counter" "$padded_type" "$formatted_date" "$formatted_time" "$size" "$filename")")
-        BACKUP_LIST_DETAILS[$counter]="$file" # Populate global associative array
-        ((counter++)); ((max_lines++))
-    done <<< "$sorted_files"
-
-     if [[ $max_lines -eq 0 ]]; then
-      log_warn "No local backups found matching expected patterns."
-      return 1
-    fi
-
-    echo ""
-    echo "Available Backups (Newest First):"
-    echo " ID | Type        | Date       | Time     | Size   | Filename"
-    echo "----|-------------|------------|----------|--------|------------------------------------------"
-    printf '%s\n' "${details_lines[@]}"
-    echo "----|-------------|------------|----------|--------|------------------------------------------"
-    echo ""
-    return 0
-}
+# --- List Backups Function (Removed) ---
+# Now uses list_backups() from lib/backup_utils.sh
 
 # Interactive selection function
 select_backup_interactive() {
-    # Relies on BACKUP_LIST_DETAILS being populated globally by list_backups_for_restore
-    if ! list_backups_for_restore; then
+    # Declare the global associative array expected by list_backups
+    declare -gA BACKUP_LIST_DETAILS
+    # Call the centralized list_backups function
+    if ! list_backups; then # list_backups populates BACKUP_LIST_DETAILS
         return 1
     fi
 
@@ -173,9 +118,7 @@ select_backup_interactive() {
 
 # --- Validation ---
 validate_environment() {
-    # --- START FIX #4: Add sqlite3 prereq ---
     require_commands age tar gzip chown sqlite3 || return 1
-    # --- END FIX #4 ---
     require_docker || return 1
     if ! check_age_key; then log_error "Age key not available"; return 1; fi
 
@@ -204,7 +147,7 @@ detect_backup_type() {
                 if file "$temp_peek" | grep -q 'gzip compressed data'; then type_guess="db";
                 elif tar -tf "$temp_peek" > /dev/null 2>&1; then
                     if tar -tf "$temp_peek" | grep -qE "(RECOVERY\.md|kit-info\.txt)"; then type_guess="emergency";
-                    elif tar -tf "$temp_peek" | grep -qE "(\.env|docker-compose\.yml)"; then type_guess="full";
+                    elif tar -tf "$temp_peek" | grep -qE "(\.env|docker-compose\.yml|lib/)"; then type_guess="full"; # Added lib/ check
                     else type_guess="unknown_tar"; fi
                 else type_guess="unknown_format"; fi
                 rm -f "$temp_peek"
@@ -242,8 +185,7 @@ confirm_restore() {
     return 0
 }
 
-# --- Restore Functions --- (Keep existing restore_database, restore_full_system, restore_emergency_kit logic as is, ensuring they use the potentially globally set BACKUP_FILE)
-# ... [Function bodies remain largely the same, just ensure they rely on BACKUP_FILE] ...
+# --- Restore Functions ---
 # --- Database Restore ---
 restore_database() {
     log_info "Starting database restore from: $(basename "$BACKUP_FILE")"
@@ -292,7 +234,7 @@ restore_full_system() {
 
     local backup_suffix="pre-restore-$(date +%Y%m%d-%H%M%S)"
     log_info "Backing up current configuration...";
-    [[ -f .env ]] && cp .env ".env.$backup_suffix" || true; [[ -f docker-compose.yml ]] && cp docker-compose.yml "docker-compose.yml.$backup_suffix" || true; [[ -d secrets ]] && cp -a secrets "secrets.$backup_suffix" || true; [[ -d caddy ]] && cp -a caddy "caddy.$backup_suffix" || true; [[ -d fail2ban ]] && cp -a fail2ban "fail2ban.$backup_suffix" || true
+    [[ -f .env ]] && cp .env ".env.$backup_suffix" || true; [[ -f docker-compose.yml ]] && cp docker-compose.yml "docker-compose.yml.$backup_suffix" || true; [[ -d secrets ]] && cp -a secrets "secrets.$backup_suffix" || true; [[ -d caddy ]] && cp -a caddy "caddy.$backup_suffix" || true; [[ -d fail2ban ]] && cp -a fail2ban "fail2ban.$backup_suffix" || true; [[ -d lib ]] && cp -a lib "lib.$backup_suffix" || true # Backup lib dir
 
     log_info "Restoring configuration files..."; rsync -a --delete "$temp_dir/" . || log_warn "Copy errors occurred"
 
@@ -300,7 +242,10 @@ restore_full_system() {
     if [[ -d "$temp_dir/data" ]]; then
         log_info "Restoring data directory to $state_dir/data..."; ensure_dir "$state_dir" 755 "$owner"
         if [[ -d "$state_dir/data" ]]; then log_info "Backing up current data dir..."; mv "$state_dir/data" "$state_dir/data.$backup_suffix" || { log_error "Failed data backup!"; start_services; return 1; }; fi
-        if [[ -d "./data" ]]; then mv "./data" "$state_dir/" || { log_error "Failed data move!"; start_services; return 1; }; else log_error "Missing data in backup."; return 1; fi
+        # Check if data was extracted to project root or state dir path
+        if [[ -d "./data" ]]; then mv "./data" "$state_dir/" || { log_error "Failed data move!"; start_services; return 1; };
+        elif [[ -d "$temp_dir/data" ]]; then mv "$temp_dir/data" "$state_dir/" || { log_error "Failed data move from temp!"; start_services; return 1; };
+        else log_error "Missing data in backup."; return 1; fi
     else log_warn "No data dir in backup."; fi
 
     log_info "Setting ownership/permissions..."; chown -R "$owner" . || log_warn "Proj ownership error"; [[ -d "$state_dir/data" ]] && chown -R "$owner" "$state_dir/data" || log_warn "Data ownership error"
@@ -333,15 +278,23 @@ restore_emergency_kit() {
     local backup_suffix="emergency-restore-backup-$(date +%Y%m%d-%H%M%S)"
     log_info "Creating emergency backup of current state: ./emergency-backups/$backup_suffix/"
     ensure_dir "emergency-backups/$backup_suffix" 755 "$owner"
-    rsync -a --delete --exclude 'emergency-backups/' . "emergency-backups/$backup_suffix/" || log_warn "Could not fully back up current state"
+    # Ensure PROJECT_ROOT doesn't end with / for rsync exclude
+    local exclude_root="${PROJECT_ROOT%/}"
+    rsync -a --delete --exclude "${exclude_root}/emergency-backups/" "${exclude_root}/" "emergency-backups/$backup_suffix/" || log_warn "Could not fully back up current state"
+
 
     log_info "Restoring complete system from kit..."; rsync -a --delete "$temp_dir/" . || log_warn "Copy errors occurred"
 
     local state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
-    if [[ -d "./data" ]]; then
+    # Correct data move logic from kit
+    if [[ -d "$temp_dir/data" ]]; then
         log_info "Moving restored data to $state_dir/data..."; ensure_dir "$state_dir" 755 "$owner"; rm -rf "$state_dir/data" 2>/dev/null || true
-        mv "./data" "$state_dir/" || { log_error "Failed data move!"; return 1; }
-    else log_warn "No data dir in kit."; fi
+        mv "$temp_dir/data" "$state_dir/" || { log_error "Failed data move from temp!"; return 1; }
+    elif [[ -d "./data" ]]; then # If rsync moved it to root first
+        log_info "Moving restored data from ./data to $state_dir/data..."; ensure_dir "$state_dir" 755 "$owner"; rm -rf "$state_dir/data" 2>/dev/null || true
+        mv "./data" "$state_dir/" || { log_error "Failed data move from project root!"; return 1; }
+    else log_warn "No data dir found in kit."; fi
+
 
     log_info "Setting ownership/permissions..."; chown -R "$owner" . || log_warn "Proj ownership error"; [[ -d "$state_dir/data" ]] && chown -R "$owner" "$state_dir/data" || log_warn "Data ownership error"
     [[ -f .env ]] && secure_file .env 600; [[ -f secrets/secrets.yaml ]] && secure_file secrets/secrets.yaml 600; [[ -f secrets/keys/age-key.txt ]] && secure_file secrets/keys/age-key.txt 600
@@ -388,7 +341,6 @@ main() {
     echo "Next steps:"; echo "  1. Verify health: ./health.sh (or make health)"; echo "  2. Test web access: https://$domain"; echo "  3. Check admin panel"; echo "  4. Create new backup: ./backup.sh (or make backup-full)"
 }
 
-# Declare the global associative array used by listing/selection
-declare -A BACKUP_LIST_DETAILS=()
+# Ensure the global associative array used by listing/selection exists
+declare -gA BACKUP_LIST_DETAILS=()
 main "$@"
-
