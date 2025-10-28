@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # backup.sh - Simplified VaultWarden backup creation with library integration
+# Uses centralized backup listing function
 
 set -euo pipefail
 
@@ -13,6 +14,7 @@ source "lib/common.sh"
 init_common_lib "$0"
 source "lib/docker.sh"
 source "lib/crypto.sh"
+source "lib/backup_utils.sh" # Source the new backup utils library
 
 # --- Configuration ---
 BACKUP_TYPE="db"  # db, full, or emergency
@@ -65,79 +67,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 # --- List Backups Function ---
-# Function to list backups - also used by restore.sh (logic duplicated there)
-list_backups() {
-    log_info "Available local backups:"
-    echo ""
-    local backup_base_dir="$PROJECT_ROOT/backups"
-    local found_backups_details=() # Store lines for later printing
-    local counter=1
-
-    # --- START FIX #2: NUL/newline mismatch ---
-    # Use find with printf to get timestamp and path, sort numerically, read line by line
-    local find_cmd
-    find_cmd="find \"$backup_base_dir/db\" \"$backup_base_dir/full\" \"$backup_base_dir/emergency\" -maxdepth 1 -name '*.age' -type f -printf '%T@ %p\n' 2>/dev/null"
-
-    local sorted_files
-    sorted_files=$(eval "$find_cmd" | sort -nr)
-    # --- END FIX #2 ---
-
-    if [[ -z "$sorted_files" ]]; then
-        log_warn "No local backups found in ./backups/{db,full,emergency}/"
-        return 1
-    fi
-
-    local max_lines=0 # Count lines found
-    while IFS= read -r line; do
-        [[ -z "$line" ]] && continue # Skip empty lines
-
-        # Extract path (everything after the first space)
-        local file="${line#* }"
-        local filename type timestamp date_str time_str size
-        filename=$(basename "$file")
-        size=$(du -h "$file" | cut -f1)
-
-        # --- START FIX #1: BASH_REMATCH check (Regex remains, indices were correct) ---
-        if [[ $filename =~ ^vw-(db|full)-backup-([0-9]{8})-([0-9]{6})\.sqlite3\.gz\.age$ ]]; then
-            type="${BASH_REMATCH[1]}"
-            date_str="${BASH_REMATCH[2]}"
-            time_str="${BASH_REMATCH[3]}"
-        elif [[ $filename =~ ^emergency-kit-([0-9]{8})-([0-9]{6})\.tar\.gz\.age$ ]]; then
-            type="emergency"
-            date_str="${BASH_REMATCH[1]}"
-            time_str="${BASH_REMATCH[2]}" # Corrected index was already applied
-        else
-            type="unknown"
-            date_str="--------"
-            time_str="------"
-        fi
-        # --- END FIX #1 ---
-
-        local formatted_date="${date_str:0:4}-${date_str:4:2}-${date_str:6:2}"
-        local formatted_time="${time_str:0:2}:${time_str:2:2}:${time_str:4:2}"
-        local padded_type
-        printf -v padded_type "%-11s" "$type"
-
-        # Store formatted line
-        found_backups_details+=("$(printf "%3d | %s | %s | %s | %6s | %s" "$counter" "$padded_type" "$formatted_date" "$formatted_time" "$size" "$filename")")
-        ((counter++))
-        ((max_lines++))
-    done <<< "$sorted_files"
-
-    if [[ $max_lines -eq 0 ]]; then
-      log_warn "No local backups found matching expected patterns."
-      return 1
-    fi
-
-    echo " ID | Type        | Date       | Time     | Size   | Filename"
-    echo "----|-------------|------------|----------|--------|------------------------------------------"
-    # Print stored lines
-    printf '%s\n' "${found_backups_details[@]}"
-    echo "----|-------------|------------|----------|--------|------------------------------------------"
-    echo ""
-    return 0
-}
-
+# Now uses the centralized function from lib/backup_utils.sh
+# Kept for compatibility with `make list-backups` target if it calls this directly
+# The main() function will call the library version if --list is passed.
 
 # --- Backup Functions ---
 
@@ -185,7 +117,7 @@ create_db_backup() {
 
     state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
     db_file="$state_dir/data/bwdata/db.sqlite3"
-    local container_db_path="/data/db.sqlite3"
+    local container_db_path="/data/bwdata/db.sqlite3" # Corrected path inside container
 
     is_running=$(is_service_running "vaultwarden" && echo "true" || echo "false")
 
@@ -261,7 +193,7 @@ create_full_backup() {
 
     state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
     db_file="$state_dir/data/bwdata/db.sqlite3"
-    local container_db_path="/data/db.sqlite3"
+    local container_db_path="/data/bwdata/db.sqlite3" # Corrected path inside container
 
     is_running=$(is_service_running "vaultwarden" && echo "true" || echo "false")
 
@@ -281,6 +213,9 @@ create_full_backup() {
     [[ -d caddy ]] && cp -r caddy "$temp_dir/" || log_warn "caddy/ directory not found"
     [[ -d fail2ban ]] && cp -r fail2ban "$temp_dir/" || log_warn "fail2ban/ directory not found"
     [[ -d secrets ]] && cp -r secrets "$temp_dir/" || log_warn "secrets/ directory not found"
+    # --- START FIX: Include lib dir ---
+    [[ -d lib ]] && cp -r lib "$temp_dir/" || log_warn "lib/ directory not found"
+    # --- END FIX ---
 
     local db_snapshot="$temp_dir/db.sqlite3.snapshot"
     log_info "Creating consistent database snapshot..."
@@ -305,7 +240,7 @@ create_full_backup() {
     log_info "Copying data directory..."
     if [[ -d "$state_dir/data" ]]; then
         mkdir -p "$temp_dir/data"
-        # --- START FIX #3: Fallback copy logic ---
+        # Use rsync if available, fallback to cp
         if command -v rsync >/dev/null 2>&1; then
              if ! rsync -a --delete --exclude 'bwdata/db.sqlite3*' "$state_dir/data/" "$temp_dir/data/"; then
                  log_warn "Rsync failed, falling back to cp"
@@ -314,7 +249,6 @@ create_full_backup() {
         else
              cp -a "$state_dir/data/"* "$temp_dir/data/" 2>/dev/null || true
         fi
-        # --- END FIX #3 ---
         if [[ -f "$db_snapshot" ]]; then
             mkdir -p "$temp_dir/data/bwdata"
             mv "$db_snapshot" "$temp_dir/data/bwdata/db.sqlite3"
@@ -371,7 +305,7 @@ create_emergency_kit() {
 
     state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
     db_file="$state_dir/data/bwdata/db.sqlite3"
-    local container_db_path="/data/db.sqlite3"
+    local container_db_path="/data/bwdata/db.sqlite3" # Corrected path inside container
 
     local temp_dir
     temp_dir=$(mktemp -d)
@@ -383,6 +317,10 @@ create_emergency_kit() {
     [[ -d caddy ]] && cp -r caddy "$temp_dir/" || { log_error "caddy/ required"; return 1; }
     [[ -d fail2ban ]] && cp -r fail2ban "$temp_dir/" || log_warn "fail2ban/ not found"
     [[ -d secrets ]] && cp -r secrets "$temp_dir/" || { log_error "secrets/ required"; return 1; }
+    # --- START FIX: Include lib dir ---
+    [[ -d lib ]] && cp -r lib "$temp_dir/" || { log_error "lib/ required"; return 1; }
+    # --- END FIX ---
+
 
     mkdir -p "$temp_dir/data"
     local db_snapshot="$temp_dir/db.sqlite3.snapshot"
@@ -403,7 +341,7 @@ create_emergency_kit() {
 
      log_info "Copying data contents for kit..."
     if [[ -d "$state_dir/data" ]]; then
-        # --- START FIX #3: Fallback copy logic ---
+        # Use rsync if available, fallback to cp
         if [[ -f "$db_snapshot" ]]; then
              if command -v rsync >/dev/null 2>&1; then
                  if ! rsync -a --delete --exclude 'bwdata/db.sqlite3*' "$state_dir/data/" "$temp_dir/data/"; then
@@ -428,7 +366,6 @@ create_emergency_kit() {
                   cp -a "$state_dir/data/"* "$temp_dir/data/" 2>/dev/null || true
              fi
         fi
-         # --- END FIX #3 ---
     else
         log_warn "State data directory not found. Kit incomplete."
     fi
@@ -439,15 +376,18 @@ create_emergency_kit() {
 
 ## Quick Recovery Steps
 1. Set up new Ubuntu 24.04 server (or similar Debian-based).
-2. Extract this kit: `age -d -i secrets/keys/age-key.txt emergency-kit-*.tar.gz.age | tar -xzf - -C /path/to/restore`
-3. Install dependencies: `sudo apt update && sudo apt install -y docker.io docker-compose-plugin age sops nano rclone sqlite3 argon2 jq mailutils ufw curl`
-4. Copy extracted files to project directory (e.g., `/opt/vaultwarden`).
-5. Set ownership: `sudo chown -R your_user:your_group /opt/vaultwarden` (Replace your_user:your_group).
-6. Set secure permissions: `chmod 600 /opt/vaultwarden/.env /opt/vaultwarden/secrets/secrets.yaml /opt/vaultwarden/secrets/keys/age-key.txt`.
-7. Set executable permissions: `chmod +x /opt/vaultwarden/*.sh`.
-8. Start services: `cd /opt/vaultwarden && ./startup.sh`.
-9. Update DNS record for your domain to point to the new server IP.
-10. Check health: `./health.sh --comprehensive`.
+2. Transfer this kit and your Age private key (`age-key.txt`) to the new server.
+3. Install dependencies: `sudo apt update && sudo apt install -y docker.io docker-compose-plugin age sops nano rclone sqlite3 argon2 jq mailutils ufw curl git`
+4. Create project directory: `sudo mkdir -p /opt/vaultwarden`
+5. Extract this kit into the project directory: `sudo age -d -i /path/to/your/age-key.txt emergency-kit-*.tar.gz.age | sudo tar -xzf - -C /opt/vaultwarden`
+6. Set ownership: `sudo chown -R your_user:your_group /opt/vaultwarden` (Replace your_user:your_group with the user who will manage VaultWarden).
+7. Set secure permissions: `sudo chmod 600 /opt/vaultwarden/.env /opt/vaultwarden/secrets/secrets.yaml /opt/vaultwarden/secrets/keys/age-key.txt`.
+8. Set executable permissions: `sudo chmod +x /opt/vaultwarden/*.sh`.
+9. Ensure state directory exists and has correct owner (usually done by setup, but verify): `sudo mkdir -p /var/lib/vaultwarden && sudo chown your_user:your_group /var/lib/vaultwarden`
+10. Start services: `cd /opt/vaultwarden && ./startup.sh`.
+11. Update DNS record for your domain to point to the new server IP.
+12. Check health: `./health.sh --comprehensive`.
+13. Configure firewall IPs: `sudo ./update-cloudflare-ips.sh`
 
 ## Files Included
 - docker-compose.yml - Container configuration
@@ -455,12 +395,13 @@ create_emergency_kit() {
 - caddy/ - Reverse proxy configuration
 - fail2ban/ - Security configuration
 - secrets/ - Encrypted secrets (including Age keys)
+- lib/ - Script libraries
 - data/ - VaultWarden database and files (snapshot if possible)
 
 ## Important Notes
-- **CRITICAL:** Keep Age private key (secrets/keys/age-key.txt) secure and backed up separately! Without it, this kit is useless.
+- **CRITICAL:** Keep your Age private key (secrets/keys/age-key.txt from the original setup) secure and backed up separately! Without it, this kit is useless.
 - This kit restores the exact state at the time of creation.
-- Verify firewall allows SSH port (check .env `SSH_PORT`) and ports 80/443 from Cloudflare IPs (run `sudo ./update-cloudflare-ips.sh` after startup if needed).
+- Verify firewall allows SSH port (check .env `SSH_PORT`) and ports 80/443 from Cloudflare IPs.
 
 Recovery Time: ~15-30 minutes with proper preparation.
 EOF
@@ -529,8 +470,11 @@ rclone_sync_offsite() {
 
 # --- Main Execution ---
 main() {
+    # If --list is passed, use the centralized list_backups function and exit
     if [[ "$LIST_BACKUPS" == "true" ]]; then
-        list_backups
+        # Ensure the global array exists for the function
+        declare -gA BACKUP_LIST_DETAILS
+        list_backups # This function is now sourced from backup_utils.sh
         exit $?
     fi
 
@@ -564,8 +508,8 @@ main() {
 
     if [[ $rclone_exit_code -ne 0 ]]; then overall_exit_code=1; log_error "Backup done locally, but rclone sync FAILED."; else log_success "Backup completed successfully!"; fi
 
-    echo ""; echo "Backup Details:"; echo "  Type: $BACKUP_TYPE"; echo "  File: $backup_file"; echo "  Size: $file_size"; echo "  Rclone Sync: $sync_status"; echo "";
-    echo "To restore:"; echo "  ./restore.sh '$backup_file'"; echo "  Or use interactive restore: ./restore.sh --interactive (or 'make restore')"
+    echo ""; echo "Backup Details:"; echo "  Type: $BACKUP_TYPE"; echo "  File: $(basename "$backup_file")"; echo "  Size: $file_size"; echo "  Rclone Sync: $sync_status"; echo "";
+    echo "To restore:"; echo "  ./restore.sh '$(basename "$backup_file")' # Adjust path if needed"; echo "  Or use interactive restore: ./restore.sh --interactive (or 'make restore')"
 
     if [[ "$EMAIL_NOTIFY" == "true" ]]; then
         if [[ $overall_exit_code -eq 0 ]]; then
@@ -581,4 +525,3 @@ main() {
 }
 
 main "$@"
-
