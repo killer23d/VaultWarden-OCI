@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # edit-secrets.sh - Simplified secrets management with library integration
-# Uses centralized library function
+# Uses centralized library functions
 
 set -euo pipefail
 
@@ -17,9 +17,8 @@ source "lib/crypto.sh"
 # --- Configuration ---
 EDITOR="${EDITOR:-nano}"
 SECRETS_FILE="secrets/secrets.yaml"
-# --- START FIX: Define key file path ---
 AGE_KEY_FILE="secrets/keys/age-key.txt"
-# --- END FIX ---
+SOPS_CONFIG_FILE=".sops.yaml" # Added SOPS config file variable
 
 
 # --- Help ---
@@ -96,11 +95,14 @@ check_prerequisites() {
         return 1
     fi
 
-    # Check SOPS config file
-    if [[ ! -f ".sops.yaml" ]]; then
-        log_warn ".sops.yaml configuration file not found."
-        log_info "Attempting to continue by specifying key file directly to SOPS."
+    # --- START FIX: Check SOPS config file existence ---
+    if [[ ! -f "$SOPS_CONFIG_FILE" ]]; then
+        log_error "SOPS configuration file not found: $SOPS_CONFIG_FILE"
+        log_info "This file tells SOPS which key to use."
+        log_info "Please re-run 'sudo ./setup.sh --force' to generate it."
+        return 1
     fi
+    # --- END FIX ---
 
 
     return 0
@@ -117,6 +119,8 @@ init_secrets() {
             log_info "Cancelled"
             return 0
         fi
+        # Remove existing file if overwriting
+        rm -f "$SECRETS_FILE"
     fi
 
     # Ensure secrets directory exists using library function
@@ -161,13 +165,13 @@ EOF
     log_success "Template secrets file created"
     log_info "Now encrypting with SOPS..."
 
-    # Encrypt the file using library function (sops_encrypt calls sops --encrypt --in-place)
-    # It relies on .sops.yaml or explicit keys
-    if sops --encrypt --age "$(get_public_key "$AGE_KEY_FILE")" --in-place "$SECRETS_FILE"; then
-        log_success "Secrets file encrypted successfully"
+    # Encrypt the file using SOPS. It should pick up the key from .sops.yaml
+    if sops --encrypt --in-place "$SECRETS_FILE"; then
+        log_success "Secrets file encrypted successfully using config in $SOPS_CONFIG_FILE"
         secure_file "$SECRETS_FILE" 600
     else
-        log_error "Failed to encrypt secrets file"
+        log_error "Failed to encrypt secrets file using $SOPS_CONFIG_FILE"
+        log_info "Check $SOPS_CONFIG_FILE and ensure the public key matches secrets/keys/age-public-key.txt"
         return 1
     fi
 
@@ -198,10 +202,11 @@ show_secrets() {
     fi
 
     echo ""
-    echo "=== DECRYPTED SECRETS ==="
+    echo "=== DECRYPTED SECRETS (using key $AGE_KEY_FILE) ==="
     # Use library function to decrypt, explicitly providing key
+    # (Showing secrets should always use the explicit key for clarity)
     if sops_decrypt "$SECRETS_FILE" "" "$AGE_KEY_FILE"; then # Pass key file explicitly
-        echo "========================="
+        echo "======================================================"
         echo ""
         log_warn "Remember to keep these values secure!"
     else
@@ -222,7 +227,7 @@ edit_secrets() {
         return 1
     fi
 
-    # --- START FIX: Add permission checks ---
+    # Permission checks
     if [[ ! -r "$AGE_KEY_FILE" ]]; then
         log_error "Cannot read Age key file: $AGE_KEY_FILE"
         log_info "Check permissions. It should be readable by user $(whoami)."
@@ -233,13 +238,16 @@ edit_secrets() {
         log_info "Check permissions. It should be writable by user $(whoami)."
         return 1
     fi
-     # Check if the directory is writable (for SOPS temp files)
     if [[ ! -w "$(dirname "$SECRETS_FILE")" ]]; then
         log_error "Cannot write to secrets directory: $(dirname "$SECRETS_FILE")"
         log_info "Check permissions. Directory should be writable by user $(whoami)."
         return 1
     fi
-    # --- END FIX ---
+     if [[ ! -r "$SOPS_CONFIG_FILE" ]]; then
+        log_error "Cannot read SOPS config file: $SOPS_CONFIG_FILE"
+        log_info "Check permissions or re-run setup."
+        return 1
+    fi
 
 
     # Check if file is encrypted using library function
@@ -249,23 +257,26 @@ edit_secrets() {
         return 1
     fi
 
-    # Test decryption using library function, explicitly pass key
+    # Test decryption using the explicit key (as a sanity check before editing)
+    log_debug "Performing pre-edit decryption test using key $AGE_KEY_FILE..."
     if ! sops_decrypt "$SECRETS_FILE" "/dev/null" "$AGE_KEY_FILE" >/dev/null 2>&1; then
-        log_error "Cannot decrypt secrets file with current Age key: $AGE_KEY_FILE"
-        log_info "Ensure the key file is correct and has not changed."
+        log_error "Pre-edit decryption test failed using key: $AGE_KEY_FILE"
+        log_info "This indicates a key mismatch or corrupted file. Cannot proceed with edit."
         return 1
     fi
-    log_success "Decryption test passed."
+    log_success "Pre-edit decryption test passed."
 
 
     log_info "Using editor: $EDITOR"
-    log_info "The file will be automatically re-encrypted when you save and exit"
+    log_info "Relying on $SOPS_CONFIG_FILE to find the correct Age key."
+    log_info "The file will be automatically re-encrypted when you save and exit."
     echo ""
 
-    # --- START FIX: Explicitly pass Age key file to sops edit command ---
-    # Use SOPS to edit the file directly, specifying the identity file
-    # This overrides .sops.yaml if present, ensuring the correct key is used
-    if EDITOR="$EDITOR" sops --age "$(cat "$AGE_KEY_FILE" | grep -v '^#')" "$SECRETS_FILE"; then
+    # --- START FIX: Rely on .sops.yaml for the edit command ---
+    # Use SOPS to edit the file directly. SOPS will use .sops.yaml to find the key.
+    local sops_command="sops \"$SECRETS_FILE\""
+    log_debug "Executing SOPS edit command: EDITOR=\"$EDITOR\" $sops_command"
+    if EDITOR="$EDITOR" sops "$SECRETS_FILE"; then
     # --- END FIX ---
         log_success "Secrets updated successfully"
 
@@ -273,13 +284,12 @@ edit_secrets() {
         if is_sops_encrypted "$SECRETS_FILE"; then
             log_success "Secrets file encryption verified"
         else
-            # SOPS should normally error out before this if encryption fails, but check anyway
             log_error "CRITICAL WARNING: Secrets file may NOT be properly encrypted after editing!"
             log_info "Check the file content immediately: $SECRETS_FILE"
             return 1
         fi
 
-        # Set proper permissions using library function (redundant if SOPS preserves, but safe)
+        # Set proper permissions using library function
         secure_file "$SECRETS_FILE" 600
 
         # Remind about restarting services
@@ -288,10 +298,10 @@ edit_secrets() {
         log_info "  make restart  (or ./startup.sh --force-restart)"
 
     else
-        # This usually means the editor exited non-zero (e.g., user cancelled, save failed)
-        log_warn "Editor exited with a non-zero status or SOPS encountered an error."
+        log_warn "Editor exited with a non-zero status or SOPS encountered an error during edit."
         log_info "Secrets file *should* remain unchanged if the editor cancelled."
-        log_info "Check the file state if unsure: $SECRETS_FILE"
+        log_info "If SOPS reported an error, check its output for details."
+        log_info "You can run './edit-secrets.sh --test' to check decryption again."
         return 1 # Return error code
     fi
 
@@ -354,9 +364,10 @@ test_secrets_access() {
         return 1
     fi
 
-    # Test decryption using library function, explicitly pass key
+    # Test decryption using library function, explicitly pass key for test clarity
+    log_info "Attempting decryption using key: $AGE_KEY_FILE..."
     if sops_decrypt "$SECRETS_FILE" "/dev/null" "$AGE_KEY_FILE" >/dev/null 2>&1; then
-        log_success "Secrets file can be decrypted using key: $AGE_KEY_FILE"
+        log_success "Secrets file can be decrypted using the current key."
 
         # Test individual secret access using direct decryption and jq
         local decrypted_json
@@ -369,34 +380,39 @@ test_secrets_access() {
         local test_secrets=("admin_token" "backup_passphrase" "ddclient_api_token" "fail2ban_api_token")
         local accessible_secrets=0
         local missing_secrets=0
+        local placeholder_secrets=0
 
+        log_info "Checking configuration status of core secrets:"
         for secret in "${test_secrets[@]}"; do
              local value
              value=$(echo "$decrypted_json" | jq -r --arg key "$secret" '.[$key] // ""')
              if [[ -n "$value" ]] && [[ "$value" != "null" ]] && [[ "$value" != CHANGE_ME* ]]; then
                 ((accessible_secrets++))
-                log_success "✓ Secret '$secret' accessible and configured"
+                log_success "  ✓ '$secret' is accessible and configured."
              elif [[ -n "$value" ]] && [[ "$value" == CHANGE_ME* ]]; then
-                 log_warn "✗ Secret '$secret' accessible but has placeholder value"
-                 ((missing_secrets++))
+                 log_warn "  ✗ '$secret' has a placeholder value (e.g., CHANGE_ME...)."
+                 ((placeholder_secrets++))
              else
-                 log_warn "✗ Secret '$secret' not found or inaccessible in YAML structure"
+                 log_warn "  ✗ '$secret' not found in the secrets file."
                  ((missing_secrets++))
              fi
         done
 
-        if [[ $missing_secrets -eq 0 ]]; then
-            log_success "All core secrets are accessible and appear configured"
+        echo ""
+        if [[ $missing_secrets -eq 0 && $placeholder_secrets -eq 0 ]]; then
+            log_success "All core secrets are accessible and appear configured correctly."
+            return 0
         else
-            log_warn "Some secrets are missing or have placeholder values"
+            log_warn "Found $placeholder_secrets placeholder value(s) and $missing_secrets missing secret(s)."
+            log_info "Use option '1) Edit secrets' to configure them."
+            return 1 # Return error if not fully configured
         fi
 
     else
         log_error "Cannot decrypt secrets file using key: $AGE_KEY_FILE"
+        log_info "This indicates a key mismatch or corrupted file."
         return 1
     fi
-
-    return 0
 }
 
 # --- Main Execution ---
@@ -429,8 +445,7 @@ main() {
             init_secrets || exit 1
             echo ""
             log_info "Now opening for editing..."
-            sleep 2
-            # Fall through to edit secrets after init
+            sleep 1 # Brief pause before edit
             edit_secrets
             exit $?
         else
@@ -466,3 +481,4 @@ main() {
 }
 
 main "$@"
+
