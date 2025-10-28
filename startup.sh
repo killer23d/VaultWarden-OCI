@@ -12,7 +12,7 @@ PROJECT_ROOT="$SCRIPT_DIR"
 # --- Enhanced Cleanup Function ---
 cleanup_secrets() {
     local cleanup_reason="${1:-unknown}"
-    
+
     # Only clean up on successful completion or explicit stop
     if [[ "${STARTUP_SUCCESS:-false}" == "true" || "$cleanup_reason" == "stop" ]]; then
         rm -rf "$PROJECT_ROOT/secrets/.docker_secrets" 2>/dev/null || true
@@ -58,12 +58,12 @@ USAGE:
     ./startup.sh [OPTIONS]
 
 OPTIONS:
-    --help              Show this help
-    --force-restart     Stop and recreate all containers (REQUIRED after secrets changes)
-    --dry-run           Show what would be done without executing
-    --skip-health       Skip post-startup health check
-    --down              Stop and remove all containers
-    --strict-secrets    Fail immediately if critical secrets are missing (production mode)
+    --help             Show this help
+    --force-restart    Stop and recreate all containers (REQUIRED after secrets changes)
+    --dry-run          Show what would be done without executing
+    --skip-health      Skip post-startup health check
+    --down             Stop and remove all containers
+    --strict-secrets   Fail immediately if critical secrets are missing (production mode)
 
 EXAMPLES:
     ./startup.sh                    # Normal startup
@@ -140,7 +140,7 @@ prepare_docker_secrets() {
     # ENHANCED: Define which file secrets are critical vs optional
     local critical_file_secrets=("admin_token" "ddclient_api_token" "fail2ban_api_token")
     local optional_file_secrets=("smtp_password" "push_installation_id" "push_installation_key")
-    
+
     local secret_file_path
     local missing_critical=()
     local placeholder_critical=()
@@ -175,7 +175,7 @@ prepare_docker_secrets() {
                 log_debug "Created empty file for optional secret: $secret"
             fi
         fi
-        
+
         # ENHANCED: Check secure_file return code
         if ! secure_file "$secret_file_path" 600; then
             log_error "Failed to set secure permissions on secret file: $secret_file_path"
@@ -188,13 +188,13 @@ prepare_docker_secrets() {
         local value
         value=$(echo "$decrypted_json" | jq -r --arg secret "$secret" '.[$secret] // "CHANGE_ME"')
         if [[ -z "$value" ]] || [[ "$value" == "CHANGE_ME"* ]] || [[ "$value" == "null" ]]; then
-             missing_critical+=("$secret")
+            missing_critical+=("$secret")
         fi
     done
 
     # ENHANCED: Strict mode handling
     local total_critical_issues=$((${#missing_critical[@]} + ${#placeholder_critical[@]}))
-    
+
     if [[ $total_critical_issues -gt 0 ]]; then
         if [[ "$STRICT_SECRETS" == "true" ]]; then
             log_error "STRICT MODE: Critical secrets validation failed"
@@ -234,7 +234,7 @@ prepare_environment_variables() {
     echo "$decrypted_json" | jq . > /dev/null 2>&1 || {
         log_error "Decrypted secrets content for env vars is not valid JSON."
         return 1
-    fi
+    }
 
     # Export environment variables that containers need
     local admin_basic_auth_hash
@@ -279,7 +279,7 @@ post_startup_health_check() {
     # Check non-critical services
     local other_services=("fail2ban" "ddclient")
     local unhealthy_other=()
-     for service in "${other_services[@]}"; do
+    for service in "${other_services[@]}"; do
         if ! wait_for_service_ready "$service" 30; then
             unhealthy_other+=("$service")
         fi
@@ -288,12 +288,12 @@ post_startup_health_check() {
     # ENHANCED: More detailed health check results
     if [[ ${#failed_services[@]} -eq 0 ]]; then
         log_success "All critical services are running and healthy"
-        
+
         if [[ ${#unhealthy_other[@]} -gt 0 ]]; then
             log_warn "Non-critical services with issues: ${unhealthy_other[*]}"
             log_info "System functional but some features may not work"
         fi
-        
+
         local domain
         domain=$(get_config_value "DOMAIN" "")
         if [[ -n "$domain" ]] && has_command curl; then
@@ -375,7 +375,7 @@ main() {
     local health_check_failed=false
     if ! post_startup_health_check; then
         health_check_failed=true
-        log_error "Post-startup health check FAILED"
+        # Error message logged within post_startup_health_check
     fi
 
     # Final status determination
@@ -395,29 +395,29 @@ main() {
         echo "  3. Try restarting: make restart"
         echo "  4. Check system health: make health"
         echo ""
-        exit 1
+        exit 1 # Exit with error code if critical services failed health check
     else
         # Mark successful startup
         STARTUP_SUCCESS=true
-        
+
         log_success "🎉 VaultWarden-OCI-NG startup completed successfully"
-        
-        # Check final service status
+
+        # Check final service status (even if health checks passed, good to confirm)
         local all_running=true
         for service in vaultwarden caddy fail2ban ddclient; do
-          if ! is_service_running "$service"; then
-            all_running=false
-            log_warn "Service $service is not running."
-          fi
+            if ! is_service_running "$service"; then
+                all_running=false
+                log_warn "Service $service is not running."
+            fi
         done
 
         echo ""
         if [[ "$all_running" == "true" ]]; then
-            echo "✅ All services are running and healthy!"
+            echo "✅ All services are running and appear healthy!"
             echo "🌐 Web interface: https://$domain"
             echo "⚙️  Admin panel: https://$domain/admin"
         else
-             echo "⚠️  Some services may have issues. Check logs for details."
+            echo "⚠️  Some services may have issues. Check logs for details."
         fi
 
         echo ""
@@ -429,7 +429,7 @@ main() {
         echo ""
         echo "IMPORTANT NOTES:"
         echo "  • After editing secrets, always use: make restart"
-        echo "  • For production, consider: ./startup.sh --strict-secrets"
+        echo "  • For production, consider using: ./startup.sh --strict-secrets"
     fi
 }
 
