@@ -1,6 +1,6 @@
 # Caddyfile for VaultWarden-OCI-NG
 # Automatic HTTPS with security headers and rate limiting
-# Addresses v4 review: Simplified WebSocket handling, restored security features
+# Fixed: Admin authentication environment variable exposure
 
 # Import Cloudflare IP ranges for trusted proxies
 import cloudflare-ips.caddy
@@ -49,14 +49,14 @@ import cloudflare-ips.caddy
         -X-Powered-By
     }
 
-    # Admin panel protection (CRITICAL: Restored from review)
+    # Admin panel protection (FIXED: Use Docker secret file)
     @admin {
         path /admin*
     }
 
-    # Admin Basic Authentication using bcrypt hash from secrets
+    # Admin Basic Authentication using bcrypt hash from Docker secret file
     basicauth @admin {
-        admin {env.ADMIN_BASIC_AUTH_HASH}
+        admin {file./admin_basic_auth_hash}
     }
 
     # Rate limiting for admin endpoints
