@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# startup.sh - Fixed VaultWarden stack orchestration
+# startup.sh - Enhanced VaultWarden stack orchestration
 # MAJOR FIX: Create ALL required secret files including API tokens
-# ENHANCED: Better trap handling and error recovery
+# ENHANCED: Production hardening with strict mode and better error handling
 
 set -euo pipefail
 
@@ -46,6 +46,7 @@ FORCE_RESTART=false
 DRY_RUN=false
 SKIP_HEALTH=false
 STOP_MODE=false
+STRICT_SECRETS=false  # NEW: Strict mode for production
 STARTUP_SUCCESS=false
 
 # --- Help ---
@@ -57,16 +58,18 @@ USAGE:
     ./startup.sh [OPTIONS]
 
 OPTIONS:
-    --help           Show this help
-    --force-restart  Stop and recreate all containers (REQUIRED after secrets changes)
-    --dry-run        Show what would be done without executing
-    --skip-health    Skip post-startup health check
-    --down           Stop and remove all containers
+    --help              Show this help
+    --force-restart     Stop and recreate all containers (REQUIRED after secrets changes)
+    --dry-run           Show what would be done without executing
+    --skip-health       Skip post-startup health check
+    --down              Stop and remove all containers
+    --strict-secrets    Fail immediately if critical secrets are missing (production mode)
 
 EXAMPLES:
     ./startup.sh                    # Normal startup
     ./startup.sh --force-restart    # Force recreate containers (use after edit-secrets.sh)
     ./startup.sh --down             # Stop all services
+    ./startup.sh --strict-secrets   # Production startup with strict validation
 
 IMPORTANT:
     After editing secrets (./edit-secrets.sh), always use --force-restart to ensure
@@ -82,11 +85,12 @@ while [[ $# -gt 0 ]]; do
         --dry-run) DRY_RUN=true; shift ;;
         --skip-health) SKIP_HEALTH=true; shift ;;
         --down) STOP_MODE=true; shift ;;
+        --strict-secrets) STRICT_SECRETS=true; shift ;;  # NEW: Strict mode
         *) log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done
 
-# --- FIXED: Prepare Docker Secrets ---
+# --- ENHANCED: Prepare Docker Secrets ---
 prepare_docker_secrets() {
     log_info "Preparing Docker secrets..."
 
@@ -133,9 +137,13 @@ prepare_docker_secrets() {
     local secrets_needing_files=("admin_token" "smtp_password" "push_installation_id" "push_installation_key" "ddclient_api_token" "fail2ban_api_token")
     # FIXED: Only admin_basic_auth_hash is environment-only
     local critical_env_secrets=("admin_basic_auth_hash")
+    # ENHANCED: Define which file secrets are critical vs optional
+    local critical_file_secrets=("admin_token" "ddclient_api_token" "fail2ban_api_token")
+    local optional_file_secrets=("smtp_password" "push_installation_id" "push_installation_key")
+    
     local secret_file_path
-    local missing_secrets=()
-    local placeholder_secrets=()
+    local missing_critical=()
+    local placeholder_critical=()
 
     # Write files for ALL secrets that need them
     for secret in "${secrets_needing_files[@]}"; do
@@ -147,19 +155,32 @@ prepare_docker_secrets() {
             echo -n "$value" > "$secret_file_path"
             log_debug "Created secret file: $secret_file_path"
         else
-            # Handle missing/placeholder secrets appropriately
-            if [[ "$secret" == "smtp_password" || "$secret" == "push_installation_id" || "$secret" == "push_installation_key" ]]; then
-                # Optional secrets - create empty file
+            # Check if this is a critical vs optional secret
+            local is_critical=false
+            for critical_secret in "${critical_file_secrets[@]}"; do
+                if [[ "$secret" == "$critical_secret" ]]; then
+                    is_critical=true
+                    break
+                fi
+            done
+
+            if [[ "$is_critical" == "true" ]]; then
+                # Critical secret missing/placeholder
+                echo "PLACEHOLDER_NOT_CONFIGURED" > "$secret_file_path"
+                placeholder_critical+=("$secret")
+                log_warn "Critical secret '$secret' has placeholder value"
+            else
+                # Optional secret - create empty file
                 touch "$secret_file_path"
                 log_debug "Created empty file for optional secret: $secret"
-            else
-                # Critical secrets - create placeholder but warn
-                echo "PLACEHOLDER_NOT_CONFIGURED" > "$secret_file_path"
-                placeholder_secrets+=("$secret")
-                log_warn "Critical secret '$secret' has placeholder value"
             fi
         fi
-        secure_file "$secret_file_path" 600 || { log_error "Failed to secure secret file: $secret"; return 1; }
+        
+        # ENHANCED: Check secure_file return code
+        if ! secure_file "$secret_file_path" 600; then
+            log_error "Failed to set secure permissions on secret file: $secret_file_path"
+            return 1
+        fi
     done
 
     # Validate critical secrets that are passed via environment
@@ -167,22 +188,30 @@ prepare_docker_secrets() {
         local value
         value=$(echo "$decrypted_json" | jq -r --arg secret "$secret" '.[$secret] // "CHANGE_ME"')
         if [[ -z "$value" ]] || [[ "$value" == "CHANGE_ME"* ]] || [[ "$value" == "null" ]]; then
-             missing_secrets+=("$secret")
+             missing_critical+=("$secret")
         fi
     done
 
-    # Report issues but allow startup for debugging
-    if [[ ${#missing_secrets[@]} -gt 0 ]]; then
-        log_warn "Missing critical environment secrets: ${missing_secrets[*]}"
-        log_info "Edit secrets with: ./edit-secrets.sh"
-    fi
+    # ENHANCED: Strict mode handling
+    local total_critical_issues=$((${#missing_critical[@]} + ${#placeholder_critical[@]}))
     
-    if [[ ${#placeholder_secrets[@]} -gt 0 ]]; then
-        log_warn "Placeholder critical file secrets: ${placeholder_secrets[*]}"
-        log_info "Edit secrets with: ./edit-secrets.sh"
+    if [[ $total_critical_issues -gt 0 ]]; then
+        if [[ "$STRICT_SECRETS" == "true" ]]; then
+            log_error "STRICT MODE: Critical secrets validation failed"
+            [[ ${#missing_critical[@]} -gt 0 ]] && log_error "Missing environment secrets: ${missing_critical[*]}"
+            [[ ${#placeholder_critical[@]} -gt 0 ]] && log_error "Placeholder file secrets: ${placeholder_critical[*]}"
+            log_error "Cannot start in strict mode with misconfigured secrets"
+            log_info "Fix secrets with: ./edit-secrets.sh"
+            return 1
+        else
+            # Warn but continue (debugging mode)
+            [[ ${#missing_critical[@]} -gt 0 ]] && log_warn "Missing critical environment secrets: ${missing_critical[*]}"
+            [[ ${#placeholder_critical[@]} -gt 0 ]] && log_warn "Placeholder critical file secrets: ${placeholder_critical[*]}"
+            log_info "Edit secrets with: ./edit-secrets.sh"
+            log_warn "Continuing startup for debugging (use --strict-secrets to enforce)"
+        fi
     fi
 
-    # Allow startup even with warnings - containers can start and we can debug
     log_success "Docker secrets prepared (check warnings above)"
     return 0
 }
@@ -205,7 +234,7 @@ prepare_environment_variables() {
     echo "$decrypted_json" | jq . > /dev/null 2>&1 || {
         log_error "Decrypted secrets content for env vars is not valid JSON."
         return 1
-    }
+    fi
 
     # Export environment variables that containers need
     local admin_basic_auth_hash
@@ -227,7 +256,7 @@ prepare_environment_variables() {
     return 0
 }
 
-# --- Post-Startup Health Check ---
+# --- ENHANCED: Post-Startup Health Check ---
 post_startup_health_check() {
     if [[ "$SKIP_HEALTH" == "true" || "$DRY_RUN" == "true" ]]; then
         log_info "Skipping health check"
@@ -249,14 +278,21 @@ post_startup_health_check() {
 
     # Check non-critical services
     local other_services=("fail2ban" "ddclient")
+    local unhealthy_other=()
      for service in "${other_services[@]}"; do
         if ! wait_for_service_ready "$service" 30; then
-            log_warn "Service '$service' failed post-startup health check."
+            unhealthy_other+=("$service")
         fi
     done
 
+    # ENHANCED: More detailed health check results
     if [[ ${#failed_services[@]} -eq 0 ]]; then
         log_success "All critical services are running and healthy"
+        
+        if [[ ${#unhealthy_other[@]} -gt 0 ]]; then
+            log_warn "Non-critical services with issues: ${unhealthy_other[*]}"
+            log_info "System functional but some features may not work"
+        fi
         
         local domain
         domain=$(get_config_value "DOMAIN" "")
@@ -267,16 +303,16 @@ post_startup_health_check() {
             if test_http "https://$clean_domain" 15; then
                 log_success "Web interface is responding"
             else
-                log_warn "Web interface not yet responding (may need more time)"
+                log_warn "Web interface not yet responding (DNS/SSL may need time)"
             fi
         fi
+        return 0
     else
-        log_error "Failed critical services: ${failed_services[*]}"
+        log_error "CRITICAL: Failed services: ${failed_services[*]}"
+        log_error "VaultWarden application is likely NON-FUNCTIONAL"
         log_info "Check logs with: docker compose logs <service_name>"
         return 1
     fi
-
-    return 0
 }
 
 # --- Main Execution ---
@@ -285,6 +321,10 @@ main() {
 
     if [[ "$DRY_RUN" == "true" ]]; then
         log_warn "DRY RUN MODE - No changes will be made"
+    fi
+
+    if [[ "$STRICT_SECRETS" == "true" ]]; then
+        log_info "STRICT SECRETS MODE - Will abort on any critical secret issues"
     fi
 
     # Load configuration
@@ -331,45 +371,66 @@ main() {
         fi
     fi
 
-    # Health check
-    post_startup_health_check || log_warn "Health check detected issues"
+    # ENHANCED: Better health check handling
+    local health_check_failed=false
+    if ! post_startup_health_check; then
+        health_check_failed=true
+        log_error "Post-startup health check FAILED"
+    fi
 
-    # Mark successful startup
-    STARTUP_SUCCESS=true
-
-    # Final status
+    # Final status determination
     local domain
     domain=$(get_config_value "DOMAIN")
 
-    log_success "VaultWarden-OCI-NG startup completed"
-    echo ""
-    
-    # Check final status
-    local all_running=true
-    for service in vaultwarden caddy fail2ban ddclient; do
-      if ! is_service_running "$service"; then
-        all_running=false
-        log_warn "Service $service is not running."
-      fi
-    done
-
-    if [[ "$all_running" == "true" ]]; then
-        echo "🎉 All services are running!"
-        echo "Web interface: https://$domain"
-        echo "Admin panel: https://$domain/admin"
+    # ENHANCED: Clearer final status messaging
+    if [[ "$health_check_failed" == "true" ]]; then
+        log_error "🚨 STARTUP COMPLETED WITH CRITICAL ISSUES"
+        echo ""
+        echo "❌ Critical services failed health checks"
+        echo "❌ VaultWarden is likely NON-FUNCTIONAL"
+        echo ""
+        echo "Immediate actions:"
+        echo "  1. Check container logs: make logs SERVICE=vaultwarden"
+        echo "  2. Check container status: docker compose ps"
+        echo "  3. Try restarting: make restart"
+        echo "  4. Check system health: make health"
+        echo ""
+        exit 1
     else
-         echo "⚠️  Some services may not be running correctly. Please check logs."
-    fi
+        # Mark successful startup
+        STARTUP_SUCCESS=true
+        
+        log_success "🎉 VaultWarden-OCI-NG startup completed successfully"
+        
+        # Check final service status
+        local all_running=true
+        for service in vaultwarden caddy fail2ban ddclient; do
+          if ! is_service_running "$service"; then
+            all_running=false
+            log_warn "Service $service is not running."
+          fi
+        done
 
-    echo ""
-    echo "Useful commands:"
-    echo "  make status          # Check service status"
-    echo "  make health          # Comprehensive health check"
-    echo "  make logs SERVICE=vaultwarden # View service logs"
-    echo "  make down            # Stop services"
-    echo ""
-    echo "IMPORTANT NOTES:"
-    echo "  • After editing secrets, always use: make restart"
+        echo ""
+        if [[ "$all_running" == "true" ]]; then
+            echo "✅ All services are running and healthy!"
+            echo "🌐 Web interface: https://$domain"
+            echo "⚙️  Admin panel: https://$domain/admin"
+        else
+             echo "⚠️  Some services may have issues. Check logs for details."
+        fi
+
+        echo ""
+        echo "Useful commands:"
+        echo "  make status          # Check service status"
+        echo "  make health          # Comprehensive health check"
+        echo "  make logs SERVICE=vaultwarden # View service logs"
+        echo "  make down            # Stop services"
+        echo ""
+        echo "IMPORTANT NOTES:"
+        echo "  • After editing secrets, always use: make restart"
+        echo "  • For production, consider: ./startup.sh --strict-secrets"
+    fi
 }
 
 main "$@"
