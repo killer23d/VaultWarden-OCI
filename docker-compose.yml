@@ -1,16 +1,13 @@
 version: "3.9"
 
-# VaultWarden-OCI-NG Docker Compose Configuration
+# VaultWarden-OCI Docker Compose Configuration
 
 services:
   vaultwarden:
-    # Changed default from specific version to 'latest'
     image: vaultwarden/server:${VAULTWARDEN_VERSION:-latest}
     container_name: vaultwarden_app
     restart: unless-stopped
-    # --- START FIX: Use PUID/PGID ---
     user: "${PUID:-1000}:${PGID:-1000}"
-    # --- END FIX ---
 
     environment:
       - DOMAIN=https://${DOMAIN}
@@ -96,9 +93,10 @@ services:
     environment:
       - DOMAIN=${DOMAIN}
       - EMAIL=${ADMIN_EMAIL}
+      # ADMIN_BASIC_AUTH_HASH is passed via environment by startup.sh
       - ADMIN_BASIC_AUTH_HASH=${ADMIN_BASIC_AUTH_HASH}
-      # Use fail2ban token (Zone:Firewall Services:Edit)
-      - CLOUDFLARE_API_TOKEN_FILE=/run/secrets/fail2ban_api_token
+      # CLOUDFLARE_API_TOKEN is passed via environment by startup.sh for ACME DNS challenge
+      - CLOUDFLARE_API_TOKEN=${FAIL2BAN_API_TOKEN} # Using fail2ban token as it needs firewall perms
 
     ports:
       - "80:80"
@@ -111,9 +109,7 @@ services:
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/config:/config:rw
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy:/logs:rw
 
-    secrets:
-      - fail2ban_api_token
-      - admin_basic_auth_hash
+    # Removed admin_basic_auth_hash and fail2ban_api_token from secrets here
 
     depends_on:
       vaultwarden:
@@ -158,9 +154,9 @@ services:
       - F2B_DB_PURGE_AGE=1d
       - F2B_MAX_RETRY=3
       - F2B_DEST_EMAIL=${ADMIN_EMAIL}
-      # Use fail2ban token (Zone:Firewall Services:Edit)
-      - CLOUDFLARE_API_TOKEN=${FAIL2BAN_API_TOKEN:-} # Read by gomplate in jail.d
-      - CLOUDFLARE_ZONE_ID=${CLOUDFLARE_ZONE_ID:-}   # Read by gomplate in jail.d
+      # Passed via environment by startup.sh
+      - FAIL2BAN_API_TOKEN=${FAIL2BAN_API_TOKEN:-}
+      - CLOUDFLARE_ZONE_ID=${CLOUDFLARE_ZONE_ID:-}
 
     volumes:
       - ./fail2ban/jail.d:/config/jail.d:ro
@@ -168,6 +164,8 @@ services:
       - ./fail2ban/action.d:/config/action.d:ro
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy:/var/log/caddy:ro
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/fail2ban:/var/log:rw
+
+    # Removed fail2ban_api_token from secrets here
 
     healthcheck:
       test: ["CMD-SHELL", "fail2ban-client ping"]
@@ -211,11 +209,10 @@ services:
       - DD_PROTOCOL=cloudflare
       - DD_ZONE=${CLOUDFLARE_ZONE_ID}
       - DD_HOST=${DDCLIENT_HOSTNAME}
-      # Use ddclient token (Zone:DNS:Edit)
-      - DD_PASSWORD_FILE=/run/secrets/ddclient_api_token
+      # DD_PASSWORD (API token) is passed via environment by startup.sh
+      - DD_PASSWORD=${DDCLIENT_API_TOKEN}
 
-    secrets:
-      - ddclient_api_token
+    # Removed ddclient_api_token from secrets here
 
     healthcheck:
       test: ["CMD-SHELL", "pidof ddclient"]
@@ -243,22 +240,16 @@ services:
       - vaultwarden_network
 
 # Secrets managed externally by startup script
+# Removed redundant entries
 secrets:
   admin_token:
     file: ./secrets/.docker_secrets/admin_token
-  admin_basic_auth_hash:
-    file: ./secrets/.docker_secrets/admin_basic_auth_hash
   smtp_password:
     file: ./secrets/.docker_secrets/smtp_password
   push_installation_id:
     file: ./secrets/.docker_secrets/push_installation_id
   push_installation_key:
     file: ./secrets/.docker_secrets/push_installation_key
-  # Split tokens
-  ddclient_api_token:
-    file: ./secrets/.docker_secrets/ddclient_api_token
-  fail2ban_api_token:
-    file: ./secrets/.docker_secrets/fail2ban_api_token
 
 # Network configuration
 networks:
