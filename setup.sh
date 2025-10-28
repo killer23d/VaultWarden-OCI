@@ -11,6 +11,7 @@ cd "$PROJECT_ROOT"
 # --- Source Libraries ---
 source "lib/common.sh"
 init_common_lib "$0"
+source "lib/crypto.sh"
 
 # --- Configuration Defaults ---
 DOMAIN=""
@@ -761,3 +762,4 @@ main() {
 
 # --- Execution ---
 main "$@"
+
