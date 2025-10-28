@@ -1,6 +1,5 @@
 # Cloudflare IP ranges for trusted_proxies
-# Updated automatically - VaultWarden-OCI-NG
-# Last updated: 2024-10-23
+# Updated automatically by update-cloudflare-ips.sh. Do not edit.
 
 @cloudflare {
     # Cloudflare IPv4 ranges
