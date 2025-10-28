@@ -13,6 +13,7 @@ source "lib/common.sh"
 init_common_lib "$0"
 source "lib/docker.sh"
 source "lib/crypto.sh"
+source "lib/backup_utils.sh"
 
 # --- Configuration ---
 BACKUP_TYPE="db"  # db, full, or emergency
@@ -70,73 +71,20 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# --- List Backups Function ---
-list_backups() {
-    log_info "Available local backups:"
-    echo ""
-    local backup_base_dir="$PROJECT_ROOT/backups"
-    local found_backups_details=()
-    local counter=1
+# --- Verification Functions ---
 
-    # Use find with printf to get timestamp and path, sort numerically, read line by line
-    local find_cmd
-    find_cmd="find \"$backup_base_dir/db\" \"$backup_base_dir/full\" \"$backup_base_dir/emergency\" -maxdepth 1 -name '*.age' -type f -printf '%T@ %p\n' 2>/dev/null"
-
-    local sorted_files
-    sorted_files=$(eval "$find_cmd" | sort -nr)
-
-    if [[ -z "$sorted_files" ]]; then
-        log_warn "No local backups found in ./backups/{db,full,emergency}/"
-        return 1
-    fi
-
-    local max_lines=0
-    while IFS= read -r line; do
-        [[ -z "$line" ]] && continue
-
-        local file="${line#* }"
-        local filename type timestamp date_str time_str size
-        filename=$(basename "$file")
-        size=$(du -h "$file" | cut -f1)
-
-        if [[ $filename =~ ^vw-(db|full)-backup-([0-9]{8})-([0-9]{6})\.sqlite3\.gz\.age$ ]]; then
-            type="${BASH_REMATCH[1]}"
-            date_str="${BASH_REMATCH[2]}"
-            time_str="${BASH_REMATCH[3]}"
-        elif [[ $filename =~ ^emergency-kit-([0-9]{8})-([0-9]{6})\.tar\.gz\.age$ ]]; then
-            type="emergency"
-            date_str="${BASH_REMATCH[1]}"
-            time_str="${BASH_REMATCH[2]}"
-        else
-            type="unknown"
-            date_str="--------"
-            time_str="------"
-        fi
-
-        local formatted_date="${date_str:0:4}-${date_str:4:2}-${date_str:6:2}"
-        local formatted_time="${time_str:0:2}:${time_str:2:2}:${time_str:4:2}"
-        local padded_type
-        printf -v padded_type "%-11s" "$type"
-
-        found_backups_details+=("$(printf "%3d | %s | %s | %s | %6s | %s" "$counter" "$padded_type" "$formatted_date" "$formatted_time" "$size" "$filename")")
-        ((counter++))
-        ((max_lines++))
-    done <<< "$sorted_files"
-
-    if [[ $max_lines -eq 0 ]]; then
-        log_warn "No local backups found matching expected patterns."
-        return 1
-    fi
-
-    echo " ID | Type        | Date       | Time     | Size   | Filename"
-    echo "----|-------------|------------|----------|--------|------------------------------------------"
-    printf '%s\n' "${found_backups_details[@]}"
-    echo "----|-------------|------------|----------|--------|------------------------------------------"
-    echo ""
-    return 0
+# Get verification mode from configuration with fallback
+get_verification_mode() {
+    local mode
+    mode=$(get_config_value "BACKUP_VERIFICATION_MODE" "quick_check")
+    case "$mode" in
+        quick_check|integrity_check) echo "$mode" ;;
+        *) 
+            log_debug "Invalid verification mode '$mode', using quick_check"
+            echo "quick_check" 
+            ;;
+    esac
 }
-
-# --- Enhanced Verification Functions ---
 
 # Verify SQLite database integrity with configurable depth
 verify_sqlite_integrity() {
@@ -148,7 +96,7 @@ verify_sqlite_integrity() {
         return 1
     fi
     
-    log_info "Running SQLite $verification_mode on backup..."
+    log_info "Running SQLite $verification_mode on database..."
     local check_result
     
     case "$verification_mode" in
@@ -183,7 +131,12 @@ verify_sqlite_integrity() {
 verify_encrypted_backup() {
     local encrypted_file="$1"
     local backup_type="$2"
-    local verification_mode="${3:-quick_check}"
+    local verification_mode="${3:-}"
+    
+    # Use configured mode if not specified
+    if [[ -z "$verification_mode" ]]; then
+        verification_mode=$(get_verification_mode)
+    fi
     
     log_info "Verifying encrypted backup integrity..."
     
@@ -260,21 +213,26 @@ create_db_backup() {
     state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
     db_file="$state_dir/data/bwdata/db.sqlite3"
     local container_db_path="/data/bwdata/db.sqlite3"
-    verification_mode=$(get_config_value "BACKUP_VERIFICATION_MODE" "quick_check")
+    verification_mode=$(get_verification_mode)
 
     is_running=$(is_service_running "vaultwarden" && echo "true" || echo "false")
 
     # Pre-backup integrity check
     log_info "Verifying live database integrity before backup..."
     if [[ "$is_running" == "true" ]]; then
-        local integrity_result
-        integrity_result=$(exec_in_service vaultwarden sqlite3 "$container_db_path" "PRAGMA $verification_mode;" 2>/dev/null) || {
-            log_error "Failed to run pre-backup integrity check"
+        local temp_check=$(mktemp)
+        trap "rm -f '$temp_check'" EXIT
+        
+        if ! exec_in_service vaultwarden sqlite3 "$container_db_path" ".backup $temp_check"; then
+            log_error "Failed to create temporary database snapshot for verification"
             return 1
-        }
-        if [[ "$integrity_result" != "ok" ]]; then
-            log_error "Live database integrity check FAILED: $integrity_result"
-            log_error "Aborting backup to prevent backing up corrupted data"
+        fi
+        
+        if verify_sqlite_integrity "$temp_check" "$verification_mode"; then
+            rm -f "$temp_check"
+        else
+            log_error "Live database integrity check failed, aborting backup"
+            rm -f "$temp_check"
             return 1
         fi
     else
@@ -354,21 +312,23 @@ create_full_backup() {
     state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
     db_file="$state_dir/data/bwdata/db.sqlite3"
     local container_db_path="/data/bwdata/db.sqlite3"
-    verification_mode=$(get_config_value "BACKUP_VERIFICATION_MODE" "quick_check")
+    verification_mode=$(get_verification_mode)
 
     is_running=$(is_service_running "vaultwarden" && echo "true" || echo "false")
 
     # Pre-backup integrity check
     log_info "Verifying live database integrity before full backup..."
     if [[ "$is_running" == "true" ]]; then
-        local integrity_result
-        integrity_result=$(exec_in_service vaultwarden sqlite3 "$container_db_path" "PRAGMA $verification_mode;" 2>/dev/null) || {
-            log_error "Failed to run pre-backup integrity check"
-            return 1
-        }
-        if [[ "$integrity_result" != "ok" ]]; then
-            log_error "Live database integrity check FAILED: $integrity_result"
-            log_warn "Continuing with full backup but database may be inconsistent"
+        local temp_check=$(mktemp)
+        trap "rm -f '$temp_check'" EXIT
+        
+        if exec_in_service vaultwarden sqlite3 "$container_db_path" ".backup $temp_check"; then
+            if ! verify_sqlite_integrity "$temp_check" "$verification_mode"; then
+                log_warn "Database integrity check failed, but continuing with full backup"
+            fi
+            rm -f "$temp_check"
+        else
+            log_warn "Could not verify database integrity, continuing with backup"
         fi
     else
         if [[ -f "$db_file" ]] && ! verify_sqlite_integrity "$db_file" "$verification_mode"; then
@@ -487,14 +447,14 @@ create_emergency_kit() {
     local verification_mode
 
     ensure_dir "$backup_dir" 755
-    verification_mode=$(get_config_value "BACKUP_VERIFICATION_MODE" "quick_check")
+    verification_mode=$(get_verification_mode)
 
     local temp_dir
     temp_dir=$(mktemp -d)
     local cleanup_temp() { rm -rf "$temp_dir"; }
     trap cleanup_temp EXIT
 
-    # Prepare recovery files (similar to full backup but with recovery focus)
+    # Prepare recovery files
     log_info "Preparing emergency recovery files..."
     [[ -f docker-compose.yml ]] && cp docker-compose.yml "$temp_dir/" || { log_error "docker-compose.yml required"; return 1; }
     [[ -f .env ]] && cp .env "$temp_dir/" || { log_error ".env required"; return 1; }
@@ -502,7 +462,7 @@ create_emergency_kit() {
     [[ -d fail2ban ]] && cp -r fail2ban "$temp_dir/" || log_warn "fail2ban/ not found"
     [[ -d secrets ]] && cp -r secrets "$temp_dir/" || { log_error "secrets/ required"; return 1; }
 
-    # Include data with snapshot if possible
+    # Include data with verified snapshot if possible
     local state_dir db_file is_running
     state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
     db_file="$state_dir/data/bwdata/db.sqlite3"
@@ -513,7 +473,7 @@ create_emergency_kit() {
     local db_snapshot="$temp_dir/db.sqlite3.snapshot"
     
     if [[ "$is_running" == "true" ]]; then
-        log_info "Creating verified snapshot for emergency kit...")
+        log_info "Creating verified snapshot for emergency kit..."
         if exec_in_service vaultwarden sqlite3 "$container_db_path" ".backup /tmp/backup.db" && \
            docker compose exec vaultwarden cat /tmp/backup.db > "$db_snapshot"; then
             # Verify the snapshot
@@ -568,7 +528,7 @@ create_emergency_kit() {
 
 ## Verification Features
 - This kit was created with enhanced backup verification
-- Database integrity was verified before inclusion
+- Database integrity was verified before inclusion when possible
 - All encrypted components were tested for decryption
 - Recovery time: ~15-30 minutes with proper preparation
 
@@ -634,7 +594,7 @@ EOF
     fi
 }
 
-# --- Rclone Sync Function (unchanged) ---
+# --- Rclone Sync Function ---
 rclone_sync_offsite() {
     local backup_file_path="$1"
     
@@ -691,7 +651,7 @@ rclone_sync_offsite() {
 # --- Main Execution ---
 main() {
     if [[ "$LIST_BACKUPS" == "true" ]]; then
-        list_backups
+        list_backups  # Using function from lib/backup_utils.sh
         exit $?
     fi
 
@@ -707,7 +667,7 @@ main() {
     fi
 
     local verification_mode
-    verification_mode=$(get_config_value "BACKUP_VERIFICATION_MODE" "quick_check")
+    verification_mode=$(get_verification_mode)
     log_info "Using verification mode: $verification_mode"
 
     local backup_file="" backup_exit_code=0 rclone_exit_code=0 overall_exit_code=0
