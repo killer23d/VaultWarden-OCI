@@ -198,7 +198,7 @@ install_dependencies() {
     local basic_packages=(
         "age"           # Encryption tool
         "make"          # Build utility (for Makefile shortcuts)
-        "nano"          # Text editor
+        "nano"          # Text editor (Default for SOPS)
         "rclone"        # Cloud sync tool
         "sqlite3"       # Database tool
         "argon2"        # Password hashing tool
@@ -210,6 +210,7 @@ install_dependencies() {
         "unzip"         # Archive tool
         "git"           # Version control
         "gpg"           # GPG for docker key
+        "coreutils"     # Provides numfmt used in backup_utils.sh
     )
 
     if apt-get install -y "${basic_packages[@]}"; then
@@ -254,10 +255,12 @@ verify_dependencies() {
         "docker"
         "age"
         "sops"
-        "make" # Verify make is present
+        "make"
+        "nano"
         "sqlite3"
         "curl"
         "jq"
+        "numfmt" # Verify numfmt is present
     )
 
     for cmd in "${required_commands[@]}"; do
@@ -286,6 +289,7 @@ verify_dependencies() {
     echo "  Age: $(age --version | head -1)"
     echo "  SOPS: $(sops --version)"
     echo "  Make: $(make --version | head -1)"
+    echo "  Nano: $(nano --version | head -1)"
     echo "  SQLite: $(sqlite3 --version | cut -d' ' -f1)"
 }
 
@@ -395,7 +399,6 @@ generate_age_keys() {
     log_warn "CRITICAL: Backup the private key ($private_key) securely!"
 }
 
-# --- START SOPS CONFIG FIX ---
 create_sops_config() {
     log_info "Creating SOPS configuration file (.sops.yaml)..."
 
@@ -448,7 +451,6 @@ EOF
 
     log_success "SOPS configuration created: $sops_config_file"
 }
-# --- END SOPS CONFIG FIX ---
 
 create_env_file() {
     log_info "Creating environment configuration file..."
@@ -635,6 +637,9 @@ setup_directories() {
     log_info "Creating state directories in $state_dir..."
     ensure_dir "$state_dir" 755 "root:root" # Root dir
     ensure_dir "$state_dir/data" 700 "$project_owner" # Data dir MUST be owned by the user
+    # --- START FIX: Create bwdata subdir ---
+    ensure_dir "$state_dir/data/bwdata" 700 "$project_owner" # Vaultwarden needs this specific subdir
+    # --- END FIX ---
     ensure_dir "$state_dir/logs" 755 "$project_owner" # Logs
     ensure_dir "$state_dir/caddy" 755 "$project_owner" # Caddy state
     ensure_dir "$state_dir/caddy/data" 755 "$project_owner"
@@ -709,8 +714,6 @@ EOF
     log_info "Encrypting secrets file..."
 
     # Encrypt the file now
-    # --- START SOPS CONFIG FIX ---
-    # Ensure SOPS config exists before trying to encrypt
     if [[ ! -f "$PROJECT_ROOT/.sops.yaml" ]]; then
         log_warn "SOPS config missing, attempting to create it..."
         create_sops_config || {
@@ -718,7 +721,6 @@ EOF
             return 1
         }
     fi
-    # --- END SOPS CONFIG FIX ---
 
     if sops --encrypt --in-place "$secrets_file"; then
         log_success "Secrets file encrypted successfully"
@@ -785,16 +787,13 @@ main() {
 
     # Phase 3: Project Setup
     log_info "=== Phase 3: Project Configuration ==="
-    # Order matters: create_env_file reads .env.example, setup_directories reads .env
     create_env_file
-    setup_directories
+    setup_directories # Creates bwdata now
     generate_age_keys
-    # --- START SOPS CONFIG FIX ---
     create_sops_config || {
         log_error "Failed to setup SOPS configuration"
         exit 1
     }
-    # --- END SOPS CONFIG FIX ---
     create_secrets_template || {
         log_error "Failed to setup secrets template"
         exit 1
@@ -833,12 +832,9 @@ main() {
     if [[ -n "$real_user" ]] && [[ "$real_user" != "root" ]]; then
         echo "  - You ($real_user) must log out and log back in for Docker group membership to apply"
     fi
-    # --- START FIX: Add final message ---
     echo ""
     log_info "Run 'make' to see available commands for managing your instance."
-    # --- END FIX ---
 }
 
 # --- Execution ---
 main "$@"
-
