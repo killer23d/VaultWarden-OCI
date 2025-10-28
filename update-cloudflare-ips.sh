@@ -341,7 +341,6 @@ main() {
             else
                  log_error "CRITICAL: Failed to restore backup after validation error. Manual fix required for $CADDY_IPS_FILE."
                  # Exiting here might be dangerous if Caddy tries to reload a bad config later.
-                 # Maybe force a Caddy restart with the restored (hopefully good) config?
             fi
         else
             log_error "CRITICAL: Validation failed and no backup found. Manual fix required for $CADDY_IPS_FILE."
@@ -365,11 +364,15 @@ main() {
     if [[ $reload_status -eq 0 ]]; then
         log_success "Caddy configuration reloaded/restarted successfully."
         log_info "Status: Update applied and active."
+        # Clean up successful backup
+        [[ -f "$backup_file" ]] && rm -f "$backup_file"
         exit 0
     else
         log_error "Caddy reload/restart FAILED."
         log_error "Status: Caddy config file updated, but changes are NOT active."
         log_error "Manual Caddy restart required: docker compose restart caddy"
+        # Keep backup file in case of reload failure
+        [[ -f "$backup_file" ]] && log_info "Backup of previous config kept at: $backup_file"
         exit 1 # Exit with error code if reload failed
     fi
 }
