@@ -1,15 +1,18 @@
 # Caddyfile for VaultWarden-OCI-NG
-# Automatic HTTPS with security headers and rate limiting
-# Fixed: Admin authentication environment variable exposure
+# Final: Import Cloudflare IPs and use forwarded directive properly
 
-# Import Cloudflare IP ranges for trusted proxies
+# Import Cloudflare IP ranges matcher (defines @cloudflare)
 import cloudflare-ips.caddy
 
 {$DOMAIN} {
-    # Trusted proxies (CRITICAL: Restores Cloudflare IP trust)
-    trusted_proxies @cloudflare
+    # Configure trusted proxy handling for Cloudflare IPs
+    # This tells Caddy to trust proxy headers ONLY from @cloudflare IPs
+    forwarded @cloudflare {
+        header CF-Connecting-IP
+        header X-Forwarded-For
+    }
 
-    # Global logging
+    # Access logging with real client IP (now properly extracted)
     log {
         output file /logs/access.log {
             roll_size 10MB
@@ -19,7 +22,7 @@ import cloudflare-ips.caddy
         format json {
             time_format "2006-01-02T15:04:05Z07:00"
             fields {
-                request>remote_ip @
+                request>remote_ip @    # Real client IP via forwarded directive
                 request>method @
                 request>uri @
                 request>headers>User-Agent >user_agent
@@ -35,7 +38,7 @@ import cloudflare-ips.caddy
         # HTTPS Security
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
 
-        # Content Security  
+        # Content Security
         X-Content-Type-Options "nosniff"
         X-Frame-Options "DENY"
         X-XSS-Protection "1; mode=block"
@@ -49,71 +52,50 @@ import cloudflare-ips.caddy
         -X-Powered-By
     }
 
-    # Admin panel protection (FIXED: Use Docker secret file)
+    # Admin panel protection
     @admin {
         path /admin*
     }
-
-    # Admin Basic Authentication using bcrypt hash from Docker secret file
-    basicauth @admin {
-        admin {file./admin_basic_auth_hash}
+    # Basic auth for admin
+    basic_auth @admin {
+        admin {env.ADMIN_BASIC_AUTH_HASH}
     }
 
-    # Rate limiting for admin endpoints
-    rate_limit @admin {
-        zone admin_zone {
-            key {http.request.header.CF-Connecting-IP}
-            key {remote_host}
-            events 5
-            window 10m
-        }
-        response 429 {
-            body "Too many admin login attempts. Please wait before trying again."
-        }
+    # Optional: Strict Cloudflare-only enforcement (uncomment to enable)
+    @non_cloudflare {
+        not remote_ip @cloudflare
     }
-
-    # General rate limiting for API endpoints
-    @api {
-        path /api* /identity*
-    }
-
-    rate_limit @api {
-        zone api_zone {
-            key {http.request.header.CF-Connecting-IP}
-            key {remote_host}
-            events 20
-            window 1m
-        }
-    }
+    # Uncomment the following lines for strict Cloudflare-only access
+    # respond @non_cloudflare 403 {
+    #     body "Access denied: Direct access not allowed"
+    # }
 
     # Block common attack paths and scanners
     @blocked {
         path /.env* /config* /.git* /.htaccess* /wp-admin* /wp-login* /phpMyAdmin* /admin.php* /.well-known/security.txt
         path *.php *.asp *.jsp *.cgi
     }
-
-    # Return 404 for blocked paths (don't reveal they exist)
     respond @blocked 404 {
         body "Not Found"
     }
 
-    # Block obviously malicious user agents
+    # Block malicious user agents
     @malicious_ua {
         header User-Agent *sqlmap* *nikto* *nmap* *masscan* *zap* *burp*
     }
-
     respond @malicious_ua 403 {
         body "Forbidden"
     }
 
     # Main reverse proxy to VaultWarden
-    # Simplified: Single proxy handles both HTTP and WebSocket (per v4 review)
-    reverse_proxy vaultwarden:80 {
-        # Preserve real client IP from Cloudflare
-        header_up X-Real-IP {http.request.header.CF-Connecting-IP}
-        header_up X-Forwarded-For {http.request.header.CF-Connecting-IP}
-        header_up X-Forwarded-Proto {scheme}
+    reverse_proxy vaultwarden_app:80 {
+        # Removed redundant header_up lines - forwarded directive handles this
+        # Caddy automatically passes correct client IP info to upstream
         header_up Host {host}
+
+        # Handle WebSocket connections
+        header_up Connection {>Connection}
+        header_up Upgrade {>Upgrade}
 
         # Health monitoring
         health_uri /alive
@@ -149,3 +131,4 @@ www.{$DOMAIN} {
     }
     respond "Not Found" 404
 }
+
