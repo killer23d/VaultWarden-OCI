@@ -1,17 +1,26 @@
 #!/usr/bin/env bash
 # startup.sh - Simplified VaultWarden stack orchestration
+# Uses centralized library functions
+# Removed redundant secrets file creation for env-passed secrets
+# FIX: Define PROJECT_ROOT before trap command
 
 set -euo pipefail
-trap "rm -rf '$PROJECT_ROOT/secrets/.docker_secrets' 2>/dev/null" EXIT HUP INT TERM
 
+# --- START FIX: Define PROJECT_ROOT earlier ---
 # --- Project Root Resolution ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR"
-cd "$PROJECT_ROOT"
+# --- END FIX ---
+
+# --- START FIX: Set trap *after* PROJECT_ROOT is defined ---
+trap "rm -rf '$PROJECT_ROOT/secrets/.docker_secrets' 2>/dev/null" EXIT HUP INT TERM
+# --- END FIX ---
+
+cd "$PROJECT_ROOT" # cd after defining PROJECT_ROOT
 
 # --- Source Libraries ---
 source "lib/common.sh"
-init_common_lib "$0"
+init_common_lib "$0" # init_common_lib now correctly uses PROJECT_ROOT if needed
 source "lib/docker.sh"
 source "lib/crypto.sh"
 
@@ -86,10 +95,14 @@ prepare_docker_secrets() {
     fi
 
     local decrypted_json
-    decrypted_json=$(sops -d --output-type json "secrets/secrets.yaml" 2>/dev/null) || {
+    # Use SOPS_AGE_KEY_FILE environment variable set by edit-secrets.sh caller potentially
+    # Or rely on .sops.yaml if variable not set. sops_decrypt handles this.
+    decrypted_json=$(sops_decrypt "secrets/secrets.yaml" "" 2>/dev/null) || {
         log_error "Failed to decrypt secrets. Check age key and sops config."
+        log_info "Try running './edit-secrets.sh --test' first."
         return 1
     }
+
 
     # Secrets that NEED files (vs being passed via env)
     local secrets_needing_files=("admin_token" "smtp_password" "push_installation_id" "push_installation_key")
@@ -102,13 +115,23 @@ prepare_docker_secrets() {
     for secret in "${secrets_needing_files[@]}"; do
         local value
         secret_file_path="$docker_secrets_dir/$secret"
-        value=$(echo "$decrypted_json" | jq -r --arg secret "$secret" '.[$secret] // "CHANGE_ME"')
+        value=$(echo "$decrypted_json" | jq -r --arg secret "$secret" '.[$secret] // ""') # Default to empty string
 
+        # Only write non-empty, non-placeholder values, otherwise write empty file for optional secrets
         if [[ -n "$value" ]] && [[ "$value" != "CHANGE_ME"* ]] && [[ "$value" != "null" ]]; then
             echo "$value" > "$secret_file_path"
         else
-            # For optional secrets, create empty file if not set
-            echo "" > "$secret_file_path"
+            # For optional secrets like smtp/push, create empty file if not set or placeholder
+             if [[ "$secret" == "smtp_password" || "$secret" == "push_installation_id" || "$secret" == "push_installation_key" ]]; then
+                # Create empty file, docker-compose expects it
+                touch "$secret_file_path"
+            else
+                # For admin_token (required), if it's missing/placeholder, it's an error state implicitly caught later
+                 echo "CHANGE_ME_#_Missing_or_Placeholder_Value" > "$secret_file_path" # Write placeholder to file for debug
+                 # We don't add admin_token to missing_secrets here as it's not checked below
+                 log_warn "Secret '$secret' (required file) seems unconfigured."
+
+            fi
         fi
         secure_file "$secret_file_path" 600 || { log_error "Failed to secure temporary secret file: $secret"; return 1; }
     done
@@ -144,9 +167,9 @@ prepare_environment_variables() {
     log_info "Preparing environment variables for containers..."
 
     local decrypted_json
-    decrypted_json=$(sops -d --output-type json "secrets/secrets.yaml" 2>/dev/null) || {
+    # Decrypt again, ensure SOPS_AGE_KEY_FILE is available if needed
+    decrypted_json=$(sops_decrypt "secrets/secrets.yaml" "" 2>/dev/null) || {
         log_error "Failed to decrypt secrets for environment variables. Check age key and sops config."
-        # Don't exit here, let prepare_docker_secrets handle the fatal error if validation fails
         return 1
     }
 
@@ -192,6 +215,15 @@ post_startup_health_check() {
         fi
     done
 
+    # Also check non-critical but important services
+    local other_services=("fail2ban" "ddclient")
+     for service in "${other_services[@]}"; do
+        if ! wait_for_service_ready "$service" 30; then # Shorter timeout for these
+            # Log warning, but don't count as failure for overall status if criticals are OK
+            log_warn "Service '$service' failed post-startup health check."
+        fi
+    done
+
     if [[ ${#failed_services[@]} -eq 0 ]]; then
         log_success "All critical services are running and healthy"
         local domain
@@ -207,7 +239,7 @@ post_startup_health_check() {
             fi
         fi
     else
-        log_error "Failed services: ${failed_services[*]}"
+        log_error "Failed critical services: ${failed_services[*]}"
         log_info "Check logs with: docker compose logs <service_name>"
         return 1
     fi
@@ -262,24 +294,45 @@ main() {
         fi
     fi
 
-    post_startup_health_check || log_warn "Health check failed, but stack is running"
+    post_startup_health_check || log_warn "Health check detected issues with critical services, but stack attempted startup"
 
     local domain
     domain=$(get_config_value "DOMAIN")
 
-    log_success "VaultWarden-OCI-NG startup completed"
+    log_success "VaultWarden-OCI-NG startup procedure completed"
     echo ""
-    echo "Services started successfully!"
-    echo "Web interface: https://$domain"
-    echo "Admin panel: https://$domain/admin"
+    # Check final status before declaring success message
+    local all_running=true
+    for service in vaultwarden caddy fail2ban ddclient; do
+      if ! is_service_running "$service"; then
+        all_running=false
+        log_warn "Service $service is not running."
+      fi
+    done
+
+    if [[ "$all_running" == "true" ]]; then
+        echo "All services appear to be running!"
+        echo "Web interface: https://$domain"
+        echo "Admin panel: https://$domain/admin"
+    else
+         echo "Some services may not be running correctly. Please check logs."
+    fi
+
     echo ""
     echo "Useful commands:"
-    echo "  ./health.sh          # Check system health"
-    echo "  ./backup.sh          # Create backup"
-    echo "  ./startup.sh --down  # Stop services"
+    echo "  make status          # Check service status"
+    echo "  make health          # Check system health"
+    echo "  make logs SERVICE=... # View service logs"
+    echo "  make down            # Stop services"
     echo ""
     echo "IMPORTANT NOTES:"
-    echo "  • After editing secrets, always use: ./startup.sh --force-restart"
+    echo "  • After editing secrets, always use: make restart"
 }
 
+# --- START FIX: Export SOPS_AGE_KEY_FILE if edit-secrets set it ---
+# This ensures sops_decrypt within prepare_docker_secrets/prepare_environment_variables uses the correct key
+export SOPS_AGE_KEY_FILE
+# --- END FIX ---
+
 main "$@"
+
