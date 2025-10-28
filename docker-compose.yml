@@ -85,9 +85,7 @@ services:
     image: caddy:${CADDY_VERSION:-latest}
     container_name: vaultwarden_caddy
     restart: unless-stopped
-    # --- START FIX: Use PUID/PGID ---
     user: "${PUID:-1000}:${PGID:-1000}"
-    # --- END FIX ---
 
     environment:
       - DOMAIN=${DOMAIN}
@@ -107,6 +105,7 @@ services:
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/data:/data:rw
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/config:/config:rw
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy:/logs:rw
+      - ./secrets/.docker_secrets/admin_basic_auth_hash:/admin_basic_auth_hash:ro
 
     # Removed admin_basic_auth_hash and fail2ban_api_token from secrets here
 
