@@ -1,6 +1,5 @@
-version: "3.9"
-
 # VaultWarden-OCI Docker Compose Configuration
+# Removed obsolete version tag
 
 services:
   vaultwarden:
