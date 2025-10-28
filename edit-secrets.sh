@@ -19,6 +19,9 @@ EDITOR="${EDITOR:-nano}"
 SECRETS_FILE="secrets/secrets.yaml"
 AGE_KEY_FILE="secrets/keys/age-key.txt"
 SOPS_CONFIG_FILE=".sops.yaml" # Added SOPS config file variable
+# --- START FIX: Export full key path ---
+export SOPS_AGE_KEY_FILE="$PROJECT_ROOT/$AGE_KEY_FILE"
+# --- END FIX ---
 
 
 # --- Help ---
@@ -39,6 +42,7 @@ OPTIONS:
 DESCRIPTION:
     Safely edit encrypted secrets using SOPS and Age encryption.
     Secrets are automatically re-encrypted after editing.
+    Uses the key defined in secrets/keys/age-key.txt via SOPS_AGE_KEY_FILE env var.
 
 EXAMPLES:
     ./edit-secrets.sh           # Edit secrets with default editor (via menu)
@@ -88,21 +92,20 @@ check_prerequisites() {
     fi
 
     # Check Age key using library function (checks existence and permissions 600)
-    if ! check_age_key "$AGE_KEY_FILE"; then
-        log_error "Age private key not found or has incorrect permissions: $AGE_KEY_FILE"
+    # Use the exported full path
+    if ! check_age_key "$SOPS_AGE_KEY_FILE"; then
+        log_error "Age private key not found or has incorrect permissions: $SOPS_AGE_KEY_FILE"
         log_info "Ensure the file exists and has permissions 600 (rw-------)."
         log_info "If the key is missing, setup may need to be rerun (this might reset secrets)."
         return 1
     fi
 
-    # --- START FIX: Check SOPS config file existence ---
+    # Check SOPS config file existence (still useful for encryption rules)
     if [[ ! -f "$SOPS_CONFIG_FILE" ]]; then
-        log_error "SOPS configuration file not found: $SOPS_CONFIG_FILE"
-        log_info "This file tells SOPS which key to use."
-        log_info "Please re-run 'sudo ./setup.sh --force' to generate it."
-        return 1
+        log_warn "SOPS configuration file ($SOPS_CONFIG_FILE) not found."
+        log_info "Relying solely on SOPS_AGE_KEY_FILE environment variable."
+        # Don't fail here, as SOPS_AGE_KEY_FILE should override
     fi
-    # --- END FIX ---
 
 
     return 0
@@ -156,22 +159,21 @@ push_installation_id: CHANGE_ME_OR_LEAVE_EMPTY
 push_installation_key: CHANGE_ME_OR_LEAVE_EMPTY
 
 # Cloudflare API token for DDNS (Permissions: Zone:DNS:Edit)
-ddclient_api_token: CHANGE_ME_DDCLIENT_API_TOKEN
+ddclient_api_token: CHANGE_ME_DNS_TOKEN
 
 # Cloudflare API token for Fail2Ban/Caddy (Permissions: Zone:Firewall Services:Edit)
 fail2ban_api_token: CHANGE_ME_FAIL2BAN_API_TOKEN
 EOF
 
     log_success "Template secrets file created"
-    log_info "Now encrypting with SOPS..."
+    log_info "Now encrypting with SOPS (using SOPS_AGE_KEY_FILE)..."
 
-    # Encrypt the file using SOPS. It should pick up the key from .sops.yaml
+    # Encrypt the file using SOPS. SOPS_AGE_KEY_FILE should ensure the correct key is used.
     if sops --encrypt --in-place "$SECRETS_FILE"; then
-        log_success "Secrets file encrypted successfully using config in $SOPS_CONFIG_FILE"
+        log_success "Secrets file encrypted successfully using key $SOPS_AGE_KEY_FILE"
         secure_file "$SECRETS_FILE" 600
     else
-        log_error "Failed to encrypt secrets file using $SOPS_CONFIG_FILE"
-        log_info "Check $SOPS_CONFIG_FILE and ensure the public key matches secrets/keys/age-public-key.txt"
+        log_error "Failed to encrypt secrets file using key $SOPS_AGE_KEY_FILE"
         return 1
     fi
 
@@ -202,15 +204,14 @@ show_secrets() {
     fi
 
     echo ""
-    echo "=== DECRYPTED SECRETS (using key $AGE_KEY_FILE) ==="
-    # Use library function to decrypt, explicitly providing key
-    # (Showing secrets should always use the explicit key for clarity)
-    if sops_decrypt "$SECRETS_FILE" "" "$AGE_KEY_FILE"; then # Pass key file explicitly
+    echo "=== DECRYPTED SECRETS (using key $SOPS_AGE_KEY_FILE) ==="
+    # Use library function to decrypt, relies on SOPS_AGE_KEY_FILE now
+    if sops_decrypt "$SECRETS_FILE" ""; then
         echo "======================================================"
         echo ""
         log_warn "Remember to keep these values secure!"
     else
-        log_error "Failed to decrypt secrets file using key $AGE_KEY_FILE"
+        log_error "Failed to decrypt secrets file using key $SOPS_AGE_KEY_FILE"
         return 1
     fi
 
@@ -228,8 +229,8 @@ edit_secrets() {
     fi
 
     # Permission checks
-    if [[ ! -r "$AGE_KEY_FILE" ]]; then
-        log_error "Cannot read Age key file: $AGE_KEY_FILE"
+    if [[ ! -r "$SOPS_AGE_KEY_FILE" ]]; then # Check the exported full path
+        log_error "Cannot read Age key file: $SOPS_AGE_KEY_FILE"
         log_info "Check permissions. It should be readable by user $(whoami)."
         return 1
     fi
@@ -243,10 +244,9 @@ edit_secrets() {
         log_info "Check permissions. Directory should be writable by user $(whoami)."
         return 1
     fi
+     # Config file check is now less critical but still good practice
      if [[ ! -r "$SOPS_CONFIG_FILE" ]]; then
-        log_error "Cannot read SOPS config file: $SOPS_CONFIG_FILE"
-        log_info "Check permissions or re-run setup."
-        return 1
+        log_warn "Cannot read SOPS config file: $SOPS_CONFIG_FILE. Relying on SOPS_AGE_KEY_FILE."
     fi
 
 
@@ -257,10 +257,11 @@ edit_secrets() {
         return 1
     fi
 
-    # Test decryption using the explicit key (as a sanity check before editing)
-    log_debug "Performing pre-edit decryption test using key $AGE_KEY_FILE..."
-    if ! sops_decrypt "$SECRETS_FILE" "/dev/null" "$AGE_KEY_FILE" >/dev/null 2>&1; then
-        log_error "Pre-edit decryption test failed using key: $AGE_KEY_FILE"
+    # Test decryption using SOPS_AGE_KEY_FILE (as a sanity check before editing)
+    log_debug "Performing pre-edit decryption test using key $SOPS_AGE_KEY_FILE..."
+    # The sops_decrypt function should now implicitly use SOPS_AGE_KEY_FILE
+    if ! sops_decrypt "$SECRETS_FILE" "/dev/null" >/dev/null 2>&1; then
+        log_error "Pre-edit decryption test failed using key specified by SOPS_AGE_KEY_FILE ($SOPS_AGE_KEY_FILE)"
         log_info "This indicates a key mismatch or corrupted file. Cannot proceed with edit."
         return 1
     fi
@@ -268,16 +269,15 @@ edit_secrets() {
 
 
     log_info "Using editor: $EDITOR"
-    log_info "Relying on $SOPS_CONFIG_FILE to find the correct Age key."
+    log_info "Using Age key file: $SOPS_AGE_KEY_FILE (via environment variable)"
     log_info "The file will be automatically re-encrypted when you save and exit."
     echo ""
 
-    # --- START FIX: Rely on .sops.yaml for the edit command ---
-    # Use SOPS to edit the file directly. SOPS will use .sops.yaml to find the key.
+    # Use SOPS to edit the file directly. SOPS_AGE_KEY_FILE should ensure the correct key is used.
     local sops_command="sops \"$SECRETS_FILE\""
     log_debug "Executing SOPS edit command: EDITOR=\"$EDITOR\" $sops_command"
+    # SOPS_AGE_KEY_FILE is already exported for the sops command
     if EDITOR="$EDITOR" sops "$SECRETS_FILE"; then
-    # --- END FIX ---
         log_success "Secrets updated successfully"
 
         # Verify the file is still properly encrypted using library function
@@ -300,7 +300,7 @@ edit_secrets() {
     else
         log_warn "Editor exited with a non-zero status or SOPS encountered an error during edit."
         log_info "Secrets file *should* remain unchanged if the editor cancelled."
-        log_info "If SOPS reported an error, check its output for details."
+        log_info "If SOPS reported an error, check its output for details (e.g., key issues)."
         log_info "You can run './edit-secrets.sh --test' to check decryption again."
         return 1 # Return error code
     fi
@@ -364,14 +364,15 @@ test_secrets_access() {
         return 1
     fi
 
-    # Test decryption using library function, explicitly pass key for test clarity
-    log_info "Attempting decryption using key: $AGE_KEY_FILE..."
-    if sops_decrypt "$SECRETS_FILE" "/dev/null" "$AGE_KEY_FILE" >/dev/null 2>&1; then
+    # Test decryption using library function, relies on SOPS_AGE_KEY_FILE
+    log_info "Attempting decryption using key specified by SOPS_AGE_KEY_FILE ($SOPS_AGE_KEY_FILE)..."
+    if sops_decrypt "$SECRETS_FILE" "/dev/null" >/dev/null 2>&1; then
         log_success "Secrets file can be decrypted using the current key."
 
         # Test individual secret access using direct decryption and jq
         local decrypted_json
-        decrypted_json=$(sops_decrypt "$SECRETS_FILE" "" "$AGE_KEY_FILE" | jq .) || {
+        # sops_decrypt should use SOPS_AGE_KEY_FILE here too
+        decrypted_json=$(sops_decrypt "$SECRETS_FILE" "" | jq .) || {
              log_error "Failed to parse decrypted JSON content."
              return 1
         }
@@ -409,7 +410,7 @@ test_secrets_access() {
         fi
 
     else
-        log_error "Cannot decrypt secrets file using key: $AGE_KEY_FILE"
+        log_error "Cannot decrypt secrets file using key specified by SOPS_AGE_KEY_FILE ($SOPS_AGE_KEY_FILE)"
         log_info "This indicates a key mismatch or corrupted file."
         return 1
     fi
@@ -480,5 +481,7 @@ main() {
     exit $exit_status
 }
 
+# Make sure SOPS_AGE_KEY_FILE is exported before main runs
+export SOPS_AGE_KEY_FILE
 main "$@"
 
