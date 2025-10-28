@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # edit-secrets.sh - Simplified secrets management with library integration
-# Uses centralized library functions
+# Uses centralized library function
 
 set -euo pipefail
 
@@ -17,6 +17,10 @@ source "lib/crypto.sh"
 # --- Configuration ---
 EDITOR="${EDITOR:-nano}"
 SECRETS_FILE="secrets/secrets.yaml"
+# --- START FIX: Define key file path ---
+AGE_KEY_FILE="secrets/keys/age-key.txt"
+# --- END FIX ---
+
 
 # --- Help ---
 show_help() {
@@ -30,6 +34,7 @@ OPTIONS:
     --editor EDITOR  Editor to use (default: nano, or $EDITOR)
     --init          Initialize secrets file with templates
     --show          Show decrypted secrets (careful!)
+    --test          Test if secrets can be decrypted
     --help          Show this help
 
 DESCRIPTION:
@@ -37,22 +42,26 @@ DESCRIPTION:
     Secrets are automatically re-encrypted after editing.
 
 EXAMPLES:
-    ./edit-secrets.sh           # Edit secrets with default editor
+    ./edit-secrets.sh           # Edit secrets with default editor (via menu)
+    make edit-secrets          # Edit secrets with default editor (via menu)
     ./edit-secrets.sh --editor vim   # Use vim as editor
     ./edit-secrets.sh --init    # Create new secrets file from template
     ./edit-secrets.sh --show    # Display current secrets (be careful!)
+    ./edit-secrets.sh --test    # Check if secrets are accessible
 EOF
 }
 
 # --- Argument Parsing ---
 SHOW_MODE=false
 INIT_MODE=false
+TEST_MODE=false # Added test mode flag
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --editor) EDITOR="$2"; shift 2 ;;
         --init) INIT_MODE=true; shift ;;
         --show) SHOW_MODE=true; shift ;;
+        --test) TEST_MODE=true; shift ;; # Added test mode parsing
         --help) show_help; exit 0 ;;
         *) log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
@@ -61,21 +70,38 @@ done
 # --- Validation ---
 check_prerequisites() {
     # Check required commands using library function
+    # Check if EDITOR command exists
+    if ! has_command "$EDITOR"; then
+         log_error "Configured editor '$EDITOR' not found."
+         log_info "Install it or use '--editor <installed_editor>'."
+         log_info "Default editor 'nano' can be installed with: sudo apt install nano"
+         return 1
+    fi
     require_commands age "$EDITOR" || return 1
+
 
     # Check SOPS availability using library function
     if ! check_sops_available; then
-        log_error "SOPS not available"
-        log_info "Install with: sudo apt install sops"
+        log_error "SOPS command not found"
+        log_info "SOPS should have been installed during setup."
+        log_info "Try running setup again or install manually."
         return 1
     fi
 
-    # Check Age key using library function
-    if ! check_age_key; then
-        log_error "Age private key not available"
-        log_info "Run ./setup.sh to generate keys"
+    # Check Age key using library function (checks existence and permissions 600)
+    if ! check_age_key "$AGE_KEY_FILE"; then
+        log_error "Age private key not found or has incorrect permissions: $AGE_KEY_FILE"
+        log_info "Ensure the file exists and has permissions 600 (rw-------)."
+        log_info "If the key is missing, setup may need to be rerun (this might reset secrets)."
         return 1
     fi
+
+    # Check SOPS config file
+    if [[ ! -f ".sops.yaml" ]]; then
+        log_warn ".sops.yaml configuration file not found."
+        log_info "Attempting to continue by specifying key file directly to SOPS."
+    fi
+
 
     return 0
 }
@@ -122,11 +148,9 @@ smtp_password: CHANGE_ME_SMTP_PASSWORD
 backup_passphrase: $backup_pass
 
 # Optional: Push notifications (get ID and Key from bitwarden.com/host)
-# --- FIX: Added push_installation_id ---
 push_installation_id: CHANGE_ME_OR_LEAVE_EMPTY
 push_installation_key: CHANGE_ME_OR_LEAVE_EMPTY
 
-# --- P1 CHANGE: Split Cloudflare token ---
 # Cloudflare API token for DDNS (Permissions: Zone:DNS:Edit)
 ddclient_api_token: CHANGE_ME_DDCLIENT_API_TOKEN
 
@@ -137,8 +161,9 @@ EOF
     log_success "Template secrets file created"
     log_info "Now encrypting with SOPS..."
 
-    # Encrypt the file using library function
-    if sops_encrypt "$SECRETS_FILE"; then
+    # Encrypt the file using library function (sops_encrypt calls sops --encrypt --in-place)
+    # It relies on .sops.yaml or explicit keys
+    if sops --encrypt --age "$(get_public_key "$AGE_KEY_FILE")" --in-place "$SECRETS_FILE"; then
         log_success "Secrets file encrypted successfully"
         secure_file "$SECRETS_FILE" 600
     else
@@ -147,9 +172,8 @@ EOF
     fi
 
     log_warn "IMPORTANT: Update the CHANGE_ME values:"
-    log_info "  1. Run: ./edit-secrets.sh"
+    log_info "  1. Run: ./edit-secrets.sh (and choose option 1)"
     log_info "  2. Update admin_basic_auth_hash"
-    # --- P1 CHANGE: Updated help text ---
     log_info "  3. Update ddclient_api_token (for dynamic DNS)"
     log_info "  4. Update fail2ban_api_token (for firewall bans)"
     log_info "  5. Update smtp_password if using email notifications"
@@ -175,13 +199,13 @@ show_secrets() {
 
     echo ""
     echo "=== DECRYPTED SECRETS ==="
-    # Use library function to decrypt
-    if sops_decrypt "$SECRETS_FILE"; then
+    # Use library function to decrypt, explicitly providing key
+    if sops_decrypt "$SECRETS_FILE" "" "$AGE_KEY_FILE"; then # Pass key file explicitly
         echo "========================="
         echo ""
         log_warn "Remember to keep these values secure!"
     else
-        log_error "Failed to decrypt secrets file"
+        log_error "Failed to decrypt secrets file using key $AGE_KEY_FILE"
         return 1
     fi
 
@@ -198,46 +222,77 @@ edit_secrets() {
         return 1
     fi
 
+    # --- START FIX: Add permission checks ---
+    if [[ ! -r "$AGE_KEY_FILE" ]]; then
+        log_error "Cannot read Age key file: $AGE_KEY_FILE"
+        log_info "Check permissions. It should be readable by user $(whoami)."
+        return 1
+    fi
+     if [[ ! -w "$SECRETS_FILE" ]]; then
+        log_error "Cannot write to secrets file: $SECRETS_FILE"
+        log_info "Check permissions. It should be writable by user $(whoami)."
+        return 1
+    fi
+     # Check if the directory is writable (for SOPS temp files)
+    if [[ ! -w "$(dirname "$SECRETS_FILE")" ]]; then
+        log_error "Cannot write to secrets directory: $(dirname "$SECRETS_FILE")"
+        log_info "Check permissions. Directory should be writable by user $(whoami)."
+        return 1
+    fi
+    # --- END FIX ---
+
+
     # Check if file is encrypted using library function
     if ! is_sops_encrypted "$SECRETS_FILE"; then
-        log_error "Secrets file is not encrypted with SOPS"
+        log_error "Secrets file exists but does not appear to be encrypted with SOPS"
+        log_info "Cannot safely edit. If this is unexpected, check the file content."
         return 1
     fi
 
-    # Test decryption using library function
-    if ! sops_decrypt "$SECRETS_FILE" >/dev/null 2>&1; then
-        log_error "Cannot decrypt secrets file with current Age key"
-        log_info "Check that Age key is correct and SOPS config is valid"
+    # Test decryption using library function, explicitly pass key
+    if ! sops_decrypt "$SECRETS_FILE" "/dev/null" "$AGE_KEY_FILE" >/dev/null 2>&1; then
+        log_error "Cannot decrypt secrets file with current Age key: $AGE_KEY_FILE"
+        log_info "Ensure the key file is correct and has not changed."
         return 1
     fi
+    log_success "Decryption test passed."
+
 
     log_info "Using editor: $EDITOR"
     log_info "The file will be automatically re-encrypted when you save and exit"
     echo ""
 
-    # Use SOPS to edit the file directly using library function
-    if sops_edit "$SECRETS_FILE"; then
+    # --- START FIX: Explicitly pass Age key file to sops edit command ---
+    # Use SOPS to edit the file directly, specifying the identity file
+    # This overrides .sops.yaml if present, ensuring the correct key is used
+    if EDITOR="$EDITOR" sops --age "$(cat "$AGE_KEY_FILE" | grep -v '^#')" "$SECRETS_FILE"; then
+    # --- END FIX ---
         log_success "Secrets updated successfully"
 
         # Verify the file is still properly encrypted using library function
         if is_sops_encrypted "$SECRETS_FILE"; then
             log_success "Secrets file encryption verified"
         else
-            log_error "Warning: Secrets file may not be properly encrypted"
+            # SOPS should normally error out before this if encryption fails, but check anyway
+            log_error "CRITICAL WARNING: Secrets file may NOT be properly encrypted after editing!"
+            log_info "Check the file content immediately: $SECRETS_FILE"
             return 1
         fi
 
-        # Set proper permissions using library function
+        # Set proper permissions using library function (redundant if SOPS preserves, but safe)
         secure_file "$SECRETS_FILE" 600
 
         # Remind about restarting services
         echo ""
         log_info "To apply changes to running services:"
-        log_info "  ./startup.sh --force-restart"
+        log_info "  make restart  (or ./startup.sh --force-restart)"
 
     else
-        log_error "Editor exited with error or was cancelled"
-        return 1
+        # This usually means the editor exited non-zero (e.g., user cancelled, save failed)
+        log_warn "Editor exited with a non-zero status or SOPS encountered an error."
+        log_info "Secrets file *should* remain unchanged if the editor cancelled."
+        log_info "Check the file state if unsure: $SECRETS_FILE"
+        return 1 # Return error code
     fi
 
     return 0
@@ -249,34 +304,45 @@ generate_password_hash() {
     echo ""
 
     if ! has_command argon2; then
-        log_warn "argon2 command not found, using openssl alternative"
+        log_warn "argon2 command not found, using openssl alternative (less secure)"
         log_info "Install argon2: sudo apt install argon2"
         echo ""
 
         read -s -p "Enter password: " password
         echo ""
         local salt hash
-        salt=$(generate_secure_string 16)
-        hash=$(echo -n "$password" | openssl dgst -sha256 -binary | openssl base64)
+        salt=$(generate_secure_string 16) # Use crypto lib function
+        hash=$(echo -n "$password" | openssl dgst -sha256 -binary | openssl base64) # Simple hash, NOT bcrypt
         echo ""
-        log_info "Basic SHA256 hash (less secure than bcrypt/argon2):"
+        log_info "Basic SHA256 hash (NOT RECOMMENDED for production):"
         echo "$hash"
         echo ""
         log_warn "Use a proper bcrypt generator online for production:"
         log_info "https://bcrypt-generator.com/"
+        log_info "(Or install 'argon2' package for local generation)"
     else
         read -s -p "Enter password: " password
         echo ""
+        read -s -p "Confirm password: " password_confirm
+        echo ""
+        if [[ "$password" != "$password_confirm" ]]; then
+            log_error "Passwords do not match."
+            return 1
+        fi
+
         local salt hash
+        # Use crypto lib function for salt
         salt=$(generate_secure_string 32)
+        # Standard parameters for Argon2id
         hash=$(echo -n "$password" | argon2 "$salt" -e -id -k 65536 -t 3 -p 4)
         echo ""
-        log_success "Argon2 hash generated:"
+        log_success "Argon2id hash generated (suitable for Caddy basicauth):"
         echo "$hash"
+        echo ""
+        log_info "Copy this hash to your secrets file as admin_basic_auth_hash"
     fi
 
     echo ""
-    log_info "Copy this hash to your secrets file as admin_basic_auth_hash"
 }
 
 # --- Test Secrets Access ---
@@ -288,31 +354,45 @@ test_secrets_access() {
         return 1
     fi
 
-    # Test decryption using library function
-    if sops_decrypt "$SECRETS_FILE" >/dev/null 2>&1; then
-        log_success "Secrets file can be decrypted"
+    # Test decryption using library function, explicitly pass key
+    if sops_decrypt "$SECRETS_FILE" "/dev/null" "$AGE_KEY_FILE" >/dev/null 2>&1; then
+        log_success "Secrets file can be decrypted using key: $AGE_KEY_FILE"
 
-        # Test individual secret access using library function
-        local test_secrets=("admin_token" "backup_passphrase")
+        # Test individual secret access using direct decryption and jq
+        local decrypted_json
+        decrypted_json=$(sops_decrypt "$SECRETS_FILE" "" "$AGE_KEY_FILE" | jq .) || {
+             log_error "Failed to parse decrypted JSON content."
+             return 1
+        }
+
+
+        local test_secrets=("admin_token" "backup_passphrase" "ddclient_api_token" "fail2ban_api_token")
         local accessible_secrets=0
+        local missing_secrets=0
 
         for secret in "${test_secrets[@]}"; do
-            if get_secret "$secret" >/dev/null 2>&1; then
+             local value
+             value=$(echo "$decrypted_json" | jq -r --arg key "$secret" '.[$key] // ""')
+             if [[ -n "$value" ]] && [[ "$value" != "null" ]] && [[ "$value" != CHANGE_ME* ]]; then
                 ((accessible_secrets++))
-                log_success "Secret '$secret' accessible"
-            else
-                log_warn "Secret '$secret' not found or inaccessible"
-            fi
+                log_success "✓ Secret '$secret' accessible and configured"
+             elif [[ -n "$value" ]] && [[ "$value" == CHANGE_ME* ]]; then
+                 log_warn "✗ Secret '$secret' accessible but has placeholder value"
+                 ((missing_secrets++))
+             else
+                 log_warn "✗ Secret '$secret' not found or inaccessible in YAML structure"
+                 ((missing_secrets++))
+             fi
         done
 
-        if [[ $accessible_secrets -eq ${#test_secrets[@]} ]]; then
-            log_success "All core secrets are accessible"
+        if [[ $missing_secrets -eq 0 ]]; then
+            log_success "All core secrets are accessible and appear configured"
         else
-            log_warn "Some secrets may be missing or misconfigured"
+            log_warn "Some secrets are missing or have placeholder values"
         fi
 
     else
-        log_error "Cannot decrypt secrets file"
+        log_error "Cannot decrypt secrets file using key: $AGE_KEY_FILE"
         return 1
     fi
 
@@ -326,47 +406,63 @@ main() {
     # Check prerequisites first
     check_prerequisites || exit 1
 
-    # Handle different modes
+    # Handle direct flags first
     if [[ "$INIT_MODE" == "true" ]]; then
         init_secrets
+        exit $?
     elif [[ "$SHOW_MODE" == "true" ]]; then
         show_secrets
-    else
-        # Check if secrets file exists, offer to create it
-        if [[ ! -f "$SECRETS_FILE" ]]; then
-            log_warn "No secrets file found"
-            read -p "Create new secrets file from template? (Y/n): " create_new
-            if [[ ! "$create_new" =~ ^[Nn]$ ]]; then
-                init_secrets || exit 1
-                echo ""
-                log_info "Now opening for editing..."
-                sleep 2
-            else
-                log_info "Cancelled"
-                exit 0
-            fi
-        fi
-
-        # Show menu for existing file
-        echo ""
-        echo "What would you like to do?"
-        echo "1) Edit secrets"
-        echo "2) Generate password hash"
-        echo "3) Show current secrets"
-        echo "4) Test secrets access"
-        echo "5) Exit"
-        echo ""
-        read -p "Choice (1-5): " choice
-
-        case "$choice" in
-            1) edit_secrets ;;
-            2) generate_password_hash ;;
-            3) show_secrets ;;
-            4) test_secrets_access ;;
-            5) log_info "Goodbye"; exit 0 ;;
-            *) log_error "Invalid choice"; exit 1 ;;
-        esac
+        exit $?
+    elif [[ "$TEST_MODE" == "true" ]]; then
+        test_secrets_access
+        exit $?
     fi
+
+
+    # If no direct flag, show menu
+
+    # Check if secrets file exists, offer to create it if not
+    if [[ ! -f "$SECRETS_FILE" ]]; then
+        log_warn "No secrets file found ($SECRETS_FILE)"
+        read -p "Create new secrets file from template? (Y/n): " create_new
+        if [[ ! "$create_new" =~ ^[Nn]$ ]]; then
+            init_secrets || exit 1
+            echo ""
+            log_info "Now opening for editing..."
+            sleep 2
+            # Fall through to edit secrets after init
+            edit_secrets
+            exit $?
+        else
+            log_info "Cancelled. Run './edit-secrets.sh --init' to create the file manually."
+            exit 0
+        fi
+    fi
+
+    # Show menu for existing file
+    echo ""
+    echo "What would you like to do?"
+    echo "1) Edit secrets"
+    echo "2) Generate password hash (for admin_basic_auth_hash)"
+    echo "3) Show current secrets (use caution!)"
+    echo "4) Test secrets access & configuration"
+    echo "5) Exit"
+    echo ""
+    read -p "Choice (1-5): " choice
+
+    case "$choice" in
+        1) edit_secrets ;;
+        2) generate_password_hash ;;
+        3) show_secrets ;;
+        4) test_secrets_access ;;
+        5) log_info "Goodbye"; exit 0 ;;
+        *) log_error "Invalid choice"; exit 1 ;;
+    esac
+
+    # Capture exit status from chosen function
+    local exit_status=$?
+    # Ensure Makefile sees the error if a function fails
+    exit $exit_status
 }
 
 main "$@"
