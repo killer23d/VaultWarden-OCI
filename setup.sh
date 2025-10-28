@@ -429,6 +429,12 @@ ADMIN_EMAIL=$ADMIN_EMAIL
 COMPOSE_PROJECT_NAME=vaultwarden
 PROJECT_STATE_DIR=/var/lib/vaultwarden
 
+# --- START FIX: Use PUID/PGID ---
+# USER & PERMISSIONS
+PUID=1000
+PGID=1000
+# --- END FIX ---
+
 # HOST CONFIGURATION
 SSH_PORT=22
 
@@ -501,7 +507,7 @@ EOF
         mv "$temp_env" "$env_file"
     fi
     
-    # Set correct UID/GID
+    # Set correct PUID/PGID
     local real_user
     real_user=$(get_real_user)
     local real_uid
@@ -509,8 +515,10 @@ EOF
     local real_gid
     real_gid=$(id -g "$real_user")
     
-    sed -i "s/^UID=.*/UID=$real_uid/" "$env_file"
-    sed -i "s/^GID=.*/GID=$real_gid/" "$env_file"
+    # --- START FIX: Use PUID/PGID to avoid collision with readonly shell vars ---
+    sed -i "s/^PUID=.*/PUID=$real_uid/" "$env_file"
+    sed -i "s/^PGID=.*/PGID=$real_gid/" "$env_file"
+    # --- END FIX ---
 
 
     # Set secure permissions
@@ -536,8 +544,10 @@ setup_directories() {
     real_user=$(get_real_user)
     local real_group
     real_group=$(id -g -n "$real_user" 2>/dev/null || echo "$real_user")
+    
     # Load state_dir from the .env file we *just* created
-    load_env_file "$PROJECT_ROOT/.env"
+    # Use default value if .env loading fails (e.g., in dry run)
+    load_env_file "$PROJECT_ROOT/.env" || log_warn "Could not load .env for directory setup"
     local state_dir
     state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
 
@@ -551,27 +561,29 @@ setup_directories() {
         "backups/emergency"
         "logs"
     )
+    local project_owner="$real_user:$real_group"
 
     for dir in "${project_dirs[@]}"; do
-        ensure_dir "$PROJECT_ROOT/$dir" 750 "$real_user:$real_group" # 750 for slightly more security
+        ensure_dir "$PROJECT_ROOT/$dir" 750 "$project_owner" # 750 for slightly more security
     done
-    ensure_dir "$PROJECT_ROOT/secrets" 700 "$real_user:$real_group" # secrets dir should be private
-    ensure_dir "$PROJECT_ROOT/secrets/keys" 700 "$real_user:$real_group"
+    ensure_dir "$PROJECT_ROOT/secrets" 700 "$project_owner" # secrets dir should be private
+    ensure_dir "$PROJECT_ROOT/secrets/keys" 700 "$project_owner"
 
 
-    # Create state directories (owned by root, but accessible by user's GID or docker GID)
+    # Create state directories
+    # These must be owned by the PUID/PGID user for the containers to write to them
     log_info "Creating state directories in $state_dir..."
     ensure_dir "$state_dir" 755 "root:root" # Root dir
-    ensure_dir "$state_dir/data" 700 "$real_user:$real_group" # Data dir MUST be owned by the user running the container
-    ensure_dir "$state_dir/logs" 755 "$real_user:$real_group" # Logs
-    ensure_dir "$state_dir/caddy" 755 "$real_user:$real_group" # Caddy state
-    ensure_dir "$state_dir/caddy/data" 755 "$real_user:$real_group"
-    ensure_dir "$state_dir/caddy/config" 755 "$real_user:$real_group"
-    ensure_dir "$state_dir/ddclient" 755 "$real_user:$real_group"
-    ensure_dir "$state_dir/ddclient/cache" 755 "$real_user:$real_group"
-    ensure_dir "$state_dir/logs/caddy" 755 "$real_user:$real_group"
-    ensure_dir "$state_dir/logs/vaultwarden" 755 "$real_user:$real_group"
-    ensure_dir "$state_dir/logs/fail2ban" 755 "$real_user:$real_group"
+    ensure_dir "$state_dir/data" 700 "$project_owner" # Data dir MUST be owned by the user
+    ensure_dir "$state_dir/logs" 755 "$project_owner" # Logs
+    ensure_dir "$state_dir/caddy" 755 "$project_owner" # Caddy state
+    ensure_dir "$state_dir/caddy/data" 755 "$project_owner"
+    ensure_dir "$state_dir/caddy/config" 755 "$project_owner"
+    ensure_dir "$state_dir/ddclient" 755 "$project_owner"
+    ensure_dir "$state_dir/ddclient/cache" 755 "$project_owner"
+    ensure_dir "$state_dir/logs/caddy" 755 "$project_owner"
+    ensure_dir "$state_dir/logs/vaultwarden" 755 "$project_owner"
+    ensure_dir "$state_dir/logs/fail2ban" 755 "$project_owner"
 
 
     log_success "Project directories created successfully"
@@ -741,6 +753,10 @@ main() {
     if [[ -n "$real_user" ]] && [[ "$real_user" != "root" ]]; then
         echo "  - You ($real_user) must log out and log back in for Docker group membership to apply"
     fi
+    # --- START FIX: Add final message ---
+    echo ""
+    log_info "Run 'make' to see available commands for managing your instance."
+    # --- END FIX ---
 }
 
 # --- Execution ---
