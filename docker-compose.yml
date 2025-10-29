@@ -46,6 +46,9 @@ services:
       # Performance
       DATABASE_MAX_CONNS: 10
       ROCKET_WORKERS: 10
+      WEBSOCKET_ENABLED: "false"
+      WEBSOCKET_ADDRESS: "0.0.0.0" 
+      WEBSOCKET_PORT: 3012
 
       # Logging
       LOG_LEVEL: info
@@ -181,7 +184,7 @@ services:
 
   # Fail2Ban Intrusion Prevention
   fail2ban:
-     image: crazymax/fail2ban:latest
+    image: crazymax/fail2ban:latest
     container_name: vaultwarden_fail2ban
     restart: unless-stopped
     
