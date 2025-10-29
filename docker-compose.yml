@@ -1,5 +1,7 @@
-# VaultWarden-OCI-NG Docker Compose Configuration
+# Create the complete docker-compose.yml file with Docker secrets approach
+docker_compose_content = """# VaultWarden-OCI-NG Docker Compose Configuration
 # Fixed: Corrected UID/GID variable names and improved container configuration
+# Updated: admin_basic_auth_hash now uses Docker secrets consistently
 
 services:
   # VaultWarden Password Manager
@@ -109,9 +111,9 @@ services:
       
       # Logs
       - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy:/logs"
-      
-      # Admin basic auth hash
-      - "./secrets/.docker_secrets/admin_basic_auth_hash:/admin_basic_auth_hash:ro"
+
+    secrets:
+      - admin_basic_auth_hash
 
     networks:
       - vaultwarden_network
@@ -224,10 +226,12 @@ services:
       - NET_ADMIN
       - NET_RAW
 
-# Docker Secrets
+# Docker Secrets (UPDATED: Added admin_basic_auth_hash)
 secrets:
   admin_token:
     file: ./secrets/.docker_secrets/admin_token
+  admin_basic_auth_hash:
+    file: ./secrets/.docker_secrets/admin_basic_auth_hash
   smtp_password:
     file: ./secrets/.docker_secrets/smtp_password
   push_installation_id:
@@ -246,3 +250,10 @@ networks:
     ipam:
       config:
         - subnet: 172.20.0.0/16
+"""
+
+# Save to file
+with open('docker-compose.yml', 'w') as f:
+    f.write(docker_compose_content)
+
+print("✅ Created docker-compose.yml")
