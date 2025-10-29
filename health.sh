@@ -1,432 +1,445 @@
 #!/usr/bin/env bash
-# health.sh - Simplified VaultWarden health monitoring with library integration
-# Uses centralized library functions
+# health.sh - Comprehensive health monitoring for VaultWarden-OCI-NG
 
 set -euo pipefail
 
-# --- Project Root Resolution ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR"
 cd "$PROJECT_ROOT"
 
-# --- Source Libraries ---
 source "lib/common.sh"
 init_common_lib "$0"
-source "lib/docker.sh"
-source "lib/crypto.sh"
 
-# --- Configuration ---
+# Configuration
 COMPREHENSIVE=false
-AUTO_HEAL=false
 QUIET=false
-# --- START P2: Add email flag ---
-EMAIL_ALERT=false
-# --- END P2 ---
+JSON_OUTPUT=false
+ALERT_THRESHOLD=80  # Percentage threshold for alerts
+OUTPUT_FILE=""
 
-# --- Health Tracking ---
-WARNINGS=0
-ERRORS=0
-ERROR_DETAILS=""
-
-# --- Help ---
 show_help() {
     cat << 'EOF'
-VaultWarden-OCI-NG Health Check
+VaultWarden-OCI-NG Health Monitor
 
 USAGE:
     ./health.sh [OPTIONS]
 
 OPTIONS:
-    --comprehensive  Run extended health checks
-    --auto-heal      Automatically attempt to fix issues
-    --email-alert    Send email notification if errors are found
-    --quiet          Only show warnings and errors
-    --help           Show this help
+    --comprehensive     Run comprehensive health checks
+    --quiet            Suppress non-error output
+    --json             Output results in JSON format
+    --output FILE      Save results to file
+    --alert-threshold N Set alert threshold percentage (default: 80)
+    --help             Show this help
 
 EXAMPLES:
-    ./health.sh                    # Basic health check
-    ./health.sh --comprehensive    # Full system health check
-    ./health.sh --auto-heal        # Check health and auto-repair
-    ./health.sh --email-alert      # Check and send email on failure
+    ./health.sh                     # Basic health check
+    ./health.sh --comprehensive     # Full system health check
+    ./health.sh --json --output health.json  # Save results as JSON
+
+HEALTH CHECKS:
+    Basic:
+    - Container status and health
+    - Service accessibility
+    - Critical process monitoring
+
+    Comprehensive:
+    - Resource usage monitoring
+    - Storage space analysis
+    - Network connectivity tests
+    - Configuration validation
+    - Security status checks
+    - Performance metrics
 EOF
 }
 
-# --- Argument Parsing ---
+# Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
         --comprehensive) COMPREHENSIVE=true; shift ;;
-        --auto-heal) AUTO_HEAL=true; shift ;;
-        # --- START P2: Parse email flag ---
-        --email-alert) EMAIL_ALERT=true; shift ;;
-        # --- END P2 ---
         --quiet) QUIET=true; shift ;;
+        --json) JSON_OUTPUT=true; shift ;;
+        --output) OUTPUT_FILE="$2"; shift 2 ;;
+        --alert-threshold) ALERT_THRESHOLD="$2"; shift 2 ;;
         --help) show_help; exit 0 ;;
         *) log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done
 
-# --- Health Check Functions ---
-check_pass() {
-    [[ "$QUIET" != "true" ]] && log_success "✅ $*"
+# Health check results storage
+declare -A HEALTH_RESULTS
+declare -A HEALTH_DETAILS
+OVERALL_STATUS="healthy"
+ISSUES_FOUND=()
+
+# Logging functions that respect quiet mode
+health_log_info() {
+    [[ "$QUIET" == "true" ]] || log_info "$1"
 }
 
-check_warn() {
-    log_warn "⚠️  $*"
-    ((WARNINGS++))
+health_log_success() {
+    [[ "$QUIET" == "true" ]] || log_success "$1"
 }
 
-check_fail() {
-    log_error "❌ $*"
-    ((ERRORS++))
-    ERROR_DETAILS+="- $*\n"
+health_log_warn() {
+    log_warn "$1"
+    ISSUES_FOUND+=("WARNING: $1")
 }
 
-# --- Core Health Checks ---
-check_docker_health() {
-    [[ "$QUIET" != "true" ]] && log_info "Checking Docker health..."
-
-    if ! check_docker_available; then
-        check_fail "Docker daemon not accessible"
-        return 1
-    fi
-    check_pass "Docker daemon accessible"
-
-    if ! check_compose_available; then
-        check_fail "Docker Compose not available"
-        return 1
-    fi
-    check_pass "Docker Compose available"
-
-    return 0
+health_log_error() {
+    log_error "$1"
+    ISSUES_FOUND+=("ERROR: $1")
+    OVERALL_STATUS="unhealthy"
 }
 
-check_container_health() {
-    [[ "$QUIET" != "true" ]] && log_info "Checking container health..."
-
-    local services=("vaultwarden" "caddy" "fail2ban" "ddclient")
-    local unhealthy_services=()
-    local stopped_services=()
-
-    for service in "${services[@]}"; do
-        local status health
-        status=$(get_service_status "$service")
-        health=$(get_service_health "$service")
-
-        case "$status" in
-            "running")
-                if [[ "$health" == "unhealthy" ]]; then
-                    unhealthy_services+=("$service")
-                    check_fail "$service is running but unhealthy"
-                elif [[ "$health" == "starting" ]]; then
-                    check_warn "$service is starting up"
-                else
-                    check_pass "$service is running and healthy"
+# Basic health checks
+check_container_status() {
+    health_log_info "Checking container status..."
+    
+    local containers=("vaultwarden_app" "vaultwarden_caddy" "vaultwarden_fail2ban" "vaultwarden_ddclient")
+    local unhealthy_containers=()
+    local stopped_containers=()
+    
+    for container in "${containers[@]}"; do
+        if docker ps --format '{{.Names}}' | grep -q "^${container}$"; then
+            local status
+            status=$(docker inspect "$container" --format='{{.State.Health.Status}}' 2>/dev/null || echo "no-healthcheck")
+            
+            if [[ "$status" == "unhealthy" ]]; then
+                unhealthy_containers+=("$container")
+            elif [[ "$status" == "no-healthcheck" ]]; then
+                # Check if container is running
+                local state
+                state=$(docker inspect "$container" --format='{{.State.Status}}' 2>/dev/null || echo "unknown")
+                if [[ "$state" != "running" ]]; then
+                    stopped_containers+=("$container")
                 fi
-                ;;
-            "exited"|"dead"|"not_found")
-                stopped_services+=("$service")
-                check_fail "$service is not running"
-                ;;
-            *)
-                check_warn "$service in unexpected state: $status"
-                ;;
-        esac
+            fi
+        else
+            stopped_containers+=("$container")
+        fi
     done
-
-    # Return status based on issues found
-    if [[ ${#stopped_services[@]} -gt 0 ]]; then
-        return 2  # Critical - services stopped
-    elif [[ ${#unhealthy_services[@]} -gt 0 ]]; then
-        return 1  # Warning - services unhealthy
+    
+    if [[ ${#stopped_containers[@]} -gt 0 ]]; then
+        health_log_error "Stopped containers: ${stopped_containers[*]}"
+        HEALTH_RESULTS["containers"]="failed"
+        HEALTH_DETAILS["containers"]="Stopped: ${stopped_containers[*]}"
+    elif [[ ${#unhealthy_containers[@]} -gt 0 ]]; then
+        health_log_warn "Unhealthy containers: ${unhealthy_containers[*]}"
+        HEALTH_RESULTS["containers"]="degraded"
+        HEALTH_DETAILS["containers"]="Unhealthy: ${unhealthy_containers[*]}"
     else
-        return 0  # All good
+        health_log_success "All containers are running and healthy"
+        HEALTH_RESULTS["containers"]="healthy"
+        HEALTH_DETAILS["containers"]="All containers operational"
     fi
 }
 
-check_system_resources() {
-    [[ "$QUIET" != "true" ]] && log_info "Checking system resources..."
-
-    # Memory usage
-    if has_command free; then
-        local mem_percent
-        mem_percent=$(free | awk '/^Mem:/ {printf "%.0f", ($3/$2)*100}')
-
-        if [[ "$mem_percent" -lt 85 ]]; then
-            check_pass "Memory usage: ${mem_percent}%"
-        elif [[ "$mem_percent" -lt 95 ]]; then
-            check_warn "Memory usage high: ${mem_percent}%"
-        else
-            check_fail "Memory usage critical: ${mem_percent}%"
-        fi
-    fi
-
-    # Disk usage
-    local state_dir
-    state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
-    if [[ -d "$state_dir" ]]; then
-        local disk_percent
-        disk_percent=$(df -h "$state_dir" | awk 'NR==2{print $5}' | sed 's/%//')
-
-        if [[ "$disk_percent" -lt 85 ]]; then
-            check_pass "Disk usage: ${disk_percent}%"
-        elif [[ "$disk_percent" -lt 95 ]]; then
-            check_warn "Disk usage high: ${disk_percent}%"
-        else
-            check_fail "Disk usage critical: ${disk_percent}%"
-        fi
-    fi
-
-    return 0
-}
-
-# --- START User Suggestion: Backup Disk Space Check ---
-check_backup_space() {
-    [[ "$QUIET" != "true" ]] && log_info "Checking backup disk space..."
+check_service_accessibility() {
+    health_log_info "Checking service accessibility..."
     
-    local backup_dir="$PROJECT_ROOT/backups"
-    if [[ ! -d "$backup_dir" ]]; then
-        check_warn "Backup directory not found, skipping space check."
-        return
-    fi
+    # Load domain from .env
+    local domain
+    domain=$(get_config_value "DOMAIN" "")
     
-    local backup_usage
-    backup_usage=$(df "$backup_dir" | awk 'NR==2{print $5}' | sed 's/%//')
-    
-    if [[ "$backup_usage" -lt 85 ]]; then
-        check_pass "Backup disk usage: ${backup_usage}%"
-    elif [[ "$backup_usage" -lt 95 ]]; then
-        check_warn "Backup disk usage high: ${backup_usage}%"
-    else
-        check_fail "Backup disk usage critical: ${backup_usage}%"
-    fi
-}
-# --- END User Suggestion ---
-
-check_network_health() {
-    [[ "$QUIET" != "true" ]] && log_info "Checking network connectivity..."
-
-    # Internet connectivity
-    if test_connectivity; then
-        check_pass "Internet connectivity working"
-    else
-        check_fail "No internet connectivity"
+    if [[ -z "$domain" ]]; then
+        health_log_error "DOMAIN not configured in .env file"
+        HEALTH_RESULTS["accessibility"]="failed"
         return 1
     fi
+    
+    # Test local VaultWarden access
+    if curl -sf "http://localhost/alive" >/dev/null 2>&1; then
+        health_log_success "VaultWarden local access: OK"
+    else
+        health_log_error "VaultWarden local access: FAILED"
+        HEALTH_RESULTS["accessibility"]="failed"
+        return 1
+    fi
+    
+    # Test external web access
+    local clean_domain
+    clean_domain=$(echo "$domain" | sed 's|https\?://||; s|/.*$||')
+    
+    if curl -sf "https://$clean_domain" >/dev/null 2>&1; then
+        health_log_success "External web access: OK"
+        HEALTH_RESULTS["accessibility"]="healthy"
+        HEALTH_DETAILS["accessibility"]="All services accessible"
+    else
+        health_log_warn "External web access: FAILED (DNS/SSL issue)"
+        HEALTH_RESULTS["accessibility"]="degraded"
+        HEALTH_DETAILS["accessibility"]="External access issues"
+    fi
+}
 
-    # Domain connectivity (if configured)
+check_resource_usage() {
+    [[ "$COMPREHENSIVE" == "false" ]] && return 0
+    
+    health_log_info "Checking resource usage..."
+    
+    # CPU usage
+    local cpu_usage
+    cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1 | cut -d'u' -f1)
+    
+    # Memory usage
+    local mem_usage
+    mem_usage=$(free | grep Mem | awk '{printf "%.0f", $3/$2 * 100.0}')
+    
+    # Disk usage
+    local disk_usage
+    disk_usage=$(df "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}" | tail -1 | awk '{print $5}' | cut -d'%' -f1)
+    
+    local resource_issues=()
+    
+    if (( $(echo "$cpu_usage > $ALERT_THRESHOLD" | bc -l) )); then
+        resource_issues+=("CPU: ${cpu_usage}%")
+    fi
+    
+    if (( mem_usage > ALERT_THRESHOLD )); then
+        resource_issues+=("Memory: ${mem_usage}%")
+    fi
+    
+    if (( disk_usage > ALERT_THRESHOLD )); then
+        resource_issues+=("Disk: ${disk_usage}%")
+    fi
+    
+    if [[ ${#resource_issues[@]} -gt 0 ]]; then
+        health_log_warn "High resource usage: ${resource_issues[*]}"
+        HEALTH_RESULTS["resources"]="degraded"
+        HEALTH_DETAILS["resources"]="High usage: ${resource_issues[*]}"
+    else
+        health_log_success "Resource usage within normal limits"
+        HEALTH_RESULTS["resources"]="healthy"
+        HEALTH_DETAILS["resources"]="CPU: ${cpu_usage}%, Memory: ${mem_usage}%, Disk: ${disk_usage}%"
+    fi
+}
+
+check_storage_space() {
+    [[ "$COMPREHENSIVE" == "false" ]] && return 0
+    
+    health_log_info "Checking storage space..."
+    
+    local state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
+    local total_size usage_percent
+    
+    if [[ -d "$state_dir" ]]; then
+        read -r total_size usage_percent < <(df -h "$state_dir" | tail -1 | awk '{print $2, $5}' | tr -d '%')
+        
+        if (( usage_percent > ALERT_THRESHOLD )); then
+            health_log_warn "Storage usage high: ${usage_percent}% of ${total_size}"
+            HEALTH_RESULTS["storage"]="degraded"
+            HEALTH_DETAILS["storage"]="${usage_percent}% used of ${total_size}"
+        else
+            health_log_success "Storage usage normal: ${usage_percent}% of ${total_size}"
+            HEALTH_RESULTS["storage"]="healthy"
+            HEALTH_DETAILS["storage"]="${usage_percent}% used of ${total_size}"
+        fi
+    else
+        health_log_warn "Storage directory not found: $state_dir"
+        HEALTH_RESULTS["storage"]="degraded"
+        HEALTH_DETAILS["storage"]="Directory not found"
+    fi
+}
+
+check_configuration() {
+    [[ "$COMPREHENSIVE" == "false" ]] && return 0
+    
+    health_log_info "Checking configuration..."
+    
+    local config_issues=()
+    
+    # Check .env file
+    if [[ ! -f ".env" ]]; then
+        config_issues+=("Missing .env file")
+    else
+        # Check required variables
+        local required_vars=("DOMAIN" "ADMIN_EMAIL")
+        for var in "${required_vars[@]}"; do
+            if ! grep -q "^${var}=" .env; then
+                config_issues+=("Missing $var in .env")
+            fi
+        done
+    fi
+    
+    # Check secrets file
+    if [[ ! -f "secrets/secrets.yaml" ]]; then
+        config_issues+=("Missing secrets.yaml file")
+    elif ! ./edit-secrets.sh --test >/dev/null 2>&1; then
+        config_issues+=("Secrets decryption failed")
+    fi
+    
+    # Check Caddyfile syntax
+    if ! docker compose run --rm caddy caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1; then
+        config_issues+=("Caddy configuration syntax error")
+    fi
+    
+    if [[ ${#config_issues[@]} -gt 0 ]]; then
+        health_log_error "Configuration issues: ${config_issues[*]}"
+        HEALTH_RESULTS["configuration"]="failed"
+        HEALTH_DETAILS["configuration"]="Issues: ${config_issues[*]}"
+    else
+        health_log_success "Configuration validation passed"
+        HEALTH_RESULTS["configuration"]="healthy"
+        HEALTH_DETAILS["configuration"]="All configurations valid"
+    fi
+}
+
+check_security_status() {
+    [[ "$COMPREHENSIVE" == "false" ]] && return 0
+    
+    health_log_info "Checking security status..."
+    
+    local security_issues=()
+    
+    # Check file permissions on secrets
+    if [[ -d "secrets/.docker_secrets" ]]; then
+        local bad_perms
+        bad_perms=$(find secrets/.docker_secrets -type f ! -perm 600 2>/dev/null | wc -l)
+        if (( bad_perms > 0 )); then
+            security_issues+=("$bad_perms secret files with incorrect permissions")
+        fi
+    fi
+    
+    # Check if fail2ban is active
+    if ! docker compose exec fail2ban fail2ban-client status >/dev/null 2>&1; then
+        security_issues+=("fail2ban not responding")
+    fi
+    
+    # Check SSL certificate validity
     local domain
     domain=$(get_config_value "DOMAIN" "")
     if [[ -n "$domain" ]]; then
         local clean_domain
         clean_domain=$(echo "$domain" | sed 's|https\?://||; s|/.*$||')
-
-        # DNS resolution
-        if has_command getent && getent hosts "$clean_domain" >/dev/null 2>&1; then
-            check_pass "DNS resolution for $clean_domain"
-        else
-            check_fail "DNS resolution failed for $clean_domain"
-            return 1
-        fi
-
-        # HTTPS connectivity
-        if test_http "https://$clean_domain" 10; then
-            check_pass "HTTPS connectivity to $clean_domain"
-        else
-            check_warn "HTTPS connectivity failed to $clean_domain"
-        fi
-    fi
-
-    return 0
-}
-
-check_backup_health() {
-    [[ "$QUIET" != "true" ]] && log_info "Checking backup health..."
-
-    local backup_dir="$PROJECT_ROOT/backups"
-
-    if [[ ! -d "$backup_dir" ]]; then
-        check_warn "Backup directory not found: $backup_dir"
-        return 1
-    fi
-
-    # Check for recent backups
-    local recent_backups
-    recent_backups=$(find "$backup_dir" -name "*.age" -mtime -7 2>/dev/null | wc -l)
-
-    if [[ "$recent_backups" -gt 0 ]]; then
-        check_pass "Found $recent_backups recent backup(s)"
-    else
-        check_warn "No recent backups found (last 7 days)"
-    fi
-
-    return 0
-}
-
-check_secrets_health() {
-    [[ "$QUIET" != "true" ]] && log_info "Checking secrets health..."
-
-    # Check Age key
-    if check_age_key; then
-        check_pass "Age encryption key accessible and secure"
-    else
-        check_fail "Age encryption key missing or insecure"
-        return 1
-    fi
-
-    # Check secrets file
-    if [[ -f "secrets/secrets.yaml" ]]; then
-        if is_sops_encrypted "secrets/secrets.yaml"; then
-            check_pass "Secrets file encrypted with SOPS"
-
-            # Test decryption
-            if get_secret "admin_token" >/dev/null 2>&1; then
-                check_pass "Secrets decryption working"
-            else
-                check_fail "Cannot decrypt secrets file"
-                return 1
-            fi
-        else
-            check_fail "Secrets file exists but not encrypted"
-            return 1
-        fi
-    else
-        check_warn "Secrets file not found"
-    fi
-
-    return 0
-}
-
-# --- Auto-Healing Functions ---
-auto_heal_containers() {
-    log_info "Attempting to heal container issues..."
-
-    # Get list of services that need healing
-    local services=("vaultwarden" "caddy" "fail2ban" "ddclient")
-    local services_to_heal=()
-
-    for service in "${services[@]}"; do
-        if ! is_service_healthy "$service"; then
-            services_to_heal+=("$service")
-        fi
-    done
-
-    if [[ ${#services_to_heal[@]} -gt 0 ]]; then
-        log_info "Healing services: ${services_to_heal[*]}"
-
-        # Try restart first
-        if restart_services "${services_to_heal[@]}"; then
-            log_success "Services restarted successfully"
-            sleep 10  # Wait for services to initialize
-
-            # Check if healing worked
-            local still_unhealthy=()
-            for service in "${services_to_heal[@]}"; do
-                if ! wait_for_service_ready "$service" 30; then
-                    still_unhealthy+=("$service")
-                fi
-            done
-
-            if [[ ${#still_unhealthy[@]} -eq 0 ]]; then
-                return 0
-            else
-                log_warn "Restart failed for: ${still_unhealthy[*]}, trying recreate..."
-
-                # If restart failed, try full recreate
-                if recreate_services "${still_unhealthy[@]}"; then
-                    log_success "Services recreated successfully"
-                    sleep 15  # Longer wait after recreate
-                    return 0
-                else
-                    log_error "Auto-healing failed"
-                    return 1
-                fi
-            fi
-        else
-            log_error "Failed to restart services"
-            return 1
-        fi
-    else
-        log_info "No container healing needed"
-        return 0
-    fi
-}
-
-# --- Main Health Check ---
-run_health_checks() {
-    log_info "Running VaultWarden health checks..."
-    echo ""
-
-    # Load configuration
-    load_env_file 2>/dev/null || log_warn "No .env file found, using defaults"
-
-    # Core checks
-    check_docker_health || return 1
-    local container_status=0
-    check_container_health || container_status=$?
-
-    # Extended checks if requested
-    if [[ "$COMPREHENSIVE" == "true" ]]; then
-        check_system_resources
-        check_network_health
-        check_backup_health
-        check_secrets_health
-        check_backup_space # User Suggestion
-    fi
-
-    # Auto-heal if requested and issues found
-    if [[ "$AUTO_HEAL" == "true" && "$container_status" -gt 0 ]]; then
-        echo ""
-        auto_heal_containers
-        echo ""
-
-        # Re-check container health after healing
-        log_info "Re-checking container health after auto-heal..."
-        check_container_health || container_status=$?
-    fi
-
-    return "$container_status"
-}
-
-# --- Main Execution ---
-main() {
-    local exit_code=0
-
-    run_health_checks || exit_code=$?
-
-    echo ""
-    echo "Health Check Summary:"
-    echo "  Warnings: $WARNINGS"
-    echo "  Errors: $ERRORS"
-
-    if [[ "$ERRORS" -eq 0 ]]; then
-        if [[ "$WARNINGS" -eq 0 ]]; then
-            log_success "All health checks passed ✅"
-        else
-            log_warn "Health check completed with $WARNINGS warning(s) ⚠️"
-        fi
-    else
-        log_error "Health check failed with $ERRORS error(s) ❌"
-        echo ""
-        echo "Common fixes:"
-        echo "  - Run: ./startup.sh --force-restart"
-        echo "  - Check logs: docker compose logs <service>"
-        echo "  - Restart system: sudo systemctl restart docker"
         
-        # --- START P2: Send Email Alert ---
-        if [[ "$EMAIL_ALERT" == "true" ]]; then
-            log_info "Sending failure alert email..."
-            local email_subject="HEALTH CHECK FAILED"
-            local email_body="VaultWarden health check detected $ERRORS error(s).
-
-Errors:
-$ERROR_DETAILS
-Please review the system."
-            send_notification_email "$email_subject" "$email_body"
+        if ! echo | openssl s_client -servername "$clean_domain" -connect "$clean_domain:443" 2>/dev/null | openssl x509 -checkend 604800 -noout >/dev/null 2>&1; then
+            security_issues+=("SSL certificate expires within 7 days")
         fi
-        # --- END P2 ---
     fi
+    
+    if [[ ${#security_issues[@]} -gt 0 ]]; then
+        health_log_warn "Security issues found: ${security_issues[*]}"
+        HEALTH_RESULTS["security"]="degraded"
+        HEALTH_DETAILS["security"]="Issues: ${security_issues[*]}"
+    else
+        health_log_success "Security status good"
+        HEALTH_RESULTS["security"]="healthy"
+        HEALTH_DETAILS["security"]="All security checks passed"
+    fi
+}
 
-    exit "$exit_code"
+generate_report() {
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        generate_json_report
+    else
+        generate_text_report
+    fi
+}
+
+generate_text_report() {
+    local report=""
+    report+="VaultWarden-OCI-NG Health Report\n"
+    report+="Generated: $(date)\n"
+    report+="Overall Status: $OVERALL_STATUS\n\n"
+    
+    report+="Component Status:\n"
+    for component in "${!HEALTH_RESULTS[@]}"; do
+        local status="${HEALTH_RESULTS[$component]}"
+        local details="${HEALTH_DETAILS[$component]:-}"
+        
+        case $status in
+            "healthy") report+="  ✅ $component: $status" ;;
+            "degraded") report+="  ⚠️  $component: $status" ;;
+            "failed") report+="  ❌ $component: $status" ;;
+        esac
+        
+        [[ -n "$details" ]] && report+=" - $details"
+        report+="\n"
+    done
+    
+    if [[ ${#ISSUES_FOUND[@]} -gt 0 ]]; then
+        report+="\nIssues Found:\n"
+        for issue in "${ISSUES_FOUND[@]}"; do
+            report+="  • $issue\n"
+        done
+    fi
+    
+    if [[ -n "$OUTPUT_FILE" ]]; then
+        echo -e "$report" > "$OUTPUT_FILE"
+        health_log_info "Report saved to: $OUTPUT_FILE"
+    else
+        echo -e "$report"
+    fi
+}
+
+generate_json_report() {
+    local json_report="{
+  \"timestamp\": \"$(date -Iseconds)\",
+  \"overall_status\": \"$OVERALL_STATUS\",
+  \"components\": {"
+    
+    local first=true
+    for component in "${!HEALTH_RESULTS[@]}"; do
+        [[ "$first" == "true" ]] && first=false || json_report+=","
+        json_report+="
+    \"$component\": {
+      \"status\": \"${HEALTH_RESULTS[$component]}\",
+      \"details\": \"${HEALTH_DETAILS[$component]:-}\""
+        json_report+="
+    }"
+    done
+    
+    json_report+="
+  },
+  \"issues\": ["
+    
+    first=true
+    for issue in "${ISSUES_FOUND[@]}"; do
+        [[ "$first" == "true" ]] && first=false || json_report+=","
+        json_report+="
+    \"$issue\""
+    done
+    
+    json_report+="
+  ]
+}"
+    
+    if [[ -n "$OUTPUT_FILE" ]]; then
+        echo "$json_report" > "$OUTPUT_FILE"
+        health_log_info "JSON report saved to: $OUTPUT_FILE"
+    else
+        echo "$json_report"
+    fi
+}
+
+main() {
+    health_log_info "VaultWarden-OCI-NG Health Monitor"
+    
+    if [[ "$COMPREHENSIVE" == "true" ]]; then
+        health_log_info "Running comprehensive health checks..."
+    else
+        health_log_info "Running basic health checks..."
+    fi
+    
+    # Run health checks
+    check_container_status
+    check_service_accessibility
+    check_resource_usage
+    check_storage_space
+    check_configuration
+    check_security_status
+    
+    # Generate report
+    generate_report
+    
+    # Exit with appropriate code
+    if [[ "$OVERALL_STATUS" == "healthy" ]]; then
+        [[ "$QUIET" == "false" ]] && health_log_success "All health checks passed"
+        exit 0
+    else
+        [[ "$QUIET" == "false" ]] && health_log_error "Health check failures detected"
+        exit 1
+    fi
 }
 
 main "$@"
