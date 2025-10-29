@@ -3,7 +3,7 @@
 # Updated: admin_basic_auth_hash now uses Docker secrets consistently
 
 services:
-  # VaultWarden Password Manager
+      # VaultWarden Password Manager
   vaultwarden:
     image: vaultwarden/server:latest
     container_name: vaultwarden_app
