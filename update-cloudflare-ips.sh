@@ -1,142 +1,75 @@
 #!/usr/bin/env bash
 # update-cloudflare-ips.sh - Update Cloudflare IP ranges for Caddy and fail2ban
-
 set -euo pipefail
 
-# Paths relative to repo root (matches docker-compose volume mounts)
 CADDY_DIR="caddy"
 IPS_FILE="${CADDY_DIR}/cloudflare-ips.caddy"
 BACKUP_FILE="${CADDY_DIR}/cloudflare-ips.caddy.bak"
+CONTAINER="vaultwarden_caddy"
 
-# Container name from docker-compose.yml
-CADDY_CONTAINER="vaultwarden_caddy"
-CADDYFILE_PATH="/etc/caddy/Caddyfile"
-
-# Cloudflare IP sources
 CF_V4_URL="https://www.cloudflare.com/ips-v4"
 CF_V6_URL="https://www.cloudflare.com/ips-v6"
 
-# Temporary files
-TMP_DIR="$(mktemp -d)"
-TMP_V4="${TMP_DIR}/cf-v4.txt"
-TMP_V6="${TMP_DIR}/cf-v6.txt"
-TMP_OUT="${TMP_DIR}/cloudflare-ips.caddy"
-
-cleanup() {
-    rm -rf "${TMP_DIR}"
-}
-trap cleanup EXIT
-
 echo "[INFO] Fetching Cloudflare IP ranges..."
 
-# Download IP ranges
-if ! curl -fsSL --max-time 30 "${CF_V4_URL}" -o "${TMP_V4}"; then
-    echo "[ERROR] Failed to fetch Cloudflare IPv4 ranges. Aborting."
+# Fetch IP ranges directly into variables
+CF_V4=$(curl -fsSL --max-time 30 "${CF_V4_URL}")
+CF_V6=$(curl -fsSL --max-time 30 "${CF_V6_URL}")
+
+if [[ -z "$CF_V4" || -z "$CF_V6" ]]; then
+    echo "[ERROR] Failed to fetch Cloudflare IP ranges. Aborting."
     exit 1
 fi
 
-if ! curl -fsSL --max-time 30 "${CF_V6_URL}" -o "${TMP_V6}"; then
-    echo "[ERROR] Failed to fetch Cloudflare IPv6 ranges. Aborting."
-    exit 1
-fi
-
-# Basic validation
-if [[ ! -s "${TMP_V4}" || ! -s "${TMP_V6}" ]]; then
-    echo "[ERROR] Empty response from Cloudflare. Aborting."
-    exit 1
-fi
-
-# Sanity check: expect reasonable number of ranges
-if (( $(wc -l < "${TMP_V4}") < 5 )) || (( $(wc -l < "${TMP_V6}") < 3 )); then
+# Simple validation
+if (( $(echo "$CF_V4" | wc -l) < 5 )) || (( $(echo "$CF_V6" | wc -l) < 3 )); then
     echo "[ERROR] Cloudflare IP list appears incomplete. Aborting."
     exit 1
 fi
-
-# Build the named matcher file content
-{
-    echo "# Cloudflare IP ranges - Generated $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-    echo "# Sources: ${CF_V4_URL} ${CF_V6_URL}"
-    echo "# Do not edit manually; changes will be overwritten."
-    echo
-    echo "@cloudflare_ips {"
-    
-    # Add IPv4 ranges (multiple per line for readability)
-    echo -n "    remote_ip"
-    count=0
-    while IFS= read -r cidr; do
-        [[ -z "${cidr}" ]] && continue
-        (( count++ ))
-        if (( count > 12 )); then
-            echo
-            echo -n "    remote_ip"
-            count=1
-        fi
-        echo -n " ${cidr}"
-    done < "${TMP_V4}"
-    echo
-    
-    # Add IPv6 ranges (fewer per line due to length)
-    echo -n "    remote_ip"
-    count=0
-    while IFS= read -r cidr; do
-        [[ -z "${cidr}" ]] && continue
-        (( count++ ))
-        if (( count > 6 )); then
-            echo
-            echo -n "    remote_ip"
-            count=1
-        fi
-        echo -n " ${cidr}"
-    done < "${TMP_V6}"
-    echo
-    echo "}"
-} > "${TMP_OUT}"
 
 # Ensure directory exists
 mkdir -p "${CADDY_DIR}"
 
 # Backup existing file
 if [[ -f "${IPS_FILE}" ]]; then
-    cp "${IPS_FILE}" "${BACKUP_FILE}" || {
-        echo "[WARN] Failed to create backup"
-    }
+    cp "${IPS_FILE}" "${BACKUP_FILE}" || true
 fi
 
-# Atomic replacement
-mv "${TMP_OUT}" "${IPS_FILE}"
+# Create the new file content directly
+cat > "${IPS_FILE}" << 'IPEOF'
+# Cloudflare IP ranges - Generated $(date -u +'%Y-%m-%dT%H:%M:%SZ')
+# Sources: https://www.cloudflare.com/ips-v4 https://www.cloudflare.com/ips-v6
+# Do not edit manually; changes will be overwritten.
 
-total_ips=$(($(wc -l < "${TMP_V4}") + $(wc -l < "${TMP_V6}")))
+IPEOF
+
+# Add IPv4 ranges (combine into fewer lines)
+echo "remote_ip $CF_V4" | tr '\n' ' ' >> "${IPS_FILE}"
+echo >> "${IPS_FILE}"
+
+# Add IPv6 ranges  
+echo "remote_ip $CF_V6" | tr '\n' ' ' >> "${IPS_FILE}"
+echo >> "${IPS_FILE}"
+
+total_ips=$(($(echo "$CF_V4" | wc -l) + $(echo "$CF_V6" | wc -l)))
 echo "[INFO] Updated ${IPS_FILE} with ${total_ips} IP ranges"
 
-# Validate configuration inside running container
-echo "[INFO] Validating Caddy configuration..."
-if ! docker exec "${CADDY_CONTAINER}" caddy validate --config "${CADDYFILE_PATH}" >/dev/null 2>&1; then
-    echo "[ERROR] Caddy configuration validation failed. Restoring backup."
-    
-    # Restore backup if available
-    if [[ -f "${BACKUP_FILE}" ]]; then
-        mv "${BACKUP_FILE}" "${IPS_FILE}"
-        echo "[INFO] Previous configuration restored."
-        
-        # Verify backup works
-        if docker exec "${CADDY_CONTAINER}" caddy validate --config "${CADDYFILE_PATH}" >/dev/null 2>&1; then
-            echo "[INFO] Backup configuration is valid."
-        else
-            echo "[ERROR] Even backup configuration is invalid. Manual intervention required."
-        fi
+# Only validate and reload if container is running
+if docker ps --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
+    echo "[INFO] Validating Caddy configuration..."
+    if docker exec "${CONTAINER}" caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1; then
+        echo "[INFO] Reloading Caddy..."
+        docker exec "${CONTAINER}" caddy reload --config /etc/caddy/Caddyfile
+        echo "[SUCCESS] Cloudflare IP ranges updated and Caddy reloaded."
     else
-        echo "[ERROR] No backup available. Manual intervention required."
+        echo "[ERROR] Caddy configuration validation failed. Restoring backup."
+        if [[ -f "${BACKUP_FILE}" ]]; then
+            mv "${BACKUP_FILE}" "${IPS_FILE}"
+        fi
+        exit 1
     fi
-    exit 1
-fi
-
-# Reload Caddy with new configuration
-echo "[INFO] Reloading Caddy with updated IP ranges..."
-if docker exec "${CADDY_CONTAINER}" caddy reload --config "${CADDYFILE_PATH}"; then
-    echo "[SUCCESS] Cloudflare IP ranges updated and Caddy reloaded successfully."
 else
-    echo "[ERROR] Caddy reload failed. Service may be using old configuration."
-    exit 1
+    echo "[INFO] Caddy container not running. Configuration will be applied on next start."
 fi
 
 # Clean up backup on success
