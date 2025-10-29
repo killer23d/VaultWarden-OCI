@@ -86,7 +86,7 @@ services:
     image: caddy:${CADDY_VERSION:-latest}
     container_name: vaultwarden_caddy
     restart: unless-stopped
-    user: "${UID:-1000}:${GID:-1000}"
+    user: "${PUID:-1000}:${PGID:-1000}"
 
     environment:
       - DOMAIN=${DOMAIN}
@@ -194,7 +194,7 @@ services:
     image: lscr.io/linuxserver/ddclient:${DDCLIENT_VERSION:-latest}
     container_name: vaultwarden_ddclient
     restart: unless-stopped
-    user: "${UID:-1000}:${GID:-1000}"
+    user: "${PUID:-1000}:${PGID:-1000}"
 
     volumes:
       - ./ddclient/ddclient.conf:/etc/ddclient/ddclient.conf:ro
