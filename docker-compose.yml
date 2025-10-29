@@ -149,11 +149,16 @@ services:
     container_name: vaultwarden_ddclient
     restart: unless-stopped
     user: "${PUID:-1000}:${PGID:-1000}"
-
+    
     environment:
       PUID: "${PUID:-1000}"
       PGID: "${PGID:-1000}"
       TZ: "${TZ:-UTC}"
+      # Non-sensitive config from .env
+      CLOUDFLARE_ZONE_ID: "${CLOUDFLARE_ZONE_ID}"
+      DDCLIENT_HOSTNAME: "${DDCLIENT_HOSTNAME}"
+      # SECRET: Use FILE__ prefix to read from Docker secret
+      FILE__DDCLIENT_API_TOKEN: "/run/secrets/ddclient_api_token"
 
     volumes:
       - "./ddclient/ddclient.conf:/config/ddclient.conf:ro"
@@ -176,26 +181,25 @@ services:
 
   # Fail2Ban Intrusion Prevention
   fail2ban:
-    image: crazymax/fail2ban:latest
+     image: crazymax/fail2ban:latest
     container_name: vaultwarden_fail2ban
     restart: unless-stopped
-    user: "${PUID:-1000}:${PGID:-1000}"
-
+    
     environment:
       F2B_LOG_LEVEL: INFO
       F2B_LOG_TARGET: /data/fail2ban.log
       TZ: "${TZ:-UTC}"
+      # Non-sensitive config from .env
+      CLOUDFLARE_ZONE_ID: "${CLOUDFLARE_ZONE_ID}"
 
     volumes:
       # Configuration
       - "./fail2ban/jail.d:/etc/fail2ban/jail.d:ro"
       - "./fail2ban/filter.d:/etc/fail2ban/filter.d:ro"
       - "./fail2ban/action.d:/etc/fail2ban/action.d:ro"
-
+      
       # Data and logs
       - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/fail2ban:/data"
-
-      # Log monitoring
       - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy:/var/log/caddy:ro"
       - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/fail2ban:/var/log"
 
