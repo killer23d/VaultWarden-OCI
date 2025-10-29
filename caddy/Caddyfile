@@ -77,7 +77,12 @@
 
     # Block malicious user agents (FIXED SYNTAX)
     @malicious_ua {
-        header User-Agent "*sqlmap*" "*nikto*" "*nmap*" "*masscan*" "*zap*" "*burp*"
+        header User-Agent *sqlmap*
+        header User-Agent *nikto*
+        header User-Agent *nmap*
+        header User-Agent *masscan*
+        header User-Agent *zap*
+        header User-Agent *burp*
     }
 
     respond @malicious_ua 403 {
