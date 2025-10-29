@@ -41,7 +41,7 @@ endef
 
 .PHONY: help
 help: ## Display this help
-	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n"} /^[a-zA-Z_0-9-]+:.*?##/ { printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2 } /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
+	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n"} /^[a-zA-Z_0-9-]+:.*?##/ { printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2 } /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
 
 ##@ Basic Operations
 
@@ -131,10 +131,26 @@ edit-secrets: ## Edit encrypted secrets file
 	$(call log_info,"Opening secrets editor...")
 	@./edit-secrets.sh
 
+.PHONY: update-secrets
+update-secrets: ## Update secrets configuration
+	$(call log_info,"Updating secrets configuration...")
+	@./edit-secrets.sh
+
+.PHONY: init-secrets
+init-secrets: ## Initialize new secrets file
+	$(call log_info,"Initializing new secrets file...")
+	@./edit-secrets.sh --init
+
 .PHONY: test-secrets
 test-secrets: ## Test secrets decryption
 	$(call log_info,"Testing secrets decryption...")
 	@./edit-secrets.sh --test
+
+.PHONY: show-secrets
+show-secrets: ## Show decrypted secrets (DANGEROUS - use with caution)
+	$(call log_warn,"WARNING: This will display secrets in plain text!")
+	@read -p "Are you sure you want to continue? [y/N]: " confirm && [ "$$confirm" = "y" ] || exit 1
+	@./edit-secrets.sh --show
 
 .PHONY: strict-start
 strict-start: ## Start with strict secrets validation (production mode)
@@ -193,6 +209,20 @@ test-caddy-syntax: ## Test Caddy configuration syntax
 	@docker compose run --rm caddy caddy validate --config /etc/caddy/Caddyfile || \
 		$(call log_error,"Caddy configuration has syntax errors")
 
+.PHONY: debug-secrets
+debug-secrets: ## Debug secrets file issues
+	$(call log_info,"Debugging secrets configuration...")
+	@echo "=== Checking secrets files ==="
+	@ls -la secrets/ || echo "No secrets directory"
+	@if [ -d "secrets/.docker_secrets" ]; then \
+		echo "=== Docker secrets files ==="; \
+		ls -la secrets/.docker_secrets/; \
+	else \
+		echo "No docker secrets directory found"; \
+	fi
+	@echo "=== Testing secrets decryption ==="
+	@./edit-secrets.sh --test || echo "Secrets decryption failed"
+
 ##@ Development
 
 .PHONY: dev-start
@@ -246,6 +276,23 @@ env-info: ## Show current environment information
 	@echo "Group ID: $(PGID)"
 	@echo "Timezone: $(TZ)"
 
+##@ Automation
+
+.PHONY: install-cron
+install-cron: ## Install automated maintenance cron jobs
+	$(call log_info,"Installing automated maintenance tasks...")
+	@./cron-setup.sh --install
+
+.PHONY: remove-cron
+remove-cron: ## Remove automated maintenance cron jobs
+	$(call log_info,"Removing automated maintenance tasks...")
+	@./cron-setup.sh --remove
+
+.PHONY: show-cron
+show-cron: ## Show currently installed cron jobs
+	$(call log_info,"Currently installed cron jobs:")
+	@crontab -l 2>/dev/null | grep -E "(VaultWarden-OCI|$(shell pwd))" || echo "No VaultWarden cron jobs found"
+
 ##@ Quick Actions
 
 .PHONY: quick-restart
@@ -257,8 +304,16 @@ full-reset: emergency-cleanup update-cf-ips up ## Full system reset with updates
 .PHONY: production-start
 production-start: env-check update-cf-ips strict-start ## Production-ready startup
 
-# Aliases for common typos
-.PHONY: satrt start stats stat log
+.PHONY: first-time-setup
+first-time-setup: env-check init-secrets install-cron up ## Complete first-time setup
+
+# Aliases for common typos and variations
+.PHONY: satrt start stats stat log secrets
 satrt start: up
 stats stat: status  
 log: logs
+secrets: edit-secrets
+
+# Compatibility aliases
+.PHONY: update-secrets-file edit-secrets-file
+update-secrets-file edit-secrets-file: edit-secrets
