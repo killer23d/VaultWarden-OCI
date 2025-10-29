@@ -11,21 +11,50 @@ PROJECT_ROOT="$SCRIPT_DIR"
 
 # --- Enhanced Cleanup Function ---
 cleanup_secrets() {
-    local cleanup_reason="${1:-unknown}"
-
-    # Only clean up on successful completion or explicit stop
-    if [[ "${STARTUP_SUCCESS:-false}" == "true" || "$cleanup_reason" == "stop" ]]; then
+    local exit_code=${?:-0}
+    local cleanup_reason="${1:-exit}"
+    
+    # Only clean up on successful completion (exit code 0) or explicit --down
+    if [[ $exit_code -eq 0 && "${STARTUP_SUCCESS:-false}" == "true" ]] || [[ "$cleanup_reason" == "stop" ]]; then
         rm -rf "$PROJECT_ROOT/secrets/.docker_secrets" 2>/dev/null || true
-        log_debug "Cleaned up temporary secret files"
+        log_debug "Cleaned up temporary secret files (successful completion)"
     else
-        log_debug "Keeping secret files for debugging (startup failed or interrupted)"
         if [[ -d "$PROJECT_ROOT/secrets/.docker_secrets" ]]; then
-            log_info "Debug: Secret files preserved in secrets/.docker_secrets/"
+            log_info "Preserving secret files for debugging (exit code: $exit_code)"
+            log_info "  Location: secrets/.docker_secrets/"
+            log_info "  Clean up manually with: sudo rm -rf secrets/.docker_secrets/"
         fi
     fi
 }
 
-# Set up trap with enhanced cleanup
+# --- Fix Secrets Ownership Function ---
+fix_secrets_ownership() {
+    local docker_secrets_dir="secrets/.docker_secrets"
+    local current_user
+    current_user=$(whoami)
+    
+    if [[ -d "$docker_secrets_dir" ]]; then
+        # Check if directory is owned by current user
+        local owner
+        owner=$(stat -c '%U' "$docker_secrets_dir" 2>/dev/null || echo "unknown")
+        
+        if [[ "$owner" != "$current_user" ]]; then
+            log_warn "Fixing ownership of secrets directory (currently owned by $owner)"
+            
+            if [[ "$owner" == "root" ]] && [[ "$current_user" != "root" ]]; then
+                # Need sudo to fix root-owned files
+                if sudo chown -R "$current_user:$(id -gn)" "$docker_secrets_dir" 2>/dev/null; then
+                    log_success "Fixed secrets directory ownership"
+                else
+                    log_warn "Could not fix ownership, recreating directory"
+                    sudo rm -rf "$docker_secrets_dir" 2>/dev/null || true
+                fi
+            fi
+        fi
+    fi
+}
+
+# Set trap to pass exit code
 trap 'cleanup_secrets "error"' ERR
 trap 'cleanup_secrets "interrupt"' HUP INT TERM
 trap 'cleanup_secrets "exit"' EXIT
@@ -46,7 +75,7 @@ FORCE_RESTART=false
 DRY_RUN=false
 SKIP_HEALTH=false
 STOP_MODE=false
-STRICT_SECRETS=false  # NEW: Strict mode for production
+STRICT_SECRETS=false
 STARTUP_SUCCESS=false
 
 # --- Help ---
@@ -58,12 +87,12 @@ USAGE:
     ./startup.sh [OPTIONS]
 
 OPTIONS:
-    --help             Show this help
-    --force-restart    Stop and recreate all containers (REQUIRED after secrets changes)
-    --dry-run          Show what would be done without executing
-    --skip-health      Skip post-startup health check
-    --down             Stop and remove all containers
-    --strict-secrets   Fail immediately if critical secrets are missing (production mode)
+    --help              Show this help
+    --force-restart     Stop and recreate all containers (REQUIRED after secrets changes)
+    --dry-run           Show what would be done without executing
+    --skip-health       Skip post-startup health check
+    --down              Stop and remove all containers
+    --strict-secrets    Fail immediately if critical secrets are missing (production mode)
 
 EXAMPLES:
     ./startup.sh                    # Normal startup
@@ -85,16 +114,20 @@ while [[ $# -gt 0 ]]; do
         --dry-run) DRY_RUN=true; shift ;;
         --skip-health) SKIP_HEALTH=true; shift ;;
         --down) STOP_MODE=true; shift ;;
-        --strict-secrets) STRICT_SECRETS=true; shift ;;  # NEW: Strict mode
+        --strict-secrets) STRICT_SECRETS=true; shift ;;
         *) log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done
 
-# --- ENHANCED: Prepare Docker Secrets ---
+# --- FIXED: Prepare Docker Secrets ---
 prepare_docker_secrets() {
     log_info "Preparing Docker secrets..."
 
     local docker_secrets_dir="secrets/.docker_secrets"
+    
+    # Fix ownership if needed before attempting operations
+    fix_secrets_ownership
+    
     rm -rf "$docker_secrets_dir"
     mkdir -p "$docker_secrets_dir"
 
@@ -137,10 +170,10 @@ prepare_docker_secrets() {
     local secrets_needing_files=("admin_token" "smtp_password" "push_installation_id" "push_installation_key" "ddclient_api_token" "fail2ban_api_token")
     # FIXED: Only admin_basic_auth_hash is environment-only
     local critical_env_secrets=("admin_basic_auth_hash")
-    # ENHANCED: Define which file secrets are critical vs optional
+    # Define which file secrets are critical vs optional
     local critical_file_secrets=("admin_token" "ddclient_api_token" "fail2ban_api_token")
     local optional_file_secrets=("smtp_password" "push_installation_id" "push_installation_key")
-
+    
     local secret_file_path
     local missing_critical=()
     local placeholder_critical=()
@@ -175,8 +208,8 @@ prepare_docker_secrets() {
                 log_debug "Created empty file for optional secret: $secret"
             fi
         fi
-
-        # ENHANCED: Check secure_file return code
+        
+        # Check secure_file return code
         if ! secure_file "$secret_file_path" 600; then
             log_error "Failed to set secure permissions on secret file: $secret_file_path"
             return 1
@@ -188,13 +221,13 @@ prepare_docker_secrets() {
         local value
         value=$(echo "$decrypted_json" | jq -r --arg secret "$secret" '.[$secret] // "CHANGE_ME"')
         if [[ -z "$value" ]] || [[ "$value" == "CHANGE_ME"* ]] || [[ "$value" == "null" ]]; then
-            missing_critical+=("$secret")
+             missing_critical+=("$secret")
         fi
     done
 
-    # ENHANCED: Strict mode handling
+    # Strict mode handling
     local total_critical_issues=$((${#missing_critical[@]} + ${#placeholder_critical[@]}))
-
+    
     if [[ $total_critical_issues -gt 0 ]]; then
         if [[ "$STRICT_SECRETS" == "true" ]]; then
             log_error "STRICT MODE: Critical secrets validation failed"
@@ -234,7 +267,7 @@ prepare_environment_variables() {
     echo "$decrypted_json" | jq . > /dev/null 2>&1 || {
         log_error "Decrypted secrets content for env vars is not valid JSON."
         return 1
-    }
+    fi
 
     # Export environment variables that containers need
     local admin_basic_auth_hash
@@ -256,7 +289,7 @@ prepare_environment_variables() {
     return 0
 }
 
-# --- ENHANCED: Post-Startup Health Check ---
+# --- Post-Startup Health Check ---
 post_startup_health_check() {
     if [[ "$SKIP_HEALTH" == "true" || "$DRY_RUN" == "true" ]]; then
         log_info "Skipping health check"
@@ -279,21 +312,21 @@ post_startup_health_check() {
     # Check non-critical services
     local other_services=("fail2ban" "ddclient")
     local unhealthy_other=()
-    for service in "${other_services[@]}"; do
+     for service in "${other_services[@]}"; do
         if ! wait_for_service_ready "$service" 30; then
             unhealthy_other+=("$service")
         fi
     done
 
-    # ENHANCED: More detailed health check results
+    # More detailed health check results
     if [[ ${#failed_services[@]} -eq 0 ]]; then
         log_success "All critical services are running and healthy"
-
+        
         if [[ ${#unhealthy_other[@]} -gt 0 ]]; then
             log_warn "Non-critical services with issues: ${unhealthy_other[*]}"
             log_info "System functional but some features may not work"
         fi
-
+        
         local domain
         domain=$(get_config_value "DOMAIN" "")
         if [[ -n "$domain" ]] && has_command curl; then
@@ -371,18 +404,17 @@ main() {
         fi
     fi
 
-    # ENHANCED: Better health check handling
+    # Better health check handling
     local health_check_failed=false
     if ! post_startup_health_check; then
         health_check_failed=true
-        # Error message logged within post_startup_health_check
     fi
 
     # Final status determination
     local domain
     domain=$(get_config_value "DOMAIN")
 
-    # ENHANCED: Clearer final status messaging
+    # Clearer final status messaging
     if [[ "$health_check_failed" == "true" ]]; then
         log_error "🚨 STARTUP COMPLETED WITH CRITICAL ISSUES"
         echo ""
@@ -395,29 +427,29 @@ main() {
         echo "  3. Try restarting: make restart"
         echo "  4. Check system health: make health"
         echo ""
-        exit 1 # Exit with error code if critical services failed health check
+        exit 1
     else
         # Mark successful startup
         STARTUP_SUCCESS=true
-
+        
         log_success "🎉 VaultWarden-OCI-NG startup completed successfully"
-
-        # Check final service status (even if health checks passed, good to confirm)
+        
+        # Check final service status
         local all_running=true
         for service in vaultwarden caddy fail2ban ddclient; do
-            if ! is_service_running "$service"; then
-                all_running=false
-                log_warn "Service $service is not running."
-            fi
+          if ! is_service_running "$service"; then
+            all_running=false
+            log_warn "Service $service is not running."
+          fi
         done
 
         echo ""
         if [[ "$all_running" == "true" ]]; then
-            echo "✅ All services are running and appear healthy!"
+            echo "✅ All services are running and healthy!"
             echo "🌐 Web interface: https://$domain"
             echo "⚙️  Admin panel: https://$domain/admin"
         else
-            echo "⚠️  Some services may have issues. Check logs for details."
+             echo "⚠️  Some services may have issues. Check logs for details."
         fi
 
         echo ""
@@ -429,7 +461,7 @@ main() {
         echo ""
         echo "IMPORTANT NOTES:"
         echo "  • After editing secrets, always use: make restart"
-        echo "  • For production, consider using: ./startup.sh --strict-secrets"
+        echo "  • For production, consider: ./startup.sh --strict-secrets"
     fi
 }
 
