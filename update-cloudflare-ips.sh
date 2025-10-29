@@ -12,65 +12,66 @@ CF_V6_URL="https://www.cloudflare.com/ips-v6"
 
 echo "[INFO] Fetching Cloudflare IP ranges..."
 
-# Fetch IP ranges directly into variables
-CF_V4=$(curl -fsSL --max-time 30 "${CF_V4_URL}")
-CF_V6=$(curl -fsSL --max-time 30 "${CF_V6_URL}")
+# Create temp directory
+TMP_DIR="$(mktemp -d)"
+trap "rm -rf ${TMP_DIR}" EXIT
 
-if [[ -z "$CF_V4" || -z "$CF_V6" ]]; then
+# Fetch IP ranges
+curl -fsSL --max-time 30 "${CF_V4_URL}" > "${TMP_DIR}/cf-v4.txt"
+curl -fsSL --max-time 30 "${CF_V6_URL}" > "${TMP_DIR}/cf-v6.txt"
+
+# Validation
+if [[ ! -s "${TMP_DIR}/cf-v4.txt" || ! -s "${TMP_DIR}/cf-v6.txt" ]]; then
     echo "[ERROR] Failed to fetch Cloudflare IP ranges. Aborting."
     exit 1
 fi
 
-# Simple validation
-if (( $(echo "$CF_V4" | wc -l) < 5 )) || (( $(echo "$CF_V6" | wc -l) < 3 )); then
+if (( $(wc -l < "${TMP_DIR}/cf-v4.txt") < 5 )) || (( $(wc -l < "${TMP_DIR}/cf-v6.txt") < 3 )); then
     echo "[ERROR] Cloudflare IP list appears incomplete. Aborting."
     exit 1
 fi
 
-# Ensure directory exists
+# Create directory and backup
 mkdir -p "${CADDY_DIR}"
+[[ -f "${IPS_FILE}" ]] && cp "${IPS_FILE}" "${BACKUP_FILE}"
 
-# Backup existing file
-if [[ -f "${IPS_FILE}" ]]; then
-    cp "${IPS_FILE}" "${BACKUP_FILE}" || true
-fi
+# Generate the named matcher file using reliable method
+{
+    echo "# Cloudflare IP ranges - Generated $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+    echo "# Sources: ${CF_V4_URL} ${CF_V6_URL}"
+    echo "# This snippet defines @cloudflare_ips matcher"
+    echo
+    echo "@cloudflare_ips {"
 
-# Create the new file content directly
-cat > "${IPS_FILE}" << 'IPEOF'
-# Cloudflare IP ranges - Generated $(date -u +'%Y-%m-%dT%H:%M:%SZ')
-# Sources: https://www.cloudflare.com/ips-v4 https://www.cloudflare.com/ips-v6
-# Do not edit manually; changes will be overwritten.
+    # IPv4 ranges - use tr to convert newlines to spaces, then clean up
+    echo -n "    remote_ip "
+    tr '\n' ' ' < "${TMP_DIR}/cf-v4.txt" | sed 's/[[:space:]]*$//'
+    echo
 
-IPEOF
+    # IPv6 ranges - same approach
+    echo -n "    remote_ip "
+    tr '\n' ' ' < "${TMP_DIR}/cf-v6.txt" | sed 's/[[:space:]]*$//'
+    echo
 
-# Add IPv4 ranges (combine into fewer lines)
-echo "remote_ip $CF_V4" | tr '\n' ' ' >> "${IPS_FILE}"
-echo >> "${IPS_FILE}"
+    echo "}"
+} > "${IPS_FILE}"
 
-# Add IPv6 ranges  
-echo "remote_ip $CF_V6" | tr '\n' ' ' >> "${IPS_FILE}"
-echo >> "${IPS_FILE}"
-
-total_ips=$(($(echo "$CF_V4" | wc -l) + $(echo "$CF_V6" | wc -l)))
+total_ips=$(($(wc -l < "${TMP_DIR}/cf-v4.txt") + $(wc -l < "${TMP_DIR}/cf-v6.txt")))
 echo "[INFO] Updated ${IPS_FILE} with ${total_ips} IP ranges"
 
-# Only validate and reload if container is running
+# Validate and reload if container is running
 if docker ps --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
     echo "[INFO] Validating Caddy configuration..."
     if docker exec "${CONTAINER}" caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1; then
         echo "[INFO] Reloading Caddy..."
         docker exec "${CONTAINER}" caddy reload --config /etc/caddy/Caddyfile
         echo "[SUCCESS] Cloudflare IP ranges updated and Caddy reloaded."
+        rm -f "${BACKUP_FILE}"
     else
         echo "[ERROR] Caddy configuration validation failed. Restoring backup."
-        if [[ -f "${BACKUP_FILE}" ]]; then
-            mv "${BACKUP_FILE}" "${IPS_FILE}"
-        fi
+        [[ -f "${BACKUP_FILE}" ]] && mv "${BACKUP_FILE}" "${IPS_FILE}"
         exit 1
     fi
 else
     echo "[INFO] Caddy container not running. Configuration will be applied on next start."
 fi
-
-# Clean up backup on success
-rm -f "${BACKUP_FILE}"
