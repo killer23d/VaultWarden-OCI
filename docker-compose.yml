@@ -16,7 +16,7 @@ services:
       ROCKET_ADDRESS: 0.0.0.0
       
       # Database
-      DATABASE_URL: "sqlite:///data/db.sqlite3"
+      # DATABASE_URL: "sqlite:///data/db.sqlite3"
       
       # Admin Configuration
       ADMIN_TOKEN_FILE: "/run/secrets/admin_token"
