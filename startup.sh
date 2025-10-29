@@ -267,7 +267,7 @@ prepare_environment_variables() {
     echo "$decrypted_json" | jq . > /dev/null 2>&1 || {
         log_error "Decrypted secrets content for env vars is not valid JSON."
         return 1
-    fi
+    }
 
     # Export environment variables that containers need
     local admin_basic_auth_hash
@@ -312,7 +312,7 @@ post_startup_health_check() {
     # Check non-critical services
     local other_services=("fail2ban" "ddclient")
     local unhealthy_other=()
-     for service in "${other_services[@]}"; do
+    for service in "${other_services[@]}"; do
         if ! wait_for_service_ready "$service" 30; then
             unhealthy_other+=("$service")
         fi
@@ -437,10 +437,10 @@ main() {
         # Check final service status
         local all_running=true
         for service in vaultwarden caddy fail2ban ddclient; do
-          if ! is_service_running "$service"; then
-            all_running=false
-            log_warn "Service $service is not running."
-          fi
+            if ! is_service_running "$service"; then
+                all_running=false
+                log_warn "Service $service is not running."
+            fi
         done
 
         echo ""
@@ -449,7 +449,7 @@ main() {
             echo "🌐 Web interface: https://$domain"
             echo "⚙️  Admin panel: https://$domain/admin"
         else
-             echo "⚠️  Some services may have issues. Check logs for details."
+            echo "⚠️  Some services may have issues. Check logs for details."
         fi
 
         echo ""
