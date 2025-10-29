@@ -164,7 +164,7 @@ services:
       FILE__DDCLIENT_API_TOKEN: "/run/secrets/ddclient_api_token"
 
     volumes:
-      - "./ddclient/ddclient.conf:/config/ddclient.conf:ro"
+      - "./ddclient/ddclient.conf:/config/ddclient.conf"
       - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/ddclient:/config/data"
 
     secrets:
