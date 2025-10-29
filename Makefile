@@ -1,219 +1,264 @@
-# Makefile for VaultWarden-OCI-Simplified - Quality of Life Shortcuts
+# VaultWarden-OCI-NG Makefile
+# Enhanced with permission fixes, cleanup tools, and Cloudflare IP management
 
-# Default Variables (Can be overridden: make logs SERVICE=caddy)
-SERVICE ?= vaultwarden
-LINES ?= 100
-IP ?= "ENTER_IP_ADDRESS"
-VERSION ?= "ENTER_VERSION"
+# Default target
+.DEFAULT_GOAL := help
 
-# Phony targets to prevent conflicts with filenames
-.PHONY: help up down restart logs logs-follow health backup-db backup-full backup-emergency list-backups restore maint-standard maint-deep db-maint update-containers update-system update-ips update-ips-force update-ips-check check-updates check-system-updates config-check configure-rclone status pins pin unpin edit-secrets unban breakglass-create breakglass-password breakglass-status
+# Variables
+COMPOSE_FILE := docker-compose.yml
+ENV_FILE := .env
+PROJECT_NAME := vaultwarden
 
-help:
-	@echo "VaultWarden-OCI-Simplified Makefile"
-	@echo ""
-	@echo "Usage: make <target> [VARIABLE=value]"
-	@echo ""
-	@echo "Common Targets:"
-	@echo "  up             - Start services (./startup.sh)"
-	@echo "  down           - Stop services (./startup.sh --down)"
-	@echo "  restart        - Force restart services (./startup.sh --force-restart)"
-	@echo "  logs           - Show recent logs for a service (Default: vaultwarden)"
-	@echo "                   Usage: make logs [SERVICE=caddy] [LINES=200]"
-	@echo "  logs-follow    - Follow logs for a service (Default: vaultwarden)"
-	@echo "                   Usage: make logs-follow [SERVICE=fail2ban]"
-	@echo "  health         - Run comprehensive health check (./health.sh --comprehensive)"
-	@echo "  status         - Show quick system status overview"
-	@echo "  config-check   - Validate docker-compose configuration syntax"
-	@echo ""
-	@echo "Backup & Restore:"
-	@echo "  backup-db      - Create database backup (./backup.sh --type db)"
-	@echo "  backup-full    - Create full system backup (./backup.sh --type full)"
-	@echo "  backup-emergency - Create emergency kit (./backup.sh --type emergency)"
-	@echo "  list-backups   - List available local backups (./backup.sh --list)"
-	@echo "  restore        - Start interactive restore from backup (./restore.sh --interactive)"
-	@echo "  configure-rclone - Interactively configure rclone for remote backups"
-	@echo ""
-	@echo "Updates & Maintenance:"
-	@echo "  check-updates       - Check for available container updates (no changes)"
-	@echo "  check-system-updates- Check for available system package updates (no changes) (Requires sudo)"
-	@echo "  update-containers - Update container images (./update.sh --type containers)"
-	@echo "  update-system     - Update system packages (sudo ./update.sh --type system) (Requires sudo)"
-	@echo "  maint-standard    - Run standard maintenance (sudo ./maintenance.sh --type standard) (Requires sudo)"
-	@echo "  maint-deep        - Run deep maintenance (sudo ./maintenance.sh --type deep) (Requires sudo)"
-	@echo "  db-maint          - Run database maintenance (sudo ./db-maint.sh) (Requires sudo)"
-	@echo ""
-	@echo "Cloudflare IP Management (Caddy Only):"
-	@echo "  update-ips        - Update Cloudflare IPs in Caddy config (./update-cloudflare-ips.sh)"
-	@echo "  update-ips-force  - Force update Cloudflare IPs (./update-cloudflare-ips.sh --force)"
-	@echo "  update-ips-check  - Preview Cloudflare IP changes (./update-cloudflare-ips.sh --dry-run)"
-	@echo ""
-	@echo "Version Management:"
-	@echo "  pins           - Show currently pinned versions (./update.sh --show-pins)"
-	@echo "  pin            - Pin a service version (Requires SERVICE and VERSION)"
-	@echo "                   Usage: make pin SERVICE=vaultwarden VERSION=1.31.0"
-	@echo "  unpin          - Unpin a service version (Requires SERVICE)"
-	@echo "                   Usage: make unpin SERVICE=caddy"
-	@echo ""
-	@echo "Configuration & Security:"
-	@echo "  edit-secrets   - Edit encrypted secrets (./edit-secrets.sh)"
-	@echo "  unban          - Unban an IP address in Fail2ban (Requires IP)"
-	@echo "                   Usage: make unban IP=1.2.3.4"
-	@echo ""
-	@echo "Emergency Access (Break-Glass Admin):"
-	@echo "  breakglass-create    - Create/Update break-glass admin (sudo ./create-breakglass-admin.sh create) (Requires sudo)"
-	@echo "  breakglass-password  - Set password for break-glass admin (sudo ./create-breakglass-admin.sh password) (Requires sudo)"
-	@echo "  breakglass-status    - Check status of break-glass admin (sudo ./create-breakglass-admin.sh status) (Requires sudo)"
-	@echo ""
+# Load environment variables
+include $(ENV_FILE)
+export
 
+# Colors for output
+RED := \033[0;31m
+GREEN := \033[0;32m
+YELLOW := \033[0;33m
+BLUE := \033[0;34m
+NC := \033[0m # No Color
 
-# --- Service Lifecycle ---
-up:
-	./startup.sh
+# Helper function to print colored output
+define log_info
+	@echo "$(BLUE)[INFO]$(NC) $(1)"
+endef
 
-down:
-	./startup.sh --down
+define log_success
+	@echo "$(GREEN)[SUCCESS]$(NC) $(1)"
+endef
 
-restart:
-	./startup.sh --force-restart
+define log_warn
+	@echo "$(YELLOW)[WARN]$(NC) $(1)"
+endef
 
-# --- Monitoring & Status ---
-logs:
-	@echo "Showing last $(LINES) lines for $(SERVICE)... (Use Ctrl+C to stop)"
-	docker compose logs --tail=$(LINES) $(SERVICE)
+define log_error
+	@echo "$(RED)[ERROR]$(NC) $(1)"
+endef
 
-logs-follow:
-	@echo "Following logs for $(SERVICE)... (Use Ctrl+C to stop)"
-	docker compose logs -f $(SERVICE)
+##@ Help
 
-health:
-	./health.sh --comprehensive
+.PHONY: help
+help: ## Display this help
+	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n"} /^[a-zA-Z_0-9-]+:.*?##/ { printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2 } /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
 
-status:
-	@echo "--- System Status Overview ---"
-	@echo "Services:"
+##@ Basic Operations
+
+.PHONY: up
+up: ## Start all services
+	$(call log_info,"Starting VaultWarden-OCI-NG services...")
+	@./startup.sh
+
+.PHONY: down
+down: ## Stop all services
+	$(call log_info,"Stopping VaultWarden-OCI-NG services...")
+	@./startup.sh --down
+
+.PHONY: restart
+restart: ## Force restart all services (required after secrets changes)
+	$(call log_info,"Force restarting all services...")
+	@./startup.sh --force-restart
+
+.PHONY: status
+status: ## Show container status
+	$(call log_info,"Checking container status...")
 	@docker compose ps
-	@echo "\nResources:"
-	@df -h / /var/lib/vaultwarden ./backups 2>/dev/null | grep -v Filesystem || echo "  Resource paths may not exist yet."
-	@free -h | grep Mem || true
-	@echo "\nPinned Versions:"
-	@./update.sh --show-pins | grep -v "Currently pinned" | grep -v "default to" || echo "  (None - using latest)"
-	@echo "\nRecent Backups (Top 3):"
-	@./backup.sh --list 2>/dev/null | grep '\.age' | head -n 3 || echo "  No recent backups found."
-	@echo "\nFail2ban Status (vaultwarden-admin jail):"
-	@docker compose exec fail2ban fail2ban-client status vaultwarden-admin 2>/dev/null | grep -E "Status|Currently banned" || echo "  Fail2ban jail 'vaultwarden-admin' status unavailable."
-	@echo "------------------------------"
 
+##@ Health and Monitoring
 
-# --- Backups & Restore ---
-backup-db:
-	./backup.sh --type db
+.PHONY: health
+health: ## Run comprehensive health check
+	$(call log_info,"Running comprehensive health check...")
+	@./health.sh --comprehensive
 
-backup-full:
-	./backup.sh --type full
-
-backup-emergency:
-	./backup.sh --type emergency
-
-list-backups:
-	./backup.sh --list
-
-restore:
-	./restore.sh --interactive
-
-# --- Updates & Maintenance ---
-check-updates:
-	./update.sh --type containers --check-only
-
-check-system-updates:
-	sudo ./update.sh --type system --check-only
-
-update-containers:
-	./update.sh --type containers --backup # Always backup before container updates via make
-
-update-system:
-	sudo ./update.sh --type system
-
-# Cloudflare IP Updates (Simplified)
-update-ips:
-	@echo "Updating Cloudflare IPs in Caddy config file..."
-	./update-cloudflare-ips.sh
-
-update-ips-force:
-	@echo "Forcing update of Cloudflare IPs in Caddy config file..."
-	./update-cloudflare-ips.sh --force
-
-update-ips-check:
-	@echo "Checking Cloudflare IP changes (dry run)..."
-	./update-cloudflare-ips.sh --dry-run
-
-# Maintenance
-maint-standard:
-	sudo ./maintenance.sh --type standard --force
-
-maint-deep:
-	sudo ./maintenance.sh --type deep --force
-
-db-maint:
-	sudo ./db-maint.sh --force
-
-# --- Version Management ---
-pins:
-	./update.sh --show-pins
-
-pin:
+.PHONY: logs
+logs: ## Show logs for a specific service (Usage: make logs SERVICE=vaultwarden)
 ifndef SERVICE
-	$(error SERVICE is not set. Usage: make pin SERVICE=<service_name> VERSION=<version>)
+	$(call log_error,"SERVICE parameter required. Usage: make logs SERVICE=vaultwarden")
+	@exit 1
 endif
-ifndef VERSION
-	$(error VERSION is not set. Usage: make pin SERVICE=<service_name> VERSION=<version>)
-endif
-	./update.sh --pin $(SERVICE) $(VERSION)
+	@docker compose logs --follow --tail=${LINES:-50} $(SERVICE)
 
-unpin:
+.PHONY: logs-all
+logs-all: ## Show logs for all services
+	$(call log_info,"Showing logs for all services...")
+	@docker compose logs --follow --tail=${LINES:-50}
+
+.PHONY: monitor
+monitor: ## Monitor system resources and container stats
+	$(call log_info,"Monitoring system resources...")
+	@echo "=== Container Stats ==="
+	@docker compose top
+	@echo -e "\n=== Resource Usage ==="
+	@docker stats --no-stream --format "table {{.Container}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}"
+
+##@ Maintenance
+
+.PHONY: update
+update: ## Update container images and restart services
+	$(call log_info,"Updating container images...")
+	@docker compose pull
+	$(call log_success,"Images updated. Restarting services...")
+	@make restart
+
+.PHONY: cleanup
+cleanup: ## Clean up unused Docker resources
+	$(call log_info,"Cleaning up unused Docker resources...")
+	@docker system prune -f
+	@docker volume prune -f
+	$(call log_success,"Docker cleanup completed")
+
+.PHONY: backup
+backup: ## Create backup of important data
+	$(call log_info,"Creating backup...")
+	@./backup.sh --create
+	$(call log_success,"Backup completed")
+
+.PHONY: restore
+restore: ## Restore from backup (Usage: make restore BACKUP_FILE=path/to/backup.tar.gz)
+ifndef BACKUP_FILE
+	$(call log_error,"BACKUP_FILE parameter required. Usage: make restore BACKUP_FILE=path/to/backup.tar.gz")
+	@exit 1
+endif
+	$(call log_info,"Restoring from backup: $(BACKUP_FILE)")
+	@./backup.sh --restore $(BACKUP_FILE)
+
+##@ Security and Configuration
+
+.PHONY: edit-secrets
+edit-secrets: ## Edit encrypted secrets file
+	$(call log_info,"Opening secrets editor...")
+	@./edit-secrets.sh
+
+.PHONY: test-secrets
+test-secrets: ## Test secrets decryption
+	$(call log_info,"Testing secrets decryption...")
+	@./edit-secrets.sh --test
+
+.PHONY: strict-start
+strict-start: ## Start with strict secrets validation (production mode)
+	$(call log_info,"Starting with strict secrets validation...")
+	@./startup.sh --strict-secrets
+
+.PHONY: update-cf-ips
+update-cf-ips: ## Update Cloudflare IP ranges
+	$(call log_info,"Updating Cloudflare IP ranges...")
+	@./update-cloudflare-ips.sh
+
+.PHONY: update-cf-ips-force
+update-cf-ips-force: ## Force update Cloudflare IP ranges
+	$(call log_info,"Force updating Cloudflare IP ranges...")
+	@./update-cloudflare-ips.sh --force
+
+##@ Troubleshooting
+
+.PHONY: fix-permissions
+fix-permissions: ## Fix ownership and permission issues
+	$(call log_warn,"Fixing file permissions and ownership...")
+	@if [ -d "secrets/.docker_secrets" ]; then \
+		sudo chown -R $(shell whoami):$(shell id -gn) secrets/.docker_secrets/ 2>/dev/null || true; \
+		$(call log_success,"Fixed secrets directory ownership"); \
+	fi
+	@sudo chown -R $(shell whoami):$(shell id -gn) . 2>/dev/null || $(call log_warn,"Some files may still be root-owned")
+	$(call log_success,"Permission fix completed")
+
+.PHONY: clean-secrets
+clean-secrets: ## Remove docker secrets directory (forces recreation on next start)
+	$(call log_warn,"Removing docker secrets directory...")
+	@sudo rm -rf secrets/.docker_secrets/
+	$(call log_success,"Secrets directory cleaned. Next startup will recreate files.")
+
+.PHONY: emergency-cleanup
+emergency-cleanup: ## Emergency cleanup of all temporary files and containers
+	$(call log_warn,"Emergency cleanup of all temporary files...")
+	@sudo rm -rf secrets/.docker_secrets/ || true
+	@docker compose down --volumes --remove-orphans || true
+	@docker system prune -f || true
+	$(call log_success,"Emergency cleanup completed. Use 'make up' to restart fresh.")
+
+.PHONY: debug-mounts
+debug-mounts: ## Debug volume mount issues
+	$(call log_info,"Debugging volume mounts...")
+	@echo "=== Checking local files ==="
+	@ls -la caddy/
+	@echo -e "\n=== Checking container mounts ==="
+	@docker compose config | grep -A5 -B5 volumes || true
+	@echo -e "\n=== Testing file access ==="
+	@docker compose run --rm caddy ls -la /etc/caddy/ || $(call log_warn,"Caddy not accessible")
+
+.PHONY: test-caddy-syntax
+test-caddy-syntax: ## Test Caddy configuration syntax
+	$(call log_info,"Testing Caddy configuration syntax...")
+	@docker compose run --rm caddy caddy validate --config /etc/caddy/Caddyfile || \
+		$(call log_error,"Caddy configuration has syntax errors")
+
+##@ Development
+
+.PHONY: dev-start
+dev-start: ## Start in development mode with verbose logging
+	$(call log_info,"Starting in development mode...")
+	@DEBUG=1 ./startup.sh --skip-health
+
+.PHONY: shell
+shell: ## Get shell access to a container (Usage: make shell SERVICE=vaultwarden)
 ifndef SERVICE
-	$(error SERVICE is not set. Usage: make unpin SERVICE=<service_name>)
+	$(call log_error,"SERVICE parameter required. Usage: make shell SERVICE=vaultwarden")
+	@exit 1
 endif
-	./update.sh --unpin $(SERVICE)
+	$(call log_info,"Opening shell in $(SERVICE) container...")
+	@docker compose exec $(SERVICE) /bin/sh || docker compose exec $(SERVICE) /bin/bash
 
-# --- Configuration & Security ---
-edit-secrets:
-	./edit-secrets.sh
+.PHONY: dry-run
+dry-run: ## Show what startup would do without executing
+	$(call log_info,"Running startup in dry-run mode...")
+	@./startup.sh --dry-run
 
-unban:
-ifndef IP
-	$(error IP is not set. Usage: make unban IP=<ip_address>)
-endif
-	@echo "Attempting to unban IP $(IP) in Fail2ban jails..."
-	docker compose exec fail2ban fail2ban-client set vaultwarden-admin unbanip $(IP) || echo "  IP $(IP) not found or already unbanned in vaultwarden-admin jail."
-	docker compose exec fail2ban fail2ban-client set vaultwarden-api unbanip $(IP) || echo "  IP $(IP) not found or already unbanned in vaultwarden-api jail."
-	docker compose exec fail2ban fail2ban-client set caddy-botsearch unbanip $(IP) || echo "  IP $(IP) not found or already unbanned in caddy-botsearch jail."
-	@echo "Unban attempt finished for IP $(IP)."
+##@ Environment
 
-config-check:
-	@echo "Validating docker-compose configuration..."
-	@if docker compose config --quiet; then \
-		echo "Docker configuration syntax appears OK."; \
-	else \
-		echo "ERROR: Docker configuration validation failed!"; \
-		docker compose config; \
+.PHONY: env-check
+env-check: ## Validate environment configuration
+	$(call log_info,"Checking environment configuration...")
+	@if [ ! -f "$(ENV_FILE)" ]; then \
+		$(call log_error,"Environment file $(ENV_FILE) not found"); \
 		exit 1; \
 	fi
+	@echo "✓ Environment file exists"
+	@if [ -z "$(DOMAIN)" ]; then \
+		$(call log_error,"DOMAIN not set in $(ENV_FILE)"); \
+		exit 1; \
+	fi
+	@echo "✓ DOMAIN is set: $(DOMAIN)"
+	@if [ -z "$(ADMIN_EMAIL)" ]; then \
+		$(call log_error,"ADMIN_EMAIL not set in $(ENV_FILE)"); \
+		exit 1; \
+	fi
+	@echo "✓ ADMIN_EMAIL is set: $(ADMIN_EMAIL)"
+	$(call log_success,"Environment configuration is valid")
 
-configure-rclone:
-	@echo "Starting interactive rclone configuration..."
-	rclone config
-	@echo ""
-	@echo "IMPORTANT: After configuring your remote, update the RCLONE_REMOTE_NAME"
-	@echo "           variable in your .env file to match the name you chose."
-	@grep '^RCLONE_REMOTE_NAME=' .env || echo "(Variable not found in .env yet)"
+.PHONY: env-info
+env-info: ## Show current environment information
+	$(call log_info,"Current environment information:")
+	@echo "Domain: $(DOMAIN)"
+	@echo "Admin Email: $(ADMIN_EMAIL)"
+	@echo "Project State Directory: $(PROJECT_STATE_DIR)"
+	@echo "User ID: $(PUID)"
+	@echo "Group ID: $(PGID)"
+	@echo "Timezone: $(TZ)"
 
-# --- Emergency Access ---
-breakglass-create:
-	sudo ./create-breakglass-admin.sh create
+##@ Quick Actions
 
-breakglass-password:
-	sudo ./create-breakglass-admin.sh password
+.PHONY: quick-restart
+quick-restart: fix-permissions clean-secrets up ## Quick troubleshooting restart
 
-breakglass-status:
-	sudo ./create-breakglass-admin.sh status
+.PHONY: full-reset
+full-reset: emergency-cleanup update-cf-ips up ## Full system reset with updates
+
+.PHONY: production-start
+production-start: env-check update-cf-ips strict-start ## Production-ready startup
+
+# Aliases for common typos
+.PHONY: satrt start stats stat log
+satrt start: up
+stats stat: status  
+log: logs
