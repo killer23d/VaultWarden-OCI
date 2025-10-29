@@ -1,5 +1,6 @@
 # Caddyfile for VaultWarden-OCI-NG
 # Modern Caddy v2 with dynamic Cloudflare IPs
+# Updated: admin_basic_auth_hash now uses Docker secrets
 
 {
     servers {
@@ -12,7 +13,7 @@
 {$DOMAIN} {
     # Import dynamic Cloudflare IPs inside the site block
     import cloudflare-ips.caddy
-    
+
     # Access logging
     log {
         output file /logs/access.log {
@@ -34,13 +35,13 @@
         -X-Powered-By
     }
 
-    # Admin panel protection (FIXED: use basic_auth and proper file path)
+    # Admin panel protection (FIXED: Docker secrets path)
     @admin {
         path /admin*
     }
-    
+
     basic_auth @admin {
-        admin {file./admin_basic_auth_hash}
+        admin {file./run/secrets/admin_basic_auth_hash}
     }
 
     # Block common attack paths
@@ -50,7 +51,7 @@
     }
     respond @blocked 404
 
-    # Block malicious user agents (FIXED: separate matchers)
+    # Block malicious user agents
     @malicious_ua1 {
         header User-Agent *sqlmap*
     }
@@ -73,7 +74,7 @@
     # WebSocket proxy for VaultWarden notifications
     reverse_proxy /notifications/hub* vaultwarden_app:3012
 
-    # Main HTTP reverse proxy (FIXED: removed redundant header_up)
+    # Main HTTP reverse proxy
     reverse_proxy vaultwarden_app:80 {
         header_up X-Real-IP {http.request.header.CF-Connecting-IP}
         header_up X-Forwarded-For {http.request.header.CF-Connecting-IP}
