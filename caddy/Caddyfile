@@ -3,36 +3,25 @@
 
 {
     servers {
-        # Trust private ranges and use CF headers for client IP
         trusted_proxies static private_ranges
         client_ip_headers X-Forwarded-For CF-Connecting-IP
         trusted_proxies_strict
     }
 }
 
-# Import dynamic Cloudflare IP matcher (updated by script)
-import cloudflare-ips.caddy
-
 {$DOMAIN} {
-    # Access logging with real client IP
+    # Define Cloudflare matcher with imported IPs
+    @cloudflare_ips {
+        import cloudflare-ips.caddy
+    }
+
+    # Access logging
     log {
         output file /logs/access.log {
             roll_size 10MB
             roll_keep 5
-            roll_keep_for 24h
         }
-        format json {
-            time_format "2006-01-02T15:04:05Z07:00"
-            fields {
-                request>remote_ip @
-                request>method @
-                request>uri @
-                request>headers>User-Agent >user_agent
-                response>status @
-                response>size @
-                latency @
-            }
-        }
+        format json
     }
 
     # Security headers
@@ -47,7 +36,7 @@ import cloudflare-ips.caddy
         -X-Powered-By
     }
 
-    # Admin panel protection (FIXED: basicauth not basic_auth)
+    # Admin panel protection
     @admin {
         path /admin*
     }
@@ -58,7 +47,7 @@ import cloudflare-ips.caddy
 
     # Block common attack paths
     @blocked {
-        path /.env* /config* /.git* /.htaccess* /wp-admin* /wp-login* /phpMyAdmin* /admin.php* /.well-known/security.txt
+        path /.env* /config* /.git* /.htaccess* /wp-admin* /wp-login* /phpMyAdmin* /admin.php*
         path *.php *.asp *.jsp *.cgi
     }
     respond @blocked 404 {
@@ -73,39 +62,27 @@ import cloudflare-ips.caddy
         body "Forbidden"
     }
 
-    # Optional: Enforce Cloudflare-only access (uncomment if desired)
-    # @non_cloudflare {
-    #     not remote_ip @cloudflare_ips
-    # }
-    # respond @non_cloudflare 403 {
-    #     body "Access denied: Direct access not allowed"
-    # }
-
     # CRITICAL FIX: WebSocket proxy for VaultWarden notifications
     reverse_proxy /notifications/hub* vaultwarden_app:3012
 
-    # Main HTTP reverse proxy (FIXED: container name vaultwarden_app)
+    # Main HTTP reverse proxy
     reverse_proxy vaultwarden_app:80 {
-        # Preserve real client IP from Cloudflare
         header_up X-Real-IP {http.request.header.CF-Connecting-IP}
         header_up X-Forwarded-For {http.request.header.CF-Connecting-IP}
         header_up X-Forwarded-Proto {scheme}
         header_up Host {host}
 
-        # Health monitoring
         health_uri /alive
         health_interval 30s
         health_timeout 10s
         health_status 200
 
-        # Connection optimization
         transport http {
             keepalive 30s
             keepalive_idle_conns 10
             compression off
         }
 
-        # Handle large uploads (attachments)
         flush_interval -1
     }
 }
@@ -118,7 +95,7 @@ www.{$DOMAIN} {
     redir https://{$DOMAIN}{uri} 301
 }
 
-# Security catch-all for other subdomains or IPs
+# Security catch-all
 :80, :443 {
     log {
         output file /logs/blocked.log
