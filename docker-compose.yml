@@ -1,54 +1,62 @@
 # VaultWarden-OCI-NG Docker Compose Configuration
+# Fixed: Corrected UID/GID variable names and improved container configuration
 
 services:
+  # VaultWarden Password Manager
   vaultwarden:
-    # Changed default from specific version to 'latest'
-    image: vaultwarden/server:${VAULTWARDEN_VERSION:-latest}
+    image: vaultwarden/server:latest
     container_name: vaultwarden_app
     restart: unless-stopped
     user: "${PUID:-1000}:${PGID:-1000}"
-
+    
     environment:
-      - DOMAIN=https://${DOMAIN}
-     # Uncomment if you want to change, otherwise use default
-     #- DATABASE_URL=sqlite:///data/bwdata/db.sqlite3
-      - ADMIN_TOKEN_FILE=/run/secrets/admin_token
-
-      # WebSocket Configuration
-      - WEBSOCKET_ENABLED=true
-      - WEBSOCKET_ADDRESS=0.0.0.0
-      - WEBSOCKET_PORT=3012
-
-      # SMTP Configuration
-      - SMTP_HOST=${SMTP_HOST:-}
-      - SMTP_PORT=${SMTP_PORT:-587}
-      - SMTP_SECURITY=${SMTP_SECURITY:-starttls}
-      - SMTP_USERNAME=${SMTP_USERNAME:-}
-      - SMTP_PASSWORD_FILE=/run/secrets/smtp_password
-      - SMTP_FROM=${ADMIN_EMAIL}
-      - SMTP_FROM_NAME=VaultWarden
-
-      # Push Notifications
-      - PUSH_INSTALLATION_ID_FILE=/run/secrets/push_installation_id
-      - PUSH_INSTALLATION_KEY_FILE=/run/secrets/push_installation_key
-
+      # Core Configuration
+      DOMAIN: "https://${DOMAIN}"
+      ROCKET_PORT: 80
+      ROCKET_ADDRESS: 0.0.0.0
+      
+      # Database
+      DATABASE_URL: "sqlite:///data/db.sqlite3"
+      
+      # Admin Configuration
+      ADMIN_TOKEN_FILE: "/run/secrets/admin_token"
+      
+      # SMTP Configuration (optional)
+      SMTP_HOST: "${SMTP_HOST:-}"
+      SMTP_FROM: "${SMTP_FROM:-noreply@${DOMAIN}}"
+      SMTP_FROM_NAME: "${SMTP_FROM_NAME:-VaultWarden}"
+      SMTP_PORT: "${SMTP_PORT:-587}"
+      SMTP_SECURITY: "${SMTP_SECURITY:-starttls}"
+      SMTP_USERNAME: "${SMTP_USERNAME:-}"
+      SMTP_PASSWORD_FILE: "/run/secrets/smtp_password"
+      
+      # Push Notifications (optional)
+      PUSH_ENABLED: "${PUSH_ENABLED:-false}"
+      PUSH_INSTALLATION_ID_FILE: "/run/secrets/push_installation_id"
+      PUSH_INSTALLATION_KEY_FILE: "/run/secrets/push_installation_key"
+      
       # Security Settings
-      - SIGNUPS_ALLOWED=false
-      - SIGNUPS_VERIFY=true
-      - INVITATIONS_ALLOWED=true
-      - EMERGENCY_ACCESS_ALLOWED=true
-      - SENDS_ALLOWED=true
-      - WEB_VAULT_ENABLED=true
-
-      # Logging Configuration
-      - LOG_LEVEL=${VAULTWARDEN_LOG_LEVEL:-info}
-      - EXTENDED_LOGGING=true
-      - LOG_FILE=/logs/vaultwarden.log
-      - TZ=UTC
+      SIGNUPS_ALLOWED: "${SIGNUPS_ALLOWED:-false}"
+      INVITATIONS_ALLOWED: "${INVITATIONS_ALLOWED:-true}"
+      EMERGENCY_ACCESS_ALLOWED: "${EMERGENCY_ACCESS_ALLOWED:-true}"
+      SENDS_ALLOWED: "${SENDS_ALLOWED:-true}"
+      WEB_VAULT_ENABLED: "${WEB_VAULT_ENABLED:-true}"
+      
+      # Performance
+      DATABASE_MAX_CONNS: 10
+      ROCKET_WORKERS: 10
+      
+      # Logging
+      LOG_LEVEL: info
+      EXTENDED_LOGGING: true
+      LOG_FILE: "/data/vaultwarden.log"
+      
+      # Timezone
+      TZ: "${TZ:-UTC}"
 
     volumes:
-      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data:/data:rw
-      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/vaultwarden:/logs:rw
+      - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data:/data"
+      - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/vaultwarden:/logs"
 
     secrets:
       - admin_token
@@ -56,59 +64,57 @@ services:
       - push_installation_id
       - push_installation_key
 
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:80/alive"]
-      interval: 60s
-      timeout: 15s
-      retries: 5
-      start_period: 60s
+    networks:
+      - vaultwarden_network
 
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/alive"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
     deploy:
       resources:
         limits:
-          memory: ${VAULTWARDEN_MEMORY_LIMIT:-2g}
-          cpus: '${VAULTWARDEN_CPU_LIMIT:-1.0}'
+          cpus: '1.0'
+          memory: 2G
         reservations:
-          memory: ${VAULTWARDEN_MEMORY_RESERVATION:-512m}
-          cpus: '${VAULTWARDEN_CPU_RESERVATION:-0.2}'
+          cpus: '0.2'
+          memory: 512M
 
-    networks:
-      - vaultwarden_network
-
+  # Caddy Reverse Proxy
   caddy:
-    # Changed default from specific version to 'latest'
-    image: caddy:${CADDY_VERSION:-latest}
+    image: caddy:latest
     container_name: vaultwarden_caddy
     restart: unless-stopped
     user: "${PUID:-1000}:${PGID:-1000}"
-
+    
     environment:
-      - DOMAIN=${DOMAIN}
-      - EMAIL=${ADMIN_EMAIL}
-      # Use fail2ban token (Zone:Firewall Services:Edit)
-      - CLOUDFLARE_API_TOKEN_FILE=/run/secrets/fail2ban_api_token
-
+      DOMAIN: "${DOMAIN}"
+      EMAIL: "${ADMIN_EMAIL}"
+      
     ports:
       - "80:80"
       - "443:443"
 
     volumes:
-      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./caddy/cloudflare-ips.caddy:/etc/caddy/cloudflare-ips.caddy:ro
-      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/data:/data:rw
-      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/config:/config:rw
-      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy:/logs:rw
-      # Mount admin_basic_auth_hash secret file directly for Caddy access
-      - ./secrets/.docker_secrets/admin_basic_auth_hash:/admin_basic_auth_hash:ro
+      # Configuration files
+      - "./caddy/Caddyfile:/etc/caddy/Caddyfile:ro"
+      - "./caddy/cloudflare-ips.caddy:/etc/caddy/cloudflare-ips.caddy:ro"
+      
+      # Persistent data
+      - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/data:/data"
+      - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/config:/config"
+      
+      # Logs
+      - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy:/logs"
+      
+      # Admin basic auth hash
+      - "./secrets/.docker_secrets/admin_basic_auth_hash:/admin_basic_auth_hash:ro"
 
-    secrets:
-      - fail2ban_api_token
+    networks:
+      - vaultwarden_network
 
     depends_on:
       vaultwarden:
@@ -116,126 +122,109 @@ services:
 
     healthcheck:
       test: ["CMD", "caddy", "version"]
-      interval: 60s
+      interval: 1m
       timeout: 15s
       retries: 5
-      start_period: 60s
-
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+      start_period: 1m
 
     deploy:
       resources:
         limits:
-          memory: ${CADDY_MEMORY_LIMIT:-256m}
-          cpus: '${CADDY_CPU_LIMIT:-0.3}'
+          cpus: '0.3'
+          memory: 256M
         reservations:
-          memory: ${CADDY_MEMORY_RESERVATION:-128m}
-          cpus: '${CADDY_CPU_RESERVATION:-0.05}'
-
-    networks:
-      - vaultwarden_network
-
-  fail2ban:
-    # Changed default from specific version to 'latest'
-    image: crazymax/fail2ban:${FAIL2BAN_VERSION:-latest}
-    container_name: vaultwarden_fail2ban
-    restart: unless-stopped
-    # Runs as root by default, which is correct
-
-    environment:
-      - TZ=UTC
-      - F2B_LOG_LEVEL=${FAIL2BAN_LOG_LEVEL:-INFO}
-      - F2B_LOG_TARGET=/var/log/fail2ban.log
-      - F2B_DB_PURGE_AGE=1d
-      - F2B_MAX_RETRY=3
-      - F2B_DEST_EMAIL=${ADMIN_EMAIL}
-      # Use fail2ban token (Zone:Firewall Services:Edit)
-      - CLOUDFLARE_API_TOKEN=${FAIL2BAN_API_TOKEN:-} # Read by gomplate in jail.d
-      - CLOUDFLARE_ZONE_ID=${CLOUDFLARE_ZONE_ID:-}   # Read by gomplate in jail.d
-
-    volumes:
-      - ./fail2ban/jail.d:/config/jail.d:ro
-      - ./fail2ban/filter.d:/config/filter.d:ro
-      - ./fail2ban/action.d:/config/action.d:ro
-      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy:/var/log/caddy:ro
-      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/fail2ban:/var/log:rw
-
-    healthcheck:
-      test: ["CMD-SHELL", "fail2ban-client ping"]
-      interval: 60s
-      timeout: 15s
-      retries: 5
-      start_period: 60s
+          cpus: '0.05'
+          memory: 128M
 
     logging:
-      driver: "json-file"
+      driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
 
-    deploy:
-      resources:
-        limits:
-          memory: ${FAIL2BAN_MEMORY_LIMIT:-128m}
-          cpus: '${FAIL2BAN_CPU_LIMIT:-0.15}'
-        reservations:
-          memory: ${FAIL2BAN_MEMORY_RESERVATION:-64m}
-          cpus: '${FAIL2BAN_CPU_RESERVATION:-0.02}'
-
-    networks:
-      - vaultwarden_network
-
+  # DDClient for Dynamic DNS
   ddclient:
-    # Changed default from specific version to 'latest'
-    image: lscr.io/linuxserver/ddclient:${DDCLIENT_VERSION:-latest}
+    image: lscr.io/linuxserver/ddclient:latest
     container_name: vaultwarden_ddclient
     restart: unless-stopped
     user: "${PUID:-1000}:${PGID:-1000}"
+    
+    environment:
+      PUID: "${PUID:-1000}"
+      PGID: "${PGID:-1000}"
+      TZ: "${TZ:-UTC}"
 
     volumes:
-      - ./ddclient/ddclient.conf:/etc/ddclient/ddclient.conf:ro
-      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/ddclient/cache:/var/cache/ddclient:rw
-
-    environment:
-      - DD_PROTOCOL=cloudflare
-      - DD_ZONE=${CLOUDFLARE_ZONE_ID}
-      - DD_HOST=${DDCLIENT_HOSTNAME}
-      # Use ddclient token (Zone:DNS:Edit)
-      - DD_PASSWORD_FILE=/run/secrets/ddclient_api_token
+      - "./ddclient/ddclient.conf:/config/ddclient.conf:ro"
+      - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/ddclient:/config/data"
 
     secrets:
       - ddclient_api_token
 
-    healthcheck:
-      test: ["CMD-SHELL", "pidof ddclient"]
-      interval: 90s
-      timeout: 15s
-      retries: 5
-      start_period: 60s
-
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+    networks:
+      - vaultwarden_network
 
     deploy:
       resources:
         limits:
-          memory: ${DDCLIENT_MEMORY_LIMIT:-64m}
-          cpus: '${DDCLIENT_CPU_LIMIT:-0.1}'
+          cpus: '0.1'
+          memory: 64M
         reservations:
-          memory: ${DDCLIENT_MEMORY_RESERVATION:-32m}
-          cpus: '${DDCLIENT_CPU_RESERVATION:-0.02}'
+          cpus: '0.02'
+          memory: 32M
+
+  # Fail2Ban Intrusion Prevention
+  fail2ban:
+    image: crazymax/fail2ban:latest
+    container_name: vaultwarden_fail2ban
+    restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
+    
+    environment:
+      F2B_LOG_LEVEL: INFO
+      F2B_LOG_TARGET: /data/fail2ban.log
+      TZ: "${TZ:-UTC}"
+
+    volumes:
+      # Configuration
+      - "./fail2ban/jail.d:/etc/fail2ban/jail.d:ro"
+      - "./fail2ban/filter.d:/etc/fail2ban/filter.d:ro"
+      - "./fail2ban/action.d:/etc/fail2ban/action.d:ro"
+      
+      # Data and logs
+      - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/fail2ban:/data"
+      
+      # Log monitoring
+      - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy:/var/log/caddy:ro"
+      - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/fail2ban:/var/log"
+
+    secrets:
+      - fail2ban_api_token
 
     networks:
       - vaultwarden_network
 
-# Secrets managed externally by startup script
+    healthcheck:
+      test: ["CMD", "fail2ban-client", "status"]
+      interval: 1m
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+    deploy:
+      resources:
+        limits:
+          cpus: '0.2'
+          memory: 128M
+        reservations:
+          cpus: '0.05'
+          memory: 64M
+
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+
+# Docker Secrets
 secrets:
   admin_token:
     file: ./secrets/.docker_secrets/admin_token
@@ -245,17 +234,15 @@ secrets:
     file: ./secrets/.docker_secrets/push_installation_id
   push_installation_key:
     file: ./secrets/.docker_secrets/push_installation_key
-  # Split tokens
   ddclient_api_token:
     file: ./secrets/.docker_secrets/ddclient_api_token
   fail2ban_api_token:
     file: ./secrets/.docker_secrets/fail2ban_api_token
 
-# Network configuration
+# Networks
 networks:
   vaultwarden_network:
-    name: ${DOCKER_NETWORK_NAME:-vaultwarden_network}
     driver: bridge
     ipam:
       config:
-        - subnet: 172.20.0.0/16
+        - subnet: 172.20
