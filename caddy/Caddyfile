@@ -1,134 +1,29 @@
-# Caddyfile for VaultWarden-OCI-NG
-# Final: Import Cloudflare IPs and use forwarded directive properly
+# Cloudflare IP ranges for request filtering  
+# Updated automatically by update-cloudflare-ips.sh. Do not edit manually.
+# Last updated: 2025-10-28 22:18:00 UTC
 
-# Import Cloudflare IP ranges matcher (defines @cloudflare)
-import cloudflare-ips.caddy
+# Cloudflare IPv4 ranges - Updated automatically
+remote_ip 103.21.244.0/22
+remote_ip 103.22.200.0/22
+remote_ip 103.31.4.0/22
+remote_ip 104.16.0.0/13
+remote_ip 104.24.0.0/14
+remote_ip 108.162.192.0/18
+remote_ip 131.0.72.0/22
+remote_ip 141.101.64.0/18
+remote_ip 162.158.0.0/15
+remote_ip 172.64.0.0/13
+remote_ip 173.245.48.0/20
+remote_ip 188.114.96.0/20
+remote_ip 190.93.240.0/20
+remote_ip 197.234.240.0/22
+remote_ip 198.41.128.0/17
 
-{$DOMAIN} {
-    # Configure trusted proxy handling for Cloudflare IPs
-    # This tells Caddy to trust proxy headers ONLY from @cloudflare IPs
-    forwarded @cloudflare {
-        header CF-Connecting-IP
-        header X-Forwarded-For
-    }
-
-    # Access logging with real client IP (now properly extracted)
-    log {
-        output file /logs/access.log {
-            roll_size 10MB
-            roll_keep 5
-            roll_keep_for 24h
-        }
-        format json {
-            time_format "2006-01-02T15:04:05Z07:00"
-            fields {
-                request>remote_ip @    # Real client IP via forwarded directive
-                request>method @
-                request>uri @
-                request>headers>User-Agent >user_agent
-                response>status @
-                response>size @
-                latency @
-            }
-        }
-    }
-
-    # Security headers
-    header {
-        # HTTPS Security
-        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-
-        # Content Security
-        X-Content-Type-Options "nosniff"
-        X-Frame-Options "DENY"
-        X-XSS-Protection "1; mode=block"
-        Referrer-Policy "strict-origin-when-cross-origin"
-
-        # Content Security Policy (VaultWarden optimized)
-        Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: https:; frame-src 'self'; object-src 'none'; base-uri 'self';"
-
-        # Remove server identification
-        -Server
-        -X-Powered-By
-    }
-
-    # Admin panel protection
-    @admin {
-        path /admin*
-    }
-    # Basic auth for admin
-    basic_auth @admin {
-        admin {env.ADMIN_BASIC_AUTH_HASH}
-    }
-
-    # Optional: Strict Cloudflare-only enforcement (uncomment to enable)
-    @non_cloudflare {
-        not remote_ip @cloudflare
-    }
-    # Uncomment the following lines for strict Cloudflare-only access
-    # respond @non_cloudflare 403 {
-    #     body "Access denied: Direct access not allowed"
-    # }
-
-    # Block common attack paths and scanners
-    @blocked {
-        path /.env* /config* /.git* /.htaccess* /wp-admin* /wp-login* /phpMyAdmin* /admin.php* /.well-known/security.txt
-        path *.php *.asp *.jsp *.cgi
-    }
-    respond @blocked 404 {
-        body "Not Found"
-    }
-
-    # Block malicious user agents
-    @malicious_ua {
-        header User-Agent *sqlmap* *nikto* *nmap* *masscan* *zap* *burp*
-    }
-    respond @malicious_ua 403 {
-        body "Forbidden"
-    }
-
-    # Main reverse proxy to VaultWarden
-    reverse_proxy vaultwarden_app:80 {
-        # Removed redundant header_up lines - forwarded directive handles this
-        # Caddy automatically passes correct client IP info to upstream
-        header_up Host {host}
-
-        # Handle WebSocket connections
-        header_up Connection {>Connection}
-        header_up Upgrade {>Upgrade}
-
-        # Health monitoring
-        health_uri /alive
-        health_interval 30s
-        health_timeout 10s
-        health_status 200
-
-        # Connection optimization
-        transport http {
-            keepalive 30s
-            keepalive_idle_conns 10
-            compression off
-        }
-
-        # Handle large uploads (attachments)
-        flush_interval -1
-    }
-}
-
-# Redirect www subdomain to apex domain
-www.{$DOMAIN} {
-    log {
-        output discard
-    }
-    redir https://{$DOMAIN}{uri} 301
-}
-
-# Catch-all for other subdomains or IPs (security)
-:80, :443 {
-    log {
-        output file /logs/blocked.log
-        level ERROR
-    }
-    respond "Not Found" 404
-}
-
+# Cloudflare IPv6 ranges - Updated automatically
+remote_ip 2400:cb00::/32
+remote_ip 2405:8100::/32
+remote_ip 2405:b500::/32
+remote_ip 2606:4700::/32
+remote_ip 2803:f800::/32
+remote_ip 2a06:98c0::/29
+remote_ip 2c0f:f248::/32
