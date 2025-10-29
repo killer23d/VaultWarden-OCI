@@ -10,11 +10,9 @@
 }
 
 {$DOMAIN} {
-    # Define Cloudflare matcher with imported IPs
-    @cloudflare_ips {
-        import cloudflare-ips.caddy
-    }
-
+    # Import dynamic Cloudflare IPs inside the site block
+    import cloudflare-ips.caddy
+    
     # Access logging
     log {
         output file /logs/access.log {
@@ -36,13 +34,13 @@
         -X-Powered-By
     }
 
-    # Admin panel protection
+    # Admin panel protection (FIXED: use basic_auth and proper file path)
     @admin {
         path /admin*
     }
     
-    basicauth @admin {
-        admin {env.ADMIN_BASIC_AUTH_HASH}
+    basic_auth @admin {
+        admin {file./admin_basic_auth_hash}
     }
 
     # Block common attack paths
@@ -50,26 +48,35 @@
         path /.env* /config* /.git* /.htaccess* /wp-admin* /wp-login* /phpMyAdmin* /admin.php*
         path *.php *.asp *.jsp *.cgi
     }
-    respond @blocked 404 {
-        body "Not Found"
-    }
+    respond @blocked 404
 
-    # Block malicious user agents
-    @malicious_ua {
-        header User-Agent *sqlmap* *nikto* *nmap* *masscan* *zap* *burp*
+    # Block malicious user agents (FIXED: separate matchers)
+    @malicious_ua1 {
+        header User-Agent *sqlmap*
     }
-    respond @malicious_ua 403 {
-        body "Forbidden"
+    @malicious_ua2 {
+        header User-Agent *nikto*
     }
+    @malicious_ua3 {
+        header User-Agent *nmap*
+    }
+    respond @malicious_ua1 403
+    respond @malicious_ua2 403
+    respond @malicious_ua3 403
 
-    # CRITICAL FIX: WebSocket proxy for VaultWarden notifications
+    # Optional: Enforce Cloudflare-only access
+    # @non_cloudflare {
+    #     not remote_ip @cloudflare_ips
+    # }
+    # respond @non_cloudflare 403
+
+    # WebSocket proxy for VaultWarden notifications
     reverse_proxy /notifications/hub* vaultwarden_app:3012
 
-    # Main HTTP reverse proxy
+    # Main HTTP reverse proxy (FIXED: removed redundant header_up)
     reverse_proxy vaultwarden_app:80 {
         header_up X-Real-IP {http.request.header.CF-Connecting-IP}
         header_up X-Forwarded-For {http.request.header.CF-Connecting-IP}
-        header_up X-Forwarded-Proto {scheme}
         header_up Host {host}
 
         health_uri /alive
@@ -87,19 +94,12 @@
     }
 }
 
-# Redirect www subdomain to apex domain
+# Redirect www subdomain
 www.{$DOMAIN} {
-    log {
-        output discard
-    }
     redir https://{$DOMAIN}{uri} 301
 }
 
 # Security catch-all
 :80, :443 {
-    log {
-        output file /logs/blocked.log
-        level ERROR
-    }
     respond "Not Found" 404
 }
