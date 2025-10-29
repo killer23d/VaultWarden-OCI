@@ -165,8 +165,8 @@ services:
 
     volumes:
       - "./ddclient/ddclient.conf:/config/ddclient.conf"
+      - "./ddclient/ddclient.conf:/etc/ddclient/ddclient.conf"
       - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/ddclient:/config/data"
-
     secrets:
       - ddclient_api_token
 
