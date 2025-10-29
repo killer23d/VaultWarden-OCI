@@ -167,11 +167,9 @@ prepare_docker_secrets() {
     }
 
     # FIXED: ALL secrets that need files (including API tokens)
-    local secrets_needing_files=("admin_token" "smtp_password" "push_installation_id" "push_installation_key" "ddclient_api_token" "fail2ban_api_token")
-    # FIXED: Only admin_basic_auth_hash is environment-only
-    local critical_env_secrets=("admin_basic_auth_hash")
-    # Define which file secrets are critical vs optional
-    local critical_file_secrets=("admin_token" "ddclient_api_token" "fail2ban_api_token")
+    local secrets_needing_files=("admin_token" "smtp_password" "push_installation_id" "push_installation_key" "ddclient_api_token" "fail2ban_api_token" "admin_basic_auth_hash")
+    local critical_env_secrets=()  # Empty - no environment secrets needed
+    local critical_file_secrets=("admin_token" "ddclient_api_token" "fail2ban_api_token" "admin_basic_auth_hash")
     local optional_file_secrets=("smtp_password" "push_installation_id" "push_installation_key")
     
     local secret_file_path
