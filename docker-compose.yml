@@ -1,7 +1,4 @@
-# VaultWarden-OCI-NG Docker Compose Configuration
-# MODIFIED: WEBSOCKET_ENABLED is now configurable via the.env file.
-# MODIFIED: Replaced hardcoded resource limits with templated variables from.env.
-# MODIFIED: Added platform specifier for ARM64 compatibility on Fail2Ban.
+# VaultWarden-OCI Docker Compose Configuration
 
 services:
   # VaultWarden Password Manager
@@ -67,31 +64,34 @@ services:
 
   # Caddy Reverse Proxy
   caddy:
-    image: caddy:${CADDY_VERSION:-latest}
+    image: ghcr.io/caddybuilds/caddy-cloudflare:${CADDY_VERSION:-latest}
     container_name: vaultwarden_caddy
     restart: unless-stopped
     user: "${PUID:-1000}:${PGID:-1000}"
     environment:
       DOMAIN: "${DOMAIN}"
       EMAIL: "${ADMIN_EMAIL}"
+      # Use file-based secret for DNS API token
+      CLOUDFLARE_API_TOKEN_FILE: "/run/secrets/caddy_cloudflare_dns_token"
     ports:
       - "80:80"
       - "443:443"
+      - "443:443/udp"
     volumes:
       - "./caddy/Caddyfile:/etc/caddy/Caddyfile:ro"
-      - "./caddy/cloudflare-ips.caddy:/etc/caddy/cloudflare-ips.caddy:ro"
       - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/data:/data"
       - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/config:/config"
       - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy:/logs"
     secrets:
       - admin_basic_auth_hash
+      - caddy_cloudflare_dns_token  # DNS management token
     networks:
       - vaultwarden_network
     depends_on:
       vaultwarden:
         condition: service_healthy
     healthcheck:
-      test:
+      test: ["CMD", "caddy", "list-certificates"]
       interval: 1m
       timeout: 15s
       retries: 5
@@ -104,36 +104,8 @@ services:
         reservations:
           cpus: '${CADDY_CPU_RESERVATION:-0.1}'
           memory: '${CADDY_MEMORY_RESERVATION:-64m}'
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
 
-  # DDNS Client for Dynamic DNS (Modernized)
-  ddclient:
-    image: ghcr.io/favonia/cloudflare-ddns:${DDCLIENT_VERSION:-latest}
-    container_name: vaultwarden_ddclient
-    restart: unless-stopped
-    environment:
-      CLOUDFLARE_API_TOKEN_FILE: /run/secrets/ddclient_api_token
-      DOMAINS: "${DOMAIN}"
-      PROXIED: "true"
-      TZ: "${TZ:-UTC}"
-    secrets:
-      - ddclient_api_token
-    networks:
-      - vaultwarden_network
-    deploy:
-      resources:
-        limits:
-          cpus: '${DDCLIENT_CPU_LIMIT:-0.1}'
-          memory: '${DDCLIENT_MEMORY_LIMIT:-64m}'
-        reservations:
-          cpus: '${DDCLIENT_CPU_RESERVATION:-0.01}'
-          memory: '${DDCLIENT_MEMORY_RESERVATION:-16m}'
-
-  # Fail2Ban Intrusion Prevention
+  # fail2ban keeps separate firewall token
   fail2ban:
     image: crazymax/fail2ban:${FAIL2BAN_VERSION:-latest}
     platform: linux/arm64
@@ -152,11 +124,11 @@ services:
       - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy:/var/log/caddy:ro"
       - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/fail2ban:/var/log"
     secrets:
-      - fail2ban_api_token
+      - fail2ban_cloudflare_firewall_token  # Firewall management token
     networks:
       - vaultwarden_network
     healthcheck:
-      test:
+      test: ["CMD", "fail2ban-client", "status"]
       interval: 1m
       timeout: 10s
       retries: 3
@@ -175,19 +147,20 @@ services:
 
 secrets:
   admin_token:
-    file:./secrets/.docker_secrets/admin_token
+    file: ./secrets/.docker_secrets/admin_token
   admin_basic_auth_hash:
-    file:./secrets/.docker_secrets/admin_basic_auth_hash
+    file: ./secrets/.docker_secrets/admin_basic_auth_hash
   smtp_password:
-    file:./secrets/.docker_secrets/smtp_password
+    file: ./secrets/.docker_secrets/smtp_password
   push_installation_id:
-    file:./secrets/.docker_secrets/push_installation_id
+    file: ./secrets/.docker_secrets/push_installation_id
   push_installation_key:
-    file:./secrets/.docker_secrets/push_installation_key
-  ddclient_api_token:
-    file:./secrets/.docker_secrets/ddclient_api_token
-  fail2ban_api_token:
-    file:./secrets/.docker_secrets/fail2ban_api_token
+    file: ./secrets/.docker_secrets/push_installation_key
+  # Updated secret names for separate CF tokens
+  caddy_cloudflare_dns_token:
+    file: ./secrets/.docker_secrets/caddy_cloudflare_dns_token
+  fail2ban_cloudflare_firewall_token:
+    file: ./secrets/.docker_secrets/fail2ban_cloudflare_firewall_token
 
 networks:
   vaultwarden_network:
