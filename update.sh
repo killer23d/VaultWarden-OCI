@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# update.sh - Simplified VaultWarden container and system updates with library integration
-# MODIFIED: Corrected fragile image name parsing to support different image formats like ghcr.io.
+# update.sh - Enhanced VaultWarden update tool with caddy-cloudflare support
+# UPDATED: Modified for caddy-cloudflare image, removed ddclient references
 
 set -euo pipefail
 
@@ -29,13 +29,13 @@ ENV_FILE=".env"
 # --- Help ---
 show_help() {
     cat << 'EOF'
-VaultWarden-OCI-NG Update Tool
+VaultWarden-OCI Update Tool - Enhanced for Caddy-Cloudflare
 
 USAGE:
-   ./update.sh
-   ./update.sh --pin <service> <version>
-   ./update.sh --unpin <service>
-   ./update.sh --show-pins
+    ./update.sh
+    ./update.sh --pin <service> <version>
+    ./update.sh --unpin <service>
+    ./update.sh --show-pins
 
 STANDARD UPDATE OPTIONS:
     --type TYPE        Update type: containers, system, all (default: containers)
@@ -45,27 +45,34 @@ STANDARD UPDATE OPTIONS:
     --help            Show this help
 
 VERSION MANAGEMENT OPTIONS:
-    --pin SERVICE VERSION   Pin a specific service to a version in.env
+    --pin SERVICE VERSION   Pin a specific service to a version in .env
                             (e.g., --pin vaultwarden 1.31.0)
-    --unpin SERVICE         Remove version pin for a service in.env (defaults to latest)
+    --unpin SERVICE         Remove version pin for a service in .env
                             (e.g., --unpin caddy)
-    --show-pins             Display currently pinned versions from.env
+    --show-pins             Display currently pinned versions from .env
 
 UPDATE TYPES:
-    containers    Update Docker containers based on.env pins or 'latest'
+    containers    Update Docker containers based on .env pins or 'latest'
     system        Update system packages (will auto-reboot if needed with --force)
     all           Update both containers and system
 
+SUPPORTED SERVICES (for --pin/--unpin):
+    vaultwarden   VaultWarden password manager
+    caddy         Caddy-Cloudflare reverse proxy (replaces separate caddy+ddclient)
+    fail2ban      Fail2Ban intrusion prevention
+
 NOTE:
-    Using --pin or --unpin modifies the.env file. Run
-    './update.sh --type containers' afterwards to apply the changes.
+    - ddclient service removed (functionality integrated into caddy-cloudflare)
+    - Using --pin or --unpin modifies the .env file
+    - Run './update.sh --type containers' after pinning to apply changes
 
 EXAMPLES:
-   ./update.sh                     # Update containers based on.env
-   ./update.sh --type system      # Update system packages
-   ./update.sh --pin vaultwarden 1.31.0 # Pin Vaultwarden to 1.31.0 in.env
-   ./update.sh --unpin caddy        # Let Caddy use the 'latest' tag
-   ./update.sh --show-pins          # View current pins
+    ./update.sh                     # Update containers based on .env
+    ./update.sh --type system      # Update system packages
+    ./update.sh --pin vaultwarden 1.31.0 # Pin VaultWarden to 1.31.0
+    ./update.sh --pin caddy 2.8.4         # Pin Caddy-Cloudflare to 2.8.4
+    ./update.sh --unpin caddy              # Use latest Caddy-Cloudflare
+    ./update.sh --show-pins                # View current pins
 EOF
 }
 
@@ -93,8 +100,15 @@ done
 validate_service_name() {
     local service="$1"
     case "$service" in
-        vaultwarden|caddy|fail2ban|ddclient) return 0 ;;
-        *) log_error "Invalid service name: '$service'. Must be one of: vaultwarden, caddy, fail2ban, ddclient."; return 1 ;;
+        vaultwarden|caddy|fail2ban) return 0 ;;
+        ddclient) 
+            log_error "ddclient service has been replaced by caddy-cloudflare integration."
+            log_info "Use 'caddy' service name instead."
+            return 1 ;;
+        *) 
+            log_error "Invalid service name: '$service'. Must be one of: vaultwarden, caddy, fail2ban."
+            log_info "Note: ddclient has been integrated into caddy-cloudflare."
+            return 1 ;;
     esac
 }
 
@@ -108,14 +122,12 @@ pin_service_version() {
     local version="$2"
     local var_name
 
-    validate_service_name "$service" |
-
-| return 1
+    validate_service_name "$service" || return 1
     var_name=$(get_version_var_name "$service")
 
     log_info "Pinning $service to version $version in $ENV_FILE..."
 
-    if [[! -f "$ENV_FILE" ]]; then
+    if [[ ! -f "$ENV_FILE" ]]; then
         log_error "$ENV_FILE not found. Cannot pin version."
         return 1
     fi
@@ -147,14 +159,12 @@ unpin_service_version() {
     local service="$1"
     local var_name
 
-    validate_service_name "$service" |
-
-| return 1
+    validate_service_name "$service" || return 1
     var_name=$(get_version_var_name "$service")
 
     log_info "Unpinning $service version in $ENV_FILE (will default to latest)..."
 
-    if [[! -f "$ENV_FILE" ]]; then
+    if [[ ! -f "$ENV_FILE" ]]; then
         log_warn "$ENV_FILE not found. Nothing to unpin."
         return 0
     fi
@@ -178,12 +188,10 @@ show_pinned_versions() {
     if [[ -f "$ENV_FILE" ]]; then
         while IFS= read -r line; do
             if [[ -n "$line" ]]; then
-                 echo "  $line"
-                 found_pins=true
+                echo "  $line"
+                found_pins=true
             fi
-        done < <(grep -E "^\s*[^#]*(VAULTWARDEN|CADDY|FAIL2BAN|DDCLIENT)_VERSION=" "$ENV_FILE" |
-
-| true)
+        done < <(grep -E "^\s*[^#]*(VAULTWARDEN|CADDY|FAIL2BAN)_VERSION=" "$ENV_FILE" || true)
     fi
 
     if [[ "$found_pins" == "false" ]]; then
@@ -191,36 +199,37 @@ show_pinned_versions() {
     fi
     echo ""
     log_info "Services without a line above will default to the 'latest' tag."
+    log_info "Note: ddclient service has been integrated into caddy-cloudflare."
 }
 
 # --- Pre-Update Backup ---
 create_backup() {
-    if]; then
+    if [[ "$AUTO_BACKUP" == "false" ]]; then
         log_info "Skipping backup (--no-backup specified)"
         return 0
     fi
 
     log_info "Creating pre-update backup..."
 
-    if]; then
-        log_info " Would create backup with:./backup.sh --type full"
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info " Would create backup with: ./backup.sh --type full"
         return 0
     fi
 
-    if./backup.sh --type full >/dev/null 2>&1; then
+    if ./backup.sh --type full >/dev/null 2>&1; then
         log_success "Pre-update backup created"
         return 0
     else
         log_error "Failed to create pre-update backup"
         log_warn "Continue without backup? This is not recommended."
 
-        if]; then
+        if [[ "$FORCE" == "true" ]]; then
             log_warn "Continuing without backup (--force specified)"
             return 0
         fi
 
         read -p "Continue anyway? (y/N): " continue_choice
-        if$ ]]; then
+        if [[ "$continue_choice" =~ ^[Yy]$ ]]; then
             log_warn "Proceeding without backup"
             return 0
         else
@@ -234,25 +243,21 @@ create_backup() {
 update_containers() {
     log_info "Updating Docker containers..."
 
-    if]; then
-        log_info " Would pull container images based on.env or 'latest'"
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info " Would pull container images based on .env or 'latest'"
         log_info " Would restart containers if images were updated"
         return 0
     fi
 
-    require_docker |
+    require_docker || return 1
 
-| return 1
-
-    if! validate_compose_file; then
+    if ! validate_compose_file; then
         log_error "Docker Compose configuration is invalid"
         return 1
     fi
 
     local services
-    services=$(docker compose config --services 2>/dev/null |
-
-| echo "")
+    services=$(docker compose config --services 2>/dev/null || echo "")
 
     if [[ -z "$services" ]]; then
         log_error "Could not determine services from docker-compose.yml"
@@ -266,26 +271,27 @@ update_containers() {
         local var_name pinned_version effective_tag
         var_name=$(get_version_var_name "$service")
         pinned_version="${!var_name:-}"
-        [[ -n "$pinned_version" ]] && effective_tag="$pinned_version" |
+        [[ -n "$pinned_version" ]] && effective_tag="$pinned_version" || effective_tag="latest"
 
-| effective_tag="latest"
-
-        # CORRECTED: Robust image name construction to handle names like ghcr.io/...
-        image_base=$(docker compose config | awk -v service="$service" '/^ *'"$service"':/,/image:/' | grep 'image:' | awk '{print $2}' | sed 's/:.*//')
+        # Enhanced image name construction for caddy-cloudflare
+        case "$service" in
+            caddy)
+                image_base="ghcr.io/caddybuilds/caddy-cloudflare"
+                ;;
+            *)
+                image_base=$(docker compose config | awk -v service="$service" '/^ *'"$service"':/,/image:/' | grep 'image:' | awk '{print $2}' | sed 's/:.*//')
+                ;;
+        esac
         image="${image_base}:${effective_tag}"
 
-        current_id=$(docker images --format "{{.ID}}" "$image" 2>/dev/null | head -1 |
-
-| echo "not_found")
+        current_id=$(docker images --format "{{.ID}}" "$image" 2>/dev/null | head -1 || echo "not_found")
         old_ids["$service"]="$current_id"
         log_info "  $service: $image ($current_id)"
     done
 
     echo ""
-    log_info "Pulling container images specified in docker-compose.yml (using.env pins or defaulting to 'latest')..."
-    pull_images |
-
-| log_warn "Image pull command encountered issues."
+    log_info "Pulling container images..."
+    pull_images || log_warn "Image pull command encountered issues."
 
     local updated_services=()
     log_info "Checking for updated images..."
@@ -294,27 +300,30 @@ update_containers() {
         local var_name pinned_version effective_tag
         var_name=$(get_version_var_name "$service")
         pinned_version="${!var_name:-}"
-        [[ -n "$pinned_version" ]] && effective_tag="$pinned_version" |
+        [[ -n "$pinned_version" ]] && effective_tag="$pinned_version" || effective_tag="latest"
 
-| effective_tag="latest"
-
-        # CORRECTED: Robust image name construction
-        image_base=$(docker compose config | awk -v service="$service" '/^ *'"$service"':/,/image:/' | grep 'image:' | awk '{print $2}' | sed 's/:.*//')
+        # Enhanced image name construction for caddy-cloudflare
+        case "$service" in
+            caddy)
+                image_base="ghcr.io/caddybuilds/caddy-cloudflare"
+                ;;
+            *)
+                image_base=$(docker compose config | awk -v service="$service" '/^ *'"$service"':/,/image:/' | grep 'image:' | awk '{print $2}' | sed 's/:.*//')
+                ;;
+        esac
         image="${image_base}:${effective_tag}"
 
-        new_id=$(docker inspect --format='{{.Id}}' "$image" 2>/dev/null |
+        new_id=$(docker inspect --format='{{.Id}}' "$image" 2>/dev/null || echo "unknown")
 
-| echo "unknown")
-
-        if [[ "${old_ids["$service"]}"!= "$new_id" && "$new_id"!= "unknown" ]]; then
-             if [[ "${old_ids["$service"]}" == "not_found" ]]; then
+        if [[ "${old_ids["$service"]}" != "$new_id" && "$new_id" != "unknown" ]]; then
+            if [[ "${old_ids["$service"]}" == "not_found" ]]; then
                 log_info "  $service: New image pulled ($image -> $new_id)"
-             else
+            else
                 log_info "  $service: Image updated ($image: ${old_ids["$service"]} -> $new_id)"
-             fi
+            fi
             updated_services+=("$service")
         elif [[ "$new_id" == "unknown" ]]; then
-             log_warn "  $service: Could not inspect image '$image'. Pull might have failed."
+            log_warn "  $service: Could not inspect image '$image'. Pull might have failed."
         fi
     done
 
@@ -332,7 +341,7 @@ update_containers() {
 
         local failed_services=()
         for service in $services; do
-            if! wait_for_service_ready "$service" 30; then
+            if ! wait_for_service_ready "$service" 30; then
                 failed_services+=("$service")
             fi
         done
@@ -356,6 +365,18 @@ update_containers() {
         log_warn "Failed to clean up old images (non-critical)"
     fi
 
+    # Verify caddy-cloudflare integration
+    if [[ " ${updated_services[*]} " =~ " caddy " ]]; then
+        log_info "Verifying caddy-cloudflare integration..."
+        sleep 5
+        if docker compose exec caddy caddy list-certificates >/dev/null 2>&1; then
+            log_success "Caddy-Cloudflare integration verified"
+        else
+            log_warn "Caddy-Cloudflare integration may need attention"
+            log_info "Check logs: docker compose logs caddy"
+        fi
+    fi
+
     return 0
 }
 
@@ -363,28 +384,26 @@ update_containers() {
 update_system() {
     log_info "Updating system packages..."
 
-    if]; then
+    if [[ "$DRY_RUN" == "true" ]]; then
         log_info " Would run: apt update && apt upgrade"
         log_info " Would check if reboot is required"
         return 0
     fi
 
-    if! is_root; then
+    if ! is_root; then
         log_error "System updates require root privileges"
-        log_info "Run with: sudo./update.sh --type system"
+        log_info "Run with: sudo ./update.sh --type system"
         return 1
     fi
 
     log_info "Updating package lists..."
-    if! apt update; then
+    if ! apt update; then
         log_error "Failed to update package lists"
         return 1
     fi
 
     local update_count
-    update_count=$(apt list --upgradable 2>/dev/null | grep -c upgradable |
-
-| echo "0")
+    update_count=$(apt list --upgradable 2>/dev/null | grep -c upgradable || echo "0")
 
     if [[ "$update_count" -eq 0 ]]; then
         log_success "System is already up to date"
@@ -398,10 +417,10 @@ update_system() {
         log_info "... and $((update_count - 10)) more packages"
     fi
 
-    if]; then
+    if [[ "$FORCE" != "true" ]]; then
         echo ""
         read -p "Proceed with system package updates? (y/N): " confirm_updates
-        if$ ]]; then
+        if [[ ! "$confirm_updates" =~ ^[Yy]$ ]]; then
             log_info "System updates cancelled"
             return 0
         fi
@@ -426,7 +445,7 @@ update_system() {
             cat /var/run/reboot-required.pkgs | head -5
         fi
 
-        if]; then
+        if [[ "$FORCE" == "true" ]]; then
             log_warn "Auto-rebooting system (--force specified)"
             send_notification_email "System Update: Rebooting" "System update completed. Reboot is required and being initiated now."
             sleep 5
@@ -449,42 +468,40 @@ update_system() {
 verify_system_health() {
     log_info "Verifying system health after update..."
 
-    if]; then
-        log_info " Would run health check:./health.sh"
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info " Would run health check: ./health.sh"
         return 0
     fi
 
     sleep 5
 
-    if./health.sh --quiet; then
+    if ./health.sh --quiet; then
         log_success "Health check passed after update"
         return 0
     else
         log_warn "Health check detected issues after update"
-        log_info "Run full health check:./health.sh --comprehensive"
+        log_info "Run full health check: ./health.sh --comprehensive"
         return 1
     fi
 }
 
 # --- Main Execution ---
 main() {
-    log_info "VaultWarden Update Manager"
+    log_info "VaultWarden Update Manager - Enhanced for Caddy-Cloudflare"
 
-    if]; then
+    if [[ -n "$PIN_SERVICE" ]]; then
         pin_service_version "$PIN_SERVICE" "$PIN_VERSION"
         exit $?
-    elif]; then
+    elif [[ -n "$UNPIN_SERVICE" ]]; then
         unpin_service_version "$UNPIN_SERVICE"
         exit $?
-    elif]; then
+    elif [[ "$SHOW_PINS" == "true" ]]; then
         show_pinned_versions
         exit 0
     fi
 
-    load_env_file |
-
-| {
-        log_warn "No.env file found, using defaults (likely 'latest' tags)"
+    load_env_file || {
+        log_warn "No .env file found, using defaults (likely 'latest' tags)"
     }
 
     local exit_code=0
@@ -495,7 +512,8 @@ main() {
     log_info "Update Plan:"
     case "$UPDATE_TYPE" in
         "containers")
-            log_info "  - Update Docker containers (using.env pins or 'latest')"
+            log_info "  - Update Docker containers (using .env pins or 'latest')"
+            log_info "  - Includes caddy-cloudflare integration"
             log_info "  - Verify service health"
             update_summary="Container update task."
             ;;
@@ -505,8 +523,8 @@ main() {
             update_summary="System update task."
             ;;
         "all")
-            if]; then log_info "  - Create backup"; fi
-            log_info "  - Update Docker containers (using.env pins or 'latest')"
+            if [[ "$AUTO_BACKUP" == "true" ]]; then log_info "  - Create backup"; fi
+            log_info "  - Update Docker containers (using .env pins or 'latest')"
             log_info "  - Update system packages"
             log_info "  - Verify service health"
             update_summary="Full system and container update task."
@@ -518,15 +536,15 @@ main() {
             ;;
     esac
 
-    if]; then
+    if [[ "$AUTO_BACKUP" == "true" ]]; then
         log_info "  - Create pre-update backup"
-    elif]; then
-         log_info "  - Skip pre-update backup (--no-backup specified)"
+    elif [[ "$AUTO_BACKUP" == "false" ]]; then
+        log_info "  - Skip pre-update backup (--no-backup specified)"
     fi
 
     echo ""
 
-    if]; then
+    if [[ "$FORCE" != "true" ]]; then
         read -p "Proceed with update? (Y/n): " confirm_proceed
         if [[ "$confirm_proceed" =~ ^[Nn]$ ]]; then
             log_info "Update cancelled"
@@ -538,13 +556,9 @@ main() {
 
     case "$UPDATE_TYPE" in
         "containers")
-            create_backup |
-
-| exit_code=$?
+            create_backup || exit_code=$?
             if [[ $exit_code -eq 0 ]]; then
-                update_containers |
-
-| exit_code=$?
+                update_containers || exit_code=$?
             fi
             update_summary="Container update completed."
             ;;
@@ -557,13 +571,9 @@ main() {
             esac
             ;;
         "all")
-            create_backup |
-
-| exit_code=$?
+            create_backup || exit_code=$?
             if [[ $exit_code -eq 0 ]]; then
-                update_containers |
-
-| exit_code=$?
+                update_containers || exit_code=$?
             fi
             if [[ $exit_code -eq 0 ]]; then
                 update_system
@@ -578,10 +588,8 @@ main() {
             ;;
     esac
 
-    if]; then
-        verify_system_health |
-
-| log_warn "Post-update health check issues detected"
+    if [[ "$DRY_RUN" != "true" ]]; then
+        verify_system_health || log_warn "Post-update health check issues detected"
     fi
 
     echo ""
@@ -611,8 +619,8 @@ main() {
         echo ""
         echo "Update failed. Common troubleshooting:"
         echo "  - Check service logs: docker compose logs"
-        echo "  - Verify system resources:./health.sh"
-        echo "  - Restore from backup if needed:./restore.sh"
+        echo "  - Verify system resources: ./health.sh"
+        echo "  - Restore from backup if needed: ./restore.sh"
     fi
 
     exit $exit_code
