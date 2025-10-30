@@ -1,28 +1,19 @@
 # VaultWarden-OCI-NG Docker Compose Configuration
-# Fixed: Corrected UID/GID variable names and improved container configuration
-# Updated: admin_basic_auth_hash now uses Docker secrets consistently
+# MODIFIED: Replaced ddclient with favonia/cloudflare-ddns for native secrets support.
+# MODIFIED: Corrected UID/GID variable names and improved container configuration.
 
 services:
   # VaultWarden Password Manager
   vaultwarden:
-    image: vaultwarden/server:latest
+    image: vaultwarden/server:${VAULTWARDEN_VERSION:-latest}
     container_name: vaultwarden_app
     restart: unless-stopped
     user: "${PUID:-1000}:${PGID:-1000}"
-
     environment:
-      # Core Configuration
       DOMAIN: "https://${DOMAIN}"
       ROCKET_PORT: 80
       ROCKET_ADDRESS: 0.0.0.0
-
-      # Database
-      # DATABASE_URL: "sqlite:///data/db.sqlite3"
-
-      # Admin Configuration
       ADMIN_TOKEN_FILE: "/run/secrets/admin_token"
-
-      # SMTP Configuration (optional)
       SMTP_HOST: "${SMTP_HOST:-}"
       SMTP_FROM: "${SMTP_FROM:-noreply@${DOMAIN}}"
       SMTP_FROM_NAME: "${SMTP_FROM_NAME:-VaultWarden}"
@@ -30,226 +21,181 @@ services:
       SMTP_SECURITY: "${SMTP_SECURITY:-starttls}"
       SMTP_USERNAME: "${SMTP_USERNAME:-}"
       SMTP_PASSWORD_FILE: "/run/secrets/smtp_password"
-
-      # Push Notifications (optional)
       PUSH_ENABLED: "${PUSH_ENABLED:-false}"
       PUSH_INSTALLATION_ID_FILE: "/run/secrets/push_installation_id"
       PUSH_INSTALLATION_KEY_FILE: "/run/secrets/push_installation_key"
-
-      # Security Settings
       SIGNUPS_ALLOWED: "${SIGNUPS_ALLOWED:-false}"
       INVITATIONS_ALLOWED: "${INVITATIONS_ALLOWED:-true}"
       EMERGENCY_ACCESS_ALLOWED: "${EMERGENCY_ACCESS_ALLOWED:-true}"
       SENDS_ALLOWED: "${SENDS_ALLOWED:-true}"
       WEB_VAULT_ENABLED: "${WEB_VAULT_ENABLED:-true}"
-
-      # Performance
       DATABASE_MAX_CONNS: 10
       ROCKET_WORKERS: 10
       WEBSOCKET_ENABLED: "false"
-      WEBSOCKET_ADDRESS: "0.0.0.0" 
+      WEBSOCKET_ADDRESS: "0.0.0.0"
       WEBSOCKET_PORT: 3012
-
-      # Logging
       LOG_LEVEL: info
       EXTENDED_LOGGING: true
       LOG_FILE: "/data/vaultwarden.log"
-
-      # Timezone
       TZ: "${TZ:-UTC}"
-
     volumes:
       - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data:/data"
       - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/vaultwarden:/logs"
-
     secrets:
       - admin_token
       - smtp_password
       - push_installation_id
       - push_installation_key
-
     networks:
       - vaultwarden_network
-
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost/alive"]
+      test:
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 30s
-
     deploy:
       resources:
         limits:
-          cpus: '1.0'
-          memory: 2G
+          cpus: '${VAULTWARDEN_CPU_LIMIT:-1.0}'
+          memory: '${VAULTWARDEN_MEMORY_LIMIT:-2G}'
         reservations:
-          cpus: '0.2'
-          memory: 512M
+          cpus: '${VAULTWARDEN_CPU_RESERVATION:-0.2}'
+          memory: '${VAULTWARDEN_MEMORY_RESERVATION:-512M}'
 
   # Caddy Reverse Proxy
   caddy:
-    image: caddy:latest
+    image: caddy:${CADDY_VERSION:-latest}
     container_name: vaultwarden_caddy
     restart: unless-stopped
     user: "${PUID:-1000}:${PGID:-1000}"
-
     environment:
       DOMAIN: "${DOMAIN}"
       EMAIL: "${ADMIN_EMAIL}"
-
     ports:
       - "80:80"
       - "443:443"
-
     volumes:
-      # Configuration files
       - "./caddy/Caddyfile:/etc/caddy/Caddyfile:ro"
       - "./caddy/cloudflare-ips.caddy:/etc/caddy/cloudflare-ips.caddy:ro"
-
-      # Persistent data
       - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/data:/data"
       - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/config:/config"
-
-      # Logs
       - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy:/logs"
-
     secrets:
       - admin_basic_auth_hash
-
     networks:
       - vaultwarden_network
-
     depends_on:
       vaultwarden:
         condition: service_healthy
-
     healthcheck:
-      test: ["CMD", "caddy", "version"]
+      test:
       interval: 1m
       timeout: 15s
       retries: 5
       start_period: 1m
-
     deploy:
       resources:
         limits:
-          cpus: '0.3'
-          memory: 256M
+          cpus: '${CADDY_CPU_LIMIT:-0.3}'
+          memory: '${CADDY_MEMORY_LIMIT:-256M}'
         reservations:
-          cpus: '0.05'
-          memory: 128M
-
+          cpus: '${CADDY_CPU_RESERVATION:-0.05}'
+          memory: '${CADDY_MEMORY_RESERVATION:-128M}'
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
 
-  # DDClient for Dynamic DNS
+  # DDNS Client for Dynamic DNS (Modernized)
   ddclient:
-    image: lscr.io/linuxserver/ddclient:latest
+    image: ghcr.io/favonia/cloudflare-ddns:${DDCLIENT_VERSION:-latest}
     container_name: vaultwarden_ddclient
     restart: unless-stopped
-    user: "${PUID:-1000}:${PGID:-1000}"
-    
     environment:
-      PUID: "${PUID:-1000}"
-      PGID: "${PGID:-1000}"
+      # The API token is read from the Docker secret file.
+      CLOUDFLARE_API_TOKEN_FILE: /run/secrets/ddclient_api_token
+      # The domain(s) to update. Reads from the.env file.
+      DOMAINS: "${DOMAIN}"
+      # Ensure Cloudflare proxy is enabled for the record.
+      PROXIED: "true"
+      # Timezone for logging.
       TZ: "${TZ:-UTC}"
-      # Non-sensitive config from .env
-      CLOUDFLARE_ZONE_ID: "${CLOUDFLARE_ZONE_ID}"
-      DDCLIENT_HOSTNAME: "${DDCLIENT_HOSTNAME}"
-      # SECRET: Use FILE__ prefix to read from Docker secret
-      FILE__DDCLIENT_API_TOKEN: "/run/secrets/ddclient_api_token"
-
-    volumes:
-      - "./ddclient/ddclient.conf:/config/ddclient.conf"
-      - "./ddclient/ddclient.conf:/etc/ddclient/ddclient.conf"
-      - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/ddclient:/config/data"
     secrets:
       - ddclient_api_token
-
     networks:
       - vaultwarden_network
-
+    healthcheck:
+      test:
+      interval: 5m
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     deploy:
       resources:
         limits:
-          cpus: '0.1'
-          memory: 64M
+          cpus: '${DDCLIENT_CPU_LIMIT:-0.1}'
+          memory: '${DDCLIENT_MEMORY_LIMIT:-32M}'
         reservations:
-          cpus: '0.02'
-          memory: 32M
+          cpus: '${DDCLIENT_CPU_RESERVATION:-0.01}'
+          memory: '${DDCLIENT_MEMORY_RESERVATION:-16M}'
 
   # Fail2Ban Intrusion Prevention
   fail2ban:
-    image: crazymax/fail2ban:latest
+    image: crazymax/fail2ban:${FAIL2BAN_VERSION:-latest}
     container_name: vaultwarden_fail2ban
     restart: unless-stopped
-    
     environment:
       F2B_LOG_LEVEL: INFO
       F2B_LOG_TARGET: /data/fail2ban.log
       TZ: "${TZ:-UTC}"
-      # Non-sensitive config from .env
       CLOUDFLARE_ZONE_ID: "${CLOUDFLARE_ZONE_ID}"
-
     volumes:
-      # Configuration
       - "./fail2ban/jail.d:/etc/fail2ban/jail.d:ro"
       - "./fail2ban/filter.d:/etc/fail2ban/filter.d:ro"
       - "./fail2ban/action.d:/etc/fail2ban/action.d:ro"
-      
-      # Data and logs
       - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/fail2ban:/data"
       - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy:/var/log/caddy:ro"
       - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/fail2ban:/var/log"
-
     secrets:
       - fail2ban_api_token
-
     networks:
       - vaultwarden_network
-
     healthcheck:
-      test: ["CMD", "fail2ban-client", "status"]
+      test:
       interval: 1m
       timeout: 10s
       retries: 3
       start_period: 30s
-
     deploy:
       resources:
         limits:
-          cpus: '0.2'
-          memory: 128M
+          cpus: '${FAIL2BAN_CPU_LIMIT:-0.2}'
+          memory: '${FAIL2BAN_MEMORY_LIMIT:-128M}'
         reservations:
-          cpus: '0.05'
-          memory: 64M
-
+          cpus: '${FAIL2BAN_CPU_RESERVATION:-0.05}'
+          memory: '${FAIL2BAN_MEMORY_RESERVATION:-64M}'
     cap_add:
       - NET_ADMIN
       - NET_RAW
 
-# Docker Secrets (UPDATED: Added admin_basic_auth_hash)
 secrets:
   admin_token:
-    file: ./secrets/.docker_secrets/admin_token
+    file:./secrets/.docker_secrets/admin_token
   admin_basic_auth_hash:
-    file: ./secrets/.docker_secrets/admin_basic_auth_hash
+    file:./secrets/.docker_secrets/admin_basic_auth_hash
   smtp_password:
-    file: ./secrets/.docker_secrets/smtp_password
+    file:./secrets/.docker_secrets/smtp_password
   push_installation_id:
-    file: ./secrets/.docker_secrets/push_installation_id
+    file:./secrets/.docker_secrets/push_installation_id
   push_installation_key:
-    file: ./secrets/.docker_secrets/push_installation_key
+    file:./secrets/.docker_secrets/push_installation_key
   ddclient_api_token:
-    file: ./secrets/.docker_secrets/ddclient_api_token
+    file:./secrets/.docker_secrets/ddclient_api_token
   fail2ban_api_token:
-    file: ./secrets/.docker_secrets/fail2ban_api_token
+    file:./secrets/.docker_secrets/fail2ban_api_token
 
-# Networks
 networks:
   vaultwarden_network:
     driver: bridge
