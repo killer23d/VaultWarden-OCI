@@ -48,7 +48,7 @@ services:
     networks:
       - vaultwarden_network
     healthcheck:
-      test:
+      test: ["CMD", "curl", "-f", "http://localhost/alive"]
       interval: 30s
       timeout: 10s
       retries: 3
