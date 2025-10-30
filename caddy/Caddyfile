@@ -1,22 +1,18 @@
 # Caddyfile for VaultWarden-OCI-Simplified
-# Modern Caddy v2 with dynamic Cloudflare IPs and native Docker secrets integration.
+# MODIFIED: WebSocket proxy is now commented out by default. Uncomment to enable.
+# MODIFIED: Implemented path-scoped Content-Security-Policy for enhanced XSS protection.
 
 {
     # Global options block
     servers {
-        # Trust private ranges and Cloudflare IPs (via import) as proxies.
         trusted_proxies static private_ranges
-        # Define headers to check for the real client IP.
         client_ip_headers X-Forwarded-For CF-Connecting-IP
     }
 }
 
 {$DOMAIN} {
-    # Import the dynamically updated list of Cloudflare IP ranges.
-    # This is used by 'trusted_proxies' to identify legitimate proxy requests.
     import cloudflare-ips.caddy
 
-    # Configure access logging in JSON format for Fail2Ban.
     log {
         output file /logs/access.log {
             roll_size 10MB
@@ -25,67 +21,55 @@
         format json
     }
 
-    # Apply strong security headers to all responses.
+    # --- Hardened Default CSP ---
     header {
-        # Enforce HTTPS for 1 year, including subdomains.
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-        # Prevent MIME-sniffing attacks.
         X-Content-Type-Options "nosniff"
-        # Prevent clickjacking attacks.
         X-Frame-Options "DENY"
-        # Enable browser's built-in XSS protection.
         X-XSS-Protection "1; mode=block"
-        # Control how much referrer information is sent.
         Referrer-Policy "strict-origin-when-cross-origin"
-        # Content Security Policy to mitigate XSS.
-        # 'unsafe-eval' is required for some of Vaultwarden's client-side crypto functions.
-        Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: https:; frame-src 'self'; object-src 'none'; base-uri 'self';"
-        # Obscure server software for security.
+        Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: https:; frame-src 'self'; object-src 'none'; base-uri 'self';"
         -Server
-        -X-Powered-By
     }
 
-    # Protect the /admin path with HTTP Basic Authentication.
+    # --- Admin Panel Handle ---
     @admin path /admin*
-    basic_auth @admin {
-        # The username is 'admin' and the password hash is read from a Docker secret.
-        admin {file./run/secrets/admin_basic_auth_hash}
+    handle @admin {
+        header {
+            Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: https:; frame-src 'self'; object-src 'none'; base-uri 'self';"
+        }
+        
+        basic_auth {
+            admin {file /run/secrets/admin_basic_auth_hash}
+        }
+
+        reverse_proxy vaultwarden_app:80 {
+            header_up X-Real-IP {http.request.header.CF-Connecting-IP}
+        }
     }
 
-    # Block requests for common sensitive files and paths.
-    @blocked path /.env* /config* /.git* /.htaccess* /wp-admin* /wp-login* /phpMyAdmin* /admin.php* *.php *.asp *.jsp *.cgi
-    respond @blocked 404
+    # --- Main Application Handle ---
+    handle {
+        @malicious_ua header User-Agent *sqlmap* *nikto* *nmap*
+        respond @malicious_ua 403
 
-    # Block common security scanner user agents.
-    @malicious_ua header User-Agent *sqlmap* *nikto* *nmap*
-    respond @malicious_ua 403
+        # MODIFIED: To enable WebSocket for live client sync, uncomment the following line.
+        # This requires WEBSOCKET_ENABLED=true in your.env file.
+        # reverse_proxy /notifications/hub* vaultwarden_app:3012
 
-    # Proxy WebSocket connections for live notifications.
-    reverse_proxy /notifications/hub* vaultwarden_app:3012
-
-    # Main reverse proxy for the VaultWarden application.
-    reverse_proxy vaultwarden_app:80 {
-        # Pass the real client IP to the backend via the X-Real-IP header.
-        # Vaultwarden can be configured to use this for logging.
-        # Caddy automatically handles the X-Forwarded-For header based on the global trusted_proxies config.
-        header_up X-Real-IP {http.request.header.CF-Connecting-IP}
-        header_up Host {host}
-
-        # Configure active health checks for the backend service.
-        health_uri /alive
-        health_interval 30s
-        health_timeout 10s
-        health_status 200
+        # Main reverse proxy for the VaultWarden application.
+        reverse_proxy vaultwarden_app:80 {
+            header_up X-Real-IP {http.request.header.CF-Connecting-IP}
+        }
     }
 }
 
-# Redirect the www subdomain to the main domain.
+# Redirect www subdomain
 www.{$DOMAIN} {
     redir https://{$DOMAIN}{uri} 301
 }
 
-# Security catch-all: respond with 404 to any requests that don't match a configured host.
-# This prevents Caddy from issuing certificates for unknown domains.
+# Security catch-all
 :80, :443 {
     respond "Not Found" 404
 }
