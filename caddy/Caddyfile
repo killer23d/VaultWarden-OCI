@@ -1,20 +1,22 @@
-# Caddyfile for VaultWarden-OCI-NG
-# Modern Caddy v2 with dynamic Cloudflare IPs
-# Updated: admin_basic_auth_hash now uses Docker secrets
+# Caddyfile for VaultWarden-OCI-Simplified
+# Modern Caddy v2 with dynamic Cloudflare IPs and native Docker secrets integration.
 
 {
+    # Global options block
     servers {
+        # Trust private ranges and Cloudflare IPs (via import) as proxies.
         trusted_proxies static private_ranges
+        # Define headers to check for the real client IP.
         client_ip_headers X-Forwarded-For CF-Connecting-IP
-        trusted_proxies_strict
     }
 }
 
 {$DOMAIN} {
-    # Import dynamic Cloudflare IPs inside the site block
+    # Import the dynamically updated list of Cloudflare IP ranges.
+    # This is used by 'trusted_proxies' to identify legitimate proxy requests.
     import cloudflare-ips.caddy
 
-    # Access logging
+    # Configure access logging in JSON format for Fail2Ban.
     log {
         output file /logs/access.log {
             roll_size 10MB
@@ -23,84 +25,67 @@
         format json
     }
 
-    # Security headers
+    # Apply strong security headers to all responses.
     header {
+        # Enforce HTTPS for 1 year, including subdomains.
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        # Prevent MIME-sniffing attacks.
         X-Content-Type-Options "nosniff"
+        # Prevent clickjacking attacks.
         X-Frame-Options "DENY"
+        # Enable browser's built-in XSS protection.
         X-XSS-Protection "1; mode=block"
+        # Control how much referrer information is sent.
         Referrer-Policy "strict-origin-when-cross-origin"
+        # Content Security Policy to mitigate XSS.
+        # 'unsafe-eval' is required for some of Vaultwarden's client-side crypto functions.
         Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: https:; frame-src 'self'; object-src 'none'; base-uri 'self';"
+        # Obscure server software for security.
         -Server
         -X-Powered-By
     }
 
-    # Admin panel protection (FIXED: Docker secrets path)
-    @admin {
-        path /admin*
-    }
-
+    # Protect the /admin path with HTTP Basic Authentication.
+    @admin path /admin*
     basic_auth @admin {
+        # The username is 'admin' and the password hash is read from a Docker secret.
         admin {file./run/secrets/admin_basic_auth_hash}
     }
 
-    # Block common attack paths
-    @blocked {
-        path /.env* /config* /.git* /.htaccess* /wp-admin* /wp-login* /phpMyAdmin* /admin.php*
-        path *.php *.asp *.jsp *.cgi
-    }
+    # Block requests for common sensitive files and paths.
+    @blocked path /.env* /config* /.git* /.htaccess* /wp-admin* /wp-login* /phpMyAdmin* /admin.php* *.php *.asp *.jsp *.cgi
     respond @blocked 404
 
-    # Block malicious user agents
-    @malicious_ua1 {
-        header User-Agent *sqlmap*
-    }
-    @malicious_ua2 {
-        header User-Agent *nikto*
-    }
-    @malicious_ua3 {
-        header User-Agent *nmap*
-    }
-    respond @malicious_ua1 403
-    respond @malicious_ua2 403
-    respond @malicious_ua3 403
+    # Block common security scanner user agents.
+    @malicious_ua header User-Agent *sqlmap* *nikto* *nmap*
+    respond @malicious_ua 403
 
-    # Optional: Enforce Cloudflare-only access
-    # @non_cloudflare {
-    #     not remote_ip @cloudflare_ips
-    # }
-    # respond @non_cloudflare 403
-
-    # WebSocket proxy for VaultWarden notifications
+    # Proxy WebSocket connections for live notifications.
     reverse_proxy /notifications/hub* vaultwarden_app:3012
 
-    # Main HTTP reverse proxy
+    # Main reverse proxy for the VaultWarden application.
     reverse_proxy vaultwarden_app:80 {
+        # Pass the real client IP to the backend via the X-Real-IP header.
+        # Vaultwarden can be configured to use this for logging.
+        # Caddy automatically handles the X-Forwarded-For header based on the global trusted_proxies config.
         header_up X-Real-IP {http.request.header.CF-Connecting-IP}
-        header_up X-Forwarded-For {http.request.header.CF-Connecting-IP}
         header_up Host {host}
 
+        # Configure active health checks for the backend service.
         health_uri /alive
         health_interval 30s
         health_timeout 10s
         health_status 200
-
-        transport http {
-            keepalive 30s
-            keepalive_idle_conns 10
-            compression off
-        }
-
-        flush_interval -1
     }
 }
 
-# Redirect www subdomain
+# Redirect the www subdomain to the main domain.
 www.{$DOMAIN} {
     redir https://{$DOMAIN}{uri} 301
 }
 
-# Security catch-all
+# Security catch-all: respond with 404 to any requests that don't match a configured host.
+# This prevents Caddy from issuing certificates for unknown domains.
 :80, :443 {
     respond "Not Found" 404
 }
