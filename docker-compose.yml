@@ -63,6 +63,8 @@ services:
           memory: '${VAULTWARDEN_MEMORY_RESERVATION:-256m}'
 
   # Caddy Reverse Proxy
+  services:
+  # Enhanced caddy with cloudflare integration
   caddy:
     image: ghcr.io/caddybuilds/caddy-cloudflare:${CADDY_VERSION:-latest}
     container_name: vaultwarden_caddy
