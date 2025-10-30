@@ -1,18 +1,18 @@
-# Caddyfile for VaultWarden-OCI-Simplified
-# MODIFIED: WebSocket proxy is now commented out by default. Uncomment to enable.
-# MODIFIED: Implemented path-scoped Content-Security-Policy for enhanced XSS protection.
-
+# Enhanced Caddyfile for CaddyBuilds/caddy-cloudflare with automatic IP management
 {
-    # Global options block
+    # Global ACME DNS configuration using file-based secret
+    acme_dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+    
+    # Global server configuration with automatic Cloudflare IP management
     servers {
-        trusted_proxies static private_ranges
-        client_ip_headers X-Forwarded-For CF-Connecting-IP
+        # Trust Cloudflare IPs automatically (updated by caddy-cloudflare-ip module)
+        trusted_proxies cloudflare
+        # Use the correct Cloudflare connecting IP header
+        client_ip_headers Cf-Connecting-Ip X-Forwarded-For
     }
 }
 
 {$DOMAIN} {
-    import cloudflare-ips.caddy
-
     log {
         output file /logs/access.log {
             roll_size 10MB
@@ -21,7 +21,7 @@
         format json
     }
 
-    # --- Hardened Default CSP ---
+    # Enhanced security headers
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
         X-Content-Type-Options "nosniff"
@@ -32,7 +32,7 @@
         -Server
     }
 
-    # --- Admin Panel Handle ---
+    # Admin panel protection with proper IP handling
     @admin path /admin*
     handle @admin {
         header {
@@ -44,22 +44,22 @@
         }
 
         reverse_proxy vaultwarden_app:80 {
-            header_up X-Real-IP {http.request.header.CF-Connecting-IP}
+            header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
+            header_up X-Forwarded-For {http.request.header.Cf-Connecting-Ip}
         }
     }
 
-    # --- Main Application Handle ---
+    # Main application with enhanced IP handling
     handle {
-        @malicious_ua header User-Agent *sqlmap* *nikto* *nmap*
+        @malicious_ua header User-Agent *sqlmap* *nikto* *nmap* *acunetix*
         respond @malicious_ua 403
 
-        # MODIFIED: To enable WebSocket for live client sync, uncomment the following line.
-        # This requires WEBSOCKET_ENABLED=true in your.env file.
+        # WebSocket support for live sync (uncomment if WEBSOCKET_ENABLED=true)
         # reverse_proxy /notifications/hub* vaultwarden_app:3012
 
-        # Main reverse proxy for the VaultWarden application.
         reverse_proxy vaultwarden_app:80 {
-            header_up X-Real-IP {http.request.header.CF-Connecting-IP}
+            header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
+            header_up X-Forwarded-For {http.request.header.Cf-Connecting-Ip}
         }
     }
 }
