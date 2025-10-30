@@ -1,7 +1,10 @@
 # Enhanced Caddyfile for CaddyBuilds/caddy-cloudflare with automatic IP management
 {
-    # Global ACME DNS configuration using file-based secret
-    acme_dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+    # Global ACME DNS configuration
+    # FIXED: Removed {env.CLOUDFLARE_API_TOKEN}
+    # Caddy automatically uses the CLOUDFLARE_API_TOKEN_FILE env var
+    # (set in docker-compose.yml) when this directive is present.
+    acme_dns cloudflare
     
     # Global server configuration with automatic Cloudflare IP management
     servers {
@@ -54,7 +57,7 @@
         @malicious_ua header User-Agent *sqlmap* *nikto* *nmap* *acunetix*
         respond @malicious_ua 403
 
-        # WebSocket support for live sync (uncomment if WEBSOCKET_ENABLED=true)
+        # WebSocket support for live sync (uncomment if WEBSOCKET_ENABLED=true in .env)
         # reverse_proxy /notifications/hub* vaultwarden_app:3012
 
         reverse_proxy vaultwarden_app:80 {
