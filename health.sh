@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# health.sh - Comprehensive health monitoring for VaultWarden-OCI-NG
+# health.sh - Enhanced health monitoring for VaultWarden-OCI with Caddy-Cloudflare
+# UPDATED: Added caddy-cloudflare specific checks, removed ddclient references
 
 set -euo pipefail
 
@@ -9,6 +10,8 @@ cd "$PROJECT_ROOT"
 
 source "lib/common.sh"
 init_common_lib "$0"
+source "lib/docker.sh"
+source "lib/crypto.sh"
 
 # Configuration
 COMPREHENSIVE=false
@@ -19,7 +22,7 @@ OUTPUT_FILE=""
 
 show_help() {
     cat << 'EOF'
-VaultWarden-OCI-NG Health Monitor
+VaultWarden-OCI Health Monitor - Enhanced for Caddy-Cloudflare
 
 USAGE:
     ./health.sh [OPTIONS]
@@ -49,6 +52,7 @@ HEALTH CHECKS:
     - Network connectivity tests
     - Configuration validation
     - Security status checks
+    - Caddy-Cloudflare integration
     - Performance metrics
 EOF
 }
@@ -96,7 +100,7 @@ health_log_error() {
 check_container_status() {
     health_log_info "Checking container status..."
     
-    local containers=("vaultwarden_app" "vaultwarden_caddy" "vaultwarden_fail2ban" "vaultwarden_ddclient")
+    local containers=("vaultwarden_app" "vaultwarden_caddy" "vaultwarden_fail2ban")
     local unhealthy_containers=()
     local stopped_containers=()
     
@@ -172,6 +176,58 @@ check_service_accessibility() {
     fi
 }
 
+check_caddy_cloudflare_integration() {
+    [[ "$COMPREHENSIVE" == "false" ]] && return 0
+    
+    health_log_info "Checking Caddy-Cloudflare integration..."
+    
+    local cf_issues=()
+    
+    # Check if Caddy is responding
+    if ! docker compose exec caddy caddy version >/dev/null 2>&1; then
+        cf_issues+=("Caddy not responding")
+    fi
+    
+    # Check SSL certificates with DNS-01 challenge
+    local cert_info
+    cert_info=$(docker compose exec caddy caddy list-certificates 2>/dev/null || echo "")
+    if [[ -n "$cert_info" ]]; then
+        if echo "$cert_info" | grep -q "DNS challenge"; then
+            health_log_success "DNS-01 ACME challenges active"
+        else
+            cf_issues+=("DNS-01 challenges not detected")
+        fi
+    else
+        cf_issues+=("Cannot retrieve certificate information")
+    fi
+    
+    # Check Cloudflare IP trust configuration
+    local caddy_config
+    caddy_config=$(docker compose exec caddy caddy config --json 2>/dev/null || echo "{}")
+    if echo "$caddy_config" | jq -e '.apps.http.servers | to_entries[] | .value.trusted_proxies' >/dev/null 2>&1; then
+        health_log_success "Cloudflare trusted proxies configured"
+    else
+        cf_issues+=("Cloudflare trusted proxies not configured")
+    fi
+    
+    # Check API token file accessibility
+    if docker compose exec caddy test -f /run/secrets/caddy_cloudflare_dns_token 2>/dev/null; then
+        health_log_success "Cloudflare DNS API token accessible"
+    else
+        cf_issues+=("Cloudflare DNS API token not accessible")
+    fi
+    
+    if [[ ${#cf_issues[@]} -gt 0 ]]; then
+        health_log_warn "Caddy-Cloudflare issues: ${cf_issues[*]}"
+        HEALTH_RESULTS["caddy_cloudflare"]="degraded"
+        HEALTH_DETAILS["caddy_cloudflare"]="Issues: ${cf_issues[*]}"
+    else
+        health_log_success "Caddy-Cloudflare integration healthy"
+        HEALTH_RESULTS["caddy_cloudflare"]="healthy"
+        HEALTH_DETAILS["caddy_cloudflare"]="DNS-01 ACME and IP management active"
+    fi
+}
+
 check_resource_usage() {
     [[ "$COMPREHENSIVE" == "false" ]] && return 0
     
@@ -179,19 +235,19 @@ check_resource_usage() {
     
     # CPU usage
     local cpu_usage
-    cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1 | cut -d'u' -f1)
+    cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1 | cut -d'u' -f1 2>/dev/null || echo "0")
     
     # Memory usage
     local mem_usage
-    mem_usage=$(free | grep Mem | awk '{printf "%.0f", $3/$2 * 100.0}')
+    mem_usage=$(free | grep Mem | awk '{printf "%.0f", $3/$2 * 100.0}' 2>/dev/null || echo "0")
     
     # Disk usage
     local disk_usage
-    disk_usage=$(df "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}" | tail -1 | awk '{print $5}' | cut -d'%' -f1)
+    disk_usage=$(df "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}" 2>/dev/null | tail -1 | awk '{print $5}' | cut -d'%' -f1 || echo "0")
     
     local resource_issues=()
     
-    if (( $(echo "$cpu_usage > $ALERT_THRESHOLD" | bc -l) )); then
+    if (( $(echo "$cpu_usage > $ALERT_THRESHOLD" | bc -l 2>/dev/null || echo "0") )); then
         resource_issues+=("CPU: ${cpu_usage}%")
     fi
     
@@ -223,7 +279,7 @@ check_storage_space() {
     local total_size usage_percent
     
     if [[ -d "$state_dir" ]]; then
-        read -r total_size usage_percent < <(df -h "$state_dir" | tail -1 | awk '{print $2, $5}' | tr -d '%')
+        read -r total_size usage_percent < <(df -h "$state_dir" 2>/dev/null | tail -1 | awk '{print $2, $5}' | tr -d '%' || echo "unknown 0")
         
         if (( usage_percent > ALERT_THRESHOLD )); then
             health_log_warn "Storage usage high: ${usage_percent}% of ${total_size}"
@@ -253,7 +309,7 @@ check_configuration() {
         config_issues+=("Missing .env file")
     else
         # Check required variables
-        local required_vars=("DOMAIN" "ADMIN_EMAIL")
+        local required_vars=("DOMAIN" "ADMIN_EMAIL" "CLOUDFLARE_ZONE_ID")
         for var in "${required_vars[@]}"; do
             if ! grep -q "^${var}=" .env; then
                 config_issues+=("Missing $var in .env")
@@ -266,11 +322,34 @@ check_configuration() {
         config_issues+=("Missing secrets.yaml file")
     elif ! ./edit-secrets.sh --test >/dev/null 2>&1; then
         config_issues+=("Secrets decryption failed")
+    else
+        # Check for caddy-cloudflare specific secrets
+        local decrypted_secrets
+        decrypted_secrets=$(sops --decrypt --output-type json secrets/secrets.yaml 2>/dev/null || echo "{}")
+        
+        local required_secrets=("caddy_cloudflare_dns_token" "fail2ban_cloudflare_firewall_token" "admin_basic_auth_hash")
+        for secret in "${required_secrets[@]}"; do
+            local value
+            value=$(echo "$decrypted_secrets" | jq -r --arg key "$secret" '.[$key] // ""')
+            if [[ -z "$value" ]] || [[ "$value" == "null" ]] || [[ "$value" == CHANGE_ME* ]]; then
+                config_issues+=("$secret not properly configured")
+            fi
+        done
     fi
     
-    # Check Caddyfile syntax
-    if ! docker compose run --rm caddy caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1; then
+    # Check Caddyfile syntax with caddy-cloudflare
+    if ! timeout 10 docker run --rm \
+        -v "$PWD/caddy/Caddyfile:/etc/caddy/Caddyfile:ro" \
+        --env DOMAIN="${DOMAIN:-vault.example.com}" \
+        --env CLOUDFLARE_API_TOKEN="test-token" \
+        ghcr.io/caddybuilds/caddy-cloudflare:latest \
+        caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1; then
         config_issues+=("Caddy configuration syntax error")
+    fi
+    
+    # Check Docker Compose syntax
+    if ! docker compose config >/dev/null 2>&1; then
+        config_issues+=("Docker Compose configuration error")
     fi
     
     if [[ ${#config_issues[@]} -gt 0 ]]; then
@@ -317,6 +396,15 @@ check_security_status() {
         fi
     fi
     
+    # Check Age key permissions
+    if [[ -f "secrets/keys/age-key.txt" ]]; then
+        local age_perms
+        age_perms=$(stat -c "%a" "secrets/keys/age-key.txt" 2>/dev/null || echo "000")
+        if [[ "$age_perms" != "600" ]]; then
+            security_issues+=("Age key has incorrect permissions: $age_perms")
+        fi
+    fi
+    
     if [[ ${#security_issues[@]} -gt 0 ]]; then
         health_log_warn "Security issues found: ${security_issues[*]}"
         HEALTH_RESULTS["security"]="degraded"
@@ -325,6 +413,39 @@ check_security_status() {
         health_log_success "Security status good"
         HEALTH_RESULTS["security"]="healthy"
         HEALTH_DETAILS["security"]="All security checks passed"
+    fi
+}
+
+check_network_connectivity() {
+    [[ "$COMPREHENSIVE" == "false" ]] && return 0
+    
+    health_log_info "Checking network connectivity..."
+    
+    local network_issues=()
+    
+    # Test basic internet connectivity
+    if ! test_connectivity "1.1.1.1" 5; then
+        network_issues+=("No internet connectivity")
+    fi
+    
+    # Test Cloudflare API connectivity
+    if ! test_http "https://api.cloudflare.com/client/v4/zones" 10; then
+        network_issues+=("Cannot reach Cloudflare API")
+    fi
+    
+    # Test Docker network
+    if ! docker network inspect vaultwarden_vaultwarden_network >/dev/null 2>&1; then
+        network_issues+=("Docker network not found")
+    fi
+    
+    if [[ ${#network_issues[@]} -gt 0 ]]; then
+        health_log_warn "Network connectivity issues: ${network_issues[*]}"
+        HEALTH_RESULTS["network"]="degraded"
+        HEALTH_DETAILS["network"]="Issues: ${network_issues[*]}"
+    else
+        health_log_success "Network connectivity good"
+        HEALTH_RESULTS["network"]="healthy"
+        HEALTH_DETAILS["network"]="All network tests passed"
     fi
 }
 
@@ -338,7 +459,7 @@ generate_report() {
 
 generate_text_report() {
     local report=""
-    report+="VaultWarden-OCI-NG Health Report\n"
+    report+="VaultWarden-OCI Health Report - Enhanced for Caddy-Cloudflare\n"
     report+="Generated: $(date)\n"
     report+="Overall Status: $OVERALL_STATUS\n\n"
     
@@ -413,7 +534,7 @@ generate_json_report() {
 }
 
 main() {
-    health_log_info "VaultWarden-OCI-NG Health Monitor"
+    health_log_info "VaultWarden-OCI Health Monitor - Enhanced for Caddy-Cloudflare"
     
     if [[ "$COMPREHENSIVE" == "true" ]]; then
         health_log_info "Running comprehensive health checks..."
@@ -421,13 +542,18 @@ main() {
         health_log_info "Running basic health checks..."
     fi
     
+    # Load environment if available
+    load_env_file 2>/dev/null || true
+    
     # Run health checks
     check_container_status
     check_service_accessibility
+    check_caddy_cloudflare_integration
     check_resource_usage
     check_storage_space
     check_configuration
     check_security_status
+    check_network_connectivity
     
     # Generate report
     generate_report
