@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# update.sh - Enhanced VaultWarden update tool with caddy-cloudflare support
-# UPDATED: Modified for caddy-cloudflare image, removed ddclient references
+# edit-secrets.sh - Enhanced secrets management with caddy-cloudflare support
+# UPDATED: Added separate DNS/Firewall tokens, bcrypt vs Argon2 handling
 
 set -euo pipefail
 
@@ -12,618 +12,490 @@ cd "$PROJECT_ROOT"
 # --- Source Libraries ---
 source "lib/common.sh"
 init_common_lib "$0"
-source "lib/docker.sh"
 source "lib/crypto.sh"
+source "lib/docker.sh"
 
 # --- Configuration ---
-UPDATE_TYPE="containers"
-AUTO_BACKUP=true
-DRY_RUN=false
-FORCE=false
-PIN_SERVICE=""
-PIN_VERSION=""
-UNPIN_SERVICE=""
-SHOW_PINS=false
-ENV_FILE=".env"
+EDITOR="${EDITOR:-nano}"
+SECRETS_FILE="secrets/secrets.yaml"
+AGE_KEY_FILE="secrets/keys/age-key.txt"
+SOPS_CONFIG_FILE=".sops.yaml"
+export SOPS_AGE_KEY_FILE="$PROJECT_ROOT/$AGE_KEY_FILE"
 
 # --- Help ---
 show_help() {
     cat << 'EOF'
-VaultWarden-OCI Update Tool - Enhanced for Caddy-Cloudflare
+VaultWarden Secrets Editor - Enhanced for Caddy-Cloudflare
 
 USAGE:
-    ./update.sh
-    ./update.sh --pin <service> <version>
-    ./update.sh --unpin <service>
-    ./update.sh --show-pins
+    ./edit-secrets.sh
 
-STANDARD UPDATE OPTIONS:
-    --type TYPE        Update type: containers, system, all (default: containers)
-    --no-backup       Skip automatic backup before update
-    --dry-run         Show what would be updated without executing
-    --force           Skip confirmation prompts (and auto-reboot if required)
-    --help            Show this help
+OPTIONS:
+    --editor EDITOR  Editor to use (default: nano, or $EDITOR)
+    --init          Initialize secrets file with templates
+    --show          Show decrypted secrets (careful!)
+    --test          Test if secrets can be decrypted
+    --help          Show this help
 
-VERSION MANAGEMENT OPTIONS:
-    --pin SERVICE VERSION   Pin a specific service to a version in .env
-                            (e.g., --pin vaultwarden 1.31.0)
-    --unpin SERVICE         Remove version pin for a service in .env
-                            (e.g., --unpin caddy)
-    --show-pins             Display currently pinned versions from .env
-
-UPDATE TYPES:
-    containers    Update Docker containers based on .env pins or 'latest'
-    system        Update system packages (will auto-reboot if needed with --force)
-    all           Update both containers and system
-
-SUPPORTED SERVICES (for --pin/--unpin):
-    vaultwarden   VaultWarden password manager
-    caddy         Caddy-Cloudflare reverse proxy (replaces separate caddy+ddclient)
-    fail2ban      Fail2Ban intrusion prevention
-
-NOTE:
-    - ddclient service removed (functionality integrated into caddy-cloudflare)
-    - Using --pin or --unpin modifies the .env file
-    - Run './update.sh --type containers' after pinning to apply changes
+DESCRIPTION:
+    Safely edit encrypted secrets using SOPS and Age encryption.
+    Enhanced for caddy-cloudflare with separate DNS/Firewall tokens.
+    
+    PASSWORD HASH TYPES:
+    - VaultWarden admin_token: Plain text (VaultWarden hashes to Argon2)
+    - Caddy admin_basic_auth_hash: bcrypt format (use menu option 2)
 
 EXAMPLES:
-    ./update.sh                     # Update containers based on .env
-    ./update.sh --type system      # Update system packages
-    ./update.sh --pin vaultwarden 1.31.0 # Pin VaultWarden to 1.31.0
-    ./update.sh --pin caddy 2.8.4         # Pin Caddy-Cloudflare to 2.8.4
-    ./update.sh --unpin caddy              # Use latest Caddy-Cloudflare
-    ./update.sh --show-pins                # View current pins
+    ./edit-secrets.sh           # Edit secrets with menu
+    ./edit-secrets.sh --editor vim   # Use vim as editor
+    ./edit-secrets.sh --init    # Create new secrets file
+    ./edit-secrets.sh --show    # Display current secrets (careful!)
+    ./edit-secrets.sh --test    # Check secrets accessibility
 EOF
 }
 
 # --- Argument Parsing ---
+SHOW_MODE=false
+INIT_MODE=false
+TEST_MODE=false
+
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --type) UPDATE_TYPE="$2"; shift 2 ;;
-        --no-backup) AUTO_BACKUP=false; shift ;;
-        --dry-run) DRY_RUN=true; shift ;;
-        --force) FORCE=true; shift ;;
-        --pin)
-            if [[ $# -lt 3 ]]; then log_error "--pin requires SERVICE and VERSION arguments"; show_help; exit 1; fi
-            PIN_SERVICE="$2"; PIN_VERSION="$3"; shift 3 ;;
-        --unpin)
-            if [[ $# -lt 2 ]]; then log_error "--unpin requires SERVICE argument"; show_help; exit 1; fi
-            UNPIN_SERVICE="$2"; shift 2 ;;
-        --show-pins) SHOW_PINS=true; shift ;;
+        --editor) EDITOR="$2"; shift 2 ;;
+        --init) INIT_MODE=true; shift ;;
+        --show) SHOW_MODE=true; shift ;;
+        --test) TEST_MODE=true; shift ;;
         --help) show_help; exit 0 ;;
         *) log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done
 
-# --- Version Management Functions ---
+# --- Validation ---
+check_prerequisites() {
+    require_commands age "$EDITOR" jq docker || return 1
 
-validate_service_name() {
-    local service="$1"
-    case "$service" in
-        vaultwarden|caddy|fail2ban) return 0 ;;
-        ddclient) 
-            log_error "ddclient service has been replaced by caddy-cloudflare integration."
-            log_info "Use 'caddy' service name instead."
-            return 1 ;;
-        *) 
-            log_error "Invalid service name: '$service'. Must be one of: vaultwarden, caddy, fail2ban."
-            log_info "Note: ddclient has been integrated into caddy-cloudflare."
-            return 1 ;;
-    esac
-}
-
-get_version_var_name() {
-    local service="$1"
-    echo "${service^^}_VERSION"
-}
-
-pin_service_version() {
-    local service="$1"
-    local version="$2"
-    local var_name
-
-    validate_service_name "$service" || return 1
-    var_name=$(get_version_var_name "$service")
-
-    log_info "Pinning $service to version $version in $ENV_FILE..."
-
-    if [[ ! -f "$ENV_FILE" ]]; then
-        log_error "$ENV_FILE not found. Cannot pin version."
+    if ! check_sops_available; then
+        log_error "SOPS command not found"
+        log_info "SOPS should have been installed during setup."
         return 1
     fi
 
-    local temp_env
-    temp_env=$(mktemp)
-    setup_cleanup_trap "rm -f '$temp_env'"
-
-    awk -v var="$var_name" -v val="$version" '
-    BEGIN { found = 0 }
-    $0 ~ "^" var "=" { print var "=" val; found = 1; next }
-    $0 ~ "^#" var "=" { print var "=" val; found = 1; next }
-    { print }
-    END { if (!found) print var "=" val }
-    ' "$ENV_FILE" > "$temp_env"
-
-    if mv "$temp_env" "$ENV_FILE"; then
-        log_success "$service pinned to $version in $ENV_FILE"
-        log_info "Run './update.sh --type containers' to apply this change."
-    else
-        log_error "Failed to update $ENV_FILE"
-        rm -f "$temp_env"
+    if ! check_age_key "$SOPS_AGE_KEY_FILE"; then
+        log_error "Age private key not found or has incorrect permissions: $SOPS_AGE_KEY_FILE"
+        log_info "Ensure the file exists and has permissions 600 (rw-------)."
         return 1
     fi
+
+    if [[ ! -f "$SOPS_CONFIG_FILE" ]]; then
+        log_warn "SOPS configuration file ($SOPS_CONFIG_FILE) not found."
+        log_info "Relying solely on SOPS_AGE_KEY_FILE environment variable."
+    fi
+
     return 0
 }
 
-unpin_service_version() {
-    local service="$1"
-    local var_name
+# --- Initialize Secrets ---
+init_secrets() {
+    log_info "Initializing secrets file from template..."
 
-    validate_service_name "$service" || return 1
-    var_name=$(get_version_var_name "$service")
-
-    log_info "Unpinning $service version in $ENV_FILE (will default to latest)..."
-
-    if [[ ! -f "$ENV_FILE" ]]; then
-        log_warn "$ENV_FILE not found. Nothing to unpin."
-        return 0
-    fi
-
-    if grep -q "^\s*[^#]*${var_name}=" "$ENV_FILE"; then
-        sed -i -e "/^\s*${var_name}=/s/^/#/" "$ENV_FILE"
-        log_success "$service unpinned in $ENV_FILE. It will now default to 'latest'."
-        log_info "Run './update.sh --type containers' to apply this change."
-    elif grep -q "^\s*#\s*${var_name}=" "$ENV_FILE"; then
-        log_info "$service version is already commented out (unpinned) in $ENV_FILE."
-    else
-        log_info "$service version variable not found in $ENV_FILE. Already defaulting to 'latest'."
-    fi
-    return 0
-}
-
-show_pinned_versions() {
-    log_info "Currently pinned versions in $ENV_FILE:"
-    echo ""
-    local found_pins=false
-    if [[ -f "$ENV_FILE" ]]; then
-        while IFS= read -r line; do
-            if [[ -n "$line" ]]; then
-                echo "  $line"
-                found_pins=true
-            fi
-        done < <(grep -E "^\s*[^#]*(VAULTWARDEN|CADDY|FAIL2BAN)_VERSION=" "$ENV_FILE" || true)
-    fi
-
-    if [[ "$found_pins" == "false" ]]; then
-        log_info "  No versions are currently pinned. All services will use 'latest' tag."
-    fi
-    echo ""
-    log_info "Services without a line above will default to the 'latest' tag."
-    log_info "Note: ddclient service has been integrated into caddy-cloudflare."
-}
-
-# --- Pre-Update Backup ---
-create_backup() {
-    if [[ "$AUTO_BACKUP" == "false" ]]; then
-        log_info "Skipping backup (--no-backup specified)"
-        return 0
-    fi
-
-    log_info "Creating pre-update backup..."
-
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info " Would create backup with: ./backup.sh --type full"
-        return 0
-    fi
-
-    if ./backup.sh --type full >/dev/null 2>&1; then
-        log_success "Pre-update backup created"
-        return 0
-    else
-        log_error "Failed to create pre-update backup"
-        log_warn "Continue without backup? This is not recommended."
-
-        if [[ "$FORCE" == "true" ]]; then
-            log_warn "Continuing without backup (--force specified)"
+    if [[ -f "$SECRETS_FILE" ]]; then
+        log_warn "Secrets file already exists: $SECRETS_FILE"
+        read -p "Overwrite existing file? (y/N): " confirm
+        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+            log_info "Cancelled"
             return 0
         fi
+        rm -f "$SECRETS_FILE"
+    fi
 
-        read -p "Continue anyway? (y/N): " continue_choice
-        if [[ "$continue_choice" =~ ^[Yy]$ ]]; then
-            log_warn "Proceeding without backup"
-            return 0
+    ensure_dir "$(dirname "$SECRETS_FILE")" 700
+
+    local admin_token backup_pass
+    admin_token=$(generate_secure_string 32)
+    backup_pass=$(generate_secure_string 32)
+
+    cat > "$SECRETS_FILE" << EOF
+# VaultWarden Secrets Configuration - Enhanced for Caddy-Cloudflare
+# IMPORTANT: Different hash types for different services
+
+# VaultWarden admin token (plain text - VaultWarden auto-hashes to Argon2)
+admin_token: $admin_token
+
+# Caddy basic_auth hash for /admin endpoint (bcrypt format)
+# Generate with: docker run --rm -it ghcr.io/caddybuilds/caddy-cloudflare:latest caddy hash-password
+admin_basic_auth_hash: CHANGE_ME_BCRYPT_HASH
+
+# SMTP password for email notifications
+smtp_password: CHANGE_ME_SMTP_PASSWORD
+
+# Backup encryption passphrase
+backup_passphrase: $backup_pass
+
+# Push notifications (optional - get ID and Key from bitwarden.com/host)
+push_installation_id: CHANGE_ME_OR_LEAVE_EMPTY  
+push_installation_key: CHANGE_ME_OR_LEAVE_EMPTY
+
+# Cloudflare DNS API token for caddy-cloudflare (DNS-01 ACME challenges)
+# Permissions: Zone:DNS:Edit + Zone:Zone:Read
+caddy_cloudflare_dns_token: CHANGE_ME_DNS_TOKEN
+
+# Cloudflare Firewall API token for fail2ban IP blocking
+# Permissions: Zone:Firewall Services:Edit
+fail2ban_cloudflare_firewall_token: CHANGE_ME_FIREWALL_TOKEN
+EOF
+
+    log_success "Template secrets file created"
+    log_info "Now encrypting with SOPS..."
+
+    if sops --input-type yaml --encrypt --in-place "$SECRETS_FILE"; then
+        log_success "Secrets file encrypted successfully"
+        secure_file "$SECRETS_FILE" 600
+    else
+        log_error "Failed to encrypt secrets file"
+        return 1
+    fi
+
+    log_warn "IMPORTANT: Update the CHANGE_ME values:"
+    log_info "  1. Run: ./edit-secrets.sh (choose option 1)"
+    log_info "  2. Generate bcrypt hash with option 2"
+    log_info "  3. Update caddy_cloudflare_dns_token"
+    log_info "  4. Update fail2ban_cloudflare_firewall_token"
+    log_info "  5. Update smtp_password if using email"
+
+    return 0
+}
+
+# --- Show Secrets ---
+show_secrets() {
+    log_warn "⚠️  SECURITY WARNING: Displaying decrypted secrets!"
+    read -p "Are you sure you want to continue? (y/N): " confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        log_info "Cancelled"
+        return 0
+    fi
+
+    if [[ ! -f "$SECRETS_FILE" ]]; then
+        log_error "Secrets file not found: $SECRETS_FILE"
+        log_info "Run: ./edit-secrets.sh --init"
+        return 1
+    fi
+
+    echo ""
+    echo "=== DECRYPTED SECRETS ==="
+    if sops_decrypt "$SECRETS_FILE" "" "yaml"; then
+        echo "========================="
+        echo ""
+        log_warn "Remember to keep these values secure!"
+    else
+        log_error "Failed to decrypt secrets file"
+        return 1
+    fi
+
+    return 0
+}
+
+# --- Edit Secrets ---
+edit_secrets() {
+    log_info "Opening encrypted secrets for editing..."
+
+    if [[ ! -f "$SECRETS_FILE" ]]; then
+        log_error "Secrets file not found: $SECRETS_FILE"
+        log_info "Run: ./edit-secrets.sh --init to create it"
+        return 1
+    fi
+
+    # Comprehensive permission checks
+    if [[ ! -r "$SOPS_AGE_KEY_FILE" ]]; then
+        log_error "Cannot read Age key file: $SOPS_AGE_KEY_FILE"
+        return 1
+    fi
+    if [[ ! -w "$SECRETS_FILE" ]]; then
+        log_error "Cannot write to secrets file: $SECRETS_FILE"
+        return 1
+    fi
+    if [[ ! -w "$(dirname "$SECRETS_FILE")" ]]; then
+        log_error "Cannot write to secrets directory: $(dirname "$SECRETS_FILE")"
+        return 1
+    fi
+    if [[ -f "$SOPS_CONFIG_FILE" ]] && [[ ! -r "$SOPS_CONFIG_FILE" ]]; then
+        log_warn "Cannot read SOPS config file: $SOPS_CONFIG_FILE. Relying on SOPS_AGE_KEY_FILE."
+    fi
+
+    if ! is_sops_encrypted "$SECRETS_FILE"; then
+        log_error "Secrets file exists but does not appear to be encrypted with SOPS"
+        return 1
+    fi
+
+    log_debug "Performing pre-edit decryption test..."
+    if ! sops_decrypt "$SECRETS_FILE" "/dev/null" >/dev/null 2>&1; then
+        log_error "Pre-edit decryption test failed. Cannot proceed with edit."
+        return 1
+    fi
+    log_success "Pre-edit decryption test passed."
+
+    log_info "Using editor: $EDITOR"
+    log_info "The file will be automatically re-encrypted when you save and exit."
+    echo ""
+
+    if EDITOR="$EDITOR" sops "$SECRETS_FILE"; then
+        log_success "Secrets updated successfully"
+
+        if is_sops_encrypted "$SECRETS_FILE"; then
+            log_success "Secrets file encryption verified"
         else
-            log_info "Update cancelled"
-            exit 1
+            log_error "CRITICAL WARNING: Secrets file may NOT be properly encrypted after editing!"
+            return 1
         fi
+
+        secure_file "$SECRETS_FILE" 600
+
+        echo ""
+        log_info "To apply changes to running services:"
+        log_info "  make restart  (or ./startup.sh --force-restart)"
+
+    else
+        log_warn "Editor exited with a non-zero status or SOPS encountered an error."
+        log_info "Secrets file should remain unchanged."
+        return 1
     fi
+
+    return 0
 }
 
-# --- Container Updates ---
-update_containers() {
-    log_info "Updating Docker containers..."
-
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info " Would pull container images based on .env or 'latest'"
-        log_info " Would restart containers if images were updated"
-        return 0
-    fi
-
-    require_docker || return 1
-
-    if ! validate_compose_file; then
-        log_error "Docker Compose configuration is invalid"
-        return 1
-    fi
-
-    local services
-    services=$(docker compose config --services 2>/dev/null || echo "")
-
-    if [[ -z "$services" ]]; then
-        log_error "Could not determine services from docker-compose.yml"
-        return 1
-    fi
-
-    log_info "Current container versions (before pull):"
-    declare -A old_ids
-    for service in $services; do
-        local image current_id
-        local var_name pinned_version effective_tag
-        var_name=$(get_version_var_name "$service")
-        pinned_version="${!var_name:-}"
-        [[ -n "$pinned_version" ]] && effective_tag="$pinned_version" || effective_tag="latest"
-
-        # Enhanced image name construction for caddy-cloudflare
-        case "$service" in
-            caddy)
-                image_base="ghcr.io/caddybuilds/caddy-cloudflare"
-                ;;
-            *)
-                image_base=$(docker compose config | awk -v service="$service" '/^ *'"$service"':/,/image:/' | grep 'image:' | awk '{print $2}' | sed 's/:.*//')
-                ;;
-        esac
-        image="${image_base}:${effective_tag}"
-
-        current_id=$(docker images --format "{{.ID}}" "$image" 2>/dev/null | head -1 || echo "not_found")
-        old_ids["$service"]="$current_id"
-        log_info "  $service: $image ($current_id)"
-    done
-
+# --- Generate Caddy bcrypt Password Hash ---
+generate_caddy_password_hash() {
+    log_info "Caddy Password Hash Generator (bcrypt for basic_auth)"
     echo ""
-    log_info "Pulling container images..."
-    pull_images || log_warn "Image pull command encountered issues."
+    log_info "This generates a bcrypt hash for Caddy's basic_auth directive."
+    log_info "This is DIFFERENT from VaultWarden's admin token (which uses Argon2)."
+    echo ""
 
-    local updated_services=()
-    log_info "Checking for updated images..."
-    for service in $services; do
-        local image new_id
-        local var_name pinned_version effective_tag
-        var_name=$(get_version_var_name "$service")
-        pinned_version="${!var_name:-}"
-        [[ -n "$pinned_version" ]] && effective_tag="$pinned_version" || effective_tag="latest"
-
-        # Enhanced image name construction for caddy-cloudflare
-        case "$service" in
-            caddy)
-                image_base="ghcr.io/caddybuilds/caddy-cloudflare"
-                ;;
-            *)
-                image_base=$(docker compose config | awk -v service="$service" '/^ *'"$service"':/,/image:/' | grep 'image:' | awk '{print $2}' | sed 's/:.*//')
-                ;;
-        esac
-        image="${image_base}:${effective_tag}"
-
-        new_id=$(docker inspect --format='{{.Id}}' "$image" 2>/dev/null || echo "unknown")
-
-        if [[ "${old_ids["$service"]}" != "$new_id" && "$new_id" != "unknown" ]]; then
-            if [[ "${old_ids["$service"]}" == "not_found" ]]; then
-                log_info "  $service: New image pulled ($image -> $new_id)"
-            else
-                log_info "  $service: Image updated ($image: ${old_ids["$service"]} -> $new_id)"
-            fi
-            updated_services+=("$service")
-        elif [[ "$new_id" == "unknown" ]]; then
-            log_warn "  $service: Could not inspect image '$image'. Pull might have failed."
-        fi
-    done
-
-    if [[ ${#updated_services[@]} -eq 0 ]]; then
-        log_success "All container images are already up to date"
-        return 0
+    if ! check_docker_available; then
+        log_error "Docker is not available or the daemon is not running."
+        log_info "Please ensure Docker is installed and started."
+        return 1
     fi
 
-    log_info "Services with image updates: ${updated_services[*]}"
-    log_info "Recreating containers with new images..."
-    if recreate_services; then
-        log_success "Containers recreated successfully"
-        log_info "Waiting for services to stabilize..."
-        sleep 15
+    log_info "This will run a temporary caddy-cloudflare container to generate the hash."
+    log_info "This works even if your main services are not running."
+    echo ""
+    log_info "You will be prompted to enter and confirm your password."
+    log_info "After confirming, copy the entire hash output (starts with '\$2a\$...')."
+    echo ""
 
-        local failed_services=()
-        for service in $services; do
-            if ! wait_for_service_ready "$service" 30; then
-                failed_services+=("$service")
+    # Use caddy-cloudflare image which has the hash-password command
+    if docker run --rm -it ghcr.io/caddybuilds/caddy-cloudflare:latest caddy hash-password; then
+        echo ""
+        log_success "Bcrypt hash generated successfully above."
+        log_info "Use the 'Edit secrets' option to paste this hash as 'admin_basic_auth_hash'."
+        echo ""
+        log_warn "IMPORTANT: This bcrypt hash is for Caddy basic_auth only."
+        log_info "VaultWarden admin_token should remain as plain text (auto-hashed to Argon2)."
+    else
+        log_error "Failed to run hash generation command."
+        log_info "Ensure you have internet connection to pull the caddy-cloudflare image."
+        return 1
+    fi
+    echo ""
+}
+
+# --- Generate VaultWarden Admin Token ---
+generate_vaultwarden_admin_token() {
+    log_info "VaultWarden Admin Token Generator"
+    echo ""
+    log_info "VaultWarden admin tokens should be stored as PLAIN TEXT in secrets."
+    log_info "VaultWarden automatically hashes them to Argon2 format internally."
+    echo ""
+    
+    local new_token
+    new_token=$(generate_secure_string 32)
+    
+    echo "Generated admin token (plain text):"
+    echo "======================================"
+    echo "$new_token"
+    echo "======================================"
+    echo ""
+    log_info "Use the 'Edit secrets' option to set this as 'admin_token' value."
+    log_warn "Store this as plain text - VaultWarden will hash it automatically."
+    echo ""
+}
+
+# --- Test Secrets Access ---
+test_secrets_access() {
+    log_info "Testing secrets access..."
+
+    if [[ ! -f "$SECRETS_FILE" ]]; then
+        log_error "Secrets file not found: $SECRETS_FILE"
+        return 1
+    fi
+
+    log_info "Attempting decryption..."
+    local decrypted_json exit_status
+    decrypted_json=$(sops --decrypt --output-type json "$SECRETS_FILE" 2>&1)
+    exit_status=$?
+
+    if [[ $exit_status -eq 0 ]]; then
+        log_success "Secrets file can be decrypted."
+
+        echo "$decrypted_json" | jq . > /dev/null 2>&1
+        local jq_status=$?
+        if [[ $jq_status -ne 0 ]]; then
+            log_error "Failed to parse decrypted JSON content."
+            return 1
+        fi
+        log_success "Decrypted content parsed successfully as JSON."
+
+        # Updated test secrets for caddy-cloudflare
+        local test_secrets=("admin_token" "admin_basic_auth_hash" "caddy_cloudflare_dns_token" "fail2ban_cloudflare_firewall_token")
+        local accessible_secrets=0
+        local missing_secrets=0
+        local placeholder_secrets=0
+
+        log_info "Checking configuration status of core secrets:"
+        for secret in "${test_secrets[@]}"; do
+            local value
+            value=$(echo "$decrypted_json" | jq -r --arg key "$secret" '.[$key] // ""')
+            if [[ -n "$value" ]] && [[ "$value" != "null" ]] && [[ "$value" != CHANGE_ME* ]]; then
+                ((accessible_secrets++))
+                log_success "  ✓ '$secret' is accessible and configured."
+            elif [[ -n "$value" ]] && [[ "$value" == CHANGE_ME* ]]; then
+                log_warn "  ✗ '$secret' has a placeholder value (e.g., CHANGE_ME...)."
+                ((placeholder_secrets++))
+            else
+                log_warn "  ✗ '$secret' not found in the secrets file."
+                ((missing_secrets++))
             fi
         done
 
-        if [[ ${#failed_services[@]} -eq 0 ]]; then
-            log_success "All services are running after update"
+        echo ""
+        if [[ $missing_secrets -eq 0 && $placeholder_secrets -eq 0 ]]; then
+            log_success "All core secrets are accessible and appear configured correctly."
+            return 0
         else
-            log_error "Some services failed to start: ${failed_services[*]}"
-            log_info "Check logs: docker compose logs <service_name>"
+            log_warn "Found $placeholder_secrets placeholder value(s) and $missing_secrets missing secret(s)."
+            log_info "Use option '1) Edit secrets' to configure them."
             return 1
         fi
+
     else
-        log_error "Failed to recreate containers"
+        log_error "Cannot decrypt secrets file."
+        log_error "SOPS Output: $decrypted_json"
+        return 1
+    fi
+}
+
+# --- Generate Docker Secrets Files ---
+generate_docker_secrets() {
+    log_info "Generating Docker Compose secret files..."
+    
+    if [[ ! -f "$SECRETS_FILE" ]]; then
+        log_error "Secrets file not found: $SECRETS_FILE"
         return 1
     fi
 
-    log_info "Cleaning up old Docker images..."
-    if cleanup_images; then
-        log_success "Old images cleaned up"
-    else
-        log_warn "Failed to clean up old images (non-critical)"
+    local secrets_dir="secrets/.docker_secrets"
+    ensure_dir "$secrets_dir" 700
+
+    # Decrypt secrets to JSON
+    local decrypted_json
+    decrypted_json=$(sops --decrypt --output-type json "$SECRETS_FILE" 2>/dev/null)
+    if [[ $? -ne 0 ]]; then
+        log_error "Failed to decrypt secrets file"
+        return 1
     fi
 
-    # Verify caddy-cloudflare integration
-    if [[ " ${updated_services[*]} " =~ " caddy " ]]; then
-        log_info "Verifying caddy-cloudflare integration..."
-        sleep 5
-        if docker compose exec caddy caddy list-certificates >/dev/null 2>&1; then
-            log_success "Caddy-Cloudflare integration verified"
+    # Extract and write individual secret files
+    local secrets_map=(
+        "admin_token:admin_token"
+        "admin_basic_auth_hash:admin_basic_auth_hash"
+        "smtp_password:smtp_password"
+        "push_installation_id:push_installation_id"
+        "push_installation_key:push_installation_key"
+        "caddy_cloudflare_dns_token:caddy_cloudflare_dns_token"
+        "fail2ban_cloudflare_firewall_token:fail2ban_cloudflare_firewall_token"
+    )
+
+    for mapping in "${secrets_map[@]}"; do
+        local yaml_key="${mapping%:*}"
+        local file_name="${mapping#*:}"
+        local value
+        
+        value=$(echo "$decrypted_json" | jq -r --arg key "$yaml_key" '.[$key] // ""')
+        
+        if [[ -n "$value" ]] && [[ "$value" != "null" ]] && [[ "$value" != CHANGE_ME* ]]; then
+            echo -n "$value" > "$secrets_dir/$file_name"
+            chmod 600 "$secrets_dir/$file_name"
+            log_success "Generated: $file_name"
+        elif [[ "$value" == CHANGE_ME* ]]; then
+            log_warn "Skipped: $file_name (placeholder value)"
         else
-            log_warn "Caddy-Cloudflare integration may need attention"
-            log_info "Check logs: docker compose logs caddy"
+            log_warn "Skipped: $file_name (empty/missing value)"
         fi
-    fi
+    done
 
+    log_success "Docker secret files generated in $secrets_dir"
     return 0
-}
-
-# --- System Updates ---
-update_system() {
-    log_info "Updating system packages..."
-
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info " Would run: apt update && apt upgrade"
-        log_info " Would check if reboot is required"
-        return 0
-    fi
-
-    if ! is_root; then
-        log_error "System updates require root privileges"
-        log_info "Run with: sudo ./update.sh --type system"
-        return 1
-    fi
-
-    log_info "Updating package lists..."
-    if ! apt update; then
-        log_error "Failed to update package lists"
-        return 1
-    fi
-
-    local update_count
-    update_count=$(apt list --upgradable 2>/dev/null | grep -c upgradable || echo "0")
-
-    if [[ "$update_count" -eq 0 ]]; then
-        log_success "System is already up to date"
-        return 0
-    fi
-
-    log_info "Found $update_count package updates available"
-    log_info "Available updates:"
-    apt list --upgradable 2>/dev/null | grep upgradable | head -10
-    if [[ "$update_count" -gt 10 ]]; then
-        log_info "... and $((update_count - 10)) more packages"
-    fi
-
-    if [[ "$FORCE" != "true" ]]; then
-        echo ""
-        read -p "Proceed with system package updates? (y/N): " confirm_updates
-        if [[ ! "$confirm_updates" =~ ^[Yy]$ ]]; then
-            log_info "System updates cancelled"
-            return 0
-        fi
-    fi
-
-    log_info "Installing system updates (unattended)..."
-    export DEBIAN_FRONTEND=noninteractive
-
-    if apt-get -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" upgrade; then
-        log_success "System packages updated successfully"
-    else
-        log_error "Failed to update some system packages"
-        return 1
-    fi
-
-    if [[ -f /var/run/reboot-required ]]; then
-        log_warn "⚠️  SYSTEM REBOOT REQUIRED"
-        log_info "Some updates require a system reboot to take effect"
-
-        if [[ -f /var/run/reboot-required.pkgs ]]; then
-            log_info "Packages requiring reboot:"
-            cat /var/run/reboot-required.pkgs | head -5
-        fi
-
-        if [[ "$FORCE" == "true" ]]; then
-            log_warn "Auto-rebooting system (--force specified)"
-            send_notification_email "System Update: Rebooting" "System update completed. Reboot is required and being initiated now."
-            sleep 5
-            sudo reboot
-            exit 0
-        else
-            echo ""
-            log_warn "Schedule a system reboot when convenient:"
-            log_info "  sudo reboot"
-        fi
-
-        return 2
-    else
-        log_success "System update completed, no reboot required"
-        return 0
-    fi
-}
-
-# --- Health Check After Update ---
-verify_system_health() {
-    log_info "Verifying system health after update..."
-
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info " Would run health check: ./health.sh"
-        return 0
-    fi
-
-    sleep 5
-
-    if ./health.sh --quiet; then
-        log_success "Health check passed after update"
-        return 0
-    else
-        log_warn "Health check detected issues after update"
-        log_info "Run full health check: ./health.sh --comprehensive"
-        return 1
-    fi
 }
 
 # --- Main Execution ---
 main() {
-    log_info "VaultWarden Update Manager - Enhanced for Caddy-Cloudflare"
+    log_info "VaultWarden Secrets Manager - Enhanced for Caddy-Cloudflare"
 
-    if [[ -n "$PIN_SERVICE" ]]; then
-        pin_service_version "$PIN_SERVICE" "$PIN_VERSION"
+    check_prerequisites || exit 1
+
+    if [[ "$INIT_MODE" == "true" ]]; then
+        init_secrets
         exit $?
-    elif [[ -n "$UNPIN_SERVICE" ]]; then
-        unpin_service_version "$UNPIN_SERVICE"
+    elif [[ "$SHOW_MODE" == "true" ]]; then
+        show_secrets
         exit $?
-    elif [[ "$SHOW_PINS" == "true" ]]; then
-        show_pinned_versions
-        exit 0
+    elif [[ "$TEST_MODE" == "true" ]]; then
+        test_secrets_access
+        exit $?
     fi
 
-    load_env_file || {
-        log_warn "No .env file found, using defaults (likely 'latest' tags)"
-    }
-
-    local exit_code=0
-    local reboot_required=false
-    local update_summary="Update job started."
-
-    echo ""
-    log_info "Update Plan:"
-    case "$UPDATE_TYPE" in
-        "containers")
-            log_info "  - Update Docker containers (using .env pins or 'latest')"
-            log_info "  - Includes caddy-cloudflare integration"
-            log_info "  - Verify service health"
-            update_summary="Container update task."
-            ;;
-        "system")
-            log_info "  - Update system packages"
-            log_info "  - Check reboot requirements"
-            update_summary="System update task."
-            ;;
-        "all")
-            if [[ "$AUTO_BACKUP" == "true" ]]; then log_info "  - Create backup"; fi
-            log_info "  - Update Docker containers (using .env pins or 'latest')"
-            log_info "  - Update system packages"
-            log_info "  - Verify service health"
-            update_summary="Full system and container update task."
-            ;;
-        *)
-            log_error "Unknown update type: $UPDATE_TYPE"
-            log_info "Valid types: containers, system, all"
-            exit 1
-            ;;
-    esac
-
-    if [[ "$AUTO_BACKUP" == "true" ]]; then
-        log_info "  - Create pre-update backup"
-    elif [[ "$AUTO_BACKUP" == "false" ]]; then
-        log_info "  - Skip pre-update backup (--no-backup specified)"
-    fi
-
-    echo ""
-
-    if [[ "$FORCE" != "true" ]]; then
-        read -p "Proceed with update? (Y/n): " confirm_proceed
-        if [[ "$confirm_proceed" =~ ^[Nn]$ ]]; then
-            log_info "Update cancelled"
+    if [[ ! -f "$SECRETS_FILE" ]]; then
+        log_warn "No secrets file found ($SECRETS_FILE)"
+        read -p "Create new secrets file from template? (Y/n): " create_new
+        if [[ ! "$create_new" =~ ^[Nn]$ ]]; then
+            init_secrets || exit 1
+            echo ""
+            log_info "Now opening for editing..."
+            sleep 1
+            edit_secrets
+            exit $?
+        else
+            log_info "Cancelled."
             exit 0
         fi
     fi
 
     echo ""
+    echo "What would you like to do?"
+    echo "1) Edit secrets file"
+    echo "2) Generate Caddy bcrypt password hash (for admin_basic_auth_hash)"
+    echo "3) Generate VaultWarden admin token (plain text)"
+    echo "4) Show current secrets (use caution!)"
+    echo "5) Test secrets access & configuration"
+    echo "6) Generate Docker Compose secret files"
+    echo "7) Exit"
+    echo ""
+    read -p "Choice (1-7): " choice
 
-    case "$UPDATE_TYPE" in
-        "containers")
-            create_backup || exit_code=$?
-            if [[ $exit_code -eq 0 ]]; then
-                update_containers || exit_code=$?
-            fi
-            update_summary="Container update completed."
-            ;;
-        "system")
-            update_system
-            case $? in
-                0) update_summary="System update completed. No reboot required." ;;
-                1) exit_code=1; update_summary="System update FAILED." ;;
-                2) reboot_required=true; update_summary="System update completed. REBOOT REQUIRED." ;;
-            esac
-            ;;
-        "all")
-            create_backup || exit_code=$?
-            if [[ $exit_code -eq 0 ]]; then
-                update_containers || exit_code=$?
-            fi
-            if [[ $exit_code -eq 0 ]]; then
-                update_system
-                case $? in
-                    0) update_summary="Full update completed. No reboot required." ;;
-                    1) exit_code=1; update_summary="Full update FAILED during system phase." ;;
-                    2) reboot_required=true; update_summary="Full update completed. REBOOT REQUIRED." ;;
-                esac
-            else
-                update_summary="Full update FAILED during container phase."
-            fi
-            ;;
+    case "$choice" in
+        1) edit_secrets ;;
+        2) generate_caddy_password_hash ;;
+        3) generate_vaultwarden_admin_token ;;
+        4) show_secrets ;;
+        5) test_secrets_access ;;
+        6) generate_docker_secrets ;;
+        7) log_info "Goodbye"; exit 0 ;;
+        *) log_error "Invalid choice"; exit 1 ;;
     esac
 
-    if [[ "$DRY_RUN" != "true" ]]; then
-        verify_system_health || log_warn "Post-update health check issues detected"
-    fi
-
-    echo ""
-    if [[ $exit_code -eq 0 ]]; then
-        if [[ "$reboot_required" == "true" ]]; then
-            log_success "Update completed successfully - REBOOT REQUIRED"
-        else
-            log_success "Update completed successfully"
-        fi
-        log_info "Update successful, no notification sent."
-    else
-        log_error "Update failed"
-        log_info "Sending update failure email..."
-        send_notification_email "Update FAILED: $UPDATE_TYPE" "$update_summary"
-    fi
-
-    echo ""
-    echo "Update Summary:"
-    echo "  Type: $UPDATE_TYPE"
-    echo "  Status: $update_summary"
-    if [[ "$reboot_required" == "true" ]]; then
-        echo "  Reboot: Required"
-    fi
-    echo "  Completed: $(date)"
-
-    if [[ $exit_code -ne 0 ]]; then
-        echo ""
-        echo "Update failed. Common troubleshooting:"
-        echo "  - Check service logs: docker compose logs"
-        echo "  - Verify system resources: ./health.sh"
-        echo "  - Restore from backup if needed: ./restore.sh"
-    fi
-
-    exit $exit_code
+    local exit_status=$?
+    exit $exit_status
 }
 
+export SOPS_AGE_KEY_FILE
 main "$@"
