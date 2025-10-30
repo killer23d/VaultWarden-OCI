@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # setup.sh - VaultWarden-OCI Setup Script with Caddy-Cloudflare Integration
-# UPDATED: Added caddy-cloudflare support, separate DNS/Firewall tokens, enhanced password generation
 
 set -euo pipefail
 
@@ -53,6 +52,7 @@ NOTES:
     - This setup configures caddy-cloudflare for DNS-01 ACME challenges
     - Separate Cloudflare API tokens needed for DNS and Firewall operations
     - VaultWarden admin uses Argon2 hash, Caddy basic_auth uses bcrypt
+    - Installs 'unattended-upgrades' for automatic host OS security patches.
 EOF
 }
 
@@ -116,6 +116,18 @@ install_dependencies() {
         log_error "Failed to install basic dependencies."
         return 1
     fi
+
+    # --- START P3 FIX: Add unattended-upgrades ---
+    log_info "Installing and enabling automatic security updates (unattended-upgrades)..."
+    if ! apt-get install -y unattended-upgrades; then
+        log_warn "Could not install 'unattended-upgrades'. Host OS security patches will be manual."
+    else
+        # Reconfigure to enable security updates automatically
+        echo "unattended-upgrades unattended-upgrades/enable_auto_updates boolean true" | debconf-set-selections
+        dpkg-reconfigure -f noninteractive unattended-upgrades
+        log_success "Host OS automatic security updates enabled."
+    fi
+    # --- END P3 FIX ---
 
     # Install Docker if not present
     if ! has_command docker; then
@@ -259,6 +271,9 @@ create_env_file() {
         log_info ".env file already exists, skipping creation."
         return 0
     fi
+    
+    local real_user; real_user=$(get_real_user)
+    local real_group; real_group=$(id -g -n $real_user)
 
     # Create .env file with caddy-cloudflare configuration
     cat > "$env_file" << EOF
@@ -269,10 +284,11 @@ create_env_file() {
 DOMAIN=$DOMAIN
 ADMIN_EMAIL=$ADMIN_EMAIL
 TZ=UTC
+COMPOSE_PROJECT_NAME=vaultwarden
 
 # === User/Group Configuration ===
-PUID=$(id -u $(get_real_user))
-PGID=$(id -g $(get_real_user))
+PUID=$(id -u $real_user)
+PGID=$(id -g $real_user)
 
 # === Project Paths ===
 PROJECT_STATE_DIR=/var/lib/vaultwarden
@@ -318,31 +334,34 @@ SMTP_FROM_NAME=VaultWarden
 # === Cloudflare Configuration (REQUIRED) ===
 CLOUDFLARE_ZONE_ID=your_zone_id_here
 
-# === Resource Limits ===
-VAULTWARDEN_CPU_LIMIT=1.0
+# === Resource Limits (Tuned for 1 OCPU, 6GB RAM OCI Flex) ===
+VAULTWARDEN_CPU_LIMIT=0.7
 VAULTWARDEN_MEMORY_LIMIT=1.5g
 VAULTWARDEN_CPU_RESERVATION=0.2
 VAULTWARDEN_MEMORY_RESERVATION=256m
 
-CADDY_CPU_LIMIT=0.5
+CADDY_CPU_LIMIT=0.2
 CADDY_MEMORY_LIMIT=256m
 CADDY_CPU_RESERVATION=0.1
 CADDY_MEMORY_RESERVATION=64m
 
-FAIL2BAN_CPU_LIMIT=0.2
+FAIL2BAN_CPU_LIMIT=0.1
 FAIL2BAN_MEMORY_LIMIT=128m
 FAIL2BAN_CPU_RESERVATION=0.05
 FAIL2BAN_MEMORY_RESERVATION=64m
 
 # === Backup Configuration ===
-BACKUP_RETENTION_DAYS=30
-RCLONE_REMOTE_NAME=
+DB_BACKUP_RETENTION_DAYS=14
+FULL_BACKUP_RETENTION_DAYS=30
+EMERGENCY_BACKUP_RETENTION_DAYS=90
+BACKUP_VERIFICATION_MODE=quick_check
+RCLONE_REMOTE_NAME=CHANGE_ME
 
 # === SSH Configuration ===
 SSH_PORT=22
 EOF
 
-    chown "$(get_real_user):$(get_real_user)" "$env_file"
+    chown "$real_user:$real_group" "$env_file"
     chmod 644 "$env_file"
     
     log_success "Environment configuration file created: $env_file"
@@ -356,8 +375,8 @@ setup_directories() {
         return 0
     fi
 
-    local real_user
-    real_user=$(get_real_user)
+    local real_user; real_user=$(get_real_user)
+    local real_group; real_group=$(id -g -n $real_user)
     
     # Core directories
     local dirs=(
@@ -373,7 +392,7 @@ setup_directories() {
 
     for dir in "${dirs[@]}"; do
         ensure_dir "$dir" 755
-        chown "$real_user:$real_user" "$dir"
+        chown "$real_user:$real_group" "$dir"
     done
 
     # Secure secrets directories
@@ -399,10 +418,13 @@ generate_age_keys() {
         log_info "Age key already exists, skipping generation."
         return 0
     fi
+    
+    local real_user; real_user=$(get_real_user)
+    local real_group; real_group=$(id -g -n $real_user)
 
     age-keygen -o "$age_key_file"
     chmod 600 "$age_key_file"
-    chown "$(get_real_user):$(get_real_user)" "$age_key_file"
+    chown "$real_user:$real_group" "$age_key_file"
     
     log_success "Age encryption keys generated: $age_key_file"
     return 0
@@ -423,9 +445,12 @@ create_sops_config() {
         log_error "Age key file not found: $age_key_file"
         return 1
     fi
+    
+    local real_user; real_user=$(get_real_user)
+    local real_group; real_group=$(id -g -n $real_user)
 
     local age_public_key
-    age_public_key=$(grep -o 'age1[a-z0-9]*' "$age_key_file")
+    age_public_key=$(age-keygen -y "$age_key_file")
 
     cat > "$sops_config" << EOF
 creation_rules:
@@ -433,7 +458,7 @@ creation_rules:
     age: $age_public_key
 EOF
 
-    chown "$(get_real_user):$(get_real_user)" "$sops_config"
+    chown "$real_user:$real_group" "$sops_config"
     
     log_success "SOPS configuration created: $sops_config"
     return 0
@@ -454,6 +479,9 @@ create_secrets_template() {
         log_info "Secrets file already exists, skipping creation."
         return 0
     fi
+    
+    local real_user; real_user=$(get_real_user)
+    local real_group; real_group=$(id -g -n $real_user)
 
     # Generate secure defaults
     local admin_token backup_pass
@@ -497,7 +525,7 @@ EOF
     if sops --input-type yaml --encrypt --in-place "$secrets_file"; then
         log_success "Secrets template encrypted successfully"
         secure_file "$secrets_file" 600
-        chown "$(get_real_user):$(get_real_user)" "$secrets_file"
+        chown "$real_user:$real_group" "$secrets_file"
     else
         log_error "Failed to encrypt secrets file"
         return 1
@@ -520,19 +548,24 @@ create_caddy_config() {
         log_info " Would create Caddy configuration files"
         return 0
     fi
+    
+    local real_user; real_user=$(get_real_user)
+    local real_group; real_group=$(id -g -n $real_user)
 
     # Create enhanced Caddyfile for caddy-cloudflare
     cat > "caddy/Caddyfile" << 'EOF'
-# Enhanced Caddyfile for CaddyBuilds/caddy-cloudflare
+# Enhanced Caddyfile for CaddyBuilds/caddy-cloudflare with automatic IP management
 {
-    # Global ACME DNS configuration for all sites
-    acme_dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+    # Global ACME DNS configuration
+    # Caddy automatically uses the CLOUDFLARE_API_TOKEN_FILE env var
+    # (set in docker-compose.yml) when this directive is present.
+    acme_dns cloudflare
     
     # Global server configuration with automatic Cloudflare IP management
     servers {
         # Trust Cloudflare IPs automatically (updated by caddy-cloudflare-ip module)
         trusted_proxies cloudflare
-        # Use Cloudflare's connecting IP header for real client IPs
+        # Use the correct Cloudflare connecting IP header
         client_ip_headers Cf-Connecting-Ip X-Forwarded-For
     }
 }
@@ -579,7 +612,7 @@ create_caddy_config() {
         @malicious_ua header User-Agent *sqlmap* *nikto* *nmap* *acunetix*
         respond @malicious_ua 403
 
-        # WebSocket support for live sync (uncomment if WEBSOCKET_ENABLED=true)
+        # WebSocket support for live sync (uncomment if WEBSOCKET_ENABLED=true in .env)
         # reverse_proxy /notifications/hub* vaultwarden_app:3012
 
         reverse_proxy vaultwarden_app:80 {
@@ -600,7 +633,7 @@ www.{$DOMAIN} {
 }
 EOF
 
-    chown "$(get_real_user):$(get_real_user)" "caddy/Caddyfile"
+    chown "$real_user:$real_group" "caddy/Caddyfile"
     
     log_success "Caddy configuration created."
     return 0
@@ -613,6 +646,9 @@ create_docker_compose() {
         log_info " Would create docker-compose.yml"
         return 0
     fi
+    
+    local real_user; real_user=$(get_real_user)
+    local real_group; real_group=$(id -g -n $real_user)
 
     # Create enhanced docker-compose.yml with caddy-cloudflare
     cat > "docker-compose.yml" << 'EOF'
@@ -672,7 +708,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '${VAULTWARDEN_CPU_LIMIT:-1.0}'
+          cpus: '${VAULTWARDEN_CPU_LIMIT:-0.7}'
           memory: '${VAULTWARDEN_MEMORY_LIMIT:-1.5g}'
         reservations:
           cpus: '${VAULTWARDEN_CPU_RESERVATION:-0.2}'
@@ -715,7 +751,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '${CADDY_CPU_LIMIT:-0.5}'
+          cpus: '${CADDY_CPU_LIMIT:-0.2}'
           memory: '${CADDY_MEMORY_LIMIT:-256m}'
         reservations:
           cpus: '${CADDY_CPU_RESERVATION:-0.1}'
@@ -757,7 +793,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '${FAIL2BAN_CPU_LIMIT:-0.2}'
+          cpus: '${FAIL2BAN_CPU_LIMIT:-0.1}'
           memory: '${FAIL2BAN_MEMORY_LIMIT:-128m}'
         reservations:
           cpus: '${FAIL2BAN_CPU_RESERVATION:-0.05}'
@@ -785,12 +821,13 @@ secrets:
 networks:
   vaultwarden_network:
     driver: bridge
+    name: ${COMPOSE_PROJECT_NAME:-vaultwarden}_vaultwarden_network
     ipam:
       config:
         - subnet: 172.20.0.0/16
 EOF
 
-    chown "$(get_real_user):$(get_real_user)" "docker-compose.yml"
+    chown "$real_user:$real_group" "docker-compose.yml"
     
     log_success "Docker Compose configuration created."
     return 0
@@ -803,6 +840,9 @@ set_script_permissions() {
         log_info " Would set executable permissions on scripts"
         return 0
     fi
+    
+    local real_user; real_user=$(get_real_user)
+    local real_group; real_group=$(id -g -n $real_user)
 
     local scripts=(
         "setup.sh"
@@ -815,14 +855,18 @@ set_script_permissions() {
         "maintenance.sh"
         "cron-setup.sh"
         "create-breakglass-admin.sh"
+        "db-maint.sh"
     )
 
     for script in "${scripts[@]}"; do
         if [[ -f "$script" ]]; then
             chmod +x "$script"
-            chown "$(get_real_user):$(get_real_user)" "$script"
+            chown "$real_user:$real_group" "$script"
         fi
     done
+    
+    find "lib" -name "*.sh" -exec chmod +x {} \;
+    find "lib" -name "*.sh" -exec chown "$real_user:$real_group" {} \;
 
     log_success "Script permissions set."
     return 0
@@ -888,6 +932,10 @@ main() {
     echo "   - Caddy basic_auth: bcrypt hash (needs setup)"
     echo "   - SOPS + Age encrypted secrets"
     echo "   - UFW firewall configured"
+    echo "   - Host OS automatic security updates enabled (unattended-upgrades)"
+    echo ""
+    echo "✅ Performance:"
+    echo "   - CPU limits tuned for 1 OCPU (1.0 total limit)"
     echo ""
     echo "⚠️  REQUIRED NEXT STEPS:"
     echo "   1. Configure secrets: ./edit-secrets.sh"
@@ -897,11 +945,11 @@ main() {
     echo "   2. Update .env file: nano .env"
     echo "      - Set CLOUDFLARE_ZONE_ID"
     echo "   3. Start services: make up"
-    echo "   4. Setup automation: sudo ./cron-setup.sh"
+    echo "   4. Setup automation: sudo ./cron-setup.sh --install"
     echo "   5. Create emergency access: make breakglass-create"
     echo ""
     echo "📚 Important Notes:"
-    echo "   - VaultWarden admin token: Plain text → Argon2 (automatic)"
+    echo "   - VaultWarden admin token: Plain text -> Argon2 (automatic)"
     echo "   - Caddy basic_auth: Must use bcrypt hash from 'caddy hash-password'"
     echo "   - DNS token: Zone:DNS:Edit + Zone:Zone:Read permissions"
     echo "   - Firewall token: Zone:Firewall Services:Edit permissions"
