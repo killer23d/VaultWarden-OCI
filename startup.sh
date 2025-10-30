@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # startup.sh - Enhanced VaultWarden stack orchestration
-# MAJOR FIX: Create ALL required secret files including API tokens
+# FIXED: Creates ALL required secret files for caddy-cloudflare
 # ENHANCED: Production hardening with strict mode and better error handling
 
 set -euo pipefail
@@ -31,7 +31,7 @@ cleanup_secrets() {
 fix_secrets_ownership() {
     local docker_secrets_dir="secrets/.docker_secrets"
     local current_user
-    current_user=$(whoami)
+    current_user=$(get_real_user)
     
     if [[ -d "$docker_secrets_dir" ]]; then
         # Check if directory is owned by current user
@@ -43,7 +43,7 @@ fix_secrets_ownership() {
             
             if [[ "$owner" == "root" ]] && [[ "$current_user" != "root" ]]; then
                 # Need sudo to fix root-owned files
-                if sudo chown -R "$current_user:$(id -gn)" "$docker_secrets_dir" 2>/dev/null; then
+                if sudo chown -R "$current_user:$(id -gn $current_user)" "$docker_secrets_dir" 2>/dev/null; then
                     log_success "Fixed secrets directory ownership"
                 else
                     log_warn "Could not fix ownership, recreating directory"
@@ -81,7 +81,7 @@ STARTUP_SUCCESS=false
 # --- Help ---
 show_help() {
     cat << 'EOF'
-VaultWarden-OCI-NG Startup Script
+VaultWarden-OCI-NG Startup Script (Modernized)
 
 USAGE:
     ./startup.sh [OPTIONS]
@@ -124,12 +124,17 @@ prepare_docker_secrets() {
     log_info "Preparing Docker secrets..."
 
     local docker_secrets_dir="secrets/.docker_secrets"
+    local real_user; real_user=$(get_real_user)
+    local real_group; real_group=$(id -g -n $real_user)
     
     # Fix ownership if needed before attempting operations
     fix_secrets_ownership
     
     rm -rf "$docker_secrets_dir"
     mkdir -p "$docker_secrets_dir"
+    chown "$real_user:$real_group" "$docker_secrets_dir"
+    chmod 700 "$docker_secrets_dir"
+
 
     if [[ ! -f "secrets/secrets.yaml" ]]; then
         log_error "Secrets file not found: secrets/secrets.yaml"
@@ -166,14 +171,28 @@ prepare_docker_secrets() {
         return 1
     }
 
-    # FIXED: ALL secrets that need files (including API tokens)
-    local secrets_needing_files=("admin_token" "smtp_password" "push_installation_id" "push_installation_key" "ddclient_api_token" "fail2ban_api_token" "admin_basic_auth_hash")
-    local critical_env_secrets=()  # Empty - no environment secrets needed
-    local critical_file_secrets=("admin_token" "ddclient_api_token" "fail2ban_api_token" "admin_basic_auth_hash")
-    local optional_file_secrets=("smtp_password" "push_installation_id" "push_installation_key")
+    # --- START CRITICAL FIX ---
+    # Define ALL secrets that need files based on docker-compose.yml
+    local secrets_needing_files=(
+        "admin_token"
+        "admin_basic_auth_hash"
+        "smtp_password"
+        "push_installation_id"
+        "push_installation_key"
+        "caddy_cloudflare_dns_token"
+        "fail2ban_cloudflare_firewall_token"
+    )
+    
+    # Define which secrets are critical for startup
+    local critical_file_secrets=(
+        "admin_token"
+        "admin_basic_auth_hash"
+        "caddy_cloudflare_dns_token"
+        "fail2ban_cloudflare_firewall_token"
+    )
+    # --- END CRITICAL FIX ---
     
     local secret_file_path
-    local missing_critical=()
     local placeholder_critical=()
 
     # Write files for ALL secrets that need them
@@ -184,7 +203,7 @@ prepare_docker_secrets() {
 
         if [[ -n "$value" && "$value" != "null" && "$value" != "CHANGE_ME"* ]]; then
             echo -n "$value" > "$secret_file_path"
-            log_debug "Created secret file: $secret_file_path"
+            log_debug "Created secret file: $secret"
         else
             # Check if this is a critical vs optional secret
             local is_critical=false
@@ -207,37 +226,27 @@ prepare_docker_secrets() {
             fi
         fi
         
-        # Check secure_file return code
+        # Set ownership and secure permissions
+        chown "$real_user:$real_group" "$secret_file_path"
         if ! secure_file "$secret_file_path" 600; then
             log_error "Failed to set secure permissions on secret file: $secret_file_path"
             return 1
         fi
     done
 
-    # Validate critical secrets that are passed via environment
-    for secret in "${critical_env_secrets[@]}"; do
-        local value
-        value=$(echo "$decrypted_json" | jq -r --arg secret "$secret" '.[$secret] // "CHANGE_ME"')
-        if [[ -z "$value" ]] || [[ "$value" == "CHANGE_ME"* ]] || [[ "$value" == "null" ]]; then
-             missing_critical+=("$secret")
-        fi
-    done
-
     # Strict mode handling
-    local total_critical_issues=$((${#missing_critical[@]} + ${#placeholder_critical[@]}))
+    local total_critical_issues=${#placeholder_critical[@]}
     
     if [[ $total_critical_issues -gt 0 ]]; then
         if [[ "$STRICT_SECRETS" == "true" ]]; then
             log_error "STRICT MODE: Critical secrets validation failed"
-            [[ ${#missing_critical[@]} -gt 0 ]] && log_error "Missing environment secrets: ${missing_critical[*]}"
-            [[ ${#placeholder_critical[@]} -gt 0 ]] && log_error "Placeholder file secrets: ${placeholder_critical[*]}"
+            log_error "Placeholder file secrets: ${placeholder_critical[*]}"
             log_error "Cannot start in strict mode with misconfigured secrets"
             log_info "Fix secrets with: ./edit-secrets.sh"
             return 1
         else
             # Warn but continue (debugging mode)
-            [[ ${#missing_critical[@]} -gt 0 ]] && log_warn "Missing critical environment secrets: ${missing_critical[*]}"
-            [[ ${#placeholder_critical[@]} -gt 0 ]] && log_warn "Placeholder critical file secrets: ${placeholder_critical[*]}"
+            log_warn "Placeholder critical file secrets: ${placeholder_critical[*]}"
             log_info "Edit secrets with: ./edit-secrets.sh"
             log_warn "Continuing startup for debugging (use --strict-secrets to enforce)"
         fi
@@ -248,41 +257,17 @@ prepare_docker_secrets() {
 }
 
 # --- Prepare Environment Variables ---
+# This function is not strictly needed if all secrets are file-based,
+# but it's good practice to export env vars listed in .env
 prepare_environment_variables() {
     log_info "Preparing environment variables for containers..."
-
-    local decrypted_json exit_status
-    log_debug "Decrypting secrets to JSON format for environment variables..."
-    decrypted_json=$(sops --decrypt --output-type json "secrets/secrets.yaml" 2>&1)
-    exit_status=$?
-    if [[ $exit_status -ne 0 ]]; then
-        log_error "Failed to decrypt secrets for environment variables."
-        log_error "SOPS Output: $decrypted_json"
+    # This function is now simpler as docker-compose handles sourcing .env
+    # We just need to ensure .env is loaded for this script's context
+    if [[ ! -f ".env" ]]; then
+        log_error ".env file not found. Please run setup.sh or create it."
         return 1
     fi
-
-    # Validate decrypted content is JSON
-    echo "$decrypted_json" | jq . > /dev/null 2>&1 || {
-        log_error "Decrypted secrets content for env vars is not valid JSON."
-        return 1
-    }
-
-    # Export environment variables that containers need
-    local admin_basic_auth_hash
-    admin_basic_auth_hash=$(echo "$decrypted_json" | jq -r '.admin_basic_auth_hash // ""')
-    export ADMIN_BASIC_AUTH_HASH="$admin_basic_auth_hash"
-    log_debug "Exported ADMIN_BASIC_AUTH_HASH"
-
-    local ddclient_token
-    ddclient_token=$(echo "$decrypted_json" | jq -r '.ddclient_api_token // ""')
-    export DDCLIENT_API_TOKEN="$ddclient_token"
-    log_debug "Exported DDCLIENT_API_TOKEN"
-
-    local fail2ban_token
-    fail2ban_token=$(echo "$decrypted_json" | jq -r '.fail2ban_api_token // ""')
-    export FAIL2BAN_API_TOKEN="$fail2ban_token"
-    log_debug "Exported FAIL2BAN_API_TOKEN"
-
+    load_env_file
     log_success "Environment variables prepared"
     return 0
 }
@@ -298,6 +283,7 @@ post_startup_health_check() {
     log_info "Waiting 15s for services to initialize..."
     sleep 15
 
+    # Services list updated to remove ddclient
     local critical_services=("vaultwarden" "caddy")
     local failed_services=()
 
@@ -308,7 +294,7 @@ post_startup_health_check() {
     done
 
     # Check non-critical services
-    local other_services=("fail2ban" "ddclient")
+    local other_services=("fail2ban")
     local unhealthy_other=()
     for service in "${other_services[@]}"; do
         if ! wait_for_service_ready "$service" 30; then
@@ -348,7 +334,7 @@ post_startup_health_check() {
 
 # --- Main Execution ---
 main() {
-    log_info "VaultWarden-OCI-NG Stack Management"
+    log_info "VaultWarden-OCI-NG Stack Management (Modernized)"
 
     if [[ "$DRY_RUN" == "true" ]]; then
         log_warn "DRY RUN MODE - No changes will be made"
@@ -359,7 +345,7 @@ main() {
     fi
 
     # Load configuration
-    load_env_file || { log_error "Failed to load configuration"; exit 1; }
+    load_env_file || { log_error "Failed to load configuration. Have you run setup.sh?"; exit 1; }
     require_config "DOMAIN" "ADMIN_EMAIL" || exit 1
     require_docker || exit 1
 
@@ -368,6 +354,7 @@ main() {
         if [[ "$DRY_RUN" == "true" ]]; then
             log_info "[DRY RUN] Would stop all services"
         else
+            log_info "Stopping services..."
             stop_services
             cleanup_secrets "stop"
             log_success "Services stopped successfully"
@@ -378,7 +365,17 @@ main() {
     # Ensure state directories exist
     local state_dir
     state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
-    ensure_dir "$state_dir/logs" 755 || exit 1
+    local real_user; real_user=$(get_real_user)
+    local real_group; real_group=$(id -g -n $real_user)
+    
+    # Ensure state dirs are owned by the user running the script, NOT root
+    # This is critical so docker, running as the user, can write to them
+    ensure_dir "$state_dir/logs" 755 "$real_user:$real_group" || exit 1
+    ensure_dir "$state_dir/data" 700 "$real_user:$real_group" || exit 1
+    ensure_dir "$state_dir/caddy/data" 700 "$real_user:$real_group" || exit 1
+    ensure_dir "$state_dir/caddy/config" 700 "$real_user:$real_group" || exit 1
+    ensure_dir "$state_dir/fail2ban" 700 "$real_user:$real_group" || exit 1
+
 
     # Prepare secrets and environment variables
     prepare_docker_secrets || exit 1
@@ -398,6 +395,7 @@ main() {
         if [[ "$DRY_RUN" == "true" ]]; then
             log_info "[DRY RUN] Would start services"
         else
+            log_info "Starting services..."
             start_services
         fi
     fi
@@ -432,9 +430,9 @@ main() {
         
         log_success "🎉 VaultWarden-OCI-NG startup completed successfully"
         
-        # Check final service status
+        # Check final service status (updated list)
         local all_running=true
-        for service in vaultwarden caddy fail2ban ddclient; do
+        for service in vaultwarden caddy fail2ban; do
             if ! is_service_running "$service"; then
                 all_running=false
                 log_warn "Service $service is not running."
@@ -459,7 +457,6 @@ main() {
         echo ""
         echo "IMPORTANT NOTES:"
         echo "  • After editing secrets, always use: make restart"
-        echo "  • For production, consider: ./startup.sh --strict-secrets"
     fi
 }
 
