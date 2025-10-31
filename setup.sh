@@ -225,6 +225,13 @@ setup_firewall() {
     # SSH on custom port
     local ssh_port="${SSH_PORT:-2222}"
     ufw allow "$ssh_port/tcp" comment "SSH-Custom" >/dev/null
+
+    # Disable IPv6 if not needed, or apply same CF restrictions
+    if [[ -f /proc/net/if_inet6 ]]; then
+        ufw default deny incoming
+    # Apply same CF IPv6 ranges or disable IPv6 entirely
+        echo "net.ipv6.conf.all.disable_ipv6 = 1" >> /etc/sysctl.conf
+    fi
     
     # Fetch current Cloudflare IP ranges dynamically
     log_info "Fetching current Cloudflare IP ranges..."
