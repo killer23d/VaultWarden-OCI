@@ -1,6 +1,6 @@
-# Security Guide - VaultWarden-OCI-Simplified
+# Security Guide - VaultWarden-OCI
 
-This comprehensive security guide covers the security architecture, hardening procedures, and operational security practices for VaultWarden-OCI-Simplified.
+This comprehensive security guide covers the security architecture, hardening procedures, and operational security practices for VaultWarden-OCI with enhanced fail2ban security, template-based configuration, and emergency access capabilities.
 
 ## Security Architecture Overview
 
@@ -13,41 +13,41 @@ External Layer (Cloudflare)
 ├── Bot mitigation and rate limiting
 └── SSL/TLS termination and proxy
 
-Network Layer (UFW + Cloud Security)
-├── Host-based firewall (UFW)
+Network Layer (Enhanced UFW + Cloud Security)
+├── Host-based firewall (UFW) with improved warnings
 ├── Cloudflare IP restriction (only CF traffic allowed)
-├── Cloud provider security groups
+├── Enhanced fail2ban with rate limiting and error handling
 └── SSH hardening and port management
 
-Application Layer (Containers)
+Application Layer (Template-Based Containers)
 ├── VaultWarden application security
 ├── Caddy reverse proxy with security headers
-├── fail2ban intrusion prevention
-└── Container isolation and resource limits
+├── Enhanced fail2ban intrusion prevention with rate limiting
+└── Template-based container isolation and resource limits
 
-Data Layer (Encryption)
+Data Layer (Enhanced Encryption)
 ├── Database encryption at rest
-├── Backup encryption with Age
-├── Secrets management with SOPS
+├── Atomic backup encryption with Age
+├── Template-based secrets management with SOPS
 ├── SSL/TLS for data in transit
 └── Admin authentication with bcrypt
 
 Recovery Layer (Break-Glass Access)
-├── Emergency admin account for serial console
-├── OCI serial console access
-├── Encrypted backup recovery procedures
-└── Disaster recovery documentation
+├── Emergency admin account for OCI serial console
+├── OCI serial console access integration
+├── Enhanced encrypted backup recovery procedures
+└── Template-based disaster recovery documentation
 
-Version Control Layer
-├── Container version pinning for stability
-├── Controlled update procedures
-├── Rollback capabilities
-└── Security patch management
+Template Control Layer
+├── Template-based configuration management
+├── Source of truth in .example files
+├── Controlled deployment via setup.sh
+└── Version control friendly security configurations
 ```
 
 ## Core Security Components
 
-### 1. Network Security
+### 1. Enhanced Network Security
 
 #### Cloudflare Edge Protection
 ```bash
@@ -64,9 +64,9 @@ Internet → Cloudflare Edge → Your Server
 - Challenge Passage: 30 minutes
 ```
 
-#### UFW Firewall Configuration
+#### Enhanced UFW Firewall Configuration
 ```bash
-# Restrictive firewall - only Cloudflare IPs allowed for web traffic
+# Restrictive firewall with improved warning system
 Default Policies:
 - Incoming: DENY (default)
 - Outgoing: ALLOW (default)
@@ -80,25 +80,32 @@ Allowed Traffic:
 # View current rules:
 sudo ufw status numbered
 
-# Rules are automatically managed by:
+# Enhanced rules management with improved error handling:
 sudo ./update-cloudflare-ips.sh
 ```
 
-#### fail2ban Integration with Cloudflare
+#### Enhanced fail2ban Integration with Cloudflare
 
-Integrating fail2ban with Cloudflare's firewall actions ensures malicious IPs are blocked at the network edge, preventing attack traffic from consuming server resources. This is generally more efficient than relying solely on local firewall rules.
+The enhanced fail2ban system now includes comprehensive rate limiting and error handling for optimal security without API abuse:
 
-**Benefits of Edge Blocking:**
-- **Resource Conservation**: Attack traffic is stopped at Cloudflare's edge before reaching your server
-- **Global Protection**: Cloudflare's network provides worldwide coverage and threat intelligence
+**Enhanced Features:**
+- **Rate Limiting**: Maximum 30 API calls per minute with intelligent backoff
+- **Comprehensive Error Handling**: Graceful failure recovery and detailed logging
+- **No More API Abuse**: Prevents hanging requests and API token exhaustion
+- **Enhanced Logging**: Detailed logging for security analysis and troubleshooting
+
+**Benefits of Enhanced Edge Blocking:**
+- **Resource Conservation**: Attack traffic stopped at Cloudflare's edge with rate-limited API calls
+- **Global Protection**: Cloudflare's network provides worldwide coverage with enhanced threat intelligence
 - **Reduced Server Load**: Your server doesn't process malicious requests, preserving CPU and bandwidth
-- **Enhanced Logging**: Centralized threat visibility across Cloudflare's analytics dashboard
+- **Enhanced Reliability**: Rate limiting prevents fail2ban service disruption due to API limits
+- **Improved Monitoring**: Better logging and error handling for security incident analysis
 
-### 2. Application Security
+### 2. Template-Based Application Security
 
 #### VaultWarden Security Configuration
 ```bash
-# Core Security Settings (in .env):
+# Core Security Settings (in template-generated .env):
 SIGNUPS_ALLOWED=false              # Disable open registration
 SIGNUPS_VERIFY=true               # Require email verification
 INVITATIONS_ALLOWED=true          # Admin-controlled invitations only
@@ -144,7 +151,7 @@ Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; 
 - **X-Frame-Options**: Prevents clickjacking by controlling iframe embedding
 - **X-Content-Type-Options**: Prevents MIME type confusion attacks
 
-### 3. Data Encryption and Secrets Management
+### 3. Enhanced Data Encryption and Secrets Management
 
 #### Encryption at Rest
 ```bash
@@ -153,18 +160,20 @@ Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; 
 - Sensitive data encrypted before storage
 - Master key derived from user passwords
 
-# Backup Encryption:
+# Enhanced Backup Encryption with Atomic Operations:
 - All backups encrypted with Age (ChaCha20-Poly1305)
 - 256-bit encryption keys
 - Authenticated encryption prevents tampering
+- Atomic operations prevent corruption during encryption
 
-# Secrets Management:
+# Template-Based Secrets Management:
 - SOPS + Age for structured secrets encryption
 - Ed25519 public key cryptography
 - Secrets never stored unencrypted on disk
+- Template-based secrets configuration for consistency
 ```
 
-### 4. Emergency Access Security
+### 4. Enhanced Emergency Access Security
 
 #### Break-Glass Admin Account
 ```bash
@@ -185,7 +194,7 @@ Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; 
 - Network connectivity issues preventing SSH
 ```
 
-#### Serial Console Security
+#### Enhanced Serial Console Security
 ```bash
 # Access Control:
 - Requires OCI tenancy administrator privileges
@@ -209,7 +218,7 @@ Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; 
 # Account Management:
 - Use strong, unique password (different from all other accounts)
 - Document credentials in secure, offline location
-- Rotate password quarterly
+- Rotate password quarterly using ./create-breakglass-admin.sh password
 - Test access annually (without causing disruption)
 
 # Monitoring:
@@ -218,45 +227,34 @@ Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; 
 - Review break-glass access in security audits
 - Monitor for unauthorized console connections
 
-# Cleanup:
-- Change break-glass password after use
+# Security Cleanup After Use:
+- Change break-glass password: ./create-breakglass-admin.sh password
 - Document reason for emergency access
 - Review and fix root cause of access need
+- Delete Console Connection in OCI Console for security
 - Consider temporary account disabling if not needed
 ```
 
-### 5. Version Control Security
+### 5. Template-Based Security Management
 
-#### Secure Update Management
+#### Secure Template Configuration
 ```bash
-# Version Pinning for Security:
-- Pin production versions to prevent unexpected updates
-- Control update timing for security patches
-- Maintain rollback capability for failed updates
+# Template Security Benefits:
+- No hardcoded credentials in generated files
+- Consistent security configurations across deployments
+- Version control safe templates
+- Single source of truth for security settings
 
-# Security Update Process:
-1. Monitor security advisories for pinned versions
-2. Test security updates in development environment
-3. Apply critical security patches quickly via version unpinning
-4. Re-pin to new secure versions after validation
+# Template Security Validation:
+docker compose config  # Validate template-generated configuration
+./edit-secrets.sh --test  # Verify secrets accessibility
+
+# Template Update Security:
+sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
+# Maintains security settings while updating configuration
 ```
 
-#### Version Security Commands
-```bash
-# Check current versions for security assessment
-make pins
-docker compose ps --format "table {{.Service}}	{{.Image}}"
-
-# Quick security patch deployment
-make unpin SERVICE=vaultwarden  # Get latest security patch
-make update-containers          # Apply immediately
-make health                     # Verify security
-
-# Re-pin after security validation
-make pin SERVICE=vaultwarden VERSION=1.31.1  # Pin to patched version
-```
-
-## Security Hardening Procedures
+## Enhanced Security Hardening Procedures
 
 ### Initial Hardening Checklist
 
@@ -283,29 +281,28 @@ sudo ufw default deny incoming
 sudo ufw default allow outgoing
 ```
 
-#### Application Level Security
+#### Enhanced Application Level Security
 ```bash
-# 1. Generate strong secrets
-make edit-secrets
+# 1. Generate strong secrets with template validation
+./edit-secrets.sh
 
-# 2. Configure restrictive firewall
-make update-ips
+# 2. Configure restrictive firewall with enhanced error handling
+sudo ./update-cloudflare-ips.sh
 
 # 3. Enable comprehensive monitoring
-make health
+./health.sh --comprehensive
 
-# 4. Setup break-glass admin
-make breakglass-create
+# 4. Setup break-glass admin for emergency access
+./create-breakglass-admin.sh
 
-# 5. Pin production versions
-make pin SERVICE=vaultwarden VERSION=1.30.5
-make pin SERVICE=caddy VERSION=2.8.4
+# 5. Validate template-based configuration
+docker compose config
 
-# 6. Create initial backup
-make backup-emergency
+# 6. Create initial backup with atomic operations
+./backup.sh --type emergency
 
-# 7. Validate configuration
-make config-check
+# 7. Validate enhanced security configuration
+./health.sh --comprehensive
 ```
 
 ### Ongoing Security Maintenance
@@ -314,50 +311,53 @@ make config-check
 ```bash
 # Via cron-setup.sh automation:
 - Health monitoring with auto-heal
-- Security log analysis
-- Failed login attempt monitoring
-- Backup integrity verification
+- Enhanced security log analysis
+- Enhanced fail2ban monitoring with rate limiting
+- Atomic backup integrity verification
 - Break-glass admin status verification
 ```
 
 #### Weekly Security Tasks
 ```bash
-# 1. Review fail2ban logs
-docker compose logs fail2ban | grep -E "Ban|Unban" | tail -20
+# 1. Review enhanced fail2ban logs with rate limiting analysis
+docker compose logs fail2ban | grep -E "Ban|Unban|Rate" | tail -20
 
 # 2. Check for security updates
-make check-system-updates
-make check-updates
+sudo apt list --upgradable
+docker compose pull --dry-run
 
-# 3. Verify Cloudflare IP ranges are current
-make update-ips --dry-run
+# 3. Verify Cloudflare IP ranges are current with enhanced error handling
+sudo ./update-cloudflare-ips.sh --dry-run
 
 # 4. Review access logs for anomalies
-make logs SERVICE=caddy | grep -E "admin|error|403|404"
+docker compose logs caddy | grep -E "admin|error|403|404" | tail -20
 
 # 5. Check break-glass admin status
-make breakglass-status
+./create-breakglass-admin.sh status
 ```
 
 #### Monthly Security Tasks
 ```bash
 # 1. Comprehensive security audit
-make health
+./health.sh --comprehensive
 
 # 2. Review container versions for security updates
-make check-updates
+docker compose pull --dry-run
 
 # 3. Review and rotate secrets if needed
-make edit-secrets
+./edit-secrets.sh
 
-# 4. Security-focused backup verification
-make backup-emergency
+# 4. Security-focused backup verification with atomic operations
+./backup.sh --type emergency
 
 # 5. Test break-glass admin access (status check only)
-make breakglass-status
+./create-breakglass-admin.sh status
 
-# 6. Review version pins for security patches
-make pins
+# 6. Validate template-based security configuration
+docker compose config
+
+# 7. Review enhanced fail2ban rate limiting effectiveness
+docker compose logs fail2ban | grep -i "rate\|limit\|error" | wc -l
 ```
 
 #### Quarterly Security Tasks
@@ -367,125 +367,209 @@ make pins
 
 # 2. Full security penetration test
 # - Test for new vulnerabilities
-# - Verify all security controls
+# - Verify all security controls including enhanced fail2ban
 # - Update security documentation
 
-# 3. Disaster recovery test
-# - Test backup restoration: make restore
-# - Verify break-glass admin access
-# - Test OCI serial console access
+# 3. Disaster recovery test with template restoration
+# - Test backup restoration: ./restore.sh --interactive
+# - Verify break-glass admin access via OCI serial console
+# - Test template-based recovery procedures
 
 # 4. Security audit and compliance review
 # - Review all access logs
 # - Audit user accounts and permissions
 # - Update security documentation
-# - Review version management security
+# - Review enhanced fail2ban rate limiting logs
+# - Validate template-based security configurations
 ```
 
-## Threat Model and Mitigations
+## Enhanced Threat Model and Mitigations
 
 ### External Threats
 
 #### DDoS Attacks
 **Threat**: Overwhelming server with traffic to cause service disruption
-**Mitigations**:
+**Enhanced Mitigations**:
 - Cloudflare DDoS protection at edge
 - Rate limiting at application layer
-- fail2ban dynamic blocking with edge integration
+- Enhanced fail2ban dynamic blocking with rate-limited edge integration
 - Resource monitoring with auto-scaling (cloud provider)
+- Comprehensive logging for attack analysis
 
 #### Brute Force Attacks
 **Threat**: Automated password guessing against admin or user accounts
-**Mitigations**:
+**Enhanced Mitigations**:
 - Strong password policies enforced
-- Account lockout after failed attempts (fail2ban)
+- Account lockout after failed attempts (enhanced fail2ban with rate limiting)
 - Rate limiting on authentication endpoints
-- IP-based blocking at Cloudflare edge
+- IP-based blocking at Cloudflare edge with intelligent API usage
 - Break-glass admin as recovery option
+- Enhanced logging and monitoring
 
 #### Application Vulnerability Exploitation
 **Threat**: Exploitation of vulnerabilities in VaultWarden or dependencies
-**Mitigations**:
-- Version pinning with controlled updates
+**Enhanced Mitigations**:
+- Template-based configuration for consistent security
 - Regular security updates (monitored and tested)
 - Container isolation (Docker)
 - Web Application Firewall (Cloudflare)
 - Input validation and sanitization
+- Enhanced monitoring and alerting
 
 ### Internal Threats
 
 #### Compromised Administrative Access
 **Threat**: Attacker gains admin credentials or SSH access
-**Mitigations**:
+**Enhanced Mitigations**:
 - Multi-factor authentication for admin panel
 - SSH key-based authentication only
 - Regular credential rotation
-- Comprehensive audit logging
+- Comprehensive audit logging with enhanced fail2ban
 - Break-glass admin for recovery
-- Version control to rollback malicious changes
+- Template-based configuration control
 
 #### Data Exfiltration
 **Threat**: Unauthorized access to password database or user data
-**Mitigations**:
+**Enhanced Mitigations**:
 - Database encryption at rest
-- Encrypted backups with separate keys
+- Atomic encrypted backups with separate keys
 - Network segmentation (container isolation)
 - Access logging and monitoring
-- Version pinning to prevent supply chain attacks
+- Template-based security controls
+- Enhanced fail2ban protection
 
-### Version Management Security
+### Template-Based Security
 
-#### Supply Chain Attacks
-**Threat**: Malicious code in container image updates
-**Mitigations**:
-- Version pinning prevents automatic malicious updates
-- Controlled update process with testing
-- Image verification before deployment
-- Rollback capability for compromised versions
+#### Configuration Tampering
+**Threat**: Unauthorized modification of security configurations
+**Enhanced Mitigations**:
+- Template-based configuration management
+- Source of truth in version-controlled .example files
+- Controlled deployment via setup.sh
+- Configuration validation before deployment
+- Immutable security settings in templates
 
-#### Security Patch Management
-**Challenge**: Balancing security patches with stability
-**Strategy**:
+#### Security Drift
+**Challenge**: Security configurations becoming inconsistent over time
+**Enhanced Strategy**:
 ```bash
-# Emergency security patch workflow:
-1. make unpin SERVICE=[service]     # Allow latest for critical patch
-2. make update-containers           # Apply patch immediately
-3. make health                      # Verify system integrity
-4. make pin SERVICE=[service] VERSION=[ver] # Re-pin to patched version
+# Regular template-based security validation:
+1. docker compose config                # Validate current configuration
+2. sudo ./setup.sh --force --domain vault.example.com --email admin@example.com  # Reset to template
+3. ./health.sh --comprehensive         # Verify security controls
+4. ./create-breakglass-admin.sh status # Verify emergency access
+```
+
+## Enhanced Security Monitoring
+
+### Real-Time Security Monitoring
+
+#### Enhanced fail2ban Monitoring
+```bash
+# Monitor enhanced fail2ban with rate limiting
+docker compose logs fail2ban --follow | grep -E "Ban|Unban|Rate|Error"
+
+# Check fail2ban status with rate limiting information
+docker compose exec fail2ban fail2ban-client status vaultwarden-admin
+
+# Monitor rate limiting effectiveness
+docker compose logs fail2ban | grep -i "rate" | tail -10
+```
+
+#### Security Log Analysis
+```bash
+# Comprehensive security log review
+./health.sh --comprehensive --quiet --json > security-status.json
+
+# Monitor break-glass admin activity
+sudo journalctl -u ssh | grep "break-glass-admin"
+
+# Review template-based configuration changes
+git log --oneline -- "*.example"
+```
+
+### Security Alerting
+
+#### Enhanced Alert Configuration
+```bash
+# Configure security alerts in health.sh
+./health.sh --comprehensive --email-alert
+
+# Monitor enhanced fail2ban alerts
+docker compose logs fail2ban | grep -E "NOTICE|WARNING|ERROR"
+
+# Template-based security validation alerts
+docker compose config || echo "Template validation failed"
 ```
 
 ## Best Practices Summary
 
 ### Production Environment Security
 
-1. **Version Management**: Always pin container versions in production
-2. **Access Control**: Use break-glass admin for emergency access only
-3. **Monitoring**: Enable comprehensive health and security monitoring
-4. **Updates**: Test all updates in development before production
-5. **Backups**: Maintain encrypted backups with regular restoration tests
+1. **Template-Based Security**: Always use template-based configuration management
+2. **Enhanced fail2ban**: Leverage rate limiting and error handling features
+3. **Break-Glass Access**: Maintain emergency admin for OCI serial console access
+4. **Atomic Backups**: Use enhanced backup operations with encryption
+5. **Monitoring**: Enable comprehensive health and security monitoring
+6. **Regular Updates**: Test all updates in development with template validation
 
 ### Security Maintenance Routine
 
 #### Weekly (5 minutes)
 ```bash
-make breakglass-status
-make check-updates
-make logs SERVICE=fail2ban | tail -10
+./create-breakglass-admin.sh status
+docker compose logs fail2ban | grep -E "Rate|Error" | tail -5
+sudo ./update-cloudflare-ips.sh --dry-run
 ```
 
 #### Monthly (15 minutes)
 ```bash
-make health
-make backup-emergency
-make update-ips
+./health.sh --comprehensive
+./backup.sh --type emergency
+sudo ./update-cloudflare-ips.sh
+docker compose config  # Validate template configuration
 ```
 
 #### Quarterly (30 minutes)
 ```bash
-make edit-secrets --rotate-keys
-# Test break-glass admin access via OCI console
-# Review and update version pins for security
+./edit-secrets.sh --rotate-keys
+# Test break-glass admin access via OCI console (status check)
+# Review and update template-based security configurations
 # Full security audit and documentation review
+# Review enhanced fail2ban rate limiting effectiveness
+```
+
+## Security Incident Response
+
+### Enhanced Incident Response Procedures
+
+#### Security Incident Detection
+```bash
+# Enhanced monitoring for security incidents
+./health.sh --comprehensive --json | jq '.security_status'
+docker compose logs fail2ban | grep -E "CRITICAL|WARNING|Rate.*exceeded"
+```
+
+#### Incident Response with Break-Glass Access
+```bash
+# If SSH access compromised, use break-glass admin:
+# 1. Access OCI Console → Instance → Console Connection
+# 2. Login with break-glass admin credentials
+# 3. Investigate and contain incident
+# 4. Restore from atomic backup if needed: ./restore.sh --interactive
+# 5. Update security configurations via templates
+# 6. Delete Console Connection for security
+# 7. Rotate break-glass password: ./create-breakglass-admin.sh password
+```
+
+#### Post-Incident Security Hardening
+```bash
+# Enhanced post-incident procedures
+# 1. Create emergency backup: ./backup.sh --type emergency
+# 2. Review enhanced fail2ban logs: docker compose logs fail2ban
+# 3. Update template-based security configurations
+# 4. Test break-glass admin access
+# 5. Comprehensive security audit: ./health.sh --comprehensive
 ```
 
 ---
@@ -496,4 +580,4 @@ make edit-secrets --rotate-keys
 - **Vulnerability Reporting**: Follow responsible disclosure procedures
 - **Break-Glass Access**: Keep emergency credentials secure and accessible
 
-**Remember**: Security is an ongoing process, not a one-time setup. Regular monitoring, updates, and testing are essential for maintaining a secure VaultWarden deployment with proper emergency access capabilities.
+**Remember**: Security is an ongoing process enhanced by template-based configuration management, rate-limited fail2ban protection, and reliable emergency access capabilities. Regular monitoring, updates, and testing are essential for maintaining a secure VaultWarden deployment with comprehensive security controls.
