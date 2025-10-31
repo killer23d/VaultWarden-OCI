@@ -2,7 +2,7 @@
 # startup.sh - Enhanced VaultWarden stack orchestration
 # FIXED: Creates ALL required secret files for caddy-cloudflare
 # ENHANCED: Production hardening with strict mode and better error handling
-# ADDED: DNS update integration for dynamic IP environments
+# FIXED: Moved DNS update to *after* services are healthy to fix logic bug
 
 set -euo pipefail
 
@@ -78,7 +78,7 @@ SKIP_HEALTH=false
 STOP_MODE=false
 STRICT_SECRETS=false
 STARTUP_SUCCESS=false
-UPDATE_DNS=true  # NEW: DNS update flag
+UPDATE_DNS=true  # DNS update flag
 
 # --- Help ---
 show_help() {
@@ -95,7 +95,7 @@ OPTIONS:
     --skip-health       Skip post-startup health check
     --down              Stop and remove all containers
     --strict-secrets    Fail immediately if critical secrets are missing (production mode)
-    --skip-dns          Skip DNS update before starting services
+    --skip-dns          Skip DNS update after starting services
 
 EXAMPLES:
     ./startup.sh                    # Normal startup with DNS update
@@ -119,12 +119,12 @@ while [[ $# -gt 0 ]]; do
         --skip-health) SKIP_HEALTH=true; shift ;;
         --down) STOP_MODE=true; shift ;;
         --strict-secrets) STRICT_SECRETS=true; shift ;;
-        --skip-dns) UPDATE_DNS=false; shift ;;  # NEW: DNS skip option
+        --skip-dns) UPDATE_DNS=false; shift ;;  # DNS skip option
         *) log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done
 
-# --- NEW: DNS Update Function ---
+# --- DNS Update Function ---
 update_dns_if_needed() {
     if [[ "$UPDATE_DNS" != "true" ]]; then
         log_info "Skipping DNS update (--skip-dns specified)"
@@ -141,8 +141,8 @@ update_dns_if_needed() {
         if ./update-dns.sh; then
             log_success "DNS update completed successfully"
         else
-            log_warn "DNS update failed, but continuing with service startup"
-            log_warn "Services may not be accessible if IP has changed"
+            log_warn "DNS update failed."
+            log_warn "This is okay if the IP hasn't changed, but check logs if access fails."
         fi
     else
         log_debug "update-dns.sh not found, skipping DNS update"
@@ -151,7 +151,7 @@ update_dns_if_needed() {
     return 0
 }
 
-# --- FIXED: Prepare Docker Secrets ---
+# --- Prepare Docker Secrets ---
 prepare_docker_secrets() {
     log_info "Preparing Docker secrets..."
 
@@ -166,7 +166,6 @@ prepare_docker_secrets() {
     mkdir -p "$docker_secrets_dir"
     chown "$real_user:$real_group" "$docker_secrets_dir"
     chmod 700 "$docker_secrets_dir"
-
 
     if [[ ! -f "secrets/secrets.yaml" ]]; then
         log_error "Secrets file not found: secrets/secrets.yaml"
@@ -203,7 +202,6 @@ prepare_docker_secrets() {
         return 1
     }
 
-    # --- START CRITICAL FIX ---
     # Define ALL secrets that need files based on docker-compose.yml
     local secrets_needing_files=(
         "admin_token"
@@ -222,8 +220,7 @@ prepare_docker_secrets() {
         "caddy_cloudflare_dns_token"
         "fail2ban_cloudflare_firewall_token"
     )
-    # --- END CRITICAL FIX ---
-
+    
     local secret_file_path
     local placeholder_critical=()
 
@@ -289,8 +286,6 @@ prepare_docker_secrets() {
 }
 
 # --- Prepare Environment Variables ---
-# This function is not strictly needed if all secrets are file-based,
-# but it's good practice to export env vars listed in .env
 prepare_environment_variables() {
     log_info "Preparing environment variables for containers..."
     # This function is now simpler as docker-compose handles sourcing .env
@@ -348,7 +343,7 @@ post_startup_health_check() {
         if [[ -n "$domain" ]] && has_command curl; then
             log_info "Testing web connectivity..."
             local clean_domain
-            clean_domain=$(echo "$domain" | sed 's|https\?://||; s|/.*$||')
+            clean_domain=$(echo "$domain" | sed 's|https?://||; s|/.*$||')
             if test_http "https://$clean_domain" 15; then
                 log_success "Web interface is responding"
             else
@@ -408,9 +403,6 @@ main() {
     ensure_dir "$state_dir/caddy/config" 700 "$real_user:$real_group" || exit 1
     ensure_dir "$state_dir/fail2ban" 700 "$real_user:$real_group" || exit 1
 
-    # NEW: Update DNS before starting services
-    update_dns_if_needed
-
     # Prepare secrets and environment variables
     prepare_docker_secrets || exit 1
     prepare_environment_variables || exit 1
@@ -440,16 +432,24 @@ main() {
         health_check_failed=true
     fi
 
+    # --- LOGIC FIX: Move DNS update to *after* health check ---
+    if [[ "$health_check_failed" == "false" ]]; then
+        update_dns_if_needed
+    else
+        log_warn "Skipping DNS update because services failed to start."
+    fi
+    # --- END LOGIC FIX ---
+
     # Final status determination
     local domain
     domain=$(get_config_value "DOMAIN")
 
     # Clearer final status messaging
     if [[ "$health_check_failed" == "true" ]]; then
-        log_error "🚨 STARTUP COMPLETED WITH CRITICAL ISSUES"
+        log_error "STARTUP COMPLETED WITH CRITICAL ISSUES"
         echo ""
-        echo "❌ Critical services failed health checks"
-        echo "❌ VaultWarden is likely NON-FUNCTIONAL"
+        echo "Critical services failed health checks"
+        echo "VaultWarden is likely NON-FUNCTIONAL"
         echo ""
         echo "Immediate actions:"
         echo "  1. Check container logs: make logs SERVICE=vaultwarden"
@@ -462,7 +462,7 @@ main() {
         # Mark successful startup
         STARTUP_SUCCESS=true
 
-        log_success "🎉 VaultWarden-OCI-NG startup completed successfully"
+        log_success "VaultWarden-OCI-NG startup completed successfully"
 
         # Check final service status (updated list)
         local all_running=true
@@ -475,11 +475,11 @@ main() {
 
         echo ""
         if [[ "$all_running" == "true" ]]; then
-            echo "✅ All services are running and healthy!"
-            echo "🌐 Web interface: https://$domain"
-            echo "⚙️  Admin panel: https://$domain/admin"
+            echo "All services are running and healthy!"
+            echo "Web interface: https://$domain"
+            echo "Admin panel: https://$domain/admin"
         else
-            echo "⚠️  Some services may have issues. Check logs for details."
+            echo "Some services may have issues. Check logs for details."
         fi
 
         echo ""
@@ -496,3 +496,4 @@ main() {
 }
 
 main "$@"
+EOF
