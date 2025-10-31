@@ -1,5 +1,6 @@
 # VaultWarden-OCI-NG Makefile
 # Modernized to match new scripts (backup --type, update --pin, etc.)
+# Enhanced with DNS management for dynamic IP environments
 
 .PHONY: help
 .DEFAULT_GOAL := help
@@ -20,7 +21,7 @@ help:
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage:\n  make \033[36m<target>\033[0m\n"} /^[a-zA-Z_0-9-]+:.*?##/ { printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2 } /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
 
 ##@ Basic Operations
-up: ## Start all services
+up: ## Start all services (includes DNS update)
 	@echo "$(BLUE)[INFO]$(NC) Starting VaultWarden services..."
 	@./startup.sh
 
@@ -35,6 +36,15 @@ restart: ## Force restart all services (required after secrets changes)
 status: ## Show container status
 	@echo "$(BLUE)[INFO]$(NC) Checking container status..."
 	@docker compose ps
+
+##@ DNS Management
+update-dns: ## Update Cloudflare DNS to current IP
+	@echo "$(BLUE)[INFO]$(NC) Updating DNS record..."
+	@./update-dns.sh
+
+check-dns: ## Check current DNS record vs public IP (dry-run)
+	@echo "$(BLUE)[INFO]$(NC) Checking DNS record..."
+	@./update-dns.sh || echo "$(YELLOW)[INFO]$(NC) DNS check completed (may show differences)"
 
 ##@ Health & Monitoring
 health: ## Run comprehensive health check
