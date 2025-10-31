@@ -214,48 +214,49 @@ setup_user_permissions() {
 }
 
 setup_firewall() {
-    log_info "Configuring UFW firewall..."
-    if [[ "$DRY_RUN" == "true" ]]; then 
-        log_info " Would configure firewall rules"
-        return 0
-    fi
+    log_info "Configuring Cloudflare-only UFW firewall..."
     
-    if ! has_command ufw; then 
-        log_warn "UFW command not found, skipping."
-        return 0
-    fi
-
-    local ssh_port
-    ssh_port=$(get_config_value "SSH_PORT" "22")
-    if [[ -z "$ssh_port" ]]; then
-        log_error "SSH_PORT is not defined. Aborting firewall setup to prevent lockout."
-        return 1
-    fi
-
-    log_info "Applying firewall rules..."
     ufw --force reset >/dev/null
     ufw default deny incoming >/dev/null
     ufw default allow outgoing >/dev/null
-    ufw allow "$ssh_port/tcp" comment "SSH" >/dev/null
-
-    # Verify SSH rule was added
-    if ! ufw status | grep -q -E "$ssh_port/tcp.*ALLOW"; then
-        log_error "CRITICAL: Failed to add SSH allow rule for port $ssh_port."
-        log_error "Aborting firewall activation to prevent SSH lockout."
-        return 1
-    fi
-    log_success "SSH allow rule for port $ssh_port verified."
-
-    ufw allow 80/tcp comment "HTTP" >/dev/null
-    ufw allow 443/tcp comment "HTTPS" >/dev/null
-
-    log_info "Enabling UFW firewall..."
-    if echo "y" | ufw enable >/dev/null; then
-        log_success "Firewall configured and enabled successfully."
+    
+    # SSH on custom port
+    local ssh_port="${SSH_PORT:-2222}"
+    ufw allow "$ssh_port/tcp" comment "SSH-Custom" >/dev/null
+    
+    # Fetch current Cloudflare IP ranges dynamically
+    log_info "Fetching current Cloudflare IP ranges..."
+    local cf_ipv4_file="/tmp/cf_ipv4_ranges.txt"
+    local cf_ipv6_file="/tmp/cf_ipv6_ranges.txt"
+    
+    if curl -sf --max-time 10 "https://www.cloudflare.com/ips-v4" -o "$cf_ipv4_file" && \
+       curl -sf --max-time 10 "https://www.cloudflare.com/ips-v6" -o "$cf_ipv6_file"; then
+        
+        # Apply IPv4 ranges
+        while IFS= read -r range; do
+            if [[ -n "$range" ]]; then
+                ufw allow from "$range" to any port 80,443 comment "CF-IPv4" >/dev/null
+            fi
+        done < "$cf_ipv4_file"
+        
+        # Apply IPv6 ranges  
+        while IFS= read -r range; do
+            if [[ -n "$range" ]]; then
+                ufw allow from "$range" to any port 80,443 comment "CF-IPv6" >/dev/null
+            fi
+        done < "$cf_ipv6_file"
+        
+        rm -f "$cf_ipv4_file" "$cf_ipv6_file"
+        log_success "Applied $(wc -l < "$cf_ipv4_file" 2>/dev/null || echo "current") Cloudflare IP ranges"
+        
     else
-        log_error "Failed to enable UFW. Please enable it manually: sudo ufw enable"
+        log_error "Failed to fetch Cloudflare IP ranges from API"
+        log_error "UFW firewall setup incomplete - web traffic may be blocked"
         return 1
     fi
+    
+    echo "y" | ufw enable >/dev/null
+    log_success "Cloudflare-only firewall configured with current IP ranges"
 }
 
 create_env_file() {
