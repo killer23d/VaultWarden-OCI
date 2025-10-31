@@ -152,3 +152,12 @@ breakglass-status: ## Check the status of the emergency break-glass admin
 breakglass-password: ## Set/change the password for the emergency break-glass admin
 	@echo "$(BLUE)[INFO]$(NC) Setting break-glass admin password..."
 	@sudo ./create-breakglass-admin.sh password
+
+##@ Security Maintenance
+update-cf-ranges: ## Update UFW Cloudflare IP ranges
+	@echo "$(BLUE)[INFO]$(NC) Updating UFW Cloudflare IP ranges..."
+	@sudo ./maintenance.sh --type cf-ranges
+
+check-cf-ranges: ## Check current UFW Cloudflare rules
+	@echo "$(BLUE)[INFO]$(NC) Current UFW Cloudflare rules:"
+	@sudo ufw status | grep "CF-"
