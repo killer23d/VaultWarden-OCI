@@ -167,6 +167,7 @@ prepare_docker_secrets() {
     chown "$real_user:$real_group" "$docker_secrets_dir"
     chmod 700 "$docker_secrets_dir"
 
+
     if [[ ! -f "secrets/secrets.yaml" ]]; then
         log_error "Secrets file not found: secrets/secrets.yaml"
         log_info "Run: ./edit-secrets.sh --init to create it"
@@ -403,6 +404,8 @@ main() {
     ensure_dir "$state_dir/caddy/config" 700 "$real_user:$real_group" || exit 1
     ensure_dir "$state_dir/fail2ban" 700 "$real_user:$real_group" || exit 1
 
+    # --- LOGIC FIX: DNS Update moved after services are confirmed healthy ---
+
     # Prepare secrets and environment variables
     prepare_docker_secrets || exit 1
     prepare_environment_variables || exit 1
@@ -434,6 +437,7 @@ main() {
 
     # --- LOGIC FIX: Move DNS update to *after* health check ---
     if [[ "$health_check_failed" == "false" ]]; then
+        # Only run DNS update if services are healthy
         update_dns_if_needed
     else
         log_warn "Skipping DNS update because services failed to start."
@@ -446,10 +450,10 @@ main() {
 
     # Clearer final status messaging
     if [[ "$health_check_failed" == "true" ]]; then
-        log_error "STARTUP COMPLETED WITH CRITICAL ISSUES"
+        log_error "🚨 STARTUP COMPLETED WITH CRITICAL ISSUES"
         echo ""
-        echo "Critical services failed health checks"
-        echo "VaultWarden is likely NON-FUNCTIONAL"
+        echo "❌ Critical services failed health checks"
+        echo "❌ VaultWarden is likely NON-FUNCTIONAL"
         echo ""
         echo "Immediate actions:"
         echo "  1. Check container logs: make logs SERVICE=vaultwarden"
@@ -462,7 +466,7 @@ main() {
         # Mark successful startup
         STARTUP_SUCCESS=true
 
-        log_success "VaultWarden-OCI-NG startup completed successfully"
+        log_success "🎉 VaultWarden-OCI-NG startup completed successfully"
 
         # Check final service status (updated list)
         local all_running=true
@@ -475,11 +479,11 @@ main() {
 
         echo ""
         if [[ "$all_running" == "true" ]]; then
-            echo "All services are running and healthy!"
-            echo "Web interface: https://$domain"
-            echo "Admin panel: https://$domain/admin"
+            echo "✅ All services are running and healthy!"
+            echo "🌐 Web interface: https://$domain"
+            echo "⚙️  Admin panel: https://$domain/admin"
         else
-            echo "Some services may have issues. Check logs for details."
+            echo "⚠️  Some services may have issues. Check logs for details."
         fi
 
         echo ""
@@ -496,4 +500,4 @@ main() {
 }
 
 main "$@"
-EOF
+
