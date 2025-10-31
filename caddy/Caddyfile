@@ -24,6 +24,21 @@
         format json
     }
 
+    # Basic rate limiting for set-and-forget operation
+    rate_limit {
+        zone static_rl {
+            key {remote_host}
+            window 1m
+            capacity 60  # 60 requests per minute per IP
+        }
+        
+        zone admin_rl {
+            key {remote_host}
+            match /admin*
+            window 1m  
+            capacity 10  # Stricter for admin panel
+        }
+
     # Enhanced security headers
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
