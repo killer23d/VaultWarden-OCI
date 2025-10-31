@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # cron-setup.sh - Setup automated maintenance tasks for VaultWarden-OCI-NG
 # Modernized for new backup, maintenance, and update scripts.
+# UPDATED: Added dynamic DNS updates to complete ddclient migration
 
 set -euo pipefail
 
@@ -19,7 +20,7 @@ DRY_RUN=false
 
 show_help() {
     cat << 'EOF'
-VaultWarden-OCI-NG Cron Setup (Modernized)
+VaultWarden-OCI-NG Cron Setup (Modernized with Dynamic DNS)
 
 USAGE:
     sudo ./cron-setup.sh [OPTIONS]
@@ -36,10 +37,11 @@ EXAMPLES:
     sudo ./cron-setup.sh --dry-run       # Preview cron jobs without installing
 
 AUTOMATED TASKS:
+    - Every 15min: Dynamic DNS Updates (replaces ddclient)
     - Daily DB Backups (with rclone sync)
     - Weekly Full Backups (with rclone sync)
-    - Daily Health Checks
-    - Weekly Maintenance (Docker prune, log rotation, old backup cleanup)
+    - Daily Health Checks (with email alerts)
+    - Weekly Maintenance (Docker prune, backup cleanup)
     - Weekly System (OS) Package Updates
     - Quarterly Database Maintenance (VACUUM)
 EOF
@@ -74,13 +76,13 @@ if ! is_root; then
 fi
 
 create_cron_jobs() {
-    log_info "Creating cron jobs configuration..."
-    
+    log_info "Creating cron jobs configuration with dynamic DNS..."
+
     local real_user; real_user=$(get_real_user)
-    
+
     # Clear the temp file
     > "$CRON_FILE"
-    
+
     # Add header
     cat >> "$CRON_FILE" << EOF
 # VaultWarden-OCI-NG Automated Maintenance Tasks
@@ -114,33 +116,36 @@ export -f log_job
 
 # --- Cron Jobs ---
 
+# Dynamic DNS Updates (every 15 minutes) - NEW: Replaces ddclient
+*/15 * * * * cd $PROJECT_ROOT && log_job "DNS Update" ./update-dns.sh
+
 # Daily DB Backup (2:00 AM)
 0 2 * * * cd $PROJECT_ROOT && log_job "DB Backup" ./backup.sh --type db --rclone
 
 # Weekly Full Backup (Sunday 4:00 AM)
 0 4 * * 0     cd $PROJECT_ROOT && log_job "Full Backup" ./backup.sh --type full --rclone
 
-# Daily Health Check (6:00 AM)
-0 6 * * * cd $PROJECT_ROOT && log_job "Health Check" ./health.sh --comprehensive --quiet
+# Daily Health Check (6:00 AM) - UPDATED: Added email alerts
+0 6 * * * cd $PROJECT_ROOT && log_job "Health Check" ./health.sh --comprehensive --email --quiet
 
 # Weekly Standard Maintenance (Sunday 5:00 AM)
-# Cleans logs, old backups (local & remote), and docker system
+# Cleans old backups (local & remote), and docker system
 0 5 * * 0     cd $PROJECT_ROOT && log_job "Standard Maintenance" sudo ./maintenance.sh --type standard --force
 
 # Weekly System (OS) Package Update (Saturday 3:00 AM)
 0 3 * * 6     cd $PROJECT_ROOT && log_job "System Update" sudo ./update.sh --type system --force
 
 # Quarterly Database Maintenance (1st Sunday of Jan, Apr, Jul, Oct at 5:30 AM)
-30 5 1-7 * 0   [ \$(date +\\%m) -eq 1 -o \$(date +\\%m) -eq 4 -o \$(date +\\%m) -eq 7 -o \$(date +\\%m) -eq 10 ] && cd $PROJECT_ROOT && log_job "DB Maintenance" sudo ./db-maint.sh --force
+30 5 1-7 * 0   [ \$(date +\%m) -eq 1 -o \$(date +\%m) -eq 4 -o \$(date +\%m) -eq 7 -o \$(date +\%m) -eq 10 ] && cd $PROJECT_ROOT && log_job "DB Maintenance" sudo ./db-maint.sh --force
 
 EOF
-    
+
     log_success "Cron jobs configuration created in $CRON_FILE"
 }
 
 install_cron_jobs() {
     local cron_target_file="/etc/cron.d/vaultwarden-oci-ng"
-    
+
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would install the following system-wide cron jobs to $cron_target_file:"
         cat "$CRON_FILE"
@@ -149,29 +154,38 @@ install_cron_jobs() {
     fi
 
     log_info "Installing cron jobs to $cron_target_file..."
-    
+
     if ! mv "$CRON_FILE" "$cron_target_file"; then
         log_error "Failed to move cron file. Check permissions."
         rm -f "$CRON_FILE"
         return 1
     fi
-    
+
     chmod 644 "$cron_target_file"
-    
+
     log_success "Cron jobs installed successfully."
     log_info "Cron logs will be written to $PROJECT_ROOT/logs/cron-jobs.log"
+    echo ""
+    log_info "Complete automation schedule:"
+    echo "  • Every 15min: DNS updates (secure, using Docker secrets)"
+    echo "  • Daily 02:00: Database backup + rclone sync"
+    echo "  • Daily 06:00: Health check + email alerts"
+    echo "  • Weekly Sun 04:00: Full backup + rclone sync"
+    echo "  • Weekly Sun 05:00: Maintenance cleanup"
+    echo "  • Weekly Sat 03:00: System package updates"
+    echo "  • Quarterly: Database VACUUM optimization"
 }
 
 remove_cron_jobs() {
     local cron_target_file="/etc/cron.d/vaultwarden-oci-ng"
-    
+
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would remove $cron_target_file"
         return 0
     fi
 
     log_info "Removing VaultWarden-OCI-NG cron jobs..."
-    
+
     if [[ -f "$cron_target_file" ]]; then
         if ! rm -f "$cron_target_file"; then
             log_error "Failed to remove cron file: $cron_target_file"
@@ -184,16 +198,16 @@ remove_cron_jobs() {
 }
 
 main() {
-    log_info "VaultWarden-OCI-NG Cron Setup (Modernized)"
-    
+    log_info "VaultWarden-OCI-NG Cron Setup (Modernized with Dynamic DNS)"
+
     if [[ "$DRY_RUN" == "true" ]]; then
         log_warn "DRY RUN MODE - No changes will be made"
     fi
-    
+
     if [[ "$INSTALL_CRON" == "true" ]]; then
         create_cron_jobs
         install_cron_jobs
-        
+
     elif [[ "$REMOVE_CRON" == "true" ]]; then
         remove_cron_jobs
     fi
