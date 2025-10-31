@@ -247,16 +247,34 @@ setup_firewall() {
         done < "$cf_ipv6_file"
         
         rm -f "$cf_ipv4_file" "$cf_ipv6_file"
-        log_success "Applied $(wc -l < "$cf_ipv4_file" 2>/dev/null || echo "current") Cloudflare IP ranges"
+        log_success "Applied Cloudflare IP ranges successfully"
         
     else
-        log_error "Failed to fetch Cloudflare IP ranges from API"
-        log_error "UFW firewall setup incomplete - web traffic may be blocked"
-        return 1
+        log_error "⚠️  CRITICAL WARNING: Failed to fetch Cloudflare IP ranges from API"
+        log_error "    This means your firewall will block ALL web traffic!"
+        log_error "    Your server may become inaccessible after firewall activation."
+        echo ""
+        echo "OPTIONS:"
+        echo "  1. Check internet connectivity and try again"
+        echo "  2. Use manual Cloudflare IP ranges (see documentation)"
+        echo "  3. Skip firewall setup (NOT recommended for production)"
+        echo ""
+        
+        if [[ "$AUTO_MODE" != "true" ]]; then
+            read -p "Continue anyway? [y/N]: " -n 1 -r
+            echo ""
+            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                log_info "Setup aborted by user. Fix connectivity and re-run."
+                exit 1
+            fi
+        fi
+        
+        log_warn "Proceeding with basic firewall (SSH only) - web access will be blocked"
+        log_warn "You MUST manually configure Cloudflare IP ranges after setup"
     fi
     
     echo "y" | ufw enable >/dev/null
-    log_success "Cloudflare-only firewall configured with current IP ranges"
+    log_success "Firewall configured and enabled"
 }
 
 create_env_file() {
