@@ -3,8 +3,6 @@
 # FIXED: Standardized logging strategy and removed hardcoded platform architecture.
 #        - VaultWarden & Fail2ban log to stdout (rotated by Docker json-file driver).
 #        - Caddy logs to file (rotated by Caddy itself) so fail2ban can read it.
-#        - Removed platform: linux/arm64 for portability.
-#        - Updated CPU limits to total 0.8 OCPU (leaving 0.2 headroom).
 
 services:
   # VaultWarden Password Manager
@@ -74,6 +72,9 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    # SAFE HARDENING
+    security_opt:
+      - no-new-privileges:true
 
   # Caddy Reverse Proxy with Cloudflare Integration
   caddy:
@@ -124,6 +125,9 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    # SAFE HARDENING
+    security_opt:
+      - no-new-privileges:true
 
   # Fail2Ban Intrusion Prevention
   fail2ban:
@@ -164,9 +168,9 @@ services:
         reservations:
           cpus: '${FAIL2BAN_CPU_RESERVATION:-0.05}'
           memory: '${FAIL2BAN_MEMORY_RESERVATION:-64m}'
-    cap_add:
-      - NET_ADMIN
-      - NET_RAW
+    # cap_add: - not needed 
+    #  - NET_ADMIN
+    #  - NET_RAW
     # --- Docker-managed log rotation ---
     logging:
       driver: json-file
