@@ -199,7 +199,7 @@ check_disk_space() {
         return 1
     elif (( usage_percent > 70 )); then
         health_log_warn "Root disk usage high: ${usage_percent}%"
-        HEALTH_RESULTS["disk_space"]="degraded"
+        HEALTH_RESULTS["disk_space"]="degraded"  
         HEALTH_DETAILS["disk_space"]="Root: ${usage_percent}% used (warning)"
     else
         health_log_success "Disk space OK: ${usage_percent}% used"
@@ -567,26 +567,26 @@ generate_text_report() {
 
 generate_json_report() {
     local json_report="{"
-    json_report+=""timestamp": "$(date -Iseconds)","
-    json_report+=""overall_status": "$OVERALL_STATUS","
-    json_report+=""components": {"
+    json_report+="\"timestamp\": \"$(date -Iseconds)\","
+    json_report+="\"overall_status\": \"$OVERALL_STATUS\","
+    json_report+="\"components\": {"
 
     local first=true
     for component in "${!HEALTH_RESULTS[@]}"; do
         [[ "$first" == "true" ]] && first=false || json_report+=","
-        json_report+=""$component": {"
-        json_report+=""status": "${HEALTH_RESULTS[$component]}","
-        json_report+=""details": "${HEALTH_DETAILS[$component]:-}""
+        json_report+="\"$component\": {"
+        json_report+="\"status\": \"${HEALTH_RESULTS[$component]}\","
+        json_report+="\"details\": \"${HEALTH_DETAILS[$component]:-}\""
         json_report+="}"
     done
 
     json_report+="},"
-    json_report+=""issues": ["
+    json_report+="\"issues\": ["
 
     first=true
     for issue in "${ISSUES_FOUND[@]}"; do
         [[ "$first" == "true" ]] && first=false || json_report+=","
-        json_report+=""$issue""
+        json_report+="\"$issue\""
     done
 
     json_report+="]"
