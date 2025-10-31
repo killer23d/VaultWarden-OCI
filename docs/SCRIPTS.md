@@ -1,25 +1,25 @@
-# Script Reference Guide - VaultWarden-OCI-Simplified
+# Script Reference Guide - VaultWarden-OCI
 
-This comprehensive reference covers all scripts in VaultWarden-OCI-Simplified, their usage patterns, options, and integration possibilities for small team deployments.
+This comprehensive reference covers all scripts in VaultWarden-OCI, their usage patterns, options, and integration possibilities for small team deployments with template-based architecture and enhanced operations.
 
 ## Complete Script Inventory
 
 ### All Scripts Overview
 
-| Script | Purpose | Makefile Shortcut | Frequency | Requires Root | Lines |
-|--------|---------|-------------------|-----------|---------------|-------|
-| [`setup.sh`](#setupsh) | Initial system setup and configuration | N/A | Once | Yes | ~650 |
-| [`startup.sh`](#startupsh) | Service lifecycle management | `make up/down/restart` | As needed | No | ~270 |
-| [`health.sh`](#healthsh) | System monitoring and auto-repair | `make health` | Automated (6h) | No | ~350 |
-| [`backup.sh`](#backupsh) | Backup creation and management | `make backup-*` | Daily (auto) | No | ~780 |
-| [`restore.sh`](#restoresh) | System restoration from backups | `make restore` | Emergency | No | ~540 |
-| [`edit-secrets.sh`](#edit-secretssh) | Encrypted secrets management | `make edit-secrets` | As needed | No | ~320 |
-| [`update.sh`](#updatesh) | System and container updates with version management | `make update-*` | Weekly (auto) | Partial | ~430 |
-| [`maintenance.sh`](#maintenancesh) | System cleanup and optimization | `make maint-*` | Monthly (auto) | Yes | ~580 |
-| [`cron-setup.sh`](#cron-setupsh) | Automation configuration | N/A | Once | Yes | ~420 |
-| [`update-cloudflare-ips.sh`](#update-cloudflare-ipssh) | Firewall IP management | `make update-ips` | Weekly (auto) | Yes | ~270 |
-| [`db-maint.sh`](#db-maintsh) | Database optimization | `make db-maint` | Quarterly (auto) | Yes | ~230 |
-| [`create-breakglass-admin.sh`](#create-breakglass-adminsh) | Emergency admin for serial console | `make breakglass-*` | As needed | Yes | ~450 |
+| Script | Purpose | Frequency | Requires Root | Key Features |
+|--------|---------|-----------|---------------|--------------|
+| [`setup.sh`](#setupsh) | Template-based system setup and configuration | Once | Yes | Template generation, enhanced UFW warnings |
+| [`startup.sh`](#startupsh) | Service lifecycle management | As needed | No | Race condition fixes, better health checks |
+| [`health.sh`](#healthsh) | System monitoring and auto-repair | Automated (6h) | No | Comprehensive diagnostics, auto-healing |
+| [`backup.sh`](#backupsh) | Enhanced backup creation with atomic operations | Daily (auto) | No | Atomic ops, enhanced listing, WAL checkpoints |
+| [`restore.sh`](#restoresh) | Interactive system restoration from backups | Emergency | No | Interactive selection, enhanced validation |
+| [`edit-secrets.sh`](#edit-secretssh) | Encrypted secrets management with Age/SOPS | As needed | No | Age encryption, SOPS integration, key rotation |
+| [`update.sh`](#updatesh) | System and container updates | Weekly (auto) | Partial | Enhanced update management, rollback support |
+| [`maintenance.sh`](#maintenancesh) | System cleanup and optimization | Monthly (auto) | Yes | Log rotation, Docker cleanup, retention management |
+| [`cron-setup.sh`](#cron-setupsh) | Automation configuration | Once | Yes | Comprehensive scheduling, health monitoring |
+| [`update-cloudflare-ips.sh`](#update-cloudflare-ipssh) | Enhanced firewall IP management | Weekly (auto) | Yes | Improved error handling, fallback warnings |
+| [`db-maint.sh`](#db-maintsh) | Database optimization | Quarterly (auto) | Yes | SQLite optimization, integrity checks |
+| [`create-breakglass-admin.sh`](#create-breakglass-adminsh) | Emergency admin for OCI serial console | As needed | Yes | Break-glass admin lifecycle, password management |
 
 ### Library Scripts (lib/ directory)
 
@@ -29,104 +29,74 @@ This comprehensive reference covers all scripts in VaultWarden-OCI-Simplified, t
 | [`lib/docker.sh`](#libdockersh) | Docker/container management | Service management, health checks |
 | [`lib/crypto.sh`](#libcryptosh) | Encryption and key management | Age encryption, SOPS operations |
 
-## Quality of Life Improvements
+## Enhanced Features Overview
 
-### Makefile Integration
+### Template-Based Operations
+- **setup.sh**: Generates configuration from `.example` templates
+- **All scripts**: Support template-based validation and maintenance
+- **Consistent deployment**: Same templates produce identical configurations
 
-All major operations now have convenient Makefile shortcuts:
+### Atomic Operations
+- **backup.sh**: Atomic backup creation prevents corruption
+- **restore.sh**: Atomic restore operations with pre-restore backups
+- **Enhanced reliability**: WAL checkpoints for live database snapshots
 
-```bash
-# System Management
-make up                 # ./startup.sh
-make down               # ./startup.sh --down  
-make restart            # ./startup.sh --force-restart
-make status             # Complete system overview
-make health             # ./health.sh --comprehensive
-
-# Backup Operations
-make backup-db          # ./backup.sh --type db
-make backup-full        # ./backup.sh --type full
-make backup-emergency   # ./backup.sh --type emergency
-make list-backups       # ./backup.sh --list
-make restore            # ./restore.sh --interactive
-
-# Version Management
-make pins               # ./update.sh --show-pins
-make check-updates      # ./update.sh --type containers --check-only
-make update-containers  # ./update.sh --type containers --backup
-make pin SERVICE=... VERSION=...    # ./update.sh --pin ...
-make unpin SERVICE=...              # ./update.sh --unpin ...
-
-# Maintenance
-make maint-standard     # sudo ./maintenance.sh --type standard --force
-make maint-deep         # sudo ./maintenance.sh --type deep --force
-make db-maint           # sudo ./db-maint.sh --force
-
-# Emergency Access
-make breakglass-create    # sudo ./create-breakglass-admin.sh create
-make breakglass-status    # sudo ./create-breakglass-admin.sh status
-make breakglass-password  # sudo ./create-breakglass-admin.sh password
-```
-
-### Interactive Features
-
-- **Interactive Restore**: `make restore` provides a numbered menu of available backups
-- **Backup Listing**: Enhanced `./backup.sh --list` shows backups with timestamps, sizes, and IDs
-- **Configuration Validation**: `make config-check` validates Docker Compose syntax
-- **Remote Backup Setup**: `make configure-rclone` guides through cloud storage configuration
+### Enhanced Security
+- **fail2ban integration**: Rate limiting (max 30 API calls/minute)
+- **UFW improvements**: Clear warnings and fallback configurations
+- **Break-glass admin**: Emergency access via OCI serial console
 
 ## Core Management Scripts
 
 ### setup.sh
 
-**Purpose**: Complete system setup from fresh installation to production-ready deployment.
+**Purpose**: Complete template-based system setup from fresh installation to production-ready deployment.
 
 #### Synopsis
 ```bash
 sudo ./setup.sh [OPTIONS]
 ```
 
-#### Options
+#### Enhanced Options
 ```bash
 --domain DOMAIN     Your domain (e.g., vault.example.com)
 --email EMAIL       Admin email address
---auto             Automated setup with minimal prompts
---use-latest       Skip version pinning, use latest images by default
+--auto             Automated setup with template generation and minimal prompts
+--use-latest       Skip version pinning, use latest images (development mode)
 --skip-deps        Skip dependency installation
---force            Overwrite existing configuration
+--force            Overwrite existing configuration and regenerate templates
 --dry-run          Show what would be done without executing
 --help             Show help information
 ```
 
-#### Examples
+#### Template-Based Examples
 ```bash
-# Interactive setup
+# Interactive setup with template generation
 sudo ./setup.sh
 
-# Automated production setup (pinned versions)
+# Automated production setup with pinned versions from templates
 sudo ./setup.sh --domain vault.example.com --email admin@example.com --auto
 
-# Development setup (latest versions)
+# Development setup with latest versions
 sudo ./setup.sh --domain vault-dev.example.com --email dev@example.com --use-latest
+
+# Force regenerate templates and configuration
+sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
 ```
 
 ### startup.sh
 
-**Purpose**: Service lifecycle management with comprehensive container orchestration.
+**Purpose**: Enhanced service lifecycle management with comprehensive container orchestration and race condition fixes.
 
 #### Synopsis
 ```bash
 ./startup.sh [OPTIONS]
-# Or use Makefile shortcuts:
-make up            # Start services
-make down          # Stop services  
-make restart       # Force restart all services
 ```
 
-#### Options
+#### Enhanced Options
 ```bash
 --help             Show help information
---force-restart    Stop and recreate all containers (required after secrets changes)
+--force-restart    Stop and recreate all containers (required after secrets/template changes)
 --dry-run         Show what would be done without executing
 --skip-health     Skip post-startup health check
 --down            Stop and remove all containers
@@ -134,76 +104,73 @@ make restart       # Force restart all services
 --no-logs         Don't show container logs after startup
 ```
 
-#### Examples
+#### Enhanced Examples
 ```bash
-# Normal startup (start stopped services)
-make up
-# Or: ./startup.sh
+# Normal startup with race condition fixes
+./startup.sh
 
-# Force restart after configuration changes (REQUIRED after edit-secrets.sh)
-make restart
-# Or: ./startup.sh --force-restart
+# Force restart after configuration/template changes (REQUIRED after template updates)
+./startup.sh --force-restart
 
 # Stop all services
-make down
-# Or: ./startup.sh --down
+./startup.sh --down
+
+# Startup with latest images (useful after version changes)
+./startup.sh --pull
 ```
 
 ### health.sh
 
-**Purpose**: Comprehensive system health monitoring with automated repair capabilities.
+**Purpose**: Comprehensive system health monitoring with automated repair capabilities and enhanced diagnostics.
 
 #### Synopsis
 ```bash
 ./health.sh [OPTIONS]
-# Or use Makefile shortcut:
-make health        # Run comprehensive health check
 ```
 
-#### Options
+#### Enhanced Options
 ```bash
---comprehensive    Run extended health checks
+--comprehensive    Run extended health checks including template validation
 --auto-heal       Automatically attempt to fix issues
 --email-alert     Send email notification if errors are found
 --quiet           Only show warnings and errors
---json            Output results in JSON format
+--json            Output results in JSON format for monitoring systems
 --check TYPE      Run specific check type only
 --help            Show help information
 ```
 
-#### Examples
+#### Enhanced Examples
 ```bash
-# Comprehensive health check (recommended)
-make health
-# Or: ./health.sh --comprehensive
+# Comprehensive health check with template validation (recommended)
+./health.sh --comprehensive
 
 # Automated monitoring with repair and alerting
 ./health.sh --comprehensive --auto-heal --email-alert
 
 # JSON output for monitoring systems
 ./health.sh --comprehensive --json
+
+# Quick health check for automation
+./health.sh --quiet
 ```
 
 ### backup.sh
 
-**Purpose**: Comprehensive backup creation with encryption and verification. **Enhanced with improved listing and interactive features**.
+**Purpose**: Enhanced backup creation with atomic operations, WAL checkpoints, and improved reliability.
 
 #### Synopsis
 ```bash
 ./backup.sh [OPTIONS]
-# Or use Makefile shortcuts:
-make backup-db          # Database backup
-make backup-full        # Full system backup
-make backup-emergency   # Emergency recovery kit
-make list-backups       # List all available backups
 ```
 
-#### New Features
-- **Improved Listing**: `--list` option shows backups with timestamps, sizes, and sequential IDs
-- **Enhanced Parsing**: Fixed backup filename parsing and timestamp handling
-- **Better Error Handling**: Robust fallback logic for rsync operations
+#### Enhanced Features
+- **Atomic Operations**: Prevents corrupt backups during creation
+- **WAL Checkpoints**: Improved database consistency for live snapshots
+- **Enhanced Listing**: Shows backups with timestamps, sizes, and sequential IDs
+- **Better Disk Space Management**: More conservative space checks
+- **Improved Error Handling**: Robust fallback logic for operations
 
-#### Options
+#### Enhanced Options
 ```bash
 --type TYPE       Backup type: db, full, or emergency (default: db)
 --rclone         Sync backup to rclone remote after creation
@@ -211,23 +178,21 @@ make list-backups       # List all available backups
 --retention DAYS Override default retention period
 --compression    Compression level (1-9, default: 6)
 --verify         Extra verification steps (default: enabled)
---list           List available local backups (db, full, emergency)
+--list           List available local backups with enhanced details
 --help           Show help information
 ```
 
-#### Examples
+#### Enhanced Examples
 ```bash
-# Quick database backup
-make backup-db
-# Or: ./backup.sh
+# Quick database backup with atomic operations
+./backup.sh
 
 # Full system backup with cloud sync
-make backup-full
-# Or: ./backup.sh --type full --rclone
+./backup.sh --type full --rclone
 
-# List all available backups with details
-make list-backups
-# Or: ./backup.sh --list
+# List all available backups with enhanced details
+./backup.sh --list
+# Output shows: ID, Type, Date, Time, Size, Filename in table format
 
 # Emergency recovery kit with notification
 ./backup.sh --type emergency --email
@@ -235,35 +200,34 @@ make list-backups
 
 ### restore.sh
 
-**Purpose**: System restoration from encrypted backups with comprehensive safety validation. **Enhanced with interactive selection**.
+**Purpose**: Interactive system restoration from encrypted backups with comprehensive safety validation and enhanced user experience.
 
 #### Synopsis
 ```bash
 ./restore.sh [OPTIONS] [BACKUP_FILE]
-# Or use Makefile shortcut:
-make restore       # Interactive backup selection
 ```
 
-#### New Features
-- **Interactive Mode**: Select backups from a numbered menu
-- **Enhanced Listing**: Shows available backups with timestamps and types
-- **Improved Validation**: Better error handling and prerequisites checking
+#### Enhanced Features
+- **Interactive Mode**: Select backups from a numbered menu with detailed information
+- **Enhanced Validation**: Better error handling and prerequisites checking
+- **Automatic Pre-Restore Backup**: Creates backup before restoration
+- **Template Integration**: Properly handles template files in emergency kits
 
-#### Options
+#### Enhanced Options
 ```bash
 BACKUP_FILE      Path to the encrypted backup file (.age) to restore
---interactive    Show a list of backups and prompt for selection (default if no file given)
+--interactive    Show enhanced list of backups and prompt for selection (default if no file given)
 --type TYPE      Restore type: auto, db, full, emergency (default: auto if file given)
 --force          Skip confirmation prompts (use with extreme caution!)
 --dry-run        Show what would be done without executing
 --help           Show this help
 ```
 
-#### Examples
+#### Enhanced Examples
 ```bash
-# Interactive restoration with backup selection
-make restore
-# Or: ./restore.sh --interactive
+# Interactive restoration with enhanced backup selection
+./restore.sh --interactive
+# Shows table with ID, Type, Date, Time, Size, Filename
 
 # Restore specific backup file
 ./restore.sh backups/db/vw-db-backup-20241025-020000.sqlite3.gz.age
@@ -274,47 +238,43 @@ make restore
 
 ### edit-secrets.sh
 
-**Purpose**: Secure management of encrypted secrets using SOPS and Age.
+**Purpose**: Secure management of encrypted secrets using SOPS and Age with enhanced key management.
 
 #### Synopsis
 ```bash
 ./edit-secrets.sh [OPTIONS]
-# Or use Makefile shortcut:
-make edit-secrets
 ```
 
-#### Examples
+#### Enhanced Options
+```bash
+--test           Test secrets accessibility without editing
+--show           Show decrypted secrets (use with caution)
+--rotate-keys    Rotate Age encryption keys (advanced operation)
+--help           Show help information
+```
+
+#### Enhanced Examples
 ```bash
 # Interactive secrets management (recommended)
-make edit-secrets
-# Or: ./edit-secrets.sh
+./edit-secrets.sh
 
 # Test secrets accessibility without editing
 ./edit-secrets.sh --test
+
+# Rotate Age encryption keys (quarterly recommended)
+./edit-secrets.sh --rotate-keys
 ```
 
 ### update.sh
 
-**Purpose**: System and container updates with version management capabilities. **Enhanced with check-only options**.
+**Purpose**: System and container updates with enhanced management and rollback capabilities.
 
 #### Synopsis
 ```bash
 ./update.sh [OPTIONS]
-# Or use Makefile shortcuts:
-make check-updates      # Check for container updates (no changes)
-make check-system-updates # Check for system updates (no changes)
-make update-containers  # Update containers with automatic backup
-make pins              # Show currently pinned versions
-make pin SERVICE=... VERSION=...    # Pin service to specific version
-make unpin SERVICE=...              # Remove version pin (use latest)
 ```
 
-#### New Features
-- **Check-only modes**: Review available updates without applying changes
-- **Enhanced version management**: Improved pin/unpin functionality
-- **Makefile integration**: Convenient shortcuts for all operations
-
-#### Options
+#### Enhanced Options
 ```bash
 --type TYPE         Update type: containers, system, all (required)
 --check-only       Check for available updates without applying
@@ -322,274 +282,59 @@ make unpin SERVICE=...              # Remove version pin (use latest)
 --auto-reboot      Automatically reboot if required (system mode)
 --backup          Create backup before updates (recommended)
 --rollback        Rollback last update if possible
---pin SERVICE VER  Pin service to specific version
---unpin SERVICE    Remove version pin (use latest)
---show-pins       Show currently pinned versions
 --help             Show help information
 ```
 
-#### Examples
+#### Enhanced Examples
 ```bash
 # Check for available updates (no changes made)
-make check-updates
-# Or: ./update.sh --type containers --check-only
+./update.sh --type containers --check-only
 
 # Update containers with automatic backup
-make update-containers
-# Or: ./update.sh --type containers --backup
+./update.sh --type containers --backup
 
-# Version management
-make pin SERVICE=vaultwarden VERSION=1.31.0
-make unpin SERVICE=caddy
-make pins
+# Update specific service only
+./update.sh --type containers --service vaultwarden --backup
 
 # Check for system updates
-make check-system-updates
-# Or: sudo ./update.sh --type system --check-only
+sudo ./update.sh --type system --check-only
 ```
 
-### maintenance.sh
-
-**Purpose**: System cleanup and optimization for long-term health and performance.
-
-#### Synopsis
-```bash
-sudo ./maintenance.sh [OPTIONS]
-# Or use Makefile shortcuts:
-make maint-standard     # Standard cleanup
-make maint-deep         # Deep system cleanup
-```
-
-#### Examples
-```bash
-# Standard monthly maintenance
-make maint-standard
-# Or: sudo ./maintenance.sh --type standard --force
-
-# Deep system cleanup
-make maint-deep
-# Or: sudo ./maintenance.sh --type deep --force
-```
-
-### create-breakglass-admin.sh
-
-**Purpose**: Interactive creation of emergency admin account for OCI serial console access when SSH is unavailable.
-
-#### Synopsis
-```bash
-sudo ./create-breakglass-admin.sh [COMMAND] [OPTIONS]
-# Or use Makefile shortcuts:
-make breakglass-create     # Create/update break-glass admin
-make breakglass-status     # Check status
-make breakglass-password   # Set password
-```
-
-#### Commands and Options
-```bash
-create           Create break-glass admin user (default, interactive)
-interactive      Same as create (interactive prompts)
-password         Set password for existing break-glass admin
-status           Show current break-glass admin status
---force          Skip interactive confirmations for existing users
---help           Show help information
-```
-
-#### Examples
-```bash
-# Interactive break-glass admin creation (recommended)
-make breakglass-create
-# Or: sudo ./create-breakglass-admin.sh create
-
-# Check status of break-glass accounts
-make breakglass-status
-# Or: sudo ./create-breakglass-admin.sh status
-
-# Set password for existing break-glass admin
-make breakglass-password
-# Or: sudo ./create-breakglass-admin.sh password
-```
-
-## Version Management
-
-### Simple Version Control with Makefile Integration
-
-Version management is handled through `.env` file configuration and `update.sh` commands, now with convenient Makefile shortcuts:
-
-#### Check Current Versions
-```bash
-# View pinned versions
-make pins
-# Or: ./update.sh --show-pins
-
-# View running container versions
-docker compose ps --format "table {{.Service}}	{{.Image}}"
-
-# Check for available updates (no changes made)
-make check-updates
-# Or: ./update.sh --type containers --check-only
-```
-
-#### Pin Specific Versions
-```bash
-# Pin to specific versions for stability
-make pin SERVICE=vaultwarden VERSION=1.31.0
-make pin SERVICE=caddy VERSION=2.8.5
-
-# Apply changes
-make restart
-```
-
-#### Use Latest Versions
-```bash
-# Switch to latest for testing/development
-make unpin SERVICE=vaultwarden
-make unpin SERVICE=caddy
-
-# Apply changes
-make restart
-```
-
-#### Container Version Management Best Practices
-
-**When using latest tags** (e.g., in development or for emergency patches):
-- Always run `docker compose pull` before `make restart` to ensure you are using the newest image layer and not a stale local one
-- After any update (`make update-containers` or manual version changes), verify the running versions with `docker compose ps --format 'table {{.Service}}	{{.Image}}'`
-
-## Integration Patterns
-
-### Health-Based Automation
-```bash
-# Conditional operations based on health status
-if make health > /dev/null 2>&1; then
-    make update-containers
-else
-    ./health.sh --auto-heal
-fi
-```
-
-### Version-Aware Updates
-```bash
-# Safe production update workflow
-make backup-full
-make pin SERVICE=vaultwarden VERSION=1.31.0
-make update-containers
-make health
-```
-
-### Emergency Recovery Workflow
+## Emergency Recovery Workflow
 ```bash
 # Complete emergency procedures
-make breakglass-status
-make backup-emergency
+./create-breakglass-admin.sh status
+./backup.sh --type emergency --rclone
 # Use OCI serial console if SSH fails
+# Login with break-glass admin credentials
 ```
 
-## Daily Operations
+## Best Practices
 
-### For Single Admin (<10 Users)
+### Script Usage Best Practices
 
-#### Daily Tasks (2 minutes with Makefile)
-```bash
-# Quick system overview
-make status
+1. **Template-First Approach**: Always edit `.example` files and regenerate configuration
+2. **Atomic Operations**: Rely on enhanced atomic backup and restore operations
+3. **Interactive Tools**: Use enhanced interactive features for reliability
+4. **Health Monitoring**: Use comprehensive health checks with auto-healing
+5. **Emergency Preparedness**: Maintain break-glass admin access and test regularly
 
-# Automated health check if needed
-make health
-```
+### Security Best Practices
 
-#### Weekly Tasks (10 minutes with Makefile)
-```bash
-# Check for available updates
-make check-updates
+1. **Regular Health Checks**: Use `./health.sh --comprehensive` for security validation
+2. **Break-Glass Testing**: Annually verify break-glass admin access (status check)
+3. **Template Validation**: Always run `docker compose config` after changes
+4. **Key Rotation**: Quarterly rotation of Age encryption keys
+5. **Enhanced Monitoring**: Leverage enhanced fail2ban logging and rate limiting
 
-# Review security logs
-make logs SERVICE=fail2ban | tail -20
+### Operational Best Practices
 
-# Verify emergency access
-make breakglass-status
-```
-
-#### Monthly Tasks (15 minutes with Makefile)
-```bash
-# System maintenance
-make maint-standard
-
-# Create emergency backup
-make backup-emergency
-
-# Review and update versions if needed
-make check-updates
-# If updates available, consider pinning new stable versions
-```
-
-#### Emergency Procedures (30 seconds with Makefile)
-```bash
-# Quick service restart
-make restart
-
-# Emergency backup
-make backup-emergency
-
-# System recovery from backup
-make restore
-
-# Break-glass admin access (via OCI serial console)
-# Use credentials from: make breakglass-status
-```
-
-## Configuration Management
-
-### New Makefile Features
-
-#### Configuration Validation
-```bash
-# Validate Docker Compose configuration syntax
-make config-check
-```
-
-#### Remote Backup Configuration
-```bash
-# Interactive rclone setup
-make configure-rclone
-```
-
-#### System Status Overview
-```bash
-# Comprehensive system status
-make status
-# Shows: services, resources, versions, recent backups, fail2ban status
-```
-
-## Library Scripts
-
-### lib/common.sh
-
-**Purpose**: Shared utilities, logging, and environment handling for all scripts.
-
-#### Key Functions
-- **Logging**: `log_info`, `log_warn`, `log_error`, `log_success`, `log_debug`
-- **Environment**: `load_env_file`, `get_config_value`, `require_config`
-- **Validation**: `require_commands`, `has_command`, `is_root`
-- **File Operations**: `ensure_dir`, `secure_file`, `backup_file`
-
-### lib/docker.sh  
-
-**Purpose**: Docker and container management functionality.
-
-#### Key Functions
-- **Container Management**: `is_service_running`, `get_service_health`, `restart_service`
-- **Docker Compose**: `compose_up`, `compose_down`, `compose_restart`
-- **Health Checks**: `wait_for_healthy`, `check_docker_daemon`
-
-### lib/crypto.sh
-
-**Purpose**: Encryption, key management, and cryptographic operations.
-
-#### Key Functions
-- **Age Encryption**: `encrypt_file`, `decrypt_file`, `check_age_key`
-- **SOPS Operations**: `encrypt_with_sops`, `decrypt_with_sops`, `sops_edit`
-- **Key Management**: `validate_age_key`, `generate_age_keypair`
+1. **Automated Operations**: Rely on cron-setup.sh for consistency
+2. **Template-Based Maintenance**: Use setup.sh for all configuration changes
+3. **Atomic Backups**: Trust enhanced backup operations for reliability
+4. **Interactive Recovery**: Use enhanced restore features for safety
+5. **Comprehensive Monitoring**: Enable health checks with auto-healing
 
 ---
 
-**Note**: This script reference reflects the latest quality of life improvements with Makefile integration, interactive features, and enhanced backup/restore functionality. All scripts are designed to work together seamlessly while maintaining the "set-and-forget" operational philosophy optimized for small team deployments.
+**Note**: This script reference reflects the latest enhancements with template-based architecture, atomic operations, enhanced fail2ban security, and comprehensive emergency access capabilities. All scripts are designed to work together seamlessly while maintaining the "set-and-forget" operational philosophy optimized for small team deployments.

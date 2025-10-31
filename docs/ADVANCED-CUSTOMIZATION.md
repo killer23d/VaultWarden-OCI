@@ -1,152 +1,201 @@
-# Advanced Customization Guide - VaultWarden-OCI-Simplified
+# Advanced Customization Guide - VaultWarden-OCI
 
-This guide covers advanced customization options for power users who need to extend or modify VaultWarden-OCI-Simplified beyond its default configuration while maintaining the "set-and-forget" philosophy.
+This guide covers advanced customization options for power users who need to extend or modify VaultWarden-OCI beyond its default configuration while maintaining the template-based architecture and "set-and-forget" philosophy.
 
 ## Customization Philosophy
 
-VaultWarden-OCI-Simplified is designed for simplicity and reliability. Advanced customizations should:
+VaultWarden-OCI is designed for simplicity and reliability with template-based configuration management. Advanced customizations should:
 
-- **Maintain system stability** - Don't compromise the core "set-and-forget" operation
-- **Preserve security** - Any changes must not weaken the security model  
-- **Stay maintainable** - Customizations should be well-documented and sustainable
-- **Support automation** - Changes should work with existing automation
+- **Maintain Template-Based Architecture** - Work within the `.example` template system
+- **Preserve System Stability** - Don't compromise the "set-and-forget" operation
+- **Enhance Security** - Any changes must not weaken the security model
+- **Stay Maintainable** - Customizations should be well-documented and sustainable
+- **Support Automation** - Changes should work with existing automation
 
-## Docker Compose Overrides
+## Template-Based Customization Framework
 
-### Using docker-compose.override.yml
+### Understanding the Template System
 
-The recommended way to customize container configuration without modifying core files:
+The template-based architecture provides customization through:
+
+```
+📁 Template Structure
+├── docker-compose.yml.example  # Docker services template
+├── .env.example                # Environment variables template
+├── Generated Files (DO NOT EDIT):
+│   ├── docker-compose.yml      # Generated from template
+│   └── .env                    # Generated from template
+├── Static Configuration:
+│   ├── caddy/Caddyfile         # Reverse proxy config
+│   └── fail2ban/               # Security configurations
+```
+
+### Template Customization Workflow
+
+```bash
+# 1. Edit templates (source of truth)
+nano docker-compose.yml.example
+nano .env.example
+
+# 2. Validate template changes
+docker compose config  # Should show no errors
+
+# 3. Apply template changes
+sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.com
+
+# 4. Restart services
+./startup.sh --force-restart
+
+# 5. Verify customizations
+./health.sh --comprehensive
+```
+
+## Docker Compose Template Customizations
+
+### Resource Optimization via Templates
+
+Edit `docker-compose.yml.example` for resource adjustments:
 
 ```yaml
-# docker-compose.override.yml
+# docker-compose.yml.example - Resource adjustments for high-performance systems
 version: '3.8'
 
 services:
   vaultwarden:
-    # Resource adjustments for high-performance systems
+    image: vaultwarden/server:${VAULTWARDEN_VERSION:-latest}
+    container_name: vaultwarden_app
+    restart: unless-stopped
+
+    # Enhanced resource limits via template
     deploy:
       resources:
         limits:
-          memory: 4g
-          cpus: '2.0'
+          memory: ${VAULTWARDEN_MEMORY_LIMIT:-1g}    # Configurable via .env
+          cpus: '${VAULTWARDEN_CPU_LIMIT:-2.0}'      # Configurable via .env
         reservations:
-          memory: 1g
-          cpus: '0.5'
+          memory: 256m
+          cpus: '0.25'
 
-    # Additional environment variables
+    # Additional environment variables via template
     environment:
-      # Enable admin token rotation
-      - ADMIN_TOKEN_ROTATION_ENABLED=true
-      # Custom attachment size limit (100MB)
-      - ATTACHMENT_LIMIT=104857600
-      # Enable organization creation by users
-      - ORG_CREATION_USERS=admin@yourdomain.com
+      # Core settings from .env template
+      - DOMAIN=${DOMAIN}
+      - ADMIN_TOKEN_FILE=/run/secrets/admin_token
 
-    # Additional volumes for custom data
+      # Custom performance settings (add to .env.example)
+      - DATABASE_MAX_CONNS=${DATABASE_MAX_CONNS:-20}
+      - ROCKET_WORKERS=${ROCKET_WORKERS:-10}
+      - ATTACHMENT_LIMIT=${ATTACHMENT_LIMIT:-104857600}
+
+    # Additional volumes for customization
     volumes:
-      - ./custom-templates:/web-vault/templates:ro
-      - ./custom-icons:/web-vault/bwrs_static:ro
+      - ${PROJECT_STATE_DIR}/data:/data
+      - ${PROJECT_STATE_DIR}/custom-templates:/templates:ro  # Custom templates
+      - ${PROJECT_STATE_DIR}/custom-icons:/web-vault/bwrs_static:ro  # Custom icons
 
-  caddy:
-    # Additional ports for development
-    ports:
-      - "8080:8080"  # Development proxy
-      - "2019:2019"  # Admin API
-
-    # Override Caddyfile for custom configuration
-    volumes:
-      - ./caddy/Caddyfile.custom:/etc/caddy/Caddyfile:ro
-
-  # Add additional services
+  # Custom monitoring service via template
   monitoring:
-    image: prom/prometheus:latest
+    image: prom/prometheus:${PROMETHEUS_VERSION:-latest}
     container_name: vaultwarden_prometheus
     restart: unless-stopped
+    profiles:
+      - monitoring  # Enable with: docker compose --profile monitoring up
     ports:
-      - "9090:9090"
+      - "${PROMETHEUS_PORT:-9090}:9090"
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
-      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
 
 volumes:
   prometheus_data:
+    name: vaultwarden_prometheus_data
 ```
 
-### Advanced VaultWarden Configuration
+### Environment Template Customizations
 
-#### Extended Security Settings
+Edit `.env.example` for additional configuration options:
+
+```bash
+# .env.example - Extended configuration template
+
+# Core settings (existing)
+DOMAIN=vault.yourdomain.com
+ADMIN_EMAIL=admin@yourdomain.com
+PROJECT_STATE_DIR=/var/lib/vaultwarden
+
+# Enhanced resource configuration
+VAULTWARDEN_MEMORY_LIMIT=1g
+VAULTWARDEN_CPU_LIMIT=2.0
+DATABASE_MAX_CONNS=20
+ROCKET_WORKERS=10
+
+# Custom feature toggles
+ATTACHMENT_LIMIT=104857600
+CUSTOM_ICONS_ENABLED=true
+MONITORING_ENABLED=false
+
+# Monitoring configuration
+PROMETHEUS_VERSION=latest
+PROMETHEUS_PORT=9090
+GRAFANA_VERSION=latest
+GRAFANA_PORT=3000
+
+# Development/testing options
+USE_LATEST_IMAGES=false
+DEBUG_LOGGING=false
+CUSTOM_WEB_VAULT_PATH=
+```
+
+## Enhanced Security Customizations
+
+### Advanced VaultWarden Security via Templates
+
+Add to `docker-compose.yml.example`:
+
 ```yaml
-# docker-compose.override.yml - VaultWarden security hardening
 services:
   vaultwarden:
     environment:
-      # Disable user registration completely
-      - SIGNUPS_ALLOWED=false
-      - SIGNUPS_VERIFY=true
+      # Enhanced security settings (add to .env.example)
+      - SIGNUPS_ALLOWED=${SIGNUPS_ALLOWED:-false}
+      - SIGNUPS_VERIFY=${SIGNUPS_VERIFY:-true}
+      - INVITATIONS_ALLOWED=${INVITATIONS_ALLOWED:-true}
 
-      # Enhanced password policy
-      - PASSWORD_COMPLEXITY_ENABLED=true
-      - PASSWORD_MIN_LENGTH=14
-      - PASSWORD_REQUIRE_SYMBOLS=true
-      - PASSWORD_REQUIRE_NUMBERS=true
+      # Advanced password policy
+      - PASSWORD_COMPLEXITY_ENABLED=${PASSWORD_COMPLEXITY_ENABLED:-true}
+      - PASSWORD_MIN_LENGTH=${PASSWORD_MIN_LENGTH:-14}
+      - PASSWORD_REQUIRE_SYMBOLS=${PASSWORD_REQUIRE_SYMBOLS:-true}
+      - PASSWORD_REQUIRE_NUMBERS=${PASSWORD_REQUIRE_NUMBERS:-true}
 
-      # Session management
-      - SESSION_TIMEOUT=3600          # 1 hour session timeout
-      - EXTENDED_LOGGING=true         # Detailed audit logs
-
-      # Two-factor authentication requirements
-      - REQUIRE_DEVICE_EMAIL=true     # Email verification for new devices
-      - DISABLE_2FA_REMEMBER=true     # Always require 2FA
+      # Enhanced session management
+      - SESSION_TIMEOUT=${SESSION_TIMEOUT:-3600}
+      - EXTENDED_LOGGING=${EXTENDED_LOGGING:-true}
+      - REQUIRE_DEVICE_EMAIL=${REQUIRE_DEVICE_EMAIL:-true}
+      - DISABLE_2FA_REMEMBER=${DISABLE_2FA_REMEMBER:-true}
 
       # Organization policies
-      - ORG_GROUPS_ENABLED=true       # Enable group management
-      - ORG_EVENTS_ENABLED=true       # Enable event logging
+      - ORG_GROUPS_ENABLED=${ORG_GROUPS_ENABLED:-true}
+      - ORG_EVENTS_ENABLED=${ORG_EVENTS_ENABLED:-true}
+      - ORG_CREATION_USERS=${ORG_CREATION_USERS:-}
 ```
 
-#### Performance Optimization
-```yaml
-# docker-compose.override.yml - Performance tuning
-services:
-  vaultwarden:
-    environment:
-      # Database optimization
-      - DATABASE_MAX_CONNS=10         # Connection pooling
-      - DATABASE_TIMEOUT=30           # Query timeout
+### Enhanced Caddy Configuration
 
-      # Caching settings
-      - ICON_CACHE_TTL=2592000       # 30 days icon cache
-      - ICON_CACHE_NEGTTL=259200     # 3 days negative cache
+Create `caddy/Caddyfile.custom` for advanced security:
 
-      # Attachment settings for high-usage
-      - ATTACHMENT_LIMIT=104857600    # 100MB attachment limit
-      - FILE_SIZE_LIMIT=52428800      # 50MB file size limit
-
-    # SSD-optimized storage
-    volumes:
-      - type: bind
-        source: /mnt/ssd/vaultwarden
-        target: /data
-        bind:
-          propagation: shared
-```
-
-## Advanced Caddy Configurations
-
-### Custom Security Headers
 ```caddyfile
-# caddy/Caddyfile.custom - Enhanced security headers
+# caddy/Caddyfile.custom - Enhanced security headers and customizations
 {$DOMAIN} {
-    # Import base configuration
+    # Import Cloudflare IP restrictions
     import cloudflare-ips.caddy
 
     # Enhanced security headers
     header {
         # Strict Content Security Policy
-        Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'sha256-allowed-hash'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: https:; frame-ancestors 'none'; base-uri 'self'; form-action 'self';"
+        Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'sha256-{HASH}'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: https:; frame-ancestors 'none'; base-uri 'self'; form-action 'self';"
 
         # Additional security headers
         X-Permitted-Cross-Domain-Policies "none"
@@ -164,16 +213,12 @@ services:
         -X-Version
     }
 
-    # Custom error pages
-    handle_errors {
-        @4xx expression `{http.error.status_code} >= 400 && {http.error.status_code} < 500`
-        @5xx expression `{http.error.status_code} >= 500 && {http.error.status_code} < 600`
-
-        rewrite @4xx /errors/4xx.html
-        rewrite @5xx /errors/5xx.html
-        file_server {
-            root /etc/caddy/errors
-        }
+    # Geographic restrictions (if needed)
+    @blocked_countries {
+        header_regexp CF-IPCountry "^(CN|RU|KP)$"
+    }
+    respond @blocked_countries 403 {
+        body "Access from your location is not permitted."
     }
 
     # Enhanced rate limiting
@@ -183,10 +228,22 @@ services:
             events 100
             window 1m
         }
+        zone admin {
+            key {http.request.header.CF-Connecting-IP}
+            events 10
+            window 10m
+        }
         response 429 {
             body "Rate limit exceeded. Please try again later."
         }
     }
+
+    # Admin panel additional protection
+    @admin {
+        path /admin*
+    }
+
+    rate_limit @admin admin
 
     # Main proxy configuration
     reverse_proxy vaultwarden:80 {
@@ -209,46 +266,66 @@ services:
         health_interval 15s
         health_timeout 5s
         health_status 200
-        health_body "OK"
+    }
+}
+
+# Custom error pages
+(error_pages) {
+    handle_errors {
+        @4xx expression `{http.error.status_code} >= 400 && {http.error.status_code} < 500`
+        @5xx expression `{http.error.status_code} >= 500 && {http.error.status_code} < 600`
+
+        rewrite @4xx /errors/4xx.html
+        rewrite @5xx /errors/5xx.html
+        file_server {
+            root /etc/caddy/errors
+        }
     }
 }
 ```
 
-### Geographic Restrictions
-```caddyfile
-# caddy/Caddyfile.geo - Geographic access control
-{$DOMAIN} {
-    # Block requests from specific countries (example)
-    @blocked_countries {
-        header_regexp CF-IPCountry "^(CN|RU|KP)$"
-    }
+## Enhanced fail2ban Customizations
 
-    respond @blocked_countries 403 {
-        body "Access from your location is not permitted."
-    }
+### Advanced fail2ban Configuration
 
-    # Allow only specific countries for admin panel
-    @admin_geo {
-        path /admin*
-        not header_regexp CF-IPCountry "^(US|CA|GB|DE|FR|AU)$"
-    }
+Create `fail2ban/jail.d/custom.conf`:
 
-    respond @admin_geo 403 {
-        body "Administrative access not available from your location."
-    }
-
-    # Continue with main configuration
-    import /etc/caddy/Caddyfile.main
-}
-```
-
-## Advanced fail2ban Configuration
-
-### Custom Filters and Jails
-
-#### Sophisticated Attack Detection
 ```ini
-# fail2ban/filter.d/vaultwarden-advanced.conf
+# fail2ban/jail.d/custom.conf - Advanced attack detection
+
+[vaultwarden-adaptive]
+enabled = true
+filter = vaultwarden-adaptive
+logpath = /var/log/caddy/access.log
+maxretry = 5
+findtime = 300
+bantime = 3600
+
+# Progressive ban time based on repeat offenses
+bantime.increment = true
+bantime.factor = 2
+bantime.multipliers = 1 2 4 8 16 32 64
+bantime.maxtime = 86400
+
+# Enhanced action with rate limiting (uses existing cloudflare-optimized.conf)
+action = cloudflare-optimized[name=%(name)s]
+
+[vaultwarden-honeypot]
+enabled = true
+filter = vaultwarden-honeypot
+logpath = /var/log/caddy/access.log
+maxretry = 1
+findtime = 86400
+bantime = 604800  # 7 days for honeypot hits
+
+# Honeypot for common attack paths
+```
+
+Create `fail2ban/filter.d/vaultwarden-adaptive.conf`:
+
+```ini
+# fail2ban/filter.d/vaultwarden-adaptive.conf - Sophisticated attack detection
+
 [Definition]
 # Advanced pattern matching for sophisticated attacks
 
@@ -264,103 +341,49 @@ failregex = ^.*"remote_ip":"<HOST>".*"uri":"/identity/connect/token".*"status":4
 # Mass download attempts
             ^.*"remote_ip":"<HOST>".*"uri":"/api/ciphers".*"method":"GET".*"status":200.*$
 
+# Ignore legitimate clients
 ignoreregex = ^.*"user_agent":".*Bitwarden.*".*$
 ```
 
-#### Adaptive Ban Policies
-```ini
-# fail2ban/jail.d/vaultwarden-advanced.conf
-[vaultwarden-adaptive]
-enabled = true
-filter = vaultwarden-advanced
-logpath = /var/log/caddy/access.log
-maxretry = 5
-findtime = 300
-bantime = 3600
+## Database and Performance Customizations
 
-# Progressive ban time based on repeat offenses
-bantime.increment = true
-bantime.factor = 2
-bantime.multipliers = 1 2 4 8 16 32 64
-bantime.maxtime = 86400
+### Advanced SQLite Tuning via Templates
 
-# Custom action with Cloudflare and email notification  
-action = %(banaction)s[name=%(name)s, cfzone="%(env_CLOUDFLARE_ZONE_ID)s", cftoken="%(env_FAIL2BAN_API_TOKEN)s"]
-         sendmail-whois-lines[name=%(name)s, sender="%(sender)s", dest="%(destemail)s", logpath=%(logpath)s]
+Add to `docker-compose.yml.example`:
 
-[vaultwarden-honeypot]
-enabled = true
-filter = vaultwarden-honeypot
-logpath = /var/log/caddy/access.log
-maxretry = 1
-findtime = 86400
-bantime = 604800  # 7 days for honeypot hits
-
-# Honeypot filter for common attack paths
-```
-
-### Intelligent IP Whitelisting
-```bash
-# Create dynamic whitelist based on successful authentications
-cat > /opt/vaultwarden/scripts/update-whitelist.sh << 'EOF'
-#!/bin/bash
-# Extract IPs that have successfully authenticated in last 24 hours
-successful_ips=$(grep -E '"status":(200|302)' /var/log/caddy/access.log |                  grep -E '(identity|api)' |                  jq -r '.remote_ip' |                  sort | uniq)
-
-# Add to fail2ban whitelist
-for ip in $successful_ips; do
-    fail2ban-client set vaultwarden-adaptive addignoreip $ip
-done
-EOF
-
-chmod +x /opt/vaultwarden/scripts/update-whitelist.sh
-
-# Add to cron for hourly execution
-echo "0 * * * * /opt/vaultwarden/scripts/update-whitelist.sh" >> /etc/cron.d/vaultwarden-whitelist
-```
-
-## Database Optimizations
-
-### Advanced SQLite Tuning
 ```yaml
-# docker-compose.override.yml - Database optimization
 services:
   vaultwarden:
     environment:
-      # SQLite performance settings
+      # SQLite performance settings via template
       - DATABASE_URL=sqlite:///data/bwdata/db.sqlite3?mode=rwc&cache=shared&_journal_mode=WAL&_synchronous=NORMAL&_cache_size=10000&_temp_store=MEMORY
 
-    # Optimized storage for database
+    # Optimized storage configuration
     volumes:
       - type: bind
-        source: /mnt/ssd/vaultwarden/data
+        source: ${PROJECT_STATE_DIR}/data
         target: /data
         bind:
           propagation: shared
-
-    # Database maintenance automation
-    command: >
-      sh -c "
-        # Pre-flight database optimization
-        sqlite3 /data/bwdata/db.sqlite3 'PRAGMA optimize;' 2>/dev/null || true
-        # Start VaultWarden
-        exec /start.sh
-      "
+        # Add mount options for SSD optimization if available
 ```
 
-### Database Monitoring and Maintenance
+### Database Monitoring Integration
+
+Create `scripts/db-monitor-custom.sh`:
+
 ```bash
-# Create advanced database monitoring script
-cat > /opt/vaultwarden/scripts/db-monitor.sh << 'EOF'
 #!/bin/bash
+# Custom database monitoring with enhanced metrics
+
 source "lib/common.sh"
 init_common_lib "$0"
 
-DB_PATH="/var/lib/vaultwarden/data/bwdata/db.sqlite3"
+DB_PATH="${PROJECT_STATE_DIR}/data/bwdata/db.sqlite3"
 LOG_FILE="/var/log/vaultwarden-db-monitor.log"
 
-# Database statistics
-get_db_stats() {
+# Enhanced database statistics
+get_enhanced_db_stats() {
     sqlite3 "$DB_PATH" << SQL
 .headers on
 .mode column
@@ -380,6 +403,10 @@ SELECT
 FROM pragma_page_count(), pragma_freelist_count()
 UNION ALL
 SELECT
+  'WAL Size (MB)',
+  ROUND(COALESCE((SELECT size FROM pragma_wal_checkpoint('PASSIVE')), 0) / 1024.0 / 1024.0, 2)
+UNION ALL
+SELECT
   'User Count',
   COUNT(*)
 FROM users
@@ -387,94 +414,98 @@ UNION ALL
 SELECT
   'Cipher Count', 
   COUNT(*)
-FROM ciphers;
+FROM ciphers
+UNION ALL
+SELECT
+  'Organization Count',
+  COUNT(*)
+FROM organizations;
 SQL
 }
 
-# Performance analysis
-analyze_performance() {
-    # Check for slow queries (if query log enabled)
-    if [[ -f "/var/log/vaultwarden/slow-queries.log" ]]; then
-        slow_queries=$(grep "$(date +%Y-%m-%d)" /var/log/vaultwarden/slow-queries.log | wc -l)
-        echo "Slow queries today: $slow_queries" >> "$LOG_FILE"
+# Performance analysis with custom metrics
+analyze_custom_performance() {
+    # Custom performance metrics
+    local db_size=$(stat -c%s "$DB_PATH" 2>/dev/null || echo "0")
+    local wal_size=$(stat -c%s "${DB_PATH}-wal" 2>/dev/null || echo "0")
+
+    if [[ $wal_size -gt 10485760 ]]; then  # 10MB
+        log_warn "WAL file large: $(( wal_size / 1024 / 1024 ))MB - considering checkpoint"
+        # Enhanced WAL checkpoint with verification
+        sqlite3 "$DB_PATH" "PRAGMA wal_checkpoint(TRUNCATE);" &&         log_info "WAL checkpoint completed successfully"
     fi
 
-    # Check WAL file size
-    wal_size=$(stat -c%s "${DB_PATH}-wal" 2>/dev/null || echo "0")
-    if [[ $wal_size -gt 10485760 ]]; then  # 10MB
-        log_warn "WAL file large: $(( wal_size / 1024 / 1024 ))MB"
-        # Trigger checkpoint
-        sqlite3 "$DB_PATH" "PRAGMA wal_checkpoint(TRUNCATE);"
+    # Check for slow queries (if enabled via custom logging)
+    if [[ -f "/var/log/vaultwarden/slow-queries.log" ]]; then
+        local slow_queries=$(grep "$(date +%Y-%m-%d)" /var/log/vaultwarden/slow-queries.log | wc -l)
+        if [[ $slow_queries -gt 10 ]]; then
+            log_warn "High number of slow queries today: $slow_queries"
+        fi
     fi
 }
 
 # Main monitoring function
 main() {
-    echo "=== Database Monitor $(date) ===" >> "$LOG_FILE"
-    get_db_stats >> "$LOG_FILE"
-    analyze_performance
+    echo "=== Enhanced Database Monitor $(date) ===" >> "$LOG_FILE"
+    get_enhanced_db_stats >> "$LOG_FILE"
+    analyze_custom_performance
     echo "" >> "$LOG_FILE"
 }
 
 main "$@"
-EOF
-
-chmod +x /opt/vaultwarden/scripts/db-monitor.sh
-
-# Add to cron for daily execution
-echo "0 6 * * * /opt/vaultwarden/scripts/db-monitor.sh" >> /etc/cron.d/vaultwarden-db-monitor
 ```
 
-## Monitoring and Observability
+## Monitoring and Observability Customizations
 
-### Prometheus Integration
+### Prometheus Integration via Templates
+
+Add to `docker-compose.yml.example`:
+
 ```yaml
-# monitoring/docker-compose.monitoring.yml
-version: '3.8'
-
 services:
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:${PROMETHEUS_VERSION:-latest}
     container_name: vaultwarden_prometheus
     restart: unless-stopped
+    profiles:
+      - monitoring
     ports:
-      - "9090:9090"
+      - "${PROMETHEUS_PORT:-9090}:9090"
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
-      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
-      - '--web.console.templates=/usr/share/prometheus/consoles'
-      - '--storage.tsdb.retention.time=30d'
+      - '--storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-30d}'
       - '--web.enable-lifecycle'
-    networks:
-      - vaultwarden_network
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:${GRAFANA_VERSION:-latest}
     container_name: vaultwarden_grafana
     restart: unless-stopped
+    profiles:
+      - monitoring
     ports:
-      - "3000:3000"
+      - "${GRAFANA_PORT:-3000}:3000"
     environment:
       - GF_SECURITY_ADMIN_PASSWORD__FILE=/run/secrets/grafana_password
+      - GF_INSTALL_PLUGINS=${GRAFANA_PLUGINS:-}
     volumes:
       - grafana_data:/var/lib/grafana
       - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
       - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources:ro
     secrets:
       - grafana_password
-    networks:
-      - vaultwarden_network
 
   node_exporter:
-    image: prom/node-exporter:latest
+    image: prom/node-exporter:${NODE_EXPORTER_VERSION:-latest}
     container_name: vaultwarden_node_exporter
     restart: unless-stopped
+    profiles:
+      - monitoring
     ports:
-      - "9100:9100"
+      - "${NODE_EXPORTER_PORT:-9100}:9100"
     command:
       - '--path.procfs=/host/proc'
       - '--path.sysfs=/host/sys'
@@ -483,34 +514,31 @@ services:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
       - /:/rootfs:ro
-    networks:
-      - vaultwarden_network
 
 volumes:
   prometheus_data:
+    name: vaultwarden_prometheus_data
   grafana_data:
+    name: vaultwarden_grafana_data
 
 secrets:
   grafana_password:
     file: ./secrets/.docker_secrets/grafana_password
-
-networks:
-  vaultwarden_network:
-    external: true
 ```
 
 ### Custom Metrics Collection
-```bash
-# Create metrics collection script
-cat > /opt/vaultwarden/scripts/collect-metrics.sh << 'EOF'
-#!/bin/bash
-# Custom metrics collector for VaultWarden
 
-METRICS_DIR="/var/lib/vaultwarden/metrics"
+Create `scripts/collect-metrics-custom.sh`:
+
+```bash
+#!/bin/bash
+# Enhanced metrics collection for VaultWarden
+
+METRICS_DIR="${PROJECT_STATE_DIR}/metrics"
 mkdir -p "$METRICS_DIR"
 
-# System metrics
-collect_system_metrics() {
+# Enhanced system metrics
+collect_enhanced_system_metrics() {
     cat > "$METRICS_DIR/system.prom" << PROM
 # HELP vaultwarden_system_memory_usage_bytes Memory usage in bytes
 # TYPE vaultwarden_system_memory_usage_bytes gauge
@@ -518,20 +546,25 @@ vaultwarden_system_memory_usage_bytes $(free -b | awk '/^Mem:/ {print $3}')
 
 # HELP vaultwarden_system_disk_usage_bytes Disk usage in bytes  
 # TYPE vaultwarden_system_disk_usage_bytes gauge
-vaultwarden_system_disk_usage_bytes $(df -B1 /var/lib/vaultwarden | awk 'NR==2 {print $3}')
+vaultwarden_system_disk_usage_bytes $(df -B1 ${PROJECT_STATE_DIR} | awk 'NR==2 {print $3}')
 
 # HELP vaultwarden_system_load_average System load average
 # TYPE vaultwarden_system_load_average gauge
 vaultwarden_system_load_average $(uptime | awk -F'load average:' '{print $2}' | awk '{print $1}' | sed 's/,//')
+
+# HELP vaultwarden_template_config_valid Template configuration validity
+# TYPE vaultwarden_template_config_valid gauge
+vaultwarden_template_config_valid $(docker compose config >/dev/null 2>&1 && echo 1 || echo 0)
 PROM
 }
 
-# VaultWarden specific metrics
-collect_vaultwarden_metrics() {
-    if [[ -f "/var/lib/vaultwarden/data/bwdata/db.sqlite3" ]]; then
-        user_count=$(sqlite3 /var/lib/vaultwarden/data/bwdata/db.sqlite3 "SELECT COUNT(*) FROM users;")
-        cipher_count=$(sqlite3 /var/lib/vaultwarden/data/bwdata/db.sqlite3 "SELECT COUNT(*) FROM ciphers;")
-        org_count=$(sqlite3 /var/lib/vaultwarden/data/bwdata/db.sqlite3 "SELECT COUNT(*) FROM organizations;")
+# Enhanced VaultWarden specific metrics
+collect_enhanced_vaultwarden_metrics() {
+    if [[ -f "${PROJECT_STATE_DIR}/data/bwdata/db.sqlite3" ]]; then
+        local user_count=$(sqlite3 ${PROJECT_STATE_DIR}/data/bwdata/db.sqlite3 "SELECT COUNT(*) FROM users;" 2>/dev/null || echo 0)
+        local cipher_count=$(sqlite3 ${PROJECT_STATE_DIR}/data/bwdata/db.sqlite3 "SELECT COUNT(*) FROM ciphers;" 2>/dev/null || echo 0)
+        local org_count=$(sqlite3 ${PROJECT_STATE_DIR}/data/bwdata/db.sqlite3 "SELECT COUNT(*) FROM organizations;" 2>/dev/null || echo 0)
+        local active_sessions=$(sqlite3 ${PROJECT_STATE_DIR}/data/bwdata/db.sqlite3 "SELECT COUNT(*) FROM devices WHERE updated_at > datetime('now', '-1 hour');" 2>/dev/null || echo 0)
 
         cat > "$METRICS_DIR/vaultwarden.prom" << PROM
 # HELP vaultwarden_users_total Total number of users
@@ -545,14 +578,19 @@ vaultwarden_ciphers_total $cipher_count
 # HELP vaultwarden_organizations_total Total number of organizations
 # TYPE vaultwarden_organizations_total gauge
 vaultwarden_organizations_total $org_count
+
+# HELP vaultwarden_active_sessions Active sessions in last hour
+# TYPE vaultwarden_active_sessions gauge
+vaultwarden_active_sessions $active_sessions
 PROM
     fi
 }
 
-# Backup metrics
-collect_backup_metrics() {
-    recent_backups=$(find /opt/vaultwarden/backups -name "*.age" -mtime -1 | wc -l)
-    backup_size=$(du -sb /opt/vaultwarden/backups 2>/dev/null | awk '{print $1}')
+# Enhanced backup metrics
+collect_enhanced_backup_metrics() {
+    local recent_backups=$(find ${PROJECT_STATE_DIR}/backups -name "*.age" -mtime -1 2>/dev/null | wc -l)
+    local backup_size=$(du -sb ${PROJECT_STATE_DIR}/backups 2>/dev/null | awk '{print $1}')
+    local failed_backups=$(grep -c "FAILED" ${PROJECT_STATE_DIR}/logs/backup.log 2>/dev/null || echo 0)
 
     cat > "$METRICS_DIR/backups.prom" << PROM
 # HELP vaultwarden_backups_recent_total Recent backups (24h)
@@ -562,301 +600,77 @@ vaultwarden_backups_recent_total $recent_backups
 # HELP vaultwarden_backup_storage_bytes Total backup storage usage
 # TYPE vaultwarden_backup_storage_bytes gauge
 vaultwarden_backup_storage_bytes ${backup_size:-0}
+
+# HELP vaultwarden_backup_failures_total Failed backup attempts
+# TYPE vaultwarden_backup_failures_total counter
+vaultwarden_backup_failures_total $failed_backups
 PROM
 }
 
 main() {
-    collect_system_metrics
-    collect_vaultwarden_metrics  
-    collect_backup_metrics
+    collect_enhanced_system_metrics
+    collect_enhanced_vaultwarden_metrics  
+    collect_enhanced_backup_metrics
 }
 
 main "$@"
-EOF
-
-chmod +x /opt/vaultwarden/scripts/collect-metrics.sh
-
-# Add to cron for frequent collection
-echo "*/5 * * * * /opt/vaultwarden/scripts/collect-metrics.sh" >> /etc/cron.d/vaultwarden-metrics
 ```
 
-## Advanced Security Customizations
+## Advanced Network Customizations
 
-### Multi-Factor Authentication Enforcement
+### VPN Integration via Templates
+
+Add to `docker-compose.yml.example`:
+
 ```yaml
-# docker-compose.override.yml - Enhanced MFA
-services:
-  vaultwarden:
-    environment:
-      # Require MFA for all users
-      - REQUIRE_DEVICE_EMAIL=true
-      - DISABLE_2FA_REMEMBER=true
-
-      # Enhanced session security
-      - SESSION_TIMEOUT=1800          # 30 minute timeout
-      - REFRESH_TOKEN_ROTATION=true   # Rotate refresh tokens
-
-      # IP-based restrictions
-      - IP_HEADER=CF-Connecting-IP    # Trust Cloudflare IP header
-      - ICON_BLACKLIST_REGEX="^https?://(?:localhost|127\.0\.0\.1|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.).*"
-```
-
-### Advanced Access Controls
-```caddyfile
-# caddy/snippets/advanced-access.caddy
-# Time-based access restrictions
-@business_hours {
-    expression `{time.hour} >= 8 && {time.hour} <= 18`
-}
-
-@after_hours {
-    not expression `{time.hour} >= 8 && {time.hour} <= 18`
-}
-
-# Restrict admin access to business hours
-handle @after_hours {
-    @admin_after_hours path /admin*
-    respond @admin_after_hours 403 {
-        body "Administrative access is only available during business hours (8 AM - 6 PM)."
-    }
-}
-
-# Enhanced IP reputation checking
-@suspicious_ip {
-    header_regexp CF-Threat-Score "([5-9][0-9]|100)"
-}
-
-respond @suspicious_ip 403 {
-    body "Access denied due to suspicious activity."
-}
-```
-
-## Performance Customizations
-
-### High-Availability Configuration
-```yaml
-# docker-compose.ha.yml - High availability setup
-version: '3.8'
-
-services:
-  vaultwarden:
-    # Enable multiple replicas (requires external database)
-    deploy:
-      replicas: 2
-      update_config:
-        parallelism: 1
-        delay: 30s
-      restart_policy:
-        condition: on-failure
-        delay: 5s
-        max_attempts: 3
-
-  # Load balancer for multiple instances
-  haproxy:
-    image: haproxy:2.8
-    container_name: vaultwarden_lb
-    restart: unless-stopped
-    ports:
-      - "8080:80"
-    volumes:
-      - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
-    depends_on:
-      - vaultwarden
-```
-
-### Caching Layer
-```yaml
-# docker-compose.cache.yml - Redis caching
-services:
-  redis:
-    image: redis:7-alpine
-    container_name: vaultwarden_redis
-    restart: unless-stopped
-    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
-    volumes:
-      - redis_data:/data
-    networks:
-      - vaultwarden_network
-
-volumes:
-  redis_data:
-```
-
-## Backup Customizations
-
-### Advanced Backup Strategies
-```bash
-# Create custom backup script with multiple destinations
-cat > /opt/vaultwarden/scripts/advanced-backup.sh << 'EOF'
-#!/bin/bash
-source "lib/common.sh"
-init_common_lib "$0"
-
-BACKUP_DESTINATIONS=(
-    "local:/opt/vaultwarden/backups"
-    "s3:vaultwarden-backups-primary"
-    "gdrive:VaultWarden/Backups"
-    "b2:vaultwarden-backup-bucket"
-)
-
-create_and_distribute_backup() {
-    local backup_type="$1"
-
-    # Create backup
-    local backup_file
-    backup_file=$(./backup.sh --type "$backup_type" 2>/dev/null | tail -1)
-
-    if [[ -z "$backup_file" || ! -f "$backup_file" ]]; then
-        log_error "Backup creation failed"
-        return 1
-    fi
-
-    # Distribute to all destinations
-    for dest in "${BACKUP_DESTINATIONS[@]}"; do
-        local dest_type="${dest%%:*}"
-        local dest_path="${dest#*:}"
-
-        case "$dest_type" in
-            "local")
-                # Already stored locally
-                log_success "Local backup: $backup_file"
-                ;;
-            "s3"|"gdrive"|"b2")
-                if rclone copy "$backup_file" "$dest/$(basename "$(dirname "$backup_file")")/" --progress; then
-                    log_success "Synced to $dest_type: $(basename "$backup_file")"
-                else
-                    log_error "Failed to sync to $dest_type"
-                fi
-                ;;
-        esac
-    done
-
-    # Verify at least one remote backup succeeded
-    local success_count=0
-    for dest in "${BACKUP_DESTINATIONS[@]}"; do
-        if [[ "$dest" != "local:"* ]]; then
-            if rclone lsf "$dest/" | grep -q "$(basename "$backup_file")"; then
-                ((success_count++))
-            fi
-        fi
-    done
-
-    if [[ $success_count -gt 0 ]]; then
-        log_success "Backup distributed to $success_count remote locations"
-        return 0
-    else
-        log_error "Failed to distribute backup to any remote location"
-        return 1
-    fi
-}
-
-main() {
-    log_info "Advanced backup distribution starting"
-
-    case "${1:-db}" in
-        "db"|"full"|"emergency")
-            create_and_distribute_backup "$1"
-            ;;
-        *)
-            log_error "Invalid backup type: $1"
-            log_info "Usage: $0 [db|full|emergency]"
-            exit 1
-            ;;
-    esac
-}
-
-main "$@"
-EOF
-
-chmod +x /opt/vaultwarden/scripts/advanced-backup.sh
-```
-
-## Network Customizations
-
-### VPN Integration
-```yaml
-# docker-compose.vpn.yml - VPN routing for enhanced security
 services:
   vpn:
-    image: qmcgaw/gluetun:latest
+    image: qmcgaw/gluetun:${GLUETUN_VERSION:-latest}
     container_name: vaultwarden_vpn
+    restart: unless-stopped
+    profiles:
+      - vpn
     cap_add:
       - NET_ADMIN
     environment:
-      - VPN_SERVICE_PROVIDER=mullvad
-      - VPN_TYPE=wireguard
+      - VPN_SERVICE_PROVIDER=${VPN_PROVIDER:-mullvad}
+      - VPN_TYPE=${VPN_TYPE:-wireguard}
       - WIREGUARD_PRIVATE_KEY_FILE=/run/secrets/wg_private_key
-      - WIREGUARD_ADDRESSES=10.64.0.1/32
-      - SERVER_CITIES=Amsterdam
+      - WIREGUARD_ADDRESSES=${VPN_ADDRESSES:-10.64.0.1/32}
+      - SERVER_CITIES=${VPN_CITIES:-Amsterdam}
     secrets:
       - wg_private_key
     volumes:
       - /dev/net/tun:/dev/net/tun
-    networks:
-      - vpn_network
 
-  # Route specific services through VPN
+  # Route backup sync through VPN
   backup_sync:
-    image: rclone/rclone:latest
+    image: rclone/rclone:${RCLONE_VERSION:-latest}
     container_name: vaultwarden_backup_vpn
     restart: "no"
+    profiles:
+      - vpn
     network_mode: "service:vpn"
     volumes:
-      - ./backups:/backups:ro
+      - ${PROJECT_STATE_DIR}/backups:/backups:ro
       - ./rclone.conf:/config/rclone/rclone.conf:ro
     command: sync /backups remote:encrypted-backups --progress
-
-networks:
-  vpn_network:
 
 secrets:
   wg_private_key:
     file: ./secrets/.docker_secrets/wireguard_key
 ```
 
-### Custom Networking
+## Template-Based Testing Framework
+
+### Development Environment Template
+
+Create `docker-compose.dev.yml.example`:
+
 ```yaml
-# docker-compose.network.yml - Advanced networking
-services:
-  vaultwarden:
-    networks:
-      - frontend
-      - backend
+# docker-compose.dev.yml.example - Development environment template
+version: '3.8'
 
-  caddy:
-    networks:
-      - frontend
-      - public
-
-  database:
-    # If using external database
-    networks:
-      - backend
-
-networks:
-  frontend:
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 172.20.0.0/16
-          gateway: 172.20.0.1
-
-  backend:
-    driver: bridge
-    internal: true  # No external access
-    ipam:
-      config:
-        - subnet: 172.21.0.0/16
-
-  public:
-    external: true
-```
-
-## Development and Testing Extensions
-
-### Development Environment
-```yaml
-# docker-compose.dev.yml - Development overrides
 services:
   vaultwarden:
     build:
@@ -865,27 +679,42 @@ services:
     environment:
       - ROCKET_ENV=development
       - LOG_LEVEL=debug
-      - DISABLE_ADMIN_TOKEN=true  # Only for development!
+      - DISABLE_ADMIN_TOKEN=${DEV_DISABLE_ADMIN_TOKEN:-true}
     volumes:
       - ./dev-data:/data
       - ./custom-web-vault:/web-vault:ro
 
   # Development tools
   mailcatcher:
-    image: schickling/mailcatcher
+    image: schickling/mailcatcher:${MAILCATCHER_VERSION:-latest}
     container_name: vaultwarden_mailcatcher
+    profiles:
+      - development
     ports:
-      - "1080:1080"
-      - "1025:1025"
-    networks:
-      - vaultwarden_network
+      - "${MAILCATCHER_WEB_PORT:-1080}:1080"
+      - "${MAILCATCHER_SMTP_PORT:-1025}:1025"
+
+  # Testing framework
+  test_runner:
+    image: node:${NODE_VERSION:-18-alpine}
+    container_name: vaultwarden_tests
+    profiles:
+      - testing
+    volumes:
+      - ./tests:/tests
+      - ./scripts:/scripts:ro
+    working_dir: /tests
+    command: npm test
 ```
 
-### Testing Framework
+### Comprehensive Testing Script
+
+Create `scripts/test-suite-custom.sh`:
+
 ```bash
-# Create comprehensive testing framework
-cat > /opt/vaultwarden/scripts/test-suite.sh << 'EOF'
 #!/bin/bash
+# Enhanced testing framework for VaultWarden
+
 source "lib/common.sh"
 init_common_lib "$0"
 
@@ -907,8 +736,13 @@ test_function() {
     fi
 }
 
-run_test_suite() {
-    log_header "VaultWarden Test Suite"
+run_enhanced_test_suite() {
+    log_header "VaultWarden Enhanced Test Suite"
+
+    # Template validation tests
+    test_function "Template configuration valid" "docker compose config"
+    test_function "Environment template exists" "test -f .env.example"
+    test_function "Docker template exists" "test -f docker-compose.yml.example"
 
     # System tests
     test_function "Docker availability" "docker --version"
@@ -919,23 +753,29 @@ run_test_suite() {
     # Service tests
     test_function "VaultWarden responding" "curl -f http://localhost:80/alive"
     test_function "Caddy configuration valid" "docker compose exec caddy caddy validate --config /etc/caddy/Caddyfile"
-    test_function "Database integrity" "sqlite3 /var/lib/vaultwarden/data/bwdata/db.sqlite3 'PRAGMA integrity_check;' | grep -q 'ok'"
+    test_function "Database integrity" "sqlite3 ${PROJECT_STATE_DIR}/data/bwdata/db.sqlite3 'PRAGMA integrity_check;' | grep -q 'ok'"
 
-    # Security tests
+    # Enhanced security tests
     test_function "Firewall active" "ufw status | grep -q 'Status: active'"
-    test_function "Age key accessible" "./edit-secrets.sh --show >/dev/null"
-    test_function "SSL certificate valid" "echo | openssl s_client -connect vault.yourdomain.com:443 2>/dev/null | openssl x509 -noout -dates"
+    test_function "Age key accessible" "./edit-secrets.sh --test"
+    test_function "Enhanced fail2ban rate limiting active" "docker compose logs fail2ban | grep -q 'rate'"
+    test_function "Break-glass admin configured" "./create-breakglass-admin.sh status"
 
-    # Backup tests
-    test_function "Backup directory writable" "touch backups/test && rm backups/test"
-    test_function "Recent backup exists" "find backups/ -name '*.age' -mtime -7 | grep -q ."
+    # Backup tests with atomic operations
+    test_function "Backup directory writable" "touch ${PROJECT_STATE_DIR}/backups/test && rm ${PROJECT_STATE_DIR}/backups/test"
+    test_function "Recent backup exists" "find ${PROJECT_STATE_DIR}/backups/ -name '*.age' -mtime -7 | grep -q ."
+    test_function "Backup listing functional" "./backup.sh --list | grep -q 'ID.*Type.*Date'"
+
+    # Template-specific tests
+    test_function "Template differences acceptable" "diff -q docker-compose.yml.example docker-compose.yml >/dev/null || true"
+    test_function "Environment variables loaded" "source .env && test -n \"\$DOMAIN\""
 
     # Performance tests
-    local response_time=$(curl -w "%{time_total}" -o /dev/null -s http://localhost:80/alive)
-    test_function "Response time acceptable" "[[ $(echo "$response_time < 2.0" | bc) -eq 1 ]]"
+    local response_time=$(curl -w "%{time_total}" -o /dev/null -s http://localhost:80/alive 2>/dev/null || echo "999")
+    test_function "Response time acceptable" "[[ $(echo "$response_time < 2.0" | bc -l 2>/dev/null || echo 0) -eq 1 ]]"
 
     # Report results
-    log_header "Test Results"
+    log_header "Enhanced Test Results"
     log_info "Passed: $TESTS_PASSED"
     log_info "Failed: $TESTS_FAILED"
 
@@ -948,106 +788,38 @@ run_test_suite() {
     fi
 }
 
-run_test_suite "$@"
-EOF
-
-chmod +x /opt/vaultwarden/scripts/test-suite.sh
-```
-
-## Integration Extensions
-
-### Webhook Integration
-```bash
-# Create webhook notification system
-cat > /opt/vaultwarden/scripts/webhook-manager.sh << 'EOF'
-#!/bin/bash
-source "lib/common.sh"
-init_common_lib "$0"
-
-WEBHOOK_URL="${WEBHOOK_URL:-}"
-WEBHOOK_SECRET="${WEBHOOK_SECRET:-}"
-
-send_webhook() {
-    local event="$1"
-    local data="$2"
-
-    if [[ -z "$WEBHOOK_URL" ]]; then
-        log_debug "No webhook URL configured"
-        return 0
-    fi
-
-    local timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    local hostname=$(hostname -f)
-
-    local payload=$(jq -n         --arg event "$event"         --arg timestamp "$timestamp"         --arg hostname "$hostname"         --argjson data "$data"         '{
-            event: $event,
-            timestamp: $timestamp,
-            hostname: $hostname,
-            data: $data
-        }')
-
-    # Create signature if secret provided
-    local signature=""
-    if [[ -n "$WEBHOOK_SECRET" ]]; then
-        signature=$(echo -n "$payload" | openssl dgst -sha256 -hmac "$WEBHOOK_SECRET" -binary | base64)
-    fi
-
-    # Send webhook
-    local curl_opts=(
-        -X POST
-        -H "Content-Type: application/json"
-        -H "User-Agent: VaultWarden-OCI-Simplified/1.0"
-        --max-time 10
-        --retry 3
-        --retry-delay 2
-    )
-
-    if [[ -n "$signature" ]]; then
-        curl_opts+=(-H "X-Signature-SHA256: $signature")
-    fi
-
-    if curl "${curl_opts[@]}" -d "$payload" "$WEBHOOK_URL" >/dev/null 2>&1; then
-        log_debug "Webhook sent successfully for event: $event"
-    else
-        log_warn "Failed to send webhook for event: $event"
-    fi
-}
-
-# Usage examples:
-# send_webhook "backup_completed" '{"type": "db", "size": "50MB", "duration": "30s"}'
-# send_webhook "health_check_failed" '{"errors": 2, "warnings": 1}'
-# send_webhook "user_login" '{"user": "user@example.com", "ip": "1.2.3.4"}'
-
-# Export for use by other scripts
-export -f send_webhook
-EOF
-
-# Source in other scripts to enable webhook notifications
+run_enhanced_test_suite "$@"
 ```
 
 ## Customization Best Practices
 
-### Configuration Management
-- **Use override files** instead of modifying core files
-- **Document all customizations** in a `CUSTOMIZATIONS.md` file
-- **Version control** your override files and custom scripts
-- **Test thoroughly** in development before applying to production
-- **Maintain upgrade compatibility** by avoiding deep modifications
+### Template-Based Configuration Management
+
+1. **Edit Templates First**: Always modify `.example` files as the source of truth
+2. **Validate Before Apply**: Run `docker compose config` to validate template changes
+3. **Use Setup Script**: Apply changes via `sudo ./setup.sh --force`
+4. **Document Customizations**: Add comments to template files explaining customizations
+5. **Version Control Templates**: Keep template files in version control
 
 ### Security Considerations
-- **Review security implications** of all customizations
-- **Maintain the principle of least privilege** in custom configurations
-- **Regularly audit** custom configurations for vulnerabilities
-- **Keep customizations simple** to reduce attack surface
-- **Document security assumptions** in custom code
+
+1. **Review Security Implications**: Analyze security impact of all customizations
+2. **Maintain Template Security**: Ensure customizations don't weaken security model
+3. **Test Security Controls**: Verify enhanced fail2ban and other security features work
+4. **Regular Security Audits**: Include customizations in security review process
+5. **Document Security Assumptions**: Clearly document security-related customizations
 
 ### Maintenance Strategy
-- **Automate testing** of customizations
-- **Monitor performance impact** of custom features
-- **Plan rollback procedures** for all customizations
-- **Keep customizations modular** for easier maintenance
-- **Regular review and cleanup** of unused customizations
+
+1. **Template-Based Updates**: Maintain customizations through template system
+2. **Automated Testing**: Include customizations in test suite
+3. **Monitor Performance Impact**: Track performance impact of customizations
+4. **Plan Rollback Procedures**: Maintain ability to revert customizations
+5. **Keep Customizations Modular**: Design customizations for easy enable/disable
+6. **Regular Review**: Periodically review and cleanup unused customizations
 
 ---
 
-**Warning**: Advanced customizations can impact system stability and security. Always test thoroughly in a non-production environment and maintain comprehensive backups before implementing changes.
+**Warning**: Advanced customizations should be thoroughly tested in a non-production environment. Always maintain comprehensive backups before implementing changes. The template-based architecture provides a solid foundation for customizations while maintaining the "set-and-forget" operational philosophy.
+
+Remember: The goal is to enhance functionality while preserving the reliability, security, and maintainability that makes VaultWarden-OCI suitable for small team deployments.

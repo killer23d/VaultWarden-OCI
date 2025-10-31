@@ -1,20 +1,30 @@
-[# Operations Guide - VaultWarden-OCI-Simplified
+# Operations Guide - VaultWarden-OCI
 
-This guide provides practical operational procedures for maintaining VaultWarden-OCI-Simplified in a production environment, optimized for single administrator, small team deployments.
+This guide provides practical operational procedures for maintaining VaultWarden-OCI in a production environment, optimized for single administrator, small team deployments with template-based architecture and enhanced automation.
+
+## Set-and-Forget Operations Philosophy
+
+VaultWarden-OCI is designed for minimal operational overhead with maximum reliability through:
+
+- **Template-Based Configuration**: Single source of truth with `.example` files
+- **Automated Operations**: Comprehensive cron-based automation via `cron-setup.sh`
+- **Enhanced Monitoring**: Proactive health checks with auto-healing capabilities
+- **Atomic Operations**: Reliable backup and restore procedures
+- **Emergency Access**: Break-glass admin for critical recovery scenarios
 
 ## Daily Operations (5 minutes)
 
 ### Automated Health Check Review
 ```bash
-# Check automated health monitoring results
-tail -20 logs/health.log
+# Check automated health monitoring results (configured via cron-setup.sh)
+tail -20 /var/log/vaultwarden/health.log
 
 # Quick manual health check if needed
 ./health.sh --quiet
 
 # Expected output: No warnings or errors
 # If issues found, run comprehensive check:
-./health.sh --comprehensive
+./health.sh --comprehensive --auto-heal
 ```
 
 ### Service Status Verification
@@ -27,12 +37,12 @@ docker compose ps
 ./startup.sh --force-restart
 ```
 
-### Backup Status Check
+### Enhanced Backup Status Check
 ```bash
-# Verify recent backups exist
-ls -la backups/db/ | tail -3
+# Verify recent backups exist with enhanced listing
+./backup.sh --list | head -5
 
-# Should show daily database backups
+# Should show recent backups with timestamps and sizes
 # If missing recent backups, check cron:
 sudo crontab -l | grep backup
 ```
@@ -47,27 +57,25 @@ sudo crontab -l | grep vaultwarden
 # 2. Review service logs for issues
 docker compose logs --since 7d | grep -i error
 
-# 3. Check version status
-echo "=== Configured Versions ==="
-grep "_VERSION=" .env
-
-echo "=== Running Versions ==="
+# 3. Check version status and template configuration
+docker compose config  # Validate template-generated configuration
 docker compose ps --format "table {{.Service}}	{{.Image}}"
 
 # 4. Check for available updates
 ./update.sh --type containers --check-only
 ```
 
-### Security Log Review
+### Enhanced Security Log Review
 ```bash
-# Check fail2ban activity
-docker compose logs fail2ban --since 7d | grep -E "Ban|Unban"
+# Check enhanced fail2ban activity with rate limiting
+docker compose logs fail2ban --since 7d | grep -E "Ban|Unban|Rate"
 
 # Review admin panel access attempts
 docker compose logs caddy --since 7d | grep "/admin"
 
-# Check firewall status
+# Check firewall status and Cloudflare IP updates
 sudo ufw status
+sudo ./update-cloudflare-ips.sh --dry-run
 ```
 
 ### Resource Usage Check
@@ -85,42 +93,44 @@ docker stats --no-stream # Container resource usage
 
 ## Monthly Operations (30 minutes)
 
-### System Maintenance
+### Enhanced System Maintenance
 ```bash
-# 1. Run comprehensive health check
+# 1. Run comprehensive health check with template validation
 ./health.sh --comprehensive --email-alert
 
 # 2. System maintenance (automated via cron, but verify)
 sudo ./maintenance.sh --type standard --dry-run
 # If output looks reasonable:
-sudo ./maintenance.sh --type standard
+sudo ./maintenance.sh --type standard --force
 
 # 3. Database maintenance (quarterly, but check status)
 sudo ./db-maint.sh --analyze-only
 ```
 
-### Version Management Review
+### Template-Based Configuration Review
 ```bash
-# 1. Check for security updates
+# 1. Validate current template-generated configuration
+docker compose config
+
+# 2. Check for security updates
 ./update.sh --type containers --check-only
 
-# 2. Review current version pins
-grep "_VERSION=" .env
+# 3. Review template files for any needed updates
+ls -la *.example
 
-# 3. Consider updating non-critical services if needed
-# Example: Update fail2ban to latest
-./update.sh --unpin fail2ban
-./update.sh --type containers --service fail2ban
-./update.sh --pin fail2ban $(docker inspect vaultwarden_fail2ban --format='{{index .Config.Image}}' | cut -d: -f2)
+# 4. Consider updating services if needed (with template regeneration)
+# Example: Update to new stable version
+# Edit .env to update version, then:
+# ./startup.sh --force-restart
 ```
 
-### Backup Verification
+### Enhanced Backup Verification
 ```bash
-# 1. Create manual emergency backup
+# 1. Create manual emergency backup with atomic operations
 ./backup.sh --type emergency --rclone --email
 
-# 2. Verify backup integrity
-ls -la backups/emergency/ | tail -3
+# 2. Verify backup integrity with enhanced listing
+./backup.sh --list
 
 # 3. Test age key accessibility
 ./edit-secrets.sh --test
@@ -132,210 +142,204 @@ rclone ls YourRemote:vaultwarden_backups/ --max-age 30d | wc -l
 ### Security Review
 ```bash
 # 1. Check break-glass admin status
-sudo ./create-breakglass-admin.sh status
+./create-breakglass-admin.sh status
 
 # 2. Review secrets status
 ./edit-secrets.sh --show | grep -E "CHANGE_ME|password|token"
 # Should not show any CHANGE_ME values
 
-# 3. Update Cloudflare IPs if needed
+# 3. Update Cloudflare IPs with enhanced error handling
 sudo ./update-cloudflare-ips.sh --dry-run
 
 # 4. Check for system updates
 sudo ./update.sh --type system --check-only
 ```
 
-## Version Management Operations
+## Template-Based Configuration Management
 
-### Production Version Update Workflow
+### Template Maintenance Workflow
 ```bash
-# 1. Create backup before any version changes
-./backup.sh --type full --rclone
+# 1. Edit template files (source of truth)
+nano docker-compose.yml.example  # For Docker configuration changes
+nano .env.example               # For environment variable changes
 
-# 2. Check what updates are available
-./update.sh --type containers --check-only
+# 2. Validate template changes
+docker compose config  # Should show no errors
 
-# 3. Update to specific tested version (example: VaultWarden)
-./update.sh --pin vaultwarden 1.31.0
+# 3. Apply template changes
+sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.com
 
-# 4. Apply the update
-./update.sh --type containers --backup
+# 4. Restart services to apply changes
+./startup.sh --force-restart
 
-# 5. Verify the update
+# 5. Verify changes
 ./health.sh --comprehensive
-docker compose ps --format "table {{.Service}}	{{.Image}}"
-
-# 6. Monitor for 24 hours, rollback if issues:
-# ./update.sh --pin vaultwarden 1.30.5
-# ./startup.sh --force-restart
 ```
 
-### Emergency Security Patch
+### Configuration Drift Prevention
 ```bash
-# 1. Quick security patch for critical vulnerability
-./update.sh --unpin vaultwarden    # Allow latest to get security patch
-./update.sh --type containers      # Apply immediately
-./health.sh --comprehensive        # Verify system health
+# Regular template validation (weekly)
+docker compose config
 
-# 2. Monitor and re-pin once stable
-# Wait 24-48 hours, then:
-current_version=$(docker inspect vaultwarden_app --format='{{index .Config.Image}}' | cut -d: -f2)
-./update.sh --pin vaultwarden $current_version
+# Check for manual modifications to generated files
+diff docker-compose.yml docker-compose.yml.example
+diff .env .env.example
+
+# If drift detected, regenerate from templates:
+sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.com
 ```
 
-### Development/Testing Version Management
+## Enhanced Backup and Recovery Operations
+
+### Automated Backup Strategy
 ```bash
-# Switch to latest versions for testing
-./update.sh --unpin vaultwarden
-./update.sh --unpin caddy
-./startup.sh --force-restart
+# Daily (automated via cron-setup.sh): Database backups with atomic operations
+# Weekly (automated via cron-setup.sh): Full system backups with template preservation
+# Manual: Emergency kits with complete recovery capability
 
-# Test new features, then pin to stable if satisfied
-./update.sh --pin vaultwarden 1.31.0
-./update.sh --pin caddy 2.8.5
-./startup.sh --force-restart
+# All backups include:
+# - Atomic operations to prevent corruption
+# - WAL checkpoints for live database snapshots
+# - Template files for complete system reconstruction
+# - Enhanced verification and integrity checks
 ```
 
-## Backup and Recovery Operations
+### Enhanced Recovery Operations
 
-### Standard Backup Operations
-```bash
-# Daily (automated via cron): Database backups
-# ./backup.sh --type db --rclone
-
-# Weekly (automated via cron): Full system backups  
-# ./backup.sh --type full --rclone
-
-# Manual emergency backup before major changes
-./backup.sh --type emergency --rclone --email
-```
-
-### Recovery Operations
-
-#### Database Recovery
+#### Database Recovery with Atomic Operations
 ```bash
 # 1. Stop services
 ./startup.sh --down
 
-# 2. Restore from recent database backup
-./restore.sh backups/db/vw-db-backup-YYYYMMDD-HHMMSS.sqlite3.gz.age
+# 2. Interactive restore with enhanced backup selection
+./restore.sh --interactive
+# Select database backup from enhanced menu
 
 # 3. Restart and verify
 ./startup.sh
 ./health.sh --comprehensive
 ```
 
-#### Complete System Recovery
+#### Complete System Recovery with Template Integration
 ```bash
 # 1. Stop all services
 ./startup.sh --down
 
-# 2. Restore from full system backup
-./restore.sh backups/full/vw-full-backup-YYYYMMDD-HHMMSS.tar.gz.age
+# 2. Interactive full system restore with template handling
+./restore.sh --interactive
+# Select full system backup or emergency kit
 
 # 3. Restart and verify
 ./startup.sh
 ./health.sh --comprehensive
 ```
 
-#### Emergency Recovery from Scratch
+#### Emergency Recovery from Bare Metal
 ```bash
 # 1. Fresh installation (new server)
-git clone https://github.com/killer23d/VaultWarden-OCI-Simplified.git
-cd VaultWarden-OCI-Simplified
-sudo ./setup.sh --domain vault.yourdomain.com --email admin@yourdomain.com --auto
+git clone https://github.com/killer23d/VaultWarden-OCI.git
+cd VaultWarden-OCI
+chmod +x *.sh
 
-# 2. Restore from emergency backup
+# 2. Restore from emergency backup (includes templates)
 ./restore.sh /path/to/emergency-kit-YYYYMMDD-HHMMSS.tar.gz.age
 
-# 3. Verify and update DNS if needed
+# 3. Verify template-based configuration and update DNS
+docker compose config
 ./health.sh --comprehensive
 ```
 
 ## Emergency Procedures
 
-### SSH Access Lost
+### Enhanced SSH Access Recovery
 ```bash
 # Use break-glass admin via OCI serial console:
 # 1. Access OCI Console → Compute → Instance → Console Connection
-# 2. Login with break-glass admin credentials
-# 3. Diagnose and fix SSH issues:
+# 2. Create console connection (if not exists)
+# 3. Login with break-glass admin credentials
+# 4. Diagnose and fix SSH issues:
 
 sudo systemctl status sshd
 sudo systemctl restart sshd
 sudo ufw allow 22/tcp
 sudo ufw reload
 
-# 4. Test SSH recovery
+# 5. Test SSH recovery
+# 6. Security cleanup:
+#    - Delete Console Connection in OCI Console
+#    - Rotate break-glass password: ./create-breakglass-admin.sh password
 ```
 
-### Service Failure
+### Service Failure with Template Validation
 ```bash
 # 1. Quick service restart
 ./startup.sh --force-restart
 
-# 2. If services still failing, check logs
+# 2. If services still failing, check template configuration
+docker compose config
 docker compose logs
 
-# 3. If persistent issues, restore from backup
+# 3. If persistent issues, restore from backup with template integration
 ./startup.sh --down
-./restore.sh backups/full/latest-good-backup.age
+./restore.sh --interactive  # Select appropriate backup
 ./startup.sh
 ```
 
-### Data Corruption
+### Template Configuration Corruption
 ```bash
 # 1. Stop services immediately
 ./startup.sh --down
 
-# 2. Check database integrity
-sqlite3 /var/lib/vaultwarden/data/bwdata/db.sqlite3 "PRAGMA integrity_check;"
+# 2. Regenerate configuration from templates
+sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.com
 
-# 3. If corrupted, restore from backup
-./restore.sh backups/db/latest-clean-backup.age
-
-# 4. Restart and verify
+# 3. Restart and verify
 ./startup.sh
 ./health.sh --comprehensive
 ```
 
-### Security Incident
+### Security Incident with Enhanced Response
 ```bash
 # 1. Immediate isolation (if severe)
 ./startup.sh --down
 sudo ufw deny in
 
-# 2. Preserve evidence
+# 2. Preserve evidence and create emergency backup
 cp -r /var/log/ /tmp/incident-$(date +%Y%m%d-%H%M%S)/
-./backup.sh --type emergency
+./backup.sh --type emergency --rclone
 
-# 3. Investigate and recover
-# Review logs, restore from clean backup, update versions
+# 3. Review enhanced fail2ban logs
+docker compose logs fail2ban | grep -E "Rate|Ban|Error"
+
+# 4. Investigate and recover with template-based approach
+# Review logs, restore from clean backup, regenerate templates
 # Re-enable services only after verification
 ```
 
-## Monitoring and Alerting
+## Enhanced Monitoring and Alerting
 
-### Health Monitoring Setup
+### Comprehensive Health Monitoring
 ```bash
-# Comprehensive health check (run weekly)
-./health.sh --comprehensive --email-alert
+# Automated health check with auto-healing (configured via cron-setup.sh)
+./health.sh --comprehensive --auto-heal --email-alert
 
 # JSON output for external monitoring systems
 ./health.sh --comprehensive --json > /tmp/vaultwarden-status.json
 ```
 
-### Log Analysis
+### Enhanced Log Analysis
 ```bash
 # Check for errors in the last 24 hours
 docker compose logs --since 24h | grep -i error
 
-# Monitor specific service logs
-docker compose logs vaultwarden --tail 100
-docker compose logs fail2ban --tail 50
+# Monitor enhanced fail2ban with rate limiting
+docker compose logs fail2ban --tail 100 | grep -E "Rate|Ban"
 
 # Check system logs for issues
 sudo journalctl -u docker --since "24 hours ago" | tail -20
+
+# Review template configuration changes
+git log --oneline -- "*.example"
 ```
 
 ### Performance Monitoring
@@ -351,62 +355,66 @@ free -h
 # Network connectivity tests
 curl -f http://localhost:80/alive
 nslookup vault.yourdomain.com
+
+# Template configuration validation
+docker compose config
 ```
 
 ## Maintenance Schedules
 
-### Automated Tasks (via cron-setup.sh)
-- **Every 6 hours**: Health monitoring with auto-heal
-- **Daily 2:00 AM**: Database backups with rclone sync
-- **Weekly Sunday 1:00 AM**: Full system backups
-- **Weekly Sunday 3:00 AM**: Container updates
-- **Monthly First Sunday 3:30 AM**: System updates
-- **Monthly First Sunday 4:00 AM**: System maintenance
-- **Weekly Sunday 5:00 AM**: Cloudflare IP updates
+### Enhanced Automated Tasks (via cron-setup.sh)
+- **Every 6 hours**: Health monitoring with auto-heal and template validation
+- **Daily 2:00 AM**: Database backups with atomic operations and rclone sync
+- **Weekly Sunday 1:00 AM**: Full system backups with template preservation
+- **Weekly Sunday 3:00 AM**: Container updates with backup creation
+- **Monthly First Sunday 3:30 AM**: System updates with template validation
+- **Monthly First Sunday 4:00 AM**: System maintenance with cleanup
+- **Weekly Sunday 5:00 AM**: Cloudflare IP updates with enhanced error handling
 
 ### Manual Tasks Schedule
 
 #### Daily (5 minutes)
 - Review automated health check results
 - Verify service status
-- Check backup creation
+- Check enhanced backup creation with listing
+- Verify break-glass admin status
 
 #### Weekly (15 minutes)
-- Review logs for errors or security issues
-- Check version status and available updates
+- Review logs for errors or security issues with enhanced fail2ban analysis
+- Check version status and template configuration validation
 - Verify resource usage levels
-- Review fail2ban activity
+- Review enhanced fail2ban activity with rate limiting
 
 #### Monthly (30 minutes)
-- Comprehensive health check
-- System maintenance verification
-- Backup integrity verification
-- Security review and updates
-- Break-glass admin status check
+- Comprehensive health check with template validation
+- System maintenance verification with enhanced features
+- Backup integrity verification with atomic operations
+- Security review with enhanced monitoring
+- Break-glass admin status check and template configuration review
 
 #### Quarterly (1 hour)
-- Full security audit
-- Test emergency procedures
-- Review and update documentation
-- Consider version updates for new features
-- Database optimization review
+- Full security audit with template-based configuration review
+- Test emergency procedures including break-glass admin access
+- Review and update template-based documentation
+- Consider version updates with template regeneration
+- Database optimization review with enhanced maintenance
 
-## Configuration Management
+## Configuration Management Best Practices
 
-### Environment Configuration (.env)
+### Template-Based Environment Configuration (.env)
 ```bash
-# View current configuration
+# View current configuration (generated from template)
 cat .env | grep -v '^#' | grep -v '^$'
 
 # Check for any CHANGE_ME values that need updating
 grep "CHANGE_ME" .env
 # Should return no results in production
 
-# Version pins for production stability
-grep "_VERSION=" .env
+# Validate template-generated configuration
+docker compose config
 ```
 
-### Secrets Management
+### Enhanced Secrets Management
 ```bash
 # Regular secrets review (quarterly)
 ./edit-secrets.sh --test
@@ -414,13 +422,13 @@ grep "_VERSION=" .env
 # Update secrets when needed
 ./edit-secrets.sh
 
-# After secrets changes, restart services
+# After secrets changes, restart services (REQUIRED)
 ./startup.sh --force-restart
 ```
 
-### Firewall and Network
+### Network and Firewall Management
 ```bash
-# Update Cloudflare IP ranges (automated weekly, manual if needed)
+# Update Cloudflare IP ranges with enhanced error handling (automated weekly)
 sudo ./update-cloudflare-ips.sh
 
 # Check firewall status
@@ -432,9 +440,9 @@ nslookup vault.yourdomain.com
 
 ## Performance Optimization
 
-### Database Performance
+### Enhanced Database Performance
 ```bash
-# Monthly database analysis
+# Monthly database analysis with enhanced checks
 sudo ./db-maint.sh --analyze-only
 
 # Quarterly database optimization (automated)
@@ -444,45 +452,48 @@ sudo ./db-maint.sh --backup
 sqlite3 /var/lib/vaultwarden/data/bwdata/db.sqlite3 "PRAGMA page_count; PRAGMA freelist_count;"
 ```
 
-### System Performance
+### System Performance with Template Optimization
 ```bash
 # Clean up disk space if needed
-sudo ./maintenance.sh --type standard
+sudo ./maintenance.sh --type standard --force
 
 # Deep cleanup if disk usage > 80%
-sudo ./maintenance.sh --type deep
+sudo ./maintenance.sh --type deep --force
 
 # Monitor container performance
 docker stats vaultwarden_app --no-stream
+
+# Validate template-generated resource limits
+docker compose config | grep -E "memory|cpus"
 ```
 
 ## Best Practices for Single Admin Operations
 
-### Documentation
-- Keep offline copies of troubleshooting procedures
-- Document any custom configurations or changes
-- Maintain current backup of encryption keys
+### Template-Based Documentation
+- Keep offline copies of template files and troubleshooting procedures
+- Document any template customizations and configuration changes
+- Maintain current backup of encryption keys and template files
 - Document break-glass admin credentials securely
 
-### Testing
-- Test backup restoration procedures quarterly
-- Verify break-glass admin access annually (status check)
-- Test update and rollback procedures in development
-- Verify monitoring and alerting systems monthly
+### Enhanced Testing
+- Test backup restoration procedures quarterly with atomic operations
+- Verify break-glass admin access annually via OCI serial console (status check)
+- Test template regeneration and update procedures in development
+- Verify enhanced monitoring and alerting systems monthly
 
-### Security
-- Review access logs monthly
-- Keep system and container versions updated
-- Monitor security advisories for used components
-- Maintain strong, unique passwords for all accounts
+### Security with Template Integration
+- Review access logs monthly with enhanced fail2ban analysis
+- Keep system and container versions updated via template configuration
+- Monitor security advisories for components used in templates
+- Maintain strong, unique passwords for all accounts including break-glass admin
 
-### Automation
-- Rely on automated tasks for routine operations
-- Monitor automated task completion via logs
+### Enhanced Automation
+- Rely on automated tasks for routine operations via cron-setup.sh
+- Monitor automated task completion via enhanced logging
 - Manually verify critical automated operations monthly
-- Adjust automation based on operational experience
+- Adjust automation based on operational experience and template updates
+- Regularly validate template-based configurations
 
 ---
 
-This operations guide is designed for the reality of single-administrator, small team environments where simplicity, reliability, and clear procedures are essential for effective system management.
-](https://github.com/killer23d/VaultWarden-OCI-Simplified)
+This operations guide is designed for the reality of single-administrator, small team environments where template-based simplicity, enhanced reliability, and clear procedures are essential for effective system management with minimal operational overhead.
