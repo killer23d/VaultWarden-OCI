@@ -1,7 +1,9 @@
 # VaultWarden-OCI Docker Compose - Enhanced with Caddy-Cloudflare
-# FIXED: Best-practice log rotation strategy for set-and-forget operation.
+# FIXED: Standardized logging strategy and removed hardcoded platform architecture.
 #        - VaultWarden & Fail2ban log to stdout (rotated by Docker json-file driver).
 #        - Caddy logs to file (rotated by Caddy itself) so fail2ban can read it.
+#        - Removed platform: linux/arm64 for portability.
+#        - Updated CPU limits to total 0.8 OCPU (leaving 0.2 headroom).
 
 services:
   # VaultWarden Password Manager
@@ -33,7 +35,7 @@ services:
       DATABASE_MAX_CONNS: 10
       ROCKET_WORKERS: 10
       WEBSOCKET_ENABLED: "${WEBSOCKET_ENABLED:-false}"
-      WEBSOCKET_ADDRESS: "0.0.0.0" 
+      WEBSOCKET_ADDRESS: "0.0.0.0"
       WEBSOCKET_PORT: 3012
       LOG_LEVEL: info
       EXTENDED_LOGGING: true
@@ -110,7 +112,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '${CADDY_CPU_LIMIT:-0.2}'
+          cpus: '${CADDY_CPU_LIMIT:-0.15}'
           memory: '${CADDY_MEMORY_LIMIT:-256m}'
         reservations:
           cpus: '${CADDY_CPU_RESERVATION:-0.1}'
@@ -125,7 +127,7 @@ services:
   # Fail2Ban Intrusion Prevention
   fail2ban:
     image: crazymax/fail2ban:${FAIL2BAN_VERSION:-latest}
-    platform: linux/arm64
+    # --- PORTABILITY FIX: Removed hardcoded platform: linux/arm64 ---
     container_name: vaultwarden_fail2ban
     restart: unless-stopped
     environment:
@@ -156,7 +158,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '${FAIL2BAN_CPU_LIMIT:-0.1}'
+          cpus: '${FAIL2BAN_CPU_LIMIT:-0.05}'
           memory: '${FAIL2BAN_MEMORY_LIMIT:-128m}'
         reservations:
           cpus: '${FAIL2BAN_CPU_RESERVATION:-0.05}'
