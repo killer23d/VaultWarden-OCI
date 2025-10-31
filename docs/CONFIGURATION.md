@@ -1,22 +1,44 @@
-# Configuration Guide - VaultWarden-OCI-Simplified
+# Configuration Guide - VaultWarden-OCI
 
-This comprehensive configuration guide covers system setup, environment variables, secrets management, and advanced configuration options for VaultWarden-OCI-Simplified.
+This comprehensive configuration guide covers system setup, environment variables, secrets management, and advanced configuration options for VaultWarden-OCI using the new template-based architecture.
 
 ## Quick Configuration Overview
 
 ### Essential Configuration Steps
 
-1. **System Setup**: `sudo ./setup.sh --auto --domain vault.example.com --email admin@example.com`
-2. **Secrets Configuration**: `make edit-secrets`
-3. **Environment Variables**: Edit `.env` file with your specific settings
-4. **Version Management**: `make pin SERVICE=vaultwarden VERSION=1.30.5` (production)
-5. **Emergency Access**: `make breakglass-create`
-6. **Remote Backups**: `make configure-rclone` (optional)
-7. **Validation**: `make config-check`
+1. **Template-Based Setup**: `sudo ./setup.sh --auto --domain vault.example.com --email admin@example.com`
+2. **Secrets Configuration**: `./edit-secrets.sh`
+3. **Environment Variables**: Edit generated `.env` file with your specific settings
+4. **Emergency Access**: `./create-breakglass-admin.sh`
+5. **Remote Backups**: `rclone config` (optional)
+6. **Validation**: `docker compose config`
+
+## Template-Based Configuration
+
+### Configuration File Generation
+
+All configuration files are now generated from templates:
+
+```bash
+# Template files (source of truth):
+├── docker-compose.yml.example
+├── .env.example
+└── Generated files:
+    ├── docker-compose.yml
+    └── .env
+```
+
+### Template Benefits
+- **Single source of truth**: Edit templates, not generated files
+- **No hardcoded values**: Platform-agnostic configurations
+- **Easy maintenance**: Version control friendly
+- **Consistent deployments**: Same templates produce identical configurations
 
 ## Environment Variables (.env)
 
 ### Core Application Settings
+
+Generated from `.env.example` template during setup:
 
 ```bash
 # Domain and Email Configuration
@@ -50,7 +72,7 @@ DB_BACKUP_RETENTION_DAYS=14             # Days to keep database backups
 EMERGENCY_BACKUP_RETENTION_DAYS=90      # Days to keep emergency kits
 
 # Remote Backup Configuration (Optional)
-RCLONE_REMOTE_NAME=your_remote_name     # Configure with: make configure-rclone
+RCLONE_REMOTE_NAME=your_remote_name     # Configure with: rclone config
 # Examples: "gdrive", "s3", "dropbox", "onedrive"
 ```
 
@@ -58,13 +80,14 @@ RCLONE_REMOTE_NAME=your_remote_name     # Configure with: make configure-rclone
 
 ```bash
 # Production Mode (Recommended - Pinned Versions)
+# Set automatically by setup.sh --auto
 VAULTWARDEN_VERSION=1.30.5             # Pin to stable version
 CADDY_VERSION=2.8.4                    # Pin to stable version
 FAIL2BAN_VERSION=1.1.0                 # Pin to stable version
 DDCLIENT_VERSION=3.11.2                # Pin to stable version
 
 # Development Mode (Latest Versions)
-# Comment out or remove version variables to use latest
+# Set by setup.sh --use-latest (versions commented out)
 #VAULTWARDEN_VERSION=1.30.5            # Commented = use latest
 #CADDY_VERSION=2.8.4                   # Commented = use latest
 ```
@@ -91,7 +114,7 @@ SMTP_HOST=smtp.gmail.com               # SMTP server
 SMTP_PORT=587                          # SMTP port
 SMTP_FROM=vaultwarden@yourdomain.com   # From address
 SMTP_USERNAME=your_email@gmail.com     # SMTP username
-# SMTP_PASSWORD configured in secrets (make edit-secrets)
+# SMTP_PASSWORD configured in secrets (./edit-secrets.sh)
 ```
 
 ## Secrets Management
@@ -102,8 +125,7 @@ Use the interactive secrets editor to configure sensitive data:
 
 ```bash
 # Edit encrypted secrets
-make edit-secrets
-# Or: ./edit-secrets.sh
+./edit-secrets.sh
 ```
 
 ### Required Secrets
@@ -119,7 +141,7 @@ admin_basic_auth_hash: "$2b$12$hash_generated_by_secrets_tool"
 
 #### Cloudflare API Tokens
 ```yaml
-# DNS updates token (Zone:DNS:Edit permission)
+# DNS updates token (Zone:DNS:Edit + Zone:Zone:Read permission)
 ddclient_api_token: "your_dns_token_here"
 
 # Firewall management token (Zone:Firewall Services:Edit permission)
@@ -146,7 +168,7 @@ push_installation_key: "your_installation_key"
 
 ```bash
 # Interactive secrets editing (recommended)
-make edit-secrets
+./edit-secrets.sh
 
 # Test secrets accessibility
 ./edit-secrets.sh --test
@@ -208,9 +230,9 @@ The Caddy configuration includes comprehensive security headers:
 }
 ```
 
-### fail2ban Intrusion Prevention
+### Enhanced fail2ban Intrusion Prevention
 
-#### Jail Configuration
+#### Enhanced Jail Configuration with Rate Limiting
 ```ini
 # Located in: fail2ban/jail.local
 [vaultwarden-admin]
@@ -220,6 +242,7 @@ logpath = /var/log/vaultwarden/*.log
 maxretry = 3
 bantime = 3600
 findtime = 600
+action = cloudflare-optimized[name=%(name)s]
 
 [vaultwarden-api]
 enabled = true
@@ -228,80 +251,70 @@ logpath = /var/log/vaultwarden/*.log
 maxretry = 5
 bantime = 3600
 findtime = 600
+action = cloudflare-optimized[name=%(name)s]
 ```
 
-## Version Management Configuration
-
-### Production Version Strategy
-
-```bash
-# Pin specific versions for stability
-make pin SERVICE=vaultwarden VERSION=1.30.5
-make pin SERVICE=caddy VERSION=2.8.4
-make pin SERVICE=fail2ban VERSION=1.1.0
-make pin SERVICE=ddclient VERSION=3.11.2
-
-# Apply pinned versions
-make restart
-
-# Verify pinned versions
-make pins
+#### Enhanced Cloudflare Action with Rate Limiting
+```ini
+# Located in: fail2ban/action.d/cloudflare-optimized.conf
+# Features:
+# - Rate limiting (max 30 API calls/minute)
+# - Comprehensive error handling and logging
+# - Graceful failure recovery
+# - No more API abuse or hanging requests
 ```
 
-### Development Version Strategy
+## Template Management
+
+### Editing Templates
+
+For ongoing maintenance, edit the template files (source of truth):
 
 ```bash
-# Use latest versions for development
-make unpin SERVICE=vaultwarden
-make unpin SERVICE=caddy
+# Edit templates
+nano docker-compose.yml.example # For Docker Compose changes
+nano .env.example # For new environment variables
 
-# Apply latest versions
-make restart
-
-# Check running versions
-docker compose ps --format "table {{.Service}}	{{.Image}}"
+# Apply template changes
+sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.com
+./startup.sh --force-restart # Apply changes
 ```
 
-### Update Management
+### Template Validation
 
 ```bash
-# Check for available updates (no changes made)
-make check-updates
-make check-system-updates
+# Validate templates before applying
+docker compose config
 
-# Update containers with automatic backup
-make update-containers
-
-# Update system packages
-sudo make update-system
+# Check for template syntax issues
+cat docker-compose.yml.example | grep -n "platform:\|linux/arm64"
 ```
 
 ## Network and Firewall Configuration
 
 ### UFW Firewall Rules
 
-The firewall is automatically configured during setup:
+The firewall is automatically configured during setup with enhanced warnings:
 
 ```bash
 # View current firewall rules
 sudo ufw status numbered
 
-# Update Cloudflare IP ranges
-make update-ips
-# Or: sudo ./update-cloudflare-ips.sh
+# Update Cloudflare IP ranges with improved error handling
+sudo ./update-cloudflare-ips.sh
 
 # Manual firewall management (if needed)
 sudo ufw allow 22/tcp          # SSH access
 sudo ufw reload                # Apply changes
 ```
 
-### Cloudflare IP Management
+### Enhanced Cloudflare IP Management
 
 ```bash
-# Automatic IP range updates (weekly via cron)
-make update-ips
+# Automatic IP range updates (weekly via cron) with improved UFW setup
+sudo ./update-cloudflare-ips.sh
 
-# Preview IP range changes
+# Preview IP range changes with clear warnings
 sudo ./update-cloudflare-ips.sh --dry-run
 
 # Force update without prompts
@@ -310,7 +323,7 @@ sudo ./update-cloudflare-ips.sh --force
 
 ## Backup Configuration
 
-### Local Backup Settings
+### Local Backup Settings with Atomic Operations
 
 ```bash
 # Configure backup retention in .env
@@ -318,18 +331,18 @@ BACKUP_RETENTION_DAYS=30              # Full backups
 DB_BACKUP_RETENTION_DAYS=14           # Database backups
 EMERGENCY_BACKUP_RETENTION_DAYS=90    # Emergency kits
 
-# Manual backup operations
-make backup-db                        # Quick database backup
-make backup-full                      # Complete system backup
-make backup-emergency                 # Disaster recovery kit
-make list-backups                     # Show available backups
+# Enhanced backup operations with atomic operations
+./backup.sh --type db                 # Atomic database backup
+./backup.sh --type full               # Complete system backup
+./backup.sh --type emergency          # Disaster recovery kit
+./backup.sh --list                    # Enhanced listing with timestamps, sizes, IDs
 ```
 
 ### Remote Backup Configuration
 
 ```bash
 # Interactive rclone setup
-make configure-rclone
+rclone config
 
 # Configure remote name in .env after setup
 RCLONE_REMOTE_NAME=your_remote_name
@@ -355,17 +368,14 @@ rclone ls YourRemote:vaultwarden_backups/
 ### Break-Glass Admin Setup
 
 ```bash
-# Create emergency admin account
-make breakglass-create
-# Or: sudo ./create-breakglass-admin.sh create
+# Create emergency admin account for OCI serial console access
+./create-breakglass-admin.sh
 
 # Check emergency admin status
-make breakglass-status
-# Or: sudo ./create-breakglass-admin.sh status
+./create-breakglass-admin.sh status
 
 # Set/change emergency admin password
-make breakglass-password
-# Or: sudo ./create-breakglass-admin.sh password
+./create-breakglass-admin.sh password
 ```
 
 ### Emergency Admin Properties
@@ -385,154 +395,45 @@ To use emergency access when SSH is unavailable:
 4. **Login with break-glass admin credentials**
 5. **Fix SSH/firewall issues**
 6. **Delete console connection** for security
-7. **Rotate break-glass password**: `make breakglass-password`
-
-## Advanced Configuration
-
-### Custom Resource Limits
-
-```bash
-# Adjust container resources in .env
-VAULTWARDEN_MEMORY_LIMIT=1g           # Increase for large deployments
-VAULTWARDEN_CPU_LIMIT=2.0             # Increase for high load
-
-# Apply changes
-make restart
-```
-
-### Development Environment Setup
-
-```bash
-# Setup with latest versions
-sudo ./setup.sh --domain vault-dev.example.com --email dev@example.com --use-latest
-
-# Switch existing deployment to development mode
-make unpin SERVICE=vaultwarden
-make unpin SERVICE=caddy
-make restart
-```
-
-### Custom SSL Certificates
-
-If using custom SSL certificates instead of Let's Encrypt:
-
-```bash
-# Place certificates in caddy/certs/
-# Modify caddy/Caddyfile as needed
-# Restart Caddy
-docker compose restart caddy
-```
-
-## Configuration Validation
-
-### Automated Validation
-
-```bash
-# Validate Docker Compose configuration
-make config-check
-
-# Comprehensive system health check
-make health
-
-# Check configuration syntax
-./startup.sh --dry-run
-```
-
-### Manual Validation
-
-```bash
-# Check environment variables
-source .env && env | grep -E "DOMAIN|ADMIN_EMAIL|CLOUDFLARE"
-
-# Verify secrets accessibility
-make edit-secrets --test
-
-# Test container configuration
-docker compose config
-```
-
-## Troubleshooting Configuration Issues
-
-### Common Configuration Problems
-
-#### Environment Variables Not Loading
-```bash
-# Check .env file syntax (no spaces around = signs)
-cat .env | grep -E "^[A-Z_]+=.*$"
-
-# Validate configuration
-make config-check
-
-# Restart services to reload configuration
-make restart
-```
-
-#### Version Management Issues
-```bash
-# Check current pins
-make pins
-
-# Verify running versions
-docker compose ps --format "table {{.Service}}	{{.Image}}"
-
-# Reset to known good versions
-make pin SERVICE=vaultwarden VERSION=1.30.5
-make restart
-```
-
-#### Secrets Access Problems
-```bash
-# Test secrets accessibility
-./edit-secrets.sh --test
-
-# Check Age key permissions
-ls -la secrets/keys/age-key.txt
-
-# Regenerate Age keys if necessary
-./edit-secrets.sh --rotate-keys
-```
-
-#### Network Configuration Issues
-```bash
-# Update Cloudflare IP ranges
-make update-ips
-
-# Check firewall status
-sudo ufw status
-
-# Verify DNS resolution
-nslookup vault.yourdomain.com
-```
+7. **Rotate break-glass password**: `./create-breakglass-admin.sh password`
 
 ## Configuration Best Practices
 
+### Template-Based Environment
+
+1. **Edit templates**: Always edit `.example` files as source of truth
+2. **Use setup.sh**: Apply changes via `sudo ./setup.sh --force`
+3. **Version control templates**: Keep `.example` files in version control
+4. **Validate first**: Always run `docker compose config` before deployment
+5. **Document changes**: Document customizations in template comments
+
 ### Production Environment
 
-1. **Pin container versions** for stability: `make pin SERVICE=... VERSION=...`
+1. **Use pinned versions** for stability (automatically set by `setup.sh --auto`)
 2. **Use strong secrets** generated by the secrets tool
-3. **Configure remote backups** with `make configure-rclone`
-4. **Setup break-glass admin** with `make breakglass-create`
+3. **Configure remote backups** with `rclone config`
+4. **Setup break-glass admin** with `./create-breakglass-admin.sh`
 5. **Enable monitoring** with comprehensive health checks
-6. **Regular updates** with `make check-updates` and planned maintenance
+6. **Regular updates** with planned maintenance
 
 ### Security Configuration
 
 1. **Separate API tokens** for DNS and firewall management
 2. **Strong admin authentication** with bcrypt hashes
 3. **Encrypted backup storage** with Age encryption
-4. **Firewall restriction** to Cloudflare IPs only
+4. **Enhanced firewall restriction** with improved UFW setup
 5. **Regular credential rotation** quarterly
 6. **Emergency access testing** annually
 
 ### Operational Configuration
 
-1. **Automated backups** with retention policies
-2. **Version management** with controlled updates
-3. **Health monitoring** with auto-healing
-4. **Log management** with appropriate retention
-5. **Resource monitoring** with alerting
-6. **Documentation maintenance** with current settings
+1. **Template-based approach** for all configuration changes
+2. **Atomic backup operations** with enhanced reliability
+3. **Enhanced fail2ban** with rate limiting and error handling
+4. **Interactive restore** with backup selection
+5. **Comprehensive health monitoring** with auto-healing
+6. **Break-glass admin access** for emergency recovery
 
 ---
 
-This configuration guide provides comprehensive coverage of all configuration aspects for VaultWarden-OCI-Simplified, optimized for small team deployments with emphasis on security, reliability, and ease of management through the new Makefile shortcuts and interactive features.
+This configuration guide provides comprehensive coverage of all configuration aspects for VaultWarden-OCI, incorporating the latest template-based architecture, enhanced fail2ban security with rate limiting, atomic backup operations, and quality of life improvements optimized for small team deployments with reliability and ease of management.
