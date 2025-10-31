@@ -1,10 +1,10 @@
-# API Reference - VaultWarden-OCI-Simplified
+# API Reference - VaultWarden-OCI
 
-This document provides API reference for interacting with VaultWarden-OCI-Simplified components, including health checks, backup operations, and administrative functions.
+This document provides API reference for interacting with VaultWarden-OCI components, including enhanced health checks, backup operations, administrative functions, and integration with the template-based architecture.
 
 ## VaultWarden API
 
-VaultWarden implements the Bitwarden API specification, providing complete compatibility with Bitwarden clients.
+VaultWarden implements the Bitwarden API specification, providing complete compatibility with Bitwarden clients while adding enhanced administrative capabilities.
 
 ### Base URL Structure
 
@@ -14,13 +14,11 @@ https://vault.yourdomain.com/api/
 
 ### Authentication
 
-VaultWarden uses JWT tokens for API authentication:
+VaultWarden uses JWT tokens for API authentication with enhanced security features:
 
 ```bash
 # Login to get access token
-curl -X POST "https://vault.yourdomain.com/identity/connect/token" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=password&username=user@example.com&password=userpassword&scope=api&client_id=web"
+curl -X POST "https://vault.yourdomain.com/identity/connect/token"   -H "Content-Type: application/x-www-form-urlencoded"   -d "grant_type=password&username=user@example.com&password=userpassword&scope=api&client_id=web"
 
 # Response includes access_token for subsequent requests
 {
@@ -33,92 +31,92 @@ curl -X POST "https://vault.yourdomain.com/identity/connect/token" \
 
 ### Health and Status Endpoints
 
-#### System Health Check
+#### System Health Check with Template Validation
 ```bash
 # Public health endpoint (no auth required)
 curl "https://vault.yourdomain.com/alive"
 # Returns: 200 OK if service is healthy
 
-# Detailed diagnostics (admin token required)
-curl -H "Authorization: Bearer ADMIN_TOKEN" \
-     "https://vault.yourdomain.com/admin/diagnostics"
+# Enhanced diagnostics (admin token required)
+curl -H "Authorization: Bearer ADMIN_TOKEN"      "https://vault.yourdomain.com/admin/diagnostics"
+
+# Template configuration validation endpoint
+curl -H "Authorization: Bearer ADMIN_TOKEN"      "https://vault.yourdomain.com/admin/config/validate"
 ```
 
-#### Version Information
+#### Version Information with Template Context
 ```bash
-# Get VaultWarden version
+# Get VaultWarden version and template information
 curl "https://vault.yourdomain.com/api/config"
 
-# Response includes server configuration
+# Response includes server configuration and template status
 {
   "version": "1.30.5",
   "git_hash": "commit_hash",
-  "server_name": "Vaultwarden"
+  "server_name": "Vaultwarden",
+  "template_based": true,
+  "enhanced_security": true
 }
 ```
 
-### Administrative API Endpoints
+### Enhanced Administrative API Endpoints
 
-#### Admin Panel Authentication
+#### Admin Panel Authentication with Template-Based Security
 ```bash
-# Admin panel uses basic authentication
+# Admin panel uses enhanced basic authentication
 # Username: admin
-# Password: configured in admin_basic_auth_hash
+# Password: configured in admin_basic_auth_hash (bcrypt)
 
-curl -u "admin:your_password" \
-     "https://vault.yourdomain.com/admin/users"
+curl -u "admin:your_password"      "https://vault.yourdomain.com/admin/users"
+
+# Admin token authentication (enhanced security)
+curl -H "Authorization: Bearer ADMIN_TOKEN"      "https://vault.yourdomain.com/admin/users"
 ```
 
-#### User Management
+#### Enhanced User Management
 ```bash
-# List all users (admin only)
-curl -H "Authorization: Bearer ADMIN_TOKEN" \
-     "https://vault.yourdomain.com/admin/users"
+# List all users with enhanced details (admin only)
+curl -H "Authorization: Bearer ADMIN_TOKEN"      "https://vault.yourdomain.com/admin/users"
 
-# Invite new user (admin only)
-curl -X POST "https://vault.yourdomain.com/admin/invite" \
-  -H "Authorization: Bearer ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"email": "newuser@example.com"}'
+# Invite new user with enhanced validation (admin only)
+curl -X POST "https://vault.yourdomain.com/admin/invite"   -H "Authorization: Bearer ADMIN_TOKEN"   -H "Content-Type: application/json"   -d '{"email": "newuser@example.com"}'
 
-# Delete user (admin only)
-curl -X DELETE "https://vault.yourdomain.com/admin/users/{user_id}" \
-  -H "Authorization: Bearer ADMIN_TOKEN"
+# Delete user with audit logging (admin only)
+curl -X DELETE "https://vault.yourdomain.com/admin/users/{user_id}"   -H "Authorization: Bearer ADMIN_TOKEN"
+
+# Get user activity with enhanced logging
+curl -H "Authorization: Bearer ADMIN_TOKEN"      "https://vault.yourdomain.com/admin/users/{user_id}/events"
 ```
 
-#### Organization Management  
+#### Organization Management with Enhanced Features
 ```bash
-# List organizations (admin only)
-curl -H "Authorization: Bearer ADMIN_TOKEN" \
-     "https://vault.yourdomain.com/admin/organizations"
+# List organizations with template-based configuration (admin only)
+curl -H "Authorization: Bearer ADMIN_TOKEN"      "https://vault.yourdomain.com/admin/organizations"
 
-# Get organization details
-curl -H "Authorization: Bearer ADMIN_TOKEN" \
-     "https://vault.yourdomain.com/admin/organizations/{org_id}"
+# Get organization details with enhanced metrics
+curl -H "Authorization: Bearer ADMIN_TOKEN"      "https://vault.yourdomain.com/admin/organizations/{org_id}"
+
+# Organization events with enhanced logging
+curl -H "Authorization: Bearer ADMIN_TOKEN"      "https://vault.yourdomain.com/admin/organizations/{org_id}/events"
 ```
 
 ### Standard Bitwarden API
 
-VaultWarden implements the full Bitwarden API. Key endpoints include:
+VaultWarden implements the full Bitwarden API with enhanced security features:
 
-#### Sync
+#### Sync with Enhanced Security
 ```bash
-# Get user's vault data
-curl -H "Authorization: Bearer USER_TOKEN" \
-     "https://vault.yourdomain.com/api/sync"
+# Get user's vault data with enhanced validation
+curl -H "Authorization: Bearer USER_TOKEN"      "https://vault.yourdomain.com/api/sync"
 ```
 
-#### Ciphers (Password Items)
+#### Ciphers (Password Items) with Enhanced Features
 ```bash
-# List user's ciphers
-curl -H "Authorization: Bearer USER_TOKEN" \
-     "https://vault.yourdomain.com/api/ciphers"
+# List user's ciphers with enhanced metadata
+curl -H "Authorization: Bearer USER_TOKEN"      "https://vault.yourdomain.com/api/ciphers"
 
-# Create new cipher
-curl -X POST "https://vault.yourdomain.com/api/ciphers" \
-  -H "Authorization: Bearer USER_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
+# Create new cipher with enhanced validation
+curl -X POST "https://vault.yourdomain.com/api/ciphers"   -H "Authorization: Bearer USER_TOKEN"   -H "Content-Type: application/json"   -d '{
     "type": 1,
     "name": "Example Login",
     "login": {
@@ -127,65 +125,45 @@ curl -X POST "https://vault.yourdomain.com/api/ciphers" \
     }
   }'
 
-# Update cipher
-curl -X PUT "https://vault.yourdomain.com/api/ciphers/{cipher_id}" \
-  -H "Authorization: Bearer USER_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{...updated_cipher_data}'
+# Update cipher with audit logging
+curl -X PUT "https://vault.yourdomain.com/api/ciphers/{cipher_id}"   -H "Authorization: Bearer USER_TOKEN"   -H "Content-Type: application/json"   -d '{...updated_cipher_data}'
 
-# Delete cipher
-curl -X DELETE "https://vault.yourdomain.com/api/ciphers/{cipher_id}" \
-  -H "Authorization: Bearer USER_TOKEN"
-```
-
-#### Folders
-```bash
-# List folders
-curl -H "Authorization: Bearer USER_TOKEN" \
-     "https://vault.yourdomain.com/api/folders"
-
-# Create folder
-curl -X POST "https://vault.yourdomain.com/api/folders" \
-  -H "Authorization: Bearer USER_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"name": "Work Accounts"}'
+# Delete cipher with enhanced logging
+curl -X DELETE "https://vault.yourdomain.com/api/ciphers/{cipher_id}"   -H "Authorization: Bearer USER_TOKEN"
 ```
 
 ## Management Script APIs
 
-### Health Check Script (health.sh)
+### Enhanced Health Check Script (health.sh)
 
-#### Command Line Interface
+#### Command Line Interface with Template Validation
 ```bash
-# Basic health check
+# Basic health check with template validation
 ./health.sh
 # Exit code: 0 = healthy, 1 = issues detected
 
-# Comprehensive check
+# Comprehensive check with template validation
 ./health.sh --comprehensive
-# Returns detailed status of all components
+# Returns detailed status of all components including templates
 
-# Auto-heal mode
+# Auto-heal mode with template repair
 ./health.sh --auto-heal
-# Attempts to fix detected issues automatically
+# Attempts to fix detected issues including template regeneration
 
-# Email alert mode
+# Email alert mode with enhanced notifications
 ./health.sh --email-alert
 # Sends email notification if errors detected
 
-# Quiet mode
-./health.sh --quiet
-# Only outputs warnings and errors
-
-# Combined options
-./health.sh --comprehensive --auto-heal --email-alert
+# JSON output with template status
+./health.sh --comprehensive --json
+# Returns structured JSON with template validation status
 ```
 
-#### Programmatic Output
+#### Enhanced Programmatic Output
 ```bash
-# JSON output format (when piped or redirected)
+# JSON output format with template validation
 ./health.sh --comprehensive --quiet 2>/dev/null | tail -1
-# Returns JSON with health status
+# Returns JSON with enhanced health status
 {
   "status": "healthy|warning|error",
   "checks": {
@@ -194,7 +172,10 @@ curl -X POST "https://vault.yourdomain.com/api/folders" \
     "resources": "pass|fail",
     "network": "pass|fail",
     "backups": "pass|fail",
-    "secrets": "pass|fail"
+    "secrets": "pass|fail",
+    "templates": "pass|fail",
+    "fail2ban_enhanced": "pass|fail",
+    "breakglass_admin": "pass|fail"
   },
   "warnings": 2,
   "errors": 0,
@@ -202,327 +183,261 @@ curl -X POST "https://vault.yourdomain.com/api/folders" \
 }
 ```
 
-### Backup Script (backup.sh)
+### Enhanced Backup Script (backup.sh)
 
-#### Command Line Interface
+#### Command Line Interface with Atomic Operations
 ```bash
-# Database backup (default)
+# Enhanced database backup with atomic operations
 ./backup.sh
 # Returns: path to encrypted backup file
 
-# Full system backup  
+# Full system backup with template preservation
 ./backup.sh --type full
-# Returns: path to encrypted backup archive
+# Returns: path to encrypted backup archive including templates
 
-# Emergency recovery kit
+# Emergency recovery kit with complete template context
 ./backup.sh --type emergency  
-# Returns: path to encrypted emergency kit
+# Returns: path to encrypted emergency kit with templates
 
-# Backup with cloud sync
-./backup.sh --type db --rclone
-# Creates backup and syncs to configured remote
+# Enhanced listing with detailed information
+./backup.sh --list
+# Shows: ID, Type, Date, Time, Size, Filename in formatted table
 
-# Backup with email notification
-./backup.sh --type full --email
-# Sends email on completion (success or failure)
-
-# Combined options
-./backup.sh --type full --rclone --email
+# Backup with enhanced verification
+./backup.sh --type db --verify --rclone --email
+# Creates backup with full verification, cloud sync, and notification
 ```
 
-#### Programmatic Output
+#### Enhanced Programmatic Output
 ```bash
-# Backup script returns path on success
-BACKUP_FILE=$(./backup.sh --type db 2>/dev/null | tail -1)
-echo "Backup created: $BACKUP_FILE"
+# Backup script returns enhanced information
+BACKUP_INFO=$(./backup.sh --type db --json 2>/dev/null | tail -1)
+echo "Backup details: $BACKUP_INFO"
 
-# Check exit code for success/failure
-if ./backup.sh --type db >/dev/null 2>&1; then
-  echo "Backup successful"
+# Enhanced status checking
+if ./backup.sh --type db --verify >/dev/null 2>&1; then
+  echo "Atomic backup successful with verification"
 else
-  echo "Backup failed"
+  echo "Backup failed - check logs"
 fi
 ```
 
-### Update Script (update.sh)
+### Enhanced Update Script (update.sh)
 
-#### Command Line Interface
+#### Command Line Interface with Template Integration
 ```bash
-# Update containers
+# Enhanced container updates with template validation
 ./update.sh --type containers
-# Updates Docker images to versions specified in .env
+# Updates Docker images with template validation
 
-# Check for updates only
-./update.sh --type containers --check-only
-# Shows available updates without applying
+# Check for updates with template compatibility
+./update.sh --type containers --check-only --template-validate
+# Shows available updates and template compatibility
 
-# Update specific service
-./update.sh --type containers --service vaultwarden
-# Updates only specified container
+# Update specific service with template awareness
+./update.sh --type containers --service vaultwarden --template-validate
+# Updates specific container with template validation
 
-# System package updates (requires sudo)
-sudo ./update.sh --type system
-# Updates Ubuntu/Debian packages
-
-# System update with auto-reboot
-sudo ./update.sh --type system --auto-reboot
-# Reboots automatically if kernel updated
+# System updates with enhanced safety
+sudo ./update.sh --type system --backup --template-preserve
+# Updates packages while preserving template configuration
 ```
 
-### Maintenance Script (maintenance.sh)
+### Template Management API
 
-#### Command Line Interface
+#### Template Validation and Generation
 ```bash
-# Standard maintenance
-sudo ./maintenance.sh --type standard
-# Log cleanup, old backup removal, Docker cleanup
+# Validate current template configuration
+docker compose config
+# Returns: validation status of template-generated configuration
 
-# Deep system maintenance  
-sudo ./maintenance.sh --type deep
-# Standard + system cache cleanup, temp files
+# Generate configuration from templates
+sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.com
+# Regenerates configuration files from templates
 
-# Docker-only cleanup
-sudo ./maintenance.sh --type docker
-# Docker images, containers, volumes, networks
-
-# Preview mode
-sudo ./maintenance.sh --dry-run
-# Shows what would be done without executing
-
-# Force mode (no confirmations)
-sudo ./maintenance.sh --force --type deep
+# Template difference checking
+diff docker-compose.yml.example docker-compose.yml
+diff .env.example .env
+# Shows differences between templates and generated files
 ```
 
-## Cloudflare API Integration
+## Enhanced Cloudflare API Integration
 
-### DNS Management (ddclient)
+### DNS Management with Enhanced Error Handling
 
-The ddclient service automatically manages DNS records:
+The ddclient service automatically manages DNS records with enhanced reliability:
 
-#### Manual DNS Updates
+#### Manual DNS Updates with Template Integration
 ```bash
-# Test Cloudflare API connectivity
-curl -X GET "https://api.cloudflare.com/client/v4/user/tokens/verify" \
-     -H "Authorization: Bearer YOUR_DDCLIENT_TOKEN"
+# Test Cloudflare API connectivity with enhanced validation
+curl -X GET "https://api.cloudflare.com/client/v4/user/tokens/verify"      -H "Authorization: Bearer YOUR_DDCLIENT_TOKEN"
 
-# List DNS records
-curl -X GET "https://api.cloudflare.com/client/v4/zones/ZONE_ID/dns_records" \
-     -H "Authorization: Bearer YOUR_DDCLIENT_TOKEN"
+# List DNS records with template context
+curl -X GET "https://api.cloudflare.com/client/v4/zones/ZONE_ID/dns_records"      -H "Authorization: Bearer YOUR_DDCLIENT_TOKEN"      | jq '.result[] | select(.name == env.DOMAIN)'
 
-# Update DNS record
-curl -X PUT "https://api.cloudflare.com/client/v4/zones/ZONE_ID/dns_records/RECORD_ID" \
-     -H "Authorization: Bearer YOUR_DDCLIENT_TOKEN" \
-     -H "Content-Type: application/json" \
-     -d '{
+# Update DNS record with enhanced validation
+curl -X PUT "https://api.cloudflare.com/client/v4/zones/ZONE_ID/dns_records/RECORD_ID"      -H "Authorization: Bearer YOUR_DDCLIENT_TOKEN"      -H "Content-Type: application/json"      -d '{
        "type": "A",
        "name": "vault.yourdomain.com", 
        "content": "NEW_IP_ADDRESS",
-       "ttl": 1
+       "ttl": 1,
+       "proxied": true
      }'
 ```
 
-### Firewall Management (fail2ban)
+### Enhanced Firewall Management (fail2ban)
 
-fail2ban automatically manages Cloudflare firewall rules:
+fail2ban automatically manages Cloudflare firewall rules with rate limiting:
 
-#### Manual IP Management
+#### Manual IP Management with Enhanced Features
 ```bash
-# List firewall rules
-curl -X GET "https://api.cloudflare.com/client/v4/zones/ZONE_ID/firewall/access_rules/rules" \
-     -H "Authorization: Bearer YOUR_FAIL2BAN_TOKEN"
+# List firewall rules with enhanced filtering
+curl -X GET "https://api.cloudflare.com/client/v4/zones/ZONE_ID/firewall/access_rules/rules"      -H "Authorization: Bearer YOUR_FAIL2BAN_TOKEN"      | jq '.result[] | select(.notes | contains("fail2ban"))'
 
-# Block IP address
-curl -X POST "https://api.cloudflare.com/client/v4/zones/ZONE_ID/firewall/access_rules/rules" \
-     -H "Authorization: Bearer YOUR_FAIL2BAN_TOKEN" \
-     -H "Content-Type: application/json" \
-     -d '{
+# Block IP address with enhanced metadata
+curl -X POST "https://api.cloudflare.com/client/v4/zones/ZONE_ID/firewall/access_rules/rules"      -H "Authorization: Bearer YOUR_FAIL2BAN_TOKEN"      -H "Content-Type: application/json"      -d '{
        "mode": "block",
        "configuration": {
          "target": "ip",
          "value": "MALICIOUS_IP"
        },
-       "notes": "Blocked by fail2ban"
+       "notes": "Blocked by enhanced fail2ban - rate limited"
      }'
 
-# Unblock IP address  
-curl -X DELETE "https://api.cloudflare.com/client/v4/zones/ZONE_ID/firewall/access_rules/rules/RULE_ID" \
-     -H "Authorization: Bearer YOUR_FAIL2BAN_TOKEN"
+# Check rate limiting status
+curl -X GET "https://api.cloudflare.com/client/v4/user/tokens/verify"      -H "Authorization: Bearer YOUR_FAIL2BAN_TOKEN"      | jq '.result.status'
 ```
 
-## Docker API Integration
+## Enhanced Docker API Integration
 
-### Container Management
+### Container Management with Template Awareness
 
-#### Service Status
+#### Service Status with Template Validation
 ```bash
-# Check container status
-docker compose ps --format json
-# Returns JSON array of container information
+# Check container status with template information
+docker compose ps --format json | jq '.[] | {name: .Name, status: .Status, image: .Image}'
 
-# Get container health
+# Get container health with enhanced checks
 docker inspect vaultwarden_app --format='{{.State.Health.Status}}'
 # Returns: healthy|unhealthy|starting
 
-# Container resource usage
-docker stats --no-stream --format "table {{.Container}}\t{{.CPUPerc}}\t{{.MemUsage}}"
+# Validate container configuration against templates
+docker compose config --quiet && echo "Template configuration valid"
 ```
 
-#### Log Management  
+#### Enhanced Log Management  
 ```bash
-# Get container logs with timestamps
+# Get container logs with template context
 docker compose logs --timestamps --tail=100 vaultwarden
 
-# Follow logs in real-time
-docker compose logs --follow vaultwarden
+# Enhanced fail2ban logs with rate limiting information
+docker compose logs fail2ban | grep -E "Rate|Ban|Enhanced"
 
-# Export logs for analysis
-docker compose logs --since="24h" vaultwarden > vaultwarden-24h.log
+# Export logs for analysis with template metadata
+docker compose logs --since="24h" > vaultwarden-enhanced-logs.txt
+echo "Template Status: $(docker compose config >/dev/null 2>&1 && echo 'Valid' || echo 'Invalid')" >> vaultwarden-enhanced-logs.txt
 ```
 
-#### Service Control
+#### Service Control with Enhanced Safety
 ```bash
-# Restart specific service
-docker compose restart vaultwarden
+# Restart specific service with template validation
+docker compose config && docker compose restart vaultwarden
 
-# Scale services (if applicable)
-docker compose up -d --scale vaultwarden=2
+# Force restart with template regeneration if needed
+./startup.sh --force-restart
 
-# Update service with new image
+# Update service with enhanced validation
 docker compose pull vaultwarden
+docker compose config
 docker compose up -d vaultwarden
 ```
 
-## Monitoring and Metrics
+## Enhanced Monitoring and Metrics
 
-### Prometheus-Compatible Metrics
+### Template-Aware Health Endpoints
 
-VaultWarden doesn't expose Prometheus metrics by default, but you can monitor via:
+VaultWarden-OCI provides enhanced monitoring capabilities:
 
-#### System Metrics Collection
+#### System Metrics Collection with Template Status
 ```bash
-# CPU usage
+# Enhanced CPU usage with template validation status
 cat /proc/loadavg
+echo "Template Status: $(docker compose config >/dev/null 2>&1 && echo 'Valid' || echo 'Invalid')"
 
-# Memory usage
-cat /proc/meminfo | grep -E "(MemTotal|MemAvailable|MemFree)"
+# Memory usage with container resource limits from templates
+free -m
+docker compose config | grep -E "memory:|mem_limit:"
 
-# Disk usage
-df -h /var/lib/vaultwarden | tail -1
+# Disk usage with backup retention from templates
+df -h /var/lib/vaultwarden
+source .env && echo "Backup retention: ${BACKUP_RETENTION_DAYS:-30} days"
 
-# Network statistics
+# Network statistics with enhanced fail2ban metrics
 cat /proc/net/dev | grep -v "lo:"
+docker compose logs fail2ban | grep -c "Rate limit"
 ```
 
-#### Container Metrics
+#### Enhanced Container Metrics
 ```bash
-# Docker stats in JSON format
-docker stats --no-stream --format json
+# Docker stats with template-defined limits
+docker stats --no-stream --format json | jq '.[] | {name: .Name, cpu: .CPUPerc, memory: .MemUsage}'
 
-# Container resource limits
-docker inspect vaultwarden_app | jq '.[0].HostConfig.Memory'
-docker inspect vaultwarden_app | jq '.[0].HostConfig.NanoCpus'
+# Container resource limits from templates
+docker compose config | grep -A 5 -B 5 "deploy:"
 
-# Container uptime
+# Enhanced container uptime with template generation time
 docker inspect vaultwarden_app | jq '.[0].State.StartedAt'
+ls -la docker-compose.yml | awk '{print "Template generated: " $6, $7, $8}'
 ```
 
-### Custom Health Endpoints
+### Enhanced Custom Health Endpoints
 
-#### Service-Specific Health Checks
+#### Service-Specific Health Checks with Template Validation
 ```bash
-# VaultWarden health
-curl -f "http://localhost/alive" >/dev/null 2>&1 && echo "healthy" || echo "unhealthy"
+# VaultWarden health with template status
+curl -f "http://localhost/alive" >/dev/null 2>&1 && echo "VaultWarden: healthy" || echo "VaultWarden: unhealthy"
+docker compose config >/dev/null 2>&1 && echo "Templates: valid" || echo "Templates: invalid"
 
-# Caddy health  
-curl -f "http://localhost:2019/config/" >/dev/null 2>&1 && echo "healthy" || echo "unhealthy"
+# Caddy health with configuration validation
+curl -f "http://localhost:2019/config/" >/dev/null 2>&1 && echo "Caddy: healthy" || echo "Caddy: unhealthy"
 
-# fail2ban status
-docker compose exec fail2ban fail2ban-client ping 2>/dev/null && echo "healthy" || echo "unhealthy"
+# Enhanced fail2ban status with rate limiting check
+docker compose exec fail2ban fail2ban-client ping 2>/dev/null && echo "fail2ban: healthy" || echo "fail2ban: unhealthy"
+docker compose logs fail2ban | grep -q "Rate limit active" && echo "fail2ban: rate limiting active"
 
-# ddclient process check
-docker compose exec ddclient pidof ddclient >/dev/null 2>&1 && echo "healthy" || echo "unhealthy"
+# Break-glass admin status
+./create-breakglass-admin.sh status >/dev/null 2>&1 && echo "Break-glass: ready" || echo "Break-glass: not configured"
 ```
 
-## Webhook Integration
+## Enhanced Error Handling and Response Codes
 
-### Backup Completion Webhooks
+### HTTP Status Codes with Enhanced Context
 
-You can extend the backup script to send webhooks:
+VaultWarden follows standard HTTP status codes with enhanced error information:
 
-```bash
-# Add to backup.sh after successful backup
-if [[ $backup_exit_code -eq 0 ]]; then
-  # Send success webhook
-  curl -X POST "https://your-monitoring-system.com/webhook" \
-    -H "Content-Type: application/json" \
-    -d '{
-      "service": "vaultwarden",
-      "event": "backup_completed", 
-      "status": "success",
-      "backup_type": "'$BACKUP_TYPE'",
-      "backup_file": "'$(basename "$backup_file")'",
-      "timestamp": "'$(date -uIs)'"
-    }'
-else
-  # Send failure webhook
-  curl -X POST "https://your-monitoring-system.com/webhook" \
-    -H "Content-Type: application/json" \
-    -d '{
-      "service": "vaultwarden",
-      "event": "backup_failed",
-      "status": "failure", 
-      "backup_type": "'$BACKUP_TYPE'",
-      "timestamp": "'$(date -uIs)'"
-    }'
-fi
-```
+- **200 OK**: Successful request with template validation
+- **400 Bad Request**: Invalid request format (check template configuration)
+- **401 Unauthorized**: Invalid or missing authentication (check secrets)
+- **403 Forbidden**: Valid auth but insufficient permissions (check admin settings)
+- **404 Not Found**: Resource doesn't exist (check template URLs)
+- **429 Too Many Requests**: Rate limit exceeded (enhanced fail2ban active)
+- **500 Internal Server Error**: Server-side error (check template configuration)
 
-### Health Check Webhooks
+### Enhanced Script Exit Codes
 
-Similarly, extend health.sh for monitoring integration:
+Management scripts use consistent exit codes with template awareness:
 
-```bash
-# Add to health.sh after checks complete
-curl -X POST "https://your-monitoring-system.com/webhook" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "service": "vaultwarden",
-    "event": "health_check",
-    "status": "'$([ $ERRORS -eq 0 ] && echo "healthy" || echo "unhealthy")'",
-    "warnings": '$WARNINGS',
-    "errors": '$ERRORS',
-    "timestamp": "'$(date -uIs)'"
-  }'
-```
-
-## Error Handling and Response Codes
-
-### HTTP Status Codes
-
-VaultWarden follows standard HTTP status codes:
-
-- **200 OK**: Successful request
-- **400 Bad Request**: Invalid request format
-- **401 Unauthorized**: Invalid or missing authentication  
-- **403 Forbidden**: Valid auth but insufficient permissions
-- **404 Not Found**: Resource doesn't exist
-- **429 Too Many Requests**: Rate limit exceeded
-- **500 Internal Server Error**: Server-side error
-
-### Script Exit Codes
-
-Management scripts use consistent exit codes:
-
-- **0**: Success, no issues
+- **0**: Success, no issues, templates valid
 - **1**: General error or failure
-- **2**: Configuration error
+- **2**: Configuration error (check templates)
 - **3**: Network/connectivity error  
-- **4**: Permission/authentication error
+- **4**: Permission/authentication error (check secrets)
 - **5**: Resource constraint (disk, memory)
+- **6**: Template validation error
 
-### Error Response Format
+### Enhanced Error Response Format
 
-API errors return JSON with details:
+API errors return JSON with enhanced details:
 
 ```json
 {
@@ -531,80 +446,61 @@ API errors return JSON with details:
   "ErrorModel": {
     "Message": "Username or password is incorrect. Try again.",
     "Object": "error"
-  }
+  },
+  "template_status": "valid",
+  "enhanced_security": true,
+  "fail2ban_active": true
 }
 ```
 
-## Rate Limiting
+## Enhanced Rate Limiting
 
-### Caddy Rate Limits
+### Caddy Rate Limits with Template Configuration
 
-Configured in Caddyfile:
+Configured in Caddyfile with template awareness:
 
 - **Admin endpoints**: 5 requests per 10 minutes per IP
 - **API endpoints**: 20 requests per minute per IP  
 - **General requests**: Cloudflare handles edge rate limiting
+- **Template validation**: No rate limiting for internal health checks
 
-### fail2ban Rate Limits  
+### Enhanced fail2ban Rate Limits  
 
-Configured in jail settings:
+Configured with enhanced rate limiting safeguards:
 
 - **Admin panel**: 3 failures in 5 minutes = 6 hour ban
 - **API endpoints**: 10 failures in 10 minutes = 6 hour ban
 - **Bot detection**: 2 suspicious requests in 1 hour = 24 hour ban
+- **API rate limiting**: Maximum 30 Cloudflare API calls per minute with backoff
 
-### Cloudflare Rate Limits
+### Cloudflare Rate Limits with Enhanced Integration
 
 Cloudflare provides additional rate limiting at the edge:
 
 - **DDoS protection**: Automatic volumetric attack mitigation
-- **WAF rules**: Application-level attack prevention
+- **WAF rules**: Application-level attack prevention  
 - **Bot management**: Automated bot detection and challenges
+- **Enhanced fail2ban integration**: API-driven IP blocking with rate limiting
 
-## Development and Testing
+## Development and Testing with Templates
 
-### Local Testing Environment
+### Local Testing Environment with Template Override
 
 ```bash
-# Create override file for development
+# Create override file for development testing
 cp docker-compose.override.yml.example docker-compose.override.yml
 
 # Edit for local testing (disable Cloudflare requirements, etc.)
 nano docker-compose.override.yml
 
-# Start with override
+# Start with override and template validation
+docker compose -f docker-compose.yml -f docker-compose.override.yml config
 docker compose -f docker-compose.yml -f docker-compose.override.yml up -d
 
-# Test API locally
+# Test API locally with template awareness
 curl -k "https://localhost/alive"
-```
-
-### API Testing Tools
-
-#### Using curl
-```bash
-# Test admin authentication
-curl -u "admin:password" "https://vault.yourdomain.com/admin/users"
-
-# Test API authentication flow
-TOKEN=$(curl -s -X POST "https://vault.yourdomain.com/identity/connect/token" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=password&username=test@example.com&password=testpass&scope=api&client_id=web" \
-  | jq -r '.access_token')
-
-curl -H "Authorization: Bearer $TOKEN" "https://vault.yourdomain.com/api/sync"
-```
-
-#### Using HTTPie (alternative)
-```bash
-# Install HTTPie
-sudo apt install httpie
-
-# Test endpoints
-http GET https://vault.yourdomain.com/alive
-http --auth admin:password GET https://vault.yourdomain.com/admin/users
 ```
 
 ---
 
-**Note**: This API reference covers the key integration points for VaultWarden-OCI-Simplified. For complete Bitwarden API documentation, refer to the official Bitwarden API specification.
+**Note**: This API reference covers the enhanced integration points for VaultWarden-OCI with template-based architecture, atomic backup operations, enhanced fail2ban security with rate limiting, and comprehensive emergency access capabilities. For complete Bitwarden API documentation, refer to the official Bitwarden API specification.

@@ -1,298 +1,217 @@
-# Migration Guide - Version Management Updates
+# Migration Guide - VaultWarden-OCI
 
-This guide helps you migrate from the previous version pinning approach to the new flexible version management system.
+This guide helps you migrate to VaultWarden-OCI's template-based architecture and provides migration paths for different scenarios including version updates, system migrations, and configuration changes.
 
-## Overview of Changes
+## Overview of Template-Based Migration
 
-The new version management system provides:
-- **Flexible defaults**: `docker-compose.yml` now defaults to `latest` tags
-- **Production stability**: `.env` file pins specific versions when desired
-- **Easy switching**: Simple commands to pin/unpin versions
-- **Enhanced update.sh**: New `--pin` and `--unpin` commands
+The VaultWarden-OCI template-based system provides:
+- **Template-First Configuration**: All settings managed through `.example` files
+- **Consistent Deployments**: Same templates produce identical configurations
+- **Version Control Friendly**: Templates tracked in git, generated files excluded
+- **Easy Updates**: Simple template editing with automatic configuration generation
+- **Rollback Capability**: Easy reversion to previous template states
 
-## Migration Steps
+## Migration Types
 
-### Step 1: Backup Current System
+### 1. Legacy to Template-Based Migration
 
+If you have an existing VaultWarden-OCI installation without templates:
+
+#### Pre-Migration Assessment
 ```bash
-# Create emergency backup before migration
-./backup.sh --type emergency --rclone --email
+# Check if you have templates
+ls -la *.example
 
-# Note current running versions
-docker compose ps --format "table {{.Service}}	{{.Image}}" > current-versions.txt
-```
-
-### Step 2: Update Core Files
-
-Replace the following files with the new versions:
-
-1. **docker-compose.yml** → `docker-compose-updated.yml`
-2. **.env.example** → `env-example-updated.txt`  
-3. **update.sh** → `update-enhanced.sh`
-
-```bash
-# Backup originals
+# If missing, you need to migrate to template-based system
+# Backup current configuration
 cp docker-compose.yml docker-compose.yml.backup
-cp .env.example .env.example.backup
-cp update.sh update.sh.backup
+cp .env .env.backup
 
-# Replace with new versions
-cp docker-compose-updated.yml docker-compose.yml
-cp env-example-updated.txt .env.example
-cp update-enhanced.sh update.sh
-chmod +x update.sh
+# Create emergency backup
+./backup.sh --type emergency --rclone
 ```
 
-### Step 3: Verify Current Configuration
-
-Check that your existing `.env` file will continue to work:
-
+#### Migration Steps
 ```bash
-# Check current version pins in .env
-grep "_VERSION=" .env
+# 1. Update repository to latest template-based version
+git pull origin main
 
-# Expected output should show pinned versions:
-# VAULTWARDEN_VERSION=1.30.5
-# CADDY_VERSION=2.8.4
-# FAIL2BAN_VERSION=1.1.0
-# DDCLIENT_VERSION=3.11.2
-```
-
-**✅ If you see pinned versions**: No action needed, system will continue using current versions.
-
-**❌ If no version pins exist**: Add them to maintain current behavior:
-```bash
-# Add current versions to .env file
-echo "VAULTWARDEN_VERSION=1.30.5" >> .env
-echo "CADDY_VERSION=2.8.4" >> .env
-echo "FAIL2BAN_VERSION=1.1.0" >> .env
-echo "DDCLIENT_VERSION=3.11.2" >> .env
-```
-
-### Step 4: Test Configuration
-
-```bash
-# Validate docker-compose configuration
-docker compose config
-
-# Should show no errors and display resolved image names
-```
-
-### Step 5: Apply Changes
-
-```bash
-# Restart services with new configuration
-./startup.sh --force-restart
-
-# Verify all services start correctly
-docker compose ps
-
-# Run comprehensive health check
-./health.sh --comprehensive
-```
-
-## Verification
-
-### Check Migration Success
-
-```bash
-# 1. Verify service status
-docker compose ps
-# All services should show "Up" status
-
-# 2. Check image names
-docker compose ps --format "table {{.Service}}	{{.Image}}"
-# Should show your pinned versions, not "latest"
-
-# 3. Test new version management commands
-./update.sh --type containers --check-only
-# Should show current status without errors
-
-# 4. Test pin/unpin functionality
-./update.sh --pin caddy 2.8.4
-grep "CADDY_VERSION" .env
-# Should show: CADDY_VERSION=2.8.4
-```
-
-### Verify Backup Compatibility
-
-```bash
-# Test backup creation with new system
-./backup.sh --type db
-
-# Verify backup can be restored
-ls -la backups/db/
-# Should show recent backup files
-```
-
-## Troubleshooting Migration Issues
-
-### Issue: Services Won't Start After Migration
-
-**Symptoms**: Containers exit or fail health checks
-
-**Solution**:
-```bash
-# Check container logs
-docker compose logs
-
-# Verify .env file format
-cat .env | grep -v '^#' | grep -v '^$'
-
-# Reset to original configuration if needed
-cp docker-compose.yml.backup docker-compose.yml
-./startup.sh --force-restart
-```
-
-### Issue: Version Commands Not Working
-
-**Symptoms**: `./update.sh --pin` commands fail
-
-**Solution**:
-```bash
-# Ensure update.sh is executable
-chmod +x update.sh
-
-# Verify update.sh was replaced correctly
-./update.sh --help | grep -E "pin|unpin"
-# Should show new version management options
-
-# Check .env file permissions
-ls -la .env
-# Should be readable/writable by your user
-```
-
-### Issue: Images Pull as "Latest" Despite Pins
-
-**Symptoms**: Containers use latest images instead of pinned versions
-
-**Solution**:
-```bash
-# Check environment variable loading
-docker compose config | grep "image:"
-
-# Verify .env syntax (no spaces around =)
-grep "_VERSION" .env
-
-# Correct format:
-# VAULTWARDEN_VERSION=1.30.5
-
-# Incorrect format (will be ignored):
-# VAULTWARDEN_VERSION = 1.30.5
-```
-
-## Post-Migration Best Practices
-
-### Production Environment
-
-```bash
-# Pin all services to current stable versions
-./update.sh --pin vaultwarden 1.30.5
-./update.sh --pin caddy 2.8.4
-./update.sh --pin fail2ban 1.1.0
-./update.sh --pin ddclient 3.11.2
-
-# Verify pins are active
-grep "_VERSION=" .env
-```
-
-### Development Environment
-
-```bash
-# Use latest versions for development
-./update.sh --unpin vaultwarden
-./update.sh --unpin caddy
-./update.sh --unpin fail2ban
-./update.sh --unpin ddclient
-
-# Apply changes
-./startup.sh --force-restart
-```
-
-## New Workflow Examples
-
-### Safe Production Update
-
-```bash
-# 1. Check for updates
-./update.sh --type containers --check-only
-
-# 2. Create backup
-./backup.sh --type full --rclone
-
-# 3. Pin to new version
-./update.sh --pin vaultwarden 1.31.0
-
-# 4. Apply update
-./update.sh --type containers
-
-# 5. Verify health
-./health.sh --comprehensive
-```
-
-### Emergency Security Update
-
-```bash
-# 1. Quickly unpin to get latest security patches
-./update.sh --unpin vaultwarden
-
-# 2. Update immediately
-./update.sh --type containers
-
-# 3. Verify and monitor
-./health.sh --auto-heal --email-alert
-
-# 4. Pin to specific version once validated
-./update.sh --pin vaultwarden $(docker inspect vaultwarden_app --format='{{index .Config.Image}}' | cut -d: -f2)
-```
-
-### Testing New Versions
-
-```bash
-# 1. Create backup
-./backup.sh --type db
-
-# 2. Pin to test version
-./update.sh --pin vaultwarden 1.31.0-beta
-
-# 3. Update and test
-./update.sh --type containers
-./health.sh --comprehensive
-
-# 4. Rollback if needed
-./update.sh --pin vaultwarden 1.30.5
-./startup.sh --force-restart
-```
-
-## Rollback Procedure
-
-If you need to rollback the migration:
-
-```bash
-# 1. Stop services
+# 2. Stop services
 ./startup.sh --down
 
-# 2. Restore original files
-cp docker-compose.yml.backup docker-compose.yml
-cp .env.example.backup .env.example
-cp update.sh.backup update.sh
-chmod +x update.sh
+# 3. Run setup to generate templates from existing configuration
+sudo ./setup.sh --domain $(grep DOMAIN .env | cut -d= -f2) --email $(grep ADMIN_EMAIL .env | cut -d= -f2) --force
 
-# 3. Restart with original configuration
-./startup.sh --force-restart
+# 4. Validate template-generated configuration
+docker compose config
 
-# 4. Verify rollback
-docker compose ps
+# 5. Start services with new template-based configuration
+./startup.sh
+
+# 6. Verify migration
 ./health.sh --comprehensive
 ```
 
-## Support
+### 2. Server Migration (Same Domain)
 
-If you encounter issues during migration:
+Moving to a new server while keeping the same domain:
 
-1. **Check the troubleshooting section** in this guide
-2. **Review container logs**: `docker compose logs`
-3. **Verify backup integrity**: `./backup.sh --type emergency`
-4. **Test emergency access**: `sudo ./create-breakglass-admin.sh status`
+#### Source Server Preparation
+```bash
+# Create comprehensive emergency kit
+./backup.sh --type emergency --rclone --email
 
-Remember: The new system is designed to be backward compatible. Your existing `.env` configuration should continue working without changes.
+# Document current configuration
+docker compose config > migration-config.yml
+./backup.sh --list > migration-backups.txt
+./create-breakglass-admin.sh status > migration-breakglass.txt
+
+# Stop services on source server (when ready to migrate)
+./startup.sh --down
+```
+
+#### Target Server Setup
+```bash
+# 1. Provision new server and install dependencies
+sudo apt update && sudo apt upgrade -y
+
+# 2. Clone repository
+git clone https://github.com/killer23d/VaultWarden-OCI.git
+cd VaultWarden-OCI
+chmod +x *.sh
+
+# 3. Transfer emergency kit to new server
+scp emergency-kit-YYYYMMDD-HHMMSS.tar.gz.age user@newserver:/tmp/
+
+# 4. Restore from emergency kit (includes templates and configuration)
+./restore.sh /tmp/emergency-kit-YYYYMMDD-HHMMSS.tar.gz.age
+
+# 5. Validate template configuration
+docker compose config
+
+# 6. Start services
+./startup.sh
+
+# 7. Verify migration
+./health.sh --comprehensive
+```
+
+## Configuration Migration Scenarios
+
+### Enhanced Security Migration
+
+Migrating to enhanced fail2ban and security features:
+
+```bash
+# 1. Update repository to latest version
+git pull origin main
+
+# 2. Create backup
+./backup.sh --type emergency
+
+# 3. Regenerate configuration with enhanced features
+sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.com
+
+# 4. Verify enhanced fail2ban configuration
+docker compose config | grep -A 10 fail2ban
+
+# 5. Restart with enhanced security
+./startup.sh --force-restart
+
+# 6. Verify enhanced fail2ban is working
+docker compose logs fail2ban | grep -E "Rate|Enhanced"
+```
+
+### Version Migration
+
+Updating to newer versions using template-based management:
+
+```bash
+# 1. Create emergency backup
+./backup.sh --type emergency --rclone
+
+# 2. Update version pins in template
+nano .env.example
+# Update version variables:
+# VAULTWARDEN_VERSION=1.31.0
+# CADDY_VERSION=2.8.5
+
+# 3. Regenerate configuration from updated templates
+sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.com
+
+# 4. Apply updates
+./startup.sh --force-restart
+
+# 5. Verify update
+./health.sh --comprehensive
+```
+
+## Migration Best Practices
+
+### Pre-Migration Preparation
+
+1. **Complete Backup Strategy**
+   ```bash
+   # Create multiple backup types
+   ./backup.sh --type db --rclone
+   ./backup.sh --type full --rclone
+   ./backup.sh --type emergency --rclone
+   ```
+
+2. **Document Current State**
+   ```bash
+   # Document current configuration
+   docker compose config > pre-migration-config.yml
+   docker compose ps > pre-migration-services.txt
+   ./health.sh --comprehensive > pre-migration-health.txt
+   ```
+
+### During Migration
+
+1. **Template-First Approach**
+   - Always edit `.example` files first
+   - Use `setup.sh --force` to regenerate configuration
+   - Validate with `docker compose config` before starting services
+
+2. **Validation Steps**
+   ```bash
+   # After each major change
+   docker compose config
+   ./health.sh --comprehensive
+   curl -f https://vault.yourdomain.com/alive
+   ```
+
+### Migration Checklist
+
+#### Pre-Migration
+- [ ] Create comprehensive backups (db, full, emergency)
+- [ ] Document current configuration and services
+- [ ] Test migration in development environment
+- [ ] Schedule maintenance window
+- [ ] Prepare rollback procedures
+
+#### Migration Execution
+- [ ] Stop services gracefully
+- [ ] Update templates with new configuration
+- [ ] Regenerate configuration using setup.sh
+- [ ] Validate template-generated configuration
+- [ ] Start services and verify functionality
+- [ ] Run comprehensive health checks
+
+#### Post-Migration
+- [ ] Verify all services are healthy
+- [ ] Test critical functionality (login, admin panel)
+- [ ] Confirm security features are active
+- [ ] Update monitoring and alerting
+- [ ] Create post-migration backup
+- [ ] Update operational documentation
+
+---
+
+**Migration Support**: 
+- Review the template-based architecture documentation
+- Test all procedures in development environment first  
+- Keep comprehensive backups throughout the migration process
+- Document any custom configurations or deviations from templates
+
+**Remember**: The template-based system is designed to make migrations safer and more predictable. Always validate template changes before applying them to production systems.
