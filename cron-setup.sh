@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # cron-setup.sh - Setup automated maintenance tasks for VaultWarden-OCI-NG
 # Modernized for new backup, maintenance, and update scripts.
-# UPDATED: Added dynamic DNS updates to complete ddclient migration
+# UPDATED: Added dynamic DNS updates and Cloudflare IP range updates for security
 
 set -euo pipefail
 
@@ -20,7 +20,7 @@ DRY_RUN=false
 
 show_help() {
     cat << 'EOF'
-VaultWarden-OCI-NG Cron Setup (Modernized with Dynamic DNS)
+VaultWarden-OCI-NG Cron Setup (Enhanced with Security Automation)
 
 USAGE:
     sudo ./cron-setup.sh [OPTIONS]
@@ -38,6 +38,7 @@ EXAMPLES:
 
 AUTOMATED TASKS:
     - Every 15min: Dynamic DNS Updates (replaces ddclient)
+    - Weekly: Cloudflare IP Range Updates (UFW security sync)
     - Daily DB Backups (with rclone sync)
     - Weekly Full Backups (with rclone sync)
     - Daily Health Checks (with email alerts)
@@ -76,7 +77,7 @@ if ! is_root; then
 fi
 
 create_cron_jobs() {
-    log_info "Creating cron jobs configuration with dynamic DNS..."
+    log_info "Creating cron jobs configuration with security automation..."
 
     local real_user; real_user=$(get_real_user)
 
@@ -116,8 +117,11 @@ export -f log_job
 
 # --- Cron Jobs ---
 
-# Dynamic DNS Updates (every 15 minutes) - NEW: Replaces ddclient
+# Dynamic DNS Updates (every 15 minutes) - Replaces ddclient
 */15 * * * * cd $PROJECT_ROOT && log_job "DNS Update" ./update-dns.sh
+
+# Cloudflare IP Range Updates (Sundays at 3:00 AM) - NEW: Security sync
+0 3 * * 0 cd $PROJECT_ROOT && log_job "CF IP Update" sudo ./maintenance.sh --type cf-ranges
 
 # Daily DB Backup (2:00 AM)
 0 2 * * * cd $PROJECT_ROOT && log_job "DB Backup" ./backup.sh --type db --rclone
@@ -125,7 +129,7 @@ export -f log_job
 # Weekly Full Backup (Sunday 4:00 AM)
 0 4 * * 0     cd $PROJECT_ROOT && log_job "Full Backup" ./backup.sh --type full --rclone
 
-# Daily Health Check (6:00 AM) - UPDATED: Added email alerts
+# Daily Health Check (6:00 AM) - Added email alerts
 0 6 * * * cd $PROJECT_ROOT && log_job "Health Check" ./health.sh --comprehensive --email --quiet
 
 # Weekly Standard Maintenance (Sunday 5:00 AM)
@@ -168,6 +172,7 @@ install_cron_jobs() {
     echo ""
     log_info "Complete automation schedule:"
     echo "  • Every 15min: DNS updates (secure, using Docker secrets)"
+    echo "  • Weekly Sun 03:00: Cloudflare IP range updates (UFW security sync)"
     echo "  • Daily 02:00: Database backup + rclone sync"
     echo "  • Daily 06:00: Health check + email alerts"
     echo "  • Weekly Sun 04:00: Full backup + rclone sync"
@@ -198,7 +203,7 @@ remove_cron_jobs() {
 }
 
 main() {
-    log_info "VaultWarden-OCI-NG Cron Setup (Modernized with Dynamic DNS)"
+    log_info "VaultWarden-OCI-NG Cron Setup (Enhanced with Security Automation)"
 
     if [[ "$DRY_RUN" == "true" ]]; then
         log_warn "DRY RUN MODE - No changes will be made"
