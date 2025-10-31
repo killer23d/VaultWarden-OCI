@@ -277,113 +277,65 @@ setup_firewall() {
     log_success "Firewall configured and enabled"
 }
 
+# Template-based environment file creation
 create_env_file() {
     log_info "Creating environment configuration file (.env)..."
-    local env_file="$PROJECT_ROOT/.env"
     
     if [[ "$DRY_RUN" == "true" ]]; then 
-        log_info " Would create/update .env file"
+        log_info " Would create .env from template"
         return 0
     fi
+    
+    local env_file="$PROJECT_ROOT/.env"
+    local env_template="$PROJECT_ROOT/.env.example"
     
     if [[ -f "$env_file" ]] && [[ "$FORCE" != "true" ]]; then
         log_info ".env file already exists, skipping creation."
         return 0
     fi
     
+    if [[ ! -f "$env_template" ]]; then
+        log_error ".env.example template not found"
+        return 1
+    fi
+    
+    # Copy template
+    cp "$env_template" "$env_file"
+    
     local real_user; real_user=$(get_real_user)
     local real_group; real_group=$(id -g -n $real_user)
-
-    # Create .env file with caddy-cloudflare configuration
-    cat > "$env_file" << EOF
-# VaultWarden-OCI Configuration - Enhanced for Caddy-Cloudflare
-# Generated on $(date)
-
-# === Core Configuration ===
-DOMAIN=$DOMAIN
-ADMIN_EMAIL=$ADMIN_EMAIL
-TZ=UTC
-COMPOSE_PROJECT_NAME=vaultwarden
-
-# === User/Group Configuration ===
-PUID=$(id -u $real_user)
-PGID=$(id -g $real_user)
-
-# === Project Paths ===
-PROJECT_STATE_DIR=/var/lib/vaultwarden
-
-# === Container Versions (Pin for production stability) ===
-EOF
-
-    if [[ "$USE_LATEST" == "true" ]]; then
-        cat >> "$env_file" << EOF
-# Using latest versions (development mode)
-#VAULTWARDEN_VERSION=latest
-#CADDY_VERSION=latest  
-#FAIL2BAN_VERSION=latest
-EOF
+    
+    # Populate template values using sed
+    sed -i "s/DOMAIN=.*/DOMAIN=$DOMAIN/" "$env_file"
+    sed -i "s/ADMIN_EMAIL=.*/ADMIN_EMAIL=$ADMIN_EMAIL/" "$env_file" 
+    sed -i "s/PUID=.*/PUID=$(id -u $real_user)/" "$env_file"
+    sed -i "s/PGID=.*/PGID=$(id -g $real_user)/" "$env_file"
+    
+    # Update SMTP_FROM with actual domain
+    sed -i "s/SMTP_FROM=.*/SMTP_FROM=noreply@$DOMAIN/" "$env_file"
+    
+    # Set version pins if not using latest
+    if [[ "$USE_LATEST" != "true" ]]; then
+        sed -i 's/#\(VAULTWARDEN_VERSION=.*\)/\1/' "$env_file"
+        sed -i 's/#\(CADDY_VERSION=.*\)/\1/' "$env_file"
+        sed -i 's/#\(FAIL2BAN_VERSION=.*\)/\1/' "$env_file"
+        log_info "Enabled pinned container versions for production stability"
     else
-        cat >> "$env_file" << EOF
-# Pinned versions (production recommended)
-VAULTWARDEN_VERSION=1.31.0
-CADDY_VERSION=2.8.4
-FAIL2BAN_VERSION=1.1.0
-EOF
+        log_info "Using latest container versions (development mode)"
     fi
-
-    cat >> "$env_file" << EOF
-
-# === VaultWarden Configuration ===
-SIGNUPS_ALLOWED=false
-INVITATIONS_ALLOWED=true
-EMERGENCY_ACCESS_ALLOWED=true
-SENDS_ALLOWED=true
-WEB_VAULT_ENABLED=true
-WEBSOCKET_ENABLED=false
-PUSH_ENABLED=false
-
-# === SMTP Configuration (Optional) ===
-SMTP_HOST=
-SMTP_PORT=587
-SMTP_SECURITY=starttls
-SMTP_USERNAME=
-SMTP_FROM=noreply@$DOMAIN
-SMTP_FROM_NAME=VaultWarden
-
-# === Cloudflare Configuration (REQUIRED) ===
-CLOUDFLARE_ZONE_ID=your_zone_id_here
-
-# === Resource Limits (Tuned for 1 OCPU, 6GB RAM OCI Flex) ===
-VAULTWARDEN_CPU_LIMIT=0.7
-VAULTWARDEN_MEMORY_LIMIT=1.5g
-VAULTWARDEN_CPU_RESERVATION=0.2
-VAULTWARDEN_MEMORY_RESERVATION=256m
-
-CADDY_CPU_LIMIT=0.2
-CADDY_MEMORY_LIMIT=256m
-CADDY_CPU_RESERVATION=0.1
-CADDY_MEMORY_RESERVATION=64m
-
-FAIL2BAN_CPU_LIMIT=0.1
-FAIL2BAN_MEMORY_LIMIT=128m
-FAIL2BAN_CPU_RESERVATION=0.05
-FAIL2BAN_MEMORY_RESERVATION=64m
-
-# === Backup Configuration ===
-DB_BACKUP_RETENTION_DAYS=14
-FULL_BACKUP_RETENTION_DAYS=30
-EMERGENCY_BACKUP_RETENTION_DAYS=90
-BACKUP_VERIFICATION_MODE=quick_check
-RCLONE_REMOTE_NAME=CHANGE_ME
-
-# === SSH Configuration ===
-SSH_PORT=22
-EOF
-
+    
     chown "$real_user:$real_group" "$env_file"
     chmod 644 "$env_file"
     
-    log_success "Environment configuration file created: $env_file"
+    log_success "Environment file created from template: $env_file"
+    
+    # Show what needs manual configuration
+    log_warn "MANUAL CONFIGURATION REQUIRED:"
+    log_info "  1. Edit .env and set CLOUDFLARE_ZONE_ID"
+    log_info "  2. Configure SMTP settings if using email notifications"
+    log_info "  3. Update RCLONE_REMOTE_NAME if using offsite backups"
+    
+    return 0
 }
 
 setup_directories() {
@@ -560,295 +512,52 @@ EOF
     return 0
 }
 
-create_caddy_config() {
-    log_info "Creating Caddy configuration..."
-    
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info " Would create Caddy configuration files"
-        return 0
-    fi
-    
-    local real_user; real_user=$(get_real_user)
-    local real_group; real_group=$(id -g -n $real_user)
-
-    # Create enhanced Caddyfile for caddy-cloudflare
-    cat > "caddy/Caddyfile" << 'EOF'
-# Enhanced Caddyfile for CaddyBuilds/caddy-cloudflare with automatic IP management
-{
-    # Global ACME DNS configuration
-    # Caddy automatically uses the CLOUDFLARE_API_TOKEN_FILE env var
-    # (set in docker-compose.yml) when this directive is present.
-    acme_dns cloudflare
-    
-    # Global server configuration with automatic Cloudflare IP management
-    servers {
-        # Trust Cloudflare IPs automatically (updated by caddy-cloudflare-ip module)
-        trusted_proxies cloudflare
-        # Use the correct Cloudflare connecting IP header
-        client_ip_headers Cf-Connecting-Ip X-Forwarded-For
-    }
-}
-
-{$DOMAIN} {
-    log {
-        output file /logs/access.log {
-            roll_size 10MB
-            roll_keep 5
-        }
-        format json
-    }
-
-    # Enhanced security headers
-    header {
-        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-        X-Content-Type-Options "nosniff"
-        X-Frame-Options "DENY"
-        X-XSS-Protection "1; mode=block"
-        Referrer-Policy "strict-origin-when-cross-origin"
-        Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: https:; frame-src 'self'; object-src 'none'; base-uri 'self';"
-        -Server
-    }
-
-    # Admin panel protection with bcrypt basic auth
-    @admin path /admin*
-    handle @admin {
-        header {
-            Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: https:; frame-src 'self'; object-src 'none'; base-uri 'self';"
-        }
-        
-        basic_auth {
-            admin {file /run/secrets/admin_basic_auth_hash}
-        }
-
-        reverse_proxy vaultwarden_app:80 {
-            header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
-            header_up X-Forwarded-For {http.request.header.Cf-Connecting-Ip}
-        }
-    }
-
-    # Main application with enhanced IP handling
-    handle {
-        @malicious_ua header User-Agent *sqlmap* *nikto* *nmap* *acunetix*
-        respond @malicious_ua 403
-
-        # WebSocket support for live sync (uncomment if WEBSOCKET_ENABLED=true in .env)
-        # reverse_proxy /notifications/hub* vaultwarden_app:3012
-
-        reverse_proxy vaultwarden_app:80 {
-            header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
-            header_up X-Forwarded-For {http.request.header.Cf-Connecting-Ip}
-        }
-    }
-}
-
-# Redirect www subdomain
-www.{$DOMAIN} {
-    redir https://{$DOMAIN}{uri} 301
-}
-
-# Security catch-all
-:80, :443 {
-    respond "Not Found" 404
-}
-EOF
-
-    chown "$real_user:$real_group" "caddy/Caddyfile"
-    
-    log_success "Caddy configuration created."
-    return 0
-}
-
+# Template-based docker compose creation
 create_docker_compose() {
-    log_info "Creating Docker Compose configuration..."
+    log_info "Setting up Docker Compose configuration..."
     
     if [[ "$DRY_RUN" == "true" ]]; then
-        log_info " Would create docker-compose.yml"
+        log_info " Would copy and validate docker-compose.yml from template"
         return 0
     fi
     
+    local compose_file="$PROJECT_ROOT/docker-compose.yml"
+    local compose_template="$PROJECT_ROOT/docker-compose.yml.example"
+    
+    if [[ -f "$compose_file" ]] && [[ "$FORCE" != "true" ]]; then
+        log_info "docker-compose.yml already exists, skipping creation."
+        # Still validate existing file
+        if docker compose config >/dev/null 2>&1; then
+            log_success "Existing docker-compose.yml validated successfully"
+        else
+            log_warn "Existing docker-compose.yml has validation issues"
+        fi
+        return 0
+    fi
+    
+    if [[ ! -f "$compose_template" ]]; then
+        log_error "docker-compose.yml.example template not found"
+        return 1
+    fi
+    
+    # Copy template
+    cp "$compose_template" "$compose_file"
+    
     local real_user; real_user=$(get_real_user)
     local real_group; real_group=$(id -g -n $real_user)
-
-    # Create enhanced docker-compose.yml with caddy-cloudflare
-    cat > "docker-compose.yml" << 'EOF'
-# VaultWarden-OCI Docker Compose - Enhanced with Caddy-Cloudflare
-services:
-  # VaultWarden Password Manager
-  vaultwarden:
-    image: vaultwarden/server:${VAULTWARDEN_VERSION:-latest}
-    container_name: vaultwarden_app
-    restart: unless-stopped
-    user: "${PUID:-1000}:${PGID:-1000}"
-    environment:
-      DOMAIN: "https://${DOMAIN}"
-      ROCKET_PORT: 80
-      ROCKET_ADDRESS: 0.0.0.0
-      ADMIN_TOKEN_FILE: "/run/secrets/admin_token"
-      SMTP_HOST: "${SMTP_HOST:-}"
-      SMTP_FROM: "${SMTP_FROM:-noreply@${DOMAIN}}"
-      SMTP_FROM_NAME: "${SMTP_FROM_NAME:-VaultWarden}"
-      SMTP_PORT: "${SMTP_PORT:-587}"
-      SMTP_SECURITY: "${SMTP_SECURITY:-starttls}"
-      SMTP_USERNAME: "${SMTP_USERNAME:-}"
-      SMTP_PASSWORD_FILE: "/run/secrets/smtp_password"
-      PUSH_ENABLED: "${PUSH_ENABLED:-false}"
-      PUSH_INSTALLATION_ID_FILE: "/run/secrets/push_installation_id"
-      PUSH_INSTALLATION_KEY_FILE: "/run/secrets/push_installation_key"
-      SIGNUPS_ALLOWED: "${SIGNUPS_ALLOWED:-false}"
-      INVITATIONS_ALLOWED: "${INVITATIONS_ALLOWED:-true}"
-      EMERGENCY_ACCESS_ALLOWED: "${EMERGENCY_ACCESS_ALLOWED:-true}"
-      SENDS_ALLOWED: "${SENDS_ALLOWED:-true}"
-      WEB_VAULT_ENABLED: "${WEB_VAULT_ENABLED:-true}"
-      DATABASE_MAX_CONNS: 10
-      ROCKET_WORKERS: 10
-      WEBSOCKET_ENABLED: "${WEBSOCKET_ENABLED:-false}"
-      WEBSOCKET_ADDRESS: "0.0.0.0" 
-      WEBSOCKET_PORT: 3012
-      LOG_LEVEL: info
-      EXTENDED_LOGGING: true
-      LOG_FILE: "/data/vaultwarden.log"
-      TZ: "${TZ:-UTC}"
-    volumes:
-      - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data:/data"
-      - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/vaultwarden:/logs"
-    secrets:
-      - admin_token
-      - smtp_password
-      - push_installation_id
-      - push_installation_key
-    networks:
-      - vaultwarden_network
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost/alive"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-    deploy:
-      resources:
-        limits:
-          cpus: '${VAULTWARDEN_CPU_LIMIT:-0.7}'
-          memory: '${VAULTWARDEN_MEMORY_LIMIT:-1.5g}'
-        reservations:
-          cpus: '${VAULTWARDEN_CPU_RESERVATION:-0.2}'
-          memory: '${VAULTWARDEN_MEMORY_RESERVATION:-256m}'
-
-  # Caddy Reverse Proxy with Cloudflare Integration
-  caddy:
-    image: ghcr.io/caddybuilds/caddy-cloudflare:${CADDY_VERSION:-latest}
-    container_name: vaultwarden_caddy
-    restart: unless-stopped
-    user: "${PUID:-1000}:${PGID:-1000}"
-    environment:
-      DOMAIN: "${DOMAIN}"
-      EMAIL: "${ADMIN_EMAIL}"
-      # Use file-based secret for DNS API token
-      CLOUDFLARE_API_TOKEN_FILE: "/run/secrets/caddy_cloudflare_dns_token"
-    ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp"
-    volumes:
-      - "./caddy/Caddyfile:/etc/caddy/Caddyfile:ro"
-      - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/data:/data"
-      - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/config:/config"
-      - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy:/logs"
-    secrets:
-      - admin_basic_auth_hash
-      - caddy_cloudflare_dns_token
-    networks:
-      - vaultwarden_network
-    depends_on:
-      vaultwarden:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "caddy", "list-certificates"]
-      interval: 1m
-      timeout: 15s
-      retries: 5
-      start_period: 1m
-    deploy:
-      resources:
-        limits:
-          cpus: '${CADDY_CPU_LIMIT:-0.2}'
-          memory: '${CADDY_MEMORY_LIMIT:-256m}'
-        reservations:
-          cpus: '${CADDY_CPU_RESERVATION:-0.1}'
-          memory: '${CADDY_MEMORY_RESERVATION:-64m}'
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-
-  # Fail2Ban Intrusion Prevention
-  fail2ban:
-    image: crazymax/fail2ban:${FAIL2BAN_VERSION:-latest}
-    platform: linux/arm64
-    container_name: vaultwarden_fail2ban
-    restart: unless-stopped
-    environment:
-      F2B_LOG_LEVEL: INFO
-      F2B_LOG_TARGET: /data/fail2ban.log
-      TZ: "${TZ:-UTC}"
-      CLOUDFLARE_ZONE_ID: "${CLOUDFLARE_ZONE_ID}"
-    volumes:
-      - "./fail2ban/jail.d:/etc/fail2ban/jail.d:ro"
-      - "./fail2ban/filter.d:/etc/fail2ban/filter.d:ro"
-      - "./fail2ban/action.d:/etc/fail2ban/action.d:ro"
-      - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/fail2ban:/data"
-      - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy:/var/log/caddy:ro"
-      - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/fail2ban:/var/log"
-    secrets:
-      - fail2ban_cloudflare_firewall_token
-    networks:
-      - vaultwarden_network
-    healthcheck:
-      test: ["CMD", "fail2ban-client", "status"]
-      interval: 1m
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-    deploy:
-      resources:
-        limits:
-          cpus: '${FAIL2BAN_CPU_LIMIT:-0.1}'
-          memory: '${FAIL2BAN_MEMORY_LIMIT:-128m}'
-        reservations:
-          cpus: '${FAIL2BAN_CPU_RESERVATION:-0.05}'
-          memory: '${FAIL2BAN_MEMORY_RESERVATION:-64m}'
-    cap_add:
-      - NET_ADMIN
-      - NET_RAW
-
-secrets:
-  admin_token:
-    file: ./secrets/.docker_secrets/admin_token
-  admin_basic_auth_hash:
-    file: ./secrets/.docker_secrets/admin_basic_auth_hash
-  smtp_password:
-    file: ./secrets/.docker_secrets/smtp_password
-  push_installation_id:
-    file: ./secrets/.docker_secrets/push_installation_id
-  push_installation_key:
-    file: ./secrets/.docker_secrets/push_installation_key
-  caddy_cloudflare_dns_token:
-    file: ./secrets/.docker_secrets/caddy_cloudflare_dns_token
-  fail2ban_cloudflare_firewall_token:
-    file: ./secrets/.docker_secrets/fail2ban_cloudflare_firewall_token
-
-networks:
-  vaultwarden_network:
-    driver: bridge
-    name: ${COMPOSE_PROJECT_NAME:-vaultwarden}_vaultwarden_network
-    ipam:
-      config:
-        - subnet: 172.20.0.0/16
-EOF
-
-    chown "$real_user:$real_group" "docker-compose.yml"
     
-    log_success "Docker Compose configuration created."
+    chown "$real_user:$real_group" "$compose_file"
+    chmod 644 "$compose_file"
+    
+    # Validate the compose file
+    if docker compose config >/dev/null 2>&1; then
+        log_success "Docker Compose configuration created and validated"
+    else
+        log_error "Docker Compose configuration has validation errors"
+        log_info "Check syntax with: docker compose config"
+        return 1
+    fi
+    
     return 0
 }
 
