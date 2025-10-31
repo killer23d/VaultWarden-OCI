@@ -150,6 +150,7 @@ services:
       - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy:/var/log/caddy:ro"
       # Note: /var/log volume kept for compatibility but fail2ban logs to stdout now
       - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/fail2ban:/var/log"
+      - "/var/log/auth.log:/var/log/auth.log:ro"
     secrets:
       - fail2ban_cloudflare_firewall_token
     networks:
