@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # maintenance.sh - System maintenance and cleanup with library integration
 # UPDATED: Removed redundant log rotation functions - Docker json-file driver handles rotation now
-# SIMPLIFIED: Focus on Docker cleanup, backup retention, and system maintenance only
+# ENHANCED: Added Cloudflare IP range updates for UFW security synchronization
+# SIMPLIFIED: Focus on Docker cleanup, backup retention, system maintenance, and security
 
 set -euo pipefail
 
@@ -19,35 +20,37 @@ source "lib/crypto.sh" # Needed for checking age key if encrypting backups
 # --- Configuration ---
 DRY_RUN=false
 FORCE=false
-CLEANUP_TYPE="standard"  # standard, deep, docker
+CLEANUP_TYPE="standard"  # standard, deep, docker, cf-ranges
 
 # --- Help ---
 show_help() {
     cat << 'EOF'
-VaultWarden System Maintenance - Streamlined for Docker Log Rotation
+VaultWarden System Maintenance - Enhanced with Security Automation
 
 USAGE:
     sudo ./maintenance.sh [OPTIONS]
 
 OPTIONS:
-    --type TYPE    Cleanup type: standard, deep, docker (default: standard)
+    --type TYPE    Cleanup type: standard, deep, docker, cf-ranges (default: standard)
     --force        Skip confirmation prompts
     --dry-run      Show what would be done without executing
     --help         Show this help
 
 CLEANUP TYPES:
-    standard    Docker cleanup, old local & remote backups, system basics
-    deep        Standard + system cache, temp files, package cache
-    docker      Docker-specific cleanup (images, volumes, networks)
+    standard     Docker cleanup, old local & remote backups, system basics
+    deep         Standard + system cache, temp files, package cache
+    docker       Docker-specific cleanup (images, volumes, networks)
+    cf-ranges    Update UFW Cloudflare IP ranges (security sync)
 
 NOTE: Log rotation is now handled automatically by Docker json-file driver.
       VaultWarden and Fail2ban log to stdout, Caddy rotates its own access.log.
 
 EXAMPLES:
-    sudo ./maintenance.sh              # Standard maintenance
-    sudo ./maintenance.sh --type deep  # Deep system cleanup
-    sudo ./maintenance.sh --type docker # Docker cleanup only
-    sudo ./maintenance.sh --dry-run    # Preview actions
+    sudo ./maintenance.sh                   # Standard maintenance
+    sudo ./maintenance.sh --type deep       # Deep system cleanup
+    sudo ./maintenance.sh --type docker     # Docker cleanup only
+    sudo ./maintenance.sh --type cf-ranges  # Update Cloudflare IP ranges
+    sudo ./maintenance.sh --dry-run         # Preview actions
 EOF
 }
 
@@ -74,8 +77,84 @@ validate_environment() {
     if [[ "$CLEANUP_TYPE" == "standard" || "$CLEANUP_TYPE" == "deep" ]]; then
         require_commands rclone || return 1
     fi
+    # Need ufw for CF range updates
+    if [[ "$CLEANUP_TYPE" == "cf-ranges" ]]; then
+        require_commands ufw curl || return 1
+    fi
 
     return 0
+}
+
+# --- NEW: Cloudflare IP Range Updates ---
+update_ufw_cloudflare_ranges() {
+    log_info "Updating UFW Cloudflare IP ranges..."
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would update UFW Cloudflare IP ranges"
+        log_info "[DRY RUN] Would remove old CF-IPv4 and CF-IPv6 rules"
+        log_info "[DRY RUN] Would fetch fresh ranges from Cloudflare API"
+        log_info "[DRY RUN] Would apply new UFW rules for HTTP/HTTPS traffic"
+        return 0
+    fi
+
+    # Remove old CF rules (cleanup)
+    log_info "Removing old Cloudflare UFW rules..."
+    local old_rules
+    old_rules=$(ufw status numbered 2>/dev/null | grep -E "(CF-IPv4|CF-IPv6|CF-Setup|CF-Auto|CF-Only|CF-HTTP)" | awk '{print $1}' | tac)
+    if [[ -n "$old_rules" ]]; then
+        echo "$old_rules" | while read -r rule_num; do
+            echo "y" | ufw delete "$rule_num" >/dev/null 2>&1 || true
+        done
+        log_info "Removed old Cloudflare rules"
+    fi
+
+    # Fetch and apply new ranges
+    local cf_ipv4_file="/tmp/cf_ipv4_update.txt"
+    local cf_ipv6_file="/tmp/cf_ipv6_update.txt"
+    local ranges_updated=false
+
+    # Fetch IPv4 ranges
+    if curl -sf --max-time 10 "https://www.cloudflare.com/ips-v4" -o "$cf_ipv4_file"; then
+        log_info "Applying IPv4 Cloudflare ranges..."
+        local ipv4_count=0
+        while IFS= read -r range; do
+            if [[ -n "$range" ]]; then
+                ufw allow from "$range" to any port 80,443 comment "CF-IPv4" >/dev/null
+                ((ipv4_count++))
+            fi
+        done < "$cf_ipv4_file"
+        log_success "Applied $ipv4_count IPv4 Cloudflare ranges"
+        ranges_updated=true
+        rm -f "$cf_ipv4_file"
+    else
+        log_error "Failed to fetch Cloudflare IPv4 ranges"
+    fi
+
+    # Fetch IPv6 ranges  
+    if curl -sf --max-time 10 "https://www.cloudflare.com/ips-v6" -o "$cf_ipv6_file"; then
+        log_info "Applying IPv6 Cloudflare ranges..."
+        local ipv6_count=0
+        while IFS= read -r range; do
+            if [[ -n "$range" ]]; then
+                ufw allow from "$range" to any port 80,443 comment "CF-IPv6" >/dev/null
+                ((ipv6_count++))
+            fi
+        done < "$cf_ipv6_file"
+        log_success "Applied $ipv6_count IPv6 Cloudflare ranges"
+        ranges_updated=true
+        rm -f "$cf_ipv6_file"
+    else
+        log_error "Failed to fetch Cloudflare IPv6 ranges"
+    fi
+
+    if [[ "$ranges_updated" == "true" ]]; then
+        log_success "UFW Cloudflare IP ranges updated successfully"
+        log_info "UFW now blocks direct IP access, forcing traffic through Cloudflare"
+        return 0
+    else
+        log_error "Failed to update any Cloudflare IP ranges"
+        return 1
+    fi
 }
 
 # --- Docker Cleanup ---
@@ -386,15 +465,17 @@ show_disk_usage() {
 
 # --- Main Execution ---
 main() {
-    log_info "VaultWarden System Maintenance - Streamlined for Docker Logging"
+    log_info "VaultWarden System Maintenance - Enhanced with Security Automation"
 
     validate_environment || exit 1
 
     # Load configuration using library function
     load_env_file 2>/dev/null || log_warn "No .env file found"
 
-    # Show current disk usage
-    show_disk_usage
+    # Show current disk usage (except for cf-ranges which is focused)
+    if [[ "$CLEANUP_TYPE" != "cf-ranges" ]]; then
+        show_disk_usage
+    fi
 
     # Confirm maintenance operation
     if [[ "$FORCE" == "false" && "$DRY_RUN" == "false" ]]; then
@@ -427,9 +508,12 @@ main() {
         "docker")
             cleanup_docker || exit_code=1
             ;;
+        "cf-ranges")
+            update_ufw_cloudflare_ranges || exit_code=1
+            ;;
         *)
             log_error "Unknown cleanup type: $CLEANUP_TYPE"
-            log_info "Valid types: standard, deep, docker"
+            log_info "Valid types: standard, deep, docker, cf-ranges"
             exit 1
             ;;
     esac
@@ -441,15 +525,21 @@ main() {
       log_error "Maintenance completed with errors."
     fi
 
-    # Show updated disk usage
-    echo ""
-    show_disk_usage
+    # Show updated disk usage (except for cf-ranges)
+    if [[ "$CLEANUP_TYPE" != "cf-ranges" ]]; then
+        echo ""
+        show_disk_usage
+    fi
 
     echo ""
     log_info "Maintenance summary:"
     echo "  Type: $CLEANUP_TYPE"
     echo "  Completed: $(date)"
-    echo "  Log rotation: Handled by Docker json-file driver"
+    if [[ "$CLEANUP_TYPE" == "cf-ranges" ]]; then
+        echo "  Security: UFW Cloudflare IP ranges synchronized"
+    else
+        echo "  Log rotation: Handled by Docker json-file driver"
+    fi
     if [[ "$DRY_RUN" == "true" ]]; then
         echo "  Mode: Dry run (no changes made)"
     fi
