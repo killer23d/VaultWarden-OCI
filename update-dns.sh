@@ -39,10 +39,19 @@ get_cf_token() {
 main() {
     log_info "Checking if DNS update needed for $DOMAIN..."
 
-    # Get current external IP
+    # Get current external IP with enhanced error handling
     local current_ip
-    if ! current_ip=$(curl -s --max-time 10 https://api64.ipify.org 2>/dev/null); then
+    if ! current_ip=$(curl -s --max-time 10 https://checkip.amazonaws.com 2>/dev/null) || [[ -z "$current_ip" ]]; then
         log_error "Cannot determine current external IP"
+        exit 1
+    fi
+    
+    # Remove any trailing whitespace/newlines
+    current_ip=$(echo "$current_ip" | tr -d '\n\r ')
+
+    # Validate IP format
+    if [[ ! "$current_ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        log_error "Invalid IP format received: $current_ip"
         exit 1
     fi
 
@@ -51,6 +60,12 @@ main() {
     if ! dns_ip=$(dig +short "$DOMAIN" @1.1.1.1 2>/dev/null | head -1); then
         log_error "Cannot resolve current DNS record for $DOMAIN"
         exit 1
+    fi
+
+    # Handle empty DNS response
+    if [[ -z "$dns_ip" ]]; then
+        log_warn "No DNS record found for $DOMAIN, proceeding with update"
+        dns_ip="(none)"
     fi
 
     # Compare IPs
@@ -94,7 +109,13 @@ main() {
         local admin_email
         admin_email=$(get_config_value "ADMIN_EMAIL" "")
         if [[ -n "$admin_email" ]] && has_command mail; then
-            send_notification_email "VaultWarden IP Address Changed" "Your VaultWarden public IP changed:\n\nOld IP: $dns_ip\nNew IP: $current_ip\nDomain: $DOMAIN\n\nDNS record updated automatically."
+            send_notification_email "VaultWarden IP Address Changed" "Your VaultWarden public IP changed:
+
+Old IP: $dns_ip
+New IP: $current_ip
+Domain: $DOMAIN
+
+DNS record updated automatically."
         fi
     else
         log_error "DNS update failed: $response"
