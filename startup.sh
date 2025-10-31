@@ -2,6 +2,7 @@
 # startup.sh - Enhanced VaultWarden stack orchestration
 # FIXED: Creates ALL required secret files for caddy-cloudflare
 # ENHANCED: Production hardening with strict mode and better error handling
+# ADDED: DNS update integration for dynamic IP environments
 
 set -euo pipefail
 
@@ -13,7 +14,7 @@ PROJECT_ROOT="$SCRIPT_DIR"
 cleanup_secrets() {
     local exit_code=${?:-0}
     local cleanup_reason="${1:-exit}"
-    
+
     # Only clean up on successful completion (exit code 0) or explicit --down
     if [[ $exit_code -eq 0 && "${STARTUP_SUCCESS:-false}" == "true" ]] || [[ "$cleanup_reason" == "stop" ]]; then
         rm -rf "$PROJECT_ROOT/secrets/.docker_secrets" 2>/dev/null || true
@@ -32,15 +33,15 @@ fix_secrets_ownership() {
     local docker_secrets_dir="secrets/.docker_secrets"
     local current_user
     current_user=$(get_real_user)
-    
+
     if [[ -d "$docker_secrets_dir" ]]; then
         # Check if directory is owned by current user
         local owner
         owner=$(stat -c '%U' "$docker_secrets_dir" 2>/dev/null || echo "unknown")
-        
+
         if [[ "$owner" != "$current_user" ]]; then
             log_warn "Fixing ownership of secrets directory (currently owned by $owner)"
-            
+
             if [[ "$owner" == "root" ]] && [[ "$current_user" != "root" ]]; then
                 # Need sudo to fix root-owned files
                 if sudo chown -R "$current_user:$(id -gn $current_user)" "$docker_secrets_dir" 2>/dev/null; then
@@ -77,6 +78,7 @@ SKIP_HEALTH=false
 STOP_MODE=false
 STRICT_SECRETS=false
 STARTUP_SUCCESS=false
+UPDATE_DNS=true  # NEW: DNS update flag
 
 # --- Help ---
 show_help() {
@@ -93,12 +95,14 @@ OPTIONS:
     --skip-health       Skip post-startup health check
     --down              Stop and remove all containers
     --strict-secrets    Fail immediately if critical secrets are missing (production mode)
+    --skip-dns          Skip DNS update before starting services
 
 EXAMPLES:
-    ./startup.sh                    # Normal startup
+    ./startup.sh                    # Normal startup with DNS update
     ./startup.sh --force-restart    # Force recreate containers (use after edit-secrets.sh)
     ./startup.sh --down             # Stop all services
     ./startup.sh --strict-secrets   # Production startup with strict validation
+    ./startup.sh --skip-dns         # Start without DNS update
 
 IMPORTANT:
     After editing secrets (./edit-secrets.sh), always use --force-restart to ensure
@@ -115,9 +119,37 @@ while [[ $# -gt 0 ]]; do
         --skip-health) SKIP_HEALTH=true; shift ;;
         --down) STOP_MODE=true; shift ;;
         --strict-secrets) STRICT_SECRETS=true; shift ;;
+        --skip-dns) UPDATE_DNS=false; shift ;;  # NEW: DNS skip option
         *) log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done
+
+# --- NEW: DNS Update Function ---
+update_dns_if_needed() {
+    if [[ "$UPDATE_DNS" != "true" ]]; then
+        log_info "Skipping DNS update (--skip-dns specified)"
+        return 0
+    fi
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would update DNS record to current IP"
+        return 0
+    fi
+
+    if [[ -f "./update-dns.sh" ]]; then
+        log_info "Updating DNS record to current IP..."
+        if ./update-dns.sh; then
+            log_success "DNS update completed successfully"
+        else
+            log_warn "DNS update failed, but continuing with service startup"
+            log_warn "Services may not be accessible if IP has changed"
+        fi
+    else
+        log_debug "update-dns.sh not found, skipping DNS update"
+    fi
+
+    return 0
+}
 
 # --- FIXED: Prepare Docker Secrets ---
 prepare_docker_secrets() {
@@ -126,10 +158,10 @@ prepare_docker_secrets() {
     local docker_secrets_dir="secrets/.docker_secrets"
     local real_user; real_user=$(get_real_user)
     local real_group; real_group=$(id -g -n $real_user)
-    
+
     # Fix ownership if needed before attempting operations
     fix_secrets_ownership
-    
+
     rm -rf "$docker_secrets_dir"
     mkdir -p "$docker_secrets_dir"
     chown "$real_user:$real_group" "$docker_secrets_dir"
@@ -182,7 +214,7 @@ prepare_docker_secrets() {
         "caddy_cloudflare_dns_token"
         "fail2ban_cloudflare_firewall_token"
     )
-    
+
     # Define which secrets are critical for startup
     local critical_file_secrets=(
         "admin_token"
@@ -191,7 +223,7 @@ prepare_docker_secrets() {
         "fail2ban_cloudflare_firewall_token"
     )
     # --- END CRITICAL FIX ---
-    
+
     local secret_file_path
     local placeholder_critical=()
 
@@ -225,7 +257,7 @@ prepare_docker_secrets() {
                 log_debug "Created empty file for optional secret: $secret"
             fi
         fi
-        
+
         # Set ownership and secure permissions
         chown "$real_user:$real_group" "$secret_file_path"
         if ! secure_file "$secret_file_path" 600; then
@@ -236,7 +268,7 @@ prepare_docker_secrets() {
 
     # Strict mode handling
     local total_critical_issues=${#placeholder_critical[@]}
-    
+
     if [[ $total_critical_issues -gt 0 ]]; then
         if [[ "$STRICT_SECRETS" == "true" ]]; then
             log_error "STRICT MODE: Critical secrets validation failed"
@@ -305,12 +337,12 @@ post_startup_health_check() {
     # More detailed health check results
     if [[ ${#failed_services[@]} -eq 0 ]]; then
         log_success "All critical services are running and healthy"
-        
+
         if [[ ${#unhealthy_other[@]} -gt 0 ]]; then
             log_warn "Non-critical services with issues: ${unhealthy_other[*]}"
             log_info "System functional but some features may not work"
         fi
-        
+
         local domain
         domain=$(get_config_value "DOMAIN" "")
         if [[ -n "$domain" ]] && has_command curl; then
@@ -367,7 +399,7 @@ main() {
     state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
     local real_user; real_user=$(get_real_user)
     local real_group; real_group=$(id -g -n $real_user)
-    
+
     # Ensure state dirs are owned by the user running the script, NOT root
     # This is critical so docker, running as the user, can write to them
     ensure_dir "$state_dir/logs" 755 "$real_user:$real_group" || exit 1
@@ -376,6 +408,8 @@ main() {
     ensure_dir "$state_dir/caddy/config" 700 "$real_user:$real_group" || exit 1
     ensure_dir "$state_dir/fail2ban" 700 "$real_user:$real_group" || exit 1
 
+    # NEW: Update DNS before starting services
+    update_dns_if_needed
 
     # Prepare secrets and environment variables
     prepare_docker_secrets || exit 1
@@ -427,9 +461,9 @@ main() {
     else
         # Mark successful startup
         STARTUP_SUCCESS=true
-        
+
         log_success "🎉 VaultWarden-OCI-NG startup completed successfully"
-        
+
         # Check final service status (updated list)
         local all_running=true
         for service in vaultwarden caddy fail2ban; do
@@ -457,6 +491,7 @@ main() {
         echo ""
         echo "IMPORTANT NOTES:"
         echo "  • After editing secrets, always use: make restart"
+        echo "  • DNS is updated automatically on startup"
     fi
 }
 
