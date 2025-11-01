@@ -2,6 +2,7 @@
 # health.sh - Enhanced health monitoring for VaultWarden-OCI with set-and-forget monitoring
 # UPDATED: Added disk space monitoring, SSL expiration, DB growth, backup status, email test
 # ADDED: Backup integrity/decryption check with enhanced error handling
+# SIMPLIFIED: Removed bc dependency - uses integer comparison as default
 
 set -euo pipefail
 
@@ -473,7 +474,7 @@ check_resource_usage() {
 
     health_log_info "Checking resource usage..."
 
-    # CPU usage
+    # CPU usage - simplified integer comparison (no bc dependency)
     local cpu_usage
     cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1 | cut -d'u' -f1 2>/dev/null || echo "0")
 
@@ -483,17 +484,10 @@ check_resource_usage() {
 
     local resource_issues=()
 
-    # Use bc if available, fallback to integer comparison
-    if has_command bc; then
-        if (( $(echo "$cpu_usage > $ALERT_THRESHOLD" | bc -l 2>/dev/null || echo "0") )); then
-            resource_issues+=("CPU: ${cpu_usage}%")
-        fi
-    else
-        # Fallback to integer comparison
-        local cpu_int=${cpu_usage%.*}  # Remove decimal part
-        if (( cpu_int > ALERT_THRESHOLD )); then
-            resource_issues+=("CPU: ${cpu_usage}%")
-        fi
+    # Integer comparison for CPU (remove decimal part)
+    local cpu_int=${cpu_usage%.*}  # Remove decimal part if present
+    if (( cpu_int > ALERT_THRESHOLD )); then
+        resource_issues+=("CPU: ${cpu_usage}%")
     fi
 
     if (( mem_usage > ALERT_THRESHOLD )); then

@@ -2,6 +2,7 @@
 # setup.sh - VaultWarden-OCI Setup Script with Caddy-Cloudflare Integration
 # UPDATED: Now uses template-based approach instead of heredoc file generation
 # ADDED: Entropy checks, template validation, and firewall fail-safe
+# REMOVED: bc dependency (no longer used in stack)
 
 set -euo pipefail
 
@@ -115,8 +116,8 @@ install_dependencies() {
     log_info "Installing system dependencies..."
     apt-get update -qq
 
-    # --- MODIFIED: Added 'haveged' for entropy ---
-    local basic_packages=("age" "make" "nano" "rclone" "sqlite3" "jq" "mailutils" "ufw" "curl" "wget" "unzip" "git" "gpg" "coreutils" "bc" "haveged")
+    # REMOVED: 'bc' from dependencies (no longer used in stack)
+    local basic_packages=("age" "make" "nano" "rclone" "sqlite3" "jq" "mailutils" "ufw" "curl" "wget" "unzip" "git" "gpg" "coreutils" "haveged")
     export DEBIAN_FRONTEND=noninteractive
 
     if ! apt-get install -y "${basic_packages[@]}"; then
@@ -189,8 +190,8 @@ install_dependencies() {
 verify_dependencies() {
     log_info "Verifying dependencies..."
 
-    # --- MODIFIED: Added 'haveged' and 'bc' ---
-    local required_commands=("age" "sops" "docker" "jq" "sqlite3" "ufw" "curl" "bc")
+    # REMOVED: 'bc' from required commands (no longer used)
+    local required_commands=("age" "sops" "docker" "jq" "sqlite3" "ufw" "curl")
     if ! require_commands "${required_commands[@]}"; then
         return 1
     fi
