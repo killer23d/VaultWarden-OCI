@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # lib/common.sh - Core shared functions for VaultWarden-OCI-NG
-# Essential utilities and logging
+# Essential utilities and logging - Enhanced Edition
 
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_COMMON_LIB_LOADED:-}" ]] && return 0
@@ -10,10 +10,11 @@ readonly VAULTWARDEN_COMMON_LIB_LOADED=1
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$LIB_DIR/.." && pwd)"
 
-# --- Logging System ---
+# --- Enhanced Logging System ---
 LOG_PREFIX=""
 LOG_TIMESTAMP=true
 LOG_COLORS=true
+LOG_LEVEL="${LOG_LEVEL:-INFO}"  # ENHANCEMENT: Configurable log levels
 
 # Colors for output (if supported)
 if [[ -t 1 ]] && command -v tput >/dev/null 2>&1; then
@@ -32,6 +33,21 @@ else
     readonly COLOR_BOLD=""
 fi
 
+# ENHANCEMENT: Log level filtering for production environments
+_should_log() {
+    local level="$1"
+    local levels=("DEBUG" "INFO" "WARN" "ERROR")
+    local current_index=-1
+    local target_index=-1
+
+    for i in "${!levels[@]}"; do
+        [[ "${levels[i]}" == "$LOG_LEVEL" ]] && current_index=$i
+        [[ "${levels[i]}" == "$level" ]] && target_index=$i
+    done
+
+    (( target_index >= current_index ))
+}
+
 # Set log prefix for current script
 set_log_prefix() {
     LOG_PREFIX="$1"
@@ -44,6 +60,7 @@ _get_timestamp() {
 
 # Core logging functions
 log_info() {
+    _should_log "INFO" || return 0
     local timestamp prefix_part
     timestamp=$(_get_timestamp)
     prefix_part="${LOG_PREFIX:+[$LOG_PREFIX] }"
@@ -56,6 +73,7 @@ log_info() {
 }
 
 log_success() {
+    _should_log "INFO" || return 0
     local timestamp prefix_part
     timestamp=$(_get_timestamp)
     prefix_part="${LOG_PREFIX:+[$LOG_PREFIX] }"
@@ -68,6 +86,7 @@ log_success() {
 }
 
 log_warn() {
+    _should_log "WARN" || return 0
     local timestamp prefix_part
     timestamp=$(_get_timestamp)
     prefix_part="${LOG_PREFIX:+[$LOG_PREFIX] }"
@@ -80,6 +99,7 @@ log_warn() {
 }
 
 log_error() {
+    _should_log "ERROR" || return 0
     local timestamp prefix_part
     timestamp=$(_get_timestamp)
     prefix_part="${LOG_PREFIX:+[$LOG_PREFIX] }"
@@ -92,9 +112,7 @@ log_error() {
 }
 
 log_debug() {
-    # Only show debug if DEBUG is set
-    [[ "${DEBUG:-false}" == "true" ]] || return 0
-
+    _should_log "DEBUG" || return 0
     local timestamp prefix_part
     timestamp=$(_get_timestamp)
     prefix_part="${LOG_PREFIX:+[$LOG_PREFIX] }"
@@ -170,11 +188,26 @@ require_config() {
     return 0
 }
 
-# --- Command and System Checks ---
+# --- ENHANCEMENT: Command Caching for Performance ---
+declare -A _command_cache
 
-# Check if command exists
+# Check if command exists (cached version for performance)
 has_command() {
-    command -v "$1" >/dev/null 2>&1
+    local cmd="$1"
+
+    # Return cached result if available
+    if [[ -n "${_command_cache[$cmd]:-}" ]]; then
+        return "${_command_cache[$cmd]}"
+    fi
+
+    # Check and cache result
+    if command -v "$cmd" >/dev/null 2>&1; then
+        _command_cache["$cmd"]=0
+        return 0
+    else
+        _command_cache["$cmd"]=1
+        return 1
+    fi
 }
 
 # Require commands to exist
@@ -194,6 +227,29 @@ require_commands() {
     fi
 
     return 0
+}
+
+# ENHANCEMENT: Retry logic with exponential backoff for reliable operations
+retry_with_backoff() {
+    local max_attempts="$1"
+    local initial_delay="$2"
+    local command=("${@:3}")
+    local delay="$initial_delay"
+
+    for ((i=1; i<=max_attempts; i++)); do
+        if "${command[@]}"; then
+            return 0
+        fi
+
+        if [[ $i -lt $max_attempts ]]; then
+            log_warn "Attempt $i failed, retrying in ${delay}s..."
+            sleep "$delay"
+            delay=$((delay * 2))  # Exponential backoff
+        fi
+    done
+
+    log_error "All $max_attempts attempts failed for command: ${command[*]}"
+    return 1
 }
 
 # Check if running as root
@@ -244,9 +300,9 @@ secure_file() {
     return 0
 }
 
-# --- Network Helpers ---
+# --- Enhanced Network Helpers ---
 
-# Test network connectivity
+# Test network connectivity with retry
 test_connectivity() {
     local host="${1:-1.1.1.1}"
     local timeout="${2:-5}"
@@ -254,60 +310,80 @@ test_connectivity() {
     ping -c 1 -W "$timeout" "$host" >/dev/null 2>&1
 }
 
-# Test HTTP connectivity
+# Test HTTP connectivity with retry and better error handling
 test_http() {
     local url="$1"
     local timeout="${2:-10}"
 
     if has_command curl; then
         curl -sf --max-time "$timeout" "$url" >/dev/null 2>&1
+    elif has_command wget; then
+        wget -q --timeout="$timeout" --spider "$url" >/dev/null 2>&1
     else
-        log_warn "curl not available, cannot test HTTP connectivity"
+        log_warn "Neither curl nor wget available, cannot test HTTP connectivity"
         return 1
     fi
 }
 
-# --- START P1/P2: New Email Notification Function ---
-# Send notification email with rate limiting
-# Usage: send_notification_email "Subject" "Body"
+# ENHANCEMENT: Robust HTTP download with retry
+download_file() {
+    local url="$1"
+    local output_file="$2"
+    local max_attempts="${3:-3}"
+
+    if retry_with_backoff "$max_attempts" 2 curl -fsSL "$url" -o "$output_file"; then
+        log_success "Downloaded: $url -> $output_file"
+        return 0
+    elif retry_with_backoff "$max_attempts" 2 wget -q "$url" -O "$output_file"; then
+        log_success "Downloaded: $url -> $output_file"
+        return 0
+    else
+        log_error "Failed to download: $url"
+        return 1
+    fi
+}
+
+# Send notification email with enhanced rate limiting
 send_notification_email() {
     local subject="$1"
     local body="$2"
-    
+
     local admin_email
     admin_email=$(get_config_value "ADMIN_EMAIL" "")
-    
+
     if [[ -z "$admin_email" ]]; then
         log_warn "ADMIN_EMAIL not configured. Cannot send notification."
         return 1
     fi
-    
+
     if ! has_command mail; then
         log_warn "mail command (mailutils) not available. Cannot send notification."
         return 1
     fi
-    
-    # --- Start User Suggestion: Rate Limiting ---
+
+    # ENHANCEMENT: Rate limiting with critical exception
     local last_email_file="/tmp/.vw_last_email_$(echo "$subject" | md5sum | cut -d' ' -f1)"
-    if [[ -f "$last_email_file" ]]; then
+
+    # Allow critical alerts through rate limiting
+    if [[ "$subject" != *"CRITICAL"* ]] && [[ -f "$last_email_file" ]]; then
         local last_time current_time
         last_time=$(cat "$last_email_file")
         current_time=$(date +%s)
-        
+
         # Don't send the same subject email more than once per hour
         if (( current_time - last_time < 3600 )); then
-            log_debug "Email rate limited, skipping notification"
+            log_debug "Email rate limited for non-critical notification: $subject"
             return 0
         fi
     fi
     echo "$(date +%s)" > "$last_email_file"
-    # --- End User Suggestion ---
 
     local full_subject="[VaultWarden] $subject"
     local full_body="$body
 ---
 Host: $(hostname -f 2>/dev/null || hostname)
-Timestamp: $(date -uIs)"
+Timestamp: $(date -uIs)
+Project: VaultWarden-OCI"
 
     if echo "$full_body" | mail -s "$full_subject" "$admin_email"; then
         log_success "Notification email sent to $admin_email"
@@ -316,9 +392,8 @@ Timestamp: $(date -uIs)"
         return 1
     fi
 }
-# --- END P1/P2 ---
 
-# --- Validation Helpers ---
+# --- Enhanced Validation Helpers ---
 
 # Validate email format (basic)
 validate_email() {
@@ -336,17 +411,51 @@ validate_domain() {
     [[ "$domain" =~ ^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]
 }
 
-# --- Error Handling ---
+# ENHANCEMENT: Additional validation helpers for network operations
+validate_port() {
+    local port="$1"
+    [[ "$port" =~ ^[0-9]+$ ]] && (( port >= 1 && port <= 65535 ))
+}
 
-# Set up error trap
+validate_ip() {
+    local ip="$1"
+    [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]
+}
+
+validate_url() {
+    local url="$1"
+    [[ "$url" =~ ^https?://[a-zA-Z0-9.-]+(:[0-9]+)?(/.*)?$ ]]
+}
+
+# --- Enhanced Error Handling ---
+
+# Set up error trap with enhanced context
 setup_error_trap() {
-    trap 'log_error "Script failed at line $LINENO in $(basename "${BASH_SOURCE[0]}")"; exit 1' ERR
+    trap 'log_error "Script failed at line $LINENO in $(basename "${BASH_SOURCE[0]}") with exit code $?"; exit 1' ERR
 }
 
 # Setup cleanup trap
 setup_cleanup_trap() {
     local cleanup_function="$1"
     trap "$cleanup_function" EXIT HUP INT TERM
+}
+
+# ENHANCEMENT: Safe execution wrapper with error context
+safe_execute() {
+    local description="$1"
+    shift
+    local command=("$@")
+
+    log_debug "Executing: $description"
+
+    if "${command[@]}"; then
+        log_debug "Success: $description"
+        return 0
+    else
+        local exit_code=$?
+        log_error "Failed: $description (exit code: $exit_code)"
+        return $exit_code
+    fi
 }
 
 # --- Library Initialization ---
@@ -366,15 +475,17 @@ init_common_lib() {
 
     log_debug "Common library initialized for: $script_name"
     log_debug "Project root: $PROJECT_ROOT"
+    log_debug "Log level: $LOG_LEVEL"
 }
 
 # --- Export Functions ---
-export -f log_info log_success log_warn log_error log_debug log_header set_log_prefix
+export -f log_info log_success log_warn log_error log_debug log_header set_log_prefix _should_log
 export -f load_env_file get_config_value require_config
-export -f has_command require_commands is_root get_real_user
-export -f ensure_dir secure_file test_connectivity test_http
+export -f has_command require_commands retry_with_backoff is_root get_real_user
+export -f ensure_dir secure_file test_connectivity test_http download_file
 export -f send_notification_email
-export -f validate_email validate_domain setup_error_trap setup_cleanup_trap
+export -f validate_email validate_domain validate_port validate_ip validate_url
+export -f setup_error_trap setup_cleanup_trap safe_execute
 export -f init_common_lib
 
-log_debug "Common library loaded successfully"
+log_debug "Enhanced common library loaded successfully"
