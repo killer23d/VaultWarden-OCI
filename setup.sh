@@ -176,7 +176,7 @@ install_dependencies() {
 verify_dependencies() {
     log_info "Verifying dependencies..."
     
-    local required_commands=("age" "sops" "docker" "jq" "sqlite3" "ufw" "curl")
+    local required_commands=("age" "sops" "docker" "jq" "sqlite3" "ufw" "curl" "bc")
     if ! require_commands "${required_commands[@]}"; then
         return 1
     fi
@@ -200,6 +200,12 @@ setup_user_permissions() {
 
     local real_user
     real_user=$(get_real_user)
+    
+    # Validate user exists
+    if ! id "$real_user" >/dev/null 2>&1; then
+        log_error "User $real_user does not exist"
+        return 1
+    fi
     
     # Ensure user is in docker group
     if ! groups "$real_user" | grep -q docker; then
@@ -233,7 +239,7 @@ setup_firewall() {
         echo "net.ipv6.conf.all.disable_ipv6 = 1" >> /etc/sysctl.conf
     fi
     
-    # Fetch current Cloudflare IP ranges dynamically
+    # Fetch current Cloudflare IP ranges dynamically with validation
     log_info "Fetching current Cloudflare IP ranges..."
     local cf_ipv4_file="/tmp/cf_ipv4_ranges.txt"
     local cf_ipv6_file="/tmp/cf_ipv6_ranges.txt"
@@ -241,22 +247,31 @@ setup_firewall() {
     if curl -sf --max-time 10 "https://www.cloudflare.com/ips-v4" -o "$cf_ipv4_file" && \
        curl -sf --max-time 10 "https://www.cloudflare.com/ips-v6" -o "$cf_ipv6_file"; then
         
-        # Apply IPv4 ranges
-        while IFS= read -r range; do
-            if [[ -n "$range" ]]; then
-                ufw allow from "$range" to any port 80,443 comment "CF-IPv4" >/dev/null
-            fi
-        done < "$cf_ipv4_file"
+        # Validate IPv4 ranges before applying
+        if grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$' "$cf_ipv4_file" >/dev/null; then
+            while IFS= read -r range; do
+                if [[ -n "$range" && "$range" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]; then
+                    ufw allow from "$range" to any port 80,443 comment "CF-IPv4" >/dev/null
+                fi
+            done < "$cf_ipv4_file"
+            log_success "Applied validated Cloudflare IPv4 ranges"
+        else
+            log_warn "Invalid IPv4 ranges received from Cloudflare API"
+        fi
         
-        # Apply IPv6 ranges  
-        while IFS= read -r range; do
-            if [[ -n "$range" ]]; then
-                ufw allow from "$range" to any port 80,443 comment "CF-IPv6" >/dev/null
-            fi
-        done < "$cf_ipv6_file"
+        # Validate IPv6 ranges before applying
+        if grep -E '^[0-9a-fA-F:]+/[0-9]{1,3}$' "$cf_ipv6_file" >/dev/null; then
+            while IFS= read -r range; do
+                if [[ -n "$range" && "$range" =~ ^[0-9a-fA-F:]+/[0-9]{1,3}$ ]]; then
+                    ufw allow from "$range" to any port 80,443 comment "CF-IPv6" >/dev/null
+                fi
+            done < "$cf_ipv6_file"
+            log_success "Applied validated Cloudflare IPv6 ranges"
+        else
+            log_warn "Invalid IPv6 ranges received from Cloudflare API"
+        fi
         
         rm -f "$cf_ipv4_file" "$cf_ipv6_file"
-        log_success "Applied Cloudflare IP ranges successfully"
         
     else
         log_error "⚠️  CRITICAL WARNING: Failed to fetch Cloudflare IP ranges from API"
@@ -314,20 +329,25 @@ create_env_file() {
     local real_user; real_user=$(get_real_user)
     local real_group; real_group=$(id -g -n $real_user)
     
+    # Validate PUID/PGID values
+    local user_id group_id
+    user_id=$(id -u "$real_user")
+    group_id=$(id -g "$real_user")
+    
     # Populate template values using sed
     sed -i "s/DOMAIN=.*/DOMAIN=$DOMAIN/" "$env_file"
     sed -i "s/ADMIN_EMAIL=.*/ADMIN_EMAIL=$ADMIN_EMAIL/" "$env_file" 
-    sed -i "s/PUID=.*/PUID=$(id -u $real_user)/" "$env_file"
-    sed -i "s/PGID=.*/PGID=$(id -g $real_user)/" "$env_file"
+    sed -i "s/PUID=.*/PUID=$user_id/" "$env_file"
+    sed -i "s/PGID=.*/PGID=$group_id/" "$env_file"
     
     # Update SMTP_FROM with actual domain
     sed -i "s/SMTP_FROM=.*/SMTP_FROM=noreply@$DOMAIN/" "$env_file"
     
     # Set version pins if not using latest
     if [[ "$USE_LATEST" != "true" ]]; then
-        sed -i 's/#\(VAULTWARDEN_VERSION=.*\)/\1/' "$env_file"
-        sed -i 's/#\(CADDY_VERSION=.*\)/\1/' "$env_file"
-        sed -i 's/#\(FAIL2BAN_VERSION=.*\)/\1/' "$env_file"
+        sed -i 's/#\\(VAULTWARDEN_VERSION=.*\\)/\\1/' "$env_file"
+        sed -i 's/#\\(CADDY_VERSION=.*\\)/\\1/' "$env_file"
+        sed -i 's/#\\(FAIL2BAN_VERSION=.*\\)/\\1/' "$env_file"
         log_info "Enabled pinned container versions for production stability"
     else
         log_info "Using latest container versions (development mode)"
@@ -357,6 +377,12 @@ setup_directories() {
 
     local real_user; real_user=$(get_real_user)
     local real_group; real_group=$(id -g -n $real_user)
+    
+    # Validate user and group exist
+    if ! id "$real_user" >/dev/null 2>&1; then
+        log_error "User $real_user does not exist"
+        return 1
+    fi
     
     # Core directories
     local dirs=(
@@ -434,7 +460,7 @@ create_sops_config() {
 
     cat > "$sops_config" << EOF
 creation_rules:
-  - path_regex: secrets/secrets\.yaml$
+  - path_regex: secrets/secrets\\.yaml$
     age: $age_public_key
 EOF
 
@@ -602,8 +628,8 @@ set_script_permissions() {
         fi
     done
     
-    find "lib" -name "*.sh" -exec chmod +x {} \;
-    find "lib" -name "*.sh" -exec chown "$real_user:$real_group" {} \;
+    find "lib" -name "*.sh" -exec chmod +x {} \\;
+    find "lib" -name "*.sh" -exec chown "$real_user:$real_group" {} \\;
 
     log_success "Script permissions set."
     return 0
