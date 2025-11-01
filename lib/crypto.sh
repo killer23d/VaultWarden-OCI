@@ -228,8 +228,6 @@ is_sops_encrypted() {
     grep -q "sops:" "$file" 2>/dev/null
 }
 
-# --- P4 FIX: Removed get_secret function ---
-
 # --- Utility Functions ---
 
 # Generate secure random string
@@ -256,14 +254,10 @@ generate_hex_string() {
     fi
 }
 
-# --- FIX #7: Removed dead code: load_secrets, set_secret, validate_age_key ---
-
 # Export functions for use by scripts
 export -f check_age_key generate_age_keypair get_public_key
 export -f encrypt_file decrypt_file encrypt_data decrypt_data
 export -f check_sops_available sops_encrypt sops_decrypt sops_edit is_sops_encrypted
-# Removed get_secret from export
 export -f generate_secure_string generate_hex_string
 
 log_debug "Crypto library loaded successfully" 2>/dev/null || true
-
