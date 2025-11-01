@@ -165,10 +165,10 @@ services:
         reservations:
           cpus: '${FAIL2BAN_CPU_RESERVATION:-0.05}'
           memory: '${FAIL2BAN_MEMORY_RESERVATION:-64m}'
-    # cap_add: - not needed 
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
     # STANDARDIZED LOGGING: Docker-managed log rotation
-    #  - NET_ADMIN
-    #  - NET_RAW
     logging:
       driver: json-file
       options:
