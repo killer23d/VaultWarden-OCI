@@ -1,8 +1,7 @@
 # VaultWarden-OCI Docker Compose Template
 # This file is copied to docker-compose.yml by setup.sh
-# FIXED: Standardized logging strategy and removed hardcoded platform architecture.
-#        - VaultWarden & Fail2ban log to stdout (rotated by Docker json-file driver).
-#        - Caddy logs to file (rotated by Caddy itself) so fail2ban can read it.
+# FIXED: Standardized logging strategy - all services use Docker json-file driver
+#        - All logs go to stdout/stderr and are managed by Docker with rotation
 
 services:
   # VaultWarden Password Manager
@@ -38,12 +37,12 @@ services:
       WEBSOCKET_PORT: 3012
       LOG_LEVEL: info
       EXTENDED_LOGGING: true
-      # --- BEST PRACTICE FIX: Log to stdout for Docker rotation ---
+      # STANDARDIZED LOGGING: All logs to stdout for Docker rotation
       LOG_FILE: "/dev/stdout"
       TZ: "${TZ:-UTC}"
     volumes:
       - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data:/data"
-      # Note: /logs volume kept for compatibility but VaultWarden logs to stdout now
+      # Legacy logs volume kept for compatibility but not used
       - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/vaultwarden:/logs"
     secrets:
       - admin_token
@@ -66,13 +65,12 @@ services:
         reservations:
           cpus: '${VAULTWARDEN_CPU_RESERVATION:-0.2}'
           memory: '${VAULTWARDEN_MEMORY_RESERVATION:-256m}'
-    # --- Docker-managed log rotation ---
+    # STANDARDIZED LOGGING: Docker-managed log rotation for all services
     logging:
       driver: json-file
       options:
         max-size: "10m"
-        max-file: "3"
-    # SAFE HARDENING
+        max-file: "5"
     security_opt:
       - no-new-privileges:true
 
@@ -95,7 +93,7 @@ services:
       - "./caddy/Caddyfile:/etc/caddy/Caddyfile:ro"
       - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/data:/data"
       - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/config:/config"
-      # --- CRITICAL: Caddy logs to file for fail2ban to read ---
+      # MODIFIED: Caddy logs both to stdout (Docker) and file (fail2ban compatibility)
       - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy:/logs"
     secrets:
       - admin_basic_auth_hash
@@ -119,25 +117,23 @@ services:
         reservations:
           cpus: '${CADDY_CPU_RESERVATION:-0.1}'
           memory: '${CADDY_MEMORY_RESERVATION:-64m}'
-    # --- Docker-managed log rotation for Caddy stdout logs ---
+    # STANDARDIZED LOGGING: Docker-managed log rotation
     logging:
       driver: json-file
       options:
         max-size: "10m"
-        max-file: "3"
-    # SAFE HARDENING
+        max-file: "5"
     security_opt:
       - no-new-privileges:true
 
   # Fail2Ban Intrusion Prevention
   fail2ban:
     image: crazymax/fail2ban:${FAIL2BAN_VERSION:-latest}
-    # --- PORTABILITY FIX: Removed hardcoded platform: linux/arm64 ---
     container_name: vaultwarden_fail2ban
     restart: unless-stopped
     environment:
       F2B_LOG_LEVEL: INFO
-      # --- BEST PRACTICE FIX: Log to stdout for Docker rotation ---
+      # STANDARDIZED LOGGING: Log to stdout for Docker rotation
       F2B_LOG_TARGET: stdout
       TZ: "${TZ:-UTC}"
       CLOUDFLARE_ZONE_ID: "${CLOUDFLARE_ZONE_ID}"
@@ -146,9 +142,9 @@ services:
       - "./fail2ban/filter.d:/etc/fail2ban/filter.d:ro"
       - "./fail2ban/action.d:/etc/fail2ban/action.d:ro"
       - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/fail2ban:/data"
-      # --- CRITICAL: Mount Caddy log file for fail2ban to read ---
+      # Mount Caddy log file for fail2ban to read
       - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy:/var/log/caddy:ro"
-      # Note: /var/log volume kept for compatibility but fail2ban logs to stdout now
+      # Legacy logs volume kept for compatibility
       - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/fail2ban:/var/log"
       - "/var/log/auth.log:/var/log/auth.log:ro"
     secrets:
@@ -170,14 +166,14 @@ services:
           cpus: '${FAIL2BAN_CPU_RESERVATION:-0.05}'
           memory: '${FAIL2BAN_MEMORY_RESERVATION:-64m}'
     # cap_add: - not needed 
+    # STANDARDIZED LOGGING: Docker-managed log rotation
     #  - NET_ADMIN
     #  - NET_RAW
-    # --- Docker-managed log rotation ---
     logging:
       driver: json-file
       options:
         max-size: "10m"
-        max-file: "3"
+        max-file: "5"
 
 secrets:
   admin_token:
