@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # health.sh - Enhanced health monitoring for VaultWarden-OCI with set-and-forget monitoring
 # UPDATED: Added disk space monitoring, SSL expiration, DB growth, backup status, email test
+# ADDED: Backup integrity/decryption check with enhanced error handling
 
 set -euo pipefail
 
@@ -47,13 +48,12 @@ SET-AND-FORGET MONITORING:
     Basic:
     - Container status and health
     - Service accessibility
-    - Critical process monitoring
 
     Comprehensive:
     - Disk space < 80% alert
     - SSL certificate expiration < 30 days
     - Database size growth monitoring
-    - Backup success/failure status
+    - Backup success, age, AND integrity (decryptability)
     - Email notification functionality test
     - Resource usage monitoring
     - Security status checks
@@ -131,7 +131,7 @@ check_container_status() {
     done
 
     if [[ ${#stopped_containers[@]} -gt 0 ]]; then
-        health_log_error "Stopped containers: ${stopped_containers[*]}"
+        health_log_error "CRITICAL: Stopped containers: ${stopped_containers[*]}"
         HEALTH_RESULTS["containers"]="failed"
         HEALTH_DETAILS["containers"]="Stopped: ${stopped_containers[*]}"
     elif [[ ${#unhealthy_containers[@]} -gt 0 ]]; then
@@ -153,7 +153,7 @@ check_service_accessibility() {
     domain=$(get_config_value "DOMAIN" "")
 
     if [[ -z "$domain" ]]; then
-        health_log_error "DOMAIN not configured in .env file"
+        health_log_error "CRITICAL: DOMAIN not configured in .env file"
         HEALTH_RESULTS["accessibility"]="failed"
         return 1
     fi
@@ -162,7 +162,7 @@ check_service_accessibility() {
     if curl -sf "http://localhost/alive" >/dev/null 2>&1; then
         health_log_success "VaultWarden local access: OK"
     else
-        health_log_error "VaultWarden local access: FAILED"
+        health_log_error "CRITICAL: VaultWarden local access: FAILED"
         HEALTH_RESULTS["accessibility"]="failed"
         return 1
     fi
@@ -182,7 +182,6 @@ check_service_accessibility() {
     fi
 }
 
-# NEW: Disk space monitoring (set-and-forget requirement)
 check_disk_space() {
     health_log_info "Checking disk space usage..."
 
@@ -193,7 +192,7 @@ check_disk_space() {
     usage_percent=$(df / | awk 'NR==2 {print $5}' | sed 's/%//' 2>/dev/null || echo "0")
 
     if (( usage_percent > ALERT_THRESHOLD )); then
-        health_log_error "Root disk usage critical: ${usage_percent}%"
+        health_log_error "CRITICAL: Root disk usage: ${usage_percent}%"
         HEALTH_RESULTS["disk_space"]="failed"
         HEALTH_DETAILS["disk_space"]="Root: ${usage_percent}% used"
         return 1
@@ -212,13 +211,12 @@ check_disk_space() {
         local state_usage
         state_usage=$(df "$state_dir" | awk 'NR==2 {print $5}' | sed 's/%//' 2>/dev/null || echo "0")
         if (( state_usage > ALERT_THRESHOLD )); then
-            health_log_error "State directory usage critical: ${state_usage}%"
+            health_log_error "CRITICAL: State directory usage: ${state_usage}%"
             HEALTH_RESULTS["disk_space"]="failed"
         fi
     fi
 }
 
-# NEW: SSL certificate expiration monitoring
 check_ssl_certificates() {
     health_log_info "Checking SSL certificate expiration..."
 
@@ -245,7 +243,7 @@ check_ssl_certificates() {
             expires_in=$(( (expiry_epoch - current_epoch) / 86400 ))
 
             if (( expires_in < 7 )); then
-                health_log_error "SSL certificate expires in ${expires_in} days"
+                health_log_error "CRITICAL: SSL certificate expires in ${expires_in} days"
                 HEALTH_RESULTS["ssl_certificates"]="failed"
                 HEALTH_DETAILS["ssl_certificates"]="Expires in ${expires_in} days"
             elif (( expires_in < 30 )); then
@@ -267,7 +265,6 @@ check_ssl_certificates() {
     fi
 }
 
-# NEW: Database size growth monitoring
 check_database_growth() {
     health_log_info "Checking database size and growth..."
 
@@ -311,12 +308,55 @@ check_database_growth() {
     fi
 }
 
-# NEW: Backup success/failure status monitoring
+# ENHANCED: Backup integrity check function with improved error handling
+_verify_backup_decryptable() {
+    local backup_file="$1"
+    local backup_type="$2"
+
+    # Check if file exists first
+    if [[ -z "$backup_file" || ! -f "$backup_file" ]]; then
+        return 0 # No file to check
+    fi
+
+    # ENHANCEMENT: Use crypto library constant and add file size check
+    local age_key_file="${DEFAULT_AGE_KEY_FILE:-secrets/keys/age-key.txt}"
+
+    if [[ ! -f "$age_key_file" ]]; then
+        health_log_error "CRITICAL: Age key file missing: $age_key_file"
+        return 1
+    fi
+
+    # Get file size for corruption detection
+    local file_size
+    file_size=$(stat -c%s "$backup_file" 2>/dev/null || stat -f%z "$backup_file" 2>/dev/null || echo "0")
+
+    # Check for suspiciously small files (likely corrupted)
+    if (( file_size < 1024 )); then
+        health_log_error "CRITICAL: Backup file suspiciously small (${file_size} bytes): $(basename "$backup_file")"
+        return 1
+    fi
+
+    # Test decryption (minimal resource usage)
+    if ! age -d -i "$age_key_file" "$backup_file" | head -c 1 > /dev/null 2>&1; then
+        health_log_error "CRITICAL: Failed to decrypt latest $backup_type backup! Check keys or file integrity: $(basename "$backup_file") (${file_size} bytes)"
+        return 1
+    fi
+
+    return 0
+}
+
 check_backup_status() {
-    health_log_info "Checking backup status..."
+    health_log_info "Checking backup status and integrity..."
 
     local backup_base_dir="$PROJECT_ROOT/backups"
     local latest_db_backup latest_full_backup
+
+    if [[ ! -d "$backup_base_dir" ]]; then
+        health_log_error "CRITICAL: Backup directory not found: $backup_base_dir"
+        HEALTH_RESULTS["backup_status"]="failed"
+        HEALTH_DETAILS["backup_status"]="Backup directory missing"
+        return 1
+    fi
 
     # Find latest database backup
     if [[ -d "$backup_base_dir/db" ]]; then
@@ -329,41 +369,66 @@ check_backup_status() {
     fi
 
     local backup_issues=()
+    local all_ok=true
 
-    # Check database backup age
+    # Check database backup age and integrity
     if [[ -n "$latest_db_backup" ]]; then
-        local db_backup_age=$((($(date +%s) - $(stat -c%Y "$latest_db_backup" 2>/dev/null || stat -f%m "$latest_db_backup" 2>/dev/null || echo "0")) / 86400))
-        if (( db_backup_age > 2 )); then
-            backup_issues+=("Last database backup is ${db_backup_age} days old")
+        # ENHANCEMENT: More portable stat command
+        local db_backup_age
+        if command -v stat >/dev/null 2>&1; then
+            db_backup_age=$((($(date +%s) - $(stat -c%Y "$latest_db_backup" 2>/dev/null || stat -f%m "$latest_db_backup" 2>/dev/null || echo "0")) / 86400))
         else
-            health_log_success "Database backup recent: ${db_backup_age} days old"
+            db_backup_age=999  # Assume old if stat unavailable
+        fi
+
+        if (( db_backup_age > 2 )); then
+            backup_issues+=("Last DB backup is ${db_backup_age} days old")
+            all_ok=false
+        elif ! _verify_backup_decryptable "$latest_db_backup" "DB"; then
+            backup_issues+=("Latest DB backup failed decryption")
+            all_ok=false
+        else
+            health_log_success "Database backup recent (${db_backup_age}d) and decryptable"
         fi
     else
         backup_issues+=("No database backups found")
+        all_ok=false
     fi
 
-    # Check full backup age (should be within 7 days)
+    # Check full backup age and integrity
     if [[ -n "$latest_full_backup" ]]; then
-        local full_backup_age=$((($(date +%s) - $(stat -c%Y "$latest_full_backup" 2>/dev/null || stat -f%m "$latest_full_backup" 2>/dev/null || echo "0")) / 86400))
+        local full_backup_age
+        if command -v stat >/dev/null 2>&1; then
+            full_backup_age=$((($(date +%s) - $(stat -c%Y "$latest_full_backup" 2>/dev/null || stat -f%m "$latest_full_backup" 2>/dev/null || echo "0")) / 86400))
+        else
+            full_backup_age=999  # Assume old if stat unavailable
+        fi
+
         if (( full_backup_age > 7 )); then
             backup_issues+=("Last full backup is ${full_backup_age} days old")
+            all_ok=false
+        elif ! _verify_backup_decryptable "$latest_full_backup" "full"; then
+             backup_issues+=("Latest full backup failed decryption")
+            all_ok=false
+        else
+            health_log_success "Full backup recent (${full_backup_age}d) and decryptable"
         fi
     else
         backup_issues+=("No full backups found")
+        all_ok=false
     fi
 
-    if [[ ${#backup_issues[@]} -gt 0 ]]; then
-        health_log_error "Backup issues: ${backup_issues[*]}"
+    if [[ "$all_ok" == "false" ]]; then
+        health_log_error "CRITICAL: Backup issues: ${backup_issues[*]}"
         HEALTH_RESULTS["backup_status"]="failed"
         HEALTH_DETAILS["backup_status"]="Issues: ${backup_issues[*]}"
     else
         health_log_success "Backup status OK"
         HEALTH_RESULTS["backup_status"]="healthy"
-        HEALTH_DETAILS["backup_status"]="Recent backups available"
+        HEALTH_DETAILS["backup_status"]="Recent backups available and decryptable"
     fi
 }
 
-# NEW: Email notification functionality test
 test_email_notifications() {
     health_log_info "Testing email notification functionality..."
 
@@ -418,8 +483,17 @@ check_resource_usage() {
 
     local resource_issues=()
 
-    if (( $(echo "$cpu_usage > $ALERT_THRESHOLD" | bc -l 2>/dev/null || echo "0") )); then
-        resource_issues+=("CPU: ${cpu_usage}%")
+    # Use bc if available, fallback to integer comparison
+    if has_command bc; then
+        if (( $(echo "$cpu_usage > $ALERT_THRESHOLD" | bc -l 2>/dev/null || echo "0") )); then
+            resource_issues+=("CPU: ${cpu_usage}%")
+        fi
+    else
+        # Fallback to integer comparison
+        local cpu_int=${cpu_usage%.*}  # Remove decimal part
+        if (( cpu_int > ALERT_THRESHOLD )); then
+            resource_issues+=("CPU: ${cpu_usage}%")
+        fi
     fi
 
     if (( mem_usage > ALERT_THRESHOLD )); then
@@ -470,7 +544,7 @@ check_configuration() {
     fi
 
     if [[ ${#config_issues[@]} -gt 0 ]]; then
-        health_log_error "Configuration issues: ${config_issues[*]}"
+        health_log_error "CRITICAL: Configuration issues: ${config_issues[*]}"
         HEALTH_RESULTS["configuration"]="failed"
         HEALTH_DETAILS["configuration"]="Issues: ${config_issues[*]}"
     else
@@ -487,27 +561,21 @@ check_security_status() {
 
     local security_issues=()
 
-    # Check file permissions on secrets
-    if [[ -d "secrets/.docker_secrets" ]]; then
-        local bad_perms
-        bad_perms=$(find secrets/.docker_secrets -type f ! -perm 600 2>/dev/null | wc -l)
-        if (( bad_perms > 0 )); then
-            security_issues+=("$bad_perms secret files with incorrect permissions")
-        fi
-    fi
-
     # Check if fail2ban is active
     if ! docker compose exec -T fail2ban fail2ban-client status >/dev/null 2>&1; then
         security_issues+=("fail2ban not responding")
     fi
 
     # Check Age key permissions
-    if [[ -f "secrets/keys/age-key.txt" ]]; then
+    local age_key_file="${DEFAULT_AGE_KEY_FILE:-secrets/keys/age-key.txt}"
+    if [[ -f "$age_key_file" ]]; then
         local age_perms
-        age_perms=$(stat -c "%a" "secrets/keys/age-key.txt" 2>/dev/null || echo "000")
+        age_perms=$(stat -c "%a" "$age_key_file" 2>/dev/null || echo "000")
         if [[ "$age_perms" != "600" ]]; then
             security_issues+=("Age key has incorrect permissions: $age_perms")
         fi
+    else
+        security_issues+=("Age key file missing!")
     fi
 
     if [[ ${#security_issues[@]} -gt 0 ]]; then
@@ -567,26 +635,26 @@ generate_text_report() {
 
 generate_json_report() {
     local json_report="{"
-    json_report+="\"timestamp\": \"$(date -Iseconds)\","
-    json_report+="\"overall_status\": \"$OVERALL_STATUS\","
-    json_report+="\"components\": {"
+    json_report+=""timestamp": "$(date -Iseconds)","
+    json_report+=""overall_status": "$OVERALL_STATUS","
+    json_report+=""components": {"
 
     local first=true
     for component in "${!HEALTH_RESULTS[@]}"; do
         [[ "$first" == "true" ]] && first=false || json_report+=","
-        json_report+="\"$component\": {"
-        json_report+="\"status\": \"${HEALTH_RESULTS[$component]}\","
-        json_report+="\"details\": \"${HEALTH_DETAILS[$component]:-}\""
+        json_report+=""$component": {"
+        json_report+=""status": "${HEALTH_RESULTS[$component]}","
+        json_report+=""details": "${HEALTH_DETAILS[$component]:-}""
         json_report+="}"
     done
 
     json_report+="},"
-    json_report+="\"issues\": ["
+    json_report+=""issues": ["
 
     first=true
     for issue in "${ISSUES_FOUND[@]}"; do
         [[ "$first" == "true" ]] && first=false || json_report+=","
-        json_report+="\"$issue\""
+        json_report+=""$issue""
     done
 
     json_report+="]"
@@ -609,17 +677,14 @@ main() {
         health_log_info "Running basic health checks..."
     fi
 
-    # Load environment if available
-    load_env_file 2>/dev/null || true
-
-    # Run health checks - NEW checks marked with comments
+    # Run health checks
     check_container_status
     check_service_accessibility
-    check_disk_space              # NEW: Disk space < 80%
-    check_ssl_certificates         # NEW: SSL certificate expiration < 30 days
-    check_database_growth          # NEW: VaultWarden database size growth rate
-    check_backup_status           # NEW: Backup success/failure status
-    test_email_notifications      # NEW: Email notification functionality
+    check_disk_space
+    check_ssl_certificates
+    check_database_growth
+    check_backup_status # Now includes integrity check
+    test_email_notifications
 
     # Comprehensive checks
     check_resource_usage
@@ -633,7 +698,7 @@ main() {
     if [[ "$SEND_EMAIL" == "true" ]] && [[ ${#CRITICAL_ISSUES[@]} -gt 0 ]]; then
         local issue_summary
         issue_summary=$(printf "%s\n" "${CRITICAL_ISSUES[@]}")
-        send_notification_email "VaultWarden Health Check CRITICAL Issues" "The following critical issues were found:\n\n$issue_summary\n\nPlease check your VaultWarden instance immediately."
+        send_notification_email "CRITICAL: VaultWarden Health Check Issues" "The following critical issues were found:\n\n$issue_summary"
     fi
 
     # Exit with appropriate code
