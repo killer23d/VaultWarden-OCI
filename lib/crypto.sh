@@ -1,263 +1,462 @@
 #!/usr/bin/env bash
-# lib/crypto.sh - Age encryption and SOPS helpers for VaultWarden-OCI-NG
-# Focused cryptographic operations
+# lib/crypto.sh - Cryptographic operations library for VaultWarden-OCI-NG
+# ENHANCED: Standardized error handling patterns - functions return, callers decide
+# ADDED: Age key validation function for health checks and verification
+# All functions use 'return' with exit codes, never 'exit'
 
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_CRYPTO_LIB_LOADED:-}" ]] && return 0
 readonly VAULTWARDEN_CRYPTO_LIB_LOADED=1
 
 # --- Configuration ---
-readonly DEFAULT_AGE_KEY_FILE="secrets/keys/age-key.txt"
-readonly DEFAULT_AGE_PUBLIC_KEY_FILE="secrets/keys/age-public-key.txt"
-readonly DEFAULT_SECRETS_FILE="secrets/secrets.yaml"
-
-# --- Age Key Operations ---
-
-# Check if Age key exists and is accessible
-check_age_key() {
-    local key_file="${1:-$DEFAULT_AGE_KEY_FILE}"
-
-    if [[ ! -f "$key_file" ]]; then
-        return 1
-    fi
-
-    if [[ ! -r "$key_file" ]]; then
-        return 1
-    fi
-
-    # Check permissions (should be 600)
-    local perms
-    perms=$(stat -c "%a" "$key_file" 2>/dev/null)
-    [[ "$perms" == "600" ]]
-}
-
-# Generate new Age key pair
-generate_age_keypair() {
-    local private_key_file="${1:-$DEFAULT_AGE_KEY_FILE}"
-    local public_key_file="${2:-$DEFAULT_AGE_PUBLIC_KEY_FILE}"
-
-    if ! command -v age-keygen >/dev/null 2>&1; then
-        return 1
-    fi
-
-    # Create keys directory
-    mkdir -p "$(dirname "$private_key_file")"
-
-    # Generate private key
-    age-keygen -o "$private_key_file" || return 1
-
-    # Set secure permissions
-    chmod 600 "$private_key_file"
-
-    # Extract public key
-    age-keygen -y "$private_key_file" > "$public_key_file" || return 1
-    chmod 644 "$public_key_file"
-
-    return 0
-}
-
-# Get public key from private key
-get_public_key() {
-    local private_key_file="${1:-$DEFAULT_AGE_KEY_FILE}"
-
-    if ! check_age_key "$private_key_file"; then
-        return 1
-    fi
-
-    if ! command -v age-keygen >/dev/null 2>&1; then
-        return 1
-    fi
-
-    age-keygen -y "$private_key_file"
-}
-
-# --- Encryption/Decryption Operations ---
-
-# Encrypt file with Age using public key
-encrypt_file() {
-    local input_file="$1"
-    local output_file="$2"
-    local public_key_file="${3:-$DEFAULT_AGE_PUBLIC_KEY_FILE}"
-
-    if [[ ! -f "$input_file" ]]; then
-        return 1
-    fi
-
-    if [[ ! -f "$public_key_file" ]]; then
-        return 1
-    fi
-
-    if ! command -v age >/dev/null 2>&1; then
-        return 1
-    fi
-
-    local public_key
-    public_key=$(cat "$public_key_file") || return 1
-
-    if [[ -n "$output_file" ]]; then
-        age -r "$public_key" -o "$output_file" "$input_file"
-    else
-        age -r "$public_key" "$input_file"
-    fi
-}
-
-# Decrypt file with Age using private key
-decrypt_file() {
-    local encrypted_file="$1"
-    local output_file="$2"
-    local private_key_file="${3:-$DEFAULT_AGE_KEY_FILE}"
-
-    if [[ ! -f "$encrypted_file" ]]; then
-        return 1
-    fi
-
-    if ! check_age_key "$private_key_file"; then
-        return 1
-    fi
-
-    if ! command -v age >/dev/null 2>&1; then
-        return 1
-    fi
-
-    if [[ -n "$output_file" ]]; then
-        age -d -i "$private_key_file" "$encrypted_file" > "$output_file"
-    else
-        age -d -i "$private_key_file" "$encrypted_file"
-    fi
-}
-
-# Encrypt data from stdin
-encrypt_data() {
-    local public_key_file="${1:-$DEFAULT_AGE_PUBLIC_KEY_FILE}"
-
-    if [[ ! -f "$public_key_file" ]]; then
-        return 1
-    fi
-
-    if ! command -v age >/dev/null 2>&1; then
-        return 1
-    fi
-
-    local public_key
-    public_key=$(cat "$public_key_file") || return 1
-
-    age -r "$public_key"
-}
-
-# Decrypt data to stdout
-decrypt_data() {
-    local private_key_file="${1:-$DEFAULT_AGE_KEY_FILE}"
-
-    if ! check_age_key "$private_key_file"; then
-        return 1
-    fi
-
-    if ! command -v age >/dev/null 2>&1; then
-        return 1
-    fi
-
-    age -d -i "$private_key_file"
-}
+DEFAULT_AGE_KEY_FILE="secrets/keys/age-key.txt"
 
 # --- SOPS Operations ---
 
-# Check if SOPS is available
-check_sops_available() {
-    command -v sops >/dev/null 2>&1
-}
-
-# Encrypt file with SOPS
-sops_encrypt() {
-    local input_file="$1"
-
-    if [[ ! -f "$input_file" ]]; then
-        return 1
-    fi
-
-    if ! check_sops_available; then
-        return 1
-    fi
-
-    sops --encrypt --in-place "$input_file"
-}
-
-# Decrypt file with SOPS
-sops_decrypt() {
-    local encrypted_file="$1"
-    local output_file="$2"
-
-    if [[ ! -f "$encrypted_file" ]]; then
-        return 1
-    fi
-
-    if ! check_sops_available; then
-        return 1
-    fi
-
-    if [[ -n "$output_file" ]]; then
-        sops -d "$encrypted_file" > "$output_file"
-    else
-        sops -d "$encrypted_file"
-    fi
-}
-
-# Edit file with SOPS (interactive)
-sops_edit() {
-    local encrypted_file="$1"
-
-    if [[ ! -f "$encrypted_file" ]]; then
-        return 1
-    fi
-
-    if ! check_sops_available; then
-        return 1
-    fi
-
-    sops "$encrypted_file"
-}
-
-# Test if file is SOPS encrypted
+# Check if a file is SOPS encrypted - STANDARDIZED: Returns exit code
 is_sops_encrypted() {
     local file="$1"
 
     if [[ ! -f "$file" ]]; then
+        log_error "File not found for SOPS check: $file"
         return 1
     fi
 
-    # Check for SOPS metadata
-    grep -q "sops:" "$file" 2>/dev/null
+    # Check for SOPS metadata in the file
+    if grep -q "sops:" "$file" && grep -q "version:" "$file"; then
+        return 0
+    else
+        return 1
+    fi
 }
 
-# --- Utility Functions ---
+# Decrypt SOPS file to stdout - STANDARDIZED: Returns exit code
+decrypt_sops_file() {
+    local file="$1"
+    local age_key_file="${2:-$DEFAULT_AGE_KEY_FILE}"
 
-# Generate secure random string
+    if [[ ! -f "$file" ]]; then
+        log_error "SOPS file not found: $file"
+        return 1
+    fi
+
+    if [[ ! -f "$age_key_file" ]]; then
+        log_error "Age key file not found: $age_key_file"
+        return 1
+    fi
+
+    if ! has_command sops; then
+        log_error "sops command not available"
+        return 1
+    fi
+
+    # Set Age key file environment variable for this operation
+    SOPS_AGE_KEY_FILE="$age_key_file" sops --decrypt "$file" 2>/dev/null
+}
+
+# Encrypt file with SOPS - STANDARDIZED: Returns exit code
+encrypt_sops_file() {
+    local file="$1"
+    local age_key_file="${2:-$DEFAULT_AGE_KEY_FILE}"
+
+    if [[ ! -f "$file" ]]; then
+        log_error "File to encrypt not found: $file"
+        return 1
+    fi
+
+    if [[ ! -f "$age_key_file" ]]; then
+        log_error "Age key file not found: $age_key_file"
+        return 1
+    fi
+
+    if ! has_command sops; then
+        log_error "sops command not available"
+        return 1
+    fi
+
+    # Extract public key from age key file
+    local age_public_key
+    if ! age_public_key=$(age-keygen -y "$age_key_file" 2>/dev/null); then
+        log_error "Failed to extract public key from: $age_key_file"
+        return 1
+    fi
+
+    # Encrypt file in place
+    if ! sops --encrypt --age "$age_public_key" --in-place "$file" 2>/dev/null; then
+        log_error "Failed to encrypt file with SOPS: $file"
+        return 1
+    fi
+
+    return 0
+}
+
+# --- Age Operations ---
+
+# Generate Age key pair - STANDARDIZED: Returns exit code
+generate_age_key() {
+    local output_file="$1"
+    local overwrite="${2:-false}"
+
+    if [[ -f "$output_file" ]] && [[ "$overwrite" != "true" ]]; then
+        log_error "Age key file already exists: $output_file (use overwrite=true to replace)"
+        return 1
+    fi
+
+    if ! has_command age-keygen; then
+        log_error "age-keygen command not available"
+        return 1
+    fi
+
+    # Create directory if needed
+    local key_dir
+    key_dir=$(dirname "$output_file")
+    if ! ensure_dir "$key_dir" 700; then
+        return 1
+    fi
+
+    # Generate key
+    if ! age-keygen -o "$output_file" 2>/dev/null; then
+        log_error "Failed to generate Age key: $output_file"
+        return 1
+    fi
+
+    # Secure the key file
+    if ! secure_file "$output_file" 600; then
+        return 1
+    fi
+
+    log_success "Age key generated: $output_file"
+    return 0
+}
+
+# Get Age public key from private key file - STANDARDIZED: Returns exit code
+get_age_public_key() {
+    local age_key_file="$1"
+
+    if [[ ! -f "$age_key_file" ]]; then
+        log_error "Age key file not found: $age_key_file"
+        return 1
+    fi
+
+    if ! has_command age-keygen; then
+        log_error "age-keygen command not available"
+        return 1
+    fi
+
+    local public_key
+    if ! public_key=$(age-keygen -y "$age_key_file" 2>/dev/null); then
+        log_error "Failed to extract public key from: $age_key_file"
+        return 1
+    fi
+
+    echo "$public_key"
+    return 0
+}
+
+# NEW: Check Age key validity - STANDARDIZED: Returns exit code
+check_age_key() {
+    local age_key_file="${1:-$DEFAULT_AGE_KEY_FILE}"
+
+    if [[ ! -f "$age_key_file" ]]; then
+        log_error "Age key file not found: $age_key_file"
+        return 1
+    fi
+
+    # Check file permissions (should be 600)
+    local key_perms
+    key_perms=$(stat -c "%a" "$age_key_file" 2>/dev/null || echo "000")
+    if [[ "$key_perms" != "600" ]]; then
+        log_error "Age key has incorrect permissions: $key_perms (should be 600)"
+        return 1
+    fi
+
+    # Check if we can extract public key (validates key format)
+    if ! has_command age-keygen; then
+        log_warn "age-keygen not available, skipping key format validation"
+        return 0
+    fi
+
+    if ! age-keygen -y "$age_key_file" >/dev/null 2>&1; then
+        log_error "Age key file appears to be corrupted or invalid format"
+        return 1
+    fi
+
+    log_debug "Age key validation passed: $age_key_file"
+    return 0
+}
+
+# Encrypt data with Age (reads from stdin, writes to stdout) - STANDARDIZED: Returns exit code
+encrypt_data() {
+    local age_key_file="${1:-$DEFAULT_AGE_KEY_FILE}"
+
+    if [[ ! -f "$age_key_file" ]]; then
+        log_error "Age key file not found: $age_key_file"
+        return 1
+    fi
+
+    if ! has_command age; then
+        log_error "age command not available"
+        return 1
+    fi
+
+    # Get public key for encryption
+    local public_key
+    if ! public_key=$(get_age_public_key "$age_key_file"); then
+        return 1
+    fi
+
+    # Encrypt stdin to stdout
+    if ! age -r "$public_key"; then
+        log_error "Age encryption failed"
+        return 1
+    fi
+
+    return 0
+}
+
+# Decrypt data with Age (reads from stdin, writes to stdout) - STANDARDIZED: Returns exit code
+decrypt_data() {
+    local age_key_file="${1:-$DEFAULT_AGE_KEY_FILE}"
+
+    if [[ ! -f "$age_key_file" ]]; then
+        log_error "Age key file not found: $age_key_file"
+        return 1
+    fi
+
+    if ! has_command age; then
+        log_error "age command not available"
+        return 1
+    fi
+
+    # Decrypt stdin to stdout
+    if ! age -d -i "$age_key_file"; then
+        log_error "Age decryption failed"
+        return 1
+    fi
+
+    return 0
+}
+
+# --- Secure Random Generation ---
+
+# Generate secure random string - STANDARDIZED: Returns exit code
 generate_secure_string() {
     local length="${1:-32}"
+    local charset="${2:-A-Za-z0-9}"
 
-    if command -v openssl >/dev/null 2>&1; then
-        openssl rand -base64 "$length" | tr -dc 'a-zA-Z0-9' | head -c "$length"
+    if ! has_command openssl; then
+        log_error "openssl command not available for secure string generation"
+        return 1
+    fi
+
+    # Generate random string using openssl
+    local random_string
+    if ! random_string=$(openssl rand -base64 $((length * 3 / 4)) 2>/dev/null | tr -cd "$charset" | head -c "$length"); then
+        log_error "Failed to generate secure random string"
+        return 1
+    fi
+
+    if [[ ${#random_string} -lt $length ]]; then
+        log_error "Generated string too short (entropy issue?)"
+        return 1
+    fi
+
+    echo "$random_string"
+    return 0
+}
+
+# Generate secure random password - STANDARDIZED: Returns exit code
+generate_secure_password() {
+    local length="${1:-24}"
+
+    # Use a charset suitable for passwords
+    local charset="A-Za-z0-9!@#$%^&*()-_=+[]{}|;:,.<>?"
+    
+    if ! generate_secure_string "$length" "$charset"; then
+        return 1
+    fi
+
+    return 0
+}
+
+# --- Hash Operations ---
+
+# Generate bcrypt hash (for Caddy basic auth) - STANDARDIZED: Returns exit code
+generate_bcrypt_hash() {
+    local password="$1"
+    local rounds="${2:-12}"
+
+    if [[ -z "$password" ]]; then
+        log_error "Password cannot be empty for bcrypt hash"
+        return 1
+    fi
+
+    # Try to use Caddy to generate bcrypt hash
+    if has_command docker && require_docker >/dev/null 2>&1; then
+        local bcrypt_hash
+        if bcrypt_hash=$(echo "$password" | docker run --rm -i ghcr.io/caddybuilds/caddy-cloudflare:latest caddy hash-password --stdin 2>/dev/null); then
+            echo "$bcrypt_hash"
+            return 0
+        fi
+    fi
+
+    # Fallback: try htpasswd if available
+    if has_command htpasswd; then
+        local bcrypt_hash
+        if bcrypt_hash=$(htpasswd -nbB -C "$rounds" user "$password" 2>/dev/null | cut -d: -f2); then
+            echo "$bcrypt_hash"
+            return 0
+        fi
+    fi
+
+    log_error "No bcrypt hash generator available (tried Caddy container and htpasswd)"
+    return 1
+}
+
+# --- File Integrity Operations ---
+
+# Calculate SHA256 checksum - STANDARDIZED: Returns exit code
+calculate_sha256() {
+    local file="$1"
+
+    if [[ ! -f "$file" ]]; then
+        log_error "File not found for checksum: $file"
+        return 1
+    fi
+
+    local checksum
+    if has_command sha256sum; then
+        if ! checksum=$(sha256sum "$file" | cut -d' ' -f1); then
+            log_error "Failed to calculate SHA256 checksum: $file"
+            return 1
+        fi
+    elif has_command shasum; then
+        if ! checksum=$(shasum -a 256 "$file" | cut -d' ' -f1); then
+            log_error "Failed to calculate SHA256 checksum: $file"
+            return 1
+        fi
     else
-        # Fallback to /dev/urandom
-        < /dev/urandom tr -dc 'a-zA-Z0-9' | head -c "$length"
+        log_error "No SHA256 calculator available (tried sha256sum and shasum)"
+        return 1
+    fi
+
+    echo "$checksum"
+    return 0
+}
+
+# Verify SHA256 checksum - STANDARDIZED: Returns exit code
+verify_sha256() {
+    local file="$1"
+    local expected_checksum="$2"
+
+    if [[ ! -f "$file" ]]; then
+        log_error "File not found for verification: $file"
+        return 1
+    fi
+
+    local actual_checksum
+    if ! actual_checksum=$(calculate_sha256 "$file"); then
+        return 1
+    fi
+
+    if [[ "$actual_checksum" == "$expected_checksum" ]]; then
+        log_debug "SHA256 verification successful: $file"
+        return 0
+    else
+        log_error "SHA256 verification failed: $file"
+        log_error "Expected: $expected_checksum"
+        log_error "Actual:   $actual_checksum"
+        return 1
     fi
 }
 
-# Generate secure hex string
-generate_hex_string() {
-    local length="${1:-32}"
+# --- Secure File Operations ---
 
-    if command -v openssl >/dev/null 2>&1; then
-        openssl rand -hex "$length"
-    else
-        # Fallback to /dev/urandom
-        < /dev/urandom tr -dc 'a-f0-9' | head -c "$((length * 2))"
+# Securely wipe file before deletion - STANDARDIZED: Returns exit code
+secure_delete() {
+    local file="$1"
+
+    if [[ ! -f "$file" ]]; then
+        log_error "File not found for secure deletion: $file"
+        return 1
     fi
+
+    # Try shred first (most secure)
+    if has_command shred; then
+        if shred -vfz -n 3 "$file" 2>/dev/null; then
+            log_debug "File securely deleted with shred: $file"
+            return 0
+        fi
+    fi
+
+    # Fallback: overwrite with random data then delete
+    if has_command dd && [[ -c /dev/urandom ]]; then
+        local file_size
+        file_size=$(stat -c%s "$file" 2>/dev/null)
+        if [[ -n "$file_size" ]] && dd if=/dev/urandom of="$file" bs="$file_size" count=1 2>/dev/null; then
+            rm -f "$file"
+            log_debug "File securely deleted with dd: $file"
+            return 0
+        fi
+    fi
+
+    # Last resort: regular deletion with warning
+    rm -f "$file"
+    log_warn "File deleted but not securely wiped: $file"
+    return 0
+}
+
+# --- Enhanced Security Validation ---
+
+# Comprehensive cryptographic environment check - STANDARDIZED: Returns exit code
+validate_crypto_environment() {
+    log_debug "Validating cryptographic environment..."
+
+    local issues=()
+
+    # Check Age tools
+    if ! has_command age; then
+        issues+=("age command not available")
+    fi
+
+    if ! has_command age-keygen; then
+        issues+=("age-keygen command not available")
+    fi
+
+    # Check SOPS
+    if ! has_command sops; then
+        issues+=("sops command not available")
+    fi
+
+    # Check default Age key if it exists
+    if [[ -f "$DEFAULT_AGE_KEY_FILE" ]]; then
+        if ! check_age_key "$DEFAULT_AGE_KEY_FILE"; then
+            issues+=("Default Age key validation failed")
+        fi
+    fi
+
+    # Check OpenSSL for secure string generation
+    if ! has_command openssl; then
+        issues+=("openssl command not available")
+    fi
+
+    if [[ ${#issues[@]} -gt 0 ]]; then
+        log_error "Cryptographic environment validation failed:"
+        for issue in "${issues[@]}"; do
+            log_error "  - $issue"
+        done
+        return 1
+    fi
+
+    log_debug "Cryptographic environment validation passed"
+    return 0
 }
 
 # Export functions for use by scripts
-export -f check_age_key generate_age_keypair get_public_key
-export -f encrypt_file decrypt_file encrypt_data decrypt_data
-export -f check_sops_available sops_encrypt sops_decrypt sops_edit is_sops_encrypted
-export -f generate_secure_string generate_hex_string
+export -f is_sops_encrypted decrypt_sops_file encrypt_sops_file
+export -f generate_age_key get_age_public_key check_age_key encrypt_data decrypt_data
+export -f generate_secure_string generate_secure_password generate_bcrypt_hash
+export -f calculate_sha256 verify_sha256 secure_delete validate_crypto_environment
+export DEFAULT_AGE_KEY_FILE
 
-log_debug "Crypto library loaded successfully" 2>/dev/null || true
+log_debug "Enhanced crypto library loaded successfully - standardized error handling with Age key validation" 2>/dev/null || true

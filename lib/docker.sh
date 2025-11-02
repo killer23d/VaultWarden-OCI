@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # lib/docker.sh - Docker operations library for VaultWarden-OCI-NG
-# Focused Docker helper functions
+# ENHANCED: Reinforced standardized error handling patterns
+# All functions return exit codes, callers decide exit strategy
 
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_DOCKER_LIB_LOADED:-}" ]] && return 0
@@ -8,7 +9,7 @@ readonly VAULTWARDEN_DOCKER_LIB_LOADED=1
 
 # --- Docker Availability Checks ---
 
-# Check if Docker is installed and accessible
+# Check if Docker is installed and accessible - STANDARDIZED: Returns exit code
 check_docker_available() {
     if ! command -v docker >/dev/null 2>&1; then
         return 1
@@ -21,12 +22,12 @@ check_docker_available() {
     return 0
 }
 
-# Check if Docker Compose plugin is available
+# Check if Docker Compose plugin is available - STANDARDIZED: Returns exit code
 check_compose_available() {
     docker compose version >/dev/null 2>&1
 }
 
-# Ensure Docker is ready for operations
+# Ensure Docker is ready for operations - STANDARDIZED: Returns exit code
 require_docker() {
     if ! check_docker_available; then
         log_error "Docker not available or daemon not running"
@@ -45,7 +46,7 @@ require_docker() {
 
 # --- Container Status Operations ---
 
-# Get container status for a service
+# Get container status for a service - STANDARDIZED: Returns exit code
 get_service_status() {
     local service="$1"
 
@@ -59,9 +60,10 @@ get_service_status() {
     status=$(docker compose ps "$service" --format json 2>/dev/null | jq -r '.State // "not_found"' 2>/dev/null)
 
     echo "${status:-not_found}"
+    return 0
 }
 
-# Check if service is running
+# Check if service is running - STANDARDIZED: Returns exit code
 is_service_running() {
     local service="$1"
     local status
@@ -70,7 +72,7 @@ is_service_running() {
     [[ "$status" == "running" ]]
 }
 
-# Get service health status
+# Get service health status - STANDARDIZED: Returns exit code
 get_service_health() {
     local service="$1"
 
@@ -83,9 +85,10 @@ get_service_health() {
     health=$(docker compose ps "$service" --format json 2>/dev/null | jq -r '.Health // "none"' 2>/dev/null)
 
     echo "${health:-none}"
+    return 0
 }
 
-# Check if service is healthy (running + healthy status)
+# Check if service is healthy - STANDARDIZED: Returns exit code
 is_service_healthy() {
     local service="$1"
     local status health
@@ -98,175 +101,284 @@ is_service_healthy() {
 
 # --- Service Management Operations ---
 
-# Start services using compose
+# Start services using compose - STANDARDIZED: Returns exit code
 start_services() {
     local services=("$@")
 
-    require_docker || return 1
+    if ! require_docker; then
+        return 1
+    fi
 
     if [[ ${#services[@]} -eq 0 ]]; then
         # Start all services
-        docker compose up -d --remove-orphans
+        if ! docker compose up -d --remove-orphans; then
+            log_error "Failed to start all services"
+            return 1
+        fi
     else
         # Start specific services
-        docker compose up -d "${services[@]}"
+        if ! docker compose up -d "${services[@]}"; then
+            log_error "Failed to start services: ${services[*]}"
+            return 1
+        fi
     fi
+
+    return 0
 }
 
-# Stop services using compose
+# Stop services using compose - STANDARDIZED: Returns exit code
 stop_services() {
     local services=("$@")
 
-    require_docker || return 1
+    if ! require_docker; then
+        return 1
+    fi
 
     if [[ ${#services[@]} -eq 0 ]]; then
         # Stop all services
-        docker compose down --remove-orphans
+        if ! docker compose down --remove-orphans; then
+            log_error "Failed to stop all services"
+            return 1
+        fi
     else
         # Stop specific services
-        docker compose stop "${services[@]}"
+        if ! docker compose stop "${services[@]}"; then
+            log_error "Failed to stop services: ${services[*]}"
+            return 1
+        fi
     fi
+
+    return 0
 }
 
-# Restart services
+# Restart services - STANDARDIZED: Returns exit code
 restart_services() {
     local services=("$@")
 
-    require_docker || return 1
+    if ! require_docker; then
+        return 1
+    fi
 
     if [[ ${#services[@]} -eq 0 ]]; then
         # Restart all services
-        docker compose restart
+        if ! docker compose restart; then
+            log_error "Failed to restart all services"
+            return 1
+        fi
     else
         # Restart specific services
-        docker compose restart "${services[@]}"
+        if ! docker compose restart "${services[@]}"; then
+            log_error "Failed to restart services: ${services[*]}"
+            return 1
+        fi
     fi
+
+    return 0
 }
 
-# Force recreate services (useful for updates)
+# Force recreate services - STANDARDIZED: Returns exit code
 recreate_services() {
     local services=("$@")
 
-    require_docker || return 1
+    if ! require_docker; then
+        return 1
+    fi
 
     if [[ ${#services[@]} -eq 0 ]]; then
         # Recreate all services
-        docker compose up -d --force-recreate --remove-orphans
+        if ! docker compose up -d --force-recreate --remove-orphans; then
+            log_error "Failed to recreate all services"
+            return 1
+        fi
     else
         # Recreate specific services
-        docker compose up -d --force-recreate "${services[@]}"
+        if ! docker compose up -d --force-recreate "${services[@]}"; then
+            log_error "Failed to recreate services: ${services[*]}"
+            return 1
+        fi
     fi
+
+    return 0
 }
 
 # --- Image Management ---
 
-# Pull latest images for services
+# Pull latest images for services - STANDARDIZED: Returns exit code
 pull_images() {
     local services=("$@")
 
-    require_docker || return 1
+    if ! require_docker; then
+        return 1
+    fi
 
     if [[ ${#services[@]} -eq 0 ]]; then
         # Pull all images
-        docker compose pull
+        if ! docker compose pull; then
+            log_error "Failed to pull all images"
+            return 1
+        fi
     else
         # Pull specific service images
-        docker compose pull "${services[@]}"
+        if ! docker compose pull "${services[@]}"; then
+            log_error "Failed to pull images for services: ${services[*]}"
+            return 1
+        fi
     fi
-}
 
-# --- FIX #6: Removed has_image_updates function ---
+    return 0
+}
 
 # --- Container Execution ---
 
-# Execute command in running service container
+# Execute command in running service container - STANDARDIZED: Returns exit code
 exec_in_service() {
     local service="$1"
     shift
     local cmd=("$@")
 
-    require_docker || return 1
-
-    if ! is_service_running "$service"; then
+    if ! require_docker; then
         return 1
     fi
 
-    docker compose exec "$service" "${cmd[@]}"
+    if ! is_service_running "$service"; then
+        log_error "Service $service is not running"
+        return 1
+    fi
+
+    if ! docker compose exec "$service" "${cmd[@]}"; then
+        log_error "Failed to execute command in service: $service"
+        return 1
+    fi
+
+    return 0
 }
 
-# Execute command in service container (creates temporary container if not running)
+# Execute command in service container - STANDARDIZED: Returns exit code
 run_in_service() {
     local service="$1"
     shift
     local cmd=("$@")
 
-    require_docker || return 1
+    if ! require_docker; then
+        return 1
+    fi
 
-    docker compose run --rm "$service" "${cmd[@]}"
+    if ! docker compose run --rm "$service" "${cmd[@]}"; then
+        log_error "Failed to run command in service: $service"
+        return 1
+    fi
+
+    return 0
 }
 
 # --- Cleanup Operations ---
 
-# Clean up stopped containers
+# Clean up stopped containers - STANDARDIZED: Returns exit code
 cleanup_containers() {
-    require_docker || return 1
+    if ! require_docker; then
+        return 1
+    fi
 
     docker container prune -f >/dev/null 2>&1
+    return 0
 }
 
-# Clean up unused images
+# Clean up unused images - STANDARDIZED: Returns exit code
 cleanup_images() {
-    require_docker || return 1
+    if ! require_docker; then
+        return 1
+    fi
 
     docker image prune -f >/dev/null 2>&1
+    return 0
 }
 
-# Clean up unused volumes (be careful!)
+# Clean up unused volumes - STANDARDIZED: Returns exit code
 cleanup_volumes() {
-    require_docker || return 1
+    if ! require_docker; then
+        return 1
+    fi
 
     docker volume prune -f >/dev/null 2>&1
+    return 0
 }
 
-# Clean up unused networks
+# Clean up unused networks - STANDARDIZED: Returns exit code
 cleanup_networks() {
-    require_docker || return 1
+    if ! require_docker; then
+        return 1
+    fi
 
     docker network prune -f >/dev/null 2>&1
+    return 0
 }
 
-# Complete Docker cleanup
+# Complete Docker cleanup - STANDARDIZED: Returns exit code
 cleanup_docker_system() {
-    cleanup_containers
-    cleanup_images
-    cleanup_volumes
-    cleanup_networks
+    local cleanup_failed=false
+
+    if ! cleanup_containers; then
+        cleanup_failed=true
+    fi
+
+    if ! cleanup_images; then
+        cleanup_failed=true
+    fi
+
+    if ! cleanup_volumes; then
+        cleanup_failed=true
+    fi
+
+    if ! cleanup_networks; then
+        cleanup_failed=true
+    fi
+
+    if [[ "$cleanup_failed" == "true" ]]; then
+        log_warn "Some Docker cleanup operations failed"
+        return 1
+    fi
+
+    return 0
 }
 
 # --- Logging Operations ---
 
-# Get logs for service
+# Get logs for service - STANDARDIZED: Returns exit code
 get_service_logs() {
     local service="$1"
     local lines="${2:-100}"
 
-    require_docker || return 1
+    if ! require_docker; then
+        return 1
+    fi
 
-    docker compose logs --tail="$lines" "$service"
+    if ! docker compose logs --tail="$lines" "$service"; then
+        log_error "Failed to get logs for service: $service"
+        return 1
+    fi
+
+    return 0
 }
 
-# Follow logs for service
+# Follow logs for service - STANDARDIZED: Returns exit code
 follow_service_logs() {
     local service="$1"
 
-    require_docker || return 1
+    if ! require_docker; then
+        return 1
+    fi
 
-    docker compose logs -f "$service"
+    if ! docker compose logs -f "$service"; then
+        log_error "Failed to follow logs for service: $service"
+        return 1
+    fi
+
+    return 0
 }
 
 # --- Validation Helpers ---
 
-# Wait for service to be ready (running + healthy)
+# Wait for service to be ready - STANDARDIZED: Returns exit code
 wait_for_service_ready() {
     local service="$1"
     local timeout="${2:-60}"
@@ -281,20 +393,29 @@ wait_for_service_ready() {
         ((count++))
     done
 
+    log_error "Service $service did not become ready within ${timeout}s"
     return 1
 }
 
-# Validate compose file syntax
+# Validate compose file syntax - STANDARDIZED: Returns exit code
 validate_compose_file() {
     local compose_file="${1:-docker-compose.yml}"
 
-    require_docker || return 1
-
-    if [[ ! -f "$compose_file" ]]; then
+    if ! require_docker; then
         return 1
     fi
 
-    docker compose -f "$compose_file" config --quiet >/dev/null 2>&1
+    if [[ ! -f "$compose_file" ]]; then
+        log_error "Compose file not found: $compose_file"
+        return 1
+    fi
+
+    if ! docker compose -f "$compose_file" config --quiet >/dev/null 2>&1; then
+        log_error "Compose file validation failed: $compose_file"
+        return 1
+    fi
+
+    return 0
 }
 
 # Export functions for use by scripts
@@ -305,4 +426,4 @@ export -f pull_images exec_in_service run_in_service
 export -f cleanup_containers cleanup_images cleanup_volumes cleanup_networks cleanup_docker_system
 export -f get_service_logs follow_service_logs wait_for_service_ready validate_compose_file
 
-log_debug "Docker library loaded successfully" 2>/dev/null || true
+log_debug "Enhanced Docker library loaded successfully - standardized error handling" 2>/dev/null || true

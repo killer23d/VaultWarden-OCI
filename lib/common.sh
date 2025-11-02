@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # lib/common.sh - Core shared functions for VaultWarden-OCI-NG
-# Essential utilities and logging - Enhanced Edition
+# ENHANCED: Standardized error handling patterns - functions return, callers decide
+# All library functions use 'return' with exit codes, never 'exit'
 
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_COMMON_LIB_LOADED:-}" ]] && return 0
@@ -14,7 +15,7 @@ PROJECT_ROOT="$(cd "$LIB_DIR/.." && pwd)"
 LOG_PREFIX=""
 LOG_TIMESTAMP=true
 LOG_COLORS=true
-LOG_LEVEL="${LOG_LEVEL:-INFO}"  # ENHANCEMENT: Configurable log levels
+LOG_LEVEL="${LOG_LEVEL:-INFO}"
 
 # Colors for output (if supported)
 if [[ -t 1 ]] && command -v tput >/dev/null 2>&1; then
@@ -33,7 +34,7 @@ else
     readonly COLOR_BOLD=""
 fi
 
-# ENHANCEMENT: Log level filtering for production environments
+# Log level filtering for production environments
 _should_log() {
     local level="$1"
     local levels=("DEBUG" "INFO" "WARN" "ERROR")
@@ -140,7 +141,7 @@ log_header() {
 
 # --- Configuration Management ---
 
-# Load .env file safely
+# Load .env file safely - STANDARDIZED: Returns exit code, never exits
 load_env_file() {
     local env_file="${1:-.env}"
 
@@ -153,7 +154,11 @@ load_env_file() {
 
     # Source with export
     set -a
-    source "$env_file"
+    source "$env_file" || {
+        log_error "Failed to source environment file: $env_file"
+        set +a
+        return 1
+    }
     set +a
 
     log_debug "Environment loaded successfully"
@@ -170,7 +175,7 @@ get_config_value() {
     echo "$value"
 }
 
-# Validate required configuration
+# Validate required configuration - STANDARDIZED: Returns exit code
 require_config() {
     local missing=()
 
@@ -188,10 +193,10 @@ require_config() {
     return 0
 }
 
-# --- ENHANCEMENT: Command Caching for Performance ---
+# --- Command Caching for Performance ---
 declare -A _command_cache
 
-# Check if command exists (cached version for performance)
+# Check if command exists (cached version) - STANDARDIZED: Returns exit code
 has_command() {
     local cmd="$1"
 
@@ -210,7 +215,7 @@ has_command() {
     fi
 }
 
-# Require commands to exist
+# Require commands to exist - STANDARDIZED: Returns exit code
 require_commands() {
     local missing=()
 
@@ -229,7 +234,7 @@ require_commands() {
     return 0
 }
 
-# ENHANCEMENT: Retry logic with exponential backoff for reliable operations
+# Retry logic with exponential backoff - STANDARDIZED: Returns exit code
 retry_with_backoff() {
     local max_attempts="$1"
     local initial_delay="$2"
@@ -244,7 +249,7 @@ retry_with_backoff() {
         if [[ $i -lt $max_attempts ]]; then
             log_warn "Attempt $i failed, retrying in ${delay}s..."
             sleep "$delay"
-            delay=$((delay * 2))  # Exponential backoff
+            delay=$((delay * 2))
         fi
     done
 
@@ -264,7 +269,7 @@ get_real_user() {
 
 # --- File Operations ---
 
-# Ensure directory exists with proper permissions
+# Ensure directory exists with proper permissions - STANDARDIZED: Returns exit code
 ensure_dir() {
     local dir="$1"
     local mode="${2:-755}"
@@ -272,19 +277,28 @@ ensure_dir() {
 
     if [[ ! -d "$dir" ]]; then
         log_debug "Creating directory: $dir"
-        mkdir -p "$dir"
+        if ! mkdir -p "$dir"; then
+            log_error "Failed to create directory: $dir"
+            return 1
+        fi
     fi
 
-    chmod "$mode" "$dir"
+    if ! chmod "$mode" "$dir"; then
+        log_error "Failed to set permissions on directory: $dir"
+        return 1
+    fi
 
     if [[ -n "$owner" ]]; then
-        chown "$owner" "$dir"
+        if ! chown "$owner" "$dir"; then
+            log_error "Failed to set ownership on directory: $dir"
+            return 1
+        fi
     fi
 
     return 0
 }
 
-# Set secure file permissions
+# Set secure file permissions - STANDARDIZED: Returns exit code
 secure_file() {
     local file="$1"
     local mode="${2:-600}"
@@ -294,15 +308,18 @@ secure_file() {
         return 1
     fi
 
-    chmod "$mode" "$file"
-    log_debug "Secured file: $file (mode: $mode)"
+    if ! chmod "$mode" "$file"; then
+        log_error "Failed to secure file: $file"
+        return 1
+    fi
 
+    log_debug "Secured file: $file (mode: $mode)"
     return 0
 }
 
-# --- Enhanced Network Helpers ---
+# --- Network Helpers ---
 
-# Test network connectivity with retry
+# Test network connectivity - STANDARDIZED: Returns exit code
 test_connectivity() {
     local host="${1:-1.1.1.1}"
     local timeout="${2:-5}"
@@ -310,7 +327,7 @@ test_connectivity() {
     ping -c 1 -W "$timeout" "$host" >/dev/null 2>&1
 }
 
-# Test HTTP connectivity with retry and better error handling
+# Test HTTP connectivity - STANDARDIZED: Returns exit code
 test_http() {
     local url="$1"
     local timeout="${2:-10}"
@@ -320,12 +337,12 @@ test_http() {
     elif has_command wget; then
         wget -q --timeout="$timeout" --spider "$url" >/dev/null 2>&1
     else
-        log_warn "Neither curl nor wget available, cannot test HTTP connectivity"
+        log_error "Neither curl nor wget available for HTTP testing"
         return 1
     fi
 }
 
-# ENHANCEMENT: Robust HTTP download with retry
+# Robust HTTP download with retry - STANDARDIZED: Returns exit code
 download_file() {
     local url="$1"
     local output_file="$2"
@@ -343,7 +360,7 @@ download_file() {
     fi
 }
 
-# Send notification email with enhanced rate limiting
+# Send notification email - STANDARDIZED: Returns exit code
 send_notification_email() {
     local subject="$1"
     local body="$2"
@@ -361,7 +378,7 @@ send_notification_email() {
         return 1
     fi
 
-    # ENHANCEMENT: Rate limiting with critical exception
+    # Rate limiting with critical exception
     local last_email_file="/tmp/.vw_last_email_$(echo "$subject" | md5sum | cut -d' ' -f1)"
 
     # Allow critical alerts through rate limiting
@@ -370,7 +387,6 @@ send_notification_email() {
         last_time=$(cat "$last_email_file")
         current_time=$(date +%s)
 
-        # Don't send the same subject email more than once per hour
         if (( current_time - last_time < 3600 )); then
             log_debug "Email rate limited for non-critical notification: $subject"
             return 0
@@ -387,21 +403,22 @@ Project: VaultWarden-OCI"
 
     if echo "$full_body" | mail -s "$full_subject" "$admin_email"; then
         log_success "Notification email sent to $admin_email"
+        return 0
     else
         log_error "Failed to send notification email"
         return 1
     fi
 }
 
-# --- Enhanced Validation Helpers ---
+# --- Validation Helpers ---
 
-# Validate email format (basic)
+# Validate email format - STANDARDIZED: Returns exit code
 validate_email() {
     local email="$1"
     [[ "$email" =~ ^[^@]+@[^@]+\.[^@]+$ ]]
 }
 
-# Validate domain format (basic)
+# Validate domain format - STANDARDIZED: Returns exit code
 validate_domain() {
     local domain="$1"
 
@@ -411,17 +428,19 @@ validate_domain() {
     [[ "$domain" =~ ^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]
 }
 
-# ENHANCEMENT: Additional validation helpers for network operations
+# Validate port number - STANDARDIZED: Returns exit code
 validate_port() {
     local port="$1"
     [[ "$port" =~ ^[0-9]+$ ]] && (( port >= 1 && port <= 65535 ))
 }
 
+# Validate IP address - STANDARDIZED: Returns exit code
 validate_ip() {
     local ip="$1"
     [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]
 }
 
+# Validate URL format - STANDARDIZED: Returns exit code
 validate_url() {
     local url="$1"
     [[ "$url" =~ ^https?://[a-zA-Z0-9.-]+(:[0-9]+)?(/.*)?$ ]]
@@ -440,7 +459,7 @@ setup_cleanup_trap() {
     trap "$cleanup_function" EXIT HUP INT TERM
 }
 
-# ENHANCEMENT: Safe execution wrapper with error context
+# Safe execution wrapper with error context - STANDARDIZED: Returns exit code
 safe_execute() {
     local description="$1"
     shift
@@ -488,4 +507,4 @@ export -f validate_email validate_domain validate_port validate_ip validate_url
 export -f setup_error_trap setup_cleanup_trap safe_execute
 export -f init_common_lib
 
-log_debug "Enhanced common library loaded successfully"
+log_debug "Enhanced common library loaded successfully - standardized error handling"
