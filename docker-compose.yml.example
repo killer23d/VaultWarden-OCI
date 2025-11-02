@@ -2,6 +2,7 @@
 # This file is copied to docker-compose.yml by setup.sh
 # FIXED: Standardized logging strategy - all services use Docker json-file driver
 #        - All logs go to stdout/stderr and are managed by Docker with rotation
+# ENHANCED: Added pids limits and additional container hardening measures
 
 services:
   # VaultWarden Password Manager
@@ -62,6 +63,7 @@ services:
         limits:
           cpus: '${VAULTWARDEN_CPU_LIMIT:-0.6}'
           memory: '${VAULTWARDEN_MEMORY_LIMIT:-1.5g}'
+          pids: 100  # ENHANCEMENT: Prevent fork bomb attacks
         reservations:
           cpus: '${VAULTWARDEN_CPU_RESERVATION:-0.2}'
           memory: '${VAULTWARDEN_MEMORY_RESERVATION:-256m}'
@@ -73,6 +75,9 @@ services:
         max-file: "5"
     security_opt:
       - no-new-privileges:true
+    # ENHANCEMENT: Additional hardening - limit writable areas
+    tmpfs:
+      - /tmp:noexec,nosuid,size=100m
 
   # Caddy Reverse Proxy with Cloudflare Integration
   caddy:
@@ -114,6 +119,7 @@ services:
         limits:
           cpus: '${CADDY_CPU_LIMIT:-0.15}'
           memory: '${CADDY_MEMORY_LIMIT:-256m}'
+          pids: 50  # ENHANCEMENT: Prevent fork bomb attacks
         reservations:
           cpus: '${CADDY_CPU_RESERVATION:-0.1}'
           memory: '${CADDY_MEMORY_RESERVATION:-64m}'
@@ -125,6 +131,9 @@ services:
         max-file: "5"
     security_opt:
       - no-new-privileges:true
+    # ENHANCEMENT: Additional hardening - limit writable areas
+    tmpfs:
+      - /tmp:noexec,nosuid,size=50m
 
   # Fail2Ban Intrusion Prevention
   fail2ban:
@@ -162,6 +171,7 @@ services:
         limits:
           cpus: '${FAIL2BAN_CPU_LIMIT:-0.05}'
           memory: '${FAIL2BAN_MEMORY_LIMIT:-128m}'
+          pids: 25  # ENHANCEMENT: Prevent fork bomb attacks
         reservations:
           cpus: '${FAIL2BAN_CPU_RESERVATION:-0.05}'
           memory: '${FAIL2BAN_MEMORY_RESERVATION:-64m}'
@@ -174,6 +184,11 @@ services:
       options:
         max-size: "10m"
         max-file: "5"
+    security_opt:
+      - no-new-privileges:true
+    # ENHANCEMENT: Additional hardening - limit writable areas
+    tmpfs:
+      - /tmp:noexec,nosuid,size=25m
 
 secrets:
   admin_token:
