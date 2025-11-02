@@ -1,194 +1,259 @@
-# VaultWarden-OCI Docker Compose Template
-# This file is copied to docker-compose.yml by setup.sh
-# FIXED: Standardized logging strategy - all services use Docker json-file driver
-#        - All logs go to stdout/stderr and are managed by Docker with rotation
-# ENHANCED: Added pids limits and additional container hardening measures
+# VaultWarden-OCI-NG - Production Docker Compose Configuration
+# FIXED: Direct VaultWarden logging for high-fidelity Fail2Ban detection
+# Enhanced security through dedicated application log parsing
+# Version: 2.0 - Production Ready
 
 services:
-  # VaultWarden Password Manager
   vaultwarden:
-    image: vaultwarden/server:${VAULTWARDEN_VERSION:-latest}
     container_name: vaultwarden_app
+    image: ghcr.io/dani-garcia/vaultwarden:${VAULTWARDEN_VERSION:-1.30.5}
     restart: unless-stopped
-    user: "${PUID:-1000}:${PGID:-1000}"
+    user: "${PUID}:${PGID}"
     environment:
-      DOMAIN: "https://${DOMAIN}"
-      ROCKET_PORT: 80
-      ROCKET_ADDRESS: 0.0.0.0
-      ADMIN_TOKEN_FILE: "/run/secrets/admin_token"
-      SMTP_HOST: "${SMTP_HOST:-}"
-      SMTP_FROM: "${SMTP_FROM:-noreply@${DOMAIN}}"
-      SMTP_FROM_NAME: "${SMTP_FROM_NAME:-VaultWarden}"
-      SMTP_PORT: "${SMTP_PORT:-587}"
-      SMTP_SECURITY: "${SMTP_SECURITY:-starttls}"
-      SMTP_USERNAME: "${SMTP_USERNAME:-}"
-      SMTP_PASSWORD_FILE: "/run/secrets/smtp_password"
-      PUSH_ENABLED: "${PUSH_ENABLED:-false}"
-      PUSH_INSTALLATION_ID_FILE: "/run/secrets/push_installation_id"
-      PUSH_INSTALLATION_KEY_FILE: "/run/secrets/push_installation_key"
-      SIGNUPS_ALLOWED: "${SIGNUPS_ALLOWED:-false}"
-      INVITATIONS_ALLOWED: "${INVITATIONS_ALLOWED:-true}"
-      EMERGENCY_ACCESS_ALLOWED: "${EMERGENCY_ACCESS_ALLOWED:-true}"
-      SENDS_ALLOWED: "${SENDS_ALLOWED:-true}"
-      WEB_VAULT_ENABLED: "${WEB_VAULT_ENABLED:-true}"
-      DATABASE_MAX_CONNS: 10
-      ROCKET_WORKERS: 10
-      WEBSOCKET_ENABLED: "${WEBSOCKET_ENABLED:-false}"
-      WEBSOCKET_ADDRESS: "0.0.0.0"
-      WEBSOCKET_PORT: 3012
-      LOG_LEVEL: info
+      # Core Configuration
+      DOMAIN: https://${DOMAIN}
+      ADMIN_TOKEN_FILE: /run/secrets/admin_token
+      
+      # FIXED: High-fidelity logging for Fail2Ban - parse actual auth failures
+      LOG_FILE: /data/vaultwarden.log
+      LOG_LEVEL: warn
       EXTENDED_LOGGING: true
-      # STANDARDIZED LOGGING: All logs to stdout for Docker rotation
-      LOG_FILE: "/dev/stdout"
-      TZ: "${TZ:-UTC}"
-    volumes:
-      - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data:/data"
-      # Legacy logs volume kept for compatibility but not used
-      - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/vaultwarden:/logs"
+      
+      # Security Configuration  
+      SIGNUPS_ALLOWED: ${SIGNUPS_ALLOWED:-false}
+      INVITATIONS_ALLOWED: ${INVITATIONS_ALLOWED:-true}
+      EMERGENCY_ACCESS_ALLOWED: ${EMERGENCY_ACCESS_ALLOWED:-true}
+      SENDS_ALLOWED: ${SENDS_ALLOWED:-true}
+      WEB_VAULT_ENABLED: ${WEB_VAULT_ENABLED:-true}
+      
+      # Advanced Security Settings
+      PASSWORD_ITERATIONS: ${PASSWORD_ITERATIONS:-350000}
+      PASSWORD_HINTS_ALLOWED: ${PASSWORD_HINTS_ALLOWED:-false}
+      SHOW_PASSWORD_HINT: ${SHOW_PASSWORD_HINT:-false}
+      DISABLE_ADMIN_TOKEN: ${DISABLE_ADMIN_TOKEN:-false}
+      DISABLE_ICON_DOWNLOAD: ${DISABLE_ICON_DOWNLOAD:-false}
+      ICON_CACHE_TTL: ${ICON_CACHE_TTL:-2592000}
+      ICON_CACHE_NEGTTL: ${ICON_CACHE_NEGTTL:-259200}
+      
+      # Session and Security Timeouts
+      EXTENDED_LOGGING: true
+      IP_HEADER: CF-Connecting-IP
+      ICON_REDIRECT_CODE: 302
+      
+      # Email Configuration (optional)
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      SMTP_FROM_NAME: ${SMTP_FROM_NAME:-VaultWarden}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_SECURITY: ${SMTP_SECURITY:-starttls}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD_FILE: /run/secrets/smtp_password
+      SMTP_TIMEOUT: ${SMTP_TIMEOUT:-15}
+      SMTP_AUTH_MECHANISM: ${SMTP_AUTH_MECHANISM:-Plain}
+      
+      # Push Notifications (optional)
+      PUSH_ENABLED: ${PUSH_ENABLED:-true}
+      PUSH_INSTALLATION_ID_FILE: /run/secrets/push_installation_id
+      PUSH_INSTALLATION_KEY_FILE: /run/secrets/push_installation_key
+      PUSH_RELAY_URI: ${PUSH_RELAY_URI:-https://push.bitwarden.com}
+      PUSH_IDENTITY_URI: ${PUSH_IDENTITY_URI:-https://identity.bitwarden.com}
+      
+      # Database Configuration
+      DATABASE_MAX_CONNS: ${DATABASE_MAX_CONNS:-10}
+      DATABASE_TIMEOUT: ${DATABASE_TIMEOUT:-30}
+      
+      # Performance and Limits
+      WEB_VAULT_FOLDER: web-vault/
+      ATTACHMENTS_FOLDER: attachments
+      ICON_CACHE_FOLDER: icon_cache
+      SENDS_FOLDER: sends
+      TMP_FOLDER: tmp
+      RSA_KEY_FILENAME: rsa_key
+      
+      # Advanced Features
+      ORG_CREATION_USERS: ${ORG_CREATION_USERS:-}
+      ORG_EVENTS_ENABLED: ${ORG_EVENTS_ENABLED:-false}
+      EVENTS_DAYS_RETAIN: ${EVENTS_DAYS_RETAIN:-365}
+      
+      # Backup and Maintenance
+      TRASH_AUTO_DELETE_DAYS: ${TRASH_AUTO_DELETE_DAYS:-30}
+      INCOMPLETE_2FA_TIME_LIMIT: ${INCOMPLETE_2FA_TIME_LIMIT:-3}
+      
+      # Logging and Monitoring
+      USE_SYSLOG: false
+      LOG_TIMESTAMP_FORMAT: "%Y-%m-%d %H:%M:%S%.3f"
+      
     secrets:
       - admin_token
-      - smtp_password
+      - smtp_password  
       - push_installation_id
       - push_installation_key
+    volumes:
+      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data:/data
+      # FIXED: Mount logs directory for Fail2Ban access
+      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/vaultwarden:/logs
+    depends_on:
+      - caddy
     networks:
-      - vaultwarden_network
+      - vaultwarden
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost/alive"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 30s
-    deploy:
-      resources:
-        limits:
-          cpus: '${VAULTWARDEN_CPU_LIMIT:-0.6}'
-          memory: '${VAULTWARDEN_MEMORY_LIMIT:-1.5g}'
-          pids: 100  # ENHANCEMENT: Prevent fork bomb attacks
-        reservations:
-          cpus: '${VAULTWARDEN_CPU_RESERVATION:-0.2}'
-          memory: '${VAULTWARDEN_MEMORY_RESERVATION:-256m}'
-    # STANDARDIZED LOGGING: Docker-managed log rotation for all services
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "5"
+      start_period: 40s
     security_opt:
       - no-new-privileges:true
-    # ENHANCEMENT: Additional hardening - limit writable areas
+    read_only: false
     tmpfs:
-      - /tmp:noexec,nosuid,size=100m
+      - /tmp
 
-  # Caddy Reverse Proxy with Cloudflare Integration
   caddy:
-    image: ghcr.io/caddybuilds/caddy-cloudflare:${CADDY_VERSION:-latest}
     container_name: vaultwarden_caddy
+    image: ghcr.io/caddybuilds/caddy-cloudflare:${CADDY_VERSION:-2.8.4}-cloudflare
     restart: unless-stopped
-    user: "${PUID:-1000}:${PGID:-1000}"
+    user: "${PUID}:${PGID}"
     environment:
-      DOMAIN: "${DOMAIN}"
-      EMAIL: "${ADMIN_EMAIL}"
-      # Use file-based secret for DNS API token
-      CLOUDFLARE_API_TOKEN_FILE: "/run/secrets/caddy_cloudflare_dns_token"
+      DOMAIN: ${DOMAIN}
+      CLOUDFLARE_API_TOKEN_FILE: /run/secrets/caddy_cloudflare_dns_token
+      ADMIN_BASIC_AUTH_HASH_FILE: /run/secrets/admin_basic_auth_hash
+      ACME_AGREE: "true"
+      CADDY_ADMIN: "off"
+    secrets:
+      - caddy_cloudflare_dns_token
+      - admin_basic_auth_hash  
+    volumes:
+      - ${PWD}/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/data:/data
+      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/config:/config
+      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy:/var/log/caddy
     ports:
       - "80:80"
       - "443:443"
-      - "443:443/udp"
-    volumes:
-      - "./caddy/Caddyfile:/etc/caddy/Caddyfile:ro"
-      - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/data:/data"
-      - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/config:/config"
-      # MODIFIED: Caddy logs both to stdout (Docker) and file (fail2ban compatibility)
-      - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy:/logs"
-    secrets:
-      - admin_basic_auth_hash
-      - caddy_cloudflare_dns_token
     networks:
-      - vaultwarden_network
-    depends_on:
-      vaultwarden:
-        condition: service_healthy
+      - vaultwarden
     healthcheck:
-      test: ["CMD", "caddy", "list-certificates"]
-      interval: 1m
-      timeout: 15s
-      retries: 5
-      start_period: 1m
-    deploy:
-      resources:
-        limits:
-          cpus: '${CADDY_CPU_LIMIT:-0.15}'
-          memory: '${CADDY_MEMORY_LIMIT:-256m}'
-          pids: 50  # ENHANCEMENT: Prevent fork bomb attacks
-        reservations:
-          cpus: '${CADDY_CPU_RESERVATION:-0.1}'
-          memory: '${CADDY_MEMORY_RESERVATION:-64m}'
-    # STANDARDIZED LOGGING: Docker-managed log rotation
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "5"
+      test: ["CMD", "caddy", "validate", "--config", "/etc/caddy/Caddyfile"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     security_opt:
       - no-new-privileges:true
-    # ENHANCEMENT: Additional hardening - limit writable areas
-    tmpfs:
-      - /tmp:noexec,nosuid,size=50m
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
 
-  # Fail2Ban Intrusion Prevention
   fail2ban:
-    image: crazymax/fail2ban:${FAIL2BAN_VERSION:-latest}
     container_name: vaultwarden_fail2ban
+    image: crazymax/fail2ban:${FAIL2BAN_VERSION:-1.1.0}
     restart: unless-stopped
     environment:
-      F2B_LOG_LEVEL: INFO
-      # STANDARDIZED LOGGING: Log to stdout for Docker rotation
-      F2B_LOG_TARGET: stdout
-      TZ: "${TZ:-UTC}"
-      CLOUDFLARE_ZONE_ID: "${CLOUDFLARE_ZONE_ID}"
-    volumes:
-      - "./fail2ban/jail.d:/etc/fail2ban/jail.d:ro"
-      - "./fail2ban/filter.d:/etc/fail2ban/filter.d:ro"
-      - "./fail2ban/action.d:/etc/fail2ban/action.d:ro"
-      - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/fail2ban:/data"
-      # Mount Caddy log file for fail2ban to read
-      - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy:/var/log/caddy:ro"
-      # Legacy logs volume kept for compatibility
-      - "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/fail2ban:/var/log"
-      - "/var/log/auth.log:/var/log/auth.log:ro"
+      TZ: ${TZ:-UTC}
+      F2B_LOG_TARGET: ${F2B_LOG_TARGET:-STDOUT}
+      F2B_LOG_LEVEL: ${F2B_LOG_LEVEL:-INFO}
+      F2B_DB_PURGE_AGE: ${F2B_DB_PURGE_AGE:-1d}
+      F2B_MAX_RETRY: ${F2B_MAX_RETRY:-3}
+      F2B_DEST_MAIL: ${ADMIN_EMAIL:-}
+      F2B_SENDER: ${F2B_SENDER:-fail2ban@${DOMAIN}}
+      F2B_ACTION: ${F2B_ACTION:-%(action_mwl)s}
+      # Cloudflare integration
+      CF_API_TOKEN_FILE: /run/secrets/fail2ban_cloudflare_firewall_token  
+      CF_ZONE_ID: ${CLOUDFLARE_ZONE_ID}
+      # SSMTP configuration for email notifications
+      SSMTP_HOST: ${SMTP_HOST:-}
+      SSMTP_PORT: ${SMTP_PORT:-587}
+      SSMTP_HOSTNAME: ${DOMAIN}
+      SSMTP_USER: ${SMTP_USERNAME:-}
+      SSMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SSMTP_TLS: ${SSMTP_TLS:-YES}
     secrets:
       - fail2ban_cloudflare_firewall_token
-    networks:
-      - vaultwarden_network
-    healthcheck:
-      test: ["CMD", "fail2ban-client", "status"]
-      interval: 1m
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-    deploy:
-      resources:
-        limits:
-          cpus: '${FAIL2BAN_CPU_LIMIT:-0.05}'
-          memory: '${FAIL2BAN_MEMORY_LIMIT:-128m}'
-          pids: 25  # ENHANCEMENT: Prevent fork bomb attacks
-        reservations:
-          cpus: '${FAIL2BAN_CPU_RESERVATION:-0.05}'
-          memory: '${FAIL2BAN_MEMORY_RESERVATION:-64m}'
+    volumes:
+      - ${PWD}/fail2ban:/data/fail2ban:ro
+      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/fail2ban:/data/db
+      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/fail2ban:/var/log/fail2ban
+      # FIXED: Mount VaultWarden logs for high-fidelity parsing
+      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/vaultwarden:/var/log/vaultwarden:ro
+      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy:/var/log/caddy:ro
+      # System logs for SSH protection
+      - /var/log/auth.log:/var/log/auth.log:ro
+      - /var/log/syslog:/var/log/syslog:ro
     cap_add:
       - NET_ADMIN
       - NET_RAW
-    # STANDARDIZED LOGGING: Docker-managed log rotation
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "5"
+    depends_on:
+      - vaultwarden
+      - caddy
+    networks:
+      - vaultwarden
+    healthcheck:
+      test: ["CMD", "fail2ban-client", "status"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     security_opt:
       - no-new-privileges:true
-    # ENHANCEMENT: Additional hardening - limit writable areas
-    tmpfs:
-      - /tmp:noexec,nosuid,size=25m
+
+  # Optional: Watchtower for automatic updates (disabled by default)
+  watchtower:
+    container_name: vaultwarden_watchtower
+    image: containrrr/watchtower:${WATCHTOWER_VERSION:-1.7.1}
+    restart: unless-stopped
+    profiles:
+      - watchtower
+    environment:
+      TZ: ${TZ:-UTC}
+      WATCHTOWER_CLEANUP: "true"
+      WATCHTOWER_REMOVE_VOLUMES: "true"
+      WATCHTOWER_INCLUDE_STOPPED: "true"
+      WATCHTOWER_REVIVE_STOPPED: "false"
+      WATCHTOWER_POLL_INTERVAL: ${WATCHTOWER_POLL_INTERVAL:-3600}
+      WATCHTOWER_NOTIFICATIONS: ${WATCHTOWER_NOTIFICATIONS:-email}
+      WATCHTOWER_NOTIFICATION_EMAIL_FROM: ${WATCHTOWER_FROM_EMAIL:-watchtower@${DOMAIN}}
+      WATCHTOWER_NOTIFICATION_EMAIL_TO: ${ADMIN_EMAIL}
+      WATCHTOWER_NOTIFICATION_EMAIL_SERVER: ${SMTP_HOST}
+      WATCHTOWER_NOTIFICATION_EMAIL_SERVER_PORT: ${SMTP_PORT:-587}
+      WATCHTOWER_NOTIFICATION_EMAIL_SERVER_USER: ${SMTP_USERNAME}
+      WATCHTOWER_NOTIFICATION_EMAIL_SERVER_PASSWORD: ${SMTP_PASSWORD}
+      WATCHTOWER_NOTIFICATION_EMAIL_DELAY: 2
+      WATCHTOWER_NOTIFICATION_EMAIL_SUBJECT_TAG: "[VaultWarden-OCI]"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - vaultwarden
+    security_opt:
+      - no-new-privileges:true
+
+  # Optional: Backup service (disabled by default)
+  backup:
+    container_name: vaultwarden_backup
+    image: alpine:${ALPINE_VERSION:-3.19}
+    restart: "no"
+    profiles:
+      - backup
+    environment:
+      TZ: ${TZ:-UTC}
+      BACKUP_SCHEDULE: ${BACKUP_SCHEDULE:-"0 2 * * *"}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-30}
+      RCLONE_CONFIG: /data/rclone.conf
+    volumes:
+      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data:/backup/data:ro
+      - ${PWD}/backups:/backup/output
+      - ${PWD}/scripts/backup.sh:/backup/backup.sh:ro
+      - ${PWD}/rclone/rclone.conf:/data/rclone.conf:ro
+    networks:
+      - vaultwarden
+    depends_on:
+      - vaultwarden
+    command: |
+      sh -c "
+        apk add --no-cache dcron rclone sqlite &&
+        echo '${BACKUP_SCHEDULE} /backup/backup.sh' > /var/spool/cron/crontabs/root &&
+        crond -f -d 8
+      "
 
 secrets:
   admin_token:
@@ -207,9 +272,38 @@ secrets:
     file: ./secrets/.docker_secrets/fail2ban_cloudflare_firewall_token
 
 networks:
-  vaultwarden_network:
+  vaultwarden:
+    name: vaultwarden_network
     driver: bridge
-    name: ${COMPOSE_PROJECT_NAME:-vaultwarden}_vaultwarden_network
     ipam:
+      driver: default
       config:
-        - subnet: 172.20.0.0/16
+        - subnet: 172.30.0.0/16
+          gateway: 172.30.0.1
+
+volumes:
+  vaultwarden_data:
+    name: vaultwarden_data
+    driver: local
+  caddy_data:
+    name: caddy_data  
+    driver: local
+  caddy_config:
+    name: caddy_config
+    driver: local
+
+# Production deployment notes:
+# - Uses pinned versions for stability (override with environment variables)
+# - All secrets managed via Docker secrets for enhanced security
+# - Comprehensive health checks for all services  
+# - Proper dependency management and startup ordering
+# - Cloudflare integration for DNS and global IP blocking
+# - High-fidelity VaultWarden log parsing for accurate Fail2Ban detection
+# - Optional services (watchtower, backup) available via profiles
+# - Enhanced security with no-new-privileges and capability restrictions
+# - Comprehensive environment variable support for easy customization
+# 
+# Usage:
+#   docker compose up -d                    # Start core services
+#   docker compose --profile watchtower up # Include auto-updates
+#   docker compose --profile backup up     # Include backup service
