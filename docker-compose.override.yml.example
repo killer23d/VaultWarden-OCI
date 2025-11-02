@@ -1,237 +1,85 @@
-# VaultWarden-OCI-NG Development Override Configuration
-# Enhanced: Supports standardized error handling testing and development workflows
-# Copy to docker-compose.override.yml for development use
+# VaultWarden-OCI - Development/Testing Overrides
+# Override configuration for development, testing, or optional services
 
-# Development-specific service modifications
+version: '3.8'
+
 services:
+  # Development overrides
   vaultwarden:
-    # Development logging configuration
     environment:
-      # Enhanced development logging for testing error handling
+      # Enable more verbose logging for development
       LOG_LEVEL: debug
       EXTENDED_LOGGING: true
-      USE_SYSLOG: false
-      
-      # Development-friendly settings
+      # Allow signups for testing
       SIGNUPS_ALLOWED: true
-      INVITATIONS_ALLOWED: true
-      ADMIN_TOKEN: "development_admin_token_change_me"
-      
-      # Disable some production features for easier testing
-      DISABLE_ADMIN_TOKEN: false
-      SHOW_PASSWORD_HINT: true
+      # Disable some restrictions for testing
       PASSWORD_HINTS_ALLOWED: true
-      
-      # Development SMTP settings (optional - use MailHog or similar)
-      SMTP_HOST: mailhog
-      SMTP_PORT: 1025
-      SMTP_SECURITY: off
-      SMTP_USERNAME: ""
-      SMTP_PASSWORD: ""
-      
-      # Faster iterations for development
-      DATABASE_TIMEOUT: 5
-      PASSWORD_ITERATIONS: 100000
-      
-      # Development backup settings
-      TRASH_AUTO_DELETE_DAYS: 1
-      
-    # Development volumes for easier debugging
-    volumes:
-      - ./dev-data:/data
-      - ./dev-logs/vaultwarden:/logs
-      
-    # Development ports (if needed for direct access)
-    ports:
-      - "8080:80"  # Direct VaultWarden access for debugging
+      SHOW_PASSWORD_HINT: true
+    # Mount source for development
+    # volumes:
+    #   - ./dev-data:/data
 
   caddy:
-    # Development logging
     environment:
-      # More verbose logging for development
-      CADDY_ADMIN: "0.0.0.0:2019"
-      
-    # Development volumes
-    volumes:
-      - ./dev-logs/caddy:/var/log/caddy
-      - ./caddy/Caddyfile.dev:/etc/caddy/Caddyfile:ro  # Development Caddyfile if exists
-      
-    # Expose admin interface for development
-    ports:
-      - "2019:2019"  # Caddy admin interface
+      # Enable Caddy admin for development
+      CADDY_ADMIN: "localhost:2019"
+    # Expose admin port for development
+    # ports:
+    #   - "2019:2019"
 
   fail2ban:
-    # Development settings
     environment:
       # More verbose logging for development
       F2B_LOG_LEVEL: DEBUG
-      F2B_LOG_TARGET: STDOUT
-      
-      # Shorter ban times for development testing
-      F2B_DEFAULT_BANTIME: 300  # 5 minutes instead of hours
-      F2B_DEFAULT_FINDTIME: 60   # 1 minute window
-      F2B_DEFAULT_MAXRETRY: 5    # More attempts allowed
-      
-      # Development email settings (optional)
-      F2B_DEST_MAIL: developer@localhost
-      
-    # Development volumes for testing
-    volumes:
-      - ./dev-logs/fail2ban:/var/log/fail2ban
-      - ./fail2ban/dev-config:/data/fail2ban:ro  # Development fail2ban config if exists
-      
-    # Less restrictive capabilities for development
-    cap_add:
-      - NET_ADMIN
-      - NET_RAW
-      - SYS_TIME  # For testing time-based features
+      # Shorter ban times for testing
+      F2B_BANTIME: 300
 
-  # Development-only services
-  mailhog:
-    container_name: vaultwarden_mailhog_dev
-    image: mailhog/mailhog:v1.0.1
-    restart: unless-stopped
-    ports:
-      - "1025:1025"  # SMTP
-      - "8025:8025"  # Web UI
-    networks:
-      - vaultwarden
-    profiles:
-      - development
+  # Optional: Add development/testing services
+  # Uncomment and modify as needed
 
-  # Development database browser (optional)
-  adminer:
-    container_name: vaultwarden_adminer_dev
-    image: adminer:4.8.1-standalone
-    restart: unless-stopped
-    environment:
-      ADMINER_DEFAULT_SERVER: vaultwarden
-      ADMINER_DESIGN: dracula
-    ports:
-      - "8081:8080"
-    networks:
-      - vaultwarden
-    profiles:
-      - development
-      - database-tools
+  # watchtower:
+  #   container_name: vaultwarden_watchtower
+  #   image: containrrr/watchtower:latest
+  #   restart: unless-stopped
+  #   environment:
+  #     TZ: ${TZ:-UTC}
+  #     WATCHTOWER_CLEANUP: "true"
+  #     WATCHTOWER_POLL_INTERVAL: 3600
+  #     WATCHTOWER_NOTIFICATIONS: email
+  #     WATCHTOWER_NOTIFICATION_EMAIL_FROM: watchtower@${DOMAIN}
+  #     WATCHTOWER_NOTIFICATION_EMAIL_TO: ${ADMIN_EMAIL}
+  #   volumes:
+  #     - /var/run/docker.sock:/var/run/docker.sock
+  #   networks:
+  #     - vaultwarden
 
-  # Development log viewer (optional)
-  dozzle:
-    container_name: vaultwarden_dozzle_dev
-    image: amir20/dozzle:latest
-    restart: unless-stopped
-    environment:
-      DOZZLE_NO_ANALYTICS: true
-      DOZZLE_LEVEL: debug
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    ports:
-      - "8082:8080"
-    networks:
-      - vaultwarden
-    profiles:
-      - development
-      - monitoring
+  # backup:
+  #   container_name: vaultwarden_backup
+  #   image: alpine:latest
+  #   restart: "no"
+  #   environment:
+  #     TZ: ${TZ:-UTC}
+  #     BACKUP_SCHEDULE: "0 2 * * *"
+  #   volumes:
+  #     - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data:/backup/data:ro
+  #     - ${PWD}/backups:/backup/output
+  #   networks:
+  #     - vaultwarden
+  #   command: |
+  #     sh -c "
+  #       apk add --no-cache dcron sqlite &&
+  #       echo 'Backup service ready' &&
+  #       tail -f /dev/null
+  #     "
 
-  # Development backup testing service
-  backup-test:
-    container_name: vaultwarden_backup_test_dev
-    image: alpine:3.19
-    restart: "no"
-    profiles:
-      - development
-      - backup-testing
-    environment:
-      TZ: UTC
-    volumes:
-      - ./dev-data:/backup/data:ro
-      - ./dev-backups:/backup/output
-      - ./backup.sh:/backup/backup.sh:ro
-      - ./restore.sh:/backup/restore.sh:ro
-    networks:
-      - vaultwarden
-    depends_on:
-      - vaultwarden
-    command: |
-      sh -c "
-        apk add --no-cache bash curl sqlite age jq &&
-        echo 'Development backup testing container ready' &&
-        tail -f /dev/null
-      "
+# Development networks (if needed)
+# networks:
+#   development:
+#     name: vaultwarden_dev
+#     driver: bridge
 
-# Development network configuration
-networks:
-  vaultwarden:
-    # Development-specific network settings
-    driver_opts:
-      com.docker.network.driver.mtu: 1500
-      
-# Development volume configuration  
-volumes:
-  # Development-specific volumes for easier cleanup
-  dev_vaultwarden_data:
-    name: vw_dev_data
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ${PWD}/dev-data
-      
-  dev_caddy_data:
-    name: vw_dev_caddy_data
-    driver: local
-    
-  dev_logs:
-    name: vw_dev_logs
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ${PWD}/dev-logs
-
-# Development-specific configurations
-x-development-notes: |
-  Development Override Configuration Notes:
-  
-  1. Copy this file to docker-compose.override.yml to activate
-  2. Provides enhanced logging and debugging capabilities
-  3. Includes development-only services (MailHog, Adminer, Dozzle)
-  4. Uses local directories for easier access to data and logs
-  5. Relaxed security settings for easier testing
-  6. Shorter ban times for Fail2Ban testing
-  
-  Usage:
-    # Start with development overrides
-    docker compose up -d
-    
-    # Start with development services
-    docker compose --profile development up -d
-    
-    # Start with all development tools
-    docker compose --profile development --profile database-tools --profile monitoring up -d
-    
-  Development URLs:
-    - VaultWarden: http://localhost (via Caddy) or http://localhost:8080 (direct)
-    - Caddy Admin: http://localhost:2019
-    - MailHog: http://localhost:8025
-    - Adminer: http://localhost:8081
-    - Dozzle (logs): http://localhost:8082
-    
-  Development Commands:
-    make dev-setup          # Setup development environment
-    make up PROFILE=development  # Start with dev services
-    make logs SERVICE=vaultwarden  # View specific service logs
-    make test               # Run all tests
-    make dry-run            # Test operations without execution
-    
-  Security Notes:
-    - This override uses relaxed security settings
-    - Never use these settings in production
-    - Development data is stored in ./dev-data/
-    - Development logs are stored in ./dev-logs/
-    
-  Testing Error Handling:
-    - Enhanced logging helps test standardized error handling
-    - Shorter ban times allow testing Fail2Ban integration
-    - Debug level logging shows detailed error flows
-    - Development services help simulate failure conditions
+# Development volumes (if needed)
+# volumes:
+#   dev_data:
+#     name: vaultwarden_dev_data
+#     driver: local
