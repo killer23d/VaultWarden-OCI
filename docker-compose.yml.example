@@ -1,7 +1,6 @@
-# VaultWarden-OCI-NG - Production Docker Compose Configuration
-# FIXED: Direct VaultWarden logging for high-fidelity Fail2Ban detection
-# Enhanced security through dedicated application log parsing
-# Version: 2.0 - Production Ready
+# VaultWarden-OCI - Production Docker Compose Configuration
+# ENHANCED: Simplified with mailutils integration and optional services removed
+# High-fidelity security detection + Built-in email notifications
 
 services:
   vaultwarden:
@@ -14,8 +13,8 @@ services:
       DOMAIN: https://${DOMAIN}
       ADMIN_TOKEN_FILE: /run/secrets/admin_token
       
-      # FIXED: High-fidelity logging for Fail2Ban - parse actual auth failures
-      LOG_FILE: /data/vaultwarden.log
+      # FIXED: High-fidelity logging for Fail2Ban
+      LOG_FILE: /logs/vaultwarden.log
       LOG_LEVEL: warn
       EXTENDED_LOGGING: true
       
@@ -25,20 +24,14 @@ services:
       EMERGENCY_ACCESS_ALLOWED: ${EMERGENCY_ACCESS_ALLOWED:-true}
       SENDS_ALLOWED: ${SENDS_ALLOWED:-true}
       WEB_VAULT_ENABLED: ${WEB_VAULT_ENABLED:-true}
+      WEBSOCKET_ENABLED: ${WEBSOCKET_ENABLED:-false}
+      PUSH_ENABLED: ${PUSH_ENABLED:-false}
       
-      # Advanced Security Settings
+      # Advanced Security
       PASSWORD_ITERATIONS: ${PASSWORD_ITERATIONS:-350000}
       PASSWORD_HINTS_ALLOWED: ${PASSWORD_HINTS_ALLOWED:-false}
       SHOW_PASSWORD_HINT: ${SHOW_PASSWORD_HINT:-false}
-      DISABLE_ADMIN_TOKEN: ${DISABLE_ADMIN_TOKEN:-false}
-      DISABLE_ICON_DOWNLOAD: ${DISABLE_ICON_DOWNLOAD:-false}
-      ICON_CACHE_TTL: ${ICON_CACHE_TTL:-2592000}
-      ICON_CACHE_NEGTTL: ${ICON_CACHE_NEGTTL:-259200}
-      
-      # Session and Security Timeouts
-      EXTENDED_LOGGING: true
       IP_HEADER: CF-Connecting-IP
-      ICON_REDIRECT_CODE: 302
       
       # Email Configuration (optional)
       SMTP_HOST: ${SMTP_HOST:-}
@@ -49,39 +42,14 @@ services:
       SMTP_USERNAME: ${SMTP_USERNAME:-}
       SMTP_PASSWORD_FILE: /run/secrets/smtp_password
       SMTP_TIMEOUT: ${SMTP_TIMEOUT:-15}
-      SMTP_AUTH_MECHANISM: ${SMTP_AUTH_MECHANISM:-Plain}
       
       # Push Notifications (optional)
-      PUSH_ENABLED: ${PUSH_ENABLED:-true}
       PUSH_INSTALLATION_ID_FILE: /run/secrets/push_installation_id
       PUSH_INSTALLATION_KEY_FILE: /run/secrets/push_installation_key
-      PUSH_RELAY_URI: ${PUSH_RELAY_URI:-https://push.bitwarden.com}
-      PUSH_IDENTITY_URI: ${PUSH_IDENTITY_URI:-https://identity.bitwarden.com}
       
-      # Database Configuration
+      # Performance
       DATABASE_MAX_CONNS: ${DATABASE_MAX_CONNS:-10}
-      DATABASE_TIMEOUT: ${DATABASE_TIMEOUT:-30}
-      
-      # Performance and Limits
       WEB_VAULT_FOLDER: web-vault/
-      ATTACHMENTS_FOLDER: attachments
-      ICON_CACHE_FOLDER: icon_cache
-      SENDS_FOLDER: sends
-      TMP_FOLDER: tmp
-      RSA_KEY_FILENAME: rsa_key
-      
-      # Advanced Features
-      ORG_CREATION_USERS: ${ORG_CREATION_USERS:-}
-      ORG_EVENTS_ENABLED: ${ORG_EVENTS_ENABLED:-false}
-      EVENTS_DAYS_RETAIN: ${EVENTS_DAYS_RETAIN:-365}
-      
-      # Backup and Maintenance
-      TRASH_AUTO_DELETE_DAYS: ${TRASH_AUTO_DELETE_DAYS:-30}
-      INCOMPLETE_2FA_TIME_LIMIT: ${INCOMPLETE_2FA_TIME_LIMIT:-3}
-      
-      # Logging and Monitoring
-      USE_SYSLOG: false
-      LOG_TIMESTAMP_FORMAT: "%Y-%m-%d %H:%M:%S%.3f"
       
     secrets:
       - admin_token
@@ -104,7 +72,8 @@ services:
       start_period: 40s
     security_opt:
       - no-new-privileges:true
-    read_only: false
+    cap_drop:
+      - ALL
     tmpfs:
       - /tmp
 
@@ -117,8 +86,6 @@ services:
       DOMAIN: ${DOMAIN}
       CLOUDFLARE_API_TOKEN_FILE: /run/secrets/caddy_cloudflare_dns_token
       ADMIN_BASIC_AUTH_HASH_FILE: /run/secrets/admin_basic_auth_hash
-      ACME_AGREE: "true"
-      CADDY_ADMIN: "off"
     secrets:
       - caddy_cloudflare_dns_token
       - admin_basic_auth_hash  
@@ -151,23 +118,15 @@ services:
     restart: unless-stopped
     environment:
       TZ: ${TZ:-UTC}
-      F2B_LOG_TARGET: ${F2B_LOG_TARGET:-STDOUT}
-      F2B_LOG_LEVEL: ${F2B_LOG_LEVEL:-INFO}
-      F2B_DB_PURGE_AGE: ${F2B_DB_PURGE_AGE:-1d}
-      F2B_MAX_RETRY: ${F2B_MAX_RETRY:-3}
-      F2B_DEST_MAIL: ${ADMIN_EMAIL:-}
-      F2B_SENDER: ${F2B_SENDER:-fail2ban@${DOMAIN}}
-      F2B_ACTION: ${F2B_ACTION:-%(action_mwl)s}
+      F2B_LOG_TARGET: STDOUT
+      F2B_LOG_LEVEL: INFO
+      F2B_DB_PURGE_AGE: 1d
+      # Email configuration (uses host mailutils)
+      F2B_DEST_MAIL: ${ADMIN_EMAIL}
+      F2B_SENDER: fail2ban@${DOMAIN}
       # Cloudflare integration
       CF_API_TOKEN_FILE: /run/secrets/fail2ban_cloudflare_firewall_token  
       CF_ZONE_ID: ${CLOUDFLARE_ZONE_ID}
-      # SSMTP configuration for email notifications
-      SSMTP_HOST: ${SMTP_HOST:-}
-      SSMTP_PORT: ${SMTP_PORT:-587}
-      SSMTP_HOSTNAME: ${DOMAIN}
-      SSMTP_USER: ${SMTP_USERNAME:-}
-      SSMTP_PASSWORD: ${SMTP_PASSWORD:-}
-      SSMTP_TLS: ${SSMTP_TLS:-YES}
     secrets:
       - fail2ban_cloudflare_firewall_token
     volumes:
@@ -179,7 +138,11 @@ services:
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy:/var/log/caddy:ro
       # System logs for SSH protection
       - /var/log/auth.log:/var/log/auth.log:ro
-      - /var/log/syslog:/var/log/syslog:ro
+      # SIMPLE: Mount host mail system (uses existing mailutils)
+      - /usr/sbin/sendmail:/usr/sbin/sendmail:ro
+      - /etc/mailname:/etc/mailname:ro
+      - /etc/passwd:/etc/passwd:ro
+      - /etc/group:/etc/group:ro
     cap_add:
       - NET_ADMIN
       - NET_RAW
@@ -196,64 +159,6 @@ services:
       start_period: 30s
     security_opt:
       - no-new-privileges:true
-
-  # Optional: Watchtower for automatic updates (disabled by default)
-  watchtower:
-    container_name: vaultwarden_watchtower
-    image: containrrr/watchtower:${WATCHTOWER_VERSION:-1.7.1}
-    restart: unless-stopped
-    profiles:
-      - watchtower
-    environment:
-      TZ: ${TZ:-UTC}
-      WATCHTOWER_CLEANUP: "true"
-      WATCHTOWER_REMOVE_VOLUMES: "true"
-      WATCHTOWER_INCLUDE_STOPPED: "true"
-      WATCHTOWER_REVIVE_STOPPED: "false"
-      WATCHTOWER_POLL_INTERVAL: ${WATCHTOWER_POLL_INTERVAL:-3600}
-      WATCHTOWER_NOTIFICATIONS: ${WATCHTOWER_NOTIFICATIONS:-email}
-      WATCHTOWER_NOTIFICATION_EMAIL_FROM: ${WATCHTOWER_FROM_EMAIL:-watchtower@${DOMAIN}}
-      WATCHTOWER_NOTIFICATION_EMAIL_TO: ${ADMIN_EMAIL}
-      WATCHTOWER_NOTIFICATION_EMAIL_SERVER: ${SMTP_HOST}
-      WATCHTOWER_NOTIFICATION_EMAIL_SERVER_PORT: ${SMTP_PORT:-587}
-      WATCHTOWER_NOTIFICATION_EMAIL_SERVER_USER: ${SMTP_USERNAME}
-      WATCHTOWER_NOTIFICATION_EMAIL_SERVER_PASSWORD: ${SMTP_PASSWORD}
-      WATCHTOWER_NOTIFICATION_EMAIL_DELAY: 2
-      WATCHTOWER_NOTIFICATION_EMAIL_SUBJECT_TAG: "[VaultWarden-OCI]"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    networks:
-      - vaultwarden
-    security_opt:
-      - no-new-privileges:true
-
-  # Optional: Backup service (disabled by default)
-  backup:
-    container_name: vaultwarden_backup
-    image: alpine:${ALPINE_VERSION:-3.19}
-    restart: "no"
-    profiles:
-      - backup
-    environment:
-      TZ: ${TZ:-UTC}
-      BACKUP_SCHEDULE: ${BACKUP_SCHEDULE:-"0 2 * * *"}
-      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-30}
-      RCLONE_CONFIG: /data/rclone.conf
-    volumes:
-      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data:/backup/data:ro
-      - ${PWD}/backups:/backup/output
-      - ${PWD}/scripts/backup.sh:/backup/backup.sh:ro
-      - ${PWD}/rclone/rclone.conf:/data/rclone.conf:ro
-    networks:
-      - vaultwarden
-    depends_on:
-      - vaultwarden
-    command: |
-      sh -c "
-        apk add --no-cache dcron rclone sqlite &&
-        echo '${BACKUP_SCHEDULE} /backup/backup.sh' > /var/spool/cron/crontabs/root &&
-        crond -f -d 8
-      "
 
 secrets:
   admin_token:
@@ -275,22 +180,6 @@ networks:
   vaultwarden:
     name: vaultwarden_network
     driver: bridge
-    ipam:
-      driver: default
-      config:
-        - subnet: 172.30.0.0/16
-          gateway: 172.30.0.1
-
-volumes:
-  vaultwarden_data:
-    name: vaultwarden_data
-    driver: local
-  caddy_data:
-    name: caddy_data  
-    driver: local
-  caddy_config:
-    name: caddy_config
-    driver: local
 
 # Production deployment notes:
 # - Uses pinned versions for stability (override with environment variables)
@@ -299,11 +188,6 @@ volumes:
 # - Proper dependency management and startup ordering
 # - Cloudflare integration for DNS and global IP blocking
 # - High-fidelity VaultWarden log parsing for accurate Fail2Ban detection
-# - Optional services (watchtower, backup) available via profiles
+# - Built-in email notifications using existing host mailutils
 # - Enhanced security with no-new-privileges and capability restrictions
-# - Comprehensive environment variable support for easy customization
-# 
-# Usage:
-#   docker compose up -d                    # Start core services
-#   docker compose --profile watchtower up # Include auto-updates
-#   docker compose --profile backup up     # Include backup service
+# - Clean configuration focused on core functionality
