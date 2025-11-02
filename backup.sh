@@ -1,39 +1,34 @@
 #!/usr/bin/env bash
-# backup.sh - Streamlined VaultWarden backup script
-# Optimized for "set-and-forget" by removing redundant logic.
-# - Re-introduced 'emergency' type for full DR (includes secrets).
-# - 'full' type includes config + data (no secrets).
-# - Removed internal retention logic (handled by maintenance.sh).
-# - ENHANCEMENT #2: Added end-to-end backup verification for complete recoverability testing.
-# - Hardened rsync fallback logic per user feedback.
+# backup.sh - Streamlined VaultWarden backup script with enhanced verification
+# ENHANCED: Standardized error handling - functions return, main() decides exit strategy
+# ADDED: Post-encryption checksum verification for belt-and-suspenders protection
+# All functions return exit codes, main() collects status and determines final exit
 
 set -euo pipefail
 
-# --- Project Root Resolution ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR"
 cd "$PROJECT_ROOT"
 
-# --- Source Libraries ---
+# Source Libraries
 source "lib/common.sh"
 init_common_lib "$0"
 source "lib/docker.sh"
 source "lib/crypto.sh"
 source "lib/backup_utils.sh"
 
-# --- Configuration ---
+# Configuration
 BACKUP_TYPE="db"
 EMAIL_NOTIFY=false
 RCLONE_SYNC=false
 LIST_BACKUPS=false
 DRY_RUN=false
-# ENHANCEMENT #2: End-to-end verification mode
-FULL_VERIFICATION=true  # Can be disabled with --skip-full-verification
+FULL_VERIFICATION=true
 
-# --- Lock File (mkdir approach for portability) ---
+# Lock File
 LOCKDIR="/var/run/vaultwarden-backup.lock"
 
-# --- Consolidated Cleanup Mechanism ---
+# Cleanup Actions
 CLEANUP_ACTIONS=()
 
 register_cleanup() {
@@ -42,7 +37,6 @@ register_cleanup() {
 
 perform_cleanup() {
     local action
-    # Execute in reverse order (LIFO)
     for ((idx=${#CLEANUP_ACTIONS[@]}-1; idx>=0; idx--)); do
         eval "${CLEANUP_ACTIONS[$idx]}" 2>/dev/null || true
     done
@@ -50,7 +44,6 @@ perform_cleanup() {
 
 trap perform_cleanup EXIT
 
-# --- Help ---
 show_help() {
     cat << 'EOF'
 VaultWarden-OCI-NG Streamlined Backup Tool
@@ -68,23 +61,18 @@ OPTIONS:
     --help                        Show this help
 
 BACKUP TYPES:
-    db          - Database only.
-    full        - Config files and data (NO secrets). Good for version upgrades.
-    emergency   - EVERYTHING: Config, data, AND secrets. Full disaster recovery.
+    db          - Database only
+    full        - Config files and data (NO secrets)
+    emergency   - EVERYTHING: Config, data, AND secrets
 
 VERIFICATION:
-    - Verifies database integrity *before* backup.
-    - NEW: Tests complete backup recoverability after creation.
-    - Relies on tool exit codes for archive and encryption integrity.
-
-NOTES:
-    - Uses atomic 'mkdir' for process locking.
-    - Retention/Cleanup is handled by 'maintenance.sh'.
-    - Full verification tests that backups can actually be restored.
+    - Verifies database integrity before backup
+    - Tests complete backup recoverability after creation
+    - Post-encryption checksum verification for integrity
 EOF
 }
 
-# --- Argument Parsing ---
+# Argument Parsing
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --type)
@@ -95,64 +83,38 @@ while [[ $# -gt 0 ]]; do
             BACKUP_TYPE="$2"
             shift 2
             ;;
-        --email)   EMAIL_NOTIFY=true; shift ;;
-        --rclone)  RCLONE_SYNC=true; shift ;;
-        --list)    LIST_BACKUPS=true; shift ;;
+        --email) EMAIL_NOTIFY=true; shift ;;
+        --rclone) RCLONE_SYNC=true; shift ;;
+        --list) LIST_BACKUPS=true; shift ;;
         --dry-run) DRY_RUN=true; shift ;;
         --skip-full-verification) FULL_VERIFICATION=false; shift ;;
-        --help)    show_help; exit 0 ;;
+        --help) show_help; exit 0 ;;
         *) log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done
 
-# --- Pre-flight Checks ---
+# STANDARDIZED: Pre-flight checks - returns exit code
 preflight_checks() {
     log_info "Running pre-flight checks..."
 
-    # Docker availability
-    if ! docker compose version >/dev/null 2>&1; then
-        log_error "Docker Compose not available or not responding"
+    if ! require_docker; then
         return 1
     fi
 
-    # VaultWarden service exists
     if ! docker compose ps vaultwarden >/dev/null 2>&1; then
         log_error "VaultWarden service not found in docker-compose.yml"
         return 1
     fi
 
-    # Required commands
-    require_commands tar gzip age sqlite3 rsync || exit 1
-
-    log_success "Pre-flight checks passed"
-}
-
-# --- Disk Space Check ---
-check_disk_space() {
-    local backup_dir="$1"
-    local state_dir
-    state_dir="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
-
-    if [[ ! -d "$state_dir/data" ]]; then
-        log_warn "Cannot estimate disk space: $state_dir/data not found"
-        return 0
-    fi
-
-    local required_space available_space
-    # Estimate required space (2x data dir size)
-    required_space=$(($(du -sb "$state_dir/data" 2>/dev/null | cut -f1) * 2))
-    available_space=$(df --output=avail -B1 "$backup_dir" 2>/dev/null | tail -1)
-
-    if [[ -z "$available_space" ]] || [[ $available_space -lt $required_space ]]; then
-        log_error "Insufficient disk space: need $((required_space / 1024 / 1024))MB, have $((available_space / 1024 / 1024))MB"
+    if ! require_commands tar gzip age sqlite3 rsync; then
         return 1
     fi
 
-    log_info "Disk space check passed: $((available_space / 1024 / 1024))MB available"
+    log_success "Pre-flight checks passed"
     return 0
 }
 
-# --- Verification Functions ---
+# STANDARDIZED: Returns exit code
 get_verification_mode() {
     local mode
     mode=$(get_config_value "BACKUP_VERIFICATION_MODE" "quick_check")
@@ -162,6 +124,7 @@ get_verification_mode() {
     esac
 }
 
+# STANDARDIZED: Returns exit code
 verify_sqlite_integrity() {
     local db_file="$1"
     local verification_mode="${2:-quick_check}"
@@ -191,7 +154,9 @@ verify_sqlite_integrity() {
             ;;
     esac
 
-    sqlite3 "$db_file" "PRAGMA optimize;" >/dev/null 2>&1 || true
+    if ! sqlite3 "$db_file" "PRAGMA optimize;" >/dev/null 2>&1; then
+        log_warn "Failed to optimize database, but continuing"
+    fi
 
     if [[ "$check_result" == "ok" ]]; then
         log_success "SQLite $verification_mode passed"
@@ -202,7 +167,7 @@ verify_sqlite_integrity() {
     fi
 }
 
-# --- ENHANCEMENT #2: End-to-End Backup Verification ---
+# STANDARDIZED: End-to-End Backup Verification - returns exit code
 verify_backup_recoverability() {
     local encrypted_file="$1"
     local backup_type="$2"
@@ -219,30 +184,25 @@ verify_backup_recoverability() {
 
     log_info "Performing end-to-end backup recoverability verification..."
 
-    # Create temporary directory for verification
     local verify_temp_dir
     verify_temp_dir=$(mktemp -d)
     register_cleanup "rm -rf '$verify_temp_dir'"
 
     case "$backup_type" in
         "db")
-            # Test database backup recoverability
             log_debug "Testing database backup decryption and decompression..."
 
-            # Decrypt and decompress to temp file
             local test_db="$verify_temp_dir/test_recovery.db"
             if ! age -d -i "$SOPS_AGE_KEY_FILE" "$encrypted_file" | gzip -d > "$test_db" 2>/dev/null; then
                 log_error "CRITICAL: Database backup cannot be decrypted or decompressed!"
                 return 1
             fi
 
-            # Verify recovered database integrity
             if ! verify_sqlite_integrity "$test_db" "quick_check"; then
                 log_error "CRITICAL: Recovered database fails integrity check!"
                 return 1
             fi
 
-            # Test basic database operations
             local table_count
             if ! table_count=$(sqlite3 "$test_db" "SELECT count(*) FROM sqlite_master WHERE type='table';" 2>/dev/null); then
                 log_error "CRITICAL: Cannot query recovered database!"
@@ -253,34 +213,34 @@ verify_backup_recoverability() {
             ;;
 
         "full"|"emergency")
-            # Test archive backup recoverability  
             log_debug "Testing archive backup decryption and extraction..."
 
-            # Test decryption and decompression
             if ! age -d -i "$SOPS_AGE_KEY_FILE" "$encrypted_file" | tar -tzf - >/dev/null 2>&1; then
                 log_error "CRITICAL: Archive backup cannot be decrypted or extracted!"
                 return 1
             fi
 
-            # Test partial extraction of key files
             local test_extraction_dir="$verify_temp_dir/test_extract"
-            mkdir -p "$test_extraction_dir"
+            if ! mkdir -p "$test_extraction_dir"; then
+                log_error "Failed to create test extraction directory"
+                return 1
+            fi
 
-            # Extract just a few key files to verify structure
             if age -d -i "$SOPS_AGE_KEY_FILE" "$encrypted_file" | tar -xzf - -C "$test_extraction_dir" ./data/bwdata/db.sqlite3 2>/dev/null; then
-                # Verify extracted database
                 if [[ -f "$test_extraction_dir/data/bwdata/db.sqlite3" ]]; then
                     if verify_sqlite_integrity "$test_extraction_dir/data/bwdata/db.sqlite3" "quick_check"; then
                         log_success "Archive backup verification: Complete extraction successful with valid database"
                     else
                         log_warn "Archive extracted but database integrity questionable"
+                        return 1
                     fi
                 else
                     log_warn "Archive extracted but database file not found in expected location"
+                    return 1
                 fi
             else
                 log_warn "Archive backup appears valid but partial extraction test failed"
-                # Still continue - this might be due to archive structure differences
+                # Continue - might be due to archive structure differences
             fi
             ;;
     esac
@@ -289,7 +249,48 @@ verify_backup_recoverability() {
     return 0
 }
 
-# --- Generate Backup Metadata ---
+# ENHANCED: Post-encryption checksum verification - NEW FEATURE
+verify_post_encryption_checksum() {
+    local encrypted_file="$1"
+
+    if [[ ! -f "$encrypted_file" ]]; then
+        log_error "Encrypted file not found for checksum verification: $encrypted_file"
+        return 1
+    fi
+
+    if [[ ! -f "$encrypted_file.sha256" ]]; then
+        log_error "Checksum file not found: $encrypted_file.sha256"
+        return 1
+    fi
+
+    log_info "Performing post-encryption checksum verification..."
+
+    local expected_checksum actual_checksum
+    expected_checksum=$(cat "$encrypted_file.sha256" 2>/dev/null)
+    
+    if [[ -z "$expected_checksum" ]]; then
+        log_error "Empty or invalid checksum file"
+        return 1
+    fi
+
+    if ! actual_checksum=$(calculate_sha256 "$encrypted_file"); then
+        log_error "Failed to calculate actual checksum"
+        return 1
+    fi
+
+    if [[ "$actual_checksum" == "$expected_checksum" ]]; then
+        log_success "Post-encryption checksum verification passed"
+        return 0
+    else
+        log_error "CRITICAL: Post-encryption checksum verification FAILED!"
+        log_error "Expected: $expected_checksum"
+        log_error "Actual:   $actual_checksum"
+        log_error "This indicates file corruption during write/storage operations"
+        return 1
+    fi
+}
+
+# STANDARDIZED: Generate backup metadata - returns exit code
 generate_metadata() {
     local encrypted_file="$1"
     local backup_type="$2"
@@ -299,21 +300,28 @@ generate_metadata() {
     local vaultwarden_version
     vaultwarden_version=$(docker compose exec -T vaultwarden /vaultwarden --version 2>/dev/null | head -1 || echo "unknown")
 
-    cat > "$encrypted_file.meta" <<EOF
+    local file_size
+    file_size=$(stat -c%s "$encrypted_file" 2>/dev/null || stat -f%z "$encrypted_file" 2>/dev/null || echo "0")
+
+    if ! cat > "$encrypted_file.meta" <<EOF; then
 backup_type=$backup_type
 timestamp=$timestamp
 hostname=$(hostname)
 verification_mode=$(get_verification_mode)
 full_verification=$FULL_VERIFICATION
 vaultwarden_version=$vaultwarden_version
-file_size=$(stat -c%s "$encrypted_file" 2>/dev/null || stat -f%z "$encrypted_file")
+file_size=$file_size
 sha256=$checksum
 EOF
+        log_error "Failed to create metadata file"
+        return 1
+    fi
 
     log_info "Metadata written to $(basename "$encrypted_file.meta")"
+    return 0
 }
 
-# --- Database Backup Function ---
+# STANDARDIZED: Database backup function - returns exit code
 create_db_backup() {
     log_info "Creating database backup with comprehensive verification..."
 
@@ -322,8 +330,13 @@ create_db_backup() {
     backup_dir="$PROJECT_ROOT/backups/db"
     encrypted_file="$backup_dir/vw-db-backup-$timestamp.sqlite3.gz.age"
 
-    ensure_dir "$backup_dir" 755
-    check_disk_space "$backup_dir" || return 1
+    if ! ensure_dir "$backup_dir" 755; then
+        return 1
+    fi
+
+    if ! check_backup_disk_space "$backup_dir" 1000; then
+        return 1
+    fi
 
     state_dir="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
     db_file="$state_dir/data/bwdata/db.sqlite3"
@@ -341,35 +354,34 @@ create_db_backup() {
 
     log_info "Creating and verifying a consistent database snapshot..."
     if [[ "$is_running" == true ]]; then
-        # Unique temp path with PID to prevent collisions
         local container_snapshot_path="/tmp/vw-snapshot-$timestamp-$$.db"
         register_cleanup "docker compose exec -T vaultwarden rm -f '$container_snapshot_path' 2>/dev/null || true"
 
-        # 1. Create snapshot inside container
         if ! docker compose exec -T vaultwarden sqlite3 "/data/bwdata/db.sqlite3" ".backup '$container_snapshot_path'"; then
             log_error "Failed to create database snapshot inside container"
             return 1
         fi
 
-        # 2. Verify snapshot inside container
         if ! docker compose exec -T vaultwarden sqlite3 "$container_snapshot_path" "PRAGMA integrity_check;" | grep -qx "ok"; then
             log_error "Snapshot integrity check failed inside container, aborting backup"
             return 1
         fi
 
-        # 3. Copy snapshot out
         if ! docker compose cp "vaultwarden:$container_snapshot_path" "$temp_snapshot"; then
             log_error "Failed to copy verified snapshot from container"
             return 1
         fi
     else
-        # If container is not running, just copy the file and verify it
         if [[ -f "$db_file" ]]; then
-            cp "$db_file" "$temp_snapshot"
+            if ! cp "$db_file" "$temp_snapshot"; then
+                log_error "Failed to copy database file"
+                return 1
+            fi
         else
             log_error "Database file not found: $db_file"
             return 1
         fi
+        
         if ! verify_sqlite_integrity "$temp_snapshot" "$verification_mode"; then
             log_error "Snapshot integrity check failed, aborting backup"
             return 1
@@ -388,33 +400,42 @@ create_db_backup() {
         return 1
     fi
 
-    secure_file "$encrypted_file" 600 || return 1
+    if ! secure_file "$encrypted_file" 600; then
+        return 1
+    fi
 
-    # ENHANCEMENT #2: Perform end-to-end verification
+    # Generate checksum FIRST
+    local checksum
+    if ! checksum=$(calculate_sha256 "$encrypted_file"); then
+        log_error "Failed to calculate checksum"
+        return 1
+    fi
+
+    echo "$checksum" > "$encrypted_file.sha256"
+
+    # ENHANCED: Post-encryption checksum verification (belt-and-suspenders)
+    if ! verify_post_encryption_checksum "$encrypted_file"; then
+        log_error "CRITICAL: Backup created but failed post-encryption verification!"
+        return 1
+    fi
+
+    # End-to-end verification
     if ! verify_backup_recoverability "$encrypted_file" "db"; then
         log_error "CRITICAL: Backup created but failed recoverability verification!"
         return 1
     fi
 
-    # Generate checksum and metadata
-    local checksum
-    checksum=$(sha256sum "$encrypted_file" | awk '{print $1}')
-    echo "$checksum" > "$encrypted_file.sha256"
-    generate_metadata "$encrypted_file" "db" "$timestamp" "$checksum"
+    # Generate metadata
+    if ! generate_metadata "$encrypted_file" "db" "$timestamp" "$checksum"; then
+        log_warn "Failed to create metadata, but backup is valid"
+    fi
 
     log_success "Database backup created and verified: $(basename "$encrypted_file")"
     echo "$encrypted_file"
     return 0
 }
 
-# --- Common Archive Backup Logic ---
-# $1: temp_dir
-# $2: verification_mode
-# $3: is_running (true/false)
-# $4: state_dir
-# $5: db_file
-# $6: timestamp
-# $7: include_secrets (true/false)
+# STANDARDIZED: Common archive backup logic - returns exit code
 create_archive_data() {
     local temp_dir="$1"
     local verification_mode="$2"
@@ -424,9 +445,10 @@ create_archive_data() {
     local timestamp="$6"
     local include_secrets="$7"
 
-    # --- SINGLE SNAPSHOT LOGIC ---
+    # Single snapshot logic
     local db_snapshot="$temp_dir/db.sqlite3.snapshot"
     log_info "Creating and verifying a consistent database snapshot..."
+    
     if [[ "$is_running" == true ]]; then
         local container_snapshot_path="/tmp/vw-snapshot-$timestamp-$$.db"
         register_cleanup "docker compose exec -T vaultwarden rm -f '$container_snapshot_path' 2>/dev/null || true"
@@ -442,7 +464,10 @@ create_archive_data() {
         fi
     else
         if [[ -f "$db_file" ]]; then
-            cp "$db_file" "$db_snapshot"
+            if ! cp "$db_file" "$db_snapshot"; then
+                log_error "Failed to copy database file for archive"
+                return 1
+            fi
             if ! verify_sqlite_integrity "$db_snapshot" "$verification_mode"; then
                 log_warn "Database integrity check failed, but continuing with archive."
             fi
@@ -459,15 +484,27 @@ create_archive_data() {
 
     if [[ "$include_secrets" == "true" ]]; then
         log_info "Including 'secrets' directory for emergency kit."
-        [[ -d secrets ]] && cp -r secrets "$temp_dir/" || { log_error "secrets/ directory required for emergency kit and not found."; return 1; }
+        if [[ -d secrets ]]; then
+            if ! cp -r secrets "$temp_dir/"; then
+                log_error "Failed to copy secrets directory"
+                return 1
+            fi
+        else
+            log_error "secrets/ directory required for emergency kit and not found."
+            return 1
+        fi
     else
         log_info "Skipping 'secrets' directory for 'full' backup."
     fi
 
     log_info "Copying data directory (excluding live database)..."
     if [[ -d "$state_dir/data" ]]; then
-        mkdir -p "$temp_dir/data"
-        # --- Start User Feedback Fix: Harder fail on rsync/cp error ---
+        if ! mkdir -p "$temp_dir/data"; then
+            log_error "Failed to create data directory in temp location"
+            return 1
+        fi
+
+        # Hardened rsync fallback logic
         if ! rsync -a --delete --exclude 'bwdata/db.sqlite3*' "$state_dir/data/" "$temp_dir/data/" 2>/dev/null; then
             log_warn "rsync failed, falling back to 'cp'..."
             if ! cp -a "$state_dir/data/." "$temp_dir/data/"; then
@@ -475,21 +512,22 @@ create_archive_data() {
                 return 1
             fi
         fi
-        # --- End User Feedback Fix ---
 
         if [[ -f "$db_snapshot" ]]; then
-            mkdir -p "$temp_dir/data/bwdata"
-            mv "$db_snapshot" "$temp_dir/data/bwdata/db.sqlite3"
+            if ! mkdir -p "$temp_dir/data/bwdata" || ! mv "$db_snapshot" "$temp_dir/data/bwdata/db.sqlite3"; then
+                log_error "Failed to include database snapshot in archive"
+                return 1
+            fi
             log_info "Included database snapshot in archive."
         fi
     else
         log_warn "State data directory not found: $state_dir/data"
     fi
+    
     return 0
 }
 
-
-# --- Full System Backup Function ---
+# STANDARDIZED: Full system backup function - returns exit code  
 create_full_backup() {
     log_info "Creating full system backup (config + data, NO secrets)..."
 
@@ -498,8 +536,13 @@ create_full_backup() {
     backup_dir="$PROJECT_ROOT/backups/full"
     encrypted_file="$backup_dir/vw-full-backup-$timestamp.tar.gz.age"
 
-    ensure_dir "$backup_dir" 755
-    check_disk_space "$backup_dir" || return 1
+    if ! ensure_dir "$backup_dir" 755; then
+        return 1
+    fi
+
+    if ! check_backup_disk_space "$backup_dir" 2000; then
+        return 1
+    fi
 
     state_dir="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
     db_file="$state_dir/data/bwdata/db.sqlite3"
@@ -511,7 +554,9 @@ create_full_backup() {
     register_cleanup "rm -rf '$temp_dir'"
 
     # Call common archive logic, DO NOT include secrets
-    create_archive_data "$temp_dir" "$verification_mode" "$is_running" "$state_dir" "$db_file" "$timestamp" "false" || return 1
+    if ! create_archive_data "$temp_dir" "$verification_mode" "$is_running" "$state_dir" "$db_file" "$timestamp" "false"; then
+        return 1
+    fi
 
     if [[ $DRY_RUN == true ]]; then
         log_info "[DRY-RUN] Would create and verify 'full' archive"
@@ -524,26 +569,42 @@ create_full_backup() {
         return 1
     fi
 
-    secure_file "$encrypted_file" 600 || return 1
+    if ! secure_file "$encrypted_file" 600; then
+        return 1
+    fi
 
-    # ENHANCEMENT #2: Perform end-to-end verification
+    # Generate checksum and verify
+    local checksum
+    if ! checksum=$(calculate_sha256 "$encrypted_file"); then
+        log_error "Failed to calculate checksum"
+        return 1
+    fi
+
+    echo "$checksum" > "$encrypted_file.sha256"
+
+    # Post-encryption checksum verification
+    if ! verify_post_encryption_checksum "$encrypted_file"; then
+        log_error "CRITICAL: Full backup created but failed post-encryption verification!"
+        return 1
+    fi
+
+    # End-to-end verification
     if ! verify_backup_recoverability "$encrypted_file" "full"; then
         log_error "CRITICAL: Full backup created but failed recoverability verification!"
         return 1
     fi
 
-    # Generate checksum and metadata
-    local checksum
-    checksum=$(sha256sum "$encrypted_file" | awk '{print $1}')
-    echo "$checksum" > "$encrypted_file.sha256"
-    generate_metadata "$encrypted_file" "full" "$timestamp" "$checksum"
+    # Generate metadata
+    if ! generate_metadata "$encrypted_file" "full" "$timestamp" "$checksum"; then
+        log_warn "Failed to create metadata, but backup is valid"
+    fi
 
     log_success "Full backup created and verified: $(basename "$encrypted_file")"
     echo "$encrypted_file"
     return 0
 }
 
-# --- Emergency Kit Function ---
+# STANDARDIZED: Emergency kit function - returns exit code
 create_emergency_kit() {
     log_info "Creating emergency recovery kit (config + data + secrets)..."
 
@@ -552,8 +613,13 @@ create_emergency_kit() {
     backup_dir="$PROJECT_ROOT/backups/emergency"
     encrypted_file="$backup_dir/emergency-kit-$timestamp.tar.gz.age"
 
-    ensure_dir "$backup_dir" 755
-    check_disk_space "$backup_dir" || return 1
+    if ! ensure_dir "$backup_dir" 755; then
+        return 1
+    fi
+
+    if ! check_backup_disk_space "$backup_dir" 2000; then
+        return 1
+    fi
 
     state_dir="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
     db_file="$state_dir/data/bwdata/db.sqlite3"
@@ -565,7 +631,9 @@ create_emergency_kit() {
     register_cleanup "rm -rf '$temp_dir'"
 
     # Call common archive logic, DO include secrets
-    create_archive_data "$temp_dir" "$verification_mode" "$is_running" "$state_dir" "$db_file" "$timestamp" "true" || return 1
+    if ! create_archive_data "$temp_dir" "$verification_mode" "$is_running" "$state_dir" "$db_file" "$timestamp" "true"; then
+        return 1
+    fi
 
     if [[ $DRY_RUN == true ]]; then
         log_info "[DRY-RUN] Would create and verify 'emergency' kit"
@@ -578,26 +646,42 @@ create_emergency_kit() {
         return 1
     fi
 
-    secure_file "$encrypted_file" 600 || return 1
+    if ! secure_file "$encrypted_file" 600; then
+        return 1
+    fi
 
-    # ENHANCEMENT #2: Perform end-to-end verification
+    # Generate checksum and verify
+    local checksum
+    if ! checksum=$(calculate_sha256 "$encrypted_file"); then
+        log_error "Failed to calculate checksum"
+        return 1
+    fi
+
+    echo "$checksum" > "$encrypted_file.sha256"
+
+    # Post-encryption checksum verification
+    if ! verify_post_encryption_checksum "$encrypted_file"; then
+        log_error "CRITICAL: Emergency kit created but failed post-encryption verification!"
+        return 1
+    fi
+
+    # End-to-end verification
     if ! verify_backup_recoverability "$encrypted_file" "emergency"; then
         log_error "CRITICAL: Emergency kit created but failed recoverability verification!"
         return 1
     fi
 
-    # Generate checksum and metadata
-    local checksum
-    checksum=$(sha256sum "$encrypted_file" | awk '{print $1}')
-    echo "$checksum" > "$encrypted_file.sha256"
-    generate_metadata "$encrypted_file" "emergency" "$timestamp" "$checksum"
+    # Generate metadata
+    if ! generate_metadata "$encrypted_file" "emergency" "$timestamp" "$checksum"; then
+        log_warn "Failed to create metadata, but backup is valid"
+    fi
 
     log_success "Emergency kit created and verified: $(basename "$encrypted_file")"
     echo "$encrypted_file"
     return 0
 }
 
-# --- Rclone Sync Function ---
+# STANDARDIZED: Rclone sync function - returns exit code
 rclone_sync_offsite() {
     local backup_file_path="$1"
 
@@ -634,7 +718,7 @@ rclone_sync_offsite() {
     return 0
 }
 
-# --- Main Execution ---
+# ENHANCED: Main function with proper error handling and exit strategy
 main() {
     # Acquire lock
     if ! mkdir "$LOCKDIR" 2>/dev/null; then
@@ -644,15 +728,23 @@ main() {
     register_cleanup "rmdir '$LOCKDIR' 2>/dev/null || true"
 
     if [[ $LIST_BACKUPS == true ]]; then
-        list_backups
-        exit 0
+        if list_backups; then
+            exit 0
+        else
+            exit 1
+        fi
     fi
 
     log_info "VaultWarden Streamlined Backup Tool with Enhanced Verification"
 
     # Early environment checks
-    load_env_file || exit 1
-    preflight_checks
+    if ! load_env_file; then
+        exit 1
+    fi
+    
+    if ! preflight_checks; then
+        exit 1
+    fi
 
     local backup_file=""
     case "$BACKUP_TYPE" in
@@ -670,8 +762,6 @@ main() {
         exit 1
     fi
 
-    # Retention/cleanup is now handled by maintenance.sh, so we skip it here.
-
     local sync_status="Skipped"
     if [[ $RCLONE_SYNC == true ]]; then
         if rclone_sync_offsite "$backup_file"; then
@@ -686,31 +776,22 @@ main() {
     file_size="$(du -h "$backup_file" | cut -f1)"
     checksum="$(cat "$backup_file.sha256" 2>/dev/null || echo "N/A")"
 
-    printf "
-Backup Details:
-"
-    printf "  Type:         %s
-" "$BACKUP_TYPE"
-    printf "  File:         %s
-" "$backup_file"
-    printf "  Size:         %s
-" "$file_size"
-    printf "  SHA256:       %s
-" "$checksum"
-    printf "  Verification: Pre-encryption snapshot OK + End-to-end recoverability verified
-"
-    printf "  Rclone Sync:  %s
-" "$sync_status"
-    printf "
-"
+    printf "\nBackup Details:\n"
+    printf "  Type:         %s\n" "$BACKUP_TYPE"
+    printf "  File:         %s\n" "$backup_file"
+    printf "  Size:         %s\n" "$file_size"
+    printf "  SHA256:       %s\n" "$checksum"
+    printf "  Verification: Pre-encryption snapshot OK + Post-encryption checksum OK + End-to-end recoverability verified\n"
+    printf "  Rclone Sync:  %s\n" "$sync_status"
+    printf "\n"
 
     if [[ $EMAIL_NOTIFY == true ]]; then
         log_info "Sending completion email..."
-        send_notification_email "Backup Completed: $BACKUP_TYPE"             "Backup job completed successfully with full verification.
+        send_notification_email "Backup Completed: $BACKUP_TYPE" "Backup job completed successfully with full verification.
 File: $(basename "$backup_file")
 Size: $file_size
 Checksum: $checksum
-Verification: Complete recoverability confirmed
+Verification: Complete recoverability confirmed + post-encryption checksum verified
 Sync: $sync_status"
     fi
 

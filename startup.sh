@@ -1,22 +1,18 @@
 #!/usr/bin/env bash
 # startup.sh - Enhanced VaultWarden stack orchestration
-# FIXED: Creates ALL required secret files for caddy-cloudflare
-# ENHANCED: Production hardening with strict mode and better error handling
-# FIXED: Moved DNS update to *after* services are healthy to fix logic bug
-# ENHANCEMENT #1: Atomic secret file creation to prevent race conditions
+# ENHANCED: Standardized error handling - functions return, main() decides exit strategy
+# All functions return exit codes, main() collects status and determines final exit
 
 set -euo pipefail
 
-# --- Project Root Resolution ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR"
 
-# --- Enhanced Cleanup Function ---
+# Enhanced Cleanup Function
 cleanup_secrets() {
     local exit_code=${?:-0}
     local cleanup_reason="${1:-exit}"
 
-    # Only clean up on successful completion (exit code 0) or explicit --down
     if [[ $exit_code -eq 0 && "${STARTUP_SUCCESS:-false}" == "true" ]] || [[ "$cleanup_reason" == "stop" ]]; then
         rm -rf "$PROJECT_ROOT/secrets/.docker_secrets" 2>/dev/null || true
         log_debug "Cleaned up temporary secret files (successful completion)"
@@ -28,18 +24,16 @@ cleanup_secrets() {
         fi
     fi
 
-    # ENHANCEMENT #1: Clean up any temporary atomic directories
     rm -rf "$PROJECT_ROOT/secrets/.docker_secrets".* 2>/dev/null || true
 }
 
-# --- Fix Secrets Ownership Function ---
+# STANDARDIZED: Fix secrets ownership - returns exit code
 fix_secrets_ownership() {
     local docker_secrets_dir="secrets/.docker_secrets"
     local current_user
     current_user=$(get_real_user)
 
     if [[ -d "$docker_secrets_dir" ]]; then
-        # Check if directory is owned by current user
         local owner
         owner=$(stat -c '%U' "$docker_secrets_dir" 2>/dev/null || echo "unknown")
 
@@ -47,16 +41,19 @@ fix_secrets_ownership() {
             log_warn "Fixing ownership of secrets directory (currently owned by $owner)"
 
             if [[ "$owner" == "root" ]] && [[ "$current_user" != "root" ]]; then
-                # Need sudo to fix root-owned files
                 if sudo chown -R "$current_user:$(id -gn $current_user)" "$docker_secrets_dir" 2>/dev/null; then
                     log_success "Fixed secrets directory ownership"
+                    return 0
                 else
                     log_warn "Could not fix ownership, recreating directory"
                     sudo rm -rf "$docker_secrets_dir" 2>/dev/null || true
+                    return 1
                 fi
             fi
         fi
     fi
+
+    return 0
 }
 
 # Set trap to pass exit code
@@ -66,7 +63,7 @@ trap 'cleanup_secrets "exit"' EXIT
 
 cd "$PROJECT_ROOT"
 
-# --- Source Libraries ---
+# Source Libraries
 source "lib/common.sh"
 init_common_lib "$0"
 source "lib/docker.sh"
@@ -75,16 +72,15 @@ source "lib/crypto.sh"
 # Ensure the key file env var is set
 export SOPS_AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-"$PROJECT_ROOT/secrets/keys/age-key.txt"}"
 
-# --- Configuration ---
+# Configuration
 FORCE_RESTART=false
 DRY_RUN=false
 SKIP_HEALTH=false
 STOP_MODE=false
 STRICT_SECRETS=false
 STARTUP_SUCCESS=false
-UPDATE_DNS=true  # DNS update flag
+UPDATE_DNS=true
 
-# --- Help ---
 show_help() {
     cat << 'EOF'
 VaultWarden-OCI-NG Startup Script (Modernized)
@@ -114,7 +110,7 @@ IMPORTANT:
 EOF
 }
 
-# --- Argument Parsing ---
+# Argument Parsing
 while [[ $# -gt 0 ]]; do
     case $1 in
         --help) show_help; exit 0 ;;
@@ -123,12 +119,12 @@ while [[ $# -gt 0 ]]; do
         --skip-health) SKIP_HEALTH=true; shift ;;
         --down) STOP_MODE=true; shift ;;
         --strict-secrets) STRICT_SECRETS=true; shift ;;
-        --skip-dns) UPDATE_DNS=false; shift ;;  # DNS skip option
+        --skip-dns) UPDATE_DNS=false; shift ;;
         *) log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done
 
-# --- DNS Update Function ---
+# STANDARDIZED: DNS Update Function - returns exit code
 update_dns_if_needed() {
     if [[ "$UPDATE_DNS" != "true" ]]; then
         log_info "Skipping DNS update (--skip-dns specified)"
@@ -144,18 +140,19 @@ update_dns_if_needed() {
         log_info "Updating DNS record to current IP..."
         if ./update-dns.sh; then
             log_success "DNS update completed successfully"
+            return 0
         else
             log_warn "DNS update failed."
             log_warn "This is okay if the IP hasn't changed, but check logs if access fails."
+            return 1
         fi
     else
         log_debug "update-dns.sh not found, skipping DNS update"
+        return 0
     fi
-
-    return 0
 }
 
-# --- ENHANCEMENT #1: Atomic Docker Secrets Preparation ---
+# STANDARDIZED: Atomic Docker Secrets Preparation - returns exit code
 prepare_docker_secrets() {
     log_info "Preparing Docker secrets with atomic operations..."
 
@@ -164,9 +161,11 @@ prepare_docker_secrets() {
     local real_group; real_group=$(id -g -n $real_user)
 
     # Fix ownership if needed before attempting operations
-    fix_secrets_ownership
+    if ! fix_secrets_ownership; then
+        log_warn "Could not fix secrets ownership, continuing anyway"
+    fi
 
-    # ENHANCEMENT #1: Create temporary directory with unique name for atomic operations
+    # Create temporary directory with unique name for atomic operations
     local temp_secrets_dir
     temp_secrets_dir=$(mktemp -d "${docker_secrets_dir}.XXXXXX")
     log_debug "Created temporary secrets directory: $(basename "$temp_secrets_dir")"
@@ -177,8 +176,10 @@ prepare_docker_secrets() {
     }
     trap cleanup_temp_dir EXIT
 
-    chmod 700 "$temp_secrets_dir"
-    chown "$real_user:$real_group" "$temp_secrets_dir"
+    if ! chmod 700 "$temp_secrets_dir" || ! chown "$real_user:$real_group" "$temp_secrets_dir"; then
+        log_error "Failed to set permissions on temp secrets directory"
+        return 1
+    fi
 
     if [[ ! -f "secrets/secrets.yaml" ]]; then
         log_error "Secrets file not found: secrets/secrets.yaml"
@@ -209,13 +210,13 @@ prepare_docker_secrets() {
     fi
 
     # Validate decrypted content is JSON
-    echo "$decrypted_json" | jq . > /dev/null 2>&1 || {
+    if ! echo "$decrypted_json" | jq . > /dev/null 2>&1; then
         log_error "Decrypted secrets content is not valid JSON. File might be corrupted."
         log_debug "Content was: $decrypted_json"
         return 1
-    }
+    fi
 
-    # Define ALL secrets that need files based on docker-compose.yml
+    # Define secrets that need files
     local secrets_needing_files=(
         "admin_token"
         "admin_basic_auth_hash"
@@ -257,20 +258,17 @@ prepare_docker_secrets() {
             done
 
             if [[ "$is_critical" == "true" ]]; then
-                # Critical secret missing/placeholder
                 echo "PLACEHOLDER_NOT_CONFIGURED" > "$secret_file_path"
                 placeholder_critical+=("$secret")
                 log_warn "Critical secret '$secret' has placeholder value"
             else
-                # Optional secret - create empty file
                 touch "$secret_file_path"
                 log_debug "Created empty file for optional secret: $secret"
             fi
         fi
 
         # Set ownership and secure permissions IN TEMP DIRECTORY
-        chown "$real_user:$real_group" "$secret_file_path"
-        if ! secure_file "$secret_file_path" 600; then
+        if ! chown "$real_user:$real_group" "$secret_file_path" || ! secure_file "$secret_file_path" 600; then
             log_error "Failed to set secure permissions on temp secret file: $secret_file_path"
             return 1
         fi
@@ -287,23 +285,22 @@ prepare_docker_secrets() {
             log_info "Fix secrets with: ./edit-secrets.sh"
             return 1
         else
-            # Warn but continue (debugging mode)
             log_warn "Placeholder critical file secrets: ${placeholder_critical[*]}"
             log_info "Edit secrets with: ./edit-secrets.sh"
             log_warn "Continuing startup for debugging (use --strict-secrets to enforce)"
         fi
     fi
 
-    # ENHANCEMENT #1: Atomic move - either complete success or complete failure
+    # Atomic move - either complete success or complete failure
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would atomically move secrets to final location"
     else
-        # Remove old directory and atomically move new one into place
         rm -rf "$docker_secrets_dir" 2>/dev/null || true
         if mv "$temp_secrets_dir" "$docker_secrets_dir"; then
             log_success "Docker secrets prepared atomically (check warnings above)"
             # Clear the trap since we successfully moved the directory
             trap - EXIT
+            return 0
         else
             log_error "Failed to atomically move secrets directory"
             return 1
@@ -313,21 +310,24 @@ prepare_docker_secrets() {
     return 0
 }
 
-# --- Prepare Environment Variables ---
+# STANDARDIZED: Prepare Environment Variables - returns exit code
 prepare_environment_variables() {
     log_info "Preparing environment variables for containers..."
-    # This function is now simpler as docker-compose handles sourcing .env
-    # We just need to ensure .env is loaded for this script's context
+
     if [[ ! -f ".env" ]]; then
         log_error ".env file not found. Please run setup.sh or create it."
         return 1
     fi
-    load_env_file
+
+    if ! load_env_file; then
+        return 1
+    fi
+
     log_success "Environment variables prepared"
     return 0
 }
 
-# --- Post-Startup Health Check ---
+# STANDARDIZED: Post-Startup Health Check - returns exit code
 post_startup_health_check() {
     if [[ "$SKIP_HEALTH" == "true" || "$DRY_RUN" == "true" ]]; then
         log_info "Skipping health check"
@@ -338,7 +338,6 @@ post_startup_health_check() {
     log_info "Waiting 15s for services to initialize..."
     sleep 15
 
-    # Services list updated to remove ddclient
     local critical_services=("vaultwarden" "caddy")
     local failed_services=()
 
@@ -387,7 +386,7 @@ post_startup_health_check() {
     fi
 }
 
-# --- Main Execution ---
+# ENHANCED: Main function with proper error handling and exit strategy
 main() {
     log_info "VaultWarden-OCI-NG Stack Management (Modernized)"
 
@@ -399,10 +398,19 @@ main() {
         log_info "STRICT SECRETS MODE - Will abort on any critical secret issues"
     fi
 
-    # Load configuration
-    load_env_file || { log_error "Failed to load configuration. Have you run setup.sh?"; exit 1; }
-    require_config "DOMAIN" "ADMIN_EMAIL" || exit 1
-    require_docker || exit 1
+    # Load configuration - early exit on failure
+    if ! load_env_file; then
+        log_error "Failed to load configuration. Have you run setup.sh?"
+        exit 1
+    fi
+
+    if ! require_config "DOMAIN" "ADMIN_EMAIL"; then
+        exit 1
+    fi
+
+    if ! require_docker; then
+        exit 1
+    fi
 
     # Handle stop mode
     if [[ "$STOP_MODE" == "true" ]]; then
@@ -410,9 +418,14 @@ main() {
             log_info "[DRY RUN] Would stop all services"
         else
             log_info "Stopping services..."
-            stop_services
-            cleanup_secrets "stop"
-            log_success "Services stopped successfully"
+            if stop_services; then
+                cleanup_secrets "stop"
+                log_success "Services stopped successfully"
+                exit 0
+            else
+                log_error "Failed to stop services"
+                exit 1
+            fi
         fi
         return 0
     fi
@@ -423,59 +436,78 @@ main() {
     local real_user; real_user=$(get_real_user)
     local real_group; real_group=$(id -g -n $real_user)
 
-    # Ensure state dirs are owned by the user running the script, NOT root
-    # This is critical so docker, running as the user, can write to them
-    ensure_dir "$state_dir/logs" 755 "$real_user:$real_group" || exit 1
-    ensure_dir "$state_dir/data" 700 "$real_user:$real_group" || exit 1
-    ensure_dir "$state_dir/caddy/data" 700 "$real_user:$real_group" || exit 1
-    ensure_dir "$state_dir/caddy/config" 700 "$real_user:$real_group" || exit 1
-    ensure_dir "$state_dir/fail2ban" 700 "$real_user:$real_group" || exit 1
-
-    # --- LOGIC FIX: DNS Update moved after services are confirmed healthy ---
+    # Ensure state dirs are owned by the user running the script
+    if ! ensure_dir "$state_dir/logs" 755 "$real_user:$real_group" || \
+       ! ensure_dir "$state_dir/data" 700 "$real_user:$real_group" || \
+       ! ensure_dir "$state_dir/caddy/data" 700 "$real_user:$real_group" || \
+       ! ensure_dir "$state_dir/caddy/config" 700 "$real_user:$real_group" || \
+       ! ensure_dir "$state_dir/fail2ban" 700 "$real_user:$real_group"; then
+        log_error "Failed to create required state directories"
+        exit 1
+    fi
 
     # Prepare secrets and environment variables
-    prepare_docker_secrets || exit 1
-    prepare_environment_variables || exit 1
+    if ! prepare_docker_secrets; then
+        log_error "Failed to prepare Docker secrets"
+        exit 1
+    fi
+
+    if ! prepare_environment_variables; then
+        log_error "Failed to prepare environment variables"
+        exit 1
+    fi
 
     # Start or restart services
+    local service_start_failed=false
     if [[ "$FORCE_RESTART" == "true" ]]; then
         if [[ "$DRY_RUN" == "true" ]]; then
             log_info "[DRY RUN] Would force restart all services"
         else
             log_info "Force restarting services..."
-            stop_services
+            if ! stop_services; then
+                log_error "Failed to stop services for restart"
+                exit 1
+            fi
             sleep 2
-            recreate_services
+            if ! recreate_services; then
+                service_start_failed=true
+            fi
         fi
     else
         if [[ "$DRY_RUN" == "true" ]]; then
             log_info "[DRY RUN] Would start services"
         else
             log_info "Starting services..."
-            start_services
+            if ! start_services; then
+                service_start_failed=true
+            fi
         fi
     fi
 
-    # Better health check handling
+    if [[ "$service_start_failed" == "true" ]]; then
+        log_error "Failed to start services"
+        exit 1
+    fi
+
+    # Health check handling
     local health_check_failed=false
     if ! post_startup_health_check; then
         health_check_failed=true
     fi
 
-    # --- LOGIC FIX: Move DNS update to *after* health check ---
+    # DNS update after health check
     if [[ "$health_check_failed" == "false" ]]; then
-        # Only run DNS update if services are healthy
-        update_dns_if_needed
+        if ! update_dns_if_needed; then
+            log_warn "DNS update failed, but services are healthy"
+        fi
     else
         log_warn "Skipping DNS update because services failed to start."
     fi
-    # --- END LOGIC FIX ---
 
     # Final status determination
     local domain
     domain=$(get_config_value "DOMAIN")
 
-    # Clearer final status messaging
     if [[ "$health_check_failed" == "true" ]]; then
         log_error "🚨 STARTUP COMPLETED WITH CRITICAL ISSUES"
         echo ""
@@ -495,7 +527,7 @@ main() {
 
         log_success "🎉 VaultWarden-OCI-NG startup completed successfully"
 
-        # Check final service status (updated list)
+        # Check final service status
         local all_running=true
         for service in vaultwarden caddy fail2ban; do
             if ! is_service_running "$service"; then
@@ -523,6 +555,8 @@ main() {
         echo "IMPORTANT NOTES:"
         echo "  • After editing secrets, always use: make restart"
         echo "  • DNS is updated automatically on startup"
+        
+        exit 0
     fi
 }
 

@@ -1,124 +1,220 @@
 #!/usr/bin/env bash
-# edit-secrets.sh - Enhanced secrets management with caddy-cloudflare support
-# UPDATED: Added separate DNS/Firewall tokens, bcrypt vs Argon2 handling
+# edit-secrets.sh - SOPS encrypted secrets management with enhanced safety
+# ENHANCED: Standardized error handling - functions return, main() decides exit strategy
+# All functions return exit codes, main() collects status and determines final exit
 
 set -euo pipefail
 
-# --- Project Root Resolution ---
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR"
 cd "$PROJECT_ROOT"
 
-# --- Source Libraries ---
 source "lib/common.sh"
 init_common_lib "$0"
 source "lib/crypto.sh"
-source "lib/docker.sh"
 
-# --- Configuration ---
-EDITOR="${EDITOR:-nano}"
+# Configuration
 SECRETS_FILE="secrets/secrets.yaml"
 AGE_KEY_FILE="secrets/keys/age-key.txt"
-SOPS_CONFIG_FILE=".sops.yaml"
-export SOPS_AGE_KEY_FILE="$PROJECT_ROOT/$AGE_KEY_FILE"
+INIT_SECRETS=false
+TEST_ONLY=false
+BACKUP_BEFORE_EDIT=true
+DRY_RUN=false
 
-# --- Help ---
 show_help() {
     cat << 'EOF'
-VaultWarden Secrets Editor - Enhanced for Caddy-Cloudflare
+VaultWarden-OCI Secrets Management - SOPS + Age Encryption
 
 USAGE:
-    ./edit-secrets.sh
+    ./edit-secrets.sh [OPTIONS]
 
 OPTIONS:
-    --editor EDITOR  Editor to use (default: nano, or $EDITOR)
-    --init          Initialize secrets file with templates
-    --show          Show decrypted secrets (careful!)
-    --test          Test if secrets can be decrypted
-    --help          Show this help
-
-DESCRIPTION:
-    Safely edit encrypted secrets using SOPS and Age encryption.
-    Enhanced for caddy-cloudflare with separate DNS/Firewall tokens.
-    
-    PASSWORD HASH TYPES:
-    - VaultWarden admin_token: Plain text (VaultWarden hashes to Argon2)
-    - Caddy admin_basic_auth_hash: bcrypt format (use menu option 2)
+    --init                  Initialize new secrets file with template
+    --test                  Test decryption without editing
+    --no-backup             Skip backup before editing
+    --dry-run               Show what would be done without executing
+    --help                  Show this help
 
 EXAMPLES:
-    ./edit-secrets.sh           # Edit secrets with menu
-    ./edit-secrets.sh --editor vim   # Use vim as editor
-    ./edit-secrets.sh --init    # Create new secrets file
-    ./edit-secrets.sh --show    # Display current secrets (careful!)
-    ./edit-secrets.sh --test    # Check secrets accessibility
+    ./edit-secrets.sh                    # Edit existing secrets
+    ./edit-secrets.sh --init             # Create new secrets file
+    ./edit-secrets.sh --test             # Test decryption
+    ./edit-secrets.sh --no-backup        # Edit without backup
+
+SECRETS INCLUDED:
+    admin_token                         # VaultWarden admin token (plain text)
+    admin_basic_auth_hash              # Caddy basic auth (bcrypt hash)
+    smtp_password                      # Email notifications
+    backup_passphrase                  # Backup encryption
+    push_installation_id/key           # Push notifications (optional)
+    caddy_cloudflare_dns_token         # DNS-01 ACME challenges
+    fail2ban_cloudflare_firewall_token # IP blocking via Cloudflare
+
+IMPORTANT:
+    • admin_token: Plain text (VaultWarden hashes with Argon2)
+    • admin_basic_auth_hash: Must be bcrypt (generate with Caddy)
+    • After editing, run: ./startup.sh --force-restart
 EOF
 }
 
-# --- Argument Parsing ---
-SHOW_MODE=false
-INIT_MODE=false
-TEST_MODE=false
-
+# Argument Parsing
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --editor) EDITOR="$2"; shift 2 ;;
-        --init) INIT_MODE=true; shift ;;
-        --show) SHOW_MODE=true; shift ;;
-        --test) TEST_MODE=true; shift ;;
+        --init) INIT_SECRETS=true; shift ;;
+        --test) TEST_ONLY=true; shift ;;
+        --no-backup) BACKUP_BEFORE_EDIT=false; shift ;;
+        --dry-run) DRY_RUN=true; shift ;;
         --help) show_help; exit 0 ;;
         *) log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done
 
-# --- Validation ---
-check_prerequisites() {
-    require_commands age "$EDITOR" jq docker || return 1
+# Set Age key file environment variable
+export SOPS_AGE_KEY_FILE="$PROJECT_ROOT/$AGE_KEY_FILE"
 
-    if ! check_sops_available; then
-        log_error "SOPS command not found"
-        log_info "SOPS should have been installed during setup."
+# STANDARDIZED: Validate environment - returns exit code
+validate_secrets_environment() {
+    log_info "Validating secrets environment..."
+
+    # Check required commands
+    if ! require_commands sops age jq; then
         return 1
     fi
 
-    if ! check_age_key "$SOPS_AGE_KEY_FILE"; then
-        log_error "Age private key not found or has incorrect permissions: $SOPS_AGE_KEY_FILE"
-        log_info "Ensure the file exists and has permissions 600 (rw-------)."
+    # Check Age key file
+    if [[ ! -f "$SOPS_AGE_KEY_FILE" ]]; then
+        log_error "Age key file not found: $SOPS_AGE_KEY_FILE"
+        log_info "Run setup.sh first to generate encryption keys"
         return 1
     fi
 
-    if [[ ! -f "$SOPS_CONFIG_FILE" ]]; then
-        log_warn "SOPS configuration file ($SOPS_CONFIG_FILE) not found."
-        log_info "Relying solely on SOPS_AGE_KEY_FILE environment variable."
+    # Check Age key permissions
+    local key_perms
+    key_perms=$(stat -c "%a" "$SOPS_AGE_KEY_FILE" 2>/dev/null || echo "000")
+    if [[ "$key_perms" != "600" ]]; then
+        log_error "Age key has incorrect permissions: $key_perms (should be 600)"
+        log_info "Fix with: chmod 600 $SOPS_AGE_KEY_FILE"
+        return 1
     fi
 
+    # Check SOPS configuration
+    if [[ ! -f ".sops.yaml" ]]; then
+        log_error "SOPS configuration not found: .sops.yaml"
+        log_info "Run setup.sh to create SOPS configuration"
+        return 1
+    fi
+
+    log_success "Secrets environment validation passed"
     return 0
 }
 
-# --- Initialize Secrets ---
-init_secrets() {
-    log_info "Initializing secrets file from template..."
-
-    if [[ -f "$SECRETS_FILE" ]]; then
-        log_warn "Secrets file already exists: $SECRETS_FILE"
-        read -p "Overwrite existing file? (y/N): " confirm
-        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-            log_info "Cancelled"
-            return 0
-        fi
-        rm -f "$SECRETS_FILE"
+# STANDARDIZED: Create secrets backup - returns exit code
+backup_secrets_file() {
+    if [[ "$BACKUP_BEFORE_EDIT" != "true" ]]; then
+        log_info "Skipping secrets backup (--no-backup specified)"
+        return 0
     fi
 
-    ensure_dir "$(dirname "$SECRETS_FILE")" 700
+    if [[ ! -f "$SECRETS_FILE" ]]; then
+        log_info "No existing secrets file to backup"
+        return 0
+    fi
 
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would backup secrets file"
+        return 0
+    fi
+
+    log_info "Creating backup of secrets file..."
+
+    local backup_file="$SECRETS_FILE.backup.$(date +%Y%m%d-%H%M%S)"
+    
+    if cp "$SECRETS_FILE" "$backup_file"; then
+        log_success "Secrets backup created: $(basename "$backup_file")"
+        return 0
+    else
+        log_error "Failed to create secrets backup"
+        return 1
+    fi
+}
+
+# STANDARDIZED: Test secrets decryption - returns exit code
+test_secrets_decryption() {
+    if [[ ! -f "$SECRETS_FILE" ]]; then
+        log_error "Secrets file not found: $SECRETS_FILE"
+        return 1
+    fi
+
+    log_info "Testing secrets decryption..."
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would test secrets decryption"
+        return 0
+    fi
+
+    # Test SOPS decryption
+    local decrypted_content
+    if decrypted_content=$(sops --decrypt "$SECRETS_FILE" 2>&1); then
+        log_success "Secrets file decryption: OK"
+        
+        # Validate YAML structure
+        if echo "$decrypted_content" | yq eval '.' >/dev/null 2>&1; then
+            log_success "YAML structure validation: OK"
+        elif echo "$decrypted_content" | jq . >/dev/null 2>&1; then
+            log_success "JSON structure validation: OK"
+        else
+            log_warn "Content structure validation: Could not validate format"
+        fi
+        
+        # Count secrets
+        local secret_count
+        if secret_count=$(echo "$decrypted_content" | yq eval 'keys | length' 2>/dev/null); then
+            log_info "Found $secret_count secrets in file"
+        fi
+        
+        return 0
+    else
+        log_error "Secrets file decryption failed:"
+        log_error "$decrypted_content"
+        return 1
+    fi
+}
+
+# STANDARDIZED: Initialize new secrets file - returns exit code
+initialize_secrets_file() {
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would initialize new secrets file"
+        return 0
+    fi
+
+    log_info "Initializing new secrets file..."
+
+    # Check if secrets file already exists
+    if [[ -f "$SECRETS_FILE" ]]; then
+        log_error "Secrets file already exists: $SECRETS_FILE"
+        log_info "Use regular edit mode or remove existing file first"
+        return 1
+    fi
+
+    # Ensure secrets directory exists
+    if ! ensure_dir "secrets" 700; then
+        log_error "Failed to create secrets directory"
+        return 1
+    fi
+
+    # Generate secure defaults
     local admin_token backup_pass
-    admin_token=$(generate_secure_string 32)
-    backup_pass=$(generate_secure_string 32)
+    if ! admin_token=$(generate_secure_string 32) || ! backup_pass=$(generate_secure_string 32); then
+        log_error "Failed to generate secure default values"
+        return 1
+    fi
 
-    cat > "$SECRETS_FILE" << EOF
+    # Create initial secrets file (unencrypted)
+    if ! cat > "$SECRETS_FILE" << EOF; then
 # VaultWarden Secrets Configuration - Enhanced for Caddy-Cloudflare
-# IMPORTANT: Different hash types for different services
+# IMPORTANT: VaultWarden admin uses Argon2, Caddy basic_auth uses bcrypt
 
-# VaultWarden admin token (plain text - VaultWarden auto-hashes to Argon2)
+# VaultWarden admin token (plain text - will be hashed to Argon2 by VaultWarden)
 admin_token: $admin_token
 
 # Caddy basic_auth hash for /admin endpoint (bcrypt format)
@@ -131,371 +227,227 @@ smtp_password: CHANGE_ME_SMTP_PASSWORD
 # Backup encryption passphrase
 backup_passphrase: $backup_pass
 
-# Push notifications (optional - get ID and Key from bitwarden.com/host)
-push_installation_id: CHANGE_ME_OR_LEAVE_EMPTY  
+# Push notifications (optional - get from bitwarden.com/host)
+push_installation_id: CHANGE_ME_OR_LEAVE_EMPTY
 push_installation_key: CHANGE_ME_OR_LEAVE_EMPTY
 
 # Cloudflare DNS API token for caddy-cloudflare (DNS-01 ACME challenges)
-# Permissions: Zone:DNS:Edit + Zone:Zone:Read
+# Permissions: Zone:DNS:Edit + Zone:Zone:Read for your domain
 caddy_cloudflare_dns_token: CHANGE_ME_DNS_TOKEN
 
 # Cloudflare Firewall API token for fail2ban IP blocking
-# Permissions: Zone:Firewall Services:Edit
+# Permissions: Zone:Firewall Services:Edit for your domain
 fail2ban_cloudflare_firewall_token: CHANGE_ME_FIREWALL_TOKEN
 EOF
+        log_error "Failed to create initial secrets file"
+        return 1
+    fi
 
-    log_success "Template secrets file created"
-    log_info "Now encrypting with SOPS..."
-
-    if sops --input-type yaml --encrypt --in-place "$SECRETS_FILE"; then
-        log_success "Secrets file encrypted successfully"
-        secure_file "$SECRETS_FILE" 600
+    # Encrypt with SOPS
+    if encrypt_sops_file "$SECRETS_FILE" "$AGE_KEY_FILE"; then
+        log_success "Secrets file initialized and encrypted"
+        
+        # Set secure permissions
+        if ! secure_file "$SECRETS_FILE" 600; then
+            log_warn "Failed to set secure permissions on secrets file"
+        fi
+        
+        log_warn "IMPORTANT: Update the placeholder values:"
+        log_info "  1. Generate bcrypt hash for admin_basic_auth_hash"
+        log_info "  2. Add Cloudflare DNS API token"
+        log_info "  3. Add Cloudflare Firewall API token"
+        log_info "  4. Configure SMTP password if using email"
+        log_info "  5. Run: ./edit-secrets.sh (to edit)"
+        
+        return 0
     else
         log_error "Failed to encrypt secrets file"
         return 1
     fi
-
-    log_warn "IMPORTANT: Update the CHANGE_ME values:"
-    log_info "  1. Run: ./edit-secrets.sh (choose option 1)"
-    log_info "  2. Generate bcrypt hash with option 2"
-    log_info "  3. Update caddy_cloudflare_dns_token"
-    log_info "  4. Update fail2ban_cloudflare_firewall_token"
-    log_info "  5. Update smtp_password if using email"
-
-    return 0
 }
 
-# --- Show Secrets ---
-show_secrets() {
-    log_warn "⚠️  SECURITY WARNING: Displaying decrypted secrets!"
-    read -p "Are you sure you want to continue? (y/N): " confirm
-    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-        log_info "Cancelled"
+# STANDARDIZED: Edit secrets file - returns exit code
+edit_secrets_file() {
+    if [[ ! -f "$SECRETS_FILE" ]]; then
+        log_error "Secrets file not found: $SECRETS_FILE"
+        log_info "Run with --init to create a new secrets file"
+        return 1
+    fi
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would open secrets file for editing"
         return 0
     fi
 
-    if [[ ! -f "$SECRETS_FILE" ]]; then
-        log_error "Secrets file not found: $SECRETS_FILE"
-        log_info "Run: ./edit-secrets.sh --init"
+    log_info "Opening secrets file for editing..."
+
+    # Create backup before editing
+    if ! backup_secrets_file; then
+        log_error "Failed to create backup before editing"
         return 1
     fi
 
-    echo ""
-    echo "=== DECRYPTED SECRETS ==="
-    if sops_decrypt "$SECRETS_FILE" "" "yaml"; then
-        echo "========================="
-        echo ""
-        log_warn "Remember to keep these values secure!"
-    else
-        log_error "Failed to decrypt secrets file"
-        return 1
-    fi
-
-    return 0
-}
-
-# --- Edit Secrets ---
-edit_secrets() {
-    log_info "Opening encrypted secrets for editing..."
-
-    if [[ ! -f "$SECRETS_FILE" ]]; then
-        log_error "Secrets file not found: $SECRETS_FILE"
-        log_info "Run: ./edit-secrets.sh --init to create it"
-        return 1
-    fi
-
-    # Comprehensive permission checks
-    if [[ ! -r "$SOPS_AGE_KEY_FILE" ]]; then
-        log_error "Cannot read Age key file: $SOPS_AGE_KEY_FILE"
-        return 1
-    fi
-    if [[ ! -w "$SECRETS_FILE" ]]; then
-        log_error "Cannot write to secrets file: $SECRETS_FILE"
-        return 1
-    fi
-    if [[ ! -w "$(dirname "$SECRETS_FILE")" ]]; then
-        log_error "Cannot write to secrets directory: $(dirname "$SECRETS_FILE")"
-        return 1
-    fi
-    if [[ -f "$SOPS_CONFIG_FILE" ]] && [[ ! -r "$SOPS_CONFIG_FILE" ]]; then
-        log_warn "Cannot read SOPS config file: $SOPS_CONFIG_FILE. Relying on SOPS_AGE_KEY_FILE."
-    fi
-
-    if ! is_sops_encrypted "$SECRETS_FILE"; then
-        log_error "Secrets file exists but does not appear to be encrypted with SOPS"
-        return 1
-    fi
-
-    log_debug "Performing pre-edit decryption test..."
-    if ! sops_decrypt "$SECRETS_FILE" "/dev/null" >/dev/null 2>&1; then
-        log_error "Pre-edit decryption test failed. Cannot proceed with edit."
-        return 1
-    fi
-    log_success "Pre-edit decryption test passed."
-
-    log_info "Using editor: $EDITOR"
-    log_info "The file will be automatically re-encrypted when you save and exit."
-    echo ""
-
-    if EDITOR="$EDITOR" sops "$SECRETS_FILE"; then
-        log_success "Secrets updated successfully"
-
-        if is_sops_encrypted "$SECRETS_FILE"; then
-            log_success "Secrets file encryption verified"
-        else
-            log_error "CRITICAL WARNING: Secrets file may NOT be properly encrypted after editing!"
-            return 1
-        fi
-
-        secure_file "$SECRETS_FILE" 600
-
-        echo ""
-        log_info "To apply changes to running services:"
-        log_info "  make restart  (or ./startup.sh --force-restart)"
-
-    else
-        log_warn "Editor exited with a non-zero status or SOPS encountered an error."
-        log_info "Secrets file should remain unchanged."
-        return 1
-    fi
-
-    return 0
-}
-
-# --- Generate Caddy bcrypt Password Hash ---
-generate_caddy_password_hash() {
-    log_info "Caddy Password Hash Generator (bcrypt for basic_auth)"
-    echo ""
-    log_info "This generates a bcrypt hash for Caddy's basic_auth directive."
-    log_info "This is DIFFERENT from VaultWarden's admin token (which uses Argon2)."
-    echo ""
-
-    if ! check_docker_available; then
-        log_error "Docker is not available or the daemon is not running."
-        log_info "Please ensure Docker is installed and started."
-        return 1
-    fi
-
-    log_info "This will run a temporary caddy-cloudflare container to generate the hash."
-    log_info "This works even if your main services are not running."
-    echo ""
-    log_info "You will be prompted to enter and confirm your password."
-    log_info "After confirming, copy the entire hash output (starts with '\$2a\$...')."
-    echo ""
-
-    # Use caddy-cloudflare image which has the hash-password command
-    if docker run --rm -it ghcr.io/caddybuilds/caddy-cloudflare:latest caddy hash-password; then
-        echo ""
-        log_success "Bcrypt hash generated successfully above."
-        log_info "Use the 'Edit secrets' option to paste this hash as 'admin_basic_auth_hash'."
-        echo ""
-        log_warn "IMPORTANT: This bcrypt hash is for Caddy basic_auth only."
-        log_info "VaultWarden admin_token should remain as plain text (auto-hashed to Argon2)."
-    else
-        log_error "Failed to run hash generation command."
-        log_info "Ensure you have internet connection to pull the caddy-cloudflare image."
-        return 1
-    fi
-    echo ""
-}
-
-# --- Generate VaultWarden Admin Token ---
-generate_vaultwarden_admin_token() {
-    log_info "VaultWarden Admin Token Generator"
-    echo ""
-    log_info "VaultWarden admin tokens should be stored as PLAIN TEXT in secrets."
-    log_info "VaultWarden automatically hashes them to Argon2 format internally."
-    echo ""
+    # Determine editor
+    local editor="${EDITOR:-nano}"
     
-    local new_token
-    new_token=$(generate_secure_string 32)
-    
-    echo "Generated admin token (plain text):"
-    echo "======================================"
-    echo "$new_token"
-    echo "======================================"
-    echo ""
-    log_info "Use the 'Edit secrets' option to set this as 'admin_token' value."
-    log_warn "Store this as plain text - VaultWarden will hash it automatically."
-    echo ""
-}
+    if ! has_command "$editor"; then
+        log_warn "Editor '$editor' not found, falling back to nano"
+        editor="nano"
+    fi
 
-# --- Test Secrets Access ---
-test_secrets_access() {
-    log_info "Testing secrets access..."
-
-    if [[ ! -f "$SECRETS_FILE" ]]; then
-        log_error "Secrets file not found: $SECRETS_FILE"
+    if ! has_command "$editor"; then
+        log_error "No suitable editor found"
+        log_info "Install nano: sudo apt install nano"
+        log_info "Or set EDITOR environment variable"
         return 1
     fi
 
-    log_info "Attempting decryption..."
-    local decrypted_json exit_status
-    decrypted_json=$(sops --decrypt --output-type json "$SECRETS_FILE" 2>&1)
-    exit_status=$?
-
-    if [[ $exit_status -eq 0 ]]; then
-        log_success "Secrets file can be decrypted."
-
-        echo "$decrypted_json" | jq . > /dev/null 2>&1
-        local jq_status=$?
-        if [[ $jq_status -ne 0 ]]; then
-            log_error "Failed to parse decrypted JSON content."
-            return 1
-        fi
-        log_success "Decrypted content parsed successfully as JSON."
-
-        # Updated test secrets for caddy-cloudflare
-        local test_secrets=("admin_token" "admin_basic_auth_hash" "caddy_cloudflare_dns_token" "fail2ban_cloudflare_firewall_token")
-        local accessible_secrets=0
-        local missing_secrets=0
-        local placeholder_secrets=0
-
-        log_info "Checking configuration status of core secrets:"
-        for secret in "${test_secrets[@]}"; do
-            local value
-            value=$(echo "$decrypted_json" | jq -r --arg key "$secret" '.[$key] // ""')
-            if [[ -n "$value" ]] && [[ "$value" != "null" ]] && [[ "$value" != CHANGE_ME* ]]; then
-                ((accessible_secrets++))
-                log_success "  ✓ '$secret' is accessible and configured."
-            elif [[ -n "$value" ]] && [[ "$value" == CHANGE_ME* ]]; then
-                log_warn "  ✗ '$secret' has a placeholder value (e.g., CHANGE_ME...)."
-                ((placeholder_secrets++))
-            else
-                log_warn "  ✗ '$secret' not found in the secrets file."
-                ((missing_secrets++))
-            fi
-        done
-
-        echo ""
-        if [[ $missing_secrets -eq 0 && $placeholder_secrets -eq 0 ]]; then
-            log_success "All core secrets are accessible and appear configured correctly."
+    log_info "Using editor: $editor"
+    log_info "Edit the secrets and save the file when done"
+    
+    # Use SOPS to edit the encrypted file
+    if sops --editor "$editor" "$SECRETS_FILE"; then
+        log_success "Secrets file edited successfully"
+        
+        # Validate the edited file
+        if test_secrets_decryption; then
+            log_success "Edited secrets file validated successfully"
+            
+            log_warn "IMPORTANT NEXT STEPS:"
+            log_info "  1. Restart containers: ./startup.sh --force-restart"
+            log_info "  2. Test login with new credentials"
+            log_info "  3. Verify email notifications if configured"
+            
             return 0
         else
-            log_warn "Found $placeholder_secrets placeholder value(s) and $missing_secrets missing secret(s)."
-            log_info "Use option '1) Edit secrets' to configure them."
+            log_error "Edited secrets file validation failed"
+            log_info "The file may have syntax errors or encryption issues"
             return 1
         fi
-
     else
-        log_error "Cannot decrypt secrets file."
-        log_error "SOPS Output: $decrypted_json"
+        log_error "Failed to edit secrets file"
+        log_info "Check that SOPS and your editor are working correctly"
         return 1
     fi
 }
 
-# --- Generate Docker Secrets Files ---
-generate_docker_secrets() {
-    log_info "Generating Docker Compose secret files..."
-    
-    if [[ ! -f "$SECRETS_FILE" ]]; then
-        log_error "Secrets file not found: $SECRETS_FILE"
-        return 1
-    fi
+# STANDARDIZED: Show secrets status - returns exit code
+show_secrets_status() {
+    log_info "Secrets file status:"
+    echo ""
 
-    local secrets_dir="secrets/.docker_secrets"
-    ensure_dir "$secrets_dir" 700
+    # Check if secrets file exists
+    if [[ -f "$SECRETS_FILE" ]]; then
+        local file_size file_perms file_age
+        file_size=$(stat -c%s "$SECRETS_FILE" 2>/dev/null || echo "unknown")
+        file_perms=$(stat -c "%a" "$SECRETS_FILE" 2>/dev/null || echo "unknown")
+        file_age=$(stat -c %Y "$SECRETS_FILE" 2>/dev/null || echo "0")
+        file_age=$(date -d "@$file_age" "+%Y-%m-%d %H:%M" 2>/dev/null || echo "unknown")
 
-    # Decrypt secrets to JSON
-    local decrypted_json
-    decrypted_json=$(sops --decrypt --output-type json "$SECRETS_FILE" 2>/dev/null)
-    if [[ $? -ne 0 ]]; then
-        log_error "Failed to decrypt secrets file"
-        return 1
-    fi
+        echo "  File: $SECRETS_FILE"
+        echo "  Size: $file_size bytes"
+        echo "  Permissions: $file_perms"
+        echo "  Last modified: $file_age"
+        echo ""
 
-    # Extract and write individual secret files
-    local secrets_map=(
-        "admin_token:admin_token"
-        "admin_basic_auth_hash:admin_basic_auth_hash"
-        "smtp_password:smtp_password"
-        "push_installation_id:push_installation_id"
-        "push_installation_key:push_installation_key"
-        "caddy_cloudflare_dns_token:caddy_cloudflare_dns_token"
-        "fail2ban_cloudflare_firewall_token:fail2ban_cloudflare_firewall_token"
-    )
-
-    for mapping in "${secrets_map[@]}"; do
-        local yaml_key="${mapping%:*}"
-        local file_name="${mapping#*:}"
-        local value
-        
-        value=$(echo "$decrypted_json" | jq -r --arg key "$yaml_key" '.[$key] // ""')
-        
-        if [[ -n "$value" ]] && [[ "$value" != "null" ]] && [[ "$value" != CHANGE_ME* ]]; then
-            echo -n "$value" > "$secrets_dir/$file_name"
-            chmod 600 "$secrets_dir/$file_name"
-            log_success "Generated: $file_name"
-        elif [[ "$value" == CHANGE_ME* ]]; then
-            log_warn "Skipped: $file_name (placeholder value)"
+        # Test encryption
+        if test_secrets_decryption; then
+            echo "  Encryption: ✅ Working"
         else
-            log_warn "Skipped: $file_name (empty/missing value)"
+            echo "  Encryption: ❌ Issues detected"
         fi
-    done
+    else
+        echo "  Status: ❌ Not found"
+        echo "  Location: $SECRETS_FILE"
+        echo ""
+        log_info "Initialize with: ./edit-secrets.sh --init"
+    fi
 
-    log_success "Docker secret files generated in $secrets_dir"
+    # Check Age key
+    echo ""
+    log_info "Age key status:"
+    if [[ -f "$SOPS_AGE_KEY_FILE" ]]; then
+        local key_perms
+        key_perms=$(stat -c "%a" "$SOPS_AGE_KEY_FILE" 2>/dev/null || echo "unknown")
+        echo "  File: $SOPS_AGE_KEY_FILE"
+        echo "  Permissions: $key_perms"
+        
+        if [[ "$key_perms" == "600" ]]; then
+            echo "  Security: ✅ Properly secured"
+        else
+            echo "  Security: ⚠️  Incorrect permissions"
+        fi
+    else
+        echo "  Status: ❌ Not found"
+        log_info "Run setup.sh to generate Age keys"
+    fi
+
     return 0
 }
 
-# --- Main Execution ---
+# ENHANCED: Main function with proper error handling and exit strategy
 main() {
-    log_info "VaultWarden Secrets Manager - Enhanced for Caddy-Cloudflare"
+    log_header "VaultWarden-OCI Secrets Management"
 
-    check_prerequisites || exit 1
-
-    if [[ "$INIT_MODE" == "true" ]]; then
-        init_secrets
-        exit $?
-    elif [[ "$SHOW_MODE" == "true" ]]; then
-        show_secrets
-        exit $?
-    elif [[ "$TEST_MODE" == "true" ]]; then
-        test_secrets_access
-        exit $?
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_warn "DRY RUN MODE - No changes will be made"
     fi
 
-    if [[ ! -f "$SECRETS_FILE" ]]; then
-        log_warn "No secrets file found ($SECRETS_FILE)"
-        read -p "Create new secrets file from template? (Y/n): " create_new
-        if [[ ! "$create_new" =~ ^[Nn]$ ]]; then
-            init_secrets || exit 1
-            echo ""
-            log_info "Now opening for editing..."
-            sleep 1
-            edit_secrets
-            exit $?
-        else
-            log_info "Cancelled."
+    # Validate environment
+    if ! validate_secrets_environment; then
+        exit 1
+    fi
+
+    # Handle test-only mode
+    if [[ "$TEST_ONLY" == "true" ]]; then
+        log_info "=== Testing Secrets Decryption ==="
+        if test_secrets_decryption; then
+            show_secrets_status
+            log_success "Secrets test completed successfully"
             exit 0
+        else
+            log_error "Secrets test failed"
+            exit 1
         fi
     fi
 
-    echo ""
-    echo "What would you like to do?"
-    echo "1) Edit secrets file"
-    echo "2) Generate Caddy bcrypt password hash (for admin_basic_auth_hash)"
-    echo "3) Generate VaultWarden admin token (plain text)"
-    echo "4) Show current secrets (use caution!)"
-    echo "5) Test secrets access & configuration"
-    echo "6) Generate Docker Compose secret files"
-    echo "7) Exit"
-    echo ""
-    read -p "Choice (1-7): " choice
+    # Handle initialization mode
+    if [[ "$INIT_SECRETS" == "true" ]]; then
+        log_info "=== Initializing Secrets File ==="
+        if initialize_secrets_file; then
+            log_success "Secrets file initialized successfully"
+            show_secrets_status
+            exit 0
+        else
+            log_error "Failed to initialize secrets file"
+            exit 1
+        fi
+    fi
 
-    case "$choice" in
-        1) edit_secrets ;;
-        2) generate_caddy_password_hash ;;
-        3) generate_vaultwarden_admin_token ;;
-        4) show_secrets ;;
-        5) test_secrets_access ;;
-        6) generate_docker_secrets ;;
-        7) log_info "Goodbye"; exit 0 ;;
-        *) log_error "Invalid choice"; exit 1 ;;
-    esac
+    # Handle regular edit mode
+    log_info "=== Editing Secrets File ==="
+    
+    # Show current status first
+    show_secrets_status
+    echo ""
 
-    local exit_status=$?
-    exit $exit_status
+    # Pre-edit validation
+    if [[ -f "$SECRETS_FILE" ]]; then
+        if ! test_secrets_decryption; then
+            log_error "Cannot edit secrets file - decryption failed"
+            log_info "File may be corrupted or keys may be wrong"
+            exit 1
+        fi
+    fi
+
+    # Edit the file
+    if edit_secrets_file; then
+        log_success "Secrets editing completed successfully"
+        exit 0
+    else
+        log_error "Secrets editing failed"
+        exit 1
+    fi
 }
 
-export SOPS_AGE_KEY_FILE
 main "$@"
