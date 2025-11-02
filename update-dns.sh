@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # update-dns.sh - Simple dynamic DNS update for VaultWarden-OCI
-# Uses Docker secrets securely without exposing tokens in environment variables
+# Now includes global lock file to prevent race conditions across concurrent DNS updates
 
 set -euo pipefail
 
@@ -10,6 +10,14 @@ cd "$PROJECT_ROOT"
 
 source "lib/common.sh"
 init_common_lib "$0"
+
+# Global DNS update lock file -- prevents overlap with startup/cron/other runs
+DNS_LOCK="/tmp/.vw_dns_update.lock"
+if ! (set -C; echo $$ > "$DNS_LOCK") 2>/dev/null; then
+    log_info "DNS update already in progress (lock: $DNS_LOCK). Skipping."
+    exit 0
+fi
+trap "rm -f '$DNS_LOCK'" EXIT
 
 # Configuration from .env
 DOMAIN="${DOMAIN:-}"
