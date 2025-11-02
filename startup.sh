@@ -3,6 +3,7 @@
 # FIXED: Creates ALL required secret files for caddy-cloudflare
 # ENHANCED: Production hardening with strict mode and better error handling
 # FIXED: Moved DNS update to *after* services are healthy to fix logic bug
+# ENHANCEMENT #1: Atomic secret file creation to prevent race conditions
 
 set -euo pipefail
 
@@ -26,6 +27,9 @@ cleanup_secrets() {
             log_info "  Clean up manually with: sudo rm -rf secrets/.docker_secrets/"
         fi
     fi
+
+    # ENHANCEMENT #1: Clean up any temporary atomic directories
+    rm -rf "$PROJECT_ROOT/secrets/.docker_secrets".* 2>/dev/null || true
 }
 
 # --- Fix Secrets Ownership Function ---
@@ -151,9 +155,9 @@ update_dns_if_needed() {
     return 0
 }
 
-# --- Prepare Docker Secrets ---
+# --- ENHANCEMENT #1: Atomic Docker Secrets Preparation ---
 prepare_docker_secrets() {
-    log_info "Preparing Docker secrets..."
+    log_info "Preparing Docker secrets with atomic operations..."
 
     local docker_secrets_dir="secrets/.docker_secrets"
     local real_user; real_user=$(get_real_user)
@@ -162,11 +166,19 @@ prepare_docker_secrets() {
     # Fix ownership if needed before attempting operations
     fix_secrets_ownership
 
-    rm -rf "$docker_secrets_dir"
-    mkdir -p "$docker_secrets_dir"
-    chown "$real_user:$real_group" "$docker_secrets_dir"
-    chmod 700 "$docker_secrets_dir"
+    # ENHANCEMENT #1: Create temporary directory with unique name for atomic operations
+    local temp_secrets_dir
+    temp_secrets_dir=$(mktemp -d "${docker_secrets_dir}.XXXXXX")
+    log_debug "Created temporary secrets directory: $(basename "$temp_secrets_dir")"
 
+    # Ensure cleanup of temp directory
+    local cleanup_temp_dir() {
+        rm -rf "$temp_secrets_dir" 2>/dev/null || true
+    }
+    trap cleanup_temp_dir EXIT
+
+    chmod 700 "$temp_secrets_dir"
+    chown "$real_user:$real_group" "$temp_secrets_dir"
 
     if [[ ! -f "secrets/secrets.yaml" ]]; then
         log_error "Secrets file not found: secrets/secrets.yaml"
@@ -221,19 +233,19 @@ prepare_docker_secrets() {
         "caddy_cloudflare_dns_token"
         "fail2ban_cloudflare_firewall_token"
     )
-    
+
     local secret_file_path
     local placeholder_critical=()
 
-    # Write files for ALL secrets that need them
+    # Write files for ALL secrets that need them IN TEMP DIRECTORY
     for secret in "${secrets_needing_files[@]}"; do
         local value
-        secret_file_path="$docker_secrets_dir/$secret"
+        secret_file_path="$temp_secrets_dir/$secret"
         value=$(echo "$decrypted_json" | jq -r --arg secret "$secret" '.[$secret] // ""')
 
         if [[ -n "$value" && "$value" != "null" && "$value" != "CHANGE_ME"* ]]; then
             echo -n "$value" > "$secret_file_path"
-            log_debug "Created secret file: $secret"
+            log_debug "Created secret file in temp dir: $secret"
         else
             # Check if this is a critical vs optional secret
             local is_critical=false
@@ -256,10 +268,10 @@ prepare_docker_secrets() {
             fi
         fi
 
-        # Set ownership and secure permissions
+        # Set ownership and secure permissions IN TEMP DIRECTORY
         chown "$real_user:$real_group" "$secret_file_path"
         if ! secure_file "$secret_file_path" 600; then
-            log_error "Failed to set secure permissions on secret file: $secret_file_path"
+            log_error "Failed to set secure permissions on temp secret file: $secret_file_path"
             return 1
         fi
     done
@@ -282,7 +294,22 @@ prepare_docker_secrets() {
         fi
     fi
 
-    log_success "Docker secrets prepared (check warnings above)"
+    # ENHANCEMENT #1: Atomic move - either complete success or complete failure
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would atomically move secrets to final location"
+    else
+        # Remove old directory and atomically move new one into place
+        rm -rf "$docker_secrets_dir" 2>/dev/null || true
+        if mv "$temp_secrets_dir" "$docker_secrets_dir"; then
+            log_success "Docker secrets prepared atomically (check warnings above)"
+            # Clear the trap since we successfully moved the directory
+            trap - EXIT
+        else
+            log_error "Failed to atomically move secrets directory"
+            return 1
+        fi
+    fi
+
     return 0
 }
 
@@ -500,4 +527,3 @@ main() {
 }
 
 main "$@"
-
