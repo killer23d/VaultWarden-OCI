@@ -16,9 +16,7 @@ VaultWarden uses JWT tokens with current enhanced security:
 
 ```bash
 # Login with current rate limiting protection
-curl -X POST "https://vault.yourdomain.com/identity/connect/token" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=password&username=user@example.com&password=userpassword&scope=api&client_id=web"
+curl -X POST "https://vault.yourdomain.com/identity/connect/token"   -H "Content-Type: application/x-www-form-urlencoded"   -d "grant_type=password&username=user@example.com&password=userpassword&scope=api&client_id=web"
 
 # Response includes enhanced security context
 {
@@ -40,12 +38,10 @@ curl "https://vault.yourdomain.com/alive"
 # Returns: 200 OK if service healthy
 
 # Enhanced diagnostics with resource information
-curl -H "Authorization: Bearer ADMIN_TOKEN" \
-  "https://vault.yourdomain.com/admin/diagnostics"
+curl -H "Authorization: Bearer ADMIN_TOKEN"   "https://vault.yourdomain.com/admin/diagnostics"
 
 # Current template validation endpoint  
-curl -H "Authorization: Bearer ADMIN_TOKEN" \
-  "https://vault.yourdomain.com/admin/config/validate"
+curl -H "Authorization: Bearer ADMIN_TOKEN"   "https://vault.yourdomain.com/admin/config/validate"
 ```
 
 #### Current Version Information
@@ -79,10 +75,6 @@ curl "https://vault.yourdomain.com/api/config"
 # Current comprehensive mode
 ./health.sh --comprehensive
 # Adds: backups, secrets, fail2ban, break-glass, resource limits
-
-# Current auto-heal with template repair
-./health.sh --auto-heal
-# Attempts fixes including template regeneration
 
 # Current JSON output with enhanced metrics
 ./health.sh --comprehensive --json
@@ -172,21 +164,16 @@ docker compose config >/dev/null && echo "Templates valid"
 ### Current DNS Management
 ```bash
 # Test current API connectivity
-curl -X GET "https://api.cloudflare.com/client/v4/user/tokens/verify" \
-  -H "Authorization: Bearer $CADDY_CF_TOKEN"
+curl -X GET "https://api.cloudflare.com/client/v4/user/tokens/verify"   -H "Authorization: Bearer $CADDY_CF_TOKEN"
 
 # Current DNS record management
-curl -X GET "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records" \
-  -H "Authorization: Bearer $CADDY_CF_TOKEN" | \
-  jq '.result[] | select(.name == env.DOMAIN)'
+curl -X GET "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records"   -H "Authorization: Bearer $CADDY_CF_TOKEN" |   jq '.result[] | select(.name == env.DOMAIN)'
 ```
 
 ### Current Enhanced Firewall Management
 ```bash
 # Current dual-action firewall rules
-curl -X GET "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/firewall/access_rules/rules" \
-  -H "Authorization: Bearer $FAIL2BAN_CF_TOKEN" | \
-  jq '.result[] | select(.notes | contains("dual-action"))'
+curl -X GET "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/firewall/access_rules/rules"   -H "Authorization: Bearer $FAIL2BAN_CF_TOKEN" |   jq '.result[] | select(.notes | contains("dual-action"))'
 
 # Current rate limiting status
 docker compose logs fail2ban | grep -E "Rate.*limit|CF.*ok|UFW.*ok"
@@ -197,12 +184,10 @@ docker compose logs fail2ban | grep -E "Rate.*limit|CF.*ok|UFW.*ok"
 ### Current Container Management
 ```bash
 # Current container status with resource limits
-docker compose ps --format json | \
-  jq '.[] | {name: .Name, status: .Status, memory_limit: .MemLimit}'
+docker compose ps --format json |   jq '.[] | {name: .Name, status: .Status, memory_limit: .MemLimit}'
 
 # Current resource usage
-docker stats --no-stream --format json | \
-  jq '.[] | {name: .Name, memory: .MemUsage, cpu: .CPUPerc}'
+docker stats --no-stream --format json |   jq '.[] | {name: .Name, memory: .MemUsage, cpu: .CPUPerc}'
 
 # Current template validation
 docker compose config >/dev/null && echo "Configuration valid"

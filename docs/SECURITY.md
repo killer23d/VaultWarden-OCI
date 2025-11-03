@@ -487,8 +487,7 @@ docker compose config
 docker stats --no-stream --format "table {{.Container}}\t{{.MemPerc}}\t{{.CPUPerc}}"
 
 # 6. Validate dual blocking is operational
-curl -X GET "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/firewall/access_rules/rules" \
-  -H "Authorization: Bearer $CF_TOKEN" | jq '.result | length'
+curl -X GET "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/firewall/access_rules/rules"   -H "Authorization: Bearer $CF_TOKEN" | jq '.result | length'
 ```
 
 ### Enhanced Security Incident Response

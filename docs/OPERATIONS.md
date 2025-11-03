@@ -8,7 +8,7 @@ VaultWarden-OCI is designed for minimal operational overhead with maximum reliab
 
 - **Template-Based Configuration**: Single source of truth with `.example` files
 - **Automated Operations**: Comprehensive cron-based automation via `cron-setup.sh`
-- **Enhanced Monitoring**: Proactive health checks with auto-healing capabilities
+- **Enhanced Monitoring**: Proactive health checks and clear diagnostics
 - **Atomic Operations**: Reliable backup and restore procedures
 - **Emergency Access**: Break-glass admin for critical recovery scenarios
 - **Resource Limits**: Container limits prevent resource exhaustion on small hosts
@@ -24,8 +24,8 @@ tail -20 /var/log/vaultwarden-cron/health.log
 # Quick manual health check if needed
 ./health.sh --quiet
 
-# If issues found, run comprehensive check with auto-heal:
-./health.sh --comprehensive --auto-heal
+# If issues are found, run the comprehensive check and follow guidance:
+./health.sh --comprehensive
 ```
 
 ### Service Status Verification
@@ -95,7 +95,7 @@ docker stats --no-stream # Container resource usage
 ### System Maintenance
 ```bash
 # 1. Comprehensive health check
-./health.sh --comprehensive --email-alert
+./health.sh --comprehensive
 
 # 2. Standard maintenance (safe cleanup)
 sudo ./maintenance.sh --type standard --dry-run
@@ -212,7 +212,7 @@ docker compose config || sudo ./setup.sh --force --domain vault.yourdomain.com -
 
 ### Health Monitoring
 ```bash
-./health.sh --comprehensive --auto-heal --email-alert
+./health.sh --comprehensive
 ./health.sh --comprehensive --json > /tmp/vaultwarden-status.json
 ```
 

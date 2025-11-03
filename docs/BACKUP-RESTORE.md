@@ -152,4 +152,3 @@ age -d -i secrets/keys/age-key.txt db-backup.age | gunzip | sqlite3 :memory: "PR
 - Include backups in health checks
 - Maintain current recovery procedures
 - Practice emergency procedures
-```
