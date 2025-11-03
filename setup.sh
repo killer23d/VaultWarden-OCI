@@ -1,577 +1,75 @@
 #!/usr/bin/env bash
-# setup.sh - VaultWarden-OCI Setup Script with Caddy-Cloudflare Integration
-# ENHANCED: Standardized error handling - functions return, main() decides exit strategy
-# All functions return exit codes, main() collects status and determines final exit
+# startup.sh - Enhanced VaultWarden startup script with secure secrets handling
+# ENHANCED: Fixed secret file permissions race condition - set umask before file creation
+# ENHANCED: Atomic secret file creation with proper permissions from the start
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR"
 cd "$PROJECT_ROOT"
-source "lib/common.sh"
-init_common_lib "$0"
-source "lib/crypto.sh"
-source "lib/docker.sh"
 
-# Configuration Defaults
-DOMAIN=""
-ADMIN_EMAIL=""
-AUTO_MODE=false
-USE_LATEST=false
-SKIP_DEPS=false
-FORCE=false
+source "lib/common.sh" 
+init_common_lib "$0"
+source "lib/docker.sh"
+source "lib/crypto.sh"
+
+# Configuration
+FORCE_RESTART=false
+SKIP_HEALTH_CHECK=false
+BACKGROUND=false
 DRY_RUN=false
-ENTROPY_THRESHOLD=200
-ENTROPY_MAX_WAIT=60
 
 show_help() {
     cat << 'EOF'
-VaultWarden-OCI Setup Tool - Enhanced for Caddy-Cloudflare
+VaultWarden-OCI Startup Script with Enhanced Security
 
 USAGE:
-    sudo ./setup.sh
+    ./startup.sh [OPTIONS]
 
-REQUIRED OPTIONS:
-    --domain DOMAIN      Your VaultWarden domain (e.g., vault.example.com)
-    --email EMAIL        Administrator email address
-
-SETUP OPTIONS:
-    --auto               Automated setup with minimal prompts
-    --use-latest         Use latest container versions (default: pinned versions)
-    --skip-deps          Skip dependency installation (install manually first)
-    --force              Overwrite existing configuration files
-    --dry-run            Show what would be done without executing
-    --help               Show this help information
+OPTIONS:
+    --force-restart         Force restart of all services
+    --skip-health           Skip post-startup health check
+    --background           Start services in background (daemon mode)
+    --dry-run              Show what would be done without executing
+    --help                 Show this help
 
 EXAMPLES:
-    # Interactive production setup (recommended)
-    sudo ./setup.sh --domain vault.example.com --email admin@example.com
-
-    # Automated production setup with pinned versions
-    sudo ./setup.sh --domain vault.example.com --email admin@example.com --auto
-
-NOTES:
-    - Uses template files (.example) for easier maintenance
-    - Installs 'unattended-upgrades' for automatic host OS security patches
-    - Enhanced error handling with proper exit codes
+    ./startup.sh                    # Normal startup
+    ./startup.sh --force-restart    # Force restart all services
+    ./startup.sh --background       # Start in daemon mode
 EOF
 }
 
-# Argument Parsing
+# Argument parsing
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --domain) DOMAIN="$2"; shift 2 ;;
-        --email) ADMIN_EMAIL="$2"; shift 2 ;;
-        --auto) AUTO_MODE=true; shift ;;
-        --use-latest) USE_LATEST=true; shift ;;
-        --skip-deps) SKIP_DEPS=true; shift ;;
-        --force) FORCE=true; shift ;;
+        --force-restart) FORCE_RESTART=true; shift ;;
+        --skip-health) SKIP_HEALTH_CHECK=true; shift ;;
+        --background) BACKGROUND=true; shift ;;
         --dry-run) DRY_RUN=true; shift ;;
         --help) show_help; exit 0 ;;
         *) log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done
 
-# Validation
-if [[ -z "$DOMAIN" ]]; then
-    log_error "Domain is required. Use --domain your-domain.com"
-    show_help
-    exit 1
-fi
-
-if [[ -z "$ADMIN_EMAIL" ]]; then
-    log_error "Admin email is required. Use --email admin@example.com"
-    show_help
-    exit 1
-fi
-
-if ! validate_domain "$DOMAIN"; then
-    log_error "Invalid domain format: $DOMAIN"
-    exit 1
-fi
-
-if ! validate_email "$ADMIN_EMAIL"; then
-    log_error "Invalid email format: $ADMIN_EMAIL"
-    exit 1
-fi
-
-# STANDARDIZED: System Functions - all return exit codes
-install_dependencies() {
-    if [[ "$SKIP_DEPS" == "true" ]]; then
-        log_info "Skipping dependency installation (--skip-deps specified)."
-        return 0
-    fi
-    
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would install system dependencies"
-        return 0
-    fi
-
-    log_info "Installing system dependencies..."
-    if ! apt-get update -qq; then
-        log_error "Failed to update package lists"
-        return 1
-    fi
-
-    local basic_packages=("age" "make" "nano" "rclone" "sqlite3" "jq" "mailutils" "ufw" "curl" "wget" "unzip" "git" "gpg" "coreutils" "haveged")
-    export DEBIAN_FRONTEND=noninteractive
-
-    if ! apt-get install -y "${basic_packages[@]}"; then
-        log_error "Failed to install basic dependencies."
-        return 1
-    fi
-
-    # Start haveged service for entropy generation
-    if systemctl is-active --quiet haveged; then
-        log_success "haveged service is already running"
-    else
-        if ! systemctl start haveged; then
-            log_error "Failed to start haveged service"
-            return 1
-        fi
-        log_success "haveged service started for entropy generation"
-    fi
-
-    # Add unattended-upgrades
-    log_info "Installing and enabling automatic security updates (unattended-upgrades)..."
-    if ! apt-get install -y unattended-upgrades; then
-        log_warn "Could not install 'unattended-upgrades'. Host OS security patches will be manual."
-    else
-        echo "unattended-upgrades unattended-upgrades/enable_auto_updates boolean true" | debconf-set-selections
-        if ! dpkg-reconfigure -f noninteractive unattended-upgrades; then
-            log_warn "Failed to configure unattended-upgrades"
-        else
-            log_success "Host OS automatic security updates enabled."
-        fi
-    fi
-
-    # Install Docker if not present
-    if ! has_command docker; then
-        log_info "Installing Docker..."
-        if ! curl -fsSL https://get.docker.com -o get-docker.sh; then
-            log_error "Failed to download Docker installer"
-            return 1
-        fi
-        
-        if ! sh get-docker.sh; then
-            log_error "Failed to install Docker"
-            rm -f get-docker.sh
-            return 1
-        fi
-        
-        rm -f get-docker.sh
-        
-        if ! systemctl enable docker || ! systemctl start docker; then
-            log_error "Failed to enable/start Docker service"
-            return 1
-        fi
-
-        local real_user
-        real_user=$(get_real_user)
-        if ! usermod -aG docker "$real_user"; then
-            log_error "Failed to add user to docker group"
-            return 1
-        fi
-        log_success "Docker installed. User $real_user added to docker group."
-    fi
-
-    # Install Docker Compose if not present
-    if ! docker compose version >/dev/null 2>&1; then
-        log_info "Installing Docker Compose plugin..."
-        if ! apt-get install -y docker-compose-plugin; then
-            log_error "Failed to install Docker Compose plugin"
-            return 1
-        fi
-    fi
-
-    # Install SOPS if not present
-    if ! has_command sops; then
-        log_info "Installing SOPS..."
-        local sops_version="v3.8.1"
-        local arch
-        arch=$(dpkg --print-architecture)
-        case "$arch" in
-            amd64) arch="amd64" ;;
-            arm64) arch="arm64" ;;
-            armhf) arch="arm" ;;
-            *) log_error "Unsupported architecture: $arch"; return 1 ;;
-        esac
-
-        if ! wget -q "https://github.com/mozilla/sops/releases/download/${sops_version}/sops-${sops_version}.linux.${arch}" -O /usr/local/bin/sops; then
-            log_error "Failed to download SOPS"
-            return 1
-        fi
-        
-        if ! chmod +x /usr/local/bin/sops; then
-            log_error "Failed to set SOPS permissions"
-            return 1
-        fi
-    fi
-
-    log_success "Dependencies installed."
-    return 0
-}
-
-# STANDARDIZED: Returns exit code
-verify_dependencies() {
-    log_info "Verifying dependencies..."
-
-    local required_commands=("age" "sops" "docker" "jq" "sqlite3" "ufw" "curl")
-    if ! require_commands "${required_commands[@]}"; then
-        return 1
-    fi
-
-    if ! systemctl is-active --quiet haveged 2>/dev/null; then
-        log_warn "haveged service not running - entropy may be insufficient"
-    fi
-
-    if ! docker compose version >/dev/null 2>&1; then
-        log_error "Docker Compose plugin not available"
-        return 1
-    fi
-
-    log_success "All dependencies verified."
-    return 0
-}
-
-# STANDARDIZED: Returns exit code
-setup_user_permissions() {
-    log_info "Setting up user permissions..."
-
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would configure user permissions and groups"
-        return 0
-    fi
-
-    local real_user
-    real_user=$(get_real_user)
-
-    if ! id "$real_user" >/dev/null 2>&1; then
-        log_error "User $real_user does not exist"
-        return 1
-    fi
-
-    # Ensure user is in docker group
-    if ! groups "$real_user" | grep -q docker; then
-        if ! usermod -aG docker "$real_user"; then
-            log_error "Failed to add $real_user to docker group"
-            return 1
-        fi
-        log_info "Added $real_user to docker group"
-    fi
-
-    # Set proper ownership for project directory
-    if ! chown -R "$real_user:$real_user" "$PROJECT_ROOT"; then
-        log_error "Failed to set project directory ownership"
-        return 1
-    fi
-
-    log_success "User permissions configured."
-    return 0
-}
-
-# STANDARDIZED: Enhanced firewall setup - returns exit code
-setup_firewall() {
-    log_info "Configuring Cloudflare-only UFW firewall..."
-
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would configure UFW firewall with Cloudflare IP ranges"
-        return 0
-    fi
-
-    if ! ufw --force reset >/dev/null; then
-        log_error "Failed to reset UFW firewall"
-        return 1
-    fi
-
-    if ! ufw default deny incoming >/dev/null || ! ufw default allow outgoing >/dev/null; then
-        log_error "Failed to set UFW default policies"
-        return 1
-    fi
-
-    # SSH on custom port
-    local ssh_port
-    ssh_port=$(get_config_value "SSH_PORT" "22")
-
-    if ! validate_port "$ssh_port"; then
-        log_error "Invalid SSH port: $ssh_port"
-        return 1
-    fi
-
-    if ! ufw allow "$ssh_port/tcp" comment "SSH" >/dev/null; then
-        log_error "Failed to allow SSH port in UFW"
-        return 1
-    fi
-
-    # Disable IPv6 if not needed
-    if [[ -f /proc/net/if_inet6 ]]; then
-        if ! ufw default deny incoming; then
-            log_warn "Failed to set IPv6 deny policy"
-        fi
-        echo "net.ipv6.conf.all.disable_ipv6 = 1" >> /etc/sysctl.conf 2>/dev/null || log_warn "Failed to disable IPv6"
-    fi
-
-    # Fetch current Cloudflare IP ranges
-    log_info "Fetching current Cloudflare IP ranges..."
-    local cf_ipv4_file="/tmp/cf_ipv4_ranges.txt"
-    local cf_ipv6_file="/tmp/cf_ipv6_ranges.txt"
-
-    if retry_with_backoff 3 2 curl -sf --max-time 10 "https://www.cloudflare.com/ips-v4" -o "$cf_ipv4_file" && \
-       retry_with_backoff 3 2 curl -sf --max-time 10 "https://www.cloudflare.com/ips-v6" -o "$cf_ipv6_file"; then
-
-        # Validate IPv4 ranges before applying
-        if grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$' "$cf_ipv4_file" >/dev/null; then
-            while IFS= read -r range; do
-                if [[ -n "$range" && "$range" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]; then
-                    if ! ufw allow from "$range" to any port 80,443 comment "CF-IPv4" >/dev/null; then
-                        log_warn "Failed to add IPv4 range: $range"
-                    fi
-                fi
-            done < "$cf_ipv4_file"
-            log_success "Applied validated Cloudflare IPv4 ranges"
-        else
-            log_warn "Invalid IPv4 ranges received from Cloudflare API"
-        fi
-
-        # Validate IPv6 ranges before applying
-        if grep -E '^[0-9a-fA-F:]+/[0-9]{1,3}$' "$cf_ipv6_file" >/dev/null; then
-            while IFS= read -r range; do
-                if [[ -n "$range" && "$range" =~ ^[0-9a-fA-F:]+/[0-9]{1,3}$ ]]; then
-                    if ! ufw allow from "$range" to any port 80,443 comment "CF-IPv6" >/dev/null; then
-                        log_warn "Failed to add IPv6 range: $range"
-                    fi
-                fi
-            done < "$cf_ipv6_file"
-            log_success "Applied validated Cloudflare IPv6 ranges"
-        else
-            log_warn "Invalid IPv6 ranges received from Cloudflare API"
-        fi
-
-        rm -f "$cf_ipv4_file" "$cf_ipv6_file"
-
-    else
-        log_error "⚠️  CRITICAL WARNING: Failed to fetch Cloudflare IP ranges from API"
-        log_error "    This means your firewall will block ALL web traffic!"
-        log_error "    Aborting setup. Check internet connectivity and re-run."
-        return 1
-    fi
-
-    if ! echo "y" | ufw enable >/dev/null; then
-        log_error "Failed to enable UFW firewall"
-        return 1
-    fi
-
-    log_success "Firewall configured and enabled"
-    return 0
-}
-
-# STANDARDIZED: Template-based environment file creation - returns exit code
-create_env_file() {
-    log_info "Creating environment configuration file (.env)..."
-
-    if [[ "$DRY_RUN" == "true" ]]; then 
-        log_info "[DRY RUN] Would create .env from template"
-        return 0
-    fi
-
-    local env_file="$PROJECT_ROOT/.env"
-    local env_template="$PROJECT_ROOT/.env.example"
-
-    if [[ -f "$env_file" ]] && [[ "$FORCE" != "true" ]]; then
-        log_info ".env file already exists, skipping creation."
-        return 0
-    fi
-
-    if [[ ! -f "$env_template" ]]; then
-        log_error ".env.example template not found"
-        return 1
-    fi
-
-    # Copy template
-    if ! cp "$env_template" "$env_file"; then
-        log_error "Failed to copy .env template"
-        return 1
-    fi
-
-    local real_user; real_user=$(get_real_user)
-    local real_group; real_group=$(id -g -n $real_user)
-
-    # Validate PUID/PGID values
-    local user_id group_id
-    user_id=$(id -u "$real_user")
-    group_id=$(id -g "$real_user")
-
-    # Populate template values using sed
-    if ! sed -i "s/DOMAIN=.*/DOMAIN=$DOMAIN/" "$env_file" || \
-       ! sed -i "s/ADMIN_EMAIL=.*/ADMIN_EMAIL=$ADMIN_EMAIL/" "$env_file" || \
-       ! sed -i "s/PUID=.*/PUID=$user_id/" "$env_file" || \
-       ! sed -i "s/PGID=.*/PGID=$group_id/" "$env_file" || \
-       ! sed -i "s/SMTP_FROM=.*/SMTP_FROM=noreply@$DOMAIN/" "$env_file"; then
-        log_error "Failed to populate .env template values"
-        return 1
-    fi
-
-    # Set version pins if not using latest
-    if [[ "$USE_LATEST" != "true" ]]; then
-        if ! sed -i 's/#\(VAULTWARDEN_VERSION=.*\)/\1/' "$env_file" || \
-           ! sed -i 's/#\(CADDY_VERSION=.*\)/\1/' "$env_file" || \
-           ! sed -i 's/#\(FAIL2BAN_VERSION=.*\)/\1/' "$env_file"; then
-            log_warn "Failed to enable pinned versions, continuing anyway"
-        else
-            log_info "Enabled pinned container versions for production stability"
-        fi
-    else
-        log_info "Using latest container versions (development mode)"
-    fi
-
-    if ! chown "$real_user:$real_group" "$env_file" || ! chmod 644 "$env_file"; then
-        log_error "Failed to set .env file permissions"
-        return 1
-    fi
-
-    log_success "Environment file created from template: $env_file"
-
-    # Show what needs manual configuration
-    log_warn "MANUAL CONFIGURATION REQUIRED:"
-    log_info "  1. Edit .env and set CLOUDFLARE_ZONE_ID"
-    log_info "  2. Configure SMTP settings if using email notifications"
-    log_info "  3. Update RCLONE_REMOTE_NAME if using offsite backups"
-
-    return 0
-}
-
-# STANDARDIZED: Returns exit code
-setup_directories() {
-    log_info "Setting up project directories..."
-
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would create project directories"
-        return 0
-    fi
-
-    local real_user; real_user=$(get_real_user)
-    local real_group; real_group=$(id -g -n $real_user)
-
-    if ! id "$real_user" >/dev/null 2>&1; then
-        log_error "User $real_user does not exist"
-        return 1
-    fi
-
-    # Core directories
-    local dirs=(
-        "secrets/keys"
-        "secrets/.docker_secrets"
-        "caddy"
-        "fail2ban/jail.d"
-        "fail2ban/filter.d"
-        "fail2ban/action.d"
-        "backups"
-        "logs"
-    )
-
-    for dir in "${dirs[@]}"; do
-        if ! ensure_dir "$dir" 755; then
-            log_error "Failed to create directory: $dir"
-            return 1
-        fi
-        
-        if ! chown "$real_user:$real_group" "$dir"; then
-            log_error "Failed to set ownership for directory: $dir"
-            return 1
-        fi
-    done
-
-    # Secure secrets directories
-    if ! chmod 700 "secrets" || ! chmod 700 "secrets/keys" || ! chmod 700 "secrets/.docker_secrets"; then
-        log_error "Failed to secure secrets directories"
-        return 1
-    fi
-
-    log_success "Project directories created."
-    return 0
-}
-
-# STANDARDIZED: Enhanced entropy check - returns exit code
-check_entropy() {
-    log_info "Checking system entropy..."
-    local entropy
-    entropy=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo "0")
-
-    if (( entropy >= ENTROPY_THRESHOLD )); then
-        log_success "System entropy is sufficient ($entropy)"
-        return 0
-    fi
-
-    log_warn "System entropy is low ($entropy). This is common on new VMs."
-
-    # Wait up to ENTROPY_MAX_WAIT seconds for entropy to build up
-    log_info "Waiting for entropy to increase (up to ${ENTROPY_MAX_WAIT}s)..."
-    local waited=0
-
-    while (( waited < ENTROPY_MAX_WAIT )); do
-        sleep 5
-        waited=$((waited + 5))
-        entropy=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo "0")
-
-        if (( entropy >= ENTROPY_THRESHOLD )); then
-            log_success "System entropy is now sufficient ($entropy) after ${waited}s"
-            return 0
-        fi
-
-        log_info "Entropy: $entropy (need $ENTROPY_THRESHOLD), waited ${waited}s..."
-    done
-
-    log_error "System entropy remained low ($entropy) after ${ENTROPY_MAX_WAIT}s wait."
-    log_error "Key generation may be unsafe. Please reboot or wait longer."
-    return 1
-}
-
-# STANDARDIZED: Returns exit code
-generate_age_keys() {
-    if ! check_entropy; then
-        return 1
-    fi
-
-    log_info "Generating Age encryption keys..."
-
+# ENHANCED: Secure secret file preparation with fixed race condition
+prepare_docker_secrets() {
+    log_info "Preparing Docker secrets with enhanced security..."
+
+    local secrets_dir="secrets/.docker_secrets"
+    local sops_file="secrets/secrets.yaml"
     local age_key_file="secrets/keys/age-key.txt"
 
     if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would generate Age encryption keys"
+        log_info "[DRY RUN] Would prepare Docker secrets securely"
         return 0
     fi
 
-    if [[ -f "$age_key_file" ]] && [[ "$FORCE" != "true" ]]; then
-        log_info "Age key already exists, skipping generation."
-        return 0
-    fi
-
-    local real_user; real_user=$(get_real_user)
-    local real_group; real_group=$(id -g -n $real_user)
-
-    if ! generate_age_key "$age_key_file" "$FORCE"; then
+    # Validate prerequisites
+    if [[ ! -f "$sops_file" ]]; then
+        log_error "Encrypted secrets file not found: $sops_file"
         return 1
-    fi
-
-    if ! chown "$real_user:$real_group" "$age_key_file"; then
-        log_error "Failed to set Age key file ownership"
-        return 1
-    fi
-
-    log_success "Age encryption keys generated: $age_key_file"
-    return 0
-}
-
-# STANDARDIZED: Returns exit code
-create_sops_config() {
-    log_info "Creating SOPS configuration..."
-
-    local sops_config=".sops.yaml"
-    local age_key_file="secrets/keys/age-key.txt"
-
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would create SOPS configuration"
-        return 0
     fi
 
     if [[ ! -f "$age_key_file" ]]; then
@@ -579,353 +77,226 @@ create_sops_config() {
         return 1
     fi
 
-    local real_user; real_user=$(get_real_user)
-    local real_group; real_group=$(id -g -n $real_user)
+    # SECURITY FIX: Set restrictive umask BEFORE creating any files
+    # This prevents the race condition where files are created with default permissions
+    local old_umask
+    old_umask=$(umask)
+    umask 077  # Ensures all new files are created with 600 permissions
 
-    local age_public_key
-    if ! age_public_key=$(get_age_public_key "$age_key_file"); then
+    # Cleanup function to restore umask
+    cleanup_umask() {
+        umask "$old_umask"
+    }
+    trap cleanup_umask EXIT
+
+    # Create secrets directory with proper permissions
+    if ! ensure_dir "$secrets_dir" 700; then
+        log_error "Failed to create secrets directory"
+        cleanup_umask
         return 1
     fi
 
-    if ! cat > "$sops_config" << EOF; then
-creation_rules:
-  - path_regex: secrets/secrets\\.yaml$
-    age: $age_public_key
-EOF
-        log_error "Failed to create SOPS configuration"
-        return 1
+    # Clean existing secret files atomically
+    if [[ -d "$secrets_dir" ]]; then
+        rm -rf "${secrets_dir:?}"/*
     fi
 
-    if ! chown "$real_user:$real_group" "$sops_config"; then
-        log_error "Failed to set SOPS config ownership"
-        return 1
-    fi
+    log_info "Decrypting secrets with secure file creation..."
 
-    log_success "SOPS configuration created: $sops_config"
-    return 0
-}
-
-# STANDARDIZED: Returns exit code
-create_secrets_template() {
-    log_info "Creating secrets template..."
-
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would create encrypted secrets template"
-        return 0
-    fi
-
-    local secrets_file="secrets/secrets.yaml"
-    local age_key_file="secrets/keys/age-key.txt"
-
-    if [[ -f "$secrets_file" ]] && [[ "$FORCE" != "true" ]]; then
-        log_info "Secrets file already exists, skipping creation."
-        return 0
-    fi
-
-    local real_user; real_user=$(get_real_user)
-    local real_group; real_group=$(id -g -n $real_user)
-
-    # Generate secure defaults
-    local admin_token backup_pass
-    if ! admin_token=$(generate_secure_string 32) || ! backup_pass=$(generate_secure_string 32); then
-        log_error "Failed to generate secure strings"
-        return 1
-    fi
-
-    # Create unencrypted template
-    if ! cat > "$secrets_file" << EOF; then
-# VaultWarden Secrets Configuration - Enhanced for Caddy-Cloudflare
-# IMPORTANT: VaultWarden admin uses Argon2, Caddy basic_auth uses bcrypt
-
-# VaultWarden admin token (plain text - will be hashed to Argon2 by VaultWarden)
-admin_token: $admin_token
-
-# Caddy basic_auth hash for /admin endpoint (bcrypt format)
-# Generate with: docker run --rm -it ghcr.io/caddybuilds/caddy-cloudflare:latest caddy hash-password
-admin_basic_auth_hash: CHANGE_ME_BCRYPT_HASH
-
-# SMTP password for email notifications
-smtp_password: CHANGE_ME_SMTP_PASSWORD
-
-# Backup encryption passphrase
-backup_passphrase: $backup_pass
-
-# Push notifications (optional - get from bitwarden.com/host)
-push_installation_id: CHANGE_ME_OR_LEAVE_EMPTY
-push_installation_key: CHANGE_ME_OR_LEAVE_EMPTY
-
-# Cloudflare DNS API token for caddy-cloudflare (DNS-01 ACME challenges)
-# Permissions: Zone:DNS:Edit + Zone:Zone:Read
-caddy_cloudflare_dns_token: CHANGE_ME_DNS_TOKEN
-
-# Cloudflare Firewall API token for fail2ban IP blocking
-# Permissions: Zone:Firewall Services:Edit  
-fail2ban_cloudflare_firewall_token: CHANGE_ME_FIREWALL_TOKEN
-EOF
-        log_error "Failed to create secrets template"
-        return 1
-    fi
-
-    # Encrypt with SOPS
+    # Set SOPS environment
     export SOPS_AGE_KEY_FILE="$PROJECT_ROOT/$age_key_file"
 
-    if ! encrypt_sops_file "$secrets_file" "$age_key_file"; then
-        log_error "Failed to encrypt secrets file"
-        return 1
-    fi
-
-    if ! secure_file "$secrets_file" 600 || ! chown "$real_user:$real_group" "$secrets_file"; then
-        log_error "Failed to secure secrets file"
-        return 1
-    fi
-
-    log_success "Secrets template encrypted successfully"
-
-    log_warn "IMPORTANT: Update the placeholder values:"
-    log_info "  1. Run: ./edit-secrets.sh"
-    log_info "  2. Generate bcrypt hash for admin_basic_auth_hash"
-    log_info "  3. Add Cloudflare DNS API token"
-    log_info "  4. Add Cloudflare Firewall API token"
-    log_info "  5. Configure SMTP password if using email"
-
-    return 0
-}
-
-# STANDARDIZED: Template-based docker compose creation - returns exit code
-create_docker_compose() {
-    log_info "Setting up Docker Compose configuration..."
-
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would copy and validate docker-compose.yml from template"
-        return 0
-    fi
-
-    local compose_file="$PROJECT_ROOT/docker-compose.yml"
-    local compose_template="$PROJECT_ROOT/docker-compose.yml.example"
-
-    if [[ -f "$compose_file" ]] && [[ "$FORCE" != "true" ]]; then
-        log_info "docker-compose.yml already exists, skipping creation."
-        return 0
-    fi
-
-    if [[ ! -f "$compose_template" ]]; then
-        log_error "docker-compose.yml.example template not found"
-        return 1
-    fi
-
-    # Validate template before copying
-    log_info "Validating template: $compose_template"
-    if ! safe_execute "Template validation" docker compose -f "$compose_template" config >/dev/null; then
-        log_error "Template validation failed for $compose_template"
-        log_info "Run 'docker compose -f $compose_template config' to debug."
-        return 1
-    fi
-    log_success "Template validated successfully."
-
-    # Copy template
-    if ! cp "$compose_template" "$compose_file"; then
-        log_error "Failed to copy Docker Compose template"
-        return 1
-    fi
-
-    local real_user; real_user=$(get_real_user)
-    local real_group; real_group=$(id -g -n $real_user)
-
-    if ! chown "$real_user:$real_group" "$compose_file" || ! chmod 644 "$compose_file"; then
-        log_error "Failed to set Docker Compose file permissions"
-        return 1
-    fi
-
-    log_success "Docker Compose configuration created from template."
-    return 0
-}
-
-# STANDARDIZED: Returns exit code
-set_script_permissions() {
-    log_info "Setting script permissions..."
-
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would set executable permissions on scripts"
-        return 0
-    fi
-
-    local real_user; real_user=$(get_real_user)
-    local real_group; real_group=$(id -g -n $real_user)
-
-    local scripts=(
-        "setup.sh"
-        "edit-secrets.sh"
-        "health.sh"
-        "update.sh"
-        "backup.sh"
-        "restore.sh"
-        "startup.sh"
-        "maintenance.sh"
-        "cron-setup.sh"
-        "create-breakglass-admin.sh"
-        "db-maint.sh"
-        "update-dns.sh"
+    # Retrieve secrets using SOPS and create files atomically
+    # Each file is created with 600 permissions due to umask 077
+    local secret_files=(
+        "admin_token"
+        "admin_basic_auth_hash" 
+        "smtp_password"
+        "push_installation_id"
+        "push_installation_key"
+        "caddy_cloudflare_dns_token"
+        "fail2ban_cloudflare_firewall_token"
     )
 
-    local failed_scripts=()
+    local secrets_created=0
+    local secrets_failed=0
 
-    for script in "${scripts[@]}"; do
-        if [[ -f "$script" ]]; then
-            if ! chmod +x "$script" || ! chown "$real_user:$real_group" "$script"; then
-                failed_scripts+=("$script")
+    for secret_name in "${secret_files[@]}"; do
+        local secret_file="$secrets_dir/$secret_name"
+        local secret_value
+
+        # Extract secret value using SOPS
+        if secret_value=$(sops -d --extract "["$secret_name"]" "$sops_file" 2>/dev/null); then
+            # Skip empty or placeholder values
+            if [[ -n "$secret_value" ]] && [[ "$secret_value" != "CHANGE_ME"* ]] && [[ "$secret_value" != "null" ]]; then
+                # Create secret file atomically - umask 077 ensures 600 permissions
+                if echo "$secret_value" > "$secret_file"; then
+                    # Verify file was created with correct permissions
+                    local file_perms
+                    file_perms=$(stat -c "%a" "$secret_file" 2>/dev/null || echo "unknown")
+                    if [[ "$file_perms" == "600" ]]; then
+                        log_debug "Secret created securely: $secret_name (permissions: $file_perms)"
+                        ((secrets_created++))
+                    else
+                        log_error "Secret file created with incorrect permissions: $secret_name ($file_perms)"
+                        ((secrets_failed++))
+                    fi
+                else
+                    log_error "Failed to create secret file: $secret_name"
+                    ((secrets_failed++))
+                fi
+            else
+                log_debug "Skipping empty/placeholder secret: $secret_name"
             fi
+        else
+            log_error "Failed to decrypt secret: $secret_name"
+            ((secrets_failed++))
         fi
     done
 
-    if ! find "lib" -name "*.sh" -exec chmod +x {} \; || \
-       ! find "lib" -name "*.sh" -exec chown "$real_user:$real_group" {} \;; then
-        log_error "Failed to set library script permissions"
+    # Restore original umask before returning
+    cleanup_umask
+    trap - EXIT
+
+    # Report results
+    log_success "Docker secrets prepared: $secrets_created created, $secrets_failed failed"
+
+    if [[ $secrets_failed -gt 0 ]]; then
+        log_warn "Some secrets failed to prepare. Check SOPS configuration and secret values."
         return 1
     fi
 
-    if [[ ${#failed_scripts[@]} -gt 0 ]]; then
-        log_error "Failed to set permissions for scripts: ${failed_scripts[*]}"
+    if [[ $secrets_created -eq 0 ]]; then
+        log_warn "No secrets were created. Verify secrets.yaml contains valid values."
         return 1
     fi
 
-    log_success "Script permissions set."
     return 0
 }
 
-# STANDARDIZED: Enhanced cleanup function - returns exit code
-cleanup_setup_deps() {
+# STANDARDIZED: Service management functions
+start_services() {
     if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would remove haveged and cleanup"
+        log_info "[DRY RUN] Would start VaultWarden services"
         return 0
     fi
 
-    log_info "Cleaning up setup dependencies..."
+    log_info "Starting VaultWarden services..."
 
-    # Stop haveged service
-    if systemctl is-active --quiet haveged 2>/dev/null; then
-        if ! systemctl stop haveged; then
-            log_warn "Failed to stop haveged service"
-        else
-            log_success "haveged service stopped"
+    if [[ "$FORCE_RESTART" == "true" ]]; then
+        log_info "Force restart requested - stopping existing services..."
+        if ! docker compose down >/dev/null 2>&1; then
+            log_warn "Failed to stop existing services (may not be running)"
         fi
     fi
 
-    # Remove haveged package
-    if has_command haveged; then
-        if apt-get remove --purge -y haveged >/dev/null 2>&1; then
-            log_success "haveged package removed"
-        else
-            log_warn "Failed to remove haveged package - please remove manually"
+    # Start services with dependency ordering
+    if [[ "$BACKGROUND" == "true" ]]; then
+        if ! docker compose up -d; then
+            log_error "Failed to start services in background"
+            return 1
         fi
-    fi
-
-    # Clean up package cache
-    if apt-get autoremove -y >/dev/null 2>&1; then
-        log_success "Package cleanup completed"
+        log_success "Services started in background mode"
     else
-        log_warn "Package autoremove failed - not critical"
+        if ! docker compose up -d; then
+            log_error "Failed to start services"
+            return 1
+        fi
+        log_success "Services started successfully"
     fi
 
     return 0
 }
 
-# ENHANCED: Main function with proper error handling and exit strategy
+# STANDARDIZED: Health validation
+verify_startup_health() {
+    if [[ "$SKIP_HEALTH_CHECK" == "true" ]]; then
+        log_info "Skipping health check (--skip-health specified)"
+        return 0
+    fi
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would verify service health"
+        return 0
+    fi
+
+    log_info "Verifying service health after startup..."
+
+    # Wait for services to initialize
+    sleep 10
+
+    # Run comprehensive health check
+    if ./health.sh --quick; then
+        log_success "All services are healthy"
+        return 0
+    else
+        log_error "Health check failed - some services may not be ready"
+        return 1
+    fi
+}
+
+# STANDARDIZED: Cleanup function
+cleanup_on_exit() {
+    # Clean up any temporary files or processes
+    if [[ -d "secrets/.docker_secrets" ]]; then
+        # Secure cleanup of secret files
+        find "secrets/.docker_secrets" -type f -exec shred -vfz -n 3 {} \; 2>/dev/null || true
+    fi
+}
+
+trap cleanup_on_exit EXIT
+
+# ENHANCED: Main function with proper error handling
 main() {
-    log_header "VaultWarden-OCI Setup - Template-Based Configuration"
+    log_header "VaultWarden-OCI Enhanced Startup"
 
-    if [[ -z "$DOMAIN" ]] || [[ -z "$ADMIN_EMAIL" ]]; then 
-        log_error "Domain and Email are required."
-        show_help
+    # Load environment configuration
+    if ! load_env_file; then
+        log_error "Failed to load environment configuration"
         exit 1
     fi
 
-    # Pre-flight checks
-    log_info "=== Phase 1: Pre-flight System Checks ==="
-    if ! is_root; then 
-        log_error "This script must be run as root."
-        exit 1
-    fi
-    log_success "Pre-flight checks passed."
-
-    # Track setup phases and their success/failure
-    local setup_phases=(
-        "install_dependencies:Dependency Installation"
-        "verify_dependencies:Dependency Verification"
-        "setup_user_permissions:User Permissions"
-        "create_env_file:Environment Configuration"
-        "create_docker_compose:Docker Compose Setup"
-        "setup_directories:Directory Creation"
-        "generate_age_keys:Encryption Keys"
-        "create_sops_config:SOPS Configuration"
-        "create_secrets_template:Secrets Template"
-        "set_script_permissions:Script Permissions"
-        "setup_firewall:Firewall Configuration"
-        "cleanup_setup_deps:Setup Cleanup"
-    )
-
-    local failed_phases=()
-
-    # Execute each phase and track results
-    for phase_info in "${setup_phases[@]}"; do
-        local phase_func="${phase_info%%:*}"
-        local phase_name="${phase_info##*:}"
-        
-        log_info "=== Phase: $phase_name ==="
-        
-        if ! $phase_func; then
-            failed_phases+=("$phase_name")
-            log_error "Phase failed: $phase_name"
-        else
-            log_success "Phase completed: $phase_name"
-        fi
-    done
-
-    # Final status determination
-    if [[ ${#failed_phases[@]} -gt 0 ]]; then
-        log_error "Setup completed with failures in the following phases:"
-        for failed_phase in "${failed_phases[@]}"; do
-            log_error "  - $failed_phase"
-        done
-        
-        log_info "You may need to manually complete the failed phases and re-run setup."
+    # Validate Docker availability
+    if ! require_docker; then
+        log_error "Docker is not available or accessible"
         exit 1
     fi
 
-    # Final success summary
-    log_header "Setup Complete - Template-Based Configuration"
-    echo "Your VaultWarden instance is configured with:"
+    # Phase 1: Secure secrets preparation
+    log_info "=== Phase 1: Secure Secrets Preparation ==="
+    if ! prepare_docker_secrets; then
+        log_error "Failed to prepare Docker secrets securely"
+        exit 1
+    fi
+
+    # Phase 2: Service startup
+    log_info "=== Phase 2: Service Startup ==="
+    if ! start_services; then
+        log_error "Failed to start services"
+        exit 1
+    fi
+
+    # Phase 3: Health verification
+    log_info "=== Phase 3: Health Verification ==="
+    if ! verify_startup_health; then
+        log_error "Service health verification failed"
+        exit 1
+    fi
+
+    # Success summary
+    log_success "VaultWarden startup completed successfully"
+
+    if [[ "$BACKGROUND" == "true" ]]; then
+        echo "Services are running in background. Use 'make logs' to monitor."
+    else
+        echo "All services are healthy and ready."
+    fi
+
+    # Show service status
     echo ""
-    echo "✅ Template-Based Configuration:"
-    echo "   - docker-compose.yml copied from docker-compose.yml.example"  
-    echo "   - .env file populated from .env.example template"
-    echo "   - Easy maintenance via template files"
-    echo ""
-    echo "✅ Caddy-Cloudflare Integration:"
-    echo "   - DNS-01 ACME challenges for SSL certificates"  
-    echo "   - Automatic Cloudflare IP range management"
-    echo "   - Separate DNS and Firewall API tokens"
-    echo ""
-    echo "✅ Security Features:"
-    echo "   - SOPS + Age encrypted secrets"
-    echo "   - UFW firewall configured with Cloudflare IP ranges"
-    echo "   - Host OS automatic security updates enabled"
-    echo "   - Secure (high-entropy) key generation"
-    echo ""
-    echo "⚠️  REQUIRED NEXT STEPS:"
-    echo "   1. Configure secrets: ./edit-secrets.sh"
-    echo "      - Generate bcrypt hash for admin_basic_auth_hash"
-    echo "      - Add Cloudflare DNS API token"
-    echo "      - Add Cloudflare Firewall API token"
-    echo "   2. Update .env file: nano .env"
-    echo "      - Set CLOUDFLARE_ZONE_ID"
-    echo "   3. Start services: make up"
-    echo "   4. Setup automation: sudo ./cron-setup.sh --install"
-    echo "   5. Create emergency access: make breakglass-create"
-    echo ""
-    echo "🔐 Security: Your secrets are encrypted with Age + SOPS"
-    echo "🌐 Domain: https://$DOMAIN"
-    echo "📧 Admin: $ADMIN_EMAIL"
-    
+    echo "Service Status:"
+    docker compose ps --format "table {{.Name}}\t{{.Status}}\t{{.Ports}}"
+
     exit 0
 }
 

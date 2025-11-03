@@ -1,6 +1,7 @@
 # VaultWarden-OCI - Production Docker Compose Configuration
-# ENHANCED: Simplified with mailutils integration and optional services removed
-# High-fidelity security detection + Built-in email notifications
+# ENHANCED: Added container resource limits for 6GB system
+# ENHANCED: Added timezone consistency across all containers
+# High-fidelity security detection + Built-in email notifications + Resource management
 
 services:
   vaultwarden:
@@ -12,12 +13,13 @@ services:
       # Core Configuration
       DOMAIN: https://${DOMAIN}
       ADMIN_TOKEN_FILE: /run/secrets/admin_token
-      
+      TZ: ${TZ:-UTC}
+
       # FIXED: High-fidelity logging for Fail2Ban
       LOG_FILE: /logs/vaultwarden.log
       LOG_LEVEL: warn
       EXTENDED_LOGGING: true
-      
+
       # Security Configuration  
       SIGNUPS_ALLOWED: ${SIGNUPS_ALLOWED:-false}
       INVITATIONS_ALLOWED: ${INVITATIONS_ALLOWED:-true}
@@ -26,13 +28,13 @@ services:
       WEB_VAULT_ENABLED: ${WEB_VAULT_ENABLED:-true}
       WEBSOCKET_ENABLED: ${WEBSOCKET_ENABLED:-false}
       PUSH_ENABLED: ${PUSH_ENABLED:-false}
-      
+
       # Advanced Security
       PASSWORD_ITERATIONS: ${PASSWORD_ITERATIONS:-350000}
       PASSWORD_HINTS_ALLOWED: ${PASSWORD_HINTS_ALLOWED:-false}
       SHOW_PASSWORD_HINT: ${SHOW_PASSWORD_HINT:-false}
       IP_HEADER: CF-Connecting-IP
-      
+
       # Email Configuration (optional)
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_FROM: ${SMTP_FROM:-}
@@ -42,15 +44,15 @@ services:
       SMTP_USERNAME: ${SMTP_USERNAME:-}
       SMTP_PASSWORD_FILE: /run/secrets/smtp_password
       SMTP_TIMEOUT: ${SMTP_TIMEOUT:-15}
-      
+
       # Push Notifications (optional)
       PUSH_INSTALLATION_ID_FILE: /run/secrets/push_installation_id
       PUSH_INSTALLATION_KEY_FILE: /run/secrets/push_installation_key
-      
+
       # Performance
       DATABASE_MAX_CONNS: ${DATABASE_MAX_CONNS:-10}
       WEB_VAULT_FOLDER: web-vault/
-      
+
     secrets:
       - admin_token
       - smtp_password  
@@ -76,6 +78,15 @@ services:
       - ALL
     tmpfs:
       - /tmp
+    # ENHANCED: Resource limits for 6GB system (balanced allocation)
+    deploy:
+      resources:
+        limits:
+          memory: 2G      # Main application, largest allocation
+          cpus: '0.6'     # 60% of single CPU
+        reservations:
+          memory: 512M    # Minimum guaranteed memory
+          cpus: '0.2'     # 20% of single CPU minimum
 
   caddy:
     container_name: vaultwarden_caddy
@@ -86,6 +97,7 @@ services:
       DOMAIN: ${DOMAIN}
       CLOUDFLARE_API_TOKEN_FILE: /run/secrets/caddy_cloudflare_dns_token
       ADMIN_BASIC_AUTH_HASH_FILE: /run/secrets/admin_basic_auth_hash
+      TZ: ${TZ:-UTC}
     secrets:
       - caddy_cloudflare_dns_token
       - admin_basic_auth_hash  
@@ -111,6 +123,15 @@ services:
       - ALL
     cap_add:
       - NET_BIND_SERVICE
+    # ENHANCED: Resource limits for reverse proxy
+    deploy:
+      resources:
+        limits:
+          memory: 1G      # Reverse proxy with SSL termination
+          cpus: '0.3'     # 30% of single CPU
+        reservations:
+          memory: 256M    # Minimum for SSL operations
+          cpus: '0.1'     # 10% of single CPU minimum
 
   fail2ban:
     container_name: vaultwarden_fail2ban
@@ -159,6 +180,15 @@ services:
       start_period: 30s
     security_opt:
       - no-new-privileges:true
+    # ENHANCED: Resource limits for security monitoring
+    deploy:
+      resources:
+        limits:
+          memory: 512M    # Log parsing and rule processing
+          cpus: '0.2'     # 20% of single CPU
+        reservations:
+          memory: 128M    # Minimum for log processing
+          cpus: '0.05'    # 5% of single CPU minimum
 
 secrets:
   admin_token:
@@ -191,3 +221,17 @@ networks:
 # - Built-in email notifications using existing host mailutils
 # - Enhanced security with no-new-privileges and capability restrictions
 # - Clean configuration focused on core functionality
+# 
+# ENHANCED FEATURES:
+# - Resource limits prevent container resource exhaustion on 6GB system
+# - Timezone consistency across all containers for proper log correlation
+# - Balanced resource allocation: VaultWarden (2G), Caddy (1G), Fail2Ban (512M)
+# - CPU limits ensure fair scheduling and prevent single container monopolization
+# - Memory reservations guarantee minimum resources for stable operation
+# 
+# RESOURCE ALLOCATION STRATEGY (for 6GB system):
+# - Total container limits: ~3.5GB (leaves 2.5GB for host OS and overhead)
+# - VaultWarden: 2GB limit (main application, database operations)
+# - Caddy: 1GB limit (SSL termination, reverse proxy, log processing)
+# - Fail2Ban: 512MB limit (log parsing, rule processing)
+# - Remaining ~2.5GB: Host OS, kernel, Docker daemon, buffers/cache

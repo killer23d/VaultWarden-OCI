@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# cron-setup.sh - Automated cron job configuration for VaultWarden-OCI
-# ENHANCED: Standardized error handling - functions return, main() decides exit strategy
-# All functions return exit codes, main() collects status and determines final exit
+# cron-setup.sh - Secure VaultWarden cron job management with centralized security functions
+# ENHANCED: Uses lib/security.sh for centralized security validation
+# ENHANCED: Eliminates code duplication and improves maintainability
 
 set -euo pipefail
 
@@ -11,485 +11,557 @@ cd "$PROJECT_ROOT"
 
 source "lib/common.sh"
 init_common_lib "$0"
+source "lib/security.sh"  # ENHANCED: Use centralized security functions
 
 # Configuration
 INSTALL_CRON=false
 REMOVE_CRON=false
 LIST_CRON=false
 DRY_RUN=false
-CRON_USER=""
-ENABLE_BACKUPS=true
-ENABLE_MAINTENANCE=true
-ENABLE_UPDATES=false
-ENABLE_HEALTH_MONITORING=true
+VALIDATE_ONLY=false
+
+# Cron job configuration
+CRON_USER="root"
+CRON_SCRIPTS_DIR="/opt/vaultwarden-scripts"
+CRON_LOG_DIR="/var/log/vaultwarden-cron"
 
 show_help() {
     cat << 'EOF'
-VaultWarden-OCI Cron Setup - Automated Task Scheduling
+VaultWarden-OCI Secure Cron Setup - Centralized Security Functions
 
 USAGE:
     sudo ./cron-setup.sh [OPTIONS]
 
 OPTIONS:
-    --install               Install cron jobs for automation
-    --remove                Remove all VaultWarden cron jobs
+    --install               Install VaultWarden cron jobs securely
+    --remove                Remove VaultWarden cron jobs
     --list                  List current VaultWarden cron jobs
-    --user USER             Run cron jobs as specific user (default: detected)
-    --no-backups            Disable automated backups
-    --no-maintenance        Disable automated maintenance
-    --enable-updates        Enable automated updates (disabled by default)
-    --no-health             Disable health monitoring
-    --dry-run               Show what would be configured without executing
+    --validate              Validate existing cron job security
+    --dry-run               Show what would be done without executing
     --help                  Show this help
 
-AUTOMATED TASKS:
-    Backups:
-    - Database backup: Daily at 2:00 AM
-    - Full backup: Weekly on Sunday at 3:00 AM
-    - Emergency kit: Monthly on 1st at 4:00 AM
+SECURITY FEATURES:
+    - Uses centralized lib/security.sh validation functions
+    - Validates script ownership (must be root:root)
+    - Ensures proper script permissions (700)
+    - Creates hardened copies in secure directory
+    - Validates script integrity before scheduling
+    - Implements secure logging with proper permissions
 
-    Maintenance:
-    - Basic maintenance: Weekly on Monday at 1:00 AM
-    - Comprehensive maintenance: Monthly on 15th at 2:00 AM
-
-    Health Monitoring:
-    - Health check: Every 4 hours
-    - Alert on failures
-
-    Updates (Optional):
-    - Container updates: Weekly on Saturday at 5:00 AM
+CRON JOBS MANAGED:
+    - Database maintenance (daily at 02:00)
+    - System backup (daily at 03:00) 
+    - Health monitoring (every 30 minutes)
+    - Log rotation (weekly)
+    - Firewall updates (weekly)
 
 EXAMPLES:
-    sudo ./cron-setup.sh --install                    # Install with defaults
-    sudo ./cron-setup.sh --install --enable-updates   # Include auto-updates
-    sudo ./cron-setup.sh --list                       # Show current jobs
-    sudo ./cron-setup.sh --remove                     # Remove all jobs
+    sudo ./cron-setup.sh --install     # Install secure cron jobs
+    sudo ./cron-setup.sh --validate    # Validate current setup
+    sudo ./cron-setup.sh --remove      # Remove all cron jobs
 EOF
 }
 
-# Argument Parsing
+# Argument parsing
 while [[ $# -gt 0 ]]; do
     case $1 in
         --install) INSTALL_CRON=true; shift ;;
         --remove) REMOVE_CRON=true; shift ;;
         --list) LIST_CRON=true; shift ;;
-        --user) CRON_USER="$2"; shift 2 ;;
-        --no-backups) ENABLE_BACKUPS=false; shift ;;
-        --no-maintenance) ENABLE_MAINTENANCE=false; shift ;;
-        --enable-updates) ENABLE_UPDATES=true; shift ;;
-        --no-health) ENABLE_HEALTH_MONITORING=false; shift ;;
+        --validate) VALIDATE_ONLY=true; shift ;;
         --dry-run) DRY_RUN=true; shift ;;
         --help) show_help; exit 0 ;;
         *) log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done
 
-# Validation
-if [[ "$INSTALL_CRON" == "true" && "$REMOVE_CRON" == "true" ]]; then
-    log_error "Cannot install and remove at the same time"
-    exit 1
-fi
+# ENHANCED: Script security validation using centralized lib/security.sh functions
+validate_script_security() {
+    local script_path="$1"
+    local script_name="$(basename "$script_path")"
 
-if [[ "$INSTALL_CRON" == "false" && "$REMOVE_CRON" == "false" && "$LIST_CRON" == "false" ]]; then
-    log_error "Must specify --install, --remove, or --list"
-    show_help
-    exit 1
-fi
+    log_debug "Validating security of script: $script_name"
 
-# STANDARDIZED: Detect appropriate user - returns exit code
-detect_cron_user() {
-    if [[ -n "$CRON_USER" ]]; then
-        # Validate specified user exists
-        if ! id "$CRON_USER" >/dev/null 2>&1; then
-            log_error "Specified user does not exist: $CRON_USER"
-            return 1
-        fi
-        log_info "Using specified cron user: $CRON_USER"
+    # Use centralized validation function from lib/security.sh
+    if ! validate_file_permissions "$script_path" "700" "root" "root"; then
+        log_error "SECURITY: Script $script_name failed security validation"
+        log_error "This creates a privilege escalation risk when run by root cron"
+        return 1
+    fi
+
+    # Additional script-specific security checks
+    if [[ ! -x "$script_path" ]]; then
+        log_error "Script $script_name is not executable"
+        return 1
+    fi
+
+    # Check for suspicious content patterns
+    if grep -q -E '(sudo|su |pkexec|chmod \+s)' "$script_path"; then
+        log_warn "SECURITY: Script $script_name contains privilege escalation commands"
+        log_warn "Review manually: grep -E '(sudo|su |pkexec|chmod \\+s)' '$script_path'"
+    fi
+
+    # Validate script has proper shebang
+    local shebang
+    shebang=$(head -1 "$script_path")
+    if [[ ! "$shebang" =~ ^#!/(usr/)?bin/(bash|sh)$ ]]; then
+        log_warn "Script $script_name has unusual shebang: $shebang"
+    fi
+
+    log_success "Script security validation passed: $script_name"
+    return 0
+}
+
+# ENHANCED: Create hardened script copies using centralized secure file functions
+create_secure_script_copy() {
+    local source_script="$1"
+    local script_name="$(basename "$source_script")"
+    local secure_copy="$CRON_SCRIPTS_DIR/$script_name"
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would create secure copy: $secure_copy"
         return 0
     fi
 
-    # Auto-detect appropriate user
-    local real_user
-    real_user=$(get_real_user)
+    log_info "Creating secure script copy: $script_name"
 
-    # Ensure user exists and is in docker group
-    if ! id "$real_user" >/dev/null 2>&1; then
-        log_error "Real user does not exist: $real_user"
+    # Ensure secure scripts directory exists with proper permissions
+    if ! ensure_dir "$CRON_SCRIPTS_DIR" 750; then
+        log_error "Failed to create secure scripts directory"
         return 1
     fi
 
-    if ! groups "$real_user" | grep -q docker; then
-        log_error "User $real_user is not in docker group"
-        log_info "Add with: sudo usermod -aG docker $real_user"
+    # Use centralized directory validation
+    if ! validate_directory_permissions "$CRON_SCRIPTS_DIR" "750" "root" "root"; then
+        # Fix permissions if validation failed
+        if ! chown root:root "$CRON_SCRIPTS_DIR" || ! chmod 750 "$CRON_SCRIPTS_DIR"; then
+            log_error "Failed to secure scripts directory"
+            return 1
+        fi
+    fi
+
+    # Read source script content
+    local script_content
+    if ! script_content=$(cat "$source_script"); then
+        log_error "Failed to read source script: $source_script"
         return 1
     fi
 
-    CRON_USER="$real_user"
-    log_info "Detected cron user: $CRON_USER"
+    # Use centralized secure file creation
+    if ! create_secure_file "$secure_copy" "$script_content" "700" "root" "root"; then
+        log_error "Failed to create secure script copy"
+        return 1
+    fi
+
+    # Verify the copy is identical
+    if ! cmp -s "$source_script" "$secure_copy"; then
+        log_error "Script copy verification failed - files differ"
+        return 1
+    fi
+
+    log_success "Secure script copy created: $secure_copy"
+    echo "$secure_copy"
     return 0
 }
 
-# STANDARDIZED: Generate cron job content - returns exit code
-generate_cron_jobs() {
-    log_info "Generating cron job configuration..."
-
-    local cron_content=""
-    
-    # Header
-    cron_content+="# VaultWarden-OCI Automated Tasks - Generated $(date)\n"
-    cron_content+="# Project: $PROJECT_ROOT\n"
-    cron_content+="# User: $CRON_USER\n"
-    cron_content+="\n"
-
-    # Environment variables for cron
-    cron_content+="# Environment\n"
-    cron_content+="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n"
-    cron_content+="MAILTO=\"\"\n"
-    cron_content+="\n"
-
-    # Backup jobs
-    if [[ "$ENABLE_BACKUPS" == "true" ]]; then
-        cron_content+="# Database Backups - Daily at 2:00 AM\n"
-        cron_content+="0 2 * * * cd $PROJECT_ROOT && ./backup.sh --type db --email >/dev/null 2>&1\n"
-        cron_content+="\n"
-        
-        cron_content+="# Full System Backup - Weekly on Sunday at 3:00 AM\n"
-        cron_content+="0 3 * * 0 cd $PROJECT_ROOT && ./backup.sh --type full --email >/dev/null 2>&1\n"
-        cron_content+="\n"
-        
-        cron_content+="# Emergency Recovery Kit - Monthly on 1st at 4:00 AM\n"
-        cron_content+="0 4 1 * * cd $PROJECT_ROOT && ./backup.sh --type emergency --email >/dev/null 2>&1\n"
-        cron_content+="\n"
+# STANDARDIZED: Setup secure logging directory using centralized functions
+setup_cron_logging() {
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would setup secure cron logging"
+        return 0
     fi
 
-    # Maintenance jobs
-    if [[ "$ENABLE_MAINTENANCE" == "true" ]]; then
-        cron_content+="# Basic Maintenance - Weekly on Monday at 1:00 AM\n"
-        cron_content+="0 1 * * 1 cd $PROJECT_ROOT && ./maintenance.sh --email >/dev/null 2>&1\n"
-        cron_content+="\n"
-        
-        cron_content+="# Comprehensive Maintenance - Monthly on 15th at 2:00 AM\n"
-        cron_content+="0 2 15 * * cd $PROJECT_ROOT && ./maintenance.sh --comprehensive --email >/dev/null 2>&1\n"
-        cron_content+="\n"
+    log_info "Setting up secure cron job logging..."
+
+    # Create log directory with proper permissions
+    if ! ensure_dir "$CRON_LOG_DIR" 750; then
+        log_error "Failed to create cron log directory"
+        return 1
     fi
 
-    # Update jobs (optional)
-    if [[ "$ENABLE_UPDATES" == "true" ]]; then
-        cron_content+="# Container Updates - Weekly on Saturday at 5:00 AM\n"
-        cron_content+="0 5 * * 6 cd $PROJECT_ROOT && ./update.sh --email >/dev/null 2>&1\n"
-        cron_content+="\n"
+    # Use centralized validation and fix if needed
+    if ! validate_directory_permissions "$CRON_LOG_DIR" "750" "root" "root"; then
+        if ! chown root:root "$CRON_LOG_DIR" || ! chmod 750 "$CRON_LOG_DIR"; then
+            log_error "Failed to secure cron log directory"
+            return 1
+        fi
     fi
 
-    # Health monitoring
-    if [[ "$ENABLE_HEALTH_MONITORING" == "true" ]]; then
-        cron_content+="# Health Monitoring - Every 4 hours\n"
-        cron_content+="0 */4 * * * cd $PROJECT_ROOT && ./health.sh --quiet || ./health.sh --email >/dev/null 2>&1\n"
-        cron_content+="\n"
-    fi
+    # Create individual log files with proper permissions using centralized function
+    local log_files=(
+        "maintenance.log"
+        "backup.log"
+        "health.log"
+        "firewall.log"
+    )
 
-    echo -e "$cron_content"
+    for log_file in "${log_files[@]}"; do
+        local full_path="$CRON_LOG_DIR/$log_file"
+        if [[ ! -f "$full_path" ]]; then
+            # Use centralized secure file creation
+            if ! create_secure_file "$full_path" "" "640" "root" "root"; then
+                log_error "Failed to create secure log file: $log_file"
+                return 1
+            fi
+        else
+            # Validate existing log file permissions
+            if ! validate_file_permissions "$full_path" "640" "root" "root"; then
+                log_warn "Correcting permissions for existing log file: $log_file"
+                if ! chown root:root "$full_path" || ! chmod 640 "$full_path"; then
+                    log_error "Failed to secure existing log file: $log_file"
+                    return 1
+                fi
+            fi
+        fi
+    done
+
+    log_success "Cron logging setup completed"
     return 0
 }
 
-# STANDARDIZED: Install cron jobs - returns exit code
+# ENHANCED: Install secure cron jobs with centralized validation
 install_cron_jobs() {
     if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would install cron jobs for user: $CRON_USER"
-        local cron_jobs
-        cron_jobs=$(generate_cron_jobs)
-        echo "Cron jobs that would be installed:"
-        echo "=================================="
-        echo -e "$cron_jobs"
+        log_info "[DRY RUN] Would install secure VaultWarden cron jobs"
         return 0
     fi
 
-    log_info "Installing cron jobs for user: $CRON_USER..."
+    log_info "Installing secure VaultWarden cron jobs..."
 
-    # Get current crontab
-    local current_crontab="/tmp/vw_current_crontab_$$"
-    local new_crontab="/tmp/vw_new_crontab_$$"
-
-    # Cleanup temp files on exit
-    trap "rm -f '$current_crontab' '$new_crontab'" EXIT
-
-    # Get existing crontab (might not exist)
-    if ! crontab -u "$CRON_USER" -l > "$current_crontab" 2>/dev/null; then
-        # No existing crontab, create empty one
-        touch "$current_crontab"
-    fi
-
-    # Remove any existing VaultWarden jobs
-    if ! grep -v "VaultWarden-OCI" "$current_crontab" > "$new_crontab"; then
-        # If grep fails (no non-matching lines), create empty file
-        touch "$new_crontab"
-    fi
-
-    # Add new VaultWarden jobs
-    local vw_cron_jobs
-    if ! vw_cron_jobs=$(generate_cron_jobs); then
-        log_error "Failed to generate cron jobs"
+    # Validate we're running as root
+    if [[ $EUID -ne 0 ]]; then
+        log_error "Cron installation must be run as root"
         return 1
     fi
 
-    echo -e "$vw_cron_jobs" >> "$new_crontab"
+    # Setup secure logging
+    if ! setup_cron_logging; then
+        log_error "Failed to setup cron logging"
+        return 1
+    fi
 
-    # Install new crontab
-    if crontab -u "$CRON_USER" "$new_crontab"; then
-        log_success "Cron jobs installed successfully for user: $CRON_USER"
-        
-        # Show what was installed
-        local job_count
-        job_count=$(echo -e "$vw_cron_jobs" | grep -c "cd $PROJECT_ROOT" || echo "0")
-        log_info "Installed $job_count automated tasks"
-        
-        return 0
+    # Define scripts to install with validation
+    local scripts_to_install=(
+        "maintenance.sh:Database and system maintenance"
+        "backup.sh:Automated backup creation"
+        "health.sh:System health monitoring"
+        "update-dns.sh:Cloudflare DNS updates"
+    )
+
+    local secure_scripts=()
+    local validation_failed=false
+
+    # Validate and create secure copies of all scripts first
+    for script_info in "${scripts_to_install[@]}"; do
+        local script_name="${script_info%%:*}"
+        local script_path="$PROJECT_ROOT/$script_name"
+
+        log_info "Validating script for cron installation: $script_name"
+
+        # Validate script security using centralized function
+        if ! validate_script_security "$script_path"; then
+            log_error "Security validation failed for: $script_name"
+            validation_failed=true
+            continue
+        fi
+
+        # Create secure copy
+        local secure_copy
+        if secure_copy=$(create_secure_script_copy "$script_path"); then
+            secure_scripts+=("$secure_copy")
+        else
+            log_error "Failed to create secure copy of: $script_name"
+            validation_failed=true
+        fi
+    done
+
+    if [[ "$validation_failed" == "true" ]]; then
+        log_error "Script validation failures prevent cron installation"
+        return 1
+    fi
+
+    # Create cron jobs with secure script paths
+    log_info "Creating cron job entries..."
+
+    local cron_jobs=(
+        # Daily maintenance at 2 AM
+        "0 2 * * * $CRON_SCRIPTS_DIR/maintenance.sh --comprehensive >> $CRON_LOG_DIR/maintenance.log 2>&1"
+
+        # Daily backup at 3 AM
+        "0 3 * * * $CRON_SCRIPTS_DIR/backup.sh --type db --rclone >> $CRON_LOG_DIR/backup.log 2>&1"
+
+        # Health check every 30 minutes
+        "*/30 * * * * $CRON_SCRIPTS_DIR/health.sh --quiet >> $CRON_LOG_DIR/health.log 2>&1"
+
+        # Weekly firewall update (Sunday at 4 AM)
+        "0 4 * * 0 $CRON_SCRIPTS_DIR/maintenance.sh --update-firewall >> $CRON_LOG_DIR/firewall.log 2>&1"
+
+        # Weekly full backup (Sunday at 5 AM)
+        "0 5 * * 0 $CRON_SCRIPTS_DIR/backup.sh --type full --rclone >> $CRON_LOG_DIR/backup.log 2>&1"
+    )
+
+    # Install cron jobs securely
+    local temp_cron="/tmp/vaultwarden_cron.$$"
+
+    # Get existing crontab (if any) but exclude our jobs
+    crontab -l 2>/dev/null | grep -v "vaultwarden\|VaultWarden" > "$temp_cron" || true
+
+    # Add our jobs with identifying comments
+    echo "# VaultWarden-OCI Automated Jobs - Managed by cron-setup.sh" >> "$temp_cron"
+    for job in "${cron_jobs[@]}"; do
+        echo "$job" >> "$temp_cron"
+    done
+    echo "# End VaultWarden-OCI Jobs" >> "$temp_cron"
+
+    # Secure the temporary cron file before installation
+    if ! chmod 600 "$temp_cron"; then
+        log_error "Failed to secure temporary cron file"
+        rm -f "$temp_cron"
+        return 1
+    fi
+
+    # Install the crontab
+    if crontab "$temp_cron"; then
+        log_success "Cron jobs installed successfully"
     else
         log_error "Failed to install cron jobs"
+        # Secure cleanup of temp file
+        secure_cleanup "$temp_cron"
         return 1
     fi
+
+    # Secure cleanup of temp file
+    secure_cleanup "$temp_cron"
+
+    # Verify cron service is running
+    if ! systemctl is-active --quiet cron 2>/dev/null; then
+        log_warn "Cron service is not running - attempting to start..."
+        if systemctl start cron 2>/dev/null; then
+            log_success "Cron service started"
+        else
+            log_error "Failed to start cron service"
+            return 1
+        fi
+    fi
+
+    log_success "Secure cron jobs installation completed"
+    return 0
 }
 
-# STANDARDIZED: Remove cron jobs - returns exit code
+# STANDARDIZED: Remove cron jobs with secure cleanup
 remove_cron_jobs() {
     if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would remove VaultWarden cron jobs for user: $CRON_USER"
+        log_info "[DRY RUN] Would remove VaultWarden cron jobs"
         return 0
     fi
 
-    log_info "Removing VaultWarden cron jobs for user: $CRON_USER..."
+    log_info "Removing VaultWarden cron jobs..."
 
-    # Get current crontab
-    local current_crontab="/tmp/vw_current_crontab_$$"
-    local new_crontab="/tmp/vw_new_crontab_$$"
+    # Get current crontab and remove our jobs
+    local temp_cron="/tmp/vaultwarden_cron_remove.$$"
 
-    # Cleanup temp files on exit
-    trap "rm -f '$current_crontab' '$new_crontab'" EXIT
+    if crontab -l 2>/dev/null | grep -v -E "(vaultwarden|VaultWarden|$CRON_SCRIPTS_DIR)" > "$temp_cron"; then
+        # Secure the temporary file
+        chmod 600 "$temp_cron"
 
-    # Get existing crontab
-    if ! crontab -u "$CRON_USER" -l > "$current_crontab" 2>/dev/null; then
-        log_info "No existing crontab found for user: $CRON_USER"
-        return 0
-    fi
-
-    # Count existing VaultWarden jobs
-    local existing_jobs
-    existing_jobs=$(grep -c "VaultWarden-OCI\|cd $PROJECT_ROOT" "$current_crontab" || echo "0")
-
-    if [[ "$existing_jobs" -eq "0" ]]; then
-        log_info "No VaultWarden cron jobs found to remove"
-        return 0
-    fi
-
-    # Remove VaultWarden jobs
-    if grep -v "VaultWarden-OCI\|cd $PROJECT_ROOT" "$current_crontab" > "$new_crontab"; then
-        # Install cleaned crontab
-        if crontab -u "$CRON_USER" "$new_crontab"; then
-            log_success "Removed $existing_jobs VaultWarden cron jobs"
-            return 0
+        if crontab "$temp_cron"; then
+            log_success "VaultWarden cron jobs removed"
         else
-            log_error "Failed to update crontab after removing jobs"
+            log_error "Failed to update crontab"
+            secure_cleanup "$temp_cron"
             return 1
         fi
     else
-        # All lines were VaultWarden jobs, remove entire crontab
-        if crontab -u "$CRON_USER" -r; then
-            log_success "Removed all cron jobs (crontab was entirely VaultWarden jobs)"
-            return 0
+        # No crontab or no jobs to remove
+        log_info "No VaultWarden cron jobs found to remove"
+    fi
+
+    # Secure cleanup of temp file
+    secure_cleanup "$temp_cron"
+
+    # Clean up secure scripts directory
+    if [[ -d "$CRON_SCRIPTS_DIR" ]]; then
+        log_info "Removing secure scripts directory..."
+        if secure_cleanup "$CRON_SCRIPTS_DIR"; then
+            log_success "Secure scripts directory removed"
         else
-            log_error "Failed to remove crontab"
-            return 1
+            log_warn "Failed to securely remove scripts directory"
         fi
     fi
+
+    return 0
 }
 
-# STANDARDIZED: List current cron jobs - returns exit code
+# STANDARDIZED: List current cron jobs
 list_cron_jobs() {
-    log_info "Current VaultWarden cron jobs for user: $CRON_USER"
-    echo ""
+    log_info "Current VaultWarden cron jobs:"
 
-    # Get current crontab
-    local current_crontab
-    if current_crontab=$(crontab -u "$CRON_USER" -l 2>/dev/null); then
-        # Filter for VaultWarden jobs
+    local cron_output
+    if cron_output=$(crontab -l 2>/dev/null); then
         local vw_jobs
-        vw_jobs=$(echo "$current_crontab" | grep -E "VaultWarden-OCI|cd $PROJECT_ROOT" || echo "")
-
-        if [[ -n "$vw_jobs" ]]; then
-            echo "Found VaultWarden cron jobs:"
-            echo "============================="
+        if vw_jobs=$(echo "$cron_output" | grep -E "(vaultwarden|VaultWarden|$CRON_SCRIPTS_DIR)"); then
             echo "$vw_jobs"
             echo ""
-            
-            local job_count
-            job_count=$(echo "$vw_jobs" | grep -c "cd $PROJECT_ROOT" || echo "0")
-            log_info "Total VaultWarden automated tasks: $job_count"
+            log_info "Found $(echo "$vw_jobs" | wc -l) VaultWarden cron jobs"
         else
             log_info "No VaultWarden cron jobs found"
         fi
     else
-        log_info "No crontab found for user: $CRON_USER"
+        log_info "No crontab found for current user"
     fi
 
-    # Show cron service status
-    echo ""
-    log_info "Cron service status:"
-    if systemctl is-active --quiet cron; then
-        log_success "Cron service is running"
-    else
-        log_warn "Cron service is not running"
-        log_info "Start with: sudo systemctl start cron"
-    fi
+    # Check secure scripts directory using centralized validation
+    if [[ -d "$CRON_SCRIPTS_DIR" ]]; then
+        log_info "Secure scripts directory exists: $CRON_SCRIPTS_DIR"
 
-    return 0
-}
-
-# STANDARDIZED: Validate cron environment - returns exit code
-validate_cron_environment() {
-    log_info "Validating cron environment..."
-
-    # Check if cron service is installed and running
-    if ! has_command crontab; then
-        log_error "crontab command not found"
-        log_info "Install with: sudo apt install cron"
-        return 1
-    fi
-
-    if ! systemctl is-enabled --quiet cron; then
-        log_warn "Cron service is not enabled"
-        log_info "Enable with: sudo systemctl enable cron"
-    fi
-
-    if ! systemctl is-active --quiet cron; then
-        log_error "Cron service is not running"
-        log_info "Start with: sudo systemctl start cron"
-        return 1
-    fi
-
-    # Check if project scripts are executable
-    local required_scripts=("health.sh" "backup.sh" "maintenance.sh")
-    if [[ "$ENABLE_UPDATES" == "true" ]]; then
-        required_scripts+=("update.sh")
-    fi
-
-    local missing_scripts=()
-    for script in "${required_scripts[@]}"; do
-        if [[ ! -x "$PROJECT_ROOT/$script" ]]; then
-            missing_scripts+=("$script")
+        # Validate directory permissions
+        if validate_directory_permissions "$CRON_SCRIPTS_DIR" "750" "root" "root"; then
+            log_success "Scripts directory permissions are secure"
+        else
+            log_warn "Scripts directory has incorrect permissions"
         fi
-    done
 
-    if [[ ${#missing_scripts[@]} -gt 0 ]]; then
-        log_error "Required scripts are not executable: ${missing_scripts[*]}"
-        log_info "Fix with: chmod +x ${missing_scripts[*]}"
-        return 1
+        local script_count
+        script_count=$(find "$CRON_SCRIPTS_DIR" -name "*.sh" -type f | wc -l)
+        log_info "Contains $script_count script files"
+
+        # Validate each script's permissions
+        while IFS= read -r -d '' script_file; do
+            if validate_file_permissions "$script_file" "700" "root" "root"; then
+                log_debug "Script permissions OK: $(basename "$script_file")"
+            else
+                log_warn "Script permissions incorrect: $(basename "$script_file")"
+            fi
+        done < <(find "$CRON_SCRIPTS_DIR" -name "*.sh" -type f -print0)
+
+    else
+        log_info "Secure scripts directory does not exist: $CRON_SCRIPTS_DIR"
     fi
 
-    # Check if .env file exists (needed for cron environment)
-    if [[ ! -f "$PROJECT_ROOT/.env" ]]; then
-        log_error "Configuration file not found: .env"
-        log_info "Run setup.sh first to create configuration"
-        return 1
-    fi
-
-    log_success "Cron environment validation passed"
     return 0
 }
 
-# ENHANCED: Main function with proper error handling and exit strategy
-main() {
-    log_header "VaultWarden-OCI Cron Setup Manager"
+# ENHANCED: Validate existing cron setup security using centralized functions
+validate_cron_security() {
+    log_info "Validating VaultWarden cron job security using centralized functions..."
 
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_warn "DRY RUN MODE - No changes will be made"
+    local validation_passed=true
+
+    # Check if running as root
+    if [[ $EUID -ne 0 ]]; then
+        log_error "Cron validation should be run as root for complete security check"
+        validation_passed=false
     fi
 
-    # Detect appropriate user for cron jobs
-    if ! detect_cron_user; then
+    # Check cron service status
+    if ! systemctl is-active --quiet cron 2>/dev/null; then
+        log_error "Cron service is not running"
+        validation_passed=false
+    fi
+
+    # Validate secure scripts directory using centralized functions
+    if [[ -d "$CRON_SCRIPTS_DIR" ]]; then
+        log_info "Validating secure scripts directory..."
+
+        if validate_directory_permissions "$CRON_SCRIPTS_DIR" "750" "root" "root"; then
+            log_success "Scripts directory permissions validated"
+        else
+            log_error "Scripts directory has incorrect permissions"
+            validation_passed=false
+        fi
+
+        # Validate each script in the directory using centralized validation
+        while IFS= read -r -d '' script_file; do
+            if ! validate_file_permissions "$script_file" "700" "root" "root"; then
+                validation_passed=false
+            fi
+        done < <(find "$CRON_SCRIPTS_DIR" -name "*.sh" -type f -print0)
+
+    else
+        log_warn "Secure scripts directory not found: $CRON_SCRIPTS_DIR"
+    fi
+
+    # Check cron log directory using centralized validation
+    if [[ -d "$CRON_LOG_DIR" ]]; then
+        if validate_directory_permissions "$CRON_LOG_DIR" "750" "root" "root"; then
+            log_success "Cron log directory permissions validated"
+        else
+            log_warn "Cron log directory has incorrect permissions"
+        fi
+    fi
+
+    if [[ "$validation_passed" == "true" ]]; then
+        log_success "Cron job security validation passed"
+        return 0
+    else
+        log_error "Cron job security validation failed"
+        return 1
+    fi
+}
+
+# ENHANCED: Main function with proper error handling
+main() {
+    log_header "VaultWarden-OCI Secure Cron Management (Centralized Security)"
+
+    # Validate running as root for installation/removal
+    if [[ "$INSTALL_CRON" == "true" ]] || [[ "$REMOVE_CRON" == "true" ]]; then
+        if [[ $EUID -ne 0 ]]; then
+            log_error "Cron installation/removal must be run as root"
+            log_info "Use: sudo $0 $*"
+            exit 1
+        fi
+    fi
+
+    # Handle different operations
+    local exit_code=0
+
+    if [[ "$LIST_CRON" == "true" ]]; then
+        if ! list_cron_jobs; then
+            exit_code=1
+        fi
+    fi
+
+    if [[ "$VALIDATE_ONLY" == "true" ]]; then
+        if ! validate_cron_security; then
+            exit_code=1
+        fi
+    fi
+
+    if [[ "$REMOVE_CRON" == "true" ]]; then
+        if ! remove_cron_jobs; then
+            exit_code=1
+        fi
+    fi
+
+    if [[ "$INSTALL_CRON" == "true" ]]; then
+        if ! install_cron_jobs; then
+            exit_code=1
+        fi
+
+        # Automatically validate after installation
+        log_info "Validating installation security..."
+        if ! validate_cron_security; then
+            log_warn "Installation completed but security validation failed"
+            exit_code=2
+        fi
+    fi
+
+    # Default action if no specific operation requested
+    if [[ "$LIST_CRON" != "true" ]] && [[ "$VALIDATE_ONLY" != "true" ]] &&        [[ "$REMOVE_CRON" != "true" ]] && [[ "$INSTALL_CRON" != "true" ]]; then
+        log_info "No operation specified. Use --help for options."
+        show_help
         exit 1
     fi
 
-    # Handle list operation
-    if [[ "$LIST_CRON" == "true" ]]; then
-        if list_cron_jobs; then
-            exit 0
-        else
-            exit 1
-        fi
+    if [[ $exit_code -eq 0 ]]; then
+        log_success "Cron management operation completed successfully"
+    elif [[ $exit_code -eq 2 ]]; then
+        log_warn "Operation completed with warnings"
+    else
+        log_error "Cron management operation failed"
     fi
 
-    # Handle remove operation
-    if [[ "$REMOVE_CRON" == "true" ]]; then
-        log_info "=== Removing VaultWarden Cron Jobs ==="
-        if remove_cron_jobs; then
-            log_success "VaultWarden cron jobs removed successfully"
-            exit 0
-        else
-            log_error "Failed to remove VaultWarden cron jobs"
-            exit 1
-        fi
-    fi
-
-    # Handle install operation
-    if [[ "$INSTALL_CRON" == "true" ]]; then
-        log_info "=== Installing VaultWarden Cron Jobs ==="
-
-        # Validate environment
-        if ! validate_cron_environment; then
-            log_error "Cron environment validation failed"
-            exit 1
-        fi
-
-        # Show configuration summary
-        log_info "Cron job configuration:"
-        echo "  User: $CRON_USER"
-        echo "  Project: $PROJECT_ROOT"
-        echo "  Backups: $ENABLE_BACKUPS"
-        echo "  Maintenance: $ENABLE_MAINTENANCE"
-        echo "  Updates: $ENABLE_UPDATES"
-        echo "  Health Monitoring: $ENABLE_HEALTH_MONITORING"
-        echo ""
-
-        # Install jobs
-        if install_cron_jobs; then
-            log_success "VaultWarden cron jobs installed successfully"
-            
-            echo ""
-            log_info "🎯 Automation enabled! Your VaultWarden instance will now:"
-            if [[ "$ENABLE_BACKUPS" == "true" ]]; then
-                echo "  • Create daily database backups (2 AM)"
-                echo "  • Create weekly full backups (Sunday 3 AM)"
-                echo "  • Create monthly emergency kits (1st 4 AM)"
-            fi
-            if [[ "$ENABLE_MAINTENANCE" == "true" ]]; then
-                echo "  • Run weekly maintenance (Monday 1 AM)"
-                echo "  • Run comprehensive maintenance (15th 2 AM)"
-            fi
-            if [[ "$ENABLE_UPDATES" == "true" ]]; then
-                echo "  • Update containers weekly (Saturday 5 AM)"
-            fi
-            if [[ "$ENABLE_HEALTH_MONITORING" == "true" ]]; then
-                echo "  • Monitor health every 4 hours"
-            fi
-            
-            echo ""
-            log_info "Useful commands:"
-            echo "  • List cron jobs: sudo ./cron-setup.sh --list"
-            echo "  • Remove cron jobs: sudo ./cron-setup.sh --remove"
-            echo "  • Check cron logs: sudo journalctl -u cron"
-            echo "  • Test backup: ./backup.sh --type db"
-            echo "  • Test health check: ./health.sh"
-            
-            exit 0
-        else
-            log_error "Failed to install VaultWarden cron jobs"
-            exit 1
-        fi
-    fi
-
-    # Should not reach here
-    log_error "No valid operation specified"
-    show_help
-    exit 1
+    exit $exit_code
 }
 
 main "$@"

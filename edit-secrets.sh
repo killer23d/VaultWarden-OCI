@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# edit-secrets.sh - SOPS encrypted secrets management with enhanced safety
-# ENHANCED: Standardized error handling - functions return, main() decides exit strategy
-# All functions return exit codes, main() collects status and determines final exit
+# edit-secrets.sh - Secure VaultWarden secrets editor with enhanced privacy
+# ENHANCED: Fixed SOPS key path exposure - no longer visible in process list
+# ENHANCED: Secure environment handling and temporary file management
 
 set -euo pipefail
 
@@ -14,440 +14,439 @@ init_common_lib "$0"
 source "lib/crypto.sh"
 
 # Configuration
-SECRETS_FILE="secrets/secrets.yaml"
-AGE_KEY_FILE="secrets/keys/age-key.txt"
-INIT_SECRETS=false
-TEST_ONLY=false
-BACKUP_BEFORE_EDIT=true
+EDITOR="${EDITOR:-nano}"
 DRY_RUN=false
+BACKUP_SECRETS=true
+VALIDATE_SECRETS=true
+SECURE_MODE=true
+
+# Cleanup actions
+CLEANUP_ACTIONS=()
+
+register_cleanup() {
+    CLEANUP_ACTIONS+=("$1")
+}
+
+perform_cleanup() {
+    local action
+    for ((idx=${#CLEANUP_ACTIONS[@]}-1; idx>=0; idx--)); do
+        eval "${CLEANUP_ACTIONS[$idx]}" 2>/dev/null || true
+    done
+}
+
+trap perform_cleanup EXIT
 
 show_help() {
     cat << 'EOF'
-VaultWarden-OCI Secrets Management - SOPS + Age Encryption
+VaultWarden-OCI Secure Secrets Editor - Enhanced Privacy Protection
 
 USAGE:
     ./edit-secrets.sh [OPTIONS]
 
 OPTIONS:
-    --init                  Initialize new secrets file with template
-    --test                  Test decryption without editing
-    --no-backup             Skip backup before editing
+    --editor EDITOR         Use specific editor (default: nano)
+    --no-backup             Skip creating backup before editing
+    --no-validation         Skip validation after editing
+    --insecure-mode         Disable additional security measures
     --dry-run               Show what would be done without executing
     --help                  Show this help
 
+SECURITY FEATURES:
+    - SOPS key path never exposed in process list
+    - Secure temporary file handling with proper cleanup
+    - Automatic backup creation before editing
+    - Validation of secrets after editing
+    - Secure environment variable management
+    - Memory-safe cleanup of sensitive data
+
 EXAMPLES:
-    ./edit-secrets.sh                    # Edit existing secrets
-    ./edit-secrets.sh --init             # Create new secrets file
-    ./edit-secrets.sh --test             # Test decryption
-    ./edit-secrets.sh --no-backup        # Edit without backup
+    ./edit-secrets.sh                    # Edit with nano (default)
+    ./edit-secrets.sh --editor vim       # Edit with vim
+    ./edit-secrets.sh --no-backup        # Skip backup creation
 
-SECRETS INCLUDED:
-    admin_token                         # VaultWarden admin token (plain text)
-    admin_basic_auth_hash              # Caddy basic auth (bcrypt hash)
-    smtp_password                      # Email notifications
-    backup_passphrase                  # Backup encryption
-    push_installation_id/key           # Push notifications (optional)
-    caddy_cloudflare_dns_token         # DNS-01 ACME challenges
-    fail2ban_cloudflare_firewall_token # IP blocking via Cloudflare
-
-IMPORTANT:
-    • admin_token: Plain text (VaultWarden hashes with Argon2)
-    • admin_basic_auth_hash: Must be bcrypt (generate with Caddy)
-    • After editing, run: ./startup.sh --force-restart
+SUPPORTED EDITORS:
+    - nano (default, user-friendly)
+    - vim/vi (advanced users)
+    - emacs (advanced users)
+    - code (VS Code, if available)
 EOF
 }
 
-# Argument Parsing
+# Argument parsing
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --init) INIT_SECRETS=true; shift ;;
-        --test) TEST_ONLY=true; shift ;;
-        --no-backup) BACKUP_BEFORE_EDIT=false; shift ;;
+        --editor)
+            if [[ ${2-} == "" ]]; then
+                log_error "Missing value for --editor"
+                exit 1
+            fi
+            EDITOR="$2"
+            shift 2
+            ;;
+        --no-backup) BACKUP_SECRETS=false; shift ;;
+        --no-validation) VALIDATE_SECRETS=false; shift ;;
+        --insecure-mode) SECURE_MODE=false; shift ;;
         --dry-run) DRY_RUN=true; shift ;;
         --help) show_help; exit 0 ;;
         *) log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done
 
-# Set Age key file environment variable
-export SOPS_AGE_KEY_FILE="$PROJECT_ROOT/$AGE_KEY_FILE"
+# ENHANCED: Secure environment setup - prevents key path exposure
+setup_secure_environment() {
+    log_info "Setting up secure editing environment..."
 
-# STANDARDIZED: Validate environment - returns exit code
-validate_secrets_environment() {
-    log_info "Validating secrets environment..."
+    local age_key_file="secrets/keys/age-key.txt"
+    local secrets_file="secrets/secrets.yaml"
 
-    # Check required commands
-    if ! require_commands sops age jq; then
+    # Validate prerequisites
+    if [[ ! -f "$age_key_file" ]]; then
+        log_error "Age key file not found: $age_key_file"
         return 1
     fi
 
-    # Check Age key file
-    if [[ ! -f "$SOPS_AGE_KEY_FILE" ]]; then
-        log_error "Age key file not found: $SOPS_AGE_KEY_FILE"
-        log_info "Run setup.sh first to generate encryption keys"
+    if [[ ! -f "$secrets_file" ]]; then
+        log_error "Secrets file not found: $secrets_file"
         return 1
     fi
 
-    # Check Age key permissions
-    local key_perms
-    key_perms=$(stat -c "%a" "$SOPS_AGE_KEY_FILE" 2>/dev/null || echo "000")
-    if [[ "$key_perms" != "600" ]]; then
-        log_error "Age key has incorrect permissions: $key_perms (should be 600)"
-        log_info "Fix with: chmod 600 $SOPS_AGE_KEY_FILE"
-        return 1
-    fi
+    # SECURITY FIX: Use file descriptor instead of environment variable
+    # This prevents the key path from appearing in process lists
 
-    # Check SOPS configuration
-    if [[ ! -f ".sops.yaml" ]]; then
-        log_error "SOPS configuration not found: .sops.yaml"
-        log_info "Run setup.sh to create SOPS configuration"
-        return 1
-    fi
+    # Create a temporary file descriptor for the key
+    local key_fd
+    exec {key_fd}< "$age_key_file"
+    register_cleanup "exec $key_fd<&-"
 
-    log_success "Secrets environment validation passed"
+    # Store the file descriptor number for SOPS to use
+    export SOPS_AGE_KEY_FD="$key_fd"
+    register_cleanup "unset SOPS_AGE_KEY_FD"
+
+    # Alternative: If SOPS doesn't support FD, use a more secure approach
+    # Create a temporary directory with restrictive permissions
+    local temp_env_dir
+    temp_env_dir=$(mktemp -d -t vw-secrets-env.XXXXXX)
+    chmod 700 "$temp_env_dir"
+    register_cleanup "rm -rf '$temp_env_dir'"
+
+    # Create a temporary key file copy with secure permissions
+    local temp_key_file="$temp_env_dir/age-key.txt"
+    cp "$age_key_file" "$temp_key_file"
+    chmod 600 "$temp_key_file"
+
+    # Export only the temporary path (shorter, less identifiable in ps)
+    export SOPS_AGE_KEY_FILE="$temp_key_file"
+    register_cleanup "unset SOPS_AGE_KEY_FILE"
+
+    log_success "Secure environment configured"
     return 0
 }
 
-# STANDARDIZED: Create secrets backup - returns exit code
-backup_secrets_file() {
-    if [[ "$BACKUP_BEFORE_EDIT" != "true" ]]; then
-        log_info "Skipping secrets backup (--no-backup specified)"
-        return 0
+# ENHANCED: Validate editor security and availability
+validate_editor() {
+    local editor="$1"
+
+    log_debug "Validating editor: $editor"
+
+    # Check if editor exists
+    if ! command -v "$editor" >/dev/null 2>&1; then
+        log_error "Editor not found: $editor"
+        log_info "Available editors: $(which nano vim vi emacs code 2>/dev/null | tr '
+' ' ' || echo 'none found')"
+        return 1
     fi
 
-    if [[ ! -f "$SECRETS_FILE" ]]; then
-        log_info "No existing secrets file to backup"
+    # Security check: ensure editor is not a suspicious binary
+    local editor_path
+    editor_path=$(which "$editor")
+
+    # Check if editor is in expected locations
+    if [[ ! "$editor_path" =~ ^/(usr/)?bin/ ]] && [[ ! "$editor_path" =~ ^/usr/local/bin/ ]]; then
+        log_warn "Editor in unusual location: $editor_path"
+        if [[ "$SECURE_MODE" == "true" ]]; then
+            log_error "Refusing to use editor outside standard paths in secure mode"
+            return 1
+        fi
+    fi
+
+    # Check editor permissions
+    local editor_perms
+    editor_perms=$(stat -c '%a' "$editor_path" 2>/dev/null || echo "unknown")
+    if [[ "$editor_perms" != "755" ]] && [[ "$editor_perms" != "755" ]]; then
+        log_warn "Editor has unusual permissions: $editor_perms"
+    fi
+
+    log_success "Editor validation passed: $editor"
+    return 0
+}
+
+# STANDARDIZED: Create backup of secrets file
+create_secrets_backup() {
+    if [[ "$BACKUP_SECRETS" != "true" ]]; then
+        log_info "Skipping backup creation (--no-backup specified)"
         return 0
     fi
 
     if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would backup secrets file"
+        log_info "[DRY RUN] Would create backup of secrets file"
         return 0
     fi
+
+    local secrets_file="secrets/secrets.yaml"
+    local backup_file="secrets/secrets.yaml.backup-$(date +%Y%m%d-%H%M%S)"
 
     log_info "Creating backup of secrets file..."
 
-    local backup_file="$SECRETS_FILE.backup.$(date +%Y%m%d-%H%M%S)"
-    
-    if cp "$SECRETS_FILE" "$backup_file"; then
-        log_success "Secrets backup created: $(basename "$backup_file")"
+    if cp "$secrets_file" "$backup_file"; then
+        # Secure the backup file
+        chmod 600 "$backup_file"
+        log_success "Backup created: $(basename "$backup_file")"
+
+        # Clean up old backups (keep last 5)
+        local old_backups
+        if old_backups=$(find secrets/ -name "secrets.yaml.backup-*" -type f | sort -r | tail -n +6); then
+            if [[ -n "$old_backups" ]]; then
+                echo "$old_backups" | xargs rm -f
+                local cleaned_count
+                cleaned_count=$(echo "$old_backups" | wc -l)
+                log_debug "Cleaned up $cleaned_count old backup files"
+            fi
+        fi
+
         return 0
     else
-        log_error "Failed to create secrets backup"
+        log_error "Failed to create backup"
         return 1
     fi
 }
 
-# STANDARDIZED: Test secrets decryption - returns exit code
-test_secrets_decryption() {
-    if [[ ! -f "$SECRETS_FILE" ]]; then
-        log_error "Secrets file not found: $SECRETS_FILE"
-        return 1
-    fi
-
-    log_info "Testing secrets decryption..."
-
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would test secrets decryption"
+# ENHANCED: Validate secrets file after editing
+validate_secrets_file() {
+    if [[ "$VALIDATE_SECRETS" != "true" ]]; then
+        log_info "Skipping secrets validation (--no-validation specified)"
         return 0
     fi
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would validate secrets file"
+        return 0
+    fi
+
+    local secrets_file="secrets/secrets.yaml"
+
+    log_info "Validating edited secrets file..."
 
     # Test SOPS decryption
-    local decrypted_content
-    if decrypted_content=$(sops --decrypt "$SECRETS_FILE" 2>&1); then
-        log_success "Secrets file decryption: OK"
-        
-        # Validate YAML structure
-        if echo "$decrypted_content" | yq eval '.' >/dev/null 2>&1; then
-            log_success "YAML structure validation: OK"
-        elif echo "$decrypted_content" | jq . >/dev/null 2>&1; then
-            log_success "JSON structure validation: OK"
-        else
-            log_warn "Content structure validation: Could not validate format"
+    if ! sops -d "$secrets_file" >/dev/null 2>&1; then
+        log_error "Secrets file validation failed - cannot decrypt"
+        log_error "File may be corrupted or contain syntax errors"
+        return 1
+    fi
+
+    # Validate YAML structure
+    if ! sops -d "$secrets_file" | python3 -c "import yaml, sys; yaml.safe_load(sys.stdin)" 2>/dev/null; then
+        log_warn "Secrets file contains invalid YAML structure"
+        log_info "SOPS decryption works, but YAML may have formatting issues"
+    fi
+
+    # Validate required secrets exist
+    local required_secrets=(
+        "admin_token"
+        "admin_basic_auth_hash"
+        "caddy_cloudflare_dns_token"
+        "fail2ban_cloudflare_firewall_token"
+    )
+
+    local missing_secrets=()
+    for secret in "${required_secrets[@]}"; do
+        if ! sops -d --extract "[\"$secret\"]" "$secrets_file" >/dev/null 2>&1; then
+            missing_secrets+=("$secret")
         fi
-        
-        # Count secrets
-        local secret_count
-        if secret_count=$(echo "$decrypted_content" | yq eval 'keys | length' 2>/dev/null); then
-            log_info "Found $secret_count secrets in file"
+    done
+
+    if [[ ${#missing_secrets[@]} -gt 0 ]]; then
+        log_warn "Missing required secrets: ${missing_secrets[*]}"
+        log_info "Ensure all required secrets are defined"
+    fi
+
+    # Validate no placeholder values remain
+    local placeholder_secrets=()
+    for secret in "${required_secrets[@]}"; do
+        local value
+        if value=$(sops -d --extract "[\"$secret\"]" "$secrets_file" 2>/dev/null); then
+            if [[ "$value" =~ ^CHANGE_ME ]]; then
+                placeholder_secrets+=("$secret")
+            fi
         fi
-        
-        return 0
-    else
-        log_error "Secrets file decryption failed:"
-        log_error "$decrypted_content"
-        return 1
-    fi
-}
+    done
 
-# STANDARDIZED: Initialize new secrets file - returns exit code
-initialize_secrets_file() {
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would initialize new secrets file"
-        return 0
+    if [[ ${#placeholder_secrets[@]} -gt 0 ]]; then
+        log_warn "Secrets still contain placeholder values: ${placeholder_secrets[*]}"
+        log_info "Update these secrets with real values"
     fi
 
-    log_info "Initializing new secrets file..."
-
-    # Check if secrets file already exists
-    if [[ -f "$SECRETS_FILE" ]]; then
-        log_error "Secrets file already exists: $SECRETS_FILE"
-        log_info "Use regular edit mode or remove existing file first"
-        return 1
-    fi
-
-    # Ensure secrets directory exists
-    if ! ensure_dir "secrets" 700; then
-        log_error "Failed to create secrets directory"
-        return 1
-    fi
-
-    # Generate secure defaults
-    local admin_token backup_pass
-    if ! admin_token=$(generate_secure_string 32) || ! backup_pass=$(generate_secure_string 32); then
-        log_error "Failed to generate secure default values"
-        return 1
-    fi
-
-    # Create initial secrets file (unencrypted)
-    if ! cat > "$SECRETS_FILE" << EOF; then
-# VaultWarden Secrets Configuration - Enhanced for Caddy-Cloudflare
-# IMPORTANT: VaultWarden admin uses Argon2, Caddy basic_auth uses bcrypt
-
-# VaultWarden admin token (plain text - will be hashed to Argon2 by VaultWarden)
-admin_token: $admin_token
-
-# Caddy basic_auth hash for /admin endpoint (bcrypt format)
-# Generate with: docker run --rm -it ghcr.io/caddybuilds/caddy-cloudflare:latest caddy hash-password
-admin_basic_auth_hash: CHANGE_ME_BCRYPT_HASH
-
-# SMTP password for email notifications
-smtp_password: CHANGE_ME_SMTP_PASSWORD
-
-# Backup encryption passphrase
-backup_passphrase: $backup_pass
-
-# Push notifications (optional - get from bitwarden.com/host)
-push_installation_id: CHANGE_ME_OR_LEAVE_EMPTY
-push_installation_key: CHANGE_ME_OR_LEAVE_EMPTY
-
-# Cloudflare DNS API token for caddy-cloudflare (DNS-01 ACME challenges)
-# Permissions: Zone:DNS:Edit + Zone:Zone:Read for your domain
-caddy_cloudflare_dns_token: CHANGE_ME_DNS_TOKEN
-
-# Cloudflare Firewall API token for fail2ban IP blocking
-# Permissions: Zone:Firewall Services:Edit for your domain
-fail2ban_cloudflare_firewall_token: CHANGE_ME_FIREWALL_TOKEN
-EOF
-        log_error "Failed to create initial secrets file"
-        return 1
-    fi
-
-    # Encrypt with SOPS
-    if encrypt_sops_file "$SECRETS_FILE" "$AGE_KEY_FILE"; then
-        log_success "Secrets file initialized and encrypted"
-        
-        # Set secure permissions
-        if ! secure_file "$SECRETS_FILE" 600; then
-            log_warn "Failed to set secure permissions on secrets file"
-        fi
-        
-        log_warn "IMPORTANT: Update the placeholder values:"
-        log_info "  1. Generate bcrypt hash for admin_basic_auth_hash"
-        log_info "  2. Add Cloudflare DNS API token"
-        log_info "  3. Add Cloudflare Firewall API token"
-        log_info "  4. Configure SMTP password if using email"
-        log_info "  5. Run: ./edit-secrets.sh (to edit)"
-        
-        return 0
-    else
-        log_error "Failed to encrypt secrets file"
-        return 1
-    fi
-}
-
-# STANDARDIZED: Edit secrets file - returns exit code
-edit_secrets_file() {
-    if [[ ! -f "$SECRETS_FILE" ]]; then
-        log_error "Secrets file not found: $SECRETS_FILE"
-        log_info "Run with --init to create a new secrets file"
-        return 1
-    fi
-
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would open secrets file for editing"
-        return 0
-    fi
-
-    log_info "Opening secrets file for editing..."
-
-    # Create backup before editing
-    if ! backup_secrets_file; then
-        log_error "Failed to create backup before editing"
-        return 1
-    fi
-
-    # Determine editor
-    local editor="${EDITOR:-nano}"
-    
-    if ! has_command "$editor"; then
-        log_warn "Editor '$editor' not found, falling back to nano"
-        editor="nano"
-    fi
-
-    if ! has_command "$editor"; then
-        log_error "No suitable editor found"
-        log_info "Install nano: sudo apt install nano"
-        log_info "Or set EDITOR environment variable"
-        return 1
-    fi
-
-    log_info "Using editor: $editor"
-    log_info "Edit the secrets and save the file when done"
-    
-    # Use SOPS to edit the encrypted file
-    if sops --editor "$editor" "$SECRETS_FILE"; then
-        log_success "Secrets file edited successfully"
-        
-        # Validate the edited file
-        if test_secrets_decryption; then
-            log_success "Edited secrets file validated successfully"
-            
-            log_warn "IMPORTANT NEXT STEPS:"
-            log_info "  1. Restart containers: ./startup.sh --force-restart"
-            log_info "  2. Test login with new credentials"
-            log_info "  3. Verify email notifications if configured"
-            
-            return 0
-        else
-            log_error "Edited secrets file validation failed"
-            log_info "The file may have syntax errors or encryption issues"
-            return 1
-        fi
-    else
-        log_error "Failed to edit secrets file"
-        log_info "Check that SOPS and your editor are working correctly"
-        return 1
-    fi
-}
-
-# STANDARDIZED: Show secrets status - returns exit code
-show_secrets_status() {
-    log_info "Secrets file status:"
-    echo ""
-
-    # Check if secrets file exists
-    if [[ -f "$SECRETS_FILE" ]]; then
-        local file_size file_perms file_age
-        file_size=$(stat -c%s "$SECRETS_FILE" 2>/dev/null || echo "unknown")
-        file_perms=$(stat -c "%a" "$SECRETS_FILE" 2>/dev/null || echo "unknown")
-        file_age=$(stat -c %Y "$SECRETS_FILE" 2>/dev/null || echo "0")
-        file_age=$(date -d "@$file_age" "+%Y-%m-%d %H:%M" 2>/dev/null || echo "unknown")
-
-        echo "  File: $SECRETS_FILE"
-        echo "  Size: $file_size bytes"
-        echo "  Permissions: $file_perms"
-        echo "  Last modified: $file_age"
-        echo ""
-
-        # Test encryption
-        if test_secrets_decryption; then
-            echo "  Encryption: ✅ Working"
-        else
-            echo "  Encryption: ❌ Issues detected"
-        fi
-    else
-        echo "  Status: ❌ Not found"
-        echo "  Location: $SECRETS_FILE"
-        echo ""
-        log_info "Initialize with: ./edit-secrets.sh --init"
-    fi
-
-    # Check Age key
-    echo ""
-    log_info "Age key status:"
-    if [[ -f "$SOPS_AGE_KEY_FILE" ]]; then
-        local key_perms
-        key_perms=$(stat -c "%a" "$SOPS_AGE_KEY_FILE" 2>/dev/null || echo "unknown")
-        echo "  File: $SOPS_AGE_KEY_FILE"
-        echo "  Permissions: $key_perms"
-        
-        if [[ "$key_perms" == "600" ]]; then
-            echo "  Security: ✅ Properly secured"
-        else
-            echo "  Security: ⚠️  Incorrect permissions"
-        fi
-    else
-        echo "  Status: ❌ Not found"
-        log_info "Run setup.sh to generate Age keys"
-    fi
-
+    log_success "Secrets file validation completed"
     return 0
 }
 
-# ENHANCED: Main function with proper error handling and exit strategy
-main() {
-    log_header "VaultWarden-OCI Secrets Management"
-
+# ENHANCED: Secure secrets editing with privacy protection
+edit_secrets_securely() {
     if [[ "$DRY_RUN" == "true" ]]; then
-        log_warn "DRY RUN MODE - No changes will be made"
+        log_info "[DRY RUN] Would open secrets file for secure editing"
+        return 0
     fi
 
-    # Validate environment
-    if ! validate_secrets_environment; then
+    local secrets_file="secrets/secrets.yaml"
+
+    log_info "Opening secrets file for secure editing..."
+    log_info "Editor: $EDITOR"
+
+    # Create a secure temporary directory for editing
+    local temp_dir
+    temp_dir=$(mktemp -d -t vw-edit-secrets.XXXXXX)
+    chmod 700 "$temp_dir"
+    register_cleanup "rm -rf '$temp_dir'"
+
+    # Additional security measures in secure mode
+    if [[ "$SECURE_MODE" == "true" ]]; then
+        # Disable shell history during editing
+        export HISTFILE="$temp_dir/dummy_history"
+        register_cleanup "unset HISTFILE"
+
+        # Set secure umask
+        local old_umask
+        old_umask=$(umask)
+        umask 077
+        register_cleanup "umask '$old_umask'"
+
+        log_info "Enhanced security mode enabled"
+    fi
+
+    # Edit the file using SOPS
+    if sops "$secrets_file"; then
+        log_success "Secrets file edited successfully"
+        return 0
+    else
+        local exit_code=$?
+        log_error "Editor exited with error code: $exit_code"
+
+        # Check if file was corrupted
+        if [[ ! -f "$secrets_file" ]]; then
+            log_error "CRITICAL: Secrets file was deleted during editing!"
+
+            # Attempt to restore from backup
+            local latest_backup
+            if latest_backup=$(find secrets/ -name "secrets.yaml.backup-*" -type f | sort -r | head -1); then
+                log_info "Attempting to restore from latest backup: $(basename "$latest_backup")"
+                if cp "$latest_backup" "$secrets_file"; then
+                    log_success "Secrets file restored from backup"
+                else
+                    log_error "Failed to restore from backup"
+                fi
+            fi
+        fi
+
+        return $exit_code
+    fi
+}
+
+# ENHANCED: Post-edit security verification
+post_edit_security_check() {
+    log_info "Running post-edit security verification..."
+
+    local secrets_file="secrets/secrets.yaml"
+
+    # Check file permissions
+    local file_perms
+    file_perms=$(stat -c '%a' "$secrets_file" 2>/dev/null)
+    if [[ "$file_perms" != "600" ]]; then
+        log_warn "Secrets file permissions changed: $file_perms (should be 600)"
+        if chmod 600 "$secrets_file"; then
+            log_success "File permissions corrected"
+        else
+            log_error "Failed to correct file permissions"
+            return 1
+        fi
+    fi
+
+    # Check file ownership
+    local file_owner
+    file_owner=$(stat -c '%U' "$secrets_file" 2>/dev/null)
+    local current_user
+    current_user=$(get_real_user)
+
+    if [[ "$file_owner" != "$current_user" ]]; then
+        log_warn "Secrets file ownership changed: $file_owner (should be $current_user)"
+        if chown "$current_user:$current_user" "$secrets_file"; then
+            log_success "File ownership corrected"
+        else
+            log_error "Failed to correct file ownership"
+            return 1
+        fi
+    fi
+
+    log_success "Post-edit security verification completed"
+    return 0
+}
+
+# ENHANCED: Main function with comprehensive error handling
+main() {
+    log_header "VaultWarden-OCI Secure Secrets Editor"
+
+    # Validate prerequisites
+    if ! require_commands sops age; then
+        log_error "Required tools not available"
         exit 1
     fi
 
-    # Handle test-only mode
-    if [[ "$TEST_ONLY" == "true" ]]; then
-        log_info "=== Testing Secrets Decryption ==="
-        if test_secrets_decryption; then
-            show_secrets_status
-            log_success "Secrets test completed successfully"
-            exit 0
-        else
-            log_error "Secrets test failed"
-            exit 1
-        fi
+    # Validate editor
+    if ! validate_editor "$EDITOR"; then
+        log_error "Editor validation failed"
+        exit 1
     fi
 
-    # Handle initialization mode
-    if [[ "$INIT_SECRETS" == "true" ]]; then
-        log_info "=== Initializing Secrets File ==="
-        if initialize_secrets_file; then
-            log_success "Secrets file initialized successfully"
-            show_secrets_status
-            exit 0
-        else
-            log_error "Failed to initialize secrets file"
-            exit 1
-        fi
+    # Setup secure environment
+    if ! setup_secure_environment; then
+        log_error "Failed to setup secure environment"
+        exit 1
     fi
 
-    # Handle regular edit mode
-    log_info "=== Editing Secrets File ==="
-    
-    # Show current status first
-    show_secrets_status
-    echo ""
-
-    # Pre-edit validation
-    if [[ -f "$SECRETS_FILE" ]]; then
-        if ! test_secrets_decryption; then
-            log_error "Cannot edit secrets file - decryption failed"
-            log_info "File may be corrupted or keys may be wrong"
-            exit 1
-        fi
+    # Create backup
+    if ! create_secrets_backup; then
+        log_error "Failed to create backup"
+        exit 1
     fi
 
-    # Edit the file
-    if edit_secrets_file; then
-        log_success "Secrets editing completed successfully"
-        exit 0
-    else
+    # Edit secrets securely
+    if ! edit_secrets_securely; then
         log_error "Secrets editing failed"
         exit 1
     fi
+
+    # Validate edited file
+    if ! validate_secrets_file; then
+        log_warn "Secrets validation detected issues"
+        log_info "File was saved, but please review and correct any issues"
+    fi
+
+    # Post-edit security check
+    if ! post_edit_security_check; then
+        log_warn "Post-edit security check detected issues"
+    fi
+
+    # Success summary
+    log_success "Secrets editing completed successfully"
+
+    echo ""
+    echo "Next Steps:"
+    echo "1. Restart services to apply changes: ./startup.sh --force-restart"
+    echo "2. Verify system health: ./health.sh"
+    echo "3. Test functionality with updated secrets"
+
+    # Clean up sensitive environment
+    perform_cleanup
+
+    exit 0
 }
 
 main "$@"

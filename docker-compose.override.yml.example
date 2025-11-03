@@ -1,85 +1,202 @@
-# VaultWarden-OCI - Development/Testing Overrides
-# Override configuration for development, testing, or optional services
+# VaultWarden-OCI - Docker Compose Override for Email Decoupling
+# ENHANCED: Decoupled email system using dedicated SSMTP container
+# ENHANCED: Eliminates host mail system dependencies for better portability
 
-version: '3.8'
+# This override file provides an alternative email configuration that:
+# 1. Removes host mail system dependencies from Fail2Ban
+# 2. Uses a dedicated SSMTP container for email notifications
+# 3. Improves portability and reduces host coupling
+# 4. Maintains timezone consistency
+
+# USAGE:
+# 1. Copy this file to docker-compose.override.yml
+# 2. Configure SMTP settings in your .env file
+# 3. Update secrets with SMTP credentials
+# 4. Restart stack: docker compose up -d
 
 services:
-  # Development overrides
-  vaultwarden:
+  # ENHANCED: Dedicated SSMTP container for decoupled email
+  ssmtp:
+    container_name: vaultwarden_ssmtp
+    image: alpine:3.19
+    restart: unless-stopped
     environment:
-      # Enable more verbose logging for development
-      LOG_LEVEL: debug
-      EXTENDED_LOGGING: true
-      # Allow signups for testing
-      SIGNUPS_ALLOWED: true
-      # Disable some restrictions for testing
-      PASSWORD_HINTS_ALLOWED: true
-      SHOW_PASSWORD_HINT: true
-    # Mount source for development
-    # volumes:
-    #   - ./dev-data:/data
+      TZ: ${TZ:-UTC}
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USERNAME}
+      SMTP_FROM_ADDRESS: ${SMTP_FROM}
+      SMTP_FROM_NAME: ${SMTP_FROM_NAME:-VaultWarden-Notifications}
+      SMTP_SECURITY: ${SMTP_SECURITY:-starttls}
+    secrets:
+      - smtp_password
+    volumes:
+      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/ssmtp:/var/log/ssmtp
+    command: >
+      sh -c '
+        # Install ssmtp and required packages
+        apk add --no-cache ssmtp mailx tzdata ca-certificates &&
 
-  caddy:
-    environment:
-      # Enable Caddy admin for development
-      CADDY_ADMIN: "localhost:2019"
-    # Expose admin port for development
-    # ports:
-    #   - "2019:2019"
+        # Configure ssmtp
+        cat > /etc/ssmtp/ssmtp.conf <<EOF
+        root=$$SMTP_FROM_ADDRESS
+        mailhub=$$SMTP_HOST:$$SMTP_PORT
+        hostname=$$SMTP_FROM_ADDRESS
+        AuthUser=$$SMTP_USER
+        AuthPass=$$(cat /run/secrets/smtp_password)
+        FromLineOverride=YES
+        UseSTARTTLS=YES
+        UseTLS=NO
+        Debug=YES
+        EOF
 
+        # Secure the configuration
+        chmod 640 /etc/ssmtp/ssmtp.conf &&
+        chown root:mail /etc/ssmtp/ssmtp.conf &&
+
+        # Configure aliases
+        echo "root:$$SMTP_FROM_ADDRESS" > /etc/ssmtp/revaliases &&
+        echo "fail2ban:$$SMTP_FROM_ADDRESS" >> /etc/ssmtp/revaliases &&
+
+        # Create log directory
+        mkdir -p /var/log/ssmtp &&
+
+        # Test configuration
+        echo "SSMTP container ready - configuration test:" > /var/log/ssmtp/startup.log &&
+        echo "Host: $$SMTP_HOST:$$SMTP_PORT" >> /var/log/ssmtp/startup.log &&
+        echo "User: $$SMTP_USER" >> /var/log/ssmtp/startup.log &&
+        echo "From: $$SMTP_FROM_ADDRESS" >> /var/log/ssmtp/startup.log &&
+
+        # Keep container running
+        while true; do
+          sleep 300
+          echo "$(date): SSMTP service alive" >> /var/log/ssmtp/keepalive.log
+        done
+      '
+    networks:
+      - vaultwarden
+    healthcheck:
+      test: ["CMD", "sh", "-c", "ps aux | grep -v grep | grep ssmtp || exit 1"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          memory: 64M      # Minimal resources for SSMTP
+          cpus: '0.05'     # 5% of single CPU
+        reservations:
+          memory: 16M      # Minimum memory
+          cpus: '0.01'     # 1% of single CPU minimum
+
+  # ENHANCED: Fail2Ban with decoupled email via SSMTP container
   fail2ban:
     environment:
-      # More verbose logging for development
-      F2B_LOG_LEVEL: DEBUG
-      # Shorter ban times for testing
-      F2B_BANTIME: 300
+      # Override email configuration to use SSMTP container
+      F2B_ACTION: "%(action_)s"  # Use default action without mailing
+    volumes:
+      # REMOVED: Host mail system dependencies
+      # - /usr/sbin/sendmail:/usr/sbin/sendmail:ro
+      # - /etc/mailname:/etc/mailname:ro  
+      # - /etc/passwd:/etc/passwd:ro
+      # - /etc/group:/etc/group:ro
 
-  # Optional: Add development/testing services
-  # Uncomment and modify as needed
+      # ENHANCED: Custom action for SSMTP integration
+      - ${PWD}/fail2ban/action.d/ssmtp-notification.conf:/data/fail2ban/action.d/ssmtp-notification.conf:ro
+    depends_on:
+      - vaultwarden
+      - caddy
+      - ssmtp  # Add dependency on SSMTP container
+    command: >
+      sh -c '
+        # Wait for SSMTP container to be ready
+        until nc -z ssmtp 25 2>/dev/null; do
+          echo "Waiting for SSMTP container..."
+          sleep 5
+        done
 
-  # watchtower:
-  #   container_name: vaultwarden_watchtower
-  #   image: containrrr/watchtower:latest
-  #   restart: unless-stopped
-  #   environment:
-  #     TZ: ${TZ:-UTC}
-  #     WATCHTOWER_CLEANUP: "true"
-  #     WATCHTOWER_POLL_INTERVAL: 3600
-  #     WATCHTOWER_NOTIFICATIONS: email
-  #     WATCHTOWER_NOTIFICATION_EMAIL_FROM: watchtower@${DOMAIN}
-  #     WATCHTOWER_NOTIFICATION_EMAIL_TO: ${ADMIN_EMAIL}
-  #   volumes:
-  #     - /var/run/docker.sock:/var/run/docker.sock
-  #   networks:
-  #     - vaultwarden
+        # Start fail2ban with custom configuration
+        exec /init
+      '
 
-  # backup:
-  #   container_name: vaultwarden_backup
-  #   image: alpine:latest
-  #   restart: "no"
-  #   environment:
-  #     TZ: ${TZ:-UTC}
-  #     BACKUP_SCHEDULE: "0 2 * * *"
-  #   volumes:
-  #     - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data:/backup/data:ro
-  #     - ${PWD}/backups:/backup/output
-  #   networks:
-  #     - vaultwarden
-  #   command: |
-  #     sh -c "
-  #       apk add --no-cache dcron sqlite &&
-  #       echo 'Backup service ready' &&
-  #       tail -f /dev/null
-  #     "
+  # ENHANCED: VaultWarden with SSMTP integration
+  vaultwarden:
+    environment:
+      # Configure VaultWarden to use SSMTP container
+      SMTP_HOST: ssmtp
+      SMTP_PORT: 25
+      SMTP_SECURITY: off  # Internal communication, no encryption needed
+      SMTP_FROM: ${SMTP_FROM}
+      SMTP_FROM_NAME: ${SMTP_FROM_NAME:-VaultWarden}
+      # Remove SMTP auth since SSMTP handles it
+      SMTP_USERNAME: ""
+    depends_on:
+      - caddy
+      - ssmtp  # Add dependency on SSMTP container
 
-# Development networks (if needed)
-# networks:
-#   development:
-#     name: vaultwarden_dev
-#     driver: bridge
-
-# Development volumes (if needed)
-# volumes:
-#   dev_data:
-#     name: vaultwarden_dev_data
-#     driver: local
+# ENHANCED FEATURES:
+#
+# 1. EMAIL DECOUPLING:
+#    - Dedicated SSMTP container handles all email
+#    - No host mail system dependencies
+#    - Portable across different host configurations
+#    - Consistent email behavior regardless of host setup
+#
+# 2. IMPROVED SECURITY:
+#    - SMTP credentials isolated in container
+#    - No host system access required
+#    - Minimal attack surface for email component
+#    - Proper secret management for SMTP password
+#
+# 3. BETTER MAINTAINABILITY:
+#    - Clear separation of concerns
+#    - Email configuration in one place
+#    - Easy to troubleshoot email issues
+#    - Consistent logging for email operations
+#
+# 4. RESOURCE EFFICIENCY:
+#    - Minimal resource usage (64MB limit)
+#    - Shared across all services needing email
+#    - Better than multiple SMTP configurations
+#
+# CONFIGURATION STEPS:
+#
+# 1. Environment Variables (.env):
+#    SMTP_HOST=smtp.gmail.com
+#    SMTP_PORT=587
+#    SMTP_USERNAME=your-email@gmail.com
+#    SMTP_FROM=noreply@yourdomain.com
+#    SMTP_FROM_NAME=VaultWarden-Notifications
+#    SMTP_SECURITY=starttls
+#
+# 2. Secrets (edit-secrets.sh):
+#    smtp_password: your-smtp-password
+#
+# 3. Custom Fail2Ban Action:
+#    Create fail2ban/action.d/ssmtp-notification.conf
+#    Configure to use docker exec to send via SSMTP container
+#
+# 4. Activation:
+#    cp docker-compose.override.yml.example docker-compose.override.yml
+#    docker compose up -d
+#
+# MIGRATION FROM HOST MAIL:
+#
+# If currently using host mail system:
+# 1. Test SSMTP configuration first
+# 2. Verify email delivery works
+# 3. Update Fail2Ban actions to use SSMTP
+# 4. Remove host mail dependencies
+# 5. Restart stack
+#
+# TROUBLESHOOTING:
+#
+# - Check SSMTP logs: docker compose logs ssmtp
+# - Test email: docker compose exec ssmtp mail -s "Test" admin@domain.com < /dev/null
+# - Verify connectivity: docker compose exec fail2ban nc -zv ssmtp 25
+# - Debug SMTP: Check /var/log/ssmtp/ in SSMTP container
