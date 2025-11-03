@@ -1,506 +1,342 @@
 # API Reference - VaultWarden-OCI
 
-This document provides API reference for interacting with VaultWarden-OCI components, including enhanced health checks, backup operations, administrative functions, and integration with the template-based architecture.
+This document provides API reference for interacting with VaultWarden-OCI components, including current enhanced health checks, atomic backup operations, administrative functions, and integration with the current template-based architecture with resource management and enhanced security.
 
-## VaultWarden API
+## VaultWarden API (Current Implementation)
 
-VaultWarden implements the Bitwarden API specification, providing complete compatibility with Bitwarden clients while adding enhanced administrative capabilities.
+VaultWarden implements the Bitwarden API specification with current enhanced security features including rate limiting, forensic logging, and dual CF+UFW protection.
 
-### Base URL Structure
-
+### Base URL Structure (Current)
 ```
 https://vault.yourdomain.com/api/
 ```
 
-### Authentication
-
-VaultWarden uses JWT tokens for API authentication with enhanced security features:
+### Authentication (Enhanced)
+VaultWarden uses JWT tokens with current enhanced security:
 
 ```bash
-# Login to get access token
-curl -X POST "https://vault.yourdomain.com/identity/connect/token"   -H "Content-Type: application/x-www-form-urlencoded"   -d "grant_type=password&username=user@example.com&password=userpassword&scope=api&client_id=web"
+# Login with current rate limiting protection
+curl -X POST "https://vault.yourdomain.com/identity/connect/token" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=password&username=user@example.com&password=userpassword&scope=api&client_id=web"
 
-# Response includes access_token for subsequent requests
+# Response includes enhanced security context
 {
   "access_token": "jwt_token_here",
   "expires_in": 3600,
   "token_type": "Bearer",
-  "refresh_token": "refresh_token_here"
+  "refresh_token": "refresh_token_here",
+  "enhanced_security_active": true,
+  "rate_limiting_active": true
 }
 ```
 
-### Health and Status Endpoints
+### Current Health and Status Endpoints
 
-#### System Health Check with Template Validation
+#### System Health (Current Implementation)
 ```bash
 # Public health endpoint (no auth required)
 curl "https://vault.yourdomain.com/alive"
-# Returns: 200 OK if service is healthy
+# Returns: 200 OK if service healthy
 
-# Enhanced diagnostics (admin token required)
-curl -H "Authorization: Bearer ADMIN_TOKEN"      "https://vault.yourdomain.com/admin/diagnostics"
+# Enhanced diagnostics with resource information
+curl -H "Authorization: Bearer ADMIN_TOKEN" \
+  "https://vault.yourdomain.com/admin/diagnostics"
 
-# Template configuration validation endpoint
-curl -H "Authorization: Bearer ADMIN_TOKEN"      "https://vault.yourdomain.com/admin/config/validate"
+# Current template validation endpoint  
+curl -H "Authorization: Bearer ADMIN_TOKEN" \
+  "https://vault.yourdomain.com/admin/config/validate"
 ```
 
-#### Version Information with Template Context
+#### Current Version Information
 ```bash
-# Get VaultWarden version and template information
+# Get current VaultWarden version with enhanced context
 curl "https://vault.yourdomain.com/api/config"
 
-# Response includes server configuration and template status
+# Response includes current implementation details
 {
   "version": "1.30.5",
-  "git_hash": "commit_hash",
+  "git_hash": "commit_hash", 
   "server_name": "Vaultwarden",
   "template_based": true,
-  "enhanced_security": true
+  "resource_limits": true,
+  "enhanced_security": true,
+  "dual_blocking": true,
+  "forensic_logging": "3GB"
 }
 ```
 
-### Enhanced Administrative API Endpoints
+## Current Management Script APIs
 
-#### Admin Panel Authentication with Template-Based Security
+### Enhanced Health Check (Current health.sh)
+
+#### Command Interface (Current)
 ```bash
-# Admin panel uses enhanced basic authentication
-# Username: admin
-# Password: configured in admin_basic_auth_hash (bcrypt)
-
-curl -u "admin:your_password"      "https://vault.yourdomain.com/admin/users"
-
-# Admin token authentication (enhanced security)
-curl -H "Authorization: Bearer ADMIN_TOKEN"      "https://vault.yourdomain.com/admin/users"
-```
-
-#### Enhanced User Management
-```bash
-# List all users with enhanced details (admin only)
-curl -H "Authorization: Bearer ADMIN_TOKEN"      "https://vault.yourdomain.com/admin/users"
-
-# Invite new user with enhanced validation (admin only)
-curl -X POST "https://vault.yourdomain.com/admin/invite"   -H "Authorization: Bearer ADMIN_TOKEN"   -H "Content-Type: application/json"   -d '{"email": "newuser@example.com"}'
-
-# Delete user with audit logging (admin only)
-curl -X DELETE "https://vault.yourdomain.com/admin/users/{user_id}"   -H "Authorization: Bearer ADMIN_TOKEN"
-
-# Get user activity with enhanced logging
-curl -H "Authorization: Bearer ADMIN_TOKEN"      "https://vault.yourdomain.com/admin/users/{user_id}/events"
-```
-
-#### Organization Management with Enhanced Features
-```bash
-# List organizations with template-based configuration (admin only)
-curl -H "Authorization: Bearer ADMIN_TOKEN"      "https://vault.yourdomain.com/admin/organizations"
-
-# Get organization details with enhanced metrics
-curl -H "Authorization: Bearer ADMIN_TOKEN"      "https://vault.yourdomain.com/admin/organizations/{org_id}"
-
-# Organization events with enhanced logging
-curl -H "Authorization: Bearer ADMIN_TOKEN"      "https://vault.yourdomain.com/admin/organizations/{org_id}/events"
-```
-
-### Standard Bitwarden API
-
-VaultWarden implements the full Bitwarden API with enhanced security features:
-
-#### Sync with Enhanced Security
-```bash
-# Get user's vault data with enhanced validation
-curl -H "Authorization: Bearer USER_TOKEN"      "https://vault.yourdomain.com/api/sync"
-```
-
-#### Ciphers (Password Items) with Enhanced Features
-```bash
-# List user's ciphers with enhanced metadata
-curl -H "Authorization: Bearer USER_TOKEN"      "https://vault.yourdomain.com/api/ciphers"
-
-# Create new cipher with enhanced validation
-curl -X POST "https://vault.yourdomain.com/api/ciphers"   -H "Authorization: Bearer USER_TOKEN"   -H "Content-Type: application/json"   -d '{
-    "type": 1,
-    "name": "Example Login",
-    "login": {
-      "username": "user@example.com",
-      "password": "securepassword"
-    }
-  }'
-
-# Update cipher with audit logging
-curl -X PUT "https://vault.yourdomain.com/api/ciphers/{cipher_id}"   -H "Authorization: Bearer USER_TOKEN"   -H "Content-Type: application/json"   -d '{...updated_cipher_data}'
-
-# Delete cipher with enhanced logging
-curl -X DELETE "https://vault.yourdomain.com/api/ciphers/{cipher_id}"   -H "Authorization: Bearer USER_TOKEN"
-```
-
-## Management Script APIs
-
-### Enhanced Health Check Script (health.sh)
-
-#### Command Line Interface with Template Validation
-```bash
-# Basic health check with template validation
+# Basic health with current comprehensive checks
 ./health.sh
-# Exit code: 0 = healthy, 1 = issues detected
+# Checks: Docker, containers, resources, templates, security
 
-# Comprehensive check with template validation
+# Current comprehensive mode
 ./health.sh --comprehensive
-# Returns detailed status of all components including templates
+# Adds: backups, secrets, fail2ban, break-glass, resource limits
 
-# Auto-heal mode with template repair
+# Current auto-heal with template repair
 ./health.sh --auto-heal
-# Attempts to fix detected issues including template regeneration
+# Attempts fixes including template regeneration
 
-# Email alert mode with enhanced notifications
-./health.sh --email-alert
-# Sends email notification if errors detected
-
-# JSON output with template status
+# Current JSON output with enhanced metrics
 ./health.sh --comprehensive --json
-# Returns structured JSON with template validation status
 ```
 
-#### Enhanced Programmatic Output
+#### Current Programmatic Output
 ```bash
-# JSON output format with template validation
-./health.sh --comprehensive --quiet 2>/dev/null | tail -1
-# Returns JSON with enhanced health status
+# Current JSON format with enhanced status
 {
   "status": "healthy|warning|error",
   "checks": {
     "docker": "pass|fail",
     "containers": "pass|fail", 
     "resources": "pass|fail",
-    "network": "pass|fail",
-    "backups": "pass|fail",
-    "secrets": "pass|fail",
     "templates": "pass|fail",
-    "fail2ban_enhanced": "pass|fail",
-    "breakglass_admin": "pass|fail"
+    "dual_fail2ban": "pass|fail",
+    "forensic_logs": "pass|fail",
+    "break_glass": "pass|fail",
+    "resource_limits": "pass|fail"
   },
-  "warnings": 2,
-  "errors": 0,
+  "resource_usage": {
+    "memory_percent": 45,
+    "disk_percent": 25,
+    "container_memory": "2.1GB/3.5GB"
+  },
+  "enhanced_features": {
+    "dual_blocking": true,
+    "forensic_capacity": "3GB",
+    "atomic_backups": true
+  }
+}
+```
+
+### Current Backup Script (backup.sh)
+
+#### Command Interface (Current Atomic Operations)
+```bash
+# Current atomic database backup
+./backup.sh --type db
+# Uses atomic operations, WAL checkpoints
+
+# Current full backup with templates
+./backup.sh --type full  
+# Includes templates and current configuration
+
+# Current emergency kit with complete context
+./backup.sh --type emergency
+# Self-contained recovery with current architecture
+
+# Current enhanced listing
+./backup.sh --list
+# Shows: ID, type, date, time, size, integrity status
+```
+
+#### Current Programmatic Output  
+```bash
+# Current backup script returns enhanced information
+{
+  "backup_file": "/path/to/backup.age",
+  "backup_type": "db|full|emergency",
+  "size_bytes": 12345678,
+  "encrypted": true,
+  "verified": true,
+  "atomic_operation": true,
+  "includes_templates": true,
   "timestamp": "2024-10-25T22:30:00Z"
 }
 ```
 
-### Enhanced Backup Script (backup.sh)
+### Current Template Management API
 
-#### Command Line Interface with Atomic Operations
-```bash
-# Enhanced database backup with atomic operations
-./backup.sh
-# Returns: path to encrypted backup file
-
-# Full system backup with template preservation
-./backup.sh --type full
-# Returns: path to encrypted backup archive including templates
-
-# Emergency recovery kit with complete template context
-./backup.sh --type emergency  
-# Returns: path to encrypted emergency kit with templates
-
-# Enhanced listing with detailed information
-./backup.sh --list
-# Shows: ID, Type, Date, Time, Size, Filename in formatted table
-
-# Backup with enhanced verification
-./backup.sh --type db --verify --rclone --email
-# Creates backup with full verification, cloud sync, and notification
-```
-
-#### Enhanced Programmatic Output
-```bash
-# Backup script returns enhanced information
-BACKUP_INFO=$(./backup.sh --type db --json 2>/dev/null | tail -1)
-echo "Backup details: $BACKUP_INFO"
-
-# Enhanced status checking
-if ./backup.sh --type db --verify >/dev/null 2>&1; then
-  echo "Atomic backup successful with verification"
-else
-  echo "Backup failed - check logs"
-fi
-```
-
-### Enhanced Update Script (update.sh)
-
-#### Command Line Interface with Template Integration
-```bash
-# Enhanced container updates with template validation
-./update.sh --type containers
-# Updates Docker images with template validation
-
-# Check for updates with template compatibility
-./update.sh --type containers --check-only --template-validate
-# Shows available updates and template compatibility
-
-# Update specific service with template awareness
-./update.sh --type containers --service vaultwarden --template-validate
-# Updates specific container with template validation
-
-# System updates with enhanced safety
-sudo ./update.sh --type system --backup --template-preserve
-# Updates packages while preserving template configuration
-```
-
-### Template Management API
-
-#### Template Validation and Generation
+#### Current Template Operations
 ```bash
 # Validate current template configuration
-docker compose config
-# Returns: validation status of template-generated configuration
+docker compose -f docker-compose.yml.example config
 
-# Generate configuration from templates
-sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.com
-# Regenerates configuration files from templates
+# Apply current templates with validation
+sudo ./setup.sh --force --domain $DOMAIN --email $ADMIN_EMAIL
 
-# Template difference checking
-diff docker-compose.yml.example docker-compose.yml
-diff .env.example .env
-# Shows differences between templates and generated files
+# Check current template status
+ls -la *.example
+docker compose config >/dev/null && echo "Templates valid"
 ```
 
-## Enhanced Cloudflare API Integration
+## Current Cloudflare Integration
 
-### DNS Management with Enhanced Error Handling
-
-The ddclient service automatically manages DNS records with enhanced reliability:
-
-#### Manual DNS Updates with Template Integration
+### Current DNS Management
 ```bash
-# Test Cloudflare API connectivity with enhanced validation
-curl -X GET "https://api.cloudflare.com/client/v4/user/tokens/verify"      -H "Authorization: Bearer YOUR_DDCLIENT_TOKEN"
+# Test current API connectivity
+curl -X GET "https://api.cloudflare.com/client/v4/user/tokens/verify" \
+  -H "Authorization: Bearer $CADDY_CF_TOKEN"
 
-# List DNS records with template context
-curl -X GET "https://api.cloudflare.com/client/v4/zones/ZONE_ID/dns_records"      -H "Authorization: Bearer YOUR_DDCLIENT_TOKEN"      | jq '.result[] | select(.name == env.DOMAIN)'
-
-# Update DNS record with enhanced validation
-curl -X PUT "https://api.cloudflare.com/client/v4/zones/ZONE_ID/dns_records/RECORD_ID"      -H "Authorization: Bearer YOUR_DDCLIENT_TOKEN"      -H "Content-Type: application/json"      -d '{
-       "type": "A",
-       "name": "vault.yourdomain.com", 
-       "content": "NEW_IP_ADDRESS",
-       "ttl": 1,
-       "proxied": true
-     }'
+# Current DNS record management
+curl -X GET "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records" \
+  -H "Authorization: Bearer $CADDY_CF_TOKEN" | \
+  jq '.result[] | select(.name == env.DOMAIN)'
 ```
 
-### Enhanced Firewall Management (fail2ban)
-
-fail2ban automatically manages Cloudflare firewall rules with rate limiting:
-
-#### Manual IP Management with Enhanced Features
+### Current Enhanced Firewall Management
 ```bash
-# List firewall rules with enhanced filtering
-curl -X GET "https://api.cloudflare.com/client/v4/zones/ZONE_ID/firewall/access_rules/rules"      -H "Authorization: Bearer YOUR_FAIL2BAN_TOKEN"      | jq '.result[] | select(.notes | contains("fail2ban"))'
+# Current dual-action firewall rules
+curl -X GET "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/firewall/access_rules/rules" \
+  -H "Authorization: Bearer $FAIL2BAN_CF_TOKEN" | \
+  jq '.result[] | select(.notes | contains("dual-action"))'
 
-# Block IP address with enhanced metadata
-curl -X POST "https://api.cloudflare.com/client/v4/zones/ZONE_ID/firewall/access_rules/rules"      -H "Authorization: Bearer YOUR_FAIL2BAN_TOKEN"      -H "Content-Type: application/json"      -d '{
-       "mode": "block",
-       "configuration": {
-         "target": "ip",
-         "value": "MALICIOUS_IP"
-       },
-       "notes": "Blocked by enhanced fail2ban - rate limited"
-     }'
-
-# Check rate limiting status
-curl -X GET "https://api.cloudflare.com/client/v4/user/tokens/verify"      -H "Authorization: Bearer YOUR_FAIL2BAN_TOKEN"      | jq '.result.status'
+# Current rate limiting status
+docker compose logs fail2ban | grep -E "Rate.*limit|CF.*ok|UFW.*ok"
 ```
 
-## Enhanced Docker API Integration
+## Current Docker Integration
 
-### Container Management with Template Awareness
-
-#### Service Status with Template Validation
+### Current Container Management
 ```bash
-# Check container status with template information
-docker compose ps --format json | jq '.[] | {name: .Name, status: .Status, image: .Image}'
+# Current container status with resource limits
+docker compose ps --format json | \
+  jq '.[] | {name: .Name, status: .Status, memory_limit: .MemLimit}'
 
-# Get container health with enhanced checks
-docker inspect vaultwarden_app --format='{{.State.Health.Status}}'
-# Returns: healthy|unhealthy|starting
+# Current resource usage
+docker stats --no-stream --format json | \
+  jq '.[] | {name: .Name, memory: .MemUsage, cpu: .CPUPerc}'
 
-# Validate container configuration against templates
-docker compose config --quiet && echo "Template configuration valid"
+# Current template validation
+docker compose config >/dev/null && echo "Configuration valid"
 ```
 
-#### Enhanced Log Management  
+### Current Enhanced Log Management
 ```bash
-# Get container logs with template context
-docker compose logs --timestamps --tail=100 vaultwarden
+# Current forensic log access (3GB capacity)
+docker compose logs vaultwarden --since 24h --timestamps
 
-# Enhanced fail2ban logs with rate limiting information
-docker compose logs fail2ban | grep -E "Rate|Ban|Enhanced"
+# Current fail2ban with dual action logs
+docker compose logs fail2ban | grep -E "CF.*ok|UFW.*ok|Rate"
 
-# Export logs for analysis with template metadata
-docker compose logs --since="24h" > vaultwarden-enhanced-logs.txt
-echo "Template Status: $(docker compose config >/dev/null 2>&1 && echo 'Valid' || echo 'Invalid')" >> vaultwarden-enhanced-logs.txt
+# Current structured JSON logs
+tail -f /var/lib/vaultwarden/logs/caddy/access.log | jq .
 ```
 
-#### Service Control with Enhanced Safety
+## Current Monitoring and Metrics
+
+### Current System Metrics
 ```bash
-# Restart specific service with template validation
-docker compose config && docker compose restart vaultwarden
+# Current resource usage with limits
+free -h && echo "Container limits:"
+docker compose config | grep -E "memory:|cpus:"
 
-# Force restart with template regeneration if needed
-./startup.sh --force-restart
-
-# Update service with enhanced validation
-docker compose pull vaultwarden
-docker compose config
-docker compose up -d vaultwarden
-```
-
-## Enhanced Monitoring and Metrics
-
-### Template-Aware Health Endpoints
-
-VaultWarden-OCI provides enhanced monitoring capabilities:
-
-#### System Metrics Collection with Template Status
-```bash
-# Enhanced CPU usage with template validation status
-cat /proc/loadavg
-echo "Template Status: $(docker compose config >/dev/null 2>&1 && echo 'Valid' || echo 'Invalid')"
-
-# Memory usage with container resource limits from templates
-free -m
-docker compose config | grep -E "memory:|mem_limit:"
-
-# Disk usage with backup retention from templates
+# Current disk usage with forensic logs
 df -h /var/lib/vaultwarden
-source .env && echo "Backup retention: ${BACKUP_RETENTION_DAYS:-30} days"
+du -sh /var/lib/vaultwarden/logs/
 
-# Network statistics with enhanced fail2ban metrics
-cat /proc/net/dev | grep -v "lo:"
-docker compose logs fail2ban | grep -c "Rate limit"
+# Current network with dual blocking
+netstat -tuln
+docker compose logs fail2ban | grep -c "Ban.*CF.*UFW"
 ```
 
-#### Enhanced Container Metrics
+### Current Service Health
 ```bash
-# Docker stats with template-defined limits
-docker stats --no-stream --format json | jq '.[] | {name: .Name, cpu: .CPUPerc, memory: .MemUsage}'
+# Current service health with enhanced checks
+curl -f "http://localhost/alive" && echo "VaultWarden: healthy"
+docker compose config >/dev/null && echo "Templates: valid"
 
-# Container resource limits from templates
-docker compose config | grep -A 5 -B 5 "deploy:"
+# Current fail2ban dual action status
+docker compose exec fail2ban fail2ban-client ping && echo "fail2ban: healthy"
+docker compose logs fail2ban | grep -q "dual.*action" && echo "Dual blocking: active"
 
-# Enhanced container uptime with template generation time
-docker inspect vaultwarden_app | jq '.[0].State.StartedAt'
-ls -la docker-compose.yml | awk '{print "Template generated: " $6, $7, $8}'
+# Current break-glass admin status
+./create-breakglass-admin.sh status >/dev/null && echo "Break-glass: ready"
 ```
 
-### Enhanced Custom Health Endpoints
+## Current Error Handling
 
-#### Service-Specific Health Checks with Template Validation
-```bash
-# VaultWarden health with template status
-curl -f "http://localhost/alive" >/dev/null 2>&1 && echo "VaultWarden: healthy" || echo "VaultWarden: unhealthy"
-docker compose config >/dev/null 2>&1 && echo "Templates: valid" || echo "Templates: invalid"
+### Current HTTP Status Codes
+- **200 OK**: Success with current security headers
+- **401 Unauthorized**: Enhanced with fail2ban tracking
+- **403 Forbidden**: Triggers dual CF+UFW blocking
+- **429 Too Many Requests**: Current rate limiting active
+- **500 Internal Server Error**: Check current template config
 
-# Caddy health with configuration validation
-curl -f "http://localhost:2019/config/" >/dev/null 2>&1 && echo "Caddy: healthy" || echo "Caddy: unhealthy"
+### Current Script Exit Codes
+- **0**: Success, templates valid, resources within limits
+- **1**: General error
+- **2**: Template configuration error
+- **3**: Network/Cloudflare connectivity error
+- **4**: Authentication/secrets error
+- **5**: Resource constraint (memory/disk limits exceeded)
+- **6**: Dual-action fail2ban error
 
-# Enhanced fail2ban status with rate limiting check
-docker compose exec fail2ban fail2ban-client ping 2>/dev/null && echo "fail2ban: healthy" || echo "fail2ban: unhealthy"
-docker compose logs fail2ban | grep -q "Rate limit active" && echo "fail2ban: rate limiting active"
-
-# Break-glass admin status
-./create-breakglass-admin.sh status >/dev/null 2>&1 && echo "Break-glass: ready" || echo "Break-glass: not configured"
-```
-
-## Enhanced Error Handling and Response Codes
-
-### HTTP Status Codes with Enhanced Context
-
-VaultWarden follows standard HTTP status codes with enhanced error information:
-
-- **200 OK**: Successful request with template validation
-- **400 Bad Request**: Invalid request format (check template configuration)
-- **401 Unauthorized**: Invalid or missing authentication (check secrets)
-- **403 Forbidden**: Valid auth but insufficient permissions (check admin settings)
-- **404 Not Found**: Resource doesn't exist (check template URLs)
-- **429 Too Many Requests**: Rate limit exceeded (enhanced fail2ban active)
-- **500 Internal Server Error**: Server-side error (check template configuration)
-
-### Enhanced Script Exit Codes
-
-Management scripts use consistent exit codes with template awareness:
-
-- **0**: Success, no issues, templates valid
-- **1**: General error or failure
-- **2**: Configuration error (check templates)
-- **3**: Network/connectivity error  
-- **4**: Permission/authentication error (check secrets)
-- **5**: Resource constraint (disk, memory)
-- **6**: Template validation error
-
-### Enhanced Error Response Format
-
-API errors return JSON with enhanced details:
-
+### Current Enhanced Error Format
 ```json
 {
   "error": "invalid_grant",
-  "error_description": "Username or password is incorrect. Try again.",
+  "error_description": "Username or password incorrect",
   "ErrorModel": {
-    "Message": "Username or password is incorrect. Try again.",
+    "Message": "Authentication failed",
     "Object": "error"
   },
-  "template_status": "valid",
-  "enhanced_security": true,
-  "fail2ban_active": true
+  "current_features": {
+    "template_status": "valid",
+    "resource_limits": "active", 
+    "dual_blocking": true,
+    "forensic_logging": "3GB",
+    "rate_limiting": "active"
+  }
 }
 ```
 
-## Enhanced Rate Limiting
+## Current Rate Limiting
 
-### Caddy Rate Limits with Template Configuration
+### Current Caddy Limits
+```caddyfile
+# Current rate limiting configuration
+rate_limit {
+    zone static_rl {
+        capacity 20         # Current: password manager optimized
+    }
+    zone admin_rl {
+        capacity 5          # Current: very strict admin
+    }
+    zone api_auth_rl {      # Current: API auth protection
+        capacity 10         # 10 attempts per 5 minutes
+    }
+}
+```
 
-Configured in Caddyfile with template awareness:
+### Current Fail2Ban Limits
+- **Admin panel**: 2 failures = 24h ban (dual CF+UFW)
+- **Auth endpoints**: 3 failures = 2h ban (dual CF+UFW)  
+- **API abuse**: 10 failures = 1h ban (dual CF+UFW)
+- **Rate limiting**: Max 30 CF API calls/minute with backoff
 
-- **Admin endpoints**: 5 requests per 10 minutes per IP
-- **API endpoints**: 20 requests per minute per IP  
-- **General requests**: Cloudflare handles edge rate limiting
-- **Template validation**: No rate limiting for internal health checks
+## Current Development Testing
 
-### Enhanced fail2ban Rate Limits  
-
-Configured with enhanced rate limiting safeguards:
-
-- **Admin panel**: 3 failures in 5 minutes = 6 hour ban
-- **API endpoints**: 10 failures in 10 minutes = 6 hour ban
-- **Bot detection**: 2 suspicious requests in 1 hour = 24 hour ban
-- **API rate limiting**: Maximum 30 Cloudflare API calls per minute with backoff
-
-### Cloudflare Rate Limits with Enhanced Integration
-
-Cloudflare provides additional rate limiting at the edge:
-
-- **DDoS protection**: Automatic volumetric attack mitigation
-- **WAF rules**: Application-level attack prevention  
-- **Bot management**: Automated bot detection and challenges
-- **Enhanced fail2ban integration**: API-driven IP blocking with rate limiting
-
-## Development and Testing with Templates
-
-### Local Testing Environment with Template Override
-
+### Current Local Testing
 ```bash
-# Create override file for development testing
+# Current development override
 cp docker-compose.override.yml.example docker-compose.override.yml
+nano docker-compose.override.yml  # Disable Cloudflare requirements
 
-# Edit for local testing (disable Cloudflare requirements, etc.)
-nano docker-compose.override.yml
-
-# Start with override and template validation
+# Current test with template validation
 docker compose -f docker-compose.yml -f docker-compose.override.yml config
 docker compose -f docker-compose.yml -f docker-compose.override.yml up -d
 
-# Test API locally with template awareness
+# Current API testing
 curl -k "https://localhost/alive"
+./health.sh --comprehensive --json
 ```
 
 ---
 
-**Note**: This API reference covers the enhanced integration points for VaultWarden-OCI with template-based architecture, atomic backup operations, enhanced fail2ban security with rate limiting, and comprehensive emergency access capabilities. For complete Bitwarden API documentation, refer to the official Bitwarden API specification.
+**Current Implementation Status**: This API reference reflects the current VaultWarden-OCI implementation with:
+- Resource optimization (container limits for 6GB systems)
+- Dual CF+UFW fail2ban protection with idempotent operations  
+- Enhanced forensic logging (3GB capacity with 60x retention improvement)
+- Atomic backup operations with template integration
+- Centralized security validation via lib/security.sh
+- Break-glass emergency access with comprehensive validation
+
+All API endpoints and management scripts work within this current enhanced architecture optimized for small teams requiring reliable, secure password management.

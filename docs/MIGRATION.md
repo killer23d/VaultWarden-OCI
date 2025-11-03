@@ -1,217 +1,294 @@
 # Migration Guide - VaultWarden-OCI
 
-This guide helps you migrate to VaultWarden-OCI's template-based architecture and provides migration paths for different scenarios including version updates, system migrations, and configuration changes.
+This guide helps you migrate to VaultWarden-OCI's current template-based architecture and provides migration paths for different scenarios including version updates, system migrations, and configuration changes with enhanced security features.
 
-## Overview of Template-Based Migration
+## Current Template-Based Migration Overview
 
-The VaultWarden-OCI template-based system provides:
-- **Template-First Configuration**: All settings managed through `.example` files
-- **Consistent Deployments**: Same templates produce identical configurations
-- **Version Control Friendly**: Templates tracked in git, generated files excluded
-- **Easy Updates**: Simple template editing with automatic configuration generation
-- **Rollback Capability**: Easy reversion to previous template states
+The current VaultWarden-OCI system provides:
+- **Resource-Optimized Templates**: Container limits for 6GB systems  
+- **Enhanced Security Integration**: Dual CF+UFW blocking, forensic logging
+- **Atomic Operations**: Backup and restore procedures with integrity
+- **Centralized Security**: lib/security.sh validation functions
+- **Emergency Access**: Break-glass admin with validation
+- **Consistent Deployments**: Same templates, identical configurations
 
-## Migration Types
+## Current Migration Types
 
-### 1. Legacy to Template-Based Migration
+### 1. Legacy to Current Template-Based Migration
 
-If you have an existing VaultWarden-OCI installation without templates:
+Migrating existing installations to current enhanced architecture:
 
-#### Pre-Migration Assessment
+#### Current Pre-Migration Assessment
 ```bash
-# Check if you have templates
+# Check current template availability
 ls -la *.example
 
-# If missing, you need to migrate to template-based system
-# Backup current configuration
-cp docker-compose.yml docker-compose.yml.backup
-cp .env .env.backup
+# Check current container resource usage
+docker stats --no-stream
 
-# Create emergency backup
-./backup.sh --type emergency --rclone
+# Check current security features
+docker compose logs fail2ban | grep -E "CF|UFW|Rate"
+
+# Create comprehensive backup with current atomic operations
+./backup.sh --type emergency --rclone --email
 ```
 
-#### Migration Steps
+#### Current Migration Steps
 ```bash
-# 1. Update repository to latest template-based version
+# 1. Update to current enhanced version
 git pull origin main
 
-# 2. Stop services
+# 2. Stop services safely
 ./startup.sh --down
 
-# 3. Run setup to generate templates from existing configuration
+# 3. Generate current configuration with resource limits
 sudo ./setup.sh --domain $(grep DOMAIN .env | cut -d= -f2) --email $(grep ADMIN_EMAIL .env | cut -d= -f2) --force
 
-# 4. Validate template-generated configuration
+# 4. Validate current template configuration
 docker compose config
 
-# 5. Start services with new template-based configuration
+# 5. Start with current enhanced features
 ./startup.sh
 
-# 6. Verify migration
+# 6. Verify current implementation
 ./health.sh --comprehensive
+docker compose logs fail2ban | grep -E "CF.*ok|UFW.*ok"
 ```
 
-### 2. Server Migration (Same Domain)
+### 2. Current Server Migration (Same Domain)
 
-Moving to a new server while keeping the same domain:
+Moving to new server with current enhanced architecture:
 
-#### Source Server Preparation
+#### Current Source Server Preparation
 ```bash
-# Create comprehensive emergency kit
+# Create current emergency kit with templates
 ./backup.sh --type emergency --rclone --email
 
-# Document current configuration
-docker compose config > migration-config.yml
-./backup.sh --list > migration-backups.txt
+# Document current enhanced configuration
+docker compose config > migration-current-config.yml
+docker stats --no-stream > migration-resources.txt
+./health.sh --comprehensive --json > migration-health.json
 ./create-breakglass-admin.sh status > migration-breakglass.txt
 
-# Stop services on source server (when ready to migrate)
+# Document current security features
+docker compose logs fail2ban | grep -E "Rate|CF|UFW" > migration-security.txt
+
+# Stop services when ready
 ./startup.sh --down
 ```
 
-#### Target Server Setup
+#### Current Target Server Setup
 ```bash
-# 1. Provision new server and install dependencies
+# 1. Provision server for current requirements
 sudo apt update && sudo apt upgrade -y
 
-# 2. Clone repository
+# 2. Clone current enhanced version
 git clone https://github.com/killer23d/VaultWarden-OCI.git
 cd VaultWarden-OCI
 chmod +x *.sh
 
-# 3. Transfer emergency kit to new server
+# 3. Transfer emergency kit with current templates
 scp emergency-kit-YYYYMMDD-HHMMSS.tar.gz.age user@newserver:/tmp/
 
-# 4. Restore from emergency kit (includes templates and configuration)
+# 4. Restore with current enhanced features
 ./restore.sh /tmp/emergency-kit-YYYYMMDD-HHMMSS.tar.gz.age
 
-# 5. Validate template configuration
+# 5. Validate current template configuration
 docker compose config
 
-# 6. Start services
+# 6. Start with current enhanced architecture
 ./startup.sh
 
-# 7. Verify migration
+# 7. Verify current implementation works
 ./health.sh --comprehensive
+docker compose logs fail2ban | grep "dual.*action"
 ```
 
-## Configuration Migration Scenarios
+## Current Configuration Migration Scenarios
 
-### Enhanced Security Migration
+### Enhanced Security Migration (Current Features)
 
-Migrating to enhanced fail2ban and security features:
+Migrating to current dual CF+UFW and forensic logging:
 
 ```bash
-# 1. Update repository to latest version
+# 1. Update to current enhanced version
 git pull origin main
 
-# 2. Create backup
+# 2. Create backup with current atomic operations
 ./backup.sh --type emergency
 
-# 3. Regenerate configuration with enhanced features
+# 3. Generate configuration with current enhancements
 sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.com
 
-# 4. Verify enhanced fail2ban configuration
-docker compose config | grep -A 10 fail2ban
+# 4. Verify current dual-action configuration
+docker compose config | grep -A 20 fail2ban
 
-# 5. Restart with enhanced security
+# 5. Start with current enhanced security
 ./startup.sh --force-restart
 
-# 6. Verify enhanced fail2ban is working
-docker compose logs fail2ban | grep -E "Rate|Enhanced"
+# 6. Verify current dual blocking works
+docker compose logs fail2ban | grep -E "CF.*ok.*UFW.*ok"
+
+# 7. Verify current forensic logging (3GB capacity)
+ls -la /var/lib/vaultwarden/logs/caddy/
+du -sh /var/lib/vaultwarden/logs/
 ```
 
-### Version Migration
+### Current Resource Optimization Migration
 
-Updating to newer versions using template-based management:
+Migrating to current container resource limits:
 
 ```bash
-# 1. Create emergency backup
-./backup.sh --type emergency --rclone
+# 1. Document current resource usage
+docker stats --no-stream > pre-migration-resources.txt
 
-# 2. Update version pins in template
+# 2. Create emergency backup
+./backup.sh --type emergency
+
+# 3. Update .env.example with current resource limits
 nano .env.example
-# Update version variables:
-# VAULTWARDEN_VERSION=1.31.0
-# CADDY_VERSION=2.8.5
+# Verify current limits:
+# VAULTWARDEN_MEMORY_LIMIT=2G
+# CADDY_MEMORY_LIMIT=1G  
+# FAIL2BAN_MEMORY_LIMIT=512M
 
-# 3. Regenerate configuration from updated templates
+# 4. Apply current resource-optimized templates
 sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.com
 
-# 4. Apply updates
+# 5. Restart with current resource limits
 ./startup.sh --force-restart
 
-# 5. Verify update
-./health.sh --comprehensive
+# 6. Verify current resource allocation
+docker stats --no-stream
+docker compose config | grep -E "memory:|cpus:"
 ```
 
-## Migration Best Practices
+### Current Version Migration
 
-### Pre-Migration Preparation
+Updating versions within current template system:
 
-1. **Complete Backup Strategy**
+```bash
+# 1. Create comprehensive backup
+./backup.sh --type emergency --rclone
+
+# 2. Update current version pins in template
+nano .env.example
+# Update to current stable versions:
+# VAULTWARDEN_VERSION=1.30.5
+# CADDY_VERSION=2.8.4-cloudflare
+# FAIL2BAN_VERSION=1.1.0
+
+# 3. Apply current template updates
+sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.com
+
+# 4. Update with current safety measures
+./startup.sh --force-restart
+
+# 5. Verify current version deployment
+./health.sh --comprehensive
+docker compose ps --format "table {{.Service}}\t{{.Image}}"
+```
+
+## Current Migration Best Practices
+
+### Current Pre-Migration Preparation
+
+1. **Current Backup Strategy**
    ```bash
-   # Create multiple backup types
+   # Create all current backup types
    ./backup.sh --type db --rclone
-   ./backup.sh --type full --rclone
+   ./backup.sh --type full --rclone  
    ./backup.sh --type emergency --rclone
    ```
 
-2. **Document Current State**
+2. **Current State Documentation**
    ```bash
-   # Document current configuration
-   docker compose config > pre-migration-config.yml
-   docker compose ps > pre-migration-services.txt
-   ./health.sh --comprehensive > pre-migration-health.txt
+   # Document current enhanced configuration
+   docker compose config > current-pre-migration-config.yml
+   docker stats --no-stream > current-resources.txt
+   ./health.sh --comprehensive --json > current-health.json
+   du -sh /var/lib/vaultwarden/logs/ > current-forensic-logs.txt
    ```
 
-### During Migration
+### Current Migration Execution
 
-1. **Template-First Approach**
-   - Always edit `.example` files first
-   - Use `setup.sh --force` to regenerate configuration
-   - Validate with `docker compose config` before starting services
+1. **Current Template-First Approach**
+   - Edit `.example` files for current architecture
+   - Use `sudo ./setup.sh --force` with current validation
+   - Verify with `docker compose config` including resource limits
+   - Test current dual CF+UFW blocking
 
-2. **Validation Steps**
+2. **Current Validation Steps**
    ```bash
-   # After each major change
+   # Validate current configuration
    docker compose config
    ./health.sh --comprehensive
+   docker compose logs fail2ban | grep -E "CF|UFW|dual"
    curl -f https://vault.yourdomain.com/alive
    ```
 
-### Migration Checklist
+### Current Migration Checklist
 
-#### Pre-Migration
-- [ ] Create comprehensive backups (db, full, emergency)
-- [ ] Document current configuration and services
-- [ ] Test migration in development environment
-- [ ] Schedule maintenance window
-- [ ] Prepare rollback procedures
+#### Current Pre-Migration
+- [ ] Create current comprehensive backups (atomic operations)
+- [ ] Document current resource usage and limits
+- [ ] Document current security features (dual blocking, forensic logs)
+- [ ] Test current migration in development
+- [ ] Prepare current rollback procedures
 
-#### Migration Execution
-- [ ] Stop services gracefully
-- [ ] Update templates with new configuration
-- [ ] Regenerate configuration using setup.sh
-- [ ] Validate template-generated configuration
-- [ ] Start services and verify functionality
-- [ ] Run comprehensive health checks
+#### Current Migration Execution  
+- [ ] Stop services with current safe shutdown
+- [ ] Update to current enhanced templates
+- [ ] Apply current resource optimization
+- [ ] Validate current template configuration
+- [ ] Start with current enhanced features
+- [ ] Verify current dual-action security
 
-#### Post-Migration
-- [ ] Verify all services are healthy
-- [ ] Test critical functionality (login, admin panel)
-- [ ] Confirm security features are active
-- [ ] Update monitoring and alerting
-- [ ] Create post-migration backup
-- [ ] Update operational documentation
+#### Current Post-Migration
+- [ ] Verify current health checks pass
+- [ ] Test current enhanced security (dual blocking)
+- [ ] Confirm current forensic logging (3GB capacity)
+- [ ] Verify current resource limits work
+- [ ] Test current break-glass admin access
+- [ ] Create post-migration backup with current atomic operations
+
+## Current Rollback Procedures
+
+### Current Configuration Rollback
+```bash
+# If current migration fails
+./startup.sh --down
+
+# Restore previous configuration
+./restore.sh --interactive  # Select pre-migration backup
+
+# Verify rollback
+./health.sh --comprehensive
+```
+
+### Current Emergency Rollback
+```bash
+# Use current break-glass admin if needed
+./create-breakglass-admin.sh status
+
+# Access via OCI console if SSH unavailable
+# Restore from current emergency kit
+./restore.sh /path/to/emergency-kit.age
+
+# Verify current system works
+./health.sh --comprehensive
+```
 
 ---
 
-**Migration Support**: 
-- Review the template-based architecture documentation
-- Test all procedures in development environment first  
-- Keep comprehensive backups throughout the migration process
-- Document any custom configurations or deviations from templates
+**Current Migration Status**: This guide reflects migration to the current VaultWarden-OCI implementation with:
+- Resource optimization for 6GB systems (container limits)
+- Dual Cloudflare+UFW fail2ban protection (idempotent operations)
+- Enhanced forensic logging (3GB capacity, 60x retention improvement)  
+- Atomic backup operations with template integration
+- Centralized security validation (lib/security.sh)
+- Break-glass emergency access with comprehensive validation
 
-**Remember**: The template-based system is designed to make migrations safer and more predictable. Always validate template changes before applying them to production systems.
+All migration procedures work within the current enhanced architecture optimized for reliable, secure operation in small team environments.
+
+**Migration Support**: Test all current procedures in development first. The current template-based system provides safer, more predictable migrations with enhanced security and resource management.
