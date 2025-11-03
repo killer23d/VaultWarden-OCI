@@ -104,7 +104,7 @@ RCLONE_REMOTE_NAME=your_remote_name     # Configure with: rclone config
 
 # Enhanced Backup Features
 BACKUP_VERIFICATION=true                # Enable backup integrity checking
-BACKUP_ATOMIC_OPERATIONS=true          # Use atomic backup operations
+BACKUP_ATOMIC_OPERATIONS=true           # Use atomic backup operations
 ```
 
 ### Container Version Management (Enhanced)
@@ -526,7 +526,7 @@ RCLONE_REMOTE_NAME=your_secure_remote
 2. **Use pinned versions**: Automatically set by `setup.sh --auto` for stability
 3. **Enhanced secrets**: SOPS key paths never exposed in process lists
 4. **Atomic operations**: Backup and maintenance operations prevent corruption
-5. **Comprehensive monitoring**: Enhanced health checks with auto-repair
+5. **Comprehensive monitoring**: Use comprehensive health checks with diagnostics
 6. **Forensic logging**: 3GB log capacity for incident investigation
 
 ### Enhanced Security Configuration
@@ -543,7 +543,7 @@ RCLONE_REMOTE_NAME=your_secure_remote
 1. **Template-driven changes**: All configuration via template modification
 2. **Atomic operations**: Backup and database operations prevent corruption
 3. **Resource optimization**: Container limits optimized for small teams
-4. **Comprehensive health**: Auto-repair capabilities with detailed diagnostics
+4. **Comprehensive health**: Use comprehensive diagnostics for status
 5. **Enhanced recovery**: Multiple backup types with integrity verification
 6. **Forensic readiness**: Enhanced logging for incident investigation
 
