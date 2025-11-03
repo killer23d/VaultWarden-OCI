@@ -15,13 +15,14 @@
 }
 
 {$DOMAIN} {
-    # ENHANCED: Improved log retention for forensic analysis
+    # ENHANCED: Improved log retention for forensic analysis with predictable rotation
     # Increased from 10MB/5 files (50MB total) to 50MB/20 files (1GB total)
     log {
         output file /logs/access.log {
             roll_size 50MB      # Increased from 10MB
             roll_keep 20        # Increased from 5 files
             roll_keep_for 30d   # Keep for 30 days regardless of file count
+            roll_local_time true # ENHANCED: Rotate at midnight local time for predictable daily logs
         }
         format json {
             # Enhanced logging for better forensic analysis
@@ -82,12 +83,13 @@
     # Admin panel protection with enhanced logging
     @admin path /admin*
     handle @admin {
-        # Enhanced logging for admin access attempts
+        # Enhanced logging for admin access attempts with predictable rotation
         log {
             output file /logs/admin_access.log {
                 roll_size 25MB      # Dedicated admin log with good retention
                 roll_keep 30        # Keep 30 files for forensic analysis
                 roll_keep_for 90d   # Keep admin logs for 90 days
+                roll_local_time true # ENHANCED: Daily rotation at midnight
             }
             format json {
                 time_format "2006-01-02T15:04:05.000Z07:00"
@@ -115,12 +117,13 @@
     # ENHANCED: Authentication endpoint monitoring for forensic analysis
     @auth_endpoints path /api/accounts/prelogin* /identity/accounts/prelogin* /identity/connect/token*
     handle @auth_endpoints {
-        # Dedicated authentication log for security monitoring
+        # Dedicated authentication log for security monitoring with predictable rotation
         log {
             output file /logs/auth_attempts.log {
                 roll_size 25MB      # Dedicated auth log
                 roll_keep 30        # High retention for security analysis
                 roll_keep_for 90d   # Keep auth logs for 90 days
+                roll_local_time true # ENHANCED: Daily rotation at midnight
             }
             format json {
                 time_format "2006-01-02T15:04:05.000Z07:00"
@@ -147,6 +150,7 @@
                     roll_size 10MB
                     roll_keep 50      # Keep many security logs
                     roll_keep_for 180d # Keep security logs for 6 months
+                    roll_local_time true # ENHANCED: Daily rotation at midnight
                 }
                 format json {
                     time_format "2006-01-02T15:04:05.000Z07:00"
@@ -184,6 +188,7 @@ www.{$DOMAIN} {
         output file /logs/redirects.log {
             roll_size 10MB
             roll_keep 10
+            roll_local_time true # ENHANCED: Daily rotation at midnight
         }
         format json
         level INFO
@@ -199,6 +204,7 @@ www.{$DOMAIN} {
             roll_size 25MB
             roll_keep 40        # Keep many security logs
             roll_keep_for 180d  # Keep for 6 months
+            roll_local_time true # ENHANCED: Daily rotation at midnight
         }
         format json {
             time_format "2006-01-02T15:04:05.000Z07:00"
@@ -210,29 +216,30 @@ www.{$DOMAIN} {
     respond "Not Found" 404
 }
 
-# ENHANCED FORENSIC FEATURES:
+# ENHANCED FORENSIC FEATURES WITH PREDICTABLE LOG ROTATION:
 # 
-# 1. IMPROVED LOG RETENTION:
-#    - Main access log: 50MB x 20 files = 1GB total (vs previous 50MB total)
-#    - Admin access log: 25MB x 30 files = 750MB (dedicated admin forensics)
-#    - Auth attempts log: 25MB x 30 files = 750MB (dedicated authentication forensics)
-#    - Security blocks log: 10MB x 50 files = 500MB (comprehensive attack logging)
-#    - Total forensic capacity: ~3GB vs previous 50MB (60x improvement)
+# 1. IMPROVED LOG RETENTION WITH DAILY ROTATION:
+#    - Main access log: 50MB x 20 files = 1GB total (rotates daily at midnight)
+#    - Admin access log: 25MB x 30 files = 750MB (rotates daily at midnight)
+#    - Auth attempts log: 25MB x 30 files = 750MB (rotates daily at midnight)
+#    - Security blocks log: 10MB x 50 files = 500MB (rotates daily at midnight)
+#    - Total forensic capacity: ~3GB with predictable daily rotation
 #
-# 2. SPECIALIZED LOGGING:
+# 2. PREDICTABLE LOG ROTATION BENEFITS:
+#    - Daily log files for easy incident correlation
+#    - Rotation at midnight local time (respects container TZ)
+#    - Easier integration with log analysis tools
+#    - Consistent log file naming for automation
+#    - Better for "set-and-forget" operations
+#
+# 3. SPECIALIZED LOGGING (UNCHANGED):
 #    - Separate logs for admin access, authentication attempts, security blocks
 #    - Enhanced JSON format with consistent timestamps
 #    - Request ID correlation across all logs
-#    - Extended retention periods (30-180 days vs previous ~2-3 days)
+#    - Extended retention periods (30-180 days)
 #
-# 3. ENHANCED SECURITY:
-#    - Stricter rate limiting appropriate for password manager
-#    - Dedicated API authentication rate limiting
-#    - Extended malicious user agent detection
-#    - Comprehensive request correlation via X-Request-ID
-#
-# 4. FORENSIC ANALYSIS CAPABILITIES:
-#    - 30-90 day log retention suitable for incident investigation
-#    - Structured JSON logs for automated analysis
-#    - Request correlation across different log files
-#    - Dedicated security event logging with extended retention
+# 4. ENHANCED OPERATIONAL BENEFITS:
+#    - Log files rotate at predictable times (daily at midnight)
+#    - Easier to correlate incidents with specific days
+#    - Better integration with external log management systems
+#    - Consistent with standard operational practices
