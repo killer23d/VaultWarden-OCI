@@ -10,8 +10,8 @@ This is a **template-based, hardened deployment** designed specifically for smal
 
 - **Set-and-forget reliability** with template-based maintenance and automated operations
 - **Template-first approach** - all configuration files maintained as `.example` templates
-- **Enhanced fail2ban** with rate limiting and Cloudflare API integration
-- **Robust security** with optimized Cloudflare integration and encrypted secrets
+- **Enhanced fail2ban** with optimized Cloudflare API integration and advanced filtering
+- **Robust security** with comprehensive Cloudflare integration and encrypted secrets
 - **Simple operations** with comprehensive automation and health monitoring
 - **Emergency recovery** with break-glass admin access for critical situations
 - **Quality of life improvements** with Makefile shortcuts and interactive tools
@@ -20,13 +20,13 @@ This is a **template-based, hardened deployment** designed specifically for smal
 ### Key Features
 
 - **Template-Based Configuration**: All config files generated from maintainable `.example` templates
-- **Enhanced Security**: Optimized fail2ban with rate limiting, improved UFW setup
-- **Minimalist Footprint**: ~20 files, modular design with shared libraries
+- **Enhanced Security**: Optimized fail2ban with dual CF+UFW blocking, comprehensive filtering
+- **Resource Management**: Container limits optimized for 6GB systems with balanced allocation
 - **Core Scripts**: 11 essential scripts for complete lifecycle management
-- **Unified Libraries**: 3 focused libraries (common, Docker, crypto) for shared functionality
+- **Unified Libraries**: Shared libraries (common, Docker, crypto, security) for consistent functionality
 - **Dynamic DNS**: Automatic Cloudflare DNS record updates
-- **Edge Security**: Cloudflare proxy with enhanced fail2ban integration for IP blocking
-- **Firewall Hardening**: UFW configured with Cloudflare IP validation and fallback warnings
+- **Edge Security**: Cloudflare proxy with enhanced fail2ban integration for global IP blocking
+- **Firewall Hardening**: UFW configured with Cloudflare IP validation and safe fallback
 - **Encrypted Secrets**: Age + SOPS for industry-standard secrets management
 - **Automated Operations**: Comprehensive cron jobs for backups, updates, and maintenance
 - **Emergency Access**: Break-glass admin for OCI serial console recovery
@@ -70,20 +70,31 @@ sudo ./cron-setup.sh --install
 
 ### Configuration Management
 
-All configuration files are now managed through templates for easier maintenance:
+All configuration files are managed through templates for easier maintenance:
 
 ```
 📁 Project Structure
-├── docker-compose.yml.example     # Template for Docker Compose
-├── .env.example                   # Template for environment variables
-├── docker-compose.yml             # Generated from template by setup.sh
-├── .env                          # Generated from template by setup.sh
-├── caddy/Caddyfile               # Static configuration file
-└── fail2ban/
-    ├── action.d/
-    │   └── cloudflare-optimized.conf  # Enhanced action with rate limiting
-    ├── filter.d/                 # Static filter configurations
-    └── jail.d/                   # Static jail configurations
+├── docker-compose.yml.example          # Template for Docker Compose
+├── docker-compose.override.yml.example # Template for email decoupling
+├── .env.example                        # Template for environment variables
+├── docker-compose.yml                  # Generated from template by setup.sh
+├── .env                               # Generated from template by setup.sh
+├── caddy/Caddyfile                    # Enhanced reverse proxy configuration
+├── fail2ban/
+│   ├── action.d/
+│   │   ├── cloudflare-apiv4.conf      # Advanced CF+UFW dual action
+│   │   └── sendmail-whois.conf        # Email notification action
+│   ├── filter.d/                      # Comprehensive filter configurations
+│   │   ├── vaultwarden-auth.conf      # Authentication failure detection
+│   │   ├── vaultwarden-admin.conf     # Admin panel protection
+│   │   └── vaultwarden-web-caddy.conf # Web interface protection
+│   └── jail.d/
+│       └── vaultwarden-oci.conf       # Complete jail configuration
+└── lib/
+    ├── common.sh                      # Shared utility functions
+    ├── crypto.sh                      # Encryption/decryption utilities
+    ├── docker.sh                      # Docker management functions
+    └── security.sh                    # Security validation functions
 ```
 
 ### Benefits of Template Approach
@@ -113,21 +124,21 @@ All configuration files are now managed through templates for easier maintenance
 └─────────────────────────────────────────┘
 ┌─────────────────────────────────────────┐
 │           Management Layer              │
-│  ┌──────────┐  ┌──────────┐             │
-│  │11 Scripts│  │3 Libraries│             │ ── Encrypted Secrets (Age + SOPS)
-│  │(Ops)     │  │(Common)   │             │
-│  └──────────┘  └──────────┘             │
+│  ┌──────────┐  ┌──────────────┐        │
+│  │11 Scripts│  │4 Libraries   │        │ ── Encrypted Secrets (Age + SOPS)
+│  │(Ops)     │  │(Common+Sec)  │        │
+│  └──────────┘  └──────────────┘        │
 └─────────────────────────────────────────┘
 ┌─────────────────────────────────────────┐
 │        Docker Application Stack         │
 │  ┌──────┐  ┌───────────┐                │
 │  │Caddy │→ │VaultWarden│                │
-│  │(SSL) │  │(App)      │                │
-│  └──────┘  └───────────┘                │
-│      ↑                                  │
+│  │(SSL) │  │(App)      │ ← 2GB Memory   │
+│  └──────┘  └───────────┘   Limit        │
+│      ↑        1GB Limit                 │
 │  ┌────────┐                             │
-│  │fail2ban│─────────────────────────────┤ Enhanced Cloudflare API
-│  │(Sec+)  │     (Rate Limited)          │ (Rate limiting, error handling)
+│  │fail2ban│─────────────────────────────┤ Dual CF+UFW Actions
+│  │(Sec)   │     512MB Limit             │ (Advanced filtering)
 │  └────────┘                             │
 └─────────────────────────────────────────┘
       ↓
@@ -146,76 +157,76 @@ All configuration files are now managed through templates for easier maintenance
 
 | Script | Purpose | Key Features | Frequency |
 |--------|---------|-------------|----------|
-| `./setup.sh` | One-time system setup | **NEW**: Template-based config generation, enhanced UFW warnings | Once |
-| `./startup.sh` | Start/stop/restart services | **IMPROVED**: Race condition fixes, better health checks | As needed |
+| `./setup.sh` | One-time system setup | Template-based config generation, UFW validation | Once |
+| `./startup.sh` | Start/stop/restart services | Enhanced secret handling, race condition fixes | As needed |
 | `./health.sh` | System health monitoring | Auto-repair, comprehensive diagnostics | Automated |
-| `./backup.sh` | Create encrypted backups | **ENHANCED**: Atomic operations, better error handling | Daily (automated) |
+| `./backup.sh` | Create encrypted backups | Atomic operations, integrity verification | Daily (automated) |
 | `./restore.sh` | Restore from encrypted backups | Interactive selection, validation | Emergency |
 
 ### Configuration & Maintenance
 
 | Script | Purpose | Key Features | Frequency |  
 |--------|---------|-------------|----------|
-| `./edit-secrets.sh` | Secure secrets management | Age + SOPS encryption | Initial + changes |
+| `./edit-secrets.sh` | Secure secrets management | Enhanced privacy, secure environment handling | Initial + changes |
 | `./update.sh` | Update containers/system packages | Automated backup before updates | Weekly (automated) |
-| `./maintenance.sh` | System cleanup and optimization | Log rotation, cleanup | Monthly (automated) |
-| `./cron-setup.sh` | Configure automation | Comprehensive scheduling | Once |
+| `./maintenance.sh` | System cleanup and optimization | Safe database operations, comprehensive cleanup | Monthly (automated) |
+| `./cron-setup.sh` | Configure automation | Secure privilege management, validation | Once |
 
 ### Emergency & Recovery
 
 | Script | Purpose | Key Features | Frequency |
 |--------|---------|-------------|----------|
-| `./create-breakglass-admin.sh` | Emergency admin for serial console | OCI console access | Once + as needed |
-| `./db-maint.sh` | Database maintenance | SQLite optimization | Monthly (automated) |
+| `./create-breakglass-admin.sh` | Emergency admin for serial console | OCI console access, secure creation | Once + as needed |
+| `./db-maint.sh` | Database maintenance | Safe offline SQLite optimization | Monthly (automated) |
 | `./update-dns.sh` | Manual DNS updates | Cloudflare API integration | As needed |
 
 ## 🔧 Enhanced Security Features
 
-### New Security Improvements
+### Current Security Improvements
 
-- **Enhanced fail2ban**: 
-  - Rate limiting (max 30 API calls/minute)
-  - Comprehensive error handling and logging
-  - Graceful failure recovery
-  - No more API abuse or hanging requests
+- **Enhanced Fail2Ban**: 
+  - Dual Cloudflare + UFW blocking with idempotent operations
+  - Advanced retry logic with exponential backoff
+  - Comprehensive regex-based filtering (no external dependencies)
+  - Rate limiting detection and response
 
-- **Improved UFW Setup**:
-  - Clear warnings when Cloudflare API fails
-  - Fallback firewall configuration
-  - Interactive prompts for failure scenarios
+- **Resource Management**:
+  - Container memory limits optimized for 6GB systems
+  - Balanced CPU allocation preventing monopolization
+  - Memory reservations ensuring stable operation
 
 - **Template Security**:
   - No hardcoded credentials in generated files
-  - Consistent security configurations
-  - Version control safe templates
+  - Consistent security configurations across deployments
+  - Version control safe templates with validation
 
 ### Multi-Layer Security
 
 - **Encrypted Secrets**: All sensitive data encrypted with Age and managed via SOPS
 - **Cloudflare Integration**:
   - Traffic proxied through Cloudflare's edge network
-  - **Enhanced fail2ban** blocks malicious IPs via Cloudflare API with rate limiting
-  - Automatic IP list updates with firewall integration
-- **Host Firewall**: UFW configured with proper Cloudflare IP validation
+  - **Dual blocking**: CF API + local UFW for comprehensive protection
+  - Automatic IP list updates with safe firewall integration
+- **Host Firewall**: UFW configured with Cloudflare IP validation and safe fallback
 - **HTTPS Enforcement**: Automatic HTTPS via Caddy with Let's Encrypt
 - **Security Headers**: Comprehensive security headers (HSTS, CSP, etc.)
-- **Rate Limiting**: API and admin endpoint protection
+- **Rate Limiting**: API and admin endpoint protection with forensic logging
 - **Admin Protection**: Basic authentication with bcrypt hashing
-- **Container Security**: Non-root execution and resource constraints
+- **Container Security**: Non-root execution, capability restrictions, resource constraints
 - **Emergency Recovery**: Secure break-glass admin access
 
 ## 📦 Backup & Recovery
 
 ### Enhanced Backup Strategy
 
-- **Atomic Operations**: **NEW** - Prevents corrupt backups during creation
-- **Better Disk Space Management**: **NEW** - More conservative space checks
-- **Improved Database Consistency**: **NEW** - WAL checkpoints for live snapshots
+- **Atomic Operations**: Prevents corrupt backups during creation
+- **Safe Database Operations**: WAL checkpoints for live snapshots
+- **Conservative Space Management**: Disk space validation before operations
 - **Daily**: Encrypted database backups (retention: 14 days)
 - **Weekly**: Encrypted full system backups (retention: 30 days)  
 - **Manual**: Emergency recovery kits (retention: 90 days)
 - **Offsite**: Automatic rclone sync to configured remote storage
-- **Verification**: Pre-encryption integrity checks
+- **Verification**: Pre-encryption integrity checks and backup testing
 
 ### Backup Operations
 
@@ -324,7 +335,7 @@ sudo ./setup.sh --force --domain your-domain.com --email your-email@domain.com
 cat docker-compose.yml.example | grep -n "platform:\|linux/arm64"
 ```
 
-**Fail2ban Issues**:
+**Fail2Ban Issues**:
 ```bash
 # Check fail2ban status
 docker compose exec fail2ban fail2ban-client status
@@ -336,6 +347,9 @@ docker compose logs fail2ban | grep -i cloudflare
 curl -X GET "https://api.cloudflare.com/client/v4/zones" \
      -H "Authorization: Bearer YOUR_TOKEN" \
      -H "Content-Type: application/json"
+
+# Validate filter syntax
+docker compose exec fail2ban fail2ban-regex /var/log/vaultwarden/vaultwarden.log /data/fail2ban/filter.d/vaultwarden-auth.conf
 ```
 
 ### Emergency Recovery
@@ -361,13 +375,15 @@ curl -X GET "https://api.cloudflare.com/client/v4/zones" \
 - ✅ Create and test backup restoration: `./backup.sh --type emergency`
 - ✅ Generate proper bcrypt hash for admin_basic_auth_hash
 - ✅ Validate Cloudflare API tokens work correctly
+- ✅ Run comprehensive health check: `./health.sh`
 
 ### Ongoing Operations  
 - ✅ Monitor break-glass admin status regularly
 - ✅ Keep template files updated and version controlled
 - ✅ Test emergency procedures quarterly
-- ✅ Monitor fail2ban for API rate limiting issues
+- ✅ Monitor fail2ban effectiveness and API limits
 - ✅ Verify UFW rules after any network changes
+- ✅ Review container resource usage periodically
 
 ### Template Security
 - 📝 Never commit actual .env or docker-compose.yml files
@@ -382,4 +398,4 @@ MIT License - see LICENSE file for details.
 
 ---
 
-**VaultWarden-OCI**: Template-based, secure, self-hosted password management made simple for small teams with enhanced fail2ban security, improved error handling, and comprehensive emergency recovery capabilities.
+**VaultWarden-OCI**: Template-based, secure, self-hosted password management made simple for small teams with enhanced fail2ban security, comprehensive resource management, and robust emergency recovery capabilities.
