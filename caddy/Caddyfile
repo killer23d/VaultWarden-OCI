@@ -1,11 +1,10 @@
-# Enhanced Caddyfile for CaddyBuilds/caddy-cloudflare with automatic IP management
 {
     # Global ACME DNS configuration
     # FIXED: Removed {env.CLOUDFLARE_API_TOKEN}
     # Caddy automatically uses the CLOUDFLARE_API_TOKEN_FILE env var
     # (set in docker-compose.yml) when this directive is present.
     acme_dns cloudflare
-    
+
     # Global server configuration with automatic Cloudflare IP management
     servers {
         # Trust Cloudflare IPs automatically (updated by caddy-cloudflare-ip module)
@@ -16,30 +15,53 @@
 }
 
 {$DOMAIN} {
+    # ENHANCED: Improved log retention for forensic analysis
+    # Increased from 10MB/5 files (50MB total) to 50MB/20 files (1GB total)
     log {
         output file /logs/access.log {
-            roll_size 10MB
-            roll_keep 5
+            roll_size 50MB      # Increased from 10MB
+            roll_keep 20        # Increased from 5 files
+            roll_keep_for 30d   # Keep for 30 days regardless of file count
         }
-        format json
+        format json {
+            # Enhanced logging for better forensic analysis
+            time_format "2006-01-02T15:04:05.000Z07:00"
+            message_key "msg"
+            level_key "level"
+            time_key "timestamp"
+            name_key "logger"
+            caller_key "caller"
+            stacktrace_key "stacktrace"
+        }
+        # Log all requests, including successful ones, for forensic analysis
+        level INFO
     }
 
-    # Basic rate limiting for set-and-forget operation
+    # ENHANCED: Stricter rate limiting for password manager security
     rate_limit {
         zone static_rl {
             key {remote_host}
             window 1m
-            capacity 60  # 60 requests per minute per IP
+            capacity 20         # Reduced from 60 - stricter for password manager
         }
-        
+
         zone admin_rl {
             key {remote_host}
             match /admin*
             window 1m  
-            capacity 10  # Stricter for admin panel
+            capacity 5          # Reduced from 10 - very strict for admin panel
+        }
+
+        # NEW: API endpoint rate limiting for authentication attempts
+        zone api_auth_rl {
+            key {remote_host}
+            match_path /api/accounts/prelogin /identity/accounts/prelogin /identity/connect/token
+            window 5m
+            capacity 10         # Allow 10 auth attempts per 5 minutes per IP
         }
     }
-    # Enhanced security headers
+
+    # Enhanced security headers with forensic considerations
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
         X-Content-Type-Options "nosniff"
@@ -47,16 +69,38 @@
         X-XSS-Protection "1; mode=block"
         Referrer-Policy "strict-origin-when-cross-origin"
         Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: https:; frame-src 'self'; object-src 'none'; base-uri 'self';"
+
+        # ENHANCED: Security headers for forensic tracking
+        X-Request-ID {uuid}     # Unique request ID for correlation
+        X-Forwarded-Proto https
+
+        # Remove server identification
         -Server
+        -X-Powered-By
     }
 
-    # Admin panel protection with proper IP handling
+    # Admin panel protection with enhanced logging
     @admin path /admin*
     handle @admin {
+        # Enhanced logging for admin access attempts
+        log {
+            output file /logs/admin_access.log {
+                roll_size 25MB      # Dedicated admin log with good retention
+                roll_keep 30        # Keep 30 files for forensic analysis
+                roll_keep_for 90d   # Keep admin logs for 90 days
+            }
+            format json {
+                time_format "2006-01-02T15:04:05.000Z07:00"
+                message_key "admin_access"
+            }
+            level INFO
+        }
+
         header {
             Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: https:; frame-src 'self'; object-src 'none'; base-uri 'self';"
+            X-Admin-Access "true"
         }
-        
+
         basic_auth {
             admin {file /run/secrets/admin_basic_auth_hash}
         }
@@ -64,30 +108,131 @@
         reverse_proxy vaultwarden_app:80 {
             header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
             header_up X-Forwarded-For {http.request.header.Cf-Connecting-Ip}
+            header_up X-Request-ID {http.request.header.X-Request-ID}
         }
     }
 
-    # Main application with enhanced IP handling
-    handle {
-        @malicious_ua header User-Agent *sqlmap* *nikto* *nmap* *acunetix*
-        respond @malicious_ua 403
-
-        # WebSocket support for live sync (uncomment if WEBSOCKET_ENABLED=true in .env)
-        # reverse_proxy /notifications/hub* vaultwarden_app:3012
+    # ENHANCED: Authentication endpoint monitoring for forensic analysis
+    @auth_endpoints path /api/accounts/prelogin* /identity/accounts/prelogin* /identity/connect/token*
+    handle @auth_endpoints {
+        # Dedicated authentication log for security monitoring
+        log {
+            output file /logs/auth_attempts.log {
+                roll_size 25MB      # Dedicated auth log
+                roll_keep 30        # High retention for security analysis
+                roll_keep_for 90d   # Keep auth logs for 90 days
+            }
+            format json {
+                time_format "2006-01-02T15:04:05.000Z07:00"
+                message_key "auth_attempt"
+            }
+            level INFO
+        }
 
         reverse_proxy vaultwarden_app:80 {
             header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
             header_up X-Forwarded-For {http.request.header.Cf-Connecting-Ip}
+            header_up X-Request-ID {http.request.header.X-Request-ID}
+            header_up X-Auth-Endpoint "true"
+        }
+    }
+
+    # Main application with enhanced security monitoring
+    handle {
+        # Block malicious user agents with forensic logging
+        @malicious_ua header User-Agent *sqlmap* *nikto* *nmap* *acunetix* *dirbuster* *gobuster* *wfuzz*
+        handle @malicious_ua {
+            log {
+                output file /logs/security_blocks.log {
+                    roll_size 10MB
+                    roll_keep 50      # Keep many security logs
+                    roll_keep_for 180d # Keep security logs for 6 months
+                }
+                format json {
+                    time_format "2006-01-02T15:04:05.000Z07:00"
+                    message_key "security_block"
+                }
+                level WARN
+            }
+            respond "Access Denied - Security Policy Violation" 403
+        }
+
+        # WebSocket support for live sync (uncomment if WEBSOCKET_ENABLED=true in .env)
+        # @websocket {
+        #     header Connection *Upgrade*
+        #     header Upgrade websocket
+        #     path /notifications/hub*
+        # }
+        # handle @websocket {
+        #     reverse_proxy vaultwarden_app:3012 {
+        #         header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
+        #         header_up X-Forwarded-For {http.request.header.Cf-Connecting-Ip}
+        #     }
+        # }
+
+        reverse_proxy vaultwarden_app:80 {
+            header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
+            header_up X-Forwarded-For {http.request.header.Cf-Connecting-Ip}
+            header_up X-Request-ID {http.request.header.X-Request-ID}
         }
     }
 }
 
-# Redirect www subdomain
+# Redirect www subdomain with logging
 www.{$DOMAIN} {
+    log {
+        output file /logs/redirects.log {
+            roll_size 10MB
+            roll_keep 10
+        }
+        format json
+        level INFO
+    }
+
     redir https://{$DOMAIN}{uri} 301
 }
 
-# Security catch-all
+# ENHANCED: Security catch-all with comprehensive logging
 :80, :443 {
+    log {
+        output file /logs/security_catchall.log {
+            roll_size 25MB
+            roll_keep 40        # Keep many security logs
+            roll_keep_for 180d  # Keep for 6 months
+        }
+        format json {
+            time_format "2006-01-02T15:04:05.000Z07:00"
+            message_key "unauthorized_access"
+        }
+        level WARN
+    }
+
     respond "Not Found" 404
 }
+
+# ENHANCED FORENSIC FEATURES:
+# 
+# 1. IMPROVED LOG RETENTION:
+#    - Main access log: 50MB x 20 files = 1GB total (vs previous 50MB total)
+#    - Admin access log: 25MB x 30 files = 750MB (dedicated admin forensics)
+#    - Auth attempts log: 25MB x 30 files = 750MB (dedicated authentication forensics)
+#    - Security blocks log: 10MB x 50 files = 500MB (comprehensive attack logging)
+#    - Total forensic capacity: ~3GB vs previous 50MB (60x improvement)
+#
+# 2. SPECIALIZED LOGGING:
+#    - Separate logs for admin access, authentication attempts, security blocks
+#    - Enhanced JSON format with consistent timestamps
+#    - Request ID correlation across all logs
+#    - Extended retention periods (30-180 days vs previous ~2-3 days)
+#
+# 3. ENHANCED SECURITY:
+#    - Stricter rate limiting appropriate for password manager
+#    - Dedicated API authentication rate limiting
+#    - Extended malicious user agent detection
+#    - Comprehensive request correlation via X-Request-ID
+#
+# 4. FORENSIC ANALYSIS CAPABILITIES:
+#    - 30-90 day log retention suitable for incident investigation
+#    - Structured JSON logs for automated analysis
+#    - Request correlation across different log files
+#    - Dedicated security event logging with extended retention
