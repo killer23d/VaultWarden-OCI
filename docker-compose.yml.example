@@ -1,6 +1,7 @@
 # VaultWarden-OCI - Production Docker Compose Configuration
 # ENHANCED: Added container resource limits for 6GB system
 # ENHANCED: Added timezone consistency across all containers
+# ENHANCED: Replaced mailutils with msmtpd sidecar for improved email reliability
 # FIXED: OCI/Oracle Linux compatibility for SSH log monitoring
 # High-fidelity security detection + Built-in email notifications + Resource management
 
@@ -134,6 +135,48 @@ services:
           memory: 256M    # Minimum for SSL operations
           cpus: '0.1'     # 10% of single CPU minimum
 
+  # NEW: Lightweight SMTP relay using msmtpd
+  msmtpd:
+    container_name: vaultwarden_msmtpd
+    image: crazymax/msmtpd:${MSMTPD_VERSION:-1.0.0}
+    restart: unless-stopped
+    environment:
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587} 
+      - SMTP_TLS=${SMTP_SECURITY:-on}
+      - SMTP_STARTTLS=${SMTP_STARTTLS:-on}
+      - SMTP_TLS_CHECKCERT=${SMTP_TLS_CHECKCERT:-on}
+      - SMTP_AUTH=${SMTP_AUTH:-on}
+      - SMTP_USER=${SMTP_USERNAME:-}
+      - SMTP_PASSWORD_FILE=/run/secrets/smtp_password
+      - SMTP_FROM=${SMTP_FROM:-}
+      - TZ=${TZ:-UTC}
+    secrets:
+      - smtp_password
+    volumes:
+      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/msmtpd:/var/log
+    networks:
+      - vaultwarden
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "1025"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # ENHANCED: Minimal resource allocation for SMTP relay
+    deploy:
+      resources:
+        limits:
+          memory: 32M     # Very lightweight SMTP relay
+          cpus: '0.05'    # 5% of single CPU
+        reservations:
+          memory: 8M      # Minimal memory reservation
+          cpus: '0.01'    # 1% of single CPU minimum
+
   fail2ban:
     container_name: vaultwarden_fail2ban
     image: crazymax/fail2ban:${FAIL2BAN_VERSION:-1.1.0}
@@ -143,7 +186,7 @@ services:
       F2B_LOG_TARGET: STDOUT
       F2B_LOG_LEVEL: INFO
       F2B_DB_PURGE_AGE: 1d
-      # Email configuration (uses host mailutils)
+      # Email configuration via msmtpd sidecar
       F2B_DEST_MAIL: ${ADMIN_EMAIL}
       F2B_SENDER: fail2ban@${DOMAIN}
       # Cloudflare integration
@@ -160,17 +203,14 @@ services:
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy:/var/log/caddy:ro
       # FIXED: Platform-specific SSH log mounting for OCI compatibility
       - ${SSH_LOG_PATH:-/var/log/secure}:/var/log/ssh-auth.log:ro
-      # SIMPLE: Mount host mail system (uses existing mailutils)
-      - /usr/sbin/sendmail:/usr/sbin/sendmail:ro
-      - /etc/mailname:/etc/mailname:ro
-      - /etc/passwd:/etc/passwd:ro
-      - /etc/group:/etc/group:ro
+      # REMOVED: Host mailutil mounts (replaced by msmtpd sidecar)
     cap_add:
       - NET_ADMIN
       - NET_RAW
     depends_on:
       - vaultwarden
       - caddy
+      - msmtpd  # NEW: Depend on email sidecar
     networks:
       - vaultwarden
     healthcheck:
@@ -219,7 +259,7 @@ networks:
 # - Proper dependency management and startup ordering
 # - Cloudflare integration for DNS and global IP blocking
 # - High-fidelity VaultWarden log parsing for accurate Fail2Ban detection
-# - Built-in email notifications using existing host mailutils
+# - ENHANCED: Email notifications via lightweight msmtpd sidecar (replaces mailutils)
 # - Enhanced security with no-new-privileges and capability restrictions
 # - Clean configuration focused on core functionality
 # - FIXED: OCI/Oracle Linux SSH log compatibility
@@ -227,16 +267,18 @@ networks:
 # ENHANCED FEATURES:
 # - Resource limits prevent container resource exhaustion on 6GB system
 # - Timezone consistency across all containers for proper log correlation
-# - Balanced resource allocation: VaultWarden (2G), Caddy (1G), Fail2Ban (512M)
+# - Balanced resource allocation: VaultWarden (2G), Caddy (1G), Fail2Ban (512M), msmtpd (32M)
 # - CPU limits ensure fair scheduling and prevent single container monopolization
 # - Memory reservations guarantee minimum resources for stable operation
 # - Platform-specific SSH log detection for multi-distro compatibility
+# - Containerized email solution eliminates host dependencies
 # 
 # RESOURCE ALLOCATION STRATEGY (for 6GB system):
 # - Total container limits: ~3.5GB (leaves 2.5GB for host OS and overhead)
 # - VaultWarden: 2GB limit (main application, database operations)
 # - Caddy: 1GB limit (SSL termination, reverse proxy, log processing)
 # - Fail2Ban: 512MB limit (log parsing, rule processing)
+# - msmtpd: 32MB limit (lightweight SMTP relay)
 # - Remaining ~2.5GB: Host OS, kernel, Docker daemon, buffers/cache
 #
 # PLATFORM COMPATIBILITY:
@@ -244,3 +286,4 @@ networks:
 # - Debian/Ubuntu: /var/log/auth.log (default fallback)
 # - RHEL/CentOS/OCI: /var/log/secure (detected by setup script)
 # - Universal container mount point: /var/log/ssh-auth.log
+# - Email functionality completely containerized (no host dependencies)
