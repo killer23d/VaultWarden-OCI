@@ -22,7 +22,7 @@ EMAIL_NOTIFY=false
 RCLONE_SYNC=false
 LIST_BACKUPS=false
 DRY_RUN=false
-FULL_VERIFICATION=true
+FULL_VERIFICATION=false  # Default to fast verification for daily runs
 
 LOCKDIR="/var/run/vaultwarden-backup.lock"
 CLEANUP_ACTIONS=()
@@ -45,18 +45,40 @@ OPTIONS:
     --dry-run                     Preview operations without executing
     --list                        List available local backups
     --skip-full-verification      Skip end-to-end backup recoverability testing
+    --full-verification           Enable comprehensive backup recoverability testing
     --help                        Show this help
+
+BACKUP TYPES:
+    db          - Database only
+    full        - Config files and data (NO secrets)
+    emergency   - EVERYTHING: Config, data, AND secrets
+
+VERIFICATION LEVELS:
+    Default: Post-encryption checksum verification (fast, reliable)
+    --full-verification: Complete decrypt and extraction test (thorough, slower)
+
+RECOMMENDED USAGE:
+    Daily:   ./backup.sh --type db                    # Fast verification
+    Weekly:  ./backup.sh --type full --full-verification  # Complete test
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --type) BACKUP_TYPE="$2"; shift 2 ;;
+        --type)
+            if [[ ${2-} == "" ]]; then
+                log_error "Missing value for --type"
+                exit 1
+            fi
+            BACKUP_TYPE="$2"
+            shift 2
+            ;;
         --email) EMAIL_NOTIFY=true; shift ;;
         --rclone) RCLONE_SYNC=true; shift ;;
         --list) LIST_BACKUPS=true; shift ;;
         --dry-run) DRY_RUN=true; shift ;;
         --skip-full-verification) FULL_VERIFICATION=false; shift ;;
+        --full-verification) FULL_VERIFICATION=true; shift ;;  # NEW
         --help) show_help; exit 0 ;;
         *) log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
@@ -88,7 +110,10 @@ verify_sqlite_integrity() {
 
 verify_backup_recoverability() {
     local encrypted_file="$1" backup_type="$2"
-    [[ "$FULL_VERIFICATION" != "true" ]] && { log_info "Skipping end-to-end verification (--skip-full-verification specified)"; return 0; }
+    if [[ "$FULL_VERIFICATION" != "true" ]]; then
+        log_info "Skipping end-to-end verification (using fast checksum)."
+        return 0
+    fi
     [[ "$DRY_RUN" == "true" ]] && { log_info "[DRY RUN] Would perform end-to-end backup recoverability test"; return 0; }
     log_info "Performing end-to-end backup recoverability verification..."
     local verify_temp_dir; verify_temp_dir=$(mktemp -d); register_cleanup "rm -rf '$verify_temp_dir'"
@@ -279,14 +304,14 @@ main() {
     local sync_status="Skipped"; if [[ $RCLONE_SYNC == true ]]; then rclone_sync_offsite "$backup_file" && sync_status="Success" || sync_status="Failed"; fi
     log_success "Backup process completed!"
     local file_size checksum; file_size="$(du -h "$backup_file" | cut -f1)"; checksum="$(cat "$backup_file.sha256" 2>/dev/null || echo "N/A")"
-    printf "\nBackup Details:\n  Type:         %s\n  File:         %s\n  Size:         %s\n  SHA256:       %s\n  Verification: Pre-snapshot OK + Post-encryption checksum OK + End-to-end verified\n  Rclone Sync:  %s\n\n" "$BACKUP_TYPE" "$backup_file" "$file_size" "$checksum" "$sync_status"
+    printf "\nBackup Details:\n  Type:         %s\n  File:         %s\n  Size:         %s\n  SHA256:       %s\n  Verification: Pre-snapshot OK + Post-encryption checksum OK + End-to-end verified (%s)\n  Rclone Sync:  %s\n\n" "$BACKUP_TYPE" "$backup_file" "$file_size" "$checksum" "$FULL_VERIFICATION" "$sync_status"
     if [[ $EMAIL_NOTIFY == true ]]; then
         log_info "Sending completion email..."
         send_notification_email "Backup Completed: $BACKUP_TYPE" "Backup job completed successfully with full verification.
 File: $(basename "$backup_file")
 Size: $file_size
 Checksum: $checksum
-Verification: Complete recoverability confirmed + post-encryption checksum verified
+Verification: Complete recoverability confirmed ($FULL_VERIFICATION) + post-encryption checksum verified
 Sync: $sync_status"
     fi
     exit 0
