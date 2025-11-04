@@ -1,6 +1,7 @@
 # VaultWarden-OCI - Production Docker Compose Configuration
 # ENHANCED: Added container resource limits for 6GB system
 # ENHANCED: Added timezone consistency across all containers
+# FIXED: OCI/Oracle Linux compatibility for SSH log monitoring
 # High-fidelity security detection + Built-in email notifications + Resource management
 
 services:
@@ -157,8 +158,8 @@ services:
       # FIXED: Mount VaultWarden logs for high-fidelity parsing
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/vaultwarden:/var/log/vaultwarden:ro
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy:/var/log/caddy:ro
-      # System logs for SSH protection
-      - /var/log/auth.log:/var/log/auth.log:ro
+      # FIXED: Platform-specific SSH log mounting for OCI compatibility
+      - ${SSH_LOG_PATH:-/var/log/secure}:/var/log/ssh-auth.log:ro
       # SIMPLE: Mount host mail system (uses existing mailutils)
       - /usr/sbin/sendmail:/usr/sbin/sendmail:ro
       - /etc/mailname:/etc/mailname:ro
@@ -221,6 +222,7 @@ networks:
 # - Built-in email notifications using existing host mailutils
 # - Enhanced security with no-new-privileges and capability restrictions
 # - Clean configuration focused on core functionality
+# - FIXED: OCI/Oracle Linux SSH log compatibility
 # 
 # ENHANCED FEATURES:
 # - Resource limits prevent container resource exhaustion on 6GB system
@@ -228,6 +230,7 @@ networks:
 # - Balanced resource allocation: VaultWarden (2G), Caddy (1G), Fail2Ban (512M)
 # - CPU limits ensure fair scheduling and prevent single container monopolization
 # - Memory reservations guarantee minimum resources for stable operation
+# - Platform-specific SSH log detection for multi-distro compatibility
 # 
 # RESOURCE ALLOCATION STRATEGY (for 6GB system):
 # - Total container limits: ~3.5GB (leaves 2.5GB for host OS and overhead)
@@ -235,3 +238,9 @@ networks:
 # - Caddy: 1GB limit (SSL termination, reverse proxy, log processing)
 # - Fail2Ban: 512MB limit (log parsing, rule processing)
 # - Remaining ~2.5GB: Host OS, kernel, Docker daemon, buffers/cache
+#
+# PLATFORM COMPATIBILITY:
+# - SSH_LOG_PATH automatically detects correct SSH log location
+# - Debian/Ubuntu: /var/log/auth.log (default fallback)
+# - RHEL/CentOS/OCI: /var/log/secure (detected by setup script)
+# - Universal container mount point: /var/log/ssh-auth.log
