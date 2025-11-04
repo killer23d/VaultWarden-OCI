@@ -2,6 +2,7 @@
 # startup.sh - Enhanced VaultWarden startup script with secure secrets handling
 # ENHANCED: Fixed secret file permissions race condition - set umask before file creation
 # ENHANCED: Atomic secret file creation with proper permissions from the start
+# FIXED: Replaced echo with printf for robust secret writing
 
 set -euo pipefail
 
@@ -130,7 +131,8 @@ prepare_docker_secrets() {
             # Skip empty or placeholder values
             if [[ -n "$secret_value" ]] && [[ "$secret_value" != "CHANGE_ME"* ]] && [[ "$secret_value" != "null" ]]; then
                 # Create secret file atomically - umask 077 ensures 600 permissions
-                if echo "$secret_value" > "$secret_file"; then
+                # FIXED: Use printf for safer writing of arbitrary strings
+                if printf '%s' "$secret_value" > "$secret_file"; then
                     # Verify file was created with correct permissions
                     local file_perms
                     file_perms=$(stat -c "%a" "$secret_file" 2>/dev/null || echo "unknown")
