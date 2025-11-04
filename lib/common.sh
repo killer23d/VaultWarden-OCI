@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # lib/common.sh - Core shared functions for VaultWarden-OCI-NG
 # ENHANCED: Standardized error handling patterns - functions return, callers decide
+# ENHANCED: Updated email function to use msmtpd sidecar (replaces mailutils)
 # All library functions use 'return' with exit codes, never 'exit'
 
 # Ensure this library is only loaded once
@@ -360,7 +361,7 @@ download_file() {
     fi
 }
 
-# Send notification email - STANDARDIZED: Returns exit code
+# ENHANCED: Send notification email via msmtpd sidecar - STANDARDIZED: Returns exit code
 send_notification_email() {
     local subject="$1"
     local body="$2"
@@ -373,10 +374,27 @@ send_notification_email() {
         return 1
     fi
 
-    if ! has_command mail; then
-        log_warn "mail command (mailutils) not available. Cannot send notification."
-        return 1
+    # Check if msmtpd container is available (preferred method)
+    if docker compose ps vaultwarden_msmtpd >/dev/null 2>&1; then
+        log_debug "Using msmtpd container for email delivery"
+        return _send_email_via_msmtpd "$subject" "$body" "$admin_email"
     fi
+
+    # Fallback to host mailutils if available (legacy support)
+    if has_command mail; then
+        log_debug "Using host mailutils for email delivery (fallback)"
+        return _send_email_via_mailutils "$subject" "$body" "$admin_email"
+    fi
+
+    log_warn "No email backend available (tried msmtpd container and host mailutils)"
+    return 1
+}
+
+# ENHANCED: Send email via msmtpd container (preferred method)
+_send_email_via_msmtpd() {
+    local subject="$1"
+    local body="$2"
+    local admin_email="$3"
 
     # Rate limiting with critical exception
     local last_email_file="/tmp/.vw_last_email_$(echo "$subject" | md5sum | cut -d' ' -f1)"
@@ -399,13 +417,86 @@ send_notification_email() {
 ---
 Host: $(hostname -f 2>/dev/null || hostname)
 Timestamp: $(date -uIs)
-Project: VaultWarden-OCI"
+Project: VaultWarden-OCI
+Email Backend: msmtpd container"
 
-    if echo "$full_body" | mail -s "$full_subject" "$admin_email"; then
-        log_success "Notification email sent to $admin_email"
+    # Create email using Python and send via msmtpd container
+    local email_script
+    email_script=$(cat <<EOF
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import sys
+
+def send_email():
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = '${SMTP_FROM:-vaultwarden@${DOMAIN:-localhost}}'
+        msg['To'] = '$admin_email'
+        msg['Subject'] = '$full_subject'
+
+        body = '''$full_body'''
+        msg.attach(MIMEText(body, 'plain'))
+
+        server = smtplib.SMTP('msmtpd', 1025)
+        server.send_message(msg)
+        server.quit()
+        print('Email sent successfully via msmtpd')
+        return True
+    except Exception as e:
+        print(f'Failed to send email via msmtpd: {e}', file=sys.stderr)
+        return False
+
+import sys
+sys.exit(0 if send_email() else 1)
+EOF
+)
+
+    # Execute email script in fail2ban container (which has Python and network access to msmtpd)
+    if docker compose exec -T vaultwarden_fail2ban python3 -c "$email_script"; then
+        log_success "Notification email sent to $admin_email (via msmtpd)"
         return 0
     else
-        log_error "Failed to send notification email"
+        log_error "Failed to send notification email via msmtpd"
+        return 1
+    fi
+}
+
+# ENHANCED: Send email via host mailutils (fallback method)
+_send_email_via_mailutils() {
+    local subject="$1"
+    local body="$2"
+    local admin_email="$3"
+
+    # Rate limiting with critical exception
+    local last_email_file="/tmp/.vw_last_email_$(echo "$subject" | md5sum | cut -d' ' -f1)"
+
+    # Allow critical alerts through rate limiting
+    if [[ "$subject" != *"CRITICAL"* ]] && [[ -f "$last_email_file" ]]; then
+        local last_time current_time
+        last_time=$(cat "$last_email_file")
+        current_time=$(date +%s)
+
+        if (( current_time - last_time < 3600 )); then
+            log_debug "Email rate limited for non-critical notification: $subject"
+            return 0
+        fi
+    fi
+    echo "$(date +%s)" > "$last_email_file"
+
+    local full_subject="[VaultWarden] $subject"
+    local full_body="$body
+---
+Host: $(hostname -f 2>/dev/null || hostname)
+Timestamp: $(date -uIs)
+Project: VaultWarden-OCI
+Email Backend: host mailutils (legacy)"
+
+    if echo "$full_body" | mail -s "$full_subject" "$admin_email"; then
+        log_success "Notification email sent to $admin_email (via mailutils)"
+        return 0
+    else
+        log_error "Failed to send notification email via mailutils"
         return 1
     fi
 }
@@ -502,9 +593,9 @@ export -f log_info log_success log_warn log_error log_debug log_header set_log_p
 export -f load_env_file get_config_value require_config
 export -f has_command require_commands retry_with_backoff is_root get_real_user
 export -f ensure_dir secure_file test_connectivity test_http download_file
-export -f send_notification_email
+export -f send_notification_email _send_email_via_msmtpd _send_email_via_mailutils
 export -f validate_email validate_domain validate_port validate_ip validate_url
 export -f setup_error_trap setup_cleanup_trap safe_execute
 export -f init_common_lib
 
-log_debug "Enhanced common library loaded successfully - standardized error handling"
+log_debug "Enhanced common library loaded successfully - msmtpd email integration"
