@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # setup.sh - VaultWarden-OCI Setup Script with Caddy-Cloudflare Integration
 # ENHANCED: Standardized error handling - functions return, main() decides exit strategy
+# ENHANCED: OCI/Oracle Linux SSH log compatibility with automatic detection
 # All functions return exit codes, main() collects status and determines final exit
 
 set -euo pipefail
@@ -26,7 +27,7 @@ ENTROPY_MAX_WAIT=60
 
 show_help() {
     cat << 'EOF'
-VaultWarden-OCI Setup Tool - Enhanced for Caddy-Cloudflare
+VaultWarden-OCI Setup Tool - Enhanced for Caddy-Cloudflare + OCI Compatibility
 
 USAGE:
     sudo ./setup.sh
@@ -54,7 +55,77 @@ NOTES:
     - Uses template files (.example) for easier maintenance
     - Installs 'unattended-upgrades' for automatic host OS security patches
     - Enhanced error handling with proper exit codes
+    - Automatic SSH log path detection for OCI/Oracle Linux compatibility
+    - Platform-specific SSH security configuration
 EOF
+}
+
+# ENHANCED: Platform-specific SSH log detection for OCI compatibility
+detect_ssh_log_path() {
+    local ssh_log_path=""
+
+    log_info "Detecting platform-specific SSH log location..."
+
+    # Detect OS type from /etc/os-release
+    if [[ -f /etc/os-release ]]; then
+        source /etc/os-release
+        case "$ID" in
+            "ol"|"rhel"|"centos"|"rocky"|"almalinux"|"fedora")
+                ssh_log_path="/var/log/secure"
+                log_info "Detected RHEL-based system ($PRETTY_NAME) - using /var/log/secure"
+                ;;
+            "ubuntu"|"debian")
+                ssh_log_path="/var/log/auth.log"
+                log_info "Detected Debian-based system ($PRETTY_NAME) - using /var/log/auth.log"
+                ;;
+            "arch"|"manjaro")
+                ssh_log_path="/var/log/auth.log"
+                log_info "Detected Arch-based system ($PRETTY_NAME) - using /var/log/auth.log"
+                ;;
+            "opensuse"*|"sles")
+                ssh_log_path="/var/log/messages"
+                log_info "Detected SUSE-based system ($PRETTY_NAME) - using /var/log/messages"
+                ;;
+            *)
+                log_warn "Unknown OS detected: $PRETTY_NAME ($ID)"
+                # Default fallback - check which file exists and has SSH entries
+                if [[ -f "/var/log/secure" ]] && grep -q "sshd" "/var/log/secure" 2>/dev/null; then
+                    ssh_log_path="/var/log/secure"
+                    log_info "Auto-detected SSH log path: /var/log/secure (found SSH entries)"
+                elif [[ -f "/var/log/auth.log" ]] && grep -q "sshd" "/var/log/auth.log" 2>/dev/null; then
+                    ssh_log_path="/var/log/auth.log"  
+                    log_info "Auto-detected SSH log path: /var/log/auth.log (found SSH entries)"
+                elif [[ -f "/var/log/secure" ]]; then
+                    ssh_log_path="/var/log/secure"
+                    log_info "Defaulting to /var/log/secure (file exists, no SSH entries yet)"
+                elif [[ -f "/var/log/auth.log" ]]; then
+                    ssh_log_path="/var/log/auth.log"
+                    log_info "Defaulting to /var/log/auth.log (file exists, no SSH entries yet)"
+                else
+                    log_warn "No SSH log files found - defaulting to /var/log/secure for RHEL compatibility"
+                    ssh_log_path="/var/log/secure"
+                fi
+                ;;
+        esac
+    else
+        log_warn "Cannot detect OS (/etc/os-release missing) - defaulting to /var/log/secure"
+        ssh_log_path="/var/log/secure"
+    fi
+
+    # Validate the detected path
+    if [[ -f "$ssh_log_path" ]]; then
+        if [[ -r "$ssh_log_path" ]]; then
+            log_success "SSH log path validated: $ssh_log_path (readable)"
+        else
+            log_warn "SSH log path exists but not readable: $ssh_log_path"
+            log_info "This is normal - Docker will handle permissions"
+        fi
+    else
+        log_warn "SSH log path does not exist yet: $ssh_log_path"
+        log_info "This is normal for new systems - file will be created by SSH daemon"
+    fi
+
+    echo "$ssh_log_path"
 }
 
 # Argument Parsing
@@ -101,7 +172,7 @@ install_dependencies() {
         log_info "Skipping dependency installation (--skip-deps specified)."
         return 0
     fi
-    
+
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would install system dependencies"
         return 0
@@ -152,15 +223,15 @@ install_dependencies() {
             log_error "Failed to download Docker installer"
             return 1
         fi
-        
+
         if ! sh get-docker.sh; then
             log_error "Failed to install Docker"
             rm -f get-docker.sh
             return 1
         fi
-        
+
         rm -f get-docker.sh
-        
+
         if ! systemctl enable docker || ! systemctl start docker; then
             log_error "Failed to enable/start Docker service"
             return 1
@@ -201,7 +272,7 @@ install_dependencies() {
             log_error "Failed to download SOPS"
             return 1
         fi
-        
+
         if ! chmod +x /usr/local/bin/sops; then
             log_error "Failed to set SOPS permissions"
             return 1
@@ -365,7 +436,7 @@ setup_firewall() {
     return 0
 }
 
-# STANDARDIZED: Template-based environment file creation - returns exit code
+# ENHANCED: Template-based environment file creation with SSH log detection - returns exit code
 create_env_file() {
     log_info "Creating environment configuration file (.env)..."
 
@@ -401,12 +472,17 @@ create_env_file() {
     user_id=$(id -u "$real_user")
     group_id=$(id -g "$real_user")
 
+    # ENHANCED: Detect platform-specific SSH log path
+    local detected_ssh_log_path
+    detected_ssh_log_path=$(detect_ssh_log_path)
+
     # Populate template values using sed
     if ! sed -i "s/DOMAIN=.*/DOMAIN=$DOMAIN/" "$env_file" || \
        ! sed -i "s/ADMIN_EMAIL=.*/ADMIN_EMAIL=$ADMIN_EMAIL/" "$env_file" || \
        ! sed -i "s/PUID=.*/PUID=$user_id/" "$env_file" || \
        ! sed -i "s/PGID=.*/PGID=$group_id/" "$env_file" || \
-       ! sed -i "s/SMTP_FROM=.*/SMTP_FROM=noreply@$DOMAIN/" "$env_file"; then
+       ! sed -i "s/SMTP_FROM=.*/SMTP_FROM=noreply@$DOMAIN/" "$env_file" || \
+       ! sed -i "s|SSH_LOG_PATH=.*|SSH_LOG_PATH=$detected_ssh_log_path|" "$env_file"; then
         log_error "Failed to populate .env template values"
         return 1
     fi
@@ -430,6 +506,7 @@ create_env_file() {
     fi
 
     log_success "Environment file created from template: $env_file"
+    log_success "SSH log path configured: $detected_ssh_log_path"
 
     # Show what needs manual configuration
     log_warn "MANUAL CONFIGURATION REQUIRED:"
@@ -474,7 +551,7 @@ setup_directories() {
             log_error "Failed to create directory: $dir"
             return 1
         fi
-        
+
         if ! chown "$real_user:$real_group" "$dir"; then
             log_error "Failed to set ownership for directory: $dir"
             return 1
@@ -831,7 +908,7 @@ cleanup_setup_deps() {
 
 # ENHANCED: Main function with proper error handling and exit strategy
 main() {
-    log_header "VaultWarden-OCI Setup - Template-Based Configuration"
+    log_header "VaultWarden-OCI Setup - Enhanced with OCI/Oracle Linux Compatibility"
 
     if [[ -z "$DOMAIN" ]] || [[ -z "$ADMIN_EMAIL" ]]; then 
         log_error "Domain and Email are required."
@@ -869,9 +946,9 @@ main() {
     for phase_info in "${setup_phases[@]}"; do
         local phase_func="${phase_info%%:*}"
         local phase_name="${phase_info##*:}"
-        
+
         log_info "=== Phase: $phase_name ==="
-        
+
         if ! $phase_func; then
             failed_phases+=("$phase_name")
             log_error "Phase failed: $phase_name"
@@ -886,19 +963,24 @@ main() {
         for failed_phase in "${failed_phases[@]}"; do
             log_error "  - $failed_phase"
         done
-        
+
         log_info "You may need to manually complete the failed phases and re-run setup."
         exit 1
     fi
 
     # Final success summary
-    log_header "Setup Complete - Template-Based Configuration"
+    log_header "Setup Complete - OCI/Oracle Linux Compatible Configuration"
     echo "Your VaultWarden instance is configured with:"
     echo ""
     echo "✅ Template-Based Configuration:"
     echo "   - docker-compose.yml copied from docker-compose.yml.example"  
     echo "   - .env file populated from .env.example template"
     echo "   - Easy maintenance via template files"
+    echo ""
+    echo "✅ OCI/Oracle Linux Compatibility:"
+    echo "   - Automatic SSH log path detection and configuration"
+    echo "   - Platform-specific security log monitoring"
+    echo "   - Universal Fail2Ban SSH protection"
     echo ""
     echo "✅ Caddy-Cloudflare Integration:"
     echo "   - DNS-01 ACME challenges for SSL certificates"  
@@ -921,11 +1003,13 @@ main() {
     echo "   3. Start services: make up"
     echo "   4. Setup automation: sudo ./cron-setup.sh --install"
     echo "   5. Create emergency access: make breakglass-create"
+    echo "   6. Validate SSH logs: ./validate-ssh-logs.sh"
     echo ""
     echo "🔐 Security: Your secrets are encrypted with Age + SOPS"
     echo "🌐 Domain: https://$DOMAIN"
     echo "📧 Admin: $ADMIN_EMAIL"
-    
+    echo "🔒 SSH Logs: Auto-configured for your platform"
+
     exit 0
 }
 
