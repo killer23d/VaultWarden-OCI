@@ -22,6 +22,7 @@
             roll_size 50MB      # Increased from 10MB
             roll_keep 20        # Increased from 5 files
             roll_keep_for 30d   # Keep for 30 days regardless of file count
+           
             roll_local_time true # ENHANCED: Rotate at midnight local time for predictable daily logs
         }
         format json {
@@ -29,6 +30,7 @@
             time_format "2006-01-02T15:04:05.000Z07:00"
             message_key "msg"
             level_key "level"
+            
             time_key "timestamp"
             name_key "logger"
             caller_key "caller"
@@ -40,7 +42,8 @@
 
     # ENHANCED: Stricter rate limiting for password manager security
     rate_limit {
-        zone static_rl {
+     
+       zone static_rl {
             key {remote_host}
             window 1m
             capacity 20         # Reduced from 60 - stricter for password manager
@@ -48,6 +51,7 @@
 
         zone admin_rl {
             key {remote_host}
+        
             match /admin*
             window 1m  
             capacity 5          # Reduced from 10 - very strict for admin panel
@@ -56,6 +60,7 @@
         # NEW: API endpoint rate limiting for authentication attempts
         zone api_auth_rl {
             key {remote_host}
+ 
             match_path /api/accounts/prelogin /identity/accounts/prelogin /identity/connect/token
             window 5m
             capacity 10         # Allow 10 auth attempts per 5 minutes per IP
@@ -83,16 +88,19 @@
     # Admin panel protection with enhanced logging
     @admin path /admin*
     handle @admin {
+  
         # Enhanced logging for admin access attempts with predictable rotation
         log {
             output file /logs/admin_access.log {
                 roll_size 25MB      # Dedicated admin log with good retention
                 roll_keep 30        # Keep 30 files for forensic analysis
+ 
                 roll_keep_for 90d   # Keep admin logs for 90 days
                 roll_local_time true # ENHANCED: Daily rotation at midnight
             }
             format json {
                 time_format "2006-01-02T15:04:05.000Z07:00"
+         
                 message_key "admin_access"
             }
             level INFO
@@ -110,6 +118,7 @@
         reverse_proxy vaultwarden_app:80 {
             header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
             header_up X-Forwarded-For {http.request.header.Cf-Connecting-Ip}
+       
             header_up X-Request-ID {http.request.header.X-Request-ID}
         }
     }
@@ -120,10 +129,12 @@
         # Dedicated authentication log for security monitoring with predictable rotation
         log {
             output file /logs/auth_attempts.log {
+               
                 roll_size 25MB      # Dedicated auth log
                 roll_keep 30        # High retention for security analysis
                 roll_keep_for 90d   # Keep auth logs for 90 days
                 roll_local_time true # ENHANCED: Daily rotation at midnight
+          
             }
             format json {
                 time_format "2006-01-02T15:04:05.000Z07:00"
@@ -133,6 +144,7 @@
         }
 
         reverse_proxy vaultwarden_app:80 {
+       
             header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
             header_up X-Forwarded-For {http.request.header.Cf-Connecting-Ip}
             header_up X-Request-ID {http.request.header.X-Request-ID}
@@ -143,7 +155,8 @@
     # Main application with enhanced security monitoring
     handle {
         # Block malicious user agents with forensic logging
-        @malicious_ua header User-Agent *sqlmap* *nikto* *nmap* *acunetix* *dirbuster* *gobuster* *wfuzz*
+        @malicious_ua 
+            header User-Agent *sqlmap* *nikto* *nmap* *acunetix* *dirbuster* *gobuster* *wfuzz*
         handle @malicious_ua {
             log {
                 output file /logs/security_blocks.log {
@@ -153,12 +166,14 @@
                     roll_local_time true # ENHANCED: Daily rotation at midnight
                 }
                 format json {
+         
                     time_format "2006-01-02T15:04:05.000Z07:00"
                     message_key "security_block"
                 }
                 level WARN
             }
             respond "Access Denied - Security Policy Violation" 403
+   
         }
 
         # WebSocket support for live sync (uncomment if WEBSOCKET_ENABLED=true in .env)
@@ -168,6 +183,7 @@
         #     path /notifications/hub*
         # }
         # handle @websocket {
+   
         #     reverse_proxy vaultwarden_app:3012 {
         #         header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
         #         header_up X-Forwarded-For {http.request.header.Cf-Connecting-Ip}
@@ -176,6 +192,7 @@
 
         reverse_proxy vaultwarden_app:80 {
             header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
+    
             header_up X-Forwarded-For {http.request.header.Cf-Connecting-Ip}
             header_up X-Request-ID {http.request.header.X-Request-ID}
         }
@@ -210,7 +227,8 @@ www.{$DOMAIN} {
             time_format "2006-01-02T15:04:05.000Z07:00"
             message_key "unauthorized_access"
         }
-        level WARN
+        level 
+            WARN
     }
 
     respond "Not Found" 404
