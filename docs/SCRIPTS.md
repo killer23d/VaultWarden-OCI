@@ -30,15 +30,16 @@ sudo ./setup.sh --force --validate
 ```
 
 ### health.sh
-- Purpose: System health diagnostics with auto-heal
+- Purpose: System health diagnostics and monitoring
 - Highlights:
   - Container status, resource checks, backup verification
   - JSON output for monitoring systems
+  - Email notifications for critical issues
 - Usage:
 ```bash
 ./health.sh --comprehensive
 ./health.sh --json
-./health.sh --auto-heal
+./health.sh --comprehensive --email
 ```
 
 ## Backups & Recovery
