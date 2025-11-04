@@ -159,7 +159,7 @@ All configuration files are managed through templates for easier maintenance:
 |--------|---------|-------------|----------|
 | `./setup.sh` | One-time system setup | Template-based config generation, UFW validation | Once |
 | `./startup.sh` | Start/stop/restart services | Enhanced secret handling, race condition fixes | As needed |
-| `./health.sh` | System health monitoring | Auto-repair, comprehensive diagnostics | Automated |
+| `./health.sh` | System health monitoring | Comprehensive diagnostics, JSON output | Automated |
 | `./backup.sh` | Create encrypted backups | Atomic operations, integrity verification | Daily (automated) |
 | `./restore.sh` | Restore from encrypted backups | Interactive selection, validation | Emergency |
 
