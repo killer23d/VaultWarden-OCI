@@ -2,6 +2,7 @@
 # cron-setup.sh - Secure VaultWarden cron job management with centralized security functions
 # ENHANCED: Uses lib/security.sh for centralized security validation
 # ENHANCED: Eliminates code duplication and improves maintainability
+# UPDATED: Differentiated daily (fast) and weekly (full) backup verification
 
 set -euo pipefail
 
@@ -49,11 +50,10 @@ SECURITY FEATURES:
     - Implements secure logging with proper permissions
 
 CRON JOBS MANAGED:
-    - Database maintenance (daily at 02:00)
-    - System backup (daily at 03:00) 
+    - Daily DB backup (fast verification)
+    - Weekly Full backup (comprehensive verification)
     - Health monitoring (every 30 minutes)
-    - Log rotation (weekly)
-    - Firewall updates (weekly)
+    - Maintenance & Firewall (weekly)
 
 EXAMPLES:
     sudo ./cron-setup.sh --install     # Install secure cron jobs
@@ -285,19 +285,19 @@ install_cron_jobs() {
 
     local cron_jobs=(
         # Daily maintenance at 2 AM
-        "0 2 * * * $CRON_SCRIPTS_DIR/maintenance.sh --comprehensive >> $CRON_LOG_DIR/maintenance.log 2>&1"
+        "0 2 * * * cd $PROJECT_ROOT && $CRON_SCRIPTS_DIR/maintenance.sh --comprehensive >> $CRON_LOG_DIR/maintenance.log 2>&1"
 
-        # Daily backup at 3 AM
-        "0 3 * * * $CRON_SCRIPTS_DIR/backup.sh --type db --rclone >> $CRON_LOG_DIR/backup.log 2>&1"
+        # Daily database backup with fast verification
+        "0 3 * * * cd $PROJECT_ROOT && $CRON_SCRIPTS_DIR/backup.sh --type db --rclone --email >> $CRON_LOG_DIR/backup.log 2>&1"
 
         # Health check every 30 minutes
-        "*/30 * * * * $CRON_SCRIPTS_DIR/health.sh --quiet >> $CRON_LOG_DIR/health.log 2>&1"
+        "*/30 * * * * cd $PROJECT_ROOT && $CRON_SCRIPTS_DIR/health.sh --quiet >> $CRON_LOG_DIR/health.log 2>&1"
 
         # Weekly firewall update (Sunday at 4 AM)
-        "0 4 * * 0 $CRON_SCRIPTS_DIR/maintenance.sh --update-firewall >> $CRON_LOG_DIR/firewall.log 2>&1"
+        "0 4 * * 0 cd $PROJECT_ROOT && $CRON_SCRIPTS_DIR/maintenance.sh --update-firewall >> $CRON_LOG_DIR/firewall.log 2>&1"
 
-        # Weekly full backup (Sunday at 5 AM)
-        "0 5 * * 0 $CRON_SCRIPTS_DIR/backup.sh --type full --rclone >> $CRON_LOG_DIR/backup.log 2>&1"
+        # Weekly full backup with comprehensive verification (Sundays at 5 AM)
+        "0 5 * * 0 cd $PROJECT_ROOT && $CRON_SCRIPTS_DIR/backup.sh --type full --full-verification --rclone --email >> $CRON_LOG_DIR/backup.log 2>&1"
     )
 
     # Install cron jobs securely
@@ -345,6 +345,12 @@ install_cron_jobs() {
     fi
 
     log_success "Secure cron jobs installation completed"
+    log_info "Installed cron jobs:"
+    log_info "  Daily (2 AM): Comprehensive maintenance"
+    log_info "  Daily (3 AM): Database backup with fast verification"
+    log_info "  Weekly (Sun 4 AM): Firewall update"
+    log_info "  Weekly (Sun 5 AM): Full backup with comprehensive verification"
+    log_info "  Every 30 min: Health check"
     return 0
 }
 
