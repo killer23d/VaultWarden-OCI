@@ -12,6 +12,7 @@ VaultWarden-OCI's current architecture supports advanced customizations through:
 - **Atomic Operations**: Preserve backup integrity and system reliability
 - **Forensic Logging**: Work with enhanced 3GB log retention system
 - **Emergency Access**: Maintain break-glass admin compatibility
+- **Containerized Email**: Use the msmtpd relay for decoupled SMTP by default (host msmtp-mta optional)
 
 ## Current Template Structure
 
@@ -19,7 +20,7 @@ VaultWarden-OCI's current architecture supports advanced customizations through:
 ```
 📁 Template Architecture
 ├── docker-compose.yml.example          # Service definitions with resource limits
-├── docker-compose.override.yml.example # Optional email decoupling
+├── docker-compose.override.yml.example # Optional email decoupling (msmtpd)
 ├── .env.example                        # Environment variables
 ├── Generated Files (never edit directly):
 │   ├── docker-compose.yml              # Generated with resource limits
@@ -89,6 +90,16 @@ services:
         reservations:
           memory: 128M                              # Minimum for processing
           cpus: '0.05'                             # 5% guaranteed
+
+  msmtpd:
+    deploy:
+      resources:
+        limits:
+          memory: ${MSMTPD_MEMORY_LIMIT:-32M}       # Lightweight relay
+          cpus: '${MSMTPD_CPU_LIMIT:-0.05}'         # 5% single CPU
+        reservations:
+          memory: 8M                                # Minimal reservation
+          cpus: '0.01'                              # Minimal CPU
 ```
 
 ### Environment Template Extensions (Current)
@@ -102,6 +113,8 @@ CADDY_MEMORY_LIMIT=1G
 CADDY_CPU_LIMIT=0.3
 FAIL2BAN_MEMORY_LIMIT=512M
 FAIL2BAN_CPU_LIMIT=0.2
+MSMTPD_MEMORY_LIMIT=32M
+MSMTPD_CPU_LIMIT=0.05
 
 # Enhanced security settings (current)
 PASSWORD_ITERATIONS=350000
@@ -462,6 +475,6 @@ test_current_customizations() {
 
 ---
 
-**Current Customization Status**: This guide reflects the current VaultWarden-OCI implementation with resource optimization for 6GB systems, dual CF+UFW security, enhanced forensic logging (3GB capacity), atomic backup operations, and centralized security validation. All customizations should preserve these current architectural decisions while extending functionality.
+**Current Customization Status**: This guide reflects the current VaultWarden-OCI implementation with resource optimization for 6GB systems, dual CF+UFW security, enhanced forensic logging (3GB capacity), atomic backup operations, containerized email via msmtpd, and centralized security validation. All customizations should preserve these current architectural decisions while extending functionality.
 
 Remember: Test all customizations thoroughly in a development environment before applying to production. The current template-based system provides a solid foundation for safe, reliable customizations.
