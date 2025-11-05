@@ -32,7 +32,7 @@ All configuration files are generated from enhanced templates:
 ### Current Template Benefits
 - **Resource Management**: Container limits optimized for 6GB systems
 - **Enhanced Security**: Comprehensive validation and hardening
-- **Email Decoupling**: Optional SSMTP container for portability
+- **Email Integration**: Containerized msmtpd for reliable email delivery
 - **Forensic Logging**: Enhanced log retention and structured JSON
 - **Version Control Safe**: No secrets embedded in templates
 - **Validation Ready**: Full syntax and dependency checking
@@ -115,28 +115,34 @@ BACKUP_ATOMIC_OPERATIONS=true           # Use atomic backup operations
 VAULTWARDEN_VERSION=1.30.5             # Pin to stable version
 CADDY_VERSION=2.8.4-cloudflare         # Pin with Cloudflare module  
 FAIL2BAN_VERSION=1.1.0                 # Pin to stable version
+MSMTPD_VERSION=1.0.0                   # Pin msmtpd version for stability
 
 # Development Mode (Latest Versions)
 # Set by setup.sh --use-latest (versions commented out)
 #VAULTWARDEN_VERSION=1.30.5            # Commented = use latest
 #CADDY_VERSION=2.8.4-cloudflare        # Commented = use latest
 #FAIL2BAN_VERSION=1.1.0                # Commented = use latest
+#MSMTPD_VERSION=1.0.0                  # Commented = use latest
 ```
 
 ### Enhanced Email Configuration
 
 ```bash
-# SMTP Settings for Notifications (Optional)
+# SMTP Settings for Notifications (containerized via msmtpd)
 SMTP_HOST=smtp.gmail.com               # SMTP server
 SMTP_PORT=587                          # SMTP port (587 for STARTTLS)
 SMTP_FROM=vaultwarden@yourdomain.com   # From address
 SMTP_FROM_NAME=VaultWarden-Notifications # Display name
 SMTP_USERNAME=your_email@gmail.com     # SMTP username
-SMTP_SECURITY=starttls                 # Security method
+SMTP_SECURITY=starttls                 # Security method (starttls/on)
+SMTP_STARTTLS=on                       # Enable STARTTLS
+SMTP_TLS_CHECKCERT=on                  # Verify TLS certificates
+SMTP_AUTH=on                           # Enable SMTP authentication
 # SMTP_PASSWORD configured in encrypted secrets
 
-# Email Decoupling (Optional - uses override template)
-USE_SSMTP_CONTAINER=false              # Enable dedicated SSMTP container
+# msmtpd Configuration
+# The msmtpd container provides containerized email relay functionality
+# replacing host-based mailutil dependencies for better portability
 ```
 
 ## Enhanced Secrets Management
@@ -179,7 +185,7 @@ fail2ban_cloudflare_firewall_token: "your_firewall_management_token"
 
 #### Optional Secrets (Enhanced)
 ```yaml
-# SMTP password for email notifications
+# SMTP password for msmtpd email notifications
 smtp_password: "your_smtp_password"
 
 # Bitwarden push notifications (optional)
@@ -240,6 +246,42 @@ DATABASE_URL=data/db.sqlite3          # Database path (relative to container)
 # - Integrity checking before operations
 ```
 
+### Enhanced msmtpd Email Configuration
+
+#### Containerized Email Relay
+The msmtpd container provides lightweight SMTP relay functionality:
+
+```yaml
+# Located in: docker-compose.yml.example
+msmtpd:
+  container_name: vaultwarden_msmtpd
+  image: crazymax/msmtpd:${MSMTPD_VERSION:-1.0.0}
+  restart: unless-stopped
+  environment:
+    - SMTP_HOST=${SMTP_HOST:-}
+    - SMTP_PORT=${SMTP_PORT:-587}
+    - SMTP_TLS=${SMTP_SECURITY:-on}
+    - SMTP_STARTTLS=${SMTP_STARTTLS:-on}
+    - SMTP_TLS_CHECKCERT=${SMTP_TLS_CHECKCERT:-on}
+    - SMTP_AUTH=${SMTP_AUTH:-on}
+    - SMTP_USER=${SMTP_USERNAME:-}
+    - SMTP_PASSWORD_FILE=/run/secrets/smtp_password
+    - SMTP_FROM=${SMTP_FROM:-}
+    - TZ=${TZ:-UTC}
+  deploy:
+    resources:
+      limits:
+        memory: 32M     # Very lightweight SMTP relay
+        cpus: '0.05'    # 5% of single CPU
+```
+
+#### Benefits of msmtpd Container
+- **No host dependencies**: Eliminates need for host mailutil packages
+- **Containerized security**: Isolated email functionality
+- **Resource efficient**: Only 32MB memory limit
+- **Configuration consistency**: Same environment variables across containers
+- **Easy troubleshooting**: Dedicated container logs for email issues
+
 ### Enhanced Caddy Configuration
 
 #### Enhanced Logging and Forensics
@@ -293,6 +335,16 @@ rate_limit {
 # - UFW fallback if Cloudflare API fails
 # - Transactional ban/unban operations
 # - Comprehensive logging and status reporting
+```
+
+#### Enhanced Email Notifications
+```ini
+# Located in: fail2ban/action.d/smtp.conf
+# Uses msmtpd container for email notifications:
+# - Containerized email delivery
+# - Consistent SMTP configuration
+# - Improved reliability over host-based solutions
+# - Enhanced logging and error handling
 ```
 
 #### Enhanced Filter Configuration (No Dependencies)
@@ -365,17 +417,20 @@ grep -A 5 -B 5 "memory:\|cpus:" docker-compose.yml.example
 
 ### Template Customization Examples
 
-#### Email Decoupling (Optional)
+#### Email Configuration via msmtpd
 ```bash
-# Enable email decoupling using override template
-cp docker-compose.override.yml.example docker-compose.override.yml
-
-# Configure SMTP settings in .env
+# msmtpd is included by default in docker-compose.yml.example
+# Configure SMTP settings in .env:
 SMTP_HOST=smtp.gmail.com
 SMTP_PORT=587
+SMTP_SECURITY=starttls
 # ... (other SMTP settings)
 
-# Restart to apply email decoupling
+# Configure SMTP password in secrets:
+./edit-secrets.sh
+# Set: smtp_password
+
+# Restart to apply email configuration
 docker compose up -d
 ```
 
@@ -528,6 +583,7 @@ RCLONE_REMOTE_NAME=your_secure_remote
 4. **Atomic operations**: Backup and maintenance operations prevent corruption
 5. **Comprehensive monitoring**: Use comprehensive health checks with diagnostics
 6. **Forensic logging**: 3GB log capacity for incident investigation
+7. **Containerized email**: msmtpd eliminates host dependencies
 
 ### Enhanced Security Configuration
 
@@ -537,6 +593,7 @@ RCLONE_REMOTE_NAME=your_secure_remote
 4. **Enhanced firewall**: Safe Cloudflare IP updates with race condition fixes
 5. **Secure automation**: Cron scripts validated for privilege escalation risks
 6. **Enhanced emergency access**: Break-glass admin with comprehensive security
+7. **Email security**: Containerized SMTP relay with secure configuration
 
 ### Enhanced Operational Excellence
 
@@ -546,7 +603,8 @@ RCLONE_REMOTE_NAME=your_secure_remote
 4. **Comprehensive health**: Use comprehensive diagnostics for status
 5. **Enhanced recovery**: Multiple backup types with integrity verification
 6. **Forensic readiness**: Enhanced logging for incident investigation
+7. **Email reliability**: Containerized msmtpd for consistent email delivery
 
 ---
 
-This enhanced configuration guide reflects the current state of VaultWarden-OCI with comprehensive resource management, advanced security features, enhanced operational capabilities, and forensic logging optimized for small teams requiring reliable, maintainable password management infrastructure.
+This enhanced configuration guide reflects the current state of VaultWarden-OCI with comprehensive resource management, advanced security features, enhanced operational capabilities, containerized email functionality via msmtpd, and forensic logging optimized for small teams requiring reliable, maintainable password management infrastructure.
