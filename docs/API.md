@@ -127,6 +127,11 @@ curl "https://vault.yourdomain.com/api/config"
 # Current enhanced listing
 ./backup.sh --list
 # Shows: ID, type, date, time, size, integrity status
+
+# Optional email notifications on completion/errors (via msmtpd)
+./backup.sh --type db --email
+./backup.sh --type full --rclone --email
+./backup.sh --type emergency --email
 ```
 
 #### Current Programmatic Output  
