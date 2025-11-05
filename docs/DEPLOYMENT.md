@@ -62,7 +62,7 @@ All configuration files are managed through templates with enhanced features:
 ├── fail2ban/
 │   ├── action.d/
 │   │   ├── cloudflare-apiv4.conf      # Dual CF+UFW action (optimized)
-│   │   └── sendmail-whois.conf        # Email notifications
+│   │   └── smtp.conf                  # Email notifications (msmtpd)
 │   ├── filter.d/                      # Regex-based filters (no dependencies)
 │   │   ├── vaultwarden-auth.conf      # Authentication failures
 │   │   ├── vaultwarden-admin.conf     # Admin panel attacks
@@ -80,7 +80,7 @@ All configuration files are managed through templates with enhanced features:
 
 ✅ **Resource Optimization** - Container limits for 6GB systems  
 ✅ **Enhanced Security** - Comprehensive validation and hardening  
-✅ **Email Decoupling** - Optional SSMTP container for portability  
+✅ **Email Decoupling** - Optional msmtpd container for portability  
 ✅ **Forensic Logging** - Enhanced log retention (3GB vs previous 50MB)  
 ✅ **Version Control Safe** - No secrets in templates  
 ✅ **Testable Configuration** - Full validation before deployment  
@@ -116,7 +116,7 @@ All configuration files are managed through templates with enhanced features:
 sudo apt update && sudo apt upgrade -y
 
 # Install required dependencies
-sudo apt install -y curl wget git nano ufw fail2ban mailutils
+sudo apt install -y curl wget git nano ufw fail2ban msmtp-mta
 
 # Set timezone for consistent logging
 sudo timedatectl set-timezone UTC
@@ -204,6 +204,7 @@ RCLONE_REMOTE_NAME=your_remote_name        # Configure with: rclone config
 VAULTWARDEN_VERSION=1.30.5                # Stable release
 CADDY_VERSION=2.8.4-cloudflare           # With Cloudflare module
 FAIL2BAN_VERSION=1.1.0                    # Enhanced fail2ban
+MSMTPD_VERSION=1.0.0                      # msmtpd relay
 ```
 
 ##### 3. Enhanced Secrets Configuration
@@ -350,12 +351,14 @@ rclone config
 - **VaultWarden**: 2GB memory limit, 0.6 CPU (60% of single CPU)
 - **Caddy**: 1GB memory limit, 0.3 CPU (30% of single CPU)  
 - **Fail2Ban**: 512MB memory limit, 0.2 CPU (20% of single CPU)
-- **Total**: ~3.5GB allocated, 2.5GB for host OS and buffers
+- **msmtpd**: 32MB memory limit, 0.05 CPU (5% of single CPU)
+- **Total**: ~3.53GB allocated, remainder for host OS and buffers
 
 #### Memory Reservations
 - **VaultWarden**: 512MB guaranteed minimum
 - **Caddy**: 256MB guaranteed minimum
 - **Fail2Ban**: 128MB guaranteed minimum
+- **msmtpd**: 8MB guaranteed minimum
 
 ### Enhanced Fail2Ban with Dual Actions
 
