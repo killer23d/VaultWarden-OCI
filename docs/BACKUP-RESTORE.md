@@ -32,7 +32,7 @@ rclone config                   # Setup remote storage
 ### Three-Tier Backup System
 
 | Backup Type | Contents | Frequency | Retention | Use Case |
-|-------------|----------|-----------|-----------|----------|
+|-------------|----------|-----------|----------|----------|
 | **Database** | SQLite database only | Daily (automated) | 14 days | Quick data recovery |
 | **Full System** | Templates + config + data | Weekly (automated) | 30 days | System restoration |
 | **Emergency Kit** | Self-contained recovery | Manual/as-needed | 90 days | Disaster recovery |
@@ -45,6 +45,7 @@ rclone config                   # Setup remote storage
 - **Tamper Prevention**: Authenticated encryption
 - **Key Management**: Separate Age keys
 - **Remote Sync**: rclone integration
+- **Notifications**: Optional email on completion/errors (via msmtpd)
 
 ## Backup Operations (Current)
 
@@ -59,20 +60,20 @@ rclone config                   # Setup remote storage
 # Automated daily at 3:00 AM via cron-setup.sh
 ./backup.sh --type db
 ./backup.sh --type db --rclone
-./backup.sh --type db --email
+./backup.sh --type db --email   # Email sent via msmtpd
 ```
 
 ### Full System Backups (Atomic)
 ```bash
 # Automated weekly on Sunday 1:00 AM
 ./backup.sh --type full
-./backup.sh --type full --rclone --email
+./backup.sh --type full --rclone --email  # Email via msmtpd
 ```
 
 ### Emergency Kits (Comprehensive)
 ```bash
 ./backup.sh --type emergency
-./backup.sh --type emergency --rclone --email
+./backup.sh --type emergency --rclone --email  # Email via msmtpd
 ```
 
 ## Restore Operations (Current)
@@ -141,6 +142,7 @@ age -d -i secrets/keys/age-key.txt db-backup.age | gunzip | sqlite3 :memory: "PR
 - Secure keys separately
 - Include templates in emergency kits
 - Test restore quarterly
+- Enable email notifications where helpful (msmtpd)
 
 ### Security
 - Store Age private keys offline copies
