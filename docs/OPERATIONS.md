@@ -253,6 +253,20 @@ curl -f https://$DOMAIN/alive
 - Monthly: Health, maintenance, backups, security review
 - Quarterly: DR tests, template review, resource tuning
 
+## Email Troubleshooting (msmtpd)
+```bash
+# Check msmtpd container logs
+docker compose logs msmtpd --tail=200
+
+# Verify msmtpd is listening locally
+docker compose exec msmtpd nc -z localhost 1025 || echo "msmtpd not listening on 1025"
+
+# Confirm SMTP environment values
+grep -E "^SMTP_(HOST|PORT|SECURITY|STARTTLS|TLS_CHECKCERT|AUTH|USERNAME|FROM)=" .env || true
+
+# Re-test from VaultWarden admin panel (Admin → SMTP → Send Test Email)
+```
+
 ---
 
-This operations guide reflects the current project state with template-based configuration, resource-aware deployment, dual Cloudflare+UFW protection, and enhanced automation designed for reliable, low-touch operations.
+This operations guide reflects the current project state with template-based configuration, resource-aware deployment, dual Cloudflare+UFW protection, containerized email via msmtpd, and enhanced automation designed for reliable, low-touch operations.
