@@ -34,7 +34,7 @@ sudo ./setup.sh --force --validate
 - Highlights:
   - Container status, resource checks, backup verification
   - JSON output for monitoring systems
-  - Email notifications for critical issues
+  - Email notifications for critical issues (via msmtpd)
 - Usage:
 ```bash
 ./health.sh --comprehensive
@@ -48,7 +48,7 @@ sudo ./setup.sh --force --validate
 - Purpose: Create encrypted backups using atomic operations
 - Highlights:
   - Types: db, full, emergency
-  - rclone integration, email notifications, verification
+  - rclone integration, email notifications (msmtpd), verification
 - Usage:
 ```bash
 ./backup.sh --type db [--rclone|--email]
@@ -135,4 +135,4 @@ sudo ./db-maint.sh --optimize-safe
 
 ---
 
-All scripts share common logging and utilities via lib/common.sh and security validation via lib/security.sh, ensuring consistent behavior and easier maintenance.
+All scripts share common logging and utilities via lib/common.sh and security validation via lib/security.sh, ensuring consistent behavior and easier maintenance. The default email relay is the msmtpd container; host msmtp-mta can be used optionally if preferred.
