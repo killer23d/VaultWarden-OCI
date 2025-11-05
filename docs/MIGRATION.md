@@ -11,6 +11,7 @@ The current VaultWarden-OCI system provides:
 - **Centralized Security**: lib/security.sh validation functions
 - **Emergency Access**: Break-glass admin with validation
 - **Consistent Deployments**: Same templates, identical configurations
+- **Containerized Email**: msmtpd relay by default (host msmtp-mta optional)
 
 ## Current Migration Types
 
@@ -30,7 +31,7 @@ docker stats --no-stream
 docker compose logs fail2ban | grep -E "CF|UFW|Rate"
 
 # Create comprehensive backup with current atomic operations
-./backup.sh --type emergency --rclone --email
+./backup.sh --type emergency --rclone --email  # (email via msmtpd)
 ```
 
 #### Current Migration Steps
@@ -62,7 +63,7 @@ Moving to new server with current enhanced architecture:
 #### Current Source Server Preparation
 ```bash
 # Create current emergency kit with templates
-./backup.sh --type emergency --rclone --email
+./backup.sh --type emergency --rclone --email  # (email via msmtpd)
 
 # Document current enhanced configuration
 docker compose config > migration-current-config.yml
@@ -151,6 +152,7 @@ nano .env.example
 # VAULTWARDEN_MEMORY_LIMIT=2G
 # CADDY_MEMORY_LIMIT=1G  
 # FAIL2BAN_MEMORY_LIMIT=512M
+# MSMTPD_MEMORY_LIMIT=32M
 
 # 4. Apply current resource-optimized templates
 sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.com
@@ -177,6 +179,7 @@ nano .env.example
 # VAULTWARDEN_VERSION=1.30.5
 # CADDY_VERSION=2.8.4-cloudflare
 # FAIL2BAN_VERSION=1.1.0
+# MSMTPD_VERSION=1.0.0
 
 # 3. Apply current template updates
 sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.com
@@ -288,6 +291,7 @@ docker compose ps --format "table {{.Service}}\t{{.Image}}"
 - Atomic backup operations with template integration
 - Centralized security validation (lib/security.sh)
 - Break-glass emergency access with comprehensive validation
+- Containerized email via msmtpd for notifications
 
 All migration procedures work within the current enhanced architecture optimized for reliable, secure operation in small team environments.
 
