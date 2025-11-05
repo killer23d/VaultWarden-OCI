@@ -83,7 +83,7 @@ All configuration files are managed through templates for easier maintenance:
 ├── fail2ban/
 │   ├── action.d/
 │   │   ├── cloudflare-apiv4.conf      # Advanced CF+UFW dual action
-│   │   └── sendmail-whois.conf        # Email notification action
+│   │   └── smtp.conf                  # Email notification action
 │   ├── filter.d/                      # Comprehensive filter configurations
 │   │   ├── vaultwarden-auth.conf      # Authentication failure detection
 │   │   ├── vaultwarden-admin.conf     # Admin panel protection
@@ -131,11 +131,12 @@ All configuration files are managed through templates for easier maintenance:
 └─────────────────────────────────────────┘
 ┌─────────────────────────────────────────┐
 │        Docker Application Stack         │
-│  ┌──────┐  ┌───────────┐                │
-│  │Caddy │→ │VaultWarden│                │
-│  │(SSL) │  │(App)      │ ← 2GB Memory   │
-│  └──────┘  └───────────┘   Limit        │
-│      ↑        1GB Limit                 │
+│  ┌──────┐  ┌───────────┐  ┌──────────┐  │
+│  │Caddy │→ │VaultWarden│  │  msmtpd  │  │
+│  │(SSL) │  │(App)      │  │ (Email)  │  │
+│  └──────┘  └───────────┘  └──────────┘  │
+│      ↑        2GB Limit     32MB Limit  │
+│    1GB Limit                            │
 │  ┌────────┐                             │
 │  │fail2ban│─────────────────────────────┤ Dual CF+UFW Actions
 │  │(Sec)   │     512MB Limit             │ (Advanced filtering)
@@ -350,6 +351,21 @@ curl -X GET "https://api.cloudflare.com/client/v4/zones" \
 
 # Validate filter syntax
 docker compose exec fail2ban fail2ban-regex /var/log/vaultwarden/vaultwarden.log /data/fail2ban/filter.d/vaultwarden-auth.conf
+```
+
+**Email Issues**:
+```bash
+# Check msmtpd container status
+docker compose logs msmtpd
+
+# Test email functionality
+docker compose exec msmtpd nc -z localhost 1025
+
+# View email configuration
+docker compose exec msmtpd cat /etc/msmtprc
+
+# Send test email from VaultWarden admin panel
+# Navigate to: https://vault.yourdomain.com/admin → SMTP Settings → Send Test Email
 ```
 
 ### Emergency Recovery
