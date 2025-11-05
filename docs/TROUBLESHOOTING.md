@@ -48,6 +48,7 @@ docker compose ps
 docker compose logs vaultwarden
 docker compose logs caddy
 docker compose logs fail2ban
+docker compose logs msmtpd
 ```
 
 ### Template Status
@@ -68,11 +69,18 @@ sudo chown -R 1000:1000 /var/lib/vaultwarden/data/
 sudo ./setup.sh --force --domain $DOMAIN --email $ADMIN_EMAIL
 ```
 
-### Template Misconfiguration
+### Email Delivery Issues (msmtpd)
 ```bash
-docker compose config
-sudo ./setup.sh --force --domain $DOMAIN --email $ADMIN_EMAIL
-./startup.sh --force-restart
+# Check msmtpd logs
+docker compose logs msmtpd --tail=200
+
+# Verify msmtpd is listening on 1025
+docker compose exec msmtpd nc -z localhost 1025 || echo "msmtpd not listening"
+
+# Confirm SMTP env values
+grep -E "^SMTP_(HOST|PORT|SECURITY|STARTTLS|TLS_CHECKCERT|AUTH|USERNAME|FROM)=" .env || true
+
+# Retry "Send Test Email" in VaultWarden admin
 ```
 
 ### Fail2Ban / Cloudflare Issues
@@ -146,4 +154,4 @@ sudo ./setup.sh --force --domain $DOMAIN --email $ADMIN_EMAIL
 
 ---
 
-Keep this guide accessible offline. With template-based configuration, dual CF+UFW protection, atomic backups, and break-glass admin, multiple recovery paths exist for rapid incident resolution.
+Keep this guide accessible offline. With template-based configuration, dual CF+UFW protection, atomic backups, containerized email via msmtpd, and break-glass admin, multiple recovery paths exist for rapid incident resolution.
