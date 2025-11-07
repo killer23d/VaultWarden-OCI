@@ -73,7 +73,8 @@ All configuration files are managed through templates with enhanced features:
     ├── common.sh                      # Shared utilities
     ├── crypto.sh                      # Encryption functions
     ├── docker.sh                      # Docker management
-    └── security.sh                    # Security validation functions
+    ├── security.sh                    # Security validation functions
+    └── backup_utils.sh                # Backup-specific utilities
 ```
 
 ### Enhanced Template Features
@@ -116,7 +117,7 @@ All configuration files are managed through templates with enhanced features:
 sudo apt update && sudo apt upgrade -y
 
 # Install required dependencies
-sudo apt install -y curl wget git nano ufw fail2ban msmtp-mta
+sudo apt install -y curl wget git nano ufw fail2ban
 
 # Set timezone for consistent logging
 sudo timedatectl set-timezone UTC
@@ -146,7 +147,7 @@ ls -la
 
 # Verify library dependencies
 ls -la lib/
-# Should show: common.sh, crypto.sh, docker.sh, security.sh
+# Should show: common.sh, crypto.sh, docker.sh, security.sh, backup_utils.sh
 ```
 
 #### Template-Based Installation with Enhanced Options
@@ -158,7 +159,7 @@ sudo ./setup.sh --domain vault.yourdomain.com --email admin@yourdomain.com --aut
 sudo ./setup.sh --domain vault-dev.yourdomain.com --email dev@yourdomain.com --use-latest
 
 # Forced reinstallation with validation
-sudo ./setup.sh --domain vault.example.com --email admin@example.com --force --validate
+sudo ./setup.sh --domain vault.example.com --email admin@example.com --force
 ```
 
 ### Phase 3: Enhanced Configuration
@@ -194,14 +195,11 @@ TZ=UTC                                     # Timezone consistency
 PUID=1000
 PGID=1000
 
-# Enhanced logging and forensics:
-# (Configured automatically in templates)
-
 # Optional remote backup:
 RCLONE_REMOTE_NAME=your_remote_name        # Configure with: rclone config
 
 # Version pinning (production stability):
-VAULTWARDEN_VERSION=1.30.5                # Stable release
+VAULTWARDEN_VERSION=1.34.3                # Stable release
 CADDY_VERSION=2.8.4-cloudflare           # With Cloudflare module
 FAIL2BAN_VERSION=1.1.0                    # Enhanced fail2ban
 MSMTPD_VERSION=1.0.0                      # msmtpd relay
@@ -222,6 +220,9 @@ MSMTPD_VERSION=1.0.0                      # msmtpd relay
 # - smtp_password: Email notification credentials
 # - push_installation_id/key: Bitwarden push notifications
 
+# Generate bcrypt hash for admin_basic_auth_hash:
+docker run --rm -it ghcr.io/caddybuilds/caddy-cloudflare:latest caddy hash-password
+
 # Enhanced security features:
 # - SOPS key path never exposed in process list
 # - Secure temporary file handling
@@ -238,10 +239,10 @@ docker compose config
 docker compose -f docker-compose.yml.example config
 
 # Test enhanced secrets management
-./edit-secrets.sh --validate
+./edit-secrets.sh --test
 
 # Comprehensive security validation
-./lib/security.sh && echo "Security validation passed"
+bash -c "source lib/security.sh && validate_system_security"
 ```
 
 ### Phase 4: Enhanced Service Deployment
@@ -251,16 +252,20 @@ docker compose -f docker-compose.yml.example config
 # Start all services with enhanced handling
 ./startup.sh
 
+# Or use Makefile
+make start
+
 # Monitor startup with resource awareness
-docker stats --format "table {{.Container}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}"
+docker stats --format "table {{.Container}}\\t{{.CPUPerc}}\\t{{.MemUsage}}\\t{{.MemPerc}}"
 
 # Verify resource limits are applied
-docker compose ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+docker compose ps --format "table {{.Names}}\\t{{.Status}}\\t{{.Ports}}"
 
 # Check service logs
 docker compose logs vaultwarden --follow --tail=50
 docker compose logs caddy --follow --tail=50
 docker compose logs fail2ban --follow --tail=50
+docker compose logs msmtpd --follow --tail=50
 ```
 
 #### Enhanced Health Verification
@@ -268,12 +273,16 @@ docker compose logs fail2ban --follow --tail=50
 # Comprehensive health check with resource monitoring
 ./health.sh --comprehensive
 
+# Or use Makefile
+make health
+
 # Expected output includes:
 # ✅ Docker daemon accessible
 # ✅ All containers running within resource limits  
 # ✅ VaultWarden: 2GB limit, healthy
 # ✅ Caddy: 1GB limit, healthy
 # ✅ Fail2ban: 512MB limit, healthy
+# ✅ msmtpd: 32MB limit, healthy
 # ✅ Memory usage: X% (< 85% threshold)
 # ✅ Enhanced logging operational (3GB capacity)
 # ✅ Dual Cloudflare+UFW blocking functional
@@ -302,15 +311,18 @@ curl -I https://vault.yourdomain.com/
 # Setup enhanced secure automation
 sudo ./cron-setup.sh --install
 
+# Or use Makefile
+make cron-install
+
 # Verify secure cron job installation
 sudo crontab -l | grep vaultwarden
 
 # Enhanced automation includes:
-# - Comprehensive health checks every 30 minutes
-# - Safe database maintenance daily at 2:00 AM
-# - Atomic backups daily at 3:00 AM  
-# - Enhanced firewall updates weekly (Sunday 4:00 AM)
-# - Full system backups weekly (Sunday 5:00 AM)
+# - Daily 2 AM: Database backup with rclone sync
+# - Daily 6 AM: Health checks with email notifications
+# - Weekly Sunday 3 AM: Full backup with verification
+# - Weekly Sunday 4 AM: Container updates
+# - Monthly 1st 5 AM: Comprehensive maintenance
 ```
 
 #### Emergency Access with Enhanced Security
@@ -318,8 +330,12 @@ sudo crontab -l | grep vaultwarden
 # Create break-glass admin with enhanced validation
 ./create-breakglass-admin.sh
 
+# Or use Makefile
+make breakglass-create
+
 # Verify emergency access with security checks
 ./create-breakglass-admin.sh --status
+make breakglass-status
 
 # Test OCI serial console access (if using OCI)
 # Document emergency procedures securely
@@ -332,15 +348,34 @@ sudo crontab -l | grep vaultwarden
 ./backup.sh --type full        # Complete system backup  
 ./backup.sh --type emergency   # Disaster recovery kit
 
+# Or use Makefile
+make backup
+make backup-full
+make backup-emergency
+
 # Enhanced backup listing with detailed information
 ./backup.sh --list
+make list-backups
 
 # Configure remote backups with encryption
 rclone config
 # Update RCLONE_REMOTE_NAME in .env after configuration
 
 # Test backup restoration
-./restore.sh --test
+./restore.sh --dry-run
+```
+
+#### Email Configuration Testing
+```bash
+# Test msmtpd email functionality
+./test-email-simple.sh
+
+# Verbose testing for troubleshooting
+./test-email-simple.sh --verbose
+
+# Check msmtpd container logs
+docker compose logs msmtpd
+make logs SERVICE=msmtpd
 ```
 
 ## Current Enhanced Features
@@ -358,7 +393,7 @@ rclone config
 - **VaultWarden**: 512MB guaranteed minimum
 - **Caddy**: 256MB guaranteed minimum
 - **Fail2Ban**: 128MB guaranteed minimum
-- **msmtpd**: 8MB guaranteed minimum
+- **msmtpd**: Not specified (very lightweight)
 
 ### Enhanced Fail2Ban with Dual Actions
 
@@ -377,7 +412,7 @@ rclone config
 ### Enhanced Logging and Forensics
 
 #### Massive Log Retention Improvement (60x increase)
-- **Main Access Log**: 50MB × 20 files = 1GB total
+- **Main Access Log**: 50MB × 20 files = 1GB total (30-day retention)
 - **Admin Access Log**: 25MB × 30 files = 750MB (90-day retention)
 - **Auth Attempts Log**: 25MB × 30 files = 750MB (90-day retention) 
 - **Security Blocks Log**: 10MB × 50 files = 500MB (180-day retention)
@@ -397,12 +432,21 @@ rclone config
 - **Version Control Safe**: Templates contain no credentials
 - **Consistent Security**: Same security model across all deployments
 
+### msmtpd Containerized Email
+
+#### Benefits Over Host-Based Solutions
+- **No Host Dependencies**: Eliminates mailutil package requirements
+- **Container Isolation**: Dedicated email functionality
+- **Resource Efficient**: Only 32MB memory footprint
+- **Easy Troubleshooting**: Dedicated container logs
+- **Consistent Configuration**: Same environment variables
+
 ## Enhanced Best Practices
 
 ### Template-Based Configuration Management
 
 1. **Edit Templates Only**: Always modify `.example` files, never generated ones
-2. **Use Enhanced Setup**: Apply changes via `./setup.sh --force --validate`  
+2. **Use Enhanced Setup**: Apply changes via `./setup.sh --force`  
 3. **Resource Awareness**: Consider 6GB system limitations in customizations
 4. **Security Validation**: Use `./health.sh --comprehensive` after changes
 5. **Document Customizations**: Maintain clear documentation of template changes
@@ -420,7 +464,7 @@ rclone config
 1. **Atomic Operations**: Use enhanced backup and maintenance operations
 2. **Secure Automation**: Leverage secure cron setup with privilege validation
 3. **Resource Optimization**: Monitor and tune container resource allocation
-4. **Comprehensive Health**: Use detailed health monitoring and auto-repair
+4. **Comprehensive Health**: Use detailed health monitoring and diagnostics
 5. **Enhanced Recovery**: Maintain multiple backup types and test restoration
 
 ### Enhanced Troubleshooting
@@ -443,13 +487,134 @@ free -h && cat /proc/meminfo | grep Available
 docker compose logs fail2ban | grep -E "(cloudflare|ufw)"
 
 # Validate filter regex
-docker compose exec fail2ban fail2ban-regex /var/log/caddy/access.log /data/fail2ban/filter.d/vaultwarden-web-caddy.conf
+docker compose exec fail2ban fail2ban-regex \\
+  /var/log/caddy/access.log \\
+  /data/fail2ban/filter.d/vaultwarden-web-caddy.conf
 
 # Test Cloudflare API connectivity
-curl -X GET "https://api.cloudflare.com/client/v4/zones" \
+curl -X GET "https://api.cloudflare.com/client/v4/zones" \\
      -H "Authorization: Bearer YOUR_TOKEN"
 ```
 
+#### Email Troubleshooting
+```bash
+# Test msmtpd functionality
+./test-email-simple.sh --verbose
+
+# Check msmtpd logs
+docker compose logs msmtpd
+
+# Verify SMTP connectivity
+docker compose exec msmtpd nc -z localhost 1025
+
+# Check msmtpd configuration
+docker compose exec msmtpd cat /etc/msmtprc
+```
+
+#### Template Issues
+```bash
+# Validate template syntax
+docker compose -f docker-compose.yml.example config
+
+# Check for platform-specific issues
+grep -n "platform:" docker-compose.yml.example
+
+# Regenerate from templates
+sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
+```
+
+## Platform-Specific Considerations
+
+### Oracle Cloud Infrastructure (OCI)
+
+**Optimizations**:
+- Auto-detects `/var/log/secure` for SSH logs (Oracle Linux)
+- Break-glass admin designed for OCI serial console
+- Dynamic IP handling with Cloudflare DNS updates
+- Always Free tier resource optimization (6GB RAM)
+
+**Setup**:
+```bash
+# Standard setup auto-detects OCI/Oracle Linux
+sudo ./setup.sh --domain vault.example.com --email admin@example.com --auto
+# SSH_LOG_PATH automatically set to /var/log/secure
+```
+
+### Generic Cloud Providers
+
+**Compatible with**:
+- AWS EC2
+- Google Cloud Compute
+- Azure VM
+- DigitalOcean
+- Linode
+- Hetzner
+- Home servers
+
+**Adjustments**:
+- SSH logs auto-detected (`/var/log/auth.log` on Debian/Ubuntu)
+- Resource limits adjustable in templates
+- Same security and operational model
+
+## Makefile Quick Reference
+
+```bash
+# Service Management
+make start          # Start services
+make stop           # Stop services
+make restart        # Restart with enhanced script
+make status         # Show status
+make logs           # View logs
+
+# Backups
+make backup         # Database backup
+make backup-full    # Full system backup
+make list-backups   # List backups
+make restore        # Interactive restore
+
+# Maintenance
+make health         # Health check
+make update         # Update containers
+make maintenance    # Run maintenance
+
+# Security
+make edit-secrets        # Edit secrets
+make breakglass-create   # Create emergency admin
+make breakglass-status   # Check status
+
+# Automation
+make cron-install   # Install cron jobs
+make cron-list      # List cron jobs
+```
+
+## Post-Deployment Checklist
+
+### Immediate Tasks
+- ✅ Access web vault at https://vault.yourdomain.com
+- ✅ Create admin account
+- ✅ Login to admin panel with bcrypt credentials
+- ✅ Test email notifications
+- ✅ Create test backup and verify
+- ✅ Test break-glass admin access
+- ✅ Verify fail2ban is blocking (check logs)
+
+### Within First Week
+- ✅ Invite team members
+- ✅ Configure organizations (if needed)
+- ✅ Setup mobile/desktop clients
+- ✅ Configure offsite backups with rclone
+- ✅ Test backup restoration
+- ✅ Review logs for any issues
+- ✅ Monitor resource usage
+
+### Ongoing Operations
+- ✅ Weekly: Review health check results
+- ✅ Weekly: Verify backups are completing
+- ✅ Monthly: Test disaster recovery
+- ✅ Monthly: Review security logs
+- ✅ Quarterly: Update containers
+- ✅ Quarterly: Test break-glass admin
+
 ---
 
-This enhanced deployment guide reflects the current state of VaultWarden-OCI with comprehensive resource management, advanced security features, enhanced logging capabilities, and robust operational excellence optimized for small teams on resource-constrained systems.
+This enhanced deployment guide reflects the current state of VaultWarden-OCI with comprehensive resource management, advanced security features, enhanced logging capabilities, containerized email via msmtpd, and robust operational excellence optimized for small teams on resource-constrained systems.
