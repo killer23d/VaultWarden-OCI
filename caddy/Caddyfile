@@ -1,8 +1,5 @@
 {
     # Global ACME DNS configuration
-    # FIXED: Removed {env.CLOUDFLARE_API_TOKEN}
-    # Caddy automatically uses the CLOUDFLARE_API_TOKEN_FILE env var
-    # (set in docker-compose.yml) when this directive is present.
     acme_dns cloudflare
 
     # Global server configuration with automatic Cloudflare IP management
@@ -16,35 +13,26 @@
 
 {$DOMAIN} {
     # ENHANCED: Improved log retention for forensic analysis with predictable rotation
-    # Increased from 10MB/5 files (50MB total) to 50MB/20 files (1GB total)
     log {
         output file /logs/access.log {
-            roll_size 50MB      # Increased from 10MB
-            roll_keep 20        # Increased from 5 files
-            roll_keep_for 30d   # Keep for 30 days regardless of file count
-           
-            roll_local_time true # ENHANCED: Rotate at midnight local time for predictable daily logs
+            roll_size 50MB
+            roll_keep 20
+            roll_keep_for 30d
+            roll_local_time true
         }
         format json {
-            # Enhanced logging for better forensic analysis
             time_format "2006-01-02T15:04:05.000Z07:00"
             message_key "msg"
             level_key "level"
-            
             time_key "timestamp"
             name_key "logger"
             caller_key "caller"
             stacktrace_key "stacktrace"
         }
-        # Log all requests, including successful ones, for forensic analysis
         level INFO
     }
 
-    # CRITICAL FIX: Removed invalid rate_limit block.
-    # This directive requires a third-party plugin that is not in the
-    # caddy-cloudflare image and would cause a startup crash.
-    # Rate limiting is correctly handled by Fail2Ban, which monitors
-    # for 429 (Too Many Requests) statuses in the Caddy logs.
+    # CRITICAL FIX 1: Removed invalid rate_limit block (this was already fixed in your new version)
 
     # Enhanced security headers with forensic considerations
     header {
@@ -54,12 +42,8 @@
         X-XSS-Protection "1; mode=block"
         Referrer-Policy "strict-origin-when-cross-origin"
         Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: https:; frame-src 'self'; object-src 'none'; base-uri 'self';"
-
-        # ENHANCED: Security headers for forensic tracking
-        X-Request-ID {uuid}     # Unique request ID for correlation
+        X-Request-ID {uuid}
         X-Forwarded-Proto https
-
-        # Remove server identification
         -Server
         -X-Powered-By
     }
@@ -67,37 +51,31 @@
     # Admin panel protection with enhanced logging
     @admin path /admin*
     handle @admin {
-  
-        # Enhanced logging for admin access attempts with predictable rotation
         log {
             output file /logs/admin_access.log {
-                roll_size 25MB      # Dedicated admin log with good retention
-                roll_keep 30        # Keep 30 files for forensic analysis
- 
-                roll_keep_for 90d   # Keep admin logs for 90 days
-                roll_local_time true # ENHANCED: Daily rotation at midnight
+                roll_size 25MB
+                roll_keep 30
+                roll_keep_for 90d
+                roll_local_time true
             }
             format json {
                 time_format "2006-01-02T15:04:05.000Z07:00"
-         
                 message_key "admin_access"
             }
             level INFO
         }
-
         header {
             Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: https:; frame-src 'self'; object-src 'none'; base-uri 'self';"
             X-Admin-Access "true"
         }
-
         basic_auth {
             admin {file /run/secrets/admin_basic_auth_hash}
         }
 
-        reverse_proxy vaultwarden_app:80 {
+        # CRITICAL FIX: Use service name 'vaultwarden' not 'vaultwarden_app' for DNS
+        reverse_proxy vaultwarden:80 {
             header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
             header_up X-Forwarded-For {http.request.header.Cf-Connecting-Ip}
-       
             header_up X-Request-ID {http.request.header.X-Request-ID}
         }
     }
@@ -105,15 +83,12 @@
     # ENHANCED: Authentication endpoint monitoring for forensic analysis
     @auth_endpoints path /api/accounts/prelogin* /identity/accounts/prelogin* /identity/connect/token*
     handle @auth_endpoints {
-        # Dedicated authentication log for security monitoring with predictable rotation
         log {
             output file /logs/auth_attempts.log {
-               
-                roll_size 25MB      # Dedicated auth log
-                roll_keep 30        # High retention for security analysis
-                roll_keep_for 90d   # Keep auth logs for 90 days
-                roll_local_time true # ENHANCED: Daily rotation at midnight
-          
+                roll_size 25MB
+                roll_keep 30
+                roll_keep_for 90d
+                roll_local_time true
             }
             format json {
                 time_format "2006-01-02T15:04:05.000Z07:00"
@@ -122,8 +97,8 @@
             level INFO
         }
 
-        reverse_proxy vaultwarden_app:80 {
-       
+        # CRITICAL FIX: Use service name 'vaultwarden' not 'vaultwarden_app' for DNS
+        reverse_proxy vaultwarden:80 {
             header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
             header_up X-Forwarded-For {http.request.header.Cf-Connecting-Ip}
             header_up X-Request-ID {http.request.header.X-Request-ID}
@@ -133,26 +108,23 @@
 
     # Main application with enhanced security monitoring
     handle {
-        # Block malicious user agents with forensic logging
         @malicious_ua 
             header User-Agent *sqlmap* *nikto* *nmap* *acunetix* *dirbuster* *gobuster* *wfuzz*
         handle @malicious_ua {
             log {
                 output file /logs/security_blocks.log {
                     roll_size 10MB
-                    roll_keep 50      # Keep many security logs
-                    roll_keep_for 180d # Keep security logs for 6 months
-                    roll_local_time true # ENHANCED: Daily rotation at midnight
+                    roll_keep 50
+                    roll_keep_for 180d
+                    roll_local_time true
                 }
                 format json {
-         
                     time_format "2006-01-02T15:04:05.000Z07:00"
                     message_key "security_block"
                 }
                 level WARN
             }
             respond "Access Denied - Security Policy Violation" 403
-   
         }
 
         # WebSocket support for live sync (uncomment if WEBSOCKET_ENABLED=true in .env)
@@ -162,16 +134,16 @@
         #     path /notifications/hub*
         # }
         # handle @websocket {
-   
-        #     reverse_proxy vaultwarden_app:3012 {
+        #     CRITICAL FIX: Use service name 'vaultwarden' not 'vaultwarden_app' for DNS
+        #     reverse_proxy vaultwarden:3012 {
         #         header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
         #         header_up X-Forwarded-For {http.request.header.Cf-Connecting-Ip}
         #     }
         # }
 
-        reverse_proxy vaultwarden_app:80 {
+        # CRITICAL FIX: Use service name 'vaultwarden' not 'vaultwarden_app' for DNS
+        reverse_proxy vaultwarden:80 {
             header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
-    
             header_up X-Forwarded-For {http.request.header.Cf-Connecting-Ip}
             header_up X-Request-ID {http.request.header.X-Request-ID}
         }
@@ -184,12 +156,11 @@ www.{$DOMAIN} {
         output file /logs/redirects.log {
             roll_size 10MB
             roll_keep 10
-            roll_local_time true # ENHANCED: Daily rotation at midnight
+            roll_local_time true
         }
         format json
         level INFO
     }
-
     redir https://{$DOMAIN}{uri} 301
 }
 
@@ -198,47 +169,15 @@ www.{$DOMAIN} {
     log {
         output file /logs/security_catchall.log {
             roll_size 25MB
-            roll_keep 40        # Keep many security logs
-            roll_keep_for 180d  # Keep for 6 months
-            roll_local_time true # ENHANCED: Daily rotation at midnight
+            roll_keep 40
+            roll_keep_for 180d
+            roll_local_time true
         }
         format json {
             time_format "2006-01-02T15:04:05.000Z07:00"
             message_key "unauthorized_access"
         }
-        level 
-            WARN
+        level WARN
     }
-
     respond "Not Found" 404
-}
-
-# ENHANCED FORENSIC FEATURES WITH PREDICTABLE LOG ROTATION:
-# 
-# 1. IMPROVED LOG RETENTION WITH DAILY ROTATION:
-#    - Main access log: 50MB x 20 files = 1GB total (rotates daily at midnight)
-#    - Admin access log: 25MB x 30 files = 750MB (rotates daily at midnight)
-#    - Auth attempts log: 25MB x 30 files = 750MB (rotates daily at midnight)
-#    - Security blocks log: 10MB x 50 files = 500MB (rotates daily at midnight)
-#    - Total forensic capacity: ~3GB with predictable daily rotation
-#
-# 2. PREDICTABLE LOG ROTATION BENEFITS:
-#    - Daily log files for easy incident correlation
-#    - Rotation at midnight local time (respects container TZ)
-#    - Easier integration with log analysis tools
-#    - Consistent log file naming for automation
-#    - Better for "set-and-forget" operations
-#
-# 3. SPECIALIZED LOGGING (UNCHANGED):
-#    - Separate logs for admin access, authentication attempts, security blocks
-#    - Enhanced JSON format with consistent timestamps
-#    - Request ID correlation across all logs
-#    - Extended retention periods (30-180 days)
-#
-# 4. ENHANCED OPERATIONAL BENEFITS:
-#    - Log files rotate at predictable times (daily at midnight)
-#    - Easier to correlate incidents with specific days
-#    - Better integration with external log management systems
-#    - Consistent with standard operational practices
-
 }
