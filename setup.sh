@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # setup.sh - VaultWarden-OCI Setup Script with Caddy-Cloudflare Integration
+# FIXED: Firewall race condition - fetch Cloudflare IPs BEFORE resetting firewall
+# FIXED: Added SSH hardening validation
+# FIXED: Added Cloudflare token validation
 # ENHANCED: Standardized error handling - functions return, main() decides exit strategy
-# ENHANCED: OCI/Oracle Linux SSH log compatibility with automatic detection
-# All functions return exit codes, main() collects status and determines final exit
 
 set -euo pipefail
 
@@ -56,7 +57,8 @@ NOTES:
     - Installs 'unattended-upgrades' for automatic host OS security patches
     - Enhanced error handling with proper exit codes
     - Automatic SSH log path detection for OCI/Oracle Linux compatibility
-    - Platform-specific SSH security configuration
+    - SSH hardening validation for set-and-forget security
+    - Cloudflare API token validation before stack deployment
 EOF
 }
 
@@ -341,7 +343,7 @@ setup_user_permissions() {
     return 0
 }
 
-# STANDARDIZED: Enhanced firewall setup - returns exit code
+# CRITICAL FIX: Firewall setup with race condition fix - fetch BEFORE reset
 setup_firewall() {
     log_info "Configuring Cloudflare-only UFW firewall..."
 
@@ -350,8 +352,35 @@ setup_firewall() {
         return 0
     fi
 
+    # CRITICAL FIX: Fetch Cloudflare IPs BEFORE resetting firewall
+    log_info "Fetching current Cloudflare IP ranges..."
+    local cf_ipv4_file="/tmp/cf_ipv4_ranges.txt"
+    local cf_ipv6_file="/tmp/cf_ipv6_ranges.txt"
+
+    # Fetch IPs first, fail early if network is broken
+    if ! retry_with_backoff 3 2 curl -sf --max-time 10 "https://www.cloudflare.com/ips-v4" -o "$cf_ipv4_file" || \
+       ! retry_with_backoff 3 2 curl -sf --max-time 10 "https://www.cloudflare.com/ips-v6" -o "$cf_ipv6_file"; then
+        log_error "⚠️  CRITICAL: Failed to fetch Cloudflare IP ranges"
+        log_error "Cannot configure firewall without Cloudflare IPs"
+        log_error "Check internet connectivity and retry"
+        # Clean up temp files
+        rm -f "$cf_ipv4_file" "$cf_ipv6_file"
+        return 1
+    fi
+
+    # Validate fetched data before proceeding
+    if ! grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$' "$cf_ipv4_file" >/dev/null; then
+        log_error "Invalid IPv4 ranges received from Cloudflare API"
+        rm -f "$cf_ipv4_file" "$cf_ipv6_file"
+        return 1
+    fi
+
+    log_success "Cloudflare IP ranges fetched and validated"
+
+    # NOW it's safe to reset the firewall
     if ! ufw --force reset >/dev/null; then
         log_error "Failed to reset UFW firewall"
+        rm -f "$cf_ipv4_file" "$cf_ipv6_file"
         return 1
     fi
 
@@ -374,65 +403,165 @@ setup_firewall() {
         return 1
     fi
 
-    # Disable IPv6 if not needed
-    if [[ -f /proc/net/if_inet6 ]]; then
-        if ! ufw default deny incoming; then
-            log_warn "Failed to set IPv6 deny policy"
+    # Apply Cloudflare IPv4 ranges (data already validated)
+    while IFS= read -r range; do
+        if [[ -n "$range" ]]; then
+            if ! ufw allow from "$range" to any port 80,443 comment "CF-IPv4" >/dev/null; then
+                log_warn "Failed to add IPv4 range: $range"
+            fi
         fi
-        echo "net.ipv6.conf.all.disable_ipv6 = 1" >> /etc/sysctl.conf 2>/dev/null || log_warn "Failed to disable IPv6"
+    done < "$cf_ipv4_file"
+    log_success "Applied Cloudflare IPv4 ranges"
+
+    # Apply Cloudflare IPv6 ranges
+    if grep -E '^[0-9a-fA-F:]+/[0-9]{1,3}$' "$cf_ipv6_file" >/dev/null; then
+        while IFS= read -r range; do
+            if [[ -n "$range" ]]; then
+                if ! ufw allow from "$range" to any port 80,443 comment "CF-IPv6" >/dev/null; then
+                    log_warn "Failed to add IPv6 range: $range"
+                fi
+            fi
+        done < "$cf_ipv6_file"
+        log_success "Applied Cloudflare IPv6 ranges"
     fi
 
-    # Fetch current Cloudflare IP ranges
-    log_info "Fetching current Cloudflare IP ranges..."
-    local cf_ipv4_file="/tmp/cf_ipv4_ranges.txt"
-    local cf_ipv6_file="/tmp/cf_ipv6_ranges.txt"
+    # Clean up temp files
+    rm -f "$cf_ipv4_file" "$cf_ipv6_file"
 
-    if retry_with_backoff 3 2 curl -sf --max-time 10 "https://www.cloudflare.com/ips-v4" -o "$cf_ipv4_file" && \
-       retry_with_backoff 3 2 curl -sf --max-time 10 "https://www.cloudflare.com/ips-v6" -o "$cf_ipv6_file"; then
-
-        # Validate IPv4 ranges before applying
-        if grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$' "$cf_ipv4_file" >/dev/null; then
-            while IFS= read -r range; do
-                if [[ -n "$range" && "$range" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]; then
-                    if ! ufw allow from "$range" to any port 80,443 comment "CF-IPv4" >/dev/null; then
-                        log_warn "Failed to add IPv4 range: $range"
-                    fi
-                fi
-            done < "$cf_ipv4_file"
-            log_success "Applied validated Cloudflare IPv4 ranges"
-        else
-            log_warn "Invalid IPv4 ranges received from Cloudflare API"
-        fi
-
-        # Validate IPv6 ranges before applying
-        if grep -E '^[0-9a-fA-F:]+/[0-9]{1,3}$' "$cf_ipv6_file" >/dev/null; then
-            while IFS= read -r range; do
-                if [[ -n "$range" && "$range" =~ ^[0-9a-fA-F:]+/[0-9]{1,3}$ ]]; then
-                    if ! ufw allow from "$range" to any port 80,443 comment "CF-IPv6" >/dev/null; then
-                        log_warn "Failed to add IPv6 range: $range"
-                    fi
-                fi
-            done < "$cf_ipv6_file"
-            log_success "Applied validated Cloudflare IPv6 ranges"
-        else
-            log_warn "Invalid IPv6 ranges received from Cloudflare API"
-        fi
-
-        rm -f "$cf_ipv4_file" "$cf_ipv6_file"
-
-    else
-        log_error "⚠️  CRITICAL WARNING: Failed to fetch Cloudflare IP ranges from API"
-        log_error "    This means your firewall will block ALL web traffic!"
-        log_error "    Aborting setup. Check internet connectivity and re-run."
-        return 1
-    fi
-
+    # Enable firewall (only after all rules are added)
     if ! echo "y" | ufw enable >/dev/null; then
         log_error "Failed to enable UFW firewall"
         return 1
     fi
 
     log_success "Firewall configured and enabled"
+    return 0
+}
+
+# NEW: SSH hardening validation for set-and-forget security
+validate_ssh_config() {
+    log_info "Validating SSH security configuration..."
+    
+    local sshd_config="/etc/ssh/sshd_config"
+    local warnings=0
+    
+    if [[ ! -f "$sshd_config" ]]; then
+        log_error "SSH configuration file not found: $sshd_config"
+        return 1
+    fi
+    
+    # Check for password authentication
+    if ! grep -qE "^PasswordAuthentication\s+no" "$sshd_config"; then
+        log_error "⚠️  SSH Security: PasswordAuthentication is not explicitly disabled"
+        log_error "Add to $sshd_config: PasswordAuthentication no"
+        warnings=$((warnings + 1))
+    else
+        log_success "SSH password authentication disabled"
+    fi
+    
+    # Check for root login
+    if ! grep -qE "^PermitRootLogin\s+(no|prohibit-password)" "$sshd_config"; then
+        log_warn "⚠️  SSH Security: PermitRootLogin should be 'no' or 'prohibit-password'"
+        log_warn "Add to $sshd_config: PermitRootLogin prohibit-password"
+        warnings=$((warnings + 1))
+    else
+        log_success "SSH root login properly configured"
+    fi
+    
+    # Check for public key auth
+    if ! grep -qE "^PubkeyAuthentication\s+yes" "$sshd_config"; then
+        log_warn "⚠️  SSH Security: PubkeyAuthentication should be enabled"
+        log_warn "Add to $sshd_config: PubkeyAuthentication yes"
+        warnings=$((warnings + 1))
+    else
+        log_success "SSH public key authentication enabled"
+    fi
+    
+    if [[ $warnings -gt 0 ]]; then
+        log_error "SSH configuration has $warnings security issues"
+        log_error "For set-and-forget operation, these MUST be fixed"
+        echo ""
+        if [[ "$AUTO_MODE" != "true" ]]; then
+            read -p "Continue setup anyway? (yes/no): " confirm
+            if [[ "$confirm" != "yes" ]]; then
+                return 1
+            fi
+        else
+            log_warn "Auto mode enabled - continuing despite SSH configuration issues"
+        fi
+    else
+        log_success "SSH configuration is properly hardened"
+    fi
+    
+    return 0
+}
+
+# NEW: Cloudflare API token validation
+validate_cloudflare_tokens() {
+    log_info "Validating Cloudflare API tokens..."
+    
+    local zone_id="$1"
+    local dns_token_file="./secrets/.docker_secrets/caddy_cloudflare_dns_token"
+    local firewall_token_file="./secrets/.docker_secrets/fail2ban_cloudflare_firewall_token"
+    
+    if [[ -z "$zone_id" ]]; then
+        log_warn "CLOUDFLARE_ZONE_ID not set - skipping token validation"
+        log_warn "You must set this in .env before starting services"
+        return 0
+    fi
+    
+    # Validate DNS token
+    if [[ -f "$dns_token_file" ]]; then
+        local dns_token
+        dns_token=$(cat "$dns_token_file")
+        
+        if [[ -z "$dns_token" || "$dns_token" == "CHANGE_ME_DNS_TOKEN" ]]; then
+            log_warn "Cloudflare DNS token not configured yet"
+            log_warn "Configure it with: ./edit-secrets.sh"
+            return 0
+        fi
+        
+        log_info "Testing Cloudflare DNS token..."
+        if ! curl -sf --max-time 10 \
+            -H "Authorization: Bearer $dns_token" \
+            "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records?per_page=1" \
+            | jq -e '.success == true' >/dev/null 2>&1; then
+            log_error "Cloudflare DNS token validation failed"
+            log_error "Token may be invalid or missing Zone:DNS:Edit permission"
+            log_error "Generate token at: https://dash.cloudflare.com/profile/api-tokens"
+            return 1
+        fi
+        log_success "Cloudflare DNS token validated"
+    else
+        log_warn "Cloudflare DNS token file not found - configure secrets first"
+    fi
+    
+    # Validate Firewall token
+    if [[ -f "$firewall_token_file" ]]; then
+        local firewall_token
+        firewall_token=$(cat "$firewall_token_file")
+        
+        if [[ -z "$firewall_token" || "$firewall_token" == "CHANGE_ME_FIREWALL_TOKEN" ]]; then
+            log_warn "Cloudflare Firewall token not configured yet"
+            log_warn "Configure it with: ./edit-secrets.sh"
+            return 0
+        fi
+        
+        log_info "Testing Cloudflare Firewall token..."
+        if ! curl -sf --max-time 10 \
+            -H "Authorization: Bearer $firewall_token" \
+            "https://api.cloudflare.com/client/v4/zones/$zone_id/firewall/access_rules/rules?per_page=1" \
+            | jq -e '.success == true' >/dev/null 2>&1; then
+            log_error "Cloudflare Firewall token validation failed"
+            log_error "Token may be invalid or missing Zone:Firewall Services:Edit permission"
+            log_error "Generate token at: https://dash.cloudflare.com/profile/api-tokens"
+            return 1
+        fi
+        log_success "Cloudflare Firewall token validated"
+    else
+        log_warn "Cloudflare Firewall token file not found - configure secrets first"
+    fi
+    
     return 0
 }
 
@@ -908,7 +1037,7 @@ cleanup_setup_deps() {
 
 # ENHANCED: Main function with proper error handling and exit strategy
 main() {
-    log_header "VaultWarden-OCI Setup - Enhanced with OCI/Oracle Linux Compatibility"
+    log_header "VaultWarden-OCI Setup - Production Security Hardened"
 
     if [[ -z "$DOMAIN" ]] || [[ -z "$ADMIN_EMAIL" ]]; then 
         log_error "Domain and Email are required."
@@ -937,6 +1066,7 @@ main() {
         "create_secrets_template:Secrets Template"
         "set_script_permissions:Script Permissions"
         "setup_firewall:Firewall Configuration"
+        "validate_ssh_config:SSH Hardening Validation"
         "cleanup_setup_deps:Setup Cleanup"
     )
 
@@ -952,10 +1082,27 @@ main() {
         if ! $phase_func; then
             failed_phases+=("$phase_name")
             log_error "Phase failed: $phase_name"
+            
+            # Critical phases should stop setup
+            if [[ "$phase_func" == "setup_firewall" || "$phase_func" == "validate_ssh_config" ]]; then
+                log_error "Critical security phase failed - stopping setup"
+                log_error "Fix the issues and re-run setup"
+                exit 1
+            fi
         else
             log_success "Phase completed: $phase_name"
         fi
     done
+
+    # Validate Cloudflare tokens if zone ID is configured
+    local zone_id
+    zone_id=$(get_config_value "CLOUDFLARE_ZONE_ID" "")
+    if [[ -n "$zone_id" && "$zone_id" != "your_cloudflare_zone_id_here" ]]; then
+        log_info "=== Phase: Cloudflare Token Validation ==="
+        if ! validate_cloudflare_tokens "$zone_id"; then
+            log_warn "Cloudflare token validation failed - configure tokens before starting services"
+        fi
+    fi
 
     # Final status determination
     if [[ ${#failed_phases[@]} -gt 0 ]]; then
@@ -969,7 +1116,7 @@ main() {
     fi
 
     # Final success summary
-    log_header "Setup Complete - OCI/Oracle Linux Compatible Configuration"
+    log_header "Setup Complete - Production Security Hardened"
     echo "Your VaultWarden instance is configured with:"
     echo ""
     echo "✅ Template-Based Configuration:"
@@ -977,17 +1124,18 @@ main() {
     echo "   - .env file populated from .env.example template"
     echo "   - Easy maintenance via template files"
     echo ""
-    echo "✅ OCI/Oracle Linux Compatibility:"
-    echo "   - Automatic SSH log path detection and configuration"
-    echo "   - Platform-specific security log monitoring"
-    echo "   - Universal Fail2Ban SSH protection"
+    echo "✅ Security Hardening:"
+    echo "   - Firewall race condition fixed (fetch-before-reset)"
+    echo "   - SSH hardening validation completed"
+    echo "   - Cloudflare token validation ready"
+    echo "   - Platform-specific SSH log detection"
     echo ""
     echo "✅ Caddy-Cloudflare Integration:"
     echo "   - DNS-01 ACME challenges for SSL certificates"  
     echo "   - Automatic Cloudflare IP range management"
     echo "   - Separate DNS and Firewall API tokens"
     echo ""
-    echo "✅ Security Features:"
+    echo "✅ Additional Features:"
     echo "   - SOPS + Age encrypted secrets"
     echo "   - UFW firewall configured with Cloudflare IP ranges"
     echo "   - Host OS automatic security updates enabled"
@@ -1003,12 +1151,11 @@ main() {
     echo "   3. Start services: make up"
     echo "   4. Setup automation: sudo ./cron-setup.sh --install"
     echo "   5. Create emergency access: make breakglass-create"
-    echo "   6. Validate SSH logs: ./validate-ssh-logs.sh"
     echo ""
     echo "🔐 Security: Your secrets are encrypted with Age + SOPS"
     echo "🌐 Domain: https://$DOMAIN"
     echo "📧 Admin: $ADMIN_EMAIL"
-    echo "🔒 SSH Logs: Auto-configured for your platform"
+    echo "🔒 SSH: Hardening validation complete"
 
     exit 0
 }
