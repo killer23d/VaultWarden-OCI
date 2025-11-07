@@ -87,7 +87,7 @@ services:
           memory: 2G      # Main application, largest allocation
           cpus: '0.6'     # 60% of single CPU
         reservations:
-          memory: 512M    # Minimum guaranteed memory
+          memory: 1G    # Minimum guaranteed memory
           cpus: '0.2'     # 20% of single CPU minimum
 
   caddy:
@@ -225,10 +225,10 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512M    # Log parsing and rule processing
+          memory: 1G    # Log parsing and rule processing
           cpus: '0.2'     # 20% of single CPU
         reservations:
-          memory: 128M    # Minimum for log processing
+          memory: 256M    # Minimum for log processing
           cpus: '0.05'    # 5% of single CPU minimum
 
 secrets:
