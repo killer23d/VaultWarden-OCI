@@ -6,15 +6,15 @@
     servers {
         # Trust Cloudflare IPs automatically (updated by caddy-cloudflare-ip module)
         trusted_proxies cloudflare
-        # Use the correct Cloudflare connecting IP header
-        client_ip_headers Cf-Connecting-Ip X-Forwarded-For
+        # FIXED: Use only Cf-Connecting-Ip (authoritative when behind Cloudflare)
+        client_ip_headers Cf-Connecting-Ip
     }
 }
 
 {$DOMAIN} {
     # ENHANCED: Improved log retention for forensic analysis with predictable rotation
     log {
-        output file /logs/access.log {
+        output file /var/log/caddy/access.log {
             roll_size 50MB
             roll_keep 20
             roll_keep_for 30d
@@ -32,8 +32,6 @@
         level INFO
     }
 
-    # CRITICAL FIX 1: Removed invalid rate_limit block (this was already fixed in your new version)
-
     # Enhanced security headers with forensic considerations
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
@@ -42,6 +40,8 @@
         X-XSS-Protection "1; mode=block"
         Referrer-Policy "strict-origin-when-cross-origin"
         Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: https:; frame-src 'self'; object-src 'none'; base-uri 'self';"
+        # NEW: Permissions-Policy header for modern browser API restrictions
+        Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=(), usb=()"
         X-Request-ID {uuid}
         X-Forwarded-Proto https
         -Server
@@ -52,7 +52,7 @@
     @admin path /admin*
     handle @admin {
         log {
-            output file /logs/admin_access.log {
+            output file /var/log/caddy/admin_access.log {
                 roll_size 25MB
                 roll_keep 30
                 roll_keep_for 90d
@@ -72,8 +72,9 @@
             admin {file /run/secrets/admin_basic_auth_hash}
         }
 
-        # CRITICAL FIX: Use service name 'vaultwarden' not 'vaultwarden_app' for DNS
+        # FIXED: Added Host header passthrough + correct service name
         reverse_proxy vaultwarden:80 {
+            header_up Host {host}
             header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
             header_up X-Forwarded-For {http.request.header.Cf-Connecting-Ip}
             header_up X-Request-ID {http.request.header.X-Request-ID}
@@ -84,7 +85,7 @@
     @auth_endpoints path /api/accounts/prelogin* /identity/accounts/prelogin* /identity/connect/token*
     handle @auth_endpoints {
         log {
-            output file /logs/auth_attempts.log {
+            output file /var/log/caddy/auth_attempts.log {
                 roll_size 25MB
                 roll_keep 30
                 roll_keep_for 90d
@@ -97,8 +98,9 @@
             level INFO
         }
 
-        # CRITICAL FIX: Use service name 'vaultwarden' not 'vaultwarden_app' for DNS
+        # FIXED: Added Host header passthrough + correct service name
         reverse_proxy vaultwarden:80 {
+            header_up Host {host}
             header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
             header_up X-Forwarded-For {http.request.header.Cf-Connecting-Ip}
             header_up X-Request-ID {http.request.header.X-Request-ID}
@@ -112,7 +114,7 @@
             header User-Agent *sqlmap* *nikto* *nmap* *acunetix* *dirbuster* *gobuster* *wfuzz*
         handle @malicious_ua {
             log {
-                output file /logs/security_blocks.log {
+                output file /var/log/caddy/security_blocks.log {
                     roll_size 10MB
                     roll_keep 50
                     roll_keep_for 180d
@@ -134,15 +136,17 @@
         #     path /notifications/hub*
         # }
         # handle @websocket {
-        #     CRITICAL FIX: Use service name 'vaultwarden' not 'vaultwarden_app' for DNS
+        #     # FIXED: Added Host header passthrough + correct service name
         #     reverse_proxy vaultwarden:3012 {
+        #         header_up Host {host}
         #         header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
         #         header_up X-Forwarded-For {http.request.header.Cf-Connecting-Ip}
         #     }
         # }
 
-        # CRITICAL FIX: Use service name 'vaultwarden' not 'vaultwarden_app' for DNS
+        # FIXED: Added Host header passthrough + correct service name
         reverse_proxy vaultwarden:80 {
+            header_up Host {host}
             header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
             header_up X-Forwarded-For {http.request.header.Cf-Connecting-Ip}
             header_up X-Request-ID {http.request.header.X-Request-ID}
@@ -153,7 +157,7 @@
 # Redirect www subdomain with logging
 www.{$DOMAIN} {
     log {
-        output file /logs/redirects.log {
+        output file /var/log/caddy/redirects.log {
             roll_size 10MB
             roll_keep 10
             roll_local_time true
@@ -167,7 +171,7 @@ www.{$DOMAIN} {
 # ENHANCED: Security catch-all with comprehensive logging
 :80, :443 {
     log {
-        output file /logs/security_catchall.log {
+        output file /var/log/caddy/security_catchall.log {
             roll_size 25MB
             roll_keep 40
             roll_keep_for 180d
