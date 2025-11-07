@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # create-breakglass-admin.sh - Emergency admin account for OCI serial console access
-# ENHANCED: Standardized error handling - functions return, main() decides exit strategy
-# All functions return exit codes, main() collects status and determines final exit
+# SIMPLIFIED DESIGN: Creates a full admin user and adds to 'sudo' group.
+# This is simpler and more maintainable than a custom sudoers file.
 
 set -euo pipefail
 
@@ -32,7 +32,7 @@ USAGE:
     sudo ./create-breakglass-admin.sh [OPTIONS]
 
 OPTIONS:
-    --create                Create break-glass admin account
+    --create                Create break-glass admin account (full sudo)
     --remove                Remove break-glass admin account
     --reset-password        Reset break-glass admin password
     --status                Show break-glass admin status
@@ -51,14 +51,14 @@ EXAMPLES:
 
 BREAK-GLASS ADMIN PURPOSE:
     Emergency access when SSH is broken or firewall blocks access.
+    This account is a FULL ADMINISTRATOR with root privileges.
     Access via OCI Console Connection (serial console).
 
 SECURITY NOTES:
-    • Uses strong random password (32 characters)
-    • Limited sudo access (systemctl, ufw, docker commands only)
-    • Separate from primary admin account
+    • Uses strong random password (32+ characters)
+    • Account is added to the 'sudo' group (full root access)
     • Password displayed only once during creation
-    • Account can be disabled when not needed
+    • Account can be disabled/removed when not needed
     • Script validates its own security before operations
 EOF
 }
@@ -161,69 +161,13 @@ generate_breakglass_password() {
     fi
 }
 
-# STANDARDIZED: Create sudoers configuration - returns exit code
-create_sudoers_config() {
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would create sudoers configuration for $BREAKGLASS_USER"
-        return 0
-    fi
-
-    log_info "Creating limited sudoers configuration..."
-
-    local sudoers_file="/etc/sudoers.d/vaultwarden-breakglass"
-
-    # Use centralized secure file creation
-    local temp_content
-    temp_content=$(cat << EOF
-# VaultWarden Break-Glass Admin - Limited Emergency Access
-# Created: $(date)
-# User: $BREAKGLASS_USER
-
-# Allow limited system control commands for emergency access
-$BREAKGLASS_USER ALL=(ALL) NOPASSWD: /bin/systemctl start ssh
-$BREAKGLASS_USER ALL=(ALL) NOPASSWD: /bin/systemctl stop ssh
-$BREAKGLASS_USER ALL=(ALL) NOPASSWD: /bin/systemctl restart ssh
-$BREAKGLASS_USER ALL=(ALL) NOPASSWD: /bin/systemctl status ssh
-$BREAKGLASS_USER ALL=(ALL) NOPASSWD: /usr/sbin/ufw allow *
-$BREAKGLASS_USER ALL=(ALL) NOPASSWD: /usr/sbin/ufw delete *
-$BREAKGLASS_USER ALL=(ALL) NOPASSWD: /usr/sbin/ufw status
-$BREAKGLASS_USER ALL=(ALL) NOPASSWD: /usr/bin/docker ps
-$BREAKGLASS_USER ALL=(ALL) NOPASSWD: /usr/bin/docker compose ps
-$BREAKGLASS_USER ALL=(ALL) NOPASSWD: /usr/bin/docker compose logs *
-$BREAKGLASS_USER ALL=(ALL) NOPASSWD: /usr/bin/docker compose restart
-$BREAKGLASS_USER ALL=(ALL) NOPASSWD: /usr/bin/docker compose down
-$BREAKGLASS_USER ALL=(ALL) NOPASSWD: /usr/bin/docker compose up -d
-
-# Allow viewing logs
-$BREAKGLASS_USER ALL=(ALL) NOPASSWD: /usr/bin/journalctl *
-$BREAKGLASS_USER ALL=(ALL) NOPASSWD: /bin/dmesg
-
-# Allow changing to project directory
-$BREAKGLASS_USER ALL=(ALL) NOPASSWD: /bin/su - $(get_real_user)
-EOF
-)
-
-    # Create with secure permissions using centralized function
-    if ! create_secure_file "$sudoers_file" "$temp_content" "440" "root" "root"; then
-        log_error "Failed to create sudoers configuration securely"
-        return 1
-    fi
-
-    # Validate sudoers syntax
-    if ! visudo -c -f "$sudoers_file"; then
-        log_error "Sudoers configuration syntax validation failed"
-        secure_cleanup "$sudoers_file"
-        return 1
-    fi
-
-    log_success "Sudoers configuration created and validated"
-    return 0
-}
+# SIMPLIFIED: create_sudoers_config() function removed.
+# We now add the user to the standard 'sudo' group.
 
 # STANDARDIZED: Create break-glass user - returns exit code
 create_breakglass_user() {
     if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would create break-glass user: $BREAKGLASS_USER"
+        log_info "[DRY RUN] Would create break-glass admin user: $BREAKGLASS_USER"
         return 0
     fi
 
@@ -263,13 +207,15 @@ create_breakglass_user() {
         userdel -r "$BREAKGLASS_USER" 2>/dev/null || true
         return 1
     fi
-
-    # Create sudoers configuration
-    if ! create_sudoers_config; then
-        log_error "Failed to create sudoers configuration"
+    
+    # SIMPLIFIED: Just add to sudo group (full admin access)
+    if ! usermod -aG sudo "$BREAKGLASS_USER"; then
+        log_error "Failed to add user to sudo group"
         userdel -r "$BREAKGLASS_USER" 2>/dev/null || true
         return 1
     fi
+
+    log_success "Break-glass admin created with full sudo access"
 
     # Create emergency access instructions with secure permissions
     local instructions_file="/home/$BREAKGLASS_USER/EMERGENCY_ACCESS_INSTRUCTIONS.txt"
@@ -277,31 +223,46 @@ create_breakglass_user() {
     instructions_content=$(cat << EOF
 VaultWarden Emergency Access Instructions
 ========================================
-
-This account provides emergency access to your VaultWarden instance when:
-- SSH access is broken
-- Firewall blocks normal access
-- Primary admin account is locked
+This account is a FULL ADMINISTRATOR with complete system access.
 
 ACCESS VIA OCI CONSOLE:
 1. Log into Oracle Cloud Infrastructure (OCI)
 2. Navigate to: Compute → Instances → Your Instance
 3. Click "Console Connection"
-4. Create new connection or use existing
-5. Connect via browser or SSH
+4. Login with these credentials:
+   Username: $BREAKGLASS_USER
+   Password: [stored securely in your password manager]
 
-EMERGENCY COMMANDS AVAILABLE:
-- sudo systemctl restart ssh    # Fix SSH service
-- sudo ufw allow 22/tcp        # Open SSH in firewall
-- sudo docker compose ps       # Check container status
-- sudo docker compose restart  # Restart services
-- sudo journalctl -u ssh       # Check SSH logs
+AVAILABLE OPERATIONS:
+- All sudo commands (full root access)
+- All Docker operations
+- All VaultWarden scripts (restore, backup, maintenance)
+- All file operations
+- System reboot/shutdown
 
-IMPORTANT:
-- This account has LIMITED sudo access for security
+COMMON EMERGENCY COMMANDS:
+# Fix SSH lockout
+sudo ufw allow ${SSH_PORT:-22}/tcp
+sudo systemctl restart sshd
+
+# Check system status
+sudo docker compose ps
+sudo journalctl -u docker --since "1 hour ago"
+sudo df -h
+
+# Restart services
+sudo docker compose restart
+cd $PROJECT_ROOT && sudo ./startup.sh
+
+# Full disaster recovery
+cd $PROJECT_ROOT && sudo ./restore.sh
+
+SECURITY NOTES:
+- This account has the SAME privileges as your main admin user
 - Use only for genuine emergencies
-- Disable/remove when not needed
-- Change password regularly
+- Disable when not needed: sudo deluser $BREAKGLASS_USER sudo
+- Remove when no longer needed: sudo deluser --remove-home $BREAKGLASS_USER
+- Password is 32+ characters for maximum security
 
 Created: $(date)
 Project: $PROJECT_ROOT
@@ -320,10 +281,12 @@ EOF
     echo "Password: $password"
     echo ""
     echo "⚠️  SECURITY WARNING:"
-    echo "• These credentials are displayed ONLY ONCE"
-    echo "• Store them securely (password manager, encrypted note)"
+    echo "• This is a FULL ADMINISTRATOR account"
+    echo "• 32-character password provides strong protection"
+    echo "• Store in secure password manager immediately"
     echo "• Access via OCI Console Connection when needed"
-    echo "• Delete this account when no longer needed"
+    echo "• Disable when not needed: sudo deluser $BREAKGLASS_USER sudo"
+    echo "• Remove when done: sudo deluser --remove-home $BREAKGLASS_USER"
     echo ""
     echo "Instructions saved to: $instructions_file"
 
@@ -358,22 +321,16 @@ remove_breakglass_user() {
         fi
     fi
 
-    # Remove user and home directory
+    # SIMPLIFIED: Just delete user (no custom sudoers file to remove)
     if userdel -r "$BREAKGLASS_USER" 2>/dev/null; then
         log_success "User removed: $BREAKGLASS_USER"
     else
         log_warn "User removal may have had issues (user might not have had home directory)"
     fi
 
-    # Remove sudoers configuration with secure cleanup
-    local sudoers_file="/etc/sudoers.d/vaultwarden-breakglass"
-    if [[ -f "$sudoers_file" ]]; then
-        if secure_cleanup "$sudoers_file"; then
-            log_success "Sudoers configuration removed securely"
-        else
-            log_warn "Failed to remove sudoers configuration securely"
-        fi
-    fi
+    # Remove user from sudo group (best effort)
+    deluser "$BREAKGLASS_USER" sudo 2>/dev/null || true
+
 
     log_success "Break-glass admin removal completed"
     return 0
@@ -454,22 +411,10 @@ show_breakglass_status() {
         fi
 
         # Check sudoers configuration
-        local sudoers_file="/etc/sudoers.d/vaultwarden-breakglass"
-        if [[ -f "$sudoers_file" ]]; then
-            if validate_file_permissions "$sudoers_file" "440" "root" "root"; then
-                echo "  Sudo access: ✅ Configured and secure"
-            else
-                echo "  Sudo access: ⚠️  Configured but permissions need fixing"
-            fi
-
-            # Validate sudoers syntax
-            if visudo -c -f "$sudoers_file" >/dev/null 2>&1; then
-                echo "  Sudo config: ✅ Valid syntax"
-            else
-                echo "  Sudo config: ❌ Invalid syntax"
-            fi
+        if groups "$BREAKGLASS_USER" | grep -q -w "sudo"; then
+            echo "  Sudo access: ✅ Configured (member of 'sudo' group)"
         else
-            echo "  Sudo access: ❌ Not configured"
+            echo "  Sudo access: ❌ NOT in 'sudo' group"
         fi
 
         # Check account status
@@ -506,7 +451,7 @@ show_breakglass_status() {
 
 # ENHANCED: Main function with proper error handling, exit strategy, and security validation
 main() {
-    log_header "VaultWarden-OCI Break-Glass Admin Manager"
+    log_header "VaultWarden-OCI Break-Glass Admin Manager (Simple Mode)"
 
     if [[ "$DRY_RUN" == "true" ]]; then
         log_warn "DRY RUN MODE - No changes will be made"
@@ -578,9 +523,8 @@ main() {
             log_info "🎯 Next Steps:"
             echo "  1. Store the credentials securely"
             echo "  2. Test OCI Console Connection access"
-            echo "  3. Verify emergency commands work"
-            echo "  4. Validate script security: sudo ./create-breakglass-admin.sh --validate"
-            echo "  5. Disable when not needed: sudo ./create-breakglass-admin.sh --remove"
+            echo "  3. Validate script security: sudo ./create-breakglass-admin.sh --validate"
+            echo "  4. Disable when not needed: sudo deluser $BREAKGLASS_USER sudo"
 
             exit 0
         else
