@@ -40,6 +40,12 @@
         level INFO
     }
 
+    # CRITICAL FIX: Removed invalid rate_limit block.
+    # This directive requires a third-party plugin that is not in the
+    # caddy-cloudflare image and would cause a startup crash.
+    # Rate limiting is correctly handled by Fail2Ban, which monitors
+    # for 429 (Too Many Requests) statuses in the Caddy logs.
+
     # Enhanced security headers with forensic considerations
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
@@ -234,3 +240,5 @@ www.{$DOMAIN} {
 #    - Easier to correlate incidents with specific days
 #    - Better integration with external log management systems
 #    - Consistent with standard operational practices
+
+}
