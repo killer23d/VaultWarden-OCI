@@ -40,33 +40,6 @@
         level INFO
     }
 
-    # ENHANCED: Stricter rate limiting for password manager security
-    rate_limit {
-     
-       zone static_rl {
-            key {remote_host}
-            window 1m
-            capacity 20         # Reduced from 60 - stricter for password manager
-        }
-
-        zone admin_rl {
-            key {remote_host}
-        
-            match /admin*
-            window 1m  
-            capacity 5          # Reduced from 10 - very strict for admin panel
-        }
-
-        # NEW: API endpoint rate limiting for authentication attempts
-        zone api_auth_rl {
-            key {remote_host}
- 
-            match_path /api/accounts/prelogin /identity/accounts/prelogin /identity/connect/token
-            window 5m
-            capacity 10         # Allow 10 auth attempts per 5 minutes per IP
-        }
-    }
-
     # Enhanced security headers with forensic considerations
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
