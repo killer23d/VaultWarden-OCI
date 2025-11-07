@@ -23,6 +23,7 @@ Application Layer (Resource-Optimized Containers)
 ├── VaultWarden: 2GB limit, enhanced security settings
 ├── Caddy: 1GB limit, forensic logging (3GB capacity)
 ├── Fail2ban: 512MB limit, regex-based filters (no dependencies)
+├── msmtpd: 32MB limit, containerized SMTP relay
 └── Container security with capability restrictions
 
 Data Layer (Enhanced Encryption + Forensic Capabilities)
@@ -38,7 +39,7 @@ Recovery Layer (Enhanced Emergency Access)
 ├── Enhanced encrypted backup procedures with integrity checking
 └── Template-based disaster recovery with validation
 
-Template Security Layer (New)
+Template Security Layer (Current)
 ├── Centralized security validation in lib/security.sh
 ├── Enhanced secret file creation with atomic operations
 ├── Comprehensive permission and ownership validation
@@ -116,6 +117,13 @@ deploy:
     reservations:
       memory: 128M      # Minimum for log processing
       cpus: '0.05'      # 5% guaranteed minimum
+
+# msmtpd Container (Email Relay)
+deploy:
+  resources:
+    limits:
+      memory: 32M       # Lightweight SMTP relay
+      cpus: '0.05'      # 5% of single CPU
 ```
 
 **Resource Security Benefits:**
@@ -130,7 +138,7 @@ deploy:
 SIGNUPS_ALLOWED=false              # Disable open registration
 INVITATIONS_ALLOWED=true          # Admin-controlled invitations only
 EMERGENCY_ACCESS_ALLOWED=true     # Enable emergency access feature
-PASSWORD_ITERATIONS=350000        # High iteration count (balanced for performance)
+PASSWORD_ITERATIONS=600000        # High iteration count for security
 PASSWORD_HINTS_ALLOWED=false      # Disable password hints
 SHOW_PASSWORD_HINT=false          # Don't show password hints
 WEB_VAULT_ENABLED=true            # Enable web vault interface
@@ -206,7 +214,7 @@ rate_limit {
         capacity 5          # Very strict for admin panel
     }
 
-    # NEW: API authentication rate limiting
+    # API authentication rate limiting
     zone api_auth_rl {
         match_path /api/accounts/prelogin /identity/connect/token
         capacity 10         # 10 auth attempts per 5 minutes per IP
@@ -357,7 +365,7 @@ sudo ./cron-setup.sh --install
 ./health.sh --comprehensive
 
 # 6. Test dual fail2ban blocking
-docker compose logs fail2ban | grep -E "cloudflare\|ufw"
+docker compose logs fail2ban | grep -E "cloudflare\\|ufw"
 ```
 
 #### Enhanced Container Security
@@ -386,7 +394,7 @@ deploy:
 docker compose logs fail2ban --follow | grep -E "CF.*ok|UFW.*ok|fail"
 
 # Check enhanced resource usage
-docker stats --format "table {{.Container}}\t{{.CPUPerc}}\t{{.MemUsage}}"
+docker stats --format "table {{.Container}}\\t{{.CPUPerc}}\\t{{.MemUsage}}"
 
 # Monitor forensic logs with enhanced retention
 tail -f /var/lib/vaultwarden/logs/caddy/access.log | jq '.request.remote_ip'
@@ -420,7 +428,7 @@ docker compose exec fail2ban fail2ban-client status vaultwarden-auth
 4. **Account Lockout**: VaultWarden native account lockout mechanisms
 5. **Forensic Logging**: 3GB log capacity for attack analysis and correlation
 
-### Resource Exhaustion Attack Mitigation (New)
+### Resource Exhaustion Attack Mitigation (Enhanced)
 **Current Resource Protection:**
 1. **Container Memory Limits**: Prevents individual containers from exhausting system memory
 2. **CPU Limits**: Prevents single container from monopolizing CPU resources  
@@ -484,10 +492,11 @@ docker compose config
 ./create-breakglass-admin.sh --validate
 
 # 5. Review resource usage trends
-docker stats --no-stream --format "table {{.Container}}\t{{.MemPerc}}\t{{.CPUPerc}}"
+docker stats --no-stream --format "table {{.Container}}\\t{{.MemPerc}}\\t{{.CPUPerc}}"
 
 # 6. Validate dual blocking is operational
-curl -X GET "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/firewall/access_rules/rules"   -H "Authorization: Bearer $CF_TOKEN" | jq '.result | length'
+curl -X GET "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/firewall/access_rules/rules" \\
+  -H "Authorization: Bearer $CF_TOKEN" | jq '.result | length'
 ```
 
 ### Enhanced Security Incident Response
@@ -571,3 +580,4 @@ bash -c "source lib/security.sh && echo 'Security library loaded'"
 - ✅ **Safe Operations**: Race condition fixes and atomic operations
 
 The current VaultWarden-OCI implementation provides enterprise-grade security with comprehensive protection layers, enhanced monitoring capabilities, and robust emergency access procedures optimized for small teams requiring reliable, secure password management infrastructure.
+"""
