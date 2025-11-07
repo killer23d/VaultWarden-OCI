@@ -22,8 +22,8 @@ This is a **template-based, hardened deployment** designed specifically for smal
 - **Template-Based Configuration**: All config files generated from maintainable `.example` templates
 - **Enhanced Security**: Optimized fail2ban with dual CF+UFW blocking, comprehensive filtering
 - **Resource Management**: Container limits optimized for 6GB systems with balanced allocation
-- **Core Scripts**: 11 essential scripts for complete lifecycle management
-- **Unified Libraries**: Shared libraries (common, Docker, crypto, security) for consistent functionality
+- **Core Scripts**: 12 essential scripts for complete lifecycle management
+- **Unified Libraries**: 5 shared libraries (common, Docker, crypto, security, backup_utils) for consistent functionality
 - **Dynamic DNS**: Automatic Cloudflare DNS record updates
 - **Edge Security**: Cloudflare proxy with enhanced fail2ban integration for global IP blocking
 - **Firewall Hardening**: UFW configured with Cloudflare IP validation and safe fallback
@@ -31,6 +31,7 @@ This is a **template-based, hardened deployment** designed specifically for smal
 - **Automated Operations**: Comprehensive cron jobs for backups, updates, and maintenance
 - **Emergency Access**: Break-glass admin for OCI serial console recovery
 - **Interactive Tools**: Makefile shortcuts and interactive backup/restore functionality
+- **Containerized Email**: msmtpd sidecar for reliable email delivery without host dependencies
 
 ## ⚡ Quick Start (15 Minutes)
 
@@ -53,15 +54,18 @@ nano .env
 
 # 5. Start services
 ./startup.sh
+# Or use Makefile: make start
 
 # 6. Setup automation (recommended for set-and-forget operation)
 sudo ./cron-setup.sh --install
 
 # 7. Create break-glass admin for emergency access (RECOMMENDED)
 ./create-breakglass-admin.sh
+# Or use Makefile: make breakglass-create
 
 # 8. Verify deployment
 ./health.sh
+# Or use Makefile: make health
 ```
 
 **🎉 Your VaultWarden is now operational at https://vault.yourdomain.com**
@@ -94,7 +98,8 @@ All configuration files are managed through templates for easier maintenance:
     ├── common.sh                      # Shared utility functions
     ├── crypto.sh                      # Encryption/decryption utilities
     ├── docker.sh                      # Docker management functions
-    └── security.sh                    # Security validation functions
+    ├── security.sh                    # Security validation functions
+    └── backup_utils.sh                # Backup-specific utilities
 ```
 
 ### Benefits of Template Approach
@@ -125,8 +130,8 @@ All configuration files are managed through templates for easier maintenance:
 ┌─────────────────────────────────────────┐
 │           Management Layer              │
 │  ┌──────────┐  ┌──────────────┐        │
-│  │11 Scripts│  │4 Libraries   │        │ ── Encrypted Secrets (Age + SOPS)
-│  │(Ops)     │  │(Common+Sec)  │        │
+│  │12 Scripts│  │5 Libraries   │        │ ── Encrypted Secrets (Age + SOPS)
+│  │(Ops)     │  │(Common+Utils)│        │
 │  └──────────┘  └──────────────┘        │
 └─────────────────────────────────────────┘
 ┌─────────────────────────────────────────┐
@@ -135,8 +140,7 @@ All configuration files are managed through templates for easier maintenance:
 │  │Caddy │→ │VaultWarden│  │  msmtpd  │  │
 │  │(SSL) │  │(App)      │  │ (Email)  │  │
 │  └──────┘  └───────────┘  └──────────┘  │
-│      ↑        2GB Limit     32MB Limit  │
-│    1GB Limit                            │
+│    1GB Limit  2GB Limit     32MB Limit  │
 │  ┌────────┐                             │
 │  │fail2ban│─────────────────────────────┤ Dual CF+UFW Actions
 │  │(Sec)   │     512MB Limit             │ (Advanced filtering)
@@ -161,7 +165,7 @@ All configuration files are managed through templates for easier maintenance:
 | `./setup.sh` | One-time system setup | Template-based config generation, UFW validation | Once |
 | `./startup.sh` | Start/stop/restart services | Enhanced secret handling, race condition fixes | As needed |
 | `./health.sh` | System health monitoring | Comprehensive diagnostics, JSON output | Automated |
-| `./backup.sh` | Create encrypted backups | Atomic operations, integrity verification | Daily (automated) |
+| `./backup.sh` | Create encrypted backups | Atomic operations, integrity verification, full verification mode | Daily (automated) |
 | `./restore.sh` | Restore from encrypted backups | Interactive selection, validation | Emergency |
 
 ### Configuration & Maintenance
@@ -180,6 +184,67 @@ All configuration files are managed through templates for easier maintenance:
 | `./create-breakglass-admin.sh` | Emergency admin for serial console | OCI console access, secure creation | Once + as needed |
 | `./db-maint.sh` | Database maintenance | Safe offline SQLite optimization | Monthly (automated) |
 | `./update-dns.sh` | Manual DNS updates | Cloudflare API integration | As needed |
+
+### Email Testing
+
+| Script | Purpose | Key Features | Frequency |
+|--------|---------|-------------|----------|
+| `./test-email-simple.sh` | Test email configuration | Tests msmtpd container, validates SMTP settings | Setup + troubleshooting |
+
+## 🚀 Makefile Quick Reference
+
+The Makefile provides convenient shortcuts for common operations:
+
+### Service Management
+```bash
+make up              # Start all services
+make down            # Stop all services
+make restart         # Restart with enhanced startup script
+make start           # Full initialization startup
+make stop            # Graceful shutdown
+make status          # Show service status
+```
+
+### Monitoring & Health
+```bash
+make health          # Run health checks
+make health-email    # Health check with email notification
+make logs            # Show all service logs
+make logs SERVICE=vaultwarden  # Show specific service logs
+```
+
+### Backup & Restore
+```bash
+make backup          # Create database backup
+make backup-full     # Create full system backup
+make backup-emergency # Create emergency recovery kit
+make list-backups    # List available backups
+make restore         # Interactive restore
+```
+
+### Maintenance
+```bash
+make update          # Update container images
+make update-system   # Update system and containers
+make maintenance     # Run basic maintenance
+make maintenance-full # Comprehensive maintenance
+```
+
+### Security
+```bash
+make breakglass-create  # Create emergency admin
+make breakglass-status  # Check emergency admin status
+make breakglass-remove  # Remove emergency admin
+```
+
+### Development
+```bash
+make dev-setup       # Setup development environment
+make test            # Run all tests
+make test-config     # Validate configuration
+make shell           # Open shell in container
+make shell SERVICE=caddy # Open shell in specific container
+```
 
 ## 🔧 Enhanced Security Features
 
@@ -200,6 +265,12 @@ All configuration files are managed through templates for easier maintenance:
   - No hardcoded credentials in generated files
   - Consistent security configurations across deployments
   - Version control safe templates with validation
+
+- **Containerized Email**:
+  - msmtpd sidecar eliminates host mailutil dependencies
+  - Dedicated 32MB container for email relay
+  - Consistent SMTP configuration across all services
+  - Enhanced reliability and troubleshooting
 
 ### Multi-Layer Security
 
@@ -222,12 +293,13 @@ All configuration files are managed through templates for easier maintenance:
 
 - **Atomic Operations**: Prevents corrupt backups during creation
 - **Safe Database Operations**: WAL checkpoints for live snapshots
+- **Full Verification Mode**: Optional end-to-end recoverability testing
 - **Conservative Space Management**: Disk space validation before operations
 - **Daily**: Encrypted database backups (retention: 14 days)
 - **Weekly**: Encrypted full system backups (retention: 30 days)  
 - **Manual**: Emergency recovery kits (retention: 90 days)
 - **Offsite**: Automatic rclone sync to configured remote storage
-- **Verification**: Pre-encryption integrity checks and backup testing
+- **Verification**: Pre-encryption integrity checks and optional full verification
 
 ### Backup Operations
 
@@ -237,11 +309,20 @@ All configuration files are managed through templates for easier maintenance:
 ./backup.sh --type full        # Complete system backup
 ./backup.sh --type emergency   # Disaster recovery kit
 
+# With full verification (recommended weekly)
+./backup.sh --type full --full-verification
+
 # With offsite sync
 ./backup.sh --type db --rclone  # Backup with remote sync
 
 # List and manage backups
 ./backup.sh --list             # Show all available backups
+
+# Using Makefile
+make backup                    # Database backup
+make backup-full              # Full system backup
+make backup-emergency         # Emergency kit
+make list-backups             # List backups
 ```
 
 ### Recovery Process
@@ -252,6 +333,9 @@ All configuration files are managed through templates for easier maintenance:
 
 # Or restore specific backup file
 ./restore.sh --file /path/to/backup-file.age
+
+# Using Makefile
+make restore                   # Interactive restore
 ```
 
 ## 🔧 Configuration
@@ -285,9 +369,25 @@ All configuration files are managed through templates for easier maintenance:
    # Generate bcrypt hash: docker run --rm -it ghcr.io/caddybuilds/caddy-cloudflare:latest caddy hash-password
    ```
 
-5. **Emergency Access Setup** (Recommended):
+5. **Email Configuration** (Enhanced):
+   ```bash
+   # Email now uses containerized msmtpd (no host dependencies)
+   # Configure SMTP settings in .env:
+   nano .env
+   # Set: SMTP_HOST, SMTP_PORT, SMTP_USERNAME, etc.
+   
+   # Set SMTP password in secrets:
+   ./edit-secrets.sh
+   # Set: smtp_password
+   
+   # Test email functionality:
+   ./test-email-simple.sh
+   ```
+
+6. **Emergency Access Setup** (Recommended):
    ```bash
    ./create-breakglass-admin.sh
+   # Or use: make breakglass-create
    # Creates emergency admin account for OCI serial console access
    ```
 
@@ -302,7 +402,10 @@ nano .env.example               # For new environment variables
 
 # Apply template changes
 sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.com
+
+# Restart to apply changes
 ./startup.sh --force-restart    # Apply changes
+# Or use: make restart
 ```
 
 ## 🆘 Troubleshooting
@@ -313,15 +416,19 @@ sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.c
 ```bash
 # Check service status
 ./health.sh
+# Or: make health
 
 # View container logs  
 docker compose logs vaultwarden
+# Or: make logs SERVICE=vaultwarden
 
 # Validate configuration
 docker compose config
+# Or: make test-config
 
 # Force restart with fresh configuration
 ./startup.sh --force-restart
+# Or: make restart
 ```
 
 **Template Issues**:
@@ -333,7 +440,29 @@ docker compose config
 sudo ./setup.sh --force --domain your-domain.com --email your-email@domain.com
 
 # Check for template syntax issues
-cat docker-compose.yml.example | grep -n "platform:\|linux/arm64"
+cat docker-compose.yml.example | grep -n "platform:\\|linux/arm64"
+```
+
+**Email Issues** (Enhanced for msmtpd):
+```bash
+# Check msmtpd container status
+docker compose logs msmtpd
+# Or: make logs SERVICE=msmtpd
+
+# Test email functionality
+./test-email-simple.sh
+
+# Verify msmtpd is running
+docker compose ps msmtpd
+
+# Check msmtpd configuration
+docker compose exec msmtpd cat /etc/msmtprc
+
+# Test SMTP connectivity from msmtpd container
+docker compose exec msmtpd nc -z localhost 1025
+
+# Send test email from VaultWarden admin panel
+# Navigate to: https://vault.yourdomain.com/admin → SMTP Settings → Send Test Email
 ```
 
 **Fail2Ban Issues**:
@@ -345,27 +474,12 @@ docker compose exec fail2ban fail2ban-client status
 docker compose logs fail2ban | grep -i cloudflare
 
 # Test API token
-curl -X GET "https://api.cloudflare.com/client/v4/zones" \
-     -H "Authorization: Bearer YOUR_TOKEN" \
+curl -X GET "https://api.cloudflare.com/client/v4/zones" \\
+     -H "Authorization: Bearer YOUR_TOKEN" \\
      -H "Content-Type: application/json"
 
 # Validate filter syntax
 docker compose exec fail2ban fail2ban-regex /var/log/vaultwarden/vaultwarden.log /data/fail2ban/filter.d/vaultwarden-auth.conf
-```
-
-**Email Issues**:
-```bash
-# Check msmtpd container status
-docker compose logs msmtpd
-
-# Test email functionality
-docker compose exec msmtpd nc -z localhost 1025
-
-# View email configuration
-docker compose exec msmtpd cat /etc/msmtprc
-
-# Send test email from VaultWarden admin panel
-# Navigate to: https://vault.yourdomain.com/admin → SMTP Settings → Send Test Email
 ```
 
 ### Emergency Recovery
@@ -381,17 +495,19 @@ docker compose exec msmtpd cat /etc/msmtprc
 2. **If no break-glass admin configured**:
    - Use OCI boot volume attachment method
    - Create break-glass admin for future: `./create-breakglass-admin.sh`
+   - Or use: `make breakglass-create`
 
 ## 🛡️ Security Best Practices
 
 ### During Initial Setup
 - ✅ Use template-based setup: `./setup.sh` (not manual file editing)
-- ✅ Configure break-glass admin: `./create-breakglass-admin.sh`
+- ✅ Configure break-glass admin: `./create-breakglass-admin.sh` or `make breakglass-create`
 - ✅ Test OCI serial console access (verify it works)
 - ✅ Create and test backup restoration: `./backup.sh --type emergency`
 - ✅ Generate proper bcrypt hash for admin_basic_auth_hash
 - ✅ Validate Cloudflare API tokens work correctly
-- ✅ Run comprehensive health check: `./health.sh`
+- ✅ Test email functionality: `./test-email-simple.sh`
+- ✅ Run comprehensive health check: `./health.sh` or `make health`
 
 ### Ongoing Operations  
 - ✅ Monitor break-glass admin status regularly
@@ -400,6 +516,7 @@ docker compose exec msmtpd cat /etc/msmtprc
 - ✅ Monitor fail2ban effectiveness and API limits
 - ✅ Verify UFW rules after any network changes
 - ✅ Review container resource usage periodically
+- ✅ Test email notifications regularly
 
 ### Template Security
 - 📝 Never commit actual .env or docker-compose.yml files
@@ -408,10 +525,26 @@ docker compose exec msmtpd cat /etc/msmtprc
 - 📝 Validate templates before deployment: `docker compose config`
 - 📝 Test template changes in non-production first
 
+## 📚 Documentation
+
+Comprehensive documentation is available in the `docs/` directory:
+
+- **[DEPLOYMENT.md](docs/DEPLOYMENT.md)** - Detailed deployment guide
+- **[CONFIGURATION.md](docs/CONFIGURATION.md)** - Complete configuration reference
+- **[SECURITY.md](docs/SECURITY.md)** - Security hardening and best practices
+- **[OPERATIONS.md](docs/OPERATIONS.md)** - Day-to-day operations guide
+- **[BACKUP-RESTORE.md](docs/BACKUP-RESTORE.md)** - Backup and recovery procedures
+- **[SCRIPTS.md](docs/SCRIPTS.md)** - Script reference guide
+- **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** - Common issues and solutions
+- **[MIGRATION.md](docs/MIGRATION.md)** - Migration from other setups
+- **[API.md](docs/API.md)** - API usage and integration
+- **[ADVANCED-CUSTOMIZATION.md](docs/ADVANCED-CUSTOMIZATION.md)** - Advanced customization options
+
 ## 📄 License
 
 MIT License - see LICENSE file for details.
 
 ---
 
-**VaultWarden-OCI**: Template-based, secure, self-hosted password management made simple for small teams with enhanced fail2ban security, comprehensive resource management, and robust emergency recovery capabilities.
+**VaultWarden-OCI**: Template-based, secure, self-hosted password management made simple for small teams with enhanced fail2ban security, comprehensive resource management, containerized email delivery via msmtpd, full backup verification, and robust emergency recovery capabilities.
+"""
