@@ -88,6 +88,10 @@ FAIL2BAN_MEMORY_LIMIT=512M              # Log parsing and rule processing
 FAIL2BAN_MEMORY_RESERVATION=128M        # Guaranteed minimum for logs
 FAIL2BAN_CPU_LIMIT=0.2                  # 20% of single CPU core
 FAIL2BAN_CPU_RESERVATION=0.05           # 5% guaranteed minimum
+
+# msmtpd Container
+MSMTPD_MEMORY_LIMIT=32M                 # Lightweight SMTP relay
+MSMTPD_CPU_LIMIT=0.05                   # 5% of single CPU core
 ```
 
 ### Enhanced Backup Configuration
@@ -103,7 +107,7 @@ RCLONE_REMOTE_NAME=your_remote_name     # Configure with: rclone config
 # Examples: "gdrive", "s3", "dropbox", "onedrive"
 
 # Enhanced Backup Features
-BACKUP_VERIFICATION=true                # Enable backup integrity checking
+BACKUP_VERIFICATION_MODE=quick_check    # quick_check or integrity_check
 BACKUP_ATOMIC_OPERATIONS=true           # Use atomic backup operations
 ```
 
@@ -112,14 +116,14 @@ BACKUP_ATOMIC_OPERATIONS=true           # Use atomic backup operations
 ```bash
 # Production Mode (Recommended - Pinned Versions)
 # Set automatically by setup.sh --auto for stability
-VAULTWARDEN_VERSION=1.30.5             # Pin to stable version
+VAULTWARDEN_VERSION=1.34.3             # Pin to stable version
 CADDY_VERSION=2.8.4-cloudflare         # Pin with Cloudflare module  
 FAIL2BAN_VERSION=1.1.0                 # Pin to stable version
 MSMTPD_VERSION=1.0.0                   # Pin msmtpd version for stability
 
 # Development Mode (Latest Versions)
 # Set by setup.sh --use-latest (versions commented out)
-#VAULTWARDEN_VERSION=1.30.5            # Commented = use latest
+#VAULTWARDEN_VERSION=1.34.3            # Commented = use latest
 #CADDY_VERSION=2.8.4-cloudflare        # Commented = use latest
 #FAIL2BAN_VERSION=1.1.0                # Commented = use latest
 #MSMTPD_VERSION=1.0.0                  # Commented = use latest
@@ -143,6 +147,16 @@ SMTP_AUTH=on                           # Enable SMTP authentication
 # msmtpd Configuration
 # The msmtpd container provides containerized email relay functionality
 # replacing host-based mailutil dependencies for better portability
+```
+
+### Platform-Specific Settings
+
+```bash
+# SSH Log Path (Auto-detected by setup.sh)
+# Debian/Ubuntu: /var/log/auth.log
+# RHEL/CentOS/Oracle Linux (OCI): /var/log/secure
+# SUSE: /var/log/messages
+SSH_LOG_PATH=/var/log/secure            # Set automatically based on OS
 ```
 
 ## Enhanced Secrets Management
@@ -172,6 +186,11 @@ admin_token: "1234567890abcdef1234567890abcdef"
 
 # Admin panel basic auth hash (bcrypt - use caddy hash-password)
 admin_basic_auth_hash: "$2b$12$hash_generated_by_caddy_tool"
+```
+
+**Generate bcrypt hash**:
+```bash
+docker run --rm -it ghcr.io/caddybuilds/caddy-cloudflare:latest caddy hash-password
 ```
 
 #### Cloudflare API Tokens (Enhanced)
@@ -222,7 +241,7 @@ sops -d secrets/secrets.yaml > /dev/null && echo "Secrets valid"
 SIGNUPS_ALLOWED=false                  # Disable open registration
 INVITATIONS_ALLOWED=true              # Admin-controlled invitations only
 EMERGENCY_ACCESS_ALLOWED=true         # Allow emergency access feature
-PASSWORD_ITERATIONS=350000            # High iteration count (was 600000)
+PASSWORD_ITERATIONS=600000            # High iteration count for security
 PASSWORD_HINTS_ALLOWED=false          # Don't allow password hints
 SHOW_PASSWORD_HINT=false              # Don't show password hints
 WEB_VAULT_ENABLED=true                # Enable web vault interface
@@ -238,6 +257,7 @@ EXTENDED_LOGGING=true                 # Enhanced audit logging
 ```bash
 # SQLite database settings with performance optimization
 DATABASE_MAX_CONNS=10                 # Maximum database connections
+DATABASE_TIMEOUT=30                   # Database connection timeout
 DATABASE_URL=data/db.sqlite3          # Database path (relative to container)
 
 # Database optimization (applied by maintenance scripts)
@@ -282,6 +302,18 @@ msmtpd:
 - **Configuration consistency**: Same environment variables across containers
 - **Easy troubleshooting**: Dedicated container logs for email issues
 
+#### Testing Email Configuration
+```bash
+# Test msmtpd email delivery
+./test-email-simple.sh
+
+# Verbose output for troubleshooting
+./test-email-simple.sh --verbose
+
+# Test to specific email
+./test-email-simple.sh --to test@example.com
+```
+
 ### Enhanced Caddy Configuration
 
 #### Enhanced Logging and Forensics
@@ -317,7 +349,7 @@ rate_limit {
     zone admin_rl {
         capacity 5          # Very strict for admin panel
     }
-    zone api_auth_rl {      # NEW: API authentication rate limiting
+    zone api_auth_rl {      # API authentication rate limiting
         match_path /api/accounts/prelogin /identity/connect/token
         capacity 10         # 10 auth attempts per 5 minutes per IP
     }
@@ -371,16 +403,19 @@ rate_limit {
 [vaultwarden-auth]
 maxretry = 3               # Strict retry limit
 bantime = 2h              # 2-hour ban
+findtime = 1h             # Within 1 hour window
 action = %(action_mwl)s cloudflare-apiv4
 
 [vaultwarden-admin]  
 maxretry = 2               # Very strict for admin panel
 bantime = 24h             # 24-hour ban
+findtime = 1h             # Within 1 hour window
 action = %(action_mwl)s cloudflare-apiv4
 
 [vaultwarden-web]
 maxretry = 10             # More lenient for web interface
 bantime = 1h              # 1-hour ban
+findtime = 1h             # Within 1 hour window
 action = %(action_mwl)s cloudflare-apiv4
 ```
 
@@ -400,6 +435,9 @@ sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.c
 
 # Restart services to apply changes
 ./startup.sh --force-restart
+
+# Or use Makefile
+make restart
 ```
 
 ### Enhanced Template Validation
@@ -409,10 +447,10 @@ sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.c
 docker compose -f docker-compose.yml.example config
 
 # Check for common template issues
-grep -n "platform:\|linux/arm64" docker-compose.yml.example
+grep -n "platform:\\|linux/arm64" docker-compose.yml.example
 
 # Validate resource limits make sense for your system
-grep -A 5 -B 5 "memory:\|cpus:" docker-compose.yml.example
+grep -A 5 -B 5 "memory:\\|cpus:" docker-compose.yml.example
 ```
 
 ### Template Customization Examples
@@ -431,7 +469,7 @@ SMTP_SECURITY=starttls
 # Set: smtp_password
 
 # Restart to apply email configuration
-docker compose up -d
+docker compose restart msmtpd
 ```
 
 #### Resource Limit Adjustment
@@ -442,6 +480,9 @@ deploy:
     limits:
       memory: 4G        # Increase for larger systems
       cpus: '1.0'       # Increase for more CPU cores
+    reservations:
+      memory: 1G        # Increase guaranteed minimum
+      cpus: '0.4'       # Increase guaranteed CPU
 ```
 
 ## Enhanced Network and Firewall Configuration
@@ -492,9 +533,25 @@ EMERGENCY_BACKUP_RETENTION_DAYS=90    # Emergency kits
 ./backup.sh --type full               # Complete system backup
 ./backup.sh --type emergency          # Disaster recovery kit
 
+# Or use Makefile
+make backup
+make backup-full
+make backup-emergency
+
 # Enhanced backup listing with detailed information:
 ./backup.sh --list
+make list-backups
 # Shows: timestamp, size, type, integrity status, file ID
+```
+
+### Backup Verification Modes
+
+```bash
+# Fast verification (default - uses checksum)
+./backup.sh --type db
+
+# Full verification (recommended weekly - tests recoverability)
+./backup.sh --type full --full-verification
 ```
 
 ### Safe Database Operations
@@ -502,6 +559,9 @@ EMERGENCY_BACKUP_RETENTION_DAYS=90    # Emergency kits
 ```bash
 # Enhanced database maintenance (stops VaultWarden first)
 ./maintenance.sh --comprehensive
+
+# Or use Makefile
+make maintenance-full
 
 # Safe database operations include:
 # 1. Stop VaultWarden service
@@ -540,6 +600,9 @@ RCLONE_REMOTE_NAME=your_secure_remote
 # Create emergency admin with validation
 ./create-breakglass-admin.sh
 
+# Or use Makefile
+make breakglass-create
+
 # Enhanced security features:
 # - Validates script ownership (prevents privilege escalation)
 # - Creates separate non-root user with sudo privileges
@@ -554,6 +617,7 @@ RCLONE_REMOTE_NAME=your_secure_remote
 ```bash
 # Check emergency admin status
 ./create-breakglass-admin.sh --status
+make breakglass-status
 
 # Generate new emergency password
 ./create-breakglass-admin.sh --password
@@ -563,6 +627,7 @@ RCLONE_REMOTE_NAME=your_secure_remote
 
 # Remove emergency admin (when no longer needed)
 ./create-breakglass-admin.sh --remove
+make breakglass-remove
 ```
 
 ## Enhanced Configuration Best Practices
@@ -570,7 +635,7 @@ RCLONE_REMOTE_NAME=your_secure_remote
 ### Current Template-Based Environment
 
 1. **Edit templates only**: Always modify `.example` files as source of truth
-2. **Use enhanced setup**: Apply changes via `sudo ./setup.sh --force --validate`
+2. **Use enhanced setup**: Apply changes via `sudo ./setup.sh --force`
 3. **Resource awareness**: Consider 6GB system limitations in customizations
 4. **Security validation**: Use enhanced security validation functions
 5. **Document customizations**: Maintain clear documentation in template comments
@@ -604,6 +669,87 @@ RCLONE_REMOTE_NAME=your_secure_remote
 5. **Enhanced recovery**: Multiple backup types with integrity verification
 6. **Forensic readiness**: Enhanced logging for incident investigation
 7. **Email reliability**: Containerized msmtpd for consistent email delivery
+
+## Configuration Troubleshooting
+
+### Template Issues
+
+```bash
+# Validate template syntax
+docker compose -f docker-compose.yml.example config
+
+# Check for platform-specific issues
+grep -n "platform:" docker-compose.yml.example
+
+# Regenerate from templates
+sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
+```
+
+### Secrets Issues
+
+```bash
+# Test secrets decryption
+./edit-secrets.sh --test
+
+# Verify Age key exists
+ls -l secrets/keys/age-key.txt
+
+# Check permissions
+ls -la secrets/
+
+# Fix permissions
+chmod 700 secrets/
+chmod 600 secrets/keys/age-key.txt
+```
+
+### Environment Variable Issues
+
+```bash
+# Check .env file
+cat .env | grep -v "^#"
+
+# Verify critical variables
+grep -E "DOMAIN|CLOUDFLARE_ZONE_ID|SMTP_HOST" .env
+
+# Regenerate .env from template
+cp .env.example .env
+nano .env  # Edit with your values
+```
+
+### Email Configuration Issues
+
+```bash
+# Test msmtpd functionality
+./test-email-simple.sh --verbose
+
+# Check msmtpd logs
+docker compose logs msmtpd
+
+# Verify SMTP settings
+grep SMTP .env
+
+# Check secrets
+./edit-secrets.sh --test
+```
+
+## Makefile Quick Reference
+
+```bash
+# Service Management
+make start          # Start services
+make restart        # Restart with enhanced script
+make status         # Show status
+
+# Configuration
+make config         # Show current configuration
+make test-config    # Validate configuration
+make edit-secrets   # Edit encrypted secrets
+
+# Health & Monitoring
+make health         # Run health checks
+make logs           # View all logs
+make logs SERVICE=vaultwarden  # View specific service logs
+```
 
 ---
 
