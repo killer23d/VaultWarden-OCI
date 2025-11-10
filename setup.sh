@@ -343,15 +343,22 @@ setup_user_permissions() {
     return 0
 }
 
-# CRITICAL FIX: Firewall setup with race condition fix - fetch BEFORE reset
+# CRITICAL FIX: Firewall setup with race condition fix
 setup_firewall() {
     log_info "Configuring Cloudflare-only UFW firewall..."
-
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would configure UFW firewall with Cloudflare IP ranges"
         return 0
     fi
-
+    
+    # Get SSH port FIRST
+    local ssh_port
+    ssh_port=$(get_config_value "SSH_PORT" "22")
+    if ! validate_port "$ssh_port"; then
+        log_error "Invalid SSH port: $ssh_port"
+        return 1
+    fi
+    
     # CRITICAL FIX: Fetch Cloudflare IPs BEFORE resetting firewall
     log_info "Fetching current Cloudflare IP ranges..."
     local cf_ipv4_file="/tmp/cf_ipv4_ranges.txt"
@@ -363,47 +370,54 @@ setup_firewall() {
         log_error "⚠️  CRITICAL: Failed to fetch Cloudflare IP ranges"
         log_error "Cannot configure firewall without Cloudflare IPs"
         log_error "Check internet connectivity and retry"
-        # Clean up temp files
         rm -f "$cf_ipv4_file" "$cf_ipv6_file"
         return 1
     fi
-
+    
     # Validate fetched data before proceeding
     if ! grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$' "$cf_ipv4_file" >/dev/null; then
         log_error "Invalid IPv4 ranges received from Cloudflare API"
         rm -f "$cf_ipv4_file" "$cf_ipv6_file"
         return 1
     fi
-
     log_success "Cloudflare IP ranges fetched and validated"
 
+    # CRITICAL FIX: Add SSH rule BEFORE reset to prevent lockout
+    log_info "Pre-configuring SSH access to prevent lockout..."
+    if ufw status | grep -q "Status: active"; then
+        # UFW is already active - add SSH rule before reset
+        if ! ufw allow "$ssh_port/tcp" comment "SSH-PreReset" >/dev/null 2>&1; then
+            log_warn "Could not add pre-reset SSH rule (may already exist)"
+        else
+            log_success "SSH access protected before reset"
+        fi
+    fi
+
     # NOW it's safe to reset the firewall
+    log_info "Resetting UFW firewall..."
     if ! ufw --force reset >/dev/null; then
         log_error "Failed to reset UFW firewall"
         rm -f "$cf_ipv4_file" "$cf_ipv6_file"
         return 1
     fi
 
+    # IMMEDIATELY set defaults and re-add SSH
     if ! ufw default deny incoming >/dev/null || ! ufw default allow outgoing >/dev/null; then
         log_error "Failed to set UFW default policies"
         return 1
     fi
 
-    # SSH on custom port
-    local ssh_port
-    ssh_port=$(get_config_value "SSH_PORT" "22")
-
-    if ! validate_port "$ssh_port"; then
-        log_error "Invalid SSH port: $ssh_port"
-        return 1
-    fi
-
+    # CRITICAL: Re-add SSH rule immediately after reset
+    log_info "Re-adding SSH access rule..."
     if ! ufw allow "$ssh_port/tcp" comment "SSH" >/dev/null; then
         log_error "Failed to allow SSH port in UFW"
         return 1
     fi
+    log_success "SSH access on port $ssh_port configured"
 
+    # Continue with Cloudflare IP ranges...
     # Apply Cloudflare IPv4 ranges (data already validated)
+    log_info "Applying Cloudflare IPv4 ranges..."
     while IFS= read -r range; do
         if [[ -n "$range" ]]; then
             if ! ufw allow from "$range" to any port 80,443 comment "CF-IPv4" >/dev/null; then
@@ -414,6 +428,7 @@ setup_firewall() {
     log_success "Applied Cloudflare IPv4 ranges"
 
     # Apply Cloudflare IPv6 ranges
+    log_info "Applying Cloudflare IPv6 ranges..."
     if grep -E '^[0-9a-fA-F:]+/[0-9]{1,3}$' "$cf_ipv6_file" >/dev/null; then
         while IFS= read -r range; do
             if [[ -n "$range" ]]; then
@@ -429,14 +444,16 @@ setup_firewall() {
     rm -f "$cf_ipv4_file" "$cf_ipv6_file"
 
     # Enable firewall (only after all rules are added)
+    log_info "Enabling UFW firewall..."
     if ! echo "y" | ufw enable >/dev/null; then
         log_error "Failed to enable UFW firewall"
         return 1
     fi
-
     log_success "Firewall configured and enabled"
+    log_info "SSH access maintained on port $ssh_port"
     return 0
 }
+
 
 # NEW: SSH hardening validation for set-and-forget security
 validate_ssh_config() {
@@ -606,11 +623,11 @@ create_env_file() {
     detected_ssh_log_path=$(detect_ssh_log_path)
 
     # Populate template values using sed
-    if ! sed -i "s/DOMAIN=.*/DOMAIN=$DOMAIN/" "$env_file" || \
+    if ! sed -i "s|DOMAIN=.*|DOMAIN=$DOMAIN|" "$env_file" || \
        ! sed -i "s/ADMIN_EMAIL=.*/ADMIN_EMAIL=$ADMIN_EMAIL/" "$env_file" || \
        ! sed -i "s/PUID=.*/PUID=$user_id/" "$env_file" || \
        ! sed -i "s/PGID=.*/PGID=$group_id/" "$env_file" || \
-       ! sed -i "s/SMTP_FROM=.*/SMTP_FROM=noreply@$DOMAIN/" "$env_file" || \
+       ! sed -i "s|SMTP_FROM=.*|SMTP_FROM=noreply@$DOMAIN|" "$env_file" || \
        ! sed -i "s|SSH_LOG_PATH=.*|SSH_LOG_PATH=$detected_ssh_log_path|" "$env_file"; then
         log_error "Failed to populate .env template values"
         return 1
@@ -971,6 +988,7 @@ set_script_permissions() {
         "create-breakglass-admin.sh"
         "db-maint.sh"
         "update-dns.sh"
+        "test-email-simple.sh"
     )
 
     local failed_scripts=()
