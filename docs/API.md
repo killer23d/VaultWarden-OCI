@@ -18,15 +18,15 @@ VaultWarden implements the Bitwarden API, providing compatibility with official 
 
 **Via Password Grant** (User login):
 ```bash
-curl -X POST https://vault.example.com/identity/connect/token \\
-  -H "Content-Type: application/x-www-form-urlencoded" \\
-  -d "grant_type=password" \\
-  -d "username=user@example.com" \\
-  -d "password=user_password" \\
-  -d "scope=api offline_access" \\
-  -d "client_id=web" \\
-  -d "deviceType=3" \\
-  -d "deviceName=api-client" \\
+curl -X POST https://vault.example.com/identity/connect/token \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=password" \
+  -d "username=user@example.com" \
+  -d "password=user_password" \
+  -d "scope=api offline_access" \
+  -d "client_id=web" \
+  -d "deviceType=3" \
+  -d "deviceName=api-client" \
   -d "deviceIdentifier=$(uuidgen)"
 ```
 
@@ -42,7 +42,7 @@ curl -X POST https://vault.example.com/identity/connect/token \\
 
 **Using Access Token**:
 ```bash
-curl -X GET https://vault.example.com/api/sync \\
+curl -X GET https://vault.example.com/api/sync \
   -H "Authorization: Bearer eyJhbGc..."
 ```
 
@@ -51,7 +51,7 @@ curl -X GET https://vault.example.com/api/sync \\
 **Admin Token** (configured in secrets):
 ```bash
 # Admin operations use admin token from secrets
-curl -X GET https://vault.example.com/admin/users \\
+curl -X GET https://vault.example.com/admin/users \
   -H "Authorization: Bearer YOUR_ADMIN_TOKEN"
 ```
 
@@ -67,21 +67,21 @@ curl -u "admin:password" https://vault.example.com/admin
 
 **Sync Vault**:
 ```bash
-curl -X GET https://vault.example.com/api/sync \\
+curl -X GET https://vault.example.com/api/sync \
   -H "Authorization: Bearer $ACCESS_TOKEN"
 ```
 
 **Get Ciphers** (vault items):
 ```bash
-curl -X GET https://vault.example.com/api/ciphers \\
+curl -X GET https://vault.example.com/api/ciphers \
   -H "Authorization: Bearer $ACCESS_TOKEN"
 ```
 
 **Create Cipher**:
 ```bash
-curl -X POST https://vault.example.com/api/ciphers \\
-  -H "Authorization: Bearer $ACCESS_TOKEN" \\
-  -H "Content-Type: application/json" \\
+curl -X POST https://vault.example.com/api/ciphers \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
   -d '{
     "type": 1,
     "name": "Example Login",
@@ -95,15 +95,15 @@ curl -X POST https://vault.example.com/api/ciphers \\
 
 **Update Cipher**:
 ```bash
-curl -X PUT https://vault.example.com/api/ciphers/$CIPHER_ID \\
-  -H "Authorization: Bearer $ACCESS_TOKEN" \\
-  -H "Content-Type: application/json" \\
+curl -X PUT https://vault.example.com/api/ciphers/$CIPHER_ID \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
   -d '{...}'
 ```
 
 **Delete Cipher**:
 ```bash
-curl -X DELETE https://vault.example.com/api/ciphers/$CIPHER_ID \\
+curl -X DELETE https://vault.example.com/api/ciphers/$CIPHER_ID \
   -H "Authorization: Bearer $ACCESS_TOKEN"
 ```
 
@@ -137,4 +137,3 @@ VaultWarden-OCI implements rate limiting via Caddy:
 ---
 
 This API guide provides comprehensive examples for integrating with VaultWarden-OCI programmatically, automating operations, and extending functionality through various programming languages and tools.
-"""

@@ -447,10 +447,10 @@ make restart
 docker compose -f docker-compose.yml.example config
 
 # Check for common template issues
-grep -n "platform:\\|linux/arm64" docker-compose.yml.example
+grep -n "platform:\|linux/arm64" docker-compose.yml.example
 
 # Validate resource limits make sense for your system
-grep -A 5 -B 5 "memory:\\|cpus:" docker-compose.yml.example
+grep -A 5 -B 5 "memory:\|cpus:" docker-compose.yml.example
 ```
 
 ### Template Customization Examples

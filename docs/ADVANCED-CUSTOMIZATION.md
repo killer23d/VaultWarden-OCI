@@ -59,7 +59,7 @@ services:
         reservations:
           memory: 1G        # Increased from 512M
           cpus: '0.4'       # Increased from 0.2
-  
+
   caddy:
     deploy:
       resources:
@@ -127,7 +127,7 @@ services:
 # Edit caddy/Caddyfile
 vault1.example.com, vault2.example.com {
     reverse_proxy vaultwarden:80
-    
+
     # Domain-specific logging
     log {
         output file /logs/vault1.log
@@ -143,7 +143,7 @@ services:
   vaultwarden:
     sysctls:
       - net.ipv6.conf.all.disable_ipv6=0
-    
+
 networks:
   default:
     enable_ipv6: true
@@ -213,7 +213,7 @@ services:
       - SMTP_SECURITY=starttls
       - SMTP_USERNAME=${SMTP_USERNAME}
       - SMTP_PASSWORD_FILE=/run/secrets/smtp_password
-  
+
   # Remove msmtpd if using external SMTP
   msmtpd:
     deploy:
@@ -261,7 +261,7 @@ header {
     Permissions-Policy "geolocation=(), microphone=(), camera=()"
     Feature-Policy "geolocation 'none'; microphone 'none'; camera 'none'"
     Expect-CT "enforce, max-age=86400"
-    
+
     # Custom headers
     X-Custom-Header "VaultWarden-OCI"
 }
@@ -280,14 +280,14 @@ handle @admin_access {
     @allowed_ips {
         remote_ip 192.168.1.0/24 10.0.0.0/8
     }
-    
+
     handle @allowed_ips {
         basic_auth {
             import secret_admin_basic_auth_hash
         }
         reverse_proxy vaultwarden:80
     }
-    
+
     handle {
         respond "Access Denied" 403
     }
@@ -322,10 +322,10 @@ VAULTWARDEN_SQLITE_CACHE_SIZE=-2000  # 2MB cache (negative = KB)
         protocol {
             experimental_http3
         }
-        
+
         # Connection limits
         max_header_size 16384
-        
+
         # Timeouts
         idle_timeout 5m
         read_header_timeout 10s
@@ -449,7 +449,7 @@ services:
   vaultwarden1:
     volumes:
       - nfs-data:/data
-      
+
   vaultwarden2:
     volumes:
       - nfs-data:/data
@@ -477,12 +477,12 @@ services:
       - DOMAIN=http://localhost:8080
     ports:
       - "8080:80"
-    
+
   # Disable production services
   fail2ban:
     deploy:
       replicas: 0
-  
+
   caddy:
     deploy:
       replicas: 0
@@ -510,7 +510,7 @@ vault.example.com {
         uri /oauth2/auth
         copy_headers X-Auth-Request-User X-Auth-Request-Email
     }
-    
+
     reverse_proxy vaultwarden:80
 }
 ```
@@ -537,12 +537,12 @@ services:
 EVENT="$1"
 MESSAGE="$2"
 
-curl -X POST https://your-webhook-url.com/notify \\
-  -H "Content-Type: application/json" \\
+curl -X POST https://your-webhook-url.com/notify \
+  -H "Content-Type: application/json" \
   -d "{
-    \\"event\\": \\"$EVENT\\",
-    \\"message\\": \\"$MESSAGE\\",
-    \\"timestamp\\": \\"$(date -Iseconds)\\"
+    \"event\": \"$EVENT\",
+    \"message\": \"$MESSAGE\",
+    \"timestamp\": \"$(date -Iseconds)\"
   }"
 ```
 

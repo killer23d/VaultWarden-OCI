@@ -93,8 +93,8 @@ sudo chown -R 1000:1000 /var/lib/vaultwarden/data/attachments
 5. **Verify migration**:
 ```bash
 # Test login
-curl -X POST https://vault.example.com/identity/connect/token \\
-  -H "Content-Type: application/x-www-form-urlencoded" \\
+curl -X POST https://vault.example.com/identity/connect/token \
+  -H "Content-Type: application/x-www-form-urlencoded" \
   -d "grant_type=password&username=test@example.com&password=test"
 
 # Check admin panel

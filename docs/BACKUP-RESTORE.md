@@ -156,10 +156,10 @@ make list-backups
 ./backup.sh --type db --dry-run
 
 # Full featured backup with all options
-./backup.sh --type full \\
-  --full-verification \\
-  --rclone \\
-  --email \\
+./backup.sh --type full \
+  --full-verification \
+  --rclone \
+  --email \
   --dry-run
 ```
 

@@ -256,10 +256,10 @@ bash -c "source lib/security.sh && validate_system_security"
 make start
 
 # Monitor startup with resource awareness
-docker stats --format "table {{.Container}}\\t{{.CPUPerc}}\\t{{.MemUsage}}\\t{{.MemPerc}}"
+docker stats --format "table {{.Container}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}"
 
 # Verify resource limits are applied
-docker compose ps --format "table {{.Names}}\\t{{.Status}}\\t{{.Ports}}"
+docker compose ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
 
 # Check service logs
 docker compose logs vaultwarden --follow --tail=50
@@ -487,12 +487,12 @@ free -h && cat /proc/meminfo | grep Available
 docker compose logs fail2ban | grep -E "(cloudflare|ufw)"
 
 # Validate filter regex
-docker compose exec fail2ban fail2ban-regex \\
-  /var/log/caddy/access.log \\
+docker compose exec fail2ban fail2ban-regex \
+  /var/log/caddy/access.log \
   /data/fail2ban/filter.d/vaultwarden-web-caddy.conf
 
 # Test Cloudflare API connectivity
-curl -X GET "https://api.cloudflare.com/client/v4/zones" \\
+curl -X GET "https://api.cloudflare.com/client/v4/zones" \
      -H "Authorization: Bearer YOUR_TOKEN"
 ```
 
