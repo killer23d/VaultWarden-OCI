@@ -87,7 +87,7 @@ services:
           memory: 2G      # Main application, largest allocation
           cpus: '0.6'     # 60% of single CPU
         reservations:
-          memory: 1G    # Minimum guaranteed memory
+          memory: 1G      # Minimum guaranteed memory
           cpus: '0.2'     # 20% of single CPU minimum
 
   caddy:
@@ -186,6 +186,8 @@ services:
       F2B_LOG_TARGET: STDOUT
       F2B_LOG_LEVEL: INFO
       F2B_DB_PURGE_AGE: 1d
+      # Install whois for enhanced email notifications
+      PACKAGES: whois
       # Email configuration via msmtpd sidecar
       F2B_DEST_MAIL: ${ADMIN_EMAIL}
       F2B_SENDER: fail2ban@${DOMAIN}
@@ -225,7 +227,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1G    # Log parsing and rule processing
+          memory: 1G      # Log parsing and rule processing
           cpus: '0.2'     # 20% of single CPU
         reservations:
           memory: 256M    # Minimum for log processing
@@ -267,19 +269,19 @@ networks:
 # ENHANCED FEATURES:
 # - Resource limits prevent container resource exhaustion on 6GB system
 # - Timezone consistency across all containers for proper log correlation
-# - Balanced resource allocation: VaultWarden (2G), Caddy (1G), Fail2Ban (512M), msmtpd (32M)
+# - Balanced resource allocation: VaultWarden (2G), Caddy (1G), Fail2Ban (1G), msmtpd (32M)
 # - CPU limits ensure fair scheduling and prevent single container monopolization
 # - Memory reservations guarantee minimum resources for stable operation
 # - Platform-specific SSH log detection for multi-distro compatibility
 # - Containerized email solution eliminates host dependencies
 # 
 # RESOURCE ALLOCATION STRATEGY (for 6GB system):
-# - Total container limits: ~3.5GB (leaves 2.5GB for host OS and overhead)
+# - Total container limits: ~4GB (leaves 2GB for host OS and overhead)
 # - VaultWarden: 2GB limit (main application, database operations)
 # - Caddy: 1GB limit (SSL termination, reverse proxy, log processing)
-# - Fail2Ban: 512MB limit (log parsing, rule processing)
+# - Fail2Ban: 1GB limit (log parsing, rule processing)
 # - msmtpd: 32MB limit (lightweight SMTP relay)
-# - Remaining ~2.5GB: Host OS, kernel, Docker daemon, buffers/cache
+# - Remaining ~2GB: Host OS, kernel, Docker daemon, buffers/cache
 #
 # PLATFORM COMPATIBILITY:
 # - SSH_LOG_PATH automatically detects correct SSH log location
