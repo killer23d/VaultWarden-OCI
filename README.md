@@ -10,7 +10,7 @@ This is a **template-based, hardened deployment** designed specifically for smal
 
 - **Set-and-forget reliability** with template-based maintenance and automated operations
 - **Template-first approach** - all configuration files maintained as `.example` templates
-- **Enhanced fail2ban** with Cloudflare-only blocking for web traffic (iptables removed from proxied services)
+- **Cloudflare-only blocking** for web traffic (iptables removed from proxied services)
 - **Robust security** with comprehensive Cloudflare integration and encrypted secrets
 - **Simple operations** with comprehensive automation and health monitoring
 - **Emergency recovery** with break-glass admin access for critical situations
@@ -20,12 +20,12 @@ This is a **template-based, hardened deployment** designed specifically for smal
 ### Key Features
 
 - **Template-Based Configuration**: All config files generated from maintainable `.example` templates
-- **Enhanced Security**: Cloudflare-only blocking for web traffic, dual CF+UFW for SSH
+- **Enhanced Security**: Cloudflare-only blocking for web traffic, local iptables only for SSH
 - **Resource Management**: Container limits optimized for 6GB systems with balanced allocation
-- **Core Scripts**: 12 essential scripts for complete lifecycle management
+- **Core Scripts**: 13 essential scripts for complete lifecycle management
 - **Unified Libraries**: 5 shared libraries (common, Docker, crypto, security, backup_utils) for consistent functionality
 - **Dynamic DNS**: Automatic Cloudflare DNS record updates
-- **Edge Security**: Cloudflare proxy with enhanced fail2ban integration for global IP blocking
+- **Edge Security**: Cloudflare proxy with Fail2ban integration for global IP blocking
 - **Firewall Hardening**: UFW configured with Cloudflare IP validation and safe fallback
 - **Encrypted Secrets**: Age + SOPS for industry-standard secrets management
 - **Automated Operations**: Comprehensive cron jobs for backups, updates, and maintenance
@@ -86,7 +86,7 @@ All configuration files are managed through templates for easier maintenance:
 ├── caddy/Caddyfile                    # Enhanced reverse proxy configuration
 ├── fail2ban/
 │   ├── action.d/
-│   │   ├── cloudflare-apiv4.conf      # Advanced CF+UFW dual action
+│   │   ├── cloudflare-apiv4.conf      # Cloudflare API blocking action
 │   │   └── smtp.conf                  # Email notification action
 │   ├── filter.d/                      # Comprehensive filter configurations
 │   │   ├── vaultwarden-auth.conf      # Authentication failure detection
@@ -130,7 +130,7 @@ All configuration files are managed through templates for easier maintenance:
 ┌─────────────────────────────────────────┐
 │           Management Layer              │
 │  ┌──────────┐  ┌──────────────┐        │
-│  │12 Scripts│  │5 Libraries   │        │ ── Encrypted Secrets (Age + SOPS)
+│  │13 Scripts│  │5 Libraries   │        │ ── Encrypted Secrets (Age + SOPS)
 │  │(Ops)     │  │(Common+Utils)│        │
 │  └──────────┘  └──────────────┘        │
 └─────────────────────────────────────────┘
@@ -143,7 +143,7 @@ All configuration files are managed through templates for easier maintenance:
 │    1GB Limit  2GB Limit     32MB Limit  │
 │  ┌────────┐                             │
 │  │fail2ban│─────────────────────────────┤ Cloudflare-only for web
-│  │(Sec)   │     512MB Limit             │ CF+UFW for SSH
+│  │(Sec)   │     1GB Limit               │ Local iptables only for SSH
 │  └────────┘                             │
 └─────────────────────────────────────────┘
       ↓
@@ -250,9 +250,10 @@ make shell SERVICE=caddy # Open shell in specific container
 
 ### Current Security Improvements
 
-- **Enhanced Fail2Ban**: 
-  - **CRITICAL FIX**: Cloudflare-only blocking for web traffic (iptables removed from proxied services)
-  - Dual CF+UFW blocking ONLY for SSH (direct connection, not proxied)
+- **Cloudflare-Only Web Blocking**: 
+  - **CRITICAL**: All web-facing jails use Cloudflare API exclusively
+  - iptables removed from proxied services (traffic comes from Cloudflare IPs, not attacker IPs)
+  - Local iptables ONLY used for SSH (direct connection, not proxied)
   - Advanced retry logic with exponential backoff
   - Comprehensive regex-based filtering (no external dependencies)
   - Rate limiting detection and response
@@ -279,7 +280,7 @@ make shell SERVICE=caddy # Open shell in specific container
 - **Cloudflare Integration**:
   - Traffic proxied through Cloudflare's edge network
   - **Cloudflare-only blocking for web**: All web-facing jails use CF API only (iptables ineffective due to proxy)
-  - **Dual CF+UFW for SSH**: SSH jail uses both actions since it's direct connection
+  - **Local iptables for SSH**: SSH jail uses iptables since it's direct connection
   - Automatic IP list updates with safe firewall integration
 - **Host Firewall**: UFW configured with Cloudflare IP validation and safe fallback
 - **HTTPS Enforcement**: Automatic HTTPS via Caddy with Let's Encrypt
@@ -377,11 +378,11 @@ make restore                   # Interactive restore
    # Configure SMTP settings in .env:
    nano .env
    # Set: SMTP_HOST, SMTP_PORT, SMTP_USERNAME, etc.
-   
+
    # Set SMTP password in secrets:
    ./edit-secrets.sh
    # Set: smtp_password
-   
+
    # Test email functionality:
    ./test-email-simple.sh
    ```
@@ -442,7 +443,7 @@ docker compose config
 sudo ./setup.sh --force --domain your-domain.com --email your-email@domain.com
 
 # Check for template syntax issues
-cat docker-compose.yml.example | grep -n "platform:\\|linux/arm64"
+cat docker-compose.yml.example | grep -n "platform:\|linux/arm64"
 ```
 
 **Email Issues** (Enhanced for msmtpd):
@@ -476,8 +477,8 @@ docker compose exec fail2ban fail2ban-client status
 docker compose logs fail2ban | grep -i cloudflare
 
 # Test API token
-curl -X GET "https://api.cloudflare.com/client/v4/zones" \\
-     -H "Authorization: Bearer YOUR_TOKEN" \\
+curl -X GET "https://api.cloudflare.com/client/v4/zones" \
+     -H "Authorization: Bearer YOUR_TOKEN" \
      -H "Content-Type: application/json"
 
 # Validate filter syntax
