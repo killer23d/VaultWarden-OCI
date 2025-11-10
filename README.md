@@ -10,7 +10,7 @@ This is a **template-based, hardened deployment** designed specifically for smal
 
 - **Set-and-forget reliability** with template-based maintenance and automated operations
 - **Template-first approach** - all configuration files maintained as `.example` templates
-- **Enhanced fail2ban** with optimized Cloudflare API integration and advanced filtering
+- **Enhanced fail2ban** with Cloudflare-only blocking for web traffic (iptables removed from proxied services)
 - **Robust security** with comprehensive Cloudflare integration and encrypted secrets
 - **Simple operations** with comprehensive automation and health monitoring
 - **Emergency recovery** with break-glass admin access for critical situations
@@ -20,7 +20,7 @@ This is a **template-based, hardened deployment** designed specifically for smal
 ### Key Features
 
 - **Template-Based Configuration**: All config files generated from maintainable `.example` templates
-- **Enhanced Security**: Optimized fail2ban with dual CF+UFW blocking, comprehensive filtering
+- **Enhanced Security**: Cloudflare-only blocking for web traffic, dual CF+UFW for SSH
 - **Resource Management**: Container limits optimized for 6GB systems with balanced allocation
 - **Core Scripts**: 12 essential scripts for complete lifecycle management
 - **Unified Libraries**: 5 shared libraries (common, Docker, crypto, security, backup_utils) for consistent functionality
@@ -142,8 +142,8 @@ All configuration files are managed through templates for easier maintenance:
 │  └──────┘  └───────────┘  └──────────┘  │
 │    1GB Limit  2GB Limit     32MB Limit  │
 │  ┌────────┐                             │
-│  │fail2ban│─────────────────────────────┤ Dual CF+UFW Actions
-│  │(Sec)   │     512MB Limit             │ (Advanced filtering)
+│  │fail2ban│─────────────────────────────┤ Cloudflare-only for web
+│  │(Sec)   │     512MB Limit             │ CF+UFW for SSH
 │  └────────┘                             │
 └─────────────────────────────────────────┘
       ↓
@@ -251,7 +251,8 @@ make shell SERVICE=caddy # Open shell in specific container
 ### Current Security Improvements
 
 - **Enhanced Fail2Ban**: 
-  - Dual Cloudflare + UFW blocking with idempotent operations
+  - **CRITICAL FIX**: Cloudflare-only blocking for web traffic (iptables removed from proxied services)
+  - Dual CF+UFW blocking ONLY for SSH (direct connection, not proxied)
   - Advanced retry logic with exponential backoff
   - Comprehensive regex-based filtering (no external dependencies)
   - Rate limiting detection and response
@@ -277,7 +278,8 @@ make shell SERVICE=caddy # Open shell in specific container
 - **Encrypted Secrets**: All sensitive data encrypted with Age and managed via SOPS
 - **Cloudflare Integration**:
   - Traffic proxied through Cloudflare's edge network
-  - **Dual blocking**: CF API + local UFW for comprehensive protection
+  - **Cloudflare-only blocking for web**: All web-facing jails use CF API only (iptables ineffective due to proxy)
+  - **Dual CF+UFW for SSH**: SSH jail uses both actions since it's direct connection
   - Automatic IP list updates with safe firewall integration
 - **Host Firewall**: UFW configured with Cloudflare IP validation and safe fallback
 - **HTTPS Enforcement**: Automatic HTTPS via Caddy with Let's Encrypt
@@ -480,6 +482,9 @@ curl -X GET "https://api.cloudflare.com/client/v4/zones" \\
 
 # Validate filter syntax
 docker compose exec fail2ban fail2ban-regex /var/log/vaultwarden/vaultwarden.log /data/fail2ban/filter.d/vaultwarden-auth.conf
+
+# NOTE: Web-facing jails (vaultwarden-auth, vaultwarden-admin, vaultwarden-web-*) 
+# use Cloudflare API ONLY - local iptables removed as traffic is proxied
 ```
 
 ### Emergency Recovery
@@ -517,6 +522,7 @@ docker compose exec fail2ban fail2ban-regex /var/log/vaultwarden/vaultwarden.log
 - ✅ Verify UFW rules after any network changes
 - ✅ Review container resource usage periodically
 - ✅ Test email notifications regularly
+- ✅ Understand Cloudflare-only blocking for web traffic (iptables removed)
 
 ### Template Security
 - 📝 Never commit actual .env or docker-compose.yml files
@@ -546,5 +552,4 @@ MIT License - see LICENSE file for details.
 
 ---
 
-**VaultWarden-OCI**: Template-based, secure, self-hosted password management made simple for small teams with enhanced fail2ban security, comprehensive resource management, containerized email delivery via msmtpd, full backup verification, and robust emergency recovery capabilities.
-"""
+**VaultWarden-OCI**: Template-based, secure, self-hosted password management made simple for small teams with Cloudflare-only blocking for web traffic, comprehensive resource management, containerized email delivery via msmtpd, full backup verification, and robust emergency recovery capabilities.
