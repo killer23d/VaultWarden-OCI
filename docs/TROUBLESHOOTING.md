@@ -105,7 +105,7 @@ make logs SERVICE=caddy
 dig +short vault.example.com
 
 # Test Cloudflare API
-curl -X GET "https://api.cloudflare.com/client/v4/zones" \\
+curl -X GET "https://api.cloudflare.com/client/v4/zones" \
      -H "Authorization: Bearer YOUR_DNS_TOKEN"
 ```
 
@@ -137,7 +137,7 @@ docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile
 docker compose -f docker-compose.yml.example config
 
 # Check for common issues
-cat docker-compose.yml.example | grep -n "platform:\\|linux/arm64"
+cat docker-compose.yml.example | grep -n "platform:\|linux/arm64"
 
 # Validate current config
 docker compose config
@@ -325,7 +325,7 @@ echo "DNS IP: $(dig +short vault.example.com)"
 ./update-dns.sh
 
 # Verify Cloudflare API token works
-curl -X GET "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID" \\
+curl -X GET "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID" \
      -H "Authorization: Bearer YOUR_DNS_TOKEN"
 
 # Check CLOUDFLARE_ZONE_ID in .env
@@ -551,12 +551,12 @@ docker compose restart fail2ban
 # Check: fail2ban_cloudflare_firewall_token
 
 # Test Cloudflare API
-curl -X GET "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/firewall/access_rules/rules" \\
+curl -X GET "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/firewall/access_rules/rules" \
      -H "Authorization: Bearer YOUR_FIREWALL_TOKEN"
 
 # Check filter syntax
-docker compose exec fail2ban fail2ban-regex \\
-  /var/log/vaultwarden/vaultwarden.log \\
+docker compose exec fail2ban fail2ban-regex \
+  /var/log/vaultwarden/vaultwarden.log \
   /data/fail2ban/filter.d/vaultwarden-auth.conf
 ```
 
@@ -740,7 +740,7 @@ docker compose logs > service-logs.txt
 
 # Configuration (sanitized)
 docker compose config > config.txt
-cat .env | grep -v "PASSWORD\\|TOKEN\\|SECRET" > env-sanitized.txt
+cat .env | grep -v "PASSWORD\|TOKEN\|SECRET" > env-sanitized.txt
 
 # Resource usage
 docker stats --no-stream > resource-usage.txt
@@ -772,4 +772,3 @@ docker compose down
 ---
 
 This troubleshooting guide covers common issues and their solutions for VaultWarden-OCI. For issues not covered here, check the GitHub issues or create a new issue with diagnostic information.
-"""
