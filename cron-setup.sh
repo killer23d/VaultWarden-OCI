@@ -347,7 +347,7 @@ install_cron_jobs() {
     log_success "Secure cron jobs installation completed"
     log_info "Installed cron jobs:"
     log_info "  Daily (2 AM): Comprehensive maintenance"
-    log_info "  Daily (3 AM): Database backup with fast verification"
+    log_info "  Daily (4 AM): Database backup with fast verification"
     log_info "  Weekly (Sun 4 AM): Firewall update"
     log_info "  Weekly (Sun 5 AM): Full backup with comprehensive verification"
     log_info "  Every 30 min: Health check"
