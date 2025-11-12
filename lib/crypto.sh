@@ -244,15 +244,16 @@ generate_secure_string() {
     local length="${1:-32}"
     local charset="${2:-A-Za-z0-9}"
 
-    if ! has_command openssl; then
-        log_error "openssl command not available for secure string generation"
-        return 1
-    fi
+    # BEST PRACTICE FIX: Use /dev/urandom and tr for robust alphanumeric string generation
+    # The previous method using 'openssl rand -base64' and filtering was buggy,
+    # as filtering out '+' and '/' characters could result in a string
+    # shorter than the required length, triggering an error.
 
-    # Generate random string using openssl
     local random_string
-    if ! random_string=$(openssl rand -base64 $((length * 3 / 4)) 2>/dev/null | tr -cd "$charset" | head -c "$length"); then
-        log_error "Failed to generate secure random string"
+    # Use LC_ALL=C for byte-wise operation, tr -dc to delete non-charset chars,
+    # and head -c to get the exact length.
+    if ! random_string=$(LC_ALL=C tr -dc "$charset" < /dev/urandom | head -c "$length"); then
+        log_error "Failed to generate secure random string from /dev/urandom"
         return 1
     fi
 
