@@ -728,6 +728,25 @@ Recommended Actions:
 # ENHANCED: Main function with proper error handling and exit strategy
 main() {
     log_header "VaultWarden-OCI SAFE Maintenance Manager"
+    
+    # BEST PRACTICE FIX: Add script-specific lock
+    local MAINT_LOCKDIR="/var/run/vaultwarden-maint.lock"
+    if ! mkdir "$MAINT_LOCKDIR" 2>/dev/null; then
+        log_error "Another maintenance task is already running (lock: $MAINT_LOCKDIR)"
+        exit 1
+    fi
+    # This script doesn't use the trap system, so add a trap manually
+    trap "rmdir '$MAINT_LOCKDIR' 2>/dev/null || true" EXIT
+
+    # BEST PRACTICE FIX: Add global maintenance mode lock for health.sh
+    local GLOBAL_MAINT_LOCK="/tmp/.vw_maintenance.lock"
+    if ! touch "$GLOBAL_MAINT_LOCK"; then
+        log_error "Failed to create global maintenance lock at $GLOBAL_MAINT_LOCK"
+        exit 1
+    fi
+    # Add to the trap
+    trap "rm -f '$GLOBAL_MAINT_LOCK' 2>/dev/null || true; rmdir '$MAINT_LOCKDIR' 2>/dev/null || true" EXIT
+
 
     if [[ "$DRY_RUN" == "true" ]]; then
         log_warn "DRY RUN MODE - No changes will be made"
@@ -806,12 +825,19 @@ main() {
 
     if [[ $critical_failures -eq 0 ]]; then
         log_success "SAFE maintenance completed successfully"
+        # BEST PRACTICE FIX: Explicitly remove locks on success before trap
+        rm -f "$GLOBAL_MAINT_LOCK" 2>/dev/null || true
+        rmdir "$MAINT_LOCKDIR" 2>/dev/null || true
         exit 0
     elif [[ $critical_failures -le 1 ]]; then
         log_warn "SAFE maintenance completed with minor issues"
+        # BEST PRACTICE FIX: Explicitly remove locks on success before trap
+        rm -f "$GLOBAL_MAINT_LOCK" 2>/dev/null || true
+        rmdir "$MAINT_LOCKDIR" 2>/dev/null || true
         exit 2  # Warning exit code
     else
         log_error "SAFE maintenance completed with critical failures"
+        # Trap will handle cleanup
         exit 1
     fi
 }
