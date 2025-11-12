@@ -1103,7 +1103,7 @@ main() {
         local phase_name="${phase_info##*:}"
 
         log_info "=== Phase: $phase_name ==="
-        
+
         # BEST PRACTICE FIX: Clear command path cache after installs
         if [[ "$phase_func" == "verify_dependencies" ]]; then
             log_debug "Clearing command path cache..."
