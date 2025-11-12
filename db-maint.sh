@@ -19,6 +19,12 @@ source "lib/crypto.sh" # Needed for backup script
 # --- Configuration ---
 FORCE=false
 
+# BEST PRACTICE FIX: Add cleanup trap system
+CLEANUP_ACTIONS=()
+register_cleanup() { CLEANUP_ACTIONS+=("$1"); }
+perform_cleanup() { for ((idx=${#CLEANUP_ACTIONS[@]}-1; idx>=0; idx--)); do eval "${CLEANUP_ACTIONS[$idx]}" 2>/dev/null || true; done; }
+trap perform_cleanup EXIT
+
 # --- Help ---
 show_help() {
     cat << 'EOF'
@@ -58,6 +64,23 @@ done
 # --- Main Execution ---
 main() {
     log_info "VaultWarden Database Maintenance"
+    
+    # BEST PRACTICE FIX: Add script-specific lock
+    local MAINT_LOCKDIR="/var/run/vaultwarden-maint.lock"
+    if ! mkdir "$MAINT_LOCKDIR" 2>/dev/null; then
+        log_error "Another maintenance task is already running (lock: $MAINT_LOCKDIR)"
+        log_info "If this is an error, manually remove $MAINT_LOCKDIR"
+        exit 1
+    fi
+    register_cleanup "rmdir '$MAINT_LOCKDIR' 2>/dev/null || true"
+            
+    # BEST PRACTICE FIX: Add global maintenance mode lock for health.sh
+    local GLOBAL_MAINT_LOCK="/tmp/.vw_maintenance.lock"
+    if ! touch "$GLOBAL_MAINT_LOCK"; then
+        log_error "Failed to create global maintenance lock at $GLOBAL_MAINT_LOCK"
+        exit 1
+    fi
+    register_cleanup "rm -f '$GLOBAL_MAINT_LOCK' 2>/dev/null || true"
     
     local safety_backup_file=""
     local maintenance_successful=false
@@ -232,7 +255,12 @@ main() {
       log_warn "Maintenance did not complete successfully."
       log_warn "Retaining safety backup: $safety_backup_file"
     fi
+
+    # BEST PRACTICE FIX: Explicitly remove locks on success before trap
+    if [[ "$maintenance_successful" == "true" ]]; then
+        rm -f "$GLOBAL_MAINT_LOCK" 2>/dev/null || true
+        rmdir "$MAINT_LOCKDIR" 2>/dev/null || true
+    fi
 }
 
 main "$@"
-
