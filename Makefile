@@ -89,6 +89,7 @@ down: ## Stop all services
 
 restart: ## Restart all services (enhanced startup)
 	@echo "$(BLUE)Restarting VaultWarden-OCI services...$(NC)"
+	# BEST PRACTICE FIX: Removed --skip-dns as it's no longer a valid flag for startup.sh
 	@./startup.sh --force-restart || { \
 		echo "$(RED)Restart failed, checking status...$(NC)"; \
 		$(MAKE) status; \
