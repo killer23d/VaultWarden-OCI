@@ -89,7 +89,7 @@ down: ## Stop all services
 
 restart: ## Restart all services (enhanced startup)
 	@echo "$(BLUE)Restarting VaultWarden-OCI services...$(NC)"
-	@./startup.sh --force-restart --skip-dns || { \
+	@./startup.sh --force-restart || { \
 		echo "$(RED)Restart failed, checking status...$(NC)"; \
 		$(MAKE) status; \
 		exit 1; \
