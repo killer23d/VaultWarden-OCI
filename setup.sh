@@ -186,7 +186,8 @@ install_dependencies() {
         return 1
     fi
 
-    local basic_packages=("age" "make" "nano" "rclone" "sqlite3" "jq" "mailutils" "ufw" "curl" "wget" "unzip" "git" "gpg" "coreutils" "haveged")
+    # BEST PRACTICE FIX: Removed "mailutils" as it's no longer required by msmtpd
+    local basic_packages=("age" "make" "nano" "rclone" "sqlite3" "jq" "ufw" "curl" "wget" "unzip" "git" "gpg" "coreutils" "haveged")
     export DEBIAN_FRONTEND=noninteractive
 
     if ! apt-get install -y "${basic_packages[@]}"; then
@@ -219,7 +220,7 @@ install_dependencies() {
     fi
 
     # Install Docker if not present
-    if ! has_command docker; then
+    if ! command -v docker >/dev/null 2>&1; then
         log_info "Installing Docker..."
         if ! curl -fsSL https://get.docker.com -o get-docker.sh; then
             log_error "Failed to download Docker installer"
@@ -258,7 +259,7 @@ install_dependencies() {
     fi
 
     # Install SOPS if not present
-    if ! has_command sops; then
+    if ! command -v sops >/dev/null 2>&1; then
         log_info "Installing SOPS..."
         local sops_version="v3.8.1"
         local arch
@@ -288,6 +289,9 @@ install_dependencies() {
 # STANDARDIZED: Returns exit code
 verify_dependencies() {
     log_info "Verifying dependencies..."
+
+    # BEST PRACTICE FIX: Clear the bash command cache to find newly installed commands
+    hash -r
 
     local required_commands=("age" "sops" "docker" "jq" "sqlite3" "ufw" "curl")
     if ! require_commands "${required_commands[@]}"; then
@@ -420,7 +424,8 @@ setup_firewall() {
     log_info "Applying Cloudflare IPv4 ranges..."
     while IFS= read -r range; do
         if [[ -n "$range" ]]; then
-            if ! ufw allow from "$range" to any port 80,443 comment "CF-IPv4" >/dev/null; then
+            # BEST PRACTICE FIX: Add 'proto tcp' to UFW command
+            if ! ufw allow from "$range" to any port 80,443 proto tcp comment "CF-IPv4" >/dev/null; then
                 log_warn "Failed to add IPv4 range: $range"
             fi
         fi
@@ -432,7 +437,8 @@ setup_firewall() {
     if grep -E '^[0-9a-fA-F:]+/[0-9]{1,3}$' "$cf_ipv6_file" >/dev/null; then
         while IFS= read -r range; do
             if [[ -n "$range" ]]; then
-                if ! ufw allow from "$range" to any port 80,443 comment "CF-IPv6" >/dev/null; then
+                # BEST PRACTICE FIX: Add 'proto tcp' to UFW command
+                if ! ufw allow from "$range" to any port 80,443 proto tcp comment "CF-IPv6" >/dev/null; then
                     log_warn "Failed to add IPv6 range: $range"
                 fi
             fi
@@ -623,10 +629,11 @@ create_env_file() {
     detected_ssh_log_path=$(detect_ssh_log_path)
 
     # Populate template values using sed
+    # BEST PRACTICE FIX: Change sed delimiter from "/" to "|" to handle paths
     if ! sed -i "s|DOMAIN=.*|DOMAIN=$DOMAIN|" "$env_file" || \
-       ! sed -i "s/ADMIN_EMAIL=.*/ADMIN_EMAIL=$ADMIN_EMAIL/" "$env_file" || \
-       ! sed -i "s/PUID=.*/PUID=$user_id/" "$env_file" || \
-       ! sed -i "s/PGID=.*/PGID=$group_id/" "$env_file" || \
+       ! sed -i "s|ADMIN_EMAIL=.*|ADMIN_EMAIL=$ADMIN_EMAIL|" "$env_file" || \
+       ! sed -i "s|PUID=.*|PUID=$user_id|" "$env_file" || \
+       ! sed -i "s|PGID=.*|PGID=$group_id|" "$env_file" || \
        ! sed -i "s|SMTP_FROM=.*|SMTP_FROM=noreply@$DOMAIN|" "$env_file" || \
        ! sed -i "s|SSH_LOG_PATH=.*|SSH_LOG_PATH=$detected_ssh_log_path|" "$env_file"; then
         log_error "Failed to populate .env template values"
@@ -1096,14 +1103,27 @@ main() {
         local phase_name="${phase_info##*:}"
 
         log_info "=== Phase: $phase_name ==="
+        
+        # BEST PRACTICE FIX: Clear command path cache after installs
+        if [[ "$phase_func" == "verify_dependencies" ]]; then
+            log_debug "Clearing command path cache..."
+            hash -r
+        fi
 
         if ! $phase_func; then
             failed_phases+=("$phase_name")
             log_error "Phase failed: $phase_name"
             
-            # Critical phases should stop setup
-            if [[ "$phase_func" == "setup_firewall" || "$phase_func" == "validate_ssh_config" ]]; then
-                log_error "Critical security phase failed - stopping setup"
+            # BEST PRACTICE FIX: Halt on all critical failures
+            if [[ "$phase_func" == "install_dependencies" || \
+                  "$phase_func" == "verify_dependencies" || \
+                  "$phase_func" == "create_env_file" || \
+                  "$phase_func" == "setup_firewall" || \
+                  "$phase_func" == "validate_ssh_config" || \
+                  "$phase_func" == "generate_age_keys" || \
+                  "$phase_func" == "create_sops_config" || \
+                  "$phase_func" == "create_secrets_template" ]]; then
+                log_error "Critical phase failed: $phase_name - stopping setup"
                 log_error "Fix the issues and re-run setup"
                 exit 1
             fi
