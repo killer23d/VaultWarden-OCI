@@ -2,6 +2,7 @@
 # lib/common.sh - Core shared functions for VaultWarden-OCI-NG
 # ENHANCED: Standardized error handling patterns - functions return, callers decide
 # ENHANCED: Updated email function to use msmtpd sidecar (replaces mailutils)
+# FIXED: require_commands function properly declares loop variable for strict mode
 # All library functions use 'return' with exit codes, never 'exit'
 
 # Ensure this library is only loaded once
@@ -179,7 +180,7 @@ get_config_value() {
 # Validate required configuration - STANDARDIZED: Returns exit code
 require_config() {
     local missing=()
-
+    local key # BEST PRACTICE FIX: Declare loop variable
     for key in "$@"; do
         if [[ -z "${!key:-}" ]]; then
             missing+=("$key")
@@ -216,10 +217,11 @@ has_command() {
     fi
 }
 
-# Require commands to exist - STANDARDIZED: Returns exit code
+# FIXED: Require commands to exist - properly handles strict mode
 require_commands() {
     local missing=()
-
+    local cmd # BEST PRACTICE FIX: Declare loop variable
+    
     for cmd in "$@"; do
         if ! has_command "$cmd"; then
             missing+=("$cmd")
@@ -241,6 +243,7 @@ retry_with_backoff() {
     local initial_delay="$2"
     local command=("${@:3}")
     local delay="$initial_delay"
+    local i # BEST PRACTICE FIX: Declare loop variable
 
     for ((i=1; i<=max_attempts; i++)); do
         if "${command[@]}"; then
@@ -598,4 +601,4 @@ export -f validate_email validate_domain validate_port validate_ip validate_url
 export -f setup_error_trap setup_cleanup_trap safe_execute
 export -f init_common_lib
 
-log_debug "Enhanced common library loaded successfully - msmtpd email integration"
+log_debug "Enhanced common library loaded successfully - msmtpd email integration + strict mode fixes"
