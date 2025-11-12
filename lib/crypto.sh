@@ -239,31 +239,33 @@ decrypt_data() {
 
 # --- Secure Random Generation ---
 
-# Generate secure random string - STANDARDIZED: Returns exit code
+# Generates a cryptographically strong random string of N characters (safe charset)
 generate_secure_string() {
     local length="${1:-32}"
     local charset="${2:-A-Za-z0-9}"
 
-    # BEST PRACTICE FIX: Use /dev/urandom and tr for robust alphanumeric string generation
-    # The previous method using 'openssl rand -base64' and filtering was buggy,
-    # as filtering out '+' and '/' characters could result in a string
-    # shorter than the required length, triggering an error.
-
-    local random_string
-    # Use LC_ALL=C for byte-wise operation, tr -dc to delete non-charset chars,
-    # and head -c to get the exact length.
-    if ! random_string=$(LC_ALL=C tr -dc "$charset" < /dev/urandom | head -c "$length"); then
-        log_error "Failed to generate secure random string from /dev/urandom"
+    # Check that /dev/urandom exists and is readable
+    if [[ ! -r /dev/urandom ]]; then
+        log_error "/dev/urandom is not available or not readable"
         return 1
     fi
 
-    if [[ ${#random_string} -lt $length ]]; then
-        log_error "Generated string too short (entropy issue?)"
-        return 1
-    fi
+    # Try up to 5 times to get enough chars, in case of momentary entropy starve
+    local random_string=""
+    local attempt
+    for attempt in {1..5}; do
+        random_string=$(LC_ALL=C tr -dc "$charset" < /dev/urandom | head -c "$length" || true)
+        
+        if [[ ${#random_string} -ge $length ]]; then
+            echo "$random_string"
+            return 0
+        fi
+        
+        sleep 1
+    done
 
-    echo "$random_string"
-    return 0
+    log_error "Failed to generate secure random string from /dev/urandom"
+    return 1
 }
 
 # Generate secure random password - STANDARDIZED: Returns exit code
