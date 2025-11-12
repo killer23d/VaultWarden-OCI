@@ -116,6 +116,12 @@ attempt_container_recovery() {
     local container="$1"
     local service="$2"
     
+    # BEST PRACTICE FIX: Check for maintenance lock file
+    if [[ -f "/tmp/.vw_maintenance.lock" ]]; then
+        log_warn "🔧 $service is stopped for planned maintenance. Skipping auto-recovery."
+        return 0
+    fi
+    
     log_warn "🔧 Attempting automatic recovery of $service..."
     
     # Attempt restart (once only)
