@@ -1,24 +1,23 @@
 {
-    # Global ACME DNS configuration - FIXED: Use environment variable
+    # Global ACME DNS configuration
     acme_dns cloudflare {env.CLOUDFLARE_API_TOKEN}
 
     # Global server configuration with automatic Cloudflare IP management
     servers {
         # Trust Cloudflare IPs automatically (updated by caddy-cloudflare-ip module)
         trusted_proxies cloudflare
-        # FIXED: Use only Cf-Connecting-Ip (authoritative when behind Cloudflare)
+        # Use only Cf-Connecting-Ip (authoritative when behind Cloudflare)
         client_ip_headers Cf-Connecting-Ip
     }
 }
 
 {$DOMAIN} {
-    # ENHANCED: Improved log retention for forensic analysis with predictable rotation
+    # Main access log for all requests
     log {
         output file /var/log/caddy/access.log {
             roll_size 50MB
             roll_keep 20
             roll_keep_for 30d
-            roll_local_time true
         }
         format json {
             time_format "2006-01-02T15:04:05.000Z07:00"
@@ -40,7 +39,6 @@
         X-XSS-Protection "1; mode=block"
         Referrer-Policy "strict-origin-when-cross-origin"
         Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: https:; frame-src 'self'; object-src 'none'; base-uri 'self';"
-        # NEW: Permissions-Policy header for modern browser API restrictions
         Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=(), usb=()"
         X-Request-ID {uuid}
         X-Forwarded-Proto https
@@ -50,13 +48,12 @@
 
     # Admin panel protection with enhanced logging
     @admin path /admin*
-    handle @admin {
+    route @admin {
         log {
             output file /var/log/caddy/admin_access.log {
                 roll_size 25MB
                 roll_keep 30
                 roll_keep_for 90d
-                roll_local_time true
             }
             format json {
                 time_format "2006-01-02T15:04:05.000Z07:00"
@@ -72,7 +69,6 @@
             admin {env.ADMIN_BASIC_AUTH_HASH}
         }
 
-        # FIXED: Added Host header passthrough + correct service name
         reverse_proxy vaultwarden:80 {
             header_up Host {host}
             header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
@@ -81,15 +77,14 @@
         }
     }
 
-    # ENHANCED: Authentication endpoint monitoring for forensic analysis
+    # Authentication endpoint monitoring for forensic analysis
     @auth_endpoints path /api/accounts/prelogin* /identity/accounts/prelogin* /identity/connect/token*
-    handle @auth_endpoints {
+    route @auth_endpoints {
         log {
             output file /var/log/caddy/auth_attempts.log {
                 roll_size 25MB
                 roll_keep 30
                 roll_keep_for 90d
-                roll_local_time true
             }
             format json {
                 time_format "2006-01-02T15:04:05.000Z07:00"
@@ -98,7 +93,6 @@
             level INFO
         }
 
-        # FIXED: Added Host header passthrough + correct service name
         reverse_proxy vaultwarden:80 {
             header_up Host {host}
             header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
@@ -109,16 +103,16 @@
     }
 
     # Main application with enhanced security monitoring
-    handle {
-        @malicious_ua 
+    route {
+        @malicious_ua {
             header User-Agent *sqlmap* *nikto* *nmap* *acunetix* *dirbuster* *gobuster* *wfuzz*
+        }
         handle @malicious_ua {
             log {
                 output file /var/log/caddy/security_blocks.log {
                     roll_size 10MB
                     roll_keep 50
                     roll_keep_for 180d
-                    roll_local_time true
                 }
                 format json {
                     time_format "2006-01-02T15:04:05.000Z07:00"
@@ -136,7 +130,6 @@
         #     path /notifications/hub*
         # }
         # handle @websocket {
-        #     # FIXED: Added Host header passthrough + correct service name
         #     reverse_proxy vaultwarden:3012 {
         #         header_up Host {host}
         #         header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
@@ -144,7 +137,6 @@
         #     }
         # }
 
-        # FIXED: Added Host header passthrough + correct service name
         reverse_proxy vaultwarden:80 {
             header_up Host {host}
             header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
@@ -160,7 +152,6 @@ www.{$DOMAIN} {
         output file /var/log/caddy/redirects.log {
             roll_size 10MB
             roll_keep 10
-            roll_local_time true
         }
         format json
         level INFO
@@ -168,14 +159,13 @@ www.{$DOMAIN} {
     redir https://{$DOMAIN}{uri} 301
 }
 
-# ENHANCED: Security catch-all with comprehensive logging
+# Security catch-all with comprehensive logging
 :80, :443 {
     log {
         output file /var/log/caddy/security_catchall.log {
             roll_size 25MB
             roll_keep 40
             roll_keep_for 180d
-            roll_local_time true
         }
         format json {
             time_format "2006-01-02T15:04:05.000Z07:00"
