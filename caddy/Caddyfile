@@ -2,17 +2,16 @@
     # Global ACME DNS configuration
     acme_dns cloudflare {env.CLOUDFLARE_API_TOKEN}
 
-    # Global server configuration with automatic Cloudflare IP management
+    # Global server configuration
     servers {
-        # Trust Cloudflare IPs automatically (updated by caddy-cloudflare-ip module)
         trusted_proxies cloudflare
-        # Use only Cf-Connecting-Ip (authoritative when behind Cloudflare)
         client_ip_headers Cf-Connecting-Ip
     }
 }
 
 {$DOMAIN} {
-    # Main access log for all requests
+    # 1. SINGLE CENTRALIZED LOG
+    # Captures ALL traffic in detailed JSON. Fail2Ban filters based on "uri" field.
     log {
         output file /var/log/caddy/access.log {
             roll_size 50MB
@@ -31,7 +30,7 @@
         level INFO
     }
 
-    # Enhanced security headers with forensic considerations
+    # 2. Security Headers
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
         X-Content-Type-Options "nosniff"
@@ -46,25 +45,15 @@
         -X-Powered-By
     }
 
-    # Admin panel protection with enhanced logging
+    # 3. Admin Panel Protection
     @admin path /admin*
-    route @admin {
-        log {
-            output file /var/log/caddy/admin_access.log {
-                roll_size 25MB
-                roll_keep 30
-                roll_keep_for 90d
-            }
-            format json {
-                time_format "2006-01-02T15:04:05.000Z07:00"
-                message_key "admin_access"
-            }
-            level INFO
-        }
+    handle @admin {
+        # Removed X-Log-Tag header (redundant)
         header {
             Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: https:; frame-src 'self'; object-src 'none'; base-uri 'self';"
             X-Admin-Access "true"
         }
+        
         basic_auth {
             admin {env.ADMIN_BASIC_AUTH_HASH}
         }
@@ -77,22 +66,9 @@
         }
     }
 
-    # Authentication endpoint monitoring for forensic analysis
+    # 4. Auth Endpoints (Monitoring)
     @auth_endpoints path /api/accounts/prelogin* /identity/accounts/prelogin* /identity/connect/token*
-    route @auth_endpoints {
-        log {
-            output file /var/log/caddy/auth_attempts.log {
-                roll_size 25MB
-                roll_keep 30
-                roll_keep_for 90d
-            }
-            format json {
-                time_format "2006-01-02T15:04:05.000Z07:00"
-                message_key "auth_attempt"
-            }
-            level INFO
-        }
-
+    handle @auth_endpoints {
         reverse_proxy vaultwarden:80 {
             header_up Host {host}
             header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
@@ -102,41 +78,16 @@
         }
     }
 
-    # Main application with enhanced security monitoring
-    route {
-        @malicious_ua {
-            header User-Agent *sqlmap* *nikto* *nmap* *acunetix* *dirbuster* *gobuster* *wfuzz*
-        }
-        handle @malicious_ua {
-            log {
-                output file /var/log/caddy/security_blocks.log {
-                    roll_size 10MB
-                    roll_keep 50
-                    roll_keep_for 180d
-                }
-                format json {
-                    time_format "2006-01-02T15:04:05.000Z07:00"
-                    message_key "security_block"
-                }
-                level WARN
-            }
-            respond "Access Denied - Security Policy Violation" 403
-        }
+    # 5. Malicious User Agents
+    @malicious_ua {
+        header User-Agent *sqlmap* *nikto* *nmap* *acunetix* *dirbuster* *gobuster* *wfuzz*
+    }
+    handle @malicious_ua {
+        respond "Access Denied - Security Policy Violation" 403
+    }
 
-        # WebSocket support for live sync (uncomment if WEBSOCKET_ENABLED=true in .env)
-        # @websocket {
-        #     header Connection *Upgrade*
-        #     header Upgrade websocket
-        #     path /notifications/hub*
-        # }
-        # handle @websocket {
-        #     reverse_proxy vaultwarden:3012 {
-        #         header_up Host {host}
-        #         header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
-        #         header_up X-Forwarded-For {http.request.header.Cf-Connecting-Ip}
-        #     }
-        # }
-
+    # 6. Default App Handler
+    handle {
         reverse_proxy vaultwarden:80 {
             header_up Host {host}
             header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
@@ -146,32 +97,20 @@
     }
 }
 
-# Redirect www subdomain with logging
+# Redirects
 www.{$DOMAIN} {
     log {
-        output file /var/log/caddy/redirects.log {
-            roll_size 10MB
-            roll_keep 10
-        }
+        output file /var/log/caddy/access.log
         format json
-        level INFO
     }
     redir https://{$DOMAIN}{uri} 301
 }
 
-# Security catch-all with comprehensive logging
+# Catch-alls
 :80, :443 {
     log {
-        output file /var/log/caddy/security_catchall.log {
-            roll_size 25MB
-            roll_keep 40
-            roll_keep_for 180d
-        }
-        format json {
-            time_format "2006-01-02T15:04:05.000Z07:00"
-            message_key "unauthorized_access"
-        }
-        level WARN
+        output file /var/log/caddy/access.log
+        format json
     }
     respond "Not Found" 404
 }
