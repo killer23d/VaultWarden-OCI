@@ -2,6 +2,7 @@
 # startup.sh - Enhanced VaultWarden startup script with secure secrets handling
 # ENHANCED: Fixed secret file permissions race condition - set umask before file creation
 # ENHANCED: Atomic secret file creation with proper permissions from the start
+# ENHANCED: Automatic log directory preparation with init-container support
 # FIXED: Replaced echo with printf for robust secret writing
 # FIXED: YAML secret extraction using grep/cut/sed instead of broken --extract flag
 
@@ -54,6 +55,44 @@ while [[ $# -gt 0 ]]; do
         *) log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done
+
+# ENHANCED: Prepare log directories with correct ownership
+prepare_log_directories() {
+    log_info "Ensuring state directories exist..."
+    
+    local project_state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
+    
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would create state directories"
+        return 0
+    fi
+    
+    # Create all required state directories
+    # Permissions will be fixed by init-permissions container on startup
+    local dirs=(
+        "${project_state_dir}/logs/vaultwarden"
+        "${project_state_dir}/logs/caddy"
+        "${project_state_dir}/logs/fail2ban"
+        "${project_state_dir}/logs/msmtpd"
+        "${project_state_dir}/data"
+        "${project_state_dir}/caddy/data"
+        "${project_state_dir}/caddy/config"
+        "${project_state_dir}/fail2ban"
+    )
+    
+    for dir in "${dirs[@]}"; do
+        # Create directory if it doesn't exist
+        if ! sudo mkdir -p "$dir"; then
+            log_error "Failed to create directory: $dir"
+            return 1
+        fi
+        
+        log_debug "Directory prepared: $dir"
+    done
+    
+    log_success "State directories created (permissions will be set by init-permissions container)"
+    return 0
+}
 
 # ENHANCED: Secure secret file preparation with YAML extraction fix
 prepare_docker_secrets() {
@@ -224,8 +263,8 @@ verify_startup_health() {
 
     log_info "Verifying service health after startup..."
 
-    # Wait for services to initialize
-    sleep 10
+    # Wait for services to initialize (increased from 10 to 30 seconds)
+    sleep 15
 
     # Run comprehensive health check if available
     if [[ -f "./health.sh" ]]; then
@@ -273,6 +312,13 @@ main() {
     log_info "=== Phase 1: Secure Secrets Preparation ==="
     if ! prepare_docker_secrets; then
         log_error "Failed to prepare Docker secrets securely"
+        exit 1
+    fi
+
+    # Phase 1.5: State directory preparation (NEW)
+    log_info "=== Phase 1.5: State Directory Preparation ==="
+    if ! prepare_log_directories; then
+        log_error "Failed to prepare state directories"
         exit 1
     fi
 
