@@ -138,7 +138,7 @@ services:
   # NEW: Lightweight SMTP relay using msmtpd
   msmtpd:
     container_name: vaultwarden_msmtpd
-    image: ghcr.io/crazymax/msmtpd:${MSMTPD_VERSION:-latest}
+    image: crazymax/msmtpd:${MSMTPD_VERSION:-latest}
     restart: unless-stopped
     environment:
       - SMTP_HOST=${SMTP_HOST:-}
