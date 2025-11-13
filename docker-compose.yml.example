@@ -4,16 +4,24 @@
 # ENHANCED: Replaced mailutils with msmtpd sidecar for improved email reliability
 # FIXED: OCI/Oracle Linux compatibility for SSH log monitoring
 # FIXED: Caddy Cloudflare token configuration for acme_dns
+# FIXED: Caddy healthcheck to test service availability instead of config validation
+# FIXED: Init container now also fixes secrets directory permissions
 # High-fidelity security detection + Built-in email notifications + Resource management
 
 services:
   # Init container to enforce correct permissions on every startup (set-and-forget)
+  # ENHANCED: Now also fixes secrets directory permissions for Docker access
   init-permissions:
     image: busybox:latest
     container_name: vaultwarden_init
     restart: "no"
     user: "0:0"
-    command: sh -c "chown -R ${PUID}:${PGID} /data /logs /caddy_data /caddy_config /fail2ban /msmtpd && chmod -R 755 /data /logs /caddy_data /caddy_config /fail2ban /msmtpd"
+    command: sh -c "
+      chown -R ${PUID}:${PGID} /data /logs /caddy_data /caddy_config /fail2ban /msmtpd && 
+      chmod -R 755 /data /logs /caddy_data /caddy_config /fail2ban /msmtpd &&
+      chmod 755 /secrets /secrets/.docker_secrets &&
+      chmod 644 /secrets/.docker_secrets/*
+      "
     volumes:
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data:/data
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/vaultwarden:/logs
@@ -21,6 +29,7 @@ services:
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/config:/caddy_config
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/fail2ban:/fail2ban
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/msmtpd:/msmtpd
+      - ${PWD}/secrets:/secrets
 
   vaultwarden:
     container_name: vaultwarden_app
@@ -120,7 +129,9 @@ services:
     networks:
       - vaultwarden
     healthcheck:
-      test: ["CMD", "caddy", "validate", "--config", "/etc/caddy/Caddyfile"]
+      # FIXED: Test actual service availability instead of config validation
+      # Config validation fails because CLOUDFLARE_API_TOKEN env var isn't available in health check process
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:2019/config/"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -160,6 +171,9 @@ services:
       - smtp_password
     volumes:
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/msmtpd:/var/log
+    depends_on:
+      init-permissions:
+        condition: service_completed_successfully
     networks:
       - vaultwarden
     healthcheck:
@@ -267,6 +281,8 @@ networks:
 # - Clean configuration focused on core functionality
 # - FIXED: OCI/Oracle Linux SSH log compatibility
 # - FIXED: Caddy Cloudflare API token read from Docker secret into environment variable
+# - FIXED: Caddy health check now tests service availability (not config validation)
+# - FIXED: Init container handles secrets directory permissions for Docker access
 # 
 # ENHANCED FEATURES:
 # - Resource limits prevent container resource exhaustion on 6GB system
@@ -277,6 +293,7 @@ networks:
 # - Platform-specific SSH log detection for multi-distro compatibility
 # - Containerized email solution eliminates host dependencies
 # - Secure token handling: Read from Docker secrets into container memory only
+# - Automatic permissions fixing on every startup for set-and-forget operation
 # 
 # RESOURCE ALLOCATION STRATEGY (for 6GB system):
 # - Total container limits: ~4GB (leaves 2GB for host OS and overhead)
@@ -292,3 +309,4 @@ networks:
 # - RHEL/CentOS/OCI: /var/log/secure (detected by setup script)
 # - Universal container mount point: /var/log/ssh-auth.log
 # - Email functionality completely containerized (no host dependencies)
+# - Automatic secrets permissions fixing ensures Docker can access secrets
