@@ -69,7 +69,7 @@
             X-Admin-Access "true"
         }
         basic_auth {
-            admin {file /run/secrets/admin_basic_auth_hash}
+            admin {env.ADMIN_BASIC_AUTH_HASH}
         }
 
         # FIXED: Added Host header passthrough + correct service name
