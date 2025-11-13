@@ -1,12 +1,24 @@
 #!/usr/bin/env bash
 # update-dns.sh - Simple dynamic DNS update for VaultWarden-OCI
 # Now includes global lock file to prevent race conditions across concurrent DNS updates
+# FIXED: Automatically sources .env file
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR"
 cd "$PROJECT_ROOT"
+
+# FIXED: Source .env file before loading common library
+if [[ -f .env ]]; then
+    set -a
+    # shellcheck disable=SC1091
+    source .env
+    set +a
+else
+    echo "ERROR: .env file not found in $PROJECT_ROOT"
+    exit 1
+fi
 
 source "lib/common.sh"
 init_common_lib "$0"
@@ -19,7 +31,7 @@ if ! (set -C; echo $$ > "$DNS_LOCK") 2>/dev/null; then
 fi
 trap "rm -f '$DNS_LOCK'" EXIT
 
-# Configuration from .env
+# Configuration from .env (now properly sourced)
 DOMAIN="${DOMAIN:-}"
 CLOUDFLARE_ZONE_ID="${CLOUDFLARE_ZONE_ID:-}"
 
