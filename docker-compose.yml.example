@@ -3,6 +3,7 @@
 # ENHANCED: Added timezone consistency across all containers
 # ENHANCED: Replaced mailutils with msmtpd sidecar for improved email reliability
 # FIXED: OCI/Oracle Linux compatibility for SSH log monitoring
+# FIXED: Caddy Cloudflare token configuration for acme_dns
 # High-fidelity security detection + Built-in email notifications + Resource management
 
 services:
@@ -95,9 +96,10 @@ services:
     image: ghcr.io/caddybuilds/caddy-cloudflare:${CADDY_VERSION:-2.10.2}
     restart: unless-stopped
     user: "${PUID}:${PGID}"
+    # FIXED: Read Cloudflare token from secret file into environment variable
+    command: sh -c 'export CLOUDFLARE_API_TOKEN=$$(cat /run/secrets/caddy_cloudflare_dns_token) && caddy run --config /etc/caddy/Caddyfile --adapter caddyfile'
     environment:
       DOMAIN: ${DOMAIN}
-      CLOUDFLARE_API_TOKEN_FILE: /run/secrets/caddy_cloudflare_dns_token
       ADMIN_BASIC_AUTH_HASH_FILE: /run/secrets/admin_basic_auth_hash
       TZ: ${TZ:-UTC}
     secrets:
@@ -265,6 +267,7 @@ networks:
 # - Enhanced security with no-new-privileges and capability restrictions
 # - Clean configuration focused on core functionality
 # - FIXED: OCI/Oracle Linux SSH log compatibility
+# - FIXED: Caddy Cloudflare API token read from Docker secret into environment variable
 # 
 # ENHANCED FEATURES:
 # - Resource limits prevent container resource exhaustion on 6GB system
@@ -274,6 +277,7 @@ networks:
 # - Memory reservations guarantee minimum resources for stable operation
 # - Platform-specific SSH log detection for multi-distro compatibility
 # - Containerized email solution eliminates host dependencies
+# - Secure token handling: Read from Docker secrets into container memory only
 # 
 # RESOURCE ALLOCATION STRATEGY (for 6GB system):
 # - Total container limits: ~4GB (leaves 2GB for host OS and overhead)
