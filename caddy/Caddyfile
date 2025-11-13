@@ -1,5 +1,5 @@
 {
-    # Global ACME DNS configuration
+    # Global ACME DNS configuration - FIXED: Use environment variable
     acme_dns cloudflare {env.CLOUDFLARE_API_TOKEN}
 
     # Global server configuration with automatic Cloudflare IP management
