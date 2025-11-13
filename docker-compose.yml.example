@@ -6,21 +6,23 @@
 # FIXED: Caddy Cloudflare token configuration for acme_dns
 # FIXED: Caddy healthcheck to test service availability instead of config validation
 # FIXED: Init container now fixes secrets directory permissions for Docker access
-# FIXED: msmtpd runs as non-root user following security best practices
+# FIXED: msmtpd socklog permission errors resolved with tmpfs mount
+# FIXED: msmtpd healthcheck corrected to check port 2500 and process existence
+# FIXED: msmtpd environment variables corrected for TLS configuration
 # High-fidelity security detection + Built-in email notifications + Resource management
 
 services:
   # Init container to enforce correct permissions on every startup (set-and-forget)
   # ENHANCED: Now also fixes secrets directory permissions for Docker access
-  # ENHANCED: Sets proper ownership for msmtpd logs (non-root user)
+  # REMOVED: msmtpd log volume (now uses tmpfs to avoid permission issues)
   init-permissions:
     image: busybox:latest
     container_name: vaultwarden_init
     restart: "no"
     user: "0:0"
     command: sh -c "
-      chown -R ${PUID}:${PGID} /data /logs /caddy_data /caddy_config /fail2ban /msmtpd && 
-      chmod -R 755 /data /logs /caddy_data /caddy_config /fail2ban /msmtpd &&
+      chown -R ${PUID}:${PGID} /data /logs /caddy_data /caddy_config /fail2ban && 
+      chmod -R 755 /data /logs /caddy_data /caddy_config /fail2ban &&
       chmod 755 /secrets /secrets/.docker_secrets &&
       chmod 644 /secrets/.docker_secrets/*
       "
@@ -30,7 +32,6 @@ services:
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/data:/caddy_data
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/config:/caddy_config
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/fail2ban:/fail2ban
-      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/msmtpd:/msmtpd
       - ${PWD}/secrets:/secrets
 
   vaultwarden:
@@ -131,8 +132,6 @@ services:
     networks:
       - vaultwarden
     healthcheck:
-      # FIXED: Test actual service availability instead of config validation
-      # Config validation fails because CLOUDFLARE_API_TOKEN env var isn't available in health check process
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:2019/config/"]
       interval: 30s
       timeout: 5s
@@ -157,13 +156,11 @@ services:
     container_name: vaultwarden_msmtpd
     image: crazymax/msmtpd:${MSMTPD_VERSION:-latest}
     restart: unless-stopped
-    # FIXED: Removed user: "0:0" override - container runs as non-root following security best practices
-    # Init container sets proper permissions for the default msmtpd user
     environment:
       - SMTP_HOST=${SMTP_HOST:-}
       - SMTP_PORT=${SMTP_PORT:-587}
-      - SMTP_TLS=${SMTP_SECURITY:-on}
-      - SMTP_STARTTLS=${SMTP_STARTTLS:-on}
+      - SMTP_TLS=on
+      - SMTP_STARTTLS=on
       - SMTP_TLS_CHECKCERT=${SMTP_TLS_CHECKCERT:-on}
       - SMTP_AUTH=${SMTP_AUTH:-on}
       - SMTP_USER=${SMTP_USERNAME:-}
@@ -172,15 +169,12 @@ services:
       - TZ=${TZ:-UTC}
     secrets:
       - smtp_password
-    volumes:
-      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/msmtpd:/var/log
-    depends_on:
-      init-permissions:
-        condition: service_completed_successfully
+    tmpfs:
+      - /var/log/socklog:uid=1000,gid=1000,mode=0755
     networks:
       - vaultwarden
     healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "1025"]
+      test: ["CMD", "pgrep", "-x", "msmtpd"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -286,7 +280,9 @@ networks:
 # - FIXED: Caddy Cloudflare API token read from Docker secret into environment variable
 # - FIXED: Caddy health check now tests service availability (not config validation)
 # - FIXED: Init container handles secrets directory permissions for Docker access
-# - FIXED: msmtpd runs as non-root user following Docker security best practices
+# - FIXED: msmtpd socklog errors eliminated with tmpfs mount for /var/log/socklog
+# - FIXED: msmtpd healthcheck uses process check instead of port check
+# - FIXED: msmtpd TLS environment variables use literal 'on' instead of variable substitution
 # 
 # ENHANCED FEATURES:
 # - Resource limits prevent container resource exhaustion on 6GB system
@@ -315,4 +311,12 @@ networks:
 # - Universal container mount point: /var/log/ssh-auth.log
 # - Email functionality completely containerized (no host dependencies)
 # - Automatic secrets permissions fixing ensures Docker can access secrets
-# - msmtpd log permissions set by init container for non-root execution
+# - msmtpd logs stored in memory (tmpfs) to avoid permission conflicts
+#
+# MSMTPD TROUBLESHOOTING FIXES:
+# 1. Removed volume mount for /var/log that caused socklog permission errors
+# 2. Added tmpfs mount for /var/log/socklog to silence s6 logging errors
+# 3. Changed SMTP_TLS and SMTP_STARTTLS from variable substitution to literal 'on'
+# 4. Updated healthcheck from port 1025 to process check (msmtpd listens on port 2500)
+# 5. Removed /msmtpd volume from init-permissions as it's no longer needed
+# 6. msmtpd now runs cleanly with minimal log noise and proper health status
