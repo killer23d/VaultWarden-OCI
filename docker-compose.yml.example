@@ -92,7 +92,7 @@ services:
 
   caddy:
     container_name: vaultwarden_caddy
-    image: ghcr.io/caddybuilds/caddy-cloudflare:${CADDY_VERSION:-2.8.4}-cloudflare
+    image: ghcr.io/caddybuilds/caddy-cloudflare:${CADDY_VERSION:-2.10.2}
     restart: unless-stopped
     user: "${PUID}:${PGID}"
     environment:
