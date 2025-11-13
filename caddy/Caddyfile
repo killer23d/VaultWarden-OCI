@@ -1,6 +1,6 @@
 {
     # Global ACME DNS configuration
-    acme_dns cloudflare
+    acme_dns cloudflare {env.CLOUDFLARE_API_TOKEN}
 
     # Global server configuration with automatic Cloudflare IP management
     servers {
