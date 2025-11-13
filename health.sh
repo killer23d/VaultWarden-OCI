@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # health.sh - Enhanced health monitoring for VaultWarden-OCI with auto-recovery
 # FIXED: Added --auto-recover flag for self-healing capabilities
+# FIXED: Proper DOMAIN error handling in check_service_accessibility
 # ENHANCED: Standardized error handling - functions return, main() decides exit strategy
 # UPDATED: Email delivery uses lib/common.sh which prefers msmtpd sidecar if available
 
@@ -86,7 +87,7 @@ health_log_success() { [[ "$QUIET" == "true" ]] || log_success "$1"; }
 health_log_warn() { log_warn "$1"; ISSUES_FOUND+=("WARNING: $1"); }
 health_log_error() { log_error "$1"; ISSUES_FOUND+=("ERROR: $1"); CRITICAL_ISSUES+=("$1"); OVERALL_STATUS="unhealthy"; }
 
-# NEW: Check if container is healthy
+# Check if container is healthy
 container_is_healthy() {
     local container="$1"
     
@@ -111,12 +112,12 @@ container_is_healthy() {
     fi
 }
 
-# NEW: Attempt automatic recovery of unhealthy container
+# Attempt automatic recovery of unhealthy container
 attempt_container_recovery() {
     local container="$1"
     local service="$2"
     
-    # BEST PRACTICE FIX: Check for maintenance lock file
+    # Check for maintenance lock file
     if [[ -f "/tmp/.vw_maintenance.lock" ]]; then
         log_warn "🔧 $service is stopped for planned maintenance. Skipping auto-recovery."
         return 0
@@ -195,7 +196,7 @@ check_container_status() {
             if [[ "$status" == "unhealthy" ]]; then
                 unhealthy_containers+=("$container")
                 
-                # NEW: Attempt auto-recovery if enabled
+                # Attempt auto-recovery if enabled
                 if [[ "$AUTO_RECOVER" == "true" ]] && [[ "$recovery_attempted" == "false" ]]; then
                     recovery_attempted=true
                     attempt_container_recovery "$container" "$service"
@@ -208,7 +209,7 @@ check_container_status() {
         else
             stopped_containers+=("$container")
             
-            # NEW: Attempt auto-recovery for stopped containers
+            # Attempt auto-recovery for stopped containers
             if [[ "$AUTO_RECOVER" == "true" ]] && [[ "$recovery_attempted" == "false" ]]; then
                 recovery_attempted=true
                 log_error "CRITICAL: $container is stopped"
@@ -256,12 +257,21 @@ check_container_status() {
 check_service_accessibility() {
     health_log_info "Checking service accessibility..."
     local domain clean_domain
-    domain=$(get_config_value "DOMAIN" "")
-    [[ -z "$domain" ]] && {
+    
+    # FIXED: Proper error handling for missing DOMAIN
+    if [[ -f ".env" ]]; then
+        domain=$(grep "^DOMAIN=" .env | head -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" || echo "")
+    else
+        domain=""
+    fi
+    
+    if [[ -z "$domain" ]]; then
         health_log_error "CRITICAL: DOMAIN not configured in .env file"
         HEALTH_RESULTS["accessibility"]="failed"
+        HEALTH_DETAILS["accessibility"]="DOMAIN not set in .env"
         return 1
-    }
+    fi
+    
     clean_domain=$(echo "$domain" | sed 's|https\?://||; s|/.*$||')
     
     if curl -sf "http://localhost/alive" >/dev/null 2>&1; then
@@ -324,11 +334,18 @@ check_disk_space() {
 check_ssl_certificates() {
     health_log_info "Checking SSL certificate expiration..."
     local domain clean_domain
-    domain=$(get_config_value "DOMAIN" "")
-    [[ -z "$domain" ]] && {
+    
+    if [[ -f ".env" ]]; then
+        domain=$(grep "^DOMAIN=" .env | head -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" || echo "")
+    else
+        domain=""
+    fi
+    
+    if [[ -z "$domain" ]]; then
         health_log_warn "No domain configured for SSL check"
         return 0
-    }
+    fi
+    
     clean_domain=$(echo "$domain" | sed 's|https\?://||; s|/.*$||')
     
     local cert_info expiry_date expires_in
@@ -518,7 +535,12 @@ check_backup_status() {
 test_email_notifications() {
     health_log_info "Testing email notification functionality..."
     local admin_email
-    admin_email=$(get_config_value "ADMIN_EMAIL" "")
+    
+    if [[ -f ".env" ]]; then
+        admin_email=$(grep "^ADMIN_EMAIL=" .env | head -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" || echo "")
+    else
+        admin_email=""
+    fi
     
     if [[ -z "$admin_email" ]]; then
         health_log_warn "ADMIN_EMAIL not configured - email notifications disabled"
