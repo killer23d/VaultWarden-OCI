@@ -7,23 +7,33 @@
 # High-fidelity security detection + Built-in email notifications + Resource management
 
 services:
+  # Init container to enforce correct permissions on every startup (set-and-forget)
+  init-permissions:
+    image: busybox:latest
+    container_name: vaultwarden_init
+    restart: "no"
+    user: "0:0"
+    command: sh -c "chown -R ${PUID}:${PGID} /data /logs /caddy_data /caddy_config /fail2ban /msmtpd && chmod -R 755 /data /logs /caddy_data /caddy_config /fail2ban /msmtpd"
+    volumes:
+      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data:/data
+      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/vaultwarden:/logs
+      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/data:/caddy_data
+      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/config:/caddy_config
+      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/fail2ban:/fail2ban
+      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/msmtpd:/msmtpd
+
   vaultwarden:
     container_name: vaultwarden_app
     image: ghcr.io/dani-garcia/vaultwarden:${VAULTWARDEN_VERSION:-1.30.5}
     restart: unless-stopped
     user: "${PUID}:${PGID}"
     environment:
-      # Core Configuration
       DOMAIN: https://${DOMAIN}
       ADMIN_TOKEN_FILE: /run/secrets/admin_token
       TZ: ${TZ:-UTC}
-
-      # FIXED: High-fidelity logging for Fail2Ban
       LOG_FILE: /logs/vaultwarden.log
       LOG_LEVEL: warn
       EXTENDED_LOGGING: true
-
-      # Security Configuration  
       SIGNUPS_ALLOWED: ${SIGNUPS_ALLOWED:-false}
       INVITATIONS_ALLOWED: ${INVITATIONS_ALLOWED:-true}
       EMERGENCY_ACCESS_ALLOWED: ${EMERGENCY_ACCESS_ALLOWED:-true}
@@ -31,14 +41,10 @@ services:
       WEB_VAULT_ENABLED: ${WEB_VAULT_ENABLED:-true}
       WEBSOCKET_ENABLED: ${WEBSOCKET_ENABLED:-false}
       PUSH_ENABLED: ${PUSH_ENABLED:-false}
-
-      # Advanced Security
       PASSWORD_ITERATIONS: ${PASSWORD_ITERATIONS:-350000}
       PASSWORD_HINTS_ALLOWED: ${PASSWORD_HINTS_ALLOWED:-false}
       SHOW_PASSWORD_HINT: ${SHOW_PASSWORD_HINT:-false}
       IP_HEADER: CF-Connecting-IP
-
-      # Email Configuration (optional)
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_FROM: ${SMTP_FROM:-}
       SMTP_FROM_NAME: ${SMTP_FROM_NAME:-VaultWarden}
@@ -47,26 +53,23 @@ services:
       SMTP_USERNAME: ${SMTP_USERNAME:-}
       SMTP_PASSWORD_FILE: /run/secrets/smtp_password
       SMTP_TIMEOUT: ${SMTP_TIMEOUT:-15}
-
-      # Push Notifications (optional)
       PUSH_INSTALLATION_ID_FILE: /run/secrets/push_installation_id
       PUSH_INSTALLATION_KEY_FILE: /run/secrets/push_installation_key
-
-      # Performance
       DATABASE_MAX_CONNS: ${DATABASE_MAX_CONNS:-10}
       WEB_VAULT_FOLDER: web-vault/
-
     secrets:
       - admin_token
-      - smtp_password  
+      - smtp_password
       - push_installation_id
       - push_installation_key
     volumes:
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data:/data
-      # FIXED: Mount logs directory for Fail2Ban access
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/vaultwarden:/logs
     depends_on:
-      - caddy
+      caddy:
+        condition: service_started
+      init-permissions:
+        condition: service_completed_successfully
     networks:
       - vaultwarden
     healthcheck:
@@ -81,15 +84,14 @@ services:
       - ALL
     tmpfs:
       - /tmp
-    # ENHANCED: Resource limits for 6GB system (balanced allocation)
     deploy:
       resources:
         limits:
-          memory: 2G      # Main application, largest allocation
-          cpus: '0.6'     # 60% of single CPU
+          memory: 2G
+          cpus: '0.6'
         reservations:
-          memory: 1G      # Minimum guaranteed memory
-          cpus: '0.2'     # 20% of single CPU minimum
+          memory: 1G
+          cpus: '0.2'
 
   caddy:
     container_name: vaultwarden_caddy
@@ -103,7 +105,7 @@ services:
       TZ: ${TZ:-UTC}
     secrets:
       - caddy_cloudflare_dns_token
-      - admin_basic_auth_hash  
+      - admin_basic_auth_hash
     volumes:
       - ${PWD}/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/data:/data
@@ -112,6 +114,9 @@ services:
     ports:
       - "80:80"
       - "443:443"
+    depends_on:
+      init-permissions:
+        condition: service_completed_successfully
     networks:
       - vaultwarden
     healthcheck:
@@ -126,24 +131,23 @@ services:
       - ALL
     cap_add:
       - NET_BIND_SERVICE
-    # ENHANCED: Resource limits for reverse proxy
     deploy:
       resources:
         limits:
-          memory: 1G      # Reverse proxy with SSL termination
-          cpus: '0.3'     # 30% of single CPU
+          memory: 1G
+          cpus: '0.3'
         reservations:
-          memory: 256M    # Minimum for SSL operations
-          cpus: '0.1'     # 10% of single CPU minimum
+          memory: 256M
+          cpus: '0.1'
 
-  # NEW: Lightweight SMTP relay using msmtpd
   msmtpd:
     container_name: vaultwarden_msmtpd
     image: crazymax/msmtpd:${MSMTPD_VERSION:-latest}
     restart: unless-stopped
+    user: "0:0"
     environment:
       - SMTP_HOST=${SMTP_HOST:-}
-      - SMTP_PORT=${SMTP_PORT:-587} 
+      - SMTP_PORT=${SMTP_PORT:-587}
       - SMTP_TLS=${SMTP_SECURITY:-on}
       - SMTP_STARTTLS=${SMTP_STARTTLS:-on}
       - SMTP_TLS_CHECKCERT=${SMTP_TLS_CHECKCERT:-on}
@@ -168,15 +172,18 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    # ENHANCED: Minimal resource allocation for SMTP relay
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
     deploy:
       resources:
         limits:
-          memory: 32M     # Very lightweight SMTP relay
-          cpus: '0.05'    # 5% of single CPU
+          memory: 32M
+          cpus: '0.05'
         reservations:
-          memory: 8M      # Minimal memory reservation
-          cpus: '0.01'    # 1% of single CPU minimum
+          memory: 8M
+          cpus: '0.01'
 
   fail2ban:
     container_name: vaultwarden_fail2ban
@@ -187,13 +194,10 @@ services:
       F2B_LOG_TARGET: STDOUT
       F2B_LOG_LEVEL: INFO
       F2B_DB_PURGE_AGE: 1d
-      # Install whois for enhanced email notifications
       PACKAGES: whois
-      # Email configuration via msmtpd sidecar
       F2B_DEST_MAIL: ${ADMIN_EMAIL}
       F2B_SENDER: fail2ban@${DOMAIN}
-      # Cloudflare integration
-      CF_API_TOKEN_FILE: /run/secrets/fail2ban_cloudflare_firewall_token  
+      CF_API_TOKEN_FILE: /run/secrets/fail2ban_cloudflare_firewall_token
       CF_ZONE_ID: ${CLOUDFLARE_ZONE_ID}
     secrets:
       - fail2ban_cloudflare_firewall_token
@@ -201,19 +205,16 @@ services:
       - ${PWD}/fail2ban:/data/fail2ban:ro
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/fail2ban:/data/db
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/fail2ban:/var/log/fail2ban
-      # FIXED: Mount VaultWarden logs for high-fidelity parsing
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/vaultwarden:/var/log/vaultwarden:ro
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy:/var/log/caddy:ro
-      # FIXED: Platform-specific SSH log mounting for OCI compatibility
       - ${SSH_LOG_PATH:-/var/log/secure}:/var/log/ssh-auth.log:ro
-      # REMOVED: Host mailutil mounts (replaced by msmtpd sidecar)
     cap_add:
       - NET_ADMIN
       - NET_RAW
     depends_on:
       - vaultwarden
       - caddy
-      - msmtpd  # NEW: Depend on email sidecar
+      - msmtpd
     networks:
       - vaultwarden
     healthcheck:
@@ -224,15 +225,14 @@ services:
       start_period: 30s
     security_opt:
       - no-new-privileges:true
-    # ENHANCED: Resource limits for security monitoring
     deploy:
       resources:
         limits:
-          memory: 1G      # Log parsing and rule processing
-          cpus: '0.2'     # 20% of single CPU
+          memory: 1G
+          cpus: '0.2'
         reservations:
-          memory: 256M    # Minimum for log processing
-          cpus: '0.05'    # 5% of single CPU minimum
+          memory: 256M
+          cpus: '0.05'
 
 secrets:
   admin_token:
