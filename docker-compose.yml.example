@@ -5,12 +5,14 @@
 # FIXED: OCI/Oracle Linux compatibility for SSH log monitoring
 # FIXED: Caddy Cloudflare token configuration for acme_dns
 # FIXED: Caddy healthcheck to test service availability instead of config validation
-# FIXED: Init container now also fixes secrets directory permissions
+# FIXED: Init container now fixes secrets directory permissions for Docker access
+# FIXED: msmtpd runs as non-root user following security best practices
 # High-fidelity security detection + Built-in email notifications + Resource management
 
 services:
   # Init container to enforce correct permissions on every startup (set-and-forget)
   # ENHANCED: Now also fixes secrets directory permissions for Docker access
+  # ENHANCED: Sets proper ownership for msmtpd logs (non-root user)
   init-permissions:
     image: busybox:latest
     container_name: vaultwarden_init
@@ -155,7 +157,8 @@ services:
     container_name: vaultwarden_msmtpd
     image: crazymax/msmtpd:${MSMTPD_VERSION:-latest}
     restart: unless-stopped
-    user: "0:0"
+    # FIXED: Removed user: "0:0" override - container runs as non-root following security best practices
+    # Init container sets proper permissions for the default msmtpd user
     environment:
       - SMTP_HOST=${SMTP_HOST:-}
       - SMTP_PORT=${SMTP_PORT:-587}
@@ -283,6 +286,7 @@ networks:
 # - FIXED: Caddy Cloudflare API token read from Docker secret into environment variable
 # - FIXED: Caddy health check now tests service availability (not config validation)
 # - FIXED: Init container handles secrets directory permissions for Docker access
+# - FIXED: msmtpd runs as non-root user following Docker security best practices
 # 
 # ENHANCED FEATURES:
 # - Resource limits prevent container resource exhaustion on 6GB system
@@ -294,6 +298,7 @@ networks:
 # - Containerized email solution eliminates host dependencies
 # - Secure token handling: Read from Docker secrets into container memory only
 # - Automatic permissions fixing on every startup for set-and-forget operation
+# - Non-root container execution following security best practices
 # 
 # RESOURCE ALLOCATION STRATEGY (for 6GB system):
 # - Total container limits: ~4GB (leaves 2GB for host OS and overhead)
@@ -310,3 +315,4 @@ networks:
 # - Universal container mount point: /var/log/ssh-auth.log
 # - Email functionality completely containerized (no host dependencies)
 # - Automatic secrets permissions fixing ensures Docker can access secrets
+# - msmtpd log permissions set by init container for non-root execution
