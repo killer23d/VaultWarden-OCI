@@ -229,7 +229,7 @@ verify_startup_health() {
 
     # Run comprehensive health check if available
     if [[ -f "./health.sh" ]]; then
-        if ./health.sh --quick; then
+        if ./health.sh; then
             log_success "All services are healthy"
             return 0
         else
