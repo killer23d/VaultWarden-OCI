@@ -181,7 +181,7 @@ check_container_status() {
         "vaultwarden_app:vaultwarden"
         "vaultwarden_caddy:caddy"
         "vaultwarden_fail2ban:fail2ban"
-        "vaultwarden_msmtpd:msmtpd"
+        "vaultwarden_postfix:postfix"
     )
     local unhealthy_containers=() stopped_containers=()
     local recovery_attempted=false
