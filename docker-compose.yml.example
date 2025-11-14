@@ -1,4 +1,13 @@
 # VaultWarden-OCI - Production Docker Compose Configuration
+# ENHANCED: Added container resource limits for 6GB system
+# ENHANCED: Added timezone consistency across all containers
+# ENHANCED: Replaced msmtpd with bokysan/docker-postfix for improved email reliability
+# FIXED: OCI/Oracle Linux compatibility for SSH log monitoring
+# FIXED: Postfix configuration uses correct bokysan/docker-postfix environment variables
+# FIXED: Caddy Cloudflare token configuration for acme_dns
+# FIXED: Caddy healthcheck to test service availability instead of config validation
+# FIXED: Init container now fixes secrets directory permissions for Docker access
+# High-fidelity security detection + Built-in email notifications + Resource management
 
 services:
   # Init container to enforce correct permissions on every startup (set-and-forget)
@@ -145,17 +154,21 @@ services:
     image: boky/postfix:${POSTFIX_VERSION:-latest}
     restart: unless-stopped
     environment:
-      - HOSTNAME=${POSTFIX_HOSTNAME:-postfix}
-      - RELAYHOST=${SMTP_HOST:-}
-      - RELAYHOST_USERNAME=${SMTP_USERNAME:-}
-      - RELAYHOST_PASSWORD=${SMTP_PASSWORD:-}
-      - ALLOWED_SENDER_DOMAINS=${ALLOWED_SENDER_DOMAINS:-}
-      - RELAYHOST_TLS_LEVEL=${POSTFIX_TLS_LEVEL:-encrypt}
-      - MESSAGE_SIZE_LIMIT=${POSTFIX_MESSAGE_SIZE_LIMIT:-10240000}
+      # General settings
       - TZ=${TZ:-UTC}
-    secrets:
-      - source: smtp_password
-        target: /run/secrets/smtp_password
+      
+      # Required: Domains allowed to send mail
+      - ALLOWED_SENDER_DOMAINS=${ALLOWED_SENDER_DOMAINS:-}
+      
+      # Relay configuration (built from SMTP_* variables)
+      - RELAYHOST=${SMTP_HOST}:${SMTP_PORT}
+      - RELAYHOST_USERNAME=${SMTP_USERNAME}
+      - RELAYHOST_PASSWORD=${SMTP_PASSWORD}
+      
+      # Postfix-specific settings (note: lowercase parameter names after POSTFIX_ prefix)
+      - POSTFIX_myhostname=${POSTFIX_MYHOSTNAME:-postfix}
+      - POSTFIX_smtp_tls_security_level=${POSTFIX_SMTP_TLS_SECURITY_LEVEL:-encrypt}
+      - POSTFIX_message_size_limit=${POSTFIX_MESSAGE_SIZE_LIMIT:-10240000}
     ports:
       - "127.0.0.1:587:587"
     networks:
@@ -265,10 +278,10 @@ networks:
 # - Enhanced security with no-new-privileges and capability restrictions
 # - Clean configuration focused on core functionality
 # - FIXED: OCI/Oracle Linux SSH log compatibility
+# - FIXED: Postfix uses correct bokysan/docker-postfix environment variables
 # - FIXED: Caddy Cloudflare API token read from Docker secret into environment variable
 # - FIXED: Caddy health check now tests service availability (not config validation)
 # - FIXED: Init container handles secrets directory permissions for Docker access
-# - FIXED: postfix using standard port 587 for SMTP relay
 # 
 # ENHANCED FEATURES:
 # - Resource limits prevent container resource exhaustion on 6GB system
@@ -299,10 +312,17 @@ networks:
 # - Automatic secrets permissions fixing ensures Docker can access secrets
 # - postfix provides full SMTP server functionality with relay support
 #
-# POSTFIX CONFIGURATION:
-# - Uses bokysan/docker-postfix for reliable email relay
-# - Supports TLS encryption for secure email transmission
-# - Configurable message size limits and sender domains
+# POSTFIX CONFIGURATION (bokysan/docker-postfix):
+# - Uses official bokysan/docker-postfix environment variables
+# - ALLOWED_SENDER_DOMAINS: Domains allowed to send mail
+# - RELAYHOST: Built from SMTP_HOST:SMTP_PORT
+# - RELAYHOST_USERNAME/PASSWORD: From SMTP credentials
+# - POSTFIX_myhostname: Postfix hostname (lowercase parameter name)
+# - POSTFIX_smtp_tls_security_level: TLS encryption level (encrypt/may/none)
+# - POSTFIX_message_size_limit: Maximum message size in bytes
+# - Any postfix parameter can be set using POSTFIX_<lowercase_parameter_name>
+# - Port 587: Standard SMTP submission port
 # - Healthcheck validates SMTP port 587 availability
 # - Integrated with Docker secrets for secure credential management
 # - Resource-efficient with 128MB limit and 32MB reservation
+"
