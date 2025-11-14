@@ -59,15 +59,15 @@ verbose_log() {
 test_postfix_container() {
     log_info "Testing postfix container status..."
 
-    # Check if container is running
-    if docker compose ps vaultwarden_postfix >/dev/null 2>&1; then
+    # Check if container is running (use service name)
+    if docker compose ps postfix >/dev/null 2>&1; then
         log_success "✅ postfix container is running"
-        verbose_log "Container status: $(docker compose ps vaultwarden_postfix --format 'table {{.Name}}\\t{{.Status}}\\t{{.Ports}}')"
+        verbose_log "Container status: $(docker compose ps postfix --format 'table {{.Name}}\t{{.Status}}\t{{.Ports}}')"
     else
         log_error "❌ postfix container is not running"
         log_info "Starting postfix container..."
         if docker compose up -d postfix; then
-            sleep 10  # Wait for startup (postfix needs more time than msmtpd)
+            sleep 15  # Wait for startup (postfix needs time to initialize)
             log_success "✅ postfix container started successfully"
         else
             log_error "❌ Failed to start postfix container"
@@ -77,33 +77,34 @@ test_postfix_container() {
 
     # Check container health
     local health_status
-    health_status=$(docker compose exec -T vaultwarden_postfix nc -z localhost 587 >/dev/null 2>&1 && echo "healthy" || echo "unhealthy")
+    health_status=$(docker compose exec -T postfix nc -z localhost 587 >/dev/null 2>&1 && echo "healthy" || echo "unhealthy")
     
     if [[ "$health_status" == "healthy" ]]; then
         log_success "✅ postfix health check passed (port 587 responding)"
     else
         log_error "❌ postfix health check failed (port 587 not responding)"
+        log_info "🔍 Check logs: docker compose logs postfix"
         return 1
     fi
 
     # Check postfix status
-    if docker compose exec -T vaultwarden_postfix postfix status >/dev/null 2>&1; then
+    if docker compose exec -T postfix postfix status >/dev/null 2>&1; then
         log_success "✅ postfix service is active"
-        verbose_log "$(docker compose exec -T vaultwarden_postfix postfix status)"
+        verbose_log "$(docker compose exec -T postfix postfix status)"
     else
         log_warn "⚠️  Could not verify postfix service status"
     fi
 
-    # Check logs for errors
+    # Check logs for errors (use service name)
     local recent_logs
-    recent_logs=$(docker compose logs --tail 20 vaultwarden_postfix 2>/dev/null | grep -i "error\\|fatal\\|warning" || true)
+    recent_logs=$(docker compose logs --tail 20 postfix 2>/dev/null | grep -i "error\|fatal" | grep -v "warning" || true)
     if [[ -n "$recent_logs" ]]; then
-        log_warn "⚠️  Found recent errors/warnings in postfix logs:"
+        log_warn "⚠️  Found recent errors in postfix logs:"
         echo "$recent_logs" | while read -r line; do
             log_warn "    $line"
         done
     else
-        verbose_log "No recent errors found in postfix logs"
+        verbose_log "No critical errors found in postfix logs"
     fi
 
     return 0
@@ -112,23 +113,24 @@ test_postfix_container() {
 test_fail2ban_integration() {
     log_info "Testing fail2ban integration..."
 
-    # Check if fail2ban container is running
-    if ! docker compose ps vaultwarden_fail2ban >/dev/null 2>&1; then
+    # Check if fail2ban container is running (use service name)
+    if ! docker compose ps fail2ban >/dev/null 2>&1; then
         log_error "❌ fail2ban container is not running"
+        log_info "💡 Start it with: docker compose up -d fail2ban"
         return 1
     fi
 
     # Check fail2ban status
-    if docker compose exec -T vaultwarden_fail2ban fail2ban-client status >/dev/null 2>&1; then
+    if docker compose exec -T fail2ban fail2ban-client status >/dev/null 2>&1; then
         log_success "✅ fail2ban is responding"
-        verbose_log "fail2ban jails: $(docker compose exec -T vaultwarden_fail2ban fail2ban-client status | grep "Jail list" || echo "Status check passed")"
+        verbose_log "fail2ban jails: $(docker compose exec -T fail2ban fail2ban-client status | grep "Jail list" || echo "Status check passed")"
     else
         log_error "❌ fail2ban is not responding"
         return 1
     fi
 
-    # Check if fail2ban can reach postfix
-    if docker compose exec -T vaultwarden_fail2ban nc -z postfix 587 >/dev/null 2>&1; then
+    # Check if fail2ban can reach postfix (use Docker network name)
+    if docker compose exec -T fail2ban nc -z postfix 587 >/dev/null 2>&1; then
         log_success "✅ fail2ban can reach postfix container"
     else
         log_error "❌ fail2ban cannot reach postfix container"
@@ -136,11 +138,11 @@ test_fail2ban_integration() {
     fi
 
     # Check if smtp action exists
-    if docker compose exec -T vaultwarden_fail2ban test -f /data/fail2ban/action.d/smtp.conf; then
+    if docker compose exec -T fail2ban test -f /data/fail2ban/action.d/smtp.conf; then
         log_success "✅ SMTP action configuration found"
         
         # Verify it references postfix (not msmtpd)
-        if docker compose exec -T vaultwarden_fail2ban grep -q "postfix" /data/fail2ban/action.d/smtp.conf; then
+        if docker compose exec -T fail2ban grep -q "postfix" /data/fail2ban/action.d/smtp.conf; then
             log_success "✅ SMTP action correctly configured for postfix"
         else
             log_warn "⚠️  SMTP action may still reference old msmtpd configuration"
@@ -245,15 +247,16 @@ VaultWarden-OCI Email System (powered by bokysan/docker-postfix)"
     if send_notification_email "$test_subject" "$test_body"; then
         log_success "✅ Test email sent successfully!"
         log_info "📬 Please check $TEST_RECIPIENT for the test message"
-        log_info "🔍 Check postfix logs: docker compose logs vaultwarden_postfix"
+        log_info "🔍 Check postfix logs: docker compose logs postfix"
     else
         log_error "❌ Failed to send test email"
         log_info "🔍 Debug steps:"
-        log_info "   1. Check postfix logs: docker compose logs vaultwarden_postfix"
-        log_info "   2. Check fail2ban logs: docker compose logs vaultwarden_fail2ban"
+        log_info "   1. Check postfix logs: docker compose logs postfix"
+        log_info "   2. Check fail2ban logs: docker compose logs fail2ban"
         log_info "   3. Verify SMTP credentials in secrets"
         log_info "   4. Verify ALLOWED_SENDER_DOMAINS in .env"
         log_info "   5. Check postfix relay configuration"
+        log_info "   6. Check postfix container permissions: docker compose logs postfix | grep -i permission"
         return 1
     fi
 
@@ -311,12 +314,13 @@ main() {
         log_error "❌ Some email migration tests failed: ${failed_tests[*]}"
         log_info ""
         log_info "TROUBLESHOOTING:"
-        log_info "1. Check container logs: docker compose logs vaultwarden_postfix"
+        log_info "1. Check container logs: docker compose logs postfix"
         log_info "2. Verify SMTP configuration in .env file"
         log_info "3. Check secrets: ./edit-secrets.sh --test"
         log_info "4. Verify ALLOWED_SENDER_DOMAINS matches your email domains"
         log_info "5. Review postfix relay configuration"
         log_info "6. Check network connectivity between containers"
+        log_info "7. Ensure postfix has proper permissions (check for Permission denied errors)"
         exit 1
     fi
 }
