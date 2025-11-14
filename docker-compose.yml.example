@@ -163,12 +163,14 @@ services:
       # Relay configuration (built from SMTP_* variables)
       - RELAYHOST=${SMTP_HOST}:${SMTP_PORT}
       - RELAYHOST_USERNAME=${SMTP_USERNAME}
-      - RELAYHOST_PASSWORD=${SMTP_PASSWORD}
+      - RELAYHOST_PASSWORD_FILE=/run/secrets/smtp_password
       
       # Postfix-specific settings (note: lowercase parameter names after POSTFIX_ prefix)
       - POSTFIX_myhostname=${POSTFIX_MYHOSTNAME:-postfix}
       - POSTFIX_smtp_tls_security_level=${POSTFIX_SMTP_TLS_SECURITY_LEVEL:-encrypt}
       - POSTFIX_message_size_limit=${POSTFIX_MESSAGE_SIZE_LIMIT:-10240000}
+    secrets:
+      - smtp_password
     ports:
       - "127.0.0.1:587:587"
     networks:
