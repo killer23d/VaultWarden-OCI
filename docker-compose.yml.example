@@ -129,7 +129,7 @@ services:
     networks:
       - vaultwarden
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:2019/config/"]
+      test: ["CMD", "pgrep", "caddy"]
       interval: 30s
       timeout: 5s
       retries: 3
