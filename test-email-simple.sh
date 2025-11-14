@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# test-email-simple.sh - Simple email testing for msmtpd integration
+# test-email-simple.sh - Simple email testing for bokysan/docker-postfix integration
 # Author: VaultWarden-OCI Team
-# Purpose: Validate email functionality after mailutil -> msmtpd migration
+# Purpose: Validate email functionality after msmtpd -> postfix migration
 
 set -euo pipefail
 
@@ -19,7 +19,7 @@ DRY_RUN=false
 
 show_help() {
     cat << 'EOF'
-Simple Email Testing for msmtpd Integration
+Simple Email Testing for bokysan/docker-postfix Integration
 
 USAGE:
     ./test-email-simple.sh [OPTIONS]
@@ -31,12 +31,12 @@ OPTIONS:
     --help              Show this help
 
 TESTS:
-    1. msmtpd Container Status
+    1. postfix Container Status
     2. fail2ban Integration
     3. Host Script Email Functionality
     4. End-to-End Email Test
 
-This script validates the migration from mailutils to msmtpd sidecar container.
+This script validates the migration from msmtpd to bokysan/docker-postfix.
 EOF
 }
 
@@ -56,46 +56,54 @@ verbose_log() {
     [[ "$VERBOSE" == "true" ]] && log_info "$1"
 }
 
-test_msmtpd_container() {
-    log_info "Testing msmtpd container status..."
+test_postfix_container() {
+    log_info "Testing postfix container status..."
 
     # Check if container is running
-    if docker compose ps vaultwarden_msmtpd >/dev/null 2>&1; then
-        log_success "✅ msmtpd container is running"
-        verbose_log "Container status: $(docker compose ps vaultwarden_msmtpd --format 'table {{.Name}}\t{{.Status}}\t{{.Ports}}')"
+    if docker compose ps vaultwarden_postfix >/dev/null 2>&1; then
+        log_success "✅ postfix container is running"
+        verbose_log "Container status: $(docker compose ps vaultwarden_postfix --format 'table {{.Name}}\\t{{.Status}}\\t{{.Ports}}')"
     else
-        log_error "❌ msmtpd container is not running"
-        log_info "Starting msmtpd container..."
-        if docker compose up -d msmtpd; then
-            sleep 5  # Wait for startup
-            log_success "✅ msmtpd container started successfully"
+        log_error "❌ postfix container is not running"
+        log_info "Starting postfix container..."
+        if docker compose up -d postfix; then
+            sleep 10  # Wait for startup (postfix needs more time than msmtpd)
+            log_success "✅ postfix container started successfully"
         else
-            log_error "❌ Failed to start msmtpd container"
+            log_error "❌ Failed to start postfix container"
             return 1
         fi
     fi
 
     # Check container health
     local health_status
-    health_status=$(docker compose exec -T vaultwarden_msmtpd nc -z localhost 1025 >/dev/null 2>&1 && echo "healthy" || echo "unhealthy")
+    health_status=$(docker compose exec -T vaultwarden_postfix nc -z localhost 587 >/dev/null 2>&1 && echo "healthy" || echo "unhealthy")
     
     if [[ "$health_status" == "healthy" ]]; then
-        log_success "✅ msmtpd health check passed (port 1025 responding)"
+        log_success "✅ postfix health check passed (port 587 responding)"
     else
-        log_error "❌ msmtpd health check failed (port 1025 not responding)"
+        log_error "❌ postfix health check failed (port 587 not responding)"
         return 1
+    fi
+
+    # Check postfix status
+    if docker compose exec -T vaultwarden_postfix postfix status >/dev/null 2>&1; then
+        log_success "✅ postfix service is active"
+        verbose_log "$(docker compose exec -T vaultwarden_postfix postfix status)"
+    else
+        log_warn "⚠️  Could not verify postfix service status"
     fi
 
     # Check logs for errors
     local recent_logs
-    recent_logs=$(docker compose logs --tail 10 vaultwarden_msmtpd 2>/dev/null | grep -i error || true)
+    recent_logs=$(docker compose logs --tail 20 vaultwarden_postfix 2>/dev/null | grep -i "error\\|fatal\\|warning" || true)
     if [[ -n "$recent_logs" ]]; then
-        log_warn "⚠️  Found recent errors in msmtpd logs:"
+        log_warn "⚠️  Found recent errors/warnings in postfix logs:"
         echo "$recent_logs" | while read -r line; do
             log_warn "    $line"
         done
     else
-        verbose_log "No recent errors found in msmtpd logs"
+        verbose_log "No recent errors found in postfix logs"
     fi
 
     return 0
@@ -119,17 +127,24 @@ test_fail2ban_integration() {
         return 1
     fi
 
-    # Check if fail2ban can reach msmtpd
-    if docker compose exec -T vaultwarden_fail2ban nc -z msmtpd 1025 >/dev/null 2>&1; then
-        log_success "✅ fail2ban can reach msmtpd container"
+    # Check if fail2ban can reach postfix
+    if docker compose exec -T vaultwarden_fail2ban nc -z postfix 587 >/dev/null 2>&1; then
+        log_success "✅ fail2ban can reach postfix container"
     else
-        log_error "❌ fail2ban cannot reach msmtpd container"
+        log_error "❌ fail2ban cannot reach postfix container"
         return 1
     fi
 
     # Check if smtp action exists
     if docker compose exec -T vaultwarden_fail2ban test -f /data/fail2ban/action.d/smtp.conf; then
         log_success "✅ SMTP action configuration found"
+        
+        # Verify it references postfix (not msmtpd)
+        if docker compose exec -T vaultwarden_fail2ban grep -q "postfix" /data/fail2ban/action.d/smtp.conf; then
+            log_success "✅ SMTP action correctly configured for postfix"
+        else
+            log_warn "⚠️  SMTP action may still reference old msmtpd configuration"
+        fi
     else
         log_error "❌ SMTP action configuration missing"
         return 1
@@ -158,6 +173,15 @@ test_host_script_email() {
 
     log_success "✅ Email recipient configured: $TEST_RECIPIENT"
 
+    # Check ALLOWED_SENDER_DOMAINS configuration
+    local sender_domains
+    sender_domains=$(get_config_value "ALLOWED_SENDER_DOMAINS" "")
+    if [[ -n "$sender_domains" ]]; then
+        log_success "✅ Allowed sender domains configured: $sender_domains"
+    else
+        log_warn "⚠️  ALLOWED_SENDER_DOMAINS not set (postfix may reject emails)"
+    fi
+
     # Test email function availability
     if declare -f send_notification_email >/dev/null 2>&1; then
         log_success "✅ send_notification_email function available"
@@ -174,7 +198,7 @@ test_end_to_end_email() {
 
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "🔍 [DRY RUN] Would send test email to: $TEST_RECIPIENT"
-        log_info "🔍 [DRY RUN] Email would be sent via msmtpd container"
+        log_info "🔍 [DRY RUN] Email would be sent via postfix container (port 587)"
         return 0
     fi
 
@@ -183,41 +207,53 @@ test_end_to_end_email() {
         return 1
     fi
 
-    local test_subject="VaultWarden Email Migration Test - $(date)"
-    local test_body="🎉 Email Migration Successful!
+    local test_subject="VaultWarden Email Migration Test - postfix - $(date)"
+    local test_body="🎉 Email Migration Successful - Now using bokysan/docker-postfix!
 
-This test email confirms that your VaultWarden-OCI deployment has successfully migrated from mailutils to msmtpd.
+This test email confirms that your VaultWarden-OCI deployment has successfully migrated from msmtpd to bokysan/docker-postfix.
 
 MIGRATION DETAILS:
 - Date: $(date -Iseconds)
 - Host: $(hostname -f 2>/dev/null || hostname)
-- Email Backend: msmtpd sidecar container
+- Email Backend: bokysan/docker-postfix container
+- SMTP Port: 587 (standard submission port)
 - Configuration: VaultWarden-OCI Enhanced
 
 BENEFITS OF THIS MIGRATION:
-✅ Eliminated host mailutils dependency
-✅ Improved email reliability
-✅ Better resource management (32MB container)
-✅ Enhanced security with containerized email
+✅ Full-featured Postfix server with relay support
+✅ Better email compatibility and deliverability
+✅ Enhanced logging and debugging capabilities
+✅ Support for TLS encryption and authentication
+✅ Configurable message size limits
+✅ Production-ready SMTP relay solution
 ✅ Maintained all existing SOPS/Age secret workflows
+
+POSTFIX FEATURES:
+- Multi-architecture support (amd64, arm64, arm/v7)
+- DKIM signing support (optional)
+- Comprehensive configuration options
+- Active maintenance and updates
+- Proven reliability in production
 
 If you received this email, the migration was completely successful!
 
 Regards,
-VaultWarden-OCI Email System"
+VaultWarden-OCI Email System (powered by bokysan/docker-postfix)"
 
     log_info "📧 Sending test email to: $TEST_RECIPIENT"
     
     if send_notification_email "$test_subject" "$test_body"; then
         log_success "✅ Test email sent successfully!"
         log_info "📬 Please check $TEST_RECIPIENT for the test message"
-        log_info "🔍 Check msmtpd logs: docker compose logs vaultwarden_msmtpd"
+        log_info "🔍 Check postfix logs: docker compose logs vaultwarden_postfix"
     else
         log_error "❌ Failed to send test email"
         log_info "🔍 Debug steps:"
-        log_info "   1. Check msmtpd logs: docker compose logs vaultwarden_msmtpd"
+        log_info "   1. Check postfix logs: docker compose logs vaultwarden_postfix"
         log_info "   2. Check fail2ban logs: docker compose logs vaultwarden_fail2ban"
         log_info "   3. Verify SMTP credentials in secrets"
+        log_info "   4. Verify ALLOWED_SENDER_DOMAINS in .env"
+        log_info "   5. Check postfix relay configuration"
         return 1
     fi
 
@@ -225,7 +261,7 @@ VaultWarden-OCI Email System"
 }
 
 main() {
-    log_header "VaultWarden Email Migration Test - msmtpd Integration"
+    log_header "VaultWarden Email Migration Test - bokysan/docker-postfix Integration"
     
     # Load environment early
     if ! load_env_file; then
@@ -234,10 +270,10 @@ main() {
     fi
 
     local test_results=()
-    local test_names=("msmtpd Container" "fail2ban Integration" "Host Script Email" "End-to-End Email")
+    local test_names=("postfix Container" "fail2ban Integration" "Host Script Email" "End-to-End Email")
     
     # Run all tests
-    test_msmtpd_container && test_results+=(0) || test_results+=(1)
+    test_postfix_container && test_results+=(0) || test_results+=(1)
     test_fail2ban_integration && test_results+=(0) || test_results+=(1)
     test_host_script_email && test_results+=(0) || test_results+=(1)
     test_end_to_end_email && test_results+=(0) || test_results+=(1)
@@ -262,22 +298,25 @@ main() {
     
     if [[ $passed_tests -eq $total_tests ]]; then
         log_success "🎉 ALL EMAIL MIGRATION TESTS PASSED!"
-        log_success "✅ Your VaultWarden-OCI deployment has successfully migrated to msmtpd"
+        log_success "✅ Your VaultWarden-OCI deployment has successfully migrated to bokysan/docker-postfix"
         log_info ""
         log_info "NEXT STEPS:"
         log_info "1. Monitor email functionality over the next few days"
         log_info "2. Check fail2ban email notifications are working"
         log_info "3. Verify backup/health script emails are delivered"
-        log_info "4. Consider removing any remaining mailutils packages from host"
+        log_info "4. Review postfix logs for any warnings or errors"
+        log_info "5. Consider configuring DKIM for better deliverability (optional)"
         exit 0
     else
         log_error "❌ Some email migration tests failed: ${failed_tests[*]}"
         log_info ""
         log_info "TROUBLESHOOTING:"
-        log_info "1. Check container logs: docker compose logs vaultwarden_msmtpd"
+        log_info "1. Check container logs: docker compose logs vaultwarden_postfix"
         log_info "2. Verify SMTP configuration in .env file"
         log_info "3. Check secrets: ./edit-secrets.sh --test"
-        log_info "4. Review fail2ban configuration files"
+        log_info "4. Verify ALLOWED_SENDER_DOMAINS matches your email domains"
+        log_info "5. Review postfix relay configuration"
+        log_info "6. Check network connectivity between containers"
         exit 1
     fi
 }
