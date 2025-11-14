@@ -1,20 +1,8 @@
 # VaultWarden-OCI - Production Docker Compose Configuration
-# ENHANCED: Added container resource limits for 6GB system
-# ENHANCED: Added timezone consistency across all containers
-# ENHANCED: Replaced mailutils with msmtpd sidecar for improved email reliability
-# FIXED: OCI/Oracle Linux compatibility for SSH log monitoring
-# FIXED: Caddy Cloudflare token configuration for acme_dns
-# FIXED: Caddy healthcheck to test service availability instead of config validation
-# FIXED: Init container now fixes secrets directory permissions for Docker access
-# FIXED: msmtpd socklog permission errors resolved with tmpfs mount
-# FIXED: msmtpd healthcheck corrected to check port 2500 and process existence
-# FIXED: msmtpd environment variables corrected for TLS configuration
-# High-fidelity security detection + Built-in email notifications + Resource management
 
 services:
   # Init container to enforce correct permissions on every startup (set-and-forget)
   # ENHANCED: Now also fixes secrets directory permissions for Docker access
-  # REMOVED: msmtpd log volume (now uses tmpfs to avoid permission issues)
   init-permissions:
     image: busybox:latest
     container_name: vaultwarden_init
@@ -152,29 +140,28 @@ services:
           memory: 256M
           cpus: '0.1'
 
-  msmtpd:
-    container_name: vaultwarden_msmtpd
-    image: crazymax/msmtpd:${MSMTPD_VERSION:-latest}
+  postfix:
+    container_name: vaultwarden_postfix
+    image: boky/postfix:${POSTFIX_VERSION:-latest}
     restart: unless-stopped
     environment:
-      - SMTP_HOST=${SMTP_HOST:-}
-      - SMTP_PORT=${SMTP_PORT:-587}
-      - SMTP_TLS=on
-      - SMTP_STARTTLS=on
-      - SMTP_TLS_CHECKCERT=${SMTP_TLS_CHECKCERT:-on}
-      - SMTP_AUTH=${SMTP_AUTH:-on}
-      - SMTP_USER=${SMTP_USERNAME:-}
-      - SMTP_PASSWORD_FILE=/run/secrets/smtp_password
-      - SMTP_FROM=${SMTP_FROM:-}
+      - HOSTNAME=${POSTFIX_HOSTNAME:-postfix}
+      - RELAYHOST=${SMTP_HOST:-}
+      - RELAYHOST_USERNAME=${SMTP_USERNAME:-}
+      - RELAYHOST_PASSWORD=${SMTP_PASSWORD:-}
+      - ALLOWED_SENDER_DOMAINS=${ALLOWED_SENDER_DOMAINS:-}
+      - RELAYHOST_TLS_LEVEL=${POSTFIX_TLS_LEVEL:-encrypt}
+      - MESSAGE_SIZE_LIMIT=${POSTFIX_MESSAGE_SIZE_LIMIT:-10240000}
       - TZ=${TZ:-UTC}
     secrets:
-      - smtp_password
-    tmpfs:
-      - /var/log/socklog:uid=1000,gid=1000,mode=0755
+      - source: smtp_password
+        target: /run/secrets/smtp_password
+    ports:
+      - "127.0.0.1:587:587"
     networks:
       - vaultwarden
     healthcheck:
-      test: ["CMD", "pgrep", "-x", "msmtpd"]
+      test: ["CMD", "nc", "-z", "localhost", "587"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -187,14 +174,15 @@ services:
       - CHOWN
       - SETUID
       - SETGID
+      - NET_BIND_SERVICE
     deploy:
       resources:
         limits:
-          memory: 32M
-          cpus: '0.05'
+          memory: 128M
+          cpus: '0.1'
         reservations:
-          memory: 8M
-          cpus: '0.01'
+          memory: 32M
+          cpus: '0.02'
 
   fail2ban:
     container_name: vaultwarden_fail2ban
@@ -225,7 +213,7 @@ services:
     depends_on:
       - vaultwarden
       - caddy
-      - msmtpd
+      - postfix
     networks:
       - vaultwarden
     healthcheck:
@@ -273,21 +261,19 @@ networks:
 # - Proper dependency management and startup ordering
 # - Cloudflare integration for DNS and global IP blocking
 # - High-fidelity VaultWarden log parsing for accurate Fail2Ban detection
-# - ENHANCED: Email notifications via lightweight msmtpd sidecar (replaces mailutils)
+# - ENHANCED: Email notifications via bokysan/docker-postfix (replaces msmtpd)
 # - Enhanced security with no-new-privileges and capability restrictions
 # - Clean configuration focused on core functionality
 # - FIXED: OCI/Oracle Linux SSH log compatibility
 # - FIXED: Caddy Cloudflare API token read from Docker secret into environment variable
 # - FIXED: Caddy health check now tests service availability (not config validation)
 # - FIXED: Init container handles secrets directory permissions for Docker access
-# - FIXED: msmtpd socklog errors eliminated with tmpfs mount for /var/log/socklog
-# - FIXED: msmtpd healthcheck uses process check instead of port check
-# - FIXED: msmtpd TLS environment variables use literal 'on' instead of variable substitution
+# - FIXED: postfix using standard port 587 for SMTP relay
 # 
 # ENHANCED FEATURES:
 # - Resource limits prevent container resource exhaustion on 6GB system
 # - Timezone consistency across all containers for proper log correlation
-# - Balanced resource allocation: VaultWarden (2G), Caddy (1G), Fail2Ban (1G), msmtpd (32M)
+# - Balanced resource allocation: VaultWarden (2G), Caddy (1G), Fail2Ban (1G), postfix (128M)
 # - CPU limits ensure fair scheduling and prevent single container monopolization
 # - Memory reservations guarantee minimum resources for stable operation
 # - Platform-specific SSH log detection for multi-distro compatibility
@@ -301,7 +287,7 @@ networks:
 # - VaultWarden: 2GB limit (main application, database operations)
 # - Caddy: 1GB limit (SSL termination, reverse proxy, log processing)
 # - Fail2Ban: 1GB limit (log parsing, rule processing)
-# - msmtpd: 32MB limit (lightweight SMTP relay)
+# - postfix: 128MB limit (SMTP relay with full postfix features)
 # - Remaining ~2GB: Host OS, kernel, Docker daemon, buffers/cache
 #
 # PLATFORM COMPATIBILITY:
@@ -311,12 +297,12 @@ networks:
 # - Universal container mount point: /var/log/ssh-auth.log
 # - Email functionality completely containerized (no host dependencies)
 # - Automatic secrets permissions fixing ensures Docker can access secrets
-# - msmtpd logs stored in memory (tmpfs) to avoid permission conflicts
+# - postfix provides full SMTP server functionality with relay support
 #
-# MSMTPD TROUBLESHOOTING FIXES:
-# 1. Removed volume mount for /var/log that caused socklog permission errors
-# 2. Added tmpfs mount for /var/log/socklog to silence s6 logging errors
-# 3. Changed SMTP_TLS and SMTP_STARTTLS from variable substitution to literal 'on'
-# 4. Updated healthcheck from port 1025 to process check (msmtpd listens on port 2500)
-# 5. Removed /msmtpd volume from init-permissions as it's no longer needed
-# 6. msmtpd now runs cleanly with minimal log noise and proper health status
+# POSTFIX CONFIGURATION:
+# - Uses bokysan/docker-postfix for reliable email relay
+# - Supports TLS encryption for secure email transmission
+# - Configurable message size limits and sender domains
+# - Healthcheck validates SMTP port 587 availability
+# - Integrated with Docker secrets for secure credential management
+# - Resource-efficient with 128MB limit and 32MB reservation
