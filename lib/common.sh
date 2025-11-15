@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # lib/common.sh - Core shared functions for VaultWarden-OCI-NG
 # ENHANCED: Standardized error handling patterns - functions return, callers decide
-# ENHANCED: Updated email function to use msmtpd sidecar (replaces mailutils)
+# ENHANCED: Updated email function to use postfix container (replaces msmtpd)
 # FIXED: require_commands function properly declares loop variable for strict mode
 # All library functions use 'return' with exit codes, never 'exit'
 
@@ -364,7 +364,7 @@ download_file() {
     fi
 }
 
-# ENHANCED: Send notification email via msmtpd sidecar - STANDARDIZED: Returns exit code
+# ENHANCED: Send notification email via postfix container - STANDARDIZED: Returns exit code
 send_notification_email() {
     local subject="$1"
     local body="$2"
@@ -377,24 +377,26 @@ send_notification_email() {
         return 1
     fi
 
-    # Check if msmtpd container is available (preferred method)
-    if docker compose ps vaultwarden_msmtpd >/dev/null 2>&1; then
-        log_debug "Using msmtpd container for email delivery"
-        return _send_email_via_msmtpd "$subject" "$body" "$admin_email"
+    # Check if postfix container is available (preferred method)
+    if docker compose ps postfix >/dev/null 2>&1; then
+        log_debug "Using postfix container for email delivery"
+        _send_email_via_postfix "$subject" "$body" "$admin_email"
+        return $?
     fi
 
     # Fallback to host mailutils if available (legacy support)
     if has_command mail; then
         log_debug "Using host mailutils for email delivery (fallback)"
-        return _send_email_via_mailutils "$subject" "$body" "$admin_email"
+        _send_email_via_mailutils "$subject" "$body" "$admin_email"
+        return $?
     fi
 
-    log_warn "No email backend available (tried msmtpd container and host mailutils)"
+    log_warn "No email backend available (tried postfix container and host mailutils)"
     return 1
 }
 
-# ENHANCED: Send email via msmtpd container (preferred method)
-_send_email_via_msmtpd() {
+# ENHANCED: Send email via postfix container (preferred method)
+_send_email_via_postfix() {
     local subject="$1"
     local body="$2"
     local admin_email="$3"
@@ -421,46 +423,51 @@ _send_email_via_msmtpd() {
 Host: $(hostname -f 2>/dev/null || hostname)
 Timestamp: $(date -uIs)
 Project: VaultWarden-OCI
-Email Backend: msmtpd container"
+Email Backend: postfix container (bokysan/docker-postfix)"
 
-    # Create email using Python and send via msmtpd container
+    # Create email using Python and send via postfix container
     local email_script
-    email_script=$(cat <<EOF
+    email_script=$(cat <<'EOF'
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import sys
+import os
 
 def send_email():
     try:
         msg = MIMEMultipart()
-        msg['From'] = '${SMTP_FROM:-vaultwarden@${DOMAIN:-localhost}}'
-        msg['To'] = '$admin_email'
-        msg['Subject'] = '$full_subject'
+        msg['From'] = os.environ.get('EMAIL_FROM', 'vaultwarden@localhost')
+        msg['To'] = os.environ.get('EMAIL_TO', '')
+        msg['Subject'] = os.environ.get('EMAIL_SUBJECT', 'No Subject')
 
-        body = '''$full_body'''
+        body = os.environ.get('EMAIL_BODY', '')
         msg.attach(MIMEText(body, 'plain'))
 
-        server = smtplib.SMTP('msmtpd', 1025)
+        server = smtplib.SMTP('postfix', 587)
         server.send_message(msg)
         server.quit()
-        print('Email sent successfully via msmtpd')
+        print('Email sent successfully via postfix')
         return True
     except Exception as e:
-        print(f'Failed to send email via msmtpd: {e}', file=sys.stderr)
+        print(f'Failed to send email via postfix: {e}', file=sys.stderr)
         return False
 
-import sys
 sys.exit(0 if send_email() else 1)
 EOF
 )
 
-    # Execute email script in fail2ban container (which has Python and network access to msmtpd)
-    if docker compose exec -T vaultwarden_fail2ban python3 -c "$email_script"; then
-        log_success "Notification email sent to $admin_email (via msmtpd)"
+    # Execute email script in fail2ban container with environment variables
+    if docker compose exec -T \
+        -e EMAIL_FROM="${SMTP_FROM:-vaultwarden@${DOMAIN:-localhost}}" \
+        -e EMAIL_TO="$admin_email" \
+        -e EMAIL_SUBJECT="$full_subject" \
+        -e EMAIL_BODY="$full_body" \
+        fail2ban python3 -c "$email_script"; then
+        log_success "Notification email sent to $admin_email (via postfix)"
         return 0
     else
-        log_error "Failed to send notification email via msmtpd"
+        log_error "Failed to send notification email via postfix"
         return 1
     fi
 }
@@ -596,9 +603,9 @@ export -f log_info log_success log_warn log_error log_debug log_header set_log_p
 export -f load_env_file get_config_value require_config
 export -f has_command require_commands retry_with_backoff is_root get_real_user
 export -f ensure_dir secure_file test_connectivity test_http download_file
-export -f send_notification_email _send_email_via_msmtpd _send_email_via_mailutils
+export -f send_notification_email _send_email_via_postfix _send_email_via_mailutils
 export -f validate_email validate_domain validate_port validate_ip validate_url
 export -f setup_error_trap setup_cleanup_trap safe_execute
 export -f init_common_lib
 
-log_debug "Enhanced common library loaded successfully - msmtpd email integration + strict mode fixes"
+log_debug "Enhanced common library loaded successfully - postfix email integration + strict mode fixes"
