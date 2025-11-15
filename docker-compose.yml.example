@@ -37,7 +37,7 @@ services:
     restart: unless-stopped
     user: "${PUID}:${PGID}"
     environment:
-      DOMAIN: https://${DOMAIN}
+      DOMAIN: ${DOMAIN}
       ADMIN_TOKEN_FILE: /run/secrets/admin_token
       TZ: ${TZ:-UTC}
       LOG_FILE: /logs/vaultwarden.log
