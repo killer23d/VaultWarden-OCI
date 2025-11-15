@@ -142,7 +142,7 @@ test_fail2ban_integration() {
         log_success "✅ SMTP action configuration found"
         
         # Verify it references postfix (not msmtpd)
-        if docker compose exec -T fail2ban grep -q "postfix" /data/fail2ban/action.d/smtp.conf; then
+        if docker compose exec -T fail2ban grep -q "smtplib.SMTP('postfix', 587)" /data/fail2ban/action.d/smtp.conf; then
             log_success "✅ SMTP action correctly configured for postfix"
         else
             log_warn "⚠️  SMTP action may still reference old msmtpd configuration"
