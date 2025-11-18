@@ -653,6 +653,12 @@ create_env_file() {
     # This prevents sed errors with special characters like @, /, etc.
     local domain_escaped admin_email_escaped smtp_from_escaped ssh_log_escaped
     domain_escaped=$(printf '%s\n' "$DOMAIN" | sed 's/[&/\]/\\&/g')
+
+    # Calculate clean domain name (no protocol) for DOMAIN_NAME variable
+    local clean_domain clean_domain_escaped
+    clean_domain=$(echo "$DOMAIN" | sed 's|https\?://||; s|/.*$||')
+    clean_domain_escaped=$(printf '%s\n' "$clean_domain" | sed 's/[&/\]/\\&/g')
+
     admin_email_escaped=$(printf '%s\n' "$ADMIN_EMAIL" | sed 's/[&/\]/\\&/g')
     smtp_from_escaped=$(printf '%s\n' "noreply@$DOMAIN" | sed 's/[&/\]/\\&/g')
     ssh_log_escaped=$(printf '%s\n' "$detected_ssh_log_path" | sed 's/[&/\]/\\&/g')
@@ -662,6 +668,7 @@ create_env_file() {
     local sed_errors=0
     
     sed -i "s|DOMAIN=.*|DOMAIN=$domain_escaped|" "$env_file" || ((sed_errors++))
+    sed -i "s|DOMAIN_NAME=.*|DOMAIN_NAME=$clean_domain_escaped|" "$env_file" || ((sed_errors++))
     sed -i "s|ADMIN_EMAIL=.*|ADMIN_EMAIL=$admin_email_escaped|" "$env_file" || ((sed_errors++))
     sed -i "s|PUID=.*|PUID=$user_id|" "$env_file" || ((sed_errors++))
     sed -i "s|PGID=.*|PGID=$group_id|" "$env_file" || ((sed_errors++))
