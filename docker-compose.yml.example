@@ -18,14 +18,16 @@ services:
     restart: "no"
     user: "0:0"
     command: sh -c "
-      chown -R ${PUID}:${PGID} /data /logs /caddy_data /caddy_config /fail2ban && 
+      mkdir -p /logs/vaultwarden /logs/caddy /logs/fail2ban /logs/msmtpd &&
+      chown -R ${PUID}:${PGID} /data /logs /caddy_data /caddy_config /fail2ban &&
       chmod -R 755 /data /logs /caddy_data /caddy_config /fail2ban &&
       chmod 755 /secrets /secrets/.docker_secrets &&
-      chmod 644 /secrets/.docker_secrets/*
+      chmod 644 /secrets/.docker_secrets/* &&
+      echo 'Init container completed - permissions set to ${PUID}:${PGID}'
       "
     volumes:
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data:/data
-      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/vaultwarden:/logs
+      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs:/logs
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/data:/caddy_data
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/config:/caddy_config
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/fail2ban:/fail2ban
