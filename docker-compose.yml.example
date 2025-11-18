@@ -111,7 +111,7 @@ services:
     user: "${PUID}:${PGID}"
     command: sh -c 'export CLOUDFLARE_API_TOKEN=$$(cat /run/secrets/caddy_cloudflare_dns_token) && export ADMIN_BASIC_AUTH_HASH=$$(cat /run/secrets/admin_basic_auth_hash) && caddy run --config /etc/caddy/Caddyfile --adapter caddyfile'
     environment:
-      DOMAIN: ${DOMAIN}
+      DOMAIN: ${DOMAIN_NAME}
       ADMIN_BASIC_AUTH_HASH_FILE: /run/secrets/admin_basic_auth_hash
       TZ: ${TZ:-UTC}
     secrets:
