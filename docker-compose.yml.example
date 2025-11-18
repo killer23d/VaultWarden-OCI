@@ -329,4 +329,3 @@ networks:
 # - Healthcheck validates SMTP port 587 availability
 # - Integrated with Docker secrets for secure credential management
 # - Resource-efficient with 128MB limit and 32MB reservation
-"
