@@ -808,15 +808,22 @@ generate_age_keys() {
         return 0
     fi
 
-    if [[ -f "$age_key_file" ]] && [[ "$FORCE" != "true" ]]; then
-        log_info "Age key already exists, skipping generation."
-        return 0
+    # CRITICAL FIX: Check if file exists and handle FORCE flag properly
+    if [[ -f "$age_key_file" ]]; then
+        if [[ "$FORCE" == "true" ]]; then
+            log_info "Force flag enabled - will regenerate existing Age key"
+        else
+            log_info "Age key already exists, skipping generation."
+            return 0
+        fi
     fi
 
     local real_user; real_user=$(get_real_user)
-    local real_group; real_group=$(id -g -n $real_user)
+    local real_group; real_group=$(id -g -n "$real_user")
 
+    # CRITICAL FIX: Pass FORCE as the overwrite parameter
     if ! generate_age_key "$age_key_file" "$FORCE"; then
+        log_error "Failed to generate Age key"
         return 1
     fi
 
