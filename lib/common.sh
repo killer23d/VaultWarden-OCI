@@ -459,7 +459,7 @@ EOF
 
     # Execute email script in fail2ban container with environment variables
     if docker compose exec -T \
-        -e EMAIL_FROM="${SMTP_FROM:-vaultwarden@${DOMAIN:-localhost}}" \
+        -e EMAIL_FROM="${SMTP_FROM:-vaultwarden@${DOMAIN_NAME:-localhost}}" \
         -e EMAIL_TO="$admin_email" \
         -e EMAIL_SUBJECT="$full_subject" \
         -e EMAIL_BODY="$full_body" \
