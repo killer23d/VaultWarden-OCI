@@ -589,6 +589,7 @@ validate_cloudflare_tokens() {
 }
 
 # ENHANCED: Template-based environment file creation with SSH log detection - returns exit code
+# ENHANCED: Template-based environment file creation with SSH log detection - returns exit code
 create_env_file() {
     log_info "Creating environment configuration file (.env)..."
 
@@ -684,17 +685,21 @@ create_env_file() {
         return 1
     fi
 
-    # Set version pins if not using latest
-    if [[ "$USE_LATEST" != "true" ]]; then
-        if ! sed -i 's/#\(VAULTWARDEN_VERSION=.*\)/\1/' "$env_file" || \
-           ! sed -i 's/#\(CADDY_VERSION=.*\)/\1/' "$env_file" || \
-           ! sed -i 's/#\(FAIL2BAN_VERSION=.*\)/\1/' "$env_file"; then
-            log_warn "Failed to enable pinned versions, continuing anyway"
-        else
-            log_info "Enabled pinned container versions for production stability"
-        fi
+    # Handle version pinning vs latest
+    if [[ "$USE_LATEST" == "true" ]]; then
+        log_info "Configuring environment for 'latest' container versions (Development Mode)..."
+        # Explicitly set all versions to 'latest'
+        sed -i 's/^VAULTWARDEN_VERSION=.*/VAULTWARDEN_VERSION=latest/' "$env_file"
+        sed -i 's/^CADDY_VERSION=.*/CADDY_VERSION=latest/' "$env_file"
+        sed -i 's/^FAIL2BAN_VERSION=.*/FAIL2BAN_VERSION=latest/' "$env_file"
+        sed -i 's/^POSTFIX_VERSION=.*/POSTFIX_VERSION=latest/' "$env_file"
     else
-        log_info "Using latest container versions (development mode)"
+        log_info "Using pinned container versions for production stability"
+        # Ensure they are uncommented if the template had them commented
+        sed -i 's/^#\s*VAULTWARDEN_VERSION=/VAULTWARDEN_VERSION=/' "$env_file"
+        sed -i 's/^#\s*CADDY_VERSION=/CADDY_VERSION=/' "$env_file"
+        sed -i 's/^#\s*FAIL2BAN_VERSION=/FAIL2BAN_VERSION=/' "$env_file"
+        sed -i 's/^#\s*POSTFIX_VERSION=/POSTFIX_VERSION=/' "$env_file"
     fi
 
     if ! chown "$real_user:$real_group" "$env_file" || ! chmod 644 "$env_file"; then
