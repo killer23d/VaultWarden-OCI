@@ -1247,6 +1247,7 @@ main() {
     echo "      - Add Cloudflare Firewall API token"
     echo "   2. Update .env file: nano .env"
     echo "      - Set CLOUDFLARE_ZONE_ID"
+    echo "      - Set and confirm other key values"
     echo "   3. Start services: make up"
     echo "   4. Setup automation: sudo ./cron-setup.sh --install"
     echo "   5. Create emergency access: make breakglass-create"
