@@ -589,6 +589,7 @@ validate_cloudflare_tokens() {
 }
 
 # ENHANCED: Template-based environment file creation with SSH log detection - returns exit code
+# ENHANCED: Template-based environment file creation with SSH log detection - returns exit code
 create_env_file() {
     log_info "Creating environment configuration file (.env)..."
 
@@ -617,7 +618,7 @@ create_env_file() {
     fi
 
     local real_user; real_user=$(get_real_user)
-    local real_group; real_group=$(id -g -n $real_user)
+    local real_group; real_group=$(id -g -n "$real_user")
 
     # Validate PUID/PGID values
     local user_id group_id
@@ -628,15 +629,52 @@ create_env_file() {
     local detected_ssh_log_path
     detected_ssh_log_path=$(detect_ssh_log_path)
 
-    # Populate template values using sed
-    # BEST PRACTICE FIX: Change sed delimiter from "/" to "|" to handle paths
-    if ! sed -i "s|DOMAIN=.*|DOMAIN=$DOMAIN|" "$env_file" || \
-       ! sed -i "s|ADMIN_EMAIL=.*|ADMIN_EMAIL=$ADMIN_EMAIL|" "$env_file" || \
-       ! sed -i "s|PUID=.*|PUID=$user_id|" "$env_file" || \
-       ! sed -i "s|PGID=.*|PGID=$group_id|" "$env_file" || \
-       ! sed -i "s|SMTP_FROM=.*|SMTP_FROM=noreply@$DOMAIN|" "$env_file" || \
-       ! sed -i "s|SSH_LOG_PATH=.*|SSH_LOG_PATH=$detected_ssh_log_path|" "$env_file"; then
-        log_error "Failed to populate .env template values"
+    # CRITICAL FIX: Validate all variables before sed operations
+    if [[ -z "$DOMAIN" ]]; then
+        log_error "DOMAIN variable is empty"
+        return 1
+    fi
+
+    if [[ -z "$ADMIN_EMAIL" ]]; then
+        log_error "ADMIN_EMAIL variable is empty"
+        return 1
+    fi
+
+    if [[ -z "$user_id" ]] || [[ -z "$group_id" ]]; then
+        log_error "Failed to get user/group IDs"
+        return 1
+    fi
+
+    if [[ -z "$detected_ssh_log_path" ]]; then
+        log_error "Failed to detect SSH log path"
+        return 1
+    fi
+
+    # CRITICAL FIX: Escape special characters in variables for sed
+    # This prevents sed errors with special characters like @, /, etc.
+    local domain_escaped admin_email_escaped smtp_from_escaped ssh_log_escaped
+    domain_escaped=$(printf '%s\n' "$DOMAIN" | sed 's/[&/\]/\\&/g')
+    admin_email_escaped=$(printf '%s\n' "$ADMIN_EMAIL" | sed 's/[&/\]/\\&/g')
+    smtp_from_escaped=$(printf '%s\n' "noreply@$DOMAIN" | sed 's/[&/\]/\\&/g')
+    ssh_log_escaped=$(printf '%s\n' "$detected_ssh_log_path" | sed 's/[&/\]/\\&/g')
+
+    # Populate template values using sed with escaped values
+    # Use || true to prevent immediate exit on error, then check results
+    local sed_errors=0
+    
+    sed -i "s|DOMAIN=.*|DOMAIN=$domain_escaped|" "$env_file" || ((sed_errors++))
+    sed -i "s|ADMIN_EMAIL=.*|ADMIN_EMAIL=$admin_email_escaped|" "$env_file" || ((sed_errors++))
+    sed -i "s|PUID=.*|PUID=$user_id|" "$env_file" || ((sed_errors++))
+    sed -i "s|PGID=.*|PGID=$group_id|" "$env_file" || ((sed_errors++))
+    sed -i "s|SMTP_FROM=.*|SMTP_FROM=$smtp_from_escaped|" "$env_file" || ((sed_errors++))
+    sed -i "s|SSH_LOG_PATH=.*|SSH_LOG_PATH=$ssh_log_escaped|" "$env_file" || ((sed_errors++))
+
+    if [[ $sed_errors -gt 0 ]]; then
+        log_error "Failed to populate .env template values ($sed_errors errors)"
+        log_error "Debug info:"
+        log_error "  DOMAIN: $DOMAIN"
+        log_error "  ADMIN_EMAIL: $ADMIN_EMAIL"
+        log_error "  SSH_LOG_PATH: $detected_ssh_log_path"
         return 1
     fi
 
