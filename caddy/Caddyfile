@@ -9,7 +9,7 @@
     }
 }
 
-{$DOMAIN} {
+{$DOMAIN_NAME} {
     # 1. SINGLE CENTRALIZED LOG
     # Captures ALL traffic in detailed JSON. Fail2Ban filters based on "uri" field.
     log {
@@ -98,12 +98,12 @@
 }
 
 # Redirects
-www.{$DOMAIN} {
+www.{$DOMAIN_NAME} {
     log {
         output file /var/log/caddy/access.log
         format json
     }
-    redir https://{$DOMAIN}{uri} 301
+    redir https://{$DOMAIN_NAME}{uri} 301
 }
 
 # Catch-alls
