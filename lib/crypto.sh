@@ -97,9 +97,18 @@ generate_age_key() {
     local output_file="$1"
     local overwrite="${2:-false}"
 
-    if [[ -f "$output_file" ]] && [[ "$overwrite" != "true" ]]; then
-        log_error "Age key file already exists: $output_file (use overwrite=true to replace)"
-        return 1
+    # CRITICAL FIX: If overwrite is true and file exists, delete it first
+    if [[ -f "$output_file" ]]; then
+        if [[ "$overwrite" == "true" ]]; then
+            log_info "Removing existing Age key for regeneration: $output_file"
+            if ! rm -f "$output_file"; then
+                log_error "Failed to remove existing Age key: $output_file"
+                return 1
+            fi
+        else
+            log_error "Age key file already exists: $output_file (use overwrite=true to replace)"
+            return 1
+        fi
     fi
 
     if ! has_command age-keygen; then
