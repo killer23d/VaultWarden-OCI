@@ -1,6 +1,7 @@
 # VaultWarden-OCI-NG Makefile
 # Enhanced: Supports standardized error handling and comprehensive automation
-# Version: 2.1 - Production Ready (Postfix Enabled)
+# Version: 2.2 - Production Ready (Postfix Enabled) - Secrets-Aware
+# Updated: Uses startup.sh for proper secrets initialization
 
 .PHONY: help setup up down restart status logs health backup restore update maintenance clean dev-setup test-secrets test-email
 
@@ -35,7 +36,7 @@ help: ## Show this help message
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  $(YELLOW)%-20s$(NC) %s\n", $$1, $$2}'
 	@echo ""
 	@echo "$(GREEN)Advanced Usage:$(NC)"
-	@echo "  $(YELLOW)make up PROFILE=watchtower$(NC)    Start with auto-updates"
+	@echo "  $(YELLOW)make up$(NC)                       Start with secrets initialization"
 	@echo "  $(YELLOW)make logs SERVICE=postfix$(NC)     View specific service logs"
 	@echo "  $(YELLOW)make backup TYPE=emergency$(NC)    Create emergency backup"
 	@echo "  $(YELLOW)make health AUTO_RECOVER=true$(NC) Run health check with auto-recovery"
@@ -76,15 +77,14 @@ test-email: ## Test email configuration (Postfix)
 	@./test-email-simple.sh --verbose
 
 ## Service Management
-up: ## Start all services
-	@echo "$(BLUE)Starting VaultWarden-OCI services...$(NC)"
-ifdef PROFILE
-	docker compose --profile $(PROFILE) up -d
-else
-	docker compose up -d
-endif
+up: ## Start all services with secrets initialization
+	@echo "$(BLUE)Starting VaultWarden-OCI services with secrets preparation...$(NC)"
+	@./startup.sh || { \
+		echo "$(RED)Startup failed, checking status...$(NC)"; \
+		$(MAKE) status; \
+		exit 1; \
+	}
 	@echo "$(GREEN)Services started successfully!$(NC)"
-	@$(MAKE) status
 
 down: ## Stop all services
 	@echo "$(BLUE)Stopping VaultWarden-OCI services...$(NC)"
@@ -100,13 +100,8 @@ restart: ## Restart all services (enhanced startup)
 	}
 	@echo "$(GREEN)Services restarted successfully!$(NC)"
 
-start: ## Start services with comprehensive startup script
-	@echo "$(BLUE)Starting services with full initialization...$(NC)"
-	@./startup.sh || { \
-		echo "$(RED)Startup failed, checking status...$(NC)"; \
-		$(MAKE) status; \
-		exit 1; \
-	}
+start: ## Alias for 'up' - Start services with full initialization
+	@$(MAKE) up
 
 stop: ## Stop services gracefully
 	@echo "$(BLUE)Stopping services gracefully...$(NC)"
