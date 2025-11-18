@@ -589,7 +589,6 @@ validate_cloudflare_tokens() {
 }
 
 # ENHANCED: Template-based environment file creation with SSH log detection - returns exit code
-# ENHANCED: Template-based environment file creation with SSH log detection - returns exit code
 create_env_file() {
     log_info "Creating environment configuration file (.env)..."
 
@@ -625,9 +624,9 @@ create_env_file() {
     user_id=$(id -u "$real_user")
     group_id=$(id -g "$real_user")
 
-    # ENHANCED: Detect platform-specific SSH log path
+    # CRITICAL FIX: Detect platform-specific SSH log path FIRST and capture only the path
     local detected_ssh_log_path
-    detected_ssh_log_path=$(detect_ssh_log_path)
+    detected_ssh_log_path=$(detect_ssh_log_path | tail -1)
 
     # CRITICAL FIX: Validate all variables before sed operations
     if [[ -z "$DOMAIN" ]]; then
