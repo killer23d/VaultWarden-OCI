@@ -58,39 +58,22 @@ done
 
 # ENHANCED: Prepare log directories with correct ownership
 prepare_log_directories() {
-    log_info "Ensuring state directories exist..."
-    
+    log_info "Ensuring base state directory exists..."
+
     local project_state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
-    
+
     if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would create state directories"
+        log_info "[DRY RUN] Would create base state directory: $project_state_dir"
         return 0
     fi
-    
-    # Create all required state directories
-    # Permissions will be fixed by init-permissions container on startup
-    local dirs=(
-        "${project_state_dir}/logs/vaultwarden"
-        "${project_state_dir}/logs/caddy"
-        "${project_state_dir}/logs/fail2ban"
-        "${project_state_dir}/logs/msmtpd"
-        "${project_state_dir}/data"
-        "${project_state_dir}/caddy/data"
-        "${project_state_dir}/caddy/config"
-        "${project_state_dir}/fail2ban"
-    )
-    
-    for dir in "${dirs[@]}"; do
-        # Create directory if it doesn't exist
-        if ! sudo mkdir -p "$dir"; then
-            log_error "Failed to create directory: $dir"
-            return 1
-        fi
-        
-        log_debug "Directory prepared: $dir"
-    done
-    
-    log_success "State directories created (permissions will be set by init-permissions container)"
+
+    # Only ensure base project state dir exists; init container does the rest
+    if ! sudo mkdir -p "$project_state_dir"; then
+        log_error "Failed to create base state directory: $project_state_dir"
+        return 1
+    fi
+
+    log_success "Base state directory created; all subdirectories/permissions will be handled by Docker init container"
     return 0
 }
 
