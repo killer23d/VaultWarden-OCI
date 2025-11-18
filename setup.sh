@@ -589,7 +589,6 @@ validate_cloudflare_tokens() {
 }
 
 # ENHANCED: Template-based environment file creation with SSH log detection - returns exit code
-# ENHANCED: Template-based environment file creation with SSH log detection - returns exit code
 create_env_file() {
     log_info "Creating environment configuration file (.env)..."
 
@@ -650,18 +649,26 @@ create_env_file() {
         return 1
     fi
 
-    # CRITICAL FIX: Escape special characters in variables for sed
-    # This prevents sed errors with special characters like @, /, etc.
-    local domain_escaped admin_email_escaped smtp_from_escaped ssh_log_escaped
-    domain_escaped=$(printf '%s\n' "$DOMAIN" | sed 's/[&/\]/\\&/g')
+    # Add https:// to DOMAIN if not present
+    local domain_with_protocol
+    if [[ "$DOMAIN" =~ ^https?:// ]]; then
+        domain_with_protocol="$DOMAIN"
+        log_info "Domain already includes protocol: $domain_with_protocol"
+    else
+        domain_with_protocol="https://$DOMAIN"
+        log_info "Added https:// protocol to domain: $domain_with_protocol"
+    fi
 
     # Calculate clean domain name (no protocol) for DOMAIN_NAME variable
-    local clean_domain clean_domain_escaped
-    clean_domain=$(echo "$DOMAIN" | sed 's|https\?://||; s|/.*$||')
-    clean_domain_escaped=$(printf '%s\n' "$clean_domain" | sed 's/[&/\]/\\&/g')
+    local clean_domain
+    clean_domain=$(echo "$domain_with_protocol" | sed 's|https\?://||; s|/.*$||')
 
+    # This prevents sed errors with special characters like @, /, etc.
+    local domain_escaped clean_domain_escaped admin_email_escaped smtp_from_escaped ssh_log_escaped
+    domain_escaped=$(printf '%s\n' "$domain_with_protocol" | sed 's/[&/\]/\\&/g')
+    clean_domain_escaped=$(printf '%s\n' "$clean_domain" | sed 's/[&/\]/\\&/g')
     admin_email_escaped=$(printf '%s\n' "$ADMIN_EMAIL" | sed 's/[&/\]/\\&/g')
-    smtp_from_escaped=$(printf '%s\n' "noreply@$DOMAIN" | sed 's/[&/\]/\\&/g')
+    smtp_from_escaped=$(printf '%s\n' "noreply@$clean_domain" | sed 's/[&/\]/\\&/g')
     ssh_log_escaped=$(printf '%s\n' "$detected_ssh_log_path" | sed 's/[&/\]/\\&/g')
 
     # Populate template values using sed with escaped values
@@ -679,7 +686,8 @@ create_env_file() {
     if [[ $sed_errors -gt 0 ]]; then
         log_error "Failed to populate .env template values ($sed_errors errors)"
         log_error "Debug info:"
-        log_error "  DOMAIN: $DOMAIN"
+        log_error "  DOMAIN (with protocol): $domain_with_protocol"
+        log_error "  DOMAIN_NAME (clean): $clean_domain"
         log_error "  ADMIN_EMAIL: $ADMIN_EMAIL"
         log_error "  SSH_LOG_PATH: $detected_ssh_log_path"
         return 1
@@ -708,6 +716,8 @@ create_env_file() {
     fi
 
     log_success "Environment file created from template: $env_file"
+    log_success "Domain configured: $domain_with_protocol"
+    log_success "Domain name (for Caddy): $clean_domain"
     log_success "SSH log path configured: $detected_ssh_log_path"
 
     # Show what needs manual configuration
