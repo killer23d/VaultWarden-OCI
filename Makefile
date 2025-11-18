@@ -1,8 +1,8 @@
 # VaultWarden-OCI-NG Makefile
 # Enhanced: Supports standardized error handling and comprehensive automation
-# Version: 2.0 - Production Ready
+# Version: 2.1 - Production Ready (Postfix Enabled)
 
-.PHONY: help setup up down restart status logs health backup restore update maintenance clean dev-setup test-secrets
+.PHONY: help setup up down restart status logs health backup restore update maintenance clean dev-setup test-secrets test-email
 
 # Configuration
 COMPOSE_FILE ?= docker-compose.yml
@@ -11,7 +11,7 @@ DOCKER_BUILDKIT ?= 1
 COMPOSE_DOCKER_CLI_BUILD ?= 1
 
 # Service names
-SERVICES = vaultwarden caddy fail2ban
+SERVICES = vaultwarden caddy fail2ban postfix
 CORE_SERVICES = vaultwarden caddy
 OPTIONAL_SERVICES = watchtower backup
 
@@ -36,9 +36,9 @@ help: ## Show this help message
 	@echo ""
 	@echo "$(GREEN)Advanced Usage:$(NC)"
 	@echo "  $(YELLOW)make up PROFILE=watchtower$(NC)    Start with auto-updates"
-	@echo "  $(YELLOW)make logs SERVICE=vaultwarden$(NC) View specific service logs"
+	@echo "  $(YELLOW)make logs SERVICE=postfix$(NC)     View specific service logs"
 	@echo "  $(YELLOW)make backup TYPE=emergency$(NC)    Create emergency backup"
-	@echo "  $(YELLOW)make health COMPREHENSIVE=1$(NC)   Run comprehensive health check"
+	@echo "  $(YELLOW)make health AUTO_RECOVER=true$(NC) Run health check with auto-recovery"
 
 ## Setup and Installation
 setup: ## Run initial setup (requires sudo)
@@ -71,6 +71,10 @@ test-secrets: ## Test secrets decryption
 	@echo "$(BLUE)Testing secrets decryption...$(NC)"
 	@./edit-secrets.sh --test && echo "$(GREEN)Secrets test passed$(NC)" || echo "$(RED)Secrets test failed$(NC)"
 
+test-email: ## Test email configuration (Postfix)
+	@echo "$(BLUE)Testing email configuration...$(NC)"
+	@./test-email-simple.sh --verbose
+
 ## Service Management
 up: ## Start all services
 	@echo "$(BLUE)Starting VaultWarden-OCI services...$(NC)"
@@ -89,7 +93,6 @@ down: ## Stop all services
 
 restart: ## Restart all services (enhanced startup)
 	@echo "$(BLUE)Restarting VaultWarden-OCI services...$(NC)"
-	# BEST PRACTICE FIX: Removed --skip-dns as it's no longer a valid flag for startup.sh
 	@./startup.sh --force-restart || { \
 		echo "$(RED)Restart failed, checking status...$(NC)"; \
 		$(MAKE) status; \
@@ -114,19 +117,15 @@ status: ## Show service status
 	@echo "$(BLUE)Service Status:$(NC)"
 	@docker compose ps --format "table {{.Service}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null || echo "$(RED)Services not running$(NC)"
 
-health: ## Run health checks
+health: ## Run health checks (Optional: AUTO_RECOVER=true)
 	@echo "$(BLUE)Running health checks...$(NC)"
-ifdef COMPREHENSIVE
-	@./health.sh --comprehensive || { \
+	@FLAGS=""; \
+	if [ "$(COMPREHENSIVE)" = "true" ]; then FLAGS="$$FLAGS --comprehensive"; fi; \
+	if [ "$(AUTO_RECOVER)" = "true" ]; then FLAGS="$$FLAGS --auto-recover"; fi; \
+	./health.sh $$FLAGS || { \
 		echo "$(RED)Health check failed$(NC)"; \
 		exit 1; \
 	}
-else
-	@./health.sh || { \
-		echo "$(RED)Health check failed$(NC)"; \
-		exit 1; \
-	}
-endif
 
 health-email: ## Run health check with email notification
 	@echo "$(BLUE)Running health check with email notification...$(NC)"
@@ -145,6 +144,9 @@ ifdef SERVICE
 else
 	docker compose logs -f -t --tail=100
 endif
+
+logs-postfix: ## Shortcut to view Postfix email logs
+	docker compose logs -f -t --tail=100 postfix
 
 ## Backup and Restore Operations
 backup: ## Create backup (TYPE: db, full, emergency)
@@ -259,6 +261,7 @@ dev-setup: ## Setup development environment
 test: ## Run all tests
 	@echo "$(BLUE)Running tests...$(NC)"
 	@$(MAKE) test-secrets
+	@$(MAKE) test-email
 	@docker compose config > /dev/null && echo "$(GREEN)Docker Compose config valid$(NC)" || echo "$(RED)Docker Compose config invalid$(NC)"
 
 test-config: ## Validate configuration
@@ -328,6 +331,7 @@ version: ## Show version information
 	@echo "$(GREEN)VaultWarden:$(NC) $$(docker compose exec -T vaultwarden /vaultwarden --version 2>/dev/null | head -1 || echo 'Not running')"
 	@echo "$(GREEN)Caddy:$(NC) $$(docker compose exec -T caddy caddy version 2>/dev/null || echo 'Not running')"
 	@echo "$(GREEN)Fail2Ban:$(NC) $$(docker compose exec -T fail2ban fail2ban-server --version 2>/dev/null | head -1 || echo 'Not running')"
+	@echo "$(GREEN)Postfix:$(NC) $$(docker compose exec -T postfix postconf -d mail_version 2>/dev/null | cut -d= -f2 | tr -d ' ' || echo 'Not running')"
 	@echo "$(GREEN)Docker:$(NC) $$(docker --version)"
 	@echo "$(GREEN)Docker Compose:$(NC) $$(docker compose version)"
 
