@@ -726,14 +726,9 @@ setup_directories() {
 
     # Core directories
     local dirs=(
+        "secrets"
         "secrets/keys"
         "secrets/.docker_secrets"
-        "caddy"
-        "fail2ban/jail.d"
-        "fail2ban/filter.d"
-        "fail2ban/action.d"
-        "backups"
-        "logs"
     )
 
     for dir in "${dirs[@]}"; do
