@@ -31,8 +31,9 @@ if ! (set -C; echo $$ > "$DNS_LOCK") 2>/dev/null; then
 fi
 trap "rm -f '$DNS_LOCK'" EXIT
 
-# Configuration from .env (now properly sourced)
+# Configuration from .env (now properly sourced) Strip protocol (https://) from domain for DNS operations
 DOMAIN="${DOMAIN:-}"
+DOMAIN=$(echo "$DOMAIN" | sed 's|https\?://||; s|/.*$||')
 CLOUDFLARE_ZONE_ID="${CLOUDFLARE_ZONE_ID:-}"
 
 # Validation
