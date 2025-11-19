@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
 # cron-setup.sh - Secure VaultWarden cron job management with centralized security functions
-# ENHANCED: Uses lib/security.sh for centralized security validation
-# ENHANCED: Eliminates code duplication and improves maintainability
 # UPDATED: Differentiated daily (fast) and weekly (full) backup verification
 
 set -euo pipefail
@@ -298,6 +296,9 @@ install_cron_jobs() {
 
         # Weekly full backup with comprehensive verification (Sundays at 5 AM)
         "0 5 * * 0 cd $PROJECT_ROOT && $CRON_SCRIPTS_DIR/backup.sh --type full --full-verification --rclone --email >> $CRON_LOG_DIR/backup.log 2>&1"
+
+        # Automated DNS update every hour
+        "0 * * * * cd $PROJECT_ROOT && $CRON_SCRIPTS_DIR/update-dns.sh >> $CRON_LOG_DIR/dns-update.log 2>&1"
     )
 
     # Install cron jobs securely
