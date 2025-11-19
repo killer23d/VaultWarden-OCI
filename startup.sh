@@ -285,6 +285,17 @@ main() {
         exit 1
     fi
 
+    # --- DNS Update Block for startup.sh ---
+
+    log_info "Running DNS update to ensure correct public IP..."
+
+    if [[ -x "$PROJECT_ROOT/update-dns.sh" ]]; then
+        "$PROJECT_ROOT/update-dns.sh"
+        log_success "DNS update script completed."
+        else
+        log_warn "DNS update script not found or not executable: $PROJECT_ROOT/update-dns.sh"
+    fi
+
     # Validate Docker availability
     if ! require_docker; then
         log_error "Docker is not available or accessible"
