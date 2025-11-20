@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # backup.sh - Streamlined VaultWarden backup script with enhanced verification
 # ENHANCED: Email delivery uses lib/common.sh which prefers msmtpd sidecar if available
+# FIXED: Uses host sqlite3 for backup consistency; redirects logs to stderr for clean capture
 # All functions return exit codes, main() collects status and determines final exit
 
 set -euo pipefail
@@ -30,6 +31,15 @@ CLEANUP_ACTIONS=()
 register_cleanup() { CLEANUP_ACTIONS+=("$1"); }
 perform_cleanup() { for ((idx=${#CLEANUP_ACTIONS[@]}-1; idx>=0; idx--)); do eval "${CLEANUP_ACTIONS[$idx]}" 2>/dev/null || true; done; }
 trap perform_cleanup EXIT
+
+# Redirect logs to stderr so stdout can be used for returning values (filenames)
+# Overriding common lib functions if necessary or just ensuring usage:
+# In this script, we will ensure all informational output goes to stderr (>2)
+
+log_info() { echo -e "${COLOR_BLUE}[$(date +'%H:%M:%S')] [INFO]${COLOR_RESET} [backup] $*" >&2; }
+log_success() { echo -e "${COLOR_GREEN}[$(date +'%H:%M:%S')] [SUCCESS]${COLOR_RESET} [backup] $*" >&2; }
+log_warn() { echo -e "${COLOR_YELLOW}[$(date +'%H:%M:%S')] [WARN]${COLOR_RESET} [backup] $*" >&2; }
+log_error() { echo -e "${COLOR_RED}[$(date +'%H:%M:%S')] [ERROR]${COLOR_RESET} [backup] $*" >&2; }
 
 show_help() {
     cat << 'EOF'
@@ -167,24 +177,29 @@ EOF
 
 create_db_backup() {
     log_info "Creating database backup with comprehensive verification..."
-    local timestamp backup_dir encrypted_file state_dir db_file verification_mode is_running
+    local timestamp backup_dir encrypted_file state_dir db_file verification_mode
     timestamp="$(date +%Y%m%d-%H%M%S)"; backup_dir="$PROJECT_ROOT/backups/db"; encrypted_file="$backup_dir/vw-db-backup-$timestamp.sqlite3.gz.age"
     ensure_dir "$backup_dir" 755 || return 1
     check_backup_disk_space "$backup_dir" 1000 || return 1
     state_dir="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"; db_file="$state_dir/data/db.sqlite3"; verification_mode="$(get_verification_mode)"
-    is_running=$(is_service_running "vaultwarden" && echo "true" || echo "false")
+    
     local temp_snapshot; temp_snapshot="$(mktemp)"; register_cleanup "rm -f '$temp_snapshot'"
     log_info "Creating and verifying a consistent database snapshot..."
-    if [[ "$is_running" == true ]]; then
-        local container_snapshot_path="/tmp/vw-snapshot-$timestamp-$$.db"; register_cleanup "docker compose exec -T vaultwarden rm -f '$container_snapshot_path' 2>/dev/null || true"
-        docker compose exec -T vaultwarden sqlite3 "/data/db.sqlite3" ".backup '$container_snapshot_path'" || { log_error "Failed to create database snapshot inside container"; return 1; }
-        docker compose exec -T vaultwarden sqlite3 "$container_snapshot_path" "PRAGMA integrity_check;" | grep -qx "ok" || { log_error "Snapshot integrity check failed inside container, aborting backup"; return 1; }
-        docker compose cp "vaultwarden:$container_snapshot_path" "$temp_snapshot" || { log_error "Failed to copy verified snapshot from container"; return 1; }
-    else
-        if [[ -f "$db_file" ]]; then cp "$db_file" "$temp_snapshot" || { log_error "Failed to copy database file"; return 1; }
-        else log_error "Database file not found: $db_file"; return 1; fi
+    
+    # Use Host sqlite3 since container image is minimal
+    if [[ -f "$db_file" ]]; then
+        if sqlite3 "$db_file" ".backup '$temp_snapshot'"; then
+             log_info "Snapshot created successfully using host sqlite3"
+        else
+             log_error "Failed to create database snapshot using host sqlite3"
+             return 1
+        fi
         verify_sqlite_integrity "$temp_snapshot" "$verification_mode" || { log_error "Snapshot integrity check failed, aborting backup"; return 1; }
+    else
+        log_error "Database file not found: $db_file"
+        return 1
     fi
+    
     log_success "Snapshot created and integrity verified successfully."
     if [[ $DRY_RUN == true ]]; then log_info "[DRY-RUN] Would compress, encrypt, and verify backup"; return 0; fi
     log_info "Compressing and encrypting the verified snapshot..."
@@ -196,22 +211,28 @@ create_db_backup() {
     verify_backup_recoverability "$encrypted_file" "db" || { log_error "CRITICAL: Backup created but failed recoverability verification!"; return 1; }
     generate_metadata "$encrypted_file" "db" "$timestamp" "$checksum" || log_warn "Failed to create metadata, but backup is valid"
     log_success "Database backup created and verified: $(basename "$encrypted_file")"
+    
+    # Only output the filename to stdout
     echo "$encrypted_file"
 }
 
 create_archive_data() {
     local temp_dir="$1" verification_mode="$2" is_running="$3" state_dir="$4" db_file="$5" timestamp="$6" include_secrets="$7"
     local db_snapshot="$temp_dir/db.sqlite3.snapshot"; log_info "Creating and verifying a consistent database snapshot..."
-    if [[ "$is_running" == true ]]; then
-        local container_snapshot_path="/tmp/vw-snapshot-$timestamp-$$.db"; register_cleanup "docker compose exec -T vaultwarden rm -f '$container_snapshot_path' 2>/dev/null || true"
-        docker compose exec -T vaultwarden sqlite3 "/data/db.sqlite3" ".backup '$container_snapshot_path'" || log_warn "Failed to create live DB snapshot. Backup may be inconsistent."
-        docker compose exec -T vaultwarden sqlite3 "$container_snapshot_path" "PRAGMA integrity_check;" | grep -qx "ok" || log_warn "Live DB snapshot failed integrity check. Backup may be inconsistent."
-        docker compose cp "vaultwarden:$container_snapshot_path" "$db_snapshot" || log_warn "Failed to copy verified snapshot from container."
-    else
-        if [[ -f "$db_file" ]]; then cp "$db_file" "$db_snapshot" || { log_error "Failed to copy database file for archive"; return 1; }
-             verify_sqlite_integrity "$db_snapshot" "$verification_mode" || log_warn "Database integrity check failed, but continuing with archive."
-        else log_warn "DB file not found, backup will be incomplete."; fi
+    
+    # Use Host sqlite3 since container image is minimal
+    if [[ -f "$db_file" ]]; then
+         if sqlite3 "$db_file" ".backup '$db_snapshot'"; then
+             log_info "Snapshot created successfully using host sqlite3"
+         else
+             log_warn "Failed to create live DB snapshot. Backup may be inconsistent."
+             cp "$db_file" "$db_snapshot"
+         fi
+         verify_sqlite_integrity "$db_snapshot" "$verification_mode" || log_warn "Database integrity check failed, but continuing with archive."
+    else 
+         log_warn "DB file not found, backup will be incomplete."
     fi
+
     log_info "Gathering configuration files..."
     [[ -f docker-compose.yml ]] && cp docker-compose.yml "$temp_dir/" || log_warn "docker-compose.yml not found"
     [[ -f .env ]] && cp .env "$temp_dir/" || log_warn ".env not found"
@@ -225,8 +246,15 @@ create_archive_data() {
     log_info "Copying data directory (excluding live database)..."
     if [[ -d "$state_dir/data" ]]; then
         mkdir -p "$temp_dir/data" || { log_error "Failed to create data directory in temp location"; return 1; }
-        rsync -a --delete --exclude 'bwdata/db.sqlite3*' "$state_dir/data/" "$temp_dir/data/" 2>/dev/null || { log_warn "rsync failed, falling back to 'cp'..."; cp -a "$state_dir/data/." "$temp_dir/data/" || { log_error "Failed to copy data directory"; return 1; }; }
-        if [[ -f "$db_snapshot" ]]; then mkdir -p "$temp_dir/data/bwdata" && mv "$db_snapshot" "$temp_dir/data/db.sqlite3" || { log_error "Failed to include database snapshot in archive"; return 1; }; log_info "Included database snapshot in archive."; fi
+        # Exclude both bwdata/db.sqlite3 and db.sqlite3 just in case
+        rsync -a --delete --exclude 'bwdata/db.sqlite3*' --exclude 'db.sqlite3*' "$state_dir/data/" "$temp_dir/data/" 2>/dev/null || { log_warn "rsync failed, falling back to 'cp'..."; cp -a "$state_dir/data/." "$temp_dir/data/" || { log_error "Failed to copy data directory"; return 1; }; }
+        
+        # Ensure DB snapshot is in the right place (root of data dir or bwdata if needed)
+        if [[ -f "$db_snapshot" ]]; then 
+            # Standard path for this setup seems to be /data/db.sqlite3
+            mv "$db_snapshot" "$temp_dir/data/db.sqlite3" || { log_error "Failed to include database snapshot in archive"; return 1; }
+            log_info "Included database snapshot in archive."
+        fi
     else log_warn "State data directory not found: $state_dir/data"; fi
 }
 
@@ -248,6 +276,8 @@ create_full_backup() {
     verify_backup_recoverability "$encrypted_file" "full" || { log_error "CRITICAL: Full backup created but failed recoverability verification!"; return 1; }
     generate_metadata "$encrypted_file" "full" "$timestamp" "$checksum" || log_warn "Failed to create metadata, but backup is valid"
     log_success "Full backup created and verified: $(basename "$encrypted_file")"
+    
+    # Only output the filename to stdout
     echo "$encrypted_file"
 }
 
@@ -269,6 +299,8 @@ create_emergency_kit() {
     verify_backup_recoverability "$encrypted_file" "emergency" || { log_error "CRITICAL: Emergency kit created but failed recoverability verification!"; return 1; }
     generate_metadata "$encrypted_file" "emergency" "$timestamp" "$checksum" || log_warn "Failed to create metadata, but backup is valid"
     log_success "Emergency kit created and verified: $(basename "$encrypted_file")"
+    
+    # Only output the filename to stdout
     echo "$encrypted_file"
 }
 
@@ -304,7 +336,7 @@ main() {
     local sync_status="Skipped"; if [[ $RCLONE_SYNC == true ]]; then rclone_sync_offsite "$backup_file" && sync_status="Success" || sync_status="Failed"; fi
     log_success "Backup process completed!"
     local file_size checksum; file_size="$(du -h "$backup_file" | cut -f1)"; checksum="$(cat "$backup_file.sha256" 2>/dev/null || echo "N/A")"
-    printf "\nBackup Details:\n  Type:         %s\n  File:         %s\n  Size:         %s\n  SHA256:       %s\n  Verification: Pre-snapshot OK + Post-encryption checksum OK + End-to-end verified (%s)\n  Rclone Sync:  %s\n\n" "$BACKUP_TYPE" "$backup_file" "$file_size" "$checksum" "$FULL_VERIFICATION" "$sync_status"
+    printf "\nBackup Details:\n  Type:         %s\n  File:         %s\n  Size:         %s\n  SHA256:       %s\n  Verification: Pre-snapshot OK + Post-encryption checksum OK + End-to-end verified (%s)\n  Rclone Sync:  %s\n\n" "$BACKUP_TYPE" "$backup_file" "$file_size" "$checksum" "$FULL_VERIFICATION" "$sync_status" >&2
     if [[ $EMAIL_NOTIFY == true ]]; then
         log_info "Sending completion email..."
         send_notification_email "Backup Completed: $BACKUP_TYPE" "Backup job completed successfully with full verification.
