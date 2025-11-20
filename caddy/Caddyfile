@@ -45,10 +45,19 @@
         -X-Powered-By
     }
 
-    # 3. Admin Panel Protection
+    # 3. Health Check Endpoint (unauthenticated, for monitoring)
+    @health path /alive
+    handle @health {
+        reverse_proxy vaultwarden:80 {
+            header_up Host {host}
+            header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
+            header_up X-Forwarded-For {http.request.header.Cf-Connecting-Ip}
+        }
+    }
+
+    # 4. Admin Panel Protection
     @admin path /admin*
     handle @admin {
-        # Removed X-Log-Tag header (redundant)
         header {
             Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: https:; frame-src 'self'; object-src 'none'; base-uri 'self';"
             X-Admin-Access "true"
@@ -66,7 +75,7 @@
         }
     }
 
-    # 4. Auth Endpoints (Monitoring)
+    # 5. Auth Endpoints (Monitoring)
     @auth_endpoints path /api/accounts/prelogin* /identity/accounts/prelogin* /identity/connect/token*
     handle @auth_endpoints {
         reverse_proxy vaultwarden:80 {
@@ -78,7 +87,7 @@
         }
     }
 
-    # 5. Malicious User Agents
+    # 6. Malicious User Agents
     @malicious_ua {
         header User-Agent *sqlmap* *nikto* *nmap* *acunetix* *dirbuster* *gobuster* *wfuzz*
     }
@@ -86,7 +95,7 @@
         respond "Access Denied - Security Policy Violation" 403
     }
 
-    # 6. Default App Handler
+    # 7. Default App Handler
     handle {
         reverse_proxy vaultwarden:80 {
             header_up Host {host}
