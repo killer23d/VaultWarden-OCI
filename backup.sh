@@ -128,9 +128,9 @@ verify_backup_recoverability() {
         "full"|"emergency")
             age -d -i "$SOPS_AGE_KEY_FILE" "$encrypted_file" | tar -tzf - >/dev/null 2>&1 || { log_error "CRITICAL: Archive backup cannot be decrypted or extracted!"; return 1; }
             local test_extraction_dir="$verify_temp_dir/test_extract"; mkdir -p "$test_extraction_dir" || { log_error "Failed to create test extraction directory"; return 1; }
-            if age -d -i "$SOPS_AGE_KEY_FILE" "$encrypted_file" | tar -xzf - -C "$test_extraction_dir" ./data/bwdata/db.sqlite3 2>/dev/null; then
-                if [[ -f "$test_extraction_dir/data/bwdata/db.sqlite3" ]]; then
-                    verify_sqlite_integrity "$test_extraction_dir/data/bwdata/db.sqlite3" "quick_check" && log_success "Archive backup verification: Complete extraction successful with valid database" || { log_warn "Archive extracted but database integrity questionable"; return 1; }
+            if age -d -i "$SOPS_AGE_KEY_FILE" "$encrypted_file" | tar -xzf - -C "$test_extraction_dir" ./data/db.sqlite3 2>/dev/null; then
+                if [[ -f "$test_extraction_dir/data/db.sqlite3" ]]; then
+                    verify_sqlite_integrity "$test_extraction_dir/data/db.sqlite3" "quick_check" && log_success "Archive backup verification: Complete extraction successful with valid database" || { log_warn "Archive extracted but database integrity questionable"; return 1; }
                 else log_warn "Archive extracted but database file not found in expected location"; return 1; fi
             else log_warn "Archive backup appears valid but partial extraction test failed"; fi
             ;;
@@ -171,13 +171,13 @@ create_db_backup() {
     timestamp="$(date +%Y%m%d-%H%M%S)"; backup_dir="$PROJECT_ROOT/backups/db"; encrypted_file="$backup_dir/vw-db-backup-$timestamp.sqlite3.gz.age"
     ensure_dir "$backup_dir" 755 || return 1
     check_backup_disk_space "$backup_dir" 1000 || return 1
-    state_dir="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"; db_file="$state_dir/data/bwdata/db.sqlite3"; verification_mode="$(get_verification_mode)"
+    state_dir="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"; db_file="$state_dir/data/db.sqlite3"; verification_mode="$(get_verification_mode)"
     is_running=$(is_service_running "vaultwarden" && echo "true" || echo "false")
     local temp_snapshot; temp_snapshot="$(mktemp)"; register_cleanup "rm -f '$temp_snapshot'"
     log_info "Creating and verifying a consistent database snapshot..."
     if [[ "$is_running" == true ]]; then
         local container_snapshot_path="/tmp/vw-snapshot-$timestamp-$$.db"; register_cleanup "docker compose exec -T vaultwarden rm -f '$container_snapshot_path' 2>/dev/null || true"
-        docker compose exec -T vaultwarden sqlite3 "/data/bwdata/db.sqlite3" ".backup '$container_snapshot_path'" || { log_error "Failed to create database snapshot inside container"; return 1; }
+        docker compose exec -T vaultwarden sqlite3 "/data/db.sqlite3" ".backup '$container_snapshot_path'" || { log_error "Failed to create database snapshot inside container"; return 1; }
         docker compose exec -T vaultwarden sqlite3 "$container_snapshot_path" "PRAGMA integrity_check;" | grep -qx "ok" || { log_error "Snapshot integrity check failed inside container, aborting backup"; return 1; }
         docker compose cp "vaultwarden:$container_snapshot_path" "$temp_snapshot" || { log_error "Failed to copy verified snapshot from container"; return 1; }
     else
@@ -204,7 +204,7 @@ create_archive_data() {
     local db_snapshot="$temp_dir/db.sqlite3.snapshot"; log_info "Creating and verifying a consistent database snapshot..."
     if [[ "$is_running" == true ]]; then
         local container_snapshot_path="/tmp/vw-snapshot-$timestamp-$$.db"; register_cleanup "docker compose exec -T vaultwarden rm -f '$container_snapshot_path' 2>/dev/null || true"
-        docker compose exec -T vaultwarden sqlite3 "/data/bwdata/db.sqlite3" ".backup '$container_snapshot_path'" || log_warn "Failed to create live DB snapshot. Backup may be inconsistent."
+        docker compose exec -T vaultwarden sqlite3 "/data/db.sqlite3" ".backup '$container_snapshot_path'" || log_warn "Failed to create live DB snapshot. Backup may be inconsistent."
         docker compose exec -T vaultwarden sqlite3 "$container_snapshot_path" "PRAGMA integrity_check;" | grep -qx "ok" || log_warn "Live DB snapshot failed integrity check. Backup may be inconsistent."
         docker compose cp "vaultwarden:$container_snapshot_path" "$db_snapshot" || log_warn "Failed to copy verified snapshot from container."
     else
@@ -226,7 +226,7 @@ create_archive_data() {
     if [[ -d "$state_dir/data" ]]; then
         mkdir -p "$temp_dir/data" || { log_error "Failed to create data directory in temp location"; return 1; }
         rsync -a --delete --exclude 'bwdata/db.sqlite3*' "$state_dir/data/" "$temp_dir/data/" 2>/dev/null || { log_warn "rsync failed, falling back to 'cp'..."; cp -a "$state_dir/data/." "$temp_dir/data/" || { log_error "Failed to copy data directory"; return 1; }; }
-        if [[ -f "$db_snapshot" ]]; then mkdir -p "$temp_dir/data/bwdata" && mv "$db_snapshot" "$temp_dir/data/bwdata/db.sqlite3" || { log_error "Failed to include database snapshot in archive"; return 1; }; log_info "Included database snapshot in archive."; fi
+        if [[ -f "$db_snapshot" ]]; then mkdir -p "$temp_dir/data/bwdata" && mv "$db_snapshot" "$temp_dir/data/db.sqlite3" || { log_error "Failed to include database snapshot in archive"; return 1; }; log_info "Included database snapshot in archive."; fi
     else log_warn "State data directory not found: $state_dir/data"; fi
 }
 
@@ -236,7 +236,7 @@ create_full_backup() {
     timestamp="$(date +%Y%m%d-%H%M%S)"; backup_dir="$PROJECT_ROOT/backups/full"; encrypted_file="$backup_dir/vw-full-backup-$timestamp.tar.gz.age"
     ensure_dir "$backup_dir" 755 || return 1
     check_backup_disk_space "$backup_dir" 2000 || return 1
-    state_dir="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"; db_file="$state_dir/data/bwdata/db.sqlite3"; verification_mode="$(get_verification_mode)"; is_running=$(is_service_running "vaultwarden" && echo "true" || echo "false")
+    state_dir="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"; db_file="$state_dir/data/db.sqlite3"; verification_mode="$(get_verification_mode)"; is_running=$(is_service_running "vaultwarden" && echo "true" || echo "false")
     local temp_dir; temp_dir="$(mktemp -d)"; register_cleanup "rm -rf '$temp_dir'"
     create_archive_data "$temp_dir" "$verification_mode" "$is_running" "$state_dir" "$db_file" "$timestamp" "false" || return 1
     [[ $DRY_RUN == true ]] && { log_info "[DRY-RUN] Would create and verify 'full' archive"; return 0; }
@@ -257,7 +257,7 @@ create_emergency_kit() {
     timestamp="$(date +%Y%m%d-%H%M%S)"; backup_dir="$PROJECT_ROOT/backups/emergency"; encrypted_file="$backup_dir/emergency-kit-$timestamp.tar.gz.age"
     ensure_dir "$backup_dir" 755 || return 1
     check_backup_disk_space "$backup_dir" 2000 || return 1
-    state_dir="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"; db_file="$state_dir/data/bwdata/db.sqlite3"; verification_mode="$(get_verification_mode)"; is_running=$(is_service_running "vaultwarden" && echo "true" || echo "false")
+    state_dir="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"; db_file="$state_dir/data/db.sqlite3"; verification_mode="$(get_verification_mode)"; is_running=$(is_service_running "vaultwarden" && echo "true" || echo "false")
     local temp_dir; temp_dir="$(mktemp -d)"; register_cleanup "rm -rf '$temp_dir'"
     create_archive_data "$temp_dir" "$verification_mode" "$is_running" "$state_dir" "$db_file" "$timestamp" "true" || return 1
     [[ $DRY_RUN == true ]] && { log_info "[DRY-RUN] Would create and verify 'emergency' kit"; return 0; }
