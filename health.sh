@@ -274,7 +274,8 @@ check_service_accessibility() {
     
     clean_domain=$(echo "$domain" | sed 's|https\?://||; s|/.*$||')
     
-    if curl -sf "http://localhost/alive" >/dev/null 2>&1; then
+    # FIXED: Use correct Host header for local checks
+    if curl -sf -H "Host: $clean_domain" --max-time 5 "http://localhost/alive" >/dev/null 2>&1; then
         health_log_success "VaultWarden local access: OK"
     else
         health_log_error "CRITICAL: VaultWarden local access: FAILED"
@@ -282,14 +283,14 @@ check_service_accessibility() {
         return 1
     fi
     
-    if curl -sf -H "Host: $clean_domain" "http://localhost" >/dev/null 2>&1 || \
-       curl -sf "https://$clean_domain" >/dev/null 2>&1; then
+    # Check external HTTPS access
+    if curl -sf --max-time 5 "https://$clean_domain/alive" >/dev/null 2>&1; then
         health_log_success "External web access: OK"
         HEALTH_RESULTS["accessibility"]="healthy"
         HEALTH_DETAILS["accessibility"]="All services accessible"
         return 0
     else
-        health_log_warn "External web access: FAILED (DNS/SSL/Caddy issue)"
+        health_log_warn "External web access: FAILED (DNS/SSL/Cloudflare issue)"
         HEALTH_RESULTS["accessibility"]="degraded"
         HEALTH_DETAILS["accessibility"]="External access issues"
         return 1
