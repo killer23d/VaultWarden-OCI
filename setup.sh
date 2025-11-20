@@ -187,7 +187,7 @@ install_dependencies() {
     fi
 
     # BEST PRACTICE FIX: Removed "mailutils" as it's no longer required by msmtpd
-    local basic_packages=("age" "make" "nano" "rclone" "sqlite3" "jq" "ufw" "curl" "wget" "unzip" "git" "gpg" "coreutils" "haveged" "dnsutils")
+    local basic_packages=("age" "make" "nano" "rclone" "sqlite3" "jq" "ufw" "curl" "wget" "unzip" "git" "gpg" "coreutils" "haveged" "dnsutils" "rsync")
     export DEBIAN_FRONTEND=noninteractive
 
     if ! apt-get install -y "${basic_packages[@]}"; then
