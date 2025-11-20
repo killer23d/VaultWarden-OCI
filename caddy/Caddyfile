@@ -11,7 +11,6 @@
 
 {$DOMAIN_NAME} {
     # 1. SINGLE CENTRALIZED LOG
-    # Captures ALL traffic in detailed JSON. Fail2Ban filters based on "uri" field.
     log {
         output file /var/log/caddy/access.log {
             roll_size 50MB
@@ -58,11 +57,20 @@
     # 4. Admin Panel Protection
     @admin path /admin*
     handle @admin {
+        # Rate limit: 10 requests per minute per IP
+        rate_limit {
+            zone admin_zone {
+                key {http.request.remote.host}
+                events 10
+                window 1m
+            }
+        }
+
         header {
             Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: https:; frame-src 'self'; object-src 'none'; base-uri 'self';"
             X-Admin-Access "true"
         }
-        
+
         basic_auth {
             admin {env.ADMIN_BASIC_AUTH_HASH}
         }
@@ -78,6 +86,15 @@
     # 5. Auth Endpoints (Monitoring)
     @auth_endpoints path /api/accounts/prelogin* /identity/accounts/prelogin* /identity/connect/token*
     handle @auth_endpoints {
+        # Rate limit: 5 requests per minute per IP
+        rate_limit {
+            zone auth_zone {
+                key {http.request.remote.host}
+                events 5
+                window 1m
+            }
+        }
+
         reverse_proxy vaultwarden:80 {
             header_up Host {host}
             header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
