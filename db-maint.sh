@@ -114,8 +114,8 @@ main() {
     # Confirmation
     if [[ "$FORCE" == "false" ]]; then
         echo ""
-        log_warn "This script will stop the ENTIRE service stack temporarily."
-        log_warn "(Caddy, VaultWarden, Fail2Ban, etc. will be down)"
+        log_warn "This script will stop the VaultWarden container temporarily."
+        log_warn "(Caddy proxy will remain up)"
         log_info "Database: $db_file"
         log_info "Current Size: $original_size"
         echo ""
@@ -145,11 +145,12 @@ main() {
         fi
     fi
     
-    log_info "Stopping all services..."
-    if ! stop_services; then
-        log_warn "Failed to stop services (maybe they were already stopped?)"
+    log_info "Stopping VaultWarden container..."
+    # FIXED: Only stop the app, not the whole stack
+    if ! docker compose stop vaultwarden; then
+        log_warn "Failed to stop vaultwarden container"
     else
-        log_success "All services stopped"
+        log_success "VaultWarden container stopped"
     fi
     
     log_info "Waiting 5 seconds for file lock release..."
@@ -162,7 +163,7 @@ main() {
     else
         log_error "Database integrity check FAILED"
         log_info "Maintenance aborted. Restarting services..."
-        start_services
+        docker compose start vaultwarden
         exit 1
     fi
     
@@ -190,7 +191,7 @@ main() {
     else
         log_error "Database VACUUM FAILED"
         log_info "Maintenance aborted. Restarting services..."
-        start_services
+        docker compose start vaultwarden
         exit 1
     fi
     
@@ -202,15 +203,15 @@ main() {
     
     # --- Maintenance End ---
     
-    log_info "Restarting all services..."
-    if ! start_services; then
-        log_error "Failed to restart services!"
-        log_info "Run './startup.sh' to start the stack manually."
+    log_info "Restarting VaultWarden container..."
+    # FIXED: Only start the app
+    if ! docker compose start vaultwarden; then
+        log_error "Failed to restart VaultWarden!"
         exit 1
     fi
     
     log_info "Waiting for services to become healthy (timeout: 45s)..."
-    local services=("vaultwarden" "caddy")
+    local services=("vaultwarden")
     local failed_services=()
     
     for service in "${services[@]}"; do
@@ -228,7 +229,7 @@ main() {
         # Don't exit, report completion anyway
     fi
     
-    log_success "All services are back online"
+    log_success "VaultWarden is back online"
     echo ""
     log_success "Database maintenance complete!"
     
