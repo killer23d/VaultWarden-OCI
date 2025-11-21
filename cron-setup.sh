@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # cron-setup.sh - Secure VaultWarden cron job management with centralized security functions
 # UPDATED: Differentiated daily (fast) and weekly (full) backup verification
+# FIXED: Now copies library dependencies to ensure scripts can run
 
 set -euo pipefail
 
@@ -191,6 +192,7 @@ setup_cron_logging() {
         "backup.log"
         "health.log"
         "firewall.log"
+        "dns-update.log"
     )
 
     for log_file in "${log_files[@]}"; do
@@ -237,6 +239,19 @@ install_cron_jobs() {
         log_error "Failed to setup cron logging"
         return 1
     fi
+
+    # --- CRITICAL FIX: Copy Library Dependencies ---
+    log_info "Installing library dependencies to secure directory..."
+    if ! cp -r "$PROJECT_ROOT/lib" "$CRON_SCRIPTS_DIR/"; then
+        log_error "Failed to copy library directory"
+        return 1
+    fi
+    # Secure the library files
+    find "$CRON_SCRIPTS_DIR/lib" -type f -exec chmod 640 {} \;
+    find "$CRON_SCRIPTS_DIR/lib" -type d -exec chmod 750 {} \;
+    chown -R root:root "$CRON_SCRIPTS_DIR/lib"
+    log_success "Libraries installed successfully"
+    # -----------------------------------------------
 
     # Define scripts to install with validation
     local scripts_to_install=(
@@ -440,6 +455,13 @@ list_cron_jobs() {
                 log_warn "Script permissions incorrect: $(basename "$script_file")"
             fi
         done < <(find "$CRON_SCRIPTS_DIR" -name "*.sh" -type f -print0)
+
+        # Verify library dependencies
+        if [[ -d "$CRON_SCRIPTS_DIR/lib" ]]; then
+            log_success "Library dependencies present"
+        else
+            log_error "MISSING LIBRARY DEPENDENCIES in secure directory!"
+        fi
 
     else
         log_info "Secure scripts directory does not exist: $CRON_SCRIPTS_DIR"
