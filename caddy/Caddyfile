@@ -9,9 +9,21 @@
     }
 }
 
+# ================================
+# Internal Health Check Endpoint
+# ================================
+:8080 {
+    handle /alive {
+        reverse_proxy vaultwarden:80
+    }
+}
+
+# ================================
+# Main Site
+# ================================
 {$DOMAIN_NAME} {
-    # 1. SINGLE CENTRALIZED LOG
-    # Captures ALL traffic in detailed JSON. Fail2Ban filters based on "uri" field.
+
+    # 1. Centralized JSON Access Logging
     log {
         output file /var/log/caddy/access.log {
             roll_size 50MB
@@ -41,11 +53,12 @@
         Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=(), usb=()"
         X-Request-ID {uuid}
         X-Forwarded-Proto https
+
         -Server
         -X-Powered-By
     }
 
-    # 3. Health Check Endpoint (unauthenticated, for monitoring)
+    # 3. Public Health Check
     @health path /alive
     handle @health {
         reverse_proxy vaultwarden:80 {
@@ -58,11 +71,12 @@
     # 4. Admin Panel Protection
     @admin path /admin*
     handle @admin {
+
         header {
             Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: https:; frame-src 'self'; object-src 'none'; base-uri 'self';"
             X-Admin-Access "true"
         }
-        
+
         basic_auth {
             admin {env.ADMIN_BASIC_AUTH_HASH}
         }
@@ -87,7 +101,7 @@
         }
     }
 
-    # 6. Malicious User Agents
+    # 6. Malicious User-Agent Blocking
     @malicious_ua {
         header User-Agent *sqlmap* *nikto* *nmap* *acunetix* *dirbuster* *gobuster* *wfuzz*
     }
@@ -95,7 +109,7 @@
         respond "Access Denied - Security Policy Violation" 403
     }
 
-    # 7. Default App Handler
+    # 7. Default Reverse Proxy
     handle {
         reverse_proxy vaultwarden:80 {
             header_up Host {host}
@@ -106,7 +120,9 @@
     }
 }
 
-# Redirects
+# ================================
+# Redirect www → apex
+# ================================
 www.{$DOMAIN_NAME} {
     log {
         output file /var/log/caddy/access.log
@@ -115,7 +131,9 @@ www.{$DOMAIN_NAME} {
     redir https://{$DOMAIN_NAME}{uri} 301
 }
 
-# Catch-alls
+# ================================
+# Catch-all :80 and :443
+# ================================
 :80, :443 {
     log {
         output file /var/log/caddy/access.log
