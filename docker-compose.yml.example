@@ -1,13 +1,4 @@
 # VaultWarden-OCI - Production Docker Compose Configuration
-# ENHANCED: Added container resource limits for 6GB system
-# ENHANCED: Added timezone consistency across all containers
-# ENHANCED: Replaced msmtpd with bokysan/docker-postfix for improved email reliability
-# FIXED: OCI/Oracle Linux compatibility for SSH log monitoring
-# FIXED: Postfix configuration uses correct bokysan/docker-postfix environment variables
-# FIXED: Caddy Cloudflare token configuration for acme_dns
-# FIXED: Caddy healthcheck to test service availability instead of config validation
-# FIXED: Init container now fixes secrets directory permissions for Docker access
-# High-fidelity security detection + Built-in email notifications + Resource management
 
 services:
   # Init container to enforce correct permissions on every startup (set-and-forget)
@@ -125,6 +116,7 @@ services:
     ports:
       - "80:80"
       - "443:443"
+      - "127.0.0.1:8080:8080"
     depends_on:
       init-permissions:
         condition: service_completed_successfully
