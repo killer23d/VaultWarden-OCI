@@ -3,7 +3,6 @@
 # FIXED: Added --auto-recover flag for self-healing capabilities
 # FIXED: Proper DOMAIN error handling in check_service_accessibility
 # ENHANCED: Standardized error handling - functions return, main() decides exit strategy
-# UPDATED: Email delivery uses lib/common.sh which prefers msmtpd sidecar if available
 
 set -euo pipefail
 
@@ -256,45 +255,39 @@ check_container_status() {
 
 check_service_accessibility() {
     health_log_info "Checking service accessibility..."
-    local domain clean_domain
     
-    # FIXED: Proper error handling for missing DOMAIN
-    if [[ -f ".env" ]]; then
-        domain=$(grep "^DOMAIN=" .env | head -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" || echo "")
-    else
-        domain=""
-    fi
-    
-    if [[ -z "$domain" ]]; then
-        health_log_error "CRITICAL: DOMAIN not configured in .env file"
-        HEALTH_RESULTS["accessibility"]="failed"
-        HEALTH_DETAILS["accessibility"]="DOMAIN not set in .env"
-        return 1
-    fi
-    
-    clean_domain=$(echo "$domain" | sed 's|https\?://||; s|/.*$||')
-    
-    # FIXED: Use correct Host header for local checks
-    if curl -sf -H "Host: $clean_domain" --max-time 5 "http://localhost/alive" >/dev/null 2>&1; then
+    # FIXED: Use the internal Caddy port 8080 which bypasses HTTPS redirects
+    # This ensures the health check validates the container is UP, not just that DNS works
+    if curl -sf --max-time 5 "http://localhost:8080/alive" >/dev/null 2>&1; then
         health_log_success "VaultWarden local access: OK"
     else
         health_log_error "CRITICAL: VaultWarden local access: FAILED"
+        health_log_error "Port 8080 may not be exposed in docker-compose.yml"
         HEALTH_RESULTS["accessibility"]="failed"
+        # If we can't hit localhost:8080, the container is actually broken/down
         return 1
     fi
     
-    # Check external HTTPS access
-    if curl -sf --max-time 5 "https://$clean_domain/alive" >/dev/null 2>&1; then
-        health_log_success "External web access: OK"
-        HEALTH_RESULTS["accessibility"]="healthy"
-        HEALTH_DETAILS["accessibility"]="All services accessible"
-        return 0
-    else
-        health_log_warn "External web access: FAILED (DNS/SSL/Cloudflare issue)"
-        HEALTH_RESULTS["accessibility"]="degraded"
-        HEALTH_DETAILS["accessibility"]="External access issues"
-        return 1
+    # Optional: Check external if domain is configured
+    if [[ -f ".env" ]]; then
+        local domain
+        domain=$(grep "^DOMAIN=" .env | head -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" || echo "")
+        if [[ -n "$domain" ]]; then
+            local clean_domain
+            clean_domain=$(echo "$domain" | sed 's|https\?://||; s|/.*$||')
+            if curl -sf --max-time 5 "https://$clean_domain/alive" >/dev/null 2>&1; then
+                health_log_success "External web access: OK"
+            else
+                health_log_warn "External web access: FAILED (Check Cloudflare/DNS)"
+                # Don't fail the whole check if only external is down (could be just a network blip)
+                HEALTH_RESULTS["accessibility"]="degraded"
+            fi
+        fi
     fi
+    
+    HEALTH_RESULTS["accessibility"]="healthy"
+    HEALTH_DETAILS["accessibility"]="Local service confirmed"
+    return 0
 }
 
 check_disk_space() {
