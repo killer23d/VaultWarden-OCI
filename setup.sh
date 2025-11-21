@@ -347,6 +347,39 @@ setup_user_permissions() {
     return 0
 }
 
+# NEW: SSH Port Validation to prevent lockout
+validate_ssh_port() {
+    local configured_port="$1"
+    
+    # Try to detect current port from SSH_CONNECTION env var (standard in SSH sessions)
+    local current_port
+    current_port=$(echo "${SSH_CONNECTION:-}" | awk '{print $4}')
+    
+    if [[ -z "$current_port" ]]; then
+        # Fallback: try to find listening sshd process
+        current_port=$(ss -tlnp | grep sshd | awk '{print $4}' | cut -d: -f2 | head -1)
+    fi
+
+    if [[ -n "$current_port" ]] && [[ "$configured_port" != "$current_port" ]]; then
+        log_error "⚠️  SSH PORT MISMATCH DETECTED ⚠️"
+        log_error "You are currently connected on port: $current_port"
+        log_error "The setup is configured to allow port: $configured_port"
+        log_error "If you proceed, the firewall reset WILL LOCK YOU OUT."
+        echo ""
+        if [[ "$AUTO_MODE" != "true" ]]; then
+            read -p "Type 'CONTINUE' only if you are absolutely sure: " confirm
+            if [[ "$confirm" != "CONTINUE" ]]; then
+                return 1
+            fi
+        else
+            log_error "Auto mode active - aborting setup for safety."
+            return 1
+        fi
+    fi
+    log_success "SSH port validation passed (Current: ${current_port:-unknown}, Configured: $configured_port)"
+    return 0
+}
+
 # CRITICAL FIX: Firewall setup with race condition fix
 setup_firewall() {
     log_info "Configuring Cloudflare-only UFW firewall..."
@@ -362,6 +395,13 @@ setup_firewall() {
         log_error "Invalid SSH port: $ssh_port"
         return 1
     fi
+
+    # --- CALL VALIDATION HERE ---
+    if ! validate_ssh_port "$ssh_port"; then
+        log_error "Firewall setup aborted due to SSH port mismatch"
+        return 1
+    fi
+    # ----------------------------
     
     # CRITICAL FIX: Fetch Cloudflare IPs BEFORE resetting firewall
     log_info "Fetching current Cloudflare IP ranges..."
@@ -850,6 +890,22 @@ generate_age_keys() {
     fi
 
     log_success "Age encryption keys generated: $age_key_file"
+    
+    # --- NEW: CRITICAL WARNING ---
+    echo ""
+    log_error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    log_error "⚠️  CRITICAL: BACKUP YOUR ENCRYPTION KEY IMMEDIATELY ⚠️"
+    log_error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    log_error "File: $age_key_file"
+    log_error "If you lose this file, ALL BACKUPS ARE PERMANENTLY UNRECOVERABLE."
+    log_error ""
+    log_error "1. Copy this file to a secure offline location NOW."
+    log_error "2. Store it in your password manager."
+    log_error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    if [[ "$AUTO_MODE" != "true" ]]; then
+        read -p "Press ENTER to acknowledge..."
+    fi
+    # -----------------------------
     return 0
 }
 
