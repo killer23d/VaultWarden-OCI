@@ -116,7 +116,8 @@ install_dependencies() {
         return 1
     fi
 
-    local basic_packages=("age" "make" "nano" "rclone" "sqlite3" "jq" "ufw" "curl" "wget" "unzip" "git" "gpg" "coreutils" "haveged" "dnsutils" "rsync")
+    # LEANEST: python3-argon2 from apt (no pip needed!)
+    local basic_packages=("age" "make" "nano" "rclone" "sqlite3" "jq" "ufw" "curl" "wget" "unzip" "git" "gpg" "coreutils" "haveged" "dnsutils" "rsync" "python3" "python3-argon2")
     export DEBIAN_FRONTEND=noninteractive
 
     if ! apt-get install -y "${basic_packages[@]}"; then
@@ -221,8 +222,14 @@ verify_dependencies() {
 
     hash -r
 
-    local required_commands=("age" "sops" "docker" "jq" "sqlite3" "ufw" "curl")
+    local required_commands=("age" "sops" "docker" "jq" "sqlite3" "ufw" "curl" "python3")
     if ! require_commands "${required_commands[@]}"; then
+        return 1
+    fi
+
+    # Verify argon2 Python library
+    if ! python3 -c "from argon2 import PasswordHasher" 2>/dev/null; then
+        log_error "Argon2 Python library not available"
         return 1
     fi
 
@@ -522,9 +529,10 @@ create_sops_config() {
         return 1
     fi
 
+    # FIX: Use flexible regex that matches any path ending with secrets.yaml
     if ! cat > "$sops_config" << EOF; then
 creation_rules:
-  - path_regex: secrets/secrets\\.yaml$
+  - path_regex: .*secrets\\.yaml$
     age: $age_public_key
 EOF
         log_error "Failed to create SOPS configuration"
@@ -549,12 +557,12 @@ create_empty_secrets_structure() {
         return 0
     fi
 
-    local secrets_file="secrets/secrets.yaml"
-    local age_key_file="secrets/keys/age-key.txt"
+    local secrets_file="$PROJECT_ROOT/secrets/secrets.yaml"
+    local age_key_file="$PROJECT_ROOT/secrets/keys/age-key.txt"
 
     if [[ -f "$secrets_file" ]]; then
         log_info "Secrets file already exists, validating..."
-        export SOPS_AGE_KEY_FILE="$PROJECT_ROOT/$age_key_file"
+        export SOPS_AGE_KEY_FILE="$age_key_file"
         if sops -d "$secrets_file" >/dev/null 2>&1; then
             log_success "Existing secrets file validated"
             return 0
@@ -567,10 +575,9 @@ create_empty_secrets_structure() {
     local real_user; real_user=$(get_real_user)
     local real_group; real_group=$(id -g -n $real_user)
 
-    local temp_secrets
-    temp_secrets=$(mktemp)
-    chmod 600 "$temp_secrets"
-
+    # FIX: Create temp file with correct name that matches SOPS regex
+    local temp_secrets="$PROJECT_ROOT/secrets/.temp_secrets.yaml"
+    
     cat > "$temp_secrets" << 'EOF'
 # VaultWarden Secrets Configuration - Empty Structure
 # This file will be populated by setup-secrets.sh
@@ -600,10 +607,21 @@ caddy_cloudflare_dns_token: PLACEHOLDER_NOT_CONFIGURED
 fail2ban_cloudflare_firewall_token: PLACEHOLDER_NOT_CONFIGURED
 EOF
 
-    export SOPS_AGE_KEY_FILE="$PROJECT_ROOT/$age_key_file"
+    chmod 600 "$temp_secrets"
 
+    # FIX: Ensure we're in PROJECT_ROOT where .sops.yaml exists
+    cd "$PROJECT_ROOT" || {
+        log_error "Failed to change to project root: $PROJECT_ROOT"
+        rm -f "$temp_secrets"
+        return 1
+    }
+
+    export SOPS_AGE_KEY_FILE="$age_key_file"
+
+    # Encrypt - now the temp file matches .*secrets\.yaml$ regex
     if ! sops --encrypt "$temp_secrets" > "$secrets_file"; then
         log_error "Failed to encrypt secrets template"
+        log_error "SOPS config: $(cat .sops.yaml 2>/dev/null || echo 'not found')"
         rm -f "$temp_secrets"
         return 1
     fi
