@@ -160,7 +160,7 @@ collect_secrets() {
     fi
     
     local caddy_hash
-    caddy_hash=$(generate_bcrypt_hash "$caddy_pass" 2>/dev/null)
+    caddy_hash=$(set +x; generate_bcrypt_hash "$caddy_pass" 2>/dev/null)
     if [[ -z "$caddy_hash" ]]; then
         log_error "Failed to generate bcrypt hash"
         return 1
