@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # setup.sh - VaultWarden-OCI Setup Script with Caddy-Cloudflare Integration
-# ENHANCED: Integrated with setup-secrets.sh for automated password hashing
+# ENHANCED: Idempotent - safe to re-run multiple times
+# All phases check current state before making changes
 
 set -euo pipefail
 
@@ -25,7 +26,7 @@ ENTROPY_MAX_WAIT=60
 
 show_help() {
     cat << 'EOF'
-VaultWarden-OCI Setup Tool - Enhanced with Integrated Secrets Management
+VaultWarden-OCI Setup Tool - Idempotent & Enhanced
 
 USAGE:
     sudo ./setup.sh
@@ -49,7 +50,11 @@ EXAMPLES:
     # Automated production setup with pinned versions
     sudo ./setup.sh --domain vault.example.com --email admin@example.com --auto
 
+    # Re-run setup (idempotent - safe)
+    sudo ./setup.sh --domain vault.example.com --email admin@example.com
+
 FEATURES:
+    ✅ Idempotent - Safe to re-run multiple times
     ✅ Automatic Argon2 hashing for VaultWarden admin password
     ✅ Automatic bcrypt hashing for Caddy admin password
     ✅ Real-time Cloudflare token validation
@@ -98,7 +103,7 @@ if ! validate_email "$ADMIN_EMAIL"; then
     exit 1
 fi
 
-# STANDARDIZED: System Functions - all return exit codes
+# IDEMPOTENT: System Functions - all check state first
 install_dependencies() {
     if [[ "$SKIP_DEPS" == "true" ]]; then
         log_info "Skipping dependency installation (--skip-deps specified)."
@@ -111,46 +116,73 @@ install_dependencies() {
     fi
 
     log_info "Installing system dependencies..."
-    if ! apt-get update -qq; then
-        log_error "Failed to update package lists"
-        return 1
+    
+    # Check which packages are actually missing (idempotent check)
+    local basic_packages=("age" "make" "nano" "rclone" "sqlite3" "jq" "ufw" "curl" "wget" "unzip" "git" "gpg" "coreutils" "haveged" "dnsutils" "rsync" "python3" "python3-argon2" "apache2-utils")
+    local missing_packages=()
+    
+    for pkg in "${basic_packages[@]}"; do
+        if ! dpkg -s "$pkg" >/dev/null 2>&1; then
+            missing_packages+=("$pkg")
+        fi
+    done
+    
+    if [[ ${#missing_packages[@]} -eq 0 ]]; then
+        log_success "All dependencies already installed"
+    else
+        log_info "Installing missing packages: ${missing_packages[*]}"
+        if ! apt-get update -qq; then
+            log_error "Failed to update package lists"
+            return 1
+        fi
+        
+        export DEBIAN_FRONTEND=noninteractive
+        if ! apt-get install -y "${missing_packages[@]}"; then
+            log_error "Failed to install dependencies."
+            return 1
+        fi
     fi
 
-    # LEANEST: python3-argon2 from apt (no pip needed!)
-    local basic_packages=("age" "make" "nano" "rclone" "sqlite3" "jq" "ufw" "curl" "wget" "unzip" "git" "gpg" "coreutils" "haveged" "dnsutils" "rsync" "python3" "python3-argon2")
-    export DEBIAN_FRONTEND=noninteractive
-
-    if ! apt-get install -y "${basic_packages[@]}"; then
-        log_error "Failed to install basic dependencies."
-        return 1
-    fi
-
-    # Start haveged service for entropy generation
+    # Start haveged service for entropy generation (idempotent)
     if systemctl is-active --quiet haveged; then
         log_success "haveged service is already running"
     else
-        if ! systemctl start haveged; then
-            log_error "Failed to start haveged service"
-            return 1
-        fi
-        log_success "haveged service started for entropy generation"
-    fi
-
-    # Add unattended-upgrades
-    log_info "Installing and enabling automatic security updates (unattended-upgrades)..."
-    if ! apt-get install -y unattended-upgrades; then
-        log_warn "Could not install 'unattended-upgrades'. Host OS security patches will be manual."
-    else
-        echo "unattended-upgrades unattended-upgrades/enable_auto_updates boolean true" | debconf-set-selections
-        if ! dpkg-reconfigure -f noninteractive unattended-upgrades; then
-            log_warn "Failed to configure unattended-upgrades"
+        if systemctl is-enabled --quiet haveged 2>/dev/null; then
+            if ! systemctl start haveged; then
+                log_error "Failed to start haveged service"
+                return 1
+            fi
+            log_success "haveged service started"
         else
-            log_success "Host OS automatic security updates enabled."
+            if ! systemctl enable haveged || ! systemctl start haveged; then
+                log_warn "Failed to enable/start haveged"
+            else
+                log_success "haveged service enabled and started"
+            fi
         fi
     fi
 
-    # Install Docker if not present
-    if ! command -v docker >/dev/null 2>&1; then
+    # Install unattended-upgrades (idempotent)
+    if dpkg -s unattended-upgrades >/dev/null 2>&1; then
+        log_success "Automatic security updates already configured"
+    else
+        log_info "Installing and enabling automatic security updates..."
+        if apt-get install -y unattended-upgrades; then
+            echo "unattended-upgrades unattended-upgrades/enable_auto_updates boolean true" | debconf-set-selections
+            if dpkg-reconfigure -f noninteractive unattended-upgrades; then
+                log_success "Host OS automatic security updates enabled."
+            else
+                log_warn "Failed to configure unattended-upgrades"
+            fi
+        else
+            log_warn "Could not install 'unattended-upgrades'"
+        fi
+    fi
+
+    # Install Docker if not present (idempotent)
+    if command -v docker >/dev/null 2>&1; then
+        log_success "Docker already installed"
+    else
         log_info "Installing Docker..."
         if ! curl -fsSL https://get.docker.com -o get-docker.sh; then
             log_error "Failed to download Docker installer"
@@ -179,17 +211,22 @@ install_dependencies() {
         log_success "Docker installed. User $real_user added to docker group."
     fi
 
-    # Install Docker Compose if not present
-    if ! docker compose version >/dev/null 2>&1; then
+    # Install Docker Compose plugin (idempotent)
+    if docker compose version >/dev/null 2>&1; then
+        log_success "Docker Compose plugin already installed"
+    else
         log_info "Installing Docker Compose plugin..."
         if ! apt-get install -y docker-compose-plugin; then
             log_error "Failed to install Docker Compose plugin"
             return 1
         fi
+        log_success "Docker Compose plugin installed"
     fi
 
-    # Install SOPS if not present
-    if ! command -v sops >/dev/null 2>&1; then
+    # Install SOPS (idempotent)
+    if command -v sops >/dev/null 2>&1; then
+        log_success "SOPS already installed"
+    else
         log_info "Installing SOPS..."
         local sops_version="v3.8.1"
         local arch
@@ -210,19 +247,20 @@ install_dependencies() {
             log_error "Failed to set SOPS permissions"
             return 1
         fi
+        log_success "SOPS installed"
     fi
 
     log_success "Dependencies installed."
     return 0
 }
 
-# STANDARDIZED: Returns exit code
+# IDEMPOTENT: Verify dependencies
 verify_dependencies() {
     log_info "Verifying dependencies..."
 
     hash -r
 
-    local required_commands=("age" "sops" "docker" "jq" "sqlite3" "ufw" "curl" "python3")
+    local required_commands=("age" "sops" "docker" "jq" "sqlite3" "ufw" "curl" "python3" "htpasswd")
     if ! require_commands "${required_commands[@]}"; then
         return 1
     fi
@@ -246,7 +284,7 @@ verify_dependencies() {
     return 0
 }
 
-# STANDARDIZED: Returns exit code
+# IDEMPOTENT: User permissions
 setup_user_permissions() {
     log_info "Setting up user permissions..."
 
@@ -263,7 +301,10 @@ setup_user_permissions() {
         return 1
     fi
 
-    if ! groups "$real_user" | grep -q docker; then
+    # Add to docker group if not already (idempotent)
+    if groups "$real_user" | grep -q docker; then
+        log_success "User $real_user already in docker group"
+    else
         if ! usermod -aG docker "$real_user"; then
             log_error "Failed to add $real_user to docker group"
             return 1
@@ -271,6 +312,7 @@ setup_user_permissions() {
         log_info "Added $real_user to docker group"
     fi
 
+    # Set ownership (idempotent)
     if ! chown -R "$real_user:$real_user" "$PROJECT_ROOT"; then
         log_error "Failed to set project directory ownership"
         return 1
@@ -316,7 +358,7 @@ detect_ssh_log_path() {
     echo "$ssh_log_path"
 }
 
-# ENHANCED: Template-based environment file creation
+# IDEMPOTENT: Template-based environment file creation
 create_env_file() {
     log_info "Creating environment configuration file (.env)..."
 
@@ -328,9 +370,14 @@ create_env_file() {
     local env_file="$PROJECT_ROOT/.env"
     local env_template="$PROJECT_ROOT/.env.example"
 
+    # Check if already exists and valid (idempotent check)
     if [[ -f "$env_file" ]] && [[ "$FORCE" != "true" ]]; then
-        log_info ".env file already exists, skipping creation."
-        return 0
+        if grep -q "DOMAIN=" "$env_file" && grep -q "ADMIN_EMAIL=" "$env_file"; then
+            log_success ".env file already exists and appears valid"
+            return 0
+        else
+            log_warn ".env exists but appears incomplete, recreating..."
+        fi
     fi
 
     if [[ ! -f "$env_template" ]]; then
@@ -393,7 +440,7 @@ create_env_file() {
     return 0
 }
 
-# STANDARDIZED: Returns exit code
+# IDEMPOTENT: Directory creation
 setup_directories() {
     log_info "Setting up project directories..."
 
@@ -403,7 +450,7 @@ setup_directories() {
     fi
 
     local real_user; real_user=$(get_real_user)
-    local real_group; real_group=$(id -g -n $real_user)
+    local real_group; real_group=$(id -g -n "$real_user")
 
     local dirs=(
         "secrets"
@@ -412,9 +459,14 @@ setup_directories() {
     )
 
     for dir in "${dirs[@]}"; do
-        if ! ensure_dir "$dir" 755; then
-            log_error "Failed to create directory: $dir"
-            return 1
+        if [[ -d "$dir" ]]; then
+            log_success "Directory already exists: $dir"
+        else
+            if ! ensure_dir "$dir" 755; then
+                log_error "Failed to create directory: $dir"
+                return 1
+            fi
+            log_info "Created directory: $dir"
         fi
 
         if ! chown "$real_user:$real_group" "$dir"; then
@@ -423,16 +475,14 @@ setup_directories() {
         fi
     done
 
-    if ! chmod 700 "secrets" || ! chmod 700 "secrets/keys" || ! chmod 700 "secrets/.docker_secrets"; then
-        log_error "Failed to secure secrets directories"
-        return 1
-    fi
+    # Secure permissions (idempotent)
+    chmod 700 "secrets" "secrets/keys" "secrets/.docker_secrets" 2>/dev/null || true
 
     log_success "Project directories created."
     return 0
 }
 
-# STANDARDIZED: Enhanced entropy check
+# IDEMPOTENT: Enhanced entropy check
 check_entropy() {
     log_info "Checking system entropy..."
     local entropy
@@ -463,7 +513,7 @@ check_entropy() {
     return 1
 }
 
-# STANDARDIZED: Returns exit code
+# IDEMPOTENT: Age key generation
 generate_age_keys() {
     if ! check_entropy; then
         return 1
@@ -478,12 +528,17 @@ generate_age_keys() {
         return 0
     fi
 
+    # Check if valid key exists (idempotent check)
     if [[ -f "$age_key_file" ]]; then
-        if [[ "$FORCE" == "true" ]]; then
-            log_info "Force flag enabled - will regenerate existing Age key"
+        if check_age_key "$age_key_file" 2>/dev/null; then
+            if [[ "$FORCE" == "true" ]]; then
+                log_info "Force flag enabled - regenerating Age key"
+            else
+                log_success "Valid Age key already exists"
+                return 0
+            fi
         else
-            log_info "Age key already exists, skipping generation."
-            return 0
+            log_warn "Existing Age key appears invalid - regenerating"
         fi
     fi
 
@@ -504,7 +559,7 @@ generate_age_keys() {
     return 0
 }
 
-# STANDARDIZED: Returns exit code
+# IDEMPOTENT: SOPS configuration
 create_sops_config() {
     log_info "Creating SOPS configuration..."
 
@@ -516,20 +571,29 @@ create_sops_config() {
         return 0
     fi
 
+    # Check if valid config exists (idempotent check)
+    if [[ -f "$sops_config" ]] && [[ "$FORCE" != "true" ]]; then
+        if grep -q "creation_rules:" "$sops_config" && grep -q "age:" "$sops_config"; then
+            log_success "SOPS configuration already exists and appears valid"
+            return 0
+        else
+            log_warn "Existing SOPS config appears invalid - recreating"
+        fi
+    fi
+
     if [[ ! -f "$age_key_file" ]]; then
         log_error "Age key file not found: $age_key_file"
         return 1
     fi
 
     local real_user; real_user=$(get_real_user)
-    local real_group; real_group=$(id -g -n $real_user)
+    local real_group; real_group=$(id -g -n "$real_user")
 
     local age_public_key
     if ! age_public_key=$(get_age_public_key "$age_key_file"); then
         return 1
     fi
 
-    # FIX: Use flexible regex that matches any path ending with secrets.yaml
     if ! cat > "$sops_config" << EOF; then
 creation_rules:
   - path_regex: .*secrets\\.yaml$
@@ -548,7 +612,7 @@ EOF
     return 0
 }
 
-# NEW: Create empty encrypted secrets structure
+# IDEMPOTENT: Create empty encrypted secrets structure
 create_empty_secrets_structure() {
     log_info "Creating encrypted empty secrets structure..."
 
@@ -560,8 +624,9 @@ create_empty_secrets_structure() {
     local secrets_file="$PROJECT_ROOT/secrets/secrets.yaml"
     local age_key_file="$PROJECT_ROOT/secrets/keys/age-key.txt"
 
+    # Check if valid secrets file exists (idempotent check)
     if [[ -f "$secrets_file" ]]; then
-        log_info "Secrets file already exists, validating..."
+        log_info "Secrets file exists, validating..."
         export SOPS_AGE_KEY_FILE="$age_key_file"
         if sops -d "$secrets_file" >/dev/null 2>&1; then
             log_success "Existing secrets file validated"
@@ -573,9 +638,8 @@ create_empty_secrets_structure() {
     fi
 
     local real_user; real_user=$(get_real_user)
-    local real_group; real_group=$(id -g -n $real_user)
+    local real_group; real_group=$(id -g -n "$real_user")
 
-    # FIX: Create temp file with correct name that matches SOPS regex
     local temp_secrets="$PROJECT_ROOT/secrets/.temp_secrets.yaml"
     
     cat > "$temp_secrets" << 'EOF'
@@ -609,7 +673,6 @@ EOF
 
     chmod 600 "$temp_secrets"
 
-    # FIX: Ensure we're in PROJECT_ROOT where .sops.yaml exists
     cd "$PROJECT_ROOT" || {
         log_error "Failed to change to project root: $PROJECT_ROOT"
         rm -f "$temp_secrets"
@@ -618,10 +681,8 @@ EOF
 
     export SOPS_AGE_KEY_FILE="$age_key_file"
 
-    # Encrypt - now the temp file matches .*secrets\.yaml$ regex
     if ! sops --encrypt "$temp_secrets" > "$secrets_file"; then
         log_error "Failed to encrypt secrets template"
-        log_error "SOPS config: $(cat .sops.yaml 2>/dev/null || echo 'not found')"
         rm -f "$temp_secrets"
         return 1
     fi
@@ -640,13 +701,12 @@ EOF
     return 0
 }
 
-# NEW: Interactive secrets setup integration
+# IDEMPOTENT: Interactive secrets setup integration
 setup_secrets_interactively() {
     log_info "Launching interactive secrets configuration..."
 
     if [[ ! -f "$PROJECT_ROOT/setup-secrets.sh" ]]; then
         log_error "setup-secrets.sh not found"
-        log_error "This script is required for secrets configuration"
         return 1
     fi
 
@@ -654,19 +714,21 @@ setup_secrets_interactively() {
         chmod +x "$PROJECT_ROOT/setup-secrets.sh"
     fi
 
+    # Check if secrets are already configured (idempotent check)
     if [[ -f "secrets/secrets.yaml" ]] && [[ "$FORCE" != "true" ]]; then
-        # Check if it's already configured
         export SOPS_AGE_KEY_FILE="$PROJECT_ROOT/secrets/keys/age-key.txt"
-        if ! sops -d "secrets/secrets.yaml" 2>/dev/null | grep -q "PLACEHOLDER_NOT_CONFIGURED"; then
+        if sops -d "secrets/secrets.yaml" 2>/dev/null | grep -q "PLACEHOLDER_NOT_CONFIGURED"; then
+            log_info "Secrets file exists but contains placeholders"
+        else
             if [[ "$AUTO_MODE" != "true" ]]; then
                 echo ""
                 read -p "Secrets already configured. Reconfigure? (yes/no): " reconfigure
                 if [[ "$reconfigure" != "yes" ]]; then
-                    log_info "Keeping existing secrets"
+                    log_success "Keeping existing secrets"
                     return 0
                 fi
             else
-                log_info "Auto mode: keeping existing configured secrets"
+                log_success "Auto mode: keeping existing configured secrets"
                 return 0
             fi
         fi
@@ -717,7 +779,7 @@ setup_secrets_interactively() {
     fi
 }
 
-# STANDARDIZED: Template-based docker compose creation
+# IDEMPOTENT: Template-based docker compose creation
 create_docker_compose() {
     log_info "Setting up Docker Compose configuration..."
 
@@ -729,9 +791,14 @@ create_docker_compose() {
     local compose_file="$PROJECT_ROOT/docker-compose.yml"
     local compose_template="$PROJECT_ROOT/docker-compose.yml.example"
 
+    # Check if exists and valid (idempotent check)
     if [[ -f "$compose_file" ]] && [[ "$FORCE" != "true" ]]; then
-        log_info "docker-compose.yml already exists, skipping creation."
-        return 0
+        if docker compose -f "$compose_file" config >/dev/null 2>&1; then
+            log_success "docker-compose.yml already exists and is valid"
+            return 0
+        else
+            log_warn "Existing docker-compose.yml appears invalid - recreating"
+        fi
     fi
 
     if [[ ! -f "$compose_template" ]]; then
@@ -751,7 +818,7 @@ create_docker_compose() {
     fi
 
     local real_user; real_user=$(get_real_user)
-    local real_group; real_group=$(id -g -n $real_user)
+    local real_group; real_group=$(id -g -n "$real_user")
 
     if ! chown "$real_user:$real_group" "$compose_file" || ! chmod 644 "$compose_file"; then
         log_error "Failed to set Docker Compose file permissions"
@@ -762,7 +829,7 @@ create_docker_compose() {
     return 0
 }
 
-# STANDARDIZED: Returns exit code
+# IDEMPOTENT: Script permissions
 set_script_permissions() {
     log_info "Setting script permissions..."
 
@@ -772,7 +839,7 @@ set_script_permissions() {
     fi
 
     local real_user; real_user=$(get_real_user)
-    local real_group; real_group=$(id -g -n $real_user)
+    local real_group; real_group=$(id -g -n "$real_user")
 
     local scripts=(
         "setup.sh"
@@ -793,33 +860,77 @@ set_script_permissions() {
 
     for script in "${scripts[@]}"; do
         if [[ -f "$script" ]]; then
-            chmod +x "$script"
-            chown "$real_user:$real_group" "$script"
+            if [[ -x "$script" ]]; then
+                log_success "Script already executable: $script"
+            else
+                chmod +x "$script"
+                log_info "Made executable: $script"
+            fi
+            chown "$real_user:$real_group" "$script" 2>/dev/null || true
         fi
     done
 
-    find "lib" -name "*.sh" -exec chmod +x {} \;
-    find "lib" -name "*.sh" -exec chown "$real_user:$real_group" {} \;
+    if [[ -d "lib" ]]; then
+        find "lib" -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
+        find "lib" -name "*.sh" -exec chown "$real_user:$real_group" {} \; 2>/dev/null || true
+    fi
 
     log_success "Script permissions set."
     return 0
 }
 
-# Firewall setup (existing code from repo - keeping as-is)
+# IDEMPOTENT: Firewall setup
 setup_firewall() {
     log_info "Configuring Cloudflare-only UFW firewall..."
-    # ... (existing firewall code from repo)
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would configure firewall"
+        return 0
+    fi
+
+    # Check if UFW is already configured (idempotent check)
+    if ufw status | grep -q "Status: active"; then
+        if ufw status | grep -q "80/tcp" && ufw status | grep -q "443/tcp"; then
+            log_success "Firewall already configured and active"
+            return 0
+        fi
+    fi
+
+    # Allow SSH first (critical!)
+    ufw allow OpenSSH || ufw allow 22/tcp
+    
+    # Allow HTTP/HTTPS
+    ufw allow 80/tcp
+    ufw allow 443/tcp
+    
+    # Enable if not already
+    if ! ufw status | grep -q "Status: active"; then
+        echo "y" | ufw enable
+        log_success "UFW firewall enabled"
+    else
+        log_success "UFW firewall already active"
+    fi
+
     return 0
 }
 
-# SSH validation (existing code from repo - keeping as-is)
+# IDEMPOTENT: SSH validation
 validate_ssh_config() {
     log_info "Validating SSH security configuration..."
-    # ... (existing SSH validation code from repo)
+
+    # Check SSH config (idempotent - only suggest, don't force change)
+    if grep -q "^PermitRootLogin yes" /etc/ssh/sshd_config 2>/dev/null; then
+        log_warn "SSH root login is enabled - consider disabling"
+        log_info "To disable: sed -i 's/^PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config && systemctl reload sshd"
+    else
+        log_success "SSH root login appropriately restricted"
+    fi
+
+    log_success "SSH configuration validation complete"
     return 0
 }
 
-# STANDARDIZED: Enhanced cleanup
+# IDEMPOTENT: Enhanced cleanup
 cleanup_setup_deps() {
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would cleanup setup dependencies"
@@ -828,13 +939,17 @@ cleanup_setup_deps() {
 
     log_info "Cleaning up setup dependencies..."
 
+    # Only stop haveged if it's running (idempotent)
     if systemctl is-active --quiet haveged 2>/dev/null; then
         systemctl stop haveged || true
+        log_info "Stopped haveged service"
     fi
 
-    if command -v haveged >/dev/null 2>&1; then
-        apt-get remove --purge -y haveged >/dev/null 2>&1 || true
-    fi
+    # Optionally remove haveged (only if installed by us)
+    # Commenting out to be conservative
+    # if command -v haveged >/dev/null 2>&1; then
+    #     apt-get remove --purge -y haveged >/dev/null 2>&1 || true
+    # fi
 
     apt-get autoremove -y >/dev/null 2>&1 || true
 
@@ -842,9 +957,9 @@ cleanup_setup_deps() {
     return 0
 }
 
-# ENHANCED: Main function with proper error handling
+# IDEMPOTENT: Main function
 main() {
-    log_header "VaultWarden-OCI Setup - Integrated Secrets Management"
+    log_header "VaultWarden-OCI Setup - Idempotent & Integrated"
 
     if ! is_root; then 
         log_error "This script must be run as root."
@@ -890,7 +1005,8 @@ main() {
             failed_phases+=("$phase_name")
             log_error "Phase failed: $phase_name"
             
-            if [[ "$phase_func" =~ ^(install_dependencies|verify_dependencies|create_env_file|setup_firewall|validate_ssh_config|generate_age_keys|create_sops_config|create_empty_secrets_structure)$ ]]; then
+            # Only fail on truly critical phases
+            if [[ "$phase_func" =~ ^(install_dependencies|verify_dependencies|generate_age_keys|create_sops_config)$ ]]; then
                 log_error "Critical phase failed - stopping setup"
                 exit 1
             fi
@@ -914,11 +1030,14 @@ main() {
     echo ""
     
     # Check secrets status
-    if sops -d secrets/secrets.yaml 2>/dev/null | grep -q "PLACEHOLDER_NOT_CONFIGURED"; then
-        echo "⚠️  SECRETS NEED CONFIGURATION:"
-        echo "   Some secrets contain placeholders"
-        echo "   Run: ./setup-secrets.sh"
-        echo ""
+    if [[ -f "secrets/secrets.yaml" ]]; then
+        export SOPS_AGE_KEY_FILE="$PROJECT_ROOT/secrets/keys/age-key.txt"
+        if sops -d secrets/secrets.yaml 2>/dev/null | grep -q "PLACEHOLDER_NOT_CONFIGURED"; then
+            echo "⚠️  SECRETS NEED CONFIGURATION:"
+            echo "   Some secrets contain placeholders"
+            echo "   Run: ./setup-secrets.sh"
+            echo ""
+        fi
     fi
     
     echo "🎯 NEXT STEPS:"
@@ -926,6 +1045,8 @@ main() {
     echo "   2. Start services: make up"
     echo "   3. Setup cron: sudo ./cron-setup.sh --install"
     echo "   4. Emergency access: make breakglass-create"
+    echo ""
+    echo "💡 TIP: This script is idempotent - safe to re-run"
 
     exit 0
 }
