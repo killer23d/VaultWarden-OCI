@@ -160,7 +160,9 @@ collect_secrets() {
     fi
     
     local caddy_hash
-    if ! caddy_hash=$(generate_bcrypt_hash "$caddy_pass"); then
+    caddy_hash=$(generate_bcrypt_hash "$caddy_pass" 2>/dev/null)
+    if [[ -z "$caddy_hash" ]]; then
+        log_error "Failed to generate bcrypt hash"
         return 1
     fi
     SECRETS["admin_basic_auth_hash"]="$caddy_hash"
