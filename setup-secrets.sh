@@ -160,13 +160,12 @@ collect_secrets() {
     fi
     
     local caddy_hash
-    caddy_hash=$(set +x; generate_bcrypt_hash "$caddy_pass" 2>/dev/null)
-    if [[ -z "$caddy_hash" ]]; then
+    if ! caddy_hash=$(generate_bcrypt_hash "$caddy_pass" 2>/dev/null); then
         log_error "Failed to generate bcrypt hash"
         return 1
     fi
     SECRETS["admin_basic_auth_hash"]="$caddy_hash"
-    
+
     # Cloudflare DNS
     echo ""
     log_info "=== Cloudflare DNS Token ==="
