@@ -296,6 +296,8 @@ generate_secure_password() {
 # Generate bcrypt hash (for Caddy basic auth) - STANDARDIZED: Returns exit code
 
 generate_bcrypt_hash() {
+    (
+    set +x 2>/dev/null
     local password="$1"
     local rounds="${2:-12}"
 
@@ -304,29 +306,31 @@ generate_bcrypt_hash() {
         return 1
     fi
 
-    # Try to use Caddy to generate bcrypt hash
-    if has_command docker; then
-        # Ensure Docker daemon is responsive
-        if docker info >/dev/null 2>&1; then
-            local bcrypt_hash
-            if bcrypt_hash=$(echo "$password" | docker run --rm -i ghcr.io/caddybuilds/caddy-cloudflare:latest caddy hash-password --stdin 2>/dev/null); then
+    # Try htpasswd first (most reliable)
+    if has_command htpasswd; then
+        local bcrypt_hash
+        if bcrypt_hash=$(htpasswd -nbBC "$rounds" user "$password" 2>/dev/null | cut -d: -f2); then
+            if [[ -n "$bcrypt_hash" ]]; then
                 echo "$bcrypt_hash"
                 return 0
             fi
         fi
     fi
 
-    # Fallback: try htpasswd if available
-    if has_command htpasswd; then
+    # Fallback: try Caddy Docker container
+    if has_command docker && docker info >/dev/null 2>&1; then
         local bcrypt_hash
-        if bcrypt_hash=$(htpasswd -nbB -C "$rounds" user "$password" 2>/dev/null | cut -d: -f2); then
-            echo "$bcrypt_hash"
-            return 0
+        if bcrypt_hash=$(echo "$password" | docker run --rm -i ghcr.io/caddybuilds/caddy-cloudflare:latest caddy hash-password --stdin 2>/dev/null); then
+            if [[ -n "$bcrypt_hash" ]]; then
+                echo "$bcrypt_hash"
+                return 0
+            fi
         fi
     fi
 
-    log_error "No bcrypt hash generator available (tried Caddy container and htpasswd)"
+    log_error "No bcrypt hash generator available (tried htpasswd and Caddy container)"
     return 1
+    )
 }
 
 # --- File Integrity Operations ---
