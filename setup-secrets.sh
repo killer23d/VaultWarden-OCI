@@ -431,9 +431,9 @@ write_secrets() {
         return 0
     fi
     
-    local temp_file
-    temp_file=$(mktemp)
-    chmod 600 "$temp_file"
+    # Create temp file in secrets directory so it matches SOPS regex
+    local temp_file="$PROJECT_ROOT/secrets/.temp_secrets.yaml"
+    chmod 600 "$temp_file" 2>/dev/null || true
     register_cleanup "rm -f '$temp_file'"
     
     cat > "$temp_file" << SECRETS_EOF
@@ -448,20 +448,20 @@ caddy_cloudflare_dns_token: $SECRET_caddy_cloudflare_dns_token
 fail2ban_cloudflare_firewall_token: $SECRET_fail2ban_cloudflare_firewall_token
 SECRETS_EOF
     
+    chmod 600 "$temp_file"
+    
     if ! setup_secrets_environment; then
         return 1
     fi
     
-    # Atomic write: encrypt to temp, then move
-    local encrypted_temp="${temp_file}.enc"
-    if ! sops --encrypt "$temp_file" > "$encrypted_temp"; then
+    # Encrypt in place (temp file matches .*secrets\.yaml$ regex)
+    if ! sops --encrypt --in-place "$temp_file"; then
         log_error "Failed to encrypt secrets"
-        rm -f "$encrypted_temp"
         return 1
     fi
     
     # Atomic move
-    mv "$encrypted_temp" "$SECRETS_FILE"
+    mv "$temp_file" "$SECRETS_FILE"
     secure_secrets_file
     
     log_success "Secrets written successfully"
