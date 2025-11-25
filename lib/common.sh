@@ -551,7 +551,7 @@ validate_url() {
 
 # Set up error trap with enhanced context
 setup_error_trap() {
-    trap 'log_error "Script failed at line $LINENO in $(basename "${BASH_SOURCE[0]}") with exit code $?"; exit 1' ERR
+    trap 'log_error "Script failed at line $LINENO in $(basename -- "${BASH_SOURCE[0]}") with exit code $?"; exit 1' ERR
 }
 
 # Setup cleanup trap
@@ -588,8 +588,8 @@ init_common_lib() {
     set -euo pipefail
 
     # Set log prefix
-    set_log_prefix "$(basename "$script_name" .sh)"
-
+    set_log_prefix "$(basename -- "$script_name" .sh)"
+    
     # Change to project root
     cd "$PROJECT_ROOT"
 
