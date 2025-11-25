@@ -361,7 +361,7 @@ generate_bcrypt_hash() {
     [[ -z "$password" ]] && return 1
 
     local bcrypt_hash
-    bcrypt_hash=$(/usr/bin/htpasswd -nbBC "$rounds" user "$password" 2>/dev/null | cut -d: -f2)
+    bcrypt_hash=$(printf '%s\n' "$password" | htpasswd -niBC "$rounds" user 2>/dev/null | cut -d: -f2)
     
     [[ -n "$bcrypt_hash" ]] || return 1
     

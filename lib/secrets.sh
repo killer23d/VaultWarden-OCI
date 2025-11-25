@@ -7,6 +7,10 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     exit 1
 fi
 
+# Source crypto library for hash functions
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/crypto.sh"
+
 # Configuration
 SECRETS_FILE="${SECRETS_FILE:-secrets/secrets.yaml}"
 AGE_KEY_FILE="${AGE_KEY_FILE:-secrets/keys/age-key.txt}"
@@ -153,12 +157,17 @@ cleanup_old_backups() {
 setup_secrets_environment() {
     local age_key="${1:-$AGE_KEY_FILE}"
     
+    # Resolve to absolute path if relative
+    if [[ ! "$age_key" = /* ]]; then
+        age_key="${PROJECT_ROOT:-$(pwd)}/$age_key"
+    fi
+    
     if [[ ! -f "$age_key" ]]; then
         log_error "Age key not found: $age_key"
         return 1
     fi
     
-    export SOPS_AGE_KEY_FILE="$PROJECT_ROOT/$age_key"
+    export SOPS_AGE_KEY_FILE="$age_key"
     log_debug "Secure environment configured"
     return 0
 }
@@ -169,83 +178,6 @@ cleanup_secrets_environment() {
         unset SOPS_AGE_KEY_FILE
     fi
     log_debug "Environment cleaned up"
-    return 0
-}
-
-# Check Argon2 support
-check_argon2_support() {
-    if python3 -c "import argon2" 2>/dev/null; then
-        echo "python"
-        return 0
-    elif command -v argon2 >/dev/null 2>&1; then
-        echo "cli"
-        return 0
-    else
-        return 1
-    fi
-}
-
-# Generate Argon2 hash
-generate_argon2_hash() {
-    local password="$1"
-    local hash
-    local method
-    
-    if ! method=$(check_argon2_support); then
-        log_error "Argon2 not available"
-        log_info "Install: pip3 install argon2-cffi OR apt-get install argon2"
-        return 1
-    fi
-    
-    case "$method" in
-        python)
-            hash=$(printf '%s' "$password" | python3 -c "
-import sys
-from argon2 import PasswordHasher
-from argon2 import Type
-ph = PasswordHasher(time_cost=3, memory_cost=65536, parallelism=4, hash_len=32, salt_len=16, type=Type.ID)
-password = sys.stdin.read()
-print(ph.hash(password))
-")
-            ;;
-        cli)
-            local salt
-            salt=$(openssl rand -base64 16)
-            hash=$(echo -n "$password" | argon2 "$salt" -id -t 3 -m 16 -p 4 -l 32 -e 2>/dev/null)
-            ;;
-    esac
-    
-    if [[ -z "$hash" ]]; then
-        log_error "Failed to generate Argon2 hash"
-        return 1
-    fi
-    
-    echo "$hash"
-    return 0
-}
-
-# Generate bcrypt hash using htpasswd
-generate_bcrypt_hash() {
-    local password="$1"
-    local rounds="${2:-12}"
-    
-    if [[ -z "$password" ]]; then
-        log_error "Password cannot be empty"
-        return 1
-    fi
-    
-    local hash
-    if ! hash=$(printf '%s\n' "$password" | htpasswd -niBC "$rounds" user 2>/dev/null | cut -d: -f2); then
-        log_error "Failed to generate bcrypt hash"
-        return 1
-    fi
-    
-    if [[ -z "$hash" ]]; then
-        log_error "Failed to generate bcrypt hash"
-        return 1
-    fi
-    
-    echo "$hash"
     return 0
 }
 
