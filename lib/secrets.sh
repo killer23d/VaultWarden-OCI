@@ -224,17 +224,23 @@ print(ph.hash(password))
     return 0
 }
 
-# Generate bcrypt hash using Caddy
+# Generate bcrypt hash using htpasswd
 generate_bcrypt_hash() {
     local password="$1"
-    local hash
+    local rounds="${2:-12}"
     
-    if ! require_docker; then
-        log_error "Docker required for bcrypt generation"
+    if [[ -z "$password" ]]; then
+        log_error "Password cannot be empty"
         return 1
     fi
     
-    if ! hash=$(echo "$password" | docker run --rm -i ghcr.io/caddybuilds/caddy-cloudflare:latest caddy hash-password --stdin 2>/dev/null); then
+    local hash
+    if ! hash=$(printf '%s\n' "$password" | htpasswd -niBC "$rounds" user 2>/dev/null | cut -d: -f2); then
+        log_error "Failed to generate bcrypt hash"
+        return 1
+    fi
+    
+    if [[ -z "$hash" ]]; then
         log_error "Failed to generate bcrypt hash"
         return 1
     fi
