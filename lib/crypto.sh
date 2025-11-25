@@ -294,6 +294,7 @@ generate_secure_password() {
 # --- Hash Operations ---
 
 # Generate bcrypt hash (for Caddy basic auth) - STANDARDIZED: Returns exit code
+
 generate_bcrypt_hash() {
     local password="$1"
     local rounds="${2:-12}"
@@ -304,11 +305,14 @@ generate_bcrypt_hash() {
     fi
 
     # Try to use Caddy to generate bcrypt hash
-    if has_command docker && require_docker >/dev/null 2>&1; then
-        local bcrypt_hash
-        if bcrypt_hash=$(echo "$password" | docker run --rm -i ghcr.io/caddybuilds/caddy-cloudflare:latest caddy hash-password --stdin 2>/dev/null); then
-            echo "$bcrypt_hash"
-            return 0
+    if has_command docker; then
+        # Ensure Docker daemon is responsive
+        if docker info >/dev/null 2>&1; then
+            local bcrypt_hash
+            if bcrypt_hash=$(echo "$password" | docker run --rm -i ghcr.io/caddybuilds/caddy-cloudflare:latest caddy hash-password --stdin 2>/dev/null); then
+                echo "$bcrypt_hash"
+                return 0
+            fi
         fi
     fi
 
