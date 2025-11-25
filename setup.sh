@@ -2,12 +2,25 @@
 # setup.sh - VaultWarden-OCI Setup Script with Caddy-Cloudflare Integration
 # ENHANCED: Idempotent - safe to re-run multiple times
 # All phases check current state before making changes
+# FIXED: --auto flag now truly non-interactive
+# FIXED: Security issues #4, #5, #6, #11, #13 addressed
+# ENHANCED: Added TMP_WORKDIR, sops --output, improved domain display
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR"
 cd "$PROJECT_ROOT"
+
+# FIX #13: Verify required libraries exist before sourcing
+for lib in "lib/common.sh" "lib/crypto.sh" "lib/docker.sh"; do
+    if [[ ! -f "$lib" ]]; then
+        echo "ERROR: Required library not found: $lib" >&2
+        echo "Please ensure all library files are present in the lib/ directory" >&2
+        exit 1
+    fi
+done
+
 source "lib/common.sh"
 init_common_lib "$0"
 source "lib/crypto.sh"
@@ -24,6 +37,16 @@ DRY_RUN=false
 ENTROPY_THRESHOLD=200
 ENTROPY_MAX_WAIT=60
 
+# Global variable to store clean domain for final summary (FIX #11)
+CLEAN_DOMAIN=""
+
+# ENHANCEMENT: Temporary working directory for atomic operations
+TMP_WORKDIR=$(mktemp -d -t vw_setup.XXXXXX) || {
+    echo "ERROR: Failed to create temporary working directory" >&2
+    exit 1
+}
+trap 'rm -rf "$TMP_WORKDIR"' EXIT
+
 show_help() {
     cat << 'EOF'
 VaultWarden-OCI Setup Tool - Idempotent & Enhanced
@@ -36,18 +59,24 @@ REQUIRED OPTIONS:
     --email EMAIL        Administrator email address
 
 SETUP OPTIONS:
-    --auto               Automated setup with minimal prompts
+    --auto               Automated setup with NO prompts (fully unattended)
     --use-latest         Use latest container versions (default: pinned versions)
     --skip-deps          Skip dependency installation (install manually first)
     --force              Overwrite existing configuration files
     --dry-run            Show what would be done without executing
     --help               Show this help information
 
+SYSTEM REQUIREMENTS:
+    Operating System:    Ubuntu 20.04+ or Debian 11+ (Debian-based only)
+    Platform:            Tested on Oracle Cloud Infrastructure (OCI)
+    Memory:              Minimum 6GB RAM
+    Architecture:        AMD64 or ARM64
+
 EXAMPLES:
     # Interactive production setup (recommended)
     sudo ./setup.sh --domain vault.example.com --email admin@example.com
 
-    # Automated production setup with pinned versions
+    # Fully automated setup with pinned versions (NO prompts)
     sudo ./setup.sh --domain vault.example.com --email admin@example.com --auto
 
     # Re-run setup (idempotent - safe)
@@ -62,6 +91,9 @@ FEATURES:
     ✅ Platform-specific SSH log detection
     ✅ Firewall race condition fixes
     ✅ SOPS + Age encrypted secrets
+    ✅ True --auto mode (zero prompts)
+    ✅ Enhanced security (600 permissions, mktemp, library validation)
+    ✅ Atomic temporary file handling
 EOF
 }
 
@@ -209,6 +241,7 @@ install_dependencies() {
             return 1
         fi
         log_success "Docker installed. User $real_user added to docker group."
+        log_warn "Note: User must logout/login or run 'newgrp docker' for group to take effect"
     fi
 
     # Install Docker Compose plugin (idempotent)
@@ -310,6 +343,7 @@ setup_user_permissions() {
             return 1
         fi
         log_info "Added $real_user to docker group"
+        log_warn "Note: User must logout/login or run 'newgrp docker' for group to take effect"
     fi
 
     # Set ownership (idempotent)
@@ -408,6 +442,9 @@ create_env_file() {
 
     local clean_domain
     clean_domain=$(echo "$domain_with_protocol" | sed 's|https\?://||; s|/.*$||')
+    
+    # FIX #11: Store clean_domain globally for final summary
+    CLEAN_DOMAIN="$clean_domain"
 
     local domain_escaped clean_domain_escaped admin_email_escaped smtp_from_escaped ssh_log_escaped
     domain_escaped=$(printf '%s\n' "$domain_with_protocol" | sed 's/[&/\]/\\&/g')
@@ -431,12 +468,14 @@ create_env_file() {
         sed -i 's/^POSTFIX_VERSION=.*/POSTFIX_VERSION=latest/' "$env_file"
     fi
 
-    if ! chown "$real_user:$real_group" "$env_file" || ! chmod 644 "$env_file"; then
+    # FIX #4: Set .env to 600 instead of 644 for security
+    if ! chown "$real_user:$real_group" "$env_file" || ! chmod 600 "$env_file"; then
         log_error "Failed to set .env file permissions"
         return 1
     fi
 
     log_success "Environment file created from template: $env_file"
+    log_info "Permissions: 600 (secure - readable only by owner)"
     return 0
 }
 
@@ -554,8 +593,15 @@ generate_age_keys() {
         log_error "Failed to set Age key file ownership"
         return 1
     fi
+    
+    # FIX #5: Explicitly set Age key to 600 permissions
+    if ! chmod 600 "$age_key_file"; then
+        log_error "Failed to set Age key file permissions"
+        return 1
+    fi
 
     log_success "Age encryption keys generated: $age_key_file"
+    log_info "Permissions: 600 (secure - readable only by owner)"
     return 0
 }
 
@@ -640,7 +686,12 @@ create_empty_secrets_structure() {
     local real_user; real_user=$(get_real_user)
     local real_group; real_group=$(id -g -n "$real_user")
 
-    local temp_secrets="$PROJECT_ROOT/secrets/.temp_secrets.yaml"
+    # FIX #6 + ENHANCEMENT: Use TMP_WORKDIR with descriptive name
+    local temp_secrets
+    temp_secrets=$(mktemp -p "$TMP_WORKDIR" vwsecrets.XXXXXX.yaml) || {
+        log_error "Failed to create temporary secrets file"
+        return 1
+    }
     
     cat > "$temp_secrets" << 'EOF'
 # VaultWarden Secrets Configuration - Empty Structure
@@ -675,19 +726,16 @@ EOF
 
     cd "$PROJECT_ROOT" || {
         log_error "Failed to change to project root: $PROJECT_ROOT"
-        rm -f "$temp_secrets"
         return 1
     }
 
     export SOPS_AGE_KEY_FILE="$age_key_file"
 
-    if ! sops --encrypt "$temp_secrets" > "$secrets_file"; then
+    # ENHANCEMENT: Use explicit --output for clarity and atomicity
+    if ! sops --encrypt --output "$secrets_file" "$temp_secrets"; then
         log_error "Failed to encrypt secrets template"
-        rm -f "$temp_secrets"
         return 1
     fi
-
-    rm -f "$temp_secrets"
 
     if ! chmod 600 "$secrets_file" || ! chown "$real_user:$real_group" "$secrets_file"; then
         log_error "Failed to secure secrets file"
@@ -696,14 +744,16 @@ EOF
 
     log_success "Empty encrypted secrets structure created"
     log_info "File: $secrets_file (encrypted with Age)"
+    log_info "Permissions: 600 (secure - readable only by owner)"
     log_info "Status: Ready for value population"
     
     return 0
 }
 
 # IDEMPOTENT: Interactive secrets setup integration
+# FIXED: Properly handles --auto mode without any prompts
 setup_secrets_interactively() {
-    log_info "Launching interactive secrets configuration..."
+    log_info "Launching secrets configuration..."
 
     if [[ ! -f "$PROJECT_ROOT/setup-secrets.sh" ]]; then
         log_error "setup-secrets.sh not found"
@@ -715,27 +765,42 @@ setup_secrets_interactively() {
     fi
 
     # Check if secrets are already configured (idempotent check)
-    if [[ -f "secrets/secrets.yaml" ]] && [[ "$FORCE" != "true" ]]; then
+    local secrets_configured=false
+    if [[ -f "secrets/secrets.yaml" ]]; then
         export SOPS_AGE_KEY_FILE="$PROJECT_ROOT/secrets/keys/age-key.txt"
         if sops -d "secrets/secrets.yaml" 2>/dev/null | grep -q "PLACEHOLDER_NOT_CONFIGURED"; then
             log_info "Secrets file exists but contains placeholders"
+            secrets_configured=false
         else
-            if [[ "$AUTO_MODE" != "true" ]]; then
-                echo ""
-                read -p "Secrets already configured. Reconfigure? (yes/no): " reconfigure
-                if [[ "$reconfigure" != "yes" ]]; then
-                    log_success "Keeping existing secrets"
-                    return 0
-                fi
-            else
-                log_success "Auto mode: keeping existing configured secrets"
-                return 0
-            fi
+            log_info "Secrets file exists and appears configured"
+            secrets_configured=true
         fi
     fi
 
+    # Handle based on mode and state
+    if [[ "$secrets_configured" == "true" ]]; then
+        # Secrets already configured
+        if [[ "$FORCE" == "true" ]]; then
+            log_info "Force flag enabled - reconfiguring secrets"
+            # Fall through to configuration logic below
+        elif [[ "$AUTO_MODE" == "true" ]]; then
+            log_success "Auto mode: keeping existing configured secrets"
+            return 0
+        else
+            # Interactive mode - ask user
+            echo ""
+            read -p "Secrets already configured. Reconfigure? (yes/no): " reconfigure
+            if [[ "$reconfigure" != "yes" ]]; then
+                log_success "Keeping existing secrets"
+                return 0
+            fi
+            # Fall through to reconfigure
+        fi
+    fi
+
+    # Configure secrets based on mode
     if [[ "$AUTO_MODE" == "true" ]]; then
-        log_info "Running automated secrets setup..."
+        log_info "Running automated secrets setup (--auto mode)..."
         
         if ./setup-secrets.sh --auto --skip-optional; then
             log_success "Secrets configured automatically"
@@ -749,6 +814,7 @@ setup_secrets_interactively() {
             return 1
         fi
     else
+        # Interactive mode
         echo ""
         log_info "═══════════════════════════════════════════════════════════"
         log_info "  Interactive Secrets Configuration"
@@ -881,7 +947,7 @@ set_script_permissions() {
 
 # IDEMPOTENT: Firewall setup
 setup_firewall() {
-    log_info "Configuring Cloudflare-only UFW firewall..."
+    log_info "Configuring basic UFW firewall..."
 
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would configure firewall"
@@ -959,7 +1025,7 @@ cleanup_setup_deps() {
 
 # IDEMPOTENT: Main function
 main() {
-    log_header "VaultWarden-OCI Setup - Idempotent & Integrated"
+    log_header "VaultWarden-OCI Setup - Production Ready"
 
     if ! is_root; then 
         log_error "This script must be run as root."
@@ -972,6 +1038,13 @@ main() {
         exit 1
     fi
 
+    # Show mode
+    if [[ "$AUTO_MODE" == "true" ]]; then
+        log_info "Running in AUTOMATED mode (--auto) - no prompts"
+    else
+        log_info "Running in INTERACTIVE mode"
+    fi
+
     local setup_phases=(
         "install_dependencies:Dependency Installation"
         "verify_dependencies:Dependency Verification"
@@ -982,7 +1055,7 @@ main() {
         "generate_age_keys:Encryption Keys"
         "create_sops_config:SOPS Configuration"
         "create_empty_secrets_structure:Empty Secrets Structure"
-        "setup_secrets_interactively:Interactive Secrets Configuration"
+        "setup_secrets_interactively:Secrets Configuration"
         "set_script_permissions:Script Permissions"
         "setup_firewall:Firewall Configuration"
         "validate_ssh_config:SSH Hardening Validation"
@@ -1020,13 +1093,15 @@ main() {
         exit 1
     fi
 
-    # Final summary
+    # ENHANCEMENT: Display https:// URL in final summary for easy copy/paste
     log_header "Setup Complete - VaultWarden-OCI Ready!"
     echo ""
     echo "✅ Configuration:"
-    echo "   - Domain: https://$DOMAIN"
+    echo "   - Domain: https://$CLEAN_DOMAIN"
     echo "   - Admin: $ADMIN_EMAIL"
     echo "   - Secrets: Encrypted with SOPS + Age"
+    echo "   - Mode: $([ "$AUTO_MODE" == "true" ] && echo "Automated" || echo "Interactive")"
+    echo "   - Security: Enhanced (600 perms, mktemp workdir, lib validation)"
     echo ""
     
     # Check secrets status
@@ -1042,11 +1117,15 @@ main() {
     
     echo "🎯 NEXT STEPS:"
     echo "   1. Review .env: nano .env"
-    echo "   2. Start services: make up"
-    echo "   3. Setup cron: sudo ./cron-setup.sh --install"
-    echo "   4. Emergency access: make breakglass-create"
+    echo "   2. Configure secrets: ./setup-secrets.sh"
+    echo "   3. Start services: make up"
+    echo "   4. Setup cron: sudo ./cron-setup.sh --install"
+    echo "   5. Emergency access: make breakglass-create"
     echo ""
-    echo "💡 TIP: This script is idempotent - safe to re-run"
+    echo "💡 TIPS:"
+    echo "   • This script is idempotent - safe to re-run"
+    echo "   • User in docker group must logout/login or run: newgrp docker"
+    echo "   • Access VaultWarden at: https://$CLEAN_DOMAIN"
 
     exit 0
 }
