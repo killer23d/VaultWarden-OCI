@@ -356,21 +356,15 @@ generate_bcrypt_hash() {
     local password="$1"
     local rounds="${2:-12}"
 
-    if [[ -z "$password" ]]; then
-        return 1
-    fi
+    [[ -z "$password" ]] && return 1
 
-    # Use htpasswd (apache2-utils) to generate bcrypt hash
-    if command -v htpasswd >/dev/null 2>&1; then
-        local bcrypt_hash
-        bcrypt_hash=$(htpasswd -nbBC "$rounds" user "$password" 2>/dev/null | cut -d: -f2)
-        if [[ -n "$bcrypt_hash" ]]; then
-            printf '%s\n' "$bcrypt_hash"
-            return 0
-        fi
-    fi
-
-    return 1
+    local bcrypt_hash
+    bcrypt_hash=$(/usr/bin/htpasswd -nbBC "$rounds" user "$password" 2>/dev/null | cut -d: -f2)
+    
+    [[ -n "$bcrypt_hash" ]] || return 1
+    
+    printf '%s\n' "$bcrypt_hash"
+    return 0
 }
 
 # --- File Integrity Operations ---
