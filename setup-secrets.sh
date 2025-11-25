@@ -129,6 +129,7 @@ collect_secrets() {
     # VaultWarden Admin
     log_info "=== VaultWarden Admin Password ==="
     log_info "Will be hashed with Argon2id"
+    
     local vw_pass
     if [[ "$AUTO_MODE" == "true" ]]; then
         vw_pass=$(generate_secure_string 24)
@@ -140,7 +141,9 @@ collect_secrets() {
     fi
     
     local vw_hash
-    if ! vw_hash=$(generate_argon2_hash "$vw_pass"); then
+    vw_hash=$(generate_argon2_hash "$vw_pass")
+    if [[ -z "$vw_hash" ]]; then
+        log_error "Failed to generate Argon2 hash"
         return 1
     fi
     SECRETS["admin_token"]="$vw_hash"
@@ -149,6 +152,7 @@ collect_secrets() {
     echo ""
     log_info "=== Caddy Admin Password ==="
     log_info "Will be hashed with bcrypt"
+    
     local caddy_pass
     if [[ "$AUTO_MODE" == "true" ]]; then
         caddy_pass=$(generate_secure_string 24)
@@ -160,7 +164,8 @@ collect_secrets() {
     fi
     
     local caddy_hash
-    if ! caddy_hash=$(generate_bcrypt_hash "$caddy_pass" 2>/dev/null); then
+    caddy_hash=$(generate_bcrypt_hash "$caddy_pass" 2>/dev/null)
+    if [[ -z "$caddy_hash" ]]; then
         log_error "Failed to generate bcrypt hash"
         return 1
     fi
@@ -170,6 +175,7 @@ collect_secrets() {
     echo ""
     log_info "=== Cloudflare DNS Token ==="
     log_info "Permissions: Zone:DNS:Edit + Zone:Zone:Read"
+    
     local cf_dns
     if [[ "$AUTO_MODE" == "true" ]]; then
         cf_dns="CHANGE_ME_DNS_TOKEN"
@@ -189,6 +195,7 @@ collect_secrets() {
     echo ""
     log_info "=== Cloudflare Firewall Token ==="
     log_info "Permissions: Zone:Firewall Services:Edit"
+    
     local cf_fw
     if [[ "$AUTO_MODE" == "true" ]]; then
         cf_fw="CHANGE_ME_FIREWALL_TOKEN"
@@ -207,6 +214,7 @@ collect_secrets() {
     # SMTP
     echo ""
     log_info "=== SMTP Password ==="
+    
     local smtp_pass
     if [[ "$AUTO_MODE" == "true" ]]; then
         smtp_pass="CHANGE_ME_SMTP_PASSWORD"
