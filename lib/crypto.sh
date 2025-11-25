@@ -296,41 +296,24 @@ generate_secure_password() {
 # Generate bcrypt hash (for Caddy basic auth) - STANDARDIZED: Returns exit code
 
 generate_bcrypt_hash() {
-    (
-    set +x 2>/dev/null
     local password="$1"
     local rounds="${2:-12}"
 
     if [[ -z "$password" ]]; then
-        log_error "Password cannot be empty for bcrypt hash"
         return 1
     fi
 
-    # Try htpasswd first (most reliable)
-    if has_command htpasswd; then
+    # Use htpasswd (apache2-utils) to generate bcrypt hash
+    if command -v htpasswd >/dev/null 2>&1; then
         local bcrypt_hash
-        if bcrypt_hash=$(htpasswd -nbBC "$rounds" user "$password" 2>/dev/null | cut -d: -f2); then
-            if [[ -n "$bcrypt_hash" ]]; then
-                echo "$bcrypt_hash"
-                return 0
-            fi
+        bcrypt_hash=$(htpasswd -nbBC "$rounds" user "$password" 2>/dev/null | cut -d: -f2)
+        if [[ -n "$bcrypt_hash" ]]; then
+            printf '%s\n' "$bcrypt_hash"
+            return 0
         fi
     fi
 
-    # Fallback: try Caddy Docker container
-    if has_command docker && docker info >/dev/null 2>&1; then
-        local bcrypt_hash
-        if bcrypt_hash=$(echo "$password" | docker run --rm -i ghcr.io/caddybuilds/caddy-cloudflare:latest caddy hash-password --stdin 2>/dev/null); then
-            if [[ -n "$bcrypt_hash" ]]; then
-                echo "$bcrypt_hash"
-                return 0
-            fi
-        fi
-    fi
-
-    log_error "No bcrypt hash generator available (tried htpasswd and Caddy container)"
     return 1
-    )
 }
 
 # --- File Integrity Operations ---
