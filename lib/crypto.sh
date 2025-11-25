@@ -291,10 +291,67 @@ generate_secure_password() {
     return 0
 }
 
+# --- Argon2 Support Detection ---
+
+# Check which Argon2 method is available
+check_argon2_support() {
+    # Try Python argon2-cffi first (preferred)
+    if command -v python3 >/dev/null 2>&1; then
+        if python3 -c "import argon2" 2>/dev/null; then
+            echo "python"
+            return 0
+        fi
+    fi
+    
+    # Try CLI argon2 tool
+    if command -v argon2 >/dev/null 2>&1; then
+        echo "cli"
+        return 0
+    fi
+    
+    return 1
+}
+
 # --- Hash Operations ---
 
-# Generate bcrypt hash (for Caddy basic auth) - STANDARDIZED: Returns exit code
+# Generate Argon2id hash (for VaultWarden admin token)
+generate_argon2_hash() {
+    local password="$1"
+    local hash=""
+    local method
+    
+    method=$(check_argon2_support) || {
+        log_error "No Argon2 implementation available"
+        return 1
+    }
+    
+    case "$method" in
+        python)
+            hash=$(python3 -c "
+from argon2 import PasswordHasher
+from argon2 import Type
+ph = PasswordHasher(time_cost=3, memory_cost=65536, parallelism=4, hash_len=32, salt_len=16, type=Type.ID)
+print(ph.hash('$password'))
+" 2>/dev/null)
+            ;;
+        cli)
+            # Generate salt
+            local salt
+            salt=$(generate_secure_string 16)
+            hash=$(echo -n "$password" | argon2 "$salt" -id -t 3 -m 16 -p 4 -l 32 -e 2>/dev/null)
+            ;;
+    esac
+    
+    if [[ -z "$hash" ]]; then
+        log_error "Failed to generate Argon2 hash"
+        return 1
+    fi
+    
+    printf '%s\n' "$hash"
+    return 0
+}
 
+# Generate bcrypt hash (for Caddy basic auth) - MINIMAL & CLEAN
 generate_bcrypt_hash() {
     local password="$1"
     local rounds="${2:-12}"
@@ -458,7 +515,7 @@ validate_crypto_environment() {
 # Export functions for use by scripts
 export -f is_sops_encrypted decrypt_sops_file encrypt_sops_file
 export -f generate_age_key get_age_public_key check_age_key encrypt_data decrypt_data
-export -f generate_secure_string generate_secure_password generate_bcrypt_hash
+export -f generate_secure_string generate_secure_password check_argon2_support generate_argon2_hash generate_bcrypt_hash
 export -f calculate_sha256 verify_sha256 secure_delete validate_crypto_environment
 export DEFAULT_AGE_KEY_FILE
 
