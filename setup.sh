@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# setup.sh - VaultWarden-OCI Setup Script with Caddy-Cloudflare Integration
+# setup.sh - VaultWarden-OCI Setup Script with Enhanced Error Handling
 
 set -euo pipefail
 
@@ -7,10 +7,23 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR"
 cd "$PROJECT_ROOT"
 
-for lib in "lib/common.sh" "lib/crypto.sh" "lib/docker.sh" "lib/security.sh" "lib/backup_utils.sh" "lib/secrets.sh"; do
+# ENHANCED: Validate ALL 6 required libraries before sourcing
+REQUIRED_LIBS=(
+    "lib/common.sh"
+    "lib/crypto.sh"
+    "lib/docker.sh"
+    "lib/security.sh"
+    "lib/backup_utils.sh"
+    "lib/secrets.sh"
+)
+
+for lib in "${REQUIRED_LIBS[@]}"; do
     if [[ ! -f "$lib" ]]; then
         echo "ERROR: Required library not found: $lib" >&2
         echo "Please ensure all library files are present in the lib/ directory" >&2
+        echo "" >&2
+        echo "Expected libraries:" >&2
+        printf "  - %s\n" "${REQUIRED_LIBS[@]}" >&2
         exit 1
     fi
 done
@@ -31,7 +44,7 @@ DRY_RUN=false
 ENTROPY_THRESHOLD=200
 ENTROPY_MAX_WAIT=60
 
-# Global variable to store clean domain for final summary (FIX #11)
+# Global variable to store clean domain for final summary
 CLEAN_DOMAIN=""
 
 # ENHANCEMENT: Temporary working directory for atomic operations
@@ -43,10 +56,10 @@ trap 'rm -rf "$TMP_WORKDIR"' EXIT
 
 show_help() {
     cat << 'EOF'
-VaultWarden-OCI Setup Tool - Idempotent & Enhanced
+VaultWarden-OCI Setup Tool - Enhanced with Standardized Error Handling
 
 USAGE:
-    sudo ./setup.sh
+    sudo ./setup.sh --domain DOMAIN --email EMAIL [OPTIONS]
 
 REQUIRED OPTIONS:
     --domain DOMAIN      Your VaultWarden domain (e.g., vault.example.com)
@@ -62,7 +75,7 @@ SETUP OPTIONS:
 
 SYSTEM REQUIREMENTS:
     Operating System:    Ubuntu 20.04+ or Debian 11+ (Debian-based only)
-    Platform:            Tested on Oracle Cloud Infrastructure (OCI)
+    Platform:            Tested on Oracle Cloud Infrastructure (OCI) A1 Flex
     Memory:              Minimum 6GB RAM
     Architecture:        AMD64 or ARM64
 
@@ -78,6 +91,8 @@ EXAMPLES:
 
 FEATURES:
     ✅ Idempotent - Safe to re-run multiple times
+    ✅ Standardized error handling - Clear critical vs non-critical failures
+    ✅ Complete library validation - All 6 libraries verified
     ✅ Automatic Argon2 hashing for VaultWarden admin password
     ✅ Automatic bcrypt hashing for Caddy admin password
     ✅ Real-time Cloudflare token validation
@@ -86,8 +101,9 @@ FEATURES:
     ✅ Firewall race condition fixes
     ✅ SOPS + Age encrypted secrets
     ✅ True --auto mode (zero prompts)
-    ✅ Enhanced security (600 permissions, mktemp, library validation)
+    ✅ Enhanced security (600 permissions, mktemp, full lib validation)
     ✅ Atomic temporary file handling
+    ✅ Postfix email backend (not msmtpd)
 EOF
 }
 
@@ -128,6 +144,10 @@ if ! validate_email "$ADMIN_EMAIL"; then
     log_error "Invalid email format: $ADMIN_EMAIL"
     exit 1
 fi
+
+# =============================================================================
+# PHASE FUNCTIONS - All idempotent with state checking
+# =============================================================================
 
 # IDEMPOTENT: System Functions - all check state first
 install_dependencies() {
@@ -437,7 +457,7 @@ create_env_file() {
     local clean_domain
     clean_domain=$(echo "$domain_with_protocol" | sed 's|https\?://||; s|/.*$||')
     
-    # FIX #11: Store clean_domain globally for final summary
+    # Store clean_domain globally for final summary
     CLEAN_DOMAIN="$clean_domain"
 
     local domain_escaped clean_domain_escaped admin_email_escaped smtp_from_escaped ssh_log_escaped
@@ -462,7 +482,7 @@ create_env_file() {
         sed -i 's/^POSTFIX_VERSION=.*/POSTFIX_VERSION=latest/' "$env_file"
     fi
 
-    # FIX #4: Set .env to 600 instead of 644 for security
+    # Set .env to 600 for security
     if ! chown "$real_user:$real_group" "$env_file" || ! chmod 600 "$env_file"; then
         log_error "Failed to set .env file permissions"
         return 1
@@ -588,7 +608,7 @@ generate_age_keys() {
         return 1
     fi
     
-    # FIX #5: Explicitly set Age key to 600 permissions
+    # Explicitly set Age key to 600 permissions
     if ! chmod 600 "$age_key_file"; then
         log_error "Failed to set Age key file permissions"
         return 1
@@ -680,7 +700,7 @@ create_empty_secrets_structure() {
     local real_user; real_user=$(get_real_user)
     local real_group; real_group=$(id -g -n "$real_user")
 
-    # FIX #6 + ENHANCEMENT: Use TMP_WORKDIR with descriptive name
+    # Use TMP_WORKDIR with descriptive name
     local temp_secrets
     temp_secrets=$(mktemp -p "$TMP_WORKDIR" vwsecrets.XXXXXX.yaml) || {
         log_error "Failed to create temporary secrets file"
@@ -725,7 +745,7 @@ EOF
 
     export SOPS_AGE_KEY_FILE="$age_key_file"
 
-    # ENHANCEMENT: Use explicit --output for clarity and atomicity
+    # Use explicit --output for clarity and atomicity
     if ! sops --encrypt --output "$secrets_file" "$temp_secrets"; then
         log_error "Failed to encrypt secrets template"
         return 1
@@ -745,7 +765,6 @@ EOF
 }
 
 # IDEMPOTENT: Interactive secrets setup integration
-# FIXED: Properly handles --auto mode without any prompts
 setup_secrets_interactively() {
     log_info "Launching secrets configuration..."
 
@@ -1005,24 +1024,60 @@ cleanup_setup_deps() {
         log_info "Stopped haveged service"
     fi
 
-    # Optionally remove haveged (only if installed by us)
-    # Commenting out to be conservative
-    # if command -v haveged >/dev/null 2>&1; then
-    #     apt-get remove --purge -y haveged >/dev/null 2>&1 || true
-    # fi
-
     apt-get autoremove -y >/dev/null 2>&1 || true
 
     log_success "Cleanup completed"
     return 0
 }
 
-# IDEMPOTENT: Main function
+# =============================================================================
+# ENHANCED ERROR HANDLING - NEW SECTION
+# =============================================================================
+
+# STANDARDIZED ERROR HANDLING: Phase execution with proper error propagation
+execute_phase() {
+    local phase_func="$1"
+    local phase_name="$2"
+    local phase_critical="${3:-false}"  # Default to non-critical
+
+    log_info "=== Phase: $phase_name ==="
+
+    # Hash refresh for command verification
+    if [[ "$phase_func" == "verify_dependencies" ]]; then
+        hash -r
+    fi
+
+    # Execute phase and capture exit code
+    local exit_code=0
+    if ! $phase_func; then
+        exit_code=$?
+        log_error "Phase failed: $phase_name (exit code: $exit_code)"
+        
+        # Critical phase failure stops execution
+        if [[ "$phase_critical" == "true" ]]; then
+            log_error "CRITICAL PHASE FAILED - Stopping setup"
+            log_error "Cannot continue without: $phase_name"
+            return 1
+        else
+            log_warn "Non-critical phase failed - continuing setup"
+            return 2  # Non-critical failure code
+        fi
+    else
+        log_success "Phase completed: $phase_name"
+        return 0
+    fi
+}
+
+# =============================================================================
+# MAIN EXECUTION - ENHANCED WITH STANDARDIZED ERROR HANDLING
+# =============================================================================
+
 main() {
-    log_header "VaultWarden-OCI Setup - Production Ready"
+    log_header "VaultWarden-OCI Setup - Production Ready (Enhanced)"
 
     if ! is_root; then 
         log_error "This script must be run as root."
+        log_info "Usage: sudo $0 --domain your-domain.com --email admin@email.com"
         exit 1
     fi
 
@@ -1039,63 +1094,94 @@ main() {
         log_info "Running in INTERACTIVE mode"
     fi
 
+    # Define setup phases with criticality flags
+    # Format: "function_name:display_name:is_critical"
     local setup_phases=(
-        "install_dependencies:Dependency Installation"
-        "verify_dependencies:Dependency Verification"
-        "setup_user_permissions:User Permissions"
-        "create_env_file:Environment Configuration"
-        "create_docker_compose:Docker Compose Setup"
-        "setup_directories:Directory Creation"
-        "generate_age_keys:Encryption Keys"
-        "create_sops_config:SOPS Configuration"
-        "create_empty_secrets_structure:Empty Secrets Structure"
-        "setup_secrets_interactively:Secrets Configuration"
-        "set_script_permissions:Script Permissions"
-        "setup_firewall:Firewall Configuration"
-        "validate_ssh_config:SSH Hardening Validation"
-        "cleanup_setup_deps:Setup Cleanup"
+        "install_dependencies:Dependency Installation:true"
+        "verify_dependencies:Dependency Verification:true"
+        "setup_user_permissions:User Permissions:false"
+        "create_env_file:Environment Configuration:true"
+        "create_docker_compose:Docker Compose Setup:true"
+        "setup_directories:Directory Creation:true"
+        "generate_age_keys:Encryption Keys:true"
+        "create_sops_config:SOPS Configuration:true"
+        "create_empty_secrets_structure:Empty Secrets Structure:true"
+        "setup_secrets_interactively:Secrets Configuration:false"
+        "set_script_permissions:Script Permissions:false"
+        "setup_firewall:Firewall Configuration:false"
+        "validate_ssh_config:SSH Hardening Validation:false"
+        "cleanup_setup_deps:Setup Cleanup:false"
     )
 
     local failed_phases=()
+    local warned_phases=()
+    local phase_info
 
+    # Execute all phases with standardized error handling
     for phase_info in "${setup_phases[@]}"; do
-        local phase_func="${phase_info%%:*}"
-        local phase_name="${phase_info##*:}"
-
-        log_info "=== Phase: $phase_name ==="
-
-        if [[ "$phase_func" == "verify_dependencies" ]]; then
-            hash -r
-        fi
-
-        if ! $phase_func; then
-            failed_phases+=("$phase_name")
-            log_error "Phase failed: $phase_name"
-            
-            # Only fail on truly critical phases
-            if [[ "$phase_func" =~ ^(install_dependencies|verify_dependencies|generate_age_keys|create_sops_config)$ ]]; then
-                log_error "Critical phase failed - stopping setup"
-                exit 1
-            fi
-        else
-            log_success "Phase completed: $phase_name"
-        fi
+        IFS=':' read -r phase_func phase_name phase_critical <<< "$phase_info"
+        
+        local result=0
+        execute_phase "$phase_func" "$phase_name" "$phase_critical" || result=$?
+        
+        case $result in
+            0)
+                # Success - continue
+                ;;
+            1)
+                # Critical failure - stop immediately
+                failed_phases+=("$phase_name [CRITICAL]")
+                log_error "Critical phase failed - cannot continue"
+                break
+                ;;
+            2)
+                # Non-critical failure - warn and continue
+                warned_phases+=("$phase_name")
+                log_warn "Non-critical phase failed - setup continues"
+                ;;
+            *)
+                # Unexpected error code
+                failed_phases+=("$phase_name [UNKNOWN ERROR: $result]")
+                if [[ "$phase_critical" == "true" ]]; then
+                    log_error "Critical phase failed with unexpected error - cannot continue"
+                    break
+                fi
+                ;;
+        esac
     done
 
+    # Report results
+    echo ""
+    log_header "Setup Complete - Results Summary"
+
     if [[ ${#failed_phases[@]} -gt 0 ]]; then
-        log_error "Setup completed with failures: ${failed_phases[*]}"
+        log_error "Setup FAILED - Critical phases did not complete:"
+        for phase in "${failed_phases[@]}"; do
+            echo "  ❌ $phase"
+        done
+        echo ""
+        log_error "VaultWarden setup incomplete - resolve errors and re-run"
         exit 1
     fi
 
-    # ENHANCEMENT: Display https:// URL in final summary for easy copy/paste
-    log_header "Setup Complete - VaultWarden-OCI Ready!"
+    if [[ ${#warned_phases[@]} -gt 0 ]]; then
+        log_warn "Setup completed with warnings:"
+        for phase in "${warned_phases[@]}"; do
+            echo "  ⚠️  $phase"
+        done
+        echo ""
+    fi
+
+    # Success summary
+    log_header "VaultWarden-OCI Ready!"
     echo ""
     echo "✅ Configuration:"
     echo "   - Domain: https://$CLEAN_DOMAIN"
     echo "   - Admin: $ADMIN_EMAIL"
     echo "   - Secrets: Encrypted with SOPS + Age"
     echo "   - Mode: $([ "$AUTO_MODE" == "true" ] && echo "Automated" || echo "Interactive")"
-    echo "   - Security: Enhanced (600 perms, mktemp workdir, lib validation)"
+    echo "   - Security: Enhanced (600 perms, mktemp workdir, all 6 libs validated)"
+    echo "   - Email: Postfix container (boky/postfix)"
     echo ""
     
     # Check secrets status
@@ -1106,20 +1192,32 @@ main() {
             echo "   Some secrets contain placeholders"
             echo "   Run: ./setup-secrets.sh"
             echo ""
+        else
+            echo "✅ Secrets: Fully configured"
+            echo ""
         fi
     fi
     
     echo "🎯 NEXT STEPS:"
     echo "   1. Review .env: nano .env"
-    echo "   2. Configure secrets: ./setup-secrets.sh"
+    echo "   2. Configure secrets (if needed): ./setup-secrets.sh"
     echo "   3. Start services: make up"
-    echo "   4. Setup cron: sudo ./cron-setup.sh --install"
+    echo "   4. Setup automation: sudo ./cron-setup.sh --install"
     echo "   5. Emergency access: make breakglass-create"
+    echo "   6. Test email: ./test-email-simple.sh"
     echo ""
     echo "💡 TIPS:"
     echo "   • This script is idempotent - safe to re-run"
     echo "   • User in docker group must logout/login or run: newgrp docker"
     echo "   • Access VaultWarden at: https://$CLEAN_DOMAIN"
+    echo "   • Email via: postfix container (not msmtpd)"
+    echo ""
+    
+    if [[ ${#warned_phases[@]} -gt 0 ]]; then
+        echo "⚠️  WARNING: Some non-critical phases failed (see above)"
+        echo "   Setup is functional but may need attention"
+        echo ""
+    fi
 
     exit 0
 }
