@@ -1,10 +1,5 @@
 #!/usr/bin/env bash
 # setup.sh - VaultWarden-OCI Setup Script with Caddy-Cloudflare Integration
-# ENHANCED: Idempotent - safe to re-run multiple times
-# All phases check current state before making changes
-# FIXED: --auto flag now truly non-interactive
-# FIXED: Security issues #4, #5, #6, #11, #13 addressed
-# ENHANCED: Added TMP_WORKDIR, sops --output, improved domain display
 
 set -euo pipefail
 
@@ -12,8 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR"
 cd "$PROJECT_ROOT"
 
-# FIX #13: Verify required libraries exist before sourcing
-for lib in "lib/common.sh" "lib/crypto.sh" "lib/docker.sh"; do
+for lib in "lib/common.sh" "lib/crypto.sh" "lib/docker.sh" "lib/security.sh" "lib/backup_utils.sh" "lib/secrets.sh"; do
     if [[ ! -f "$lib" ]]; then
         echo "ERROR: Required library not found: $lib" >&2
         echo "Please ensure all library files are present in the lib/ directory" >&2
