@@ -1,13 +1,10 @@
 # VaultWarden-OCI Development Override Configuration
-# ENHANCED: Added msmtpd development settings for email testing
-# Copy this to docker-compose.override.yml for development/testing
 
 # This file provides development-friendly overrides that:
 # 1. Enable additional logging and debugging
 # 2. Add development email testing capabilities  
 # 3. Expose additional ports for testing
 # 4. Reduce security restrictions for easier development
-# 5. Add email development/testing features
 
 services:
   vaultwarden:
@@ -44,6 +41,30 @@ services:
     deploy:
       resources: {}
 
+  postfix:
+    environment:
+      # Development SMTP settings - relaxed TLS
+      - POSTFIX_smtp_tls_security_level=may  # Allow fallback for dev
+      - POSTFIX_smtpd_tls_security_level=may
+      - POSTFIX_debug_peer_level=2  # Enhanced debugging
+      - POSTFIX_smtp_sasl_auth_enable=yes
+    # Expose SMTP port for testing
+    ports:
+      - "1025:587"  # Expose submission port for external testing
+    # Development volume mounts
+    volumes:
+      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/postfix:/var/log/postfix
+    # Remove resource limits for development
+    deploy:
+      resources: {}
+    # Override health check for development
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "587"]
+      interval: 10s
+      timeout: 5s
+      retries: 2
+      start_period: 5s
+
   fail2ban:
     environment:
       # Enhanced development logging
@@ -63,41 +84,6 @@ services:
     deploy:
       resources: {}
 
-  # ENHANCED: msmtpd development configuration
-  msmtpd:
-    environment:
-      # Development SMTP settings
-      - SMTP_HOST=${SMTP_HOST:-smtp.gmail.com}
-      - SMTP_PORT=${SMTP_PORT:-587}
-      - SMTP_TLS=${SMTP_SECURITY:-on}
-      - SMTP_STARTTLS=${SMTP_STARTTLS:-on}
-      - SMTP_TLS_CHECKCERT=${SMTP_TLS_CHECKCERT:-off}  # Relaxed for dev
-      - SMTP_AUTH=${SMTP_AUTH:-on}
-      - SMTP_USER=${SMTP_USERNAME:-}
-      - SMTP_PASSWORD_FILE=/run/secrets/smtp_password
-      - SMTP_FROM=${SMTP_FROM:-dev@localhost}
-      # Development logging
-      - MSMTPD_LOG_LEVEL=debug
-      - TZ=${TZ:-UTC}
-    # Expose SMTP port for testing
-    ports:
-      - "1025:1025"  # Expose for external email testing
-    # Development volume mounts
-    volumes:
-      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/msmtpd:/var/log
-      # Development: Add debug volume
-      - ./dev-email-tests:/email-tests:rw
-    # Remove resource limits for development
-    deploy:
-      resources: {}
-    # Override health check for development
-    healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "1025"]
-      interval: 10s
-      timeout: 5s
-      retries: 2
-      start_period: 5s
-
   # NEW: Email testing service (development only)
   email-tester:
     image: alpine:3.19
@@ -106,18 +92,74 @@ services:
     environment:
       - TZ=${TZ:-UTC}
       - ADMIN_EMAIL=${ADMIN_EMAIL:-test@localhost}
+      - SMTP_FROM=${SMTP_FROM:-dev@localhost}
     command: >
       sh -c "
-        apk add --no-cache python3 py3-pip curl netcat-openbsd &&
-        echo 'Email tester ready. Use: docker compose exec email-tester python3 /email-tests/test-smtp.py' &&
+        apk add --no-cache python3 curl netcat-openbsd &&
+        cat > /tmp/test-smtp.py << 'PYEOF'
+      import smtplib
+      from email.mime.text import MIMEText
+      from email.mime.multipart import MIMEMultipart
+      import sys
+      import os
+      from datetime import datetime
+      
+      def test_postfix():
+          try:
+              msg = MIMEMultipart()
+              msg['From'] = os.environ.get('SMTP_FROM', 'dev@localhost')
+              msg['To'] = os.environ.get('ADMIN_EMAIL', 'test@localhost')
+              msg['Subject'] = 'VaultWarden-OCI Development Email Test'
+              
+              body = f'''This is a development email test from VaultWarden-OCI.
+      
+      If you receive this email, the postfix integration is working correctly.
+      
+      Test Details:
+      - Sent via: postfix container (boky/postfix)
+      - Environment: Development
+      - Time: {datetime.now()}
+      - Container: email-tester
+      '''
+              
+              msg.attach(MIMEText(body, 'plain'))
+              
+              print('Connecting to postfix:587...')
+              server = smtplib.SMTP('postfix', 587, timeout=10)
+              server.set_debuglevel(1)
+              print('Sending email...')
+              server.send_message(msg)
+              server.quit()
+              
+              print('✅ Email sent successfully via postfix!')
+              return True
+          except Exception as e:
+              print(f'❌ Email test failed: {e}', file=sys.stderr)
+              import traceback
+              traceback.print_exc()
+              return False
+      
+      if __name__ == '__main__':
+          sys.exit(0 if test_postfix() else 1)
+      PYEOF
+        chmod +x /tmp/test-smtp.py &&
+        echo '' &&
+        echo '=====================================' &&
+        echo 'Email Tester Ready!' &&
+        echo '=====================================' &&
+        echo '' &&
+        echo 'Usage:' &&
+        echo '  docker compose exec email-tester python3 /tmp/test-smtp.py' &&
+        echo '' &&
+        echo 'Test SMTP connectivity:' &&
+        echo '  docker compose exec email-tester nc -zv postfix 587' &&
+        echo '' &&
         tail -f /dev/null
       "
-    volumes:
-      - ./dev-email-tests:/email-tests:rw
     networks:
       - vaultwarden
     depends_on:
-      - msmtpd
+      - postfix
     profiles:
       - development
       - email-testing
@@ -135,7 +177,6 @@ services:
     profiles:
       - development
       - email-capture
-    # For testing email capture instead of real SMTP
     environment:
       - MH_STORAGE=maildir
       - MH_MAILDIR_PATH=/maildir
@@ -160,7 +201,7 @@ services:
 # 
 # docker compose --profile email-testing up -d  
 #   - Includes email-tester service
-#   - Exposes msmtpd port for external testing
+#   - Exposes postfix port for external testing
 #   - Adds email testing utilities
 #
 # docker compose --profile email-capture up -d
@@ -172,71 +213,45 @@ services:
 # DEVELOPMENT EMAIL TESTING
 # =============================================================================
 
-# Create development email test directory:
-# mkdir -p dev-email-tests
-
-# Create test script (dev-email-tests/test-smtp.py):
-# #!/usr/bin/env python3
-# import smtplib
-# from email.mime.text import MIMEText
-# from email.mime.multipart import MIMEMultipart
-# import sys
-# import os
-# 
-# def test_msmtpd():
-#     try:
-#         msg = MIMEMultipart()
-#         msg['From'] = 'dev@localhost'
-#         msg['To'] = os.environ.get('ADMIN_EMAIL', 'test@localhost')
-#         msg['Subject'] = 'VaultWarden-OCI Development Email Test'
-#         
-#         body = """This is a development email test from VaultWarden-OCI.
-# 
-# If you receive this email, the msmtpd integration is working correctly.
-# 
-# Test Details:
-# - Sent via: msmtpd container
-# - Environment: Development
-# - Time: """ + str(datetime.now())
-#         
-#         msg.attach(MIMEText(body, 'plain'))
-#         
-#         server = smtplib.SMTP('msmtpd', 1025)
-#         server.send_message(msg)
-#         server.quit()
-#         
-#         print("✅ Email sent successfully via msmtpd!")
-#         return True
-#     except Exception as e:
-#         print(f"❌ Email test failed: {e}")
-#         return False
-# 
-# if __name__ == "__main__":
-#     test_msmtpd()
-
-# =============================================================================
-# DEVELOPMENT USAGE EXAMPLES
-# =============================================================================
-
 # 1. Start development environment:
 #    docker compose --profile development up -d
 
 # 2. Test email functionality:
-#    docker compose exec email-tester python3 /email-tests/test-smtp.py
+#    docker compose exec email-tester python3 /tmp/test-smtp.py
 
-# 3. Test fail2ban email integration:
-#    docker compose exec vaultwarden_fail2ban fail2ban-client set vaultwarden-auth banip 192.168.1.100
+# 3. Check postfix logs:
+#    docker compose logs -f postfix
 
-# 4. Monitor email logs:
-#    docker compose logs -f vaultwarden_msmtpd
+# 4. Test SMTP connectivity:
+#    docker compose exec email-tester nc -zv postfix 587
 
-# 5. Test host script email:
-#    ./test-email-simple.sh --verbose
+# 5. Monitor all email-related logs:
+#    docker compose logs -f postfix fail2ban vaultwarden
 
-# 6. Access services:
+# 6. Test fail2ban email integration:
+#    docker compose exec fail2ban fail2ban-client set vaultwarden-auth banip 192.168.1.100
+
+# 7. Access services:
 #    - VaultWarden: http://localhost:8080
 #    - Caddy Admin: http://localhost:2019
 #    - Mailhog UI: http://localhost:8025 (if using email-capture profile)
+
+# =============================================================================
+# POSTFIX DEBUGGING
+# =============================================================================
+
+# View postfix queue:
+#    docker compose exec postfix mailq
+
+# View postfix configuration:
+#    docker compose exec postfix postconf -n
+
+# Test postfix connectivity:
+#    docker compose exec postfix nc -zv ${SMTP_HOST} ${SMTP_PORT}
+
+# Send test email via postfix command line:
+#    docker compose exec postfix sendmail -v your@email.com
+#    (Type message, press Ctrl+D to send)
 
 # =============================================================================
 # SECURITY NOTES FOR DEVELOPMENT
@@ -263,4 +278,4 @@ services:
 # docker volume prune
 
 # Clean up email test files:
-# rm -rf dev-email-tests dev-mailhog
+# rm -rf dev-mailhog
