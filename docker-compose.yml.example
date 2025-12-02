@@ -151,20 +151,14 @@ services:
     restart: unless-stopped
     user: "${PUID}:${PGID}"
     
-    # SECURITY FIX: Load secrets via entrypoint (not exposed in command args)
-    # This prevents secrets from appearing in `docker inspect` command field
-    entrypoint: /bin/sh
-    command:
-      - -c
-      - |
-        export CLOUDFLARE_API_TOKEN=$(cat /run/secrets/caddy_cloudflare_dns_token)
-        export ADMIN_BASIC_AUTH_HASH=$(cat /run/secrets/admin_basic_auth_hash)
-        exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    # Use custom entrypoint script for secret loading
+    entrypoint: /scripts/entrypoint.sh
     
     environment:
       DOMAIN_NAME: ${DOMAIN_NAME}
       TZ: ${TZ:-UTC}
-      # Note: CLOUDFLARE_API_TOKEN and ADMIN_BASIC_AUTH_HASH are set in command
+      # Note: CLOUDFLARE_API_TOKEN and ADMIN_BASIC_AUTH_HASH 
+      # are set by entrypoint.sh from Docker secrets
     
     secrets:
       - caddy_cloudflare_dns_token
@@ -172,6 +166,7 @@ services:
     
     volumes:
       - ${PWD}/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${PWD}/caddy/entrypoint.sh:/scripts/entrypoint.sh:ro  # Custom entrypoint
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/data:/data
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/config:/config
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy:/var/log/caddy
@@ -204,14 +199,14 @@ services:
     cap_add:
       - NET_BIND_SERVICE  # Required for binding to ports 80/443
     
-    # OPTIMIZED: Resource limits for small deployment (REDUCED from original)
+    # OPTIMIZED: Resource limits for small deployment
     deploy:
       resources:
         limits:
-          memory: 512M      # REDUCED from 1G
-          cpus: '0.25'      # REDUCED from 0.3
+          memory: 512M
+          cpus: '0.25'
         reservations:
-          memory: 128M      # REDUCED from 256M
+          memory: 128M
           cpus: '0.1'
 
   # =============================================================================
