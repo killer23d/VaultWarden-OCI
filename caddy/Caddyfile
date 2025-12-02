@@ -54,7 +54,7 @@
         X-XSS-Protection "1; mode=block"
         Referrer-Policy "strict-origin-when-cross-origin"
         
-        # ADDED: Modern isolation headers (Spectre mitigation)
+        # Modern isolation headers (Spectre mitigation)
         Cross-Origin-Opener-Policy "same-origin"
         Cross-Origin-Resource-Policy "same-origin"
         Cross-Origin-Embedder-Policy "require-corp"
@@ -95,9 +95,10 @@
             X-Admin-Access "true"
         }
 
-        # SECURITY: Basic auth hash loaded from environment variable (populated from Docker secret)
-        basic_auth {
-            admin {env.ADMIN_BASIC_AUTH_HASH}
+        # BEST PRACTICE: basicauth directive with htpasswd-formatted environment variable
+        # Expected format in env var: "admin:$2a$14$hash..."
+        basicauth {
+            {env.ADMIN_BASIC_AUTH_HASH}
         }
 
         reverse_proxy vaultwarden:80 {
@@ -162,63 +163,3 @@ www.{$DOMAIN_NAME} {
     }
     respond "Not Found" 404
 }
-
-# ================================================================================================
-# DEPLOYMENT NOTES - CLOUDFLARE RATE LIMITING (REQUIRED)
-# ================================================================================================
-#
-# This Caddyfile uses Cloudflare WAF for rate limiting (edge protection).
-# You MUST configure these rules in Cloudflare Dashboard → Security → WAF → Rate limiting rules
-#
-# RULE #1: Authentication Endpoint Protection (CRITICAL)
-# -------------------------------------------------------
-# Name: VaultWarden Auth Rate Limit
-# If incoming requests match:
-#   (http.request.uri.path contains "/identity/connect/token") or
-#   (http.request.uri.path contains "/api/accounts/prelogin") or
-#   (http.request.uri.path contains "/identity/accounts/prelogin")
-# Then: Block
-# With the same characteristics:
-#   - Requests: 10 per period
-#   - Period: 1 minute (or 10 minutes on Free plan)
-#   - Counting method: Count by IP address
-# Response: 429 Too Many Requests
-#
-# RULE #2: Admin Panel Protection (HIGH PRIORITY)
-# ------------------------------------------------
-# Name: VaultWarden Admin Rate Limit
-# If incoming requests match:
-#   (http.request.uri.path contains "/admin")
-# Then: Block
-# With the same characteristics:
-#   - Requests: 5 per period
-#   - Period: 1 minute (or 10 minutes on Free plan)
-#   - Counting method: Count by IP address
-# Response: 429 Too Many Requests
-#
-# RULE #3: General API Protection (OPTIONAL)
-# -------------------------------------------
-# Name: VaultWarden API Rate Limit
-# If incoming requests match:
-#   (http.request.uri.path contains "/api/")
-# Then: Managed Challenge (CAPTCHA)
-# With the same characteristics:
-#   - Requests: 100 per period
-#   - Period: 1 minute
-#   - Counting method: Count by IP address
-#
-# ================================================================================================
-# SECURITY FEATURES IMPLEMENTED
-# ================================================================================================
-# ✅ Cloudflare Rate Limiting (edge-based attack mitigation)
-# ✅ Modern security headers (CORS, COOP, CORP, COEP)
-# ✅ Content Security Policy (XSS prevention)
-# ✅ Malicious user-agent blocking (scanner detection)
-# ✅ Basic auth for admin panel (from Docker secret)
-# ✅ Request ID tracking (forensics)
-# ✅ Optimized log retention (7 days, 5 files)
-# ✅ Server header removal (fingerprinting prevention)
-# ✅ HSTS with preload (force HTTPS)
-# ✅ Permissions Policy (feature restriction)
-#
-# ================================================================================================
