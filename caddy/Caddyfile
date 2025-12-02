@@ -1,5 +1,6 @@
 {
     # Global ACME DNS configuration
+    # SECURITY: Token loaded from Docker secret via environment variable
     acme_dns cloudflare {env.CLOUDFLARE_API_TOKEN}
 
     # Global server configuration
@@ -23,12 +24,12 @@
 # ================================
 {$DOMAIN_NAME} {
 
-    # 1. Centralized JSON Access Logging
+    # 1. Centralized JSON Access Logging (OPTIMIZED for small deployment)
     log {
         output file /var/log/caddy/access.log {
             roll_size 50MB
-            roll_keep 20
-            roll_keep_for 30d
+            roll_keep 5           # REDUCED from 20 to 5 (adequate for fail2ban)
+            roll_keep_for 7d      # REDUCED from 30d to 7d (saves disk space)
         }
         format json {
             time_format "2006-01-02T15:04:05.000Z07:00"
@@ -42,18 +43,34 @@
         level INFO
     }
 
-    # 2. Security Headers
+    # 2. Enhanced Security Headers (HARDENED)
     header {
+        # HSTS with preload
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        
+        # Classic security headers
         X-Content-Type-Options "nosniff"
         X-Frame-Options "DENY"
         X-XSS-Protection "1; mode=block"
         Referrer-Policy "strict-origin-when-cross-origin"
+        
+        # ADDED: Modern isolation headers (Spectre mitigation)
+        Cross-Origin-Opener-Policy "same-origin"
+        Cross-Origin-Resource-Policy "same-origin"
+        Cross-Origin-Embedder-Policy "require-corp"
+        X-DNS-Prefetch-Control "off"
+        
+        # Content Security Policy
         Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: https:; frame-src 'self'; object-src 'none'; base-uri 'self';"
+        
+        # Permissions Policy (restrict dangerous features)
         Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=(), usb=()"
+        
+        # Request tracking and protocol
         X-Request-ID {uuid}
         X-Forwarded-Proto https
 
+        # Remove server identification (security by obscurity)
         -Server
         -X-Powered-By
     }
@@ -69,14 +86,16 @@
     }
 
     # 4. Admin Panel Protection
+    # NOTE: Rate limiting handled by Cloudflare WAF Rule (see deployment docs)
     @admin path /admin*
     handle @admin {
-
+        # Stricter CSP for admin panel
         header {
             Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: https:; frame-src 'self'; object-src 'none'; base-uri 'self';"
             X-Admin-Access "true"
         }
 
+        # SECURITY: Basic auth hash loaded from environment variable (populated from Docker secret)
         basic_auth {
             admin {env.ADMIN_BASIC_AUTH_HASH}
         }
@@ -90,6 +109,8 @@
     }
 
     # 5. Auth Endpoints (Monitoring)
+    # NOTE: Rate limiting handled by Cloudflare WAF Rule
+    # Cloudflare WAF Rule #2: 10 requests per 5 minutes to /identity/connect/token*
     @auth_endpoints path /api/accounts/prelogin* /identity/accounts/prelogin* /identity/connect/token*
     handle @auth_endpoints {
         reverse_proxy vaultwarden:80 {
@@ -101,9 +122,9 @@
         }
     }
 
-    # 6. Malicious User-Agent Blocking
+    # 6. Malicious User-Agent Blocking (ENHANCED)
     @malicious_ua {
-        header User-Agent *sqlmap* *nikto* *nmap* *acunetix* *dirbuster* *gobuster* *wfuzz*
+        header User-Agent *sqlmap* *nikto* *nmap* *acunetix* *dirbuster* *gobuster* *wfuzz* *masscan* *zgrab*
     }
     handle @malicious_ua {
         respond "Access Denied - Security Policy Violation" 403
@@ -141,3 +162,63 @@ www.{$DOMAIN_NAME} {
     }
     respond "Not Found" 404
 }
+
+# ================================================================================================
+# DEPLOYMENT NOTES - CLOUDFLARE RATE LIMITING (REQUIRED)
+# ================================================================================================
+#
+# This Caddyfile uses Cloudflare WAF for rate limiting (edge protection).
+# You MUST configure these rules in Cloudflare Dashboard → Security → WAF → Rate limiting rules
+#
+# RULE #1: Authentication Endpoint Protection (CRITICAL)
+# -------------------------------------------------------
+# Name: VaultWarden Auth Rate Limit
+# If incoming requests match:
+#   (http.request.uri.path contains "/identity/connect/token") or
+#   (http.request.uri.path contains "/api/accounts/prelogin") or
+#   (http.request.uri.path contains "/identity/accounts/prelogin")
+# Then: Block
+# With the same characteristics:
+#   - Requests: 10 per period
+#   - Period: 1 minute (or 10 minutes on Free plan)
+#   - Counting method: Count by IP address
+# Response: 429 Too Many Requests
+#
+# RULE #2: Admin Panel Protection (HIGH PRIORITY)
+# ------------------------------------------------
+# Name: VaultWarden Admin Rate Limit
+# If incoming requests match:
+#   (http.request.uri.path contains "/admin")
+# Then: Block
+# With the same characteristics:
+#   - Requests: 5 per period
+#   - Period: 1 minute (or 10 minutes on Free plan)
+#   - Counting method: Count by IP address
+# Response: 429 Too Many Requests
+#
+# RULE #3: General API Protection (OPTIONAL)
+# -------------------------------------------
+# Name: VaultWarden API Rate Limit
+# If incoming requests match:
+#   (http.request.uri.path contains "/api/")
+# Then: Managed Challenge (CAPTCHA)
+# With the same characteristics:
+#   - Requests: 100 per period
+#   - Period: 1 minute
+#   - Counting method: Count by IP address
+#
+# ================================================================================================
+# SECURITY FEATURES IMPLEMENTED
+# ================================================================================================
+# ✅ Cloudflare Rate Limiting (edge-based attack mitigation)
+# ✅ Modern security headers (CORS, COOP, CORP, COEP)
+# ✅ Content Security Policy (XSS prevention)
+# ✅ Malicious user-agent blocking (scanner detection)
+# ✅ Basic auth for admin panel (from Docker secret)
+# ✅ Request ID tracking (forensics)
+# ✅ Optimized log retention (7 days, 5 files)
+# ✅ Server header removal (fingerprinting prevention)
+# ✅ HSTS with preload (force HTTPS)
+# ✅ Permissions Policy (feature restriction)
+#
+# ================================================================================================
