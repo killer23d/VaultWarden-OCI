@@ -1,13 +1,33 @@
 #!/usr/bin/env bash
-# setup.sh - VaultWarden-OCI Setup Script with Enhanced Error Handling
+
+# setup.sh - VaultWarden-OCI Setup Script (SECURITY HARDENED)
+# 
 
 set -euo pipefail
+
+# Disable debug traces that could leak secrets
+set +x
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR"
 cd "$PROJECT_ROOT"
 
-# ENHANCED: Validate ALL 6 required libraries before sourcing
+# =============================================================================
+# SECURITY ENHANCEMENT: Secure Temporary Directory
+# =============================================================================
+# Create temporary directory with restrictive permissions BEFORE any operations
+old_umask=$(umask)
+umask 077  # Ensure 700 permissions for temp directory
+TMP_WORKDIR=$(mktemp -d -t vw_setup.XXXXXXXXXX) || {
+    echo "ERROR: Failed to create secure temporary directory" >&2
+    exit 1
+}
+umask "$old_umask"  # Restore original umask
+trap 'rm -rf "$TMP_WORKDIR"' EXIT
+
+# =============================================================================
+# Library Validation and Sourcing
+# =============================================================================
 REQUIRED_LIBS=(
     "lib/common.sh"
     "lib/crypto.sh"
@@ -23,7 +43,7 @@ for lib in "${REQUIRED_LIBS[@]}"; do
         echo "Please ensure all library files are present in the lib/ directory" >&2
         echo "" >&2
         echo "Expected libraries:" >&2
-        printf "  - %s\n" "${REQUIRED_LIBS[@]}" >&2
+        printf " - %s\n" "${REQUIRED_LIBS[@]}" >&2
         exit 1
     fi
 done
@@ -33,7 +53,9 @@ init_common_lib "$0"
 source "lib/crypto.sh"
 source "lib/docker.sh"
 
+# =============================================================================
 # Configuration Defaults
+# =============================================================================
 DOMAIN=""
 ADMIN_EMAIL=""
 AUTO_MODE=false
@@ -47,16 +69,12 @@ ENTROPY_MAX_WAIT=60
 # Global variable to store clean domain for final summary
 CLEAN_DOMAIN=""
 
-# ENHANCEMENT: Temporary working directory for atomic operations
-TMP_WORKDIR=$(mktemp -d -t vw_setup.XXXXXX) || {
-    echo "ERROR: Failed to create temporary working directory" >&2
-    exit 1
-}
-trap 'rm -rf "$TMP_WORKDIR"' EXIT
-
+# =============================================================================
+# Help Function
+# =============================================================================
 show_help() {
     cat << 'EOF'
-VaultWarden-OCI Setup Tool - Enhanced with Standardized Error Handling
+VaultWarden-OCI Setup Tool - Security Hardened Edition
 
 USAGE:
     sudo ./setup.sh --domain DOMAIN --email EMAIL [OPTIONS]
@@ -74,10 +92,10 @@ SETUP OPTIONS:
     --help               Show this help information
 
 SYSTEM REQUIREMENTS:
-    Operating System:    Ubuntu 20.04+ or Debian 11+ (Debian-based only)
-    Platform:            Tested on Oracle Cloud Infrastructure (OCI) A1 Flex
-    Memory:              Minimum 6GB RAM
-    Architecture:        AMD64 or ARM64
+    Operating System:  Ubuntu 20.04+ or Debian 11+ (Debian-based only)
+    Platform:          Tested on Oracle Cloud Infrastructure (OCI) A1 Flex
+    Memory:            Minimum 6GB RAM
+    Architecture:      AMD64 or ARM64
 
 EXAMPLES:
     # Interactive production setup (recommended)
@@ -89,25 +107,22 @@ EXAMPLES:
     # Re-run setup (idempotent - safe)
     sudo ./setup.sh --domain vault.example.com --email admin@example.com
 
-FEATURES:
-    ✅ Idempotent - Safe to re-run multiple times
-    ✅ Standardized error handling - Clear critical vs non-critical failures
-    ✅ Complete library validation - All 6 libraries verified
-    ✅ Automatic Argon2 hashing for VaultWarden admin password
-    ✅ Automatic bcrypt hashing for Caddy admin password
-    ✅ Real-time Cloudflare token validation
-    ✅ Template-based configuration (.env, docker-compose.yml)
-    ✅ Platform-specific SSH log detection
-    ✅ Firewall race condition fixes
+SECURITY FEATURES:
+    ✅ Command injection protection (awk-based substitution)
+    ✅ Secure temporary file handling (umask 077, 10-char entropy)
+    ✅ Strict input validation (regex + length limits)
+    ✅ Sensitive data logging protection
     ✅ SOPS + Age encrypted secrets
-    ✅ True --auto mode (zero prompts)
-    ✅ Enhanced security (600 permissions, mktemp, full lib validation)
-    ✅ Atomic temporary file handling
-    ✅ Postfix email backend (not msmtpd)
+    ✅ Enhanced error handling (critical vs non-critical)
+    ✅ Idempotent - Safe to re-run multiple times
+    ✅ Postfix email backend (Cloudflare rate limiting ready)
+
 EOF
 }
 
+# =============================================================================
 # Argument Parsing
+# =============================================================================
 while [[ $# -gt 0 ]]; do
     case $1 in
         --domain) DOMAIN="$2"; shift 2 ;;
@@ -122,7 +137,50 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Validation
+# =============================================================================
+# SECURITY ENHANCEMENT: Strict Input Validation
+# =============================================================================
+validate_domain_secure() {
+    local domain="$1"
+    
+    # Length validation (max DNS name length is 253 characters)
+    if [[ ${#domain} -gt 253 ]]; then
+        log_error "Domain exceeds maximum length (253 characters)"
+        return 1
+    fi
+    
+    # Regex validation: alphanumeric, dots, hyphens only
+    # Must start with alphanumeric, contain at least one dot, end with valid TLD
+    if [[ ! "$domain" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,}$ ]]; then
+        log_error "Invalid domain format: $domain"
+        log_info "Domain must contain only alphanumeric characters, dots, and hyphens"
+        return 1
+    fi
+    
+    return 0
+}
+
+validate_email_secure() {
+    local email="$1"
+    
+    # Length validation (RFC 5321 max email length is 254 characters)
+    if [[ ${#email} -gt 254 ]]; then
+        log_error "Email exceeds maximum length (254 characters)"
+        return 1
+    fi
+    
+    # Regex validation: RFC 5322 compliant (reasonably strict)
+    if [[ ! "$email" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+        log_error "Invalid email format: $email"
+        return 1
+    fi
+    
+    return 0
+}
+
+# =============================================================================
+# Initial Validation
+# =============================================================================
 if [[ -z "$DOMAIN" ]]; then
     log_error "Domain is required. Use --domain your-domain.com"
     show_help
@@ -135,13 +193,12 @@ if [[ -z "$ADMIN_EMAIL" ]]; then
     exit 1
 fi
 
-if ! validate_domain "$DOMAIN"; then
-    log_error "Invalid domain format: $DOMAIN"
+# Apply strict validation
+if ! validate_domain_secure "$DOMAIN"; then
     exit 1
 fi
 
-if ! validate_email "$ADMIN_EMAIL"; then
-    log_error "Invalid email format: $ADMIN_EMAIL"
+if ! validate_email_secure "$ADMIN_EMAIL"; then
     exit 1
 fi
 
@@ -162,17 +219,17 @@ install_dependencies() {
     fi
 
     log_info "Installing system dependencies..."
-    
+
     # Check which packages are actually missing (idempotent check)
     local basic_packages=("age" "make" "nano" "rclone" "sqlite3" "jq" "ufw" "curl" "wget" "unzip" "git" "gpg" "coreutils" "haveged" "dnsutils" "rsync" "python3" "python3-argon2" "apache2-utils")
     local missing_packages=()
-    
+
     for pkg in "${basic_packages[@]}"; do
         if ! dpkg -s "$pkg" >/dev/null 2>&1; then
             missing_packages+=("$pkg")
         fi
     done
-    
+
     if [[ ${#missing_packages[@]} -eq 0 ]]; then
         log_success "All dependencies already installed"
     else
@@ -181,7 +238,7 @@ install_dependencies() {
             log_error "Failed to update package lists"
             return 1
         fi
-        
+
         export DEBIAN_FRONTEND=noninteractive
         if ! apt-get install -y "${missing_packages[@]}"; then
             log_error "Failed to install dependencies."
@@ -240,7 +297,6 @@ install_dependencies() {
             rm -f get-docker.sh
             return 1
         fi
-
         rm -f get-docker.sh
 
         if ! systemctl enable docker || ! systemctl start docker; then
@@ -254,6 +310,7 @@ install_dependencies() {
             log_error "Failed to add user to docker group"
             return 1
         fi
+
         log_success "Docker installed. User $real_user added to docker group."
         log_warn "Note: User must logout/login or run 'newgrp docker' for group to take effect"
     fi
@@ -278,6 +335,7 @@ install_dependencies() {
         local sops_version="v3.8.1"
         local arch
         arch=$(dpkg --print-architecture)
+        
         case "$arch" in
             amd64) arch="amd64" ;;
             arm64) arch="arm64" ;;
@@ -304,7 +362,6 @@ install_dependencies() {
 # IDEMPOTENT: Verify dependencies
 verify_dependencies() {
     log_info "Verifying dependencies..."
-
     hash -r
 
     local required_commands=("age" "sops" "docker" "jq" "sqlite3" "ufw" "curl" "python3" "htpasswd")
@@ -373,7 +430,6 @@ setup_user_permissions() {
 # Platform-specific SSH log detection
 detect_ssh_log_path() {
     local ssh_log_path=""
-
     log_info "Detecting platform-specific SSH log location..."
 
     if [[ -f /etc/os-release ]]; then
@@ -406,11 +462,13 @@ detect_ssh_log_path() {
     echo "$ssh_log_path"
 }
 
-# IDEMPOTENT: Template-based environment file creation
+# =============================================================================
+# SECURITY FIX: Template-based environment file creation with AWK substitution
+# =============================================================================
 create_env_file() {
     log_info "Creating environment configuration file (.env)..."
 
-    if [[ "$DRY_RUN" == "true" ]]; then 
+    if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would create .env from template"
         return 0
     fi
@@ -447,6 +505,7 @@ create_env_file() {
     local detected_ssh_log_path
     detected_ssh_log_path=$(detect_ssh_log_path | tail -1)
 
+    # Domain cleaning
     local domain_with_protocol
     if [[ "$DOMAIN" =~ ^https?:// ]]; then
         domain_with_protocol="$DOMAIN"
@@ -456,40 +515,64 @@ create_env_file() {
 
     local clean_domain
     clean_domain=$(echo "$domain_with_protocol" | sed 's|https\?://||; s|/.*$||')
-    
+
     # Store clean_domain globally for final summary
     CLEAN_DOMAIN="$clean_domain"
 
-    local domain_escaped clean_domain_escaped admin_email_escaped smtp_from_escaped ssh_log_escaped
-    domain_escaped=$(printf '%s\n' "$domain_with_protocol" | sed 's/[&/\]/\\&/g')
-    clean_domain_escaped=$(printf '%s\n' "$clean_domain" | sed 's/[&/\]/\\&/g')
-    admin_email_escaped=$(printf '%s\n' "$ADMIN_EMAIL" | sed 's/[&/\]/\\&/g')
-    smtp_from_escaped=$(printf '%s\n' "noreply@$clean_domain" | sed 's/[&/\]/\\&/g')
-    ssh_log_escaped=$(printf '%s\n' "$detected_ssh_log_path" | sed 's/[&/\]/\\&/g')
+    # =============================================================================
+    # SECURITY FIX: Use AWK instead of SED to prevent command injection
+    # =============================================================================
+    # AWK safely handles variables without shell expansion risks
+    
+    local temp_env="$TMP_WORKDIR/env.tmp"
+    
+    awk -v domain="$domain_with_protocol" \
+        -v name="$clean_domain" \
+        -v email="$ADMIN_EMAIL" \
+        -v uid="$user_id" \
+        -v gid="$group_id" \
+        -v smtp_from="noreply@$clean_domain" \
+        -v ssh_log="$detected_ssh_log_path" \
+        '{
+            sub(/^DOMAIN=.*/, "DOMAIN=" domain);
+            sub(/^DOMAIN_NAME=.*/, "DOMAIN_NAME=" name);
+            sub(/^ADMIN_EMAIL=.*/, "ADMIN_EMAIL=" email);
+            sub(/^PUID=.*/, "PUID=" uid);
+            sub(/^PGID=.*/, "PGID=" gid);
+            sub(/^SMTP_FROM=.*/, "SMTP_FROM=" smtp_from);
+            sub(/^SSH_LOG_PATH=.*/, "SSH_LOG_PATH=" ssh_log);
+            print;
+        }' "$env_file" > "$temp_env"
 
-    sed -i "s|DOMAIN=.*|DOMAIN=$domain_escaped|" "$env_file"
-    sed -i "s|DOMAIN_NAME=.*|DOMAIN_NAME=$clean_domain_escaped|" "$env_file"
-    sed -i "s|ADMIN_EMAIL=.*|ADMIN_EMAIL=$admin_email_escaped|" "$env_file"
-    sed -i "s|PUID=.*|PUID=$user_id|" "$env_file"
-    sed -i "s|PGID=.*|PGID=$group_id|" "$env_file"
-    sed -i "s|SMTP_FROM=.*|SMTP_FROM=$smtp_from_escaped|" "$env_file"
-    sed -i "s|SSH_LOG_PATH=.*|SSH_LOG_PATH=$ssh_log_escaped|" "$env_file"
-
-    if [[ "$USE_LATEST" == "true" ]]; then
-        sed -i 's/^VAULTWARDEN_VERSION=.*/VAULTWARDEN_VERSION=latest/' "$env_file"
-        sed -i 's/^CADDY_VERSION=.*/CADDY_VERSION=latest/' "$env_file"
-        sed -i 's/^FAIL2BAN_VERSION=.*/FAIL2BAN_VERSION=latest/' "$env_file"
-        sed -i 's/^POSTFIX_VERSION=.*/POSTFIX_VERSION=latest/' "$env_file"
+    if ! mv "$temp_env" "$env_file"; then
+        log_error "Failed to update .env file"
+        return 1
     fi
 
-    # Set .env to 600 for security
+    # Handle version pinning
+    if [[ "$USE_LATEST" == "true" ]]; then
+        awk '{
+            sub(/^VAULTWARDEN_VERSION=.*/, "VAULTWARDEN_VERSION=latest");
+            sub(/^CADDY_VERSION=.*/, "CADDY_VERSION=latest");
+            sub(/^FAIL2BAN_VERSION=.*/, "FAIL2BAN_VERSION=latest");
+            sub(/^POSTFIX_VERSION=.*/, "POSTFIX_VERSION=latest");
+            print;
+        }' "$env_file" > "$temp_env"
+        
+        if ! mv "$temp_env" "$env_file"; then
+            log_error "Failed to update version settings"
+            return 1
+        fi
+    fi
+
+    # Set .env to 600 for security (owner read/write only)
     if ! chown "$real_user:$real_group" "$env_file" || ! chmod 600 "$env_file"; then
         log_error "Failed to set .env file permissions"
         return 1
     fi
 
-    log_success "Environment file created from template: $env_file"
-    log_info "Permissions: 600 (secure - readable only by owner)"
+    log_success "Environment file created securely: $env_file"
+    log_info "Permissions: 600 (owner read/write only)"
     return 0
 }
 
@@ -538,6 +621,7 @@ setup_directories() {
 # IDEMPOTENT: Enhanced entropy check
 check_entropy() {
     log_info "Checking system entropy..."
+
     local entropy
     entropy=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo "0")
 
@@ -547,8 +631,8 @@ check_entropy() {
     fi
 
     log_warn "System entropy is low ($entropy). Waiting..."
-    local waited=0
 
+    local waited=0
     while (( waited < ENTROPY_MAX_WAIT )); do
         sleep 5
         waited=$((waited + 5))
@@ -558,7 +642,6 @@ check_entropy() {
             log_success "System entropy is now sufficient ($entropy) after ${waited}s"
             return 0
         fi
-
         log_info "Entropy: $entropy (need $ENTROPY_THRESHOLD), waited ${waited}s..."
     done
 
@@ -573,7 +656,6 @@ generate_age_keys() {
     fi
 
     log_info "Generating Age encryption keys..."
-
     local age_key_file="secrets/keys/age-key.txt"
 
     if [[ "$DRY_RUN" == "true" ]]; then
@@ -607,7 +689,7 @@ generate_age_keys() {
         log_error "Failed to set Age key file ownership"
         return 1
     fi
-    
+
     # Explicitly set Age key to 600 permissions
     if ! chmod 600 "$age_key_file"; then
         log_error "Failed to set Age key file permissions"
@@ -615,14 +697,13 @@ generate_age_keys() {
     fi
 
     log_success "Age encryption keys generated: $age_key_file"
-    log_info "Permissions: 600 (secure - readable only by owner)"
+    log_info "Permissions: 600 (owner read/write only)"
     return 0
 }
 
 # IDEMPOTENT: SOPS configuration
 create_sops_config() {
     log_info "Creating SOPS configuration..."
-
     local sops_config=".sops.yaml"
     local age_key_file="secrets/keys/age-key.txt"
 
@@ -656,7 +737,7 @@ create_sops_config() {
 
     if ! cat > "$sops_config" << EOF; then
 creation_rules:
-  - path_regex: .*secrets\\.yaml$
+  - path_regex: .*secrets\.yaml$
     age: $age_public_key
 EOF
         log_error "Failed to create SOPS configuration"
@@ -672,7 +753,9 @@ EOF
     return 0
 }
 
-# IDEMPOTENT: Create empty encrypted secrets structure
+# =============================================================================
+# SECURITY FIX: Create empty encrypted secrets structure with secure temp files
+# =============================================================================
 create_empty_secrets_structure() {
     log_info "Creating encrypted empty secrets structure..."
 
@@ -688,6 +771,7 @@ create_empty_secrets_structure() {
     if [[ -f "$secrets_file" ]]; then
         log_info "Secrets file exists, validating..."
         export SOPS_AGE_KEY_FILE="$age_key_file"
+
         if sops -d "$secrets_file" >/dev/null 2>&1; then
             log_success "Existing secrets file validated"
             return 0
@@ -700,13 +784,13 @@ create_empty_secrets_structure() {
     local real_user; real_user=$(get_real_user)
     local real_group; real_group=$(id -g -n "$real_user")
 
-    # Use TMP_WORKDIR with descriptive name
+    # SECURITY FIX: Use secure temporary directory with high entropy
     local temp_secrets
-    temp_secrets=$(mktemp -p "$TMP_WORKDIR" vwsecrets.XXXXXX.yaml) || {
+    temp_secrets=$(mktemp -p "$TMP_WORKDIR" vwsecrets.XXXXXXXXXX.yaml) || {
         log_error "Failed to create temporary secrets file"
         return 1
     }
-    
+
     cat > "$temp_secrets" << 'EOF'
 # VaultWarden Secrets Configuration - Empty Structure
 # This file will be populated by setup-secrets.sh
@@ -758,9 +842,8 @@ EOF
 
     log_success "Empty encrypted secrets structure created"
     log_info "File: $secrets_file (encrypted with Age)"
-    log_info "Permissions: 600 (secure - readable only by owner)"
+    log_info "Permissions: 600 (owner read/write only)"
     log_info "Status: Ready for value population"
-    
     return 0
 }
 
@@ -781,6 +864,7 @@ setup_secrets_interactively() {
     local secrets_configured=false
     if [[ -f "secrets/secrets.yaml" ]]; then
         export SOPS_AGE_KEY_FILE="$PROJECT_ROOT/secrets/keys/age-key.txt"
+
         if sops -d "secrets/secrets.yaml" 2>/dev/null | grep -q "PLACEHOLDER_NOT_CONFIGURED"; then
             log_info "Secrets file exists but contains placeholders"
             secrets_configured=false
@@ -814,7 +898,6 @@ setup_secrets_interactively() {
     # Configure secrets based on mode
     if [[ "$AUTO_MODE" == "true" ]]; then
         log_info "Running automated secrets setup (--auto mode)..."
-        
         if ./setup-secrets.sh --auto --skip-optional; then
             log_success "Secrets configured automatically"
             echo ""
@@ -840,7 +923,7 @@ setup_secrets_interactively() {
         log_info "  ✅ Secure random generation"
         echo ""
         read -p "Configure secrets interactively? (recommended) (yes/no): " do_setup
-        
+
         if [[ "$do_setup" == "yes" ]]; then
             if ./setup-secrets.sh; then
                 log_success "Secrets configured successfully"
@@ -977,11 +1060,11 @@ setup_firewall() {
 
     # Allow SSH first (critical!)
     ufw allow OpenSSH || ufw allow 22/tcp
-    
+
     # Allow HTTP/HTTPS
     ufw allow 80/tcp
     ufw allow 443/tcp
-    
+
     # Enable if not already
     if ! ufw status | grep -q "Status: active"; then
         echo "y" | ufw enable
@@ -1031,14 +1114,12 @@ cleanup_setup_deps() {
 }
 
 # =============================================================================
-# ENHANCED ERROR HANDLING - NEW SECTION
+# ENHANCED ERROR HANDLING - Phase Execution
 # =============================================================================
-
-# STANDARDIZED ERROR HANDLING: Phase execution with proper error propagation
 execute_phase() {
     local phase_func="$1"
     local phase_name="$2"
-    local phase_critical="${3:-false}"  # Default to non-critical
+    local phase_critical="${3:-false}" # Default to non-critical
 
     log_info "=== Phase: $phase_name ==="
 
@@ -1052,7 +1133,7 @@ execute_phase() {
     if ! $phase_func; then
         exit_code=$?
         log_error "Phase failed: $phase_name (exit code: $exit_code)"
-        
+
         # Critical phase failure stops execution
         if [[ "$phase_critical" == "true" ]]; then
             log_error "CRITICAL PHASE FAILED - Stopping setup"
@@ -1060,7 +1141,7 @@ execute_phase() {
             return 1
         else
             log_warn "Non-critical phase failed - continuing setup"
-            return 2  # Non-critical failure code
+            return 2 # Non-critical failure code
         fi
     else
         log_success "Phase completed: $phase_name"
@@ -1071,17 +1152,16 @@ execute_phase() {
 # =============================================================================
 # MAIN EXECUTION - ENHANCED WITH STANDARDIZED ERROR HANDLING
 # =============================================================================
-
 main() {
-    log_header "VaultWarden-OCI Setup - Production Ready (Enhanced)"
+    log_header "VaultWarden-OCI Setup - Security Hardened Edition"
 
-    if ! is_root; then 
+    if ! is_root; then
         log_error "This script must be run as root."
         log_info "Usage: sudo $0 --domain your-domain.com --email admin@email.com"
         exit 1
     fi
 
-    if [[ -z "$DOMAIN" ]] || [[ -z "$ADMIN_EMAIL" ]]; then 
+    if [[ -z "$DOMAIN" ]] || [[ -z "$ADMIN_EMAIL" ]]; then
         log_error "Domain and Email are required."
         show_help
         exit 1
@@ -1123,7 +1203,7 @@ main() {
         
         local result=0
         execute_phase "$phase_func" "$phase_name" "$phase_critical" || result=$?
-        
+
         case $result in
             0)
                 # Success - continue
@@ -1180,13 +1260,14 @@ main() {
     echo "   - Admin: $ADMIN_EMAIL"
     echo "   - Secrets: Encrypted with SOPS + Age"
     echo "   - Mode: $([ "$AUTO_MODE" == "true" ] && echo "Automated" || echo "Interactive")"
-    echo "   - Security: Enhanced (600 perms, mktemp workdir, all 6 libs validated)"
-    echo "   - Email: Postfix container (boky/postfix)"
+    echo "   - Security: Hardened (command injection protected, secure temp files)"
+    echo "   - Email: Postfix container (Cloudflare rate limiting ready)"
     echo ""
-    
+
     # Check secrets status
     if [[ -f "secrets/secrets.yaml" ]]; then
         export SOPS_AGE_KEY_FILE="$PROJECT_ROOT/secrets/keys/age-key.txt"
+        
         if sops -d secrets/secrets.yaml 2>/dev/null | grep -q "PLACEHOLDER_NOT_CONFIGURED"; then
             echo "⚠️  SECRETS NEED CONFIGURATION:"
             echo "   Some secrets contain placeholders"
@@ -1197,7 +1278,7 @@ main() {
             echo ""
         fi
     fi
-    
+
     echo "🎯 NEXT STEPS:"
     echo "   1. Review .env: nano .env"
     echo "   2. Configure secrets (if needed): ./setup-secrets.sh"
@@ -1210,9 +1291,9 @@ main() {
     echo "   • This script is idempotent - safe to re-run"
     echo "   • User in docker group must logout/login or run: newgrp docker"
     echo "   • Access VaultWarden at: https://$CLEAN_DOMAIN"
-    echo "   • Email via: postfix container (not msmtpd)"
+    echo "   • Rate limiting: Configure Cloudflare WAF rules (see docs)"
     echo ""
-    
+
     if [[ ${#warned_phases[@]} -gt 0 ]]; then
         echo "⚠️  WARNING: Some non-critical phases failed (see above)"
         echo "   Setup is functional but may need attention"
