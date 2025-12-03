@@ -376,9 +376,9 @@ collect_secrets() {
     fi
     
     # CRITICAL SECURITY FIX: Store in htpasswd format for Caddy basicauth directive
-    # Format: username:$2a$14$hash...
+    # Format: username $2a$14$hash...
     # This is what Caddy's {env.ADMIN_BASIC_AUTH_HASH} expects
-    SECRETS["admin_basic_auth_hash"]="admin:$caddy_hash"
+    SECRETS["admin_basic_auth_hash"]="admin $caddy_hash"  
     
     log_success "Caddy admin hash generated (htpasswd format: admin:\$2a\$...)"
 
