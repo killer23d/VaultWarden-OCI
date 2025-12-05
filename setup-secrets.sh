@@ -513,34 +513,27 @@ write_secrets() {
     chmod 600 "$temp_file"
     register_cleanup "rm -f '$temp_file'"
     
-    # Write YAML content
-    cat > "$temp_file" << SECRETS_EOF
-# VaultWarden Secrets Configuration
-# Generated: $(date -Iseconds)
-# Encrypted with: SOPS + Age
-
-# VaultWarden admin password (Argon2id hash)
-admin_token: $SECRET_admin_token
-
-# Caddy admin password (htpasswd format: admin:$2a$14$...)
-admin_basic_auth_hash: $SECRET_admin_basic_auth_hash
-
-# SMTP password for email notifications
-smtp_password: $SECRET_smtp_password
-
-# Backup encryption passphrase
-backup_passphrase: $SECRET_backup_passphrase
-
-# Push notifications (optional)
-push_installation_id: $SECRET_push_installation_id
-push_installation_key: $SECRET_push_installation_key
-
-# Cloudflare DNS API token (Zone:DNS:Edit + Zone:Zone:Read)
-caddy_cloudflare_dns_token: $SECRET_caddy_cloudflare_dns_token
-
-# Cloudflare Firewall API token (Zone:Firewall Services:Edit)
-fail2ban_cloudflare_firewall_token: $SECRET_fail2ban_cloudflare_firewall_token
-SECRETS_EOF
+   # Write YAML content using printf to avoid variable expansion issues
+    {
+        printf '# VaultWarden Secrets Configuration\n'
+        printf '# Generated: %s\n' "$(date -Iseconds)"
+        printf '# Encrypted with: SOPS + Age\n\n'
+        printf '# VaultWarden admin password (Argon2id hash)\n'
+        printf 'admin_token: %s\n\n' "$SECRET_admin_token"
+        printf '# Caddy admin password (htpasswd format: admin:$2a$14$...)\n'
+        printf 'admin_basic_auth_hash: %s\n\n' "$SECRET_admin_basic_auth_hash"
+        printf '# SMTP password for email notifications\n'
+        printf 'smtp_password: %s\n\n' "$SECRET_smtp_password"
+        printf '# Backup encryption passphrase\n'
+        printf 'backup_passphrase: %s\n\n' "$SECRET_backup_passphrase"
+        printf '# Push notifications (optional)\n'
+        printf 'push_installation_id: %s\n' "$SECRET_push_installation_id"
+        printf 'push_installation_key: %s\n\n' "$SECRET_push_installation_key"
+        printf '# Cloudflare DNS API token (Zone:DNS:Edit + Zone:Zone:Read)\n'
+        printf 'caddy_cloudflare_dns_token: %s\n\n' "$SECRET_caddy_cloudflare_dns_token"
+        printf '# Cloudflare Firewall API token (Zone:Firewall Services:Edit)\n'
+        printf 'fail2ban_cloudflare_firewall_token: %s\n' "$SECRET_fail2ban_cloudflare_firewall_token"
+    } > "$temp_file"
     
     chmod 600 "$temp_file"
     
