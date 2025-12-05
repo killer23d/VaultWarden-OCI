@@ -737,7 +737,7 @@ create_sops_config() {
 
     if ! cat > "$sops_config" << EOF; then
 creation_rules:
-  - path_regex: .*secrets\.yaml$
+  - path_regex: .*\.yaml$
     age: $age_public_key
 EOF
         log_error "Failed to create SOPS configuration"
