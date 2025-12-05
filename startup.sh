@@ -1,10 +1,5 @@
 #!/usr/bin/env bash
 # startup.sh - Enhanced VaultWarden startup script with secure secrets handling
-# ENHANCED: Fixed secret file permissions race condition - set umask before file creation
-# ENHANCED: Atomic secret file creation with proper permissions from the start
-# ENHANCED: Automatic log directory preparation with init-container support
-# FIXED: Replaced echo with printf for robust secret writing
-# FIXED: YAML secret extraction using grep/cut/sed instead of broken --extract flag
 
 set -euo pipefail
 
@@ -232,6 +227,35 @@ start_services() {
     return 0
 }
 
+# ENHANCED: DNS Update function (runs after services start)
+update_dns_record() {
+    log_info "Updating DNS to ensure correct public IP..."
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would update DNS record"
+        return 0
+    fi
+
+    if [[ ! -x "$PROJECT_ROOT/update-dns.sh" ]]; then
+        log_warn "DNS update script not found or not executable: $PROJECT_ROOT/update-dns.sh"
+        log_info "DNS will not be automatically updated"
+        return 0
+    fi
+
+    # Wait for containers to fully initialize before DNS update
+    log_info "Waiting for services to initialize before DNS update..."
+    sleep 5
+
+    if "$PROJECT_ROOT/update-dns.sh"; then
+        log_success "DNS update completed successfully"
+        return 0
+    else
+        log_warn "DNS update failed - you may need to run it manually later"
+        log_info "Run manually: ./update-dns.sh"
+        return 0  # Don't fail startup if DNS update fails
+    fi
+}
+
 # STANDARDIZED: Health validation
 verify_startup_health() {
     if [[ "$SKIP_HEALTH_CHECK" == "true" ]]; then
@@ -246,8 +270,8 @@ verify_startup_health() {
 
     log_info "Verifying service health after startup..."
 
-    # Wait for services to initialize (increased from 10 to 30 seconds)
-    sleep 15
+    # Wait for services to initialize
+    sleep 10
 
     # Run comprehensive health check if available
     if [[ -f "./health.sh" ]]; then
@@ -275,7 +299,7 @@ cleanup_on_exit() {
 
 trap cleanup_on_exit EXIT
 
-# ENHANCED: Main function with proper error handling
+# ENHANCED: Main function with proper error handling and correct phase ordering
 main() {
     log_header "VaultWarden-OCI Enhanced Startup"
 
@@ -283,17 +307,6 @@ main() {
     if ! load_env_file; then
         log_error "Failed to load environment configuration"
         exit 1
-    fi
-
-    # --- DNS Update Block for startup.sh ---
-
-    log_info "Running DNS update to ensure correct public IP..."
-
-    if [[ -x "$PROJECT_ROOT/update-dns.sh" ]]; then
-        "$PROJECT_ROOT/update-dns.sh"
-        log_success "DNS update script completed."
-        else
-        log_warn "DNS update script not found or not executable: $PROJECT_ROOT/update-dns.sh"
     fi
 
     # Validate Docker availability
@@ -309,7 +322,7 @@ main() {
         exit 1
     fi
 
-    # Phase 1.5: State directory preparation (NEW)
+    # Phase 1.5: State directory preparation
     log_info "=== Phase 1.5: State Directory Preparation ==="
     if ! prepare_log_directories; then
         log_error "Failed to prepare state directories"
@@ -322,6 +335,10 @@ main() {
         log_error "Failed to start services"
         exit 1
     fi
+
+    # Phase 2.5: DNS Update (MOVED HERE - after services are running)
+    log_info "=== Phase 2.5: DNS Update ==="
+    update_dns_record  # Non-fatal - returns 0 even on failure
 
     # Phase 3: Health verification
     log_info "=== Phase 3: Health Verification ==="
