@@ -478,11 +478,11 @@ create_env_file() {
 
     # Check if already exists and valid (idempotent check)
     if [[ -f "$env_file" ]] && [[ "$FORCE" != "true" ]]; then
-        if grep -q "DOMAIN=" "$env_file" && grep -q "ADMIN_EMAIL=" "$env_file"; then
-            log_success ".env file already exists and appears valid"
+        if grep -q "^DOMAIN=$DOMAIN" "$env_file" && grep -q "^ADMIN_EMAIL=$ADMIN_EMAIL" "$env_file"; then
+            log_success ".env file already exists with correct values"
             return 0
         else
-            log_warn ".env exists but appears incomplete, recreating..."
+            log_warn ".env exists but values differ, updating..."
         fi
     fi
 
