@@ -95,10 +95,10 @@
             X-Admin-Access "true"
         }
 
-        # BEST PRACTICE: basicauth directive with htpasswd-formatted environment variable
-        # Expected format in env var: "admin:$2a$14$hash..."
-        basicauth {
-            {env.ADMIN_BASIC_AUTH_HASH}
+        # Basic authentication for admin panel (Caddy v2.10+ format)
+        # Environment variables set by entrypoint.sh: ADMIN_USERNAME and ADMIN_HASH
+        basic_auth {
+            {env.ADMIN_USERNAME} {env.ADMIN_HASH}
         }
 
         reverse_proxy vaultwarden:80 {
@@ -125,7 +125,15 @@
 
     # 6. Malicious User-Agent Blocking (ENHANCED)
     @malicious_ua {
-        header User-Agent *sqlmap* *nikto* *nmap* *acunetix* *dirbuster* *gobuster* *wfuzz* *masscan* *zgrab*
+        header User-Agent "*sqlmap*"
+        header User-Agent "*nikto*"
+        header User-Agent "*nmap*"
+        header User-Agent "*acunetix*"
+        header User-Agent "*dirbuster*"
+        header User-Agent "*gobuster*"
+        header User-Agent "*wfuzz*"
+        header User-Agent "*masscan*"
+        header User-Agent "*zgrab*"
     }
     handle @malicious_ua {
         respond "Access Denied - Security Policy Violation" 403
