@@ -1,9 +1,9 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # caddy/entrypoint.sh - Caddy Entrypoint Script - VaultWarden-OCI
 # Purpose: Securely load Docker secrets into environment variables
 # Security: Validates secrets before starting Caddy
 
-set -euo pipefail
+set -eu
 
 echo "==================================================================="
 echo " Caddy Entrypoint - Loading Secrets"
