@@ -39,23 +39,42 @@ if [ ! -f /run/secrets/admin_basic_auth_hash ]; then
     exit 1
 fi
 
-export ADMIN_BASIC_AUTH_HASH=$(cat /run/secrets/admin_basic_auth_hash)
+# Read the full hash (format: "admin $2a$14$...")
+ADMIN_HASH_FULL=$(cat /run/secrets/admin_basic_auth_hash)
 
-if [ -z "$ADMIN_BASIC_AUTH_HASH" ]; then
+if [ -z "$ADMIN_HASH_FULL" ]; then
     echo "ERROR: Admin basic auth hash is empty" >&2
     exit 1
 fi
 
-# ✅ CRITICAL FIX: Validate SPACE-separated format (not colon)
-# Expected format: "admin $2a$14$..."
-if ! echo "$ADMIN_BASIC_AUTH_HASH" | grep -qE '^admin \$2[aby]\$'; then
+# Validate format before splitting
+if ! echo "$ADMIN_HASH_FULL" | grep -qE '^admin \$2[aby]\$'; then
     echo "ERROR: Admin basic auth hash has invalid format" >&2
     echo "Expected: admin \$2a\$14\$... (SPACE-separated)" >&2
-    echo "Got: $ADMIN_BASIC_AUTH_HASH" >&2
+    echo "Got: $ADMIN_HASH_FULL" >&2
     exit 1
 fi
 
-echo "✓ Admin basic auth hash loaded (format: admin \$2a\$...)"
+# Extract username (everything before first space)
+export ADMIN_USERNAME=$(echo "$ADMIN_HASH_FULL" | awk '{print $1}')
+
+# Extract hash (everything after first space)
+export ADMIN_HASH=$(echo "$ADMIN_HASH_FULL" | awk '{$1=""; print substr($0,2)}')
+
+# Debug output (remove after testing)
+echo "✓ Admin basic auth loaded:"
+echo "  Username: $ADMIN_USERNAME"
+echo "  Hash length: $(echo "$ADMIN_HASH" | wc -c) characters"
+
+# Verify we got both parts
+if [ -z "$ADMIN_USERNAME" ] || [ -z "$ADMIN_HASH" ]; then
+    echo "ERROR: Failed to split admin credentials" >&2
+    echo "  Username: '$ADMIN_USERNAME'" >&2
+    echo "  Hash: '$(echo "$ADMIN_HASH" | head -c 20)...'" >&2
+    exit 1
+fi
+
+echo "✓ Admin credentials ready for Caddy"
 
 # =============================================================================
 # VALIDATION: Caddyfile Syntax Check
@@ -76,12 +95,5 @@ echo "==================================================================="
 echo " Starting Caddy Server"
 echo " Domain: ${DOMAIN_NAME}"
 echo "==================================================================="
-
-# SECURITY NOTE: Environment variables used because caddy-cloudflare
-# plugin does not support file-based API tokens (plugin limitation).
-# Secrets are:
-# - NOT in docker-compose.yml (avoiding `docker inspect` exposure)
-# - Visible only within container's process environment
-# - Protected by container isolation and no-new-privileges
 
 exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
