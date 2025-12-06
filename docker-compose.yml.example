@@ -35,11 +35,15 @@ services:
       - no-new-privileges:true
     
     command: sh -c "
+      mkdir -p /logs &&
+      chown ${PUID}:${PGID} /logs &&
       mkdir -p /logs/vaultwarden /logs/caddy /logs/fail2ban /logs/postfix &&
-      chown -R ${PUID}:${PGID} /data /logs /caddy_data /caddy_config /fail2ban &&
-      chmod -R 755 /data /logs /caddy_data /caddy_config /fail2ban &&
-      chmod 755 /secrets /secrets/.docker_secrets &&
-      chmod 644 /secrets/.docker_secrets/* &&
+      chown -R ${PUID}:${PGID} /data /logs /fail2ban 2>/dev/null || true &&
+      find /caddy_data -type d -exec chown ${PUID}:${PGID} {} + 2>/dev/null || true &&
+      find /caddy_config -type d -exec chown ${PUID}:${PGID} {} + 2>/dev/null || true &&
+      chmod -R 755 /data /logs /caddy_data /caddy_config /fail2ban 2>/dev/null || true &&
+      chmod 755 /secrets /secrets/.docker_secrets 2>/dev/null || true &&
+      chmod 644 /secrets/.docker_secrets/* 2>/dev/null || true &&
       echo 'Init container completed - permissions set to ${PUID}:${PGID}'
       "
     
