@@ -27,9 +27,6 @@ services:
       - CHOWN
       - FOWNER
     
-    # SECURITY: Read-only root filesystem
-    read_only: true
-    
     # SECURITY: No new privileges
     security_opt:
       - no-new-privileges:true
