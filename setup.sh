@@ -579,21 +579,22 @@ create_env_file() {
 # IDEMPOTENT: Directory creation
 setup_directories() {
     log_info "Setting up project directories..."
-
+  
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would create project directories"
         return 0
     fi
-
+  
     local real_user; real_user=$(get_real_user)
     local real_group; real_group=$(id -g -n "$real_user")
-
+  
     local dirs=(
         "secrets"
         "secrets/keys"
         "secrets/.docker_secrets"
+        "backups"
     )
-
+  
     for dir in "${dirs[@]}"; do
         if [[ -d "$dir" ]]; then
             log_success "Directory already exists: $dir"
@@ -604,16 +605,39 @@ setup_directories() {
             fi
             log_info "Created directory: $dir"
         fi
-
+    
         if ! chown "$real_user:$real_group" "$dir"; then
-            log_error "Failed to set ownership for directory: $dir"
-            return 1
+        log_error "Failed to set ownership for directory: $dir"
+        return 1
         fi
     done
-
-    # Secure permissions (idempotent)
+  
+# Secure permissions
     chmod 700 "secrets" "secrets/keys" "secrets/.docker_secrets" 2>/dev/null || true
-
+    chmod 755 "backups" 2>/dev/null || true
+  
+# ADDED: Create state directories with log subdirectories
+    local project_state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
+    local puid="${PUID:-1001}"
+    local pgid="${PGID:-1001}"
+  
+  log_info "Creating state directories with log subdirectories..."
+    if ! sudo mkdir -p "${project_state_dir}"/{data,logs/{vaultwarden,caddy,fail2ban,postfix},caddy/{data,config},fail2ban}; then
+        log_error "Failed to create state directories"
+        return 1
+    fi
+  
+# Set ownership for state directories
+    if ! sudo chown -R "${puid}:${pgid}" "$project_state_dir"; then
+        log_error "Failed to set ownership for state directories"
+        return 1
+    fi
+  
+    if ! sudo chmod -R 755 "$project_state_dir"; then
+        log_error "Failed to set permissions for state directories"
+        return 1
+    fi
+  
     log_success "Project directories created."
     return 0
 }
