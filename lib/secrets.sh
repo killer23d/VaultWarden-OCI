@@ -168,16 +168,28 @@ setup_secrets_environment() {
     fi
     
     export SOPS_AGE_KEY_FILE="$age_key"
+    # FIXED: Also export SOPS_CONFIG to ensure .sops.yaml is found
+    export SOPS_CONFIG="${PROJECT_ROOT}/.sops.yaml"
     log_debug "Secure environment configured"
     return 0
 }
 
 # Cleanup secrets environment
+# FIXED: Commented out to prevent breaking edit-secrets.sh
+# The environment variables need to persist for the entire script execution
 cleanup_secrets_environment() {
-    if [[ -n "${SOPS_AGE_KEY_FILE:-}" ]]; then
-        unset SOPS_AGE_KEY_FILE
-    fi
-    log_debug "Environment cleaned up"
+    # NOTE: This function is intentionally disabled to prevent unsetting
+    # SOPS environment variables that are needed throughout script execution.
+    # If you need to cleanup, call 'unset SOPS_AGE_KEY_FILE SOPS_CONFIG' explicitly.
+    
+    # if [[ -n "${SOPS_AGE_KEY_FILE:-}" ]]; then
+    #     unset SOPS_AGE_KEY_FILE
+    # fi
+    # if [[ -n "${SOPS_CONFIG:-}" ]]; then
+    #     unset SOPS_CONFIG
+    # fi
+    
+    log_debug "Environment cleanup skipped (variables persist for script duration)"
     return 0
 }
 
