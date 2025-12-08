@@ -168,7 +168,7 @@ view_secrets() {
     fi
     
     local temp_file
-    temp_file=$(mktemp)
+    temp_file=$(mktemp --suffix=.yaml)
     chmod 600 "$temp_file"
     register_cleanup "rm -f '$temp_file'"
     
