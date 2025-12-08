@@ -467,7 +467,7 @@ check_backup_status() {
     local backup_issues=()
     local backup_failed=false
     
-    if [[ -n "$latest_db_backup" ]]; then
+    if [[ -n "${latest_db_backup:-}" ]]; then
         local db_backup_age
         if command -v stat >/dev/null 2>&1; then
             db_backup_age=$((($(date +%s) - $(stat -c%Y "$latest_db_backup" 2>/dev/null || \
@@ -490,7 +490,7 @@ check_backup_status() {
         backup_failed=true
     fi
     
-    if [[ -n "$latest_full_backup" ]]; then
+    if [[ -n "${latest_full_backup:-}" ]]; then
         local full_backup_age
         if command -v stat >/dev/null 2>&1; then
             full_backup_age=$((($(date +%s) - $(stat -c%Y "$latest_full_backup" 2>/dev/null || \
