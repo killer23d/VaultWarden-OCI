@@ -14,6 +14,10 @@ init_common_lib "$0"
 source "lib/crypto.sh"
 source "lib/secrets.sh"
 
+# SOPS Configuration - MUST be after sourcing libraries
+export SOPS_AGE_KEY_FILE="$PROJECT_ROOT/secrets/keys/age-key.txt"
+export SOPS_CONFIG="$PROJECT_ROOT/.sops.yaml"
+
 # Configuration
 EDITOR_CMD="${EDITOR:-nano}"
 SKIP_BACKUP=false
@@ -26,7 +30,7 @@ perform_cleanup() {
     for ((idx=${#CLEANUP_ACTIONS[@]}-1; idx>=0; idx--)); do 
         eval "${CLEANUP_ACTIONS[$idx]}" 2>/dev/null || true
     done
-    cleanup_secrets_environment
+    # Don't cleanup SOPS environment - it's needed throughout
 }
 trap perform_cleanup EXIT
 
@@ -112,15 +116,13 @@ check_prerequisites() {
 validate_secrets() {
     log_info "Validating secrets file..."
     
-    if ! setup_secrets_environment; then
-        log_error "Failed to setup SOPS environment"
-        return 1
-    fi
+    # Re-export in case libraries unset them
+    export SOPS_AGE_KEY_FILE="$PROJECT_ROOT/secrets/keys/age-key.txt"
+    export SOPS_CONFIG="$PROJECT_ROOT/.sops.yaml"
     
     if ! validate_secrets_decryption; then
         log_error "Cannot decrypt secrets file"
         log_info "The Age key may be incorrect or the file corrupted"
-        cleanup_secrets_environment
         return 1
     fi
     
@@ -129,7 +131,6 @@ validate_secrets() {
         # Continue anyway - user might be fixing it
     fi
     
-    cleanup_secrets_environment
     log_success "Secrets validation passed"
     return 0
 }
@@ -163,12 +164,12 @@ create_backup() {
 view_secrets() {
     log_info "Opening secrets in view-only mode..."
     
-    if ! setup_secrets_environment; then
-        return 1
-    fi
+    # Re-export in case libraries unset them
+    export SOPS_AGE_KEY_FILE="$PROJECT_ROOT/secrets/keys/age-key.txt"
+    export SOPS_CONFIG="$PROJECT_ROOT/.sops.yaml"
     
     local temp_file
-    temp_file=$(mktemp --suffix=.yaml)
+    temp_file=$(mktemp)
     chmod 600 "$temp_file"
     register_cleanup "rm -f '$temp_file'"
     
@@ -184,7 +185,6 @@ view_secrets() {
         "$EDITOR_CMD" -R "$temp_file" 2>/dev/null || cat "$temp_file"
     fi
     
-    cleanup_secrets_environment
     return 0
 }
 
@@ -192,13 +192,13 @@ view_secrets() {
 edit_secrets() {
     log_info "Opening secrets with: $EDITOR_CMD"
     
-    if ! setup_secrets_environment; then
-        return 1
-    fi
+    # Re-export in case libraries unset them
+    export SOPS_AGE_KEY_FILE="$PROJECT_ROOT/secrets/keys/age-key.txt"
+    export SOPS_CONFIG="$PROJECT_ROOT/.sops.yaml"
     
     # Decrypt to temp file
     local temp_file
-    temp_file=$(mktemp)
+    temp_file=$(mktemp --suffix=.yaml)
     chmod 600 "$temp_file"
     register_cleanup "rm -f '$temp_file'"
     
@@ -223,7 +223,6 @@ edit_secrets() {
     
     if [[ "$before_checksum" == "$after_checksum" ]]; then
         log_info "File has not changed, exiting"
-        cleanup_secrets_environment
         return 0
     fi
     
@@ -247,7 +246,8 @@ edit_secrets() {
     log_info "Encrypting changes..."
     local encrypted_temp="${temp_file}.enc"
     
-    if ! sops --encrypt "$temp_file" > "$encrypted_temp"; then
+    # FIXED: Use inline environment variables to ensure they're set for this command
+    if ! SOPS_AGE_KEY_FILE="$PROJECT_ROOT/secrets/keys/age-key.txt" SOPS_CONFIG="$PROJECT_ROOT/.sops.yaml" sops --encrypt "$temp_file" > "$encrypted_temp"; then
         log_error "Failed to encrypt secrets"
         rm -f "$encrypted_temp"
         return 1
@@ -256,8 +256,6 @@ edit_secrets() {
     # Atomic move
     mv "$encrypted_temp" "$SECRETS_FILE"
     secure_secrets_file
-    
-    cleanup_secrets_environment
     
     log_success "Secrets updated successfully"
     return 0
