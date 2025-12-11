@@ -221,7 +221,7 @@ install_dependencies() {
     log_info "Installing system dependencies..."
 
     # Check which packages are actually missing (idempotent check)
-    local basic_packages=("age" "make" "nano" "rclone" "sqlite3" "jq" "ufw" "curl" "wget" "unzip" "git" "gpg" "coreutils" "haveged" "dnsutils" "rsync" "python3" "python3-argon2" "apache2-utils")
+    local basic_packages=("age" "make" "nano" "rclone" "sqlite3" "jq" "ufw" "curl" "wget" "unzip" "git" "gpg" "coreutils" "haveged" "dnsutils" "rsync" "python3" "python3-argon2" "apache2-utils" "cron")
     local missing_packages=()
 
     for pkg in "${basic_packages[@]}"; do
