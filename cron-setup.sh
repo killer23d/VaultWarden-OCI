@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
 # cron-setup.sh - Secure VaultWarden cron job management with centralized security functions
-# UPDATED: Differentiated daily (fast) and weekly (full) backup verification
-# FIXED: Now copies library dependencies to ensure scripts can run
 
 set -euo pipefail
 
@@ -11,7 +9,8 @@ cd "$PROJECT_ROOT"
 
 source "lib/common.sh"
 init_common_lib "$0"
-source "lib/security.sh"  # ENHANCED: Use centralized security functions
+source "lib/docker.sh"
+source "lib/security.sh"
 
 # Configuration
 INSTALL_CRON=false
