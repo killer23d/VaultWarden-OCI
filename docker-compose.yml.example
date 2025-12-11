@@ -219,18 +219,11 @@ services:
     restart: unless-stopped
     
     environment:
-      # General settings
       - TZ=${TZ:-UTC}
-      
-      # Required: Domains allowed to send mail
       - ALLOWED_SENDER_DOMAINS=${ALLOWED_SENDER_DOMAINS:-}
-      
-      # Relay configuration (built from SMTP_* variables)
       - RELAYHOST=${SMTP_HOST}:${SMTP_PORT}
       - RELAYHOST_USERNAME=${SMTP_USERNAME}
       - RELAYHOST_PASSWORD_FILE=/run/secrets/smtp_password
-      
-      # Postfix-specific settings (note: lowercase parameter names after POSTFIX_ prefix)
       - POSTFIX_myhostname=${POSTFIX_MYHOSTNAME:-postfix}
       - POSTFIX_smtp_tls_security_level=${POSTFIX_SMTP_TLS_SECURITY_LEVEL:-encrypt}
       - POSTFIX_message_size_limit=${POSTFIX_MESSAGE_SIZE_LIMIT:-10240000}
@@ -246,31 +239,34 @@ services:
     
     healthcheck:
       test: ["CMD", "nc", "-z", "localhost", "587"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
+      interval: 60s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
     
     security_opt:
       - no-new-privileges:true
     
-    # SECURITY FIX: Reduced capabilities (removed DAC_OVERRIDE and FOWNER)
     cap_drop:
       - ALL
     
     cap_add:
-      - CHOWN           # Required for mail queue ownership
-      - SETUID          # Required for user switching
-      - SETGID          # Required for group switching
-      - NET_BIND_SERVICE  # Required for port 587
+      - CHOWN              # Mail queue ownership
+      - SETUID             # User switching
+      - SETGID             # Group switching
+      - NET_BIND_SERVICE   # Port 587
+      - DAC_OVERRIDE       # Internal socket access (required)
+      - FOWNER             # File ownership (required)
+      - KILL               # Process management
     
     deploy:
       resources:
         limits:
-          memory: 256M      # INCREASED from 128M (more realistic for Postfix)
+          memory: 256M
           cpus: '0.1'
+          pids: 50
         reservations:
-          memory: 64M       # INCREASED from 32M
+          memory: 64M
           cpus: '0.02'
 
   # =============================================================================
