@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # db-maint.sh - On-demand VaultWarden SQLite database maintenance
-# This script stops the ENTIRE stack, runs VACUUM on the live DB, and restarts.
 
 set -euo pipefail
 
@@ -94,7 +93,6 @@ main() {
     load_env_file || { log_error "Failed to load .env file"; exit 1; }
     require_docker || exit 1
     require_commands stat numfmt || exit 1
-    # NOTE: removed sqlite3 from required commands as we use container now
     
     # Get database file path
     local state_dir db_file
@@ -156,9 +154,8 @@ main() {
     log_info "Waiting 5 seconds for file lock release..."
     sleep 5
     
-    # HELPER: Containerized sqlite execution
-    # Mounts $state_dir/data/bwdata to /data in container
-    run_sqlite() {
+    # HELPER: Containerized sqlite execution (Sidecar)
+    run_sqlite_sidecar() {
         local cmd="$1"
         docker run --rm -v "$state_dir/data/bwdata:/data" alpine:latest \
             sh -c "apk add --no-cache sqlite >/dev/null 2>&1 && sqlite3 /data/db.sqlite3 '$cmd'"
@@ -166,7 +163,7 @@ main() {
 
     # 1. Check integrity
     log_info "Step 1/5: Checking database integrity..."
-    if run_sqlite "PRAGMA integrity_check;" | grep -q "ok"; then
+    if run_sqlite_sidecar "PRAGMA integrity_check;" | grep -q "ok"; then
         log_success "Database integrity check passed"
     else
         log_error "Database integrity check FAILED"
@@ -177,7 +174,7 @@ main() {
     
     # 2. Checkpoint WAL
     log_info "Step 2/5: Committing WAL file (PRAGMA wal_checkpoint)..."
-    if run_sqlite "PRAGMA wal_checkpoint(TRUNCATE);"; then
+    if run_sqlite_sidecar "PRAGMA wal_checkpoint(TRUNCATE);"; then
         log_success "WAL file checkpointed successfully"
     else
         # This is non-fatal, but we should warn
@@ -186,7 +183,7 @@ main() {
     
     # 3. Optimize
     log_info "Step 3/5: Optimizing database stats (PRAGMA optimize)..."
-    if run_sqlite "PRAGMA optimize;"; then
+    if run_sqlite_sidecar "PRAGMA optimize;"; then
         log_success "Database optimization complete"
     else
         log_warn "Could not optimize database. Proceeding anyway."
@@ -194,7 +191,7 @@ main() {
     
     # 4. Perform VACUUM
     log_info "Step 4/5: Reclaiming free space (VACUUM)... This may take a moment."
-    if run_sqlite "VACUUM;"; then
+    if run_sqlite_sidecar "VACUUM;"; then
         log_success "Database VACUUM completed"
     else
         log_error "Database VACUUM FAILED"
