@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
 # maintenance.sh - System cleanup and optimization with enhanced safety
-# ENHANCED: Fixed live database VACUUM - now safely stops services before database operations
-# ENHANCED: Proper transaction handling and integrity verification
-# MODIFIED: Containerized sqlite3 execution (No host dependencies)
 
 set -euo pipefail
 
@@ -262,8 +259,7 @@ cleanup_docker_system() {
     fi
 }
 
-# ENHANCED: SAFE database optimization - stops services first to prevent corruption
-# MODIFIED: Uses docker run ... alpine instead of host sqlite3
+# ENHANCED: SAFE database optimization - stops services first, sidecar ops
 optimize_database() {
     if [[ "$OPTIMIZE_DATABASE" != "true" ]]; then
         log_info "Skipping database optimization (--no-database specified)"
@@ -306,26 +302,9 @@ optimize_database() {
 
     log_info "Database size before optimization: ${size_before}MB"
 
-    # HELPER: Containerized sqlite execution
-    # Mounts the 'data' dir from state dir to /data in container
-    run_sqlite_container() {
-        local cmd="$1"
-        docker run --rm -v "$state_dir/data/bwdata:/data" alpine:latest \
-            sh -c "apk add --no-cache sqlite >/dev/null 2>&1 && sqlite3 /data/db.sqlite3 '$cmd'"
-    }
-
     # SAFETY STEP 1: If service is running, prepare for safe shutdown
     if [[ "$was_running" == "true" ]]; then
         log_info "Preparing VaultWarden for safe database maintenance..."
-
-        # Checkpoint WAL to ensure all transactions are written to main DB
-        log_info "Checkpointing WAL (Write-Ahead Log) for transaction consistency..."
-        # Try online checkpoint first
-        if docker compose exec -T vaultwarden sqlite3 /data/bwdata/db.sqlite3 "PRAGMA wal_checkpoint(FULL);" >/dev/null 2>&1; then
-            log_success "WAL checkpoint completed successfully"
-        else
-            log_warn "WAL checkpoint failed, but continuing with optimization"
-        fi
 
         # Stop VaultWarden service gracefully
         log_info "Stopping VaultWarden service for safe database operations..."
@@ -353,9 +332,16 @@ optimize_database() {
         return 1
     fi
 
+    # HELPER: Containerized sqlite execution (Sidecar)
+    run_sqlite_sidecar() {
+        local cmd="$1"
+        docker run --rm -v "$state_dir/data/bwdata:/data" alpine:latest \
+            sh -c "apk add --no-cache sqlite >/dev/null 2>&1 && sqlite3 /data/db.sqlite3 '$cmd'"
+    }
+
     # SAFETY STEP 3: Verify database integrity before optimization
     log_info "Verifying database integrity before optimization..."
-    if run_sqlite_container "PRAGMA integrity_check;" | grep -qx "ok"; then
+    if run_sqlite_sidecar "PRAGMA integrity_check;" | grep -qx "ok"; then
         log_success "Database integrity check passed"
     else
         log_error "Database integrity check failed - aborting optimization"
@@ -379,7 +365,7 @@ optimize_database() {
 
     for cmd in "${optimization_commands[@]}"; do
         log_debug "Running: $cmd"
-        if ! run_sqlite_container "$cmd" >/dev/null 2>&1; then
+        if ! run_sqlite_sidecar "$cmd"; then
             log_warn "Database command failed: $cmd"
             optimization_success=false
         fi
@@ -387,7 +373,7 @@ optimize_database() {
 
     # SAFETY STEP 5: Verify database integrity after optimization
     log_info "Verifying database integrity after optimization..."
-    if run_sqlite_container "PRAGMA integrity_check;" | grep -qx "ok"; then
+    if run_sqlite_sidecar "PRAGMA integrity_check;" | grep -qx "ok"; then
         log_success "Post-optimization integrity check passed"
     else
         log_error "CRITICAL: Database integrity check failed after optimization!"
