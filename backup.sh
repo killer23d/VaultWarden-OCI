@@ -94,7 +94,7 @@ get_verification_mode() { local mode; mode=$(get_config_value "BACKUP_VERIFICATI
 # Helper to run sqlite3 commands (Containerized)
 # Checks if the main container is running, otherwise spins up ephemeral alpine
 verify_sqlite_integrity() {
-    local db_file="$1"  # Host path
+   local db_file="$1"
     local verification_mode="${2:-quick_check}"
     
     log_info "Verifying database integrity ($verification_mode)..."
@@ -109,10 +109,10 @@ verify_sqlite_integrity() {
     local dir_name=$(dirname "$db_file")
     local file_name=$(basename "$db_file")
     
-    # Run integrity check using ephemeral container to avoid host dependency
+    # FIXED: Suppress docker pull output, only capture sqlite3 result
     local result
     result=$(docker run --rm -v "$dir_name:/check" alpine:latest \
-        sh -c "apk add --no-cache sqlite >/dev/null 2>&1 && sqlite3 /check/$file_name '$check_cmd'" 2>&1)
+        sh -c "apk add --no-cache sqlite >/dev/null 2>&1 && sqlite3 /check/$file_name '$check_cmd'" 2>/dev/null)
     
     if [[ "$result" == "ok" ]]; then
         log_success "SQLite integrity check passed"
