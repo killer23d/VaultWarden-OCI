@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # maintenance.sh - System cleanup and optimization with enhanced safety
+# FIXED: Lock files now use state directory for portability
 
 set -euo pipefail
 
@@ -33,7 +34,7 @@ show_help() {
 VaultWarden-OCI Maintenance Script - Safe Database Operations
 
 USAGE:
-    ./maintenance.sh [OPTIONS]
+    sudo ./maintenance.sh [OPTIONS]
 
 OPTIONS:
     --comprehensive         Run comprehensive maintenance (includes firewall updates)
@@ -65,9 +66,9 @@ SAFETY FEATURES:
     - Firewall updates avoid service interruption
 
 EXAMPLES:
-    ./maintenance.sh                    # Basic maintenance
-    ./maintenance.sh --comprehensive    # Full maintenance with firewall
-    ./maintenance.sh --dry-run          # Preview maintenance actions
+    sudo ./maintenance.sh                    # Basic maintenance
+    sudo ./maintenance.sh --comprehensive    # Full maintenance with firewall
+    sudo ./maintenance.sh --dry-run          # Preview maintenance actions
 EOF
 }
 
@@ -726,22 +727,32 @@ Recommended Actions:
 main() {
     log_header "VaultWarden-OCI SAFE Maintenance Manager"
     
-    # BEST PRACTICE FIX: Add script-specific lock
-    local MAINT_LOCKDIR="/var/run/vaultwarden-maint.lock"
+    # FIXED: Use state directory for locks - always writable
+    local state_dir
+    state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
+    
+    # Create locks directory if it doesn't exist
+    mkdir -p "$state_dir/.locks" 2>/dev/null || true
+    
+    local MAINT_LOCKDIR="$state_dir/.locks/maintenance.lock"
+    
     if ! mkdir "$MAINT_LOCKDIR" 2>/dev/null; then
         log_error "Another maintenance task is already running (lock: $MAINT_LOCKDIR)"
+        log_info "If this is an error, manually remove: $MAINT_LOCKDIR"
         exit 1
     fi
-    # This script doesn't use the trap system, so add a trap manually
+    
+    # Cleanup trap
     trap "rmdir '$MAINT_LOCKDIR' 2>/dev/null || true" EXIT
 
-    # BEST PRACTICE FIX: Add global maintenance mode lock for health.sh
-    local GLOBAL_MAINT_LOCK="/tmp/.vw_maintenance.lock"
+    # Global maintenance mode lock for health.sh
+    local GLOBAL_MAINT_LOCK="$state_dir/.locks/global-maintenance.lock"
     if ! touch "$GLOBAL_MAINT_LOCK"; then
         log_error "Failed to create global maintenance lock at $GLOBAL_MAINT_LOCK"
         exit 1
     fi
-    # Add to the trap
+    
+    # Update trap to clean both locks
     trap "rm -f '$GLOBAL_MAINT_LOCK' 2>/dev/null || true; rmdir '$MAINT_LOCKDIR' 2>/dev/null || true" EXIT
 
 
@@ -822,13 +833,13 @@ main() {
 
     if [[ $critical_failures -eq 0 ]]; then
         log_success "SAFE maintenance completed successfully"
-        # BEST PRACTICE FIX: Explicitly remove locks on success before trap
+        # Explicitly remove locks on success before trap
         rm -f "$GLOBAL_MAINT_LOCK" 2>/dev/null || true
         rmdir "$MAINT_LOCKDIR" 2>/dev/null || true
         exit 0
     elif [[ $critical_failures -le 1 ]]; then
         log_warn "SAFE maintenance completed with minor issues"
-        # BEST PRACTICE FIX: Explicitly remove locks on success before trap
+        # Explicitly remove locks on success before trap
         rm -f "$GLOBAL_MAINT_LOCK" 2>/dev/null || true
         rmdir "$MAINT_LOCKDIR" 2>/dev/null || true
         exit 2  # Warning exit code
