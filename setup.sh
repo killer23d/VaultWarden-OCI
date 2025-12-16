@@ -621,8 +621,8 @@ setup_directories() {
     local puid="${PUID:-1001}"
     local pgid="${PGID:-1001}"
   
-  log_info "Creating state directories with log subdirectories..."
-    if ! sudo mkdir -p "${project_state_dir}"/{data,logs/{vaultwarden,caddy,fail2ban,postfix},caddy/{data,config},fail2ban}; then
+    log_info "Creating state directories with log subdirectories..."
+    if ! sudo mkdir -p "${project_state_dir}"/{data/bwdata,logs/{vaultwarden,caddy,fail2ban,postfix},caddy/{data,config},fail2ban}; then
         log_error "Failed to create state directories"
         return 1
     fi
