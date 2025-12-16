@@ -238,8 +238,8 @@ services:
       - vaultwarden
     
     healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "587"]
-      interval: 60s
+      test: ["CMD", "sh", "-c", "nc -z localhost 587 2>/dev/null"]
+      interval: 120s
       timeout: 10s
       retries: 5
       start_period: 60s
