@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # db-maint.sh - On-demand VaultWarden SQLite database maintenance
+# FIXED: Lock files now use state directory for portability
 
 set -euo pipefail
 
@@ -63,8 +64,15 @@ done
 main() {
     log_info "VaultWarden Database Maintenance"
     
-    # BEST PRACTICE FIX: Add script-specific lock
-    local MAINT_LOCKDIR="/var/run/vaultwarden-maint.lock"
+    # Get state directory for locks
+    local state_dir
+    state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
+    
+    # Create locks directory if it doesn't exist
+    mkdir -p "$state_dir/.locks" 2>/dev/null || true
+    
+    # FIXED: Use state directory for lock
+    local MAINT_LOCKDIR="$state_dir/.locks/db-maint.lock"
     if ! mkdir "$MAINT_LOCKDIR" 2>/dev/null; then
         log_error "Another maintenance task is already running (lock: $MAINT_LOCKDIR)"
         log_info "If this is an error, manually remove $MAINT_LOCKDIR"
@@ -72,8 +80,8 @@ main() {
     fi
     register_cleanup "rmdir '$MAINT_LOCKDIR' 2>/dev/null || true"
             
-    # BEST PRACTICE FIX: Add global maintenance mode lock for health.sh
-    local GLOBAL_MAINT_LOCK="/tmp/.vw_maintenance.lock"
+    # Global maintenance mode lock for health.sh
+    local GLOBAL_MAINT_LOCK="$state_dir/.locks/global-maintenance.lock"
     if ! touch "$GLOBAL_MAINT_LOCK"; then
         log_error "Failed to create global maintenance lock at $GLOBAL_MAINT_LOCK"
         exit 1
@@ -95,9 +103,7 @@ main() {
     require_commands stat numfmt || exit 1
     
     # Get database file path
-    local state_dir db_file
-    state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
-    db_file="$state_dir/data/bwdata/db.sqlite3"
+    local db_file="$state_dir/data/bwdata/db.sqlite3"
     
     if [[ ! -f "$db_file" ]]; then
         log_error "Database file not found at: $db_file"
@@ -144,7 +150,7 @@ main() {
     fi
     
     log_info "Stopping VaultWarden container..."
-    # FIXED: Only stop the app, not the whole stack
+    # Only stop the app, not the whole stack
     if ! docker compose stop vaultwarden; then
         log_warn "Failed to stop vaultwarden container"
     else
@@ -209,7 +215,7 @@ main() {
     # --- Maintenance End ---
     
     log_info "Restarting VaultWarden container..."
-    # FIXED: Only start the app
+    # Only start the app
     if ! docker compose start vaultwarden; then
         log_error "Failed to restart VaultWarden!"
         exit 1
@@ -252,7 +258,7 @@ main() {
     echo ""
     if [[ "$maintenance_successful" == "true" && -n "$safety_backup_file" && -f "$safety_backup_file" ]]; then
       log_info "Cleaning up temporary safety backup..."
-      if rm -f "$safety_backup_file"; then
+      if rm -f "$safety_backup_file" "$safety_backup_file.sha256" "$safety_backup_file.meta" 2>/dev/null; then
         log_success "Removed safety backup: $(basename "$safety_backup_file")"
       else
         log_warn "Could not remove safety backup: $safety_backup_file"
@@ -262,7 +268,7 @@ main() {
       log_warn "Retaining safety backup: $safety_backup_file"
     fi
 
-    # BEST PRACTICE FIX: Explicitly remove locks on success before trap
+    # Explicitly remove locks on success before trap
     if [[ "$maintenance_successful" == "true" ]]; then
         rm -f "$GLOBAL_MAINT_LOCK" 2>/dev/null || true
         rmdir "$MAINT_LOCKDIR" 2>/dev/null || true
