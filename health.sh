@@ -390,7 +390,7 @@ check_database_growth() {
         current_size_bytes=$(stat -c%s "$db_path" 2>/dev/null || stat -f%z "$db_path" 2>/dev/null || echo "0")
         current_size_mb=$((current_size_bytes / 1024 / 1024))
         
-        local size_history_file="/tmp/.vw_db_size_history"
+        local size_history_file="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/.vw_db_size_history"
         local previous_size=0
         [[ -f "$size_history_file" ]] && previous_size=$(cat "$size_history_file" 2>/dev/null || echo "0")
         echo "$current_size_mb" > "$size_history_file"
