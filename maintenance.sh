@@ -284,7 +284,7 @@ optimize_database() {
 
     local state_dir
     state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
-    local host_db_path="$state_dir/data/bwdata/db.sqlite3"
+    local host_db_path="$state_dir/data/db.sqlite3"
 
     # Verify database exists
     if [[ ! -f "$host_db_path" ]]; then
