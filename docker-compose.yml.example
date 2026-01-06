@@ -6,6 +6,8 @@
 # ✅ Optimized resource limits (appropriate for <10 users)
 # ✅ Enhanced security headers and modern isolation
 # ✅ Cloudflare WAF rate limiting (edge protection)
+# ✅ Fail2Ban SSH protection via host networking (FIXED)
+# ✅ Postfix capabilities hardened (DAC_OVERRIDE, FOWNER, KILL removed)
 
 services:
   # =============================================================================
@@ -73,7 +75,7 @@ services:
       EMERGENCY_ACCESS_ALLOWED: ${EMERGENCY_ACCESS_ALLOWED:-true}
       SENDS_ALLOWED: ${SENDS_ALLOWED:-true}
       WEB_VAULT_ENABLED: ${WEB_VAULT_ENABLED:-true}
-      WEBSOCKET_ENABLED: ${WEBSOCKET_ENABLED:-false}
+      WEBSOCKET_ENABLED: ${WEBSOCKET_ENABLED:-true}
       PUSH_ENABLED: ${PUSH_ENABLED:-false}
       PASSWORD_ITERATIONS: ${PASSWORD_ITERATIONS:-350000}
       PASSWORD_HINTS_ALLOWED: ${PASSWORD_HINTS_ALLOWED:-false}
@@ -131,15 +133,15 @@ services:
     tmpfs:
       - /tmp
     
-    # OPTIMIZED: Resource limits for <10 users (REDUCED from original)
+    # OPTIMIZED: Resource limits for <10 users
     deploy:
       resources:
         limits:
-          memory: 512M      # REDUCED from 2G (adequate for small deployment)
-          cpus: '0.3'       # REDUCED from 0.6
+          memory: 512M
+          cpus: '0.3'
         reservations:
-          memory: 128M      # REDUCED from 1G
-          cpus: '0.1'       # REDUCED from 0.2
+          memory: 128M
+          cpus: '0.1'
 
   # =============================================================================
   # Caddy - Reverse Proxy with SSL Termination
@@ -165,7 +167,7 @@ services:
     
     volumes:
       - ${PWD}/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - ${PWD}/caddy/entrypoint.sh:/scripts/entrypoint.sh:ro  # Custom entrypoint
+      - ${PWD}/caddy/entrypoint.sh:/scripts/entrypoint.sh:ro
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/data:/data
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/config:/config
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy:/var/log/caddy
@@ -192,9 +194,8 @@ services:
       - ALL
     
     cap_add:
-      - NET_BIND_SERVICE  # Required for binding to ports 80/443
+      - NET_BIND_SERVICE
     
-    # OPTIMIZED: Resource limits for small deployment
     deploy:
       resources:
         limits:
@@ -205,7 +206,7 @@ services:
           cpus: '0.1'
 
   # =============================================================================
-  # Postfix - Email Relay
+  # Postfix - Email Relay (HARDENED - Reduced Capabilities)
   # =============================================================================
   postfix:
     container_name: vaultwarden_postfix
@@ -244,14 +245,12 @@ services:
     cap_drop:
       - ALL
     
+    # HARDENED: Minimal capability set (removed DAC_OVERRIDE, FOWNER, KILL)
     cap_add:
       - CHOWN              # Mail queue ownership
       - SETUID             # User switching
       - SETGID             # Group switching
       - NET_BIND_SERVICE   # Port 587
-      - DAC_OVERRIDE       # Internal socket access (required)
-      - FOWNER             # File ownership (required)
-      - KILL               # Process management
     
     deploy:
       resources:
@@ -264,12 +263,15 @@ services:
           cpus: '0.02'
 
   # =============================================================================
-  # Fail2Ban - Intrusion Prevention
+  # Fail2Ban - Intrusion Prevention (HOST NETWORKING for SSH Protection)
   # =============================================================================
   fail2ban:
     container_name: vaultwarden_fail2ban
     image: crazymax/fail2ban:${FAIL2BAN_VERSION:-1.1.0}
     restart: unless-stopped
+    
+    # FIXED: Host networking mode to allow SSH iptables manipulation
+    network_mode: host
     
     environment:
       TZ: ${TZ:-UTC}
@@ -302,9 +304,6 @@ services:
       - caddy
       - postfix
     
-    networks:
-      - vaultwarden
-    
     healthcheck:
       test: ["CMD", "fail2ban-client", "status"]
       interval: 30s
@@ -315,14 +314,13 @@ services:
     security_opt:
       - no-new-privileges:true
     
-    # OPTIMIZED: Resource limits (REDUCED from original)
     deploy:
       resources:
         limits:
-          memory: 512M      # REDUCED from 1G
-          cpus: '0.15'      # REDUCED from 0.2
+          memory: 512M
+          cpus: '0.15'
         reservations:
-          memory: 128M      # REDUCED from 256M
+          memory: 128M
           cpus: '0.05'
 
 # =============================================================================
@@ -366,7 +364,25 @@ networks:
 # ✅ Modern isolation headers (Spectre mitigation)
 # ✅ Malicious user-agent blocking (scanner detection)
 # ✅ Init container capability restriction (CHOWN + FOWNER only)
-# ✅ Init-permissions dependency removed (runs once, no runtime warnings)
+# ✅ Fail2Ban host networking for SSH protection (FIXED)
+# ✅ Postfix hardened capabilities (DAC_OVERRIDE, FOWNER, KILL removed)
+# ✅ WebSocket support enabled by default
+#
+# CRITICAL FIXES APPLIED:
+# 1. Fail2Ban SSH Protection (FIXED):
+#    - Moved to network_mode: host to enable SSH iptables manipulation
+#    - SMTP action already configured for 127.0.0.1:587 (host-mode compatible)
+#    - SSH jail can now properly ban attackers on host port 22
+#
+# 2. WebSocket Support (ENABLED):
+#    - WEBSOCKET_ENABLED now defaults to true
+#    - Caddy routing for /notifications/hub must be configured
+#    - Enables real-time sync for VaultWarden clients
+#
+# 3. Postfix Capabilities (HARDENED):
+#    - Removed DAC_OVERRIDE, FOWNER, KILL capabilities
+#    - Minimal set: CHOWN, SETUID, SETGID, NET_BIND_SERVICE
+#    - Test mail delivery after deployment to confirm functionality
 #
 # CLOUDFLARE RATE LIMITING (REQUIRED):
 # You MUST configure these WAF rules in Cloudflare Dashboard:
@@ -387,41 +403,28 @@ networks:
 #   - Action: Managed Challenge (CAPTCHA)
 #
 # RESOURCE ALLOCATION (OPTIMIZED for <10 users on 6GB system):
-# - VaultWarden: 512M limit / 128M reservation (sufficient for small deployment)
-# - Caddy: 512M limit / 128M reservation (reduced from 1G)
-# - Fail2Ban: 512M limit / 128M reservation (reduced from 1G)
-# - Postfix: 256M limit / 64M reservation (realistic for full Postfix)
+# - VaultWarden: 512M limit / 128M reservation
+# - Caddy: 512M limit / 128M reservation
+# - Fail2Ban: 512M limit / 128M reservation
+# - Postfix: 256M limit / 64M reservation
 # - Total limits: ~1.8GB (leaves 4.2GB for host OS and overhead)
 # - Total reservations: ~448MB (ensures stable operation)
 #
-# SECURITY BEST PRACTICES IMPLEMENTED:
-# 1. Secrets Management:
-#    - All secrets stored in Docker secrets (encrypted at rest)
-#    - Secrets loaded via entrypoint (not command args)
-#    - No secrets in environment variables (except runtime-loaded)
-#
-# 2. Container Hardening:
-#    - no-new-privileges:true on all containers
-#    - Capabilities dropped to ALL, then minimal set added
-#    - Non-root user execution (PUID:PGID)
-#    - Read-only root filesystem where possible
-#
-# 3. Network Security:
-#    - Cloudflare WAF rate limiting (edge protection)
-#    - Fail2Ban for host-level intrusion prevention
-#    - Internal health checks on 127.0.0.1:8080 only
-#
-# 4. Postfix Capabilities (MINIMAL SET):
-#    - CHOWN: Mail queue ownership
-#    - SETUID/SETGID: User/group switching
-#    - NET_BIND_SERVICE: Port 587 binding
-#    - DAC_OVERRIDE, FOWNER: Required for mail operations
+# FAIL2BAN HOST NETWORKING IMPLICATIONS:
+# - Fail2Ban now shares host network namespace
+# - Can directly manipulate host iptables for SSH protection
+# - SMTP configured for 127.0.0.1:587 (already compatible)
+# - Loses Docker DNS service resolution (not needed for this setup)
+# - Cannot use networks: directive (mutually exclusive with network_mode: host)
 #
 # TESTING CHECKLIST:
 # □ Verify Caddy starts without errors: docker compose logs caddy
 # □ Test basic auth works: curl -u admin:password https://vault.domain.com/admin
 # □ Verify secrets not in docker inspect: docker inspect vaultwarden_caddy | grep CLOUDFLARE
-# □ Test Postfix with capabilities: docker compose exec postfix postqueue -p
+# □ Test Postfix with reduced capabilities: docker compose exec postfix postqueue -p
+# □ Test SSH ban works: Trigger 3 failed SSH attempts, verify iptables ban
+# □ Verify Fail2Ban can send email via 127.0.0.1:587
+# □ Test WebSocket sync: Enable in client, verify real-time notifications
 # □ Verify Cloudflare rate limiting: Run 15 auth requests in 1 minute (should see 429)
 # □ Check resource usage: docker stats (should be under limits)
 # □ No init-permissions warnings: docker compose up -d (should be clean)
@@ -436,5 +439,12 @@ networks:
 # ⚠️  MANDATORY: Backup secrets/keys/age-key.txt to offline storage
 # ⚠️  If lost, ALL encrypted backups are permanently unrecoverable
 # ⚠️  Test key recovery quarterly (see docs/RECOVERY.md)
+#
+# POSTFIX CAPABILITY TESTING:
+# If mail delivery fails after reducing capabilities, incrementally add back:
+# 1. Test current setup first (should work for most relay scenarios)
+# 2. If delivery fails, try adding DAC_OVERRIDE
+# 3. If still failing, try adding FOWNER
+# 4. Document any capabilities required for your specific relay configuration
 #
 # =============================================================================
