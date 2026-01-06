@@ -35,7 +35,7 @@
             time_format "2006-01-02T15:04:05.000Z07:00"
             message_key "msg"
             level_key "level"
-            time_key "timestamp"
+            time_key "ts"
             name_key "logger"
             caller_key "caller"
             stacktrace_key "stacktrace"
@@ -85,6 +85,11 @@
         }
     }
 
+    # FIXED: Added WebSocket routing for notifications hub
+    handle /notifications/hub {
+        reverse_proxy vaultwarden:3012
+    }
+
     # 4. Admin Panel Protection
     # NOTE: Rate limiting handled by Cloudflare WAF Rule (see deployment docs)
     @admin path /admin*
@@ -97,6 +102,7 @@
 
         # Basic authentication for admin panel (Caddy v2.10+ format)
         # Environment variables set by entrypoint.sh: ADMIN_USERNAME and ADMIN_HASH
+        # FIXED: Safer syntax to avoid parsing issues
         basic_auth {
             {env.ADMIN_USERNAME} {env.ADMIN_HASH}
         }
