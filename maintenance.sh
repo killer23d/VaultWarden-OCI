@@ -135,6 +135,12 @@ cleanup_logs() {
     if large_logs=$(find "${log_dirs[@]}" -name "*.log" -type f -size +100M 2>/dev/null); then
         while IFS= read -r log_file; do
             if [[ -n "$log_file" ]]; then
+                # FIXED: Skip Caddy logs to avoid conflict with internal rotation
+                if [[ "$log_file" == *"/logs/caddy/access.log" ]]; then
+                    log_debug "Skipping rotation for Caddy log (handled internally): $log_file"
+                    continue
+                fi
+                
                 local rotated_name="${log_file}.$(date +%Y%m%d)"
                 if mv "$log_file" "$rotated_name" && gzip "$rotated_name"; then
                     log_debug "Rotated large log: $(basename "$log_file")"
