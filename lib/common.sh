@@ -5,6 +5,7 @@
 # ENHANCED: Updated email function to use postfix container (replaces msmtpd)
 # FIXED: require_commands function properly declares loop variable for strict mode
 # FIXED: Added LIB_COMMON_LOADED flag for backward compatibility
+# FIXED: Postfix email sending works when fail2ban is network_mode: host (uses 127.0.0.1:587)
 
 # All library functions use 'return' with exit codes, never 'exit'
 
@@ -49,12 +50,12 @@ _should_log() {
     local levels=("DEBUG" "INFO" "WARN" "ERROR")
     local current_index=-1
     local target_index=-1
-    
+
     for i in "${!levels[@]}"; do
         [[ "${levels[i]}" == "$LOG_LEVEL" ]] && current_index=$i
         [[ "${levels[i]}" == "$level" ]] && target_index=$i
     done
-    
+
     (( target_index >= current_index ))
 }
 
@@ -147,14 +148,14 @@ log_header() {
 # Load .env file safely - STANDARDIZED: Returns exit code, never exits
 load_env_file() {
     local env_file="${1:-.env}"
-    
+
     if [[ ! -f "$env_file" ]]; then
         log_error "Environment file not found: $env_file"
         return 1
     fi
-    
+
     log_debug "Loading environment from: $env_file"
-    
+
     # Source with export
     set -a
     source "$env_file" || {
@@ -163,7 +164,7 @@ load_env_file() {
         return 1
     }
     set +a
-    
+
     log_debug "Environment loaded successfully"
     return 0
 }
@@ -172,7 +173,6 @@ load_env_file() {
 get_config_value() {
     local key="$1"
     local default="${2:-}"
-    # Use parameter expansion to get value or default
     local value="${!key:-$default}"
     echo "$value"
 }
@@ -180,19 +180,19 @@ get_config_value() {
 # Validate required configuration - STANDARDIZED: Returns exit code
 require_config() {
     local missing=()
-    local key # BEST PRACTICE FIX: Declare loop variable
-    
+    local key
+
     for key in "$@"; do
         if [[ -z "${!key:-}" ]]; then
             missing+=("$key")
         fi
     done
-    
+
     if [[ ${#missing[@]} -gt 0 ]]; then
         log_error "Missing required configuration: ${missing[*]}"
         return 1
     fi
-    
+
     return 0
 }
 
@@ -202,13 +202,11 @@ declare -A _command_cache
 # Check if command exists (cached version) - STANDARDIZED: Returns exit code
 has_command() {
     local cmd="$1"
-    
-    # Return cached result if available
+
     if [[ -n "${_command_cache[$cmd]:-}" ]]; then
         return "${_command_cache[$cmd]}"
     fi
-    
-    # Check and cache result
+
     if command -v "$cmd" >/dev/null 2>&1; then
         _command_cache["$cmd"]=0
         return 0
@@ -221,20 +219,20 @@ has_command() {
 # FIXED: Require commands to exist - properly handles strict mode
 require_commands() {
     local missing=()
-    local cmd # BEST PRACTICE FIX: Declare loop variable
-    
+    local cmd
+
     for cmd in "$@"; do
         if ! has_command "$cmd"; then
             missing+=("$cmd")
         fi
     done
-    
+
     if [[ ${#missing[@]} -gt 0 ]]; then
         log_error "Missing required commands: ${missing[*]}"
         log_info "Install with: sudo apt install ${missing[*]}"
         return 1
     fi
-    
+
     return 0
 }
 
@@ -244,20 +242,20 @@ retry_with_backoff() {
     local initial_delay="$2"
     local command=("${@:3}")
     local delay="$initial_delay"
-    local i # BEST PRACTICE FIX: Declare loop variable
-    
+    local i
+
     for ((i=1; i<=max_attempts; i++)); do
         if "${command[@]}"; then
             return 0
         fi
-        
+
         if [[ $i -lt $max_attempts ]]; then
             log_warn "Attempt $i failed, retrying in ${delay}s..."
             sleep "$delay"
             delay=$((delay * 2))
         fi
     done
-    
+
     log_error "All $max_attempts attempts failed for command: ${command[*]}"
     return 1
 }
@@ -279,7 +277,7 @@ ensure_dir() {
     local dir="$1"
     local mode="${2:-755}"
     local owner="${3:-}"
-    
+
     if [[ ! -d "$dir" ]]; then
         log_debug "Creating directory: $dir"
         if ! mkdir -p "$dir"; then
@@ -287,19 +285,19 @@ ensure_dir() {
             return 1
         fi
     fi
-    
+
     if ! chmod "$mode" "$dir"; then
         log_error "Failed to set permissions on directory: $dir"
         return 1
     fi
-    
+
     if [[ -n "$owner" ]]; then
         if ! chown "$owner" "$dir"; then
             log_error "Failed to set ownership on directory: $dir"
             return 1
         fi
     fi
-    
+
     return 0
 }
 
@@ -307,17 +305,17 @@ ensure_dir() {
 secure_file() {
     local file="$1"
     local mode="${2:-600}"
-    
+
     if [[ ! -f "$file" ]]; then
         log_error "File not found: $file"
         return 1
     fi
-    
+
     if ! chmod "$mode" "$file"; then
         log_error "Failed to secure file: $file"
         return 1
     fi
-    
+
     log_debug "Secured file: $file (mode: $mode)"
     return 0
 }
@@ -335,7 +333,7 @@ test_connectivity() {
 test_http() {
     local url="$1"
     local timeout="${2:-10}"
-    
+
     if has_command curl; then
         curl -sf --max-time "$timeout" "$url" >/dev/null 2>&1
     elif has_command wget; then
@@ -351,7 +349,7 @@ download_file() {
     local url="$1"
     local output_file="$2"
     local max_attempts="${3:-3}"
-    
+
     if retry_with_backoff "$max_attempts" 2 curl -fsSL "$url" -o "$output_file"; then
         log_success "Downloaded: $url -> $output_file"
         return 0
@@ -370,28 +368,45 @@ send_notification_email() {
     local body="$2"
     local admin_email
     admin_email=$(get_config_value "ADMIN_EMAIL" "")
-    
+
     if [[ -z "$admin_email" ]]; then
         log_warn "ADMIN_EMAIL not configured. Cannot send notification."
         return 1
     fi
-    
+
     # Check if postfix container is available (preferred method)
     if docker compose ps postfix >/dev/null 2>&1; then
         log_debug "Using postfix container for email delivery"
         _send_email_via_postfix "$subject" "$body" "$admin_email"
         return $?
     fi
-    
+
     # Fallback to host mailutils if available (legacy support)
     if has_command mail; then
         log_debug "Using host mailutils for email delivery (fallback)"
         _send_email_via_mailutils "$subject" "$body" "$admin_email"
         return $?
     fi
-    
+
     log_warn "No email backend available (tried postfix container and host mailutils)"
     return 1
+}
+
+# Determine SMTP host/port for postfix based on fail2ban network mode.
+# If fail2ban is network_mode: host, Docker DNS names like "postfix" won't resolve; use 127.0.0.1. [web:315]
+_get_postfix_smtp_target_for_fail2ban() {
+    local host="postfix"
+    local port="587"
+
+    local netmode
+    netmode=$(docker inspect vaultwarden_fail2ban --format '{{.HostConfig.NetworkMode}}' 2>/dev/null || echo "")
+
+    if [[ "$netmode" == "host" ]]; then
+        host="127.0.0.1"
+    fi
+
+    printf '%s:%s\n' "$host" "$port"
+    return 0
 }
 
 # ENHANCED: Send email via postfix container (preferred method)
@@ -399,10 +414,10 @@ _send_email_via_postfix() {
     local subject="$1"
     local body="$2"
     local admin_email="$3"
-    
+
     # Rate limiting with critical exception
     local last_email_file="/tmp/.vw_last_email_$(echo "$subject" | md5sum | cut -d' ' -f1)"
-    
+
     # Allow critical alerts through rate limiting
     if [[ "$subject" != *"CRITICAL"* ]] && [[ -f "$last_email_file" ]]; then
         local last_time current_time
@@ -413,9 +428,9 @@ _send_email_via_postfix() {
             return 0
         fi
     fi
-    
+
     echo "$(date +%s)" > "$last_email_file"
-    
+
     local full_subject="[VaultWarden] $subject"
     local full_body="$body
 
@@ -424,7 +439,15 @@ Host: $(hostname -f 2>/dev/null || hostname)
 Timestamp: $(date -uIs)
 Project: VaultWarden-OCI
 Email Backend: postfix container (bokysan/docker-postfix)"
-    
+
+    # Pick SMTP host/port for the Python running in fail2ban
+    local smtp_target smtp_host smtp_port
+    smtp_target=$(_get_postfix_smtp_target_for_fail2ban)
+    smtp_host="${smtp_target%:*}"
+    smtp_port="${smtp_target##*:}"
+
+    log_debug "Postfix SMTP target for fail2ban: ${smtp_host}:${smtp_port}"
+
     # Create email using Python and send via postfix container
     local email_script
     email_script=$(cat <<'EOF'
@@ -440,14 +463,17 @@ def send_email():
         msg['From'] = os.environ.get('EMAIL_FROM', 'vaultwarden@localhost')
         msg['To'] = os.environ.get('EMAIL_TO', '')
         msg['Subject'] = os.environ.get('EMAIL_SUBJECT', 'No Subject')
-        
+
         body = os.environ.get('EMAIL_BODY', '')
         msg.attach(MIMEText(body, 'plain'))
-        
-        server = smtplib.SMTP('postfix', 587)
+
+        host = os.environ.get('SMTP_HOST', '127.0.0.1')
+        port = int(os.environ.get('SMTP_PORT', '587'))
+
+        server = smtplib.SMTP(host, port, timeout=10)
         server.send_message(msg)
         server.quit()
-        
+
         print('Email sent successfully via postfix')
         return True
     except Exception as e:
@@ -457,13 +483,15 @@ def send_email():
 sys.exit(0 if send_email() else 1)
 EOF
 )
-    
+
     # Execute email script in fail2ban container with environment variables
     if docker compose exec -T \
         -e EMAIL_FROM="${SMTP_FROM:-vaultwarden@${DOMAIN_NAME:-localhost}}" \
         -e EMAIL_TO="$admin_email" \
         -e EMAIL_SUBJECT="$full_subject" \
         -e EMAIL_BODY="$full_body" \
+        -e SMTP_HOST="$smtp_host" \
+        -e SMTP_PORT="$smtp_port" \
         fail2ban python3 -c "$email_script"; then
         log_success "Notification email sent to $admin_email (via postfix)"
         return 0
@@ -478,10 +506,10 @@ _send_email_via_mailutils() {
     local subject="$1"
     local body="$2"
     local admin_email="$3"
-    
+
     # Rate limiting with critical exception
     local last_email_file="/tmp/.vw_last_email_$(echo "$subject" | md5sum | cut -d' ' -f1)"
-    
+
     # Allow critical alerts through rate limiting
     if [[ "$subject" != *"CRITICAL"* ]] && [[ -f "$last_email_file" ]]; then
         local last_time current_time
@@ -492,9 +520,9 @@ _send_email_via_mailutils() {
             return 0
         fi
     fi
-    
+
     echo "$(date +%s)" > "$last_email_file"
-    
+
     local full_subject="[VaultWarden] $subject"
     local full_body="$body
 
@@ -503,7 +531,7 @@ Host: $(hostname -f 2>/dev/null || hostname)
 Timestamp: $(date -uIs)
 Project: VaultWarden-OCI
 Email Backend: host mailutils (legacy)"
-    
+
     if echo "$full_body" | mail -s "$full_subject" "$admin_email"; then
         log_success "Notification email sent to $admin_email (via mailutils)"
         return 0
@@ -524,7 +552,6 @@ validate_email() {
 # Validate domain format - STANDARDIZED: Returns exit code
 validate_domain() {
     local domain="$1"
-    # Remove protocol if present
     domain=$(echo "$domain" | sed 's|https\?://||; s|/.*$||')
     [[ "$domain" =~ ^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]
 }
@@ -565,7 +592,7 @@ safe_execute() {
     local description="$1"
     shift
     local command=("$@")
-    
+
     log_debug "Executing: $description"
     if "${command[@]}"; then
         log_debug "Success: $description"
@@ -582,16 +609,16 @@ safe_execute() {
 # Initialize common library for a script
 init_common_lib() {
     local script_name="$1"
-    
+
     # Set error handling
     set -euo pipefail
-    
+
     # Set log prefix
     set_log_prefix "$(basename -- "$script_name" .sh)"
-    
+
     # Change to project root
     cd "$PROJECT_ROOT"
-    
+
     log_debug "Common library initialized for: $script_name"
     log_debug "Project root: $PROJECT_ROOT"
     log_debug "Log level: $LOG_LEVEL"
@@ -602,7 +629,7 @@ export -f log_info log_success log_warn log_error log_debug log_header set_log_p
 export -f load_env_file get_config_value require_config
 export -f has_command require_commands retry_with_backoff is_root get_real_user
 export -f ensure_dir secure_file test_connectivity test_http download_file
-export -f send_notification_email _send_email_via_postfix _send_email_via_mailutils
+export -f send_notification_email _get_postfix_smtp_target_for_fail2ban _send_email_via_postfix _send_email_via_mailutils
 export -f validate_email validate_domain validate_port validate_ip validate_url
 export -f setup_error_trap setup_cleanup_trap safe_execute
 export -f init_common_lib
