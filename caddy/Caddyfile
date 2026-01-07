@@ -4,6 +4,7 @@
     acme_dns cloudflare {env.CLOUDFLARE_API_TOKEN}
 
     # Global server configuration
+    # Trust Cloudflare as the only proxy and allow client IP extraction from CF header
     servers {
         trusted_proxies cloudflare
         client_ip_headers Cf-Connecting-Ip
@@ -15,7 +16,18 @@
 # ================================
 :8080 {
     handle /alive {
-        reverse_proxy vaultwarden:80
+        reverse_proxy vaultwarden:80 {
+            header_up Host {host}
+
+            # Forward client IP info if present (works even if you hit this internally)
+            header_up CF-Connecting-IP {http.request.header.Cf-Connecting-Ip}
+            header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
+            header_up X-Forwarded-For {http.request.header.Cf-Connecting-Ip}
+            header_up X-Forwarded-Proto {scheme}
+
+            # Trace id (useful for correlating logs)
+            header_up X-Request-ID {uuid}
+        }
     }
 }
 
@@ -28,8 +40,8 @@
     log {
         output file /var/log/caddy/access.log {
             roll_size 50MB
-            roll_keep 5           # REDUCED from 20 to 5 (adequate for fail2ban)
-            roll_keep_for 7d      # REDUCED from 30d to 7d (saves disk space)
+            roll_keep 5
+            roll_keep_for 7d
         }
         format json {
             time_format "2006-01-02T15:04:05.000Z07:00"
@@ -47,28 +59,27 @@
     header {
         # HSTS with preload
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-        
+
         # Classic security headers
         X-Content-Type-Options "nosniff"
         X-Frame-Options "DENY"
         X-XSS-Protection "1; mode=block"
         Referrer-Policy "strict-origin-when-cross-origin"
-        
+
         # Modern isolation headers (Spectre mitigation)
         Cross-Origin-Opener-Policy "same-origin"
         Cross-Origin-Resource-Policy "same-origin"
         Cross-Origin-Embedder-Policy "require-corp"
         X-DNS-Prefetch-Control "off"
-        
+
         # Content Security Policy
         Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: https:; frame-src 'self'; object-src 'none'; base-uri 'self';"
-        
+
         # Permissions Policy (restrict dangerous features)
         Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=(), usb=()"
-        
-        # Request tracking and protocol
+
+        # Request tracking (response header)
         X-Request-ID {uuid}
-        X-Forwarded-Proto https
 
         # Remove server identification (security by obscurity)
         -Server
@@ -80,18 +91,30 @@
     handle @health {
         reverse_proxy vaultwarden:80 {
             header_up Host {host}
+
+            # IMPORTANT: Forward the CF header itself because Vaultwarden is set to IP_HEADER=CF-Connecting-IP
+            header_up CF-Connecting-IP {http.request.header.Cf-Connecting-Ip}
             header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
             header_up X-Forwarded-For {http.request.header.Cf-Connecting-Ip}
+            header_up X-Forwarded-Proto {scheme}
+            header_up X-Request-ID {uuid}
         }
     }
 
-    # FIXED: Added WebSocket routing for notifications hub
+    # 4. WebSocket routing for notifications hub
     handle /notifications/hub {
-        reverse_proxy vaultwarden:3012
+        reverse_proxy vaultwarden:3012 {
+            header_up Host {host}
+
+            header_up CF-Connecting-IP {http.request.header.Cf-Connecting-Ip}
+            header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
+            header_up X-Forwarded-For {http.request.header.Cf-Connecting-Ip}
+            header_up X-Forwarded-Proto {scheme}
+            header_up X-Request-ID {uuid}
+        }
     }
 
-    # 4. Admin Panel Protection
-    # NOTE: Rate limiting handled by Cloudflare WAF Rule (see deployment docs)
+    # 5. Admin Panel Protection
     @admin path /admin*
     handle @admin {
         # Stricter CSP for admin panel
@@ -100,36 +123,38 @@
             X-Admin-Access "true"
         }
 
-        # Basic authentication for admin panel (Caddy v2.10+ format)
-        # Environment variables set by entrypoint.sh: ADMIN_USERNAME and ADMIN_HASH
-        # FIXED: Safer syntax to avoid parsing issues
         basic_auth {
             {env.ADMIN_USERNAME} {env.ADMIN_HASH}
         }
 
         reverse_proxy vaultwarden:80 {
             header_up Host {host}
+
+            header_up CF-Connecting-IP {http.request.header.Cf-Connecting-Ip}
             header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
             header_up X-Forwarded-For {http.request.header.Cf-Connecting-Ip}
-            header_up X-Request-ID {http.request.header.X-Request-ID}
+            header_up X-Forwarded-Proto {scheme}
+            header_up X-Request-ID {uuid}
         }
     }
 
-    # 5. Auth Endpoints (Monitoring)
-    # NOTE: Rate limiting handled by Cloudflare WAF Rule
-    # Cloudflare WAF Rule #2: 10 requests per 5 minutes to /identity/connect/token*
+    # 6. Auth Endpoints (Monitoring)
     @auth_endpoints path /api/accounts/prelogin* /identity/accounts/prelogin* /identity/connect/token*
     handle @auth_endpoints {
         reverse_proxy vaultwarden:80 {
             header_up Host {host}
+
+            header_up CF-Connecting-IP {http.request.header.Cf-Connecting-Ip}
             header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
             header_up X-Forwarded-For {http.request.header.Cf-Connecting-Ip}
-            header_up X-Request-ID {http.request.header.X-Request-ID}
+            header_up X-Forwarded-Proto {scheme}
+            header_up X-Request-ID {uuid}
+
             header_up X-Auth-Endpoint "true"
         }
     }
 
-    # 6. Malicious User-Agent Blocking (ENHANCED)
+    # 7. Malicious User-Agent Blocking (ENHANCED)
     @malicious_ua {
         header User-Agent "*sqlmap*"
         header User-Agent "*nikto*"
@@ -145,13 +170,16 @@
         respond "Access Denied - Security Policy Violation" 403
     }
 
-    # 7. Default Reverse Proxy
+    # 8. Default Reverse Proxy
     handle {
         reverse_proxy vaultwarden:80 {
             header_up Host {host}
+
+            header_up CF-Connecting-IP {http.request.header.Cf-Connecting-Ip}
             header_up X-Real-IP {http.request.header.Cf-Connecting-Ip}
             header_up X-Forwarded-For {http.request.header.Cf-Connecting-Ip}
-            header_up X-Request-ID {http.request.header.X-Request-ID}
+            header_up X-Forwarded-Proto {scheme}
+            header_up X-Request-ID {uuid}
         }
     }
 }
