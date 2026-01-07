@@ -1,202 +1,201 @@
 {
-    # Global ACME DNS configuration
-    # SECURITY: Token loaded from Docker secret via environment variable
-    acme_dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+        # Global ACME DNS configuration
+        # SECURITY: Token loaded from Docker secret via environment variable
+        acme_dns cloudflare {env.CLOUDFLARE_API_TOKEN}
 
-    # Global server configuration
-    # Trust Cloudflare as the only proxy and allow client IP extraction from CF header
-    servers {
-        trusted_proxies cloudflare
-        client_ip_headers Cf-Connecting-Ip
-    }
+        # Global server configuration
+        # Trust Cloudflare as the only proxy and allow client IP extraction from CF header
+        servers {
+                trusted_proxies cloudflare
+                client_ip_headers Cf-Connecting-Ip
+        }
 }
 
 # ================================
 # Internal Health Check Endpoint
 # ================================
 :8080 {
-    handle /alive {
-        reverse_proxy vaultwarden:80 {
-            header_up Host {host}
+        handle /alive {
+                reverse_proxy vaultwarden:80 {
+                        header_up Host {host}
 
-            # FIX: Always send a non-empty, validated client IP to Vaultwarden
-            # {client_ip} is derived considering trusted_proxies + client_ip_headers
-            header_up CF-Connecting-IP {client_ip}
-            header_up X-Real-IP {client_ip}
-            header_up X-Forwarded-For {client_ip}
+                        # FIX: Always send a non-empty, validated client IP to Vaultwarden
+                        # {client_ip} is derived considering trusted_proxies + client_ip_headers
+                        header_up CF-Connecting-IP {client_ip}
+                        header_up X-Real-IP {client_ip}
+                        header_up X-Forwarded-For {client_ip}
 
-            # Trace id (useful for correlating logs)
-            header_up X-Request-ID {uuid}
+                        # Trace id (useful for correlating logs)
+                        header_up X-Request-ID {uuid}
+                }
         }
-    }
 }
 
 # ================================
 # Main Site
 # ================================
 {$DOMAIN_NAME} {
-
-    # 1. Centralized JSON Access Logging (OPTIMIZED for small deployment)
-    log {
-        output file /var/log/caddy/access.log {
-            roll_size 50MB
-            roll_keep 5
-            roll_keep_for 7d
+        # 1. Centralized JSON Access Logging (OPTIMIZED for small deployment)
+        log {
+                output file /var/log/caddy/access.log {
+                        roll_size 50MB
+                        roll_keep 5
+                        roll_keep_for 7d
+                }
+                format json {
+                        time_format "2006-01-02T15:04:05.000Z07:00"
+                        message_key "msg"
+                        level_key "level"
+                        time_key "ts"
+                        name_key "logger"
+                        caller_key "caller"
+                        stacktrace_key "stacktrace"
+                }
+                level INFO
         }
-        format json {
-            time_format "2006-01-02T15:04:05.000Z07:00"
-            message_key "msg"
-            level_key "level"
-            time_key "ts"
-            name_key "logger"
-            caller_key "caller"
-            stacktrace_key "stacktrace"
-        }
-        level INFO
-    }
 
-    # 2. Enhanced Security Headers (HARDENED)
-    header {
-        # HSTS with preload
-        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-
-        # Classic security headers
-        X-Content-Type-Options "nosniff"
-        X-Frame-Options "DENY"
-        X-XSS-Protection "1; mode=block"
-        Referrer-Policy "strict-origin-when-cross-origin"
-
-        # Modern isolation headers (Spectre mitigation)
-        Cross-Origin-Opener-Policy "same-origin"
-        Cross-Origin-Resource-Policy "same-origin"
-        Cross-Origin-Embedder-Policy "require-corp"
-        X-DNS-Prefetch-Control "off"
-
-        # Content Security Policy
-        Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: https:; frame-src 'self'; object-src 'none'; base-uri 'self';"
-
-        # Permissions Policy (restrict dangerous features)
-        Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=(), usb=()"
-
-        # Request tracking (response header)
-        X-Request-ID {uuid}
-
-        # Remove server identification (security by obscurity)
-        -Server
-        -X-Powered-By
-    }
-
-    # 3. Public Health Check
-    @health path /alive
-    handle @health {
-        reverse_proxy vaultwarden:80 {
-            header_up Host {host}
-
-            # FIX: Send resolved client IP (never empty) to match Vaultwarden IP_HEADER=CF-Connecting-IP
-            header_up CF-Connecting-IP {client_ip}
-            header_up X-Real-IP {client_ip}
-            header_up X-Forwarded-For {client_ip}
-            header_up X-Request-ID {uuid}
-        }
-    }
-
-    # 4. WebSocket routing for notifications hub
-    handle /notifications/hub {
-        reverse_proxy vaultwarden:3012 {
-            header_up Host {host}
-
-            header_up CF-Connecting-IP {client_ip}
-            header_up X-Real-IP {client_ip}
-            header_up X-Forwarded-For {client_ip}
-            header_up X-Request-ID {uuid}
-        }
-    }
-
-    # 5. Admin Panel Protection
-    @admin path /admin*
-    handle @admin {
-        # Stricter CSP for admin panel
+        # 2. Enhanced Security Headers (HARDENED)
         header {
-            Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: https:; frame-src 'self'; object-src 'none'; base-uri 'self';"
-            X-Admin-Access "true"
+                # HSTS with preload
+                Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+
+                # Classic security headers
+                X-Content-Type-Options "nosniff"
+                X-Frame-Options "DENY"
+                X-XSS-Protection "1; mode=block"
+                Referrer-Policy "strict-origin-when-cross-origin"
+
+                # Modern isolation headers (Spectre mitigation)
+                Cross-Origin-Opener-Policy "same-origin"
+                Cross-Origin-Resource-Policy "same-origin"
+                Cross-Origin-Embedder-Policy "require-corp"
+                X-DNS-Prefetch-Control "off"
+
+                # Content Security Policy
+                Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: https:; frame-src 'self'; object-src 'none'; base-uri 'self';"
+
+                # Permissions Policy (restrict dangerous features)
+                Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=(), usb=()"
+
+                # Request tracking (response header)
+                X-Request-ID {uuid}
+
+                # Remove server identification (security by obscurity)
+                -Server
+                -X-Powered-By
         }
 
-        basic_auth {
-            {env.ADMIN_USERNAME} {env.ADMIN_HASH}
+        # 3. Public Health Check
+        @health path /alive
+        handle @health {
+                reverse_proxy vaultwarden:80 {
+                        header_up Host {host}
+
+                        # FIX: Send resolved client IP (never empty) to match Vaultwarden IP_HEADER=CF-Connecting-IP
+                        header_up CF-Connecting-IP {client_ip}
+                        header_up X-Real-IP {client_ip}
+                        header_up X-Forwarded-For {client_ip}
+                        header_up X-Request-ID {uuid}
+                }
         }
 
-        reverse_proxy vaultwarden:80 {
-            header_up Host {host}
+        # 4. WebSocket routing for notifications hub
+        handle /notifications/hub {
+                reverse_proxy vaultwarden:3012 {
+                        header_up Host {host}
 
-            header_up CF-Connecting-IP {client_ip}
-            header_up X-Real-IP {client_ip}
-            header_up X-Forwarded-For {client_ip}
-            header_up X-Request-ID {uuid}
+                        header_up CF-Connecting-IP {client_ip}
+                        header_up X-Real-IP {client_ip}
+                        header_up X-Forwarded-For {client_ip}
+                        header_up X-Request-ID {uuid}
+                }
         }
-    }
 
-    # 6. Auth Endpoints (Monitoring)
-    @auth_endpoints path /api/accounts/prelogin* /identity/accounts/prelogin* /identity/connect/token*
-    handle @auth_endpoints {
-        reverse_proxy vaultwarden:80 {
-            header_up Host {host}
+        # 5. Admin Panel Protection
+        @admin path /admin*
+        handle @admin {
+                # Stricter CSP for admin panel
+                header {
+                        Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: https:; frame-src 'self'; object-src 'none'; base-uri 'self';"
+                        X-Admin-Access "true"
+                }
 
-            header_up CF-Connecting-IP {client_ip}
-            header_up X-Real-IP {client_ip}
-            header_up X-Forwarded-For {client_ip}
-            header_up X-Request-ID {uuid}
+                basic_auth {
+                        {env.ADMIN_USERNAME} {env.ADMIN_HASH}
+                }
 
-            header_up X-Auth-Endpoint "true"
+                reverse_proxy vaultwarden:80 {
+                        header_up Host {host}
+
+                        header_up CF-Connecting-IP {client_ip}
+                        header_up X-Real-IP {client_ip}
+                        header_up X-Forwarded-For {client_ip}
+                        header_up X-Request-ID {uuid}
+                }
         }
-    }
 
-    # 7. Malicious User-Agent Blocking (ENHANCED)
-    @malicious_ua {
-        header User-Agent "*sqlmap*"
-        header User-Agent "*nikto*"
-        header User-Agent "*nmap*"
-        header User-Agent "*acunetix*"
-        header User-Agent "*dirbuster*"
-        header User-Agent "*gobuster*"
-        header User-Agent "*wfuzz*"
-        header User-Agent "*masscan*"
-        header User-Agent "*zgrab*"
-    }
-    handle @malicious_ua {
-        respond "Access Denied - Security Policy Violation" 403
-    }
+        # 6. Auth Endpoints (Monitoring)
+        @auth_endpoints path /api/accounts/prelogin* /identity/accounts/prelogin* /identity/connect/token*
+        handle @auth_endpoints {
+                reverse_proxy vaultwarden:80 {
+                        header_up Host {host}
 
-    # 8. Default Reverse Proxy
-    handle {
-        reverse_proxy vaultwarden:80 {
-            header_up Host {host}
+                        header_up CF-Connecting-IP {client_ip}
+                        header_up X-Real-IP {client_ip}
+                        header_up X-Forwarded-For {client_ip}
+                        header_up X-Request-ID {uuid}
 
-            header_up CF-Connecting-IP {client_ip}
-            header_up X-Real-IP {client_ip}
-            header_up X-Forwarded-For {client_ip}
-            header_up X-Request-ID {uuid}
+                        header_up X-Auth-Endpoint "true"
+                }
         }
-    }
+
+        # 7. Malicious User-Agent Blocking (ENHANCED)
+        @malicious_ua {
+                header User-Agent "*sqlmap*"
+                header User-Agent "*nikto*"
+                header User-Agent "*nmap*"
+                header User-Agent "*acunetix*"
+                header User-Agent "*dirbuster*"
+                header User-Agent "*gobuster*"
+                header User-Agent "*wfuzz*"
+                header User-Agent "*masscan*"
+                header User-Agent "*zgrab*"
+        }
+        handle @malicious_ua {
+                respond "Access Denied - Security Policy Violation" 403
+        }
+
+        # 8. Default Reverse Proxy
+        handle {
+                reverse_proxy vaultwarden:80 {
+                        header_up Host {host}
+
+                        header_up CF-Connecting-IP {client_ip}
+                        header_up X-Real-IP {client_ip}
+                        header_up X-Forwarded-For {client_ip}
+                        header_up X-Request-ID {uuid}
+                }
+        }
 }
 
 # ================================
 # Redirect www → apex
 # ================================
 www.{$DOMAIN_NAME} {
-    log {
-        output file /var/log/caddy/access.log
-        format json
-    }
-    redir https://{$DOMAIN_NAME}{uri} 301
+        log {
+                output file /var/log/caddy/access.log
+                format json
+        }
+        redir https://{$DOMAIN_NAME}{uri} 301
 }
 
 # ================================
 # Catch-all :80 and :443
 # ================================
 :80, :443 {
-    log {
-        output file /var/log/caddy/access.log
-        format json
-    }
-    respond "Not Found" 404
+        log {
+                output file /var/log/caddy/access.log
+                format json
+        }
+        respond "Not Found" 404
 }
