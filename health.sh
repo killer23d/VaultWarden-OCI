@@ -3,6 +3,7 @@
 # FIXED: Added --auto-recover flag for self-healing capabilities
 # FIXED: Proper DOMAIN error handling in check_service_accessibility
 # ENHANCED: Standardized error handling - functions return, main() decides exit strategy
+# FIXED: Backup decrypt verification works when backups/age key are root-only (auto sudo)
 
 set -euo pipefail
 
@@ -85,6 +86,26 @@ health_log_info() { [[ "$QUIET" == "true" ]] || log_info "$1"; }
 health_log_success() { [[ "$QUIET" == "true" ]] || log_success "$1"; }
 health_log_warn() { log_warn "$1"; ISSUES_FOUND+=("WARNING: $1"); }
 health_log_error() { log_error "$1"; ISSUES_FOUND+=("ERROR: $1"); CRITICAL_ISSUES+=("$1"); OVERALL_STATUS="unhealthy"; }
+
+# Run a command as root if needed (interactive -> sudo, non-interactive -> sudo -n)
+_maybe_sudo() {
+    if is_root; then
+        "$@"
+        return $?
+    fi
+
+    if ! command -v sudo >/dev/null 2>&1; then
+        "$@"
+        return $?
+    fi
+
+    # If running without a TTY (cron/non-interactive), don't prompt for password.
+    if [[ -t 0 ]]; then
+        sudo "$@"
+    else
+        sudo -n "$@"
+    fi
+}
 
 # Check if container is healthy
 container_is_healthy() {
@@ -439,7 +460,8 @@ _verify_backup_decryptable() {
         return 1
     }
     
-    if ! age -d -i "$age_key_file" "$backup_file" > /dev/null 2>&1; then
+    # Use sudo if required (common when backups and/or age key are root-only)
+    if ! _maybe_sudo age -d -i "$age_key_file" "$backup_file" > /dev/null 2>&1; then
         health_log_error "CRITICAL: Failed to decrypt latest $backup_type backup!"
         return 1
     fi
