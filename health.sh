@@ -439,7 +439,7 @@ _verify_backup_decryptable() {
         return 1
     }
     
-    if ! age -d -i "$age_key_file" "$backup_file" | head -c 1 > /dev/null 2>&1; then
+    if ! age -d -i "$age_key_file" "$backup_file" > /dev/null 2>&1; then
         health_log_error "CRITICAL: Failed to decrypt latest $backup_type backup!"
         return 1
     fi
