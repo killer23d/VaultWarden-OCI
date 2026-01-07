@@ -78,7 +78,7 @@ test_postfix_container() {
     # Check container health
     local health_status
     health_status=$(docker compose exec -T postfix nc -z localhost 587 >/dev/null 2>&1 && echo "healthy" || echo "unhealthy")
-    
+
     if [[ "$health_status" == "healthy" ]]; then
         log_success "✅ postfix health check passed (port 587 responding)"
     else
@@ -129,21 +129,36 @@ test_fail2ban_integration() {
         return 1
     fi
 
-    # Check if fail2ban can reach postfix (use Docker network name)
-    if docker compose exec -T fail2ban nc -z postfix 587 >/dev/null 2>&1; then
-        log_success "✅ fail2ban can reach postfix container"
+    # Determine how fail2ban should reach postfix SMTP.
+    # If fail2ban is network_mode: host, it cannot resolve Docker service names like "postfix";
+    # it should use the host loopback where postfix is published (127.0.0.1:587).
+    local f2b_netmode smtp_host smtp_port
+    f2b_netmode=$(docker inspect vaultwarden_fail2ban --format '{{.HostConfig.NetworkMode}}' 2>/dev/null || echo "")
+    smtp_port="587"
+
+    if [[ "$f2b_netmode" == "host" ]]; then
+        smtp_host="127.0.0.1"
+        verbose_log "fail2ban network mode: host -> testing SMTP via ${smtp_host}:${smtp_port}"
     else
-        log_error "❌ fail2ban cannot reach postfix container"
+        smtp_host="postfix"
+        verbose_log "fail2ban network mode: ${f2b_netmode:-unknown} -> testing SMTP via ${smtp_host}:${smtp_port}"
+    fi
+
+    # Check if fail2ban can reach postfix SMTP
+    if docker compose exec -T fail2ban sh -lc "nc -zv $smtp_host $smtp_port" >/dev/null 2>&1; then
+        log_success "✅ fail2ban can reach postfix SMTP (${smtp_host}:${smtp_port})"
+    else
+        log_error "❌ fail2ban cannot reach postfix SMTP (${smtp_host}:${smtp_port})"
         return 1
     fi
 
     # Check if smtp action exists
     if docker compose exec -T fail2ban test -f /data/fail2ban/action.d/smtp.conf; then
         log_success "✅ SMTP action configuration found"
-        
-        # Verify it references postfix (not msmtpd)
-        if docker compose exec -T fail2ban grep -q "smtplib.SMTP('postfix', 587)" /data/fail2ban/action.d/smtp.conf; then
-            log_success "✅ SMTP action correctly configured for postfix"
+
+        # Verify it references postfix OR localhost (host-net fail2ban may legitimately use 127.0.0.1)
+        if docker compose exec -T fail2ban grep -Eq "smtplib\.SMTP\('postfix', 587\)|smtplib\.SMTP\('127\.0\.0\.1', 587\)" /data/fail2ban/action.d/smtp.conf; then
+            log_success "✅ SMTP action correctly configured (postfix or localhost)"
         else
             log_warn "⚠️  SMTP action may still reference old msmtpd configuration"
         fi
@@ -243,7 +258,7 @@ Regards,
 VaultWarden-OCI Email System (powered by bokysan/docker-postfix)"
 
     log_info "📧 Sending test email to: $TEST_RECIPIENT"
-    
+
     if send_notification_email "$test_subject" "$test_body"; then
         log_success "✅ Test email sent successfully!"
         log_info "📬 Please check $TEST_RECIPIENT for the test message"
@@ -265,7 +280,7 @@ VaultWarden-OCI Email System (powered by bokysan/docker-postfix)"
 
 main() {
     log_header "VaultWarden Email Migration Test - bokysan/docker-postfix Integration"
-    
+
     # Load environment early
     if ! load_env_file; then
         log_error "Failed to load environment configuration"
@@ -274,18 +289,18 @@ main() {
 
     local test_results=()
     local test_names=("postfix Container" "fail2ban Integration" "Host Script Email" "End-to-End Email")
-    
+
     # Run all tests
     test_postfix_container && test_results+=(0) || test_results+=(1)
     test_fail2ban_integration && test_results+=(0) || test_results+=(1)
     test_host_script_email && test_results+=(0) || test_results+=(1)
     test_end_to_end_email && test_results+=(0) || test_results+=(1)
-    
+
     # Calculate results
     local total_tests=${#test_results[@]}
     local passed_tests=0
     local failed_tests=()
-    
+
     for i in "${!test_results[@]}"; do
         if [[ ${test_results[i]} -eq 0 ]]; then
             ((passed_tests++))
@@ -293,12 +308,12 @@ main() {
             failed_tests+=("${test_names[i]}")
         fi
     done
-    
+
     echo ""
     log_info "============================================"
     log_info "TEST RESULTS: $passed_tests/$total_tests tests passed"
     log_info "============================================"
-    
+
     if [[ $passed_tests -eq $total_tests ]]; then
         log_success "🎉 ALL EMAIL MIGRATION TESTS PASSED!"
         log_success "✅ Your VaultWarden-OCI deployment has successfully migrated to bokysan/docker-postfix"
