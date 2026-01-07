@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 # startup.sh - Enhanced VaultWarden startup script with secure secrets handling
+# FIXED: Health verification now uses sudo when needed (root-only backup decrypt checks)
 
 set -euo pipefail
 
@@ -52,23 +53,43 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Run a command as root if needed (interactive -> sudo, non-interactive -> sudo -n)
+_maybe_sudo() {
+  if is_root; then
+    "$@"
+    return $?
+  fi
+
+  if ! command -v sudo >/dev/null 2>&1; then
+    "$@"
+    return $?
+  fi
+
+  # If running without a TTY (cron/non-interactive), don't prompt for password.
+  if [[ -t 0 ]]; then
+    sudo "$@"
+  else
+    sudo -n "$@"
+  fi
+}
+
 # ENHANCED: Prepare log directories with correct ownership
 prepare_log_directories() {
   log_info "Ensuring base state directory exists..."
-  
+
   local project_state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
-  
+
   if [[ "$DRY_RUN" == "true" ]]; then
     log_info "[DRY RUN] Would create base state directory: $project_state_dir"
     return 0
   fi
-  
+
   # Create base project state directory
   if ! sudo mkdir -p "$project_state_dir"; then
     log_error "Failed to create base state directory: $project_state_dir"
     return 1
   fi
-  
+
   # Create log subdirectories with correct ownership (RUNTIME FIX)
   log_info "Creating log subdirectories with correct permissions..."
   if ! sudo mkdir -p "${project_state_dir}/logs"/{vaultwarden,caddy,fail2ban,postfix}; then
@@ -81,19 +102,19 @@ prepare_log_directories() {
     sudo chmod -R 755 "${project_state_dir}/logs" 2>/dev/null || true
     log_success "Log subdirectories created with correct permissions"
   fi
-  
+
   # Create backup directory (RUNTIME FIX)
   if [ ! -d "${PROJECT_ROOT}/backups" ]; then
     mkdir -p "${PROJECT_ROOT}/backups" 2>/dev/null || true
     log_info "Created backup directory"
   fi
-  
+
   # Ensure Caddy entrypoint is executable (RUNTIME FIX)
   if [ -f "${PROJECT_ROOT}/caddy/entrypoint.sh" ]; then
     chmod +x "${PROJECT_ROOT}/caddy/entrypoint.sh" 2>/dev/null || true
     log_info "Ensured Caddy entrypoint is executable"
   fi
-  
+
   log_success "State directories prepared successfully"
   return 0
 }
@@ -101,55 +122,55 @@ prepare_log_directories() {
 # ENHANCED: Secure secret file preparation with YAML extraction fix
 prepare_docker_secrets() {
   log_info "Preparing Docker secrets with enhanced security..."
-  
+
   local secrets_dir="secrets/.docker_secrets"
   local sops_file="secrets/secrets.yaml"
   local age_key_file="secrets/keys/age-key.txt"
-  
+
   if [[ "$DRY_RUN" == "true" ]]; then
     log_info "[DRY RUN] Would prepare Docker secrets securely"
     return 0
   fi
-  
+
   # Validate prerequisites
   if [[ ! -f "$sops_file" ]]; then
     log_error "Encrypted secrets file not found: $sops_file"
     return 1
   fi
-  
+
   if [[ ! -f "$age_key_file" ]]; then
     log_error "Age key file not found: $age_key_file"
     return 1
   fi
-  
+
   # SECURITY FIX: Set restrictive umask BEFORE creating any files
   local old_umask
   old_umask=$(umask)
   umask 077 # Ensures all new files are created with 600 permissions
-  
+
   # Cleanup function to restore umask
   cleanup_umask() {
     umask "$old_umask"
   }
   trap cleanup_umask EXIT
-  
+
   # Create secrets directory with proper permissions
   if ! ensure_dir "$secrets_dir" 700; then
     log_error "Failed to create secrets directory"
     cleanup_umask
     return 1
   fi
-  
+
   # Clean existing secret files atomically
   if [[ -d "$secrets_dir" ]]; then
     rm -rf "${secrets_dir:?}"/*
   fi
-  
+
   log_info "Decrypting secrets with secure file creation..."
-  
+
   # Set SOPS environment
   export SOPS_AGE_KEY_FILE="$PROJECT_ROOT/$age_key_file"
-  
+
   # Retrieve secrets using SOPS and create files atomically
   local secret_files=(
     "admin_token"
@@ -161,17 +182,17 @@ prepare_docker_secrets() {
     "fail2ban_cloudflare_firewall_token"
     "backup_passphrase"
   )
-  
+
   local secrets_created=0
   local secrets_failed=0
-  
+
   for secret_name in "${secret_files[@]}"; do
     local secret_file="$secrets_dir/$secret_name"
     local secret_value
-    
+
     # Extract secret using grep/cut/sed for YAML with comments
     secret_value=$(sops --decrypt "$sops_file" 2>/dev/null | grep "^${secret_name}:" | head -n1 | cut -d: -f2- | sed 's/^ *//' || echo "")
-    
+
     if [[ -n "$secret_value" ]] && [[ "$secret_value" != "CHANGE_ME"* ]] && [[ "$secret_value" != "null" ]] && [[ "$secret_value" != "PLACEHOLDER"* ]]; then
       # Create secret file atomically
       if printf '%s' "$secret_value" > "$secret_file"; then
@@ -192,24 +213,24 @@ prepare_docker_secrets() {
       log_debug "Skipping empty/placeholder secret: $secret_name"
     fi
   done
-  
+
   # Restore original umask
   cleanup_umask
   trap - EXIT
-  
+
   # Report results
   log_success "Docker secrets prepared: $secrets_created created, $secrets_failed failed"
-  
+
   if [[ $secrets_failed -gt 0 ]]; then
     log_warn "Some secrets failed to prepare. Check SOPS configuration and secret values."
     return 1
   fi
-  
+
   if [[ $secrets_created -eq 0 ]]; then
     log_warn "No secrets were created. Verify secrets.yaml contains valid values."
     return 1
   fi
-  
+
   return 0
 }
 
@@ -219,16 +240,16 @@ start_services() {
     log_info "[DRY RUN] Would start VaultWarden services"
     return 0
   fi
-  
+
   log_info "Starting VaultWarden services..."
-  
+
   if [[ "$FORCE_RESTART" == "true" ]]; then
     log_info "Force restart requested - stopping existing services..."
     if ! docker compose down >/dev/null 2>&1; then
       log_warn "Failed to stop existing services (may not be running)"
     fi
   fi
-  
+
   # Start services
   if [[ "$BACKGROUND" == "true" ]]; then
     if ! docker compose up -d; then
@@ -243,29 +264,29 @@ start_services() {
     fi
     log_success "Services started successfully"
   fi
-  
+
   return 0
 }
 
 # DNS Update function
 update_dns_record() {
   log_info "Updating DNS to ensure correct public IP..."
-  
+
   if [[ "$DRY_RUN" == "true" ]]; then
     log_info "[DRY RUN] Would update DNS record"
     return 0
   fi
-  
+
   if [[ ! -x "$PROJECT_ROOT/update-dns.sh" ]]; then
     log_warn "DNS update script not found or not executable"
     log_info "DNS will not be automatically updated"
     return 0
   fi
-  
+
   # Wait for containers to initialize
   log_info "Waiting for services to initialize before DNS update..."
   sleep 5
-  
+
   if "$PROJECT_ROOT/update-dns.sh"; then
     log_success "DNS update completed successfully"
     return 0
@@ -282,22 +303,24 @@ verify_startup_health() {
     log_info "Skipping health check (--skip-health specified)"
     return 0
   fi
-  
+
   if [[ "$DRY_RUN" == "true" ]]; then
     log_info "[DRY RUN] Would verify service health"
     return 0
   fi
-  
+
   log_info "Verifying service health after startup..."
   sleep 10
-  
+
   if [[ -f "./health.sh" ]]; then
-    if ./health.sh; then
+    # Prefer sudo here because health.sh may need root to decrypt/check backups
+    if _maybe_sudo ./health.sh; then
       log_success "All services are healthy"
       return 0
     else
       log_warn "Health check failed - some services may not be ready"
       log_info "Services may still be initializing. Check with: docker compose ps"
+      # Keep non-fatal behavior as before
       return 0
     fi
   else
@@ -316,50 +339,50 @@ trap cleanup_on_exit EXIT
 # Main function
 main() {
   log_header "VaultWarden-OCI Enhanced Startup"
-  
+
   # Load environment configuration
   if ! load_env_file; then
     log_error "Failed to load environment configuration"
     exit 1
   fi
-  
+
   # Validate Docker availability
   if ! require_docker; then
     log_error "Docker is not available or accessible"
     exit 1
   fi
-  
+
   # Phase 1: Secure secrets preparation
   log_info "=== Phase 1: Secure Secrets Preparation ==="
   if ! prepare_docker_secrets; then
     log_error "Failed to prepare Docker secrets securely"
     exit 1
   fi
-  
+
   # Phase 1.5: State directory preparation (ENHANCED)
   log_info "=== Phase 1.5: State Directory Preparation ==="
   if ! prepare_log_directories; then
     log_error "Failed to prepare state directories"
     exit 1
   fi
-  
+
   # Phase 2: Service startup
   log_info "=== Phase 2: Service Startup ==="
   if ! start_services; then
     log_error "Failed to start services"
     exit 1
   fi
-  
+
   # Phase 2.5: DNS Update
   log_info "=== Phase 2.5: DNS Update ==="
   update_dns_record
-  
+
   # Phase 3: Health verification
   log_info "=== Phase 3: Health Verification ==="
   if ! verify_startup_health; then
     log_warn "Service health verification had issues, but continuing..."
   fi
-  
+
   # Success summary
   log_success "VaultWarden startup completed successfully"
   if [[ "$BACKGROUND" == "true" ]]; then
@@ -367,12 +390,12 @@ main() {
   else
     echo "All services started. Check status below."
   fi
-  
+
   # Show service status
   echo ""
   echo "Service Status:"
   docker compose ps --format "table {{.Name}}\t{{.Status}}\t{{.Ports}}" || docker compose ps
-  
+
   exit 0
 }
 
