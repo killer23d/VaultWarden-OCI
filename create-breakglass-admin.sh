@@ -274,21 +274,35 @@ EOF
     fi
 
     log_success "Break-glass admin created successfully"
-    echo ""
-    echo "🚨 EMERGENCY ACCESS CREDENTIALS 🚨"
-    echo "=================================="
-    echo "Username: $BREAKGLASS_USER"
-    echo "Password: $password"
-    echo ""
-    echo "⚠️  SECURITY WARNING:"
-    echo "• This is a FULL ADMINISTRATOR account"
-    echo "• 32-character password provides strong protection"
-    echo "• Store in secure password manager immediately"
-    echo "• Access via OCI Console Connection when needed"
-    echo "• Disable when not needed: sudo deluser $BREAKGLASS_USER sudo"
-    echo "• Remove when done: sudo deluser --remove-home $BREAKGLASS_USER"
-    echo ""
-    echo "Instructions saved to: $instructions_file"
+    
+    # NEW: Clear screen and show critical credentials
+    clear
+    echo -e "${COLOR_RED}"
+    cat << "EOF"
+  _    _  ___  ____  _   _  _  _  ____  _ 
+ ( \/\/ )/ __)(_  _)( )_( )( \/ )(__  )(_)
+  )    (( (__  _)(_  ) _ (  )  (  _)(_  _ 
+ (__/\__)\___)(____)(_) (_)(_/\_)(____)(_)
+EOF
+    echo -e "${COLOR_RESET}"
+
+    echo -e "${COLOR_YELLOW}EMERGENCY ACCESS CREDENTIALS CREATED${COLOR_RESET}"
+    echo -e "These credentials allow access via the OCI Serial Console if SSH fails."
+    echo -e "Write these down physically and store them securely.\n"
+
+    echo -e "Username:  ${COLOR_GREEN}${BREAKGLASS_USER}${COLOR_RESET}"
+    echo -e "Password:  ${COLOR_GREEN}${password}${COLOR_RESET}"
+    echo -e "Expiry:    ${COLOR_CYAN}Never (Account is locked to serial console)${COLOR_RESET}"
+
+    echo -e "\nTo test this:"
+    echo -e "1. Go to Oracle Cloud Console > Compute > Instance > Console Connection"
+    echo -e "2. Launch Cloud Shell connection"
+    echo -e "3. Press ENTER to see login prompt"
+    echo -e "4. Login with the credentials above"
+
+    echo -e "\n${COLOR_RED}Press ENTER to clear screen and finish...${COLOR_RESET}"
+    read -r
+    clear
 
     return 0
 }
