@@ -1173,6 +1173,55 @@ execute_phase() {
     fi
 }
 
+show_post_install_summary() {
+    # 1. Clear screen for impact
+    clear
+
+    # 2. ASCII Warning Header
+    echo -e "${COLOR_RED}"
+    cat << "EOF"
+    ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !
+    !                                                             !
+    !   CRITICAL: SAVE THIS INFORMATION FOR DISASTER RECOVERY     !
+    !                                                             !
+    ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !
+EOF
+    echo -e "${COLOR_RESET}"
+
+    echo -e "${COLOR_YELLOW}The following information is REQUIRED to restore your backups or rebuild this server.${COLOR_RESET}"
+    echo -e "Copy this to a secure offline location (e.g., a physical notebook or an external encrypted drive).\n"
+
+    # 3. Dynamic Values
+    echo -e "${COLOR_CYAN}--- GENERATED SECRETS (Save These Now) ---${COLOR_RESET}"
+    
+    # We assume secrets.yaml exists because setup ran successfully
+    echo -e "VaultWarden Admin Token:  [Saved in secrets/secrets.yaml - Run ./edit-secrets.sh to view]"
+    
+    if [[ -f "secrets/keys/age-key.txt" ]]; then
+        local age_pub_key=$(grep "public key" "secrets/keys/age-key.txt" | cut -d: -f2 | tr -d ' ')
+        echo -e "SOPS Age Public Key:      ${COLOR_GREEN}${age_pub_key}${COLOR_RESET}"
+        echo -e "SOPS Age Private Key:     ${COLOR_RED}Cat secrets/keys/age-key.txt to view (BACKUP THIS FILE!)${COLOR_RESET}"
+    fi
+
+    echo -e "\n${COLOR_CYAN}--- EXTERNAL CONFIGURATION CHECKLIST (Verify You Have These) ---${COLOR_RESET}"
+    echo -e "You provided these values. Ensure they are saved in your password manager:"
+    echo -e "1. [ ] Domain Name:          ${COLOR_GREEN}${DOMAIN:-Not Set}${COLOR_RESET}"
+    echo -e "2. [ ] Cloudflare Zone ID:   (Used in .env)"
+    echo -e "3. [ ] CF DNS API Token:     (Used for Let's Encrypt DNS challenges)"
+    echo -e "4. [ ] CF Firewall Token:    (Used for Fail2Ban IP banning)"
+    echo -e "5. [ ] SMTP Password:        (Used for email notifications)"
+    echo -e "6. [ ] Admin Email:          ${COLOR_GREEN}${ADMIN_EMAIL:-Not Set}${COLOR_RESET}"
+
+    echo -e "\n${COLOR_CYAN}--- NEXT STEPS ---${COLOR_RESET}"
+    echo -e "1. Run ${COLOR_YELLOW}./edit-secrets.sh${COLOR_RESET} to input the missing external secrets (SMTP, CF Tokens)."
+    echo -e "2. Run ${COLOR_YELLOW}./startup.sh${COLOR_RESET} to start the application."
+    echo -e "3. Run ${COLOR_YELLOW}./create-breakglass-admin.sh${COLOR_RESET} to set up emergency access."
+
+    echo -e "\n${COLOR_RED}!!! PRESS ENTER TO CLEAR THIS SCREEN AND FINISH !!!${COLOR_RESET}"
+    read -r
+    clear
+}
+
 # =============================================================================
 # MAIN EXECUTION - ENHANCED WITH STANDARDIZED ERROR HANDLING
 # =============================================================================
@@ -1322,6 +1371,13 @@ main() {
         echo "⚠️  WARNING: Some non-critical phases failed (see above)"
         echo "   Setup is functional but may need attention"
         echo ""
+    fi
+
+    # Trigger post-install summary if not in auto mode
+    if [[ "$AUTO_MODE" != "true" ]]; then
+        echo ""
+        read -p "Press Enter to view CRITICAL recovery information..."
+        show_post_install_summary
     fi
 
     exit 0
