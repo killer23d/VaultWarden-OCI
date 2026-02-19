@@ -79,6 +79,14 @@ select_backup_interactively() {
     if [[ "$INTERACTIVE" != "true" ]]; then
         return 0  # Skip if not interactive
     fi
+    
+    # NEW: Pre-restore checklist
+    echo -e "${COLOR_YELLOW}PRE-RESTORE CHECKLIST:${COLOR_RESET}"
+    echo -e "Ensure you have the following available:"
+    echo -e "- The 'age-key.txt' file (from your backup)"
+    echo -e "- The 'secrets.yaml' file (if restoring full config)"
+    echo -e "- Your Cloudflare API Tokens (if rebuilding server)"
+    echo -e ""
 
     log_info "Available backups for restoration:"
     echo ""
