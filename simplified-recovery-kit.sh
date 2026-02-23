@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# simplified-recovery-kit.sh - Practical key escrow for single admin
+# simplified-recovery-kit.sh - Comprehensive Server Recovery Kit
+# Generates a single file with ALL credentials, keys, and migration instructions
 
 set -euo pipefail
 
@@ -10,39 +11,38 @@ cd "$PROJECT_ROOT"
 source "lib/common.sh"
 init_common_lib "$0"
 source "lib/crypto.sh"
-source "lib/simple_key_resilience.sh"
 
 show_help() {
     cat << 'EOF'
-Simplified VaultWarden Recovery Kit for Single Admin
+VaultWarden Comprehensive Recovery Kit Generator
 
 USAGE:
   ./simplified-recovery-kit.sh [OPTIONS]
 
 OPTIONS:
-  --create          Create password manager-ready key backup
-  --verify          Verify existing key health
-  --print           Generate printable/PDF backup (optional)
+  --create          Create a full recovery document (Keys + Secrets + Config)
   --help            Show this help
 
-RECOMMENDED WORKFLOW:
-  1. ./simplified-recovery-kit.sh --create
-  2. Copy output to password manager (1Password, Bitwarden, etc.)
-  3. Delete local copy after confirming saved
-  4. Optional: ./simplified-recovery-kit.sh --print (store in safe)
+DESCRIPTION:
+  This script generates a SINGLE "Break Glass" document containing:
+  1. The Age Encryption Key (Critical)
+  2. All Decrypted Secrets (SMTP, Cloudflare, Backup Passphrase)
+  3. Configuration Variables (Domain, Email)
+  4. Server Migration/Rebuild Checklist
 
-ONGOING MAINTENANCE:
-  - Key verification happens automatically with every backup
-  - Re-run --create only if you rotate your key
+SECURITY WARNING:
+  The output file contains UNENCRYPTED secrets. 
+  Store it IMMEDIATELY in a secure location (Password Manager/Safe) 
+  and DELETE the local copy.
+
 EOF
 }
 
+# Parse Arguments
 ACTION=""
 for arg in "$@"; do
     case "$arg" in
         --create) ACTION="create" ;;
-        --verify) ACTION="verify" ;;
-        --print) ACTION="print" ;;
         --help) show_help; exit 0 ;;
         *) log_error "Unknown option: $arg"; show_help; exit 1 ;;
     esac
@@ -50,60 +50,208 @@ done
 
 [[ -z "$ACTION" ]] && { show_help; exit 1; }
 
-load_env_file || exit 1
+# Prerequisites
+check_deps() {
+    local missing=()
+    for cmd in sops age age-keygen jq grep; do
+        if ! command -v $cmd >/dev/null 2>&1; then
+            missing+=("$cmd")
+        fi
+    done
 
-case "$ACTION" in
-    verify)
-        log_info "Verifying Age key health..."
-        if simple_verify_age_key; then
-            log_success "✅ Age key is healthy and functional"
-            exit 0
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        log_error "Missing required dependencies: ${missing[*]}"
+        exit 1
+    fi
+}
+
+generate_recovery_kit() {
+    local output_file="$1"
+    local age_key="${SOPS_AGE_KEY_FILE:-secrets/keys/age-key.txt}"
+    local secrets_file="secrets/secrets.yaml"
+    local env_file=".env"
+
+    if [[ ! -f "$age_key" ]]; then
+        log_error "Age key not found: $age_key"
+        return 1
+    fi
+
+    log_info "Collecting recovery data..."
+
+    # 1. Metadata
+    local hostname_val=$(hostname)
+    local date_val=$(date)
+
+    # 2. Key Data
+    local pub_key=$(age-keygen -y "$age_key")
+    local priv_key=$(cat "$age_key")
+
+    # 3. Config Data
+    local domain="Not Configured"
+    local admin_email="Not Configured"
+    if [[ -f "$env_file" ]]; then
+        domain=$(grep "^DOMAIN=" "$env_file" | cut -d= -f2 || echo "Not Configured")
+        admin_email=$(grep "^ADMIN_EMAIL=" "$env_file" | cut -d= -f2 || echo "Not Configured")
+    fi
+
+    # 4. Decrypt Secrets
+    log_info "Decrypting secrets for export..."
+    local vw_admin_hash="Not Set"
+    local caddy_hash="Not Set"
+    local smtp_pass="Not Set"
+    local backup_pass="Not Set"
+    local cf_dns="Not Set"
+    local cf_fw="Not Set"
+    local push_id="Not Set"
+    local push_key="Not Set"
+
+    if [[ -f "$secrets_file" ]]; then
+        # Export key for sops
+        export SOPS_AGE_KEY_FILE="$age_key"
+        
+        local secrets_json
+        if secrets_json=$(sops -d --output-type json "$secrets_file" 2>/dev/null); then
+            vw_admin_hash=$(echo "$secrets_json" | jq -r '.admin_token // "Not Set"')
+            caddy_hash=$(echo "$secrets_json" | jq -r '.admin_basic_auth_hash // "Not Set"')
+            smtp_pass=$(echo "$secrets_json" | jq -r '.smtp_password // "Not Set"')
+            backup_pass=$(echo "$secrets_json" | jq -r '.backup_passphrase // "Not Set"')
+            cf_dns=$(echo "$secrets_json" | jq -r '.caddy_cloudflare_dns_token // "Not Set"')
+            cf_fw=$(echo "$secrets_json" | jq -r '.fail2ban_cloudflare_firewall_token // "Not Set"')
+            push_id=$(echo "$secrets_json" | jq -r '.push_installation_id // "Not Set"')
+            push_key=$(echo "$secrets_json" | jq -r '.push_installation_key // "Not Set"')
         else
-            log_error "❌ Age key verification failed"
-            exit 1
+            log_error "Failed to decrypt secrets.yaml. Ensure sops is working."
+            return 1
         fi
-        ;;
-    
-    create)
-        log_info "Creating password manager-ready backup..."
-        output_file="$HOME/vaultwarden-age-key-$(date +%Y%m%d-%H%M%S).txt"
-        
-        create_password_manager_escrow "$output_file" || exit 1
-        
-        echo ""
-        log_warn "═══════════════════════════════════════════════════════"
-        log_warn "  IMMEDIATE ACTION REQUIRED"
-        log_warn "═══════════════════════════════════════════════════════"
-        echo ""
-        echo "1. Open your password manager (1Password, Bitwarden, etc.)"
-        echo "2. Create a new Secure Note called: 'VaultWarden Age Key'"
-        echo "3. Copy the entire file content:"
-        echo "   cat $output_file"
-        echo ""
-        echo "4. After confirming it's saved, DELETE the local file:"
-        echo "   rm $output_file"
-        echo ""
-        read -p "Press Enter after you've saved to password manager..."
-        
-        if [[ -f "$output_file" ]]; then
-            read -p "Delete local copy now? (Y/n): " delete_confirm
-            if [[ ! "$delete_confirm" =~ ^[Nn]$ ]]; then
-                if command -v shred >/dev/null 2>&1; then
-                    shred -u "$output_file"
-                else
-                    rm -f "$output_file"
-                fi
-                log_success "Local copy deleted securely"
-            else
-                log_warn "Remember to delete manually: rm $output_file"
-            fi
-        fi
-        ;;
-    
-    print)
-        create_printable_key_backup || exit 1
-        log_info "Print and store in fireproof safe or safety deposit box"
-        ;;
-esac
+    else
+        log_warn "secrets.yaml not found"
+    fi
 
-exit 0
+    # 5. Generate Content
+    cat > "$output_file" << EOF
+══════════════════════════════════════════════════════════════════════════════
+VAULTWARDEN SERVER RECOVERY KIT
+══════════════════════════════════════════════════════════════════════════════
+Created: $date_val
+Server:  $hostname_val
+Domain:  $domain
+
+🚨 CRITICAL SECURITY DOCUMENT 🚨
+This file contains sensitive unencrypted secrets.
+1. Save this to your Password Manager (Secure Note).
+2. Print a copy for your physical safe (optional).
+3. DELETE this file from the server immediately after saving.
+
+══════════════════════════════════════════════════════════════════════════════
+SECTION 1: ENCRYPTION KEYS (THE MOST IMPORTANT PART)
+══════════════════════════════════════════════════════════════════════════════
+If you lose this key, your backups are USELESS.
+
+[AGE PRIVATE KEY]
+$priv_key
+
+[AGE PUBLIC KEY]
+$pub_key
+
+══════════════════════════════════════════════════════════════════════════════
+SECTION 2: SERVER SECRETS (DECRYPTED)
+══════════════════════════════════════════════════════════════════════════════
+
+[SYSTEM CREDENTIALS]
+Backup Encryption Passphrase:
+$backup_pass
+
+SMTP Password (Email):
+$smtp_pass
+
+Cloudflare DNS Token:
+$cf_dns
+
+Cloudflare Firewall Token:
+$cf_fw
+
+[PUSH NOTIFICATIONS]
+Installation ID:  $push_id
+Installation Key: $push_key
+
+[ADMIN ACCESS]
+Admin Email: $admin_email
+
+VaultWarden Admin Password Hash (Argon2id):
+$vw_admin_hash
+(Note: Original password cannot be recovered from hash. Reset if lost.)
+
+Caddy Basic Auth Hash (Bcrypt):
+$caddy_hash
+(Note: Original password cannot be recovered from hash. Reset if lost.)
+
+══════════════════════════════════════════════════════════════════════════════
+SECTION 3: DISASTER RECOVERY & MIGRATION CHECKLIST
+══════════════════════════════════════════════════════════════════════════════
+
+TO RESTORE THIS SERVER ON NEW HARDWARE:
+
+1. PREPARATION
+   [ ] Install Git, Docker, and SOPS on new server.
+   [ ] Clone the repository:
+       git clone https://github.com/killer23d/VaultWarden-OCI.git
+   [ ] Run setup:
+       ./setup.sh --domain $domain --email $admin_email
+
+2. RESTORE KEYS
+   [ ] Create key directory:
+       mkdir -p secrets/keys
+   [ ] Restore Age Key:
+       Paste the [AGE PRIVATE KEY] above into: secrets/keys/age-key.txt
+   [ ] Set permissions:
+       chmod 600 secrets/keys/age-key.txt
+
+3. RESTORE DATA (Choose Option A or B)
+
+   OPTION A: From Remote Backup (Rclone/S3)
+   [ ] Configure Rclone:
+       rclone config
+   [ ] Download latest backup:
+       rclone copy remote:bucket/backup.tar.gz.age ./backups/
+   [ ] Run Restore:
+       ./restore.sh --type emergency
+
+   OPTION B: From Secrets Above (Manual Rebuild)
+   [ ] Run secrets setup:
+       ./setup-secrets.sh
+   [ ] Manually enter the values from [SECTION 2] when prompted.
+
+4. FINALIZATION
+   [ ] Start services:
+       make up
+   [ ] Check health:
+       ./health.sh
+   [ ] Verify email delivery:
+       ./test-email-simple.sh
+
+══════════════════════════════════════════════════════════════════════════════
+END OF RECOVERY KIT
+══════════════════════════════════════════════════════════════════════════════
+EOF
+
+    chmod 600 "$output_file"
+}
+
+# Main Execution
+check_deps
+
+if [[ "$ACTION" == "create" ]]; then
+    output_file="$HOME/vaultwarden-recovery-kit-$(date +%Y%m%d).txt"
+    
+    if generate_recovery_kit "$output_file"; then
+        log_success "Recovery Kit created: $output_file"
+        echo ""
+        log_warn "⚠️  ACTION REQUIRED:"
+        echo "1. Copy content to password manager."
+        echo "2. Delete local file: rm $output_file"
+        echo ""
+    else
+        log_error "Failed to generate recovery kit"
+        exit 1
+    fi
+fi
