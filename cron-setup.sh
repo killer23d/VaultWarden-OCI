@@ -365,7 +365,7 @@ install_cron_jobs() {
     log_info "  Weekly (Sun 4 AM): Firewall update"
     log_info "  Weekly (Sun 5 AM): Full backup with comprehensive verification"
     log_info "  Every 30 min: Health check"
-    log_info "  Every hour: DNS update"
+    log_info "  Every hour: DNS update (maintenance.sh --update-dns)"
     return 0
 }
 
