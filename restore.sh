@@ -322,10 +322,7 @@ restore_archive() {
 
     local temp_dir
     temp_dir=$(mktemp -d)
-    local cleanup_temp() {
-        rm -rf "$temp_dir"
-    }
-    trap cleanup_temp EXIT
+    trap 'rm -rf "$temp_dir"' EXIT
 
     # Decrypt and extract archive
     if ! age -d -i "$SOPS_AGE_KEY_FILE" "$BACKUP_FILE" | tar -xzf - -C "$temp_dir"; then
