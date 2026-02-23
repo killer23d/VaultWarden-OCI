@@ -4,6 +4,7 @@
 # FIXED: Proper DOMAIN error handling in check_service_accessibility
 # ENHANCED: Standardized error handling - functions return, main() decides exit strategy
 # FIXED: Backup decrypt verification works when backups/age key are root-only (auto sudo)
+# FIXED: Added timeout to SSL certificate check to prevent hanging
 
 set -euo pipefail
 
@@ -154,43 +155,18 @@ attempt_container_recovery() {
         if container_is_healthy "$container"; then
             log_success "✅ Auto-recovery succeeded for $service"
             send_notification_email "✅ $service Auto-Recovered" \
-                "Service $service was unhealthy and has been automatically restarted.
-
-Container: $container
-Recovery time: ${RECOVERY_WAIT_TIME}s
-Status: Now healthy
-
-This was an automated recovery action. The service should now be functioning normally."
+                "Service $service was unhealthy and has been automatically restarted.\n\nContainer: $container\nRecovery time: ${RECOVERY_WAIT_TIME}s\nStatus: Now healthy\n\nThis was an automated recovery action. The service should now be functioning normally."
             return 0
         else
             log_error "❌ Auto-recovery failed for $service - container still unhealthy"
             send_notification_email "❌ $service Auto-Recovery Failed" \
-                "Service $service remains unhealthy after automatic restart attempt.
-
-Container: $container
-Recovery attempt: Failed after ${RECOVERY_WAIT_TIME}s wait
-Status: Still unhealthy
-
-MANUAL INTERVENTION REQUIRED:
-1. Check container logs: docker compose logs $service
-2. Check container status: docker compose ps $service
-3. Manual restart: docker compose restart $service
-4. If persistent, check configuration and resources"
+                "Service $service remains unhealthy after automatic restart attempt.\n\nContainer: $container\nRecovery attempt: Failed after ${RECOVERY_WAIT_TIME}s wait\nStatus: Still unhealthy\n\nMANUAL INTERVENTION REQUIRED:\n1. Check container logs: docker compose logs $service\n2. Check container status: docker compose ps $service\n3. Manual restart: docker compose restart $service\n4. If persistent, check configuration and resources"
             return 1
         fi
     else
         log_error "❌ Failed to execute restart command for $service"
         send_notification_email "❌ Cannot Restart $service" \
-            "Automatic restart command failed for service $service.
-
-Container: $container
-Error: Docker compose restart command failed
-
-IMMEDIATE ACTION REQUIRED:
-1. Check Docker daemon: systemctl status docker
-2. Check Docker Compose: docker compose ps
-3. Check system resources: df -h && free -h
-4. Attempt manual restart: docker compose restart $service"
+            "Automatic restart command failed for service $service.\n\nContainer: $container\nError: Docker compose restart command failed\n\nIMMEDIATE ACTION REQUIRED:\n1. Check Docker daemon: systemctl status docker\n2. Check Docker Compose: docker compose ps\n3. Check system resources: df -h && free -h\n4. Attempt manual restart: docker compose restart $service"
         return 1
     fi
 }
@@ -364,7 +340,8 @@ check_ssl_certificates() {
     clean_domain=$(echo "$domain" | sed 's|https\?://||; s|/.*$||')
     
     local cert_info expiry_date expires_in
-    if cert_info=$(echo | openssl s_client -servername "$clean_domain" -connect "$clean_domain:443" 2>/dev/null | \
+    # Added 'timeout 5' to prevent openssl from hanging indefinitely if the network drops connection silently
+    if cert_info=$(echo | timeout 5 openssl s_client -servername "$clean_domain" -connect "$clean_domain:443" 2>/dev/null | \
                    openssl x509 -noout -dates 2>/dev/null); then
         expiry_date=$(echo "$cert_info" | grep "notAfter" | cut -d= -f2)
         if [[ -n "$expiry_date" ]]; then
@@ -395,7 +372,7 @@ check_ssl_certificates() {
             return 1
         fi
     else
-        health_log_warn "Could not check SSL certificate (connection failed)"
+        health_log_warn "Could not check SSL certificate (connection failed or timed out)"
         HEALTH_RESULTS["ssl_certificates"]="degraded"
         return 1
     fi
@@ -789,13 +766,7 @@ main() {
         local issue_summary
         issue_summary=$(printf "%s\n" "${CRITICAL_ISSUES[@]}")
         send_notification_email "CRITICAL: VaultWarden Health Check Issues" \
-            "The following critical issues were found:
-
-$issue_summary
-
-Auto-Recovery: $([[ "$AUTO_RECOVER" == "true" ]] && echo "Enabled (attempted)" || echo "Disabled")
-
-Please investigate and resolve these issues immediately."
+            "The following critical issues were found:\n\n$issue_summary\n\nAuto-Recovery: $([[ "$AUTO_RECOVER" == "true" ]] && echo "Enabled (attempted)" || echo "Disabled")\n\nPlease investigate and resolve these issues immediately."
     fi
     
     if [[ "$OVERALL_STATUS" == "healthy" ]]; then
