@@ -185,8 +185,8 @@ All configuration files are managed through templates for easier maintenance:
 | Script | Purpose | Key Features | Frequency |
 | :-- | :-- | :-- | :-- |
 | `./create-breakglass-admin.sh` | Emergency admin for serial console | OCI console access, secure creation | Once + as needed |
-| `./db-maint.sh` | Database maintenance | Safe offline SQLite optimization | Monthly (automated) |
-| `./update-dns.sh` | Manual DNS updates | Cloudflare API integration | As needed |
+| `./maintenance.sh --db-maint` | Database maintenance | Safe offline SQLite optimization | Monthly (automated) |
+| `./maintenance.sh --update-dns` | Manual DNS updates | Cloudflare API integration | As needed |
 
 ### Email Testing
 
