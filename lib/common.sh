@@ -33,6 +33,7 @@ if [[ -t 1 ]] && command -v tput >/dev/null 2>&1; then
     readonly COLOR_GREEN=$(tput setaf 2)
     readonly COLOR_YELLOW=$(tput setaf 3)
     readonly COLOR_BLUE=$(tput setaf 4)
+    readonly COLOR_CYAN=$(tput setaf 6)
     readonly COLOR_RESET=$(tput sgr0)
     readonly COLOR_BOLD=$(tput bold)
 else
@@ -40,6 +41,7 @@ else
     readonly COLOR_GREEN=""
     readonly COLOR_YELLOW=""
     readonly COLOR_BLUE=""
+    readonly COLOR_CYAN=""
     readonly COLOR_RESET=""
     readonly COLOR_BOLD=""
 fi
