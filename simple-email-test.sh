@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test-email-simple.sh - Simple email testing for bokysan/docker-postfix integration
+# simple-email-test.sh - Simple email testing for bokysan/docker-postfix integration
 # Author: VaultWarden-OCI Team
 # Purpose: Validate email functionality after msmtpd -> postfix migration
 
@@ -22,7 +22,7 @@ show_help() {
 Simple Email Testing for bokysan/docker-postfix Integration
 
 USAGE:
-    ./test-email-simple.sh [OPTIONS]
+    ./simple-email-test.sh [OPTIONS]
 
 OPTIONS:
     --recipient EMAIL    Test email recipient (default: ADMIN_EMAIL from .env)
