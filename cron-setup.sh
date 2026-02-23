@@ -269,7 +269,6 @@ install_cron_jobs() {
         "maintenance.sh:Database and system maintenance"
         "backup.sh:Automated backup creation"
         "health.sh:System health monitoring"
-        "update-dns.sh:Cloudflare DNS updates"
     )
     
     local secure_scripts=()
@@ -324,7 +323,7 @@ install_cron_jobs() {
         "0 5 * * 0 cd $PROJECT_ROOT && $CRON_SCRIPTS_DIR/backup.sh --type full --full-verification --rclone --email >> $CRON_LOG_DIR/backup.log 2>&1"
         
         # Automated DNS update every hour
-        "0 * * * * cd $PROJECT_ROOT && $CRON_SCRIPTS_DIR/update-dns.sh >> $CRON_LOG_DIR/dns-update.log 2>&1"
+        "0 * * * * cd $PROJECT_ROOT && $CRON_SCRIPTS_DIR/maintenance.sh --update-dns >> $CRON_LOG_DIR/dns-update.log 2>&1"
     )
     
     # Install cron jobs securely
