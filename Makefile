@@ -1,4 +1,4 @@
-# VaultWarden-OCI-NG Makefile
+# VaultWarden-OCI Makefile
 # Enhanced: Supports standardized error handling and comprehensive automation
 # Version: 2.2 - Production Ready (Postfix Enabled) - Secrets-Aware
 # Updated: Uses startup.sh for proper secrets initialization
@@ -74,7 +74,7 @@ test-secrets: ## Test secrets decryption
 
 test-email: ## Test email configuration (Postfix)
 	@echo "$(BLUE)Testing email configuration...$(NC)"
-	@./test-email-simple.sh --verbose
+	@./simple-email-test.sh --verbose
 
 ## Service Management
 up: ## Start all services with secrets initialization
@@ -211,7 +211,7 @@ maintenance-full: ## Run comprehensive maintenance
 ## DNS Management
 update-dns: ## Update DNS record to current IP
 	@echo "$(BLUE)Updating DNS record...$(NC)"
-	@./update-dns.sh || { \
+	@./maintenance.sh --update-dns || { \
 		echo "$(RED)DNS update failed$(NC)"; \
 		exit 1; \
 	}
@@ -275,7 +275,7 @@ dry-run: ## Show what operations would do without executing
 ## Database Operations
 db-maint: ## Run database maintenance
 	@echo "$(BLUE)Running database maintenance...$(NC)"
-	@./db-maint.sh || { \
+	@./maintenance.sh --db-maint || { \
 		echo "$(RED)Database maintenance failed$(NC)"; \
 		exit 1; \
 	}
