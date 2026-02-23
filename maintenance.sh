@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# maintenance.sh - System cleanup and optimization with enhanced safety
-# FIXED: Lock files now use state directory for portability
+# maintenance.sh - System cleanup, optimization, DNS update, and on-demand DB maintenance
 
 set -euo pipefail
 
@@ -12,16 +11,24 @@ source "lib/common.sh"
 init_common_lib "$0"
 source "lib/docker.sh"
 source "lib/backup_utils.sh"
+source "lib/crypto.sh"  # Needed for db-maint backup path
 
+# ---------------------------------------------------------------------------
 # Configuration
+# ---------------------------------------------------------------------------
 CLEAN_LOGS=true
 CLEAN_BACKUPS=true
 CLEAN_DOCKER=true
 OPTIMIZE_DATABASE=true
 UPDATE_FIREWALL=false
+UPDATE_DNS=false
 DRY_RUN=false
 EMAIL_NOTIFY=false
 COMPREHENSIVE=false
+
+# Deep (on-demand) DB maintenance mode  -- replaces db-maint.sh
+DB_DEEP_MAINT=false
+DB_DEEP_FORCE=false
 
 # Retention settings (days)
 LOG_RETENTION_DAYS=30
@@ -29,118 +36,106 @@ DB_BACKUP_RETENTION_DAYS=14
 FULL_BACKUP_RETENTION_DAYS=30
 EMERGENCY_BACKUP_RETENTION_DAYS=90
 
+# ---------------------------------------------------------------------------
+# Help
+# ---------------------------------------------------------------------------
 show_help() {
     cat << 'EOF'
-VaultWarden-OCI Maintenance Script - Safe Database Operations
+VaultWarden-OCI Maintenance Script
 
 USAGE:
     sudo ./maintenance.sh [OPTIONS]
 
-OPTIONS:
-    --comprehensive         Run comprehensive maintenance (includes firewall updates)
+ROUTINE MAINTENANCE OPTIONS:
+    --comprehensive         Run comprehensive maintenance (includes firewall + DNS updates)
     --no-logs               Skip log rotation and cleanup
     --no-backups            Skip backup cleanup
     --no-docker             Skip Docker cleanup
-    --no-database           Skip database optimization
+    --no-database           Skip scheduled database optimization
     --update-firewall       Update Cloudflare IP ranges in firewall
+    --update-dns            Update Cloudflare dynamic DNS record to current public IP
     --dry-run               Show what would be done without executing
     --email                 Send email notification on completion
     --help                  Show this help
 
-MAINTENANCE TASKS:
-    Basic:
-    - Log rotation and cleanup (30 days)
-    - Backup retention management (14/30/90 days)
-    - Docker system cleanup
-    - SAFE database optimization (stops services first)
-
-    Comprehensive:
-    - All basic tasks
-    - Safe firewall IP range updates (no service interruption)
-    - System health validation
-
-SAFETY FEATURES:
-    - Database operations stop VaultWarden service first
-    - WAL checkpoint before VACUUM operations
-    - Integrity verification before restart
-    - Firewall updates avoid service interruption
+ON-DEMAND DEEP DATABASE MAINTENANCE (replaces db-maint.sh):
+    --db-maint              Run deep database maintenance (VACUUM + WAL checkpoint + backup)
+                            Stops the VaultWarden container; prompts for confirmation
+    --db-maint --force      Skip the confirmation prompt
 
 EXAMPLES:
-    sudo ./maintenance.sh                    # Basic maintenance
-    sudo ./maintenance.sh --comprehensive    # Full maintenance with firewall
-    sudo ./maintenance.sh --dry-run          # Preview maintenance actions
+    sudo ./maintenance.sh                       # Basic maintenance
+    sudo ./maintenance.sh --comprehensive       # Full maintenance with firewall + DNS
+    sudo ./maintenance.sh --dry-run             # Preview maintenance actions
+    sudo ./maintenance.sh --db-maint            # Deep DB maintenance (interactive)
+    sudo ./maintenance.sh --db-maint --force    # Deep DB maintenance (non-interactive)
+    sudo ./maintenance.sh --update-dns          # One-shot DNS update only
 EOF
 }
 
+# ---------------------------------------------------------------------------
 # Argument Parsing
+# ---------------------------------------------------------------------------
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --comprehensive) COMPREHENSIVE=true; UPDATE_FIREWALL=true; shift ;;
-        --no-logs) CLEAN_LOGS=false; shift ;;
-        --no-backups) CLEAN_BACKUPS=false; shift ;;
-        --no-docker) CLEAN_DOCKER=false; shift ;;
-        --no-database) OPTIMIZE_DATABASE=false; shift ;;
+        --comprehensive)   COMPREHENSIVE=true; UPDATE_FIREWALL=true; UPDATE_DNS=true; shift ;;
+        --no-logs)         CLEAN_LOGS=false; shift ;;
+        --no-backups)      CLEAN_BACKUPS=false; shift ;;
+        --no-docker)       CLEAN_DOCKER=false; shift ;;
+        --no-database)     OPTIMIZE_DATABASE=false; shift ;;
         --update-firewall) UPDATE_FIREWALL=true; shift ;;
-        --dry-run) DRY_RUN=true; shift ;;
-        --email) EMAIL_NOTIFY=true; shift ;;
-        --help) show_help; exit 0 ;;
+        --update-dns)      UPDATE_DNS=true; shift ;;
+        --dry-run)         DRY_RUN=true; shift ;;
+        --email)           EMAIL_NOTIFY=true; shift ;;
+        --db-maint)        DB_DEEP_MAINT=true; shift ;;
+        --force)           DB_DEEP_FORCE=true; shift ;;
+        --help)            show_help; exit 0 ;;
         *) log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done
 
-# STANDARDIZED: Log cleanup and rotation - returns exit code
+# ---------------------------------------------------------------------------
+# ROUTINE: Log cleanup and rotation
+# ---------------------------------------------------------------------------
 cleanup_logs() {
     if [[ "$CLEAN_LOGS" != "true" ]]; then
         log_info "Skipping log cleanup (--no-logs specified)"
         return 0
     fi
-
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would clean up logs older than $LOG_RETENTION_DAYS days"
         return 0
     fi
-
     log_info "Cleaning up logs older than $LOG_RETENTION_DAYS days..."
-
     local state_dir
     state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
     local logs_cleaned=0
-
-    # Clean up application logs
     local log_dirs=(
         "$state_dir/logs/vaultwarden"
         "$state_dir/logs/caddy"
         "$state_dir/logs/fail2ban"
         "$PROJECT_ROOT/logs"
     )
-
     for log_dir in "${log_dirs[@]}"; do
         if [[ -d "$log_dir" ]]; then
             local old_logs
             if old_logs=$(find "$log_dir" -name "*.log*" -type f -mtime +$LOG_RETENTION_DAYS 2>/dev/null); then
                 while IFS= read -r log_file; do
                     if [[ -n "$log_file" ]]; then
-                        if rm -f "$log_file"; then
-                            ((logs_cleaned++))
-                            log_debug "Removed old log: $(basename "$log_file")"
-                        fi
+                        rm -f "$log_file" && ((logs_cleaned++)) && log_debug "Removed old log: $(basename "$log_file")"
                     fi
                 done <<< "$old_logs"
             fi
         fi
     done
-
-    # Rotate current logs if they're too large (>100MB)
     local large_logs
     if large_logs=$(find "${log_dirs[@]}" -name "*.log" -type f -size +100M 2>/dev/null); then
         while IFS= read -r log_file; do
             if [[ -n "$log_file" ]]; then
-                # FIXED: Skip Caddy logs to avoid conflict with internal rotation
                 if [[ "$log_file" == *"/logs/caddy/access.log" ]]; then
                     log_debug "Skipping rotation for Caddy log (handled internally): $log_file"
                     continue
                 fi
-                
                 local rotated_name="${log_file}.$(date +%Y%m%d)"
                 if mv "$log_file" "$rotated_name" && gzip "$rotated_name"; then
                     log_debug "Rotated large log: $(basename "$log_file")"
@@ -149,710 +144,505 @@ cleanup_logs() {
             fi
         done <<< "$large_logs"
     fi
-
-    if [[ $logs_cleaned -gt 0 ]]; then
-        log_success "Cleaned up $logs_cleaned log files"
-    else
-        log_info "No old logs found to clean up"
-    fi
-
+    [[ $logs_cleaned -gt 0 ]] && log_success "Cleaned up $logs_cleaned log files" || log_info "No old logs found to clean up"
     return 0
 }
 
-# STANDARDIZED: Backup retention management - returns exit code
+# ---------------------------------------------------------------------------
+# ROUTINE: Backup retention management
+# ---------------------------------------------------------------------------
 cleanup_backups() {
-    if [[ "$CLEAN_BACKUPS" != "true" ]]; then
-        log_info "Skipping backup cleanup (--no-backups specified)"
-        return 0
-    fi
-
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would clean up old backups based on retention policy"
-        return 0
-    fi
-
+    if [[ "$CLEAN_BACKUPS" != "true" ]]; then log_info "Skipping backup cleanup (--no-backups specified)"; return 0; fi
+    if [[ "$DRY_RUN"       == "true" ]]; then log_info "[DRY RUN] Would clean up old backups based on retention policy"; return 0; fi
     log_info "Managing backup retention..."
-
     local backup_base_dir="$PROJECT_ROOT/backups"
-    local cleanup_results=()
-
-    # Clean up different backup types with different retention periods
-    local backup_types=(
-        "db:$DB_BACKUP_RETENTION_DAYS"
-        "full:$FULL_BACKUP_RETENTION_DAYS"
-        "emergency:$EMERGENCY_BACKUP_RETENTION_DAYS"
-    )
-
+    local backup_types=("db:$DB_BACKUP_RETENTION_DAYS" "full:$FULL_BACKUP_RETENTION_DAYS" "emergency:$EMERGENCY_BACKUP_RETENTION_DAYS")
     for backup_type_info in "${backup_types[@]}"; do
         local backup_type="${backup_type_info%%:*}"
         local retention_days="${backup_type_info##*:}"
-        local backup_dir="$backup_base_dir/$backup_type"
-
-        if cleanup_old_backups "$backup_dir" "$backup_type" "$retention_days"; then
-            cleanup_results+=("✅ $backup_type backups cleaned (${retention_days}d retention)")
+        if cleanup_old_backups "$backup_base_dir/$backup_type" "$backup_type" "$retention_days"; then
+            log_success "$backup_type backups cleaned (${retention_days}d retention)"
         else
-            cleanup_results+=("❌ $backup_type backup cleanup failed")
+            log_error "$backup_type backup cleanup failed"
         fi
     done
-
-    # Log results
-    for result in "${cleanup_results[@]}"; do
-        if [[ "$result" =~ ^✅ ]]; then
-            log_success "${result#✅ }"
-        else
-            log_error "${result#❌ }"
-        fi
-    done
-
     log_success "Backup retention management completed"
     return 0
 }
 
-# STANDARDIZED: Docker system cleanup - returns exit code
+# ---------------------------------------------------------------------------
+# ROUTINE: Docker system cleanup
+# ---------------------------------------------------------------------------
 cleanup_docker_system() {
-    if [[ "$CLEAN_DOCKER" != "true" ]]; then
-        log_info "Skipping Docker cleanup (--no-docker specified)"
-        return 0
-    fi
-
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would clean up Docker system resources"
-        return 0
-    fi
-
+    if [[ "$CLEAN_DOCKER" != "true" ]]; then log_info "Skipping Docker cleanup (--no-docker specified)"; return 0; fi
+    if [[ "$DRY_RUN"      == "true" ]]; then log_info "[DRY RUN] Would clean up Docker system resources"; return 0; fi
     log_info "Cleaning up Docker system resources..."
-
-    # Check Docker availability
-    if ! require_docker; then
-        log_error "Docker not available for cleanup"
-        return 1
-    fi
-
+    if ! require_docker; then log_error "Docker not available for cleanup"; return 1; fi
     local cleanup_success=true
-
-    # Clean up in order of safety: containers -> images -> volumes -> networks
-    if ! cleanup_containers; then
-        log_warn "Container cleanup had issues"
-        cleanup_success=false
-    fi
-
-    if ! cleanup_images; then
-        log_warn "Image cleanup had issues"  
-        cleanup_success=false
-    fi
-
-    # Be more careful with volumes - only clean unnamed volumes
+    cleanup_containers || { log_warn "Container cleanup had issues"; cleanup_success=false; }
+    cleanup_images     || { log_warn "Image cleanup had issues";     cleanup_success=false; }
     log_info "Cleaning up unnamed Docker volumes..."
-    if ! docker volume prune -f >/dev/null 2>&1; then
-        log_warn "Volume cleanup had issues"
-        cleanup_success=false
-    fi
-
-    if ! cleanup_networks; then
-        log_warn "Network cleanup had issues"
-        cleanup_success=false
-    fi
-
-    # Get cleanup summary
+    docker volume prune -f >/dev/null 2>&1 || { log_warn "Volume cleanup had issues"; cleanup_success=false; }
+    cleanup_networks   || { log_warn "Network cleanup had issues";   cleanup_success=false; }
     local space_reclaimed
     space_reclaimed=$(docker system df --format "table {{.Reclaimed}}" 2>/dev/null | tail -1 || echo "unknown")
-
     if [[ "$cleanup_success" == "true" ]]; then
-        log_success "Docker cleanup completed successfully (reclaimed: ${space_reclaimed})"
-        return 0
+        log_success "Docker cleanup completed successfully (reclaimed: ${space_reclaimed})"; return 0
     else
-        log_warn "Docker cleanup completed with some issues (reclaimed: ${space_reclaimed})"
-        return 1
+        log_warn "Docker cleanup completed with some issues (reclaimed: ${space_reclaimed})"; return 1
     fi
 }
 
-# ENHANCED: SAFE database optimization - stops services first, sidecar ops
+# ---------------------------------------------------------------------------
+# ROUTINE: Scheduled database optimization
+# Now includes wal_checkpoint(TRUNCATE) which was missing from the original.
+# ---------------------------------------------------------------------------
 optimize_database() {
-    if [[ "$OPTIMIZE_DATABASE" != "true" ]]; then
-        log_info "Skipping database optimization (--no-database specified)"
-        return 0
-    fi
-
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would safely optimize VaultWarden database (stops service first)"
-        return 0
-    fi
-
+    if [[ "$OPTIMIZE_DATABASE" != "true" ]]; then log_info "Skipping database optimization (--no-database specified)"; return 0; fi
+    if [[ "$DRY_RUN"           == "true" ]]; then log_info "[DRY RUN] Would safely optimize VaultWarden database"; return 0; fi
     log_info "Starting SAFE database optimization (will stop VaultWarden temporarily)..."
-
-    # Check if VaultWarden is running
-    local was_running=false
-    if is_service_running "vaultwarden"; then
-        was_running=true
-    else
-        log_warn "VaultWarden not running, will optimize offline database"
-    fi
-
     local state_dir
     state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
     local host_db_path="$state_dir/data/db.sqlite3"
-
-    # Verify database exists
-    if [[ ! -f "$host_db_path" ]]; then
-        log_error "Database file not found: $host_db_path"
-        return 1
-    fi
-
-    # Get database size before optimization
+    if [[ ! -f "$host_db_path" ]]; then log_error "Database file not found: $host_db_path"; return 1; fi
+    local was_running=false
+    is_service_running "vaultwarden" && was_running=true || log_warn "VaultWarden not running, will optimize offline database"
     local size_before
-    if size_before=$(stat -c%s "$host_db_path" 2>/dev/null); then
-        size_before=$((size_before / 1024 / 1024))  # Convert to MB
-    else
-        log_warn "Could not determine database size"
-        size_before=0
-    fi
-
+    size_before=$(stat -c%s "$host_db_path" 2>/dev/null && echo "$(($(stat -c%s "$host_db_path") / 1024 / 1024))" || echo "0")
     log_info "Database size before optimization: ${size_before}MB"
-
-    # SAFETY STEP 1: If service is running, prepare for safe shutdown
     if [[ "$was_running" == "true" ]]; then
-        log_info "Preparing VaultWarden for safe database maintenance..."
-
-        # Stop VaultWarden service gracefully
-        log_info "Stopping VaultWarden service for safe database operations..."
-        if ! docker compose stop vaultwarden; then
-            log_error "Failed to stop VaultWarden service"
-            return 1
-        fi
-        log_success "VaultWarden service stopped safely"
-
-        # Give a moment for graceful shutdown
-        sleep 3
+        log_info "Stopping VaultWarden service..."
+        docker compose stop vaultwarden || { log_error "Failed to stop VaultWarden"; return 1; }
+        log_success "VaultWarden stopped"; sleep 3
     fi
-
-    # SAFETY STEP 2: Create a backup before optimization
     local backup_file="$state_dir/data/bwdata/db.sqlite3.pre-optimization-$(date +%Y%m%d-%H%M%S)"
-    log_info "Creating safety backup before optimization..."
-    if cp "$host_db_path" "$backup_file"; then
-        log_success "Safety backup created: $(basename "$backup_file")"
-    else
-        log_error "Failed to create safety backup - aborting optimization"
-        # Restart service if it was running
-        if [[ "$was_running" == "true" ]]; then
-            docker compose start vaultwarden
-        fi
-        return 1
-    fi
+    cp "$host_db_path" "$backup_file" || { log_error "Failed to create safety backup"; [[ "$was_running" == "true" ]] && docker compose start vaultwarden; return 1; }
+    log_success "Safety backup created: $(basename "$backup_file")"
 
-    # HELPER: Containerized sqlite execution (Sidecar)
     run_sqlite_sidecar() {
-        local cmd="$1"
         docker run --rm -v "$state_dir/data/bwdata:/data" alpine:latest \
-            sh -c "apk add --no-cache sqlite >/dev/null 2>&1 && sqlite3 /data/db.sqlite3 '$cmd'"
+            sh -c "apk add --no-cache sqlite >/dev/null 2>&1 && sqlite3 /data/db.sqlite3 '$1'"
     }
 
-    # SAFETY STEP 3: Verify database integrity before optimization
-    log_info "Verifying database integrity before optimization..."
-    if run_sqlite_sidecar "PRAGMA integrity_check;" | grep -qx "ok"; then
-        log_success "Database integrity check passed"
-    else
-        log_error "Database integrity check failed - aborting optimization"
-        # Restart service if it was running
-        if [[ "$was_running" == "true" ]]; then
-            docker compose start vaultwarden
-        fi
-        return 1
+    log_info "Verifying integrity before optimization..."
+    if ! run_sqlite_sidecar "PRAGMA integrity_check;" | grep -qx "ok"; then
+        log_error "Integrity check failed - aborting"; [[ "$was_running" == "true" ]] && docker compose start vaultwarden; return 1
     fi
-
-    # STEP 4: Perform database optimization operations safely
-    log_info "Performing database optimization operations (VACUUM, ANALYZE, OPTIMIZE)..."
-
-    local optimization_commands=(
-        "PRAGMA optimize;"
-        "ANALYZE;"
-        "VACUUM;"
-    )
+    log_success "Integrity check passed"
 
     local optimization_success=true
-
-    for cmd in "${optimization_commands[@]}"; do
+    for cmd in "PRAGMA wal_checkpoint(TRUNCATE);" "PRAGMA optimize;" "ANALYZE;" "VACUUM;"; do
         log_debug "Running: $cmd"
-        if ! run_sqlite_sidecar "$cmd"; then
-            log_warn "Database command failed: $cmd"
-            optimization_success=false
-        fi
+        run_sqlite_sidecar "$cmd" || { log_warn "Command failed: $cmd"; optimization_success=false; }
     done
 
-    # SAFETY STEP 5: Verify database integrity after optimization
-    log_info "Verifying database integrity after optimization..."
-    if run_sqlite_sidecar "PRAGMA integrity_check;" | grep -qx "ok"; then
-        log_success "Post-optimization integrity check passed"
-    else
-        log_error "CRITICAL: Database integrity check failed after optimization!"
-        log_error "Restoring from safety backup..."
-
-        if cp "$backup_file" "$host_db_path"; then
-            log_success "Database restored from safety backup"
-        else
-            log_error "CRITICAL: Failed to restore from backup!"
-        fi
-
+    log_info "Verifying integrity after optimization..."
+    if ! run_sqlite_sidecar "PRAGMA integrity_check;" | grep -qx "ok"; then
+        log_error "CRITICAL: Post-optimization integrity check failed! Restoring..."
+        cp "$backup_file" "$host_db_path" && log_success "Restored from backup" || log_error "CRITICAL: Restore failed!"
         optimization_success=false
-    fi
-
-    # STEP 6: Restart VaultWarden service if it was running
-    if [[ "$was_running" == "true" ]]; then
-        log_info "Restarting VaultWarden service..."
-        if docker compose start vaultwarden; then
-            log_success "VaultWarden service restarted successfully"
-
-            # Wait for service to be ready
-            sleep 5
-
-            # Verify service health
-            if is_service_running "vaultwarden"; then
-                log_success "VaultWarden service is healthy after database optimization"
-            else
-                log_error "VaultWarden service failed to start properly after optimization"
-                optimization_success=false
-            fi
-        else
-            log_error "Failed to restart VaultWarden service"
-            optimization_success=false
-        fi
-    fi
-
-    # STEP 7: Report results and clean up
-    local size_after
-    if size_after=$(stat -c%s "$host_db_path" 2>/dev/null); then
-        size_after=$((size_after / 1024 / 1024))  # Convert to MB
-        local space_saved=$((size_before - size_after))
-
-        log_info "Database size after optimization: ${size_after}MB"
-
-        if [[ "$optimization_success" == "true" ]]; then
-            log_success "SAFE database optimization completed successfully"
-            log_info "Size change: ${size_before}MB → ${size_after}MB (saved ${space_saved}MB)"
-
-            # Clean up safety backup after successful optimization
-            if rm -f "$backup_file"; then
-                log_debug "Safety backup cleaned up"
-            fi
-        else
-            log_error "Database optimization completed with issues"
-            log_warn "Safety backup retained: $(basename "$backup_file")"
-        fi
     else
-        if [[ "$optimization_success" == "true" ]]; then
-            log_success "SAFE database optimization completed successfully"
-        else
-            log_error "Database optimization completed with issues"
-        fi
+        log_success "Post-optimization integrity check passed"
     fi
 
+    if [[ "$was_running" == "true" ]]; then
+        docker compose start vaultwarden && log_success "VaultWarden restarted" || { log_error "Failed to restart VaultWarden"; optimization_success=false; }
+        sleep 5
+        is_service_running "vaultwarden" && log_success "VaultWarden healthy" || { log_error "VaultWarden not healthy after optimization"; optimization_success=false; }
+    fi
+
+    local size_after
+    size_after=$(stat -c%s "$host_db_path" 2>/dev/null && echo "$(($(stat -c%s "$host_db_path") / 1024 / 1024))" || echo "0")
+    if [[ "$optimization_success" == "true" ]]; then
+        log_success "Database optimization completed. ${size_before}MB → ${size_after}MB"
+        rm -f "$backup_file"
+    else
+        log_warn "Optimization completed with issues. Safety backup retained: $(basename "$backup_file")"
+    fi
     return $([[ "$optimization_success" == "true" ]] && echo 0 || echo 1)
 }
 
-# ENHANCED: Safe firewall IP range updates - prevents service interruption
-update_firewall_ranges() {
-    if [[ "$UPDATE_FIREWALL" != "true" ]]; then
-        log_info "Skipping firewall updates (use --update-firewall to enable)"
-        return 0
-    fi
+# ---------------------------------------------------------------------------
+# ON-DEMAND: Deep database maintenance  (merged from db-maint.sh)
+# --db-maint [--force]
+# ---------------------------------------------------------------------------
+run_deep_db_maintenance() {
+    log_info "VaultWarden Deep Database Maintenance"
+    local state_dir
+    state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
+    local db_file="$state_dir/data/bwdata/db.sqlite3"
+
+    if [[ ! -f "$db_file" ]]; then log_error "Database file not found at: $db_file"; return 1; fi
+    local original_size original_bytes
+    original_size=$(du -h "$db_file" | cut -f1)
+    original_bytes=$(stat -c%s "$db_file" 2>/dev/null || echo "0")
 
     if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would safely update Cloudflare IP ranges in firewall"
-        return 0
+        log_info "[DRY RUN] Would perform deep DB maintenance on: $db_file ($original_size)"; return 0
+    fi
+    is_root          || { log_error "Deep DB maintenance requires sudo."; return 1; }
+    require_commands stat numfmt || return 1
+    require_docker               || return 1
+
+    # Confirmation
+    if [[ "$DB_DEEP_FORCE" == "false" ]]; then
+        echo ""
+        log_warn "This will stop the VaultWarden container temporarily. (Caddy stays up)"
+        log_info "Database: $db_file  |  Current Size: $original_size"
+        echo ""
+        read -p "Continue with deep database maintenance? (Y/n): " confirm
+        [[ "$confirm" =~ ^[Nn]$ ]] && { log_info "Deep maintenance cancelled"; return 0; }
     fi
 
-    log_info "Safely updating Cloudflare IP ranges in firewall (no service interruption)..."
+    local safety_backup_file=""
+    local maintenance_successful=false
 
-    # Fetch new Cloudflare IP ranges first
+    # Step 0: Safety backup
+    log_info "Step 0/5: Creating pre-maintenance safety backup..."
+    if safety_backup_file=$(./backup.sh --type db 2>/dev/null); then
+        log_success "Safety backup created: $(basename "$safety_backup_file")"
+    else
+        log_error "Failed to create safety backup!"
+        if [[ "$DB_DEEP_FORCE" == "false" ]]; then
+            read -p "Proceed without a safety backup? (y/N): " confirm_no_backup
+            [[ ! "$confirm_no_backup" =~ ^[Yy]$ ]] && { log_info "Maintenance cancelled"; return 1; }
+        else
+            log_warn "Proceeding without safety backup (--force specified)"
+        fi
+    fi
+
+    log_info "Stopping VaultWarden container..."
+    docker compose stop vaultwarden && log_success "VaultWarden container stopped" || log_warn "Failed to stop vaultwarden container"
+    log_info "Waiting 5 seconds for file lock release..."; sleep 5
+
+    run_sqlite_sidecar_deep() {
+        docker run --rm -v "$state_dir/data/bwdata:/data" alpine:latest \
+            sh -c "apk add --no-cache sqlite >/dev/null 2>&1 && sqlite3 /data/db.sqlite3 '$1'"
+    }
+
+    # Step 1
+    log_info "Step 1/5: Checking database integrity..."
+    if ! run_sqlite_sidecar_deep "PRAGMA integrity_check;" | grep -q "ok"; then
+        log_error "Integrity check FAILED. Aborting. Restarting services..."
+        docker compose start vaultwarden; return 1
+    fi
+    log_success "Database integrity check passed"
+
+    # Step 2
+    log_info "Step 2/5: Committing WAL file (PRAGMA wal_checkpoint(TRUNCATE))..."
+    run_sqlite_sidecar_deep "PRAGMA wal_checkpoint(TRUNCATE);" && log_success "WAL checkpointed" || log_warn "Could not checkpoint WAL. Proceeding."
+
+    # Step 3
+    log_info "Step 3/5: Optimizing database stats (PRAGMA optimize)..."
+    run_sqlite_sidecar_deep "PRAGMA optimize;" && log_success "Optimization complete" || log_warn "Could not optimize. Proceeding."
+
+    # Step 4
+    log_info "Step 4/5: Reclaiming free space (VACUUM)... This may take a moment."
+    if ! run_sqlite_sidecar_deep "VACUUM;"; then
+        log_error "VACUUM FAILED. Aborting. Restarting services..."
+        docker compose start vaultwarden; return 1
+    fi
+    log_success "Database VACUUM completed"
+
+    # Step 5
+    log_info "Step 5/5: Gathering statistics..."
+    local new_size new_bytes
+    new_size=$(du -h "$db_file" | cut -f1)
+    new_bytes=$(stat -c%s "$db_file" 2>/dev/null || echo "0")
+
+    log_info "Restarting VaultWarden container..."
+    docker compose start vaultwarden || { log_error "Failed to restart VaultWarden!"; return 1; }
+
+    log_info "Waiting for services to become healthy (timeout: 45s)..."
+    if wait_for_service_ready "vaultwarden" 45; then
+        log_success "All critical services are healthy"
+        maintenance_successful=true
+    else
+        log_error "vaultwarden did not become healthy in time"
+        log_info "Check logs: docker compose logs vaultwarden"
+    fi
+
+    log_success "VaultWarden is back online"
+    echo ""
+    log_success "Deep database maintenance complete!"
+
+    if [[ "$original_bytes" -gt 0 && "$new_bytes" -gt 0 && "$original_bytes" -ge "$new_bytes" ]]; then
+        local saved_bytes=$((original_bytes - new_bytes))
+        local saved_percent=$(( (saved_bytes * 100) / original_bytes ))
+        log_info "Size: $original_size → $new_size  (saved $(numfmt --to=iec $saved_bytes), ${saved_percent}%)"
+    else
+        log_info "Size changed from $original_size to $new_size"
+    fi
+
+    echo ""
+    if [[ "$maintenance_successful" == "true" && -n "$safety_backup_file" && -f "$safety_backup_file" ]]; then
+        log_info "Cleaning up temporary safety backup..."
+        rm -f "$safety_backup_file" "$safety_backup_file.sha256" "$safety_backup_file.meta" 2>/dev/null \
+            && log_success "Removed safety backup: $(basename "$safety_backup_file")" \
+            || log_warn "Could not remove safety backup: $safety_backup_file"
+    elif [[ -n "$safety_backup_file" && -f "$safety_backup_file" ]]; then
+        log_warn "Maintenance did not complete successfully. Retaining safety backup: $safety_backup_file"
+    fi
+
+    return $([[ "$maintenance_successful" == "true" ]] && echo 0 || echo 1)
+}
+
+# ---------------------------------------------------------------------------
+# ROUTINE: Safe firewall IP range updates  (unchanged from original)
+# ---------------------------------------------------------------------------
+update_firewall_ranges() {
+    if [[ "$UPDATE_FIREWALL" != "true" ]]; then log_info "Skipping firewall updates (use --update-firewall to enable)"; return 0; fi
+    if [[ "$DRY_RUN"         == "true" ]]; then log_info "[DRY RUN] Would safely update Cloudflare IP ranges in firewall"; return 0; fi
+    log_info "Safely updating Cloudflare IP ranges in firewall..."
     local cf_ipv4_file="/tmp/cf_ipv4_ranges_maint.txt"
     local cf_ipv6_file="/tmp/cf_ipv6_ranges_maint.txt"
-    local ranges_fetched=false
-
-    if retry_with_backoff 3 2 curl -sf --max-time 10 "https://www.cloudflare.com/ips-v4" -o "$cf_ipv4_file" &&        retry_with_backoff 3 2 curl -sf --max-time 10 "https://www.cloudflare.com/ips-v6" -o "$cf_ipv6_file"; then
-        ranges_fetched=true
+    if retry_with_backoff 3 2 curl -sf --max-time 10 "https://www.cloudflare.com/ips-v4" -o "$cf_ipv4_file" && \
+       retry_with_backoff 3 2 curl -sf --max-time 10 "https://www.cloudflare.com/ips-v6" -o "$cf_ipv6_file"; then
         log_success "Successfully fetched current Cloudflare IP ranges"
     else
-        log_error "Failed to fetch Cloudflare IP ranges - aborting firewall update"
-        return 1
+        log_error "Failed to fetch Cloudflare IP ranges - aborting firewall update"; return 1
     fi
-
-    # SAFETY: Add new rules FIRST, then remove old ones to prevent service interruption
     local ranges_added=false
-
-    # Apply IPv4 ranges
     if grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$' "$cf_ipv4_file" >/dev/null; then
         log_info "Adding new Cloudflare IPv4 ranges..."
         while IFS= read -r range; do
             if [[ -n "$range" && "$range" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]; then
-                # Check if rule already exists to avoid duplicates
                 if ! ufw status | grep -q "$range"; then
-                    if ufw allow from "$range" to any port 80,443 comment "CF-IPv4-NEW" >/dev/null; then
-                        ranges_added=true
-                        log_debug "Added IPv4 range: $range"
-                    fi
+                    ufw allow from "$range" to any port 80,443 comment "CF-IPv4-NEW" >/dev/null && ranges_added=true && log_debug "Added IPv4 range: $range"
                 fi
             fi
         done < "$cf_ipv4_file"
     fi
-
-    # Apply IPv6 ranges
     if grep -E '^[0-9a-fA-F:]+/[0-9]{1,3}$' "$cf_ipv6_file" >/dev/null; then
         log_info "Adding new Cloudflare IPv6 ranges..."
         while IFS= read -r range; do
             if [[ -n "$range" && "$range" =~ ^[0-9a-fA-F:]+/[0-9]{1,3}$ ]]; then
-                # Check if rule already exists to avoid duplicates
                 if ! ufw status | grep -q "$range"; then
-                    if ufw allow from "$range" to any port 80,443 comment "CF-IPv6-NEW" >/dev/null; then
-                        ranges_added=true
-                        log_debug "Added IPv6 range: $range"
-                    fi
+                    ufw allow from "$range" to any port 80,443 comment "CF-IPv6-NEW" >/dev/null && ranges_added=true && log_debug "Added IPv6 range: $range"
                 fi
             fi
         done < "$cf_ipv6_file"
     fi
-
     if [[ "$ranges_added" == "true" ]]; then
         log_success "New Cloudflare IP ranges added successfully"
-
-        # Now safely remove old rules (those without -NEW suffix)
         log_info "Removing outdated Cloudflare IP ranges..."
-        local old_rules
+        local old_rules removed_count=0
         if old_rules=$(ufw status numbered | grep -E "CF-IPv[46]" | grep -v "CF-IPv[46]-NEW" | awk '{print $1}' | sed 's/\[//g' | sed 's/\]//g' | sort -rn); then
-            local removed_count=0
             while IFS= read -r rule_num; do
-                if [[ -n "$rule_num" ]]; then
-                    if echo "y" | ufw delete "$rule_num" >/dev/null 2>&1; then
-                        ((removed_count++))
-                    fi
-                fi
+                [[ -n "$rule_num" ]] && echo "y" | ufw delete "$rule_num" >/dev/null 2>&1 && ((removed_count++))
             done <<< "$old_rules"
-
-            if [[ $removed_count -gt 0 ]]; then
-                log_success "Removed $removed_count outdated firewall rules"
-            fi
+            [[ $removed_count -gt 0 ]] && log_success "Removed $removed_count outdated firewall rules"
         fi
-
-        # Clean up the -NEW suffixes from comments
-        log_info "Finalizing firewall rule comments..."
-        # Note: UFW doesn't have a direct way to modify comments, so we leave them as -NEW
-        # This actually helps identify when rules were last updated
-
-        log_success "Firewall IP ranges updated safely with no service interruption"
+        log_success "Firewall IP ranges updated safely"
     else
         log_info "No new IP ranges needed to be added"
     fi
-
-    # Clean up temporary files
     rm -f "$cf_ipv4_file" "$cf_ipv6_file"
-
     return 0
 }
 
-# STANDARDIZED: System health validation - returns exit code
-validate_system_health() {
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would validate system health after maintenance"
-        return 0
+# ---------------------------------------------------------------------------
+# DNS UPDATE  (merged from update-dns.sh)
+# Safe to call standalone (--update-dns) or as part of --comprehensive.
+# Uses /tmp lock for concurrency safety, registered to CLEANUP_ACTIONS.
+# ---------------------------------------------------------------------------
+update_dns_record() {
+    if [[ "$UPDATE_DNS" != "true" ]]; then log_info "Skipping DNS update (use --update-dns or --comprehensive to enable)"; return 0; fi
+    if [[ "$DRY_RUN"    == "true" ]]; then log_info "[DRY RUN] Would check and update Cloudflare DNS A record"; return 0; fi
+
+    local domain="${DOMAIN:-}"
+    domain=$(echo "$domain" | sed 's|https\?://||; s|/.*$||')
+    local zone_id="${CLOUDFLARE_ZONE_ID:-}"
+    [[ -z "$domain"   ]] && { log_error "DOMAIN not set in .env"; return 1; }
+    [[ -z "$zone_id"  ]] && { log_error "CLOUDFLARE_ZONE_ID not set in .env"; return 1; }
+
+    local DNS_LOCK="/tmp/.vw_dns_update.lock"
+    if ! (set -C; echo $$ > "$DNS_LOCK") 2>/dev/null; then
+        log_info "DNS update already in progress (lock: $DNS_LOCK). Skipping."; return 0
     fi
+    CLEANUP_ACTIONS+=("rm -f '$DNS_LOCK' 2>/dev/null || true")
 
-    log_info "Validating system health after maintenance..."
+    log_info "Checking if DNS update needed for $domain..."
+    local current_ip
+    current_ip=$(curl -s --max-time 10 https://checkip.amazonaws.com 2>/dev/null | tr -d '\n\r ') || true
+    [[ -z "$current_ip" ]] && { log_error "Cannot determine current external IP"; return 1; }
+    [[ ! "$current_ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] && { log_error "Invalid IP format: $current_ip"; return 1; }
 
-    # Run basic health check
-    if ./health.sh --quiet; then
-        log_success "System health validation passed"
-        return 0
+    local dns_ip
+    dns_ip=$(dig +short "$domain" @1.1.1.1 2>/dev/null | head -1) || { log_error "Cannot resolve DNS for $domain"; return 1; }
+    [[ -z "$dns_ip" ]] && { log_warn "No DNS record found for $domain, proceeding with update"; dns_ip="(none)"; }
+
+    if [[ "$current_ip" == "$dns_ip" ]]; then
+        log_success "DNS record up to date: $domain -> $current_ip"; return 0
+    fi
+    log_info "DNS update needed: $dns_ip -> $current_ip"
+
+    local cf_token
+    cf_token=$(docker compose exec -T caddy cat /run/secrets/caddy_cloudflare_dns_token 2>/dev/null) \
+        || { log_error "Cannot read Cloudflare API token from Docker secret"; return 1; }
+
+    local record_id
+    record_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records?type=A&name=$domain" \
+                -H "Authorization: Bearer $cf_token" -H "Content-Type: application/json" | \
+                jq -r '.result[0].id // empty' 2>/dev/null)
+    [[ -z "$record_id" ]] && { log_error "Cannot find DNS record ID for $domain"; return 1; }
+
+    local response
+    response=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records/$record_id" \
+               -H "Authorization: Bearer $cf_token" -H "Content-Type: application/json" \
+               --data "{\"type\":\"A\",\"name\":\"$domain\",\"content\":\"$current_ip\",\"ttl\":300}")
+
+    if echo "$response" | jq -e '.success' >/dev/null 2>&1; then
+        log_success "DNS updated successfully: $domain -> $current_ip"
+        local admin_email; admin_email=$(get_config_value "ADMIN_EMAIL" "")
+        if [[ -n "$admin_email" ]]; then
+            send_notification_email "VaultWarden IP Address Changed" \
+"Old IP: $dns_ip
+New IP: $current_ip
+Domain: $domain
+DNS record updated automatically."
+        fi
     else
-        log_warn "System health validation detected issues"
-        return 1
+        log_error "DNS update failed: $response"; return 1
     fi
+    return 0
 }
 
-# STANDARDIZED: Maintenance summary generation - returns exit code
+# ---------------------------------------------------------------------------
+# ROUTINE: System health validation
+# ---------------------------------------------------------------------------
+validate_system_health() {
+    if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would validate system health"; return 0; fi
+    log_info "Validating system health after maintenance..."
+    ./health.sh --quiet && { log_success "System health validation passed"; return 0; } || { log_warn "System health validation detected issues"; return 1; }
+}
+
+# ---------------------------------------------------------------------------
+# ROUTINE: Maintenance summary
+# ---------------------------------------------------------------------------
 generate_maintenance_summary() {
-    local log_cleanup="$1"
-    local backup_cleanup="$2"
-    local docker_cleanup="$3"
-    local db_optimization="$4"
-    local firewall_update="$5"
-    local health_validation="$6"
+    local log_cleanup="$1" backup_cleanup="$2" docker_cleanup="$3"
+    local db_optimization="$4" firewall_update="$5" dns_update="$6" health_validation="$7"
 
-    log_info "Generating maintenance summary..."
+    local summary="VaultWarden SAFE Maintenance Summary - $(date)\n\nMaintenance Results:\n"
 
-    local summary="VaultWarden SAFE Maintenance Summary - $(date)
-"
-    summary+="
-Maintenance Results:
-"
-
-    # Log cleanup
-    if [[ "$CLEAN_LOGS" == "true" ]]; then
-        if [[ "$log_cleanup" == "0" ]]; then
-            summary+="  ✅ Log cleanup: Completed successfully
-"
-        else
-            summary+="  ❌ Log cleanup: Failed
-"
-        fi
-    else
-        summary+="  ⏭️  Log cleanup: Skipped
-"
-    fi
-
-    # Backup cleanup
-    if [[ "$CLEAN_BACKUPS" == "true" ]]; then
-        if [[ "$backup_cleanup" == "0" ]]; then
-            summary+="  ✅ Backup cleanup: Completed successfully
-"
-        else
-            summary+="  ❌ Backup cleanup: Failed
-"
-        fi
-    else
-        summary+="  ⏭️  Backup cleanup: Skipped
-"
-    fi
-
-    # Docker cleanup
+    [[ "$CLEAN_LOGS"    == "true" ]] && { [[ "$log_cleanup"    == "0" ]] && summary+="  ✅ Log cleanup: OK\n"     || summary+="  ❌ Log cleanup: Failed\n";    } || summary+="  ⏭️  Log cleanup: Skipped\n"
+    [[ "$CLEAN_BACKUPS" == "true" ]] && { [[ "$backup_cleanup" == "0" ]] && summary+="  ✅ Backup cleanup: OK\n" || summary+="  ❌ Backup cleanup: Failed\n"; } || summary+="  ⏭️  Backup cleanup: Skipped\n"
     if [[ "$CLEAN_DOCKER" == "true" ]]; then
-        if [[ "$docker_cleanup" == "0" ]]; then
-            summary+="  ✅ Docker cleanup: Completed successfully
-"
-        elif [[ "$docker_cleanup" == "1" ]]; then
-            summary+="  ⚠️  Docker cleanup: Completed with issues
-"
-        else
-            summary+="  ❌ Docker cleanup: Failed
-"
-        fi
-    else
-        summary+="  ⏭️  Docker cleanup: Skipped
-"
-    fi
+        [[ "$docker_cleanup" == "0" ]] && summary+="  ✅ Docker cleanup: OK\n" || [[ "$docker_cleanup" == "1" ]] && summary+="  ⚠️  Docker cleanup: Issues\n" || summary+="  ❌ Docker cleanup: Failed\n"
+    else summary+="  ⏭️  Docker cleanup: Skipped\n"; fi
+    [[ "$OPTIMIZE_DATABASE" == "true" ]] && { [[ "$db_optimization" == "0" ]] && summary+="  ✅ DB optimization: OK\n" || summary+="  ⚠️  DB optimization: Issues\n"; } || summary+="  ⏭️  DB optimization: Skipped\n"
+    [[ "$UPDATE_FIREWALL"   == "true" ]] && { [[ "$firewall_update"  == "0" ]] && summary+="  ✅ Firewall update: OK\n" || summary+="  ❌ Firewall update: Failed\n";  } || summary+="  ⏭️  Firewall update: Skipped\n"
+    [[ "$UPDATE_DNS"        == "true" ]] && { [[ "$dns_update"       == "0" ]] && summary+="  ✅ DNS update: OK\n"      || summary+="  ❌ DNS update: Failed\n";       } || summary+="  ⏭️  DNS update: Skipped\n"
+    [[ "$health_validation" == "0" ]]    && summary+="  ✅ Health validation: Passed\n" || summary+="  ⚠️  Health validation: Issues\n"
 
-    # Database optimization
-    if [[ "$OPTIMIZE_DATABASE" == "true" ]]; then
-        if [[ "$db_optimization" == "0" ]]; then
-            summary+="  ✅ SAFE database optimization: Completed successfully
-"
-        else
-            summary+="  ⚠️  SAFE database optimization: Completed with issues
-"
-        fi
-    else
-        summary+="  ⏭️  Database optimization: Skipped
-"
-    fi
-
-    # Firewall update
-    if [[ "$UPDATE_FIREWALL" == "true" ]]; then
-        if [[ "$firewall_update" == "0" ]]; then
-            summary+="  ✅ SAFE firewall update: Completed successfully
-"
-        else
-            summary+="  ❌ Firewall update: Failed
-"
-        fi
-    else
-        summary+="  ⏭️  Firewall update: Skipped
-"
-    fi
-
-    # Health validation
-    if [[ "$health_validation" == "0" ]]; then
-        summary+="  ✅ Health validation: Passed
-"
-    else
-        summary+="  ⚠️  Health validation: Issues detected
-"
-    fi
-
-    # Overall status
     local critical_failures=0
-    [[ "$log_cleanup" != "0" ]] && ((critical_failures++))
+    [[ "$log_cleanup"    != "0" ]] && ((critical_failures++))
     [[ "$backup_cleanup" != "0" ]] && ((critical_failures++))
-    [[ "$docker_cleanup" == "2" ]] && ((critical_failures++))  # Only count severe Docker failures
-
-    if [[ $critical_failures -eq 0 ]]; then
-        summary+="
-🎉 Overall Status: SAFE MAINTENANCE SUCCESSFUL
-"
-        summary+="
-Safety Features Used:
-"
-        summary+="  • Database operations stopped service first
-"
-        summary+="  • WAL checkpoint before VACUUM
-"
-        summary+="  • Integrity verification at each step
-"
-        summary+="  • Firewall updates avoided service interruption
-"
-        summary+="
-Next Steps:
-"
-        summary+="  • Monitor system performance
-"
-        summary+="  • Check logs if any issues arise
-"
-    else
-        summary+="
-⚠️  Overall Status: MAINTENANCE COMPLETED WITH ISSUES
-"
-        summary+="
-Recommended Actions:
-"
-        summary+="  • Review maintenance logs
-"
-        summary+="  • Run comprehensive health check
-"
-        summary+="  • Address any critical issues
-"
-    fi
+    [[ "$docker_cleanup" == "2" ]] && ((critical_failures++))
+    [[ $critical_failures -eq 0 ]] && summary+="\n🎉 Overall Status: SAFE MAINTENANCE SUCCESSFUL\n" || summary+="\n⚠️  Overall Status: MAINTENANCE COMPLETED WITH ISSUES\n"
 
     echo -e "$summary"
 
-    # Send email notification if requested
     if [[ "$EMAIL_NOTIFY" == "true" ]]; then
-        local email_subject
-        if [[ $critical_failures -eq 0 ]]; then
-            email_subject="VaultWarden SAFE Maintenance: SUCCESS"
-        else
-            email_subject="VaultWarden SAFE Maintenance: ISSUES DETECTED"
-        fi
-
-        if send_notification_email "$email_subject" "$summary"; then
-            log_info "Maintenance summary emailed to admin"
-        else
-            log_warn "Failed to send maintenance summary email"
-        fi
+        local subj; [[ $critical_failures -eq 0 ]] && subj="VaultWarden Maintenance: SUCCESS" || subj="VaultWarden Maintenance: ISSUES DETECTED"
+        send_notification_email "$subj" "$summary" && log_info "Summary emailed" || log_warn "Failed to send summary email"
     fi
-
     return 0
 }
 
-# ENHANCED: Main function with proper error handling and exit strategy
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 main() {
-    log_header "VaultWarden-OCI SAFE Maintenance Manager"
-    
-    # FIXED: Use state directory for locks - always writable
+    log_header "VaultWarden-OCI Maintenance Manager"
+
     local state_dir
     state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
-    
-    # Create locks directory if it doesn't exist
     mkdir -p "$state_dir/.locks" 2>/dev/null || true
-    
+
+    # Unified cleanup stack (shared by DNS lock, DB lock, maintenance lock)
+    CLEANUP_ACTIONS=()
+    perform_cleanup() {
+        for ((idx=${#CLEANUP_ACTIONS[@]}-1; idx>=0; idx--)); do
+            eval "${CLEANUP_ACTIONS[$idx]}" 2>/dev/null || true
+        done
+    }
+    trap perform_cleanup EXIT
+
+    # ---- Deep DB maintenance: self-contained sub-command ----
+    if [[ "$DB_DEEP_MAINT" == "true" ]]; then
+        local DEEP_LOCKDIR="$state_dir/.locks/db-maint.lock"
+        if ! mkdir "$DEEP_LOCKDIR" 2>/dev/null; then
+            log_error "Another DB maintenance task is already running (lock: $DEEP_LOCKDIR)"
+            log_info  "If this is an error, manually remove: $DEEP_LOCKDIR"
+            exit 1
+        fi
+        CLEANUP_ACTIONS+=("rmdir '$DEEP_LOCKDIR' 2>/dev/null || true")
+        local GLOBAL_MAINT_LOCK="$state_dir/.locks/global-maintenance.lock"
+        touch "$GLOBAL_MAINT_LOCK"
+        CLEANUP_ACTIONS+=("rm -f '$GLOBAL_MAINT_LOCK' 2>/dev/null || true")
+        if ! load_env_file; then log_error "Failed to load configuration"; exit 1; fi
+        run_deep_db_maintenance
+        exit $?
+    fi
+
+    # ---- Routine maintenance ----
     local MAINT_LOCKDIR="$state_dir/.locks/maintenance.lock"
-    
     if ! mkdir "$MAINT_LOCKDIR" 2>/dev/null; then
         log_error "Another maintenance task is already running (lock: $MAINT_LOCKDIR)"
-        log_info "If this is an error, manually remove: $MAINT_LOCKDIR"
+        log_info  "If this is an error, manually remove: $MAINT_LOCKDIR"
         exit 1
     fi
-    
-    # Cleanup trap
-    trap "rmdir '$MAINT_LOCKDIR' 2>/dev/null || true" EXIT
-
-    # Global maintenance mode lock for health.sh
+    CLEANUP_ACTIONS+=("rmdir '$MAINT_LOCKDIR' 2>/dev/null || true")
     local GLOBAL_MAINT_LOCK="$state_dir/.locks/global-maintenance.lock"
-    if ! touch "$GLOBAL_MAINT_LOCK"; then
-        log_error "Failed to create global maintenance lock at $GLOBAL_MAINT_LOCK"
-        exit 1
-    fi
-    
-    # Update trap to clean both locks
-    trap "rm -f '$GLOBAL_MAINT_LOCK' 2>/dev/null || true; rmdir '$MAINT_LOCKDIR' 2>/dev/null || true" EXIT
+    touch "$GLOBAL_MAINT_LOCK"
+    CLEANUP_ACTIONS+=("rm -f '$GLOBAL_MAINT_LOCK' 2>/dev/null || true")
 
+    [[ "$DRY_RUN"       == "true" ]] && log_warn "DRY RUN MODE - No changes will be made"
+    [[ "$COMPREHENSIVE" == "true" ]] && log_info "Running comprehensive SAFE maintenance..."
 
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_warn "DRY RUN MODE - No changes will be made"
-    fi
+    if ! load_env_file; then log_error "Failed to load configuration"; exit 1; fi
 
-    if [[ "$COMPREHENSIVE" == "true" ]]; then
-        log_info "Running comprehensive SAFE maintenance..."
-    fi
+    local log_cleanup_result=1 backup_cleanup_result=1 docker_cleanup_result=1
+    local db_optimization_result=1 firewall_update_result=1 dns_update_result=1 health_validation_result=1
 
-    # Load configuration
-    if ! load_env_file; then
-        log_error "Failed to load configuration"
-        exit 1
-    fi
-
-    # Track maintenance task results
-    local log_cleanup_result=1
-    local backup_cleanup_result=1
-    local docker_cleanup_result=1
-    local db_optimization_result=1
-    local firewall_update_result=1
-    local health_validation_result=1
-
-    # Phase 1: System cleanup
     log_info "=== Phase 1: System Cleanup ==="
+    cleanup_logs    && log_cleanup_result=0
+    cleanup_backups && backup_cleanup_result=0
+    if cleanup_docker_system; then docker_cleanup_result=0
+    elif [[ $? -eq 1 ]];      then docker_cleanup_result=1
+    else                           docker_cleanup_result=2; fi
 
-    if cleanup_logs; then
-        log_cleanup_result=0
-    fi
-
-    if cleanup_backups; then
-        backup_cleanup_result=0
-    fi
-
-    if cleanup_docker_system; then
-        docker_cleanup_result=0
-    elif [[ $? -eq 1 ]]; then
-        docker_cleanup_result=1  # Issues but not critical
-    else
-        docker_cleanup_result=2  # Critical failure
-    fi
-
-    # Phase 2: SAFE Optimization
     log_info "=== Phase 2: SAFE System Optimization ==="
+    optimize_database && db_optimization_result=0
 
-    if optimize_database; then
-        db_optimization_result=0
+    if [[ "$COMPREHENSIVE" == "true" || "$UPDATE_FIREWALL" == "true" || "$UPDATE_DNS" == "true" ]]; then
+        log_info "=== Phase 3: SAFE Security & Network Maintenance ==="
+        [[ "$UPDATE_FIREWALL" == "true" ]] && update_firewall_ranges && firewall_update_result=0
+        [[ "$UPDATE_DNS"      == "true" ]] && update_dns_record      && dns_update_result=0
     fi
 
-    # Phase 3: SAFE Security maintenance (comprehensive mode)
-    if [[ "$COMPREHENSIVE" == "true" ]]; then
-        log_info "=== Phase 3: SAFE Security Maintenance ==="
-
-        if update_firewall_ranges; then
-            firewall_update_result=0
-        fi
-    fi
-
-    # Phase 4: Health validation
     log_info "=== Phase 4: Health Validation ==="
+    validate_system_health && health_validation_result=0
 
-    if validate_system_health; then
-        health_validation_result=0
-    fi
-
-    # Phase 5: Summary and reporting
     log_info "=== Phase 5: Maintenance Summary ==="
+    generate_maintenance_summary \
+        "$log_cleanup_result" "$backup_cleanup_result" "$docker_cleanup_result" \
+        "$db_optimization_result" "$firewall_update_result" "$dns_update_result" \
+        "$health_validation_result"
 
-    generate_maintenance_summary "$log_cleanup_result" "$backup_cleanup_result" "$docker_cleanup_result" "$db_optimization_result" "$firewall_update_result" "$health_validation_result"
-
-    # Determine final exit code
     local critical_failures=0
-    [[ "$log_cleanup_result" != "0" ]] && ((critical_failures++))
+    [[ "$log_cleanup_result"    != "0" ]] && ((critical_failures++))
     [[ "$backup_cleanup_result" != "0" ]] && ((critical_failures++))
     [[ "$docker_cleanup_result" == "2" ]] && ((critical_failures++))
 
     if [[ $critical_failures -eq 0 ]]; then
-        log_success "SAFE maintenance completed successfully"
-        # Explicitly remove locks on success before trap
-        rm -f "$GLOBAL_MAINT_LOCK" 2>/dev/null || true
-        rmdir "$MAINT_LOCKDIR" 2>/dev/null || true
-        exit 0
+        log_success "SAFE maintenance completed successfully"; exit 0
     elif [[ $critical_failures -le 1 ]]; then
-        log_warn "SAFE maintenance completed with minor issues"
-        # Explicitly remove locks on success before trap
-        rm -f "$GLOBAL_MAINT_LOCK" 2>/dev/null || true
-        rmdir "$MAINT_LOCKDIR" 2>/dev/null || true
-        exit 2  # Warning exit code
+        log_warn "SAFE maintenance completed with minor issues"; exit 2
     else
-        log_error "SAFE maintenance completed with critical failures"
-        # Trap will handle cleanup
-        exit 1
+        log_error "SAFE maintenance completed with critical failures"; exit 1
     fi
 }
 
