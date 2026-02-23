@@ -1174,8 +1174,12 @@ execute_phase() {
 }
 
 show_post_install_summary() {
-    # 1. Clear screen for impact
-    clear
+    local mode="${1:-interactive}"
+    
+    # 1. Clear screen for impact (only in interactive mode)
+    if [[ "$mode" == "interactive" ]]; then
+        clear
+    fi
 
     # 2. ASCII Warning Header
     echo -e "${COLOR_RED}"
@@ -1214,12 +1218,16 @@ EOF
 
     echo -e "\n${COLOR_CYAN}--- NEXT STEPS ---${COLOR_RESET}"
     echo -e "1. Run ${COLOR_YELLOW}./edit-secrets.sh${COLOR_RESET} to input the missing external secrets (SMTP, CF Tokens)."
-    echo -e "2. Run ${COLOR_YELLOW}./startup.sh${COLOR_RESET} to start the application."
-    echo -e "3. Run ${COLOR_YELLOW}./create-breakglass-admin.sh${COLOR_RESET} to set up emergency access."
+    echo -e "2. Run ${COLOR_YELLOW}make up${COLOR_RESET} to start the application."
+    echo -e "3. Run ${COLOR_YELLOW}make breakglass-create${COLOR_RESET} to set up emergency access."
 
-    echo -e "\n${COLOR_RED}!!! PRESS ENTER TO CLEAR THIS SCREEN AND FINISH !!!${COLOR_RESET}"
-    read -r
-    clear
+    if [[ "$mode" == "interactive" ]]; then
+        echo -e "\n${COLOR_RED}!!! PRESS ENTER TO CLEAR THIS SCREEN AND FINISH !!!${COLOR_RESET}"
+        read -r
+        clear
+    else
+        echo -e "\n${COLOR_RED}!!! PLEASE SCROLL UP AND SAVE THE ABOVE INFORMATION BEFORE CLOSING YOUR TERMINAL !!!${COLOR_RESET}\n"
+    fi
 }
 
 # =============================================================================
@@ -1373,11 +1381,14 @@ main() {
         echo ""
     fi
 
-    # Trigger post-install summary if not in auto mode
+    # Trigger post-install summary
     if [[ "$AUTO_MODE" != "true" ]]; then
         echo ""
         read -p "Press Enter to view CRITICAL recovery information..."
-        show_post_install_summary
+        show_post_install_summary "interactive"
+    else
+        echo ""
+        show_post_install_summary "auto"
     fi
 
     exit 0
