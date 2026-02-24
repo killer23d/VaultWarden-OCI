@@ -102,12 +102,17 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Validate mutual exclusion
+# ---------------------------------------------------------------------------
+# Mutual-exclusion guard
+# FIX: (( n++ )) returns exit code 1 when the result is 0, which triggers
+#      set -e and silently kills the script before main() runs.
+#      Use _mode_count=$(( _mode_count + 1 )) instead — always exit-code 0.
+# ---------------------------------------------------------------------------
 _mode_count=0
-[[ "$VIEW_ONLY"  == "true"   ]] && (( _mode_count++ ))
-[[ "$LIST_KEYS" == "true"   ]] && (( _mode_count++ ))
-[[ -n "$ROTATE_FIELD"       ]] && (( _mode_count++ ))
-if (( _mode_count > 1 )); then
+[[ "$VIEW_ONLY"  == "true" ]] && _mode_count=$(( _mode_count + 1 ))
+[[ "$LIST_KEYS" == "true"  ]] && _mode_count=$(( _mode_count + 1 ))
+[[ -n "$ROTATE_FIELD"      ]] && _mode_count=$(( _mode_count + 1 ))
+if [[ $_mode_count -gt 1 ]]; then
     log_error "--view, --list, and --rotate are mutually exclusive"
     exit 1
 fi
@@ -126,8 +131,8 @@ check_prerequisites() {
         missing+=("Valid Age encryption key")
     fi
 
-    [[ ! -f ".sops.yaml" ]]     && missing+=("SOPS configuration: .sops.yaml")
-    [[ ! -f "$SECRETS_FILE" ]]  && missing+=("Secrets file: $SECRETS_FILE")
+    [[ ! -f ".sops.yaml" ]]    && missing+=("SOPS configuration: .sops.yaml")
+    [[ ! -f "$SECRETS_FILE" ]] && missing+=("Secrets file: $SECRETS_FILE")
 
     if [[ ${#missing[@]} -gt 0 ]]; then
         log_error "Missing prerequisites:"
@@ -147,7 +152,6 @@ check_prerequisites() {
 validate_secrets() {
     log_info "Validating secrets file..."
 
-    # ensure_sops_env is the single source of truth for SOPS env vars
     if ! ensure_sops_env; then return 1; fi
 
     if ! validate_secrets_decryption; then
@@ -231,13 +235,7 @@ do_view() {
 # ---------------------------------------------------------------------------
 # --rotate FIELD mode
 # ---------------------------------------------------------------------------
-# Re-collects just the named field (prompting the user where needed and
-# applying the correct hash), merges it into the decrypted YAML, then
-# re-encrypts atomically.  Password fields are hashed with the same
-# algorithms as setup-secrets.sh so values are always correct.
-# ---------------------------------------------------------------------------
 
-# Known fields that require hashing or special handling
 _HASHED_FIELDS=("admin_token" "admin_basic_auth_hash")
 _PLAIN_TOKEN_FIELDS=("caddy_cloudflare_dns_token" "fail2ban_cloudflare_firewall_token" "smtp_password" "push_installation_id" "push_installation_key")
 _AUTO_FIELDS=("backup_passphrase")
@@ -345,7 +343,6 @@ do_rotate() {
     log_info "Rotating secret: $field"
     echo ""
 
-    # Decrypt current secrets to a temp YAML file
     local temp_plain
     temp_plain=$(mktemp --suffix=.yaml)
     chmod 600 "$temp_plain"
@@ -356,13 +353,11 @@ do_rotate() {
         return 1
     fi
 
-    # Collect the new value (with hashing where appropriate)
     local new_value
     if ! new_value=$(_collect_new_value "$field"); then
         return 1
     fi
 
-    # Patch the single field in the YAML using Python
     local temp_patched
     temp_patched=$(mktemp --suffix=.yaml)
     chmod 600 "$temp_patched"
@@ -385,13 +380,11 @@ PYEOF
         return 1
     fi
 
-    # Validate patched YAML
     if ! python3 -c "import yaml, sys; yaml.safe_load(open('$temp_patched'))" 2>/dev/null; then
         log_error "Patched YAML is invalid - aborting"
         return 1
     fi
 
-    # Re-encrypt atomically
     log_info "Re-encrypting secrets..."
     local temp_enc
     temp_enc=$(mktemp --suffix=.yaml.enc)
@@ -490,10 +483,10 @@ main() {
         create_backup || log_warn "Backup failed - continuing anyway"
     fi
 
-    if   [[ "$LIST_KEYS"  == "true"   ]]; then do_list_keys    || exit 1
-    elif [[ "$VIEW_ONLY"  == "true"   ]]; then do_view          || exit 1
-    elif [[ -n "$ROTATE_FIELD"        ]]; then do_rotate "$ROTATE_FIELD" || exit 1
-    else                                       do_edit          || exit 1
+    if   [[ "$LIST_KEYS" == "true" ]]; then do_list_keys             || exit 1
+    elif [[ "$VIEW_ONLY" == "true" ]]; then do_view                   || exit 1
+    elif [[ -n "$ROTATE_FIELD"     ]]; then do_rotate "$ROTATE_FIELD" || exit 1
+    else                                    do_edit                   || exit 1
     fi
 
     exit 0
