@@ -4,6 +4,8 @@
 # Safe to re-run multiple times
 #
 # SECURITY ENHANCEMENT: Caddy basic auth hash in htpasswd format (admin:$2a$14$...)
+#
+# See also: ./edit-secrets.sh  (edit, view, list keys, or rotate a single field)
 
 set -euo pipefail
 
@@ -16,7 +18,9 @@ init_common_lib "$0"
 source "lib/crypto.sh"
 source "lib/secrets.sh"
 
+# ---------------------------------------------------------------------------
 # Configuration
+# ---------------------------------------------------------------------------
 AUTO_MODE=false
 SKIP_VALIDATION=false
 SKIP_OPTIONAL=false
@@ -24,17 +28,22 @@ FORCE=false
 DRY_RUN=false
 AUTO_FIX=true
 
+# ---------------------------------------------------------------------------
 # Cleanup
+# ---------------------------------------------------------------------------
 CLEANUP_ACTIONS=()
 register_cleanup() { CLEANUP_ACTIONS+=("$1"); }
-perform_cleanup() { 
-    for ((idx=${#CLEANUP_ACTIONS[@]}-1; idx>=0; idx--)); do 
+perform_cleanup() {
+    for ((idx=${#CLEANUP_ACTIONS[@]}-1; idx>=0; idx--)); do
         eval "${CLEANUP_ACTIONS[$idx]}" 2>/dev/null || true
     done
     cleanup_secrets_environment
 }
 trap perform_cleanup EXIT
 
+# ---------------------------------------------------------------------------
+# Help
+# ---------------------------------------------------------------------------
 show_help() {
     cat << 'HELP'
 VaultWarden Interactive Secrets Setup (Idempotent - Security Hardened)
@@ -62,7 +71,7 @@ FEATURES:
     ✅ Secure password generation (32-char minimum)
 
 SECURITY ENHANCEMENTS:
-    ✅ Caddy basic auth in htpasswd format (admin:$2a$14$...)
+    ✅ Caddy basic auth in htpasswd format (admin:\$2a\$14\$...)
     ✅ Hash validation before storage
     ✅ Secure temporary file handling
     ✅ Enhanced error messages
@@ -72,31 +81,39 @@ EXAMPLES:
     ./setup-secrets.sh --auto           # Automated with generated passwords
     ./setup-secrets.sh --force          # Reconfigure without prompting
     ./setup-secrets.sh --skip-optional  # Skip push notifications
+
+SEE ALSO:
+    ./edit-secrets.sh --list            # Show existing secret key names
+    ./edit-secrets.sh --rotate FIELD    # Rotate a single secret
+    ./edit-secrets.sh                   # Interactive raw edit
 HELP
 }
 
-# Parse arguments
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --auto) AUTO_MODE=true; shift ;;
-        --skip-validation) SKIP_VALIDATION=true; shift ;;
-        --skip-optional) SKIP_OPTIONAL=true; shift ;;
-        --force) FORCE=true; shift ;;
-        --dry-run) DRY_RUN=true; shift ;;
-        --no-auto-fix) AUTO_FIX=false; shift ;;
-        --help) show_help; exit 0 ;;
+        --auto)            AUTO_MODE=true;        shift ;;
+        --skip-validation) SKIP_VALIDATION=true;  shift ;;
+        --skip-optional)   SKIP_OPTIONAL=true;    shift ;;
+        --force)           FORCE=true;            shift ;;
+        --dry-run)         DRY_RUN=true;          shift ;;
+        --no-auto-fix)     AUTO_FIX=false;        shift ;;
+        --help)            show_help; exit 0 ;;
         *) log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done
 
-# Ensure prerequisites exist (idempotent)
+# ---------------------------------------------------------------------------
+# Prerequisites
+# ---------------------------------------------------------------------------
 ensure_prerequisites() {
     log_info "Checking prerequisites..."
-    
+
     local missing=()
     local can_fix=()
-    
-    # Check Age key
+
     if [[ ! -f "$AGE_KEY_FILE" ]]; then
         missing+=("Age encryption key")
         can_fix+=("age_key")
@@ -105,27 +122,21 @@ ensure_prerequisites() {
         missing+=("Valid Age encryption key")
         can_fix+=("age_key")
     fi
-    
-    # Check SOPS configuration
+
     if [[ ! -f ".sops.yaml" ]]; then
         missing+=("SOPS configuration")
         can_fix+=("sops_config")
     fi
-    
-    # Check directories
+
     if [[ ! -d "secrets" ]]; then
         missing+=("Secrets directory")
         can_fix+=("directories")
     fi
-    
-    # Report missing items
+
     if [[ ${#missing[@]} -gt 0 ]]; then
         log_warn "Missing prerequisites:"
-        for item in "${missing[@]}"; do
-            log_warn "  - $item"
-        done
-        
-        # Auto-fix or prompt
+        for item in "${missing[@]}"; do log_warn "  - $item"; done
+
         if [[ "$AUTO_FIX" == "true" ]]; then
             log_info "Auto-fixing missing prerequisites..."
             fix_prerequisites "${can_fix[@]}"
@@ -136,14 +147,13 @@ ensure_prerequisites() {
     else
         log_success "All prerequisites present"
     fi
-    
+
     return 0
 }
 
-# Fix missing prerequisites (idempotent)
 fix_prerequisites() {
     local items=("$@")
-    
+
     for item in "${items[@]}"; do
         case "$item" in
             age_key)
@@ -163,7 +173,6 @@ fix_prerequisites() {
                     log_error "Failed to extract Age public key"
                     return 1
                 fi
-                
                 cat > .sops.yaml << SOPS_EOF
 creation_rules:
   - path_regex: secrets/secrets\.yaml$
@@ -179,138 +188,106 @@ SOPS_EOF
                 ;;
         esac
     done
-    
+
     return 0
 }
 
-# Check if secrets are already configured (idempotent check)
+# ---------------------------------------------------------------------------
+# Idempotency guard
+# ---------------------------------------------------------------------------
 secrets_are_configured() {
-    if ! secrets_file_exists; then
-        return 1
-    fi
-    
-    # Setup environment to decrypt
-    if ! setup_secrets_environment; then
-        return 1
-    fi
-    
-    # Check for placeholder values
+    if ! secrets_file_exists; then return 1; fi
+    if ! ensure_sops_env;      then return 1; fi
     if ! check_placeholder_values 2>/dev/null; then
-        cleanup_secrets_environment
         return 1
     fi
-    
-    cleanup_secrets_environment
     return 0
 }
 
-# Validate existing secrets
 validate_existing_secrets() {
     log_info "Validating existing secrets..."
-    
-    if ! setup_secrets_environment; then
-        return 1
-    fi
-    
+
+    if ! ensure_sops_env; then return 1; fi
+
     local issues=()
-    
-    # Check decryption
-    if ! validate_secrets_decryption; then
-        issues+=("Cannot decrypt secrets file")
-    fi
-    
-    # Check YAML structure
-    if ! validate_secrets_yaml; then
-        issues+=("Invalid YAML structure")
-    fi
-    
-    # Check required secrets
-    if ! validate_required_secrets; then
-        issues+=("Missing required secrets")
-    fi
-    
-    # Check for placeholders
-    if ! check_placeholder_values; then
-        issues+=("Contains placeholder values")
-    fi
-    
-    cleanup_secrets_environment
-    
+
+    validate_secrets_decryption || issues+=("Cannot decrypt secrets file")
+    validate_secrets_yaml       || issues+=("Invalid YAML structure")
+    validate_required_secrets   || issues+=("Missing required secrets")
+    check_placeholder_values    || issues+=("Contains placeholder values")
+
     if [[ ${#issues[@]} -gt 0 ]]; then
         log_warn "Validation issues found:"
-        for issue in "${issues[@]}"; do
-            log_warn "  - $issue"
-        done
+        for issue in "${issues[@]}"; do log_warn "  - $issue"; done
         return 1
     fi
-    
+
     log_success "Existing secrets are valid"
     return 0
 }
 
-# Ensure Argon2 available (idempotent)
-ensure_argon2_available() {
-    if check_argon2_support >/dev/null 2>&1; then
+check_reconfiguration() {
+    if ! secrets_are_configured; then
+        log_info "No valid secrets found - configuration needed"
         return 0
     fi
-    
+
+    if [[ "$FORCE" == "true" ]]; then
+        log_info "Force mode - reconfiguring secrets"
+        create_secrets_backup
+        return 0
+    fi
+
+    log_info "Secrets already configured and valid"
+
+    if [[ "$AUTO_MODE" == "true" ]]; then
+        log_info "Auto mode - keeping existing secrets"
+        return 1
+    fi
+
+    echo ""
+    read -p "Reconfigure secrets? (yes/no): " confirm
+
+    if [[ "$confirm" == "yes" ]]; then
+        create_secrets_backup
+        return 0
+    fi
+
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# Argon2 check
+# ---------------------------------------------------------------------------
+ensure_argon2_available() {
+    if check_argon2_support >/dev/null 2>&1; then return 0; fi
+
     log_warn "Argon2 not detected"
-    
+
     if [[ "$AUTO_MODE" != "true" ]]; then
         read -p "Install Python argon2-cffi? (yes/no): " install_it
         if [[ "$install_it" == "yes" ]]; then
             pip3 install argon2-cffi && return 0
         fi
     fi
-    
+
     log_error "Argon2 required but not available"
     return 1
 }
 
-# Check if reconfiguration needed
-check_reconfiguration() {
-    if ! secrets_are_configured; then
-        log_info "No valid secrets found - configuration needed"
-        return 0
-    fi
-    
-    if [[ "$FORCE" == "true" ]]; then
-        log_info "Force mode - reconfiguring secrets"
-        create_secrets_backup
-        return 0
-    fi
-    
-    log_info "Secrets already configured and valid"
-    
-    if [[ "$AUTO_MODE" == "true" ]]; then
-        log_info "Auto mode - keeping existing secrets"
-        return 1
-    fi
-    
-    echo ""
-    read -p "Reconfigure secrets? (yes/no): " confirm
-    
-    if [[ "$confirm" == "yes" ]]; then
-        create_secrets_backup
-        return 0
-    fi
-    
-    return 1
-}
-
-# =============================================================================
-# SECURITY FIX: Collect Secrets with Proper htpasswd Format
-# =============================================================================
+# ---------------------------------------------------------------------------
+# Collect secrets
+# ---------------------------------------------------------------------------
 collect_secrets() {
     declare -A SECRETS
-    
+
     echo ""
     log_info "═══════════════════════════════════════════════════════════"
     log_info " VaultWarden Admin Password"
     log_info "═══════════════════════════════════════════════════════════"
     log_info "This password will be hashed with Argon2id for VaultWarden"
     echo ""
-    
+
     local vw_pass
     if [[ "$AUTO_MODE" == "true" ]]; then
         vw_pass=$(generate_secure_string 32)
@@ -323,20 +300,14 @@ collect_secrets() {
     else
         vw_pass=$(prompt_password_with_confirmation "VaultWarden admin password" 12)
     fi
-    
+
     log_info "Generating Argon2id hash for VaultWarden admin..."
     local vw_hash
     vw_hash=$(generate_argon2_hash "$vw_pass")
-    if [[ -z "$vw_hash" ]]; then
-        log_error "Failed to generate Argon2 hash"
-        return 1
-    fi
+    if [[ -z "$vw_hash" ]]; then log_error "Failed to generate Argon2 hash"; return 1; fi
     SECRETS["admin_token"]="$vw_hash"
     log_success "VaultWarden admin hash generated (Argon2id)"
-    
-    # =============================================================================
-    # SECURITY FIX: Caddy Admin Password in htpasswd Format
-    # =============================================================================
+
     echo ""
     log_info "═══════════════════════════════════════════════════════════"
     log_info " Caddy Admin Panel Password"
@@ -344,7 +315,7 @@ collect_secrets() {
     log_info "This password will be hashed with bcrypt for Caddy basic auth"
     log_info "Format: htpasswd (admin:\$2a\$14\$...)"
     echo ""
-    
+
     local caddy_pass
     if [[ "$AUTO_MODE" == "true" ]]; then
         caddy_pass=$(generate_secure_string 32)
@@ -357,10 +328,8 @@ collect_secrets() {
     else
         caddy_pass=$(prompt_password_with_confirmation "Caddy admin password" 12)
     fi
-    
+
     log_info "Generating bcrypt hash for Caddy basic auth..."
-    
-    # Use lib/crypto.sh function to generate hash
     local caddy_hash
     caddy_hash=$(generate_bcrypt_hash "$caddy_pass")
     if [[ -z "$caddy_hash" ]]; then
@@ -368,21 +337,15 @@ collect_secrets() {
         log_error "Ensure apache2-utils is installed: sudo apt-get install apache2-utils"
         return 1
     fi
-    
-    # CRITICAL: Validate hash format before proceeding
+
     if [[ ! "$caddy_hash" =~ ^\$2[aby]\$[0-9]{2}\$ ]]; then
         log_error "Generated bcrypt hash has invalid format: $caddy_hash"
         return 1
     fi
-    
-    # CRITICAL SECURITY FIX: Store in htpasswd format for Caddy basicauth directive
-    # Format: username $2a$14$hash...
-    # This is what Caddy's {env.ADMIN_BASIC_AUTH_HASH} expects
-    SECRETS["admin_basic_auth_hash"]="admin $caddy_hash"  
-    
+
+    SECRETS["admin_basic_auth_hash"]="admin $caddy_hash"
     log_success "Caddy admin hash generated (htpasswd format: admin:\$2a\$...)"
 
-    # Cloudflare DNS Token
     echo ""
     log_info "═══════════════════════════════════════════════════════════"
     log_info " Cloudflare DNS API Token"
@@ -390,7 +353,7 @@ collect_secrets() {
     log_info "Required Permissions: Zone:DNS:Edit + Zone:Zone:Read"
     log_info "Create at: https://dash.cloudflare.com/profile/api-tokens"
     echo ""
-    
+
     local cf_dns
     if [[ "$AUTO_MODE" == "true" ]]; then
         cf_dns="CHANGE_ME_DNS_TOKEN"
@@ -406,8 +369,7 @@ collect_secrets() {
         fi
     fi
     SECRETS["caddy_cloudflare_dns_token"]="$cf_dns"
-    
-    # Cloudflare Firewall Token
+
     echo ""
     log_info "═══════════════════════════════════════════════════════════"
     log_info " Cloudflare Firewall API Token"
@@ -415,7 +377,7 @@ collect_secrets() {
     log_info "Required Permissions: Zone:Firewall Services:Edit"
     log_info "Create at: https://dash.cloudflare.com/profile/api-tokens"
     echo ""
-    
+
     local cf_fw
     if [[ "$AUTO_MODE" == "true" ]]; then
         cf_fw="CHANGE_ME_FIREWALL_TOKEN"
@@ -431,14 +393,13 @@ collect_secrets() {
         fi
     fi
     SECRETS["fail2ban_cloudflare_firewall_token"]="$cf_fw"
-    
-    # SMTP Password
+
     echo ""
     log_info "═══════════════════════════════════════════════════════════"
     log_info " SMTP Password (Email Notifications)"
     log_info "═══════════════════════════════════════════════════════════"
     echo ""
-    
+
     local smtp_pass
     if [[ "$AUTO_MODE" == "true" ]]; then
         smtp_pass="CHANGE_ME_SMTP_PASSWORD"
@@ -455,14 +416,12 @@ collect_secrets() {
         fi
     fi
     SECRETS["smtp_password"]="$smtp_pass"
-    
-    # Backup Passphrase (Auto-generated)
+
     echo ""
     log_info "Generating backup encryption passphrase..."
     SECRETS["backup_passphrase"]=$(generate_secure_string 32)
     log_success "Backup passphrase generated (32 characters)"
-    
-    # Optional: Push Notifications
+
     if [[ "$SKIP_OPTIONAL" != "true" ]]; then
         echo ""
         log_info "═══════════════════════════════════════════════════════════"
@@ -470,10 +429,10 @@ collect_secrets() {
         log_info "═══════════════════════════════════════════════════════════"
         log_info "Get credentials from: https://bitwarden.com/host"
         echo ""
-        
+
         read -p "Configure push notifications? (yes/no): " do_push
         if [[ "$do_push" == "yes" ]]; then
-            read -p "Push installation ID: " push_id
+            read -p "Push installation ID: "  push_id
             read -p "Push installation key: " push_key
             SECRETS["push_installation_id"]="$push_id"
             SECRETS["push_installation_key"]="$push_key"
@@ -487,33 +446,32 @@ collect_secrets() {
         SECRETS["push_installation_id"]="CHANGE_ME_OR_LEAVE_EMPTY"
         SECRETS["push_installation_key"]="CHANGE_ME_OR_LEAVE_EMPTY"
     fi
-    
-    # Export Secrets for Writing
+
     for key in "${!SECRETS[@]}"; do
         export "SECRET_$key=${SECRETS[$key]}"
     done
-    
+
     echo ""
     log_success "All secrets collected successfully"
     return 0
 }
 
-# Write Secrets (Atomic Operation)
+# ---------------------------------------------------------------------------
+# Write secrets (atomic)
+# ---------------------------------------------------------------------------
 write_secrets() {
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would write secrets to encrypted file"
         return 0
     fi
-    
+
     log_info "Writing secrets to encrypted YAML file..."
-    
-    # Create temp file in secrets directory so it matches SOPS regex
+
     local temp_file="$PROJECT_ROOT/secrets/.temp_secrets.yaml"
     touch "$temp_file"
     chmod 600 "$temp_file"
     register_cleanup "rm -f '$temp_file'"
-    
-   # Write YAML content using printf to avoid variable expansion issues
+
     {
         printf '# VaultWarden Secrets Configuration\n'
         printf '# Generated: %s\n' "$(date -Iseconds)"
@@ -534,80 +492,69 @@ write_secrets() {
         printf '# Cloudflare Firewall API token (Zone:Firewall Services:Edit)\n'
         printf 'fail2ban_cloudflare_firewall_token: %s\n' "$SECRET_fail2ban_cloudflare_firewall_token"
     } > "$temp_file"
-    
+
     chmod 600 "$temp_file"
-    
-    # Setup SOPS environment
-    if ! setup_secrets_environment; then
+
+    # Single call - ensure_sops_env is the source of truth
+    if ! ensure_sops_env; then
         log_error "Failed to setup SOPS environment"
         return 1
     fi
-    
-    # Encrypt in place
+
     log_info "Encrypting secrets with SOPS + Age..."
     if ! sops --encrypt --in-place "$temp_file" 2>&1; then
         log_error "Failed to encrypt secrets file"
         return 1
     fi
-    
-    # Atomic move
+
     if ! mv "$temp_file" "$SECRETS_FILE"; then
         log_error "Failed to move encrypted secrets to final location"
         return 1
     fi
-    
-    # Secure the file
+
     if ! secure_secrets_file; then
         log_error "Failed to secure secrets file permissions"
         return 1
     fi
-    
+
     log_success "Secrets encrypted and written to: $SECRETS_FILE"
-    
-    # Create Docker secrets directory if needed
+
     local docker_secrets_dir="$PROJECT_ROOT/secrets/.docker_secrets"
     if [[ ! -d "$docker_secrets_dir" ]]; then
         mkdir -p "$docker_secrets_dir"
         chmod 700 "$docker_secrets_dir"
         log_info "Created Docker secrets directory: $docker_secrets_dir"
     fi
-    
+
     return 0
 }
 
-# Main Execution
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 main() {
     log_header "VaultWarden Secrets Setup (Security Hardened)"
-    
+
     echo ""
     log_info "This script will configure all secrets for VaultWarden deployment"
     log_info "Secrets will be encrypted with SOPS + Age encryption"
     echo ""
-    
-    # Check required commands
+
     if ! require_commands sops age python3 jq htpasswd; then
         log_error "Missing required commands"
         log_info "Install htpasswd with: sudo apt-get install apache2-utils"
         exit 1
     fi
-    
-    # Ensure prerequisites (idempotent)
-    if ! ensure_prerequisites; then
-        exit 1
-    fi
-    
-    # Ensure Argon2 available
-    if ! ensure_argon2_available; then
-        exit 1
-    fi
-    
-    # Check if reconfiguration needed (idempotent check)
+
+    if ! ensure_prerequisites;    then exit 1; fi
+    if ! ensure_argon2_available; then exit 1; fi
+
     if ! check_reconfiguration; then
         log_info "Keeping existing secrets - no changes made"
+        log_info "Tip: to rotate a single field run: ./edit-secrets.sh --rotate FIELD"
         exit 0
     fi
-    
-    # Collect secrets
+
     echo ""
     log_info "═══════════════════════════════════════════════════════════"
     log_info " Secrets Collection"
@@ -616,8 +563,7 @@ main() {
         log_error "Failed to collect secrets"
         exit 1
     fi
-    
-    # Write secrets (atomic)
+
     echo ""
     log_info "═══════════════════════════════════════════════════════════"
     log_info " Writing Encrypted Secrets"
@@ -626,8 +572,7 @@ main() {
         log_error "Failed to write secrets"
         exit 1
     fi
-    
-    # Final success message
+
     echo ""
     log_header "Secrets Setup Complete!"
     echo ""
@@ -637,14 +582,16 @@ main() {
     log_success "✅ All secrets protected with Age encryption"
     echo ""
     echo "📋 Next Steps:"
-    echo "   1. Review .env file: nano .env"
-    echo "   2. Start services: make up"
-    echo "   3. Test health: ./health.sh"
-    echo "   4. Test admin login: https://yourdomain.com/admin"
+    echo "   1. Review .env file:          nano .env"
+    echo "   2. Start services:            make up"
+    echo "   3. Test health:               ./health.sh"
+    echo "   4. Test admin login:          https://yourdomain.com/admin"
+    echo "   5. To rotate a single field:  ./edit-secrets.sh --rotate FIELD"
+    echo "   6. To list secret keys:       ./edit-secrets.sh --list"
     echo ""
     log_warn "⚠️  If you used --auto mode, save the generated passwords above!"
     echo ""
-    
+
     exit 0
 }
 
