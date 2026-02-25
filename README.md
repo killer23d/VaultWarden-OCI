@@ -31,7 +31,7 @@ This is a **template-based, hardened deployment** designed specifically for smal
 - **Automated Operations**: Comprehensive cron jobs for backups, updates, and maintenance
 - **Emergency Access**: Break-glass admin for OCI serial console recovery
 - **Interactive Tools**: Makefile shortcuts and interactive backup/restore functionality
-- **Containerized Email**: msmtpd sidecar for reliable email delivery without host dependencies
+- **Containerized Email**: Postfix sidecar for reliable email delivery without host dependencies
 - **Self-Healing**: Health checks with auto-recovery for unhealthy containers
 
 ## ⚡ Quick Start (15 Minutes)
@@ -47,24 +47,32 @@ chmod +x *.sh
 # 2. Run automated setup (uses template-based approach)
 sudo ./setup.sh --domain vault.yourdomain.com --email admin@yourdomain.com --auto
 
-# 3. Configure secrets (CRITICAL - set admin_basic_auth_hash and API tokens)
+# 3. Log out and log back in
+#    setup.sh adds your user to the docker group. You must start a fresh
+#    session for that group membership to take effect before running any
+#    docker or make commands.
+exit
+# Re-SSH into your instance, then cd back into the project directory:
+cd VaultWarden-OCI
+
+# 4. Configure secrets (CRITICAL - set admin_basic_auth_hash and API tokens)
 ./edit-secrets.sh
 
-# 4. Configure environment (.env file - set CLOUDFLARE_ZONE_ID, etc.)
+# 5. Configure environment (.env file - set CLOUDFLARE_ZONE_ID, etc.)
 nano .env
 
-# 5. Start services
+# 6. Start services
 ./startup.sh
 # Or use Makefile: make start
 
-# 6. Setup automation (recommended for set-and-forget operation)
+# 7. Setup automation (recommended for set-and-forget operation)
 sudo ./cron-setup.sh --install
 
-# 7. Create break-glass admin for emergency access (RECOMMENDED)
+# 8. Create break-glass admin for emergency access (RECOMMENDED)
 ./create-breakglass-admin.sh
 # Or use Makefile: make breakglass-create
 
-# 8. Verify deployment
+# 9. Verify deployment
 ./health.sh
 # Or use Makefile: make health
 ```
@@ -103,7 +111,6 @@ All configuration files are managed through templates for easier maintenance:
     └── backup_utils.sh                # Backup-specific utilities
 ```
 
-
 ### Benefits of Template Approach
 
 ✅ **Single source of truth** - Edit templates, not generated files
@@ -138,11 +145,11 @@ All configuration files are managed through templates for easier maintenance:
 └─────────────────────────────────────────┘
 ┌─────────────────────────────────────────┐
 │        Docker Application Stack         │
-│  ┌──────┐  ┌───────────┐  ┌──────────┐  │
-│  │Caddy │→ │VaultWarden│  │  msmtpd  │  │
-│  │(SSL) │  │(App)      │  │ (Email)  │  │
-│  └──────┘  └───────────┘  └──────────┘  │
-│    1GB Limit  2GB Limit     32MB Limit  │
+│  ┌──────┐  ┌───────────┐  ┌──────────┐ │
+│  │Caddy │→ │VaultWarden│  │ Postfix  │ │
+│  │(SSL) │  │(App)      │  │ (Email)  │ │
+│  └──────┘  └───────────┘  └──────────┘ │
+│   1GB Limit   2GB Limit                │
 │  ┌────────┐                             │
 │  │fail2ban│─────────────────────────────┤ Cloudflare-only for web
 │  │(Sec)   │     1GB Limit               │ Local iptables only for SSH
@@ -152,12 +159,11 @@ All configuration files are managed through templates for easier maintenance:
 ┌─────────────────────────────────────────┐
 │         Emergency Recovery Layer        │
 │  ┌──────────────┐                       │
-│  │Break-Glass   │ ← OCI Serial Console   │ ── Emergency Access Path
-│  │Admin Account │   Access               │
+│  │Break-Glass   │ ← OCI Serial Console  │ ── Emergency Access Path
+│  │Admin Account │   Access              │
 │  └──────────────┘                       │
 └─────────────────────────────────────────┘
 ```
-
 
 ## 🛠️ Core Scripts
 
@@ -171,28 +177,28 @@ All configuration files are managed through templates for easier maintenance:
 | `./backup.sh` | Create encrypted backups | Atomic operations, integrity verification, full verification mode | Daily (automated) |
 | `./restore.sh` | Restore from encrypted backups | Interactive selection, validation | Emergency |
 
-### Configuration \& Maintenance
+### Configuration & Maintenance
 
 | Script | Purpose | Key Features | Frequency |
 | :-- | :-- | :-- | :-- |
 | `./edit-secrets.sh` | Secure secrets management | Enhanced privacy, secure environment handling | Initial + changes |
 | `./update.sh` | Update containers/system packages | Automated backup before updates | Weekly (automated) |
-| `./maintenance.sh` | System cleanup and optimization | Safe database operations, comprehensive cleanup | Monthly (automated) |
+| `./maintenance.sh` | System cleanup, optimization, DNS update, and on-demand DB/email maintenance | Safe database operations, comprehensive cleanup, unified sub-commands | Monthly (automated) |
 | `./cron-setup.sh` | Configure automation | Secure privilege management, validation | Once |
 
-### Emergency \& Recovery
+### Emergency & Recovery
 
 | Script | Purpose | Key Features | Frequency |
 | :-- | :-- | :-- | :-- |
 | `./create-breakglass-admin.sh` | Emergency admin for serial console | OCI console access, secure creation | Once + as needed |
-| `./maintenance.sh --db-maint` | Database maintenance | Safe offline SQLite optimization | Monthly (automated) |
+| `./maintenance.sh --db-maint` | Deep database maintenance | Safe offline SQLite VACUUM + WAL checkpoint | Monthly (automated) |
 | `./maintenance.sh --update-dns` | Manual DNS updates | Cloudflare API integration | As needed |
 
 ### Email Testing
 
 | Script | Purpose | Key Features | Frequency |
 | :-- | :-- | :-- | :-- |
-| `./test-email-simple.sh` | Test email configuration | Tests msmtpd container, validates SMTP settings | Setup + troubleshooting |
+| `./maintenance.sh --test-email` | Test email configuration | Tests Postfix container, validates SMTP relay, end-to-end delivery check | Setup + troubleshooting |
 
 ## 🚀 Makefile Quick Reference
 
@@ -204,42 +210,41 @@ The Makefile provides convenient shortcuts for common operations:
 make up              # Start all services
 make down            # Stop all services
 make restart         # Restart with enhanced startup script
-make start           # Full initialization startup
-make stop            # Graceful shutdown
+make start           # Alias for up
+make stop            # Alias for down
 make status          # Show service status
 ```
 
-
-### Monitoring \& Health
+### Monitoring & Health
 
 ```bash
 make health          # Run health checks
 make health-email    # Health check with email notification
 make logs            # Show all service logs
 make logs SERVICE=vaultwarden  # Show specific service logs
+make logs-postfix    # Shortcut to view Postfix email logs
 ```
 
-
-### Backup \& Restore
+### Backup & Restore
 
 ```bash
-make backup          # Create database backup
-make backup-full     # Create full system backup
-make backup-emergency # Create emergency recovery kit
+make backup          # Create database backup (silent — no email)
+make backup-full     # Create full system backup (emails on completion)
+make backup-emergency # Create emergency recovery kit (emails on completion)
 make list-backups    # List available backups
 make restore         # Interactive restore
 ```
-
 
 ### Maintenance
 
 ```bash
 make update          # Update container images
 make update-system   # Update system and containers
-make maintenance     # Run basic maintenance
-make maintenance-full # Comprehensive maintenance
+make maintenance     # Run full maintenance (cleanup, Docker, DB, DNS, firewall)
+make maintenance-full # Full maintenance with email notification
+make update-dns      # Update Cloudflare DNS record to current IP
+make db-maint        # Deep database maintenance (requires sudo)
 ```
-
 
 ### Security
 
@@ -249,17 +254,19 @@ make breakglass-status  # Check emergency admin status
 make breakglass-remove  # Remove emergency admin
 ```
 
-
-### Development
+### Development & Testing
 
 ```bash
 make dev-setup       # Setup development environment
-make test            # Run all tests
-make test-config     # Validate configuration
-make shell           # Open shell in container
+make test            # Run all tests (secrets + email + config)
+make test-secrets    # Test secrets decryption
+make test-email      # Test Postfix email configuration (verbose)
+make test-config     # Validate Docker Compose configuration
+make dry-run         # Preview all operations without executing
+make fmt             # Validate all configuration files
+make shell           # Open shell in container (default: vaultwarden)
 make shell SERVICE=caddy # Open shell in specific container
 ```
-
 
 ## 🔧 Enhanced Security Features
 
@@ -272,7 +279,7 @@ make shell SERVICE=caddy # Open shell in specific container
     - Advanced retry logic with exponential backoff
     - Comprehensive regex-based filtering (no external dependencies)
     - Rate limiting detection and response
-- **Secure Startup \& Secrets**:
+- **Secure Startup & Secrets**:
     - `startup.sh` enforces `umask 077` during secrets generation (files created with 600 permissions)
     - Atomic file creation avoids race conditions
     - Log directories automatically created with correct PUID:PGID ownership
@@ -290,11 +297,10 @@ make shell SERVICE=caddy # Open shell in specific container
     - Consistent security configurations across deployments
     - Version control safe templates with validation
 - **Containerized Email**:
-    - msmtpd sidecar eliminates host mailutil dependencies
-    - Dedicated 32MB container for email relay
-    - Consistent SMTP configuration across all services
-    - Enhanced reliability and troubleshooting
-
+    - Postfix sidecar eliminates host mail utility dependencies
+    - Dedicated container for SMTP relay (port 587)
+    - Consistent SMTP configuration across all services (scripts and fail2ban)
+    - Enhanced reliability and troubleshooting via unified `--test-email` diagnostic
 
 ### Multi-Layer Security
 
@@ -312,8 +318,7 @@ make shell SERVICE=caddy # Open shell in specific container
 - **Container Security**: Non-root execution, capability restrictions, resource constraints
 - **Emergency Recovery**: Secure break-glass admin access
 
-
-## 📦 Backup \& Recovery
+## 📦 Backup & Recovery
 
 ### Enhanced Backup Strategy
 
@@ -326,7 +331,6 @@ make shell SERVICE=caddy # Open shell in specific container
 - **Manual**: Emergency recovery kits (retention: 90 days)
 - **Offsite**: Automatic rclone sync to configured remote storage
 - **Verification**: Pre-encryption integrity checks and optional full verification
-
 
 ### Backup Operations
 
@@ -346,12 +350,11 @@ make shell SERVICE=caddy # Open shell in specific container
 ./backup.sh --list             # Show all available backups
 
 # Using Makefile
-make backup                    # Database backup
-make backup-full              # Full system backup
-make backup-emergency         # Emergency kit
+make backup                    # Database backup (silent)
+make backup-full              # Full system backup (emails on completion)
+make backup-emergency         # Emergency kit (emails on completion)
 make list-backups             # List backups
 ```
-
 
 ### Recovery Process
 
@@ -365,7 +368,6 @@ make list-backups             # List backups
 # Using Makefile
 make restore                   # Interactive restore
 ```
-
 
 ## 🔧 Configuration
 
@@ -403,20 +405,21 @@ nano .env
 # Generate bcrypt hash: docker run --rm -it ghcr.io/caddybuilds/caddy-cloudflare:latest caddy hash-password
 ```
 
-5. **Email Configuration** (Enhanced):
+5. **Email Configuration**:
 
 ```bash
-# Email now uses containerized msmtpd (no host dependencies)
-# Configure SMTP settings in .env:
+# Email uses a containerized Postfix relay (no host mail dependencies).
+# Configure SMTP relay settings in .env:
 nano .env
-# Set: SMTP_HOST, SMTP_PORT, SMTP_USERNAME, etc.
+# Set: SMTP_HOST, SMTP_PORT, SMTP_USERNAME, ALLOWED_SENDER_DOMAINS, etc.
 
 # Set SMTP password in secrets:
 ./edit-secrets.sh
 # Set: smtp_password
 
 # Test email functionality:
-./test-email-simple.sh
+./maintenance.sh --test-email --verbose
+# Or use Makefile: make test-email
 ```
 
 6. **Emergency Access Setup** (Recommended):
@@ -426,7 +429,6 @@ nano .env
 # Or use: make breakglass-create
 # Creates emergency admin account for OCI serial console access
 ```
-
 
 ### Template Maintenance
 
@@ -445,7 +447,6 @@ sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.c
 # Or use: make restart
 ```
 
-
 ## 🆘 Troubleshooting
 
 ### Common Issues
@@ -457,7 +458,7 @@ sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.c
 ./health.sh
 # Or: make health
 
-# View container logs  
+# View container logs
 docker compose logs vaultwarden
 # Or: make logs SERVICE=vaultwarden
 
@@ -483,24 +484,33 @@ sudo ./setup.sh --force --domain your-domain.com --email your-email@domain.com
 cat docker-compose.yml.example | grep -n "platform:\|linux/arm64"
 ```
 
-**Email Issues** (Enhanced for msmtpd):
+**Email Issues**:
 
 ```bash
-# Check msmtpd container status
-docker compose logs msmtpd
-# Or: make logs SERVICE=msmtpd
+# Run the built-in email diagnostic (tests Postfix container,
+# fail2ban integration, host script config, and end-to-end delivery)
+./maintenance.sh --test-email --verbose
+# Or: make test-email
 
-# Test email functionality
-./test-email-simple.sh
+# Check Postfix container status and logs
+docker compose ps postfix
+docker compose logs postfix
+# Or: make logs-postfix
 
-# Verify msmtpd is running
-docker compose ps msmtpd
+# Verify Postfix SMTP port is responding
+docker compose exec postfix nc -z localhost 587
 
-# Check msmtpd configuration
-docker compose exec msmtpd cat /etc/msmtprc
+# Check fail2ban can reach Postfix
+docker compose exec fail2ban nc -zv postfix 587
 
-# Test SMTP connectivity from msmtpd container
-docker compose exec msmtpd nc -z localhost 1025
+# Send a test email to a specific recipient
+./maintenance.sh --test-email --recipient you@example.com
+
+# Debug steps if delivery fails:
+#   1. Verify SMTP relay credentials in secrets (./edit-secrets.sh)
+#   2. Verify ALLOWED_SENDER_DOMAINS in .env
+#   3. Check Postfix relay configuration
+#   4. Review Postfix logs: docker compose logs postfix | grep -i error
 
 # Send test email from VaultWarden admin panel
 # Navigate to: https://vault.yourdomain.com/admin → SMTP Settings → Send Test Email
@@ -523,10 +533,9 @@ curl -X GET "https://api.cloudflare.com/client/v4/zones" \
 # Validate filter syntax
 docker compose exec fail2ban fail2ban-regex /var/log/vaultwarden/vaultwarden.log /data/fail2ban/filter.d/vaultwarden-auth.conf
 
-# NOTE: Web-facing jails (vaultwarden-auth, vaultwarden-admin, vaultwarden-web-*) 
+# NOTE: Web-facing jails (vaultwarden-auth, vaultwarden-admin, vaultwarden-web-*)
 # use Cloudflare API ONLY - local iptables removed as traffic is proxied
 ```
-
 
 ### Emergency Recovery
 
@@ -548,14 +557,14 @@ docker compose exec fail2ban fail2ban-regex /var/log/vaultwarden/vaultwarden.log
 ### During Initial Setup
 
 - ✅ Use template-based setup: `./setup.sh` (not manual file editing)
+- ✅ Log out and log back in after `setup.sh` to apply docker group membership
 - ✅ Configure break-glass admin: `./create-breakglass-admin.sh` or `make breakglass-create`
 - ✅ Test OCI serial console access (verify it works)
 - ✅ Create and test backup restoration: `./backup.sh --type emergency`
 - ✅ Generate proper bcrypt hash for admin_basic_auth_hash
 - ✅ Validate Cloudflare API tokens work correctly
-- ✅ Test email functionality: `./test-email-simple.sh`
+- ✅ Test email functionality: `make test-email`
 - ✅ Run comprehensive health check: `./health.sh` or `make health`
-
 
 ### Ongoing Operations
 
@@ -565,9 +574,8 @@ docker compose exec fail2ban fail2ban-regex /var/log/vaultwarden/vaultwarden.log
 - ✅ Monitor fail2ban effectiveness and API limits
 - ✅ Verify UFW rules after any network changes
 - ✅ Review container resource usage periodically
-- ✅ Test email notifications regularly
+- ✅ Test email notifications regularly: `make test-email`
 - ✅ Understand Cloudflare-only blocking for web traffic (iptables removed)
-
 
 ### Template Security
 
@@ -576,7 +584,6 @@ docker compose exec fail2ban fail2ban-regex /var/log/vaultwarden/vaultwarden.log
 - 📝 Use setup.sh for all configuration generation
 - 📝 Validate templates before deployment: `docker compose config`
 - 📝 Test template changes in non-production first
-
 
 ## 📚 Documentation
 
@@ -593,8 +600,6 @@ Comprehensive documentation is available in the `docs/` directory:
 - **[API.md](docs/API.md)** - API usage and integration
 - **[ADVANCED-CUSTOMIZATION.md](docs/ADVANCED-CUSTOMIZATION.md)** - Advanced customization options
 
-
 ## 📄 License
 
 MIT License - see LICENSE file for details.
-
