@@ -316,6 +316,16 @@ generate_recovery_kit() {
     fi
 
     # 5. Generate Content
+    # FIX: Pre-create the output file with 600 permissions BEFORE any plaintext
+    # is written. Without this, the shell creates the file at the current umask
+    # (typically 022 → 644) and it remains world-readable until the chmod 600
+    # at the end of this function — a window that exposes the Age private key
+    # and all decrypted secrets to any other process on the system.
+    if ! install -m 600 /dev/null "$output_file"; then
+        log_error "Failed to create output file with secure permissions: $output_file"
+        return 1
+    fi
+
     cat > "$output_file" << EOF
 ██████╗ ███████╗ ██████╗ ██████╗ ██╗   ██╗███████╗██████╗ ██╗   ██╗
 ██╔══██╗██╔════╝██╔════╝██╔═══██╗██║   ██║██╔════╝██╔══██╗╚██╗ ██╔╝
@@ -470,6 +480,7 @@ offer_recovery_kit_export() {
             echo ""
         else
             log_error "Failed to generate recovery kit"
+            return 1
         fi
     fi
 }
