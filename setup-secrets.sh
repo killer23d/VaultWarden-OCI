@@ -27,6 +27,7 @@ SKIP_OPTIONAL=false
 FORCE=false
 DRY_RUN=false
 AUTO_FIX=true
+EXPORT_RECOVERY_KIT=false
 
 # ---------------------------------------------------------------------------
 # Cleanup
@@ -52,13 +53,14 @@ USAGE:
     ./setup-secrets.sh [OPTIONS]
 
 OPTIONS:
-    --auto              Auto-generate passwords
-    --skip-validation   Skip token/SMTP validation
-    --skip-optional     Skip optional secrets
-    --force             Overwrite existing secrets without prompting
-    --dry-run           Preview without executing
-    --no-auto-fix       Don't auto-create missing prerequisites
-    --help              Show help
+    --auto                  Auto-generate passwords
+    --skip-validation       Skip token/SMTP validation
+    --skip-optional         Skip optional secrets
+    --force                 Overwrite existing secrets without prompting
+    --dry-run               Preview without executing
+    --no-auto-fix           Don't auto-create missing prerequisites
+    --export-recovery-kit   Generate a recovery document with unencrypted secrets
+    --help                  Show help
 
 FEATURES:
     ✅ Idempotent - Safe to re-run multiple times
@@ -81,6 +83,7 @@ EXAMPLES:
     ./setup-secrets.sh --auto           # Automated with generated passwords
     ./setup-secrets.sh --force          # Reconfigure without prompting
     ./setup-secrets.sh --skip-optional  # Skip push notifications
+    ./setup-secrets.sh --export-recovery-kit # Export a recovery document
 
 SEE ALSO:
     ./edit-secrets.sh --list            # Show existing secret key names
@@ -94,13 +97,14 @@ HELP
 # ---------------------------------------------------------------------------
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --auto)            AUTO_MODE=true;        shift ;;
-        --skip-validation) SKIP_VALIDATION=true;  shift ;;
-        --skip-optional)   SKIP_OPTIONAL=true;    shift ;;
-        --force)           FORCE=true;            shift ;;
-        --dry-run)         DRY_RUN=true;          shift ;;
-        --no-auto-fix)     AUTO_FIX=false;        shift ;;
-        --help)            show_help; exit 0 ;;
+        --auto)                  AUTO_MODE=true;        shift ;;
+        --skip-validation)       SKIP_VALIDATION=true;  shift ;;
+        --skip-optional)         SKIP_OPTIONAL=true;    shift ;;
+        --force)                 FORCE=true;            shift ;;
+        --dry-run)               DRY_RUN=true;          shift ;;
+        --no-auto-fix)           AUTO_FIX=false;        shift ;;
+        --export-recovery-kit)   EXPORT_RECOVERY_KIT=true; shift ;;
+        --help)                  show_help; exit 0 ;;
         *) log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done
@@ -175,7 +179,7 @@ fix_prerequisites() {
                 fi
                 cat > .sops.yaml << SOPS_EOF
 creation_rules:
-  - path_regex: secrets/secrets\.yaml$
+  - path_regex: secrets/secrets\\.yaml$
     age: $age_public_key
 SOPS_EOF
                 log_success "SOPS configuration created: .sops.yaml"
@@ -535,6 +539,14 @@ write_secrets() {
 main() {
     log_header "VaultWarden Secrets Setup (Security Hardened)"
 
+    # Standalone export logic
+    if [[ "$EXPORT_RECOVERY_KIT" == "true" && "$AUTO_MODE" == "false" && "$SKIP_VALIDATION" == "false" && "$SKIP_OPTIONAL" == "false" && "$FORCE" == "false" && "$DRY_RUN" == "false" ]]; then
+        log_info "Running standalone recovery kit export..."
+        if ! ensure_sops_env; then exit 1; fi
+        offer_recovery_kit_export "true"
+        exit 0
+    fi
+
     echo ""
     log_info "This script will configure all secrets for VaultWarden deployment"
     log_info "Secrets will be encrypted with SOPS + Age encryption"
@@ -591,6 +603,11 @@ main() {
     echo ""
     log_warn "⚠️  If you used --auto mode, save the generated passwords above!"
     echo ""
+
+    # Offer to export the recovery kit since the secrets have just been written.
+    if [[ "$DRY_RUN" == "false" ]]; then
+        offer_recovery_kit_export "$EXPORT_RECOVERY_KIT"
+    fi
 
     exit 0
 }
