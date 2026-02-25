@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# maintenance.sh - System cleanup, optimization, DNS update, and on-demand DB maintenance
-# Merged: db-maint.sh (on-demand deep DB maintenance) + update-dns.sh (Cloudflare DDNS)
+# maintenance.sh - System cleanup, optimization, DNS update, and on-demand DB/Email maintenance
+# Merged: db-maint.sh (on-demand deep DB maintenance) + update-dns.sh (Cloudflare DDNS) + simple-email-test.sh
 
 set -euo pipefail
 
@@ -27,13 +27,17 @@ DRY_RUN=false
 EMAIL_NOTIFY=false
 COMPREHENSIVE=false
 
-# Deep (on-demand) DB maintenance mode  -- replaces db-maint.sh
+# Deep (on-demand) DB maintenance mode
 DB_DEEP_MAINT=false
 DB_DEEP_FORCE=false
 
+# Email diagnostic mode
+TEST_EMAIL=false
+TEST_RECIPIENT=""
+VERBOSE=false   # Only meaningful with --test-email; ignored by all other modes
+
 # Targeted-mode flag: set to true when ONLY targeted flags are given
-# (i.e. --update-dns or --update-firewall alone, without --comprehensive or
-#  any routine --no-* overrides). Skips phases 1-2 entirely.
+# (i.e. --update-dns or --update-firewall alone)
 TARGETED_MODE=false
 
 # Retention settings (days)
@@ -60,36 +64,47 @@ TARGETED (single-task) OPTIONS:
     phases are skipped entirely. Combine with --comprehensive or routine
     flags to include them alongside.
 
+ON-DEMAND DIAGNOSTICS & DEEP MAINTENANCE:
+    --db-maint              Run deep database maintenance (VACUUM + WAL checkpoint + backup)
+                            Stops the VaultWarden container; prompts for confirmation
+    --db-maint --force      Skip the confirmation prompt
+    --test-email            Run email diagnostics and send a test notification.
+                            Supports: --dry-run, --recipient EMAIL, --verbose
+                            May start the postfix container if it is stopped.
+    --recipient EMAIL       Override the default admin email recipient.
+                            Only meaningful with --test-email.
+    --verbose               Show detailed diagnostic output.
+                            Only meaningful with --test-email; ignored in all other modes.
+
 ROUTINE MAINTENANCE OPTIONS:
     --comprehensive         Run everything: routine + firewall + DNS
     --no-logs               Skip log rotation and cleanup
     --no-backups            Skip backup cleanup
     --no-docker             Skip Docker cleanup
     --no-database           Skip scheduled database optimization
-    --dry-run               Show what would be done without executing
+    --dry-run               Show what would be done without executing.
+                            Supported by all modes including --test-email.
     --email                 Send email notification on completion
     --help                  Show this help
 
-ON-DEMAND DEEP DATABASE MAINTENANCE (replaces db-maint.sh):
-    --db-maint              Run deep database maintenance (VACUUM + WAL checkpoint + backup)
-                            Stops the VaultWarden container; prompts for confirmation
-    --db-maint --force      Skip the confirmation prompt
-
 BEHAVIOUR OVERVIEW:
-    Targeted flags alone    Run ONLY that task (no cleanup, no DB opt)
+    --test-email            Run email diagnostics ONLY (no cleanup, no DB opt)
+    --db-maint              Run deep DB maintenance ONLY (no cleanup, no DB opt)
+    --update-dns alone      Run DNS update ONLY (no cleanup, no DB opt)
+    --update-firewall alone Run firewall update ONLY (no cleanup, no DB opt)
     --comprehensive         Full routine + firewall + DNS + health check
     No flags                Show this help
     --dry-run               Preview any mode without making changes
 
 EXAMPLES:
-    ./maintenance.sh --help                     # This help
-    ./maintenance.sh --update-dns               # DNS update ONLY
-    ./maintenance.sh --update-firewall          # Firewall update ONLY
-    ./maintenance.sh --dry-run --update-dns     # Preview DNS update
-    ./maintenance.sh --comprehensive            # Full maintenance
-    ./maintenance.sh --no-database              # Routine cleanup, skip DB opt
-    sudo ./maintenance.sh --db-maint            # Deep DB maintenance (interactive)
-    sudo ./maintenance.sh --db-maint --force    # Deep DB maintenance (non-interactive)
+    ./maintenance.sh --comprehensive              # Full maintenance
+    ./maintenance.sh --update-dns                 # DNS update ONLY
+    ./maintenance.sh --test-email                 # Email diagnostics
+    ./maintenance.sh --test-email --verbose       # Email diagnostics (detailed)
+    ./maintenance.sh --test-email --dry-run       # Preview email test without sending
+    ./maintenance.sh --test-email --recipient admin@example.com
+    sudo ./maintenance.sh --db-maint              # Deep DB maintenance (interactive)
+    sudo ./maintenance.sh --db-maint --force      # Deep DB maintenance (non-interactive)
 EOF
 }
 
@@ -99,7 +114,7 @@ EOF
 [[ $# -eq 0 ]] && { show_help; exit 0; }
 
 # Track which flags were explicitly set so we can detect targeted mode
-_ROUTINE_OVERRIDE=false   # set true if any --no-* or --comprehensive is used
+_ROUTINE_OVERRIDE=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -116,18 +131,17 @@ while [[ $# -gt 0 ]]; do
         --email)           EMAIL_NOTIFY=true;    shift ;;
         --db-maint)        DB_DEEP_MAINT=true;   shift ;;
         --force)           DB_DEEP_FORCE=true;   shift ;;
+        --test-email)      TEST_EMAIL=true;      shift ;;
+        --recipient)       TEST_RECIPIENT="$2";  shift 2 ;;
+        --verbose)         VERBOSE=true;         shift ;;
         --help)            show_help; exit 0 ;;
         *) log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done
 
-# Detect targeted mode: ONLY a targeted flag was given, no routine overrides,
-# no --comprehensive, and neither --db-maint was used.
-# In targeted mode we skip phases 1 (cleanup) and 2 (DB optimization) entirely.
-if [[ "$_ROUTINE_OVERRIDE" == "false" && "$DB_DEEP_MAINT" == "false" ]]; then
+if [[ "$_ROUTINE_OVERRIDE" == "false" && "$DB_DEEP_MAINT" == "false" && "$TEST_EMAIL" == "false" ]]; then
     if [[ "$UPDATE_DNS" == "true" || "$UPDATE_FIREWALL" == "true" ]]; then
         TARGETED_MODE=true
-        # Also suppress the routine tasks so summary shows them all as N/A
         CLEAN_LOGS=false
         CLEAN_BACKUPS=false
         CLEAN_DOCKER=false
@@ -326,7 +340,6 @@ optimize_database() {
 
 # ---------------------------------------------------------------------------
 # ON-DEMAND: Deep database maintenance  (merged from db-maint.sh)
-# --db-maint [--force]
 # ---------------------------------------------------------------------------
 run_deep_db_maintenance() {
     log_info "VaultWarden Deep Database Maintenance"
@@ -447,9 +460,238 @@ run_deep_db_maintenance() {
 }
 
 # ---------------------------------------------------------------------------
+# ON-DEMAND: Email Diagnostics (merged from simple-email-test.sh)
+# ---------------------------------------------------------------------------
+
+# verbose_log: emits only when --verbose is set. Only called within the
+# --test-email sub-command; VERBOSE has no effect in any other mode.
+verbose_log() {
+    [[ "$VERBOSE" == "true" ]] && log_info "$1"
+}
+
+test_postfix_container() {
+    log_info "Testing postfix container status..."
+
+    if docker compose ps postfix >/dev/null 2>&1; then
+        log_success "✅ postfix container is running"
+        verbose_log "Container status: $(docker compose ps postfix --format 'table {{.Name}}\t{{.Status}}\t{{.Ports}}')"
+    else
+        log_error "❌ postfix container is not running"
+        # Guard the start attempt: in --dry-run mode we report the real state
+        # (container down) and return 1 intentionally. This means --test-email
+        # --dry-run will show a test failure for this step when postfix is
+        # stopped. That is correct behaviour — it accurately reflects system
+        # state without changing anything.
+        if [[ "$DRY_RUN" == "true" ]]; then
+            log_info "🔍 [DRY RUN] Would start postfix container"
+            return 1
+        fi
+        log_info "Starting postfix container..."
+        if docker compose up -d postfix; then
+            sleep 15
+            log_success "✅ postfix container started successfully"
+        else
+            log_error "❌ Failed to start postfix container"
+            return 1
+        fi
+    fi
+
+    local health_status
+    health_status=$(docker compose exec -T postfix nc -z localhost 587 >/dev/null 2>&1 && echo "healthy" || echo "unhealthy")
+
+    if [[ "$health_status" == "healthy" ]]; then
+        log_success "✅ postfix health check passed (port 587 responding)"
+    else
+        log_error "❌ postfix health check failed (port 587 not responding)"
+        log_info "🔍 Check logs: docker compose logs postfix"
+        return 1
+    fi
+
+    if docker compose exec -T postfix postfix status >/dev/null 2>&1; then
+        log_success "✅ postfix service is active"
+        verbose_log "$(docker compose exec -T postfix postfix status)"
+    else
+        log_warn "⚠️  Could not verify postfix service status"
+    fi
+
+    local recent_logs
+    recent_logs=$(docker compose logs --tail 20 postfix 2>/dev/null | grep -i "error\|fatal" | grep -v "warning" || true)
+    if [[ -n "$recent_logs" ]]; then
+        log_warn "⚠️  Found recent errors in postfix logs:"
+        echo "$recent_logs" | while read -r line; do
+            log_warn "    $line"
+        done
+    else
+        verbose_log "No critical errors found in postfix logs"
+    fi
+    return 0
+}
+
+test_fail2ban_integration() {
+    log_info "Testing fail2ban integration..."
+
+    if ! docker compose ps fail2ban >/dev/null 2>&1; then
+        log_error "❌ fail2ban container is not running"
+        log_info "💡 Start it with: docker compose up -d fail2ban"
+        return 1
+    fi
+
+    if docker compose exec -T fail2ban fail2ban-client status >/dev/null 2>&1; then
+        log_success "✅ fail2ban is responding"
+        verbose_log "fail2ban jails: $(docker compose exec -T fail2ban fail2ban-client status | grep "Jail list" || echo "Status check passed")"
+    else
+        log_error "❌ fail2ban is not responding"
+        return 1
+    fi
+
+    local f2b_netmode smtp_host smtp_port
+    f2b_netmode=$(docker inspect vaultwarden_fail2ban --format '{{.HostConfig.NetworkMode}}' 2>/dev/null || echo "")
+    smtp_port="587"
+
+    if [[ "$f2b_netmode" == "host" ]]; then
+        smtp_host="127.0.0.1"
+        verbose_log "fail2ban network mode: host -> testing SMTP via ${smtp_host}:${smtp_port}"
+    else
+        smtp_host="postfix"
+        verbose_log "fail2ban network mode: ${f2b_netmode:-unknown} -> testing SMTP via ${smtp_host}:${smtp_port}"
+    fi
+
+    if docker compose exec -T fail2ban sh -lc "nc -zv $smtp_host $smtp_port" >/dev/null 2>&1; then
+        log_success "✅ fail2ban can reach postfix SMTP (${smtp_host}:${smtp_port})"
+    else
+        log_error "❌ fail2ban cannot reach postfix SMTP (${smtp_host}:${smtp_port})"
+        return 1
+    fi
+
+    if docker compose exec -T fail2ban test -f /data/fail2ban/action.d/smtp.conf; then
+        log_success "✅ SMTP action configuration found"
+        if docker compose exec -T fail2ban grep -Eq "smtplib\.SMTP\('postfix', 587\)|smtplib\.SMTP\('127\.0\.0\.1', 587\)" /data/fail2ban/action.d/smtp.conf; then
+            log_success "✅ SMTP action correctly configured (postfix or localhost)"
+        else
+            log_warn "⚠️  SMTP action may still reference old msmtpd configuration"
+        fi
+    else
+        log_error "❌ SMTP action configuration missing"
+        return 1
+    fi
+    return 0
+}
+
+test_host_script_email() {
+    log_info "Testing host script email functionality..."
+
+    if [[ -z "$TEST_RECIPIENT" ]]; then
+        TEST_RECIPIENT=$(get_config_value "ADMIN_EMAIL" "")
+        if [[ -z "$TEST_RECIPIENT" ]]; then
+            log_error "❌ No email recipient configured (ADMIN_EMAIL not set)"
+            return 1
+        fi
+    fi
+
+    log_success "✅ Email recipient configured: $TEST_RECIPIENT"
+
+    local sender_domains
+    sender_domains=$(get_config_value "ALLOWED_SENDER_DOMAINS" "")
+    if [[ -n "$sender_domains" ]]; then
+        log_success "✅ Allowed sender domains configured: $sender_domains"
+    else
+        log_warn "⚠️  ALLOWED_SENDER_DOMAINS not set (postfix may reject emails)"
+    fi
+
+    if declare -f send_notification_email >/dev/null 2>&1; then
+        log_success "✅ send_notification_email function available"
+    else
+        log_error "❌ send_notification_email function not available"
+        return 1
+    fi
+    return 0
+}
+
+test_end_to_end_email() {
+    log_info "Testing end-to-end email functionality..."
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "🔍 [DRY RUN] Would send test email to: $TEST_RECIPIENT"
+        log_info "🔍 [DRY RUN] Email would be sent via postfix container (port 587)"
+        return 0
+    fi
+
+    if [[ -z "$TEST_RECIPIENT" ]]; then
+        log_error "❌ No test recipient specified"
+        return 1
+    fi
+
+    local test_subject="VaultWarden Email Test - postfix - $(date)"
+    local test_body="VaultWarden notification test
+Sent: $(date -Iseconds)
+Host: $(hostname -f 2>/dev/null || hostname)
+
+If you received this message, email delivery is working correctly."
+
+    log_info "📧 Sending test email to: $TEST_RECIPIENT"
+
+    if send_notification_email "$test_subject" "$test_body"; then
+        log_success "✅ Test email sent successfully!"
+        log_info "📬 Please check $TEST_RECIPIENT for the test message"
+        log_info "🔍 Check postfix logs: docker compose logs postfix"
+    else
+        log_error "❌ Failed to send test email"
+        log_info "🔍 Debug steps:"
+        log_info "   1. Check postfix logs: docker compose logs postfix"
+        log_info "   2. Check fail2ban logs: docker compose logs fail2ban"
+        log_info "   3. Verify SMTP credentials in secrets"
+        log_info "   4. Verify ALLOWED_SENDER_DOMAINS in .env"
+        log_info "   5. Check postfix relay configuration"
+        log_info "   6. Check postfix container permissions: docker compose logs postfix | grep -i permission"
+        return 1
+    fi
+    return 0
+}
+
+run_email_diagnostics() {
+    log_header "VaultWarden Email Diagnostic"
+
+    # Note on --dry-run behaviour: if postfix is not running, test_postfix_container
+    # returns 1 even in dry-run mode. This is intentional — dry-run reports real
+    # system state without making changes. A 1/4 result means the system has a
+    # genuine issue, not a false alarm from the dry-run itself.
+    local test_results=()
+    local test_names=("postfix Container" "fail2ban Integration" "Host Script Email" "End-to-End Email")
+
+    test_postfix_container    && test_results+=(0) || test_results+=(1)
+    test_fail2ban_integration && test_results+=(0) || test_results+=(1)
+    test_host_script_email    && test_results+=(0) || test_results+=(1)
+    test_end_to_end_email     && test_results+=(0) || test_results+=(1)
+
+    local total_tests=${#test_results[@]}
+    local passed_tests=0
+    local failed_tests=()
+
+    for i in "${!test_results[@]}"; do
+        if [[ ${test_results[i]} -eq 0 ]]; then
+            ((passed_tests++))
+        else
+            failed_tests+=("${test_names[i]}")
+        fi
+    done
+
+    echo ""
+    log_info "============================================"
+    log_info "TEST RESULTS: $passed_tests/$total_tests tests passed"
+    log_info "============================================"
+
+    if [[ $passed_tests -eq $total_tests ]]; then
+        log_success "🎉 ALL EMAIL TESTS PASSED!"
+        log_success "✅ Your VaultWarden-OCI email deployment is functioning correctly"
+        return 0
+    else
+        log_error "❌ Some email tests failed: ${failed_tests[*]}"
+        return 1
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # TARGETED: Firewall IP range update
-# FIX: ufw requires proto tcp/udp when specifying multiple ports with comma
-#      syntax. Split each range into two rules: one for port 80, one for 443.
 # ---------------------------------------------------------------------------
 update_firewall_ranges() {
     if [[ "$UPDATE_FIREWALL" != "true" ]]; then log_info "Skipping firewall update"; return 0; fi
@@ -464,7 +706,6 @@ update_firewall_ranges() {
         log_error "Failed to fetch Cloudflare IP ranges - aborting firewall update"; return 1
     fi
 
-    # Helper: add two rules (port 80 tcp + port 443 tcp) for a given range and label
     _ufw_allow_range() {
         local range="$1" label="$2"
         local added=false
@@ -517,7 +758,7 @@ update_firewall_ranges() {
 }
 
 # ---------------------------------------------------------------------------
-# TARGETED: DNS update  (merged from update-dns.sh)
+# TARGETED: DNS update
 # ---------------------------------------------------------------------------
 update_dns_record() {
     if [[ "$UPDATE_DNS" != "true" ]]; then log_info "Skipping DNS update"; return 0; fi
@@ -599,21 +840,18 @@ generate_maintenance_summary() {
 
     local summary="VaultWarden Maintenance Summary - $(date)\n\nMaintenance Results:\n"
 
-    # Log cleanup
     if [[ "$CLEAN_LOGS" == "true" ]]; then
         [[ "$log_cleanup" == "0" ]] && summary+="  ✅ Log cleanup: OK\n" || summary+="  ❌ Log cleanup: Failed\n"
     else
         summary+="  ⏭️  Log cleanup: Skipped\n"
     fi
 
-    # Backup cleanup
     if [[ "$CLEAN_BACKUPS" == "true" ]]; then
         [[ "$backup_cleanup" == "0" ]] && summary+="  ✅ Backup cleanup: OK\n" || summary+="  ❌ Backup cleanup: Failed\n"
     else
         summary+="  ⏭️  Backup cleanup: Skipped\n"
     fi
 
-    # Docker cleanup
     if [[ "$CLEAN_DOCKER" == "true" ]]; then
         if [[ "$docker_cleanup" == "0" ]]; then
             summary+="  ✅ Docker cleanup: OK\n"
@@ -626,28 +864,24 @@ generate_maintenance_summary() {
         summary+="  ⏭️  Docker cleanup: Skipped\n"
     fi
 
-    # DB optimization
     if [[ "$OPTIMIZE_DATABASE" == "true" ]]; then
         [[ "$db_optimization" == "0" ]] && summary+="  ✅ DB optimization: OK\n" || summary+="  ⚠️  DB optimization: Issues\n"
     else
         summary+="  ⏭️  DB optimization: Skipped\n"
     fi
 
-    # Firewall
     if [[ "$UPDATE_FIREWALL" == "true" ]]; then
         [[ "$firewall_update" == "0" ]] && summary+="  ✅ Firewall update: OK\n" || summary+="  ❌ Firewall update: Failed\n"
     else
         summary+="  ⏭️  Firewall update: Skipped\n"
     fi
 
-    # DNS
     if [[ "$UPDATE_DNS" == "true" ]]; then
         [[ "$dns_update" == "0" ]] && summary+="  ✅ DNS update: OK\n" || summary+="  ❌ DNS update: Failed\n"
     else
         summary+="  ⏭️  DNS update: Skipped\n"
     fi
 
-    # Health (only shown when not in targeted mode)
     if [[ "$TARGETED_MODE" == "false" ]]; then
         [[ "$health_validation" == "0" ]] && summary+="  ✅ Health validation: Passed\n" || summary+="  ⚠️  Health validation: Issues\n"
     fi
@@ -699,6 +933,15 @@ main() {
         CLEANUP_ACTIONS+=("rm -f '$GLOBAL_MAINT_LOCK' 2>/dev/null || true")
         if ! load_env_file; then log_error "Failed to load configuration"; exit 1; fi
         run_deep_db_maintenance
+        exit $?
+    fi
+
+    # ---- Email diagnostic: self-contained sub-command ----
+    # Acquires no routine lock; a --test-email run cannot block or be blocked
+    # by a concurrent cron-driven --comprehensive run.
+    if [[ "$TEST_EMAIL" == "true" ]]; then
+        if ! load_env_file; then log_error "Failed to load configuration"; exit 1; fi
+        run_email_diagnostics
         exit $?
     fi
 
