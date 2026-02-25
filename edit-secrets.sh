@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # edit-secrets.sh - VaultWarden secrets editor
-# Modes: edit (default) | view (--view) | list keys (--list) | rotate field (--rotate FIELD)
+# Modes: edit (default) | view (--view) | list keys (--list) | rotate field (--rotate FIELD) | export kit (--export-recovery-kit)
 # Safe to re-run multiple times.  Uses your $EDITOR or falls back to nano.
 #
 # See also: ./setup-secrets.sh  (first-time creation and full reconfiguration)
@@ -24,6 +24,7 @@ SKIP_BACKUP=false
 VIEW_ONLY=false
 LIST_KEYS=false
 ROTATE_FIELD=""   # non-empty triggers --rotate mode
+EXPORT_RECOVERY_KIT=false
 
 # ---------------------------------------------------------------------------
 # Cleanup
@@ -48,23 +49,24 @@ USAGE:
     ./edit-secrets.sh [OPTIONS]
 
 MODES (mutually exclusive; default is interactive edit):
-    --view              View decrypted secrets read-only (no changes saved)
-    --list              List secret key names only (no values shown)
-    --rotate FIELD      Re-collect and re-hash a single named field, then
-                        re-encrypt.  Supported fields:
-                            admin_token              (Argon2id re-hash)
-                            admin_basic_auth_hash    (bcrypt re-hash)
-                            caddy_cloudflare_dns_token
-                            fail2ban_cloudflare_firewall_token
-                            smtp_password
-                            push_installation_id
-                            push_installation_key
-                            backup_passphrase        (auto-generated)
+    --view                  View decrypted secrets read-only (no changes saved)
+    --list                  List secret key names only (no values shown)
+    --rotate FIELD          Re-collect and re-hash a single named field, then
+                            re-encrypt.  Supported fields:
+                                admin_token              (Argon2id re-hash)
+                                admin_basic_auth_hash    (bcrypt re-hash)
+                                caddy_cloudflare_dns_token
+                                fail2ban_cloudflare_firewall_token
+                                smtp_password
+                                push_installation_id
+                                push_installation_key
+                                backup_passphrase        (auto-generated)
+    --export-recovery-kit   Generate a recovery document with unencrypted secrets
 
 EDIT OPTIONS:
-    --editor EDITOR     Use specific editor (default: $EDITOR or nano)
-    --no-backup         Skip creating backup before edit
-    --help              Show this help
+    --editor EDITOR         Use specific editor (default: $EDITOR or nano)
+    --no-backup             Skip creating backup before edit
+    --help                  Show this help
 
 FEATURES:
     ✅ Automatic backup before every edit
@@ -72,6 +74,7 @@ FEATURES:
     ✅ YAML validation after editing with rollback offer
     ✅ --rotate re-invokes hashing logic from setup for password fields
     ✅ --list shows key names without decrypting values
+    ✅ Prompts to export recovery kit upon any modification
 
 EXAMPLES:
     ./edit-secrets.sh                              # Interactive edit
@@ -80,7 +83,7 @@ EXAMPLES:
     ./edit-secrets.sh --list                       # Show key names
     ./edit-secrets.sh --rotate admin_token         # Re-hash VW admin password
     ./edit-secrets.sh --rotate caddy_cloudflare_dns_token  # Replace CF token
-    ./edit-secrets.sh --no-backup --rotate smtp_password
+    ./edit-secrets.sh --export-recovery-kit        # Export a recovery document
 
 SEE ALSO:
     ./setup-secrets.sh  - First-time creation or full reconfiguration
@@ -92,26 +95,28 @@ HELP
 # ---------------------------------------------------------------------------
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --editor)    EDITOR_CMD="$2"; shift 2 ;;
-        --no-backup) SKIP_BACKUP=true; shift ;;
-        --view)      VIEW_ONLY=true; shift ;;
-        --list)      LIST_KEYS=true; shift ;;
-        --rotate)    ROTATE_FIELD="$2"; shift 2 ;;
-        --help)      show_help; exit 0 ;;
-        *)           log_error "Unknown option: $1"; show_help; exit 1 ;;
+        --editor)              EDITOR_CMD="$2"; shift 2 ;;
+        --no-backup)           SKIP_BACKUP=true; shift ;;
+        --view)                VIEW_ONLY=true; shift ;;
+        --list)                LIST_KEYS=true; shift ;;
+        --rotate)              ROTATE_FIELD="$2"; shift 2 ;;
+        --export-recovery-kit) EXPORT_RECOVERY_KIT=true; shift ;;
+        --help)                show_help; exit 0 ;;
+        *)                     log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done
 
 # ---------------------------------------------------------------------------
 # Mutual-exclusion guard
-# FIX: (( n++ )) returns exit code 1 when the result is 0, which triggers
-#      set -e and silently kills the script before main() runs.
-#      Use _mode_count=$(( _mode_count + 1 )) instead — always exit-code 0.
 # ---------------------------------------------------------------------------
 _mode_count=0
-[[ "$VIEW_ONLY"  == "true" ]] && _mode_count=$(( _mode_count + 1 ))
-[[ "$LIST_KEYS" == "true"  ]] && _mode_count=$(( _mode_count + 1 ))
-[[ -n "$ROTATE_FIELD"      ]] && _mode_count=$(( _mode_count + 1 ))
+[[ "$VIEW_ONLY" == "true"           ]] && _mode_count=$(( _mode_count + 1 ))
+[[ "$LIST_KEYS" == "true"           ]] && _mode_count=$(( _mode_count + 1 ))
+[[ -n "$ROTATE_FIELD"               ]] && _mode_count=$(( _mode_count + 1 ))
+# Note: --export-recovery-kit is treated as a mode if it's the ONLY thing passed,
+# but it can also be a flag applied to the default edit mode.
+# We will evaluate standalone export in the main() function.
+
 if [[ $_mode_count -gt 1 ]]; then
     log_error "--view, --list, and --rotate are mutually exclusive"
     exit 1
@@ -400,6 +405,9 @@ PYEOF
     secure_secrets_file
 
     log_success "Secret '$field' rotated successfully"
+
+    offer_recovery_kit_export "$EXPORT_RECOVERY_KIT"
+
     return 0
 }
 
@@ -466,6 +474,9 @@ do_edit() {
     secure_secrets_file
 
     log_success "Secrets updated successfully"
+
+    offer_recovery_kit_export "$EXPORT_RECOVERY_KIT"
+
     return 0
 }
 
@@ -476,7 +487,16 @@ main() {
     log_header "VaultWarden Secrets Editor"
 
     if ! check_prerequisites; then exit 1; fi
-    if ! validate_secrets;     then exit 1; fi
+
+    # Standalone export logic
+    if [[ "$EXPORT_RECOVERY_KIT" == "true" && "$_mode_count" -eq 0 ]]; then
+        log_info "Running standalone recovery kit export..."
+        if ! ensure_sops_env; then exit 1; fi
+        offer_recovery_kit_export "true"
+        exit 0
+    fi
+
+    if ! validate_secrets; then exit 1; fi
 
     # Backup before any write operation
     if [[ "$VIEW_ONLY" != "true" && "$LIST_KEYS" != "true" ]]; then
@@ -484,9 +504,9 @@ main() {
     fi
 
     if   [[ "$LIST_KEYS" == "true" ]]; then do_list_keys             || exit 1
-    elif [[ "$VIEW_ONLY" == "true" ]]; then do_view                   || exit 1
+    elif [[ "$VIEW_ONLY" == "true" ]]; then do_view                  || exit 1
     elif [[ -n "$ROTATE_FIELD"     ]]; then do_rotate "$ROTATE_FIELD" || exit 1
-    else                                    do_edit                   || exit 1
+    else                                    do_edit                  || exit 1
     fi
 
     exit 0
