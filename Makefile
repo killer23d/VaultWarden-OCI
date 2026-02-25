@@ -74,7 +74,7 @@ test-secrets: ## Test secrets decryption
 
 test-email: ## Test email configuration (Postfix)
 	@echo "$(BLUE)Testing email configuration...$(NC)"
-	@./simple-email-test.sh --verbose
+	@./maintenance.sh --test-email --verbose
 
 ## Service Management
 up: ## Start all services with secrets initialization
