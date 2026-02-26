@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
 # lib/backup_utils.sh - Backup utility functions for VaultWarden-OCI-NG
-# ENHANCED: Standardized error handling patterns - functions return, callers decide
-# Common backup operations with consistent error handling
 
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_BACKUP_UTILS_LIB_LOADED:-}" ]] && return 0
@@ -10,6 +8,7 @@ readonly VAULTWARDEN_BACKUP_UTILS_LIB_LOADED=1
 # --- Backup Validation Functions ---
 
 # List available backups in a directory - STANDARDIZED: Returns exit code
+# FIX [ISSUE 13]: Use stat instead of date -r for cross-platform mtime display.
 list_backups() {
     local backup_base_dir="${1:-backups}"
 
@@ -26,7 +25,7 @@ list_backups() {
 
     for backup_type in "${backup_types[@]}"; do
         local type_dir="$backup_base_dir/$backup_type"
-        
+
         if [[ -d "$type_dir" ]]; then
             local backups
             if backups=$(find "$type_dir" -name "*.age" -type f 2>/dev/null | sort); then
@@ -36,17 +35,25 @@ list_backups() {
                         local basename_file size_info age_info
                         basename_file=$(basename "$backup_file")
                         size_info=$(du -h "$backup_file" 2>/dev/null | cut -f1 || echo "unknown")
-                        age_info=$(date -r "$backup_file" "+%Y-%m-%d %H:%M" 2>/dev/null || echo "unknown")
-                        
+
+                        # FIX [ISSUE 13]: stat -c '%y' is Linux (GNU coreutils);
+                        # fall back to BSD stat -f '%Sm' for macOS compatibility.
+                        # Both are far more portable than 'date -r FILE' which is
+                        # macOS-only and silently fails on every Linux system.
+                        age_info=$(stat -c '%y' "$backup_file" 2>/dev/null \
+                            | cut -c1-16 \
+                            || stat -f '%Sm' -t '%Y-%m-%d %H:%M' "$backup_file" 2>/dev/null \
+                            || echo "unknown")
+
                         printf "  %-40s %10s  %s\n" "$basename_file" "$size_info" "$age_info"
-                        
+
                         # Show metadata if available
                         if [[ -f "$backup_file.meta" ]]; then
                             local vw_version
                             vw_version=$(grep "vaultwarden_version=" "$backup_file.meta" 2>/dev/null | cut -d= -f2 || echo "unknown")
                             printf "    └─ VaultWarden: %s\n" "$vw_version"
                         fi
-                        
+
                         found_backups=true
                     done <<< "$backups"
                     echo ""
@@ -64,6 +71,14 @@ list_backups() {
 }
 
 # Validate backup file integrity - STANDARDIZED: Returns exit code
+# FIX [ISSUE 7]: The original test piped age output to 'head -c 1 > /dev/null'.
+# Under set -euo pipefail, bash evaluates the LAST command's exit code in a
+# pipeline, which is always 0 for 'head -c 1' even when age exits non-zero
+# (i.e., decryption fails). A corrupt/wrong-key backup would silently pass.
+#
+# Fix: redirect age output directly to /dev/null and check age's own exit code,
+# OR use PIPESTATUS. We choose the direct-redirect approach as it is simpler
+# and eliminates the pipeline entirely.
 validate_backup_integrity() {
     local backup_file="$1"
     local age_key_file="${2:-secrets/keys/age-key.txt}"
@@ -83,7 +98,7 @@ validate_backup_integrity() {
     # Check file size (basic corruption detection)
     local file_size
     file_size=$(stat -c%s "$backup_file" 2>/dev/null || stat -f%z "$backup_file" 2>/dev/null || echo "0")
-    
+
     if (( file_size < 1024 )); then
         log_error "Backup file suspiciously small (${file_size} bytes)"
         return 1
@@ -93,7 +108,7 @@ validate_backup_integrity() {
     if [[ -f "$backup_file.sha256" ]]; then
         local expected_checksum
         expected_checksum=$(cat "$backup_file.sha256" 2>/dev/null)
-        
+
         if [[ -n "$expected_checksum" ]]; then
             if ! verify_sha256 "$backup_file" "$expected_checksum"; then
                 log_error "Backup file checksum verification failed"
@@ -103,9 +118,12 @@ validate_backup_integrity() {
         fi
     fi
 
-    # Test decryption (minimal - just first few bytes)
-    if ! age -d -i "$age_key_file" "$backup_file" | head -c 1 > /dev/null 2>&1; then
-        log_error "Backup file decryption test failed"
+    # FIX [ISSUE 7]: Test decryption by redirecting age output directly to
+    # /dev/null. This avoids the pipeline PIPESTATUS trap: age's own exit code
+    # is captured directly, so any decryption failure (wrong key, corrupt file,
+    # truncated header) correctly propagates as a non-zero return.
+    if ! age -d -i "$age_key_file" "$backup_file" > /dev/null 2>&1; then
+        log_error "Backup file decryption test failed (wrong key or corrupt file)"
         return 1
     fi
 
@@ -125,14 +143,14 @@ check_backup_disk_space() {
 
     local available_space_kb
     available_space_kb=$(df --output=avail "$target_dir" 2>/dev/null | tail -1)
-    
+
     if [[ -z "$available_space_kb" ]] || ! [[ "$available_space_kb" =~ ^[0-9]+$ ]]; then
         log_error "Cannot determine available disk space for: $target_dir"
         return 1
     fi
 
     local available_space_mb=$((available_space_kb / 1024))
-    
+
     if (( available_space_mb < required_space_mb )); then
         log_error "Insufficient disk space: need ${required_space_mb}MB, have ${available_space_mb}MB"
         return 1
@@ -162,14 +180,11 @@ cleanup_old_backups() {
 
     local deleted_count=0
     local old_backups
-    
-    # Find backups older than retention period
+
     if old_backups=$(find "$backup_dir" -name "*.age" -type f -mtime +$retention_days 2>/dev/null); then
         while IFS= read -r backup_file; do
             if [[ -n "$backup_file" ]]; then
                 log_debug "Removing old backup: $(basename "$backup_file")"
-                
-                # Remove backup file and associated metadata
                 rm -f "$backup_file" "$backup_file.sha256" "$backup_file.meta" 2>/dev/null
                 ((deleted_count++))
             fi
@@ -185,7 +200,7 @@ cleanup_old_backups() {
     return 0
 }
 
-# Get backup statistics - STANDARDIZED: Returns exit code  
+# Get backup statistics - STANDARDIZED: Returns exit code
 get_backup_statistics() {
     local backup_base_dir="${1:-backups}"
 
@@ -203,16 +218,16 @@ get_backup_statistics() {
 
     for backup_type in "${backup_types[@]}"; do
         local type_dir="$backup_base_dir/$backup_type"
-        
+
         if [[ -d "$type_dir" ]]; then
             local count size_bytes
             count=$(find "$type_dir" -name "*.age" -type f 2>/dev/null | wc -l)
             size_bytes=$(find "$type_dir" -name "*.age" -type f -exec stat -c%s {} + 2>/dev/null | awk '{sum+=$1} END {print sum+0}')
-            
+
             local size_mb=$((size_bytes / 1024 / 1024))
-            
+
             printf "%-10s: %3d backups, %6d MB\n" "$backup_type" "$count" "$size_mb"
-            
+
             total_backups=$((total_backups + count))
             total_size_bytes=$((total_size_bytes + size_bytes))
         else
@@ -244,20 +259,17 @@ create_backup_metadata() {
     timestamp=$(date -Iseconds)
     file_size=$(stat -c%s "$backup_file" 2>/dev/null || stat -f%z "$backup_file" 2>/dev/null || echo "0")
     hostname=$(hostname -f 2>/dev/null || hostname)
-    
-    # Calculate checksum
+
     if ! checksum=$(calculate_sha256 "$backup_file"); then
         log_warn "Could not calculate checksum for metadata"
         checksum="unavailable"
     fi
 
-    # Get VaultWarden version if possible
     local vw_version="unknown"
     if require_docker >/dev/null 2>&1; then
         vw_version=$(docker compose exec -T vaultwarden /vaultwarden --version 2>/dev/null | head -1 || echo "unknown")
     fi
 
-    # Create metadata file
     cat > "$metadata_file" <<EOF
 # VaultWarden Backup Metadata
 backup_type=$backup_type
