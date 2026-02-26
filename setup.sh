@@ -1,19 +1,24 @@
 #!/usr/bin/env bash
 # setup.sh - VaultWarden-OCI Setup Script (SECURITY HARDENED)
-#
-# FIXES APPLIED (LATEST REVISION):
-#   - CRITICAL: Fixed regex escaping (\\.) in domain and email validation
-#   - CRITICAL: Restored --dry-run guards across all phase functions
-#   - CRITICAL: Fixed literal markdown URL typo in Docker installation
-#   - HIGH: Used ERE (sed -E) for cross-platform macOS/BSD compatibility
-#   - HIGH: Fixed chown -R to use dynamic primary group instead of username
-#   - MEDIUM: Restored UFW idempotency guard to prevent duplicate rules
-#   - MEDIUM: Restored validate_ssh_config PermitRootLogin warning
-#   - MINOR: Restored high-visibility ASCII recovery banner
-#   - MINOR: Restored --use-latest awk replacement block
 
 set -euo pipefail
 set +x
+
+# =============================================================================
+# DEPENDENCY VERSION PINS
+# To pin a specific version, set the variable. Leave blank ("") to auto-resolve
+# the latest release at runtime via the GitHub API.
+#
+# Examples:
+#   SOPS_VERSION="v3.9.4"   <- pinned
+#   SOPS_VERSION=""          <- auto-resolve latest (default)
+#
+# You may also override any of these from the environment before running:
+#   SOPS_VERSION=v3.9.4 sudo ./setup.sh --domain ...
+# =============================================================================
+SOPS_VERSION="${SOPS_VERSION:-}"   # e.g. "v3.9.4" — leave blank for latest
+AGE_VERSION="${AGE_VERSION:-}"     # e.g. "v1.2.0" — leave blank for latest (only used if installing age as binary instead of apt)
+# =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR"
@@ -91,12 +96,27 @@ if [[ -z "$DOMAIN" ]] || [[ -z "$ADMIN_EMAIL" ]]; then show_help; exit 1; fi
 if ! validate_domain_secure "$DOMAIN"; then log_error "Invalid domain format"; exit 1; fi
 if ! validate_email_secure "$ADMIN_EMAIL"; then log_error "Invalid email format"; exit 1; fi
 
+# Resolve a GitHub latest release tag. Usage: resolve_github_latest OWNER/REPO
+# Returns the tag string (e.g. "v3.9.4") or exits 1 on failure.
+resolve_github_latest() {
+    local repo="$1"
+    local tag
+    tag=$(curl -fsSL "https://api.github.com/repos/${repo}/releases/latest" \
+        | grep '"tag_name"' \
+        | cut -d'"' -f4)
+    if [[ -z "$tag" ]]; then
+        log_error "Failed to resolve latest release for ${repo} — check network or set version pin at top of script"
+        return 1
+    fi
+    echo "$tag"
+}
+
 install_dependencies() {
     if [[ "$SKIP_DEPS" == "true" ]]; then return 0; fi
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would install dependencies"; return 0; fi
-    
+
     log_info "Installing system dependencies..."
-    
+
     local basic_packages=("age" "make" "nano" "rclone" "sqlite3" "jq" "ufw" "curl" "wget" "unzip" "git" "gpg" "coreutils" "haveged" "dnsutils" "rsync" "python3" "python3-argon2" "apache2-utils" "cron")
     local missing_packages=()
     for pkg in "${basic_packages[@]}"; do
@@ -129,7 +149,16 @@ install_dependencies() {
     if ! command -v sops >/dev/null 2>&1; then
         local arch; arch=$(dpkg --print-architecture)
         [[ "$arch" == "armhf" ]] && arch="arm"
-        wget -q "https://github.com/mozilla/sops/releases/download/v3.8.1/sops-v3.8.1.linux.${arch}" -O /usr/local/bin/sops || return 1
+
+        # Use pinned version if set at top of script, otherwise resolve latest.
+        local sops_ver="${SOPS_VERSION:-}"
+        if [[ -z "$sops_ver" ]]; then
+            log_info "SOPS_VERSION not pinned — resolving latest from GitHub..."
+            sops_ver=$(resolve_github_latest "getsops/sops") || return 1
+        fi
+        log_info "Installing SOPS ${sops_ver}..."
+        wget -q "https://github.com/getsops/sops/releases/download/${sops_ver}/sops-${sops_ver}.linux.${arch}" \
+            -O /usr/local/bin/sops || return 1
         chmod +x /usr/local/bin/sops || return 1
     fi
     return 0
@@ -146,26 +175,32 @@ verify_dependencies() {
 
 setup_user_permissions() {
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would configure user permissions"; return 0; fi
-    
+
     local real_user; real_user=$(get_real_user)
     id "$real_user" >/dev/null 2>&1 || return 1
     groups "$real_user" | grep -q docker || usermod -aG docker "$real_user" || return 1
-    
-    chown -R "$real_user:$(id -g -n "$real_user")" "$PROJECT_ROOT" || return 1
+
+    # Scope chown to non-secrets paths to avoid clobbering future key permissions.
+    # secrets/ is handled explicitly by setup_directories and generate_age_keys.
+    find "$PROJECT_ROOT" -maxdepth 1 \
+        ! -name 'secrets' \
+        ! -path "$PROJECT_ROOT" \
+        -exec chown -R "$real_user:$(id -g -n "$real_user")" {} \; 2>/dev/null || true
+
     return 0
 }
 
 detect_ssh_log_path() {
     local ssh_log_path="/var/log/secure"
     local os_id
-    
+
     if [[ -f /etc/os-release ]]; then
         os_id=$(grep -E '^ID=' /etc/os-release | cut -d= -f2 | tr -d '"' | tr -d "'")
         case "$os_id" in
             ol|rhel|centos|rocky|almalinux|fedora) ssh_log_path="/var/log/secure" ;;
             ubuntu|debian) ssh_log_path="/var/log/auth.log" ;;
-            *) 
-                if [[ -f "/var/log/secure" ]]; then ssh_log_path="/var/log/secure";
+            *)
+                if [[ -f "/var/log/secure" ]]; then ssh_log_path="/var/log/secure"
                 else ssh_log_path="/var/log/auth.log"; fi ;;
         esac
     fi
@@ -174,7 +209,7 @@ detect_ssh_log_path() {
 
 create_env_file() {
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would create .env file"; return 0; fi
-    
+
     local env_file="$PROJECT_ROOT/.env"
     local env_template="$PROJECT_ROOT/.env.example"
 
@@ -189,14 +224,14 @@ create_env_file() {
     local real_user; real_user=$(get_real_user)
     local user_id; user_id=$(id -u "$real_user")
     local group_id; group_id=$(id -g "$real_user")
-    local detected_ssh_log_path; detected_ssh_log_path=$(detect_ssh_log_path | tail -1)
+    local detected_ssh_log_path; detected_ssh_log_path=$(detect_ssh_log_path 2>/dev/null)
 
     local domain_with_protocol
     [[ "$DOMAIN" =~ ^https?:// ]] && domain_with_protocol="$DOMAIN" || domain_with_protocol="https://$DOMAIN"
-    
+
     local clean_domain; clean_domain=$(echo "$domain_with_protocol" | sed -E 's|https?://||; s|/.*$||')
     CLEAN_DOMAIN="$clean_domain"
-    
+
     local temp_env="$TMP_WORKDIR/env.tmp"
     awk -v domain="$domain_with_protocol" -v name="$clean_domain" -v email="$ADMIN_EMAIL" \
         -v uid="$user_id" -v gid="$group_id" -v smtp_from="noreply@$clean_domain" -v ssh_log="$detected_ssh_log_path" \
@@ -212,7 +247,7 @@ create_env_file() {
         }' "$env_file" > "$temp_env"
 
     mv "$temp_env" "$env_file" || return 1
-    
+
     if [[ "$USE_LATEST" == "true" ]]; then
         awk '{
             sub(/^VAULTWARDEN_VERSION=.*/, "VAULTWARDEN_VERSION=latest");
@@ -231,27 +266,27 @@ create_env_file() {
 
 setup_directories() {
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would setup directories"; return 0; fi
-    
+
     local real_user; real_user=$(get_real_user)
     local real_group; real_group=$(id -g -n "$real_user")
-  
+
     local dirs=("secrets" "secrets/keys" "secrets/.docker_secrets" "backups")
     for dir in "${dirs[@]}"; do
         ensure_dir "$dir" 755 || return 1
         chown "$real_user:$real_group" "$dir" || return 1
     done
-  
+
     chmod 700 "secrets" "secrets/keys" "secrets/.docker_secrets" 2>/dev/null || true
     chmod 755 "backups" 2>/dev/null || true
-  
+
     local puid; puid=$(id -u "$real_user")
     local pgid; pgid=$(id -g "$real_user")
     local project_state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
-  
+
     if ! sudo mkdir -p "${project_state_dir}"/{data,logs/{vaultwarden,caddy,fail2ban,postfix},caddy/{data,config},fail2ban}; then
         return 1
     fi
-  
+
     sudo chown -R "${puid}:${pgid}" "$project_state_dir" || return 1
     sudo chmod -R 755 "$project_state_dir" || return 1
     return 0
@@ -260,7 +295,7 @@ setup_directories() {
 check_entropy() {
     local entropy; entropy=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo "0")
     (( entropy >= ENTROPY_THRESHOLD )) && return 0
-    
+
     local waited=0
     while (( waited < ENTROPY_MAX_WAIT )); do
         sleep 5
@@ -273,7 +308,7 @@ check_entropy() {
 
 generate_age_keys() {
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would generate Age keys"; return 0; fi
-    
+
     check_entropy || return 1
     local age_key_file="secrets/keys/age-key.txt"
     if [[ -f "$age_key_file" ]] && [[ "$FORCE" != "true" ]]; then
@@ -289,7 +324,7 @@ generate_age_keys() {
 
 create_sops_config() {
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would create SOPS config"; return 0; fi
-    
+
     local sops_config=".sops.yaml"
     local age_key_file="secrets/keys/age-key.txt"
     if [[ -f "$sops_config" ]] && [[ "$FORCE" != "true" ]]; then
@@ -299,7 +334,7 @@ create_sops_config() {
     local age_public_key; age_public_key=$(get_age_public_key "$age_key_file") || return 1
     cat > "$sops_config" << EOF
 creation_rules:
-  - path_regex: .*\.yaml$
+  - path_regex: .*\\.yaml$
     age: $age_public_key
 EOF
     chown "$(get_real_user):$(id -g -n "$(get_real_user)")" "$sops_config" || return 1
@@ -308,13 +343,18 @@ EOF
 
 create_empty_secrets_structure() {
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would create secrets structure"; return 0; fi
-    
+
     local secrets_file="$PROJECT_ROOT/secrets/secrets.yaml"
     local age_key_file="$PROJECT_ROOT/secrets/keys/age-key.txt"
 
-    if [[ -f "$secrets_file" ]]; then
+    if [[ -f "$secrets_file" ]] && [[ "$FORCE" != "true" ]]; then
         export SOPS_AGE_KEY_FILE="$age_key_file"
-        sops -d "$secrets_file" >/dev/null 2>&1 && return 0 || return 1
+        if sops -d "$secrets_file" >/dev/null 2>&1; then
+            return 0
+        else
+            log_error "Existing secrets.yaml is unreadable with current key. Use --force to overwrite."
+            return 1
+        fi
     fi
 
     local temp_secrets; temp_secrets=$(mktemp -p "$TMP_WORKDIR" vwsecrets.XXXXXXXXXX.yaml) || return 1
@@ -337,6 +377,8 @@ EOF
 }
 
 setup_secrets_interactively() {
+    if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would configure secrets interactively"; return 0; fi
+
     chmod +x "$PROJECT_ROOT/setup-secrets.sh" 2>/dev/null || true
     local secrets_configured=false
     if [[ -f "secrets/secrets.yaml" ]]; then
@@ -350,7 +392,7 @@ setup_secrets_interactively() {
 
     if [[ "$secrets_configured" == "true" && "$FORCE" != "true" ]]; then
         [[ "$AUTO_MODE" == "true" ]] && return 0
-        read -p "Secrets already configured. Reconfigure? (yes/no): " reconfigure
+        read -r -p "Secrets already configured. Reconfigure? (yes/no): " reconfigure
         [[ "$reconfigure" != "yes" ]] && return 0
     fi
 
@@ -358,14 +400,14 @@ setup_secrets_interactively() {
         ./setup-secrets.sh --auto --skip-optional || return 1
         return 0
     else
-        read -p "Configure secrets interactively? (yes/no): " do_setup
+        read -r -p "Configure secrets interactively? (yes/no): " do_setup
         [[ "$do_setup" == "yes" ]] && ./setup-secrets.sh || return 0
     fi
 }
 
 create_docker_compose() {
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would create docker-compose.yml"; return 0; fi
-    
+
     local compose_file="$PROJECT_ROOT/docker-compose.yml"
     local compose_template="$PROJECT_ROOT/docker-compose.yml.example"
 
@@ -381,7 +423,7 @@ create_docker_compose() {
 
 set_script_permissions() {
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would set script permissions"; return 0; fi
-    
+
     local real_user; real_user=$(get_real_user)
     local real_group; real_group=$(id -g -n "$real_user")
 
@@ -392,7 +434,7 @@ set_script_permissions() {
             chown "$real_user:$real_group" "$script" 2>/dev/null || true
         fi
     done
-    
+
     if [[ -d "lib" ]]; then
         find "lib" -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
         find "lib" -name "*.sh" -exec chown "$real_user:$real_group" {} \; 2>/dev/null || true
@@ -402,29 +444,32 @@ set_script_permissions() {
 
 setup_firewall() {
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would configure firewall"; return 0; fi
-    
-    if ufw status | grep -q "Status: active"; then
-        if ufw status | grep -q "80/tcp" && ufw status | grep -q "443/tcp"; then
-            log_success "Firewall already configured and active"
-            return 0
-        fi
-    fi
 
     local ssh_port
     ssh_port=$(awk '/^Port/ {print $2; exit}' /etc/ssh/sshd_config 2>/dev/null)
     ssh_port=${ssh_port:-22}
-    
+
+    # Idempotency: only skip if ALL three required rules are already present and active.
+    # Checking SSH port here is critical — returning early without it would lock the admin out.
+    if ufw status | grep -q "Status: active" && \
+       ufw status | grep -q "80/tcp" && \
+       ufw status | grep -q "443/tcp" && \
+       ufw status | grep -q "${ssh_port}/tcp"; then
+        log_success "Firewall already configured and active"
+        return 0
+    fi
+
     ufw allow "${ssh_port}/tcp"
     ufw allow 80/tcp
     ufw allow 443/tcp
-    
+
     ufw status | grep -q "Status: active" || echo "y" | ufw enable
     return 0
 }
 
 validate_ssh_config() {
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would validate SSH config"; return 0; fi
-    
+
     if grep -q "^PermitRootLogin yes" /etc/ssh/sshd_config 2>/dev/null; then
         log_warn "SSH root login is enabled - consider disabling"
     fi
@@ -433,7 +478,7 @@ validate_ssh_config() {
 
 cleanup_setup_deps() {
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would cleanup dependencies"; return 0; fi
-    
+
     apt-get autoremove -y >/dev/null 2>&1 || true
     return 0
 }
@@ -460,7 +505,7 @@ execute_phase() {
 show_post_install_summary() {
     local mode="${1:-interactive}"
     [[ "$mode" == "interactive" ]] && clear
-    
+
     echo -e "${COLOR_RED}"
     cat << "EOF"
     ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !
@@ -470,7 +515,7 @@ show_post_install_summary() {
     ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !
 EOF
     echo -e "${COLOR_RESET}"
-    
+
     local age_pub_key=""
     if [[ -f "secrets/keys/age-key.txt" ]]; then
         age_pub_key=$(grep "public key" "secrets/keys/age-key.txt" | cut -d: -f2 | tr -d ' ' || echo "MISSING")
@@ -496,7 +541,14 @@ EOF
 main() {
     log_header "VaultWarden-OCI Setup - Security Hardened Edition"
     if ! is_root; then log_error "Must run as root."; exit 1; fi
-    
+
+    # Log version pin status for transparency
+    if [[ -n "${SOPS_VERSION:-}" ]]; then
+        log_info "SOPS version pinned: ${SOPS_VERSION}"
+    else
+        log_info "SOPS version: will resolve latest from GitHub at install time"
+    fi
+
     local setup_phases=(
         "install_dependencies:Dependency Installation:true"
         "verify_dependencies:Dependency Verification:true"
@@ -533,7 +585,7 @@ main() {
     fi
 
     if [[ "$AUTO_MODE" != "true" ]]; then
-        read -p "Press Enter to view CRITICAL recovery information..."
+        read -r -p "Press Enter to view CRITICAL recovery information..."
         show_post_install_summary "interactive"
     else
         show_post_install_summary "auto"
