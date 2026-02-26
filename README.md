@@ -13,7 +13,7 @@ This is a **template-based, hardened deployment** designed specifically for smal
 - **Cloudflare-only blocking** for web traffic (iptables removed from proxied services)
 - **Robust security** with comprehensive Cloudflare integration and encrypted secrets
 - **Simple operations** with comprehensive automation and health monitoring
-- **Emergency recovery** with break-glass admin access for critical situations
+- **Emergency recovery** with break-glass admin access and automatic rollback
 - **Quality of life improvements** with Makefile shortcuts and interactive tools
 - **Clear documentation** focused on practical deployment and maintenance
 
@@ -22,7 +22,7 @@ This is a **template-based, hardened deployment** designed specifically for smal
 - **Template-Based Configuration**: All config files generated from maintainable `.example` templates
 - **Enhanced Security**: Cloudflare-only blocking for web traffic, local iptables only for SSH
 - **Resource Management**: Container limits optimized for 6GB systems with balanced allocation
-- **Core Scripts**: 13 essential scripts for complete lifecycle management
+- **Core Scripts**: 14 essential scripts for complete lifecycle management
 - **Unified Libraries**: 5 shared libraries (common, Docker, crypto, security, backup_utils) for consistent functionality
 - **Dynamic DNS**: Automatic Cloudflare DNS record updates
 - **Edge Security**: Cloudflare proxy with Fail2ban integration for global IP blocking
@@ -33,6 +33,8 @@ This is a **template-based, hardened deployment** designed specifically for smal
 - **Interactive Tools**: Makefile shortcuts and interactive backup/restore functionality
 - **Containerized Email**: Postfix sidecar for reliable email delivery without host dependencies
 - **Self-Healing**: Health checks with auto-recovery for unhealthy containers
+- **Dependency Version Pinning**: Optional version pins for SOPS and age at the top of `setup.sh`
+- **Automatic Rollback**: `update.sh` automatically attempts rollback via `restore.sh` if a post-update health check fails
 
 ## ⚡ Quick Start (15 Minutes)
 
@@ -78,6 +80,29 @@ sudo ./cron-setup.sh --install
 ```
 
 **🎉 Your VaultWarden is now operational at https://vault.yourdomain.com**
+
+## 📌 Dependency Version Pinning
+
+By default `setup.sh` auto-resolves the latest release of each external tool (SOPS, age) from the GitHub API at install time. If you need reproducible, auditable deployments you can **pin specific versions** at the top of `setup.sh`:
+
+```bash
+# At the top of setup.sh — edit before running setup:
+SOPS_VERSION="v3.9.4"   # pinned — always installs this exact version
+AGE_VERSION=""           # blank  — auto-resolves latest at runtime
+```
+
+You can also override pins at runtime without editing the file:
+
+```bash
+SOPS_VERSION=v3.9.4 sudo ./setup.sh --domain vault.yourdomain.com --email admin@yourdomain.com
+```
+
+| Variable | Default | Example pin |
+| :-- | :-- | :-- |
+| `SOPS_VERSION` | `""` (latest) | `"v3.9.4"` |
+| `AGE_VERSION` | `""` (latest) | `"v1.2.0"` |
+
+> **Note:** `age` is installed via `apt` by default. `AGE_VERSION` only applies if installing age as a standalone binary instead.
 
 ## 🛠️ Template-Based Architecture
 
@@ -139,7 +164,7 @@ All configuration files are managed through templates for easier maintenance:
 ┌─────────────────────────────────────────┐
 │           Management Layer              │
 │  ┌──────────┐  ┌──────────────┐        │
-│  │13 Scripts│  │5 Libraries   │        │ ── Encrypted Secrets (Age + SOPS)
+│  │14 Scripts│  │5 Libraries   │        │ ── Encrypted Secrets (Age + SOPS)
 │  │(Ops)     │  │(Common+Utils)│        │
 │  └──────────┘  └──────────────┘        │
 └─────────────────────────────────────────┘
@@ -158,10 +183,11 @@ All configuration files are managed through templates for easier maintenance:
       ↓
 ┌─────────────────────────────────────────┐
 │         Emergency Recovery Layer        │
-│  ┌──────────────┐                       │
-│  │Break-Glass   │ ← OCI Serial Console  │ ── Emergency Access Path
-│  │Admin Account │   Access              │
-│  └──────────────┘                       │
+│  ┌──────────────┐  ┌─────────────────┐  │
+│  │Break-Glass   │  │Auto-Rollback    │  │
+│  │Admin Account │  │(update → restore│  │ ── Emergency Access & Recovery
+│  │(OCI Console) │  │ on health fail) │  │
+│  └──────────────┘  └─────────────────┘  │
 └─────────────────────────────────────────┘
 ```
 
@@ -171,18 +197,18 @@ All configuration files are managed through templates for easier maintenance:
 
 | Script | Purpose | Key Features | Frequency |
 | :-- | :-- | :-- | :-- |
-| `./setup.sh` | One-time system setup | Template-based config generation, UFW validation | Once |
+| `./setup.sh` | One-time system setup | Template-based config generation, UFW validation, **optional dependency version pinning** | Once |
 | `./startup.sh` | Start/stop/restart services | **Secure secrets (umask 077)**, log perm fixes, sudo-aware health check | As needed |
 | `./health.sh` | System health monitoring | **Auto-recovery (`--auto-recover`)**, sudo-aware backup verification | Automated |
 | `./backup.sh` | Create encrypted backups | Atomic operations, integrity verification, full verification mode | Daily (automated) |
-| `./restore.sh` | Restore from encrypted backups | Interactive selection, validation | Emergency |
+| `./restore.sh` | Restore from encrypted backups | Interactive selection, validation, **`--latest` flag for automated rollback** | Emergency |
 
 ### Configuration & Maintenance
 
 | Script | Purpose | Key Features | Frequency |
 | :-- | :-- | :-- | :-- |
 | `./edit-secrets.sh` | Secure secrets management | Enhanced privacy, secure environment handling | Initial + changes |
-| `./update.sh` | Update containers/system packages | Automated backup before updates | Weekly (automated) |
+| `./update.sh` | Update containers/system packages | Automated backup before updates, **configurable stabilization wait (`POST_UPDATE_WAIT_SECONDS`)**, **automatic rollback on health failure** | Weekly (automated) |
 | `./maintenance.sh` | System cleanup, optimization, DNS update, and on-demand DB/email maintenance | Safe database operations, comprehensive cleanup, unified sub-commands | Monthly (automated) |
 | `./cron-setup.sh` | Configure automation | Secure privilege management, validation | Once |
 
@@ -199,6 +225,34 @@ All configuration files are managed through templates for easier maintenance:
 | Script | Purpose | Key Features | Frequency |
 | :-- | :-- | :-- | :-- |
 | `./maintenance.sh --test-email` | Test email configuration | Tests Postfix container, validates SMTP relay, end-to-end delivery check | Setup + troubleshooting |
+
+## 🔄 Update & Rollback Behaviour
+
+`update.sh` runs a fully phased, safe update cycle:
+
+```
+Phase 1: Pre-Update Preparation
+  ├── Pre-update health check (non-fatal — fresh systems always show warnings)
+  └── Create full backup  ← FATAL if this fails; update is aborted
+
+Phase 2: Perform Updates
+  ├── System packages (--system flag required)
+  └── Container image pull
+
+Phase 3: Post-Update Restart and Verification
+  ├── Restart services (./startup.sh --force)
+  ├── Wait POST_UPDATE_WAIT_SECONDS (default: 30, configurable)
+  ├── Post-update health check
+  └── On health failure → automatic rollback via ./restore.sh --latest --type full --force --no-backup
+
+Phase 4: Summary
+  └── Exit 0 (success) | 1 (critical failure) | 2 (health issues)
+```
+
+**Key behaviours:**
+- If the container **pull fails**, services are left running on their old images and no restart is attempted — this is reported as "update unavailable", not "critical failure"
+- If the post-update **health check fails**, rollback is attempted automatically before exiting
+- `POST_UPDATE_WAIT_SECONDS` can be increased for slower OCI ARM instances: `POST_UPDATE_WAIT_SECONDS=60 ./update.sh`
 
 ## 🚀 Makefile Quick Reference
 
@@ -270,6 +324,18 @@ make shell SERVICE=caddy # Open shell in specific container
 
 ## 🔧 Enhanced Security Features
 
+### Script Hardening (Latest Revision)
+
+All scripts in this project have been hardened with the following guarantees:
+
+- **`set -euo pipefail`** throughout — unset variables and failing pipelines are fatal
+- **`if`-guarded function calls** — functions return exit codes; `main()` decides the exit strategy; `set -e` never fires unexpectedly
+- **`printf` for all summary output** — `echo -e` with `\\n` sequences replaced everywhere to prevent backslash misinterpretation
+- **`read -r`** on all interactive prompts — backslash sequences in user input are never silently consumed
+- **`--force` flag contract** — all scripts call `./startup.sh --force` (the confirmed supported flag); the invalid `--force-restart` flag has been removed everywhere
+- **Verified backup file resolution** — `restore.sh` sorts by modification time (`find -printf '%T@'`), not lexicographic filename order, to reliably find the newest backup regardless of filename format
+- **Registered cleanup registry** — temp files and directories are tracked in a `CLEANUP_DIRS`/`CLEANUP_FILES` array and cleaned up via a single `trap … EXIT` handler, preventing silent trap overwrites
+
 ### Current Security Improvements
 
 - **Cloudflare-Only Web Blocking**:
@@ -316,7 +382,7 @@ make shell SERVICE=caddy # Open shell in specific container
 - **Rate Limiting**: API and admin endpoint protection with forensic logging
 - **Admin Protection**: Basic authentication with bcrypt hashing
 - **Container Security**: Non-root execution, capability restrictions, resource constraints
-- **Emergency Recovery**: Secure break-glass admin access
+- **Emergency Recovery**: Secure break-glass admin access + automatic rollback on failed updates
 
 ## 📦 Backup & Recovery
 
@@ -362,12 +428,26 @@ make list-backups             # List backups
 # Interactive restore (recommended)
 ./restore.sh
 
-# Or restore specific backup file
+# Restore latest backup automatically (used by update.sh rollback)
+./restore.sh --latest --force --no-backup
+
+# Restore latest backup of a specific type
+./restore.sh --latest --type full --force
+
+# Restore a specific backup file
 ./restore.sh --file /path/to/backup-file.age
 
 # Using Makefile
 make restore                   # Interactive restore
 ```
+
+#### restore.sh Exit Codes
+
+| Code | Meaning |
+| :-- | :-- |
+| `0` | Restore completed successfully, all health checks passed |
+| `1` | Restore failed or critical phase error |
+| `2` | Restore completed but post-restore health check reported issues |
 
 ## 🔧 Configuration
 
@@ -443,7 +523,7 @@ nano .env.example               # For new environment variables
 sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.com
 
 # Restart to apply changes
-./startup.sh --force-restart    # Apply changes
+./startup.sh --force    # Apply changes
 # Or use: make restart
 ```
 
@@ -467,7 +547,7 @@ docker compose config
 # Or: make test-config
 
 # Force restart with fresh configuration
-./startup.sh --force-restart
+./startup.sh --force
 # Or: make restart
 ```
 
@@ -482,6 +562,20 @@ sudo ./setup.sh --force --domain your-domain.com --email your-email@domain.com
 
 # Check for template syntax issues
 cat docker-compose.yml.example | grep -n "platform:\|linux/arm64"
+```
+
+**Update Fails or Service Unhealthy After Update**:
+
+```bash
+# update.sh will attempt automatic rollback if post-update health fails.
+# If manual rollback is needed:
+./restore.sh --latest --type full --force --no-backup
+
+# To increase stabilization wait time on slow instances:
+POST_UPDATE_WAIT_SECONDS=60 ./update.sh
+
+# Preview what would be updated without making changes:
+./update.sh --dry-run --system
 ```
 
 **Email Issues**:
@@ -557,6 +651,7 @@ docker compose exec fail2ban fail2ban-regex /var/log/vaultwarden/vaultwarden.log
 ### During Initial Setup
 
 - ✅ Use template-based setup: `./setup.sh` (not manual file editing)
+- ✅ Pin dependency versions in `setup.sh` if you need reproducible deployments
 - ✅ Log out and log back in after `setup.sh` to apply docker group membership
 - ✅ Configure break-glass admin: `./create-breakglass-admin.sh` or `make breakglass-create`
 - ✅ Test OCI serial console access (verify it works)
@@ -576,6 +671,7 @@ docker compose exec fail2ban fail2ban-regex /var/log/vaultwarden/vaultwarden.log
 - ✅ Review container resource usage periodically
 - ✅ Test email notifications regularly: `make test-email`
 - ✅ Understand Cloudflare-only blocking for web traffic (iptables removed)
+- ✅ Review update.sh exit codes in cron output (0=success, 1=failure, 2=health issues)
 
 ### Template Security
 
