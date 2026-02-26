@@ -330,7 +330,7 @@ All scripts in this project have been hardened with the following guarantees:
 
 - **`set -euo pipefail`** throughout — unset variables and failing pipelines are fatal
 - **`if`-guarded function calls** — functions return exit codes; `main()` decides the exit strategy; `set -e` never fires unexpectedly
-- **`printf` for all summary output** — `echo -e` with `\\n` sequences replaced everywhere to prevent backslash misinterpretation
+- **`printf` for all summary output** — `echo -e` with `\n` sequences replaced everywhere to prevent backslash misinterpretation
 - **`read -r`** on all interactive prompts — backslash sequences in user input are never silently consumed
 - **`--force` flag contract** — all scripts call `./startup.sh --force` (the confirmed supported flag); the invalid `--force-restart` flag has been removed everywhere
 - **Verified backup file resolution** — `restore.sh` sorts by modification time (`find -printf '%T@'`), not lexicographic filename order, to reliably find the newest backup regardless of filename format
@@ -451,24 +451,32 @@ make restore                   # Interactive restore
 
 ## 🔧 Configuration
 
-### Template-Based Configuration
+### 1. Mandatory Pre-Flight Configuration
 
-1. **Initial Setup** (uses templates):
+#### OCI VCN Security Lists (Opening the Firewall)
+Even though `setup.sh` configures the local Ubuntu `ufw` firewall automatically, Oracle Cloud blocks all incoming traffic by default at the virtual network level. You must open ports 80 and 443 in the OCI Web Console:
+1. Go to **Compute** → **Instances** → Click your instance.
+2. Click on the **Subnet** linked under "Primary VNIC".
+3. Click the **Default Security List** for that subnet.
+4. Add two **Ingress Rules**:
+   - Source: `0.0.0.0/0`, Protocol: `TCP`, Destination Port: `80`
+   - Source: `0.0.0.0/0`, Protocol: `TCP`, Destination Port: `443`
+
+#### Cloudflare Staging (Grey Cloud First)
+Because Caddy needs to provision a Let's Encrypt certificate during its very first boot, it must be able to solve the HTTP challenge. 
+- During initial setup, ensure your DNS record in Cloudflare is set to **DNS Only (Grey Cloud)**.
+- *After* `make start` runs successfully and you can access your vault, you can switch the record to **Proxied (Orange Cloud)** and change your SSL/TLS encryption mode to **Full (Strict)**.
+
+### 2. Template-Based Configuration
+
+**Initial Setup** (uses templates):
 
 ```bash
 # Setup copies and populates templates
 sudo ./setup.sh --domain vault.yourdomain.com --email admin@yourdomain.com
 ```
 
-2. **Cloudflare Setup**:
-
-```bash
-# Create two API tokens at https://dash.cloudflare.com/profile/api-tokens
-# Token 1: DNS (Zone:DNS:Edit + Zone:Zone:Read for your domain)
-# Token 2: Firewall (Zone:Firewall Services:Edit for your domain)
-```
-
-3. **Environment Configuration** (.env):
+**Environment Configuration** (.env):
 
 ```bash
 # Generated from .env.example, then customize:
@@ -476,33 +484,47 @@ nano .env
 # Set: CLOUDFLARE_ZONE_ID, RCLONE_REMOTE_NAME, etc.
 ```
 
-4. **Secrets Configuration**:
+### 3. Secrets & API Tokens
 
+**Cloudflare Setup**:
+Create two API tokens at https://dash.cloudflare.com/profile/api-tokens
+- **Token 1: DNS** (Zone:DNS:Edit + Zone:Zone:Read for your domain)
+- **Token 2: Firewall** (Zone:Firewall Services:Edit for your domain)
+
+**Secrets Configuration**:
 ```bash
 # Securely edit secrets
 ./edit-secrets.sh
-# Set: admin_basic_auth_hash, caddy_cloudflare_dns_token, fail2ban_cloudflare_firewall_token
-# Generate bcrypt hash: docker run --rm -it ghcr.io/caddybuilds/caddy-cloudflare:latest caddy hash-password
 ```
+You must configure:
+- `admin_basic_auth_hash` (Generate via: `docker run --rm -it ghcr.io/caddybuilds/caddy-cloudflare:latest caddy hash-password`)
+- `caddy_cloudflare_dns_token` (Token 1 from above)
+- `fail2ban_cloudflare_firewall_token` (Token 2 from above. **Mandatory** for edge blocking)
 
-5. **Email Configuration**:
+> **Fail2Ban Edge Token Wiring:** Because all web traffic arrives via the Cloudflare proxy, Fail2Ban cannot use local `iptables` to block attackers. It must push blocks directly to the Cloudflare Edge WAF. Supplying your `fail2ban_cloudflare_firewall_token` and `CLOUDFLARE_ZONE_ID` (in `.env`) automatically wires the `action.d/cloudflare-apiv4.conf` jail to drop malicious IPs globally.
 
+### 4. Email Configuration
+
+Email uses a containerized Postfix relay (no host mail dependencies).
+Configure SMTP relay settings in `.env`:
 ```bash
-# Email uses a containerized Postfix relay (no host mail dependencies).
-# Configure SMTP relay settings in .env:
 nano .env
 # Set: SMTP_HOST, SMTP_PORT, SMTP_USERNAME, ALLOWED_SENDER_DOMAINS, etc.
+```
 
-# Set SMTP password in secrets:
+Set SMTP password in secrets:
+```bash
 ./edit-secrets.sh
 # Set: smtp_password
+```
 
-# Test email functionality:
+Test email functionality:
+```bash
 ./maintenance.sh --test-email --verbose
 # Or use Makefile: make test-email
 ```
 
-6. **Emergency Access Setup** (Recommended):
+### 5. Emergency Access Setup (Recommended)
 
 ```bash
 ./create-breakglass-admin.sh
