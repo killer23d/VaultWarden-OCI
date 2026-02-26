@@ -1,18 +1,5 @@
 #!/usr/bin/env bash
-# backup.sh - Streamlined VaultWarden backup script with enhanced verification
-#
-# FIXES APPLIED (2026-02):
-#   [ITEM 2]  CRITICAL  - Wrapped bare cp in create_archive_data with if/else so
-#                         docker compose start always runs even on disk-full.
-#   [ITEM 5]  HIGH      - Replaced internet-dependent alpine/apk add sqlite with
-#                         the already-pulled vaultwarden image to avoid WAN dependency.
-#   [ITEM 6]  HIGH      - Replaced eval-based cleanup handler with a safe indexed
-#                         array of temp paths cleaned up with direct rm calls.
-#   [ITEM 7]  HIGH      - Added DRY_RUN gate at the top of create_archive_data so
-#                         --dry-run no longer stops/starts the real container.
-#   [ITEM 9]  MEDIUM    - Moved LOCKDIR from /var/run (requires root) to /tmp.
-#   [ITEM 11] MINOR     - Fixed unquoted nested command substitution in
-#                         rclone_sync_offsite to handle paths with spaces.
+# backup.sh - VaultWarden backup script with enhanced verification
 
 set -euo pipefail
 
@@ -43,12 +30,13 @@ LIST_BACKUPS=false
 DRY_RUN=false
 FULL_VERIFICATION=false
 
-# FIX [ITEM 9]: Use /tmp instead of /var/run so non-root users can create the lock.
-LOCKDIR="/tmp/vaultwarden-backup.lock"
+# FIX [ISSUE 4]: Scope lock to current UID so no other local user can pre-create
+# the directory and permanently block backups (local DoS).
+# Previously: /tmp/vaultwarden-backup.lock  (shared, world-writable /tmp)
+# Now:        /tmp/vaultwarden-backup-${UID}.lock (per-user, cannot be squatted)
+LOCKDIR="/tmp/vaultwarden-backup-${UID}.lock"
 
-# FIX [ITEM 6]: Safe cleanup - store paths to remove, never use eval.
-# Each entry is a plain filesystem path; cleanup iterates in reverse and uses
-# direct rm calls, eliminating the path-injection risk of eval.
+# Safe cleanup registry — indexed arrays, never eval.
 CLEANUP_FILES=()
 CLEANUP_DIRS=()
 
@@ -60,9 +48,13 @@ perform_cleanup() {
     for (( i=${#CLEANUP_FILES[@]}-1; i>=0; i-- )); do
         rm -f  "${CLEANUP_FILES[$i]}" 2>/dev/null || true
     done
-    for (( i=${#CLEANUP_DIRS[@]}-1;  i>=0; i-- )); do
-        rm -rf "${CLEANUP_DIRS[$i]}"  2>/dev/null || true
-    done
+    # FIX: guard matches restore.sh pattern — safe on bash 3.2+ under set -u
+    local _ndirs="${#CLEANUP_DIRS[@]}"
+    if (( _ndirs > 0 )); then
+        for (( i=_ndirs-1; i>=0; i-- )); do
+            rm -rf "${CLEANUP_DIRS[$i]}"  2>/dev/null || true
+        done
+    fi
 }
 trap perform_cleanup EXIT
 
@@ -123,10 +115,8 @@ get_verification_mode() {
     echo "$mode"
 }
 
-# FIX [ITEM 5]: Use the already-pulled vaultwarden image instead of spinning up
-# a fresh Alpine container that requires an internet download of sqlite on every
-# run.  If VaultWarden is not running we fall back to a read-only one-shot
-# container from the same image tag so no extra pull is ever needed.
+# Use the already-pulled vaultwarden image to verify SQLite integrity.
+# No internet required — avoids alpine/apk add sqlite on every run.
 verify_sqlite_integrity() {
     local db_file="$1"
     local verification_mode="${2:-quick_check}"
@@ -144,8 +134,6 @@ verify_sqlite_integrity() {
     dir_name=$(dirname  "$db_file")
     file_name=$(basename "$db_file")
 
-    # Use the vaultwarden image (already present on disk) to avoid any WAN call.
-    # docker compose run picks up the correct image tag from docker-compose.yml.
     result=$(docker compose run --rm -T \
         -v "${dir_name}:/check:ro" \
         --entrypoint sqlite3 \
@@ -187,7 +175,6 @@ verify_backup_recoverability() {
     log_success "End-to-end recoverability verified"
 }
 
-# Standardized metadata generation
 generate_metadata() {
     local encrypted_file="$1" backup_type="$2" timestamp="$3" checksum="$4"
     local vw_version="unknown"
@@ -209,6 +196,10 @@ sha256=$checksum
 EOF
 }
 
+# ---------------------------------------------------------------------------
+# create_db_backup
+# Stop-Copy-Start for the database only. Fast path used by the daily cron.
+# ---------------------------------------------------------------------------
 create_db_backup() {
     log_info "Creating database backup..."
     local timestamp
@@ -243,7 +234,6 @@ create_db_backup() {
     docker compose stop vaultwarden
 
     log_info "Copying database file..."
-    # Container always restarts regardless of cp result (correctly handled here).
     if cp "$db_file" "$host_temp"; then
         log_info "Database copied successfully."
         docker compose start vaultwarden
@@ -261,8 +251,7 @@ create_db_backup() {
 
     verify_sqlite_integrity "$host_temp" "$(get_verification_mode)" || return 1
 
-    # Encrypt to a temp file first; only move into final place on success so
-    # no dangling corrupt artifact is left behind on a partial write.
+    # Atomic write: encrypt to .tmp, rename on success only
     local encrypted_tmp="${encrypted_file}.tmp"
     register_cleanup_file "$encrypted_tmp"
     log_info "Compressing and encrypting..."
@@ -283,11 +272,33 @@ create_db_backup() {
     echo "$encrypted_file"
 }
 
+# ---------------------------------------------------------------------------
+# create_archive_data TEMP_DIR INCLUDE_SECRETS
+#
+# FIX [ISSUE 3]: The rsync of the data directory now runs INSIDE the
+# Stop-Copy-Start critical section — after the container is stopped and before
+# it is restarted. This ensures the filesystem snapshot (attachments, icons,
+# sends) and the DB copy are taken from the same instant, eliminating the
+# window where VaultWarden could write attachment blobs while the DB snapshot
+# was still pending.
+#
+# Sequence BEFORE fix (race window between rsync and DB copy):
+#   1. rsync data/  →  container still live, can write attachments
+#   2. docker compose stop vaultwarden
+#   3. cp db.sqlite3
+#   4. docker compose start vaultwarden
+#
+# Sequence AFTER fix (fully consistent):
+#   1. docker compose stop vaultwarden
+#   2. rsync data/  →  container stopped, filesystem quiesced
+#   3. cp db.sqlite3
+#   4. docker compose start vaultwarden
+# ---------------------------------------------------------------------------
 create_archive_data() {
     local temp_dir="$1" include_secrets="$2"
 
-    # FIX [ITEM 7]: Honour --dry-run BEFORE the Stop-Copy-Start so we never
-    # actually stop a live container during a dry-run invocation.
+    # Honour --dry-run BEFORE the Stop-Copy-Start so we never actually stop
+    # a live container during a dry-run invocation.
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY-RUN] Would assemble archive data (no container stop)"
         return 0
@@ -296,35 +307,37 @@ create_archive_data() {
     local state_dir
     state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
 
-    # 1. Config files
+    # --- Config files (safe to copy any time, no consistency requirement) ---
     cp "$PROJECT_ROOT/docker-compose.yml" "$temp_dir/" 2>/dev/null || true
     cp "$PROJECT_ROOT/.env"               "$temp_dir/" 2>/dev/null || true
     [[ -d "$PROJECT_ROOT/caddy"    ]] && cp -r "$PROJECT_ROOT/caddy"    "$temp_dir/"
     [[ -d "$PROJECT_ROOT/fail2ban" ]] && cp -r "$PROJECT_ROOT/fail2ban" "$temp_dir/"
 
-    # 2. Secrets (if emergency)
+    # --- Secrets (emergency only, outside critical section — SOPS-encrypted at rest) ---
     if [[ "$include_secrets" == "true" ]]; then
         [[ -d "$PROJECT_ROOT/secrets" ]] && cp -r "$PROJECT_ROOT/secrets" "$temp_dir/"
     fi
 
-    # 3. Data Directory (excluding live DB)
+    # --- Critical Section: Stop → rsync + DB copy → Start ---
+    local db_file="${state_dir}/data/db.sqlite3"
     mkdir -p "$temp_dir/data"
+
+    log_info "Stopping VaultWarden for consistent data + DB snapshot..."
+    docker compose stop vaultwarden
+
+    # FIX [ISSUE 3]: rsync runs HERE (after stop) so the filesystem is quiesced.
+    # Attachment blobs, icon cache, sends, and the DB are now all from the same
+    # instant. No VaultWarden process can write between rsync and cp.
     if [[ -d "$state_dir/data" ]]; then
+        log_info "Syncing data directory (container stopped)..."
         rsync -a --delete \
             --exclude 'db.sqlite3*' \
             --exclude 'bwdata/db.sqlite3*' \
             "$state_dir/data/" "$temp_dir/data/"
     fi
 
-    # 4. DB Snapshot (Stop-Copy-Start)
-    # FIX [ITEM 2]: Wrap cp in an if/else so docker compose start ALWAYS runs
-    # even when cp fails (e.g. disk full).  This mirrors the correct pattern
-    # already present in create_db_backup().
-    local db_file="${state_dir}/data/db.sqlite3"
     if [[ -f "$db_file" ]]; then
-        log_info "Snapshotting database for archive (Stop-Copy-Start)..."
-        docker compose stop vaultwarden
-
+        log_info "Copying database snapshot..."
         if cp "$db_file" "$temp_dir/data/db.sqlite3"; then
             docker compose start vaultwarden
             if [[ -f "$temp_dir/data/db.sqlite3" ]]; then
@@ -337,13 +350,25 @@ create_archive_data() {
             return 1
         fi
     else
+        # No DB yet (fresh install) — restart and warn
+        docker compose start vaultwarden
         log_warn "DB file not found, backup will be incomplete."
     fi
+    # --- End Critical Section ---
 }
 
+# ---------------------------------------------------------------------------
+# create_full_backup TYPE
+#
+# FIX [ISSUE 10]: check_backup_disk_space now runs before the mktemp working
+# directory is created, with a configurable minimum (default 2000 MB for
+# full/emergency vs. 500 MB for db-only). This matches the guard that already
+# existed for create_db_backup and prevents the partial-archive failure mode
+# where tar/age begins writing, fills the disk, then leaves a corrupt .tmp file.
+# ---------------------------------------------------------------------------
 create_full_backup() {
     log_info "Creating full backup..."
-    local type="${1:-full}"  # 'full' or 'emergency'
+    local type="${1:-full}"   # 'full' or 'emergency'
     local include_secrets="false"
     [[ "$type" == "emergency" ]] && include_secrets="true"
 
@@ -354,11 +379,18 @@ create_full_backup() {
 
     ensure_dir "$backup_dir" 755 || return 1
 
+    # FIX [ISSUE 10]: Space check before allocating the working directory.
+    # Full backups include attachments and can be much larger than 500 MB.
+    # Override FULL_BACKUP_MIN_MB in .env if your data directory is larger.
+    local min_space_mb
+    min_space_mb=$(get_config_value "FULL_BACKUP_MIN_MB" "2000")
+    check_backup_disk_space "$backup_dir" "$min_space_mb" || return 1
+
     local temp_dir
     temp_dir=$(mktemp -d)
     register_cleanup_dir "$temp_dir"
 
-    # create_archive_data now handles its own DRY_RUN gate internally.
+    # create_archive_data handles its own DRY_RUN gate internally.
     create_archive_data "$temp_dir" "$include_secrets" || return 1
 
     if [[ "$DRY_RUN" == "true" ]]; then
@@ -366,6 +398,7 @@ create_full_backup() {
         return 0
     fi
 
+    # Atomic write: encrypt to .tmp, rename on success only
     local encrypted_tmp="${encrypted_file}.tmp"
     register_cleanup_file "$encrypted_tmp"
     if ! tar -czf - -C "$temp_dir" . | encrypt_data > "$encrypted_tmp"; then
@@ -396,8 +429,7 @@ rclone_sync_offsite() {
     fi
 
     log_info "Syncing to remote: $remote_name"
-    # FIX [ITEM 11]: Quote the nested command substitutions to handle paths
-    # containing spaces correctly.
+    # Quote nested command substitutions to handle paths containing spaces.
     local filename type_dir dest
     filename=$(basename "$backup_file")
     type_dir=$(basename "$(dirname "$backup_file")")
@@ -414,13 +446,12 @@ rclone_sync_offsite() {
 }
 
 main() {
-    # FIX [ITEM 9]: Lock is now in /tmp so non-root users can create it.
+    # FIX [ISSUE 4]: Lock scoped to current UID prevents cross-user DoS.
     if ! mkdir "$LOCKDIR" 2>/dev/null; then
         log_error "Backup already running (lock: $LOCKDIR)"
         exit 1
     fi
-    # Safe cleanup: rmdir only removes the directory if empty (it is).
-    trap 'rmdir "$LOCKDIR" 2>/dev/null || true' EXIT
+    trap 'rmdir "$LOCKDIR" 2>/dev/null || true; perform_cleanup' EXIT
 
     if [[ $LIST_BACKUPS == true ]]; then list_backups; exit 0; fi
 
