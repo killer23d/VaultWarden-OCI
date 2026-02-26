@@ -3,6 +3,9 @@
 # Modes: edit (default) | view (--view) | list keys (--list) | rotate field (--rotate FIELD) | export kit (--export-recovery-kit)
 # Safe to re-run multiple times.  Uses your $EDITOR or falls back to nano.
 #
+# Canonical standalone recovery-kit export:
+#   ./edit-secrets.sh --export-recovery-kit
+#
 # See also: ./setup-secrets.sh  (first-time creation and full reconfiguration)
 
 set -euo pipefail
@@ -61,7 +64,10 @@ MODES (mutually exclusive; default is interactive edit):
                                 push_installation_id
                                 push_installation_key
                                 backup_passphrase        (auto-generated)
-    --export-recovery-kit   Generate a recovery document with unencrypted secrets
+    --export-recovery-kit   Generate a recovery document with unencrypted
+                            secrets. This is the canonical standalone entry
+                            point for recovery kit export. setup-secrets.sh
+                            delegates its post-setup prompt here.
 
 EDIT OPTIONS:
     --editor EDITOR         Use specific editor (default: $EDITOR or nano)
@@ -72,7 +78,8 @@ FEATURES:
     ✅ Automatic backup before every edit
     ✅ Change detection (no-op if nothing changed)
     ✅ YAML validation after editing with rollback offer
-    ✅ --rotate re-invokes hashing logic from setup for password fields
+    ✅ --rotate calls collect_secret_field() from lib/secrets.sh (single
+       source of truth for hashing — no duplicate Argon2id/bcrypt logic)
     ✅ --list shows key names without decrypting values
     ✅ Prompts to export recovery kit upon any modification
 
@@ -113,9 +120,9 @@ _mode_count=0
 [[ "$VIEW_ONLY" == "true"           ]] && _mode_count=$(( _mode_count + 1 ))
 [[ "$LIST_KEYS" == "true"           ]] && _mode_count=$(( _mode_count + 1 ))
 [[ -n "$ROTATE_FIELD"               ]] && _mode_count=$(( _mode_count + 1 ))
-# Note: --export-recovery-kit is treated as a mode if it's the ONLY thing passed,
-# but it can also be a flag applied to the default edit mode.
-# We will evaluate standalone export in the main() function.
+# --export-recovery-kit is a standalone mode when it is the only flag;
+# it can also trail --rotate / do_edit (offer after modification).
+# Standalone evaluation is handled in main().
 
 if [[ $_mode_count -gt 1 ]]; then
     log_error "--view, --list, and --rotate are mutually exclusive"
@@ -239,105 +246,25 @@ do_view() {
 
 # ---------------------------------------------------------------------------
 # --rotate FIELD mode
+#
+# FIX #2: _collect_new_value() has been removed. All per-field collection,
+# hashing (Argon2id / bcrypt), and validation is now handled by the single
+# canonical collect_secret_field() function in lib/secrets.sh.
 # ---------------------------------------------------------------------------
 
-_HASHED_FIELDS=("admin_token" "admin_basic_auth_hash")
-_PLAIN_TOKEN_FIELDS=("caddy_cloudflare_dns_token" "fail2ban_cloudflare_firewall_token" "smtp_password" "push_installation_id" "push_installation_key")
-_AUTO_FIELDS=("backup_passphrase")
-_ALL_ROTATE_FIELDS=("${_HASHED_FIELDS[@]}" "${_PLAIN_TOKEN_FIELDS[@]}" "${_AUTO_FIELDS[@]}")
+_ROTATE_FIELDS=("admin_token" "admin_basic_auth_hash"
+                "caddy_cloudflare_dns_token" "fail2ban_cloudflare_firewall_token"
+                "smtp_password" "push_installation_id" "push_installation_key"
+                "backup_passphrase")
 
 _validate_rotate_field() {
     local field="$1"
-    for f in "${_ALL_ROTATE_FIELDS[@]}"; do
+    for f in "${_ROTATE_FIELDS[@]}"; do
         [[ "$f" == "$field" ]] && return 0
     done
     log_error "Unknown field: $field"
-    log_info  "Supported fields: ${_ALL_ROTATE_FIELDS[*]}"
+    log_info  "Supported fields: ${_ROTATE_FIELDS[*]}"
     return 1
-}
-
-_collect_new_value() {
-    local field="$1"
-    local new_value=""
-
-    case "$field" in
-
-        admin_token)
-            log_info "Re-collecting VaultWarden admin password (will be Argon2id hashed)"
-            local raw_pass
-            raw_pass=$(prompt_password_with_confirmation "New VaultWarden admin password" 12)
-            log_info "Generating Argon2id hash..."
-            new_value=$(generate_argon2_hash "$raw_pass")
-            [[ -z "$new_value" ]] && { log_error "Argon2id hash generation failed"; return 1; }
-            log_success "Argon2id hash generated"
-            ;;
-
-        admin_basic_auth_hash)
-            log_info "Re-collecting Caddy admin password (will be bcrypt hashed, htpasswd format)"
-            local raw_pass
-            raw_pass=$(prompt_password_with_confirmation "New Caddy admin password" 12)
-            log_info "Generating bcrypt hash..."
-            local bcrypt_hash
-            bcrypt_hash=$(generate_bcrypt_hash "$raw_pass")
-            [[ -z "$bcrypt_hash" ]] && { log_error "bcrypt hash generation failed"; return 1; }
-            if [[ ! "$bcrypt_hash" =~ ^\$2[aby]\$[0-9]{2}\$ ]]; then
-                log_error "Generated bcrypt hash has invalid format: $bcrypt_hash"
-                return 1
-            fi
-            new_value="admin $bcrypt_hash"
-            log_success "bcrypt hash generated (htpasswd format: admin:\$2a\$...)"
-            ;;
-
-        caddy_cloudflare_dns_token)
-            log_info "Required Permissions: Zone:DNS:Edit + Zone:Zone:Read"
-            log_info "Create at: https://dash.cloudflare.com/profile/api-tokens"
-            read -p "New Cloudflare DNS API token: " new_value
-            if [[ -n "$new_value" && "$new_value" != "CHANGE_ME"* ]]; then
-                if validate_cloudflare_token "$new_value" "dns" 2>/dev/null; then
-                    log_success "DNS token validated successfully"
-                else
-                    log_warn "Token validation failed - continuing anyway"
-                fi
-            fi
-            ;;
-
-        fail2ban_cloudflare_firewall_token)
-            log_info "Required Permissions: Zone:Firewall Services:Edit"
-            log_info "Create at: https://dash.cloudflare.com/profile/api-tokens"
-            read -p "New Cloudflare Firewall API token: " new_value
-            if [[ -n "$new_value" && "$new_value" != "CHANGE_ME"* ]]; then
-                if validate_cloudflare_token "$new_value" "firewall" 2>/dev/null; then
-                    log_success "Firewall token validated successfully"
-                else
-                    log_warn "Token validation failed - continuing anyway"
-                fi
-            fi
-            ;;
-
-        smtp_password)
-            read -s -p "New SMTP password: " new_value
-            echo ""
-            ;;
-
-        push_installation_id)
-            log_info "Get credentials from: https://bitwarden.com/host"
-            read -p "New push installation ID: " new_value
-            ;;
-
-        push_installation_key)
-            read -p "New push installation key: " new_value
-            ;;
-
-        backup_passphrase)
-            new_value=$(generate_secure_string 32)
-            log_warn "Auto-generated new backup passphrase (32 chars) - save it if needed:"
-            log_warn "  $new_value"
-            ;;
-    esac
-
-    [[ -z "$new_value" ]] && { log_error "No value entered for $field"; return 1; }
-    printf '%s' "$new_value"
-    return 0
 }
 
 do_rotate() {
@@ -358,8 +285,9 @@ do_rotate() {
         return 1
     fi
 
+    # Delegate to the single canonical field-collection function in lib/secrets.sh
     local new_value
-    if ! new_value=$(_collect_new_value "$field"); then
+    if ! new_value=$(collect_secret_field "$field"); then
         return 1
     fi
 
@@ -488,7 +416,8 @@ main() {
 
     if ! check_prerequisites; then exit 1; fi
 
-    # Standalone export logic
+    # Standalone export: --export-recovery-kit with no other mode flag.
+    # This is the canonical single entry point for recovery kit export (Fix #1).
     if [[ "$EXPORT_RECOVERY_KIT" == "true" && "$_mode_count" -eq 0 ]]; then
         log_info "Running standalone recovery kit export..."
         if ! ensure_sops_env; then exit 1; fi
