@@ -1,11 +1,5 @@
 #!/usr/bin/env bash
-
 # lib/common.sh - Core shared functions for VaultWarden-OCI-NG
-# ENHANCED: Standardized error handling patterns - functions return, callers decide
-# ENHANCED: Updated email function to use postfix container (replaces msmtpd)
-# FIXED: require_commands function properly declares loop variable for strict mode
-# FIXED: Added LIB_COMMON_LOADED flag for backward compatibility
-# FIXED: Postfix email sending works when fail2ban is network_mode: host (uses 127.0.0.1:587)
 
 # All library functions use 'return' with exit codes, never 'exit'
 
@@ -13,8 +7,11 @@
 [[ -n "${VAULTWARDEN_COMMON_LIB_LOADED:-}" ]] && return 0
 readonly VAULTWARDEN_COMMON_LIB_LOADED=1
 
-# COMPATIBILITY: Also set the flag that security.sh expects
-[[ -n "${LIB_COMMON_LOADED:-}" ]] && return 0
+# COMPATIBILITY: Set the flag that lib/security.sh checks before loading.
+# This must come AFTER the guard above so it is only set on the first load.
+# FIX [ISSUE 6]: The original code had a second [[ -n ... ]] && return 0 here
+# that was unreachable dead code. Removed. The readonly assignment below is
+# all that is needed.
 readonly LIB_COMMON_LOADED=1
 
 # --- Library Configuration ---
@@ -61,17 +58,14 @@ _should_log() {
     (( target_index >= current_index ))
 }
 
-# Set log prefix for current script
 set_log_prefix() {
     LOG_PREFIX="$1"
 }
 
-# Get timestamp for logging
 _get_timestamp() {
     [[ "$LOG_TIMESTAMP" == "true" ]] && date '+%H:%M:%S' || echo ""
 }
 
-# Core logging functions
 log_info() {
     _should_log "INFO" || return 0
     local timestamp prefix_part
@@ -147,7 +141,6 @@ log_header() {
 
 # --- Configuration Management ---
 
-# Load .env file safely - STANDARDIZED: Returns exit code, never exits
 load_env_file() {
     local env_file="${1:-.env}"
 
@@ -158,7 +151,6 @@ load_env_file() {
 
     log_debug "Loading environment from: $env_file"
 
-    # Source with export
     set -a
     source "$env_file" || {
         log_error "Failed to source environment file: $env_file"
@@ -171,7 +163,6 @@ load_env_file() {
     return 0
 }
 
-# Get configuration value with default
 get_config_value() {
     local key="$1"
     local default="${2:-}"
@@ -179,7 +170,6 @@ get_config_value() {
     echo "$value"
 }
 
-# Validate required configuration - STANDARDIZED: Returns exit code
 require_config() {
     local missing=()
     local key
@@ -201,7 +191,6 @@ require_config() {
 # --- Command Caching for Performance ---
 declare -A _command_cache
 
-# Check if command exists (cached version) - STANDARDIZED: Returns exit code
 has_command() {
     local cmd="$1"
 
@@ -218,7 +207,6 @@ has_command() {
     fi
 }
 
-# FIXED: Require commands to exist - properly handles strict mode
 require_commands() {
     local missing=()
     local cmd
@@ -238,7 +226,6 @@ require_commands() {
     return 0
 }
 
-# Retry logic with exponential backoff - STANDARDIZED: Returns exit code
 retry_with_backoff() {
     local max_attempts="$1"
     local initial_delay="$2"
@@ -262,19 +249,16 @@ retry_with_backoff() {
     return 1
 }
 
-# Check if running as root
 is_root() {
     [[ $EUID -eq 0 ]]
 }
 
-# Get current user (even when using sudo)
 get_real_user() {
     echo "${SUDO_USER:-$USER}"
 }
 
 # --- File Operations ---
 
-# Ensure directory exists with proper permissions - STANDARDIZED: Returns exit code
 ensure_dir() {
     local dir="$1"
     local mode="${2:-755}"
@@ -303,7 +287,6 @@ ensure_dir() {
     return 0
 }
 
-# Set secure file permissions - STANDARDIZED: Returns exit code
 secure_file() {
     local file="$1"
     local mode="${2:-600}"
@@ -324,14 +307,12 @@ secure_file() {
 
 # --- Network Helpers ---
 
-# Test network connectivity - STANDARDIZED: Returns exit code
 test_connectivity() {
     local host="${1:-1.1.1.1}"
     local timeout="${2:-5}"
     ping -c 1 -W "$timeout" "$host" >/dev/null 2>&1
 }
 
-# Test HTTP connectivity - STANDARDIZED: Returns exit code
 test_http() {
     local url="$1"
     local timeout="${2:-10}"
@@ -346,7 +327,6 @@ test_http() {
     fi
 }
 
-# Robust HTTP download with retry - STANDARDIZED: Returns exit code
 download_file() {
     local url="$1"
     local output_file="$2"
@@ -364,7 +344,7 @@ download_file() {
     fi
 }
 
-# ENHANCED: Send notification email via postfix container - STANDARDIZED: Returns exit code
+# ENHANCED: Send notification email via postfix container
 send_notification_email() {
     local subject="$1"
     local body="$2"
@@ -376,14 +356,12 @@ send_notification_email() {
         return 1
     fi
 
-    # Check if postfix container is available (preferred method)
     if docker compose ps postfix >/dev/null 2>&1; then
         log_debug "Using postfix container for email delivery"
         _send_email_via_postfix "$subject" "$body" "$admin_email"
         return $?
     fi
 
-    # Fallback to host mailutils if available (legacy support)
     if has_command mail; then
         log_debug "Using host mailutils for email delivery (fallback)"
         _send_email_via_mailutils "$subject" "$body" "$admin_email"
@@ -394,8 +372,6 @@ send_notification_email() {
     return 1
 }
 
-# Determine SMTP host/port for postfix based on fail2ban network mode.
-# If fail2ban is network_mode: host, Docker DNS names like "postfix" won't resolve; use 127.0.0.1. [web:315]
 _get_postfix_smtp_target_for_fail2ban() {
     local host="postfix"
     local port="587"
@@ -411,16 +387,13 @@ _get_postfix_smtp_target_for_fail2ban() {
     return 0
 }
 
-# ENHANCED: Send email via postfix container (preferred method)
 _send_email_via_postfix() {
     local subject="$1"
     local body="$2"
     local admin_email="$3"
 
-    # Rate limiting with critical exception
     local last_email_file="/tmp/.vw_last_email_$(echo "$subject" | md5sum | cut -d' ' -f1)"
 
-    # Allow critical alerts through rate limiting
     if [[ "$subject" != *"CRITICAL"* ]] && [[ -f "$last_email_file" ]]; then
         local last_time current_time
         last_time=$(cat "$last_email_file")
@@ -442,7 +415,6 @@ Timestamp: $(date -uIs)
 Project: VaultWarden-OCI
 Email Backend: postfix container (bokysan/docker-postfix)"
 
-    # Pick SMTP host/port for the Python running in fail2ban
     local smtp_target smtp_host smtp_port
     smtp_target=$(_get_postfix_smtp_target_for_fail2ban)
     smtp_host="${smtp_target%:*}"
@@ -450,7 +422,6 @@ Email Backend: postfix container (bokysan/docker-postfix)"
 
     log_debug "Postfix SMTP target for fail2ban: ${smtp_host}:${smtp_port}"
 
-    # Create email using Python and send via postfix container
     local email_script
     email_script=$(cat <<'EOF'
 import smtplib
@@ -486,7 +457,6 @@ sys.exit(0 if send_email() else 1)
 EOF
 )
 
-    # Execute email script in fail2ban container with environment variables
     if docker compose exec -T \
         -e EMAIL_FROM="${SMTP_FROM:-vaultwarden@${DOMAIN_NAME:-localhost}}" \
         -e EMAIL_TO="$admin_email" \
@@ -503,16 +473,13 @@ EOF
     fi
 }
 
-# ENHANCED: Send email via host mailutils (fallback method)
 _send_email_via_mailutils() {
     local subject="$1"
     local body="$2"
     local admin_email="$3"
 
-    # Rate limiting with critical exception
     local last_email_file="/tmp/.vw_last_email_$(echo "$subject" | md5sum | cut -d' ' -f1)"
 
-    # Allow critical alerts through rate limiting
     if [[ "$subject" != *"CRITICAL"* ]] && [[ -f "$last_email_file" ]]; then
         local last_time current_time
         last_time=$(cat "$last_email_file")
@@ -545,32 +512,27 @@ Email Backend: host mailutils (legacy)"
 
 # --- Validation Helpers ---
 
-# Validate email format - STANDARDIZED: Returns exit code
 validate_email() {
     local email="$1"
     [[ "$email" =~ ^[^@]+@[^@]+\.[^@]+$ ]]
 }
 
-# Validate domain format - STANDARDIZED: Returns exit code
 validate_domain() {
     local domain="$1"
     domain=$(echo "$domain" | sed 's|https\?://||; s|/.*$||')
     [[ "$domain" =~ ^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]
 }
 
-# Validate port number - STANDARDIZED: Returns exit code
 validate_port() {
     local port="$1"
     [[ "$port" =~ ^[0-9]+$ ]] && (( port >= 1 && port <= 65535 ))
 }
 
-# Validate IP address - STANDARDIZED: Returns exit code
 validate_ip() {
     local ip="$1"
     [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]
 }
 
-# Validate URL format - STANDARDIZED: Returns exit code
 validate_url() {
     local url="$1"
     [[ "$url" =~ ^https?://[a-zA-Z0-9.-]+(:[0-9]+)?(/.*)?$ ]]
@@ -578,18 +540,15 @@ validate_url() {
 
 # --- Enhanced Error Handling ---
 
-# Set up error trap with enhanced context
 setup_error_trap() {
     trap 'log_error "Script failed at line $LINENO in $(basename -- "${BASH_SOURCE[0]}") with exit code $?"; exit 1' ERR
 }
 
-# Setup cleanup trap
 setup_cleanup_trap() {
     local cleanup_function="$1"
     trap "$cleanup_function" EXIT HUP INT TERM
 }
 
-# Safe execution wrapper with error context - STANDARDIZED: Returns exit code
 safe_execute() {
     local description="$1"
     shift
@@ -608,17 +567,13 @@ safe_execute() {
 
 # --- Library Initialization ---
 
-# Initialize common library for a script
 init_common_lib() {
     local script_name="$1"
 
-    # Set error handling
     set -euo pipefail
 
-    # Set log prefix
     set_log_prefix "$(basename -- "$script_name" .sh)"
 
-    # Change to project root
     cd "$PROJECT_ROOT"
 
     log_debug "Common library initialized for: $script_name"
