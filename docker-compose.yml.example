@@ -8,6 +8,7 @@
 # ✅ Cloudflare WAF rate limiting (edge protection)
 # ✅ Fail2Ban SSH protection via host networking (FIXED)
 # ✅ Postfix capabilities hardened (DAC_OVERRIDE, FOWNER, KILL removed)
+# ✅ Log rotation limits on all runtime services (disk-fill prevention)
 
 services:
   # =============================================================================
@@ -21,18 +22,18 @@ services:
     container_name: vaultwarden_init
     restart: "no"
     user: "0:0"  # Required for chown operations
-    
+
     # SECURITY: Restrict capabilities even for root user
     cap_drop:
       - ALL
     cap_add:
       - CHOWN
       - FOWNER
-    
+
     # SECURITY: No new privileges
     security_opt:
       - no-new-privileges:true
-    
+
     command: sh -c "
       mkdir -p /logs &&
       chown ${PUID}:${PGID} /logs &&
@@ -45,7 +46,7 @@ services:
       chmod 644 /secrets/.docker_secrets/* 2>/dev/null || true &&
       echo 'Init container completed - permissions set to ${PUID}:${PGID}'
       "
-    
+
     volumes:
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data:/data
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs:/logs
@@ -62,7 +63,7 @@ services:
     image: ghcr.io/dani-garcia/vaultwarden:${VAULTWARDEN_VERSION:-1.30.5}
     restart: unless-stopped
     user: "${PUID}:${PGID}"
-    
+
     environment:
       DOMAIN: ${DOMAIN}
       ADMIN_TOKEN_FILE: /run/secrets/admin_token
@@ -81,7 +82,7 @@ services:
       PASSWORD_HINTS_ALLOWED: ${PASSWORD_HINTS_ALLOWED:-false}
       SHOW_PASSWORD_HINT: ${SHOW_PASSWORD_HINT:-false}
       IP_HEADER: CF-Connecting-IP
-      
+
       # Email configuration (via Postfix relay)
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_FROM: ${SMTP_FROM:-}
@@ -91,48 +92,56 @@ services:
       SMTP_USERNAME: ${SMTP_USERNAME:-}
       SMTP_PASSWORD_FILE: /run/secrets/smtp_password
       SMTP_TIMEOUT: ${SMTP_TIMEOUT:-15}
-      
+
       # Push notifications (optional)
       PUSH_INSTALLATION_ID_FILE: /run/secrets/push_installation_id
       PUSH_INSTALLATION_KEY_FILE: /run/secrets/push_installation_key
-      
+
       # Database configuration
       DATABASE_MAX_CONNS: ${DATABASE_MAX_CONNS:-10}
       WEB_VAULT_FOLDER: web-vault/
-    
+
     secrets:
       - admin_token
       - smtp_password
       - push_installation_id
       - push_installation_key
-    
+
     volumes:
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data:/data
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/vaultwarden:/logs
-    
+
     depends_on:
       caddy:
         condition: service_started
-    
+
     networks:
       - vaultwarden
-    
+
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost/alive"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
-    
+
     security_opt:
       - no-new-privileges:true
-    
+
     cap_drop:
       - ALL
-    
+
     tmpfs:
       - /tmp
-    
+
+    # LOG ROTATION: Cap Docker json-file driver to prevent disk fill.
+    # VaultWarden logs at warn-level only; 10m x 5 = 50MB worst-case.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
     # OPTIMIZED: Resource limits for <10 users
     deploy:
       resources:
@@ -151,51 +160,60 @@ services:
     image: ghcr.io/caddybuilds/caddy-cloudflare:${CADDY_VERSION:-2.10.2}
     restart: unless-stopped
     user: "${PUID}:${PGID}"
-    
+
     # Use custom entrypoint script for secret loading
     entrypoint: /scripts/entrypoint.sh
-    
+
     environment:
       DOMAIN_NAME: ${DOMAIN_NAME}
       TZ: ${TZ:-UTC}
-      # Note: CLOUDFLARE_API_TOKEN and ADMIN_BASIC_AUTH_HASH 
+      # Note: CLOUDFLARE_API_TOKEN and ADMIN_BASIC_AUTH_HASH
       # are set by entrypoint.sh from Docker secrets
-    
+
     secrets:
       - caddy_cloudflare_dns_token
       - admin_basic_auth_hash
-    
+
     volumes:
       - ${PWD}/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - ${PWD}/caddy/entrypoint.sh:/scripts/entrypoint.sh:ro
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/data:/data
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/config:/config
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy:/var/log/caddy
-    
+
     ports:
       - "80:80"
       - "443:443"
       - "127.0.0.1:8080:8080"
-    
+
     networks:
       - vaultwarden
-    
+
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/alive"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 10s
-    
+
     security_opt:
       - no-new-privileges:true
-    
+
     cap_drop:
       - ALL
-    
+
     cap_add:
       - NET_BIND_SERVICE
-    
+
+    # LOG ROTATION: Caddy writes one access-log line per request; give it the
+    # largest budget. 20m x 5 = 100MB worst-case. Caddy also writes structured
+    # logs to /var/log/caddy (volume-mounted); this caps the Docker stdout copy.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+
     deploy:
       resources:
         limits:
@@ -212,7 +230,7 @@ services:
     container_name: vaultwarden_postfix
     image: boky/postfix:${POSTFIX_VERSION:-latest}
     restart: unless-stopped
-    
+
     environment:
       - TZ=${TZ:-UTC}
       - ALLOWED_SENDER_DOMAINS=${ALLOWED_SENDER_DOMAINS:-}
@@ -222,29 +240,29 @@ services:
       - POSTFIX_myhostname=${POSTFIX_MYHOSTNAME:-postfix}
       - POSTFIX_smtp_tls_security_level=${POSTFIX_SMTP_TLS_SECURITY_LEVEL:-encrypt}
       - POSTFIX_message_size_limit=${POSTFIX_MESSAGE_SIZE_LIMIT:-10240000}
-    
+
     secrets:
       - smtp_password
-    
+
     ports:
       - "127.0.0.1:587:587"
-    
+
     networks:
       - vaultwarden
-    
+
     healthcheck:
       test: ["CMD", "sh", "-c", "nc -z localhost 587 2>/dev/null"]
       interval: 120s
       timeout: 10s
       retries: 5
       start_period: 60s
-    
+
     security_opt:
       - no-new-privileges:true
-    
+
     cap_drop:
       - ALL
-        
+
     cap_add:
       - CHOWN              # Mail queue ownership
       - SETUID             # User switching
@@ -252,7 +270,15 @@ services:
       - NET_BIND_SERVICE   # Port 587
       - DAC_OVERRIDE       # Spool permission overrides (REQUIRED)
       - FOWNER             # Spool file ownership (REQUIRED)
-    
+
+    # LOG ROTATION: Postfix is low-volume (alert emails only).
+    # 5m x 3 = 15MB worst-case.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "3"
+
     deploy:
       resources:
         limits:
@@ -270,10 +296,10 @@ services:
     container_name: vaultwarden_fail2ban
     image: crazymax/fail2ban:${FAIL2BAN_VERSION:-1.1.0}
     restart: unless-stopped
-    
+
     # FIXED: Host networking mode to allow SSH iptables manipulation
     network_mode: host
-    
+
     environment:
       TZ: ${TZ:-UTC}
       F2B_LOG_TARGET: STDOUT
@@ -284,10 +310,10 @@ services:
       F2B_SENDER: fail2ban@${DOMAIN_NAME}
       CF_API_TOKEN_FILE: /run/secrets/fail2ban_cloudflare_firewall_token
       CF_ZONE_ID: ${CLOUDFLARE_ZONE_ID}
-    
+
     secrets:
       - fail2ban_cloudflare_firewall_token
-    
+
     volumes:
       - ${PWD}/fail2ban:/data/fail2ban:ro
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/fail2ban:/data/db
@@ -295,26 +321,34 @@ services:
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/vaultwarden:/var/log/vaultwarden:ro
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy:/var/log/caddy:ro
       - ${SSH_LOG_PATH:-/var/log/secure}:/var/log/ssh-auth.log:ro
-    
+
     cap_add:
       - NET_ADMIN  # Required for iptables manipulation
       - NET_RAW    # Required for raw socket access
-    
+
     depends_on:
       - vaultwarden
       - caddy
       - postfix
-    
+
     healthcheck:
       test: ["CMD", "fail2ban-client", "status"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 30s
-    
+
     security_opt:
       - no-new-privileges:true
-    
+
+    # LOG ROTATION: Fail2Ban is low-volume (ban/unban events only).
+    # 5m x 3 = 15MB worst-case.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "3"
+
     deploy:
       resources:
         limits:
@@ -368,6 +402,7 @@ networks:
 # ✅ Fail2Ban host networking for SSH protection (FIXED)
 # ✅ Postfix hardened capabilities (DAC_OVERRIDE, FOWNER, KILL removed)
 # ✅ WebSocket support enabled by default
+# ✅ Log rotation limits on all runtime services (disk-fill prevention)
 #
 # CRITICAL FIXES APPLIED:
 # 1. Fail2Ban SSH Protection (FIXED):
@@ -384,6 +419,17 @@ networks:
 #    - Removed DAC_OVERRIDE, FOWNER, KILL capabilities
 #    - Minimal set: CHOWN, SETUID, SETGID, NET_BIND_SERVICE
 #    - Test mail delivery after deployment to confirm functionality
+#
+# 4. Log Rotation (HARDENED):
+#    - All runtime services now cap Docker json-file logs natively
+#    - Worst-case total Docker log footprint: ~200MB on the 40GB SSD
+#    - Sizing rationale:
+#        caddy:      20m x 5 = 100MB  (one line per request - highest volume)
+#        vaultwarden: 10m x 5 =  50MB  (warn-level only - low volume)
+#        postfix:     5m x 3 =  15MB  (alert emails only - very low volume)
+#        fail2ban:    5m x 3 =  15MB  (ban/unban events only - very low volume)
+#    - bash maintenance.sh --comprehensive also rotates volume-mounted logs
+#      as a secondary layer of defense
 #
 # CLOUDFLARE RATE LIMITING (REQUIRED):
 # You MUST configure these WAF rules in Cloudflare Dashboard:
@@ -429,6 +475,7 @@ networks:
 # □ Verify Cloudflare rate limiting: Run 15 auth requests in 1 minute (should see 429)
 # □ Check resource usage: docker stats (should be under limits)
 # □ No init-permissions warnings: docker compose up -d (should be clean)
+# □ Verify log caps active: docker inspect vaultwarden_app | grep -A5 LogConfig
 #
 # PLATFORM COMPATIBILITY:
 # - SSH_LOG_PATH automatically detected by setup.sh
