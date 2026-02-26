@@ -50,7 +50,8 @@ EXAMPLES:
 SAFETY FEATURES:
     - Automatic backup before updates (can be disabled with --no-backup)
     - Health checks before and after updates
-    - Automatic rollback attempt via restore.sh if post-update health fails
+    - Automatic rollback attempt via restore.sh --latest if post-update
+      health check fails (always selects the freshest pre-update snapshot)
     - Email notifications for update status
 
 EXIT CODES:
@@ -76,8 +77,6 @@ done
 
 # ---------------------------------------------------------------------------
 # create_pre_update_backup
-# Creates a full backup. --email is a boolean toggle with no value; only
-# include it when the caller requested email via --email.
 # ---------------------------------------------------------------------------
 create_pre_update_backup() {
     if [[ "$BACKUP_BEFORE_UPDATE" != "true" ]]; then
@@ -129,8 +128,6 @@ update_system_packages() {
         return 1
     fi
 
-    # Use grep -c '/' to count only package lines, avoiding the -1 edge case
-    # that occurs when wc -l counts only the "Listing..." header line.
     local updates_available
     updates_available=$(apt list --upgradable 2>/dev/null | grep -c '/' || echo "0")
 
@@ -183,7 +180,7 @@ update_containers() {
 }
 
 # ---------------------------------------------------------------------------
-# pre_update_health_check - non-fatal, informational only
+# pre_update_health_check — informational only, never blocks the update
 # ---------------------------------------------------------------------------
 pre_update_health_check() {
     log_info "Performing pre-update health check..."
@@ -205,9 +202,7 @@ pre_update_health_check() {
 
 # ---------------------------------------------------------------------------
 # restart_services_after_update
-# Uses --force which is the confirmed supported flag in startup.sh.
-# The previously used --force-restart was never a valid flag and would have
-# caused startup.sh to exit 1 on every update attempt.
+# Uses --force (the correct, documented flag per startup.sh after FIX [ISSUE 2]).
 # ---------------------------------------------------------------------------
 restart_services_after_update() {
     if [[ "$RESTART_AFTER" != "true" ]]; then
@@ -255,17 +250,18 @@ post_update_health_check() {
 
 # ---------------------------------------------------------------------------
 # attempt_rollback
-# Calls restore.sh using its CURRENT supported flags:
-#   --type full   matches the backup type created by create_pre_update_backup
-#   --force       skips the restore confirmation prompt
-#   --no-backup   skips the pre-restore backup (we already have our snapshot)
 #
-# NOTE: If restore.sh gains a --latest flag in future, this can be simplified
-# to: ./restore.sh --latest --type full --force --no-backup
+# FIX [ISSUE 14]: Now uses --latest --type full so restore.sh always selects
+# the most recent full backup by mtime. This guarantees the rollback grabs
+# the snapshot just created by create_pre_update_backup regardless of whether
+# lexicographic sort or clock skew would have chosen a different file.
+#
+# --no-backup skips the pre-restore snapshot (we already have ours).
+# --force    skips the interactive confirmation prompt.
 # ---------------------------------------------------------------------------
 attempt_rollback() {
     if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would attempt rollback: ./restore.sh --type full --force --no-backup"
+        log_info "[DRY RUN] Would attempt rollback: ./restore.sh --latest --type full --force --no-backup"
         return 0
     fi
 
@@ -273,11 +269,14 @@ attempt_rollback() {
 
     if [[ ! -x "./restore.sh" ]]; then
         log_error "restore.sh not found or not executable - manual rollback required"
-        log_error "Run: ./restore.sh --type full --force --no-backup"
+        log_error "Run: ./restore.sh --latest --type full --force --no-backup"
         return 1
     fi
 
-    if ./restore.sh --type full --force --no-backup; then
+    # FIX [ISSUE 14]: --latest ensures we always get the newest backup by mtime,
+    # not by lexicographic filename sort. Combined with --type full, this
+    # restricts selection to full backups (skips db/emergency types).
+    if ./restore.sh --latest --type full --force --no-backup; then
         log_success "Rollback completed - services restored to pre-update state"
         log_warn "Please investigate why the update caused health check failures"
         return 0
@@ -290,7 +289,6 @@ attempt_rollback() {
 
 # ---------------------------------------------------------------------------
 # generate_update_summary
-# Uses printf throughout to avoid echo -e backslash fragility.
 # ---------------------------------------------------------------------------
 generate_update_summary() {
     local pre_health="$1"
@@ -353,7 +351,8 @@ generate_update_summary() {
         fi
     fi
 
-    if [[ "$system_update" == "0" && "$container_update" == "0" && "$restart" == "0" && "$post_health" == "0" ]]; then
+    if [[ "$system_update" == "0" && "$container_update" == "0" && \
+          "$restart" == "0" && "$post_health" == "0" ]]; then
         summary+=$(printf "\n🎉 Overall Status: UPDATE SUCCESSFUL\n")
         summary+=$(printf "\nNext Steps:\n")
         summary+=$(printf "  • Monitor services for stability\n")
@@ -367,7 +366,7 @@ generate_update_summary() {
         summary+=$(printf "  • Check service logs: make logs\n")
         summary+=$(printf "  • Run health check: ./health.sh --comprehensive\n")
         if [[ "$rollback_attempted" != "true" ]]; then
-            summary+=$(printf "  • Consider rollback if issues persist: ./restore.sh --type full --force --no-backup\n")
+            summary+=$(printf "  • Consider rollback: ./restore.sh --latest --type full --force --no-backup\n")
         fi
     fi
 
@@ -375,7 +374,8 @@ generate_update_summary() {
 
     if [[ "$EMAIL_NOTIFY" == "true" ]]; then
         local email_subject
-        if [[ "$system_update" == "0" && "$container_update" == "0" && "$restart" == "0" && "$post_health" == "0" ]]; then
+        if [[ "$system_update" == "0" && "$container_update" == "0" && \
+              "$restart" == "0" && "$post_health" == "0" ]]; then
             email_subject="VaultWarden Update: SUCCESS"
         else
             email_subject="VaultWarden Update: ISSUES DETECTED"
@@ -420,13 +420,12 @@ main() {
     # -----------------------------------------------------------------------
     log_info "=== Phase 1: Pre-Update Preparation ==="
 
-    # Health check is informational only — fresh systems with no backups yet
-    # will always show warnings here. Must not block the update.
+    # Health check is informational only
     if pre_update_health_check; then
         pre_health_result=0
     fi
 
-    # Backup IS fatal: refuse to proceed without a safety snapshot.
+    # Backup IS fatal: refuse to proceed without a safety snapshot
     if ! create_pre_update_backup; then
         log_error "Pre-update backup failed - aborting update for safety"
         exit 1
@@ -462,7 +461,6 @@ main() {
         fi
     else
         # Pull failed — nothing was changed, services still running on old images.
-        # This is a deliberate skip, not a restart failure.
         log_info "Skipping service restart — container pull failed, old images still active"
         restart_result=0
     fi
@@ -493,7 +491,8 @@ main() {
         "$rollback_attempted" \
         "$rollback_result"
 
-    if [[ "$container_update_result" == "0" && "$restart_result" == "0" && "$post_health_result" == "0" ]]; then
+    if [[ "$container_update_result" == "0" && "$restart_result" == "0" && \
+          "$post_health_result" == "0" ]]; then
         log_success "Update completed successfully"
         exit 0
     elif [[ "$container_update_result" == "0" && "$restart_result" == "0" ]]; then
