@@ -22,7 +22,6 @@ SECRETS_BACKUP_DIR="${SECRETS_BACKUP_DIR:-secrets}"
 ensure_sops_env() {
     local age_key="${1:-$AGE_KEY_FILE}"
 
-    # Resolve to absolute path when relative
     if [[ ! "$age_key" = /* ]]; then
         age_key="${PROJECT_ROOT:-$(pwd)}/$age_key"
     fi
@@ -240,20 +239,39 @@ secure_secrets_file() {
 }
 
 # ---------------------------------------------------------------------------
-# collect_secret_field  (FIX #2 — single source of truth for per-field logic)
+# _bcrypt_format_ok  (internal)
 #
-# Collects, validates, and hashes a single secret field. Outputs the final
-# value (already hashed where applicable) on stdout. Returns 1 on error.
+# Validates that a string looks like a bcrypt hash as produced by htpasswd.
+# htpasswd -B outputs:  $2y$<cost>$<53 chars>
+# The cost field is variable-width (e.g. 10, 12, 14).
+# ---------------------------------------------------------------------------
+_bcrypt_format_ok() {
+    local hash="$1"
+    # ^          start
+    # \$2[aby]\$ variant prefix ($2a, $2b, $2y)
+    # [0-9]+     cost digits (no trailing dollar — that is part of the hash body)
+    # \$         separator
+    # .{53}      53-char encoded salt+hash
+    # $          end
+    [[ "$hash" =~ ^\$2[aby]\$[0-9]+\$.{53}$ ]]
+}
+
+# ---------------------------------------------------------------------------
+# collect_secret_field  — single source of truth for INTERACTIVE collection
+#
+# Prompts the user, validates, and hashes a single secret field.
+# Outputs the final (already-hashed where applicable) value on stdout.
+# All user-facing messages go to stderr. Returns 1 on error.
 #
 # Supported fields:
-#   admin_token                      — prompts for password, Argon2id-hashes it
-#   admin_basic_auth_hash            — prompts for password, bcrypt-hashes it
-#   caddy_cloudflare_dns_token       — prompts for token, validates vs CF API
-#   fail2ban_cloudflare_firewall_token — prompts for token, validates vs CF API
-#   smtp_password                    — prompts silently, no hashing
-#   push_installation_id             — plain read
-#   push_installation_key            — plain read
-#   backup_passphrase                — auto-generated; value printed to stderr
+#   admin_token                        — prompt + Argon2id hash
+#   admin_basic_auth_hash              — prompt + bcrypt hash, "admin <hash>" format
+#   caddy_cloudflare_dns_token         — prompt + optional CF API validation
+#   fail2ban_cloudflare_firewall_token — prompt + optional CF API validation
+#   smtp_password                      — silent prompt, no hashing
+#   push_installation_id               — plain read
+#   push_installation_key              — plain read
+#   backup_passphrase                  — auto-generated; printed to stderr
 #
 # Usage:
 #   new_value=$(collect_secret_field "admin_token") || exit 1
@@ -289,11 +307,11 @@ collect_secret_field() {
                 log_error "bcrypt hash generation failed. Ensure apache2-utils is installed." >&2
                 return 1
             fi
-            if [[ ! "$bcrypt_hash" =~ ^\$2[aby]\$[0-9]{2}\$ ]]; then
+            if ! _bcrypt_format_ok "$bcrypt_hash"; then
                 log_error "Generated bcrypt hash has invalid format: $bcrypt_hash" >&2
                 return 1
             fi
-            log_success "bcrypt hash generated (htpasswd format: admin:\$2a\$...)" >&2
+            log_success "bcrypt hash generated (htpasswd format: admin:\$2y\$...)" >&2
             printf '%s' "admin $bcrypt_hash"
             ;;
 
@@ -364,6 +382,114 @@ collect_secret_field() {
 }
 
 # ---------------------------------------------------------------------------
+# auto_generate_secret_field  — single source of truth for AUTO-MODE generation
+#
+# Generates or sets a reasonable default for a single secret field without
+# prompting the user. Outputs the final value on stdout; status messages and
+# any plaintext passwords the operator must save go to stderr.
+# Returns 1 on error.
+#
+# Behaviour per field:
+#   admin_token                        — generate 32-char password, Argon2id hash it
+#   admin_basic_auth_hash              — generate 32-char password, bcrypt hash it
+#   caddy_cloudflare_dns_token         — emit CHANGE_ME placeholder
+#   fail2ban_cloudflare_firewall_token — emit CHANGE_ME placeholder
+#   smtp_password                      — emit CHANGE_ME placeholder
+#   push_installation_id               — emit CHANGE_ME_OR_LEAVE_EMPTY placeholder
+#   push_installation_key              — emit CHANGE_ME_OR_LEAVE_EMPTY placeholder
+#   backup_passphrase                  — generate 32-char passphrase
+#
+# Usage:
+#   new_value=$(auto_generate_secret_field "admin_token") || exit 1
+# ---------------------------------------------------------------------------
+auto_generate_secret_field() {
+    local field="$1"
+
+    case "$field" in
+
+        admin_token)
+            local vw_pass
+            vw_pass=$(generate_secure_string 32)
+            echo "" >&2
+            log_warn "🔐 AUTO-GENERATED VAULTWARDEN ADMIN PASSWORD:" >&2
+            log_warn "   $vw_pass" >&2
+            log_warn "" >&2
+            log_warn "⚠️  SAVE THIS PASSWORD SECURELY - It cannot be recovered!" >&2
+            echo "" >&2
+            log_info "Generating Argon2id hash..." >&2
+            local vw_hash
+            vw_hash=$(generate_argon2_hash "$vw_pass")
+            if [[ -z "$vw_hash" ]]; then
+                log_error "Failed to generate Argon2id hash" >&2
+                return 1
+            fi
+            log_success "VaultWarden admin hash generated (Argon2id)" >&2
+            printf '%s' "$vw_hash"
+            ;;
+
+        admin_basic_auth_hash)
+            local caddy_pass
+            caddy_pass=$(generate_secure_string 32)
+            echo "" >&2
+            log_warn "🔐 AUTO-GENERATED CADDY ADMIN PASSWORD:" >&2
+            log_warn "   $caddy_pass" >&2
+            log_warn "" >&2
+            log_warn "⚠️  SAVE THIS PASSWORD SECURELY - It cannot be recovered!" >&2
+            echo "" >&2
+            log_info "Generating bcrypt hash for Caddy basic auth..." >&2
+            local caddy_hash
+            caddy_hash=$(generate_bcrypt_hash "$caddy_pass")
+            if [[ -z "$caddy_hash" ]]; then
+                log_error "Failed to generate bcrypt hash. Ensure apache2-utils is installed." >&2
+                return 1
+            fi
+            if ! _bcrypt_format_ok "$caddy_hash"; then
+                log_error "Generated bcrypt hash has invalid format: $caddy_hash" >&2
+                return 1
+            fi
+            log_success "Caddy admin hash generated (htpasswd format: admin:\$2y\$...)" >&2
+            printf '%s' "admin $caddy_hash"
+            ;;
+
+        caddy_cloudflare_dns_token)
+            log_warn "Auto mode: Using placeholder for Cloudflare DNS token - MUST be updated before deployment" >&2
+            printf '%s' "CHANGE_ME_DNS_TOKEN"
+            ;;
+
+        fail2ban_cloudflare_firewall_token)
+            log_warn "Auto mode: Using placeholder for Cloudflare Firewall token - MUST be updated before deployment" >&2
+            printf '%s' "CHANGE_ME_FIREWALL_TOKEN"
+            ;;
+
+        smtp_password)
+            log_warn "Auto mode: Using placeholder for SMTP password - configure later in .env" >&2
+            printf '%s' "CHANGE_ME_SMTP_PASSWORD"
+            ;;
+
+        push_installation_id)
+            printf '%s' "CHANGE_ME_OR_LEAVE_EMPTY"
+            ;;
+
+        push_installation_key)
+            printf '%s' "CHANGE_ME_OR_LEAVE_EMPTY"
+            ;;
+
+        backup_passphrase)
+            local passphrase
+            passphrase=$(generate_secure_string 32)
+            log_success "Backup passphrase generated (32 characters)" >&2
+            printf '%s' "$passphrase"
+            ;;
+
+        *)
+            log_error "auto_generate_secret_field: unknown field '$field'" >&2
+            return 1
+            ;;
+    esac
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # Recovery Kit Generation
 # ---------------------------------------------------------------------------
 generate_recovery_kit() {
@@ -384,13 +510,11 @@ generate_recovery_kit() {
 
     log_info "Collecting recovery data..."
 
-    # 1. Metadata
     local hostname_val
     hostname_val=$(hostname)
     local date_val
     date_val=$(date)
 
-    # 2. Key Data
     local pub_key
     if ! pub_key=$(age-keygen -y "$age_key" 2>/dev/null); then
         log_error "Failed to derive Age public key"
@@ -399,7 +523,6 @@ generate_recovery_kit() {
     local priv_key
     priv_key=$(cat "$age_key")
 
-    # 3. Config Data
     local domain="Not Configured"
     local admin_email="Not Configured"
     if [[ -f "$env_file" ]]; then
@@ -407,7 +530,6 @@ generate_recovery_kit() {
         admin_email=$(grep "^ADMIN_EMAIL=" "$env_file" | cut -d= -f2 || echo "Not Configured")
     fi
 
-    # 4. Decrypt Secrets
     log_info "Decrypting secrets for export..."
     local vw_admin_hash="Not Set"
     local caddy_hash="Not Set"
@@ -439,9 +561,6 @@ generate_recovery_kit() {
         log_warn "secrets.yaml not found"
     fi
 
-    # 5. Generate Content
-    # Pre-create the output file with 600 permissions BEFORE any plaintext
-    # is written to avoid a world-readable window at the default umask.
     if ! install -m 600 /dev/null "$output_file"; then
         log_error "Failed to create output file with secure permissions: $output_file"
         return 1
@@ -588,7 +707,6 @@ offer_recovery_kit_export() {
         return 0
     fi
 
-    # Interactive prompt
     echo ""
     read -p "Export a plaintext Recovery Kit? (yes/no): " export_kit
     if [[ "$export_kit" == "yes" ]]; then
