@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-
 # startup.sh - Enhanced VaultWarden startup script with secure secrets handling
-# FIXED: Health verification now uses sudo when needed (root-only backup decrypt checks)
 
 set -euo pipefail
 
@@ -28,7 +26,8 @@ USAGE:
   ./startup.sh [OPTIONS]
 
 OPTIONS:
-  --force-restart  Force restart of all services
+  --force          Force restart of all services (preferred flag)
+  --force-restart  Alias for --force (legacy, kept for compatibility)
   --skip-health    Skip post-startup health check
   --background     Start services in background (daemon mode)
   --dry-run        Show what would be done without executing
@@ -36,19 +35,21 @@ OPTIONS:
 
 EXAMPLES:
   ./startup.sh                    # Normal startup
-  ./startup.sh --force-restart    # Force restart all services
+  ./startup.sh --force            # Force restart all services
   ./startup.sh --background       # Start in daemon mode
 EOF
 }
 
 # Argument parsing
+# FIX [ISSUE 2]: --force is now a first-class flag; --force-restart kept as alias.
 while [[ $# -gt 0 ]]; do
   case $1 in
+    --force)         FORCE_RESTART=true; shift ;;
     --force-restart) FORCE_RESTART=true; shift ;;
-    --skip-health) SKIP_HEALTH_CHECK=true; shift ;;
-    --background) BACKGROUND=true; shift ;;
-    --dry-run) DRY_RUN=true; shift ;;
-    --help) show_help; exit 0 ;;
+    --skip-health)   SKIP_HEALTH_CHECK=true; shift ;;
+    --background)    BACKGROUND=true; shift ;;
+    --dry-run)       DRY_RUN=true; shift ;;
+    --help)          show_help; exit 0 ;;
     *) log_error "Unknown option: $1"; show_help; exit 1 ;;
   esac
 done
@@ -120,6 +121,8 @@ prepare_log_directories() {
 }
 
 # ENHANCED: Secure secret file preparation with YAML extraction fix
+# FIX [ISSUE 12]: Decrypt SOPS file once and cache the plaintext, then extract
+#                 all secrets from the cache. Avoids N heavy age decrypt operations.
 prepare_docker_secrets() {
   log_info "Preparing Docker secrets with enhanced security..."
 
@@ -166,12 +169,28 @@ prepare_docker_secrets() {
     rm -rf "${secrets_dir:?}"/*
   fi
 
-  log_info "Decrypting secrets with secure file creation..."
+  log_info "Decrypting secrets (single pass) with secure file creation..."
 
   # Set SOPS environment
   export SOPS_AGE_KEY_FILE="$PROJECT_ROOT/$age_key_file"
 
-  # Retrieve secrets using SOPS and create files atomically
+  # FIX [ISSUE 12]: Decrypt once into a secure temp file; extract all secrets from it.
+  local decrypted_cache
+  decrypted_cache=$(mktemp)
+  chmod 600 "$decrypted_cache"
+
+  # Register for cleanup — will be removed on EXIT regardless of success/failure.
+  local _orig_trap
+  _orig_trap=$(trap -p EXIT)
+  trap "rm -f '$decrypted_cache'; cleanup_umask" EXIT
+
+  if ! sops --decrypt "$sops_file" > "$decrypted_cache" 2>/dev/null; then
+    log_error "Failed to decrypt secrets file"
+    rm -f "$decrypted_cache"
+    cleanup_umask
+    return 1
+  fi
+
   local secret_files=(
     "admin_token"
     "admin_basic_auth_hash"
@@ -190,11 +209,11 @@ prepare_docker_secrets() {
     local secret_file="$secrets_dir/$secret_name"
     local secret_value
 
-    # Extract secret using grep/cut/sed for YAML with comments
-    secret_value=$(sops --decrypt "$sops_file" 2>/dev/null | grep "^${secret_name}:" | head -n1 | cut -d: -f2- | sed 's/^ *//' || echo "")
+    # Extract from the already-decrypted cache (no repeated sops calls)
+    secret_value=$(grep "^${secret_name}:" "$decrypted_cache" | head -n1 | cut -d: -f2- | sed 's/^ *//' || echo "")
 
-    if [[ -n "$secret_value" ]] && [[ "$secret_value" != "CHANGE_ME"* ]] && [[ "$secret_value" != "null" ]] && [[ "$secret_value" != "PLACEHOLDER"* ]]; then
-      # Create secret file atomically
+    if [[ -n "$secret_value" ]] && [[ "$secret_value" != "CHANGE_ME"* ]] && \
+       [[ "$secret_value" != "null" ]] && [[ "$secret_value" != "PLACEHOLDER"* ]]; then
       if printf '%s' "$secret_value" > "$secret_file"; then
         local file_perms
         file_perms=$(stat -c "%a" "$secret_file" 2>/dev/null || echo "unknown")
@@ -214,11 +233,17 @@ prepare_docker_secrets() {
     fi
   done
 
-  # Restore original umask
+  # Securely wipe the decrypted cache
+  if command -v shred >/dev/null 2>&1; then
+    shred -fuz "$decrypted_cache" 2>/dev/null || rm -f "$decrypted_cache"
+  else
+    rm -f "$decrypted_cache"
+  fi
+
+  # Restore cleanup trap and umask
   cleanup_umask
   trap - EXIT
 
-  # Report results
   log_success "Docker secrets prepared: $secrets_created created, $secrets_failed failed"
 
   if [[ $secrets_failed -gt 0 ]]; then
