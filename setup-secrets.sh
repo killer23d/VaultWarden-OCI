@@ -3,7 +3,7 @@
 # Can be run standalone or as part of setup.sh
 # Safe to re-run multiple times
 #
-# SECURITY ENHANCEMENT: Caddy basic auth hash in htpasswd format (admin:$2a$14$...)
+# SECURITY ENHANCEMENT: Caddy basic auth hash in htpasswd format (admin:$2y$14$...)
 #
 # See also: ./edit-secrets.sh  (edit, view, list keys, rotate a single field,
 #                               or export recovery kit)
@@ -80,7 +80,7 @@ FEATURES:
     ✅ Secure password generation (32-char minimum)
 
 SECURITY ENHANCEMENTS:
-    ✅ Caddy basic auth in htpasswd format (admin:\$2a\$14\$...)
+    ✅ Caddy basic auth in htpasswd format (admin:\$2y\$14\$...)
     ✅ Hash validation before storage
     ✅ Secure temporary file handling
     ✅ Enhanced error messages
@@ -187,7 +187,7 @@ fix_prerequisites() {
                 fi
                 cat > .sops.yaml << SOPS_EOF
 creation_rules:
-  - path_regex: secrets/secrets\\.yaml$
+  - path_regex: secrets/secrets\.yaml$
     age: $age_public_key
 SOPS_EOF
                 log_success "SOPS configuration created: .sops.yaml"
@@ -290,14 +290,25 @@ ensure_argon2_available() {
 # ---------------------------------------------------------------------------
 # Collect secrets
 #
-# FIX #2: Password fields (admin_token, admin_basic_auth_hash) now delegate
-# to collect_secret_field() from lib/secrets.sh — the single source of
-# truth for prompting, hashing (Argon2id / bcrypt), and format validation.
-# Plain-value fields keep their own logic here because auto-mode placeholders
-# are specific to first-time setup and not relevant to rotation.
+# Both AUTO_MODE and interactive paths now delegate to lib/secrets.sh:
+#   - interactive  → collect_secret_field()        (prompts, hashes, validates)
+#   - auto         → auto_generate_secret_field()  (generates, hashes, validates)
+#
+# All hashing logic (Argon2id, bcrypt) and format validation live exclusively
+# in lib/secrets.sh. collect_secrets() is now a thin orchestration layer.
 # ---------------------------------------------------------------------------
 collect_secrets() {
     declare -A SECRETS
+
+    # Helper: call the right lib function based on AUTO_MODE
+    _get_field() {
+        local field="$1"
+        if [[ "$AUTO_MODE" == "true" ]]; then
+            auto_generate_secret_field "$field"
+        else
+            collect_secret_field "$field"
+        fi
+    }
 
     # --- VaultWarden admin password (Argon2id) -------------------------------
     echo ""
@@ -307,30 +318,9 @@ collect_secrets() {
     log_info "This password will be hashed with Argon2id for VaultWarden"
     echo ""
 
-    if [[ "$AUTO_MODE" == "true" ]]; then
-        local vw_pass
-        vw_pass=$(generate_secure_string 32)
-        echo ""
-        log_warn "🔐 AUTO-GENERATED VAULTWARDEN ADMIN PASSWORD:"
-        log_warn "   $vw_pass"
-        log_warn ""
-        log_warn "⚠️  SAVE THIS PASSWORD SECURELY - It cannot be recovered!"
-        echo ""
-        log_info "Generating Argon2id hash..."
-        local vw_hash
-        vw_hash=$(generate_argon2_hash "$vw_pass")
-        if [[ -z "$vw_hash" ]]; then log_error "Failed to generate Argon2 hash"; return 1; fi
-        SECRETS["admin_token"]="$vw_hash"
-        log_success "VaultWarden admin hash generated (Argon2id)"
-    else
-        local vw_hash
-        vw_hash=$(collect_secret_field "admin_token")
-        if [[ $? -ne 0 || -z "$vw_hash" ]]; then
-            log_error "Failed to collect admin_token"
-            return 1
-        fi
-        SECRETS["admin_token"]="$vw_hash"
-    fi
+    local vw_hash
+    vw_hash=$(_get_field "admin_token") || { log_error "Failed to collect admin_token"; return 1; }
+    SECRETS["admin_token"]="$vw_hash"
 
     # --- Caddy admin password (bcrypt / htpasswd) ----------------------------
     echo ""
@@ -338,41 +328,12 @@ collect_secrets() {
     log_info " Caddy Admin Panel Password"
     log_info "═══════════════════════════════════════════════════════════"
     log_info "This password will be hashed with bcrypt for Caddy basic auth"
-    log_info "Format: htpasswd (admin:\$2a\$14\$...)"
+    log_info 'Format: htpasswd (admin:$2y$14$...)'
     echo ""
 
-    if [[ "$AUTO_MODE" == "true" ]]; then
-        local caddy_pass
-        caddy_pass=$(generate_secure_string 32)
-        echo ""
-        log_warn "🔐 AUTO-GENERATED CADDY ADMIN PASSWORD:"
-        log_warn "   $caddy_pass"
-        log_warn ""
-        log_warn "⚠️  SAVE THIS PASSWORD SECURELY - It cannot be recovered!"
-        echo ""
-        log_info "Generating bcrypt hash for Caddy basic auth..."
-        local caddy_hash
-        caddy_hash=$(generate_bcrypt_hash "$caddy_pass")
-        if [[ -z "$caddy_hash" ]]; then
-            log_error "Failed to generate bcrypt hash"
-            log_error "Ensure apache2-utils is installed: sudo apt-get install apache2-utils"
-            return 1
-        fi
-        if [[ ! "$caddy_hash" =~ ^\$2[aby]\$[0-9]{2}\$ ]]; then
-            log_error "Generated bcrypt hash has invalid format: $caddy_hash"
-            return 1
-        fi
-        SECRETS["admin_basic_auth_hash"]="admin $caddy_hash"
-        log_success "Caddy admin hash generated (htpasswd format: admin:\$2a\$...)"
-    else
-        local caddy_hash
-        caddy_hash=$(collect_secret_field "admin_basic_auth_hash")
-        if [[ $? -ne 0 || -z "$caddy_hash" ]]; then
-            log_error "Failed to collect admin_basic_auth_hash"
-            return 1
-        fi
-        SECRETS["admin_basic_auth_hash"]="$caddy_hash"
-    fi
+    local caddy_hash
+    caddy_hash=$(_get_field "admin_basic_auth_hash") || { log_error "Failed to collect admin_basic_auth_hash"; return 1; }
+    SECRETS["admin_basic_auth_hash"]="$caddy_hash"
 
     # --- Cloudflare DNS token ------------------------------------------------
     echo ""
@@ -384,19 +345,7 @@ collect_secrets() {
     echo ""
 
     local cf_dns
-    if [[ "$AUTO_MODE" == "true" ]]; then
-        cf_dns="CHANGE_ME_DNS_TOKEN"
-        log_warn "Auto mode: Using placeholder - MUST be updated before deployment"
-    else
-        read -r -p "Cloudflare DNS API token: " cf_dns
-        if [[ "$SKIP_VALIDATION" != "true" && "$cf_dns" != "CHANGE_ME_DNS_TOKEN" ]]; then
-            if validate_cloudflare_token "$cf_dns" "dns" 2>/dev/null; then
-                log_success "✓ DNS token validated successfully"
-            else
-                log_warn "⚠ Token validation failed - continuing anyway"
-            fi
-        fi
-    fi
+    cf_dns=$(_get_field "caddy_cloudflare_dns_token") || { log_error "Failed to collect caddy_cloudflare_dns_token"; return 1; }
     SECRETS["caddy_cloudflare_dns_token"]="$cf_dns"
 
     # --- Cloudflare Firewall token ------------------------------------------
@@ -409,19 +358,7 @@ collect_secrets() {
     echo ""
 
     local cf_fw
-    if [[ "$AUTO_MODE" == "true" ]]; then
-        cf_fw="CHANGE_ME_FIREWALL_TOKEN"
-        log_warn "Auto mode: Using placeholder - MUST be updated before deployment"
-    else
-        read -r -p "Cloudflare Firewall API token: " cf_fw
-        if [[ "$SKIP_VALIDATION" != "true" && "$cf_fw" != "CHANGE_ME_FIREWALL_TOKEN" ]]; then
-            if validate_cloudflare_token "$cf_fw" "firewall" 2>/dev/null; then
-                log_success "✓ Firewall token validated successfully"
-            else
-                log_warn "⚠ Token validation failed - continuing anyway"
-            fi
-        fi
-    fi
+    cf_fw=$(_get_field "fail2ban_cloudflare_firewall_token") || { log_error "Failed to collect fail2ban_cloudflare_firewall_token"; return 1; }
     SECRETS["fail2ban_cloudflare_firewall_token"]="$cf_fw"
 
     # --- SMTP password ------------------------------------------------------
@@ -433,13 +370,11 @@ collect_secrets() {
 
     local smtp_pass
     if [[ "$AUTO_MODE" == "true" ]]; then
-        smtp_pass="CHANGE_ME_SMTP_PASSWORD"
-        log_warn "Auto mode: Using placeholder - configure later in .env"
+        smtp_pass=$(auto_generate_secret_field "smtp_password") || { log_error "Failed to generate smtp_password"; return 1; }
     else
         read -r -p "Enable email notifications now? (yes/no): " enable_email
         if [[ "$enable_email" == "yes" ]]; then
-            read -r -s -p "SMTP password: " smtp_pass
-            echo ""
+            smtp_pass=$(collect_secret_field "smtp_password") || { log_error "Failed to collect smtp_password"; return 1; }
             log_success "SMTP password configured"
         else
             smtp_pass="CHANGE_ME_SMTP_PASSWORD"
@@ -448,11 +383,12 @@ collect_secrets() {
     fi
     SECRETS["smtp_password"]="$smtp_pass"
 
-    # --- Backup passphrase (auto-generated) ---------------------------------
+    # --- Backup passphrase (always auto-generated) --------------------------
     echo ""
     log_info "Generating backup encryption passphrase..."
-    SECRETS["backup_passphrase"]=$(generate_secure_string 32)
-    log_success "Backup passphrase generated (32 characters)"
+    local backup_pass
+    backup_pass=$(auto_generate_secret_field "backup_passphrase") || { log_error "Failed to generate backup_passphrase"; return 1; }
+    SECRETS["backup_passphrase"]="$backup_pass"
 
     # --- Push notifications (optional) --------------------------------------
     if [[ "$SKIP_OPTIONAL" != "true" ]]; then
@@ -463,17 +399,20 @@ collect_secrets() {
         log_info "Get credentials from: https://bitwarden.com/host"
         echo ""
 
-        read -r -p "Configure push notifications? (yes/no): " do_push
-        if [[ "$do_push" == "yes" ]]; then
-            read -r -p "Push installation ID: "  push_id
-            read -r -p "Push installation key: " push_key
-            SECRETS["push_installation_id"]="$push_id"
-            SECRETS["push_installation_key"]="$push_key"
-            log_success "Push notifications configured"
+        if [[ "$AUTO_MODE" == "true" ]]; then
+            SECRETS["push_installation_id"]=$(auto_generate_secret_field "push_installation_id")
+            SECRETS["push_installation_key"]=$(auto_generate_secret_field "push_installation_key")
         else
-            SECRETS["push_installation_id"]="CHANGE_ME_OR_LEAVE_EMPTY"
-            SECRETS["push_installation_key"]="CHANGE_ME_OR_LEAVE_EMPTY"
-            log_info "Push notifications skipped"
+            read -r -p "Configure push notifications? (yes/no): " do_push
+            if [[ "$do_push" == "yes" ]]; then
+                SECRETS["push_installation_id"]=$(collect_secret_field "push_installation_id") || return 1
+                SECRETS["push_installation_key"]=$(collect_secret_field "push_installation_key") || return 1
+                log_success "Push notifications configured"
+            else
+                SECRETS["push_installation_id"]="CHANGE_ME_OR_LEAVE_EMPTY"
+                SECRETS["push_installation_key"]="CHANGE_ME_OR_LEAVE_EMPTY"
+                log_info "Push notifications skipped"
+            fi
         fi
     else
         SECRETS["push_installation_id"]="CHANGE_ME_OR_LEAVE_EMPTY"
@@ -511,7 +450,7 @@ write_secrets() {
         printf '# Encrypted with: SOPS + Age\n\n'
         printf '# VaultWarden admin password (Argon2id hash)\n'
         printf 'admin_token: %s\n\n' "$SECRET_admin_token"
-        printf '# Caddy admin password (htpasswd format: admin:$2a$14$...)\n'
+        printf '# Caddy admin password (htpasswd format: admin:$2y$14$...)\n'
         printf 'admin_basic_auth_hash: %s\n\n' "$SECRET_admin_basic_auth_hash"
         printf '# SMTP password for email notifications\n'
         printf 'smtp_password: %s\n\n' "$SECRET_smtp_password"
@@ -567,13 +506,6 @@ write_secrets() {
 main() {
     log_header "VaultWarden Secrets Setup (Security Hardened)"
 
-    # FIX #1: The standalone --export-recovery-kit path has been removed from
-    # this script. setup-secrets.sh is the first-time creation tool; recovery
-    # kit export is the responsibility of edit-secrets.sh. The flag is still
-    # accepted (for backwards compatibility) and is forwarded to the
-    # post-setup offer_recovery_kit_export() call at the end of main().
-    # Canonical standalone export: ./edit-secrets.sh --export-recovery-kit
-
     echo ""
     log_info "This script will configure all secrets for VaultWarden deployment"
     log_info "Secrets will be encrypted with SOPS + Age encryption"
@@ -617,7 +549,7 @@ main() {
     log_header "Secrets Setup Complete!"
     echo ""
     log_success "✅ Secrets encrypted and stored in: $SECRETS_FILE"
-    log_success "✅ Caddy admin hash in htpasswd format: admin:\$2a\$14\$..."
+    log_success "✅ Caddy admin hash in htpasswd format: admin:\$2y\$14\$..."
     log_success "✅ VaultWarden admin hash in Argon2id format"
     log_success "✅ All secrets protected with Age encryption"
     echo ""
@@ -633,9 +565,6 @@ main() {
     log_warn "⚠️  If you used --auto mode, save the generated passwords above!"
     echo ""
 
-    # Offer to export the recovery kit since the secrets have just been written.
-    # offer_recovery_kit_export() is the canonical function in lib/secrets.sh;
-    # no subprocess or second entry-point needed (Fix #1).
     if [[ "$DRY_RUN" == "false" ]]; then
         offer_recovery_kit_export "$EXPORT_RECOVERY_KIT"
     fi
