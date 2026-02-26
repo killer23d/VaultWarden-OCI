@@ -13,21 +13,27 @@ source "lib/docker.sh"
 source "lib/crypto.sh"
 source "lib/backup_utils.sh"
 
-# Safe cleanup registry — mirrors the pattern from backup.sh so restore_archive
-# can register temp dirs without overwriting any existing EXIT trap.
+# Safe cleanup registry — mirrors the pattern from backup.sh.
 CLEANUP_DIRS=()
 CLEANUP_FILES=()
 register_cleanup_dir()  { CLEANUP_DIRS+=("$1"); }
 register_cleanup_file() { CLEANUP_FILES+=("$1"); }
+
+# FIX [ISSUE 1]: Use the "${arr[@]+"${arr[@]}"}" expansion for both arrays so
+# that an empty array never triggers "unbound variable" under set -u on bash 3.2.
 perform_cleanup() {
     local f
     for f in "${CLEANUP_FILES[@]+"${CLEANUP_FILES[@]}"}"; do
         rm -f "$f" 2>/dev/null || true
     done
     local i
-    for (( i=${#CLEANUP_DIRS[@]}-1; i>=0; i-- )); do
-        rm -rf "${CLEANUP_DIRS[$i]}" 2>/dev/null || true
-    done
+    # FIX [ISSUE 1]: Guard added here — was previously missing for CLEANUP_DIRS.
+    local _ndirs="${#CLEANUP_DIRS[@]}"
+    if (( _ndirs > 0 )); then
+        for (( i=_ndirs-1; i>=0; i-- )); do
+            rm -rf "${CLEANUP_DIRS[$i]}" 2>/dev/null || true
+        done
+    fi
 }
 trap perform_cleanup EXIT
 
@@ -191,17 +197,11 @@ select_backup_interactively() {
 
 # ---------------------------------------------------------------------------
 # resolve_backup_file
-# Handles four cases:
-#   1. --latest [--type TYPE]  : find newest .age by mtime across type(s)
-#   2. --file FILE             : use exact path, infer type from path
-#   3. --type TYPE             : find newest .age in that type dir by mtime
-#   4. neither                 : fall through to interactive selection
 # ---------------------------------------------------------------------------
 resolve_backup_file() {
     # Case 1: --latest flag — find most recent backup by mtime
     if [[ "$USE_LATEST" == "true" ]]; then
         if [[ -n "$RESTORE_TYPE" ]]; then
-            # --latest --type TYPE: newest in the specified type directory
             local backup_dir="$PROJECT_ROOT/backups/$RESTORE_TYPE"
             BACKUP_FILE=$(_find_latest_backup "$backup_dir")
             if [[ -z "$BACKUP_FILE" ]]; then
@@ -209,7 +209,6 @@ resolve_backup_file() {
                 return 1
             fi
         else
-            # --latest alone: newest across ALL backup types
             local candidate latest_time=0
             local backup_types=("db" "full" "emergency")
             for btype in "${backup_types[@]}"; do
@@ -260,7 +259,6 @@ resolve_backup_file() {
             return 1
         fi
 
-        # Sort by mtime, not lexicographically, for correctness
         BACKUP_FILE=$(_find_latest_backup "$backup_dir")
         if [[ -z "$BACKUP_FILE" ]]; then
             log_error "No backup files found in: $backup_dir"
@@ -295,8 +293,6 @@ create_restore_point_backup() {
 
     log_info "Creating restore point backup for safety..."
 
-    # --type emergency only; --email is a boolean toggle with no value so we
-    # omit it entirely (email is off by default in backup.sh).
     if ./backup.sh --type emergency; then
         log_success "Restore point backup completed"
         return 0
@@ -329,8 +325,11 @@ prepare_services_for_restore() {
 # ---------------------------------------------------------------------------
 # restore_database
 # Decrypt → verify → swap. Live DB is never touched until both checks pass.
-# temp_db is created inside a registered temp_dir so the cleanup registry
-# handles it on any crash path.
+# FIX [ISSUE 4]:  chown now uses PUID:PGID from the environment so the
+#                 Vaultwarden container can actually read the restored file.
+#                 get_real_user() returns $SUDO_USER (the human admin), not the
+#                 service account the container runs as.
+# FIX [ISSUE 11]: Uses pre-computed RESTORE_TS for safety-copy filename.
 # ---------------------------------------------------------------------------
 restore_database() {
     if [[ "$RESTORE_TYPE" != "db" ]]; then
@@ -355,7 +354,6 @@ restore_database() {
         return 1
     fi
 
-    # Create temp dir registered with cleanup registry so temp_db is covered
     local temp_dir
     temp_dir=$(mktemp -d)
     register_cleanup_dir "$temp_dir"
@@ -375,7 +373,8 @@ restore_database() {
 
     # Both checks passed — safe to swap
     if [[ -f "$db_path" ]]; then
-        local backup_db="$db_path.pre-restore-$(date +%Y%m%d-%H%M%S)"
+        # FIX [ISSUE 11]: Use pre-computed RESTORE_TS (set in main) for all safety copies.
+        local backup_db="$db_path.pre-restore-${RESTORE_TS}"
         if ! mv "$db_path" "$backup_db"; then
             log_error "Failed to move existing database to safety"
             return 1
@@ -388,21 +387,24 @@ restore_database() {
         return 1
     fi
 
-    local real_user real_group
-    real_user=$(get_real_user)
-    real_group=$(id -g -n "$real_user")
+    # FIX [ISSUE 4]: Use PUID:PGID from the loaded environment so the container
+    # service account (not the admin's login account) owns the restored file.
+    local db_uid="${PUID:-1001}"
+    local db_gid="${PGID:-1001}"
 
-    if ! chown "$real_user:$real_group" "$db_path" || ! chmod 644 "$db_path"; then
-        log_error "Failed to set database permissions"
+    if ! chown "${db_uid}:${db_gid}" "$db_path" || ! chmod 644 "$db_path"; then
+        log_error "Failed to set database permissions (uid=${db_uid} gid=${db_gid})"
         return 1
     fi
 
-    log_success "Database restored successfully"
+    log_success "Database restored successfully (owner: ${db_uid}:${db_gid})"
     return 0
 }
 
 # ---------------------------------------------------------------------------
 # restore_archive
+# FIX [ISSUE 4]:  data directory chown uses PUID:PGID, not get_real_user().
+# FIX [ISSUE 11]: All safety-copy filenames use pre-computed RESTORE_TS.
 # ---------------------------------------------------------------------------
 restore_archive() {
     if [[ "$RESTORE_TYPE" != "full" && "$RESTORE_TYPE" != "emergency" ]]; then
@@ -432,7 +434,8 @@ restore_archive() {
     for config_file in "${config_files[@]}"; do
         if [[ -f "$temp_dir/$config_file" ]]; then
             if [[ -f "$PROJECT_ROOT/$config_file" ]]; then
-                local backup_config="$PROJECT_ROOT/$config_file.pre-restore-$(date +%Y%m%d-%H%M%S)"
+                # FIX [ISSUE 11]: Use pre-computed RESTORE_TS — no per-file date call.
+                local backup_config="$PROJECT_ROOT/$config_file.pre-restore-${RESTORE_TS}"
                 mv "$PROJECT_ROOT/$config_file" "$backup_config" || log_warn "Failed to backup existing $config_file"
             fi
             if ! cp "$temp_dir/$config_file" "$PROJECT_ROOT/"; then
@@ -449,7 +452,8 @@ restore_archive() {
     for config_dir in "${config_dirs[@]}"; do
         if [[ -d "$temp_dir/$config_dir" ]]; then
             if [[ -d "$PROJECT_ROOT/$config_dir" ]]; then
-                local backup_cdir="$PROJECT_ROOT/$config_dir.pre-restore-$(date +%Y%m%d-%H%M%S)"
+                # FIX [ISSUE 11]: Pre-computed timestamp.
+                local backup_cdir="$PROJECT_ROOT/$config_dir.pre-restore-${RESTORE_TS}"
                 mv "$PROJECT_ROOT/$config_dir" "$backup_cdir" || log_warn "Failed to backup existing $config_dir"
             fi
             if ! cp -r "$temp_dir/$config_dir" "$PROJECT_ROOT/"; then
@@ -468,7 +472,8 @@ restore_archive() {
         state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
 
         if [[ -d "$state_dir/data" ]]; then
-            local backup_data="$state_dir/data.pre-restore-$(date +%Y%m%d-%H%M%S)"
+            # FIX [ISSUE 11]: Pre-computed timestamp.
+            local backup_data="$state_dir/data.pre-restore-${RESTORE_TS}"
             mv "$state_dir/data" "$backup_data" || log_warn "Failed to backup existing data directory"
         fi
 
@@ -482,16 +487,16 @@ restore_archive() {
             return 1
         fi
 
-        local real_user real_group
-        real_user=$(get_real_user)
-        real_group=$(id -g -n "$real_user")
+        # FIX [ISSUE 4]: Use PUID:PGID so the container service account owns the data.
+        local db_uid="${PUID:-1001}"
+        local db_gid="${PGID:-1001}"
 
-        if ! chown -R "$real_user:$real_group" "$state_dir/data"; then
-            log_error "Failed to set data directory ownership"
+        if ! chown -R "${db_uid}:${db_gid}" "$state_dir/data"; then
+            log_error "Failed to set data directory ownership (uid=${db_uid} gid=${db_gid})"
             return 1
         fi
 
-        log_success "Data directory restored successfully"
+        log_success "Data directory restored successfully (owner: ${db_uid}:${db_gid})"
     fi
 
     # Restore secrets (emergency only)
@@ -499,7 +504,8 @@ restore_archive() {
         log_info "Restoring secrets (emergency restore)..."
 
         if [[ -d "$PROJECT_ROOT/secrets" ]]; then
-            local backup_secrets="$PROJECT_ROOT/secrets.pre-restore-$(date +%Y%m%d-%H%M%S)"
+            # FIX [ISSUE 11]: Pre-computed timestamp.
+            local backup_secrets="$PROJECT_ROOT/secrets.pre-restore-${RESTORE_TS}"
             mv "$PROJECT_ROOT/secrets" "$backup_secrets" || log_warn "Failed to backup existing secrets"
         fi
 
@@ -522,9 +528,7 @@ restore_archive() {
 
 # ---------------------------------------------------------------------------
 # start_services_after_restore
-# Uses --force which is the confirmed supported flag in startup.sh.
-# The original --force-restart was never valid and silently left services
-# down after every restore.
+# Calls startup.sh --force (the correct, documented flag after FIX [ISSUE 2]).
 # ---------------------------------------------------------------------------
 start_services_after_restore() {
     if [[ "$DRY_RUN" == "true" ]]; then
@@ -545,10 +549,6 @@ start_services_after_restore() {
 
 # ---------------------------------------------------------------------------
 # validate_restore_health
-# Polls every 5s for up to 10 attempts (50s max), exits early on success.
-# Uses --quiet only (not --comprehensive) — slow extra checks like config
-# validation and secret decryption are irrelevant to post-restore service
-# health and can produce false negatives.
 # ---------------------------------------------------------------------------
 validate_restore_health() {
     if [[ "$DRY_RUN" == "true" ]]; then
@@ -580,7 +580,6 @@ validate_restore_health() {
 
 # ---------------------------------------------------------------------------
 # generate_restore_summary
-# Uses printf throughout to avoid echo -e backslash fragility.
 # ---------------------------------------------------------------------------
 generate_restore_summary() {
     local backup_verification="$1"
@@ -661,6 +660,7 @@ generate_restore_summary() {
 
 # ---------------------------------------------------------------------------
 # main
+# FIX [ISSUE 11]: RESTORE_TS computed once here and exported for all functions.
 # ---------------------------------------------------------------------------
 main() {
     log_header "VaultWarden-OCI Restore Manager"
@@ -681,6 +681,10 @@ main() {
         log_info "Cannot decrypt backups without the Age key"
         exit 1
     fi
+
+    # FIX [ISSUE 11]: Single timestamp for ALL pre-restore safety copies in this run.
+    RESTORE_TS="$(date +%Y%m%d-%H%M%S)"
+    export RESTORE_TS
 
     # Track restoration results (1 = not yet run / failed, 0 = success)
     local backup_verification_result=1
