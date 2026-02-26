@@ -323,13 +323,51 @@ prepare_services_for_restore() {
 }
 
 # ---------------------------------------------------------------------------
+# purge_wal_files DB_DIR
+# FIX [WAL BUG]: Deletes orphaned SQLite WAL and SHM sidecar files from
+# DB_DIR before the restored database is placed there.  If these files are
+# left on disk, SQLite's WAL recovery logic replays the (newer, incompatible)
+# transactions from the running system into the older restored database the
+# moment Vaultwarden opens it, causing instant structural corruption
+# ("database disk image is malformed").  Deleting them is always safe
+# because the container is stopped before this function is called —
+# there is no in-progress writer that could own a valid WAL.
+# ---------------------------------------------------------------------------
+purge_wal_files() {
+    local db_dir="$1"
+    local wal_file="$db_dir/db.sqlite3-wal"
+    local shm_file="$db_dir/db.sqlite3-shm"
+    local purged=false
+
+    if [[ -f "$wal_file" ]]; then
+        log_info "Removing orphaned WAL file to prevent SQLite replay corruption: $(basename "$wal_file")"
+        rm -f "$wal_file"
+        purged=true
+    fi
+    if [[ -f "$shm_file" ]]; then
+        log_info "Removing orphaned SHM file: $(basename "$shm_file")"
+        rm -f "$shm_file"
+        purged=true
+    fi
+
+    if [[ "$purged" == "true" ]]; then
+        log_success "SQLite WAL/SHM files purged — restored DB will start clean"
+    else
+        log_info "No orphaned SQLite WAL/SHM files found"
+    fi
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # restore_database
-# Decrypt → verify → swap. Live DB is never touched until both checks pass.
+# Decrypt → verify → purge WAL → swap. Live DB is never touched until
+# both checks pass AND orphaned WAL files are removed.
 # FIX [ISSUE 4]:  chown now uses PUID:PGID from the environment so the
 #                 Vaultwarden container can actually read the restored file.
 #                 get_real_user() returns $SUDO_USER (the human admin), not the
 #                 service account the container runs as.
 # FIX [ISSUE 11]: Uses pre-computed RESTORE_TS for safety-copy filename.
+# FIX [WAL BUG]:  Calls purge_wal_files() before swapping in restored DB.
 # ---------------------------------------------------------------------------
 restore_database() {
     if [[ "$RESTORE_TYPE" != "db" ]]; then
@@ -338,6 +376,7 @@ restore_database() {
 
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would restore database from: $(basename "$BACKUP_FILE")"
+        log_info "[DRY RUN] Would purge orphaned WAL/SHM files from data directory"
         return 0
     fi
 
@@ -371,7 +410,14 @@ restore_database() {
         return 1
     fi
 
-    # Both checks passed — safe to swap
+    # FIX [WAL BUG]: Both checks passed — purge orphaned WAL/SHM files BEFORE
+    # swapping in the restored DB so SQLite starts with a clean slate.
+    if ! purge_wal_files "$db_dir"; then
+        log_error "Failed to purge WAL/SHM files — aborting to prevent corruption"
+        return 1
+    fi
+
+    # Safe to swap
     if [[ -f "$db_path" ]]; then
         # FIX [ISSUE 11]: Use pre-computed RESTORE_TS (set in main) for all safety copies.
         local backup_db="$db_path.pre-restore-${RESTORE_TS}"
@@ -405,6 +451,10 @@ restore_database() {
 # restore_archive
 # FIX [ISSUE 4]:  data directory chown uses PUID:PGID, not get_real_user().
 # FIX [ISSUE 11]: All safety-copy filenames use pre-computed RESTORE_TS.
+# FIX [WAL BUG]:  Calls purge_wal_files() after restoring the data directory
+#                 so that any WAL files bundled inside a full/emergency archive
+#                 (which are themselves stale relative to the restored DB state)
+#                 are also removed before Vaultwarden starts.
 # ---------------------------------------------------------------------------
 restore_archive() {
     if [[ "$RESTORE_TYPE" != "full" && "$RESTORE_TYPE" != "emergency" ]]; then
@@ -413,6 +463,7 @@ restore_archive() {
 
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would restore $RESTORE_TYPE archive from: $(basename "$BACKUP_FILE")"
+        log_info "[DRY RUN] Would purge orphaned WAL/SHM files from restored data directory"
         return 0
     fi
 
@@ -484,6 +535,16 @@ restore_archive() {
 
         if ! cp -r "$temp_dir/data" "$state_dir/"; then
             log_error "Failed to restore data directory"
+            return 1
+        fi
+
+        # FIX [WAL BUG]: Purge any WAL/SHM files that were bundled inside the
+        # archive or that remained in the restored data directory.  The backup
+        # was created while the container was stopped (clean checkpoint), so
+        # any WAL file in the archive is already fully committed to the main DB
+        # file and does not need to be replayed again.
+        if ! purge_wal_files "$state_dir/data"; then
+            log_error "Failed to purge WAL/SHM files from restored data directory"
             return 1
         fi
 

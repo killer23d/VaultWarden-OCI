@@ -13,6 +13,10 @@
 #   mailpit is the community-standard drop-in: same ports, ARM64-native)
 # - logging: stanzas added to all services (larger caps than prod for
 #   debug verbosity, but still bounded to prevent local disk fill)
+# - ALL exposed ports now bind to 127.0.0.1 exclusively (not 0.0.0.0)
+#   to prevent accidental public exposure of the Caddy Admin API (2019),
+#   Mailpit web UI (8025), and debug SMTP (1025/1026) if the OCI VCN
+#   Security List is ever misconfigured.
 # =============================================================================
 
 services:
@@ -26,9 +30,9 @@ services:
       SIGNUPS_ALLOWED: true
       # Reduce security for testing
       PASSWORD_ITERATIONS: 100000
-    # Expose VaultWarden directly for testing
+    # Expose VaultWarden directly for testing (loopback only)
     ports:
-      - "8080:80"
+      - "127.0.0.1:8080:80"
     # Development volume mounts
     volumes:
       # Allow live editing of web vault for development
@@ -45,13 +49,13 @@ services:
 
   caddy:
     environment:
-      # Development logging
-      CADDY_ADMIN: 0.0.0.0:2019
-    # Expose Caddy admin API
+      # Development logging — bind admin API to loopback only
+      CADDY_ADMIN: 127.0.0.1:2019
+    # Expose Caddy ports for testing (loopback only)
     ports:
-      - "8081:80"
-      - "8443:443"
-      - "2019:2019"  # Caddy admin API
+      - "127.0.0.1:8081:80"
+      - "127.0.0.1:8443:443"
+      - "127.0.0.1:2019:2019"  # Caddy admin API — unauthenticated, loopback only
     # Remove resource limits for development
     deploy:
       resources: {}
@@ -69,9 +73,9 @@ services:
       - POSTFIX_smtpd_tls_security_level=may
       - POSTFIX_debug_peer_level=2  # Enhanced debugging
       - POSTFIX_smtp_sasl_auth_enable=yes
-    # Expose SMTP port for testing
+    # Expose SMTP port for testing (loopback only)
     ports:
-      - "1025:587"  # Expose submission port for external testing
+      - "127.0.0.1:1025:587"  # Submission port — loopback only
     # Development volume mounts
     volumes:
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/postfix:/var/log/postfix
@@ -218,8 +222,8 @@ services:
     container_name: vaultwarden_mailpit
     restart: unless-stopped
     ports:
-      - "8025:8025"   # Web UI (same as mailhog)
-      - "1026:1025"   # SMTP server (same as mailhog)
+      - "127.0.0.1:8025:8025"   # Web UI (loopback only — unauthenticated by default)
+      - "127.0.0.1:1026:1025"   # SMTP server (loopback only)
     networks:
       - vaultwarden
     profiles:
@@ -261,7 +265,7 @@ services:
 # docker compose --profile email-capture up -d
 #   - Adds Mailpit for email capture and inspection
 #   - Useful for testing without sending real emails
-#   - Web UI at http://localhost:8025
+#   - Web UI at http://localhost:8025 (SSH tunnel required from remote host)
 
 # =============================================================================
 # DEVELOPMENT EMAIL TESTING
@@ -285,10 +289,10 @@ services:
 # 6. Test fail2ban email integration:
 #    docker compose exec fail2ban fail2ban-client set vaultwarden-auth banip 192.168.1.100
 
-# 7. Access services:
-#    - VaultWarden:  http://localhost:8080
-#    - Caddy Admin:  http://localhost:2019
-#    - Mailpit UI:   http://localhost:8025 (if using email-capture profile)
+# 7. Access services (SSH tunnel required from remote host):
+#    - VaultWarden:  http://localhost:8080  (ssh -L 8080:localhost:8080 user@host)
+#    - Caddy Admin:  http://localhost:2019  (ssh -L 2019:localhost:2019 user@host)
+#    - Mailpit UI:   http://localhost:8025  (ssh -L 8025:localhost:8025 user@host)
 
 # =============================================================================
 # POSTFIX DEBUGGING
@@ -312,7 +316,7 @@ services:
 # =============================================================================
 
 # WARNING: This override file reduces security for development convenience:
-# 1. Exposes additional ports
+# 1. Exposes additional ports (loopback-only — use SSH port-forwarding to access)
 # 2. Relaxes TLS certificate checking
 # 3. Enables signups
 # 4. Reduces password iterations
