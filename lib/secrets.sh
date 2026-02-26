@@ -240,6 +240,130 @@ secure_secrets_file() {
 }
 
 # ---------------------------------------------------------------------------
+# collect_secret_field  (FIX #2 — single source of truth for per-field logic)
+#
+# Collects, validates, and hashes a single secret field. Outputs the final
+# value (already hashed where applicable) on stdout. Returns 1 on error.
+#
+# Supported fields:
+#   admin_token                      — prompts for password, Argon2id-hashes it
+#   admin_basic_auth_hash            — prompts for password, bcrypt-hashes it
+#   caddy_cloudflare_dns_token       — prompts for token, validates vs CF API
+#   fail2ban_cloudflare_firewall_token — prompts for token, validates vs CF API
+#   smtp_password                    — prompts silently, no hashing
+#   push_installation_id             — plain read
+#   push_installation_key            — plain read
+#   backup_passphrase                — auto-generated; value printed to stderr
+#
+# Usage:
+#   new_value=$(collect_secret_field "admin_token") || exit 1
+# ---------------------------------------------------------------------------
+collect_secret_field() {
+    local field="$1"
+
+    case "$field" in
+
+        admin_token)
+            log_info "Collecting VaultWarden admin password (will be Argon2id hashed)" >&2
+            local raw_pass
+            raw_pass=$(prompt_password_with_confirmation "VaultWarden admin password" 12)
+            log_info "Generating Argon2id hash..." >&2
+            local hashed
+            hashed=$(generate_argon2_hash "$raw_pass")
+            if [[ -z "$hashed" ]]; then
+                log_error "Argon2id hash generation failed" >&2
+                return 1
+            fi
+            log_success "Argon2id hash generated" >&2
+            printf '%s' "$hashed"
+            ;;
+
+        admin_basic_auth_hash)
+            log_info "Collecting Caddy admin password (will be bcrypt hashed, htpasswd format)" >&2
+            local raw_pass
+            raw_pass=$(prompt_password_with_confirmation "Caddy admin password" 12)
+            log_info "Generating bcrypt hash..." >&2
+            local bcrypt_hash
+            bcrypt_hash=$(generate_bcrypt_hash "$raw_pass")
+            if [[ -z "$bcrypt_hash" ]]; then
+                log_error "bcrypt hash generation failed. Ensure apache2-utils is installed." >&2
+                return 1
+            fi
+            if [[ ! "$bcrypt_hash" =~ ^\$2[aby]\$[0-9]{2}\$ ]]; then
+                log_error "Generated bcrypt hash has invalid format: $bcrypt_hash" >&2
+                return 1
+            fi
+            log_success "bcrypt hash generated (htpasswd format: admin:\$2a\$...)" >&2
+            printf '%s' "admin $bcrypt_hash"
+            ;;
+
+        caddy_cloudflare_dns_token)
+            log_info "Required Permissions: Zone:DNS:Edit + Zone:Zone:Read" >&2
+            log_info "Create at: https://dash.cloudflare.com/profile/api-tokens" >&2
+            local token
+            read -r -p "Cloudflare DNS API token: " token
+            if [[ -n "$token" && "$token" != CHANGE_ME* ]]; then
+                if validate_cloudflare_token "$token" "dns" 2>/dev/null; then
+                    log_success "DNS token validated successfully" >&2
+                else
+                    log_warn "Token validation failed - continuing anyway" >&2
+                fi
+            fi
+            printf '%s' "$token"
+            ;;
+
+        fail2ban_cloudflare_firewall_token)
+            log_info "Required Permissions: Zone:Firewall Services:Edit" >&2
+            log_info "Create at: https://dash.cloudflare.com/profile/api-tokens" >&2
+            local token
+            read -r -p "Cloudflare Firewall API token: " token
+            if [[ -n "$token" && "$token" != CHANGE_ME* ]]; then
+                if validate_cloudflare_token "$token" "firewall" 2>/dev/null; then
+                    log_success "Firewall token validated successfully" >&2
+                else
+                    log_warn "Token validation failed - continuing anyway" >&2
+                fi
+            fi
+            printf '%s' "$token"
+            ;;
+
+        smtp_password)
+            local pw
+            read -r -s -p "SMTP password: " pw
+            echo "" >&2
+            printf '%s' "$pw"
+            ;;
+
+        push_installation_id)
+            log_info "Get credentials from: https://bitwarden.com/host" >&2
+            local val
+            read -r -p "Push installation ID: " val
+            printf '%s' "$val"
+            ;;
+
+        push_installation_key)
+            local val
+            read -r -p "Push installation key: " val
+            printf '%s' "$val"
+            ;;
+
+        backup_passphrase)
+            local passphrase
+            passphrase=$(generate_secure_string 32)
+            log_warn "Auto-generated backup passphrase (32 chars) — save it if needed:" >&2
+            log_warn "  $passphrase" >&2
+            printf '%s' "$passphrase"
+            ;;
+
+        *)
+            log_error "collect_secret_field: unknown field '$field'" >&2
+            return 1
+            ;;
+    esac
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # Recovery Kit Generation
 # ---------------------------------------------------------------------------
 generate_recovery_kit() {
@@ -316,11 +440,8 @@ generate_recovery_kit() {
     fi
 
     # 5. Generate Content
-    # FIX: Pre-create the output file with 600 permissions BEFORE any plaintext
-    # is written. Without this, the shell creates the file at the current umask
-    # (typically 022 → 644) and it remains world-readable until the chmod 600
-    # at the end of this function — a window that exposes the Age private key
-    # and all decrypted secrets to any other process on the system.
+    # Pre-create the output file with 600 permissions BEFORE any plaintext
+    # is written to avoid a world-readable window at the default umask.
     if ! install -m 600 /dev/null "$output_file"; then
         log_error "Failed to create output file with secure permissions: $output_file"
         return 1
