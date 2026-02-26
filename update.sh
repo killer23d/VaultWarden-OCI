@@ -52,7 +52,8 @@ SAFETY FEATURES:
     - Health checks before and after updates
     - Automatic rollback attempt via restore.sh --latest if post-update
       health check fails (always selects the freshest pre-update snapshot)
-    - Email notifications for update status
+    - Email notifications for update status (single summary email per run;
+      the pre-update backup does NOT send its own email even with --email)
 
 EXIT CODES:
     0  - Update completed successfully, all health checks passed
@@ -77,6 +78,12 @@ done
 
 # ---------------------------------------------------------------------------
 # create_pre_update_backup
+#
+# FIX #3: --email is intentionally NOT forwarded to backup.sh here.
+# When update.sh --email is used the user expects exactly one summary
+# email for the whole run. If backup.sh also emailed, two emails would
+# fire for a single update. The update summary from generate_update_summary()
+# already covers the backup outcome.
 # ---------------------------------------------------------------------------
 create_pre_update_backup() {
     if [[ "$BACKUP_BEFORE_UPDATE" != "true" ]]; then
@@ -91,10 +98,9 @@ create_pre_update_backup() {
 
     log_info "Creating pre-update backup for safety..."
 
-    local backup_args=(--type full)
-    [[ "$EMAIL_NOTIFY" == "true" ]] && backup_args+=(--email)
-
-    if ./backup.sh "${backup_args[@]}"; then
+    # NOTE: --email is deliberately omitted. The update summary email covers
+    # the full run; we do not want backup.sh to send a separate email here.
+    if ./backup.sh --type full; then
         log_success "Pre-update backup completed successfully"
         return 0
     else
@@ -180,27 +186,6 @@ update_containers() {
 }
 
 # ---------------------------------------------------------------------------
-# pre_update_health_check — informational only, never blocks the update
-# ---------------------------------------------------------------------------
-pre_update_health_check() {
-    log_info "Performing pre-update health check..."
-
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would perform pre-update health check"
-        return 0
-    fi
-
-    if ./health.sh --quiet; then
-        log_success "Pre-update health check passed"
-        return 0
-    else
-        log_warn "Pre-update health check reported issues (non-fatal - see above)"
-        log_info "Continuing with update - the pre-update backup provides the safety net"
-        return 1
-    fi
-}
-
-# ---------------------------------------------------------------------------
 # restart_services_after_update
 # Uses --force (the correct, documented flag per startup.sh after FIX [ISSUE 2]).
 # ---------------------------------------------------------------------------
@@ -222,28 +207,6 @@ restart_services_after_update() {
         return 0
     else
         log_error "Failed to restart services after update"
-        return 1
-    fi
-}
-
-# ---------------------------------------------------------------------------
-# post_update_health_check
-# ---------------------------------------------------------------------------
-post_update_health_check() {
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would perform post-update health check (wait: ${POST_UPDATE_WAIT_SECONDS}s)"
-        return 0
-    fi
-
-    log_info "Performing post-update health check..."
-    log_info "Waiting ${POST_UPDATE_WAIT_SECONDS}s for services to stabilize after restart..."
-    sleep "$POST_UPDATE_WAIT_SECONDS"
-
-    if ./health.sh --quiet; then
-        log_success "Post-update health check passed"
-        return 0
-    else
-        log_error "Post-update health check failed - update may have caused issues"
         return 1
     fi
 }
@@ -273,9 +236,6 @@ attempt_rollback() {
         return 1
     fi
 
-    # FIX [ISSUE 14]: --latest ensures we always get the newest backup by mtime,
-    # not by lexicographic filename sort. Combined with --type full, this
-    # restricts selection to full backups (skips db/emergency types).
     if ./restore.sh --latest --type full --force --no-backup; then
         log_success "Rollback completed - services restored to pre-update state"
         log_warn "Please investigate why the update caused health check failures"
@@ -393,6 +353,16 @@ generate_update_summary() {
 
 # ---------------------------------------------------------------------------
 # main
+#
+# FIX #4: pre_update_health_check() and post_update_health_check() wrapper
+# functions have been removed and their logic inlined here.
+#
+# Pre-check  — informational only, never blocks the update. The non-fatal
+#              semantics and context message are preserved inline.
+# Post-check — the POST_UPDATE_WAIT_SECONDS stabilisation sleep is preserved
+#              inline before calling ./health.sh --quiet. This was the
+#              non-trivial behaviour that the wrapper added beyond the bare
+#              health.sh call, and it must not be lost.
 # ---------------------------------------------------------------------------
 main() {
     log_header "VaultWarden-OCI Update Manager"
@@ -420,9 +390,17 @@ main() {
     # -----------------------------------------------------------------------
     log_info "=== Phase 1: Pre-Update Preparation ==="
 
-    # Health check is informational only
-    if pre_update_health_check; then
+    # Pre-update health check — informational only, never blocks the update.
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would perform pre-update health check"
         pre_health_result=0
+    elif ./health.sh --quiet; then
+        log_success "Pre-update health check passed"
+        pre_health_result=0
+    else
+        log_warn "Pre-update health check reported issues (non-fatal - see above)"
+        log_info "Continuing with update - the pre-update backup provides the safety net"
+        # pre_health_result stays 1 (issues detected) but we do not exit
     fi
 
     # Backup IS fatal: refuse to proceed without a safety snapshot
@@ -466,13 +444,23 @@ main() {
     fi
 
     if [[ "$restart_result" == "0" ]]; then
-        if post_update_health_check; then
+        # Post-update health check — wait for stabilisation, then check.
+        if [[ "$DRY_RUN" == "true" ]]; then
+            log_info "[DRY RUN] Would perform post-update health check (wait: ${POST_UPDATE_WAIT_SECONDS}s)"
             post_health_result=0
         else
-            log_error "Post-update health check failed — attempting automatic rollback"
-            rollback_attempted=true
-            if attempt_rollback; then
-                rollback_result=0
+            log_info "Performing post-update health check..."
+            log_info "Waiting ${POST_UPDATE_WAIT_SECONDS}s for services to stabilize after restart..."
+            sleep "$POST_UPDATE_WAIT_SECONDS"
+            if ./health.sh --quiet; then
+                log_success "Post-update health check passed"
+                post_health_result=0
+            else
+                log_error "Post-update health check failed — attempting automatic rollback"
+                rollback_attempted=true
+                if attempt_rollback; then
+                    rollback_result=0
+                fi
             fi
         fi
     fi
