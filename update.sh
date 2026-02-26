@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
 # update.sh - System and container update script with enhanced safety
-# ENHANCED: Standardized error handling - functions return, main() decides exit strategy
-# All functions return exit codes, main() collects status and determines final exit
 
 set -euo pipefail
 
@@ -23,6 +21,10 @@ DRY_RUN=false
 EMAIL_NOTIFY=false
 RESTART_AFTER=true
 
+# How long to wait for services to stabilize before post-update health check.
+# Override from environment: POST_UPDATE_WAIT_SECONDS=60 ./update.sh
+POST_UPDATE_WAIT_SECONDS="${POST_UPDATE_WAIT_SECONDS:-30}"
+
 show_help() {
     cat << 'EOF'
 VaultWarden-OCI Update Script with Safety Checks
@@ -32,12 +34,12 @@ USAGE:
 
 OPTIONS:
     --system                Update system packages (default: containers only)
-    --no-backup            Skip backup before update (not recommended)
-    --no-restart           Skip service restart after update
-    --force                Force update even if no new versions available
-    --dry-run              Show what would be updated without executing
-    --email                Send email notification on completion
-    --help                 Show this help
+    --no-backup             Skip backup before update (not recommended)
+    --no-restart            Skip service restart after update
+    --force                 Force update even if no new versions available
+    --dry-run               Show what would be updated without executing
+    --email                 Send email notification on completion
+    --help                  Show this help
 
 EXAMPLES:
     ./update.sh                          # Update containers with backup
@@ -48,40 +50,34 @@ EXAMPLES:
 SAFETY FEATURES:
     - Automatic backup before updates (can be disabled with --no-backup)
     - Health checks before and after updates
-    - Rollback capability if health checks fail
+    - Automatic rollback attempt via restore.sh if post-update health fails
     - Email notifications for update status
+
+EXIT CODES:
+    0  - Update completed successfully, all health checks passed
+    1  - Update failed or critical phase error
+    2  - Update completed but post-update health check reported issues
 EOF
 }
 
 # Argument Parsing
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --system)    UPDATE_SYSTEM=true;        shift ;;
-        --no-backup) BACKUP_BEFORE_UPDATE=false; shift ;;
-        --no-restart) RESTART_AFTER=false;      shift ;;
-        --force)     FORCE_UPDATE=true;         shift ;;
-        --dry-run)   DRY_RUN=true;              shift ;;
-        --email)     EMAIL_NOTIFY=true;         shift ;;
-        --help)      show_help; exit 0 ;;
+        --system)     UPDATE_SYSTEM=true;         shift ;;
+        --no-backup)  BACKUP_BEFORE_UPDATE=false; shift ;;
+        --no-restart) RESTART_AFTER=false;        shift ;;
+        --force)      FORCE_UPDATE=true;          shift ;;
+        --dry-run)    DRY_RUN=true;               shift ;;
+        --email)      EMAIL_NOTIFY=true;          shift ;;
+        --help)       show_help; exit 0 ;;
         *) log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done
 
 # ---------------------------------------------------------------------------
 # create_pre_update_backup
-# ---------------------------------------------------------------------------
-# FIX 1: The old call was:  ./backup.sh --type full --email=false
-#   --email=false is not a recognised flag in backup.sh.  backup.sh's --email
-#   is a boolean toggle (no value).  EMAIL_NOTIFY defaults to false already,
-#   so simply omit the flag entirely.  Only pass --email when the caller
-#   explicitly requested email via update.sh --email.
-#
-# FIX 2: The health check before the backup was failing with
-#   "CRITICAL: Backup issues: No full backups found" because there are no
-#   backups yet (first run).  That warning is expected and should NOT block
-#   a pre-update backup — the backup IS the safety net.  The health check
-#   failure is already logged as WARN and execution continues; nothing
-#   changes here structurally but the comment is now accurate.
+# Creates a full backup. --email is a boolean toggle with no value; only
+# include it when the caller requested email via --email.
 # ---------------------------------------------------------------------------
 create_pre_update_backup() {
     if [[ "$BACKUP_BEFORE_UPDATE" != "true" ]]; then
@@ -90,14 +86,12 @@ create_pre_update_backup() {
     fi
 
     if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would create pre-update backup"
+        log_info "[DRY RUN] Would create pre-update backup (type: full)"
         return 0
     fi
 
     log_info "Creating pre-update backup for safety..."
 
-    # Build backup.sh argument list.
-    # --email is a boolean flag with no value; only include it when requested.
     local backup_args=(--type full)
     [[ "$EMAIL_NOTIFY" == "true" ]] && backup_args+=(--email)
 
@@ -110,7 +104,9 @@ create_pre_update_backup() {
     fi
 }
 
-# STANDARDIZED: System updates - returns exit code
+# ---------------------------------------------------------------------------
+# update_system_packages
+# ---------------------------------------------------------------------------
 update_system_packages() {
     if [[ "$UPDATE_SYSTEM" != "true" ]]; then
         log_info "Skipping system package updates (use --system to enable)"
@@ -119,6 +115,10 @@ update_system_packages() {
 
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would update system packages"
+        apt-get update -qq 2>/dev/null || true
+        local count
+        count=$(apt list --upgradable 2>/dev/null | grep -c '/' || echo "0")
+        log_info "[DRY RUN] System packages available to upgrade: ${count}"
         return 0
     fi
 
@@ -129,11 +129,12 @@ update_system_packages() {
         return 1
     fi
 
+    # Use grep -c '/' to count only package lines, avoiding the -1 edge case
+    # that occurs when wc -l counts only the "Listing..." header line.
     local updates_available
-    updates_available=$(apt list --upgradable 2>/dev/null | wc -l)
-    updates_available=$(( updates_available - 1 ))  # subtract header line
+    updates_available=$(apt list --upgradable 2>/dev/null | grep -c '/' || echo "0")
 
-    if [[ $updates_available -eq 0 ]] && [[ "$FORCE_UPDATE" != "true" ]]; then
+    if [[ "$updates_available" -eq 0 ]] && [[ "$FORCE_UPDATE" != "true" ]]; then
         log_info "No system package updates available"
         return 0
     fi
@@ -154,7 +155,9 @@ update_system_packages() {
     fi
 }
 
-# STANDARDIZED: Container updates - returns exit code
+# ---------------------------------------------------------------------------
+# update_containers
+# ---------------------------------------------------------------------------
 update_containers() {
     if [[ "$UPDATE_CONTAINERS" != "true" ]]; then
         log_info "Skipping container updates"
@@ -162,7 +165,9 @@ update_containers() {
     fi
 
     if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would update container images"
+        log_info "[DRY RUN] Would pull updated container images. Current configured tags:"
+        docker compose config --images 2>/dev/null | sort | uniq | sed 's/^/    /' || \
+            log_info "    (could not list images - docker compose config unavailable)"
         return 0
     fi
 
@@ -177,7 +182,9 @@ update_containers() {
     return 0
 }
 
-# STANDARDIZED: Pre-update health check - non-fatal, returns exit code for tracking only
+# ---------------------------------------------------------------------------
+# pre_update_health_check - non-fatal, informational only
+# ---------------------------------------------------------------------------
 pre_update_health_check() {
     log_info "Performing pre-update health check..."
 
@@ -190,16 +197,18 @@ pre_update_health_check() {
         log_success "Pre-update health check passed"
         return 0
     else
-        # Non-fatal: health issues (e.g. "No full backups found") are expected
-        # on a fresh deployment or before the first backup has ever run.
-        # The backup we are about to create IS the safety net.
         log_warn "Pre-update health check reported issues (non-fatal - see above)"
-        log_info "Continuing with update - the pre-update backup provides safety"
+        log_info "Continuing with update - the pre-update backup provides the safety net"
         return 1
     fi
 }
 
-# STANDARDIZED: Post-update service restart - returns exit code
+# ---------------------------------------------------------------------------
+# restart_services_after_update
+# Uses --force which is the confirmed supported flag in startup.sh.
+# The previously used --force-restart was never a valid flag and would have
+# caused startup.sh to exit 1 on every update attempt.
+# ---------------------------------------------------------------------------
 restart_services_after_update() {
     if [[ "$RESTART_AFTER" != "true" ]]; then
         log_info "Skipping service restart (--no-restart specified)"
@@ -213,7 +222,7 @@ restart_services_after_update() {
 
     log_info "Restarting services with updated containers..."
 
-    if ./startup.sh --force-restart; then
+    if ./startup.sh --force; then
         log_success "Services restarted successfully with updated containers"
         return 0
     else
@@ -222,95 +231,147 @@ restart_services_after_update() {
     fi
 }
 
-# STANDARDIZED: Post-update health check - returns exit code
+# ---------------------------------------------------------------------------
+# post_update_health_check
+# ---------------------------------------------------------------------------
 post_update_health_check() {
     if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would perform post-update health check"
+        log_info "[DRY RUN] Would perform post-update health check (wait: ${POST_UPDATE_WAIT_SECONDS}s)"
         return 0
     fi
 
     log_info "Performing post-update health check..."
-    log_info "Waiting 30s for services to stabilize after restart..."
-    sleep 30
+    log_info "Waiting ${POST_UPDATE_WAIT_SECONDS}s for services to stabilize after restart..."
+    sleep "$POST_UPDATE_WAIT_SECONDS"
 
     if ./health.sh --quiet; then
         log_success "Post-update health check passed"
         return 0
     else
         log_error "Post-update health check failed - update may have caused issues"
-        log_info "Consider checking logs and potentially rolling back"
         return 1
     fi
 }
 
-# STANDARDIZED: Update summary generation - returns exit code
+# ---------------------------------------------------------------------------
+# attempt_rollback
+# Calls restore.sh using its CURRENT supported flags:
+#   --type full   matches the backup type created by create_pre_update_backup
+#   --force       skips the restore confirmation prompt
+#   --no-backup   skips the pre-restore backup (we already have our snapshot)
+#
+# NOTE: If restore.sh gains a --latest flag in future, this can be simplified
+# to: ./restore.sh --latest --type full --force --no-backup
+# ---------------------------------------------------------------------------
+attempt_rollback() {
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would attempt rollback: ./restore.sh --type full --force --no-backup"
+        return 0
+    fi
+
+    log_warn "Attempting automatic rollback to pre-update backup..."
+
+    if [[ ! -x "./restore.sh" ]]; then
+        log_error "restore.sh not found or not executable - manual rollback required"
+        log_error "Run: ./restore.sh --type full --force --no-backup"
+        return 1
+    fi
+
+    if ./restore.sh --type full --force --no-backup; then
+        log_success "Rollback completed - services restored to pre-update state"
+        log_warn "Please investigate why the update caused health check failures"
+        return 0
+    else
+        log_error "Automatic rollback failed - MANUAL INTERVENTION REQUIRED"
+        log_error "Steps: 1) docker compose down  2) ./restore.sh  3) ./startup.sh"
+        return 1
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# generate_update_summary
+# Uses printf throughout to avoid echo -e backslash fragility.
+# ---------------------------------------------------------------------------
 generate_update_summary() {
     local pre_health="$1"
     local system_update="$2"
     local container_update="$3"
     local restart="$4"
     local post_health="$5"
+    local rollback_attempted="${6:-false}"
+    local rollback_result="${7:-1}"
 
     log_info "Generating update summary..."
 
-    local summary="VaultWarden Update Summary - $(date)\n"
-    summary+="\nUpdate Results:\n"
+    local summary
+    summary=$(printf "VaultWarden Update Summary - %s\n" "$(date)")
+    summary+=$(printf "\nUpdate Results:\n")
 
     if [[ "$UPDATE_SYSTEM" == "true" ]]; then
         if [[ "$system_update" == "0" ]]; then
-            summary+="  ✅ System packages: Updated successfully\n"
+            summary+=$(printf "  ✅ System packages: Updated successfully\n")
         else
-            summary+="  ❌ System packages: Update failed\n"
+            summary+=$(printf "  ❌ System packages: Update failed\n")
         fi
     else
-        summary+="  ⏭️  System packages: Skipped\n"
+        summary+=$(printf "  ⏭️  System packages: Skipped\n")
     fi
 
     if [[ "$container_update" == "0" ]]; then
-        summary+="  ✅ Container images: Updated successfully\n"
+        summary+=$(printf "  ✅ Container images: Updated successfully\n")
     else
-        summary+="  ❌ Container images: Update failed\n"
+        summary+=$(printf "  ❌ Container images: Update failed\n")
     fi
 
     if [[ "$RESTART_AFTER" == "true" ]]; then
         if [[ "$restart" == "0" ]]; then
-            summary+="  ✅ Service restart: Completed successfully\n"
+            summary+=$(printf "  ✅ Service restart: Completed successfully\n")
         else
-            summary+="  ❌ Service restart: Failed\n"
+            summary+=$(printf "  ❌ Service restart: Failed\n")
         fi
     else
-        summary+="  ⏭️  Service restart: Skipped\n"
+        summary+=$(printf "  ⏭️  Service restart: Skipped\n")
     fi
 
     if [[ "$pre_health" == "0" ]]; then
-        summary+="  ✅ Pre-update health: Passed\n"
+        summary+=$(printf "  ✅ Pre-update health: Passed\n")
     else
-        summary+="  ⚠️  Pre-update health: Issues detected (non-fatal)\n"
+        summary+=$(printf "  ⚠️  Pre-update health: Issues detected (non-fatal)\n")
     fi
 
     if [[ "$post_health" == "0" ]]; then
-        summary+="  ✅ Post-update health: Passed\n"
+        summary+=$(printf "  ✅ Post-update health: Passed\n")
     else
-        summary+="  ❌ Post-update health: Issues detected\n"
+        summary+=$(printf "  ❌ Post-update health: Issues detected\n")
+    fi
+
+    if [[ "$rollback_attempted" == "true" ]]; then
+        if [[ "$rollback_result" == "0" ]]; then
+            summary+=$(printf "  ✅ Automatic rollback: Succeeded\n")
+        else
+            summary+=$(printf "  ❌ Automatic rollback: FAILED - manual intervention required\n")
+        fi
     fi
 
     if [[ "$system_update" == "0" && "$container_update" == "0" && "$restart" == "0" && "$post_health" == "0" ]]; then
-        summary+="\n🎉 Overall Status: UPDATE SUCCESSFUL\n"
-        summary+="\nNext Steps:\n"
-        summary+="  • Monitor services for stability\n"
-        summary+="  • Check logs if any issues arise\n"
+        summary+=$(printf "\n🎉 Overall Status: UPDATE SUCCESSFUL\n")
+        summary+=$(printf "\nNext Steps:\n")
+        summary+=$(printf "  • Monitor services for stability\n")
+        summary+=$(printf "  • Check logs if any issues arise\n")
         if [[ -f /var/run/reboot-required ]]; then
-            summary+="  • IMPORTANT: System reboot required (sudo reboot)\n"
+            summary+=$(printf "  • IMPORTANT: System reboot required (sudo reboot)\n")
         fi
     else
-        summary+="\n⚠️  Overall Status: UPDATE COMPLETED WITH ISSUES\n"
-        summary+="\nImmediate Actions Required:\n"
-        summary+="  • Check service logs: make logs\n"
-        summary+="  • Run health check: ./health.sh --comprehensive\n"
-        summary+="  • Consider rollback if issues persist\n"
+        summary+=$(printf "\n⚠️  Overall Status: UPDATE COMPLETED WITH ISSUES\n")
+        summary+=$(printf "\nImmediate Actions Required:\n")
+        summary+=$(printf "  • Check service logs: make logs\n")
+        summary+=$(printf "  • Run health check: ./health.sh --comprehensive\n")
+        if [[ "$rollback_attempted" != "true" ]]; then
+            summary+=$(printf "  • Consider rollback if issues persist: ./restore.sh --type full --force --no-backup\n")
+        fi
     fi
 
-    echo -e "$summary"
+    printf "%s\n" "$summary"
 
     if [[ "$EMAIL_NOTIFY" == "true" ]]; then
         local email_subject
@@ -330,7 +391,9 @@ generate_update_summary() {
     return 0
 }
 
-# ENHANCED: Main function with proper error handling and exit strategy
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
 main() {
     log_header "VaultWarden-OCI Update Manager"
 
@@ -343,26 +406,27 @@ main() {
         exit 1
     fi
 
-    # Track operation results
+    # Track operation results (1 = not yet run / failed, 0 = success)
     local pre_health_result=1
     local system_update_result=1
     local container_update_result=1
     local restart_result=1
     local post_health_result=1
+    local rollback_attempted=false
+    local rollback_result=1
 
     # -----------------------------------------------------------------------
     # Phase 1: Pre-update checks and backup
     # -----------------------------------------------------------------------
     log_info "=== Phase 1: Pre-Update Preparation ==="
 
-    # Health check is informational only - a fresh system with no backups yet
-    # will always fail this check; that must not block the update.
+    # Health check is informational only — fresh systems with no backups yet
+    # will always show warnings here. Must not block the update.
     if pre_update_health_check; then
         pre_health_result=0
     fi
-    # Note: no 'else abort' here - pre-health failure is non-fatal by design.
 
-    # Backup IS fatal: if we cannot create a safety snapshot, refuse to proceed.
+    # Backup IS fatal: refuse to proceed without a safety snapshot.
     if ! create_pre_update_backup; then
         log_error "Pre-update backup failed - aborting update for safety"
         exit 1
@@ -376,14 +440,13 @@ main() {
     if update_system_packages; then
         system_update_result=0
     else
-        log_error "System package update failed"
-        # Continue with container updates even if system updates fail
+        log_error "System package update failed - continuing with container updates"
     fi
 
     if update_containers; then
         container_update_result=0
     else
-        log_error "Container update failed"
+        log_error "Container image pull failed"
     fi
 
     # -----------------------------------------------------------------------
@@ -398,7 +461,9 @@ main() {
             log_error "Service restart failed"
         fi
     else
-        log_info "Skipping service restart (no container updates)"
+        # Pull failed — nothing was changed, services still running on old images.
+        # This is a deliberate skip, not a restart failure.
+        log_info "Skipping service restart — container pull failed, old images still active"
         restart_result=0
     fi
 
@@ -406,7 +471,11 @@ main() {
         if post_update_health_check; then
             post_health_result=0
         else
-            log_error "Post-update health check failed"
+            log_error "Post-update health check failed — attempting automatic rollback"
+            rollback_attempted=true
+            if attempt_rollback; then
+                rollback_result=0
+            fi
         fi
     fi
 
@@ -415,13 +484,20 @@ main() {
     # -----------------------------------------------------------------------
     log_info "=== Phase 4: Update Summary ==="
 
-    generate_update_summary "$pre_health_result" "$system_update_result" "$container_update_result" "$restart_result" "$post_health_result"
+    generate_update_summary \
+        "$pre_health_result" \
+        "$system_update_result" \
+        "$container_update_result" \
+        "$restart_result" \
+        "$post_health_result" \
+        "$rollback_attempted" \
+        "$rollback_result"
 
     if [[ "$container_update_result" == "0" && "$restart_result" == "0" && "$post_health_result" == "0" ]]; then
         log_success "Update completed successfully"
         exit 0
     elif [[ "$container_update_result" == "0" && "$restart_result" == "0" ]]; then
-        log_warn "Update completed but health check shows issues"
+        log_warn "Update completed but health check shows issues (exit 2)"
         exit 2
     else
         log_error "Update completed with critical failures"
