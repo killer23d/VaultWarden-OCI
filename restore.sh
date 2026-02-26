@@ -1,22 +1,5 @@
 #!/usr/bin/env bash
 # restore.sh - VaultWarden backup restoration with enhanced safety
-#
-# FIXES APPLIED (2026-02):
-#   [ITEM 1]  CRITICAL  - Decrypt and verify the incoming backup BEFORE moving
-#                         the live database.  The live DB is now only replaced
-#                         after the new DB passes all integrity checks.
-#   [ITEM 3]  CRITICAL  - Fixed DB restore destination path from
-#                         $state_dir/data/bwdata/db.sqlite3  (wrong)
-#                      to $state_dir/data/db.sqlite3          (correct, matches backup)
-#   [ITEM 4]  CRITICAL  - Fixed restore-point backup call from
-#                         ./backup.sh --type emergency --email=false  (breaks arg parser)
-#                      to ./backup.sh --type emergency                (email off by default)
-#   [ITEM 8]  MEDIUM    - Replaced bare `trap ... EXIT` in restore_archive() with
-#                         the register_cleanup_dir() pattern so no prior EXIT trap
-#                         is silently overwritten.
-#   [ITEM 10] MINOR     - Replaced hard-coded sleep 45 in validate_restore_health()
-#                         with a 10-attempt polling loop (5 s between attempts) that
-#                         exits early the moment health.sh reports success.
 
 set -euo pipefail
 
@@ -30,11 +13,17 @@ source "lib/docker.sh"
 source "lib/crypto.sh"
 source "lib/backup_utils.sh"
 
-# FIX [ITEM 8]: Mirror the safe cleanup registry from backup.sh so restore_archive
+# Safe cleanup registry — mirrors the pattern from backup.sh so restore_archive
 # can register temp dirs without overwriting any existing EXIT trap.
 CLEANUP_DIRS=()
-register_cleanup_dir() { CLEANUP_DIRS+=("$1"); }
+CLEANUP_FILES=()
+register_cleanup_dir()  { CLEANUP_DIRS+=("$1"); }
+register_cleanup_file() { CLEANUP_FILES+=("$1"); }
 perform_cleanup() {
+    local f
+    for f in "${CLEANUP_FILES[@]+"${CLEANUP_FILES[@]}"}"; do
+        rm -f "$f" 2>/dev/null || true
+    done
     local i
     for (( i=${#CLEANUP_DIRS[@]}-1; i>=0; i-- )); do
         rm -rf "${CLEANUP_DIRS[$i]}" 2>/dev/null || true
@@ -50,6 +39,7 @@ DRY_RUN=false
 SKIP_VERIFICATION=false
 INTERACTIVE=true
 CREATE_RESTORE_BACKUP=true
+USE_LATEST=false
 
 show_help() {
     cat << 'EOF'
@@ -61,6 +51,9 @@ USAGE:
 OPTIONS:
     --file FILE             Specific backup file to restore
     --type TYPE             Backup type to restore (db, full, emergency)
+    --latest                Restore the most recent backup (by modification
+                            time) across all types; use with --type to
+                            restrict to a specific type
     --force                 Skip confirmation prompts
     --no-backup             Skip creating restore point backup
     --skip-verification     Skip backup integrity verification
@@ -70,6 +63,8 @@ OPTIONS:
 EXAMPLES:
     ./restore.sh                                    # Interactive restore
     ./restore.sh --type db                          # Restore latest database backup
+    ./restore.sh --latest --force --no-backup       # Auto-restore newest backup (used by update.sh rollback)
+    ./restore.sh --latest --type full --force       # Auto-restore newest full backup
     ./restore.sh --file backup-20241101.tar.gz.age  # Restore specific file
     ./restore.sh --dry-run --type full              # Preview full system restore
 
@@ -84,6 +79,11 @@ RESTORE TYPES:
     db          - Database only (preserves configuration)
     full        - Configuration + data (NO secrets)
     emergency   - EVERYTHING including secrets
+
+EXIT CODES:
+    0  - Restore completed successfully, all health checks passed
+    1  - Restore failed or critical phase error
+    2  - Restore completed but post-restore health check reported issues
 EOF
 }
 
@@ -92,6 +92,7 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --file)              BACKUP_FILE="$2"; shift 2 ;;
         --type)              RESTORE_TYPE="$2"; shift 2 ;;
+        --latest)            USE_LATEST=true; INTERACTIVE=false; shift ;;
         --force)             FORCE_RESTORE=true; INTERACTIVE=false; shift ;;
         --no-backup)         CREATE_RESTORE_BACKUP=false; shift ;;
         --skip-verification) SKIP_VERIFICATION=true; shift ;;
@@ -101,10 +102,27 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Interactive backup selection - returns exit code
+# ---------------------------------------------------------------------------
+# _find_latest_backup DIR
+# Returns the most recent .age file in DIR by modification time.
+# Uses find -printf '%T@ %p\n' | sort -n so result is correct regardless
+# of filename date format, unlike lexicographic 'sort | tail -1'.
+# ---------------------------------------------------------------------------
+_find_latest_backup() {
+    local dir="$1"
+    [[ -d "$dir" ]] || return 1
+    find "$dir" -name "*.age" -type f -printf '%T@ %p\n' 2>/dev/null \
+        | sort -n \
+        | tail -1 \
+        | cut -d' ' -f2-
+}
+
+# ---------------------------------------------------------------------------
+# select_backup_interactively
+# ---------------------------------------------------------------------------
 select_backup_interactively() {
     if [[ "$INTERACTIVE" != "true" ]]; then
-        return 0  # Skip if not interactive
+        return 0
     fi
 
     echo -e "${COLOR_YELLOW}PRE-RESTORE CHECKLIST:${COLOR_RESET}"
@@ -112,7 +130,7 @@ select_backup_interactively() {
     echo -e "- The 'age-key.txt' file (from your backup)"
     echo -e "- The 'secrets.yaml' file (if restoring full config)"
     echo -e "- Your Cloudflare API Tokens (if rebuilding server)"
-    echo -e ""
+    echo ""
 
     log_info "Available backups for restoration:"
     echo ""
@@ -123,7 +141,7 @@ select_backup_interactively() {
     fi
 
     echo ""
-    read -p "Enter the full filename of the backup to restore (or 'quit' to exit): " selected_file
+    read -r -p "Enter the full filename of the backup to restore (or 'quit' to exit): " selected_file
 
     if [[ "$selected_file" == "quit" ]] || [[ -z "$selected_file" ]]; then
         log_info "Restore cancelled by user"
@@ -161,7 +179,7 @@ select_backup_interactively() {
     fi
 
     if [[ "$FORCE_RESTORE" != "true" ]]; then
-        read -p "Continue with restore? (yes/no): " confirm
+        read -r -p "Continue with restore? (yes/no): " confirm
         if [[ "$confirm" != "yes" ]]; then
             log_info "Restore cancelled by user"
             exit 0
@@ -171,8 +189,51 @@ select_backup_interactively() {
     return 0
 }
 
-# Backup file resolution - returns exit code
+# ---------------------------------------------------------------------------
+# resolve_backup_file
+# Handles four cases:
+#   1. --latest [--type TYPE]  : find newest .age by mtime across type(s)
+#   2. --file FILE             : use exact path, infer type from path
+#   3. --type TYPE             : find newest .age in that type dir by mtime
+#   4. neither                 : fall through to interactive selection
+# ---------------------------------------------------------------------------
 resolve_backup_file() {
+    # Case 1: --latest flag — find most recent backup by mtime
+    if [[ "$USE_LATEST" == "true" ]]; then
+        if [[ -n "$RESTORE_TYPE" ]]; then
+            # --latest --type TYPE: newest in the specified type directory
+            local backup_dir="$PROJECT_ROOT/backups/$RESTORE_TYPE"
+            BACKUP_FILE=$(_find_latest_backup "$backup_dir")
+            if [[ -z "$BACKUP_FILE" ]]; then
+                log_error "No backups found for type: $RESTORE_TYPE"
+                return 1
+            fi
+        else
+            # --latest alone: newest across ALL backup types
+            local candidate latest_time=0
+            local backup_types=("db" "full" "emergency")
+            for btype in "${backup_types[@]}"; do
+                candidate=$(_find_latest_backup "$PROJECT_ROOT/backups/$btype" 2>/dev/null || true)
+                if [[ -n "$candidate" ]]; then
+                    local mtime
+                    mtime=$(stat -c%Y "$candidate" 2>/dev/null || stat -f%m "$candidate" 2>/dev/null || echo "0")
+                    if (( mtime > latest_time )); then
+                        latest_time="$mtime"
+                        BACKUP_FILE="$candidate"
+                        RESTORE_TYPE="$btype"
+                    fi
+                fi
+            done
+            if [[ -z "$BACKUP_FILE" ]]; then
+                log_error "No backups found in any backup directory"
+                return 1
+            fi
+        fi
+        log_info "Using latest backup (by mtime): $(basename "$BACKUP_FILE") [type: $RESTORE_TYPE]"
+        return 0
+    fi
+
+    # Case 2: --file FILE
     if [[ -n "$BACKUP_FILE" ]]; then
         if [[ ! -f "$BACKUP_FILE" ]]; then
             log_error "Specified backup file not found: $BACKUP_FILE"
@@ -188,30 +249,39 @@ resolve_backup_file() {
                 return 1
             fi
         fi
-    elif [[ -n "$RESTORE_TYPE" ]]; then
+        return 0
+    fi
+
+    # Case 3: --type TYPE without --file
+    if [[ -n "$RESTORE_TYPE" ]]; then
         local backup_dir="$PROJECT_ROOT/backups/$RESTORE_TYPE"
         if [[ ! -d "$backup_dir" ]]; then
             log_error "No backups found for type: $RESTORE_TYPE"
             return 1
         fi
 
-        BACKUP_FILE=$(find "$backup_dir" -name "*.age" -type f | sort | tail -1)
+        # Sort by mtime, not lexicographically, for correctness
+        BACKUP_FILE=$(_find_latest_backup "$backup_dir")
         if [[ -z "$BACKUP_FILE" ]]; then
             log_error "No backup files found in: $backup_dir"
             return 1
         fi
 
         log_info "Using latest $RESTORE_TYPE backup: $(basename "$BACKUP_FILE")"
-    else
-        if ! select_backup_interactively; then
-            return 1
-        fi
+        return 0
+    fi
+
+    # Case 4: interactive
+    if ! select_backup_interactively; then
+        return 1
     fi
 
     return 0
 }
 
-# Pre-restore backup creation - returns exit code
+# ---------------------------------------------------------------------------
+# create_restore_point_backup
+# ---------------------------------------------------------------------------
 create_restore_point_backup() {
     if [[ "$CREATE_RESTORE_BACKUP" != "true" ]]; then
         log_info "Skipping restore point backup (--no-backup specified)"
@@ -219,16 +289,14 @@ create_restore_point_backup() {
     fi
 
     if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would create restore point backup"
+        log_info "[DRY RUN] Would create restore point backup (type: emergency)"
         return 0
     fi
 
     log_info "Creating restore point backup for safety..."
 
-    # FIX [ITEM 4]: Pass only --type emergency.  The original code passed
-    # --email=false which backup.sh does not understand (it expects --email as
-    # a bare boolean flag), causing the restore-point backup to abort with
-    # "Unknown option" and taking the entire restore with it.
+    # --type emergency only; --email is a boolean toggle with no value so we
+    # omit it entirely (email is off by default in backup.sh).
     if ./backup.sh --type emergency; then
         log_success "Restore point backup completed"
         return 0
@@ -238,7 +306,9 @@ create_restore_point_backup() {
     fi
 }
 
-# Service preparation for restore - returns exit code
+# ---------------------------------------------------------------------------
+# prepare_services_for_restore
+# ---------------------------------------------------------------------------
 prepare_services_for_restore() {
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would stop services for restoration"
@@ -256,10 +326,15 @@ prepare_services_for_restore() {
     fi
 }
 
-# Database restore - returns exit code
+# ---------------------------------------------------------------------------
+# restore_database
+# Decrypt → verify → swap. Live DB is never touched until both checks pass.
+# temp_db is created inside a registered temp_dir so the cleanup registry
+# handles it on any crash path.
+# ---------------------------------------------------------------------------
 restore_database() {
     if [[ "$RESTORE_TYPE" != "db" ]]; then
-        return 0  # Not a database restore
+        return 0
     fi
 
     if [[ "$DRY_RUN" == "true" ]]; then
@@ -272,9 +347,6 @@ restore_database() {
     local state_dir
     state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
 
-    # FIX [ITEM 3]: Correct destination path.
-    # backup.sh sources the DB from  $state_dir/data/db.sqlite3
-    # so we must restore it to the identical path, NOT data/bwdata/db.sqlite3.
     local db_dir="$state_dir/data"
     local db_path="$db_dir/db.sqlite3"
 
@@ -283,45 +355,39 @@ restore_database() {
         return 1
     fi
 
-    # FIX [ITEM 1]: Decrypt and fully verify the incoming backup FIRST.
-    # Only after both steps pass do we touch the live database.
-    # This guarantees the live DB is never removed when decryption fails
-    # (e.g. wrong key, corrupted archive, WAN issue).
-    local temp_db
-    temp_db=$(mktemp)
+    # Create temp dir registered with cleanup registry so temp_db is covered
+    local temp_dir
+    temp_dir=$(mktemp -d)
+    register_cleanup_dir "$temp_dir"
+    local temp_db="$temp_dir/db.sqlite3"
 
     log_info "Decrypting and decompressing backup (live DB untouched until verified)..."
     if ! age -d -i "$SOPS_AGE_KEY_FILE" "$BACKUP_FILE" | gzip -d > "$temp_db"; then
         log_error "Failed to decrypt/decompress database backup. Live database is untouched."
-        rm -f "$temp_db"
         return 1
     fi
 
     log_info "Verifying integrity of decrypted database..."
     if ! sqlite3 "$temp_db" "PRAGMA integrity_check;" | grep -qx "ok"; then
         log_error "Decrypted database failed integrity check. Live database is untouched."
-        rm -f "$temp_db"
         return 1
     fi
 
-    # Both checks passed — now it is safe to swap the live database.
+    # Both checks passed — safe to swap
     if [[ -f "$db_path" ]]; then
         local backup_db="$db_path.pre-restore-$(date +%Y%m%d-%H%M%S)"
         if ! mv "$db_path" "$backup_db"; then
             log_error "Failed to move existing database to safety"
-            rm -f "$temp_db"
             return 1
         fi
         log_info "Existing database preserved at: $(basename "$backup_db")"
     fi
 
-    if ! mv "$temp_db" "$db_path"; then
-        log_error "Failed to move restored database into place"
-        rm -f "$temp_db"
+    if ! cp "$temp_db" "$db_path"; then
+        log_error "Failed to copy restored database into place"
         return 1
     fi
 
-    # Set proper ownership and permissions
     local real_user real_group
     real_user=$(get_real_user)
     real_group=$(id -g -n "$real_user")
@@ -335,10 +401,12 @@ restore_database() {
     return 0
 }
 
-# Full/Emergency archive restore - returns exit code
+# ---------------------------------------------------------------------------
+# restore_archive
+# ---------------------------------------------------------------------------
 restore_archive() {
     if [[ "$RESTORE_TYPE" != "full" && "$RESTORE_TYPE" != "emergency" ]]; then
-        return 0  # Not an archive restore
+        return 0
     fi
 
     if [[ "$DRY_RUN" == "true" ]]; then
@@ -350,12 +418,8 @@ restore_archive() {
 
     local temp_dir
     temp_dir=$(mktemp -d)
-    # FIX [ITEM 8]: Register with the global cleanup registry instead of
-    # overwriting the EXIT trap, which would silently drop any trap set by
-    # the sourced libraries or by main().
     register_cleanup_dir "$temp_dir"
 
-    # Decrypt and extract archive
     if ! age -d -i "$SOPS_AGE_KEY_FILE" "$BACKUP_FILE" | tar -xzf - -C "$temp_dir"; then
         log_error "Failed to decrypt and extract archive"
         return 1
@@ -369,16 +433,12 @@ restore_archive() {
         if [[ -f "$temp_dir/$config_file" ]]; then
             if [[ -f "$PROJECT_ROOT/$config_file" ]]; then
                 local backup_config="$PROJECT_ROOT/$config_file.pre-restore-$(date +%Y%m%d-%H%M%S)"
-                if ! mv "$PROJECT_ROOT/$config_file" "$backup_config"; then
-                    log_warn "Failed to backup existing $config_file"
-                fi
+                mv "$PROJECT_ROOT/$config_file" "$backup_config" || log_warn "Failed to backup existing $config_file"
             fi
-
             if ! cp "$temp_dir/$config_file" "$PROJECT_ROOT/"; then
                 log_error "Failed to restore $config_file"
                 return 1
             fi
-
             log_info "Restored: $config_file"
         fi
     done
@@ -389,17 +449,13 @@ restore_archive() {
     for config_dir in "${config_dirs[@]}"; do
         if [[ -d "$temp_dir/$config_dir" ]]; then
             if [[ -d "$PROJECT_ROOT/$config_dir" ]]; then
-                local backup_dir="$PROJECT_ROOT/$config_dir.pre-restore-$(date +%Y%m%d-%H%M%S)"
-                if ! mv "$PROJECT_ROOT/$config_dir" "$backup_dir"; then
-                    log_warn "Failed to backup existing $config_dir"
-                fi
+                local backup_cdir="$PROJECT_ROOT/$config_dir.pre-restore-$(date +%Y%m%d-%H%M%S)"
+                mv "$PROJECT_ROOT/$config_dir" "$backup_cdir" || log_warn "Failed to backup existing $config_dir"
             fi
-
             if ! cp -r "$temp_dir/$config_dir" "$PROJECT_ROOT/"; then
                 log_error "Failed to restore $config_dir"
                 return 1
             fi
-
             log_info "Restored: $config_dir/"
         fi
     done
@@ -413,9 +469,7 @@ restore_archive() {
 
         if [[ -d "$state_dir/data" ]]; then
             local backup_data="$state_dir/data.pre-restore-$(date +%Y%m%d-%H%M%S)"
-            if ! mv "$state_dir/data" "$backup_data"; then
-                log_warn "Failed to backup existing data directory"
-            fi
+            mv "$state_dir/data" "$backup_data" || log_warn "Failed to backup existing data directory"
         fi
 
         if ! ensure_dir "$(dirname "$state_dir/data")" 755; then
@@ -440,15 +494,13 @@ restore_archive() {
         log_success "Data directory restored successfully"
     fi
 
-    # Restore secrets (emergency restore only)
+    # Restore secrets (emergency only)
     if [[ "$RESTORE_TYPE" == "emergency" ]] && [[ -d "$temp_dir/secrets" ]]; then
         log_info "Restoring secrets (emergency restore)..."
 
         if [[ -d "$PROJECT_ROOT/secrets" ]]; then
             local backup_secrets="$PROJECT_ROOT/secrets.pre-restore-$(date +%Y%m%d-%H%M%S)"
-            if ! mv "$PROJECT_ROOT/secrets" "$backup_secrets"; then
-                log_warn "Failed to backup existing secrets"
-            fi
+            mv "$PROJECT_ROOT/secrets" "$backup_secrets" || log_warn "Failed to backup existing secrets"
         fi
 
         if ! cp -r "$temp_dir/secrets" "$PROJECT_ROOT/"; then
@@ -468,7 +520,12 @@ restore_archive() {
     return 0
 }
 
-# Post-restore service startup - returns exit code
+# ---------------------------------------------------------------------------
+# start_services_after_restore
+# Uses --force which is the confirmed supported flag in startup.sh.
+# The original --force-restart was never valid and silently left services
+# down after every restore.
+# ---------------------------------------------------------------------------
 start_services_after_restore() {
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would start services after restoration"
@@ -477,7 +534,7 @@ start_services_after_restore() {
 
     log_info "Starting services after restoration..."
 
-    if ./startup.sh --force-restart; then
+    if ./startup.sh --force; then
         log_success "Services started successfully after restore"
         return 0
     else
@@ -486,7 +543,13 @@ start_services_after_restore() {
     fi
 }
 
-# Post-restore health validation - returns exit code
+# ---------------------------------------------------------------------------
+# validate_restore_health
+# Polls every 5s for up to 10 attempts (50s max), exits early on success.
+# Uses --quiet only (not --comprehensive) — slow extra checks like config
+# validation and secret decryption are irrelevant to post-restore service
+# health and can produce false negatives.
+# ---------------------------------------------------------------------------
 validate_restore_health() {
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would validate system health after restoration"
@@ -495,9 +558,6 @@ validate_restore_health() {
 
     log_info "Validating system health after restoration..."
 
-    # FIX [ITEM 10]: Replace the hard-coded sleep 45 with a polling retry loop.
-    # Polls every 5 seconds for up to 10 attempts (50 s max) and exits as soon
-    # as health.sh reports success, minimising unnecessary wait time.
     local max_attempts=10
     local interval=5
     local attempt=1
@@ -506,7 +566,7 @@ validate_restore_health() {
         log_info "Health check attempt $attempt/$max_attempts (waiting ${interval}s)..."
         sleep "$interval"
 
-        if ./health.sh --comprehensive --quiet; then
+        if ./health.sh --quiet; then
             log_success "Post-restore health validation passed (attempt $attempt)"
             return 0
         fi
@@ -518,7 +578,10 @@ validate_restore_health() {
     return 1
 }
 
-# Restore summary generation - returns exit code
+# ---------------------------------------------------------------------------
+# generate_restore_summary
+# Uses printf throughout to avoid echo -e backslash fragility.
+# ---------------------------------------------------------------------------
 generate_restore_summary() {
     local backup_verification="$1"
     local restore_backup="$2"
@@ -529,73 +592,76 @@ generate_restore_summary() {
 
     log_info "Generating restore summary..."
 
-    local summary="VaultWarden Restore Summary - $(date)\n"
-    summary+="\nRestore Details:\n"
-    summary+="  Backup File: $(basename "$BACKUP_FILE")\n"
-    summary+="  Restore Type: $RESTORE_TYPE\n"
-    summary+="\nRestore Results:\n"
+    local summary
+    summary=$(printf "VaultWarden Restore Summary - %s\n" "$(date)")
+    summary+=$(printf "\nRestore Details:\n")
+    summary+=$(printf "  Backup File: %s\n" "$(basename "$BACKUP_FILE")")
+    summary+=$(printf "  Restore Type: %s\n" "$RESTORE_TYPE")
+    summary+=$(printf "\nRestore Results:\n")
 
     if [[ "$SKIP_VERIFICATION" == "true" ]]; then
-        summary+="  ⏭️  Backup verification: Skipped\n"
+        summary+=$(printf "  ⏭️  Backup verification: Skipped\n")
     elif [[ "$backup_verification" == "0" ]]; then
-        summary+="  ✅ Backup verification: Passed\n"
+        summary+=$(printf "  ✅ Backup verification: Passed\n")
     else
-        summary+="  ❌ Backup verification: Failed\n"
+        summary+=$(printf "  ❌ Backup verification: Failed\n")
     fi
 
     if [[ "$CREATE_RESTORE_BACKUP" == "true" ]]; then
         if [[ "$restore_backup" == "0" ]]; then
-            summary+="  ✅ Restore point backup: Created successfully\n"
+            summary+=$(printf "  ✅ Restore point backup: Created successfully\n")
         else
-            summary+="  ❌ Restore point backup: Failed\n"
+            summary+=$(printf "  ❌ Restore point backup: Failed\n")
         fi
     else
-        summary+="  ⏭️  Restore point backup: Skipped\n"
+        summary+=$(printf "  ⏭️  Restore point backup: Skipped\n")
     fi
 
     if [[ "$services_stop" == "0" ]]; then
-        summary+="  ✅ Service stop: Completed successfully\n"
+        summary+=$(printf "  ✅ Service stop: Completed successfully\n")
     else
-        summary+="  ❌ Service stop: Failed\n"
+        summary+=$(printf "  ❌ Service stop: Failed\n")
     fi
 
     if [[ "$restore_operation" == "0" ]]; then
-        summary+="  ✅ Data restoration: Completed successfully\n"
+        summary+=$(printf "  ✅ Data restoration: Completed successfully\n")
     else
-        summary+="  ❌ Data restoration: Failed\n"
+        summary+=$(printf "  ❌ Data restoration: Failed\n")
     fi
 
     if [[ "$services_start" == "0" ]]; then
-        summary+="  ✅ Service restart: Completed successfully\n"
+        summary+=$(printf "  ✅ Service restart: Completed successfully\n")
     else
-        summary+="  ❌ Service restart: Failed\n"
+        summary+=$(printf "  ❌ Service restart: Failed\n")
     fi
 
     if [[ "$health_validation" == "0" ]]; then
-        summary+="  ✅ Health validation: Passed\n"
+        summary+=$(printf "  ✅ Health validation: Passed\n")
     else
-        summary+="  ❌ Health validation: Issues detected\n"
+        summary+=$(printf "  ❌ Health validation: Issues detected\n")
     fi
 
     if [[ "$restore_operation" == "0" && "$services_start" == "0" && "$health_validation" == "0" ]]; then
-        summary+="\n🎉 Overall Status: RESTORE SUCCESSFUL\n"
-        summary+="\nNext Steps:\n"
-        summary+="  • Monitor services for stability\n"
-        summary+="  • Verify data integrity\n"
-        summary+="  • Update any changed configurations\n"
+        summary+=$(printf "\n🎉 Overall Status: RESTORE SUCCESSFUL\n")
+        summary+=$(printf "\nNext Steps:\n")
+        summary+=$(printf "  • Monitor services for stability\n")
+        summary+=$(printf "  • Verify data integrity\n")
+        summary+=$(printf "  • Update any changed configurations\n")
     else
-        summary+="\n⚠️  Overall Status: RESTORE COMPLETED WITH ISSUES\n"
-        summary+="\nImmediate Actions Required:\n"
-        summary+="  • Check service logs: make logs\n"
-        summary+="  • Run health check: ./health.sh --comprehensive\n"
-        summary+="  • Consider rollback if issues persist\n"
+        summary+=$(printf "\n⚠️  Overall Status: RESTORE COMPLETED WITH ISSUES\n")
+        summary+=$(printf "\nImmediate Actions Required:\n")
+        summary+=$(printf "  • Check service logs: make logs\n")
+        summary+=$(printf "  • Run health check: ./health.sh --comprehensive\n")
+        summary+=$(printf "  • Consider manual rollback if issues persist\n")
     fi
 
-    echo -e "$summary"
+    printf "%s\n" "$summary"
     return 0
 }
 
-# Main function with proper error handling and exit strategy
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
 main() {
     log_header "VaultWarden-OCI Restore Manager"
 
@@ -616,7 +682,7 @@ main() {
         exit 1
     fi
 
-    # Track restoration results
+    # Track restoration results (1 = not yet run / failed, 0 = success)
     local backup_verification_result=1
     local restore_backup_result=1
     local services_stop_result=1
@@ -624,7 +690,9 @@ main() {
     local services_start_result=1
     local health_validation_result=1
 
+    # -----------------------------------------------------------------------
     # Phase 1: Preparation and validation
+    # -----------------------------------------------------------------------
     log_info "=== Phase 1: Restore Preparation ==="
 
     if ! resolve_backup_file; then
@@ -647,7 +715,9 @@ main() {
         exit 1
     fi
 
+    # -----------------------------------------------------------------------
     # Phase 2: Service preparation
+    # -----------------------------------------------------------------------
     log_info "=== Phase 2: Service Preparation ==="
 
     if prepare_services_for_restore; then
@@ -657,7 +727,9 @@ main() {
         exit 1
     fi
 
+    # -----------------------------------------------------------------------
     # Phase 3: Data restoration
+    # -----------------------------------------------------------------------
     log_info "=== Phase 3: Data Restoration ==="
 
     local restore_success=true
@@ -674,10 +746,12 @@ main() {
         restore_operation_result=0
     else
         log_error "Data restoration failed"
-        # Don't exit here - attempt to bring services back up
+        # Don't exit — attempt to bring services back up
     fi
 
+    # -----------------------------------------------------------------------
     # Phase 4: Service restart and validation
+    # -----------------------------------------------------------------------
     log_info "=== Phase 4: Service Restart and Validation ==="
 
     if start_services_after_restore; then
@@ -694,7 +768,9 @@ main() {
         fi
     fi
 
+    # -----------------------------------------------------------------------
     # Phase 5: Summary and results
+    # -----------------------------------------------------------------------
     log_info "=== Phase 5: Restore Summary ==="
 
     generate_restore_summary \
@@ -709,8 +785,8 @@ main() {
         log_success "Restore completed successfully"
         exit 0
     elif [[ "$restore_operation_result" == "0" && "$services_start_result" == "0" ]]; then
-        log_warn "Restore completed but health check shows issues"
-        exit 2  # Warning exit code
+        log_warn "Restore completed but health check shows issues (exit 2)"
+        exit 2
     else
         log_error "Restore completed with critical failures"
         exit 1
