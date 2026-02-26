@@ -2,9 +2,18 @@
 
 # This file provides development-friendly overrides that:
 # 1. Enable additional logging and debugging
-# 2. Add development email testing capabilities  
+# 2. Add development email testing capabilities
 # 3. Expose additional ports for testing
 # 4. Reduce security restrictions for easier development
+
+# =============================================================================
+# CHANGES FROM BASE docker-compose.yml.example
+# =============================================================================
+# - mailhog replaced with mailpit (mailhog abandoned since 2022, has CVEs;
+#   mailpit is the community-standard drop-in: same ports, ARM64-native)
+# - logging: stanzas added to all services (larger caps than prod for
+#   debug verbosity, but still bounded to prevent local disk fill)
+# =============================================================================
 
 services:
   vaultwarden:
@@ -27,6 +36,12 @@ services:
     # Remove resource limits for development
     deploy:
       resources: {}
+    # LOG CAP: Larger than prod (debug verbosity). 50m x 5 = 250MB max.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
 
   caddy:
     environment:
@@ -40,6 +55,12 @@ services:
     # Remove resource limits for development
     deploy:
       resources: {}
+    # LOG CAP: Larger than prod (one line per request + debug). 50m x 5 = 250MB max.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
 
   postfix:
     environment:
@@ -64,6 +85,12 @@ services:
       timeout: 5s
       retries: 2
       start_period: 5s
+    # LOG CAP: Debug level generates more output than prod. 10m x 5 = 50MB max.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
 
   fail2ban:
     environment:
@@ -83,8 +110,16 @@ services:
     # Remove resource limits for development
     deploy:
       resources: {}
+    # LOG CAP: DEBUG level is very verbose. 50m x 5 = 250MB max.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
 
-  # NEW: Email testing service (development only)
+  # =============================================================================
+  # Email testing service (development only)
+  # =============================================================================
   email-tester:
     image: alpine:3.19
     container_name: vaultwarden_email_tester
@@ -103,42 +138,42 @@ services:
       import sys
       import os
       from datetime import datetime
-      
+
       def test_postfix():
           try:
               msg = MIMEMultipart()
               msg['From'] = os.environ.get('SMTP_FROM', 'dev@localhost')
               msg['To'] = os.environ.get('ADMIN_EMAIL', 'test@localhost')
               msg['Subject'] = 'VaultWarden-OCI Development Email Test'
-              
+
               body = f'''This is a development email test from VaultWarden-OCI.
-      
+
       If you receive this email, the postfix integration is working correctly.
-      
+
       Test Details:
       - Sent via: postfix container (boky/postfix)
       - Environment: Development
       - Time: {datetime.now()}
       - Container: email-tester
       '''
-              
+
               msg.attach(MIMEText(body, 'plain'))
-              
+
               print('Connecting to postfix:587...')
               server = smtplib.SMTP('postfix', 587, timeout=10)
               server.set_debuglevel(1)
               print('Sending email...')
               server.send_message(msg)
               server.quit()
-              
-              print('✅ Email sent successfully via postfix!')
+
+              print('Email sent successfully via postfix!')
               return True
           except Exception as e:
-              print(f'❌ Email test failed: {e}', file=sys.stderr)
+              print(f'Email test failed: {e}', file=sys.stderr)
               import traceback
               traceback.print_exc()
               return False
-      
+
       if __name__ == '__main__':
           sys.exit(0 if test_postfix() else 1)
       PYEOF
@@ -163,49 +198,68 @@ services:
     profiles:
       - development
       - email-testing
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
-  # NEW: Mailhog for email capture during development (optional)
-  mailhog:
-    image: mailhog/mailhog:${MAILHOG_VERSION:-v1.0.1}
-    container_name: vaultwarden_mailhog
+  # =============================================================================
+  # Mailpit - Email capture during development (replaces abandoned mailhog)
+  # =============================================================================
+  # mailhog/mailhog was last updated in 2022 and has known unfixed CVEs.
+  # axllent/mailpit is the actively maintained, ARM64-native drop-in replacement.
+  # Port mapping is identical — no workflow changes required.
+  # Web UI:  http://localhost:8025
+  # SMTP:    localhost:1026
+  # =============================================================================
+  mailpit:
+    image: axllent/mailpit:${MAILPIT_VERSION:-v1.21.6}
+    container_name: vaultwarden_mailpit
     restart: unless-stopped
     ports:
-      - "8025:8025"  # Web UI
-      - "1026:1025"  # SMTP server (alternate port)
+      - "8025:8025"   # Web UI (same as mailhog)
+      - "1026:1025"   # SMTP server (same as mailhog)
     networks:
       - vaultwarden
     profiles:
       - development
       - email-capture
     environment:
-      - MH_STORAGE=maildir
-      - MH_MAILDIR_PATH=/maildir
+      - MP_DATA_FILE=/data/mailpit.db   # Persistent SQLite storage
+      - MP_UI_AUTH_FILE=""              # No auth for dev (set a file path to enable)
+      - TZ=${TZ:-UTC}
     volumes:
-      - ./dev-mailhog:/maildir
+      - ./dev-mailpit:/data
     deploy:
       resources:
         limits:
           memory: 128M
           cpus: '0.1'
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 # =============================================================================
 # DEVELOPMENT PROFILES
 # =============================================================================
 
 # Available profiles for different development scenarios:
-# 
+#
 # docker compose --profile development up -d
 #   - Adds email-tester service for SMTP testing
 #   - Enhanced logging and debugging
 #   - Relaxed security settings
-# 
-# docker compose --profile email-testing up -d  
+#
+# docker compose --profile email-testing up -d
 #   - Includes email-tester service
 #   - Exposes postfix port for external testing
 #   - Adds email testing utilities
 #
 # docker compose --profile email-capture up -d
-#   - Adds Mailhog for email capture and inspection
+#   - Adds Mailpit for email capture and inspection
 #   - Useful for testing without sending real emails
 #   - Web UI at http://localhost:8025
 
@@ -232,9 +286,9 @@ services:
 #    docker compose exec fail2ban fail2ban-client set vaultwarden-auth banip 192.168.1.100
 
 # 7. Access services:
-#    - VaultWarden: http://localhost:8080
-#    - Caddy Admin: http://localhost:2019
-#    - Mailhog UI: http://localhost:8025 (if using email-capture profile)
+#    - VaultWarden:  http://localhost:8080
+#    - Caddy Admin:  http://localhost:2019
+#    - Mailpit UI:   http://localhost:8025 (if using email-capture profile)
 
 # =============================================================================
 # POSTFIX DEBUGGING
@@ -263,7 +317,7 @@ services:
 # 3. Enables signups
 # 4. Reduces password iterations
 # 5. Adds debug logging
-# 
+#
 # NEVER use this configuration in production!
 # Always use separate development and production environments.
 
@@ -277,5 +331,5 @@ services:
 # Remove development volumes:
 # docker volume prune
 
-# Clean up email test files:
-# rm -rf dev-mailhog
+# Clean up mailpit data:
+# rm -rf dev-mailpit
