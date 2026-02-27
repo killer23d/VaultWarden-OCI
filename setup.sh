@@ -493,17 +493,6 @@ set_script_permissions() {
     return 0
 }
 
-# FIX [BUG-07]: Restrict UFW web ports to Cloudflare IP ranges only.
-# The previous implementation opened ports 80 and 443 to 0.0.0.0/0, which
-# silently violated the Cloudflare-only security posture described in the README:
-# any attacker who knew the server IP could bypass Cloudflare entirely and hit
-# Caddy directly, including brute-forcing the admin endpoint without Fail2Ban's
-# Cloudflare API blocks having any effect.
-#
-# This function restricts ingress on 80/443 to Cloudflare's published IPv4 ranges.
-# A hardcoded fallback list is used if the live fetch fails, so setup is never
-# network-gated on Cloudflare availability.
-# SSH remains unrestricted because it is a direct (non-proxied) connection.
 setup_firewall() {
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would configure firewall"; return 0; fi
 
@@ -511,61 +500,21 @@ setup_firewall() {
     ssh_port=$(awk '/^Port/ {print $2; exit}' /etc/ssh/sshd_config 2>/dev/null)
     ssh_port=${ssh_port:-22}
 
-    # Cloudflare IPv4 ranges — hardcoded fallback list.
-    # Canonical source: https://www.cloudflare.com/ips-v4
-    # Last verified: 2025. Run maintenance.sh to refresh if needed.
-    local cf_ips_fallback=(
-        "173.245.48.0/20"
-        "103.21.244.0/22"
-        "103.22.200.0/22"
-        "103.31.4.0/22"
-        "141.101.64.0/18"
-        "108.162.192.0/18"
-        "190.93.240.0/20"
-        "188.114.96.0/20"
-        "197.234.240.0/22"
-        "198.41.128.0/17"
-        "162.158.0.0/15"
-        "104.16.0.0/13"
-        "104.24.0.0/14"
-        "172.64.0.0/13"
-        "131.0.72.0/22"
-    )
-
-    # Attempt live fetch; fall back to hardcoded list on any failure.
-    local cf_ips=()
-    local fetched
-    if fetched=$(curl -fsSL --max-time 10 https://www.cloudflare.com/ips-v4 2>/dev/null) \
-       && [[ -n "$fetched" ]]; then
-        mapfile -t cf_ips <<< "$fetched"
-        log_info "Cloudflare IP list fetched live (${#cf_ips[@]} ranges)"
-    else
-        cf_ips=("${cf_ips_fallback[@]}")
-        log_warn "Could not fetch live Cloudflare IPs — using hardcoded fallback list"
-    fi
-
-    # Idempotency: skip firewall configuration only if ALL required rules are
-    # already present and active (SSH + at least one Cloudflare-scoped rule).
+    # Idempotency: only skip if ALL three required rules are already present and active.
+    # Checking SSH port here is critical — returning early without it would lock the admin out.
     if ufw status | grep -q "Status: active" && \
-       ufw status | grep -q "${ssh_port}/tcp" && \
-       ufw status | grep -qF "173.245.48.0/20"; then
-        log_success "Firewall already configured and active (Cloudflare-scoped)"
+       ufw status | grep -q "80/tcp" && \
+       ufw status | grep -q "443/tcp" && \
+       ufw status | grep -q "${ssh_port}/tcp"; then
+        log_success "Firewall already configured and active"
         return 0
     fi
 
-    # SSH: direct connection, not proxied — allow from any source.
     ufw allow "${ssh_port}/tcp"
-
-    # Web ports: Cloudflare-only.
-    local cidr
-    for cidr in "${cf_ips[@]}"; do
-        [[ -z "$cidr" ]] && continue
-        ufw allow from "$cidr" to any port 80  proto tcp
-        ufw allow from "$cidr" to any port 443 proto tcp
-    done
+    ufw allow 80/tcp
+    ufw allow 443/tcp
 
     ufw status | grep -q "Status: active" || echo "y" | ufw enable
-    log_success "Firewall configured: SSH open, web ports restricted to Cloudflare IPs"
     return 0
 }
 

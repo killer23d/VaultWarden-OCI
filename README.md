@@ -161,7 +161,7 @@ All configuration files are managed through templates for easier maintenance:
 ```
  Cloudflare Edge (Proxy, WAF, DNS)
        ↑ ↓
- Host Firewall (UFW - Cloudflare IPs only for 80/443 + SSH only)
+ Host Firewall (UFW - Ports 80/443 + SSH)
        ↑ ↓
 ┌─────────────────────────────────────────┐
 │      Template Management Layer          │
@@ -355,10 +355,10 @@ All scripts in this project have been hardened with the following guarantees:
     - Advanced retry logic with exponential backoff
     - Comprehensive regex-based filtering (no external dependencies)
     - Rate limiting detection and response
-- **Cloudflare-Restricted UFW Rules**:
-    - Ports 80 and 443 are restricted to Cloudflare's published IPv4 ranges at the UFW layer
-    - SSH remains unrestricted (direct connection)
-    - A hardcoded fallback IP list is used if the live Cloudflare fetch fails, so setup never requires network access to Cloudflare
+- **UFW Rules**:
+    - Ports 80 and 443 are open at the host firewall (UFW) layer.
+    - Network-level restriction to Cloudflare IPs is recommended at the OCI VCN Security List layer.
+    - SSH remains unrestricted (direct connection).
 - **Secure Startup & Secrets**:
     - `startup.sh` enforces `umask 077` during secrets generation (files created with 600 permissions)
     - Atomic file creation avoids race conditions
@@ -390,7 +390,7 @@ All scripts in this project have been hardened with the following guarantees:
     - **Cloudflare-only blocking for web**: All web-facing jails use CF API only (iptables ineffective due to proxy)
     - **Local iptables for SSH**: SSH jail uses iptables since it's direct connection
     - Automatic IP list updates with safe firewall integration
-- **Host Firewall**: UFW configured with Cloudflare IP restriction — ports 80/443 accept traffic from Cloudflare ranges only
+- **Host Firewall**: UFW configured to allow ports 80/443 and SSH.
 - **HTTPS Enforcement**: Automatic HTTPS via Caddy with Let's Encrypt
 - **Security Headers**: Comprehensive security headers (HSTS, CSP, etc.)
 - **Rate Limiting**: API and admin endpoint protection with forensic logging
@@ -474,17 +474,23 @@ make restore                   # Interactive restore
 
 ### 1. Mandatory Pre-Flight Configuration
 
-#### OCI VCN Security Lists (Restrict to Cloudflare IPs Only)
+#### OCI VCN Security Lists (Cloudflare IP Restriction - Optional but Recommended)
 
 Oracle Cloud blocks all incoming traffic by default at the virtual network level.
-Do **NOT** open ports 80/443 to `0.0.0.0/0`. Instead, restrict ingress to
-Cloudflare's published IP ranges. This enforces the Cloudflare-only web
-posture at the network layer — packets from non-Cloudflare sources are
-dropped before they reach the VM.
+You must configure your VCN Security List to allow web traffic to reach your instance.
 
+**Option A: Standard Setup (Open Web Traffic)**
+If you want to manage traffic filtering at the application layer or just want a simpler setup:
 1. Go to **Compute** → **Instances** → Click your instance.
 2. Click the **Subnet** under "Primary VNIC" → **Default Security List**.
-3. Add **Ingress Rules** for each Cloudflare IPv4 range below.
+3. Add an **Ingress Rule**:
+   - Source CIDR: `0.0.0.0/0`
+   - Protocol: `TCP`
+   - Destination Ports: `80,443`
+
+**Option B: Hardened Setup (Restrict to Cloudflare IPs Only)**
+To enforce a Cloudflare-only web posture at the network layer (dropping non-Cloudflare packets before they reach the VM):
+1. Add **Ingress Rules** for each Cloudflare IPv4 range below instead of `0.0.0.0/0`.
    - Protocol: `TCP`, Destination Ports: `80,443`
    - Source: one CIDR per rule (OCI does not support comma-separated CIDRs)
 
@@ -513,11 +519,7 @@ dropped before they reach the VM.
 
 > **Why not UFW for this?** OCI VCN Security Lists drop packets at the hypervisor
 > level before they reach the VM's network stack — this is a harder control than
-> host-level UFW. UFW also restricts ports 80/443 to Cloudflare IPs (enforced by
-> `setup.sh`), giving defence-in-depth, but the VCN layer is the primary barrier.
-
-> **Keeping the list current:** Cloudflare rarely changes its IP ranges. Subscribe
-> to https://www.cloudflare.com/ips/ for update notifications.
+> host-level UFW.
 
 #### Cloudflare Staging (Grey Cloud First)
 Because Caddy needs to provision a Let's Encrypt certificate during its very first boot, it must be able to solve the HTTP challenge.
@@ -739,7 +741,7 @@ docker compose exec fail2ban fail2ban-regex /var/log/vaultwarden/vaultwarden.log
 - ✅ Validate Cloudflare API tokens work correctly
 - ✅ Test email functionality: `make test-email`
 - ✅ Run comprehensive health check: `./health.sh` or `make health`
-- ✅ Verify OCI VCN Security Lists restrict ports 80/443 to Cloudflare IPs only
+- ✅ Verify OCI VCN Security Lists allow ports 80/443 (Cloudflare restriction recommended)
 
 ### Ongoing Operations
 
