@@ -7,7 +7,7 @@
 # ✅ Enhanced security headers and modern isolation
 # ✅ Cloudflare WAF rate limiting (edge protection)
 # ✅ Fail2Ban SSH protection via host networking (FIXED)
-# ✅ Postfix capabilities hardened (DAC_OVERRIDE, FOWNER, KILL removed)
+# ✅ Postfix capabilities hardened (CHOWN, SETUID, SETGID, NET_BIND_SERVICE, DAC_OVERRIDE, FOWNER only — KILL and others dropped)
 # ✅ Log rotation limits on all runtime services (disk-fill prevention)
 
 services:
@@ -224,7 +224,7 @@ services:
           cpus: '0.1'
 
   # =============================================================================
-  # Postfix - Email Relay (HARDENED - Reduced Capabilities)
+  # Postfix - Email Relay (HARDENED - Minimal Capabilities)
   # =============================================================================
   postfix:
     container_name: vaultwarden_postfix
@@ -400,7 +400,7 @@ networks:
 # ✅ Malicious user-agent blocking (scanner detection)
 # ✅ Init container capability restriction (CHOWN + FOWNER only)
 # ✅ Fail2Ban host networking for SSH protection (FIXED)
-# ✅ Postfix hardened capabilities (DAC_OVERRIDE, FOWNER, KILL removed)
+# ✅ Postfix capabilities hardened (6 caps: CHOWN, SETUID, SETGID, NET_BIND_SERVICE, DAC_OVERRIDE, FOWNER — all others dropped)
 # ✅ WebSocket support enabled by default
 # ✅ Log rotation limits on all runtime services (disk-fill prevention)
 #
@@ -416,18 +416,20 @@ networks:
 #    - Enables real-time sync for VaultWarden clients
 #
 # 3. Postfix Capabilities (HARDENED):
-#    - Removed DAC_OVERRIDE, FOWNER, KILL capabilities
-#    - Minimal set: CHOWN, SETUID, SETGID, NET_BIND_SERVICE
-#    - Test mail delivery after deployment to confirm functionality
+#    - All capabilities dropped by default (cap_drop: ALL)
+#    - Only required caps granted: CHOWN, SETUID, SETGID, NET_BIND_SERVICE,
+#      DAC_OVERRIDE (spool permission overrides), FOWNER (spool file ownership)
+#    - DAC_OVERRIDE and FOWNER are REQUIRED for correct mail spool operation
+#    - KILL and all other capabilities remain dropped
 #
 # 4. Log Rotation (HARDENED):
 #    - All runtime services now cap Docker json-file logs natively
 #    - Worst-case total Docker log footprint: ~200MB on the 40GB SSD
 #    - Sizing rationale:
-#        caddy:      20m x 5 = 100MB  (one line per request - highest volume)
+#        caddy:       20m x 5 = 100MB  (one line per request - highest volume)
 #        vaultwarden: 10m x 5 =  50MB  (warn-level only - low volume)
-#        postfix:     5m x 3 =  15MB  (alert emails only - very low volume)
-#        fail2ban:    5m x 3 =  15MB  (ban/unban events only - very low volume)
+#        postfix:      5m x 3 =  15MB  (alert emails only - very low volume)
+#        fail2ban:     5m x 3 =  15MB  (ban/unban events only - very low volume)
 #    - bash maintenance.sh --comprehensive also rotates volume-mounted logs
 #      as a secondary layer of defense
 #
@@ -453,7 +455,7 @@ networks:
 # - VaultWarden: 512M limit / 128M reservation
 # - Caddy: 512M limit / 128M reservation
 # - Fail2Ban: 512M limit / 128M reservation
-# - Postfix: 256M limit / 64M reservation
+# - Postfix: 256M limit / 64M reservation (+ pids: 50)
 # - Total limits: ~1.8GB (leaves 4.2GB for host OS and overhead)
 # - Total reservations: ~448MB (ensures stable operation)
 #
@@ -468,7 +470,7 @@ networks:
 # □ Verify Caddy starts without errors: docker compose logs caddy
 # □ Test basic auth works: curl -u admin:password https://vault.domain.com/admin
 # □ Verify secrets not in docker inspect: docker inspect vaultwarden_caddy | grep CLOUDFLARE
-# □ Test Postfix with reduced capabilities: docker compose exec postfix postqueue -p
+# □ Test Postfix mail delivery: ./maintenance.sh --test-email --verbose
 # □ Test SSH ban works: Trigger 3 failed SSH attempts, verify iptables ban
 # □ Verify Fail2Ban can send email via 127.0.0.1:587
 # □ Test WebSocket sync: Enable in client, verify real-time notifications
@@ -488,11 +490,12 @@ networks:
 # ⚠️  If lost, ALL encrypted backups are permanently unrecoverable
 # ⚠️  Test key recovery quarterly (see docs/RECOVERY.md)
 #
-# POSTFIX CAPABILITY TESTING:
-# If mail delivery fails after reducing capabilities, incrementally add back:
-# 1. Test current setup first (should work for most relay scenarios)
-# 2. If delivery fails, try adding DAC_OVERRIDE
-# 3. If still failing, try adding FOWNER
-# 4. Document any capabilities required for your specific relay configuration
+# POSTFIX CAPABILITY NOTES:
+# The postfix service grants exactly 6 capabilities (all others dropped):
+#   CHOWN, SETUID, SETGID, NET_BIND_SERVICE, DAC_OVERRIDE, FOWNER
+# DAC_OVERRIDE and FOWNER are required for mail spool access and must
+# not be removed. If mail delivery fails, verify these are present:
+#   docker inspect vaultwarden_postfix | grep -A20 CapAdd
+# Expected hex value includes bits for all six capabilities above.
 #
 # =============================================================================
