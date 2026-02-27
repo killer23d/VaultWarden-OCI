@@ -1,574 +1,524 @@
-# Scripts Reference - VaultWarden-OCI
+# Scripts Reference — VaultWarden-OCI
 
-Complete reference guide for all 12 management scripts and 5 utility libraries in VaultWarden-OCI.
+Complete reference for all management scripts and utility libraries in VaultWarden-OCI.
 
-## Core Management Scripts (12 Total)
+> **Architecture note:** Several scripts that previously existed as standalone files have been **merged** into `maintenance.sh` via sub-command flags:
+> - `db-maint.sh` → `./maintenance.sh --db-maint`
+> - `update-dns.sh` → `./maintenance.sh --update-dns`
+> - `test-email-simple.sh` → `./maintenance.sh --test-email`
+>
+> This reduces the number of files to maintain while keeping each task fully self-contained via locking and separate log files.
 
-### Essential Operations Scripts
+---
 
-#### 1. setup.sh
-**Purpose**: One-time system initialization and configuration
+## 🗂️ Script Inventory
 
-**Usage**:
+| # | Script | Category | sudo? |
+|---|---|---|---|
+| 1 | `setup.sh` | Initialisation | ✅ |
+| 2 | `startup.sh` | Service management | — |
+| 3 | `health.sh` | Monitoring | — |
+| 4 | `backup.sh` | Backup | — |
+| 5 | `restore.sh` | Backup | — |
+| 6 | `edit-secrets.sh` | Secrets | — |
+| 7 | `update.sh` | Updates | — |
+| 8 | `maintenance.sh` | Maintenance (merged) | `--db-maint` only |
+| 9 | `create-breakglass-admin.sh` | Emergency | ✅ |
+| 10 | `cron-setup.sh` | Automation | ✅ |
+
+**Utility libraries (5):** `lib/common.sh`, `lib/docker.sh`, `lib/crypto.sh`, `lib/security.sh`, `lib/backup_utils.sh`
+
+---
+
+## 🔧 Core Management Scripts
+
+### 1. `setup.sh`
+**Purpose:** One-time system initialisation and configuration generation
+
 ```bash
 sudo ./setup.sh --domain vault.example.com --email admin@example.com [OPTIONS]
 ```
 
-**Key Features**:
-- Template-based configuration generation
-- Platform-specific SSH log detection (OCI/Oracle Linux compatible)
-- Enhanced UFW firewall with Cloudflare IP validation
-- Automatic dependency installation
+**Key features:**
+- Template-based `docker-compose.yml` and `.env` generation
+- Platform-specific SSH log detection (Oracle Linux: `/var/log/secure`; Ubuntu: `/var/log/auth.log`)
+- UFW firewall configured for Cloudflare-only web traffic
 - Age encryption key generation
 - SOPS configuration setup
-- Enhanced security validation
+- Dependency installation
 
-**Options**:
-- `--domain DOMAIN` - Your VaultWarden domain (required)
-- `--email EMAIL` - Administrator email (required)
-- `--auto` - Automated setup with minimal prompts
-- `--use-latest` - Use latest container versions (default: pinned)
-- `--skip-deps` - Skip dependency installation
-- `--force` - Overwrite existing configuration files
-- `--dry-run` - Show what would be done
+**Options:**
 
-**Example**:
+| Option | Description |
+|---|---|
+| `--domain DOMAIN` | VaultWarden domain — required |
+| `--email EMAIL` | Administrator email — required |
+| `--auto` | Automated setup with minimal prompts |
+| `--use-latest` | Use `latest` image tags instead of pinned versions |
+| `--skip-deps` | Skip dependency installation |
+| `--force` | Overwrite existing configuration files |
+| `--dry-run` | Show what would be done without executing |
+
 ```bash
 sudo ./setup.sh --domain vault.example.com --email admin@example.com --auto
 ```
 
-#### 2. startup.sh
-**Purpose**: Start, stop, and restart VaultWarden services
+> ⚠️ After `setup.sh` adds your user to the `docker` group, **log out and back in** (or start a new shell session) before running any `docker` or `make` commands.
 
-**Usage**:
+---
+
+### 2. `startup.sh`
+**Purpose:** Start, stop, and restart VaultWarden services
+
 ```bash
 ./startup.sh [OPTIONS]
 ```
 
-**Key Features**:
-- Enhanced secret handling with privacy protection
-- Race condition fixes for service startup
-- DNS record updates
-- Comprehensive health checks
-- Graceful service management
+**What it does:**
+1. Decrypts `secrets/secrets.yaml` once and writes individual Docker secret files to `secrets/.docker_secrets/` (600 permissions)
+2. Creates `${PROJECT_STATE_DIR}/logs/` subdirectories with correct ownership
+3. Starts all containers with `docker compose up -d`
+4. Updates Cloudflare DNS A record
+5. Runs `health.sh` post-startup
 
-**Options**:
-- `--force-restart` - Force restart all services
-- `--down` - Stop all services
-- `--skip-dns` - Skip DNS record updates
-- `--dry-run` - Preview operations
+**Options:**
 
-**Example**:
+| Option | Description |
+|---|---|
+| `--force` | Force restart (preferred flag) — stops containers then restarts |
+| `--force-restart` | Legacy alias for `--force` (kept for compatibility) |
+| `--skip-health` | Skip post-startup health check |
+| `--background` | Start in daemon mode |
+| `--dry-run` | Preview operations without executing |
+
+**Makefile shortcuts:**
 ```bash
-./startup.sh --force-restart
+make start     # Full initialisation startup (alias: make up)
+make stop      # Graceful shutdown (alias: make down)
+make restart   # Force restart
 ```
 
-**Makefile Shortcuts**:
-```bash
-make start     # Full initialization startup
-make restart   # Restart with enhanced script
-make stop      # Graceful shutdown
-```
+---
 
-#### 3. health.sh
-**Purpose**: System health monitoring and diagnostics
+### 3. `health.sh`
+**Purpose:** System health monitoring, diagnostics, and auto-recovery
 
-**Usage**:
 ```bash
 ./health.sh [OPTIONS]
 ```
 
-**Key Features**:
-- Service status checking
-- Resource usage monitoring
-- Configuration validation
-- Connectivity testing
-- Fail2ban status verification
-- Email notification support
-- JSON output option
+**Always-on checks:**
+- All 4 containers running (`vaultwarden_app`, `vaultwarden_caddy`, `vaultwarden_fail2ban`, `vaultwarden_postfix`)
+- VaultWarden accessible on `localhost:8080`
+- External web access via Cloudflare
+- Disk space (warn >70%, critical >alert threshold [default 80%])
+- SSL certificate expiration (warn <30 days, critical <7 days)
+- Database size and growth rate
+- Backup age and decrypt verification (Age)
+- Email notification configuration
 
-**Options**:
-- `--comprehensive` - Run all diagnostics
-- `--email` - Send email notification
-- `--quiet` - Minimal output (exit code only)
-- `--json` - JSON formatted output
+**Options:**
 
-**Example**:
+| Option | Description |
+|---|---|
+| `--comprehensive` | Add resource usage, configuration, and security checks |
+| `--auto-recover` | Attempt automatic container restart on failure |
+| `--email` | Send email if critical issues found |
+| `--quiet` | Suppress non-error console output |
+| `--json` | Output results as JSON |
+| `--output FILE` | Save report to file |
+| `--alert-threshold N` | Set alert threshold % (default: 80) |
+
 ```bash
-./health.sh --comprehensive --email
+./health.sh --comprehensive --auto-recover --email
+
+make health                        # Basic
+make health AUTO_RECOVER=true      # With auto-recovery
+make health COMPREHENSIVE=true     # Comprehensive
+make health-email                  # Comprehensive + email
 ```
 
-**Makefile Shortcuts**:
-```bash
-make health           # Basic health check
-make health-email     # With email notification
-```
+---
 
-#### 4. backup.sh
-**Purpose**: Create encrypted backups with verification
+### 4. `backup.sh`
+**Purpose:** Create Age-encrypted backups with integrity verification
 
-**Usage**:
 ```bash
 ./backup.sh --type TYPE [OPTIONS]
 ```
 
-**Key Features**:
-- Atomic backup operations
-- Safe database snapshots with WAL checkpoints
-- Post-encryption checksum verification
-- Optional full recoverability verification
-- Three backup types: db, full, emergency
-- Rclone offsite sync support
-- Email notifications
-- Comprehensive metadata generation
+**Backup types:**
 
-**Options**:
-- `--type TYPE` - Backup type: db, full, or emergency (required)
-- `--rclone` - Sync to rclone remote after creation
-- `--email` - Send email notification
-- `--full-verification` - Enable end-to-end verification test
-- `--skip-full-verification` - Use fast checksum only (default)
-- `--list` - List available backups
-- `--dry-run` - Preview operations
+| Type | Contents | Retention |
+|---|---|---|
+| `db` | SQLite database only | 14 days |
+| `full` | Database + config + Caddy certs + logs (no secrets) | 30 days |
+| `emergency` | Everything including secrets | 90 days |
 
-**Backup Types**:
-- `db` - Database only (fastest, daily recommended)
-- `full` - Config files and data (NO secrets)
-- `emergency` - Everything including secrets (disaster recovery)
+**Options:**
 
-**Examples**:
+| Option | Description |
+|---|---|
+| `--type TYPE` | `db`, `full`, or `emergency` — required |
+| `--rclone` | Sync encrypted backup to rclone remote after creation |
+| `--email` | Send email notification on completion |
+| `--full-verification` | End-to-end decrypt + integrity check (weekly recommended) |
+| `--skip-full-verification` | Fast checksum only (default) |
+| `--list` | List available backups with metadata |
+| `--dry-run` | Preview operations |
+
 ```bash
-# Daily database backup (fast verification)
+# Daily
 ./backup.sh --type db
 
-# Weekly full backup with complete verification
-./backup.sh --type full --full-verification
+# Weekly with full verification and remote sync
+./backup.sh --type full --full-verification --rclone --email
 
-# Emergency kit with offsite sync
-./backup.sh --type emergency --rclone --email
-```
+# Emergency kit
+./backup.sh --type emergency --rclone
 
-**Makefile Shortcuts**:
-```bash
 make backup              # Database backup
-make backup-full         # Full system backup
-make backup-emergency    # Emergency recovery kit
-make list-backups        # List available backups
+make backup-full         # Full backup
+make backup-emergency    # Emergency kit
+make list-backups        # List backups
 ```
 
-#### 5. restore.sh
-**Purpose**: Restore from encrypted backups
+---
 
-**Usage**:
+### 5. `restore.sh`
+**Purpose:** Restore from an Age-encrypted backup
+
 ```bash
 ./restore.sh [OPTIONS]
 ```
 
-**Key Features**:
-- Interactive backup selection
-- Automatic decryption
-- Database integrity verification
-- Service management during restore
-- Comprehensive validation
+**Options:**
 
-**Options**:
-- `--file FILE` - Specific backup file to restore
-- `--type TYPE` - Filter backups by type
-- `--force` - Skip confirmation prompts
-- `--dry-run` - Preview operations
+| Option | Description |
+|---|---|
+| `--file FILE` | Specific backup file to restore |
+| `--type TYPE` | Filter backup list by type |
+| `--force` | Skip confirmation prompts |
+| `--dry-run` | Preview operations |
 
-**Example**:
 ```bash
-# Interactive restore (recommended)
+# Interactive (recommended)
 ./restore.sh
+make restore
 
-# Restore specific file
+# Specific file
 ./restore.sh --file /path/to/backup.age --force
+
+# Latest DB backup (non-interactive)
+make restore-db
 ```
 
-**Makefile Shortcuts**:
-```bash
-make restore             # Interactive restore
-```
+---
 
-### Configuration & Secrets Management
+### 6. `edit-secrets.sh`
+**Purpose:** Securely edit SOPS-encrypted secrets
 
-#### 6. edit-secrets.sh
-**Purpose**: Secure secrets editing with enhanced privacy
-
-**Usage**:
 ```bash
 ./edit-secrets.sh [OPTIONS]
 ```
 
-**Key Features**:
-- SOPS key path never exposed in process list
-- Secure temporary file handling
-- Automatic backup creation before editing
-- Comprehensive validation after editing
-- Editor security validation
-- Privacy protection enhancements
+**Key features:**
+- SOPS Age key path never appears in the process list
+- Decrypts to a secure temp file (shredded on exit)
+- Creates automatic backup before editing
+- Validates secrets after editing
 
-**Options**:
-- `--editor EDITOR` - Specify editor (default: nano)
-- `--no-backup` - Skip backup creation
-- `--no-validation` - Skip post-edit validation
-- `--test` - Test secrets decryption without editing
+**Managed secrets:**
+`admin_token`, `admin_basic_auth_hash`, `smtp_password`, `push_installation_id`, `push_installation_key`, `caddy_cloudflare_dns_token`, `fail2ban_cloudflare_firewall_token`, `backup_passphrase`
 
-**Example**:
+**Options:**
+
+| Option | Description |
+|---|---|
+| `--editor EDITOR` | Specify editor (default: nano) |
+| `--no-backup` | Skip automatic backup |
+| `--no-validation` | Skip post-edit validation |
+| `--test` | Test decryption without editing |
+
 ```bash
 ./edit-secrets.sh
 ./edit-secrets.sh --editor vim
+make edit-secrets
+make test-secrets
 ```
 
-**Makefile Shortcuts**:
-```bash
-make edit-secrets        # Edit encrypted secrets
-make test-secrets        # Test secrets decryption
-```
+---
 
-### Update & Maintenance Scripts
+### 7. `update.sh`
+**Purpose:** Update container images and optionally system packages
 
-#### 7. update.sh
-**Purpose**: Update container images and system packages
-
-**Usage**:
 ```bash
 ./update.sh [OPTIONS]
 ```
 
-**Key Features**:
-- Automatic backup before updates
-- Container image updates
-- System package updates
-- Version pinning respect
-- Email notifications
+**Options:**
 
-**Options**:
-- `--system` - Update system packages too
-- `--email` - Send email notification
-- `--no-backup` - Skip pre-update backup
-- `--dry-run` - Preview operations
+| Option | Description |
+|---|---|
+| `--system` | Also update system packages (apt) and Docker engine |
+| `--email` | Send email notification on completion |
+| `--no-backup` | Skip pre-update emergency backup |
+| `--dry-run` | Preview operations |
 
-**Example**:
 ```bash
+./update.sh
 ./update.sh --system --email
+
+make update           # Containers only
+make update-system    # Containers + system packages
 ```
 
-**Makefile Shortcuts**:
-```bash
-make update              # Update containers only
-make update-system       # Update system and containers
-```
+---
 
-#### 8. maintenance.sh
-**Purpose**: System cleanup and optimization
+### 8. `maintenance.sh` *(merged script)*
+**Purpose:** Routine cleanup, optimisation, DNS update, deep DB maintenance, and email diagnostics — all in one script with sub-command modes
 
-**Usage**:
 ```bash
 ./maintenance.sh [OPTIONS]
 ```
 
-**Key Features**:
-- Safe database maintenance (offline)
-- Docker cleanup operations
-- Log rotation and cleanup
-- Backup pruning
-- Enhanced firewall updates with race condition fixes
-- Email notifications
+**Modes overview:**
 
-**Options**:
-- `--comprehensive` - Run all maintenance tasks
-- `--no-logs` - Skip log cleanup
-- `--no-backups` - Skip backup pruning
-- `--no-database` - Skip database maintenance
-- `--update-firewall` - Update Cloudflare firewall rules
-- `--email` - Send email notification
-- `--dry-run` - Preview operations
+| Mode | Command | Cleanup runs? |
+|---|---|---|
+| Routine | `--comprehensive` | ✅ |
+| Targeted DNS | `--update-dns` (alone) | ❌ |
+| Targeted Firewall | `--update-firewall` (alone) | ❌ |
+| Deep DB maintenance | `--db-maint` | ❌ |
+| Email diagnostics | `--test-email` | ❌ |
 
-**Example**:
+**Routine options:**
+
+| Option | Description |
+|---|---|
+| `--comprehensive` | Full routine: cleanup + DB opt + firewall + DNS + health |
+| `--no-logs` | Skip log cleanup |
+| `--no-backups` | Skip backup pruning |
+| `--no-docker` | Skip Docker resource cleanup |
+| `--no-database` | Skip scheduled DB optimisation |
+| `--email` | Send summary email on completion |
+| `--dry-run` | Preview any mode without changes |
+
+**Deep DB maintenance options:**
+
+| Option | Description |
+|---|---|
+| `--db-maint` | Run full VACUUM cycle (stops VaultWarden; prompts for confirmation) |
+| `--db-maint --force` | Skip the confirmation prompt |
+
+**Email diagnostic options:**
+
+| Option | Description |
+|---|---|
+| `--test-email` | Run Postfix + fail2ban + end-to-end email tests |
+| `--verbose` | Detailed output (only meaningful with `--test-email`) |
+| `--recipient EMAIL` | Override default `ADMIN_EMAIL` recipient |
+
+**Targeted options:**
+
+| Option | Description |
+|---|---|
+| `--update-firewall` | Fetch latest Cloudflare IPs and update UFW rules |
+| `--update-dns` | Check current public IP and update Cloudflare DNS A record |
+
 ```bash
+# Routine
+./maintenance.sh --comprehensive
 ./maintenance.sh --comprehensive --email
+make maintenance
+make maintenance-full
+
+# Deep DB
+sudo ./maintenance.sh --db-maint
+sudo ./maintenance.sh --db-maint --force
+make db-maint
+
+# Email
+./maintenance.sh --test-email
+./maintenance.sh --test-email --verbose
+./maintenance.sh --test-email --recipient admin@example.com
+make test-email
+
+# Targeted
+./maintenance.sh --update-dns
 ./maintenance.sh --update-firewall
+make update-dns
 ```
 
-**Makefile Shortcuts**:
-```bash
-make maintenance         # Basic maintenance
-make maintenance-full    # Comprehensive maintenance
-```
+---
 
-#### 9. cron-setup.sh
-**Purpose**: Configure automated task scheduling
+### 9. `create-breakglass-admin.sh`
+**Purpose:** Emergency OS admin account for OCI Serial Console access
 
-**Usage**:
-```bash
-sudo ./cron-setup.sh [OPTIONS]
-```
-
-**Key Features**:
-- Secure privilege management
-- Automated backups
-- Regular health checks
-- Periodic updates
-- Monthly maintenance
-- Validation of cron jobs
-
-**Options**:
-- `--install` - Install cron jobs
-- `--remove` - Remove cron jobs
-- `--list` - List current cron jobs
-- `--dry-run` - Preview operations
-
-**Default Schedule**:
-- Daily 2 AM: Database backup
-- Daily 6 AM: Health check
-- Weekly Sunday 3 AM: Full backup with verification
-- Weekly Sunday 4 AM: Container updates
-- Monthly 1st 5 AM: Comprehensive maintenance
-
-**Example**:
-```bash
-sudo ./cron-setup.sh --install
-```
-
-**Makefile Shortcuts**:
-```bash
-make cron-install        # Install cron jobs
-make cron-remove         # Remove cron jobs
-make cron-list           # List cron jobs
-```
-
-### Emergency & Recovery Scripts
-
-#### 10. create-breakglass-admin.sh
-**Purpose**: Emergency admin account for OCI console access
-
-**Usage**:
 ```bash
 ./create-breakglass-admin.sh [OPTIONS]
 ```
 
-**Key Features**:
-- Secure non-root user with sudo privileges
-- SSH key authentication setup
-- Password auth for OCI console only
+**Key features:**
+- Creates a non-root user with `sudo` privileges
+- SSH key authentication + console password authentication
 - Comprehensive audit logging
-- Security validation using centralized lib/security.sh
+- Security validation via `lib/security.sh`
 
-**Options**:
-- `--create` - Create emergency admin account
-- `--status` - Show break-glass admin status
-- `--password` - Generate new password
-- `--validate` - Validate security configuration
-- `--remove` - Remove emergency admin account
+**Options:**
 
-**Example**:
+| Option | Description |
+|---|---|
+| `--create` | Create the emergency admin account |
+| `--status` | Show current break-glass admin status |
+| `--password` | Generate a new emergency password |
+| `--validate` | Run security validation |
+| `--remove` | Remove the emergency admin account |
+
 ```bash
 ./create-breakglass-admin.sh --create
+
+make breakglass-create
+make breakglass-status
+make breakglass-remove
 ```
 
-**Makefile Shortcuts**:
+---
+
+### 10. `cron-setup.sh`
+**Purpose:** Install, validate, and manage automated cron jobs with security hardening
+
 ```bash
-make breakglass-create   # Create emergency admin
-make breakglass-status   # Check status
-make breakglass-remove   # Remove emergency admin
+sudo ./cron-setup.sh [OPTIONS]
 ```
 
-#### 11. db-maint.sh
-**Purpose**: Database maintenance and optimization
+**Key features:**
+- Copies scripts to `/opt/vaultwarden-scripts/` with `root:root 700` permissions
+- Patches `SCRIPT_DIR` and `lib/` source paths at install time (prevents LPE)
+- `flock`-based mutual exclusion prevents overlapping cron runs
+- Split-brain detection: warns when `/opt/` scripts are older than the git repo
+- Validates `lib/simple_key_resilience.sh` presence (Age key health checks)
 
-**Usage**:
+**Options:**
+
+| Option | Description |
+|---|---|
+| `--install` | Install cron jobs securely |
+| `--remove` | Remove cron jobs and `/opt/` script copies |
+| `--list` | List current jobs + check for split-brain |
+| `--validate` | Validate security configuration |
+| `--dry-run` | Preview without executing |
+
+**Installed schedule:**
+
+| Schedule | Job |
+|---|---|
+| Daily 2 AM (Mon–Sat) | `maintenance.sh --comprehensive` |
+| Daily 4 AM | `backup.sh --type db --rclone --email` |
+| Every 30 min | `health.sh --quiet` |
+| Saturday 4 AM | `maintenance.sh --update-firewall` |
+| Sunday 3 AM | `backup.sh --type full --full-verification --rclone --email` |
+| Every hour | `maintenance.sh --update-dns` |
+
+All scripts run from `$PROJECT_ROOT` to preserve context. Health and maintenance jobs are `flock`-protected. Sunday maintenance is intentionally skipped.
+
 ```bash
-./db-maint.sh [OPTIONS]
+sudo ./cron-setup.sh --install
+sudo ./cron-setup.sh --list
+sudo ./cron-setup.sh --validate
+sudo ./cron-setup.sh --remove
+
+make cron-install
+make cron-list
+make cron-remove
 ```
 
-**Key Features**:
-- Safe offline database operations
-- WAL checkpoint before maintenance
-- Integrity checking before and after
-- VACUUM operation for optimization
-- Service management
+---
 
-**Options**:
-- `--force` - Skip confirmation prompts
-- `--dry-run` - Preview operations
+## 📚 Utility Libraries
 
-**Example**:
-```bash
-./db-maint.sh
-```
+All libraries live in `lib/` and are sourced at the top of every script. At cron-install time, `cron-setup.sh` copies the entire `lib/` tree to `/opt/vaultwarden-scripts/lib/` and patches source paths.
 
-**Makefile Shortcuts**:
-```bash
-make db-maint            # Database maintenance
-```
+### `lib/common.sh`
+Core functions used by every script.
 
-#### 12. update-dns.sh
-**Purpose**: Manual DNS record updates
+| Function | Description |
+|---|---|
+| `init_common_lib "$0"` | Initialise library with script context |
+| `log_info/success/warn/error` | Colour-coded logging |
+| `require_commands` | Assert required binaries are present |
+| `get_config_value KEY DEFAULT` | Read a variable from `.env` |
+| `load_env_file` | Source `.env` into the environment |
+| `get_real_user` | Resolve actual user even under `sudo` |
+| `ensure_dir PATH MODE` | Create directory with permissions |
+| `retry_with_backoff N DELAY CMD` | Retry with exponential backoff |
+| `validate_domain/email/port` | Input validation helpers |
+| `send_notification_email SUBJ BODY` | Send via Postfix container |
 
-**Usage**:
-```bash
-./update-dns.sh [OPTIONS]
-```
+### `lib/docker.sh`
+Docker and Docker Compose helpers.
 
-**Key Features**:
-- Cloudflare API integration
-- Current IP detection
-- DNS record validation
-- Error handling
+| Function | Description |
+|---|---|
+| `require_docker` | Verify Docker daemon is accessible |
+| `is_service_running NAME` | Check if a Compose service is running |
+| `wait_for_service NAME TIMEOUT` | Poll until service is healthy |
+| `stop_service / start_service` | Service lifecycle helpers |
+| `get_container_status` | Detailed container status |
+| `docker_cleanup` | Remove unused containers, images, volumes |
 
-**Options**:
-- `--dry-run` - Preview operations
+### `lib/crypto.sh`
+Encryption, decryption, and key management.
 
-**Example**:
-```bash
-./update-dns.sh
-```
+| Function | Description |
+|---|---|
+| `generate_age_key PATH` | Generate an Age identity key |
+| `get_age_public_key PATH` | Extract the Age public key |
+| `encrypt_data / decrypt_data` | Age encrypt / decrypt |
+| `encrypt_sops_file / decrypt_sops_file` | SOPS file operations |
+| `generate_secure_string N` | Cryptographically secure random string |
+| `calculate_sha256 FILE` | SHA-256 checksum |
+| `secure_file PATH` | Set restrictive permissions on a file |
+| `check_age_key PATH` | Validate Age key file (used by `health.sh`) |
 
-**Makefile Shortcuts**:
-```bash
-make update-dns          # Update DNS record
-```
+### `lib/security.sh`
+Centralised security validation.
 
-### Testing & Validation Scripts
+| Function | Description |
+|---|---|
+| `validate_file_permissions PATH MODE OWNER GROUP` | Assert file permissions |
+| `validate_directory_permissions PATH` | Recursive directory validation |
+| `create_secure_file PATH CONTENT MODE OWNER GROUP` | Atomic secure file creation |
+| `secure_cleanup PATH` | Multi-pass secure deletion |
+| `validate_password_strength PASSWORD` | Password strength check |
+| `generate_secure_random N` | Cryptographically secure random bytes |
+| `validate_system_security` | Comprehensive system security audit |
 
-#### test-email-simple.sh
-**Purpose**: Test email configuration
+### `lib/backup_utils.sh`
+Backup-specific helpers.
 
-**Usage**:
-```bash
-./test-email-simple.sh [OPTIONS]
-```
+| Function | Description |
+|---|---|
+| `check_backup_disk_space DIR MIN_MB` | Verify available disk space |
+| `list_backups DIR` | List backups with metadata |
+| `get_backup_metadata FILE` | Extract metadata from a backup file |
+| `verify_backup_integrity FILE` | Verify backup file integrity |
+| `cleanup_old_backups DIR TYPE DAYS` | Remove old backups per retention policy |
+| `format_backup_size BYTES` | Human-readable size formatting |
 
-**Key Features**:
-- Tests msmtpd container functionality
-- Validates SMTP configuration
-- Connection testing
-- Detailed diagnostics
+---
 
-**Options**:
-- `--verbose` - Detailed output
-- `--to EMAIL` - Override recipient email
+## 🏗️ Script Design Patterns
 
-**Example**:
-```bash
-./test-email-simple.sh
-./test-email-simple.sh --verbose --to test@example.com
-```
-
-## Utility Libraries (5 Total)
-
-### lib/common.sh
-**Purpose**: Core utility functions used by all scripts
-
-**Key Functions**:
-- `init_common_lib()` - Initialize library with script context
-- `log_info()`, `log_success()`, `log_warn()`, `log_error()` - Logging functions
-- `require_commands()` - Check for required commands
-- `has_command()` - Check if command exists
-- `get_config_value()` - Get configuration value from .env
-- `load_env_file()` - Load environment variables
-- `get_real_user()` - Get actual user (even when running as root)
-- `ensure_dir()` - Create directory with permissions
-- `safe_execute()` - Execute command with error handling
-- `retry_with_backoff()` - Retry operation with exponential backoff
-- `validate_domain()`, `validate_email()`, `validate_port()` - Input validation
-- `send_notification_email()` - Send email notifications (prefers msmtpd)
-
-**Usage Example**:
-```bash
-source "lib/common.sh"
-init_common_lib "$0"
-log_info "Starting operation..."
-```
-
-### lib/docker.sh
-**Purpose**: Docker and Docker Compose operations
-
-**Key Functions**:
-- `require_docker()` - Verify Docker is available
-- `is_service_running()` - Check if service is running
-- `wait_for_service()` - Wait for service to be ready
-- `stop_service()`, `start_service()` - Service management
-- `get_container_status()` - Get detailed container status
-- `docker_cleanup()` - Clean up Docker resources
-
-**Usage Example**:
-```bash
-source "lib/docker.sh"
-is_service_running "vaultwarden" && echo "Running"
-```
-
-### lib/crypto.sh
-**Purpose**: Encryption, decryption, and key management
-
-**Key Functions**:
-- `generate_age_key()` - Generate Age encryption key
-- `get_age_public_key()` - Extract Age public key
-- `encrypt_data()` - Encrypt data with Age
-- `decrypt_data()` - Decrypt Age-encrypted data
-- `encrypt_sops_file()` - Encrypt file with SOPS
-- `decrypt_sops_file()` - Decrypt SOPS file
-- `generate_secure_string()` - Generate cryptographically secure random string
-- `calculate_sha256()` - Calculate SHA256 checksum
-- `secure_file()` - Set secure permissions on file
-
-**Usage Example**:
-```bash
-source "lib/crypto.sh"
-generate_age_key "secrets/keys/age-key.txt"
-```
-
-### lib/security.sh
-**Purpose**: Centralized security validation and operations
-
-**Key Functions**:
-- `validate_file_permissions()` - Validate file permissions, owner, group
-- `validate_directory_permissions()` - Recursive directory validation
-- `create_secure_file()` - Atomic secure file creation
-- `secure_cleanup()` - Multi-pass secure file deletion
-- `validate_password_strength()` - Password strength validation
-- `generate_secure_random()` - Cryptographically secure random generation
-- `validate_system_security()` - Comprehensive system security check
-
-**Usage Example**:
-```bash
-source "lib/security.sh"
-validate_file_permissions "/path/to/file" "600" "user" "group"
-```
-
-### lib/backup_utils.sh (NEW)
-**Purpose**: Backup-specific utility functions
-
-**Key Functions**:
-- `check_backup_disk_space()` - Validate available disk space
-- `list_backups()` - List available backups with metadata
-- `get_backup_metadata()` - Extract backup metadata
-- `verify_backup_integrity()` - Verify backup file integrity
-- `cleanup_old_backups()` - Remove old backups based on retention policy
-- `format_backup_size()` - Human-readable size formatting
-
-**Usage Example**:
-```bash
-source "lib/backup_utils.sh"
-check_backup_disk_space "/path/to/backup/dir" 1000
-```
-
-## Script Design Patterns
-
-### Standardized Error Handling
-All scripts follow a standardized error handling pattern:
+### Standardised Error Handling
 
 ```bash
-# Functions return exit codes
 function_name() {
-    # Operations
-    return 0  # Success
-    return 1  # Failure
+    # perform operation
+    return 0  # success
+    return 1  # failure
 }
 
-# Main function collects status
 main() {
     if ! function_name; then
         log_error "Operation failed"
@@ -578,8 +528,7 @@ main() {
 }
 ```
 
-### Cleanup Management
-Scripts use trap-based cleanup:
+### Trap-Based Cleanup
 
 ```bash
 CLEANUP_ACTIONS=()
@@ -593,7 +542,6 @@ trap perform_cleanup EXIT
 ```
 
 ### Library Integration
-All scripts follow consistent library integration:
 
 ```bash
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -604,34 +552,36 @@ source "lib/common.sh"
 init_common_lib "$0"
 source "lib/docker.sh"
 source "lib/crypto.sh"
-# ... other libraries as needed
+# … additional libraries as needed
 ```
 
-## Best Practices
+### Flock-Based Mutual Exclusion (Cron Jobs)
 
-### Script Execution
-1. **Always run from project root**: Scripts assume they are run from the project root directory
-2. **Use sudo when required**: setup.sh, cron-setup.sh, create-breakglass-admin.sh need sudo
-3. **Check help first**: All scripts support `--help` option
-4. **Use dry-run**: Preview operations with `--dry-run` when available
-
-### Makefile Usage
-1. **Prefer Makefile shortcuts**: More convenient and consistent
-2. **Use descriptive targets**: `make health` instead of remembering script options
-3. **Check available targets**: Run `make help` to see all options
-
-### Security Considerations
-1. **Validate before production**: Always test in development first
-2. **Review generated files**: Check docker-compose.yml and .env after setup
-3. **Secure cleanup**: Scripts automatically clean up sensitive temporary files
-4. **Audit logging**: All administrative actions are logged
-
-### Operational Excellence
-1. **Use automation**: Install cron jobs with `make cron-install`
-2. **Monitor regularly**: Use `make health` for health checks
-3. **Test backups**: Regularly test restore procedures
-4. **Keep updated**: Run `make update` regularly for security patches
+Health and maintenance cron jobs are wrapped with `flock -n LOCKFILE CMD`. If the previous run is still active, the new invocation exits immediately — no queuing, no duplicate alerts.
 
 ---
 
-This scripts reference provides comprehensive documentation for all management scripts and utility libraries in VaultWarden-OCI, enabling efficient operation and maintenance of your VaultWarden deployment.
+## ✅ Best Practices
+
+### Script Execution
+1. **Run from project root** — all scripts resolve paths relative to `SCRIPT_DIR`
+2. **Use `sudo` where required** — `setup.sh`, `cron-setup.sh`, `create-breakglass-admin.sh`, and `maintenance.sh --db-maint`
+3. **Check `--help` first** — every script supports `--help`
+4. **Use `--dry-run`** — preview any operation before applying
+
+### Makefile Usage
+1. **Prefer Makefile shortcuts** — they handle quoting and flags consistently
+2. **Run `make help`** to see all available targets
+3. **Use `make test-config`** to validate docker-compose config before deployment
+
+### Security
+1. **Never hardcode secrets in `.env`** — use `./edit-secrets.sh` for all sensitive values
+2. **Review generated files** — inspect `docker-compose.yml` and `.env` after `setup.sh`
+3. **Scripts auto-clean temp files** — sensitive temp files are shredded on exit
+4. **All admin actions are logged** — check `/var/log/vaultwarden-cron/` for cron output
+
+### Operational Excellence
+1. **Install cron** — `sudo ./cron-setup.sh --install` for hands-off operation
+2. **Monitor regularly** — `make health` or rely on the every-30-min cron check
+3. **Test backups** — periodically run `./restore.sh` to verify recoverability
+4. **Re-run `--install` after updates** — keeps `/opt/` scripts in sync with the git repo

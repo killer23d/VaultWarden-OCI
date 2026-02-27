@@ -1,127 +1,142 @@
-# Operations Guide - VaultWarden-OCI
+# Operations Guide — VaultWarden-OCI
 
-This comprehensive operations guide covers day-to-day management, maintenance procedures, monitoring, and troubleshooting for VaultWarden-OCI with current Cloudflare-only blocking, resource management, and automated operations.
+This guide covers day-to-day management, maintenance, monitoring, and troubleshooting for VaultWarden-OCI with Cloudflare-only web traffic, Age-encrypted backups, containerised Postfix email, and automated operations via cron.
 
-## Daily Operations
+---
+
+## 🔄 Daily Operations
 
 ### Service Management
 
 #### Starting Services
 
 ```bash
-# Full initialization startup (recommended)
+# Full initialisation startup (recommended)
 ./startup.sh
 
-# Or use Makefile
-make start
+# Or via Makefile
+make start   # alias: make up
 
-# Features:
-# - Pre-flight validation checks
-# - Secret extraction and validation
-# - Dependency checks (Docker, containers)
-# - Race condition handling
-# - Comprehensive error reporting
+# What it does:
+#  - Decrypts SOPS secrets once and writes Docker secret files
+#  - Prepares log and state directories with correct ownership
+#  - Starts all containers (docker compose up -d)
+#  - Updates Cloudflare DNS A record
+#  - Runs post-startup health check
 ```
 
 #### Stopping Services
 
 ```bash
-# Graceful shutdown
-./startup.sh --stop
+# Graceful shutdown via startup.sh
+./startup.sh --down
 
-# Or use Docker Compose directly
+# Or via Makefile
+make stop   # alias: make down
+
+# Or directly
 docker compose down
 
-# Or use Makefile
-make stop
-
-# Emergency stop (if graceful fails)
+# Emergency stop
 docker compose kill
 ```
 
 #### Restarting Services
 
 ```bash
-# Enhanced restart with fresh configuration
+# Enhanced restart (preferred)
+./startup.sh --force
+
+# --force-restart is a legacy alias for --force
 ./startup.sh --force-restart
 
-# Or use Makefile
+# Or via Makefile
 make restart
 
-# Features:
-# - Stops all services cleanly
-# - Re-extracts secrets
-# - Validates configuration
-# - Starts with fresh state
+# Safe restart with auto-rollback on health failure
+make safe-restart
 ```
+
+---
 
 ### Health Monitoring
 
-#### Comprehensive Health Checks
+#### Basic Health Check
 
 ```bash
-# Run complete health diagnostic
 ./health.sh
 
-# Or use Makefile
+# Or via Makefile
 make health
 
-# Checks performed:
-# ✓ Docker daemon accessible
-# ✓ All containers running
-# ✓ Container resource usage
-# ✓ Memory usage < 85% threshold
-# ✓ VaultWarden responding
-# ✓ Caddy configuration valid
-# ✓ Fail2Ban operational
-# ✓ msmtpd running
-# ✓ Disk space available
-# ✓ Secrets properly configured
-# ✓ Network connectivity
+# Basic checks (always run):
+#  ✓ All containers running (vaultwarden, caddy, fail2ban, postfix)
+#  ✓ VaultWarden accessible on localhost:8080
+#  ✓ External web access via Cloudflare (soft warning if down)
+#  ✓ Disk space (warn >70%, critical >80%)
+#  ✓ SSL certificate expiration
+#  ✓ Database size and growth rate
+#  ✓ Backup age and decryptability
+#  ✓ Email notification configuration
 ```
 
-#### Health Check with Email Notification
+#### Comprehensive Health Check
 
 ```bash
-# Send health report via email
-./health.sh --email
+./health.sh --comprehensive
 
-# Or use Makefile
-make health-email
-
-# Useful for automated monitoring
+# Additional checks:
+#  ✓ CPU and memory usage vs alert threshold
+#  ✓ .env and secrets.yaml configuration validation
+#  ✓ Fail2ban responding, Age key valid, SOPS config present
 ```
 
-#### Container-Specific Health
+#### Health Check with Auto-Recovery
 
 ```bash
-# Check specific container
-docker compose ps vaultwarden
+# Automatically restart unhealthy containers
+./health.sh --auto-recover
 
-# View container resource usage
-docker stats --no-stream vaultwarden_app
+# Combined — comprehensive check + auto-recovery + email alert
+./health.sh --comprehensive --auto-recover --email
 
-# Check health status
+# Or via Makefile
+make health AUTO_RECOVER=true
+make health-email   # comprehensive + email
+```
+
+> **Note:** `--comprehensive` and `--auto-recover` are confirmed flags. There is no `--quiet` flag for disabling email-only output; use `--quiet` only to suppress non-error console output.
+
+#### Container-Specific Status
+
+```bash
+# Show all container states
+docker compose ps
+
+# Resource usage snapshot
+docker stats --no-stream
+
+# Health status of a specific container
 docker inspect vaultwarden_app | jq '.[0].State.Health'
 ```
+
+---
 
 ### Log Management
 
 #### Viewing Logs
 
 ```bash
-# All services
+# All services (follow)
 docker compose logs --follow
-
-# Or use Makefile
 make logs
 
 # Specific service
 docker compose logs vaultwarden --follow --tail=50
 make logs SERVICE=vaultwarden
 
-# Multiple services
-docker compose logs vaultwarden caddy --follow
+# Postfix email logs shortcut
+make logs-postfix
 
 # With timestamps
 docker compose logs --follow --timestamps
@@ -130,621 +145,424 @@ docker compose logs --follow --timestamps
 #### Log Analysis
 
 ```bash
-# Authentication failures
+# Authentication failures (Caddy JSON logs)
 grep "401" ${PROJECT_STATE_DIR}/logs/caddy/auth_attempts.log | jq
 
 # Admin panel access
 cat ${PROJECT_STATE_DIR}/logs/caddy/admin_access.log | jq
 
-# Security events
+# Fail2ban bans
 grep "block\|ban" ${PROJECT_STATE_DIR}/logs/fail2ban/fail2ban.log
 
 # VaultWarden errors
 grep "ERROR" ${PROJECT_STATE_DIR}/logs/vaultwarden/vaultwarden.log
 
-# Rate limit hits
+# Rate limit events
 grep "429" ${PROJECT_STATE_DIR}/logs/caddy/access.log | jq
 ```
 
-#### Log Rotation Status
+#### Log Retention (Caddy)
 
-Current log retention:
-```
-Main Access Log:   1GB   (30-day retention)
-Admin Access Log:  750MB (90-day retention)
-Auth Attempts Log: 750MB (90-day retention)
-Security Log:      500MB (180-day retention)
-```
+| Log | Max Size | Retention |
+|---|---|---|
+| Main access | 1 GB | 30 days |
+| Admin access | 750 MB | 90 days |
+| Auth attempts | 750 MB | 90 days |
+| Security | 500 MB | 180 days |
 
-Check log sizes:
 ```bash
 # Check log directory sizes
 du -sh ${PROJECT_STATE_DIR}/logs/*
-
-# Check specific log files
-ls -lh ${PROJECT_STATE_DIR}/logs/caddy/*.log
 ```
 
-## Backup Operations
+---
+
+## 💾 Backup Operations
 
 ### Creating Backups
 
-#### Database Backup (Quick)
+#### Database Backup (Quick — Daily)
 
 ```bash
-# Create database backup
 ./backup.sh --type db
+make backup   # same
+make db-backup
 
-# Or use Makefile
-make backup
-
-# Features:
-# - Atomic operation (prevents corruption)
-# - WAL checkpoint before backup
-# - Integrity verification
-# - Age encryption
-# - 14-day retention
+# Features: atomic WAL checkpoint, integrity check, Age encryption, 14-day retention
 ```
 
 #### Full System Backup
 
 ```bash
-# Complete system backup
 ./backup.sh --type full
-
-# Or use Makefile
 make backup-full
 
-# Includes:
-# - Database
-# - Configuration files
-# - Secrets (encrypted)
-# - Caddy certificates
-# - All logs
-# - 30-day retention
+# Includes: database, config files, Caddy certificates, logs
+# Excludes: secrets (use --type emergency for those)
+# Retention: 30 days
 ```
 
-#### Full Backup with Verification
+#### Full Backup with End-to-End Verification
 
 ```bash
-# Backup with end-to-end verification
 ./backup.sh --type full --full-verification
 
-# Verification process:
-# 1. Create backup
-# 2. Decrypt backup
-# 3. Extract contents
-# 4. Verify database integrity
-# 5. Confirm all files present
-# 6. Cleanup test environment
-
-# Recommended: Weekly
+# Process: create → decrypt → extract → integrity check → verify files → cleanup
+# Recommended: weekly (matches cron default)
 ```
 
 #### Emergency Recovery Kit
 
 ```bash
-# Create disaster recovery kit
 ./backup.sh --type emergency
-
-# Or use Makefile
 make backup-emergency
 
-# Includes everything for complete restoration
+# Includes everything, including secrets — full disaster recovery
 # Retention: 90 days
 ```
 
-### Remote Backups
-
-#### Configure Remote Storage
+### Remote Backups (rclone)
 
 ```bash
-# Interactive configuration
+# Configure a remote first
 rclone config
+# Set RCLONE_REMOTE_NAME in .env
 
-# Example remotes:
-# - Google Drive
-# - Amazon S3
-# - Dropbox
-# - OneDrive
-# - Backblaze B2
-
-# Update .env with remote name
-nano .env
-# Set: RCLONE_REMOTE_NAME=your_remote_name
-```
-
-#### Backup with Remote Sync
-
-```bash
-# Create backup and sync to remote
+# Backup + sync to remote
 ./backup.sh --type db --rclone
-
-# Or for full backup
-./backup.sh --type full --rclone
-
-# Features:
-# - Encrypted before upload
-# - TLS in transit
-# - Age encryption at rest
-# - Automatic retry on failure
+./backup.sh --type full --rclone --email
 ```
+
+Supported remotes: Google Drive, Amazon S3, Backblaze B2, Dropbox, OneDrive, and all other rclone-supported providers.
 
 ### Managing Backups
 
-#### List Available Backups
-
 ```bash
-# List all backups with details
+# List all backups
 ./backup.sh --list
-
-# Or use Makefile
 make list-backups
 
-# Output includes:
-# - Timestamp
-# - Backup type
-# - Size
-# - File location
-# - Integrity status
-```
-
-#### Restore from Backup
-
-```bash
 # Interactive restore (recommended)
 ./restore.sh
-
-# Or use Makefile
 make restore
 
-# Features:
-# - Lists available backups
-# - Interactive selection
-# - Validates before restore
-# - Creates safety backup
-# - Comprehensive error handling
-
-# Or restore specific file
+# Restore specific file
 ./restore.sh --file /path/to/backup.age
+
+# Restore latest DB backup (non-interactive)
+make restore-db
 ```
 
-## Update Operations
+---
+
+## ⬆️ Update Operations
 
 ### Updating Containers
 
-#### Standard Update
-
 ```bash
-# Update all containers
+# Update container images (respects version pins in .env)
 ./update.sh
-
-# Or use Makefile
 make update
 
-# Process:
-# 1. Create automatic backup
-# 2. Pull latest images (respects pinned versions)
-# 3. Stop services
-# 4. Start with new images
-# 5. Verify health
-```
-
-#### Update with System Packages
-
-```bash
-# Update containers and system
+# Update containers + system packages
 ./update.sh --system
-
-# Or use Makefile
 make update-system
-
-# Additionally updates:
-# - System packages (apt)
-# - Security updates
-# - Docker engine
 ```
 
 ### Version Management
 
-#### Production Mode (Pinned Versions)
+**Production mode — pinned versions (default):**
 
 ```bash
-# .env file (set by setup.sh --auto)
+# .env (set by setup.sh --auto)
 VAULTWARDEN_VERSION=1.34.3
-CADDY_VERSION=2.8.4-cloudflare
+CADDY_VERSION=2.10.2
 FAIL2BAN_VERSION=1.1.0
-MSMTPD_VERSION=1.0.0
+POSTFIX_VERSION=4.4.0
 ```
 
-Benefits:
-- ✅ Predictable updates
-- ✅ Tested versions
-- ✅ Rollback capability
-- ✅ Production stability
+**Development mode — latest versions:**
 
-#### Development Mode (Latest Versions)
-
-```bash
-# .env file (set by setup.sh --use-latest)
-#VAULTWARDEN_VERSION=1.34.3      # Commented out
-#CADDY_VERSION=2.8.4-cloudflare  # Commented out
-#FAIL2BAN_VERSION=1.1.0          # Commented out
-#MSMTPD_VERSION=1.0.0            # Commented out
-```
-
-Pulls latest versions on update.
+Comment out version pins in `.env` to allow `docker compose pull` to fetch `latest` tags.
 
 ### Manual Version Upgrade
 
 ```bash
-# Edit .env to update version
+# Edit .env
 nano .env
-# Change: VAULTWARDEN_VERSION=1.34.4
+# e.g. VAULTWARDEN_VERSION=1.34.4
 
-# Create backup before upgrade
+# Create emergency backup first
 ./backup.sh --type emergency
 
-# Apply update
+# Pull and restart
 docker compose pull vaultwarden
 docker compose up -d vaultwarden
 
-# Verify health
 ./health.sh
 ```
 
-## Maintenance Operations
+---
 
-### Basic Maintenance
+## 🛠️ Maintenance Operations
+
+### Routine Maintenance
 
 ```bash
-# Run basic maintenance
-./maintenance.sh
-
-# Or use Makefile
+# Full maintenance: cleanup + Docker prune + DB optimisation + DNS + firewall
+./maintenance.sh --comprehensive
 make maintenance
 
-# Tasks performed:
-# - Docker system cleanup
-# - Remove unused images
-# - Remove unused volumes
-# - Clear old logs
-# - Temporary file cleanup
-```
-
-### Comprehensive Maintenance
-
-```bash
-# Full maintenance with database optimization
-./maintenance.sh --comprehensive
-
-# Or use Makefile
+# With email summary
+./maintenance.sh --comprehensive --email
 make maintenance-full
 
-# Additional tasks:
-# - Stop VaultWarden
-# - WAL checkpoint
-# - Database integrity check
-# - VACUUM database (offline)
-# - Verify integrity after VACUUM
-# - Restart VaultWarden
-# - Verify service health
-
-# Recommended: Monthly
+# Dry run — preview without changes
+./maintenance.sh --comprehensive --dry-run
 ```
 
-### Firewall Maintenance
+### Targeted Tasks
+
+When called with only a targeted flag, routine cleanup is **skipped entirely**:
 
 ```bash
-# Update Cloudflare IP ranges
-./maintenance.sh --update-firewall
+# Update Cloudflare IP ranges in UFW firewall
+./maintenance.sh --update-firewall        # Recommended: quarterly
 
-# Features:
-# - Fetches latest Cloudflare IPs
-# - Adds new rules BEFORE removing old
-# - Validates before applying
-# - Safe fallback if API fails
-# - Comprehensive logging
-
-# Recommended: Quarterly
+# Check and update Cloudflare DNS A record
+./maintenance.sh --update-dns             # Automated hourly via cron
+make update-dns
 ```
 
-### Database Maintenance
+### Deep Database Maintenance (On-Demand)
+
+This **stops VaultWarden temporarily** and runs a full VACUUM cycle. Use it when the database is fragmented or unusually large.
 
 ```bash
-# Safe database optimization
-./db-maint.sh
+# Interactive (prompts for confirmation)
+sudo ./maintenance.sh --db-maint
+make db-maint
 
-# Process:
-# 1. Stop VaultWarden service
-# 2. Create backup
-# 3. WAL checkpoint
-# 4. Integrity check
-# 5. VACUUM operation
-# 6. Verify integrity
-# 7. Restart VaultWarden
+# Non-interactive (skip confirmation)
+sudo ./maintenance.sh --db-maint --force
 
-# Automated by cron (monthly)
+# Steps performed:
+#  1. Pre-maintenance encrypted backup
+#  2. Stop VaultWarden container
+#  3. PRAGMA integrity_check
+#  4. PRAGMA wal_checkpoint(TRUNCATE)
+#  5. PRAGMA optimize + ANALYZE
+#  6. VACUUM
+#  7. Post-VACUUM integrity check
+#  8. Restart VaultWarden and wait for health
+#  9. Report size delta (before → after)
+#  Note: Automated lightweight optimisation runs monthly via cron
 ```
 
-## Security Operations
+### Email Diagnostics (On-Demand)
 
-### Fail2Ban Management
+```bash
+# Run full email diagnostic suite
+./maintenance.sh --test-email
+make test-email
 
-#### Check Ban Status
+# Verbose diagnostics
+./maintenance.sh --test-email --verbose
+
+# Override recipient
+./maintenance.sh --test-email --recipient admin@example.com
+
+# Dry run (reports system state, does not send)
+./maintenance.sh --test-email --dry-run
+
+# Tests performed:
+#  1. Postfix container running and port 587 responding
+#  2. Fail2ban can reach postfix SMTP
+#  3. Host script send_notification_email() available
+#  4. End-to-end test email sent
+```
+
+---
+
+## 🔒 Security Operations
+
+### Fail2ban Management
 
 ```bash
 # Overall status
 docker compose exec fail2ban fail2ban-client status
 
-# Specific jail status
+# Specific jail
 docker compose exec fail2ban fail2ban-client status vaultwarden-auth
 
-# View banned IPs
-docker compose exec fail2ban fail2ban-client get vaultwarden-auth banip
-```
-
-#### Manual Ban/Unban
-
-```bash
-# Ban IP manually (Cloudflare)
-docker compose exec fail2ban fail2ban-client set vaultwarden-auth banip 1.2.3.4
-
-# Unban IP
+# Manual ban / unban
+docker compose exec fail2ban fail2ban-client set vaultwarden-auth banip   1.2.3.4
 docker compose exec fail2ban fail2ban-client set vaultwarden-auth unbanip 1.2.3.4
 
-# Note: Manual bans go to Cloudflare for web jails
-```
-
-#### Cloudflare Integration Check
-
-```bash
-# Check Cloudflare API connectivity
-docker compose logs fail2ban | grep -i cloudflare
-
-# View recent Cloudflare actions
+# Check Cloudflare ban actions
 docker compose logs fail2ban | grep "cloudflare-apiv4"
-
-# Test Cloudflare API manually
-curl -X GET "https://api.cloudflare.com/client/v4/zones" \
-     -H "Authorization: Bearer YOUR_TOKEN" \
-     -H "Content-Type: application/json"
 ```
 
 ### Secrets Management
 
-#### Editing Secrets
-
 ```bash
-# Interactive secrets editor
+# Edit secrets interactively
 ./edit-secrets.sh
+make edit-secrets
 
-# Specify editor
-./edit-secrets.sh --editor vim
+# Test decryption without editing
+./edit-secrets.sh --test
+make test-secrets
 
-# Features:
-# - SOPS key path privacy
-# - Automatic backup
-# - Validation after editing
-# - Secure temp file handling
-```
-
-#### Rotating Secrets
-
-```bash
-# 1. Edit secrets
+# Rotate secrets:
+# 1. Edit
 ./edit-secrets.sh
-
-# 2. Update values (admin_token, etc.)
-
-# 3. Restart services to apply
-./startup.sh --force-restart
-
-# 4. Verify health
+# 2. Update admin_token, admin_basic_auth_hash, smtp_password, etc.
+# 3. Restart to apply
+./startup.sh --force
 ./health.sh
-
-# Recommended: Annually, or after suspected compromise
 ```
 
 ### Break-Glass Admin Management
 
-#### Check Status
-
 ```bash
-# Check break-glass admin status
+# Create emergency admin account
+./create-breakglass-admin.sh --create
+make breakglass-create
+
+# Check status
 ./create-breakglass-admin.sh --status
-
-# Or use Makefile
 make breakglass-status
-```
 
-#### Generate New Password
-
-```bash
-# Generate new emergency password
+# Generate new password
 ./create-breakglass-admin.sh --password
 
-# Recommended: After each use, or quarterly
-```
-
-#### Remove Emergency Admin
-
-```bash
-# Remove break-glass admin (when no longer needed)
+# Remove when no longer needed
 ./create-breakglass-admin.sh --remove
-
-# Or use Makefile
 make breakglass-remove
-
-# Confirm removal
-./create-breakglass-admin.sh --status
 ```
 
-## Automated Operations
+---
 
-### Cron Configuration
+## ⚙️ Automated Operations (Cron)
 
-#### Installing Cron Jobs
+### Installing Cron Jobs
 
 ```bash
-# Install automated operations
 sudo ./cron-setup.sh --install
-
-# Or use Makefile
 make cron-install
-
-# Automated tasks:
-# - Daily 2 AM: Database backup with rclone sync
-# - Daily 6 AM: Health checks with email notification
-# - Weekly Sunday 3 AM: Full backup with verification
-# - Weekly Sunday 4 AM: Container updates
-# - Monthly 1st 5 AM: Comprehensive maintenance
 ```
 
-#### Viewing Cron Jobs
+### Actual Cron Schedule
+
+| Schedule | Job |
+|---|---|
+| Daily 2 AM (Mon–Sat) | Comprehensive maintenance (flock-protected; Sunday skipped to avoid overlap with full backup) |
+| Daily 4 AM | Database backup with fast verification + rclone sync |
+| Every 30 minutes | Health check, quiet mode (flock-protected) |
+| Saturday 4 AM | Cloudflare firewall IP range update |
+| Sunday 3 AM | Weekly full backup with comprehensive verification + rclone sync |
+| Every hour | DNS A record update via `maintenance.sh --update-dns` |
+
+> **Note:** Maintenance is intentionally skipped on Sunday to prevent overlap with the 3 AM full backup.
 
 ```bash
-# List installed cron jobs
-sudo crontab -l | grep vaultwarden
-
-# Or use Makefile
+# View installed jobs
+sudo ./cron-setup.sh --list
 make cron-list
 
-# Example output:
-# 0 2 * * * /opt/VaultWarden-OCI/backup.sh --type db --rclone
-# 0 6 * * * /opt/VaultWarden-OCI/health.sh --email
-# 0 3 * * 0 /opt/VaultWarden-OCI/backup.sh --type full --full-verification
-# 0 4 * * 0 /opt/VaultWarden-OCI/update.sh
-# 0 5 1 * * /opt/VaultWarden-OCI/maintenance.sh --comprehensive
-```
+# Validate security and detect split-brain (stale /opt/ scripts)
+sudo ./cron-setup.sh --validate
 
-#### Removing Cron Jobs
-
-```bash
-# Remove automated operations
-sudo ./cron-setup.sh --uninstall
-
-# Or use Makefile
-make cron-uninstall
+# Remove jobs
+sudo ./cron-setup.sh --remove
+make cron-remove
 ```
 
 ### Email Notifications
 
-#### Testing Email
+All notifications use the containerised Postfix relay (`bokysan/docker-postfix`, port 587).
 
 ```bash
-# Test email configuration
-./test-email-simple.sh
+# Full diagnostic
+./maintenance.sh --test-email --verbose
 
-# Verbose output for troubleshooting
-./test-email-simple.sh --verbose
+# Check Postfix logs
+docker compose logs postfix
 
-# Test to specific email
-./test-email-simple.sh --to test@example.com
+# Check Postfix port
+docker compose exec postfix nc -z localhost 587
 ```
 
-#### Email via msmtpd
+---
 
-All email notifications use containerized msmtpd:
-
-Benefits:
-- ✅ No host mailutils dependency
-- ✅ Consistent SMTP configuration
-- ✅ Resource-efficient (32MB)
-- ✅ Dedicated container logs
-- ✅ Easy troubleshooting
-
-Check msmtpd status:
-```bash
-# Container logs
-docker compose logs msmtpd
-
-# Container status
-docker compose ps msmtpd
-
-# Test connectivity
-docker compose exec msmtpd nc -z localhost 1025
-```
-
-## Resource Monitoring
+## 📊 Resource Monitoring
 
 ### Container Resource Usage
 
 ```bash
-# Real-time resource monitoring
+# Real-time
 docker stats
 
-# Or specific containers
-docker stats vaultwarden_app vaultwarden_caddy
-
-# Single snapshot
+# Snapshot
 docker stats --no-stream
 
-# Check against limits:
-# VaultWarden: 2GB memory, 60% CPU
-# Caddy: 1GB memory, 30% CPU
-# Fail2Ban: 1GB memory, 20% CPU
-# msmtpd: 32MB memory, 5% CPU
+# Configured resource limits:
+# VaultWarden: 2 GB memory, 60% CPU
+# Caddy:       1 GB memory, 30% CPU
+# Fail2ban:    1 GB memory, 20% CPU
+# Postfix:   128 MB memory,  5% CPU
 ```
 
 ### System Resource Usage
 
 ```bash
-# Memory usage
-free -h
-
-# Disk usage
-df -h
-
-# Disk usage by directory
-du -sh ${PROJECT_STATE_DIR}/*
-
-# Check against thresholds:
-# Memory: < 85% used (health.sh alert)
-# Disk: > 10% free (backup.sh requirement)
+free -h                              # Memory
+df -h                                # Disk
+du -sh ${PROJECT_STATE_DIR}/*        # State directory breakdown
 ```
 
-### Performance Optimization
-
-If resource usage is high:
+### Performance Optimisation
 
 ```bash
 # 1. Review log sizes
 du -sh ${PROJECT_STATE_DIR}/logs/*
 
-# 2. Check for old backups
+# 2. Review backup storage
 ls -lh ${PROJECT_STATE_DIR}/backups/
 
 # 3. Run maintenance
 ./maintenance.sh --comprehensive
 
-# 4. Consider adjusting resource limits
-# Edit: docker-compose.yml.example
-# Then: sudo ./setup.sh --force --domain ... --email ...
+# 4. Adjust resource limits if needed
+# Edit docker-compose.yml.example then:
+sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
 ```
 
-## Troubleshooting Operations
+---
+
+## 🔧 Troubleshooting Operations
 
 ### Service Won't Start
 
 ```bash
-# 1. Check configuration
+# 1. Validate compose config
 docker compose config
 
-# 2. Check secrets
+# 2. Check secrets exist
 ls -la secrets/.docker_secrets/
 
 # 3. View startup errors
 docker compose up
 
-# 4. Check individual containers
+# 4. Per-container logs
 docker compose logs vaultwarden
 docker compose logs caddy
 docker compose logs fail2ban
-docker compose logs msmtpd
+docker compose logs postfix
 
 # 5. Force restart
-./startup.sh --force-restart
+./startup.sh --force
 ```
 
 ### High Resource Usage
@@ -753,64 +571,44 @@ docker compose logs msmtpd
 # 1. Identify heavy container
 docker stats --no-stream
 
-# 2. Check container logs for issues
+# 2. Check container logs
 docker compose logs <container> --tail=100
 
-# 3. Check for log file growth
+# 3. Check log file growth
 du -sh ${PROJECT_STATE_DIR}/logs/*
 
 # 4. Run maintenance
-./maintenance.sh
-
-# 5. Consider increasing limits if legitimate usage
+./maintenance.sh --comprehensive
 ```
 
 ### Email Not Working
 
 ```bash
-# 1. Check msmtpd container
-docker compose ps msmtpd
-docker compose logs msmtpd
+# Full diagnostic
+./maintenance.sh --test-email --verbose
 
-# 2. Test email
-./test-email-simple.sh --verbose
-
-# 3. Check SMTP settings
+# Individual checks
+docker compose ps postfix
+docker compose logs postfix
 grep SMTP .env
-
-# 4. Check secrets
-./edit-secrets.sh --test
-
-# 5. Test SMTP connectivity
-docker compose exec msmtpd nc -z ${SMTP_HOST} ${SMTP_PORT}
-
-# 6. Check firewall (if SMTP blocked)
-sudo ufw status | grep ${SMTP_PORT}
+./edit-secrets.sh --test    # Verify smtp_password
 ```
 
-### Fail2Ban Not Blocking
+### Fail2ban Not Blocking
 
 ```bash
-# 1. Check fail2ban status
+# 1. Check status
 docker compose exec fail2ban fail2ban-client status
-
-# 2. Check jail status
 docker compose exec fail2ban fail2ban-client status vaultwarden-auth
 
-# 3. Test filter regex
+# 2. Test filter regex
 docker compose exec fail2ban fail2ban-regex \
   /var/log/vaultwarden/vaultwarden.log \
   /data/fail2ban/filter.d/vaultwarden-auth.conf
 
-# 4. Check Cloudflare API
-docker compose logs fail2ban | grep -i cloudflare
-
-# 5. Verify environment variables
+# 3. Verify Cloudflare API token
 docker compose exec fail2ban env | grep CF_
-
-# 6. Test Cloudflare API token manually
-curl -X GET "https://api.cloudflare.com/client/v4/zones" \
-     -H "Authorization: Bearer YOUR_TOKEN"
+docker compose logs fail2ban | grep -i cloudflare
 ```
 
 ### Backup Issues
@@ -819,143 +617,142 @@ curl -X GET "https://api.cloudflare.com/client/v4/zones" \
 # 1. Check disk space
 df -h
 
-# 2. Check backup directory permissions
-ls -la ${PROJECT_STATE_DIR}/backups/
-
-# 3. Test Age encryption
-age --version
-
-# 4. Verify Age key
+# 2. Check Age key
 ls -la secrets/keys/age-key.txt
 
-# 5. Test backup manually
-./backup.sh --type db --verbose
+# 3. Test backup manually
+./backup.sh --type db
 
-# 6. Check backup logs
-grep backup /var/log/syslog
+# 4. Check cron logs
+cat /var/log/vaultwarden-cron/backup.log
 ```
 
-## Template Maintenance
+---
 
-### Updating Templates
+## 📋 Template Maintenance
 
 ```bash
-# 1. Edit template files
+# 1. Edit templates
 nano docker-compose.yml.example
 nano .env.example
 
-# 2. Validate template syntax
+# 2. Validate syntax
 docker compose -f docker-compose.yml.example config
 
-# 3. Test in development first
-# Create test directory, apply templates, test
-
-# 4. Create backup before applying
+# 3. Backup before applying
 ./backup.sh --type emergency
 
-# 5. Apply templates to production
+# 4. Apply to production
 sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
 
-# 6. Restart services
-./startup.sh --force-restart
-
-# 7. Verify health
+# 5. Restart and verify
+./startup.sh --force
 ./health.sh
 ```
 
-### Template Best Practices
-
-- ✅ Always edit `.example` files, never generated files
+**Template best practices:**
+- ✅ Edit `.example` files — never directly edit generated files
 - ✅ Validate templates before applying
-- ✅ Test changes in non-production first
-- ✅ Create backup before major changes
-- ✅ Document customizations in template comments
-- ✅ Keep templates in version control
-- ✅ Review diffs carefully before committing
+- ✅ Test in non-production first
+- ✅ Create a backup before major changes
+- ✅ Document customisations in template comments
 
-## Operational Best Practices
+---
 
-### Daily Checklist
-- ✅ Check automated backup success (email notification)
-- ✅ Review health check results (email notification)
-- ✅ Glance at fail2ban logs for unusual activity
-- ✅ Monitor resource usage trends
+## 📅 Operational Checklists
 
-### Weekly Checklist
+### Daily
+- ✅ Check automated backup success (email notification or `/var/log/vaultwarden-cron/backup.log`)
+- ✅ Review health check results
+- ✅ Glance at fail2ban for unusual ban activity
+
+### Weekly
 - ✅ Review full backup with verification results
 - ✅ Check container update results
 - ✅ Review authentication failure patterns
 - ✅ Verify email notifications working
 - ✅ Check disk space usage
 
-### Monthly Checklist
+### Monthly
 - ✅ Review comprehensive maintenance results
-- ✅ Test backup restoration
-- ✅ Review security logs thoroughly
+- ✅ Test backup restoration (`./restore.sh`)
+- ✅ Review security logs
 - ✅ Check for available updates
 - ✅ Verify break-glass admin access
-- ✅ Review and archive old logs if needed
 
-### Quarterly Checklist
+### Quarterly
 - ✅ Test emergency procedures (break-glass admin)
-- ✅ Update Cloudflare IP ranges
+- ✅ Update Cloudflare IP ranges (`./maintenance.sh --update-firewall`)
 - ✅ Review and update documentation
 - ✅ Audit user accounts and permissions
-- ✅ Test disaster recovery procedures
-- ✅ Review resource limits and adjust if needed
+- ✅ Test complete system rebuild from backup
 
-### Annual Checklist
+### Annual
 - ✅ Rotate all secrets (tokens, passwords)
 - ✅ Review and update security policies
 - ✅ Audit complete system configuration
-- ✅ Update to latest stable versions
+- ✅ Update to latest stable container versions
 - ✅ Review backup retention policies
-- ✅ Test complete system rebuild from backup
-
-## Makefile Quick Reference
-
-```bash
-# Service Management
-make start              # Start all services
-make stop               # Stop all services
-make restart            # Restart with enhanced script
-make status             # Show service status
-
-# Monitoring
-make health             # Run health checks
-make health-email       # Health check with email
-make logs               # View all logs
-make logs SERVICE=name  # View specific service logs
-
-# Backups
-make backup             # Database backup
-make backup-full        # Full system backup
-make backup-emergency   # Emergency recovery kit
-make list-backups       # List available backups
-make restore            # Interactive restore
-
-# Updates & Maintenance
-make update             # Update containers
-make update-system      # Update system and containers
-make maintenance        # Basic maintenance
-make maintenance-full   # Comprehensive maintenance
-
-# Security
-make edit-secrets       # Edit encrypted secrets
-make breakglass-create  # Create emergency admin
-make breakglass-status  # Check emergency admin status
-make breakglass-remove  # Remove emergency admin
-
-# Automation
-make cron-install       # Install cron jobs
-make cron-list          # List cron jobs
-make cron-uninstall     # Remove cron jobs
-
-# Configuration
-make config             # Show current configuration
-make test-config        # Validate configuration
-```
 
 ---
 
-This operations guide reflects the current state of VaultWarden-OCI with Cloudflare-only blocking for web traffic, comprehensive resource management, automated operations via cron, containerized email via msmtpd, and robust operational procedures optimized for small teams requiring reliable, maintainable password management infrastructure.
+## 📖 Makefile Quick Reference
+
+```bash
+# Service Management
+make start              # Start all services (alias: make up)
+make stop               # Stop all services (alias: make down)
+make restart            # Restart with enhanced script
+make safe-restart       # Restart with auto-rollback on failure
+make status             # Show service status
+
+# Monitoring
+make health                        # Basic health check
+make health AUTO_RECOVER=true      # With auto-recovery
+make health COMPREHENSIVE=true     # Comprehensive check
+make health-email                  # Comprehensive + email
+make logs                          # All service logs
+make logs SERVICE=vaultwarden      # Specific service
+make logs-postfix                  # Postfix email logs
+make monitor                       # Real-time log stream
+make watch                         # Live status + health
+
+# Backups
+make backup              # Database backup
+make backup-full         # Full system backup
+make backup-emergency    # Emergency recovery kit
+make list-backups        # List available backups
+make restore             # Interactive restore
+make restore-db          # Restore latest DB backup
+
+# Updates & Maintenance
+make update              # Update container images
+make update-system       # Update system + containers
+make maintenance         # Comprehensive maintenance
+make maintenance-full    # Comprehensive + email notification
+make db-maint            # Deep database maintenance (sudo)
+make update-dns          # Update Cloudflare DNS record
+make test-email          # Full email diagnostic
+
+# Security
+make edit-secrets        # Edit encrypted secrets
+make test-secrets        # Test secrets decryption
+make breakglass-create   # Create emergency admin
+make breakglass-status   # Check emergency admin status
+make breakglass-remove   # Remove emergency admin
+
+# Automation
+make cron-install        # Install cron jobs
+make cron-list           # List cron jobs
+make cron-remove         # Remove cron jobs
+
+# Configuration & Info
+make config              # Show configuration summary
+make test-config         # Validate docker-compose config
+make fmt                 # Validate all config files
+make info                # System info + service status
+make version             # Container version info
+make dry-run             # Preview all operations
+make shell               # Shell in vaultwarden container
+make shell SERVICE=caddy # Shell in specific container
+```
