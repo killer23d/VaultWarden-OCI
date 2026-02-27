@@ -1,756 +1,256 @@
-# Configuration Guide - VaultWarden-OCI
+# Configuration Reference — VaultWarden-OCI
 
-This comprehensive configuration guide covers system setup, environment variables, secrets management, and advanced configuration options for VaultWarden-OCI using the current template-based architecture with enhanced resource management and security features.
+All configuration is split between two files: **`.env`** (non-sensitive settings) and **`secrets/secrets.yaml`** (encrypted with Age + SOPS, edited via `./edit-secrets.sh`). Both are generated from `.example` templates by `setup.sh` — never edit generated files directly.
 
-## Quick Configuration Overview
+Related docs: [DEPLOYMENT.md](DEPLOYMENT.md) · [SECURITY.md](SECURITY.md) · [ADVANCED-CUSTOMIZATION.md](ADVANCED-CUSTOMIZATION.md)
 
-### Essential Configuration Steps
+---
 
-1. **Template-Based Setup**: `sudo ./setup.sh --auto --domain vault.example.com --email admin@example.com`
-2. **Enhanced Secrets Configuration**: `./edit-secrets.sh`
-3. **Environment Variables**: Edit generated `.env` file with your specific settings
-4. **Emergency Access**: `./create-breakglass-admin.sh`
-5. **Remote Backups**: `rclone config` (optional)
-6. **Configuration Validation**: `docker compose config`
-
-## Current Template-Based Architecture
-
-### Enhanced Configuration File Structure
-
-All configuration files are generated from enhanced templates:
+## 📋 Configuration Workflow
 
 ```bash
-# Template files (source of truth):
-├── docker-compose.yml.example          # With resource limits and security
-├── docker-compose.override.yml.example # Email decoupling (optional)
-├── .env.example                        # Environment template
-└── Generated files (deployment-specific):
-    ├── docker-compose.yml               # Generated from template
-    └── .env                            # Generated from template
-```
+# Initial setup (generates .env and docker-compose.yml from templates)
+sudo ./setup.sh --domain vault.yourdomain.com --email admin@yourdomain.com --auto
 
-### Current Template Benefits
-- **Resource Management**: Container limits optimized for 6GB systems
-- **Enhanced Security**: Comprehensive validation and hardening
-- **Email Integration**: Containerized msmtpd for reliable email delivery
-- **Forensic Logging**: Enhanced log retention and structured JSON
-- **Version Control Safe**: No secrets embedded in templates
-- **Validation Ready**: Full syntax and dependency checking
+# Edit non-sensitive settings
+nano .env
 
-## Environment Variables (.env)
-
-### Core Application Settings
-
-Generated from enhanced `.env.example` template during setup:
-
-```bash
-# Domain and Email Configuration
-DOMAIN=vault.yourdomain.com              # Your VaultWarden domain
-ADMIN_EMAIL=admin@yourdomain.com         # Administrator email
-
-# Enhanced Project Configuration
-PROJECT_STATE_DIR=/var/lib/vaultwarden   # Data storage directory
-SSH_PORT=22                              # SSH port (change if non-standard)
-TZ=UTC                                   # Timezone for consistent logging
-PUID=1000                                # User ID for containers
-PGID=1000                                # Group ID for containers
-```
-
-### Cloudflare Integration (Enhanced)
-
-```bash
-# Cloudflare Zone Configuration
-CLOUDFLARE_ZONE_ID=your_zone_id_here    # Get from Cloudflare dashboard
-# Find at: Cloudflare Dashboard → Domain → Overview → Zone ID (right sidebar)
-
-# Enhanced DNS Management
-# (API tokens configured in encrypted secrets)
-```
-
-### Enhanced Resource Management
-
-```bash
-# Container Resource Limits (6GB System Optimization)
-# VaultWarden Container
-VAULTWARDEN_MEMORY_LIMIT=2G             # Main application (largest allocation)
-VAULTWARDEN_MEMORY_RESERVATION=512M     # Guaranteed minimum memory
-VAULTWARDEN_CPU_LIMIT=0.6               # 60% of single CPU core
-VAULTWARDEN_CPU_RESERVATION=0.2         # 20% guaranteed minimum
-
-# Caddy Container  
-CADDY_MEMORY_LIMIT=1G                   # Reverse proxy with SSL
-CADDY_MEMORY_RESERVATION=256M           # Guaranteed minimum for SSL
-CADDY_CPU_LIMIT=0.3                     # 30% of single CPU core
-CADDY_CPU_RESERVATION=0.1               # 10% guaranteed minimum
-
-# Fail2Ban Container
-FAIL2BAN_MEMORY_LIMIT=512M              # Log parsing and rule processing
-FAIL2BAN_MEMORY_RESERVATION=128M        # Guaranteed minimum for logs
-FAIL2BAN_CPU_LIMIT=0.2                  # 20% of single CPU core
-FAIL2BAN_CPU_RESERVATION=0.05           # 5% guaranteed minimum
-
-# msmtpd Container
-MSMTPD_MEMORY_LIMIT=32M                 # Lightweight SMTP relay
-MSMTPD_CPU_LIMIT=0.05                   # 5% of single CPU core
-```
-
-### Enhanced Backup Configuration
-
-```bash
-# Local Backup Settings with Atomic Operations
-BACKUP_RETENTION_DAYS=30                # Days to keep local full backups
-DB_BACKUP_RETENTION_DAYS=14             # Days to keep database backups
-EMERGENCY_BACKUP_RETENTION_DAYS=90      # Days to keep emergency kits
-
-# Remote Backup Configuration (Optional)
-RCLONE_REMOTE_NAME=your_remote_name     # Configure with: rclone config
-# Examples: "gdrive", "s3", "dropbox", "onedrive"
-
-# Enhanced Backup Features
-BACKUP_VERIFICATION_MODE=quick_check    # quick_check or integrity_check
-BACKUP_ATOMIC_OPERATIONS=true           # Use atomic backup operations
-```
-
-### Container Version Management (Enhanced)
-
-```bash
-# Production Mode (Recommended - Pinned Versions)
-# Set automatically by setup.sh --auto for stability
-VAULTWARDEN_VERSION=1.34.3             # Pin to stable version
-CADDY_VERSION=2.8.4-cloudflare         # Pin with Cloudflare module  
-FAIL2BAN_VERSION=1.1.0                 # Pin to stable version
-MSMTPD_VERSION=1.0.0                   # Pin msmtpd version for stability
-
-# Development Mode (Latest Versions)
-# Set by setup.sh --use-latest (versions commented out)
-#VAULTWARDEN_VERSION=1.34.3            # Commented = use latest
-#CADDY_VERSION=2.8.4-cloudflare        # Commented = use latest
-#FAIL2BAN_VERSION=1.1.0                # Commented = use latest
-#MSMTPD_VERSION=1.0.0                  # Commented = use latest
-```
-
-### Enhanced Email Configuration
-
-```bash
-# SMTP Settings for Notifications (containerized via msmtpd)
-SMTP_HOST=smtp.gmail.com               # SMTP server
-SMTP_PORT=587                          # SMTP port (587 for STARTTLS)
-SMTP_FROM=vaultwarden@yourdomain.com   # From address
-SMTP_FROM_NAME=VaultWarden-Notifications # Display name
-SMTP_USERNAME=your_email@gmail.com     # SMTP username
-SMTP_SECURITY=starttls                 # Security method (starttls/on)
-SMTP_STARTTLS=on                       # Enable STARTTLS
-SMTP_TLS_CHECKCERT=on                  # Verify TLS certificates
-SMTP_AUTH=on                           # Enable SMTP authentication
-# SMTP_PASSWORD configured in encrypted secrets
-
-# msmtpd Configuration
-# The msmtpd container provides containerized email relay functionality
-# replacing host-based mailutil dependencies for better portability
-```
-
-### Platform-Specific Settings
-
-```bash
-# SSH Log Path (Auto-detected by setup.sh)
-# Debian/Ubuntu: /var/log/auth.log
-# RHEL/CentOS/Oracle Linux (OCI): /var/log/secure
-# SUSE: /var/log/messages
-SSH_LOG_PATH=/var/log/secure            # Set automatically based on OS
-```
-
-## Enhanced Secrets Management
-
-### Encrypted Secrets with Privacy Protection
-
-Use the enhanced interactive secrets editor with improved security:
-
-```bash
-# Edit encrypted secrets with enhanced privacy
+# Edit sensitive secrets (encrypted)
 ./edit-secrets.sh
 
-# Enhanced security features:
-# - SOPS key path never exposed in process list
-# - Secure temporary file handling  
-# - Automatic backup creation before editing
-# - Comprehensive validation after editing
-# - Editor security validation
-```
+# Validate
+docker compose config
 
-### Required Secrets (Enhanced)
-
-#### VaultWarden Admin Authentication
-```yaml
-# Admin token for API access (32-character hex string)  
-admin_token: "1234567890abcdef1234567890abcdef"
-
-# Admin panel basic auth hash (bcrypt - use caddy hash-password)
-admin_basic_auth_hash: "$2b$12$hash_generated_by_caddy_tool"
-```
-
-**Generate bcrypt hash**:
-```bash
-docker run --rm -it ghcr.io/caddybuilds/caddy-cloudflare:latest caddy hash-password
-```
-
-#### Cloudflare API Tokens (Enhanced)
-```yaml
-# DNS management token for Caddy (Zone:DNS:Edit + Zone:Zone:Read)
-caddy_cloudflare_dns_token: "your_dns_management_token"
-
-# Firewall management token for Fail2Ban (Zone:Firewall Services:Edit)
-fail2ban_cloudflare_firewall_token: "your_firewall_management_token"
-```
-
-#### Optional Secrets (Enhanced)
-```yaml
-# SMTP password for msmtpd email notifications
-smtp_password: "your_smtp_password"
-
-# Bitwarden push notifications (optional)
-push_installation_id: "your_installation_id"
-push_installation_key: "your_installation_key"
-```
-
-### Enhanced Secrets Management Commands
-
-```bash
-# Interactive secrets editing with enhanced privacy (recommended)
-./edit-secrets.sh
-
-# Editor selection with validation
-./edit-secrets.sh --editor vim
-
-# Skip backup creation (not recommended)
-./edit-secrets.sh --no-backup
-
-# Skip validation after editing (not recommended) 
-./edit-secrets.sh --no-validation
-
-# Validate secrets without editing
-sops -d secrets/secrets.yaml > /dev/null && echo "Secrets valid"
-```
-
-## Enhanced Container Configuration
-
-### VaultWarden Application Settings (Enhanced)
-
-#### Enhanced Security Configuration
-```bash
-# These environment variables affect VaultWarden behavior:
-SIGNUPS_ALLOWED=false                  # Disable open registration
-INVITATIONS_ALLOWED=true              # Admin-controlled invitations only
-EMERGENCY_ACCESS_ALLOWED=true         # Allow emergency access feature
-PASSWORD_ITERATIONS=600000            # High iteration count for security
-PASSWORD_HINTS_ALLOWED=false          # Don't allow password hints
-SHOW_PASSWORD_HINT=false              # Don't show password hints
-WEB_VAULT_ENABLED=true                # Enable web vault interface
-WEBSOCKET_ENABLED=false               # Disable WebSocket (comment to enable)
-
-# Enhanced Logging and Forensics
-LOG_FILE=/logs/vaultwarden.log        # Structured log file location
-LOG_LEVEL=warn                        # Log level (error, warn, info, debug)
-EXTENDED_LOGGING=true                 # Enhanced audit logging
-```
-
-#### Enhanced Database Configuration
-```bash
-# SQLite database settings with performance optimization
-DATABASE_MAX_CONNS=10                 # Maximum database connections
-DATABASE_TIMEOUT=30                   # Database connection timeout
-DATABASE_URL=data/db.sqlite3          # Database path (relative to container)
-
-# Database optimization (applied by maintenance scripts)
-# - WAL mode for better concurrency
-# - Automatic VACUUM operations (offline)
-# - Integrity checking before operations
-```
-
-### Enhanced msmtpd Email Configuration
-
-#### Containerized Email Relay
-The msmtpd container provides lightweight SMTP relay functionality:
-
-```yaml
-# Located in: docker-compose.yml.example
-msmtpd:
-  container_name: vaultwarden_msmtpd
-  image: crazymax/msmtpd:${MSMTPD_VERSION:-1.0.0}
-  restart: unless-stopped
-  environment:
-    - SMTP_HOST=${SMTP_HOST:-}
-    - SMTP_PORT=${SMTP_PORT:-587}
-    - SMTP_TLS=${SMTP_SECURITY:-on}
-    - SMTP_STARTTLS=${SMTP_STARTTLS:-on}
-    - SMTP_TLS_CHECKCERT=${SMTP_TLS_CHECKCERT:-on}
-    - SMTP_AUTH=${SMTP_AUTH:-on}
-    - SMTP_USER=${SMTP_USERNAME:-}
-    - SMTP_PASSWORD_FILE=/run/secrets/smtp_password
-    - SMTP_FROM=${SMTP_FROM:-}
-    - TZ=${TZ:-UTC}
-  deploy:
-    resources:
-      limits:
-        memory: 32M     # Very lightweight SMTP relay
-        cpus: '0.05'    # 5% of single CPU
-```
-
-#### Benefits of msmtpd Container
-- **No host dependencies**: Eliminates need for host mailutil packages
-- **Containerized security**: Isolated email functionality
-- **Resource efficient**: Only 32MB memory limit
-- **Configuration consistency**: Same environment variables across containers
-- **Easy troubleshooting**: Dedicated container logs for email issues
-
-#### Testing Email Configuration
-```bash
-# Test msmtpd email delivery
-./test-email-simple.sh
-
-# Verbose output for troubleshooting
-./test-email-simple.sh --verbose
-
-# Test to specific email
-./test-email-simple.sh --to test@example.com
-```
-
-### Enhanced Caddy Configuration
-
-#### Enhanced Logging and Forensics
-The current Caddyfile includes comprehensive forensic logging:
-
-```caddyfile
-# Located in: caddy/Caddyfile
-# Enhanced log retention (60x improvement):
-log {
-    output file /logs/access.log {
-        roll_size 50MB      # Increased from 10MB
-        roll_keep 20        # Increased from 5 files
-        roll_keep_for 30d   # Keep for 30 days
-    }
-    format json {
-        time_format "2006-01-02T15:04:05.000Z07:00"
-    }
-}
-
-# Specialized logging for different endpoints:
-# - Admin access log: 25MB x 30 files = 750MB (90-day retention)
-# - Auth attempts log: 25MB x 30 files = 750MB (90-day retention)  
-# - Security blocks log: 10MB x 50 files = 500MB (180-day retention)
-```
-
-#### Enhanced Rate Limiting
-```caddyfile
-# Stricter rate limiting appropriate for password manager:
-rate_limit {
-    zone static_rl {
-        capacity 20         # Reduced from 60
-    }
-    zone admin_rl {
-        capacity 5          # Very strict for admin panel
-    }
-    zone api_auth_rl {      # API authentication rate limiting
-        match_path /api/accounts/prelogin /identity/connect/token
-        capacity 10         # 10 auth attempts per 5 minutes per IP
-    }
-}
-```
-
-### Enhanced Fail2Ban Configuration
-
-#### Dual Cloudflare + UFW Action
-```ini
-# Located in: fail2ban/action.d/cloudflare-apiv4.conf
-# Current advanced features:
-# - Idempotent operations (checks existing rules before creating)
-# - Retry logic with exponential backoff
-# - UFW fallback if Cloudflare API fails
-# - Transactional ban/unban operations
-# - Comprehensive logging and status reporting
-```
-
-#### Enhanced Email Notifications
-```ini
-# Located in: fail2ban/action.d/smtp.conf
-# Uses msmtpd container for email notifications:
-# - Containerized email delivery
-# - Consistent SMTP configuration
-# - Improved reliability over host-based solutions
-# - Enhanced logging and error handling
-```
-
-#### Enhanced Filter Configuration (No Dependencies)
-```ini
-# All filters now use regex (no JMESPath dependency):
-
-# fail2ban/filter.d/vaultwarden-auth.conf
-# - Authentication failure detection via VaultWarden logs
-
-# fail2ban/filter.d/vaultwarden-admin.conf  
-# - Admin panel attack detection
-
-# fail2ban/filter.d/vaultwarden-web-caddy.conf
-# - Web interface protection via Caddy JSON logs
-# - Rate limiting detection (429 status codes)
-# - Fallback regex patterns for compatibility
-```
-
-#### Enhanced Jail Configuration
-```ini
-# Located in: fail2ban/jail.d/vaultwarden-oci.conf
-# Current jail settings optimized for password manager:
-
-[vaultwarden-auth]
-maxretry = 3               # Strict retry limit
-bantime = 2h              # 2-hour ban
-findtime = 1h             # Within 1 hour window
-action = %(action_mwl)s cloudflare-apiv4
-
-[vaultwarden-admin]  
-maxretry = 2               # Very strict for admin panel
-bantime = 24h             # 24-hour ban
-findtime = 1h             # Within 1 hour window
-action = %(action_mwl)s cloudflare-apiv4
-
-[vaultwarden-web]
-maxretry = 10             # More lenient for web interface
-bantime = 1h              # 1-hour ban
-findtime = 1h             # Within 1 hour window
-action = %(action_mwl)s cloudflare-apiv4
-```
-
-## Enhanced Template Management
-
-### Editing Templates (Current Best Practice)
-
-For ongoing maintenance, always edit template files as source of truth:
-
-```bash
-# Edit templates (never edit generated files directly)
-nano docker-compose.yml.example # For container/service changes
-nano .env.example # For new environment variables
-
-# Apply template changes with validation
+# Apply changes
 sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.com
-
-# Restart services to apply changes
-./startup.sh --force-restart
-
-# Or use Makefile
-make restart
-```
-
-### Enhanced Template Validation
-
-```bash
-# Validate templates before applying (recommended)
-docker compose -f docker-compose.yml.example config
-
-# Check for common template issues
-grep -n "platform:\|linux/arm64" docker-compose.yml.example
-
-# Validate resource limits make sense for your system
-grep -A 5 -B 5 "memory:\|cpus:" docker-compose.yml.example
-```
-
-### Template Customization Examples
-
-#### Email Configuration via msmtpd
-```bash
-# msmtpd is included by default in docker-compose.yml.example
-# Configure SMTP settings in .env:
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
-SMTP_SECURITY=starttls
-# ... (other SMTP settings)
-
-# Configure SMTP password in secrets:
-./edit-secrets.sh
-# Set: smtp_password
-
-# Restart to apply email configuration
-docker compose restart msmtpd
-```
-
-#### Resource Limit Adjustment
-```yaml
-# In docker-compose.yml.example, adjust resource limits:
-deploy:
-  resources:
-    limits:
-      memory: 4G        # Increase for larger systems
-      cpus: '1.0'       # Increase for more CPU cores
-    reservations:
-      memory: 1G        # Increase guaranteed minimum
-      cpus: '0.4'       # Increase guaranteed CPU
-```
-
-## Enhanced Network and Firewall Configuration
-
-### UFW Firewall with Enhanced Safety
-
-The firewall is configured with enhanced safety measures:
-
-```bash
-# View current firewall status
-sudo ufw status numbered
-
-# Enhanced firewall update with race condition fixes
-./maintenance.sh --update-firewall
-
-# The enhanced process:
-# 1. Adds new Cloudflare rules before removing old ones
-# 2. Validates rules before applying
-# 3. Provides clear warnings if API fails
-# 4. Falls back to safe default rules
-```
-
-### Enhanced Cloudflare IP Management
-
-```bash
-# Safe firewall updates (prevents service interruption)
-./maintenance.sh --update-firewall
-
-# Features:
-# - Race condition fixes (add before remove)  
-# - API failure handling with clear warnings
-# - Safe fallback if Cloudflare API is unavailable
-# - Comprehensive logging of all changes
-```
-
-## Enhanced Backup Configuration
-
-### Atomic Backup Operations
-
-```bash
-# Configure enhanced backup settings in .env
-BACKUP_RETENTION_DAYS=30              # Full backups
-DB_BACKUP_RETENTION_DAYS=14           # Database backups  
-EMERGENCY_BACKUP_RETENTION_DAYS=90    # Emergency kits
-
-# Enhanced backup operations with atomic features:
-./backup.sh --type db                 # Atomic database backup
-./backup.sh --type full               # Complete system backup
-./backup.sh --type emergency          # Disaster recovery kit
-
-# Or use Makefile
-make backup
-make backup-full
-make backup-emergency
-
-# Enhanced backup listing with detailed information:
-./backup.sh --list
-make list-backups
-# Shows: timestamp, size, type, integrity status, file ID
-```
-
-### Backup Verification Modes
-
-```bash
-# Fast verification (default - uses checksum)
-./backup.sh --type db
-
-# Full verification (recommended weekly - tests recoverability)
-./backup.sh --type full --full-verification
-```
-
-### Safe Database Operations
-
-```bash
-# Enhanced database maintenance (stops VaultWarden first)
-./maintenance.sh --comprehensive
-
-# Or use Makefile
-make maintenance-full
-
-# Safe database operations include:
-# 1. Stop VaultWarden service
-# 2. WAL checkpoint before operations
-# 3. Integrity check before VACUUM
-# 4. Safe offline VACUUM operation
-# 5. Integrity check after operations
-# 6. Restart VaultWarden service
-# 7. Verify service health
-```
-
-### Remote Backup with Enhanced Security
-
-```bash
-# Configure encrypted remote backup
-rclone config
-
-# Set remote name in .env
-RCLONE_REMOTE_NAME=your_secure_remote
-
-# Test enhanced remote backup
-./backup.sh --type db --rclone
-
-# Enhanced remote features:
-# - Age encryption before upload
-# - Integrity verification before encryption
-# - Secure cleanup of temporary files
-# - Comprehensive error handling
-```
-
-## Enhanced Emergency Access Configuration
-
-### Break-Glass Admin with Enhanced Security
-
-```bash
-# Create emergency admin with validation
-./create-breakglass-admin.sh
-
-# Or use Makefile
-make breakglass-create
-
-# Enhanced security features:
-# - Validates script ownership (prevents privilege escalation)
-# - Creates separate non-root user with sudo privileges
-# - Configures secure SSH key authentication
-# - Enables password auth for OCI console access only
-# - Comprehensive audit logging
-# - Secure credential generation and storage
-```
-
-### Emergency Admin Commands
-
-```bash
-# Check emergency admin status
-./create-breakglass-admin.sh --status
-make breakglass-status
-
-# Generate new emergency password
-./create-breakglass-admin.sh --password
-
-# Validate emergency admin security
-./create-breakglass-admin.sh --validate
-
-# Remove emergency admin (when no longer needed)
-./create-breakglass-admin.sh --remove
-make breakglass-remove
-```
-
-## Enhanced Configuration Best Practices
-
-### Current Template-Based Environment
-
-1. **Edit templates only**: Always modify `.example` files as source of truth
-2. **Use enhanced setup**: Apply changes via `sudo ./setup.sh --force`
-3. **Resource awareness**: Consider 6GB system limitations in customizations
-4. **Security validation**: Use enhanced security validation functions
-5. **Document customizations**: Maintain clear documentation in template comments
-
-### Enhanced Production Environment
-
-1. **Use resource limits**: Container limits prevent system resource exhaustion
-2. **Use pinned versions**: Automatically set by `setup.sh --auto` for stability
-3. **Enhanced secrets**: SOPS key paths never exposed in process lists
-4. **Atomic operations**: Backup and maintenance operations prevent corruption
-5. **Comprehensive monitoring**: Use comprehensive health checks with diagnostics
-6. **Forensic logging**: 3GB log capacity for incident investigation
-7. **Containerized email**: msmtpd eliminates host dependencies
-
-### Enhanced Security Configuration
-
-1. **Dual API tokens**: Separate tokens for DNS and firewall management
-2. **Enhanced authentication**: Secure admin panel with bcrypt hashing
-3. **Comprehensive validation**: Script ownership and permission validation
-4. **Enhanced firewall**: Safe Cloudflare IP updates with race condition fixes
-5. **Secure automation**: Cron scripts validated for privilege escalation risks
-6. **Enhanced emergency access**: Break-glass admin with comprehensive security
-7. **Email security**: Containerized SMTP relay with secure configuration
-
-### Enhanced Operational Excellence
-
-1. **Template-driven changes**: All configuration via template modification
-2. **Atomic operations**: Backup and database operations prevent corruption
-3. **Resource optimization**: Container limits optimized for small teams
-4. **Comprehensive health**: Use comprehensive diagnostics for status
-5. **Enhanced recovery**: Multiple backup types with integrity verification
-6. **Forensic readiness**: Enhanced logging for incident investigation
-7. **Email reliability**: Containerized msmtpd for consistent email delivery
-
-## Configuration Troubleshooting
-
-### Template Issues
-
-```bash
-# Validate template syntax
-docker compose -f docker-compose.yml.example config
-
-# Check for platform-specific issues
-grep -n "platform:" docker-compose.yml.example
-
-# Regenerate from templates
-sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
-```
-
-### Secrets Issues
-
-```bash
-# Test secrets decryption
-./edit-secrets.sh --test
-
-# Verify Age key exists
-ls -l secrets/keys/age-key.txt
-
-# Check permissions
-ls -la secrets/
-
-# Fix permissions
-chmod 700 secrets/
-chmod 600 secrets/keys/age-key.txt
-```
-
-### Environment Variable Issues
-
-```bash
-# Check .env file
-cat .env | grep -v "^#"
-
-# Verify critical variables
-grep -E "DOMAIN|CLOUDFLARE_ZONE_ID|SMTP_HOST" .env
-
-# Regenerate .env from template
-cp .env.example .env
-nano .env  # Edit with your values
-```
-
-### Email Configuration Issues
-
-```bash
-# Test msmtpd functionality
-./test-email-simple.sh --verbose
-
-# Check msmtpd logs
-docker compose logs msmtpd
-
-# Verify SMTP settings
-grep SMTP .env
-
-# Check secrets
-./edit-secrets.sh --test
-```
-
-## Makefile Quick Reference
-
-```bash
-# Service Management
-make start          # Start services
-make restart        # Restart with enhanced script
-make status         # Show status
-
-# Configuration
-make config         # Show current configuration
-make test-config    # Validate configuration
-make edit-secrets   # Edit encrypted secrets
-
-# Health & Monitoring
-make health         # Run health checks
-make logs           # View all logs
-make logs SERVICE=vaultwarden  # View specific service logs
+./startup.sh --force
 ```
 
 ---
 
-This enhanced configuration guide reflects the current state of VaultWarden-OCI with comprehensive resource management, advanced security features, enhanced operational capabilities, containerized email functionality via msmtpd, and forensic logging optimized for small teams requiring reliable, maintainable password management infrastructure.
+## 🌍 Core Settings
+
+```bash
+# Your VaultWarden URL — MUST include https://
+DOMAIN=https://vault.yourdomain.com
+
+# Bare domain (no protocol) — used by Caddy, Fail2Ban, and Postfix
+DOMAIN_NAME=vault.yourdomain.com
+
+# Admin contact for notifications and Fail2Ban emails
+ADMIN_EMAIL=admin@yourdomain.com
+
+# Cloudflare Zone ID — find in Cloudflare dashboard → Overview → right sidebar
+CLOUDFLARE_ZONE_ID=your_zone_id_here
+```
+
+> **⚠️** `DOMAIN` requires `https://`. `DOMAIN_NAME` is the bare hostname without protocol. Both are required and used by different services.
+
+---
+
+## 📁 User & Directory
+
+```bash
+PUID=1000                              # Container file ownership UID
+PGID=1000                              # Container file ownership GID
+PROJECT_STATE_DIR=/var/lib/vaultwarden # Data, logs, and config root
+TZ=UTC                                 # Timezone (affects all container logs)
+SSH_PORT=22                            # SSH port for Fail2Ban SSH jail
+SSH_LOG_PATH=/var/log/secure           # Auto-detected by setup.sh (OCI default)
+# Debian/Ubuntu: /var/log/auth.log
+# Oracle Linux / RHEL: /var/log/secure
+```
+
+---
+
+## 📦 Container Versions
+
+```bash
+VAULTWARDEN_VERSION=1.34.3   # Pin for stability; blank = latest
+CADDY_VERSION=2.10.2          # Must include Cloudflare module
+FAIL2BAN_VERSION=1.1.0
+POSTFIX_VERSION=4.4.0         # bokysan/docker-postfix email relay
+```
+
+To override versions at runtime without editing files:
+
+```bash
+SOPS_VERSION=v3.9.4 sudo ./setup.sh --domain vault.yourdomain.com --email admin@yourdomain.com
+```
+
+See [ADVANCED-CUSTOMIZATION.md](ADVANCED-CUSTOMIZATION.md) for version pinning details.
+
+---
+
+## 🔒 Secrets (Encrypted)
+
+Manage secrets with `./edit-secrets.sh`. They are encrypted with Age + SOPS; never stored in plaintext.
+
+### Required Secrets
+
+| Secret | Purpose | How to Get |
+| :-- | :-- | :-- |
+| `admin_basic_auth_hash` | Bcrypt hash for Caddy `/admin` basic auth | `docker run --rm -it ghcr.io/caddybuilds/caddy-cloudflare:latest caddy hash-password` |
+| `caddy_cloudflare_dns_token` | Caddy DNS-01 challenge (Zone:DNS:Edit + Zone:Zone:Read) | [Cloudflare API Tokens](https://dash.cloudflare.com/profile/api-tokens) |
+| `fail2ban_cloudflare_firewall_token` | Fail2Ban edge banning (Zone:Firewall Services:Edit) | [Cloudflare API Tokens](https://dash.cloudflare.com/profile/api-tokens) |
+
+### Optional Secrets
+
+| Secret | Purpose |
+| :-- | :-- |
+| `smtp_password` | SMTP relay password for Postfix/VaultWarden email |
+| `push_installation_id` | Bitwarden push notification installation ID |
+| `push_installation_key` | Bitwarden push notification installation key |
+
+> **Note:** `fail2ban_cloudflare_firewall_token` is mandatory if you want edge blocking. Without it, Fail2Ban can detect attacks but cannot push bans to Cloudflare WAF.
+
+---
+
+## 📧 Email Configuration (Postfix)
+
+Email is delivered by a **`bokysan/docker-postfix`** sidecar container acting as an SMTP relay. Configure the relay in `.env`; the password goes in secrets.
+
+```bash
+# SMTP relay settings (shared by VaultWarden and Postfix)
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_SECURITY=starttls              # starttls or on (SSL/TLS)
+SMTP_USERNAME=your-email@gmail.com
+SMTP_FROM=noreply@vault.yourdomain.com
+SMTP_FROM_NAME=VaultWarden
+SMTP_TIMEOUT=15
+
+# Postfix-specific
+ALLOWED_SENDER_DOMAINS="vault.yourdomain.com yourdomain.com"
+POSTFIX_MYHOSTNAME=postfix.vault.yourdomain.com
+POSTFIX_SMTP_TLS_SECURITY_LEVEL=encrypt   # encrypt | may | none
+POSTFIX_MESSAGE_SIZE_LIMIT=10240000        # 10 MB
+```
+
+SMTP password:
+
+```bash
+./edit-secrets.sh   # set: smtp_password
+```
+
+Test end-to-end delivery:
+
+```bash
+./test-email-simple.sh --verbose
+# or: ./maintenance.sh --test-email --verbose
+# or: make test-email
+```
+
+> The Postfix container relays through your `SMTP_HOST`. `RELAYHOST`, `RELAYHOST_USERNAME`, and `RELAYHOST_PASSWORD` are constructed automatically from `SMTP_*` variables in `docker-compose.yml` — do not set them manually.
+
+---
+
+## 🔔 VaultWarden Application Settings
+
+```bash
+# Registration
+SIGNUPS_ALLOWED=false             # Disable open registration (recommended)
+INVITATIONS_ALLOWED=true          # Admin-controlled invites
+EMERGENCY_ACCESS_ALLOWED=true
+SENDS_ALLOWED=true
+WEB_VAULT_ENABLED=true
+
+# Security
+PASSWORD_ITERATIONS=600000        # Argon2 / PBKDF2 iterations
+PASSWORD_HINTS_ALLOWED=false
+SHOW_PASSWORD_HINT=false
+DISABLE_ADMIN_TOKEN=false
+DISABLE_ICON_DOWNLOAD=false
+
+# Icon cache
+ICON_CACHE_TTL=2592000
+ICON_CACHE_NEGTTL=259200
+
+# Organisation & events
+ORG_CREATION_USERS=               # Blank = anyone; or comma-separated emails
+ORG_EVENTS_ENABLED=false
+EVENTS_DAYS_RETAIN=365
+
+# Maintenance
+TRASH_AUTO_DELETE_DAYS=30
+INCOMPLETE_2FA_TIME_LIMIT=3
+
+# Database
+DATABASE_MAX_CONNS=10
+DATABASE_TIMEOUT=30
+```
+
+---
+
+## 📲 Push Notifications
+
+Register at <https://bitwarden.com/host> to get an installation ID and key, then set:
+
+```bash
+PUSH_ENABLED=true
+PUSH_RELAY_URI=https://push.bitwarden.com
+PUSH_IDENTITY_URI=https://identity.bitwarden.com
+```
+
+Add `push_installation_id` and `push_installation_key` via `./edit-secrets.sh`.
+
+---
+
+## 🚫 Fail2Ban
+
+```bash
+F2B_LOG_TARGET=STDOUT
+F2B_LOG_LEVEL=INFO
+F2B_DB_PURGE_AGE=1d
+F2B_MAX_RETRY=3
+F2B_DEST_MAIL="${ADMIN_EMAIL}"    # Ban notification recipient
+F2B_SENDER="fail2ban@${DOMAIN_NAME}"
+F2B_ACTION="%(action_mwl)s"        # Email + Cloudflare ban
+```
+
+> All web-facing jails push bans to **Cloudflare Edge WAF via API** — local `iptables` is not used for proxied services. Only the SSH jail uses local iptables.
+
+---
+
+## 💾 Backup
+
+```bash
+BACKUP_VERIFICATION_MODE=quick_check   # quick_check or integrity_check
+BACKUP_SCHEDULE="0 2 * * *"            # Cron schedule for automated backups
+BACKUP_RETENTION_DAYS=30               # Retention for full backups
+RCLONE_REMOTE_NAME=CHANGE_ME_RCLONE_REMOTE  # rclone remote for offsite sync
+```
+
+See [BACKUP-RESTORE.md](BACKUP-RESTORE.md) for procedures.
+
+---
+
+## 🛠️ Troubleshooting Configuration
+
+**Validate before applying:**
+
+```bash
+docker compose config                              # validate generated compose
+docker compose -f docker-compose.yml.example config  # validate template
+```
+
+**Regenerate from templates:**
+
+```bash
+sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.com
+```
+
+**Secrets issues:**
+
+```bash
+ls -l secrets/keys/age-key.txt   # must exist and be mode 600
+./edit-secrets.sh                 # verify decryption works
+```
+
+**Email issues:**
+
+```bash
+docker compose logs postfix
+./test-email-simple.sh --verbose
+grep SMTP .env
+```
