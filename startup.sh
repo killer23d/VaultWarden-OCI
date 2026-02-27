@@ -302,8 +302,8 @@ update_dns_record() {
     return 0
   fi
 
-  if [[ ! -x "$PROJECT_ROOT/update-dns.sh" ]]; then
-    log_warn "DNS update script not found or not executable"
+  if [[ ! -x "$PROJECT_ROOT/maintenance.sh" ]]; then
+    log_warn "Maintenance script not found - skipping DNS update"
     log_info "DNS will not be automatically updated"
     return 0
   fi
@@ -312,12 +312,12 @@ update_dns_record() {
   log_info "Waiting for services to initialize before DNS update..."
   sleep 5
 
-  if "$PROJECT_ROOT/update-dns.sh"; then
+  if "$PROJECT_ROOT/maintenance.sh" --update-dns; then
     log_success "DNS update completed successfully"
     return 0
   else
     log_warn "DNS update failed - you may need to run it manually later"
-    log_info "Run manually: ./update-dns.sh"
+    log_info "Run manually: ./maintenance.sh --update-dns"
     return 0
   fi
 }
