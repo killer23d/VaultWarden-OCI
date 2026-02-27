@@ -37,7 +37,7 @@ make test-config
 **Solutions**:
 ```bash
 # Fix configuration and restart
-./startup.sh --force-restart
+./startup.sh --force
 make restart
 
 # If templates are invalid, validate first
@@ -45,7 +45,7 @@ docker compose -f docker-compose.yml.example config
 
 # Regenerate from templates
 sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
-./startup.sh --force-restart
+./startup.sh --force
 ```
 
 ### VaultWarden Container Crashes
@@ -62,7 +62,8 @@ docker compose logs vaultwarden | tail -100
 make logs SERVICE=vaultwarden
 
 # Check for database issues
-docker compose exec vaultwarden sqlite3 /data/db.sqlite3 "PRAGMA integrity_check;"
+docker run --rm -v "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data/bwdata:/data" alpine:latest \
+  sh -c "apk add --no-cache sqlite >/dev/null 2>&1 && sqlite3 /data/db.sqlite3 'PRAGMA integrity_check;'"
 
 # Check resource usage
 docker stats vaultwarden_app
@@ -70,11 +71,15 @@ docker stats vaultwarden_app
 
 **Solutions**:
 ```bash
-# Database corruption
-./db-maint.sh
+# Deep database maintenance (stops VaultWarden temporarily)
+sudo ./maintenance.sh --db-maint
+# or via Makefile:
+make db-maint
 
 # If database is corrupt, restore from backup
 ./restore.sh --type db
+# or restore latest DB backup non-interactively:
+make restore-db
 
 # Check resource limits
 docker inspect vaultwarden_app | grep -A 10 Memory
@@ -82,7 +87,7 @@ docker inspect vaultwarden_app | grep -A 10 Memory
 # Increase limits if needed (edit template)
 nano docker-compose.yml.example
 sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
-./startup.sh --force-restart
+./startup.sh --force
 ```
 
 ### Caddy Certificate Issues
@@ -141,6 +146,7 @@ cat docker-compose.yml.example | grep -n "platform:\|linux/arm64"
 
 # Validate current config
 docker compose config
+make test-config
 ```
 
 **Solutions**:
@@ -168,7 +174,7 @@ sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
 cat .env | grep -v "^#"
 
 # Verify critical variables are set
-grep -E "DOMAIN|CLOUDFLARE_ZONE_ID|SMTP_HOST" .env
+grep -E "DOMAIN|CLOUDFLARE_ZONE_ID|SMTP_HOST|ADMIN_EMAIL" .env
 
 # Check if services are using environment
 docker compose config | grep -A 5 environment
@@ -185,7 +191,7 @@ cp .env.example .env
 nano .env
 
 # Restart services to apply
-./startup.sh --force-restart
+./startup.sh --force
 ```
 
 ### Secrets Decryption Failures
@@ -217,7 +223,7 @@ sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
 chmod 700 secrets/
 chmod 600 secrets/keys/age-key.txt
 
-# Test decryption
+# Test decryption manually
 age -d -i secrets/keys/age-key.txt secrets/secrets.yaml
 ```
 
@@ -235,8 +241,8 @@ age -d -i secrets/keys/age-key.txt secrets/secrets.yaml
 # Check if services are running
 docker compose ps
 
-# Test local connectivity
-curl -I http://localhost:80
+# Test local connectivity (Caddy internal health endpoint)
+curl -I http://localhost:8080/alive
 
 # Check Caddy logs
 docker compose logs caddy | grep -i error
@@ -251,10 +257,10 @@ sudo ufw status
 **Solutions**:
 ```bash
 # Restart services
-./startup.sh --force-restart
+./startup.sh --force
 
-# Update DNS if IP changed
-./update-dns.sh
+# Update DNS if IP changed (targeted mode — no cleanup)
+./maintenance.sh --update-dns
 
 # Verify Cloudflare proxy is enabled
 # Check Cloudflare dashboard: DNS → Proxied (orange cloud)
@@ -276,7 +282,7 @@ sudo ufw status
 sudo ufw status numbered
 
 # Check for Cloudflare rules
-sudo ufw status | grep CF
+sudo ufw status | grep "CF-IPv"
 
 # Test from external IP
 curl -I https://vault.example.com
@@ -284,7 +290,7 @@ curl -I https://vault.example.com
 
 **Solutions**:
 ```bash
-# Update Cloudflare IP ranges safely
+# Safely update Cloudflare IP ranges (adds new rules before removing old)
 ./maintenance.sh --update-firewall
 
 # If firewall is blocking everything, check UFW
@@ -295,8 +301,8 @@ sudo ufw status
 # Fix firewall rules, then:
 # sudo ufw enable
 
-# Properly update firewall
-./maintenance.sh --update-firewall
+# Schedule safe recurring firewall updates (Saturday 4 AM via cron)
+make cron-install
 ```
 
 ### DNS Not Updating
@@ -309,20 +315,23 @@ sudo ufw status
 **Diagnosis**:
 ```bash
 # Check current public IP
-curl -s ifconfig.me
+curl -s https://checkip.amazonaws.com
 
 # Check DNS record
-dig +short vault.example.com
+dig +short vault.example.com @1.1.1.1
 
 # Compare IPs
-echo "Public IP: $(curl -s ifconfig.me)"
-echo "DNS IP: $(dig +short vault.example.com)"
+echo "Public IP: $(curl -s https://checkip.amazonaws.com)"
+echo "DNS IP:    $(dig +short vault.example.com @1.1.1.1 | head -1)"
 ```
 
 **Solutions**:
 ```bash
-# Manual DNS update
-./update-dns.sh
+# Manual DNS update (targeted mode — no routine cleanup)
+./maintenance.sh --update-dns
+
+# Or via Makefile
+make update-dns
 
 # Verify Cloudflare API token works
 curl -X GET "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID" \
@@ -334,7 +343,7 @@ grep CLOUDFLARE_ZONE_ID .env
 
 ## Email Issues
 
-### Email Not Sending (msmtpd)
+### Email Not Sending (Postfix)
 
 **Symptoms**:
 - Email notifications not received
@@ -343,35 +352,39 @@ grep CLOUDFLARE_ZONE_ID .env
 
 **Diagnosis**:
 ```bash
-# Check msmtpd container status
-docker compose ps msmtpd
-docker compose logs msmtpd
+# Check postfix container status
+docker compose ps postfix
+docker compose logs postfix
+make logs-postfix                    # shortcut with timestamps
 
-# Test email functionality
-./test-email-simple.sh --verbose
+# Run full email diagnostic (4 tests)
+./maintenance.sh --test-email
+# or via Makefile:
+make test-email
 
-# Check msmtpd configuration
-docker compose exec msmtpd cat /etc/msmtprc
+# Verbose diagnostic output
+./maintenance.sh --test-email --verbose
 
-# Verify SMTP connectivity
-docker compose exec msmtpd nc -z localhost 1025
+# Preview without sending
+./maintenance.sh --test-email --dry-run
+
+# Check postfix relay configuration
+docker compose exec postfix postconf relayhost
+docker compose exec postfix nc -z localhost 587
 ```
 
 **Solutions**:
 ```bash
-# Verify SMTP settings in .env
+# Verify SMTP relay settings in .env
 nano .env
-# Check: SMTP_HOST, SMTP_PORT, SMTP_USERNAME
+# Check: SMTP_HOST, SMTP_PORT, SMTP_USERNAME, ALLOWED_SENDER_DOMAINS
 
 # Verify SMTP password in secrets
 ./edit-secrets.sh
 # Check: smtp_password
 
-# Restart msmtpd
-docker compose restart msmtpd
-
-# Test again
-./test-email-simple.sh
+# Restart postfix
+docker compose restart postfix
 
 # Send test from VaultWarden admin panel
 # Navigate to: https://vault.example.com/admin → SMTP Settings → Send Test Email
@@ -382,15 +395,18 @@ docker compose restart msmtpd
 **Symptoms**:
 - Authentication failed errors
 - 535 SMTP errors in logs
-- msmtpd can't connect to SMTP server
+- Postfix can't connect to SMTP relay
 
 **Diagnosis**:
 ```bash
 # Check SMTP credentials
 ./edit-secrets.sh --test
 
-# View msmtpd logs for auth errors
-docker compose logs msmtpd | grep -i auth
+# View postfix logs for auth errors
+docker compose logs postfix | grep -i "auth\|error\|fatal"
+
+# Run verbose email diagnostic
+./maintenance.sh --test-email --verbose
 ```
 
 **Solutions**:
@@ -402,12 +418,44 @@ docker compose logs msmtpd | grep -i auth
 # Verify SMTP settings
 nano .env
 # Ensure SMTP_USERNAME matches your email
+# Ensure SMTP_HOST and SMTP_PORT are correct
 
 # For Gmail, create app-specific password
 # https://myaccount.google.com/apppasswords
 
-# Restart services
-docker compose restart msmtpd vaultwarden
+# Restart postfix and vaultwarden
+docker compose restart postfix vaultwarden
+```
+
+### Fail2Ban Cannot Send Email
+
+**Symptoms**:
+- Fail2Ban ban notifications not arriving
+- `fail2ban cannot reach postfix SMTP` error in `--test-email` output
+
+**Diagnosis**:
+```bash
+# Confirm Fail2Ban network mode (must be host)
+docker inspect vaultwarden_fail2ban --format '{{.HostConfig.NetworkMode}}'
+
+# Check Fail2Ban → Postfix connectivity
+# (in host-network mode, postfix is reachable at 127.0.0.1:587)
+docker compose exec fail2ban sh -c "nc -zv 127.0.0.1 587"
+
+# Check SMTP action config
+docker compose exec fail2ban cat /data/fail2ban/action.d/smtp.conf
+```
+
+**Solutions**:
+```bash
+# Ensure docker-compose.yml has network_mode: host for fail2ban
+# (already set in docker-compose.yml.example)
+
+# Restart fail2ban
+docker compose restart fail2ban
+
+# Re-run email diagnostic
+./maintenance.sh --test-email --verbose
 ```
 
 ## Backup and Restore Issues
@@ -422,7 +470,7 @@ docker compose restart msmtpd vaultwarden
 **Diagnosis**:
 ```bash
 # Check disk space
-df -h /path/to/backups
+df -h ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}
 
 # Verify Age key
 ls -l secrets/keys/age-key.txt
@@ -445,8 +493,9 @@ sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
 # Retry backup
 ./backup.sh --type db
 
-# Check backup logs
-docker compose logs | grep backup
+# List existing backups
+./backup.sh --list
+make list-backups
 ```
 
 ### Restore Fails
@@ -461,21 +510,27 @@ docker compose logs | grep backup
 # Verify backup file integrity
 sha256sum -c backup.age.sha256
 
-# Test Age key
+# Test Age key against backup
 age -d -i secrets/keys/age-key.txt backup.age > /dev/null
 
 # Check backup metadata
 cat backup.age.meta
+
+# List all available backups
+./backup.sh --list
 ```
 
 **Solutions**:
 ```bash
-# Try older backup if current is corrupt
-./backup.sh --list
-./restore.sh --file /path/to/older-backup.age
+# Interactive restore (prompts for file selection)
+./restore.sh
 
-# If Age key doesn't match, use emergency kit
-./restore.sh --type emergency
+# Restore latest DB backup directly
+./restore.sh --type db
+make restore-db
+
+# Try older backup if current is corrupt
+./restore.sh --file /path/to/older-backup.age
 
 # After restore, verify services
 ./health.sh --comprehensive
@@ -513,7 +568,7 @@ nano .env
 echo "test" | rclone rcat your_remote_name:test.txt
 rclone cat your_remote_name:test.txt
 
-# Retry backup
+# Retry backup with rclone sync
 ./backup.sh --type db --rclone
 ```
 
@@ -537,8 +592,8 @@ docker compose exec fail2ban fail2ban-client status vaultwarden-auth
 # View logs
 docker compose logs fail2ban | tail -100
 
-# Check dual action effectiveness
-docker compose logs fail2ban | grep -E "CF.*ok|UFW.*ok"
+# Verify Cloudflare action is reachable
+docker compose logs fail2ban | grep -i cloudflare
 ```
 
 **Solutions**:
@@ -554,7 +609,7 @@ docker compose restart fail2ban
 curl -X GET "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/firewall/access_rules/rules" \
      -H "Authorization: Bearer YOUR_FIREWALL_TOKEN"
 
-# Check filter syntax
+# Test filter regex against live log
 docker compose exec fail2ban fail2ban-regex \
   /var/log/vaultwarden/vaultwarden.log \
   /data/fail2ban/filter.d/vaultwarden-auth.conf
@@ -578,14 +633,14 @@ docker compose logs caddy | grep admin
 
 **Solutions**:
 ```bash
-# Generate new bcrypt hash
+# Generate a new bcrypt hash using the Caddy image already in use
 docker run --rm -it ghcr.io/caddybuilds/caddy-cloudflare:latest caddy hash-password
 
 # Update secrets with new hash
 ./edit-secrets.sh
 # Set: admin_basic_auth_hash (paste bcrypt hash)
 
-# Restart Caddy
+# Restart Caddy to apply new hash
 docker compose restart caddy
 
 # Test admin access
@@ -602,7 +657,7 @@ curl -u "admin:your_password" https://vault.example.com/admin
 **Diagnosis**:
 ```bash
 # Check break-glass admin status
-./create-breakglass-admin.sh --status
+sudo ./create-breakglass-admin.sh --status
 make breakglass-status
 
 # Verify user exists
@@ -614,16 +669,15 @@ sudo cat /home/vw-breakglass/.ssh/authorized_keys
 
 **Solutions**:
 ```bash
-# Recreate break-glass admin
-./create-breakglass-admin.sh --create
+# Remove and recreate break-glass admin
+sudo ./create-breakglass-admin.sh --remove
+sudo ./create-breakglass-admin.sh --create
+# or:
+make breakglass-remove
 make breakglass-create
 
 # Test via OCI Console
 # Navigate to: OCI Console → Instance → Console Connection
-
-# If needed, remove and recreate
-./create-breakglass-admin.sh --remove
-./create-breakglass-admin.sh --create
 ```
 
 ## Performance Issues
@@ -649,16 +703,16 @@ docker inspect vaultwarden_app | grep -A 10 CPU
 
 **Solutions**:
 ```bash
-# Adjust CPU limits in template
+# Adjust CPU limits in template (defaults: VW 0.3, Caddy 0.25, Fail2Ban 0.15, Postfix 0.1)
 nano docker-compose.yml.example
 # Increase cpus value for affected container
 
 # Regenerate and apply
 sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
-./startup.sh --force-restart
+./startup.sh --force
 
-# Check for database issues
-./db-maint.sh
+# Run database maintenance if VaultWarden is CPU-heavy
+sudo ./maintenance.sh --db-maint
 ```
 
 ### High Memory Usage
@@ -682,15 +736,15 @@ docker inspect vaultwarden_app | grep -A 10 Memory
 
 **Solutions**:
 ```bash
-# Increase memory limits
+# Adjust memory limits in template
+# Defaults: VaultWarden 512M, Caddy 512M, Fail2Ban 512M, Postfix 256M
 nano docker-compose.yml.example
-# Adjust memory values for your system
 
 # Regenerate and restart
 sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
-./startup.sh --force-restart
+./startup.sh --force
 
-# Run maintenance
+# Run comprehensive maintenance to free resources
 ./maintenance.sh --comprehensive
 ```
 
@@ -704,10 +758,13 @@ sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
 **Diagnosis**:
 ```bash
 # Check database size
-du -h /var/lib/vaultwarden/data/bwdata/db.sqlite3
+du -h ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data/db.sqlite3
 
-# Check database integrity
-docker compose exec vaultwarden sqlite3 /data/db.sqlite3 "PRAGMA integrity_check;"
+# Check database integrity (ephemeral alpine container)
+docker run --rm \
+  -v "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data/bwdata:/data" \
+  alpine:latest \
+  sh -c "apk add --no-cache sqlite >/dev/null 2>&1 && sqlite3 /data/db.sqlite3 'PRAGMA integrity_check;'"
 
 # Review VaultWarden logs
 docker compose logs vaultwarden | grep -i slow
@@ -715,14 +772,62 @@ docker compose logs vaultwarden | grep -i slow
 
 **Solutions**:
 ```bash
-# Run database maintenance
-./db-maint.sh
+# Deep database maintenance: VACUUM + WAL checkpoint + optimize
+sudo ./maintenance.sh --db-maint
+make db-maint
 
-# If database is very large, consider cleanup
-# Review and remove old trash items, sends, etc. via admin panel
+# Non-interactive (skip confirmation prompt)
+sudo ./maintenance.sh --db-maint --force
+
+# Review and remove old items via admin panel:
+# https://vault.example.com/admin → Users → Purge Trash / Sends
 
 # Restart VaultWarden
 docker compose restart vaultwarden
+```
+
+## Cron / Automation Issues
+
+### Cron Jobs Not Running
+
+**Symptoms**:
+- No entries in cron log files
+- Scheduled backups or maintenance not occurring
+- Health alerts not being sent
+
+**Diagnosis**:
+```bash
+# List installed VaultWarden cron jobs
+sudo ./cron-setup.sh --list
+make cron-list
+
+# Validate security and dependencies
+sudo ./cron-setup.sh --validate
+
+# Check cron logs
+tail -50 /var/log/vaultwarden-cron/maintenance.log
+tail -50 /var/log/vaultwarden-cron/backup.log
+tail -50 /var/log/vaultwarden-cron/health.log
+
+# Check cron service
+systemctl status cron
+```
+
+**Solutions**:
+```bash
+# (Re-)install cron jobs
+sudo ./cron-setup.sh --install
+make cron-install
+
+# After pulling a repo update, re-install to sync /opt/ scripts
+sudo ./cron-setup.sh --install
+
+# Check for split-brain (stale /opt/ scripts)
+sudo ./cron-setup.sh --list
+# Look for: ⚠️ SPLIT-BRAIN DETECTED warning
+
+# Verify flock is installed
+command -v flock || sudo apt install util-linux
 ```
 
 ## Getting Help
@@ -747,6 +852,9 @@ docker stats --no-stream > resource-usage.txt
 
 # Version information
 make version > version-info.txt
+
+# Cron job status
+sudo ./cron-setup.sh --list > cron-status.txt
 ```
 
 ### Emergency Recovery
@@ -771,4 +879,4 @@ docker compose down
 
 ---
 
-This troubleshooting guide covers common issues and their solutions for VaultWarden-OCI. For issues not covered here, check the GitHub issues or create a new issue with diagnostic information.
+This troubleshooting guide covers common issues and their solutions for VaultWarden-OCI. For issues not covered here, check the GitHub issues or create a new issue with the diagnostic information collected above.

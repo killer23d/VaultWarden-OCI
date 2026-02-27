@@ -35,7 +35,7 @@ VaultWarden-OCI implements defense-in-depth with multiple security layers:
 │   - Cloudflare-ONLY for Web Traffic    │
 │   - Local iptables ONLY for SSH         │
 │   - High-Fidelity Log Parsing           │
-│   - Email Alerts via msmtpd             │
+│   - Email Alerts via Postfix            │
 └─────────────────────────────────────────┘
                   ↓
 ┌─────────────────────────────────────────┐
@@ -205,7 +205,7 @@ cp secrets/secrets.yaml secrets/secrets.yaml.backup
 
 ### Cloudflare-Only Web Jails
 
-All web-facing jails now use Cloudflare API exclusively:
+All web-facing jails use Cloudflare API exclusively:
 
 ```ini
 # iptables removed - ineffective for proxied traffic
@@ -224,7 +224,8 @@ action = smtp[name=vaultwarden-web-auth, ...]
 
 ### Local iptables for SSH Only
 
-SSH protection uses local iptables (direct connection):
+SSH protection uses local iptables (direct connection). Fail2Ban runs with
+`network_mode: host` to allow direct host iptables manipulation:
 
 ```ini
 # SSH is NOT proxied, so iptables works correctly
@@ -258,9 +259,11 @@ logpath  = /var/log/caddy/admin_access.log   # 750MB retention
 maxretry = 5
 ```
 
-### Email Notifications via msmtpd
+### Email Notifications via Postfix
 
-Email alerts are sent via containerized msmtpd:
+Email alerts are sent via the containerised Postfix relay (`boky/postfix`,
+port 587). Fail2Ban uses `network_mode: host` and therefore reaches Postfix
+at `127.0.0.1:587`:
 
 ```ini
 # All jails include email notifications
@@ -270,9 +273,9 @@ action = smtp[name=jail_name, dest="admin@example.com", sender="fail2ban@domain.
 
 Benefits:
 - ✅ No host dependencies (mailutils not required)
-- ✅ Consistent SMTP configuration
-- ✅ Dedicated container logs for troubleshooting
-- ✅ Resource-efficient (32MB limit)
+- ✅ Consistent SMTP configuration via a single Postfix relay
+- ✅ Dedicated container logs for troubleshooting (`docker compose logs postfix`)
+- ✅ Resource-efficient (256MB memory limit, 0.1 CPU)
 
 ## Firewall Hardening (UFW)
 
@@ -300,17 +303,19 @@ sudo ufw limit 22/tcp comment 'SSH rate limit'
 
 ### Safe Firewall Updates
 
-The maintenance script includes race condition fixes:
+The maintenance script applies new Cloudflare IP ranges **before** removing
+old ones to eliminate race conditions:
 
 ```bash
-# Enhanced update process
+# Safe update (targeted mode — skips routine cleanup)
 ./maintenance.sh --update-firewall
 
 # Features:
-# 1. Adds new rules BEFORE removing old ones
-# 2. Validates rules before applying
-# 3. Falls back to safe defaults if API fails
-# 4. Comprehensive logging of all changes
+# 1. Fetches current Cloudflare IPv4 + IPv6 ranges
+# 2. Adds new rules BEFORE removing old ones
+# 3. Validates ranges with regex before applying
+# 4. Falls back safely if API fails
+# 5. Comprehensive logging of all changes
 ```
 
 ## Container Security
@@ -327,18 +332,18 @@ services:
   caddy:
     user: "${PUID}:${PGID}"
 
-  # fail2ban and msmtpd use container-default non-root users
+  # postfix uses container-default user; fail2ban uses host networking
 ```
 
 ### Capability Restrictions
 
-Containers drop all capabilities and only add necessary ones:
+Containers drop all capabilities and only add the minimum required:
 
 ```yaml
 vaultwarden:
   cap_drop:
     - ALL
-  # No capabilities added
+  # No additional capabilities
 
 caddy:
   cap_drop:
@@ -346,44 +351,70 @@ caddy:
   cap_add:
     - NET_BIND_SERVICE  # Required for ports 80/443
 
-fail2ban:
+postfix:
+  cap_drop:
+    - ALL
   cap_add:
-    - NET_ADMIN  # Required for iptables (SSH only)
+    - CHOWN              # Mail queue ownership
+    - SETUID             # User switching
+    - SETGID             # Group switching
+    - NET_BIND_SERVICE   # Port 587
+    - DAC_OVERRIDE       # Spool permission overrides (REQUIRED)
+    - FOWNER             # Spool file ownership (REQUIRED)
+
+fail2ban:
+  # network_mode: host — no cap_drop (host network namespace)
+  cap_add:
+    - NET_ADMIN  # Required for iptables manipulation
     - NET_RAW    # Required for network monitoring
 ```
 
 ### Resource Limits
 
-Prevents resource exhaustion attacks:
+Prevents resource exhaustion attacks. Values are optimised for a system
+serving fewer than 10 users:
 
 ```yaml
 vaultwarden:
   deploy:
     resources:
       limits:
-        memory: 2G
-        cpus: '0.6'
+        memory: 512M
+        cpus: '0.3'
+      reservations:
+        memory: 128M
+        cpus: '0.1'
 
 caddy:
   deploy:
     resources:
       limits:
-        memory: 1G
-        cpus: '0.3'
+        memory: 512M
+        cpus: '0.25'
+      reservations:
+        memory: 128M
+        cpus: '0.1'
 
 fail2ban:
   deploy:
     resources:
       limits:
-        memory: 1G
-        cpus: '0.2'
+        memory: 512M
+        cpus: '0.15'
+      reservations:
+        memory: 128M
+        cpus: '0.05'
 
-msmtpd:
+postfix:
   deploy:
     resources:
       limits:
-        memory: 32M
-        cpus: '0.05'
+        memory: 256M
+        cpus: '0.1'
+        pids: 50
+      reservations:
+        memory: 64M
+        cpus: '0.02'
 ```
 
 ### Security Options
@@ -393,15 +424,31 @@ security_opt:
   - no-new-privileges:true
 ```
 
-Prevents privilege escalation within containers.
+Applied to all containers. Prevents privilege escalation within containers.
+
+### Log Rotation (Docker Driver)
+
+All runtime containers cap their Docker json-file logs at the driver level
+to prevent disk fill:
+
+```yaml
+logging:
+  driver: "json-file"
+  options:
+    max-size: "20m"   # caddy: 20m × 5 = 100MB worst-case
+    max-file: "5"
+# vaultwarden: 10m × 5 = 50MB
+# postfix:      5m × 3 = 15MB
+# fail2ban:     5m × 3 = 15MB
+```
 
 ## Application Security
 
 ### Admin Panel Protection
 
-Two-factor protection for admin panel:
+Two-factor protection for the admin panel:
 
-1. **Caddy Basic Authentication** (bcrypt hash):
+1. **Caddy Basic Authentication** (bcrypt hash from secrets):
 ```caddyfile
 route /admin* {
     import admin_basic_auth
@@ -409,33 +456,20 @@ route /admin* {
 }
 ```
 
-2. **Admin Token** (in encrypted secrets):
+2. **Admin Token** (stored in encrypted secrets):
 ```yaml
 admin_token: "32-character-hex-string"
 ```
 
-### Rate Limiting
+### Rate Limiting (Cloudflare WAF)
 
-Caddy implements strict rate limits:
+Cloudflare WAF rules must be configured manually in the Cloudflare dashboard:
 
-```caddyfile
-# API authentication rate limiting
-rate_limit {
-    zone api_auth_rl {
-        match_path /api/accounts/prelogin /identity/connect/token
-        capacity 10
-        window 5m
-    }
-}
-
-# Admin panel rate limiting
-rate_limit {
-    zone admin_rl {
-        capacity 5
-        window 5m
-    }
-}
-```
+| Rule | Path | Limit | Action |
+|---|---|---|---|
+| Auth endpoint protection | `/identity/connect/token*`, `/api/accounts/prelogin*` | 10 req / 1 min per IP | Block (429) |
+| Admin panel protection | `/admin*` | 5 req / 1 min per IP | Block (429) |
+| General API protection (optional) | `/api/*` | 100 req / 1 min per IP | Managed Challenge |
 
 ### Security Headers
 
@@ -466,7 +500,7 @@ Security Log:      10MB × 50 files = 500MB  (180-day retention)
 
 ### Structured JSON Logging
 
-All logs use structured JSON format for easy parsing:
+All Caddy logs use structured JSON format for easy parsing:
 
 ```json
 {
@@ -505,8 +539,9 @@ ${PROJECT_STATE_DIR}/logs/caddy/security.log
 # Fail2Ban logs
 ${PROJECT_STATE_DIR}/logs/fail2ban/fail2ban.log
 
-# msmtpd logs
-${PROJECT_STATE_DIR}/logs/msmtpd/msmtpd.log
+# Postfix logs
+${PROJECT_STATE_DIR}/logs/postfix/
+docker compose logs postfix   # live container output
 ```
 
 ## Emergency Access
@@ -526,13 +561,13 @@ A dedicated emergency admin account for OCI serial console access:
 
 ```bash
 # Create emergency admin
-./create-breakglass-admin.sh
+sudo ./create-breakglass-admin.sh --create
 
 # Or use Makefile
 make breakglass-create
 
 # Check status
-./create-breakglass-admin.sh --status
+sudo ./create-breakglass-admin.sh --status
 make breakglass-status
 ```
 
@@ -576,10 +611,10 @@ All backups are encrypted with Age:
 ### Backup Verification
 
 ```bash
-# Quick verification (checksum-based)
+# Standard backup (checksum-based verification)
 ./backup.sh --type db
 
-# Full verification (end-to-end recoverability test)
+# Full backup with end-to-end recoverability test
 ./backup.sh --type full --full-verification
 
 # Verification process:
@@ -611,32 +646,43 @@ rclone config
 ### Health Checks
 
 ```bash
-# Comprehensive security health check
+# Basic health check (containers + service accessibility)
 ./health.sh
 
-# Checks include:
-# - All containers running
-# - Resource usage within limits
-# - Fail2ban operational
-# - Cloudflare API accessible
-# - Secrets properly encrypted
-# - Firewall rules correct
-# - No security misconfigurations
+# Comprehensive check (adds disk, SSL, DB, backups, resources, config, security)
+./health.sh --comprehensive
+
+# With automatic recovery of unhealthy containers
+./health.sh --auto-recover
+
+# Full comprehensive check with email alert and auto-recovery
+./health.sh --comprehensive --email --auto-recover
 ```
+
+Checks performed:
+- All containers running and healthy (`vaultwarden_app`, `vaultwarden_caddy`, `vaultwarden_fail2ban`, `vaultwarden_postfix`)
+- Local service accessibility on port 8080
+- Disk space against configurable threshold (default 80%)
+- SSL certificate expiry (warn < 30 days, critical < 7 days)
+- Database size and growth rate
+- Backup age and decryptability
+- Resource usage (comprehensive mode)
+- Configuration validity (comprehensive mode)
+- Security status: Fail2Ban, Age key, SOPS config (comprehensive mode)
 
 ### Monitoring Fail2Ban
 
 ```bash
-# Check ban status
+# Check ban status across all jails
 docker compose exec fail2ban fail2ban-client status
 
-# View recent bans
+# View specific jail bans
 docker compose exec fail2ban fail2ban-client status vaultwarden-auth
 
 # Check Cloudflare integration
 docker compose logs fail2ban | grep -i cloudflare
 
-# View banned IPs
+# View banned IPs for a jail
 docker compose exec fail2ban fail2ban-client get vaultwarden-auth banip
 ```
 
@@ -652,7 +698,7 @@ cat ${PROJECT_STATE_DIR}/logs/caddy/admin_access.log | jq
 # View security events
 cat ${PROJECT_STATE_DIR}/logs/caddy/security.log | jq 'select(.status >= 400)'
 
-# Analyze VaultWarden logs
+# Analyse VaultWarden logs
 grep "ERROR" ${PROJECT_STATE_DIR}/logs/vaultwarden/vaultwarden.log
 ```
 
@@ -664,23 +710,25 @@ grep "ERROR" ${PROJECT_STATE_DIR}/logs/vaultwarden/vaultwarden.log
 - ✅ Enable Cloudflare proxy (orange cloud) for DNS record
 - ✅ Configure HTTPS-only redirect at Cloudflare
 - ✅ Enable Cloudflare WAF managed rules
+- ✅ Configure WAF rate limiting rules (auth, admin, API)
 - ✅ Set up break-glass admin immediately
 - ✅ Test emergency access procedures
 - ✅ Create initial encrypted backup
-- ✅ Configure email notifications
-- ✅ Verify all health checks pass
+- ✅ Configure email notifications and run `make test-email`
+- ✅ Verify all health checks pass: `./health.sh --comprehensive`
 
 ### Ongoing Operations
 - ✅ Monitor Fail2Ban logs weekly
 - ✅ Review Cloudflare analytics monthly
 - ✅ Test backup restoration monthly
 - ✅ Rotate secrets annually
-- ✅ Update containers weekly (automated)
+- ✅ Update containers weekly (automated via cron)
 - ✅ Review firewall rules quarterly
 - ✅ Test emergency procedures quarterly
 - ✅ Monitor resource usage monthly
 - ✅ Review forensic logs for incidents
 - ✅ Keep break-glass admin credentials secure
+- ✅ Run `sudo ./cron-setup.sh --validate` after pulling repo updates
 
 ### Incident Response
 
@@ -700,7 +748,7 @@ If you detect suspicious activity:
 
 2. **Analysis**:
    ```bash
-   # Analyze authentication failures
+   # Analyse authentication failures
    cat ${PROJECT_STATE_DIR}/logs/caddy/auth_attempts.log | jq
 
    # Check admin panel access
@@ -730,10 +778,10 @@ If you detect suspicious activity:
 
    # Update admin token and hash
    # Restart services
-   ./startup.sh --force-restart
+   ./startup.sh --force
 
    # Verify security
-   ./health.sh
+   ./health.sh --comprehensive
    ```
 
 ## Security Troubleshooting
@@ -761,7 +809,7 @@ docker compose exec fail2ban cat /data/fail2ban/action.d/cloudflare-apiv4.conf
 # Verify zone ID and token
 docker compose exec fail2ban env | grep CF_
 
-# Test filter regex
+# Test filter regex against live log
 docker compose exec fail2ban fail2ban-regex \
   /var/log/vaultwarden/vaultwarden.log \
   /data/fail2ban/filter.d/vaultwarden-auth.conf
@@ -773,17 +821,28 @@ docker compose logs fail2ban | grep -i error
 ### Email Notifications Not Working
 
 ```bash
-# Check msmtpd container
-docker compose logs msmtpd
+# Check postfix container status and logs
+docker compose ps postfix
+docker compose logs postfix          # live output
+make logs-postfix                    # shortcut
 
-# Test email manually
-./test-email-simple.sh --verbose
+# Run full email diagnostic (4 tests)
+./maintenance.sh --test-email
 
-# Verify SMTP settings
-grep SMTP .env
+# Verbose output for detailed diagnosis
+./maintenance.sh --test-email --verbose
 
-# Check secrets
-./edit-secrets.sh --test
+# Test with specific recipient
+./maintenance.sh --test-email --recipient admin@example.com
+
+# Preview without sending (dry-run)
+./maintenance.sh --test-email --dry-run
+
+# Verify SMTP settings in .env
+grep -E 'SMTP|POSTFIX|ALLOWED_SENDER' .env
+
+# Verify SMTP password in secrets
+./edit-secrets.sh
 ```
 
 ## Compliance and Hardening
@@ -792,12 +851,12 @@ grep SMTP .env
 
 - ✅ Containers run as non-root
 - ✅ Capabilities dropped and minimally added
-- ✅ Resource limits configured
-- ✅ Security options enabled (no-new-privileges)
-- ✅ Secrets not in environment variables
-- ✅ Read-only filesystems where possible
+- ✅ Resource limits configured (memory, CPU, PIDs)
+- ✅ Security options enabled (`no-new-privileges:true`)
+- ✅ Secrets not in environment variables (Docker secrets via files)
+- ✅ Docker json-file log rotation caps applied
 - ✅ Minimal images used
-- ✅ Health checks configured
+- ✅ Health checks configured on all containers
 
 ### Additional Hardening
 
@@ -818,4 +877,4 @@ sudo dpkg-reconfigure --priority=low unattended-upgrades
 
 ---
 
-This security guide reflects the current architecture with Cloudflare-only blocking for web traffic, local iptables for SSH, comprehensive resource management, enhanced forensic logging, and robust security practices optimized for small teams requiring enterprise-grade password management security.
+This security guide reflects the current architecture with Cloudflare-only blocking for web traffic, local iptables for SSH (Fail2Ban in host-network mode), containerised Postfix email relay, comprehensive resource management, enhanced forensic logging, and robust security practices optimised for small teams requiring enterprise-grade password management security.
