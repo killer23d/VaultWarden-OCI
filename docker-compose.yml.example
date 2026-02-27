@@ -7,30 +7,25 @@
 # ✅ Enhanced security headers and modern isolation
 # ✅ Cloudflare WAF rate limiting (edge protection)
 # ✅ Fail2Ban SSH protection via host networking (FIXED)
-# ✅ Postfix capabilities hardened (CHOWN, SETUID, SETGID, NET_BIND_SERVICE, DAC_OVERRIDE, FOWNER only — KILL and others dropped)
+# ✅ Postfix capabilities hardened (CHOWN, SETUID, SETGID, NET_BIND_SERVICE, DAC_OVERRIDE, FOWNER only)
 # ✅ Log rotation limits on all runtime services (disk-fill prevention)
 
 services:
   # =============================================================================
   # Init Container - Permissions Setup
   # =============================================================================
-  # SECURITY NOTE: This container runs as root (user: "0:0") but only during
-  # startup to fix ownership. Consider moving to one-time setup.sh operation
-  # for enhanced security (see docs/SECURITY.md).
   init-permissions:
     image: busybox:latest
     container_name: vaultwarden_init
     restart: "no"
     user: "0:0"  # Required for chown operations
 
-    # SECURITY: Restrict capabilities even for root user
     cap_drop:
       - ALL
     cap_add:
       - CHOWN
       - FOWNER
 
-    # SECURITY: No new privileges
     security_opt:
       - no-new-privileges:true
 
@@ -60,7 +55,9 @@ services:
   # =============================================================================
   vaultwarden:
     container_name: vaultwarden_app
-    image: ghcr.io/dani-garcia/vaultwarden:${VAULTWARDEN_VERSION:-1.30.5}
+    # 1.35.4 — SECURITY RELEASE: fixes GHSA-w9f8-m526-h7fh, GHSA-h4hq-rgvh-wh27,
+    # GHSA-r32r-j5jq-3w4m (cipher access bypass + collection permission bypasses)
+    image: ghcr.io/dani-garcia/vaultwarden:${VAULTWARDEN_VERSION:-1.35.4}
     restart: unless-stopped
     user: "${PUID}:${PGID}"
 
@@ -134,15 +131,12 @@ services:
     tmpfs:
       - /tmp
 
-    # LOG ROTATION: Cap Docker json-file driver to prevent disk fill.
-    # VaultWarden logs at warn-level only; 10m x 5 = 50MB worst-case.
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "5"
 
-    # OPTIMIZED: Resource limits for <10 users
     deploy:
       resources:
         limits:
@@ -157,18 +151,23 @@ services:
   # =============================================================================
   caddy:
     container_name: vaultwarden_caddy
-    image: ghcr.io/caddybuilds/caddy-cloudflare:${CADDY_VERSION:-2.10.2}
+    # CaddyBuilds/caddy-cloudflare 2.11.1 — released 2026-02-24
+    # >= v2.11.0 bundles caddy-cloudflare-ip BY DEFAULT.
+    # This module rewrites remote_ip in access.log to the real client IP
+    # sourced from Cf-Connecting-Ip, which is mandatory for fail2ban Caddy
+    # filters to ban actual attackers instead of Cloudflare edge nodes.
+    # DO NOT downgrade below 2.11.0 without verifying the module is present:
+    #   docker run --rm ghcr.io/caddybuilds/caddy-cloudflare:<tag> caddy list-modules | grep cloudflare
+    #   Expected: http.ip_sources.cloudflare must appear in output
+    image: ghcr.io/caddybuilds/caddy-cloudflare:${CADDY_VERSION:-2.11.1}
     restart: unless-stopped
     user: "${PUID}:${PGID}"
 
-    # Use custom entrypoint script for secret loading
     entrypoint: /scripts/entrypoint.sh
 
     environment:
       DOMAIN_NAME: ${DOMAIN_NAME}
       TZ: ${TZ:-UTC}
-      # Note: CLOUDFLARE_API_TOKEN and ADMIN_BASIC_AUTH_HASH
-      # are set by entrypoint.sh from Docker secrets
 
     secrets:
       - caddy_cloudflare_dns_token
@@ -205,9 +204,6 @@ services:
     cap_add:
       - NET_BIND_SERVICE
 
-    # LOG ROTATION: Caddy writes one access-log line per request; give it the
-    # largest budget. 20m x 5 = 100MB worst-case. Caddy also writes structured
-    # logs to /var/log/caddy (volume-mounted); this caps the Docker stdout copy.
     logging:
       driver: "json-file"
       options:
@@ -228,7 +224,8 @@ services:
   # =============================================================================
   postfix:
     container_name: vaultwarden_postfix
-    image: boky/postfix:${POSTFIX_VERSION:-latest}
+    # boky/postfix 4.3.0 — latest stable
+    image: boky/postfix:${POSTFIX_VERSION:-4.3.0}
     restart: unless-stopped
 
     environment:
@@ -264,15 +261,13 @@ services:
       - ALL
 
     cap_add:
-      - CHOWN              # Mail queue ownership
-      - SETUID             # User switching
-      - SETGID             # Group switching
-      - NET_BIND_SERVICE   # Port 587
-      - DAC_OVERRIDE       # Spool permission overrides (REQUIRED)
-      - FOWNER             # Spool file ownership (REQUIRED)
+      - CHOWN
+      - SETUID
+      - SETGID
+      - NET_BIND_SERVICE
+      - DAC_OVERRIDE
+      - FOWNER
 
-    # LOG ROTATION: Postfix is low-volume (alert emails only).
-    # 5m x 3 = 15MB worst-case.
     logging:
       driver: "json-file"
       options:
@@ -294,10 +289,11 @@ services:
   # =============================================================================
   fail2ban:
     container_name: vaultwarden_fail2ban
-    image: crazymax/fail2ban:${FAIL2BAN_VERSION:-1.1.0}
+    # crazymax/fail2ban 1.1.0-r3 — iptables-legacy fix (2024-12-25)
+    image: crazymax/fail2ban:${FAIL2BAN_VERSION:-1.1.0-r3}
     restart: unless-stopped
 
-    # FIXED: Host networking mode to allow SSH iptables manipulation
+    # HOST networking required for SSH iptables manipulation
     network_mode: host
 
     environment:
@@ -323,8 +319,8 @@ services:
       - ${SSH_LOG_PATH:-/var/log/secure}:/var/log/ssh-auth.log:ro
 
     cap_add:
-      - NET_ADMIN  # Required for iptables manipulation
-      - NET_RAW    # Required for raw socket access
+      - NET_ADMIN
+      - NET_RAW
 
     depends_on:
       - vaultwarden
@@ -341,8 +337,6 @@ services:
     security_opt:
       - no-new-privileges:true
 
-    # LOG ROTATION: Fail2Ban is low-volume (ban/unban events only).
-    # 5m x 3 = 15MB worst-case.
     logging:
       driver: "json-file"
       options:
@@ -389,6 +383,21 @@ networks:
 # DEPLOYMENT NOTES - SECURITY HARDENED EDITION
 # =============================================================================
 #
+# VERSION PINS (updated 2026-02-27):
+# - VaultWarden 1.35.4  — SECURITY release, upgrade mandatory
+# - Caddy 2.11.1        — caddy-cloudflare-ip bundled by default (>= 2.11.0)
+# - Fail2Ban 1.1.0-r3   — iptables-legacy fix
+# - Postfix 4.3.0       — latest stable
+#
+# CADDY VERSION REQUIREMENT:
+# This stack requires caddy-cloudflare >= 2.11.0. The caddy-cloudflare-ip
+# module (http.ip_sources.cloudflare) is bundled by default from that version.
+# It rewrites remote_ip in access logs to the real client IP, which is
+# mandatory for all fail2ban Caddy-based jails to function correctly.
+# Verify the module is present after any Caddy image change:
+#   docker run --rm ghcr.io/caddybuilds/caddy-cloudflare:2.11.1 caddy list-modules | grep cloudflare
+#   Must see: http.ip_sources.cloudflare
+#
 # SECURITY ENHANCEMENTS APPLIED:
 # ✅ Command injection protection (awk-based substitution in setup.sh)
 # ✅ Docker secrets loaded via entrypoint (not exposed in command args)
@@ -399,42 +408,13 @@ networks:
 # ✅ Modern isolation headers (Spectre mitigation)
 # ✅ Malicious user-agent blocking (scanner detection)
 # ✅ Init container capability restriction (CHOWN + FOWNER only)
-# ✅ Fail2Ban host networking for SSH protection (FIXED)
-# ✅ Postfix capabilities hardened (6 caps: CHOWN, SETUID, SETGID, NET_BIND_SERVICE, DAC_OVERRIDE, FOWNER — all others dropped)
+# ✅ Fail2Ban host networking for SSH protection
+# ✅ Postfix capabilities hardened (6 caps only)
 # ✅ WebSocket support enabled by default
-# ✅ Log rotation limits on all runtime services (disk-fill prevention)
-#
-# CRITICAL FIXES APPLIED:
-# 1. Fail2Ban SSH Protection (FIXED):
-#    - Moved to network_mode: host to enable SSH iptables manipulation
-#    - SMTP action already configured for 127.0.0.1:587 (host-mode compatible)
-#    - SSH jail can now properly ban attackers on host port 22
-#
-# 2. WebSocket Support (ENABLED):
-#    - WEBSOCKET_ENABLED now defaults to true
-#    - Caddy routing for /notifications/hub must be configured
-#    - Enables real-time sync for VaultWarden clients
-#
-# 3. Postfix Capabilities (HARDENED):
-#    - All capabilities dropped by default (cap_drop: ALL)
-#    - Only required caps granted: CHOWN, SETUID, SETGID, NET_BIND_SERVICE,
-#      DAC_OVERRIDE (spool permission overrides), FOWNER (spool file ownership)
-#    - DAC_OVERRIDE and FOWNER are REQUIRED for correct mail spool operation
-#    - KILL and all other capabilities remain dropped
-#
-# 4. Log Rotation (HARDENED):
-#    - All runtime services now cap Docker json-file logs natively
-#    - Worst-case total Docker log footprint: ~200MB on the 40GB SSD
-#    - Sizing rationale:
-#        caddy:       20m x 5 = 100MB  (one line per request - highest volume)
-#        vaultwarden: 10m x 5 =  50MB  (warn-level only - low volume)
-#        postfix:      5m x 3 =  15MB  (alert emails only - very low volume)
-#        fail2ban:     5m x 3 =  15MB  (ban/unban events only - very low volume)
-#    - bash maintenance.sh --comprehensive also rotates volume-mounted logs
-#      as a secondary layer of defense
+# ✅ Log rotation limits on all runtime services
 #
 # CLOUDFLARE RATE LIMITING (REQUIRED):
-# You MUST configure these WAF rules in Cloudflare Dashboard:
+# Configure these WAF rules in Cloudflare Dashboard:
 #
 # Rule #1: Authentication Endpoint Protection
 #   - Path: /identity/connect/token*, /api/accounts/prelogin*
@@ -457,33 +437,31 @@ networks:
 # - Fail2Ban: 512M limit / 128M reservation
 # - Postfix: 256M limit / 64M reservation (+ pids: 50)
 # - Total limits: ~1.8GB (leaves 4.2GB for host OS and overhead)
-# - Total reservations: ~448MB (ensures stable operation)
 #
 # FAIL2BAN HOST NETWORKING IMPLICATIONS:
-# - Fail2Ban now shares host network namespace
+# - Fail2Ban shares host network namespace
 # - Can directly manipulate host iptables for SSH protection
-# - SMTP configured for 127.0.0.1:587 (already compatible)
-# - Loses Docker DNS service resolution (not needed for this setup)
+# - SMTP configured for 127.0.0.1:587 (host-mode compatible)
 # - Cannot use networks: directive (mutually exclusive with network_mode: host)
 #
 # TESTING CHECKLIST:
 # □ Verify Caddy starts without errors: docker compose logs caddy
+# □ Verify caddy-cloudflare-ip module present:
+#     docker run --rm ghcr.io/caddybuilds/caddy-cloudflare:2.11.1 caddy list-modules | grep cloudflare
+#     Must see: http.ip_sources.cloudflare
 # □ Test basic auth works: curl -u admin:password https://vault.domain.com/admin
 # □ Verify secrets not in docker inspect: docker inspect vaultwarden_caddy | grep CLOUDFLARE
 # □ Test Postfix mail delivery: ./maintenance.sh --test-email --verbose
 # □ Test SSH ban works: Trigger 3 failed SSH attempts, verify iptables ban
 # □ Verify Fail2Ban can send email via 127.0.0.1:587
+# □ Confirm fail2ban sees real IPs: docker exec vaultwarden_fail2ban fail2ban-client status vaultwarden-web-auth
 # □ Test WebSocket sync: Enable in client, verify real-time notifications
-# □ Verify Cloudflare rate limiting: Run 15 auth requests in 1 minute (should see 429)
 # □ Check resource usage: docker stats (should be under limits)
-# □ No init-permissions warnings: docker compose up -d (should be clean)
-# □ Verify log caps active: docker inspect vaultwarden_app | grep -A5 LogConfig
 #
 # PLATFORM COMPATIBILITY:
 # - SSH_LOG_PATH automatically detected by setup.sh
 # - Debian/Ubuntu: /var/log/auth.log (default)
 # - RHEL/CentOS/OCI: /var/log/secure (auto-detected)
-# - Email: Fully containerized (no host dependencies)
 #
 # BACKUP ENCRYPTION KEY RECOVERY (CRITICAL):
 # ⚠️  MANDATORY: Backup secrets/keys/age-key.txt to offline storage
@@ -496,6 +474,5 @@ networks:
 # DAC_OVERRIDE and FOWNER are required for mail spool access and must
 # not be removed. If mail delivery fails, verify these are present:
 #   docker inspect vaultwarden_postfix | grep -A20 CapAdd
-# Expected hex value includes bits for all six capabilities above.
 #
 # =============================================================================
