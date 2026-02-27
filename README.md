@@ -2,7 +2,7 @@
 
 **Production-Ready VaultWarden for Small Teams**
 
-A streamlined, secure, and operationally excellent VaultWarden deployment optimized for teams of 10 or fewer users. Designed for Oracle Cloud Infrastructure (OCI) with dynamic IPs, this project focuses on essential functionality, ease of maintenance, and robust security for reliable password management.
+A streamlined, secure, and operationally excellent VaultWarden deployment optimized for teams of 10 or fewer users. Designed for Oracle Cloud Infrastructure (OCI) with dynamic IPs, focused on ease of maintenance and robust security.
 
 ## 🎯 What Makes This Different
 
@@ -14,7 +14,7 @@ This is a **template-based, hardened deployment** designed specifically for smal
 - **Simple operations** with a Makefile, 14 lifecycle scripts, and 5 shared libraries
 - **Emergency recovery** with break-glass admin access and automatic rollback on failed updates
 
-## 🏗️ Project Components
+## 🏗️ Architecture
 
 ```
  Cloudflare Edge (Proxy, WAF, DNS)
@@ -47,102 +47,70 @@ This is a **template-based, hardened deployment** designed specifically for smal
 | **VaultWarden** | Bitwarden-compatible password manager (2 GB limit) |
 | **Postfix** | Containerised SMTP relay — no host mail dependencies |
 | **fail2ban** | Blocks attackers via Cloudflare Edge WAF (not iptables) |
-| **UFW** | Host firewall; Cloudflare-IP restriction recommended at OCI VCN level |
+| **UFW** | Host firewall; Cloudflare-IP restriction at OCI VCN level recommended |
 | **Age + SOPS** | Encrypted secrets management |
 | **14 Scripts** | Full lifecycle: setup, start, backup, restore, update, health, maintenance … |
 | **Makefile** | Convenient shortcuts for all common operations |
 
-> For a full breakdown of scripts, libraries, and the Makefile reference see [docs/SCRIPTS.md](docs/SCRIPTS.md) and [docs/OPERATIONS.md](docs/OPERATIONS.md).
+## ⚠️ Before You Begin — OCI Security List
 
-## ⚡ Quick Start
-
-### Step 1 — OCI VCN Security List (Do This First)
-
-Oracle Cloud blocks all incoming traffic at the virtual-network level by default. **Configure your Security List before cloning the repo.**
+> **Do this first, before cloning the repo.** Oracle Cloud blocks all incoming traffic at the virtual-network level by default. Your instance will be unreachable until you open the correct ports.
 
 1. Go to **Compute → Instances** → click your instance.
 2. Click the **Subnet** under "Primary VNIC" → **Default Security List**.
-3. Add **Ingress Rules** for web traffic:
-
-**Option A — Open (simpler):** Add one rule with Source CIDR `0.0.0.0/0`, Protocol TCP, Destination Ports `80,443`.
-
-**Option B — Hardened (recommended):** Add one rule per Cloudflare IPv4 range (OCI does not support comma-separated CIDRs), Protocol TCP, Ports `80,443`. Verify the current list at https://www.cloudflare.com/ips-v4:
-
-```
-173.245.48.0/20   103.21.244.0/22   103.22.200.0/22   103.31.4.0/22
-141.101.64.0/18   108.162.192.0/18  190.93.240.0/20   188.114.96.0/20
-197.234.240.0/22  198.41.128.0/17   162.158.0.0/15    104.16.0.0/13
-104.24.0.0/14     172.64.0.0/13     131.0.72.0/22
-```
-
+3. Add **Ingress Rules**: TCP ports `80` and `443` — either from Cloudflare IP ranges only (recommended), or `0.0.0.0/0` as a simpler open rule.
 4. Add one SSH rule: Source `0.0.0.0/0` (or your management IP), Protocol TCP, Port `22`.
 
-> **Why not just UFW?** OCI Security Lists drop packets at the hypervisor before they ever reach the VM — a harder control than host-level UFW.
+> Full Cloudflare IP range list, hardened VCN setup, and UFW rules → [docs/SECURITY.md](docs/SECURITY.md)
 
-### Step 2 — Cloudflare DNS (Grey Cloud First)
+## ⚡ Quick Start
 
-Before running setup, set your Cloudflare DNS record to **DNS Only (Grey Cloud)**. Caddy must reach Let's Encrypt directly to provision its TLS certificate on first boot. You can switch to **Proxied (Orange Cloud)** after Step 7.
+### 1 — DNS: Grey Cloud First
 
-### Step 3 — Clone & Run Setup
+Set your Cloudflare DNS record to **DNS Only (Grey Cloud)**. Caddy must reach Let's Encrypt directly to provision TLS on first boot. Switch to **Proxied (Orange Cloud)** after Step 5.
+
+### 2 — Clone & Run Setup
 
 ```bash
 git clone https://github.com/killer23d/VaultWarden-OCI.git
 cd VaultWarden-OCI
 chmod +x *.sh
-
-# Automated setup (template-based)
 sudo ./setup.sh --domain vault.yourdomain.com --email admin@yourdomain.com --auto
 ```
 
-### Step 4 — Re-login (Apply Docker Group)
+### 3 — Re-login (Apply Docker Group)
 
-`setup.sh` adds your user to the `docker` group. You **must** start a fresh SSH session before running Docker commands:
+`setup.sh` adds your user to the `docker` group. Start a fresh SSH session before continuing:
 
 ```bash
-exit
-# Re-SSH, then:
+exit  # then re-SSH into the server
 cd VaultWarden-OCI
 ```
 
-### Step 5 — Configure Secrets & Environment
+### 4 — Configure Secrets & Environment
 
 ```bash
-# Set admin_basic_auth_hash, Cloudflare API tokens, SMTP password
-./edit-secrets.sh
-
-# Set CLOUDFLARE_ZONE_ID, SMTP relay settings, etc.
-nano .env
+./edit-secrets.sh   # admin hash, Cloudflare API tokens, SMTP password
+nano .env           # CLOUDFLARE_ZONE_ID, SMTP relay settings, etc.
 ```
 
-> See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for all secrets and `.env` variables.
+> Full variable and secrets reference → [docs/CONFIGURATION.md](docs/CONFIGURATION.md)
 
-### Step 6 — Start Services
+### 5 — Start Services
 
 ```bash
 ./startup.sh
 # or: make start
 ```
 
-### Step 7 — Switch to Proxied & Finish
+### 6 — Switch to Proxied & Finish
 
-1. In Cloudflare, switch your DNS record to **Proxied (Orange Cloud)**.
-2. Set SSL/TLS encryption mode to **Full (Strict)**.
-3. Enable automation (recommended for set-and-forget operation):
-   ```bash
-   sudo ./cron-setup.sh --install
-   ```
-4. Create the break-glass emergency admin:
-   ```bash
-   ./create-breakglass-admin.sh
-   # or: make breakglass-create
-   ```
-5. Verify everything is healthy:
-   ```bash
-   ./health.sh
-   # or: make health
-   ```
+1. In Cloudflare, switch DNS to **Proxied (Orange Cloud)** and set SSL/TLS to **Full (Strict)**.
+2. Enable automation: `sudo ./cron-setup.sh --install`
+3. Create the break-glass admin: `./create-breakglass-admin.sh`
+4. Verify everything is healthy: `./health.sh` (or `make health`)
 
-**🎉 Your VaultWarden is now operational at `https://vault.yourdomain.com`**
+**🎉 Your VaultWarden is live at `https://vault.yourdomain.com`**
 
 ## 📚 Documentation
 
@@ -152,7 +120,7 @@ All technical details live in the `docs/` directory:
 | :-- | :-- |
 | [DEPLOYMENT.md](docs/DEPLOYMENT.md) | Detailed step-by-step deployment guide |
 | [CONFIGURATION.md](docs/CONFIGURATION.md) | Full `.env`, secrets, and template reference |
-| [SECURITY.md](docs/SECURITY.md) | Security hardening, Cloudflare setup, UFW rules |
+| [SECURITY.md](docs/SECURITY.md) | Security hardening, Cloudflare setup, UFW rules, OCI Security Lists |
 | [OPERATIONS.md](docs/OPERATIONS.md) | Day-to-day operations, Makefile reference, cron jobs |
 | [SCRIPTS.md](docs/SCRIPTS.md) | All 14 scripts and 5 libraries documented |
 | [BACKUP-RESTORE.md](docs/BACKUP-RESTORE.md) | Backup strategy, restore procedures, exit codes |
