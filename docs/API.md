@@ -1,28 +1,21 @@
-# API Integration Guide - VaultWarden-OCI
+# API Integration — VaultWarden-OCI
 
-Guide for integrating with VaultWarden API, automating operations, and extending functionality.
+VaultWarden implements the **Bitwarden API**, making it compatible with all official Bitwarden clients and CLIs. This guide covers authentication, common operations, and security practices for programmatic access.
 
-## VaultWarden API Overview
+Related docs: [CONFIGURATION.md](CONFIGURATION.md) · [SECURITY.md](SECURITY.md)
 
-VaultWarden implements the Bitwarden API, providing compatibility with official Bitwarden clients and allowing programmatic access to your password vault.
+---
 
-**API Endpoints**:
-- Identity API: `/identity` - Authentication and tokens
-- API: `/api` - Vault operations
-- Admin API: `/admin` - Administrative functions
-- Web Vault: `/` - Web interface
+## 🔐 Authentication
 
-## Authentication
+### User Access Token (Password Grant)
 
-### Obtaining Access Tokens
-
-**Via Password Grant** (User login):
 ```bash
-curl -X POST https://vault.example.com/identity/connect/token \
+curl -X POST https://vault.yourdomain.com/identity/connect/token \
   -H "Content-Type: application/x-www-form-urlencoded" \
   -d "grant_type=password" \
   -d "username=user@example.com" \
-  -d "password=user_password" \
+  -d "password=your_password" \
   -d "scope=api offline_access" \
   -d "client_id=web" \
   -d "deviceType=3" \
@@ -30,7 +23,8 @@ curl -X POST https://vault.example.com/identity/connect/token \
   -d "deviceIdentifier=$(uuidgen)"
 ```
 
-**Response**:
+Response:
+
 ```json
 {
   "access_token": "eyJhbGc...",
@@ -40,46 +34,54 @@ curl -X POST https://vault.example.com/identity/connect/token \
 }
 ```
 
-**Using Access Token**:
+Use the token:
+
 ```bash
-curl -X GET https://vault.example.com/api/sync \
-  -H "Authorization: Bearer eyJhbGc..."
+curl -X GET https://vault.yourdomain.com/api/sync \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
 ```
 
 ### Admin Authentication
 
-**Admin Token** (configured in secrets):
+The admin panel is protected by two layers:
+
+1. **Caddy basic auth** — `admin_basic_auth_hash` secret (bcrypt hash), prompted in browser
+2. **VaultWarden admin token** — configured in secrets, used for direct API calls
+
 ```bash
-# Admin operations use admin token from secrets
-curl -X GET https://vault.example.com/admin/users \
-  -H "Authorization: Bearer YOUR_ADMIN_TOKEN"
+# Direct admin API call
+curl -X GET https://vault.yourdomain.com/admin/users \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 
-**Admin Basic Auth** (Caddy layer):
+To generate a valid bcrypt hash for `admin_basic_auth_hash`:
+
 ```bash
-# Admin panel protected by basic auth
-curl -u "admin:password" https://vault.example.com/admin
+docker run --rm -it ghcr.io/caddybuilds/caddy-cloudflare:latest caddy hash-password
 ```
 
-## Common API Operations
+---
 
-### Vault Operations
+## 📦 Common Vault Operations
 
-**Sync Vault**:
+### Sync
+
 ```bash
-curl -X GET https://vault.example.com/api/sync \
+curl -X GET https://vault.yourdomain.com/api/sync \
   -H "Authorization: Bearer $ACCESS_TOKEN"
 ```
 
-**Get Ciphers** (vault items):
+### List Ciphers
+
 ```bash
-curl -X GET https://vault.example.com/api/ciphers \
+curl -X GET https://vault.yourdomain.com/api/ciphers \
   -H "Authorization: Bearer $ACCESS_TOKEN"
 ```
 
-**Create Cipher**:
+### Create Cipher
+
 ```bash
-curl -X POST https://vault.example.com/api/ciphers \
+curl -X POST https://vault.yourdomain.com/api/ciphers \
   -H "Authorization: Bearer $ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -93,47 +95,48 @@ curl -X POST https://vault.example.com/api/ciphers \
   }'
 ```
 
-**Update Cipher**:
+### Update / Delete Cipher
+
 ```bash
-curl -X PUT https://vault.example.com/api/ciphers/$CIPHER_ID \
+# Update
+curl -X PUT https://vault.yourdomain.com/api/ciphers/$CIPHER_ID \
   -H "Authorization: Bearer $ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{...}'
-```
 
-**Delete Cipher**:
-```bash
-curl -X DELETE https://vault.example.com/api/ciphers/$CIPHER_ID \
+# Delete
+curl -X DELETE https://vault.yourdomain.com/api/ciphers/$CIPHER_ID \
   -H "Authorization: Bearer $ACCESS_TOKEN"
 ```
 
-## API Security Best Practices
+---
 
-1. **Use HTTPS only**: Always use secure connections
-2. **Rotate tokens regularly**: Implement token rotation
-3. **Limit token scope**: Use minimum required permissions
-4. **Rate limiting**: Implement rate limiting in automation
-5. **Log API access**: Monitor API usage for anomalies
-6. **Secure credentials**: Never hardcode tokens in scripts
-7. **Use service accounts**: Create dedicated API users
-8. **Validate inputs**: Sanitize all user inputs
-9. **Error handling**: Implement proper error handling
-10. **Audit regularly**: Review API access logs
+## 🚫 Rate Limiting
 
-## Rate Limiting
+Caddy applies rate limits to protect sensitive endpoints:
 
-VaultWarden-OCI implements rate limiting via Caddy:
+| Endpoint | Limit |
+| :-- | :-- |
+| Static endpoints | 20 requests / 5 min / IP |
+| API auth endpoints | 10 requests / 5 min / IP |
+| Admin endpoints | 5 requests / 5 min / IP |
 
-- Static endpoints: 20 requests per 5 minutes per IP
-- Admin endpoints: 5 requests per 5 minutes per IP
-- API auth endpoints: 10 requests per 5 minutes per IP
-
-## Further Resources
-
-- **Bitwarden API Documentation**: https://bitwarden.com/help/api/
-- **VaultWarden Wiki**: https://github.com/dani-garcia/vaultwarden/wiki
-- **Official Bitwarden CLI**: https://bitwarden.com/help/cli/
+Fail2ban adds a second layer — repeated auth failures trigger a **Cloudflare Edge WAF ban** (not a local iptables rule, since traffic arrives via the Cloudflare proxy).
 
 ---
 
-This API guide provides comprehensive examples for integrating with VaultWarden-OCI programmatically, automating operations, and extending functionality through various programming languages and tools.
+## ✅ API Security Practices
+
+- Always use HTTPS — HTTP is redirected by Caddy
+- Never hardcode tokens in scripts; load from environment or secrets
+- Use dedicated service accounts rather than personal user accounts
+- Rotate tokens regularly and audit access logs
+- Implement back-off and retry logic in automation to stay within rate limits
+
+---
+
+## 📚 Further Resources
+
+- [Bitwarden API Documentation](https://bitwarden.com/help/api/)
+- [VaultWarden Wiki](https://github.com/dani-garcia/vaultwarden/wiki)
+- [Official Bitwarden CLI](https://bitwarden.com/help/cli/)
