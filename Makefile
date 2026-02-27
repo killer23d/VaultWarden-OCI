@@ -73,7 +73,7 @@ start: up ## Alias for up
 
 down: ## Stop all services gracefully
 	@echo "$(BLUE)Stopping VaultWarden-OCI services...$(NC)"
-	@./startup.sh --down || $(DOCKER_COMP) down
+	@$(DOCKER_COMP) down
 	@echo "$(GREEN)Services stopped successfully!$(NC)"
 
 stop: down ## Alias for down

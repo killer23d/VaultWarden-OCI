@@ -17,6 +17,7 @@ FORCE_RESTART=false
 SKIP_HEALTH_CHECK=false
 BACKGROUND=false
 DRY_RUN=false
+DO_DOWN=false
 
 show_help() {
 cat << 'EOF'
@@ -31,12 +32,14 @@ OPTIONS:
   --skip-health    Skip post-startup health check
   --background     Start services in background (daemon mode)
   --dry-run        Show what would be done without executing
+  --down           Stop all services (delegates to docker compose down)
   --help           Show this help
 
 EXAMPLES:
   ./startup.sh                    # Normal startup
   ./startup.sh --force            # Force restart all services
   ./startup.sh --background       # Start in daemon mode
+  ./startup.sh --down             # Stop all services
 EOF
 }
 
@@ -49,10 +52,19 @@ while [[ $# -gt 0 ]]; do
     --skip-health)   SKIP_HEALTH_CHECK=true; shift ;;
     --background)    BACKGROUND=true; shift ;;
     --dry-run)       DRY_RUN=true; shift ;;
+    --down)          DO_DOWN=true; shift ;;
     --help)          show_help; exit 0 ;;
     *) log_error "Unknown option: $1"; show_help; exit 1 ;;
   esac
 done
+
+# --down: stop all services and exit immediately
+if [[ "$DO_DOWN" == "true" ]]; then
+  log_info "Stopping VaultWarden services..."
+  docker compose down
+  log_success "Services stopped successfully"
+  exit 0
+fi
 
 # Run a command as root if needed (interactive -> sudo, non-interactive -> sudo -n)
 _maybe_sudo() {
