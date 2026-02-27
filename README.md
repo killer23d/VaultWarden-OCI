@@ -58,7 +58,7 @@ In your Cloudflare dashboard set your DNS record to **DNS Only (Grey Cloud)** be
 ```bash
 git clone https://github.com/killer23d/VaultWarden-OCI.git
 cd VaultWarden-OCI
-chmod +x *.sh
+chmod -R +x *.sh
 
 # Automated setup — generates config files from templates
 sudo ./setup.sh --domain vault.yourdomain.com --email admin@yourdomain.com --auto
