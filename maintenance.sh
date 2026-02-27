@@ -99,6 +99,7 @@ BEHAVIOUR OVERVIEW:
 EXAMPLES:
     ./maintenance.sh --comprehensive              # Full maintenance
     ./maintenance.sh --update-dns                 # DNS update ONLY
+    ./maintenance.sh --update-dns --email         # DNS update + notify on change
     ./maintenance.sh --test-email                 # Email diagnostics
     ./maintenance.sh --test-email --verbose       # Email diagnostics (detailed)
     ./maintenance.sh --test-email --dry-run       # Preview email test without sending
@@ -808,13 +809,20 @@ update_dns_record() {
 
     if echo "$response" | jq -e '.success' >/dev/null 2>&1; then
         log_success "DNS updated successfully: $domain -> $current_ip"
-        local admin_email; admin_email=$(get_config_value "ADMIN_EMAIL" "")
-        if [[ -n "$admin_email" ]]; then
-            send_notification_email "VaultWarden IP Address Changed" \
+        # Only send email notification when explicitly requested via --email flag.
+        # During startup the postfix container may not be ready yet, which would
+        # cause a noisy "Failed to send notification email" error.
+        if [[ "$EMAIL_NOTIFY" == "true" ]]; then
+            local admin_email; admin_email=$(get_config_value "ADMIN_EMAIL" "")
+            if [[ -n "$admin_email" ]]; then
+                send_notification_email "VaultWarden IP Address Changed" \
 "Old IP: $dns_ip
 New IP: $current_ip
 Domain: $domain
-DNS record updated automatically."
+DNS record updated automatically." \
+                    && log_info "DNS change notification sent" \
+                    || log_warn "Failed to send DNS change notification email"
+            fi
         fi
     else
         log_error "DNS update failed: $response"; return 1
