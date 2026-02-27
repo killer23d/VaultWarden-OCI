@@ -478,11 +478,6 @@ test_postfix_container() {
         verbose_log "Container status: $(docker compose ps postfix --format 'table {{.Name}}\t{{.Status}}\t{{.Ports}}')"
     else
         log_error "❌ postfix container is not running"
-        # Guard the start attempt: in --dry-run mode we report the real state
-        # (container down) and return 1 intentionally. This means --test-email
-        # --dry-run will show a test failure for this step when postfix is
-        # stopped. That is correct behaviour — it accurately reflects system
-        # state without changing anything.
         if [[ "$DRY_RUN" == "true" ]]; then
             log_info "🔍 [DRY RUN] Would start postfix container"
             return 1
@@ -531,17 +526,30 @@ test_postfix_container() {
 test_fail2ban_integration() {
     log_info "Testing fail2ban integration..."
 
-    if ! docker compose ps fail2ban >/dev/null 2>&1; then
+    # Use docker inspect to check actual running state.
+    # `docker compose ps fail2ban` always exits 0 (it lists config, not state),
+    # so it cannot be used as a running-state guard.
+    local f2b_running
+    f2b_running=$(docker inspect vaultwarden_fail2ban --format '{{.State.Running}}' 2>/dev/null || echo "false")
+    if [[ "$f2b_running" != "true" ]]; then
         log_error "❌ fail2ban container is not running"
         log_info "💡 Start it with: docker compose up -d fail2ban"
         return 1
     fi
+    log_success "✅ fail2ban container is running"
 
-    if docker compose exec -T fail2ban fail2ban-client status >/dev/null 2>&1; then
+    # crazymax/fail2ban uses a non-standard PATH; invoke fail2ban-client via
+    # `sh -c` to ensure the shell resolves it correctly. Use `docker exec`
+    # directly (by container name) — more reliable for host-network containers
+    # than `docker compose exec` which requires a compose project context.
+    local f2b_status_output
+    if f2b_status_output=$(docker exec vaultwarden_fail2ban sh -c 'fail2ban-client status' 2>&1); then
         log_success "✅ fail2ban is responding"
-        verbose_log "fail2ban jails: $(docker compose exec -T fail2ban fail2ban-client status | grep "Jail list" || echo "Status check passed")"
+        verbose_log "fail2ban status: $f2b_status_output"
     else
-        log_error "❌ fail2ban is not responding"
+        log_error "❌ fail2ban is not responding (fail2ban-client status failed)"
+        log_info "🔍 Debug: docker exec vaultwarden_fail2ban sh -c 'fail2ban-client status'"
+        log_info "🔍 Logs:  docker compose logs fail2ban"
         return 1
     fi
 
@@ -557,22 +565,24 @@ test_fail2ban_integration() {
         verbose_log "fail2ban network mode: ${f2b_netmode:-unknown} -> testing SMTP via ${smtp_host}:${smtp_port}"
     fi
 
-    if docker compose exec -T fail2ban sh -lc "nc -zv $smtp_host $smtp_port" >/dev/null 2>&1; then
+    if docker exec vaultwarden_fail2ban sh -c "nc -zv $smtp_host $smtp_port" >/dev/null 2>&1; then
         log_success "✅ fail2ban can reach postfix SMTP (${smtp_host}:${smtp_port})"
     else
         log_error "❌ fail2ban cannot reach postfix SMTP (${smtp_host}:${smtp_port})"
+        log_info "🔍 Debug: docker exec vaultwarden_fail2ban sh -c 'nc -zv ${smtp_host} ${smtp_port}'"
         return 1
     fi
 
-    if docker compose exec -T fail2ban test -f /data/fail2ban/action.d/smtp.conf; then
+    if docker exec vaultwarden_fail2ban sh -c 'test -f /data/fail2ban/action.d/smtp.conf'; then
         log_success "✅ SMTP action configuration found"
-        if docker compose exec -T fail2ban grep -Eq "smtplib\.SMTP\('postfix', 587\)|smtplib\.SMTP\('127\.0\.0\.1', 587\)" /data/fail2ban/action.d/smtp.conf; then
+        if docker exec vaultwarden_fail2ban sh -c \
+            'grep -Eq "smtplib\.SMTP\(.(postfix|127\.0\.0\.1)., 587\)" /data/fail2ban/action.d/smtp.conf'; then
             log_success "✅ SMTP action correctly configured (postfix or localhost)"
         else
             log_warn "⚠️  SMTP action may still reference old msmtpd configuration"
         fi
     else
-        log_error "❌ SMTP action configuration missing"
+        log_error "❌ SMTP action configuration missing: /data/fail2ban/action.d/smtp.conf"
         return 1
     fi
     return 0
@@ -652,10 +662,6 @@ If you received this message, email delivery is working correctly."
 run_email_diagnostics() {
     log_header "VaultWarden Email Diagnostic"
 
-    # Note on --dry-run behaviour: if postfix is not running, test_postfix_container
-    # returns 1 even in dry-run mode. This is intentional — dry-run reports real
-    # system state without making changes. A 1/4 result means the system has a
-    # genuine issue, not a false alarm from the dry-run itself.
     local test_results=()
     local test_names=("postfix Container" "fail2ban Integration" "Host Script Email" "End-to-End Email")
 
@@ -809,9 +815,6 @@ update_dns_record() {
 
     if echo "$response" | jq -e '.success' >/dev/null 2>&1; then
         log_success "DNS updated successfully: $domain -> $current_ip"
-        # Only send email notification when explicitly requested via --email flag.
-        # During startup the postfix container may not be ready yet, which would
-        # cause a noisy "Failed to send notification email" error.
         if [[ "$EMAIL_NOTIFY" == "true" ]]; then
             local admin_email; admin_email=$(get_config_value "ADMIN_EMAIL" "")
             if [[ -n "$admin_email" ]]; then
@@ -945,8 +948,6 @@ main() {
     fi
 
     # ---- Email diagnostic: self-contained sub-command ----
-    # Acquires no routine lock; a --test-email run cannot block or be blocked
-    # by a concurrent cron-driven --comprehensive run.
     if [[ "$TEST_EMAIL" == "true" ]]; then
         if ! load_env_file; then log_error "Failed to load configuration"; exit 1; fi
         run_email_diagnostics
