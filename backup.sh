@@ -30,11 +30,32 @@ LIST_BACKUPS=false
 DRY_RUN=false
 FULL_VERIFICATION=false
 
-# FIX [ISSUE 4]: Scope lock to current UID so no other local user can pre-create
-# the directory and permanently block backups (local DoS).
-# Previously: /tmp/vaultwarden-backup.lock  (shared, world-writable /tmp)
-# Now:        /tmp/vaultwarden-backup-${UID}.lock (per-user, cannot be squatted)
-LOCKDIR="/tmp/vaultwarden-backup-${UID}.lock"
+# FIX [BUG-11]: Use flock(1) on a plain file instead of mkdir-based lock.
+# A mkdir lock is NOT released on SIGKILL (trap does not fire), permanently
+# blocking all future cron backups until manual cleanup.
+# flock holds an advisory lock on an open file descriptor; the kernel
+# releases it automatically when the process exits for ANY reason, including
+# SIGKILL, OOM kill, or power loss — no trap required.
+#
+# Lock file is scoped to UID to prevent cross-user interference (same
+# rationale as the previous LOCKDIR design).
+# /var/tmp is used instead of /tmp to remain visible across shells even
+# under systemd PrivateTmp= namespacing.
+LOCK_FILE="/var/tmp/vaultwarden-backup-${UID}.lock"
+LOCK_FD=9  # Arbitrary unused file descriptor number
+
+acquire_lock() {
+    # Open (or create) the lock file on FD 9, then attempt a non-blocking
+    # exclusive lock. -n means "fail immediately if already locked" so
+    # cron jobs never queue up behind each other.
+    eval "exec ${LOCK_FD}>\"${LOCK_FILE}\""
+    if ! flock -n "$LOCK_FD"; then
+        log_error "Another backup is already running (lock: $LOCK_FILE). Exiting."
+        exit 1
+    fi
+    # Write PID into the lock file for diagnostics (e.g. kill $(cat lockfile))
+    echo "$$" >&"$LOCK_FD"
+}
 
 # Safe cleanup registry — indexed arrays, never eval.
 CLEANUP_FILES=()
@@ -446,12 +467,10 @@ rclone_sync_offsite() {
 }
 
 main() {
-    # FIX [ISSUE 4]: Lock scoped to current UID prevents cross-user DoS.
-    if ! mkdir "$LOCKDIR" 2>/dev/null; then
-        log_error "Backup already running (lock: $LOCKDIR)"
-        exit 1
-    fi
-    trap 'rmdir "$LOCKDIR" 2>/dev/null || true; perform_cleanup' EXIT
+    # FIX [BUG-11]: flock-based lock — kernel releases fd on any process exit,
+    # including SIGKILL. No stale lock directory can block future cron runs.
+    acquire_lock
+    trap 'perform_cleanup' EXIT
 
     if [[ $LIST_BACKUPS == true ]]; then list_backups; exit 0; fi
 
