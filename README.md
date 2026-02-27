@@ -26,7 +26,7 @@ This is a **template-based, hardened deployment** designed specifically for smal
 - **Unified Libraries**: 5 shared libraries (common, Docker, crypto, security, backup_utils) for consistent functionality
 - **Dynamic DNS**: Automatic Cloudflare DNS record updates
 - **Edge Security**: Cloudflare proxy with Fail2ban integration for global IP blocking
-- **Firewall Hardening**: UFW configured with Cloudflare IP validation and safe fallback
+- **Firewall Hardening**: UFW configured with Cloudflare IP restriction and safe fallback
 - **Encrypted Secrets**: Age + SOPS for industry-standard secrets management
 - **Automated Operations**: Comprehensive cron jobs for backups, updates, and maintenance
 - **Emergency Access**: Break-glass admin for OCI serial console recovery
@@ -46,10 +46,16 @@ git clone https://github.com/killer23d/VaultWarden-OCI.git
 cd VaultWarden-OCI
 chmod +x *.sh
 
-# 2. Run automated setup (uses template-based approach)
+# 2. IMPORTANT: Cloudflare DNS staging (do this BEFORE running setup)
+#    In your Cloudflare dashboard, ensure your DNS record is set to
+#    DNS Only (Grey Cloud — NOT orange/proxied). Caddy must be able to
+#    reach Let's Encrypt directly to provision its TLS certificate on
+#    first boot. You can enable the proxy (orange cloud) after step 6.
+
+# 3. Run automated setup (uses template-based approach)
 sudo ./setup.sh --domain vault.yourdomain.com --email admin@yourdomain.com --auto
 
-# 3. Log out and log back in
+# 4. Log out and log back in
 #    setup.sh adds your user to the docker group. You must start a fresh
 #    session for that group membership to take effect before running any
 #    docker or make commands.
@@ -57,24 +63,27 @@ exit
 # Re-SSH into your instance, then cd back into the project directory:
 cd VaultWarden-OCI
 
-# 4. Configure secrets (CRITICAL - set admin_basic_auth_hash and API tokens)
+# 5. Configure secrets (CRITICAL - set admin_basic_auth_hash and API tokens)
 ./edit-secrets.sh
 
-# 5. Configure environment (.env file - set CLOUDFLARE_ZONE_ID, etc.)
+# 6. Configure environment (.env file - set CLOUDFLARE_ZONE_ID, etc.)
 nano .env
 
-# 6. Start services
+# 7. Start services
 ./startup.sh
 # Or use Makefile: make start
 
-# 7. Setup automation (recommended for set-and-forget operation)
+# 8. Switch Cloudflare record to Proxied (Orange Cloud) and set
+#    SSL/TLS encryption mode to Full (Strict) in the Cloudflare dashboard.
+
+# 9. Setup automation (recommended for set-and-forget operation)
 sudo ./cron-setup.sh --install
 
-# 8. Create break-glass admin for emergency access (RECOMMENDED)
+# 10. Create break-glass admin for emergency access (RECOMMENDED)
 ./create-breakglass-admin.sh
 # Or use Makefile: make breakglass-create
 
-# 9. Verify deployment
+# 11. Verify deployment
 ./health.sh
 # Or use Makefile: make health
 ```
@@ -152,7 +161,7 @@ All configuration files are managed through templates for easier maintenance:
 ```
  Cloudflare Edge (Proxy, WAF, DNS)
        ↑ ↓
- Host Firewall (UFW - Cloudflare IPs + SSH only)
+ Host Firewall (UFW - Cloudflare IPs only for 80/443 + SSH only)
        ↑ ↓
 ┌─────────────────────────────────────────┐
 │      Template Management Layer          │
@@ -335,6 +344,7 @@ All scripts in this project have been hardened with the following guarantees:
 - **`--force` flag contract** — all scripts call `./startup.sh --force` (the confirmed supported flag); the invalid `--force-restart` flag has been removed everywhere
 - **Verified backup file resolution** — `restore.sh` sorts by modification time (`find -printf '%T@'`), not lexicographic filename order, to reliably find the newest backup regardless of filename format
 - **Registered cleanup registry** — temp files and directories are tracked in a `CLEANUP_DIRS`/`CLEANUP_FILES` array and cleaned up via a single `trap … EXIT` handler, preventing silent trap overwrites
+- **SIGKILL-safe backup lock** — `backup.sh` uses `flock` on a file descriptor instead of a `mkdir`-based lock; the kernel releases the lock automatically on any process exit, including SIGKILL and OOM kill
 
 ### Current Security Improvements
 
@@ -345,6 +355,10 @@ All scripts in this project have been hardened with the following guarantees:
     - Advanced retry logic with exponential backoff
     - Comprehensive regex-based filtering (no external dependencies)
     - Rate limiting detection and response
+- **Cloudflare-Restricted UFW Rules**:
+    - Ports 80 and 443 are restricted to Cloudflare's published IPv4 ranges at the UFW layer
+    - SSH remains unrestricted (direct connection)
+    - A hardcoded fallback IP list is used if the live Cloudflare fetch fails, so setup never requires network access to Cloudflare
 - **Secure Startup & Secrets**:
     - `startup.sh` enforces `umask 077` during secrets generation (files created with 600 permissions)
     - Atomic file creation avoids race conditions
@@ -376,7 +390,7 @@ All scripts in this project have been hardened with the following guarantees:
     - **Cloudflare-only blocking for web**: All web-facing jails use CF API only (iptables ineffective due to proxy)
     - **Local iptables for SSH**: SSH jail uses iptables since it's direct connection
     - Automatic IP list updates with safe firewall integration
-- **Host Firewall**: UFW configured with Cloudflare IP validation and safe fallback
+- **Host Firewall**: UFW configured with Cloudflare IP restriction — ports 80/443 accept traffic from Cloudflare ranges only
 - **HTTPS Enforcement**: Automatic HTTPS via Caddy with Let's Encrypt
 - **Security Headers**: Comprehensive security headers (HSTS, CSP, etc.)
 - **Rate Limiting**: API and admin endpoint protection with forensic logging
@@ -392,11 +406,18 @@ All scripts in this project have been hardened with the following guarantees:
 - **Safe Database Operations**: WAL checkpoints for live snapshots
 - **Full Verification Mode**: Optional end-to-end recoverability testing
 - **Conservative Space Management**: Disk space validation before operations
+- **SIGKILL-Safe Locking**: `flock`-based backup lock releases automatically on any process exit
 - **Daily**: Encrypted database backups (retention: 14 days)
 - **Weekly**: Encrypted full system backups (retention: 30 days)
 - **Manual**: Emergency recovery kits (retention: 90 days)
 - **Offsite**: Automatic rclone sync to configured remote storage
 - **Verification**: Pre-encryption integrity checks and optional full verification
+
+> **Restore requires your Age private key.** Full and database backups are
+> encrypted with your Age key (`secrets/keys/age-key.txt`). Emergency backups
+> include the key inside the archive. For full and db backup types, ensure
+> you have a separate copy of `secrets/keys/age-key.txt` before restoring to
+> a new server. See [BACKUP-RESTORE.md](docs/BACKUP-RESTORE.md) for details.
 
 ### Backup Operations
 
@@ -453,17 +474,53 @@ make restore                   # Interactive restore
 
 ### 1. Mandatory Pre-Flight Configuration
 
-#### OCI VCN Security Lists (Opening the Firewall)
-Even though `setup.sh` configures the local Ubuntu `ufw` firewall automatically, Oracle Cloud blocks all incoming traffic by default at the virtual network level. You must open ports 80 and 443 in the OCI Web Console:
+#### OCI VCN Security Lists (Restrict to Cloudflare IPs Only)
+
+Oracle Cloud blocks all incoming traffic by default at the virtual network level.
+Do **NOT** open ports 80/443 to `0.0.0.0/0`. Instead, restrict ingress to
+Cloudflare's published IP ranges. This enforces the Cloudflare-only web
+posture at the network layer — packets from non-Cloudflare sources are
+dropped before they reach the VM.
+
 1. Go to **Compute** → **Instances** → Click your instance.
-2. Click on the **Subnet** linked under "Primary VNIC".
-3. Click the **Default Security List** for that subnet.
-4. Add two **Ingress Rules**:
-   - Source: `0.0.0.0/0`, Protocol: `TCP`, Destination Port: `80`
-   - Source: `0.0.0.0/0`, Protocol: `TCP`, Destination Port: `443`
+2. Click the **Subnet** under "Primary VNIC" → **Default Security List**.
+3. Add **Ingress Rules** for each Cloudflare IPv4 range below.
+   - Protocol: `TCP`, Destination Ports: `80,443`
+   - Source: one CIDR per rule (OCI does not support comma-separated CIDRs)
+
+**Cloudflare IPv4 ranges** (verify current list at https://www.cloudflare.com/ips-v4):
+
+```
+173.245.48.0/20
+103.21.244.0/22
+103.22.200.0/22
+103.31.4.0/22
+141.101.64.0/18
+108.162.192.0/18
+190.93.240.0/20
+188.114.96.0/20
+197.234.240.0/22
+198.41.128.0/17
+162.158.0.0/15
+104.16.0.0/13
+104.24.0.0/14
+172.64.0.0/13
+131.0.72.0/22
+```
+
+4. Add one rule for **SSH**:
+   - Source: your management IP (or `0.0.0.0/0` if dynamic), Protocol: `TCP`, Port: `22`
+
+> **Why not UFW for this?** OCI VCN Security Lists drop packets at the hypervisor
+> level before they reach the VM's network stack — this is a harder control than
+> host-level UFW. UFW also restricts ports 80/443 to Cloudflare IPs (enforced by
+> `setup.sh`), giving defence-in-depth, but the VCN layer is the primary barrier.
+
+> **Keeping the list current:** Cloudflare rarely changes its IP ranges. Subscribe
+> to https://www.cloudflare.com/ips/ for update notifications.
 
 #### Cloudflare Staging (Grey Cloud First)
-Because Caddy needs to provision a Let's Encrypt certificate during its very first boot, it must be able to solve the HTTP challenge. 
+Because Caddy needs to provision a Let's Encrypt certificate during its very first boot, it must be able to solve the HTTP challenge.
 - During initial setup, ensure your DNS record in Cloudflare is set to **DNS Only (Grey Cloud)**.
 - *After* `make start` runs successfully and you can access your vault, you can switch the record to **Proxied (Orange Cloud)** and change your SSL/TLS encryption mode to **Full (Strict)**.
 
@@ -682,6 +739,7 @@ docker compose exec fail2ban fail2ban-regex /var/log/vaultwarden/vaultwarden.log
 - ✅ Validate Cloudflare API tokens work correctly
 - ✅ Test email functionality: `make test-email`
 - ✅ Run comprehensive health check: `./health.sh` or `make health`
+- ✅ Verify OCI VCN Security Lists restrict ports 80/443 to Cloudflare IPs only
 
 ### Ongoing Operations
 
@@ -694,6 +752,7 @@ docker compose exec fail2ban fail2ban-regex /var/log/vaultwarden/vaultwarden.log
 - ✅ Test email notifications regularly: `make test-email`
 - ✅ Understand Cloudflare-only blocking for web traffic (iptables removed)
 - ✅ Review update.sh exit codes in cron output (0=success, 1=failure, 2=health issues)
+- ✅ Periodically verify Cloudflare IP ranges: https://www.cloudflare.com/ips-v4
 
 ### Template Security
 

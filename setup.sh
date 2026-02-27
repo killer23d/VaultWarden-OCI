@@ -96,19 +96,73 @@ if [[ -z "$DOMAIN" ]] || [[ -z "$ADMIN_EMAIL" ]]; then show_help; exit 1; fi
 if ! validate_domain_secure "$DOMAIN"; then log_error "Invalid domain format"; exit 1; fi
 if ! validate_email_secure "$ADMIN_EMAIL"; then log_error "Invalid email format"; exit 1; fi
 
+# FIX [BUG-05]: Use jq (already a required dep) instead of grep|cut to parse
+# the GitHub API response. Add semver pattern validation so that malformed API
+# responses (HTML error pages, empty strings, truncated JSON) produce a clear
+# error with a version-pin hint rather than silently constructing an invalid
+# download URL and installing a corrupt binary to /usr/local/bin/sops.
+#
 # Resolve a GitHub latest release tag. Usage: resolve_github_latest OWNER/REPO
 # Returns the tag string (e.g. "v3.9.4") or exits 1 on failure.
 resolve_github_latest() {
     local repo="$1"
     local tag
+
     tag=$(curl -fsSL "https://api.github.com/repos/${repo}/releases/latest" \
-        | grep '"tag_name"' \
-        | cut -d'"' -f4)
-    if [[ -z "$tag" ]]; then
-        log_error "Failed to resolve latest release for ${repo} — check network or set version pin at top of script"
+        | jq -r '.tag_name // empty')
+
+    # Validate the result looks like a semver tag before using it to
+    # construct a download URL. Malformed API responses produce empty
+    # string or HTML, both of which fail this guard.
+    if [[ -z "$tag" ]] || [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9] ]]; then
+        log_error "Could not resolve a valid release tag for ${repo}."
+        log_error "Set SOPS_VERSION=vX.Y.Z at the top of setup.sh to bypass."
         return 1
     fi
+
     echo "$tag"
+}
+
+# FIX [BUG-04]: Replace curl|sh Docker install with the direct apt-repo method.
+# The convenience script (get.docker.com) is executed as root without any
+# integrity check, and does not support Ubuntu 24.10 (Oracular). This function:
+#   - Adds Docker's official GPG key (fingerprint from docs.docker.com).
+#   - Pins the apt source to 'noble' (24.04 LTS), which is the correct
+#     repository for Ubuntu 24.10 — Docker does not publish an 'oracular' repo,
+#     but noble packages are ABI-compatible and work correctly on 24.10.
+#   - Installs docker-ce, docker-ce-cli, containerd.io, and the Compose plugin
+#     as explicit, auditable apt packages.
+install_docker_apt() {
+    log_info "Installing Docker via official apt repository (noble codename)..."
+
+    # Add Docker's official GPG key
+    # Fingerprint: 9DC8 5822 9FC7 DD38 854A  E2D8 8D81 803C 0EBF CD88
+    # Verify at: https://docs.docker.com/engine/install/ubuntu/#install-using-the-repository
+    install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+        | gpg --dearmor -o /etc/apt/keyrings/docker.gpg || return 1
+    chmod a+r /etc/apt/keyrings/docker.gpg
+
+    # Use 'noble' (24.04 LTS) codename for Ubuntu 24.10 — Docker does not
+    # publish a 24.10 (oracular) repository; noble packages run correctly
+    # on 24.10 (same ABI, tested upstream).
+    echo \
+      "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+https://download.docker.com/linux/ubuntu noble stable" \
+      | tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+    apt-get update -qq || return 1
+    apt-get install -y \
+        docker-ce \
+        docker-ce-cli \
+        containerd.io \
+        docker-buildx-plugin \
+        docker-compose-plugin || return 1
+
+    systemctl enable --now docker || return 1
+    usermod -aG docker "$(get_real_user)" || return 1
+    log_success "Docker installed via apt repository"
+    return 0
 }
 
 install_dependencies() {
@@ -134,12 +188,9 @@ install_dependencies() {
         systemctl start haveged || log_warn "Failed to start haveged"
     fi
 
+    # FIX [BUG-04]: Use apt-repo installation instead of curl|sh.
     if ! command -v docker >/dev/null 2>&1; then
-        curl -fsSL https://get.docker.com -o get-docker.sh
-        sh get-docker.sh || return 1
-        rm -f get-docker.sh
-        systemctl enable --now docker || return 1
-        usermod -aG docker "$(get_real_user)" || return 1
+        install_docker_apt || return 1
     fi
 
     if ! docker compose version >/dev/null 2>&1; then
@@ -442,6 +493,17 @@ set_script_permissions() {
     return 0
 }
 
+# FIX [BUG-07]: Restrict UFW web ports to Cloudflare IP ranges only.
+# The previous implementation opened ports 80 and 443 to 0.0.0.0/0, which
+# silently violated the Cloudflare-only security posture described in the README:
+# any attacker who knew the server IP could bypass Cloudflare entirely and hit
+# Caddy directly, including brute-forcing the admin endpoint without Fail2Ban's
+# Cloudflare API blocks having any effect.
+#
+# This function restricts ingress on 80/443 to Cloudflare's published IPv4 ranges.
+# A hardcoded fallback list is used if the live fetch fails, so setup is never
+# network-gated on Cloudflare availability.
+# SSH remains unrestricted because it is a direct (non-proxied) connection.
 setup_firewall() {
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would configure firewall"; return 0; fi
 
@@ -449,21 +511,61 @@ setup_firewall() {
     ssh_port=$(awk '/^Port/ {print $2; exit}' /etc/ssh/sshd_config 2>/dev/null)
     ssh_port=${ssh_port:-22}
 
-    # Idempotency: only skip if ALL three required rules are already present and active.
-    # Checking SSH port here is critical — returning early without it would lock the admin out.
+    # Cloudflare IPv4 ranges — hardcoded fallback list.
+    # Canonical source: https://www.cloudflare.com/ips-v4
+    # Last verified: 2025. Run maintenance.sh to refresh if needed.
+    local cf_ips_fallback=(
+        "173.245.48.0/20"
+        "103.21.244.0/22"
+        "103.22.200.0/22"
+        "103.31.4.0/22"
+        "141.101.64.0/18"
+        "108.162.192.0/18"
+        "190.93.240.0/20"
+        "188.114.96.0/20"
+        "197.234.240.0/22"
+        "198.41.128.0/17"
+        "162.158.0.0/15"
+        "104.16.0.0/13"
+        "104.24.0.0/14"
+        "172.64.0.0/13"
+        "131.0.72.0/22"
+    )
+
+    # Attempt live fetch; fall back to hardcoded list on any failure.
+    local cf_ips=()
+    local fetched
+    if fetched=$(curl -fsSL --max-time 10 https://www.cloudflare.com/ips-v4 2>/dev/null) \
+       && [[ -n "$fetched" ]]; then
+        mapfile -t cf_ips <<< "$fetched"
+        log_info "Cloudflare IP list fetched live (${#cf_ips[@]} ranges)"
+    else
+        cf_ips=("${cf_ips_fallback[@]}")
+        log_warn "Could not fetch live Cloudflare IPs — using hardcoded fallback list"
+    fi
+
+    # Idempotency: skip firewall configuration only if ALL required rules are
+    # already present and active (SSH + at least one Cloudflare-scoped rule).
     if ufw status | grep -q "Status: active" && \
-       ufw status | grep -q "80/tcp" && \
-       ufw status | grep -q "443/tcp" && \
-       ufw status | grep -q "${ssh_port}/tcp"; then
-        log_success "Firewall already configured and active"
+       ufw status | grep -q "${ssh_port}/tcp" && \
+       ufw status | grep -qF "173.245.48.0/20"; then
+        log_success "Firewall already configured and active (Cloudflare-scoped)"
         return 0
     fi
 
+    # SSH: direct connection, not proxied — allow from any source.
     ufw allow "${ssh_port}/tcp"
-    ufw allow 80/tcp
-    ufw allow 443/tcp
+
+    # Web ports: Cloudflare-only.
+    local cidr
+    for cidr in "${cf_ips[@]}"; do
+        [[ -z "$cidr" ]] && continue
+        ufw allow from "$cidr" to any port 80  proto tcp
+        ufw allow from "$cidr" to any port 443 proto tcp
+    done
 
     ufw status | grep -q "Status: active" || echo "y" | ufw enable
+    log_success "Firewall configured: SSH open, web ports restricted to Cloudflare IPs"
     return 0
 }
 
@@ -506,7 +608,9 @@ show_post_install_summary() {
     local mode="${1:-interactive}"
     [[ "$mode" == "interactive" ]] && clear
 
-    echo -e "${COLOR_RED}"
+    # FIX [BUG-10]: Replace echo -e with printf. The README states echo -e was
+    # removed everywhere in favour of printf; this was the one remaining violation.
+    printf '%s' "${COLOR_RED}"
     cat << "EOF"
     ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !
     !                                                             !
@@ -514,25 +618,25 @@ show_post_install_summary() {
     !                                                             !
     ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !
 EOF
-    echo -e "${COLOR_RESET}"
+    printf '%s' "${COLOR_RESET}"
 
     local age_pub_key=""
     if [[ -f "secrets/keys/age-key.txt" ]]; then
         age_pub_key=$(grep "public key" "secrets/keys/age-key.txt" | cut -d: -f2 | tr -d ' ' || echo "MISSING")
-        echo -e "SOPS Age Public Key:      ${COLOR_GREEN}${age_pub_key}${COLOR_RESET}"
-        echo -e "SOPS Age Private Key:     ${COLOR_RED}Cat secrets/keys/age-key.txt to view (BACKUP THIS FILE!)${COLOR_RESET}"
+        printf 'SOPS Age Public Key:      %s%s%s\n' "${COLOR_GREEN}" "${age_pub_key}" "${COLOR_RESET}"
+        printf 'SOPS Age Private Key:     %sCat secrets/keys/age-key.txt to view (BACKUP THIS FILE!)%s\n' "${COLOR_RED}" "${COLOR_RESET}"
     fi
 
-    echo -e "\n${COLOR_CYAN}--- EXTERNAL CONFIGURATION CHECKLIST (Verify You Have These) ---${COLOR_RESET}"
-    echo -e "1. [ ] Domain Name:          ${COLOR_GREEN}${DOMAIN:-Not Set}${COLOR_RESET}"
-    echo -e "2. [ ] Admin Email:          ${COLOR_GREEN}${ADMIN_EMAIL:-Not Set}${COLOR_RESET}"
-    echo -e "\n${COLOR_CYAN}--- NEXT STEPS ---${COLOR_RESET}"
-    echo -e "1. Run ${COLOR_YELLOW}./edit-secrets.sh${COLOR_RESET} to input external secrets."
-    echo -e "2. Run ${COLOR_YELLOW}make up${COLOR_RESET} to start the application."
-    echo -e "3. Run ${COLOR_YELLOW}sudo ./cron-setup.sh --install${COLOR_RESET} to setup automation."
+    printf '\n%s--- EXTERNAL CONFIGURATION CHECKLIST (Verify You Have These) ---%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
+    printf '1. [ ] Domain Name:          %s%s%s\n' "${COLOR_GREEN}" "${DOMAIN:-Not Set}" "${COLOR_RESET}"
+    printf '2. [ ] Admin Email:          %s%s%s\n' "${COLOR_GREEN}" "${ADMIN_EMAIL:-Not Set}" "${COLOR_RESET}"
+    printf '\n%s--- NEXT STEPS ---%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
+    printf '1. Run %s./edit-secrets.sh%s to input external secrets.\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
+    printf '2. Run %smake up%s to start the application.\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
+    printf '3. Run %ssudo ./cron-setup.sh --install%s to setup automation.\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
 
     if [[ "$mode" == "interactive" ]]; then
-        echo -e "\n${COLOR_RED}!!! PRESS ENTER TO CLEAR THIS SCREEN AND FINISH !!!${COLOR_RESET}"
+        printf '\n%s!!! PRESS ENTER TO CLEAR THIS SCREEN AND FINISH !!!%s\n' "${COLOR_RED}" "${COLOR_RESET}"
         read -r
         clear
     fi
