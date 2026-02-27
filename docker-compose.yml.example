@@ -225,7 +225,7 @@ services:
   postfix:
     container_name: vaultwarden_postfix
     # boky/postfix 4.3.0 — latest stable
-    image: boky/postfix:${POSTFIX_VERSION:-4.3.0}
+    image: boky/postfix:${POSTFIX_VERSION:-5.1.0}
     restart: unless-stopped
 
     environment:
