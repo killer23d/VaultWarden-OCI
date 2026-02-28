@@ -614,8 +614,14 @@ check_configuration() {
     
     if [[ ! -f "secrets/secrets.yaml" ]]; then
         config_issues+=("Missing secrets.yaml file")
-    elif ! ./edit-secrets.sh --test >/dev/null 2>&1; then
-        config_issues+=("Secrets decryption failed")
+    else
+        # FIX: --test is not a valid edit-secrets.sh flag (unknown options exit 1).
+        # Use --list instead: it runs check_prerequisites + validate_secrets
+        # (which performs the actual SOPS decryption test) then lists key names
+        # to stdout (redirected to /dev/null). Exits 0 on success, 1 on failure.
+        if ! ./edit-secrets.sh --list >/dev/null 2>&1; then
+            config_issues+=("Secrets decryption failed")
+        fi
     fi
     
     docker compose config >/dev/null 2>&1 || config_issues+=("Docker Compose configuration error")
@@ -638,8 +644,11 @@ check_security_status() {
     health_log_info "Checking security status..."
     
     local security_issues=()
-    
-    docker compose exec -T fail2ban fail2ban-client status >/dev/null 2>&1 || \
+
+    # FIX: crazymax/fail2ban has a non-standard PATH; fail2ban-client must be
+    # invoked via sh -c. Use docker exec by container name — more reliable
+    # than docker compose exec for host-network containers.
+    docker exec vaultwarden_fail2ban sh -c 'fail2ban-client status' >/dev/null 2>&1 || \
         security_issues+=("fail2ban not responding")
     
     local age_key_file="${DEFAULT_AGE_KEY_FILE:-secrets/keys/age-key.txt}"
@@ -744,6 +753,13 @@ main() {
     [[ "$COMPREHENSIVE" == "true" ]] && health_log_info "Running comprehensive health checks..." || \
         health_log_info "Running basic health checks..."
     
+    # FIX: Disable exit-on-error for the check loop.
+    # With set -e active, any check function returning non-zero would abort the
+    # entire script via `cmd; arr+=($?)` before the result is captured, skipping
+    # all remaining checks and the summary report.
+    # Individual check failures are non-fatal by design — we want the full picture.
+    set +e
+
     local check_results=()
     
     check_container_status; check_results+=($?)
