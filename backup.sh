@@ -136,8 +136,15 @@ get_verification_mode() {
     echo "$mode"
 }
 
-# Use the already-pulled vaultwarden image to verify SQLite integrity.
-# No internet required — avoids alpine/apk add sqlite on every run.
+# Verify SQLite integrity using alpine+sqlite.
+#
+# The vaultwarden image (ghcr.io/dani-garcia/vaultwarden) is a minimal
+# Rust binary — it has NO sqlite3 CLI. Using --entrypoint sqlite3 on that
+# image silently fails (binary not found), leaving $result empty and causing
+# every backup to abort with "SQLite verification FAILED: ".
+#
+# Use alpine:latest with apk add sqlite instead — the same pattern used in
+# maintenance.sh — which is guaranteed to have sqlite3 available.
 verify_sqlite_integrity() {
     local db_file="$1"
     local verification_mode="${2:-quick_check}"
@@ -155,10 +162,14 @@ verify_sqlite_integrity() {
     dir_name=$(dirname  "$db_file")
     file_name=$(basename "$db_file")
 
-    result=$(docker compose run --rm -T \
+    # Run sqlite3 inside a throwaway alpine container.
+    # Mount the directory read-only; apk output is suppressed; sqlite3
+    # errors surface normally so failures are visible in backup logs.
+    result=$(docker run --rm \
         -v "${dir_name}:/check:ro" \
-        --entrypoint sqlite3 \
-        vaultwarden "/check/${file_name}" "${check_cmd}" 2>/dev/null) || true
+        alpine:latest \
+        sh -c "apk add --no-cache sqlite >/dev/null 2>&1 && \
+               sqlite3 /check/${file_name} '${check_cmd}'" 2>&1) || true
 
     if [[ "$result" == "ok" ]]; then
         log_success "SQLite integrity check passed"
