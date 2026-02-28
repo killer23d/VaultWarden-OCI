@@ -145,6 +145,12 @@ get_verification_mode() {
 #
 # Use alpine:latest with apk add sqlite instead — the same pattern used in
 # maintenance.sh — which is guaranteed to have sqlite3 available.
+#
+# NOTE: do NOT use :ro on the volume mount. VaultWarden uses SQLite WAL mode;
+# even read-only PRAGMA queries require sqlite3 to create/open a -shm
+# (shared memory) file in the same directory. :ro blocks that at the kernel
+# level, causing SQLITE_CANTOPEN (error 14) before any check runs.
+# The container is throwaway (--rm); the -shm file is ephemeral and harmless.
 verify_sqlite_integrity() {
     local db_file="$1"
     local verification_mode="${2:-quick_check}"
@@ -163,10 +169,10 @@ verify_sqlite_integrity() {
     file_name=$(basename "$db_file")
 
     # Run sqlite3 inside a throwaway alpine container.
-    # Mount the directory read-only; apk output is suppressed; sqlite3
-    # errors surface normally so failures are visible in backup logs.
+    # Mount WITHOUT :ro so SQLite WAL mode can create the -shm file it needs.
+    # apk output is suppressed; sqlite3 errors surface normally.
     result=$(docker run --rm \
-        -v "${dir_name}:/check:ro" \
+        -v "${dir_name}:/check" \
         alpine:latest \
         sh -c "apk add --no-cache sqlite >/dev/null 2>&1 && \
                sqlite3 /check/${file_name} '${check_cmd}'" 2>&1) || true
