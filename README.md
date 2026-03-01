@@ -176,6 +176,7 @@ Full reference: [docs/SCRIPTS.md](docs/SCRIPTS.md)
 | `security.sh` | Security validation helpers |
 | `backup_utils.sh` | Backup-specific shared logic |
 | `secrets.sh` | Secrets collection, auto-generation, hashing (Argon2id + bcrypt), Cloudflare token validation, recovery kit generation |
+| `simple_key_resilience.sh` | Three-tier Age key protection: health check with auto-permission fix and encrypt/decrypt roundtrip (Tier 1); password-manager-ready plaintext escrow export (Tier 2); printable PDF/HTML paper backup with optional QR code via `qrencode` and `wkhtmltopdf` (Tier 3) |
 
 ### Configuration Templates
 

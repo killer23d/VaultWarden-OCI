@@ -79,6 +79,51 @@ Use fast for daily automated backups; full for weekly and before major changes.
 
 ---
 
+## 🔑 Age Key Protection (`lib/simple_key_resilience.sh`)
+
+Your Age key (`secrets/keys/age-key.txt`) is the single point of failure for all backup decryption. If you lose it, **every backup is permanently unrecoverable**. `lib/simple_key_resilience.sh` provides three complementary protection tiers.
+
+### Tier 1 — Automatic Health Check (runs on every backup)
+
+`backup.sh` calls `simple_verify_age_key` before every backup run. It checks that the key file exists, auto-corrects permissions to 600 if needed, validates the key structure, and performs a live encrypt/decrypt roundtrip. If the check fails, the backup is aborted.
+
+No action required — this runs automatically.
+
+### Tier 2 — Password Manager Escrow (recommended after setup)
+
+Exports a formatted plain-text document containing the Age private key, public key, and recovery instructions — ready to paste as a Secure Note in Bitwarden, 1Password, or similar.
+
+```bash
+source lib/simple_key_resilience.sh
+create_password_manager_escrow ~/vaultwarden-age-key-escrow.txt
+
+# ⚠️ Copy contents to your password manager NOW, then securely delete:
+shred -fuz ~/vaultwarden-age-key-escrow.txt
+```
+
+Re-run this any time you rotate the Age key.
+
+### Tier 3 — Paper Backup (optional, for physical offline storage)
+
+Generates a printable PDF (or HTML if `wkhtmltopdf` is not installed) containing the Age key, optional QR code, and recovery steps. The temp HTML file is securely wiped after PDF generation.
+
+```bash
+# Install optional dependencies
+sudo apt install qrencode wkhtmltopdf
+
+source lib/simple_key_resilience.sh
+create_printable_key_backup ~/vaultwarden-key-backup.pdf
+
+# Print and store in a fireproof safe, then delete the file
+```
+
+> **When to run each tier:**
+> - Tier 1: automatic on every `backup.sh` run
+> - Tier 2: after initial setup and after any Age key rotation
+> - Tier 3: optional — for physical offline copies in a fireproof safe or safety deposit box
+
+---
+
 ## ☁️ Offsite Storage (rclone)
 
 ```bash
@@ -136,7 +181,7 @@ make restore
 
 ---
 
-## 🚏 Disaster Recovery Scenarios
+## 🚨 Disaster Recovery Scenarios
 
 ### Scenario 1 — Database Corruption
 
@@ -214,7 +259,12 @@ docker compose logs vaultwarden
 
 ```bash
 ls -l secrets/keys/age-key.txt
-# If missing, restore from emergency kit or re-run setup
+
+# Manual health check
+source lib/simple_key_resilience.sh && simple_verify_age_key
+
+# If missing, restore from your password manager escrow (Tier 2)
+# or from an emergency kit, then re-run setup:
 sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.com
 ```
 
@@ -263,5 +313,5 @@ rclone config show your_remote_name
 
 **Daily:** Automated db backup runs and checksum passes
 **Weekly:** Full backup with `--full-verification`; offsite sync verified
-**Monthly:** Emergency kit created; `restore.sh` tested in dry-run
+**Monthly:** Emergency kit created; `restore.sh` tested in dry-run; Tier 2 escrow refreshed if Age key was rotated
 **Quarterly:** Full disaster recovery drill on a fresh instance

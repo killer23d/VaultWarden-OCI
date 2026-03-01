@@ -26,7 +26,7 @@ Complete reference for all management scripts and utility libraries in VaultWard
 | 9 | `create-breakglass-admin.sh` | Emergency | ✅ |
 | 10 | `cron-setup.sh` | Automation | ✅ |
 
-**Utility libraries (5):** `lib/common.sh`, `lib/docker.sh`, `lib/crypto.sh`, `lib/security.sh`, `lib/backup_utils.sh`
+**Utility libraries (6):** `lib/common.sh`, `lib/docker.sh`, `lib/crypto.sh`, `lib/security.sh`, `lib/backup_utils.sh`, `lib/simple_key_resilience.sh`
 
 ---
 
@@ -505,6 +505,61 @@ Backup-specific helpers.
 | `verify_backup_integrity FILE` | Verify backup file integrity |
 | `cleanup_old_backups DIR TYPE DAYS` | Remove old backups per retention policy |
 | `format_backup_size BYTES` | Human-readable size formatting |
+
+### `lib/secrets.sh`
+Secrets collection, generation, hashing, validation, and recovery kit export. Used by `setup-secrets.sh` and `edit-secrets.sh`.
+
+| Function | Description |
+|---|---|
+| `collect_secret_field FIELD` | Interactive prompt, hash, and validate a single secret field |
+| `auto_generate_secret_field FIELD` | Non-interactive generation or CHANGE_ME placeholder per field |
+| `ensure_sops_env` | Set `SOPS_AGE_KEY_FILE` and `SOPS_CONFIG` for sops calls |
+| `secrets_file_exists` | Check whether `secrets/secrets.yaml` is present |
+| `validate_secrets_decryption` | Assert the secrets file can be decrypted |
+| `validate_required_secrets` | Assert all required keys are present and non-empty |
+| `check_placeholder_values` | Detect any remaining CHANGE_ME / PLACEHOLDER values |
+| `list_secret_keys` | Print all key names in the secrets file |
+| `create_secrets_backup` | Timestamped backup of the encrypted secrets file |
+| `generate_recovery_kit FILE` | Write a full plaintext recovery document (key + secrets) |
+| `offer_recovery_kit_export` | Interactive or auto prompt to export a recovery kit |
+
+### `lib/simple_key_resilience.sh`
+Three-tier Age key protection strategy. Sourced by `backup.sh` (Tier 1 runs automatically on every backup) and available for manual use via the functions below.
+
+> **Optional dependencies:** Tier 3 can generate a QR code if `qrencode` is installed (`sudo apt install qrencode`) and will produce a PDF if `wkhtmltopdf` is installed (`sudo apt install wkhtmltopdf`). Without either, it produces a plain HTML file instead.
+
+| Tier | Function | Description |
+|---|---|---|
+| 1 | `simple_verify_age_key` | Health check: asserts file exists, auto-fixes permissions to 600 if needed, validates key structure via `age-keygen -y`, and performs a full encrypt/decrypt roundtrip to confirm the key is functional. Called automatically by `backup.sh` before every backup run. |
+| 2 | `create_password_manager_escrow OUTPUT_FILE` | Writes a formatted plain-text escrow document containing the Age private key, public key, hostname, date, and step-by-step recovery instructions. Designed to be pasted as a Secure Note in a password manager (Bitwarden, 1Password, etc.). Output is chmod 600. |
+| 3 | `create_printable_key_backup [OUTPUT_PDF]` | Generates a printable PDF (requires `wkhtmltopdf`) or HTML paper backup containing the Age key, optional QR code (requires `qrencode`), and recovery steps. The temp HTML file containing the plaintext key is securely wiped via `shred` (or `dd` fallback) immediately after PDF generation. |
+
+**Recommended usage cadence:**
+
+| When | Action |
+|---|---|
+| After initial setup | Run Tier 2 — store escrow in your password manager |
+| After rotating the Age key | Re-run Tier 2 and optionally Tier 3 |
+| After any major config change | Re-run `./edit-secrets.sh --export-recovery-kit` (includes the key) |
+| Tier 1 | Automatic — runs on every `backup.sh` invocation |
+
+```bash
+# Source the library manually if calling outside of backup.sh
+source lib/simple_key_resilience.sh
+
+# Tier 1 — manual key health check
+simple_verify_age_key
+
+# Tier 2 — password manager escrow export
+create_password_manager_escrow ~/vaultwarden-age-key-escrow.txt
+# ⚠️  Copy to your password manager, then delete:
+shred -fuz ~/vaultwarden-age-key-escrow.txt
+
+# Tier 3 — printable paper backup (PDF if wkhtmltopdf present, HTML otherwise)
+sudo apt install qrencode wkhtmltopdf   # optional but recommended
+create_printable_key_backup ~/vaultwarden-key-backup.pdf
+# ⚠️  Print and store in a fireproof safe, then delete the file
+```
 
 ---
 
