@@ -60,7 +60,11 @@ git clone https://github.com/killer23d/VaultWarden-OCI.git
 cd VaultWarden-OCI
 chmod -R +x *.sh
 
-# Automated setup — generates config files from templates
+# Automated setup — installs deps, generates config files, auto-generates
+# VaultWarden admin password, Caddy admin password, and backup passphrase.
+# External credentials (CF tokens, SMTP, push keys) are left as
+# CHANGE_ME placeholders — the post-install summary lists the exact
+# ./edit-secrets.sh --rotate commands to fill them in.
 sudo ./setup.sh --domain vault.yourdomain.com --email admin@yourdomain.com --auto
 
 # Re-login so your user picks up the docker group
@@ -69,17 +73,36 @@ exit
 cd VaultWarden-OCI
 ```
 
+> **`--auto` vs `--use-latest`:** `--auto` is fully non-interactive and does not change container version pins. Pass `--use-latest` separately if you want all container image tags set to `latest` instead of the pinned versions in `.env`.
+
 ---
 
-### Step 3 — Configure Secrets & Environment
+### Step 3 — Configure Environment & External Credentials
+
+**Edit `.env` first** — `CLOUDFLARE_ZONE_ID` must be set before secrets are configured so that Cloudflare token validation works correctly.
 
 ```bash
-# Set admin_basic_auth_hash, Cloudflare API tokens, SMTP password, etc.
-./edit-secrets.sh
-
-# Set CLOUDFLARE_ZONE_ID, SMTP settings, rclone remote, etc.
 nano .env
+# ► Set: CLOUDFLARE_ZONE_ID, SMTP_HOST, SMTP_PORT, SMTP_USERNAME
+# ► Verify: DOMAIN and ADMIN_EMAIL are correct
 ```
+
+Then supply the external credentials that `--auto` cannot generate for you:
+
+```bash
+# Cloudflare tokens (required — Caddy TLS + Fail2ban edge blocking)
+./edit-secrets.sh --rotate caddy_cloudflare_dns_token
+./edit-secrets.sh --rotate fail2ban_cloudflare_firewall_token
+
+# SMTP password (required if using email notifications)
+./edit-secrets.sh --rotate smtp_password
+
+# Push notification keys (optional — mobile app push alerts)
+./edit-secrets.sh --rotate push_installation_id
+./edit-secrets.sh --rotate push_installation_key
+```
+
+**Interactive install (no `--auto`):** `setup.sh` creates the skeleton and displays a next-steps screen. Follow the steps printed on screen — edit `.env` first, then run `./setup-secrets.sh` to be prompted for all credentials at once.
 
 See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for every available variable.
 
@@ -101,6 +124,10 @@ Once healthy, switch the Cloudflare record to **Proxied (Orange Cloud)** and set
 ```bash
 # Set up automated backups, updates, and maintenance
 sudo ./cron-setup.sh --install
+
+# Export a plaintext recovery kit to your password manager
+# Run this AFTER all secrets are configured so everything is included
+./edit-secrets.sh --export-recovery-kit
 
 # Create emergency admin for OCI serial console recovery
 ./create-breakglass-admin.sh    # or: make breakglass-create
@@ -125,15 +152,15 @@ sudo ./cron-setup.sh --install
 
 | Script | Purpose |
 | :-- | :-- |
-| `setup.sh` | One-time system setup, template generation |
+| `setup.sh` | One-time system setup: installs deps, generates `.env` and `docker-compose.yml` from templates, creates Age key, SOPS config, and empty secrets structure. In `--auto` mode, also auto-generates passwords/passphrases via `setup-secrets.sh --auto --quiet-summary` after all infra phases complete, then shows a single consolidated summary screen. |
+| `setup-secrets.sh` | Initial secrets bootstrap — prompted interactively or via `--auto`. Standalone flow: run **after** editing `.env`. Supports `--quiet-summary` to suppress its completion banner when called from `setup.sh`. |
 | `startup.sh` | Start / stop / restart services |
 | `health.sh` | Health monitoring with optional auto-recovery |
 | `backup.sh` | Encrypted database and full-system backups |
 | `restore.sh` | Interactive or automated restore |
 | `update.sh` | Safe container + system updates with auto-rollback |
 | `maintenance.sh` | Cleanup, DNS update, DB maintenance, email test |
-| `edit-secrets.sh` | Secure secrets editor (Age + SOPS) |
-| `setup-secrets.sh` | Initial secrets bootstrap |
+| `edit-secrets.sh` | Secure secrets editor (Age + SOPS) — rotate individual fields, list keys, export recovery kit |
 | `cron-setup.sh` | Install / remove automation crons |
 | `create-breakglass-admin.sh` | Emergency OCI serial console admin |
 
@@ -148,6 +175,7 @@ Full reference: [docs/SCRIPTS.md](docs/SCRIPTS.md)
 | `docker.sh` | Docker lifecycle management |
 | `security.sh` | Security validation helpers |
 | `backup_utils.sh` | Backup-specific shared logic |
+| `secrets.sh` | Secrets collection, auto-generation, hashing (Argon2id + bcrypt), Cloudflare token validation, recovery kit generation |
 
 ### Configuration Templates
 
