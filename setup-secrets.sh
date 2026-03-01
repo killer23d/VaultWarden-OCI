@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # setup-secrets.sh - Idempotent VaultWarden secrets configuration (SECURITY HARDENED)
-# Can be run standalone or as part of setup.sh
-# Safe to re-run multiple times
+# Can be run standalone or called from setup.sh --auto.
+# Safe to re-run multiple times.
 #
 # SECURITY ENHANCEMENT: Caddy basic auth hash in htpasswd format (admin:$2y$14$...)
 #
@@ -29,6 +29,10 @@ FORCE=false
 DRY_RUN=false
 AUTO_FIX=true
 EXPORT_RECOVERY_KIT=false
+# Phase 1-B: When called from setup.sh, suppress the completion banner,
+# next-steps block, and offer_recovery_kit_export prompt so that setup.sh
+# can display a single consolidated summary screen instead.
+QUIET_SUMMARY=false
 
 # ---------------------------------------------------------------------------
 # Cleanup
@@ -54,13 +58,19 @@ USAGE:
     ./setup-secrets.sh [OPTIONS]
 
 OPTIONS:
-    --auto                  Auto-generate passwords
+    --auto                  Auto-generate passwords; external credentials
+                            (CF tokens, SMTP, push keys) are left as
+                            CHANGE_ME placeholders for manual rotation.
     --skip-validation       Skip token/SMTP validation
-    --skip-optional         Skip optional secrets
+    --skip-optional         Skip optional secrets (push notifications)
     --force                 Overwrite existing secrets without prompting
     --dry-run               Preview without executing
     --no-auto-fix           Don't auto-create missing prerequisites
     --export-recovery-kit   Offer recovery kit export after setup completes
+    --quiet-summary         Suppress the completion banner, next-steps block,
+                            and recovery-kit prompt. Used internally by
+                            setup.sh so it can display a single consolidated
+                            summary screen. Not intended for direct use.
     --help                  Show help
 
 NOTES:
@@ -68,6 +78,12 @@ NOTES:
     appears after a successful setup run. To export a recovery kit
     independently (without running setup), use:
         ./edit-secrets.sh --export-recovery-kit
+
+    The intended standalone order is:
+        1. sudo ./setup.sh --domain DOMAIN --email EMAIL
+        2. nano .env           (set CLOUDFLARE_ZONE_ID, SMTP_HOST, etc.)
+        3. ./setup-secrets.sh  (prompted for all credentials)
+        4. make up
 
 FEATURES:
     ✅ Idempotent - Safe to re-run multiple times
@@ -105,13 +121,14 @@ HELP
 # ---------------------------------------------------------------------------
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --auto)                  AUTO_MODE=true;        shift ;;
-        --skip-validation)       SKIP_VALIDATION=true;  shift ;;
-        --skip-optional)         SKIP_OPTIONAL=true;    shift ;;
-        --force)                 FORCE=true;            shift ;;
-        --dry-run)               DRY_RUN=true;          shift ;;
-        --no-auto-fix)           AUTO_FIX=false;        shift ;;
+        --auto)                  AUTO_MODE=true;           shift ;;
+        --skip-validation)       SKIP_VALIDATION=true;     shift ;;
+        --skip-optional)         SKIP_OPTIONAL=true;       shift ;;
+        --force)                 FORCE=true;               shift ;;
+        --dry-run)               DRY_RUN=true;             shift ;;
+        --no-auto-fix)           AUTO_FIX=false;           shift ;;
         --export-recovery-kit)   EXPORT_RECOVERY_KIT=true; shift ;;
+        --quiet-summary)         QUIET_SUMMARY=true;       shift ;;
         --help)                  show_help; exit 0 ;;
         *) log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
@@ -258,7 +275,7 @@ check_reconfiguration() {
     fi
 
     echo ""
-    read -p "Reconfigure secrets? (yes/no): " confirm
+    read -r -p "Reconfigure secrets? (yes/no): " confirm
 
     if [[ "$confirm" == "yes" ]]; then
         create_secrets_backup
@@ -277,7 +294,7 @@ ensure_argon2_available() {
     log_warn "Argon2 not detected"
 
     if [[ "$AUTO_MODE" != "true" ]]; then
-        read -p "Install Python argon2-cffi? (yes/no): " install_it
+        read -r -p "Install Python argon2-cffi? (yes/no): " install_it
         if [[ "$install_it" == "yes" ]]; then
             pip3 install argon2-cffi && return 0
         fi
@@ -290,12 +307,18 @@ ensure_argon2_available() {
 # ---------------------------------------------------------------------------
 # Collect secrets
 #
-# Both AUTO_MODE and interactive paths now delegate to lib/secrets.sh:
+# Both AUTO_MODE and interactive paths delegate to lib/secrets.sh:
 #   - interactive  → collect_secret_field()        (prompts, hashes, validates)
 #   - auto         → auto_generate_secret_field()  (generates, hashes, validates)
 #
+# In --auto mode, auto_generate_secret_field() intentionally emits CHANGE_ME
+# placeholders for credentials that exist in external systems (CF tokens,
+# SMTP password, push keys). These must be rotated manually with:
+#   ./edit-secrets.sh --rotate FIELD
+# This is by design: --auto is truly non-interactive.
+#
 # All hashing logic (Argon2id, bcrypt) and format validation live exclusively
-# in lib/secrets.sh. collect_secrets() is now a thin orchestration layer.
+# in lib/secrets.sh. collect_secrets() is a thin orchestration layer.
 # ---------------------------------------------------------------------------
 collect_secrets() {
     declare -A SECRETS
@@ -370,6 +393,8 @@ collect_secrets() {
 
     local smtp_pass
     if [[ "$AUTO_MODE" == "true" ]]; then
+        # auto_generate_secret_field emits CHANGE_ME_SMTP_PASSWORD for this
+        # field — correct behaviour; caller must rotate with edit-secrets.sh.
         smtp_pass=$(auto_generate_secret_field "smtp_password") || { log_error "Failed to generate smtp_password"; return 1; }
     else
         read -r -p "Enable email notifications now? (yes/no): " enable_email
@@ -378,7 +403,7 @@ collect_secrets() {
             log_success "SMTP password configured"
         else
             smtp_pass="CHANGE_ME_SMTP_PASSWORD"
-            log_info "Email skipped - configure later in .env and re-run this script"
+            log_info "Email skipped - configure later with: ./edit-secrets.sh --rotate smtp_password"
         fi
     fi
     SECRETS["smtp_password"]="$smtp_pass"
@@ -400,6 +425,8 @@ collect_secrets() {
         echo ""
 
         if [[ "$AUTO_MODE" == "true" ]]; then
+            # auto_generate_secret_field emits CHANGE_ME placeholders for push
+            # keys — correct behaviour for truly non-interactive mode.
             SECRETS["push_installation_id"]=$(auto_generate_secret_field "push_installation_id")
             SECRETS["push_installation_key"]=$(auto_generate_secret_field "push_installation_key")
         else
@@ -411,7 +438,7 @@ collect_secrets() {
             else
                 SECRETS["push_installation_id"]="CHANGE_ME_OR_LEAVE_EMPTY"
                 SECRETS["push_installation_key"]="CHANGE_ME_OR_LEAVE_EMPTY"
-                log_info "Push notifications skipped"
+                log_info "Push notifications skipped - configure later with: ./edit-secrets.sh --rotate push_installation_id"
             fi
         fi
     else
@@ -545,28 +572,47 @@ main() {
         exit 1
     fi
 
-    echo ""
-    log_header "Secrets Setup Complete!"
-    echo ""
-    log_success "✅ Secrets encrypted and stored in: $SECRETS_FILE"
-    log_success "✅ Caddy admin hash in htpasswd format: admin:\$2y\$14\$..."
-    log_success "✅ VaultWarden admin hash in Argon2id format"
-    log_success "✅ All secrets protected with Age encryption"
-    echo ""
-    echo "📋 Next Steps:"
-    echo "   1. Review .env file:          nano .env"
-    echo "   2. Start services:            make up"
-    echo "   3. Test health:               ./health.sh"
-    echo "   4. Test admin login:          https://yourdomain.com/admin"
-    echo "   5. To rotate a single field:  ./edit-secrets.sh --rotate FIELD"
-    echo "   6. To list secret keys:       ./edit-secrets.sh --list"
-    echo "   7. To export recovery kit:    ./edit-secrets.sh --export-recovery-kit"
-    echo ""
-    log_warn "⚠️  If you used --auto mode, save the generated passwords above!"
-    echo ""
+    # Phase 1-B: Gate the entire completion output on QUIET_SUMMARY.
+    #
+    # When called from setup.sh --auto with --quiet-summary:
+    #   - The auto-generated plaintext passwords emitted by log_warn inside
+    #     auto_generate_secret_field() (above) are already visible on screen.
+    #   - setup.sh owns show_post_install_summary("auto"), which is the single
+    #     consolidated screen listing what still needs to be done.
+    #   - Suppressing this block also eliminates the offer_recovery_kit_export
+    #     interactive prompt that would hang in a non-TTY context.
+    #
+    # When run standalone (--quiet-summary not passed):
+    #   - Full completion banner and updated next-steps are displayed.
+    #   - offer_recovery_kit_export prompt is shown as usual.
+    if [[ "$QUIET_SUMMARY" != "true" ]]; then
+        echo ""
+        log_header "Secrets Setup Complete!"
+        echo ""
+        log_success "✅ Secrets encrypted and stored in: $SECRETS_FILE"
+        log_success "✅ Caddy admin hash in htpasswd format: admin:\$2y\$14\$..."
+        log_success "✅ VaultWarden admin hash in Argon2id format"
+        log_success "✅ All secrets protected with Age encryption"
+        echo ""
+        # Phase 2-C: Updated next-steps to reflect the new install order.
+        # The user has already edited .env before running this script, so
+        # step 1 is "Verify" not "Review/create".
+        echo "📋 Next Steps:"
+        echo "   1. Verify .env settings:      nano .env"
+        echo "      ► Confirm: CLOUDFLARE_ZONE_ID, SMTP_HOST, SMTP_PORT, SMTP_USERNAME"
+        echo "   2. Start services:            make up"
+        echo "   3. Setup automation:          sudo ./cron-setup.sh --install"
+        echo "   4. Export recovery kit:       ./edit-secrets.sh --export-recovery-kit"
+        echo "   5. Test health:               ./health.sh"
+        echo "   6. To rotate a single field:  ./edit-secrets.sh --rotate FIELD"
+        echo "   7. To list secret keys:       ./edit-secrets.sh --list"
+        echo ""
+        log_warn "⚠️  If you used --auto mode, scroll up to save the generated passwords!"
+        echo ""
 
-    if [[ "$DRY_RUN" == "false" ]]; then
-        offer_recovery_kit_export "$EXPORT_RECOVERY_KIT"
+        if [[ "$DRY_RUN" == "false" ]]; then
+            offer_recovery_kit_export "$EXPORT_RECOVERY_KIT"
+        fi
     fi
 
     exit 0
