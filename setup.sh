@@ -61,6 +61,17 @@ show_help() {
     cat << 'EOF'
 VaultWarden-OCI Setup Tool - Security Hardened Edition
 USAGE: sudo ./setup.sh --domain DOMAIN --email EMAIL [OPTIONS]
+
+OPTIONS:
+  --auto          Non-interactive install. Auto-generates passwords/passphrases;
+                  external credentials (CF tokens, SMTP) remain as CHANGE_ME
+                  placeholders — the post-install summary lists exact commands
+                  to rotate them. Does NOT imply --use-latest.
+  --use-latest    Override pinned container versions with 'latest' tags in .env.
+  --skip-deps     Skip dependency installation (assumes already installed).
+  --force         Overwrite existing .env, secrets, and docker-compose files.
+  --dry-run       Print what would happen without making any changes.
+  --help          Show this help and exit.
 EOF
 }
 
@@ -427,34 +438,17 @@ EOF
     return 0
 }
 
-setup_secrets_interactively() {
-    if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would configure secrets interactively"; return 0; fi
-
-    chmod +x "$PROJECT_ROOT/setup-secrets.sh" 2>/dev/null || true
-    local secrets_configured=false
-    if [[ -f "secrets/secrets.yaml" ]]; then
-        export SOPS_AGE_KEY_FILE="$PROJECT_ROOT/secrets/keys/age-key.txt"
-        if sops -d "secrets/secrets.yaml" 2>/dev/null | grep -q "PLACEHOLDER_NOT_CONFIGURED"; then
-            secrets_configured=false
-        else
-            secrets_configured=true
-        fi
-    fi
-
-    if [[ "$secrets_configured" == "true" && "$FORCE" != "true" ]]; then
-        [[ "$AUTO_MODE" == "true" ]] && return 0
-        read -r -p "Secrets already configured. Reconfigure? (yes/no): " reconfigure
-        [[ "$reconfigure" != "yes" ]] && return 0
-    fi
-
-    if [[ "$AUTO_MODE" == "true" ]]; then
-        ./setup-secrets.sh --auto --skip-optional || return 1
-        return 0
-    else
-        read -r -p "Configure secrets interactively? (yes/no): " do_setup
-        [[ "$do_setup" == "yes" ]] && ./setup-secrets.sh || return 0
-    fi
-}
+# Phase 2-B: setup_secrets_interactively() removed.
+# Previously phase 10; replaced by the post-phase block in main().
+# Rationale:
+#   - In the old model, secrets ran as phase 10 of 14, before the user ever
+#     saw the final summary or had a chance to review .env. This meant
+#     CLOUDFLARE_ZONE_ID was not set yet, silently disabling CF token
+#     validation in lib/secrets.sh:validate_cloudflare_token().
+#   - The inverted-pipe logic (sops -d | grep) could silently set
+#     secrets_configured=true when sops failed, causing --auto to return 0
+#     without ever calling setup-secrets.sh.
+#   - See main() post-phase block below for the replacement logic.
 
 create_docker_compose() {
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would create docker-compose.yml"; return 0; fi
@@ -553,12 +547,22 @@ execute_phase() {
     fi
 }
 
+# Phase 1-C: Mode-aware post-install summary.
+#
+# auto mode     — lists what was auto-generated, the exact
+#                 ./edit-secrets.sh --rotate commands for every CHANGE_ME field,
+#                 and an ordered next-steps checklist.
+# interactive   — clean checklist directing the user to edit .env FIRST (so
+#                 CLOUDFLARE_ZONE_ID is set before secrets run), then run
+#                 ./setup-secrets.sh.
+#
+# This is the ONLY completion screen shown. setup-secrets.sh's own banner is
+# suppressed via --quiet-summary when called from the post-phase block below.
 show_post_install_summary() {
     local mode="${1:-interactive}"
     [[ "$mode" == "interactive" ]] && clear
 
-    # FIX [BUG-10]: Replace echo -e with printf. The README states echo -e was
-    # removed everywhere in favour of printf; this was the one remaining violation.
+    # FIX [BUG-10]: printf throughout; no echo -e.
     printf '%s' "${COLOR_RED}"
     cat << "EOF"
     ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !
@@ -569,20 +573,74 @@ show_post_install_summary() {
 EOF
     printf '%s' "${COLOR_RESET}"
 
-    local age_pub_key=""
     if [[ -f "secrets/keys/age-key.txt" ]]; then
+        local age_pub_key
         age_pub_key=$(grep "public key" "secrets/keys/age-key.txt" | cut -d: -f2 | tr -d ' ' || echo "MISSING")
-        printf 'SOPS Age Public Key:      %s%s%s\n' "${COLOR_GREEN}" "${age_pub_key}" "${COLOR_RESET}"
-        printf 'SOPS Age Private Key:     %sCat secrets/keys/age-key.txt to view (BACKUP THIS FILE!)%s\n' "${COLOR_RED}" "${COLOR_RESET}"
+        printf 'SOPS Age Public Key:  %s%s%s\n' "${COLOR_GREEN}" "${age_pub_key}" "${COLOR_RESET}"
+        printf 'SOPS Age Private Key: %sCat secrets/keys/age-key.txt to view  (BACKUP THIS FILE!)%s\n' \
+            "${COLOR_RED}" "${COLOR_RESET}"
     fi
 
-    printf '\n%s--- EXTERNAL CONFIGURATION CHECKLIST (Verify You Have These) ---%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
-    printf '1. [ ] Domain Name:          %s%s%s\n' "${COLOR_GREEN}" "${DOMAIN:-Not Set}" "${COLOR_RESET}"
-    printf '2. [ ] Admin Email:          %s%s%s\n' "${COLOR_GREEN}" "${ADMIN_EMAIL:-Not Set}" "${COLOR_RESET}"
-    printf '\n%s--- NEXT STEPS ---%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
-    printf '1. Run %s./edit-secrets.sh%s to input external secrets.\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
-    printf '2. Run %smake up%s to start the application.\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
-    printf '3. Run %ssudo ./cron-setup.sh --install%s to setup automation.\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
+    if [[ "$mode" == "auto" ]]; then
+        printf '\n%s--- AUTO-GENERATED CREDENTIALS (scroll up to save plaintext passwords) ---%s\n' \
+            "${COLOR_CYAN}" "${COLOR_RESET}"
+        printf '  %s✔%s VaultWarden admin token    : GENERATED (Argon2id hash stored in secrets)\n' \
+            "${COLOR_GREEN}" "${COLOR_RESET}"
+        printf '  %s✔%s Caddy admin password       : GENERATED (bcrypt hash stored in secrets)\n' \
+            "${COLOR_GREEN}" "${COLOR_RESET}"
+        printf '  %s✔%s Backup passphrase          : GENERATED (stored in secrets)\n' \
+            "${COLOR_GREEN}" "${COLOR_RESET}"
+
+        printf '\n%s--- CREDENTIALS REQUIRING MANUAL CONFIGURATION ---%s\n' \
+            "${COLOR_YELLOW}" "${COLOR_RESET}"
+        printf 'These fields still contain CHANGE_ME placeholders.\n'
+        printf 'Set them BEFORE running %smake up%s:\n\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
+        printf '  %s./edit-secrets.sh --rotate caddy_cloudflare_dns_token%s\n' \
+            "${COLOR_YELLOW}" "${COLOR_RESET}"
+        printf '  %s./edit-secrets.sh --rotate fail2ban_cloudflare_firewall_token%s\n' \
+            "${COLOR_YELLOW}" "${COLOR_RESET}"
+        printf '  %s./edit-secrets.sh --rotate smtp_password%s         (if using email notifications)\n' \
+            "${COLOR_YELLOW}" "${COLOR_RESET}"
+        printf '  %s./edit-secrets.sh --rotate push_installation_id%s  (optional — mobile push)\n' \
+            "${COLOR_YELLOW}" "${COLOR_RESET}"
+        printf '  %s./edit-secrets.sh --rotate push_installation_key%s (optional — mobile push)\n' \
+            "${COLOR_YELLOW}" "${COLOR_RESET}"
+
+        printf '\n%s--- NEXT STEPS ---%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
+        printf '1. Edit .env:           %snano .env%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
+        printf '   ► Set: CLOUDFLARE_ZONE_ID, SMTP_HOST, SMTP_PORT, SMTP_USERNAME\n'
+        printf '   ► Verify: DOMAIN and ADMIN_EMAIL are correct\n'
+        printf '2. Set external tokens: %s(use ./edit-secrets.sh --rotate commands above)%s\n' \
+            "${COLOR_YELLOW}" "${COLOR_RESET}"
+        printf '3. Start services:      %smake up%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
+        printf '4. Setup automation:    %ssudo ./cron-setup.sh --install%s\n' \
+            "${COLOR_YELLOW}" "${COLOR_RESET}"
+        printf '5. Export recovery kit: %s./edit-secrets.sh --export-recovery-kit%s\n' \
+            "${COLOR_YELLOW}" "${COLOR_RESET}"
+        printf '   %s(Run AFTER step 2 so all secrets are included in the kit)%s\n' \
+            "${COLOR_RED}" "${COLOR_RESET}"
+    else
+        # Interactive mode — secrets not yet configured.
+        # Direct the user to edit .env BEFORE running setup-secrets.sh so that
+        # CLOUDFLARE_ZONE_ID is present when validate_cloudflare_token() runs.
+        printf '\n%s--- EXTERNAL CONFIGURATION CHECKLIST ---%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
+        printf '1. [ ] Domain Name:   %s%s%s\n' "${COLOR_GREEN}" "${DOMAIN:-Not Set}" "${COLOR_RESET}"
+        printf '2. [ ] Admin Email:   %s%s%s\n' "${COLOR_GREEN}" "${ADMIN_EMAIL:-Not Set}" "${COLOR_RESET}"
+
+        printf '\n%s--- NEXT STEPS ---%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
+        printf '1. Edit .env:           %snano .env%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
+        printf '   ► Set: CLOUDFLARE_ZONE_ID, SMTP_HOST, SMTP_PORT, SMTP_USERNAME\n'
+        printf '   ► Verify: DOMAIN and ADMIN_EMAIL are correct\n'
+        printf '2. Configure secrets:   %s./setup-secrets.sh%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
+        printf '   ► You will be prompted for all credentials\n'
+        printf '3. Start services:      %smake up%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
+        printf '4. Setup automation:    %ssudo ./cron-setup.sh --install%s\n' \
+            "${COLOR_YELLOW}" "${COLOR_RESET}"
+        printf '5. Export recovery kit: %s./edit-secrets.sh --export-recovery-kit%s\n' \
+            "${COLOR_YELLOW}" "${COLOR_RESET}"
+        printf '   %s(Run AFTER step 2 so all secrets are included in the kit)%s\n' \
+            "${COLOR_RED}" "${COLOR_RESET}"
+    fi
 
     if [[ "$mode" == "interactive" ]]; then
         printf '\n%s!!! PRESS ENTER TO CLEAR THIS SCREEN AND FINISH !!!%s\n' "${COLOR_RED}" "${COLOR_RESET}"
@@ -602,6 +660,9 @@ main() {
         log_info "SOPS version: will resolve latest from GitHub at install time"
     fi
 
+    # Phase 2-A: setup_secrets_interactively removed from this array.
+    # Secrets are handled in the post-phase block below, after all infra is
+    # ready and the user has had a chance to set CLOUDFLARE_ZONE_ID in .env.
     local setup_phases=(
         "install_dependencies:Dependency Installation:true"
         "verify_dependencies:Dependency Verification:true"
@@ -612,7 +673,6 @@ main() {
         "generate_age_keys:Encryption Keys:true"
         "create_sops_config:SOPS Configuration:true"
         "create_empty_secrets_structure:Empty Secrets Structure:true"
-        "setup_secrets_interactively:Secrets Configuration:false"
         "set_script_permissions:Script Permissions:false"
         "setup_firewall:Firewall Configuration:false"
         "validate_ssh_config:SSH Hardening Validation:false"
@@ -637,6 +697,36 @@ main() {
         exit 1
     fi
 
+    # --- Phase 2-A: Post-phase secrets configuration ---
+    #
+    # AUTO MODE: Run setup-secrets.sh non-interactively now that all infra
+    # phases are complete. Calling it here (rather than as a phase) ensures:
+    #   1. .env exists and has been written with DOMAIN/EMAIL, so
+    #      validate_cloudflare_token() in lib/secrets.sh can read
+    #      CLOUDFLARE_ZONE_ID if the user pre-populated it.
+    #   2. The Age key and SOPS config are already in place.
+    #   3. --quiet-summary suppresses setup-secrets.sh's own completion
+    #      banner; show_post_install_summary() below is the single
+    #      consolidated output screen.
+    #   4. --auto keeps all external credentials (CF tokens, SMTP password,
+    #      push keys) as CHANGE_ME placeholders — truly non-interactive.
+    #      The summary screen lists exact ./edit-secrets.sh --rotate commands
+    #      to fill them in before running make up.
+    #
+    # INTERACTIVE MODE: Do NOT call setup-secrets.sh here. The summary screen
+    # directs the user to edit .env first (step 1), then run ./setup-secrets.sh
+    # themselves (step 2). This ordering lets CF token validation work correctly.
+    if [[ "$AUTO_MODE" == "true" ]]; then
+        log_info "=== Auto Mode: Configuring secrets ==="
+        chmod +x "$PROJECT_ROOT/setup-secrets.sh" 2>/dev/null || true
+        local secrets_args=(--auto --skip-optional --quiet-summary)
+        [[ "$FORCE" == "true" ]] && secrets_args+=(--force)
+        if ! ./setup-secrets.sh "${secrets_args[@]}"; then
+            log_warn "Secrets auto-configuration encountered issues — run ./setup-secrets.sh after editing .env"
+        fi
+    fi
+
+    # Single consolidated summary screen (both modes).
     if [[ "$AUTO_MODE" != "true" ]]; then
         read -r -p "Press Enter to view CRITICAL recovery information..."
         show_post_install_summary "interactive"
