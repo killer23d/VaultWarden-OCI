@@ -328,7 +328,7 @@ remove_breakglass_user() {
         log_warn "This will permanently remove the break-glass admin account."
         log_warn "You will lose emergency console access capability."
         echo ""
-        read -p "Continue with removal? (yes/no): " confirm
+        read -r -p "Continue with removal? (yes/no): " confirm
         if [[ "$confirm" != "yes" ]]; then
             log_info "Removal cancelled by user"
             return 0
