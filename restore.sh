@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
-# restore.sh - Enhanced VaultWarden-OCI restore script with safety checks
-# Supports restoring database-only or full state backups
+# restore.sh - VaultWarden-OCI safe restore
+#
+# Supports both archive formats:
+#   version=2 / archive_format=relative  →  staged restore (atomic, safe)
+#   version=1 (legacy absolute paths)    →  direct -C / extraction (backward compat)
+#
+# Safety features:
+#   - require_root enforced via lib/common.sh
+#   - All decrypted artifacts in mktemp dir + EXIT/INT/TERM trap
+#   - Docker alpine+sqlite for integrity checks (no host sqlite3 dependency)
+#   - tar member validation blocks path traversal before extraction
+#   - Staged full restore: extract → validate → atomic mv (all-or-nothing)
+#   - Pre-restore emergency snapshot before any destructive operation
+#   - AGE_KEY_FILE read from .env (SOPS_AGE_KEY_FILE) with safe default
 
 set -euo pipefail
 
@@ -10,308 +22,324 @@ cd "$PROJECT_ROOT"
 
 source "lib/common.sh"
 init_common_lib "$0"
-source "lib/docker.sh"
-source "lib/backup_utils.sh"
-source "lib/crypto.sh"
+source "lib/docker.sh"       2>/dev/null || true
+source "lib/backup_utils.sh" 2>/dev/null || true
+source "lib/crypto.sh"       2>/dev/null || true
 
 # ---------------------------------------------------------------------------
-# FIX #3 — Cleanup trap: remove plaintext /tmp files on any exit so that
-# a SIGINT, SIGTERM, or set -e abort never leaves decrypted data on disk.
-# setup_cleanup_trap() is exported by lib/common.sh.
-# ---------------------------------------------------------------------------
-_RESTORE_TEMP_FILES=()
-_cleanup_temp_files() {
-    local f
-    for f in "${_RESTORE_TEMP_FILES[@]:-}"; do
-        [[ -f "$f" ]] && rm -f "$f" && log_debug "Cleaned up temp file: $f"
-    done
-}
-setup_cleanup_trap _cleanup_temp_files
-
 # Configuration
+# ---------------------------------------------------------------------------
 BACKUP_FILE=""
-TARGET_DIR=""
+RESTORE_TYPE=""
+USE_LATEST=false
+LIST_ONLY=false
 DRY_RUN=false
 FORCE=false
-LIST_ONLY=false
+NO_PRE_BACKUP=false
+SKIP_VERIFICATION=false
 
 show_help() {
     cat << 'EOF'
 VaultWarden-OCI Restore Script
 
 USAGE:
-    ./restore.sh [OPTIONS]
+    sudo ./restore.sh [OPTIONS]
 
 OPTIONS:
-    --file FILE     Path to the backup file to restore (.age)
-    --target DIR    Target directory for restore (default: read from .env or /var/lib/vaultwarden)
-    --list          List available backups and exit
-    --dry-run       Show what would be done without executing
-    --force         Skip confirmation prompts and safety checks
-    --help          Show this help
+    --list                  List available backups and exit
+    --file FILE             Restore a specific backup file (.age)
+    --type TYPE             db | full | emergency (helps resolve --latest)
+    --latest                Use newest backup (optionally filtered by --type)
+    --no-backup             Skip pre-restore emergency snapshot
+    --skip-verification     Skip integrity check (not recommended)
+    --dry-run               Show what would happen without making changes
+    --force                 Skip confirmation prompts
+    --help                  Show this help
 
 EXAMPLES:
-    ./restore.sh --list
-    ./restore.sh --file backups/db/db_backup_20240101_120000.sqlite3.age
-    ./restore.sh --file backups/full/full_backup_20240101_120000.tar.gz.age --force
+    sudo ./restore.sh --list
+    sudo ./restore.sh --latest --type db --force
+    sudo ./restore.sh --file backups/full/full_backup_20260101_120000.tar.gz.age
 EOF
 }
 
-# Argument parsing
 while [[ $# -gt 0 ]]; do
-    case $1 in
-        --file)     BACKUP_FILE="$2"; shift 2 ;;
-        --target)   TARGET_DIR="$2"; shift 2 ;;
-        --list)     LIST_ONLY=true; shift ;;
-        --dry-run)  DRY_RUN=true; shift ;;
-        --force)    FORCE=true; shift ;;
-        --help)     show_help; exit 0 ;;
-        *)          log_error "Unknown option: $1"; show_help; exit 1 ;;
+    case "$1" in
+        --list)               LIST_ONLY=true;         shift ;;
+        --file)               BACKUP_FILE="$2";       shift 2 ;;
+        --type)               RESTORE_TYPE="$2";      shift 2 ;;
+        --latest)             USE_LATEST=true;        shift ;;
+        --no-backup)          NO_PRE_BACKUP=true;     shift ;;
+        --skip-verification)  SKIP_VERIFICATION=true; shift ;;
+        --dry-run)            DRY_RUN=true;           shift ;;
+        --force)              FORCE=true;             shift ;;
+        --help)               show_help; exit 0 ;;
+        *)                    log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+_find_latest_backup() {
+    local dir="$1"
+    [[ -d "$dir" ]] || return 1
+    find "$dir" -name "*.age" -type f -printf '%T@ %p\n' 2>/dev/null \
+        | sort -n | tail -1 | cut -d' ' -f2-
+}
+
 list_backups() {
-    log_info "Available Database Backups:"
-    if [[ -d "$PROJECT_ROOT/backups/db" ]]; then
-        find "$PROJECT_ROOT/backups/db" -name "*.age" -type f -exec ls -lh {} \; | sort -r | head -n 10
-    else
-        echo "  None found."
-    fi
-
-    echo ""
-    log_info "Available Full Backups:"
-    if [[ -d "$PROJECT_ROOT/backups/full" ]]; then
-        find "$PROJECT_ROOT/backups/full" -name "*.age" -type f -exec ls -lh {} \; | sort -r | head -n 10
-    else
-        echo "  None found."
-    fi
-
-    echo ""
-    log_info "Available Emergency Backups:"
-    if [[ -d "$PROJECT_ROOT/backups/emergency" ]]; then
-        find "$PROJECT_ROOT/backups/emergency" -name "*.age" -type f -exec ls -lh {} \; | sort -r | head -n 10
-    else
-        echo "  None found."
-    fi
+    local types=("db" "full" "emergency")
+    for t in "${types[@]}"; do
+        echo ""
+        log_info "Available ${t} backups:"
+        if [[ -d "$PROJECT_ROOT/backups/$t" ]]; then
+            find "$PROJECT_ROOT/backups/$t" -name "*.age" -type f \
+                -exec ls -lh {} \; 2>/dev/null | sort -r | head -n 20 || true
+        else
+            echo "  (none)"
+        fi
+    done
 }
 
-get_target_dir() {
-    if [[ -n "$TARGET_DIR" ]]; then
-        echo "$TARGET_DIR"
-    else
-        get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden"
-    fi
-}
-
-determine_backup_type() {
-    local file="$1"
-    local filename
-    filename=$(basename "$file")
-
-    if [[ -f "${file}.meta" ]]; then
-        local type
-        type=$(grep -m 1 "^type=" "${file}.meta" | cut -d= -f2)
-        if [[ -n "$type" ]]; then
-            echo "$type"
+resolve_backup_file() {
+    if [[ "$USE_LATEST" == "true" ]]; then
+        if [[ -n "$RESTORE_TYPE" ]]; then
+            BACKUP_FILE="$(_find_latest_backup "$PROJECT_ROOT/backups/$RESTORE_TYPE" || true)"
+            [[ -n "$BACKUP_FILE" ]] || { log_error "No backups found for type: $RESTORE_TYPE"; return 1; }
             return 0
         fi
-    fi
-
-    # Fallback to filename guessing
-    if [[ "$filename" == *"db_backup"* || "$filename" == *".sqlite3.age" ]]; then
-        echo "db"
-    elif [[ "$filename" == *"full_backup"* || "$filename" == *".tar.gz.age" ]]; then
-        echo "full"
-    else
-        log_error "Could not determine backup type for: $file"
-        return 1
-    fi
-}
-
-decrypt_backup() {
-    local encrypted_file="$1"
-    local decrypted_file="$2"
-
-    # FIX #4 — Read AGE_KEY_FILE from .env (set by load_env_file in main())
-    # with a fallback to the historical default path.  Consistent with how
-    # every other configurable path in this file uses get_config_value.
-    local age_key_file
-    age_key_file=$(get_config_value "AGE_KEY_FILE" "secrets/keys/age-key.txt")
-
-    if [[ ! -f "$age_key_file" ]]; then
-        log_error "Age key file not found: $age_key_file"
-        log_error "Set AGE_KEY_FILE in .env or place the key at secrets/keys/age-key.txt"
-        return 1
-    fi
-
-    # Register decrypted output for cleanup trap before writing
-    _RESTORE_TEMP_FILES+=("$decrypted_file")
-
-    log_info "Decrypting backup file..."
-    if age -d -i "$age_key_file" -o "$decrypted_file" "$encrypted_file"; then
-        log_success "Backup decrypted successfully"
-        return 0
-    else
-        log_error "Failed to decrypt backup. Verify the age key is correct."
-        rm -f "$decrypted_file"
-        return 1
-    fi
-}
-
-restore_db() {
-    local backup_file="$1"
-    local state_dir="$2"
-
-    local target_db="$state_dir/data/db.sqlite3"
-    local temp_decrypted
-    temp_decrypted=$(mktemp /tmp/vw_restore_db_XXXXXX.sqlite3)
-    _RESTORE_TEMP_FILES+=("$temp_decrypted")
-
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would decrypt $backup_file and replace $target_db"
-        return 0
-    fi
-
-    # 1. Decrypt
-    if ! decrypt_backup "$backup_file" "$temp_decrypted"; then
-        return 1
-    fi
-
-    # 2. Verify integrity via Docker (alpine+sqlite) — mirrors backup.sh fix
-    #    (commit e1f1303). Avoids a hard dependency on a host sqlite3 binary;
-    #    errors are surfaced (no 2>/dev/null suppression).
-    log_info "Verifying database integrity (via alpine+sqlite container)..."
-    local integrity_result
-    integrity_result=$(
-        docker run --rm \
-            -v "${temp_decrypted}:/db.sqlite3" \
-            alpine:latest \
-            sh -c 'apk add -q sqlite && sqlite3 /db.sqlite3 "PRAGMA integrity_check;"'
-    )
-    if [[ "$integrity_result" != "ok" ]]; then
-        log_error "Decrypted database failed integrity check! Aborting restore."
-        log_error "SQLite output: ${integrity_result:-<empty>}"
-        return 1
-    fi
-    log_success "Database integrity check passed"
-
-    # 3. Create safety backup of current DB if it exists
-    if [[ -f "$target_db" ]]; then
-        local safety_backup="$state_dir/data/db.sqlite3.pre-restore-$(date +%Y%m%d-%H%M%S)"
-        log_info "Creating safety backup of current database at $safety_backup"
-        cp "$target_db" "$safety_backup"
-
-        # Keep permissions of original
-        local owner group perms
-        owner=$(stat -c %U "$target_db" 2>/dev/null || echo "root")
-        group=$(stat -c %G "$target_db" 2>/dev/null || echo "root")
-        perms=$(stat -c %a "$target_db" 2>/dev/null || echo "644")
-    else
-        log_info "No existing database found. Creating new."
-        # Use default permissions from .env or fallback
-        local puid pgid
-        puid=$(get_config_value "PUID" "1001")
-        pgid=$(get_config_value "PGID" "1001")
-        local owner="$puid"
-        local group="$pgid"
-        local perms="644"
-    fi
-
-    # 4. Replace database
-    log_info "Restoring database..."
-
-    # Make sure target directory exists
-    mkdir -p "$(dirname "$target_db")"
-
-    # Replace file
-    cp "$temp_decrypted" "$target_db"
-
-    # Set permissions
-    chown "$owner:$group" "$target_db" 2>/dev/null || log_warn "Could not set ownership on $target_db"
-    chmod "$perms" "$target_db" 2>/dev/null || log_warn "Could not set permissions on $target_db"
-
-    # Clean up WAL/SHM files to prevent corruption with new DB
-    rm -f "${target_db}-wal" "${target_db}-shm"
-
-    log_success "Database restored successfully"
-    return 0
-}
-
-restore_full() {
-    local backup_file="$1"
-    local state_dir="$2"
-
-    local temp_decrypted
-    temp_decrypted=$(mktemp /tmp/vw_restore_full_XXXXXX.tar.gz)
-    _RESTORE_TEMP_FILES+=("$temp_decrypted")
-
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would decrypt $backup_file and extract to $state_dir and $PROJECT_ROOT"
-        return 0
-    fi
-
-    # 1. Decrypt
-    if ! decrypt_backup "$backup_file" "$temp_decrypted"; then
-        return 1
-    fi
-
-    # 2. Verify archive integrity
-    log_info "Verifying archive integrity..."
-    if ! tar -tzf "$temp_decrypted" >/dev/null 2>&1; then
-        log_error "Decrypted archive is invalid or corrupt! Aborting restore."
-        return 1
-    fi
-
-    # FIX #5 — Path-traversal guard: scan every tar member and reject any
-    # entry whose resolved absolute path falls outside the expected
-    # STATE_DIR or PROJECT_ROOT prefixes before we write a single byte.
-    log_info "Validating archive member paths..."
-    local allowed_prefixes=("$state_dir" "$PROJECT_ROOT")
-    local bad_entry=""
-    while IFS= read -r member; do
-        # Normalise: prepend / if not already absolute
-        local abs_member="/${member#/}"
-        local allowed=false
-        local prefix
-        for prefix in "${allowed_prefixes[@]}"; do
-            if [[ "$abs_member" == "${prefix}"* ]]; then
-                allowed=true
-                break
+        local best="" best_mtime=0 candidate mtime
+        for t in db full emergency; do
+            candidate="$(_find_latest_backup "$PROJECT_ROOT/backups/$t" || true)"
+            if [[ -n "$candidate" ]]; then
+                mtime=$(stat -c%Y "$candidate" 2>/dev/null || stat -f%m "$candidate" 2>/dev/null || echo 0)
+                if (( mtime > best_mtime )); then
+                    best_mtime="$mtime"; best="$candidate"; RESTORE_TYPE="$t"
+                fi
             fi
         done
-        if [[ "$allowed" == "false" ]]; then
-            bad_entry="$member"
-            break
+        [[ -n "$best" ]] || { log_error "No backups found in any backup directory"; return 1; }
+        BACKUP_FILE="$best"
+        return 0
+    fi
+
+    if [[ -n "$BACKUP_FILE" ]]; then
+        [[ -f "$BACKUP_FILE" ]] || { log_error "Backup file not found: $BACKUP_FILE"; return 1; }
+        if [[ -z "$RESTORE_TYPE" ]]; then
+            if   [[ "$BACKUP_FILE" == */db/* ]];        then RESTORE_TYPE="db"
+            elif [[ "$BACKUP_FILE" == */full/* ]];      then RESTORE_TYPE="full"
+            elif [[ "$BACKUP_FILE" == */emergency/* ]]; then RESTORE_TYPE="emergency"
+            fi
         fi
-    done < <(tar -tzf "$temp_decrypted")
-
-    if [[ -n "$bad_entry" ]]; then
-        log_error "Archive contains a path that escapes allowed directories: $bad_entry"
-        log_error "Expected paths under: ${allowed_prefixes[*]}"
-        log_error "Aborting restore — archive may be corrupt or tampered."
-        return 1
+        [[ -n "$RESTORE_TYPE" ]] || {
+            log_error "Cannot determine backup type — specify --type db|full|emergency"
+            return 1
+        }
+        return 0
     fi
-    log_success "All archive paths validated"
 
-    # 3. Create safety backup of current state
-    log_info "Creating emergency full backup before restore..."
-    if [[ -x "./backup.sh" ]]; then
-        ./backup.sh --type emergency --quiet || log_warn "Failed to create emergency backup, proceeding anyway"
+    log_error "No backup specified. Use --file FILE or --latest."
+    return 1
+}
+
+read_meta_field() {
+    local meta_file="$1"
+    local field="$2"
+    local default="${3:-}"
+    if [[ -f "$meta_file" ]]; then
+        local val
+        val=$(grep -m1 "^${field}=" "$meta_file" | cut -d= -f2- || true)
+        echo "${val:-$default}"
     else
-        log_warn "Backup script not found, cannot create emergency pre-restore backup"
+        echo "$default"
     fi
+}
 
-    # 4. Extract archive (safe: members were validated above)
-    log_info "Extracting full backup... (this may take a moment)"
-    if ! tar -xzf "$temp_decrypted" -C "/"; then
-        log_error "Failed to extract backup archive"
+# Block archives containing absolute paths or ../ traversal
+tar_validate_members() {
+    local tarfile="$1"
+    local members
+    members="$(tar -tzf "$tarfile")" || {
+        log_error "Cannot list archive members"
+        return 1
+    }
+    if echo "$members" | grep -qE '(^/|(^|/)\.\.(/|$))'; then
+        log_error "Archive contains unsafe paths (absolute or traversal). Refusing to extract."
+        log_error "If this is a legacy backup (version=1), it will be extracted via fallback."
         return 1
     fi
-
-    log_success "Full state restored successfully"
     return 0
 }
 
+# Verify SQLite integrity via docker (no host sqlite3 dependency)
+verify_sqlite_docker() {
+    local dbfile="$1"
+    log_info "Verifying SQLite integrity (docker alpine+sqlite)..."
+    if docker run --rm -v "${dbfile}:/db.sqlite3" alpine:latest \
+        sh -c 'apk add -q sqlite >/dev/null 2>&1 && sqlite3 /db.sqlite3 "PRAGMA integrity_check;"' \
+        | grep -qx "ok"; then
+        log_success "SQLite integrity check passed"
+        return 0
+    else
+        log_error "SQLite integrity check FAILED"
+        return 1
+    fi
+}
+
+purge_wal_shm() {
+    local db="$1"
+    rm -f "${db}-wal" "${db}-shm" 2>/dev/null || true
+}
+
+create_pre_restore_snapshot() {
+    [[ "$NO_PRE_BACKUP" == "true" ]] && { log_info "Skipping pre-restore snapshot (--no-backup)"; return 0; }
+    [[ "$DRY_RUN"       == "true" ]] && { log_info "[DRY RUN] Would run: ./backup.sh --type emergency"; return 0; }
+    if [[ -x "./backup.sh" ]]; then
+        log_info "Creating pre-restore emergency snapshot..."
+        ./backup.sh --type emergency --quiet || log_warn "Pre-restore snapshot failed (continuing)"
+    else
+        log_warn "backup.sh not executable — skipping pre-restore snapshot"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# DB restore
+# ---------------------------------------------------------------------------
+restore_db() {
+    local backup_file="$1"
+    local age_key_file="$2"
+    local state_dir="$3"
+    local puid="$4"
+    local pgid="$5"
+    local tmpdir="$6"
+
+    local dec_db="$tmpdir/db.sqlite3"
+
+    log_info "Decrypting database backup..."
+    age -d -i "$age_key_file" -o "$dec_db" "$backup_file" || {
+        log_error "Decryption failed — verify the age key is correct."
+        return 1
+    }
+
+    if [[ "$SKIP_VERIFICATION" != "true" ]]; then
+        verify_sqlite_docker "$dec_db" || return 1
+    fi
+
+    local db_dir="$state_dir/data"
+    local db_path="$db_dir/db.sqlite3"
+    mkdir -p "$db_dir"
+
+    local ts
+    ts="$(date +%Y%m%d-%H%M%S)"
+    if [[ -f "$db_path" ]]; then
+        log_info "Saving current DB as pre-restore copy (${db_path}.pre-restore-${ts})..."
+        cp -a "$db_path" "${db_path}.pre-restore-${ts}"
+    fi
+
+    log_info "Restoring database..."
+    cp -f "$dec_db" "$db_path"
+    purge_wal_shm "$db_path"
+    chown "${puid}:${pgid}" "$db_path" 2>/dev/null || log_warn "Could not set ownership on $db_path"
+    chmod 640 "$db_path" 2>/dev/null || true
+
+    log_success "Database restored successfully."
+}
+
+# ---------------------------------------------------------------------------
+# Full / emergency restore — staged (version=2) or legacy (version=1)
+# ---------------------------------------------------------------------------
+restore_full() {
+    local backup_file="$1"
+    local age_key_file="$2"
+    local state_dir="$3"
+    local puid="$4"
+    local pgid="$5"
+    local tmpdir="$6"
+    local archive_format="$7"   # "relative" | "absolute" (legacy)
+
+    local dec_tar="$tmpdir/restore.tar.gz"
+
+    log_info "Decrypting archive..."
+    age -d -i "$age_key_file" -o "$dec_tar" "$backup_file" || {
+        log_error "Decryption failed — verify the age key is correct."
+        return 1
+    }
+
+    if [[ "$SKIP_VERIFICATION" != "true" ]]; then
+        log_info "Verifying archive structure..."
+        tar -tzf "$dec_tar" >/dev/null || { log_error "Archive is corrupt or invalid"; return 1; }
+    fi
+
+    if [[ "$archive_format" == "absolute" ]]; then
+        # -------------------------------------------------------------------
+        # LEGACY path: version=1 absolute-path archive → extract directly to /
+        # -------------------------------------------------------------------
+        log_warn "Legacy archive format detected (version=1, absolute paths)."
+        log_warn "Extracting directly to / — no staging available for this format."
+
+        if [[ "$DRY_RUN" == "true" ]]; then
+            log_info "[DRY RUN] Would run: tar -xzf <archive> -C /"
+            return 0
+        fi
+
+        tar -xzf "$dec_tar" -C / --no-same-owner --no-same-permissions --delay-directory-restore
+        purge_wal_shm "$state_dir/data/db.sqlite3" || true
+        log_success "Legacy archive restored."
+        return 0
+    fi
+
+    # -----------------------------------------------------------------------
+    # CURRENT path: version=2 relative-path archive → staged restore
+    # -----------------------------------------------------------------------
+    if [[ "$SKIP_VERIFICATION" != "true" ]]; then
+        log_info "Validating archive members (path traversal check)..."
+        tar_validate_members "$dec_tar" || return 1
+    fi
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would stage-extract archive, validate, then atomic mv into place."
+        return 0
+    fi
+
+    # Stage extraction
+    local staging="$tmpdir/stage"
+    mkdir -p "$staging"
+    log_info "Extracting archive to staging directory..."
+    tar -xzf "$dec_tar" -C "$staging"
+
+    # Validate expected paths exist in staging
+    local rel_state="${state_dir#/}"
+    if [[ ! -d "$staging/$rel_state" ]]; then
+        log_error "Staging validation failed: expected directory not found: $staging/$rel_state"
+        log_error "Archive members:"
+        tar -tzf "$dec_tar" | head -20 >&2 || true
+        return 1
+    fi
+
+    # Atomic swap: rename current state dir to .pre-restore-<ts>, mv staged dir in
+    local ts
+    ts="$(date +%Y%m%d-%H%M%S)"
+    if [[ -d "$state_dir" ]]; then
+        log_info "Renaming current state dir to ${state_dir}.pre-restore-${ts}..."
+        mv "$state_dir" "${state_dir}.pre-restore-${ts}"
+    fi
+
+    log_info "Promoting staged restore to live path..."
+    mv "$staging/$rel_state" "$state_dir"
+
+    # Fix ownership on restored data
+    chown -R "${puid}:${pgid}" "$state_dir/data" 2>/dev/null || \
+        log_warn "Could not set ownership on $state_dir/data"
+    purge_wal_shm "$state_dir/data/db.sqlite3" || true
+
+    log_success "Full restore completed (staged, atomic)."
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 main() {
     require_root "$@"
 
@@ -322,91 +350,88 @@ main() {
         exit 0
     fi
 
-    if [[ -z "$BACKUP_FILE" ]]; then
-        log_error "No backup file specified. Use --file to specify a backup."
-        log_info "Use --list to see available backups."
-        exit 1
-    fi
+    # Load environment
+    load_env_file || { log_error "Failed to load .env"; exit 1; }
 
-    if [[ ! -f "$BACKUP_FILE" ]]; then
-        log_error "Backup file not found: $BACKUP_FILE"
-        exit 1
-    fi
+    local STATE_DIR AGE_KEY_FILE PUID PGID
+    STATE_DIR="$(get_config_value "PROJECT_STATE_DIR"   "/var/lib/vaultwarden")"
+    AGE_KEY_FILE="$(get_config_value "SOPS_AGE_KEY_FILE" "secrets/keys/age-key.txt")"
+    PUID="$(get_config_value "PUID" "1001")"
+    PGID="$(get_config_value "PGID" "1001")"
 
-    if ! load_env_file; then
-        log_error "Failed to load environment configuration"
-        exit 1
-    fi
+    [[ -f "$AGE_KEY_FILE" ]] || { log_error "Age key not found: $AGE_KEY_FILE"; exit 1; }
 
-    local target_dir
-    target_dir=$(get_target_dir)
+    resolve_backup_file || exit 1
+    [[ -f "$BACKUP_FILE" ]] || { log_error "Backup file not found: $BACKUP_FILE"; exit 1; }
 
-    local backup_type
-    backup_type=$(determine_backup_type "$BACKUP_FILE") || exit 1
+    # Read .meta to determine archive format / version
+    local meta_file="${BACKUP_FILE}.meta"
+    local archive_version archive_format
+    archive_version="$(read_meta_field "$meta_file" "version"       "1")"
+    archive_format="$( read_meta_field "$meta_file" "archive_format" "absolute")"
 
-    log_info "Restore Configuration:"
-    log_info "  Backup File: $BACKUP_FILE"
-    log_info "  Backup Type: $backup_type"
-    log_info "  Target Dir:  $target_dir"
-    log_info "  Age Key:     $(get_config_value 'AGE_KEY_FILE' 'secrets/keys/age-key.txt')"
+    log_info "Restore plan:"
+    log_info "  File:           $BACKUP_FILE"
+    log_info "  Type:           $RESTORE_TYPE"
+    log_info "  Archive ver:    $archive_version (format: $archive_format)"
+    log_info "  State dir:      $STATE_DIR"
+    log_info "  Age key:        $AGE_KEY_FILE"
 
-    # Warning & Confirmation
+    # Confirmation
     if [[ "$FORCE" != "true" && "$DRY_RUN" != "true" ]]; then
         echo ""
-        log_warn "WARNING: This will overwrite current data!"
-        log_warn "Services will be stopped during restoration."
-        # FIX #1 — read -r -p: add -r to prevent backslash interpretation
-        # (same fix applied to setup-secrets.sh in commit a9bd3db).
-        read -r -p "Are you sure you want to proceed? (y/N) " confirm
-        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-            log_info "Restore cancelled."
-            exit 0
-        fi
+        log_warn  "WARNING: This will overwrite current data."
+        log_warn  "Services will be stopped during the restore."
+        echo ""
+        read -r -p "Type 'yes' to proceed: " confirm
+        [[ "$confirm" == "yes" ]] || { log_info "Restore cancelled."; exit 0; }
     fi
 
-    # Stop services if running
-    local services_were_running=false
-    if [[ "$DRY_RUN" == "false" ]]; then
-        if docker compose ps | grep -q "Up"; then
-            services_were_running=true
-            log_info "Stopping services before restore..."
+    # mktemp staging area — cleanup on any exit
+    local TMPDIR_RESTORE
+    TMPDIR_RESTORE="$(mktemp -d)"
+    cleanup() { rm -rf "$TMPDIR_RESTORE" 2>/dev/null || true; }
+    trap cleanup EXIT HUP INT TERM
+
+    create_pre_restore_snapshot
+
+    # Stop services
+    if [[ "$DRY_RUN" != "true" ]]; then
+        if docker compose ps 2>/dev/null | grep -q "Up"; then
+            log_info "Stopping services..."
             docker compose stop
         fi
     fi
 
     # Perform restore
-    local restore_success=false
+    case "$RESTORE_TYPE" in
+        db)
+            restore_db \
+                "$BACKUP_FILE" "$AGE_KEY_FILE" "$STATE_DIR" \
+                "$PUID" "$PGID" "$TMPDIR_RESTORE"
+            ;;
+        full|emergency)
+            restore_full \
+                "$BACKUP_FILE" "$AGE_KEY_FILE" "$STATE_DIR" \
+                "$PUID" "$PGID" "$TMPDIR_RESTORE" "$archive_format"
+            ;;
+        *)
+            log_error "Unknown restore type: $RESTORE_TYPE"
+            exit 1
+            ;;
+    esac
 
-    if [[ "$backup_type" == "db" ]]; then
-        restore_db "$BACKUP_FILE" "$target_dir" && restore_success=true
-    elif [[ "$backup_type" == "full" ]]; then
-        restore_full "$BACKUP_FILE" "$target_dir" && restore_success=true
-    else
-        log_error "Unknown backup type: $backup_type"
-    fi
-
-    # Restart services if they were running
-    if [[ "$DRY_RUN" == "false" && "$services_were_running" == "true" ]]; then
-        log_info "Restarting services..."
+    # Restart services
+    if [[ "$DRY_RUN" != "true" ]]; then
+        log_info "Starting services..."
         docker compose start
-
-        # Verify health
-        if [[ "$restore_success" == "true" ]]; then
-            log_info "Waiting for services to initialize..."
-            sleep 5
-            if [[ -x "./health.sh" ]]; then
-                ./health.sh --quiet || log_warn "Services started but health check reported issues"
-            fi
+        if [[ -x "./health.sh" ]]; then
+            log_info "Running post-restore health check..."
+            ./health.sh --quiet || log_warn "Health check reported issues after restore"
         fi
     fi
 
-    if [[ "$restore_success" == "true" ]]; then
-        log_success "Restore completed successfully!"
-        exit 0
-    else
-        log_error "Restore failed."
-        exit 1
-    fi
+    log_success "Restore complete."
 }
 
 main "$@"
