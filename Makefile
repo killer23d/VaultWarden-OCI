@@ -220,7 +220,7 @@ clean: ## Clean up Docker resources only
 
 clean-all: ## Clean up everything (DESTRUCTIVE)
 	@echo "$(RED)WARNING: This will remove all containers, volumes, and data!$(NC)"
-	@read -p "Are you sure? Type 'yes' to continue: " confirm && [ "$$confirm" = "yes" ] || exit 1
+	@read -r -p "Are you sure? Type 'yes' to continue: " confirm && [ "$$confirm" = "yes" ] || exit 1
 	@$(DOCKER_COMP) down -v --remove-orphans
 	@docker system prune -af --volumes
 
