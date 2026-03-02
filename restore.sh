@@ -11,6 +11,9 @@
 #   - Docker alpine+sqlite for integrity checks (no host sqlite3 dependency)
 #   - tar member validation blocks path traversal before extraction
 #   - Staged full restore: extract → validate → atomic mv (all-or-nothing)
+#   - PROJECT_ROOT config files (.env, docker-compose.yml, caddy/, fail2ban/)
+#     restored from archive after STATE_DIR promotion; secrets/ and *.sh
+#     scripts are intentionally excluded
 #   - Pre-restore emergency snapshot before any destructive operation
 #   - AGE_KEY_FILE read from .env (SOPS_AGE_KEY_FILE) with safe default
 
@@ -333,6 +336,53 @@ restore_full() {
     chown -R "${puid}:${pgid}" "$state_dir/data" 2>/dev/null || \
         log_warn "Could not set ownership on $state_dir/data"
     purge_wal_shm "$state_dir/data/db.sqlite3" || true
+
+    # -----------------------------------------------------------------------
+    # Restore PROJECT_ROOT config files from staging.
+    #
+    # Intentional exclusions:
+    #   *.sh scripts  — may be running and are not data; operator should
+    #                   update scripts manually if needed
+    #   secrets/      — the live age key decrypted this archive; overwriting
+    #                   it with an archived version would break access to all
+    #                   backups made after that key was rotated
+    # -----------------------------------------------------------------------
+    local rel_project="${PROJECT_ROOT#/}"
+    if [[ -d "$staging/$rel_project" ]]; then
+        log_info "Restoring project config files from archive..."
+
+        # Explicit config files (safe to replace while scripts are running)
+        local config_files=(
+            .env
+            docker-compose.yml
+            docker-compose.override.yml
+            .env.example
+        )
+        for f in "${config_files[@]}"; do
+            local src="$staging/$rel_project/$f"
+            if [[ -f "$src" ]]; then
+                cp -f "$src" "$PROJECT_ROOT/$f"
+                log_info "  Restored: $f"
+            fi
+        done
+
+        # Config directories (caddy, fail2ban, nginx — excludes secrets/)
+        local config_dirs=(caddy fail2ban nginx)
+        for d in "${config_dirs[@]}"; do
+            local src_dir="$staging/$rel_project/$d"
+            if [[ -d "$src_dir" ]]; then
+                cp -rf "$src_dir" "$PROJECT_ROOT/"
+                log_info "  Restored: $d/"
+            fi
+        done
+
+        log_success "Project config files restored from archive."
+        log_warn "secrets/ and *.sh scripts were intentionally not restored."
+        log_warn "Restart services for any .env changes to take full effect."
+    else
+        log_warn "Project root not found in archive staging ($rel_project) — config files not restored."
+        log_warn "This may be expected for archives created before PROJECT_ROOT was included."
+    fi
 
     log_success "Full restore completed (staged, atomic)."
 }
