@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # backup.sh - VaultWarden-OCI backup (atomic DB snapshot, relative-path archive, age encryption)
 # archive_format=relative: archives use paths relative to / so restores can stage safely.
+#
+# Fix: global TMPDIR_BACKUP created in main() with EXIT/INT/TERM trap so all
+# decrypted/intermediate artifacts are purged on any exit, including SIGINT
+# mid-function (previously each function had its own mktemp with manual rm -rf,
+# leaving plaintext snapshots on disk if the process was killed between steps).
 
 set -euo pipefail
 
@@ -158,6 +163,7 @@ perform_db_backup() {
     local target_dir="$1"
     local timestamp="$2"
     local age_pub_key="$3"
+    local shared_tmpdir="$4"    # provided by main(); covered by global EXIT/INT/TERM trap
     local state_dir
     state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
 
@@ -171,10 +177,7 @@ perform_db_backup() {
     local db_file="$state_dir/data/db.sqlite3"
     [[ -f "$db_file" ]] || { log_error "Database not found: $db_file"; return 1; }
 
-    # mktemp — cleaned up by caller's trap
-    local tmpdir
-    tmpdir="$(mktemp -d)"
-    local snap="$tmpdir/db.sqlite3"
+    local snap="$shared_tmpdir/db.sqlite3"
 
     b_log_info "Creating atomic DB snapshot..."
     if ! create_db_snapshot_docker "$state_dir" "$snap"; then
@@ -182,17 +185,15 @@ perform_db_backup() {
         cp "$db_file" "$snap"
     fi
 
-    verify_sqlite_docker "$snap" || { rm -rf "$tmpdir"; return 1; }
+    verify_sqlite_docker "$snap" || return 1
 
     b_log_info "Encrypting DB snapshot..."
     local enc="$target_dir/db_backup_$timestamp.sqlite3.age"
     if ! age -r "$age_pub_key" -o "$enc" "$snap"; then
         log_error "Encryption failed"
-        rm -rf "$tmpdir"
         return 1
     fi
     secure_file "$enc" 600
-    rm -rf "$tmpdir"
 
     [[ -s "$enc" ]] || { log_error "Encrypted output is empty"; rm -f "$enc"; return 1; }
 
@@ -216,6 +217,7 @@ perform_full_backup() {
     local timestamp="$2"
     local age_pub_key="$3"
     local backup_label="${4:-full}"   # full | emergency
+    local shared_tmpdir="$5"          # provided by main(); covered by global EXIT/INT/TERM trap
     local state_dir
     state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
 
@@ -228,11 +230,9 @@ perform_full_backup() {
 
     require_commands tar || return 1
 
-    local tmpdir
-    tmpdir="$(mktemp -d)"
-    local snap_dir="$tmpdir/stage"
+    local snap_dir="$shared_tmpdir/stage"
     local snap_db="$snap_dir/${state_dir#/}/data/db.sqlite3"
-    local temp_tar="$tmpdir/${backup_label}_backup_$timestamp.tar.gz"
+    local temp_tar="$shared_tmpdir/${backup_label}_backup_$timestamp.tar.gz"
 
     mkdir -p "$(dirname "$snap_db")"
 
@@ -297,7 +297,6 @@ perform_full_backup() {
     # tar exits 1 for harmless warnings (file changed); only >1 is a real error
     if (( tar_exit > 1 )); then
         log_error "tar failed with exit code $tar_exit"
-        rm -rf "$tmpdir"
         return 1
     fi
 
@@ -308,7 +307,7 @@ perform_full_backup() {
     # -----------------------------------------------------------------------
     if [[ "$db_snapshot_ok" == "true" ]]; then
         b_log_info "Injecting clean DB snapshot into archive..."
-        local temp_tar_raw="$tmpdir/${backup_label}_backup_$timestamp.tar"
+        local temp_tar_raw="$shared_tmpdir/${backup_label}_backup_$timestamp.tar"
 
         # Decompress → append → recompress
         if gunzip -c "$temp_tar" > "$temp_tar_raw" \
@@ -331,7 +330,7 @@ perform_full_backup() {
             )
             tar_exit=0
             tar -czf "$temp_tar" -C / "${tar_excludes[@]}" "${tar_sources[@]}" 2>/dev/null || tar_exit=$?
-            (( tar_exit <= 1 )) || { log_error "Rebuild tar failed"; rm -rf "$tmpdir"; return 1; }
+            (( tar_exit <= 1 )) || { log_error "Rebuild tar failed"; return 1; }
         fi
     fi
 
@@ -343,11 +342,9 @@ perform_full_backup() {
 
     if ! age -r "$age_pub_key" -o "$enc" "$temp_tar"; then
         log_error "Encryption failed"
-        rm -rf "$tmpdir"
         return 1
     fi
     secure_file "$enc" 600
-    rm -rf "$tmpdir"
 
     [[ -s "$enc" ]] || { log_error "Encrypted output is empty"; rm -f "$enc"; return 1; }
 
@@ -371,6 +368,13 @@ main() {
     local state_dir
     state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
     local LOCK_FILE="${state_dir}/.locks/backup.lock"
+
+    # Global tmpdir — all decrypted/intermediate artifacts land here.
+    # Trap ensures cleanup on any exit (normal, SIGINT, SIGTERM, ERR via set -e).
+    local TMPDIR_BACKUP
+    TMPDIR_BACKUP="$(mktemp -d)"
+    cleanup() { rm -rf "$TMPDIR_BACKUP" 2>/dev/null || true; }
+    trap cleanup EXIT HUP INT TERM
 
     # flock-based lock — kernel releases on any exit, no stale locks
     if [[ "$FORCE" != "true" && "$DRY_RUN" != "true" ]]; then
@@ -408,10 +412,10 @@ main() {
     local backup_success=false
     case "$actual_type" in
         db)
-            perform_db_backup "$backup_dir" "$timestamp" "$age_pub_key" && backup_success=true
+            perform_db_backup "$backup_dir" "$timestamp" "$age_pub_key" "$TMPDIR_BACKUP" && backup_success=true
             ;;
         full|emergency)
-            perform_full_backup "$backup_dir" "$timestamp" "$age_pub_key" "$actual_type" && backup_success=true
+            perform_full_backup "$backup_dir" "$timestamp" "$age_pub_key" "$actual_type" "$TMPDIR_BACKUP" && backup_success=true
             ;;
         *)
             log_error "Invalid backup type: $actual_type"; exit 1 ;;
