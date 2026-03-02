@@ -375,7 +375,7 @@ do_edit() {
 
     if ! python3 -c "import yaml, sys; yaml.safe_load(open('$temp_file'))" 2>/dev/null; then
         log_error "Invalid YAML structure after editing"
-        read -p "Discard changes? (yes/no): " discard
+        read -r -p "Discard changes? (yes/no): " discard
         if [[ "$discard" == "yes" ]]; then
             log_info "Changes discarded"
             return 1
