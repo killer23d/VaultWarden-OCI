@@ -703,6 +703,9 @@ run_email_diagnostics() {
 update_firewall_ranges() {
     if [[ "$UPDATE_FIREWALL" != "true" ]]; then log_info "Skipping firewall update"; return 0; fi
     if [[ "$DRY_RUN"         == "true" ]]; then log_info "[DRY RUN] Would safely update Cloudflare IP ranges in firewall"; return 0; fi
+    
+    require_root "$@"
+    
     log_info "Safely updating Cloudflare IP ranges in firewall..."
     local cf_ipv4_file="/tmp/cf_ipv4_ranges_maint.txt"
     local cf_ipv6_file="/tmp/cf_ipv6_ranges_maint.txt"
@@ -916,6 +919,8 @@ generate_maintenance_summary() {
 # Main
 # ---------------------------------------------------------------------------
 main() {
+    require_root "$@"
+
     log_header "VaultWarden-OCI Maintenance Manager"
 
     local state_dir

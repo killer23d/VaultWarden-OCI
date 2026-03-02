@@ -748,6 +748,8 @@ generate_json_report() {
 }
 
 main() {
+    require_root "$@"
+
     health_log_info "VaultWarden-OCI Health Monitor - Set-and-Forget Edition"
     [[ "$AUTO_RECOVER" == "true" ]] && health_log_info "🔧 Auto-recovery enabled"
     [[ "$COMPREHENSIVE" == "true" ]] && health_log_info "Running comprehensive health checks..." || \

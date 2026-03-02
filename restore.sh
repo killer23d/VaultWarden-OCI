@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# restore.sh - VaultWarden backup restoration with enhanced safety
+# restore.sh - Enhanced VaultWarden-OCI restore script with safety checks
+# Supports restoring database-only or full state backups
 
 set -euo pipefail
 
@@ -10,850 +11,340 @@ cd "$PROJECT_ROOT"
 source "lib/common.sh"
 init_common_lib "$0"
 source "lib/docker.sh"
-source "lib/crypto.sh"
 source "lib/backup_utils.sh"
-
-# Safe cleanup registry — mirrors the pattern from backup.sh.
-CLEANUP_DIRS=()
-CLEANUP_FILES=()
-register_cleanup_dir()  { CLEANUP_DIRS+=("$1"); }
-register_cleanup_file() { CLEANUP_FILES+=("$1"); }
-
-# FIX [ISSUE 1]: Use the "${arr[@]+"${arr[@]}"}" expansion for both arrays so
-# that an empty array never triggers "unbound variable" under set -u on bash 3.2.
-perform_cleanup() {
-    local f
-    for f in "${CLEANUP_FILES[@]+"${CLEANUP_FILES[@]}"}"; do
-        rm -f "$f" 2>/dev/null || true
-    done
-    local i
-    # FIX [ISSUE 1]: Guard added here — was previously missing for CLEANUP_DIRS.
-    local _ndirs="${#CLEANUP_DIRS[@]}"
-    if (( _ndirs > 0 )); then
-        for (( i=_ndirs-1; i>=0; i-- )); do
-            rm -rf "${CLEANUP_DIRS[$i]}" 2>/dev/null || true
-        done
-    fi
-}
-trap perform_cleanup EXIT
+source "lib/crypto.sh"
 
 # Configuration
 BACKUP_FILE=""
-RESTORE_TYPE=""
-FORCE_RESTORE=false
+TARGET_DIR=""
 DRY_RUN=false
-SKIP_VERIFICATION=false
-INTERACTIVE=true
-CREATE_RESTORE_BACKUP=true
-USE_LATEST=false
+FORCE=false
+LIST_ONLY=false
 
 show_help() {
     cat << 'EOF'
-VaultWarden-OCI Restore Script with Safety Checks
+VaultWarden-OCI Restore Script
 
 USAGE:
     ./restore.sh [OPTIONS]
 
 OPTIONS:
-    --file FILE             Specific backup file to restore
-    --type TYPE             Backup type to restore (db, full, emergency)
-    --latest                Restore the most recent backup (by modification
-                            time) across all types; use with --type to
-                            restrict to a specific type
-    --force                 Skip confirmation prompts
-    --no-backup             Skip creating restore point backup
-    --skip-verification     Skip backup integrity verification
-    --dry-run               Show what would be restored without executing
-    --help                  Show this help
+    --file FILE     Path to the backup file to restore (.age)
+    --target DIR    Target directory for restore (default: read from .env or /var/lib/vaultwarden)
+    --list          List available backups and exit
+    --dry-run       Show what would be done without executing
+    --force         Skip confirmation prompts and safety checks
+    --help          Show this help
 
 EXAMPLES:
-    ./restore.sh                                    # Interactive restore
-    ./restore.sh --type db                          # Restore latest database backup
-    ./restore.sh --latest --force --no-backup       # Auto-restore newest backup (used by update.sh rollback)
-    ./restore.sh --latest --type full --force       # Auto-restore newest full backup
-    ./restore.sh --file backup-20241101.tar.gz.age  # Restore specific file
-    ./restore.sh --dry-run --type full              # Preview full system restore
-
-SAFETY FEATURES:
-    - Interactive backup selection with metadata display
-    - Automatic restore point backup before restore
-    - Backup integrity verification before restore
-    - Service health checks after restore
-    - Rollback capability if restore fails
-
-RESTORE TYPES:
-    db          - Database only (preserves configuration)
-    full        - Configuration + data (NO secrets)
-    emergency   - EVERYTHING including secrets
-
-EXIT CODES:
-    0  - Restore completed successfully, all health checks passed
-    1  - Restore failed or critical phase error
-    2  - Restore completed but post-restore health check reported issues
+    ./restore.sh --list
+    ./restore.sh --file backups/db/db_backup_20240101_120000.sqlite3.age
+    ./restore.sh --file backups/full/full_backup_20240101_120000.tar.gz.age --force
 EOF
 }
 
-# Argument Parsing
+# Argument parsing
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --file)              BACKUP_FILE="$2"; shift 2 ;;
-        --type)              RESTORE_TYPE="$2"; shift 2 ;;
-        --latest)            USE_LATEST=true; INTERACTIVE=false; shift ;;
-        --force)             FORCE_RESTORE=true; INTERACTIVE=false; shift ;;
-        --no-backup)         CREATE_RESTORE_BACKUP=false; shift ;;
-        --skip-verification) SKIP_VERIFICATION=true; shift ;;
-        --dry-run)           DRY_RUN=true; shift ;;
-        --help)              show_help; exit 0 ;;
-        *) log_error "Unknown option: $1"; show_help; exit 1 ;;
+        --file)     BACKUP_FILE="$2"; shift 2 ;;
+        --target)   TARGET_DIR="$2"; shift 2 ;;
+        --list)     LIST_ONLY=true; shift ;;
+        --dry-run)  DRY_RUN=true; shift ;;
+        --force)    FORCE=true; shift ;;
+        --help)     show_help; exit 0 ;;
+        *)          log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done
 
-# ---------------------------------------------------------------------------
-# _find_latest_backup DIR
-# Returns the most recent .age file in DIR by modification time.
-# Uses find -printf '%T@ %p\n' | sort -n so result is correct regardless
-# of filename date format, unlike lexicographic 'sort | tail -1'.
-# ---------------------------------------------------------------------------
-_find_latest_backup() {
-    local dir="$1"
-    [[ -d "$dir" ]] || return 1
-    find "$dir" -name "*.age" -type f -printf '%T@ %p\n' 2>/dev/null \
-        | sort -n \
-        | tail -1 \
-        | cut -d' ' -f2-
+list_backups() {
+    log_info "Available Database Backups:"
+    if [[ -d "$PROJECT_ROOT/backups/db" ]]; then
+        find "$PROJECT_ROOT/backups/db" -name "*.age" -type f -exec ls -lh {} \; | sort -r | head -n 10
+    else
+        echo "  None found."
+    fi
+    
+    echo ""
+    log_info "Available Full Backups:"
+    if [[ -d "$PROJECT_ROOT/backups/full" ]]; then
+        find "$PROJECT_ROOT/backups/full" -name "*.age" -type f -exec ls -lh {} \; | sort -r | head -n 10
+    else
+        echo "  None found."
+    fi
+    
+    echo ""
+    log_info "Available Emergency Backups:"
+    if [[ -d "$PROJECT_ROOT/backups/emergency" ]]; then
+        find "$PROJECT_ROOT/backups/emergency" -name "*.age" -type f -exec ls -lh {} \; | sort -r | head -n 10
+    else
+        echo "  None found."
+    fi
 }
 
-# ---------------------------------------------------------------------------
-# select_backup_interactively
-# ---------------------------------------------------------------------------
-select_backup_interactively() {
-    if [[ "$INTERACTIVE" != "true" ]]; then
+get_target_dir() {
+    if [[ -n "$TARGET_DIR" ]]; then
+        echo "$TARGET_DIR"
+    else
+        get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden"
+    fi
+}
+
+determine_backup_type() {
+    local file="$1"
+    local filename
+    filename=$(basename "$file")
+    
+    if [[ -f "${file}.meta" ]]; then
+        local type
+        type=$(grep -m 1 "^type=" "${file}.meta" | cut -d= -f2)
+        if [[ -n "$type" ]]; then
+            echo "$type"
+            return 0
+        fi
+    fi
+    
+    # Fallback to filename guessing
+    if [[ "$filename" == *"db_backup"* || "$filename" == *".sqlite3.age" ]]; then
+        echo "db"
+    elif [[ "$filename" == *"full_backup"* || "$filename" == *".tar.gz.age" ]]; then
+        echo "full"
+    else
+        log_error "Could not determine backup type for: $file"
+        return 1
+    fi
+}
+
+decrypt_backup() {
+    local encrypted_file="$1"
+    local decrypted_file="$2"
+    local age_key_file="secrets/keys/age-key.txt"
+    
+    if [[ ! -f "$age_key_file" ]]; then
+        log_error "Age key file not found: $age_key_file"
+        return 1
+    fi
+    
+    log_info "Decrypting backup file..."
+    if age -d -i "$age_key_file" -o "$decrypted_file" "$encrypted_file"; then
+        log_success "Backup decrypted successfully"
+        return 0
+    else
+        log_error "Failed to decrypt backup. Verify the age key is correct."
+        rm -f "$decrypted_file"
+        return 1
+    fi
+}
+
+restore_db() {
+    local backup_file="$1"
+    local state_dir="$2"
+    
+    local target_db="$state_dir/data/db.sqlite3"
+    local temp_decrypted="/tmp/vw_restore_temp.sqlite3"
+    
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would decrypt $backup_file and replace $target_db"
         return 0
     fi
-
-    echo -e "${COLOR_YELLOW}PRE-RESTORE CHECKLIST:${COLOR_RESET}"
-    echo -e "Ensure you have the following available:"
-    echo -e "- The 'age-key.txt' file (from your backup)"
-    echo -e "- The 'secrets.yaml' file (if restoring full config)"
-    echo -e "- Your Cloudflare API Tokens (if rebuilding server)"
-    echo ""
-
-    log_info "Available backups for restoration:"
-    echo ""
-
-    if ! list_backups; then
-        log_error "No backups found for restoration"
+    
+    # 1. Decrypt
+    if ! decrypt_backup "$backup_file" "$temp_decrypted"; then
         return 1
     fi
+    
+    # 2. Verify integrity of decrypted DB
+    log_info "Verifying database integrity..."
+    if ! sqlite3 "$temp_decrypted" "PRAGMA integrity_check;" | grep -q "ok"; then
+        log_error "Decrypted database failed integrity check! Aborting restore."
+        rm -f "$temp_decrypted"
+        return 1
+    fi
+    
+    # 3. Create safety backup of current DB if it exists
+    if [[ -f "$target_db" ]]; then
+        local safety_backup="$state_dir/data/db.sqlite3.pre-restore-$(date +%Y%m%d-%H%M%S)"
+        log_info "Creating safety backup of current database at $safety_backup"
+        cp "$target_db" "$safety_backup"
+        
+        # Keep permissions of original
+        local owner group perms
+        owner=$(stat -c %U "$target_db" 2>/dev/null || echo "root")
+        group=$(stat -c %G "$target_db" 2>/dev/null || echo "root")
+        perms=$(stat -c %a "$target_db" 2>/dev/null || echo "644")
+    else
+        log_info "No existing database found. Creating new."
+        # Use default permissions from .env or fallback
+        local puid pgid
+        puid=$(get_config_value "PUID" "1001")
+        pgid=$(get_config_value "PGID" "1001")
+        local owner="$puid"
+        local group="$pgid"
+        local perms="644"
+    fi
+    
+    # 4. Replace database
+    log_info "Restoring database..."
+    
+    # Make sure target directory exists
+    mkdir -p "$(dirname "$target_db")"
+    
+    # Replace file
+    cp "$temp_decrypted" "$target_db"
+    
+    # Set permissions
+    chown "$owner:$group" "$target_db" 2>/dev/null || log_warn "Could not set ownership on $target_db"
+    chmod "$perms" "$target_db" 2>/dev/null || log_warn "Could not set permissions on $target_db"
+    
+    # Clean up WAL/SHM files to prevent corruption with new DB
+    rm -f "${target_db}-wal" "${target_db}-shm"
+    
+    # Clean up temp
+    rm -f "$temp_decrypted"
+    
+    log_success "Database restored successfully"
+    return 0
+}
 
-    echo ""
-    read -r -p "Enter the full filename of the backup to restore (or 'quit' to exit): " selected_file
+restore_full() {
+    local backup_file="$1"
+    local state_dir="$2"
+    
+    local temp_decrypted="/tmp/vw_restore_temp.tar.gz"
+    
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would decrypt $backup_file and extract to $state_dir and $PROJECT_ROOT"
+        return 0
+    fi
+    
+    # 1. Decrypt
+    if ! decrypt_backup "$backup_file" "$temp_decrypted"; then
+        return 1
+    fi
+    
+    # 2. Verify archive
+    log_info "Verifying archive integrity..."
+    if ! tar -tzf "$temp_decrypted" >/dev/null 2>&1; then
+        log_error "Decrypted archive is invalid or corrupt! Aborting restore."
+        rm -f "$temp_decrypted"
+        return 1
+    fi
+    
+    # 3. Create safety backup of current state
+    log_info "Creating emergency full backup before restore..."
+    if [[ -x "./backup.sh" ]]; then
+        ./backup.sh --type emergency --quiet || log_warn "Failed to create emergency backup, proceeding anyway"
+    else
+        log_warn "Backup script not found, cannot create emergency pre-restore backup"
+    fi
+    
+    # 4. Extract archive
+    log_info "Extracting full backup... (this may take a moment)"
+    
+    # The tar archive was created with absolute paths (starting from /)
+    # We extract it to the root directory, which places files in their original absolute locations
+    if ! tar -xzf "$temp_decrypted" -C "/"; then
+        log_error "Failed to extract backup archive"
+        rm -f "$temp_decrypted"
+        return 1
+    fi
+    
+    # Clean up temp
+    rm -f "$temp_decrypted"
+    
+    log_success "Full state restored successfully"
+    return 0
+}
 
-    if [[ "$selected_file" == "quit" ]] || [[ -z "$selected_file" ]]; then
-        log_info "Restore cancelled by user"
+main() {
+    require_root "$@"
+
+    log_header "VaultWarden-OCI Restore Utility"
+    
+    if [[ "$LIST_ONLY" == "true" ]]; then
+        list_backups
         exit 0
     fi
-
-    local backup_found=false
-    local backup_types=("db" "full" "emergency")
-
-    for backup_type in "${backup_types[@]}"; do
-        local backup_path="$PROJECT_ROOT/backups/$backup_type/$selected_file"
-        if [[ -f "$backup_path" ]]; then
-            BACKUP_FILE="$backup_path"
-            RESTORE_TYPE="$backup_type"
-            backup_found=true
-            break
-        fi
-    done
-
-    if [[ "$backup_found" != "true" ]]; then
-        log_error "Backup file not found: $selected_file"
-        return 1
+    
+    if [[ -z "$BACKUP_FILE" ]]; then
+        log_error "No backup file specified. Use --file to specify a backup."
+        log_info "Use --list to see available backups."
+        exit 1
     fi
-
-    log_info "Selected backup: $(basename "$BACKUP_FILE")"
-    log_info "Restore type: $RESTORE_TYPE"
-
-    if [[ -f "$BACKUP_FILE.meta" ]]; then
-        echo ""
-        log_info "Backup metadata:"
-        while IFS= read -r line; do
-            [[ "$line" =~ ^[a-zA-Z_]+=.*$ ]] && echo "  $line"
-        done < "$BACKUP_FILE.meta"
-        echo ""
+    
+    if [[ ! -f "$BACKUP_FILE" ]]; then
+        log_error "Backup file not found: $BACKUP_FILE"
+        exit 1
     fi
-
-    if [[ "$FORCE_RESTORE" != "true" ]]; then
-        read -r -p "Continue with restore? (yes/no): " confirm
-        if [[ "$confirm" != "yes" ]]; then
-            log_info "Restore cancelled by user"
+    
+    if ! load_env_file; then
+        log_error "Failed to load environment configuration"
+        exit 1
+    fi
+    
+    local target_dir
+    target_dir=$(get_target_dir)
+    
+    local backup_type
+    backup_type=$(determine_backup_type "$BACKUP_FILE") || exit 1
+    
+    log_info "Restore Configuration:"
+    log_info "  Backup File: $BACKUP_FILE"
+    log_info "  Backup Type: $backup_type"
+    log_info "  Target Dir:  $target_dir"
+    
+    # Warning & Confirmation
+    if [[ "$FORCE" != "true" && "$DRY_RUN" != "true" ]]; then
+        echo ""
+        log_warn "WARNING: This will overwrite current data!"
+        log_warn "Services will be stopped during restoration."
+        read -p "Are you sure you want to proceed? (y/N) " confirm
+        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+            log_info "Restore cancelled."
             exit 0
         fi
     fi
-
-    return 0
-}
-
-# ---------------------------------------------------------------------------
-# resolve_backup_file
-# ---------------------------------------------------------------------------
-resolve_backup_file() {
-    # Case 1: --latest flag — find most recent backup by mtime
-    if [[ "$USE_LATEST" == "true" ]]; then
-        if [[ -n "$RESTORE_TYPE" ]]; then
-            local backup_dir="$PROJECT_ROOT/backups/$RESTORE_TYPE"
-            BACKUP_FILE=$(_find_latest_backup "$backup_dir")
-            if [[ -z "$BACKUP_FILE" ]]; then
-                log_error "No backups found for type: $RESTORE_TYPE"
-                return 1
-            fi
-        else
-            local candidate latest_time=0
-            local backup_types=("db" "full" "emergency")
-            for btype in "${backup_types[@]}"; do
-                candidate=$(_find_latest_backup "$PROJECT_ROOT/backups/$btype" 2>/dev/null || true)
-                if [[ -n "$candidate" ]]; then
-                    local mtime
-                    mtime=$(stat -c%Y "$candidate" 2>/dev/null || stat -f%m "$candidate" 2>/dev/null || echo "0")
-                    if (( mtime > latest_time )); then
-                        latest_time="$mtime"
-                        BACKUP_FILE="$candidate"
-                        RESTORE_TYPE="$btype"
-                    fi
-                fi
-            done
-            if [[ -z "$BACKUP_FILE" ]]; then
-                log_error "No backups found in any backup directory"
-                return 1
+    
+    # Stop services if running
+    local services_were_running=false
+    if [[ "$DRY_RUN" == "false" ]]; then
+        if docker compose ps | grep -q "Up"; then
+            services_were_running=true
+            log_info "Stopping services before restore..."
+            docker compose stop
+        fi
+    fi
+    
+    # Perform restore
+    local restore_success=false
+    
+    if [[ "$backup_type" == "db" ]]; then
+        restore_db "$BACKUP_FILE" "$target_dir" && restore_success=true
+    elif [[ "$backup_type" == "full" ]]; then
+        restore_full "$BACKUP_FILE" "$target_dir" && restore_success=true
+    else
+        log_error "Unknown backup type: $backup_type"
+    fi
+    
+    # Restart services if they were running
+    if [[ "$DRY_RUN" == "false" && "$services_were_running" == "true" ]]; then
+        log_info "Restarting services..."
+        docker compose start
+        
+        # Verify health
+        if [[ "$restore_success" == "true" ]]; then
+            log_info "Waiting for services to initialize..."
+            sleep 5
+            if [[ -x "./health.sh" ]]; then
+                ./health.sh --quiet || log_warn "Services started but health check reported issues"
             fi
         fi
-        log_info "Using latest backup (by mtime): $(basename "$BACKUP_FILE") [type: $RESTORE_TYPE]"
-        return 0
     fi
-
-    # Case 2: --file FILE
-    if [[ -n "$BACKUP_FILE" ]]; then
-        if [[ ! -f "$BACKUP_FILE" ]]; then
-            log_error "Specified backup file not found: $BACKUP_FILE"
-            return 1
-        fi
-
-        if [[ -z "$RESTORE_TYPE" ]]; then
-            if   [[ "$BACKUP_FILE" =~ /db/        ]]; then RESTORE_TYPE="db"
-            elif [[ "$BACKUP_FILE" =~ /full/      ]]; then RESTORE_TYPE="full"
-            elif [[ "$BACKUP_FILE" =~ /emergency/ ]]; then RESTORE_TYPE="emergency"
-            else
-                log_error "Cannot determine backup type from file path: $BACKUP_FILE"
-                return 1
-            fi
-        fi
-        return 0
-    fi
-
-    # Case 3: --type TYPE without --file
-    if [[ -n "$RESTORE_TYPE" ]]; then
-        local backup_dir="$PROJECT_ROOT/backups/$RESTORE_TYPE"
-        if [[ ! -d "$backup_dir" ]]; then
-            log_error "No backups found for type: $RESTORE_TYPE"
-            return 1
-        fi
-
-        BACKUP_FILE=$(_find_latest_backup "$backup_dir")
-        if [[ -z "$BACKUP_FILE" ]]; then
-            log_error "No backup files found in: $backup_dir"
-            return 1
-        fi
-
-        log_info "Using latest $RESTORE_TYPE backup: $(basename "$BACKUP_FILE")"
-        return 0
-    fi
-
-    # Case 4: interactive
-    if ! select_backup_interactively; then
-        return 1
-    fi
-
-    return 0
-}
-
-# ---------------------------------------------------------------------------
-# create_restore_point_backup
-# ---------------------------------------------------------------------------
-create_restore_point_backup() {
-    if [[ "$CREATE_RESTORE_BACKUP" != "true" ]]; then
-        log_info "Skipping restore point backup (--no-backup specified)"
-        return 0
-    fi
-
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would create restore point backup (type: emergency)"
-        return 0
-    fi
-
-    log_info "Creating restore point backup for safety..."
-
-    if ./backup.sh --type emergency; then
-        log_success "Restore point backup completed"
-        return 0
-    else
-        log_error "Restore point backup failed"
-        return 1
-    fi
-}
-
-# ---------------------------------------------------------------------------
-# prepare_services_for_restore
-# ---------------------------------------------------------------------------
-prepare_services_for_restore() {
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would stop services for restoration"
-        return 0
-    fi
-
-    log_info "Stopping services for restoration..."
-
-    if stop_services; then
-        log_success "Services stopped successfully"
-        return 0
-    else
-        log_error "Failed to stop services"
-        return 1
-    fi
-}
-
-# ---------------------------------------------------------------------------
-# purge_wal_files DB_DIR
-# FIX [WAL BUG]: Deletes orphaned SQLite WAL and SHM sidecar files from
-# DB_DIR before the restored database is placed there.  If these files are
-# left on disk, SQLite's WAL recovery logic replays the (newer, incompatible)
-# transactions from the running system into the older restored database the
-# moment Vaultwarden opens it, causing instant structural corruption
-# ("database disk image is malformed").  Deleting them is always safe
-# because the container is stopped before this function is called —
-# there is no in-progress writer that could own a valid WAL.
-# ---------------------------------------------------------------------------
-purge_wal_files() {
-    local db_dir="$1"
-    local wal_file="$db_dir/db.sqlite3-wal"
-    local shm_file="$db_dir/db.sqlite3-shm"
-    local purged=false
-
-    if [[ -f "$wal_file" ]]; then
-        log_info "Removing orphaned WAL file to prevent SQLite replay corruption: $(basename "$wal_file")"
-        rm -f "$wal_file"
-        purged=true
-    fi
-    if [[ -f "$shm_file" ]]; then
-        log_info "Removing orphaned SHM file: $(basename "$shm_file")"
-        rm -f "$shm_file"
-        purged=true
-    fi
-
-    if [[ "$purged" == "true" ]]; then
-        log_success "SQLite WAL/SHM files purged — restored DB will start clean"
-    else
-        log_info "No orphaned SQLite WAL/SHM files found"
-    fi
-    return 0
-}
-
-# ---------------------------------------------------------------------------
-# restore_database
-# Decrypt → verify → purge WAL → swap. Live DB is never touched until
-# both checks pass AND orphaned WAL files are removed.
-# FIX [ISSUE 4]:  chown now uses PUID:PGID from the environment so the
-#                 Vaultwarden container can actually read the restored file.
-#                 get_real_user() returns $SUDO_USER (the human admin), not the
-#                 service account the container runs as.
-# FIX [ISSUE 11]: Uses pre-computed RESTORE_TS for safety-copy filename.
-# FIX [WAL BUG]:  Calls purge_wal_files() before swapping in restored DB.
-# ---------------------------------------------------------------------------
-restore_database() {
-    if [[ "$RESTORE_TYPE" != "db" ]]; then
-        return 0
-    fi
-
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would restore database from: $(basename "$BACKUP_FILE")"
-        log_info "[DRY RUN] Would purge orphaned WAL/SHM files from data directory"
-        return 0
-    fi
-
-    log_info "Restoring database from: $(basename "$BACKUP_FILE")"
-
-    local state_dir
-    state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
-
-    local db_dir="$state_dir/data"
-    local db_path="$db_dir/db.sqlite3"
-
-    if ! ensure_dir "$db_dir" 700; then
-        log_error "Failed to create database directory"
-        return 1
-    fi
-
-    local temp_dir
-    temp_dir=$(mktemp -d)
-    register_cleanup_dir "$temp_dir"
-    local temp_db="$temp_dir/db.sqlite3"
-
-    log_info "Decrypting and decompressing backup (live DB untouched until verified)..."
-    if ! age -d -i "$SOPS_AGE_KEY_FILE" "$BACKUP_FILE" | gzip -d > "$temp_db"; then
-        log_error "Failed to decrypt/decompress database backup. Live database is untouched."
-        return 1
-    fi
-
-    log_info "Verifying integrity of decrypted database..."
-    if ! sqlite3 "$temp_db" "PRAGMA integrity_check;" | grep -qx "ok"; then
-        log_error "Decrypted database failed integrity check. Live database is untouched."
-        return 1
-    fi
-
-    # FIX [WAL BUG]: Both checks passed — purge orphaned WAL/SHM files BEFORE
-    # swapping in the restored DB so SQLite starts with a clean slate.
-    if ! purge_wal_files "$db_dir"; then
-        log_error "Failed to purge WAL/SHM files — aborting to prevent corruption"
-        return 1
-    fi
-
-    # Safe to swap
-    if [[ -f "$db_path" ]]; then
-        # FIX [ISSUE 11]: Use pre-computed RESTORE_TS (set in main) for all safety copies.
-        local backup_db="$db_path.pre-restore-${RESTORE_TS}"
-        if ! mv "$db_path" "$backup_db"; then
-            log_error "Failed to move existing database to safety"
-            return 1
-        fi
-        log_info "Existing database preserved at: $(basename "$backup_db")"
-    fi
-
-    if ! cp "$temp_db" "$db_path"; then
-        log_error "Failed to copy restored database into place"
-        return 1
-    fi
-
-    # FIX [ISSUE 4]: Use PUID:PGID from the loaded environment so the container
-    # service account (not the admin's login account) owns the restored file.
-    local db_uid="${PUID:-1001}"
-    local db_gid="${PGID:-1001}"
-
-    if ! chown "${db_uid}:${db_gid}" "$db_path" || ! chmod 644 "$db_path"; then
-        log_error "Failed to set database permissions (uid=${db_uid} gid=${db_gid})"
-        return 1
-    fi
-
-    log_success "Database restored successfully (owner: ${db_uid}:${db_gid})"
-    return 0
-}
-
-# ---------------------------------------------------------------------------
-# restore_archive
-# FIX [ISSUE 4]:  data directory chown uses PUID:PGID, not get_real_user().
-# FIX [ISSUE 11]: All safety-copy filenames use pre-computed RESTORE_TS.
-# FIX [WAL BUG]:  Calls purge_wal_files() after restoring the data directory
-#                 so that any WAL files bundled inside a full/emergency archive
-#                 (which are themselves stale relative to the restored DB state)
-#                 are also removed before Vaultwarden starts.
-# ---------------------------------------------------------------------------
-restore_archive() {
-    if [[ "$RESTORE_TYPE" != "full" && "$RESTORE_TYPE" != "emergency" ]]; then
-        return 0
-    fi
-
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would restore $RESTORE_TYPE archive from: $(basename "$BACKUP_FILE")"
-        log_info "[DRY RUN] Would purge orphaned WAL/SHM files from restored data directory"
-        return 0
-    fi
-
-    log_info "Restoring $RESTORE_TYPE archive from: $(basename "$BACKUP_FILE")"
-
-    local temp_dir
-    temp_dir=$(mktemp -d)
-    register_cleanup_dir "$temp_dir"
-
-    if ! age -d -i "$SOPS_AGE_KEY_FILE" "$BACKUP_FILE" | tar -xzf - -C "$temp_dir"; then
-        log_error "Failed to decrypt and extract archive"
-        return 1
-    fi
-
-    # Restore configuration files
-    log_info "Restoring configuration files..."
-    local config_files=("docker-compose.yml" ".env")
-
-    for config_file in "${config_files[@]}"; do
-        if [[ -f "$temp_dir/$config_file" ]]; then
-            if [[ -f "$PROJECT_ROOT/$config_file" ]]; then
-                # FIX [ISSUE 11]: Use pre-computed RESTORE_TS — no per-file date call.
-                local backup_config="$PROJECT_ROOT/$config_file.pre-restore-${RESTORE_TS}"
-                mv "$PROJECT_ROOT/$config_file" "$backup_config" || log_warn "Failed to backup existing $config_file"
-            fi
-            if ! cp "$temp_dir/$config_file" "$PROJECT_ROOT/"; then
-                log_error "Failed to restore $config_file"
-                return 1
-            fi
-            log_info "Restored: $config_file"
-        fi
-    done
-
-    # Restore caddy and fail2ban configurations
-    local config_dirs=("caddy" "fail2ban")
-
-    for config_dir in "${config_dirs[@]}"; do
-        if [[ -d "$temp_dir/$config_dir" ]]; then
-            if [[ -d "$PROJECT_ROOT/$config_dir" ]]; then
-                # FIX [ISSUE 11]: Pre-computed timestamp.
-                local backup_cdir="$PROJECT_ROOT/$config_dir.pre-restore-${RESTORE_TS}"
-                mv "$PROJECT_ROOT/$config_dir" "$backup_cdir" || log_warn "Failed to backup existing $config_dir"
-            fi
-            if ! cp -r "$temp_dir/$config_dir" "$PROJECT_ROOT/"; then
-                log_error "Failed to restore $config_dir"
-                return 1
-            fi
-            log_info "Restored: $config_dir/"
-        fi
-    done
-
-    # Restore data directory
-    if [[ -d "$temp_dir/data" ]]; then
-        log_info "Restoring data directory..."
-
-        local state_dir
-        state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
-
-        if [[ -d "$state_dir/data" ]]; then
-            # FIX [ISSUE 11]: Pre-computed timestamp.
-            local backup_data="$state_dir/data.pre-restore-${RESTORE_TS}"
-            mv "$state_dir/data" "$backup_data" || log_warn "Failed to backup existing data directory"
-        fi
-
-        if ! ensure_dir "$(dirname "$state_dir/data")" 755; then
-            log_error "Failed to create parent directory for data"
-            return 1
-        fi
-
-        if ! cp -r "$temp_dir/data" "$state_dir/"; then
-            log_error "Failed to restore data directory"
-            return 1
-        fi
-
-        # FIX [WAL BUG]: Purge any WAL/SHM files that were bundled inside the
-        # archive or that remained in the restored data directory.  The backup
-        # was created while the container was stopped (clean checkpoint), so
-        # any WAL file in the archive is already fully committed to the main DB
-        # file and does not need to be replayed again.
-        if ! purge_wal_files "$state_dir/data"; then
-            log_error "Failed to purge WAL/SHM files from restored data directory"
-            return 1
-        fi
-
-        # FIX [ISSUE 4]: Use PUID:PGID so the container service account owns the data.
-        local db_uid="${PUID:-1001}"
-        local db_gid="${PGID:-1001}"
-
-        if ! chown -R "${db_uid}:${db_gid}" "$state_dir/data"; then
-            log_error "Failed to set data directory ownership (uid=${db_uid} gid=${db_gid})"
-            return 1
-        fi
-
-        log_success "Data directory restored successfully (owner: ${db_uid}:${db_gid})"
-    fi
-
-    # Restore secrets (emergency only)
-    if [[ "$RESTORE_TYPE" == "emergency" ]] && [[ -d "$temp_dir/secrets" ]]; then
-        log_info "Restoring secrets (emergency restore)..."
-
-        if [[ -d "$PROJECT_ROOT/secrets" ]]; then
-            # FIX [ISSUE 11]: Pre-computed timestamp.
-            local backup_secrets="$PROJECT_ROOT/secrets.pre-restore-${RESTORE_TS}"
-            mv "$PROJECT_ROOT/secrets" "$backup_secrets" || log_warn "Failed to backup existing secrets"
-        fi
-
-        if ! cp -r "$temp_dir/secrets" "$PROJECT_ROOT/"; then
-            log_error "Failed to restore secrets directory"
-            return 1
-        fi
-
-        if ! chmod -R 700 "$PROJECT_ROOT/secrets"; then
-            log_error "Failed to set secrets permissions"
-            return 1
-        fi
-
-        log_success "Secrets restored successfully"
-    fi
-
-    log_success "$RESTORE_TYPE archive restored successfully"
-    return 0
-}
-
-# ---------------------------------------------------------------------------
-# start_services_after_restore
-# Calls startup.sh --force (the correct, documented flag after FIX [ISSUE 2]).
-# ---------------------------------------------------------------------------
-start_services_after_restore() {
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would start services after restoration"
-        return 0
-    fi
-
-    log_info "Starting services after restoration..."
-
-    if ./startup.sh --force; then
-        log_success "Services started successfully after restore"
-        return 0
-    else
-        log_error "Failed to start services after restore"
-        return 1
-    fi
-}
-
-# ---------------------------------------------------------------------------
-# validate_restore_health
-# ---------------------------------------------------------------------------
-validate_restore_health() {
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would validate system health after restoration"
-        return 0
-    fi
-
-    log_info "Validating system health after restoration..."
-
-    local max_attempts=10
-    local interval=5
-    local attempt=1
-
-    while (( attempt <= max_attempts )); do
-        log_info "Health check attempt $attempt/$max_attempts (waiting ${interval}s)..."
-        sleep "$interval"
-
-        if ./health.sh --quiet; then
-            log_success "Post-restore health validation passed (attempt $attempt)"
-            return 0
-        fi
-
-        (( attempt++ )) || true
-    done
-
-    log_error "Post-restore health validation failed after $max_attempts attempts"
-    return 1
-}
-
-# ---------------------------------------------------------------------------
-# generate_restore_summary
-# ---------------------------------------------------------------------------
-generate_restore_summary() {
-    local backup_verification="$1"
-    local restore_backup="$2"
-    local services_stop="$3"
-    local restore_operation="$4"
-    local services_start="$5"
-    local health_validation="$6"
-
-    log_info "Generating restore summary..."
-
-    local summary
-    summary=$(printf "VaultWarden Restore Summary - %s\n" "$(date)")
-    summary+=$(printf "\nRestore Details:\n")
-    summary+=$(printf "  Backup File: %s\n" "$(basename "$BACKUP_FILE")")
-    summary+=$(printf "  Restore Type: %s\n" "$RESTORE_TYPE")
-    summary+=$(printf "\nRestore Results:\n")
-
-    if [[ "$SKIP_VERIFICATION" == "true" ]]; then
-        summary+=$(printf "  ⏭️  Backup verification: Skipped\n")
-    elif [[ "$backup_verification" == "0" ]]; then
-        summary+=$(printf "  ✅ Backup verification: Passed\n")
-    else
-        summary+=$(printf "  ❌ Backup verification: Failed\n")
-    fi
-
-    if [[ "$CREATE_RESTORE_BACKUP" == "true" ]]; then
-        if [[ "$restore_backup" == "0" ]]; then
-            summary+=$(printf "  ✅ Restore point backup: Created successfully\n")
-        else
-            summary+=$(printf "  ❌ Restore point backup: Failed\n")
-        fi
-    else
-        summary+=$(printf "  ⏭️  Restore point backup: Skipped\n")
-    fi
-
-    if [[ "$services_stop" == "0" ]]; then
-        summary+=$(printf "  ✅ Service stop: Completed successfully\n")
-    else
-        summary+=$(printf "  ❌ Service stop: Failed\n")
-    fi
-
-    if [[ "$restore_operation" == "0" ]]; then
-        summary+=$(printf "  ✅ Data restoration: Completed successfully\n")
-    else
-        summary+=$(printf "  ❌ Data restoration: Failed\n")
-    fi
-
-    if [[ "$services_start" == "0" ]]; then
-        summary+=$(printf "  ✅ Service restart: Completed successfully\n")
-    else
-        summary+=$(printf "  ❌ Service restart: Failed\n")
-    fi
-
-    if [[ "$health_validation" == "0" ]]; then
-        summary+=$(printf "  ✅ Health validation: Passed\n")
-    else
-        summary+=$(printf "  ❌ Health validation: Issues detected\n")
-    fi
-
-    if [[ "$restore_operation" == "0" && "$services_start" == "0" && "$health_validation" == "0" ]]; then
-        summary+=$(printf "\n🎉 Overall Status: RESTORE SUCCESSFUL\n")
-        summary+=$(printf "\nNext Steps:\n")
-        summary+=$(printf "  • Monitor services for stability\n")
-        summary+=$(printf "  • Verify data integrity\n")
-        summary+=$(printf "  • Update any changed configurations\n")
-    else
-        summary+=$(printf "\n⚠️  Overall Status: RESTORE COMPLETED WITH ISSUES\n")
-        summary+=$(printf "\nImmediate Actions Required:\n")
-        summary+=$(printf "  • Check service logs: make logs\n")
-        summary+=$(printf "  • Run health check: ./health.sh --comprehensive\n")
-        summary+=$(printf "  • Consider manual rollback if issues persist\n")
-    fi
-
-    printf "%s\n" "$summary"
-    return 0
-}
-
-# ---------------------------------------------------------------------------
-# main
-# FIX [ISSUE 11]: RESTORE_TS computed once here and exported for all functions.
-# ---------------------------------------------------------------------------
-main() {
-    log_header "VaultWarden-OCI Restore Manager"
-
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_warn "DRY RUN MODE - No changes will be made"
-    fi
-
-    if ! load_env_file; then
-        log_error "Failed to load configuration"
-        exit 1
-    fi
-
-    export SOPS_AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-"$PROJECT_ROOT/secrets/keys/age-key.txt"}"
-
-    if [[ ! -f "$SOPS_AGE_KEY_FILE" ]]; then
-        log_error "Age key file not found: $SOPS_AGE_KEY_FILE"
-        log_info "Cannot decrypt backups without the Age key"
-        exit 1
-    fi
-
-    # FIX [ISSUE 11]: Single timestamp for ALL pre-restore safety copies in this run.
-    RESTORE_TS="$(date +%Y%m%d-%H%M%S)"
-    export RESTORE_TS
-
-    # Track restoration results (1 = not yet run / failed, 0 = success)
-    local backup_verification_result=1
-    local restore_backup_result=1
-    local services_stop_result=1
-    local restore_operation_result=1
-    local services_start_result=1
-    local health_validation_result=1
-
-    # -----------------------------------------------------------------------
-    # Phase 1: Preparation and validation
-    # -----------------------------------------------------------------------
-    log_info "=== Phase 1: Restore Preparation ==="
-
-    if ! resolve_backup_file; then
-        exit 1
-    fi
-
-    if [[ "$SKIP_VERIFICATION" != "true" ]]; then
-        if validate_backup_integrity "$BACKUP_FILE"; then
-            backup_verification_result=0
-        else
-            log_error "Backup integrity validation failed - aborting restore"
-            exit 1
-        fi
-    fi
-
-    if create_restore_point_backup; then
-        restore_backup_result=0
-    else
-        log_error "Failed to create restore point backup - aborting for safety"
-        exit 1
-    fi
-
-    # -----------------------------------------------------------------------
-    # Phase 2: Service preparation
-    # -----------------------------------------------------------------------
-    log_info "=== Phase 2: Service Preparation ==="
-
-    if prepare_services_for_restore; then
-        services_stop_result=0
-    else
-        log_error "Failed to prepare services for restore"
-        exit 1
-    fi
-
-    # -----------------------------------------------------------------------
-    # Phase 3: Data restoration
-    # -----------------------------------------------------------------------
-    log_info "=== Phase 3: Data Restoration ==="
-
-    local restore_success=true
-
-    if ! restore_database; then
-        restore_success=false
-    fi
-
-    if ! restore_archive; then
-        restore_success=false
-    fi
-
+    
     if [[ "$restore_success" == "true" ]]; then
-        restore_operation_result=0
-    else
-        log_error "Data restoration failed"
-        # Don't exit — attempt to bring services back up
-    fi
-
-    # -----------------------------------------------------------------------
-    # Phase 4: Service restart and validation
-    # -----------------------------------------------------------------------
-    log_info "=== Phase 4: Service Restart and Validation ==="
-
-    if start_services_after_restore; then
-        services_start_result=0
-    else
-        log_error "Failed to start services after restore"
-    fi
-
-    if [[ "$services_start_result" == "0" ]]; then
-        if validate_restore_health; then
-            health_validation_result=0
-        else
-            log_error "Post-restore health validation failed"
-        fi
-    fi
-
-    # -----------------------------------------------------------------------
-    # Phase 5: Summary and results
-    # -----------------------------------------------------------------------
-    log_info "=== Phase 5: Restore Summary ==="
-
-    generate_restore_summary \
-        "$backup_verification_result" \
-        "$restore_backup_result" \
-        "$services_stop_result" \
-        "$restore_operation_result" \
-        "$services_start_result" \
-        "$health_validation_result"
-
-    if [[ "$restore_operation_result" == "0" && "$services_start_result" == "0" && "$health_validation_result" == "0" ]]; then
-        log_success "Restore completed successfully"
+        log_success "Restore completed successfully!"
         exit 0
-    elif [[ "$restore_operation_result" == "0" && "$services_start_result" == "0" ]]; then
-        log_warn "Restore completed but health check shows issues (exit 2)"
-        exit 2
     else
-        log_error "Restore completed with critical failures"
+        log_error "Restore failed."
         exit 1
     fi
 }
