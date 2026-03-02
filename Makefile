@@ -6,7 +6,7 @@
 # Configuration
 COMPOSE_FILE ?= docker-compose.yml
 COMPOSE_PROJECT_NAME ?= vaultwarden-oci
-DOCKER_COMP ?= docker compose
+DOCKER_COMP ?= $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
 DOCKER_BUILDKIT ?= 1
 COMPOSE_DOCKER_CLI_BUILD ?= 1
 
