@@ -253,6 +253,14 @@ is_root() {
     [[ $EUID -eq 0 ]]
 }
 
+require_root() {
+    if ! is_root; then
+        log_error "This script must be run as root."
+        log_error "Re-run with: sudo $0 ${*:-}"
+        exit 1
+    fi
+}
+
 get_real_user() {
     echo "${SUDO_USER:-$USER}"
 }
@@ -584,7 +592,7 @@ init_common_lib() {
 # --- Export Functions ---
 export -f log_info log_success log_warn log_error log_debug log_header set_log_prefix _should_log
 export -f load_env_file get_config_value require_config
-export -f has_command require_commands retry_with_backoff is_root get_real_user
+export -f has_command require_commands retry_with_backoff is_root require_root get_real_user
 export -f ensure_dir secure_file test_connectivity test_http download_file
 export -f send_notification_email _get_postfix_smtp_target_for_fail2ban _send_email_via_postfix _send_email_via_mailutils
 export -f validate_email validate_domain validate_port validate_ip validate_url

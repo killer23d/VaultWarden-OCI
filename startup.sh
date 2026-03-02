@@ -375,6 +375,8 @@ trap cleanup_on_exit EXIT
 
 # Main function
 main() {
+  require_root "$@"
+
   log_header "VaultWarden-OCI Enhanced Startup"
 
   # Load environment configuration
