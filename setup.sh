@@ -176,6 +176,60 @@ https://download.docker.com/linux/ubuntu noble stable" \
     return 0
 }
 
+# FIX [C-05]: Preflight disk-space check before any phase runs.
+# Requires at least MIN_FREE_KB kilobytes free on the filesystem containing
+# PROJECT_ROOT. Failing early avoids mid-run partial state (half-written .env,
+# incomplete secrets structure, etc.).
+check_disk_space() {
+    if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would check disk space"; return 0; fi
+
+    local min_free_kb=$((2 * 1024 * 1024))   # 2 GiB in KiB
+    local available_kb
+    available_kb=$(df -k "$PROJECT_ROOT" | awk 'NR==2 {print $4}')
+
+    if (( available_kb < min_free_kb )); then
+        log_error "Insufficient disk space. Required: 2 GiB, Available: $(( available_kb / 1024 )) MiB on $PROJECT_ROOT"
+        return 1
+    fi
+    log_info "Disk space OK: $(( available_kb / 1024 )) MiB available"
+    return 0
+}
+
+# FIX [C-06]: Create a 1 GiB swapfile when no swap is currently active.
+# OCI A1 Flex instances ship with zero swap; under memory pressure Docker will
+# OOM-kill containers. A swapfile provides breathing room without a persistent
+# volume resize. vm.swappiness=10 keeps swap as a last resort.
+create_swapfile() {
+    if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would create swapfile if needed"; return 0; fi
+
+    if swapon --show | grep -q .; then
+        log_info "Swap already active — skipping swapfile creation"
+        return 0
+    fi
+
+    local swapfile="/swapfile"
+    log_info "No swap detected — creating 1 GiB swapfile at ${swapfile}..."
+
+    fallocate -l 1G "$swapfile" || dd if=/dev/zero of="$swapfile" bs=1M count=1024 status=none || return 1
+    chmod 600 "$swapfile"
+    mkswap "$swapfile" >/dev/null || return 1
+    swapon "$swapfile" || return 1
+
+    # Persist across reboots
+    if ! grep -q "^${swapfile}" /etc/fstab 2>/dev/null; then
+        echo "${swapfile} none swap sw 0 0" >> /etc/fstab
+    fi
+
+    # Keep swap as a last resort (default 60 is too aggressive for server use)
+    sysctl -q vm.swappiness=10 || true
+    if ! grep -q "^vm.swappiness" /etc/sysctl.conf 2>/dev/null; then
+        echo "vm.swappiness=10" >> /etc/sysctl.conf
+    fi
+
+    log_success "Swapfile created and activated (1 GiB)"
+    return 0
+}
+
 install_dependencies() {
     if [[ "$SKIP_DEPS" == "true" ]]; then return 0; fi
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would install dependencies"; return 0; fi
@@ -212,9 +266,18 @@ install_dependencies() {
         local arch; arch=$(dpkg --print-architecture)
         [[ "$arch" == "armhf" ]] && arch="arm"
 
-        # Use pinned version if set at top of script, otherwise resolve latest.
+        # FIX [C-08]: Validate any caller-supplied SOPS_VERSION against the
+        # semver pattern before using it to construct a download URL. This
+        # prevents path traversal or shell injection via an env override such as
+        #   SOPS_VERSION="../../etc/passwd" sudo ./setup.sh ...
         local sops_ver="${SOPS_VERSION:-}"
-        if [[ -z "$sops_ver" ]]; then
+        if [[ -n "$sops_ver" ]]; then
+            if [[ ! "$sops_ver" =~ ^v[0-9]+\.[0-9]+\.[0-9] ]]; then
+                log_error "SOPS_VERSION '${sops_ver}' does not match expected format vX.Y.Z — aborting."
+                return 1
+            fi
+            log_info "Using pinned SOPS version: ${sops_ver}"
+        else
             log_info "SOPS_VERSION not pinned — resolving latest from GitHub..."
             sops_ver=$(resolve_github_latest "getsops/sops") || return 1
         fi
@@ -275,8 +338,33 @@ create_env_file() {
     local env_file="$PROJECT_ROOT/.env"
     local env_template="$PROJECT_ROOT/.env.example"
 
+    # FIX [New Issue #1]: Only skip re-write when DOMAIN, ADMIN_EMAIL, *and*
+    # the USE_LATEST state all match the existing .env. Previously the early
+    # return fired on domain+email match alone, so --use-latest on a re-run
+    # was silently ignored and container versions were never updated.
     if [[ -f "$env_file" ]] && [[ "$FORCE" != "true" ]]; then
-        if grep -qF "DOMAIN=$DOMAIN" "$env_file" && grep -qF "ADMIN_EMAIL=$ADMIN_EMAIL" "$env_file"; then
+        local domain_matches=false email_matches=false latest_matches=false
+        grep -qF "DOMAIN=$DOMAIN" "$env_file"       && domain_matches=true
+        grep -qF "ADMIN_EMAIL=$ADMIN_EMAIL" "$env_file" && email_matches=true
+
+        if [[ "$USE_LATEST" == "true" ]]; then
+            # Latest mode: all version fields must already be 'latest'
+            if grep -qE '^VAULTWARDEN_VERSION=latest' "$env_file" && \
+               grep -qE '^CADDY_VERSION=latest'       "$env_file" && \
+               grep -qE '^FAIL2BAN_VERSION=latest'    "$env_file" && \
+               grep -qE '^POSTFIX_VERSION=latest'     "$env_file"; then
+                latest_matches=true
+            fi
+        else
+            # Non-latest mode: no version field should be 'latest'
+            if ! grep -qE '^(VAULTWARDEN|CADDY|FAIL2BAN|POSTFIX)_VERSION=latest' "$env_file"; then
+                latest_matches=true
+            fi
+        fi
+
+        if [[ "$domain_matches" == "true" ]] && \
+           [[ "$email_matches" == "true" ]] && \
+           [[ "$latest_matches" == "true" ]]; then
             return 0
         fi
     fi
@@ -345,12 +433,15 @@ setup_directories() {
     local pgid; pgid=$(id -g "$real_user")
     local project_state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
 
-    if ! sudo mkdir -p "${project_state_dir}"/{data,logs/{vaultwarden,caddy,fail2ban,postfix},caddy/{data,config},fail2ban}; then
+    # FIX [BUG-06]: Remove redundant sudo — setup.sh requires root (is_root
+    # guard in main()), so sudo inside a root process is a no-op at best and
+    # misleading at worst. Direct calls are clearer and avoid a sudo fork.
+    if ! mkdir -p "${project_state_dir}"/{data,logs/{vaultwarden,caddy,fail2ban,postfix},caddy/{data,config},fail2ban}; then
         return 1
     fi
 
-    sudo chown -R "${puid}:${pgid}" "$project_state_dir" || return 1
-    sudo chmod -R 755 "$project_state_dir" || return 1
+    chown -R "${puid}:${pgid}" "$project_state_dir" || return 1
+    chmod -R 755 "$project_state_dir" || return 1
     return 0
 }
 
@@ -389,11 +480,28 @@ create_sops_config() {
 
     local sops_config=".sops.yaml"
     local age_key_file="secrets/keys/age-key.txt"
+
+    # FIX [C-07]: Always re-derive the public key from the key file so that a
+    # regenerated key (e.g. after --force) is reflected in .sops.yaml.
+    # The previous guard returned early when .sops.yaml already existed and
+    # contained 'age:', leaving a stale public key embedded in the config.
+    # We still skip if the key file hasn't changed (idempotent non-force run),
+    # but we verify by re-reading the live public key rather than trusting a
+    # cached string.
+    local age_public_key; age_public_key=$(get_age_public_key "$age_key_file") || return 1
+
     if [[ -f "$sops_config" ]] && [[ "$FORCE" != "true" ]]; then
-        grep -q "creation_rules:" "$sops_config" && grep -q "age:" "$sops_config" && return 0
+        # Check that the embedded key matches the current key file exactly.
+        if grep -qF "$age_public_key" "$sops_config"; then
+            # Validate the config is actually usable before trusting it.
+            if grep -q "creation_rules:" "$sops_config" && grep -q "age:" "$sops_config"; then
+                log_info "SOPS config already up-to-date"
+                return 0
+            fi
+        fi
+        log_warn "SOPS config exists but public key has changed — rewriting .sops.yaml"
     fi
 
-    local age_public_key; age_public_key=$(get_age_public_key "$age_key_file") || return 1
     cat > "$sops_config" << EOF
 creation_rules:
   - path_regex: .*\\.yaml$
@@ -462,7 +570,9 @@ create_docker_compose() {
 
     cp "$compose_template" "$compose_file" || return 1
     chown "$(get_real_user):$(id -g -n "$(get_real_user)")" "$compose_file" || return 1
-    chmod 644 "$compose_file" || return 1
+    # FIX [SEC-03]: 644 exposes port/volume/image data to all local users.
+    # 640 restricts read access to the owner's group only.
+    chmod 640 "$compose_file" || return 1
     return 0
 }
 
@@ -472,7 +582,11 @@ set_script_permissions() {
     local real_user; real_user=$(get_real_user)
     local real_group; real_group=$(id -g -n "$real_user")
 
-    local scripts=("setup.sh" "setup-secrets.sh" "edit-secrets.sh" "health.sh" "update.sh" "backup.sh" "restore.sh" "startup.sh" "maintenance.sh" "cron-setup.sh" "create-breakglass-admin.sh" "db-maint.sh" "update-dns.sh" "test-email-simple.sh")
+    # FIX [BUG-09]: Removed three deleted scripts (db-maint.sh, update-dns.sh,
+    # test-email-simple.sh) that no longer exist in the repository. The loop
+    # uses [[ -f ]] guards so missing entries are silently skipped, but keeping
+    # deleted names here is misleading and would cause confusion during audits.
+    local scripts=("setup.sh" "setup-secrets.sh" "edit-secrets.sh" "health.sh" "update.sh" "backup.sh" "restore.sh" "startup.sh" "maintenance.sh" "cron-setup.sh" "create-breakglass-admin.sh")
     for script in "${scripts[@]}"; do
         if [[ -f "$script" ]]; then
             chmod +x "$script"
@@ -480,9 +594,13 @@ set_script_permissions() {
         fi
     done
 
+    # FIX [New Issue #2]: Do NOT grant +x to lib/*.sh. Library files are
+    # intended to be sourced (. lib/foo.sh), never executed directly. Making
+    # them executable invites accidental direct invocation which causes partial
+    # execution and confusing errors (missing init_common_lib context, etc.).
     if [[ -d "lib" ]]; then
-        find "lib" -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
         find "lib" -name "*.sh" -exec chown "$real_user:$real_group" {} \; 2>/dev/null || true
+        find "lib" -name "*.sh" -exec chmod 644 {} \; 2>/dev/null || true
     fi
     return 0
 }
@@ -664,6 +782,8 @@ main() {
     # Secrets are handled in the post-phase block below, after all infra is
     # ready and the user has had a chance to set CLOUDFLARE_ZONE_ID in .env.
     local setup_phases=(
+        "check_disk_space:Disk Space Preflight:true"
+        "create_swapfile:Swap Configuration:false"
         "install_dependencies:Dependency Installation:true"
         "verify_dependencies:Dependency Verification:true"
         "setup_user_permissions:User Permissions:false"
