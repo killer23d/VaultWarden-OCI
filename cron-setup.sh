@@ -47,6 +47,7 @@ SECURITY FEATURES:
     - Validates script integrity before scheduling
     - Implements secure logging with proper permissions
     - flock-based mutual exclusion prevents overlapping cron runs
+    - Skip events logged when flock finds job already running (FIX-C02)
     - Simple split-brain detection: warns when /opt/ scripts are older than git repo
 
 CRON JOBS MANAGED:
@@ -54,8 +55,8 @@ CRON JOBS MANAGED:
     - Weekly Full backup (Sunday 3 AM, full verification + rclone offsite sync + email)
     - Health monitoring (every 30 min, flock-protected)
     - Maintenance (daily 2 AM Mon-Sat ONLY, flock-protected)
-    - Firewall update (Saturday 4 AM)
-    - DNS update (hourly)
+    - Firewall update (Saturday 4 AM, flock-protected)
+    - DNS update (hourly, flock-protected)
 
 EXAMPLES:
     sudo ./cron-setup.sh --install     # Install secure cron jobs
@@ -298,22 +299,22 @@ check_split_brain() {
 #   flock -n LOCKFILE CMD so only one instance runs at a time. If the previous
 #   run is still active, the new invocation exits immediately (no queuing, no
 #   duplicate alerts). Backup jobs already have their own internal lock
-#   (/tmp/vaultwarden-backup-${UID}.lock) so they are not double-wrapped.
+#   so they are not double-wrapped.
 #
 # FIX [ISSUE 9]:  Daily maintenance moved from "* * *" (every day) to
 #   "* * 1-6" (Monday-Saturday only). This prevents maintenance from running
 #   at 2 AM on Sunday, which was the only remaining overlap window with the
 #   weekly full backup at 3 AM on Sunday.
 #
-# FIX [ISSUE 15]: After cp -r lib/, explicitly verify that
+# FIX [ISSUE 15]: After cp -rP lib/, explicitly verify that
 #   simple_key_resilience.sh landed in /opt/. If it is missing the install
 #   fails loudly rather than silently degrading backup key health checks.
 #
-# NOTE: --rclone and --full-verification are re-instated in cron backup
-#   invocations. backup.sh now implements both flags via sync_to_rclone()
-#   and verify_backup_full(). --rclone is non-fatal (local backup already
-#   succeeded); --full-verification is intentionally fatal (a corrupt offsite
-#   backup is worthless for disaster recovery).
+# FIX-C01: Temporary cron files now use mktemp (unpredictable name, mode 600).
+# FIX-C02: Skip events are logged when flock -n skips a job.
+# FIX-C03: cp -rP used for lib/ to avoid following symlinks.
+# FIX-C04: cd uses || exit 1 guard; jobs cannot run in the wrong directory.
+# FIX-C05: DNS update and firewall update are now flock-protected.
 # ---------------------------------------------------------------------------
 install_cron_jobs() {
     if [[ "$DRY_RUN" == "true" ]]; then
@@ -344,8 +345,12 @@ install_cron_jobs() {
         return 1
     fi
 
+    # FIX-C03: Use cp -rP (--no-dereference) so that any symlinks inside the
+    # lib/ source tree are copied as symlinks, not followed. A supply-chain
+    # compromise that plants a symlink in lib/ pointing to /etc/shadow would
+    # otherwise silently write that file into the hardened /opt/ directory.
     log_info "Installing library dependencies to secure directory..."
-    if ! cp -r "$PROJECT_ROOT/lib" "$CRON_SCRIPTS_DIR/" 2>/dev/null; then
+    if ! cp -rP "$PROJECT_ROOT/lib" "$CRON_SCRIPTS_DIR/" 2>/dev/null; then
         log_error "Failed to copy library directory"
         return 1
     fi
@@ -402,45 +407,82 @@ install_cron_jobs() {
 
     log_info "Creating cron job entries..."
 
-    # flock wrapper helper used by maintenance and health jobs.
+    # flock wrapper helper used by maintenance, health, DNS, and firewall jobs.
     # flock -n: non-blocking — if lock is held, exit immediately (no queue).
     # Lock files live in CRON_LOCK_DIR (/run/vaultwarden-locks/).
     local fl="flock -n"
     local ml="$CRON_LOCK_DIR/maintenance.lock"
     local hl="$CRON_LOCK_DIR/health.lock"
+    # FIX-C05: DNS update and firewall update were previously unprotected.
+    # Both can stall (slow DNS API, network issue) and overlap with the next
+    # scheduled run. Lock them consistently with the rest of the maintenance jobs.
+    local dl="$CRON_LOCK_DIR/dns.lock"
+    local fw="$CRON_LOCK_DIR/firewall.lock"
 
-    # FIX [ISSUE 9]:  maintenance now runs Mon-Sat ONLY (days 1-6).
-    #                 Sunday is reserved for the weekly full backup at 3 AM.
-    # FIX [ISSUE 5]:  maintenance and health wrapped with flock -n to prevent
-    #                 overlapping instances. Backup has its own internal lock.
-    # BUG 6 FIX:      Firewall on Saturday 4 AM, full backup Sunday 3 AM.
-    # NOTE: --rclone and --full-verification are re-instated now that
-    #       backup.sh implements both flags (sync_to_rclone / verify_backup_full).
+    # FIX-C04 + FIX-C02 + FIX-C05 notes:
+    #
+    #   FIX-C04: All cron entries changed from
+    #     'cd $PROJECT_ROOT && CMD'
+    #   to
+    #     'cd $PROJECT_ROOT || exit 1; CMD'
+    #   Rationale: if PROJECT_ROOT is unmounted or deleted, '&&' silently
+    #   skips CMD with no log entry. '|| exit 1' causes the cron shell to
+    #   exit(1) immediately, which cron reports to root via MAILTO.
+    #   The semicolon separates the cd guard from the payload so CMD is
+    #   unreachable when the guard fires.
+    #
+    #   FIX-C02: flock-protected entries now use the pattern:
+    #     (flock -n LOCK CMD || echo SKIPPED:reason) >> LOG 2>&1
+    #   A skipped run (lock already held) writes 'SKIPPED:...' to the log
+    #   instead of writing nothing. Without this, overlapping runs are
+    #   completely invisible in the log file.
+    #
+    #   FIX-C05: dl and fw lock variables added (see above).
+    #
+    # NOTE: --rclone and --full-verification are re-instated in cron backup
+    #   invocations. backup.sh implements both flags via sync_to_rclone()
+    #   and verify_backup_full(). --rclone is non-fatal; --full-verification
+    #   is intentionally fatal (a corrupt offsite backup = worthless DR).
     local cron_jobs=(
-        # Daily maintenance at 2 AM — MON-SAT ONLY (FIX [ISSUE 9]: skip Sunday)
-        "0 2 * * 1-6 cd $PROJECT_ROOT && $fl $ml $CRON_SCRIPTS_DIR/maintenance.sh --comprehensive >> $CRON_LOG_DIR/maintenance.log 2>&1"
+        # FIX-C04: cd || exit 1  FIX-C02: log skip event  FIX [ISSUE 9]: Mon-Sat only
+        "0 2 * * 1-6 cd $PROJECT_ROOT || exit 1; ($fl $ml $CRON_SCRIPTS_DIR/maintenance.sh --comprehensive || echo SKIPPED:maintenance-already-running) >> $CRON_LOG_DIR/maintenance.log 2>&1"
 
-        # Daily database backup at 4 AM — rclone offsite sync, non-fatal on remote failure
-        "0 4 * * * cd $PROJECT_ROOT && $CRON_SCRIPTS_DIR/backup.sh --type db --rclone --email >> $CRON_LOG_DIR/backup.log 2>&1"
+        # FIX-C04: cd || exit 1  (backup has its own internal flock — no wrapper needed)
+        "0 4 * * * cd $PROJECT_ROOT || exit 1; $CRON_SCRIPTS_DIR/backup.sh --type db --rclone --email >> $CRON_LOG_DIR/backup.log 2>&1"
 
-        # Health check every 30 min (FIX [ISSUE 5]: flock prevents overlapping runs)
-        "*/30 * * * * cd $PROJECT_ROOT && $fl $hl $CRON_SCRIPTS_DIR/health.sh --quiet >> $CRON_LOG_DIR/health.log 2>&1"
+        # FIX-C04: cd || exit 1  FIX-C02: log skip event
+        "*/30 * * * * cd $PROJECT_ROOT || exit 1; ($fl $hl $CRON_SCRIPTS_DIR/health.sh --quiet || echo SKIPPED:health-already-running) >> $CRON_LOG_DIR/health.log 2>&1"
 
-        # BUG 6 FIX: Weekly firewall update — Saturday 4 AM
-        "0 4 * * 6 cd $PROJECT_ROOT && $CRON_SCRIPTS_DIR/maintenance.sh --update-firewall >> $CRON_LOG_DIR/firewall.log 2>&1"
+        # FIX-C04: cd || exit 1  FIX-C02: log skip event  FIX-C05: flock added
+        "0 4 * * 6 cd $PROJECT_ROOT || exit 1; ($fl $fw $CRON_SCRIPTS_DIR/maintenance.sh --update-firewall || echo SKIPPED:firewall-update-already-running) >> $CRON_LOG_DIR/firewall.log 2>&1"
 
-        # BUG 6 FIX + FIX [ISSUE 9]: Weekly full backup — Sunday 3 AM
-        # Maintenance does NOT run on Sunday (see Mon-Sat schedule above),
-        # so full backup has the full hour window with no competing jobs.
+        # FIX-C04: cd || exit 1  (backup has its own internal flock — no wrapper needed)
         # --full-verification is intentionally FATAL: corrupt offsite = worthless DR.
         # --rclone is non-fatal: local backup already succeeded before sync attempt.
-        "0 3 * * 0 cd $PROJECT_ROOT && $CRON_SCRIPTS_DIR/backup.sh --type full --full-verification --rclone --email >> $CRON_LOG_DIR/backup.log 2>&1"
+        "0 3 * * 0 cd $PROJECT_ROOT || exit 1; $CRON_SCRIPTS_DIR/backup.sh --type full --full-verification --rclone --email >> $CRON_LOG_DIR/backup.log 2>&1"
 
-        # Automated DNS update every hour
-        "0 * * * * cd $PROJECT_ROOT && $CRON_SCRIPTS_DIR/maintenance.sh --update-dns >> $CRON_LOG_DIR/dns-update.log 2>&1"
+        # FIX-C04: cd || exit 1  FIX-C02: log skip event  FIX-C05: flock added
+        "0 * * * * cd $PROJECT_ROOT || exit 1; ($fl $dl $CRON_SCRIPTS_DIR/maintenance.sh --update-dns || echo SKIPPED:dns-update-already-running) >> $CRON_LOG_DIR/dns-update.log 2>&1"
     )
 
-    local temp_cron="/tmp/vaultwarden_cron.$$"
+    # FIX-C01: Use mktemp instead of /tmp/vaultwarden_cron.$$ to prevent
+    # symlink/TOCTOU attacks. A local attacker who knows the PID of this
+    # process could pre-create a symlink at /tmp/vaultwarden_cron.<PID>
+    # before we write to it, redirecting the crontab content (which contains
+    # commands run as root) to any attacker-controlled path.
+    # mktemp creates the file atomically with a 128-bit-entropy suffix.
+    # RETURN trap ensures cleanup even if set -e fires unexpectedly.
+    local temp_cron=""
+    trap 'rm -f "$temp_cron" 2>/dev/null || true' RETURN
+    local old_umask
+    old_umask=$(umask)
+    umask 077
+    temp_cron=$(mktemp -t vw_cron.XXXXXXXXXX) || {
+        log_error "Failed to create secure temporary cron file"
+        umask "$old_umask"
+        return 1
+    }
+    umask "$old_umask"
 
     # || true: grep -v exits 1 when all lines are filtered (set -e safety)
     crontab -l 2>/dev/null | grep -v "vaultwarden\|VaultWarden" > "$temp_cron" || true
@@ -453,7 +495,7 @@ install_cron_jobs() {
 
     if ! chmod 600 "$temp_cron"; then
         log_error "Failed to secure temporary cron file"
-        rm -f "$temp_cron"
+        secure_cleanup "$temp_cron"
         return 1
     fi
 
@@ -466,25 +508,29 @@ install_cron_jobs() {
     fi
 
     secure_cleanup "$temp_cron"
+    temp_cron=""  # clear so RETURN trap is a no-op (already cleaned up)
 
     log_success "Secure cron jobs installation completed"
     log_info "Installed cron jobs:"
-    log_info "  Daily   (2 AM Mon-Sat):  Comprehensive maintenance (flock-protected)"
+    log_info "  Daily   (2 AM Mon-Sat):  Comprehensive maintenance (flock-protected, skip-logged)"
     log_info "  Daily   (4 AM):          Database backup with rclone offsite sync + email"
-    log_info "  Every 30 min:            Health check (flock-protected)"
-    log_info "  Every hour:              DNS update"
-    log_info "  Weekly  (Sat 4 AM):      Firewall update"
+    log_info "  Every 30 min:            Health check (flock-protected, skip-logged)"
+    log_info "  Every hour:              DNS update (flock-protected, skip-logged)"
+    log_info "  Weekly  (Sat 4 AM):      Firewall update (flock-protected, skip-logged)"
     log_info "  Weekly  (Sun 3 AM):      Full backup with full verification + rclone sync + email"
     log_info "  NOTE: Sunday maintenance is intentionally skipped to avoid"
     log_info "        overlap with the Sunday 3 AM full backup."
     log_info "  NOTE: --rclone is non-fatal; --full-verification is fatal on"
     log_info "        the Sunday run (corrupt offsite backup = worthless DR)."
+    log_info "  NOTE: All flock-protected jobs write SKIPPED:reason to their"
+    log_info "        log file when a prior run is still in progress."
     return 0
 }
 
 # ---------------------------------------------------------------------------
 # remove_cron_jobs
 # BUG 2 + BUG 4 FIX: handles empty result and pipefail abort.
+# FIX-C01: uses mktemp instead of predictable /tmp/PID path.
 # ---------------------------------------------------------------------------
 remove_cron_jobs() {
     if [[ "$DRY_RUN" == "true" ]]; then
@@ -494,7 +540,18 @@ remove_cron_jobs() {
 
     log_info "Removing VaultWarden cron jobs..."
 
-    local temp_cron="/tmp/vaultwarden_cron_remove.$$"
+    # FIX-C01: mktemp with RETURN trap — same rationale as install_cron_jobs().
+    local temp_cron=""
+    trap 'rm -f "$temp_cron" 2>/dev/null || true' RETURN
+    local old_umask
+    old_umask=$(umask)
+    umask 077
+    temp_cron=$(mktemp -t vw_cron_rm.XXXXXXXXXX) || {
+        log_error "Failed to create secure temporary cron file"
+        umask "$old_umask"
+        return 1
+    }
+    umask "$old_umask"
 
     # BUG 4 FIX: || true prevents pipefail abort when grep -v matches nothing
     crontab -l 2>/dev/null \
@@ -507,6 +564,7 @@ remove_cron_jobs() {
         if ! crontab "$temp_cron"; then
             log_error "Failed to update crontab"
             secure_cleanup "$temp_cron"
+            temp_cron=""
             return 1
         fi
         log_success "VaultWarden cron jobs removed"
@@ -516,8 +574,8 @@ remove_cron_jobs() {
         log_success "VaultWarden cron jobs removed (crontab now empty)"
     fi
 
-    # BUG 2 FIX: always reached
     secure_cleanup "$temp_cron"
+    temp_cron=""  # clear so RETURN trap is a no-op (already cleaned up)
 
     if [[ -d "$CRON_SCRIPTS_DIR" ]]; then
         log_info "Removing secure scripts directory..."
@@ -562,9 +620,9 @@ list_cron_jobs() {
             log_success "Library dependencies present"
             # FIX [ISSUE 15]: Show explicit status for simple_key_resilience.sh
             if [[ -f "$CRON_SCRIPTS_DIR/lib/simple_key_resilience.sh" ]]; then
-                log_success "  ✅ simple_key_resilience.sh present"
+                log_success "  \u2705 simple_key_resilience.sh present"
             else
-                log_warn "  ❌ simple_key_resilience.sh MISSING — key health checks disabled"
+                log_warn "  \u274c simple_key_resilience.sh MISSING — key health checks disabled"
             fi
         else
             log_warn "Library dependencies missing"
@@ -584,6 +642,7 @@ list_cron_jobs() {
 # BUG 5 FIX: Sets validation_passed=false when jobs not found.
 # FIX [ISSUE 17]: Calls check_split_brain at the end.
 # FIX [ISSUE 15]: Checks for simple_key_resilience.sh in /opt/.
+# FIX-C05: Verifies flock is available (now required for 4 job types).
 # ---------------------------------------------------------------------------
 validate_cron_security() {
     log_info "Validating VaultWarden cron job security..."
@@ -627,12 +686,24 @@ validate_cron_security() {
         validation_passed=false
     fi
 
-    # FIX [ISSUE 5]: Check flock is available (required for job mutual exclusion)
+    # FIX [ISSUE 5] + FIX-C05: Check flock is available.
+    # flock is now required for 4 job types: maintenance, health, DNS, firewall.
     if command -v flock >/dev/null 2>&1; then
-        log_success "flock available — overlapping job protection active"
+        log_success "flock available — overlapping job protection active (maintenance, health, DNS, firewall)"
     else
-        log_warn "flock not found — overlapping cron job protection DISABLED"
+        log_warn "flock not found — overlapping cron job protection DISABLED for all 4 protected job types"
         log_info "Install with: sudo apt install util-linux"
+        validation_passed=false
+    fi
+
+    # Verify CRON_LOCK_DIR exists (it must survive reboots via /run tmpfs re-init
+    # or a tmpfiles.d rule; warn if absent so the operator knows to re-run --install).
+    if [[ -d "$CRON_LOCK_DIR" ]]; then
+        log_success "Cron lock directory exists: $CRON_LOCK_DIR"
+    else
+        log_warn "Cron lock directory missing: $CRON_LOCK_DIR"
+        log_warn "flock-protected jobs will fail on next run until directory is recreated."
+        log_info "Fix: sudo ./cron-setup.sh --install  (or: sudo mkdir -m 700 $CRON_LOCK_DIR && sudo chown root:root $CRON_LOCK_DIR)"
         validation_passed=false
     fi
 
