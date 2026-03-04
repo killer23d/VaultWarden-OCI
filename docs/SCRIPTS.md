@@ -144,13 +144,14 @@ make health-email                  # Comprehensive + email
 **Purpose:** Create Age-encrypted backups with integrity verification
 
 ```bash
-./backup.sh --type TYPE [OPTIONS]
+sudo ./backup.sh [OPTIONS]
 ```
 
 **Backup types:**
 
 | Type | Contents | Retention |
 |---|---|---|
+| `auto` | Auto-selects `db` or `full` based on DB age and last full backup age | — |
 | `db` | SQLite database only | 14 days |
 | `full` | Database + config + Caddy certs + logs (no secrets) | 30 days |
 | `emergency` | Everything including secrets | 90 days |
@@ -159,23 +160,32 @@ make health-email                  # Comprehensive + email
 
 | Option | Description |
 |---|---|
-| `--type TYPE` | `db`, `full`, or `emergency` — required |
-| `--rclone` | Sync encrypted backup to rclone remote after creation |
-| `--email` | Send email notification on completion |
-| `--full-verification` | End-to-end decrypt + integrity check (weekly recommended) |
-| `--skip-full-verification` | Fast checksum only (default) |
-| `--list` | List available backups with metadata |
-| `--dry-run` | Preview operations |
+| `--type TYPE` | `auto` (default), `db`, `full`, or `emergency` |
+| `--rclone` | Sync encrypted backup to rclone remote after creation (non-fatal on failure) |
+| `--full-verification` | End-to-end decrypt + integrity check before sync (fatal on failure) |
+| `--skip-full-verification` | Fast checksum only — explicit default |
+| `--keep N` | Retention period in days (default: 14) |
+| `--email` | Send email notification on completion/failure |
+| `--quiet` | Suppress non-error output |
+| `--force` | Ignore locks and force backup |
+| `--list` | List existing backups and exit (no root required) |
+| `--dry-run` | Preview operations without executing |
 
 ```bash
 # Daily
-./backup.sh --type db
+sudo ./backup.sh --type db
+
+# Daily with offsite sync
+sudo ./backup.sh --type db --rclone --email
 
 # Weekly with full verification and remote sync
-./backup.sh --type full --full-verification --rclone --email
+sudo ./backup.sh --type full --full-verification --rclone --email
 
 # Emergency kit
-./backup.sh --type emergency --rclone
+sudo ./backup.sh --type emergency --rclone
+
+# Keep 30 days of backups
+sudo ./backup.sh --type db --keep 30
 
 make backup              # Database backup
 make backup-full         # Full backup
@@ -197,8 +207,11 @@ make list-backups        # List backups
 | Option | Description |
 |---|---|
 | `--file FILE` | Specific backup file to restore |
+| `--latest` | Use the newest backup (optionally filtered by `--type`) |
 | `--type TYPE` | Filter backup list by type |
 | `--force` | Skip confirmation prompts |
+| `--no-backup` | Skip pre-restore emergency snapshot |
+| `--skip-verification` | Skip integrity check |
 | `--dry-run` | Preview operations |
 
 ```bash
@@ -210,7 +223,12 @@ make restore
 ./restore.sh --file /path/to/backup.age --force
 
 # Latest DB backup (non-interactive)
+./restore.sh --latest --type db
 make restore-db
+
+# Latest full backup, skip confirmation and pre-restore snapshot
+# (used internally by update.sh rollback)
+./restore.sh --latest --type full --force --no-backup
 ```
 
 ---
@@ -236,15 +254,21 @@ make restore-db
 | Option | Description |
 |---|---|
 | `--editor EDITOR` | Specify editor (default: nano) |
-| `--no-backup` | Skip automatic backup |
-| `--no-validation` | Skip post-edit validation |
-| `--test` | Test decryption without editing |
+| `--rotate FIELD` | Rotate (regenerate) a single secret field |
+| `--export-recovery-kit` | Export a plaintext recovery document (key + all secrets) |
+| `--view` | View decrypted secrets without editing |
+| `--list` | List all available secret key names |
+| `--no-backup` | Skip automatic backup before editing |
 
 ```bash
 ./edit-secrets.sh
 ./edit-secrets.sh --editor vim
+./edit-secrets.sh --rotate smtp_password
+./edit-secrets.sh --export-recovery-kit
+./edit-secrets.sh --view
+./edit-secrets.sh --list
 make edit-secrets
-make test-secrets
+make test-secrets    # runs --list internally
 ```
 
 ---
@@ -413,14 +437,14 @@ sudo ./cron-setup.sh [OPTIONS]
 
 | Schedule | Job |
 |---|---|
-| Daily 2 AM (Mon–Sat) | `maintenance.sh --comprehensive` |
+| Daily 2 AM (Mon–Sat) | `backup.sh --type db --rclone --email` |
 | Daily 4 AM | `backup.sh --type db --rclone --email` |
 | Every 30 min | `health.sh --quiet` |
 | Saturday 4 AM | `maintenance.sh --update-firewall` |
 | Sunday 3 AM | `backup.sh --type full --full-verification --rclone --email` |
 | Every hour | `maintenance.sh --update-dns` |
 
-All scripts run from `$PROJECT_ROOT` to preserve context. Health and maintenance jobs are `flock`-protected. Sunday maintenance is intentionally skipped.
+All scripts run from `$PROJECT_ROOT` to preserve context. Health and maintenance jobs are `flock`-protected. Sunday maintenance is intentionally skipped to avoid overlap with the full backup.
 
 ```bash
 sudo ./cron-setup.sh --install
