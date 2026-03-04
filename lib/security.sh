@@ -140,15 +140,17 @@ create_secure_file() {
 
     local temp_file
     temp_file=$(mktemp)
-    local cleanup_temp="rm -f '$temp_file'"
+    # NOTE: cleanup_temp local variable removed (was eval "$cleanup_temp", see BUG-R class).
+    # All error paths now call: rm -f -- "$temp_file"
 
     # Set restrictive umask for secure creation
     local old_umask
     old_umask=$(umask)
     umask 077
 
-    # Create file content atomically
-    if echo "$content" > "$temp_file"; then
+    # FIX (echo "$content" LOW): printf avoids misinterpreting content that
+    # begins with '-' as an echo flag on POSIX implementations.
+    if printf '%s\n' "$content" > "$temp_file"; then
         # Set permissions before moving to final location
         if chmod "$permissions" "$temp_file"; then
             # Set ownership if specified
@@ -161,7 +163,9 @@ create_secure_file() {
                 if ! chown "$chown_target" "$temp_file"; then
                     log_error "Failed to set ownership: $chown_target"
                     umask "$old_umask"
-                    eval "$cleanup_temp"
+                    # FIX (eval "$cleanup_temp" LOW): direct rm -f eliminates
+                    # the eval injection vector.
+                    rm -f -- "$temp_file"
                     return 1
                 fi
             fi
@@ -174,19 +178,19 @@ create_secure_file() {
             else
                 log_error "Failed to move secure file to final location: $file_path"
                 umask "$old_umask"
-                eval "$cleanup_temp"
+                rm -f -- "$temp_file"
                 return 1
             fi
         else
             log_error "Failed to set file permissions: $permissions"
             umask "$old_umask"
-            eval "$cleanup_temp"
+            rm -f -- "$temp_file"
             return 1
         fi
     else
         log_error "Failed to write content to temporary file"
         umask "$old_umask"
-        eval "$cleanup_temp"
+        rm -f -- "$temp_file"
         return 1
     fi
 }
@@ -244,7 +248,36 @@ validate_password_strength() {
     return 0
 }
 
-# ENHANCED: Generate secure random strings
+# ENHANCED: Generate cryptographically secure random strings.
+#
+# FIXED BUG-L (HIGH) — Modulo bias eliminated via rejection sampling.
+#   The old code used `rand_byte % char_count` directly.  Because a byte
+#   spans [0,255] and most charsets do not divide 256 evenly, the first
+#   (256 mod char_count) indices were over-represented:
+#
+#     Charset           Size  256 mod N  Bias on first N indices
+#     hex                 16      0      None (256 = 16×16)
+#     base64              64      0      None (256 = 4×64)
+#     alphanumeric        62      8      +25% on indices 0-7  (A-H)
+#     alphanum_special    74     34      +33% on indices 0-33
+#
+#   Fix: compute highest_multiple = (256 / char_count) * char_count and
+#   discard any byte whose value >= highest_multiple before applying modulo.
+#   For hex and base64 highest_multiple == 256, so no bytes are discarded.
+#
+# FIXED BUG-M/N (MEDIUM) — Bulk entropy read; $RANDOM fallback removed.
+#   The old loop forked `od` + `tr` (~3 processes) for every character,
+#   producing ~96 subprocess spawns for a 48-character password.  The
+#   else-branch fell back to $RANDOM, a 15-bit LCG that is not
+#   cryptographically secure.
+#
+#   Fix: all bytes are obtained with a single `od` invocation reading
+#   (length * 2 + 64) bytes — enough to absorb rejected bytes with
+#   very high probability even for the worst-case charset (74 chars,
+#   ~13.3% rejection rate).  A top-up loop handles the astronomically
+#   unlikely case where the bulk read falls short.
+#   The $RANDOM fallback is removed entirely; if /dev/urandom is absent
+#   the function returns 1 with an explicit error.
 generate_secure_random() {
     local length="${1:-32}"
     local charset="${2:-alphanumeric}"
@@ -268,24 +301,67 @@ generate_secure_random() {
             ;;
     esac
 
-    # Use multiple entropy sources
-    local random_string=""
+    # Guard: /dev/urandom is required; $RANDOM is not a cryptographic source.
+    if [[ ! -c /dev/urandom ]]; then
+        log_error "generate_secure_random: /dev/urandom not available; cannot generate cryptographically secure string"
+        return 1
+    fi
+
     local char_count=${#chars}
 
-    for ((i=0; i<length; i++)); do
-        # Use multiple entropy sources for better randomness
-        local rand_byte
-        if [[ -c /dev/urandom ]]; then
-            rand_byte=$(od -An -N1 -tu1 /dev/urandom | tr -d ' ')
-        else
-            rand_byte=$((RANDOM % 256))
-        fi
+    # Rejection-sampling threshold (BUG-L fix).
+    # highest_multiple is the largest value < 256 that is an exact multiple of
+    # char_count.  Bytes in [highest_multiple, 255] are discarded so that the
+    # remaining range maps evenly onto the charset with no over-representation.
+    local highest_multiple=$(( (256 / char_count) * char_count ))
 
-        local char_index=$((rand_byte % char_count))
-        random_string+="${chars:$char_index:1}"
+    local random_string=""
+    local accepted=0
+
+    # Single bulk read — (BUG-M/N fix).
+    # Over-read by 2x + 64 to absorb rejected bytes comfortably.  Even the
+    # worst case (alphanum_special, ~13.3% rejection) leaves ample margin.
+    local bytes_to_read=$(( length * 2 + 64 ))
+    local raw_bytes
+    raw_bytes=$(od -An -N"$bytes_to_read" -tu1 /dev/urandom)
+
+    local rand_byte
+    for rand_byte in $raw_bytes; do
+        [[ $accepted -ge $length ]] && break
+        # Discard bytes that would introduce modulo bias
+        [[ $rand_byte -ge $highest_multiple ]] && continue
+        random_string+="${chars:$(( rand_byte % char_count )):1}"
+        (( accepted++ ))
+    done
+
+    # Top-up: handles the extremely unlikely case where the bulk read fell
+    # short after rejection sampling.  Each iteration is a single od call,
+    # but this path is essentially unreachable in normal operation.
+    while [[ $accepted -lt $length ]]; do
+        rand_byte=$(od -An -N1 -tu1 /dev/urandom | tr -d ' \n')
+        [[ $rand_byte -ge $highest_multiple ]] && continue
+        random_string+="${chars:$(( rand_byte % char_count )):1}"
+        (( accepted++ ))
     done
 
     echo "$random_string"
+}
+
+# Named wrapper for breakglass password generation.
+#
+# FIX (Dead generate_breakglass_password, MEDIUM): Both call sites in
+# create-breakglass-admin.sh previously bypassed this wrapper and called
+# generate_secure_random() directly with inline charset arguments, making
+# the function unreachable dead code.  Having the wrapper here provides:
+#   - a semantically clear call site
+#   - a single place to adjust charset or length policy
+#   - automatic inheritance of the BUG-L rejection-sampling fix above
+#
+# Uses the alphanumeric (62-char) charset.  256 mod 62 = 8, so bytes
+# 248-255 are discarded (~3.1% rejection rate); no bias remains.
+generate_breakglass_password() {
+    local length="${1:-48}"
+    generate_secure_random "$length" "alphanumeric"
 }
 
 # ENHANCED: Secure cleanup function for sensitive data
