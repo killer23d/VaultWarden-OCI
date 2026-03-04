@@ -923,8 +923,6 @@ generate_maintenance_summary() {
 # Main
 # ---------------------------------------------------------------------------
 main() {
-    require_root "$@"
-
     log_header "VaultWarden-OCI Maintenance Manager"
 
     local state_dir
@@ -941,6 +939,9 @@ main() {
 
     # ---- Deep DB maintenance: self-contained sub-command ----
     if [[ "$DB_DEEP_MAINT" == "true" ]]; then
+        # Needs root (enforced inside run_deep_db_maintenance via is_root),
+        # but keep lock creation etc. consistent here.
+        require_root "$@"
         local DEEP_LOCKDIR="$state_dir/.locks/db-maint.lock"
         if ! mkdir "$DEEP_LOCKDIR" 2>/dev/null; then
             log_error "Another DB maintenance task is already running (lock: $DEEP_LOCKDIR)"
@@ -958,12 +959,16 @@ main() {
 
     # ---- Email diagnostic: self-contained sub-command ----
     if [[ "$TEST_EMAIL" == "true" ]]; then
+        # Email diagnostics do not inherently require root; they require Docker access.
+        # If user lacks docker permissions, docker commands will fail with a clear error.
         if ! load_env_file; then log_error "Failed to load configuration"; exit 1; fi
         run_email_diagnostics
         exit $?
     fi
 
     # ---- Routine or targeted maintenance ----
+    # Routine maintenance and firewall updates require root.
+    require_root "$@"
     local MAINT_LOCKDIR="$state_dir/.locks/maintenance.lock"
     if ! mkdir "$MAINT_LOCKDIR" 2>/dev/null; then
         log_error "Another maintenance task is already running (lock: $MAINT_LOCKDIR)"
