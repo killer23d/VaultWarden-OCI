@@ -70,6 +70,11 @@ OPTIONS:
   --use-latest    Override pinned container versions with 'latest' tags in .env.
   --skip-deps     Skip dependency installation (assumes already installed).
   --force         Overwrite existing .env, secrets, and docker-compose files.
+                  WARNING: Also regenerates the Age encryption key. All
+                  existing encrypted secrets become permanently unrecoverable
+                  without a prior recovery kit export. Run
+                  './edit-secrets.sh --export-recovery-kit' BEFORE using
+                  --force on a running installation.
   --dry-run       Print what would happen without making any changes.
   --help          Show this help and exit.
 EOF
@@ -137,7 +142,8 @@ resolve_github_latest() {
 # FIX [BUG-04]: Replace curl|sh Docker install with the direct apt-repo method.
 # The convenience script (get.docker.com) is executed as root without any
 # integrity check, and does not support Ubuntu 24.10 (Oracular). This function:
-#   - Adds Docker's official GPG key (fingerprint from docs.docker.com).
+#   - Adds Docker's official GPG key and PROGRAMMATICALLY verifies the
+#     fingerprint before trusting it (FIX-S03).
 #   - Pins the apt source to 'noble' (24.04 LTS), which is the correct
 #     repository for Ubuntu 24.10 — Docker does not publish an 'oracular' repo,
 #     but noble packages are ABI-compatible and work correctly on 24.10.
@@ -146,12 +152,41 @@ resolve_github_latest() {
 install_docker_apt() {
     log_info "Installing Docker via official apt repository (noble codename)..."
 
-    # Add Docker's official GPG key
-    # Fingerprint: 9DC8 5822 9FC7 DD38 854A  E2D8 8D81 803C 0EBF CD88
-    # Verify at: https://docs.docker.com/engine/install/ubuntu/#install-using-the-repository
     install -m 0755 -d /etc/apt/keyrings
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
-        | gpg --dearmor -o /etc/apt/keyrings/docker.gpg || return 1
+
+    # FIX-S03: Download Docker's GPG key to a temp file and verify its
+    # fingerprint programmatically before importing it into the apt keyring.
+    # A fingerprint that exists only in a comment is not a security control.
+    # Official fingerprint source: https://docs.docker.com/engine/install/ubuntu/
+    local docker_gpg_tmp="$TMP_WORKDIR/docker.gpg.asc"
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o "$docker_gpg_tmp" || {
+        log_error "Failed to download Docker GPG key"
+        return 1
+    }
+
+    local expected_fpr="9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
+    local actual_fpr
+    actual_fpr=$(gpg --with-colons --import-options show-only \
+        --import "$docker_gpg_tmp" 2>/dev/null \
+        | awk -F: '/^fpr/{print $10}' | head -1)
+
+    if [[ -z "$actual_fpr" ]]; then
+        log_error "Could not extract fingerprint from Docker GPG key — gpg parsing failed."
+        log_error "Verify manually: gpg --with-colons --import-options show-only --import ${docker_gpg_tmp}"
+        return 1
+    fi
+
+    if [[ "$actual_fpr" != "$expected_fpr" ]]; then
+        log_error "Docker GPG fingerprint MISMATCH — refusing to add repository."
+        log_error "  Expected: $expected_fpr"
+        log_error "  Actual:   $actual_fpr"
+        log_error "This may indicate a supply chain attack or DNS/MITM compromise."
+        log_error "Verify at: https://docs.docker.com/engine/install/ubuntu/"
+        return 1
+    fi
+
+    log_success "Docker GPG key fingerprint verified: $actual_fpr"
+    gpg --dearmor < "$docker_gpg_tmp" > /etc/apt/keyrings/docker.gpg || return 1
     chmod a+r /etc/apt/keyrings/docker.gpg
 
     # Use 'noble' (24.04 LTS) codename for Ubuntu 24.10 — Docker does not
@@ -236,6 +271,33 @@ install_dependencies() {
 
     log_info "Installing system dependencies..."
 
+    # FIX-S06: Ensure the Ubuntu 'universe' repository is enabled before
+    # attempting to install python3-argon2, which lives in universe and is
+    # absent from Ubuntu 24.04 minimal's default sources. Without this,
+    # apt-get fails with 'E: Unable to locate package python3-argon2' and
+    # the entire setup phase aborts.
+    if ! grep -qE '^deb[[:space:]].*universe' \
+            /etc/apt/sources.list \
+            /etc/apt/sources.list.d/*.list 2>/dev/null; then
+        log_info "Enabling Ubuntu 'universe' repository (required for python3-argon2)..."
+        if command -v add-apt-repository >/dev/null 2>&1; then
+            add-apt-repository -y universe 2>/dev/null || {
+                log_warn "add-apt-repository failed — adding universe source manually"
+                local codename
+                codename=$(lsb_release -cs 2>/dev/null || echo "noble")
+                echo "deb http://archive.ubuntu.com/packages/ubuntu ${codename} universe" \
+                    > /etc/apt/sources.list.d/ubuntu-universe.list
+            }
+        else
+            local codename
+            codename=$(lsb_release -cs 2>/dev/null || echo "noble")
+            echo "deb http://archive.ubuntu.com/packages/ubuntu ${codename} universe" \
+                > /etc/apt/sources.list.d/ubuntu-universe.list
+        fi
+        apt-get update -qq || return 1
+        log_success "Universe repository enabled"
+    fi
+
     local basic_packages=("age" "make" "nano" "rclone" "sqlite3" "jq" "ufw" "curl" "wget" "unzip" "git" "gpg" "coreutils" "haveged" "dnsutils" "rsync" "python3" "python3-argon2" "apache2-utils" "cron")
     local missing_packages=()
     for pkg in "${basic_packages[@]}"; do
@@ -281,10 +343,50 @@ install_dependencies() {
             log_info "SOPS_VERSION not pinned — resolving latest from GitHub..."
             sops_ver=$(resolve_github_latest "getsops/sops") || return 1
         fi
-        log_info "Installing SOPS ${sops_ver}..."
-        wget -q "https://github.com/getsops/sops/releases/download/${sops_ver}/sops-${sops_ver}.linux.${arch}" \
-            -O /usr/local/bin/sops || return 1
-        chmod +x /usr/local/bin/sops || return 1
+
+        # FIX-S01: Download the SOPS binary and the official checksums file,
+        # then verify the SHA-256 hash before installing. The previous code
+        # piped directly to /usr/local/bin/sops with no integrity check —
+        # a MITM or compromised CDN could serve a backdoored binary that gets
+        # installed as root and used to decrypt all secrets.
+        log_info "Installing SOPS ${sops_ver} with checksum verification..."
+
+        local sops_filename="sops-${sops_ver}.linux.${arch}"
+        local base_url="https://github.com/getsops/sops/releases/download/${sops_ver}"
+        local sops_bin="$TMP_WORKDIR/${sops_filename}"
+        local sops_checksums="$TMP_WORKDIR/sops-${sops_ver}.checksums.txt"
+
+        wget -q "${base_url}/${sops_filename}"               -O "$sops_bin"       || {
+            log_error "Failed to download SOPS binary: ${base_url}/${sops_filename}"
+            return 1
+        }
+        wget -q "${base_url}/sops-${sops_ver}.checksums.txt" -O "$sops_checksums" || {
+            log_error "Failed to download SOPS checksums: ${base_url}/sops-${sops_ver}.checksums.txt"
+            return 1
+        }
+
+        local expected actual
+        expected=$(grep "${sops_filename}$" "$sops_checksums" | awk '{print $1}')
+        actual=$(sha256sum "$sops_bin" | awk '{print $1}')
+
+        if [[ -z "$expected" ]]; then
+            log_error "Could not find checksum entry for '${sops_filename}' in checksums file."
+            log_error "The checksums file may not include this architecture/version combination."
+            log_error "Pin SOPS_VERSION=vX.Y.Z at the top of setup.sh and retry."
+            return 1
+        fi
+
+        if [[ "$expected" != "$actual" ]]; then
+            log_error "SOPS checksum MISMATCH — refusing to install."
+            log_error "  Expected: $expected"
+            log_error "  Actual:   $actual"
+            log_error "This may indicate a compromised download, MITM, or corrupted file."
+            log_error "Pin SOPS_VERSION=vX.Y.Z and retry. Releases: https://github.com/getsops/sops/releases"
+            return 1
+        fi
+
+        log_success "SOPS checksum verified: $expected"
+        install -m 755 "$sops_bin" /usr/local/bin/sops || return 1
     fi
     return 0
 }
@@ -441,7 +543,15 @@ setup_directories() {
     fi
 
     chown -R "${puid}:${pgid}" "$project_state_dir" || return 1
-    chmod -R 755 "$project_state_dir" || return 1
+
+    # FIX-S02: Replace chmod -R 755 with restrictive permissions.
+    # 755 sets world-execute on every subdirectory under /var/lib/vaultwarden,
+    # making the entire path traversable by any local user — including any
+    # future service account, Docker socket escape, or concurrent SSH session.
+    # 750 (directories) and 640 (files) restrict access to owner + group only.
+    find "${project_state_dir}" -type d -exec chmod 750 {} \; 2>/dev/null || return 1
+    find "${project_state_dir}" -type f -exec chmod 640 {} \; 2>/dev/null || true
+
     return 0
 }
 
@@ -464,8 +574,46 @@ generate_age_keys() {
 
     check_entropy || return 1
     local age_key_file="secrets/keys/age-key.txt"
-    if [[ -f "$age_key_file" ]] && [[ "$FORCE" != "true" ]]; then
-        check_age_key "$age_key_file" 2>/dev/null && return 0
+
+    if [[ -f "$age_key_file" ]]; then
+        if [[ "$FORCE" != "true" ]]; then
+            # Normal non-force path: skip if existing key is valid.
+            check_age_key "$age_key_file" 2>/dev/null && return 0
+        else
+            # FIX-S07: --force on an existing, valid Age key permanently
+            # invalidates all existing encrypted secrets — secrets.yaml,
+            # any exported recovery kits, and all backup passphrases encrypted
+            # to the old key become unrecoverable without a prior recovery kit.
+            #
+            # In --auto mode: hard fail. Automated scripts must not silently
+            # rotate the master encryption key.
+            # In interactive mode: require the operator to type 'ROTATE KEY'
+            # to confirm they understand the consequences.
+            if check_age_key "$age_key_file" 2>/dev/null; then
+                if [[ "$AUTO_MODE" == "true" ]]; then
+                    log_error "--force with --auto would regenerate the Age encryption key."
+                    log_error "This permanently invalidates ALL existing encrypted secrets."
+                    log_error "Run './edit-secrets.sh --export-recovery-kit' first, then"
+                    log_error "retry with --force WITHOUT --auto to confirm interactively."
+                    return 1
+                else
+                    log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    log_warn "  WARNING: --force will REGENERATE the Age encryption key."
+                    log_warn "  ALL existing encrypted secrets will become permanently"
+                    log_warn "  unrecoverable without a prior recovery kit export."
+                    log_warn "  Run './edit-secrets.sh --export-recovery-kit' FIRST."
+                    log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    printf '\nType %sROTATE KEY%s to confirm, or anything else to abort: ' \
+                        "${COLOR_RED:-}" "${COLOR_RESET:-}"
+                    local confirm
+                    read -r confirm
+                    if [[ "$confirm" != "ROTATE KEY" ]]; then
+                        log_info "Key regeneration cancelled — existing key preserved."
+                        return 1
+                    fi
+                fi
+            fi
+        fi
     fi
 
     local real_user; real_user=$(get_real_user)
@@ -608,9 +756,19 @@ set_script_permissions() {
 setup_firewall() {
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would configure firewall"; return 0; fi
 
+    # FIX-S05: Use 'sshd -T' to resolve the effective SSH configuration,
+    # including all Include directives and sshd_config.d/ drop-in files.
+    # Ubuntu 24.04 minimal uses sshd_config.d/50-cloud-init.conf for
+    # non-standard ports; awk on sshd_config alone silently misses these.
+    # If the real SSH port is not opened in UFW, the next reboot or
+    # 'ufw reload' locks the operator out of the server.
     local ssh_port
-    ssh_port=$(awk '/^Port/ {print $2; exit}' /etc/ssh/sshd_config 2>/dev/null)
+    ssh_port=$(sshd -T 2>/dev/null | awk '/^port /{print $2; exit}')
+    if [[ -z "$ssh_port" ]]; then
+        ssh_port=$(awk '/^Port[[:space:]]/{print $2; exit}' /etc/ssh/sshd_config 2>/dev/null)
+    fi
     ssh_port=${ssh_port:-22}
+    log_info "Detected SSH port: ${ssh_port}"
 
     # Idempotency: only skip if ALL three required rules are already present and active.
     # Checking SSH port here is critical — returning early without it would lock the admin out.
@@ -770,6 +928,23 @@ EOF
 main() {
     log_header "VaultWarden-OCI Setup - Security Hardened Edition"
     if ! is_root; then log_error "Must run as root."; exit 1; fi
+
+    # FIX-S04: Prevent concurrent setup.sh invocations.
+    # A race between two simultaneous runs can permanently corrupt the
+    # Age key + SOPS config pair: if both runs pass the [[ -f age_key_file ]]
+    # guard and both call generate_age_key(), the second run can overwrite
+    # the key file while the first has already used the original public key
+    # to encrypt secrets.yaml — leaving them permanently mismatched and
+    # unrecoverable without the recovery kit.
+    local SETUP_LOCK_FILE="/var/lock/vaultwarden-setup.lock"
+    local SETUP_LOCK_FD=202
+    eval "exec ${SETUP_LOCK_FD}>\"$SETUP_LOCK_FILE\""
+    if ! flock -n $SETUP_LOCK_FD; then
+        log_error "Another setup instance is already running (could not acquire lock)."
+        log_error "Wait for it to complete, then retry."
+        log_error "If the lock is stale, remove: ${SETUP_LOCK_FILE}"
+        exit 1
+    fi
 
     # Log version pin status for transparency
     if [[ -n "${SOPS_VERSION:-}" ]]; then
