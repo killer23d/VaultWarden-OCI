@@ -21,6 +21,10 @@ source "lib/crypto.sh"
 # Configuration
 UPDATE_SYSTEM=false
 UPDATE_IMAGES=true
+NO_IMAGES=false
+NO_RESTART=false
+NO_CLEANUP=false
+EMAIL_NOTIFY=false
 DRY_RUN=false
 RESTART_SERVICES=true
 CLEANUP_OLD=true
@@ -38,14 +42,15 @@ USAGE:
     ./update.sh [OPTIONS]
 
 OPTIONS:
-    --system        Also update host OS packages (apt-get update && apt-get upgrade)
+    --system            Update system packages (apt) in addition to containers
     --no-images     Skip pulling new Docker images
     --no-restart    Do not restart services after update
     --no-cleanup    Do not remove old Docker images after update
-    --dry-run       Show what would be updated without making changes
-    --force         Proceed even if pre-update safety backup fails (DANGEROUS)
-    --quiet         Suppress non-error output
-    --help          Show this help
+    --dry-run           Show what would be done without executing
+    --email             Send email notification on completion
+    --force             Proceed even if pre-update backup fails
+    --quiet             Reduce output
+    --help              Show this help
 
 EXAMPLES:
     ./update.sh                   # Update containers and restart
@@ -63,6 +68,7 @@ while [[ $# -gt 0 ]]; do
         --no-restart)   RESTART_SERVICES=false; shift ;;
         --no-cleanup)   CLEANUP_OLD=false; shift ;;
         --dry-run)      DRY_RUN=true; shift ;;
+        --email)      EMAIL_NOTIFY=true; shift ;;
         --force)        FORCE_UPDATE=true; shift ;;
         --quiet)        QUIET=true; shift ;;
         --help)         show_help; exit 0 ;;
@@ -95,7 +101,7 @@ check_for_updates() {
         images=$(docker compose config 2>/dev/null \
             | grep -E '^[[:space:]]+image:' \
             | awk '{print $2}' \
-            | tr -d '"'"'"')
+            | tr -d '"'"'")
     fi
 
     if [[ -z "$images" ]]; then
@@ -332,21 +338,15 @@ main() {
     else
         u_log_success "Update process completed successfully"
 
-        # FIX (BUG-R): Direct send_notification_email call instead of spawning
-        # a new bash subshell with `bash -c "source lib/common.sh &&
-        # send_notification_email '$subject' '$body'"`. The old approach broke
-        # silently whenever $subject or $body contained a single quote — the
-        # shell tokeniser would see the unescaped quote as closing the
-        # argument, splitting the string or injecting unintended tokens.
-        # lib/common.sh is already sourced at the top of this script.
-        local admin_email
-        admin_email=$(get_config_value "ADMIN_EMAIL" "")
-
-        if [[ -n "$admin_email" ]]; then
-            local subject="VaultWarden Updated Successfully"
-            local body
-            body="The VaultWarden-OCI stack has been updated.\nDate: $(date -Iseconds)\nUpdates applied: $([[ "$images_updated" == "true" ]] && echo "Docker Images" || echo "None")$([[ "$UPDATE_SYSTEM" == "true" ]] && echo ", System Packages" || echo "")"
-            send_notification_email "$subject" "$body" >/dev/null 2>&1 || true
+        # Email notification (opt-in via --email)
+        if [[ "$EMAIL_NOTIFY" == "true" ]]; then
+            local admin_email
+            admin_email=$(get_config_value "ADMIN_EMAIL" "")
+            if [[ -n "$admin_email" ]]; then
+                local subject="VaultWarden Update Complete"
+                local body="Update completed on: $(hostname)\n\nSee logs for details."
+                send_notification_email "$subject" "$body" >/dev/null 2>&1 || true
+            fi
         fi
     fi
 
