@@ -24,7 +24,7 @@ This is a **template-based, hardened deployment** built for small teams who want
 > **⚠️ CRITICAL:** OCI blocks all inbound traffic by default at the hypervisor level. You must open ports 80 and 443 in your VCN Security List **before** cloning — Caddy cannot provision its TLS certificate otherwise.
 
 1. In the OCI Console go to **Compute → Instances → your instance**.
-2. Under "Primary VNIC" click your **Subnet → Default Security List**.
+2. Under “Primary VNIC” click your **Subnet → Default Security List**.
 3. Add **Ingress Rules** for TCP ports `80` and `443`.
 
 **Option A — Open to all (simplest):**
@@ -43,13 +43,13 @@ Verify the current list at <https://www.cloudflare.com/ips-v4>.
 
 4. Also add an SSH rule: Source `0.0.0.0/0` (or your IP), Protocol TCP, Port `22`.
 
-> **Why not UFW?** OCI Security Lists drop packets at the hypervisor — before the VM's network stack — making them a harder control than host-level UFW.
+> **Why not UFW?** OCI Security Lists drop packets at the hypervisor — before the VM’s network stack — making them a harder control than host-level UFW.
 
 ---
 
 ### Step 1 — Cloudflare DNS Staging (Grey Cloud First)
 
-In your Cloudflare dashboard set your DNS record to **DNS Only (Grey Cloud)** before running setup. Caddy must reach Let's Encrypt directly to provision its TLS certificate on first boot. You can enable the orange proxy cloud after the stack is running.
+In your Cloudflare dashboard set your DNS record to **DNS Only (Grey Cloud)** before running setup. Caddy must reach Let’s Encrypt directly to provision its TLS certificate on first boot. You can enable the orange proxy cloud after the stack is running.
 
 ---
 
@@ -58,7 +58,10 @@ In your Cloudflare dashboard set your DNS record to **DNS Only (Grey Cloud)** be
 ```bash
 git clone https://github.com/killer23d/VaultWarden-OCI.git
 cd VaultWarden-OCI
-chmod -R +x *.sh
+
+# Make top-level scripts executable — do NOT use -R here.
+# lib/*.sh are sourced libraries, not standalone executables.
+chmod +x *.sh
 
 # Automated setup — installs deps, generates config files, auto-generates
 # VaultWarden admin password, Caddy admin password, and backup passphrase.
@@ -133,6 +136,23 @@ sudo ./cron-setup.sh --install
 ./create-breakglass-admin.sh    # or: make breakglass-create
 ```
 
+The installed cron schedule:
+
+| Time | Job | Protection |
+| :-- | :-- | :-- |
+| 2 AM Mon–Sat | Comprehensive maintenance | `flock` — skips + logs if already running |
+| 3 AM Sunday | Full backup + verify + rclone + email | Internal lock in `backup.sh` |
+| 4 AM daily | DB backup + rclone + email | Internal lock in `backup.sh` |
+| Every 30 min | Health check | `flock` — skips + logs if already running |
+| Every hour | DNS update | `flock` — skips + logs if already running |
+| Saturday 4 AM | Firewall rules update | `flock` — skips + logs if already running |
+
+> **⚠️ After every reboot:** The lock directory `/run/vaultwarden-locks/` lives on a `tmpfs` mount and is wiped on reboot. All four flock-protected jobs will fail to acquire their lock until the directory is recreated. Run `sudo ./cron-setup.sh --install` (idempotent) or `sudo ./cron-setup.sh --validate` to detect and fix this. To avoid manual intervention, add a `systemd-tmpfiles.d` rule:
+> ```bash
+> echo 'd /run/vaultwarden-locks 0700 root root -' | sudo tee /etc/tmpfiles.d/vaultwarden-locks.conf
+> sudo systemd-tmpfiles --create
+> ```
+
 **🎉 Your vault is live at `https://vault.yourdomain.com`**
 
 ---
@@ -156,12 +176,12 @@ sudo ./cron-setup.sh --install
 | `setup-secrets.sh` | Initial secrets bootstrap — prompted interactively or via `--auto`. Standalone flow: run **after** editing `.env`. Supports `--quiet-summary` to suppress its completion banner when called from `setup.sh`. |
 | `startup.sh` | Start / stop / restart services |
 | `health.sh` | Health monitoring with optional auto-recovery |
-| `backup.sh` | Encrypted database and full-system backups |
-| `restore.sh` | Interactive or automated restore |
+| `backup.sh` | Encrypted database and full-system backups. Uses host `sqlite3` with the Online Backup API for atomic, WAL-safe DB snapshots — no Docker container required for backup integrity checks. |
+| `restore.sh` | Interactive or automated restore. Uses host `sqlite3` for archive integrity verification — no Docker required. |
 | `update.sh` | Safe container + system updates with auto-rollback |
 | `maintenance.sh` | Cleanup, DNS update, DB maintenance, email test |
 | `edit-secrets.sh` | Secure secrets editor (Age + SOPS) — rotate individual fields, list keys, export recovery kit |
-| `cron-setup.sh` | Install / remove automation crons |
+| `cron-setup.sh` | Install / remove automation crons. All maintenance tasks (maintenance, health, DNS update, firewall update) are `flock`-protected with skip-logging — overlapping runs are skipped and recorded in the job’s log file rather than silently dropped. |
 | `create-breakglass-admin.sh` | Emergency OCI serial console admin |
 
 Full reference: [docs/SCRIPTS.md](docs/SCRIPTS.md)
@@ -195,8 +215,10 @@ All live configuration is generated from `.example` templates by `setup.sh`. Edi
 - **Edge WAF** — Cloudflare proxy + Fail2ban pushes bans to Cloudflare API (iptables not used for proxied services)
 - **Host firewall** — UFW opens 80/443/22; Cloudflare IP restriction enforced at OCI Security List level
 - **Encrypted secrets** — Age + SOPS; no plaintext credentials at rest
-- **HTTPS** — Automatic Let's Encrypt via Caddy with HSTS, CSP, and security headers
+- **HTTPS** — Automatic Let’s Encrypt via Caddy with HSTS, CSP, and security headers
 - **Container hardening** — Non-root execution, capability restrictions, memory limits
+- **Docker-free backup integrity** — `backup.sh` and `restore.sh` use host `sqlite3` (SQLite Online Backup API) for atomic DB snapshots and `PRAGMA integrity_check`; no ephemeral alpine containers with read-write mounts over live vault data
+- **Hardened cron temp files** — cron install/remove use `mktemp` with `umask 077`; eliminates PID-predictable `/tmp` symlink attack vector on the root-owned crontab write
 
 Full details: [docs/SECURITY.md](docs/SECURITY.md)
 
@@ -212,11 +234,18 @@ Full details: [docs/SECURITY.md](docs/SECURITY.md)
 
 Three backup tiers with encrypted output (Age key required to restore):
 
-- **Daily** — database backup (14-day retention)
-- **Weekly** — full system backup (30-day retention)
-- **Manual** — emergency recovery kit (90-day retention)
+| Tier | Schedule | Default retention |
+| :-- | :-- | :-- |
+| **Database snapshot** | Daily 4 AM | 14 days |
+| **Full system archive** | Sunday 3 AM | 14 days |
+| **On-demand emergency** | Manual | 14 days |
 
-> Keep a separate copy of `secrets/keys/age-key.txt` — it is required to decrypt full and database backups on a new server.
+Retention is configurable: pass `--keep N` to `backup.sh`, or edit `KEEP_DAYS` in `.env`. Example — keep 30 days of weekly full backups:
+```bash
+sudo ./backup.sh --type full --keep 30
+```
+
+> **⚠️ Keep a separate copy of `secrets/keys/age-key.txt`** — it is required to decrypt all backups on a new server. Run `./edit-secrets.sh --export-recovery-kit` after setup to store it in your password manager alongside all other credentials.
 
 Full procedures: [docs/BACKUP-RESTORE.md](docs/BACKUP-RESTORE.md)
 
