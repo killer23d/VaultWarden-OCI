@@ -63,7 +63,7 @@ Each backup produces three files:
 | File | Purpose |
 | :-- | :-- |
 | `*.age` | Encrypted backup archive |
-| `*.sha256` | Post-encryption checksum |
+| `*.sha256` | Post-encryption SHA-256 checksum (generated automatically) |
 | `*.meta` | Metadata (type, timestamp, version, size) |
 
 ---
@@ -72,7 +72,7 @@ Each backup produces three files:
 
 | Mode | Flag | Speed | What It Tests |
 | :-- | :-- | :-- | :-- |
-| Fast (default) | *(none)* | Seconds | SHA256 checksum post-encryption |
+| Fast (default) | *(none)* | Seconds | SHA-256 checksum post-encryption |
 | Full | `--full-verification` | Minutes | Decrypt → extract → DB integrity check |
 
 Use fast for daily automated backups; full for weekly and before major changes.
@@ -126,21 +126,28 @@ create_printable_key_backup ~/vaultwarden-key-backup.pdf
 
 ## ☁️ Offsite Storage (rclone)
 
+`backup.sh` reads `RCLONE_REMOTE_NAME` from `.env` and syncs the encrypted `.age`, `.meta`, and `.sha256` sidecars to `${RCLONE_REMOTE_NAME}:vaultwarden_backups/${type}/` when `--rclone` is passed. The sync is **non-fatal** — a remote failure warns and emails but does not mark the local backup as failed.
+
 ```bash
-# Configure a remote
+# 1. Install rclone (if not already present)
+curl https://rclone.tech/install.sh | sudo bash
+
+# 2. Configure a remote
 rclone config
 
-# Set the remote name in .env
+# 3. Set the remote name in .env
 RCLONE_REMOTE_NAME=your_remote_name
 
-# Test
+# 4. Test
 ./backup.sh --type db --rclone
 
-# Verify remote contents
+# 5. Verify remote contents
 rclone ls your_remote_name:vaultwarden_backups/
 ```
 
-Automation installs rclone-enabled crons via `sudo ./cron-setup.sh --install`.
+`sudo ./cron-setup.sh --install` provisions rclone-enabled cron jobs automatically:
+- **Daily 4 AM** — `backup.sh --type db --rclone --email` (non-fatal on remote failure)
+- **Sunday 3 AM** — `backup.sh --type full --full-verification --rclone --email` (fatal on verification failure)
 
 ---
 
@@ -271,7 +278,7 @@ sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.c
 **"Decryption failed" on restore**
 
 ```bash
-# Verify checksum
+# Verify checksum — .sha256 is generated automatically alongside every .age archive
 sha256sum -c backup.age.sha256
 
 # Make sure the Age key matches the backup
@@ -279,14 +286,6 @@ age-keygen -y secrets/keys/age-key.txt
 
 # Try an older backup
 ./restore.sh --file /path/to/older-backup.age
-```
-
-**"Services won't start after restore"**
-
-```bash
-docker compose config   # check for config errors
-docker compose logs
-make restart
 ```
 
 **"rclone sync failed"**
@@ -311,7 +310,7 @@ rclone config show your_remote_name
 
 ## ✅ Backup Operations Checklist
 
-**Daily:** Automated db backup runs and checksum passes
+**Daily:** Automated db backup runs, checksum passes, and offsite sync succeeds
 **Weekly:** Full backup with `--full-verification`; offsite sync verified
 **Monthly:** Emergency kit created; `restore.sh` tested in dry-run; Tier 2 escrow refreshed if Age key was rotated
 **Quarterly:** Full disaster recovery drill on a fresh instance
