@@ -27,6 +27,8 @@ DRY_RUN=false
 KEEP_DAYS=14
 QUIET=false
 FORCE=false
+EMAIL_NOTIFY=false   # set by --email; send_notification() called on completion
+LIST_ONLY=false      # set by --list; print existing backups and exit (no root needed)
 LOCK_FD=200
 
 show_help() {
@@ -42,23 +44,29 @@ OPTIONS:
     --keep N        Retention period in days (default: 14)
     --quiet         Suppress non-error output
     --force         Ignore locks and force backup
+    --email         Send email notification on completion/failure
+    --list          List existing backups and exit (no root required)
     --help          Show this help
 
 EXAMPLES:
-    sudo ./backup.sh                   # Auto mode
-    sudo ./backup.sh --type db         # Database-only backup
-    sudo ./backup.sh --type full       # Full state backup
-    sudo ./backup.sh --keep 30         # Keep 30 days of backups
+    sudo ./backup.sh                        # Auto mode
+    sudo ./backup.sh --type db              # Database-only backup
+    sudo ./backup.sh --type full            # Full state backup
+    sudo ./backup.sh --keep 30              # Keep 30 days of backups
+    sudo ./backup.sh --type db --email      # DB backup with email notification
+    sudo ./backup.sh --list                 # List existing backups
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --type)    BACKUP_TYPE="$2"; shift 2 ;;
-        --dry-run) DRY_RUN=true;    shift ;;
-        --keep)    KEEP_DAYS="$2";  shift 2 ;;
-        --quiet)   QUIET=true;      shift ;;
-        --force)   FORCE=true;      shift ;;
+        --dry-run) DRY_RUN=true;     shift ;;
+        --keep)    KEEP_DAYS="$2";   shift 2 ;;
+        --quiet)   QUIET=true;       shift ;;
+        --force)   FORCE=true;       shift ;;
+        --email)   EMAIL_NOTIFY=true; shift ;;
+        --list)    LIST_ONLY=true;   shift ;;
         --help)    show_help; exit 0 ;;
         *)         log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
@@ -72,11 +80,48 @@ b_log_warn()    { [[ "$QUIET" == "true" ]] || log_warn "$*";    }
 # Helpers
 # ---------------------------------------------------------------------------
 
+# BUG-W fix: honour BACKUP_DIR from env/config; fall back to project-relative default.
 get_backup_dir() {
     local type="$1"
-    local dir="$PROJECT_ROOT/backups/$type"
+    local base_dir
+    base_dir="$(get_config_value "BACKUP_DIR" "$PROJECT_ROOT/backups")"
+    local dir="$base_dir/$type"
     ensure_dir "$dir" 750 "$(get_real_user)"
     echo "$dir"
+}
+
+# List all *.age archives under BACKUP_DIR, grouped by type, with size and mtime.
+list_backups() {
+    local base_dir
+    base_dir="$(get_config_value "BACKUP_DIR" "$PROJECT_ROOT/backups")"
+    log_header "Existing Backups — $(date)"
+    if [[ ! -d "$base_dir" ]]; then
+        log_warn "Backup directory not found: $base_dir"
+        return 0
+    fi
+    local found=0
+    for type_dir in "$base_dir"/*/; do
+        [[ -d "$type_dir" ]] || continue
+        local type_name
+        type_name="$(basename "$type_dir")"
+        local files=()
+        while IFS= read -r -d '' f; do
+            files+=("$f")
+        done < <(find "$type_dir" -maxdepth 1 -name "*.age" -type f -print0 2>/dev/null | sort -z)
+        if (( ${#files[@]} > 0 )); then
+            log_info "  [$type_name]"
+            for f in "${files[@]}"; do
+                local size mtime
+                size=$(du -sh "$f" 2>/dev/null | cut -f1 || echo "?")
+                mtime=$(stat -c "%y" "$f" 2>/dev/null | cut -d. -f1 \
+                     || stat -f "%Sm" "$f" 2>/dev/null \
+                     || echo "?")
+                log_info "    $(basename "$f")  ($size  $mtime)"
+                (( ++found )) || true
+            done
+        fi
+    done
+    (( found > 0 )) || log_info "  No backups found."
 }
 
 get_age_public_key() {
@@ -363,6 +408,13 @@ MEOF
 # Main
 # ---------------------------------------------------------------------------
 main() {
+    # --list does not require root; run before privilege check.
+    if [[ "$LIST_ONLY" == "true" ]]; then
+        load_env_file 2>/dev/null || true
+        list_backups
+        exit 0
+    fi
+
     require_root "$@"
 
     local state_dir
@@ -409,13 +461,16 @@ main() {
     local backup_dir
     backup_dir=$(get_backup_dir "$actual_type")
 
+    local backup_file=""
     local backup_success=false
     case "$actual_type" in
         db)
-            perform_db_backup "$backup_dir" "$timestamp" "$age_pub_key" "$TMPDIR_BACKUP" && backup_success=true
+            backup_file=$(perform_db_backup "$backup_dir" "$timestamp" "$age_pub_key" "$TMPDIR_BACKUP") \
+                && backup_success=true
             ;;
         full|emergency)
-            perform_full_backup "$backup_dir" "$timestamp" "$age_pub_key" "$actual_type" "$TMPDIR_BACKUP" && backup_success=true
+            backup_file=$(perform_full_backup "$backup_dir" "$timestamp" "$age_pub_key" "$actual_type" "$TMPDIR_BACKUP") \
+                && backup_success=true
             ;;
         *)
             log_error "Invalid backup type: $actual_type"; exit 1 ;;
@@ -425,12 +480,32 @@ main() {
         b_log_info "Cleaning up old backups (retention: $KEEP_DAYS days)..."
         cleanup_old_backups "$backup_dir" "$actual_type" "$KEEP_DAYS" || \
             b_log_warn "Failed to clean up some old backups"
+
+        if [[ "$EMAIL_NOTIFY" == "true" ]]; then
+            local subject="[VaultWarden] Backup completed: $actual_type ($timestamp)"
+            local body
+            body="$(printf 'Backup type:  %s\nTimestamp:    %s\nFile:         %s\nHost:         %s\n' \
+                "$actual_type" "$timestamp" \
+                "$(basename "${backup_file:-unknown}")" \
+                "$(hostname -f 2>/dev/null || hostname)")"
+            send_notification "$subject" "$body" 2>/dev/null || \
+                b_log_warn "Email notification failed (backup still succeeded)"
+        fi
+
         b_log_success "Backup completed successfully"
         exit 0
     elif [[ "$DRY_RUN" == "true" ]]; then
         b_log_success "Dry run completed"
         exit 0
     else
+        if [[ "$EMAIL_NOTIFY" == "true" ]]; then
+            local subject="[VaultWarden] Backup FAILED: $actual_type ($timestamp)"
+            local body
+            body="$(printf 'Backup type:  %s\nTimestamp:    %s\nHost:         %s\n\nCheck logs for details.\n' \
+                "$actual_type" "$timestamp" \
+                "$(hostname -f 2>/dev/null || hostname)")"
+            send_notification "$subject" "$body" 2>/dev/null || true
+        fi
         log_error "Backup failed"
         exit 1
     fi
