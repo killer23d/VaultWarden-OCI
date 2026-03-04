@@ -50,8 +50,8 @@ SECURITY FEATURES:
     - Simple split-brain detection: warns when /opt/ scripts are older than git repo
 
 CRON JOBS MANAGED:
-    - Daily DB backup (4 AM Mon-Sat, with email notification)
-    - Weekly Full backup (Sunday 3 AM, with email notification)
+    - Daily DB backup (4 AM Mon-Sat, with rclone offsite sync + email notification)
+    - Weekly Full backup (Sunday 3 AM, full verification + rclone offsite sync + email)
     - Health monitoring (every 30 min, flock-protected)
     - Maintenance (daily 2 AM Mon-Sat ONLY, flock-protected)
     - Firewall update (Saturday 4 AM)
@@ -301,7 +301,7 @@ check_split_brain() {
 #   (/tmp/vaultwarden-backup-${UID}.lock) so they are not double-wrapped.
 #
 # FIX [ISSUE 9]:  Daily maintenance moved from "* * *" (every day) to
-#   "* * 1-6" (Monday–Saturday only). This prevents maintenance from running
+#   "* * 1-6" (Monday-Saturday only). This prevents maintenance from running
 #   at 2 AM on Sunday, which was the only remaining overlap window with the
 #   weekly full backup at 3 AM on Sunday.
 #
@@ -309,9 +309,11 @@ check_split_brain() {
 #   simple_key_resilience.sh landed in /opt/. If it is missing the install
 #   fails loudly rather than silently degrading backup key health checks.
 #
-# NEW-CRIT FIX: Removed --rclone and --full-verification flags from cron
-#   backup invocations — backup.sh does not recognise these flags and exited
-#   1 (unknown option) on every scheduled run.
+# NOTE: --rclone and --full-verification are re-instated in cron backup
+#   invocations. backup.sh now implements both flags via sync_to_rclone()
+#   and verify_backup_full(). --rclone is non-fatal (local backup already
+#   succeeded); --full-verification is intentionally fatal (a corrupt offsite
+#   backup is worthless for disaster recovery).
 # ---------------------------------------------------------------------------
 install_cron_jobs() {
     if [[ "$DRY_RUN" == "true" ]]; then
@@ -402,27 +404,24 @@ install_cron_jobs() {
 
     # flock wrapper helper used by maintenance and health jobs.
     # flock -n: non-blocking — if lock is held, exit immediately (no queue).
-    # Lock files live in CRON_LOCK_DIR (/tmp/vaultwarden-cron-locks/).
+    # Lock files live in CRON_LOCK_DIR (/run/vaultwarden-locks/).
     local fl="flock -n"
     local ml="$CRON_LOCK_DIR/maintenance.lock"
     local hl="$CRON_LOCK_DIR/health.lock"
 
-    # NEW-CRIT FIX: --rclone and --full-verification removed from all backup
-    # invocations below.  backup.sh does not accept these flags; their presence
-    # caused every scheduled backup to exit 1 immediately (unknown option).
-    #
     # FIX [ISSUE 9]:  maintenance now runs Mon-Sat ONLY (days 1-6).
     #                 Sunday is reserved for the weekly full backup at 3 AM.
     # FIX [ISSUE 5]:  maintenance and health wrapped with flock -n to prevent
     #                 overlapping instances. Backup has its own internal lock.
     # BUG 6 FIX:      Firewall on Saturday 4 AM, full backup Sunday 3 AM.
+    # NOTE: --rclone and --full-verification are re-instated now that
+    #       backup.sh implements both flags (sync_to_rclone / verify_backup_full).
     local cron_jobs=(
         # Daily maintenance at 2 AM — MON-SAT ONLY (FIX [ISSUE 9]: skip Sunday)
         "0 2 * * 1-6 cd $PROJECT_ROOT && $fl $ml $CRON_SCRIPTS_DIR/maintenance.sh --comprehensive >> $CRON_LOG_DIR/maintenance.log 2>&1"
 
-        # Daily database backup at 4 AM with email notification
-        # NEW-CRIT FIX: removed --rclone (unrecognised flag in backup.sh)
-        "0 4 * * * cd $PROJECT_ROOT && $CRON_SCRIPTS_DIR/backup.sh --type db --email >> $CRON_LOG_DIR/backup.log 2>&1"
+        # Daily database backup at 4 AM — rclone offsite sync, non-fatal on remote failure
+        "0 4 * * * cd $PROJECT_ROOT && $CRON_SCRIPTS_DIR/backup.sh --type db --rclone --email >> $CRON_LOG_DIR/backup.log 2>&1"
 
         # Health check every 30 min (FIX [ISSUE 5]: flock prevents overlapping runs)
         "*/30 * * * * cd $PROJECT_ROOT && $fl $hl $CRON_SCRIPTS_DIR/health.sh --quiet >> $CRON_LOG_DIR/health.log 2>&1"
@@ -433,9 +432,9 @@ install_cron_jobs() {
         # BUG 6 FIX + FIX [ISSUE 9]: Weekly full backup — Sunday 3 AM
         # Maintenance does NOT run on Sunday (see Mon-Sat schedule above),
         # so full backup has the full hour window with no competing jobs.
-        # NEW-CRIT FIX: removed --rclone and --full-verification (both
-        # unrecognised flags in backup.sh).
-        "0 3 * * 0 cd $PROJECT_ROOT && $CRON_SCRIPTS_DIR/backup.sh --type full --email >> $CRON_LOG_DIR/backup.log 2>&1"
+        # --full-verification is intentionally FATAL: corrupt offsite = worthless DR.
+        # --rclone is non-fatal: local backup already succeeded before sync attempt.
+        "0 3 * * 0 cd $PROJECT_ROOT && $CRON_SCRIPTS_DIR/backup.sh --type full --full-verification --rclone --email >> $CRON_LOG_DIR/backup.log 2>&1"
 
         # Automated DNS update every hour
         "0 * * * * cd $PROJECT_ROOT && $CRON_SCRIPTS_DIR/maintenance.sh --update-dns >> $CRON_LOG_DIR/dns-update.log 2>&1"
@@ -471,13 +470,15 @@ install_cron_jobs() {
     log_success "Secure cron jobs installation completed"
     log_info "Installed cron jobs:"
     log_info "  Daily   (2 AM Mon-Sat):  Comprehensive maintenance (flock-protected)"
-    log_info "  Daily   (4 AM):          Database backup with email notification"
+    log_info "  Daily   (4 AM):          Database backup with rclone offsite sync + email"
     log_info "  Every 30 min:            Health check (flock-protected)"
     log_info "  Every hour:              DNS update"
     log_info "  Weekly  (Sat 4 AM):      Firewall update"
-    log_info "  Weekly  (Sun 3 AM):      Full backup with email notification"
+    log_info "  Weekly  (Sun 3 AM):      Full backup with full verification + rclone sync + email"
     log_info "  NOTE: Sunday maintenance is intentionally skipped to avoid"
     log_info "        overlap with the Sunday 3 AM full backup."
+    log_info "  NOTE: --rclone is non-fatal; --full-verification is fatal on"
+    log_info "        the Sunday run (corrupt offsite backup = worthless DR)."
     return 0
 }
 
