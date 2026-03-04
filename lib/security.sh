@@ -2,6 +2,23 @@
 # lib/security.sh - Enhanced security functions for VaultWarden-OCI
 # ENHANCED: Comprehensive security validation and hardening functions
 # Used by scripts to implement consistent security checks and measures
+#
+# PATCHED BUGS (2026-03-03):
+#   BUG-1 [HIGH]   create_secure_file(): printf '%s\\\\n' → printf '%s\n'
+#                  Over-escaped format literal wrote "\\n" (backslash+backslash+n)
+#                  instead of a newline, corrupting every script copied to /opt/.
+#   BUG-2 [HIGH]   secure_cleanup(): find … {} \\\\; → find … {} \;
+#                  Over-escaped terminator: bash reduced \\\\; to \\; which
+#                  (a) passed \ (not ;) to find, and (b) under set -euo pipefail
+#                  the bare ; launched "2>/dev/null || true" as a new command.
+#   BUG-3 [MEDIUM] generate_secure_random() top-up loop: tr -d ' \\\\n' → tr -d ' \n'
+#                  Over-escaped delete-set: tr received \\\\n (backslashes+n) and
+#                  deleted backslashes and the letter 'n' from od output instead
+#                  of deleting spaces and newlines.
+#   BUG-4 [MEDIUM] validate_file_permissions(): [[ ! -f ]] → [[ ! -e ]]
+#                  -f tests for regular files only; validate_directory_permissions()
+#                  calls this function on subdirectories in its recursive path,
+#                  causing every subdirectory to fail with "File not found".
 
 # Prevent multiple sourcing
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
@@ -26,14 +43,20 @@ readonly SECURITY_MAX_FAILED_ATTEMPTS=3
 readonly SECURITY_LOCKOUT_DURATION=300  # 5 minutes
 
 # ENHANCED: File permission validation with detailed reporting
+#
+# FIX BUG-4: Guard changed from [[ ! -f ]] to [[ ! -e ]] so the function
+# works correctly when called on directories (e.g. from the recursive path
+# in validate_directory_permissions).  -f is true only for regular files;
+# -e is true for any existing filesystem object (file, directory, symlink…).
 validate_file_permissions() {
     local file_path="$1"
     local expected_perms="$2"
     local expected_owner="${3:-}"
     local expected_group="${4:-}"
 
-    if [[ ! -f "$file_path" ]]; then
-        log_error "File not found for permission validation: $file_path"
+    # BUG-4 FIX: was [[ ! -f "$file_path" ]] — fails silently for directories
+    if [[ ! -e "$file_path" ]]; then
+        log_error "Path not found for permission validation: $file_path"
         return 1
     fi
 
@@ -119,6 +142,20 @@ validate_directory_permissions() {
 }
 
 # ENHANCED: Secure file creation with atomic operations
+#
+# FIX BUG-1: printf format was '%s\\\\n' (single-quoted literal).
+#   Single quotes preserve everything verbatim, so printf received the
+#   8-char format string  %s\\\\n.  printf's own escape processing then
+#   converted \\→\ and \\→\, producing output:  <content>\\n
+#   i.e. the content followed by two literal backslashes and the letter n —
+#   NOT a newline.  Every script copied to /opt/ via cron-setup.sh had this
+#   garbage appended, and the trailing line was not a valid newline, so
+#   'wc -l' counted one fewer line than the source, potentially triggering
+#   the truncation guard.
+#
+#   Fix: '%s\n'  printf interprets \n in the format string as a newline;
+#   $content is passed as the argument (not the format), so no format-string
+#   injection is possible regardless of what $content contains.
 create_secure_file() {
     local file_path="$1"
     local content="$2"
@@ -140,16 +177,16 @@ create_secure_file() {
 
     local temp_file
     temp_file=$(mktemp)
-    # NOTE: cleanup_temp local variable removed (was eval "$cleanup_temp", see BUG-R class).
-    # All error paths now call: rm -f -- "$temp_file"
 
     # Set restrictive umask for secure creation
     local old_umask
     old_umask=$(umask)
     umask 077
 
-    # FIX (echo "$content" LOW): printf avoids misinterpreting content that
-    # begins with '-' as an echo flag on POSIX implementations.
+    # BUG-1 FIX: was printf '%s\\\\n' "$content"
+    # Over-escaped format wrote literal \\n (backslash+backslash+n) instead of
+    # a newline.  '%s\n' is correct: printf interprets \n as newline; $content
+    # is the %s argument so no backslash sequences inside it are expanded.
     if printf '%s\n' "$content" > "$temp_file"; then
         # Set permissions before moving to final location
         if chmod "$permissions" "$temp_file"; then
@@ -163,8 +200,6 @@ create_secure_file() {
                 if ! chown "$chown_target" "$temp_file"; then
                     log_error "Failed to set ownership: $chown_target"
                     umask "$old_umask"
-                    # FIX (eval "$cleanup_temp" LOW): direct rm -f eliminates
-                    # the eval injection vector.
                     rm -f -- "$temp_file"
                     return 1
                 fi
@@ -251,33 +286,8 @@ validate_password_strength() {
 # ENHANCED: Generate cryptographically secure random strings.
 #
 # FIXED BUG-L (HIGH) — Modulo bias eliminated via rejection sampling.
-#   The old code used `rand_byte % char_count` directly.  Because a byte
-#   spans [0,255] and most charsets do not divide 256 evenly, the first
-#   (256 mod char_count) indices were over-represented:
-#
-#     Charset           Size  256 mod N  Bias on first N indices
-#     hex                 16      0      None (256 = 16×16)
-#     base64              64      0      None (256 = 4×64)
-#     alphanumeric        62      8      +25% on indices 0-7  (A-H)
-#     alphanum_special    74     34      +33% on indices 0-33
-#
-#   Fix: compute highest_multiple = (256 / char_count) * char_count and
-#   discard any byte whose value >= highest_multiple before applying modulo.
-#   For hex and base64 highest_multiple == 256, so no bytes are discarded.
-#
 # FIXED BUG-M/N (MEDIUM) — Bulk entropy read; $RANDOM fallback removed.
-#   The old loop forked `od` + `tr` (~3 processes) for every character,
-#   producing ~96 subprocess spawns for a 48-character password.  The
-#   else-branch fell back to $RANDOM, a 15-bit LCG that is not
-#   cryptographically secure.
-#
-#   Fix: all bytes are obtained with a single `od` invocation reading
-#   (length * 2 + 64) bytes — enough to absorb rejected bytes with
-#   very high probability even for the worst-case charset (74 chars,
-#   ~13.3% rejection rate).  A top-up loop handles the astronomically
-#   unlikely case where the bulk read falls short.
-#   The $RANDOM fallback is removed entirely; if /dev/urandom is absent
-#   the function returns 1 with an explicit error.
+# (See original comments above each section for full rationale.)
 generate_secure_random() {
     local length="${1:-32}"
     local charset="${2:-alphanumeric}"
@@ -310,17 +320,12 @@ generate_secure_random() {
     local char_count=${#chars}
 
     # Rejection-sampling threshold (BUG-L fix).
-    # highest_multiple is the largest value < 256 that is an exact multiple of
-    # char_count.  Bytes in [highest_multiple, 255] are discarded so that the
-    # remaining range maps evenly onto the charset with no over-representation.
     local highest_multiple=$(( (256 / char_count) * char_count ))
 
     local random_string=""
     local accepted=0
 
-    # Single bulk read — (BUG-M/N fix).
-    # Over-read by 2x + 64 to absorb rejected bytes comfortably.  Even the
-    # worst case (alphanum_special, ~13.3% rejection) leaves ample margin.
+    # Single bulk read (BUG-M/N fix).
     local bytes_to_read=$(( length * 2 + 64 ))
     local raw_bytes
     raw_bytes=$(od -An -N"$bytes_to_read" -tu1 /dev/urandom)
@@ -328,15 +333,20 @@ generate_secure_random() {
     local rand_byte
     for rand_byte in $raw_bytes; do
         [[ $accepted -ge $length ]] && break
-        # Discard bytes that would introduce modulo bias
         [[ $rand_byte -ge $highest_multiple ]] && continue
         random_string+="${chars:$(( rand_byte % char_count )):1}"
         (( accepted++ ))
     done
 
     # Top-up: handles the extremely unlikely case where the bulk read fell
-    # short after rejection sampling.  Each iteration is a single od call,
-    # but this path is essentially unreachable in normal operation.
+    # short after rejection sampling.
+    #
+    # BUG-3 FIX: was tr -d ' \\\\n'
+    #   Single-quoted ' \\\\n' is the 6-char literal " \\\\n".
+    #   tr received that string and interpreted \\ as backslash and n as 'n',
+    #   so it deleted spaces, backslashes, AND the letter n from od output
+    #   instead of deleting spaces and newlines.
+    #   Fix: ' \n'  — tr interprets \n as newline (removes spaces + newlines).
     while [[ $accepted -lt $length ]]; do
         rand_byte=$(od -An -N1 -tu1 /dev/urandom | tr -d ' \n')
         [[ $rand_byte -ge $highest_multiple ]] && continue
@@ -348,23 +358,19 @@ generate_secure_random() {
 }
 
 # Named wrapper for breakglass password generation.
-#
-# FIX (Dead generate_breakglass_password, MEDIUM): Both call sites in
-# create-breakglass-admin.sh previously bypassed this wrapper and called
-# generate_secure_random() directly with inline charset arguments, making
-# the function unreachable dead code.  Having the wrapper here provides:
-#   - a semantically clear call site
-#   - a single place to adjust charset or length policy
-#   - automatic inheritance of the BUG-L rejection-sampling fix above
-#
-# Uses the alphanumeric (62-char) charset.  256 mod 62 = 8, so bytes
-# 248-255 are discarded (~3.1% rejection rate); no bias remains.
 generate_breakglass_password() {
     local length="${1:-48}"
     generate_secure_random "$length" "alphanumeric"
 }
 
 # ENHANCED: Secure cleanup function for sensitive data
+#
+# FIX BUG-2: find … {} \\\\; → find … {} \;
+#   Unquoted \\\\; in the original: bash reduces each \\ pair to \, yielding
+#   \\ followed by ; .  The ; is a shell metacharacter (command separator),
+#   so the find command ended without its required terminator, and under
+#   set -euo pipefail the bare "2>/dev/null || true" ran as a separate command.
+#   Fix: \; — bash reduces \; to ; and passes it to find as the -exec terminator.
 secure_cleanup() {
     local target="$1"
     local passes="${2:-3}"
@@ -397,7 +403,8 @@ secure_cleanup() {
         log_debug "Fallback secure cleanup completed: $target"
 
     elif [[ -d "$target" ]]; then
-        # Secure directory deletion
+        # BUG-2 FIX: was {} \\\\; — over-escaped terminator broke the find
+        # command and injected a stray shell command under set -euo pipefail.
         find "$target" -type f -exec shred -vfz -n "$passes" {} \; 2>/dev/null || true
         rm -rf "$target"
         log_debug "Secure directory cleanup completed: $target"
