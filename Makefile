@@ -199,10 +199,14 @@ test-config: ## Validate configuration
 
 dry-run: ## Preview all operations without executing
 	@echo "$(BLUE)Dry run mode - showing what would be done:$(NC)"
-	@./startup.sh --dry-run
-	@./health.sh --dry-run
-	@./backup.sh --dry-run
-	@./maintenance.sh --dry-run
+	@echo "$(YELLOW)--- startup.sh ---$(NC)"
+	@./startup.sh --dry-run || true
+	@echo "$(YELLOW)--- health.sh ---$(NC)"
+	@./health.sh --dry-run || true
+	@echo "$(YELLOW)--- backup.sh ---$(NC)"
+	@./backup.sh --dry-run || true
+	@echo "$(YELLOW)--- maintenance.sh ---$(NC)"
+	@./maintenance.sh --dry-run || true
 
 ## Database Operations
 db-maint: ## Run deep database maintenance (requires sudo)

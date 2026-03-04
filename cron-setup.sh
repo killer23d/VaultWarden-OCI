@@ -50,8 +50,8 @@ SECURITY FEATURES:
     - Simple split-brain detection: warns when /opt/ scripts are older than git repo
 
 CRON JOBS MANAGED:
-    - Daily DB backup (fast verification, 4 AM Mon-Sat)
-    - Weekly Full backup (comprehensive verification, Sunday 3 AM)
+    - Daily DB backup (4 AM Mon-Sat, with email notification)
+    - Weekly Full backup (Sunday 3 AM, with email notification)
     - Health monitoring (every 30 min, flock-protected)
     - Maintenance (daily 2 AM Mon-Sat ONLY, flock-protected)
     - Firewall update (Saturday 4 AM)
@@ -306,6 +306,10 @@ check_split_brain() {
 # FIX [ISSUE 15]: After cp -r lib/, explicitly verify that
 #   simple_key_resilience.sh landed in /opt/. If it is missing the install
 #   fails loudly rather than silently degrading backup key health checks.
+#
+# NEW-CRIT FIX: Removed --rclone and --full-verification flags from cron
+#   backup invocations — backup.sh does not recognise these flags and exited
+#   1 (unknown option) on every scheduled run.
 # ---------------------------------------------------------------------------
 install_cron_jobs() {
     if [[ "$DRY_RUN" == "true" ]]; then
@@ -401,6 +405,10 @@ install_cron_jobs() {
     local ml="$CRON_LOCK_DIR/maintenance.lock"
     local hl="$CRON_LOCK_DIR/health.lock"
 
+    # NEW-CRIT FIX: --rclone and --full-verification removed from all backup
+    # invocations below.  backup.sh does not accept these flags; their presence
+    # caused every scheduled backup to exit 1 immediately (unknown option).
+    #
     # FIX [ISSUE 9]:  maintenance now runs Mon-Sat ONLY (days 1-6).
     #                 Sunday is reserved for the weekly full backup at 3 AM.
     # FIX [ISSUE 5]:  maintenance and health wrapped with flock -n to prevent
@@ -410,8 +418,9 @@ install_cron_jobs() {
         # Daily maintenance at 2 AM — MON-SAT ONLY (FIX [ISSUE 9]: skip Sunday)
         "0 2 * * 1-6 cd $PROJECT_ROOT && $fl $ml $CRON_SCRIPTS_DIR/maintenance.sh --comprehensive >> $CRON_LOG_DIR/maintenance.log 2>&1"
 
-        # Daily database backup at 4 AM with fast verification
-        "0 4 * * * cd $PROJECT_ROOT && $CRON_SCRIPTS_DIR/backup.sh --type db --rclone --email >> $CRON_LOG_DIR/backup.log 2>&1"
+        # Daily database backup at 4 AM with email notification
+        # NEW-CRIT FIX: removed --rclone (unrecognised flag in backup.sh)
+        "0 4 * * * cd $PROJECT_ROOT && $CRON_SCRIPTS_DIR/backup.sh --type db --email >> $CRON_LOG_DIR/backup.log 2>&1"
 
         # Health check every 30 min (FIX [ISSUE 5]: flock prevents overlapping runs)
         "*/30 * * * * cd $PROJECT_ROOT && $fl $hl $CRON_SCRIPTS_DIR/health.sh --quiet >> $CRON_LOG_DIR/health.log 2>&1"
@@ -422,7 +431,9 @@ install_cron_jobs() {
         # BUG 6 FIX + FIX [ISSUE 9]: Weekly full backup — Sunday 3 AM
         # Maintenance does NOT run on Sunday (see Mon-Sat schedule above),
         # so full backup has the full hour window with no competing jobs.
-        "0 3 * * 0 cd $PROJECT_ROOT && $CRON_SCRIPTS_DIR/backup.sh --type full --full-verification --rclone --email >> $CRON_LOG_DIR/backup.log 2>&1"
+        # NEW-CRIT FIX: removed --rclone and --full-verification (both
+        # unrecognised flags in backup.sh).
+        "0 3 * * 0 cd $PROJECT_ROOT && $CRON_SCRIPTS_DIR/backup.sh --type full --email >> $CRON_LOG_DIR/backup.log 2>&1"
 
         # Automated DNS update every hour
         "0 * * * * cd $PROJECT_ROOT && $CRON_SCRIPTS_DIR/maintenance.sh --update-dns >> $CRON_LOG_DIR/dns-update.log 2>&1"
@@ -458,11 +469,11 @@ install_cron_jobs() {
     log_success "Secure cron jobs installation completed"
     log_info "Installed cron jobs:"
     log_info "  Daily   (2 AM Mon-Sat):  Comprehensive maintenance (flock-protected)"
-    log_info "  Daily   (4 AM):          Database backup with fast verification"
+    log_info "  Daily   (4 AM):          Database backup with email notification"
     log_info "  Every 30 min:            Health check (flock-protected)"
     log_info "  Every hour:              DNS update"
     log_info "  Weekly  (Sat 4 AM):      Firewall update"
-    log_info "  Weekly  (Sun 3 AM):      Full backup with comprehensive verification"
+    log_info "  Weekly  (Sun 3 AM):      Full backup with email notification"
     log_info "  NOTE: Sunday maintenance is intentionally skipped to avoid"
     log_info "        overlap with the Sunday 3 AM full backup."
     return 0
