@@ -276,25 +276,45 @@ install_dependencies() {
     # absent from Ubuntu 24.04 minimal's default sources. Without this,
     # apt-get fails with 'E: Unable to locate package python3-argon2' and
     # the entire setup phase aborts.
+    # FIX [NEW-S01]: Check both legacy .list and DEB822 .sources formats
     if ! grep -qE '^deb[[:space:]].*universe' \
             /etc/apt/sources.list \
-            /etc/apt/sources.list.d/*.list 2>/dev/null; then
+            /etc/apt/sources.list.d/*.list 2>/dev/null && \
+       ! grep -qE '^Components:.*\buniverse\b' \
+            /etc/apt/sources.list.d/*.sources 2>/dev/null; then
         log_info "Enabling Ubuntu 'universe' repository (required for python3-argon2)..."
         if command -v add-apt-repository >/dev/null 2>&1; then
             add-apt-repository -y universe 2>/dev/null || {
                 log_warn "add-apt-repository failed — adding universe source manually"
+                # FIX [HIGH-NEW-02]: Correct URL and ARM64 hostname
+                local arch; arch=$(dpkg --print-architecture)
+                local archive_url
                 local codename
                 codename=$(lsb_release -cs 2>/dev/null || echo "noble")
-                echo "deb http://archive.ubuntu.com/packages/ubuntu ${codename} universe" \
+                if [[ "$arch" == "arm64" || "$arch" == "armhf" ]]; then
+                    archive_url="http://ports.ubuntu.com/ubuntu-ports"
+                else
+                    archive_url="http://archive.ubuntu.com/ubuntu"
+                fi
+                echo "deb ${archive_url} ${codename} universe" \
                     > /etc/apt/sources.list.d/ubuntu-universe.list
+                apt-get update -qq || return 1
             }
         else
+            # FIX [HIGH-NEW-02]: Same correction for no add-apt-repository path
+            local arch; arch=$(dpkg --print-architecture)
+            local archive_url
             local codename
             codename=$(lsb_release -cs 2>/dev/null || echo "noble")
-            echo "deb http://archive.ubuntu.com/packages/ubuntu ${codename} universe" \
+            if [[ "$arch" == "arm64" || "$arch" == "armhf" ]]; then
+                archive_url="http://ports.ubuntu.com/ubuntu-ports"
+            else
+                archive_url="http://archive.ubuntu.com/ubuntu"
+            fi
+            echo "deb ${archive_url} ${codename} universe" \
                 > /etc/apt/sources.list.d/ubuntu-universe.list
+            apt-get update -qq || return 1
         fi
-        apt-get update -qq || return 1
         log_success "Universe repository enabled"
     fi
 
@@ -578,7 +598,16 @@ generate_age_keys() {
     if [[ -f "$age_key_file" ]]; then
         if [[ "$FORCE" != "true" ]]; then
             # Normal non-force path: skip if existing key is valid.
-            check_age_key "$age_key_file" 2>/dev/null && return 0
+            if check_age_key "$age_key_file" 2>/dev/null; then
+                return 0
+            # FIX [LOW-NEW-02]: Warn operator about corrupt key before regeneration
+            else
+                log_warn "Existing Age key file is present but INVALID/CORRUPT."
+                log_warn "It will be replaced. If any usable encrypted data was created"
+                log_warn "with a previous key version, it cannot be recovered after this."
+                log_warn "If in doubt, abort (Ctrl-C) and inspect: $age_key_file"
+                # Proceed to key regeneration - no confirmation required since key unusable
+            fi
         else
             # FIX-S07: --force on an existing, valid Age key permanently
             # invalidates all existing encrypted secrets — secrets.yaml,
@@ -652,7 +681,7 @@ create_sops_config() {
 
     cat > "$sops_config" << EOF
 creation_rules:
-  - path_regex: .*\\.yaml$
+  - path_regex: .*\.yaml$
     age: $age_public_key
 EOF
     chown "$(get_real_user):$(id -g -n "$(get_real_user)")" "$sops_config" || return 1
