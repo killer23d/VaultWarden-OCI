@@ -280,7 +280,8 @@ optimize_database() {
         docker compose stop vaultwarden || { log_error "Failed to stop VaultWarden"; return 1; }
         log_success "VaultWarden stopped"; sleep 3
     fi
-    local backup_file="$state_dir/data/bwdata/db.sqlite3.pre-optimization-$(date +%Y%m%d-%H%M%S)"
+    # FIX BUG-S: was data/bwdata/ — corrected to data/
+    local backup_file="$state_dir/data/db.sqlite3.pre-optimization-$(date +%Y%m%d-%H%M%S)"
     cp "$host_db_path" "$backup_file" || {
         log_error "Failed to create safety backup"
         [[ "$was_running" == "true" ]] && docker compose start vaultwarden
@@ -288,12 +289,13 @@ optimize_database() {
     }
     log_success "Safety backup created: $(basename "$backup_file")"
 
+    # FIX BUG-S: volume mount was data/bwdata:/data — corrected to data:/data
     run_sqlite_integrity() {
-        docker run --rm -v "$state_dir/data/bwdata:/data" alpine:latest \
+        docker run --rm -v "$state_dir/data:/data" alpine:latest \
             sh -c "apk add --no-cache sqlite >/dev/null 2>&1 && sqlite3 /data/db.sqlite3 '$1'"
     }
     run_sqlite_silent() {
-        docker run --rm -v "$state_dir/data/bwdata:/data" alpine:latest \
+        docker run --rm -v "$state_dir/data:/data" alpine:latest \
             sh -c "apk add --no-cache sqlite >/dev/null 2>&1 && sqlite3 /data/db.sqlite3 '$1'" >/dev/null 2>&1
     }
 
@@ -346,7 +348,8 @@ run_deep_db_maintenance() {
     log_info "VaultWarden Deep Database Maintenance"
     local state_dir
     state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
-    local db_file="$state_dir/data/bwdata/db.sqlite3"
+    # FIX BUG-S: was data/bwdata/db.sqlite3 — corrected to data/db.sqlite3
+    local db_file="$state_dir/data/db.sqlite3"
 
     if [[ ! -f "$db_file" ]]; then log_error "Database file not found at: $db_file"; return 1; fi
     local original_size original_bytes
@@ -389,12 +392,13 @@ run_deep_db_maintenance() {
     docker compose stop vaultwarden && log_success "VaultWarden container stopped" || log_warn "Failed to stop vaultwarden container"
     log_info "Waiting 5 seconds for file lock release..."; sleep 5
 
+    # FIX BUG-S: volume mount was data/bwdata:/data — corrected to data:/data
     run_sqlite_deep_integrity() {
-        docker run --rm -v "$state_dir/data/bwdata:/data" alpine:latest \
+        docker run --rm -v "$state_dir/data:/data" alpine:latest \
             sh -c "apk add --no-cache sqlite >/dev/null 2>&1 && sqlite3 /data/db.sqlite3 '$1'"
     }
     run_sqlite_deep_silent() {
-        docker run --rm -v "$state_dir/data/bwdata:/data" alpine:latest \
+        docker run --rm -v "$state_dir/data:/data" alpine:latest \
             sh -c "apk add --no-cache sqlite >/dev/null 2>&1 && sqlite3 /data/db.sqlite3 '$1'" >/dev/null 2>&1
     }
 
