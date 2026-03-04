@@ -23,7 +23,7 @@ CRON_SCRIPTS_DIR="/opt/vaultwarden-scripts"
 CRON_LOG_DIR="/var/log/vaultwarden-cron"
 
 # Lock directory for flock-based job mutual exclusion
-CRON_LOCK_DIR="/tmp/vaultwarden-cron-locks"
+CRON_LOCK_DIR="/run/vaultwarden-locks"
 
 show_help() {
     cat << 'EOF'
@@ -198,9 +198,11 @@ setup_cron_logging() {
     fi
 
     # FIX [ISSUE 5]: Create lock directory for flock-based mutual exclusion
-    if ! ensure_dir "$CRON_LOCK_DIR" 1777; then
+    # Best practice: root-owned 0700 under /run to prevent unprivileged lock pre-creation/DoS.
+    if ! ensure_dir "$CRON_LOCK_DIR" 700; then
         log_warn "Failed to create cron lock directory — overlapping job protection disabled"
     else
+        chown root:root "$CRON_LOCK_DIR" 2>/dev/null || true
         log_success "Cron lock directory ready: $CRON_LOCK_DIR"
     fi
 
