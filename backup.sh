@@ -377,19 +377,32 @@ perform_db_backup() {
     # FIX-B06: Use host sqlite3 Online Backup API instead of Docker.
     b_log_info "Creating atomic DB snapshot (sqlite3 .backup)..."
     if ! create_db_snapshot_host "$state_dir" "$snap"; then
-        b_log_warn "Host sqlite3 snapshot failed — falling back to cp (services should be stopped)"
+        # Fallback: checkpoint WAL then copy main DB file for best-effort consistency
+        b_log_warn "Host sqlite3 snapshot failed — attempting offline fallback with WAL checkpoint"
+        if ! sqlite3 "$db_file" "PRAGMA wal_checkpoint(TRUNCATE);" 2>/dev/null; then
+            b_log_warn "WAL checkpoint failed — copy may be missing recent uncommitted transactions"
+            b_log_warn "For guaranteed consistency, stop VaultWarden before backup or fix sqlite3 .backup"
+        fi
         cp "$db_file" "$snap"
+        if [[ ! -s "$snap" ]]; then
+            log_error "Fallback snapshot copy failed or produced empty file"
+            return 1
+        fi
     fi
 
     # FIX-B06: Use host sqlite3 integrity check instead of Docker.
     verify_sqlite "$snap" || return 1
 
     b_log_info "Encrypting DB snapshot..."
+    # Atomic write: encrypt to .tmp then mv into place
     local enc="$target_dir/db_backup_$timestamp.sqlite3.age"
-    if ! age -r "$age_pub_key" -o "$enc" "$snap"; then
+    local enc_tmp="${enc}.tmp"
+    if ! age -r "$age_pub_key" -o "$enc_tmp" "$snap"; then
         log_error "Encryption failed"
+        rm -f "$enc_tmp"
         return 1
     fi
+    mv "$enc_tmp" "$enc"
     secure_file "$enc" 600
 
     # Generate SHA-256 checksum sidecar (verified by restore.sh before decryption)
@@ -507,7 +520,30 @@ perform_full_backup() {
     # 4. Inject the clean DB snapshot into the archive
     #    We must work with an uncompressed copy to use tar --append,
     #    then recompress.
+    #    MEDIUM-NEW-02: pre-flight disk space check to avoid exhausting TMPDIR
     # -----------------------------------------------------------------------
+    if [[ "$db_snapshot_ok" == "true" ]]; then
+        # Estimate required space before decompression:
+        # - decompressed tar ~8–9x compressed
+        # - plus new compressed copy
+        # - plus snapshot DB
+        # - plus 1 GiB safety margin
+        local compressed_size snap_size available_kb required_kb
+        compressed_size=$(stat -c%s "$temp_tar" 2>/dev/null || echo 0)
+        snap_size=$(stat -c%s "$snap_db" 2>/dev/null || echo 0)
+        available_kb=$(df -k "$(dirname "$temp_tar")" | awk 'NR==2{print $4}')
+        required_kb=$(( (compressed_size * 9 + snap_size) / 1024 + 1048576 ))
+
+        if (( available_kb < required_kb )); then
+            b_log_warn "Insufficient space for snapshot injection in $(dirname "$temp_tar")"
+            b_log_warn "  Need: ~$((required_kb / 1024)) MB"
+            b_log_warn "  Free: $((available_kb / 1024)) MB"
+            b_log_warn "Skipping snapshot injection — archive will include live DB files"
+            b_log_warn "To use snapshot injection: increase TMPDIR volume or free space"
+            db_snapshot_ok=false
+        fi
+    fi
+
     if [[ "$db_snapshot_ok" == "true" ]]; then
         b_log_info "Injecting clean DB snapshot into archive..."
         local temp_tar_raw="$shared_tmpdir/${backup_label}_backup_$timestamp.tar"
@@ -541,12 +577,16 @@ perform_full_backup() {
     # 5. Encrypt
     # -----------------------------------------------------------------------
     b_log_info "Encrypting ${backup_label} archive..."
+    # Atomic write: encrypt to .tmp then mv into place
     local enc="$target_dir/${backup_label}_backup_$timestamp.tar.gz.age"
+    local enc_tmp="${enc}.tmp"
 
-    if ! age -r "$age_pub_key" -o "$enc" "$temp_tar"; then
+    if ! age -r "$age_pub_key" -o "$enc_tmp" "$temp_tar"; then
         log_error "Encryption failed"
+        rm -f "$enc_tmp"
         return 1
     fi
+    mv "$enc_tmp" "$enc"
     secure_file "$enc" 600
 
     # Generate SHA-256 checksum sidecar (verified by restore.sh before decryption)
