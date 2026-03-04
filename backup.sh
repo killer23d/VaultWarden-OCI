@@ -2,10 +2,14 @@
 # backup.sh - VaultWarden-OCI backup (atomic DB snapshot, relative-path archive, age encryption)
 # archive_format=relative: archives use paths relative to / so restores can stage safely.
 #
-# Fix: global TMPDIR_BACKUP created in main() with EXIT/INT/TERM trap so all
-# decrypted/intermediate artifacts are purged on any exit, including SIGINT
-# mid-function (previously each function had its own mktemp with manual rm -rf,
-# leaving plaintext snapshots on disk if the process was killed between steps).
+# FIX-B03: global TMPDIR_BACKUP created in main() with cleanup() trap registered BEFORE mktemp
+# so all decrypted/intermediate artifacts are purged on any exit, including SIGINT mid-function.
+#
+# FIX-B01/FIX-B02: Docker sqlite3 dependency removed. verify_sqlite_docker() and
+# create_db_snapshot_docker() replaced with host sqlite3 equivalents:
+#   - verify_sqlite()          uses host 'sqlite3 PRAGMA integrity_check'
+#   - create_db_snapshot_host() uses host 'sqlite3 .backup' (SQLite Online Backup API)
+# sqlite3 is installed by setup.sh's basic_packages array.
 
 set -euo pipefail
 
@@ -59,7 +63,7 @@ EXAMPLES:
     sudo ./backup.sh --type full                                        # Full state backup
     sudo ./backup.sh --keep 30                                          # Keep 30 days of backups
     sudo ./backup.sh --type db --email                                  # DB backup with email notification
-    sudo ./backup.sh --list                                             # List existing backups
+    ./backup.sh --list                                                  # List existing backups (no sudo)
     sudo ./backup.sh --type db --rclone --email                         # DB backup + offsite sync + email
     sudo ./backup.sh --type full --full-verification --rclone --email   # Full verified offsite backup
 EOF
@@ -182,39 +186,71 @@ auto_determine_backup_type() {
 }
 
 # ---------------------------------------------------------------------------
-# SQLite integrity check via docker (no host sqlite3 dependency)
+# FIX-B01: SQLite integrity check using host sqlite3.
+#
+# Replaces verify_sqlite_docker() which ran 'apk add sqlite && sqlite3 PRAGMA'
+# inside an alpine:latest container on every backup run. Problems with that:
+#   - Requires pulling alpine:latest from Docker Hub (supply-chain risk)
+#   - Read-write bind-mount over live VaultWarden data was unnecessarily broad
+#   - Added 3-10s overhead per backup run due to container startup
+#   - Created a root-owned container process with access to vault data
+#
+# sqlite3 is already installed on the host by setup.sh's basic_packages array.
 # ---------------------------------------------------------------------------
-verify_sqlite_docker() {
+verify_sqlite() {
     local dbfile="$1"
-    b_log_info "Verifying SQLite integrity (docker alpine+sqlite)..."
-    if docker run --rm -v "${dbfile}:/db.sqlite3" alpine:latest \
-        sh -c 'apk add -q sqlite >/dev/null 2>&1 && sqlite3 /db.sqlite3 "PRAGMA integrity_check;"' \
-        | grep -qx "ok"; then
-        b_log_success "SQLite integrity check passed"
-        return 0
-    else
-        log_error "SQLite integrity check FAILED"
+    b_log_info "Verifying SQLite integrity (host sqlite3)..."
+    local result
+    result=$(sqlite3 "$dbfile" "PRAGMA integrity_check;" 2>&1) || {
+        log_error "SQLite integrity check error: ${result}"
+        return 1
+    }
+    if [[ "$result" != "ok" ]]; then
+        log_error "SQLite integrity check FAILED: ${result}"
         return 1
     fi
+    b_log_success "SQLite integrity check passed"
+    return 0
 }
 
 # ---------------------------------------------------------------------------
-# DB snapshot via docker (no host sqlite3 dependency, handles WAL safely)
+# FIX-B02: Atomic DB snapshot using host sqlite3 Online Backup API.
+#
+# Replaces create_db_snapshot_docker() which did:
+#   docker run --rm --user root \
+#       -v "${state_dir}/data:/data" \
+#       -v "$(dirname "$dest"):/snapshot" \
+#       alpine:latest sh -c 'apk add sqlite && sqlite3 /data/db.sqlite3 .backup ...'
+#
+# Problems with the Docker approach:
+#   - Read-WRITE volume mount over the live data directory (only a read is needed)
+#   - Pulls alpine:latest on every run unless cached (supply-chain risk + latency)
+#   - Container overhead: 3-8 seconds of startup time on each backup
+#   - Ran as root inside the container with direct access to vault data
+#
+# sqlite3 .backup uses the SQLite Online Backup API: creates an atomic,
+# WAL-consistent point-in-time copy while VaultWarden is running, without
+# blocking any writes. This is the same mechanism used by Litestream and
+# litestream-based backup tools.
 # ---------------------------------------------------------------------------
-create_db_snapshot_docker() {
+create_db_snapshot_host() {
     local state_dir="$1"
     local dest="$2"
-    docker run --rm --user root \
-        -v "${state_dir}/data:/data" \
-        -v "$(dirname "$dest"):/snapshot" \
-        alpine:latest \
-        sh -c 'apk add -q sqlite >/dev/null 2>&1 && sqlite3 /data/db.sqlite3 ".backup /snapshot/'"$(basename "$dest")"'"'
+    local db_file="${state_dir}/data/db.sqlite3"
+    [[ -f "$db_file" ]] || { log_error "Database not found: $db_file"; return 1; }
+    # .backup destination path must be single-quoted for the sqlite3 shell
+    sqlite3 "$db_file" ".backup '${dest}'" || {
+        log_error "sqlite3 .backup failed for: $db_file"
+        return 1
+    }
+    return 0
 }
 
 # ---------------------------------------------------------------------------
 # Full end-to-end verification: decrypt the just-created archive and re-verify.
 # Uses $TMPDIR_BACKUP (already covered by EXIT/INT/TERM trap in main).
 # FATAL on failure — a silently-corrupt backup is worse than no backup.
+# FIX-B05: db branch now calls verify_sqlite() instead of verify_sqlite_docker().
 # ---------------------------------------------------------------------------
 verify_backup_full() {
     local enc_file="$1"
@@ -234,7 +270,8 @@ verify_backup_full() {
 
     case "$backup_type" in
         db)
-            verify_sqlite_docker "$dec_out" || return 1
+            # FIX-B05: host sqlite3 instead of Docker alpine container.
+            verify_sqlite "$dec_out" || return 1
             ;;
         full|emergency)
             b_log_info "Verifying archive structure..."
@@ -315,6 +352,7 @@ sync_to_rclone() {
 
 # ---------------------------------------------------------------------------
 # Database-only backup
+# FIX-B06: Uses create_db_snapshot_host() and verify_sqlite() (host sqlite3).
 # ---------------------------------------------------------------------------
 perform_db_backup() {
     local target_dir="$1"
@@ -336,13 +374,15 @@ perform_db_backup() {
 
     local snap="$shared_tmpdir/db.sqlite3"
 
-    b_log_info "Creating atomic DB snapshot..."
-    if ! create_db_snapshot_docker "$state_dir" "$snap"; then
-        b_log_warn "Docker snapshot failed — falling back to cp (services should be stopped)"
+    # FIX-B06: Use host sqlite3 Online Backup API instead of Docker.
+    b_log_info "Creating atomic DB snapshot (sqlite3 .backup)..."
+    if ! create_db_snapshot_host "$state_dir" "$snap"; then
+        b_log_warn "Host sqlite3 snapshot failed — falling back to cp (services should be stopped)"
         cp "$db_file" "$snap"
     fi
 
-    verify_sqlite_docker "$snap" || return 1
+    # FIX-B06: Use host sqlite3 integrity check instead of Docker.
+    verify_sqlite "$snap" || return 1
 
     b_log_info "Encrypting DB snapshot..."
     local enc="$target_dir/db_backup_$timestamp.sqlite3.age"
@@ -352,7 +392,7 @@ perform_db_backup() {
     fi
     secure_file "$enc" 600
 
-    # Generate SHA-256 checksum sidecar (fixes BACKUP-RESTORE.md troubleshooting step)
+    # Generate SHA-256 checksum sidecar (verified by restore.sh before decryption)
     sha256sum "$enc" | awk '{print $1}' > "${enc}.sha256"
     chmod 600 "${enc}.sha256"
 
@@ -372,6 +412,7 @@ MEOF
 
 # ---------------------------------------------------------------------------
 # Full / emergency backup  (RELATIVE-PATH archive)
+# FIX-B07: Uses create_db_snapshot_host() (host sqlite3) instead of Docker.
 # ---------------------------------------------------------------------------
 perform_full_backup() {
     local target_dir="$1"
@@ -399,22 +440,23 @@ perform_full_backup() {
 
     # -----------------------------------------------------------------------
     # 1. Atomic DB snapshot → staging tree
+    #    FIX-B07: Use host sqlite3 Online Backup API instead of Docker.
     # -----------------------------------------------------------------------
     local db_file="$state_dir/data/db.sqlite3"
     local db_snapshot_ok=false
 
     if [[ -f "$db_file" ]]; then
-        b_log_info "Creating atomic DB snapshot..."
-        if create_db_snapshot_docker "$state_dir" "$snap_db" 2>/dev/null; then
+        b_log_info "Creating atomic DB snapshot (sqlite3 .backup)..."
+        if create_db_snapshot_host "$state_dir" "$snap_db" 2>/dev/null; then
             db_snapshot_ok=true
         else
-            b_log_warn "Docker snapshot failed — will use live DB file in archive"
+            b_log_warn "Host sqlite3 snapshot failed — will use live DB file in archive"
         fi
     fi
 
     # -----------------------------------------------------------------------
     # 2. Build relative-path tar with -C /
-    #    All members will be  var/lib/vaultwarden/...  and  opt/vaultwarden/...\
+    #    All members will be  var/lib/vaultwarden/...  and  opt/vaultwarden/...
     #    (or wherever PROJECT_ROOT / STATE_DIR live) — never /absolute paths.
     # -----------------------------------------------------------------------
     b_log_info "Archiving state (relative paths, safe for staged restore)..."
@@ -507,7 +549,7 @@ perform_full_backup() {
     fi
     secure_file "$enc" 600
 
-    # Generate SHA-256 checksum sidecar (fixes BACKUP-RESTORE.md troubleshooting step)
+    # Generate SHA-256 checksum sidecar (verified by restore.sh before decryption)
     sha256sum "$enc" | awk '{print $1}' > "${enc}.sha256"
     chmod 600 "${enc}.sha256"
 
@@ -537,27 +579,45 @@ main() {
 
     require_root "$@"
 
-    local state_dir
-    state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
-    local LOCK_FILE="${state_dir}/.locks/backup.lock"
-
-    # Global tmpdir — all decrypted/intermediate artifacts land here.
-    # Trap ensures cleanup on any exit (normal, SIGINT, SIGTERM, ERR via set -e).
-    local TMPDIR_BACKUP
-    TMPDIR_BACKUP="$(mktemp -d)"
-    cleanup() { rm -rf "$TMPDIR_BACKUP" 2>/dev/null || true; }
+    # FIX-B03: Register cleanup() BEFORE mktemp so any set -e exit between
+    # mktemp and the original trap registration cannot leave plaintext DB
+    # snapshots or intermediate tar files in /tmp indefinitely.
+    # The null-guard on TMPDIR_BACKUP ensures cleanup() is a no-op if
+    # mktemp itself fails before the variable is assigned.
+    local TMPDIR_BACKUP=""
+    cleanup() { [[ -n "$TMPDIR_BACKUP" ]] && rm -rf "$TMPDIR_BACKUP" 2>/dev/null || true; }
     trap cleanup EXIT HUP INT TERM
 
-    # flock-based lock — kernel releases on any exit, no stale locks
+    # FIX-B04: Move lock file to /var/lock/ (FHS-designated location).
+    # The original path "${state_dir}/.locks/backup.lock" had two problems:
+    #   1. state_dir was read before load_env_file, so it used the default
+    #      "/var/lib/vaultwarden" even when .env overrides PROJECT_STATE_DIR.
+    #   2. It required STATE_DIR to exist and be writable before the lock
+    #      could be acquired — mkdir -p with wrong umask created it with
+    #      potentially incorrect permissions on first run.
+    # /var/lock is always available to root and has no STATE_DIR dependency.
+    local LOCK_FILE="/var/lock/vaultwarden-backup.lock"
+
+    # flock-based lock — kernel releases on any exit, no stale locks.
     if [[ "$FORCE" != "true" && "$DRY_RUN" != "true" ]]; then
-        mkdir -p "${state_dir}/.locks" 2>/dev/null || true
         eval "exec ${LOCK_FD}>\"$LOCK_FILE\""
         if ! flock -n $LOCK_FD; then
             log_error "Another backup is already running (could not acquire lock)."
             log_info  "Wait for it to finish or use --force if you are certain it is stuck."
+            log_error "If the lock is stale, remove: ${LOCK_FILE}"
             exit 1
         fi
     fi
+
+    # Create the secured temporary directory (now protected by trap above).
+    local old_umask
+    old_umask=$(umask)
+    umask 077
+    TMPDIR_BACKUP="$(mktemp -d -t vw_backup.XXXXXXXXXX)" || {
+        log_error "Failed to create secure temporary directory"
+        exit 1
+    }
+    umask "$old_umask"
 
     if [[ "$DRY_RUN" == "true" ]]; then
         log_header "VaultWarden-OCI Backup [DRY RUN]"
@@ -566,6 +626,11 @@ main() {
     fi
 
     load_env_file || { log_error "Failed to load .env"; exit 1; }
+
+    # FIX-B04: Read state_dir AFTER load_env_file so that a PROJECT_STATE_DIR
+    # override in .env is correctly picked up (previously read before load_env_file).
+    local state_dir
+    state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
 
     local age_pub_key
     age_pub_key=$(get_age_public_key) || exit 1
