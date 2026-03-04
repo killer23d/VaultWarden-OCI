@@ -6,16 +6,20 @@
 #   version=1 (legacy absolute paths)    →  direct -C / extraction (backward compat)
 #
 # Safety features:
-#   - require_root enforced via lib/common.sh
+#   - require_root enforced via lib/common.sh (--list is exempt)
 #   - All decrypted artifacts in mktemp dir + EXIT/INT/TERM trap
-#   - Docker alpine+sqlite for integrity checks (no host sqlite3 dependency)
+#   - Host sqlite3 for integrity checks (FIX-R06: Docker dependency removed)
 #   - tar member validation blocks path traversal before extraction
+#     (FIX-R01: now applied to BOTH legacy v1 AND current v2 paths)
 #   - Staged full restore: extract → validate → atomic mv (all-or-nothing)
 #   - PROJECT_ROOT config files (.env, docker-compose.yml, caddy/, fail2ban/)
 #     restored from archive after STATE_DIR promotion; secrets/ and *.sh
 #     scripts are intentionally excluded
 #   - Pre-restore emergency snapshot before any destructive operation
 #   - AGE_KEY_FILE read from .env (SOPS_AGE_KEY_FILE) with safe default
+#   - .sha256 sidecar verified before decryption (FIX-R05)
+#   - flock mutex prevents concurrent restore races (FIX-R03)
+#   - .pre-restore-* artefacts pruned to keep last 3 (FIX-R08)
 
 set -euo pipefail
 
@@ -49,7 +53,7 @@ USAGE:
     sudo ./restore.sh [OPTIONS]
 
 OPTIONS:
-    --list                  List available backups and exit
+    --list                  List available backups and exit (no root required)
     --file FILE             Restore a specific backup file (.age)
     --type TYPE             db | full | emergency (helps resolve --latest)
     --latest                Use newest backup (optionally filtered by --type)
@@ -60,7 +64,7 @@ OPTIONS:
     --help                  Show this help
 
 EXAMPLES:
-    sudo ./restore.sh --list
+    ./restore.sh --list
     sudo ./restore.sh --latest --type db --force
     sudo ./restore.sh --file backups/full/full_backup_20260101_120000.tar.gz.age
 EOF
@@ -160,7 +164,10 @@ read_meta_field() {
     fi
 }
 
-# Block archives containing absolute paths or ../ traversal
+# Block archives containing ../  traversal sequences.
+# NOTE: This function also rejects absolute paths (/). For the legacy v1
+# restore path, use check_traversal_only() below, which only checks for
+# ../ sequences (v1 archives intentionally use absolute paths).
 tar_validate_members() {
     local tarfile="$1"
     local members
@@ -176,19 +183,40 @@ tar_validate_members() {
     return 0
 }
 
-# Verify SQLite integrity via docker (no host sqlite3 dependency)
-verify_sqlite_docker() {
-    local dbfile="$1"
-    log_info "Verifying SQLite integrity (docker alpine+sqlite)..."
-    if docker run --rm -v "${dbfile}:/db.sqlite3" alpine:latest \
-        sh -c 'apk add -q sqlite >/dev/null 2>&1 && sqlite3 /db.sqlite3 "PRAGMA integrity_check;"' \
-        | grep -qx "ok"; then
-        log_success "SQLite integrity check passed"
-        return 0
-    else
-        log_error "SQLite integrity check FAILED"
+# FIX-R01 helper: Traversal-only check for legacy v1 absolute-path archives.
+# v1 archives use absolute paths by design, so we only reject ../ sequences.
+check_traversal_only() {
+    local tarfile="$1"
+    local bad_members
+    bad_members=$(tar -tzf "$tarfile" 2>/dev/null \
+        | grep -E '(^|/)\.\.(/|$)' || true)
+    if [[ -n "$bad_members" ]]; then
+        log_error "Archive contains path traversal sequences (../). Refusing to extract."
+        log_error "Suspicious paths:"
+        echo "$bad_members" | head -10 >&2
         return 1
     fi
+    return 0
+}
+
+# FIX-R06: Replace verify_sqlite_docker() with verify_sqlite() using the
+# host sqlite3 binary. sqlite3 is installed by setup.sh's basic_packages
+# array. Spinning up an alpine:latest container with --user root to run a
+# one-line SQL command is an unnecessary supply-chain risk and Docker dep.
+verify_sqlite() {
+    local dbfile="$1"
+    log_info "Verifying SQLite integrity (host sqlite3)..."
+    local result
+    result=$(sqlite3 "$dbfile" "PRAGMA integrity_check;" 2>&1) || {
+        log_error "SQLite integrity check error: ${result}"
+        return 1
+    }
+    if [[ "$result" != "ok" ]]; then
+        log_error "SQLite integrity check FAILED: ${result}"
+        return 1
+    fi
+    log_success "SQLite integrity check passed"
+    return 0
 }
 
 purge_wal_shm() {
@@ -205,6 +233,43 @@ create_pre_restore_snapshot() {
     else
         log_warn "backup.sh not executable — skipping pre-restore snapshot"
     fi
+}
+
+# FIX-R08: Prune .pre-restore-* artefacts created by restore_db / restore_full.
+# Each restore renames the current db file or state directory to a timestamped
+# .pre-restore-<ts> path. Without pruning these accumulate indefinitely and
+# will eventually exhaust disk space on a 40 GiB OCI boot volume.
+#
+# Keeps the $keep_count most recent artefacts; removes the rest.
+# Sort order is lexicographic on the timestamp suffix (YYYYmmdd-HHMMSS), which
+# equals chronological order without needing stat.
+cleanup_pre_restore_artefacts() {
+    local base_path="$1"
+    local keep_count="${2:-3}"
+    local base_dir base_name
+    base_dir="$(dirname  "$base_path")"
+    base_name="$(basename "$base_path")"
+
+    local artefacts=()
+    while IFS= read -r -d '' f; do
+        artefacts+=("$f")
+    done < <(find "$base_dir" -maxdepth 1 \
+        -name "${base_name}.pre-restore-*" \
+        -print0 2>/dev/null \
+        | sort -z)
+
+    local total="${#artefacts[@]}"
+    if (( total <= keep_count )); then
+        return 0
+    fi
+
+    local to_remove=$(( total - keep_count ))
+    log_info "Pruning ${to_remove} old pre-restore artefact(s) (keeping ${keep_count} most recent)..."
+    for (( i=0; i<to_remove; i++ )); do
+        rm -rf "${artefacts[$i]}"
+        log_info "  Removed: $(basename "${artefacts[$i]}")"
+    done
+    return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -226,8 +291,9 @@ restore_db() {
         return 1
     }
 
+    # FIX-R06: Use host sqlite3 instead of Docker alpine container.
     if [[ "$SKIP_VERIFICATION" != "true" ]]; then
-        verify_sqlite_docker "$dec_db" || return 1
+        verify_sqlite "$dec_db" || return 1
     fi
 
     local db_dir="$state_dir/data"
@@ -281,6 +347,29 @@ restore_full() {
         # -------------------------------------------------------------------
         log_warn "Legacy archive format detected (version=1, absolute paths)."
         log_warn "Extracting directly to / — no staging available for this format."
+
+        # FIX-R01: Path traversal check on the legacy path.
+        # This branch previously had NO traversal validation at all, making it
+        # the most dangerous case: a tampered .age file (decryptable with the
+        # correct Age key) could embed ../../etc/cron.d/backdoor entries that
+        # extract directly to / as root.
+        #
+        # We use check_traversal_only() here, NOT tar_validate_members():
+        # v1 archives intentionally use absolute paths, so rejecting all
+        # absolute paths would always fail. We only block ../ sequences.
+        if [[ "$SKIP_VERIFICATION" != "true" ]]; then
+            log_info "Validating archive members (path traversal check — legacy format)..."
+            check_traversal_only "$dec_tar" || {
+                log_error "Refusing to extract legacy archive containing path traversal sequences."
+                log_error "Use --skip-verification only if you generated this archive yourself"
+                log_error "and can guarantee its integrity."
+                return 1
+            }
+            log_success "Archive traversal check passed (legacy format)."
+        else
+            log_warn "--skip-verification set: path traversal check BYPASSED on legacy archive."
+            log_warn "Only use --skip-verification if you generated this archive yourself."
+        fi
 
         if [[ "$DRY_RUN" == "true" ]]; then
             log_info "[DRY RUN] Would run: tar -xzf <archive> -C /"
@@ -391,28 +480,86 @@ restore_full() {
 # Main
 # ---------------------------------------------------------------------------
 main() {
-    require_root "$@"
-
     log_header "VaultWarden-OCI Restore Utility"
 
+    # FIX-R04: --list does not require root. It only reads local backup file
+    # metadata (find + ls on the backups/ tree). Requiring root prevented
+    # non-privileged operators from inspecting what backups are available
+    # before deciding whether a restore is needed.
     if [[ "$LIST_ONLY" == "true" ]]; then
         list_backups
         exit 0
+    fi
+
+    require_root "$@"
+
+    # FIX-R03: Prevent concurrent restore runs.
+    # A race between two simultaneous restores — or a restore racing with a
+    # running backup — can corrupt the atomic state-dir swap in restore_full():
+    # if both runs reach the mv step concurrently the .pre-restore-<ts> swap
+    # may clobber itself, leaving the vault in an unrecoverable split state.
+    local RESTORE_LOCK_FILE="/var/lock/vaultwarden-restore.lock"
+    local RESTORE_LOCK_FD=203
+    eval "exec ${RESTORE_LOCK_FD}>\"$RESTORE_LOCK_FILE\""
+    if ! flock -n $RESTORE_LOCK_FD; then
+        log_error "Another restore is already running (could not acquire lock)."
+        log_error "Wait for it to complete, then retry."
+        log_error "If the lock is stale, remove: ${RESTORE_LOCK_FILE}"
+        exit 1
     fi
 
     # Load environment
     load_env_file || { log_error "Failed to load .env"; exit 1; }
 
     local STATE_DIR AGE_KEY_FILE PUID PGID
-    STATE_DIR="$(get_config_value "PROJECT_STATE_DIR"   "/var/lib/vaultwarden")"
-    AGE_KEY_FILE="$(get_config_value "SOPS_AGE_KEY_FILE" "secrets/keys/age-key.txt")"
-    PUID="$(get_config_value "PUID" "1001")"
-    PGID="$(get_config_value "PGID" "1001")"
+    STATE_DIR="$(get_config_value    "PROJECT_STATE_DIR"   "/var/lib/vaultwarden")"
+    AGE_KEY_FILE="$(get_config_value "SOPS_AGE_KEY_FILE"   "secrets/keys/age-key.txt")"
+
+    # FIX-R07: Make missing PUID/PGID a hard error rather than silently
+    # defaulting to 1001. On a fresh restore target UID 1001 may belong to
+    # a different user or be unallocated. Containers running as the wrong UID
+    # cannot write to the restored data directory and fail with misleading
+    # permission errors that are not immediately obvious as a restore problem.
+    PUID="$(get_config_value "PUID" "")"
+    PGID="$(get_config_value "PGID" "")"
+
+    if [[ -z "$PUID" || -z "$PGID" ]]; then
+        log_error "PUID and PGID must be set in .env before restoring."
+        log_error "These must match the UID/GID that owns the VaultWarden data files."
+        log_error "Find the correct values with: id <your-username>"
+        log_error "Then add PUID=<uid> and PGID=<gid> to your .env file."
+        exit 1
+    fi
 
     [[ -f "$AGE_KEY_FILE" ]] || { log_error "Age key not found: $AGE_KEY_FILE"; exit 1; }
 
     resolve_backup_file || exit 1
     [[ -f "$BACKUP_FILE" ]] || { log_error "Backup file not found: $BACKUP_FILE"; exit 1; }
+
+    # FIX-R05: Verify .sha256 sidecar before attempting decryption.
+    # backup.sh writes a .sha256 file alongside every .age archive. Checking
+    # it here detects bitrot and accidental or deliberate tampering without
+    # consuming the Age key — fast, key-less, defence-in-depth.
+    # Warn-only (not hard-fail) when the sidecar is absent for backward
+    # compatibility with v1 backups that pre-date sidecar generation.
+    local sha256_sidecar="${BACKUP_FILE}.sha256"
+    if [[ -f "$sha256_sidecar" ]]; then
+        log_info "Verifying backup checksum before decryption..."
+        local expected_sum actual_sum
+        expected_sum=$(cat "$sha256_sidecar")
+        actual_sum=$(sha256sum "$BACKUP_FILE" | awk '{print $1}')
+        if [[ "$expected_sum" != "$actual_sum" ]]; then
+            log_error "Checksum MISMATCH — backup file may be corrupted or tampered."
+            log_error "  Expected: $expected_sum"
+            log_error "  Actual:   $actual_sum"
+            log_error "Do not restore from this file. Locate an earlier backup."
+            exit 1
+        fi
+        log_success "Backup checksum verified: $(basename "$BACKUP_FILE")"
+    else
+        log_warn "No .sha256 sidecar found — skipping pre-decryption checksum check."
+        log_warn "(Backups created before v2 did not generate sidecar files.)"
+    fi
 
     # Read .meta to determine archive format / version
     local meta_file="${BACKUP_FILE}.meta"
@@ -437,11 +584,22 @@ main() {
         [[ "$confirm" == "yes" ]] || { log_info "Restore cancelled."; exit 0; }
     fi
 
-    # mktemp staging area — cleanup on any exit
-    local TMPDIR_RESTORE
-    TMPDIR_RESTORE="$(mktemp -d)"
-    cleanup() { rm -rf "$TMPDIR_RESTORE" 2>/dev/null || true; }
+    # FIX-R09: Register cleanup() BEFORE mktemp so that any set -e exit
+    # between mktemp and the original trap registration cannot leave a
+    # decrypted archive in /tmp. The null-guard on TMPDIR_RESTORE ensures
+    # the handler is a no-op if mktemp itself fails.
+    local TMPDIR_RESTORE=""
+    cleanup() { [[ -n "$TMPDIR_RESTORE" ]] && rm -rf "$TMPDIR_RESTORE" 2>/dev/null || true; }
     trap cleanup EXIT HUP INT TERM
+
+    local old_umask
+    old_umask=$(umask)
+    umask 077
+    TMPDIR_RESTORE="$(mktemp -d -t vw_restore.XXXXXXXXXX)" || {
+        log_error "Failed to create secure temporary directory"
+        exit 1
+    }
+    umask "$old_umask"
 
     create_pre_restore_snapshot
 
@@ -471,13 +629,45 @@ main() {
             ;;
     esac
 
-    # Restart services
+    # FIX-R08: Prune old .pre-restore-* artefacts after a successful restore.
+    # Each restore run creates a dated rollback copy; without pruning these
+    # accumulate indefinitely. Keep the 3 most recent for safety.
+    if [[ "$DRY_RUN" != "true" ]]; then
+        case "$RESTORE_TYPE" in
+            db)
+                cleanup_pre_restore_artefacts "${STATE_DIR}/data/db.sqlite3" 3 || true
+                ;;
+            full|emergency)
+                cleanup_pre_restore_artefacts "$STATE_DIR" 3 || true
+                ;;
+        esac
+    fi
+
+    # FIX-R02: Use docker compose up -d instead of docker compose start.
+    # docker compose start only resumes ALREADY-CREATED containers.
+    # On a fresh disaster-recovery server no containers have ever been
+    # created, so start exits silently, the vault is completely down, and
+    # the restore incorrectly reports success. docker compose up -d
+    # --remove-orphans creates containers if they do not exist AND starts
+    # them if they are stopped — correct in both scenarios.
     if [[ "$DRY_RUN" != "true" ]]; then
         log_info "Starting services..."
-        docker compose start
+        if ! docker compose up -d --remove-orphans; then
+            log_error "Failed to start services after restore."
+            log_error "Investigate with: docker compose logs --tail=50"
+            exit 1
+        fi
+
+        # Brief settle period before health check so containers have time
+        # to initialise (especially on a fresh DR install with cold images).
+        sleep 5
+
         if [[ -x "./health.sh" ]]; then
             log_info "Running post-restore health check..."
-            ./health.sh --quiet || log_warn "Health check reported issues after restore"
+            ./health.sh --quiet || {
+                log_warn "Health check reported issues after restore."
+                log_warn "Investigate with: docker compose logs --tail=50"
+            }
         fi
     fi
 
