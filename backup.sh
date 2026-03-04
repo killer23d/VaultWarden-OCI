@@ -29,6 +29,8 @@ QUIET=false
 FORCE=false
 EMAIL_NOTIFY=false   # set by --email; send_notification() called on completion
 LIST_ONLY=false      # set by --list; print existing backups and exit (no root needed)
+RCLONE_SYNC=false    # set by --rclone; sync encrypted backup to rclone remote after creation
+FULL_VERIFY=false    # set by --full-verification; decrypt + integrity check before sync
 LOCK_FD=200
 
 show_help() {
@@ -39,36 +41,44 @@ USAGE:
     sudo ./backup.sh [OPTIONS]
 
 OPTIONS:
-    --type TYPE     auto (default) | db | full | emergency
-    --dry-run       Show what would be done without executing
-    --keep N        Retention period in days (default: 14)
-    --quiet         Suppress non-error output
-    --force         Ignore locks and force backup
-    --email         Send email notification on completion/failure
-    --list          List existing backups and exit (no root required)
-    --help          Show this help
+    --type TYPE              auto (default) | db | full | emergency
+    --dry-run                Show what would be done without executing
+    --keep N                 Retention period in days (default: 14)
+    --quiet                  Suppress non-error output
+    --force                  Ignore locks and force backup
+    --email                  Send email notification on completion/failure
+    --list                   List existing backups and exit (no root required)
+    --rclone                 Sync encrypted backup to rclone remote after creation
+    --full-verification      End-to-end decrypt + integrity check before sync (fatal on failure)
+    --skip-full-verification Fast checksum only — explicit default
+    --help                   Show this help
 
 EXAMPLES:
-    sudo ./backup.sh                        # Auto mode
-    sudo ./backup.sh --type db              # Database-only backup
-    sudo ./backup.sh --type full            # Full state backup
-    sudo ./backup.sh --keep 30              # Keep 30 days of backups
-    sudo ./backup.sh --type db --email      # DB backup with email notification
-    sudo ./backup.sh --list                 # List existing backups
+    sudo ./backup.sh                                                    # Auto mode
+    sudo ./backup.sh --type db                                          # Database-only backup
+    sudo ./backup.sh --type full                                        # Full state backup
+    sudo ./backup.sh --keep 30                                          # Keep 30 days of backups
+    sudo ./backup.sh --type db --email                                  # DB backup with email notification
+    sudo ./backup.sh --list                                             # List existing backups
+    sudo ./backup.sh --type db --rclone --email                         # DB backup + offsite sync + email
+    sudo ./backup.sh --type full --full-verification --rclone --email   # Full verified offsite backup
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --type)    BACKUP_TYPE="$2"; shift 2 ;;
-        --dry-run) DRY_RUN=true;     shift ;;
-        --keep)    KEEP_DAYS="$2";   shift 2 ;;
-        --quiet)   QUIET=true;       shift ;;
-        --force)   FORCE=true;       shift ;;
-        --email)   EMAIL_NOTIFY=true; shift ;;
-        --list)    LIST_ONLY=true;   shift ;;
-        --help)    show_help; exit 0 ;;
-        *)         log_error "Unknown option: $1"; show_help; exit 1 ;;
+        --type)                   BACKUP_TYPE="$2"; shift 2 ;;
+        --dry-run)                DRY_RUN=true;     shift ;;
+        --keep)                   KEEP_DAYS="$2";   shift 2 ;;
+        --quiet)                  QUIET=true;       shift ;;
+        --force)                  FORCE=true;       shift ;;
+        --email)                  EMAIL_NOTIFY=true; shift ;;
+        --list)                   LIST_ONLY=true;   shift ;;
+        --rclone)                 RCLONE_SYNC=true; shift ;;
+        --full-verification)      FULL_VERIFY=true; shift ;;
+        --skip-full-verification) FULL_VERIFY=false; shift ;;
+        --help)                   show_help; exit 0 ;;
+        *)                        log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done
 
@@ -202,6 +212,108 @@ create_db_snapshot_docker() {
 }
 
 # ---------------------------------------------------------------------------
+# Full end-to-end verification: decrypt the just-created archive and re-verify.
+# Uses $TMPDIR_BACKUP (already covered by EXIT/INT/TERM trap in main).
+# FATAL on failure — a silently-corrupt backup is worse than no backup.
+# ---------------------------------------------------------------------------
+verify_backup_full() {
+    local enc_file="$1"
+    local backup_type="$2"
+    local shared_tmpdir="$3"
+
+    b_log_info "Running full verification (decrypt + integrity check)..."
+
+    local age_key_file
+    age_key_file="$(get_config_value "SOPS_AGE_KEY_FILE" "secrets/keys/age-key.txt")"
+
+    local dec_out="$shared_tmpdir/verify_$(basename "$enc_file" .age)"
+    if ! age -d -i "$age_key_file" -o "$dec_out" "$enc_file"; then
+        log_error "Full verification FAILED: could not decrypt $enc_file"
+        return 1
+    fi
+
+    case "$backup_type" in
+        db)
+            verify_sqlite_docker "$dec_out" || return 1
+            ;;
+        full|emergency)
+            b_log_info "Verifying archive structure..."
+            if ! tar -tzf "$dec_out" >/dev/null 2>&1; then
+                log_error "Full verification FAILED: archive is corrupt or unreadable"
+                return 1
+            fi
+            # Confirm the archive is non-trivially sized (>10 KB)
+            local size
+            size=$(stat -c%s "$dec_out" 2>/dev/null || stat -f%z "$dec_out" 2>/dev/null || echo 0)
+            if (( size < 10240 )); then
+                log_error "Full verification FAILED: archive suspiciously small (${size} bytes)"
+                return 1
+            fi
+            ;;
+    esac
+
+    b_log_success "Full verification passed: $(basename "$enc_file")"
+    rm -f "$dec_out"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Rclone offsite sync — NON-FATAL by design.
+# Reads RCLONE_REMOTE_NAME from .env.
+# Syncs only the specific backup file + its .meta and .sha256 sidecars.
+# On failure: warns but does NOT mark the backup as failed (local copy is safe).
+# ---------------------------------------------------------------------------
+sync_to_rclone() {
+    local enc_file="$1"
+    local backup_type="$2"
+
+    if ! command -v rclone >/dev/null 2>&1; then
+        log_warn "rclone not installed — skipping offsite sync."
+        log_warn "Install: https://rclone.tech/install/"
+        return 1
+    fi
+
+    local remote_name
+    remote_name="$(get_config_value "RCLONE_REMOTE_NAME" "")"
+    if [[ -z "$remote_name" || "$remote_name" == "CHANGE_ME_RCLONE_REMOTE" ]]; then
+        log_warn "RCLONE_REMOTE_NAME not configured in .env — skipping offsite sync."
+        log_warn "Set RCLONE_REMOTE_NAME in .env and run: rclone config"
+        return 1
+    fi
+
+    local remote_path="${remote_name}:vaultwarden_backups/${backup_type}"
+    b_log_info "Syncing backup to rclone remote: ${remote_path}/"
+
+    local rclone_ok=true
+
+    # Copy the encrypted archive
+    if ! rclone copy "$enc_file" "$remote_path/" --checksum 2>&1; then
+        rclone_ok=false
+    fi
+
+    # Copy the .meta sidecar if it exists
+    local meta_file="${enc_file}.meta"
+    if [[ -f "$meta_file" ]]; then
+        rclone copy "$meta_file" "$remote_path/" --checksum 2>&1 || true
+    fi
+
+    # Copy the .sha256 sidecar if it exists
+    local sha256_file="${enc_file}.sha256"
+    if [[ -f "$sha256_file" ]]; then
+        rclone copy "$sha256_file" "$remote_path/" --checksum 2>&1 || true
+    fi
+
+    if [[ "$rclone_ok" == "true" ]]; then
+        b_log_success "Offsite sync complete → ${remote_path}/$(basename "$enc_file")"
+        return 0
+    else
+        log_warn "Rclone sync FAILED — backup is safe locally, but offsite copy was not updated."
+        log_warn "Retry manually: rclone copy $enc_file ${remote_path}/"
+        return 1
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Database-only backup
 # ---------------------------------------------------------------------------
 perform_db_backup() {
@@ -240,7 +352,11 @@ perform_db_backup() {
     fi
     secure_file "$enc" 600
 
-    [[ -s "$enc" ]] || { log_error "Encrypted output is empty"; rm -f "$enc"; return 1; }
+    # Generate SHA-256 checksum sidecar (fixes BACKUP-RESTORE.md troubleshooting step)
+    sha256sum "$enc" | awk '{print $1}' > "${enc}.sha256"
+    chmod 600 "${enc}.sha256"
+
+    [[ -s "$enc" ]] || { log_error "Encrypted output is empty"; rm -f "$enc" "${enc}.sha256"; return 1; }
 
     cat > "${enc}.meta" <<MEOF
 type=db
@@ -298,7 +414,7 @@ perform_full_backup() {
 
     # -----------------------------------------------------------------------
     # 2. Build relative-path tar with -C /
-    #    All members will be  var/lib/vaultwarden/...  and  opt/vaultwarden/...
+    #    All members will be  var/lib/vaultwarden/...  and  opt/vaultwarden/...\
     #    (or wherever PROJECT_ROOT / STATE_DIR live) — never /absolute paths.
     # -----------------------------------------------------------------------
     b_log_info "Archiving state (relative paths, safe for staged restore)..."
@@ -391,7 +507,11 @@ perform_full_backup() {
     fi
     secure_file "$enc" 600
 
-    [[ -s "$enc" ]] || { log_error "Encrypted output is empty"; rm -f "$enc"; return 1; }
+    # Generate SHA-256 checksum sidecar (fixes BACKUP-RESTORE.md troubleshooting step)
+    sha256sum "$enc" | awk '{print $1}' > "${enc}.sha256"
+    chmod 600 "${enc}.sha256"
+
+    [[ -s "$enc" ]] || { log_error "Encrypted output is empty"; rm -f "$enc" "${enc}.sha256"; return 1; }
 
     cat > "${enc}.meta" <<MEOF
 type=${backup_label}
@@ -477,16 +597,39 @@ main() {
     esac
 
     if [[ "$backup_success" == "true" && "$DRY_RUN" == "false" ]]; then
+
+        # Optional: full end-to-end verification (FATAL if enabled — a silently corrupt
+        # backup is worse than a known-failed one; discard and exit immediately).
+        if [[ "$FULL_VERIFY" == "true" ]]; then
+            if ! verify_backup_full "$backup_file" "$actual_type" "$TMPDIR_BACKUP"; then
+                log_error "Backup verification failed — discarding corrupt archive."
+                rm -f "$backup_file" "${backup_file}.meta" "${backup_file}.sha256"
+                exit 1
+            fi
+        fi
+
+        # Optional: offsite rclone sync (NON-FATAL — local backup already succeeded).
+        local rclone_failed=false
+        if [[ "$RCLONE_SYNC" == "true" ]]; then
+            sync_to_rclone "$backup_file" "$actual_type" || rclone_failed=true
+        fi
+
         b_log_info "Cleaning up old backups (retention: $KEEP_DAYS days)..."
         cleanup_old_backups "$backup_dir" "$actual_type" "$KEEP_DAYS" || \
             b_log_warn "Failed to clean up some old backups"
 
         if [[ "$EMAIL_NOTIFY" == "true" ]]; then
+            local rclone_status="skipped"
+            [[ "$RCLONE_SYNC" == "true" && "$rclone_failed" == "false" ]] && rclone_status="synced"
+            [[ "$RCLONE_SYNC" == "true" && "$rclone_failed" == "true"  ]] && rclone_status="FAILED"
+
             local subject="[VaultWarden] Backup completed: $actual_type ($timestamp)"
             local body
-            body="$(printf 'Backup type:  %s\nTimestamp:    %s\nFile:         %s\nHost:         %s\n' \
+            body="$(printf 'Backup type:  %s\nTimestamp:    %s\nFile:         %s\nVerification: %s\nOffsite sync: %s\nHost:         %s\n' \
                 "$actual_type" "$timestamp" \
                 "$(basename "${backup_file:-unknown}")" \
+                "$( [[ "$FULL_VERIFY" == "true" ]] && echo "full" || echo "checksum-only" )" \
+                "$rclone_status" \
                 "$(hostname -f 2>/dev/null || hostname)")"
             send_notification "$subject" "$body" 2>/dev/null || \
                 b_log_warn "Email notification failed (backup still succeeded)"
