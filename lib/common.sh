@@ -207,19 +207,47 @@ has_command() {
     fi
 }
 
+_command_to_package_hint() {
+    local cmd="$1"
+    case "$cmd" in
+        htpasswd) echo "apache2-utils" ;;
+        docker) echo "docker-ce (or docker.io)" ;;
+        sops) echo "sops" ;;
+        age) echo "age" ;;
+        *) echo "$cmd" ;;
+    esac
+}
+
+_package_manager_hint() {
+    if has_command apt-get; then
+        echo "sudo apt install"
+    elif has_command dnf; then
+        echo "sudo dnf install"
+    elif has_command yum; then
+        echo "sudo yum install"
+    else
+        echo "Install required packages using your system package manager"
+    fi
+}
+
 require_commands() {
     local missing=()
-    local cmd
+    local packages=()
+    local cmd pkg
 
     for cmd in "$@"; do
         if ! has_command "$cmd"; then
             missing+=("$cmd")
+            pkg=$(_command_to_package_hint "$cmd")
+            packages+=("$pkg")
         fi
     done
 
     if [[ ${#missing[@]} -gt 0 ]]; then
         log_error "Missing required commands: ${missing[*]}"
-        log_info "Install with: sudo apt install ${missing[*]}"
+        local installer
+        installer=$(_package_manager_hint)
+        log_info "Install hint: ${installer} ${packages[*]}"
         return 1
     fi
 

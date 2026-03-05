@@ -784,11 +784,18 @@ update_dns_record() {
     [[ -z "$domain"  ]] && { log_error "DOMAIN not set in .env"; return 1; }
     [[ -z "$zone_id" ]] && { log_error "CLOUDFLARE_ZONE_ID not set in .env"; return 1; }
 
-    local DNS_LOCK="/tmp/.vw_dns_update.lock"
-    if ! (set -C; echo $$ > "$DNS_LOCK") 2>/dev/null; then
-        log_info "DNS update already in progress (lock: $DNS_LOCK). Skipping."; return 0
+    local lock_dir="${PROJECT_ROOT}/.locks"
+    local DNS_LOCK="${lock_dir}/dns-update.lock"
+    ensure_dir "$lock_dir" 700 "$(get_real_user)" || {
+        log_error "Failed to initialize lock directory: $lock_dir"
+        return 1
+    }
+
+    exec 242>"$DNS_LOCK"
+    if ! flock -n 242; then
+        log_info "DNS update already in progress (lock: $DNS_LOCK). Skipping."
+        return 0
     fi
-    CLEANUP_ACTIONS+=("rm -f '$DNS_LOCK' 2>/dev/null || true")
 
     log_info "Checking if DNS update needed for $domain..."
     local current_ip

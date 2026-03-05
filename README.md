@@ -142,7 +142,7 @@ The installed cron schedule:
 | :-- | :-- | :-- |
 | 2 AM Mon–Sat | Comprehensive maintenance | `flock` — skips + logs if already running |
 | 3 AM Sunday | Full backup + verify + rclone + email | Internal lock in `backup.sh` |
-| 4 AM daily | DB backup + rclone + email | Internal lock in `backup.sh` |
+| 4 AM Mon–Sat | DB backup + rclone + email | Internal lock in `backup.sh` |
 | Every 30 min | Health check | `flock` — skips + logs if already running |
 | Every hour | DNS update | `flock` — skips + logs if already running |
 | Saturday 4 AM | Firewall rules update | `flock` — skips + logs if already running |
