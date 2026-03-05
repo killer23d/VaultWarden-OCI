@@ -82,8 +82,16 @@ EOF
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --domain) DOMAIN="$2"; shift 2 ;;
-        --email) ADMIN_EMAIL="$2"; shift 2 ;;
+        --domain)
+            [[ $# -ge 2 ]] || { log_error "--domain requires a value"; show_help; exit 1; }
+            DOMAIN="$2"
+            shift 2
+            ;;
+        --email)
+            [[ $# -ge 2 ]] || { log_error "--email requires a value"; show_help; exit 1; }
+            ADMIN_EMAIL="$2"
+            shift 2
+            ;;
         --auto) AUTO_MODE=true; shift ;;
         --use-latest) USE_LATEST=true; shift ;;
         --skip-deps) SKIP_DEPS=true; shift ;;

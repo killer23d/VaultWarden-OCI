@@ -17,14 +17,15 @@ if [ ! -f /run/secrets/caddy_cloudflare_dns_token ]; then
     exit 1
 fi
 
-export CLOUDFLARE_API_TOKEN=$(cat /run/secrets/caddy_cloudflare_dns_token)
+CLOUDFLARE_API_TOKEN=$(tr -d '\r\n' < /run/secrets/caddy_cloudflare_dns_token)
+export CLOUDFLARE_API_TOKEN
 
 if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
     echo "ERROR: Cloudflare API token is empty" >&2
     exit 1
 fi
 
-if ! echo "$CLOUDFLARE_API_TOKEN" | grep -qE '^[A-Za-z0-9_-]+$'; then
+if ! printf '%s' "$CLOUDFLARE_API_TOKEN" | grep -qE '^[A-Za-z0-9_-]+$'; then
     echo "ERROR: Cloudflare API token contains invalid characters" >&2
     exit 1
 fi
@@ -40,7 +41,7 @@ if [ ! -f /run/secrets/admin_basic_auth_hash ]; then
 fi
 
 # Read the full hash (format: "admin $2a$14$...")
-ADMIN_HASH_FULL=$(cat /run/secrets/admin_basic_auth_hash)
+ADMIN_HASH_FULL=$(< /run/secrets/admin_basic_auth_hash)
 
 if [ -z "$ADMIN_HASH_FULL" ]; then
     echo "ERROR: Admin basic auth hash is empty" >&2
@@ -48,7 +49,7 @@ if [ -z "$ADMIN_HASH_FULL" ]; then
 fi
 
 # Validate format before splitting
-if ! echo "$ADMIN_HASH_FULL" | grep -qE '^admin \$2[aby]\$'; then
+if ! printf '%s' "$ADMIN_HASH_FULL" | grep -qE '^admin \$2[aby]\$'; then
     echo "ERROR: Admin basic auth hash has invalid format" >&2
     echo "Expected: admin \$2a\$14\$... (SPACE-separated)" >&2
     exit 1
@@ -90,6 +91,10 @@ echo "✓ Caddyfile validation passed"
 # =============================================================================
 echo "==================================================================="
 echo " Starting Caddy Server"
+if [ -z "${DOMAIN_NAME:-}" ]; then
+    echo "ERROR: DOMAIN_NAME environment variable is not set" >&2
+    exit 1
+fi
 echo " Domain: ${DOMAIN_NAME}"
 echo "==================================================================="
 
