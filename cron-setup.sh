@@ -198,10 +198,22 @@ setup_cron_logging() {
         return 1
     fi
 
-    # FIX [ISSUE 5]: Create lock directory for flock-based mutual exclusion
-    # Best practice: root-owned 0700 under /run to prevent unprivileged lock pre-creation/DoS.
+    # FIX HIGH-NEW-01: Create lock directory with tmpfiles.d rule for persistence across reboots
+    # /run is a tmpfs filesystem cleared on every reboot. Without persistent recreation,
+    # all flock-protected cron jobs silently skip after reboot with "No such file or directory".
+    # tmpfiles.d ensures the directory is automatically recreated on every boot.
+    cat > /etc/tmpfiles.d/vaultwarden-locks.conf << 'EOF'
+d /run/vaultwarden-locks 0700 root root -
+EOF
+    if systemd-tmpfiles --create /etc/tmpfiles.d/vaultwarden-locks.conf 2>/dev/null; then
+        log_success "tmpfiles.d rule created: /run/vaultwarden-locks auto-recreated on boot"
+    else
+        log_warn "systemd-tmpfiles not available — lock directory will not persist across reboots"
+    fi
+
     if ! ensure_dir "$CRON_LOCK_DIR" 700; then
-        log_warn "Failed to create cron lock directory — overlapping job protection disabled"
+        log_error "Failed to create cron lock directory — overlapping job protection disabled"
+        return 1
     else
         chown root:root "$CRON_LOCK_DIR" 2>/dev/null || true
         log_success "Cron lock directory ready: $CRON_LOCK_DIR"
@@ -447,8 +459,8 @@ install_cron_jobs() {
         # FIX-C04: cd || exit 1  FIX-C02: log skip event  FIX [ISSUE 9]: Mon-Sat only
         "0 2 * * 1-6 cd $PROJECT_ROOT || exit 1; ($fl $ml $CRON_SCRIPTS_DIR/maintenance.sh --comprehensive || echo SKIPPED:maintenance-already-running) >> $CRON_LOG_DIR/maintenance.log 2>&1"
 
-        # FIX-C04: cd || exit 1  (backup has its own internal flock — no wrapper needed)
-        "0 4 * * * cd $PROJECT_ROOT || exit 1; $CRON_SCRIPTS_DIR/backup.sh --type db --rclone --email >> $CRON_LOG_DIR/backup.log 2>&1"
+        # FIX MEDIUM-NEW-01: DB backup now Mon-Sat only (prevents Sunday 4 AM race with 3 AM full backup via shared lock)
+        "0 4 * * 1-6 cd $PROJECT_ROOT || exit 1; $CRON_SCRIPTS_DIR/backup.sh --type db --rclone --email >> $CRON_LOG_DIR/backup.log 2>&1"
 
         # FIX-C04: cd || exit 1  FIX-C02: log skip event
         "*/30 * * * * cd $PROJECT_ROOT || exit 1; ($fl $hl $CRON_SCRIPTS_DIR/health.sh --quiet || echo SKIPPED:health-already-running) >> $CRON_LOG_DIR/health.log 2>&1"
@@ -513,13 +525,14 @@ install_cron_jobs() {
     log_success "Secure cron jobs installation completed"
     log_info "Installed cron jobs:"
     log_info "  Daily   (2 AM Mon-Sat):  Comprehensive maintenance (flock-protected, skip-logged)"
-    log_info "  Daily   (4 AM):          Database backup with rclone offsite sync + email"
+    log_info "  Daily   (4 AM Mon-Sat):  Database backup with rclone offsite sync + email"
     log_info "  Every 30 min:            Health check (flock-protected, skip-logged)"
     log_info "  Every hour:              DNS update (flock-protected, skip-logged)"
     log_info "  Weekly  (Sat 4 AM):      Firewall update (flock-protected, skip-logged)"
     log_info "  Weekly  (Sun 3 AM):      Full backup with full verification + rclone sync + email"
-    log_info "  NOTE: Sunday maintenance is intentionally skipped to avoid"
-    log_info "        overlap with the Sunday 3 AM full backup."
+    log_info "  NOTE: Sunday maintenance and Sunday DB backup are intentionally skipped"
+    log_info "        to prevent lock contention with the Sunday 3 AM full backup"
+    log_info "        (Sunday's full backup already includes the database)."
     log_info "  NOTE: --rclone is non-fatal; --full-verification is fatal on"
     log_info "        the Sunday run (corrupt offsite backup = worthless DR)."
     log_info "  NOTE: All flock-protected jobs write SKIPPED:reason to their"
