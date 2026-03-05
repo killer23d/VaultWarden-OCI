@@ -92,8 +92,12 @@ done
 _find_latest_backup() {
     local dir="$1"
     [[ -d "$dir" ]] || return 1
-    find "$dir" -name "*.age" -type f -printf '%T@ %p\n' 2>/dev/null \
-        | sort -n | tail -1 | cut -d' ' -f2-
+    # Use portable stat instead of GNU-specific -printf '%T@'
+    find "$dir" -name "*.age" -type f | while IFS= read -r f; do
+        printf '%s %s\n' \
+            "$(stat -c%Y "$f" 2>/dev/null || stat -f%m "$f" 2>/dev/null || echo 0)" \
+            "$f"
+    done | sort -n | tail -1 | cut -d' ' -f2-
 }
 
 list_backups() {
@@ -543,7 +547,7 @@ main() {
     # Warn-only (not hard-fail) when the sidecar is absent for backward
     # compatibility with v1 backups that pre-date sidecar generation.
     local sha256_sidecar="${BACKUP_FILE}.sha256"
-    if [[ -f "$sha256_sidecar" ]]; then
+    if [[ -f "$sha256_sidecar" && "$SKIP_VERIFICATION" != "true" ]]; then
         log_info "Verifying backup checksum before decryption..."
         local expected_sum actual_sum
         expected_sum=$(cat "$sha256_sidecar")
@@ -556,6 +560,9 @@ main() {
             exit 1
         fi
         log_success "Backup checksum verified: $(basename "$BACKUP_FILE")"
+    elif [[ -f "$sha256_sidecar" && "$SKIP_VERIFICATION" == "true" ]]; then
+        log_warn "--skip-verification: SHA-256 sidecar check bypassed."
+        log_warn "Proceeding to Age decryption — AEAD will still verify authenticity."
     else
         log_warn "No .sha256 sidecar found — skipping pre-decryption checksum check."
         log_warn "(Backups created before v2 did not generate sidecar files.)"
@@ -658,9 +665,13 @@ main() {
             exit 1
         fi
 
-        # Brief settle period before health check so containers have time
-        # to initialise (especially on a fresh DR install with cold images).
-        sleep 5
+        # Wait for services to initialize with retry loop for cold-start DR
+        log_info "Waiting for services to initialize (up to 60s on cold start)..."
+        local max_wait=60 waited=0
+        while (( waited < max_wait )); do
+            sleep 5; (( waited += 5 ))
+            docker compose ps 2>/dev/null | grep -qE "healthy|running" && break
+        done
 
         if [[ -x "./health.sh" ]]; then
             log_info "Running post-restore health check..."
