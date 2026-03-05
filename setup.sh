@@ -842,14 +842,14 @@ execute_phase() {
     [[ "$phase_func" == "verify_dependencies" ]] && hash -r
 
     local exit_code=0
-    if ! "$phase_func"; then
-        exit_code=$?
+    "$phase_func" || exit_code=$?
+    if [[ $exit_code -ne 0 ]]; then
         log_error "Phase failed: $phase_name (exit code: $exit_code)"
         [[ "$phase_critical" == "true" ]] && return 1 || return 2
-    else
-        log_success "Phase completed: $phase_name"
-        return 0
     fi
+
+    log_success "Phase completed: $phase_name"
+    return 0
 }
 
 # Phase 1-C: Mode-aware post-install summary.

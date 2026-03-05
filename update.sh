@@ -32,7 +32,8 @@ QUIET=false
 FORCE_UPDATE=false   # bypass fatal backup-failure guard (--force)
 
 # Shared operations lock — must match the name used in restore.sh and maintenance.sh
-VW_OPERATIONS_LOCK="/tmp/.vw_operations.lock"
+VW_LOCK_DIR="${PROJECT_ROOT}/.locks"
+VW_OPERATIONS_LOCK="${VW_LOCK_DIR}/operations.lock"
 
 show_help() {
     cat << 'EOF'
@@ -249,6 +250,11 @@ main() {
     # so they cannot run concurrently. This prevents races such as update.sh
     # replacing images while restore.sh is replaying volumes, or maintenance.sh
     # vacuuming the database while an update is mid-flight.
+    ensure_dir "$VW_LOCK_DIR" 700 "$(get_real_user)" || {
+        log_error "Failed to initialize lock directory: $VW_LOCK_DIR"
+        exit 1
+    }
+
     exec 9>"$VW_OPERATIONS_LOCK"
     if ! flock -n 9; then
         log_error "Another update/restore/maintenance operation is already running."

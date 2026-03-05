@@ -15,7 +15,7 @@ services:
   # Init Container - Permissions Setup
   # =============================================================================
   init-permissions:
-    image: busybox:latest
+    image: busybox:1.36.1
     container_name: vaultwarden_init
     restart: "no"
     user: "0:0"  # Required for chown operations
@@ -225,7 +225,7 @@ services:
   postfix:
     container_name: vaultwarden_postfix
     # boky/postfix 4.3.0 — latest stable
-    image: boky/postfix:${POSTFIX_VERSION:-5.1.0}
+    image: boky/postfix:${POSTFIX_VERSION:-4.3.0}
     restart: unless-stopped
 
     environment:

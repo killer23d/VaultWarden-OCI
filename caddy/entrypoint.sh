@@ -51,7 +51,6 @@ fi
 if ! echo "$ADMIN_HASH_FULL" | grep -qE '^admin \$2[aby]\$'; then
     echo "ERROR: Admin basic auth hash has invalid format" >&2
     echo "Expected: admin \$2a\$14\$... (SPACE-separated)" >&2
-    echo "Got: $ADMIN_HASH_FULL" >&2
     exit 1
 fi
 
@@ -61,16 +60,14 @@ export ADMIN_USERNAME=$(echo "$ADMIN_HASH_FULL" | awk '{print $1}')
 # Extract hash (everything after first space)
 export ADMIN_HASH=$(echo "$ADMIN_HASH_FULL" | awk '{$1=""; print substr($0,2)}')
 
-# Debug output (remove after testing)
-echo "✓ Admin basic auth loaded:"
-echo "  Username: $ADMIN_USERNAME"
-echo "  Hash length: $(echo "$ADMIN_HASH" | wc -c) characters"
+DEBUG_ENTRYPOINT=${DEBUG_ENTRYPOINT:-false}
+if [ "$DEBUG_ENTRYPOINT" = "true" ]; then
+    echo "✓ Admin basic auth loaded"
+fi
 
 # Verify we got both parts
 if [ -z "$ADMIN_USERNAME" ] || [ -z "$ADMIN_HASH" ]; then
     echo "ERROR: Failed to split admin credentials" >&2
-    echo "  Username: '$ADMIN_USERNAME'" >&2
-    echo "  Hash: '$(echo "$ADMIN_HASH" | head -c 20)...'" >&2
     exit 1
 fi
 
