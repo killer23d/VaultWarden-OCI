@@ -188,23 +188,10 @@ require_config() {
     return 0
 }
 
-# --- Command Caching for Performance ---
-declare -A _command_cache
-
+# --- Command Availability ---
 has_command() {
     local cmd="$1"
-
-    if [[ -n "${_command_cache[$cmd]:-}" ]]; then
-        return "${_command_cache[$cmd]}"
-    fi
-
-    if command -v "$cmd" >/dev/null 2>&1; then
-        _command_cache["$cmd"]=0
-        return 0
-    else
-        _command_cache["$cmd"]=1
-        return 1
-    fi
+    command -v "$cmd" >/dev/null 2>&1
 }
 
 _command_to_package_hint() {
@@ -302,7 +289,7 @@ ensure_dir() {
 
     if [[ ! -d "$dir" ]]; then
         log_debug "Creating directory: $dir"
-        if ! mkdir -p "$dir"; then
+        if ! install -d -m "$mode" "$dir"; then
             log_error "Failed to create directory: $dir"
             return 1
         fi
@@ -392,7 +379,7 @@ send_notification_email() {
         return 1
     fi
 
-    if docker compose ps postfix >/dev/null 2>&1; then
+    if docker inspect vaultwarden_postfix --format '{{.State.Running}}' 2>/dev/null | grep -qx 'true'; then
         log_debug "Using postfix container for email delivery"
         _send_email_via_postfix "$subject" "$body" "$admin_email"
         return $?
@@ -428,7 +415,10 @@ _send_email_via_postfix() {
     local body="$2"
     local admin_email="$3"
 
-    local last_email_file="/tmp/.vw_last_email_$(echo "$subject" | md5sum | cut -d' ' -f1)"
+    local rate_limit_dir="${PROJECT_ROOT:-/var/lib/vaultwarden}/.rate-limit"
+    mkdir -p "$rate_limit_dir" 2>/dev/null || true
+    chmod 700 "$rate_limit_dir" 2>/dev/null || true
+    local last_email_file="$rate_limit_dir/.vw_last_email_$(echo "$subject" | md5sum | cut -d' ' -f1)"
 
     if [[ "$subject" != *"CRITICAL"* ]] && [[ -f "$last_email_file" ]]; then
         local last_time current_time
@@ -474,6 +464,12 @@ def send_email():
         msg['Subject'] = os.environ.get('EMAIL_SUBJECT', 'No Subject')
 
         body = os.environ.get('EMAIL_BODY', '')
+        if not body:
+            try:
+                with open('/tmp/.vw_email_body', 'r', encoding='utf-8') as f:
+                    body = f.read()
+            except Exception:
+                body = ''
         msg.attach(MIMEText(body, 'plain'))
 
         host = os.environ.get('SMTP_HOST', '127.0.0.1')
@@ -493,17 +489,22 @@ sys.exit(0 if send_email() else 1)
 EOF
 )
 
+    local body_tmp
+    body_tmp=$(mktemp)
+    chmod 600 "$body_tmp" 2>/dev/null || true
+    printf '%s' "$full_body" > "$body_tmp"
     if docker compose exec -T \
         -e EMAIL_FROM="${SMTP_FROM:-vaultwarden@${DOMAIN_NAME:-localhost}}" \
         -e EMAIL_TO="$admin_email" \
         -e EMAIL_SUBJECT="$full_subject" \
-        -e EMAIL_BODY="$full_body" \
         -e SMTP_HOST="$smtp_host" \
         -e SMTP_PORT="$smtp_port" \
-        fail2ban python3 -c "$email_script"; then
+        fail2ban sh -c "cat >/tmp/.vw_email_body && python3 -c '$email_script'; rc=$?; rm -f /tmp/.vw_email_body; exit $rc" < "$body_tmp"; then
+        rm -f "$body_tmp" 2>/dev/null || true
         log_success "Notification email sent to $admin_email (via postfix)"
         return 0
     else
+        rm -f "$body_tmp" 2>/dev/null || true
         log_error "Failed to send notification email via postfix"
         return 1
     fi
@@ -514,7 +515,10 @@ _send_email_via_mailutils() {
     local body="$2"
     local admin_email="$3"
 
-    local last_email_file="/tmp/.vw_last_email_$(echo "$subject" | md5sum | cut -d' ' -f1)"
+    local rate_limit_dir="${PROJECT_ROOT:-/var/lib/vaultwarden}/.rate-limit"
+    mkdir -p "$rate_limit_dir" 2>/dev/null || true
+    chmod 700 "$rate_limit_dir" 2>/dev/null || true
+    local last_email_file="$rate_limit_dir/.vw_last_email_$(echo "$subject" | md5sum | cut -d' ' -f1)"
 
     if [[ "$subject" != *"CRITICAL"* ]] && [[ -f "$last_email_file" ]]; then
         local last_time current_time
