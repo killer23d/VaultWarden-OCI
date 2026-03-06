@@ -231,25 +231,41 @@ validate_cloudflare_token() {
 # ---------------------------------------------------------------------------
 # Interactive helpers
 # ---------------------------------------------------------------------------
+
+# prompt_password_with_confirmation
+#
+# FIX [LOW]: Added MAX_ATTEMPTS counter (default 10) to prevent infinite
+# loops that leave SSH sessions hanging when the connection times out
+# mid-setup.  After MAX_ATTEMPTS failed attempts the function prints a
+# clear error and returns 1 so the caller can abort gracefully.
 prompt_password_with_confirmation() {
     local prompt_text="$1"
     local min_length="${2:-12}"
+    local max_attempts="${3:-10}"
     local password password_confirm
+    local attempt=0
+
     while true; do
-        read -s -p "$prompt_text: " password
+        attempt=$(( attempt + 1 ))
+        if [[ $attempt -gt $max_attempts ]]; then
+            log_error "Too many failed password attempts (${max_attempts}). Aborting."
+            return 1
+        fi
+
+        read -r -s -p "$prompt_text: " password
         echo ""
         if [[ -z "$password" ]]; then
-            log_error "Password cannot be empty"
+            log_error "Password cannot be empty (attempt $attempt/$max_attempts)"
             continue
         fi
         if [[ ${#password} -lt $min_length ]]; then
-            log_error "Password must be at least $min_length characters"
+            log_error "Password must be at least $min_length characters (attempt $attempt/$max_attempts)"
             continue
         fi
-        read -s -p "Confirm password: " password_confirm
+        read -r -s -p "Confirm password: " password_confirm
         echo ""
         if [[ "$password" != "$password_confirm" ]]; then
-            log_error "Passwords don't match"
+            log_error "Passwords don't match (attempt $attempt/$max_attempts)"
             continue
         fi
         break

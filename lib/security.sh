@@ -4,21 +4,33 @@
 # Used by scripts to implement consistent security checks and measures
 #
 # PATCHED BUGS (2026-03-03):
-#   BUG-1 [HIGH]   create_secure_file(): printf '%s\\\\n' → printf '%s\n'
+#   BUG-1 [HIGH]   create_secure_file(): printf '%s\\n' → printf '%s\n'
 #                  Over-escaped format literal wrote "\\n" (backslash+backslash+n)
 #                  instead of a newline, corrupting every script copied to /opt/.
-#   BUG-2 [HIGH]   secure_cleanup(): find … {} \\\\; → find … {} \;
-#                  Over-escaped terminator: bash reduced \\\\; to \\; which
+#   BUG-2 [HIGH]   secure_cleanup(): find … {} \\; → find … {} \;
+#                  Over-escaped terminator: bash reduced \\; to \; which
 #                  (a) passed \ (not ;) to find, and (b) under set -euo pipefail
 #                  the bare ; launched "2>/dev/null || true" as a new command.
-#   BUG-3 [MEDIUM] generate_secure_random() top-up loop: tr -d ' \\\\n' → tr -d ' \n'
-#                  Over-escaped delete-set: tr received \\\\n (backslashes+n) and
+#   BUG-3 [MEDIUM] generate_secure_random() top-up loop: tr -d ' \\n' → tr -d ' \n'
+#                  Over-escaped delete-set: tr received \\n (backslashes+n) and
 #                  deleted backslashes and the letter 'n' from od output instead
 #                  of deleting spaces and newlines.
 #   BUG-4 [MEDIUM] validate_file_permissions(): [[ ! -f ]] → [[ ! -e ]]
 #                  -f tests for regular files only; validate_directory_permissions()
 #                  calls this function on subdirectories in its recursive path,
 #                  causing every subdirectory to fail with "File not found".
+#
+# PATCHED BUGS (2026-03-06):
+#   BUG-5 [HIGH]   validate_password_strength(): ((score++)) under set -e exits the
+#                  function on the FIRST successful match (exit code 1 from arithmetic
+#                  with result 1). Fixed by guarding every increment with '|| true'.
+#   BUG-6 [MEDIUM] validate_file_permissions(): stat -c '%a'/'%U'/'%G' is GNU-only.
+#                  macOS requires stat -f '%OLp'/'%Su'/'%Sg'. Added _stat_octal_perms(),
+#                  _stat_owner(), _stat_group() portable wrappers that detect the
+#                  platform at call time.
+#   BUG-7 [LOW]    validate_file_permissions(): stat on an unmapped UID returns the
+#                  string "UNKNOWN" for owner/group, causing false-positive mismatch
+#                  errors. Now logged as a warning and treated as a soft failure only.
 
 # Prevent multiple sourcing
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
@@ -42,12 +54,57 @@ readonly SECURITY_MIN_PASSWORD_LENGTH=12
 readonly SECURITY_MAX_FAILED_ATTEMPTS=3
 readonly SECURITY_LOCKOUT_DURATION=300  # 5 minutes
 
+# ---------------------------------------------------------------------------
+# Portable stat helpers (BUG-6 fix)
+#
+# GNU stat (Linux):  stat -c FORMAT FILE
+# BSD  stat (macOS): stat -f FORMAT FILE
+#
+# We detect the platform once per call — cheap and avoids a global flag that
+# could be poisoned by sourcing order.
+# ---------------------------------------------------------------------------
+_stat_octal_perms() {
+    local path="$1"
+    if stat --version >/dev/null 2>&1; then
+        # GNU coreutils
+        stat -c '%a' "$path" 2>/dev/null
+    else
+        # BSD / macOS
+        stat -f '%OLp' "$path" 2>/dev/null
+    fi
+}
+
+_stat_owner() {
+    local path="$1"
+    if stat --version >/dev/null 2>&1; then
+        stat -c '%U' "$path" 2>/dev/null
+    else
+        stat -f '%Su' "$path" 2>/dev/null
+    fi
+}
+
+_stat_group() {
+    local path="$1"
+    if stat --version >/dev/null 2>&1; then
+        stat -c '%G' "$path" 2>/dev/null
+    else
+        stat -f '%Sg' "$path" 2>/dev/null
+    fi
+}
+
 # ENHANCED: File permission validation with detailed reporting
 #
 # FIX BUG-4: Guard changed from [[ ! -f ]] to [[ ! -e ]] so the function
 # works correctly when called on directories (e.g. from the recursive path
 # in validate_directory_permissions).  -f is true only for regular files;
 # -e is true for any existing filesystem object (file, directory, symlink…).
+#
+# FIX BUG-6: stat calls replaced with portable _stat_octal_perms(),
+# _stat_owner(), _stat_group() helpers that work on both GNU/Linux and macOS.
+#
+# FIX BUG-7: owner/group values of "UNKNOWN" (returned by stat for unmapped
+# UIDs, e.g. files owned by a deleted user) are treated as a soft warning
+# rather than a hard mismatch, avoiding false-positive validation failures.
 validate_file_permissions() {
     local file_path="$1"
     local expected_perms="$2"
@@ -63,10 +120,10 @@ validate_file_permissions() {
     local validation_passed=true
     local current_perms current_owner current_group
 
-    # Get current file attributes
-    current_perms=$(stat -c '%a' "$file_path" 2>/dev/null)
-    current_owner=$(stat -c '%U' "$file_path" 2>/dev/null)
-    current_group=$(stat -c '%G' "$file_path" 2>/dev/null)
+    # BUG-6 FIX: use portable wrappers instead of GNU-only stat -c
+    current_perms=$(_stat_octal_perms "$file_path")
+    current_owner=$(_stat_owner "$file_path")
+    current_group=$(_stat_group "$file_path")
 
     # Validate permissions
     if [[ "$current_perms" != "$expected_perms" ]]; then
@@ -75,18 +132,30 @@ validate_file_permissions() {
         validation_passed=false
     fi
 
+    # BUG-7 FIX: stat returns "UNKNOWN" for unmapped UIDs; treat as a warning
+    # rather than a hard mismatch so files owned by deleted users do not cause
+    # spurious permission-check failures.
+
     # Validate owner if specified
-    if [[ -n "$expected_owner" ]] && [[ "$current_owner" != "$expected_owner" ]]; then
-        log_error "File owner mismatch: $file_path"
-        log_error "  Current: $current_owner, Expected: $expected_owner"
-        validation_passed=false
+    if [[ -n "$expected_owner" ]]; then
+        if [[ "$current_owner" == "UNKNOWN" ]]; then
+            log_warn "File owner is UNKNOWN (unmapped UID) for: $file_path — skipping owner check"
+        elif [[ "$current_owner" != "$expected_owner" ]]; then
+            log_error "File owner mismatch: $file_path"
+            log_error "  Current: $current_owner, Expected: $expected_owner"
+            validation_passed=false
+        fi
     fi
 
     # Validate group if specified
-    if [[ -n "$expected_group" ]] && [[ "$current_group" != "$expected_group" ]]; then
-        log_error "File group mismatch: $file_path"
-        log_error "  Current: $current_group, Expected: $expected_group"
-        validation_passed=false
+    if [[ -n "$expected_group" ]]; then
+        if [[ "$current_group" == "UNKNOWN" ]]; then
+            log_warn "File group is UNKNOWN (unmapped GID) for: $file_path — skipping group check"
+        elif [[ "$current_group" != "$expected_group" ]]; then
+            log_error "File group mismatch: $file_path"
+            log_error "  Current: $current_group, Expected: $expected_group"
+            validation_passed=false
+        fi
     fi
 
     if [[ "$validation_passed" == "true" ]]; then
@@ -143,15 +212,12 @@ validate_directory_permissions() {
 
 # ENHANCED: Secure file creation with atomic operations
 #
-# FIX BUG-1: printf format was '%s\\\\n' (single-quoted literal).
+# FIX BUG-1: printf format was '%s\\n' (single-quoted literal).
 #   Single quotes preserve everything verbatim, so printf received the
-#   8-char format string  %s\\\\n.  printf's own escape processing then
-#   converted \\→\ and \\→\, producing output:  <content>\\n
-#   i.e. the content followed by two literal backslashes and the letter n —
-#   NOT a newline.  Every script copied to /opt/ via cron-setup.sh had this
-#   garbage appended, and the trailing line was not a valid newline, so
-#   'wc -l' counted one fewer line than the source, potentially triggering
-#   the truncation guard.
+#   8-char format string  %s\\n.  printf's own escape processing then
+#   converted \\→\, producing output:  <content>\n  — NOT a newline but a
+#   literal backslash followed by the letter n.  Every script copied to
+#   /opt/ via cron-setup.sh had this garbage appended.
 #
 #   Fix: '%s\n'  printf interprets \n in the format string as a newline;
 #   $content is passed as the argument (not the format), so no format-string
@@ -183,10 +249,7 @@ create_secure_file() {
     old_umask=$(umask)
     umask 077
 
-    # BUG-1 FIX: was printf '%s\\\\n' "$content"
-    # Over-escaped format wrote literal \\n (backslash+backslash+n) instead of
-    # a newline.  '%s\n' is correct: printf interprets \n as newline; $content
-    # is the %s argument so no backslash sequences inside it are expanded.
+    # BUG-1 FIX: was printf '%s\\n' "$content" — wrote literal \n not newline.
     if printf '%s\n' "$content" > "$temp_file"; then
         # Set permissions before moving to final location
         if chmod "$permissions" "$temp_file"; then
@@ -231,6 +294,14 @@ create_secure_file() {
 }
 
 # ENHANCED: Password strength validation
+#
+# FIX BUG-5: ((score++)) under set -e exits the FUNCTION on the first
+# successful character-class match because arithmetic expressions that
+# evaluate to 1 (i.e. the OLD value before increment) return exit code 1,
+# which set -e treats as an error.
+#
+# The fix guards every increment with '|| true' so the exit code of the
+# arithmetic compound command is always 0, regardless of the result value.
 validate_password_strength() {
     local password="$1"
     local min_length="${2:-$SECURITY_MIN_PASSWORD_LENGTH}"
@@ -260,10 +331,12 @@ validate_password_strength() {
     local score=0
     local requirements=()
 
-    if [[ "$has_lower" == "true" ]]; then ((score++)); else requirements+=("lowercase letter"); fi
-    if [[ "$has_upper" == "true" ]]; then ((score++)); else requirements+=("uppercase letter"); fi
-    if [[ "$has_digit" == "true" ]]; then ((score++)); else requirements+=("digit"); fi
-    if [[ "$has_special" == "true" ]]; then ((score++)); else requirements+=("special character"); fi
+    # BUG-5 FIX: '|| true' prevents set -e from killing the function when
+    # ((score++)) returns exit code 1 (the pre-increment value of 0 → 1).
+    if [[ "$has_lower" == "true" ]]; then ((score++)) || true; else requirements+=("lowercase letter"); fi
+    if [[ "$has_upper" == "true" ]]; then ((score++)) || true; else requirements+=("uppercase letter"); fi
+    if [[ "$has_digit" == "true" ]]; then ((score++)) || true; else requirements+=("digit"); fi
+    if [[ "$has_special" == "true" ]]; then ((score++)) || true; else requirements+=("special character"); fi
 
     if [[ $score -lt 3 ]]; then
         log_error "Password is too weak. Missing: ${requirements[*]}"
@@ -335,23 +408,19 @@ generate_secure_random() {
         [[ $accepted -ge $length ]] && break
         [[ $rand_byte -ge $highest_multiple ]] && continue
         random_string+="${chars:$(( rand_byte % char_count )):1}"
-        (( accepted++ ))
+        (( accepted++ )) || true
     done
 
     # Top-up: handles the extremely unlikely case where the bulk read fell
     # short after rejection sampling.
     #
-    # BUG-3 FIX: was tr -d ' \\\\n'
-    #   Single-quoted ' \\\\n' is the 6-char literal " \\\\n".
-    #   tr received that string and interpreted \\ as backslash and n as 'n',
-    #   so it deleted spaces, backslashes, AND the letter n from od output
-    #   instead of deleting spaces and newlines.
-    #   Fix: ' \n'  — tr interprets \n as newline (removes spaces + newlines).
+    # BUG-3 FIX: was tr -d ' \\n' — deleted backslashes and 'n', not newlines.
+    # Fix: ' \n' — tr interprets \n as newline (removes spaces + newlines).
     while [[ $accepted -lt $length ]]; do
         rand_byte=$(od -An -N1 -tu1 /dev/urandom | tr -d ' \n')
         [[ $rand_byte -ge $highest_multiple ]] && continue
         random_string+="${chars:$(( rand_byte % char_count )):1}"
-        (( accepted++ ))
+        (( accepted++ )) || true
     done
 
     echo "$random_string"
@@ -365,11 +434,11 @@ generate_breakglass_password() {
 
 # ENHANCED: Secure cleanup function for sensitive data
 #
-# FIX BUG-2: find … {} \\\\; → find … {} \;
-#   Unquoted \\\\; in the original: bash reduces each \\ pair to \, yielding
-#   \\ followed by ; .  The ; is a shell metacharacter (command separator),
-#   so the find command ended without its required terminator, and under
-#   set -euo pipefail the bare "2>/dev/null || true" ran as a separate command.
+# FIX BUG-2: find … {} \\; → find … {} \;
+#   Unquoted \\; in the original: bash reduces \\ to \, yielding \ followed
+#   by ; which is a shell metacharacter (command separator), so find ended
+#   without its required terminator, and under set -euo pipefail the bare
+#   "2>/dev/null || true" ran as a separate command.
 #   Fix: \; — bash reduces \; to ; and passes it to find as the -exec terminator.
 secure_cleanup() {
     local target="$1"
@@ -393,7 +462,13 @@ secure_cleanup() {
 
         # Fallback: overwrite and remove
         local file_size
-        file_size=$(stat -c%s "$target" 2>/dev/null || echo "0")
+        file_size=$(_stat_octal_perms "$target" 2>/dev/null || echo "0")
+        # Use GNU stat for byte size specifically (different format flag needed)
+        if stat --version >/dev/null 2>&1; then
+            file_size=$(stat -c%s "$target" 2>/dev/null || echo "4096")
+        else
+            file_size=$(stat -f%z "$target" 2>/dev/null || echo "4096")
+        fi
 
         for ((i=1; i<=passes; i++)); do
             dd if=/dev/urandom of="$target" bs="$file_size" count=1 2>/dev/null || true
@@ -403,8 +478,7 @@ secure_cleanup() {
         log_debug "Fallback secure cleanup completed: $target"
 
     elif [[ -d "$target" ]]; then
-        # BUG-2 FIX: was {} \\\\; — over-escaped terminator broke the find
-        # command and injected a stray shell command under set -euo pipefail.
+        # BUG-2 FIX: was {} \\; — over-escaped terminator broke the find command.
         find "$target" -type f -exec shred -vfz -n "$passes" {} \; 2>/dev/null || true
         rm -rf "$target"
         log_debug "Secure directory cleanup completed: $target"

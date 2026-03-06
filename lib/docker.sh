@@ -56,6 +56,25 @@ require_docker() {
     return 0
 }
 
+# ---------------------------------------------------------------------------
+# require_jq  (FIX [MEDIUM] — jq dependency undeclared)
+#
+# jq is used by get_service_status() and get_service_health() to parse
+# docker compose ps --format json output.  Without a guard, absent jq causes
+# the pipeline to fail silently and every container is reported as 'not_found'.
+#
+# This guard is called at the top of both functions; it logs a clear,
+# actionable error message and returns 1 so callers can propagate the failure.
+# ---------------------------------------------------------------------------
+require_jq() {
+    if ! command -v jq >/dev/null 2>&1; then
+        log_error "jq is required but not installed."
+        log_info  "Install with: sudo apt-get install -y jq"
+        return 1
+    fi
+    return 0
+}
+
 # --- Container Status Operations ---
 
 # Get container status for a service - STANDARDIZED: Returns exit code
@@ -66,11 +85,19 @@ require_docker() {
 #   - Array:          [ { "State": "running" }, ... ]
 # The first element is used in the array case, consistent with service-level
 # health checks (we report the state of the first/only container).
+#
+# [MEDIUM FIX] Added require_jq() guard so absent jq produces a clear error
+# instead of silently reporting every service as 'not_found'.
 get_service_status() {
     local service="$1"
 
     if ! check_docker_available; then
         echo "docker_unavailable"
+        return 1
+    fi
+
+    if ! require_jq; then
+        echo "jq_unavailable"
         return 1
     fi
 
@@ -98,11 +125,17 @@ is_service_running() {
 # Get service health status - STANDARDIZED: Returns exit code
 #
 # [MEDIUM FIX] Same jq array-vs-object fix as get_service_status().
+# [MEDIUM FIX] Added require_jq() guard.
 get_service_health() {
     local service="$1"
 
     if ! check_docker_available; then
         echo "docker_unavailable"
+        return 1
+    fi
+
+    if ! require_jq; then
+        echo "jq_unavailable"
         return 1
     fi
 
@@ -282,8 +315,57 @@ exec_in_service() {
     return 0
 }
 
-# Execute command in service container - STANDARDIZED: Returns exit code
+# ---------------------------------------------------------------------------
+# exec_oneshot_in_service  (FIX [LOW] — replaces run_in_service with --rm)
+#
+# The original run_in_service() used `docker compose run --rm`, which is
+# incompatible with services that have `depends_on:` health conditions
+# because Compose re-evaluates the dependency graph on every `run` and the
+# ephemeral --rm container is not tracked by the health machinery.
+#
+# This replacement uses the lower-level docker container lifecycle:
+#   create → start → wait → logs → rm
+# so the transient container never interferes with the Compose dependency
+# graph and is always cleaned up regardless of exit code.
+# ---------------------------------------------------------------------------
+exec_oneshot_in_service() {
+    local service="$1"
+    shift
+    local cmd=("$@")
+
+    if ! require_docker; then
+        return 1
+    fi
+
+    local image
+    image=$(docker compose config --format json 2>/dev/null \
+        | jq -r ".services.\"${service}\".image // empty" 2>/dev/null)
+    if [[ -z "$image" ]]; then
+        log_error "exec_oneshot_in_service: could not resolve image for service '$service'"
+        return 1
+    fi
+
+    local container_id
+    container_id=$(docker container create --rm=false "$image" "${cmd[@]}" 2>/dev/null) || {
+        log_error "Failed to create one-shot container for service: $service"
+        return 1
+    }
+
+    local exit_code=0
+    docker container start --attach "$container_id" 2>&1 || exit_code=$?
+    docker container rm -f "$container_id" >/dev/null 2>&1 || true
+
+    return "$exit_code"
+}
+
+# run_in_service — DEPRECATED: use exec_oneshot_in_service() instead.
+#
+# Kept as a compatibility alias. The --rm flag is retained here so existing
+# call-sites that do not use depends_on health conditions continue to work,
+# but a warning is emitted to encourage migration.
 run_in_service() {
+    log_warn "run_in_service() is deprecated; use exec_oneshot_in_service() to avoid" \
+              "depends_on health-condition conflicts with --rm containers."
     local service="$1"
     shift
     local cmd=("$@")
@@ -387,9 +469,14 @@ cleanup_docker_system() {
 # --- Logging Operations ---
 
 # Get logs for service - STANDARDIZED: Returns exit code
+#
+# FIX [LOW]: Default raised from 100 → 250 lines. Callers requiring full
+# context (e.g. post-incident review) should pass a larger value or "all".
+# The variable name 'lines' is kept for readability; callers may pass "all"
+# to fetch the complete log, e.g.: get_service_logs vaultwarden all
 get_service_logs() {
     local service="$1"
-    local lines="${2:-100}"
+    local lines="${2:-250}"
 
     if ! require_docker; then
         return 1
@@ -477,10 +564,10 @@ validate_compose_file() {
 }
 
 # Export functions for use by scripts
-export -f check_docker_available check_compose_available require_docker
+export -f check_docker_available check_compose_available require_docker require_jq
 export -f get_service_status is_service_running get_service_health is_service_healthy
 export -f start_services stop_services restart_services recreate_services
-export -f pull_images exec_in_service run_in_service
+export -f pull_images exec_in_service exec_oneshot_in_service run_in_service
 export -f _docker_prune_filter
 export -f cleanup_containers cleanup_images cleanup_volumes cleanup_networks cleanup_docker_system
 export -f get_service_logs follow_service_logs wait_for_service_ready validate_compose_file
