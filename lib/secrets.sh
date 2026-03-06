@@ -168,6 +168,26 @@ cleanup_old_secret_backups() {
 }
 
 # ---------------------------------------------------------------------------
+# _secure_shred FILE
+#
+# Securely overwrite and remove a file containing sensitive data.
+# Uses shred(1) when available; falls back to dd(1) + rm.
+# Safe to call on a path that does not exist.
+# ---------------------------------------------------------------------------
+_secure_shred() {
+    local target="$1"
+    [[ -f "$target" ]] || return 0
+    if command -v shred >/dev/null 2>&1; then
+        shred -fuz "$target" 2>/dev/null && return 0
+    fi
+    # dd fallback: overwrite with random bytes then unlink
+    local file_size
+    file_size=$(stat -c%s "$target" 2>/dev/null || echo "4096")
+    dd if=/dev/urandom of="$target" bs="$file_size" count=1 conv=notrunc 2>/dev/null || true
+    rm -f "$target"
+}
+
+# ---------------------------------------------------------------------------
 # Cloudflare token validation
 # ---------------------------------------------------------------------------
 validate_cloudflare_token() {
@@ -181,12 +201,18 @@ validate_cloudflare_token() {
         log_debug "Zone ID not configured - skipping validation"
         return 0
     fi
+
+    # FIX: 'firewall' token type now validates against the WAF Custom Rules
+    # Rulesets endpoint instead of the deprecated Firewall Access Rules endpoint
+    # (/zones/{zone_id}/firewall/access_rules/rules), consistent with the
+    # already-migrated fail2ban action.d/cloudflare-apiv4.conf.
     local endpoint
     case "$token_type" in
         dns)      endpoint="https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records?per_page=1" ;;
-        firewall) endpoint="https://api.cloudflare.com/client/v4/zones/$zone_id/firewall/access_rules/rules?per_page=1" ;;
+        firewall) endpoint="https://api.cloudflare.com/client/v4/zones/$zone_id/rulesets" ;;
         *)        log_error "Invalid token type: $token_type"; return 1 ;;
     esac
+
     local curl_cfg
     curl_cfg=$(mktemp) || return 1
     chmod 600 "$curl_cfg" 2>/dev/null || true
@@ -254,34 +280,11 @@ secure_secrets_file() {
 # ---------------------------------------------------------------------------
 _bcrypt_format_ok() {
     local hash="$1"
-    # ^          start
-    # \$2[aby]\$ variant prefix ($2a, $2b, $2y)
-    # [0-9]+     cost digits (no trailing dollar — that is part of the hash body)
-    # \$         separator
-    # .{53}      53-char encoded salt+hash
-    # $          end
     [[ "$hash" =~ ^\$2[aby]\$[0-9]+\$.{53}$ ]]
 }
 
 # ---------------------------------------------------------------------------
 # collect_secret_field  — single source of truth for INTERACTIVE collection
-#
-# Prompts the user, validates, and hashes a single secret field.
-# Outputs the final (already-hashed where applicable) value on stdout.
-# All user-facing messages go to stderr. Returns 1 on error.
-#
-# Supported fields:
-#   admin_token                        — prompt + Argon2id hash
-#   admin_basic_auth_hash              — prompt + bcrypt hash, "admin <hash>" format
-#   caddy_cloudflare_dns_token         — prompt + optional CF API validation
-#   fail2ban_cloudflare_firewall_token — prompt + optional CF API validation
-#   smtp_password                      — silent prompt, no hashing
-#   push_installation_id               — plain read
-#   push_installation_key              — plain read
-#   backup_passphrase                  — auto-generated; printed to stderr
-#
-# Usage:
-#   new_value=$(collect_secret_field "admin_token") || exit 1
 # ---------------------------------------------------------------------------
 collect_secret_field() {
     local field="$1"
@@ -390,24 +393,6 @@ collect_secret_field() {
 
 # ---------------------------------------------------------------------------
 # auto_generate_secret_field  — single source of truth for AUTO-MODE generation
-#
-# Generates or sets a reasonable default for a single secret field without
-# prompting the user. Outputs the final value on stdout; status messages and
-# any plaintext passwords the operator must save go to stderr.
-# Returns 1 on error.
-#
-# Behaviour per field:
-#   admin_token                        — generate 32-char password, Argon2id hash it
-#   admin_basic_auth_hash              — generate 32-char password, bcrypt hash it
-#   caddy_cloudflare_dns_token         — emit CHANGE_ME placeholder
-#   fail2ban_cloudflare_firewall_token — emit CHANGE_ME placeholder
-#   smtp_password                      — emit CHANGE_ME placeholder
-#   push_installation_id               — emit CHANGE_ME_OR_LEAVE_EMPTY placeholder
-#   push_installation_key              — emit CHANGE_ME_OR_LEAVE_EMPTY placeholder
-#   backup_passphrase                  — generate 32-char passphrase
-#
-# Usage:
-#   new_value=$(auto_generate_secret_field "admin_token") || exit 1
 # ---------------------------------------------------------------------------
 auto_generate_secret_field() {
     local field="$1"
@@ -537,6 +522,18 @@ generate_recovery_kit() {
         admin_email=$(grep "^ADMIN_EMAIL=" "$env_file" | cut -d= -f2 || echo "Not Configured")
     fi
 
+    # FIX: Derive clone URL from git remote rather than hardcoding the public
+    # template URL. Falls back to RECOVERY_KIT_REPO_URL env var, then to a
+    # generic placeholder so the kit remains useful for forks.
+    local repo_clone_url
+    repo_clone_url="${RECOVERY_KIT_REPO_URL:-}"
+    if [[ -z "$repo_clone_url" ]]; then
+        repo_clone_url=$(git -C "${PROJECT_ROOT:-.}" remote get-url origin 2>/dev/null || true)
+    fi
+    if [[ -z "$repo_clone_url" ]]; then
+        repo_clone_url="<your-repo-clone-url>"
+    fi
+
     log_info "Decrypting secrets for export..."
     local vw_admin_hash="Not Set"
     local caddy_hash="Not Set"
@@ -652,9 +649,9 @@ TO RESTORE THIS SERVER ON NEW HARDWARE:
 1. PREPARATION
    [ ] Install Git, Docker, and SOPS on new server.
    [ ] Clone the repository:
-       git clone https://github.com/killer23d/VaultWarden-OCI.git
+       git clone $repo_clone_url
    [ ] Run setup:
-       cd VaultWarden-OCI
+       cd $(basename "$repo_clone_url" .git)
        ./setup.sh --domain $domain --email $admin_email
 
 2. RESTORE KEYS
@@ -694,39 +691,71 @@ EOF
     chmod 600 "$output_file"
 }
 
+# ---------------------------------------------------------------------------
+# offer_recovery_kit_export
+#
+# FIX [HIGH]: Recovery kit auto-deletion
+#
+# The plaintext recovery kit file MUST NOT persist on the server after the
+# operator has copied its contents to a password manager. This function now:
+#   1. Registers an EXIT trap that calls _secure_shred() on the output file.
+#      The trap fires on any unexpected exit (SIGINT, SIGTERM, ERR, etc.).
+#   2. After successfully generating the kit, prompts the operator to confirm
+#      they have saved it. On confirmation (or after a 120s timeout) the file
+#      is securely shredded and the trap is cleared.
+#   3. An explicit countdown is shown so the operator is never surprised by
+#      automatic deletion.
+# ---------------------------------------------------------------------------
 offer_recovery_kit_export() {
     local auto_export="${1:-false}"
     local output_file="$HOME/vaultwarden-recovery-kit-$(date +%Y%m%d%H%M%S).txt"
 
-    if [[ "$auto_export" == "true" ]]; then
-        log_info "Exporting recovery kit (--export-recovery-kit specified)..."
-        if generate_recovery_kit "$output_file"; then
-            log_success "Recovery Kit created: $output_file"
-            echo ""
-            log_warn "⚠️  ACTION REQUIRED:"
-            echo "1. Copy content to password manager."
-            echo "2. Delete local file: rm $output_file"
-            echo ""
-        else
+    _do_generate_and_secure() {
+        # Register trap BEFORE generating so even a SIGINT during generation
+        # cleans up a partially-written plaintext file.
+        # shellcheck disable=SC2064  # intentional: expand $output_file now
+        trap "_secure_shred '$output_file'; echo '[recovery-kit] Plaintext kit securely deleted.' >&2" EXIT
+
+        if ! generate_recovery_kit "$output_file"; then
             log_error "Failed to generate recovery kit"
+            # EXIT trap will clean up any partial file.
             return 1
         fi
-        return 0
+
+        log_success "Recovery Kit created: $output_file"
+        echo ""
+        log_warn "⚠️  ACTION REQUIRED — SAVE NOW BEFORE THIS FILE IS AUTO-DELETED:"
+        echo "  1. Open the file: cat '$output_file'"
+        echo "  2. Copy ALL contents to your password manager (Secure Note)."
+        echo "  3. Optionally print a physical copy for your fireproof safe."
+        echo ""
+        log_warn "This file will be securely deleted after you press Enter."
+        log_warn "If you do not respond within 120 seconds it will be deleted automatically."
+        echo ""
+
+        # Read with timeout. Works in bash; degrades gracefully if not a TTY.
+        local user_ack
+        if read -r -t 120 -p "Press Enter once you have saved the recovery kit: " user_ack 2>/dev/null \
+           || true; then
+            : # any input (or empty Enter) is acceptable
+        fi
+
+        log_info "Securely deleting recovery kit from server..."
+        _secure_shred "$output_file"
+        trap - EXIT  # disarm: file is already gone
+        log_success "Recovery kit securely deleted from server."
+        echo ""
+    }
+
+    if [[ "$auto_export" == "true" ]]; then
+        log_info "Exporting recovery kit (--export-recovery-kit specified)..."
+        _do_generate_and_secure
+        return $?
     fi
 
     echo ""
-    read -p "Export a plaintext Recovery Kit? (yes/no): " export_kit
+    read -r -p "Export a plaintext Recovery Kit? (yes/no): " export_kit
     if [[ "$export_kit" == "yes" ]]; then
-        if generate_recovery_kit "$output_file"; then
-            log_success "Recovery Kit created: $output_file"
-            echo ""
-            log_warn "⚠️  ACTION REQUIRED:"
-            echo "1. Copy content to password manager."
-            echo "2. Delete local file: rm $output_file"
-            echo ""
-        else
-            log_error "Failed to generate recovery kit"
-            return 1
-        fi
+        _do_generate_and_secure
     fi
 }
