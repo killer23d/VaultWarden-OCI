@@ -163,16 +163,19 @@ prepare_docker_secrets() {
   old_umask=$(umask)
   umask 077 # Ensures all new files are created with 600 permissions
 
-  # Cleanup function to restore umask
-  cleanup_umask() {
+  # Cleanup function scoped to this function invocation.
+  local decrypted_cache=""
+  cleanup_local() {
     umask "$old_umask"
+    if [[ -n "$decrypted_cache" ]]; then
+      rm -f "$decrypted_cache" 2>/dev/null || true
+    fi
   }
-  trap cleanup_umask EXIT
+  trap cleanup_local RETURN
 
   # Create secrets directory with proper permissions
   if ! ensure_dir "$secrets_dir" 700; then
     log_error "Failed to create secrets directory"
-    cleanup_umask
     return 1
   fi
 
@@ -187,19 +190,11 @@ prepare_docker_secrets() {
   export SOPS_AGE_KEY_FILE="$PROJECT_ROOT/$age_key_file"
 
   # FIX [ISSUE 12]: Decrypt once into a secure temp file; extract all secrets from it.
-  local decrypted_cache
   decrypted_cache=$(mktemp)
   chmod 600 "$decrypted_cache"
 
-  # Register for cleanup — will be removed on EXIT regardless of success/failure.
-  local _orig_trap
-  _orig_trap=$(trap -p EXIT)
-  trap "rm -f '$decrypted_cache'; cleanup_umask" EXIT
-
   if ! sops --decrypt "$sops_file" > "$decrypted_cache" 2>/dev/null; then
     log_error "Failed to decrypt secrets file"
-    rm -f "$decrypted_cache"
-    cleanup_umask
     return 1
   fi
 
@@ -221,8 +216,17 @@ prepare_docker_secrets() {
     local secret_file="$secrets_dir/$secret_name"
     local secret_value
 
-    # Extract from the already-decrypted cache (no repeated sops calls)
-    secret_value=$(grep "^${secret_name}:" "$decrypted_cache" | head -n1 | cut -d: -f2- | sed 's/^ *//' || echo "")
+    # Extract using YAML parsing to avoid brittle grep/cut behavior.
+    secret_value=$(python3 - "$decrypted_cache" "$secret_name" <<'PY'
+import sys, yaml
+with open(sys.argv[1], 'r', encoding='utf-8') as f:
+    data = yaml.safe_load(f) or {}
+v = data.get(sys.argv[2], "")
+if v is None:
+    v = ""
+print(v, end="")
+PY
+)
 
     if [[ -n "$secret_value" ]] && [[ "$secret_value" != "CHANGE_ME"* ]] && \
        [[ "$secret_value" != "null" ]] && [[ "$secret_value" != "PLACEHOLDER"* ]]; then
@@ -253,8 +257,8 @@ prepare_docker_secrets() {
   fi
 
   # Restore cleanup trap and umask
-  cleanup_umask
-  trap - EXIT
+  trap - RETURN
+  cleanup_local
 
   log_success "Docker secrets prepared: $secrets_created created, $secrets_failed failed"
 
@@ -347,7 +351,7 @@ verify_startup_health() {
   fi
 
   log_info "Verifying service health after startup..."
-  sleep 10
+  sleep 30
 
   if [[ -f "./health.sh" ]]; then
     # Prefer sudo here because health.sh may need root to decrypt/check backups
