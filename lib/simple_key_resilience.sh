@@ -24,12 +24,15 @@ simple_verify_age_key() {
         chmod 600 "$age_key"
     fi
 
-    # Check 3: Validity (via age-keygen) and Functionality (Encrypt/Decrypt roundtrip)
+    # Check 3: Validity and Functionality (Encrypt/Decrypt roundtrip)
+    # FIX: Use _derive_age_public_key() instead of calling `age-keygen -y`
+    # directly. The helper is Ubuntu 22.04-compatible and is already used in
+    # create_printable_key_backup(), making all public-key derivation consistent.
     local test_data="vw-key-check-$(date +%s)"
     local result
 
     local public_key
-    if ! public_key=$(age-keygen -y "$age_key" 2>/dev/null); then
+    if ! public_key=$(_derive_age_public_key "$age_key"); then
         log_error "Age key corrupted: Cannot extract public key"
         return 1
     fi
@@ -50,6 +53,16 @@ simple_verify_age_key() {
 
 # === TIER 2: Password Manager Escrow ===
 
+# ---------------------------------------------------------------------------
+# create_password_manager_escrow OUTPUT_FILE
+#
+# FIX [HIGH]: Plaintext Age key written to disk with no EXIT trap.
+#
+# An EXIT trap is registered immediately after the output file is created
+# (via install -m 600) so that any early return, signal, or error causes
+# _secure_remove_file() to wipe the plaintext file. The trap is explicitly
+# cleared (trap - EXIT) only on successful completion.
+# ---------------------------------------------------------------------------
 create_password_manager_escrow() {
     local age_key="${SOPS_AGE_KEY_FILE:-secrets/keys/age-key.txt}"
     local output_file="$1"
@@ -61,8 +74,26 @@ create_password_manager_escrow() {
 
     log_info "Creating password manager-ready Age key backup..."
 
+    # Create the output file with secure permissions BEFORE writing any key
+    # material, so that the window where the file exists but is world-readable
+    # is zero.
+    if ! install -m 600 /dev/null "$output_file"; then
+        log_error "Failed to create secure output file: $output_file"
+        return 1
+    fi
+
+    # Register EXIT trap NOW — any failure from this point on will trigger
+    # _secure_remove_file() to wipe the (possibly partially-written) plaintext.
+    # shellcheck disable=SC2064  # intentional: expand $output_file now
+    trap "_secure_remove_file '$output_file'" EXIT
+
+    # FIX: Use _derive_age_public_key() for Ubuntu 22.04 compatibility.
     local pub_key
-    pub_key=$(age-keygen -y "$age_key")
+    if ! pub_key=$(_derive_age_public_key "$age_key"); then
+        log_error "Failed to derive Age public key"
+        return 1  # EXIT trap cleans up
+    fi
+
     local hostname_val
     hostname_val=$(hostname)
     local date_val
@@ -94,8 +125,16 @@ Hostname: $hostname_val
 ───────────────────────────────────────────────────────────────
 EOF
 
+    # Ensure output file is still mode 600 after the heredoc write.
     chmod 600 "$output_file"
+
+    # Success — disarm the EXIT trap. The caller owns the file lifecycle from
+    # here and is responsible for calling _secure_remove_file() after use.
+    trap - EXIT
+
     log_success "Password manager backup created: $output_file"
+    log_warn "⚠️  SECURITY: Delete this file immediately after copying to your password manager:"
+    log_warn "   _secure_remove_file '$output_file'"
     return 0
 }
 
@@ -132,7 +171,7 @@ create_printable_key_backup() {
         log_info "Install with: sudo apt install qrencode"
     fi
 
-    # FIX [ISSUE 8a]: Set umask 077 BEFORE mktemp so the temp file is created
+    # Set umask 077 BEFORE mktemp so the temp file is created
     # with mode 600 rather than the default 644.
     local old_umask
     old_umask=$(umask)
@@ -141,12 +180,12 @@ create_printable_key_backup() {
     temp_html=$(mktemp --suffix=.html)
     umask "$old_umask"
 
-    # FIX [ISSUE 8b]: Register the temp file for secure removal on EXIT so the
+    # Register the temp file for secure removal on EXIT so the
     # plaintext Age key is wiped even if the script is interrupted.
     trap '_secure_remove_file "$temp_html"' EXIT
 
     local pub_key
-    pub_key=$(age-keygen -y "$age_key")
+    pub_key=$(_derive_age_public_key "$age_key")
     local key_content
     key_content=$(cat "$age_key")
     local hostname_val
@@ -210,7 +249,7 @@ EOF
 
     if command -v wkhtmltopdf >/dev/null 2>&1; then
         wkhtmltopdf -q "$temp_html" "$output_pdf"
-        # FIX [ISSUE 8c]: Secure-delete the temp HTML (contains plaintext key).
+        # Secure-delete the temp HTML (contains plaintext key).
         _secure_remove_file "$temp_html"
         trap - EXIT
         log_success "Printable PDF backup created: $output_pdf"
