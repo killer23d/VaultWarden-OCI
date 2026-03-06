@@ -1,17 +1,24 @@
 #!/usr/bin/env bash
 # lib/common.sh - Core shared functions for VaultWarden-OCI-NG
-
+#
 # All library functions use 'return' with exit codes, never 'exit'
+#
+# PATCHED BUGS (2026-03-06):
+#   BUG-C1 [MEDIUM] _send_email_via_postfix/_send_email_via_mailutils(): rate-limit
+#                   timestamp written BEFORE mktemp — on mktemp failure the counter
+#                   is bumped and the next hour of notifications is silently dropped.
+#                   Fixed: mktemp first; stamp written only after temp file succeeds.
+#   BUG-C2 [LOW]    get_real_user(): empty SUDO_USER + empty USER returns "",
+#                   causing downstream chown '' to silently chown to root.
+#                   Fixed: falls back to `id -un`, then literal 'root'.
+#   BUG-C3 [LOW]    log_header(): printf '=%.0s' $(seq ...) uses seq(1) which is
+#                   absent on Alpine/BusyBox. Replaced with a pure-bash while loop.
 
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_COMMON_LIB_LOADED:-}" ]] && return 0
 readonly VAULTWARDEN_COMMON_LIB_LOADED=1
 
 # COMPATIBILITY: Set the flag that lib/security.sh checks before loading.
-# This must come AFTER the guard above so it is only set on the first load.
-# FIX [ISSUE 6]: The original code had a second [[ -n ... ]] && return 0 here
-# that was unreachable dead code. Removed. The readonly assignment below is
-# all that is needed.
 readonly LIB_COMMON_LOADED=1
 
 # --- Library Configuration ---
@@ -122,10 +129,18 @@ log_debug() {
     echo "[${timestamp}] [DEBUG] ${prefix_part}$*" >&2
 }
 
+# BUG-C3 FIX: replaced `printf '=%.0s' $(seq 1 N)` with a pure-bash while
+# loop. seq(1) is absent on Alpine/BusyBox; the while loop has no external
+# dependency and runs on every POSIX-compatible bash.
 log_header() {
     local message="$*"
-    local line
-    line=$(printf '=%.0s' $(seq 1 ${#message}))
+    local len=${#message}
+    local line=""
+    local i=0
+    while (( i < len )); do
+        line+="="
+        (( i++ )) || true
+    done
     echo ""
     if [[ "$LOG_COLORS" == "true" ]]; then
         echo "${COLOR_BOLD}${line}${COLOR_RESET}"
@@ -276,8 +291,23 @@ require_root() {
     fi
 }
 
+# BUG-C2 FIX: when both SUDO_USER and USER are unset (non-interactive daemon
+# context), the function previously returned an empty string. Downstream
+# callers like secure_secrets_file() pass the result to chown, so an empty
+# string caused `chown :` to silently transfer ownership to root.
+#
+# Fallback chain: SUDO_USER → USER → id -un → 'root'
 get_real_user() {
-    echo "${SUDO_USER:-$USER}"
+    if [[ -n "${SUDO_USER:-}" ]]; then
+        echo "$SUDO_USER"
+    elif [[ -n "${USER:-}" ]]; then
+        echo "$USER"
+    else
+        # Non-interactive / daemon context: derive from process credentials.
+        local effective_user
+        effective_user=$(id -un 2>/dev/null) || effective_user="root"
+        echo "$effective_user"
+    fi
 }
 
 # --- File Operations ---
@@ -367,6 +397,39 @@ download_file() {
     fi
 }
 
+# --- Email Helpers ---
+
+# BUG-C1 FIX: _rate_limit_check_and_stamp  (extracted helper)
+#
+# Previously both _send_email_via_postfix() and _send_email_via_mailutils()
+# wrote the rate-limit timestamp BEFORE attempting to create the temp file
+# for the email body.  If mktemp failed, the stamp was already written and
+# the next hour of notifications was silently suppressed.
+#
+# This helper encapsulates the rate-limit logic so it can be called AFTER
+# the temp file is successfully created.  It returns 0 when the message may
+# be sent, 1 when the rate limit is active (caller should return 0 = "OK,
+# but silently dropped").
+_rate_limit_check() {
+    local subject="$1"
+    local rate_limit_dir="$2"
+    local last_email_file="$rate_limit_dir/.vw_last_email_$(printf '%s' "$subject" | md5sum | cut -d' ' -f1)"
+
+    if [[ "$subject" != *"CRITICAL"* ]] && [[ -f "$last_email_file" ]]; then
+        local last_time current_time
+        last_time=$(cat "$last_email_file" 2>/dev/null || echo 0)
+        current_time=$(date +%s)
+        if (( current_time - last_time < 3600 )); then
+            log_debug "Email rate limited for non-critical notification: $subject"
+            return 1
+        fi
+    fi
+
+    # Print the stamp-file path so the caller can write it after a successful send.
+    echo "$last_email_file"
+    return 0
+}
+
 # ENHANCED: Send notification email via postfix container
 send_notification_email() {
     local subject="$1"
@@ -418,19 +481,23 @@ _send_email_via_postfix() {
     local rate_limit_dir="${PROJECT_ROOT:-/var/lib/vaultwarden}/.rate-limit"
     mkdir -p "$rate_limit_dir" 2>/dev/null || true
     chmod 700 "$rate_limit_dir" 2>/dev/null || true
-    local last_email_file="$rate_limit_dir/.vw_last_email_$(echo "$subject" | md5sum | cut -d' ' -f1)"
 
-    if [[ "$subject" != *"CRITICAL"* ]] && [[ -f "$last_email_file" ]]; then
-        local last_time current_time
-        last_time=$(cat "$last_email_file")
-        current_time=$(date +%s)
-        if (( current_time - last_time < 3600 )); then
-            log_debug "Email rate limited for non-critical notification: $subject"
-            return 0
-        fi
+    # BUG-C1 FIX: create temp file FIRST, then check rate limit.
+    # Previously the stamp was written before mktemp; a mktemp failure left
+    # the rate-limit counter bumped and silently dropped the next hour of mail.
+    local body_tmp
+    if ! body_tmp=$(mktemp); then
+        log_error "Failed to create temp file for email body"
+        return 1
     fi
+    chmod 600 "$body_tmp" 2>/dev/null || true
 
-    echo "$(date +%s)" > "$last_email_file"
+    # Check rate limit — if active, clean up temp file and return "sent" (silent drop).
+    local stamp_file
+    if ! stamp_file=$(_rate_limit_check "$subject" "$rate_limit_dir"); then
+        rm -f "$body_tmp" 2>/dev/null || true
+        return 0
+    fi
 
     local full_subject="[VaultWarden] $subject"
     local full_body="$body
@@ -449,7 +516,7 @@ Email Backend: postfix container (bokysan/docker-postfix)"
     log_debug "Postfix SMTP target for fail2ban: ${smtp_host}:${smtp_port}"
 
     local email_script
-    email_script=$(cat <<'EOF'
+    email_script=$(cat <<'PYEOF'
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -486,12 +553,9 @@ def send_email():
         return False
 
 sys.exit(0 if send_email() else 1)
-EOF
+PYEOF
 )
 
-    local body_tmp
-    body_tmp=$(mktemp)
-    chmod 600 "$body_tmp" 2>/dev/null || true
     printf '%s' "$full_body" > "$body_tmp"
     if docker compose exec -T \
         -e EMAIL_FROM="${SMTP_FROM:-vaultwarden@${DOMAIN_NAME:-localhost}}" \
@@ -501,6 +565,8 @@ EOF
         -e SMTP_PORT="$smtp_port" \
         fail2ban sh -c "cat >/tmp/.vw_email_body && python3 -c '$email_script'; rc=$?; rm -f /tmp/.vw_email_body; exit $rc" < "$body_tmp"; then
         rm -f "$body_tmp" 2>/dev/null || true
+        # Write rate-limit stamp only on successful send.
+        date +%s > "$stamp_file" 2>/dev/null || true
         log_success "Notification email sent to $admin_email (via postfix)"
         return 0
     else
@@ -518,19 +584,14 @@ _send_email_via_mailutils() {
     local rate_limit_dir="${PROJECT_ROOT:-/var/lib/vaultwarden}/.rate-limit"
     mkdir -p "$rate_limit_dir" 2>/dev/null || true
     chmod 700 "$rate_limit_dir" 2>/dev/null || true
-    local last_email_file="$rate_limit_dir/.vw_last_email_$(echo "$subject" | md5sum | cut -d' ' -f1)"
 
-    if [[ "$subject" != *"CRITICAL"* ]] && [[ -f "$last_email_file" ]]; then
-        local last_time current_time
-        last_time=$(cat "$last_email_file")
-        current_time=$(date +%s)
-        if (( current_time - last_time < 3600 )); then
-            log_debug "Email rate limited for non-critical notification: $subject"
-            return 0
-        fi
+    # BUG-C1 FIX: same ordering fix as _send_email_via_postfix.
+    # Check rate limit before doing any work; no temp file needed here but
+    # the stamp must only be written after a successful send.
+    local stamp_file
+    if ! stamp_file=$(_rate_limit_check "$subject" "$rate_limit_dir"); then
+        return 0
     fi
-
-    echo "$(date +%s)" > "$last_email_file"
 
     local full_subject="[VaultWarden] $subject"
     local full_body="$body
@@ -542,6 +603,8 @@ Project: VaultWarden-OCI
 Email Backend: host mailutils (legacy)"
 
     if echo "$full_body" | mail -s "$full_subject" "$admin_email"; then
+        # Write rate-limit stamp only on successful send.
+        date +%s > "$stamp_file" 2>/dev/null || true
         log_success "Notification email sent to $admin_email (via mailutils)"
         return 0
     else
@@ -626,7 +689,8 @@ export -f log_info log_success log_warn log_error log_debug log_header set_log_p
 export -f load_env_file get_config_value require_config
 export -f has_command require_commands retry_with_backoff is_root require_root get_real_user
 export -f ensure_dir secure_file test_connectivity test_http download_file
-export -f send_notification_email _get_postfix_smtp_target_for_fail2ban _send_email_via_postfix _send_email_via_mailutils
+export -f _rate_limit_check send_notification_email _get_postfix_smtp_target_for_fail2ban
+export -f _send_email_via_postfix _send_email_via_mailutils
 export -f validate_email validate_domain validate_port validate_ip validate_url
 export -f setup_error_trap setup_cleanup_trap safe_execute
 export -f init_common_lib
