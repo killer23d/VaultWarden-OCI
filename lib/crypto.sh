@@ -11,6 +11,39 @@ readonly VAULTWARDEN_CRYPTO_LIB_LOADED=1
 # --- Configuration ---
 DEFAULT_AGE_KEY_FILE="secrets/keys/age-key.txt"
 
+# ---------------------------------------------------------------------------
+# _derive_age_public_key  KEY_FILE
+#
+# [MEDIUM FIX] Canonical helper to extract the Age public key from a private
+# key file WITHOUT calling `age-keygen -y`, which is absent on some Ubuntu
+# 22.04 age builds.  age-keygen always writes the public key as a comment:
+#   # public key: age1...
+# We grep for that comment and strip the prefix.  This works with every
+# version of age that writes the standard comment format.
+#
+# This function is now the single source of truth for public-key derivation
+# across the entire codebase (crypto.sh, secrets.sh, simple_key_resilience.sh).
+# ---------------------------------------------------------------------------
+_derive_age_public_key() {
+    local key_file="$1"
+
+    if [[ ! -f "$key_file" ]]; then
+        log_error "Age key file not found: $key_file"
+        return 1
+    fi
+
+    local pub_key
+    pub_key=$(grep -m1 '^# public key:' "$key_file" | sed 's/^# public key: //')
+
+    if [[ -z "$pub_key" ]]; then
+        log_error "Cannot derive Age public key from: $key_file (missing '# public key:' comment)"
+        return 1
+    fi
+
+    printf '%s\n' "$pub_key"
+    return 0
+}
+
 # --- SOPS Operations ---
 
 # Check if a file is SOPS encrypted - STANDARDIZED: Returns exit code
@@ -55,6 +88,8 @@ decrypt_sops_file() {
 }
 
 # Encrypt file with SOPS - STANDARDIZED: Returns exit code
+# [MEDIUM FIX] Replaced `age-keygen -y` with _derive_age_public_key() for
+# Ubuntu 22.04 compatibility and codebase consistency.
 encrypt_sops_file() {
     local file="$1"
     local age_key_file="${2:-$DEFAULT_AGE_KEY_FILE}"
@@ -76,7 +111,7 @@ encrypt_sops_file() {
 
     # Extract public key from age key file
     local age_public_key
-    if ! age_public_key=$(age-keygen -y "$age_key_file" 2>/dev/null); then
+    if ! age_public_key=$(_derive_age_public_key "$age_key_file"); then
         log_error "Failed to extract public key from: $age_key_file"
         return 1
     fi
@@ -139,30 +174,14 @@ generate_age_key() {
 }
 
 # Get Age public key from private key file - STANDARDIZED: Returns exit code
+# [MEDIUM FIX] Delegates to _derive_age_public_key() — no longer calls age-keygen -y.
 get_age_public_key() {
     local age_key_file="$1"
-
-    if [[ ! -f "$age_key_file" ]]; then
-        log_error "Age key file not found: $age_key_file"
-        return 1
-    fi
-
-    if ! has_command age-keygen; then
-        log_error "age-keygen command not available"
-        return 1
-    fi
-
-    local public_key
-    if ! public_key=$(age-keygen -y "$age_key_file" 2>/dev/null); then
-        log_error "Failed to extract public key from: $age_key_file"
-        return 1
-    fi
-
-    echo "$public_key"
-    return 0
+    _derive_age_public_key "$age_key_file"
 }
 
 # NEW: Check Age key validity - STANDARDIZED: Returns exit code
+# [MEDIUM FIX] Replaced `age-keygen -y` with _derive_age_public_key().
 check_age_key() {
     local age_key_file="${1:-$DEFAULT_AGE_KEY_FILE}"
 
@@ -179,14 +198,9 @@ check_age_key() {
         return 1
     fi
 
-    # Check if we can extract public key (validates key format)
-    if ! has_command age-keygen; then
-        log_warn "age-keygen not available, skipping key format validation"
-        return 0
-    fi
-
-    if ! age-keygen -y "$age_key_file" >/dev/null 2>&1; then
-        log_error "Age key file appears to be corrupted or invalid format"
+    # Validate by attempting to derive the public key from the comment header.
+    if ! _derive_age_public_key "$age_key_file" >/dev/null; then
+        log_error "Age key file appears to be corrupted or missing public key comment"
         return 1
     fi
 
@@ -195,6 +209,7 @@ check_age_key() {
 }
 
 # Encrypt data with Age (reads from stdin, writes to stdout) - STANDARDIZED: Returns exit code
+# [MEDIUM FIX] get_age_public_key() now delegates to _derive_age_public_key() — chain fixed.
 encrypt_data() {
     local age_key_file="${1:-$DEFAULT_AGE_KEY_FILE}"
 
@@ -278,6 +293,9 @@ generate_secure_string() {
 }
 
 # Generate secure random password - STANDARDIZED: Returns exit code
+# NOTE: charset includes shell-special characters ($, !, etc.).
+# Callers MUST use `printf '%s' "$password"` (not `echo`) when passing the
+# result to external commands to prevent shell word-splitting or escape issues.
 generate_secure_password() {
     local length="${1:-24}"
 
@@ -353,10 +371,15 @@ print(ph.hash(password))
     return 0
 }
 
-# Generate bcrypt hash (for Caddy basic auth) - MINIMAL & CLEAN
+# Generate bcrypt hash (for Caddy basic auth)
+#
+# [MEDIUM FIX] Default cost documented: 12 (OWASP recommended minimum).
+# setup-secrets.sh auto-generate path calls this with no argument so the
+# produced hashes are $2y$12$ — the setup banner previously claimed $2y$14$
+# which was misleading. Use generate_bcrypt_hash 14 for cost-14 hashes.
 generate_bcrypt_hash() {
     local password="$1"
-    local rounds="${2:-12}"
+    local rounds="${2:-12}"  # OWASP minimum; increase to 14 for higher security at cost of CPU
 
     [[ -z "$password" ]] && return 1
 
@@ -509,6 +532,7 @@ validate_crypto_environment() {
 }
 
 # Export functions for use by scripts
+export -f _derive_age_public_key
 export -f is_sops_encrypted decrypt_sops_file encrypt_sops_file
 export -f generate_age_key get_age_public_key check_age_key encrypt_data decrypt_data
 export -f generate_secure_string generate_secure_password check_argon2_support generate_argon2_hash generate_bcrypt_hash
