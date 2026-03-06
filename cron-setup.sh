@@ -283,7 +283,14 @@ check_split_brain() {
         opt_mtime=$(stat -c%Y "$opt_script"  2>/dev/null || echo "0")
 
         if (( repo_mtime > opt_mtime )); then
-            stale_scripts+=("$script")
+            # Reduce false positives from timestamp-only checks (e.g. git pull
+            # or checkout touching mtimes without content changes).
+            local repo_sum opt_sum
+            repo_sum=$(sha256sum "$repo_script" 2>/dev/null | awk '{print $1}')
+            opt_sum=$(sha256sum "$opt_script" 2>/dev/null | awk '{print $1}')
+            if [[ -n "$repo_sum" && -n "$opt_sum" && "$repo_sum" != "$opt_sum" ]]; then
+                stale_scripts+=("$script")
+            fi
         fi
     done
 

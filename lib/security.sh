@@ -260,10 +260,10 @@ validate_password_strength() {
     local score=0
     local requirements=()
 
-    if [[ "$has_lower" == "true" ]]; then ((score++)); else requirements+=("lowercase letter"); fi
-    if [[ "$has_upper" == "true" ]]; then ((score++)); else requirements+=("uppercase letter"); fi
-    if [[ "$has_digit" == "true" ]]; then ((score++)); else requirements+=("digit"); fi
-    if [[ "$has_special" == "true" ]]; then ((score++)); else requirements+=("special character"); fi
+    if [[ "$has_lower" == "true" ]]; then score=$((score + 1)); else requirements+=("lowercase letter"); fi
+    if [[ "$has_upper" == "true" ]]; then score=$((score + 1)); else requirements+=("uppercase letter"); fi
+    if [[ "$has_digit" == "true" ]]; then score=$((score + 1)); else requirements+=("digit"); fi
+    if [[ "$has_special" == "true" ]]; then score=$((score + 1)); else requirements+=("special character"); fi
 
     if [[ $score -lt 3 ]]; then
         log_error "Password is too weak. Missing: ${requirements[*]}"
@@ -335,7 +335,7 @@ generate_secure_random() {
         [[ $accepted -ge $length ]] && break
         [[ $rand_byte -ge $highest_multiple ]] && continue
         random_string+="${chars:$(( rand_byte % char_count )):1}"
-        (( accepted++ ))
+        accepted=$((accepted + 1))
     done
 
     # Top-up: handles the extremely unlikely case where the bulk read fell
@@ -351,7 +351,7 @@ generate_secure_random() {
         rand_byte=$(od -An -N1 -tu1 /dev/urandom | tr -d ' \n')
         [[ $rand_byte -ge $highest_multiple ]] && continue
         random_string+="${chars:$(( rand_byte % char_count )):1}"
-        (( accepted++ ))
+        accepted=$((accepted + 1))
     done
 
     echo "$random_string"

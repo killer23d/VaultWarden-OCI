@@ -119,9 +119,8 @@ check_for_updates() {
 
         if [[ "$DRY_RUN" == "true" ]]; then
             # Needs experimental features enabled; fallback to pull simulation
-            export DOCKER_CLI_EXPERIMENTAL=enabled
             local remote_digest
-            remote_digest=$(docker manifest inspect "$image" 2>/dev/null \
+            remote_digest=$(DOCKER_CLI_EXPERIMENTAL=enabled docker manifest inspect "$image" 2>/dev/null \
                 | grep -A 1 "config" | grep "digest" | awk -F'"' '{print $4}' \
                 || echo "unknown")
 

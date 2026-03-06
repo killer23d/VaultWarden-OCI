@@ -466,9 +466,15 @@ write_secrets() {
 
     log_info "Writing secrets to encrypted YAML file..."
 
-    local temp_file="$PROJECT_ROOT/secrets/.temp_secrets.yaml"
-    touch "$temp_file"
-    chmod 600 "$temp_file"
+    local old_umask temp_file
+    old_umask=$(umask)
+    umask 077
+    temp_file=$(mktemp -p "$PROJECT_ROOT/secrets" .temp_secrets.XXXXXXXXXX.yaml) || {
+        umask "$old_umask"
+        log_error "Failed to create temporary secrets file"
+        return 1
+    }
+    umask "$old_umask"
     register_cleanup "rm -f '$temp_file'"
 
     {

@@ -477,9 +477,12 @@ verbose_log() {
 test_postfix_container() {
     log_info "Testing postfix container status..."
 
-    if docker compose ps postfix >/dev/null 2>&1; then
+    local postfix_running
+    postfix_running=$(docker inspect vaultwarden_postfix --format '{{.State.Running}}' 2>/dev/null || echo "false")
+
+    if [[ "$postfix_running" == "true" ]]; then
         log_success "✅ postfix container is running"
-        verbose_log "Container status: $(docker compose ps postfix --format 'table {{.Name}}\t{{.Status}}\t{{.Ports}}')"
+        verbose_log "Container status: $(docker compose ps postfix --format 'table {{.Name}}	{{.Status}}	{{.Ports}}' 2>/dev/null || true)"
     else
         log_error "❌ postfix container is not running"
         if [[ "$DRY_RUN" == "true" ]]; then
@@ -816,15 +819,20 @@ update_dns_record() {
     cf_token=$(docker compose exec -T caddy cat /run/secrets/caddy_cloudflare_dns_token 2>/dev/null) \
         || { log_error "Cannot read Cloudflare API token from Docker secret"; return 1; }
 
+    local curl_cfg
+    curl_cfg=$(mktemp) || { log_error "Cannot create temporary curl config"; return 1; }
+    chmod 600 "$curl_cfg" 2>/dev/null || true
+    printf 'header = "Authorization: Bearer %s"\nheader = "Content-Type: application/json"\n' "$cf_token" > "$curl_cfg"
+
     local record_id
     record_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records?type=A&name=$domain" \
-                -H "Authorization: Bearer $cf_token" -H "Content-Type: application/json" | \
+                --config "$curl_cfg" | \
                 jq -r '.result[0].id // empty' 2>/dev/null)
-    [[ -z "$record_id" ]] && { log_error "Cannot find DNS record ID for $domain"; return 1; }
+    [[ -z "$record_id" ]] && { rm -f "$curl_cfg" 2>/dev/null || true; log_error "Cannot find DNS record ID for $domain"; return 1; }
 
     local response
     response=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records/$record_id" \
-               -H "Authorization: Bearer $cf_token" -H "Content-Type: application/json" \
+               --config "$curl_cfg" \
                --data "{\"type\":\"A\",\"name\":\"$domain\",\"content\":\"$current_ip\",\"ttl\":300}")
 
     if echo "$response" | jq -e '.success' >/dev/null 2>&1; then
@@ -842,8 +850,10 @@ DNS record updated automatically." \
             fi
         fi
     else
+        rm -f "$curl_cfg" 2>/dev/null || true
         log_error "DNS update failed: $response"; return 1
     fi
+    rm -f "$curl_cfg" 2>/dev/null || true
     return 0
 }
 
@@ -935,6 +945,19 @@ main() {
     local state_dir
     state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
     mkdir -p "$state_dir/.locks" 2>/dev/null || true
+
+    # Global operations mutex shared with update.sh
+    local shared_ops_lock="${PROJECT_ROOT}/.locks/operations.lock"
+    ensure_dir "${PROJECT_ROOT}/.locks" 700 "$(get_real_user)" || {
+        log_error "Failed to initialize operations lock directory"
+        exit 1
+    }
+    exec 9>"$shared_ops_lock"
+    if ! flock -n 9; then
+        log_error "Another update/restore/maintenance operation is already running."
+        log_error "Lock file: $shared_ops_lock"
+        exit 1
+    fi
 
     CLEANUP_ACTIONS=()
     perform_cleanup() {

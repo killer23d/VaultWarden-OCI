@@ -31,7 +31,7 @@ DRY_RUN=false
 KEEP_DAYS=14
 QUIET=false
 FORCE=false
-EMAIL_NOTIFY=false   # set by --email; send_notification() called on completion
+    EMAIL_NOTIFY=false   # set by --email; send_notification_email() called on completion
 LIST_ONLY=false      # set by --list; print existing backups and exit (no root needed)
 RCLONE_SYNC=false    # set by --rclone; sync encrypted backup to rclone remote after creation
 FULL_VERIFY=false    # set by --full-verification; decrypt + integrity check before sync
@@ -535,12 +535,12 @@ perform_full_backup() {
         required_kb=$(( (compressed_size * 9 + snap_size) / 1024 + 1048576 ))
 
         if (( available_kb < required_kb )); then
-            b_log_warn "Insufficient space for snapshot injection in $(dirname "$temp_tar")"
-            b_log_warn "  Need: ~$((required_kb / 1024)) MB"
-            b_log_warn "  Free: $((available_kb / 1024)) MB"
-            b_log_warn "Skipping snapshot injection — archive will include live DB files"
-            b_log_warn "To use snapshot injection: increase TMPDIR volume or free space"
-            db_snapshot_ok=false
+            log_error "Insufficient space for safe DB snapshot injection in $(dirname "$temp_tar")"
+            log_error "  Need: ~$((required_kb / 1024)) MB"
+            log_error "  Free: $((available_kb / 1024)) MB"
+            log_error "Aborting full/emergency backup to avoid fallback to a live DB copy."
+            log_error "Free space or move TMPDIR to a larger filesystem, then retry."
+            return 1
         fi
     fi
 
@@ -736,7 +736,7 @@ main() {
                 "$( [[ "$FULL_VERIFY" == "true" ]] && echo "full" || echo "checksum-only" )" \
                 "$rclone_status" \
                 "$(hostname -f 2>/dev/null || hostname)")"
-            send_notification "$subject" "$body" 2>/dev/null || \
+            send_notification_email "$subject" "$body" 2>/dev/null || \
                 b_log_warn "Email notification failed (backup still succeeded)"
         fi
 
@@ -752,7 +752,7 @@ main() {
             body="$(printf 'Backup type:  %s\nTimestamp:    %s\nHost:         %s\n\nCheck logs for details.\n' \
                 "$actual_type" "$timestamp" \
                 "$(hostname -f 2>/dev/null || hostname)")"
-            send_notification "$subject" "$body" 2>/dev/null || true
+            send_notification_email "$subject" "$body" 2>/dev/null || true
         fi
         log_error "Backup failed"
         exit 1

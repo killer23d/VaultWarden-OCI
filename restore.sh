@@ -27,6 +27,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR"
 cd "$PROJECT_ROOT"
 
+# Shared operations lock (update.sh/maintenance.sh/restore.sh)
+VW_LOCK_DIR="${PROJECT_ROOT}/.locks"
+VW_OPERATIONS_LOCK="${VW_LOCK_DIR}/operations.lock"
+
 source "lib/common.sh"
 init_common_lib "$0"
 source "lib/docker.sh"       2>/dev/null || true
@@ -44,6 +48,7 @@ DRY_RUN=false
 FORCE=false
 NO_PRE_BACKUP=false
 SKIP_VERIFICATION=false
+RESTORE_ENV=true
 
 show_help() {
     cat << 'EOF'
@@ -59,6 +64,7 @@ OPTIONS:
     --latest                Use newest backup (optionally filtered by --type)
     --no-backup             Skip pre-restore emergency snapshot
     --skip-verification     Skip integrity check (not recommended)
+    --skip-env              Do not restore archived .env over current .env
     --dry-run               Show what would happen without making changes
     --force                 Skip confirmation prompts
     --help                  Show this help
@@ -78,6 +84,7 @@ while [[ $# -gt 0 ]]; do
         --latest)             USE_LATEST=true;        shift ;;
         --no-backup)          NO_PRE_BACKUP=true;     shift ;;
         --skip-verification)  SKIP_VERIFICATION=true; shift ;;
+        --skip-env)           RESTORE_ENV=false;      shift ;;
         --dry-run)            DRY_RUN=true;           shift ;;
         --force)              FORCE=true;             shift ;;
         --help)               show_help; exit 0 ;;
@@ -231,6 +238,12 @@ purge_wal_shm() {
 create_pre_restore_snapshot() {
     [[ "$NO_PRE_BACKUP" == "true" ]] && { log_info "Skipping pre-restore snapshot (--no-backup)"; return 0; }
     [[ "$DRY_RUN"       == "true" ]] && { log_info "[DRY RUN] Would run: ./backup.sh --type emergency"; return 0; }
+    local state_dir
+    state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
+    local db_path="$state_dir/data/db.sqlite3"
+    if [[ -f "$db_path" ]] && command -v sqlite3 >/dev/null 2>&1; then
+        sqlite3 "$db_path" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1 || true
+    fi
     if [[ -x "./backup.sh" ]]; then
         log_info "Creating pre-restore emergency snapshot..."
         ./backup.sh --type emergency --quiet || log_warn "Pre-restore snapshot failed (continuing)"
@@ -403,7 +416,7 @@ restore_full() {
     local staging="$tmpdir/stage"
     mkdir -p "$staging"
     log_info "Extracting archive to staging directory..."
-    tar -xzf "$dec_tar" -C "$staging"
+    tar -xzf "$dec_tar" -C "$staging" --no-same-owner --no-same-permissions --delay-directory-restore
 
     # Validate expected paths exist in staging
     local rel_state="${state_dir#/}"
@@ -446,25 +459,36 @@ restore_full() {
 
         # Explicit config files (safe to replace while scripts are running)
         local config_files=(
-            .env
             docker-compose.yml
             docker-compose.override.yml
             .env.example
         )
+        [[ "$RESTORE_ENV" == "true" ]] && config_files=(.env "${config_files[@]}")
         for f in "${config_files[@]}"; do
             local src="$staging/$rel_project/$f"
             if [[ -f "$src" ]]; then
+                if [[ "$f" == ".env" ]] && [[ -f "$PROJECT_ROOT/.env" ]]; then
+                    cp -f "$PROJECT_ROOT/.env" "$PROJECT_ROOT/.env.pre-restore-$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+                fi
                 cp -f "$src" "$PROJECT_ROOT/$f"
                 log_info "  Restored: $f"
             fi
         done
 
         # Config directories (caddy, fail2ban, nginx — excludes secrets/)
+        # Preserve a timestamped backup of any existing directory before applying
+        # restored content, so local customizations are recoverable.
         local config_dirs=(caddy fail2ban nginx)
         for d in "${config_dirs[@]}"; do
             local src_dir="$staging/$rel_project/$d"
+            local dst_dir="$PROJECT_ROOT/$d"
             if [[ -d "$src_dir" ]]; then
-                cp -rf "$src_dir" "$PROJECT_ROOT/"
+                if [[ -d "$dst_dir" ]]; then
+                    cp -a "$dst_dir" "${dst_dir}.pre-restore-${ts}"
+                    log_info "  Backed up existing $d/ to ${d}.pre-restore-${ts}/"
+                fi
+                mkdir -p "$dst_dir"
+                cp -a "$src_dir/." "$dst_dir/"
                 log_info "  Restored: $d/"
             fi
         done
@@ -496,6 +520,19 @@ main() {
     fi
 
     require_root "$@"
+
+    # Shared operations mutex to prevent overlap with update/maintenance jobs.
+    ensure_dir "$VW_LOCK_DIR" 700 "$(get_real_user)" || {
+        log_error "Failed to initialize operations lock directory: $VW_LOCK_DIR"
+        exit 1
+    }
+
+    exec 9>"$VW_OPERATIONS_LOCK"
+    if ! flock -n 9; then
+        log_error "Another update/restore/maintenance operation is already running."
+        log_error "Lock file: $VW_OPERATIONS_LOCK"
+        exit 1
+    fi
 
     # FIX-R03: Prevent concurrent restore runs.
     # A race between two simultaneous restores — or a restore racing with a
@@ -602,7 +639,9 @@ main() {
     local old_umask
     old_umask=$(umask)
     umask 077
-    TMPDIR_RESTORE="$(mktemp -d -t vw_restore.XXXXXXXXXX)" || {
+    local tmp_parent
+    tmp_parent="$(dirname "$STATE_DIR")"
+    TMPDIR_RESTORE="$(mktemp -d -p "$tmp_parent" vw_restore.XXXXXXXXXX)" || {
         log_error "Failed to create secure temporary directory"
         exit 1
     }
@@ -612,7 +651,7 @@ main() {
 
     # Stop services
     if [[ "$DRY_RUN" != "true" ]]; then
-        if docker compose ps 2>/dev/null | grep -q "Up"; then
+        if docker compose ps --status running --services 2>/dev/null | grep -q .; then
             log_info "Stopping services..."
             docker compose stop
         fi
@@ -670,7 +709,9 @@ main() {
         local max_wait=60 waited=0
         while (( waited < max_wait )); do
             sleep 5; (( waited += 5 ))
-            docker compose ps 2>/dev/null | grep -qE "healthy|running" && break
+            if docker inspect vaultwarden_app --format '{{.State.Status}} {{.State.Health.Status}}' 2>/dev/null | grep -qE 'running (healthy|$)'; then
+                break
+            fi
         done
 
         if [[ -x "./health.sh" ]]; then

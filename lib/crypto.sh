@@ -76,7 +76,7 @@ encrypt_sops_file() {
 
     # Extract public key from age key file
     local age_public_key
-    if ! age_public_key=$(age-keygen -y "$age_key_file" 2>/dev/null); then
+    if ! age_public_key=$(_age_pubkey_from_private "$age_key_file"); then
         log_error "Failed to extract public key from: $age_key_file"
         return 1
     fi
@@ -91,6 +91,14 @@ encrypt_sops_file() {
 }
 
 # --- Age Operations ---
+
+# Compatibility helper: derive age public key from a private key file across
+# age-keygen variants (some versions accept a filename with -y; others only stdin).
+_age_pubkey_from_private() {
+    local age_key_file="$1"
+    age-keygen -y "$age_key_file" 2>/dev/null || age-keygen -y < "$age_key_file" 2>/dev/null
+}
+
 
 # Generate Age key pair - STANDARDIZED: Returns exit code
 generate_age_key() {
@@ -153,7 +161,7 @@ get_age_public_key() {
     fi
 
     local public_key
-    if ! public_key=$(age-keygen -y "$age_key_file" 2>/dev/null); then
+    if ! public_key=$(_age_pubkey_from_private "$age_key_file"); then
         log_error "Failed to extract public key from: $age_key_file"
         return 1
     fi
@@ -185,7 +193,7 @@ check_age_key() {
         return 0
     fi
 
-    if ! age-keygen -y "$age_key_file" >/dev/null 2>&1; then
+    if ! _age_pubkey_from_private "$age_key_file" >/dev/null 2>&1; then
         log_error "Age key file appears to be corrupted or invalid format"
         return 1
     fi

@@ -130,6 +130,7 @@ restore: ## Restore from backup (interactive)
 
 restore-db: ## Restore latest database backup
 	@echo "$(BLUE)Restoring latest database backup...$(NC)"
+	@echo "$(RED)WARNING: Forced restore with no confirmation.$(NC)"
 	@./restore.sh --type db --force
 
 ## Maintenance Operations

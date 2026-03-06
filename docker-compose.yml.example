@@ -109,8 +109,8 @@ services:
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/vaultwarden:/logs
 
     depends_on:
-      caddy:
-        condition: service_started
+      init-permissions:
+        condition: service_completed_successfully
 
     networks:
       - vaultwarden
@@ -185,6 +185,10 @@ services:
       - "443:443"
       - "127.0.0.1:8080:8080"
 
+    depends_on:
+      init-permissions:
+        condition: service_completed_successfully
+
     networks:
       - vaultwarden
 
@@ -193,7 +197,7 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 60s
 
     security_opt:
       - no-new-privileges:true
@@ -244,6 +248,10 @@ services:
     ports:
       - "127.0.0.1:587:587"
 
+    depends_on:
+      init-permissions:
+        condition: service_completed_successfully
+
     networks:
       - vaultwarden
 
@@ -279,7 +287,7 @@ services:
         limits:
           memory: 256M
           cpus: '0.1'
-          pids: 50
+          pids: 100
         reservations:
           memory: 64M
           cpus: '0.02'
@@ -323,9 +331,14 @@ services:
       - NET_RAW
 
     depends_on:
-      - vaultwarden
-      - caddy
-      - postfix
+      init-permissions:
+        condition: service_completed_successfully
+      vaultwarden:
+        condition: service_started
+      caddy:
+        condition: service_started
+      postfix:
+        condition: service_started
 
     healthcheck:
       test: ["CMD", "fail2ban-client", "status"]

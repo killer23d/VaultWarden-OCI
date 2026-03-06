@@ -14,7 +14,7 @@
 # ================================
 # Internal Health Check Endpoint
 # ================================
-:8080 {
+127.0.0.1:8080 {
         handle /alive {
                 reverse_proxy vaultwarden:80 {
                         header_up Host {host}
@@ -116,7 +116,7 @@
         handle @admin {
                 # Stricter CSP for admin panel
                 header {
-                        Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: https:; frame-src 'self'; object-src 'none'; base-uri 'self';"
+                        Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: https:; frame-src 'self'; object-src 'none'; base-uri 'self';"
                         X-Admin-Access "true"
                 }
 
@@ -192,7 +192,7 @@ www.{$DOMAIN_NAME} {
 # ================================
 # Catch-all :80 and :443
 # ================================
-:80, :443 {
+:80 {
         log {
                 output file /var/log/caddy/access.log
                 format json

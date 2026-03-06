@@ -75,19 +75,28 @@ validate_script_security() {
         return 1
     fi
 
-    # Use centralized security validation
-    if ! validate_file_permissions "$script_path" "700" "root" "root"; then
-        log_error "SECURITY: Script failed validation - privilege escalation risk"
-        log_error "Expected: root:root ownership with 700 permissions"
-        log_error "Current script: $script_path"
+    # Use centralized security validation.
+    # In a git checkout we allow user-owned executable scripts; strict root:root
+    # validation is only enforced for deployed /opt copies.
+    if [[ "$script_path" == /opt/vaultwarden-scripts/* ]]; then
+        if ! validate_file_permissions "$script_path" "700" "root" "root"; then
+            log_error "SECURITY: Script failed validation - privilege escalation risk"
+            log_error "Expected: root:root ownership with 700 permissions"
+            log_error "Current script: $script_path"
 
-        # Show current permissions for debugging
-        if ls -la "$script_path"; then
-            log_info "^ Current permissions shown above"
+            # Show current permissions for debugging
+            if ls -la "$script_path"; then
+                log_info "^ Current permissions shown above"
+            fi
+
+            log_error "Fix with: sudo chown root:root '$script_path' && sudo chmod 700 '$script_path'"
+            return 1
         fi
-
-        log_error "Fix with: sudo chown root:root '$script_path' && sudo chmod 700 '$script_path'"
-        return 1
+    else
+        if [[ ! -x "$script_path" ]]; then
+            log_error "Script is not executable: $script_path"
+            return 1
+        fi
     fi
 
     # Validate script is in expected location
@@ -219,6 +228,8 @@ create_breakglass_user() {
 
     # Create emergency access instructions with secure permissions
     local instructions_file="/home/$BREAKGLASS_USER/EMERGENCY_ACCESS_INSTRUCTIONS.txt"
+    local ssh_port
+    ssh_port=$(get_config_value "SSH_PORT" "22")
     local instructions_content
     instructions_content=$(cat << EOF
 VaultWarden Emergency Access Instructions
@@ -242,7 +253,7 @@ AVAILABLE OPERATIONS:
 
 COMMON EMERGENCY COMMANDS:
 # Fix SSH lockout
-sudo ufw allow ${SSH_PORT:-22}/tcp
+sudo ufw allow ${ssh_port}/tcp
 sudo systemctl restart sshd
 
 # Check system status
@@ -290,8 +301,11 @@ EOF
     echo -e "These credentials allow access via the OCI Serial Console if SSH fails."
     echo -e "Write these down physically and store them securely.\n"
 
+    local cred_file="/root/.vaultwarden-breakglass-${BREAKGLASS_USER}.txt"
+    printf 'Username: %s\nPassword: %s\nGenerated: %s\n' "$BREAKGLASS_USER" "$password" "$(date -Is)" > "$cred_file"
+    chmod 600 "$cred_file" || true
     echo -e "Username:  ${COLOR_GREEN}${BREAKGLASS_USER}${COLOR_RESET}"
-    echo -e "Password:  ${COLOR_GREEN}${password}${COLOR_RESET}"
+    echo -e "Password:  ${COLOR_YELLOW}[stored at ${cred_file}]${COLOR_RESET}"
     echo -e "Expiry:    ${COLOR_CYAN}Never (Account is locked to serial console)${COLOR_RESET}"
 
     echo -e "\nTo test this:"
@@ -342,10 +356,6 @@ remove_breakglass_user() {
         log_warn "User removal may have had issues (user might not have had home directory)"
     fi
 
-    # Remove user from sudo group (best effort)
-    deluser "$BREAKGLASS_USER" sudo 2>/dev/null || true
-
-
     log_success "Break-glass admin removal completed"
     return 0
 }
@@ -380,15 +390,23 @@ reset_breakglass_password() {
     fi
 
     log_success "Break-glass admin password reset successfully"
+
+    local cred_file="/root/.vaultwarden-breakglass-${BREAKGLASS_USER}.txt"
+    printf 'Username: %s
+Password: %s
+Reset: %s
+' "$BREAKGLASS_USER" "$password" "$(date -Is)" > "$cred_file"
+    chmod 600 "$cred_file" || true
+
     echo ""
     echo "🔑 NEW EMERGENCY ACCESS CREDENTIALS"
     echo "=================================="
     echo "Username: $BREAKGLASS_USER"
-    echo "Password: $password"
+    echo "Password: [stored at $cred_file]"
     echo ""
     echo "⚠️  SECURITY WARNING:"
-    echo "• These credentials are displayed ONLY ONCE"
-    echo "• Store them securely (password manager, encrypted note)"
+    echo "• Credentials are stored only in a root-only file"
+    echo "• Move them to your secure password manager, then delete the file"
     echo "• Old credentials are now invalid"
 
     return 0

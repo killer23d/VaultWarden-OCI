@@ -161,8 +161,10 @@ attempt_container_recovery() {
     local container="$1"
     local service="$2"
 
-    # Check for maintenance lock file
-    if [[ -f "/tmp/.vw_maintenance.lock" ]]; then
+    # Check for maintenance/update lock files and skip intrusive recovery.
+    local project_state_dir
+    project_state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
+    if [[ -f "$project_state_dir/.locks/global-maintenance.lock" ]] || [[ -f "$PROJECT_ROOT/.locks/operations.lock" ]]; then
         log_warn "🔧 $service is stopped for planned maintenance. Skipping auto-recovery."
         return 0
     fi
@@ -317,8 +319,10 @@ check_service_accessibility() {
         fi
     fi
 
-    HEALTH_RESULTS["accessibility"]="healthy"
-    HEALTH_DETAILS["accessibility"]="Local service confirmed"
+    if [[ "${HEALTH_RESULTS["accessibility"]:-}" != "degraded" ]]; then
+        HEALTH_RESULTS["accessibility"]="healthy"
+        HEALTH_DETAILS["accessibility"]="Local service confirmed"
+    fi
     return 0
 }
 
@@ -806,7 +810,7 @@ generate_json_report() {
 }
 
 main() {
-    require_root "$@"
+    # Run as non-root when possible; individual checks should degrade gracefully.
 
     health_log_info "VaultWarden-OCI Health Monitor - Set-and-Forget Edition"
     [[ "$AUTO_RECOVER" == "true" ]] && health_log_info "🔧 Auto-recovery enabled"

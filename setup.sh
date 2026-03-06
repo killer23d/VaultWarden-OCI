@@ -219,14 +219,22 @@ check_disk_space() {
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would check disk space"; return 0; fi
 
     local min_free_kb=$((2 * 1024 * 1024))   # 2 GiB in KiB
-    local available_kb
-    available_kb=$(df -k "$PROJECT_ROOT" | awk 'NR==2 {print $4}')
+    local available_project_kb available_root_kb
+    available_project_kb=$(df -k "$PROJECT_ROOT" | awk 'NR==2 {print $4}')
+    available_root_kb=$(df -k / | awk 'NR==2 {print $4}')
 
-    if (( available_kb < min_free_kb )); then
-        log_error "Insufficient disk space. Required: 2 GiB, Available: $(( available_kb / 1024 )) MiB on $PROJECT_ROOT"
+    if (( available_project_kb < min_free_kb )); then
+        log_error "Insufficient disk space on project filesystem. Required: 2 GiB, Available: $(( available_project_kb / 1024 )) MiB"
         return 1
     fi
-    log_info "Disk space OK: $(( available_kb / 1024 )) MiB available"
+
+    # Swapfile is created at /swapfile; ensure root filesystem can hold it.
+    if (( available_root_kb < min_free_kb )); then
+        log_error "Insufficient disk space on root filesystem (/). Required: 2 GiB, Available: $(( available_root_kb / 1024 )) MiB"
+        return 1
+    fi
+
+    log_info "Disk space OK: project=$(( available_project_kb / 1024 )) MiB, root=$(( available_root_kb / 1024 )) MiB"
     return 0
 }
 
@@ -681,7 +689,7 @@ create_sops_config() {
 
     cat > "$sops_config" << EOF
 creation_rules:
-  - path_regex: .*\.yaml$
+  - path_regex: secrets/secrets\.yaml$
     age: $age_public_key
 EOF
     chown "$(get_real_user):$(id -g -n "$(get_real_user)")" "$sops_config" || return 1

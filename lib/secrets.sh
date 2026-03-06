@@ -187,10 +187,17 @@ validate_cloudflare_token() {
         firewall) endpoint="https://api.cloudflare.com/client/v4/zones/$zone_id/firewall/access_rules/rules?per_page=1" ;;
         *)        log_error "Invalid token type: $token_type"; return 1 ;;
     esac
-    if curl -sf --max-time 10 -H "Authorization: Bearer $token" "$endpoint" \
+    local curl_cfg
+    curl_cfg=$(mktemp) || return 1
+    chmod 600 "$curl_cfg" 2>/dev/null || true
+    printf 'header = "Authorization: Bearer %s"\n' "$token" > "$curl_cfg"
+
+    if curl -sf --max-time 10 --config "$curl_cfg" "$endpoint" \
         | jq -e '.success == true' >/dev/null 2>&1; then
+        rm -f "$curl_cfg" 2>/dev/null || true
         return 0
     else
+        rm -f "$curl_cfg" 2>/dev/null || true
         return 1
     fi
 }
@@ -516,7 +523,7 @@ generate_recovery_kit() {
     date_val=$(date)
 
     local pub_key
-    if ! pub_key=$(age-keygen -y "$age_key" 2>/dev/null); then
+    if ! pub_key=$(_derive_age_public_key "$age_key"); then
         log_error "Failed to derive Age public key"
         return 1
     fi

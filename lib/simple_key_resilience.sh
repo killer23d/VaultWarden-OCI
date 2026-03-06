@@ -5,6 +5,12 @@
 [[ -n "${VAULTWARDEN_KEY_RESILIENCE_LIB_LOADED:-}" ]] && return 0
 readonly VAULTWARDEN_KEY_RESILIENCE_LIB_LOADED=1
 
+# Compatibility helper for age-keygen variants.
+_derive_age_public_key() {
+    local age_key_file="$1"
+    age-keygen -y "$age_key_file" 2>/dev/null || age-keygen -y < "$age_key_file" 2>/dev/null
+}
+
 # === TIER 1: Age Key Health Check (Built into backup.sh) ===
 
 simple_verify_age_key() {
@@ -29,7 +35,7 @@ simple_verify_age_key() {
     local result
 
     local public_key
-    if ! public_key=$(age-keygen -y "$age_key" 2>/dev/null); then
+    if ! public_key=$(_derive_age_public_key "$age_key"); then
         log_error "Age key corrupted: Cannot extract public key"
         return 1
     fi
@@ -62,7 +68,7 @@ create_password_manager_escrow() {
     log_info "Creating password manager-ready Age key backup..."
 
     local pub_key
-    pub_key=$(age-keygen -y "$age_key")
+    pub_key=$(_derive_age_public_key "$age_key")
     local hostname_val
     hostname_val=$(hostname)
     local date_val
@@ -146,7 +152,7 @@ create_printable_key_backup() {
     trap '_secure_remove_file "$temp_html"' EXIT
 
     local pub_key
-    pub_key=$(age-keygen -y "$age_key")
+    pub_key=$(_derive_age_public_key "$age_key")
     local key_content
     key_content=$(cat "$age_key")
     local hostname_val

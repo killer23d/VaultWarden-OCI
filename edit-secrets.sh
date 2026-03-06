@@ -41,6 +41,16 @@ perform_cleanup() {
 }
 trap perform_cleanup EXIT
 
+secure_mktemp() {
+    local old_umask
+    old_umask=$(umask)
+    umask 077
+    local tmp
+    tmp=$(mktemp "$@") || { umask "$old_umask"; return 1; }
+    umask "$old_umask"
+    printf '%s\n' "$tmp"
+}
+
 # ---------------------------------------------------------------------------
 # Help
 # ---------------------------------------------------------------------------
@@ -226,8 +236,7 @@ do_view() {
     log_info "Opening secrets in view-only mode..."
 
     local temp_file
-    temp_file=$(mktemp)
-    chmod 600 "$temp_file"
+    temp_file=$(secure_mktemp)
     register_cleanup "rm -f '$temp_file'"
 
     if ! sops -d "$SECRETS_FILE" > "$temp_file"; then
@@ -276,8 +285,7 @@ do_rotate() {
     echo ""
 
     local temp_plain
-    temp_plain=$(mktemp --suffix=.yaml)
-    chmod 600 "$temp_plain"
+    temp_plain=$(secure_mktemp --suffix=.yaml)
     register_cleanup "rm -f '$temp_plain'"
 
     if ! sops -d "$SECRETS_FILE" > "$temp_plain"; then
@@ -292,8 +300,7 @@ do_rotate() {
     fi
 
     local temp_patched
-    temp_patched=$(mktemp --suffix=.yaml)
-    chmod 600 "$temp_patched"
+    temp_patched=$(secure_mktemp --suffix=.yaml)
     register_cleanup "rm -f '$temp_patched'"
 
     python3 - "$temp_plain" "$field" "$new_value" "$temp_patched" << 'PYEOF'
@@ -320,8 +327,7 @@ PYEOF
 
     log_info "Re-encrypting secrets..."
     local temp_enc
-    temp_enc=$(mktemp --suffix=.yaml.enc)
-    chmod 600 "$temp_enc"
+    temp_enc=$(secure_mktemp --suffix=.yaml.enc)
     register_cleanup "rm -f '$temp_enc'"
 
     if ! sops --encrypt "$temp_patched" > "$temp_enc"; then
@@ -346,8 +352,7 @@ do_edit() {
     log_info "Opening secrets with: $EDITOR_CMD"
 
     local temp_file
-    temp_file=$(mktemp --suffix=.yaml)
-    chmod 600 "$temp_file"
+    temp_file=$(secure_mktemp --suffix=.yaml)
     register_cleanup "rm -f '$temp_file'"
 
     if ! sops -d "$SECRETS_FILE" > "$temp_file"; then
