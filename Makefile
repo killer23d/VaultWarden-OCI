@@ -217,9 +217,14 @@ db-backup: ## Quick database backup
 	@$(MAKE) backup TYPE=db
 
 ## Cleanup Operations
+# [MEDIUM FIX] The previous `clean` target passed --no-logs, --no-backups,
+# --no-database to maintenance.sh, which does not implement those flags.
+# Using direct docker commands instead so the target's stated purpose
+# ("clean Docker resources") is actually achieved.
 clean: ## Clean up Docker resources only
 	@echo "$(BLUE)Cleaning up Docker resources...$(NC)"
-	@./maintenance.sh --no-logs --no-backups --no-database || true
+	@$(DOCKER_COMP) rm -f --stop 2>/dev/null || true
+	@docker system prune -f
 	@echo "$(GREEN)Cleanup completed!$(NC)"
 
 clean-all: ## Clean up everything (DESTRUCTIVE)
@@ -294,10 +299,19 @@ fmt: ## Format and validate all configuration files
 	fi
 	@./edit-secrets.sh --list > /dev/null && echo "$(GREEN)✓ secrets.yaml$(NC)" || echo "$(RED)✗ secrets.yaml$(NC)"
 
-config: ## Show current configuration summary
+# [MEDIUM FIX] config target: filter out sensitive keys from .env output.
+# Keys matching TOKEN, PASSWORD, SECRET, KEY, ZONE_ID, HASH are omitted
+# so that `make config` is safe to run in a shared terminal or CI log.
+config: ## Show current configuration summary (sensitive keys redacted)
 	@echo "$(BLUE)Current Configuration Summary$(NC)"
 	@echo "$(BLUE)============================$(NC)"
-	@if [ -f ".env" ]; then echo "$(GREEN)Environment Variables:$(NC)"; grep -E '^[A-Z_]+=' .env | head -10; echo ""; fi
+	@if [ -f ".env" ]; then \
+		echo "$(GREEN)Environment Variables (non-sensitive):$(NC)"; \
+		grep -E '^[A-Z_]+=' .env \
+			| grep -viE '(TOKEN|PASSWORD|SECRET|KEY|ZONE_ID|HASH)' \
+			| head -15; \
+		echo ""; \
+	fi
 	@if [ -f "docker-compose.override.yml" ]; then echo "$(GREEN)Development Override:$(NC) Active"; else echo "$(GREEN)Development Override:$(NC) Not active"; fi
 	@echo ""
 	@echo "$(GREEN)Services Configuration:$(NC)"

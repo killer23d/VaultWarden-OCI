@@ -7,6 +7,18 @@
 [[ -n "${VAULTWARDEN_DOCKER_LIB_LOADED:-}" ]] && return 0
 readonly VAULTWARDEN_DOCKER_LIB_LOADED=1
 
+# ---------------------------------------------------------------------------
+# DOCKER_PROJECT_LABEL — default guard
+#
+# [MEDIUM FIX] The cleanup_*() functions pass this value as a --filter
+# argument to `docker prune`. If the caller has not set the variable, the
+# empty string would produce `--filter ''` which causes docker to error OR,
+# worse, to match every object on the host. Default to the Compose project
+# label so only this project's resources are pruned.
+# ---------------------------------------------------------------------------
+DOCKER_PROJECT_LABEL="${DOCKER_PROJECT_LABEL:-label=com.docker.compose.project=vaultwarden-oci}"
+export DOCKER_PROJECT_LABEL
+
 # --- Docker Availability Checks ---
 
 # Check if Docker is installed and accessible - STANDARDIZED: Returns exit code
@@ -47,6 +59,13 @@ require_docker() {
 # --- Container Status Operations ---
 
 # Get container status for a service - STANDARDIZED: Returns exit code
+#
+# [MEDIUM FIX] docker compose ps --format json returns a JSON array when
+# multiple replicas are running. The jq filter now handles both:
+#   - Single object:  { "State": "running" }
+#   - Array:          [ { "State": "running" }, ... ]
+# The first element is used in the array case, consistent with service-level
+# health checks (we report the state of the first/only container).
 get_service_status() {
     local service="$1"
 
@@ -55,9 +74,13 @@ get_service_status() {
         return 1
     fi
 
-    # Use compose ps with JSON format for reliable parsing
+    local raw_json
+    raw_json=$(docker compose ps "$service" --format json 2>/dev/null)
+
+    # Handle both scalar object and array responses from docker compose ps
     local status
-    status=$(docker compose ps "$service" --format json 2>/dev/null | jq -r '.State // "not_found"' 2>/dev/null)
+    status=$(printf '%s' "$raw_json" \
+        | jq -r 'if type == "array" then .[0].State // "not_found" else .State // "not_found" end' 2>/dev/null)
 
     echo "${status:-not_found}"
     return 0
@@ -73,6 +96,8 @@ is_service_running() {
 }
 
 # Get service health status - STANDARDIZED: Returns exit code
+#
+# [MEDIUM FIX] Same jq array-vs-object fix as get_service_status().
 get_service_health() {
     local service="$1"
 
@@ -81,8 +106,12 @@ get_service_health() {
         return 1
     fi
 
+    local raw_json
+    raw_json=$(docker compose ps "$service" --format json 2>/dev/null)
+
     local health
-    health=$(docker compose ps "$service" --format json 2>/dev/null | jq -r '.Health // "none"' 2>/dev/null)
+    health=$(printf '%s' "$raw_json" \
+        | jq -r 'if type == "array" then .[0].Health // "none" else .Health // "none" end' 2>/dev/null)
 
     echo "${health:-none}"
     return 0
@@ -273,13 +302,24 @@ run_in_service() {
 
 # --- Cleanup Operations ---
 
+# _docker_prune_filter  — emit --filter arg only if DOCKER_PROJECT_LABEL is set
+#
+# [MEDIUM FIX] Guard against empty DOCKER_PROJECT_LABEL, which would make
+# `docker prune --filter ''` match every object on the host.
+_docker_prune_filter() {
+    if [[ -n "${DOCKER_PROJECT_LABEL:-}" ]]; then
+        printf -- '--filter %s' "${DOCKER_PROJECT_LABEL}"
+    fi
+}
+
 # Clean up stopped containers - STANDARDIZED: Returns exit code
 cleanup_containers() {
     if ! require_docker; then
         return 1
     fi
 
-    docker container prune -f --filter "${DOCKER_PROJECT_LABEL}" >/dev/null 2>&1
+    # shellcheck disable=SC2046  # intentional: may be empty
+    docker container prune -f $(_docker_prune_filter) >/dev/null 2>&1
     return 0
 }
 
@@ -289,7 +329,8 @@ cleanup_images() {
         return 1
     fi
 
-    docker image prune -f --filter "${DOCKER_PROJECT_LABEL}" >/dev/null 2>&1
+    # shellcheck disable=SC2046
+    docker image prune -f $(_docker_prune_filter) >/dev/null 2>&1
     return 0
 }
 
@@ -299,7 +340,8 @@ cleanup_volumes() {
         return 1
     fi
 
-    docker volume prune -f --filter "${DOCKER_PROJECT_LABEL}" >/dev/null 2>&1
+    # shellcheck disable=SC2046
+    docker volume prune -f $(_docker_prune_filter) >/dev/null 2>&1
     return 0
 }
 
@@ -309,7 +351,8 @@ cleanup_networks() {
         return 1
     fi
 
-    docker network prune -f --filter "${DOCKER_PROJECT_LABEL}" >/dev/null 2>&1
+    # shellcheck disable=SC2046
+    docker network prune -f $(_docker_prune_filter) >/dev/null 2>&1
     return 0
 }
 
@@ -379,21 +422,36 @@ follow_service_logs() {
 # --- Validation Helpers ---
 
 # Wait for service to be ready - STANDARDIZED: Returns exit code
+#
+# [MEDIUM FIX] Added progress reporting every 5 seconds so operators are
+# not left wondering whether the script has hung. The error message now
+# includes the actual elapsed time for easier debugging.
 wait_for_service_ready() {
     local service="$1"
     local timeout="${2:-60}"
     local count=0
+    local dot_interval=5
+
+    log_info "Waiting for service '$service' to become ready (timeout: ${timeout}s)..."
 
     while [[ $count -lt $timeout ]]; do
         if is_service_healthy "$service"; then
+            echo ""  # newline after progress dots
+            log_success "Service '$service' is ready (${count}s)"
             return 0
+        fi
+
+        # Print a progress dot every dot_interval seconds
+        if (( count % dot_interval == 0 && count > 0 )); then
+            printf '.' >&2
         fi
 
         sleep 1
         count=$((count + 1))
     done
 
-    log_error "Service $service did not become ready within ${timeout}s"
+    echo "" >&2
+    log_error "Service '$service' did not become ready within ${count}s (timeout: ${timeout}s)"
     return 1
 }
 
@@ -423,6 +481,7 @@ export -f check_docker_available check_compose_available require_docker
 export -f get_service_status is_service_running get_service_health is_service_healthy
 export -f start_services stop_services restart_services recreate_services
 export -f pull_images exec_in_service run_in_service
+export -f _docker_prune_filter
 export -f cleanup_containers cleanup_images cleanup_volumes cleanup_networks cleanup_docker_system
 export -f get_service_logs follow_service_logs wait_for_service_ready validate_compose_file
 
