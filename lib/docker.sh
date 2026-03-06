@@ -136,7 +136,7 @@ stop_services() {
 
     if [[ ${#services[@]} -eq 0 ]]; then
         # Stop all services
-        if ! docker compose down --remove-orphans; then
+        if ! docker compose stop; then
             log_error "Failed to stop all services"
             return 1
         fi
@@ -279,7 +279,7 @@ cleanup_containers() {
         return 1
     fi
 
-    docker container prune -f >/dev/null 2>&1
+    docker container prune -f --filter "${DOCKER_PROJECT_LABEL}" >/dev/null 2>&1
     return 0
 }
 
@@ -289,7 +289,7 @@ cleanup_images() {
         return 1
     fi
 
-    docker image prune -f >/dev/null 2>&1
+    docker image prune -f --filter "${DOCKER_PROJECT_LABEL}" >/dev/null 2>&1
     return 0
 }
 
@@ -299,7 +299,7 @@ cleanup_volumes() {
         return 1
     fi
 
-    docker volume prune -f >/dev/null 2>&1
+    docker volume prune -f --filter "${DOCKER_PROJECT_LABEL}" >/dev/null 2>&1
     return 0
 }
 
@@ -309,7 +309,7 @@ cleanup_networks() {
         return 1
     fi
 
-    docker network prune -f >/dev/null 2>&1
+    docker network prune -f --filter "${DOCKER_PROJECT_LABEL}" >/dev/null 2>&1
     return 0
 }
 
@@ -390,7 +390,7 @@ wait_for_service_ready() {
         fi
 
         sleep 1
-        ((count++))
+        count=$((count + 1))
     done
 
     log_error "Service $service did not become ready within ${timeout}s"
