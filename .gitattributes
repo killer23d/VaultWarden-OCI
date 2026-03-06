@@ -1,0 +1,10 @@
+# Force language detection for VaultWarden-OCI
+*.sh linguist-language=Shell
+Makefile linguist-language=Makefile
+# Prevent documentation and config files from affecting language stats
+*.md linguist-documentation
+*.json linguist-data
+*.yml linguist-data
+*.yaml linguist-data
+*.txt linguist-documentation
+LICENSE linguist-documentation
