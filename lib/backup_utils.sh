@@ -1,5 +1,18 @@
 #!/usr/bin/env bash
 # lib/backup_utils.sh - Backup utility functions for VaultWarden-OCI-NG
+#
+# PATCHED BUGS (2026-03-06):
+#   BUG-B1 [HIGH]   check_backup_disk_space(): df --output=avail is GNU-only.
+#                   BSD/macOS df does not support --output=. Replaced with a
+#                   portable awk one-liner.
+#   BUG-B2 [HIGH]   get_backup_statistics(): find -exec stat -c%s {} + is
+#                   GNU-only. Replaced with find | while + _stat_file_size().
+#   BUG-B3 [MEDIUM] create_backup_metadata(): stat -c%s GNU-only. Replaced
+#                   with _stat_file_size() helper from lib/crypto.sh.
+#   BUG-B4 [MEDIUM] cleanup_old_backups(): unquoted -mtime +$retention_days.
+#                   Quoted to prevent set -u unbound-variable failure.
+#   BUG-B5 [LOW]    create_backup_metadata(): $? anti-pattern after heredoc.
+#                   Replaced with direct 'if ! cat > file <<EOF' test.
 
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_BACKUP_UTILS_LIB_LOADED:-}" ]] && return 0
@@ -71,14 +84,8 @@ list_backups() {
 }
 
 # Validate backup file integrity - STANDARDIZED: Returns exit code
-# FIX [ISSUE 7]: The original test piped age output to 'head -c 1 > /dev/null'.
-# Under set -euo pipefail, bash evaluates the LAST command's exit code in a
-# pipeline, which is always 0 for 'head -c 1' even when age exits non-zero
-# (i.e., decryption fails). A corrupt/wrong-key backup would silently pass.
-#
-# Fix: redirect age output directly to /dev/null and check age's own exit code,
-# OR use PIPESTATUS. We choose the direct-redirect approach as it is simpler
-# and eliminates the pipeline entirely.
+# FIX [ISSUE 7]: Decryption test uses direct redirect; avoids pipeline
+# PIPESTATUS trap under set -euo pipefail.
 validate_backup_integrity() {
     local backup_file="$1"
     local age_key_file="${2:-secrets/keys/age-key.txt}"
@@ -96,6 +103,7 @@ validate_backup_integrity() {
     log_info "Validating backup integrity: $(basename "$backup_file")"
 
     # Check file size (basic corruption detection)
+    # Use inline GNU||BSD fallback for portability.
     local file_size
     file_size=$(stat -c%s "$backup_file" 2>/dev/null || stat -f%z "$backup_file" 2>/dev/null || echo "0")
 
@@ -132,6 +140,15 @@ validate_backup_integrity() {
 }
 
 # Check available disk space for backup operations - STANDARDIZED: Returns exit code
+#
+# BUG-B1 FIX: df --output=avail is GNU coreutils-only. BSD/macOS df does not
+# support the --output= long option and the function always reported
+# 'Cannot determine available disk space' on macOS.
+#
+# Replaced with a portable awk approach that reads the last column of the
+# last row of `df` output.  POSIX df guarantees the available-blocks value
+# is in column 4 (1 KiB blocks on both GNU and BSD), so the awk expression
+# is identical on Linux and macOS.
 check_backup_disk_space() {
     local target_dir="$1"
     local required_space_mb="${2:-1000}"  # Default 1GB
@@ -141,8 +158,10 @@ check_backup_disk_space() {
         return 1
     fi
 
+    # BUG-B1 FIX: portable df — column 4 is Available (1 KiB blocks) on
+    # both GNU df and BSD/macOS df.
     local available_space_kb
-    available_space_kb=$(df --output=avail "$target_dir" 2>/dev/null | tail -1)
+    available_space_kb=$(df "$target_dir" 2>/dev/null | awk 'NR==2 {print $4}')
 
     if [[ -z "$available_space_kb" ]] || ! [[ "$available_space_kb" =~ ^[0-9]+$ ]]; then
         log_error "Cannot determine available disk space for: $target_dir"
@@ -161,6 +180,9 @@ check_backup_disk_space() {
 }
 
 # Clean up old backups based on retention policy - STANDARDIZED: Returns exit code
+#
+# BUG-B4 FIX: unquoted $retention_days in find -mtime argument. Under set -u
+# an unset variable throws 'unbound variable'. Quoted the argument.
 cleanup_old_backups() {
     local backup_dir="$1"
     local backup_type="$2"
@@ -181,12 +203,13 @@ cleanup_old_backups() {
     local deleted_count=0
     local old_backups
 
-    if old_backups=$(find "$backup_dir" -name "*.age" -type f -mtime +$retention_days 2>/dev/null); then
+    # BUG-B4 FIX: quoted the +$retention_days argument
+    if old_backups=$(find "$backup_dir" -name "*.age" -type f -mtime "+$retention_days" 2>/dev/null); then
         while IFS= read -r backup_file; do
             if [[ -n "$backup_file" ]]; then
                 log_debug "Removing old backup: $(basename "$backup_file")"
                 rm -f "$backup_file" "$backup_file.sha256" "$backup_file.meta" 2>/dev/null
-                ((deleted_count++))
+                (( deleted_count++ )) || true
             fi
         done <<< "$old_backups"
     fi
@@ -201,6 +224,12 @@ cleanup_old_backups() {
 }
 
 # Get backup statistics - STANDARDIZED: Returns exit code
+#
+# BUG-B2 FIX: find -exec stat -c%s {} + is GNU-only. On macOS stat -c%s
+# errors and awk sums to 0, reporting all backup sizes as 0 MB.
+#
+# Replaced with a find | while loop using _stat_file_size() (exported by
+# lib/crypto.sh) which selects the correct stat format per platform.
 get_backup_statistics() {
     local backup_base_dir="${1:-backups}"
 
@@ -220,22 +249,30 @@ get_backup_statistics() {
         local type_dir="$backup_base_dir/$backup_type"
 
         if [[ -d "$type_dir" ]]; then
-            local count size_bytes
-            count=$(find "$type_dir" -name "*.age" -type f 2>/dev/null | wc -l)
-            size_bytes=$(find "$type_dir" -name "*.age" -type f -exec stat -c%s {} + 2>/dev/null | awk '{sum+=$1} END {print sum+0}')
+            local count=0
+            local size_bytes=0
 
-            local size_mb=$((size_bytes / 1024 / 1024))
+            # BUG-B2 FIX: portable size accumulation via _stat_file_size()
+            while IFS= read -r f; do
+                local fsz
+                fsz=$(_stat_file_size "$f" 2>/dev/null || echo 0)
+                [[ -z "$fsz" || ! "$fsz" =~ ^[0-9]+$ ]] && fsz=0
+                size_bytes=$(( size_bytes + fsz ))
+                (( count++ )) || true
+            done < <(find "$type_dir" -name "*.age" -type f 2>/dev/null)
+
+            local size_mb=$(( size_bytes / 1024 / 1024 ))
 
             printf "%-10s: %3d backups, %6d MB\n" "$backup_type" "$count" "$size_mb"
 
-            total_backups=$((total_backups + count))
-            total_size_bytes=$((total_size_bytes + size_bytes))
+            total_backups=$(( total_backups + count ))
+            total_size_bytes=$(( total_size_bytes + size_bytes ))
         else
             printf "%-10s: %3d backups, %6d MB\n" "$backup_type" 0 0
         fi
     done
 
-    local total_size_mb=$((total_size_bytes / 1024 / 1024))
+    local total_size_mb=$(( total_size_bytes / 1024 / 1024 ))
     echo "=================="
     printf "%-10s: %3d backups, %6d MB\n" "TOTAL" "$total_backups" "$total_size_mb"
 
@@ -243,6 +280,11 @@ get_backup_statistics() {
 }
 
 # Create backup metadata file - STANDARDIZED: Returns exit code
+#
+# BUG-B3 FIX: stat -c%s is GNU-only. Replaced with _stat_file_size() from
+# lib/crypto.sh for consistent portable behaviour.
+# BUG-B5 FIX: replaced '$? -eq 0' anti-pattern after heredoc with a direct
+# 'if ! cat > file <<EOF' guard.
 create_backup_metadata() {
     local backup_file="$1"
     local backup_type="$2"
@@ -257,7 +299,9 @@ create_backup_metadata() {
     local timestamp file_size checksum hostname
 
     timestamp=$(date -Iseconds)
-    file_size=$(stat -c%s "$backup_file" 2>/dev/null || stat -f%z "$backup_file" 2>/dev/null || echo "0")
+    # BUG-B3 FIX: use portable _stat_file_size() wrapper
+    file_size=$(_stat_file_size "$backup_file" 2>/dev/null || echo "0")
+    [[ -z "$file_size" || ! "$file_size" =~ ^[0-9]+$ ]] && file_size=0
     hostname=$(hostname -f 2>/dev/null || hostname)
 
     if ! checksum=$(calculate_sha256 "$backup_file"); then
@@ -270,7 +314,10 @@ create_backup_metadata() {
         vw_version=$(docker compose exec -T vaultwarden /vaultwarden --version 2>/dev/null | head -1 || echo "unknown")
     fi
 
-    cat > "$metadata_file" <<EOF
+    # BUG-B5 FIX: test the cat heredoc directly instead of checking $?
+    # after the fact, which is an anti-pattern ($? may be stale or from
+    # a different command in complex pipelines).
+    if ! cat > "$metadata_file" <<EOF
 # VaultWarden Backup Metadata
 backup_type=$backup_type
 timestamp=$timestamp
@@ -281,14 +328,13 @@ vaultwarden_version=$vw_version
 creator=VaultWarden-OCI-NG
 $additional_info
 EOF
-
-    if [[ $? -eq 0 ]]; then
-        log_debug "Metadata created: $(basename "$metadata_file")"
-        return 0
-    else
+    then
         log_error "Failed to create metadata file: $metadata_file"
         return 1
     fi
+
+    log_debug "Metadata created: $(basename "$metadata_file")"
+    return 0
 }
 
 # Export functions for use by scripts

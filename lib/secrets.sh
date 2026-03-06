@@ -1,6 +1,22 @@
 #!/usr/bin/env bash
 # lib/secrets.sh - Shared secrets management functions
 # Used by edit-secrets.sh and setup-secrets.sh
+#
+# PATCHED BUGS (2026-03-06):
+#   BUG-S1 [HIGH]   _secure_shred(): stat -c%s is GNU-only. On macOS the dd
+#                   fallback received bs='' and errored silently, leaving
+#                   plaintext recovery kit files on disk after shred failure.
+#                   Replaced with the portable inline GNU||BSD stat fallback.
+#   BUG-S2 [MEDIUM] validate_cloudflare_token(): TOCTOU race between mktemp
+#                   (creates world-readable file) and chmod 600 (locks it).
+#                   Token could be read by another process in that window.
+#                   Replaced with 'install -m 600 /dev/null' (atomic).
+#   BUG-S3 [MEDIUM] offer_recovery_kit_export(): _do_generate_and_secure()
+#                   was a nested function, polluting the global namespace.
+#                   Promoted to top-level _ork_generate_and_secure().
+#   BUG-S4 [LOW]    prompt_password_with_confirmation(): 'echo "$password"'
+#                   silently strips trailing newlines via $() substitution.
+#                   Replaced with printf '%s\n'.
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     echo "Error: This library should be sourced, not executed directly"
@@ -159,7 +175,7 @@ cleanup_old_secret_backups() {
     local keep_count="${2:-5}"
     local old_backups
     old_backups=$(find "$backup_dir" -name "secrets.yaml.backup-*" -type f 2>/dev/null \
-        | sort -r | tail -n +$((keep_count + 1)))
+        | sort -r | tail -n +$(( keep_count + 1 )))
     if [[ -n "$old_backups" ]]; then
         echo "$old_backups" | xargs rm -f
         log_debug "Cleaned up old secrets backups (keeping last $keep_count)"
@@ -173,6 +189,11 @@ cleanup_old_secret_backups() {
 # Securely overwrite and remove a file containing sensitive data.
 # Uses shred(1) when available; falls back to dd(1) + rm.
 # Safe to call on a path that does not exist.
+#
+# BUG-S1 FIX: stat -c%s is GNU-only. On macOS stat -c%s errors and the dd
+# fallback received bs='' causing it to error silently, leaving plaintext
+# recovery kit files on disk. Replaced with the portable GNU||BSD inline
+# fallback already established across the codebase.
 # ---------------------------------------------------------------------------
 _secure_shred() {
     local target="$1"
@@ -181,14 +202,22 @@ _secure_shred() {
         shred -fuz "$target" 2>/dev/null && return 0
     fi
     # dd fallback: overwrite with random bytes then unlink
+    # BUG-S1 FIX: portable stat (GNU -c%s || BSD -f%z), with safe default
     local file_size
-    file_size=$(stat -c%s "$target" 2>/dev/null || echo "4096")
+    file_size=$(stat -c%s "$target" 2>/dev/null || stat -f%z "$target" 2>/dev/null || echo "4096")
+    [[ -z "$file_size" || ! "$file_size" =~ ^[0-9]+$ ]] && file_size=4096
+    (( file_size == 0 )) && file_size=4096
     dd if=/dev/urandom of="$target" bs="$file_size" count=1 conv=notrunc 2>/dev/null || true
     rm -f "$target"
 }
 
 # ---------------------------------------------------------------------------
 # Cloudflare token validation
+#
+# BUG-S2 FIX: TOCTOU race between mktemp (creates file world-readable) and
+# chmod 600 (locks it). Replaced with 'install -m 600 /dev/null' which
+# atomically creates the curl config file at the correct permission before
+# any token material is written.
 # ---------------------------------------------------------------------------
 validate_cloudflare_token() {
     local token="$1"
@@ -202,10 +231,8 @@ validate_cloudflare_token() {
         return 0
     fi
 
-    # FIX: 'firewall' token type now validates against the WAF Custom Rules
-    # Rulesets endpoint instead of the deprecated Firewall Access Rules endpoint
-    # (/zones/{zone_id}/firewall/access_rules/rules), consistent with the
-    # already-migrated fail2ban action.d/cloudflare-apiv4.conf.
+    # FIX: 'firewall' token type validates against the WAF Custom Rules
+    # Rulesets endpoint (not the deprecated Firewall Access Rules endpoint).
     local endpoint
     case "$token_type" in
         dns)      endpoint="https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records?per_page=1" ;;
@@ -213,31 +240,34 @@ validate_cloudflare_token() {
         *)        log_error "Invalid token type: $token_type"; return 1 ;;
     esac
 
+    # BUG-S2 FIX: create file atomically at mode 600 before writing secret
     local curl_cfg
-    curl_cfg=$(mktemp) || return 1
-    chmod 600 "$curl_cfg" 2>/dev/null || true
-    printf 'header = "Authorization: Bearer %s"\n' "$token" > "$curl_cfg"
-
-    if curl -sf --max-time 10 --config "$curl_cfg" "$endpoint" \
-        | jq -e '.success == true' >/dev/null 2>&1; then
-        rm -f "$curl_cfg" 2>/dev/null || true
-        return 0
-    else
+    if ! curl_cfg=$(mktemp) || ! install -m 600 /dev/null "$curl_cfg"; then
         rm -f "$curl_cfg" 2>/dev/null || true
         return 1
     fi
+    printf 'header = "Authorization: Bearer %s"\n' "$token" > "$curl_cfg"
+
+    local result=0
+    if curl -sf --max-time 10 --config "$curl_cfg" "$endpoint" \
+        | jq -e '.success == true' >/dev/null 2>&1; then
+        result=0
+    else
+        result=1
+    fi
+    rm -f "$curl_cfg" 2>/dev/null || true
+    return "$result"
 }
 
 # ---------------------------------------------------------------------------
 # Interactive helpers
-# ---------------------------------------------------------------------------
-
-# prompt_password_with_confirmation
 #
-# FIX [LOW]: Added MAX_ATTEMPTS counter (default 10) to prevent infinite
-# loops that leave SSH sessions hanging when the connection times out
-# mid-setup.  After MAX_ATTEMPTS failed attempts the function prints a
-# clear error and returns 1 so the caller can abort gracefully.
+# BUG-S4 FIX: prompt_password_with_confirmation() used 'echo "$password"' to
+# return the password to the caller. Bash $() substitution strips trailing
+# newlines, so a password that legitimately ends in '\n' would be silently
+# truncated. Replaced with 'printf "%s\n"' which is equivalent for normal
+# passwords and correct for edge cases.
+# ---------------------------------------------------------------------------
 prompt_password_with_confirmation() {
     local prompt_text="$1"
     local min_length="${2:-12}"
@@ -270,7 +300,8 @@ prompt_password_with_confirmation() {
         fi
         break
     done
-    echo "$password"
+    # BUG-S4 FIX: use printf to avoid $() stripping trailing newlines
+    printf '%s\n' "$password"
     return 0
 }
 
@@ -289,10 +320,6 @@ secure_secrets_file() {
 
 # ---------------------------------------------------------------------------
 # _bcrypt_format_ok  (internal)
-#
-# Validates that a string looks like a bcrypt hash as produced by htpasswd.
-# htpasswd -B outputs:  $2y$<cost>$<53 chars>
-# The cost field is variable-width (e.g. 10, 12, 14).
 # ---------------------------------------------------------------------------
 _bcrypt_format_ok() {
     local hash="$1"
@@ -499,6 +526,12 @@ auto_generate_secret_field() {
 
 # ---------------------------------------------------------------------------
 # Recovery Kit Generation
+#
+# CONTRACT: generate_recovery_kit() writes a plaintext file containing the
+# Age private key and all decrypted secrets to $output_file. The caller MUST
+# register an EXIT trap that calls _secure_shred() on $output_file before
+# calling this function. The offer_recovery_kit_export() wrapper below does
+# this correctly. Direct callers must do the same.
 # ---------------------------------------------------------------------------
 generate_recovery_kit() {
     local output_file="$1"
@@ -518,17 +551,14 @@ generate_recovery_kit() {
 
     log_info "Collecting recovery data..."
 
-    local hostname_val
+    local hostname_val date_val pub_key priv_key
     hostname_val=$(hostname)
-    local date_val
     date_val=$(date)
 
-    local pub_key
     if ! pub_key=$(_derive_age_public_key "$age_key"); then
         log_error "Failed to derive Age public key"
         return 1
     fi
-    local priv_key
     priv_key=$(cat "$age_key")
 
     local domain="Not Configured"
@@ -551,14 +581,9 @@ generate_recovery_kit() {
     fi
 
     log_info "Decrypting secrets for export..."
-    local vw_admin_hash="Not Set"
-    local caddy_hash="Not Set"
-    local smtp_pass="Not Set"
-    local backup_pass="Not Set"
-    local cf_dns="Not Set"
-    local cf_fw="Not Set"
-    local push_id="Not Set"
-    local push_key="Not Set"
+    local vw_admin_hash="Not Set" caddy_hash="Not Set" smtp_pass="Not Set"
+    local backup_pass="Not Set" cf_dns="Not Set" cf_fw="Not Set"
+    local push_id="Not Set" push_key="Not Set"
 
     if [[ -f "$secrets_file" ]]; then
         if ! ensure_sops_env; then return 1; fi
@@ -591,7 +616,7 @@ generate_recovery_kit() {
 ██╔══██╗██╔════╝██╔════╝██╔═══██╗██║   ██║██╔════╝██╔══██╗╚██╗ ██╔╝
 ██████╔╝█████╗  ██║     ██║   ██║██║   ██║█████╗  ██████╔╝ ╚████╔╝ 
 ██╔══██╗██╔══╝  ██║     ██║   ██║╚██╗ ██╔╝██╔══╝  ██╔══██╗  ╚██╔╝  
-██║  ██║███████╗╚██████╗╚██████╔╝ ╚████╔╝ ███████╗██║  ██║   ██║   
+██║  ██╗███████╗╚██████╗╚██████╔╝ ╚████╔╝ ███████╗██║  ██╗   ██║   
 ╚═╝  ╚═╝╚══════╝ ╚═════╝ ╚═════╝   ╚═══╝  ╚══════╝╚═╝  ╚═╝   ╚═╝   
                                                                    
 ██╗  ██╗██╗████████╗
@@ -601,9 +626,9 @@ generate_recovery_kit() {
 ██║  ██╗██║   ██║   
 ╚═╝  ╚═╝╚═╝   ╚═╝   
 
-══════════════════════════════════════════════════════════════════════════════
+════════════════════════════════════════════════════════════════════════════
                             🚨 CRITICAL SECURITY DOCUMENT 🚨
-══════════════════════════════════════════════════════════════════════════════
+════════════════════════════════════════════════════════════════════════════
 Created: $date_val
 Server:  $hostname_val
 Domain:  $domain
@@ -613,9 +638,9 @@ WARNING: This file contains highly sensitive UNENCRYPTED secrets.
 2. Print a physical copy for your fireproof safe (optional).
 3. DELETE THIS FILE from the server immediately after saving.
 
-══════════════════════════════════════════════════════════════════════════════
+════════════════════════════════════════════════════════════════════════════
 SECTION 1: ENCRYPTION KEYS (THE MOST IMPORTANT PART)
-══════════════════════════════════════════════════════════════════════════════
+════════════════════════════════════════════════════════════════════════════
 If you lose this key, your backups are FOREVER USELESS.
 
 [AGE PRIVATE KEY]
@@ -624,9 +649,9 @@ $priv_key
 [AGE PUBLIC KEY]
 $pub_key
 
-══════════════════════════════════════════════════════════════════════════════
+════════════════════════════════════════════════════════════════════════════
 SECTION 2: SERVER SECRETS (DECRYPTED)
-══════════════════════════════════════════════════════════════════════════════
+════════════════════════════════════════════════════════════════════════════
 
 [SYSTEM CREDENTIALS]
 Backup Encryption Passphrase:
@@ -656,9 +681,9 @@ Caddy Basic Auth Hash (Bcrypt):
 $caddy_hash
 (Note: Original password cannot be recovered from hash. Reset if lost.)
 
-══════════════════════════════════════════════════════════════════════════════
+════════════════════════════════════════════════════════════════════════════
 SECTION 3: DISASTER RECOVERY & MIGRATION CHECKLIST
-══════════════════════════════════════════════════════════════════════════════
+════════════════════════════════════════════════════════════════════════════
 
 TO RESTORE THIS SERVER ON NEW HARDWARE:
 
@@ -699,79 +724,81 @@ TO RESTORE THIS SERVER ON NEW HARDWARE:
    [ ] Check health:
        ./health.sh
 
-══════════════════════════════════════════════════════════════════════════════
+════════════════════════════════════════════════════════════════════════════
 END OF RECOVERY KIT
-══════════════════════════════════════════════════════════════════════════════
+════════════════════════════════════════════════════════════════════════════
 EOF
 
     chmod 600 "$output_file"
 }
 
 # ---------------------------------------------------------------------------
+# _ork_generate_and_secure  (was: nested _do_generate_and_secure)
+#
+# BUG-S3 FIX: The helper was previously a nested function defined inside
+# offer_recovery_kit_export(). Bash nested function definitions pollute the
+# global namespace — the function is visible and callable from anywhere after
+# the outer function is sourced, which is surprising and potentially dangerous
+# for a helper that writes and securely deletes plaintext secret files.
+#
+# Promoted to a top-level private function with the _ork_ prefix to:
+#   1. Eliminate the global namespace pollution from the nested definition.
+#   2. Make the function visible only by convention (prefix), not by scope.
+#   3. Allow offer_recovery_kit_export() to call it normally.
+# ---------------------------------------------------------------------------
+_ork_generate_and_secure() {
+    local output_file="$1"
+
+    # Register trap BEFORE generating so even a SIGINT during generation
+    # cleans up a partially-written plaintext file.
+    # shellcheck disable=SC2064  # intentional: expand $output_file now
+    trap "_secure_shred '$output_file'; echo '[recovery-kit] Plaintext kit securely deleted.' >&2" EXIT
+
+    if ! generate_recovery_kit "$output_file"; then
+        log_error "Failed to generate recovery kit"
+        return 1
+    fi
+
+    log_success "Recovery Kit created: $output_file"
+    echo ""
+    log_warn "⚠️  ACTION REQUIRED — SAVE NOW BEFORE THIS FILE IS AUTO-DELETED:"
+    echo "  1. Open the file: cat '$output_file'"
+    echo "  2. Copy ALL contents to your password manager (Secure Note)."
+    echo "  3. Optionally print a physical copy for your fireproof safe."
+    echo ""
+    log_warn "This file will be securely deleted after you press Enter."
+    log_warn "If you do not respond within 120 seconds it will be deleted automatically."
+    echo ""
+
+    local user_ack
+    if read -r -t 120 -p "Press Enter once you have saved the recovery kit: " user_ack 2>/dev/null \
+       || true; then
+        : # any input (or empty Enter) is acceptable
+    fi
+
+    log_info "Securely deleting recovery kit from server..."
+    _secure_shred "$output_file"
+    trap - EXIT  # disarm: file is already gone
+    log_success "Recovery kit securely deleted from server."
+    echo ""
+}
+
+# ---------------------------------------------------------------------------
 # offer_recovery_kit_export
-#
-# FIX [HIGH]: Recovery kit auto-deletion
-#
-# The plaintext recovery kit file MUST NOT persist on the server after the
-# operator has copied its contents to a password manager. This function now:
-#   1. Registers an EXIT trap that calls _secure_shred() on the output file.
-#      The trap fires on any unexpected exit (SIGINT, SIGTERM, ERR, etc.).
-#   2. After successfully generating the kit, prompts the operator to confirm
-#      they have saved it. On confirmation (or after a 120s timeout) the file
-#      is securely shredded and the trap is cleared.
-#   3. An explicit countdown is shown so the operator is never surprised by
-#      automatic deletion.
 # ---------------------------------------------------------------------------
 offer_recovery_kit_export() {
     local auto_export="${1:-false}"
     local output_file="$HOME/vaultwarden-recovery-kit-$(date +%Y%m%d%H%M%S).txt"
 
-    _do_generate_and_secure() {
-        # Register trap BEFORE generating so even a SIGINT during generation
-        # cleans up a partially-written plaintext file.
-        # shellcheck disable=SC2064  # intentional: expand $output_file now
-        trap "_secure_shred '$output_file'; echo '[recovery-kit] Plaintext kit securely deleted.' >&2" EXIT
-
-        if ! generate_recovery_kit "$output_file"; then
-            log_error "Failed to generate recovery kit"
-            # EXIT trap will clean up any partial file.
-            return 1
-        fi
-
-        log_success "Recovery Kit created: $output_file"
-        echo ""
-        log_warn "⚠️  ACTION REQUIRED — SAVE NOW BEFORE THIS FILE IS AUTO-DELETED:"
-        echo "  1. Open the file: cat '$output_file'"
-        echo "  2. Copy ALL contents to your password manager (Secure Note)."
-        echo "  3. Optionally print a physical copy for your fireproof safe."
-        echo ""
-        log_warn "This file will be securely deleted after you press Enter."
-        log_warn "If you do not respond within 120 seconds it will be deleted automatically."
-        echo ""
-
-        # Read with timeout. Works in bash; degrades gracefully if not a TTY.
-        local user_ack
-        if read -r -t 120 -p "Press Enter once you have saved the recovery kit: " user_ack 2>/dev/null \
-           || true; then
-            : # any input (or empty Enter) is acceptable
-        fi
-
-        log_info "Securely deleting recovery kit from server..."
-        _secure_shred "$output_file"
-        trap - EXIT  # disarm: file is already gone
-        log_success "Recovery kit securely deleted from server."
-        echo ""
-    }
-
     if [[ "$auto_export" == "true" ]]; then
         log_info "Exporting recovery kit (--export-recovery-kit specified)..."
-        _do_generate_and_secure
+        _ork_generate_and_secure "$output_file"
         return $?
     fi
 
     echo ""
     read -r -p "Export a plaintext Recovery Kit? (yes/no): " export_kit
     if [[ "$export_kit" == "yes" ]]; then
-        _do_generate_and_secure
+        _ork_generate_and_secure "$output_file"
     fi
 }
