@@ -1,882 +1,273 @@
-# Troubleshooting Guide - VaultWarden-OCI
+# Troubleshooting Guide — VaultWarden-OCI
 
-Common issues and solutions for VaultWarden-OCI deployment and operations.
+This guide covers the current troubleshooting paths for a deployment built around `setup.sh`, `startup.sh`, `health.sh`, `maintenance.sh`, `backup.sh`, `restore.sh`, and `cron-setup.sh`.
 
-## General Troubleshooting Approach
+For first-time setup flow, see [DEPLOYMENT.md](DEPLOYMENT.md). For day-to-day tasks, see [OPERATIONS.md](OPERATIONS.md).
 
-1. **Check service status**: `./health.sh` or `make health`
-2. **Review logs**: `docker compose logs` or `make logs`
-3. **Validate configuration**: `docker compose config` or `make test-config`
-4. **Check resources**: `docker stats`
-5. **Verify connectivity**: Test network, DNS, and firewall
+---
 
-## Service Issues
+## Troubleshooting approach
 
-### Services Won't Start
+Use this order when something breaks:
 
-**Symptoms**:
-- Services fail to start
-- Containers exit immediately
-- Docker Compose errors
+1. Confirm the intended workflow was followed.
+2. Run `./health.sh` or `./health.sh --comprehensive`.
+3. Review service-specific logs.
+4. Reapply template-backed configuration if drift is suspected.
+5. Restore from backup if validation shows the environment is no longer trustworthy.
 
-**Diagnosis**:
+Many issues come from configuration drift, incomplete secret setup, or environment assumptions that no longer match the current repository workflow.
+
+---
+
+## First checks
+
+Start with these commands:
+
 ```bash
-# Check service status
 ./health.sh
+./health.sh --comprehensive
 docker compose ps
+docker stats --no-stream
+```
 
-# View logs
-docker compose logs
-make logs
+If the environment recently changed, also check whether the issue started after setup regeneration, secret rotation, an update, or a reboot.
 
-# Validate configuration
+---
+
+## Startup problems
+
+### Services will not start
+
+```bash
 docker compose config
-make test-config
-```
-
-**Solutions**:
-```bash
-# Fix configuration and restart
-./startup.sh --force
-make restart
-
-# If templates are invalid, validate first
-docker compose -f docker-compose.yml.example config
-
-# Regenerate from templates
-sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
+docker compose logs vaultwarden
+docker compose logs caddy
+docker compose logs fail2ban
+docker compose logs postfix
 ./startup.sh --force
 ```
 
-### VaultWarden Container Crashes
+Common causes:
 
-**Symptoms**:
-- VaultWarden container stops unexpectedly
-- Database errors in logs
-- Web vault inaccessible
+- Incomplete or invalid `.env` values.
+- Missing or undecryptable secrets.
+- Template drift between generated files and intended repo state.
+- DNS or Cloudflare state that no longer matches bootstrap expectations.
 
-**Diagnosis**:
+### Secrets do not decrypt
+
 ```bash
-# Check VaultWarden logs
-docker compose logs vaultwarden | tail -100
-make logs SERVICE=vaultwarden
-
-# Check for database issues
-docker run --rm -v "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data/bwdata:/data" alpine:latest \
-  sh -c "apk add --no-cache sqlite >/dev/null 2>&1 && sqlite3 /data/db.sqlite3 'PRAGMA integrity_check;'"
-
-# Check resource usage
-docker stats vaultwarden_app
-```
-
-**Solutions**:
-```bash
-# Deep database maintenance (stops VaultWarden temporarily)
-sudo ./maintenance.sh --db-maint
-# or via Makefile:
-make db-maint
-
-# If database is corrupt, restore from backup
-./restore.sh --type db
-# or restore latest DB backup non-interactively:
-make restore-db
-
-# Check resource limits
-docker inspect vaultwarden_app | grep -A 10 Memory
-
-# Increase limits if needed (edit template)
-nano docker-compose.yml.example
-sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
-./startup.sh --force
-```
-
-### Caddy Certificate Issues
-
-**Symptoms**:
-- HTTPS not working
-- Certificate errors
-- DNS-01 challenge failures
-
-**Diagnosis**:
-```bash
-# Check Caddy logs
-docker compose logs caddy | grep -i error
-make logs SERVICE=caddy
-
-# Verify Cloudflare API token
 ./edit-secrets.sh --test
-
-# Check DNS resolution
-dig +short vault.example.com
-
-# Test Cloudflare API
-curl -X GET "https://api.cloudflare.com/client/v4/zones" \
-     -H "Authorization: Bearer YOUR_DNS_TOKEN"
+ls -la secrets/keys/age-key.txt
 ```
 
-**Solutions**:
+If the Age key is missing or broken, recover it first before continuing with broader troubleshooting.
+
+---
+
+## HTTPS and Cloudflare problems
+
+### TLS will not provision
+
+Check these first:
+
+- OCI networking allows TCP `80` and `443`.
+- The DNS record is still **DNS Only** during bootstrap.
+- The requested hostname matches the configured domain values.
+
+Useful commands:
+
 ```bash
-# Verify Cloudflare DNS token in secrets
-./edit-secrets.sh
-# Ensure caddy_cloudflare_dns_token is set
-
-# Restart Caddy to retry
-docker compose restart caddy
-
-# Force certificate renewal
-docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile
+docker compose logs caddy
+./health.sh
 ```
 
-## Configuration Issues
+### Site works locally but not externally
 
-### Template Validation Errors
+Validate Cloudflare mode, DNS record correctness, and OCI ingress rules.
 
-**Symptoms**:
-- `docker compose config` fails
-- Syntax errors in generated files
-- Services won't start due to config errors
+If you recently cut over DNS, also account for propagation delay before assuming the service itself is broken.
 
-**Diagnosis**:
+---
+
+## Email problems
+
+Mail troubleshooting should use the current maintenance entry point, not stale legacy helpers.
+
 ```bash
-# Validate template
-docker compose -f docker-compose.yml.example config
-
-# Check for common issues
-cat docker-compose.yml.example | grep -n "platform:\|linux/arm64"
-
-# Validate current config
-docker compose config
-make test-config
-```
-
-**Solutions**:
-```bash
-# Fix template syntax
-nano docker-compose.yml.example
-
-# Validate after changes
-docker compose -f docker-compose.yml.example config
-
-# Regenerate from fixed template
-sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
-```
-
-### Environment Variable Issues
-
-**Symptoms**:
-- Services missing configuration
-- Incorrect behavior
-- Connection failures
-
-**Diagnosis**:
-```bash
-# Check .env file
-cat .env | grep -v "^#"
-
-# Verify critical variables are set
-grep -E "DOMAIN|CLOUDFLARE_ZONE_ID|SMTP_HOST|ADMIN_EMAIL" .env
-
-# Check if services are using environment
-docker compose config | grep -A 5 environment
-```
-
-**Solutions**:
-```bash
-# Edit environment file
-nano .env
-
-# Or regenerate from template
-cp .env.example .env
-# Edit with correct values
-nano .env
-
-# Restart services to apply
-./startup.sh --force
-```
-
-### Secrets Decryption Failures
-
-**Symptoms**:
-- Cannot edit secrets
-- Services can't load secrets
-- Age decryption errors
-
-**Diagnosis**:
-```bash
-# Test secrets decryption
-./edit-secrets.sh --test
-make test-secrets
-
-# Verify Age key exists
-ls -l secrets/keys/age-key.txt
-
-# Check permissions
-ls -la secrets/
-```
-
-**Solutions**:
-```bash
-# If Age key is missing, regenerate
-sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
-
-# Fix permissions
-chmod 700 secrets/
-chmod 600 secrets/keys/age-key.txt
-
-# Test decryption manually
-age -d -i secrets/keys/age-key.txt secrets/secrets.yaml
-```
-
-## Network and Connectivity Issues
-
-### Cannot Access Web Vault
-
-**Symptoms**:
-- HTTPS site unreachable
-- Connection timeout
-- DNS resolution failures
-
-**Diagnosis**:
-```bash
-# Check if services are running
-docker compose ps
-
-# Test local connectivity (Caddy internal health endpoint)
-curl -I http://localhost:8080/alive
-
-# Check Caddy logs
-docker compose logs caddy | grep -i error
-
-# Verify DNS resolution
-dig +short vault.example.com
-
-# Check firewall
-sudo ufw status
-```
-
-**Solutions**:
-```bash
-# Restart services
-./startup.sh --force
-
-# Update DNS if IP changed (targeted mode — no cleanup)
-./maintenance.sh --update-dns
-
-# Verify Cloudflare proxy is enabled
-# Check Cloudflare dashboard: DNS → Proxied (orange cloud)
-
-# Update firewall if Cloudflare IPs changed
-./maintenance.sh --update-firewall
-```
-
-### Firewall Blocking Access
-
-**Symptoms**:
-- Connection refused
-- Timeout errors
-- Can't reach services
-
-**Diagnosis**:
-```bash
-# Check UFW status
-sudo ufw status numbered
-
-# Check for Cloudflare rules
-sudo ufw status | grep "CF-IPv"
-
-# Test from external IP
-curl -I https://vault.example.com
-```
-
-**Solutions**:
-```bash
-# Safely update Cloudflare IP ranges (adds new rules before removing old)
-./maintenance.sh --update-firewall
-
-# If firewall is blocking everything, check UFW
-sudo ufw status
-
-# Emergency: temporarily disable UFW (NOT RECOMMENDED for production)
-# sudo ufw disable
-# Fix firewall rules, then:
-# sudo ufw enable
-
-# Schedule safe recurring firewall updates (Saturday 4 AM via cron)
-make cron-install
-```
-
-### DNS Not Updating
-
-**Symptoms**:
-- Wrong IP in DNS
-- Dynamic IP changed but DNS still old
-- Cannot reach site after IP change
-
-**Diagnosis**:
-```bash
-# Check current public IP
-curl -s https://checkip.amazonaws.com
-
-# Check DNS record
-dig +short vault.example.com @1.1.1.1
-
-# Compare IPs
-echo "Public IP: $(curl -s https://checkip.amazonaws.com)"
-echo "DNS IP:    $(dig +short vault.example.com @1.1.1.1 | head -1)"
-```
-
-**Solutions**:
-```bash
-# Manual DNS update (targeted mode — no routine cleanup)
-./maintenance.sh --update-dns
-
-# Or via Makefile
-make update-dns
-
-# Verify Cloudflare API token works
-curl -X GET "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID" \
-     -H "Authorization: Bearer YOUR_DNS_TOKEN"
-
-# Check CLOUDFLARE_ZONE_ID in .env
-grep CLOUDFLARE_ZONE_ID .env
-```
-
-## Email Issues
-
-### Email Not Sending (Postfix)
-
-**Symptoms**:
-- Email notifications not received
-- SMTP errors in logs
-- VaultWarden can't send email
-
-**Diagnosis**:
-```bash
-# Check postfix container status
+./maintenance.sh --test-email --verbose
 docker compose ps postfix
 docker compose logs postfix
-make logs-postfix                    # shortcut with timestamps
-
-# Run full email diagnostic (4 tests)
-./maintenance.sh --test-email
-# or via Makefile:
-make test-email
-
-# Verbose diagnostic output
-./maintenance.sh --test-email --verbose
-
-# Preview without sending
-./maintenance.sh --test-email --dry-run
-
-# Check postfix relay configuration
-docker compose exec postfix postconf relayhost
-docker compose exec postfix nc -z localhost 587
-```
-
-**Solutions**:
-```bash
-# Verify SMTP relay settings in .env
-nano .env
-# Check: SMTP_HOST, SMTP_PORT, SMTP_USERNAME, ALLOWED_SENDER_DOMAINS
-
-# Verify SMTP password in secrets
-./edit-secrets.sh
-# Check: smtp_password
-
-# Restart postfix
-docker compose restart postfix
-
-# Send test from VaultWarden admin panel
-# Navigate to: https://vault.example.com/admin → SMTP Settings → Send Test Email
-```
-
-### SMTP Authentication Failures
-
-**Symptoms**:
-- Authentication failed errors
-- 535 SMTP errors in logs
-- Postfix can't connect to SMTP relay
-
-**Diagnosis**:
-```bash
-# Check SMTP credentials
+grep SMTP .env
 ./edit-secrets.sh --test
-
-# View postfix logs for auth errors
-docker compose logs postfix | grep -i "auth\|error\|fatal"
-
-# Run verbose email diagnostic
-./maintenance.sh --test-email --verbose
 ```
 
-**Solutions**:
+Common causes:
+
+- Wrong SMTP host, port, or security mode.
+- Missing or incorrect `smtp_password`.
+- Sender-domain rules that do not match the configured mail identity.
+
+---
+
+## Fail2ban and security-response issues
+
+If bans do not seem to be happening, verify both the service state and the Cloudflare-related secret material.
+
 ```bash
-# Update SMTP password
-./edit-secrets.sh
-# Set correct smtp_password
-
-# Verify SMTP settings
-nano .env
-# Ensure SMTP_USERNAME matches your email
-# Ensure SMTP_HOST and SMTP_PORT are correct
-
-# For Gmail, create app-specific password
-# https://myaccount.google.com/apppasswords
-
-# Restart postfix and vaultwarden
-docker compose restart postfix vaultwarden
-```
-
-### Fail2Ban Cannot Send Email
-
-**Symptoms**:
-- Fail2Ban ban notifications not arriving
-- `fail2ban cannot reach postfix SMTP` error in `--test-email` output
-
-**Diagnosis**:
-```bash
-# Confirm Fail2Ban network mode (must be host)
-docker inspect vaultwarden_fail2ban --format '{{.HostConfig.NetworkMode}}'
-
-# Check Fail2Ban → Postfix connectivity
-# (in host-network mode, postfix is reachable at 127.0.0.1:587)
-docker compose exec fail2ban sh -c "nc -zv 127.0.0.1 587"
-
-# Check SMTP action config
-docker compose exec fail2ban cat /data/fail2ban/action.d/smtp.conf
-```
-
-**Solutions**:
-```bash
-# Ensure docker-compose.yml has network_mode: host for fail2ban
-# (already set in docker-compose.yml.example)
-
-# Restart fail2ban
-docker compose restart fail2ban
-
-# Re-run email diagnostic
-./maintenance.sh --test-email --verbose
-```
-
-## Backup and Restore Issues
-
-### Backup Creation Fails
-
-**Symptoms**:
-- Backup script errors
-- Insufficient disk space
-- Encryption failures
-
-**Diagnosis**:
-```bash
-# Check disk space
-df -h ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}
-
-# Verify Age key
-ls -l secrets/keys/age-key.txt
-
-# Test backup with dry-run
-./backup.sh --type db --dry-run
-
-# Check VaultWarden status
-docker compose ps vaultwarden
-```
-
-**Solutions**:
-```bash
-# Free up disk space
-./maintenance.sh --comprehensive
-
-# If Age key missing, regenerate
-sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
-
-# Retry backup
-./backup.sh --type db
-
-# List existing backups
-./backup.sh --list
-make list-backups
-```
-
-### Restore Fails
-
-**Symptoms**:
-- Decryption errors
-- Database corruption after restore
-- Services won't start after restore
-
-**Diagnosis**:
-```bash
-# Verify backup file integrity
-sha256sum -c backup.age.sha256
-
-# Test Age key against backup
-age -d -i secrets/keys/age-key.txt backup.age > /dev/null
-
-# Check backup metadata
-cat backup.age.meta
-
-# List all available backups
-./backup.sh --list
-```
-
-**Solutions**:
-```bash
-# Interactive restore (prompts for file selection)
-./restore.sh
-
-# Restore latest DB backup directly
-./restore.sh --type db
-make restore-db
-
-# Try older backup if current is corrupt
-./restore.sh --file /path/to/older-backup.age
-
-# After restore, verify services
-./health.sh --comprehensive
-```
-
-### Offsite Backup Sync Fails
-
-**Symptoms**:
-- Rclone errors
-- Connection timeouts
-- Authentication failures
-
-**Diagnosis**:
-```bash
-# Test rclone connectivity
-rclone lsd your_remote_name:
-
-# Check rclone config
-rclone config show your_remote_name
-
-# Verify remote name in .env
-grep RCLONE_REMOTE_NAME .env
-```
-
-**Solutions**:
-```bash
-# Reconfigure rclone
-rclone config
-
-# Update remote name in .env
-nano .env
-# Set: RCLONE_REMOTE_NAME=your_remote_name
-
-# Test with small file
-echo "test" | rclone rcat your_remote_name:test.txt
-rclone cat your_remote_name:test.txt
-
-# Retry backup with rclone sync
-./backup.sh --type db --rclone
-```
-
-## Security Issues
-
-### Fail2Ban Not Blocking
-
-**Symptoms**:
-- Repeated failed login attempts
-- IPs not being banned
-- Fail2ban inactive
-
-**Diagnosis**:
-```bash
-# Check fail2ban status
 docker compose exec fail2ban fail2ban-client status
-
-# Check specific jail
 docker compose exec fail2ban fail2ban-client status vaultwarden-auth
-
-# View logs
-docker compose logs fail2ban | tail -100
-
-# Verify Cloudflare action is reachable
-docker compose logs fail2ban | grep -i cloudflare
-```
-
-**Solutions**:
-```bash
-# Restart fail2ban
-docker compose restart fail2ban
-
-# Verify Cloudflare firewall token
-./edit-secrets.sh
-# Check: fail2ban_cloudflare_firewall_token
-
-# Test Cloudflare API
-curl -X GET "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/firewall/access_rules/rules" \
-     -H "Authorization: Bearer YOUR_FIREWALL_TOKEN"
-
-# Test filter regex against live log
-docker compose exec fail2ban fail2ban-regex \
-  /var/log/vaultwarden/vaultwarden.log \
-  /data/fail2ban/filter.d/vaultwarden-auth.conf
-```
-
-### Admin Panel Inaccessible
-
-**Symptoms**:
-- 401 Unauthorized errors
-- Basic auth prompts repeatedly
-- Cannot login to /admin
-
-**Diagnosis**:
-```bash
-# Check Caddy basic auth configuration
-docker compose logs caddy | grep admin
-
-# Verify admin_basic_auth_hash in secrets
+docker compose logs fail2ban
 ./edit-secrets.sh --test
 ```
 
-**Solutions**:
+If the deployment is proxied through Cloudflare, remember that web response behavior is built around edge enforcement rather than only local host firewall changes.
+
+---
+
+## Backup and restore issues
+
+### Backup failures
+
 ```bash
-# Generate a new bcrypt hash using the Caddy image already in use
-docker run --rm -it ghcr.io/caddybuilds/caddy-cloudflare:latest caddy hash-password
-
-# Update secrets with new hash
-./edit-secrets.sh
-# Set: admin_basic_auth_hash (paste bcrypt hash)
-
-# Restart Caddy to apply new hash
-docker compose restart caddy
-
-# Test admin access
-curl -u "admin:your_password" https://vault.example.com/admin
+df -h
+./backup.sh --type db
+./backup.sh --type full --full-verification
+ls -la secrets/keys/age-key.txt
 ```
 
-### Break-Glass Admin Not Working
+Common causes:
 
-**Symptoms**:
-- Cannot login via OCI console
-- SSH key authentication fails
-- Emergency access unavailable
+- Low disk space.
+- Missing or invalid Age key.
+- rclone remote misconfiguration.
+- Permission issues around backup paths.
 
-**Diagnosis**:
-```bash
-# Check break-glass admin status
-sudo ./create-breakglass-admin.sh --status
-make breakglass-status
+### Restore uncertainty
 
-# Verify user exists
-sudo id vw-breakglass
-
-# Check SSH configuration
-sudo cat /home/vw-breakglass/.ssh/authorized_keys
-```
-
-**Solutions**:
-```bash
-# Remove and recreate break-glass admin
-sudo ./create-breakglass-admin.sh --remove
-sudo ./create-breakglass-admin.sh --create
-# or:
-make breakglass-remove
-make breakglass-create
-
-# Test via OCI Console
-# Navigate to: OCI Console → Instance → Console Connection
-```
-
-## Performance Issues
-
-### High CPU Usage
-
-**Symptoms**:
-- System slow or unresponsive
-- High CPU percentage in docker stats
-- Services timing out
-
-**Diagnosis**:
-```bash
-# Check container CPU usage
-docker stats --no-stream
-
-# Check for runaway processes
-docker compose top
-
-# Review resource limits
-docker inspect vaultwarden_app | grep -A 10 CPU
-```
-
-**Solutions**:
-```bash
-# Adjust CPU limits in template (defaults: VW 0.3, Caddy 0.25, Fail2Ban 0.15, Postfix 0.1)
-nano docker-compose.yml.example
-# Increase cpus value for affected container
-
-# Regenerate and apply
-sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
-./startup.sh --force
-
-# Run database maintenance if VaultWarden is CPU-heavy
-sudo ./maintenance.sh --db-maint
-```
-
-### High Memory Usage
-
-**Symptoms**:
-- Out of memory errors
-- Containers being killed
-- System swapping heavily
-
-**Diagnosis**:
-```bash
-# Check memory usage
-docker stats --no-stream
-
-# Check for memory leaks
-docker compose logs | grep -i "out of memory"
-
-# Review memory limits
-docker inspect vaultwarden_app | grep -A 10 Memory
-```
-
-**Solutions**:
-```bash
-# Adjust memory limits in template
-# Defaults: VaultWarden 512M, Caddy 512M, Fail2Ban 512M, Postfix 256M
-nano docker-compose.yml.example
-
-# Regenerate and restart
-sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
-./startup.sh --force
-
-# Run comprehensive maintenance to free resources
-./maintenance.sh --comprehensive
-```
-
-### Slow Database Performance
-
-**Symptoms**:
-- Slow web vault responses
-- Database timeouts
-- High database file size
-
-**Diagnosis**:
-```bash
-# Check database size
-du -h ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data/db.sqlite3
-
-# Check database integrity (ephemeral alpine container)
-docker run --rm \
-  -v "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data/bwdata:/data" \
-  alpine:latest \
-  sh -c "apk add --no-cache sqlite >/dev/null 2>&1 && sqlite3 /data/db.sqlite3 'PRAGMA integrity_check;'"
-
-# Review VaultWarden logs
-docker compose logs vaultwarden | grep -i slow
-```
-
-**Solutions**:
-```bash
-# Deep database maintenance: VACUUM + WAL checkpoint + optimize
-sudo ./maintenance.sh --db-maint
-make db-maint
-
-# Non-interactive (skip confirmation prompt)
-sudo ./maintenance.sh --db-maint --force
-
-# Review and remove old items via admin panel:
-# https://vault.example.com/admin → Users → Purge Trash / Sends
-
-# Restart VaultWarden
-docker compose restart vaultwarden
-```
-
-## Cron / Automation Issues
-
-### Cron Jobs Not Running
-
-**Symptoms**:
-- No entries in cron log files
-- Scheduled backups or maintenance not occurring
-- Health alerts not being sent
-
-**Diagnosis**:
-```bash
-# List installed VaultWarden cron jobs
-sudo ./cron-setup.sh --list
-make cron-list
-
-# Validate security and dependencies
-sudo ./cron-setup.sh --validate
-
-# Check cron logs
-tail -50 /var/log/vaultwarden-cron/maintenance.log
-tail -50 /var/log/vaultwarden-cron/backup.log
-tail -50 /var/log/vaultwarden-cron/health.log
-
-# Check cron service
-systemctl status cron
-```
-
-**Solutions**:
-```bash
-# (Re-)install cron jobs
-sudo ./cron-setup.sh --install
-make cron-install
-
-# After pulling a repo update, re-install to sync /opt/ scripts
-sudo ./cron-setup.sh --install
-
-# Check for split-brain (stale /opt/ scripts)
-sudo ./cron-setup.sh --list
-# Look for: ⚠️ SPLIT-BRAIN DETECTED warning
-
-# Verify flock is installed
-command -v flock || sudo apt install util-linux
-```
-
-## Getting Help
-
-### Diagnostic Information to Collect
-
-When reporting issues, include:
+Prefer the interactive restore flow when you are unsure which archive to trust:
 
 ```bash
-# System information
-./health.sh --comprehensive --json > health-report.json
-
-# Service logs
-docker compose logs > service-logs.txt
-
-# Configuration (sanitized)
-docker compose config > config.txt
-cat .env | grep -v "PASSWORD\|TOKEN\|SECRET" > env-sanitized.txt
-
-# Resource usage
-docker stats --no-stream > resource-usage.txt
-
-# Version information
-make version > version-info.txt
-
-# Cron job status
-sudo ./cron-setup.sh --list > cron-status.txt
-```
-
-### Emergency Recovery
-
-If all else fails:
-
-```bash
-# 1. Stop services
-docker compose down
-
-# 2. Create emergency backup (if possible)
-./backup.sh --type emergency
-
-# 3. Restore from last known good backup
 ./restore.sh
+```
 
-# 4. If complete failure, rebuild from emergency kit
-# See BACKUP-RESTORE.md → Complete System Loss
+If you need a targeted restore:
 
-# 5. Contact support with diagnostic information
+```bash
+./restore.sh --latest --type db
+./restore.sh --latest --type full --force
+```
+
+After any restore, run:
+
+```bash
+./health.sh --comprehensive
 ```
 
 ---
 
-This troubleshooting guide covers common issues and their solutions for VaultWarden-OCI. For issues not covered here, check the GitHub issues or create a new issue with the diagnostic information collected above.
+## Cron and reboot issues
+
+### Jobs stopped working after reboot
+
+The project uses `/run/vaultwarden-locks/` for flock-protected jobs, and `/run` is cleared at reboot.
+
+Validate or recreate the lock setup:
+
+```bash
+sudo ./cron-setup.sh --validate
+sudo ./cron-setup.sh --install
+```
+
+For automatic recreation:
+
+```bash
+echo 'd /run/vaultwarden-locks 0700 root root -' | sudo tee /etc/tmpfiles.d/vaultwarden-locks.conf
+sudo systemd-tmpfiles --create
+```
+
+### Cron drift or stale automation
+
+```bash
+sudo ./cron-setup.sh --list
+sudo ./cron-setup.sh --validate
+```
+
+Use `cron-setup.sh` rather than manual cron edits so the scheduled model matches the current repository state.
+
+---
+
+## Update problems
+
+### Service unhealthy after update
+
+Use the project’s normal update and recovery model.
+
+```bash
+./update.sh
+./health.sh --comprehensive
+```
+
+If a rollback is needed manually:
+
+```bash
+./restore.sh --latest --type full --force
+./health.sh
+```
+
+### Unexpected behavior after config or version change
+
+Return to the template-first path:
+
+```bash
+sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.com
+./startup.sh --force
+./health.sh
+```
+
+This is often faster and safer than trying to debug undocumented drift in generated files.
+
+---
+
+## High resource usage
+
+```bash
+docker stats --no-stream
+du -sh ${PROJECT_STATE_DIR}/logs/*
+./maintenance.sh --comprehensive
+```
+
+Investigate:
+
+- Log growth.
+- Backup accumulation.
+- Container memory pressure.
+- Database maintenance needs.
+
+If the database appears bloated or fragmented, consider the deeper maintenance path during a quiet window:
+
+```bash
+sudo ./maintenance.sh --db-maint
+```
+
+---
+
+## When to restore instead of debug
+
+Consider restoring or rebuilding when:
+
+- Multiple services are failing after risky changes.
+- Secrets, templates, and runtime files have drifted badly.
+- A recent known-good backup exists.
+- Recreating the environment cleanly will be faster than uncertain manual repair.
+
+Useful recovery commands:
+
+```bash
+./backup.sh --list
+./restore.sh
+./restore.sh --file /path/to/backup.age --force
+```
+
+A disciplined restore is often safer than continuing to patch a deployment you no longer trust.

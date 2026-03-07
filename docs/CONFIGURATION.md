@@ -1,190 +1,190 @@
 # Configuration Reference — VaultWarden-OCI
 
-All configuration is split between two files: **`.env`** (non-sensitive settings) and **`secrets/secrets.yaml`** (encrypted with Age + SOPS, edited via `./edit-secrets.sh`). Both are generated from `.example` templates by `setup.sh` — never edit generated files directly.
+This guide reflects the current configuration model for the project: template-generated runtime files, non-sensitive settings in `.env`, and encrypted secret material managed through Age + SOPS.
 
-Related docs: [DEPLOYMENT.md](DEPLOYMENT.md) · [SECURITY.md](SECURITY.md) · [ADVANCED-CUSTOMIZATION.md](ADVANCED-CUSTOMIZATION.md)
+Related docs: [DEPLOYMENT.md](DEPLOYMENT.md) · [ADVANCED-CUSTOMIZATION.md](ADVANCED-CUSTOMIZATION.md) · [SECURITY.md](SECURITY.md)
 
 ---
 
-## 📋 Configuration Workflow
+## Configuration model
+
+Treat configuration as three layers:
+
+| Layer | Purpose | How it is managed |
+| :-- | :-- | :-- |
+| `.example` templates | Source of truth for generated runtime files | Edit in the repo, then regenerate with `setup.sh` |
+| `.env` | Non-sensitive deployment settings | Review after setup; regenerate from `.env.example` as needed |
+| `secrets/secrets.yaml` | Sensitive values | Manage only through `setup-secrets.sh` or `edit-secrets.sh` |
+
+Generated runtime files are deployment artifacts, not the long-term source of truth.
+
+---
+
+## Normal workflow
+
+Use this flow when changing configuration:
 
 ```bash
-# Initial setup (generates .env and docker-compose.yml from templates)
-sudo ./setup.sh --domain vault.yourdomain.com --email admin@yourdomain.com --auto
+# 1. Update templates or review generated .env
+nano .env.example
+nano docker-compose.yml.example
+nano docker-compose.override.yml.example
 
-# Edit non-sensitive settings
-nano .env
+# 2. Reapply generated config
+sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
 
-# Edit sensitive secrets (encrypted)
-./edit-secrets.sh
-
-# Validate
-docker compose config
-
-# Apply changes
-sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.com
+# 3. Restart and validate
 ./startup.sh --force
+./health.sh
 ```
 
+For secret-only changes, use the secrets tooling and skip template regeneration unless the non-secret config also changed.
+
 ---
 
-## 🌍 Core Settings
+## Core identity settings
+
+These values define the deployment identity and should be reviewed early in every install:
 
 ```bash
-# Your VaultWarden URL — MUST include https://
 DOMAIN=https://vault.yourdomain.com
-
-# Bare domain (no protocol) — used by Caddy, Fail2Ban, and Postfix
 DOMAIN_NAME=vault.yourdomain.com
-
-# Admin contact for notifications and Fail2Ban emails
 ADMIN_EMAIL=admin@yourdomain.com
-
-# Cloudflare Zone ID — find in Cloudflare dashboard → Overview → right sidebar
 CLOUDFLARE_ZONE_ID=your_zone_id_here
 ```
 
-> **⚠️** `DOMAIN` requires `https://`. `DOMAIN_NAME` is the bare hostname without protocol. Both are required and used by different services.
+Keep `DOMAIN` as the full HTTPS URL and `DOMAIN_NAME` as the bare hostname.
 
 ---
 
-## 📁 User & Directory
+## Host and path settings
+
+Common deployment-level settings include:
 
 ```bash
-PUID=1000                              # Container file ownership UID
-PGID=1000                              # Container file ownership GID
-PROJECT_STATE_DIR=/var/lib/vaultwarden # Data, logs, and config root
-TZ=UTC                                 # Timezone (affects all container logs)
-SSH_PORT=22                            # SSH port for Fail2Ban SSH jail
-SSH_LOG_PATH=/var/log/secure           # Auto-detected by setup.sh (OCI default)
-# Debian/Ubuntu: /var/log/auth.log
-# Oracle Linux / RHEL: /var/log/secure
+PUID=1000
+PGID=1000
+PROJECT_STATE_DIR=/var/lib/vaultwarden
+TZ=UTC
+SSH_PORT=22
+SSH_LOG_PATH=/var/log/secure
 ```
 
+`SSH_LOG_PATH` can vary by platform. OCI and Oracle Linux commonly use `/var/log/secure`, while Ubuntu commonly uses `/var/log/auth.log`.
+
 ---
 
-## 📦 Container Versions
+## Version settings
+
+The project supports both controlled pinning and newer-image workflows.
+
+Typical version variables include:
 
 ```bash
-VAULTWARDEN_VERSION=1.34.3   # Pin for stability; blank = latest
-CADDY_VERSION=2.10.2          # Must include Cloudflare module
+VAULTWARDEN_VERSION=1.34.3
+CADDY_VERSION=2.10.2
 FAIL2BAN_VERSION=1.1.0
-POSTFIX_VERSION=4.4.0         # bokysan/docker-postfix email relay
+POSTFIX_VERSION=4.4.0
 ```
 
-To override versions at runtime without editing files:
-
-```bash
-SOPS_VERSION=v3.9.4 sudo ./setup.sh --domain vault.yourdomain.com --email admin@yourdomain.com
-```
-
-See [ADVANCED-CUSTOMIZATION.md](ADVANCED-CUSTOMIZATION.md) for version pinning details.
+For conservative production operation, keep explicit versions and apply changes through `./update.sh`. If you intentionally want newer image behavior during setup generation, use `setup.sh --use-latest`.
 
 ---
 
-## 🔒 Secrets (Encrypted)
+## Secret management
 
-Manage secrets with `./edit-secrets.sh`. They are encrypted with Age + SOPS; never stored in plaintext.
+Sensitive values belong in encrypted secrets, not in `.env`.
 
-### Required Secrets
+Primary tools:
 
-| Secret | Purpose | How to Get |
-| :-- | :-- | :-- |
-| `admin_basic_auth_hash` | Bcrypt hash for Caddy `/admin` basic auth | `docker run --rm -it ghcr.io/caddybuilds/caddy-cloudflare:latest caddy hash-password` |
-| `caddy_cloudflare_dns_token` | Caddy DNS-01 challenge (Zone:DNS:Edit + Zone:Zone:Read) | [Cloudflare API Tokens](https://dash.cloudflare.com/profile/api-tokens) |
-| `fail2ban_cloudflare_firewall_token` | Fail2Ban edge banning (Zone:Firewall Services:Edit) | [Cloudflare API Tokens](https://dash.cloudflare.com/profile/api-tokens) |
+```bash
+./setup-secrets.sh
+./edit-secrets.sh
+./edit-secrets.sh --test
+./edit-secrets.sh --list
+```
 
-### Optional Secrets
+Common secret fields include:
 
 | Secret | Purpose |
 | :-- | :-- |
-| `smtp_password` | SMTP relay password for Postfix/VaultWarden email |
-| `push_installation_id` | Bitwarden push notification installation ID |
-| `push_installation_key` | Bitwarden push notification installation key |
+| `admin_basic_auth_hash` | Protects the admin surface |
+| `caddy_cloudflare_dns_token` | Cloudflare DNS/TLS integration |
+| `fail2ban_cloudflare_firewall_token` | Edge-ban automation |
+| `smtp_password` | SMTP relay authentication |
+| `push_installation_id` | Push notification support |
+| `push_installation_key` | Push notification support |
 
-> **Note:** `fail2ban_cloudflare_firewall_token` is mandatory if you want edge blocking. Without it, Fail2Ban can detect attacks but cannot push bans to Cloudflare WAF.
+For `--auto` installations, locally generated credentials may already exist, but external-service secrets still need to be filled in explicitly.
 
 ---
 
-## 📧 Email Configuration (Postfix)
+## Email settings
 
-Email is delivered by a **`bokysan/docker-postfix`** sidecar container acting as an SMTP relay. Configure the relay in `.env`; the password goes in secrets.
+Mail is handled through the containerized Postfix relay used by the deployment.
+
+Common non-secret SMTP settings belong in `.env`:
 
 ```bash
-# SMTP relay settings (shared by VaultWarden and Postfix)
 SMTP_HOST=smtp.gmail.com
 SMTP_PORT=587
-SMTP_SECURITY=starttls              # starttls or on (SSL/TLS)
-SMTP_USERNAME=your-email@gmail.com
+SMTP_SECURITY=starttls
+SMTP_USERNAME=your-user@example.com
 SMTP_FROM=noreply@vault.yourdomain.com
 SMTP_FROM_NAME=VaultWarden
 SMTP_TIMEOUT=15
-
-# Postfix-specific
 ALLOWED_SENDER_DOMAINS="vault.yourdomain.com yourdomain.com"
 POSTFIX_MYHOSTNAME=postfix.vault.yourdomain.com
-POSTFIX_SMTP_TLS_SECURITY_LEVEL=encrypt   # encrypt | may | none
-POSTFIX_MESSAGE_SIZE_LIMIT=10240000        # 10 MB
+POSTFIX_SMTP_TLS_SECURITY_LEVEL=encrypt
+POSTFIX_MESSAGE_SIZE_LIMIT=10240000
 ```
 
-SMTP password:
+Store the actual SMTP password in encrypted secrets and validate end to end with:
 
 ```bash
-./edit-secrets.sh   # set: smtp_password
+./maintenance.sh --test-email --verbose
 ```
-
-Test end-to-end delivery:
-
-```bash
-./test-email-simple.sh --verbose
-# or: ./maintenance.sh --test-email --verbose
-# or: make test-email
-```
-
-> The Postfix container relays through your `SMTP_HOST`. `RELAYHOST`, `RELAYHOST_USERNAME`, and `RELAYHOST_PASSWORD` are constructed automatically from `SMTP_*` variables in `docker-compose.yml` — do not set them manually.
 
 ---
 
-## 🔔 VaultWarden Application Settings
+## VaultWarden application settings
+
+Application behavior is driven by environment settings exposed through the generated configuration.
+
+Common categories include:
+
+- Signup and invitation policy.
+- Emergency access and send behavior.
+- Password and hint policy.
+- Organization and event retention behavior.
+- Database connection and timeout tuning.
+- Icon and cache settings.
+
+Example values commonly reviewed:
 
 ```bash
-# Registration
-SIGNUPS_ALLOWED=false             # Disable open registration (recommended)
-INVITATIONS_ALLOWED=true          # Admin-controlled invites
+SIGNUPS_ALLOWED=false
+INVITATIONS_ALLOWED=true
 EMERGENCY_ACCESS_ALLOWED=true
 SENDS_ALLOWED=true
 WEB_VAULT_ENABLED=true
-
-# Security
-PASSWORD_ITERATIONS=600000        # Argon2 / PBKDF2 iterations
 PASSWORD_HINTS_ALLOWED=false
-SHOW_PASSWORD_HINT=false
-DISABLE_ADMIN_TOKEN=false
-DISABLE_ICON_DOWNLOAD=false
-
-# Icon cache
-ICON_CACHE_TTL=2592000
-ICON_CACHE_NEGTTL=259200
-
-# Organisation & events
-ORG_CREATION_USERS=               # Blank = anyone; or comma-separated emails
 ORG_EVENTS_ENABLED=false
 EVENTS_DAYS_RETAIN=365
-
-# Maintenance
 TRASH_AUTO_DELETE_DAYS=30
-INCOMPLETE_2FA_TIME_LIMIT=3
-
-# Database
 DATABASE_MAX_CONNS=10
 DATABASE_TIMEOUT=30
 ```
 
+Use the generated `.env` plus the templates as your final reference for what is deployed in your environment.
+
 ---
 
-## 📲 Push Notifications
+## Push settings
 
-Register at <https://bitwarden.com/host> to get an installation ID and key, then set:
+If you use Bitwarden-compatible push notifications, review the push-related environment values and supply the installation credentials as encrypted secrets.
+
+Typical environment values include:
 
 ```bash
 PUSH_ENABLED=true
@@ -192,65 +192,54 @@ PUSH_RELAY_URI=https://push.bitwarden.com
 PUSH_IDENTITY_URI=https://identity.bitwarden.com
 ```
 
-Add `push_installation_id` and `push_installation_key` via `./edit-secrets.sh`.
+Then set `push_installation_id` and `push_installation_key` through `edit-secrets.sh`.
 
 ---
 
-## 🚫 Fail2Ban
+## Fail2ban and Cloudflare settings
+
+Fail2ban is designed around Cloudflare-backed edge enforcement for proxied web traffic.
+
+Common tunables include:
 
 ```bash
 F2B_LOG_TARGET=STDOUT
 F2B_LOG_LEVEL=INFO
 F2B_DB_PURGE_AGE=1d
 F2B_MAX_RETRY=3
-F2B_DEST_MAIL="${ADMIN_EMAIL}"    # Ban notification recipient
+F2B_DEST_MAIL="${ADMIN_EMAIL}"
 F2B_SENDER="fail2ban@${DOMAIN_NAME}"
-F2B_ACTION="%(action_mwl)s"        # Email + Cloudflare ban
+F2B_ACTION="%(action_mwl)s"
 ```
 
-> All web-facing jails push bans to **Cloudflare Edge WAF via API** — local `iptables` is not used for proxied services. Only the SSH jail uses local iptables.
+The SSH path remains a host-level concern, while web-facing bans are designed around Cloudflare integration rather than local `iptables` blocking for proxied traffic.
 
 ---
 
-## 💾 Backup
+## Backup settings
+
+Backup behavior should be configured according to your recovery goals.
+
+Typical settings and related controls include:
 
 ```bash
-BACKUP_VERIFICATION_MODE=quick_check   # quick_check or integrity_check
-BACKUP_SCHEDULE="0 2 * * *"            # Cron schedule for automated backups
-BACKUP_RETENTION_DAYS=30               # Retention for full backups
-RCLONE_REMOTE_NAME=CHANGE_ME_RCLONE_REMOTE  # rclone remote for offsite sync
+BACKUP_VERIFICATION_MODE=quick_check
+RCLONE_REMOTE_NAME=your_remote_name
 ```
 
-See [BACKUP-RESTORE.md](BACKUP-RESTORE.md) for procedures.
+Retention should be treated as configurable. Use deployed `.env` values for defaults, and use `./backup.sh --keep N` when you need a run-specific override.
 
 ---
 
-## 🛠️ Troubleshooting Configuration
+## Validation and troubleshooting
 
-**Validate before applying:**
-
-```bash
-docker compose config                              # validate generated compose
-docker compose -f docker-compose.yml.example config  # validate template
-```
-
-**Regenerate from templates:**
+Validate generated config before applying or after changing it:
 
 ```bash
-sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.com
+docker compose config
+docker compose -f docker-compose.yml.example config
+./edit-secrets.sh --test
+./health.sh --comprehensive
 ```
 
-**Secrets issues:**
-
-```bash
-ls -l secrets/keys/age-key.txt   # must exist and be mode 600
-./edit-secrets.sh                 # verify decryption works
-```
-
-**Email issues:**
-
-```bash
-docker compose logs postfix
-./test-email-simple.sh --verbose
-grep SMTP .env
-```
+If configuration drift or breakage is suspected, return to the template-first flow, regenerate with `setup.sh --force`, then restart with `startup.sh --force`.
