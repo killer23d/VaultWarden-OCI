@@ -557,13 +557,27 @@ PYEOF
 )
 
     printf '%s' "$full_body" > "$body_tmp"
+
+    # Write the Python script to a secure temp file to avoid single-quote
+    # injection: the email_script contains Python single-quoted strings
+    # ('plain', 'No Subject', etc.) that would terminate an outer sh -c '...'
+    # argument prematurely if embedded directly.
+    local script_tmp
+    script_tmp=$(mktemp /tmp/vw_email_XXXXXX.py)
+    install -m 600 /dev/null "$script_tmp"
+    printf '%s\n' "$email_script" > "$script_tmp"
+
+    # Copy script into container, execute it, then clean up both copies.
+    docker compose cp "$script_tmp" fail2ban:/tmp/.vw_email_send.py 2>/dev/null || true
+    rm -f "$script_tmp" 2>/dev/null || true
+
     if docker compose exec -T \
         -e EMAIL_FROM="${SMTP_FROM:-vaultwarden@${DOMAIN_NAME:-localhost}}" \
         -e EMAIL_TO="$admin_email" \
         -e EMAIL_SUBJECT="$full_subject" \
         -e SMTP_HOST="$smtp_host" \
         -e SMTP_PORT="$smtp_port" \
-        fail2ban sh -c "cat >/tmp/.vw_email_body && python3 -c '$email_script'; rc=$?; rm -f /tmp/.vw_email_body; exit $rc" < "$body_tmp"; then
+        fail2ban sh -c "cat >/tmp/.vw_email_body && python3 /tmp/.vw_email_send.py; rc=\$?; rm -f /tmp/.vw_email_body /tmp/.vw_email_send.py; exit \$rc" < "$body_tmp"; then
         rm -f "$body_tmp" 2>/dev/null || true
         # Write rate-limit stamp only on successful send.
         date +%s > "$stamp_file" 2>/dev/null || true
@@ -633,7 +647,13 @@ validate_port() {
 
 validate_ip() {
     local ip="$1"
-    [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]
+    local -i octet
+    [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+    IFS='.' read -ra octets <<< "$ip"
+    for octet in "${octets[@]}"; do
+        (( octet >= 0 && octet <= 255 )) || return 1
+    done
+    return 0
 }
 
 validate_url() {

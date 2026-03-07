@@ -457,16 +457,19 @@ install_cron_jobs() {
     #   is intentionally fatal (a corrupt offsite backup = worthless DR).
     local cron_jobs=(
         # FIX-C04: cd || exit 1  FIX-C02: log skip event  FIX [ISSUE 9]: Mon-Sat only
-        "0 2 * * 1-6 cd $PROJECT_ROOT || exit 1; ($fl $ml $CRON_SCRIPTS_DIR/maintenance.sh --comprehensive || echo SKIPPED:maintenance-already-running) >> $CRON_LOG_DIR/maintenance.log 2>&1"
+        # NEW-08: mkdir ensures lock dir exists after reboot (tmpfs /run cleared)
+        "0 2 * * 1-6 cd $PROJECT_ROOT || exit 1; mkdir -p $CRON_LOCK_DIR 2>/dev/null || true; ($fl $ml $CRON_SCRIPTS_DIR/maintenance.sh --comprehensive || echo SKIPPED:maintenance-already-running) >> $CRON_LOG_DIR/maintenance.log 2>&1"
 
         # FIX MEDIUM-NEW-01: DB backup now Mon-Sat only (prevents Sunday 4 AM race with 3 AM full backup via shared lock)
         "0 4 * * 1-6 cd $PROJECT_ROOT || exit 1; $CRON_SCRIPTS_DIR/backup.sh --type db --rclone --email >> $CRON_LOG_DIR/backup.log 2>&1"
 
         # FIX-C04: cd || exit 1  FIX-C02: log skip event
-        "*/30 * * * * cd $PROJECT_ROOT || exit 1; ($fl $hl $CRON_SCRIPTS_DIR/health.sh --quiet || echo SKIPPED:health-already-running) >> $CRON_LOG_DIR/health.log 2>&1"
+        # NEW-08: mkdir ensures lock dir exists after reboot (tmpfs /run cleared)
+        "*/30 * * * * cd $PROJECT_ROOT || exit 1; mkdir -p $CRON_LOCK_DIR 2>/dev/null || true; ($fl $hl $CRON_SCRIPTS_DIR/health.sh --quiet || echo SKIPPED:health-already-running) >> $CRON_LOG_DIR/health.log 2>&1"
 
         # FIX-C04: cd || exit 1  FIX-C02: log skip event  FIX-C05: flock added
-        "0 4 * * 6 cd $PROJECT_ROOT || exit 1; ($fl $fw $CRON_SCRIPTS_DIR/maintenance.sh --update-firewall || echo SKIPPED:firewall-update-already-running) >> $CRON_LOG_DIR/firewall.log 2>&1"
+        # NEW-08: mkdir ensures lock dir exists after reboot (tmpfs /run cleared)
+        "0 4 * * 6 cd $PROJECT_ROOT || exit 1; mkdir -p $CRON_LOCK_DIR 2>/dev/null || true; ($fl $fw $CRON_SCRIPTS_DIR/maintenance.sh --update-firewall || echo SKIPPED:firewall-update-already-running) >> $CRON_LOG_DIR/firewall.log 2>&1"
 
         # FIX-C04: cd || exit 1  (backup has its own internal flock — no wrapper needed)
         # --full-verification is intentionally FATAL: corrupt offsite = worthless DR.
@@ -474,7 +477,8 @@ install_cron_jobs() {
         "0 3 * * 0 cd $PROJECT_ROOT || exit 1; $CRON_SCRIPTS_DIR/backup.sh --type full --full-verification --rclone --email >> $CRON_LOG_DIR/backup.log 2>&1"
 
         # FIX-C04: cd || exit 1  FIX-C02: log skip event  FIX-C05: flock added
-        "0 * * * * cd $PROJECT_ROOT || exit 1; ($fl $dl $CRON_SCRIPTS_DIR/maintenance.sh --update-dns || echo SKIPPED:dns-update-already-running) >> $CRON_LOG_DIR/dns-update.log 2>&1"
+        # NEW-08: mkdir ensures lock dir exists after reboot (tmpfs /run cleared)
+        "0 * * * * cd $PROJECT_ROOT || exit 1; mkdir -p $CRON_LOCK_DIR 2>/dev/null || true; ($fl $dl $CRON_SCRIPTS_DIR/maintenance.sh --update-dns || echo SKIPPED:dns-update-already-running) >> $CRON_LOG_DIR/dns-update.log 2>&1"
     )
 
     # FIX-C01: Use mktemp instead of /tmp/vaultwarden_cron.$$ to prevent

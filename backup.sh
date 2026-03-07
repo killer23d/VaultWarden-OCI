@@ -416,7 +416,7 @@ perform_db_backup() {
     cat > "${enc}.meta" <<MEOF
 type=db
 timestamp=$timestamp
-original_size=$(_stat_file_size "$db_file" 2>/dev/null || echo 0)
+original_size=$(stat -c%s "$db_file" 2>/dev/null || stat -f%z "$db_file" 2>/dev/null || echo 0)
 archive_format=relative
 version=2
 MEOF
@@ -534,6 +534,10 @@ perform_full_backup() {
         compressed_size=$(stat -c%s "$temp_tar" 2>/dev/null || echo 0)
         snap_size=$(stat -c%s "$snap_db" 2>/dev/null || echo 0)
         available_kb=$(df -k "$(dirname "$temp_tar")" | awk 'NR==2{print $4}')
+        if [[ -z "$available_kb" || "$available_kb" == "0" ]]; then
+            log_warn "Could not determine available disk space — proceeding with caution"
+            available_kb=0
+        fi
         required_kb=$(( (compressed_size * 9 + snap_size) / 1024 + 1048576 ))
 
         if (( available_kb < required_kb )); then
