@@ -161,7 +161,9 @@ check_backup_disk_space() {
     # BUG-B1 FIX: portable df — column 4 is Available (1 KiB blocks) on
     # both GNU df and BSD/macOS df.
     local available_space_kb
-    available_space_kb=$(df "$target_dir" 2>/dev/null | awk 'NR==2 {print $4}')
+    # FIX [L-11]: Use awk 'END' (last line) instead of 'NR==2' to handle long
+    # filesystem paths that cause df to wrap output across two lines.
+    available_space_kb=$(df "$target_dir" 2>/dev/null | awk 'END {print $4}')
 
     if [[ -z "$available_space_kb" ]] || ! [[ "$available_space_kb" =~ ^[0-9]+$ ]]; then
         log_error "Cannot determine available disk space for: $target_dir"

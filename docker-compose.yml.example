@@ -36,7 +36,16 @@ services:
       chown -R ${PUID}:${PGID} /data /logs /fail2ban 2>/dev/null || true &&
       find /caddy_data -type d -exec chown ${PUID}:${PGID} {} + 2>/dev/null || true &&
       find /caddy_config -type d -exec chown ${PUID}:${PGID} {} + 2>/dev/null || true &&
-      chmod -R 755 /data /logs /caddy_data /caddy_config /fail2ban 2>/dev/null || true &&
+      find /data -type d -exec chmod 750 {} + 2>/dev/null || true &&
+      find /data -type f -exec chmod 640 {} + 2>/dev/null || true &&
+      find /logs -type d -exec chmod 750 {} + 2>/dev/null || true &&
+      find /logs -type f -exec chmod 640 {} + 2>/dev/null || true &&
+      find /caddy_data -type d -exec chmod 750 {} + 2>/dev/null || true &&
+      find /caddy_data -type f -exec chmod 640 {} + 2>/dev/null || true &&
+      find /caddy_config -type d -exec chmod 750 {} + 2>/dev/null || true &&
+      find /caddy_config -type f -exec chmod 640 {} + 2>/dev/null || true &&
+      find /fail2ban -type d -exec chmod 750 {} + 2>/dev/null || true &&
+      find /fail2ban -type f -exec chmod 640 {} + 2>/dev/null || true &&
       chmod 755 /secrets /secrets/.docker_secrets 2>/dev/null || true &&
       chmod 644 /secrets/.docker_secrets/* 2>/dev/null || true &&
       echo 'Init container completed - permissions set to ${PUID}:${PGID}'
@@ -107,10 +116,6 @@ services:
     volumes:
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data:/data
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/vaultwarden:/logs
-
-    depends_on:
-      caddy:
-        condition: service_started
 
     networks:
       - vaultwarden
@@ -318,6 +323,8 @@ services:
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy:/var/log/caddy:ro
       - ${SSH_LOG_PATH:-/var/log/secure}:/var/log/ssh-auth.log:ro
 
+    cap_drop:
+      - ALL
     cap_add:
       - NET_ADMIN
       - NET_RAW

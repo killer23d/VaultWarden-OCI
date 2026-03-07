@@ -28,6 +28,8 @@ VIEW_ONLY=false
 LIST_KEYS=false
 ROTATE_FIELD=""   # non-empty triggers --rotate mode
 EXPORT_RECOVERY_KIT=false
+# FIX [L-07]: Maximum recursive edit attempts before aborting
+readonly MAX_EDIT_ATTEMPTS=5
 
 # ---------------------------------------------------------------------------
 # Cleanup
@@ -267,6 +269,52 @@ _validate_rotate_field() {
     return 1
 }
 
+# FIX [M-10]: Deploy all Docker secret files from the encrypted YAML.
+# Mirrors the logic in startup.sh prepare_docker_secrets() so the bind-mounted
+# files in secrets/.docker_secrets/ stay in sync after a rotation.
+_deploy_docker_secrets() {
+    local docker_dir="$PROJECT_ROOT/secrets/.docker_secrets"
+    local temp_plain
+    temp_plain=$(mktemp --suffix=.yaml)
+    chmod 600 "$temp_plain"
+    register_cleanup "rm -f '$temp_plain'"
+
+    if ! sops -d "$SECRETS_FILE" > "$temp_plain" 2>/dev/null; then
+        log_error "Cannot decrypt secrets for Docker secret deployment"
+        return 1
+    fi
+
+    mkdir -p "$docker_dir"
+    chmod 700 "$docker_dir"
+
+    local old_umask; old_umask=$(umask); umask 077
+    local deployed=0 failed=0
+    local secret_fields=(
+        "admin_token" "admin_basic_auth_hash" "smtp_password"
+        "backup_passphrase" "push_installation_id" "push_installation_key"
+        "caddy_cloudflare_dns_token" "fail2ban_cloudflare_firewall_token"
+    )
+    for field_name in "${secret_fields[@]}"; do
+        local value
+        value=$(python3 - "$temp_plain" "$field_name" <<'PY'
+import sys, yaml
+with open(sys.argv[1], 'r', encoding='utf-8') as f:
+    data = yaml.safe_load(f) or {}
+v = data.get(sys.argv[2], "")
+print(v if v is not None else "", end="")
+PY
+)
+        if [[ -n "$value" ]] && [[ "$value" != "CHANGE_ME"* ]] && [[ "$value" != "null" ]]; then
+            printf '%s' "$value" > "$docker_dir/$field_name"
+            (( deployed++ ))
+        fi
+    done
+    umask "$old_umask"
+
+    log_debug "Docker secrets deployed: $deployed"
+    return 0
+}
+
 do_rotate() {
     local field="$1"
 
@@ -334,6 +382,16 @@ PYEOF
 
     log_success "Secret '$field' rotated successfully"
 
+    # FIX [M-10]: After successful rotation, redeploy Docker secret files so
+    # the live bind-mounted secrets stay in sync with the encrypted YAML.
+    log_info "Redeploying Docker secret files..."
+    if _deploy_docker_secrets 2>/dev/null; then
+        log_success "Docker secret files updated"
+        log_warn "Run 'docker compose restart <service>' for the new secret to take effect"
+    else
+        log_warn "Could not auto-redeploy Docker secret files. Run: ./startup.sh or ./setup-secrets.sh"
+    fi
+
     offer_recovery_kit_export "$EXPORT_RECOVERY_KIT"
 
     return 0
@@ -342,7 +400,14 @@ PYEOF
 # ---------------------------------------------------------------------------
 # Default: interactive edit
 # ---------------------------------------------------------------------------
+# FIX [L-07]: Added _depth parameter to prevent unbounded recursion when the
+# user repeatedly saves invalid YAML and chooses not to discard changes.
 do_edit() {
+    local _depth="${1:-0}"
+    if (( _depth > MAX_EDIT_ATTEMPTS )); then
+        log_error "Too many failed edit attempts (max ${MAX_EDIT_ATTEMPTS}). Aborting."
+        return 1
+    fi
     log_info "Opening secrets with: $EDITOR_CMD"
 
     local temp_file
@@ -375,13 +440,17 @@ do_edit() {
 
     if ! python3 -c "import yaml, sys; yaml.safe_load(open('$temp_file'))" 2>/dev/null; then
         log_error "Invalid YAML structure after editing"
-        read -r -p "Discard changes? (yes/no): " discard
+        # FIX [L-04]: Add -t 30 timeout
+        if ! read -r -t 30 -p "Discard changes? (yes/no): " discard; then
+            log_warn "No input received (30s timeout). Discarding changes."
+            discard="yes"
+        fi
         if [[ "$discard" == "yes" ]]; then
             log_info "Changes discarded"
             return 1
         else
             log_info "Re-opening editor to fix..."
-            do_edit
+            do_edit $(( _depth + 1 ))
             return $?
         fi
     fi

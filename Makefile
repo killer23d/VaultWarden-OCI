@@ -7,8 +7,9 @@
 COMPOSE_FILE ?= docker-compose.yml
 COMPOSE_PROJECT_NAME ?= vaultwarden-oci
 DOCKER_COMP ?= $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
+# FIX [L-08]: COMPOSE_DOCKER_CLI_BUILD is deprecated in Docker 23+ (BuildKit is on by default).
+# Removed COMPOSE_DOCKER_CLI_BUILD. DOCKER_BUILDKIT kept for contexts that still need it.
 DOCKER_BUILDKIT ?= 1
-COMPOSE_DOCKER_CLI_BUILD ?= 1
 
 # Service names
 SERVICES = vaultwarden caddy fail2ban postfix
@@ -24,7 +25,6 @@ NC = \033[0m # No Color
 
 # Export environment variables
 export DOCKER_BUILDKIT
-export COMPOSE_DOCKER_CLI_BUILD
 
 ## Default target
 help: ## Show this help message
@@ -49,7 +49,12 @@ setup: ## Run initial setup (requires sudo)
 
 init-secrets: ## Initialize secrets file (interactive)
 	@echo "$(BLUE)Initializing secrets...$(NC)"
-	@if [ ! -f "secrets/secrets.yaml" ]; then ./edit-secrets.sh --init; else echo "$(YELLOW)Secrets file exists. Use 'make edit-secrets'.$(NC)"; fi
+	@if [ ! -f "secrets/secrets.yaml" ]; then \
+		echo "$(BLUE)No secrets file found. Running setup-secrets.sh...$(NC)"; \
+		./setup-secrets.sh; \
+	else \
+		echo "$(YELLOW)Secrets file already exists. Use 'make edit-secrets' to modify.$(NC)"; \
+	fi
 
 edit-secrets: ## Edit encrypted secrets file
 	@echo "$(BLUE)Opening secrets editor...$(NC)"
@@ -229,9 +234,12 @@ clean: ## Clean up Docker resources only
 
 clean-all: ## Clean up everything (DESTRUCTIVE)
 	@echo "$(RED)WARNING: This will remove all containers, volumes, and data!$(NC)"
-	@read -r -p "Are you sure? Type 'yes' to continue: " confirm && [ "$$confirm" = "yes" ] || exit 1
-	@$(DOCKER_COMP) down -v --remove-orphans
-	@docker system prune -af --volumes
+	@if read -r -t 30 -p "Are you sure? Type 'yes' to continue: " confirm && [ "$$confirm" = "yes" ]; then \
+		$(DOCKER_COMP) down -v --remove-orphans; \
+		docker system prune -af --volumes; \
+	else \
+		echo "$(YELLOW)Aborted or timed out (30s). No data was deleted.$(NC)"; \
+	fi
 
 prune: ## Clean up unused Docker resources
 	@echo "$(BLUE)Pruning unused Docker resources...$(NC)"

@@ -359,7 +359,7 @@ run_deep_db_maintenance() {
         log_warn "This will stop the VaultWarden container temporarily. (Caddy stays up)"
         log_info "Database: $db_file  |  Current Size: $original_size"
         echo ""
-        read -r -p "Continue with deep database maintenance? (Y/n): " confirm
+        read -r -t 30 -p "Continue with deep database maintenance? (Y/n): " confirm || confirm="Y"
         [[ "$confirm" =~ ^[Nn]$ ]] && { log_info "Deep maintenance cancelled"; return 0; }
     fi
 
@@ -367,16 +367,25 @@ run_deep_db_maintenance() {
     local maintenance_successful=false
 
     log_info "Step 0/5: Creating pre-maintenance safety backup..."
-    if safety_backup_file=$(./backup.sh --type db 2>/dev/null); then
-        log_success "Safety backup created: $(basename "$safety_backup_file")"
-    else
-        log_error "Failed to create safety backup!"
+    # FIX [M-02]: backup.sh writes log lines to stdout — do not capture stdout as a file path.
+    # Capture a timestamp BEFORE running backup.sh, then find the newest db backup created after it.
+    local backup_ts_marker
+    backup_ts_marker=$(mktemp) && touch "$backup_ts_marker"
+    if ! ./backup.sh --type db; then
+        rm -f "$backup_ts_marker"
+        log_error "Pre-maintenance safety backup failed — aborting deep maintenance"
         if [[ "$DB_DEEP_FORCE" == "false" ]]; then
-            read -r -p "Proceed without a safety backup? (y/N): " confirm_no_backup
+            read -r -t 30 -p "Proceed without a safety backup? (y/N): " confirm_no_backup || confirm_no_backup="n"
             [[ ! "$confirm_no_backup" =~ ^[Yy]$ ]] && { log_info "Maintenance cancelled"; return 1; }
         else
             log_warn "Proceeding without safety backup (--force specified)"
         fi
+    else
+        log_success "Pre-maintenance safety backup created"
+        # Find the db backup created after our timestamp marker (most reliable approach)
+        local backup_base; backup_base=$(get_config_value "BACKUP_DIR" "${PROJECT_ROOT}/backups")
+        safety_backup_file=$(find "${backup_base}/db" -name "vaultwarden-db-*.age" -newer "$backup_ts_marker" 2>/dev/null | sort | tail -1) || true
+        rm -f "$backup_ts_marker"
     fi
 
     log_info "Stopping VaultWarden container..."
@@ -793,9 +802,17 @@ update_dns_record() {
     fi
     log_info "DNS update needed: $dns_ip -> $current_ip"
 
+    # FIX [H-01]: Read token from host secret file first; fall back to running container.
+    # Reading from the container fails when Caddy is stopped (e.g., during maintenance).
+    local token_file="${PROJECT_ROOT}/secrets/.docker_secrets/caddy_cloudflare_dns_token"
     local cf_token
-    cf_token=$(docker compose exec -T caddy cat /run/secrets/caddy_cloudflare_dns_token 2>/dev/null) \
-        || { log_error "Cannot read Cloudflare API token from Docker secret"; return 1; }
+    if [[ -f "$token_file" ]]; then
+        cf_token=$(cat "$token_file") || { log_error "Cannot read Cloudflare API token from host secret file"; return 1; }
+    else
+        cf_token=$(docker compose exec -T caddy cat /run/secrets/caddy_cloudflare_dns_token 2>/dev/null) \
+            || { log_error "Cannot read Cloudflare API token (host file: $token_file not found, Caddy container may be stopped)"; return 1; }
+    fi
+    [[ -z "$cf_token" ]] && { log_error "Cloudflare API token is empty"; return 1; }
 
     local record_id
     record_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records?type=A&name=$domain" \
@@ -957,16 +974,18 @@ main() {
     # ---- Routine or targeted maintenance ----
     # Routine maintenance and firewall updates require root.
     require_root "$@"
-    local MAINT_LOCKDIR="$state_dir/.locks/maintenance.lock"
-    if ! mkdir "$MAINT_LOCKDIR" 2>/dev/null; then
-        log_error "Another maintenance task is already running (lock: $MAINT_LOCKDIR)"
-        log_info  "If this is an error, manually remove: $MAINT_LOCKDIR"
+    # FIX [M-01]: Use shared flock on operations.lock (same as update.sh/restore.sh fd 9)
+    # so concurrent runs of maintenance/update/restore are mutually exclusive.
+    local ops_lock_dir="${PROJECT_ROOT}/.locks"
+    ensure_dir "$ops_lock_dir" 700 "$(get_real_user)" || true
+    exec 9>"${ops_lock_dir}/operations.lock"
+    if ! flock -n 9; then
+        log_error "Another operation (update/restore/maintenance) is already running. Aborting."
         exit 1
     fi
-    CLEANUP_ACTIONS+=("rmdir '$MAINT_LOCKDIR' 2>/dev/null || true")
-    local GLOBAL_MAINT_LOCK="$state_dir/.locks/global-maintenance.lock"
-    touch "$GLOBAL_MAINT_LOCK"
-    CLEANUP_ACTIONS+=("rm -f '$GLOBAL_MAINT_LOCK' 2>/dev/null || true")
+    # FIX [M-01]: Signal health.sh to skip auto-recovery while maintenance is active
+    touch /tmp/.vw_maintenance.lock
+    CLEANUP_ACTIONS+=("rm -f /tmp/.vw_maintenance.lock 2>/dev/null || true")
 
     [[ "$DRY_RUN"        == "true" ]] && log_warn "DRY RUN MODE - No changes will be made"
     [[ "$TARGETED_MODE"  == "true" ]] && log_info "Targeted mode — running requested task(s) only"

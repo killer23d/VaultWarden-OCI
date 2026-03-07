@@ -43,6 +43,12 @@ simple_verify_age_key() {
         log_warn "Fixing Age key permissions: ${perms:-<unreadable>} -> 600"
         chmod 600 "$age_key"
     fi
+    # FIX [M-05]: Also restore ownership to the real user after chmod
+    local real_user real_group
+    real_user=$(get_real_user 2>/dev/null || echo "root")
+    real_group=$(id -gn "$real_user" 2>/dev/null || echo "$real_user")
+    chown "${real_user}:${real_group}" "$age_key" 2>/dev/null || \
+        log_warn "Could not restore ownership of $age_key to ${real_user}:${real_group}"
 
     # Check 3: Validity — Encrypt/Decrypt roundtrip
     local test_data="vw-key-check-$(date +%s)"
@@ -150,7 +156,8 @@ _secure_remove_file() {
     [[ -f "$target" ]] || return 0
 
     if command -v shred >/dev/null 2>&1; then
-        shred -fuz "$target" 2>/dev/null && return 0
+        # FIX [L-01]: Explicit -n 3 pass count (system default is 3 but not guaranteed)
+        shred -fuz -n 3 "$target" 2>/dev/null && return 0
     fi
 
     # dd fallback — overwrite then unlink
@@ -180,7 +187,11 @@ _secure_remove_file() {
 # ---------------------------------------------------------------------------
 create_printable_key_backup() {
     local age_key="${SOPS_AGE_KEY_FILE:-secrets/keys/age-key.txt}"
-    local output_pdf="${1:-$HOME/vaultwarden-key-backup.pdf}"
+    # FIX [L-02]: $HOME resolves to /root when run via sudo on OCI.
+    # Use the real user's home directory instead.
+    local real_user_home
+    real_user_home=$(getent passwd "$(get_real_user)" 2>/dev/null | cut -d: -f6) || real_user_home="${HOME}"
+    local output_pdf="${1:-${real_user_home}/vaultwarden-key-backup.pdf}"
 
     log_info "Creating printable key backup..."
 
