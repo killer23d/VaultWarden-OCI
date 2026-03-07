@@ -118,6 +118,11 @@
         # 5. Admin Panel Protection
         @admin path /admin*
         handle @admin {
+                # NOTE: 'unsafe-inline' in script-src is required by VaultWarden's admin UI
+                # which renders inline <script> blocks. This cannot be removed without
+                # breaking admin panel functionality. Risk accepted: admin panel access is
+                # already protected by Caddy basic_auth and should only be accessible from
+                # trusted IPs via Cloudflare firewall rules.
                 # Stricter CSP for admin panel
                 header {
                         Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: https:; frame-src 'self'; object-src 'none'; base-uri 'self';"
@@ -201,6 +206,12 @@ www.{$DOMAIN_NAME} {
 # ================================
 # Catch-all :80 and :443
 # ================================
+# SECURITY NOTE: Caddy auto-provisions a self-signed cert for :443, so direct-IP
+# TLS scans complete a handshake before getting the 404. To prevent this from
+# revealing server presence, restrict port 443 to Cloudflare IP ranges at the
+# firewall level (UFW / OCI Security List). See:
+#   https://www.cloudflare.com/ips/
+# Example OCI ingress rule: allow TCP 443 only from Cloudflare IP ranges.
 :80, :443 {
         # FIX [M-15]: Add log rotation params to prevent disk-fill risk
         log {

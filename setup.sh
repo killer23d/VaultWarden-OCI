@@ -123,7 +123,7 @@ resolve_github_latest() {
     local repo="$1"
     local tag
 
-    tag=$(curl -fsSL "https://api.github.com/repos/${repo}/releases/latest" \
+    tag=$(curl -fsSL --max-time 30 "https://api.github.com/repos/${repo}/releases/latest" \
         | jq -r '.tag_name // empty')
 
     # Validate the result looks like a semver tag before using it to
@@ -158,7 +158,7 @@ install_docker_apt() {
     # A fingerprint that exists only in a comment is not a security control.
     # Official fingerprint source: https://docs.docker.com/engine/install/ubuntu/
     local docker_gpg_tmp="$TMP_WORKDIR/docker.gpg.asc"
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o "$docker_gpg_tmp" || {
+    curl -fsSL --max-time 30 https://download.docker.com/linux/ubuntu/gpg -o "$docker_gpg_tmp" || {
         log_error "Failed to download Docker GPG key"
         return 1
     }
@@ -541,14 +541,15 @@ setup_directories() {
     local real_user; real_user=$(get_real_user)
     local real_group; real_group=$(id -g -n "$real_user")
 
-    local dirs=("secrets" "secrets/keys" "secrets/.docker_secrets" "backups")
-    for dir in "${dirs[@]}"; do
-        ensure_dir "$dir" 755 || return 1
+    # Use mode 700 atomically for secrets dirs (avoid TOCTOU from mkdir+chmod).
+    local secrets_dirs=("secrets" "secrets/keys" "secrets/.docker_secrets")
+    for dir in "${secrets_dirs[@]}"; do
+        ensure_dir "$dir" 700 || return 1
         chown "$real_user:$real_group" "$dir" || return 1
     done
 
-    chmod 700 "secrets" "secrets/keys" "secrets/.docker_secrets" 2>/dev/null || true
-    chmod 755 "backups" 2>/dev/null || true
+    ensure_dir "backups" 755 || return 1
+    chown "$real_user:$real_group" "backups" || return 1
 
     local puid; puid=$(id -u "$real_user")
     local pgid; pgid=$(id -g "$real_user")

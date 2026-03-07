@@ -593,6 +593,13 @@ main() {
         exit 1
     fi
 
+    # Unset all plaintext SECRET_* variables now that write_secrets() has
+    # consumed them, so they are not visible in /proc/<pid>/environ for the
+    # remainder of the script's lifetime.
+    while IFS= read -r var; do
+        unset "$var"
+    done < <(compgen -v SECRET_)
+
     # Phase 1-B: Gate the entire completion output on QUIET_SUMMARY.
     #
     # When called from setup.sh --auto with --quiet-summary:
