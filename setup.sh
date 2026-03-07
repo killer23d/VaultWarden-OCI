@@ -17,7 +17,6 @@ set +x
 #   SOPS_VERSION=v3.9.4 sudo ./setup.sh --domain ...
 # =============================================================================
 SOPS_VERSION="${SOPS_VERSION:-}"   # e.g. "v3.9.4" — leave blank for latest
-AGE_VERSION="${AGE_VERSION:-}"     # e.g. "v1.2.0" — leave blank for latest (only used if installing age as binary instead of apt)
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

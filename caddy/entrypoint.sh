@@ -90,6 +90,7 @@ echo "✓ Caddyfile validation passed"
 # =============================================================================
 echo "==================================================================="
 echo " Starting Caddy Server"
+DOMAIN_NAME="${DOMAIN_NAME:?ERROR: DOMAIN_NAME environment variable must be set}"
 echo " Domain: ${DOMAIN_NAME}"
 echo "==================================================================="
 

@@ -21,7 +21,6 @@ source "lib/crypto.sh"
 # Configuration
 UPDATE_SYSTEM=false
 UPDATE_IMAGES=true
-NO_IMAGES=false
 NO_RESTART=false
 NO_CLEANUP=false
 EMAIL_NOTIFY=false

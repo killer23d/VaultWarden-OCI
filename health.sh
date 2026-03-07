@@ -55,6 +55,7 @@ OPTIONS:
     --json              Output results in JSON format
     --output FILE       Save results to file
     --alert-threshold N Set alert threshold percentage (default: 80)
+    --recovery-wait N   Seconds to wait after container restart before re-check (default: 30)
     --help              Show this help
 
 EXAMPLES:
@@ -83,6 +84,7 @@ while [[ $# -gt 0 ]]; do
         --json) JSON_OUTPUT=true; shift ;;
         --output) OUTPUT_FILE="$2"; shift 2 ;;
         --alert-threshold) ALERT_THRESHOLD="$2"; shift 2 ;;
+        --recovery-wait) RECOVERY_WAIT_TIME="$2"; shift 2 ;;
         --help) show_help; exit 0 ;;
         *) log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac

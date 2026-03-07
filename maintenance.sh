@@ -211,7 +211,8 @@ cleanup_backups() {
     if [[ "$CLEAN_BACKUPS" != "true" ]]; then log_info "Skipping backup cleanup"; return 0; fi
     if [[ "$DRY_RUN"       == "true" ]]; then log_info "[DRY RUN] Would clean up old backups based on retention policy"; return 0; fi
     log_info "Managing backup retention..."
-    local backup_base_dir="$PROJECT_ROOT/backups"
+    local backup_base_dir
+    backup_base_dir="$(get_config_value "BACKUP_DIR" "$PROJECT_ROOT/backups")"
     local had_real_error=false
     local backup_types=("db:$DB_BACKUP_RETENTION_DAYS" "full:$FULL_BACKUP_RETENTION_DAYS" "emergency:$EMERGENCY_BACKUP_RETENTION_DAYS")
     for backup_type_info in "${backup_types[@]}"; do
@@ -289,18 +290,8 @@ optimize_database() {
     }
     log_success "Safety backup created: $(basename "$backup_file")"
 
-    # FIX BUG-S: volume mount was data/bwdata:/data — corrected to data:/data
-    run_sqlite_integrity() {
-        docker run --rm -v "$state_dir/data:/data" alpine:latest \
-            sh -c "apk add --no-cache sqlite >/dev/null 2>&1 && sqlite3 /data/db.sqlite3 '$1'"
-    }
-    run_sqlite_silent() {
-        docker run --rm -v "$state_dir/data:/data" alpine:latest \
-            sh -c "apk add --no-cache sqlite >/dev/null 2>&1 && sqlite3 /data/db.sqlite3 '$1'" >/dev/null 2>&1
-    }
-
     log_info "Verifying integrity before optimization..."
-    if ! run_sqlite_integrity "PRAGMA integrity_check;" | grep -qx "ok"; then
+    if ! sqlite3 "$host_db_path" "PRAGMA integrity_check;" | grep -qx "ok"; then
         log_error "Integrity check failed - aborting"
         [[ "$was_running" == "true" ]] && docker compose start vaultwarden
         return 1
@@ -310,11 +301,11 @@ optimize_database() {
     local optimization_success=true
     for cmd in "PRAGMA wal_checkpoint(TRUNCATE);" "PRAGMA optimize;" "ANALYZE;" "VACUUM;"; do
         log_debug "Running: $cmd"
-        run_sqlite_silent "$cmd" || { log_warn "Command failed: $cmd"; optimization_success=false; }
+        sqlite3 "$host_db_path" "$cmd" >/dev/null 2>&1 || { log_warn "Command failed: $cmd"; optimization_success=false; }
     done
 
     log_info "Verifying integrity after optimization..."
-    if ! run_sqlite_integrity "PRAGMA integrity_check;" | grep -qx "ok"; then
+    if ! sqlite3 "$host_db_path" "PRAGMA integrity_check;" | grep -qx "ok"; then
         log_error "CRITICAL: Post-optimization integrity check failed! Restoring..."
         cp "$backup_file" "$host_db_path" && log_success "Restored from backup" || log_error "CRITICAL: Restore failed!"
         optimization_success=false
@@ -392,31 +383,21 @@ run_deep_db_maintenance() {
     docker compose stop vaultwarden && log_success "VaultWarden container stopped" || log_warn "Failed to stop vaultwarden container"
     log_info "Waiting 5 seconds for file lock release..."; sleep 5
 
-    # FIX BUG-S: volume mount was data/bwdata:/data — corrected to data:/data
-    run_sqlite_deep_integrity() {
-        docker run --rm -v "$state_dir/data:/data" alpine:latest \
-            sh -c "apk add --no-cache sqlite >/dev/null 2>&1 && sqlite3 /data/db.sqlite3 '$1'"
-    }
-    run_sqlite_deep_silent() {
-        docker run --rm -v "$state_dir/data:/data" alpine:latest \
-            sh -c "apk add --no-cache sqlite >/dev/null 2>&1 && sqlite3 /data/db.sqlite3 '$1'" >/dev/null 2>&1
-    }
-
     log_info "Step 1/5: Checking database integrity..."
-    if ! run_sqlite_deep_integrity "PRAGMA integrity_check;" | grep -q "ok"; then
+    if ! sqlite3 "$db_file" "PRAGMA integrity_check;" | grep -q "ok"; then
         log_error "Integrity check FAILED. Aborting. Restarting services..."
         docker compose start vaultwarden; return 1
     fi
     log_success "Database integrity check passed"
 
     log_info "Step 2/5: Committing WAL file (PRAGMA wal_checkpoint(TRUNCATE))..."
-    run_sqlite_deep_silent "PRAGMA wal_checkpoint(TRUNCATE);" && log_success "WAL checkpointed" || log_warn "Could not checkpoint WAL. Proceeding."
+    sqlite3 "$db_file" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1 && log_success "WAL checkpointed" || log_warn "Could not checkpoint WAL. Proceeding."
 
     log_info "Step 3/5: Optimizing database stats (PRAGMA optimize)..."
-    run_sqlite_deep_silent "PRAGMA optimize;" && log_success "Optimization complete" || log_warn "Could not optimize. Proceeding."
+    sqlite3 "$db_file" "PRAGMA optimize;" >/dev/null 2>&1 && log_success "Optimization complete" || log_warn "Could not optimize. Proceeding."
 
     log_info "Step 4/5: Reclaiming free space (VACUUM)... This may take a moment."
-    if ! run_sqlite_deep_silent "VACUUM;"; then
+    if ! sqlite3 "$db_file" "VACUUM;" >/dev/null 2>&1; then
         log_error "VACUUM FAILED. Aborting. Restarting services..."
         docker compose start vaultwarden; return 1
     fi
