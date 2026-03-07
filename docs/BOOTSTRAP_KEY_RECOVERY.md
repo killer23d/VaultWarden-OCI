@@ -1,186 +1,172 @@
 # Bootstrap Key Recovery — VaultWarden-OCI
 
-This guide describes how to protect your **Age encryption key** against loss, solving the circular dependency in encrypted backups: you need the Age key to decrypt a backup, but the Age key lives on the server you are trying to recover.
+This guide covers recovery of the Age key and related bootstrap material used by the current VaultWarden-OCI deployment model.
 
-Related docs: [BACKUP-RESTORE.md](BACKUP-RESTORE.md) · [SECURITY.md](SECURITY.md)
+If you lose the Age key, normal encrypted backups and encrypted secret workflows become much harder or impossible to recover. Treat this document as part of the disaster-recovery plan, not as an optional appendix.
 
----
-
-## 📍 The Circular Dependency Problem
-
-```
-Tier 1 — Bootstrap Passphrase (memorised or in password manager)
-  └─> Decrypts GPG-wrapped Age key
-        └─> Decrypts Age-encrypted backup archive
-              └─> Full system recovery
-```
-
-By encrypting the Age key with GPG (a separate passphrase), you can keep the Age key offsite without storing it in plaintext. Emergency kits already include the Age key inside the archive, but full and database backups do not — this procedure covers those cases.
+Related docs: [BACKUP-RESTORE.md](BACKUP-RESTORE.md) · [DEPLOYMENT.md](DEPLOYMENT.md) · [OPERATIONS.md](OPERATIONS.md)
 
 ---
 
-## 💾 Storage Strategy
+## What key this refers to
 
-### Where to Keep the GPG-Wrapped Age Key
-
-Store **2–3 copies** in different locations:
-
-| Location | Notes |
-| :-- | :-- |
-| Password manager (secure note/attachment) | Primary; most accessible |
-| Encrypted USB in fireproof safe | Offline; survives cloud outage |
-| Encrypted cloud storage (separate account) | Must differ from backup storage |
-| Bank safety deposit box (optional) | For highest-risk environments |
-
-> **Never store the bootstrap key and the encrypted backups in the same location.**
-
-### Where to Keep the GPG Private Key
-
-- Password manager (highest priority secure note)
-- Encrypted copy on a separate USB drive
-- Consider a paper backup kept in a safe
-
----
-
-## 🔒 Creating a Bootstrap-Protected Age Key
+The key in scope is the repository’s Age private key stored at:
 
 ```bash
-# GPG-encrypt your Age key with a strong passphrase
-gpg --symmetric --cipher-algo AES256 \
-    --output ~/age-key-$(date +%Y%m%d).gpg \
-    secrets/keys/age-key.txt
+secrets/keys/age-key.txt
+```
 
-# Copy to your bootstrap storage location(s)
-cp ~/age-key-$(date +%Y%m%d).gpg /path/to/usb/
+This key is central to the project’s encrypted backup and secret-management model. Protect it separately from the VM and from normal local-only server storage.
 
-# Export your GPG private key for safekeeping
-gpg --export-secret-keys --armor YOUR_GPG_KEY_ID > gpg-private-key-backup.asc
+---
+
+## Recommended protection layers
+
+The current project supports and encourages multiple recovery layers.
+
+### 1. Export a recovery kit
+
+```bash
+./edit-secrets.sh --export-recovery-kit
+```
+
+Do this after initial deployment and after meaningful secret or recovery-material changes. Store the exported material in a secure external location such as a password manager secure note or other protected offline repository.
+
+### 2. Maintain offline escrow
+
+Keep a second copy of the Age key outside the server. Good options include:
+
+- Password manager secure note.
+- Encrypted removable media.
+- Printed or otherwise physically secured backup if your process supports it.
+
+### 3. Verify you can still use it
+
+A recovery artifact that was never tested is only a guess.
+
+After restoring key material, always validate with:
+
+```bash
+./edit-secrets.sh --test
+./health.sh
 ```
 
 ---
 
-## ⏪ Recovery Procedures
+## When recovery is needed
 
-### Standard Recovery (Bootstrap Passphrase Available)
+Use this guide when any of these happen:
+
+- `secrets/keys/age-key.txt` is missing.
+- The server was rebuilt and you need to restore encrypted material.
+- A backup archive cannot be decrypted on the replacement host.
+- Secret editing or export flows fail because the Age key is unavailable.
+
+---
+
+## Recovery path on an existing server
+
+If the host still exists and only the key file is missing or damaged:
+
+1. Retrieve the correct Age key from your recovery kit or offline escrow.
+2. Restore it to `secrets/keys/age-key.txt`.
+3. Restrict permissions.
+4. Test decryption and project health.
+
+Example flow:
 
 ```bash
-# 1. Decrypt the Age key
-gpg --decrypt age-key-TIMESTAMP.gpg > age-key.txt
+mkdir -p secrets/keys
+nano secrets/keys/age-key.txt
+chmod 600 secrets/keys/age-key.txt
 
-# 2. Use it to decrypt a backup
-age -d -i age-key.txt backup-TIMESTAMP.tar.gz.age | tar -xzf -
-
-# 3. Place the Age key in the project
-mkdir -p VaultWarden-OCI/secrets/keys
-mv age-key.txt VaultWarden-OCI/secrets/keys/
-chmod 600 VaultWarden-OCI/secrets/keys/age-key.txt
-
-# 4. Start services
-cd VaultWarden-OCI
-./startup.sh
-# or: make start
+./edit-secrets.sh --test
+./health.sh --comprehensive
 ```
 
-### Emergency Recovery (GPG Keyring Lost)
+Do not continue with normal operations until decryption works again.
+
+---
+
+## Recovery path on a fresh server
+
+When rebuilding on a new VM, first get the repository into a baseline state and then restore the key material before attempting deeper recovery.
 
 ```bash
-# 1. Import your GPG private key backup
-gpg --import gpg-private-key-backup.asc
-
-# 2. Follow standard recovery above
-```
-
-### Full Disaster Recovery (Server Lost, Only Offsite Backup Available)
-
-```bash
-# 1. Install dependencies on new server
-apt-get update && apt-get install -y gnupg git
-
-# 2. Import GPG key
-gpg --import gpg-private-key-backup.asc
-
-# 3. Decrypt Age key from bootstrap key
-gpg --decrypt age-key-TIMESTAMP.gpg > age-key.txt
-
-# 4. Download encrypted backup from offsite
-rclone copy your_remote_name:vaultwarden_backups/emergency/ ./
-
-# 5. Clone repo and run setup
 git clone https://github.com/killer23d/VaultWarden-OCI.git
 cd VaultWarden-OCI
 chmod +x *.sh
+
 sudo ./setup.sh --domain vault.yourdomain.com --email admin@yourdomain.com
-
-# 6. Place Age key and restore
-mkdir -p secrets/keys
-mv ../age-key.txt secrets/keys/
-chmod 600 secrets/keys/age-key.txt
-./restore.sh --file ../backup-TIMESTAMP.age --force
-
-# 7. Verify
-make health
 ```
 
----
-
-## 🧪 Quarterly Test Procedure
-
-Run this every quarter to confirm you can actually recover:
+Then restore the key:
 
 ```bash
-mkdir -p ~/bootstrap-test && cd ~/bootstrap-test
+mkdir -p secrets/keys
+nano secrets/keys/age-key.txt
+chmod 600 secrets/keys/age-key.txt
+```
 
-# Copy bootstrap key and a recent backup
-cp /path/to/bootstrap/age-key-*.gpg .
-cp ~/VaultWarden-OCI/backups/emergency/emergency-*.age . 2>/dev/null || \
-  cp ~/VaultWarden-OCI/backups/full/full-*.age .
+Then validate and continue with backup or secret recovery:
 
-# Test 1: Decrypt bootstrap key
-gpg --decrypt age-key-*.gpg > age-key-test.txt
-echo "✓ Bootstrap key decryption OK"
-
-# Test 2: Decrypt backup and list contents
-age -d -i age-key-test.txt *.age | tar -tzf - | head -20
-echo "✓ Backup decryption and listing OK"
-
-# Test 3: Extract and check the database
-mkdir extract
-age -d -i age-key-test.txt *.age | tar -xzf - -C extract data/db.sqlite3 2>/dev/null
-sqlite3 extract/data/db.sqlite3 "SELECT count(*) FROM sqlite_master WHERE type='table';"
-echo "✓ Database integrity OK"
-
-# Cleanup
-cd ~ && rm -rf ~/bootstrap-test
-echo "✅ All recovery tests passed"
+```bash
+./edit-secrets.sh --test
+./restore.sh --file /path/to/backup.age --force
+./health.sh
 ```
 
 ---
 
-## 🛠️ Troubleshooting
+## If you have an emergency backup
 
-| Error | Cause | Fix |
-| :-- | :-- | :-- |
-| `gpg: decryption failed: No secret key` | GPG private key not in keyring | `gpg --import gpg-private-key-backup.asc` |
-| `age: no identity matched any recipient` | Wrong or corrupted Age key file | Try alternate bootstrap key copy; verify Age key format |
-| `Cannot decrypt — wrong passphrase` | Incorrect passphrase | Check password manager; try alternate saved passphrases |
-| `Backup file corrupted or invalid` | Partial download or disk corruption | Re-download from offsite; verify SHA256 checksum |
+An emergency backup may be your fastest recovery path in a total-loss scenario, especially if it was created right before a risky change.
 
----
+A practical rebuild flow is:
 
-## 📅 Maintenance Schedule
+1. Provision the new host.
+2. Clone the repository.
+3. Run baseline `setup.sh`.
+4. Restore the Age key from escrow or recovery material.
+5. Restore the emergency archive.
+6. Run health validation.
 
-| Frequency | Task |
-| :-- | :-- |
-| Monthly | Create new emergency kit: `./backup.sh --type emergency` |
-| Quarterly | Full recovery test (procedure above) |
-| Yearly | Optionally rotate GPG bootstrap passphrase |
+This keeps recovery aligned with the repository’s current setup and restore model.
 
 ---
 
-## ✅ Security Practices
+## Permission and handling rules
 
-- Use a strong, unique passphrase (15+ characters) stored in your password manager
-- Never reuse the bootstrap passphrase for any other system
-- Store bootstrap key and backups in **different** locations and cloud accounts
-- Label files clearly: `"VaultWarden Bootstrap Key — Required for Recovery"`
-- Never leave the Age key unencrypted on any networked system
+When restoring the key, keep handling tight:
+
+- Store it only at `secrets/keys/age-key.txt` unless you are staging a short-lived recovery copy.
+- Set mode `600`.
+- Remove temporary plaintext copies after validation.
+- Do not leave the key in shell history, shared paste buffers, or long-lived temp files.
+
+If you exported the key to an intermediate file during recovery, securely remove that file after validation.
+
+---
+
+## Validation checklist
+
+After restoring the key, confirm the deployment is actually usable again:
+
+```bash
+./edit-secrets.sh --test
+./backup.sh --type db
+./restore.sh
+./health.sh --comprehensive
+```
+
+At minimum, verify that encrypted secrets can be read and that a backup workflow still succeeds.
+
+---
+
+## If no recovery copy exists
+
+If the Age key is lost and you have no recovery kit, no offline escrow, and no other surviving copy, encrypted artifacts protected by that key may be permanently unrecoverable.
+
+In that case, your remaining path is usually to rebuild the deployment, generate new recovery material, and re-enter any credentials or configuration that cannot be recovered from another secure source.
+
+That is why exporting and separately storing recovery material is part of the normal operating procedure, not an optional extra.

@@ -1,142 +1,157 @@
-# API Integration — VaultWarden-OCI
+# API and Integration Notes — VaultWarden-OCI
 
-VaultWarden implements the **Bitwarden API**, making it compatible with all official Bitwarden clients and CLIs. This guide covers authentication, common operations, and security practices for programmatic access.
+This repository does not add a separate custom application API of its own. Instead, it packages and automates several integration surfaces: the VaultWarden web/API service behind Caddy, operational shell scripts, Docker Compose service controls, and Cloudflare-backed automation used by the deployment.
 
-Related docs: [CONFIGURATION.md](CONFIGURATION.md) · [SECURITY.md](SECURITY.md)
+This document explains the current integration model so operators know what is safe to automate and what should remain under script control.
 
----
-
-## 🔐 Authentication
-
-### User Access Token (Password Grant)
-
-```bash
-curl -X POST https://vault.yourdomain.com/identity/connect/token \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=password" \
-  -d "username=user@example.com" \
-  -d "password=your_password" \
-  -d "scope=api offline_access" \
-  -d "client_id=web" \
-  -d "deviceType=3" \
-  -d "deviceName=api-client" \
-  -d "deviceIdentifier=$(uuidgen)"
-```
-
-Response:
-
-```json
-{
-  "access_token": "eyJhbGc...",
-  "expires_in": 3600,
-  "token_type": "Bearer",
-  "refresh_token": "eyJhbGc..."
-}
-```
-
-Use the token:
-
-```bash
-curl -X GET https://vault.yourdomain.com/api/sync \
-  -H "Authorization: Bearer $ACCESS_TOKEN"
-```
-
-### Admin Authentication
-
-The admin panel is protected by two layers:
-
-1. **Caddy basic auth** — `admin_basic_auth_hash` secret (bcrypt hash), prompted in browser
-2. **VaultWarden admin token** — configured in secrets, used for direct API calls
-
-```bash
-# Direct admin API call
-curl -X GET https://vault.yourdomain.com/admin/users \
-  -H "Authorization: Bearer $ADMIN_TOKEN"
-```
-
-To generate a valid bcrypt hash for `admin_basic_auth_hash`:
-
-```bash
-docker run --rm -it ghcr.io/caddybuilds/caddy-cloudflare:latest caddy hash-password
-```
+Related docs: [DEPLOYMENT.md](DEPLOYMENT.md) · [OPERATIONS.md](OPERATIONS.md) · [SCRIPTS.md](SCRIPTS.md) · [SECURITY.md](SECURITY.md)
 
 ---
 
-## 📦 Common Vault Operations
+## Integration surfaces
 
-### Sync
+The current project exposes or relies on four main surfaces:
 
-```bash
-curl -X GET https://vault.yourdomain.com/api/sync \
-  -H "Authorization: Bearer $ACCESS_TOKEN"
-```
-
-### List Ciphers
-
-```bash
-curl -X GET https://vault.yourdomain.com/api/ciphers \
-  -H "Authorization: Bearer $ACCESS_TOKEN"
-```
-
-### Create Cipher
-
-```bash
-curl -X POST https://vault.yourdomain.com/api/ciphers \
-  -H "Authorization: Bearer $ACCESS_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "type": 1,
-    "name": "Example Login",
-    "login": {
-      "username": "user@example.com",
-      "password": "secure_password",
-      "uris": [{"match": null, "uri": "https://example.com"}]
-    }
-  }'
-```
-
-### Update / Delete Cipher
-
-```bash
-# Update
-curl -X PUT https://vault.yourdomain.com/api/ciphers/$CIPHER_ID \
-  -H "Authorization: Bearer $ACCESS_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{...}'
-
-# Delete
-curl -X DELETE https://vault.yourdomain.com/api/ciphers/$CIPHER_ID \
-  -H "Authorization: Bearer $ACCESS_TOKEN"
-```
+| Surface | Purpose | Recommended use |
+| :-- | :-- | :-- |
+| VaultWarden application endpoints | User-facing vault access and app integrations | Use for normal client and automation flows supported by VaultWarden itself |
+| Project shell scripts | Deployment and operations control plane | Use for setup, lifecycle, backup, restore, update, maintenance, and secret handling |
+| Docker Compose and container tooling | Service inspection and low-level runtime control | Use for diagnostics and exceptional intervention |
+| Cloudflare API integrations | DNS updates and edge ban actions | Let the repository scripts manage this through configured credentials |
 
 ---
 
-## 🚫 Rate Limiting
+## VaultWarden application access
 
-Caddy applies rate limits to protect sensitive endpoints:
+The primary externally consumed interface is the VaultWarden service published through Caddy at your configured domain.
 
-| Endpoint | Limit |
+Typical consumers include:
+
+- Browser users.
+- Official or compatible Bitwarden clients.
+- Admins accessing the admin surface through the deployment’s configured protections.
+
+This repository’s job is to deploy and operate that surface reliably; it does not redefine the upstream application API contract.
+
+---
+
+## Project scripts as the operational API
+
+For automation, the most important “API” in this repository is the script layer.
+
+Use these scripts as the supported control surface:
+
+| Script | Use case |
 | :-- | :-- |
-| Static endpoints | 20 requests / 5 min / IP |
-| API auth endpoints | 10 requests / 5 min / IP |
-| Admin endpoints | 5 requests / 5 min / IP |
+| `setup.sh` | Generate deployment files and prepare the host |
+| `setup-secrets.sh` | Guided secret bootstrap |
+| `startup.sh` | Start, stop, restart, and reinitialize services |
+| `health.sh` | Validate runtime health and optionally recover unhealthy services |
+| `backup.sh` | Create encrypted backups and optional offsite sync |
+| `restore.sh` | Restore from selected backup archives |
+| `update.sh` | Perform validated updates with rollback-aware workflow |
+| `maintenance.sh` | DNS refresh, cleanup, DB maintenance, and email diagnostics |
+| `edit-secrets.sh` | Rotate, test, and export secret material |
+| `cron-setup.sh` | Install and validate scheduled automation |
+| `create-breakglass-admin.sh` | Manage the recovery admin lifecycle |
 
-Fail2ban adds a second layer — repeated auth failures trigger a **Cloudflare Edge WAF ban** (not a local iptables rule, since traffic arrives via the Cloudflare proxy).
-
----
-
-## ✅ API Security Practices
-
-- Always use HTTPS — HTTP is redirected by Caddy
-- Never hardcode tokens in scripts; load from environment or secrets
-- Use dedicated service accounts rather than personal user accounts
-- Rotate tokens regularly and audit access logs
-- Implement back-off and retry logic in automation to stay within rate limits
+For most automation tasks, prefer calling one of these scripts over composing a new low-level workflow yourself.
 
 ---
 
-## 📚 Further Resources
+## Docker and Compose access
 
-- [Bitwarden API Documentation](https://bitwarden.com/help/api/)
-- [VaultWarden Wiki](https://github.com/dani-garcia/vaultwarden/wiki)
-- [Official Bitwarden CLI](https://bitwarden.com/help/cli/)
+Direct Docker and Compose access is still useful, but it should usually be treated as a diagnostic or emergency interface rather than the first-choice automation path.
+
+Typical examples:
+
+```bash
+docker compose ps
+docker compose logs vaultwarden --tail=50
+docker stats --no-stream
+docker compose exec fail2ban fail2ban-client status
+```
+
+Use this layer when you need runtime visibility, per-container logs, or one-off troubleshooting detail that the higher-level scripts do not already summarize.
+
+---
+
+## Cloudflare-backed automation
+
+The deployment uses Cloudflare-related credentials for two important integrations:
+
+- DNS record management.
+- Fail2ban-driven edge blocking actions.
+
+Manage these via encrypted secrets and the project scripts, not by embedding API calls into ad-hoc local automation.
+
+Common credential operations:
+
+```bash
+./edit-secrets.sh --rotate caddy_cloudflare_dns_token
+./edit-secrets.sh --rotate fail2ban_cloudflare_firewall_token
+./startup.sh --force
+./health.sh
+```
+
+This keeps Cloudflare automation aligned with the repository’s current security and deployment model.
+
+---
+
+## Email and notification integration
+
+Operational notifications are sent through the containerized Postfix relay used by the deployment.
+
+Validate the mail path with the project tooling:
+
+```bash
+./maintenance.sh --test-email
+./maintenance.sh --test-email --verbose
+docker compose logs postfix
+```
+
+SMTP values belong in `.env`, while the SMTP password belongs in encrypted secrets.
+
+---
+
+## Backup and recovery integration
+
+Backups are part of the operational surface and can be integrated into broader workflows through the repository scripts.
+
+Examples:
+
+```bash
+./backup.sh --type db
+./backup.sh --type full --full-verification
+./backup.sh --type db --rclone --email
+./restore.sh --latest --type full
+```
+
+If external orchestration is added, it should call these commands rather than trying to reimplement encryption, verification, and restore semantics itself.
+
+---
+
+## Safe automation guidance
+
+Use this approach when integrating the project into a larger ops workflow:
+
+1. Treat `.example` files and encrypted secrets as the configuration API.
+2. Treat repository scripts as the operational API.
+3. Use Docker/Compose only for inspection or exceptional low-level intervention.
+4. Re-run `health.sh` after any scripted change.
+5. Keep credentials inside the Age + SOPS workflow rather than passing plaintext around.
+
+This will keep your automation compatible with future documentation and repository updates.
+
+---
+
+## What not to build around
+
+Avoid treating these as stable external APIs:
+
+- Temporary decrypted Docker secret files.
+- Internal generated file layouts that are recreated by setup.
+- Manual one-off container exec workflows for normal lifecycle management.
+- Direct hand-written Cloudflare API calls that duplicate existing project behavior.
+
+Those can work in an emergency, but they are the wrong long-term abstraction layer for this repository.
