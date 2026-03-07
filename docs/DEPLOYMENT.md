@@ -1,85 +1,61 @@
 # Deployment Guide — VaultWarden-OCI
 
-This guide walks through a complete deployment from a fresh OCI instance to a running vault. For a condensed version see the [README quickstart](../README.md).
+This guide reflects the current deployment flow for the repository as it exists today: template-driven setup, encrypted secret bootstrap, scripted startup and health validation, Cloudflare-aware networking, and post-deployment automation.
 
-Related docs: [CONFIGURATION.md](CONFIGURATION.md) · [SECURITY.md](SECURITY.md) · [OPERATIONS.md](OPERATIONS.md)
+For quick bootstrap, see the [README](../README.md). For day-to-day management after install, see [OPERATIONS.md](OPERATIONS.md).
 
 ---
 
-## ✅ Prerequisites
+## Prerequisites
 
 | Requirement | Details |
 | :-- | :-- |
-| **Server** | Ubuntu 24.04 LTS or Oracle Linux 8/9 (OCI A1 Flex recommended) |
-| **Resources** | 1 vCPU, 6 GB RAM, 50 GB storage (OCI Always Free tier) |
-| **Domain** | A domain you control with DNS on Cloudflare |
-| **Cloudflare account** | Free tier is sufficient |
-| **SMTP access** | Any SMTP relay (Gmail, SendGrid, etc.) — optional but recommended |
+| Server | Ubuntu 24.04 LTS or Oracle Linux 8/9 on a public VM |
+| Baseline resources | Small-team deployment; size the VM for your user count, storage growth, and backup needs |
+| Domain | A hostname you control for the vault |
+| Cloudflare | Required for the documented DNS, TLS, and edge-protection workflow |
+| SMTP relay | Optional but strongly recommended for operational notifications |
+
+Oracle Cloud Infrastructure A1 Flex remains a common fit for lightweight personal or small-team use, but size the instance for your actual operating profile instead of treating one shape as universal.
 
 ---
 
-## 📌 Phase 0 — OCI Security List (Do This First)
+## Phase 0 — OCI network access
 
-> **⚠️ CRITICAL:** OCI blocks all inbound traffic by default at the hypervisor level. You must open ports 80 and 443 **before** running setup — Caddy cannot provision its TLS certificate otherwise.
+OCI blocks inbound traffic at the network layer unless your Security List or Network Security Group allows it.
 
-1. OCI Console → **Compute → Instances → your instance**
-2. Under "Primary VNIC" click **Subnet → Default Security List**
-3. Add **Ingress Rules** (one per row):
+Before running setup:
 
-| Rule | Source CIDR | Protocol | Port |
-| :-- | :-- | :-- | :-- |
-| Web (open) | `0.0.0.0/0` | TCP | 80, 443 |
-| Web (Cloudflare IPs only — recommended) | one per CF range | TCP | 80, 443 |
-| SSH | `0.0.0.0/0` or your IP | TCP | 22 |
+1. Open TCP `80` and `443` to either `0.0.0.0/0` during bootstrap or the current Cloudflare IPv4 ranges.
+2. Open TCP `22` to your management IP or your preferred SSH source range.
 
-Cloudflare IPv4 ranges (verify at <https://www.cloudflare.com/ips-v4>):
-```
-173.245.48.0/20   103.21.244.0/22   103.22.200.0/22   103.31.4.0/22
-141.101.64.0/18   108.162.192.0/18  190.93.240.0/20   188.114.96.0/20
-197.234.240.0/22  198.41.128.0/17   162.158.0.0/15    104.16.0.0/13
-104.24.0.0/14     172.64.0.0/13     131.0.72.0/22
-```
+This must be done before first startup so Caddy can complete certificate provisioning.
+
+Cloudflare IPv4 ranges change over time, so always verify the current list from Cloudflare before hard-coding rules.
 
 ---
 
-## ☁️ Phase 1 — Cloudflare DNS Staging
+## Phase 1 — Cloudflare DNS staging
 
-In your Cloudflare dashboard, set your DNS record to **DNS Only (Grey Cloud)** before running setup. Caddy needs to reach Let's Encrypt directly to complete the HTTP-01 TLS challenge on first boot. Enable the orange proxy cloud after the stack is healthy.
+Set the vault DNS record to **DNS Only (Grey Cloud)** before first start.
+
+That allows certificate issuance and first-boot validation to complete without Cloudflare proxy behavior complicating the bootstrap path. After the deployment is healthy, switch the record to **Proxied (Orange Cloud)** and use **Full (Strict)** SSL/TLS mode.
 
 ---
 
-## 🛠️ Phase 2 — Server Setup
+## Phase 2 — Clone the repository and run setup
 
 ```bash
-# Update system
-sudo apt update && sudo apt upgrade -y
-
-# Set timezone
-sudo timedatectl set-timezone UTC
-
-# Clone repo
 git clone https://github.com/killer23d/VaultWarden-OCI.git
 cd VaultWarden-OCI
 chmod +x *.sh
-```
 
----
-
-## ⚙️ Phase 3 — Run Setup
-
-```bash
-# Generates docker-compose.yml and .env from templates;
-# installs Docker, Age, SOPS, UFW, rclone
 sudo ./setup.sh --domain vault.yourdomain.com --email admin@yourdomain.com --auto
 ```
 
-`setup.sh --auto` will:
-- Install Docker, Age, SOPS, UFW, rclone (versions from top of `setup.sh`, auto-resolved by default)
-- Generate `docker-compose.yml` and `.env` from templates
-- Configure UFW
-- Add your user to the `docker` group
+`setup.sh` is the supported installation entry point. It prepares the host, installs required dependencies, and generates the live deployment files from the repository templates.
 
-> **⚠️ Re-login required.** `setup.sh` adds your user to the `docker` group. You must start a fresh SSH session for group membership to take effect before running any Docker or `make` commands.
+After setup completes, log out and back in so your shell picks up Docker group membership.
 
 ```bash
 exit
@@ -87,184 +63,189 @@ exit
 cd VaultWarden-OCI
 ```
 
+### Auto vs interactive bootstrap
+
+- `--auto` is the fastest path and is intended for mostly non-interactive setup.
+- `--use-latest` is optional and should only be added if you intentionally want latest image tags instead of the pinned/default behavior in the generated configuration.
+- Running `setup.sh` without `--auto` gives you the staged interactive path for environment review and secret entry.
+
 ---
 
-## 🔐 Phase 4 — Configure Secrets & Environment
+## Phase 3 — Review `.env` and finish secrets
 
-### Cloudflare API Tokens
+### Review environment values first
 
-Create two tokens at <https://dash.cloudflare.com/profile/api-tokens>:
-
-| Token | Permissions | Used by |
-| :-- | :-- | :-- |
-| **DNS token** | Zone:DNS:Edit + Zone:Zone:Read | Caddy (TLS DNS-01 challenge) |
-| **Firewall token** | Zone:Firewall Services:Edit | Fail2Ban (edge banning) |
-
-### Secrets
-
-```bash
-./edit-secrets.sh
-```
-
-Set at minimum:
-- `admin_basic_auth_hash` — generate with: `docker run --rm -it ghcr.io/caddybuilds/caddy-cloudflare:latest caddy hash-password`
-- `caddy_cloudflare_dns_token`
-- `fail2ban_cloudflare_firewall_token`
-- `smtp_password` (if using email)
-
-### Environment (.env)
+Edit `.env` before completing the external-credential workflow.
 
 ```bash
 nano .env
 ```
 
-Key variables to set:
+At minimum, confirm or set:
+
+- `DOMAIN`
+- `DOMAIN_NAME`
+- `ADMIN_EMAIL`
+- `CLOUDFLARE_ZONE_ID`
+- `SMTP_HOST`
+- `SMTP_PORT`
+- `SMTP_USERNAME`
+- `RCLONE_REMOTE_NAME` if offsite backups are used
+
+Use [CONFIGURATION.md](CONFIGURATION.md) for the full variable reference.
+
+### Secret setup for `--auto` installs
+
+`--auto` can generate local credentials and passphrases, but external service credentials still need to be provided manually.
+
+Rotate or set the required external secrets:
 
 ```bash
-DOMAIN=https://vault.yourdomain.com     # WITH https://
-DOMAIN_NAME=vault.yourdomain.com        # bare hostname, no protocol
-ADMIN_EMAIL=admin@yourdomain.com
-CLOUDFLARE_ZONE_ID=your_zone_id_here
-SMTP_HOST=smtp.yourmailprovider.com
-SMTP_USERNAME=your-relay-account
-RCLONE_REMOTE_NAME=your_rclone_remote   # if using offsite backups
+./edit-secrets.sh --rotate caddy_cloudflare_dns_token
+./edit-secrets.sh --rotate fail2ban_cloudflare_firewall_token
+./edit-secrets.sh --rotate smtp_password
 ```
 
-See [CONFIGURATION.md](CONFIGURATION.md) for the full variable reference.
+Optional push-notification credentials:
+
+```bash
+./edit-secrets.sh --rotate push_installation_id
+./edit-secrets.sh --rotate push_installation_key
+```
+
+### Secret setup for interactive installs
+
+If you did not use `--auto`, finish bootstrap after `.env` review with:
+
+```bash
+./setup-secrets.sh
+```
+
+That path is preferred over ad-hoc manual editing when you want the repository’s guided secret collection workflow.
 
 ---
 
-## 🚀 Phase 5 — Start & Verify
+## Phase 4 — Start and validate the stack
 
 ```bash
-./startup.sh        # start all containers
-# or: make start
+./startup.sh
+make start
 
-./health.sh         # verify everything is healthy
-# or: make health
+./health.sh
+make health
 ```
 
-### Container Stack
+The deployed stack is built around four main services:
 
-| Container | Role | Memory Limit |
-| :-- | :-- | :-- |
-| **vaultwarden** | Password manager app | 2 GB |
-| **caddy** | TLS + reverse proxy | 1 GB |
-| **fail2ban** | Brute-force detection | 512 MB |
-| **postfix** | Containerised SMTP relay ([bokysan/docker-postfix](https://github.com/bokysan/docker-postfix)) | 128 MB |
+| Service | Purpose |
+| :-- | :-- |
+| `vaultwarden` | Main password-manager application |
+| `caddy` | Reverse proxy, HTTPS termination, and security headers |
+| `fail2ban` | Abuse detection and edge-ban automation |
+| `postfix` | Containerized SMTP relay |
 
-Once healthy, switch Cloudflare to **Proxied (Orange Cloud)** and set SSL/TLS to **Full (Strict)**.
+Do not switch Cloudflare back to proxied mode until startup and health validation succeed.
 
 ---
 
-## 🔄 Phase 6 — Post-Deployment Tasks
+## Phase 5 — Post-deployment tasks
+
+Once the vault is healthy, complete the operational hardening steps:
 
 ```bash
-# Install automated backups, updates, and maintenance crons
 sudo ./cron-setup.sh --install
-
-# Create break-glass emergency admin for OCI serial console
+./edit-secrets.sh --export-recovery-kit
 ./create-breakglass-admin.sh
-# or: make breakglass-create
-
-# Create initial backups
 ./backup.sh --type db
 ./backup.sh --type emergency
-# or: make backup / make backup-emergency
-
-# Test email delivery
-./test-email-simple.sh --verbose
-# or: make test-email
+./maintenance.sh --test-email --verbose
 ```
 
-**🎉 Vault is live at `https://vault.yourdomain.com`**
+Recommended first-run checks:
+
+- Access the main vault URL and confirm normal login flow.
+- Confirm admin access works as expected.
+- Test email notifications.
+- Verify backups can be created successfully.
+- Confirm the break-glass admin path is documented and recoverable.
+
+At this point, switch Cloudflare to **Proxied (Orange Cloud)** and set SSL/TLS mode to **Full (Strict)**.
 
 ---
 
-## 📋 Post-Deployment Checklist
+## Applying configuration changes later
 
-**Immediately:**
-- ✅ Access web vault and create your admin account
-- ✅ Log in to `/admin` with the bcrypt credentials you set
-- ✅ Test email notifications: `make test-email`
-- ✅ Test break-glass admin via OCI Console Connection
-- ✅ Create and test a backup: `make backup-emergency`
-
-**First week:**
-- ✅ Invite team members
-- ✅ Configure rclone for offsite backups; test sync
-- ✅ Test `./restore.sh --dry-run`
-- ✅ Review `docker compose logs fail2ban` for blocking activity
-
-**Ongoing:**
-- ✅ Weekly: review `make health` output
-- ✅ Monthly: `./maintenance.sh` for cleanup, DB vacuum, DNS update
-- ✅ Quarterly: test break-glass admin; run full recovery drill
-
----
-
-## 🔧 Applying Configuration Changes
+The repository is still template-driven after day one. When you change configuration, update the templates and regenerate the live files.
 
 ```bash
-# Edit the template (source of truth)
-nano docker-compose.yml.example   # container / service changes
-nano .env.example                  # new environment variables
+nano docker-compose.yml.example
+nano docker-compose.override.yml.example
+nano .env.example
 
-# Regenerate and apply
 sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.com
 ./startup.sh --force
-# or: make restart
+./health.sh
 ```
+
+Treat `.example` files as the source of truth and generated files as deployment artifacts.
 
 ---
 
-## 🛠️ Troubleshooting Deployment
+## Troubleshooting deployment
 
-**Service won't start:**
+### Caddy or HTTPS bootstrap fails
+
+- Confirm the DNS record is still **DNS Only (Grey Cloud)**.
+- Confirm OCI networking allows port `80` and `443` to reach the instance.
+- Re-run `./health.sh` and inspect `docker compose logs caddy`.
+
+### Services will not start
 
 ```bash
-./health.sh
-docker compose logs vaultwarden
 docker compose config
+docker compose logs vaultwarden
+docker compose logs caddy
+docker compose logs fail2ban
+docker compose logs postfix
+./startup.sh --force
 ```
 
-**TLS certificate not provisioning:**
-- Confirm Cloudflare record is set to **DNS Only (Grey Cloud)**
-- Confirm OCI Security List allows port 80 from `0.0.0.0/0` (Let's Encrypt needs to reach your server)
-
-**Email not working:**
+### Secrets or decryption problems
 
 ```bash
+ls -l secrets/keys/age-key.txt
+./edit-secrets.sh --test
+./setup-secrets.sh
+```
+
+The Age key should remain readable only by the correct user and must be preserved for recovery.
+
+### Email issues
+
+```bash
+./maintenance.sh --test-email --verbose
 docker compose logs postfix
-./test-email-simple.sh --verbose
 grep SMTP .env
 ```
 
-**Secrets decryption failure:**
-
-```bash
-ls -l secrets/keys/age-key.txt   # must be mode 600
-./edit-secrets.sh
-```
-
-**Re-run setup after fixing issues:**
+### Need to regenerate after fixes
 
 ```bash
 sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.com
 ./startup.sh --force
+./health.sh
 ```
 
 ---
 
-## 🌍 Platform Notes
+## Platform notes
 
-### Oracle Cloud Infrastructure (OCI)
-- `setup.sh` auto-detects Oracle Linux and sets `SSH_LOG_PATH=/var/log/secure`
-- Break-glass admin is designed for OCI serial console recovery
-- Dynamic IP is handled automatically via Cloudflare DNS updates (`./maintenance.sh --update-dns`)
-- OCI A1 Flex 1 OCPU / 6 GB RAM qualifies for Always Free tier
+### OCI-specific behavior
 
-### Other Cloud Providers (AWS, GCP, Azure, Hetzner)
-- `SSH_LOG_PATH` is auto-detected (`/var/log/auth.log` on Debian/Ubuntu)
-- All other steps are identical
-- Adjust Security Group / Firewall rules to match the OCI Security List instructions above
+- The project is designed with OCI deployment and recovery in mind.
+- Break-glass administration is especially relevant for OCI serial-console recovery scenarios.
+- Dynamic public IP handling is covered by the project’s DNS update workflow.
+
+### Other providers
+
+The project can still be used outside OCI, but you need equivalent inbound firewall rules and the same Cloudflare DNS/TLS assumptions if you follow this deployment guide.
