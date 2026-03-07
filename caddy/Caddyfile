@@ -100,9 +100,13 @@
         }
 
         # 4. WebSocket routing for notifications hub
+        # FIX [M-14]: Port 3012 was removed in VaultWarden >= 1.30.0.
+        # All WebSocket real-time sync now goes through the main HTTP port 80.
         handle /notifications/hub {
-                reverse_proxy vaultwarden:3012 {
+                reverse_proxy vaultwarden:80 {
                         header_up Host {host}
+                        header_up Connection {>Connection}
+                        header_up Upgrade {>Upgrade}
 
                         header_up CF-Connecting-IP {client_ip}
                         header_up X-Real-IP {client_ip}
@@ -182,8 +186,13 @@
 # Redirect www → apex
 # ================================
 www.{$DOMAIN_NAME} {
+        # FIX [M-15]: Add log rotation params to prevent disk-fill risk
         log {
-                output file /var/log/caddy/access.log
+                output file /var/log/caddy/access.log {
+                        roll_size 50MB
+                        roll_keep 5
+                        roll_keep_for 7d
+                }
                 format json
         }
         redir https://{$DOMAIN_NAME}{uri} 301
@@ -193,8 +202,13 @@ www.{$DOMAIN_NAME} {
 # Catch-all :80 and :443
 # ================================
 :80, :443 {
+        # FIX [M-15]: Add log rotation params to prevent disk-fill risk
         log {
-                output file /var/log/caddy/access.log
+                output file /var/log/caddy/access.log {
+                        roll_size 50MB
+                        roll_keep 5
+                        roll_keep_for 7d
+                }
                 format json
         }
         respond "Not Found" 404

@@ -204,7 +204,7 @@ fix_prerequisites() {
                 fi
                 cat > .sops.yaml << SOPS_EOF
 creation_rules:
-  - path_regex: secrets/secrets\.yaml$
+  - path_regex: .*\.yaml$
     age: $age_public_key
 SOPS_EOF
                 log_success "SOPS configuration created: .sops.yaml"
@@ -275,7 +275,11 @@ check_reconfiguration() {
     fi
 
     echo ""
-    read -r -p "Reconfigure secrets? (yes/no): " confirm
+    # FIX [L-04]: Add -t 30 timeout to avoid hanging in non-interactive contexts
+    if ! read -r -t 30 -p "Reconfigure secrets? (yes/no): " confirm; then
+        log_warn "No input received (30s timeout). Treating as 'no'."
+        confirm="no"
+    fi
 
     if [[ "$confirm" == "yes" ]]; then
         create_secrets_backup
@@ -294,7 +298,11 @@ ensure_argon2_available() {
     log_warn "Argon2 not detected"
 
     if [[ "$AUTO_MODE" != "true" ]]; then
-        read -r -p "Install Python argon2-cffi? (yes/no): " install_it
+        # FIX [L-04]: Add -t 30 timeout to avoid hanging in non-interactive contexts
+        if ! read -r -t 30 -p "Install Python argon2-cffi? (yes/no): " install_it; then
+            log_warn "No input received (30s timeout). Treating as 'no'."
+            install_it="no"
+        fi
         if [[ "$install_it" == "yes" ]]; then
             pip3 install argon2-cffi && return 0
         fi
@@ -397,7 +405,11 @@ collect_secrets() {
         # field — correct behaviour; caller must rotate with edit-secrets.sh.
         smtp_pass=$(auto_generate_secret_field "smtp_password") || { log_error "Failed to generate smtp_password"; return 1; }
     else
-        read -r -p "Enable email notifications now? (yes/no): " enable_email
+        # FIX [L-04]: Add -t 30 timeout to avoid hanging in non-interactive contexts
+        if ! read -r -t 30 -p "Enable email notifications now? (yes/no): " enable_email; then
+            log_warn "No input received (30s timeout). Treating as 'no'."
+            enable_email="no"
+        fi
         if [[ "$enable_email" == "yes" ]]; then
             smtp_pass=$(collect_secret_field "smtp_password") || { log_error "Failed to collect smtp_password"; return 1; }
             log_success "SMTP password configured"
@@ -430,7 +442,11 @@ collect_secrets() {
             SECRETS["push_installation_id"]=$(auto_generate_secret_field "push_installation_id")
             SECRETS["push_installation_key"]=$(auto_generate_secret_field "push_installation_key")
         else
-            read -r -p "Configure push notifications? (yes/no): " do_push
+            # FIX [L-04]: Add -t 30 timeout to avoid hanging in non-interactive contexts
+            if ! read -r -t 30 -p "Configure push notifications? (yes/no): " do_push; then
+                log_warn "No input received (30s timeout). Treating as 'no'."
+                do_push="no"
+            fi
             if [[ "$do_push" == "yes" ]]; then
                 SECRETS["push_installation_id"]=$(collect_secret_field "push_installation_id") || return 1
                 SECRETS["push_installation_key"]=$(collect_secret_field "push_installation_key") || return 1
@@ -466,9 +482,14 @@ write_secrets() {
 
     log_info "Writing secrets to encrypted YAML file..."
 
-    local temp_file="$PROJECT_ROOT/secrets/.temp_secrets.yaml"
-    touch "$temp_file"
-    chmod 600 "$temp_file"
+    # FIX [M-06]: Use mktemp for an unpredictable temp filename to avoid concurrent-run
+    # race conditions on the previously fixed-path .temp_secrets.yaml.
+    # Also fix trap to use double-quotes so $temp_file expands at registration time.
+    local temp_file
+    temp_file=$(mktemp -p "$PROJECT_ROOT/secrets" vwsecrets.XXXXXXXXXX.yaml) || return 1
+    install -m 600 /dev/null "$temp_file"
+    # shellcheck disable=SC2064  # SC2064: intentional — $temp_file must expand NOW at registration
+    # time so the cleanup action removes the correct file even if the variable changes later.
     register_cleanup "rm -f '$temp_file'"
 
     {

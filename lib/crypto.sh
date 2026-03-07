@@ -82,6 +82,8 @@ _derive_age_public_key() {
 # --- SOPS Operations ---
 
 # Check if a file is SOPS encrypted - STANDARDIZED: Returns exit code
+# FIX [M-04]: Require top-level 'sops:' key AND nested 'mac:' field to avoid
+# false positives on any YAML file that happens to contain a 'sops:' key.
 is_sops_encrypted() {
     local file="$1"
 
@@ -90,11 +92,8 @@ is_sops_encrypted() {
         return 1
     fi
 
-    if grep -q "sops:" "$file" && grep -q "version:" "$file"; then
-        return 0
-    else
-        return 1
-    fi
+    # A SOPS-encrypted file always has a top-level 'sops:' map AND a 'mac:' field within it
+    grep -q '^sops:' "$file" && grep -q '^\s*mac:' "$file"
 }
 
 # Decrypt SOPS file to stdout - STANDARDIZED: Returns exit code

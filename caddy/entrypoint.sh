@@ -9,6 +9,10 @@ echo "==================================================================="
 echo " Caddy Entrypoint - Loading Secrets"
 echo "==================================================================="
 
+# FIX [M-16]: Validate required environment variables BEFORE Caddyfile validation
+# so we never print "validation passed" when DOMAIN_NAME is unset.
+: "${DOMAIN_NAME:?ERROR: DOMAIN_NAME environment variable must be set}"
+
 # =============================================================================
 # SECURITY: Load Cloudflare API Token
 # =============================================================================
@@ -17,7 +21,11 @@ if [ ! -f /run/secrets/caddy_cloudflare_dns_token ]; then
     exit 1
 fi
 
-export CLOUDFLARE_API_TOKEN=$(cat /run/secrets/caddy_cloudflare_dns_token)
+# FIX [M-17]: Separate assignment from export so the exit code of the command
+# substitution is not masked by the 'export' builtin under POSIX set -eu.
+_token=$(cat /run/secrets/caddy_cloudflare_dns_token) || { echo "ERROR: cannot read CF token" >&2; exit 1; }
+export CLOUDFLARE_API_TOKEN="$_token"
+unset _token
 
 if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
     echo "ERROR: Cloudflare API token is empty" >&2
@@ -54,11 +62,14 @@ if ! echo "$ADMIN_HASH_FULL" | grep -qE '^admin \$2[aby]\$'; then
     exit 1
 fi
 
-# Extract username (everything before first space)
-export ADMIN_USERNAME=$(echo "$ADMIN_HASH_FULL" | awk '{print $1}')
+# FIX [M-17]: Separate assignment from export for each variable
+_admin_username=$(echo "$ADMIN_HASH_FULL" | awk '{print $1}') || { echo "ERROR: cannot parse admin username" >&2; exit 1; }
+export ADMIN_USERNAME="$_admin_username"
+unset _admin_username
 
-# Extract hash (everything after first space)
-export ADMIN_HASH=$(echo "$ADMIN_HASH_FULL" | awk '{$1=""; print substr($0,2)}')
+_admin_hash=$(echo "$ADMIN_HASH_FULL" | awk '{$1=""; print substr($0,2)}') || { echo "ERROR: cannot parse admin hash" >&2; exit 1; }
+export ADMIN_HASH="$_admin_hash"
+unset _admin_hash
 
 DEBUG_ENTRYPOINT=${DEBUG_ENTRYPOINT:-false}
 if [ "$DEBUG_ENTRYPOINT" = "true" ]; then
@@ -90,7 +101,6 @@ echo "✓ Caddyfile validation passed"
 # =============================================================================
 echo "==================================================================="
 echo " Starting Caddy Server"
-DOMAIN_NAME="${DOMAIN_NAME:?ERROR: DOMAIN_NAME environment variable must be set}"
 echo " Domain: ${DOMAIN_NAME}"
 echo "==================================================================="
 

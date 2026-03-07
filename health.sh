@@ -275,8 +275,11 @@ check_container_status() {
         HEALTH_DETAILS["containers"]="Stopped: ${stopped_containers[*]}"
         return 1
     elif [[ ${#unhealthy_containers[@]} -gt 0 ]]; then
-        health_log_warn "Unhealthy containers: ${unhealthy_containers[*]}"
-        HEALTH_RESULTS["containers"]="degraded"
+        # FIX [M-03]: Containers with Docker health=unhealthy must set OVERALL_STATUS=unhealthy
+        # and exit 1. Using health_log_warn here left exit code 0 even when containers
+        # were failing their health checks.
+        health_log_error "CRITICAL: Unhealthy containers: ${unhealthy_containers[*]}"
+        HEALTH_RESULTS["containers"]="failed"
         HEALTH_DETAILS["containers"]="Unhealthy: ${unhealthy_containers[*]}"
         return 1
     else

@@ -279,8 +279,8 @@ check_split_brain() {
         fi
 
         local repo_mtime opt_mtime
-        repo_mtime=$(stat -c%Y "$repo_script" 2>/dev/null || echo "0")
-        opt_mtime=$(stat -c%Y "$opt_script"  2>/dev/null || echo "0")
+        repo_mtime=$(stat -c%Y "$repo_script" 2>/dev/null || stat -f%m "$repo_script" 2>/dev/null || echo "0")
+        opt_mtime=$(stat -c%Y "$opt_script"  2>/dev/null || stat -f%m "$opt_script"  2>/dev/null || echo "0")
 
         if (( repo_mtime > opt_mtime )); then
             stale_scripts+=("$script")
@@ -341,13 +341,32 @@ install_cron_jobs() {
         return 1
     fi
 
-    if ! systemctl is-active --quiet cron 2>/dev/null; then
-        log_warn "Cron service is not running - attempting to start..."
-        if systemctl start cron 2>/dev/null && systemctl enable cron 2>/dev/null; then
-            log_success "Cron service started and enabled"
+    # FIX [M-19]: Detect cron service name — Debian/Ubuntu use 'cron',
+    # RHEL/Oracle Linux (OCI default OS) use 'crond'.
+    # Cache systemctl list-units output to avoid two separate invocations.
+    local _systemd_units
+    _systemd_units=$(systemctl list-units --type=service --all 2>/dev/null || true)
+    local cron_service="cron"
+    if echo "$_systemd_units" | grep -q 'crond\.service'; then
+        cron_service="crond"
+    elif ! echo "$_systemd_units" | grep -q 'cron\.service'; then
+        # Neither found; detect via binary
+        command -v crond &>/dev/null && cron_service="crond" || cron_service="cron"
+    fi
+
+    if ! systemctl is-active --quiet "$cron_service" 2>/dev/null; then
+        log_warn "Cron service ($cron_service) is not running - attempting to start..."
+        if systemctl start "$cron_service" 2>/dev/null && systemctl enable "$cron_service" 2>/dev/null; then
+            log_success "Cron service ($cron_service) started and enabled"
         else
-            log_error "Failed to start cron service"
-            log_info "Install with: sudo apt install cron && sudo systemctl start cron"
+            log_error "Failed to start cron service ($cron_service)"
+            if command -v apt-get &>/dev/null; then
+                log_info "Install with: sudo apt-get install -y cron && sudo systemctl start cron"
+            elif command -v dnf &>/dev/null; then
+                log_info "Install with: sudo dnf install -y cronie && sudo systemctl start crond"
+            else
+                log_info "Install and start the cron daemon for your distribution"
+            fi
             return 1
         fi
     fi
@@ -666,12 +685,19 @@ validate_cron_security() {
 
     local validation_passed=true
 
-    if ! systemctl is-active --quiet cron 2>/dev/null; then
-        log_error "Cron service is not running"
-        log_info "Start with: sudo systemctl start cron"
+    # FIX [M-19]: Detect cron service name for Oracle Linux/RHEL compatibility
+    # Cache output to avoid calling systemctl twice.
+    local _units
+    _units=$(systemctl list-units --type=service --all 2>/dev/null || true)
+    local _cron_svc="cron"
+    echo "$_units" | grep -q 'crond\.service' && _cron_svc="crond"
+
+    if ! systemctl is-active --quiet "$_cron_svc" 2>/dev/null; then
+        log_error "Cron service ($_cron_svc) is not running"
+        log_info "Start with: sudo systemctl start $_cron_svc"
         validation_passed=false
     else
-        log_success "Cron service is running"
+        log_success "Cron service ($_cron_svc) is running"
     fi
 
     if crontab -l 2>/dev/null | grep -q "$CRON_SCRIPTS_DIR"; then

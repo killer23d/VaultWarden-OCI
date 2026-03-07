@@ -14,6 +14,16 @@ init_common_lib "$0"
 source "lib/crypto.sh"
 source "lib/security.sh"
 
+# FIX [L-05]: Source SSH_PORT from .env so instructions show the correct port.
+# $SSH_PORT defaults to 22 if not set or not found in .env.
+SSH_PORT="${SSH_PORT:-}"
+if [[ -z "$SSH_PORT" ]] && [[ -f "${PROJECT_ROOT}/.env" ]]; then
+    # Use grep -m1 to take the first match; strip surrounding quotes/spaces robustly.
+    SSH_PORT=$(grep -m1 -E '^[[:space:]]*SSH_PORT[[:space:]]*=' "${PROJECT_ROOT}/.env" 2>/dev/null \
+        | sed 's/^[^=]*=[[:space:]]*//' | tr -d '"'"'" | tr -d '[:space:]') || true
+fi
+SSH_PORT="${SSH_PORT:-22}"
+
 # Configuration
 BREAKGLASS_USER="vw-emergency"
 CREATE_USER=false
@@ -64,7 +74,10 @@ EOF
 }
 
 # ENHANCED: Script self-validation using lib/security.sh
+# FIX [M-08]: Accept a 'strict' parameter so non-validate modes only warn on ownership failure
+# instead of hard-failing (blocking fresh installs where setup.sh sets non-root ownership).
 validate_script_security() {
+    local strict="${1:-false}"
     local script_path="$0"
 
     log_info "Validating script security..."
@@ -77,17 +90,21 @@ validate_script_security() {
 
     # Use centralized security validation
     if ! validate_file_permissions "$script_path" "700" "root" "root"; then
-        log_error "SECURITY: Script failed validation - privilege escalation risk"
-        log_error "Expected: root:root ownership with 700 permissions"
-        log_error "Current script: $script_path"
+        if [[ "$strict" == "true" ]]; then
+            log_error "SECURITY: Script failed validation - privilege escalation risk"
+            log_error "Expected: root:root ownership with 700 permissions"
+            log_error "Current script: $script_path"
 
-        # Show current permissions for debugging
-        if ls -la "$script_path"; then
-            log_info "^ Current permissions shown above"
+            # Show current permissions for debugging
+            if ls -la "$script_path"; then
+                log_info "^ Current permissions shown above"
+            fi
+
+            log_error "Fix with: sudo chown root:root '$script_path' && sudo chmod 700 '$script_path'"
+            return 1
+        else
+            log_warn "Script not owned by root:root — consider: sudo chown root:root $(realpath "$script_path") && sudo chmod 700 $(realpath "$script_path")"
         fi
-
-        log_error "Fix with: sudo chown root:root '$script_path' && sudo chmod 700 '$script_path'"
-        return 1
     fi
 
     # Validate script is in expected location
@@ -201,8 +218,9 @@ create_breakglass_user() {
         return 1
     fi
 
-    # Set password
-    if ! echo "$BREAKGLASS_USER:$password" | chpasswd; then
+    # FIX [M-09]: Use heredoc to set password — avoids "echo USER:PASS | chpasswd" which
+    # exposes the password in /proc/<pid>/cmdline via the echo subprocess.
+    if ! chpasswd <<< "${BREAKGLASS_USER}:${password}"; then
         log_error "Failed to set user password"
         userdel -r "$BREAKGLASS_USER" 2>/dev/null || true
         return 1
@@ -276,31 +294,32 @@ EOF
     log_success "Break-glass admin created successfully"
     
     # NEW: Clear screen and show critical credentials
+    # FIX [L-06]: Replace echo -e with printf to match codebase convention (BUG-10 fix)
     clear
-    echo -e "${COLOR_RED}"
+    printf '%b\n' "${COLOR_RED}"
     cat << "EOF"
   _    _  ___  ____  _   _  _  _  ____  _ 
  ( \/\/ )/ __)(_  _)( )_( )( \/ )(__  )(_)
   )    (( (__  _)(_  ) _ (  )  (  _)(_  _ 
  (__/\__)\___)(____)(_) (_)(_/\_)(____)(_)
 EOF
-    echo -e "${COLOR_RESET}"
+    printf '%b\n' "${COLOR_RESET}"
 
-    echo -e "${COLOR_YELLOW}EMERGENCY ACCESS CREDENTIALS CREATED${COLOR_RESET}"
-    echo -e "These credentials allow access via the OCI Serial Console if SSH fails."
-    echo -e "Write these down physically and store them securely.\n"
+    printf '%b\n' "${COLOR_YELLOW}EMERGENCY ACCESS CREDENTIALS CREATED${COLOR_RESET}"
+    printf 'These credentials allow access via the OCI Serial Console if SSH fails.\n'
+    printf 'Write these down physically and store them securely.\n\n'
 
-    echo -e "Username:  ${COLOR_GREEN}${BREAKGLASS_USER}${COLOR_RESET}"
-    echo -e "Password:  ${COLOR_GREEN}${password}${COLOR_RESET}"
-    echo -e "Expiry:    ${COLOR_CYAN}Never (Account is locked to serial console)${COLOR_RESET}"
+    printf '%b\n' "Username:  ${COLOR_GREEN}${BREAKGLASS_USER}${COLOR_RESET}"
+    printf '%b\n' "Password:  ${COLOR_GREEN}${password}${COLOR_RESET}"
+    printf '%b\n' "Expiry:    ${COLOR_CYAN}Never (Account is locked to serial console)${COLOR_RESET}"
 
-    echo -e "\nTo test this:"
-    echo -e "1. Go to Oracle Cloud Console > Compute > Instance > Console Connection"
-    echo -e "2. Launch Cloud Shell connection"
-    echo -e "3. Press ENTER to see login prompt"
-    echo -e "4. Login with the credentials above"
+    printf '\nTo test this:\n'
+    printf '1. Go to Oracle Cloud Console > Compute > Instance > Console Connection\n'
+    printf '2. Launch Cloud Shell connection\n'
+    printf '3. Press ENTER to see login prompt\n'
+    printf '4. Login with the credentials above\n'
 
-    echo -e "\n${COLOR_RED}Press ENTER to clear screen and finish...${COLOR_RESET}"
+    printf '%b\n' "\n${COLOR_RED}Press ENTER to clear screen and finish...${COLOR_RESET}"
     read -r
     clear
 
@@ -373,8 +392,8 @@ reset_breakglass_password() {
         return 1
     fi
 
-    # Set new password
-    if ! echo "$BREAKGLASS_USER:$password" | chpasswd; then
+    # FIX [M-09]: Use herestring to avoid exposing password in /proc/<pid>/cmdline
+    if ! chpasswd <<< "${BREAKGLASS_USER}:${password}"; then
         log_error "Failed to reset user password"
         return 1
     fi
@@ -453,7 +472,8 @@ show_breakglass_status() {
 
     echo ""
     log_info "Security Status:"
-    if validate_script_security; then
+    # FIX [M-08]: Non-strict validation for --status (read-only) — only warn, don't fail
+    if validate_script_security "false"; then
         echo "  • Script security: ✅ Validated"
     else
         echo "  • Script security: ❌ Validation failed"
@@ -477,8 +497,12 @@ main() {
         exit 1
     fi
 
+    # FIX [M-08]: Pass strict=true only for --validate mode; other modes only warn on ownership failure.
+    local _security_strict="false"
+    [[ "$VALIDATE_ONLY" == "true" ]] && _security_strict="true"
+
     # ENHANCED: Always validate script security first (as documented in SECURITY.md)
-    if ! validate_script_security; then
+    if ! validate_script_security "$_security_strict"; then
         log_error "Script security validation failed - refusing to proceed"
         log_info "This is a security requirement to prevent privilege escalation"
         exit 1
