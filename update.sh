@@ -117,10 +117,10 @@ check_for_updates() {
         local_id=$(docker inspect --type=image --format '{{.Id}}' "$image" 2>/dev/null || echo "none")
 
         if [[ "$DRY_RUN" == "true" ]]; then
-            # Needs experimental features enabled; fallback to pull simulation
-            export DOCKER_CLI_EXPERIMENTAL=enabled
             local remote_digest
-            remote_digest=$(docker manifest inspect "$image" 2>/dev/null \
+            # DOCKER_CLI_EXPERIMENTAL is a no-op on Docker >= 20.10 but required for
+            # older clients; scope it to this single call to avoid process-level bleed.
+            remote_digest=$(DOCKER_CLI_EXPERIMENTAL=enabled docker manifest inspect "$image" 2>/dev/null \
                 | grep -A 1 "config" | grep "digest" | awk -F'"' '{print $4}' \
                 || echo "unknown")
 
