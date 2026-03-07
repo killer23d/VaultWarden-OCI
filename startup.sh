@@ -108,9 +108,10 @@ prepare_log_directories() {
   if ! sudo mkdir -p "${project_state_dir}/logs"/{vaultwarden,caddy,fail2ban,postfix}; then
     log_warn "Failed to create log subdirectories (init container will try)"
   else
-    # Set ownership to PUID:PGID from environment
-    local puid="${PUID:-1001}"
-    local pgid="${PGID:-1001}"
+    # Set ownership to PUID:PGID from .env configuration
+    local puid pgid
+    puid=$(get_config_value "PUID" "1001")
+    pgid=$(get_config_value "PGID" "1001")
     sudo chown -R "${puid}:${pgid}" "${project_state_dir}/logs" 2>/dev/null || true
     sudo chmod -R 755 "${project_state_dir}/logs" 2>/dev/null || true
     log_success "Log subdirectories created with correct permissions"
@@ -235,14 +236,14 @@ PY
         file_perms=$(stat -c "%a" "$secret_file" 2>/dev/null || echo "unknown")
         if [[ "$file_perms" == "600" ]]; then
           log_debug "Secret created securely: $secret_name (permissions: $file_perms)"
-          ((secrets_created++))
+          secrets_created=$(( secrets_created + 1 ))
         else
           log_error "Secret file created with incorrect permissions: $secret_name ($file_perms)"
-          ((secrets_failed++))
+          secrets_failed=$(( secrets_failed + 1 ))
         fi
       else
         log_error "Failed to create secret file: $secret_name"
-        ((secrets_failed++))
+        secrets_failed=$(( secrets_failed + 1 ))
       fi
     else
       log_debug "Skipping empty/placeholder secret: $secret_name"

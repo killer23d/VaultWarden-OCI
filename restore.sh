@@ -104,7 +104,7 @@ _find_latest_backup() {
         printf '%s %s\n' \
             "$(stat -c%Y "$f" 2>/dev/null || stat -f%m "$f" 2>/dev/null || echo 0)" \
             "$f"
-    done | sort -n | tail -1 | cut -d' ' -f2-
+    done | sort -n | tail -1 | cut -d' ' -f2- || true
 }
 
 list_backups() {
@@ -709,7 +709,7 @@ main() {
         local max_wait=60 waited=0
         while (( waited < max_wait )); do
             sleep 5; (( waited += 5 ))
-            if docker inspect vaultwarden_app --format '{{.State.Status}} {{.State.Health.Status}}' 2>/dev/null | grep -qE 'running (healthy|$)'; then
+            if docker inspect vaultwarden_app --format '{{.State.Status}} {{.State.Health.Status}}' 2>/dev/null | grep -qE $'running (healthy|$)'; then
                 break
             fi
         done
