@@ -313,6 +313,7 @@ check_service_accessibility() {
                 health_log_warn "External web access: FAILED (Check Cloudflare/DNS)"
                 # Don't fail the whole check if only external is down (could be just a network blip)
                 HEALTH_RESULTS["accessibility"]="degraded"
+                return 0
             fi
         fi
     fi
@@ -381,7 +382,9 @@ check_ssl_certificates() {
         expiry_date=$(echo "$cert_info" | grep "notAfter" | cut -d= -f2)
         if [[ -n "$expiry_date" ]]; then
             local expiry_epoch current_epoch
-            expiry_epoch=$(date -d "$expiry_date" +%s 2>/dev/null || echo "0")
+            expiry_epoch=$(date -d "$expiry_date" +%s 2>/dev/null \
+                        || date -j -f "%b %d %T %Y %Z" "$expiry_date" +%s 2>/dev/null \
+                        || echo "0")
             current_epoch=$(date +%s)
             expires_in=$(( (expiry_epoch - current_epoch) / 86400 ))
 
@@ -613,7 +616,37 @@ check_resource_usage() {
     health_log_info "Checking resource usage..."
 
     local cpu_usage mem_usage cpu_int
-    cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1 | cut -d'u' -f1 2>/dev/null || echo "0")
+
+    # Use /proc/stat for reliable CPU measurement on Linux (stable kernel interface).
+    # Fall back to flexible top parsing on non-Linux systems where /proc/stat is absent.
+    if [[ -r /proc/stat ]]; then
+        # Two-sample measurement: sample idle/total ticks 1 second apart.
+        local cpu1 cpu2 idle1 total1 idle2 total2
+        cpu1=$(grep -m1 '^cpu ' /proc/stat)
+        sleep 1
+        cpu2=$(grep -m1 '^cpu ' /proc/stat)
+        read -r _ u1 n1 s1 i1 rest1 <<< "$cpu1"
+        read -r _ u2 n2 s2 i2 rest2 <<< "$cpu2"
+        total1=$(( u1 + n1 + s1 + i1 ))
+        total2=$(( u2 + n2 + s2 + i2 ))
+        idle1=$i1; idle2=$i2
+        local dtotal=$(( total2 - total1 ))
+        local didle=$(( idle2 - idle1 ))
+        if (( dtotal > 0 )); then
+            cpu_usage=$(( 100 * (dtotal - didle) / dtotal ))
+        else
+            cpu_usage=0
+        fi
+    else
+        cpu_usage=$(top -bn1 | awk '/[Cc][Pp][Uu]/ && /[0-9]/ {
+            for(i=1;i<=NF;i++) {
+                if ($i ~ /^[0-9.]+$/ && $(i-1) ~ /[uU][sS]/) { print $i; exit }
+                if ($i ~ /[0-9.]+%?us,?/) { gsub(/[^0-9.]/,"",$i); print $i; exit }
+            }
+        } NR==3 {exit}' 2>/dev/null | head -1 || echo "0")
+        cpu_usage=${cpu_usage%.*}
+        cpu_usage=${cpu_usage:-0}
+    fi
     mem_usage=$(free | grep Mem | awk '{printf "%.0f", $3/$2 * 100.0}' 2>/dev/null || echo "0")
 
     local resource_issues=()

@@ -125,10 +125,11 @@ list_backups() {
         if (( ${#files[@]} > 0 )); then
             log_info "  [$type_name]"
             for f in "${files[@]}"; do
-                local size mtime
+                local size mtime mtime_epoch
                 size=$(du -sh "$f" 2>/dev/null | cut -f1 || echo "?")
-                mtime=$(stat -c "%y" "$f" 2>/dev/null | cut -d. -f1 \
-                     || stat -f "%Sm" "$f" 2>/dev/null \
+                mtime_epoch=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || echo 0)
+                mtime=$(date -d "@${mtime_epoch}" "+%Y-%m-%d %H:%M:%S" 2>/dev/null \
+                     || date -r "${mtime_epoch}" "+%Y-%m-%d %H:%M:%S" 2>/dev/null \
                      || echo "?")
                 log_info "    $(basename "$f")  ($size  $mtime)"
                 (( ++found )) || true
@@ -238,8 +239,9 @@ create_db_snapshot_host() {
     local dest="$2"
     local db_file="${state_dir}/data/db.sqlite3"
     [[ -f "$db_file" ]] || { log_error "Database not found: $db_file"; return 1; }
-    # .backup destination path must be single-quoted for the sqlite3 shell
-    sqlite3 "$db_file" ".backup '${dest}'" || {
+    # Pass dest as a printf argument so any special characters (including single
+    # quotes) in the path are treated as a plain string by sqlite3.
+    sqlite3 "$db_file" "$(printf '.backup %s' "$dest")" || {
         log_error "sqlite3 .backup failed for: $db_file"
         return 1
     }
@@ -414,7 +416,7 @@ perform_db_backup() {
     cat > "${enc}.meta" <<MEOF
 type=db
 timestamp=$timestamp
-original_size=$(stat -c%s "$db_file" 2>/dev/null || stat -f%z "$db_file" 2>/dev/null || echo 0)
+original_size=$(_stat_file_size "$db_file" 2>/dev/null || echo 0)
 archive_format=relative
 version=2
 MEOF
