@@ -71,9 +71,8 @@ sudo cp /tmp/db.sqlite3.backup /var/lib/vaultwarden/data/bwdata/db.sqlite3
 sudo chown 1000:1000 /var/lib/vaultwarden/data/bwdata/db.sqlite3
 sudo chmod 600  /var/lib/vaultwarden/data/bwdata/db.sqlite3
 
-# Verify database integrity (uses an ephemeral alpine container)
-docker run --rm -v /var/lib/vaultwarden/data/bwdata:/data alpine:latest \
-  sh -c "apk add --no-cache sqlite >/dev/null 2>&1 && sqlite3 /data/db.sqlite3 'PRAGMA integrity_check;'"
+# Verify database integrity (uses host sqlite3 directly - no Docker required)
+sudo sqlite3 /var/lib/vaultwarden/data/bwdata/db.sqlite3 'PRAGMA integrity_check;'
 
 # Start services
 ./startup.sh
@@ -243,10 +242,10 @@ sudo ./setup.sh --domain vault.example.com --email admin@example.com --auto
 | Feature | Generic Docker Compose | VaultWarden-OCI |
 |---|---|---|
 | Configuration | Manual | Template-based (`setup.sh`) |
-| Resource limits | Manual / none | Pre-configured for 6 GB systems |
-| Security | DIY | Dual Fail2ban + Cloudflare-only firewall |
+| Resource limits | Manual / none | Pre-configured limits for 6 GB systems |
+| Security | DIY | Dual Fail2ban (Host-networking) + Cloudflare-only firewall |
 | Email | Manual SMTP | Containerised Postfix relay |
-| Backups | Manual | Automated cron (daily DB, weekly full) |
+| Backups | Manual | Automated cron (Mon-Sat DB, Sunday full) |
 | Encryption | None | Age-encrypted backups and secrets (SOPS) |
 
 **Migration steps:**
@@ -324,7 +323,7 @@ sudo ./cron-setup.sh --install
 ./backup.sh --list
 
 # Test email
-./maintenance.sh --test-email
+./maintenance.sh --test-email --verbose
 ```
 
 ### Update Client Applications
@@ -362,9 +361,8 @@ If migration fails:
 ### Database import fails
 
 ```bash
-# Check database integrity
-docker run --rm -v /var/lib/vaultwarden/data/bwdata:/data alpine:latest \
-  sh -c "apk add --no-cache sqlite >/dev/null 2>&1 && sqlite3 /data/db.sqlite3 'PRAGMA integrity_check;'"
+# Check database integrity (uses host sqlite3)
+sudo sqlite3 /var/lib/vaultwarden/data/bwdata/db.sqlite3 'PRAGMA integrity_check;'
 
 # Run deep maintenance if WAL corruption is suspected
 sudo ./maintenance.sh --db-maint
