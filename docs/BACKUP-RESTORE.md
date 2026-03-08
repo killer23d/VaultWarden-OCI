@@ -1,294 +1,316 @@
-# Backup and Restore — VaultWarden-OCI
+# Backup & Restore — VaultWarden-OCI
 
-This guide reflects the current backup and restore model used by the repository: encrypted backup archives created by `backup.sh`, restore workflows driven by `restore.sh`, optional offsite sync through rclone, and recovery material managed through the Age + SOPS workflow.
+All backups are encrypted with **Age** and managed by `backup.sh`. The backup lock uses `flock` on a file descriptor — the kernel releases it automatically on any process exit, including SIGKILL and OOM kill.
 
-Related docs: [OPERATIONS.md](OPERATIONS.md) · [BOOTSTRAP_KEY_RECOVERY.md](BOOTSTRAP_KEY_RECOVERY.md) · [SCRIPTS.md](SCRIPTS.md)
-
----
-
-## Backup model
-
-The project currently supports three backup types:
-
-| Type | Purpose | Notes |
-| :-- | :-- | :-- |
-| `db` | Fast database-focused backup | Best for frequent scheduled protection |
-| `full` | Broader system-state backup | Use before larger changes and for regular full recovery points |
-| `emergency` | Disaster-recovery archive | Use before high-risk changes and for server-loss scenarios |
-
-All normal backup flows are encrypted. Recovery depends on preserving the required key material outside the server.
+Related docs: [OPERATIONS.md](OPERATIONS.md) · [SCRIPTS.md](SCRIPTS.md) · [ADVANCED-CUSTOMIZATION.md](ADVANCED-CUSTOMIZATION.md)
 
 ---
 
-## Recovery material
+## 💾 Backup Tiers
 
-Your backups are only as good as your ability to decrypt them later.
+| Type | Contents | Retention | Age Key Required |
+| :-- | :-- | :-- | :-- |
+| **Database** (`db`) | SQLite database only | 14 days | Yes |
+| **Full** (`full`) | Config + data (no secrets) | 30 days | Yes |
+| **Emergency** (`emergency`) | Everything + secrets + Age key | 90 days | Included in archive |
 
-Critical items to protect:
-
-- `secrets/keys/age-key.txt`
-- Any exported recovery kit produced by `./edit-secrets.sh --export-recovery-kit`
-- Any separate offline escrow or paper backup you maintain for the Age key
-
-Recommended step after deployment or secret changes:
-
-```bash
-./edit-secrets.sh --export-recovery-kit
-```
-
-Store recovery material outside the server and outside the same failure domain as the primary VM.
+> **⚠️** Full and database backups require your Age key (`secrets/keys/age-key.txt`) to decrypt. Keep a copy offline or in a secure separate location before restoring to a new server. Emergency kits include the key inside the archive.
 
 ---
 
-## Creating backups
+## 📦 Creating Backups
 
-### Database backup
-
-```bash
-./backup.sh --type db
-make backup
-make db-backup
-```
-
-Use this for the normal fast backup path.
-
-### Full backup
+### Database Backup (Daily)
 
 ```bash
-./backup.sh --type full
-make backup-full
+./backup.sh --type db                        # default
+./backup.sh --type db --rclone               # with offsite sync
+./backup.sh --type db --email                # with email notification
+make backup                                  # silent (no email)
 ```
 
-Use this for regular broader recovery points and before meaningful system changes.
-
-### Emergency backup
+### Full System Backup (Weekly)
 
 ```bash
-./backup.sh --type emergency
-make backup-emergency
+./backup.sh --type full                      # fast checksum verification
+./backup.sh --type full --full-verification  # end-to-end decrypt + integrity test
+./backup.sh --type full --full-verification --rclone --email
+make backup-full                             # full backup with email
 ```
 
-Use this before high-risk changes or when you want the strongest rebuild path available.
+**Included:** Docker Compose config, `.env`, Caddy config, Fail2ban config, VaultWarden data directory, database snapshot.
+**Excluded:** `secrets/` directory, Age keys, SSH keys.
 
----
-
-## Verification and remote sync
-
-### Full verification
+### Emergency Recovery Kit (As Needed)
 
 ```bash
-./backup.sh --type full --full-verification
-./backup.sh --type emergency --full-verification
+./backup.sh --type emergency                  # includes secrets + Age key
+./backup.sh --type emergency --full-verification --rclone --email
+make backup-emergency                         # emergency kit with email
 ```
 
-Use full verification for higher-confidence backups, especially before major upgrades, infrastructure moves, or risky customization work.
+> ⚠️ Emergency kits contain your encryption keys. Store them securely offline.
 
-### rclone offsite copy
-
-```bash
-./backup.sh --type db --rclone
-./backup.sh --type full --rclone --email
-```
-
-Configure the remote in your environment before relying on offsite copy:
-
-```bash
-rclone config
-nano .env
-```
-
-Set or review `RCLONE_REMOTE_NAME`, then test with a manual run before assuming cron coverage is sufficient.
-
----
-
-## Retention
-
-Retention should be treated as a deployment setting, not a fixed value hard-coded in documentation.
-
-Current tuning options:
-
-- Override a run with `--keep N`.
-- Review or adjust the default retention in `.env`.
-
-Example:
-
-```bash
-./backup.sh --type full --keep 30
-```
-
-This is the safer way to describe the project because deployed values can differ across environments.
-
----
-
-## Listing and selecting backups
+### List & Inspect Backups
 
 ```bash
 ./backup.sh --list
 make list-backups
 ```
 
-Use the listing flow before a restore if you want to confirm available archives, timestamps, and which recovery tier you intend to use.
+Each backup produces three files:
+
+| File | Purpose |
+| :-- | :-- |
+| `*.age` | Encrypted backup archive |
+| `*.sha256` | Post-encryption SHA-256 checksum (generated automatically) |
+| `*.meta` | Metadata (type, timestamp, version, size) |
 
 ---
 
-## Restore workflows
+## 🔄 Verification Modes
 
-### Interactive restore
+| Mode | Flag | Speed | What It Tests |
+| :-- | :-- | :-- | :-- |
+| Fast (default) | *(none)* | Seconds | SHA-256 checksum post-encryption |
+| Full | `--full-verification` | Minutes | Decrypt → extract → DB integrity check |
+
+Use fast for daily automated backups; full for weekly and before major changes.
+
+---
+
+## 🔑 Age Key Protection (`lib/simple_key_resilience.sh`)
+
+Your Age key (`secrets/keys/age-key.txt`) is the single point of failure for all backup decryption. If you lose it, **every backup is permanently unrecoverable**. `lib/simple_key_resilience.sh` provides three complementary protection tiers.
+
+### Tier 1 — Automatic Health Check (runs on every backup)
+
+`backup.sh` calls `simple_verify_age_key` before every backup run. It checks that the key file exists, auto-corrects permissions to 600 if needed, validates the key structure, and performs a live encrypt/decrypt roundtrip. If the check fails, the backup is aborted.
+
+No action required — this runs automatically.
+
+### Tier 2 — Password Manager Escrow (recommended after setup)
+
+Exports a formatted plain-text document containing the Age private key, public key, and recovery instructions — ready to paste as a Secure Note in Bitwarden, 1Password, or similar.
 
 ```bash
-./restore.sh
+source lib/simple_key_resilience.sh
+create_password_manager_escrow ~/vaultwarden-age-key-escrow.txt
+
+# ⚠️ Copy contents to your password manager NOW, then securely delete:
+shred -fuz ~/vaultwarden-age-key-escrow.txt
+```
+
+Re-run this any time you rotate the Age key.
+
+### Tier 3 — Paper Backup (optional, for physical offline storage)
+
+Generates a printable PDF (or HTML if `wkhtmltopdf` is not installed) containing the Age key, optional QR code, and recovery steps. The temp HTML file is securely wiped after PDF generation.
+
+```bash
+# Install optional dependencies
+sudo apt install qrencode wkhtmltopdf
+
+source lib/simple_key_resilience.sh
+create_printable_key_backup ~/vaultwarden-key-backup.pdf
+
+# Print and store in a fireproof safe, then delete the file
+```
+
+> **When to run each tier:**
+> - Tier 1: automatic on every `backup.sh` run
+> - Tier 2: after initial setup and after any Age key rotation
+> - Tier 3: optional — for physical offline copies in a fireproof safe or safety deposit box
+
+---
+
+## ☁️ Offsite Storage (rclone)
+
+`backup.sh` reads `RCLONE_REMOTE_NAME` from `.env` and syncs the encrypted `.age`, `.meta`, and `.sha256` sidecars to `${RCLONE_REMOTE_NAME}:vaultwarden_backups/${type}/` when `--rclone` is passed. The sync is **non-fatal** — a remote failure warns and emails but does not mark the local backup as failed.
+
+```bash
+# 1. Install rclone (if not already present)
+curl https://rclone.tech/install.sh | sudo bash
+
+# 2. Configure a remote
+rclone config
+
+# 3. Set the remote name in .env
+RCLONE_REMOTE_NAME=your_remote_name
+
+# 4. Test
+./backup.sh --type db --rclone
+
+# 5. Verify remote contents
+rclone ls your_remote_name:vaultwarden_backups/
+```
+
+`sudo ./cron-setup.sh --install` provisions rclone-enabled cron jobs automatically:
+- **Daily 4 AM** — `backup.sh --type db --rclone --email` (non-fatal on remote failure)
+- **Sunday 3 AM** — `backup.sh --type full --full-verification --rclone --email` (fatal on verification failure)
+
+---
+
+## ⏪ Restoring
+
+### Interactive Restore (Recommended)
+
+```bash
+./restore.sh      # lists backups, prompts for selection
 make restore
 ```
 
-This is the preferred restore path for most operators because it guides archive selection and reduces the chance of restoring the wrong backup.
+`restore.sh` selects the newest backup by **file modification time** (not lexicographic filename order), so it reliably finds the latest regardless of filename format.
 
-### Latest backup restore
+### Command-Line Restore
 
 ```bash
-./restore.sh --latest --type db
+# Restore the latest backup of a specific type
 ./restore.sh --latest --type full
-```
+./restore.sh --latest --type db
 
-Use this when you already know the recovery tier you want and you are comfortable with a non-interactive selection path.
+# Restore the latest backup, skip confirmation and skip pre-restore backup
+# (used internally by update.sh rollback)
+./restore.sh --latest --type full --force --no-backup
 
-### Specific archive restore
-
-```bash
+# Restore a specific file
 ./restore.sh --file /path/to/backup.age
 ./restore.sh --file /path/to/backup.age --force
 ```
 
-This is useful for disaster recovery, archived offsite pulls, or testing a particular recovery point.
+### Exit Codes
+
+| Code | Meaning |
+| :-- | :-- |
+| `0` | Restore completed, all health checks passed |
+| `1` | Restore failed or critical phase error |
+| `2` | Restore completed but post-restore health check reported issues |
 
 ---
 
-## Common recovery scenarios
+## 🚨 Disaster Recovery Scenarios
 
-### Database-only recovery
+### Scenario 1 — Database Corruption
 
 ```bash
 docker compose stop vaultwarden
 ./restore.sh --latest --type db
-./health.sh
+make health
 ```
 
-Use this when the application is intact but the database needs to be rolled back.
-
-### Full environment recovery
+### Scenario 2 — Configuration Loss
 
 ```bash
 docker compose down
 ./restore.sh --latest --type full
-./startup.sh
-./health.sh
+docker compose config   # validate
+make start
 ```
 
-Use this when broader configuration or service-state recovery is required.
-
-### Rebuild on a fresh server
+### Scenario 3 — Complete Server Loss
 
 ```bash
+# 1. Provision new OCI instance, configure Security List (ports 80/443/22)
+# 2. Clone repo
 git clone https://github.com/killer23d/VaultWarden-OCI.git
 cd VaultWarden-OCI
 chmod +x *.sh
 
+# 3. Pull emergency kit from offsite
+rclone copy your_remote_name:vaultwarden_backups/emergency/ ./backups/emergency/
+
+# 4. Run setup (generates baseline config)
 sudo ./setup.sh --domain vault.yourdomain.com --email admin@yourdomain.com
-./restore.sh --file /path/to/emergency-backup.age --force
-./health.sh
+
+# 5. Restore emergency kit (overwrites generated config)
+./restore.sh --file ./backups/emergency/emergency-TIMESTAMP.age --force
+
+# 6. Verify
+make health
 ```
 
-This is the normal pattern for complete host loss or migration to a new VM.
+### Scenario 4 — Failed Update (Auto-Rollback)
 
-### Rollback after a failed update
+`update.sh` triggers this automatically when its post-update health check fails:
 
-`update.sh` is the preferred update path partly because it is designed around validation and recovery logic.
+```bash
+./restore.sh --latest --type full --force --no-backup
+```
 
-If you need to trigger a manual rollback path yourself:
+If you need to trigger it manually:
 
 ```bash
 ./restore.sh --latest --type full --force
-./health.sh
 ```
 
 ---
 
-## Scheduled operations
+## 🛠️ Troubleshooting
 
-Cron installation wires backup behavior into the project’s automation model:
-
-```bash
-sudo ./cron-setup.sh --install
-sudo ./cron-setup.sh --list
-sudo ./cron-setup.sh --validate
-```
-
-The current operational pattern is:
-
-- Regular database backups during the week.
-- A weekly full backup cycle.
-- Health checks and other maintenance as separate automated jobs.
-
-Review [OPERATIONS.md](OPERATIONS.md) for the current documented schedule.
-
----
-
-## Integrity and validation
-
-Use these checks when validating backup readiness:
-
-```bash
-./backup.sh --type db
-./backup.sh --type full --full-verification
-./restore.sh
-./health.sh --comprehensive
-```
-
-A backup strategy is not complete until you have also tested the restore path.
-
----
-
-## Troubleshooting
-
-### Not enough disk space
+**"Insufficient disk space"**
 
 ```bash
 df -h
-./maintenance.sh --comprehensive
+./maintenance.sh   # runs cleanup as part of full maintenance
 ```
 
-### Age key issues
+**"Database snapshot failed"**
 
 ```bash
-ls -la secrets/keys/age-key.txt
-./edit-secrets.sh --test
+docker compose logs vaultwarden
+./maintenance.sh --db-maint   # offline SQLite VACUUM + WAL checkpoint
+./backup.sh --type db
 ```
 
-If the key is missing or unusable, recover it from your recovery kit or other offline escrow before assuming the backups are restorable.
+**"Encryption failed" / Age key missing**
 
-### rclone issues
+```bash
+ls -l secrets/keys/age-key.txt
+
+# Manual health check
+source lib/simple_key_resilience.sh && simple_verify_age_key
+
+# If missing, restore from your password manager escrow (Tier 2)
+# or from an emergency kit, then re-run setup:
+sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.com
+```
+
+**"Decryption failed" on restore**
+
+```bash
+# Verify checksum — .sha256 is generated automatically alongside every .age archive
+sha256sum -c backup.age.sha256
+
+# Make sure the Age key matches the backup
+age-keygen -y secrets/keys/age-key.txt
+
+# Try an older backup
+./restore.sh --file /path/to/older-backup.age
+```
+
+**"rclone sync failed"**
 
 ```bash
 rclone lsd your_remote_name:
-./backup.sh --type db --rclone
+rclone config show your_remote_name
+./backup.sh --type db --rclone 2>&1 | tee /tmp/backup-debug.log
 ```
-
-Test remote sync manually before depending on unattended runs.
-
-### Restore uncertainty
-
-Use the interactive restore flow first. It is usually safer than jumping straight to forced command-line recovery when you are under time pressure.
 
 ---
 
-## Recommended policy
+## ⏱️ Recovery Time Reference
 
-For most small-team deployments, a good operating baseline is:
+| Scenario | Estimated Time | Max Data Loss |
+| :-- | :-- | :-- |
+| Database restore | 5–10 min | Up to 24 h (last db backup) |
+| Full system restore | 15–30 min | Up to 7 days (last full backup) |
+| Complete server rebuild | 30–60 min | Minimal with emergency kit |
 
-- Frequent `db` backups.
-- Regular `full` backups with periodic full verification.
-- An `emergency` backup before risky changes.
-- Offsite encrypted copies through rclone if available.
-- Recovery material exported and stored separately from the host.
-- Periodic restore drills, not just backup creation.
+---
 
-That combination matches the repository’s current recovery-first design.
+## ✅ Backup Operations Checklist
+
+**Daily:** Automated db backup runs, checksum passes, and offsite sync succeeds
+**Weekly:** Full backup with `--full-verification`; offsite sync verified
+**Monthly:** Emergency kit created; `restore.sh` tested in dry-run; Tier 2 escrow refreshed if Age key was rotated
+**Quarterly:** Full disaster recovery drill on a fresh instance

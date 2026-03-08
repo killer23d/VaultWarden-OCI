@@ -1,230 +1,439 @@
 # Migration Guide — VaultWarden-OCI
 
-This guide describes the current recommended migration approach: build a fresh target deployment using the repository’s script-driven workflow, then migrate data and configuration into that target in a controlled way.
-
-Related docs: [DEPLOYMENT.md](DEPLOYMENT.md) · [BACKUP-RESTORE.md](BACKUP-RESTORE.md) · [TROUBLESHOOTING.md](TROUBLESHOOTING.md)
+Guide for migrating to VaultWarden-OCI from other VaultWarden deployments or password managers.
 
 ---
 
-## Migration strategy
+## 📋 Migration Overview
 
-For most situations, the safest pattern is **fresh target, then cut over**.
+VaultWarden-OCI uses a template-based, production-ready configuration optimised for small teams. This guide covers:
 
-Instead of trying to transform an old installation in place, deploy a clean VaultWarden-OCI environment first, validate it, then import or restore the source data.
-
-This reduces hidden drift and keeps the final environment aligned with the repository’s current templates, secrets workflow, and operational tooling.
-
----
-
-## Common migration sources
-
-This repository can be used as the target for migrations from:
-
-- A standalone VaultWarden or Bitwarden-compatible host.
-- Another Docker Compose VaultWarden deployment.
-- A manually maintained OCI setup with drifted configuration.
-- An older revision of this repository that no longer matches the current docs or script model.
-
-The exact source details vary, but the target pattern stays the same.
+- Migrating from an existing VaultWarden deployment
+- Migrating from Bitwarden cloud
+- Migrating from other password managers
+- Platform-specific considerations (OCI / generic cloud)
 
 ---
 
-## Pre-migration checklist
+## ✅ Pre-Migration Checklist
 
-Before moving anything:
+Before starting:
 
-- Inventory the current source environment.
-- Confirm where the source database and attachments live.
-- Identify SMTP, Cloudflare, push, and admin-related credentials.
-- Export or preserve any existing recovery material.
-- Schedule a cutover window if the source is actively used.
-- Decide whether you are restoring from archives or copying live source data.
-
-Always create a fresh source backup before touching the migration target.
+- ✅ **Backup source system** — create a complete backup of the current deployment
+- ✅ **Export data** — export all vaults, organisations, and attachments
+- ✅ **Document configuration** — note custom settings and integrations
+- ✅ **Prepare target** — set up VaultWarden-OCI on the new server
+- ✅ **Test environment** — verify the target works before migrating
+- ✅ **Plan downtime** — schedule a maintenance window
+- ✅ **Notify users** — inform the team of the migration timeline
 
 ---
 
-## Build the target first
+## 🔄 Migrating from an Existing VaultWarden
 
-Provision the new environment using the current repository workflow.
+### Method 1: Database Migration (Recommended)
 
+**Prerequisites**
+- Access to the source VaultWarden SQLite database
+- Both systems on the same VaultWarden version (or source is older)
+
+**Steps**
+
+**1. Prepare the target system:**
 ```bash
 git clone https://github.com/killer23d/VaultWarden-OCI.git
 cd VaultWarden-OCI
 chmod +x *.sh
 
-sudo ./setup.sh --domain vault.yourdomain.com --email admin@yourdomain.com --auto
+sudo ./setup.sh --domain vault.example.com --email admin@example.com
+./edit-secrets.sh
+nano .env
 ```
 
-Then start a fresh shell session, review `.env`, complete external secrets, and bring up the stack:
+**2. Export the source database:**
+```bash
+# On source system — stop VaultWarden first
+docker stop vaultwarden
+
+cp /path/to/vaultwarden/data/db.sqlite3 db.sqlite3.backup
+scp db.sqlite3.backup user@new-server:/tmp/
+```
+
+**3. Import on the target system:**
+```bash
+# Stop VaultWarden-OCI services
+./startup.sh --down
+
+# Copy database to correct location
+sudo cp /tmp/db.sqlite3.backup /var/lib/vaultwarden/data/bwdata/db.sqlite3
+
+# Fix permissions
+sudo chown 1000:1000 /var/lib/vaultwarden/data/bwdata/db.sqlite3
+sudo chmod 600  /var/lib/vaultwarden/data/bwdata/db.sqlite3
+
+# Verify database integrity (uses an ephemeral alpine container)
+docker run --rm -v /var/lib/vaultwarden/data/bwdata:/data alpine:latest \
+  sh -c "apk add --no-cache sqlite >/dev/null 2>&1 && sqlite3 /data/db.sqlite3 'PRAGMA integrity_check;'"
+
+# Start services
+./startup.sh
+```
+
+**4. Migrate attachments (if applicable):**
+```bash
+scp -r user@old-server:/path/to/vaultwarden/data/attachments /tmp/
+
+sudo cp -r /tmp/attachments /var/lib/vaultwarden/data/
+sudo chown -R 1000:1000 /var/lib/vaultwarden/data/attachments
+```
+
+**5. Verify migration:**
+```bash
+# Check admin panel
+# Navigate to https://vault.example.com/admin
+
+# Run health checks
+./health.sh
+
+# Verify all vaults are accessible
+# Log in with existing credentials and inspect data
+```
+
+---
+
+### Method 2: Export / Import (Alternative)
+
+**Use when:**
+- Direct database migration is not possible
+- Version compatibility issues exist
+- A clean fresh database is preferred
+
+**Steps**
+
+**1. Export from source:**
+```bash
+# Web vault: Login → Settings → Export Vault → JSON format
+
+# Or via Bitwarden CLI
+bw export --output vault-export.json --format json
+```
+
+**2. Set up target:**
+```bash
+sudo ./setup.sh --domain vault.example.com --email admin@example.com
+./edit-secrets.sh
+nano .env
+./startup.sh
+```
+
+**3. Import to target:**
+```bash
+# Web vault: Login → Settings → Import Data → Select JSON → Upload
+
+# Or via CLI
+bw import bitwardenjson vault-export.json
+```
+
+> **Note:** Export/import may not preserve item history, trash items, some organisational metadata, or attachment filenames (manual re-upload may be required).
+
+---
+
+## ☁️ Migrating from Bitwarden Cloud
+
+**1. Export from Bitwarden:**
+```bash
+# Web vault: Login → Settings → Export Vault → JSON format
+
+# Or via CLI
+bw login
+bw unlock
+bw export --output bitwarden-export.json --format json
+```
+
+**2. Set up VaultWarden-OCI:**
+```bash
+git clone https://github.com/killer23d/VaultWarden-OCI.git
+cd VaultWarden-OCI
+sudo ./setup.sh --domain vault.example.com --email admin@example.com
+./edit-secrets.sh
+nano .env
+./startup.sh
+```
+
+**3. Import to VaultWarden:**
+```bash
+# Web vault: Login → Settings → Import Data
+# Select "Bitwarden (json)" and upload bitwarden-export.json
+```
+
+**4. Migrate organisations (if applicable):**
+```
+For each organisation:
+  1. Export from Bitwarden cloud as organisation owner
+  2. Create organisation in VaultWarden
+  3. Import organisation data
+  4. Invite members
+```
+
+**5. Update client applications:**
+```
+# Desktop app, browser extension, mobile app:
+Settings → Server URL → https://vault.example.com
+```
+
+---
+
+## 🔑 Migrating from Other Password Managers
+
+### From LastPass
 
 ```bash
+# 1. Export
+# LastPass web vault → More Options → Advanced → Export → Save as CSV
+
+# 2. Import via web vault
+# Settings → Import Data → LastPass (csv)
+```
+
+### From 1Password
+
+```bash
+# 1. Export: 1Password app → File → Export → 1Password Interchange Format (1pif)
+
+# 2. Import via web vault
+# Settings → Import Data → 1Password (1pif)
+```
+
+### From KeePass
+
+```bash
+# 1. Export: KeePass → File → Export → KeePass XML (2.x)
+
+# 2. Import via web vault
+# Settings → Import Data → KeePass 2 (xml)
+```
+
+---
+
+## 🏗️ Platform-Specific Migration
+
+### Migrating to Oracle Cloud Infrastructure (OCI)
+
+**OCI-specific considerations:**
+
+| Detail | Notes |
+|---|---|
+| SSH log path | `/var/log/secure` (not `/var/log/auth.log`) — auto-detected by `setup.sh` |
+| Dynamic IPs | Automated Cloudflare DNS updates via `maintenance.sh --update-dns` (runs hourly via cron) |
+| Break-glass admin | Essential for OCI Serial Console emergency access |
+| Firewall | Pre-configured for Cloudflare-only web traffic |
+
+```bash
+# Standard setup auto-detects OCI / Oracle Linux
+sudo ./setup.sh --domain vault.example.com --email admin@example.com --auto
+
+# Create break-glass admin for emergency console access
+./create-breakglass-admin.sh --create
+```
+
+### Migrating from a Generic Docker Compose Deployment
+
+**Key differences in VaultWarden-OCI:**
+
+| Feature | Generic Docker Compose | VaultWarden-OCI |
+|---|---|---|
+| Configuration | Manual | Template-based (`setup.sh`) |
+| Resource limits | Manual / none | Pre-configured for 6 GB systems |
+| Security | DIY | Dual Fail2ban + Cloudflare-only firewall |
+| Email | Manual SMTP | Containerised Postfix relay |
+| Backups | Manual | Automated cron (daily DB, weekly full) |
+| Encryption | None | Age-encrypted backups and secrets (SOPS) |
+
+**Migration steps:**
+
+```bash
+# 1. Backup existing deployment
+docker compose down
+tar -czf vaultwarden-backup.tar.gz /path/to/vaultwarden
+
+# 2. Copy to new server
+scp vaultwarden-backup.tar.gz user@new-server:/tmp/
+
+# 3. Set up VaultWarden-OCI
+git clone https://github.com/killer23d/VaultWarden-OCI.git
+cd VaultWarden-OCI
+sudo ./setup.sh --domain vault.example.com --email admin@example.com
+./edit-secrets.sh
+nano .env
+
+# 4. Migrate data
+./startup.sh --down
+
+cd /tmp
+tar -xzf vaultwarden-backup.tar.gz
+
+sudo cp -r /tmp/vaultwarden/data/* /var/lib/vaultwarden/data/
+sudo chown -R 1000:1000 /var/lib/vaultwarden/data
+
+# 5. Start and verify
+cd /path/to/VaultWarden-OCI
 ./startup.sh
 ./health.sh
 ```
 
-Do not begin data migration until the fresh target is healthy.
-
 ---
 
-## Migration methods
+## 🏁 Post-Migration Tasks
 
-### Method 1 — Restore from a compatible backup
+### Verification Checklist
 
-If you already have a suitable backup archive for the source environment, restore into the new target.
+- ✅ **Login test** — verify users can log in with existing credentials
+- ✅ **Data integrity** — check all vaults, items, and attachments
+- ✅ **Organisations** — verify organisation access and permissions
+- ✅ **2FA** — test two-factor authentication
+- ✅ **Attachments** — verify file downloads work
+- ✅ **Sends** — test Send functionality
+- ✅ **Email** — test email notifications (`./maintenance.sh --test-email`)
+- ✅ **Admin panel** — verify admin access works
 
-Typical flow:
-
-```bash
-./restore.sh --file /path/to/backup.age --force
-./health.sh
-```
-
-This is the cleanest option when the backup format matches the recovery path you want.
-
-### Method 2 — Source data copy with fresh target config
-
-If you are moving from another VaultWarden deployment, keep the new target’s current templates and operational tooling, but move the source data into place during the migration window.
-
-In practice, this usually means preserving:
-
-- The VaultWarden database.
-- Attachments and relevant application data.
-- Any required mail or integration credentials.
-
-Avoid blindly copying unrelated old operational scripts or stale generated config files into the new repo.
-
----
-
-## Secrets and credentials
-
-Do not migrate secret handling by copying random plaintext files around.
-
-The target project expects secret material to be maintained through `setup-secrets.sh` and `edit-secrets.sh`.
-
-Recommended approach:
-
-1. Re-enter or rotate external credentials into the new target.
-2. Export a fresh recovery kit once the target is complete.
-3. Preserve the Age key and recovery material outside the new server.
-
-Useful commands:
+### Security Hardening After Migration
 
 ```bash
-./setup-secrets.sh
+# Generate new bcrypt hash for admin basic auth
+docker run --rm -it ghcr.io/caddybuilds/caddy-cloudflare:latest caddy hash-password
+
+# Update secrets
 ./edit-secrets.sh
-./edit-secrets.sh --export-recovery-kit
-```
+# Set: admin_basic_auth_hash (and admin_token if desired)
 
----
-
-## Cutover sequence
-
-A practical cutover flow is:
-
-1. Freeze or stop writes on the source environment.
-2. Take one final source backup.
-3. Apply the final restore or data sync to the target.
-4. Start or restart the target stack.
-5. Run health checks.
-6. Point DNS and Cloudflare to the target.
-7. Validate login, admin access, mail, and backup behavior.
-
-Example validation commands:
-
-```bash
+# Restart services to apply
 ./startup.sh --force
-./health.sh --comprehensive
-./maintenance.sh --test-email --verbose
-./backup.sh --type db
-```
 
----
-
-## OCI and Cloudflare considerations
-
-If the target is on OCI, confirm networking before cutover.
-
-- Open TCP `80`, `443`, and `22` appropriately.
-- Keep Cloudflare DNS in **DNS Only** mode until HTTPS bootstrap and health checks succeed.
-- Switch to **Proxied** mode and **Full (Strict)** only after validation is complete.
-
-If the target public IP differs from the source, confirm DNS propagation and then verify the project’s DNS update workflow is behaving as expected.
-
----
-
-## After migration
-
-Once the target is live:
-
-- Install scheduled automation with `cron-setup.sh`.
-- Export and store fresh recovery material.
-- Create a post-migration backup.
-- Verify the break-glass admin path.
-- Review logs for login, mail, and Fail2ban anomalies.
-
-Recommended commands:
-
-```bash
-sudo ./cron-setup.sh --install
-./edit-secrets.sh --export-recovery-kit
-./create-breakglass-admin.sh
-./backup.sh --type emergency
-./health.sh --comprehensive
-```
-
----
-
-## What not to carry over
-
-Avoid bringing these into the new deployment without a deliberate reason:
-
-- Stale generated `.env` or Compose files from a different repo revision.
-- Old helper scripts that no longer exist in the current project.
-- Previous cron entries that bypass `cron-setup.sh`.
-- Plaintext credential files outside the Age + SOPS workflow.
-- Firewall assumptions that conflict with the current OCI + Cloudflare model.
-
-Migrating old drift is one of the easiest ways to end up with a deployment that technically runs but no longer matches the documented operating model.
-
----
-
-## Troubleshooting migration issues
-
-### Target starts but login or data looks wrong
-
-Validate what you actually restored and check that the correct data path was migrated.
-
-```bash
-docker compose logs vaultwarden
-./health.sh --comprehensive
-```
-
-### Mail works on source but not target
-
-Re-check `.env` SMTP values and the encrypted `smtp_password`, then run:
-
-```bash
-./maintenance.sh --test-email --verbose
-docker compose logs postfix
-```
-
-### Cloudflare or HTTPS issues after cutover
-
-Keep DNS grey-clouded until Caddy is healthy, then review:
-
-```bash
-docker compose logs caddy
+# Verify health
 ./health.sh
 ```
 
-### Recovery material mismatch
-
-If a restore archive cannot be decrypted, verify that the correct Age key is present before assuming the backup is unusable.
+### Set Up Automation
 
 ```bash
-./edit-secrets.sh --test
-ls -la secrets/keys/age-key.txt
+# Install cron jobs (daily backups, health checks, maintenance)
+sudo ./cron-setup.sh --install
+
+# Verify backups work
+./backup.sh --type db
+./backup.sh --list
+
+# Test email
+./maintenance.sh --test-email
 ```
 
-A good migration finishes only after backup, restore, DNS, mail, and health validation all work in the new environment.
+### Update Client Applications
+
+For each user, set the **Server URL** to `https://vault.example.com` in:
+
+- Desktop application: **Settings → Account → Server URL**
+- Browser extension: **Settings → Server URL**
+- Mobile app: **Settings → Server URL**
+
+---
+
+## 🔙 Rollback Plan
+
+If migration fails:
+
+1. **Keep the old system running** during migration until fully verified
+2. **Test the new system thoroughly** before decommissioning the old one
+3. **Retain old system backups** for 30+ days
+4. **Documented rollback:**
+
+```bash
+# Point DNS back to old server IP (update Cloudflare manually)
+# Or trigger an immediate DNS update if old IP still valid:
+./maintenance.sh --update-dns
+
+# Notify users to switch back
+# Restore old system from backup if needed
+```
+
+---
+
+## 🔧 Troubleshooting Migration
+
+### Database import fails
+
+```bash
+# Check database integrity
+docker run --rm -v /var/lib/vaultwarden/data/bwdata:/data alpine:latest \
+  sh -c "apk add --no-cache sqlite >/dev/null 2>&1 && sqlite3 /data/db.sqlite3 'PRAGMA integrity_check;'"
+
+# Run deep maintenance if WAL corruption is suspected
+sudo ./maintenance.sh --db-maint
+```
+
+### Attachments not accessible
+
+```bash
+# Check permissions
+ls -la /var/lib/vaultwarden/data/attachments
+
+# Fix permissions
+sudo chown -R 1000:1000 /var/lib/vaultwarden/data/attachments
+sudo chmod -R 755      /var/lib/vaultwarden/data/attachments
+```
+
+### Users can't log in
+
+```bash
+# Check secrets are decryptable
+./edit-secrets.sh --test
+
+# Verify VaultWarden is running
+docker compose ps vaultwarden
+
+# Check logs
+docker compose logs vaultwarden | grep -i auth
+
+# Test admin panel
+curl -I https://vault.example.com/admin
+```
+
+### Email not working after migration
+
+```bash
+# Full email diagnostics
+./maintenance.sh --test-email --verbose
+
+# Check Postfix logs
+docker compose logs postfix
+
+# Verify SMTP settings
+grep SMTP .env
+./edit-secrets.sh  # Check smtp_password
+```
+
+---
+
+## 💡 Migration Best Practices
+
+1. **Test in staging first** — never migrate production directly
+2. **Backup everything** — multiple backups before starting
+3. **Document changes** — keep detailed migration notes
+4. **Plan rollback** — have a working rollback plan ready
+5. **Verify thoroughly** — test all functionality before going live
+6. **Communicate clearly** — keep users informed throughout
+7. **Schedule wisely** — migrate during low-usage periods
+8. **Monitor closely** — watch logs and metrics after cutover
+
+---
+
+## 🆘 Support
+
+For migration assistance:
+
+1. Review the `/docs` directory for related guides
+2. Search GitHub Issues for similar migrations
+3. Open a new issue with:
+   - Source system details
+   - Migration method used
+   - Error messages and logs
+   - Steps already attempted

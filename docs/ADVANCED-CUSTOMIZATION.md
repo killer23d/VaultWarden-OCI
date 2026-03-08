@@ -1,270 +1,313 @@
 # Advanced Customization — VaultWarden-OCI
 
-This guide covers the supported ways to customize the deployment without fighting the repository’s current operating model.
+This guide covers advanced configuration options beyond the defaults set by `setup.sh`. All customisation follows the same **template-first principle**: edit `.example` files, then regenerate.
 
-The project is still built around **template-driven generation** and **scripted operations**. Treat generated files as deployment artifacts, and treat repository templates plus encrypted secrets as the source of truth.
-
-Related docs: [CONFIGURATION.md](CONFIGURATION.md) · [DEPLOYMENT.md](DEPLOYMENT.md) · [OPERATIONS.md](OPERATIONS.md) · [SCRIPTS.md](SCRIPTS.md)
+Related docs: [CONFIGURATION.md](CONFIGURATION.md) · [DEPLOYMENT.md](DEPLOYMENT.md) · [SECURITY.md](SECURITY.md)
 
 ---
 
-## Customization model
+## 📋 Template Workflow
 
-The safe pattern for nearly all changes is:
+Every live config file is generated from a `.example` template. Never edit generated files directly — they are overwritten by `setup.sh`.
 
-1. Edit the relevant template or encrypted secret.
-2. Regenerate or reapply with the project scripts.
-3. Restart with `startup.sh`.
-4. Validate with `health.sh`.
+```
+.example templates  →  setup.sh  →  Generated files  →  docker compose up
+```
 
-Use this flow for image versions, resource limits, environment variables, service behavior, and runtime integrations.
-
----
-
-## Source of truth
-
-These templates are the canonical configuration inputs:
-
-| Template | Generated file |
-| :-- | :-- |
-| `.env.example` | `.env` |
-| `docker-compose.yml.example` | `docker-compose.yml` |
-| `docker-compose.override.yml.example` | `docker-compose.override.yml` |
-
-Preferred apply flow:
+### Apply Template Changes
 
 ```bash
-nano .env.example
+# 1. Edit the template
 nano docker-compose.yml.example
-nano docker-compose.override.yml.example
 
-sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
-./startup.sh --force
-./health.sh
-```
-
-Do not rely on one-off edits to generated files unless you are intentionally making a short-lived local change and understand that re-running setup can overwrite it.
-
----
-
-## Version strategy
-
-The repository supports both pinned-image and latest-image workflows.
-
-### Pinned/default behavior
-
-The normal production path is to keep explicit image versions in `.env` and use `./update.sh` for controlled upgrades.
-
-Typical workflow:
-
-```bash
-nano .env
-./backup.sh --type emergency
-./update.sh
-./health.sh
-```
-
-### Latest-image behavior
-
-If you want a more aggressive update posture, use `setup.sh --use-latest` during setup generation or otherwise configure the environment so generated Compose files track latest-tag behavior.
-
-That approach is better for testing than for conservative production use, because update outcomes will be less predictable over time.
-
----
-
-## Environment customization
-
-Most feature toggles and integration settings should be handled through `.env.example` and then applied by regenerating `.env`.
-
-Common categories to customize:
-
-- Domain and identity settings.
-- SMTP and notification behavior.
-- Backup retention and rclone remote naming.
-- Version pins.
-- Resource limits and operational thresholds.
-- Cloudflare-related identifiers.
-
-Use [CONFIGURATION.md](CONFIGURATION.md) as the field-level reference when adding or changing values.
-
----
-
-## Secrets customization
-
-Secrets are not meant to be maintained as plaintext files.
-
-Use the project’s secret tooling instead of editing decrypted runtime material manually:
-
-```bash
-./edit-secrets.sh
-./edit-secrets.sh --test
-./edit-secrets.sh --rotate caddy_cloudflare_dns_token
-./edit-secrets.sh --rotate fail2ban_cloudflare_firewall_token
-./edit-secrets.sh --rotate smtp_password
-```
-
-After secret changes:
-
-```bash
-./startup.sh --force
-./health.sh
-```
-
-If you are doing an interactive bootstrap rather than incremental rotation, use `./setup-secrets.sh` after reviewing `.env`.
-
----
-
-## Compose customization
-
-`docker-compose.yml.example` is the right place for most service-level tuning.
-
-Typical advanced changes include:
-
-- Resource limits and reservations.
-- Volume mappings.
-- Service environment wiring.
-- Restart policies.
-- Capability and security options.
-- Additional labels or container arguments.
-
-Validate before applying:
-
-```bash
+# 2. Validate syntax before applying
 docker compose -f docker-compose.yml.example config
+
+# 3. Regenerate and apply
+sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.com
+
+# 4. Restart services
+./startup.sh --force
 ```
 
-Then regenerate and restart through the normal flow.
-
-### Override file usage
-
-`docker-compose.override.yml.example` exists for supplemental or environment-specific Compose customizations.
-
-Use it when you want to layer behavior without making the base template harder to read, especially for provider-specific adjustments, extra mounts, or local-only service changes.
-
 ---
 
-## Caddy and edge behavior
+## 📌 Dependency Version Pinning
 
-If you need to change web behavior, review both the Caddy-related template content and the Cloudflare assumptions used by the deployment.
-
-Common advanced customizations include:
-
-- Additional security headers.
-- Request-size behavior.
-- Reverse-proxy tuning.
-- Access logging adjustments.
-- Cloudflare-aware TLS and DNS settings.
-
-When changing edge behavior:
-
-1. Keep bootstrap DNS on grey cloud until you confirm issuance still works.
-2. Re-run startup.
-3. Validate with `health.sh`.
-4. Inspect Caddy logs if anything regresses.
-
----
-
-## Fail2ban and ban policy
-
-The repository is built around Fail2ban integration that pushes enforcement to Cloudflare rather than relying on host firewall blocking for proxied web traffic.
-
-Advanced adjustments may include:
-
-- Jail thresholds and timing.
-- Filter behavior.
-- Cloudflare token scope changes.
-- Logging or action tuning.
-
-After Fail2ban-related customization:
+By default `setup.sh` auto-resolves the latest release of SOPS and age from the GitHub API. To pin specific versions for reproducible deployments, edit the top of `setup.sh` before running:
 
 ```bash
-docker compose exec fail2ban fail2ban-client status
-docker compose logs fail2ban
-./health.sh --comprehensive
+SOPS_VERSION="v3.9.4"   # pinned
+AGE_VERSION=""           # blank = auto-resolve latest
+```
+
+Or override at runtime without editing the file:
+
+```bash
+SOPS_VERSION=v3.9.4 sudo ./setup.sh --domain vault.yourdomain.com --email admin@yourdomain.com
+```
+
+| Variable | Default | Example |
+| :-- | :-- | :-- |
+| `SOPS_VERSION` | `""` (latest) | `"v3.9.4"` |
+| `AGE_VERSION` | `""` (latest) | `"v1.2.0"` |
+
+> `AGE_VERSION` only applies when installing age as a standalone binary. By default age is installed via `apt`.
+
+---
+
+## 🖥️ Resource Limits
+
+Default limits are tuned for a **6 GB OCI ARM instance**. Edit `docker-compose.yml.example` to adjust.
+
+### Larger Systems (12 GB+ RAM)
+
+```yaml
+services:
+  vaultwarden:
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '1.0'
+        reservations:
+          memory: 1G
+          cpus: '0.4'
+  caddy:
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '0.5'
+```
+
+### Smaller Systems (4 GB RAM)
+
+```yaml
+services:
+  vaultwarden:
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
+          cpus: '0.5'
+        reservations:
+          memory: 384M
 ```
 
 ---
 
-## Backup policy tuning
+## 🔒 Security Customisation
 
-Backup behavior is customizable and should be aligned to your recovery objectives.
+### Fail2Ban — Tighter Thresholds
 
-Areas you may tune:
-
-- Retention defaults in `.env`.
-- Whether rclone offsite sync is used.
-- Which backup type you run before risky changes.
-- Whether weekly jobs use full verification.
-- Where recovery material is stored outside the server.
-
-Useful examples:
-
-```bash
-./backup.sh --type full --keep 30
-./backup.sh --type full --full-verification
-./backup.sh --type db --rclone --email
-./edit-secrets.sh --export-recovery-kit
+```ini
+# Edit fail2ban/jail.d/vaultwarden-oci.conf
+[vaultwarden-auth]
+maxretry = 2       # reduced from 3
+bantime  = 24h     # increased from 2h
+findtime = 10m     # tightened from 1h
 ```
 
-Use [BACKUP-RESTORE.md](BACKUP-RESTORE.md) for the recovery-side implications of these choices.
+> **Note:** All web-facing jails push bans to the **Cloudflare Edge WAF via API** — local `iptables` is not used for proxied services. Only the SSH jail uses local iptables.
+
+### Custom Fail2Ban Filter
+
+```ini
+# Create fail2ban/filter.d/vaultwarden-custom.conf
+[Definition]
+failregex = ^.*<your-pattern>.*<HOST>.*$
+ignoreregex =
+```
+
+### Additional Caddy Security Headers
+
+```caddyfile
+# Edit caddy/Caddyfile
+header {
+    Permissions-Policy "geolocation=(), microphone=(), camera=()"
+    Expect-CT          "enforce, max-age=86400"
+}
+```
+
+### Admin IP Allowlisting
+
+```caddyfile
+# Edit caddy/Caddyfile
+@admin { path /admin* }
+
+handle @admin {
+    @allowed { remote_ip 192.168.1.0/24 10.0.0.0/8 }
+    handle @allowed {
+        basic_auth { import secret_admin_basic_auth_hash }
+        reverse_proxy vaultwarden:80
+    }
+    handle { respond "Access Denied" 403 }
+}
+```
 
 ---
 
-## Cron and automation tuning
+## 📦 Storage Customisation
 
-The repository installs scheduled operations through `cron-setup.sh` rather than expecting manual crontab editing.
+### External Database
 
-Preferred workflow:
-
-```bash
-sudo ./cron-setup.sh --install
-sudo ./cron-setup.sh --list
-sudo ./cron-setup.sh --validate
+```yaml
+# Edit docker-compose.yml.example
+services:
+  vaultwarden:
+    environment:
+      - DATABASE_URL=postgresql://user:pass@pg-host:5432/vaultwarden
+      # or MySQL: mysql://user:pass@mysql-host:3306/vaultwarden
 ```
 
-If you need to change timing or policy, keep the change aligned with the project’s locking model and reboot behavior for `/run/vaultwarden-locks/`.
+### NFS / Separate Volume Mounts
 
-If your environment reboots regularly, configure tmpfiles recreation so flock-protected jobs keep working automatically:
+```yaml
+services:
+  vaultwarden:
+    volumes:
+      - /mnt/nfs/vaultwarden/attachments:/data/attachments
+```
+
+### Multi-Destination Backups
 
 ```bash
-echo 'd /run/vaultwarden-locks 0700 root root -' | sudo tee /etc/tmpfiles.d/vaultwarden-locks.conf
-sudo systemd-tmpfiles --create
+# After running ./backup.sh, sync to additional remotes:
+rclone copy backups/full/latest.age gdrive:vaultwarden-backups/
+rclone copy backups/full/latest.age s3:my-bucket/vaultwarden/
 ```
 
 ---
 
-## Resource tuning
+## 📧 Email Customisation
 
-Small-team defaults are intentionally conservative, but you can adjust them if your usage pattern changes.
-
-Good reasons to tune resource settings include:
-
-- Larger attachment usage.
-- Higher login volume.
-- Heavier logging or longer retention.
-- More aggressive maintenance and verification jobs.
-- Constrained OCI instance sizes.
-
-After resource changes, use:
+Email is handled by the **Postfix sidecar container** (`postfix` service). Configure the relay in `.env`:
 
 ```bash
-docker stats --no-stream
-./health.sh --comprehensive
+SMTP_HOST=smtp.sendgrid.net
+SMTP_PORT=587
+SMTP_USERNAME=apikey
+ALLOWED_SENDER_DOMAINS=yourdomain.com
 ```
 
-Tune based on observed usage, not on guesswork.
+Set the SMTP password via secrets:
+
+```bash
+./edit-secrets.sh   # set: smtp_password
+```
+
+Test end-to-end delivery:
+
+```bash
+./maintenance.sh --test-email --verbose
+# or: make test-email
+```
+
+### Decoupled Email Override
+
+The `docker-compose.override.yml.example` is provided specifically to decouple VaultWarden's built-in SMTP from the Postfix sidecar. Copy and activate it if you need to route VaultWarden emails differently:
+
+```bash
+cp docker-compose.override.yml.example docker-compose.override.yml
+```
 
 ---
 
-## Safe change workflow
+## ⚡ Performance Tuning
 
-Use this checklist for any advanced customization:
+### Database (SQLite)
 
-- Create a backup first, preferably `./backup.sh --type emergency` before high-risk changes.
-- Edit templates or encrypted secrets, not random generated artifacts.
-- Regenerate with `setup.sh --force` when template-backed files change.
-- Restart with `startup.sh --force`.
-- Validate with `health.sh`, and use `--comprehensive` for larger changes.
-- Review container logs if behavior changed at the edge, mail, or security layers.
+WAL mode is enabled automatically. To tune further:
 
-This keeps customizations compatible with the current repository design instead of drifting into an undocumented snowflake deployment.
+```bash
+docker compose exec vaultwarden sqlite3 /data/db.sqlite3 \
+  "PRAGMA synchronous=NORMAL; PRAGMA cache_size=-2000;"
+```
+
+### Caddy — HTTP/3 and Compression
+
+```caddyfile
+# Edit caddy/Caddyfile — global options block
+{
+    servers {
+        protocol { experimental_http3 }
+        idle_timeout 5m
+        read_header_timeout 10s
+    }
+}
+
+# Inside the site block
+encode {
+    gzip 6
+    zstd
+    minimum_length 256
+}
+```
+
+---
+
+## 🧪 Development Environment
+
+```yaml
+# docker-compose.override.yml — dev overrides
+services:
+  vaultwarden:
+    environment:
+      - SIGNUPS_ALLOWED=true
+      - LOG_LEVEL=debug
+      - DOMAIN=http://localhost:8080
+    ports:
+      - "8080:80"
+  fail2ban:
+    deploy:
+      replicas: 0
+  caddy:
+    deploy:
+      replicas: 0
+```
+
+```bash
+make dev-setup     # setup dev environment
+make test          # run all tests
+make test-config   # validate Docker Compose config
+make dry-run       # preview all operations
+```
+
+---
+
+## 🔌 Integrations
+
+### SSO via OAuth2 Proxy
+
+```caddyfile
+# Edit caddy/Caddyfile
+vault.yourdomain.com {
+    forward_auth oauth2-proxy:4180 {
+        uri /oauth2/auth
+        copy_headers X-Auth-Request-User X-Auth-Request-Email
+    }
+    reverse_proxy vaultwarden:80
+}
+```
+
+### Webhook Notifications
+
+```bash
+# Call from cron or health check scripts
+curl -sX POST https://your-webhook-url/notify \
+  -H "Content-Type: application/json" \
+  -d "{\"event\":\"$1\",\"message\":\"$2\",\"timestamp\":\"$(date -Iseconds)\"}"
+```
+
+---
+
+## ✅ Customisation Checklist
+
+- Edit `.example` templates — never generated files
+- Validate with `docker compose config` before applying
+- Run `sudo ./setup.sh --force ...` to regenerate
+- Restart with `./startup.sh --force`
+- Verify with `./health.sh` or `make health`
+- Commit template changes to version control
+- Create a backup before major changes: `./backup.sh --type full`
