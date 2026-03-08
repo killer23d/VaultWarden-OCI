@@ -121,7 +121,7 @@ Caddy applies rate limits to protect sensitive endpoints:
 | API auth endpoints | 10 requests / 5 min / IP |
 | Admin endpoints | 5 requests / 5 min / IP |
 
-Fail2ban adds a second layer — repeated auth failures trigger a **Cloudflare Edge WAF ban** (not a local iptables rule, since traffic arrives via the Cloudflare proxy).
+Fail2ban adds a second layer — repeated auth failures trigger a **Cloudflare Edge WAF ban** (not a local iptables rule, since web traffic arrives via the Cloudflare proxy). Local `iptables` is strictly used for SSH protection.
 
 ---
 
