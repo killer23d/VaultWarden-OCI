@@ -179,6 +179,8 @@ du -sh ${PROJECT_STATE_DIR}/logs/*
 
 ## 💾 Backup Operations
 
+> **`sudo` note:** Direct `backup.sh` calls require `sudo` in production (needs write access to `${PROJECT_STATE_DIR}`). Makefile targets (`make backup`, `make backup-full`, etc.) and cron jobs handle this automatically.
+
 ### Creating Backups
 
 #### Database Backup (Quick — Daily)
