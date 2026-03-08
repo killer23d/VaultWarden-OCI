@@ -148,10 +148,10 @@ See [CONFIGURATION.md](CONFIGURATION.md) for the full variable reference.
 
 | Container | Role | Memory Limit |
 | :-- | :-- | :-- |
-| **vaultwarden** | Password manager app | 2 GB |
-| **caddy** | TLS + reverse proxy | 1 GB |
-| **fail2ban** | Brute-force detection | 512 MB |
-| **postfix** | Containerised SMTP relay ([bokysan/docker-postfix](https://github.com/bokysan/docker-postfix)) | 128 MB |
+| **vaultwarden** | Password manager app | 512 MB |
+| **caddy** | TLS + reverse proxy | 512 MB |
+| **fail2ban** | Brute-force detection & SSH protection | 512 MB |
+| **postfix** | Containerised SMTP relay ([bokysan/docker-postfix](https://github.com/bokysan/docker-postfix)) | 256 MB |
 
 Once healthy, switch Cloudflare to **Proxied (Orange Cloud)** and set SSL/TLS to **Full (Strict)**.
 
@@ -173,7 +173,7 @@ sudo ./cron-setup.sh --install
 # or: make backup / make backup-emergency
 
 # Test email delivery
-./test-email-simple.sh --verbose
+./maintenance.sh --test-email --verbose
 # or: make test-email
 ```
 
@@ -236,7 +236,7 @@ docker compose config
 
 ```bash
 docker compose logs postfix
-./test-email-simple.sh --verbose
+./maintenance.sh --test-email --verbose
 grep SMTP .env
 ```
 
