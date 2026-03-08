@@ -58,7 +58,7 @@ SOPS_VERSION=v3.9.4 sudo ./setup.sh --domain vault.yourdomain.com --email admin@
 
 ## 🖥️ Resource Limits
 
-Default limits are tuned for a **6 GB OCI ARM instance**. Edit `docker-compose.yml.example` to adjust.
+Default limits are tightly tuned for a **6 GB OCI ARM instance** (512 MB for VaultWarden, Caddy, and Fail2ban; 256 MB for Postfix) to leave ample memory for the host OS. Edit `docker-compose.yml.example` to adjust if you need more resources.
 
 ### Larger Systems (12 GB+ RAM)
 
@@ -68,20 +68,20 @@ services:
     deploy:
       resources:
         limits:
-          memory: 4G
+          memory: 2G
           cpus: '1.0'
         reservations:
-          memory: 1G
+          memory: 512M
           cpus: '0.4'
   caddy:
     deploy:
       resources:
         limits:
-          memory: 2G
+          memory: 1G
           cpus: '0.5'
 ```
 
-### Smaller Systems (4 GB RAM)
+### Minimal Systems (2 GB RAM)
 
 ```yaml
 services:
@@ -89,10 +89,10 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1536M
+          memory: 256M
           cpus: '0.5'
         reservations:
-          memory: 384M
+          memory: 128M
 ```
 
 ---
@@ -109,7 +109,7 @@ bantime  = 24h     # increased from 2h
 findtime = 10m     # tightened from 1h
 ```
 
-> **Note:** All web-facing jails push bans to the **Cloudflare Edge WAF via API** — local `iptables` is not used for proxied services. Only the SSH jail uses local iptables.
+> **Note:** All web-facing jails push bans to the **Cloudflare Edge WAF via API** — local `iptables` is not used for proxied services. Only the SSH jail uses local iptables (leveraging Fail2ban's `network_mode: host`).
 
 ### Custom Fail2Ban Filter
 
@@ -173,9 +173,9 @@ services:
 ### Multi-Destination Backups
 
 ```bash
-# After running ./backup.sh, sync to additional remotes:
-rclone copy backups/full/latest.age gdrive:vaultwarden-backups/
-rclone copy backups/full/latest.age s3:my-bucket/vaultwarden/
+# After running ./backup.sh, sync the entire directory to additional remotes:
+rclone copy backups/full/ gdrive:vaultwarden-backups/full/
+rclone copy backups/full/ s3:my-bucket/vaultwarden/full/
 ```
 
 ---
