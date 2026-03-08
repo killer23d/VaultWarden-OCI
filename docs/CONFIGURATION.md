@@ -66,10 +66,10 @@ SSH_LOG_PATH=/var/log/secure           # Auto-detected by setup.sh (OCI default)
 ## 📦 Container Versions
 
 ```bash
-VAULTWARDEN_VERSION=1.34.3   # Pin for stability; blank = latest
-CADDY_VERSION=2.10.2          # Must include Cloudflare module
-FAIL2BAN_VERSION=1.1.0
-POSTFIX_VERSION=4.4.0         # bokysan/docker-postfix email relay
+VAULTWARDEN_VERSION=1.35.4   # Pin for stability; blank = latest
+CADDY_VERSION=2.11.1          # Must include Cloudflare module
+FAIL2BAN_VERSION=1.1.0-r3
+POSTFIX_VERSION=4.3.0         # bokysan/docker-postfix email relay
 ```
 
 To override versions at runtime without editing files:
@@ -136,8 +136,7 @@ SMTP password:
 Test end-to-end delivery:
 
 ```bash
-./test-email-simple.sh --verbose
-# or: ./maintenance.sh --test-email --verbose
+./maintenance.sh --test-email --verbose
 # or: make test-email
 ```
 
@@ -216,7 +215,7 @@ F2B_ACTION="%(action_mwl)s"        # Email + Cloudflare ban
 
 ```bash
 BACKUP_VERIFICATION_MODE=quick_check   # quick_check or integrity_check
-BACKUP_SCHEDULE="0 2 * * *"            # Cron schedule for automated backups
+BACKUP_SCHEDULE="0 4 * * 1-6"          # Cron schedule for automated DB backups
 BACKUP_RETENTION_DAYS=30               # Retention for full backups
 RCLONE_REMOTE_NAME=CHANGE_ME_RCLONE_REMOTE  # rclone remote for offsite sync
 ```
@@ -251,6 +250,6 @@ ls -l secrets/keys/age-key.txt   # must exist and be mode 600
 
 ```bash
 docker compose logs postfix
-./test-email-simple.sh --verbose
+./maintenance.sh --test-email --verbose
 grep SMTP .env
 ```
