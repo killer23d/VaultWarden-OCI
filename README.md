@@ -163,10 +163,10 @@ The installed cron schedule:
 
 | Container | Role |
 | :-- | :-- |
-| **Caddy** | TLS termination, reverse proxy, security headers (1 GB limit) |
-| **VaultWarden** | Password manager application (2 GB limit) |
-| **Postfix** | Containerised SMTP relay — no host mail dependencies |
-| **Fail2ban** | Brute-force detection → Cloudflare edge blocking |
+| **Caddy** | TLS termination, reverse proxy, security headers (512 MB limit) |
+| **VaultWarden** | Password manager application (512 MB limit) |
+| **Postfix** | Containerised SMTP relay — no host mail dependencies (256 MB limit) |
+| **Fail2ban** | Brute-force detection → Cloudflare edge blocking; Host networking for SSH protection (512 MB limit) |
 
 ### Scripts
 
@@ -212,7 +212,7 @@ All live configuration is generated from `.example` templates by `setup.sh`. Edi
 
 ## 🔒 Security at a Glance
 
-- **Edge WAF** — Cloudflare proxy + Fail2ban pushes bans to Cloudflare API (iptables not used for proxied services)
+- **Edge WAF & Host Protection** — Cloudflare proxy + Fail2ban pushes WAF bans to Cloudflare API. Fail2ban also runs in host network mode for direct iptables SSH protection.
 - **Host firewall** — UFW opens 80/443/22; Cloudflare IP restriction enforced at OCI Security List level
 - **Encrypted secrets** — Age + SOPS; no plaintext credentials at rest
 - **HTTPS** — Automatic Let’s Encrypt via Caddy with HSTS, CSP, and security headers
