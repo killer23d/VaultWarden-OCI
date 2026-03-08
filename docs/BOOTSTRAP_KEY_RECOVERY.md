@@ -67,8 +67,8 @@ gpg --export-secret-keys --armor YOUR_GPG_KEY_ID > gpg-private-key-backup.asc
 # 1. Decrypt the Age key
 gpg --decrypt age-key-TIMESTAMP.gpg > age-key.txt
 
-# 2. Use it to decrypt a backup
-age -d -i age-key.txt backup-TIMESTAMP.tar.gz.age | tar -xzf -
+# 2. Use it to decrypt a backup (archive output streams directly to tar)
+age -d -i age-key.txt full-TIMESTAMP.age | tar -xzf -
 
 # 3. Place the Age key in the project
 mkdir -p VaultWarden-OCI/secrets/keys
@@ -103,7 +103,7 @@ gpg --import gpg-private-key-backup.asc
 gpg --decrypt age-key-TIMESTAMP.gpg > age-key.txt
 
 # 4. Download encrypted backup from offsite
-rclone copy your_remote_name:vaultwarden_backups/emergency/ ./
+rclone copy your_remote_name:vaultwarden_backups/emergency/ ./\n
 
 # 5. Clone repo and run setup
 git clone https://github.com/killer23d/VaultWarden-OCI.git
@@ -115,7 +115,7 @@ sudo ./setup.sh --domain vault.yourdomain.com --email admin@yourdomain.com
 mkdir -p secrets/keys
 mv ../age-key.txt secrets/keys/
 chmod 600 secrets/keys/age-key.txt
-./restore.sh --file ../backup-TIMESTAMP.age --force
+./restore.sh --file ../emergency-TIMESTAMP.age --force
 
 # 7. Verify
 make health
@@ -135,17 +135,20 @@ cp /path/to/bootstrap/age-key-*.gpg .
 cp ~/VaultWarden-OCI/backups/emergency/emergency-*.age . 2>/dev/null || \
   cp ~/VaultWarden-OCI/backups/full/full-*.age .
 
+# Select the backup file
+BACKUP_FILE=$(ls *.age | head -1)
+
 # Test 1: Decrypt bootstrap key
 gpg --decrypt age-key-*.gpg > age-key-test.txt
 echo "✓ Bootstrap key decryption OK"
 
 # Test 2: Decrypt backup and list contents
-age -d -i age-key-test.txt *.age | tar -tzf - | head -20
+age -d -i age-key-test.txt "$BACKUP_FILE" | tar -tzf - | head -20
 echo "✓ Backup decryption and listing OK"
 
 # Test 3: Extract and check the database
 mkdir extract
-age -d -i age-key-test.txt *.age | tar -xzf - -C extract data/db.sqlite3 2>/dev/null
+age -d -i age-key-test.txt "$BACKUP_FILE" | tar -xzf - -C extract data/db.sqlite3 2>/dev/null
 sqlite3 extract/data/db.sqlite3 "SELECT count(*) FROM sqlite_master WHERE type='table';"
 echo "✓ Database integrity OK"
 
