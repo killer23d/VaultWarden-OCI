@@ -113,13 +113,13 @@ curl -X DELETE https://vault.yourdomain.com/api/ciphers/$CIPHER_ID \
 
 ## 🚫 Rate Limiting
 
-Caddy applies rate limits to protect sensitive endpoints:
+Rate limits are enforced via **Cloudflare WAF rules** configured manually in the Cloudflare dashboard — not by Caddy middleware. See [SECURITY.md](SECURITY.md) for setup instructions.
 
-| Endpoint | Limit |
-| :-- | :-- |
-| Static endpoints | 20 requests / 5 min / IP |
-| API auth endpoints | 10 requests / 5 min / IP |
-| Admin endpoints | 5 requests / 5 min / IP |
+| Rule | Path | Limit | Action |
+| :-- | :-- | :-- | :-- |
+| Auth endpoint protection | `/identity/connect/token*`, `/api/accounts/prelogin*` | 10 req / 1 min per IP | Block (429) |
+| Admin panel protection | `/admin*` | 5 req / 1 min per IP | Block (429) |
+| General API protection (optional) | `/api/*` | 100 req / 1 min per IP | Managed Challenge |
 
 Fail2ban adds a second layer — repeated auth failures trigger a **Cloudflare Edge WAF ban** (not a local iptables rule, since web traffic arrives via the Cloudflare proxy). Local `iptables` is strictly used for SSH protection.
 

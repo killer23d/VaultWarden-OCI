@@ -216,7 +216,9 @@ F2B_ACTION="%(action_mwl)s"        # Email + Cloudflare ban
 ```bash
 BACKUP_VERIFICATION_MODE=quick_check   # quick_check or integrity_check
 BACKUP_SCHEDULE="0 4 * * 1-6"          # Cron schedule for automated DB backups
-BACKUP_RETENTION_DAYS=30               # Retention for full backups
+BACKUP_RETENTION_DAYS=30               # Default retention for full backups (days).
+                                        # DB backups default to 14 days.
+                                        # Override per-run: backup.sh --keep N
 RCLONE_REMOTE_NAME=CHANGE_ME_RCLONE_REMOTE  # rclone remote for offsite sync
 ```
 
