@@ -86,6 +86,8 @@ action = smtp[...]
 #### SSH Traffic (Direct, NOT Proxied)
 ```ini
 # SSH jail uses local iptables (direct connection)
+# Fail2ban 1.1.0-r3 leverages iptables-legacy fallbacks to ensure compatibility
+# with modern OS networking stacks (like Oracle Linux and Debian).
 [sshd]
 action = smtp[...]
          iptables-multiport  # ✅ Local blocking works for SSH
@@ -261,7 +263,7 @@ maxretry = 5
 
 ### Email Notifications via Postfix
 
-Email alerts are sent via the containerised Postfix relay (`boky/postfix`,
+Email alerts are sent via the containerised Postfix relay (`bokysan/docker-postfix`,
 port 587). Fail2Ban uses `network_mode: host` and therefore reaches Postfix
 at `127.0.0.1:587`:
 
@@ -371,8 +373,7 @@ fail2ban:
 
 ### Resource Limits
 
-Prevents resource exhaustion attacks. Values are optimised for a system
-serving fewer than 10 users:
+Prevents resource exhaustion attacks. Values are tightly optimised:
 
 ```yaml
 vaultwarden:
@@ -660,7 +661,7 @@ rclone config
 ```
 
 Checks performed:
-- All containers running and healthy (`vaultwarden_app`, `vaultwarden_caddy`, `vaultwarden_fail2ban`, `vaultwarden_postfix`)
+- All containers running and healthy (`vaultwarden`, `caddy`, `fail2ban`, `postfix`)
 - Local service accessibility on port 8080
 - Disk space against configurable threshold (default 80%)
 - SSL certificate expiry (warn < 30 days, critical < 7 days)

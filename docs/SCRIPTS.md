@@ -108,7 +108,7 @@ make restart   # Force restart
 ```
 
 **Always-on checks:**
-- All 4 containers running (`vaultwarden_app`, `vaultwarden_caddy`, `vaultwarden_fail2ban`, `vaultwarden_postfix`)
+- All 4 containers running (`vaultwarden`, `caddy`, `fail2ban`, `postfix`)
 - VaultWarden accessible on `localhost:8080`
 - External web access via Cloudflare
 - Disk space (warn >70%, critical >alert threshold [default 80%])
@@ -437,12 +437,12 @@ sudo ./cron-setup.sh [OPTIONS]
 
 | Schedule | Job |
 |---|---|
-| Daily 2 AM (Mon–Sat) | `backup.sh --type db --rclone --email` |
-| Daily 4 AM | `backup.sh --type db --rclone --email` |
-| Every 30 min | `health.sh --quiet` |
-| Saturday 4 AM | `maintenance.sh --update-firewall` |
-| Sunday 3 AM | `backup.sh --type full --full-verification --rclone --email` |
-| Every hour | `maintenance.sh --update-dns` |
+| Daily 2 AM (Mon–Sat) | `maintenance.sh --comprehensive` (flock-protected) |
+| Mon-Sat 4 AM | `backup.sh --type db --rclone --email` (flock-protected) |
+| Every 30 min | `health.sh --quiet` (flock-protected) |
+| Saturday 4 AM | `maintenance.sh --update-firewall` (flock-protected) |
+| Sunday 3 AM | `backup.sh --type full --full-verification --rclone --email` (flock-protected) |
+| Every hour | `maintenance.sh --update-dns` (flock-protected) |
 
 All scripts run from `$PROJECT_ROOT` to preserve context. Health and maintenance jobs are `flock`-protected. Sunday maintenance is intentionally skipped to avoid overlap with the full backup.
 
