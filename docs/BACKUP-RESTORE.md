@@ -26,7 +26,7 @@ Related docs: [OPERATIONS.md](OPERATIONS.md) · [SCRIPTS.md](SCRIPTS.md) · [ADV
 ./backup.sh --type db                        # default
 ./backup.sh --type db --rclone               # with offsite sync
 ./backup.sh --type db --email                # with email notification
-make backup                                  # silent (no email)
+make backup TYPE=db                          # silent (no email)
 ```
 
 ### Full System Backup (Weekly)
@@ -146,7 +146,7 @@ rclone ls your_remote_name:vaultwarden_backups/
 ```
 
 `sudo ./cron-setup.sh --install` provisions rclone-enabled cron jobs automatically:
-- **Daily 4 AM** — `backup.sh --type db --rclone --email` (non-fatal on remote failure)
+- **Mon-Sat 4 AM** — `backup.sh --type db --rclone --email` (non-fatal on remote failure)
 - **Sunday 3 AM** — `backup.sh --type full --full-verification --rclone --email` (fatal on verification failure)
 
 ---
