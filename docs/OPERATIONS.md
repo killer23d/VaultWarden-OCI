@@ -117,7 +117,7 @@ docker compose ps
 docker stats --no-stream
 
 # Health status of a specific container
-docker inspect vaultwarden_app | jq '.[0].State.Health'
+docker inspect $(docker compose ps -q vaultwarden) | jq '.[0].State.Health'
 ```
 
 ---
@@ -178,6 +178,8 @@ du -sh ${PROJECT_STATE_DIR}/logs/*
 ---
 
 ## 💾 Backup Operations
+
+> **`sudo` note:** Direct `backup.sh` calls require `sudo` in production (needs write access to `${PROJECT_STATE_DIR}`). Makefile targets (`make backup`, `make backup-full`, etc.) and cron jobs handle this automatically.
 
 ### Creating Backups
 
@@ -410,8 +412,8 @@ docker compose logs fail2ban | grep "cloudflare-apiv4"
 ./edit-secrets.sh
 make edit-secrets
 
-# Test decryption without editing
-./edit-secrets.sh --test
+# View decrypted secrets without editing
+./edit-secrets.sh --view
 make test-secrets
 
 # Rotate secrets:
@@ -591,7 +593,7 @@ du -sh ${PROJECT_STATE_DIR}/logs/*
 docker compose ps postfix
 docker compose logs postfix
 grep SMTP .env
-./edit-secrets.sh --test    # Verify smtp_password
+./edit-secrets.sh --view    # View smtp_password and verify decryption
 ```
 
 ### Fail2ban Not Blocking

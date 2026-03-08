@@ -218,12 +218,15 @@ cp docker-compose.override.yml.example docker-compose.override.yml
 
 ### Database (SQLite)
 
-WAL mode is enabled automatically. To tune further:
+WAL mode is enabled automatically. To tune further, use `sqlite3` from the host (the VaultWarden container does not ship `sqlite3`):
 
 ```bash
-docker compose exec vaultwarden sqlite3 /data/db.sqlite3 \
+# Run against the host-accessible database file
+sudo sqlite3 "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data/bwdata/db.sqlite3" \
   "PRAGMA synchronous=NORMAL; PRAGMA cache_size=-2000;"
 ```
+
+> ⚠️ Only run manual PRAGMAs when VaultWarden is stopped to avoid WAL conflicts: `docker compose stop vaultwarden` first, then restart with `docker compose start vaultwarden`.
 
 ### Caddy — HTTP/3 and Compression
 

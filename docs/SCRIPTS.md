@@ -16,6 +16,7 @@ Complete reference for all management scripts and utility libraries in VaultWard
 | # | Script | Category | sudo? |
 |---|---|---|---|
 | 1 | `setup.sh` | Initialisation | ✅ |
+| — | `setup-secrets.sh` | Secrets bootstrap (called by `setup.sh`; run standalone to re-init secrets) | — |
 | 2 | `startup.sh` | Service management | — |
 | 3 | `health.sh` | Monitoring | — |
 | 4 | `backup.sh` | Backup | — |
@@ -64,6 +65,44 @@ sudo ./setup.sh --domain vault.example.com --email admin@example.com --auto
 ```
 
 > ⚠️ After `setup.sh` adds your user to the `docker` group, **log out and back in** (or start a new shell session) before running any `docker` or `make` commands.
+
+---
+
+### `setup-secrets.sh` *(secrets bootstrap)*
+**Purpose:** Interactive or automated first-time secrets initialisation — prompts for all required secrets, generates bcrypt hashes, and writes the encrypted `secrets/secrets.yaml`
+
+```bash
+./setup-secrets.sh [OPTIONS]
+```
+
+**Called automatically by `setup.sh --auto`.** Run standalone only when you need to re-initialise secrets without re-running full setup — for example, after a partial setup failure, on a cloned deployment, or when rotating all secrets at once.
+
+**Key features:**
+- Interactive prompts for all required secrets (`admin_token`, `admin_basic_auth_hash`, Cloudflare tokens, SMTP password, push notification keys)
+- `--auto` mode generates secure defaults and `CHANGE_ME` placeholders for optional fields — no prompts
+- `--quiet-summary` suppresses verbose output in automated workflows
+- Validates all required fields and detects `CHANGE_ME` placeholder values after writing
+
+**Options:**
+
+| Option | Description |
+|---|---|
+| `--auto` | Non-interactive — auto-generate required secrets; set `CHANGE_ME` for optional fields |
+| `--quiet-summary` | Suppress verbose output (used internally by `setup.sh --auto`) |
+| `--dry-run` | Show what would be generated without writing secrets |
+
+```bash
+# Re-initialise secrets interactively (e.g. after partial setup failure)
+./setup-secrets.sh
+
+# Non-interactive — same as what setup.sh --auto calls internally
+./setup-secrets.sh --auto
+
+# Confirm the result
+./edit-secrets.sh --view
+```
+
+> After `setup-secrets.sh` runs, use `./edit-secrets.sh` for all subsequent edits — it safely decrypts, edits, re-encrypts, and backs up the secrets file.
 
 ---
 
@@ -144,8 +183,10 @@ make health-email                  # Comprehensive + email
 **Purpose:** Create Age-encrypted backups with integrity verification
 
 ```bash
-sudo ./backup.sh [OPTIONS]
+./backup.sh [OPTIONS]
 ```
+
+> **`sudo` note:** Direct invocations require `sudo` in production deployments where `${PROJECT_STATE_DIR}` is root-owned (the default after `setup.sh`). The `--list` flag does **not** require root (reads metadata only). Makefile targets (`make backup`, `make backup-full`, etc.) and cron jobs run as root automatically.
 
 **Backup types:**
 
@@ -437,7 +478,7 @@ sudo ./cron-setup.sh [OPTIONS]
 
 | Schedule | Job |
 |---|---|
-| Daily 2 AM (Mon–Sat) | `maintenance.sh --comprehensive` (flock-protected) |
+| Daily 2 AM (Mon–Sat) | `maintenance.sh --comprehensive` (flock-protected; Sunday skipped to avoid overlap with full backup) |
 | Mon-Sat 4 AM | `backup.sh --type db --rclone --email` (flock-protected) |
 | Every 30 min | `health.sh --quiet` (flock-protected) |
 | Saturday 4 AM | `maintenance.sh --update-firewall` (flock-protected) |
@@ -644,7 +685,7 @@ Health and maintenance cron jobs are wrapped with `flock -n LOCKFILE CMD`. If th
 
 ### Script Execution
 1. **Run from project root** — all scripts resolve paths relative to `SCRIPT_DIR`
-2. **Use `sudo` where required** — `setup.sh`, `cron-setup.sh`, `create-breakglass-admin.sh`, and `maintenance.sh --db-maint`
+2. **Use `sudo` where required** — `setup.sh`, `cron-setup.sh`, `create-breakglass-admin.sh`, `maintenance.sh --db-maint`, and direct `backup.sh` calls in production
 3. **Check `--help` first** — every script supports `--help`
 4. **Use `--dry-run`** — preview any operation before applying
 
