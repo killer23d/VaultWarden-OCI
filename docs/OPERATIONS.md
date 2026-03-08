@@ -275,10 +275,10 @@ make update-system
 
 ```bash
 # .env (set by setup.sh --auto)
-VAULTWARDEN_VERSION=1.34.3
-CADDY_VERSION=2.10.2
-FAIL2BAN_VERSION=1.1.0
-POSTFIX_VERSION=4.4.0
+VAULTWARDEN_VERSION=1.35.4
+CADDY_VERSION=2.11.1
+FAIL2BAN_VERSION=1.1.0-r3
+POSTFIX_VERSION=4.3.0
 ```
 
 **Development mode — latest versions:**
@@ -290,7 +290,7 @@ Comment out version pins in `.env` to allow `docker compose pull` to fetch `late
 ```bash
 # Edit .env
 nano .env
-# e.g. VAULTWARDEN_VERSION=1.34.4
+# e.g. VAULTWARDEN_VERSION=1.35.4
 
 # Create emergency backup first
 ./backup.sh --type emergency
@@ -327,10 +327,10 @@ When called with only a targeted flag, routine cleanup is **skipped entirely**:
 
 ```bash
 # Update Cloudflare IP ranges in UFW firewall
-./maintenance.sh --update-firewall        # Recommended: quarterly
+./maintenance.sh --update-firewall        # Automated weekly via cron (Saturday 4 AM)
 
 # Check and update Cloudflare DNS A record
-./maintenance.sh --update-dns             # Automated hourly via cron
+./maintenance.sh --update-dns             # Automated hourly via cron (flock-protected)
 make update-dns
 ```
 
@@ -458,11 +458,11 @@ make cron-install
 | Schedule | Job |
 |---|---|
 | Daily 2 AM (Mon–Sat) | Comprehensive maintenance (flock-protected; Sunday skipped to avoid overlap with full backup) |
-| Daily 4 AM | Database backup with fast verification + rclone sync |
+| Mon-Sat 4 AM | Database backup with fast verification + rclone sync |
 | Every 30 minutes | Health check, quiet mode (flock-protected) |
-| Saturday 4 AM | Cloudflare firewall IP range update |
+| Saturday 4 AM | Cloudflare firewall IP range update (flock-protected) |
 | Sunday 3 AM | Weekly full backup with comprehensive verification + rclone sync |
-| Every hour | DNS A record update via `maintenance.sh --update-dns` |
+| Every hour | DNS A record update via `maintenance.sh --update-dns` (flock-protected) |
 
 > **Note:** Maintenance is intentionally skipped on Sunday to prevent overlap with the 3 AM full backup.
 
@@ -508,10 +508,10 @@ docker stats
 docker stats --no-stream
 
 # Configured resource limits:
-# VaultWarden: 2 GB memory, 60% CPU
-# Caddy:       1 GB memory, 30% CPU
-# Fail2ban:    1 GB memory, 20% CPU
-# Postfix:   128 MB memory,  5% CPU
+# VaultWarden: 512 MB memory, 30% CPU
+# Caddy:       512 MB memory, 25% CPU
+# Fail2ban:    512 MB memory, 15% CPU
+# Postfix:     256 MB memory, 10% CPU
 ```
 
 ### System Resource Usage
