@@ -61,12 +61,11 @@ sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
 docker compose logs vaultwarden | tail -100
 make logs SERVICE=vaultwarden
 
-# Check for database issues
-docker run --rm -v "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data/bwdata:/data" alpine:latest \
-  sh -c "apk add --no-cache sqlite >/dev/null 2>&1 && sqlite3 /data/db.sqlite3 'PRAGMA integrity_check;'"
+# Check for database issues (uses host sqlite3)
+sudo sqlite3 "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data/bwdata/db.sqlite3" 'PRAGMA integrity_check;'
 
 # Check resource usage
-docker stats vaultwarden_app
+docker stats $(docker compose ps -q vaultwarden)
 ```
 
 **Solutions**:
@@ -82,7 +81,7 @@ make db-maint
 make restore-db
 
 # Check resource limits
-docker inspect vaultwarden_app | grep -A 10 Memory
+docker inspect $(docker compose ps -q vaultwarden) | grep -A 10 Memory
 
 # Increase limits if needed (edit template)
 nano docker-compose.yml.example
@@ -436,7 +435,7 @@ docker compose restart postfix vaultwarden
 **Diagnosis**:
 ```bash
 # Confirm Fail2Ban network mode (must be host)
-docker inspect vaultwarden_fail2ban --format '{{.HostConfig.NetworkMode}}'
+docker inspect $(docker compose ps -q fail2ban) --format '{{.HostConfig.NetworkMode}}'
 
 # Check Fail2Ban → Postfix connectivity
 # (in host-network mode, postfix is reachable at 127.0.0.1:587)
@@ -698,7 +697,7 @@ docker stats --no-stream
 docker compose top
 
 # Review resource limits
-docker inspect vaultwarden_app | grep -A 10 CPU
+docker inspect $(docker compose ps -q vaultwarden) | grep -A 10 CPU
 ```
 
 **Solutions**:
@@ -731,7 +730,7 @@ docker stats --no-stream
 docker compose logs | grep -i "out of memory"
 
 # Review memory limits
-docker inspect vaultwarden_app | grep -A 10 Memory
+docker inspect $(docker compose ps -q vaultwarden) | grep -A 10 Memory
 ```
 
 **Solutions**:
@@ -760,11 +759,8 @@ sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
 # Check database size
 du -h ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data/db.sqlite3
 
-# Check database integrity (ephemeral alpine container)
-docker run --rm \
-  -v "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data/bwdata:/data" \
-  alpine:latest \
-  sh -c "apk add --no-cache sqlite >/dev/null 2>&1 && sqlite3 /data/db.sqlite3 'PRAGMA integrity_check;'"
+# Check database integrity (uses host sqlite3)
+sudo sqlite3 "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data/bwdata/db.sqlite3" 'PRAGMA integrity_check;'
 
 # Review VaultWarden logs
 docker compose logs vaultwarden | grep -i slow
