@@ -31,6 +31,15 @@
 #   BUG-7 [LOW]    validate_file_permissions(): stat on an unmapped UID returns the
 #                  string "UNKNOWN" for owner/group, causing false-positive mismatch
 #                  errors. Now logged as a warning and treated as a soft failure only.
+#
+# MODERNIZED (2026-03-09):
+#   MOD-1 [secure_cleanup] shred/dd overwrite loops removed. On modern storage
+#                  stacks (ext4 journal, COW filesystems, SSD FTL/wear-levelling),
+#                  file-content overwrites are NOT guaranteed to reach the same
+#                  physical sectors. Reliable protection requires full-disk
+#                  encryption (LUKS / OCI Block Volume encryption), which is
+#                  assumed for any deployment storing sensitive VaultWarden data.
+#                  See function comment for full rationale.
 
 # Prevent multiple sourcing
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
@@ -432,17 +441,43 @@ generate_breakglass_password() {
     generate_secure_random "$length" "alphanumeric"
 }
 
-# ENHANCED: Secure cleanup function for sensitive data
+# MODERNIZED: Secure cleanup function
 #
-# FIX BUG-2: find … {} \\; → find … {} \;
-#   Unquoted \\; in the original: bash reduces \\ to \, yielding \ followed
-#   by ; which is a shell metacharacter (command separator), so find ended
-#   without its required terminator, and under set -euo pipefail the bare
-#   "2>/dev/null || true" ran as a separate command.
-#   Fix: \; — bash reduces \; to ; and passes it to find as the -exec terminator.
+# MOD-1 (2026-03-09): shred/dd overwrite loops REMOVED.
+#
+# Rationale — overwrite-based deletion is unreliable on modern storage stacks:
+#
+#   • ext4 with journaling: the journal may replay old data blocks after an
+#     unclean shutdown, resurrecting "deleted" file content even after an
+#     fsync-confirmed overwrite.
+#
+#   • btrfs, ZFS, APFS (copy-on-write): a write always creates a new extent;
+#     the previous extent remains allocated until the space is reclaimed by
+#     the garbage collector. shred/dd overwrites land on NEW physical blocks,
+#     leaving the original data intact in the old extent.
+#
+#   • SSDs with Flash Translation Layer (FTL) and wear-levelling: the FTL
+#     remaps logical block addresses to physical NAND pages transparently.
+#     An overwrite write is sent to a different physical page; the original
+#     page is only erased when the FTL decides to reclaim it — which may be
+#     never during the device's lifetime.
+#
+# The only reliable protection against data recovery is full-disk encryption
+# at rest (LUKS on the host OS volume, or OCI Block Volume encryption with
+# AES-256). This is assumed to be in place for any deployment storing
+# sensitive VaultWarden data.
+#
+# For transient plaintext (backup snapshots, staging tarballs):
+# backup.sh registers an EXIT/INT/TERM trap before mktemp that calls
+# rm -rf on TMPDIR_BACKUP on ALL exit paths including SIGINT mid-backup.
+# That trap-based pattern is the correct mitigation; overwrite loops add
+# latency (multiple dd passes over large files) without meaningful security.
+#
+# The $passes parameter is retained for backward compatibility but is now
+# ignored. All callers can continue passing it without breaking.
 secure_cleanup() {
     local target="$1"
-    local passes="${2:-3}"
+    local passes="${2:-3}"  # retained for backward compat; ignored (see above)
 
     if [[ -z "$target" ]]; then
         log_error "secure_cleanup: target is required"
@@ -450,37 +485,10 @@ secure_cleanup() {
     fi
 
     if [[ -f "$target" ]]; then
-        # Secure file deletion with multiple overwrites
-        if command -v shred >/dev/null 2>&1; then
-            if shred -vfz -n "$passes" "$target" 2>/dev/null; then
-                log_debug "Secure file cleanup completed: $target"
-                return 0
-            else
-                log_warn "Shred failed, falling back to rm: $target"
-            fi
-        fi
-
-        # Fallback: overwrite and remove
-        local file_size
-        file_size=$(_stat_octal_perms "$target" 2>/dev/null || echo "0")
-        # Use GNU stat for byte size specifically (different format flag needed)
-        if stat --version >/dev/null 2>&1; then
-            file_size=$(stat -c%s "$target" 2>/dev/null || echo "4096")
-        else
-            file_size=$(stat -f%z "$target" 2>/dev/null || echo "4096")
-        fi
-
-        for ((i=1; i<=passes; i++)); do
-            dd if=/dev/urandom of="$target" bs="$file_size" count=1 2>/dev/null || true
-        done
-
-        rm -f "$target"
-        log_debug "Fallback secure cleanup completed: $target"
-
+        rm -f -- "$target"
+        log_debug "Secure file cleanup completed: $target"
     elif [[ -d "$target" ]]; then
-        # BUG-2 FIX: was {} \\; — over-escaped terminator broke the find command.
-        find "$target" -type f -exec shred -vfz -n "$passes" {} \; 2>/dev/null || true
-        rm -rf "$target"
+        rm -rf -- "$target"
         log_debug "Secure directory cleanup completed: $target"
     else
         log_warn "Target not found for secure cleanup: $target"
