@@ -3,6 +3,10 @@ Description=VaultWarden DNS Update
 After=network-online.target
 Wants=network-online.target
 ConditionPathExists=/opt/vaultwarden-scripts/maintenance.sh
+# FIX-S01: OnFailure= added — DNS update failures now trigger an email
+# notification via the shared template unit, consistent with all other
+# VaultWarden service units (maintenance, backup, health, firewall).
+OnFailure=vaultwarden-notify-failure@%n.service
 
 [Service]
 Type=oneshot
@@ -14,4 +18,8 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=vw-dns-update
 NoNewPrivileges=yes
+# FIX-S01: PrivateTmp=yes added — gives the service its own private /tmp
+# mount, preventing temp-file name collisions with concurrently running
+# services. Consistent with all other VaultWarden service units.
+PrivateTmp=yes
 TimeoutStartSec=120
