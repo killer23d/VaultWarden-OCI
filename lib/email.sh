@@ -21,6 +21,8 @@
 # MailerSend  202 empty body (warnings may produce 202+JSON -- both = success)
 # SendGrid    202 empty body; content[] must be array of {type,value} objects
 # Mailgun     200 JSON; uses HTTP Basic Auth + form-data NOT JSON
+#             Two API regions: US (api.mailgun.net) / EU (api.eu.mailgun.net)
+#             Set MAILGUN_REGION=eu in .env for EU-hosted accounts.
 # Postmark    200 JSON PascalCase; check ErrorCode in body, not just HTTP code
 # Resend      200 JSON; from is composite string, to is string array
 #
@@ -46,6 +48,17 @@
 # never reached the 202 branch. Fixed: restructured to if/else so that a
 # successful call with a non-empty response body (202+warnings) is logged
 # as a warning before returning 0, and any failure logs the HTTP code.
+#
+# --- FIX-B02 (2026-03-09) ----------------------------------------------------
+# _email_driver_mailgun(): added MAILGUN_REGION=us|eu support.
+# Mailgun operates two independent API fleets with different hostnames:
+#   US (default): api.mailgun.net        -- accounts at mailgun.com
+#   EU:           api.eu.mailgun.net     -- accounts at eu.mailgun.com
+# EU-region accounts always received HTTP 404 from the hardcoded US endpoint.
+# The 404 body ("Domain not found") is indistinguishable from a bad domain
+# name, making the misconfiguration very difficult to diagnose from logs.
+# Fix: read MAILGUN_REGION from .env; default 'us' is backward compatible.
+# An unrecognised MAILGUN_REGION value is caught early with log_error.
 # -----------------------------------------------------------------------------
 
 # Prevent direct execution
@@ -120,7 +133,7 @@ _email_driver_mailersend() {
     local s b fn fe ae
     s=$(_email_json_escape "$subject")
     b=$(_email_json_escape "$body")
-    local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM}}"
+    local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
     # FIX-M03: JSON-escape envelope fields (fn=from_name, fe=from_email, ae=admin_email)
     fn=$(_email_json_escape "${SMTP_FROM_NAME:-VaultWarden}")
     fe=$(_email_json_escape "${_from_email}")
@@ -162,7 +175,7 @@ _email_driver_sendgrid() {
     local s b fn fe ae
     s=$(_email_json_escape "$subject")
     b=$(_email_json_escape "$body")
-    local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM}}"
+    local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
     # FIX-M03: JSON-escape envelope fields
     fn=$(_email_json_escape "${SMTP_FROM_NAME:-VaultWarden}")
     fe=$(_email_json_escape "${_from_email}")
@@ -195,9 +208,14 @@ EOF
 # Payload: multipart/form-data (-F flags) -- NOT JSON
 # NOTE:    No JSON escaping needed; curl handles multipart field encoding.
 # Success: HTTP 200 JSON { "id": "...", "message": "Queued. Thank you." }
+#
+# Regions:
+#   MAILGUN_REGION=us  (default) -- api.mailgun.net    (accounts at mailgun.com)
+#   MAILGUN_REGION=eu             -- api.eu.mailgun.net (accounts at eu.mailgun.com)
+# FIX-B02: EU-region accounts received HTTP 404 from the hardcoded US endpoint.
 _email_driver_mailgun() {
     local subject="$1" body="$2"
-    local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM}}"
+    local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
 
     local domain="${MAILGUN_DOMAIN:-}"
     [[ -z "$domain" ]] && domain="${_from_email##*@}"
@@ -205,6 +223,21 @@ _email_driver_mailgun() {
         log_error "Mailgun driver: cannot determine domain. Set MAILGUN_DOMAIN in .env"
         return 1
     fi
+
+    # FIX-B02: Select the correct regional API endpoint.
+    # Mailgun US and EU are completely separate fleets; using the wrong endpoint
+    # always returns HTTP 404 ("Domain not found"), which is indistinguishable
+    # from a misconfigured MAILGUN_DOMAIN and produces confusing log output.
+    local mg_region="${MAILGUN_REGION:-us}"
+    local mg_api_host
+    case "${mg_region,,}" in
+        us)  mg_api_host="api.mailgun.net" ;;
+        eu)  mg_api_host="api.eu.mailgun.net" ;;
+        *)
+            log_error "Mailgun driver: unrecognised MAILGUN_REGION='${mg_region}'. Valid values: us eu"
+            return 1
+            ;;
+    esac
 
     local tmp code
     tmp=$(mktemp -t vw_email.XXXXXXXXXX)
@@ -217,7 +250,7 @@ _email_driver_mailgun() {
         --retry-delay 3 \
         -o "$tmp" \
         -w "%{http_code}" \
-        -X POST "https://api.mailgun.net/v3/${domain}/messages" \
+        -X POST "https://${mg_api_host}/v3/${domain}/messages" \
         --user "api:${EMAIL_API_TOKEN}" \
         -F "from=${SMTP_FROM_NAME:-VaultWarden} <${_from_email}>" \
         -F "to=${ADMIN_EMAIL}" \
@@ -227,7 +260,7 @@ _email_driver_mailgun() {
 
     local resp; resp=$(head -c 300 "$tmp" 2>/dev/null | tr -d '\n')
     [[ "$code" =~ ^2 ]] && return 0
-    log_warn "Mailgun API HTTP ${code}: ${resp}"
+    log_warn "Mailgun API HTTP ${code} (region=${mg_region}, host=${mg_api_host}): ${resp}"
     return 1
 }
 
@@ -242,7 +275,7 @@ _email_driver_postmark() {
     local s b fn fe ae
     s=$(_email_json_escape "$subject")
     b=$(_email_json_escape "$body")
-    local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM}}"
+    local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
     # FIX-M03: JSON-escape envelope fields. The Postmark driver uses inline
     # -d "{ ... }" rather than a heredoc, making unescaped quotes in display
     # names particularly hard to spot and immediately fatal (HTTP 400).
@@ -295,7 +328,7 @@ _email_driver_resend() {
     local s b fn fe ae
     s=$(_email_json_escape "$subject")
     b=$(_email_json_escape "$body")
-    local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM}}"
+    local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
     # FIX-M03: JSON-escape envelope fields
     fn=$(_email_json_escape "${SMTP_FROM_NAME:-VaultWarden}")
     fe=$(_email_json_escape "${_from_email}")
