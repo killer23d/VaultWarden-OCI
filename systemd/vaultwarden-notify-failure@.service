@@ -1,0 +1,18 @@
+[Unit]
+Description=VaultWarden Failure Notification for %i
+# Template unit: instantiated by OnFailure=vaultwarden-notify-failure@%n.service
+# %i receives the failed unit name (e.g. vaultwarden-health.service)
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/vaultwarden-scripts
+EnvironmentFile=/etc/vaultwarden/vaultwarden.env
+ExecStart=/bin/bash -c '\
+  source /opt/vaultwarden-scripts/lib/common.sh; \
+  send_email \
+    "FAILURE: %i on $(hostname -f 2>/dev/null || hostname)" \
+    "The systemd unit %i failed at $(date).\nCheck logs with:\n  journalctl -u %i -n 50\n"\
+'
+User=root
+SyslogIdentifier=vw-notify
+TimeoutStartSec=30

@@ -1,0 +1,10 @@
+[Unit]
+Description=VaultWarden DB Backup Timer Mon-Sat 04:00
+
+[Timer]
+OnCalendar=Mon-Sat *-*-* 04:00:00
+Persistent=true
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target

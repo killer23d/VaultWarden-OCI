@@ -1,0 +1,20 @@
+[Unit]
+Description=VaultWarden Health Monitor
+Documentation=https://github.com/killer23d/VaultWarden-OCI
+After=docker.service network-online.target
+Requires=docker.service
+ConditionPathExists=/opt/vaultwarden-scripts/health.sh
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/vaultwarden-scripts
+EnvironmentFile=/etc/vaultwarden/vaultwarden.env
+ExecStart=/opt/vaultwarden-scripts/health.sh --quiet
+User=root
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vw-health
+NoNewPrivileges=yes
+PrivateTmp=yes
+OnFailure=vaultwarden-notify-failure@%n.service
+TimeoutStartSec=300

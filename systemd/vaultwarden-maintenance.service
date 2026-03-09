@@ -1,0 +1,20 @@
+[Unit]
+Description=VaultWarden Comprehensive Maintenance
+Documentation=https://github.com/killer23d/VaultWarden-OCI
+After=docker.service network-online.target
+Requires=docker.service
+ConditionPathExists=/opt/vaultwarden-scripts/maintenance.sh
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/vaultwarden-scripts
+EnvironmentFile=/etc/vaultwarden/vaultwarden.env
+ExecStart=/opt/vaultwarden-scripts/maintenance.sh --comprehensive
+User=root
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vw-maintenance
+NoNewPrivileges=yes
+PrivateTmp=yes
+OnFailure=vaultwarden-notify-failure@%n.service
+TimeoutStartSec=1800
