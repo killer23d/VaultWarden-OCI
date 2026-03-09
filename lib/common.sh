@@ -13,6 +13,14 @@
 #                   Fixed: falls back to `id -un`, then literal 'root'.
 #   BUG-C3 [LOW]    log_header(): printf '=%.0s' $(seq ...) uses seq(1) which is
 #                   absent on Alpine/BusyBox. Replaced with a pure-bash while loop.
+#
+# MODERNIZATION (2026-03-08):
+#   EMAIL [MAJOR]   Replaced postfix-container email delivery with a three-stage
+#                   provider-driver system (API -> SMTP relay -> host MTA).
+#                   All provider drivers live in lib/email.sh.
+#                   send_notification_email() is kept as a backward-compat shim.
+#                   Removed: _send_email_via_postfix, _send_email_via_mailutils,
+#                            _get_postfix_smtp_target_for_fail2ban
 
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_COMMON_LIB_LOADED:-}" ]] && return 0
@@ -216,6 +224,7 @@ _command_to_package_hint() {
         docker) echo "docker-ce (or docker.io)" ;;
         sops) echo "sops" ;;
         age) echo "age" ;;
+        zstd) echo "zstd" ;;
         *) echo "$cmd" ;;
     esac
 }
@@ -296,14 +305,13 @@ require_root() {
 # callers like secure_secrets_file() pass the result to chown, so an empty
 # string caused `chown :` to silently transfer ownership to root.
 #
-# Fallback chain: SUDO_USER → USER → id -un → 'root'
+# Fallback chain: SUDO_USER -> USER -> id -un -> 'root'
 get_real_user() {
     if [[ -n "${SUDO_USER:-}" ]]; then
         echo "$SUDO_USER"
     elif [[ -n "${USER:-}" ]]; then
         echo "$USER"
     else
-        # Non-interactive / daemon context: derive from process credentials.
         local effective_user
         effective_user=$(id -un 2>/dev/null) || effective_user="root"
         echo "$effective_user"
@@ -399,17 +407,17 @@ download_file() {
 
 # --- Email Helpers ---
 
-# BUG-C1 FIX: _rate_limit_check_and_stamp  (extracted helper)
+# Load provider-specific email drivers (MailerSend, SendGrid, Mailgun, Postmark, Resend)
+# shellcheck source=lib/email.sh
+source "${LIB_DIR}/email.sh"
+
+# _rate_limit_check SUBJECT RATE_LIMIT_DIR
 #
-# Previously both _send_email_via_postfix() and _send_email_via_mailutils()
-# wrote the rate-limit timestamp BEFORE attempting to create the temp file
-# for the email body.  If mktemp failed, the stamp was already written and
-# the next hour of notifications was silently suppressed.
+# Returns 0 and prints the stamp-file path when the message may be sent.
+# Returns 1 (silent drop) when the non-critical rate limit is active.
 #
-# This helper encapsulates the rate-limit logic so it can be called AFTER
-# the temp file is successfully created.  It returns 0 when the message may
-# be sent, 1 when the rate limit is active (caller should return 0 = "OK,
-# but silently dropped").
+# BUG-C1 NOTE: callers must create their temp body file BEFORE calling this
+# function, and write the stamp ONLY after a successful send.
 _rate_limit_check() {
     local subject="$1"
     local rate_limit_dir="$2"
@@ -425,206 +433,154 @@ _rate_limit_check() {
         fi
     fi
 
-    # Print the stamp-file path so the caller can write it after a successful send.
     echo "$last_email_file"
     return 0
 }
 
-# ENHANCED: Send notification email via postfix container
-send_notification_email() {
-    local subject="$1"
-    local body="$2"
-    local admin_email
-    admin_email=$(get_config_value "ADMIN_EMAIL" "")
+# _smtp_send SUBJECT BODY
+#
+# Provider-agnostic SMTP relay delivery via curl.
+# Builds a proper RFC 5322 message — required by all standards-compliant MTAs.
+# Missing headers cause rejection or body-as-headers corruption.
+#
+# Change SMTP_HOST/PORT/USERNAME/PASSWORD in .env to switch providers;
+# this function never needs to change.
+#
+# Port 465 = implicit TLS (smtps://)
+# Port 587 = explicit TLS via STARTTLS (smtp:// + --ssl-reqd)
+_smtp_send() {
+    local subject="$1" body="$2"
 
-    if [[ -z "$admin_email" ]]; then
-        log_warn "ADMIN_EMAIL not configured. Cannot send notification."
+    if [[ -z "${SMTP_HOST:-}" || -z "${SMTP_USERNAME:-}" || -z "${SMTP_PASSWORD:-}" ]]; then
+        log_debug "SMTP relay not configured (SMTP_HOST/USERNAME/PASSWORD missing) — skipping"
         return 1
     fi
 
-    if docker inspect vaultwarden_postfix --format '{{.State.Running}}' 2>/dev/null | grep -qx 'true'; then
-        log_debug "Using postfix container for email delivery"
-        _send_email_via_postfix "$subject" "$body" "$admin_email"
-        return $?
+    local smtp_port="${SMTP_PORT:-465}"
+    local smtp_url
+    if [[ "$smtp_port" == "465" ]]; then
+        smtp_url="smtps://${SMTP_HOST}:465"
+    else
+        smtp_url="smtp://${SMTP_HOST}:${smtp_port}"
     fi
 
-    if has_command mail; then
-        log_debug "Using host mailutils for email delivery (fallback)"
-        _send_email_via_mailutils "$subject" "$body" "$admin_email"
-        return $?
+    local date_str
+    date_str=$(date -u "+%a, %d %b %Y %H:%M:%S +0000")
+
+    # RFC 5322 message: headers, blank line, body
+    # CRLF line endings required by SMTP spec (RFC 2822 §2.2)
+    {
+        printf "From: \"%s\" <%s>\r\n" "${SMTP_FROM_NAME:-VaultWarden}" "${SMTP_FROM_EMAIL}"
+        printf "To: %s\r\n"            "${ADMIN_EMAIL}"
+        printf "Subject: %s\r\n"       "${subject}"
+        printf "Date: %s\r\n"          "${date_str}"
+        printf "MIME-Version: 1.0\r\n"
+        printf "Content-Type: text/plain; charset=UTF-8\r\n"
+        printf "Content-Transfer-Encoding: 7bit\r\n"
+        printf "\r\n"
+        printf "%s\r\n"                "${body}"
+    } | curl -s \
+        --connect-timeout 15 \
+        --max-time 30 \
+        --retry 2 \
+        --retry-delay 5 \
+        --ssl-reqd \
+        --url "$smtp_url" \
+        --mail-from "${SMTP_FROM_EMAIL}" \
+        --mail-rcpt "${ADMIN_EMAIL}" \
+        --user "${SMTP_USERNAME}:${SMTP_PASSWORD}" \
+        --upload-file - 2>/dev/null
+
+    return $?
+}
+
+# send_email SUBJECT BODY
+#
+# Public entry point for all email delivery.
+# Three-stage delivery chain controlled by EMAIL_PROVIDER in .env:
+#
+#   Named provider  ->  HTTP API driver  ->  SMTP relay  ->  host MTA
+#   smtp            ->  (skip API)       ->  SMTP relay  ->  host MTA
+#   host            ->  (skip all)       ->              ->  host MTA
+#
+# API drivers live in lib/email.sh. To add a new provider:
+#   1. Add function _email_driver_PROVIDERNAME() to lib/email.sh
+#   2. Add entry to _EMAIL_DRIVERS in lib/email.sh
+#   3. Set EMAIL_PROVIDER=PROVIDERNAME in .env
+# No other files need changing.
+#
+# Subjects containing "CRITICAL" bypass the rate limiter.
+send_email() {
+    local subject="${1:-VaultWarden Notification}"
+    local body="${2:-}"
+    local provider="${EMAIL_PROVIDER:-smtp}"
+
+    local rate_limit_dir="${PROJECT_ROOT:-/var/lib/vaultwarden}/.rate-limit"
+    mkdir -p "$rate_limit_dir" 2>/dev/null || true
+    chmod 700 "$rate_limit_dir" 2>/dev/null || true
+
+    local stamp_file
+    if ! stamp_file=$(_rate_limit_check "$subject" "$rate_limit_dir"); then
+        return 0  # silently suppressed — rate limit active
     fi
 
-    log_warn "No email backend available (tried postfix container and host mailutils)"
+    # Append standard footer
+    local full_body
+    full_body="${body}
+
+---
+Host:      $(hostname -f 2>/dev/null || hostname)
+Timestamp: $(date -uIs)
+Provider:  ${provider}"
+
+    # ── Stage 1: HTTP API via named driver ──────────────────────────────
+    if [[ "$provider" != "smtp" && "$provider" != "host" ]]; then
+        if [[ -z "${_EMAIL_DRIVERS[$provider]:-}" ]]; then
+            log_error "Unknown EMAIL_PROVIDER='${provider}'"
+            log_info  "Valid providers: ${!_EMAIL_DRIVERS[*]} smtp host"
+            return 1
+        fi
+
+        local driver_fn="_email_driver_${provider}"
+
+        if [[ -z "${EMAIL_API_TOKEN:-}" ]]; then
+            log_warn "EMAIL_PROVIDER=${provider} set but EMAIL_API_TOKEN is empty — falling back to SMTP"
+        elif "$driver_fn" "$subject" "$full_body"; then
+            log_success "Email sent via ${provider} API: ${subject}"
+            date +%s > "$stamp_file" 2>/dev/null || true
+            return 0
+        else
+            log_warn "${provider} API failed — falling back to SMTP relay"
+        fi
+    fi
+
+    # ── Stage 2: SMTP relay via curl ────────────────────────────────────
+    if [[ "$provider" != "host" ]]; then
+        if _smtp_send "$subject" "$full_body"; then
+            log_success "Email sent via SMTP relay (${SMTP_HOST:-unconfigured}:${SMTP_PORT:-465}): ${subject}"
+            date +%s > "$stamp_file" 2>/dev/null || true
+            return 0
+        fi
+        log_warn "SMTP relay failed — falling back to host MTA"
+    fi
+
+    # ── Stage 3: Host MTA (Postfix or sendmail) ─────────────────────────
+    if command -v mail &>/dev/null; then
+        if echo "$full_body" | mail -s "$subject" "${ADMIN_EMAIL}" 2>/dev/null; then
+            log_success "Email sent via host MTA: ${subject}"
+            date +%s > "$stamp_file" 2>/dev/null || true
+            return 0
+        fi
+    fi
+
+    log_error "All email delivery methods failed (provider=${provider}, subject=${subject})"
     return 1
 }
 
-_get_postfix_smtp_target_for_fail2ban() {
-    local host="postfix"
-    local port="587"
-
-    local netmode
-    netmode=$(docker inspect vaultwarden_fail2ban --format '{{.HostConfig.NetworkMode}}' 2>/dev/null || echo "")
-
-    if [[ "$netmode" == "host" ]]; then
-        host="127.0.0.1"
-    fi
-
-    printf '%s:%s\n' "$host" "$port"
-    return 0
-}
-
-_send_email_via_postfix() {
-    local subject="$1"
-    local body="$2"
-    local admin_email="$3"
-
-    local rate_limit_dir="${PROJECT_ROOT:-/var/lib/vaultwarden}/.rate-limit"
-    mkdir -p "$rate_limit_dir" 2>/dev/null || true
-    chmod 700 "$rate_limit_dir" 2>/dev/null || true
-
-    # BUG-C1 FIX: create temp file FIRST, then check rate limit.
-    # Previously the stamp was written before mktemp; a mktemp failure left
-    # the rate-limit counter bumped and silently dropped the next hour of mail.
-    local body_tmp
-    if ! body_tmp=$(mktemp); then
-        log_error "Failed to create temp file for email body"
-        return 1
-    fi
-    chmod 600 "$body_tmp" 2>/dev/null || true
-
-    # Check rate limit — if active, clean up temp file and return "sent" (silent drop).
-    local stamp_file
-    if ! stamp_file=$(_rate_limit_check "$subject" "$rate_limit_dir"); then
-        rm -f "$body_tmp" 2>/dev/null || true
-        return 0
-    fi
-
-    local full_subject="[VaultWarden] $subject"
-    local full_body="$body
-
----
-Host: $(hostname -f 2>/dev/null || hostname)
-Timestamp: $(date -uIs)
-Project: VaultWarden-OCI
-Email Backend: postfix container (bokysan/docker-postfix)"
-
-    local smtp_target smtp_host smtp_port
-    smtp_target=$(_get_postfix_smtp_target_for_fail2ban)
-    smtp_host="${smtp_target%:*}"
-    smtp_port="${smtp_target##*:}"
-
-    log_debug "Postfix SMTP target for fail2ban: ${smtp_host}:${smtp_port}"
-
-    local email_script
-    email_script=$(cat <<'PYEOF'
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-import sys
-import os
-
-def send_email():
-    try:
-        msg = MIMEMultipart()
-        msg['From'] = os.environ.get('EMAIL_FROM', 'vaultwarden@localhost')
-        msg['To'] = os.environ.get('EMAIL_TO', '')
-        msg['Subject'] = os.environ.get('EMAIL_SUBJECT', 'No Subject')
-
-        body = os.environ.get('EMAIL_BODY', '')
-        if not body:
-            try:
-                with open('/tmp/.vw_email_body', 'r', encoding='utf-8') as f:
-                    body = f.read()
-            except Exception:
-                body = ''
-        msg.attach(MIMEText(body, 'plain'))
-
-        host = os.environ.get('SMTP_HOST', '127.0.0.1')
-        port = int(os.environ.get('SMTP_PORT', '587'))
-
-        server = smtplib.SMTP(host, port, timeout=10)
-        server.send_message(msg)
-        server.quit()
-
-        print('Email sent successfully via postfix')
-        return True
-    except Exception as e:
-        print(f'Failed to send email via postfix: {e}', file=sys.stderr)
-        return False
-
-sys.exit(0 if send_email() else 1)
-PYEOF
-)
-
-    printf '%s' "$full_body" > "$body_tmp"
-
-    # Write the Python script to a secure temp file to avoid single-quote
-    # injection: the email_script contains Python single-quoted strings
-    # ('plain', 'No Subject', etc.) that would terminate an outer sh -c '...'
-    # argument prematurely if embedded directly.
-    local script_tmp
-    script_tmp=$(mktemp /tmp/vw_email_XXXXXX.py)
-    install -m 600 /dev/null "$script_tmp"
-    printf '%s\n' "$email_script" > "$script_tmp"
-
-    # Copy script into container, execute it, then clean up both copies.
-    docker compose cp "$script_tmp" fail2ban:/tmp/.vw_email_send.py 2>/dev/null || true
-    rm -f "$script_tmp" 2>/dev/null || true
-
-    if docker compose exec -T \
-        -e EMAIL_FROM="${SMTP_FROM:-vaultwarden@${DOMAIN_NAME:-localhost}}" \
-        -e EMAIL_TO="$admin_email" \
-        -e EMAIL_SUBJECT="$full_subject" \
-        -e SMTP_HOST="$smtp_host" \
-        -e SMTP_PORT="$smtp_port" \
-        fail2ban sh -c "cat >/tmp/.vw_email_body && python3 /tmp/.vw_email_send.py; rc=\$?; rm -f /tmp/.vw_email_body /tmp/.vw_email_send.py; exit \$rc" < "$body_tmp"; then
-        rm -f "$body_tmp" 2>/dev/null || true
-        # Write rate-limit stamp only on successful send.
-        date +%s > "$stamp_file" 2>/dev/null || true
-        log_success "Notification email sent to $admin_email (via postfix)"
-        return 0
-    else
-        rm -f "$body_tmp" 2>/dev/null || true
-        log_error "Failed to send notification email via postfix"
-        return 1
-    fi
-}
-
-_send_email_via_mailutils() {
-    local subject="$1"
-    local body="$2"
-    local admin_email="$3"
-
-    local rate_limit_dir="${PROJECT_ROOT:-/var/lib/vaultwarden}/.rate-limit"
-    mkdir -p "$rate_limit_dir" 2>/dev/null || true
-    chmod 700 "$rate_limit_dir" 2>/dev/null || true
-
-    # BUG-C1 FIX: same ordering fix as _send_email_via_postfix.
-    # Check rate limit before doing any work; no temp file needed here but
-    # the stamp must only be written after a successful send.
-    local stamp_file
-    if ! stamp_file=$(_rate_limit_check "$subject" "$rate_limit_dir"); then
-        return 0
-    fi
-
-    local full_subject="[VaultWarden] $subject"
-    local full_body="$body
-
----
-Host: $(hostname -f 2>/dev/null || hostname)
-Timestamp: $(date -uIs)
-Project: VaultWarden-OCI
-Email Backend: host mailutils (legacy)"
-
-    if echo "$full_body" | mail -s "$full_subject" "$admin_email"; then
-        # Write rate-limit stamp only on successful send.
-        date +%s > "$stamp_file" 2>/dev/null || true
-        log_success "Notification email sent to $admin_email (via mailutils)"
-        return 0
-    else
-        log_error "Failed to send notification email via mailutils"
-        return 1
-    fi
+# send_notification_email SUBJECT BODY
+# Backward-compatibility shim. All new code should call send_email() directly.
+send_notification_email() {
+    send_email "$1" "$2"
 }
 
 # --- Validation Helpers ---
@@ -709,10 +665,9 @@ export -f log_info log_success log_warn log_error log_debug log_header set_log_p
 export -f load_env_file get_config_value require_config
 export -f has_command require_commands retry_with_backoff is_root require_root get_real_user
 export -f ensure_dir secure_file test_connectivity test_http download_file
-export -f _rate_limit_check send_notification_email _get_postfix_smtp_target_for_fail2ban
-export -f _send_email_via_postfix _send_email_via_mailutils
+export -f _rate_limit_check send_email send_notification_email _smtp_send
 export -f validate_email validate_domain validate_port validate_ip validate_url
 export -f setup_error_trap setup_cleanup_trap safe_execute
 export -f init_common_lib
 
-log_debug "Enhanced common library loaded successfully - postfix email integration + strict mode fixes + compatibility flag"
+log_debug "Common library loaded (email provider: ${EMAIL_PROVIDER:-smtp})"
