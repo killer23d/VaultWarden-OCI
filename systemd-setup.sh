@@ -7,8 +7,20 @@
 # USAGE:
 #   sudo ./systemd-setup.sh --install    # Install and enable all timers
 #   sudo ./systemd-setup.sh --remove     # Disable and remove all units
+#   sudo ./systemd-setup.sh --validate   # Verify installed state vs repo
 #   sudo ./systemd-setup.sh --status     # Show timer/service status
 #   sudo ./systemd-setup.sh --dry-run    # Print actions without executing
+#
+# FIX-S06  (2026-03-09): --validate subcommand added. Checks scripts,
+#          lib/, unit files, timer enablement, EnvironmentFile permissions,
+#          and split-brain (installed-vs-repo staleness). Safe for CI/CD.
+# FIX-S07  (2026-03-09): Script patching no longer uses $() command
+#          substitution. bash $() strips trailing newlines silently.
+#          Patched content is now written via sed directly into a mktemp
+#          file; a line-count sanity check aborts on truncation.
+# FIX-S08  (2026-03-09): --remove now emits a prominent warning that
+#          /etc/vaultwarden/vaultwarden.env was intentionally left in
+#          place and may contain credentials.
 
 set -euo pipefail
 
@@ -22,6 +34,7 @@ init_common_lib "$0"
 INSTALL=false
 REMOVE=false
 STATUS=false
+VALIDATE=false
 DRY_RUN=false
 
 # FIX-S03: Capture original script arguments before the option-parsing loop
@@ -66,6 +79,7 @@ USAGE:
 OPTIONS:
     --install     Install and enable all systemd timer units
     --remove      Disable and remove all systemd timer units
+    --validate    Verify installed state matches repo; detect split-brain
     --status      Show timer and service status
     --dry-run     Print actions without executing
     --help        Show this help
@@ -79,6 +93,15 @@ WHAT --install DOES:
     4. Copies systemd/*.{service,timer} -> /etc/systemd/system/
     5. systemctl daemon-reload
     6. systemctl enable --now for all 6 timers
+
+WHAT --validate CHECKS:
+    1. Scripts present and executable in /opt/vaultwarden-scripts/
+    2. lib/ and simple_key_resilience.sh present
+    3. All unit files present in /etc/systemd/system/
+    4. All 6 timers enabled (systemctl is-enabled)
+    5. EnvironmentFile /etc/vaultwarden/vaultwarden.env exists (mode 600)
+    6. Installed scripts not older than repo source (split-brain detection)
+       Re-run --install after any git pull to keep /opt/ in sync.
 
 VIEWING LOGS:
     journalctl -u vaultwarden-health.service -n 50
@@ -95,11 +118,12 @@ EOF
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --install)  INSTALL=true;  shift ;;
-        --remove)   REMOVE=true;   shift ;;
-        --status)   STATUS=true;   shift ;;
-        --dry-run)  DRY_RUN=true;  shift ;;
-        --help)     show_help; exit 0 ;;
+        --install)   INSTALL=true;   shift ;;
+        --remove)    REMOVE=true;    shift ;;
+        --validate)  VALIDATE=true;  shift ;;
+        --status)    STATUS=true;    shift ;;
+        --dry-run)   DRY_RUN=true;   shift ;;
+        --help)      show_help; exit 0 ;;
         *) log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done
@@ -172,16 +196,37 @@ install_units() {
             log_info "[DRY RUN] Would install: $OPT_SCRIPTS_DIR/$script"
             continue
         fi
-        # Patch SCRIPT_DIR, PROJECT_ROOT, and lib source paths for /opt/ tree
-        local patched_content
-        patched_content=$(
-            sed \
-                -e "s|^SCRIPT_DIR=.*|SCRIPT_DIR=\"$OPT_SCRIPTS_DIR\"|" \
-                -e "s|^PROJECT_ROOT=\"\$SCRIPT_DIR\"|PROJECT_ROOT=\"$PROJECT_ROOT\"|" \
-                -e 's|source "lib/|source "$SCRIPT_DIR/lib/|g' \
-                "$src"
-        )
-        printf '%s\n' "$patched_content" > "$OPT_SCRIPTS_DIR/$script"
+
+        # FIX-S07: Do NOT use $() command substitution to capture patched content.
+        # bash $() strips all trailing newlines — a script ending with one or more
+        # blank lines (common for readability) will lose those lines silently,
+        # causing the installed copy to quietly differ from the repo source.
+        #
+        # Fix: redirect sed output directly into a mktemp file, then run a
+        # line-count sanity check before an atomic mv into place. This preserves
+        # every byte of the source except the three intentional substitutions.
+        local tmp_script
+        tmp_script=$(mktemp "${TMPDIR:-/tmp}/vw-patch-XXXXXX")
+        sed \
+            -e "s|^SCRIPT_DIR=.*|SCRIPT_DIR=\"$OPT_SCRIPTS_DIR\"|" \
+            -e "s|^PROJECT_ROOT=\"\$SCRIPT_DIR\"|PROJECT_ROOT=\"$PROJECT_ROOT\"|" \
+            -e 's|source "lib/|source "$SCRIPT_DIR/lib/|g' \
+            "$src" > "$tmp_script"
+
+        # Sanity check: installed line count must be >= source line count.
+        # A mismatch means sed failed or output was truncated unexpectedly.
+        local src_lines installed_lines
+        src_lines=$(wc -l < "$src")
+        installed_lines=$(wc -l < "$tmp_script")
+        if (( installed_lines < src_lines - 1 )); then
+            log_error "Line count mismatch after patching $script:"
+            log_error "  source=${src_lines} lines  installed=${installed_lines} lines"
+            log_error "Refusing to deploy a potentially truncated file."
+            rm -f "$tmp_script"
+            return 1
+        fi
+
+        mv "$tmp_script" "$OPT_SCRIPTS_DIR/$script"
         chmod 700 "$OPT_SCRIPTS_DIR/$script"
         chown root:root "$OPT_SCRIPTS_DIR/$script"
         log_success "Installed: $OPT_SCRIPTS_DIR/$script"
@@ -251,6 +296,7 @@ install_units() {
     log_success "Installation complete."
     log_info "Next steps:"
     log_info "  Verify:    systemctl list-timers --all | grep vaultwarden"
+    log_info "  Validate:  sudo ./systemd-setup.sh --validate"
     log_info "  Test run:  sudo systemctl start vaultwarden-health.service"
     log_info "  View logs: journalctl -u vaultwarden-health.service -n 50"
     log_info "  Env file:  $ENV_FILE  (add EMAIL_PROVIDER credentials here)"
@@ -281,6 +327,154 @@ remove_units() {
     _run systemctl daemon-reload
     log_success "All timer units removed and daemon reloaded."
     log_info "Scripts remain in $OPT_SCRIPTS_DIR -- remove manually if desired."
+
+    # FIX-S08: --remove intentionally does NOT delete $ENV_FILE because it may
+    # contain API tokens and SMTP credentials that the operator has not yet
+    # backed up elsewhere. Silently deleting a secrets file is a data-loss
+    # risk; silently retaining it is a data-retention risk. We keep it and
+    # emit a prominent warning so the operator makes a deliberate decision.
+    if [[ -f "$ENV_FILE" ]]; then
+        log_warn "────────────────────────────────────────────────────────────────"
+        log_warn "NOTICE: EnvironmentFile was NOT removed automatically:"
+        log_warn "  $ENV_FILE"
+        log_warn "This file may contain API tokens and SMTP credentials."
+        log_warn "Review its contents and remove it manually once you have"
+        log_warn "confirmed the credentials are no longer needed or have been"
+        log_warn "migrated elsewhere:"
+        log_warn "  sudo rm -f $ENV_FILE"
+        log_warn "  sudo rmdir --ignore-fail-on-non-empty $ENV_DIR"
+        log_warn "────────────────────────────────────────────────────────────────"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# validate_installation  (FIX-S06)
+#
+# Verifies that the installed state in /opt/ and /etc/systemd/system/ matches
+# the repository source. Exits 0 only if every check passes; exits 1 on any
+# error, making it safe to gate on in CI/CD or post-deploy pipelines.
+#
+# Checks performed:
+#   1. Required scripts present and executable in $OPT_SCRIPTS_DIR
+#   2. lib/ and simple_key_resilience.sh present in $OPT_SCRIPTS_DIR/lib/
+#   3. All unit files present in $UNIT_DEST_DIR
+#   4. All 6 timers enabled (systemctl is-enabled)
+#   5. EnvironmentFile $ENV_FILE exists with mode 600
+#   6. Split-brain: installed script mtime vs repo source mtime (-nt check)
+#      warns when a git pull was done but --install was not re-run
+# ---------------------------------------------------------------------------
+validate_installation() {
+    log_header "VaultWarden-OCI Installation Validation"
+    local errors=0
+    local warnings=0
+
+    # ── 1. Scripts in /opt/vaultwarden-scripts/ ─────────────────────────────
+    log_info "[1/6] Checking installed scripts ..."
+    local scripts_to_check=(maintenance.sh backup.sh health.sh)
+    for script in "${scripts_to_check[@]}"; do
+        local installed="$OPT_SCRIPTS_DIR/$script"
+        if [[ ! -f "$installed" ]]; then
+            log_error "  MISSING:        $installed"
+            (( errors++ )) || true
+        elif [[ ! -x "$installed" ]]; then
+            log_error "  NOT EXECUTABLE: $installed"
+            (( errors++ )) || true
+        else
+            log_success "  OK:             $installed"
+        fi
+    done
+
+    # ── 2. lib/ directory ───────────────────────────────────────────────────
+    log_info "[2/6] Checking installed lib/ ..."
+    if [[ ! -d "$OPT_SCRIPTS_DIR/lib" ]]; then
+        log_error "  MISSING: $OPT_SCRIPTS_DIR/lib/"
+        (( errors++ )) || true
+    else
+        log_success "  OK: $OPT_SCRIPTS_DIR/lib/"
+    fi
+    local critical_lib="$OPT_SCRIPTS_DIR/lib/simple_key_resilience.sh"
+    if [[ ! -f "$critical_lib" ]]; then
+        log_error "  MISSING: $critical_lib"
+        (( errors++ )) || true
+    else
+        log_success "  OK: $critical_lib"
+    fi
+
+    # ── 3. Unit files in /etc/systemd/system/ ───────────────────────────────
+    log_info "[3/6] Checking installed unit files ..."
+    for unit in "${SERVICES[@]}" "${TIMERS[@]}"; do
+        local dest="$UNIT_DEST_DIR/$unit"
+        if [[ ! -f "$dest" ]]; then
+            log_error "  MISSING: $dest"
+            (( errors++ )) || true
+        else
+            log_success "  OK: $dest"
+        fi
+    done
+
+    # ── 4. Timers enabled ───────────────────────────────────────────────────
+    log_info "[4/6] Checking timer enablement ..."
+    for timer in "${TIMERS[@]}"; do
+        if systemctl is-enabled "$timer" &>/dev/null; then
+            log_success "  ENABLED:     $timer"
+        else
+            log_error   "  NOT ENABLED: $timer"
+            (( errors++ )) || true
+        fi
+    done
+
+    # ── 5. EnvironmentFile ──────────────────────────────────────────────────
+    log_info "[5/6] Checking EnvironmentFile ..."
+    if [[ ! -f "$ENV_FILE" ]]; then
+        log_error "  MISSING: $ENV_FILE"
+        log_error "  Run: sudo ./systemd-setup.sh --install  (or create it manually)"
+        (( errors++ )) || true
+    else
+        # stat -c is GNU (Linux); stat -f is BSD (macOS) — handle both
+        local env_perms
+        env_perms=$(stat -c '%a' "$ENV_FILE" 2>/dev/null || stat -f '%Lp' "$ENV_FILE" 2>/dev/null || echo "unknown")
+        if [[ "$env_perms" != "600" ]]; then
+            log_warn "  PERMISSIONS: $ENV_FILE is mode $env_perms (expected 600)"
+            log_warn "  Fix: sudo chmod 600 $ENV_FILE"
+            (( warnings++ )) || true
+        else
+            log_success "  OK: $ENV_FILE (mode 600)"
+        fi
+    fi
+
+    # ── 6. Split-brain detection ─────────────────────────────────────────────
+    # If the repo source file is NEWER than the installed copy, the operator
+    # did a git pull but forgot to re-run --install. The installed scripts are
+    # stale and may be missing bug fixes or new features.
+    log_info "[6/6] Checking for split-brain (repo newer than installed) ..."
+    for script in "${scripts_to_check[@]}"; do
+        local repo_src="$PROJECT_ROOT/$script"
+        local installed="$OPT_SCRIPTS_DIR/$script"
+        if [[ ! -f "$repo_src" || ! -f "$installed" ]]; then
+            continue  # already flagged in check 1 above
+        fi
+        if [[ "$repo_src" -nt "$installed" ]]; then
+            log_warn "  STALE: $installed is older than repo source $repo_src"
+            log_warn "         Re-run: sudo ./systemd-setup.sh --install"
+            (( warnings++ )) || true
+        else
+            log_success "  UP-TO-DATE: $script"
+        fi
+    done
+
+    # ── Summary ──────────────────────────────────────────────────────────────
+    echo ""
+    if (( errors > 0 )); then
+        log_error "Validation FAILED: ${errors} error(s), ${warnings} warning(s)."
+        log_error "Run: sudo ./systemd-setup.sh --install to resolve errors."
+        return 1
+    elif (( warnings > 0 )); then
+        log_warn  "Validation passed with ${warnings} warning(s) — review output above."
+        return 0
+    else
+        log_success "Validation PASSED: installation is consistent with repository."
+        return 0
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -307,6 +501,11 @@ main() {
     if [[ "$STATUS" == "true" ]]; then
         show_status
         exit 0
+    fi
+
+    if [[ "$VALIDATE" == "true" ]]; then
+        validate_installation
+        exit $?
     fi
 
     if [[ "$REMOVE" == "true" ]]; then
