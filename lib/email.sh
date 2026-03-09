@@ -23,6 +23,11 @@
 # Mailgun     200 JSON; uses HTTP Basic Auth + form-data NOT JSON
 # Postmark    200 JSON PascalCase; check ErrorCode in body, not just HTTP code
 # Resend      200 JSON; from is composite string, to is string array
+#
+# ─── FIX-M01 (2026-03-09) ────────────────────────────────────────────────────
+# All drivers now use ${SMTP_FROM_EMAIL:-${SMTP_FROM}} for the sender address.
+# This provides backward-compatibility for existing .env files that still use
+# the legacy SMTP_FROM= variable name. The canonical name is SMTP_FROM_EMAIL.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Prevent direct execution
@@ -94,7 +99,7 @@ _email_bearer_post() {
 # Success: HTTP 202, EMPTY body (x-message-id in response header, not body)
 #          Exception: HTTP 202 + JSON body = queued with warnings (still success)
 # Error:   HTTP 422, JSON { "message": "...", "errors": { ... } }
-# Env:     EMAIL_API_TOKEN, SMTP_FROM_EMAIL, SMTP_FROM_NAME, ADMIN_EMAIL
+# Env:     EMAIL_API_TOKEN, SMTP_FROM_EMAIL (or SMTP_FROM), SMTP_FROM_NAME, ADMIN_EMAIL
 # ─────────────────────────────────────────────────────────────────────────────
 _email_driver_mailersend() {
     local subject="$1" body="$2"
@@ -102,12 +107,15 @@ _email_driver_mailersend() {
     s=$(_email_json_escape "$subject")
     b=$(_email_json_escape "$body")
 
+    # FIX-M01: fall back to legacy SMTP_FROM= if SMTP_FROM_EMAIL is not set.
+    local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM}}"
+
     local payload
     payload=$(
         cat <<EOF
 {
     "from": {
-        "email": "${SMTP_FROM_EMAIL}",
+        "email": "${_from_email}",
         "name":  "${SMTP_FROM_NAME:-VaultWarden}"
     },
     "to": [
@@ -140,13 +148,16 @@ EOF
 # IMPORTANT: content MUST be [{"type":"text/plain","value":"..."}] — NOT a string
 # Success: HTTP 202, empty body
 # Error:   HTTP 4xx, JSON { "errors": [{ "message": "...", "field": null }] }
-# Env:     EMAIL_API_TOKEN, SMTP_FROM_EMAIL, SMTP_FROM_NAME, ADMIN_EMAIL
+# Env:     EMAIL_API_TOKEN, SMTP_FROM_EMAIL (or SMTP_FROM), SMTP_FROM_NAME, ADMIN_EMAIL
 # ─────────────────────────────────────────────────────────────────────────────
 _email_driver_sendgrid() {
     local subject="$1" body="$2"
     local s b
     s=$(_email_json_escape "$subject")
     b=$(_email_json_escape "$body")
+
+    # FIX-M01: fall back to legacy SMTP_FROM= if SMTP_FROM_EMAIL is not set.
+    local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM}}"
 
     local payload
     payload=$(
@@ -156,7 +167,7 @@ _email_driver_sendgrid() {
         { "to": [{ "email": "${ADMIN_EMAIL}" }] }
     ],
     "from": {
-        "email": "${SMTP_FROM_EMAIL}",
+        "email": "${_from_email}",
         "name":  "${SMTP_FROM_NAME:-VaultWarden}"
     },
     "subject": "${s}",
@@ -184,14 +195,17 @@ EOF
 # Success: HTTP 200, JSON { "id": "...", "message": "Queued. Thank you." }
 # Error:   HTTP 4xx, JSON { "message": "..." }
 # Env:     EMAIL_API_TOKEN, MAILGUN_DOMAIN (or derived from SMTP_FROM_EMAIL),
-#          SMTP_FROM_EMAIL, SMTP_FROM_NAME, ADMIN_EMAIL
+#          SMTP_FROM_EMAIL (or SMTP_FROM), SMTP_FROM_NAME, ADMIN_EMAIL
 # ─────────────────────────────────────────────────────────────────────────────
 _email_driver_mailgun() {
     local subject="$1" body="$2"
 
+    # FIX-M01: fall back to legacy SMTP_FROM= if SMTP_FROM_EMAIL is not set.
+    local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM}}"
+
     local domain="${MAILGUN_DOMAIN:-}"
     if [[ -z "$domain" ]]; then
-        domain="${SMTP_FROM_EMAIL##*@}"
+        domain="${_from_email##*@}"
     fi
     if [[ -z "$domain" ]]; then
         log_error "Mailgun driver: cannot determine domain. Set MAILGUN_DOMAIN in .env"
@@ -211,7 +225,7 @@ _email_driver_mailgun() {
         -w "%{http_code}" \
         -X POST "https://api.mailgun.net/v3/${domain}/messages" \
         --user "api:${EMAIL_API_TOKEN}" \
-        -F "from=${SMTP_FROM_NAME:-VaultWarden} <${SMTP_FROM_EMAIL}>" \
+        -F "from=${SMTP_FROM_NAME:-VaultWarden} <${_from_email}>" \
         -F "to=${ADMIN_EMAIL}" \
         -F "subject=${subject}" \
         -F "text=${body}" \
@@ -231,13 +245,16 @@ _email_driver_mailgun() {
 # Success: HTTP 200, JSON { "ErrorCode": 0, "MessageID": "...", "Message": "OK" }
 # Error:   HTTP 200 + ErrorCode != 0, or HTTP 4xx/5xx
 # IMPORTANT: Must check ErrorCode in body — HTTP 200 does NOT mean success
-# Env:     EMAIL_API_TOKEN, SMTP_FROM_EMAIL, SMTP_FROM_NAME, ADMIN_EMAIL
+# Env:     EMAIL_API_TOKEN, SMTP_FROM_EMAIL (or SMTP_FROM), SMTP_FROM_NAME, ADMIN_EMAIL
 # ─────────────────────────────────────────────────────────────────────────────
 _email_driver_postmark() {
     local subject="$1" body="$2"
     local s b
     s=$(_email_json_escape "$subject")
     b=$(_email_json_escape "$body")
+
+    # FIX-M01: fall back to legacy SMTP_FROM= if SMTP_FROM_EMAIL is not set.
+    local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM}}"
 
     local tmp code
     tmp=$(mktemp -t vw_email.XXXXXXXXXX)
@@ -255,7 +272,7 @@ _email_driver_postmark() {
         -H "Content-Type: application/json" \
         -H "X-Postmark-Server-Token: ${EMAIL_API_TOKEN}" \
         -d "{
-            \"From\":          \"${SMTP_FROM_NAME:-VaultWarden} <${SMTP_FROM_EMAIL}>\",
+            \"From\":          \"${SMTP_FROM_NAME:-VaultWarden} <${_from_email}>\",
             \"To\":            \"${ADMIN_EMAIL}\",
             \"Subject\":       \"${s}\",
             \"TextBody\":      \"${b}\",
@@ -284,7 +301,7 @@ _email_driver_postmark() {
 # IMPORTANT: from is a string, not an object; to is ["email"] not [{email:...}]
 # Success: HTTP 200, JSON { "id": "..." }
 # Error:   HTTP 4xx, JSON { "name": "...", "message": "..." }
-# Env:     EMAIL_API_TOKEN, SMTP_FROM_EMAIL, SMTP_FROM_NAME, ADMIN_EMAIL
+# Env:     EMAIL_API_TOKEN, SMTP_FROM_EMAIL (or SMTP_FROM), SMTP_FROM_NAME, ADMIN_EMAIL
 # ─────────────────────────────────────────────────────────────────────────────
 _email_driver_resend() {
     local subject="$1" body="$2"
@@ -292,11 +309,14 @@ _email_driver_resend() {
     s=$(_email_json_escape "$subject")
     b=$(_email_json_escape "$body")
 
+    # FIX-M01: fall back to legacy SMTP_FROM= if SMTP_FROM_EMAIL is not set.
+    local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM}}"
+
     local payload
     payload=$(
         cat <<EOF
 {
-    "from":    "${SMTP_FROM_NAME:-VaultWarden} <${SMTP_FROM_EMAIL}>",
+    "from":    "${SMTP_FROM_NAME:-VaultWarden} <${_from_email}>",
     "to":      ["${ADMIN_EMAIL}"],
     "subject": "${s}",
     "text":    "${b}"

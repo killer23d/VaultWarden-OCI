@@ -21,6 +21,15 @@
 #                   send_notification_email() is kept as a backward-compat shim.
 #                   Removed: _send_email_via_postfix, _send_email_via_mailutils,
 #                            _get_postfix_smtp_target_for_fail2ban
+#
+# FIX (2026-03-09): Email variable naming consistency:
+#   FIX-M01  _smtp_send(): uses ${SMTP_FROM_EMAIL:-${SMTP_FROM}} so existing
+#            .env files with the legacy SMTP_FROM= variable continue to work
+#            without any changes. Canonical name is now SMTP_FROM_EMAIL.
+#   FIX-M02  send_email(): resolves <PROVIDER_UPPER>_API_TOKEN → EMAIL_API_TOKEN
+#            automatically. MAILERSEND_API_TOKEN / SENDGRID_API_TOKEN etc. are
+#            picked up from secrets without also requiring EMAIL_API_TOKEN.
+#            Token is injected via inline env assignment to avoid global mutation.
 
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_COMMON_LIB_LOADED:-}" ]] && return 0
@@ -448,6 +457,9 @@ _rate_limit_check() {
 #
 # Port 465 = implicit TLS (smtps://)
 # Port 587 = explicit TLS via STARTTLS (smtp:// + --ssl-reqd)
+#
+# FIX-M01: uses _smtp_from_addr=${SMTP_FROM_EMAIL:-${SMTP_FROM}} so .env files
+# with the legacy SMTP_FROM= variable keep working without any changes.
 _smtp_send() {
     local subject="$1" body="$2"
 
@@ -455,6 +467,9 @@ _smtp_send() {
         log_debug "SMTP relay not configured (SMTP_HOST/USERNAME/PASSWORD missing) — skipping"
         return 1
     fi
+
+    # FIX-M01: canonical name is SMTP_FROM_EMAIL; fall back to legacy SMTP_FROM.
+    local _smtp_from_addr="${SMTP_FROM_EMAIL:-${SMTP_FROM}}"
 
     local smtp_port="${SMTP_PORT:-465}"
     local smtp_url
@@ -470,7 +485,7 @@ _smtp_send() {
     # RFC 5322 message: headers, blank line, body
     # CRLF line endings required by SMTP spec (RFC 2822 §2.2)
     {
-        printf "From: \"%s\" <%s>\r\n" "${SMTP_FROM_NAME:-VaultWarden}" "${SMTP_FROM_EMAIL}"
+        printf "From: \"%s\" <%s>\r\n" "${SMTP_FROM_NAME:-VaultWarden}" "${_smtp_from_addr}"
         printf "To: %s\r\n"            "${ADMIN_EMAIL}"
         printf "Subject: %s\r\n"       "${subject}"
         printf "Date: %s\r\n"          "${date_str}"
@@ -486,7 +501,7 @@ _smtp_send() {
         --retry-delay 5 \
         --ssl-reqd \
         --url "$smtp_url" \
-        --mail-from "${SMTP_FROM_EMAIL}" \
+        --mail-from "${_smtp_from_addr}" \
         --mail-rcpt "${ADMIN_EMAIL}" \
         --user "${SMTP_USERNAME}:${SMTP_PASSWORD}" \
         --upload-file - 2>/dev/null
@@ -543,9 +558,19 @@ Provider:  ${provider}"
 
         local driver_fn="_email_driver_${provider}"
 
-        if [[ -z "${EMAIL_API_TOKEN:-}" ]]; then
-            log_warn "EMAIL_PROVIDER=${provider} set but EMAIL_API_TOKEN is empty — falling back to SMTP"
-        elif "$driver_fn" "$subject" "$full_body"; then
+        # FIX-M02: Resolve the provider-specific token variable
+        # (e.g. MAILERSEND_API_TOKEN for provider=mailersend) to the canonical
+        # EMAIL_API_TOKEN consumed by all driver functions. This means operators
+        # only need to set the provider-prefixed name in secrets; the generic
+        # EMAIL_API_TOKEN does not need to be set separately.
+        # The resolved token is passed via inline env assignment so the global
+        # EMAIL_API_TOKEN is never mutated in the calling shell.
+        local _token_var="${provider^^}_API_TOKEN"
+        local _api_token="${!_token_var:-${EMAIL_API_TOKEN:-}}"
+
+        if [[ -z "${_api_token}" ]]; then
+            log_warn "EMAIL_PROVIDER=${provider} set but ${_token_var} (and EMAIL_API_TOKEN) are empty — falling back to SMTP"
+        elif EMAIL_API_TOKEN="${_api_token}" "$driver_fn" "$subject" "$full_body"; then
             log_success "Email sent via ${provider} API: ${subject}"
             date +%s > "$stamp_file" 2>/dev/null || true
             return 0
