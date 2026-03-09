@@ -24,6 +24,13 @@ REMOVE=false
 STATUS=false
 DRY_RUN=false
 
+# FIX-S03: Capture original script arguments before the option-parsing loop
+# consumes them via `shift`. _require_root() previously used bare `$*` which
+# refers to the function's own (empty) positional parameters, so the re-run
+# hint always printed without a subcommand. ${_ORIG_ARGS[*]} preserves exactly
+# what the operator typed (e.g. --install --dry-run).
+_ORIG_ARGS=("$@")
+
 UNIT_SOURCE_DIR="$PROJECT_ROOT/systemd"
 UNIT_DEST_DIR="/etc/systemd/system"
 OPT_SCRIPTS_DIR="/opt/vaultwarden-scripts"
@@ -93,10 +100,13 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# FIX-S03: Use ${_ORIG_ARGS[*]} (captured before option parsing) so the hint
+# reflects the exact subcommand the operator ran, e.g.:
+#   Use: sudo ./systemd-setup.sh --install
 _require_root() {
     if [[ $EUID -ne 0 ]]; then
         log_error "This script must be run as root."
-        log_info  "Use: sudo $0 $*"
+        log_info  "Use: sudo $0 ${_ORIG_ARGS[*]}"
         exit 1
     fi
 }
@@ -142,7 +152,7 @@ install_units() {
 
     # Verify simple_key_resilience.sh is present (mirrors cron-setup.sh ISSUE 15 check)
     if [[ "$DRY_RUN" == "false" ]] && [[ ! -f "$OPT_SCRIPTS_DIR/lib/simple_key_resilience.sh" ]]; then
-        log_error "CRITICAL: lib/simple_key_resilience.sh missing from repo — key health checks disabled."
+        log_error "CRITICAL: lib/simple_key_resilience.sh missing from repo -- key health checks disabled."
         log_error "Ensure lib/simple_key_resilience.sh exists in: $PROJECT_ROOT/lib/"
         return 1
     fi
@@ -189,14 +199,14 @@ install_units() {
                 chown root:root "$ENV_FILE"
                 log_success "Copied .env -> $ENV_FILE"
             else
-                log_warn ".env not found — creating empty $ENV_FILE"
+                log_warn ".env not found -- creating empty $ENV_FILE"
                 log_warn "Populate $ENV_FILE with ADMIN_EMAIL, EMAIL_PROVIDER credentials, etc."
                 touch "$ENV_FILE"
                 chmod 600 "$ENV_FILE"
                 chown root:root "$ENV_FILE"
             fi
         else
-            log_info "$ENV_FILE already exists — skipping (not overwritten)"
+            log_info "$ENV_FILE already exists -- skipping (not overwritten)"
         fi
     else
         log_info "[DRY RUN] Would create $ENV_FILE from .env"
@@ -219,7 +229,7 @@ install_units() {
         log_success "Installed unit: $unit"
     done
     if [[ "$unit_ok" == "false" ]]; then
-        log_warn "Some unit files were missing — check the systemd/ directory."
+        log_warn "Some unit files were missing -- check the systemd/ directory."
     fi
 
     # ------------------------------------------------------------------
@@ -266,7 +276,7 @@ remove_units() {
 
     _run systemctl daemon-reload
     log_success "All timer units removed and daemon reloaded."
-    log_info "Scripts remain in $OPT_SCRIPTS_DIR — remove manually if desired."
+    log_info "Scripts remain in $OPT_SCRIPTS_DIR -- remove manually if desired."
 }
 
 # ---------------------------------------------------------------------------
