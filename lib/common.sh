@@ -62,6 +62,11 @@
 #              starttls   — smtp:// + --ssl-reqd (explicit TLS, e.g. port 587)
 #              none/plain — smtp:// without TLS flags (dev/internal relays only)
 #            An invalid value now returns 1 with a clear error message.
+#   FIX-M08  _smtp_send(): ${SMTP_FROM} changed to ${SMTP_FROM:-} (empty
+#            default) to prevent "SMTP_FROM: unbound variable" abort under
+#            bash set -u. New .env files correctly define only SMTP_FROM_EMAIL=
+#            and omit the legacy SMTP_FROM= variable; the inner ${SMTP_FROM}
+#            without a default caused an immediate crash for these users.
 
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_COMMON_LIB_LOADED:-}" ]] && return 0
@@ -487,12 +492,13 @@ _rate_limit_check() {
 # Change SMTP_HOST/PORT/USERNAME/PASSWORD/SECURITY in .env to switch providers;
 # this function never needs to change.
 #
-# FIX-M01: uses _smtp_from_addr=${SMTP_FROM_EMAIL:-${SMTP_FROM}} so .env files
+# FIX-M01: uses _smtp_from_addr=${SMTP_FROM_EMAIL:-${SMTP_FROM:-}} so .env files
 # with the legacy SMTP_FROM= variable keep working without any changes.
 # FIX-M05: SMTP_FROM_NAME is RFC 5322 quoted-string escaped before embedding
 # in the From: header. Rule: \ -> \\ and " -> \" (RFC 5322 §3.2.4).
 # FIX-M07: SMTP_SECURITY (tls|starttls|none) is honoured when set explicitly.
 # When unset, port-based heuristic applies: 465 → tls, anything else → starttls.
+# FIX-M08: ${SMTP_FROM:-} uses empty default; see header for rationale.
 _smtp_send() {
     local subject="$1" body="$2"
 
@@ -501,8 +507,10 @@ _smtp_send() {
         return 1
     fi
 
-    # FIX-M01: canonical name is SMTP_FROM_EMAIL; fall back to legacy SMTP_FROM.
-    local _smtp_from_addr="${SMTP_FROM_EMAIL:-${SMTP_FROM}}"
+    # FIX-M01 + FIX-M08: canonical name is SMTP_FROM_EMAIL; fall back to
+    # legacy SMTP_FROM with an explicit empty default (:-) to prevent an
+    # "unbound variable" abort under set -u when both variables are absent.
+    local _smtp_from_addr="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
 
     # FIX-M05: RFC 5322 quoted-string escaping for the display name.
     # RFC 5322 §3.2.4: inside a quoted-string only \ and " are special and
