@@ -21,6 +21,10 @@
 # FIX-S08  (2026-03-09): --remove now emits a prominent warning that
 #          /etc/vaultwarden/vaultwarden.env was intentionally left in
 #          place and may contain credentials.
+# FIX-S09  (2026-03-09): --validate now requires root. /etc/vaultwarden/
+#          is chmod 700 (root-only); running as non-root caused stat() to
+#          return "unknown" permissions (spurious WARN) and systemctl
+#          is-enabled to give inaccurate results on some D-Bus configs.
 
 set -euo pipefail
 
@@ -207,6 +211,9 @@ install_units() {
         # every byte of the source except the three intentional substitutions.
         local tmp_script
         tmp_script=$(mktemp "${TMPDIR:-/tmp}/vw-patch-XXXXXX")
+        # Ensure tmp_script is cleaned up on any early return from this loop
+        # iteration (set -e exit, explicit return, or abnormal signal).
+        trap 'rm -f "${tmp_script:-}" 2>/dev/null; trap - RETURN' RETURN
         sed \
             -e "s|^SCRIPT_DIR=.*|SCRIPT_DIR=\"$OPT_SCRIPTS_DIR\"|" \
             -e "s|^PROJECT_ROOT=\"\$SCRIPT_DIR\"|PROJECT_ROOT=\"$PROJECT_ROOT\"|" \
@@ -362,8 +369,16 @@ remove_units() {
 #   5. EnvironmentFile $ENV_FILE exists with mode 600
 #   6. Split-brain: installed script mtime vs repo source mtime (-nt check)
 #      warns when a git pull was done but --install was not re-run
+#
+# FIX-S09: Requires root. /etc/vaultwarden/ is chmod 700; non-root stat()
+#   returns EACCES, triggering the "unknown" permissions fallback and a
+#   spurious WARN. systemctl is-enabled may also return inaccurate results
+#   without D-Bus access.
 # ---------------------------------------------------------------------------
 validate_installation() {
+    # FIX-S09: /etc/vaultwarden/ is root-only (chmod 700) and systemctl
+    # is-enabled requires D-Bus access. Require root like all other subcommands.
+    _require_root
     log_header "VaultWarden-OCI Installation Validation"
     local errors=0
     local warnings=0
