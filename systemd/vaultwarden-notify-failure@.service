@@ -2,16 +2,27 @@
 Description=VaultWarden Failure Notification for %i
 # Template unit: instantiated by OnFailure=vaultwarden-notify-failure@%n.service
 # %i receives the failed unit name (e.g. vaultwarden-health.service)
+#
+# FIX-S02 — three defects corrected in the inline ExecStart bash script:
+#   1. LIB_DIR hardcoded before source: unambiguous path, not reliant on
+#      BASH_SOURCE[0] resolution inside a bash -c exec context.
+#   2. init_common_lib called: enables set -euo pipefail, sets log prefix,
+#      and cd to PROJECT_ROOT — matching all other VaultWarden scripts.
+#   3. printf used for email body: bash "..." strings do not expand \n;
+#      printf does. %%s escapes the printf placeholder from systemd specifier
+#      expansion (%s = user shell); systemd expands %% → % before bash runs.
 
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/vaultwarden-scripts
 EnvironmentFile=/etc/vaultwarden/vaultwarden.env
 ExecStart=/bin/bash -c '\
-  source /opt/vaultwarden-scripts/lib/common.sh; \
-  send_email \
-    "FAILURE: %i on $(hostname -f 2>/dev/null || hostname)" \
-    "The systemd unit %i failed at $(date).\nCheck logs with:\n  journalctl -u %i -n 50\n"\
+  set -euo pipefail; \
+  LIB_DIR=/opt/vaultwarden-scripts/lib; \
+  source "${LIB_DIR}/common.sh"; \
+  init_common_lib notify-failure; \
+  body=$(printf "The systemd unit %i failed at %%s.\nCheck logs with:\n  journalctl -u %i -n 50\n" "$(date)"); \
+  send_email "FAILURE: %i on $(hostname -f 2>/dev/null || hostname)" "${body}" \
 '
 User=root
 SyslogIdentifier=vw-notify
