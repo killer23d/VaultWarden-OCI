@@ -11,6 +11,11 @@ Description=VaultWarden Failure Notification for %i
 #   3. printf used for email body: bash "..." strings do not expand \n;
 #      printf does. %%s escapes the printf placeholder from systemd specifier
 #      expansion (%s = user shell); systemd expands %% → % before bash runs.
+#
+# FIX-S05: Added NoNewPrivileges=yes and PrivateTmp=yes to match all other
+#   service units. The notify-failure service runs as root and calls
+#   send_email(), which creates temp files via mktemp in _email_bearer_post().
+#   PrivateTmp=yes isolates those temp files from the shared /tmp namespace.
 
 [Service]
 Type=oneshot
@@ -27,3 +32,5 @@ ExecStart=/bin/bash -c '\
 User=root
 SyslogIdentifier=vw-notify
 TimeoutStartSec=30
+NoNewPrivileges=yes
+PrivateTmp=yes
