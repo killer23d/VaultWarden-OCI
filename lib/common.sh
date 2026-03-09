@@ -52,6 +52,16 @@
 #            rate-limit check so stamp files are keyed consistently, and
 #            CRITICAL bypass detection still works because the word CRITICAL
 #            remains present in the prefixed subject.
+#   FIX-M07  _smtp_send(): SMTP_SECURITY variable (tls|starttls|none) is now
+#            read and used to set the curl URL scheme and TLS flags.
+#            Previously the port-based heuristic was the only path, making
+#            SMTP_SECURITY= in .env.example a documented-but-ignored no-op.
+#            Priority: explicit SMTP_SECURITY overrides the port heuristic;
+#            the heuristic is retained as fallback for existing .env files.
+#              tls/ssl    — smtps:// (implicit TLS, e.g. port 465)
+#              starttls   — smtp:// + --ssl-reqd (explicit TLS, e.g. port 587)
+#              none/plain — smtp:// without TLS flags (dev/internal relays only)
+#            An invalid value now returns 1 with a clear error message.
 
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_COMMON_LIB_LOADED:-}" ]] && return 0
@@ -474,16 +484,15 @@ _rate_limit_check() {
 # Builds a proper RFC 5322 message — required by all standards-compliant MTAs.
 # Missing headers cause rejection or body-as-headers corruption.
 #
-# Change SMTP_HOST/PORT/USERNAME/PASSWORD in .env to switch providers;
+# Change SMTP_HOST/PORT/USERNAME/PASSWORD/SECURITY in .env to switch providers;
 # this function never needs to change.
-#
-# Port 465 = implicit TLS (smtps://)
-# Port 587 = explicit TLS via STARTTLS (smtp:// + --ssl-reqd)
 #
 # FIX-M01: uses _smtp_from_addr=${SMTP_FROM_EMAIL:-${SMTP_FROM}} so .env files
 # with the legacy SMTP_FROM= variable keep working without any changes.
 # FIX-M05: SMTP_FROM_NAME is RFC 5322 quoted-string escaped before embedding
 # in the From: header. Rule: \ -> \\ and " -> \" (RFC 5322 §3.2.4).
+# FIX-M07: SMTP_SECURITY (tls|starttls|none) is honoured when set explicitly.
+# When unset, port-based heuristic applies: 465 → tls, anything else → starttls.
 _smtp_send() {
     local subject="$1" body="$2"
 
@@ -503,13 +512,46 @@ _smtp_send() {
     _smtp_from_name="${_smtp_from_name//\\/\\\\}"   # \  ->  \\
     _smtp_from_name="${_smtp_from_name//\"/\\\"}"   # "  ->  \"
 
+    # FIX-M07: Honour SMTP_SECURITY (tls|starttls|none) when set explicitly.
+    # Priority: explicit SMTP_SECURITY > port-based heuristic.
+    # The heuristic is retained as fallback so existing .env files that omit
+    # SMTP_SECURITY continue to work identically to before this fix.
+    #
+    # TLS flags are collected in an array; ${array[@]+"${array[@]}"} expands
+    # safely to nothing when the array is empty (set -u compatible).
     local smtp_port="${SMTP_PORT:-465}"
+    local smtp_security="${SMTP_SECURITY:-}"
     local smtp_url
-    if [[ "$smtp_port" == "465" ]]; then
-        smtp_url="smtps://${SMTP_HOST}:465"
-    else
-        smtp_url="smtp://${SMTP_HOST}:${smtp_port}"
+    local smtp_tls_flags=()
+
+    # Apply port heuristic only when SMTP_SECURITY is unset
+    if [[ -z "$smtp_security" ]]; then
+        [[ "$smtp_port" == "465" ]] && smtp_security="tls" || smtp_security="starttls"
     fi
+
+    case "${smtp_security,,}" in
+        tls|ssl)
+            # Implicit TLS — curl's smtps:// scheme negotiates TLS before any
+            # SMTP command. Standard for port 465.
+            smtp_url="smtps://${SMTP_HOST}:${smtp_port}"
+            ;;
+        starttls)
+            # Explicit TLS upgrade via the STARTTLS command. Standard for port 587.
+            # --ssl-reqd tells curl to fail if STARTTLS is not offered.
+            smtp_url="smtp://${SMTP_HOST}:${smtp_port}"
+            smtp_tls_flags=(--ssl-reqd)
+            ;;
+        none|plain)
+            # Plaintext SMTP — for internal/development relays only.
+            # Emits a warning; credentials will travel in cleartext.
+            smtp_url="smtp://${SMTP_HOST}:${smtp_port}"
+            log_warn "_smtp_send: SMTP_SECURITY=none — message will be sent in plaintext"
+            ;;
+        *)
+            log_error "_smtp_send: Unknown SMTP_SECURITY='${smtp_security}'. Valid values: tls starttls none"
+            return 1
+            ;;
+    esac
 
     local date_str
     date_str=$(date -u "+%a, %d %b %Y %H:%M:%S +0000")
@@ -531,7 +573,7 @@ _smtp_send() {
         --max-time 30 \
         --retry 2 \
         --retry-delay 5 \
-        --ssl-reqd \
+        "${smtp_tls_flags[@]+"${smtp_tls_flags[@]}"}" \
         --url "$smtp_url" \
         --mail-from "${_smtp_from_addr}" \
         --mail-rcpt "${ADMIN_EMAIL}" \
