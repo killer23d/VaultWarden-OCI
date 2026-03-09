@@ -2,33 +2,41 @@
 # lib/email.sh - Email provider driver registry for VaultWarden-OCI
 # shellcheck shell=bash
 #
-# ─── DRIVER CONTRACT ─────────────────────────────────────────────────────────
+# --- DRIVER CONTRACT ---------------------------------------------------------
 # Every driver function MUST:
 #   - Be named:     _email_driver_PROVIDERNAME
 #   - Accept:       $1=subject  $2=body (plain text)
 #   - Return:       0 on accepted/queued, non-zero on failure
 #   - NEVER log:    EMAIL_API_TOKEN or any password
-#   - Log on fail:  truncated response body (≤300 chars) via log_warn
+#   - Log on fail:  truncated response body (<=300 chars) via log_warn
 #   - Clean up:     temp files via local trap on RETURN
 #
-# ─── HOW TO ADD A NEW PROVIDER ───────────────────────────────────────────────
+# --- HOW TO ADD A NEW PROVIDER -----------------------------------------------
 # 1. Add one entry in _EMAIL_DRIVERS below (key = EMAIL_PROVIDER value)
 # 2. Write one function:  _email_driver_YOURPROVIDER() { ... }
 # 3. Set EMAIL_PROVIDER=YOURPROVIDER in .env
 # No other files need changing.
 #
-# ─── PROVIDER NOTES (source-verified against official API docs) ──────────────
-# MailerSend  202 empty body (warnings may produce 202+JSON — both = success)
+# --- PROVIDER NOTES ----------------------------------------------------------
+# MailerSend  202 empty body (warnings may produce 202+JSON -- both = success)
 # SendGrid    202 empty body; content[] must be array of {type,value} objects
 # Mailgun     200 JSON; uses HTTP Basic Auth + form-data NOT JSON
 # Postmark    200 JSON PascalCase; check ErrorCode in body, not just HTTP code
 # Resend      200 JSON; from is composite string, to is string array
 #
-# ─── FIX-M01 (2026-03-09) ────────────────────────────────────────────────────
+# --- FIX-M01 (2026-03-09) ----------------------------------------------------
 # All drivers now use ${SMTP_FROM_EMAIL:-${SMTP_FROM}} for the sender address.
-# This provides backward-compatibility for existing .env files that still use
-# the legacy SMTP_FROM= variable name. The canonical name is SMTP_FROM_EMAIL.
-# ─────────────────────────────────────────────────────────────────────────────
+# Backward-compatibility for .env files still using the legacy SMTP_FROM= name.
+#
+# --- FIX-M03 (2026-03-09) ----------------------------------------------------
+# All JSON-producing drivers (mailersend, sendgrid, postmark, resend) now
+# JSON-escape SMTP_FROM_NAME, the from-address, and ADMIN_EMAIL before
+# embedding them in payloads. Previously only subject and body were escaped.
+# A display name containing a double-quote or backslash (e.g. Vault "Prod")
+# produced malformed JSON and a 400/422 error from the provider.
+# Escaped values stored in local fn/fe/ae (from_name/from_email/admin_email).
+# Mailgun unaffected -- uses multipart/form-data; curl handles field encoding.
+# -----------------------------------------------------------------------------
 
 # Prevent direct execution
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
@@ -40,10 +48,10 @@ fi
 [[ -n "${LIB_EMAIL_LOADED:-}" ]] && return 0
 readonly LIB_EMAIL_LOADED=1
 
-# ── DRIVER REGISTRY ──────────────────────────────────────────────────────────
+# -- DRIVER REGISTRY ----------------------------------------------------------
 # Key   = value accepted in EMAIL_PROVIDER env var
 # Value = suffix of the driver function (_email_driver_<value>)
-# 'smtp' and 'host' are reserved — handled in send_email() in common.sh
+# 'smtp' and 'host' are reserved -- handled in send_email() in common.sh
 declare -A _EMAIL_DRIVERS=(
     [mailersend]="mailersend"
     [sendgrid]="sendgrid"
@@ -52,12 +60,12 @@ declare -A _EMAIL_DRIVERS=(
     [resend]="resend"
 )
 
-# ── HELPER: JSON string escape ────────────────────────────────────────────────
-# Pure bash — no sed, no external tools.
+# -- HELPER: JSON string escape -----------------------------------------------
+# Pure bash -- no sed, no external tools.
 # Handles: backslash, double-quote, newline, carriage return, tab.
 _email_json_escape() {
     local str="$1"
-    str="${str//\\/\\\\}"      # \ → \\
+    str="${str//\\/\\\\}"
     str="${str//\"/\\\"}"
     str="${str//$'\n'/\\n}"
     str="${str//$'\r'/\\r}"
@@ -65,7 +73,7 @@ _email_json_escape() {
     printf '%s' "$str"
 }
 
-# ── HELPER: shared Bearer-token POST ─────────────────────────────────────────
+# -- HELPER: shared Bearer-token POST -----------------------------------------
 # Used by MailerSend, SendGrid, Resend.
 # Sets _ECURL_CODE and _ECURL_BODY for callers to inspect.
 # Returns 0 on HTTP 2xx, 1 otherwise.
@@ -92,47 +100,35 @@ _email_bearer_post() {
     [[ "$code" =~ ^2 ]] && return 0 || return 1
 }
 
-# ── DRIVER: MailerSend ────────────────────────────────────────────────────────
+# -- DRIVER: MailerSend -------------------------------------------------------
 # Docs:    https://developers.mailersend.com/api/v1/email.html
 # Auth:    Authorization: Bearer {token}
-# Payload: JSON — from.email, from.name, to[].email, subject, text
-# Success: HTTP 202, EMPTY body (x-message-id in response header, not body)
-#          Exception: HTTP 202 + JSON body = queued with warnings (still success)
-# Error:   HTTP 422, JSON { "message": "...", "errors": { ... } }
-# Env:     EMAIL_API_TOKEN, SMTP_FROM_EMAIL (or SMTP_FROM), SMTP_FROM_NAME, ADMIN_EMAIL
-# ─────────────────────────────────────────────────────────────────────────────
+# Success: HTTP 202 empty body; 202+JSON = queued with warnings (still success)
+# Error:   HTTP 422 JSON { "message": "...", "errors": { ... } }
 _email_driver_mailersend() {
     local subject="$1" body="$2"
-    local s b
+    local s b fn fe ae
     s=$(_email_json_escape "$subject")
     b=$(_email_json_escape "$body")
-
-    # FIX-M01: fall back to legacy SMTP_FROM= if SMTP_FROM_EMAIL is not set.
     local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM}}"
+    # FIX-M03: JSON-escape envelope fields (fn=from_name, fe=from_email, ae=admin_email)
+    fn=$(_email_json_escape "${SMTP_FROM_NAME:-VaultWarden}")
+    fe=$(_email_json_escape "${_from_email}")
+    ae=$(_email_json_escape "${ADMIN_EMAIL}")
 
     local payload
-    payload=$(
-        cat <<EOF
+    payload=$(cat <<EOF
 {
-    "from": {
-        "email": "${_from_email}",
-        "name":  "${SMTP_FROM_NAME:-VaultWarden}"
-    },
-    "to": [
-        { "email": "${ADMIN_EMAIL}" }
-    ],
+    "from": { "email": "${fe}", "name": "${fn}" },
+    "to":   [ { "email": "${ae}" } ],
     "subject": "${s}",
     "text":    "${b}",
-    "settings": {
-        "track_clicks": false,
-        "track_opens":  false
-    }
+    "settings": { "track_clicks": false, "track_opens": false }
 }
 EOF
-    )
+)
 
     _email_bearer_post "https://api.mailersend.com/v1/email" "$payload" && return 0
-    # HTTP 202 + non-empty JSON body = warnings but still queued
     if [[ "${_ECURL_CODE}" == "202" ]]; then
         log_warn "MailerSend: queued with warnings: ${_ECURL_BODY}"
         return 0
@@ -141,39 +137,29 @@ EOF
     return 1
 }
 
-# ── DRIVER: SendGrid ──────────────────────────────────────────────────────────
+# -- DRIVER: SendGrid ---------------------------------------------------------
 # Docs:    https://docs.sendgrid.com/api-reference/mail-send/mail-send
 # Auth:    Authorization: Bearer {api_key}
-# Payload: JSON — personalizations[].to[], from, subject, content[].type+value
-# IMPORTANT: content MUST be [{"type":"text/plain","value":"..."}] — NOT a string
-# Success: HTTP 202, empty body
-# Error:   HTTP 4xx, JSON { "errors": [{ "message": "...", "field": null }] }
-# Env:     EMAIL_API_TOKEN, SMTP_FROM_EMAIL (or SMTP_FROM), SMTP_FROM_NAME, ADMIN_EMAIL
-# ─────────────────────────────────────────────────────────────────────────────
+# IMPORTANT: content MUST be [{"type":"text/plain","value":"..."}] not a string
+# Success: HTTP 202 empty body
 _email_driver_sendgrid() {
     local subject="$1" body="$2"
-    local s b
+    local s b fn fe ae
     s=$(_email_json_escape "$subject")
     b=$(_email_json_escape "$body")
-
-    # FIX-M01: fall back to legacy SMTP_FROM= if SMTP_FROM_EMAIL is not set.
     local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM}}"
+    # FIX-M03: JSON-escape envelope fields
+    fn=$(_email_json_escape "${SMTP_FROM_NAME:-VaultWarden}")
+    fe=$(_email_json_escape "${_from_email}")
+    ae=$(_email_json_escape "${ADMIN_EMAIL}")
 
     local payload
-    payload=$(
-        cat <<EOF
+    payload=$(cat <<EOF
 {
-    "personalizations": [
-        { "to": [{ "email": "${ADMIN_EMAIL}" }] }
-    ],
-    "from": {
-        "email": "${_from_email}",
-        "name":  "${SMTP_FROM_NAME:-VaultWarden}"
-    },
+    "personalizations": [ { "to": [ { "email": "${ae}" } ] } ],
+    "from":    { "email": "${fe}", "name": "${fn}" },
     "subject": "${s}",
-    "content": [
-        { "type": "text/plain", "value": "${b}" }
-    ],
+    "content": [ { "type": "text/plain", "value": "${b}" } ],
     "tracking_settings": {
         "click_tracking":        { "enable": false },
         "open_tracking":         { "enable": false },
@@ -181,32 +167,25 @@ _email_driver_sendgrid() {
     }
 }
 EOF
-    )
+)
 
     _email_bearer_post "https://api.sendgrid.com/v3/mail/send" "$payload" && return 0
     log_warn "SendGrid API HTTP ${_ECURL_CODE}: ${_ECURL_BODY}"
     return 1
 }
 
-# ── DRIVER: Mailgun ───────────────────────────────────────────────────────────
+# -- DRIVER: Mailgun ----------------------------------------------------------
 # Docs:    https://documentation.mailgun.com/docs/mailgun/api-reference/
-# Auth:    HTTP Basic Auth — username "api", password = API key (NOT Bearer)
-# Payload: multipart/form-data (-F flags) — NOT JSON
-# Success: HTTP 200, JSON { "id": "...", "message": "Queued. Thank you." }
-# Error:   HTTP 4xx, JSON { "message": "..." }
-# Env:     EMAIL_API_TOKEN, MAILGUN_DOMAIN (or derived from SMTP_FROM_EMAIL),
-#          SMTP_FROM_EMAIL (or SMTP_FROM), SMTP_FROM_NAME, ADMIN_EMAIL
-# ─────────────────────────────────────────────────────────────────────────────
+# Auth:    HTTP Basic Auth -- username "api", password = API key (NOT Bearer)
+# Payload: multipart/form-data (-F flags) -- NOT JSON
+# NOTE:    No JSON escaping needed; curl handles multipart field encoding.
+# Success: HTTP 200 JSON { "id": "...", "message": "Queued. Thank you." }
 _email_driver_mailgun() {
     local subject="$1" body="$2"
-
-    # FIX-M01: fall back to legacy SMTP_FROM= if SMTP_FROM_EMAIL is not set.
     local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM}}"
 
     local domain="${MAILGUN_DOMAIN:-}"
-    if [[ -z "$domain" ]]; then
-        domain="${_from_email##*@}"
-    fi
+    [[ -z "$domain" ]] && domain="${_from_email##*@}"
     if [[ -z "$domain" ]]; then
         log_error "Mailgun driver: cannot determine domain. Set MAILGUN_DOMAIN in .env"
         return 1
@@ -237,24 +216,24 @@ _email_driver_mailgun() {
     return 1
 }
 
-# ── DRIVER: Postmark ──────────────────────────────────────────────────────────
+# -- DRIVER: Postmark ---------------------------------------------------------
 # Docs:    https://postmarkapp.com/developer/api/email-api
 # Auth:    X-Postmark-Server-Token: {token}  (NOT Authorization: Bearer)
-# Payload: JSON with PascalCase keys — From, To, Subject, TextBody
-#          From and To are plain strings; MessageStream = "outbound"
-# Success: HTTP 200, JSON { "ErrorCode": 0, "MessageID": "...", "Message": "OK" }
-# Error:   HTTP 200 + ErrorCode != 0, or HTTP 4xx/5xx
-# IMPORTANT: Must check ErrorCode in body — HTTP 200 does NOT mean success
-# Env:     EMAIL_API_TOKEN, SMTP_FROM_EMAIL (or SMTP_FROM), SMTP_FROM_NAME, ADMIN_EMAIL
-# ─────────────────────────────────────────────────────────────────────────────
+# Payload: JSON PascalCase; From and To are plain strings
+# IMPORTANT: HTTP 200 does NOT mean success -- must check ErrorCode in body
+# Success: HTTP 200 JSON { "ErrorCode": 0, ... }
 _email_driver_postmark() {
     local subject="$1" body="$2"
-    local s b
+    local s b fn fe ae
     s=$(_email_json_escape "$subject")
     b=$(_email_json_escape "$body")
-
-    # FIX-M01: fall back to legacy SMTP_FROM= if SMTP_FROM_EMAIL is not set.
     local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM}}"
+    # FIX-M03: JSON-escape envelope fields. The Postmark driver uses inline
+    # -d "{ ... }" rather than a heredoc, making unescaped quotes in display
+    # names particularly hard to spot and immediately fatal (HTTP 400).
+    fn=$(_email_json_escape "${SMTP_FROM_NAME:-VaultWarden}")
+    fe=$(_email_json_escape "${_from_email}")
+    ae=$(_email_json_escape "${ADMIN_EMAIL}")
 
     local tmp code
     tmp=$(mktemp -t vw_email.XXXXXXXXXX)
@@ -272,20 +251,18 @@ _email_driver_postmark() {
         -H "Content-Type: application/json" \
         -H "X-Postmark-Server-Token: ${EMAIL_API_TOKEN}" \
         -d "{
-            \"From\":          \"${SMTP_FROM_NAME:-VaultWarden} <${_from_email}>\",
-            \"To\":            \"${ADMIN_EMAIL}\",
+            \"From\":          \"${fn} <${fe}>\",
+            \"To\":            \"${ae}\",
             \"Subject\":       \"${s}\",
             \"TextBody\":      \"${b}\",
             \"MessageStream\": \"outbound\"
         }" 2>/dev/null)
 
     local resp; resp=$(head -c 300 "$tmp" 2>/dev/null | tr -d '\n')
-
     if [[ ! "$code" =~ ^2 ]]; then
         log_warn "Postmark API HTTP ${code}: ${resp}"
         return 1
     fi
-    # Postmark HTTP 200 with ErrorCode != 0 = failure
     if echo "$resp" | grep -q '"ErrorCode":0'; then
         return 0
     fi
@@ -293,36 +270,32 @@ _email_driver_postmark() {
     return 1
 }
 
-# ── DRIVER: Resend ────────────────────────────────────────────────────────────
+# -- DRIVER: Resend -----------------------------------------------------------
 # Docs:    https://resend.com/docs/api-reference/emails/send-email
 # Auth:    Authorization: Bearer {token}
-# Payload: JSON — from (composite string "Name <email>"), to (string array),
-#          subject, text
-# IMPORTANT: from is a string, not an object; to is ["email"] not [{email:...}]
-# Success: HTTP 200, JSON { "id": "..." }
-# Error:   HTTP 4xx, JSON { "name": "...", "message": "..." }
-# Env:     EMAIL_API_TOKEN, SMTP_FROM_EMAIL (or SMTP_FROM), SMTP_FROM_NAME, ADMIN_EMAIL
-# ─────────────────────────────────────────────────────────────────────────────
+# IMPORTANT: from is a string "Name <email>"; to is ["email"] not [{email:...}]
+# Success: HTTP 200 JSON { "id": "..." }
 _email_driver_resend() {
     local subject="$1" body="$2"
-    local s b
+    local s b fn fe ae
     s=$(_email_json_escape "$subject")
     b=$(_email_json_escape "$body")
-
-    # FIX-M01: fall back to legacy SMTP_FROM= if SMTP_FROM_EMAIL is not set.
     local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM}}"
+    # FIX-M03: JSON-escape envelope fields
+    fn=$(_email_json_escape "${SMTP_FROM_NAME:-VaultWarden}")
+    fe=$(_email_json_escape "${_from_email}")
+    ae=$(_email_json_escape "${ADMIN_EMAIL}")
 
     local payload
-    payload=$(
-        cat <<EOF
+    payload=$(cat <<EOF
 {
-    "from":    "${SMTP_FROM_NAME:-VaultWarden} <${_from_email}>",
-    "to":      ["${ADMIN_EMAIL}"],
+    "from":    "${fn} <${fe}>",
+    "to":      ["${ae}"],
     "subject": "${s}",
     "text":    "${b}"
 }
 EOF
-    )
+)
 
     _email_bearer_post "https://api.resend.com/emails" "$payload" && return 0
     log_warn "Resend API HTTP ${_ECURL_CODE}: ${_ECURL_BODY}"
