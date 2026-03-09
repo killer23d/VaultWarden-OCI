@@ -85,7 +85,11 @@ VIEWING LOGS:
     journalctl -u vaultwarden-db-backup.service -n 100
     systemctl list-timers --all | grep vaultwarden
 
-NOTE: cron-setup.sh is kept for legacy installs. Do not run both.
+MIGRATING FROM CRON:
+    cron-setup.sh has been removed. To migrate:
+    1. sudo ./systemd-setup.sh --install
+    2. Remove old crontab entries: sudo crontab -e
+    3. Verify timers: systemctl list-timers --all | grep vaultwarden
 EOF
 }
 

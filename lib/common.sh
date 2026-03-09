@@ -39,6 +39,19 @@
 #              smtp  — SMTP relay only; no API or host MTA fallback
 #              host  — host MTA only; no API or SMTP fallback
 #            Legacy EMAIL_PROVIDER=smtp|host aliases retained for compatibility.
+#   FIX-M05  _smtp_send(): RFC 5322 quoted-string escaping added for
+#            SMTP_FROM_NAME. A display name containing a backslash or
+#            double-quote (e.g. Vault "Prod" Server) produced a malformed
+#            From: header that most MTAs reject with a 5xx error.
+#            Fixed: escape \ -> \\ and " -> \" before embedding in the
+#            quoted-string (RFC 5322 §3.2.4), matching FIX-M03 in email.sh.
+#   FIX-M06  send_email(): restored the [VaultWarden] subject prefix removed
+#            during modernization. Pre-modernization drivers added this prefix;
+#            its absence silently broke existing mail filters. The prefix is
+#            added only when not already present, is applied before the
+#            rate-limit check so stamp files are keyed consistently, and
+#            CRITICAL bypass detection still works because the word CRITICAL
+#            remains present in the prefixed subject.
 
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_COMMON_LIB_LOADED:-}" ]] && return 0
@@ -469,6 +482,8 @@ _rate_limit_check() {
 #
 # FIX-M01: uses _smtp_from_addr=${SMTP_FROM_EMAIL:-${SMTP_FROM}} so .env files
 # with the legacy SMTP_FROM= variable keep working without any changes.
+# FIX-M05: SMTP_FROM_NAME is RFC 5322 quoted-string escaped before embedding
+# in the From: header. Rule: \ -> \\ and " -> \" (RFC 5322 §3.2.4).
 _smtp_send() {
     local subject="$1" body="$2"
 
@@ -479,6 +494,14 @@ _smtp_send() {
 
     # FIX-M01: canonical name is SMTP_FROM_EMAIL; fall back to legacy SMTP_FROM.
     local _smtp_from_addr="${SMTP_FROM_EMAIL:-${SMTP_FROM}}"
+
+    # FIX-M05: RFC 5322 quoted-string escaping for the display name.
+    # RFC 5322 §3.2.4: inside a quoted-string only \ and " are special and
+    # must be preceded by a backslash. Unescaped quotes break header parsing
+    # and cause 5xx rejections on most MTAs.
+    local _smtp_from_name="${SMTP_FROM_NAME:-VaultWarden}"
+    _smtp_from_name="${_smtp_from_name//\\/\\\\}"   # \  ->  \\
+    _smtp_from_name="${_smtp_from_name//\"/\\\"}"   # "  ->  \"
 
     local smtp_port="${SMTP_PORT:-465}"
     local smtp_url
@@ -494,7 +517,7 @@ _smtp_send() {
     # RFC 5322 message: headers, blank line, body
     # CRLF line endings required by SMTP spec (RFC 2822 §2.2)
     {
-        printf "From: \"%s\" <%s>\r\n" "${SMTP_FROM_NAME:-VaultWarden}" "${_smtp_from_addr}"
+        printf "From: \"%s\" <%s>\r\n" "${_smtp_from_name}" "${_smtp_from_addr}"
         printf "To: %s\r\n"            "${ADMIN_EMAIL}"
         printf "Subject: %s\r\n"       "${subject}"
         printf "Date: %s\r\n"          "${date_str}"
@@ -538,6 +561,11 @@ _smtp_send() {
 # EMAIL_PROVIDER=smtp and EMAIL_PROVIDER=host are legacy aliases for
 # EMAIL_MODE=smtp and EMAIL_MODE=host respectively (retained for compatibility).
 #
+# Subject prefix: every outgoing subject is prefixed with [VaultWarden] unless
+# it already starts with that string. This matches pre-modernization behavior
+# and preserves existing mail filter rules. CRITICAL bypass detection works
+# because the word CRITICAL remains present after prefixing.
+#
 # API drivers live in lib/email.sh. To add a new provider:
 #   1. Add function _email_driver_PROVIDERNAME() to lib/email.sh
 #   2. Add entry to _EMAIL_DRIVERS in lib/email.sh
@@ -567,6 +595,11 @@ send_email() {
             return 1
             ;;
     esac
+
+    # FIX-M06: Prepend standard subject prefix if not already present.
+    # Applied before rate-limit check so stamp files are keyed consistently.
+    # CRITICAL bypass is unaffected: "CRITICAL" is still present post-prefix.
+    [[ "$subject" != "[VaultWarden]"* ]] && subject="[VaultWarden] ${subject}"
 
     local rate_limit_dir="${PROJECT_ROOT:-/var/lib/vaultwarden}/.rate-limit"
     mkdir -p "$rate_limit_dir" 2>/dev/null || true
