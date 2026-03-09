@@ -36,6 +36,16 @@
 # produced malformed JSON and a 400/422 error from the provider.
 # Escaped values stored in local fn/fe/ae (from_name/from_email/admin_email).
 # Mailgun unaffected -- uses multipart/form-data; curl handles field encoding.
+#
+# --- FIX-B01 (2026-03-09) ----------------------------------------------------
+# _email_driver_mailersend(): removed dead code after _email_bearer_post.
+# _email_bearer_post() returns 0 for ALL 2xx codes (including 202), so the
+# previous pattern:
+#     _email_bearer_post ... && return 0
+#     if [[ "${_ECURL_CODE}" == "202" ]]; then ... fi   # UNREACHABLE
+# never reached the 202 branch. Fixed: restructured to if/else so that a
+# successful call with a non-empty response body (202+warnings) is logged
+# as a warning before returning 0, and any failure logs the HTTP code.
 # -----------------------------------------------------------------------------
 
 # Prevent direct execution
@@ -128,9 +138,14 @@ _email_driver_mailersend() {
 EOF
 )
 
-    _email_bearer_post "https://api.mailersend.com/v1/email" "$payload" && return 0
-    if [[ "${_ECURL_CODE}" == "202" ]]; then
-        log_warn "MailerSend: queued with warnings: ${_ECURL_BODY}"
+    # FIX-B01: _email_bearer_post returns 0 for all 2xx (including 202), so the
+    # previous `&& return 0 / if 202` pattern had a permanently dead branch.
+    # Restructured to if/else: on success, log any non-empty body as a warning
+    # (202+JSON = queued with API warnings) then return 0; on failure log the
+    # HTTP code and return 1.
+    if _email_bearer_post "https://api.mailersend.com/v1/email" "$payload"; then
+        # Non-empty body on a 2xx indicates queued-with-warnings from MailerSend.
+        [[ -n "${_ECURL_BODY}" ]] && log_warn "MailerSend: queued with warnings: ${_ECURL_BODY}"
         return 0
     fi
     log_warn "MailerSend API HTTP ${_ECURL_CODE}: ${_ECURL_BODY}"

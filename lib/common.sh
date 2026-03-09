@@ -26,10 +26,19 @@
 #   FIX-M01  _smtp_send(): uses ${SMTP_FROM_EMAIL:-${SMTP_FROM}} so existing
 #            .env files with the legacy SMTP_FROM= variable continue to work
 #            without any changes. Canonical name is now SMTP_FROM_EMAIL.
-#   FIX-M02  send_email(): resolves <PROVIDER_UPPER>_API_TOKEN → EMAIL_API_TOKEN
+#   FIX-M02  send_email(): resolves <PROVIDER_UPPER>_API_TOKEN -> EMAIL_API_TOKEN
 #            automatically. MAILERSEND_API_TOKEN / SENDGRID_API_TOKEN etc. are
 #            picked up from secrets without also requiring EMAIL_API_TOKEN.
 #            Token is injected via inline env assignment to avoid global mutation.
+#   FIX-M04  send_email(): EMAIL_MODE now implemented.
+#            Previously EMAIL_MODE was documented in .env.example but never read;
+#            all sends silently fell through all three stages regardless of the
+#            operator's setting. Now enforced:
+#              auto  — API -> SMTP -> host MTA (default, unchanged behavior)
+#              api   — API only; fails loudly on missing token or driver error
+#              smtp  — SMTP relay only; no API or host MTA fallback
+#              host  — host MTA only; no API or SMTP fallback
+#            Legacy EMAIL_PROVIDER=smtp|host aliases retained for compatibility.
 
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_COMMON_LIB_LOADED:-}" ]] && return 0
@@ -512,11 +521,22 @@ _smtp_send() {
 # send_email SUBJECT BODY
 #
 # Public entry point for all email delivery.
-# Three-stage delivery chain controlled by EMAIL_PROVIDER in .env:
+# Delivery chain controlled by EMAIL_MODE and EMAIL_PROVIDER in .env:
 #
-#   Named provider  ->  HTTP API driver  ->  SMTP relay  ->  host MTA
-#   smtp            ->  (skip API)       ->  SMTP relay  ->  host MTA
-#   host            ->  (skip all)       ->              ->  host MTA
+#   EMAIL_MODE=auto  (default)
+#                    Stage 1: HTTP API driver (EMAIL_PROVIDER) -> Stage 2: SMTP
+#                    relay -> Stage 3: host MTA. Recommended for production.
+#   EMAIL_MODE=api   HTTP API only. Fails loudly if token is missing or the
+#                    API call fails — no SMTP or host-MTA fallback.
+#   EMAIL_MODE=smtp  SMTP relay only (curl smtps/starttls). Skips API stage.
+#                    Fails loudly if the relay is unreachable.
+#   EMAIL_MODE=host  Host MTA (Postfix / mail binary) only. Skips API + SMTP.
+#                    Fails loudly if the MTA is unavailable.
+#
+# EMAIL_PROVIDER selects the HTTP API driver (mailersend|sendgrid|mailgun|
+# postmark|resend). Only relevant when EMAIL_MODE=auto or api.
+# EMAIL_PROVIDER=smtp and EMAIL_PROVIDER=host are legacy aliases for
+# EMAIL_MODE=smtp and EMAIL_MODE=host respectively (retained for compatibility).
 #
 # API drivers live in lib/email.sh. To add a new provider:
 #   1. Add function _email_driver_PROVIDERNAME() to lib/email.sh
@@ -528,7 +548,25 @@ _smtp_send() {
 send_email() {
     local subject="${1:-VaultWarden Notification}"
     local body="${2:-}"
+    local mode="${EMAIL_MODE:-auto}"
     local provider="${EMAIL_PROVIDER:-smtp}"
+
+    # Legacy aliases: EMAIL_PROVIDER=smtp|host override EMAIL_MODE for backward
+    # compatibility. New deployments should use EMAIL_MODE= directly.
+    if [[ "$provider" == "smtp" ]]; then
+        mode="smtp"
+    elif [[ "$provider" == "host" ]]; then
+        mode="host"
+    fi
+
+    # Validate EMAIL_MODE early so the operator gets a clear error message.
+    case "$mode" in
+        auto|api|smtp|host) ;;
+        *)
+            log_error "Unknown EMAIL_MODE='${mode}'. Valid values: auto api smtp host"
+            return 1
+            ;;
+    esac
 
     local rate_limit_dir="${PROJECT_ROOT:-/var/lib/vaultwarden}/.rate-limit"
     mkdir -p "$rate_limit_dir" 2>/dev/null || true
@@ -546,59 +584,79 @@ send_email() {
 ---
 Host:      $(hostname -f 2>/dev/null || hostname)
 Timestamp: $(date -uIs)
-Provider:  ${provider}"
+Mode:      ${mode}${provider:+ / provider: ${provider}}"
 
     # ── Stage 1: HTTP API via named driver ──────────────────────────────
-    if [[ "$provider" != "smtp" && "$provider" != "host" ]]; then
+    if [[ "$mode" == "auto" || "$mode" == "api" ]]; then
         if [[ -z "${_EMAIL_DRIVERS[$provider]:-}" ]]; then
             log_error "Unknown EMAIL_PROVIDER='${provider}'"
             log_info  "Valid providers: ${!_EMAIL_DRIVERS[*]} smtp host"
-            return 1
-        fi
-
-        local driver_fn="_email_driver_${provider}"
-
-        # FIX-M02: Resolve the provider-specific token variable
-        # (e.g. MAILERSEND_API_TOKEN for provider=mailersend) to the canonical
-        # EMAIL_API_TOKEN consumed by all driver functions. This means operators
-        # only need to set the provider-prefixed name in secrets; the generic
-        # EMAIL_API_TOKEN does not need to be set separately.
-        # The resolved token is passed via inline env assignment so the global
-        # EMAIL_API_TOKEN is never mutated in the calling shell.
-        local _token_var="${provider^^}_API_TOKEN"
-        local _api_token="${!_token_var:-${EMAIL_API_TOKEN:-}}"
-
-        if [[ -z "${_api_token}" ]]; then
-            log_warn "EMAIL_PROVIDER=${provider} set but ${_token_var} (and EMAIL_API_TOKEN) are empty — falling back to SMTP"
-        elif EMAIL_API_TOKEN="${_api_token}" "$driver_fn" "$subject" "$full_body"; then
-            log_success "Email sent via ${provider} API: ${subject}"
-            date +%s > "$stamp_file" 2>/dev/null || true
-            return 0
+            # api mode: unknown provider is a hard failure with no fallback
+            [[ "$mode" == "api" ]] && return 1
+            # auto mode: fall through to SMTP stage below
         else
-            log_warn "${provider} API failed — falling back to SMTP relay"
+            local driver_fn="_email_driver_${provider}"
+
+            # FIX-M02: Resolve the provider-specific token variable
+            # (e.g. MAILERSEND_API_TOKEN for provider=mailersend) to the canonical
+            # EMAIL_API_TOKEN consumed by all driver functions. This means operators
+            # only need to set the provider-prefixed name in secrets; the generic
+            # EMAIL_API_TOKEN does not need to be set separately.
+            # The resolved token is passed via inline env assignment so the global
+            # EMAIL_API_TOKEN is never mutated in the calling shell.
+            local _token_var="${provider^^}_API_TOKEN"
+            local _api_token="${!_token_var:-${EMAIL_API_TOKEN:-}}"
+
+            if [[ -z "${_api_token}" ]]; then
+                if [[ "$mode" == "api" ]]; then
+                    log_error "EMAIL_MODE=api but ${_token_var} (and EMAIL_API_TOKEN) are empty — cannot send"
+                    return 1
+                fi
+                log_warn "EMAIL_PROVIDER=${provider} set but ${_token_var} (and EMAIL_API_TOKEN) are empty — falling back to SMTP"
+            elif EMAIL_API_TOKEN="${_api_token}" "$driver_fn" "$subject" "$full_body"; then
+                log_success "Email sent via ${provider} API: ${subject}"
+                date +%s > "$stamp_file" 2>/dev/null || true
+                return 0
+            else
+                if [[ "$mode" == "api" ]]; then
+                    log_error "EMAIL_MODE=api: ${provider} API failed — no fallback configured"
+                    return 1
+                fi
+                log_warn "${provider} API failed — falling back to SMTP relay"
+            fi
         fi
     fi
 
     # ── Stage 2: SMTP relay via curl ────────────────────────────────────
-    if [[ "$provider" != "host" ]]; then
+    if [[ "$mode" == "auto" || "$mode" == "smtp" ]]; then
         if _smtp_send "$subject" "$full_body"; then
             log_success "Email sent via SMTP relay (${SMTP_HOST:-unconfigured}:${SMTP_PORT:-465}): ${subject}"
             date +%s > "$stamp_file" 2>/dev/null || true
             return 0
         fi
+        if [[ "$mode" == "smtp" ]]; then
+            log_error "EMAIL_MODE=smtp: SMTP relay failed — no fallback configured"
+            return 1
+        fi
         log_warn "SMTP relay failed — falling back to host MTA"
     fi
 
     # ── Stage 3: Host MTA (Postfix or sendmail) ─────────────────────────
-    if command -v mail &>/dev/null; then
-        if echo "$full_body" | mail -s "$subject" "${ADMIN_EMAIL}" 2>/dev/null; then
-            log_success "Email sent via host MTA: ${subject}"
-            date +%s > "$stamp_file" 2>/dev/null || true
-            return 0
+    if [[ "$mode" == "auto" || "$mode" == "host" ]]; then
+        if command -v mail &>/dev/null; then
+            if echo "$full_body" | mail -s "$subject" "${ADMIN_EMAIL}" 2>/dev/null; then
+                log_success "Email sent via host MTA: ${subject}"
+                date +%s > "$stamp_file" 2>/dev/null || true
+                return 0
+            fi
+        fi
+        if [[ "$mode" == "host" ]]; then
+            log_error "EMAIL_MODE=host: host MTA failed or not available — no fallback configured"
+            return 1
         fi
     fi
 
-    log_error "All email delivery methods failed (provider=${provider}, subject=${subject})"
+    log_error "All email delivery methods failed (mode=${mode}, provider=${provider}, subject=${subject})"
     return 1
 }
 
@@ -695,4 +753,4 @@ export -f validate_email validate_domain validate_port validate_ip validate_url
 export -f setup_error_trap setup_cleanup_trap safe_execute
 export -f init_common_lib
 
-log_debug "Common library loaded (email provider: ${EMAIL_PROVIDER:-smtp})"
+log_debug "Common library loaded (email mode: ${EMAIL_MODE:-auto}, provider: ${EMAIL_PROVIDER:-smtp})"
