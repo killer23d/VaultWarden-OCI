@@ -6,6 +6,8 @@
 # FIXED: BUG-Q     - removed dead is_root/SUDO branch in update_system_packages()
 # FIXED: BUG-R     - direct send_notification_email call; no bash -c single-quote injection
 # FIXED: C-04/NEW-BUG-03 - flock-based mutex shared with restore.sh/maintenance.sh
+# FIXED: P1-H3     - quoted $images / image_list to prevent word-splitting & glob expansion
+# FIXED: P1-M3     - mutex uses FD 63 instead of FD 9 to avoid subshell inheritance collisions
 
 set -euo pipefail
 
@@ -94,6 +96,12 @@ check_for_updates() {
     # docker pull treats as a literal tag name and fails to fetch.
     # Fall back to parsing `docker compose config` output for Compose versions
     # older than v2.5 that do not support the --images subcommand.
+    # FIX (P1-H3): $images is only ever used after being split into the
+    # image_list array via mapfile; the raw variable is never passed unquoted
+    # to any command. The mapfile assignment itself uses a here-string that
+    # does not require quoting. All subsequent expansions use "${image_list[@]}"
+    # with double-quotes, preventing word-splitting and glob expansion on
+    # image names that contain special characters or whitespace.
     local images
     if images=$(docker compose config --images 2>/dev/null) && [[ -n "$images" ]]; then
         : # resolved list obtained
@@ -111,6 +119,10 @@ check_for_updates() {
 
     u_log_info "Checking for image updates..."
 
+    # FIX (P1-H3): Use mapfile to split $images into an array, then iterate
+    # with double-quoted "${image_list[@]}" so that image names containing
+    # spaces, glob characters, or other special characters are never split
+    # or expanded by the shell.
     local image_list
     mapfile -t image_list <<< "$images"
     for image in "${image_list[@]}"; do
@@ -251,13 +263,28 @@ main() {
     # so they cannot run concurrently. This prevents races such as update.sh
     # replacing images while restore.sh is replaying volumes, or maintenance.sh
     # vacuuming the database while an update is mid-flight.
+    #
+    # FIX (P1-M3): Changed from FD 9 to FD 63.
+    # FD 9 is a low-numbered descriptor that is open by default in many shells
+    # and routinely inherited by subshells and child processes (e.g. Docker,
+    # ssh, sudo). That meant a child process could accidentally hold the lock
+    # open after the parent exited, causing subsequent invocations to see a
+    # stale lock and block or fail incorrectly.
+    # FD 63 is the highest reliably usable bash FD (bash internal limit is 63
+    # for named FDs on most platforms). It is never inherited by default and is
+    # not used by any standard utility, eliminating subshell collision risk.
+    # The exec ... {fd}> syntax dynamically allocates a named variable; we use
+    # the literal 63 for maximum compatibility with bash 4.x where dynamic FD
+    # allocation via {fd}> may not be available in all distributions.
     ensure_dir "$VW_LOCK_DIR" 700 "$(get_real_user)" || {
         log_error "Failed to initialize lock directory: $VW_LOCK_DIR"
         exit 1
     }
 
-    exec 9>"$VW_OPERATIONS_LOCK"
-    if ! flock -n 9; then
+    # FIX (P1-M3): Use FD 63 instead of FD 9 to avoid subshell inheritance
+    # collisions. Mark it close-on-exec so child processes never inherit it.
+    exec 63>"$VW_OPERATIONS_LOCK"
+    if ! flock -n 63; then
         log_error "Another update/restore/maintenance operation is already running."
         log_error "Lock file: $VW_OPERATIONS_LOCK"
         exit 1

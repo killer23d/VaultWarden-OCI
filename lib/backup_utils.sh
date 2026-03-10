@@ -13,6 +13,11 @@
 #                   Quoted to prevent set -u unbound-variable failure.
 #   BUG-B5 [LOW]    create_backup_metadata(): $? anti-pattern after heredoc.
 #                   Replaced with direct 'if ! cat > file <<EOF' test.
+# PATCHED BUGS (2026-03-10):
+#   P2-M3 [MEDIUM]  cleanup_old_backups(): orphaned .meta/.sha256 sidecars
+#                   (no corresponding .age file) were never removed, causing
+#                   indefinite accumulation. Added a second sweep that finds
+#                   and removes all sidecar files whose base .age is absent.
 
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_BACKUP_UTILS_LIB_LOADED:-}" ]] && return 0
@@ -185,6 +190,17 @@ check_backup_disk_space() {
 #
 # BUG-B4 FIX: unquoted $retention_days in find -mtime argument. Under set -u
 # an unset variable throws 'unbound variable'. Quoted the argument.
+#
+# P2-M3 FIX: orphaned sidecar sweep.
+# The original code only searched for *.age files and deleted their paired
+# sidecars when an .age file crossed the retention threshold. This left
+# orphaned .meta and .sha256 files behind whenever an .age file had already
+# been removed by an earlier run, a manual deletion, or an interrupted
+# cleanup, causing them to accumulate indefinitely.
+# The fix adds a second sweep after the .age pass: for every .meta and
+# .sha256 file found in the directory, if the corresponding .age file does
+# not exist, the sidecar is removed immediately (no age-based threshold
+# needed — if the primary is gone the sidecar is always orphaned).
 cleanup_old_backups() {
     local backup_dir="$1"
     local backup_type="$2"
@@ -216,10 +232,36 @@ cleanup_old_backups() {
         done <<< "$old_backups"
     fi
 
+    # P2-M3 FIX: sweep for orphaned sidecars (.meta and .sha256) whose
+    # corresponding .age primary file no longer exists. These are left behind
+    # when the .age file was removed by a previous (possibly partial) cleanup
+    # run, a manual deletion, or any other out-of-band removal. Because the
+    # primary is gone there is no meaningful retention check — every orphan
+    # is removed unconditionally.
+    local orphan_count=0
+    while IFS= read -r sidecar; do
+        if [[ -n "$sidecar" ]]; then
+            # Derive the expected .age path: strip the trailing .meta or .sha256
+            local primary="${sidecar%.meta}"
+            primary="${primary%.sha256}"
+            if [[ ! -f "$primary" ]]; then
+                log_debug "Removing orphaned sidecar: $(basename "$sidecar")"
+                rm -f "$sidecar" 2>/dev/null
+                (( orphan_count++ )) || true
+            fi
+        fi
+    done < <(find "$backup_dir" \( -name "*.meta" -o -name "*.sha256" \) -type f 2>/dev/null)
+
     if (( deleted_count > 0 )); then
         log_success "Cleaned up $deleted_count old $backup_type backups"
     else
         log_debug "No old $backup_type backups to clean up"
+    fi
+
+    if (( orphan_count > 0 )); then
+        log_success "Removed $orphan_count orphaned sidecar file(s) from $backup_type backups"
+    else
+        log_debug "No orphaned sidecar files found in $backup_type backups"
     fi
 
     return 0
