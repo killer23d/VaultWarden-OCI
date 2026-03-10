@@ -701,8 +701,10 @@ update_firewall_ranges() {
     require_root "$@"
     
     log_info "Safely updating Cloudflare IP ranges in firewall..."
-    local cf_ipv4_file="/tmp/cf_ipv4_ranges_maint.txt"
-    local cf_ipv6_file="/tmp/cf_ipv6_ranges_maint.txt"
+    local cf_ipv4_file cf_ipv6_file
+    cf_ipv4_file=$(mktemp -t cf_ipv4.XXXXXXXXXX)
+    cf_ipv6_file=$(mktemp -t cf_ipv6.XXXXXXXXXX)
+    CLEANUP_ACTIONS+=("rm -f '$cf_ipv4_file' '$cf_ipv6_file' 2>/dev/null || true")
     if retry_with_backoff 3 2 curl -sf --max-time 10 "https://www.cloudflare.com/ips-v4" -o "$cf_ipv4_file" && \
        retry_with_backoff 3 2 curl -sf --max-time 10 "https://www.cloudflare.com/ips-v6" -o "$cf_ipv6_file"; then
         log_success "Successfully fetched current Cloudflare IP ranges"
@@ -757,7 +759,6 @@ update_firewall_ranges() {
     else
         log_info "No new IP ranges needed to be added"
     fi
-    rm -f "$cf_ipv4_file" "$cf_ipv6_file"
     return 0
 }
 
@@ -927,6 +928,12 @@ generate_maintenance_summary() {
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+perform_cleanup() {
+    for ((idx=${#CLEANUP_ACTIONS[@]}-1; idx>=0; idx--)); do
+        eval "${CLEANUP_ACTIONS[$idx]}" 2>/dev/null || true
+    done
+}
+
 main() {
     log_header "VaultWarden-OCI Maintenance Manager"
 
@@ -935,11 +942,6 @@ main() {
     mkdir -p "$state_dir/.locks" 2>/dev/null || true
 
     CLEANUP_ACTIONS=()
-    perform_cleanup() {
-        for ((idx=${#CLEANUP_ACTIONS[@]}-1; idx>=0; idx--)); do
-            eval "${CLEANUP_ACTIONS[$idx]}" 2>/dev/null || true
-        done
-    }
     trap perform_cleanup EXIT
 
     # ---- Deep DB maintenance: self-contained sub-command ----

@@ -486,6 +486,7 @@ write_secrets() {
     # race conditions on the previously fixed-path .temp_secrets.yaml.
     # Also fix trap to use double-quotes so $temp_file expands at registration time.
     local temp_file
+    mkdir -p "$PROJECT_ROOT/secrets" 2>/dev/null || true
     temp_file=$(mktemp -p "$PROJECT_ROOT/secrets" vwsecrets.XXXXXXXXXX.yaml) || return 1
     install -m 600 /dev/null "$temp_file"
     # shellcheck disable=SC2064  # SC2064: intentional — $temp_file must expand NOW at registration
