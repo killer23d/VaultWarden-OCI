@@ -9,12 +9,87 @@
                 trusted_proxies cloudflare
                 client_ip_headers Cf-Connecting-Ip
         }
+
+        # -----------------------------------------------------------------------
+        # 4-Log Forensic Architecture (per SECURITY.md)
+        # Route log output by named logger to prevent double-firing and achieve
+        # per-category retention targets (~3 GB total forensic capacity).
+        # -----------------------------------------------------------------------
+        log access_log {
+                output file /var/log/caddy/access.log {
+                        roll_size 50MB
+                        roll_keep 20
+                        roll_keep_for 30d
+                }
+                format json {
+                        time_format "2006-01-02T15:04:05.000Z07:00"
+                        message_key "msg"
+                        level_key   "level"
+                        time_key    "ts"
+                        name_key    "logger"
+                        caller_key  "caller"
+                }
+                level INFO
+        }
+
+        log admin_log {
+                output file /var/log/caddy/admin_access.log {
+                        roll_size 25MB
+                        roll_keep 30
+                        roll_keep_for 90d
+                }
+                format json {
+                        time_format "2006-01-02T15:04:05.000Z07:00"
+                        message_key "msg"
+                        level_key   "level"
+                        time_key    "ts"
+                        name_key    "logger"
+                }
+                level INFO
+        }
+
+        log auth_log {
+                output file /var/log/caddy/auth_attempts.log {
+                        roll_size 25MB
+                        roll_keep 30
+                        roll_keep_for 90d
+                }
+                format json {
+                        time_format "2006-01-02T15:04:05.000Z07:00"
+                        message_key "msg"
+                        level_key   "level"
+                        time_key    "ts"
+                        name_key    "logger"
+                }
+                level INFO
+        }
+
+        log security_log {
+                output file /var/log/caddy/security.log {
+                        roll_size 10MB
+                        roll_keep 50
+                        roll_keep_for 180d
+                }
+                format json {
+                        time_format "2006-01-02T15:04:05.000Z07:00"
+                        message_key "msg"
+                        level_key   "level"
+                        time_key    "ts"
+                        name_key    "logger"
+                }
+                level WARN
+        }
 }
 
 # ================================
 # Internal Health Check Endpoint
 # ================================
-:8080 {
+# FIX [P3-M3]: Bind to loopback only — prevents unauthenticated access
+# from any other container on the shared Docker internal network.
+# The host-side 127.0.0.1 binding in docker-compose.yml is a separate,
+# complementary control; this binding is the container-layer guard.
+127.0.0.1:8080 {
+        log_name access_log
         handle /alive {
                 reverse_proxy vaultwarden:80 {
                         header_up Host {host}
@@ -35,26 +110,10 @@
 # Main Site
 # ================================
 {$DOMAIN_NAME} {
-        # 1. Centralized JSON Access Logging (OPTIMIZED for small deployment)
-        log {
-                output file /var/log/caddy/access.log {
-                        roll_size 50MB
-                        roll_keep 5
-                        roll_keep_for 7d
-                }
-                format json {
-                        time_format "2006-01-02T15:04:05.000Z07:00"
-                        message_key "msg"
-                        level_key "level"
-                        time_key "ts"
-                        name_key "logger"
-                        caller_key "caller"
-                        stacktrace_key "stacktrace"
-                }
-                level INFO
-        }
+        # Route all main-site traffic to the general access log
+        log_name access_log
 
-        # 2. Enhanced Security Headers (HARDENED)
+        # 1. Enhanced Security Headers (HARDENED)
         header {
                 # HSTS with preload
                 Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
@@ -68,7 +127,11 @@
                 # Modern isolation headers (Spectre mitigation)
                 Cross-Origin-Opener-Policy "same-origin"
                 Cross-Origin-Resource-Policy "same-origin"
-                Cross-Origin-Embedder-Policy "require-corp"
+                # FIX [P3-M2]: credentialless instead of require-corp.
+                # require-corp blocks cross-origin authenticators used by
+                # WebAuthn/passkey flows. credentialless preserves Spectre
+                # isolation while allowing cross-origin no-credential fetches.
+                Cross-Origin-Embedder-Policy "credentialless"
                 X-DNS-Prefetch-Control "off"
 
                 # Content Security Policy
@@ -85,7 +148,7 @@
                 -X-Powered-By
         }
 
-        # 3. Public Health Check
+        # 2. Public Health Check
         @health path /alive
         handle @health {
                 reverse_proxy vaultwarden:80 {
@@ -99,7 +162,7 @@
                 }
         }
 
-        # 4. WebSocket routing for notifications hub
+        # 3. WebSocket routing for notifications hub
         # FIX [M-14]: Port 3012 was removed in VaultWarden >= 1.30.0.
         # All WebSocket real-time sync now goes through the main HTTP port 80.
         handle /notifications/hub {
@@ -115,9 +178,18 @@
                 }
         }
 
-        # 5. Admin Panel Protection
+        # 4. Admin Panel Protection
+        # FIX [P3-C2]: @malicious_ua UA blocklist removed — trivially bypassed
+        # by any attacker that omits a scanner User-Agent string. The Cloudflare
+        # WAF Managed Ruleset (OWASP CRS / Cloudflare OWASP) is the correct and
+        # effective layer for scanner/bot detection. Keeping a local list here
+        # provides false confidence without meaningful security benefit.
+        # Configure: Cloudflare Dashboard → Security → WAF → Managed rules.
         @admin path /admin*
         handle @admin {
+                # Route admin traffic to the dedicated high-retention admin log
+                log_name admin_log
+
                 # NOTE: 'unsafe-inline' in script-src is required by VaultWarden's admin UI
                 # which renders inline <script> blocks. This cannot be removed without
                 # breaking admin panel functionality. Risk accepted: admin panel access is
@@ -126,7 +198,9 @@
                 # Stricter CSP for admin panel
                 header {
                         Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: https:; frame-src 'self'; object-src 'none'; base-uri 'self';"
-                        X-Admin-Access "true"
+                        # FIX [P3-C1]: X-Admin-Access header removed.
+                        # Broadcasting panel existence in every response is an
+                        # unnecessary information disclosure. Removed entirely.
                 }
 
                 basic_auth {
@@ -143,9 +217,11 @@
                 }
         }
 
-        # 6. Auth Endpoints (Monitoring)
+        # 5. Auth Endpoints (route to dedicated auth_attempts log for Fail2Ban)
         @auth_endpoints path /api/accounts/prelogin* /identity/accounts/prelogin* /identity/connect/token*
         handle @auth_endpoints {
+                log_name auth_log
+
                 reverse_proxy vaultwarden:80 {
                         header_up Host {host}
 
@@ -158,23 +234,7 @@
                 }
         }
 
-        # 7. Malicious User-Agent Blocking (ENHANCED)
-        @malicious_ua {
-                header User-Agent "*sqlmap*"
-                header User-Agent "*nikto*"
-                header User-Agent "*nmap*"
-                header User-Agent "*acunetix*"
-                header User-Agent "*dirbuster*"
-                header User-Agent "*gobuster*"
-                header User-Agent "*wfuzz*"
-                header User-Agent "*masscan*"
-                header User-Agent "*zgrab*"
-        }
-        handle @malicious_ua {
-                respond "Access Denied - Security Policy Violation" 403
-        }
-
-        # 8. Default Reverse Proxy
+        # 6. Default Reverse Proxy
         handle {
                 reverse_proxy vaultwarden:80 {
                         header_up Host {host}
@@ -191,15 +251,7 @@
 # Redirect www → apex
 # ================================
 www.{$DOMAIN_NAME} {
-        # FIX [M-15]: Add log rotation params to prevent disk-fill risk
-        log {
-                output file /var/log/caddy/access.log {
-                        roll_size 50MB
-                        roll_keep 5
-                        roll_keep_for 7d
-                }
-                format json
-        }
+        log_name access_log
         redir https://{$DOMAIN_NAME}{uri} 301
 }
 
@@ -213,14 +265,6 @@ www.{$DOMAIN_NAME} {
 #   https://www.cloudflare.com/ips/
 # Example OCI ingress rule: allow TCP 443 only from Cloudflare IP ranges.
 :80, :443 {
-        # FIX [M-15]: Add log rotation params to prevent disk-fill risk
-        log {
-                output file /var/log/caddy/access.log {
-                        roll_size 50MB
-                        roll_keep 5
-                        roll_keep_for 7d
-                }
-                format json
-        }
+        log_name security_log
         respond "Not Found" 404
 }
