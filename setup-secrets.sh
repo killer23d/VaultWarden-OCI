@@ -255,6 +255,20 @@ validate_existing_secrets() {
     return 0
 }
 
+# ---------------------------------------------------------------------------
+# SS-L2: Helper — write timeout warnings to /dev/tty when available so that
+# automated pipelines capturing stdout are not silently confused by the
+# default-to-'no' decision.
+# ---------------------------------------------------------------------------
+_warn_tty() {
+    local msg="$1"
+    if [[ -w /dev/tty ]]; then
+        echo "$msg" > /dev/tty
+    else
+        log_warn "$msg"
+    fi
+}
+
 check_reconfiguration() {
     if ! secrets_are_configured; then
         log_info "No valid secrets found - configuration needed"
@@ -276,8 +290,10 @@ check_reconfiguration() {
 
     echo ""
     # FIX [L-04]: Add -t 30 timeout to avoid hanging in non-interactive contexts
+    # FIX SS-L2: Route timeout warning to /dev/tty when available
+    local confirm
     if ! read -r -t 30 -p "Reconfigure secrets? (yes/no): " confirm; then
-        log_warn "No input received (30s timeout). Treating as 'no'."
+        _warn_tty "WARNING: No input received (30s timeout). Treating as 'no'."
         confirm="no"
     fi
 
@@ -299,8 +315,10 @@ ensure_argon2_available() {
 
     if [[ "$AUTO_MODE" != "true" ]]; then
         # FIX [L-04]: Add -t 30 timeout to avoid hanging in non-interactive contexts
+        # FIX SS-L2: Route timeout warning to /dev/tty when available
+        local install_it
         if ! read -r -t 30 -p "Install Python argon2-cffi? (yes/no): " install_it; then
-            log_warn "No input received (30s timeout). Treating as 'no'."
+            _warn_tty "WARNING: No input received (30s timeout). Treating as 'no'."
             install_it="no"
         fi
         if [[ "$install_it" == "yes" ]]; then
@@ -406,8 +424,10 @@ collect_secrets() {
         smtp_pass=$(auto_generate_secret_field "smtp_password") || { log_error "Failed to generate smtp_password"; return 1; }
     else
         # FIX [L-04]: Add -t 30 timeout to avoid hanging in non-interactive contexts
+        # FIX SS-L2: Route timeout warning to /dev/tty when available
+        local enable_email
         if ! read -r -t 30 -p "Enable email notifications now? (yes/no): " enable_email; then
-            log_warn "No input received (30s timeout). Treating as 'no'."
+            _warn_tty "WARNING: No input received (30s timeout). Treating as 'no'."
             enable_email="no"
         fi
         if [[ "$enable_email" == "yes" ]]; then
@@ -443,8 +463,10 @@ collect_secrets() {
             SECRETS["push_installation_key"]=$(auto_generate_secret_field "push_installation_key")
         else
             # FIX [L-04]: Add -t 30 timeout to avoid hanging in non-interactive contexts
+            # FIX SS-L2: Route timeout warning to /dev/tty when available
+            local do_push
             if ! read -r -t 30 -p "Configure push notifications? (yes/no): " do_push; then
-                log_warn "No input received (30s timeout). Treating as 'no'."
+                _warn_tty "WARNING: No input received (30s timeout). Treating as 'no'."
                 do_push="no"
             fi
             if [[ "$do_push" == "yes" ]]; then
@@ -484,13 +506,20 @@ write_secrets() {
 
     # FIX [M-06]: Use mktemp for an unpredictable temp filename to avoid concurrent-run
     # race conditions on the previously fixed-path .temp_secrets.yaml.
-    # Also fix trap to use double-quotes so $temp_file expands at registration time.
+    # FIX SS-M1: Apply umask 077 so the temp file is created 0600 from the start,
+    # and unset each SECRET_* variable immediately after writing it to the temp
+    # file to minimise the window in which plaintext secrets are live in the
+    # process environment (visible via /proc/$$/environ to root processes).
     local temp_file
     mkdir -p "$PROJECT_ROOT/secrets" 2>/dev/null || true
-    temp_file=$(mktemp -p "$PROJECT_ROOT/secrets" vwsecrets.XXXXXXXXXX.yaml) || return 1
-    install -m 600 /dev/null "$temp_file"
-    # shellcheck disable=SC2064  # SC2064: intentional — $temp_file must expand NOW at registration
-    # time so the cleanup action removes the correct file even if the variable changes later.
+
+    local _saved_umask
+    _saved_umask=$(umask)
+    umask 077
+    temp_file=$(mktemp -p "$PROJECT_ROOT/secrets" vwsecrets.XXXXXXXXXX.yaml) || { umask "$_saved_umask"; return 1; }
+    umask "$_saved_umask"
+
+    # shellcheck disable=SC2064  # intentional — $temp_file must expand NOW
     register_cleanup "rm -f '$temp_file'"
 
     {
@@ -514,7 +543,11 @@ write_secrets() {
         printf 'fail2ban_cloudflare_firewall_token: %s\n' "$SECRET_fail2ban_cloudflare_firewall_token"
     } > "$temp_file"
 
-    chmod 600 "$temp_file"
+    # SS-M1: Unset plaintext SECRET_* vars immediately after the temp file is
+    # written, before SOPS encryption, to close the /proc/$$/environ window.
+    while IFS= read -r var; do
+        unset "$var"
+    done < <(compgen -v SECRET_)
 
     if ! ensure_sops_env; then
         log_error "Failed to setup SOPS environment"
@@ -594,9 +627,10 @@ main() {
         exit 1
     fi
 
-    # Unset all plaintext SECRET_* variables now that write_secrets() has
-    # consumed them, so they are not visible in /proc/<pid>/environ for the
-    # remainder of the script's lifetime.
+    # write_secrets() now unsets SECRET_* vars immediately after writing the
+    # temp file (before SOPS encryption). The loop below is kept as a safety
+    # net to catch any variables that may have been introduced by future changes
+    # without updating write_secrets().
     while IFS= read -r var; do
         unset "$var"
     done < <(compgen -v SECRET_)
@@ -626,11 +660,12 @@ main() {
         # Phase 2-C: Updated next-steps to reflect the new install order.
         # The user has already edited .env before running this script, so
         # step 1 is "Verify" not "Review/create".
+        # FIX SS-L1: cron-setup.sh was removed; reference systemd-setup.sh instead.
         echo "📋 Next Steps:"
         echo "   1. Verify .env settings:      nano .env"
         echo "      ► Confirm: CLOUDFLARE_ZONE_ID, SMTP_HOST, SMTP_PORT, SMTP_USERNAME"
         echo "   2. Start services:            make up"
-        echo "   3. Setup automation:          sudo ./cron-setup.sh --install"
+        echo "   3. Setup automation:          sudo ./systemd-setup.sh --install"
         echo "   4. Export recovery kit:       ./edit-secrets.sh --export-recovery-kit"
         echo "   5. Test health:               ./health.sh"
         echo "   6. To rotate a single field:  ./edit-secrets.sh --rotate FIELD"
