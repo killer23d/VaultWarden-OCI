@@ -253,7 +253,7 @@ bantime  = 2h
 # Enhanced forensic logs with long retention
 [vaultwarden-web-auth]
 logpath  = /var/log/caddy/auth_attempts.log  # 750MB retention
-filter   = vaultwarden-web-caddy
+filter   = vaultwarden-web-auth
 maxretry = 10
 
 [vaultwarden-web-admin]
@@ -474,29 +474,52 @@ Cloudflare WAF rules must be configured manually in the Cloudflare dashboard:
 
 ### Security Headers
 
+The following hardened security headers are enforced in the Caddyfile:
+
 ```caddyfile
 header {
+    # HSTS with preload
     Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+
+    # Classic security headers
     X-Content-Type-Options "nosniff"
-    X-Frame-Options "SAMEORIGIN"
-    Referrer-Policy "same-origin"
-    Permissions-Policy "geolocation=(), microphone=(), camera=()"
-    Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'"
+    X-Frame-Options "DENY"
+    X-XSS-Protection "1; mode=block"
+    Referrer-Policy "strict-origin-when-cross-origin"
+
+    # Modern isolation headers (Spectre mitigation)
+    Cross-Origin-Opener-Policy "same-origin"
+    Cross-Origin-Resource-Policy "same-origin"
+    Cross-Origin-Embedder-Policy "credentialless"
+    X-DNS-Prefetch-Control "off"
+
+    # Content Security Policy
+    Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: https:; frame-src 'self'; object-src 'none'; base-uri 'self';"
+
+    # Permissions Policy (restrict dangerous features)
+    Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=(), usb=()"
+
+    # Request tracking (response header)
+    X-Request-ID {uuid}
+
+    # Remove server identification
     -Server
+    -X-Powered-By
 }
 ```
 
 ## Forensic Logging
 
-### Enhanced Log Retention (60x Improvement)
+### 4-Log Forensic Architecture (~3 GB Total Capacity)
 
-Total forensic capacity: **~3GB** (vs previous 50MB)
+Caddy routes log output by named logger to dedicated files, preventing
+double-firing across log categories and enabling per-category retention targets.
 
 ```
-Main Access Log:   50MB × 20 files = 1GB    (30-day retention)
-Admin Access Log:  25MB × 30 files = 750MB  (90-day retention)
-Auth Attempts Log: 25MB × 30 files = 750MB  (90-day retention)
-Security Log:      10MB × 50 files = 500MB  (180-day retention)
+Main Access Log:   50MB × 20 files = 1GB    (30-day retention)   → access.log
+Admin Access Log:  25MB × 30 files = 750MB  (90-day retention)   → admin_access.log
+Auth Attempts Log: 25MB × 30 files = 750MB  (90-day retention)   → auth_attempts.log
+Security Log:      10MB × 50 files = 500MB  (180-day retention)  → security.log
 ```
 
 ### Structured JSON Logging
@@ -531,11 +554,11 @@ All Caddy logs use structured JSON format for easy parsing:
 # VaultWarden application logs
 ${PROJECT_STATE_DIR}/logs/vaultwarden/vaultwarden.log
 
-# Caddy logs (multiple specialized logs)
-${PROJECT_STATE_DIR}/logs/caddy/access.log
-${PROJECT_STATE_DIR}/logs/caddy/admin_access.log
-${PROJECT_STATE_DIR}/logs/caddy/auth_attempts.log
-${PROJECT_STATE_DIR}/logs/caddy/security.log
+# Caddy logs (4 specialised forensic logs)
+${PROJECT_STATE_DIR}/logs/caddy/access.log        # General access (access_log)
+${PROJECT_STATE_DIR}/logs/caddy/admin_access.log  # Admin panel traffic (admin_log)
+${PROJECT_STATE_DIR}/logs/caddy/auth_attempts.log # Auth endpoints (auth_log)
+${PROJECT_STATE_DIR}/logs/caddy/security.log      # Catch-all / suspicious (security_log)
 
 # Fail2Ban logs
 ${PROJECT_STATE_DIR}/logs/fail2ban/fail2ban.log
