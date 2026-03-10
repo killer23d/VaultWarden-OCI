@@ -37,7 +37,7 @@ DRY_RUN=false
 KEEP_DAYS=14
 QUIET=false
 FORCE=false
-    EMAIL_NOTIFY=false   # set by --email; send_notification_email() called on completion
+EMAIL_NOTIFY=false   # set by --email; send_notification_email() called on completion
 LIST_ONLY=false      # set by --list; print existing backups and exit (no root needed)
 RCLONE_SYNC=false    # set by --rclone; sync encrypted backup to rclone remote after creation
 FULL_VERIFY=false    # set by --full-verification; decrypt + integrity check before sync
@@ -145,21 +145,6 @@ list_backups() {
     (( found > 0 )) || log_info "  No backups found."
 }
 
-get_age_public_key() {
-    local age_key_file
-    age_key_file="$(get_config_value "SOPS_AGE_KEY_FILE" "secrets/keys/age-key.txt")"
-    if [[ ! -f "$age_key_file" ]]; then
-        log_error "Age key file not found: $age_key_file"
-        return 1
-    fi
-    local pub_key
-    pub_key=$(grep -m 1 "public key: " "$age_key_file" | cut -d: -f2 | tr -d ' ')
-    if [[ -z "$pub_key" ]]; then
-        log_error "Could not extract public key from $age_key_file"
-        return 1
-    fi
-    echo "$pub_key"
-}
 
 auto_determine_backup_type() {
     local state_dir
@@ -697,8 +682,10 @@ main() {
     local state_dir
     state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
 
+    local age_key_file
+    age_key_file="$(get_config_value "SOPS_AGE_KEY_FILE" "secrets/keys/age-key.txt")"
     local age_pub_key
-    age_pub_key=$(get_age_public_key) || exit 1
+    age_pub_key=$(get_age_public_key "$age_key_file") || { log_error "Could not read Age public key from $age_key_file"; exit 1; }
 
     local actual_type="$BACKUP_TYPE"
     if [[ "$BACKUP_TYPE" == "auto" ]]; then

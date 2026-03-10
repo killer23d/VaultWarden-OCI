@@ -182,7 +182,7 @@ read_meta_field() {
 tar_validate_members() {
     local tarfile="$1"
     local members
-    members="$(tar -tzf "$tarfile")" || {
+    members="$(tar -tf "$tarfile")" || {
         log_error "Cannot list archive members"
         return 1
     }
@@ -199,7 +199,7 @@ tar_validate_members() {
 check_traversal_only() {
     local tarfile="$1"
     local bad_members
-    bad_members=$(tar -tzf "$tarfile" 2>/dev/null \
+    bad_members=$(tar -tf "$tarfile" 2>/dev/null \
         | grep -E '(^|/)\.\.(/|$)' || true)
     if [[ -n "$bad_members" ]]; then
         log_error "Archive contains path traversal sequences (../). Refusing to extract."
@@ -355,7 +355,7 @@ restore_full() {
 
     if [[ "$SKIP_VERIFICATION" != "true" ]]; then
         log_info "Verifying archive structure..."
-        tar -tzf "$dec_tar" >/dev/null || { log_error "Archive is corrupt or invalid"; return 1; }
+        tar -tf "$dec_tar" >/dev/null || { log_error "Archive is corrupt or invalid"; return 1; }
     fi
 
     if [[ "$archive_format" == "absolute" ]]; then
@@ -389,11 +389,11 @@ restore_full() {
         fi
 
         if [[ "$DRY_RUN" == "true" ]]; then
-            log_info "[DRY RUN] Would run: tar -xzf <archive> -C /"
+            log_info "[DRY RUN] Would run: tar -xf <archive> -C /"
             return 0
         fi
 
-        tar -xzf "$dec_tar" -C / --no-same-owner --no-same-permissions --delay-directory-restore
+        tar -xf "$dec_tar" -C / --no-same-owner --no-same-permissions --delay-directory-restore
         purge_wal_shm "$state_dir/data/db.sqlite3" || true
         log_success "Legacy archive restored."
         return 0
@@ -416,14 +416,14 @@ restore_full() {
     local staging="$tmpdir/stage"
     mkdir -p "$staging"
     log_info "Extracting archive to staging directory..."
-    tar -xzf "$dec_tar" -C "$staging" --no-same-owner --no-same-permissions --delay-directory-restore
+    tar -xf "$dec_tar" -C "$staging" --no-same-owner --no-same-permissions --delay-directory-restore
 
     # Validate expected paths exist in staging
     local rel_state="${state_dir#/}"
     if [[ ! -d "$staging/$rel_state" ]]; then
         log_error "Staging validation failed: expected directory not found: $staging/$rel_state"
         log_error "Archive members:"
-        tar -tzf "$dec_tar" | head -20 >&2 || true
+        tar -tf "$dec_tar" | head -20 >&2 || true
         return 1
     fi
 

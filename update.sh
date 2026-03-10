@@ -68,7 +68,7 @@ while [[ $# -gt 0 ]]; do
         --no-restart)   RESTART_SERVICES=false; shift ;;
         --no-cleanup)   CLEANUP_OLD=false; shift ;;
         --dry-run)      DRY_RUN=true; shift ;;
-        --email)      EMAIL_NOTIFY=true; shift ;;
+        --email)        EMAIL_NOTIFY=true; shift ;;
         --force)        FORCE_UPDATE=true; shift ;;
         --quiet)        QUIET=true; shift ;;
         --help)         show_help; exit 0 ;;
@@ -111,7 +111,9 @@ check_for_updates() {
 
     u_log_info "Checking for image updates..."
 
-    for image in $images; do
+    local image_list
+    mapfile -t image_list <<< "$images"
+    for image in "${image_list[@]}"; do
         # Get local image ID
         local local_id
         local_id=$(docker inspect --type=image --format '{{.Id}}' "$image" 2>/dev/null || echo "none")
