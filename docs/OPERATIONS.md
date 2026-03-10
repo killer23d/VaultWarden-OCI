@@ -105,7 +105,7 @@ make health AUTO_RECOVER=true
 make health-email   # comprehensive + email
 ```
 
-> **Note:** `--comprehensive` and `--auto-recover` are confirmed flags. There is no `--quiet` flag for disabling email-only output; use `--quiet` only to suppress non-error console output.
+> **Note:** `--comprehensive` and `--auto-recover` are the supported flags. Use `--quiet` to suppress non-error console output.
 
 #### Container-Specific Status
 
@@ -146,20 +146,22 @@ docker compose logs --follow --timestamps
 
 ```bash
 # Authentication failures (Caddy JSON logs)
-grep "401" ${PROJECT_STATE_DIR}/logs/caddy/auth_attempts.log | jq
+grep "401" /var/lib/vaultwarden/logs/caddy/auth_attempts.log | jq
 
 # Admin panel access
-cat ${PROJECT_STATE_DIR}/logs/caddy/admin_access.log | jq
+cat /var/lib/vaultwarden/logs/caddy/admin_access.log | jq
 
 # Fail2ban bans
-grep "block\|ban" ${PROJECT_STATE_DIR}/logs/fail2ban/fail2ban.log
+grep "block\|ban" /var/lib/vaultwarden/logs/fail2ban/fail2ban.log
 
 # VaultWarden errors
-grep "ERROR" ${PROJECT_STATE_DIR}/logs/vaultwarden/vaultwarden.log
+grep "ERROR" /var/lib/vaultwarden/logs/vaultwarden/vaultwarden.log
 
 # Rate limit events
-grep "429" ${PROJECT_STATE_DIR}/logs/caddy/access.log | jq
+grep "429" /var/lib/vaultwarden/logs/caddy/access.log | jq
 ```
+
+> **Note:** The default state directory is `/var/lib/vaultwarden`. If you customised `PROJECT_STATE_DIR` in `.env`, substitute that path in the commands above.
 
 #### Log Retention (Caddy)
 
@@ -172,7 +174,7 @@ grep "429" ${PROJECT_STATE_DIR}/logs/caddy/access.log | jq
 
 ```bash
 # Check log directory sizes
-du -sh ${PROJECT_STATE_DIR}/logs/*
+du -sh /var/lib/vaultwarden/logs/*
 ```
 
 ---
@@ -446,16 +448,16 @@ make breakglass-remove
 
 ---
 
-## ⚙️ Automated Operations (Cron)
+## ⚙️ Automated Operations (Systemd)
 
-### Installing Cron Jobs
+### Installing Systemd Timers
 
 ```bash
-sudo ./cron-setup.sh --install
+sudo ./systemd-setup.sh --install
 make cron-install
 ```
 
-### Actual Cron Schedule
+### Actual Schedule
 
 | Schedule | Job |
 |---|---|
@@ -470,14 +472,14 @@ make cron-install
 
 ```bash
 # View installed jobs
-sudo ./cron-setup.sh --list
+sudo ./systemd-setup.sh --list
 make cron-list
 
 # Validate security and detect split-brain (stale /opt/ scripts)
-sudo ./cron-setup.sh --validate
+sudo ./systemd-setup.sh --validate
 
 # Remove jobs
-sudo ./cron-setup.sh --remove
+sudo ./systemd-setup.sh --remove
 make cron-remove
 ```
 
@@ -519,19 +521,21 @@ docker stats --no-stream
 ### System Resource Usage
 
 ```bash
-free -h                              # Memory
-df -h                                # Disk
-du -sh ${PROJECT_STATE_DIR}/*        # State directory breakdown
+free -h                                  # Memory
+df -h                                    # Disk
+du -sh /var/lib/vaultwarden/*            # State directory breakdown
 ```
+
+> **Note:** Replace `/var/lib/vaultwarden` with your `PROJECT_STATE_DIR` value from `.env` if customised.
 
 ### Performance Optimisation
 
 ```bash
 # 1. Review log sizes
-du -sh ${PROJECT_STATE_DIR}/logs/*
+du -sh /var/lib/vaultwarden/logs/*
 
 # 2. Review backup storage
-ls -lh ${PROJECT_STATE_DIR}/backups/
+ls -lh /var/lib/vaultwarden/backups/
 
 # 3. Run maintenance
 ./maintenance.sh --comprehensive
@@ -577,7 +581,7 @@ docker stats --no-stream
 docker compose logs <container> --tail=100
 
 # 3. Check log file growth
-du -sh ${PROJECT_STATE_DIR}/logs/*
+du -sh /var/lib/vaultwarden/logs/*
 
 # 4. Run maintenance
 ./maintenance.sh --comprehensive
@@ -744,9 +748,9 @@ make breakglass-status   # Check emergency admin status
 make breakglass-remove   # Remove emergency admin
 
 # Automation
-make cron-install        # Install cron jobs
-make cron-list           # List cron jobs
-make cron-remove         # Remove cron jobs
+make cron-install        # Install systemd timers
+make cron-list           # List scheduled jobs
+make cron-remove         # Remove scheduled jobs
 
 # Configuration & Info
 make config              # Show configuration summary
