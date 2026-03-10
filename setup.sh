@@ -504,16 +504,30 @@ create_env_file() {
     CLEAN_DOMAIN="$clean_domain"
 
     local temp_env="$TMP_WORKDIR/env.tmp"
-    awk -v domain="$domain_with_protocol" -v name="$clean_domain" -v email="$ADMIN_EMAIL" \
-        -v uid="$user_id" -v gid="$group_id" -v smtp_from="noreply@$clean_domain" -v ssh_log="$detected_ssh_log_path" \
-        '{
-            sub(/^DOMAIN=.*/, "DOMAIN=" domain);
-            sub(/^DOMAIN_NAME=.*/, "DOMAIN_NAME=" name);
-            sub(/^ADMIN_EMAIL=.*/, "ADMIN_EMAIL=" email);
-            sub(/^PUID=.*/, "PUID=" uid);
-            sub(/^PGID=.*/, "PGID=" gid);
-            sub(/^SMTP_FROM=.*/, "SMTP_FROM=" smtp_from);
-            sub(/^SSH_LOG_PATH=.*/, "SSH_LOG_PATH=" ssh_log);
+
+    # FIX [P1-H5]: Replace awk -v assignments with ENVIRON[] references to
+    # eliminate awk variable-injection risk. When user-controlled strings
+    # (domain, email, ssh_log) are passed via -v, awk interprets backslash
+    # sequences and newlines in the value, enabling injection of arbitrary awk
+    # code. Exporting values as environment variables and reading them via
+    # ENVIRON["key"] treats the values as opaque strings — no interpretation
+    # occurs regardless of what characters they contain.
+    AWK_DOMAIN="$domain_with_protocol" \
+    AWK_NAME="$clean_domain" \
+    AWK_EMAIL="$ADMIN_EMAIL" \
+    AWK_UID="$user_id" \
+    AWK_GID="$group_id" \
+    AWK_SMTP_FROM="noreply@$clean_domain" \
+    AWK_SSH_LOG="$detected_ssh_log_path" \
+    awk '
+        {
+            sub(/^DOMAIN=.*/, "DOMAIN=" ENVIRON["AWK_DOMAIN"]);
+            sub(/^DOMAIN_NAME=.*/, "DOMAIN_NAME=" ENVIRON["AWK_NAME"]);
+            sub(/^ADMIN_EMAIL=.*/, "ADMIN_EMAIL=" ENVIRON["AWK_EMAIL"]);
+            sub(/^PUID=.*/, "PUID=" ENVIRON["AWK_UID"]);
+            sub(/^PGID=.*/, "PGID=" ENVIRON["AWK_GID"]);
+            sub(/^SMTP_FROM=.*/, "SMTP_FROM=" ENVIRON["AWK_SMTP_FROM"]);
+            sub(/^SSH_LOG_PATH=.*/, "SSH_LOG_PATH=" ENVIRON["AWK_SSH_LOG"]);
             print;
         }' "$env_file" > "$temp_env"
 
@@ -575,19 +589,36 @@ setup_directories() {
     return 0
 }
 
+# FIX [P1-M5]: The original loop emitted a single log_info line per 5-second
+# sleep with no visible progress during the wait, causing operators to believe
+# the script had hung and incorrectly abort it. This version:
+#   - Prints a one-line status header before blocking.
+#   - Emits a dot to stderr every second (no newline) so the terminal shows
+#     continuous activity without flooding the log.
+#   - Prints a final newline + updated status after each 5-second interval.
+#   - Reports the final entropy level whether the wait succeeds or times out.
 check_entropy() {
     local entropy; entropy=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo "0")
     (( entropy >= ENTROPY_THRESHOLD )) && return 0
 
     log_warn "Insufficient entropy (${entropy} bits, need ${ENTROPY_THRESHOLD}). Waiting for entropy pool to fill..."
+    log_info  "Progress is shown below — do NOT abort. Install haveged to speed this up."
+
     local waited=0
     while (( waited < ENTROPY_MAX_WAIT )); do
-        log_info "Waiting for sufficient entropy... (${entropy} bits, need ${ENTROPY_THRESHOLD}, waited ${waited}s/${ENTROPY_MAX_WAIT}s)"
-        sleep 5
-        waited=$((waited + 5))
+        # Emit one dot per second for 5 seconds so operators see live activity.
+        printf '  [entropy] Waiting' >&2
+        local tick
+        for (( tick = 0; tick < 5; tick++ )); do
+            printf '.' >&2
+            sleep 1
+        done
+        waited=$(( waited + 5 ))
         entropy=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo "0")
+        printf ' %d bits (%ds/%ds)\n' "$entropy" "$waited" "$ENTROPY_MAX_WAIT" >&2
         (( entropy >= ENTROPY_THRESHOLD )) && return 0
     done
+
     log_error "Insufficient entropy after ${ENTROPY_MAX_WAIT}s (got ${entropy} bits, need ${ENTROPY_THRESHOLD}). Install haveged: sudo apt-get install -y haveged"
     return 1
 }
