@@ -37,10 +37,13 @@ DRY_RUN=false
 KEEP_DAYS=14
 QUIET=false
 FORCE=false
+# FIX P1-M2: removed leading whitespace from EMAIL_NOTIFY declaration.
 EMAIL_NOTIFY=false   # set by --email; send_notification_email() called on completion
 LIST_ONLY=false      # set by --list; print existing backups and exit (no root needed)
 RCLONE_SYNC=false    # set by --rclone; sync encrypted backup to rclone remote after creation
 FULL_VERIFY=false    # set by --full-verification; decrypt + integrity check before sync
+# FIX P2-C3: LOCK_FD is declared here; the fd is opened with exec inside main()
+# immediately before flock so the file descriptor actually exists when flock runs.
 LOCK_FD=200
 
 show_help() {
@@ -95,6 +98,15 @@ done
 b_log_info()    { [[ "$QUIET" == "true" ]] || log_info "$*";    }
 b_log_success() { [[ "$QUIET" == "true" ]] || log_success "$*"; }
 b_log_warn()    { [[ "$QUIET" == "true" ]] || log_warn "$*";    }
+
+# ---------------------------------------------------------------------------
+# FIX P1-M1: cleanup() is defined at global scope (not inside main()) so it
+# cannot silently shadow any other function and is visible to the trap handler
+# regardless of shell nesting depth.
+# TMPDIR_BACKUP is initialised to "" here; main() sets it after mktemp.
+# ---------------------------------------------------------------------------
+TMPDIR_BACKUP=""
+cleanup() { [[ -n "$TMPDIR_BACKUP" ]] && rm -rf "$TMPDIR_BACKUP" 2>/dev/null || true; }
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -179,15 +191,6 @@ auto_determine_backup_type() {
 
 # ---------------------------------------------------------------------------
 # FIX-B01: SQLite integrity check using host sqlite3.
-#
-# Replaces verify_sqlite_docker() which ran 'apk add sqlite && sqlite3 PRAGMA'
-# inside an alpine:latest container on every backup run. Problems with that:
-#   - Requires pulling alpine:latest from Docker Hub (supply-chain risk)
-#   - Read-write bind-mount over live VaultWarden data was unnecessarily broad
-#   - Added 3-10s overhead per backup run due to container startup
-#   - Created a root-owned container process with access to vault data
-#
-# sqlite3 is already installed on the host by setup.sh's basic_packages array.
 # ---------------------------------------------------------------------------
 verify_sqlite() {
     local dbfile="$1"
@@ -207,31 +210,12 @@ verify_sqlite() {
 
 # ---------------------------------------------------------------------------
 # FIX-B02: Atomic DB snapshot using host sqlite3 Online Backup API.
-#
-# Replaces create_db_snapshot_docker() which did:
-#   docker run --rm --user root \
-#       -v "${state_dir}/data:/data" \
-#       -v "$(dirname "$dest"):/snapshot" \
-#       alpine:latest sh -c 'apk add sqlite && sqlite3 /data/db.sqlite3 .backup ...'
-#
-# Problems with the Docker approach:
-#   - Read-WRITE volume mount over the live data directory (only a read is needed)
-#   - Pulls alpine:latest on every run unless cached (supply-chain risk + latency)
-#   - Container overhead: 3-8 seconds of startup time on each backup
-#   - Ran as root inside the container with direct access to vault data
-#
-# sqlite3 .backup uses the SQLite Online Backup API: creates an atomic,
-# WAL-consistent point-in-time copy while VaultWarden is running, without
-# blocking any writes. This is the same mechanism used by Litestream and
-# litestream-based backup tools.
 # ---------------------------------------------------------------------------
 create_db_snapshot_host() {
     local state_dir="$1"
     local dest="$2"
     local db_file="${state_dir}/data/db.sqlite3"
     [[ -f "$db_file" ]] || { log_error "Database not found: $db_file"; return 1; }
-    # Pass dest as a printf argument so any special characters (including single
-    # quotes) in the path are treated as a plain string by sqlite3.
     sqlite3 "$db_file" "$(printf '.backup %s' "$dest")" || {
         log_error "sqlite3 .backup failed for: $db_file"
         return 1
@@ -241,7 +225,7 @@ create_db_snapshot_host() {
 
 # ---------------------------------------------------------------------------
 # Full end-to-end verification: decrypt the just-created archive and re-verify.
-# Uses $TMPDIR_BACKUP (already covered by EXIT/INT/TERM trap in main).
+# Uses $TMPDIR_BACKUP (already covered by EXIT/INT/TERM trap).
 # FATAL on failure — a silently-corrupt backup is worse than no backup.
 # FIX-B05: db branch now calls verify_sqlite() instead of verify_sqlite_docker().
 # MOD-1: archive verification uses zstd decompression (--use-compress-program=zstd).
@@ -264,17 +248,14 @@ verify_backup_full() {
 
     case "$backup_type" in
         db)
-            # FIX-B05: host sqlite3 instead of Docker alpine container.
             verify_sqlite "$dec_out" || return 1
             ;;
         full|emergency)
             b_log_info "Verifying archive structure..."
-            # MOD-1: use zstd decompression for .tar.zst archives.
             if ! tar --use-compress-program=zstd -tf "$dec_out" >/dev/null 2>&1; then
                 log_error "Full verification FAILED: archive is corrupt or unreadable"
                 return 1
             fi
-            # Confirm the archive is non-trivially sized (>10 KB)
             local size
             size=$(stat -c%s "$dec_out" 2>/dev/null || stat -f%z "$dec_out" 2>/dev/null || echo 0)
             if (( size < 10240 )); then
@@ -290,26 +271,25 @@ verify_backup_full() {
 }
 
 # ---------------------------------------------------------------------------
-# Rclone offsite sync — NON-FATAL by design.
-# Reads RCLONE_REMOTE_NAME from .env.
-# Syncs only the specific backup file + its .meta and .sha256 sidecars.
-# On failure: warns but does NOT mark the backup as failed (local copy is safe).
+# Rclone offsite sync.
+# FIX P2-M6: missing/unconfigured rclone now returns 1 (caller treats as
+# fatal when --rclone is set) instead of silently returning 0 and skipping.
 # ---------------------------------------------------------------------------
 sync_to_rclone() {
     local enc_file="$1"
     local backup_type="$2"
 
     if ! command -v rclone >/dev/null 2>&1; then
-        log_warn "rclone not installed — skipping offsite sync."
-        log_warn "Install: https://rclone.tech/install/"
+        log_error "rclone not installed — offsite backup cannot proceed."
+        log_error "Install: https://rclone.tech/install/"
         return 1
     fi
 
     local remote_name
     remote_name="$(get_config_value "RCLONE_REMOTE_NAME" "")"
     if [[ -z "$remote_name" || "$remote_name" == "CHANGE_ME_RCLONE_REMOTE" ]]; then
-        log_warn "RCLONE_REMOTE_NAME not configured in .env — skipping offsite sync."
-        log_warn "Set RCLONE_REMOTE_NAME in .env and run: rclone config"
+        log_error "RCLONE_REMOTE_NAME not configured in .env — offsite backup cannot proceed."
+        log_error "Set RCLONE_REMOTE_NAME in .env and run: rclone config"
         return 1
     fi
 
@@ -318,18 +298,15 @@ sync_to_rclone() {
 
     local rclone_ok=true
 
-    # Copy the encrypted archive
     if ! rclone copy "$enc_file" "$remote_path/" --checksum 2>&1; then
         rclone_ok=false
     fi
 
-    # Copy the .meta sidecar if it exists
     local meta_file="${enc_file}.meta"
     if [[ -f "$meta_file" ]]; then
         rclone copy "$meta_file" "$remote_path/" --checksum 2>&1 || true
     fi
 
-    # Copy the .sha256 sidecar if it exists
     local sha256_file="${enc_file}.sha256"
     if [[ -f "$sha256_file" ]]; then
         rclone copy "$sha256_file" "$remote_path/" --checksum 2>&1 || true
@@ -339,8 +316,8 @@ sync_to_rclone() {
         b_log_success "Offsite sync complete → ${remote_path}/$(basename "$enc_file")"
         return 0
     else
-        log_warn "Rclone sync FAILED — backup is safe locally, but offsite copy was not updated."
-        log_warn "Retry manually: rclone copy $enc_file ${remote_path}/"
+        log_error "Rclone sync FAILED — backup is safe locally, but offsite copy was not updated."
+        log_error "Retry manually: rclone copy $enc_file ${remote_path}/"
         return 1
     fi
 }
@@ -348,6 +325,7 @@ sync_to_rclone() {
 # ---------------------------------------------------------------------------
 # Database-only backup
 # FIX-B06: Uses create_db_snapshot_host() and verify_sqlite() (host sqlite3).
+# FIX P2-H3: .meta block now includes archive_format= and version= fields.
 # ---------------------------------------------------------------------------
 perform_db_backup() {
     local target_dir="$1"
@@ -369,10 +347,8 @@ perform_db_backup() {
 
     local snap="$shared_tmpdir/db.sqlite3"
 
-    # FIX-B06: Use host sqlite3 Online Backup API instead of Docker.
     b_log_info "Creating atomic DB snapshot (sqlite3 .backup)..."
     if ! create_db_snapshot_host "$state_dir" "$snap"; then
-        # Fallback: checkpoint WAL then copy main DB file for best-effort consistency
         b_log_warn "Host sqlite3 snapshot failed — attempting offline fallback with WAL checkpoint"
         if ! sqlite3 "$db_file" "PRAGMA wal_checkpoint(TRUNCATE);" 2>/dev/null; then
             b_log_warn "WAL checkpoint failed — copy may be missing recent uncommitted transactions"
@@ -385,11 +361,9 @@ perform_db_backup() {
         fi
     fi
 
-    # FIX-B06: Use host sqlite3 integrity check instead of Docker.
     verify_sqlite "$snap" || return 1
 
     b_log_info "Encrypting DB snapshot..."
-    # Atomic write: encrypt to .tmp then mv into place
     local enc="$target_dir/db_backup_$timestamp.sqlite3.age"
     local enc_tmp="${enc}.tmp"
     if ! age -r "$age_pub_key" -o "$enc_tmp" "$snap"; then
@@ -400,12 +374,12 @@ perform_db_backup() {
     mv "$enc_tmp" "$enc"
     secure_file "$enc" 600
 
-    # Generate SHA-256 checksum sidecar (verified by restore.sh before decryption)
     sha256sum "$enc" | awk '{print $1}' > "${enc}.sha256"
     chmod 600 "${enc}.sha256"
 
     [[ -s "$enc" ]] || { log_error "Encrypted output is empty"; rm -f "$enc" "${enc}.sha256"; return 1; }
 
+    # FIX P2-H3: include archive_format= and version= (were previously missing for db type).
     cat > "${enc}.meta" <<MEOF
 type=db
 timestamp=$timestamp
@@ -422,10 +396,7 @@ MEOF
 # Full / emergency backup  (RELATIVE-PATH archive)
 # FIX-B07: Uses create_db_snapshot_host() (host sqlite3) instead of Docker.
 # MOD-1: Uses zstd compression instead of gzip.
-#   - tar --use-compress-program='zstd -T0 -3' for creation and rebuild
-#   - zstd -d -T0 -c for decompression in snapshot injection step
-#   - zstd -T0 -3 for recompression in snapshot injection step
-#   - Archive extension: .tar.zst (encrypted: .tar.zst.age)
+# FIX P1-M6: ${backup_label^} replaced with portable printf/sed titlecase.
 # ---------------------------------------------------------------------------
 perform_full_backup() {
     local target_dir="$1"
@@ -435,6 +406,11 @@ perform_full_backup() {
     local shared_tmpdir="$5"          # provided by main(); covered by global EXIT/INT/TERM trap
     local state_dir
     state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
+
+    # FIX P1-M6: portable titlecase — no bash 4.0+ parameter expansion required.
+    local backup_label_title
+    backup_label_title="$(printf '%s' "$backup_label" | sed 's/./\u&/')" 2>/dev/null \
+        || backup_label_title="$(printf '%s' "${backup_label:0:1}" | tr '[:lower:]' '[:upper:]')${backup_label:1}"
 
     b_log_info "Performing ${backup_label} backup (relative-path archive)..."
 
@@ -448,14 +424,12 @@ perform_full_backup() {
 
     local snap_dir="$shared_tmpdir/stage"
     local snap_db="$snap_dir/${state_dir#/}/data/db.sqlite3"
-    # MOD-1: .tar.zst extension (was .tar.gz)
     local temp_tar="$shared_tmpdir/${backup_label}_backup_$timestamp.tar.zst"
 
     mkdir -p "$(dirname "$snap_db")"
 
     # -----------------------------------------------------------------------
     # 1. Atomic DB snapshot → staging tree
-    #    FIX-B07: Use host sqlite3 Online Backup API instead of Docker.
     # -----------------------------------------------------------------------
     local db_file="$state_dir/data/db.sqlite3"
     local db_snapshot_ok=false
@@ -471,8 +445,6 @@ perform_full_backup() {
 
     # -----------------------------------------------------------------------
     # 2. Build relative-path tar with -C /
-    #    All members will be  var/lib/vaultwarden/...  and  opt/vaultwarden/...
-    #    (or wherever PROJECT_ROOT / STATE_DIR live) — never /absolute paths.
     # -----------------------------------------------------------------------
     b_log_info "Archiving state (relative paths, safe for staged restore)..."
 
@@ -486,12 +458,8 @@ perform_full_backup() {
 
     local tar_sources=()
 
-    # Always include project root
     tar_sources+=("${PROJECT_ROOT#/}")
 
-    # Include state dir, but if we have a clean snapshot:
-    #   - exclude the live DB + WAL/SHM from the archive
-    #   - we'll merge the snapshot files in next
     if [[ "$db_snapshot_ok" == "true" ]]; then
         tar_excludes+=(
             "--exclude=${state_dir#/}/data/db.sqlite3"
@@ -505,7 +473,6 @@ perform_full_backup() {
 
     # -----------------------------------------------------------------------
     # 3. Create the compressed archive from /  (relative paths)
-    #    MOD-1: zstd -T0 -3 (threaded, level 3) replaces gzip -9.
     # -----------------------------------------------------------------------
     local tar_exit=0
     tar --use-compress-program='zstd -T0 -3' -cf "$temp_tar" \
@@ -513,7 +480,6 @@ perform_full_backup() {
         "${tar_excludes[@]}" \
         "${tar_sources[@]}" 2>/dev/null || tar_exit=$?
 
-    # tar exits 1 for harmless warnings (file changed); only >1 is a real error
     if (( tar_exit > 1 )); then
         log_error "tar failed with exit code $tar_exit"
         return 1
@@ -521,16 +487,8 @@ perform_full_backup() {
 
     # -----------------------------------------------------------------------
     # 4. Inject the clean DB snapshot into the archive
-    #    We must work with an uncompressed copy to use tar --append,
-    #    then recompress.
-    #    MEDIUM-NEW-02: pre-flight disk space check to avoid exhausting TMPDIR
     # -----------------------------------------------------------------------
     if [[ "$db_snapshot_ok" == "true" ]]; then
-        # Estimate required space before decompression:
-        # - decompressed tar ~8–9x compressed
-        # - plus new compressed copy
-        # - plus snapshot DB
-        # - plus 1 GiB safety margin
         local compressed_size snap_size available_kb required_kb
         compressed_size=$(stat -c%s "$temp_tar" 2>/dev/null || echo 0)
         snap_size=$(stat -c%s "$snap_db" 2>/dev/null || echo 0)
@@ -555,8 +513,6 @@ perform_full_backup() {
         b_log_info "Injecting clean DB snapshot into archive..."
         local temp_tar_raw="$shared_tmpdir/${backup_label}_backup_$timestamp.tar"
 
-        # MOD-1: decompress with zstd, append snapshot, recompress with zstd.
-        # (was: gunzip -c → tar --append → gzip -9 -c)
         if zstd -d -T0 -c "$temp_tar" > "$temp_tar_raw" \
             && tar -rf "$temp_tar_raw" -C "$snap_dir" "${state_dir#/}/data/db.sqlite3" \
             && zstd -T0 -3 "$temp_tar_raw" -o "${temp_tar}.new"
@@ -567,7 +523,6 @@ perform_full_backup() {
         else
             b_log_warn "DB snapshot injection failed — archive will use live DB copy"
             rm -f "$temp_tar_raw" "${temp_tar}.new" 2>/dev/null || true
-            # Rebuild without snapshot exclusion
             tar_excludes=(
                 "--exclude=${PROJECT_ROOT#/}/backups"
                 "--exclude=${PROJECT_ROOT#/}/logs"
@@ -576,7 +531,6 @@ perform_full_backup() {
                 "--exclude=*.lock"
             )
             tar_exit=0
-            # MOD-1: zstd rebuild (was tar -czf)
             tar --use-compress-program='zstd -T0 -3' -cf "$temp_tar" -C / "${tar_excludes[@]}" "${tar_sources[@]}" 2>/dev/null || tar_exit=$?
             (( tar_exit <= 1 )) || { log_error "Rebuild tar failed"; return 1; }
         fi
@@ -586,8 +540,6 @@ perform_full_backup() {
     # 5. Encrypt
     # -----------------------------------------------------------------------
     b_log_info "Encrypting ${backup_label} archive..."
-    # Atomic write: encrypt to .tmp then mv into place
-    # MOD-1: .tar.zst.age extension (was .tar.gz.age)
     local enc="$target_dir/${backup_label}_backup_$timestamp.tar.zst.age"
     local enc_tmp="${enc}.tmp"
 
@@ -599,7 +551,6 @@ perform_full_backup() {
     mv "$enc_tmp" "$enc"
     secure_file "$enc" 600
 
-    # Generate SHA-256 checksum sidecar (verified by restore.sh before decryption)
     sha256sum "$enc" | awk '{print $1}' > "${enc}.sha256"
     chmod 600 "${enc}.sha256"
 
@@ -612,7 +563,8 @@ archive_format=relative
 version=2
 MEOF
 
-    b_log_success "${backup_label^} backup: $(basename "$enc")"
+    # FIX P1-M6: use portable titlecase variable instead of ${backup_label^}.
+    b_log_success "${backup_label_title} backup: $(basename "$enc")"
     echo "$enc"
 }
 
@@ -620,7 +572,6 @@ MEOF
 # Main
 # ---------------------------------------------------------------------------
 main() {
-    # --list does not require root; run before privilege check.
     if [[ "$LIST_ONLY" == "true" ]]; then
         load_env_file 2>/dev/null || true
         list_backups
@@ -629,26 +580,17 @@ main() {
 
     require_root "$@"
 
-    # FIX-B03: Register cleanup() BEFORE mktemp so any set -e exit between
-    # mktemp and the original trap registration cannot leave plaintext DB
-    # snapshots or intermediate tar files in /tmp indefinitely.
-    # The null-guard on TMPDIR_BACKUP ensures cleanup() is a no-op if
-    # mktemp itself fails before the variable is assigned.
-    local TMPDIR_BACKUP=""
-    cleanup() { [[ -n "$TMPDIR_BACKUP" ]] && rm -rf "$TMPDIR_BACKUP" 2>/dev/null || true; }
+    # FIX P1-M1: cleanup() is defined at global scope above; trap is registered
+    # here before mktemp, but the function itself lives outside main().
+    # FIX P2-H5: only the global cleanup() trap manages TMPDIR_BACKUP.
+    # The Systemd PrivateTmp=yes mount namespace handles /tmp on SIGKILL;
+    # we do NOT add a second 'rm -rf /tmp/...' trap that would conflict.
     trap cleanup EXIT HUP INT TERM
 
-    # FIX-B04: Move lock file to /var/lock/ (FHS-designated location).
-    # The original path "${state_dir}/.locks/backup.lock" had two problems:
-    #   1. state_dir was read before load_env_file, so it used the default
-    #      "/var/lib/vaultwarden" even when .env overrides PROJECT_STATE_DIR.
-    #   2. It required STATE_DIR to exist and be writable before the lock
-    #      could be acquired — mkdir -p with wrong umask created it with
-    #      potentially incorrect permissions on first run.
-    # /var/lock is always available to root and has no STATE_DIR dependency.
     local LOCK_FILE="/var/lock/vaultwarden-backup.lock"
 
-    # flock-based lock — kernel releases on any exit, no stale locks.
+    # FIX P2-C3: exec the file descriptor here, immediately before flock,
+    # so the fd is actually open when flock(1) tries to use it.
     if [[ "$FORCE" != "true" && "$DRY_RUN" != "true" ]]; then
         eval "exec ${LOCK_FD}>\"$LOCK_FILE\""
         if ! flock -n $LOCK_FD; then
@@ -659,7 +601,6 @@ main() {
         fi
     fi
 
-    # Create the secured temporary directory (now protected by trap above).
     local old_umask
     old_umask=$(umask)
     umask 077
@@ -677,15 +618,21 @@ main() {
 
     load_env_file || { log_error "Failed to load .env"; exit 1; }
 
-    # FIX-B04: Read state_dir AFTER load_env_file so that a PROJECT_STATE_DIR
-    # override in .env is correctly picked up (previously read before load_env_file).
     local state_dir
     state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
 
     local age_key_file
     age_key_file="$(get_config_value "SOPS_AGE_KEY_FILE" "secrets/keys/age-key.txt")"
+
+    # FIX P1-H2: delegate entirely to the authoritative get_age_public_key()
+    # in lib/crypto.sh (which calls _derive_age_public_key using grep/sed on
+    # the '# public key:' comment). The previous local duplicate used
+    # 'cut -d: -f2' which would silently truncate keys containing colons.
     local age_pub_key
-    age_pub_key=$(get_age_public_key "$age_key_file") || { log_error "Could not read Age public key from $age_key_file"; exit 1; }
+    age_pub_key=$(get_age_public_key "$age_key_file") || {
+        log_error "Could not read Age public key from $age_key_file"
+        exit 1
+    }
 
     local actual_type="$BACKUP_TYPE"
     if [[ "$BACKUP_TYPE" == "auto" ]]; then
@@ -715,8 +662,6 @@ main() {
 
     if [[ "$backup_success" == "true" && "$DRY_RUN" == "false" ]]; then
 
-        # Optional: full end-to-end verification (FATAL if enabled — a silently corrupt
-        # backup is worse than a known-failed one; discard and exit immediately).
         if [[ "$FULL_VERIFY" == "true" ]]; then
             if ! verify_backup_full "$backup_file" "$actual_type" "$TMPDIR_BACKUP"; then
                 log_error "Backup verification failed — discarding corrupt archive."
@@ -725,10 +670,25 @@ main() {
             fi
         fi
 
-        # Optional: offsite rclone sync (NON-FATAL — local backup already succeeded).
+        # FIX P2-M6: rclone failure is now fatal when --rclone is set.
+        # sync_to_rclone() returns 1 for missing binary OR unconfigured remote;
+        # the script exits non-zero so monitoring/cron captures the failure.
         local rclone_failed=false
         if [[ "$RCLONE_SYNC" == "true" ]]; then
-            sync_to_rclone "$backup_file" "$actual_type" || rclone_failed=true
+            if ! sync_to_rclone "$backup_file" "$actual_type"; then
+                rclone_failed=true
+                if [[ "$EMAIL_NOTIFY" == "true" ]]; then
+                    local subj="[VaultWarden] Offsite sync FAILED: $actual_type ($timestamp)"
+                    local bdy
+                    bdy="$(printf 'Backup type:  %s\nTimestamp:    %s\nFile:         %s\nHost:         %s\n\nOffsite rclone sync failed. Local backup is intact.\n' \
+                        "$actual_type" "$timestamp" \
+                        "$(basename "${backup_file:-unknown}")" \
+                        "$(hostname -f 2>/dev/null || hostname)")"
+                    send_notification_email "$subj" "$bdy" 2>/dev/null || true
+                fi
+                log_error "Offsite sync failed — see above. Local backup is safe."
+                exit 1
+            fi
         fi
 
         b_log_info "Cleaning up old backups (retention: $KEEP_DAYS days)..."
@@ -738,7 +698,6 @@ main() {
         if [[ "$EMAIL_NOTIFY" == "true" ]]; then
             local rclone_status="skipped"
             [[ "$RCLONE_SYNC" == "true" && "$rclone_failed" == "false" ]] && rclone_status="synced"
-            [[ "$RCLONE_SYNC" == "true" && "$rclone_failed" == "true"  ]] && rclone_status="FAILED"
 
             local subject="[VaultWarden] Backup completed: $actual_type ($timestamp)"
             local body
