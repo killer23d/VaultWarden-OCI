@@ -105,7 +105,7 @@ make health AUTO_RECOVER=true
 make health-email   # comprehensive + email
 ```
 
-> **Note:** `--comprehensive` and `--auto-recover` are the supported flags. Use `--quiet` to suppress non-error console output.
+> **Note:** Supported flags: `--comprehensive` (runs additional checks), `--auto-recover` (restarts unhealthy containers), and `--quiet` (suppresses non-error console output).
 
 #### Container-Specific Status
 
@@ -161,7 +161,7 @@ grep "ERROR" /var/lib/vaultwarden/logs/vaultwarden/vaultwarden.log
 grep "429" /var/lib/vaultwarden/logs/caddy/access.log | jq
 ```
 
-> **Note:** The default state directory is `/var/lib/vaultwarden`. If you customised `PROJECT_STATE_DIR` in `.env`, substitute that path in the commands above.
+> **Note:** The paths above use the default state directory `/var/lib/vaultwarden`. If you customised `PROJECT_STATE_DIR` in `.env`, replace `/var/lib/vaultwarden` with that value in the commands above.
 
 #### Log Retention (Caddy)
 
