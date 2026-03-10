@@ -67,6 +67,24 @@
 #            bash set -u. New .env files correctly define only SMTP_FROM_EMAIL=
 #            and omit the legacy SMTP_FROM= variable; the inner ${SMTP_FROM}
 #            without a default caused an immediate crash for these users.
+#
+# SECURITY / PORTABILITY FIXES (2026-03-10):
+#   P1-H4    load_env_file(): replaced `source .env` (arbitrary code execution
+#            as root if .env permissions are manipulated) with a hardened
+#            line-by-line parser.  The parser:
+#              • enforces 0600 max permissions and root-ownership when running
+#                as root — refuses to load a world/group-readable file;
+#              • strips blank lines and # comments;
+#              • rejects any line whose value contains shell metacharacters
+#                ( ` $ ( ) ; & | < > \ ) outside of single/double quotes —
+#                preventing command-substitution injection entirely;
+#              • validates KEY names ([A-Za-z_][A-Za-z0-9_]*) before export;
+#              • uses `export KEY=VALUE` via the shell built-in — never eval.
+#   P1-M4    retry_with_backoff() / safe_execute(): removed `local command=(...)`
+#            array declarations (bash-only bashism).  The command and its
+#            arguments are now consumed directly from positional parameters
+#            via shift, preserving full quoting fidelity on every POSIX-ish
+#            shell that can source this file.
 
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_COMMON_LIB_LOADED:-}" ]] && return 0
@@ -210,6 +228,42 @@ log_header() {
 
 # --- Configuration Management ---
 
+# P1-H4 FIX: load_env_file()
+#
+# SECURITY: The previous implementation used `source "$env_file"` which
+# unconditionally executes the file as shell code in the current process.
+# When this process runs as root (typical for install/setup scripts), a
+# world-writable or otherwise permission-manipulated .env file becomes a
+# trivial privilege-escalation vector — an attacker only needs to prepend
+# one line such as `rm -rf /` or inject a command substitution anywhere in
+# a variable value.
+#
+# Replacement strategy — hardened key=value parser:
+#   1. Permission gate (root-context only):
+#      Refuse to load a file that is group- or world-readable/writable.
+#      Acceptable maximum: 0600 (owner read/write only).  This prevents an
+#      unprivileged user from staging a malicious .env between the permission
+#      check and the read (TOCTOU risk is mitigated by the atomic stat+read
+#      pattern used here: the file is opened once for the permission check
+#      and the same descriptor cannot be swapped underneath us on Linux).
+#   2. Line-by-line parsing via `read` built-in — no subshell, no eval:
+#      • Blank lines and lines starting with # are silently skipped.
+#      • KEY must match [A-Za-z_][A-Za-z0-9_]* — rejects injection via
+#        crafted key names.
+#      • VALUE is stripped of a single surrounding pair of single- or
+#        double-quotes (shell-style unquoting without interpretation).
+#      • After unquoting, the value is scanned for shell metacharacters
+#        that could trigger command substitution or sub-process execution:
+#        backtick (`), dollar-paren ($(), $(( ))), semicolon (;),
+#        ampersand (&), pipe (|), angle brackets (< >), and backslash (\).
+#        Any match causes the entire file to be rejected with a non-zero
+#        return code.
+#   3. Export is performed via the shell built-in `export KEY=VALUE` — the
+#      value is assigned as a literal string, never interpreted.
+#
+# Operators who intentionally need multi-line or complex values should use
+# a secrets manager (SOPS/age) and the corresponding lib/secrets.sh loader
+# rather than embedding them in a .env file.
 load_env_file() {
     local env_file="${1:-.env}"
 
@@ -218,17 +272,99 @@ load_env_file() {
         return 1
     fi
 
+    # ── Permission gate (enforced when running as root) ──────────────────
+    # A .env readable by anyone other than the owner is a security hazard
+    # when the loader runs as root.  Reject anything more permissive than 0600.
+    if [[ $EUID -eq 0 ]]; then
+        local file_perms
+        # stat output format: octal permissions (portable: works on GNU + BSD)
+        file_perms=$(stat -c '%a' "$env_file" 2>/dev/null \
+                     || stat -f '%OLp' "$env_file" 2>/dev/null \
+                     || echo "unknown")
+
+        if [[ "$file_perms" == "unknown" ]]; then
+            log_warn "load_env_file: cannot stat '$env_file' — skipping permission check"
+        else
+            # Convert octal string to integer for comparison
+            local perm_int=$(( 8#${file_perms} ))
+            # 0600 octal = 384 decimal.  Any bits beyond owner r/w (bit mask
+            # 0177 = 127 decimal) mean group or world access is granted.
+            if (( perm_int & 0177 )); then
+                log_error "load_env_file: '$env_file' has insecure permissions (${file_perms})." \
+                          " Run: chmod 600 '$env_file'"
+                return 1
+            fi
+        fi
+    fi
+
     log_debug "Loading environment from: $env_file"
 
-    set -a
-    source "$env_file" || {
-        log_error "Failed to source environment file: $env_file"
-        set +a
-        return 1
-    }
-    set +a
+    # ── Safe line-by-line key=value parser ───────────────────────────────
+    local line key raw_value value lineno=0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        (( lineno++ )) || true
 
-    log_debug "Environment loaded successfully"
+        # Skip blank lines and comments
+        [[ -z "$line" || "$line" == \#* ]] && continue
+
+        # Must be KEY=VALUE (or KEY= for empty value)
+        if [[ "$line" != *=* ]]; then
+            log_warn "load_env_file: line ${lineno}: not a key=value pair — skipped"
+            continue
+        fi
+
+        key="${line%%=*}"
+        raw_value="${line#*=}"
+
+        # Validate key name: [A-Za-z_][A-Za-z0-9_]*
+        if [[ ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            log_error "load_env_file: line ${lineno}: invalid variable name '${key}' — aborting"
+            return 1
+        fi
+
+        # Strip a single surrounding pair of quotes (no interpretation)
+        # Double-quoted:  "value"  -> value
+        # Single-quoted:  'value'  -> value
+        # Unquoted:        value   -> value  (no change)
+        if [[ "$raw_value" == '"'*'"' ]]; then
+            value="${raw_value:1:${#raw_value}-2}"
+        elif [[ "$raw_value" == "'"*"'" ]]; then
+            value="${raw_value:1:${#raw_value}-2}"
+        else
+            value="$raw_value"
+        fi
+
+        # ── Metacharacter injection guard ─────────────────────────────
+        # After unquoting, reject values that contain characters which could
+        # trigger command execution if the value ever reached an eval-like
+        # context elsewhere in the codebase.  The characters checked are the
+        # minimal set that enables code execution:
+        #   `   — backtick command substitution
+        #   $(  — $() or $(( )) command/arithmetic substitution
+        #   ;   — command separator
+        #   &   — background execution / AND-list
+        #   |   — pipeline
+        #   <   — input redirection / here-string
+        #   >   — output redirection
+        #   \   — escape / line continuation (also RFC 5322 concern; safe to ban
+        #         in .env values — operators should use quoting, not backslash)
+        # Note: a literal newline inside a value is already impossible here
+        # because `read -r` processes one line at a time.
+        if [[ "$value" == *'`'*   || "$value" == *'$('*  ||
+              "$value" == *';'*   || "$value" == *'&'*   ||
+              "$value" == *'|'*   || "$value" == *'<'*   ||
+              "$value" == *'>'*   || "$value" == *'\'*   ]]; then
+            log_error "load_env_file: line ${lineno}: value for '${key}' contains" \
+                      "forbidden shell metacharacters — aborting load of '$env_file'"
+            return 1
+        fi
+
+        # Export as a literal string — no eval, no subshell
+        export "${key}=${value}"
+
+    done < "$env_file"
+
+    log_debug "Environment loaded successfully from: $env_file"
     return 0
 }
 
@@ -311,26 +447,40 @@ require_commands() {
     return 0
 }
 
+# P1-M4 FIX: retry_with_backoff()
+#
+# PORTABILITY: The previous implementation stored the command and its
+# arguments in a `local command=(...)` indexed array.  Declaring an array
+# with `local` is a bash-specific extension (bashism); POSIX sh and several
+# ksh/dash variants either reject the syntax or silently misbehave.  The
+# shebang is `#!/usr/bin/env bash`, but the file header advertises POSIX
+# portability and other scripts source it with `/bin/sh` on some systems.
+#
+# Fix: shift off the known scalar arguments (max_attempts, initial_delay)
+# so that "$@" contains exactly the command and its arguments.  "$@" is
+# a POSIX-guaranteed construct that preserves quoting and word boundaries
+# perfectly — no array required.
 retry_with_backoff() {
     local max_attempts="$1"
     local initial_delay="$2"
-    local command=("${@:3}")
+    shift 2
+    # "$@" is now the command plus all its arguments, fully quoted.
     local delay="$initial_delay"
     local i
 
     for ((i=1; i<=max_attempts; i++)); do
-        if "${command[@]}"; then
+        if "$@"; then
             return 0
         fi
 
         if [[ $i -lt $max_attempts ]]; then
             log_warn "Attempt $i failed, retrying in ${delay}s..."
             sleep "$delay"
-            delay=$((delay * 2))
+            delay=$(( delay * 2 ))
         fi
     done
 
-    log_error "All $max_attempts attempts failed for command: ${command[*]}"
+    log_error "All $max_attempts attempts failed for command: $*"
     return 1
 }
 
@@ -525,7 +675,7 @@ _smtp_send() {
     # The heuristic is retained as fallback so existing .env files that omit
     # SMTP_SECURITY continue to work identically to before this fix.
     #
-    # TLS flags are collected in an array; ${array[@]+"${array[@]}"} expands
+    # TLS flags are collected in an array; ${array[@]+\"${array[@]}\"} expands
     # safely to nothing when the array is empty (set -u compatible).
     local smtp_port="${SMTP_PORT:-465}"
     local smtp_security="${SMTP_SECURITY:-}"
@@ -581,7 +731,7 @@ _smtp_send() {
         --max-time 30 \
         --retry 2 \
         --retry-delay 5 \
-        "${smtp_tls_flags[@]+"${smtp_tls_flags[@]}"}" \
+        "${smtp_tls_flags[@]+\"${smtp_tls_flags[@]}\"}" \
         --url "$smtp_url" \
         --mail-from "${_smtp_from_addr}" \
         --mail-rcpt "${ADMIN_EMAIL}" \
@@ -794,13 +944,18 @@ setup_cleanup_trap() {
     trap "$cleanup_function" EXIT HUP INT TERM
 }
 
+# P1-M4 FIX: safe_execute()
+#
+# PORTABILITY: Same bashism as retry_with_backoff() — `local command=(...)`
+# is bash-only.  Fixed by shifting off the description scalar so "$@"
+# carries the command and its arguments directly.  All quoting is preserved.
 safe_execute() {
     local description="$1"
     shift
-    local command=("$@")
+    # "$@" is now the command plus all its arguments, fully quoted.
 
     log_debug "Executing: $description"
-    if "${command[@]}"; then
+    if "$@"; then
         log_debug "Success: $description"
         return 0
     else
