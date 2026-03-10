@@ -9,6 +9,8 @@
 # ✅ Fail2Ban SSH protection via host networking (FIXED)
 # ✅ Postfix capabilities hardened (CHOWN, SETUID, SETGID, NET_BIND_SERVICE, DAC_OVERRIDE, FOWNER only)
 # ✅ Log rotation limits on all runtime services (disk-fill prevention)
+# ✅ Init container uses chmod 700 on secret dirs and chmod 600 on secret files
+# ✅ vaultwarden network marked internal: true (no unnecessary outbound access)
 
 services:
   # =============================================================================
@@ -46,8 +48,8 @@ services:
       find /caddy_config -type f -exec chmod 640 {} + 2>/dev/null || true &&
       find /fail2ban -type d -exec chmod 750 {} + 2>/dev/null || true &&
       find /fail2ban -type f -exec chmod 640 {} + 2>/dev/null || true &&
-      chmod 755 /secrets /secrets/.docker_secrets 2>/dev/null || true &&
-      chmod 644 /secrets/.docker_secrets/* 2>/dev/null || true &&
+      chmod 700 /secrets /secrets/.docker_secrets 2>/dev/null || true &&
+      chmod 600 /secrets/.docker_secrets/* 2>/dev/null || true &&
       echo 'Init container completed - permissions set to ${PUID}:${PGID}'
       "
 
@@ -298,7 +300,12 @@ services:
     image: crazymax/fail2ban:${FAIL2BAN_VERSION:-1.1.0-r3}
     restart: unless-stopped
 
-    # HOST networking required for SSH iptables manipulation
+    # HOST networking required for SSH iptables manipulation.
+    # ACCEPTED RISK (NEW-3): host network_mode expands the attack surface and
+    # bypasses Docker network isolation; this is a deliberate tradeoff.
+    # cap_add NET_ADMIN (+ NET_RAW) grants broad host network manipulation;
+    # consider pre-generating iptables rules via a privileged init container
+    # if further hardening is desired in future iterations.
     network_mode: host
 
     environment:
@@ -385,6 +392,10 @@ networks:
   vaultwarden:
     name: vaultwarden_network
     driver: bridge
+    # internal: true prevents containers from initiating outbound internet
+    # connections through this network. Caddy handles all external traffic
+    # via its published ports (80/443); no other service requires egress.
+    internal: true
 
 # =============================================================================
 # DEPLOYMENT NOTES - SECURITY HARDENED EDITION
@@ -419,6 +430,8 @@ networks:
 # ✅ Postfix capabilities hardened (6 caps only)
 # ✅ WebSocket support enabled by default
 # ✅ Log rotation limits on all runtime services
+# ✅ Secret dirs chmod 700, secret files chmod 600 (init container)
+# ✅ vaultwarden network internal: true (no container egress)
 #
 # CLOUDFLARE RATE LIMITING (REQUIRED):
 # Configure these WAF rules in Cloudflare Dashboard:
@@ -451,6 +464,14 @@ networks:
 # - SMTP configured for 127.0.0.1:587 (host-mode compatible)
 # - Cannot use networks: directive (mutually exclusive with network_mode: host)
 #
+# INTERNAL NETWORK NOTE:
+# The vaultwarden bridge network is marked internal: true. This means
+# containers cannot initiate outbound connections through it. Caddy
+# reaches the internet exclusively via its published ports. If any
+# container requires egress (e.g., external SMTP relay from within a
+# container), move that service to a separate non-internal network or
+# route through the host.
+#
 # TESTING CHECKLIST:
 # □ Verify Caddy starts without errors: docker compose logs caddy
 # □ Verify caddy-cloudflare-ip module present:
@@ -464,6 +485,9 @@ networks:
 # □ Confirm fail2ban sees real IPs: docker exec vaultwarden_fail2ban fail2ban-client status vaultwarden-web-auth
 # □ Test WebSocket sync: Enable in client, verify real-time notifications
 # □ Check resource usage: docker stats (should be under limits)
+# □ Verify secret file perms: ls -la secrets/.docker_secrets/ (must show -rw-------)
+# □ Verify network isolation: docker network inspect vaultwarden_network | grep Internal
+#     Must show: "Internal": true
 #
 # PLATFORM COMPATIBILITY:
 # - SSH_LOG_PATH automatically detected by setup.sh
