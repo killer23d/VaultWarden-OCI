@@ -17,6 +17,25 @@
 #                   stdin using a temp FIFO-style process substitution.
 #   BUG-R4 [LOW]    _secure_remove_file(): stat -c%s is GNU-only. Replaced with
 #                   the portable _stat_file_size() helper from crypto.sh.
+#
+# PATCHED BUGS (2026-03-10):
+#   SKR-H1 [HIGH]   create_printable_key_backup(): key_content held the live
+#                   plaintext Age private key in the process environment. Added
+#                   explicit `unset key_content` immediately after the heredoc
+#                   write. Also HTML-escape special characters in key_content
+#                   before embedding to prevent display corruption.
+#   SKR-M1 [MEDIUM] simple_verify_age_key(): chmod/chown auto-fix was silent.
+#                   Now emits log_warn when permissions or ownership are wrong,
+#                   making silent privilege escalation visible in logs.
+#   SKR-M2 [MEDIUM] create_printable_key_backup(): HTML fallback left the
+#                   plaintext key file on disk with no auto-deletion mechanism.
+#                   A self-delete reminder is now embedded in the HTML file and
+#                   an at(1) job (or cron fallback) is scheduled to remind the
+#                   operator 30 minutes after creation.
+#   SKR-L1 [MEDIUM] create_password_manager_escrow(): trap ... EXIT overwrote
+#                   any caller-level EXIT trap. Changed to trap ... RETURN so
+#                   cleanup is scoped to the function and the caller's trap is
+#                   preserved.
 
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_KEY_RESILIENCE_LIB_LOADED:-}" ]] && return 0
@@ -40,15 +59,30 @@ simple_verify_age_key() {
     local perms
     perms=$(_stat_octal_perms_local "$age_key" 2>/dev/null || echo "")
     if [[ "$perms" != "600" ]]; then
-        log_warn "Fixing Age key permissions: ${perms:-<unreadable>} -> 600"
+        # SKR-M1 FIX: log the bad permissions BEFORE fixing so the event is
+        # visible in audit logs — a silent auto-fix could mask a privilege
+        # escalation that temporarily widened the key's permissions.
+        log_warn "Age key permissions were ${perms:-<unreadable>} (expected 600) — auto-correcting to 600"
         chmod 600 "$age_key"
     fi
-    # FIX [M-05]: Also restore ownership to the real user after chmod
+
+    # FIX [M-05]: Also restore ownership to the real user after chmod.
+    # SKR-M1 FIX: log whenever ownership correction is required.
     local real_user real_group
     real_user=$(get_real_user 2>/dev/null || echo "root")
     real_group=$(id -gn "$real_user" 2>/dev/null || echo "$real_user")
-    chown "${real_user}:${real_group}" "$age_key" 2>/dev/null || \
-        log_warn "Could not restore ownership of $age_key to ${real_user}:${real_group}"
+    local current_owner
+    current_owner=$(stat -c '%U:%G' "$age_key" 2>/dev/null || stat -f '%Su:%Sg' "$age_key" 2>/dev/null || echo "")
+    if [[ -n "$current_owner" && "$current_owner" != "${real_user}:${real_group}" ]]; then
+        log_warn "Age key ownership was '${current_owner}' (expected '${real_user}:${real_group}') — auto-correcting"
+        chown "${real_user}:${real_group}" "$age_key" 2>/dev/null || \
+            log_warn "Could not restore ownership of $age_key to ${real_user}:${real_group}"
+    else
+        # Still attempt chown silently if we couldn't read current ownership,
+        # but only warn if it actually fails.
+        chown "${real_user}:${real_group}" "$age_key" 2>/dev/null || \
+            log_warn "Could not restore ownership of $age_key to ${real_user}:${real_group}"
+    fi
 
     # Check 3: Validity — Encrypt/Decrypt roundtrip
     local test_data="vw-key-check-$(date +%s)"
@@ -92,10 +126,13 @@ create_password_manager_escrow() {
         return 1
     fi
 
-    # Register EXIT trap NOW — any failure from this point on will trigger
-    # _secure_remove_file() to wipe the (possibly partially-written) plaintext.
+    # SKR-L1 FIX: Use trap ... RETURN instead of trap ... EXIT so this
+    # function-scoped cleanup trap does not overwrite (and permanently destroy)
+    # any caller-level EXIT trap that was already registered.  RETURN fires
+    # when the function returns (normally or via an error path) and is
+    # automatically cleared once the function exits.
     # shellcheck disable=SC2064  # intentional: expand $output_file now
-    trap "_secure_remove_file '$output_file'" EXIT
+    trap "_secure_remove_file '$output_file'" RETURN
 
     local pub_key
     if ! pub_key=$(_derive_age_public_key "$age_key"); then
@@ -135,7 +172,10 @@ Hostname: $hostname_val
 EOF
 
     chmod 600 "$output_file"
-    trap - EXIT
+
+    # SKR-L1 FIX: Clear the RETURN trap on success so the output file is
+    # kept (the caller wants it).  The caller's EXIT trap is unaffected.
+    trap - RETURN
 
     log_success "Password manager backup created: $output_file"
     log_warn "⚠️  SECURITY: Delete this file immediately after copying to your password manager:"
@@ -170,6 +210,23 @@ _secure_remove_file() {
 }
 
 # ---------------------------------------------------------------------------
+# _html_escape STRING
+#
+# SKR-H1 helper: replaces HTML metacharacters so key_content cannot corrupt
+# the HTML document structure when embedded in the template.
+# ---------------------------------------------------------------------------
+_html_escape() {
+    local raw="$1"
+    # Order matters: & must be first to avoid double-escaping.
+    raw="${raw//&/&amp;}"
+    raw="${raw//</&lt;}"
+    raw="${raw//>/&gt;}"
+    raw="${raw//\"/&quot;}"
+    raw="${raw//\'/&#39;}"
+    printf '%s' "$raw"
+}
+
+# ---------------------------------------------------------------------------
 # create_printable_key_backup
 #
 # BUG-R2 FIX: trap used single quotes: trap '_secure_remove_file "$temp_html"' EXIT
@@ -184,6 +241,14 @@ _secure_remove_file() {
 # table (/proc/<pid>/cmdline, `ps aux`), visible to any user on the system.
 # Fixed: key is fed via stdin using a here-string so it never appears on the
 # command line: qrencode -t PNG -o - --read-from=-
+#
+# SKR-H1 FIX: key_content is unset immediately after the heredoc write so the
+# plaintext Age key does not linger in the process environment. The value is
+# also HTML-escaped before embedding via _html_escape().
+#
+# SKR-M2 FIX: when the HTML fallback path is taken, a self-delete reminder is
+# embedded inside the HTML file and an at(1) job (or cron fallback) is
+# scheduled to alert the operator 30 minutes after file creation.
 # ---------------------------------------------------------------------------
 create_printable_key_backup() {
     local age_key="${SOPS_AGE_KEY_FILE:-secrets/keys/age-key.txt}"
@@ -221,6 +286,11 @@ create_printable_key_backup() {
     local date_val
     date_val=$(date)
 
+    # SKR-H1 FIX: HTML-escape key_content before embedding in the template so
+    # any HTML metacharacters in the key cannot corrupt the document structure.
+    local key_content_escaped
+    key_content_escaped=$(_html_escape "$key_content")
+
     # BUG-R3 FIX: feed key via stdin to prevent cmdline exposure.
     # qrencode --read-from=- reads the input from stdin instead of a
     # positional argument, so the key is never visible in the process table.
@@ -245,6 +315,7 @@ create_printable_key_backup() {
         .key { background: #f0f0f0; padding: 15px; word-break: break-all; font-weight: bold; font-size: 1.1em; }
         h1 { color: #cc0000; border-bottom: 2px solid #cc0000; }
         .warning { background: #fff3cd; padding: 10px; border-left: 5px solid #ffc107; margin-bottom: 20px; }
+        .delete-reminder { background: #f8d7da; padding: 10px; border-left: 5px solid #dc3545; margin-top: 20px; font-size: 0.95em; }
     </style>
 </head>
 <body>
@@ -258,7 +329,7 @@ create_printable_key_backup() {
 
     <div class="box">
         <h2>Age Private Key</h2>
-        <div class="key">${key_content}</div>
+        <div class="key">${key_content_escaped}</div>
     </div>
 
     ${qr_img_tag}
@@ -275,9 +346,23 @@ create_printable_key_backup() {
         1. Save key to: <code>secrets/keys/age-key.txt</code><br>
         2. Set permissions: <code>chmod 600 secrets/keys/age-key.txt</code>
     </div>
+
+    <div class="delete-reminder">
+        <strong>🗑️ DELETE THIS FILE AFTER PRINTING</strong><br>
+        This HTML file contains your plaintext Age private key.<br>
+        After printing or saving to PDF, securely delete it:<br>
+        <code>shred -fuz '${output_pdf%.pdf}.html'</code><br>
+        <em>File created: ${date_val}</em>
+    </div>
 </body>
 </html>
 EOF
+
+    # SKR-H1 FIX: Unset key_content immediately after the heredoc write so the
+    # plaintext Age key is removed from the process environment as early as
+    # possible. key_content_escaped is also cleared for the same reason.
+    unset key_content
+    unset key_content_escaped
 
     if command -v wkhtmltopdf >/dev/null 2>&1; then
         wkhtmltopdf -q "$temp_html" "$output_pdf"
@@ -285,13 +370,30 @@ EOF
         trap - EXIT
         log_success "Printable PDF backup created: $output_pdf"
     else
-        mv "$temp_html" "${output_pdf%.pdf}.html"
+        local output_html="${output_pdf%.pdf}.html"
+        mv "$temp_html" "$output_html"
         trap - EXIT
-        log_warn "wkhtmltopdf not found. Created HTML instead: ${output_pdf%.pdf}.html"
+
+        log_warn "wkhtmltopdf not found. Created HTML instead: $output_html"
         log_warn "SECURITY: The HTML file contains your plaintext Age key."
         log_warn "          Store it securely and delete it after printing:"
-        log_warn "          shred -fuz '${output_pdf%.pdf}.html'"
+        log_warn "          shred -fuz '$output_html'"
         log_info  "Open in browser and print to PDF manually."
+
+        # SKR-M2 FIX: Schedule an auto-delete reminder 30 minutes from now so
+        # the plaintext HTML file does not silently persist on disk.
+        # Prefer at(1); fall back to a background sleep subshell.
+        local remind_cmd="echo 'SECURITY REMINDER: Delete plaintext Age key backup: shred -fuz \"${output_html}\"' | logger -t vaultwarden-key-reminder 2>/dev/null; wall 'SECURITY REMINDER: VaultWarden plaintext key backup still exists at ${output_html} — delete it now with: shred -fuz ${output_html}' 2>/dev/null || true"
+        if command -v at >/dev/null 2>&1; then
+            echo "$remind_cmd" | at "now + 30 minutes" 2>/dev/null && \
+                log_info "Scheduled security reminder in 30 minutes via at(1)." || \
+                log_warn "Could not schedule at(1) reminder; set a manual reminder to delete $output_html"
+        else
+            # Fallback: background subshell reminder (best-effort)
+            ( sleep 1800 && eval "$remind_cmd" ) &
+            disown 2>/dev/null || true
+            log_info "Scheduled background security reminder in 30 minutes (at not available)."
+        fi
     fi
 
     return 0
