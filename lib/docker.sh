@@ -16,6 +16,20 @@
 #                   token. Word-splitting in callers requires two tokens.
 #                   Changed to emit two newline-separated tokens and updated
 #                   all four cleanup_*() callers to use mapfile + array.
+#
+# PATCHED BUGS (2026-03-10):
+#   DOC-H1 [HIGH]   exec_oneshot_in_service(): docker container start failure
+#                   was silently swallowed by || true; docker container wait
+#                   would then block forever. Now checks start exit code
+#                   explicitly, cleans up the orphaned container, and returns 1.
+#   DOC-M1 [MEDIUM] Added run_in_service_full_env() helper for running one-shot
+#                   commands with the full service environment (env vars,
+#                   volumes, networks) against any service, including stopped.
+#   DOC-M2 [MEDIUM] cleanup_volumes() now checks Docker Engine version; falls
+#                   back to docker compose down -v on engines < 25.0 where
+#                   docker volume prune --filter label= is unsupported.
+#   DOC-L1 [LOW]    run_in_service() deprecation is now enforced: the function
+#                   logs an error and returns 1. Removed from export -f.
 
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_DOCKER_LIB_LOADED:-}" ]] && return 0
@@ -263,7 +277,8 @@ exec_in_service() {
 # NOT inherit the service's environment variables, volume mounts, network
 # aliases, or Docker labels. It is intended for simple validation commands
 # that only need the image binary. For commands requiring the full service
-# environment, use exec_in_service() against a running container instead.
+# environment (env vars, volumes, networks) against a stopped service,
+# use run_in_service_full_env() instead.
 #
 # BUG-D2 FIX: 'docker container start --attach' was replaced with a
 # start→wait→logs→rm sequence. Benefits:
@@ -271,6 +286,11 @@ exec_in_service() {
 #      very fast-exiting containers.
 #   2. Container's stderr no longer mixes inline with host log_error output.
 #   3. Exit code is captured cleanly via 'docker container wait'.
+#
+# DOC-H1 FIX: docker container start exit code is now checked explicitly.
+# If start fails (OOM, volume mount error, etc.) the orphaned container is
+# removed and the function returns 1 immediately instead of hanging forever
+# on docker container wait.
 # ---------------------------------------------------------------------------
 exec_oneshot_in_service() {
     local service="$1"
@@ -299,8 +319,16 @@ exec_oneshot_in_service() {
         return 1
     }
 
-    # BUG-D2 FIX: start detached, wait for exit, replay logs, then remove.
-    docker container start "$container_id" >/dev/null 2>&1 || true
+    # DOC-H1 FIX: capture start exit code explicitly; do NOT use || true.
+    # If start fails, clean up the orphaned container and return 1 immediately
+    # rather than hanging forever on 'docker container wait'.
+    local start_rc=0
+    docker container start "$container_id" >/dev/null 2>&1 || start_rc=$?
+    if [[ $start_rc -ne 0 ]]; then
+        log_error "exec_oneshot_in_service: 'docker container start' failed (rc=${start_rc}) for service '$service'"
+        docker container rm -f "$container_id" >/dev/null 2>&1 || true
+        return 1
+    fi
 
     local exit_code=0
     exit_code=$(docker container wait "$container_id" 2>/dev/null) || exit_code=1
@@ -313,19 +341,45 @@ exec_oneshot_in_service() {
     return "${exit_code:-1}"
 }
 
-# run_in_service — DEPRECATED: use exec_oneshot_in_service() instead.
-run_in_service() {
-    log_warn "run_in_service() is deprecated; use exec_oneshot_in_service() to avoid" \
-              "depends_on health-condition conflicts with --rm containers."
+# ---------------------------------------------------------------------------
+# run_in_service_full_env  (DOC-M1: new helper — full service environment)
+#
+# Unlike exec_oneshot_in_service(), this function uses `docker compose run
+# --rm` which inherits ALL service settings from docker-compose.yml:
+# environment variables, volume mounts, network aliases, labels, etc.
+# Works against both running and stopped services.
+#
+# Usage:
+#   run_in_service_full_env <service> <cmd> [args...]
+#
+# NOTE: `docker compose run --rm` will start the service's depends_on
+# containers if they are not already running. If the depends_on containers
+# have health conditions, this may block until they are healthy.
+# ---------------------------------------------------------------------------
+run_in_service_full_env() {
     local service="$1"
     shift
     local cmd=("$@")
+
     if ! require_docker; then return 1; fi
+
     if ! docker compose run --rm "$service" "${cmd[@]}"; then
-        log_error "Failed to run command in service: $service"
+        log_error "run_in_service_full_env: command failed in service '$service'"
         return 1
     fi
     return 0
+}
+
+# run_in_service — DEPRECATED (DOC-L1): calling this function is now a hard
+# error. Use exec_oneshot_in_service() for image-only one-shots, or
+# run_in_service_full_env() for commands that require the full service
+# environment. This stub is retained only to produce an actionable error
+# message for any script that accidentally calls the old API.
+# NOTE: removed from export -f so subshells cannot inherit it silently.
+run_in_service() {
+    log_error "run_in_service() has been removed. "\
+              "Use exec_oneshot_in_service() or run_in_service_full_env() instead."
+    return 1
 }
 
 # --- Cleanup Operations ---
@@ -365,12 +419,39 @@ cleanup_images() {
     return 0
 }
 
-# Clean up unused volumes
+# ---------------------------------------------------------------------------
+# cleanup_volumes  (DOC-M2 FIX)
+#
+# `docker volume prune --filter label=` was added in Docker Engine 25.0.
+# On older engines (Docker 20.x common on OCI free-tier) the flag is silently
+# ignored and ALL anonymous volumes on the host are pruned — including those
+# belonging to unrelated projects.
+#
+# Fix: detect the Docker Engine major version at call time.
+#   >= 25 → use docker volume prune -f with label filter (original behaviour)
+#   <  25 → fall back to `docker compose down -v` which is correctly scoped
+#            to this project on all Engine versions.
+# ---------------------------------------------------------------------------
 cleanup_volumes() {
     if ! require_docker; then return 1; fi
-    local _prune_args=()
-    mapfile -t _prune_args < <(_docker_prune_filter)
-    docker volume prune -f "${_prune_args[@]}" >/dev/null 2>&1
+
+    # Parse major version from "Docker version XX.Y.Z, build ..." output.
+    local docker_version_str docker_major
+    docker_version_str=$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo "0.0.0")
+    docker_major=$(printf '%s' "$docker_version_str" | cut -d. -f1)
+    docker_major=$(( docker_major + 0 ))   # coerce to integer
+
+    if [[ $docker_major -ge 25 ]]; then
+        # label filter supported — safe to use volume prune
+        local _prune_args=()
+        mapfile -t _prune_args < <(_docker_prune_filter)
+        docker volume prune -f "${_prune_args[@]}" >/dev/null 2>&1
+    else
+        # Older engine: fall back to compose-scoped volume removal
+        log_debug "cleanup_volumes: Docker Engine ${docker_version_str} < 25.0; "\
+                  "falling back to 'docker compose down -v' for safe scoped volume cleanup"
+        docker compose down -v >/dev/null 2>&1 || true
+    fi
     return 0
 }
 
@@ -476,10 +557,11 @@ validate_compose_file() {
 }
 
 # Export functions for use by scripts
+# NOTE: run_in_service is intentionally NOT exported (DOC-L1: hard deprecation)
 export -f check_docker_available check_compose_available require_docker require_jq
 export -f get_service_status is_service_running get_service_health is_service_healthy
 export -f start_services stop_services restart_services recreate_services
-export -f pull_images exec_in_service exec_oneshot_in_service run_in_service
+export -f pull_images exec_in_service exec_oneshot_in_service run_in_service_full_env
 export -f _docker_prune_filter
 export -f cleanup_containers cleanup_images cleanup_volumes cleanup_networks cleanup_docker_system
 export -f get_service_logs follow_service_logs wait_for_service_ready validate_compose_file

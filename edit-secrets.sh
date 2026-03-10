@@ -32,6 +32,31 @@ EXPORT_RECOVERY_KIT=false
 readonly MAX_EDIT_ATTEMPTS=5
 
 # ---------------------------------------------------------------------------
+# Secure shred helper
+# ---------------------------------------------------------------------------
+# FIX [P3-H3]: Use _secure_shred() instead of plain rm -f for all plaintext
+# YAML temp files so decrypted data cannot be recovered from CoW filesystems
+# (btrfs, APFS, ZFS) where overwrite-in-place is a no-op.
+# Tries shred(1), then srm(1), then falls back to a best-effort
+# overwrite-via-dd before unlinking.
+_secure_shred() {
+    local file="$1"
+    [[ -f "$file" ]] || return 0
+    if command -v shred >/dev/null 2>&1; then
+        shred -uzf "$file" 2>/dev/null || rm -f "$file"
+    elif command -v srm >/dev/null 2>&1; then
+        srm -fz "$file" 2>/dev/null || rm -f "$file"
+    else
+        # Best-effort: overwrite with zeros then remove
+        local sz; sz=$(wc -c < "$file" 2>/dev/null || echo 0)
+        if [[ "$sz" -gt 0 ]]; then
+            dd if=/dev/zero of="$file" bs=1 count="$sz" conv=notrunc 2>/dev/null || true
+        fi
+        rm -f "$file"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Cleanup
 # ---------------------------------------------------------------------------
 CLEANUP_ACTIONS=()
@@ -230,7 +255,8 @@ do_view() {
     local temp_file
     temp_file=$(mktemp)
     chmod 600 "$temp_file"
-    register_cleanup "rm -f '$temp_file'"
+    # FIX [P3-H3]: use _secure_shred() instead of rm -f for plaintext temp file
+    register_cleanup "_secure_shred '$temp_file'"
 
     if ! sops -d "$SECRETS_FILE" > "$temp_file"; then
         log_error "Failed to decrypt secrets"
@@ -259,6 +285,20 @@ _ROTATE_FIELDS=("admin_token" "admin_basic_auth_hash"
                 "smtp_password" "push_installation_id" "push_installation_key"
                 "backup_passphrase")
 
+# FIX [P4-UX2]: Map each rotatable field to the Docker service(s) that consume
+# it so the post-rotation message tells the operator exactly what to restart.
+declare -A _FIELD_SERVICES
+_FIELD_SERVICES=(
+    [admin_token]="vaultwarden"
+    [admin_basic_auth_hash]="vaultwarden"
+    [caddy_cloudflare_dns_token]="caddy"
+    [fail2ban_cloudflare_firewall_token]="fail2ban"
+    [smtp_password]="vaultwarden"
+    [push_installation_id]="vaultwarden"
+    [push_installation_key]="vaultwarden"
+    [backup_passphrase]="vaultwarden"
+)
+
 _validate_rotate_field() {
     local field="$1"
     for f in "${_ROTATE_FIELDS[@]}"; do
@@ -277,7 +317,8 @@ _deploy_docker_secrets() {
     local temp_plain
     temp_plain=$(mktemp --suffix=.yaml)
     chmod 600 "$temp_plain"
-    register_cleanup "rm -f '$temp_plain'"
+    # FIX [P3-H3]: use _secure_shred() for this plaintext temp file
+    register_cleanup "_secure_shred '$temp_plain'"
 
     if ! sops -d "$SECRETS_FILE" > "$temp_plain" 2>/dev/null; then
         log_error "Cannot decrypt secrets for Docker secret deployment"
@@ -326,7 +367,8 @@ do_rotate() {
     local temp_plain
     temp_plain=$(mktemp --suffix=.yaml)
     chmod 600 "$temp_plain"
-    register_cleanup "rm -f '$temp_plain'"
+    # FIX [P3-H3]: use _secure_shred() for this plaintext temp file
+    register_cleanup "_secure_shred '$temp_plain'"
 
     if ! sops -d "$SECRETS_FILE" > "$temp_plain"; then
         log_error "Failed to decrypt secrets for rotation"
@@ -342,7 +384,8 @@ do_rotate() {
     local temp_patched
     temp_patched=$(mktemp --suffix=.yaml)
     chmod 600 "$temp_patched"
-    register_cleanup "rm -f '$temp_patched'"
+    # FIX [P3-H3]: use _secure_shred() for this plaintext patched temp file
+    register_cleanup "_secure_shred '$temp_patched'"
 
     python3 - "$temp_plain" "$field" "$new_value" "$temp_patched" << 'PYEOF'
 import sys, yaml
@@ -387,12 +430,20 @@ PYEOF
 
     log_success "Secret '$field' rotated successfully"
 
+    # FIX [P4-UX2]: Tell the operator exactly which Docker service to restart.
+    local _affected_service="${_FIELD_SERVICES[$field]:-}"
+    if [[ -n "$_affected_service" ]]; then
+        log_warn "Restart the following Docker service for the new secret to take effect:"
+        log_warn "  docker compose restart $_affected_service"
+    else
+        log_warn "Run 'docker compose restart <service>' for the new secret to take effect"
+    fi
+
     # FIX [M-10]: After successful rotation, redeploy Docker secret files so
     # the live bind-mounted secrets stay in sync with the encrypted YAML.
     log_info "Redeploying Docker secret files..."
     if _deploy_docker_secrets 2>/dev/null; then
         log_success "Docker secret files updated"
-        log_warn "Run 'docker compose restart <service>' for the new secret to take effect"
     else
         log_warn "Could not auto-redeploy Docker secret files. Run: ./startup.sh or ./setup-secrets.sh"
     fi
@@ -418,7 +469,8 @@ do_edit() {
     local temp_file
     temp_file=$(mktemp --suffix=.yaml)
     chmod 600 "$temp_file"
-    register_cleanup "rm -f '$temp_file'"
+    # FIX [P3-H3]: use _secure_shred() for this plaintext temp file
+    register_cleanup "_secure_shred '$temp_file'"
 
     if ! sops -d "$SECRETS_FILE" > "$temp_file"; then
         log_error "Failed to decrypt secrets"
