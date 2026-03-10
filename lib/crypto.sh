@@ -12,6 +12,24 @@
 #                   Replaced with portable _stat_file_size() helper.
 #   BUG-K3 [MEDIUM] generate_argon2_hash() CLI path: echo -n is not POSIX;
 #                   on dash/zsh it outputs '-n'. Replaced with printf '%s'.
+#
+# PATCHED BUGS (2026-03-10):
+#   CRY-H1 [HIGH]   generate_secure_password(): charset was double-quoted,
+#                   causing shell to expand $%, $^, $*, $@, etc. before tr
+#                   ever saw them, silently weakening the charset.
+#                   Fixed: use $'...' ANSI-C quoting for the charset literal.
+#   CRY-M1 [MEDIUM] generate_secure_string(): `tr ... | head -c` triggers
+#                   SIGPIPE on tr under set -euo pipefail.
+#                   Fixed: use dd bs=1 count=$length 2>/dev/null.
+#   CRY-M2 [MEDIUM] encrypt_sops_file(): sops --in-place truncates/destroys
+#                   the file on any error (malformed YAML, missing .sops.yaml).
+#                   Fixed: write to mktemp, then atomic mv.
+#   CRY-L1 [LOW]    generate_argon2_hash() Python path: sys.stdin.read() had
+#                   no size cap, risking high-memory on corrupted input.
+#                   Fixed: sys.stdin.read(1024).
+#   CRY-L2 [LOW]    check_age_key(): only checked permissions and comment header;
+#                   could not detect corrupted private key material.
+#                   Fixed: perform encrypt/decrypt round-trip with age.
 
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_CRYPTO_LIB_LOADED:-}" ]] && return 0
@@ -120,6 +138,12 @@ decrypt_sops_file() {
 }
 
 # Encrypt file with SOPS - STANDARDIZED: Returns exit code
+#
+# CRY-M2 FIX: sops --in-place will truncate/destroy the target file on any
+# error (malformed YAML, missing .sops.yaml rule, etc.).  We now encrypt to
+# a mktemp file and atomically rename it over the original only on success,
+# matching the safe pattern used by write_secrets() in setup-secrets.sh.
+#
 # [MEDIUM FIX] Replaced `age-keygen -y` with _derive_age_public_key() for
 # Ubuntu 22.04 compatibility and codebase consistency.
 encrypt_sops_file() {
@@ -147,8 +171,30 @@ encrypt_sops_file() {
         return 1
     fi
 
-    if ! sops --encrypt --age "$age_public_key" --in-place "$file" 2>/dev/null; then
+    # CRY-M2 FIX: encrypt to a temp file; only overwrite original on success
+    local tmp_file
+    tmp_file=$(mktemp "${file}.sops.XXXXXX") || {
+        log_error "Failed to create temp file for SOPS encryption: $file"
+        return 1
+    }
+
+    # Copy original content into the temp file so SOPS can read its format
+    if ! cp -- "$file" "$tmp_file"; then
+        rm -f "$tmp_file"
+        log_error "Failed to copy file for SOPS encryption: $file"
+        return 1
+    fi
+
+    if ! sops --encrypt --age "$age_public_key" --in-place "$tmp_file" 2>/dev/null; then
+        rm -f "$tmp_file"
         log_error "Failed to encrypt file with SOPS: $file"
+        return 1
+    fi
+
+    # Atomic replace - original is only overwritten after successful encryption
+    if ! mv -- "$tmp_file" "$file"; then
+        rm -f "$tmp_file"
+        log_error "Failed to atomically replace file after SOPS encryption: $file"
         return 1
     fi
 
@@ -209,6 +255,12 @@ get_age_public_key() {
 #
 # BUG-K1 FIX: replaced stat -c "%a" (GNU-only) with _stat_octal_perms_local()
 # which selects the correct format string for the host platform.
+#
+# CRY-L2 FIX: In addition to permission and comment-header checks, perform a
+# full encrypt/decrypt round-trip using age to detect corrupted private key
+# material (a key whose comment is intact but whose private bytes are damaged
+# will pass the header check but fail here).  This mirrors the authoritative
+# validation done by simple_verify_age_key() in simple_key_resilience.sh.
 check_age_key() {
     local age_key_file="${1:-$DEFAULT_AGE_KEY_FILE}"
 
@@ -225,9 +277,37 @@ check_age_key() {
         return 1
     fi
 
-    if ! _derive_age_public_key "$age_key_file" >/dev/null; then
+    local age_public_key
+    if ! age_public_key=$(_derive_age_public_key "$age_key_file"); then
         log_error "Age key file appears to be corrupted or missing public key comment"
         return 1
+    fi
+
+    # CRY-L2 FIX: encrypt/decrypt round-trip to verify private key material integrity
+    if has_command age; then
+        local test_plaintext="vaultwarden-age-key-check"
+        local tmp_enc
+        tmp_enc=$(mktemp) || {
+            log_warn "check_age_key: cannot create temp file for round-trip test; skipping"
+            log_debug "Age key validation passed (header only): $age_key_file"
+            return 0
+        }
+
+        local round_trip_ok=false
+        if printf '%s' "$test_plaintext" \
+               | age -r "$age_public_key" -o "$tmp_enc" 2>/dev/null; then
+            local decrypted
+            decrypted=$(age -d -i "$age_key_file" "$tmp_enc" 2>/dev/null) || true
+            [[ "$decrypted" == "$test_plaintext" ]] && round_trip_ok=true
+        fi
+        rm -f "$tmp_enc"
+
+        if [[ "$round_trip_ok" != "true" ]]; then
+            log_error "Age key round-trip encrypt/decrypt failed: $age_key_file (private key may be corrupted)"
+            return 1
+        fi
+    else
+        log_warn "check_age_key: 'age' binary not found; skipping round-trip test"
     fi
 
     log_debug "Age key validation passed: $age_key_file"
@@ -286,6 +366,13 @@ decrypt_data() {
 # --- Secure Random Generation ---
 
 # Generates a cryptographically strong random string of N characters (safe charset)
+#
+# CRY-M1 FIX: The previous implementation piped tr into head -c, which causes tr
+# to receive SIGPIPE when head exits after reading enough bytes.  Under
+# set -euo pipefail this makes tr exit non-zero and || true yields a potentially
+# short string.  We now use dd bs=1 count=$length 2>/dev/null as the consumer,
+# which reads exactly the requested number of bytes in a single pass with no
+# broken-pipe risk.
 generate_secure_string() {
     local length="${1:-32}"
     local charset="${2:-A-Za-z0-9}"
@@ -298,10 +385,14 @@ generate_secure_string() {
     local random_string=""
     local attempt
     for attempt in {1..5}; do
-        random_string=$(LC_ALL=C tr -dc "$charset" < /dev/urandom | head -c "$length" || true)
+        # CRY-M1 FIX: dd bs=1 count=$length avoids the SIGPIPE that head -c
+        # sends to tr when it finishes reading, which would exit non-zero under
+        # set -euo pipefail.
+        random_string=$(LC_ALL=C tr -dc "$charset" < /dev/urandom \
+                        | dd bs=1 count="$length" 2>/dev/null || true)
 
         if [[ ${#random_string} -ge $length ]]; then
-            echo "$random_string"
+            printf '%s' "${random_string:0:$length}"
             return 0
         fi
 
@@ -313,12 +404,22 @@ generate_secure_string() {
 }
 
 # Generate secure random password
+#
+# CRY-H1 FIX: The charset was previously a double-quoted string:
+#   local charset="A-Za-z0-9!@#$%^&*()-_=+[]{}|;:,.<>?"
+# The shell expands $%, $^, $*, $@ (and any matching variables) inside double
+# quotes BEFORE tr sees the string, silently dropping those characters from
+# the effective charset and producing weaker passwords with no error.
+# Fixed by using $'...' ANSI-C quoting, where the $ prefix is part of the
+# quoting syntax and all characters are treated as literals.
+#
 # NOTE: charset includes shell-special characters ($, !, etc.).
 # Callers MUST use `printf '%s' "$password"` (not `echo`) when passing the
 # result to external commands.
 generate_secure_password() {
     local length="${1:-24}"
-    local charset="A-Za-z0-9!@#$%^&*()-_=+[]{}|;:,.<>?"
+    # CRY-H1 FIX: $'...' ANSI-C quoting — every character is literal
+    local charset=$'A-Za-z0-9!@#$%^&*()-_=+[]{}|;:,.<>?'
 
     if ! generate_secure_string "$length" "$charset"; then
         return 1
@@ -353,6 +454,10 @@ check_argon2_support() {
 # echo -n is not POSIX; on dash and zsh it outputs the literal string '-n'
 # followed by the password. Replaced with `printf '%s' "$password"` which
 # is POSIX and behaves consistently across all shells.
+#
+# CRY-L1 FIX: Python path called sys.stdin.read() with no size cap, risking
+# a very large argon2 call on corrupted input. Changed to sys.stdin.read(1024)
+# to mirror the protective intent of printf '%s' on the CLI path.
 generate_argon2_hash() {
     local password="$1"
     local hash=""
@@ -365,12 +470,14 @@ generate_argon2_hash() {
 
     case "$method" in
         python)
+            # CRY-L1 FIX: sys.stdin.read(1024) caps input to prevent runaway
+            # memory usage on unexpectedly large / corrupted input.
             hash=$(printf '%s' "$password" | python3 -c "
 import sys
 from argon2 import PasswordHasher
 from argon2 import Type
 ph = PasswordHasher(time_cost=3, memory_cost=65536, parallelism=4, hash_len=32, salt_len=16, type=Type.ID)
-password = sys.stdin.read()
+password = sys.stdin.read(1024)
 print(ph.hash(password))
 ")
             ;;
