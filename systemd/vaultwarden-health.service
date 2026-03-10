@@ -9,7 +9,11 @@ ConditionPathExists=/opt/vaultwarden-scripts/health.sh
 Type=oneshot
 WorkingDirectory=/opt/vaultwarden-scripts
 EnvironmentFile=/etc/vaultwarden/vaultwarden.env
-ExecStart=/opt/vaultwarden-scripts/health.sh --quiet
+# FIX (H-L2): Include --auto-recover and --email so that timer-driven runs
+# perform self-healing and send alerts as the "set-and-forget" design intends.
+# To run in passive/observe-only mode instead, remove those two flags and add
+# --quiet so failures are still journalled without triggering recovery actions.
+ExecStart=/opt/vaultwarden-scripts/health.sh --auto-recover --email
 User=root
 StandardOutput=journal
 StandardError=journal

@@ -11,6 +11,10 @@
 # FIXED: BUG-V - sanitize user-data before embedding in JSON string fields
 # FIXED: BUG-W - read BACKUP_DIR from .env; fall back to PROJECT_ROOT/backups
 # FIXED: Auto-recovery single-container limit - per-container recovery (not first-only)
+# FIXED: H-M1 - use get_config_value() for DOMAIN in check_service_accessibility
+# FIXED: H-M2 - guard size_history_file with install -m 600 before writing
+# FIXED: H-L1 - add explicit parse-failure guard/log_warn in top CPU fallback
+# FIXED: H-L2 - vaultwarden-health.service ExecStart includes --auto-recover --email
 
 set -euo pipefail
 
@@ -305,21 +309,21 @@ check_service_accessibility() {
         return 1
     fi
 
-    # Optional: Check external if domain is configured
-    if [[ -f ".env" ]]; then
-        local domain
-        domain=$(grep "^DOMAIN=" .env | head -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" || echo "")
-        if [[ -n "$domain" ]]; then
-            local clean_domain
-            clean_domain=$(echo "$domain" | sed 's|https\?://||; s|/.*$||')
-            if curl -sf --max-time 5 "https://$clean_domain/alive" >/dev/null 2>&1; then
-                health_log_success "External web access: OK"
-            else
-                health_log_warn "External web access: FAILED (Check Cloudflare/DNS)"
-                # Don't fail the whole check if only external is down (could be just a network blip)
-                HEALTH_RESULTS["accessibility"]="degraded"
-                return 0
-            fi
+    # FIX (H-M1): Use get_config_value() instead of bare grep/cut so that DOMAIN
+    # values containing shell metacharacters are safely retrieved and do not leak
+    # into the curl URL argument.
+    local domain
+    domain=$(get_config_value "DOMAIN" 2>/dev/null || echo "")
+    if [[ -n "$domain" ]]; then
+        local clean_domain
+        clean_domain=$(printf '%s' "$domain" | sed 's|https\?://||; s|/.*$||')
+        if curl -sf --max-time 5 "https://$clean_domain/alive" >/dev/null 2>&1; then
+            health_log_success "External web access: OK"
+        else
+            health_log_warn "External web access: FAILED (Check Cloudflare/DNS)"
+            # Don't fail the whole check if only external is down (could be just a network blip)
+            HEALTH_RESULTS["accessibility"]="degraded"
+            return 0
         fi
     fi
 
@@ -434,8 +438,17 @@ check_database_growth() {
         local size_history_file="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/.vw_db_size_history"
         local previous_size=0
         [[ -f "$size_history_file" ]] && previous_size=$(cat "$size_history_file" 2>/dev/null || echo "0")
+
+        # FIX (H-M2): Ensure the history file is created with mode 0600 before
+        # writing, preventing world-readable DB size trend data on systems with
+        # a misconfigured or permissive umask.
+        if [[ ! -f "$size_history_file" ]]; then
+            install -m 600 /dev/null "$size_history_file" 2>/dev/null || true
+        fi
         printf '%s\n' "$current_size_mb" > "${size_history_file}.tmp" && \
             mv "${size_history_file}.tmp" "$size_history_file" || true
+        # Restore correct permissions on the tmp->final rename (mv preserves source perms)
+        chmod 600 "$size_history_file" 2>/dev/null || true
 
         local growth=$((current_size_mb - previous_size))
 
@@ -644,14 +657,22 @@ check_resource_usage() {
             cpu_usage=0
         fi
     else
+        # FIX (H-L1): After extracting cpu_usage from top, validate it is a
+        # non-negative integer. Unrecognised top formats (e.g. BusyBox/Alpine)
+        # may produce empty or non-numeric output; emit a warning and default
+        # to 0 rather than silently returning a false-healthy reading.
         cpu_usage=$(top -bn1 | awk '/[Cc][Pp][Uu]/ && /[0-9]/ {
             for(i=1;i<=NF;i++) {
                 if ($i ~ /^[0-9.]+$/ && $(i-1) ~ /[uU][sS]/) { print $i; exit }
                 if ($i ~ /[0-9.]+%?us,?/) { gsub(/[^0-9.]/,"",$i); print $i; exit }
             }
-        } NR==3 {exit}' 2>/dev/null | head -1 || echo "0")
+        } NR==3 {exit}' 2>/dev/null | head -1 || echo "")
         cpu_usage=${cpu_usage%.*}
-        cpu_usage=${cpu_usage:-0}
+        # Validate: must be a non-negative integer; warn and default to 0 on parse failure.
+        if [[ -z "$cpu_usage" ]] || ! [[ "$cpu_usage" =~ ^[0-9]+$ ]]; then
+            log_warn "check_resource_usage: could not parse CPU usage from top output (unrecognised format); defaulting to 0"
+            cpu_usage=0
+        fi
     fi
     mem_usage=$(free | grep Mem | awk '{printf "%.0f", $3/$2 * 100.0}' 2>/dev/null || echo "0")
 
