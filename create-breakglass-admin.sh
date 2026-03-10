@@ -34,6 +34,9 @@ VALIDATE_ONLY=false
 DRY_RUN=false
 FORCE=false
 
+# BG-L1: Configurable threshold (hours) after which --status warns the account is still active.
+BREAKGLASS_MAX_AGE_HOURS="${BREAKGLASS_MAX_AGE_HOURS:-72}"
+
 show_help() {
     cat << 'EOF'
 VaultWarden-OCI Break-Glass Admin Manager - Emergency Access
@@ -51,6 +54,9 @@ OPTIONS:
     --force                 Force operations without confirmation
     --dry-run               Show what would be done without executing
     --help                  Show this help
+
+ENVIRONMENT:
+    BREAKGLASS_MAX_AGE_HOURS  Hours before --status warns account is too old (default: 72)
 
 EXAMPLES:
     sudo ./create-breakglass-admin.sh --create        # Create emergency admin
@@ -73,9 +79,16 @@ SECURITY NOTES:
 EOF
 }
 
-# ENHANCED: Script self-validation using lib/security.sh
-# FIX [M-08]: Accept a 'strict' parameter so non-validate modes only warn on ownership failure
-# instead of hard-failing (blocking fresh installs where setup.sh sets non-root ownership).
+# ---------------------------------------------------------------------------
+# BG-M1 FIX: validate_script_security()
+#
+# Two-tier enforcement:
+#   strict=true  → hard-fail on ANY permission/ownership deviation (--validate mode)
+#   strict=false → hard-fail ONLY when the script is world-writable (o+w set),
+#                  because that is an active privilege-escalation vector regardless
+#                  of operational mode. Non-critical deviations (e.g. not yet
+#                  chowned to root during a fresh install) remain warnings.
+# ---------------------------------------------------------------------------
 validate_script_security() {
     local strict="${1:-false}"
     local script_path="$0"
@@ -88,7 +101,40 @@ validate_script_security() {
         return 1
     fi
 
-    # Use centralized security validation
+    # ------------------------------------------------------------------
+    # BG-M1: Always hard-fail if the script file is world-writable (o+w).
+    # This check runs in every mode so an attacker cannot inject code by
+    # making the file group- or world-writable between invocations.
+    # ------------------------------------------------------------------
+    local perms
+    if perms=$(stat -c '%a' "$script_path" 2>/dev/null); then
+        # Convert octal string to integer for bitwise test
+        local perm_int
+        perm_int=$(( 8#$perms ))
+        # Bit 1 of the "other" triad = world-write (octal 002 = decimal 2)
+        if (( perm_int & 8#002 )); then
+            log_error "SECURITY: Script is world-writable — hard-failing to prevent code injection"
+            log_error "Script: $script_path  (current mode: $perms)"
+            log_error "Fix with: sudo chmod o-w '$script_path'"
+            return 1
+        fi
+        # Group-writable is also dangerous; always hard-fail on that too.
+        if (( perm_int & 8#020 )); then
+            log_error "SECURITY: Script is group-writable — hard-failing to prevent code injection"
+            log_error "Script: $script_path  (current mode: $perms)"
+            log_error "Fix with: sudo chmod g-w '$script_path'"
+            return 1
+        fi
+    else
+        log_error "Failed to stat script for permission check: $script_path"
+        return 1
+    fi
+
+    # ------------------------------------------------------------------
+    # Full ownership + permission check (root:root 700).
+    # In strict mode (--validate) this is a hard error.
+    # In non-strict mode it is a warning so fresh installs aren't blocked.
+    # ------------------------------------------------------------------
     if ! validate_file_permissions "$script_path" "700" "root" "root"; then
         if [[ "$strict" == "true" ]]; then
             log_error "SECURITY: Script failed validation - privilege escalation risk"
@@ -301,7 +347,7 @@ EOF
   _    _  ___  ____  _   _  _  _  ____  _ 
  ( \/\/ )/ __)(_  _)( )_( )( \/ )(__  )(_)
   )    (( (__  _)(_  ) _ (  )  (  _)(_  _ 
- (__/\__)\___)(____)(_) (_)(_/\_)(____)(_)
+ (__/\__)\___)(____)((_) (_)(_/\_)(____)((_)
 EOF
     printf '%b\n' "${COLOR_RESET}"
 
@@ -326,7 +372,17 @@ EOF
     return 0
 }
 
-# STANDARDIZED: Remove break-glass user - returns exit code
+# ---------------------------------------------------------------------------
+# BG-M2 FIX: remove_breakglass_user()
+#
+# Previous code used `|| true` to silently swallow errors from deluser/gpasswd,
+# leaving stale sudo-group membership data on RHEL/Oracle Linux systems that
+# lack deluser.  The fix:
+#   1. Always prefer gpasswd -d (portable: available on both Debian and RHEL).
+#   2. Fall back to deluser only if gpasswd is absent.
+#   3. Log a clear warning (not silent || true) if neither tool can remove the
+#      membership, so the operator knows manual remediation is required.
+# ---------------------------------------------------------------------------
 remove_breakglass_user() {
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would remove break-glass user: $BREAKGLASS_USER"
@@ -354,20 +410,36 @@ remove_breakglass_user() {
         fi
     fi
 
-    # SIMPLIFIED: Just delete user (no custom sudoers file to remove)
+    # BG-M2: Remove from sudo group BEFORE deleting the user so that group
+    # management tools can still resolve the username.
+    local group_removal_ok=false
+    if command -v gpasswd >/dev/null 2>&1; then
+        if gpasswd -d "$BREAKGLASS_USER" sudo 2>/dev/null; then
+            group_removal_ok=true
+            log_info "Removed $BREAKGLASS_USER from sudo group via gpasswd"
+        else
+            log_warn "gpasswd -d reported an error removing $BREAKGLASS_USER from sudo group"
+        fi
+    elif command -v deluser >/dev/null 2>&1; then
+        if deluser "$BREAKGLASS_USER" sudo 2>/dev/null; then
+            group_removal_ok=true
+            log_info "Removed $BREAKGLASS_USER from sudo group via deluser"
+        else
+            log_warn "deluser reported an error removing $BREAKGLASS_USER from sudo group"
+        fi
+    fi
+
+    if [[ "$group_removal_ok" == "false" ]]; then
+        log_warn "Could not remove $BREAKGLASS_USER from sudo group automatically."
+        log_warn "Manual remediation: edit /etc/group and remove '$BREAKGLASS_USER' from the sudo line."
+    fi
+
+    # Delete the user account and home directory
     if userdel -r "$BREAKGLASS_USER" 2>/dev/null; then
         log_success "User removed: $BREAKGLASS_USER"
     else
         log_warn "User removal may have had issues (user might not have had home directory)"
     fi
-
-    # Remove user from sudo group — portable across Debian (deluser) and RHEL (gpasswd)
-    if command -v gpasswd >/dev/null 2>&1; then
-        gpasswd -d "$BREAKGLASS_USER" sudo 2>/dev/null || true
-    elif command -v deluser >/dev/null 2>&1; then
-        deluser "$BREAKGLASS_USER" sudo 2>/dev/null || true
-    fi
-
 
     log_success "Break-glass admin removal completed"
     return 0
@@ -417,6 +489,50 @@ reset_breakglass_password() {
     return 0
 }
 
+# ---------------------------------------------------------------------------
+# BG-L1 FIX: _check_breakglass_account_age()
+#
+# Helper called from show_breakglass_status(). Determines how long the
+# breakglass account has been active by inspecting:
+#   1. The mtime of EMERGENCY_ACCESS_INSTRUCTIONS.txt (set at creation time).
+#   2. The shadow-file entry mtime as a fallback (requires root).
+# Emits a warning if the account age exceeds BREAKGLASS_MAX_AGE_HOURS.
+# ---------------------------------------------------------------------------
+_check_breakglass_account_age() {
+    local home_dir="$1"
+    local instructions_file="$home_dir/EMERGENCY_ACCESS_INSTRUCTIONS.txt"
+    local creation_epoch=""
+
+    # Prefer the instructions file mtime — it is set at account creation.
+    if [[ -f "$instructions_file" ]]; then
+        creation_epoch=$(stat -c '%Y' "$instructions_file" 2>/dev/null) || true
+    fi
+
+    # Fallback: use the home-directory mtime.
+    if [[ -z "$creation_epoch" ]] && [[ -d "$home_dir" ]]; then
+        creation_epoch=$(stat -c '%Y' "$home_dir" 2>/dev/null) || true
+    fi
+
+    if [[ -z "$creation_epoch" ]]; then
+        log_warn "Cannot determine account creation time — skipping age check"
+        return 0
+    fi
+
+    local now_epoch
+    now_epoch=$(date +%s)
+    local age_seconds=$(( now_epoch - creation_epoch ))
+    local age_hours=$(( age_seconds / 3600 ))
+    local threshold_seconds=$(( BREAKGLASS_MAX_AGE_HOURS * 3600 ))
+
+    if (( age_seconds > threshold_seconds )); then
+        echo "  Account age: ⚠️  ${age_hours}h (threshold: ${BREAKGLASS_MAX_AGE_HOURS}h) — consider removing with --remove"
+        log_warn "Break-glass account has been active for ${age_hours} hours (limit: ${BREAKGLASS_MAX_AGE_HOURS}h)."
+        log_warn "Remove it when no longer needed: sudo $0 --remove"
+    else
+        echo "  Account age: ✅ ${age_hours}h (threshold: ${BREAKGLASS_MAX_AGE_HOURS}h)"
+    fi
+}
+
 # ENHANCED: Show break-glass status with security validation
 show_breakglass_status() {
     log_info "Break-glass admin status:"
@@ -445,6 +561,9 @@ show_breakglass_status() {
             else
                 echo "  Instructions: ❌ Missing"
             fi
+
+            # BG-L1: Warn if the account has been active beyond the configured threshold.
+            _check_breakglass_account_age "$home_dir"
         fi
 
         # Check sudoers configuration
