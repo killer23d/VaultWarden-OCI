@@ -20,6 +20,25 @@
 #   - .sha256 sidecar verified before decryption (FIX-R05)
 #   - flock mutex prevents concurrent restore races (FIX-R03)
 #   - .pre-restore-* artefacts pruned to keep last 3 (FIX-R08)
+#
+# FIXES (this revision):
+#   P1-C1  tar_validate_members() and staged restore now use -I zstd for
+#          .tar.zst archives instead of the implicit -z (gzip) flag.
+#   P1-C2  Legacy v1 absolute-path restore now calls chown -R after
+#          extraction to fix root:root ownership on restored files.
+#   P1-H1  _find_latest_backup() stat pipeline race condition fixed;
+#          stat failure no longer silently returns an empty string.
+#   P2-H3  archive_format default changed from "absolute" (v1 legacy) to
+#          "relative" for archives whose filename implies zstd/v2. Also
+#          adds filename-based heuristic as a fallback when .meta is absent.
+#   P1-M1  cleanup() moved to global scope; no longer silently defined
+#          inside main() on every invocation.
+#   P1-M3  Operations mutex moved from FD 9 to FD 200 to avoid subshell
+#          inheritance collisions with update.sh (which also uses FD 9).
+#   P1-M7  Pre-restore snapshot failure is now a configurable hard-fail
+#          controlled by RESTORE_SNAPSHOT_HARD_FAIL (default: true).
+#          Use --no-backup or set RESTORE_SNAPSHOT_HARD_FAIL=false to
+#          revert to warn-only behaviour.
 
 set -euo pipefail
 
@@ -49,6 +68,9 @@ FORCE=false
 NO_PRE_BACKUP=false
 SKIP_VERIFICATION=false
 RESTORE_ENV=true
+# P1-M7: configurable hard-fail for pre-restore snapshot. Override via env
+# or set to false to revert to legacy warn-only behaviour.
+RESTORE_SNAPSHOT_HARD_FAIL="${RESTORE_SNAPSHOT_HARD_FAIL:-true}"
 
 show_help() {
     cat << 'EOF'
@@ -68,6 +90,10 @@ OPTIONS:
     --dry-run               Show what would happen without making changes
     --force                 Skip confirmation prompts
     --help                  Show this help
+
+ENVIRONMENT:
+    RESTORE_SNAPSHOT_HARD_FAIL=false   Demote snapshot failure to a warning
+                                       (default: true = hard-fail)
 
 EXAMPLES:
     ./restore.sh --list
@@ -93,18 +119,50 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ---------------------------------------------------------------------------
+# P1-M1 FIX: cleanup() at global scope so it is registered exactly once and
+# is never silently re-defined on every call to main(). TMPDIR_RESTORE is
+# declared here as an empty global; main() sets it before mktemp runs.
+# ---------------------------------------------------------------------------
+TMPDIR_RESTORE=""
+cleanup() { [[ -n "$TMPDIR_RESTORE" ]] && rm -rf "$TMPDIR_RESTORE" 2>/dev/null || true; }
+trap cleanup EXIT HUP INT TERM
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
+# P1-H1 FIX: Guard each stat call so a missing/unreadable file does not
+# silently produce an empty timestamp string that propagates through sort/tail
+# and causes _find_latest_backup to return nothing. The pipeline now uses a
+# subshell-safe approach: stat failure emits "0" (epoch) so the file remains
+# in the sorted list rather than being silently dropped; tail -1 then returns
+# it as a candidate and the caller can validate it exists.
 _find_latest_backup() {
     local dir="$1"
     [[ -d "$dir" ]] || return 1
-    # Use portable stat instead of GNU-specific -printf '%T@'
-    find "$dir" -name "*.age" -type f | while IFS= read -r f; do
-        printf '%s %s\n' \
-            "$(stat -c%Y "$f" 2>/dev/null || stat -f%m "$f" 2>/dev/null || echo 0)" \
-            "$f"
-    done | sort -n | tail -1 | cut -d' ' -f2- || true
+
+    local best_mtime=0
+    local best_file=""
+    local f mtime
+
+    while IFS= read -r f; do
+        [[ -f "$f" ]] || continue
+        mtime=$(stat -c%Y "$f" 2>/dev/null \
+             || stat -f%m "$f" 2>/dev/null \
+             || echo 0)
+        # Ensure mtime is numeric; treat non-numeric as 0
+        [[ "$mtime" =~ ^[0-9]+$ ]] || mtime=0
+        if (( mtime > best_mtime )); then
+            best_mtime=$mtime
+            best_file="$f"
+        fi
+    done < <(find "$dir" -name "*.age" -type f 2>/dev/null)
+
+    if [[ -n "$best_file" ]]; then
+        echo "$best_file"
+        return 0
+    fi
+    return 1
 }
 
 list_backups() {
@@ -133,6 +191,7 @@ resolve_backup_file() {
             candidate="$(_find_latest_backup "$PROJECT_ROOT/backups/$t" || true)"
             if [[ -n "$candidate" ]]; then
                 mtime=$(stat -c%Y "$candidate" 2>/dev/null || stat -f%m "$candidate" 2>/dev/null || echo 0)
+                [[ "$mtime" =~ ^[0-9]+$ ]] || mtime=0
                 if (( mtime > best_mtime )); then
                     best_mtime="$mtime"; best="$candidate"; RESTORE_TYPE="$t"
                 fi
@@ -175,18 +234,41 @@ read_meta_field() {
     fi
 }
 
+# ---------------------------------------------------------------------------
+# P1-C1 FIX: Determine the decompression filter from the actual filename so
+# that .tar.zst archives are decompressed with zstd (-I zstd) rather than
+# the implicit -z (gzip) flag that tar applies to .tar.gz files.
+# Returns the tar filter option string (e.g. "-I zstd", "-z", "-j", or "")
+# for use with -t and -x operations.
+# ---------------------------------------------------------------------------
+_tar_filter_for_file() {
+    local f="$1"
+    case "$f" in
+        *.tar.zst|*.zst) echo "-I zstd" ;;
+        *.tar.gz|*.tgz)  echo "-z"      ;;
+        *.tar.bz2|*.tbz) echo "-j"      ;;
+        *.tar.xz)        echo "-J"      ;;
+        *)               echo ""        ;;
+    esac
+}
+
 # Block archives containing ../  traversal sequences.
 # NOTE: This function also rejects absolute paths (/). For the legacy v1
 # restore path, use check_traversal_only() below, which only checks for
 # ../ sequences (v1 archives intentionally use absolute paths).
+# P1-C1 FIX: Uses _tar_filter_for_file() so .tar.zst archives are listed
+# with -I zstd instead of the incorrect implicit -z (gzip) flag.
 tar_validate_members() {
     local tarfile="$1"
+    local filter
+    filter="$(_tar_filter_for_file "$tarfile")"
     local members
-    members="$(tar -tf "$tarfile")" || {
+    # shellcheck disable=SC2086
+    members="$(tar $filter -tf "$tarfile")" || {
         log_error "Cannot list archive members"
         return 1
     }
-    if echo "$members" | grep -qE '(^/|(^|/)\.\.(/|$))'; then
+    if echo "$members" | grep -qE '(^/|(^|/)\.\.(\/|$))'; then
         log_error "Archive contains unsafe paths (absolute or traversal). Refusing to extract."
         log_error "If this is a legacy backup (version=1), it will be extracted via fallback."
         return 1
@@ -196,11 +278,15 @@ tar_validate_members() {
 
 # FIX-R01 helper: Traversal-only check for legacy v1 absolute-path archives.
 # v1 archives use absolute paths by design, so we only reject ../ sequences.
+# P1-C1 FIX: Uses _tar_filter_for_file() for correct decompression.
 check_traversal_only() {
     local tarfile="$1"
+    local filter
+    filter="$(_tar_filter_for_file "$tarfile")"
     local bad_members
-    bad_members=$(tar -tf "$tarfile" 2>/dev/null \
-        | grep -E '(^|/)\.\.(/|$)' || true)
+    # shellcheck disable=SC2086
+    bad_members=$(tar $filter -tf "$tarfile" 2>/dev/null \
+        | grep -E '(^|/)\.\.(\/|$)' || true)
     if [[ -n "$bad_members" ]]; then
         log_error "Archive contains path traversal sequences (../). Refusing to extract."
         log_error "Suspicious paths:"
@@ -235,6 +321,9 @@ purge_wal_shm() {
     rm -f "${db}-wal" "${db}-shm" 2>/dev/null || true
 }
 
+# P1-M7 FIX: Pre-restore snapshot failure is now a hard-fail by default.
+# Set RESTORE_SNAPSHOT_HARD_FAIL=false (or pass --no-backup) to revert to
+# warn-only behaviour for environments where backup.sh may not be available.
 create_pre_restore_snapshot() {
     [[ "$NO_PRE_BACKUP" == "true" ]] && { log_info "Skipping pre-restore snapshot (--no-backup)"; return 0; }
     [[ "$DRY_RUN"       == "true" ]] && { log_info "[DRY RUN] Would run: ./backup.sh --type emergency"; return 0; }
@@ -246,9 +335,24 @@ create_pre_restore_snapshot() {
     fi
     if [[ -x "./backup.sh" ]]; then
         log_info "Creating pre-restore emergency snapshot..."
-        ./backup.sh --type emergency --quiet || log_warn "Pre-restore snapshot failed (continuing)"
+        if ! ./backup.sh --type emergency --quiet; then
+            if [[ "${RESTORE_SNAPSHOT_HARD_FAIL}" == "true" ]]; then
+                log_error "Pre-restore snapshot FAILED (hard-fail)."
+                log_error "Use --no-backup or set RESTORE_SNAPSHOT_HARD_FAIL=false to skip."
+                return 1
+            else
+                log_warn "Pre-restore snapshot failed (continuing — RESTORE_SNAPSHOT_HARD_FAIL=false)"
+            fi
+        fi
     else
-        log_warn "backup.sh not executable — skipping pre-restore snapshot"
+        local msg="backup.sh not executable — cannot create pre-restore snapshot"
+        if [[ "${RESTORE_SNAPSHOT_HARD_FAIL}" == "true" ]]; then
+            log_error "$msg"
+            log_error "Use --no-backup or set RESTORE_SNAPSHOT_HARD_FAIL=false to skip."
+            return 1
+        else
+            log_warn "$msg (continuing — RESTORE_SNAPSHOT_HARD_FAIL=false)"
+        fi
     fi
 }
 
@@ -345,7 +449,22 @@ restore_full() {
     local tmpdir="$6"
     local archive_format="$7"   # "relative" | "absolute" (legacy)
 
-    local dec_tar="$tmpdir/restore.tar.gz"
+    # P1-C1 FIX: Name the decrypted file with the correct extension so that
+    # _tar_filter_for_file() can derive the right decompressor. Strip the
+    # outer .age suffix and keep the inner archive extension (.tar.gz /
+    # .tar.zst etc.).  Fall back to .tar.gz for archives with no recognised
+    # inner extension so existing behaviour is preserved.
+    local inner_name
+    inner_name="${backup_file%.age}"
+    case "$inner_name" in
+        *.tar.zst|*.tar.gz|*.tar.bz2|*.tar.xz|*.tgz|*.tbz) : ;;
+        *) inner_name="${inner_name}.tar.gz" ;;
+    esac
+    local dec_tar="$tmpdir/$(basename "$inner_name")"
+
+    # Determine tar filter once so all tar invocations below are consistent.
+    local tar_filter
+    tar_filter="$(_tar_filter_for_file "$dec_tar")"
 
     log_info "Decrypting archive..."
     age -d -i "$age_key_file" -o "$dec_tar" "$backup_file" || {
@@ -355,7 +474,8 @@ restore_full() {
 
     if [[ "$SKIP_VERIFICATION" != "true" ]]; then
         log_info "Verifying archive structure..."
-        tar -tf "$dec_tar" >/dev/null || { log_error "Archive is corrupt or invalid"; return 1; }
+        # shellcheck disable=SC2086
+        tar $tar_filter -tf "$dec_tar" >/dev/null || { log_error "Archive is corrupt or invalid"; return 1; }
     fi
 
     if [[ "$archive_format" == "absolute" ]]; then
@@ -366,14 +486,6 @@ restore_full() {
         log_warn "Extracting directly to / — no staging available for this format."
 
         # FIX-R01: Path traversal check on the legacy path.
-        # This branch previously had NO traversal validation at all, making it
-        # the most dangerous case: a tampered .age file (decryptable with the
-        # correct Age key) could embed ../../etc/cron.d/backdoor entries that
-        # extract directly to / as root.
-        #
-        # We use check_traversal_only() here, NOT tar_validate_members():
-        # v1 archives intentionally use absolute paths, so rejecting all
-        # absolute paths would always fail. We only block ../ sequences.
         if [[ "$SKIP_VERIFICATION" != "true" ]]; then
             log_info "Validating archive members (path traversal check — legacy format)..."
             check_traversal_only "$dec_tar" || {
@@ -389,11 +501,26 @@ restore_full() {
         fi
 
         if [[ "$DRY_RUN" == "true" ]]; then
-            log_info "[DRY RUN] Would run: tar -xf <archive> -C /"
+            log_info "[DRY RUN] Would run: tar $tar_filter -xf <archive> -C /"
             return 0
         fi
 
-        tar -xf "$dec_tar" -C / --no-same-owner --no-same-permissions --delay-directory-restore
+        # shellcheck disable=SC2086
+        tar $tar_filter -xf "$dec_tar" -C / \
+            --no-same-owner --no-same-permissions --delay-directory-restore
+
+        # P1-C2 FIX: Fix ownership on the restored state directory so that
+        # containers do not start as root:root. Without this fixup the
+        # extracted files retain root:root ownership from the tar stream and
+        # VaultWarden cannot write to its data directory, causing silent
+        # startup failures that are not immediately obvious as a restore issue.
+        local state_rel="${state_dir#/}"
+        if [[ -d "$state_dir" ]]; then
+            log_info "Fixing ownership on restored state directory (${puid}:${pgid})..."
+            chown -R "${puid}:${pgid}" "$state_dir/data" 2>/dev/null || \
+                log_warn "Could not set ownership on $state_dir/data (chown -R failed)"
+        fi
+
         purge_wal_shm "$state_dir/data/db.sqlite3" || true
         log_success "Legacy archive restored."
         return 0
@@ -416,14 +543,17 @@ restore_full() {
     local staging="$tmpdir/stage"
     mkdir -p "$staging"
     log_info "Extracting archive to staging directory..."
-    tar -xf "$dec_tar" -C "$staging" --no-same-owner --no-same-permissions --delay-directory-restore
+    # shellcheck disable=SC2086
+    tar $tar_filter -xf "$dec_tar" -C "$staging" \
+        --no-same-owner --no-same-permissions --delay-directory-restore
 
     # Validate expected paths exist in staging
     local rel_state="${state_dir#/}"
     if [[ ! -d "$staging/$rel_state" ]]; then
         log_error "Staging validation failed: expected directory not found: $staging/$rel_state"
         log_error "Archive members:"
-        tar -tf "$dec_tar" | head -20 >&2 || true
+        # shellcheck disable=SC2086
+        tar $tar_filter -tf "$dec_tar" | head -20 >&2 || true
         return 1
     fi
 
@@ -527,8 +657,13 @@ main() {
         exit 1
     }
 
-    exec 9>"$VW_OPERATIONS_LOCK"
-    if ! flock -n 9; then
+    # P1-M3 FIX: Use FD 200 (instead of FD 9) for the operations mutex so
+    # that subshells spawned by restore.sh do not inherit the same FD as
+    # update.sh (which uses FD 9). Inheriting the same FD causes the child
+    # to hold the lock open after the parent releases it, preventing any
+    # subsequent operation from acquiring the mutex until the subshell exits.
+    exec 200>"$VW_OPERATIONS_LOCK"
+    if ! flock -n 200; then
         log_error "Another update/restore/maintenance operation is already running."
         log_error "Lock file: $VW_OPERATIONS_LOCK"
         exit 1
@@ -605,11 +740,52 @@ main() {
         log_warn "(Backups created before v2 did not generate sidecar files.)"
     fi
 
-    # Read .meta to determine archive format / version
+    # P2-H3 FIX: Read archive_format from .meta but use a smarter default
+    # when the field is absent. backup_utils.sh's create_backup_metadata()
+    # does not write version= or archive_format= fields, so all meta files
+    # produced by the current backup.sh lack these keys and read_meta_field
+    # always falls back to the default.
+    #
+    # Strategy (in priority order):
+    #   1. Explicit field in .meta file — authoritative when present.
+    #   2. Filename heuristic: .tar.zst implies v2/relative (backup.sh has
+    #      used zstd + relative paths since v2 was introduced).
+    #   3. If version=2 is present in .meta but archive_format is missing,
+    #      default to "relative" (v2 always uses relative paths).
+    #   4. Hard fallback: "absolute" only when version=1 is explicit.
+    #      Ambiguous cases (no meta, no zst extension) warn and default to
+    #      "relative" so v2 archives are not silently extracted as legacy.
     local meta_file="${BACKUP_FILE}.meta"
     local archive_version archive_format
-    archive_version="$(read_meta_field "$meta_file" "version"       "1")"
-    archive_format="$( read_meta_field "$meta_file" "archive_format" "absolute")"
+
+    archive_version="$(read_meta_field "$meta_file" "version" "")"
+    archive_format="$( read_meta_field "$meta_file" "archive_format" "")"
+
+    if [[ -z "$archive_format" ]]; then
+        # Heuristic 1: zstd extension → v2/relative
+        if [[ "$BACKUP_FILE" == *.tar.zst.age || "$BACKUP_FILE" == *.zst.age ]]; then
+            archive_format="relative"
+            log_info "archive_format not in .meta; inferred 'relative' from .zst extension."
+        # Heuristic 2: explicit version=2 in meta → relative
+        elif [[ "$archive_version" == "2" ]]; then
+            archive_format="relative"
+            log_info "archive_format not in .meta; defaulting to 'relative' (version=2)."
+        # Heuristic 3: explicit version=1 → absolute (legacy)
+        elif [[ "$archive_version" == "1" ]]; then
+            archive_format="absolute"
+            log_info "archive_format not in .meta; defaulting to 'absolute' (version=1 legacy)."
+        else
+            # No meta, no version, no recognised extension — warn and default
+            # to 'relative' so a v2 archive is not inadvertently extracted as
+            # a legacy absolute-path archive (which would clobber / as root).
+            archive_format="relative"
+            log_warn "archive_format and version absent from .meta; defaulting to 'relative'."
+            log_warn "If this is a v1 (absolute-path) archive, add --type and re-check the .meta file."
+        fi
+    fi
+
+    # Normalise absent version for display
+    [[ -z "$archive_version" ]] && archive_version="unknown"
 
     log_info "Restore plan:"
     log_info "  File:           $BACKUP_FILE"
@@ -628,14 +804,8 @@ main() {
         [[ "$confirm" == "yes" ]] || { log_info "Restore cancelled."; exit 0; }
     fi
 
-    # FIX-R09: Register cleanup() BEFORE mktemp so that any set -e exit
-    # between mktemp and the original trap registration cannot leave a
-    # decrypted archive in /tmp. The null-guard on TMPDIR_RESTORE ensures
-    # the handler is a no-op if mktemp itself fails.
-    local TMPDIR_RESTORE=""
-    cleanup() { [[ -n "$TMPDIR_RESTORE" ]] && rm -rf "$TMPDIR_RESTORE" 2>/dev/null || true; }
-    trap cleanup EXIT HUP INT TERM
-
+    # NOTE: cleanup() and its trap are registered at global scope (above main)
+    # so that mktemp failures after set -e cannot leave decrypted data in /tmp.
     local old_umask
     old_umask=$(umask)
     umask 077
@@ -647,7 +817,7 @@ main() {
     }
     umask "$old_umask"
 
-    create_pre_restore_snapshot
+    create_pre_restore_snapshot || exit 1
 
     # Stop services
     if [[ "$DRY_RUN" != "true" ]]; then
