@@ -4,6 +4,10 @@ Description=VaultWarden Health Check Timer every 30 min
 [Timer]
 OnCalendar=*:0/30
 Persistent=true
+# NEW-timer: Added RandomizedDelaySec to prevent a guaranteed immediate
+# zero-jitter fire at every boot. Without this, Persistent=true causes
+# the health check to fire instantly on boot with no spreading.
+RandomizedDelaySec=60
 
 [Install]
 WantedBy=timers.target

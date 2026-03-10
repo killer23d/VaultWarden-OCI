@@ -4,7 +4,9 @@ Description=VaultWarden Full Backup Timer Sunday 03:00
 [Timer]
 OnCalendar=Sun *-*-* 03:00:00
 Persistent=true
-RandomizedDelaySec=60
+# P2-H: Extended RandomizedDelaySec to 300 s (5 min) for the heaviest
+# job (full backup) to give maximum spread after an unclean reboot burst.
+RandomizedDelaySec=300
 
 [Install]
 WantedBy=timers.target

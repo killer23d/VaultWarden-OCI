@@ -4,6 +4,10 @@ Description=VaultWarden DB Backup Timer Mon-Sat 04:00
 [Timer]
 OnCalendar=Mon-Sat *-*-* 04:00:00
 Persistent=true
+# P2-H: RandomizedDelaySec spreads post-reboot catch-up burst.
+# SSD-M3-timer: db-backup fires at 04:00 (+0-60s jitter), maintenance at
+# 02:00 (+0-30s) — 2 h nominal gap prevents Sunday overlap without needing
+# explicit After= ordering between the two services.
 RandomizedDelaySec=60
 
 [Install]

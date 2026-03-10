@@ -4,6 +4,7 @@ Description=VaultWarden Maintenance Timer Mon-Sat 02:00
 [Timer]
 OnCalendar=Mon-Sat *-*-* 02:00:00
 Persistent=true
+# P2-H: RandomizedDelaySec spreads post-reboot catch-up burst.
 RandomizedDelaySec=30
 
 [Install]

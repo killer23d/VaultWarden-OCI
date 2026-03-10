@@ -4,6 +4,10 @@ Description=VaultWarden DNS Update Timer hourly
 [Timer]
 OnCalendar=hourly
 Persistent=true
+# SSD-M3/P2-H: Added RandomizedDelaySec to spread post-reboot catch-up
+# burst and prevent simultaneous maintenance.sh --update-dns invocations
+# competing for the FD-9 operations.lock alongside other timers.
+RandomizedDelaySec=120
 
 [Install]
 WantedBy=timers.target

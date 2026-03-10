@@ -25,6 +25,12 @@
 #          is chmod 700 (root-only); running as non-root caused stat() to
 #          return "unknown" permissions (spurious WARN) and systemctl
 #          is-enabled to give inaccurate results on some D-Bus configs.
+# FIX-S10  (2026-03-10): SSD-H1  — tmp file cleanup uses a _tmpfiles
+#          finaliser array + single EXIT trap outside the per-script loop.
+# FIX-S11  (2026-03-10): SSD-M1  — .env vs vaultwarden.env checksum diff
+#          warns operator when variables have been added after first install.
+# FIX-S12  (2026-03-10): SSD-M2  — split-brain check [6/6] uses sha256sum
+#          content comparison instead of -nt mtime comparison.
 
 set -euo pipefail
 
@@ -93,7 +99,7 @@ WHAT --install DOES:
        (root:root 700, with SCRIPT_DIR + lib/ source paths patched)
     2. Copies lib/ -> /opt/vaultwarden-scripts/lib/ (root:root 640)
     3. Copies .env -> /etc/vaultwarden/vaultwarden.env (root:root 600)
-       (skipped if the EnvironmentFile already exists)
+       (skipped if the EnvironmentFile already exists; warns if content differs)
     4. Copies systemd/*.{service,timer} -> /etc/systemd/system/
     5. systemctl daemon-reload
     6. systemctl enable --now for all 6 timers
@@ -104,7 +110,7 @@ WHAT --validate CHECKS:
     3. All unit files present in /etc/systemd/system/
     4. All 6 timers enabled (systemctl is-enabled)
     5. EnvironmentFile /etc/vaultwarden/vaultwarden.env exists (mode 600)
-    6. Installed scripts not older than repo source (split-brain detection)
+    6. Installed scripts match repo source checksum (sha256 split-brain detection)
        Re-run --install after any git pull to keep /opt/ in sync.
 
 VIEWING LOGS:
@@ -153,6 +159,19 @@ _run() {
 }
 
 # ---------------------------------------------------------------------------
+# _sha256 FILE
+# Portable sha256 hash of a single file; prints only the hex digest.
+# ---------------------------------------------------------------------------
+_sha256() {
+    if command -v sha256sum &>/dev/null; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        # macOS / BSDs ship shasum
+        shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # install_units
 # ---------------------------------------------------------------------------
 install_units() {
@@ -189,6 +208,20 @@ install_units() {
         return 1
     fi
 
+    # FIX-S10 (SSD-H1): Use a finaliser array + single EXIT trap outside the
+    # per-script loop.  Mirrors setup-secrets.sh pattern.  If set -e fires on
+    # any command inside the loop (e.g. wc -l failing), the EXIT handler
+    # removes every mktemp file that was created up to that point, so no tmp
+    # files are ever leaked regardless of where the interruption occurs.
+    local -a _tmpfiles=()
+    _cleanup_tmpfiles() {
+        local f
+        for f in "${_tmpfiles[@]:-}"; do
+            rm -f "$f" 2>/dev/null || true
+        done
+    }
+    trap '_cleanup_tmpfiles' EXIT
+
     local scripts_to_install=(maintenance.sh backup.sh health.sh)
     for script in "${scripts_to_install[@]}"; do
         local src="$PROJECT_ROOT/$script"
@@ -211,9 +244,10 @@ install_units() {
         # every byte of the source except the three intentional substitutions.
         local tmp_script
         tmp_script=$(mktemp "${TMPDIR:-/tmp}/vw-patch-XXXXXX")
-        # Ensure tmp_script is cleaned up on any early return from this loop
-        # iteration (set -e exit, explicit return, or abnormal signal).
-        trap 'rm -f "${tmp_script:-}" 2>/dev/null; trap - RETURN' RETURN
+        # Register in finaliser array so the EXIT trap cleans it up even if
+        # set -e triggers before the mv below (FIX-S10 / SSD-H1).
+        _tmpfiles+=("$tmp_script")
+
         sed \
             -e "s|^SCRIPT_DIR=.*|SCRIPT_DIR=\"$OPT_SCRIPTS_DIR\"|" \
             -e "s|^PROJECT_ROOT=\"\$SCRIPT_DIR\"|PROJECT_ROOT=\"$PROJECT_ROOT\"|" \
@@ -229,7 +263,6 @@ install_units() {
             log_error "Line count mismatch after patching $script:"
             log_error "  source=${src_lines} lines  installed=${installed_lines} lines"
             log_error "Refusing to deploy a potentially truncated file."
-            rm -f "$tmp_script"
             return 1
         fi
 
@@ -239,6 +272,11 @@ install_units() {
         log_success "Installed: $OPT_SCRIPTS_DIR/$script"
     done
     [[ "$DRY_RUN" == "false" ]] && chown root:root "$OPT_SCRIPTS_DIR" || true
+
+    # Remove the EXIT trap now that all scripts are safely installed; normal
+    # path cleanup for any residual entries (mv already consumed them).
+    trap - EXIT
+    _cleanup_tmpfiles
 
     # ------------------------------------------------------------------
     # 2. Create EnvironmentFile at /etc/vaultwarden/vaultwarden.env
@@ -262,10 +300,35 @@ install_units() {
                 chown root:root "$ENV_FILE"
             fi
         else
-            log_info "$ENV_FILE already exists -- skipping (not overwritten)"
+            # FIX-S11 (SSD-M1): vaultwarden.env already exists from a prior
+            # --install. Compare checksums so the operator knows whether new
+            # variables added to .env after initial setup need to be merged.
+            log_info "$ENV_FILE already exists -- checking for drift ..."
+            if [[ -f "$PROJECT_ROOT/.env" ]]; then
+                local repo_sum installed_sum
+                repo_sum=$(_sha256 "$PROJECT_ROOT/.env")
+                installed_sum=$(_sha256 "$ENV_FILE")
+                if [[ "$repo_sum" != "$installed_sum" ]]; then
+                    log_warn "────────────────────────────────────────────────────────────────"
+                    log_warn "DRIFT DETECTED: .env and $ENV_FILE differ."
+                    log_warn "  repo .env  sha256: $repo_sum"
+                    log_warn "  installed  sha256: $installed_sum"
+                    log_warn "New variables added to .env after initial setup will NOT be"
+                    log_warn "visible to systemd units until $ENV_FILE is updated."
+                    log_warn "Review differences and merge manually:"
+                    log_warn "  diff $PROJECT_ROOT/.env $ENV_FILE"
+                    log_warn "Then run: sudo ./systemd-setup.sh --install to re-copy."
+                    log_warn "  (Back up $ENV_FILE first — it may contain live credentials)"
+                    log_warn "────────────────────────────────────────────────────────────────"
+                else
+                    log_success "$ENV_FILE is identical to repo .env (checksums match)"
+                fi
+            else
+                log_info "No repo .env found -- skipping drift check"
+            fi
         fi
     else
-        log_info "[DRY RUN] Would create $ENV_FILE from .env"
+        log_info "[DRY RUN] Would create/check $ENV_FILE from .env"
     fi
 
     # ------------------------------------------------------------------
@@ -367,8 +430,9 @@ remove_units() {
 #   3. All unit files present in $UNIT_DEST_DIR
 #   4. All 6 timers enabled (systemctl is-enabled)
 #   5. EnvironmentFile $ENV_FILE exists with mode 600
-#   6. Split-brain: installed script mtime vs repo source mtime (-nt check)
-#      warns when a git pull was done but --install was not re-run
+#   6. Split-brain: sha256sum of installed script vs repo source
+#      (FIX-S12 / SSD-M2: replaces -nt mtime comparison which is unreliable
+#      after git pull when only unrelated files changed)
 #
 # FIX-S09: Requires root. /etc/vaultwarden/ is chmod 700; non-root stat()
 #   returns EACCES, triggering the "unknown" permissions fallback and a
@@ -457,23 +521,42 @@ validate_installation() {
         fi
     fi
 
-    # ── 6. Split-brain detection ─────────────────────────────────────────────
-    # If the repo source file is NEWER than the installed copy, the operator
-    # did a git pull but forgot to re-run --install. The installed scripts are
-    # stale and may be missing bug fixes or new features.
-    log_info "[6/6] Checking for split-brain (repo newer than installed) ..."
+    # ── 6. Split-brain detection (FIX-S12 / SSD-M2) ─────────────────────────
+    # Compare sha256 checksums of the installed script against the repo source.
+    # -nt (mtime) is NOT reliable: git pull resets mtime only for changed files,
+    # so an installed script can be months stale yet still pass a -nt check if
+    # the repo source was not touched in the latest pull.
+    log_info "[6/6] Checking for split-brain (sha256 repo vs installed) ..."
     for script in "${scripts_to_check[@]}"; do
         local repo_src="$PROJECT_ROOT/$script"
         local installed="$OPT_SCRIPTS_DIR/$script"
         if [[ ! -f "$repo_src" || ! -f "$installed" ]]; then
             continue  # already flagged in check 1 above
         fi
-        if [[ "$repo_src" -nt "$installed" ]]; then
-            log_warn "  STALE: $installed is older than repo source $repo_src"
+        # The installed copy has had SCRIPT_DIR/PROJECT_ROOT/source paths
+        # patched by sed during --install, so the checksums legitimately
+        # differ. We flag a WARN only when the installed script's checksum
+        # does NOT match what we would produce by applying the same sed
+        # transformation to the current repo source on-the-fly.
+        local expected_sum actual_sum
+        expected_sum=$(
+            sed \
+                -e "s|^SCRIPT_DIR=.*|SCRIPT_DIR=\"$OPT_SCRIPTS_DIR\"|" \
+                -e "s|^PROJECT_ROOT=\"\$SCRIPT_DIR\"|PROJECT_ROOT=\"$PROJECT_ROOT\"|" \
+                -e 's|source "lib/|source "$SCRIPT_DIR/lib/|g' \
+                "$repo_src" | \
+            if command -v sha256sum &>/dev/null; then sha256sum; else shasum -a 256; fi | \
+            awk '{print $1}'
+        )
+        actual_sum=$(_sha256 "$installed")
+        if [[ "$expected_sum" != "$actual_sum" ]]; then
+            log_warn "  STALE: $installed does not match patched repo source"
+            log_warn "         expected sha256: $expected_sum"
+            log_warn "         installed sha256: $actual_sum"
             log_warn "         Re-run: sudo ./systemd-setup.sh --install"
             (( warnings++ )) || true
         else
-            log_success "  UP-TO-DATE: $script"
+            log_success "  UP-TO-DATE: $script (sha256 match)"
         fi
     done
 
