@@ -222,8 +222,8 @@ sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
 chmod 700 secrets/
 chmod 600 secrets/keys/age-key.txt
 
-# Test decryption manually
-age -d -i secrets/keys/age-key.txt secrets/secrets.yaml
+# Test decryption manually (secrets are SOPS-encrypted; use sops -d)
+sops -d secrets/secrets.yaml
 ```
 
 ## Network and Connectivity Issues
@@ -509,8 +509,8 @@ make list-backups
 # Verify backup file integrity
 sha256sum -c backup.age.sha256
 
-# Test Age key against backup
-age -d -i secrets/keys/age-key.txt backup.age > /dev/null
+# Test SOPS decryption against backup
+sops -d secrets/secrets.yaml > /dev/null
 
 # Check backup metadata
 cat backup.age.meta
@@ -604,8 +604,8 @@ docker compose restart fail2ban
 ./edit-secrets.sh
 # Check: fail2ban_cloudflare_firewall_token
 
-# Test Cloudflare API
-curl -X GET "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/firewall/access_rules/rules" \
+# Test Cloudflare API token against the current WAF custom rules endpoint
+curl -X GET "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/rulesets/phases/http_request_firewall_custom/entrypoint" \
      -H "Authorization: Bearer YOUR_FIREWALL_TOKEN"
 
 # Test filter regex against live log
@@ -793,33 +793,33 @@ docker compose restart vaultwarden
 
 **Diagnosis**:
 ```bash
-# List installed VaultWarden cron jobs
-sudo ./cron-setup.sh --list
+# List installed VaultWarden systemd timers
+sudo ./systemd-setup.sh --list
 make cron-list
 
 # Validate security and dependencies
-sudo ./cron-setup.sh --validate
+sudo ./systemd-setup.sh --validate
 
 # Check cron logs
 tail -50 /var/log/vaultwarden-cron/maintenance.log
 tail -50 /var/log/vaultwarden-cron/backup.log
 tail -50 /var/log/vaultwarden-cron/health.log
 
-# Check cron service
-systemctl status cron
+# Check systemd timer status
+systemctl list-timers --all | grep vaultwarden
 ```
 
 **Solutions**:
 ```bash
-# (Re-)install cron jobs
-sudo ./cron-setup.sh --install
+# (Re-)install systemd timers
+sudo ./systemd-setup.sh --install
 make cron-install
 
 # After pulling a repo update, re-install to sync /opt/ scripts
-sudo ./cron-setup.sh --install
+sudo ./systemd-setup.sh --install
 
 # Check for split-brain (stale /opt/ scripts)
-sudo ./cron-setup.sh --list
+sudo ./systemd-setup.sh --list
 # Look for: ⚠️ SPLIT-BRAIN DETECTED warning
 
 # Verify flock is installed
@@ -849,8 +849,8 @@ docker stats --no-stream > resource-usage.txt
 # Version information
 make version > version-info.txt
 
-# Cron job status
-sudo ./cron-setup.sh --list > cron-status.txt
+# Systemd timer status
+sudo ./systemd-setup.sh --list > cron-status.txt
 ```
 
 ### Emergency Recovery
