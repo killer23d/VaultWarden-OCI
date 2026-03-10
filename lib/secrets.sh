@@ -17,6 +17,28 @@
 #   BUG-S4 [LOW]    prompt_password_with_confirmation(): 'echo "$password"'
 #                   silently strips trailing newlines via $() substitution.
 #                   Replaced with printf '%s\n'.
+#
+# PATCHED BUGS (2026-03-10):
+#   BUG-S5 [CRITICAL/P3-C3]
+#                   offer_recovery_kit_export() wrote the plaintext recovery
+#                   kit to $HOME (persistent disk). On CoW/journaled filesystems
+#                   shred is ineffective and OCI block volume snapshots could
+#                   capture the file before the EXIT trap fires.
+#                   Fix: _tmpfs_dir() resolves a tmpfs path in priority order
+#                   (/dev/shm → /run/user/UID → /tmp) and the kit is written
+#                   there. A prominent WARNING banner is printed to the TTY
+#                   *before* the file is opened so the user is always aware
+#                   that plaintext is about to land on disk.
+#   BUG-S6 [MEDIUM/P3-M5]
+#                   auto_generate_secret_field() passed plaintext admin_token
+#                   and admin_basic_auth_hash passwords through log_warn() to
+#                   stderr, which is permanently captured by the systemd journal
+#                   when the script runs non-interactively.
+#                   collect_secret_field() emitted the backup_passphrase
+#                   plaintext via log_warn() to stderr for the same reason.
+#                   Fix: all plaintext password display is now routed exclusively
+#                   to /dev/tty (the operator's controlling terminal) so it
+#                   never appears in stderr or the systemd journal.
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     echo "Error: This library should be sourced, not executed directly"
@@ -209,6 +231,49 @@ _secure_shred() {
     (( file_size == 0 )) && file_size=4096
     dd if=/dev/urandom of="$target" bs="$file_size" count=1 conv=notrunc 2>/dev/null || true
     rm -f "$target"
+}
+
+# ---------------------------------------------------------------------------
+# _tmpfs_dir  (internal)
+#
+# BUG-S5 FIX (P3-C3): Returns a path that resides on a tmpfs/ramfs mount so
+# that the plaintext recovery kit never touches a persistent block device.
+# Priority order:
+#   1. /dev/shm   — POSIX shared memory (tmpfs, Linux)
+#   2. /run/user/UID — systemd user runtime dir (tmpfs, Linux)
+#   3. /tmp       — last resort; may be tmpfs on some systems but is NOT
+#                   guaranteed; caller receives a warning in this case.
+#
+# Outputs the chosen directory path on stdout and returns 0.
+# Returns 1 only if none of the candidates are writable (should never happen).
+# ---------------------------------------------------------------------------
+_tmpfs_dir() {
+    local uid
+    uid=$(id -u)
+
+    if [[ -d /dev/shm && -w /dev/shm ]]; then
+        echo "/dev/shm"
+        return 0
+    fi
+
+    local run_user="/run/user/$uid"
+    if [[ -d "$run_user" && -w "$run_user" ]]; then
+        echo "$run_user"
+        return 0
+    fi
+
+    # /tmp fallback — warn via TTY so the operator sees it even when stderr
+    # is redirected to the journal.
+    if [[ -w /tmp ]]; then
+        printf '\n⚠️  WARNING: /dev/shm and /run/user/%s are unavailable.\n' "$uid" > /dev/tty 2>/dev/null || true
+        printf '            Recovery kit will be written to /tmp which may NOT be tmpfs.\n' > /dev/tty 2>/dev/null || true
+        printf '            Shred effectiveness on CoW/journaled filesystems is not guaranteed.\n\n' > /dev/tty 2>/dev/null || true
+        echo "/tmp"
+        return 0
+    fi
+
+    log_error "_tmpfs_dir: no writable tmpfs candidate found (/dev/shm, /run/user/$uid, /tmp)"
+    return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -421,8 +486,20 @@ collect_secret_field() {
         backup_passphrase)
             local passphrase
             passphrase=$(generate_secure_string 32)
-            log_warn "Auto-generated backup passphrase (32 chars) — save it if needed:" >&2
-            log_warn "  $passphrase" >&2
+            # BUG-S6 FIX (P3-M5): Write plaintext passphrase exclusively to
+            # /dev/tty (the operator's controlling terminal) so it is never
+            # captured by stderr redirection or the systemd journal.
+            {
+                printf '\n'
+                printf '🔑 AUTO-GENERATED BACKUP PASSPHRASE (save if needed):\n'
+                printf '   %s\n' "$passphrase"
+                printf '\n'
+            } > /dev/tty 2>/dev/null || {
+                # /dev/tty unavailable (truly non-interactive): emit a redacted
+                # notice to stderr so the caller knows a passphrase was set,
+                # but never include the plaintext value.
+                log_warn "Backup passphrase auto-generated (32 chars) — retrieve from secrets store." >&2
+            }
             printf '%s' "$passphrase"
             ;;
 
@@ -445,12 +522,23 @@ auto_generate_secret_field() {
         admin_token)
             local vw_pass
             vw_pass=$(generate_secure_string 32)
-            echo "" >&2
-            log_warn "🔐 AUTO-GENERATED VAULTWARDEN ADMIN PASSWORD:" >&2
-            log_warn "   $vw_pass" >&2
-            log_warn "" >&2
-            log_warn "⚠️  SAVE THIS PASSWORD SECURELY - It cannot be recovered!" >&2
-            echo "" >&2
+            # BUG-S6 FIX (P3-M5): The generated plaintext password must NOT be
+            # passed through log_warn() to stderr, which is permanently captured
+            # by the systemd journal when running non-interactively.
+            # Write it exclusively to /dev/tty (the operator's terminal).
+            {
+                printf '\n'
+                printf '🔐 AUTO-GENERATED VAULTWARDEN ADMIN PASSWORD:\n'
+                printf '   %s\n' "$vw_pass"
+                printf '\n'
+                printf '⚠️  SAVE THIS PASSWORD SECURELY - It cannot be recovered!\n'
+                printf '\n'
+            } > /dev/tty 2>/dev/null || {
+                # /dev/tty unavailable (batch/CI with no terminal): emit a
+                # redacted notice to stderr so callers see that generation
+                # occurred but never receive the plaintext value in the journal.
+                log_warn "VaultWarden admin password auto-generated — retrieve from recovery kit." >&2
+            }
             log_info "Generating Argon2id hash..." >&2
             local vw_hash
             vw_hash=$(generate_argon2_hash "$vw_pass")
@@ -465,12 +553,17 @@ auto_generate_secret_field() {
         admin_basic_auth_hash)
             local caddy_pass
             caddy_pass=$(generate_secure_string 32)
-            echo "" >&2
-            log_warn "🔐 AUTO-GENERATED CADDY ADMIN PASSWORD:" >&2
-            log_warn "   $caddy_pass" >&2
-            log_warn "" >&2
-            log_warn "⚠️  SAVE THIS PASSWORD SECURELY - It cannot be recovered!" >&2
-            echo "" >&2
+            # BUG-S6 FIX (P3-M5): Same journal-leak fix as admin_token above.
+            {
+                printf '\n'
+                printf '🔐 AUTO-GENERATED CADDY ADMIN PASSWORD:\n'
+                printf '   %s\n' "$caddy_pass"
+                printf '\n'
+                printf '⚠️  SAVE THIS PASSWORD SECURELY - It cannot be recovered!\n'
+                printf '\n'
+            } > /dev/tty 2>/dev/null || {
+                log_warn "Caddy admin password auto-generated — retrieve from recovery kit." >&2
+            }
             log_info "Generating bcrypt hash for Caddy basic auth..." >&2
             local caddy_hash
             caddy_hash=$(generate_bcrypt_hash "$caddy_pass")
@@ -745,9 +838,32 @@ EOF
 #   1. Eliminate the global namespace pollution from the nested definition.
 #   2. Make the function visible only by convention (prefix), not by scope.
 #   3. Allow offer_recovery_kit_export() to call it normally.
+#
+# BUG-S5 FIX (P3-C3): output_file is now resolved to a tmpfs path by the
+# caller (offer_recovery_kit_export) via _tmpfs_dir(). A prominent WARNING
+# banner is printed to /dev/tty *before* generate_recovery_kit() opens the
+# file so the operator is aware that plaintext is about to land on disk.
 # ---------------------------------------------------------------------------
 _ork_generate_and_secure() {
     local output_file="$1"
+
+    # BUG-S5 FIX (P3-C3): Emit a pre-write warning to the operator's terminal
+    # BEFORE the plaintext file is created, so they are aware of the transient
+    # disk exposure and can take action (e.g. disable snapshots, use HSM).
+    {
+        printf '\n'
+        printf '════════════════════════════════════════════════════════════\n'
+        printf '⚠️  SECURITY NOTICE — PLAINTEXT FILE ABOUT TO BE WRITTEN\n'
+        printf '════════════════════════════════════════════════════════════\n'
+        printf 'The recovery kit will be written to:\n'
+        printf '  %s\n' "$output_file"
+        printf '\n'
+        printf 'Even on tmpfs, this file is visible to root and may appear\n'
+        printf 'in OCI block-volume snapshots if /tmp falls back to disk.\n'
+        printf 'The file will be securely deleted after you confirm.\n'
+        printf '════════════════════════════════════════════════════════════\n'
+        printf '\n'
+    } > /dev/tty 2>/dev/null || true
 
     # Register trap BEFORE generating so even a SIGINT during generation
     # cleans up a partially-written plaintext file.
@@ -785,10 +901,24 @@ _ork_generate_and_secure() {
 
 # ---------------------------------------------------------------------------
 # offer_recovery_kit_export
+#
+# BUG-S5 FIX (P3-C3): output_file is now placed in the directory returned by
+# _tmpfs_dir() (prefers /dev/shm, then /run/user/UID, then /tmp) instead of
+# $HOME. This keeps the plaintext recovery kit off persistent block storage
+# on systems where those paths are backed by tmpfs/ramfs, significantly
+# reducing the OCI snapshot exposure window.
 # ---------------------------------------------------------------------------
 offer_recovery_kit_export() {
     local auto_export="${1:-false}"
-    local output_file="$HOME/vaultwarden-recovery-kit-$(date +%Y%m%d%H%M%S).txt"
+
+    # BUG-S5 FIX: resolve tmpfs directory before building the output path
+    local tmpfs_base
+    if ! tmpfs_base=$(_tmpfs_dir); then
+        log_error "Cannot determine a safe (tmpfs) directory for the recovery kit. Aborting."
+        return 1
+    fi
+
+    local output_file="${tmpfs_base}/vaultwarden-recovery-kit-$(date +%Y%m%d%H%M%S).txt"
 
     if [[ "$auto_export" == "true" ]]; then
         log_info "Exporting recovery kit (--export-recovery-kit specified)..."
