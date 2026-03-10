@@ -1,0 +1,9 @@
+[Unit]
+Description=VaultWarden DNS Update Timer hourly
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target

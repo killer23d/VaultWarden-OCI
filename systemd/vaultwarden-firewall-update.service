@@ -1,0 +1,24 @@
+[Unit]
+Description=VaultWarden Firewall Update
+After=network-online.target docker.service
+ConditionPathExists=/opt/vaultwarden-scripts/maintenance.sh
+# FIX-S01: OnFailure= added — firewall update failures now trigger an email
+# notification via the shared template unit, consistent with all other
+# VaultWarden service units (maintenance, backup, health, dns-update).
+OnFailure=vaultwarden-notify-failure@%n.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/vaultwarden-scripts
+EnvironmentFile=/etc/vaultwarden/vaultwarden.env
+ExecStart=/opt/vaultwarden-scripts/maintenance.sh --update-firewall
+User=root
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vw-firewall
+NoNewPrivileges=yes
+# FIX-S01: PrivateTmp=yes added — gives the service its own private /tmp
+# mount, preventing temp-file name collisions with concurrently running
+# services. Consistent with all other VaultWarden service units.
+PrivateTmp=yes
+TimeoutStartSec=300

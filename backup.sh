@@ -10,6 +10,12 @@
 #   - verify_sqlite()          uses host 'sqlite3 PRAGMA integrity_check'
 #   - create_db_snapshot_host() uses host 'sqlite3 .backup' (SQLite Online Backup API)
 # sqlite3 is installed by setup.sh's basic_packages array.
+#
+# MOD-1: gzip replaced with zstd for full/emergency archives.
+#   - Compression: tar --use-compress-program='zstd -T0 -3' (threaded, level 3)
+#   - Decompression: zstd -d -T0 -c (snapshot injection step)
+#   - Archive extension: .tar.zst (was .tar.gz); encrypted: .tar.zst.age (was .tar.gz.age)
+#   - DB-only backups (.sqlite3.age) are unaffected — no compression layer there.
 
 set -euo pipefail
 
@@ -253,6 +259,7 @@ create_db_snapshot_host() {
 # Uses $TMPDIR_BACKUP (already covered by EXIT/INT/TERM trap in main).
 # FATAL on failure — a silently-corrupt backup is worse than no backup.
 # FIX-B05: db branch now calls verify_sqlite() instead of verify_sqlite_docker().
+# MOD-1: archive verification uses zstd decompression (--use-compress-program=zstd).
 # ---------------------------------------------------------------------------
 verify_backup_full() {
     local enc_file="$1"
@@ -277,7 +284,8 @@ verify_backup_full() {
             ;;
         full|emergency)
             b_log_info "Verifying archive structure..."
-            if ! tar -tzf "$dec_out" >/dev/null 2>&1; then
+            # MOD-1: use zstd decompression for .tar.zst archives.
+            if ! tar --use-compress-program=zstd -tf "$dec_out" >/dev/null 2>&1; then
                 log_error "Full verification FAILED: archive is corrupt or unreadable"
                 return 1
             fi
@@ -428,6 +436,11 @@ MEOF
 # ---------------------------------------------------------------------------
 # Full / emergency backup  (RELATIVE-PATH archive)
 # FIX-B07: Uses create_db_snapshot_host() (host sqlite3) instead of Docker.
+# MOD-1: Uses zstd compression instead of gzip.
+#   - tar --use-compress-program='zstd -T0 -3' for creation and rebuild
+#   - zstd -d -T0 -c for decompression in snapshot injection step
+#   - zstd -T0 -3 for recompression in snapshot injection step
+#   - Archive extension: .tar.zst (encrypted: .tar.zst.age)
 # ---------------------------------------------------------------------------
 perform_full_backup() {
     local target_dir="$1"
@@ -441,15 +454,17 @@ perform_full_backup() {
     b_log_info "Performing ${backup_label} backup (relative-path archive)..."
 
     if [[ "$DRY_RUN" == "true" ]]; then
-        b_log_info "[DRY RUN] Would create ${backup_label} backup → $target_dir/${backup_label}_backup_$timestamp.tar.gz.age"
+        b_log_info "[DRY RUN] Would create ${backup_label} backup → $target_dir/${backup_label}_backup_$timestamp.tar.zst.age"
         return 0
     fi
 
     require_commands tar || return 1
+    require_commands zstd || return 1
 
     local snap_dir="$shared_tmpdir/stage"
     local snap_db="$snap_dir/${state_dir#/}/data/db.sqlite3"
-    local temp_tar="$shared_tmpdir/${backup_label}_backup_$timestamp.tar.gz"
+    # MOD-1: .tar.zst extension (was .tar.gz)
+    local temp_tar="$shared_tmpdir/${backup_label}_backup_$timestamp.tar.zst"
 
     mkdir -p "$(dirname "$snap_db")"
 
@@ -505,9 +520,10 @@ perform_full_backup() {
 
     # -----------------------------------------------------------------------
     # 3. Create the compressed archive from /  (relative paths)
+    #    MOD-1: zstd -T0 -3 (threaded, level 3) replaces gzip -9.
     # -----------------------------------------------------------------------
     local tar_exit=0
-    tar -czf "$temp_tar" \
+    tar --use-compress-program='zstd -T0 -3' -cf "$temp_tar" \
         -C / \
         "${tar_excludes[@]}" \
         "${tar_sources[@]}" 2>/dev/null || tar_exit=$?
@@ -554,10 +570,11 @@ perform_full_backup() {
         b_log_info "Injecting clean DB snapshot into archive..."
         local temp_tar_raw="$shared_tmpdir/${backup_label}_backup_$timestamp.tar"
 
-        # Decompress → append → recompress
-        if gunzip -c "$temp_tar" > "$temp_tar_raw" \
+        # MOD-1: decompress with zstd, append snapshot, recompress with zstd.
+        # (was: gunzip -c → tar --append → gzip -9 -c)
+        if zstd -d -T0 -c "$temp_tar" > "$temp_tar_raw" \
             && tar -rf "$temp_tar_raw" -C "$snap_dir" "${state_dir#/}/data/db.sqlite3" \
-            && gzip -9 -c "$temp_tar_raw" > "${temp_tar}.new"
+            && zstd -T0 -3 "$temp_tar_raw" -o "${temp_tar}.new"
         then
             mv "${temp_tar}.new" "$temp_tar"
             rm -f "$temp_tar_raw"
@@ -574,7 +591,8 @@ perform_full_backup() {
                 "--exclude=*.lock"
             )
             tar_exit=0
-            tar -czf "$temp_tar" -C / "${tar_excludes[@]}" "${tar_sources[@]}" 2>/dev/null || tar_exit=$?
+            # MOD-1: zstd rebuild (was tar -czf)
+            tar --use-compress-program='zstd -T0 -3' -cf "$temp_tar" -C / "${tar_excludes[@]}" "${tar_sources[@]}" 2>/dev/null || tar_exit=$?
             (( tar_exit <= 1 )) || { log_error "Rebuild tar failed"; return 1; }
         fi
     fi
@@ -584,7 +602,8 @@ perform_full_backup() {
     # -----------------------------------------------------------------------
     b_log_info "Encrypting ${backup_label} archive..."
     # Atomic write: encrypt to .tmp then mv into place
-    local enc="$target_dir/${backup_label}_backup_$timestamp.tar.gz.age"
+    # MOD-1: .tar.zst.age extension (was .tar.gz.age)
+    local enc="$target_dir/${backup_label}_backup_$timestamp.tar.zst.age"
     local enc_tmp="${enc}.tmp"
 
     if ! age -r "$age_pub_key" -o "$enc_tmp" "$temp_tar"; then

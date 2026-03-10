@@ -1,0 +1,21 @@
+[Unit]
+Description=VaultWarden Daily DB Backup
+Documentation=https://github.com/killer23d/VaultWarden-OCI
+After=docker.service network-online.target
+Requires=docker.service
+ConditionPathExists=/opt/vaultwarden-scripts/backup.sh
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/vaultwarden-scripts
+EnvironmentFile=/etc/vaultwarden/vaultwarden.env
+ExecStart=/opt/vaultwarden-scripts/backup.sh --type db --rclone --email
+User=root
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vw-db-backup
+NoNewPrivileges=yes
+PrivateTmp=yes
+OnFailure=vaultwarden-notify-failure@%n.service
+# Raise timeout: rclone sync to OCI Object Storage can be slow
+TimeoutStartSec=3600
