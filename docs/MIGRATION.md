@@ -298,8 +298,8 @@ cd /path/to/VaultWarden-OCI
 ### Security Hardening After Migration
 
 ```bash
-# Generate new bcrypt hash for admin basic auth
-docker run --rm -it ghcr.io/caddybuilds/caddy-cloudflare:latest caddy hash-password
+# Regenerate bcrypt hash for admin basic auth using the built-in tool
+./setup-secrets.sh --hash-only
 
 # Update secrets
 ./edit-secrets.sh
