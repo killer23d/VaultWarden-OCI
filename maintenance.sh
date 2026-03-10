@@ -184,21 +184,29 @@ cleanup_logs() {
             fi
         fi
     done
-    local large_logs
-    if large_logs=$(find "${log_dirs[@]}" -name "*.log" -type f -size +100M 2>/dev/null); then
-        while IFS= read -r log_file; do
-            if [[ -n "$log_file" ]]; then
-                if [[ "$log_file" == *"/logs/caddy/access.log" ]]; then
-                    log_debug "Skipping rotation for Caddy log (handled internally): $log_file"
-                    continue
+    # FIX P2-H4: Only pass directories that exist to find, preventing abort under
+    # set -e when log dirs are absent on fresh installs.
+    local existing_log_dirs=()
+    for log_dir in "${log_dirs[@]}"; do
+        [[ -d "$log_dir" ]] && existing_log_dirs+=("$log_dir")
+    done
+    if [[ ${#existing_log_dirs[@]} -gt 0 ]]; then
+        local large_logs
+        if large_logs=$(find "${existing_log_dirs[@]}" -name "*.log" -type f -size +100M 2>/dev/null); then
+            while IFS= read -r log_file; do
+                if [[ -n "$log_file" ]]; then
+                    if [[ "$log_file" == *"/logs/caddy/access.log" ]]; then
+                        log_debug "Skipping rotation for Caddy log (handled internally): $log_file"
+                        continue
+                    fi
+                    local rotated_name="${log_file}.$(date +%Y%m%d)"
+                    if mv "$log_file" "$rotated_name" && gzip "$rotated_name"; then
+                        log_debug "Rotated large log: $(basename "$log_file")"
+                        ((logs_cleaned++))
+                    fi
                 fi
-                local rotated_name="${log_file}.$(date +%Y%m%d)"
-                if mv "$log_file" "$rotated_name" && gzip "$rotated_name"; then
-                    log_debug "Rotated large log: $(basename "$log_file")"
-                    ((logs_cleaned++))
-                fi
-            fi
-        done <<< "$large_logs"
+            done <<< "$large_logs"
+        fi
     fi
     [[ $logs_cleaned -gt 0 ]] && log_success "Cleaned up $logs_cleaned log files" || log_info "No old logs found to clean up"
     return 0
@@ -285,7 +293,8 @@ optimize_database() {
     local backup_file="$state_dir/data/db.sqlite3.pre-optimization-$(date +%Y%m%d-%H%M%S)"
     cp "$host_db_path" "$backup_file" || {
         log_error "Failed to create safety backup"
-        [[ "$was_running" == "true" ]] && docker compose start vaultwarden
+        # FIX P2-H1: use 'up -d' so the container is deployed even on a fresh DR host
+        [[ "$was_running" == "true" ]] && docker compose up -d vaultwarden
         return 1
     }
     log_success "Safety backup created: $(basename "$backup_file")"
@@ -293,7 +302,8 @@ optimize_database() {
     log_info "Verifying integrity before optimization..."
     if ! sqlite3 "$host_db_path" "PRAGMA integrity_check;" | grep -qx "ok"; then
         log_error "Integrity check failed - aborting"
-        [[ "$was_running" == "true" ]] && docker compose start vaultwarden
+        # FIX P2-H1: use 'up -d' so the container is deployed even on a fresh DR host
+        [[ "$was_running" == "true" ]] && docker compose up -d vaultwarden
         return 1
     fi
     log_success "Integrity check passed"
@@ -314,7 +324,8 @@ optimize_database() {
     fi
 
     if [[ "$was_running" == "true" ]]; then
-        docker compose start vaultwarden && log_success "VaultWarden restarted" || { log_error "Failed to restart VaultWarden"; optimization_success=false; }
+        # FIX P2-H1: use 'up -d' so the container is deployed even on a fresh DR host
+        docker compose up -d vaultwarden && log_success "VaultWarden restarted" || { log_error "Failed to restart VaultWarden"; optimization_success=false; }
         sleep 5
         is_service_running "vaultwarden" && log_success "VaultWarden healthy" || { log_error "VaultWarden not healthy after optimization"; optimization_success=false; }
     fi
@@ -395,7 +406,8 @@ run_deep_db_maintenance() {
     log_info "Step 1/5: Checking database integrity..."
     if ! sqlite3 "$db_file" "PRAGMA integrity_check;" | grep -q "ok"; then
         log_error "Integrity check FAILED. Aborting. Restarting services..."
-        docker compose start vaultwarden; return 1
+        # FIX P2-H1: use 'up -d' so the container is deployed even on a fresh DR host
+        docker compose up -d vaultwarden; return 1
     fi
     log_success "Database integrity check passed"
 
@@ -408,7 +420,8 @@ run_deep_db_maintenance() {
     log_info "Step 4/5: Reclaiming free space (VACUUM)... This may take a moment."
     if ! sqlite3 "$db_file" "VACUUM;" >/dev/null 2>&1; then
         log_error "VACUUM FAILED. Aborting. Restarting services..."
-        docker compose start vaultwarden; return 1
+        # FIX P2-H1: use 'up -d' so the container is deployed even on a fresh DR host
+        docker compose up -d vaultwarden; return 1
     fi
     log_success "Database VACUUM completed"
 
@@ -418,7 +431,8 @@ run_deep_db_maintenance() {
     new_bytes=$(stat -c%s "$db_file" 2>/dev/null || echo "0")
 
     log_info "Restarting VaultWarden container..."
-    docker compose start vaultwarden || { log_error "Failed to restart VaultWarden!"; return 1; }
+    # FIX P2-H1: use 'up -d' so the container is deployed even on a fresh DR host
+    docker compose up -d vaultwarden || { log_error "Failed to restart VaultWarden!"; return 1; }
 
     log_info "Waiting for services to become healthy (timeout: 45s)..."
     if wait_for_service_ready "vaultwarden" 45; then
@@ -704,6 +718,8 @@ update_firewall_ranges() {
     local cf_ipv4_file cf_ipv6_file
     cf_ipv4_file=$(mktemp -t cf_ipv4.XXXXXXXXXX)
     cf_ipv6_file=$(mktemp -t cf_ipv6.XXXXXXXXXX)
+    # FIX P2-M4: Register temp-file cleanup immediately after mktemp so that any
+    # early-exit path (error, SIGINT, etc.) always removes the files via perform_cleanup.
     CLEANUP_ACTIONS+=("rm -f '$cf_ipv4_file' '$cf_ipv6_file' 2>/dev/null || true")
     if retry_with_backoff 3 2 curl -sf --max-time 10 "https://www.cloudflare.com/ips-v4" -o "$cf_ipv4_file" && \
        retry_with_backoff 3 2 curl -sf --max-time 10 "https://www.cloudflare.com/ips-v6" -o "$cf_ipv6_file"; then
@@ -946,19 +962,21 @@ main() {
 
     # ---- Deep DB maintenance: self-contained sub-command ----
     if [[ "$DB_DEEP_MAINT" == "true" ]]; then
-        # Needs root (enforced inside run_deep_db_maintenance via is_root),
-        # but keep lock creation etc. consistent here.
+        # FIX P2-C2 / P2-M2: Replace mkdir-based lock with the shared FD 9 operations.lock.
+        # This makes --db-maint mutually exclusive with update.sh / restore.sh / routine
+        # maintenance, and the kernel releases the flock automatically on SIGKILL — no
+        # manual operator cleanup is ever needed.
         require_root "$@"
-        local DEEP_LOCKDIR="$state_dir/.locks/db-maint.lock"
-        if ! mkdir "$DEEP_LOCKDIR" 2>/dev/null; then
-            log_error "Another DB maintenance task is already running (lock: $DEEP_LOCKDIR)"
-            log_info  "If this is an error, manually remove: $DEEP_LOCKDIR"
+        local ops_lock_dir="${PROJECT_ROOT}/.locks"
+        ensure_dir "$ops_lock_dir" 700 "$(get_real_user)" || true
+        exec 9>"${ops_lock_dir}/operations.lock"
+        if ! flock -n 9; then
+            log_error "Another operation (update/restore/maintenance) is already running. Aborting."
             exit 1
         fi
-        CLEANUP_ACTIONS+=("rmdir '$DEEP_LOCKDIR' 2>/dev/null || true")
-        local GLOBAL_MAINT_LOCK="$state_dir/.locks/global-maintenance.lock"
-        touch "$GLOBAL_MAINT_LOCK"
-        CLEANUP_ACTIONS+=("rm -f '$GLOBAL_MAINT_LOCK' 2>/dev/null || true")
+        # Signal health.sh to skip auto-recovery while maintenance is active
+        touch /tmp/.vw_maintenance.lock
+        CLEANUP_ACTIONS+=("rm -f /tmp/.vw_maintenance.lock 2>/dev/null || true")
         if ! load_env_file; then log_error "Failed to load configuration"; exit 1; fi
         run_deep_db_maintenance
         exit $?
