@@ -59,6 +59,38 @@
 # name, making the misconfiguration very difficult to diagnose from logs.
 # Fix: read MAILGUN_REGION from .env; default 'us' is backward compatible.
 # An unrecognised MAILGUN_REGION value is caught early with log_error.
+#
+# --- FIX EM-H1 (2026-03-10) --------------------------------------------------
+# Pass EMAIL_API_TOKEN via curl --config @- (stdin pipe) instead of inline
+# -H "Authorization: Bearer ..." to prevent token exposure in the process
+# table (/proc/$$/cmdline) and in set -x / error traces on stderr.
+# Applies to _email_bearer_post (Bearer) and _email_driver_postmark
+# (X-Postmark-Server-Token). Mailgun --user also moved to config file.
+#
+# --- FIX EM-M1 (2026-03-10) --------------------------------------------------
+# Added --retry-all-errors to all curl calls. curl's built-in --retry only
+# fires on network-level failures; HTTP 5xx from the provider is treated as a
+# successful curl invocation (exit 0) and was never retried. --retry-all-errors
+# (curl >= 7.71) extends retry logic to cover those cases.
+#
+# --- FIX EM-M2 (2026-03-10) --------------------------------------------------
+# _email_json_escape() now strips raw Unicode control characters U+0000-U+001F
+# (other than \n \r \t which are encoded) via LC_ALL=C sed before the bash
+# substitutions. Prevents JSON rejection on crash-log payloads containing BEL,
+# FF, or other control characters.
+#
+# --- FIX EM-M3 (2026-03-10) --------------------------------------------------
+# _email_driver_mailgun() validates the resolved domain against the strict
+# regex ^[a-zA-Z0-9.-]+$ before embedding it in the API URL. A crafted
+# SMTP_FROM_EMAIL containing path components or query strings would otherwise
+# allow SSRF / URL path traversal.
+#
+# --- FIX EM-L1 (2026-03-10) --------------------------------------------------
+# bash does not export associative arrays to subshells. _EMAIL_DRIVERS is now
+# mirrored into two plain indexed arrays (_EMAIL_DRIVERS_KEYS /
+# _EMAIL_DRIVERS_VALS) which ARE exportable. _email_driver_lookup() rebuilds
+# the mapping at query time, so the dispatcher in common.sh works correctly
+# whether lib/email.sh was sourced in the parent shell or a child subshell.
 # -----------------------------------------------------------------------------
 
 # Prevent direct execution
@@ -75,6 +107,11 @@ readonly LIB_EMAIL_LOADED=1
 # Key   = value accepted in EMAIL_PROVIDER env var
 # Value = suffix of the driver function (_email_driver_<value>)
 # 'smtp' and 'host' are reserved -- handled in send_email() in common.sh
+#
+# FIX EM-L1: bash cannot export associative arrays.  We keep the associative
+# array for in-process lookups but also maintain two plain indexed arrays that
+# ARE exported so that child subshells can reconstruct the mapping via
+# _email_driver_lookup() without re-sourcing the file.
 declare -A _EMAIL_DRIVERS=(
     [mailersend]="mailersend"
     [sendgrid]="sendgrid"
@@ -83,11 +120,44 @@ declare -A _EMAIL_DRIVERS=(
     [resend]="resend"
 )
 
+# Serialised exportable shadow of _EMAIL_DRIVERS (plain indexed arrays)
+_EMAIL_DRIVERS_KEYS=(mailersend sendgrid mailgun postmark resend)
+_EMAIL_DRIVERS_VALS=(mailersend sendgrid mailgun postmark resend)
+export _EMAIL_DRIVERS_KEYS _EMAIL_DRIVERS_VALS
+
+# _email_driver_lookup PROVIDER
+# Prints the driver function suffix for PROVIDER, or returns 1 if unknown.
+# Works in subshells where _EMAIL_DRIVERS (associative) is not present by
+# falling back to the exported plain-array shadow.
+_email_driver_lookup() {
+    local provider="${1,,}"
+    # Fast path: associative array available (same shell as source)
+    if declare -p _EMAIL_DRIVERS &>/dev/null 2>&1; then
+        local val="${_EMAIL_DRIVERS[$provider]:-}"
+        [[ -n "$val" ]] && { printf '%s' "$val"; return 0; }
+    fi
+    # Fallback: linear scan of the exported plain-array shadow
+    local i
+    for i in "${!_EMAIL_DRIVERS_KEYS[@]}"; do
+        if [[ "${_EMAIL_DRIVERS_KEYS[$i]}" == "$provider" ]]; then
+            printf '%s' "${_EMAIL_DRIVERS_VALS[$i]}"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # -- HELPER: JSON string escape -----------------------------------------------
-# Pure bash -- no sed, no external tools.
-# Handles: backslash, double-quote, newline, carriage return, tab.
+# Strips raw control chars U+0000-U+001F (EM-M2) then encodes the five
+# characters that MUST be escaped in a JSON string value.
 _email_json_escape() {
     local str="$1"
+    # FIX EM-M2: Remove control characters U+0000-U+001F that are not \n \r \t.
+    # LC_ALL=C ensures single-byte interpretation; the character class covers
+    # all C0 controls; \n \r \t are excluded because we re-encode them below.
+    str=$(LC_ALL=C printf '%s' "$str" \
+        | LC_ALL=C sed 's/[\x00-\x08\x0b\x0c\x0e-\x1f]//g')
+    # Encode the five mandatory JSON escape sequences (order matters: \ first)
     str="${str//\\/\\\\}"
     str="${str//\"/\\\"}"
     str="${str//$'\n'/\\n}"
@@ -100,21 +170,32 @@ _email_json_escape() {
 # Used by MailerSend, SendGrid, Resend.
 # Sets _ECURL_CODE and _ECURL_BODY for callers to inspect.
 # Returns 0 on HTTP 2xx, 1 otherwise.
+#
+# FIX EM-H1: The Authorization header is written to a temp curl config file
+# and passed via --config @- (stdin) so the token never appears in the process
+# table or in bash error/trace output.
+# FIX EM-M1: --retry-all-errors added so HTTP 5xx also triggers the retry loop.
 _email_bearer_post() {
     local url="$1" payload="$2"
-    local tmp code
+    local tmp cfg code
     tmp=$(mktemp -t vw_email.XXXXXXXXXX)
-    trap 'rm -f "$tmp" 2>/dev/null; trap - RETURN' RETURN
+    cfg=$(mktemp -t vw_ecfg.XXXXXXXXXX)
+    trap 'rm -f "$tmp" "$cfg" 2>/dev/null; trap - RETURN' RETURN
+
+    # Write the token into the curl config file -- never on the command line
+    printf 'header = "Authorization: Bearer %s"\n' "${EMAIL_API_TOKEN}" >"$cfg"
+    chmod 600 "$cfg"
 
     code=$(curl -s \
+        --config "$cfg" \
         --connect-timeout 10 \
         --max-time 20 \
         --retry 2 \
         --retry-delay 3 \
+        --retry-all-errors \
         -o "$tmp" \
         -w "%{http_code}" \
         -X POST "$url" \
-        -H "Authorization: Bearer ${EMAIL_API_TOKEN}" \
         -H "Content-Type: application/json" \
         -d "$payload" 2>/dev/null)
 
@@ -213,6 +294,9 @@ EOF
 #   MAILGUN_REGION=us  (default) -- api.mailgun.net    (accounts at mailgun.com)
 #   MAILGUN_REGION=eu             -- api.eu.mailgun.net (accounts at eu.mailgun.com)
 # FIX-B02: EU-region accounts received HTTP 404 from the hardcoded US endpoint.
+# FIX EM-H1: --user credential moved to curl config file (not process table).
+# FIX EM-M1: --retry-all-errors added.
+# FIX EM-M3: domain validated against strict hostname regex before use in URL.
 _email_driver_mailgun() {
     local subject="$1" body="$2"
     local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
@@ -221,6 +305,14 @@ _email_driver_mailgun() {
     [[ -z "$domain" ]] && domain="${_from_email##*@}"
     if [[ -z "$domain" ]]; then
         log_error "Mailgun driver: cannot determine domain. Set MAILGUN_DOMAIN in .env"
+        return 1
+    fi
+
+    # FIX EM-M3: Validate domain is a safe hostname before embedding in URL.
+    # A crafted SMTP_FROM_EMAIL like user@host/path?q= would allow SSRF via
+    # path traversal in the constructed curl URL.
+    if [[ ! "$domain" =~ ^[a-zA-Z0-9.-]+$ ]]; then
+        log_error "Mailgun driver: invalid domain '${domain}' (failed hostname validation). Check MAILGUN_DOMAIN or SMTP_FROM_EMAIL."
         return 1
     fi
 
@@ -239,19 +331,25 @@ _email_driver_mailgun() {
             ;;
     esac
 
-    local tmp code
+    local tmp cfg code
     tmp=$(mktemp -t vw_email.XXXXXXXXXX)
-    trap 'rm -f "$tmp" 2>/dev/null; trap - RETURN' RETURN
+    cfg=$(mktemp -t vw_ecfg.XXXXXXXXXX)
+    trap 'rm -f "$tmp" "$cfg" 2>/dev/null; trap - RETURN' RETURN
+
+    # FIX EM-H1: Write Basic Auth credential to config file -- not process table.
+    printf 'user = "api:%s"\n' "${EMAIL_API_TOKEN}" >"$cfg"
+    chmod 600 "$cfg"
 
     code=$(curl -s \
+        --config "$cfg" \
         --connect-timeout 10 \
         --max-time 20 \
         --retry 2 \
         --retry-delay 3 \
+        --retry-all-errors \
         -o "$tmp" \
         -w "%{http_code}" \
         -X POST "https://${mg_api_host}/v3/${domain}/messages" \
-        --user "api:${EMAIL_API_TOKEN}" \
         -F "from=${SMTP_FROM_NAME:-VaultWarden} <${_from_email}>" \
         -F "to=${ADMIN_EMAIL}" \
         -F "subject=${subject}" \
@@ -270,6 +368,9 @@ _email_driver_mailgun() {
 # Payload: JSON PascalCase; From and To are plain strings
 # IMPORTANT: HTTP 200 does NOT mean success -- must check ErrorCode in body
 # Success: HTTP 200 JSON { "ErrorCode": 0, ... }
+#
+# FIX EM-H1: X-Postmark-Server-Token moved to curl config file.
+# FIX EM-M1: --retry-all-errors added.
 _email_driver_postmark() {
     local subject="$1" body="$2"
     local s b fn fe ae
@@ -283,28 +384,40 @@ _email_driver_postmark() {
     fe=$(_email_json_escape "${_from_email}")
     ae=$(_email_json_escape "${ADMIN_EMAIL}")
 
-    local tmp code
+    local tmp cfg code
     tmp=$(mktemp -t vw_email.XXXXXXXXXX)
-    trap 'rm -f "$tmp" 2>/dev/null; trap - RETURN' RETURN
+    cfg=$(mktemp -t vw_ecfg.XXXXXXXXXX)
+    trap 'rm -f "$tmp" "$cfg" 2>/dev/null; trap - RETURN' RETURN
+
+    # FIX EM-H1: Token written to config file -- never on the command line.
+    printf 'header = "X-Postmark-Server-Token: %s"\n' "${EMAIL_API_TOKEN}" >"$cfg"
+    chmod 600 "$cfg"
+
+    local payload
+    payload=$(cat <<EOF
+{
+    "From":          "${fn} <${fe}>",
+    "To":            "${ae}",
+    "Subject":       "${s}",
+    "TextBody":      "${b}",
+    "MessageStream": "outbound"
+}
+EOF
+)
 
     code=$(curl -s \
+        --config "$cfg" \
         --connect-timeout 10 \
         --max-time 20 \
         --retry 2 \
         --retry-delay 3 \
+        --retry-all-errors \
         -o "$tmp" \
         -w "%{http_code}" \
         -X POST "https://api.postmarkapp.com/email" \
         -H "Accept: application/json" \
         -H "Content-Type: application/json" \
-        -H "X-Postmark-Server-Token: ${EMAIL_API_TOKEN}" \
-        -d "{
-            \"From\":          \"${fn} <${fe}>\",
-            \"To\":            \"${ae}\",
-            \"Subject\":       \"${s}\",
-            \"TextBody\":      \"${b}\",
-            \"MessageStream\": \"outbound\"
-        }" 2>/dev/null)
+        -d "$payload" 2>/dev/null)
 
     local resp; resp=$(head -c 300 "$tmp" 2>/dev/null | tr -d '\n')
     if [[ ! "$code" =~ ^2 ]]; then
@@ -350,8 +463,11 @@ EOF
     return 1
 }
 
-# Export all driver functions so they are available in subshells
-export -f _email_json_escape _email_bearer_post
+# Export all driver functions and the lookup helper so they are available in
+# subshells.  _EMAIL_DRIVERS_KEYS/_EMAIL_DRIVERS_VALS (plain indexed arrays)
+# are already exported above; _email_driver_lookup() uses them as the fallback
+# when the associative _EMAIL_DRIVERS is unavailable in a child subshell (EM-L1).
+export -f _email_json_escape _email_bearer_post _email_driver_lookup
 export -f _email_driver_mailersend _email_driver_sendgrid _email_driver_mailgun
 export -f _email_driver_postmark _email_driver_resend
 
