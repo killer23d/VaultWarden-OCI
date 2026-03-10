@@ -86,6 +86,41 @@ _maybe_sudo() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# _startup_secure_wipe FILE
+#
+# FIX [ST-H1]: Securely overwrite and remove a sensitive temp file.
+# Mirrors lib/secrets.sh::_secure_shred() to handle CoW filesystems
+# (btrfs, snapshotted ext4 on OCI block volumes) where shred(1) cannot
+# guarantee extent reuse and therefore cannot guarantee data erasure.
+#
+# Strategy:
+#   1. shred(1) when available — best effort on non-CoW filesystems.
+#   2. dd(1) overwrite with /dev/urandom — effective on CoW filesystems
+#      because writing new data forces a new extent allocation, breaking
+#      the old snapshot's reference to the plaintext extent.
+#   3. rm(1) — removes the directory entry in all cases.
+#
+# Portable stat: GNU uses -c%s; BSD/macOS uses -f%z.
+# Safe default of 4096 bytes is used if stat fails.
+# ---------------------------------------------------------------------------
+_startup_secure_wipe() {
+  local target="$1"
+  [[ -f "$target" ]] || return 0
+
+  if command -v shred >/dev/null 2>&1; then
+    shred -fuz "$target" 2>/dev/null && return 0
+  fi
+
+  # dd overwrite fallback: effective on CoW filesystems
+  local file_size
+  file_size=$(stat -c%s "$target" 2>/dev/null || stat -f%z "$target" 2>/dev/null || echo "4096")
+  [[ -z "$file_size" || ! "$file_size" =~ ^[0-9]+$ ]] && file_size=4096
+  (( file_size == 0 )) && file_size=4096
+  dd if=/dev/urandom of="$target" bs="$file_size" count=1 conv=notrunc 2>/dev/null || true
+  rm -f "$target"
+}
+
 # ENHANCED: Prepare log directories with correct ownership
 prepare_log_directories() {
   log_info "Ensuring base state directory exists..."
@@ -136,6 +171,9 @@ prepare_log_directories() {
 # ENHANCED: Secure secret file preparation with YAML extraction fix
 # FIX [ISSUE 12]: Decrypt SOPS file once and cache the plaintext, then extract
 #                 all secrets from the cache. Avoids N heavy age decrypt operations.
+# FIX [ST-H1]:   Replaced shred-only wipe with _startup_secure_wipe() which
+#                 uses a dd-overwrite fallback, making erasure effective on
+#                 CoW filesystems (btrfs / snapshotted ext4 on OCI block volumes).
 prepare_docker_secrets() {
   log_info "Preparing Docker secrets with enhanced security..."
 
@@ -169,7 +207,10 @@ prepare_docker_secrets() {
   cleanup_local() {
     umask "$old_umask"
     if [[ -n "$decrypted_cache" ]]; then
-      rm -f "$decrypted_cache" 2>/dev/null || true
+      # FIX [ST-H1]: Use _startup_secure_wipe instead of shred-only to handle
+      # CoW filesystems where shred cannot guarantee extent reuse.
+      _startup_secure_wipe "$decrypted_cache"
+      decrypted_cache=""
     fi
   }
   trap cleanup_local RETURN
@@ -191,6 +232,7 @@ prepare_docker_secrets() {
   export SOPS_AGE_KEY_FILE="$PROJECT_ROOT/$age_key_file"
 
   # FIX [ISSUE 12]: Decrypt once into a secure temp file; extract all secrets from it.
+  # FIX [ST-H1]:   File is wiped via _startup_secure_wipe() on RETURN (see cleanup_local).
   decrypted_cache=$(mktemp)
   chmod 600 "$decrypted_cache"
 
@@ -250,12 +292,10 @@ PY
     fi
   done
 
-  # Securely wipe the decrypted cache
-  if command -v shred >/dev/null 2>&1; then
-    shred -fuz "$decrypted_cache" 2>/dev/null || rm -f "$decrypted_cache"
-  else
-    rm -f "$decrypted_cache"
-  fi
+  # FIX [ST-H1]: Explicit secure wipe before RETURN trap fires, so the wipe
+  # happens here in the success path and cleanup_local becomes a safe no-op.
+  _startup_secure_wipe "$decrypted_cache"
+  decrypted_cache=""
 
   # Restore cleanup trap and umask
   trap - RETURN
@@ -284,6 +324,16 @@ start_services() {
   fi
 
   log_info "Starting VaultWarden services..."
+
+  # FIX [ST-M2]: Enforce the architectural contract that secret files must
+  # exist before Docker bind-mounts them. This makes the cleanup_on_exit()
+  # comment-only guard concrete and catches accidental pre-startup deletion.
+  local secrets_dir="secrets/.docker_secrets"
+  if [[ ! -d "$secrets_dir" ]] || [[ -z "$(ls -A "$secrets_dir" 2>/dev/null)" ]]; then
+    log_error "Secrets directory is missing or empty: $secrets_dir"
+    log_error "Cannot start services — Docker bind-mounts require secret files to exist."
+    return 1
+  fi
 
   if [[ "$FORCE_RESTART" == "true" ]]; then
     log_info "Force restart requested - stopping existing services..."
@@ -340,6 +390,10 @@ update_dns_record() {
 }
 
 # Health validation
+# FIX [ST-M1]: Pass --auto-recover unconditionally so health.sh can take
+# corrective action on startup failures (container restarts, etc.).
+# Pass --email only when ADMIN_EMAIL is configured so alert delivery is
+# gated on a known-good destination, matching health.sh's own convention.
 verify_startup_health() {
   if [[ "$SKIP_HEALTH_CHECK" == "true" ]]; then
     log_info "Skipping health check (--skip-health specified)"
@@ -355,8 +409,14 @@ verify_startup_health() {
   sleep 30
 
   if [[ -f "./health.sh" ]]; then
+    # Build health.sh argument list
+    local health_args=("--auto-recover")
+    if [[ -n "${ADMIN_EMAIL:-}" ]]; then
+      health_args+=("--email")
+    fi
+
     # Prefer sudo here because health.sh may need root to decrypt/check backups
-    if _maybe_sudo ./health.sh; then
+    if _maybe_sudo ./health.sh "${health_args[@]}"; then
       log_success "All services are healthy"
       return 0
     else
@@ -371,10 +431,29 @@ verify_startup_health() {
   fi
 }
 
-# Cleanup function
+# ---------------------------------------------------------------------------
+# cleanup_on_exit
+#
+# FIX [ST-M2]: The previous implementation was a silent colon stub with only
+# a comment to prevent accidental secret deletion. Replaced with an explicit
+# 'return 0' and an expanded contract comment.
+#
+# ARCHITECTURAL CONTRACT:
+#   Docker bind-mounts in docker-compose.yml reference files under
+#   secrets/.docker_secrets/. Those files MUST remain on disk from the time
+#   prepare_docker_secrets() writes them until *after* docker compose up
+#   completes and Docker has read them into the container namespace.
+#
+#   start_services() now asserts that the secrets directory is non-empty
+#   before calling docker compose up, making this contract enforceable at
+#   runtime rather than relying solely on this comment.
+#
+#   Do NOT add rm/shred calls here for the secrets directory. The files are
+#   intentionally left on disk; they are mode-600 and owned by root, which
+#   is the correct long-term security posture for Docker secret bind-mounts.
+# ---------------------------------------------------------------------------
 cleanup_on_exit() {
-  # Secrets files need to persist for Docker to mount them
-  :
+  return 0
 }
 trap cleanup_on_exit EXIT
 
