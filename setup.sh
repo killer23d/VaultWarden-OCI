@@ -579,13 +579,16 @@ check_entropy() {
     local entropy; entropy=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo "0")
     (( entropy >= ENTROPY_THRESHOLD )) && return 0
 
+    log_warn "Insufficient entropy (${entropy} bits, need ${ENTROPY_THRESHOLD}). Waiting for entropy pool to fill..."
     local waited=0
     while (( waited < ENTROPY_MAX_WAIT )); do
+        log_info "Waiting for sufficient entropy... (${entropy} bits, need ${ENTROPY_THRESHOLD}, waited ${waited}s/${ENTROPY_MAX_WAIT}s)"
         sleep 5
         waited=$((waited + 5))
         entropy=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo "0")
         (( entropy >= ENTROPY_THRESHOLD )) && return 0
     done
+    log_error "Insufficient entropy after ${ENTROPY_MAX_WAIT}s (got ${entropy} bits, need ${ENTROPY_THRESHOLD}). Install haveged: sudo apt-get install -y haveged"
     return 1
 }
 

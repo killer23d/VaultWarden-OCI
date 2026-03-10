@@ -361,8 +361,12 @@ remove_breakglass_user() {
         log_warn "User removal may have had issues (user might not have had home directory)"
     fi
 
-    # Remove user from sudo group (best effort)
-    deluser "$BREAKGLASS_USER" sudo 2>/dev/null || true
+    # Remove user from sudo group — portable across Debian (deluser) and RHEL (gpasswd)
+    if command -v gpasswd >/dev/null 2>&1; then
+        gpasswd -d "$BREAKGLASS_USER" sudo 2>/dev/null || true
+    elif command -v deluser >/dev/null 2>&1; then
+        deluser "$BREAKGLASS_USER" sudo 2>/dev/null || true
+    fi
 
 
     log_success "Break-glass admin removal completed"

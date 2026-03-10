@@ -434,7 +434,8 @@ check_database_growth() {
         local size_history_file="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/.vw_db_size_history"
         local previous_size=0
         [[ -f "$size_history_file" ]] && previous_size=$(cat "$size_history_file" 2>/dev/null || echo "0")
-        echo "$current_size_mb" > "$size_history_file"
+        printf '%s\n' "$current_size_mb" > "${size_history_file}.tmp" && \
+            mv "${size_history_file}.tmp" "$size_history_file" || true
 
         local growth=$((current_size_mb - previous_size))
 
@@ -845,6 +846,8 @@ generate_json_report() {
 
 main() {
     require_root "$@"
+
+    load_env_file 2>/dev/null || true
 
     health_log_info "VaultWarden-OCI Health Monitor - Set-and-Forget Edition"
     [[ "$AUTO_RECOVER" == "true" ]] && health_log_info "🔧 Auto-recovery enabled"

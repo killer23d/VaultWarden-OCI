@@ -361,7 +361,12 @@ PYEOF
         return 1
     fi
 
-    if ! python3 -c "import yaml, sys; yaml.safe_load(open('$temp_patched'))" 2>/dev/null; then
+    if ! python3 - "$temp_patched" <<'PYEOF' 2>/dev/null
+import sys, yaml
+with open(sys.argv[1]) as f:
+    yaml.safe_load(f)
+PYEOF
+    then
         log_error "Patched YAML is invalid - aborting"
         return 1
     fi
@@ -438,7 +443,12 @@ do_edit() {
 
     log_info "Changes detected, validating..."
 
-    if ! python3 -c "import yaml, sys; yaml.safe_load(open('$temp_file'))" 2>/dev/null; then
+    if ! python3 - "$temp_file" <<'PYEOF' 2>/dev/null
+import sys, yaml
+with open(sys.argv[1]) as f:
+    yaml.safe_load(f)
+PYEOF
+    then
         log_error "Invalid YAML structure after editing"
         # FIX [L-04]: Add -t 30 timeout
         if ! read -r -t 30 -p "Discard changes? (yes/no): " discard; then

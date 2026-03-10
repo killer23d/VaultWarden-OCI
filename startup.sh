@@ -233,7 +233,7 @@ PY
        [[ "$secret_value" != "null" ]] && [[ "$secret_value" != "PLACEHOLDER"* ]]; then
       if printf '%s' "$secret_value" > "$secret_file"; then
         local file_perms
-        file_perms=$(stat -c "%a" "$secret_file" 2>/dev/null || echo "unknown")
+        file_perms=$(_stat_octal_perms_local "$secret_file" 2>/dev/null || echo "unknown")
         if [[ "$file_perms" == "600" ]]; then
           log_debug "Secret created securely: $secret_name (permissions: $file_perms)"
           secrets_created=$(( secrets_created + 1 ))
