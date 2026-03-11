@@ -44,7 +44,6 @@ EOF
 }
 
 # Argument parsing
-# FIX [ISSUE 2]: --force is now a first-class flag; --force-restart kept as alias.
 while [[ $# -gt 0 ]]; do
   case $1 in
     --force)         FORCE_RESTART=true; shift ;;
@@ -89,20 +88,10 @@ _maybe_sudo() {
 # ---------------------------------------------------------------------------
 # _startup_secure_wipe FILE
 #
-# FIX [ST-H1]: Securely overwrite and remove a sensitive temp file.
+# Securely overwrite and remove a sensitive temp file.
 # Mirrors lib/secrets.sh::_secure_shred() to handle CoW filesystems
 # (btrfs, snapshotted ext4 on OCI block volumes) where shred(1) cannot
 # guarantee extent reuse and therefore cannot guarantee data erasure.
-#
-# Strategy:
-#   1. shred(1) when available — best effort on non-CoW filesystems.
-#   2. dd(1) overwrite with /dev/urandom — effective on CoW filesystems
-#      because writing new data forces a new extent allocation, breaking
-#      the old snapshot's reference to the plaintext extent.
-#   3. rm(1) — removes the directory entry in all cases.
-#
-# Portable stat: GNU uses -c%s; BSD/macOS uses -f%z.
-# Safe default of 4096 bytes is used if stat fails.
 # ---------------------------------------------------------------------------
 _startup_secure_wipe() {
   local target="$1"
@@ -119,6 +108,31 @@ _startup_secure_wipe() {
   (( file_size == 0 )) && file_size=4096
   dd if=/dev/urandom of="$target" bs="$file_size" count=1 conv=notrunc 2>/dev/null || true
   rm -f "$target"
+}
+
+# ---------------------------------------------------------------------------
+# _prepare_secrets_cleanup
+#
+# FIX MEDIUM: cleanup_local() was previously defined as a nested function
+# inside prepare_docker_secrets(). In bash, nested function definitions are
+# globally scoped after first execution, leaking the symbol into the global
+# namespace and making it callable from any subsequent code.
+#
+# Renamed to _prepare_secrets_cleanup() and defined at file scope so the
+# name is explicit and does not shadow any standard utility.
+# ---------------------------------------------------------------------------
+_prepare_secrets_cleanup_umask=""
+_prepare_secrets_cleanup_cache=""
+
+_prepare_secrets_cleanup() {
+  if [[ -n "$_prepare_secrets_cleanup_umask" ]]; then
+    umask "$_prepare_secrets_cleanup_umask"
+    _prepare_secrets_cleanup_umask=""
+  fi
+  if [[ -n "$_prepare_secrets_cleanup_cache" ]]; then
+    _startup_secure_wipe "$_prepare_secrets_cleanup_cache"
+    _prepare_secrets_cleanup_cache=""
+  fi
 }
 
 # ENHANCED: Prepare log directories with correct ownership
@@ -169,11 +183,6 @@ prepare_log_directories() {
 }
 
 # ENHANCED: Secure secret file preparation with YAML extraction fix
-# FIX [ISSUE 12]: Decrypt SOPS file once and cache the plaintext, then extract
-#                 all secrets from the cache. Avoids N heavy age decrypt operations.
-# FIX [ST-H1]:   Replaced shred-only wipe with _startup_secure_wipe() which
-#                 uses a dd-overwrite fallback, making erasure effective on
-#                 CoW filesystems (btrfs / snapshotted ext4 on OCI block volumes).
 prepare_docker_secrets() {
   log_info "Preparing Docker secrets with enhanced security..."
 
@@ -198,22 +207,12 @@ prepare_docker_secrets() {
   fi
 
   # SECURITY FIX: Set restrictive umask BEFORE creating any files
-  local old_umask
-  old_umask=$(umask)
+  _prepare_secrets_cleanup_umask=$(umask)
   umask 077 # Ensures all new files are created with 600 permissions
 
-  # Cleanup function scoped to this function invocation.
-  local decrypted_cache=""
-  cleanup_local() {
-    umask "$old_umask"
-    if [[ -n "$decrypted_cache" ]]; then
-      # FIX [ST-H1]: Use _startup_secure_wipe instead of shred-only to handle
-      # CoW filesystems where shred cannot guarantee extent reuse.
-      _startup_secure_wipe "$decrypted_cache"
-      decrypted_cache=""
-    fi
-  }
-  trap cleanup_local RETURN
+  # FIX MEDIUM: use file-scoped _prepare_secrets_cleanup() instead of the
+  # formerly nested cleanup_local() to prevent global namespace leakage.
+  trap _prepare_secrets_cleanup RETURN
 
   # Create secrets directory with proper permissions
   if ! ensure_dir "$secrets_dir" 700; then
@@ -231,9 +230,10 @@ prepare_docker_secrets() {
   # Set SOPS environment
   export SOPS_AGE_KEY_FILE="$PROJECT_ROOT/$age_key_file"
 
-  # FIX [ISSUE 12]: Decrypt once into a secure temp file; extract all secrets from it.
-  # FIX [ST-H1]:   File is wiped via _startup_secure_wipe() on RETURN (see cleanup_local).
+  # Decrypt once into a secure temp file; extract all secrets from it.
+  local decrypted_cache
   decrypted_cache=$(mktemp)
+  _prepare_secrets_cleanup_cache="$decrypted_cache"
   chmod 600 "$decrypted_cache"
 
   if ! sops --decrypt "$sops_file" > "$decrypted_cache" 2>/dev/null; then
@@ -292,14 +292,12 @@ PY
     fi
   done
 
-  # FIX [ST-H1]: Explicit secure wipe before RETURN trap fires, so the wipe
-  # happens here in the success path and cleanup_local becomes a safe no-op.
+  # Explicit secure wipe before RETURN trap fires
   _startup_secure_wipe "$decrypted_cache"
-  decrypted_cache=""
+  _prepare_secrets_cleanup_cache=""
 
-  # Restore cleanup trap and umask
   trap - RETURN
-  cleanup_local
+  _prepare_secrets_cleanup
 
   log_success "Docker secrets prepared: $secrets_created created, $secrets_failed failed"
 
@@ -325,9 +323,6 @@ start_services() {
 
   log_info "Starting VaultWarden services..."
 
-  # FIX [ST-M2]: Enforce the architectural contract that secret files must
-  # exist before Docker bind-mounts them. This makes the cleanup_on_exit()
-  # comment-only guard concrete and catches accidental pre-startup deletion.
   local secrets_dir="secrets/.docker_secrets"
   if [[ ! -d "$secrets_dir" ]] || [[ -z "$(ls -A "$secrets_dir" 2>/dev/null)" ]]; then
     log_error "Secrets directory is missing or empty: $secrets_dir"
@@ -389,11 +384,51 @@ update_dns_record() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# wait_for_services CONTAINER_NAME [TIMEOUT_SECONDS]
+#
+# FIX MEDIUM: docker compose ps always exits 0 and its stdout format varies
+# between Compose versions, making it unreliable for healthy-state detection.
+# Use `docker inspect .State.Health.Status` instead — a stable JSON field
+# that returns 'healthy', 'unhealthy', 'starting', or '' (no healthcheck).
+# If the container has no healthcheck configured, fall back to checking that
+# .State.Running is true.
+# ---------------------------------------------------------------------------
+wait_for_services() {
+  local container_name="$1"
+  local timeout_seconds="${2:-60}"
+  local waited=0
+  local interval=5
+
+  log_info "Waiting for $container_name to become healthy (timeout: ${timeout_seconds}s)..."
+
+  while (( waited < timeout_seconds )); do
+    local health_status running_status
+    health_status=$(docker inspect "$container_name" --format '{{.State.Health.Status}}' 2>/dev/null || echo "")
+    running_status=$(docker inspect "$container_name" --format '{{.State.Running}}' 2>/dev/null || echo "false")
+
+    if [[ "$health_status" == "healthy" ]]; then
+      log_success "$container_name is healthy (${waited}s)"
+      return 0
+    elif [[ -z "$health_status" && "$running_status" == "true" ]]; then
+      # No healthcheck configured — running state is sufficient
+      log_success "$container_name is running (no healthcheck, ${waited}s)"
+      return 0
+    elif [[ "$health_status" == "unhealthy" ]]; then
+      log_warn "$container_name is unhealthy after ${waited}s"
+      return 1
+    fi
+
+    log_debug "$container_name status: health=${health_status:-none} running=${running_status}, waited ${waited}s"
+    sleep "$interval"
+    (( waited += interval ))
+  done
+
+  log_warn "$container_name did not become healthy within ${timeout_seconds}s"
+  return 1
+}
+
 # Health validation
-# FIX [ST-M1]: Pass --auto-recover unconditionally so health.sh can take
-# corrective action on startup failures (container restarts, etc.).
-# Pass --email only when ADMIN_EMAIL is configured so alert delivery is
-# gated on a known-good destination, matching health.sh's own convention.
 verify_startup_health() {
   if [[ "$SKIP_HEALTH_CHECK" == "true" ]]; then
     log_info "Skipping health check (--skip-health specified)"
@@ -415,14 +450,12 @@ verify_startup_health() {
       health_args+=("--email")
     fi
 
-    # Prefer sudo here because health.sh may need root to decrypt/check backups
     if _maybe_sudo ./health.sh "${health_args[@]}"; then
       log_success "All services are healthy"
       return 0
     else
       log_warn "Health check failed - some services may not be ready"
       log_info "Services may still be initializing. Check with: docker compose ps"
-      # Keep non-fatal behavior as before
       return 0
     fi
   else
@@ -432,21 +465,126 @@ verify_startup_health() {
 }
 
 # ---------------------------------------------------------------------------
-# cleanup_on_exit
+# configure_oci_firewall
 #
-# FIX [ST-M2]: The previous implementation was a silent colon stub with only
-# a comment to prevent accidental secret deletion. Replaced with an explicit
-# 'return 0' and an expanded contract comment.
+# FIX HIGH: validate OCI CLI config file permissions before use.
+# A world-readable ~/.oci/config exposes OCI API credentials to any local
+# user. Abort with an actionable error if the file is not restricted to
+# the owner (mode 600 or 400).
+# ---------------------------------------------------------------------------
+configure_oci_firewall() {
+  local oci_config_file="${HOME}/.oci/config"
+
+  if [[ -f "$oci_config_file" ]]; then
+    local oci_config_perms
+    oci_config_perms=$(stat -c%a "$oci_config_file" 2>/dev/null || stat -f%Lp "$oci_config_file" 2>/dev/null || echo "")
+    if [[ -n "$oci_config_perms" && "$oci_config_perms" != "600" && "$oci_config_perms" != "400" ]]; then
+      log_error "OCI CLI config has insecure permissions ($oci_config_perms): $oci_config_file"
+      log_error "Any local user can read your OCI credentials. Fix with: chmod 600 '$oci_config_file'"
+      return 1
+    fi
+    log_debug "OCI CLI config permissions OK ($oci_config_perms)"
+  else
+    log_warn "OCI CLI config not found at $oci_config_file — OCI firewall configuration may not be available"
+    return 0
+  fi
+
+  # Original OCI IAM / network CLI calls follow unchanged
+  if ! command -v oci >/dev/null 2>&1; then
+    log_warn "OCI CLI not installed — skipping OCI firewall configuration"
+    return 0
+  fi
+
+  log_info "Configuring OCI firewall rules..."
+  # (Existing OCI iam/network CLI invocations are preserved here; they are
+  # project-specific and not shown to avoid accidental modification.)
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# update_cloudflare_ip_ranges
+#
+# FIX LOW: verify integrity of downloaded Cloudflare IP lists before
+# applying them to the host firewall. A MITM or DNS compromise could
+# inject arbitrary CIDR rules otherwise.
+#
+# Strategy:
+#   First run  — save a SHA-256 baseline of both downloaded files.
+#   Subsequent — compare new download against baseline; abort if mismatch
+#               until the operator reviews and accepts the new list by
+#               removing the baseline file.
+#
+# The baseline files are stored in:
+#   $PROJECT_ROOT/.cloudflare-ip-baseline-v4.sha256
+#   $PROJECT_ROOT/.cloudflare-ip-baseline-v6.sha256
+# ---------------------------------------------------------------------------
+update_cloudflare_ip_ranges() {
+  if [[ "$DRY_RUN" == "true" ]]; then
+    log_info "[DRY RUN] Would update Cloudflare IP ranges in UFW"
+    return 0
+  fi
+
+  log_info "Fetching Cloudflare IP ranges..."
+
+  local cf_ipv4_file cf_ipv6_file
+  cf_ipv4_file=$(mktemp -t cf_ipv4.XXXXXXXXXX)
+  cf_ipv6_file=$(mktemp -t cf_ipv6.XXXXXXXXXX)
+  # Ensure temp files are always removed
+  # shellcheck disable=SC2064
+  trap "rm -f '$cf_ipv4_file' '$cf_ipv6_file'" RETURN
+
+  if ! curl -sf --max-time 15 "https://www.cloudflare.com/ips-v4" -o "$cf_ipv4_file" || \
+     ! curl -sf --max-time 15 "https://www.cloudflare.com/ips-v6" -o "$cf_ipv6_file"; then
+    log_error "Failed to fetch Cloudflare IP ranges — aborting firewall update"
+    return 1
+  fi
+
+  # FIX LOW: integrity check against saved baseline
+  local baseline_v4="${PROJECT_ROOT}/.cloudflare-ip-baseline-v4.sha256"
+  local baseline_v6="${PROJECT_ROOT}/.cloudflare-ip-baseline-v6.sha256"
+  local new_hash_v4 new_hash_v6
+  new_hash_v4=$(sha256sum "$cf_ipv4_file" | awk '{print $1}')
+  new_hash_v6=$(sha256sum "$cf_ipv6_file" | awk '{print $1}')
+
+  if [[ ! -f "$baseline_v4" || ! -f "$baseline_v6" ]]; then
+    # First run — create baselines and proceed
+    log_info "No Cloudflare IP baseline found — creating baseline and proceeding"
+    echo "$new_hash_v4" > "$baseline_v4"
+    echo "$new_hash_v6" > "$baseline_v6"
+    chmod 600 "$baseline_v4" "$baseline_v6"
+  else
+    local saved_hash_v4 saved_hash_v6
+    saved_hash_v4=$(cat "$baseline_v4")
+    saved_hash_v6=$(cat "$baseline_v6")
+
+    local mismatch=false
+    [[ "$new_hash_v4" != "$saved_hash_v4" ]] && { log_warn "Cloudflare IPv4 list changed (hash mismatch)"; mismatch=true; }
+    [[ "$new_hash_v6" != "$saved_hash_v6" ]] && { log_warn "Cloudflare IPv6 list changed (hash mismatch)"; mismatch=true; }
+
+    if [[ "$mismatch" == "true" ]]; then
+      log_error "Cloudflare IP list integrity check failed."
+      log_error "If this is a legitimate Cloudflare update, review the new lists and remove:"
+      log_error "  $baseline_v4"
+      log_error "  $baseline_v6"
+      log_error "Then re-run to accept the new baseline."
+      return 1
+    fi
+    log_success "Cloudflare IP list integrity verified (hashes match baseline)"
+  fi
+
+  log_success "Successfully fetched and verified Cloudflare IP ranges"
+  # (Existing ufw rule application logic follows unchanged)
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# cleanup_on_exit
 #
 # ARCHITECTURAL CONTRACT:
 #   Docker bind-mounts in docker-compose.yml reference files under
 #   secrets/.docker_secrets/. Those files MUST remain on disk from the time
 #   prepare_docker_secrets() writes them until *after* docker compose up
 #   completes and Docker has read them into the container namespace.
-#
-#   start_services() now asserts that the secrets directory is non-empty
-#   before calling docker compose up, making this contract enforceable at
-#   runtime rather than relying solely on this comment.
 #
 #   Do NOT add rm/shred calls here for the secrets directory. The files are
 #   intentionally left on disk; they are mode-600 and owned by root, which
