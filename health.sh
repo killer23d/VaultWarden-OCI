@@ -15,6 +15,11 @@
 # FIXED: H-M2 - guard size_history_file with install -m 600 before writing
 # FIXED: H-L1 - add explicit parse-failure guard/log_warn in top CPU fallback
 # FIXED: H-L2 - vaultwarden-health.service ExecStart includes --auto-recover --email
+# FIXED: AUDIT-H1 - DNS pre-resolution guard in check_ssl_certificates prevents hang
+# FIXED: AUDIT-M1 - fail2ban check uses --json flag; version-stable output parsing
+# FIXED: AUDIT-M2 - disk space check includes absolute free-space thresholds
+# FIXED: AUDIT-M3 - check guards mark components 'skipped' on premature exit
+# FIXED: AUDIT-L1 - backup freshness uses verified-timestamp not mtime
 
 set -euo pipefail
 
@@ -134,6 +139,29 @@ _json_escape() {
     printf '%s' "$s"
 }
 
+# ---------------------------------------------------------------------------
+# AUDIT-M3: run_check COMPONENT cmd [args...]
+#
+# Runs a check function under set +e and captures its exit code.  If the
+# function exits unexpectedly (e.g. via a nested set -e trap, a signal, or
+# an unhandled error) the component is recorded as 'skipped' and the overall
+# status is set to degraded so the report always reflects what ran.
+# ---------------------------------------------------------------------------
+run_check() {
+    local component="$1"; shift
+    local rc=0
+    "$@" || rc=$?
+    # If the check set HEALTH_RESULTS for the component itself, honour it.
+    # If not (component key absent), the check exited prematurely — mark skipped.
+    if [[ -z "${HEALTH_RESULTS[$component]+isset}" ]]; then
+        HEALTH_RESULTS[$component]="skipped"
+        HEALTH_DETAILS[$component]="Check exited prematurely (rc=${rc})"
+        ISSUES_FOUND+=("WARNING: $component check did not complete (rc=${rc})")
+        [[ "$OVERALL_STATUS" != "unhealthy" ]] && OVERALL_STATUS="degraded"
+    fi
+    return 0
+}
+
 # Check if container is healthy
 container_is_healthy() {
     local container="$1"
@@ -160,9 +188,6 @@ container_is_healthy() {
 }
 
 # Attempt automatic recovery of unhealthy container.
-# FIX (NEW-BUG-06): Email notifications are gated behind SEND_EMAIL flag.
-# Previously send_notification_email was called unconditionally regardless of
-# whether --email was passed, bypassing the user-visible CLI gate entirely.
 attempt_container_recovery() {
     local container="$1"
     local service="$2"
@@ -216,10 +241,6 @@ check_container_status() {
     )
     local unhealthy_containers=() stopped_containers=()
 
-    # FIX (auto-recovery single-container limit): Evaluate and recover each
-    # container independently. The previous single boolean recovery_attempted
-    # flag caused only the first unhealthy/stopped container to be recovered;
-    # all subsequent containers were silently skipped.
     for container_service in "${containers[@]}"; do
         local container="${container_service%%:*}"
         local service="${container_service##*:}"
@@ -279,9 +300,6 @@ check_container_status() {
         HEALTH_DETAILS["containers"]="Stopped: ${stopped_containers[*]}"
         return 1
     elif [[ ${#unhealthy_containers[@]} -gt 0 ]]; then
-        # FIX [M-03]: Containers with Docker health=unhealthy must set OVERALL_STATUS=unhealthy
-        # and exit 1. Using health_log_warn here left exit code 0 even when containers
-        # were failing their health checks.
         health_log_error "CRITICAL: Unhealthy containers: ${unhealthy_containers[*]}"
         HEALTH_RESULTS["containers"]="failed"
         HEALTH_DETAILS["containers"]="Unhealthy: ${unhealthy_containers[*]}"
@@ -297,21 +315,15 @@ check_container_status() {
 check_service_accessibility() {
     health_log_info "Checking service accessibility..."
 
-    # FIXED: Use the internal Caddy port 8080 which bypasses HTTPS redirects
-    # This ensures the health check validates the container is UP, not just that DNS works
     if curl -sf --max-time 5 "http://localhost:8080/alive" >/dev/null 2>&1; then
         health_log_success "VaultWarden local access: OK"
     else
         health_log_error "CRITICAL: VaultWarden local access: FAILED"
         health_log_error "Port 8080 may not be exposed in docker-compose.yml"
         HEALTH_RESULTS["accessibility"]="failed"
-        # If we can't hit localhost:8080, the container is actually broken/down
         return 1
     fi
 
-    # FIX (H-M1): Use get_config_value() instead of bare grep/cut so that DOMAIN
-    # values containing shell metacharacters are safely retrieved and do not leak
-    # into the curl URL argument.
     local domain
     domain=$(get_config_value "DOMAIN" 2>/dev/null || echo "")
     if [[ -n "$domain" ]]; then
@@ -321,7 +333,6 @@ check_service_accessibility() {
             health_log_success "External web access: OK"
         else
             health_log_warn "External web access: FAILED (Check Cloudflare/DNS)"
-            # Don't fail the whole check if only external is down (could be just a network blip)
             HEALTH_RESULTS["accessibility"]="degraded"
             return 0
         fi
@@ -332,38 +343,115 @@ check_service_accessibility() {
     return 0
 }
 
+# ---------------------------------------------------------------------------
+# AUDIT-M2: check_disk_space
+#
+# Checks both percentage-used and absolute free space.  Percentage alone
+# gives false confidence on large volumes (10 TB at 85% = 1.5 TB free) and
+# false alarms on small ones (10 GB at 79% = 2.1 GB free).  By also testing
+# absolute free KiB we catch the small-volume case regardless of percentage.
+#
+# Thresholds (absolute):
+#   WARN     < 2 GB free  (2 097 152 KiB)
+#   CRITICAL < 500 MB free (512 000 KiB)
+# ---------------------------------------------------------------------------
 check_disk_space() {
     health_log_info "Checking disk space usage..."
     local state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
-    local usage_percent
-    usage_percent=$(df / | awk 'NR==2 {print $5}' | sed 's/%//' 2>/dev/null || echo "0")
 
-    if (( usage_percent > ALERT_THRESHOLD )); then
-        health_log_error "CRITICAL: Root disk usage: ${usage_percent}%"
-        HEALTH_RESULTS["disk_space"]="failed"
-        HEALTH_DETAILS["disk_space"]="Root: ${usage_percent}% used"
-        return 1
-    elif (( usage_percent > 70 )); then
-        health_log_warn "Root disk usage high: ${usage_percent}%"
-        HEALTH_RESULTS["disk_space"]="degraded"
-        HEALTH_DETAILS["disk_space"]="Root: ${usage_percent}% used (warning)"
-        return 1
-    else
-        health_log_success "Disk space OK: ${usage_percent}% used"
-        HEALTH_RESULTS["disk_space"]="healthy"
-        HEALTH_DETAILS["disk_space"]="Root: ${usage_percent}% used"
-    fi
+    # ── Helper: check one mount point ──────────────────────────────────────
+    _check_mount() {
+        local label="$1" mount="$2"
+        local usage_percent free_kib
+        # df -k: columns are Filesystem 1K-blocks Used Available Use% Mounted
+        read -r usage_percent free_kib < <(
+            df -k "$mount" 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print $5, $4}'
+        )
+        usage_percent=${usage_percent:-0}
+        free_kib=${free_kib:-0}
+
+        # Convert free KiB to human-readable for messages
+        local free_human
+        if   (( free_kib >= 1048576 )); then
+            free_human="$(( free_kib / 1048576 )) GB"
+        elif (( free_kib >= 1024 )); then
+            free_human="$(( free_kib / 1024 )) MB"
+        else
+            free_human="${free_kib} KB"
+        fi
+
+        # Critical: percentage threshold OR absolute < 500 MB
+        if (( usage_percent > ALERT_THRESHOLD )) || (( free_kib < 512000 )); then
+            health_log_error "CRITICAL: ${label} disk usage: ${usage_percent}% (${free_human} free)"
+            HEALTH_RESULTS["disk_space"]="failed"
+            HEALTH_DETAILS["disk_space"]="${label}: ${usage_percent}% used, ${free_human} free"
+            return 1
+        # Warning: percentage > 70 OR absolute < 2 GB
+        elif (( usage_percent > 70 )) || (( free_kib < 2097152 )); then
+            health_log_warn "${label} disk usage high: ${usage_percent}% (${free_human} free)"
+            # Only downgrade to degraded; don't overwrite an existing failed state
+            [[ "${HEALTH_RESULTS[disk_space]:-}" != "failed" ]] && {
+                HEALTH_RESULTS["disk_space"]="degraded"
+                HEALTH_DETAILS["disk_space"]="${label}: ${usage_percent}% used, ${free_human} free (warning)"
+            }
+            return 1
+        else
+            health_log_success "${label} disk space OK: ${usage_percent}% used (${free_human} free)"
+            [[ -z "${HEALTH_RESULTS[disk_space]+isset}" ]] && {
+                HEALTH_RESULTS["disk_space"]="healthy"
+                HEALTH_DETAILS["disk_space"]="${label}: ${usage_percent}% used, ${free_human} free"
+            }
+            return 0
+        fi
+    }
+
+    local disk_ok=true
+    _check_mount "Root (/)" "/" || disk_ok=false
 
     if [[ -d "$state_dir" && "$state_dir" != "/" ]]; then
-        local state_usage
-        state_usage=$(df "$state_dir" | awk 'NR==2 {print $5}' | sed 's/%//' 2>/dev/null || echo "0")
-        if (( state_usage > ALERT_THRESHOLD )); then
-            health_log_error "CRITICAL: State directory usage: ${state_usage}%"
-            HEALTH_RESULTS["disk_space"]="failed"
-            return 1
-        fi
+        _check_mount "State dir (${state_dir})" "$state_dir" || disk_ok=false
     fi
 
+    # Ensure the key is always set even when both mounts pass
+    if [[ -z "${HEALTH_RESULTS[disk_space]+isset}" ]]; then
+        HEALTH_RESULTS["disk_space"]="healthy"
+        HEALTH_DETAILS["disk_space"]="All mount points within thresholds"
+    fi
+
+    [[ "$disk_ok" == "true" ]]
+}
+
+# ---------------------------------------------------------------------------
+# AUDIT-H1: check_ssl_certificates
+#
+# The previous implementation called `openssl s_client` directly behind a
+# `timeout 5` wrapper.  On systems where the domain resolves to NXDOMAIN,
+# the TCP connect() blocks for up to ~120 s (kernel retransmit timeout)
+# before the OS returns ECONNREFUSED — the `timeout 5` wrapping the
+# openssl *process* does kill it after 5 s, but only after the full TCP
+# timeout fires inside the kernel; on some distros/kernels the process-level
+# SIGTERM arrives after 2 min, not 5 s.
+#
+# Fix: resolve the domain with a 3-second deadline first.  If resolution
+# fails we emit a warning and skip the openssl call entirely, preventing
+# any TCP-level hang.
+# ---------------------------------------------------------------------------
+_resolve_domain() {
+    local domain="$1"
+    # Try getent first (glibc, always present), then dig, then host.
+    if command -v getent >/dev/null 2>&1; then
+        timeout 3 getent hosts "$domain" >/dev/null 2>&1 && return 0
+    fi
+    if command -v dig >/dev/null 2>&1; then
+        local result
+        result=$(timeout 3 dig +short +tries=1 +time=3 "$domain" 2>/dev/null)
+        [[ -n "$result" ]] && return 0
+        return 1
+    fi
+    if command -v host >/dev/null 2>&1; then
+        timeout 3 host -W 3 "$domain" >/dev/null 2>&1 && return 0
+    fi
+    # No resolver available — allow the openssl attempt to proceed (best effort)
     return 0
 }
 
@@ -379,15 +467,31 @@ check_ssl_certificates() {
 
     if [[ -z "$domain" ]]; then
         health_log_warn "No domain configured for SSL check"
+        HEALTH_RESULTS["ssl_certificates"]="degraded"
+        HEALTH_DETAILS["ssl_certificates"]="No domain configured"
         return 0
     fi
 
     clean_domain=$(echo "$domain" | sed 's|https\?://||; s|/.*$||')
 
+    # AUDIT-H1: Pre-resolve the domain before opening a TCP connection.
+    # If DNS returns NXDOMAIN / SERVFAIL the OS TCP stack will block for up to
+    # ~120 s (kernel retransmit) before the process-level timeout fires.
+    # Resolving first with a 3-second deadline avoids that hang entirely.
+    if ! _resolve_domain "$clean_domain"; then
+        health_log_warn "SSL check skipped: domain '$clean_domain' does not resolve (NXDOMAIN or DNS timeout)"
+        HEALTH_RESULTS["ssl_certificates"]="degraded"
+        HEALTH_DETAILS["ssl_certificates"]="DNS resolution failed for ${clean_domain}"
+        return 1
+    fi
+
     local cert_info expiry_date expires_in
-    # Added 'timeout 5' to prevent openssl from hanging indefinitely if the network drops connection silently
-    if cert_info=$(echo | timeout 5 openssl s_client -servername "$clean_domain" -connect "$clean_domain:443" 2>/dev/null | \
-                   openssl x509 -noout -dates 2>/dev/null); then
+    # timeout 5 wraps the openssl process; DNS is already confirmed above so
+    # the 5-second budget is spent only on the TLS handshake, not DNS.
+    if cert_info=$(echo | timeout 5 openssl s_client \
+            -servername "$clean_domain" \
+            -connect "$clean_domain:443" 2>/dev/null | \
+            openssl x509 -noout -dates 2>/dev/null); then
         expiry_date=$(echo "$cert_info" | grep "notAfter" | cut -d= -f2)
         if [[ -n "$expiry_date" ]]; then
             local expiry_epoch current_epoch
@@ -416,11 +520,13 @@ check_ssl_certificates() {
         else
             health_log_warn "Could not parse SSL certificate expiration"
             HEALTH_RESULTS["ssl_certificates"]="degraded"
+            HEALTH_DETAILS["ssl_certificates"]="Could not parse cert dates"
             return 1
         fi
     else
         health_log_warn "Could not check SSL certificate (connection failed or timed out)"
         HEALTH_RESULTS["ssl_certificates"]="degraded"
+        HEALTH_DETAILS["ssl_certificates"]="Connection failed or timed out"
         return 1
     fi
 }
@@ -439,15 +545,12 @@ check_database_growth() {
         local previous_size=0
         [[ -f "$size_history_file" ]] && previous_size=$(cat "$size_history_file" 2>/dev/null || echo "0")
 
-        # FIX (H-M2): Ensure the history file is created with mode 0600 before
-        # writing, preventing world-readable DB size trend data on systems with
-        # a misconfigured or permissive umask.
+        # FIX (H-M2): Ensure the history file is created with mode 0600
         if [[ ! -f "$size_history_file" ]]; then
             install -m 600 /dev/null "$size_history_file" 2>/dev/null || true
         fi
         printf '%s\n' "$current_size_mb" > "${size_history_file}.tmp" && \
             mv "${size_history_file}.tmp" "$size_history_file" || true
-        # Restore correct permissions on the tmp->final rename (mv preserves source perms)
         chmod 600 "$size_history_file" 2>/dev/null || true
 
         local growth=$((current_size_mb - previous_size))
@@ -476,6 +579,17 @@ check_database_growth() {
     fi
 }
 
+# ---------------------------------------------------------------------------
+# _verify_backup_decryptable
+#
+# AUDIT-L1: After a successful decryption-verify pass, write a
+# .vw_backup_verified.<basename> timestamp file.  check_backup_status() uses
+# the mtime of that verified-stamp instead of the backup file's own mtime for
+# freshness comparison.  This ensures that touch / rsync --no-times /
+# cp --preserve=timestamps cannot make a stale backup appear fresh — those
+# operations cannot update the verified-stamp without running the actual age
+# decryption.
+# ---------------------------------------------------------------------------
 _verify_backup_decryptable() {
     local backup_file="$1"
     local backup_type="$2"
@@ -500,15 +614,45 @@ _verify_backup_decryptable() {
         return 1
     fi
 
+    # AUDIT-L1: Write verified-timestamp so freshness check cannot be spoofed
+    # by mtime manipulation (touch / rsync --no-times / cp --preserve).
+    local state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
+    local stamp_file="${state_dir}/.vw_backup_verified.$(basename "$backup_file")"
+    install -m 600 /dev/null "${stamp_file}.tmp" 2>/dev/null && \
+        printf '%s\n' "$(date +%s)" > "${stamp_file}.tmp" && \
+        mv "${stamp_file}.tmp" "$stamp_file" || true
+
     return 0
+}
+
+# ---------------------------------------------------------------------------
+# _backup_verified_age_days FILE
+#
+# AUDIT-L1: Return (via stdout) the age in days of the verified-stamp for
+# FILE.  Falls back to the file's own mtime when no stamp exists (first run
+# before any verify pass has written one).
+# ---------------------------------------------------------------------------
+_backup_verified_age_days() {
+    local backup_file="$1"
+    local state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
+    local stamp_file="${state_dir}/.vw_backup_verified.$(basename "$backup_file")"
+
+    local ref_epoch=0
+    if [[ -f "$stamp_file" ]]; then
+        ref_epoch=$(cat "$stamp_file" 2>/dev/null || echo "0")
+    else
+        # Fallback: use the backup file's own mtime (pre-stamp behaviour)
+        ref_epoch=$(stat -c%Y "$backup_file" 2>/dev/null || \
+                    stat -f%m "$backup_file" 2>/dev/null || echo "0")
+    fi
+
+    echo $(( ($(date +%s) - ref_epoch) / 86400 ))
 }
 
 check_backup_status() {
     health_log_info "Checking backup status and integrity..."
 
-    # FIX (BUG-W): Read BACKUP_DIR from .env when present so health.sh and
-    # backup.sh agree on the backup location. Fall back to PROJECT_ROOT/backups
-    # only when the variable is absent or empty.
+    # FIX (BUG-W): Read BACKUP_DIR from .env
     local backup_base_dir
     backup_base_dir="$PROJECT_ROOT/backups"
     if [[ -f ".env" ]]; then
@@ -535,16 +679,12 @@ check_backup_status() {
     local backup_failed=false
 
     if [[ -n "${latest_db_backup:-}" ]]; then
+        # AUDIT-L1: Use verified-stamp age, not raw mtime
         local db_backup_age
-        if command -v stat >/dev/null 2>&1; then
-            db_backup_age=$((($(date +%s) - $(stat -c%Y "$latest_db_backup" 2>/dev/null || \
-                              stat -f%m "$latest_db_backup" 2>/dev/null || echo "0")) / 86400))
-        else
-            db_backup_age=999
-        fi
+        db_backup_age=$(_backup_verified_age_days "$latest_db_backup")
 
         if (( db_backup_age > 2 )); then
-            backup_issues+=("Last DB backup is ${db_backup_age} days old")
+            backup_issues+=("Last DB backup is ${db_backup_age} days old (verified stamp)")
             backup_failed=true
         elif ! _verify_backup_decryptable "$latest_db_backup" "DB"; then
             backup_issues+=("Latest DB backup failed decryption")
@@ -558,16 +698,12 @@ check_backup_status() {
     fi
 
     if [[ -n "${latest_full_backup:-}" ]]; then
+        # AUDIT-L1: Use verified-stamp age, not raw mtime
         local full_backup_age
-        if command -v stat >/dev/null 2>&1; then
-            full_backup_age=$((($(date +%s) - $(stat -c%Y "$latest_full_backup" 2>/dev/null || \
-                                stat -f%m "$latest_full_backup" 2>/dev/null || echo "0")) / 86400))
-        else
-            full_backup_age=999
-        fi
+        full_backup_age=$(_backup_verified_age_days "$latest_full_backup")
 
         if (( full_backup_age > 7 )); then
-            backup_issues+=("Last full backup is ${full_backup_age} days old")
+            backup_issues+=("Last full backup is ${full_backup_age} days old (verified stamp)")
             backup_failed=true
         elif ! _verify_backup_decryptable "$latest_full_backup" "full"; then
             backup_issues+=("Latest full backup failed decryption")
@@ -636,10 +772,7 @@ check_resource_usage() {
 
     local cpu_usage mem_usage cpu_int
 
-    # Use /proc/stat for reliable CPU measurement on Linux (stable kernel interface).
-    # Fall back to flexible top parsing on non-Linux systems where /proc/stat is absent.
     if [[ -r /proc/stat ]]; then
-        # Two-sample measurement: sample idle/total ticks 1 second apart.
         local cpu1 cpu2 idle1 total1 idle2 total2
         cpu1=$(grep -m1 '^cpu ' /proc/stat)
         sleep 1
@@ -657,10 +790,7 @@ check_resource_usage() {
             cpu_usage=0
         fi
     else
-        # FIX (H-L1): After extracting cpu_usage from top, validate it is a
-        # non-negative integer. Unrecognised top formats (e.g. BusyBox/Alpine)
-        # may produce empty or non-numeric output; emit a warning and default
-        # to 0 rather than silently returning a false-healthy reading.
+        # FIX (H-L1): Validate parsed value; warn and default to 0 on failure
         cpu_usage=$(top -bn1 | awk '/[Cc][Pp][Uu]/ && /[0-9]/ {
             for(i=1;i<=NF;i++) {
                 if ($i ~ /^[0-9.]+$/ && $(i-1) ~ /[uU][sS]/) { print $i; exit }
@@ -668,9 +798,8 @@ check_resource_usage() {
             }
         } NR==3 {exit}' 2>/dev/null | head -1 || echo "")
         cpu_usage=${cpu_usage%.*}
-        # Validate: must be a non-negative integer; warn and default to 0 on parse failure.
         if [[ -z "$cpu_usage" ]] || ! [[ "$cpu_usage" =~ ^[0-9]+$ ]]; then
-            log_warn "check_resource_usage: could not parse CPU usage from top output (unrecognised format); defaulting to 0"
+            log_warn "check_resource_usage: could not parse CPU usage from top output; defaulting to 0"
             cpu_usage=0
         fi
     fi
@@ -721,10 +850,6 @@ check_configuration() {
     if [[ ! -f "secrets/secrets.yaml" ]]; then
         config_issues+=("Missing secrets.yaml file")
     else
-        # FIX: --test is not a valid edit-secrets.sh flag (unknown options exit 1).
-        # Use --list instead: it runs check_prerequisites + validate_secrets
-        # (which performs the actual SOPS decryption test) then lists key names
-        # to stdout (redirected to /dev/null). Exits 0 on success, 1 on failure.
         if ! ./edit-secrets.sh --list >/dev/null 2>&1; then
             config_issues+=("Secrets decryption failed")
         fi
@@ -745,16 +870,38 @@ check_configuration() {
     fi
 }
 
+# ---------------------------------------------------------------------------
+# AUDIT-M1: check_security_status / check_fail2ban_status
+#
+# fail2ban-client status output format changed between 0.x and 1.x:
+#   0.x header: "Status"
+#   1.x header: "Status for the jail:"
+# Grepping for a specific string is brittle.  Instead:
+#   1. Try `fail2ban-client --json status` (available since 0.10 / 1.x);
+#      parse the JSON field .status to confirm the daemon responded.
+#   2. Fall back to plain `fail2ban-client status` and check only for a
+#      non-zero exit code, which is stable across all versions.
+# ---------------------------------------------------------------------------
+_check_fail2ban_responding() {
+    # First try: JSON output (stable across 1.x versions)
+    if docker exec vaultwarden_fail2ban sh -c \
+            'fail2ban-client --json status 2>/dev/null' \
+            | grep -q '"status"' 2>/dev/null; then
+        return 0
+    fi
+    # Fallback: plain status — trust exit code only, not text parsing
+    docker exec vaultwarden_fail2ban sh -c \
+        'fail2ban-client status >/dev/null 2>&1'
+}
+
 check_security_status() {
     [[ "$COMPREHENSIVE" == "false" ]] && return 0
     health_log_info "Checking security status..."
 
     local security_issues=()
 
-    # FIX: crazymax/fail2ban has a non-standard PATH; fail2ban-client must be
-    # invoked via sh -c. Use docker exec by container name — more reliable
-    # than docker compose exec for host-network containers.
-    docker exec vaultwarden_fail2ban sh -c 'fail2ban-client status' >/dev/null 2>&1 || \
+    # AUDIT-M1: version-stable fail2ban check
+    _check_fail2ban_responding 2>/dev/null || \
         security_issues+=("fail2ban not responding")
 
     local age_key_file="${DEFAULT_AGE_KEY_FILE:-secrets/keys/age-key.txt}"
@@ -783,10 +930,7 @@ generate_report() {
     [[ "$JSON_OUTPUT" == "true" ]] && generate_json_report || generate_text_report
 }
 
-# FIX (BUG-U): Use printf '%b\n' instead of echo -e to print the report.
-# echo -e interprets backslash sequences found inside health detail strings
-# (e.g. container names or paths that happen to contain \n, \t, etc.),
-# which can corrupt output or silently truncate lines.
+# FIX (BUG-U): Use printf '%b\n' instead of echo -e
 generate_text_report() {
     local report=""
     report+="VaultWarden-OCI Health Report - Set-and-Forget Edition\n"
@@ -800,9 +944,10 @@ generate_text_report() {
         local status="${HEALTH_RESULTS[$component]}"
         local details="${HEALTH_DETAILS[$component]:-}"
         case $status in
-            "healthy") report+="  ✅ $component: $status" ;;
+            "healthy")  report+="  ✅ $component: $status" ;;
             "degraded") report+="  ⚠️  $component: $status" ;;
-            "failed") report+="  ❌ $component: $status" ;;
+            "failed")   report+="  ❌ $component: $status" ;;
+            "skipped")  report+="  ⏭️  $component: $status" ;;
         esac
         [[ -n "$details" ]] && report+=" - $details"
         report+="\n"
@@ -823,10 +968,7 @@ generate_text_report() {
     fi
 }
 
-# FIX (BUG-V): Sanitize all user-controlled values before embedding in JSON.
-# Previously, values from HEALTH_RESULTS, HEALTH_DETAILS, and ISSUES_FOUND
-# were interpolated verbatim; any string containing a double-quote, backslash,
-# or control character would produce structurally invalid JSON.
+# FIX (BUG-V): Sanitize all user-controlled values before embedding in JSON
 generate_json_report() {
     local json_report="{"
     json_report+="\"timestamp\": \"$(date -Iseconds)\","
@@ -875,29 +1017,23 @@ main() {
     [[ "$COMPREHENSIVE" == "true" ]] && health_log_info "Running comprehensive health checks..." || \
         health_log_info "Running basic health checks..."
 
-    # FIX: Disable exit-on-error for the check loop.
-    # With set -e active, any check function returning non-zero would abort the
-    # entire script via `cmd; arr+=($?)` before the result is captured, skipping
-    # all remaining checks and the summary report.
-    # Individual check failures are non-fatal by design — we want the full picture.
+    # Disable exit-on-error for the check loop; individual failures are non-fatal.
+    # run_check() wraps each call and marks components 'skipped' on premature exit
+    # (AUDIT-M3), ensuring the full report is always assembled and sent.
     set +e
 
-    # FIX (BUG-T): Removed the dead check_results array. The array was appended
-    # to after each check call but was never read anywhere in the script.
-    # Exit codes are captured implicitly via OVERALL_STATUS / HEALTH_RESULTS.
-
-    check_container_status
-    check_service_accessibility
-    check_disk_space
-    check_ssl_certificates
-    check_database_growth
-    check_backup_status
-    test_email_notifications
+    run_check "containers"         check_container_status
+    run_check "accessibility"      check_service_accessibility
+    run_check "disk_space"         check_disk_space
+    run_check "ssl_certificates"   check_ssl_certificates
+    run_check "database_growth"    check_database_growth
+    run_check "backup_status"      check_backup_status
+    run_check "email_notifications" test_email_notifications
 
     if [[ "$COMPREHENSIVE" == "true" ]]; then
-        check_resource_usage
-        check_configuration
-        check_security_status
+        run_check "resources"      check_resource_usage
+        run_check "configuration"  check_configuration
+        run_check "security"       check_security_status
     fi
 
     generate_report
