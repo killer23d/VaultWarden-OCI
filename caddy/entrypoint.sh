@@ -72,23 +72,23 @@ fi
 
 # Validate format before splitting
 # FIX [CE-L2]: case statement avoids echo|grep pipeline masking under ash.
+# FIX: Tightened bcrypt pattern from \$2[aby]\$* to \$2[abxy]\$[0-9][0-9]\$*
+# The previous pattern accepted single-digit cost factors and empty hash bodies.
+# Valid bcrypt format: $2[abxy]$NN$<53 chars> where NN is a 2-digit cost (04-31).
 case "$ADMIN_HASH_FULL" in
-    admin\ \$2[aby]\$*) ;;
+    admin\ \$2[abxy]\$[0-9][0-9]\$*) ;;
     *)
         echo "ERROR: Admin basic auth hash has invalid format" >&2
-        echo "Expected: admin \$2a\$14\$... (SPACE-separated)" >&2
+        echo "Expected: admin \$2a\$14\$... (SPACE-separated, 2-digit cost factor)" >&2
         exit 1
         ;;
 esac
 
-# FIX [M-17]: Separate assignment from export for each variable
-_admin_username=$(echo "$ADMIN_HASH_FULL" | awk '{print $1}') || { echo "ERROR: cannot parse admin username" >&2; exit 1; }
-export ADMIN_USERNAME="$_admin_username"
-unset _admin_username
-
-_admin_hash=$(echo "$ADMIN_HASH_FULL" | awk '{$1=""; print substr($0,2)}') || { echo "ERROR: cannot parse admin hash" >&2; exit 1; }
-export ADMIN_HASH="$_admin_hash"
-unset _admin_hash
+# FIX [CE-L2]: Replace awk pipelines with POSIX parameter expansion to avoid
+# ash pipefail masking. ${var%% *} strips from the first space to end (username).
+# ${var#* } strips from start to first space (hash body).
+export ADMIN_USERNAME="${ADMIN_HASH_FULL%% *}"
+export ADMIN_HASH="${ADMIN_HASH_FULL#* }"
 
 # FIX [CE-M2]: Unset ADMIN_HASH_FULL after splitting to purge the full
 # htpasswd-format string (username + bcrypt hash) from the container
@@ -99,7 +99,9 @@ unset ADMIN_HASH_FULL
 
 DEBUG_ENTRYPOINT=${DEBUG_ENTRYPOINT:-false}
 if [ "$DEBUG_ENTRYPOINT" = "true" ]; then
-    echo "✓ Admin basic auth loaded"
+    # FIX: Include parsed ADMIN_USERNAME in debug output so operators can verify
+    # the correct credential file was read. ADMIN_HASH is intentionally omitted.
+    echo "✓ Admin basic auth loaded (username: ${ADMIN_USERNAME})"
 fi
 
 # Verify we got both parts
