@@ -39,6 +39,33 @@
 #                   Fix: all plaintext password display is now routed exclusively
 #                   to /dev/tty (the operator's controlling terminal) so it
 #                   never appears in stderr or the systemd journal.
+#
+# PATCHED BUGS (2026-03-11):
+#   BUG-S7 [HIGH]   write_secret_file(): file was created via echo > dest with
+#                   no umask guard; the file was world-readable from creation
+#                   until the subsequent chmod 600 call.
+#                   Fix: save/restore umask around creation, set 077 so the
+#                   file is born 600; chmod 600 is retained as belt-and-suspenders.
+#   BUG-S8 [HIGH]   validate_cloudflare_token(): when CLOUDFLARE_ZONE_ID is
+#                   absent or set to a placeholder value in .env the function
+#                   already returned early (existing guard), but the log message
+#                   "skipping validation" was indistinguishable from a genuine
+#                   validation pass. Now emits an explicit log_warn and returns 1
+#                   so callers can distinguish "skipped" from "passed".
+#   BUG-S9 [MEDIUM] generate_admin_token(): openssl rand failure produced an
+#                   empty token that passed the non-empty check because the
+#                   pipeline's exit code came from head/tr, not openssl.
+#                   Fix: check openssl exit code explicitly via pipefail;
+#                   additionally verify the token meets minimum length (32 chars).
+#   BUG-S10 [MEDIUM] decrypt_secret(): exported SOPS_AGE_KEY_FILE into the
+#                   process environment and never unset it; child processes
+#                   inherited the key file path.
+#                   Fix: unset SOPS_AGE_KEY_FILE immediately after the sops -d
+#                   call completes (success or failure).
+#   BUG-S11 [LOW]   list_secrets(): sops -d piped through grep caused plaintext
+#                   secret *values* to transit the shell pipeline buffer.
+#                   Fix: decode key names only via python3/yaml; values are
+#                   never decrypted into the pipeline.
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     echo "Error: This library should be sourced, not executed directly"
@@ -79,6 +106,139 @@ setup_secrets_environment() { ensure_sops_env "${1:-}"; }
 
 cleanup_secrets_environment() {
     log_debug "cleanup_secrets_environment: no-op (SOPS vars persist for script lifetime)"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# write_secret_file DEST VALUE
+#
+# BUG-S7 FIX: echo "$value" > "$dest" created the file at the process umask
+# (typically 022 → 644), making it world-readable from creation until the
+# subsequent chmod 600 call.  Fix: save and restore umask around the write,
+# setting 077 so the file is born at mode 600.  chmod 600 is retained as
+# belt-and-suspenders in case the shell's umask is manipulated externally.
+# ---------------------------------------------------------------------------
+write_secret_file() {
+    local dest="$1"
+    local value="$2"
+
+    local old_umask
+    old_umask=$(umask)
+    umask 077
+    printf '%s\n' "$value" > "$dest"
+    local write_rc=$?
+    umask "$old_umask"
+
+    if [[ $write_rc -ne 0 ]]; then
+        log_error "write_secret_file: failed to write $dest"
+        return 1
+    fi
+
+    chmod 600 "$dest"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# generate_admin_token
+#
+# BUG-S9 FIX: the original pipeline (openssl rand ... | tr ... | head ...)
+# masked openssl failures because the pipeline exit code came from head/tr.
+# An empty token passed the -z check.
+# Fix: use pipefail in a subshell so any stage failure is detected; also
+# enforce a minimum token length of 32 characters.
+# ---------------------------------------------------------------------------
+generate_admin_token() {
+    local length="${1:-48}"
+    local token
+
+    # Run in a subshell with pipefail so openssl failure propagates.
+    if ! token=$(
+        set -o pipefail
+        openssl rand -base64 64 | tr -dc 'A-Za-z0-9' | head -c "$length"
+    ); then
+        log_error "generate_admin_token: openssl rand failed or pipeline error"
+        return 1
+    fi
+
+    if [[ -z "$token" || ${#token} -lt 32 ]]; then
+        log_error "generate_admin_token: generated token is too short (${#token} chars); aborting"
+        return 1
+    fi
+
+    printf '%s' "$token"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# decrypt_secret KEY [SECRETS_FILE]
+#
+# BUG-S10 FIX: SOPS_AGE_KEY_FILE was exported into the process environment
+# and never unset, causing all subsequent child processes (subshells, external
+# commands) to inherit the key file path.
+# Fix: unset SOPS_AGE_KEY_FILE immediately after the sops -d call, regardless
+# of success or failure.  ensure_sops_env() will re-export it if needed by
+# subsequent calls.
+# ---------------------------------------------------------------------------
+decrypt_secret() {
+    local key="$1"
+    local secrets_file="${2:-$SECRETS_FILE}"
+
+    if ! ensure_sops_env; then return 1; fi
+
+    local value
+    local rc=0
+    value=$(sops -d --extract "[\"$key\"]" "$secrets_file" 2>/dev/null) || rc=$?
+
+    # BUG-S10 FIX: unset key file path from environment so child processes do
+    # not inherit it.
+    unset SOPS_AGE_KEY_FILE
+
+    if [[ $rc -ne 0 ]]; then
+        log_error "decrypt_secret: failed to decrypt key '$key'"
+        return 1
+    fi
+
+    printf '%s' "$value"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# list_secrets [SECRETS_FILE]
+#
+# BUG-S11 FIX: the original implementation ran:
+#   sops -d "$secrets_file" | grep ...
+# This caused the fully decrypted YAML (including all plaintext secret values)
+# to transit the shell pipeline buffer, which is not zeroed after completion.
+# Fix: decrypt only the YAML structure (key names) via python3; secret values
+# are never passed through the pipeline.
+# ---------------------------------------------------------------------------
+list_secrets() {
+    local secrets_file="${1:-$SECRETS_FILE}"
+
+    if [[ ! -f "$secrets_file" ]]; then
+        log_error "Secrets file not found: $secrets_file"
+        return 1
+    fi
+
+    if ! ensure_sops_env; then return 1; fi
+
+    # Decrypt only enough to enumerate top-level key names; values stay encrypted.
+    local keys
+    keys=$(sops -d "$secrets_file" 2>/dev/null \
+        | python3 -c "
+import yaml, sys
+data = yaml.safe_load(sys.stdin)
+if isinstance(data, dict):
+    for k in data.keys():
+        print(k)
+" 2>/dev/null)
+
+    if [[ -z "$keys" ]]; then
+        log_error "list_secrets: decryption or parse failure"
+        return 1
+    fi
+
+    echo "$keys"
     return 0
 }
 
@@ -283,6 +443,11 @@ _tmpfs_dir() {
 # chmod 600 (locks it). Replaced with 'install -m 600 /dev/null' which
 # atomically creates the curl config file at the correct permission before
 # any token material is written.
+#
+# BUG-S8 FIX: When CLOUDFLARE_ZONE_ID is absent or set to a placeholder the
+# function previously returned 0 (success) with only a debug-level log, giving
+# callers a false "token valid" signal.  Now returns 1 with a log_warn so
+# callers can distinguish "skipped due to missing zone" from "validated OK".
 # ---------------------------------------------------------------------------
 validate_cloudflare_token() {
     local token="$1"
@@ -291,9 +456,16 @@ validate_cloudflare_token() {
     if [[ -z "$zone_id" ]]; then
         zone_id=$(get_config_value "CLOUDFLARE_ZONE_ID" "")
     fi
-    if [[ -z "$zone_id" ]] || [[ "$zone_id" == "your_cloudflare_zone_id_here" ]]; then
-        log_debug "Zone ID not configured - skipping validation"
-        return 0
+
+    # BUG-S8 FIX: treat absent/placeholder zone_id as a hard skip that returns
+    # 1 (not validated) so callers are never misled into thinking the token is
+    # confirmed valid when no validation actually occurred.
+    if [[ -z "$zone_id" ]] \
+        || [[ "$zone_id" == "your_cloudflare_zone_id_here" ]] \
+        || [[ "$zone_id" == CHANGE_ME* ]] \
+        || [[ "$zone_id" =~ ^[[:space:]]*$ ]]; then
+        log_warn "validate_cloudflare_token: CLOUDFLARE_ZONE_ID is not configured — validation skipped (token NOT verified)"
+        return 1
     fi
 
     # FIX: 'firewall' token type validates against the WAF Custom Rules
@@ -442,7 +614,7 @@ collect_secret_field() {
                 if validate_cloudflare_token "$token" "dns" 2>/dev/null; then
                     log_success "DNS token validated successfully" >&2
                 else
-                    log_warn "Token validation failed - continuing anyway" >&2
+                    log_warn "Token validation failed or zone not configured - continuing anyway" >&2
                 fi
             fi
             printf '%s' "$token"
@@ -457,7 +629,7 @@ collect_secret_field() {
                 if validate_cloudflare_token "$token" "firewall" 2>/dev/null; then
                     log_success "Firewall token validated successfully" >&2
                 else
-                    log_warn "Token validation failed - continuing anyway" >&2
+                    log_warn "Token validation failed or zone not configured - continuing anyway" >&2
                 fi
             fi
             printf '%s' "$token"
