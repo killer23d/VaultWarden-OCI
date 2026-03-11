@@ -9,7 +9,7 @@
 # ✅ Fail2Ban SSH protection via host networking (FIXED)
 # ✅ Postfix capabilities hardened (CHOWN, SETUID, SETGID, NET_BIND_SERVICE, DAC_OVERRIDE, FOWNER only)
 # ✅ Log rotation limits on all runtime services (disk-fill prevention)
-# ✅ Init container uses chmod 700 on secret dirs and chmod 600 on secret files
+# ✅ Init container uses find -exec chmod (glob-safe, no silent no-op on empty dirs)
 # ✅ vaultwarden network marked internal: true (no unnecessary outbound access)
 
 services:
@@ -49,7 +49,7 @@ services:
       find /fail2ban -type d -exec chmod 750 {} + 2>/dev/null || true &&
       find /fail2ban -type f -exec chmod 640 {} + 2>/dev/null || true &&
       chmod 700 /secrets /secrets/.docker_secrets 2>/dev/null || true &&
-      chmod 600 /secrets/.docker_secrets/* 2>/dev/null || true &&
+      find /secrets/.docker_secrets -type f -exec chmod 600 {} + 2>/dev/null || true &&
       echo 'Init container completed - permissions set to ${PUID}:${PGID}'
       "
 
@@ -72,6 +72,15 @@ services:
     restart: unless-stopped
     user: "${PUID}:${PGID}"
 
+    depends_on:
+      init-permissions:
+        # FIX [MEDIUM-depends_on]: ensure init-permissions has fully completed
+        # before vaultwarden starts. Without this condition, on a cold start
+        # Docker may launch vaultwarden (and fail2ban) before the init container
+        # has set directory ownership/permissions, causing permission-denied
+        # errors on /data and /logs at startup.
+        condition: service_completed_successfully
+
     environment:
       DOMAIN: ${DOMAIN}
       ADMIN_TOKEN_FILE: /run/secrets/admin_token
@@ -85,6 +94,12 @@ services:
       SENDS_ALLOWED: ${SENDS_ALLOWED:-true}
       WEB_VAULT_ENABLED: ${WEB_VAULT_ENABLED:-true}
       WEBSOCKET_ENABLED: ${WEBSOCKET_ENABLED:-true}
+      # FIX [HIGH-PUSH_ENABLED]: default is false here AND in .env.example.
+      # PUSH_ENABLED=true with placeholder push_installation_id /
+      # push_installation_key values causes VaultWarden to log a push-relay
+      # authentication error on every sync cycle. Only set true after rotating
+      # both secrets via: ./edit-secrets.sh --rotate push_installation_id
+      #                   ./edit-secrets.sh --rotate push_installation_key
       PUSH_ENABLED: ${PUSH_ENABLED:-false}
       PASSWORD_ITERATIONS: ${PASSWORD_ITERATIONS:-350000}
       PASSWORD_HINTS_ALLOWED: ${PASSWORD_HINTS_ALLOWED:-false}
@@ -102,6 +117,11 @@ services:
       SMTP_TIMEOUT: ${SMTP_TIMEOUT:-15}
 
       # Push notifications (optional)
+      # WARNING: internal: true network blocks PUSH_RELAY_URI and
+      # PUSH_IDENTITY_URI outbound connections. If push notifications are
+      # required, either remove internal: true from the vaultwarden network
+      # or route push traffic through an egress proxy. See INTERNAL NETWORK
+      # NOTE in the deployment notes below.
       PUSH_INSTALLATION_ID_FILE: /run/secrets/push_installation_id
       PUSH_INSTALLATION_KEY_FILE: /run/secrets/push_installation_key
 
@@ -123,7 +143,10 @@ services:
       - vaultwarden
 
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost/alive"]
+      # FIX [LOW-vaultwarden-healthcheck]: use 127.0.0.1 instead of localhost
+      # to prevent IPv6 (::1) resolution failure when the container listener
+      # is bound only to the IPv4 loopback interface.
+      test: ["CMD", "curl", "-f", "http://127.0.0.1/alive"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -170,6 +193,13 @@ services:
     restart: unless-stopped
     user: "${PUID}:${PGID}"
 
+    depends_on:
+      init-permissions:
+        # FIX [MEDIUM-depends_on]: same reasoning as vaultwarden — caddy must
+        # not start before /caddy_data and /caddy_config are owned/chmod'd
+        # by the init container.
+        condition: service_completed_successfully
+
     entrypoint: /scripts/entrypoint.sh
 
     environment:
@@ -196,7 +226,10 @@ services:
       - vaultwarden
 
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/alive"]
+      # FIX [LOW-caddy-healthcheck]: use 127.0.0.1 instead of localhost to
+      # prevent IPv6 (::1) resolution failure when Caddy binds only to the
+      # IPv4 loopback for the admin/health endpoint on port 8080.
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8080/alive"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -235,6 +268,12 @@ services:
     image: boky/postfix:${POSTFIX_VERSION:-4.3.0}
     restart: unless-stopped
 
+    depends_on:
+      init-permissions:
+        # FIX [MEDIUM-depends_on]: postfix writes to /logs/postfix; init must
+        # complete first to ensure the directory exists with correct ownership.
+        condition: service_completed_successfully
+
     environment:
       - TZ=${TZ:-UTC}
       - ALLOWED_SENDER_DOMAINS=${ALLOWED_SENDER_DOMAINS:-}
@@ -245,6 +284,16 @@ services:
       - POSTFIX_smtp_tls_security_level=${POSTFIX_SMTP_TLS_SECURITY_LEVEL:-encrypt}
       - POSTFIX_message_size_limit=${POSTFIX_MESSAGE_SIZE_LIMIT:-10240000}
 
+    # SECURITY NOTE [MEDIUM-postfix-sasl_passwd]: boky/postfix writes the SMTP
+    # relay password to /etc/postfix/sasl_passwd inside the container as part
+    # of its entrypoint (Postfix requires a plaintext file for SASL auth).
+    # This is an upstream limitation of the Postfix SASL mechanism — the
+    # password cannot be kept exclusively in a Docker secret file at runtime.
+    # Mitigation: the file is inside the container filesystem (not a bind
+    # mount), not accessible from the host without `docker exec`. Restrict
+    # access to the Docker socket and do not grant exec permissions to
+    # untrusted operators. Inspect with:
+    #   docker exec vaultwarden_postfix cat /etc/postfix/sasl_passwd
     secrets:
       - smtp_password
 
@@ -308,6 +357,14 @@ services:
     # if further hardening is desired in future iterations.
     network_mode: host
 
+    depends_on:
+      init-permissions:
+        # FIX [MEDIUM-depends_on]: fail2ban sets inotify watches on log
+        # directories. On a cold start those directories may not exist or may
+        # have incorrect ownership until init-permissions completes, causing
+        # fail2ban to error and exit immediately.
+        condition: service_completed_successfully
+
     environment:
       TZ: ${TZ:-UTC}
       F2B_LOG_TARGET: STDOUT
@@ -335,11 +392,6 @@ services:
     cap_add:
       - NET_ADMIN
       - NET_RAW
-
-    depends_on:
-      - vaultwarden
-      - caddy
-      - postfix
 
     healthcheck:
       test: ["CMD", "fail2ban-client", "status"]
@@ -392,9 +444,14 @@ networks:
   vaultwarden:
     name: vaultwarden_network
     driver: bridge
-    # internal: true prevents containers from initiating outbound internet
-    # connections through this network. Caddy handles all external traffic
-    # via its published ports (80/443); no other service requires egress.
+    # WARNING: internal: true prevents ALL outbound connections from containers
+    # on this network, including PUSH_RELAY_URI and PUSH_IDENTITY_URI used by
+    # VaultWarden mobile push notifications. If push notifications are required:
+    #   1. Remove internal: true below, OR
+    #   2. Route push traffic via an egress proxy on a separate non-internal
+    #      network.
+    # Caddy handles all inbound external traffic via its published ports
+    # (80/443); no other service requires general egress.
     internal: true
 
 # =============================================================================
@@ -430,8 +487,10 @@ networks:
 # ✅ Postfix capabilities hardened (6 caps only)
 # ✅ WebSocket support enabled by default
 # ✅ Log rotation limits on all runtime services
-# ✅ Secret dirs chmod 700, secret files chmod 600 (init container)
+# ✅ Secret dirs chmod 700, secret files chmod 600 via find -exec (glob-safe)
 # ✅ vaultwarden network internal: true (no container egress)
+# ✅ depends_on condition: service_completed_successfully for init-permissions
+# ✅ Healthchecks use 127.0.0.1 (IPv4-explicit, no ::1 ambiguity)
 #
 # CLOUDFLARE RATE LIMITING (REQUIRED):
 # Configure these WAF rules in Cloudflare Dashboard:
@@ -468,9 +527,15 @@ networks:
 # The vaultwarden bridge network is marked internal: true. This means
 # containers cannot initiate outbound connections through it. Caddy
 # reaches the internet exclusively via its published ports. If any
-# container requires egress (e.g., external SMTP relay from within a
-# container), move that service to a separate non-internal network or
-# route through the host.
+# container requires egress (e.g., VaultWarden push notifications,
+# external SMTP relay from within a container), either remove internal:
+# true or move that service to a separate non-internal network.
+#
+# POSTFIX SASL PASSWORD NOTE:
+# boky/postfix writes the SMTP relay password to /etc/postfix/sasl_passwd
+# inside the container (Postfix SASL requirement). This file is not exposed
+# on the host filesystem but is readable via `docker exec`. Restrict Docker
+# socket access to prevent unauthorised inspection.
 #
 # TESTING CHECKLIST:
 # □ Verify Caddy starts without errors: docker compose logs caddy
