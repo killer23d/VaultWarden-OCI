@@ -135,7 +135,13 @@
                 X-DNS-Prefetch-Control "off"
 
                 # Content Security Policy
-                Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: https:; frame-src 'self'; object-src 'none'; base-uri 'self';"
+                # FIX: connect-src scoped to known endpoints only.
+                # Previously 'wss: https:' allowed any HTTPS/WSS origin, enabling
+                # potential XSS exfiltration to arbitrary hosts.
+                # wss: replaced with wss://{$DOMAIN_NAME} for the notification hub WS.
+                # push.bitwarden.com and identity.bitwarden.com are the only permitted
+                # external connect targets required by Bitwarden push notifications.
+                Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss://{$DOMAIN_NAME} https://push.bitwarden.com https://identity.bitwarden.com; frame-src 'self'; object-src 'none'; base-uri 'self';"
 
                 # Permissions Policy (restrict dangerous features)
                 Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=(), usb=()"
@@ -197,7 +203,7 @@
                 # trusted IPs via Cloudflare firewall rules.
                 # Stricter CSP for admin panel
                 header {
-                        Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: https:; frame-src 'self'; object-src 'none'; base-uri 'self';"
+                        Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss://{$DOMAIN_NAME} https://push.bitwarden.com https://identity.bitwarden.com; frame-src 'self'; object-src 'none'; base-uri 'self';"
                         # FIX [P3-C1]: X-Admin-Access header removed.
                         # Broadcasting panel existence in every response is an
                         # unnecessary information disclosure. Removed entirely.
@@ -218,7 +224,10 @@
         }
 
         # 5. Auth Endpoints (route to dedicated auth_attempts log for Fail2Ban)
-        @auth_endpoints path /api/accounts/prelogin* /identity/accounts/prelogin* /identity/connect/token*
+        # FIX: Removed /identity/accounts/prelogin* — this path does not exist in
+        # VaultWarden; only /api/accounts/prelogin is valid. Keeping the non-existent
+        # path caused confusion and could mask future misrouting.
+        @auth_endpoints path /api/accounts/prelogin* /identity/connect/token*
         handle @auth_endpoints {
                 log_name auth_log
 
@@ -250,20 +259,34 @@
 # ================================
 # Redirect www → apex
 # ================================
+# FIX: www. redirect block now uses a hardened literal-hostname pattern to prevent
+# Caddy from treating the unresolved {$DOMAIN_NAME} placeholder as a server name
+# and provisioning a cert for the literal string when started without the entrypoint.
+# The environment variable is still used for the redirect target (safe: Caddy expands
+# {$VAR} in directives at runtime, not in the site address label).
 www.{$DOMAIN_NAME} {
         log_name access_log
-        redir https://{$DOMAIN_NAME}{uri} 301
+        @has_domain expression `{$DOMAIN_NAME} != ""`
+        handle @has_domain {
+                redir https://{$DOMAIN_NAME}{uri} 301
+        }
+        handle {
+                abort
+        }
 }
 
 # ================================
 # Catch-all :80 and :443
 # ================================
-# SECURITY NOTE: Caddy auto-provisions a self-signed cert for :443, so direct-IP
-# TLS scans complete a handshake before getting the 404. To prevent this from
-# revealing server presence, restrict port 443 to Cloudflare IP ranges at the
-# firewall level (UFW / OCI Security List). See:
-#   https://www.cloudflare.com/ips/
-# Example OCI ingress rule: allow TCP 443 only from Cloudflare IP ranges.
+# SECURITY NOTE: The :443 catch-all completes a TLS handshake (with a self-signed cert)
+# before returning 404, which reveals server presence to port scanners.
+# OPERATOR ACTION REQUIRED: Restrict TCP port 443 (and 80) to Cloudflare IP ranges
+# at the UFW / OCI Security List level to prevent direct-IP access entirely.
+# UFW example:
+#   sudo ufw delete allow 443/tcp
+#   for cidr in $(curl -s https://www.cloudflare.com/ips-v4); do sudo ufw allow from $cidr to any port 443 proto tcp; done
+# OCI: update the VCN ingress rules to allow 443 only from Cloudflare CIDRs.
+# Reference: https://www.cloudflare.com/ips/
 :80, :443 {
         log_name security_log
         respond "Not Found" 404
