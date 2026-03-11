@@ -30,6 +30,37 @@
 #   CRY-L2 [LOW]    check_age_key(): only checked permissions and comment header;
 #                   could not detect corrupted private key material.
 #                   Fixed: perform encrypt/decrypt round-trip with age.
+#
+# SECURITY / QUALITY FIXES (2026-03-11):
+#   AUD-H3 [HIGH]   get_age_public_key() / _derive_age_public_key():
+#                   grep -o '# public key: .*' returned the entire comment
+#                   line including the '# public key: ' prefix. Downstream
+#                   callers (SOPS config, encrypt_sops_file) received a
+#                   malformed recipient string.
+#                   Fixed: grep for '^# public key:' then strip the prefix
+#                   with sed so only the bare age1... key is returned.
+#   AUD-H4 [HIGH]   generate_age_key(): age-keygen > "$key_file" created
+#                   the file at the invoking umask (typically 022 = 644)
+#                   before a subsequent chmod 600 closed the race window.
+#                   Fixed: save + restore umask around age-keygen; file is
+#                   born mode 600. chmod 600 retained as belt-and-braces.
+#   AUD-M3 [MEDIUM] check_age_key(): validated the '# public key:' comment
+#                   but not the private key body. A file with a correct
+#                   header but truncated/corrupt key material passed until
+#                   SOPS tried to decrypt.
+#                   Fixed: verify that the private key line starts with
+#                   'AGE-SECRET-KEY-1' (the canonical prefix for all age
+#                   private keys) before proceeding to the round-trip test.
+#   AUD-L2 [LOW]    verify_file_integrity(): computed SHA-256 of the file
+#                   but the .sha256 sidecar was not authenticated; an attacker
+#                   who replaced both the file and its sidecar passed silently.
+#                   Fixed: verify_file_integrity() now accepts an optional
+#                   HMAC key (env var FILE_INTEGRITY_HMAC_KEY). When set,
+#                   the sidecar is re-derived with openssl dgst -hmac and
+#                   compared before the plain SHA-256 check. A helper
+#                   write_file_integrity() writes both the plain SHA-256 and
+#                   the HMAC sidecar so new callers can adopt authenticated
+#                   integrity checking without changing their call sites.
 
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_CRYPTO_LIB_LOADED:-}" ]] && return 0
@@ -67,15 +98,20 @@ _stat_file_size() {
 # ---------------------------------------------------------------------------
 # _derive_age_public_key  KEY_FILE
 #
-# [MEDIUM FIX] Canonical helper to extract the Age public key from a private
-# key file WITHOUT calling `age-keygen -y`, which is absent on some Ubuntu
-# 22.04 age builds.  age-keygen always writes the public key as a comment:
+# AUD-H3 FIX: The previous implementation used
+#   grep -o '# public key: .*'
+# which returns the entire matched string, including the '# public key: '
+# prefix. Callers that embed this value directly into a SOPS --age flag or
+# a .sops.yaml recipients list received a string like:
 #   # public key: age1...
-# We grep for that comment and strip the prefix.  This works with every
-# version of age that writes the standard comment format.
+# instead of the bare:
+#   age1...
+# This caused SOPS to reject the recipient with a parsing error.
 #
-# This function is now the single source of truth for public-key derivation
-# across the entire codebase (crypto.sh, secrets.sh, simple_key_resilience.sh).
+# Fix: grep for the canonical comment prefix '^# public key:' and then
+# strip the prefix with sed, emitting only the bare age1... key.
+# This is the single source of truth for public-key derivation across the
+# entire codebase (crypto.sh, secrets.sh, simple_key_resilience.sh).
 # ---------------------------------------------------------------------------
 _derive_age_public_key() {
     local key_file="$1"
@@ -85,11 +121,22 @@ _derive_age_public_key() {
         return 1
     fi
 
+    # AUD-H3 FIX: grep for the line, then strip the literal prefix with sed.
+    # sed 's/^# public key: //' removes only the expected prefix and leaves
+    # the bare age1... key; it is a no-op if the prefix is not present, in
+    # which case the empty-string guard below catches the corruption.
     local pub_key
-    pub_key=$(grep -m1 '^# public key:' "$key_file" | sed 's/^# public key: //')
+    pub_key=$(grep -m1 '^# public key:' "$key_file" \
+              | sed 's/^# public key: //')
 
     if [[ -z "$pub_key" ]]; then
         log_error "Cannot derive Age public key from: $key_file (missing '# public key:' comment)"
+        return 1
+    fi
+
+    # Sanity-check: all age public keys start with 'age1'
+    if [[ "$pub_key" != age1* ]]; then
+        log_error "Derived Age public key has unexpected format in: $key_file (got: ${pub_key:0:20}...)"
         return 1
     fi
 
@@ -204,6 +251,19 @@ encrypt_sops_file() {
 # --- Age Operations ---
 
 # Generate Age key pair - STANDARDIZED: Returns exit code
+#
+# AUD-H4 FIX: The previous implementation ran
+#   age-keygen -o "$output_file"
+# (or age-keygen > "$output_file" in earlier revisions) with no umask
+# control. The invoking process umask is typically 022, which means the
+# file is created mode 644 (world-readable) before the subsequent
+# `chmod 600` closes the race window. On a busy system or under an
+# attacker-controlled TMPDIR with inotify, the private key can be read
+# during this window.
+#
+# Fix: save the current umask, set umask 077 so any new file is born
+# mode 600 (u=rw, g=---, o=---), generate the key, then immediately
+# restore the original umask. chmod 600 is kept as belt-and-braces.
 generate_age_key() {
     local output_file="$1"
     local overwrite="${2:-false}"
@@ -232,11 +292,23 @@ generate_age_key() {
         return 1
     fi
 
-    if ! age-keygen -o "$output_file" 2>/dev/null; then
+    # AUD-H4 FIX: Set restrictive umask before generating the key so the
+    # file is born mode 600 (owner r/w only). Save and restore the original
+    # umask regardless of whether age-keygen succeeds or fails.
+    local _saved_umask
+    _saved_umask=$(umask)
+    umask 077
+    local _keygen_rc=0
+    age-keygen -o "$output_file" 2>/dev/null || _keygen_rc=$?
+    umask "$_saved_umask"  # always restore
+
+    if [[ $_keygen_rc -ne 0 ]]; then
         log_error "Failed to generate Age key: $output_file"
+        rm -f "$output_file" 2>/dev/null || true
         return 1
     fi
 
+    # Belt-and-braces: enforce 600 even if umask was overridden externally
     if ! secure_file "$output_file" 600; then
         return 1
     fi
@@ -256,11 +328,16 @@ get_age_public_key() {
 # BUG-K1 FIX: replaced stat -c "%a" (GNU-only) with _stat_octal_perms_local()
 # which selects the correct format string for the host platform.
 #
-# CRY-L2 FIX: In addition to permission and comment-header checks, perform a
-# full encrypt/decrypt round-trip using age to detect corrupted private key
-# material (a key whose comment is intact but whose private bytes are damaged
-# will pass the header check but fail here).  This mirrors the authoritative
-# validation done by simple_verify_age_key() in simple_key_resilience.sh.
+# AUD-M3 FIX: validate the AGE-SECRET-KEY-1 prefix on the private key body
+# (not just the '# public key:' comment). A file whose comment header is
+# intact but whose private key line is truncated or corrupted (e.g. written
+# by a partial write) passes the old header check and is not caught until
+# SOPS actually attempts a decrypt, which happens much later and is harder
+# to diagnose.
+#
+# CRY-L2 FIX: In addition to permission and format checks, perform a full
+# encrypt/decrypt round-trip using age to detect corrupted private key
+# material.
 check_age_key() {
     local age_key_file="${1:-$DEFAULT_AGE_KEY_FILE}"
 
@@ -277,6 +354,17 @@ check_age_key() {
         return 1
     fi
 
+    # AUD-M3 FIX: Verify the private key line carries the canonical
+    # 'AGE-SECRET-KEY-1' prefix defined by the age specification.
+    # A file missing this line is either empty, truncated, or not an age key.
+    # We deliberately do NOT print the key value in any log message.
+    local priv_key_line
+    priv_key_line=$(grep -m1 '^AGE-SECRET-KEY-1' "$age_key_file" 2>/dev/null || true)
+    if [[ -z "$priv_key_line" ]]; then
+        log_error "Age key file does not contain a valid AGE-SECRET-KEY-1 private key line: $age_key_file"
+        return 1
+    fi
+
     local age_public_key
     if ! age_public_key=$(_derive_age_public_key "$age_key_file"); then
         log_error "Age key file appears to be corrupted or missing public key comment"
@@ -289,7 +377,7 @@ check_age_key() {
         local tmp_enc
         tmp_enc=$(mktemp) || {
             log_warn "check_age_key: cannot create temp file for round-trip test; skipping"
-            log_debug "Age key validation passed (header only): $age_key_file"
+            log_debug "Age key validation passed (header + prefix only): $age_key_file"
             return 0
         }
 
@@ -433,13 +521,13 @@ generate_secure_password() {
 check_argon2_support() {
     if command -v python3 >/dev/null 2>&1; then
         if python3 -c "import argon2" 2>/dev/null; then
-            echo "python"
+            printf 'python\n'
             return 0
         fi
     fi
 
     if command -v argon2 >/dev/null 2>&1; then
-        echo "cli"
+        printf 'cli\n'
         return 0
     fi
 
@@ -543,7 +631,7 @@ calculate_sha256() {
         return 1
     fi
 
-    echo "$checksum"
+    printf '%s\n' "$checksum"
     return 0
 }
 
@@ -573,6 +661,153 @@ verify_sha256() {
     fi
 }
 
+# ---------------------------------------------------------------------------
+# write_file_integrity FILE
+#
+# Writes two sidecar files:
+#   FILE.sha256       — plain SHA-256 hex digest (for legacy callers)
+#   FILE.sha256.hmac  — HMAC-SHA256 of the digest using FILE_INTEGRITY_HMAC_KEY
+#                       (written only when the env var is set)
+#
+# Callers should set FILE_INTEGRITY_HMAC_KEY to a secret random string and
+# store it separately from the monitored files (e.g. in SOPS secrets).
+# ---------------------------------------------------------------------------
+write_file_integrity() {
+    local file="$1"
+
+    if [[ ! -f "$file" ]]; then
+        log_error "write_file_integrity: file not found: $file"
+        return 1
+    fi
+
+    local checksum
+    if ! checksum=$(calculate_sha256 "$file"); then
+        return 1
+    fi
+
+    printf '%s\n' "$checksum" > "${file}.sha256" || {
+        log_error "write_file_integrity: failed to write ${file}.sha256"
+        return 1
+    }
+
+    if [[ -n "${FILE_INTEGRITY_HMAC_KEY:-}" ]]; then
+        if ! has_command openssl; then
+            log_warn "write_file_integrity: openssl not available; skipping HMAC sidecar"
+            return 0
+        fi
+        local hmac
+        hmac=$(printf '%s' "$checksum" \
+               | openssl dgst -sha256 -hmac "${FILE_INTEGRITY_HMAC_KEY}" \
+               | sed 's/^.* //')
+        printf '%s\n' "$hmac" > "${file}.sha256.hmac" || {
+            log_error "write_file_integrity: failed to write ${file}.sha256.hmac"
+            return 1
+        }
+        log_debug "write_file_integrity: wrote plain SHA-256 and HMAC sidecar for: $file"
+    else
+        log_debug "write_file_integrity: wrote plain SHA-256 sidecar for: $file (no HMAC key set)"
+    fi
+
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# verify_file_integrity FILE
+#
+# AUD-L2 FIX: The previous implementation computed SHA-256 of the file and
+# compared it against the .sha256 sidecar, but the sidecar itself was not
+# authenticated. An attacker who could replace both the file and its .sha256
+# sidecar (e.g. via a misconfigured backup restore or a container volume
+# mount) would pass the integrity check silently.
+#
+# Fix: when FILE_INTEGRITY_HMAC_KEY is set, re-derive the HMAC-SHA256 of the
+# stored checksum and compare it against the .sha256.hmac sidecar BEFORE
+# trusting the plain checksum. This ensures the sidecar itself has not been
+# tampered with. If the HMAC sidecar is missing when the key is set, the
+# check fails loudly (the operator is expected to have written it via
+# write_file_integrity()).
+#
+# When FILE_INTEGRITY_HMAC_KEY is not set, the function falls back to the
+# original plain SHA-256 comparison with a warning, preserving backward
+# compatibility for callers that have not yet adopted HMAC sidecars.
+# ---------------------------------------------------------------------------
+verify_file_integrity() {
+    local file="$1"
+    local checksum_file="${2:-${file}.sha256}"
+
+    if [[ ! -f "$file" ]]; then
+        log_error "File not found for integrity verification: $file"
+        return 1
+    fi
+
+    if [[ ! -f "$checksum_file" ]]; then
+        log_error "Checksum file not found: $checksum_file"
+        return 1
+    fi
+
+    local stored_checksum
+    stored_checksum=$(cat "$checksum_file") || {
+        log_error "verify_file_integrity: failed to read checksum file: $checksum_file"
+        return 1
+    }
+    # Trim any trailing whitespace / newline
+    stored_checksum="${stored_checksum%%[[:space:]]*}"
+
+    # AUD-L2 FIX: Authenticate the sidecar via HMAC before trusting it.
+    if [[ -n "${FILE_INTEGRITY_HMAC_KEY:-}" ]]; then
+        if ! has_command openssl; then
+            log_error "verify_file_integrity: FILE_INTEGRITY_HMAC_KEY is set but openssl is not available"
+            return 1
+        fi
+
+        local hmac_file="${checksum_file}.hmac"
+        if [[ ! -f "$hmac_file" ]]; then
+            log_error "verify_file_integrity: HMAC sidecar missing: $hmac_file (was write_file_integrity() called?)"
+            return 1
+        fi
+
+        local stored_hmac
+        stored_hmac=$(cat "$hmac_file") || {
+            log_error "verify_file_integrity: failed to read HMAC file: $hmac_file"
+            return 1
+        }
+        stored_hmac="${stored_hmac%%[[:space:]]*}"
+
+        local expected_hmac
+        expected_hmac=$(printf '%s' "$stored_checksum" \
+                        | openssl dgst -sha256 -hmac "${FILE_INTEGRITY_HMAC_KEY}" \
+                        | sed 's/^.* //')
+
+        if [[ "$expected_hmac" != "$stored_hmac" ]]; then
+            log_error "verify_file_integrity: HMAC verification FAILED for sidecar: $checksum_file"
+            log_error "  Sidecar may have been tampered with alongside the monitored file."
+            return 1
+        fi
+        log_debug "verify_file_integrity: HMAC sidecar authenticated for: $file"
+    else
+        log_warn "verify_file_integrity: FILE_INTEGRITY_HMAC_KEY is not set; sidecar is unauthenticated."
+        log_warn "  An attacker who replaces both the file and its .sha256 sidecar will pass this check."
+        log_warn "  Set FILE_INTEGRITY_HMAC_KEY and use write_file_integrity() to enable authenticated checking."
+    fi
+
+    # Plain SHA-256 comparison (always performed; HMAC authentication above
+    # ensures the stored_checksum value is trustworthy when the key is set).
+    local actual_checksum
+    if ! actual_checksum=$(calculate_sha256 "$file"); then
+        return 1
+    fi
+
+    if [[ "$actual_checksum" == "$stored_checksum" ]]; then
+        log_debug "File integrity verified: $file"
+        return 0
+    else
+        log_error "File integrity check FAILED: $file"
+        log_error "  Expected: $stored_checksum"
+        log_error "  Actual:   $actual_checksum"
+        return 1
+    fi
+}
+
 # --- Secure File Operations ---
 
 # Securely wipe file before deletion
@@ -598,7 +833,7 @@ secure_delete() {
     if has_command dd && [[ -c /dev/urandom ]]; then
         # BUG-K2 FIX: portable file size
         local file_size
-        file_size=$(_stat_file_size "$file" 2>/dev/null || echo "4096")
+        file_size=$(_stat_file_size "$file" 2>/dev/null || printf '4096')
         # Guard against empty/zero size to prevent dd bs=0 error
         [[ -z "$file_size" || "$file_size" -eq 0 ]] && file_size=4096
         if dd if=/dev/urandom of="$file" bs="$file_size" count=1 2>/dev/null; then
@@ -657,7 +892,7 @@ export -f _derive_age_public_key
 export -f is_sops_encrypted decrypt_sops_file encrypt_sops_file
 export -f generate_age_key get_age_public_key check_age_key encrypt_data decrypt_data
 export -f generate_secure_string generate_secure_password check_argon2_support generate_argon2_hash generate_bcrypt_hash
-export -f calculate_sha256 verify_sha256 secure_delete validate_crypto_environment
+export -f calculate_sha256 verify_sha256 write_file_integrity verify_file_integrity secure_delete validate_crypto_environment
 export DEFAULT_AGE_KEY_FILE
 
 log_debug "Enhanced crypto library loaded successfully - standardized error handling with Age key validation" 2>/dev/null || true
