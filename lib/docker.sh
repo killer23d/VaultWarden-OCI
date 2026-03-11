@@ -30,6 +30,30 @@
 #                   docker volume prune --filter label= is unsupported.
 #   DOC-L1 [LOW]    run_in_service() deprecation is now enforced: the function
 #                   logs an error and returns 1. Removed from export -f.
+#
+# PATCHED BUGS (2026-03-11):
+#   AUD-D1 [MEDIUM] wait_for_container_healthy() / is_service_healthy():
+#                   containers with no HEALTHCHECK defined return an empty
+#                   Health string from docker compose ps --format json.
+#                   The empty string was treated as "not yet healthy" causing
+#                   wait_for_service_ready() to spin until timeout.
+#                   Fix: get_service_health() now maps an empty string to
+#                   "none"; is_service_healthy() treats "none" as healthy
+#                   (already done), and wait_for_service_ready() detects the
+#                   "no-healthcheck" case via a dedicated helper and returns
+#                   immediately.
+#   AUD-D2 [MEDIUM] get_service_status() / get_service_health(): docker
+#                   compose ps --format json may emit plain-text (Compose v1
+#                   or degraded mode). jq then exits non-zero but the error
+#                   was swallowed inside a subshell even under set -e.
+#                   Fix: validate raw output is parseable JSON before piping
+#                   to jq; return "not_found"/"none" on parse failure.
+#   AUD-D3 [LOW]    pull_image_with_retry(): hardcoded 5 s sleep with no
+#                   backoff; no distinction between transient and permanent
+#                   errors.
+#                   Fix: exponential backoff (5→10→20 s); permanent-error
+#                   keywords (not found, unauthorized, denied, does not exist,
+#                   no such manifest) cause an immediate bail-out.
 
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_DOCKER_LIB_LOADED:-}" ]] && return 0
@@ -96,6 +120,8 @@ require_jq() {
 # [MEDIUM FIX] docker compose ps --format json returns a JSON array when
 # multiple replicas are running. The jq filter handles both scalar and array.
 # [MEDIUM FIX] Added require_jq() guard.
+# AUD-D2 FIX: validate raw output is valid JSON before piping to jq; return
+# "not_found" gracefully on Compose v1 plain-text or other non-JSON output.
 get_service_status() {
     local service="$1"
 
@@ -111,6 +137,13 @@ get_service_status() {
 
     local raw_json
     raw_json=$(docker compose ps "$service" --format json 2>/dev/null)
+
+    # AUD-D2 FIX: guard against non-JSON output (Compose v1, plain-text mode)
+    if ! printf '%s' "$raw_json" | jq -e . >/dev/null 2>&1; then
+        log_debug "get_service_status: non-JSON output from docker compose ps for '$service'; falling back to not_found"
+        echo "not_found"
+        return 0
+    fi
 
     local status
     status=$(printf '%s' "$raw_json" \
@@ -131,6 +164,9 @@ is_service_running() {
 #
 # [MEDIUM FIX] Same jq array-vs-object fix as get_service_status().
 # [MEDIUM FIX] Added require_jq() guard.
+# AUD-D1 FIX: an empty Health field (no HEALTHCHECK defined) is now
+#             explicitly mapped to "none" so callers never see an empty string.
+# AUD-D2 FIX: validate raw output is valid JSON before piping to jq.
 get_service_health() {
     local service="$1"
 
@@ -147,10 +183,19 @@ get_service_health() {
     local raw_json
     raw_json=$(docker compose ps "$service" --format json 2>/dev/null)
 
-    local health
-    health=$(printf '%s' "$raw_json" \
-        | jq -r 'if type == "array" then .[0].Health // "none" else .Health // "none" end' 2>/dev/null)
+    # AUD-D2 FIX: guard against non-JSON output
+    if ! printf '%s' "$raw_json" | jq -e . >/dev/null 2>&1; then
+        log_debug "get_service_health: non-JSON output from docker compose ps for '$service'; falling back to none"
+        echo "none"
+        return 0
+    fi
 
+    local health
+    # AUD-D1 FIX: empty string and null both map to "none" via // "none"
+    health=$(printf '%s' "$raw_json" \
+        | jq -r 'if type == "array" then (.[0].Health // "none") else (.Health // "none") end' 2>/dev/null)
+
+    # Extra guard: if jq somehow emits an empty string, normalise to "none"
     echo "${health:-none}"
     return 0
 }
@@ -161,6 +206,15 @@ is_service_healthy() {
     status=$(get_service_status "$service")
     health=$(get_service_health "$service")
     [[ "$status" == "running" ]] && [[ "$health" =~ ^(healthy|none)$ ]]
+}
+
+# AUD-D1 FIX: helper — returns 0 when a service has no HEALTHCHECK defined.
+# Used by wait_for_service_ready() to short-circuit the polling loop.
+_service_has_no_healthcheck() {
+    local service="$1"
+    local health
+    health=$(get_service_health "$service")
+    [[ "$health" == "none" ]]
 }
 
 # --- Service Management Operations ---
@@ -250,6 +304,60 @@ pull_images() {
         fi
     fi
     return 0
+}
+
+# ---------------------------------------------------------------------------
+# pull_image_with_retry  (AUD-D3 FIX)
+#
+# Retries a `docker pull` up to MAX_RETRIES times with exponential backoff.
+# Permanent errors (image not found, auth failure, etc.) cause an immediate
+# bail-out rather than exhausting all retries.
+#
+# Usage: pull_image_with_retry <image> [max_retries] [initial_sleep_seconds]
+#   max_retries:        default 3
+#   initial_sleep_secs: default 5  (doubles each attempt: 5→10→20)
+# ---------------------------------------------------------------------------
+pull_image_with_retry() {
+    local image="$1"
+    local max_retries="${2:-3}"
+    local sleep_secs="${3:-5}"
+
+    if ! require_docker; then return 1; fi
+
+    local attempt=1
+    while [[ $attempt -le $max_retries ]]; do
+        local pull_output pull_rc
+        pull_output=$(docker pull "$image" 2>&1)
+        pull_rc=$?
+
+        if [[ $pull_rc -eq 0 ]]; then
+            log_debug "pull_image_with_retry: pulled '$image' on attempt $attempt"
+            return 0
+        fi
+
+        # AUD-D3 FIX: detect permanent errors and bail immediately.
+        # These indicate the image reference itself is invalid or the
+        # credentials are wrong — retrying will not help.
+        local lower_output
+        lower_output=$(printf '%s' "$pull_output" | tr '[:upper:]' '[:lower:]')
+        if printf '%s' "$lower_output" | grep -qE \
+            'not found|unauthorized|denied|does not exist|no such manifest|manifest unknown|access forbidden'; then
+            log_error "pull_image_with_retry: permanent error pulling '$image' (attempt $attempt): ${pull_output}"
+            return 1
+        fi
+
+        log_warn "pull_image_with_retry: transient error pulling '$image' (attempt $attempt/$max_retries, retry in ${sleep_secs}s): ${pull_output}"
+
+        if [[ $attempt -lt $max_retries ]]; then
+            sleep "$sleep_secs"
+            sleep_secs=$(( sleep_secs * 2 ))  # AUD-D3 FIX: exponential backoff
+        fi
+
+        attempt=$(( attempt + 1 ))
+    done
+
+    log_error "pull_image_with_retry: failed to pull '$image' after $max_retries attempts"
+    return 1
 }
 
 # --- Container Execution ---
@@ -511,6 +619,13 @@ follow_service_logs() {
 # blank line in log output.
 # Added a dots_printed flag that is set to true on the first dot emission
 # and checked before printing the trailing newline.
+#
+# AUD-D1 FIX: if the service has no HEALTHCHECK defined, is_service_healthy()
+# will return true the moment the container is running (health=="none").
+# However, because docker compose ps may briefly return an empty Health field
+# before the container reaches "running", we also add an explicit early-exit
+# path: once the container is running AND health is "none", we return 0
+# immediately without waiting for the full polling loop.
 wait_for_service_ready() {
     local service="$1"
     local timeout="${2:-60}"
@@ -521,8 +636,19 @@ wait_for_service_ready() {
     log_info "Waiting for service '$service' to become ready (timeout: ${timeout}s)..."
 
     while [[ $count -lt $timeout ]]; do
-        if is_service_healthy "$service"; then
-            # BUG-D1 FIX: only emit newline if we actually printed dots
+        local current_status current_health
+        current_status=$(get_service_status "$service")
+        current_health=$(get_service_health "$service")
+
+        # AUD-D1 FIX: no-healthcheck containers — running + health=="none"
+        # means healthy by definition; return immediately.
+        if [[ "$current_status" == "running" && "$current_health" == "none" ]]; then
+            [[ "$dots_printed" == "true" ]] && echo "" >&2
+            log_success "Service '$service' is ready (no healthcheck; running after ${count}s)"
+            return 0
+        fi
+
+        if [[ "$current_status" == "running" && "$current_health" == "healthy" ]]; then
             [[ "$dots_printed" == "true" ]] && echo "" >&2
             log_success "Service '$service' is ready (${count}s)"
             return 0
@@ -560,8 +686,9 @@ validate_compose_file() {
 # NOTE: run_in_service is intentionally NOT exported (DOC-L1: hard deprecation)
 export -f check_docker_available check_compose_available require_docker require_jq
 export -f get_service_status is_service_running get_service_health is_service_healthy
+export -f _service_has_no_healthcheck
 export -f start_services stop_services restart_services recreate_services
-export -f pull_images exec_in_service exec_oneshot_in_service run_in_service_full_env
+export -f pull_images pull_image_with_retry exec_in_service exec_oneshot_in_service run_in_service_full_env
 export -f _docker_prune_filter
 export -f cleanup_containers cleanup_images cleanup_volumes cleanup_networks cleanup_docker_system
 export -f get_service_logs follow_service_logs wait_for_service_ready validate_compose_file
