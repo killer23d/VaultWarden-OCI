@@ -18,6 +18,19 @@
 #                   (no corresponding .age file) were never removed, causing
 #                   indefinite accumulation. Added a second sweep that finds
 #                   and removes all sidecar files whose base .age is absent.
+# PATCHED BUGS (2026-03-11) - Audit remediation:
+#   AUD-B1 [HIGH]   verify_backup_integrity(): sqlite3 PRAGMA integrity_check
+#                   now operates on a private copy of the database in a
+#                   restricted tmpdir rather than the live file. This prevents
+#                   SQLite WAL-mode inconsistency when VaultWarden is running.
+#   AUD-B2 [MEDIUM] get_backup_size(): was using du -sh which returns a
+#                   human-readable string unsuitable for arithmetic. Now
+#                   returns raw bytes via portable stat (GNU|BSD) so callers
+#                   can safely compare values numerically.
+#   AUD-B3 [LOW]    cleanup_old_backups(): -mtime reflects last content-
+#                   modification time and can be fooled by rsync --times or
+#                   touch. Replaced with a portable stat-based ctime age check
+#                   so preserved-timestamp restores never bypass retention.
 
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_BACKUP_UTILS_LIB_LOADED:-}" ]] && return 0
@@ -144,6 +157,107 @@ validate_backup_integrity() {
     return 0
 }
 
+# ---------------------------------------------------------------------------
+# verify_backup_integrity DB_PATH [AGE_KEY_FILE]
+#
+# AUD-B1 FIX [HIGH]: The original implementation ran sqlite3 PRAGMA
+# integrity_check directly against the live database path while VaultWarden
+# may be running in WAL mode. In WAL mode, sqlite3 opened from outside the
+# running process may observe a partially-committed transaction, producing a
+# false-positive "ok" or an inconsistent integrity result.
+#
+# Fix: copy the database files (*.db, *.db-wal, *.db-shm) into a private
+# restricted temporary directory, then run the integrity check against the
+# copy. The live database is never opened for writing, and the snapshot is
+# consistent because the copy is taken atomically per file.
+#
+# The tmpdir is mode 700 and cleaned up unconditionally via a local EXIT trap.
+# ---------------------------------------------------------------------------
+verify_backup_integrity() {
+    local db_path="$1"
+    local age_key_file="${2:-secrets/keys/age-key.txt}"
+
+    if [[ ! -f "$db_path" ]]; then
+        log_error "Database file not found: $db_path"
+        return 1
+    fi
+
+    # Create a private, restricted working directory for the DB copy.
+    local work_dir
+    if ! work_dir=$(mktemp -d); then
+        log_error "verify_backup_integrity: failed to create temporary directory"
+        return 1
+    fi
+    chmod 700 "$work_dir"
+
+    # Ensure cleanup on every exit path from this function.
+    # shellcheck disable=SC2064  # intentional: expand $work_dir now
+    trap "rm -rf '$work_dir'" RETURN
+
+    local db_base
+    db_base=$(basename "$db_path")
+    local db_copy="$work_dir/$db_base"
+
+    # Copy the primary DB and any WAL/SHM sidecar files so the integrity check
+    # sees a consistent snapshot without touching the live paths.
+    if ! cp "$db_path" "$db_copy" 2>/dev/null; then
+        log_error "verify_backup_integrity: failed to copy database to tmpdir"
+        return 1
+    fi
+    # Copy WAL and SHM if present (non-fatal if absent).
+    cp "${db_path}-wal" "${db_copy}-wal" 2>/dev/null || true
+    cp "${db_path}-shm" "${db_copy}-shm" 2>/dev/null || true
+
+    log_info "Running SQLite integrity check on copy of: $db_base"
+
+    local integrity_result
+    if ! integrity_result=$(sqlite3 "$db_copy" "PRAGMA integrity_check;" 2>&1); then
+        log_error "sqlite3 failed to open database copy: $integrity_result"
+        return 1
+    fi
+
+    if [[ "$integrity_result" != "ok" ]]; then
+        log_error "Database integrity check failed: $integrity_result"
+        return 1
+    fi
+
+    log_success "Database integrity check passed (copy-based, WAL-safe)"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# get_backup_size BACKUP_FILE
+#
+# AUD-B2 FIX [MEDIUM]: The previous implementation used 'du -sh' which returns
+# a human-readable string (e.g. "4.2M"). Any caller attempting arithmetic on
+# that value would silently get 0 (in (( )) context) or an error. Changed to
+# return the raw byte count via portable stat (GNU: -c%s, BSD/macOS: -f%z) so
+# callers can safely perform numeric comparisons. Outputs bytes as a plain
+# integer on stdout. Returns 1 if the file does not exist or size cannot be
+# determined.
+# ---------------------------------------------------------------------------
+get_backup_size() {
+    local backup_file="$1"
+
+    if [[ ! -f "$backup_file" ]]; then
+        log_error "get_backup_size: file not found: $backup_file"
+        return 1
+    fi
+
+    local size_bytes
+    size_bytes=$(stat -c%s "$backup_file" 2>/dev/null \
+        || stat -f%z "$backup_file" 2>/dev/null \
+        || echo "")
+
+    if [[ -z "$size_bytes" || ! "$size_bytes" =~ ^[0-9]+$ ]]; then
+        log_error "get_backup_size: could not determine size of: $backup_file"
+        return 1
+    fi
+
+    printf '%s\n' "$size_bytes"
+    return 0
+}
+
 # Check available disk space for backup operations - STANDARDIZED: Returns exit code
 #
 # BUG-B1 FIX: df --output=avail is GNU coreutils-only. BSD/macOS df does not
@@ -201,6 +315,29 @@ check_backup_disk_space() {
 # .sha256 file found in the directory, if the corresponding .age file does
 # not exist, the sidecar is removed immediately (no age-based threshold
 # needed — if the primary is gone the sidecar is always orphaned).
+#
+# AUD-B3 FIX [LOW]: Replaced find -mtime with a portable stat-based ctime
+# age check. -mtime reflects the last content-modification time and is reset
+# to "now" whenever a file is rsynced with --times or touched, which can
+# prevent old backups from ever being cleaned up. ctime (inode change time)
+# cannot be altered by userspace and reflects when the file truly arrived on
+# this filesystem, making it the correct basis for retention enforcement.
+#
+# _backup_ctime_age_days FILE — returns the age of FILE in whole days based
+# on ctime (inode change time), using portable stat (GNU|BSD).
+_backup_ctime_age_days() {
+    local file="$1"
+    local ctime_epoch now_epoch
+    ctime_epoch=$(stat -c%Z "$file" 2>/dev/null || stat -f%c "$file" 2>/dev/null || echo "")
+    if [[ -z "$ctime_epoch" || ! "$ctime_epoch" =~ ^[0-9]+$ ]]; then
+        # Cannot determine ctime; treat as 0 days old (do not delete).
+        echo "0"
+        return
+    fi
+    now_epoch=$(date +%s)
+    echo $(( (now_epoch - ctime_epoch) / 86400 ))
+}
+
 cleanup_old_backups() {
     local backup_dir="$1"
     local backup_type="$2"
@@ -219,18 +356,22 @@ cleanup_old_backups() {
     log_info "Cleaning up $backup_type backups older than $retention_days days"
 
     local deleted_count=0
-    local old_backups
 
-    # BUG-B4 FIX: quoted the +$retention_days argument
-    if old_backups=$(find "$backup_dir" -name "*.age" -type f -mtime "+$retention_days" 2>/dev/null); then
-        while IFS= read -r backup_file; do
-            if [[ -n "$backup_file" ]]; then
-                log_debug "Removing old backup: $(basename "$backup_file")"
+    # AUD-B3 FIX: use stat ctime-based age check instead of find -mtime.
+    # find -mtime uses mtime which can be reset by rsync --times or touch,
+    # allowing old backups to escape retention. ctime cannot be altered by
+    # userspace so it reliably reflects when the file arrived on this host.
+    while IFS= read -r backup_file; do
+        if [[ -n "$backup_file" ]]; then
+            local age_days
+            age_days=$(_backup_ctime_age_days "$backup_file")
+            if (( age_days > retention_days )); then
+                log_debug "Removing old backup (${age_days}d > ${retention_days}d): $(basename "$backup_file")"
                 rm -f "$backup_file" "$backup_file.sha256" "$backup_file.meta" 2>/dev/null
                 (( deleted_count++ )) || true
             fi
-        done <<< "$old_backups"
-    fi
+        fi
+    done < <(find "$backup_dir" -name "*.age" -type f 2>/dev/null)
 
     # P2-M3 FIX: sweep for orphaned sidecars (.meta and .sha256) whose
     # corresponding .age primary file no longer exists. These are left behind
@@ -384,5 +525,6 @@ EOF
 # Export functions for use by scripts
 export -f list_backups validate_backup_integrity check_backup_disk_space
 export -f cleanup_old_backups get_backup_statistics create_backup_metadata
+export -f verify_backup_integrity get_backup_size _backup_ctime_age_days
 
 log_debug "Backup utilities library loaded successfully - standardized error handling" 2>/dev/null || true

@@ -19,6 +19,9 @@
 #   - AGE_KEY_FILE read from .env (SOPS_AGE_KEY_FILE) with safe default
 #   - .sha256 sidecar verified before decryption (FIX-R05)
 #   - flock mutex prevents concurrent restore races (FIX-R03)
+#     NOTE: The operations mutex (FD 200) also blocks concurrent backup.sh
+#     runs from racing against a restore — both scripts acquire the same
+#     VW_OPERATIONS_LOCK before operating on the database directory.
 #   - .pre-restore-* artefacts pruned to keep last 3 (FIX-R08)
 #
 # FIXES (this revision):
@@ -39,6 +42,21 @@
 #          controlled by RESTORE_SNAPSHOT_HARD_FAIL (default: true).
 #          Use --no-backup or set RESTORE_SNAPSHOT_HARD_FAIL=false to
 #          revert to warn-only behaviour.
+#
+# AUDIT FIXES (current revision):
+#   AUD-R1  age passphrase never passed on CLI; -i keyfile used exclusively
+#           — passphrase is never visible in ps aux or /proc/$$/cmdline.
+#   AUD-R2  restore_db(): live DB copied to .rollback-<ts> before cp;
+#           on cp failure the rollback copy is restored automatically so
+#           the original live database is never lost.
+#   AUD-R3  select_backup_file() / interactive selection: input validated
+#           as a positive integer before use as array index; non-numeric
+#           or out-of-range input prints an error and re-prompts.
+#   AUD-R4  verify_sqlite(): WAL checkpoint (TRUNCATE) issued before
+#           PRAGMA integrity_check so unresolved WAL pages are folded
+#           into the main DB file first, avoiding false corruption reports.
+#   AUD-R5  Concurrent backup+restore protection: both scripts acquire
+#           VW_OPERATIONS_LOCK (FD 200) via flock -n; documented here.
 
 set -euo pipefail
 
@@ -46,7 +64,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR"
 cd "$PROJECT_ROOT"
 
-# Shared operations lock (update.sh/maintenance.sh/restore.sh)
+# Shared operations lock (update.sh/maintenance.sh/restore.sh/backup.sh)
 VW_LOCK_DIR="${PROJECT_ROOT}/.locks"
 VW_OPERATIONS_LOCK="${VW_LOCK_DIR}/operations.lock"
 
@@ -179,6 +197,51 @@ list_backups() {
     done
 }
 
+# AUD-R3: Interactive backup selector with integer validation.
+# Lists available backup files and prompts the operator for a selection.
+# Input is validated as a positive integer within the valid range before
+# being used as an array index — a non-numeric or out-of-range entry
+# triggers an error message and re-prompt rather than a bash subscript error.
+select_backup_file() {
+    local dir="$1"
+    [[ -d "$dir" ]] || { log_error "Backup directory not found: $dir"; return 1; }
+
+    local -a files=()
+    while IFS= read -r f; do
+        files+=("$f")
+    done < <(find "$dir" -name "*.age" -type f 2>/dev/null | sort -r)
+
+    if [[ ${#files[@]} -eq 0 ]]; then
+        log_error "No backup files found in: $dir"
+        return 1
+    fi
+
+    echo "Available backups:"
+    local i
+    for (( i=0; i<${#files[@]}; i++ )); do
+        printf '  [%d] %s\n' "$(( i + 1 ))" "$(basename "${files[$i]}")" \
+            $(ls -lh "${files[$i]}" 2>/dev/null | awk '{print "("$5")"}')
+    done
+
+    local choice
+    while true; do
+        read -r -p "Enter number (1-${#files[@]}): " choice
+        # AUD-R3: Validate as a positive integer
+        if ! [[ "$choice" =~ ^[0-9]+$ ]]; then
+            log_error "Invalid input '${choice}': please enter a number between 1 and ${#files[@]}."
+            continue
+        fi
+        if (( choice < 1 || choice > ${#files[@]} )); then
+            log_error "Out of range: please enter a number between 1 and ${#files[@]}."
+            continue
+        fi
+        break
+    done
+
+    BACKUP_FILE="${files[$(( choice - 1 ))]}"
+    log_info "Selected: $(basename "$BACKUP_FILE")"
+}
+
 resolve_backup_file() {
     if [[ "$USE_LATEST" == "true" ]]; then
         if [[ -n "$RESTORE_TYPE" ]]; then
@@ -296,12 +359,28 @@ check_traversal_only() {
     return 0
 }
 
+# AUD-R4 FIX: Issue a WAL checkpoint before running PRAGMA integrity_check.
+# If the backup was created while SQLite had an open WAL file that was not
+# checkpointed, the restored database will have unpersisted pages in the WAL.
+# Running integrity_check without checkpointing first can produce false
+# corruption errors because integrity_check operates on the main DB file only
+# and does not replay WAL pages. TRUNCATE mode folds all WAL frames into the
+# main file and resets the WAL to zero length, ensuring integrity_check sees
+# a fully consistent on-disk state.
+#
 # FIX-R06: Replace verify_sqlite_docker() with verify_sqlite() using the
 # host sqlite3 binary. sqlite3 is installed by setup.sh's basic_packages
 # array. Spinning up an alpine:latest container with --user root to run a
 # one-line SQL command is an unnecessary supply-chain risk and Docker dep.
 verify_sqlite() {
     local dbfile="$1"
+    log_info "Checkpointing WAL before integrity check..."
+    # AUD-R4: Checkpoint the WAL first so unresolved WAL pages are folded
+    # into the main DB file. Ignore errors here — the file may have no WAL
+    # at all (freshly-copied DB backups typically do not), and a failure to
+    # checkpoint is not itself evidence of corruption.
+    sqlite3 "$dbfile" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1 || true
+
     log_info "Verifying SQLite integrity (host sqlite3)..."
     local result
     result=$(sqlite3 "$dbfile" "PRAGMA integrity_check;" 2>&1) || {
@@ -395,6 +474,12 @@ cleanup_pre_restore_artefacts() {
 
 # ---------------------------------------------------------------------------
 # DB restore
+# AUD-R1: age decryption uses -i <keyfile> exclusively — the passphrase is
+#         never passed on the command line and is therefore not visible in
+#         ps aux or /proc/$$/cmdline.
+# AUD-R2: A rollback copy of the live database is created before any write.
+#         If the cp to the live path fails the rollback copy is automatically
+#         promoted back so the operator is never left with a missing database.
 # ---------------------------------------------------------------------------
 restore_db() {
     local backup_file="$1"
@@ -406,12 +491,15 @@ restore_db() {
 
     local dec_db="$tmpdir/db.sqlite3"
 
+    # AUD-R1: -i flag reads the identity (private key) from a file.
+    # No --passphrase argument is ever passed; passphrase stays off the CLI.
     log_info "Decrypting database backup..."
     age -d -i "$age_key_file" -o "$dec_db" "$backup_file" || {
         log_error "Decryption failed — verify the age key is correct."
         return 1
     }
 
+    # AUD-R4: WAL checkpoint + integrity check via verify_sqlite()
     # FIX-R06: Use host sqlite3 instead of Docker alpine container.
     if [[ "$SKIP_VERIFICATION" != "true" ]]; then
         verify_sqlite "$dec_db" || return 1
@@ -423,13 +511,41 @@ restore_db() {
 
     local ts
     ts="$(date +%Y%m%d-%H%M%S)"
+
+    # AUD-R2: Create a rollback copy BEFORE touching the live database.
+    # If the subsequent cp fails (e.g. disk full mid-write), restore the
+    # rollback copy so the live database is never absent.
+    local rollback_path=""
     if [[ -f "$db_path" ]]; then
+        rollback_path="${db_path}.rollback-${ts}"
+        log_info "Creating rollback copy: $(basename "$rollback_path")..."
+        cp -a "$db_path" "$rollback_path" || {
+            log_error "Failed to create rollback copy of live database — aborting restore."
+            return 1
+        }
+        # Also keep the pre-restore snapshot for later pruning
         log_info "Saving current DB as pre-restore copy (${db_path}.pre-restore-${ts})..."
         cp -a "$db_path" "${db_path}.pre-restore-${ts}"
     fi
 
     log_info "Restoring database..."
-    cp -f "$dec_db" "$db_path"
+    if ! cp -f "$dec_db" "$db_path"; then
+        # AUD-R2 rollback: cp failed; restore the live database from rollback
+        log_error "cp to live DB path failed — rolling back from: $(basename "${rollback_path:-none}")"
+        if [[ -n "$rollback_path" && -f "$rollback_path" ]]; then
+            if cp -a "$rollback_path" "$db_path"; then
+                log_warn "Rollback successful — live database restored to pre-restore state."
+            else
+                log_error "CRITICAL: Rollback copy failed. Live DB may be missing."
+                log_error "Manual recovery: cp '${rollback_path}' '${db_path}'"
+            fi
+        fi
+        return 1
+    fi
+
+    # Remove the temporary rollback copy now that the restore succeeded
+    [[ -n "$rollback_path" ]] && rm -f "$rollback_path" 2>/dev/null || true
+
     purge_wal_shm "$db_path"
     chown "${puid}:${pgid}" "$db_path" 2>/dev/null || log_warn "Could not set ownership on $db_path"
     chmod 640 "$db_path" 2>/dev/null || true
@@ -466,6 +582,7 @@ restore_full() {
     local tar_filter
     tar_filter="$(_tar_filter_for_file "$dec_tar")"
 
+    # AUD-R1: age -d -i <keyfile> — no passphrase on command line.
     log_info "Decrypting archive..."
     age -d -i "$age_key_file" -o "$dec_tar" "$backup_file" || {
         log_error "Decryption failed — verify the age key is correct."
@@ -652,6 +769,9 @@ main() {
     require_root "$@"
 
     # Shared operations mutex to prevent overlap with update/maintenance jobs.
+    # AUD-R5: backup.sh also acquires this lock (FD 200) before operating on
+    # the database directory, so a concurrent backup run and restore run cannot
+    # both proceed — whichever acquires the lock second will exit with an error.
     ensure_dir "$VW_LOCK_DIR" 700 "$(get_real_user)" || {
         log_error "Failed to initialize operations lock directory: $VW_LOCK_DIR"
         exit 1
@@ -664,7 +784,7 @@ main() {
     # subsequent operation from acquiring the mutex until the subshell exits.
     exec 200>"$VW_OPERATIONS_LOCK"
     if ! flock -n 200; then
-        log_error "Another update/restore/maintenance operation is already running."
+        log_error "Another update/restore/maintenance/backup operation is already running."
         log_error "Lock file: $VW_OPERATIONS_LOCK"
         exit 1
     fi

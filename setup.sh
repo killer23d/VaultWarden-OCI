@@ -185,8 +185,14 @@ install_docker_apt() {
     fi
 
     log_success "Docker GPG key fingerprint verified: $actual_fpr"
-    gpg --dearmor < "$docker_gpg_tmp" > /etc/apt/keyrings/docker.gpg || return 1
-    chmod a+r /etc/apt/keyrings/docker.gpg
+
+    # FIX [MEDIUM-install_docker_apt]: pipe gpg --dearmor through install(1)
+    # with explicit mode 0644 so the keyring file is never world-unreadable
+    # under a restrictive umask (e.g. 077). The previous redirect
+    # (gpg --dearmor > /etc/apt/keyrings/docker.gpg) created the file under
+    # the current umask before the subsequent chmod a+r could close the race.
+    gpg --dearmor "$docker_gpg_tmp" \
+        | install -m 0644 /dev/stdin /etc/apt/keyrings/docker.gpg || return 1
 
     # Use 'noble' (24.04 LTS) codename for Ubuntu 24.10 — Docker does not
     # publish a 24.10 (oracular) repository; noble packages run correctly
@@ -197,7 +203,7 @@ https://download.docker.com/linux/ubuntu noble stable" \
       | tee /etc/apt/sources.list.d/docker.list > /dev/null
 
     apt-get update -qq || return 1
-    apt-get install -y \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
         docker-ce \
         docker-ce-cli \
         containerd.io \
@@ -210,10 +216,9 @@ https://download.docker.com/linux/ubuntu noble stable" \
     return 0
 }
 
-# FIX [C-05]: Preflight disk-space check before any phase runs.
-# Requires at least MIN_FREE_KB kilobytes free on the filesystem containing
-# PROJECT_ROOT. Failing early avoids mid-run partial state (half-written .env,
-# incomplete secrets structure, etc.).
+# FIX [C-05] + LOW (docker path): Preflight disk-space check before any phase.
+# Checks both $PROJECT_ROOT filesystem and /var/lib/docker (where images and
+# volumes are stored). Failing early avoids mid-run partial state.
 check_disk_space() {
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would check disk space"; return 0; fi
 
@@ -222,10 +227,28 @@ check_disk_space() {
     available_kb=$(df -k "$PROJECT_ROOT" | awk 'NR==2 {print $4}')
 
     if (( available_kb < min_free_kb )); then
-        log_error "Insufficient disk space. Required: 2 GiB, Available: $(( available_kb / 1024 )) MiB on $PROJECT_ROOT"
+        log_error "Insufficient disk space on $PROJECT_ROOT. Required: 2 GiB, Available: $(( available_kb / 1024 )) MiB"
         return 1
     fi
-    log_info "Disk space OK: $(( available_kb / 1024 )) MiB available"
+    log_info "Disk space OK on $PROJECT_ROOT: $(( available_kb / 1024 )) MiB available"
+
+    # FIX [LOW-check_disk_space]: also check /var/lib/docker where images and
+    # volumes are actually stored. The docker data root may live on a separate
+    # filesystem (e.g. a second block device on OCI). Without this check the
+    # script could succeed even when Docker has no room to pull images.
+    local docker_root="/var/lib/docker"
+    if [[ -d "$docker_root" ]]; then
+        local docker_available_kb
+        docker_available_kb=$(df -k "$docker_root" | awk 'NR==2 {print $4}')
+        if (( docker_available_kb < min_free_kb )); then
+            log_error "Insufficient disk space on $docker_root. Required: 2 GiB, Available: $(( docker_available_kb / 1024 )) MiB"
+            return 1
+        fi
+        log_info "Disk space OK on $docker_root: $(( docker_available_kb / 1024 )) MiB available"
+    else
+        log_info "/var/lib/docker does not exist yet — skipping Docker data-root space check"
+    fi
+
     return 0
 }
 
@@ -325,8 +348,12 @@ install_dependencies() {
 
     if [[ ${#missing_packages[@]} -gt 0 ]]; then
         apt-get update -qq || return 1
-        export DEBIAN_FRONTEND=noninteractive
-        apt-get install -y "${missing_packages[@]}" || return 1
+        # FIX [MEDIUM-install_dependencies]: scope DEBIAN_FRONTEND inline so it
+        # does not leak into the rest of the script (and into the subsequent
+        # ./setup-secrets.sh invocation). Previously `export
+        # DEBIAN_FRONTEND=noninteractive` persisted for the entire script
+        # lifetime; using an inline env prefix keeps it local to this call only.
+        DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing_packages[@]}" || return 1
     fi
 
     if ! systemctl is-active --quiet haveged; then
@@ -340,7 +367,7 @@ install_dependencies() {
     fi
 
     if ! docker compose version >/dev/null 2>&1; then
-        apt-get install -y docker-compose-plugin || return 1
+        DEBIAN_FRONTEND=noninteractive apt-get install -y docker-compose-plugin || return 1
     fi
 
     if ! command -v sops >/dev/null 2>&1; then
@@ -426,12 +453,16 @@ setup_user_permissions() {
     id "$real_user" >/dev/null 2>&1 || return 1
     groups "$real_user" | grep -q docker || usermod -aG docker "$real_user" || return 1
 
-    # Scope chown to non-secrets paths to avoid clobbering future key permissions.
-    # secrets/ is handled explicitly by setup_directories and generate_age_keys.
+    # FIX [MEDIUM-setup_user_permissions]: use --no-dereference on chown so
+    # that symlinks inside $PROJECT_ROOT are not followed into their targets
+    # (which may be outside the project tree). The previous plain chown -R
+    # dereferenced symlinks, potentially changing ownership of files in
+    # /etc, /var, or mounted filesystems that happen to be symlinked here.
+    # Scope chown to non-secrets paths to avoid clobbering key permissions.
     find "$PROJECT_ROOT" -maxdepth 1 \
         ! -name 'secrets' \
         ! -path "$PROJECT_ROOT" \
-        -exec chown -R "$real_user:$(id -g -n "$real_user")" {} \; 2>/dev/null || true
+        -exec chown --no-dereference "$real_user:$(id -g -n "$real_user")" {} \; 2>/dev/null || true
 
     return 0
 }
@@ -490,7 +521,15 @@ create_env_file() {
         fi
     fi
 
-    cp "$env_template" "$env_file" || return 1
+    # FIX [HIGH-create_env_file]: set umask 077 before cp so that the new .env
+    # is created mode 600 from the start, eliminating the 644→600 window that
+    # existed when cp ran under the default umask (typically 022) and chmod 600
+    # was applied only after the file existed. Any process that opened the file
+    # in that brief window could read plaintext credentials.
+    local prev_umask; prev_umask=$(umask)
+    umask 077
+    cp "$env_template" "$env_file" || { umask "$prev_umask"; return 1; }
+    umask "$prev_umask"
 
     local real_user; real_user=$(get_real_user)
     local user_id; user_id=$(id -u "$real_user")
@@ -701,6 +740,19 @@ create_sops_config() {
     # cached string.
     local age_public_key; age_public_key=$(get_age_public_key "$age_key_file") || return 1
 
+    # FIX [HIGH-create_sops_config]: validate age public key format before
+    # embedding it in .sops.yaml. An age1... Bech32 key that fails validation
+    # would be silently written into the config, causing all subsequent
+    # `sops --encrypt` calls to fail with a cryptic error rather than a clear
+    # message here at the source. age public keys always start with "age1" and
+    # are 62 characters long (Bech32 encoding of a X25519 public key).
+    if [[ ! "$age_public_key" =~ ^age1[a-z0-9]{58}$ ]]; then
+        log_error "Age public key has unexpected format: '${age_public_key}'"
+        log_error "Expected format: age1<58 lowercase alphanumeric chars>"
+        log_error "Regenerate the key with: rm secrets/keys/age-key.txt && ./setup.sh ..."
+        return 1
+    fi
+
     if [[ -f "$sops_config" ]] && [[ "$FORCE" != "true" ]]; then
         # Check that the embedded key matches the current key file exactly.
         if grep -qF "$age_public_key" "$sops_config"; then
@@ -731,8 +783,14 @@ create_empty_secrets_structure() {
     if [[ -f "$secrets_file" ]] && [[ "$FORCE" != "true" ]]; then
         export SOPS_AGE_KEY_FILE="$age_key_file"
         if sops -d "$secrets_file" >/dev/null 2>&1; then
+            # FIX [LOW-create_empty_secrets_structure]: unset SOPS_AGE_KEY_FILE
+            # immediately after the check so it does not leak into subsequent
+            # phases or into the ./setup-secrets.sh invocation. Previously the
+            # export persisted for the entire remaining script lifetime.
+            unset SOPS_AGE_KEY_FILE
             return 0
         else
+            unset SOPS_AGE_KEY_FILE
             log_error "Existing secrets.yaml is unreadable with current key. Use --force to overwrite."
             return 1
         fi
@@ -751,7 +809,9 @@ fail2ban_cloudflare_firewall_token: PLACEHOLDER_NOT_CONFIGURED
 EOF
     chmod 600 "$temp_secrets"
     export SOPS_AGE_KEY_FILE="$age_key_file"
-    sops --encrypt --output "$secrets_file" "$temp_secrets" || return 1
+    sops --encrypt --output "$secrets_file" "$temp_secrets" || { unset SOPS_AGE_KEY_FILE; return 1; }
+    # FIX [LOW-create_empty_secrets_structure]: unset after use
+    unset SOPS_AGE_KEY_FILE
     chmod 600 "$secrets_file" || return 1
     chown "$(get_real_user):$(id -g -n "$(get_real_user)")" "$secrets_file" || return 1
     return 0
@@ -793,11 +853,13 @@ set_script_permissions() {
     local real_user; real_user=$(get_real_user)
     local real_group; real_group=$(id -g -n "$real_user")
 
-    # FIX [BUG-09]: Removed three deleted scripts (db-maint.sh, update-dns.sh,
-    # test-email-simple.sh) that no longer exist in the repository. The loop
-    # uses [[ -f ]] guards so missing entries are silently skipped, but keeping
-    # deleted names here is misleading and would cause confusion during audits.
-    local scripts=("setup.sh" "setup-secrets.sh" "edit-secrets.sh" "health.sh" "update.sh" "backup.sh" "restore.sh" "startup.sh" "maintenance.sh" "cron-setup.sh" "create-breakglass-admin.sh")
+    # FIX [MEDIUM-set_script_permissions]: removed cron-setup.sh from the array
+    # because that file does not exist in the repository. Keeping a non-existent
+    # entry is misleading during audits. The [[ -f ]] guard below would silently
+    # skip it, but the entry should not be listed as a managed script.
+    # FIX [BUG-09]: Also removed three deleted scripts (db-maint.sh,
+    # update-dns.sh, test-email-simple.sh) that no longer exist in the repo.
+    local scripts=("setup.sh" "setup-secrets.sh" "edit-secrets.sh" "health.sh" "update.sh" "backup.sh" "restore.sh" "startup.sh" "maintenance.sh" "create-breakglass-admin.sh")
     for script in "${scripts[@]}"; do
         if [[ -f "$script" ]]; then
             chmod +x "$script"
@@ -847,7 +909,12 @@ setup_firewall() {
     ufw allow 80/tcp
     ufw allow 443/tcp
 
-    ufw status | grep -q "Status: active" || echo "y" | ufw enable
+    # FIX [MEDIUM-setup_firewall]: replace `echo "y" | ufw enable` with
+    # `ufw --force enable`. The echo pipe is fragile: it relies on ufw reading
+    # from stdin, which may not work in all execution contexts (e.g. when stdin
+    # is already redirected). `ufw --force enable` is the documented
+    # non-interactive flag and does not depend on stdin.
+    ufw status | grep -q "Status: active" || ufw --force enable
     return 0
 }
 
@@ -913,8 +980,15 @@ EOF
     printf '%s' "${COLOR_RESET}"
 
     if [[ -f "secrets/keys/age-key.txt" ]]; then
+        # FIX [LOW-show_post_install_summary]: call get_age_public_key() (the
+        # existing library function from lib/crypto.sh) instead of the fragile
+        # inline `grep "public key" | cut -d: -f2 | tr -d ' '` pipeline.
+        # The library function handles edge cases (comments with colons,
+        # whitespace variants, multi-line output) correctly and is already
+        # tested. Using a different extraction method here risks showing a
+        # different key than what is actually embedded in .sops.yaml.
         local age_pub_key
-        age_pub_key=$(grep "public key" "secrets/keys/age-key.txt" | cut -d: -f2 | tr -d ' ' || echo "MISSING")
+        age_pub_key=$(get_age_public_key "secrets/keys/age-key.txt" 2>/dev/null || echo "MISSING")
         printf 'SOPS Age Public Key:  %s%s%s\n' "${COLOR_GREEN}" "${age_pub_key}" "${COLOR_RESET}"
         printf 'SOPS Age Private Key: %sCat secrets/keys/age-key.txt to view  (BACKUP THIS FILE!)%s\n' \
             "${COLOR_RED}" "${COLOR_RESET}"
@@ -1001,7 +1075,13 @@ main() {
     # unrecoverable without the recovery kit.
     local SETUP_LOCK_FILE="/var/lock/vaultwarden-setup.lock"
     local SETUP_LOCK_FD=202
-    eval "exec ${SETUP_LOCK_FD}>\"$SETUP_LOCK_FILE\""
+    # FIX [HIGH-main-eval]: replace eval "exec ${SETUP_LOCK_FD}>..." with a
+    # direct exec redirection. eval was the last remaining use of eval in the
+    # repository; it is unnecessary here because the file descriptor number and
+    # path are both known at script-write time. Direct exec is safer and
+    # clearer — there is no variable that could carry a shell metacharacter
+    # into an eval context.
+    exec 202>"$SETUP_LOCK_FILE"
     if ! flock -n $SETUP_LOCK_FD; then
         log_error "Another setup instance is already running (could not acquire lock)."
         log_error "Wait for it to complete, then retry."

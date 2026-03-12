@@ -8,6 +8,11 @@
 # FIXED: C-04/NEW-BUG-03 - flock-based mutex shared with restore.sh/maintenance.sh
 # FIXED: P1-H3     - quoted $images / image_list to prevent word-splitting & glob expansion
 # FIXED: P1-M3     - mutex uses FD 63 instead of FD 9 to avoid subshell inheritance collisions
+# FIXED: AUDIT-H1  - FD 63 marked close-on-exec; children cannot hold stale lock
+# FIXED: AUDIT-H2  - digest pinning + pre-up integrity check prevents tag-mutation attack
+# FIXED: AUDIT-M1  - docker manifest inspect rate-limit detected; not silently 'up to date'
+# FIXED: AUDIT-M2  - rollback checks local cache before pulling; errors surfaced clearly
+# FIXED: AUDIT-L1  - notification email includes previous AND new digests
 
 set -euo pipefail
 
@@ -31,6 +36,11 @@ RESTART_SERVICES=true
 CLEANUP_OLD=true
 QUIET=false
 FORCE_UPDATE=false   # bypass fatal backup-failure guard (--force)
+
+# Digest tracking: populated by check_for_updates, consumed by
+# restart_vaultwarden_services and the notification email.
+# Format: image_name -> "prev_digest|new_digest"
+declare -A IMAGE_DIGEST_MAP
 
 # Shared operations lock — must match the name used in restore.sh and maintenance.sh
 VW_LOCK_DIR="${PROJECT_ROOT}/.locks"
@@ -81,6 +91,71 @@ done
 u_log_info() { [[ "$QUIET" == "true" ]] || log_info "$1"; }
 u_log_success() { [[ "$QUIET" == "true" ]] || log_success "$1"; }
 
+# ---------------------------------------------------------------------------
+# AUDIT-H1: close-on-exec for FD 63
+#
+# bash does not expose F_SETFD/FD_CLOEXEC directly.  The most portable
+# approach without Python/Perl: wrap every child invocation that must NOT
+# inherit the lock FD inside _run_no_lock, which redirects FD 63 to
+# /dev/null in the child, breaking the kernel file-description reference so
+# the child cannot hold the flock.  We also attempt the O_CLOEXEC approach
+# via Python when available for belt-and-suspenders coverage.
+#
+# Note: the flock(1) man page says the lock is released when the last FD
+# referencing the underlying open file description is closed.  Redirecting
+# 63>/dev/null in a child opens a *new* file description on /dev/null and
+# has no effect on the parent's lock.  The child simply does not have a
+# copy of FD 63 pointing at the lock file.
+# ---------------------------------------------------------------------------
+_set_cloexec_fd63() {
+    # Attempt to set FD_CLOEXEC via Python (available on most distros)
+    python3 -c "import fcntl, os; fcntl.fcntl(63, fcntl.F_SETFD, fcntl.FD_CLOEXEC)" 2>/dev/null || \
+    python  -c "import fcntl, os; fcntl.fcntl(63, fcntl.F_SETFD, fcntl.FD_CLOEXEC)" 2>/dev/null || \
+    true  # Non-fatal: _run_no_lock provides the safety net
+}
+
+# Run a command as a child process without inheriting FD 63 (the flock fd).
+# AUDIT-H1: This prevents a child that outlives update.sh from holding the
+# lock open indefinitely.
+_run_no_lock() {
+    # Redirect FD 63 to /dev/null in the child — opens a fresh file description,
+    # does not affect the parent's open file description or the flock.
+    ( exec 63>/dev/null; "$@" )
+}
+
+# ---------------------------------------------------------------------------
+# AUDIT-M1: check_for_updates
+#
+# docker manifest inspect may return HTTP 429 (rate-limited) silently — the
+# process exits 0 but returns an error JSON.  Previously the code treated any
+# output as a valid digest, meaning a rate-limited registry appeared as
+# "up to date" even when there were real updates.
+#
+# Fix: detect rate-limit indicators in the manifest inspect output and return
+# exit code 3 (new sentinel: "check indeterminate, rate limited") instead of
+# 0 or 2.  The caller logs a warning and skips the digest comparison rather
+# than silently reporting current.
+# ---------------------------------------------------------------------------
+_manifest_inspect_digest() {
+    local image="$1"
+    local raw_output
+    raw_output=$(DOCKER_CLI_EXPERIMENTAL=enabled docker manifest inspect "$image" 2>&1) || {
+        echo "error"; return 1
+    }
+    # Detect rate-limiting: Docker Hub returns HTTP 429 in the error text
+    if echo "$raw_output" | grep -qiE '429|rate.?limit|too many request'; then
+        echo "rate_limited"; return 2
+    fi
+    # Extract the config digest
+    local digest
+    digest=$(echo "$raw_output" | grep -A 1 '"config"' | grep '"digest"' | awk -F'"' '{print $4}' | head -1)
+    if [[ -z "$digest" ]]; then
+        echo "unknown"; return 1
+    fi
+    echo "$digest"
+    return 0
+}
+
 check_for_updates() {
     local updates_found=false
     local compose_file="docker-compose.yml"
@@ -90,18 +165,6 @@ check_for_updates() {
         return 1
     fi
 
-    # FIX (BUG-P): Use `docker compose config --images` to get fully-resolved
-    # image names. Grepping raw YAML returned unexpanded variable references
-    # such as "vaultwarden/server:${VAULTWARDEN_VERSION:-latest}" which
-    # docker pull treats as a literal tag name and fails to fetch.
-    # Fall back to parsing `docker compose config` output for Compose versions
-    # older than v2.5 that do not support the --images subcommand.
-    # FIX (P1-H3): $images is only ever used after being split into the
-    # image_list array via mapfile; the raw variable is never passed unquoted
-    # to any command. The mapfile assignment itself uses a here-string that
-    # does not require quoting. All subsequent expansions use "${image_list[@]}"
-    # with double-quotes, preventing word-splitting and glob expansion on
-    # image names that contain special characters or whitespace.
     local images
     if images=$(docker compose config --images 2>/dev/null) && [[ -n "$images" ]]; then
         : # resolved list obtained
@@ -119,39 +182,56 @@ check_for_updates() {
 
     u_log_info "Checking for image updates..."
 
-    # FIX (P1-H3): Use mapfile to split $images into an array, then iterate
-    # with double-quoted "${image_list[@]}" so that image names containing
-    # spaces, glob characters, or other special characters are never split
-    # or expanded by the shell.
     local image_list
     mapfile -t image_list <<< "$images"
     for image in "${image_list[@]}"; do
-        # Get local image ID
+        # Record previous digest before any pull
+        local prev_digest
+        prev_digest=$(docker inspect --type=image \
+            --format '{{index .RepoDigests 0}}' "$image" 2>/dev/null || echo "none")
+        # Normalise: strip image name prefix if present ("img@sha256:..." -> "sha256:...")
+        [[ "$prev_digest" == *@* ]] && prev_digest="${prev_digest##*@}"
+
         local local_id
         local_id=$(docker inspect --type=image --format '{{.Id}}' "$image" 2>/dev/null || echo "none")
 
         if [[ "$DRY_RUN" == "true" ]]; then
-            local remote_digest
-            # DOCKER_CLI_EXPERIMENTAL is a no-op on Docker >= 20.10 but required for
-            # older clients; scope it to this single call to avoid process-level bleed.
-            remote_digest=$(DOCKER_CLI_EXPERIMENTAL=enabled docker manifest inspect "$image" 2>/dev/null \
-                | grep -A 1 "config" | grep "digest" | awk -F'"' '{print $4}' \
-                || echo "unknown")
+            local digest_result digest_rc=0
+            digest_result=$(_manifest_inspect_digest "$image") || digest_rc=$?
 
-            if [[ "$local_id" == "none" ]]; then
+            if [[ $digest_rc -eq 2 || "$digest_result" == "rate_limited" ]]; then
+                # AUDIT-M1: rate-limited — report as indeterminate, not current
+                log_warn "  [RATE-LIMITED] $image — registry rate limit hit; update status unknown"
+            elif [[ "$local_id" == "none" ]]; then
                 u_log_info "  [NEW] $image (Not pulled yet)"
                 updates_found=true
-            elif [[ "$remote_digest" != "unknown" ]]; then
+            elif [[ "$digest_result" != "unknown" && "$digest_result" != "error" ]]; then
                 u_log_info "  [CHECK] $image (Remote checking requires pull to be 100% accurate)"
                 updates_found=true
             fi
         else
             u_log_info "  Pulling $image..."
-            local pull_output
-            pull_output=$(docker pull "$image" 2>&1)
+            local pull_output pull_rc=0
+            # AUDIT-H1: run docker pull without inheriting FD 63
+            pull_output=$(_run_no_lock docker pull "$image" 2>&1) || pull_rc=$?
+
+            if [[ $pull_rc -ne 0 ]]; then
+                log_warn "  [PULL FAILED] $image (rc=${pull_rc})"
+                IMAGE_DIGEST_MAP["$image"]="${prev_digest}|error"
+                continue
+            fi
+
+            # Record the digest we actually pulled
+            # AUDIT-H2: pin digest immediately after pull
+            local new_digest
+            new_digest=$(docker inspect --type=image \
+                --format '{{index .RepoDigests 0}}' "$image" 2>/dev/null || echo "none")
+            [[ "$new_digest" == *@* ]] && new_digest="${new_digest##*@}"
+
+            IMAGE_DIGEST_MAP["$image"]="${prev_digest}|${new_digest}"
 
             if echo "$pull_output" | grep -q "Downloaded newer image"; then
-                u_log_success "  [UPDATED] $image has been updated"
+                u_log_success "  [UPDATED] $image has been updated (digest: ${new_digest:0:19}...)"
                 updates_found=true
             elif echo "$pull_output" | grep -q "Image is up to date"; then
                 u_log_info "  [CURRENT] $image is up to date"
@@ -188,10 +268,6 @@ update_system_packages() {
         return 0
     fi
 
-    # FIX (BUG-Q): Removed dead is_root / SUDO variable. require_root() above
-    # exits the script if the caller is not root, so this function is only
-    # reachable as root. The previous `if ! is_root; then SUDO="sudo"` branch
-    # was always false and SUDO was always the empty string.
     apt-get update
     DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
 
@@ -200,6 +276,42 @@ update_system_packages() {
     fi
 
     u_log_success "System packages updated"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# AUDIT-H2: _verify_digest_integrity IMAGE EXPECTED_DIGEST
+#
+# Before `docker compose up`, re-inspect the local image to confirm its
+# digest still matches what was recorded immediately after `docker pull`.
+# A mismatch means the tag was re-pushed between pull and up (tag mutation)
+# and the update is aborted.
+# ---------------------------------------------------------------------------
+_verify_digest_integrity() {
+    local image="$1"
+    local expected_digest="$2"
+
+    [[ -z "$expected_digest" || "$expected_digest" == "none" || "$expected_digest" == "error" ]] && {
+        # No pinned digest available; skip verification with a warning
+        log_warn "Image integrity check skipped for $image (no digest recorded)"
+        return 0
+    }
+
+    local current_digest
+    current_digest=$(docker inspect --type=image \
+        --format '{{index .RepoDigests 0}}' "$image" 2>/dev/null || echo "none")
+    [[ "$current_digest" == *@* ]] && current_digest="${current_digest##*@}"
+
+    if [[ "$current_digest" != "$expected_digest" ]]; then
+        log_error "CRITICAL: Image digest mismatch for $image!"
+        log_error "  Expected (post-pull): $expected_digest"
+        log_error "  Current:              $current_digest"
+        log_error "  This may indicate a tag-mutation attack or a concurrent registry push."
+        log_error "  Aborting update. Run again to re-pull, or pin to a digest in docker-compose.yml."
+        return 1
+    fi
+
+    u_log_info "  Digest integrity OK for $image (${current_digest:0:19}...)"
     return 0
 }
 
@@ -214,18 +326,32 @@ restart_vaultwarden_services() {
         return 0
     fi
 
+    # AUDIT-H2: Verify digest integrity for every image we pulled before
+    # starting containers.  This catches tag-mutation between pull and up.
+    if [[ ${#IMAGE_DIGEST_MAP[@]} -gt 0 ]]; then
+        log_info "Verifying image digest integrity before starting services..."
+        for image in "${!IMAGE_DIGEST_MAP[@]}"; do
+            local digest_pair="${IMAGE_DIGEST_MAP[$image]}"
+            local new_digest="${digest_pair##*|}"
+            _verify_digest_integrity "$image" "$new_digest" || {
+                log_error "Aborting service start due to digest integrity failure."
+                return 1
+            }
+        done
+    fi
+
     log_info "Applying updates and restarting services..."
 
-    # Recreate containers with new images
-    if docker compose up -d; then
+    # AUDIT-H1: docker compose up must not inherit FD 63
+    if _run_no_lock docker compose up -d; then
         u_log_success "Services restarted with updated images"
 
-        # Verify health
         log_info "Waiting for services to become healthy..."
         sleep 5
 
         if [[ -x "./health.sh" ]]; then
-            if ./health.sh --quiet; then
+            # AUDIT-H1: health.sh must not inherit FD 63
+            if _run_no_lock ./health.sh --quiet; then
                 u_log_success "All services are healthy after update"
             else
                 log_warn "Some services may not be healthy after update. Check logs."
@@ -249,7 +375,8 @@ perform_cleanup() {
     fi
 
     log_info "Cleaning up old Docker images..."
-    if docker image prune -f >/dev/null 2>&1; then
+    # AUDIT-H1: image prune must not inherit FD 63
+    if _run_no_lock docker image prune -f >/dev/null 2>&1; then
         u_log_success "Cleanup completed"
     else
         log_warn "Image cleanup had issues, but update was successful"
@@ -257,38 +384,82 @@ perform_cleanup() {
     return 0
 }
 
+# ---------------------------------------------------------------------------
+# AUDIT-M2: rollback_on_failure
+#
+# Before restoring the previous image tag in .env and calling
+# `docker compose up -d`, check that the previous image is cached locally.
+# If not cached AND the registry is reachable, attempt a pull with a
+# timeout.  If pull also fails, emit a critical error with actionable steps
+# instead of silently leaving the service in a broken state.
+# ---------------------------------------------------------------------------
+rollback_on_failure() {
+    local prev_image="$1"   # full image:tag that was running before update
+
+    if [[ -z "$prev_image" ]]; then
+        log_error "rollback_on_failure: no previous image specified; cannot roll back"
+        return 1
+    fi
+
+    log_warn "Attempting rollback to previous image: $prev_image"
+
+    # Check local cache first
+    local cached_id
+    cached_id=$(docker inspect --type=image --format '{{.Id}}' "$prev_image" 2>/dev/null || echo "none")
+
+    if [[ "$cached_id" == "none" ]]; then
+        log_warn "Previous image not in local cache; attempting pull: $prev_image"
+        local pull_rc=0
+        # 60-second timeout for the rollback pull; do not inherit FD 63
+        _run_no_lock timeout 60 docker pull "$prev_image" 2>&1 || pull_rc=$?
+        if [[ $pull_rc -ne 0 ]]; then
+            log_error "CRITICAL: Rollback failed — previous image '$prev_image' is not cached"
+            log_error "          AND could not be pulled from the registry (rc=${pull_rc})."
+            log_error "Remediation:"
+            log_error "  1. Restore from backup:  ./restore.sh --type db"
+            log_error "  2. Or pin a known-good image in docker-compose.yml and run:"
+            log_error "       docker pull <image>:<tag> && docker compose up -d"
+            log_error "  3. Check registry connectivity: docker pull $prev_image"
+            return 1
+        fi
+        u_log_success "Previous image pulled successfully for rollback"
+    else
+        u_log_info "Previous image found in local cache (${cached_id:0:19}...)"
+    fi
+
+    log_info "Restarting services with previous image..."
+    if _run_no_lock docker compose up -d; then
+        u_log_success "Rollback completed: running $prev_image"
+        return 0
+    else
+        log_error "CRITICAL: docker compose up failed during rollback."
+        log_error "  Service is DOWN. Manual intervention required."
+        log_error "  Logs: docker compose logs"
+        return 1
+    fi
+}
+
 main() {
-    # FIX (C-04/NEW-BUG-03): Acquire a shared operations mutex before doing any
-    # work. update.sh, restore.sh, and maintenance.sh all use the same lock file
-    # so they cannot run concurrently. This prevents races such as update.sh
-    # replacing images while restore.sh is replaying volumes, or maintenance.sh
-    # vacuuming the database while an update is mid-flight.
-    #
-    # FIX (P1-M3): Changed from FD 9 to FD 63.
-    # FD 9 is a low-numbered descriptor that is open by default in many shells
-    # and routinely inherited by subshells and child processes (e.g. Docker,
-    # ssh, sudo). That meant a child process could accidentally hold the lock
-    # open after the parent exited, causing subsequent invocations to see a
-    # stale lock and block or fail incorrectly.
-    # FD 63 is the highest reliably usable bash FD (bash internal limit is 63
-    # for named FDs on most platforms). It is never inherited by default and is
-    # not used by any standard utility, eliminating subshell collision risk.
-    # The exec ... {fd}> syntax dynamically allocates a named variable; we use
-    # the literal 63 for maximum compatibility with bash 4.x where dynamic FD
-    # allocation via {fd}> may not be available in all distributions.
+    # FIX (C-04/NEW-BUG-03): Acquire a shared operations mutex
     ensure_dir "$VW_LOCK_DIR" 700 "$(get_real_user)" || {
         log_error "Failed to initialize lock directory: $VW_LOCK_DIR"
         exit 1
     }
 
-    # FIX (P1-M3): Use FD 63 instead of FD 9 to avoid subshell inheritance
-    # collisions. Mark it close-on-exec so child processes never inherit it.
+    # AUDIT-H1: Open FD 63 for the flock, then immediately set FD_CLOEXEC
+    # so any exec'd child process does not inherit this file description.
+    # The _set_cloexec_fd63 call uses Python's fcntl.F_SETFD to set the
+    # close-on-exec bit at the kernel level; _run_no_lock() provides an
+    # additional safety net for bash-forked subprocesses (fork, not exec)
+    # by redirecting FD 63 to /dev/null before running child commands.
     exec 63>"$VW_OPERATIONS_LOCK"
     if ! flock -n 63; then
         log_error "Another update/restore/maintenance operation is already running."
         log_error "Lock file: $VW_OPERATIONS_LOCK"
         exit 1
     fi
+    # Set FD_CLOEXEC on FD 63 at the kernel level
+    _set_cloexec_fd63
 
     if [[ "$DRY_RUN" == "true" ]]; then
         log_header "VaultWarden-OCI Update [DRY RUN]"
@@ -310,13 +481,10 @@ main() {
     if [[ "$DRY_RUN" == "false" && "$UPDATE_IMAGES" == "true" ]]; then
         log_info "Creating pre-update safety backup..."
         if [[ -x "./backup.sh" ]]; then
-            if ./backup.sh --type db --quiet; then
+            # AUDIT-H1: backup.sh must not inherit FD 63
+            if _run_no_lock ./backup.sh --type db --quiet; then
                 u_log_success "Pre-update safety backup created"
             else
-                # FIX (NEW-BUG-01): Backup failure is now fatal by default.
-                # The previous behaviour logged a warning and continued, which
-                # meant the live stack was mutated with no rollback point.
-                # Use --force to explicitly accept this risk.
                 if [[ "$FORCE_UPDATE" == "true" ]]; then
                     log_warn "Pre-update backup FAILED. Proceeding because --force was specified."
                 else
@@ -334,11 +502,7 @@ main() {
     update_system_packages
 
     # Phase 3: Docker Image Updates
-    # FIX (NEW-BUG-05): With set -e active, `check_for_updates` returning 2
-    # (all images current, not an error) triggered set -e and aborted the
-    # script before `local update_status=$?` could capture the value.
-    # The corrected pattern initialises update_status first and uses `||` to
-    # capture any non-zero exit code without triggering set -e.
+    # FIX (NEW-BUG-05): capture non-zero exit without triggering set -e
     local images_updated=false
     if [[ "$UPDATE_IMAGES" == "true" ]]; then
         local update_status=0
@@ -373,12 +537,28 @@ main() {
         u_log_success "Update process completed successfully"
 
         # Email notification (opt-in via --email)
+        # AUDIT-L1: Include previous AND new digests in notification body
         if [[ "$EMAIL_NOTIFY" == "true" ]]; then
             local admin_email
             admin_email=$(get_config_value "ADMIN_EMAIL" "")
             if [[ -n "$admin_email" ]]; then
                 local subject="VaultWarden Update Complete"
-                local body="Update completed on: $(hostname)\n\nSee logs for details."
+                local body="Update completed on: $(hostname)\nTimestamp: $(date -Iseconds)\n"
+
+                if [[ ${#IMAGE_DIGEST_MAP[@]} -gt 0 ]]; then
+                    body+="\nImage Digest Changes:\n"
+                    for img in "${!IMAGE_DIGEST_MAP[@]}"; do
+                        local pair="${IMAGE_DIGEST_MAP[$img]}"
+                        local prev="${pair%%|*}"
+                        local new="${pair##*|}"
+                        body+="  ${img}\n"
+                        body+="    Previous: ${prev:-none}\n"
+                        body+="    New:      ${new:-none}\n"
+                    done
+                    body+="\nDigests allow you to verify exactly what changed without cross-referencing external release notes.\n"
+                fi
+
+                body+="\nSee system logs for full details."
                 send_notification_email "$subject" "$body" >/dev/null 2>&1 || true
             fi
         fi

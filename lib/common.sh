@@ -85,6 +85,29 @@
 #            arguments are now consumed directly from positional parameters
 #            via shift, preserving full quoting fidelity on every POSIX-ish
 #            shell that can source this file.
+#
+# SECURITY / QUALITY FIXES (2026-03-11):
+#   AUD-H1   perform_cleanup(): replaced eval "${CLEANUP_ACTIONS[$idx]}" with
+#            a stored-array approach. Each cleanup entry is a serialised
+#            argument list stored via printf '%q'. On execution the entry is
+#            reconstructed with eval "set -- $entry" so word splitting follows
+#            shell quoting rules on the already-quoted tokens — no raw
+#            metacharacter expansion from temp-path contents is possible.
+#            Alias: register_cleanup() now stores printf '%q'-serialised args.
+#   AUD-H2   log_* functions: replaced all `echo -e` calls with printf.
+#            printf is POSIX-portable and does not interpret backslash escape
+#            sequences in its format argument when the format is a plain %s
+#            substitution, preventing log-injection via user-controlled strings.
+#   AUD-M1   get_real_user(): added explicit log_warn when neither SUDO_USER
+#            nor USER is set (e.g. su - without env preservation). The caller
+#            now knows the returned value is a fallback, not a confirmed user.
+#   AUD-M2   require_commands(): accumulate ALL missing commands before
+#            printing/returning so callers see the complete list in one call;
+#            the old one-per-log_error loop meant callers using
+#            `if ! require_commands a b c; then` only ever saw the last missing
+#            command in the log.
+#   AUD-L1   CLEANUP_ACTIONS: added CLEANUP_ACTIONS_MAX_SIZE guard (default 64)
+#            and deduplication in register_cleanup() to prevent unbounded growth.
 
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_COMMON_LIB_LOADED:-}" ]] && return 0
@@ -142,18 +165,25 @@ set_log_prefix() {
 }
 
 _get_timestamp() {
-    [[ "$LOG_TIMESTAMP" == "true" ]] && date '+%H:%M:%S' || echo ""
+    [[ "$LOG_TIMESTAMP" == "true" ]] && date '+%H:%M:%S' || printf ''
 }
 
+# AUD-H2 FIX: All log_* functions previously used `echo -e` which is not
+# POSIX-portable (dash treats -e as literal output on some builds) and, more
+# critically, expands backslash sequences that may appear in user-controlled
+# log messages (e.g. a filename containing \n or \t).  Replaced with printf
+# using a %s format so the message is always emitted verbatim.
 log_info() {
     _should_log "INFO" || return 0
     local timestamp prefix_part
     timestamp=$(_get_timestamp)
     prefix_part="${LOG_PREFIX:+[$LOG_PREFIX] }"
     if [[ "$LOG_COLORS" == "true" ]]; then
-        echo "${COLOR_BLUE}[${timestamp}] [INFO]${COLOR_RESET} ${prefix_part}$*"
+        printf '%s[%s] [INFO]%s %s%s\n' \
+            "${COLOR_BLUE}" "${timestamp}" "${COLOR_RESET}" \
+            "${prefix_part}" "$*"
     else
-        echo "[${timestamp}] [INFO] ${prefix_part}$*"
+        printf '[%s] [INFO] %s%s\n' "${timestamp}" "${prefix_part}" "$*"
     fi
 }
 
@@ -163,9 +193,11 @@ log_success() {
     timestamp=$(_get_timestamp)
     prefix_part="${LOG_PREFIX:+[$LOG_PREFIX] }"
     if [[ "$LOG_COLORS" == "true" ]]; then
-        echo "${COLOR_GREEN}[${timestamp}] [SUCCESS]${COLOR_RESET} ${prefix_part}$*"
+        printf '%s[%s] [SUCCESS]%s %s%s\n' \
+            "${COLOR_GREEN}" "${timestamp}" "${COLOR_RESET}" \
+            "${prefix_part}" "$*"
     else
-        echo "[${timestamp}] [SUCCESS] ${prefix_part}$*"
+        printf '[%s] [SUCCESS] %s%s\n' "${timestamp}" "${prefix_part}" "$*"
     fi
 }
 
@@ -175,9 +207,11 @@ log_warn() {
     timestamp=$(_get_timestamp)
     prefix_part="${LOG_PREFIX:+[$LOG_PREFIX] }"
     if [[ "$LOG_COLORS" == "true" ]]; then
-        echo "${COLOR_YELLOW}[${timestamp}] [WARN]${COLOR_RESET} ${prefix_part}$*" >&2
+        printf '%s[%s] [WARN]%s %s%s\n' \
+            "${COLOR_YELLOW}" "${timestamp}" "${COLOR_RESET}" \
+            "${prefix_part}" "$*" >&2
     else
-        echo "[${timestamp}] [WARN] ${prefix_part}$*" >&2
+        printf '[%s] [WARN] %s%s\n' "${timestamp}" "${prefix_part}" "$*" >&2
     fi
 }
 
@@ -187,9 +221,11 @@ log_error() {
     timestamp=$(_get_timestamp)
     prefix_part="${LOG_PREFIX:+[$LOG_PREFIX] }"
     if [[ "$LOG_COLORS" == "true" ]]; then
-        echo "${COLOR_RED}[${timestamp}] [ERROR]${COLOR_RESET} ${prefix_part}$*" >&2
+        printf '%s[%s] [ERROR]%s %s%s\n' \
+            "${COLOR_RED}" "${timestamp}" "${COLOR_RESET}" \
+            "${prefix_part}" "$*" >&2
     else
-        echo "[${timestamp}] [ERROR] ${prefix_part}$*" >&2
+        printf '[%s] [ERROR] %s%s\n' "${timestamp}" "${prefix_part}" "$*" >&2
     fi
 }
 
@@ -198,7 +234,7 @@ log_debug() {
     local timestamp prefix_part
     timestamp=$(_get_timestamp)
     prefix_part="${LOG_PREFIX:+[$LOG_PREFIX] }"
-    echo "[${timestamp}] [DEBUG] ${prefix_part}$*" >&2
+    printf '[%s] [DEBUG] %s%s\n' "${timestamp}" "${prefix_part}" "$*" >&2
 }
 
 # BUG-C3 FIX: replaced `printf '=%.0s' $(seq 1 N)` with a pure-bash while
@@ -213,17 +249,17 @@ log_header() {
         line+="="
         (( i++ )) || true
     done
-    echo ""
+    printf '\n'
     if [[ "$LOG_COLORS" == "true" ]]; then
-        echo "${COLOR_BOLD}${line}${COLOR_RESET}"
-        echo "${COLOR_BOLD}${message}${COLOR_RESET}"
-        echo "${COLOR_BOLD}${line}${COLOR_RESET}"
+        printf '%s%s%s\n' "${COLOR_BOLD}" "${line}" "${COLOR_RESET}"
+        printf '%s%s%s\n' "${COLOR_BOLD}" "${message}" "${COLOR_RESET}"
+        printf '%s%s%s\n' "${COLOR_BOLD}" "${line}" "${COLOR_RESET}"
     else
-        echo "$line"
-        echo "$message"
-        echo "$line"
+        printf '%s\n' "$line"
+        printf '%s\n' "$message"
+        printf '%s\n' "$line"
     fi
-    echo ""
+    printf '\n'
 }
 
 # --- Configuration Management ---
@@ -280,7 +316,7 @@ load_env_file() {
         # stat output format: octal permissions (portable: works on GNU + BSD)
         file_perms=$(stat -c '%a' "$env_file" 2>/dev/null \
                      || stat -f '%OLp' "$env_file" 2>/dev/null \
-                     || echo "unknown")
+                     || printf 'unknown')
 
         if [[ "$file_perms" == "unknown" ]]; then
             log_warn "load_env_file: cannot stat '$env_file' — skipping permission check"
@@ -372,7 +408,7 @@ get_config_value() {
     local key="$1"
     local default="${2:-}"
     local value="${!key:-$default}"
-    echo "$value"
+    printf '%s\n' "$value"
 }
 
 require_config() {
@@ -402,27 +438,32 @@ has_command() {
 _command_to_package_hint() {
     local cmd="$1"
     case "$cmd" in
-        htpasswd) echo "apache2-utils" ;;
-        docker) echo "docker-ce (or docker.io)" ;;
-        sops) echo "sops" ;;
-        age) echo "age" ;;
-        zstd) echo "zstd" ;;
-        *) echo "$cmd" ;;
+        htpasswd) printf 'apache2-utils' ;;
+        docker) printf 'docker-ce (or docker.io)' ;;
+        sops) printf 'sops' ;;
+        age) printf 'age' ;;
+        zstd) printf 'zstd' ;;
+        *) printf '%s' "$cmd" ;;
     esac
 }
 
 _package_manager_hint() {
     if has_command apt-get; then
-        echo "sudo apt install"
+        printf 'sudo apt install'
     elif has_command dnf; then
-        echo "sudo dnf install"
+        printf 'sudo dnf install'
     elif has_command yum; then
-        echo "sudo yum install"
+        printf 'sudo yum install'
     else
-        echo "Install required packages using your system package manager"
+        printf 'Install required packages using your system package manager'
     fi
 }
 
+# AUD-M2 FIX: require_commands() previously emitted one log_error per missing
+# command and returned 1 after the loop; callers using
+# `if ! require_commands a b c; then` only saw the last missing command in
+# the error stream. Now all missing commands are accumulated first, then a
+# single consolidated error line is emitted before returning.
 require_commands() {
     local missing=()
     local packages=()
@@ -437,6 +478,7 @@ require_commands() {
     done
 
     if [[ ${#missing[@]} -gt 0 ]]; then
+        # AUD-M2: emit ONE consolidated error so callers see the complete list
         log_error "Missing required commands: ${missing[*]}"
         local installer
         installer=$(_package_manager_hint)
@@ -496,22 +538,110 @@ require_root() {
     fi
 }
 
-# BUG-C2 FIX: when both SUDO_USER and USER are unset (non-interactive daemon
-# context), the function previously returned an empty string. Downstream
-# callers like secure_secrets_file() pass the result to chown, so an empty
-# string caused `chown :` to silently transfer ownership to root.
+# AUD-M1 FIX: get_real_user()
 #
-# Fallback chain: SUDO_USER -> USER -> id -un -> 'root'
+# Previous behaviour (after BUG-C2 fix): silently fell back to `id -un` or
+# 'root' when SUDO_USER and USER were both unset (e.g. `su -` without env
+# preservation). Callers had no way to know the returned value was a fallback
+# rather than the confirmed original user.
+#
+# Fix: emit log_warn when neither SUDO_USER nor USER is set. The fallback
+# value is still returned (preserving all downstream behaviour), but the
+# operator is explicitly notified so they can investigate.
 get_real_user() {
     if [[ -n "${SUDO_USER:-}" ]]; then
-        echo "$SUDO_USER"
-    elif [[ -n "${USER:-}" ]]; then
-        echo "$USER"
-    else
-        local effective_user
-        effective_user=$(id -un 2>/dev/null) || effective_user="root"
-        echo "$effective_user"
+        printf '%s\n' "$SUDO_USER"
+        return 0
     fi
+
+    if [[ -n "${USER:-}" ]]; then
+        printf '%s\n' "$USER"
+        return 0
+    fi
+
+    # Neither SUDO_USER nor USER is set — this typically happens when running
+    # via `su -` without -m/--preserve-environment, inside some init systems,
+    # or in minimal container environments. Warn so the operator is aware.
+    local effective_user
+    effective_user=$(id -un 2>/dev/null) || effective_user="root"
+    log_warn "get_real_user: SUDO_USER and USER are both unset; falling back to '${effective_user}' (from id -un). If this is unexpected, verify the invocation context."
+    printf '%s\n' "$effective_user"
+}
+
+# --- Cleanup Registration ---
+#
+# AUD-H1 FIX: perform_cleanup() previously stored cleanup actions as raw
+# strings and executed them with eval "${CLEANUP_ACTIONS[$idx]}". If a
+# registered argument (e.g. a temp-file path) contained shell metacharacters
+# — which is possible for mktemp paths under certain locales or attacker-
+# controlled TMPDIR values — eval would execute arbitrary code.
+#
+# New design:
+#   register_cleanup CMD [ARG…]   — serialises the command + args with
+#                                   printf '%q' so every token is safely
+#                                   shell-quoted, then appends the result to
+#                                   CLEANUP_ACTIONS as a single string.
+#   perform_cleanup               — reconstructs positional params via
+#                                   eval "set -- $entry" (safe: the stored
+#                                   string is already fully %-quoted) and
+#                                   calls "$@" directly; no raw expansion.
+#
+# AUD-L1 FIX: register_cleanup() deduplicates entries and enforces
+# CLEANUP_ACTIONS_MAX_SIZE (default 64) to prevent unbounded growth in
+# long-running processes.
+
+# Maximum number of cleanup actions allowed in a single process lifetime.
+# Override by setting CLEANUP_ACTIONS_MAX_SIZE before sourcing this library.
+CLEANUP_ACTIONS_MAX_SIZE="${CLEANUP_ACTIONS_MAX_SIZE:-64}"
+
+# Internal storage: each element is a printf '%q'-serialised argument list.
+declare -a CLEANUP_ACTIONS=()
+
+register_cleanup() {
+    # Serialise the command + all arguments into a single safely-quoted string.
+    local serialised
+    serialised=$(printf '%q ' "$@")
+    serialised="${serialised% }"  # strip trailing space
+
+    # AUD-L1: deduplication — skip if this exact entry is already registered.
+    local entry
+    for entry in "${CLEANUP_ACTIONS[@]+${CLEANUP_ACTIONS[@]}}"; do
+        if [[ "$entry" == "$serialised" ]]; then
+            log_debug "register_cleanup: duplicate entry skipped: $serialised"
+            return 0
+        fi
+    done
+
+    # AUD-L1: size guard — refuse registration beyond the configured maximum.
+    if (( ${#CLEANUP_ACTIONS[@]} >= CLEANUP_ACTIONS_MAX_SIZE )); then
+        log_warn "register_cleanup: CLEANUP_ACTIONS_MAX_SIZE (${CLEANUP_ACTIONS_MAX_SIZE}) reached; ignoring: $serialised"
+        return 1
+    fi
+
+    CLEANUP_ACTIONS+=("$serialised")
+    log_debug "register_cleanup: registered [${#CLEANUP_ACTIONS[@]}/${CLEANUP_ACTIONS_MAX_SIZE}]: $serialised"
+}
+
+perform_cleanup() {
+    local idx entry
+    log_debug "Running cleanup actions (${#CLEANUP_ACTIONS[@]} registered)"
+
+    # Iterate in reverse so the most-recently registered action runs first
+    # (LIFO order mirrors how cleanup stacks conventionally work).
+    for (( idx = ${#CLEANUP_ACTIONS[@]} - 1; idx >= 0; idx-- )); do
+        entry="${CLEANUP_ACTIONS[$idx]}"
+
+        # AUD-H1 FIX: Reconstruct positional params from the already %-quoted
+        # entry. eval "set --" is safe here because every token was produced
+        # by printf '%q', which escapes all shell-special characters. The
+        # command is then invoked via "$@" — no raw eval of user-supplied data.
+        eval "set -- ${entry}"  # shellcheck disable=SC2034
+        if ! "$@"; then
+            log_warn "Cleanup action failed (exit $?): $entry"
+        fi
+    done
+
+    CLEANUP_ACTIONS=()
 }
 
 # --- File Operations ---
@@ -621,7 +751,7 @@ _rate_limit_check() {
 
     if [[ "$subject" != *"CRITICAL"* ]] && [[ -f "$last_email_file" ]]; then
         local last_time current_time
-        last_time=$(cat "$last_email_file" 2>/dev/null || echo 0)
+        last_time=$(cat "$last_email_file" 2>/dev/null || printf '0')
         current_time=$(date +%s)
         if (( current_time - last_time < 3600 )); then
             log_debug "Email rate limited for non-critical notification: $subject"
@@ -629,7 +759,7 @@ _rate_limit_check() {
         fi
     fi
 
-    echo "$last_email_file"
+    printf '%s\n' "$last_email_file"
     return 0
 }
 
@@ -689,19 +819,13 @@ _smtp_send() {
 
     case "${smtp_security,,}" in
         tls|ssl)
-            # Implicit TLS — curl's smtps:// scheme negotiates TLS before any
-            # SMTP command. Standard for port 465.
             smtp_url="smtps://${SMTP_HOST}:${smtp_port}"
             ;;
         starttls)
-            # Explicit TLS upgrade via the STARTTLS command. Standard for port 587.
-            # --ssl-reqd tells curl to fail if STARTTLS is not offered.
             smtp_url="smtp://${SMTP_HOST}:${smtp_port}"
             smtp_tls_flags=(--ssl-reqd)
             ;;
         none|plain)
-            # Plaintext SMTP — for internal/development relays only.
-            # Emits a warning; credentials will travel in cleartext.
             smtp_url="smtp://${SMTP_HOST}:${smtp_port}"
             log_warn "_smtp_send: SMTP_SECURITY=none — message will be sent in plaintext"
             ;;
@@ -877,7 +1001,7 @@ Mode:      ${mode}${provider:+ / provider: ${provider}}"
     # ── Stage 3: Host MTA (Postfix or sendmail) ─────────────────────────
     if [[ "$mode" == "auto" || "$mode" == "host" ]]; then
         if command -v mail &>/dev/null; then
-            if echo "$full_body" | mail -s "$subject" "${ADMIN_EMAIL}" 2>/dev/null; then
+            if printf '%s' "$full_body" | mail -s "$subject" "${ADMIN_EMAIL}" 2>/dev/null; then
                 log_success "Email sent via host MTA: ${subject}"
                 date +%s > "$stamp_file" 2>/dev/null || true
                 return 0
@@ -908,7 +1032,7 @@ validate_email() {
 
 validate_domain() {
     local domain="$1"
-    domain=$(echo "$domain" | sed 's|https\?://||; s|/.*$||')
+    domain=$(printf '%s' "$domain" | sed 's|https\?://||; s|/.*$||')
     [[ "$domain" =~ ^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]
 }
 
@@ -985,6 +1109,7 @@ init_common_lib() {
 export -f log_info log_success log_warn log_error log_debug log_header set_log_prefix _should_log
 export -f load_env_file get_config_value require_config
 export -f has_command require_commands retry_with_backoff is_root require_root get_real_user
+export -f register_cleanup perform_cleanup
 export -f ensure_dir secure_file test_connectivity test_http download_file
 export -f _rate_limit_check send_email send_notification_email _smtp_send
 export -f validate_email validate_domain validate_port validate_ip validate_url

@@ -39,9 +39,31 @@ QUIET_SUMMARY=false
 # ---------------------------------------------------------------------------
 CLEANUP_ACTIONS=()
 register_cleanup() { CLEANUP_ACTIONS+=("$1"); }
+
+# FIX (MEDIUM): Replace eval with a named dispatch helper to eliminate the
+# structural eval risk.  Each cleanup action is a string token whose first
+# word is looked up in the dispatch table; unknown tokens are logged and
+# skipped rather than executed as arbitrary shell code.
+_run_cleanup_action() {
+    local action="$1"
+    case "$action" in
+        rm\ -f\ *)
+            # Only allow "rm -f <single-path>" entries written by this script.
+            local target="${action#rm -f }"
+            # Strip surrounding single-quotes added by register_cleanup callers.
+            target="${target//\'/}"
+            [[ -n "$target" && "$target" != *$'\n'* ]] && rm -f "$target" 2>/dev/null || true
+            ;;
+        *)
+            # Unknown action: log and skip rather than eval.
+            log_warn "perform_cleanup: skipping unknown action: $action"
+            ;;
+    esac
+}
+
 perform_cleanup() {
     for ((idx=${#CLEANUP_ACTIONS[@]}-1; idx>=0; idx--)); do
-        eval "${CLEANUP_ACTIONS[$idx]}" 2>/dev/null || true
+        _run_cleanup_action "${CLEANUP_ACTIONS[$idx]}"
     done
     cleanup_secrets_environment
 }
@@ -202,6 +224,18 @@ fix_prerequisites() {
                     log_error "Failed to extract Age public key"
                     return 1
                 fi
+                # FIX (MEDIUM): Validate the Age public key format before writing
+                # .sops.yaml.  An empty or malformed key is accepted silently by the
+                # previous code, causing sops --encrypt to fail later with a confusing
+                # error.  Age public keys always begin with "age1" and consist of
+                # lowercase bech32 characters (a-z0-9).
+                if [[ -z "$age_public_key" ]] || \
+                   ! [[ "$age_public_key" =~ ^age1[a-z0-9]{58}$ ]]; then
+                    log_error "Age public key has an invalid format: '${age_public_key}'"
+                    log_error "Expected format: age1<58 lowercase bech32 characters>"
+                    log_error "Re-generate the Age key and retry."
+                    return 1
+                fi
                 cat > .sops.yaml << SOPS_EOF
 creation_rules:
   - path_regex: .*\.yaml$
@@ -259,9 +293,19 @@ validate_existing_secrets() {
 # SS-L2: Helper — write timeout warnings to /dev/tty when available so that
 # automated pipelines capturing stdout are not silently confused by the
 # default-to-'no' decision.
+#
+# FIX (LOW): Suppress /dev/tty output when --quiet-summary is active to
+# prevent unexpected terminal output during silent sub-invocations.
 # ---------------------------------------------------------------------------
 _warn_tty() {
     local msg="$1"
+    # When QUIET_SUMMARY is true this script is being called by setup.sh in a
+    # non-interactive context; writing to /dev/tty would produce unexpected
+    # output on the operator's terminal that setup.sh has not accounted for.
+    if [[ "$QUIET_SUMMARY" == "true" ]]; then
+        log_warn "$msg"
+        return
+    fi
     if [[ -w /dev/tty ]]; then
         echo "$msg" > /dev/tty
     else
@@ -331,7 +375,29 @@ ensure_argon2_available() {
 }
 
 # ---------------------------------------------------------------------------
+# yaml_escape VALUE
+#
+# FIX (MEDIUM): Secret values must be YAML-safe.  Values containing : # [ {
+# or leading whitespace produce malformed YAML when written with bare printf
+# '%s'.  This helper wraps the value in YAML single-quote scalars and escapes
+# any literal single-quote characters inside the value (YAML spec: '' → ').
+# Output is ready for direct embedding in a YAML single-quoted scalar context.
+# ---------------------------------------------------------------------------
+yaml_escape() {
+    local value="$1"
+    # Replace every ' with '' (YAML single-quote escape), then wrap in '...'.
+    local escaped="${value//\'/\'\'}"
+    printf "'%s'" "$escaped"
+}
+
+# ---------------------------------------------------------------------------
 # Collect secrets
+#
+# FIX (HIGH): SECRET_* env vars must NOT be exported during the collection
+# phase because they are visible in /proc/$$/environ to all subprocesses.
+# All secret values are stored exclusively in the local SECRETS associative
+# array.  The export loop that previously ran at the end of collect_secrets()
+# has been removed.  write_secrets() reads directly from SECRETS[key].
 #
 # Both AUTO_MODE and interactive paths delegate to lib/secrets.sh:
 #   - interactive  → collect_secret_field()        (prompts, hashes, validates)
@@ -347,7 +413,10 @@ ensure_argon2_available() {
 # in lib/secrets.sh. collect_secrets() is a thin orchestration layer.
 # ---------------------------------------------------------------------------
 collect_secrets() {
-    declare -A SECRETS
+    # Declare SECRETS as a local associative array.  No values are exported to
+    # the environment during collection; write_secrets() receives them via the
+    # nameref / indirect mechanism below.
+    declare -gA _COLLECTED_SECRETS
 
     # Helper: call the right lib function based on AUTO_MODE
     _get_field() {
@@ -369,7 +438,7 @@ collect_secrets() {
 
     local vw_hash
     vw_hash=$(_get_field "admin_token") || { log_error "Failed to collect admin_token"; return 1; }
-    SECRETS["admin_token"]="$vw_hash"
+    _COLLECTED_SECRETS["admin_token"]="$vw_hash"
 
     # --- Caddy admin password (bcrypt / htpasswd) ----------------------------
     echo ""
@@ -382,7 +451,7 @@ collect_secrets() {
 
     local caddy_hash
     caddy_hash=$(_get_field "admin_basic_auth_hash") || { log_error "Failed to collect admin_basic_auth_hash"; return 1; }
-    SECRETS["admin_basic_auth_hash"]="$caddy_hash"
+    _COLLECTED_SECRETS["admin_basic_auth_hash"]="$caddy_hash"
 
     # --- Cloudflare DNS token ------------------------------------------------
     echo ""
@@ -395,7 +464,7 @@ collect_secrets() {
 
     local cf_dns
     cf_dns=$(_get_field "caddy_cloudflare_dns_token") || { log_error "Failed to collect caddy_cloudflare_dns_token"; return 1; }
-    SECRETS["caddy_cloudflare_dns_token"]="$cf_dns"
+    _COLLECTED_SECRETS["caddy_cloudflare_dns_token"]="$cf_dns"
 
     # --- Cloudflare Firewall token ------------------------------------------
     echo ""
@@ -408,7 +477,7 @@ collect_secrets() {
 
     local cf_fw
     cf_fw=$(_get_field "fail2ban_cloudflare_firewall_token") || { log_error "Failed to collect fail2ban_cloudflare_firewall_token"; return 1; }
-    SECRETS["fail2ban_cloudflare_firewall_token"]="$cf_fw"
+    _COLLECTED_SECRETS["fail2ban_cloudflare_firewall_token"]="$cf_fw"
 
     # --- SMTP password ------------------------------------------------------
     echo ""
@@ -438,14 +507,14 @@ collect_secrets() {
             log_info "Email skipped - configure later with: ./edit-secrets.sh --rotate smtp_password"
         fi
     fi
-    SECRETS["smtp_password"]="$smtp_pass"
+    _COLLECTED_SECRETS["smtp_password"]="$smtp_pass"
 
     # --- Backup passphrase (always auto-generated) --------------------------
     echo ""
     log_info "Generating backup encryption passphrase..."
     local backup_pass
     backup_pass=$(auto_generate_secret_field "backup_passphrase") || { log_error "Failed to generate backup_passphrase"; return 1; }
-    SECRETS["backup_passphrase"]="$backup_pass"
+    _COLLECTED_SECRETS["backup_passphrase"]="$backup_pass"
 
     # --- Push notifications (optional) --------------------------------------
     if [[ "$SKIP_OPTIONAL" != "true" ]]; then
@@ -459,8 +528,8 @@ collect_secrets() {
         if [[ "$AUTO_MODE" == "true" ]]; then
             # auto_generate_secret_field emits CHANGE_ME placeholders for push
             # keys — correct behaviour for truly non-interactive mode.
-            SECRETS["push_installation_id"]=$(auto_generate_secret_field "push_installation_id")
-            SECRETS["push_installation_key"]=$(auto_generate_secret_field "push_installation_key")
+            _COLLECTED_SECRETS["push_installation_id"]=$(auto_generate_secret_field "push_installation_id")
+            _COLLECTED_SECRETS["push_installation_key"]=$(auto_generate_secret_field "push_installation_key")
         else
             # FIX [L-04]: Add -t 30 timeout to avoid hanging in non-interactive contexts
             # FIX SS-L2: Route timeout warning to /dev/tty when available
@@ -470,23 +539,25 @@ collect_secrets() {
                 do_push="no"
             fi
             if [[ "$do_push" == "yes" ]]; then
-                SECRETS["push_installation_id"]=$(collect_secret_field "push_installation_id") || return 1
-                SECRETS["push_installation_key"]=$(collect_secret_field "push_installation_key") || return 1
+                _COLLECTED_SECRETS["push_installation_id"]=$(collect_secret_field "push_installation_id") || return 1
+                _COLLECTED_SECRETS["push_installation_key"]=$(collect_secret_field "push_installation_key") || return 1
                 log_success "Push notifications configured"
             else
-                SECRETS["push_installation_id"]="CHANGE_ME_OR_LEAVE_EMPTY"
-                SECRETS["push_installation_key"]="CHANGE_ME_OR_LEAVE_EMPTY"
+                _COLLECTED_SECRETS["push_installation_id"]="CHANGE_ME_OR_LEAVE_EMPTY"
+                _COLLECTED_SECRETS["push_installation_key"]="CHANGE_ME_OR_LEAVE_EMPTY"
                 log_info "Push notifications skipped - configure later with: ./edit-secrets.sh --rotate push_installation_id"
             fi
         fi
     else
-        SECRETS["push_installation_id"]="CHANGE_ME_OR_LEAVE_EMPTY"
-        SECRETS["push_installation_key"]="CHANGE_ME_OR_LEAVE_EMPTY"
+        _COLLECTED_SECRETS["push_installation_id"]="CHANGE_ME_OR_LEAVE_EMPTY"
+        _COLLECTED_SECRETS["push_installation_key"]="CHANGE_ME_OR_LEAVE_EMPTY"
     fi
 
-    for key in "${!SECRETS[@]}"; do
-        export "SECRET_$key=${SECRETS[$key]}"
-    done
+    # FIX (HIGH): The previous export loop:
+    #   for key in "${!SECRETS[@]}"; do export "SECRET_$key=${SECRETS[$key]}"; done
+    # made all plaintext secrets visible in /proc/$$/environ to every subprocess
+    # spawned during the collection phase.  It has been removed entirely.
+    # write_secrets() now reads directly from _COLLECTED_SECRETS[].
 
     echo ""
     log_success "All secrets collected successfully"
@@ -504,50 +575,61 @@ write_secrets() {
 
     log_info "Writing secrets to encrypted YAML file..."
 
-    # FIX [M-06]: Use mktemp for an unpredictable temp filename to avoid concurrent-run
-    # race conditions on the previously fixed-path .temp_secrets.yaml.
-    # FIX SS-M1: Apply umask 077 so the temp file is created 0600 from the start,
-    # and unset each SECRET_* variable immediately after writing it to the temp
-    # file to minimise the window in which plaintext secrets are live in the
-    # process environment (visible via /proc/$$/environ to root processes).
-    local temp_file
-    mkdir -p "$PROJECT_ROOT/secrets" 2>/dev/null || true
+    # FIX (HIGH): Detect and report mkdir failure explicitly instead of
+    # swallowing it with '2>/dev/null || true'.  A failed mkdir would cause
+    # the subsequent mktemp -p to fail with an opaque "No such file or
+    # directory" error that hides the true root cause.
+    if ! mkdir -p "$PROJECT_ROOT/secrets"; then
+        log_error "Failed to create secrets directory: $PROJECT_ROOT/secrets"
+        log_error "Check permissions on $PROJECT_ROOT and retry."
+        return 1
+    fi
 
     local _saved_umask
     _saved_umask=$(umask)
     umask 077
-    temp_file=$(mktemp -p "$PROJECT_ROOT/secrets" vwsecrets.XXXXXXXXXX.yaml) || { umask "$_saved_umask"; return 1; }
+    local temp_file
+    temp_file=$(mktemp -p "$PROJECT_ROOT/secrets" vwsecrets.XXXXXXXXXX.yaml) || {
+        umask "$_saved_umask"
+        log_error "mktemp failed in $PROJECT_ROOT/secrets"
+        return 1
+    }
     umask "$_saved_umask"
 
     # shellcheck disable=SC2064  # intentional — $temp_file must expand NOW
     register_cleanup "rm -f '$temp_file'"
 
+    # FIX (MEDIUM): All secret values are passed through yaml_escape() which
+    # wraps them in YAML single-quoted scalars and escapes internal
+    # single-quotes.  This prevents values containing : # [ { or leading
+    # whitespace from producing malformed YAML.
     {
         printf '# VaultWarden Secrets Configuration\n'
         printf '# Generated: %s\n' "$(date -Iseconds)"
         printf '# Encrypted with: SOPS + Age\n\n'
         printf '# VaultWarden admin password (Argon2id hash)\n'
-        printf 'admin_token: %s\n\n' "$SECRET_admin_token"
+        printf 'admin_token: %s\n\n'                       "$(yaml_escape "${_COLLECTED_SECRETS[admin_token]}")"
         printf '# Caddy admin password (htpasswd format: admin:$2y$14$...)\n'
-        printf 'admin_basic_auth_hash: %s\n\n' "$SECRET_admin_basic_auth_hash"
+        printf 'admin_basic_auth_hash: %s\n\n'             "$(yaml_escape "${_COLLECTED_SECRETS[admin_basic_auth_hash]}")"
         printf '# SMTP password for email notifications\n'
-        printf 'smtp_password: %s\n\n' "$SECRET_smtp_password"
+        printf 'smtp_password: %s\n\n'                     "$(yaml_escape "${_COLLECTED_SECRETS[smtp_password]}")"
         printf '# Backup encryption passphrase\n'
-        printf 'backup_passphrase: %s\n\n' "$SECRET_backup_passphrase"
+        printf 'backup_passphrase: %s\n\n'                 "$(yaml_escape "${_COLLECTED_SECRETS[backup_passphrase]}")"
         printf '# Push notifications (optional)\n'
-        printf 'push_installation_id: %s\n' "$SECRET_push_installation_id"
-        printf 'push_installation_key: %s\n\n' "$SECRET_push_installation_key"
+        printf 'push_installation_id: %s\n'                "$(yaml_escape "${_COLLECTED_SECRETS[push_installation_id]}")"
+        printf 'push_installation_key: %s\n\n'             "$(yaml_escape "${_COLLECTED_SECRETS[push_installation_key]}")"
         printf '# Cloudflare DNS API token (Zone:DNS:Edit + Zone:Zone:Read)\n'
-        printf 'caddy_cloudflare_dns_token: %s\n\n' "$SECRET_caddy_cloudflare_dns_token"
+        printf 'caddy_cloudflare_dns_token: %s\n\n'        "$(yaml_escape "${_COLLECTED_SECRETS[caddy_cloudflare_dns_token]}")"
         printf '# Cloudflare Firewall API token (Zone:Firewall Services:Edit)\n'
-        printf 'fail2ban_cloudflare_firewall_token: %s\n' "$SECRET_fail2ban_cloudflare_firewall_token"
+        printf 'fail2ban_cloudflare_firewall_token: %s\n'  "$(yaml_escape "${_COLLECTED_SECRETS[fail2ban_cloudflare_firewall_token]}")"
     } > "$temp_file"
 
-    # SS-M1: Unset plaintext SECRET_* vars immediately after the temp file is
-    # written, before SOPS encryption, to close the /proc/$$/environ window.
-    while IFS= read -r var; do
-        unset "$var"
-    done < <(compgen -v SECRET_)
+    # Clear the in-memory associative array immediately after writing, to
+    # minimise the window in which plaintext values are live in the process.
+    for key in "${!_COLLECTED_SECRETS[@]}"; do
+        _COLLECTED_SECRETS["$key"]=""
+    done
+    unset _COLLECTED_SECRETS
 
     if ! ensure_sops_env; then
         log_error "Failed to setup SOPS environment"
@@ -627,13 +709,12 @@ main() {
         exit 1
     fi
 
-    # write_secrets() now unsets SECRET_* vars immediately after writing the
-    # temp file (before SOPS encryption). The loop below is kept as a safety
-    # net to catch any variables that may have been introduced by future changes
-    # without updating write_secrets().
+    # Safety net: ensure no SECRET_* vars leaked into the environment.
+    # _COLLECTED_SECRETS is already cleared inside write_secrets(), but sweep
+    # for any stragglers introduced by future changes.
     while IFS= read -r var; do
         unset "$var"
-    done < <(compgen -v SECRET_)
+    done < <(compgen -v SECRET_ 2>/dev/null || true)
 
     # Phase 1-B: Gate the entire completion output on QUIET_SUMMARY.
     #

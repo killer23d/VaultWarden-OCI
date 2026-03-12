@@ -36,6 +36,20 @@
 #                   any caller-level EXIT trap. Changed to trap ... RETURN so
 #                   cleanup is scoped to the function and the caller's trap is
 #                   preserved.
+#
+# PATCHED BUGS (2026-03-11):
+#   SKR-M3 [MEDIUM] verify_key_replica(): compared replicas only by SHA-256
+#                   hash. A consistently-corrupt primary causes all replicas to
+#                   match the corrupt hash, hiding the corruption.
+#                   Fix: after the hash check passes, perform a functional
+#                   encrypt/decrypt roundtrip against each replica key file to
+#                   confirm it is operationally valid, not just byte-identical.
+#   SKR-M4 [MEDIUM] restore_key_from_replica(): used cp for the restore, so a
+#                   crash mid-copy could leave a partial/truncated primary key.
+#                   Fix: cp to a .tmp sidecar first, then atomic mv into place.
+#   SKR-L2 [LOW]    verify_key_replica(): if the replica list is empty the
+#                   function returned 0 (success) silently.
+#                   Fix: detect empty replica array and return 1 with log_warn.
 
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_KEY_RESILIENCE_LIB_LOADED:-}" ]] && return 0
@@ -224,6 +238,151 @@ _html_escape() {
     raw="${raw//\"/&quot;}"
     raw="${raw//\'/&#39;}"
     printf '%s' "$raw"
+}
+
+# ---------------------------------------------------------------------------
+# verify_key_replica [PRIMARY_KEY] [REPLICA_KEY...]
+#
+# SKR-M3 FIX: previously compared replicas only by SHA-256 hash. If the
+# primary key is consistently corrupt (same bytes each time), all replicas
+# match the corrupt hash and the corruption is silently accepted.
+# Fix: after the hash comparison passes, perform a functional age
+# encrypt/decrypt roundtrip against each replica key file to verify it is
+# operationally valid — not just byte-identical to the primary.
+#
+# SKR-L2 FIX: if the replica list is empty, return 1 with a log_warn instead
+# of silently returning 0 (success).
+# ---------------------------------------------------------------------------
+verify_key_replica() {
+    local primary_key="${1:-${SOPS_AGE_KEY_FILE:-secrets/keys/age-key.txt}}"
+    shift
+    local replicas=("$@")
+
+    # SKR-L2 FIX: treat an empty replica list as an explicit failure so the
+    # caller knows no verification was actually performed.
+    if [[ ${#replicas[@]} -eq 0 ]]; then
+        log_warn "verify_key_replica: no replicas configured — cannot verify (returning failure)"
+        return 1
+    fi
+
+    if [[ ! -f "$primary_key" ]]; then
+        log_error "verify_key_replica: primary key not found: $primary_key"
+        return 1
+    fi
+
+    local primary_hash
+    primary_hash=$(sha256sum "$primary_key" 2>/dev/null | awk '{print $1}')
+    if [[ -z "$primary_hash" ]]; then
+        log_error "verify_key_replica: could not hash primary key: $primary_key"
+        return 1
+    fi
+
+    # SKR-M3 FIX: also validate the primary key itself with a functional
+    # roundtrip before using it as the reference for replica comparison.
+    local test_data="vw-replica-check-$$-$(date +%s)"
+    local primary_pub
+    if ! primary_pub=$(_derive_age_public_key "$primary_key" 2>/dev/null); then
+        log_error "verify_key_replica: primary key is corrupt (cannot derive public key): $primary_key"
+        return 1
+    fi
+    local roundtrip_result
+    if ! roundtrip_result=$(printf '%s' "$test_data" | age -r "$primary_pub" 2>/dev/null | age -d -i "$primary_key" 2>/dev/null) \
+        || [[ "$roundtrip_result" != "$test_data" ]]; then
+        log_error "verify_key_replica: primary key failed functional roundtrip test — key is corrupt: $primary_key"
+        return 1
+    fi
+
+    local all_ok=0
+    local replica
+    for replica in "${replicas[@]}"; do
+        if [[ ! -f "$replica" ]]; then
+            log_warn "verify_key_replica: replica not found: $replica"
+            all_ok=1
+            continue
+        fi
+
+        # Step 1: hash comparison (quick byte-level check)
+        local replica_hash
+        replica_hash=$(sha256sum "$replica" 2>/dev/null | awk '{print $1}')
+        if [[ "$replica_hash" != "$primary_hash" ]]; then
+            log_warn "verify_key_replica: replica hash mismatch: $replica"
+            all_ok=1
+            continue
+        fi
+
+        # SKR-M3 FIX: Step 2: functional roundtrip test against the replica
+        # key to detect corruption that is byte-identical to a corrupt primary.
+        local replica_result
+        if ! replica_result=$(printf '%s' "$test_data" | age -r "$primary_pub" 2>/dev/null | age -d -i "$replica" 2>/dev/null) \
+            || [[ "$replica_result" != "$test_data" ]]; then
+            log_warn "verify_key_replica: replica failed functional roundtrip test (corrupt): $replica"
+            all_ok=1
+            continue
+        fi
+
+        log_debug "verify_key_replica: OK — $replica"
+    done
+
+    return "$all_ok"
+}
+
+# ---------------------------------------------------------------------------
+# restore_key_from_replica REPLICA_KEY [PRIMARY_KEY]
+#
+# SKR-M4 FIX: previously used `cp replica primary` directly. A crash or
+# signal mid-copy leaves a partial/truncated file at the primary path, which
+# is worse than no key at all (it silently poisons the key store).
+# Fix: copy to a .tmp sidecar, then atomically rename into place. The
+# primary is only replaced once the full copy is verified on disk.
+# ---------------------------------------------------------------------------
+restore_key_from_replica() {
+    local replica_key="$1"
+    local primary_key="${2:-${SOPS_AGE_KEY_FILE:-secrets/keys/age-key.txt}}"
+
+    if [[ -z "$replica_key" ]]; then
+        log_error "restore_key_from_replica: replica key path required"
+        return 1
+    fi
+
+    if [[ ! -f "$replica_key" ]]; then
+        log_error "restore_key_from_replica: replica not found: $replica_key"
+        return 1
+    fi
+
+    local primary_dir
+    primary_dir=$(dirname "$primary_key")
+    local tmp_key="${primary_key}.tmp.$$"
+
+    # Ensure the target directory exists
+    if [[ ! -d "$primary_dir" ]]; then
+        if ! mkdir -p "$primary_dir"; then
+            log_error "restore_key_from_replica: cannot create directory: $primary_dir"
+            return 1
+        fi
+        chmod 700 "$primary_dir"
+    fi
+
+    # SKR-M4 FIX: write to a sidecar first so a crash mid-copy leaves the
+    # existing primary intact (or absent), never a partial file.
+    log_info "restore_key_from_replica: copying replica to tmp: $tmp_key"
+    if ! cp "$replica_key" "$tmp_key"; then
+        log_error "restore_key_from_replica: copy to tmp failed"
+        rm -f "$tmp_key" 2>/dev/null || true
+        return 1
+    fi
+    chmod 600 "$tmp_key"
+
+    # Atomic rename: on the same filesystem this is guaranteed by POSIX to be
+    # atomic; the primary is replaced in one syscall.
+    if ! mv "$tmp_key" "$primary_key"; then
+        log_error "restore_key_from_replica: atomic rename failed"
+        rm -f "$tmp_key" 2>/dev/null || true
+        return 1
+    fi
+
+    chmod 600 "$primary_key"
+    log_success "restore_key_from_replica: primary key restored from replica: $replica_key → $primary_key"
+    return 0
 }
 
 # ---------------------------------------------------------------------------

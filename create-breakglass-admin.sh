@@ -227,6 +227,32 @@ generate_breakglass_password() {
 # SIMPLIFIED: create_sudoers_config() function removed.
 # We now add the user to the standard 'sudo' group.
 
+# ---------------------------------------------------------------------------
+# LOW FIX: _notify_breakglass_event()
+#
+# Emits a notification via the same send_notification_email() / send_email()
+# path used by health.sh and maintenance.sh so breakglass activity is
+# visible in the operator's alert channel, not just a local log file.
+# Non-fatal: a delivery failure is logged as a warning only.
+# ---------------------------------------------------------------------------
+_notify_breakglass_event() {
+    local event="$1"      # e.g. "CREATED", "REMOVED", "PASSWORD_RESET", "DISABLE_FAILED"
+    local detail="${2:-}"
+    local severity="${3:-INFO}"  # INFO | CRITICAL
+
+    local subject="Breakglass Admin ${event}: ${BREAKGLASS_USER}"
+    [[ "$severity" == "CRITICAL" ]] && subject="CRITICAL ${subject}"
+
+    local body
+    body=$(printf 'Breakglass admin event\n\nEvent:   %s\nUser:    %s\nHost:    %s\nTime:    %s\n' \
+        "$event" "$BREAKGLASS_USER" "$(hostname -f 2>/dev/null || hostname)" "$(date -uIs)")
+    [[ -n "$detail" ]] && body+=$(printf '\nDetail:  %s' "$detail")
+
+    if ! send_notification_email "$subject" "$body" 2>/dev/null; then
+        log_warn "Breakglass event notification delivery failed (non-fatal)"
+    fi
+}
+
 # STANDARDIZED: Create break-glass user - returns exit code
 create_breakglass_user() {
     if [[ "$DRY_RUN" == "true" ]]; then
@@ -338,6 +364,9 @@ EOF
     fi
 
     log_success "Break-glass admin created successfully"
+
+    # LOW FIX: Notify via the project notification system.
+    _notify_breakglass_event "CREATED" "User $BREAKGLASS_USER added to sudo group" "INFO"
     
     # NEW: Clear screen and show critical credentials
     # FIX [L-06]: Replace echo -e with printf to match codebase convention (BUG-10 fix)
@@ -442,6 +471,10 @@ remove_breakglass_user() {
     fi
 
     log_success "Break-glass admin removal completed"
+
+    # LOW FIX: Notify via the project notification system.
+    _notify_breakglass_event "REMOVED" "User $BREAKGLASS_USER removed from system" "INFO"
+
     return 0
 }
 
@@ -485,6 +518,9 @@ reset_breakglass_password() {
     echo "• These credentials are displayed ONLY ONCE"
     echo "• Store them securely (password manager, encrypted note)"
     echo "• Old credentials are now invalid"
+
+    # LOW FIX: Notify via the project notification system.
+    _notify_breakglass_event "PASSWORD_RESET" "Password for $BREAKGLASS_USER was reset" "INFO"
 
     return 0
 }
@@ -604,6 +640,45 @@ show_breakglass_status() {
     fi
 
     return 0
+}
+
+# ---------------------------------------------------------------------------
+# MEDIUM FIX: _restart_after_disable()
+#
+# Wraps 'docker compose restart vaultwarden'. If the restart fails for any
+# reason (port conflict, OOM, etc.), the breakglass token remains active.
+# This function:
+#   1. Attempts the restart with a generous timeout.
+#   2. On failure, emits a CRITICAL notification so the operator is alerted
+#      rather than silently left with an active breakglass token.
+#   3. Returns the restart exit code so callers can decide whether to
+#      propagate the failure.
+# ---------------------------------------------------------------------------
+_restart_after_disable() {
+    local service="${1:-vaultwarden}"
+
+    log_info "Restarting $service to re-apply original token..."
+    if docker compose restart "$service"; then
+        log_success "$service restarted successfully — breakglass token deactivated"
+        return 0
+    fi
+
+    local _rc=$?
+    log_error "CRITICAL: 'docker compose restart $service' failed (exit ${_rc})."
+    log_error "CRITICAL: The breakglass admin token is still ACTIVE."
+    log_error "Manual remediation required:"
+    log_error "  1. Investigate: docker compose logs $service"
+    log_error "  2. Fix the underlying issue (port conflict, OOM, config error)"
+    log_error "  3. Re-run: docker compose restart $service"
+    log_error "  4. Confirm: ./create-breakglass-admin.sh --status"
+
+    # LOW + MEDIUM FIX: Send a CRITICAL alert through the project notification system.
+    _notify_breakglass_event \
+        "DISABLE_FAILED" \
+        "docker compose restart ${service} exited with code ${_rc}. Breakglass token is still ACTIVE." \
+        "CRITICAL"
+
+    return $_rc
 }
 
 # ENHANCED: Main function with proper error handling, exit strategy, and security validation

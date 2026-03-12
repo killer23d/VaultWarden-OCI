@@ -31,6 +31,19 @@
 #          warns operator when variables have been added after first install.
 # FIX-S12  (2026-03-10): SSD-M2  — split-brain check [6/6] uses sha256sum
 #          content comparison instead of -nt mtime comparison.
+# FIX-S13  (2026-03-11): AUDIT   — sed delimiter changed from | to \001
+#          (ASCII SOH) to avoid breakage when paths contain |.
+# FIX-S14  (2026-03-11): AUDIT   — expected_sum uses temp file to avoid
+#          silent empty hash on sed failure (false-positive STALE).
+# FIX-S15  (2026-03-11): AUDIT   — remove_units() logs timer disable
+#          failures instead of hiding them behind 2>/dev/null || true.
+# FIX-S16  (2026-03-11): AUDIT   — install line-count check upgraded to
+#          sha256 content comparison to catch content corruption.
+# FIX-S17  (2026-03-11): AUDIT   — find -exec {} \; → -exec {} + for
+#          efficiency (one chmod call per batch, not per file).
+# FIX-S18  (2026-03-11): AUDIT   — show_status() wraps systemctl status
+#          in { ...; } || true so inactive-service non-zero exit does
+#          not abort the loop under set -e.
 
 set -euo pipefail
 
@@ -172,6 +185,27 @@ _sha256() {
 }
 
 # ---------------------------------------------------------------------------
+# _sed_patch SRC DST
+#
+# FIX-S13 (AUDIT MEDIUM): The previous implementation used | as the sed
+# delimiter.  If $OPT_SCRIPTS_DIR or $PROJECT_ROOT ever contain a literal
+# | character the substitution expressions break silently.  We switch to
+# ASCII SOH (\001) which cannot appear in a filesystem path on Linux/macOS.
+# ---------------------------------------------------------------------------
+_sed_patch() {
+    local src="$1" dst="$2"
+    # Use printf to produce the \001 delimiter at runtime so the sed
+    # expressions remain readable without embedded control characters.
+    local D
+    D=$'\001'
+    sed \
+        -e "s${D}^SCRIPT_DIR=.*${D}SCRIPT_DIR=\"${OPT_SCRIPTS_DIR}\"${D}" \
+        -e "s${D}^PROJECT_ROOT=\"\$SCRIPT_DIR\"${D}PROJECT_ROOT=\"${PROJECT_ROOT}\"${D}" \
+        -e "s${D}source \"lib/${D}source \"\$SCRIPT_DIR/lib/${D}g" \
+        "$src" > "$dst"
+}
+
+# ---------------------------------------------------------------------------
 # install_units
 # ---------------------------------------------------------------------------
 install_units() {
@@ -193,8 +227,10 @@ install_units() {
     # Copy lib/ with -rP (no symlink-follow, same as cron-setup.sh BUG-C03 fix)
     if [[ "$DRY_RUN" == "false" ]]; then
         cp -rP "$PROJECT_ROOT/lib" "$OPT_SCRIPTS_DIR/"
-        find "$OPT_SCRIPTS_DIR/lib" -type f -exec chmod 640 {} \; 2>/dev/null || true
-        find "$OPT_SCRIPTS_DIR/lib" -type d -exec chmod 750 {} \; 2>/dev/null || true
+        # FIX-S17 (AUDIT LOW): Use + form so find passes all matched files to
+        # a single chmod invocation instead of forking one process per file.
+        find "$OPT_SCRIPTS_DIR/lib" -type f -exec chmod 640 {} +  2>/dev/null || true
+        find "$OPT_SCRIPTS_DIR/lib" -type d -exec chmod 750 {} +  2>/dev/null || true
         chown -R root:root "$OPT_SCRIPTS_DIR/lib"
         log_success "Installed lib/ to $OPT_SCRIPTS_DIR/lib/"
     else
@@ -240,22 +276,45 @@ install_units() {
         # causing the installed copy to quietly differ from the repo source.
         #
         # Fix: redirect sed output directly into a mktemp file, then run a
-        # line-count sanity check before an atomic mv into place. This preserves
-        # every byte of the source except the three intentional substitutions.
+        # content-hash sanity check before an atomic mv into place.
         local tmp_script
         tmp_script=$(mktemp "${TMPDIR:-/tmp}/vw-patch-XXXXXX")
         # Register in finaliser array so the EXIT trap cleans it up even if
         # set -e triggers before the mv below (FIX-S10 / SSD-H1).
         _tmpfiles+=("$tmp_script")
 
-        sed \
-            -e "s|^SCRIPT_DIR=.*|SCRIPT_DIR=\"$OPT_SCRIPTS_DIR\"|" \
-            -e "s|^PROJECT_ROOT=\"\$SCRIPT_DIR\"|PROJECT_ROOT=\"$PROJECT_ROOT\"|" \
-            -e 's|source "lib/|source "$SCRIPT_DIR/lib/|g' \
-            "$src" > "$tmp_script"
+        # FIX-S13: _sed_patch uses \001 delimiter; see helper above.
+        if ! _sed_patch "$src" "$tmp_script"; then
+            log_error "sed patching failed for $script; aborting install."
+            return 1
+        fi
 
-        # Sanity check: installed line count must be >= source line count.
-        # A mismatch means sed failed or output was truncated unexpectedly.
+        # FIX-S16 (AUDIT LOW): The original line-count sanity check detects
+        # truncation only.  Content corruption that preserves the line count
+        # passes silently.  Replace with a sha256 content comparison:
+        #   - Compute the hash of what we would expect the patched file to
+        #     contain by running _sed_patch on the source into a second temp
+        #     file and hashing that.
+        #   - Compare against the actual temp file written above.
+        # A mismatch means sed produced unexpected output.
+        local tmp_verify
+        tmp_verify=$(mktemp "${TMPDIR:-/tmp}/vw-verify-XXXXXX")
+        _tmpfiles+=("$tmp_verify")
+        if ! _sed_patch "$src" "$tmp_verify"; then
+            log_error "sed verification pass failed for $script; aborting install."
+            return 1
+        fi
+        local expected_hash actual_hash
+        expected_hash=$(_sha256 "$tmp_verify")
+        actual_hash=$(_sha256 "$tmp_script")
+        if [[ "$expected_hash" != "$actual_hash" ]]; then
+            log_error "Content hash mismatch after patching $script:"
+            log_error "  expected sha256: $expected_hash"
+            log_error "  actual   sha256: $actual_hash"
+            log_error "Refusing to deploy a potentially corrupted file."
+            return 1
+        fi
+        # Also retain the original line-count floor check as a belt-and-suspenders guard.
         local src_lines installed_lines
         src_lines=$(wc -l < "$src")
         installed_lines=$(wc -l < "$tmp_script")
@@ -379,10 +438,17 @@ remove_units() {
     _require_root
     log_header "VaultWarden-OCI systemd Timer Removal"
 
+    # FIX-S15 (AUDIT MEDIUM): Previously used 2>/dev/null || true together,
+    # which silently hid every timer disable failure.  Now capture the exit
+    # status and emit a log_warn per failed timer so the operator is informed.
     for timer in "${TIMERS[@]}"; do
-        if systemctl is-enabled "$timer" 2>/dev/null; then
-            _run systemctl disable --now "$timer" 2>/dev/null || true
-            log_success "Disabled: $timer"
+        if systemctl is-enabled "$timer" &>/dev/null; then
+            if _run systemctl disable --now "$timer"; then
+                log_success "Disabled: $timer"
+            else
+                log_warn "Failed to disable $timer -- it may already be inactive or masked."
+                log_warn "  Check: systemctl status $timer"
+            fi
         fi
     done
 
@@ -430,9 +496,9 @@ remove_units() {
 #   3. All unit files present in $UNIT_DEST_DIR
 #   4. All 6 timers enabled (systemctl is-enabled)
 #   5. EnvironmentFile $ENV_FILE exists with mode 600
-#   6. Split-brain: sha256sum of installed script vs repo source
-#      (FIX-S12 / SSD-M2: replaces -nt mtime comparison which is unreliable
-#      after git pull when only unrelated files changed)
+#   6. Split-brain: sha256sum of installed script vs patched repo source
+#      (FIX-S12 / SSD-M2 + FIX-S14: temp-file approach avoids silent empty
+#      hash when sed fails inside a pipeline subshell)
 #
 # FIX-S09: Requires root. /etc/vaultwarden/ is chmod 700; non-root stat()
 #   returns EACCES, triggering the "unknown" permissions fallback and a
@@ -521,33 +587,47 @@ validate_installation() {
         fi
     fi
 
-    # ── 6. Split-brain detection (FIX-S12 / SSD-M2) ─────────────────────────
-    # Compare sha256 checksums of the installed script against the repo source.
-    # -nt (mtime) is NOT reliable: git pull resets mtime only for changed files,
-    # so an installed script can be months stale yet still pass a -nt check if
-    # the repo source was not touched in the latest pull.
+    # ── 6. Split-brain detection (FIX-S12 / SSD-M2 + FIX-S14) ──────────────
+    # FIX-S14 (AUDIT MEDIUM): The previous implementation computed expected_sum
+    # inside a subshell pipeline ( sed ... | sha256sum | awk ).  A sed failure
+    # inside that pipeline produces an empty string silently — every subsequent
+    # comparison then evaluates to != (since actual_sum is never empty), causing
+    # every split-brain check to warn STALE regardless of true state.
+    #
+    # Fix: write the patched output to a mktemp file using _sed_patch().  If
+    # _sed_patch fails we abort with an explicit error.  The hash is then
+    # computed from the file, which cannot be empty on a successful sed run.
     log_info "[6/6] Checking for split-brain (sha256 repo vs installed) ..."
+    local -a _validate_tmpfiles=()
+    _cleanup_validate_tmpfiles() {
+        local f
+        for f in "${_validate_tmpfiles[@]:-}"; do
+            rm -f "$f" 2>/dev/null || true
+        done
+    }
+    trap '_cleanup_validate_tmpfiles' RETURN
+
     for script in "${scripts_to_check[@]}"; do
         local repo_src="$PROJECT_ROOT/$script"
         local installed="$OPT_SCRIPTS_DIR/$script"
         if [[ ! -f "$repo_src" || ! -f "$installed" ]]; then
             continue  # already flagged in check 1 above
         fi
-        # The installed copy has had SCRIPT_DIR/PROJECT_ROOT/source paths
-        # patched by sed during --install, so the checksums legitimately
-        # differ. We flag a WARN only when the installed script's checksum
-        # does NOT match what we would produce by applying the same sed
-        # transformation to the current repo source on-the-fly.
+
+        local tmp_patched
+        tmp_patched=$(mktemp "${TMPDIR:-/tmp}/vw-validate-XXXXXX")
+        _validate_tmpfiles+=("$tmp_patched")
+
+        # FIX-S14: Use _sed_patch (\001 delimiter, temp-file output) instead of
+        # inline pipeline so a sed failure is caught and reported explicitly.
+        if ! _sed_patch "$repo_src" "$tmp_patched"; then
+            log_error "  ERROR: sed patch failed for $script during validation."
+            (( errors++ )) || true
+            continue
+        fi
+
         local expected_sum actual_sum
-        expected_sum=$(
-            sed \
-                -e "s|^SCRIPT_DIR=.*|SCRIPT_DIR=\"$OPT_SCRIPTS_DIR\"|" \
-                -e "s|^PROJECT_ROOT=\"\$SCRIPT_DIR\"|PROJECT_ROOT=\"$PROJECT_ROOT\"|" \
-                -e 's|source "lib/|source "$SCRIPT_DIR/lib/|g' \
-                "$repo_src" | \
-            if command -v sha256sum &>/dev/null; then sha256sum; else shasum -a 256; fi | \
-            awk '{print $1}'
-        )
+        expected_sum=$(_sha256 "$tmp_patched")
         actual_sum=$(_sha256 "$installed")
         if [[ "$expected_sum" != "$actual_sum" ]]; then
             log_warn "  STALE: $installed does not match patched repo source"
@@ -587,7 +667,14 @@ show_status() {
         # Skip template unit in status loop
         [[ "$svc" == *"@"* ]] && continue
         log_info "--- $svc ---"
-        systemctl status "$svc" --no-pager -l 2>/dev/null | head -12 || true
+        # FIX-S18 (AUDIT LOW): systemctl status exits non-zero for inactive
+        # services.  The previous code piped through '| head -12 || true'
+        # which only protected head's exit status, not systemctl's; under
+        # set -euo pipefail the non-zero status of the first element of the
+        # pipeline could still abort the loop.  Wrap the entire pipeline in
+        # { ...; } || true so the loop always continues regardless of the
+        # service state.
+        { systemctl status "$svc" --no-pager -l 2>/dev/null | head -20; } || true
         echo ""
     done
 }

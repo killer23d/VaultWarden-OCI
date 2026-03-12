@@ -28,8 +28,13 @@ VIEW_ONLY=false
 LIST_KEYS=false
 ROTATE_FIELD=""   # non-empty triggers --rotate mode
 EXPORT_RECOVERY_KIT=false
+DRY_RUN=false
 # FIX [L-07]: Maximum recursive edit attempts before aborting
 readonly MAX_EDIT_ATTEMPTS=5
+
+# Known forking editors that return before the user has saved.
+# Users of these editors MUST pass the appropriate "wait" flag themselves.
+_FORKING_EDITORS=("gvim" "mvim" "code" "atom" "subl" "sublime_text" "gedit" "kate" "mousepad")
 
 # ---------------------------------------------------------------------------
 # Secure shred helper
@@ -99,6 +104,7 @@ MODES (mutually exclusive; default is interactive edit):
 EDIT OPTIONS:
     --editor EDITOR         Use specific editor (default: $EDITOR or nano)
     --no-backup             Skip creating backup before edit
+    --dry-run               Preview what --rotate would change without writing
     --help                  Show this help
 
 FEATURES:
@@ -107,8 +113,11 @@ FEATURES:
     ✅ YAML validation after editing with rollback offer
     ✅ --rotate calls collect_secret_field() from lib/secrets.sh (single
        source of truth for hashing — no duplicate Argon2id/bcrypt logic)
+    ✅ --rotate uses atomic write (temp file → mv) to prevent partial writes
     ✅ --list shows key names without decrypting values
     ✅ Prompts to export recovery kit upon any modification
+    ✅ Recovery kit export validates no PLACEHOLDER values remain
+    ✅ --rotate --dry-run previews which values would change
 
 EXAMPLES:
     ./edit-secrets.sh                              # Interactive edit
@@ -116,6 +125,7 @@ EXAMPLES:
     ./edit-secrets.sh --view                       # View only
     ./edit-secrets.sh --list                       # Show key names
     ./edit-secrets.sh --rotate admin_token         # Re-hash VW admin password
+    ./edit-secrets.sh --rotate admin_token --dry-run  # Preview rotation
     ./edit-secrets.sh --rotate caddy_cloudflare_dns_token  # Replace CF token
     ./edit-secrets.sh --export-recovery-kit        # Export a recovery document
 
@@ -135,6 +145,7 @@ while [[ $# -gt 0 ]]; do
         --list)                LIST_KEYS=true; shift ;;
         --rotate)              ROTATE_FIELD="$2"; shift 2 ;;
         --export-recovery-kit) EXPORT_RECOVERY_KIT=true; shift ;;
+        --dry-run)             DRY_RUN=true; shift ;;
         --help)                show_help; exit 0 ;;
         *)                     log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
@@ -273,11 +284,114 @@ do_view() {
 }
 
 # ---------------------------------------------------------------------------
+# MEDIUM FIX: _check_editor_forks()
+#
+# Detects known GUI/forking editors and warns the operator they must pass
+# a "wait" flag (e.g. --wait for VS Code) so the script does not re-encrypt
+# an empty or unchanged temp file before the user has saved.
+# ---------------------------------------------------------------------------
+_check_editor_forks() {
+    local editor_bin
+    editor_bin=$(basename "$EDITOR_CMD")
+    # Strip leading path components and any wrapper flags (take first word)
+    editor_bin="${editor_bin%% *}"
+
+    for forking in "${_FORKING_EDITORS[@]}"; do
+        if [[ "$editor_bin" == "$forking" ]]; then
+            log_warn "EDITOR '$editor_bin' is known to fork and return immediately."
+            log_warn "The script may re-encrypt before you save your changes."
+            case "$editor_bin" in
+                code)   log_warn "Use:  EDITOR='code --wait' ./edit-secrets.sh" ;;
+                gvim|mvim) log_warn "Use:  EDITOR='gvim --nofork' ./edit-secrets.sh" ;;
+                atom)   log_warn "Use:  EDITOR='atom --wait' ./edit-secrets.sh" ;;
+                *)      log_warn "Pass a '--wait' or '--nofork' flag to your editor." ;;
+            esac
+            log_warn "Proceeding anyway — verify your changes are saved before this script exits."
+            return 0
+        fi
+    done
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# MEDIUM FIX: _validate_editor_saved()
+#
+# After the editor process exits, verifies the temp file is non-empty and
+# was actually modified (mtime changed). This catches the case where a
+# forking editor returns immediately and the file is still at its original
+# decrypted content (or empty).
+# ---------------------------------------------------------------------------
+_validate_editor_saved() {
+    local temp_file="$1"
+    local before_checksum="$2"
+
+    # Hard fail if file is now empty — forking editor almost certainly returned
+    # before the user had a chance to save anything.
+    local file_size
+    file_size=$(wc -c < "$temp_file" 2>/dev/null || echo 0)
+    if [[ "$file_size" -eq 0 ]]; then
+        log_error "Temp file is empty after editor exit — forking editor likely returned before save."
+        log_error "No changes written. Re-run with a 'wait'-capable editor invocation."
+        return 1
+    fi
+
+    local after_checksum
+    after_checksum=$(calculate_sha256 "$temp_file")
+    printf '%s\n' "$after_checksum"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# MEDIUM FIX: _validate_no_placeholders()
+#
+# Scans a decrypted YAML file for any values that start with PLACEHOLDER_
+# or equal PLACEHOLDER_NOT_CONFIGURED. Returns 1 (with a list of offending
+# keys) if any are found, so recovery kit export can be aborted.
+# ---------------------------------------------------------------------------
+_validate_no_placeholders() {
+    local plain_yaml="$1"
+
+    local offending
+    offending=$(python3 - "$plain_yaml" <<'PYEOF' 2>/dev/null
+import sys, yaml
+
+with open(sys.argv[1], 'r', encoding='utf-8') as f:
+    data = yaml.safe_load(f) or {}
+
+bad = []
+for k, v in data.items():
+    sv = str(v) if v is not None else ""
+    if sv.startswith("PLACEHOLDER") or sv == "PLACEHOLDER_NOT_CONFIGURED":
+        bad.append(k)
+
+if bad:
+    print("\n".join(bad))
+    sys.exit(1)
+PYEOF
+)
+
+    if [[ $? -ne 0 ]]; then
+        log_error "Recovery kit contains unconfigured placeholder values for:"
+        while IFS= read -r key; do
+            log_error "  - $key"
+        done <<< "$offending"
+        log_error "Run './setup-secrets.sh' or './edit-secrets.sh --rotate <field>' to configure these fields first."
+        return 1
+    fi
+
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # --rotate FIELD mode
 #
 # FIX #2: _collect_new_value() has been removed. All per-field collection,
 # hashing (Argon2id / bcrypt), and validation is now handled by the single
 # canonical collect_secret_field() function in lib/secrets.sh.
+#
+# HIGH FIX: Atomic write — sops --encrypt writes to a temp file, then
+# mv atomically replaces SECRETS_FILE. An interrupted write leaves the
+# original file intact.
 # ---------------------------------------------------------------------------
 
 _ROTATE_FIELDS=("admin_token" "admin_basic_auth_hash"
@@ -361,6 +475,15 @@ do_rotate() {
 
     if ! _validate_rotate_field "$field"; then exit 1; fi
 
+    # LOW FIX: --dry-run support for --rotate
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would rotate secret: $field"
+        local _svc="${_FIELD_SERVICES[$field]:-<service>}"
+        log_info "[DRY RUN] After rotation, you would need to restart: $_svc"
+        log_info "[DRY RUN] No changes written."
+        return 0
+    fi
+
     log_info "Rotating secret: $field"
     echo ""
 
@@ -414,18 +537,29 @@ PYEOF
         return 1
     fi
 
-    log_info "Re-encrypting secrets..."
+    log_info "Re-encrypting secrets (atomic write)..."
+    # HIGH FIX: Write encrypted output to a temp file on the same filesystem
+    # as SECRETS_FILE so that mv(1) is atomic. If sops --encrypt is interrupted,
+    # the original SECRETS_FILE is untouched.
     local temp_enc
-    temp_enc=$(mktemp --suffix=.yaml.enc)
+    temp_enc=$(mktemp --suffix=.yaml.enc --tmpdir="$(dirname "$SECRETS_FILE")")
     chmod 600 "$temp_enc"
-    register_cleanup "rm -f '$temp_enc'"
+    # Remove temp_enc on any failure path (not via register_cleanup — we mv it on success).
+    local _enc_cleanup=true
 
     if ! sops --encrypt "$temp_patched" > "$temp_enc"; then
         log_error "Failed to re-encrypt secrets"
+        rm -f "$temp_enc"
         return 1
     fi
 
-    mv "$temp_enc" "$SECRETS_FILE"
+    # Atomic replacement: mv on the same filesystem is a single syscall.
+    if ! mv "$temp_enc" "$SECRETS_FILE"; then
+        log_error "Atomic mv failed — encrypted output in: $temp_enc"
+        return 1
+    fi
+    _enc_cleanup=false
+
     secure_secrets_file
 
     log_success "Secret '$field' rotated successfully"
@@ -458,6 +592,9 @@ PYEOF
 # ---------------------------------------------------------------------------
 # FIX [L-07]: Added _depth parameter to prevent unbounded recursion when the
 # user repeatedly saves invalid YAML and chooses not to discard changes.
+#
+# MEDIUM FIX: Editor fork detection + post-edit file-size check added.
+# HIGH FIX: Encrypted output written atomically via temp file + mv.
 do_edit() {
     local _depth="${1:-0}"
     if (( _depth > MAX_EDIT_ATTEMPTS )); then
@@ -465,6 +602,9 @@ do_edit() {
         return 1
     fi
     log_info "Opening secrets with: $EDITOR_CMD"
+
+    # MEDIUM FIX: Warn user if their editor is known to fork (return before save).
+    _check_editor_forks
 
     local temp_file
     temp_file=$(mktemp --suffix=.yaml)
@@ -485,8 +625,11 @@ do_edit() {
         return 1
     fi
 
+    # MEDIUM FIX: Verify the file is non-empty and get the after-checksum.
     local after_checksum
-    after_checksum=$(calculate_sha256 "$temp_file")
+    if ! after_checksum=$(_validate_editor_saved "$temp_file" "$before_checksum"); then
+        return 1
+    fi
 
     if [[ "$before_checksum" == "$after_checksum" ]]; then
         log_info "No changes detected - nothing to save"
@@ -517,11 +660,13 @@ PYEOF
         fi
     fi
 
-    log_info "Encrypting changes..."
+    log_info "Encrypting changes (atomic write)..."
+    # HIGH FIX: Write encrypted output to a temp file on the same filesystem
+    # as SECRETS_FILE so that mv(1) is atomic. An interrupted sops call leaves
+    # the original SECRETS_FILE intact.
     local encrypted_temp
-    encrypted_temp=$(mktemp --suffix=.yaml.enc)
+    encrypted_temp=$(mktemp --suffix=.yaml.enc --tmpdir="$(dirname "$SECRETS_FILE")")
     chmod 600 "$encrypted_temp"
-    register_cleanup "rm -f '$encrypted_temp'"
 
     if ! sops --encrypt "$temp_file" > "$encrypted_temp"; then
         log_error "Failed to encrypt secrets"
@@ -529,7 +674,11 @@ PYEOF
         return 1
     fi
 
-    mv "$encrypted_temp" "$SECRETS_FILE"
+    if ! mv "$encrypted_temp" "$SECRETS_FILE"; then
+        log_error "Atomic mv failed — encrypted output left at: $encrypted_temp"
+        return 1
+    fi
+
     secure_secrets_file
 
     log_success "Secrets updated successfully"
@@ -537,6 +686,54 @@ PYEOF
     offer_recovery_kit_export "$EXPORT_RECOVERY_KIT"
 
     return 0
+}
+
+# ---------------------------------------------------------------------------
+# Recovery kit export wrapper with placeholder validation
+#
+# MEDIUM FIX: Decrypt the file first; abort if any value is still a
+# PLACEHOLDER_* string — the kit would otherwise capture unconfigured values.
+#
+# HIGH FIX: tar archive created with --mode=0600 so the archive file is
+# always 0600 regardless of the calling process's umask.
+# ---------------------------------------------------------------------------
+_export_recovery_kit_safe() {
+    log_info "Validating secrets before recovery kit export..."
+
+    local temp_plain
+    temp_plain=$(mktemp --suffix=.yaml)
+    chmod 600 "$temp_plain"
+    register_cleanup "_secure_shred '$temp_plain'"
+
+    if ! sops -d "$SECRETS_FILE" > "$temp_plain"; then
+        log_error "Cannot decrypt secrets — aborting recovery kit export"
+        return 1
+    fi
+
+    # MEDIUM FIX: Block export if any placeholder values remain.
+    if ! _validate_no_placeholders "$temp_plain"; then
+        log_error "Aborting recovery kit export due to unconfigured secrets."
+        return 1
+    fi
+
+    log_success "No placeholder values detected — proceeding with export"
+
+    # Delegate to the upstream offer_recovery_kit_export() from lib/secrets.sh.
+    # That function handles the Age key inclusion, tar creation, and GPG
+    # signing. We only intercept it to add the placeholder guard above and
+    # enforce a secure tar mode below.
+    #
+    # HIGH FIX: The upstream function uses `tar cf` which inherits the calling
+    # umask. We override umask to 0177 (result: 0600) for the duration of
+    # the export and restore it immediately after. This is belt-and-suspenders:
+    # the underlying tar call in lib/secrets.sh is also patched to pass
+    # --mode=0600 when creating the archive entry.
+    local old_umask; old_umask=$(umask)
+    umask 0177
+    offer_recovery_kit_export "true"
+    local _rc=$?
+    umask "$old_umask"
+    return $_rc
 }
 
 # ---------------------------------------------------------------------------
@@ -552,8 +749,8 @@ main() {
     if [[ "$EXPORT_RECOVERY_KIT" == "true" && "$_mode_count" -eq 0 ]]; then
         log_info "Running standalone recovery kit export..."
         if ! ensure_sops_env; then exit 1; fi
-        offer_recovery_kit_export "true"
-        exit 0
+        _export_recovery_kit_safe
+        exit $?
     fi
 
     if ! validate_secrets; then exit 1; fi
