@@ -1,5 +1,8 @@
 [Unit]
 Description=VaultWarden Full Backup Timer Sunday 03:00
+# SY-2: Prevent this timer firing mid-shutdown and interrupting a live
+# SQLite WAL checkpoint.
+Conflicts=shutdown.target
 
 [Timer]
 OnCalendar=Sun *-*-* 03:00:00

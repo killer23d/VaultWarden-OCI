@@ -18,8 +18,9 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=vw-dns-update
 NoNewPrivileges=yes
-# FIX-S01: PrivateTmp=yes added — gives the service its own private /tmp
-# mount, preventing temp-file name collisions with concurrently running
-# services. Consistent with all other VaultWarden service units.
 PrivateTmp=yes
+# SY-1: Sandbox hardening — script can only write to its own directories.
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/vaultwarden-scripts /var/lib/vaultwarden /etc/vaultwarden
 TimeoutStartSec=120

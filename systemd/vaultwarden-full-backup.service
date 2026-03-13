@@ -16,6 +16,10 @@ StandardError=journal
 SyslogIdentifier=vw-full-backup
 NoNewPrivileges=yes
 PrivateTmp=yes
+# SY-1: Sandbox hardening — script can only write to its own directories.
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/vaultwarden-scripts /var/lib/vaultwarden /etc/vaultwarden
 OnFailure=vaultwarden-notify-failure@%n.service
 # Full backup verification can run long
 TimeoutStartSec=7200

@@ -1,5 +1,7 @@
 [Unit]
 Description=VaultWarden Maintenance Timer Mon-Sat 02:00
+# SY-2: Prevent this timer firing mid-shutdown.
+Conflicts=shutdown.target
 
 [Timer]
 OnCalendar=Mon-Sat *-*-* 02:00:00

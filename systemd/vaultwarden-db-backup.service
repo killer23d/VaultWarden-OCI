@@ -16,6 +16,10 @@ StandardError=journal
 SyslogIdentifier=vw-db-backup
 NoNewPrivileges=yes
 PrivateTmp=yes
+# SY-1: Sandbox hardening — script can only write to its own directories.
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/vaultwarden-scripts /var/lib/vaultwarden /etc/vaultwarden
 OnFailure=vaultwarden-notify-failure@%n.service
 # Raise timeout: rclone sync to OCI Object Storage can be slow
 TimeoutStartSec=3600

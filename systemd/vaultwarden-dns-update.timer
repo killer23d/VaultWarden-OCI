@@ -1,5 +1,7 @@
 [Unit]
 Description=VaultWarden DNS Update Timer hourly
+# SY-2: Prevent this timer firing mid-shutdown.
+Conflicts=shutdown.target
 
 [Timer]
 OnCalendar=hourly

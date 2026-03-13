@@ -1,8 +1,14 @@
 [Unit]
-Description=VaultWarden DB Backup Timer Mon-Sat 04:00
+Description=VaultWarden DB Backup Timer daily 04:00
+# SY-2: Prevent this timer firing mid-shutdown and interrupting a live
+# SQLite WAL checkpoint.
+Conflicts=shutdown.target
 
 [Timer]
-OnCalendar=Mon-Sat *-*-* 04:00:00
+# SY-3: Changed from Mon-Sat to daily to close the ~47 h Saturday-night
+# backup gap (no DB snapshot was taken between Sat 04:00 and the Sunday
+# full backup at 03:00).
+OnCalendar=daily *-*-* 04:00:00
 Persistent=true
 # P2-H: RandomizedDelaySec spreads post-reboot catch-up burst.
 # SSD-M3-timer: db-backup fires at 04:00 (+0-60s jitter), maintenance at

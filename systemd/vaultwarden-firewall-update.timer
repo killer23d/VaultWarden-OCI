@@ -1,5 +1,7 @@
 [Unit]
 Description=VaultWarden Firewall Update Timer Saturday 04:00
+# SY-2: Prevent this timer firing mid-shutdown.
+Conflicts=shutdown.target
 
 [Timer]
 OnCalendar=Sat *-*-* 04:00:00
