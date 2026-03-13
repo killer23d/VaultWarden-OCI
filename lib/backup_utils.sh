@@ -31,6 +31,21 @@
 #                   modification time and can be fooled by rsync --times or
 #                   touch. Replaced with a portable stat-based ctime age check
 #                   so preserved-timestamp restores never bypass retention.
+# PATCHED BUGS (2026-03-13):
+#   LB-1  [CRITICAL] verify_backup_integrity(): three sequential cp calls
+#                   could produce an inconsistent DB snapshot (VaultWarden can
+#                   commit a transaction between the first and second cp).
+#                   Replaced with sqlite3 .backup (SQLite Online Backup API)
+#                   which holds the necessary read lock for a fully consistent
+#                   copy regardless of WAL activity.
+#   LB-2  [HIGH]    _backup_ctime_age_days() / cleanup_old_backups(): ctime is
+#                   reset by cp, mv across filesystems, chmod, or chown, so
+#                   backups restored to a fresh host appear 0 days old and are
+#                   never cleaned up (unbounded retention).
+#                   Fix: new _backup_filename_age_days() parses the immutable
+#                   YYYYMMDD-HHMMSS timestamp embedded in the filename as the
+#                   primary age source. Falls back to ctime only for files
+#                   predating the naming convention (no timestamp in name).
 
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_BACKUP_UTILS_LIB_LOADED:-}" ]] && return 0
@@ -82,7 +97,7 @@ list_backups() {
                         if [[ -f "$backup_file.meta" ]]; then
                             local vw_version
                             vw_version=$(grep "vaultwarden_version=" "$backup_file.meta" 2>/dev/null | cut -d= -f2 || echo "unknown")
-                            printf "    └─ VaultWarden: %s\n" "$vw_version"
+                            printf "    \u2514\u2500 VaultWarden: %s\n" "$vw_version"
                         fi
 
                         found_backups=true
@@ -160,18 +175,19 @@ validate_backup_integrity() {
 # ---------------------------------------------------------------------------
 # verify_backup_integrity DB_PATH [AGE_KEY_FILE]
 #
-# AUD-B1 FIX [HIGH]: The original implementation ran sqlite3 PRAGMA
-# integrity_check directly against the live database path while VaultWarden
-# may be running in WAL mode. In WAL mode, sqlite3 opened from outside the
-# running process may observe a partially-committed transaction, producing a
-# false-positive "ok" or an inconsistent integrity result.
+# LB-1 FIX [CRITICAL]: The previous implementation copied the live .db,
+# -wal, and -shm files with three sequential cp calls. VaultWarden can commit
+# a transaction between the first and second cp, producing an inconsistent
+# snapshot. SQLite's PRAGMA integrity_check on such a pair can return a false
+# "ok".
 #
-# Fix: copy the database files (*.db, *.db-wal, *.db-shm) into a private
-# restricted temporary directory, then run the integrity check against the
-# copy. The live database is never opened for writing, and the snapshot is
-# consistent because the copy is taken atomically per file.
+# Fix: use sqlite3 "$db_path" ".backup '$db_copy'" (SQLite Online Backup API)
+# which holds the necessary shared read lock across the entire copy, producing
+# a fully consistent snapshot regardless of concurrent WAL activity.
+# The WAL and SHM sidecars are NOT manually copied — the Online Backup API
+# handles log integration internally.
 #
-# The tmpdir is mode 700 and cleaned up unconditionally via a local EXIT trap.
+# The tmpdir is mode 700 and cleaned up unconditionally via a local RETURN trap.
 # ---------------------------------------------------------------------------
 verify_backup_integrity() {
     local db_path="$1"
@@ -179,6 +195,11 @@ verify_backup_integrity() {
 
     if [[ ! -f "$db_path" ]]; then
         log_error "Database file not found: $db_path"
+        return 1
+    fi
+
+    if ! command -v sqlite3 >/dev/null 2>&1; then
+        log_error "verify_backup_integrity: sqlite3 not available"
         return 1
     fi
 
@@ -198,21 +219,21 @@ verify_backup_integrity() {
     db_base=$(basename "$db_path")
     local db_copy="$work_dir/$db_base"
 
-    # Copy the primary DB and any WAL/SHM sidecar files so the integrity check
-    # sees a consistent snapshot without touching the live paths.
-    if ! cp "$db_path" "$db_copy" 2>/dev/null; then
-        log_error "verify_backup_integrity: failed to copy database to tmpdir"
+    # LB-1 FIX: use SQLite Online Backup API via the sqlite3 .backup dot-command.
+    # This acquires the correct shared read lock and integrates any pending WAL
+    # frames before writing the copy, guaranteeing a consistent snapshot even
+    # while VaultWarden is running in WAL mode.
+    log_info "Creating consistent DB snapshot via SQLite Online Backup API: $db_base"
+    if ! sqlite3 "$db_path" ".backup '${db_copy}'" 2>/dev/null; then
+        log_error "verify_backup_integrity: sqlite3 .backup failed for: $db_path"
         return 1
     fi
-    # Copy WAL and SHM if present (non-fatal if absent).
-    cp "${db_path}-wal" "${db_copy}-wal" 2>/dev/null || true
-    cp "${db_path}-shm" "${db_copy}-shm" 2>/dev/null || true
 
-    log_info "Running SQLite integrity check on copy of: $db_base"
+    log_info "Running SQLite integrity check on snapshot of: $db_base"
 
     local integrity_result
     if ! integrity_result=$(sqlite3 "$db_copy" "PRAGMA integrity_check;" 2>&1); then
-        log_error "sqlite3 failed to open database copy: $integrity_result"
+        log_error "sqlite3 failed to open database snapshot: $integrity_result"
         return 1
     fi
 
@@ -221,7 +242,7 @@ verify_backup_integrity() {
         return 1
     fi
 
-    log_success "Database integrity check passed (copy-based, WAL-safe)"
+    log_success "Database integrity check passed (Online Backup API snapshot, WAL-safe)"
     return 0
 }
 
@@ -300,6 +321,73 @@ check_backup_disk_space() {
     return 0
 }
 
+# ---------------------------------------------------------------------------
+# _backup_filename_age_days FILE
+#
+# LB-2 FIX: Primary age source for retention. Extracts the YYYYMMDD-HHMMSS
+# timestamp embedded in the backup filename (e.g.
+#   db-20240315-143022.age  → 20240315-143022)
+# and converts it to whole days elapsed since that timestamp.
+#
+# Returns the age in days on stdout. If no recognisable timestamp is found in
+# the filename, returns empty string so the caller can fall back to ctime.
+# ---------------------------------------------------------------------------
+_backup_filename_age_days() {
+    local file="$1"
+    local basename_file
+    basename_file=$(basename "$file")
+
+    # Match YYYYMMDD-HHMMSS anywhere in the filename.
+    local ts_date ts_time
+    if [[ "$basename_file" =~ ([0-9]{8})-([0-9]{6}) ]]; then
+        ts_date="${BASH_REMATCH[1]}"   # e.g. 20240315
+        ts_time="${BASH_REMATCH[2]}"   # e.g. 143022
+    else
+        # No timestamp in filename — signal fallback needed.
+        echo ""
+        return
+    fi
+
+    # Reformat for date(1): YYYY-MM-DD HH:MM:SS
+    local ts_str
+    ts_str="${ts_date:0:4}-${ts_date:4:2}-${ts_date:6:2} ${ts_time:0:2}:${ts_time:2:2}:${ts_time:4:2}"
+
+    local ts_epoch
+    # GNU date
+    ts_epoch=$(date -d "$ts_str" +%s 2>/dev/null) || \
+    # BSD/macOS date
+    ts_epoch=$(date -j -f '%Y-%m-%d %H:%M:%S' "$ts_str" +%s 2>/dev/null) || true
+
+    if [[ -z "$ts_epoch" || ! "$ts_epoch" =~ ^[0-9]+$ ]]; then
+        echo ""
+        return
+    fi
+
+    local now_epoch
+    now_epoch=$(date +%s)
+    echo $(( (now_epoch - ts_epoch) / 86400 ))
+}
+
+# ---------------------------------------------------------------------------
+# _backup_ctime_age_days FILE
+#
+# Returns the age of FILE in whole days based on ctime (inode change time),
+# using portable stat (GNU|BSD). Kept as a fallback for files that predate
+# the YYYYMMDD-HHMMSS naming convention.
+# ---------------------------------------------------------------------------
+_backup_ctime_age_days() {
+    local file="$1"
+    local ctime_epoch now_epoch
+    ctime_epoch=$(stat -c%Z "$file" 2>/dev/null || stat -f%c "$file" 2>/dev/null || echo "")
+    if [[ -z "$ctime_epoch" || ! "$ctime_epoch" =~ ^[0-9]+$ ]]; then
+        # Cannot determine ctime; treat as 0 days old (do not delete).
+        echo "0"
+        return
+    fi
+    now_epoch=$(date +%s)
+    echo $(( (now_epoch - ctime_epoch) / 86400 ))
+}
+
 # Clean up old backups based on retention policy - STANDARDIZED: Returns exit code
 #
 # BUG-B4 FIX: unquoted $retention_days in find -mtime argument. Under set -u
@@ -316,28 +404,11 @@ check_backup_disk_space() {
 # not exist, the sidecar is removed immediately (no age-based threshold
 # needed — if the primary is gone the sidecar is always orphaned).
 #
-# AUD-B3 FIX [LOW]: Replaced find -mtime with a portable stat-based ctime
-# age check. -mtime reflects the last content-modification time and is reset
-# to "now" whenever a file is rsynced with --times or touched, which can
-# prevent old backups from ever being cleaned up. ctime (inode change time)
-# cannot be altered by userspace and reflects when the file truly arrived on
-# this filesystem, making it the correct basis for retention enforcement.
-#
-# _backup_ctime_age_days FILE — returns the age of FILE in whole days based
-# on ctime (inode change time), using portable stat (GNU|BSD).
-_backup_ctime_age_days() {
-    local file="$1"
-    local ctime_epoch now_epoch
-    ctime_epoch=$(stat -c%Z "$file" 2>/dev/null || stat -f%c "$file" 2>/dev/null || echo "")
-    if [[ -z "$ctime_epoch" || ! "$ctime_epoch" =~ ^[0-9]+$ ]]; then
-        # Cannot determine ctime; treat as 0 days old (do not delete).
-        echo "0"
-        return
-    fi
-    now_epoch=$(date +%s)
-    echo $(( (now_epoch - ctime_epoch) / 86400 ))
-}
-
+# LB-2 FIX: Replaced ctime-only age check with _backup_filename_age_days().
+# The filename timestamp is immutable across cp/mv/chmod/chown and reliably
+# reflects when the backup was created. Falls back to _backup_ctime_age_days()
+# only when the filename contains no recognisable YYYYMMDD-HHMMSS stamp
+# (i.e. files predating the current naming convention).
 cleanup_old_backups() {
     local backup_dir="$1"
     local backup_type="$2"
@@ -357,14 +428,17 @@ cleanup_old_backups() {
 
     local deleted_count=0
 
-    # AUD-B3 FIX: use stat ctime-based age check instead of find -mtime.
-    # find -mtime uses mtime which can be reset by rsync --times or touch,
-    # allowing old backups to escape retention. ctime cannot be altered by
-    # userspace so it reliably reflects when the file arrived on this host.
+    # LB-2 FIX: prefer filename-embedded timestamp for age calculation;
+    # fall back to ctime only for files without a recognisable timestamp.
     while IFS= read -r backup_file; do
         if [[ -n "$backup_file" ]]; then
             local age_days
-            age_days=$(_backup_ctime_age_days "$backup_file")
+            age_days=$(_backup_filename_age_days "$backup_file")
+            if [[ -z "$age_days" ]]; then
+                # No timestamp in filename — fall back to ctime.
+                age_days=$(_backup_ctime_age_days "$backup_file")
+                log_debug "Retention: no filename timestamp for $(basename "$backup_file") — using ctime (${age_days}d)"
+            fi
             if (( age_days > retention_days )); then
                 log_debug "Removing old backup (${age_days}d > ${retention_days}d): $(basename "$backup_file")"
                 rm -f "$backup_file" "$backup_file.sha256" "$backup_file.meta" 2>/dev/null
@@ -526,5 +600,6 @@ EOF
 export -f list_backups validate_backup_integrity check_backup_disk_space
 export -f cleanup_old_backups get_backup_statistics create_backup_metadata
 export -f verify_backup_integrity get_backup_size _backup_ctime_age_days
+export -f _backup_filename_age_days
 
 log_debug "Backup utilities library loaded successfully - standardized error handling" 2>/dev/null || true
