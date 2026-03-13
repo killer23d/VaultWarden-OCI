@@ -96,6 +96,10 @@ done
 validate_domain_secure() {
     local domain="$1"
     if [[ ${#domain} -gt 253 ]]; then return 1; fi
+    # FIX SS-4: Reject bare IPv4 addresses before the hostname regex.
+    # Without this guard, 192.168.1.1 satisfies ^[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$
+    # and is written to .env, causing Caddy ACME provisioning to fail silently.
+    if [[ "$domain" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then return 1; fi
     if [[ ! "$domain" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then return 1; fi
     return 0
 }
@@ -542,7 +546,14 @@ create_env_file() {
     local clean_domain; clean_domain=$(echo "$domain_with_protocol" | sed -E 's|https?://||; s|/.*$||')
     CLEAN_DOMAIN="$clean_domain"
 
-    local temp_env="$TMP_WORKDIR/env.tmp"
+    # FIX SS-2: Use mktemp -p "$(dirname "$env_file")" so the temp file lives
+    # on the same filesystem as the destination. On OCI with a dedicated data
+    # disk, TMP_WORKDIR (/tmp) and $PROJECT_ROOT may be on different
+    # filesystems — mv across filesystems degrades to a non-atomic cp+rm, and
+    # a crash between them leaves a 0-byte .env. Same-filesystem mktemp
+    # guarantees the final mv is an atomic rename(2) syscall.
+    local temp_env
+    temp_env=$(mktemp -p "$(dirname "$env_file")" .env.tmp.XXXXXXXXXX) || return 1
 
     # FIX [P1-H5]: Replace awk -v assignments with ENVIRON[] references to
     # eliminate awk variable-injection risk. When user-controlled strings
@@ -573,6 +584,8 @@ create_env_file() {
     mv "$temp_env" "$env_file" || return 1
 
     if [[ "$USE_LATEST" == "true" ]]; then
+        # Reuse a same-filesystem temp file for the USE_LATEST rewrite pass.
+        temp_env=$(mktemp -p "$(dirname "$env_file")" .env.tmp.XXXXXXXXXX) || return 1
         awk '{
             sub(/^VAULTWARDEN_VERSION=.*/, "VAULTWARDEN_VERSION=latest");
             sub(/^CADDY_VERSION=.*/, "CADDY_VERSION=latest");
@@ -781,16 +794,16 @@ create_empty_secrets_structure() {
     local age_key_file="$PROJECT_ROOT/secrets/keys/age-key.txt"
 
     if [[ -f "$secrets_file" ]] && [[ "$FORCE" != "true" ]]; then
-        export SOPS_AGE_KEY_FILE="$age_key_file"
-        if sops -d "$secrets_file" >/dev/null 2>&1; then
-            # FIX [LOW-create_empty_secrets_structure]: unset SOPS_AGE_KEY_FILE
-            # immediately after the check so it does not leak into subsequent
-            # phases or into the ./setup-secrets.sh invocation. Previously the
-            # export persisted for the entire remaining script lifetime.
-            unset SOPS_AGE_KEY_FILE
+        # FIX SS-1 (existing-file check path): wrap export + sops -d in a
+        # subshell so SOPS_AGE_KEY_FILE never leaks into the parent environment
+        # even under set -e + SIGPIPE conditions where the || guard can be
+        # bypassed.
+        local decrypt_ok=false
+        ( export SOPS_AGE_KEY_FILE="$age_key_file"; sops -d "$secrets_file" >/dev/null 2>&1 ) \
+            && decrypt_ok=true
+        if [[ "$decrypt_ok" == "true" ]]; then
             return 0
         else
-            unset SOPS_AGE_KEY_FILE
             log_error "Existing secrets.yaml is unreadable with current key. Use --force to overwrite."
             return 1
         fi
@@ -808,10 +821,16 @@ caddy_cloudflare_dns_token: PLACEHOLDER_NOT_CONFIGURED
 fail2ban_cloudflare_firewall_token: PLACEHOLDER_NOT_CONFIGURED
 EOF
     chmod 600 "$temp_secrets"
-    export SOPS_AGE_KEY_FILE="$age_key_file"
-    sops --encrypt --output "$secrets_file" "$temp_secrets" || { unset SOPS_AGE_KEY_FILE; return 1; }
-    # FIX [LOW-create_empty_secrets_structure]: unset after use
-    unset SOPS_AGE_KEY_FILE
+
+    # FIX SS-1: Wrap SOPS_AGE_KEY_FILE export and sops --encrypt in a subshell.
+    # Under set -e + SIGPIPE, the previous `export VAR; cmd || { unset VAR; return 1; }`
+    # pattern could be interrupted between the export and the || handler,
+    # leaking the Age key path into subsequent ./setup-secrets.sh invocations.
+    # A subshell ( export VAR; cmd ) confines the variable to the child process;
+    # the parent environment is never modified regardless of how the child exits.
+    ( export SOPS_AGE_KEY_FILE="$age_key_file"; \
+      sops --encrypt --output "$secrets_file" "$temp_secrets" ) || return 1
+
     chmod 600 "$secrets_file" || return 1
     chown "$(get_real_user):$(id -g -n "$(get_real_user)")" "$secrets_file" || return 1
     return 0
@@ -895,8 +914,39 @@ setup_firewall() {
     ssh_port=${ssh_port:-22}
     log_info "Detected SSH port: ${ssh_port}"
 
-    # Idempotency: only skip if ALL three required rules are already present and active.
-    # Checking SSH port here is critical — returning early without it would lock the admin out.
+    # FIX SS-3: Fetch Cloudflare CIDRs and restrict ports 80/443 to those
+    # ranges only, preventing direct-IP exposure of the TLS catch-all.
+    # Falls back to unrestricted allow rules with a prominent warning on
+    # fetch failure so setup does not block on a network issue.
+    local cf_ipv4_url="https://www.cloudflare.com/ips-v4"
+    local cf_ipv6_url="https://www.cloudflare.com/ips-v6"
+    local cf_cidrs=()
+    local cf_fetch_failed=false
+
+    log_info "Fetching Cloudflare CIDR lists for firewall restriction..."
+    local ipv4_list ipv6_list
+    ipv4_list=$(curl -fsSL --max-time 15 "$cf_ipv4_url" 2>/dev/null) || cf_fetch_failed=true
+    ipv6_list=$(curl -fsSL --max-time 15 "$cf_ipv6_url" 2>/dev/null) || cf_fetch_failed=true
+
+    if [[ "$cf_fetch_failed" == "false" ]] && \
+       [[ -n "$ipv4_list" ]] && [[ -n "$ipv6_list" ]]; then
+        # Build array from non-empty, non-comment lines
+        while IFS= read -r cidr; do
+            [[ -z "$cidr" || "$cidr" == \#* ]] && continue
+            cf_cidrs+=("$cidr")
+        done <<< "$ipv4_list"
+        while IFS= read -r cidr; do
+            [[ -z "$cidr" || "$cidr" == \#* ]] && continue
+            cf_cidrs+=("$cidr")
+        done <<< "$ipv6_list"
+        log_info "Fetched ${#cf_cidrs[@]} Cloudflare CIDRs"
+    else
+        log_warn "Could not fetch Cloudflare CIDR lists — falling back to unrestricted allow rules."
+        log_warn "SECURITY: Ports 80/443 will be open to all IPs. Restrict manually after setup:"
+        log_warn "  See: https://www.cloudflare.com/ips-v4 and https://www.cloudflare.com/ips-v6"
+    fi
+
+    # Idempotency: only skip if ALL required rules are already present and active.
     if ufw status | grep -q "Status: active" && \
        ufw status | grep -q "80/tcp" && \
        ufw status | grep -q "443/tcp" && \
@@ -906,8 +956,19 @@ setup_firewall() {
     fi
 
     ufw allow "${ssh_port}/tcp"
-    ufw allow 80/tcp
-    ufw allow 443/tcp
+
+    if [[ ${#cf_cidrs[@]} -gt 0 ]]; then
+        # Per-CIDR rules for ports 80 and 443
+        for cidr in "${cf_cidrs[@]}"; do
+            ufw allow from "$cidr" to any port 80 proto tcp  2>/dev/null || true
+            ufw allow from "$cidr" to any port 443 proto tcp 2>/dev/null || true
+        done
+        log_success "Firewall: ports 80/443 restricted to ${#cf_cidrs[@]} Cloudflare CIDRs"
+    else
+        # Fallback: unrestricted (already warned above)
+        ufw allow 80/tcp
+        ufw allow 443/tcp
+    fi
 
     # FIX [MEDIUM-setup_firewall]: replace `echo "y" | ufw enable` with
     # `ufw --force enable`. The echo pipe is fragile: it relies on ufw reading
@@ -1026,7 +1087,8 @@ EOF
         printf '2. Set external tokens: %s(use ./edit-secrets.sh --rotate commands above)%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '3. Start services:      %smake up%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '4. Setup automation:    %ssudo ./cron-setup.sh --install%s\n' \
+        # FIX SS-5: Replace non-existent cron-setup.sh with systemd-setup.sh
+        printf '4. Setup automation:    %ssudo ./systemd-setup.sh --install%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '5. Export recovery kit: %s./edit-secrets.sh --export-recovery-kit%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
@@ -1047,7 +1109,8 @@ EOF
         printf '2. Configure secrets:   %s./setup-secrets.sh%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '   ► You will be prompted for all credentials\n'
         printf '3. Start services:      %smake up%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '4. Setup automation:    %ssudo ./cron-setup.sh --install%s\n' \
+        # FIX SS-5: Replace non-existent cron-setup.sh with systemd-setup.sh
+        printf '4. Setup automation:    %ssudo ./systemd-setup.sh --install%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '5. Export recovery kit: %s./edit-secrets.sh --export-recovery-kit%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
@@ -1133,6 +1196,15 @@ main() {
     if [[ ${#failed_phases[@]} -gt 0 ]]; then
         log_error "Setup FAILED - Critical phases did not complete"
         exit 1
+    fi
+
+    # FIX SS-6: Report non-critical phase warnings so setup does not silently
+    # claim full success when setup_firewall, set_script_permissions, or
+    # setup_user_permissions encountered non-fatal issues. The warned_phases[]
+    # array was populated by execute_phase() (return code 2) but never reported.
+    if [[ ${#warned_phases[@]} -gt 0 ]]; then
+        log_warn "Non-critical phases had warnings: ${warned_phases[*]}"
+        log_warn "Review the output above for details. These phases can be re-run manually."
     fi
 
     # --- Phase 2-A: Post-phase secrets configuration ---
