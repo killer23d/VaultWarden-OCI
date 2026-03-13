@@ -16,6 +16,13 @@ echo "==================================================================="
 echo " Caddy Entrypoint - Loading Secrets"
 echo "==================================================================="
 
+# FIX [CE-2]: Emit a loud production warning immediately when debug mode is
+# enabled so operators are reminded to disable it before deploying.
+DEBUG_ENTRYPOINT=${DEBUG_ENTRYPOINT:-false}
+if [ "$DEBUG_ENTRYPOINT" = "true" ]; then
+    echo "⚠️  WARNING: DEBUG_ENTRYPOINT enabled — credential names will be logged — DISABLE IN PRODUCTION" >&2
+fi
+
 # FIX [M-16]: Validate required environment variables BEFORE Caddyfile validation
 # so we never print "validation passed" when DOMAIN_NAME is unset.
 : "${DOMAIN_NAME:?ERROR: DOMAIN_NAME environment variable must be set}"
@@ -84,6 +91,17 @@ case "$ADMIN_HASH_FULL" in
         ;;
 esac
 
+# FIX [CE-1]: Enforce OWASP minimum bcrypt cost of 10.
+# The case pattern above accepts costs 04–99 (any two-digit number).
+# This explicit check rejects costs below 10 with a clear error message.
+_cost=$(printf '%s' "$ADMIN_HASH_FULL" | sed 's/.*\$2.\$\([0-9]*\)\$.*/\1/')
+if [ "$_cost" -lt 10 ] 2>/dev/null; then
+    echo "ERROR: bcrypt cost ${_cost} < minimum 10 (OWASP requirement)" >&2
+    echo "Re-generate with: htpasswd -bnBC 14 admin <password>" >&2
+    exit 1
+fi
+unset _cost
+
 # FIX [CE-L2]: Replace awk pipelines with POSIX parameter expansion to avoid
 # ash pipefail masking. ${var%% *} strips from the first space to end (username).
 # ${var#* } strips from start to first space (hash body).
@@ -97,7 +115,6 @@ export ADMIN_HASH="${ADMIN_HASH_FULL#* }"
 # sufficient privilege inside the container.
 unset ADMIN_HASH_FULL
 
-DEBUG_ENTRYPOINT=${DEBUG_ENTRYPOINT:-false}
 if [ "$DEBUG_ENTRYPOINT" = "true" ]; then
     # FIX: Include parsed ADMIN_USERNAME in debug output so operators can verify
     # the correct credential file was read. ADMIN_HASH is intentionally omitted.
@@ -111,6 +128,20 @@ if [ -z "$ADMIN_USERNAME" ] || [ -z "$ADMIN_HASH" ]; then
 fi
 
 echo "✓ Admin credentials ready for Caddy"
+
+# =============================================================================
+# FIX [CF-1]: Set PUSH_CSP environment variable consumed by Caddyfile.
+# When PUSH_ENABLED=true, include Bitwarden push endpoints in connect-src.
+# Otherwise export an empty string to keep the CSP attack surface minimal.
+# Leading space is intentional — it separates the value from the preceding
+# wss://{$DOMAIN_NAME} token in the CSP directive.
+# =============================================================================
+PUSH_ENABLED=${PUSH_ENABLED:-false}
+if [ "$PUSH_ENABLED" = "true" ]; then
+    export PUSH_CSP=" https://push.bitwarden.com https://identity.bitwarden.com"
+else
+    export PUSH_CSP=""
+fi
 
 # =============================================================================
 # VALIDATION: Caddyfile Syntax Check

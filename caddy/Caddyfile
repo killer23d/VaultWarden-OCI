@@ -135,13 +135,12 @@
                 X-DNS-Prefetch-Control "off"
 
                 # Content Security Policy
-                # FIX: connect-src scoped to known endpoints only.
-                # Previously 'wss: https:' allowed any HTTPS/WSS origin, enabling
-                # potential XSS exfiltration to arbitrary hosts.
-                # wss: replaced with wss://{$DOMAIN_NAME} for the notification hub WS.
-                # push.bitwarden.com and identity.bitwarden.com are the only permitted
-                # external connect targets required by Bitwarden push notifications.
-                Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss://{$DOMAIN_NAME} https://push.bitwarden.com https://identity.bitwarden.com; frame-src 'self'; object-src 'none'; base-uri 'self';"
+                # FIX [CF-1]: connect-src push endpoints are conditional on PUSH_ENABLED.
+                # PUSH_CSP is set to "" by entrypoint.sh when PUSH_ENABLED!=true, and to
+                # "https://push.bitwarden.com https://identity.bitwarden.com" when true.
+                # This prevents unnecessarily widening CSP attack surface for the majority
+                # of deployments that do not use Bitwarden push notifications.
+                Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss://{$DOMAIN_NAME}{$PUSH_CSP}; frame-src 'self'; object-src 'none'; base-uri 'self';"
 
                 # Permissions Policy (restrict dangerous features)
                 Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=(), usb=()"
@@ -202,8 +201,9 @@
                 # already protected by Caddy basic_auth and should only be accessible from
                 # trusted IPs via Cloudflare firewall rules.
                 # Stricter CSP for admin panel
+                # FIX [CF-1]: PUSH_CSP applied conditionally here as well.
                 header {
-                        Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss://{$DOMAIN_NAME} https://push.bitwarden.com https://identity.bitwarden.com; frame-src 'self'; object-src 'none'; base-uri 'self';"
+                        Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss://{$DOMAIN_NAME}{$PUSH_CSP}; frame-src 'self'; object-src 'none'; base-uri 'self';"
                         # FIX [P3-C1]: X-Admin-Access header removed.
                         # Broadcasting panel existence in every response is an
                         # unnecessary information disclosure. Removed entirely.
