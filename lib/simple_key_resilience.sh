@@ -50,6 +50,15 @@
 #   SKR-L2 [LOW]    verify_key_replica(): if the replica list is empty the
 #                   function returned 0 (success) silently.
 #                   Fix: detect empty replica array and return 1 with log_warn.
+#
+# PATCHED BUGS (2026-03-13):
+#   SK-1  [MEDIUM]  simple_verify_age_key(): used echo "$test_data" | age ...
+#                   for the crypto round-trip. echo appends a trailing newline;
+#                   the comparison only held because $() strips trailing newlines
+#                   — a fragile coincidence that breaks if read -r or binary data
+#                   is ever introduced.
+#                   Fix: replaced with printf '%s' "$test_data" | age ... for
+#                   deterministic, newline-free byte handling.
 
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_KEY_RESILIENCE_LIB_LOADED:-}" ]] && return 0
@@ -99,6 +108,11 @@ simple_verify_age_key() {
     fi
 
     # Check 3: Validity — Encrypt/Decrypt roundtrip
+    # SK-1 FIX: use printf '%s' instead of echo to avoid appending a trailing
+    # newline. The old echo-based comparison only worked because $() strips
+    # trailing newlines — a fragile coincidence. printf '%s' emits exactly the
+    # bytes in $test_data with no newline, making the comparison deterministic
+    # and safe if the callers ever switch to read -r or binary data.
     local test_data="vw-key-check-$(date +%s)"
     local result
 
@@ -108,7 +122,7 @@ simple_verify_age_key() {
         return 1
     fi
 
-    if ! result=$(echo "$test_data" | age -r "$public_key" 2>/dev/null | age -d -i "$age_key" 2>/dev/null); then
+    if ! result=$(printf '%s' "$test_data" | age -r "$public_key" 2>/dev/null | age -d -i "$age_key" 2>/dev/null); then
         log_error "Age key encryption/decryption test failed"
         return 1
     fi
@@ -392,8 +406,8 @@ restore_key_from_replica() {
 # Single quotes prevent variable expansion at trap-registration time. When the
 # EXIT handler fires, $temp_html is evaluated in the cleanup context where it
 # may be empty or wrong, leaving the plaintext key file on disk.
-# Fixed: double-quote the trap command and single-quote the expanded path value,
-# matching the pattern already used correctly in create_password_manager_escrow().
+# Fixed: double-quote the trap command so $temp_html expands NOW, matching the
+# pattern already used correctly in create_password_manager_escrow().
 #
 # BUG-R3 FIX: qrencode was called as: qrencode -t PNG -o - "$key_content"
 # The full Age private key appeared as a positional argument in the process
