@@ -61,6 +61,25 @@
 #                   write_file_integrity() writes both the plain SHA-256 and
 #                   the HMAC sidecar so new callers can adopt authenticated
 #                   integrity checking without changing their call sites.
+#
+# PATCHED BUGS (2026-03-13):
+#   LC-1  [HIGH]    generate_bcrypt_hash(): no local validation of the cost
+#                   factor range. A caller passing rounds=6 (e.g. from a
+#                   misconfigured .env) silently generates a cryptographically
+#                   weak credential.
+#                   Fix: guard [[ "$rounds" =~ ^[0-9]+$ ]] &&
+#                   (( rounds >= 10 && rounds <= 31 )) before calling htpasswd.
+#   LC-2  [MEDIUM]  check_age_key(): mktemp failure path returned 0 (success)
+#                   via `|| { log_warn ...; return 0; }`. A key that cannot be
+#                   tested was reported healthy — a fail-open path.
+#                   Fix: fail closed — return 1 with log_error when mktemp
+#                   cannot create the temp file.
+#   LC-3  [MEDIUM]  encrypt_sops_file(): temp file created at process umask
+#                   (022 → 644) before SOPS writes encrypted content. A brief
+#                   window exists where partially-written ciphertext is
+#                   world-readable.
+#                   Fix: chmod 600 "$tmp_file" immediately after mktemp,
+#                   before the cp and sops calls.
 
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_CRYPTO_LIB_LOADED:-}" ]] && return 0
@@ -193,6 +212,11 @@ decrypt_sops_file() {
 #
 # [MEDIUM FIX] Replaced `age-keygen -y` with _derive_age_public_key() for
 # Ubuntu 22.04 compatibility and codebase consistency.
+#
+# LC-3 FIX: chmod 600 applied to tmp_file immediately after mktemp, before
+# any content is written, to eliminate the world-readable race window that
+# exists between mktemp (creates file at process umask, typically 644) and
+# the subsequent SOPS write.
 encrypt_sops_file() {
     local file="$1"
     local age_key_file="${2:-$DEFAULT_AGE_KEY_FILE}"
@@ -224,6 +248,13 @@ encrypt_sops_file() {
         log_error "Failed to create temp file for SOPS encryption: $file"
         return 1
     }
+
+    # LC-3 FIX: restrict permissions immediately after mktemp, before any
+    # content is written. mktemp creates the file at the process umask
+    # (typically 022 → mode 644, world-readable). Setting 600 here closes
+    # the race window so no partially-written SOPS ciphertext is ever
+    # world-readable, even transiently.
+    chmod 600 "$tmp_file"
 
     # Copy original content into the temp file so SOPS can read its format
     if ! cp -- "$file" "$tmp_file"; then
@@ -338,6 +369,10 @@ get_age_public_key() {
 # CRY-L2 FIX: In addition to permission and format checks, perform a full
 # encrypt/decrypt round-trip using age to detect corrupted private key
 # material.
+#
+# LC-2 FIX: mktemp failure path now returns 1 (fail-closed) instead of 0
+# (fail-open). A key that cannot be tested is no longer silently reported
+# as healthy.
 check_age_key() {
     local age_key_file="${1:-$DEFAULT_AGE_KEY_FILE}"
 
@@ -372,13 +407,14 @@ check_age_key() {
     fi
 
     # CRY-L2 FIX: encrypt/decrypt round-trip to verify private key material integrity
+    # LC-2 FIX: fail closed on mktemp failure — a key that cannot be tested
+    # must NOT be reported healthy (fail-open was the previous behaviour).
     if has_command age; then
         local test_plaintext="vaultwarden-age-key-check"
         local tmp_enc
         tmp_enc=$(mktemp) || {
-            log_warn "check_age_key: cannot create temp file for round-trip test; skipping"
-            log_debug "Age key validation passed (header + prefix only): $age_key_file"
-            return 0
+            log_error "check_age_key: cannot create temp file for round-trip test — key NOT verified"
+            return 1
         }
 
         local round_trip_ok=false
@@ -589,11 +625,23 @@ print(ph.hash(password))
 # Generate bcrypt hash (for Caddy basic auth)
 #
 # [MEDIUM FIX] Default cost documented: 12 (OWASP recommended minimum).
+#
+# LC-1 FIX: Validate the cost factor before calling htpasswd. A caller
+# passing rounds=6 (e.g. from a misconfigured .env) would silently produce
+# a cryptographically weak credential. bcrypt cost must be in [10, 31]:
+#   • 10 is the OWASP-recommended minimum for interactive logins.
+#   • 31 is the maximum accepted by the bcrypt specification.
 generate_bcrypt_hash() {
     local password="$1"
     local rounds="${2:-12}"
 
     [[ -z "$password" ]] && return 1
+
+    # LC-1 FIX: guard against out-of-range cost factor.
+    if ! [[ "$rounds" =~ ^[0-9]+$ ]] || ! (( rounds >= 10 && rounds <= 31 )); then
+        log_error "bcrypt cost $rounds out of range [10-31] — refusing to generate weak hash"
+        return 1
+    fi
 
     local bcrypt_hash
     bcrypt_hash=$(printf '%s\n' "$password" | htpasswd -niBC "$rounds" user 2>/dev/null | cut -d: -f2)
