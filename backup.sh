@@ -34,6 +34,14 @@
 #            mounts where mtime is not updated on write.
 #   LOW-2:   Partial failure (rclone upload ok but quick-verify failed) now sends a distinct
 #            WARNING notification before any success email, making the failure visible.
+#
+# PATCH FIXES (B-1 through B-6):
+#   B-1:  _set_cloexec_on_fd: fixed elif...; do → elif...; then (bash parse-time error)
+#   B-2:  perform_full_backup titlecase: removed broken GNU sed branch; use printf+tr only
+#   B-3:  perform_db_backup WAL checkpoint: validate result; abort if pages unincorporated
+#   B-4:  verify_backup_quick: missing age key is now a hard error (return 1), not a warning
+#   B-5:  LOCK_FD changed from 200 to 9 (POSIX-safe range; avoids Docker FD truncation)
+#   B-6:  KEEP_DAYS validated as positive integer after arg parsing (command-injection guard)
 
 set -euo pipefail
 
@@ -60,9 +68,11 @@ EMAIL_NOTIFY=false   # set by --email; send_notification_email() called on compl
 LIST_ONLY=false      # set by --list; print existing backups and exit (no root needed)
 RCLONE_SYNC=false    # set by --rclone; sync encrypted backup to rclone remote after creation
 FULL_VERIFY=false    # set by --full-verification; decrypt + integrity check before sync
-# FIX P2-C3: LOCK_FD is declared here; the fd is opened with exec inside main()
-# immediately before flock so the file descriptor actually exists when flock runs.
-LOCK_FD=200
+# B-5 FIX: LOCK_FD changed from 200 to 9. FD 200 is closed in some Docker
+# environments (which cap inherited FDs at 128 or 255), causing flock to
+# silently fail and defeat the concurrent-run lock. FD 9 is within every
+# POSIX-guaranteed range and safe across all container runtimes.
+LOCK_FD=9
 
 show_help() {
     cat << 'EOF'
@@ -113,6 +123,15 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# B-6 FIX: Validate KEEP_DAYS immediately after argument parsing.
+# Reject any value that is not a plain positive integer to prevent
+# command injection via find -mtime +$keep_days (shell word-splitting
+# would execute arbitrary commands in a value like "14; rm -rf /").
+if ! [[ "$KEEP_DAYS" =~ ^[0-9]+$ ]] || ! (( KEEP_DAYS >= 1 )); then
+    log_error "Invalid --keep value: '${KEEP_DAYS}' — must be a positive integer (e.g. 14)"
+    exit 1
+fi
+
 b_log_info()    { [[ "$QUIET" == "true" ]] || log_info "$*";    }
 b_log_success() { [[ "$QUIET" == "true" ]] || log_success "$*"; }
 b_log_warn()    { [[ "$QUIET" == "true" ]] || log_warn "$*";    }
@@ -138,6 +157,11 @@ cleanup() { [[ -n "$TMPDIR_BACKUP" ]] && rm -rf "$TMPDIR_BACKUP" 2>/dev/null || 
 #      (both are present on any system that can run docker)
 # If neither python3 nor perl is available we fall back gracefully — the lock
 # still works, just without close-on-exec semantics (pre-audit behaviour).
+#
+# B-1 FIX: The perl elif branch previously ended with "; do" (while-loop
+# syntax), causing a bash parse-time error that killed the entire script on
+# systems where python3 is absent. Changed to "; then" (correct if-elif
+# branch syntax).
 # ---------------------------------------------------------------------------
 _set_cloexec_on_fd() {
     local fd="$1"
@@ -149,7 +173,7 @@ fd = int(sys.argv[1])
 flags = fcntl.fcntl(fd, fcntl.F_GETFD)
 fcntl.fcntl(fd, fcntl.F_SETFD, flags | fcntl.FD_CLOEXEC)
 PYEOF
-    elif command -v perl >/dev/null 2>&1; do
+    elif command -v perl >/dev/null 2>&1; then
         perl -e "
 use Fcntl;
 my \$fd = $fd;
@@ -382,6 +406,11 @@ verify_backup_full() {
 # age --decrypt to /dev/null so corrupt ciphertext is caught even when
 # --full-verification is not requested.  A non-empty file with a matching SHA256
 # but corrupt ciphertext will now fail this check.
+#
+# B-4 FIX: A missing age key file now causes a hard error (return 1) instead
+# of a log_warn + silent success. Proceeding without the decrypt probe on a
+# "verified" backup would allow a permanently unrecoverable archive to be
+# uploaded to rclone as passing verification.
 # ---------------------------------------------------------------------------
 verify_backup_quick() {
     local enc_file="$1"
@@ -409,19 +438,22 @@ verify_backup_quick() {
         b_log_warn "No SHA256 sidecar found — skipping hash check"
     fi
 
-    # 3. AUDIT MED-1: Decrypt probe — stream to /dev/null; verifies ciphertext
-    #    integrity without writing decrypted data to disk.
+    # 3. B-4 FIX: Missing age key is a hard error. Skipping the decrypt probe
+    #    would let a corrupt or tampered ciphertext pass verification and be
+    #    uploaded to rclone as "verified" — an unrecoverable state.
     #    AUDIT HIGH-2 note: -i <key-file> identity, never --passphrase on cmdline.
-    if [[ -f "$age_key_file" ]]; then
-        if ! age -d -i "$age_key_file" -o /dev/null "$enc_file" 2>/dev/null; then
-            log_error "Quick verify FAILED: age --decrypt probe failed for $(basename "$enc_file")"
-            log_error "The ciphertext may be corrupt even though the SHA256 matched."
-            return 1
-        fi
-        b_log_info "Decrypt probe passed"
-    else
-        b_log_warn "Age key file not found ($age_key_file) — skipping decrypt probe"
+    if [[ ! -f "$age_key_file" ]]; then
+        log_error "Quick verify FAILED: Age key file not found ($age_key_file)"
+        log_error "Cannot perform decrypt probe — refusing to report verification success."
+        return 1
     fi
+
+    if ! age -d -i "$age_key_file" -o /dev/null "$enc_file" 2>/dev/null; then
+        log_error "Quick verify FAILED: age --decrypt probe failed for $(basename "$enc_file")"
+        log_error "The ciphertext may be corrupt even though the SHA256 matched."
+        return 1
+    fi
+    b_log_info "Decrypt probe passed"
 
     b_log_success "Quick verification passed: $(basename "$enc_file")"
     return 0
@@ -604,6 +636,8 @@ cleanup_old_backups() {
 # FIX P2-H3: .meta block now includes archive_format= and version= fields.
 # AUDIT HIGH-1: fallback cp path now waits for container stopped state first.
 # AUDIT HIGH-2: encryption uses -r <pub_key> (recipient), NOT --passphrase.
+# B-3 FIX: WAL checkpoint result is now validated; backup aborts if any WAL
+#          pages remain unincorporated (non-zero busy or log page counts).
 # ---------------------------------------------------------------------------
 perform_db_backup() {
     local target_dir="$1"
@@ -652,10 +686,26 @@ perform_db_backup() {
             fi
         fi
 
-        if ! sqlite3 "$db_file" "PRAGMA wal_checkpoint(TRUNCATE);" 2>/dev/null; then
-            b_log_warn "WAL checkpoint failed — copy may be missing recent uncommitted transactions"
+        # B-3 FIX: Capture and validate the WAL checkpoint result.
+        # PRAGMA wal_checkpoint(TRUNCATE) returns a row: "blocked|log_pages|ckpt_pages"
+        # A non-zero log or checkpoint page count means WAL data is not yet
+        # incorporated into the main DB file; copying now would produce an
+        # inconsistent snapshot. Abort rather than silently back up partial data.
+        local wal_result
+        wal_result=$(sqlite3 "$db_file" "PRAGMA wal_checkpoint(TRUNCATE);" 2>&1) || {
+            b_log_warn "WAL checkpoint command failed — copy may be missing recent transactions"
             b_log_warn "For guaranteed consistency, stop VaultWarden before backup or fix sqlite3 .backup"
+        }
+        if [[ -n "$wal_result" ]]; then
+            if ! echo "$wal_result" | awk -F'|' '$2!=0 || $3!=0 {exit 1}'; then
+                log_error "WAL checkpoint incomplete — unincorporated pages remain (result: $wal_result)"
+                log_error "Aborting fallback copy to avoid backing up an inconsistent database."
+                log_error "Stop VaultWarden fully, then retry, or fix sqlite3 .backup."
+                return 1
+            fi
+            b_log_info "WAL checkpoint succeeded (result: $wal_result)"
         fi
+
         cp "$db_file" "$snap"
 
         if [[ "$container_was_running" == "true" ]]; then
@@ -709,8 +759,12 @@ MEOF
 # Full / emergency backup  (RELATIVE-PATH archive)
 # FIX-B07: Uses create_db_snapshot_host() (host sqlite3) instead of Docker.
 # MOD-1: Uses zstd compression instead of gzip.
-# FIX P1-M6: ${backup_label^} replaced with portable printf/sed titlecase.
+# FIX P1-M6: ${backup_label^} replaced with portable printf/tr titlecase.
 # AUDIT HIGH-2: encryption uses -r <pub_key> (recipient), NOT --passphrase.
+# B-2 FIX: Removed the GNU sed 's/./\u&/' branch entirely. BusyBox/Alpine sed
+#          exits 0 but emits "ufull"/"uemergency" instead of the capitalised
+#          word, so the || fallback never fired and .meta files contained wrong
+#          label values. Now uses only the portable printf+tr one-liner.
 # ---------------------------------------------------------------------------
 perform_full_backup() {
     local target_dir="$1"
@@ -721,10 +775,10 @@ perform_full_backup() {
     local state_dir
     state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
 
-    # FIX P1-M6: portable titlecase — no bash 4.0+ parameter expansion required.
+    # B-2 FIX: portable titlecase using printf + tr only — no GNU sed required.
+    # Produces "Full" from "full", "Emergency" from "emergency", etc.
     local backup_label_title
-    backup_label_title="$(printf '%s' "$backup_label" | sed 's/./\u&/')" 2>/dev/null \
-        || backup_label_title="$(printf '%s' "${backup_label:0:1}" | tr '[:lower:]' '[:upper:]')${backup_label:1}"
+    backup_label_title="$(printf '%s' "${backup_label:0:1}" | tr '[:lower:]' '[:upper:]')${backup_label:1}"
 
     b_log_info "Performing ${backup_label} backup (relative-path archive)..."
 
@@ -880,7 +934,7 @@ archive_format=relative
 version=2
 MEOF
 
-    # FIX P1-M6: use portable titlecase variable instead of ${backup_label^}.
+    # B-2 FIX: use portable titlecase variable instead of GNU sed or ${backup_label^}.
     b_log_success "${backup_label_title} backup: $(basename "$enc")"
     echo "$enc"
 }
@@ -906,7 +960,10 @@ main() {
 
     local LOCK_FILE="/var/lock/vaultwarden-backup.lock"
 
-    # FIX P2-C3 + AUDIT MED-3: open lock fd immediately before flock.
+    # B-5 FIX + AUDIT MED-3: open lock fd immediately before flock.
+    # FD 9 is used (changed from 200) to stay within all POSIX-guaranteed FD
+    # ranges. Some Docker environments close FDs above 128 or 255 before exec,
+    # which would cause flock -n 200 to silently fail and defeat the lock.
     # _set_cloexec_on_fd() marks the fd FD_CLOEXEC so child processes do not
     # inherit and hold the lock open after fork/exec.
     if [[ "$FORCE" != "true" && "$DRY_RUN" != "true" ]]; then
