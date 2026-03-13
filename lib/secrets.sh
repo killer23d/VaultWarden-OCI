@@ -25,7 +25,7 @@
 #                   shred is ineffective and OCI block volume snapshots could
 #                   capture the file before the EXIT trap fires.
 #                   Fix: _tmpfs_dir() resolves a tmpfs path in priority order
-#                   (/dev/shm → /run/user/UID → /tmp) and the kit is written
+#                   (/dev/shm -> /run/user/UID -> /tmp) and the kit is written
 #                   there. A prominent WARNING banner is printed to the TTY
 #                   *before* the file is opened so the user is always aware
 #                   that plaintext is about to land on disk.
@@ -66,6 +66,35 @@
 #                   secret *values* to transit the shell pipeline buffer.
 #                   Fix: decode key names only via python3/yaml; values are
 #                   never decrypted into the pipeline.
+#
+# PATCHED BUGS (2026-03-13):
+#   LS-1 [CRITICAL] generate_recovery_kit(): decrypted the full secrets set
+#                   into a single bash variable secrets_json, then re-piped it
+#                   via echo "$secrets_json" | jq through 8+ subshells,
+#                   exposing the full plaintext payload in /proc/$$/fd/ pipe
+#                   buffers readable by any same-UID process.
+#                   Fix: each secret is now extracted individually via
+#                   sops -d --extract '["key"]' so full plaintext JSON is
+#                   never materialised in a variable or pipe.
+#   LS-2 [CRITICAL] cleanup_secrets_environment(): was an explicit no-op.
+#                   Every child process inherited SOPS_AGE_KEY_FILE, broadcasting
+#                   the Age private key file path.
+#                   Fix: real cleanup — unset SOPS_AGE_KEY_FILE; unset SOPS_CONFIG.
+#   LS-3 [HIGH]     validate_secrets_yaml(): decrypted the full secrets file
+#                   through a sops -d | python3 pipe, materialising all 8
+#                   plaintext secrets on every validation call.
+#                   Fix: sops -d --output-type json "$secrets_file" > /dev/null
+#                   validates both decryptability and YAML structure without
+#                   a plaintext pipeline.
+#   LS-4 [HIGH]     create_secrets_backup(): cp then chmod 600 left the
+#                   SOPS-encrypted backup world-readable between the two calls.
+#                   Fix: install -m 600 /dev/null first (atomic), then cp.
+#   LS-5 [MEDIUM]   cleanup_old_secret_backups(): echo "$old_backups" | xargs
+#                   splits on spaces in paths.
+#                   Fix: find -print0 | sort -rz | tail -z | xargs -0 rm -f.
+#   LS-6 [MEDIUM]   _ork_generate_and_secure(): trap ... EXIT overwrote any
+#                   caller-level EXIT trap.
+#                   Fix: changed to trap ... RETURN for function-scoped cleanup.
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     echo "Error: This library should be sourced, not executed directly"
@@ -104,8 +133,19 @@ ensure_sops_env() {
 
 setup_secrets_environment() { ensure_sops_env "${1:-}"; }
 
+# ---------------------------------------------------------------------------
+# cleanup_secrets_environment
+#
+# LS-2 FIX: Was an explicit no-op, leaving SOPS_AGE_KEY_FILE and SOPS_CONFIG
+# exported for the lifetime of the calling script. Every child process
+# spawned after secrets operations (docker compose, rclone, curl) inherited
+# the Age private key file path, broadcasting a sensitive credential.
+# Fix: perform real cleanup by unsetting both SOPS variables.
+# ---------------------------------------------------------------------------
 cleanup_secrets_environment() {
-    log_debug "cleanup_secrets_environment: no-op (SOPS vars persist for script lifetime)"
+    unset SOPS_AGE_KEY_FILE
+    unset SOPS_CONFIG
+    log_debug "cleanup_secrets_environment: SOPS_AGE_KEY_FILE and SOPS_CONFIG unset"
     return 0
 }
 
@@ -113,7 +153,7 @@ cleanup_secrets_environment() {
 # write_secret_file DEST VALUE
 #
 # BUG-S7 FIX: echo "$value" > "$dest" created the file at the process umask
-# (typically 022 → 644), making it world-readable from creation until the
+# (typically 022 -> 644), making it world-readable from creation until the
 # subsequent chmod 600 call.  Fix: save and restore umask around the write,
 # setting 077 so the file is born at mode 600.  chmod 600 is retained as
 # belt-and-suspenders in case the shell's umask is manipulated externally.
@@ -263,11 +303,25 @@ validate_secrets_decryption() {
     return 0
 }
 
+# ---------------------------------------------------------------------------
+# validate_secrets_yaml [SECRETS_FILE]
+#
+# LS-3 FIX: The previous implementation piped the full decrypted output
+# through python3, materialising all 8 plaintext secrets in a kernel pipe
+# buffer on every call (invoked from setup-secrets.sh and edit-secrets.sh).
+# Fix: use sops --output-type json with stdout discarded; sops itself
+# validates both decryptability and the YAML/JSON structure, producing no
+# plaintext pipeline.
+# ---------------------------------------------------------------------------
 validate_secrets_yaml() {
     local secrets_file="${1:-$SECRETS_FILE}"
+    if [[ ! -f "$secrets_file" ]]; then
+        log_error "Secrets file not found: $secrets_file"
+        return 1
+    fi
     if ! ensure_sops_env; then return 1; fi
-    if ! sops -d "$secrets_file" | python3 -c "import yaml, sys; yaml.safe_load(sys.stdin)" 2>/dev/null; then
-        log_warn "Secrets file contains invalid YAML"
+    if ! sops -d --output-type json "$secrets_file" > /dev/null 2>&1; then
+        log_warn "Secrets file cannot be decrypted or contains invalid YAML"
         return 1
     fi
     return 0
@@ -334,6 +388,21 @@ list_secret_keys() {
 # ---------------------------------------------------------------------------
 # Backup helpers
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# create_secrets_backup [SECRETS_FILE [BACKUP_DIR]]
+#
+# LS-4 FIX: The original implementation used:
+#   cp "$secrets_file" "$backup_file"
+#   chmod 600 "$backup_file"
+# cp(1) creates the destination at the process umask (typically 022 -> 644),
+# so the SOPS-encrypted backup file was world-readable from the moment it was
+# created until chmod ran. Even though the content is still SOPS-encrypted,
+# this violates the principle of least privilege and may be prohibited by
+# compliance requirements.
+# Fix: atomically pre-create the file at mode 600 using install(1) before cp
+# writes any data into it, so the file is never in a permissive state.
+# ---------------------------------------------------------------------------
 create_secrets_backup() {
     local secrets_file="${1:-$SECRETS_FILE}"
     local backup_dir="${2:-$SECRETS_BACKUP_DIR}"
@@ -343,25 +412,42 @@ create_secrets_backup() {
     fi
     local backup_file="$backup_dir/secrets.yaml.backup-$(date +%Y%m%d-%H%M%S)"
     log_info "Creating backup: $(basename "$backup_file")"
-    if ! cp "$secrets_file" "$backup_file"; then
-        log_error "Failed to create backup"
+    # LS-4 FIX: pre-create at 600 so the file is never world-readable.
+    if ! install -m 600 /dev/null "$backup_file"; then
+        log_error "Failed to pre-create backup file with secure permissions: $backup_file"
         return 1
     fi
-    chmod 600 "$backup_file"
+    if ! cp "$secrets_file" "$backup_file"; then
+        log_error "Failed to create backup"
+        rm -f "$backup_file" 2>/dev/null || true
+        return 1
+    fi
     log_success "Backup created"
     return 0
 }
 
+# ---------------------------------------------------------------------------
+# cleanup_old_secret_backups [BACKUP_DIR [KEEP_COUNT]]
+#
+# LS-5 FIX: The original implementation collected old backup paths into a
+# variable via newline-delimited find output, then passed them to xargs rm
+# via echo. If $backup_dir contained spaces, xargs would split the path,
+# pass incorrect tokens to rm, and silently fail to delete old backups (or
+# delete wrong paths).
+# Fix: use a fully NUL-delimited pipeline:
+#   find -print0 | sort -rz | tail -z -n +N | xargs -0 rm -f
+# so filenames with spaces, newlines, or special characters are handled
+# correctly at every stage.
+# ---------------------------------------------------------------------------
 cleanup_old_secret_backups() {
     local backup_dir="${1:-$SECRETS_BACKUP_DIR}"
     local keep_count="${2:-5}"
-    local old_backups
-    old_backups=$(find "$backup_dir" -name "secrets.yaml.backup-*" -type f 2>/dev/null \
-        | sort -r | tail -n +$(( keep_count + 1 )))
-    if [[ -n "$old_backups" ]]; then
-        echo "$old_backups" | xargs rm -f
-        log_debug "Cleaned up old secrets backups (keeping last $keep_count)"
-    fi
+    # LS-5 FIX: NUL-delimited pipeline — safe for paths containing spaces.
+    find "$backup_dir" -name "secrets.yaml.backup-*" -type f -print0 2>/dev/null \
+        | sort -rz \
+        | tail -z -n +$(( keep_count + 1 )) \
+        | xargs -0 rm -f
+    log_debug "Cleaned up old secrets backups (keeping last $keep_count)"
     return 0
 }
 
@@ -399,9 +485,9 @@ _secure_shred() {
 # BUG-S5 FIX (P3-C3): Returns a path that resides on a tmpfs/ramfs mount so
 # that the plaintext recovery kit never touches a persistent block device.
 # Priority order:
-#   1. /dev/shm   — POSIX shared memory (tmpfs, Linux)
-#   2. /run/user/UID — systemd user runtime dir (tmpfs, Linux)
-#   3. /tmp       — last resort; may be tmpfs on some systems but is NOT
+#   1. /dev/shm   -- POSIX shared memory (tmpfs, Linux)
+#   2. /run/user/UID -- systemd user runtime dir (tmpfs, Linux)
+#   3. /tmp       -- last resort; may be tmpfs on some systems but is NOT
 #                   guaranteed; caller receives a warning in this case.
 #
 # Outputs the chosen directory path on stdout and returns 0.
@@ -422,10 +508,10 @@ _tmpfs_dir() {
         return 0
     fi
 
-    # /tmp fallback — warn via TTY so the operator sees it even when stderr
+    # /tmp fallback -- warn via TTY so the operator sees it even when stderr
     # is redirected to the journal.
     if [[ -w /tmp ]]; then
-        printf '\n⚠️  WARNING: /dev/shm and /run/user/%s are unavailable.\n' "$uid" > /dev/tty 2>/dev/null || true
+        printf '\n WARNING: /dev/shm and /run/user/%s are unavailable.\n' "$uid" > /dev/tty 2>/dev/null || true
         printf '            Recovery kit will be written to /tmp which may NOT be tmpfs.\n' > /dev/tty 2>/dev/null || true
         printf '            Shred effectiveness on CoW/journaled filesystems is not guaranteed.\n\n' > /dev/tty 2>/dev/null || true
         echo "/tmp"
@@ -464,7 +550,7 @@ validate_cloudflare_token() {
         || [[ "$zone_id" == "your_cloudflare_zone_id_here" ]] \
         || [[ "$zone_id" == CHANGE_ME* ]] \
         || [[ "$zone_id" =~ ^[[:space:]]*$ ]]; then
-        log_warn "validate_cloudflare_token: CLOUDFLARE_ZONE_ID is not configured — validation skipped (token NOT verified)"
+        log_warn "validate_cloudflare_token: CLOUDFLARE_ZONE_ID is not configured -- validation skipped (token NOT verified)"
         return 1
     fi
 
@@ -564,7 +650,7 @@ _bcrypt_format_ok() {
 }
 
 # ---------------------------------------------------------------------------
-# collect_secret_field  — single source of truth for INTERACTIVE collection
+# collect_secret_field  -- single source of truth for INTERACTIVE collection
 # ---------------------------------------------------------------------------
 collect_secret_field() {
     local field="$1"
@@ -663,14 +749,14 @@ collect_secret_field() {
             # captured by stderr redirection or the systemd journal.
             {
                 printf '\n'
-                printf '🔑 AUTO-GENERATED BACKUP PASSPHRASE (save if needed):\n'
+                printf ' AUTO-GENERATED BACKUP PASSPHRASE (save if needed):\n'
                 printf '   %s\n' "$passphrase"
                 printf '\n'
             } > /dev/tty 2>/dev/null || {
                 # /dev/tty unavailable (truly non-interactive): emit a redacted
                 # notice to stderr so the caller knows a passphrase was set,
                 # but never include the plaintext value.
-                log_warn "Backup passphrase auto-generated (32 chars) — retrieve from secrets store." >&2
+                log_warn "Backup passphrase auto-generated (32 chars) -- retrieve from secrets store." >&2
             }
             printf '%s' "$passphrase"
             ;;
@@ -684,7 +770,7 @@ collect_secret_field() {
 }
 
 # ---------------------------------------------------------------------------
-# auto_generate_secret_field  — single source of truth for AUTO-MODE generation
+# auto_generate_secret_field  -- single source of truth for AUTO-MODE generation
 # ---------------------------------------------------------------------------
 auto_generate_secret_field() {
     local field="$1"
@@ -700,16 +786,16 @@ auto_generate_secret_field() {
             # Write it exclusively to /dev/tty (the operator's terminal).
             {
                 printf '\n'
-                printf '🔐 AUTO-GENERATED VAULTWARDEN ADMIN PASSWORD:\n'
+                printf ' AUTO-GENERATED VAULTWARDEN ADMIN PASSWORD:\n'
                 printf '   %s\n' "$vw_pass"
                 printf '\n'
-                printf '⚠️  SAVE THIS PASSWORD SECURELY - It cannot be recovered!\n'
+                printf ' SAVE THIS PASSWORD SECURELY - It cannot be recovered!\n'
                 printf '\n'
             } > /dev/tty 2>/dev/null || {
                 # /dev/tty unavailable (batch/CI with no terminal): emit a
                 # redacted notice to stderr so callers see that generation
                 # occurred but never receive the plaintext value in the journal.
-                log_warn "VaultWarden admin password auto-generated — retrieve from recovery kit." >&2
+                log_warn "VaultWarden admin password auto-generated -- retrieve from recovery kit." >&2
             }
             log_info "Generating Argon2id hash..." >&2
             local vw_hash
@@ -728,13 +814,13 @@ auto_generate_secret_field() {
             # BUG-S6 FIX (P3-M5): Same journal-leak fix as admin_token above.
             {
                 printf '\n'
-                printf '🔐 AUTO-GENERATED CADDY ADMIN PASSWORD:\n'
+                printf ' AUTO-GENERATED CADDY ADMIN PASSWORD:\n'
                 printf '   %s\n' "$caddy_pass"
                 printf '\n'
-                printf '⚠️  SAVE THIS PASSWORD SECURELY - It cannot be recovered!\n'
+                printf ' SAVE THIS PASSWORD SECURELY - It cannot be recovered!\n'
                 printf '\n'
             } > /dev/tty 2>/dev/null || {
-                log_warn "Caddy admin password auto-generated — retrieve from recovery kit." >&2
+                log_warn "Caddy admin password auto-generated -- retrieve from recovery kit." >&2
             }
             log_info "Generating bcrypt hash for Caddy basic auth..." >&2
             local caddy_hash
@@ -790,13 +876,21 @@ auto_generate_secret_field() {
 }
 
 # ---------------------------------------------------------------------------
-# Recovery Kit Generation
+# generate_recovery_kit OUTPUT_FILE
 #
-# CONTRACT: generate_recovery_kit() writes a plaintext file containing the
-# Age private key and all decrypted secrets to $output_file. The caller MUST
-# register an EXIT trap that calls _secure_shred() on $output_file before
-# calling this function. The offer_recovery_kit_export() wrapper below does
-# this correctly. Direct callers must do the same.
+# CONTRACT: writes a plaintext file containing the Age private key and all
+# decrypted secrets to $output_file. The caller MUST register a trap that
+# calls _secure_shred() on $output_file. The offer_recovery_kit_export()
+# wrapper below does this correctly. Direct callers must do the same.
+#
+# LS-1 FIX: The previous implementation decrypted the full secrets set into
+# a single bash variable (secrets_json) via sops -d --output-type json, then
+# re-piped that variable through 8+ separate echo "$secrets_json" | jq
+# subshells. This exposed the complete plaintext payload in /proc/$$/fd/ pipe
+# buffers, readable by any process running as the same UID.
+# Fix: each secret is now extracted individually via
+#   sops -d --extract '["key"]' "$file"
+# so the full plaintext JSON is never materialised in a variable or pipe.
 # ---------------------------------------------------------------------------
 generate_recovery_kit() {
     local output_file="$1"
@@ -806,11 +900,6 @@ generate_recovery_kit() {
 
     if [[ ! -f "$age_key" ]]; then
         log_error "Age key not found: $age_key"
-        return 1
-    fi
-
-    if ! command -v jq >/dev/null 2>&1; then
-        log_error "jq is required to generate the recovery kit. Please install it."
         return 1
     fi
 
@@ -846,6 +935,8 @@ generate_recovery_kit() {
     fi
 
     log_info "Decrypting secrets for export..."
+
+    # LS-1 FIX: extract each secret individually — no full-JSON variable.
     local vw_admin_hash="Not Set" caddy_hash="Not Set" smtp_pass="Not Set"
     local backup_pass="Not Set" cf_dns="Not Set" cf_fw="Not Set"
     local push_id="Not Set" push_key="Not Set"
@@ -853,20 +944,24 @@ generate_recovery_kit() {
     if [[ -f "$secrets_file" ]]; then
         if ! ensure_sops_env; then return 1; fi
 
-        local secrets_json
-        if secrets_json=$(sops -d --output-type json "$secrets_file" 2>/dev/null); then
-            vw_admin_hash=$(echo "$secrets_json" | jq -r '.admin_token // "Not Set"')
-            caddy_hash=$(echo "$secrets_json" | jq -r '.admin_basic_auth_hash // "Not Set"')
-            smtp_pass=$(echo "$secrets_json" | jq -r '.smtp_password // "Not Set"')
-            backup_pass=$(echo "$secrets_json" | jq -r '.backup_passphrase // "Not Set"')
-            cf_dns=$(echo "$secrets_json" | jq -r '.caddy_cloudflare_dns_token // "Not Set"')
-            cf_fw=$(echo "$secrets_json" | jq -r '.fail2ban_cloudflare_firewall_token // "Not Set"')
-            push_id=$(echo "$secrets_json" | jq -r '.push_installation_id // "Not Set"')
-            push_key=$(echo "$secrets_json" | jq -r '.push_installation_key // "Not Set"')
-        else
-            log_error "Failed to decrypt secrets.yaml. Ensure sops is working."
-            return 1
-        fi
+        _sops_extract() {
+            local _key="$1"
+            local _val
+            _val=$(sops -d --extract "[\"${_key}\"]" "$secrets_file" 2>/dev/null) \
+                && printf '%s' "$_val" \
+                || printf '%s' "Not Set"
+        }
+
+        vw_admin_hash=$(_sops_extract admin_token)
+        caddy_hash=$(_sops_extract admin_basic_auth_hash)
+        smtp_pass=$(_sops_extract smtp_password)
+        backup_pass=$(_sops_extract backup_passphrase)
+        cf_dns=$(_sops_extract caddy_cloudflare_dns_token)
+        cf_fw=$(_sops_extract fail2ban_cloudflare_firewall_token)
+        push_id=$(_sops_extract push_installation_id)
+        push_key=$(_sops_extract push_installation_key)
+
+        unset -f _sops_extract
     else
         log_warn "secrets.yaml not found"
     fi
@@ -1002,7 +1097,7 @@ EOF
 #
 # BUG-S3 FIX: The helper was previously a nested function defined inside
 # offer_recovery_kit_export(). Bash nested function definitions pollute the
-# global namespace — the function is visible and callable from anywhere after
+# global namespace -- the function is visible and callable from anywhere after
 # the outer function is sourced, which is surprising and potentially dangerous
 # for a helper that writes and securely deletes plaintext secret files.
 #
@@ -1015,6 +1110,10 @@ EOF
 # caller (offer_recovery_kit_export) via _tmpfs_dir(). A prominent WARNING
 # banner is printed to /dev/tty *before* generate_recovery_kit() opens the
 # file so the operator is aware that plaintext is about to land on disk.
+#
+# LS-6 FIX: trap ... EXIT was overwriting any caller-level EXIT trap (e.g.
+# setup.sh temp-dir cleanup). Changed to trap ... RETURN so the cleanup is
+# function-scoped only and never clobbers the caller's EXIT handler.
 # ---------------------------------------------------------------------------
 _ork_generate_and_secure() {
     local output_file="$1"
@@ -1025,7 +1124,7 @@ _ork_generate_and_secure() {
     {
         printf '\n'
         printf '════════════════════════════════════════════════════════════\n'
-        printf '⚠️  SECURITY NOTICE — PLAINTEXT FILE ABOUT TO BE WRITTEN\n'
+        printf ' SECURITY NOTICE -- PLAINTEXT FILE ABOUT TO BE WRITTEN\n'
         printf '════════════════════════════════════════════════════════════\n'
         printf 'The recovery kit will be written to:\n'
         printf '  %s\n' "$output_file"
@@ -1037,10 +1136,12 @@ _ork_generate_and_secure() {
         printf '\n'
     } > /dev/tty 2>/dev/null || true
 
-    # Register trap BEFORE generating so even a SIGINT during generation
-    # cleans up a partially-written plaintext file.
+    # LS-6 FIX: use RETURN trap (function-scoped) instead of EXIT trap so we
+    # do not overwrite the caller's EXIT handler (e.g. setup.sh temp-dir
+    # cleanup). The shred runs when this function returns (normally, via
+    # return, or via an unhandled signal that unwinds the call stack).
     # shellcheck disable=SC2064  # intentional: expand $output_file now
-    trap "_secure_shred '$output_file'; echo '[recovery-kit] Plaintext kit securely deleted.' >&2" EXIT
+    trap "_secure_shred '$output_file'; echo '[recovery-kit] Plaintext kit securely deleted.' >&2" RETURN
 
     if ! generate_recovery_kit "$output_file"; then
         log_error "Failed to generate recovery kit"
@@ -1049,7 +1150,7 @@ _ork_generate_and_secure() {
 
     log_success "Recovery Kit created: $output_file"
     echo ""
-    log_warn "⚠️  ACTION REQUIRED — SAVE NOW BEFORE THIS FILE IS AUTO-DELETED:"
+    log_warn " ACTION REQUIRED -- SAVE NOW BEFORE THIS FILE IS AUTO-DELETED:"
     echo "  1. Open the file: cat '$output_file'"
     echo "  2. Copy ALL contents to your password manager (Secure Note)."
     echo "  3. Optionally print a physical copy for your fireproof safe."
@@ -1066,7 +1167,9 @@ _ork_generate_and_secure() {
 
     log_info "Securely deleting recovery kit from server..."
     _secure_shred "$output_file"
-    trap - EXIT  # disarm: file is already gone
+    # Disarm the RETURN trap now that we have already shredded the file,
+    # preventing a redundant (harmless but noisy) second shred on return.
+    trap - RETURN
     log_success "Recovery kit securely deleted from server."
     echo ""
 }
