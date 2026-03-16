@@ -1,6 +1,6 @@
 # Backup & Restore — VaultWarden-OCI
 
-All backups are encrypted with **Age** and managed by `backup.sh`. The backup lock uses `flock` on a file descriptor — the kernel releases it automatically on any process exit, including SIGKILL and OOM kill.
+All backups are encrypted with **Age** and managed by `backup.sh`. The backup lock uses `flock` on FD 9 (POSIX-safe range, changed from FD 200 to survive Docker FD truncation) with `FD_CLOEXEC` set so child processes cannot inherit and hold the lock open after fork/exec. The kernel releases the lock automatically on any process exit, including SIGKILL and OOM kill.
 
 Related docs: [OPERATIONS.md](OPERATIONS.md) · [SCRIPTS.md](SCRIPTS.md) · [ADVANCED-CUSTOMIZATION.md](ADVANCED-CUSTOMIZATION.md)
 
@@ -18,6 +18,34 @@ Related docs: [OPERATIONS.md](OPERATIONS.md) · [SCRIPTS.md](SCRIPTS.md) · [ADV
 
 ---
 
+## 📦 Archive Format
+
+### File naming and extensions
+
+| Backup type | Encrypted file | Sidecar files |
+| :-- | :-- | :-- |
+| `db` | `db_backup_YYYYMMDD_HHMMSS.sqlite3.age` | `.sha256`, `.meta` |
+| `full` | `full_backup_YYYYMMDD_HHMMSS.tar.zst.age` | `.sha256`, `.meta` |
+| `emergency` | `emergency_backup_YYYYMMDD_HHMMSS.tar.zst.age` | `.sha256`, `.meta` |
+
+Full and emergency archives are compressed with **zstd** (threaded, level 3: `zstd -T0 -3`), replacing the previous gzip compression. The `.tar.zst.age` extension reflects this. Database-only backups are a raw SQLite file encrypted directly with Age — no compression layer.
+
+Each backup produces three files:
+
+| File | Purpose |
+| :-- | :-- |
+| `*.age` | Encrypted backup archive |
+| `*.sha256` | Post-encryption SHA-256 checksum (generated automatically) |
+| `*.meta` | Metadata (type, timestamp, archive format, version) |
+
+### Retention age calculation
+
+Retention is based on the **`YYYYMMDD-HHMMSS` timestamp embedded in the filename** (immutable across `cp`, `mv`, `chmod`, `chown`). This prevents a known failure mode where backups restored to a fresh host showed `ctime = now`, appeared 0 days old, and were never pruned. The ctime fallback is used only for files predating the current naming convention.
+
+Orphaned sidecar files (`.meta`, `.sha256`) whose corresponding `.age` primary is absent are removed on every cleanup sweep.
+
+---
+
 ## 📦 Creating Backups
 
 ### Database Backup (Daily)
@@ -32,14 +60,14 @@ make backup TYPE=db                          # silent (no email)
 ### Full System Backup (Weekly)
 
 ```bash
-./backup.sh --type full                      # fast checksum verification
+./backup.sh --type full                      # fast checksum + decrypt probe
 ./backup.sh --type full --full-verification  # end-to-end decrypt + integrity test
 ./backup.sh --type full --full-verification --rclone --email
 make backup-full                             # full backup with email
 ```
 
 **Included:** Docker Compose config, `.env`, Caddy config, Fail2ban config, VaultWarden data directory, database snapshot.
-**Excluded:** `secrets/` directory, Age keys, SSH keys.
+**Excluded:** `secrets/` directory, Age keys, SSH keys, `backups/`, `logs/`.
 
 ### Emergency Recovery Kit (As Needed)
 
@@ -58,13 +86,15 @@ make backup-emergency                         # emergency kit with email
 make list-backups
 ```
 
-Each backup produces three files:
+### Retention control
 
-| File | Purpose |
-| :-- | :-- |
-| `*.age` | Encrypted backup archive |
-| `*.sha256` | Post-encryption SHA-256 checksum (generated automatically) |
-| `*.meta` | Metadata (type, timestamp, version, size) |
+The default retention is **14 days** for all types. Override with `--keep N`:
+
+```bash
+sudo ./backup.sh --type db --keep 30
+```
+
+`--keep` accepts only positive integers; non-integer or shell-injectable values (e.g. `"14; rm -rf /"`) are rejected immediately after argument parsing.
 
 ---
 
@@ -72,10 +102,23 @@ Each backup produces three files:
 
 | Mode | Flag | Speed | What It Tests |
 | :-- | :-- | :-- | :-- |
-| Fast (default) | *(none)* | Seconds | SHA-256 checksum post-encryption |
+| Quick (default) | *(none)* | Seconds | SHA-256 checksum + Age decrypt probe |
 | Full | `--full-verification` | Minutes | Decrypt → extract → DB integrity check |
 
-Use fast for daily automated backups; full for weekly and before major changes.
+The quick mode now **always performs an actual Age decrypt probe** (in addition to SHA-256), so corrupt ciphertext is caught even without `--full-verification`. If the Age key file is missing, quick verification fails with a hard error (it no longer silently succeeds).
+
+Use quick for daily automated backups; full for weekly and before major changes.
+
+---
+
+## 🗄️ Database Snapshot Integrity
+
+`backup.sh` uses the **SQLite Online Backup API** (`sqlite3 .backup`) to produce a fully consistent database snapshot while VaultWarden is running. This replaces the previous approach of three sequential `cp` calls, which could capture an inconsistent state if VaultWarden committed a transaction between copies.
+
+For the WAL checkpoint fallback path (used only when the host `sqlite3` binary cannot be found), the script:
+1. Stops the VaultWarden container and waits up to 30 seconds for it to reach `exited` state.
+2. Validates the WAL checkpoint result (`PRAGMA wal_checkpoint(TRUNCATE)`) — if any WAL pages remain unincorporated, the backup is aborted rather than producing a partial snapshot.
+3. Restarts the container after the copy.
 
 ---
 
@@ -85,7 +128,7 @@ Your Age key (`secrets/keys/age-key.txt`) is the single point of failure for all
 
 ### Tier 1 — Automatic Health Check (runs on every backup)
 
-`backup.sh` calls `simple_verify_age_key` before every backup run. It checks that the key file exists, auto-corrects permissions to 600 if needed, validates the key structure, and performs a live encrypt/decrypt roundtrip. If the check fails, the backup is aborted.
+`backup.sh` calls `simple_verify_age_key` before every backup run. It checks that the key file exists, auto-corrects permissions to 600 if needed, validates the key structure (including the `AGE-SECRET-KEY-1` prefix on the private key body), and performs a live encrypt/decrypt roundtrip using `printf '%s'` for deterministic byte handling. If the check fails, the backup is aborted.
 
 No action required — this runs automatically.
 
@@ -126,7 +169,9 @@ create_printable_key_backup ~/vaultwarden-key-backup.pdf
 
 ## ☁️ Offsite Storage (rclone)
 
-`backup.sh` reads `RCLONE_REMOTE_NAME` from `.env` and syncs the encrypted `.age`, `.meta`, and `.sha256` sidecars to `${RCLONE_REMOTE_NAME}:vaultwarden_backups/${type}/` when `--rclone` is passed. The sync is **non-fatal** — a remote failure warns and emails but does not mark the local backup as failed.
+`backup.sh` reads `RCLONE_REMOTE_NAME` from `.env` and syncs the encrypted `.age`, `.meta`, and `.sha256` sidecars to `${RCLONE_REMOTE_NAME}:vaultwarden_backups/${type}/` when `--rclone` is passed.
+
+**Rclone failure is fatal when `--rclone` is set** — a missing binary or unconfigured remote causes a non-zero exit so monitoring and the systemd timer capture the failure. The rclone config path (`RCLONE_CONFIG`) is validated before use: shell metacharacters, world-writable files, and paths resolving into `/etc`, `/root`, `/proc`, or `/sys` are all rejected.
 
 ```bash
 # 1. Install rclone (if not already present)
@@ -138,16 +183,30 @@ rclone config
 # 3. Set the remote name in .env
 RCLONE_REMOTE_NAME=your_remote_name
 
-# 4. Test
+# 4. (Optional) set a custom config path
+RCLONE_CONFIG=/path/to/rclone.conf
+
+# 5. Test
 ./backup.sh --type db --rclone
 
-# 5. Verify remote contents
+# 6. Verify remote contents
 rclone ls your_remote_name:vaultwarden_backups/
 ```
 
-`sudo ./cron-setup.sh --install` provisions rclone-enabled cron jobs automatically:
-- **Mon-Sat 4 AM** — `backup.sh --type db --rclone --email` (non-fatal on remote failure)
-- **Sunday 3 AM** — `backup.sh --type full --full-verification --rclone --email` (fatal on verification failure)
+`sudo ./systemd-setup.sh --install` provisions systemd timers for automated backups:
+
+| Timer | Schedule | Command |
+| :-- | :-- | :-- |
+| `vaultwarden-db-backup.timer` | Daily (Mon–Sun) | `backup.sh --type db --rclone --email` |
+| `vaultwarden-full-backup.timer` | Weekly (Sunday) | `backup.sh --type full --full-verification --rclone --email` |
+
+Check timer status:
+
+```bash
+systemctl status vaultwarden-db-backup.timer
+systemctl status vaultwarden-full-backup.timer
+journalctl -u vaultwarden-db-backup.service --since today
+```
 
 ---
 
@@ -223,11 +282,13 @@ rclone copy your_remote_name:vaultwarden_backups/emergency/ ./backups/emergency/
 sudo ./setup.sh --domain vault.yourdomain.com --email admin@yourdomain.com
 
 # 5. Restore emergency kit (overwrites generated config)
-./restore.sh --file ./backups/emergency/emergency-TIMESTAMP.age --force
+./restore.sh --file ./backups/emergency/emergency_backup-TIMESTAMP.tar.zst.age --force
 
 # 6. Verify
 make health
 ```
+
+> **Note:** Emergency kit archives use the `.tar.zst.age` extension (zstd-compressed). Adjust the filename to match your actual backup file.
 
 ### Scenario 4 — Failed Update (Auto-Rollback)
 
@@ -262,12 +323,27 @@ docker compose logs vaultwarden
 ./backup.sh --type db
 ```
 
+**"WAL checkpoint incomplete"**
+
+This means unincorporated WAL pages remain after `PRAGMA wal_checkpoint(TRUNCATE)`. The backup was deliberately aborted to avoid an inconsistent snapshot. Fix:
+
+```bash
+# Option 1: Stop VaultWarden and retry
+docker compose stop vaultwarden
+./backup.sh --type db
+docker compose start vaultwarden
+
+# Option 2: Run offline maintenance to force a clean checkpoint
+./maintenance.sh --db-maint
+./backup.sh --type db
+```
+
 **"Encryption failed" / Age key missing**
 
 ```bash
 ls -l secrets/keys/age-key.txt
 
-# Manual health check
+# Manual health check (validates key format + encrypt/decrypt roundtrip)
 source lib/simple_key_resilience.sh && simple_verify_age_key
 
 # If missing, restore from your password manager escrow (Tier 2)
@@ -282,7 +358,8 @@ sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.c
 sha256sum -c backup.age.sha256
 
 # Make sure the Age key matches the backup
-age-keygen -y secrets/keys/age-key.txt
+# The public key comment in the key file must match the recipient in the archive
+grep '# public key:' secrets/keys/age-key.txt
 
 # Try an older backup
 ./restore.sh --file /path/to/older-backup.age
@@ -294,7 +371,16 @@ age-keygen -y secrets/keys/age-key.txt
 rclone lsd your_remote_name:
 rclone config show your_remote_name
 ./backup.sh --type db --rclone 2>&1 | tee /tmp/backup-debug.log
+
+# If RCLONE_CONFIG is set, verify it passes validation:
+# - no shell metacharacters
+# - regular file, not world-writable
+# - does not resolve into /etc, /root, /proc, /sys
 ```
+
+**"Invalid --keep value"**
+
+`--keep` accepts only a positive integer. Values like `"14; rm -rf /"` are rejected immediately after argument parsing as a command-injection guard.
 
 ---
 
@@ -310,7 +396,7 @@ rclone config show your_remote_name
 
 ## ✅ Backup Operations Checklist
 
-**Daily:** Automated db backup runs, checksum passes, and offsite sync succeeds
+**Daily:** Automated db backup runs, SHA-256 + decrypt probe passes, and offsite sync succeeds
 **Weekly:** Full backup with `--full-verification`; offsite sync verified
-**Monthly:** Emergency kit created; `restore.sh` tested in dry-run; Tier 2 escrow refreshed if Age key was rotated
+**Monthly:** Emergency kit created; `restore.sh` tested; Tier 2 escrow refreshed if Age key was rotated
 **Quarterly:** Full disaster recovery drill on a fresh instance
