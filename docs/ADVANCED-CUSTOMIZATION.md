@@ -32,6 +32,65 @@ sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.c
 
 ---
 
+## ⏲️ Automation — systemd Timers
+
+Automation is managed by **systemd timers** (not cron). Install or remove them with:
+
+```bash
+sudo ./systemd-setup.sh --install    # install all timers and services
+sudo ./systemd-setup.sh --remove     # remove all timers and services
+sudo ./systemd-setup.sh --status     # show status of all units
+```
+
+### Installed Timer Schedule
+
+| Unit | Schedule | Job |
+| :-- | :-- | :-- |
+| `vaultwarden-maintenance.timer` | Sunday 2 AM | Comprehensive maintenance |
+| `vaultwarden-full-backup.timer` | Sunday 3 AM | Full backup + verify + rclone + email |
+| `vaultwarden-db-backup.timer` | Mon–Sat 4 AM | DB snapshot + rclone + email |
+| `vaultwarden-health.timer` | Every 30 min | Health check with auto-recover + email |
+| `vaultwarden-dns-update.timer` | Every hour | Dynamic DNS update |
+| `vaultwarden-firewall-update.timer` | Saturday 4 AM | Cloudflare firewall IP list refresh |
+
+> **Note on the Sunday DB backup gap:** `vaultwarden-db-backup.timer` runs Mon–Sat only. The Sunday 3 AM full backup covers the Sunday snapshot. If you want an additional DB-only run on Sunday after the full backup completes, add a supplemental timer entry with `OnCalendar=Sun *-*-* 05:00:00`.
+
+### Timer Persistence
+
+All timers use `Persistent=true`. If the system reboots while a timer was due to fire, systemd runs the missed job once on next boot — no manual intervention or lock-directory recreation required.
+
+### Failure Notifications
+
+Every service unit has:
+```ini
+OnFailure=vaultwarden-notify-failure@%n.service
+```
+If any timer-triggered job fails, an email alert is sent automatically via the shared `vaultwarden-notify-failure@.service` template unit. No external monitoring tool is required for basic failure alerting.
+
+### Viewing Timer Status
+
+```bash
+# Show all VaultWarden timers, next fire time, and last result
+systemctl list-timers --all | grep vaultwarden
+
+# View logs for a specific unit
+journalctl -u vaultwarden-db-backup.service -n 50
+journalctl -u vaultwarden-health.service -n 50
+```
+
+### Modifying a Timer Schedule
+
+Edit the `.timer` file directly (do not use `systemd-setup.sh` — it would overwrite your change on next install):
+
+```bash
+sudo systemctl edit --full vaultwarden-db-backup.timer
+# Change OnCalendar= to your preferred schedule
+sudo systemctl daemon-reload
+sudo systemctl restart vaultwarden-db-backup.timer
+```
+
+---
+
 ## 📌 Dependency Version Pinning
 
 By default `setup.sh` auto-resolves the latest release of SOPS and age from the GitHub API. To pin specific versions for reproducible deployments, edit the top of `setup.sh` before running:
@@ -111,6 +170,21 @@ findtime = 10m     # tightened from 1h
 
 > **Note:** All web-facing jails push bans to the **Cloudflare Edge WAF via API** — local `iptables` is not used for proxied services. Only the SSH jail uses local iptables (leveraging Fail2ban's `network_mode: host`).
 
+### Fail2Ban — NFS Log Mounts
+
+If your Caddy log volume is on an NFS share (common in OCI with block storage), log lines end with `\r\n` instead of `\n`. The JSON `failregex` patterns in `fail2ban/filter.d/vaultwarden-web-auth.conf` must use `\r?$` line anchors to match correctly on NFS mounts:
+
+```ini
+# Correct pattern for NFS-mounted logs (\r?$ instead of $)
+failregex = ^{"ts":.+"status":40[13].+}\r?$
+```
+
+Verify whether your logs have carriage returns:
+```bash
+cat -A /var/log/caddy/auth_attempts.log | head -5
+# A trailing ^M before $ means \r is present — use \r?$ anchors
+```
+
 ### Custom Fail2Ban Filter
 
 ```ini
@@ -119,6 +193,37 @@ findtime = 10m     # tightened from 1h
 failregex = ^.*<your-pattern>.*<HOST>.*$
 ignoreregex =
 ```
+
+### Caddy — 4-Tier Log Architecture
+
+Caddy uses four named loggers to route traffic to independent log files with separate retention policies:
+
+| Logger | File | Retention | Purpose |
+| :-- | :-- | :-- | :-- |
+| `access_log` | `/var/log/caddy/access.log` | 30 days / 50 MB rolls | All general traffic |
+| `admin_log` | `/var/log/caddy/admin_access.log` | 90 days / 25 MB rolls | `/admin` panel requests |
+| `auth_log` | `/var/log/caddy/auth_attempts.log` | 90 days / 25 MB rolls | Login and token endpoints (Fail2Ban source) |
+| `security_log` | `/var/log/caddy/security.log` | 180 days / 10 MB rolls | Catch-all and anomalous requests |
+
+To adjust retention, edit the `log` blocks in the global section of `caddy/Caddyfile`:
+
+```caddyfile
+log auth_log {
+    output file /var/log/caddy/auth_attempts.log {
+        roll_size 50MB       # increase roll size
+        roll_keep 60         # keep 60 rolled files
+        roll_keep_for 180d   # retain for 6 months
+    }
+}
+```
+
+### Caddy — Security Headers
+
+The Caddyfile ships with a hardened security header set. Key notes for customisation:
+
+- **`Cross-Origin-Embedder-Policy`** is set to `credentialless` (not `require-corp`). Changing to `require-corp` breaks WebAuthn/passkey flows because cross-origin authenticators cannot load without credentials.
+- **`Content-Security-Policy`** on the main site scopes `connect-src` to `wss://{$DOMAIN_NAME}`, `https://push.bitwarden.com`, and `https://identity.bitwarden.com`. If you disable push notifications (`PUSH_ENABLED=false` in `.env`), you can remove the two Bitwarden push URLs from `connect-src` in `caddy/Caddyfile` to tighten the policy.
+- **Admin panel CSP** retains `'unsafe-inline'` in `script-src` — this is required by VaultWarden's admin UI which renders inline `<script>` blocks. Do not remove it without testing admin panel functionality.
 
 ### Additional Caddy Security Headers
 
@@ -139,11 +244,39 @@ header {
 handle @admin {
     @allowed { remote_ip 192.168.1.0/24 10.0.0.0/8 }
     handle @allowed {
-        basic_auth { import secret_admin_basic_auth_hash }
+        basic_auth {
+            {env.ADMIN_USERNAME} {env.ADMIN_HASH}
+        }
         reverse_proxy vaultwarden:80
     }
     handle { respond "Access Denied" 403 }
 }
+```
+
+> **Note:** The `@malicious_ua` User-Agent blocklist that appeared in earlier versions has been removed. It was trivially bypassed by any attacker omitting a scanner User-Agent. Configure scanner/bot detection through the **Cloudflare WAF Managed Ruleset** (Cloudflare Dashboard → Security → WAF → Managed rules) for effective protection.
+
+### Bcrypt Cost Factor
+
+All bcrypt hash operations (Caddy admin credential, break-glass admin) enforce a **minimum cost factor of 10**. The validator in `lib/crypto.sh` rejects any hash or cost value below 10 at generation time. The recommended production value is 12 (the default).
+
+If you regenerate the Caddy admin credential manually:
+```bash
+# Correct: cost 12
+htpasswd -nbBC 12 admin 'yourpassword'
+
+# The entrypoint.sh validator will reject hashes with cost < 10 at startup
+```
+
+### Caddy Entrypoint Debug Mode
+
+`caddy/entrypoint.sh` supports a `DEBUG_ENTRYPOINT=true` environment variable for troubleshooting startup issues. **Never leave this enabled in production** — it logs `ADMIN_USERNAME` to Docker stdout (which is persisted to the container's `json.log` file on the host).
+
+```bash
+# Temporarily enable for one-off debugging only:
+docker compose run --rm -e DEBUG_ENTRYPOINT=true caddy
+
+# The entrypoint will print a visible WARNING banner when debug mode is active:
+# ⚠️  WARNING: DEBUG_ENTRYPOINT enabled — credential names will be logged — DISABLE IN PRODUCTION
 ```
 
 ---
@@ -170,6 +303,8 @@ services:
       - /mnt/nfs/vaultwarden/attachments:/data/attachments
 ```
 
+> **If using NFS for Caddy logs:** see the Fail2Ban NFS note above — `\r?$` anchors are required in `failregex` patterns.
+
 ### Multi-Destination Backups
 
 ```bash
@@ -177,6 +312,29 @@ services:
 rclone copy backups/full/ gdrive:vaultwarden-backups/full/
 rclone copy backups/full/ s3:my-bucket/vaultwarden/full/
 ```
+
+---
+
+## 💾 Backup Retention Customisation
+
+Default retention is **14 days** for all backup tiers. Override at runtime or in `.env`:
+
+```bash
+# Keep 30 days of full backups
+sudo ./backup.sh --type full --keep 30
+
+# Keep 7 days of DB snapshots
+sudo ./backup.sh --type db --keep 7
+```
+
+The `--keep` value **must be a positive integer**. Non-integer values are rejected with an error before any backup or cleanup operation begins.
+
+To set a permanent default, edit `KEEP_DAYS` in `.env`:
+```bash
+KEEP_DAYS=30
+```
+
+> **Retention on restored hosts:** Backup retention age is calculated from the **timestamp embedded in the filename** (e.g., `vaultwarden-full-20260312-030000.tar.gz.age`), not from the file's `ctime`. This means backups restored to a new host are cleaned up correctly based on their original creation date, not the date they were copied.
 
 ---
 
@@ -194,7 +352,7 @@ ALLOWED_SENDER_DOMAINS=yourdomain.com
 Set the SMTP password via secrets:
 
 ```bash
-./edit-secrets.sh   # set: smtp_password
+./edit-secrets.sh --rotate smtp_password
 ```
 
 Test end-to-end delivery:
@@ -314,3 +472,4 @@ curl -sX POST https://your-webhook-url/notify \
 - Verify with `./health.sh` or `make health`
 - Commit template changes to version control
 - Create a backup before major changes: `./backup.sh --type full`
+- After re-installing automation: `sudo ./systemd-setup.sh --install && systemctl list-timers --all | grep vaultwarden`
