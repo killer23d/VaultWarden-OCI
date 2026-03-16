@@ -1,6 +1,6 @@
 # Operations Guide — VaultWarden-OCI
 
-This guide covers day-to-day management, maintenance, monitoring, and troubleshooting for VaultWarden-OCI with Cloudflare-only web traffic, Age-encrypted backups, containerised Postfix email, and automated operations via cron.
+This guide covers day-to-day management, maintenance, monitoring, and troubleshooting for VaultWarden-OCI with Cloudflare-only web traffic, Age-encrypted backups, containerised Postfix email, and automated operations via systemd timers.
 
 ---
 
@@ -76,7 +76,7 @@ make health
 #  ✓ Disk space (warn >70%, critical >80%)
 #  ✓ SSL certificate expiration
 #  ✓ Database size and growth rate
-#  ✓ Backup age and decryptability
+#  ✓ Backup age and decryptability (missing Age key = hard failure)
 #  ✓ Email notification configuration
 ```
 
@@ -163,6 +163,24 @@ grep "429" /var/lib/vaultwarden/logs/caddy/access.log | jq
 
 > **Note:** The paths above use the default state directory `/var/lib/vaultwarden`. If you customised `PROJECT_STATE_DIR` in `.env`, replace `/var/lib/vaultwarden` with that value in the commands above.
 
+#### Systemd Job Logs
+
+```bash
+# View output from any automated job
+journalctl -u vaultwarden-health.service
+journalctl -u vaultwarden-db-backup.service
+journalctl -u vaultwarden-full-backup.service
+journalctl -u vaultwarden-maintenance.service
+journalctl -u vaultwarden-dns-update.service
+journalctl -u vaultwarden-firewall-update.service
+
+# Follow the most recent run of any service
+journalctl -fu vaultwarden-health.service
+
+# Show last N lines
+journalctl -u vaultwarden-db-backup.service -n 50 --no-pager
+```
+
 #### Log Retention (Caddy)
 
 | Log | Max Size | Retention |
@@ -181,7 +199,7 @@ du -sh /var/lib/vaultwarden/logs/*
 
 ## 💾 Backup Operations
 
-> **`sudo` note:** Direct `backup.sh` calls require `sudo` in production (needs write access to `${PROJECT_STATE_DIR}`). Makefile targets (`make backup`, `make backup-full`, etc.) and cron jobs handle this automatically.
+> **`sudo` note:** Direct `backup.sh` calls require `sudo` in production (needs write access to `${PROJECT_STATE_DIR}`). Makefile targets (`make backup`, `make backup-full`, etc.) and systemd jobs handle this automatically.
 
 ### Creating Backups
 
@@ -192,7 +210,13 @@ du -sh /var/lib/vaultwarden/logs/*
 make backup   # same
 make db-backup
 
-# Features: atomic WAL checkpoint, integrity check, Age encryption, 14-day retention
+# Features:
+#  - WAL checkpoint verified for completion before snapshot
+#  - Atomic SQLite snapshot via .backup API (consistent under concurrent writes)
+#  - PRAGMA integrity_check on the snapshot copy
+#  - Age encryption
+#  - Age key presence verified (hard failure if key absent)
+#  - 14-day retention (age derived from filename timestamp, not ctime)
 ```
 
 #### Full System Backup
@@ -204,6 +228,7 @@ make backup-full
 # Includes: database, config files, Caddy certificates, logs
 # Excludes: secrets (use --type emergency for those)
 # Retention: 30 days
+# Requires: zstd (installed by setup.sh)
 ```
 
 #### Full Backup with End-to-End Verification
@@ -212,7 +237,7 @@ make backup-full
 ./backup.sh --type full --full-verification
 
 # Process: create → decrypt → extract → integrity check → verify files → cleanup
-# Recommended: weekly (matches cron default)
+# Recommended: weekly (matches systemd timer default)
 ```
 
 #### Emergency Recovery Kit
@@ -306,6 +331,8 @@ docker compose up -d vaultwarden
 ./health.sh
 ```
 
+> **VaultWarden 1.30.0+ note:** Port 3012 (legacy WebSocket) was removed. All real-time sync now goes through the main HTTP port 80. The Caddyfile `/notifications/hub` block already routes to `vaultwarden:80`; no manual change is needed for upgrades.
+
 ---
 
 ## 🛠️ Maintenance Operations
@@ -331,10 +358,11 @@ When called with only a targeted flag, routine cleanup is **skipped entirely**:
 
 ```bash
 # Update Cloudflare IP ranges in UFW firewall
-./maintenance.sh --update-firewall        # Automated weekly via cron (Saturday 4 AM)
+# (adds new rules BEFORE removing old ones — no race condition)
+./maintenance.sh --update-firewall        # Automated weekly via systemd (Saturday 4 AM)
 
 # Check and update Cloudflare DNS A record
-./maintenance.sh --update-dns             # Automated hourly via cron (flock-protected)
+./maintenance.sh --update-dns             # Automated hourly via systemd
 make update-dns
 ```
 
@@ -360,7 +388,7 @@ sudo ./maintenance.sh --db-maint --force
 #  7. Post-VACUUM integrity check
 #  8. Restart VaultWarden and wait for health
 #  9. Report size delta (before → after)
-#  Note: Automated lightweight optimisation runs monthly via cron
+#  Note: Automated lightweight optimisation runs monthly via systemd
 ```
 
 ### Email Diagnostics (On-Demand)
@@ -461,26 +489,40 @@ make cron-install
 
 | Schedule | Job |
 |---|---|
-| Daily 2 AM (Mon–Sat) | Comprehensive maintenance (flock-protected; Sunday skipped to avoid overlap with full backup) |
-| Mon-Sat 4 AM | Database backup with fast verification + rclone sync |
-| Every 30 minutes | Health check, quiet mode (flock-protected) |
-| Saturday 4 AM | Cloudflare firewall IP range update (flock-protected) |
+| Daily 2 AM (Mon–Sat) | Comprehensive maintenance (Sunday skipped to avoid overlap with full backup) |
+| Mon–Sat 4 AM (+ 0–60 s jitter) | Database backup with fast verification + rclone sync |
+| Every 30 minutes | Health check with auto-recovery + email on failure |
+| Saturday 4 AM | Cloudflare firewall IP range update |
 | Sunday 3 AM | Weekly full backup with comprehensive verification + rclone sync |
-| Every hour | DNS A record update via `maintenance.sh --update-dns` (flock-protected) |
+| Every hour | DNS A record update via `maintenance.sh --update-dns` |
 
-> **Note:** Maintenance is intentionally skipped on Sunday to prevent overlap with the 3 AM full backup.
+> **Note:** Maintenance is intentionally skipped on Sunday to prevent overlap with the 3 AM full backup. `RandomizedDelaySec=60` on the database backup timer spreads post-reboot catch-up bursts.
 
 ```bash
-# View installed jobs
+# View installed timers
 sudo ./systemd-setup.sh --list
 make cron-list
 
 # Validate security and detect split-brain (stale /opt/ scripts)
 sudo ./systemd-setup.sh --validate
 
-# Remove jobs
+# Remove timers
 sudo ./systemd-setup.sh --remove
 make cron-remove
+
+# Re-run after pulling repo updates to keep /opt/ in sync
+sudo ./systemd-setup.sh --install
+```
+
+> **Migration note:** The earlier `cron-setup.sh` has been replaced by `systemd-setup.sh`. If you set up on a previous version, remove old cron entries (`sudo crontab -l`, delete the VaultWarden block with `sudo crontab -e`), then run `sudo ./systemd-setup.sh --install`.
+
+### Failure Notifications
+
+Every systemd service unit sets `OnFailure=vaultwarden-notify-failure@%n.service`. That template unit sends an email via Postfix. To confirm failure email delivery:
+
+```bash
+# Simulate a failure notification
+systemctl start vaultwarden-notify-failure@vaultwarden-db-backup.service
 ```
 
 ### Email Notifications
@@ -615,6 +657,10 @@ docker compose exec fail2ban fail2ban-regex \
 # 3. Verify Cloudflare API token
 docker compose exec fail2ban env | grep CF_
 docker compose logs fail2ban | grep -i cloudflare
+
+# 4. Check for \r\n line endings in Caddy JSON log volume (OCI NFS mounts)
+file /var/lib/vaultwarden/logs/caddy/auth_attempts.log
+# If CRLF is reported, verify fail2ban filter.d failregex patterns end with \r?$
 ```
 
 ### Backup Issues
@@ -629,8 +675,11 @@ ls -la secrets/keys/age-key.txt
 # 3. Test backup manually
 ./backup.sh --type db
 
-# 4. Check cron logs
-cat /var/log/vaultwarden-cron/backup.log
+# 4. Check systemd job output
+journalctl -u vaultwarden-db-backup.service --no-pager
+
+# 5. Manually test Age key round-trip
+source lib/simple_key_resilience.sh && simple_verify_age_key
 ```
 
 ---
@@ -651,7 +700,10 @@ docker compose -f docker-compose.yml.example config
 # 4. Apply to production
 sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
 
-# 5. Restart and verify
+# 5. Re-apply Cloudflare firewall CIDRs (setup --force resets UFW rules)
+./maintenance.sh --update-firewall
+
+# 6. Restart and verify
 ./startup.sh --force
 ./health.sh
 ```
@@ -668,12 +720,12 @@ sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
 ## 📅 Operational Checklists
 
 ### Daily
-- ✅ Check automated backup success (email notification or `/var/log/vaultwarden-cron/backup.log`)
+- ✅ Check automated backup success (`journalctl -u vaultwarden-db-backup.service` or email notification)
 - ✅ Review health check results
 - ✅ Glance at fail2ban for unusual ban activity
 
 ### Weekly
-- ✅ Review full backup with verification results
+- ✅ Review full backup with verification results (`journalctl -u vaultwarden-full-backup.service`)
 - ✅ Check container update results
 - ✅ Review authentication failure patterns
 - ✅ Verify email notifications working
@@ -688,10 +740,11 @@ sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
 
 ### Quarterly
 - ✅ Test emergency procedures (break-glass admin)
-- ✅ Update Cloudflare IP ranges (`./maintenance.sh --update-firewall`)
+- ✅ Update Cloudflare IP ranges (`./maintenance.sh --update-firewall`) — also automated weekly via systemd
 - ✅ Review and update documentation
 - ✅ Audit user accounts and permissions
 - ✅ Test complete system rebuild from backup
+- ✅ Run `sudo ./systemd-setup.sh --validate` to detect any split-brain between `/opt/` and the current repo
 
 ### Annual
 - ✅ Rotate all secrets (tokens, passwords)
@@ -748,9 +801,9 @@ make breakglass-status   # Check emergency admin status
 make breakglass-remove   # Remove emergency admin
 
 # Automation
-make cron-install        # Install systemd timers
-make cron-list           # List scheduled jobs
-make cron-remove         # Remove scheduled jobs
+make cron-install        # Install systemd timers (delegates to systemd-setup.sh)
+make cron-list           # List scheduled timers
+make cron-remove         # Remove timers
 
 # Configuration & Info
 make config              # Show configuration summary
