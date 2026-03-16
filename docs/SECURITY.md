@@ -98,7 +98,7 @@ action = smtp[...]
 - ✅ **True source IP**: Uses `CF-Connecting-IP` header for accurate detection
 - ✅ **No firewall pollution**: Doesn't add ineffective rules to local firewall
 - ✅ **Faster blocking**: Edge blocking is immediate and global
-- ✅ **API-driven**: Automated, programmatic control via Cloudflare API
+- ✅ **API-driven**: Automated, programmatic control via Cloudflare WAF Custom Rules API
 
 ## Cloudflare Integration
 
@@ -124,17 +124,21 @@ Zone Resources:
 ```
 Name: VaultWarden Firewall Management
 Permissions:
+  - Zone:Zone:Read
   - Zone:Firewall Services:Edit
 Zone Resources:
   - Include → Specific zone → yourdomain.com
 ```
 
 **Used for**:
-- Creating WAF rules to block malicious IPs
+- Creating WAF Custom Rules to block malicious IPs via the Rulesets API
 - Managing Cloudflare-level IP access lists
 - Automated ban/unban operations
 
-### Cloudflare WAF Rules
+### Cloudflare WAF Custom Rules (Rulesets API)
+
+Fail2Ban uses the current **WAF Custom Rules Rulesets API** — the legacy
+`/firewall/access_rules/rules` endpoint is deprecated and no longer used.
 
 Fail2Ban creates rules like:
 ```
@@ -148,6 +152,16 @@ These rules:
 - Apply globally across all Cloudflare edge locations
 - Use actual attacker IP from `CF-Connecting-IP` header
 - Expire automatically based on `bantime` configuration
+
+#### Verify Cloudflare Firewall Token
+
+```bash
+# Verify the token can access the WAF Custom Rules endpoint (Rulesets API)
+curl -s -X GET \
+  "https://api.cloudflare.com/client/v4/zones/${CLOUDFLARE_ZONE_ID}/rulesets/phases/http_request_firewall_custom/entrypoint" \
+  -H "Authorization: Bearer YOUR_FIREWALL_TOKEN" \
+  -H "Content-Type: application/json" | jq .result.id
+```
 
 ## Encrypted Secrets Management
 
@@ -169,21 +183,27 @@ Containers (Read-Only Access)
 
 ```yaml
 # secrets/secrets.yaml (encrypted)
-admin_token: "32-character-hex-string"
-admin_basic_auth_hash: "$2b$12$bcrypt_hash"
+admin_token: "48-char-alphanumeric-string"
+admin_basic_auth_hash: "admin $2b$14$bcrypt_hash"
 caddy_cloudflare_dns_token: "cloudflare_dns_token"
 fail2ban_cloudflare_firewall_token: "cloudflare_firewall_token"
 smtp_password: "smtp_password"
 push_installation_id: "optional"
 push_installation_key: "optional"
+backup_passphrase: "optional"
 ```
 
 ### Enhanced Security Features
 
-The `edit-secrets.sh` script includes:
-- **Process privacy**: SOPS key path never exposed in process list
-- **Secure temp files**: Proper cleanup of temporary decrypted data
-- **Automatic backups**: Creates backup before editing
+The secrets management layer (`lib/secrets.sh`, `edit-secrets.sh`, `setup-secrets.sh`) implements several hardened behaviours:
+
+- **Umask guard on file creation**: `write_secret_file()` saves and restores the process umask around every secret file write, ensuring files are born at mode `600` — not world-readable at any point (BUG-S7 fix).
+- **SOPS key scoping**: `decrypt_secret()` unsets `SOPS_AGE_KEY_FILE` immediately after each `sops -d` call so no child process (Docker, rclone, curl) inherits the Age key file path (BUG-S10 fix).
+- **Key-names-only listing**: `list_secrets()` decodes only YAML key names via `python3/yaml` — secret values are never decrypted into the shell pipeline buffer (BUG-S11 fix).
+- **Environment cleanup**: `cleanup_secrets_environment()` actively unsets `SOPS_AGE_KEY_FILE` and `SOPS_CONFIG` when called at the end of any secrets workflow. SOPS variables do not persist for the script lifetime.
+- **Process privacy**: SOPS key path is never exposed in process list (`ps aux`)
+- **Secure temp files**: Proper cleanup of temporary decrypted data via EXIT trap on a dedicated tmpfs path
+- **Automatic backups**: Creates backup before editing, using `install -m 600` for atomic secure creation
 - **Validation**: Comprehensive checks after editing
 - **Editor security**: Validates editor is not running as root
 
@@ -197,10 +217,13 @@ The `edit-secrets.sh` script includes:
 ./edit-secrets.sh --editor vim
 
 # Validate secrets without editing
+./edit-secrets.sh --test
+# or manually:
 sops -d secrets/secrets.yaml > /dev/null && echo "Valid"
 
 # Backup secrets manually
-cp secrets/secrets.yaml secrets/secrets.yaml.backup
+cp secrets/secrets.yaml secrets/secrets.yaml.backup-$(date +%Y%m%d-%H%M%S)
+chmod 600 secrets/secrets.yaml.backup-*
 ```
 
 ## Fail2Ban Configuration
@@ -247,6 +270,15 @@ filter   = vaultwarden-auth
 maxretry = 3
 bantime  = 2h
 ```
+
+#### Fail2Ban Filter Notes
+
+- **`vaultwarden-admin.conf`**: `ignoreregex` does **not** suppress `[INFO]` lines — the
+  filter is scoped tightly to the exact `Invalid admin token` message only, preventing
+  a log-level change in VaultWarden from silently disabling admin brute-force protection.
+- **`vaultwarden-web-auth.conf`**: All JSON `failregex` patterns include a `\r?$` anchor
+  so detection works correctly on NFS-mounted log volumes (OCI File Storage) where lines
+  may end with `\r\n` rather than `\n`.
 
 #### Specialized Caddy Log Monitoring
 ```ini
@@ -295,6 +327,11 @@ sudo ufw allow from 103.21.244.0/22 to any port 443 proto tcp
 sudo ufw allow from 2400:cb00::/32 to any port 443 proto tcp
 # ... (all Cloudflare IPv6 ranges)
 ```
+
+> **OPERATOR ACTION REQUIRED**: During initial setup, `setup.sh` opens ports 80 and 443
+> to all sources. You must restrict those rules to Cloudflare CIDRs after deployment using
+> `./maintenance.sh --update-firewall` or by running the UFW commands in
+> `docker-compose.yml.example` comments.
 
 ### SSH Protection
 
@@ -443,6 +480,28 @@ logging:
 # fail2ban:     5m × 3 = 15MB
 ```
 
+### Systemd Service Hardening
+
+All VaultWarden systemd service units are hardened consistently:
+
+```ini
+[Service]
+User=root
+NoNewPrivileges=yes
+PrivateTmp=yes          # Isolated /tmp per service (prevents name collisions)
+OnFailure=vaultwarden-notify-failure@%n.service
+EnvironmentFile=/etc/vaultwarden/vaultwarden.env
+```
+
+- `PrivateTmp=yes` gives each service its own private `/tmp` mount, preventing
+  temp-file name collisions between concurrently running backup, health, and
+  maintenance units.
+- `OnFailure=` is set on **all** service units — including `firewall-update` and
+  `dns-update` — so no failure goes unnotified.
+- The `vaultwarden-notify-failure@.service` template uses `printf` for email body
+  construction (bash `"..."` strings do not expand `\n`) and calls `init_common_lib`
+  to enable `set -euo pipefail` consistently.
+
 ## Application Security
 
 ### Admin Panel Protection
@@ -451,16 +510,33 @@ Two-factor protection for the admin panel:
 
 1. **Caddy Basic Authentication** (bcrypt hash from secrets):
 ```caddyfile
-route /admin* {
-    import admin_basic_auth
+@admin path /admin*
+handle @admin {
+    basic_auth {
+        {env.ADMIN_USERNAME} {env.ADMIN_HASH}
+    }
     reverse_proxy vaultwarden:80
 }
 ```
 
-2. **Admin Token** (stored in encrypted secrets):
+2. **Admin Token** (stored in encrypted secrets, minimum 48 characters):
 ```yaml
-admin_token: "32-character-hex-string"
+admin_token: "48-char-alphanumeric-string"
 ```
+
+**Bcrypt cost factor**: The bcrypt hash stored in `admin_basic_auth_hash` must use
+a cost factor of **≥ 10** (OWASP minimum). `caddy/entrypoint.sh` validates the
+cost factor on every container start and exits with an error if it is below 10.
+Generate compliant hashes with:
+```bash
+docker run --rm -it ghcr.io/caddybuilds/caddy-cloudflare:latest caddy hash-password --cost 14
+```
+
+**DEBUG_ENTRYPOINT**: The `DEBUG_ENTRYPOINT=true` environment variable logs the
+parsed `ADMIN_USERNAME` to Docker stdout. This is for troubleshooting only and
+**must not be enabled in production** — it is not set by default. If enabled, a
+prominent `WARNING: DEBUG_ENTRYPOINT enabled` banner is emitted to stderr to
+remind operators to disable it.
 
 ### Rate Limiting (Cloudflare WAF)
 
@@ -490,11 +566,15 @@ header {
     # Modern isolation headers (Spectre mitigation)
     Cross-Origin-Opener-Policy "same-origin"
     Cross-Origin-Resource-Policy "same-origin"
+    # credentialless (not require-corp) — preserves Spectre isolation while
+    # allowing cross-origin WebAuthn/passkey flows without blocking them.
     Cross-Origin-Embedder-Policy "credentialless"
     X-DNS-Prefetch-Control "off"
 
-    # Content Security Policy
-    Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: https:; frame-src 'self'; object-src 'none'; base-uri 'self';"
+    # Content Security Policy — connect-src is scoped to known endpoints only.
+    # wss: is replaced with wss://{$DOMAIN_NAME} to prevent XSS exfiltration
+    # to arbitrary WebSocket hosts.
+    Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss://{$DOMAIN_NAME} https://push.bitwarden.com https://identity.bitwarden.com; frame-src 'self'; object-src 'none'; base-uri 'self';"
 
     # Permissions Policy (restrict dangerous features)
     Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=(), usb=()"
@@ -507,6 +587,11 @@ header {
     -X-Powered-By
 }
 ```
+
+> **Note**: The `Content-Security-Policy connect-src` directive includes
+> `https://push.bitwarden.com` and `https://identity.bitwarden.com` only when
+> `PUSH_ENABLED=true`. If push notifications are disabled, those external endpoints
+> are not needed in the CSP. Review your configuration if you do not use push.
 
 ## Forensic Logging
 
@@ -622,31 +707,49 @@ make breakglass-status
 
 All backups are encrypted with Age:
 
-```bash
-# Backup process
-1. Create database snapshot (atomic operation)
-2. Verify integrity (SQLite integrity check)
-3. Encrypt with Age (recipient: age public key)
-4. Store encrypted backup
-5. Verify encryption successful
-6. Cleanup temporary files securely
 ```
+Backup process:
+1. WAL checkpoint (TRUNCATE) on live database — verified before proceeding
+2. Consistent DB snapshot via SQLite Online Backup API (.backup dot-command)
+   — acquires shared read lock, integrates WAL frames atomically
+3. Compress snapshot with zstd
+4. Encrypt with Age (recipient: age public key from secrets/keys/age-key.txt)
+5. Write SHA-256 checksum sidecar (.sha256)
+6. Write metadata sidecar (.meta) — includes VaultWarden version, hostname, timestamp
+7. Quick verification — decrypt probe to /dev/null (Age key MUST exist; missing key
+   is a hard failure, not a soft warning)
+8. Cleanup temporary files securely from private tmpdir
+```
+
+> **Backup integrity note**: `verify_backup_integrity()` in `lib/backup_utils.sh`
+> uses the SQLite Online Backup API (`.backup` dot-command) rather than OS-level
+> `cp` to create the verification snapshot. This holds the correct shared read lock
+> and guarantees a consistent copy even while VaultWarden is actively writing.
+
+### Backup Retention
+
+Retention age is determined from the **filename-embedded timestamp**
+(`YYYYMMDD-HHMMSS`), which is immutable across `cp`, `mv`, `chmod`, and `chown`.
+`ctime`-based fallback is used only for files predating the current naming convention.
+This ensures backups restored to a fresh host are not treated as brand-new and
+excluded from retention enforcement.
 
 ### Backup Verification
 
 ```bash
-# Standard backup (checksum-based verification)
+# Standard backup (checksum-based verification + Age decrypt probe)
 ./backup.sh --type db
 
 # Full backup with end-to-end recoverability test
 ./backup.sh --type full --full-verification
 
-# Verification process:
-1. Decrypt backup
-2. Extract contents
-3. Verify database integrity
-4. Confirm all files present
-5. Cleanup test environment
+# Verification process (--full-verification):
+1. SHA-256 checksum check
+2. Decrypt backup with Age key
+3. Extract and decompress
+4. Verify SQLite database integrity (Online Backup API snapshot, WAL-safe)
+5. Confirm all expected files present
+6. Cleanup test environment
 ```
 
 ### Remote Backup Security
@@ -659,9 +762,8 @@ rclone config
 ./backup.sh --type db --rclone
 
 # Security features:
-# - Encrypted BEFORE upload
+# - Encrypted BEFORE upload (Age encryption at rest)
 # - TLS in transit to remote
-# - Age encryption at rest
 # - Access token secured in rclone config
 ```
 
@@ -680,6 +782,7 @@ rclone config
 ./health.sh --auto-recover
 
 # Full comprehensive check with email alert and auto-recovery
+# (this is what the systemd vaultwarden-health timer runs)
 ./health.sh --comprehensive --email --auto-recover
 ```
 
@@ -729,7 +832,7 @@ grep "ERROR" ${PROJECT_STATE_DIR}/logs/vaultwarden/vaultwarden.log
 ## Security Best Practices
 
 ### Initial Setup
-- ✅ Generate strong bcrypt hash for admin basic auth
+- ✅ Generate bcrypt hash with cost factor ≥ 14 for admin basic auth
 - ✅ Use separate Cloudflare API tokens (DNS and Firewall)
 - ✅ Enable Cloudflare proxy (orange cloud) for DNS record
 - ✅ Configure HTTPS-only redirect at Cloudflare
@@ -740,19 +843,20 @@ grep "ERROR" ${PROJECT_STATE_DIR}/logs/vaultwarden/vaultwarden.log
 - ✅ Create initial encrypted backup
 - ✅ Configure email notifications and run `make test-email`
 - ✅ Verify all health checks pass: `./health.sh --comprehensive`
+- ✅ Restrict UFW ports 80/443 to Cloudflare CIDRs: `./maintenance.sh --update-firewall`
 
 ### Ongoing Operations
 - ✅ Monitor Fail2Ban logs weekly
 - ✅ Review Cloudflare analytics monthly
 - ✅ Test backup restoration monthly
 - ✅ Rotate secrets annually
-- ✅ Update containers weekly (automated via cron)
+- ✅ Update containers weekly (automated via systemd timer)
 - ✅ Review firewall rules quarterly
 - ✅ Test emergency procedures quarterly
 - ✅ Monitor resource usage monthly
 - ✅ Review forensic logs for incidents
 - ✅ Keep break-glass admin credentials secure
-- ✅ Run `sudo ./cron-setup.sh --validate` after pulling repo updates
+- ✅ Run `sudo ./systemd-setup.sh --validate` after pulling repo updates
 
 ### Incident Response
 
@@ -818,8 +922,8 @@ curl -X GET "https://api.cloudflare.com/client/v4/zones" \
      -H "Authorization: Bearer YOUR_DNS_TOKEN" \
      -H "Content-Type: application/json"
 
-# Test Firewall token
-curl -X GET "https://api.cloudflare.com/client/v4/zones/ZONE_ID/firewall/access_rules/rules" \
+# Test Firewall token against the current WAF Custom Rules endpoint
+curl -X GET "https://api.cloudflare.com/client/v4/zones/${CLOUDFLARE_ZONE_ID}/rulesets/phases/http_request_firewall_custom/entrypoint" \
      -H "Authorization: Bearer YOUR_FIREWALL_TOKEN" \
      -H "Content-Type: application/json"
 ```
@@ -827,16 +931,21 @@ curl -X GET "https://api.cloudflare.com/client/v4/zones/ZONE_ID/firewall/access_
 ### Fail2Ban Not Blocking
 
 ```bash
-# Check Cloudflare action is configured
+# Check Cloudflare action is configured (uses Rulesets API — not legacy access_rules)
 docker compose exec fail2ban cat /data/fail2ban/action.d/cloudflare-apiv4.conf
 
 # Verify zone ID and token
 docker compose exec fail2ban env | grep CF_
 
-# Test filter regex against live log
+# Test filter regex against live VaultWarden log
 docker compose exec fail2ban fail2ban-regex \
   /var/log/vaultwarden/vaultwarden.log \
   /data/fail2ban/filter.d/vaultwarden-auth.conf
+
+# Test filter regex against live Caddy JSON log
+docker compose exec fail2ban fail2ban-regex \
+  /var/log/caddy/auth_attempts.log \
+  /data/fail2ban/filter.d/vaultwarden-web-auth.conf
 
 # Check for errors
 docker compose logs fail2ban | grep -i error
@@ -901,4 +1010,4 @@ sudo dpkg-reconfigure --priority=low unattended-upgrades
 
 ---
 
-This security guide reflects the current architecture with Cloudflare-only blocking for web traffic, local iptables for SSH (Fail2Ban in host-network mode), containerised Postfix email relay, comprehensive resource management, enhanced forensic logging, and robust security practices optimised for small teams requiring enterprise-grade password management security.
+This security guide reflects the current architecture with Cloudflare-only blocking for web traffic, local iptables for SSH (Fail2Ban in host-network mode), containerised Postfix email relay, comprehensive resource management, enhanced forensic logging, systemd-hardened service units, and robust security practices optimised for small teams requiring enterprise-grade password management security.
