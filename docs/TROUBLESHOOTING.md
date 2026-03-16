@@ -108,7 +108,7 @@ make logs SERVICE=caddy
 # Check DNS resolution
 dig +short vault.example.com
 
-# Test Cloudflare API
+# Test Cloudflare DNS API token
 curl -X GET "https://api.cloudflare.com/client/v4/zones" \
      -H "Authorization: Bearer YOUR_DNS_TOKEN"
 ```
@@ -125,6 +125,41 @@ docker compose restart caddy
 # Force certificate renewal
 docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile
 ```
+
+### Caddy Exits with BCrypt Hash Error
+
+**Symptoms**:
+- Caddy container fails to start and exits immediately
+- Error in logs: `ERROR: bcrypt cost N < minimum 10`
+- Admin panel inaccessible after updating `admin_basic_auth_hash`
+
+**Diagnosis**:
+```bash
+# Check Caddy entrypoint logs
+docker compose logs caddy | tail -30
+
+# Verify the cost factor of your current hash (factor is between the second and third $)
+# Example hash: $2b$06$... means cost=6 (too low)
+grep admin_basic_auth_hash secrets/secrets.yaml   # encrypted; use edit-secrets.sh
+./edit-secrets.sh --test
+```
+
+**Solutions**:
+```bash
+# Generate a new compliant bcrypt hash (cost factor >=14 recommended)
+# Use the Caddy image already in use to avoid version mismatch
+docker run --rm -it ghcr.io/caddybuilds/caddy-cloudflare:latest caddy hash-password --cost 14
+
+# Update the hash in secrets
+./edit-secrets.sh
+# Set admin_basic_auth_hash to the new hash string
+
+# Restart Caddy
+docker compose restart caddy
+```
+
+> **Note**: The minimum enforced cost factor is **10** (OWASP minimum). A cost of **14** is
+> recommended for 2024+ hardware. The Caddy entrypoint validates this on every start.
 
 ## Configuration Issues
 
@@ -226,6 +261,36 @@ chmod 600 secrets/keys/age-key.txt
 sops -d secrets/secrets.yaml
 ```
 
+### Secrets Environment Leaking to Child Processes
+
+**Symptoms**:
+- `SOPS_AGE_KEY_FILE` remains set after running `./setup.sh`, `./edit-secrets.sh`, or `./setup-secrets.sh`
+- Docker or rclone subprocesses inherit the Age key file path (visible via `ps aux`)
+
+**Diagnosis**:
+```bash
+# Check if SOPS env vars are exported into the current session
+env | grep SOPS
+
+# If called as a subprocess, confirm the calling script sources lib/secrets.sh
+grep cleanup_secrets_environment setup.sh
+```
+
+**Solutions**:
+```bash
+# cleanup_secrets_environment() now actively unsets SOPS_AGE_KEY_FILE and SOPS_CONFIG.
+# If you see these variables in child processes, ensure you are running the
+# current version of the scripts.
+git pull
+
+# Manually unset if needed in the current session:
+unset SOPS_AGE_KEY_FILE
+unset SOPS_CONFIG
+
+# Re-run the affected script
+./edit-secrets.sh
+```
+
 ## Network and Connectivity Issues
 
 ### Cannot Access Web Vault
@@ -300,7 +365,7 @@ sudo ufw status
 # Fix firewall rules, then:
 # sudo ufw enable
 
-# Schedule safe recurring firewall updates (Saturday 4 AM via cron)
+# Schedule safe recurring firewall updates (Saturday 4 AM via systemd timer)
 make cron-install
 ```
 
@@ -497,6 +562,71 @@ sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
 make list-backups
 ```
 
+### Backup Verification Fails with Missing Age Key
+
+**Symptoms**:
+- Backup is created successfully but `--quick-verify` reports failure
+- Error: `Age key not found — refusing to report verification success`
+- Backup was previously silently marked verified despite missing key
+
+**Diagnosis**:
+```bash
+# Check Age key existence
+ls -l secrets/keys/age-key.txt
+
+# Confirm the quick-verify actually tests decryption
+./backup.sh --type db --list
+```
+
+**Explanation**: The `verify_backup_quick()` function previously returned **success (0)**
+when the Age key file was absent, skipping the decrypt probe with only a warning and
+marking the backup as verified. This was a fail-open bug. The function now **fails hard**
+when the Age key cannot be found — a missing key means the backup cannot be verified
+and must not be reported as recoverable.
+
+**Solutions**:
+```bash
+# Restore or regenerate the Age key before attempting backup verification
+ls -l secrets/keys/age-key.txt
+
+# If key is missing: restore from your offline copy (recovery kit)
+# If no offline copy exists, regenerate (WARNING: old backups become unrecoverable)
+sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
+```
+
+### Backup Retention Not Cleaning Up Old Backups
+
+**Symptoms**:
+- Old backups accumulate past the configured retention period
+- This is most common after restoring the project to a new OCI instance
+- `./backup.sh --list` shows backups with correct timestamps but `ctime = now`
+
+**Explanation**: Backup age is now determined from the **filename-embedded timestamp**
+(`YYYYMMDD-HHMMSS`), which is immutable across filesystem operations (`cp`, `mv`,
+`chmod`, `chown`). On a fresh host restore, `ctime` is reset to now and would make
+every backup appear 0 days old, preventing all cleanup. The filename timestamp
+remains unchanged and is always the primary age source.
+
+**Diagnosis**:
+```bash
+# List backups and confirm timestamp in filenames
+./backup.sh --list
+# e.g. db-20240315-143022.age → created 15 March 2024
+
+# Confirm retention setting
+grep BACKUP_RETENTION .env
+```
+
+**Solutions**:
+```bash
+# No action needed if filenames contain YYYYMMDD-HHMMSS timestamps
+# The retention logic will use the filename timestamp correctly
+
+# If backups were created without a timestamp in the filename (pre-convention files),
+# ctime fallback is used — rename those files manually or delete them
+ls backups/db/ | grep -v '[0-9]\{8\}-[0-9]\{6\}'
+```
+
 ### Restore Fails
 
 **Symptoms**:
@@ -604,14 +734,55 @@ docker compose restart fail2ban
 ./edit-secrets.sh
 # Check: fail2ban_cloudflare_firewall_token
 
-# Test Cloudflare API token against the current WAF custom rules endpoint
+# Test Cloudflare firewall token against the WAF Custom Rules endpoint (Rulesets API)
 curl -X GET "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/rulesets/phases/http_request_firewall_custom/entrypoint" \
      -H "Authorization: Bearer YOUR_FIREWALL_TOKEN"
 
-# Test filter regex against live log
+# Test VaultWarden filter regex against live log
 docker compose exec fail2ban fail2ban-regex \
   /var/log/vaultwarden/vaultwarden.log \
   /data/fail2ban/filter.d/vaultwarden-auth.conf
+
+# Test Caddy JSON log filter
+docker compose exec fail2ban fail2ban-regex \
+  /var/log/caddy/auth_attempts.log \
+  /data/fail2ban/filter.d/vaultwarden-web-auth.conf
+```
+
+### Fail2Ban Filter Not Detecting Attacks in Caddy Logs
+
+**Symptoms**:
+- VaultWarden auth failures are visible in Caddy JSON logs
+- `fail2ban-client status vaultwarden-web-auth` shows zero detections
+- No bans triggered for HTTP 401/403 patterns despite repeated failures
+
+**Diagnosis**:
+```bash
+# Confirm log line endings (OCI NFS/shared volumes may produce \r\n)
+cat -A ${PROJECT_STATE_DIR}/logs/caddy/auth_attempts.log | head -5 | grep -c '\\r'
+
+# Test filter against the live log
+docker compose exec fail2ban fail2ban-regex \
+  /var/log/caddy/auth_attempts.log \
+  /data/fail2ban/filter.d/vaultwarden-web-auth.conf
+
+# Check filter file is current (all JSON failregex patterns must end with \r?$)
+docker compose exec fail2ban grep 'failregex' /data/fail2ban/filter.d/vaultwarden-web-auth.conf
+```
+
+**Explanation**: On NFS-mounted log volumes (common on OCI), line endings may be
+`\r\n`. A `$` anchor in the regex does not consume `\r`, causing all Caddy JSON
+log patterns to silently fail. The current filter files use `\r?$` anchors on
+every JSON `failregex` pattern to handle both `\n` and `\r\n` endings correctly.
+
+**Solutions**:
+```bash
+# Ensure you are on the latest version of the filter files
+git pull
+docker compose restart fail2ban
+
+# Verify the fix is in place
+docker compose exec fail2ban grep 'r?\$' /data/fail2ban/filter.d/vaultwarden-web-auth.conf
 ```
 
 ### Admin Panel Inaccessible
@@ -632,8 +803,8 @@ docker compose logs caddy | grep admin
 
 **Solutions**:
 ```bash
-# Generate a new bcrypt hash using the Caddy image already in use
-docker run --rm -it ghcr.io/caddybuilds/caddy-cloudflare:latest caddy hash-password
+# Generate a new bcrypt hash (cost >=14 recommended; >=10 required)
+docker run --rm -it ghcr.io/caddybuilds/caddy-cloudflare:latest caddy hash-password --cost 14
 
 # Update secrets with new hash
 ./edit-secrets.sh
@@ -820,11 +991,15 @@ sudo ./systemd-setup.sh --install
 
 # Check for split-brain (stale /opt/ scripts)
 sudo ./systemd-setup.sh --list
-# Look for: ⚠️ SPLIT-BRAIN DETECTED warning
+# Look for: ⚠️  SPLIT-BRAIN DETECTED warning
 
 # Verify flock is installed
 command -v flock || sudo apt install util-linux
 ```
+
+> **Note**: Automation is managed via **systemd timers** (`systemd-setup.sh`), not
+> cron. There is no `cron-setup.sh` in the repository. Use `systemd-setup.sh`
+> for all scheduling operations.
 
 ## Getting Help
 
@@ -851,6 +1026,9 @@ make version > version-info.txt
 
 # Systemd timer status
 sudo ./systemd-setup.sh --list > cron-status.txt
+
+# Fail2Ban jail status
+docker compose exec fail2ban fail2ban-client status >> cron-status.txt
 ```
 
 ### Emergency Recovery
