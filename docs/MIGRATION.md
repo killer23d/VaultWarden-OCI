@@ -65,14 +65,17 @@ scp db.sqlite3.backup user@new-server:/tmp/
 ./startup.sh --down
 
 # Copy database to correct location
-sudo cp /tmp/db.sqlite3.backup /var/lib/vaultwarden/data/bwdata/db.sqlite3
+# NOTE: VaultWarden-OCI stores the database at:
+#   $PROJECT_STATE_DIR/data/db.sqlite3
+# The default PROJECT_STATE_DIR is /var/lib/vaultwarden
+sudo cp /tmp/db.sqlite3.backup /var/lib/vaultwarden/data/db.sqlite3
 
 # Fix permissions
-sudo chown 1000:1000 /var/lib/vaultwarden/data/bwdata/db.sqlite3
-sudo chmod 600  /var/lib/vaultwarden/data/bwdata/db.sqlite3
+sudo chown 1000:1000 /var/lib/vaultwarden/data/db.sqlite3
+sudo chmod 600  /var/lib/vaultwarden/data/db.sqlite3
 
 # Verify database integrity (uses host sqlite3 directly - no Docker required)
-sudo sqlite3 /var/lib/vaultwarden/data/bwdata/db.sqlite3 'PRAGMA integrity_check;'
+sudo sqlite3 /var/lib/vaultwarden/data/db.sqlite3 'PRAGMA integrity_check;'
 
 # Start services
 ./startup.sh
@@ -162,7 +165,7 @@ nano .env
 **3. Import to VaultWarden:**
 ```bash
 # Web vault: Login → Settings → Import Data
-# Select "Bitwarden (json)" and upload bitwarden-export.json
+# Select “Bitwarden (json)” and upload bitwarden-export.json
 ```
 
 **4. Migrate organisations (if applicable):**
@@ -223,7 +226,7 @@ Settings → Server URL → https://vault.example.com
 | Detail | Notes |
 |---|---|
 | SSH log path | `/var/log/secure` (not `/var/log/auth.log`) — auto-detected by `setup.sh` |
-| Dynamic IPs | Automated Cloudflare DNS updates via `maintenance.sh --update-dns` (runs hourly via cron) |
+| Dynamic IPs | Automated Cloudflare DNS updates via `maintenance.sh --update-dns` (runs hourly via `vaultwarden-dns-update.timer`) |
 | Break-glass admin | Essential for OCI Serial Console emergency access |
 | Firewall | Pre-configured for Cloudflare-only web traffic |
 
@@ -243,9 +246,11 @@ sudo ./setup.sh --domain vault.example.com --email admin@example.com --auto
 |---|---|---|
 | Configuration | Manual | Template-based (`setup.sh`) |
 | Resource limits | Manual / none | Pre-configured limits for 6 GB systems |
-| Security | DIY | Dual Fail2ban (Host-networking) + Cloudflare-only firewall |
-| Email | Manual SMTP | Containerised Postfix relay |
-| Backups | Manual | Automated cron (Mon-Sat DB, Sunday full) |
+| Security | DIY | Dual Fail2ban (host-networking) + Cloudflare-only firewall |
+| Email | Manual SMTP daemon | `lib/email.sh` multi-provider chain (API → SMTP → host MTA, no sidecar required) |
+| Caddy | Any version | >= 2.11.0 required (`caddy-cloudflare-ip` bundled; needed for correct Fail2Ban IP logging) |
+| Push notifications | Manual | Requires `internal: true` removed from the `vaultwarden` network when `PUSH_ENABLED=true` |
+| Backups | Manual | Automated via systemd timers (Mon-Sat DB, Sunday full) |
 | Encryption | None | Age-encrypted backups and secrets (SOPS) |
 
 **Migration steps:**
@@ -294,6 +299,7 @@ cd /path/to/VaultWarden-OCI
 - ✅ **Sends** — test Send functionality
 - ✅ **Email** — test email notifications (`./maintenance.sh --test-email`)
 - ✅ **Admin panel** — verify admin access works
+- ✅ **Systemd timers** — confirm scheduled jobs are active: `sudo systemctl list-timers 'vaultwarden-*'`
 
 ### Security Hardening After Migration
 
@@ -315,16 +321,21 @@ cd /path/to/VaultWarden-OCI
 ### Set Up Automation
 
 ```bash
-# Install cron jobs (daily backups, health checks, maintenance)
-sudo ./cron-setup.sh --install
+# Install systemd timers (daily backups, health checks, maintenance, DNS/firewall updates)
+sudo ./systemd-setup.sh --install
+
+# Confirm timers are active
+sudo systemctl list-timers 'vaultwarden-*'
 
 # Verify backups work
 ./backup.sh --type db
 ./backup.sh --list
 
-# Test email
+# Test email (uses lib/email.sh multi-provider chain)
 ./maintenance.sh --test-email --verbose
 ```
+
+> **Email migration note:** VaultWarden-OCI no longer requires a Postfix sidecar container for email. `lib/email.sh` provides an API → SMTP → host MTA fallback chain. Set `EMAIL_PROVIDER` and the corresponding API token secret (`<PROVIDER_UPPER>_API_TOKEN`) via `./edit-secrets.sh`. See [CONFIGURATION.md](CONFIGURATION.md) for the full email configuration reference.
 
 ### Update Client Applications
 
@@ -362,7 +373,8 @@ If migration fails:
 
 ```bash
 # Check database integrity (uses host sqlite3)
-sudo sqlite3 /var/lib/vaultwarden/data/bwdata/db.sqlite3 'PRAGMA integrity_check;'
+# Default path: /var/lib/vaultwarden/data/db.sqlite3
+sudo sqlite3 /var/lib/vaultwarden/data/db.sqlite3 'PRAGMA integrity_check;'
 
 # Run deep maintenance if WAL corruption is suspected
 sudo ./maintenance.sh --db-maint
@@ -379,7 +391,7 @@ sudo chown -R 1000:1000 /var/lib/vaultwarden/data/attachments
 sudo chmod -R 755      /var/lib/vaultwarden/data/attachments
 ```
 
-### Users can't log in
+### Users can’t log in
 
 ```bash
 # Check secrets are decryptable
@@ -401,12 +413,24 @@ curl -I https://vault.example.com/admin
 # Full email diagnostics
 ./maintenance.sh --test-email --verbose
 
-# Check Postfix logs
-docker compose logs postfix
+# Check configured email mode and provider
+grep -E 'EMAIL_MODE|EMAIL_PROVIDER|SMTP_HOST' .env
 
-# Verify SMTP settings
-grep SMTP .env
-./edit-secrets.sh  # Check smtp_password
+# Verify API token is set in secrets
+./edit-secrets.sh  # Check <PROVIDER_UPPER>_API_TOKEN
+```
+
+### Systemd timers not running
+
+```bash
+# List all VaultWarden timers and their next trigger times
+sudo systemctl list-timers 'vaultwarden-*'
+
+# Check a specific service log
+sudo journalctl -u vaultwarden-db-backup.service -n 50
+
+# Re-install timers if missing
+sudo ./systemd-setup.sh --install
 ```
 
 ---
