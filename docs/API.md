@@ -43,10 +43,10 @@ curl -X GET https://vault.yourdomain.com/api/sync \
 
 ### Admin Authentication
 
-The admin panel is protected by two layers:
+The admin panel is protected by two independent layers:
 
-1. **Caddy basic auth** — `admin_basic_auth_hash` secret (bcrypt hash), prompted in browser
-2. **VaultWarden admin token** — configured in secrets, used for direct API calls
+1. **Caddy basic auth** — `admin_basic_auth_hash` secret (bcrypt hash, **minimum cost 10**), prompted in browser
+2. **VaultWarden admin token** — Argon2id hash stored in SOPS secrets, used for direct API calls
 
 ```bash
 # Direct admin API call
@@ -57,7 +57,25 @@ curl -X GET https://vault.yourdomain.com/admin/users \
 To generate a valid bcrypt hash for `admin_basic_auth_hash`:
 
 ```bash
+# Using the project tooling (enforces cost >= 10)
+source lib/crypto.sh
+generate_bcrypt_hash "yourpassword" 12
+
+# Or using Caddy directly
 docker run --rm -it ghcr.io/caddybuilds/caddy-cloudflare:latest caddy hash-password
+```
+
+> ⚠️ **bcrypt cost floor:** `lib/crypto.sh:generate_bcrypt_hash()` and `caddy/entrypoint.sh` both enforce a **minimum bcrypt cost of 10** (OWASP minimum for interactive logins). A hash generated with cost < 10 will be rejected at startup with an explicit error. The valid range is **10–31**; the project default is **12**.
+
+To generate an Argon2id hash for the VaultWarden admin token:
+
+```bash
+# Using the project tooling
+source lib/crypto.sh
+generate_argon2_hash "your_admin_token"
+
+# Or directly with argon2 CLI (parameters must match: -id -t 3 -m 16 -p 4 -l 32)
+echo -n "your_admin_token" | argon2 "$(openssl rand -hex 8)" -id -t 3 -m 16 -p 4 -l 32 -e
 ```
 
 ---
@@ -125,13 +143,27 @@ Fail2ban adds a second layer — repeated auth failures trigger a **Cloudflare E
 
 ---
 
+## 🛡️ Content-Security-Policy and Push Notifications
+
+The Caddy `Content-Security-Policy` header is generated dynamically by `caddy/entrypoint.sh` based on the `PUSH_ENABLED` environment variable:
+
+- **`PUSH_ENABLED=false` (default):** `connect-src` does **not** include `https://push.bitwarden.com` or `https://identity.bitwarden.com`. This is the narrowest (most secure) policy.
+- **`PUSH_ENABLED=true`:** Both push relay origins are added to `connect-src` automatically.
+
+Do not manually edit the CSP in the Caddyfile — the `{$PUSH_CSP}` placeholder is populated at container startup from the environment. Mismatched push origins will cause silent sync failures in clients.
+
+> ⚠️ **`PUSH_ENABLED=true` + `internal: true` network:** push relay connections to `https://push.bitwarden.com` will silently fail. The `startup.sh` probe will reject this combination at startup and print a clear error. Set `PUSH_ENABLED=false` or remove the `internal: true` constraint from the network in `docker-compose.yml`.
+
+---
+
 ## ✅ API Security Practices
 
 - Always use HTTPS — HTTP is redirected by Caddy
-- Never hardcode tokens in scripts; load from environment or secrets
+- Never hardcode tokens in scripts; load from environment or SOPS secrets
 - Use dedicated service accounts rather than personal user accounts
 - Rotate tokens regularly and audit access logs
 - Implement back-off and retry logic in automation to stay within rate limits
+- Admin token must be an Argon2id hash (not plaintext); bcrypt hashes for Caddy basic auth must use cost ≥ 10
 
 ---
 
