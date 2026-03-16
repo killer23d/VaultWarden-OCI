@@ -34,7 +34,7 @@ sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.c
 # Your VaultWarden URL — MUST include https://
 DOMAIN=https://vault.yourdomain.com
 
-# Bare domain (no protocol) — used by Caddy, Fail2Ban, and Postfix
+# Bare domain (no protocol) — used by Caddy, Fail2Ban, and email
 DOMAIN_NAME=vault.yourdomain.com
 
 # Admin contact for notifications and Fail2Ban emails
@@ -67,15 +67,22 @@ SSH_LOG_PATH=/var/log/secure           # Auto-detected by setup.sh (OCI default)
 
 ```bash
 VAULTWARDEN_VERSION=1.35.4   # Pin for stability; blank = latest
-CADDY_VERSION=2.11.1          # Must include Cloudflare module
-FAIL2BAN_VERSION=1.1.0-r3
-POSTFIX_VERSION=4.3.0         # bokysan/docker-postfix email relay
+                              # 1.35.4 is a security release (2026-02-23):
+                              # fixes GHSA-w9f8-m526-h7fh, GHSA-h4hq-rgvh-wh27,
+                              # GHSA-r32r-j5jq-3w4m — upgrade strongly advised
+CADDY_VERSION=2.11.1          # CaddyBuilds/caddy-cloudflare build
+                              # >= 2.11.0: caddy-cloudflare-ip bundled by default,
+                              # rewrites remote_ip to real client IP in access logs
+                              # (required for Fail2Ban to ban attackers, not CF nodes)
+FAIL2BAN_VERSION=1.1.0-r3     # iptables-legacy fix included; do not downgrade to 1.1.0
 ```
+
+> **⚠️ Note on Postfix:** the Postfix sidecar container (`bokysan/docker-postfix`) is no longer required. Email is now handled by `lib/email.sh` — a pure bash + curl multi-provider chain. The Postfix container may remain in `docker-compose.yml` as a last-resort MTA fallback, but `POSTFIX_VERSION` no longer needs to be set in `.env`.
 
 To override versions at runtime without editing files:
 
 ```bash
-SOPS_VERSION=v3.9.4 sudo ./setup.sh --domain vault.yourdomain.com --email admin@yourdomain.com
+VAULTWARDEN_VERSION=1.35.4 sudo ./setup.sh --domain vault.yourdomain.com --email admin@yourdomain.com
 ```
 
 See [ADVANCED-CUSTOMIZATION.md](ADVANCED-CUSTOMIZATION.md) for version pinning details.
@@ -98,7 +105,8 @@ Manage secrets with `./edit-secrets.sh`. They are encrypted with Age + SOPS; nev
 
 | Secret | Purpose |
 | :-- | :-- |
-| `smtp_password` | SMTP relay password for Postfix/VaultWarden email |
+| `smtp_password` | SMTP relay password (used by `lib/email.sh` SMTP fallback path) |
+| `<PROVIDER>_API_TOKEN` | HTTP API token for the selected email provider (see Email section below) |
 | `push_installation_id` | Bitwarden push notification installation ID |
 | `push_installation_key` | Bitwarden push notification installation key |
 
@@ -106,32 +114,87 @@ Manage secrets with `./edit-secrets.sh`. They are encrypted with Age + SOPS; nev
 
 ---
 
-## 📧 Email Configuration (Postfix)
+## 📧 Email Configuration
 
-Email is delivered by a **`bokysan/docker-postfix`** sidecar container acting as an SMTP relay. Configure the relay in `.env`; the password goes in secrets.
+Email delivery is handled by **`lib/email.sh`** — a pure bash + curl multi-provider chain with automatic fallback. No mail daemon sidecar is required.
+
+### Delivery Chain
+
+```
+EMAIL_MODE=auto  →  1. HTTP API (EMAIL_PROVIDER)
+                    2. SMTP relay (curl smtps/starttls)
+                    3. Host MTA (Postfix / mail binary)
+```
+
+`EMAIL_MODE` controls which path(s) are attempted:
+
+| Value | Behaviour |
+| :-- | :-- |
+| `auto` | Try API → SMTP → host MTA in order (recommended) |
+| `api` | HTTP API only; fail loudly if token not set |
+| `smtp` | SMTP relay only (curl, no local daemon) |
+| `host` | Host MTA only (Postfix / `mail` binary) |
+
+### Provider Selection
 
 ```bash
-# SMTP relay settings (shared by VaultWarden and Postfix)
-SMTP_HOST=smtp.gmail.com
+EMAIL_MODE=auto
+EMAIL_PROVIDER=mailersend   # mailersend | sendgrid | mailgun | postmark | resend
+```
+
+`lib/email.sh` automatically resolves the API token from `<PROVIDER_UPPER>_API_TOKEN` in secrets — you do not need to set `EMAIL_API_TOKEN` separately:
+
+| `EMAIL_PROVIDER` | Secret key to set via `./edit-secrets.sh` |
+| :-- | :-- |
+| `mailersend` | `MAILERSEND_API_TOKEN` |
+| `sendgrid` | `SENDGRID_API_TOKEN` |
+| `mailgun` | `MAILGUN_API_TOKEN` |
+| `postmark` | `POSTMARK_API_TOKEN` |
+| `resend` | `RESEND_API_TOKEN` |
+
+### SMTP Fallback
+
+```bash
+# Used when EMAIL_MODE=auto (API unavailable) or EMAIL_MODE=smtp
+SMTP_HOST=smtp.mailersend.net
 SMTP_PORT=587
 SMTP_SECURITY=starttls              # starttls or on (SSL/TLS)
-SMTP_USERNAME=your-email@gmail.com
-SMTP_FROM=noreply@vault.yourdomain.com
+SMTP_USERNAME=your-smtp-username
+# SMTP_PASSWORD stored in secrets via ./edit-secrets.sh
+SMTP_FROM_EMAIL=noreply@vault.yourdomain.com
 SMTP_FROM_NAME=VaultWarden
-SMTP_TIMEOUT=15
-
-# Postfix-specific
-ALLOWED_SENDER_DOMAINS="vault.yourdomain.com yourdomain.com"
-POSTFIX_MYHOSTNAME=postfix.vault.yourdomain.com
-POSTFIX_SMTP_TLS_SECURITY_LEVEL=encrypt   # encrypt | may | none
-POSTFIX_MESSAGE_SIZE_LIMIT=10240000        # 10 MB
+SMTP_TIMEOUT=30
 ```
 
-SMTP password:
+### VaultWarden Container SMTP
+
+The VaultWarden container uses its own set of SMTP variables. Docker Compose does **not** expand `${VAR}` references in `.env` files — these must be **literal values**, kept in sync with the `SMTP_*` block above:
 
 ```bash
-./edit-secrets.sh   # set: smtp_password
+VW_SMTP_HOST=smtp.mailersend.net
+VW_SMTP_PORT=587
+VW_SMTP_SECURITY=starttls
+VW_SMTP_USERNAME=your-smtp-username
+VW_SMTP_FROM=noreply@vault.yourdomain.com
+VW_SMTP_FROM_NAME=VaultWarden
+VW_SMTP_TIMEOUT=30
 ```
+
+### Fail2Ban Email
+
+Fail2Ban notification addresses must also be **literal values** — `${ADMIN_EMAIL}` and `${DOMAIN_NAME}` are not expanded in `.env`:
+
+```bash
+F2B_LOG_TARGET=STDOUT
+F2B_LOG_LEVEL=INFO
+F2B_DB_PURGE_AGE=1d
+F2B_MAX_RETRY=3
+F2B_DEST_MAIL=admin@yourdomain.com      # ← literal, not ${ADMIN_EMAIL}
+F2B_SENDER=fail2ban@vault.yourdomain.com # ← literal, not fail2ban@${DOMAIN_NAME}
+F2B_ACTION="%(action_mwl)s"             # Email + Cloudflare ban
+```
+
+> All web-facing jails push bans to **Cloudflare Edge WAF via API** — local `iptables` is not used for proxied services. Only the SSH jail uses local iptables.
 
 Test end-to-end delivery:
 
@@ -139,8 +202,6 @@ Test end-to-end delivery:
 ./maintenance.sh --test-email --verbose
 # or: make test-email
 ```
-
-> The Postfix container relays through your `SMTP_HOST`. `RELAYHOST`, `RELAYHOST_USERNAME`, and `RELAYHOST_PASSWORD` are constructed automatically from `SMTP_*` variables in `docker-compose.yml` — do not set them manually.
 
 ---
 
@@ -193,21 +254,7 @@ PUSH_IDENTITY_URI=https://identity.bitwarden.com
 
 Add `push_installation_id` and `push_installation_key` via `./edit-secrets.sh`.
 
----
-
-## 🚫 Fail2Ban
-
-```bash
-F2B_LOG_TARGET=STDOUT
-F2B_LOG_LEVEL=INFO
-F2B_DB_PURGE_AGE=1d
-F2B_MAX_RETRY=3
-F2B_DEST_MAIL="${ADMIN_EMAIL}"    # Ban notification recipient
-F2B_SENDER="fail2ban@${DOMAIN_NAME}"
-F2B_ACTION="%(action_mwl)s"        # Email + Cloudflare ban
-```
-
-> All web-facing jails push bans to **Cloudflare Edge WAF via API** — local `iptables` is not used for proxied services. Only the SSH jail uses local iptables.
+> **⚠️ Network Constraint:** Push relay requires outbound internet access from the VaultWarden container. The `vaultwarden` network is marked `internal: true` in `docker-compose.yml`, which blocks all outbound traffic. If you enable push notifications, you must either remove `internal: true` from the network definition or route push traffic through an external proxy. Mismatching these settings causes silent push failures on every sync cycle. See [DEPLOYMENT.md](DEPLOYMENT.md) for details.
 
 ---
 
@@ -215,14 +262,43 @@ F2B_ACTION="%(action_mwl)s"        # Email + Cloudflare ban
 
 ```bash
 BACKUP_VERIFICATION_MODE=quick_check   # quick_check or integrity_check
-BACKUP_SCHEDULE="0 4 * * 1-6"          # Cron schedule for automated DB backups
+RCLONE_REMOTE_NAME=CHANGE_ME_RCLONE_REMOTE  # rclone remote for offsite sync
 BACKUP_RETENTION_DAYS=30               # Default retention for full backups (days).
                                         # DB backups default to 14 days.
                                         # Override per-run: backup.sh --keep N
-RCLONE_REMOTE_NAME=CHANGE_ME_RCLONE_REMOTE  # rclone remote for offsite sync
+
+# BACKUP_SCHEDULE is a reference value only — the actual automated schedule
+# is controlled by the systemd timer: vaultwarden-db-backup.timer (Mon-Sat 04:00)
+# and vaultwarden-full-backup.timer (Sunday).
+# To change the schedule: sudo systemctl edit vaultwarden-db-backup.timer
+# Legacy cron: cron-setup.sh hardcodes its own schedule independently.
+BACKUP_SCHEDULE="0 4 * * *"
 ```
 
 See [BACKUP-RESTORE.md](BACKUP-RESTORE.md) for procedures.
+
+---
+
+## 🔁 Automation (Systemd)
+
+Scheduled jobs are managed by systemd timers installed by `systemd-setup.sh`:
+
+```bash
+sudo ./systemd-setup.sh --install
+```
+
+| Timer | Schedule | Script |
+| :-- | :-- | :-- |
+| `vaultwarden-db-backup.timer` | Mon–Sat 04:00 (+60 s jitter) | `backup.sh --type db --rclone --email` |
+| `vaultwarden-full-backup.timer` | Sunday 04:00 | `backup.sh --type full --full-verification --rclone --email` |
+| `vaultwarden-health.timer` | Every 15 min | `health.sh --auto-recover --email` |
+| `vaultwarden-maintenance.timer` | Sunday 02:00 | `maintenance.sh --comprehensive` |
+| `vaultwarden-dns-update.timer` | Every hour | `maintenance.sh --update-dns` |
+| `vaultwarden-firewall-update.timer` | Every 6 h | `maintenance.sh --update-firewall` |
+
+All services emit `OnFailure=vaultwarden-notify-failure@%n.service` — failures trigger an email via the notification template unit.
+
+> **Legacy:** `cron-setup.sh` is **no longer present** in the repository. If you have legacy cron jobs from a prior install, remove them and migrate to `systemd-setup.sh --install`.
 
 ---
 
@@ -251,7 +327,16 @@ ls -l secrets/keys/age-key.txt   # must exist and be mode 600
 **Email issues:**
 
 ```bash
-docker compose logs postfix
 ./maintenance.sh --test-email --verbose
-grep SMTP .env
+grep -E 'EMAIL_MODE|EMAIL_PROVIDER|SMTP_HOST' .env
+./edit-secrets.sh   # verify the correct API token key is set for EMAIL_PROVIDER
+```
+
+**Push notification failures (silent):**
+
+```bash
+# Check if PUSH_ENABLED=true conflicts with internal:true network
+grep PUSH_ENABLED .env
+grep 'internal:' docker-compose.yml
+docker compose logs vaultwarden | grep -i push
 ```
