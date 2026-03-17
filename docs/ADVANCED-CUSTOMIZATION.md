@@ -281,6 +281,174 @@ docker compose run --rm -e DEBUG_ENTRYPOINT=true caddy
 
 ---
 
+## 📧 Email Customisation
+
+Email delivery is handled by **`lib/email.sh`** — a pure bash + curl multi-provider chain. The Postfix sidecar container (`postfix` service, `boky/postfix`) provides the **last-resort host MTA tier** when both the HTTP API and SMTP relay paths fail or are disabled.
+
+### Delivery Chain
+
+```
+EMAIL_MODE=auto  →  1. HTTP API    (EMAIL_PROVIDER + API token via curl)
+                    2. SMTP relay  (curl smtps/starttls — no local daemon)
+                    3. Host MTA    (Postfix sidecar on 127.0.0.1:587)
+```
+
+Set `EMAIL_MODE` in `.env` to control which paths are attempted:
+
+| `EMAIL_MODE` | Behaviour |
+| :-- | :-- |
+| `auto` | Try API → SMTP → host MTA in order (recommended) |
+| `api` | HTTP API only; fails loudly if token missing |
+| `smtp` | SMTP relay only (curl) |
+| `host` | Host MTA only (Postfix sidecar / `mail` binary) |
+
+### Tier 1 — Switching Email Provider
+
+Change `EMAIL_PROVIDER` in `.env` and rotate the matching token in secrets:
+
+```bash
+# In .env:
+EMAIL_PROVIDER=sendgrid
+
+# In secrets (rotate the matching key):
+./edit-secrets.sh --rotate SENDGRID_API_TOKEN
+```
+
+Supported providers and their secret key names:
+
+| Provider | `.env` value | Secret key |
+| :-- | :-- | :-- |
+| MailerSend | `mailersend` | `MAILERSEND_API_TOKEN` |
+| SendGrid | `sendgrid` | `SENDGRID_API_TOKEN` |
+| Mailgun | `mailgun` | `MAILGUN_API_TOKEN` |
+| Postmark | `postmark` | `POSTMARK_API_TOKEN` |
+| Resend | `resend` | `RESEND_API_TOKEN` |
+
+### Tier 2 — SMTP Relay Override
+
+To use a different SMTP provider for the relay fallback, update these values in `.env`:
+
+```bash
+SMTP_HOST=smtp.sendgrid.net
+SMTP_PORT=587
+SMTP_SECURITY=starttls
+SMTP_USERNAME=apikey
+SMTP_FROM_EMAIL=noreply@vault.yourdomain.com
+SMTP_FROM_NAME=VaultWarden
+SMTP_TIMEOUT=30
+```
+
+Set the SMTP password via secrets (shared with the Postfix sidecar):
+
+```bash
+./edit-secrets.sh --rotate smtp_password
+```
+
+> **Keep VaultWarden SMTP in sync.** The VaultWarden container has its own parallel `VW_SMTP_*` variables in `.env` (Docker Compose does not expand `${VAR}` references in `.env` files — they must be literal values). Update both blocks together whenever you change SMTP provider.
+
+### Tier 3 — Postfix MTA Sidecar
+
+The `postfix` service runs `boky/postfix` as a containerised SMTP relay. It is **not** a standalone MX mail server — it forwards all outbound mail through an upstream relay (`RELAYHOST`). This means it still requires a valid upstream SMTP provider and credentials.
+
+**Configure the Postfix relay in `.env`:**
+
+```bash
+SMTP_HOST=smtp.mailersend.net      # Upstream relay (RELAYHOST in Postfix)
+SMTP_PORT=587                      # Relay port
+SMTP_USERNAME=your-smtp-username   # Relay auth username
+ALLOWED_SENDER_DOMAINS=yourdomain.com  # REQUIRED — prevents open relay abuse
+POSTFIX_MYHOSTNAME=postfix             # HELO/EHLO hostname (optional)
+POSTFIX_SMTP_TLS_SECURITY_LEVEL=encrypt  # encrypt (required) or may (opportunistic)
+POSTFIX_MESSAGE_SIZE_LIMIT=10240000    # Max message size in bytes (~10 MB)
+```
+
+> **`ALLOWED_SENDER_DOMAINS` must be set.** Leaving it blank permits any sender domain, turning the container into an open relay accessible to every container on the Docker network. Set it to your bare domain (e.g. `yourdomain.com`, not `vault.yourdomain.com`).
+
+**Security note — SASL password file:** `boky/postfix` writes the relay password to `/etc/postfix/sasl_passwd` inside the container at startup. This is a Postfix SASL protocol requirement and cannot be avoided. The file is not bind-mounted to the host, but it is accessible via `docker exec`:
+
+```bash
+docker exec vaultwarden_postfix cat /etc/postfix/sasl_passwd
+```
+
+Restrict the Docker socket to trusted operators to prevent unauthorised inspection.
+
+**Postfix capabilities:** The container requires exactly six Linux capabilities. Do not remove `DAC_OVERRIDE` or `FOWNER` — mail spool access will fail:
+
+```yaml
+cap_add:
+  - CHOWN
+  - SETUID
+  - SETGID
+  - NET_BIND_SERVICE
+  - DAC_OVERRIDE   # required — mail spool access
+  - FOWNER         # required — mail spool access
+```
+
+Verify capabilities are present after any image update:
+
+```bash
+docker inspect vaultwarden_postfix | grep -A 20 CapAdd
+```
+
+**Verify Postfix is healthy:**
+
+```bash
+docker compose ps postfix
+docker compose logs -f postfix
+docker exec vaultwarden_postfix postconf relayhost
+docker exec vaultwarden_postfix postconf smtp_tls_security_level
+docker exec vaultwarden_postfix postconf smtp_sasl_auth_enable
+```
+
+### Disabling the Postfix Sidecar
+
+If you use `EMAIL_MODE=api` or `EMAIL_MODE=smtp` exclusively and want to remove the MTA fallback entirely:
+
+**Option A — docker-compose override (preferred, non-destructive):**
+
+```yaml
+# docker-compose.override.yml
+services:
+  postfix:
+    deploy:
+      replicas: 0
+```
+
+**Option B — remove from template:**
+
+Comment out or delete the entire `postfix:` service block in `docker-compose.yml.example`, then regenerate:
+
+```bash
+sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.com
+./startup.sh --force
+```
+
+### Decoupled VaultWarden Email Override
+
+The `docker-compose.override.yml.example` is provided to decouple VaultWarden's built-in SMTP from the `lib/email.sh` chain (e.g. to route VaultWarden app emails through a different provider than maintenance/health alert emails):
+
+```bash
+cp docker-compose.override.yml.example docker-compose.override.yml
+nano docker-compose.override.yml   # customise VaultWarden SMTP overrides
+```
+
+### Testing Each Tier
+
+```bash
+# Full chain (auto — tests API → SMTP → MTA in order)
+./maintenance.sh --test-email --verbose
+
+# Force a specific tier
+EMAIL_MODE=api  ./maintenance.sh --test-email --verbose
+EMAIL_MODE=smtp ./maintenance.sh --test-email --verbose
+EMAIL_MODE=host ./maintenance.sh --test-email --verbose
+
+# Makefile shortcut
+make test-email
+```
+
+---
+
 ## 📦 Storage Customisation
 
 ### External Database
@@ -335,40 +503,6 @@ KEEP_DAYS=30
 ```
 
 > **Retention on restored hosts:** Backup retention age is calculated from the **timestamp embedded in the filename** (e.g., `vaultwarden-full-20260312-030000.tar.gz.age`), not from the file's `ctime`. This means backups restored to a new host are cleaned up correctly based on their original creation date, not the date they were copied.
-
----
-
-## 📧 Email Customisation
-
-Email is handled by the **Postfix sidecar container** (`postfix` service). Configure the relay in `.env`:
-
-```bash
-SMTP_HOST=smtp.sendgrid.net
-SMTP_PORT=587
-SMTP_USERNAME=apikey
-ALLOWED_SENDER_DOMAINS=yourdomain.com
-```
-
-Set the SMTP password via secrets:
-
-```bash
-./edit-secrets.sh --rotate smtp_password
-```
-
-Test end-to-end delivery:
-
-```bash
-./maintenance.sh --test-email --verbose
-# or: make test-email
-```
-
-### Decoupled Email Override
-
-The `docker-compose.override.yml.example` is provided specifically to decouple VaultWarden's built-in SMTP from the Postfix sidecar. Copy and activate it if you need to route VaultWarden emails differently:
-
-```bash
-cp docker-compose.override.yml.example docker-compose.override.yml
-```
 
 ---
 
