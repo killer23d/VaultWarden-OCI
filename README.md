@@ -43,13 +43,13 @@ Verify the current list at <https://www.cloudflare.com/ips-v4>.
 
 4. Also add an SSH rule: Source `0.0.0.0/0` (or your IP), Protocol TCP, Port `22`.
 
-> **Why not UFW?** OCI Security Lists drop packets at the hypervisor — before the VM's network stack — making them a harder control than host-level UFW.
+> **Why not UFW?** OCI Security Lists drop packets at the hypervisor — before the VM’s network stack — making them a harder control than host-level UFW.
 
 ---
 
 ### Step 1 — Cloudflare DNS Staging (Grey Cloud First)
 
-In your Cloudflare dashboard set your DNS record to **DNS Only (Grey Cloud)** before running setup. Caddy must reach Let's Encrypt directly to provision its TLS certificate on first boot. You can enable the orange proxy cloud after the stack is running.
+In your Cloudflare dashboard set your DNS record to **DNS Only (Grey Cloud)** before running setup. Caddy must reach Let’s Encrypt directly to provision its TLS certificate on first boot. You can enable the orange proxy cloud after the stack is running.
 
 ---
 
@@ -87,6 +87,9 @@ cd VaultWarden-OCI
 ```bash
 nano .env
 # ► Set: CLOUDFLARE_ZONE_ID, SMTP_HOST, SMTP_PORT, SMTP_USERNAME
+# ► Set: EMAIL_MODE=auto, EMAIL_PROVIDER=mailersend (or your provider)
+# ► Set: ALLOWED_SENDER_DOMAINS=vault.yourdomain.com  (for Postfix sidecar)
+# ► Set literal values: F2B_DEST_MAIL, F2B_SENDER, VW_SMTP_HOST, VW_SMTP_FROM
 # ► Verify: DOMAIN and ADMIN_EMAIL are correct
 ```
 
@@ -97,7 +100,11 @@ Then supply the external credentials that `--auto` cannot generate for you:
 ./edit-secrets.sh --rotate caddy_cloudflare_dns_token
 ./edit-secrets.sh --rotate fail2ban_cloudflare_firewall_token
 
-# SMTP password (required if using email notifications)
+# Email API token (required for Tier 1 — replace with your provider's key name)
+./edit-secrets.sh --rotate MAILERSEND_API_TOKEN
+# e.g. SENDGRID_API_TOKEN | MAILGUN_API_TOKEN | POSTMARK_API_TOKEN | RESEND_API_TOKEN
+
+# SMTP password (required for Tier 2 relay and Postfix sidecar)
 ./edit-secrets.sh --rotate smtp_password
 
 # Push notification keys (optional — mobile app push alerts)
@@ -107,7 +114,7 @@ Then supply the external credentials that `--auto` cannot generate for you:
 
 **Interactive install (no `--auto`):** `setup.sh` creates the skeleton and displays a next-steps screen. Follow the steps printed on screen — edit `.env` first, then run `./setup-secrets.sh` to be prompted for all credentials at once.
 
-See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for every available variable.
+See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for every available variable and [docs/EMAIL.md](docs/EMAIL.md) for a full email setup walkthrough.
 
 ---
 
@@ -157,6 +164,62 @@ The installed systemd timer schedule:
 
 ---
 
+## 📧 Email Delivery
+
+Email is handled by **`lib/email.sh`** — a pure bash + curl multi-provider chain. No mail daemon is required on the host. Three tiers are attempted in order when `EMAIL_MODE=auto`:
+
+```
+Tier 1 ─ HTTP API       →  MailerSend, SendGrid, Mailgun, Postmark, Resend
+           │ fail
+           ▼
+Tier 2 ─ SMTP relay     →  curl smtps/starttls (no local daemon)
+           │ fail
+           ▼
+Tier 3 ─ Host MTA       →  Postfix sidecar (boky/docker-postfix) on 127.0.0.1:587
+```
+
+Fail2Ban uses the Postfix sidecar (Tier 3) exclusively for ban notifications,
+calling the host `mail` binary targeting `127.0.0.1:587`. The VaultWarden
+container has its own built-in SMTP client configured via `VW_SMTP_*` in `.env`.
+
+**Minimum setup for operational alerts (all three tiers):**
+
+```bash
+# .env
+EMAIL_MODE=auto
+EMAIL_PROVIDER=mailersend           # or your chosen provider
+SMTP_HOST=smtp.mailersend.net
+SMTP_PORT=587
+SMTP_SECURITY=starttls
+SMTP_USERNAME=your-smtp-username
+SMTP_FROM_EMAIL=noreply@vault.yourdomain.com
+ALLOWED_SENDER_DOMAINS=vault.yourdomain.com
+F2B_DEST_MAIL=admin@yourdomain.com  # literal value — NOT ${ADMIN_EMAIL}
+F2B_SENDER=fail2ban@vault.yourdomain.com  # literal value — NOT fail2ban@${DOMAIN_NAME}
+
+# Keep VW_SMTP_* in sync with SMTP_* above (literal values only):
+VW_SMTP_HOST=smtp.mailersend.net
+VW_SMTP_PORT=587
+VW_SMTP_SECURITY=starttls
+VW_SMTP_USERNAME=your-smtp-username
+VW_SMTP_FROM=noreply@vault.yourdomain.com
+```
+
+```bash
+# Secrets
+./edit-secrets.sh --rotate MAILERSEND_API_TOKEN
+./edit-secrets.sh --rotate smtp_password
+```
+
+```bash
+# Test end-to-end
+./maintenance.sh --test-email --verbose
+```
+
+Full details, provider setup, Postfix MTA configuration, and troubleshooting: **[docs/EMAIL.md](docs/EMAIL.md)**
+
+---
+
 ## 🏗️ Project Components
 
 ### Docker Stack
@@ -165,7 +228,7 @@ The installed systemd timer schedule:
 | :-- | :-- |
 | **Caddy** | TLS termination, reverse proxy, security headers, 4-tier structured JSON logging (512 MB limit) |
 | **VaultWarden** | Password manager application (512 MB limit) |
-| **Postfix** | Containerised SMTP relay — no host mail dependencies (256 MB limit) |
+| **Postfix** | Containerised SMTP relay — last-resort MTA for `lib/email.sh` and sole email path for Fail2Ban; binds `127.0.0.1:587` (256 MB limit) |
 | **Fail2ban** | Brute-force detection → Cloudflare edge blocking; Host networking for SSH protection (512 MB limit) |
 
 ### Scripts
@@ -196,6 +259,7 @@ Full reference: [docs/SCRIPTS.md](docs/SCRIPTS.md)
 | `security.sh` | Security validation helpers |
 | `backup_utils.sh` | Backup-specific shared logic including SQLite Online Backup API integrity verification |
 | `secrets.sh` | Secrets collection, auto-generation, hashing (Argon2id + bcrypt), Cloudflare token validation, recovery kit generation |
+| `email.sh` | Multi-provider email delivery: HTTP API (tier 1) → SMTP relay via curl (tier 2) → host MTA/Postfix (tier 3). Resolves `<PROVIDER_UPPER>_API_TOKEN` from secrets automatically. |
 | `simple_key_resilience.sh` | Three-tier Age key protection: health check with auto-permission fix and encrypt/decrypt roundtrip (Tier 1); password-manager-ready plaintext escrow export (Tier 2); printable PDF/HTML paper backup with optional QR code via `qrencode` and `wkhtmltopdf` (Tier 3) |
 
 ### Configuration Templates
@@ -215,7 +279,7 @@ All live configuration is generated from `.example` templates by `setup.sh`. Edi
 - **Edge WAF & Host Protection** — Cloudflare proxy + Fail2ban pushes WAF bans to Cloudflare API. Fail2ban also runs in host network mode for direct iptables SSH protection.
 - **Host firewall** — UFW opens 80/443/22; Cloudflare IP restriction enforced at OCI Security List level
 - **Encrypted secrets** — Age + SOPS; no plaintext credentials at rest. `cleanup_secrets_environment()` unsets all SOPS environment variables after every operation.
-- **HTTPS** — Automatic Let's Encrypt via Caddy with HSTS, CSP, and security headers
+- **HTTPS** — Automatic Let’s Encrypt via Caddy with HSTS, CSP, and security headers
 - **Container hardening** — Non-root execution, capability restrictions, memory limits
 - **Docker-free backup integrity** — `backup.sh` and `restore.sh` use host `sqlite3` (SQLite Online Backup API) for atomic DB snapshots and `PRAGMA integrity_check`; no ephemeral alpine containers with read-write mounts over live vault data
 - **Systemd hardening** — All service units run with `NoNewPrivileges=yes` and `PrivateTmp=yes`; failure notifications are wired via `OnFailure=` on every unit
@@ -273,6 +337,7 @@ make logs [SERVICE=name]               # Container logs
 | :-- | :-- |
 | [DEPLOYMENT.md](docs/DEPLOYMENT.md) | Detailed deployment walkthrough |
 | [CONFIGURATION.md](docs/CONFIGURATION.md) | Every `.env` and secrets variable |
+| [EMAIL.md](docs/EMAIL.md) | Email setup: API providers, SMTP relay, Postfix MTA, Fail2Ban notifications |
 | [SECURITY.md](docs/SECURITY.md) | Security hardening deep-dive |
 | [OPERATIONS.md](docs/OPERATIONS.md) | Day-to-day ops, update/rollback phases |
 | [BACKUP-RESTORE.md](docs/BACKUP-RESTORE.md) | Backup strategy and restore procedures |
