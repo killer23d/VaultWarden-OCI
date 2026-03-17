@@ -75,9 +75,10 @@ CADDY_VERSION=2.11.1          # CaddyBuilds/caddy-cloudflare build
                               # rewrites remote_ip to real client IP in access logs
                               # (required for Fail2Ban to ban attackers, not CF nodes)
 FAIL2BAN_VERSION=1.1.0-r3     # iptables-legacy fix included; do not downgrade to 1.1.0
+POSTFIX_VERSION=4.3.0         # boky/postfix — used when EMAIL_MODE=host or as MTA fallback
 ```
 
-> **⚠️ Note on Postfix:** the Postfix sidecar container (`bokysan/docker-postfix`) is no longer required. Email is now handled by `lib/email.sh` — a pure bash + curl multi-provider chain. The Postfix container may remain in `docker-compose.yml` as a last-resort MTA fallback, but `POSTFIX_VERSION` no longer needs to be set in `.env`.
+> **Note on Postfix:** the Postfix sidecar (`boky/postfix`) is the **host MTA tier** — the last fallback in the `auto` delivery chain. It is not required for API or SMTP relay delivery. See the [Email Configuration](#-email-configuration) section below for the full chain.
 
 To override versions at runtime without editing files:
 
@@ -105,7 +106,7 @@ Manage secrets with `./edit-secrets.sh`. They are encrypted with Age + SOPS; nev
 
 | Secret | Purpose |
 | :-- | :-- |
-| `smtp_password` | SMTP relay password (used by `lib/email.sh` SMTP fallback path) |
+| `smtp_password` | SMTP relay password — used by `lib/email.sh` SMTP path **and** the Postfix MTA sidecar |
 | `<PROVIDER>_API_TOKEN` | HTTP API token for the selected email provider (see Email section below) |
 | `push_installation_id` | Bitwarden push notification installation ID |
 | `push_installation_key` | Bitwarden push notification installation key |
@@ -116,14 +117,14 @@ Manage secrets with `./edit-secrets.sh`. They are encrypted with Age + SOPS; nev
 
 ## 📧 Email Configuration
 
-Email delivery is handled by **`lib/email.sh`** — a pure bash + curl multi-provider chain with automatic fallback. No mail daemon sidecar is required.
+Email delivery is handled by **`lib/email.sh`** — a pure bash + curl multi-provider chain with automatic fallback. The Postfix sidecar acts as the last-resort host MTA tier when both the API and SMTP relay paths are unavailable or disabled.
 
 ### Delivery Chain
 
 ```
-EMAIL_MODE=auto  →  1. HTTP API (EMAIL_PROVIDER)
-                    2. SMTP relay (curl smtps/starttls)
-                    3. Host MTA (Postfix / mail binary)
+EMAIL_MODE=auto  →  1. HTTP API    (EMAIL_PROVIDER, curl)
+                    2. SMTP relay  (curl smtps/starttls — no local daemon)
+                    3. Host MTA    (Postfix sidecar container on 127.0.0.1:587)
 ```
 
 `EMAIL_MODE` controls which path(s) are attempted:
@@ -133,9 +134,9 @@ EMAIL_MODE=auto  →  1. HTTP API (EMAIL_PROVIDER)
 | `auto` | Try API → SMTP → host MTA in order (recommended) |
 | `api` | HTTP API only; fail loudly if token not set |
 | `smtp` | SMTP relay only (curl, no local daemon) |
-| `host` | Host MTA only (Postfix / `mail` binary) |
+| `host` | Host MTA only (Postfix sidecar / `mail` binary) |
 
-### Provider Selection
+### Tier 1 — HTTP API Provider
 
 ```bash
 EMAIL_MODE=auto
@@ -152,18 +153,95 @@ EMAIL_PROVIDER=mailersend   # mailersend | sendgrid | mailgun | postmark | resen
 | `postmark` | `POSTMARK_API_TOKEN` |
 | `resend` | `RESEND_API_TOKEN` |
 
-### SMTP Fallback
+### Tier 2 — SMTP Relay (curl, no daemon)
+
+Used when `EMAIL_MODE=auto` and the API path fails, or when `EMAIL_MODE=smtp`.
 
 ```bash
-# Used when EMAIL_MODE=auto (API unavailable) or EMAIL_MODE=smtp
 SMTP_HOST=smtp.mailersend.net
 SMTP_PORT=587
 SMTP_SECURITY=starttls              # starttls or on (SSL/TLS)
 SMTP_USERNAME=your-smtp-username
-# SMTP_PASSWORD stored in secrets via ./edit-secrets.sh
+# SMTP_PASSWORD stored in secrets via ./edit-secrets.sh --rotate smtp_password
 SMTP_FROM_EMAIL=noreply@vault.yourdomain.com
 SMTP_FROM_NAME=VaultWarden
 SMTP_TIMEOUT=30
+```
+
+### Tier 3 — Host MTA (Postfix Sidecar)
+
+The `postfix` service in `docker-compose.yml` runs `boky/postfix` as a containerised SMTP relay bound to `127.0.0.1:587`. It is the last-resort delivery path when both API and SMTP relay are unavailable, or when `EMAIL_MODE=host`.
+
+**How it works:**
+
+- `lib/email.sh` connects to `127.0.0.1:587` (Fail2Ban uses host networking; VaultWarden uses the Docker bridge) when the host MTA path is selected.
+- The Postfix container authenticates upstream using the same `smtp_password` secret as tier 2.
+- Postfix forwards mail through `RELAYHOST` (your upstream SMTP provider) — it is a relay, not a standalone mail server. It does **not** send mail directly to recipient MX records.
+
+**Key Postfix variables in `.env`:**
+
+```bash
+# These are consumed by the postfix container via docker-compose.yml
+SMTP_HOST=smtp.mailersend.net        # Upstream relay host (RELAYHOST)
+SMTP_PORT=587                        # Upstream relay port
+SMTP_USERNAME=your-smtp-username     # Upstream relay username (RELAYHOST_USERNAME)
+ALLOWED_SENDER_DOMAINS=yourdomain.com # Restrict which From: domains Postfix accepts
+                                      # Prevents open relay abuse — set to your domain
+POSTFIX_MYHOSTNAME=postfix           # Postfix FQDN / helo name (optional)
+POSTFIX_SMTP_TLS_SECURITY_LEVEL=encrypt  # encrypt (recommended) or may (opportunistic)
+POSTFIX_MESSAGE_SIZE_LIMIT=10240000  # Max message size in bytes (default: ~10 MB)
+```
+
+> **`ALLOWED_SENDER_DOMAINS` is critical.** If left blank, Postfix will accept mail from any sender domain, making it an open relay accessible to any container on the Docker network. Always set it to your domain (e.g. `yourdomain.com`).
+
+**SMTP password note:** `boky/postfix` writes the relay password to `/etc/postfix/sasl_passwd` inside the container at startup — this is a Postfix SASL requirement and cannot be avoided at the protocol level. The file is not bind-mounted to the host, but is readable via `docker exec vaultwarden_postfix cat /etc/postfix/sasl_passwd`. Restrict Docker socket access to trusted operators.
+
+**Container capabilities required by Postfix:**
+
+```yaml
+cap_add:
+  - CHOWN
+  - SETUID
+  - SETGID
+  - NET_BIND_SERVICE
+  - DAC_OVERRIDE   # required for mail spool access
+  - FOWNER         # required for mail spool access
+```
+
+Do not remove `DAC_OVERRIDE` or `FOWNER` — mail delivery will fail silently.
+
+**Enabling / disabling the Postfix sidecar:**
+
+The `postfix` service is defined in `docker-compose.yml.example` and active by default. If you are using `EMAIL_MODE=api` or `EMAIL_MODE=smtp` exclusively and want to remove the MTA fallback:
+
+```yaml
+# docker-compose.override.yml — disable Postfix sidecar
+services:
+  postfix:
+    deploy:
+      replicas: 0
+```
+
+Or comment out the entire `postfix:` service block in `docker-compose.yml.example` before running `setup.sh`.
+
+**Verifying Postfix is working:**
+
+```bash
+# Check Postfix container is healthy
+docker compose ps postfix
+
+# Tail Postfix logs
+docker compose logs -f postfix
+
+# Send a test message through the full chain (hits all three tiers in auto mode)
+./maintenance.sh --test-email --verbose
+
+# Send a test message forcing the MTA tier only
+EMAIL_MODE=host ./maintenance.sh --test-email --verbose
+
+# Inspect the relay configuration inside the container
+docker exec vaultwarden_postfix postconf relayhost
+docker exec vaultwarden_postfix postconf smtp_tls_security_level
 ```
 
 ### VaultWarden Container SMTP
@@ -196,11 +274,19 @@ F2B_ACTION="%(action_mwl)s"             # Email + Cloudflare ban
 
 > All web-facing jails push bans to **Cloudflare Edge WAF via API** — local `iptables` is not used for proxied services. Only the SSH jail uses local iptables.
 
-Test end-to-end delivery:
+### Testing Email Delivery
 
 ```bash
+# Test full chain (auto mode — tries API → SMTP → MTA in order)
 ./maintenance.sh --test-email --verbose
-# or: make test-email
+
+# Force a specific tier for targeted testing
+EMAIL_MODE=api  ./maintenance.sh --test-email --verbose
+EMAIL_MODE=smtp ./maintenance.sh --test-email --verbose
+EMAIL_MODE=host ./maintenance.sh --test-email --verbose
+
+# Makefile shortcut
+make test-email
 ```
 
 ---
@@ -330,6 +416,12 @@ ls -l secrets/keys/age-key.txt   # must exist and be mode 600
 ./maintenance.sh --test-email --verbose
 grep -E 'EMAIL_MODE|EMAIL_PROVIDER|SMTP_HOST' .env
 ./edit-secrets.sh   # verify the correct API token key is set for EMAIL_PROVIDER
+
+# Postfix MTA sidecar specifically
+docker compose ps postfix
+docker compose logs postfix
+docker exec vaultwarden_postfix postconf relayhost
+docker exec vaultwarden_postfix postconf smtp_sasl_auth_enable
 ```
 
 **Push notification failures (silent):**
