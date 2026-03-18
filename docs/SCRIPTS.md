@@ -26,8 +26,9 @@ Complete reference for all management scripts and utility libraries in VaultWard
 | 8 | `maintenance.sh` | Maintenance (merged) | `--db-maint` only |
 | 9 | `create-breakglass-admin.sh` | Emergency | ✅ |
 | 10 | `systemd-setup.sh` | Automation | ✅ |
+| 11 | `uninstall-vaultwarden.sh` | Uninstall | ✅ |
 
-**Utility libraries (7):** `lib/common.sh`, `lib/docker.sh`, `lib/crypto.sh`, `lib/security.sh`, `lib/backup_utils.sh`, `lib/secrets.sh`, `lib/simple_key_resilience.sh`
+**Utility libraries (8):** `lib/common.sh`, `lib/docker.sh`, `lib/crypto.sh`, `lib/security.sh`, `lib/backup_utils.sh`, `lib/secrets.sh`, `lib/simple_key_resilience.sh`, `lib/email.sh`
 
 ---
 
@@ -92,6 +93,7 @@ sudo ./setup.sh --domain vault.example.com --email admin@example.com --auto
 |---|---|
 | `--auto` | Non-interactive — auto-generate required secrets; set `CHANGE_ME` for optional fields |
 | `--quiet-summary` | Suppress verbose output (used internally by `setup.sh --auto`) |
+| `--hash-only` | Generate and print a bcrypt hash for the supplied password without modifying secrets |
 | `--dry-run` | Show what would be generated without writing secrets |
 
 ```bash
@@ -100,6 +102,9 @@ sudo ./setup.sh --domain vault.example.com --email admin@example.com --auto
 
 # Non-interactive — same as what setup.sh --auto calls internally
 ./setup-secrets.sh --auto
+
+# Generate a bcrypt hash for manual insertion
+./setup-secrets.sh --hash-only
 
 # Confirm the result
 ./edit-secrets.sh --view
@@ -246,7 +251,7 @@ sudo ./backup.sh --type db --keep 30
 make backup              # Database backup
 make backup-full         # Full backup
 make backup-emergency    # Emergency kit
-make list-backups        # List backups
+make list-backups        # List all available backups
 ```
 
 > **`zstd` dependency:** Full backups require `zstd` for compression. `setup.sh` installs it automatically. If you installed before this was added to the package list, run `sudo apt install zstd`.
@@ -357,8 +362,10 @@ make test-secrets    # runs --list internally
 ./update.sh --system --email
 
 make update           # Containers only
-make update-system    # Containers + system packages
+make update-system    # Containers + system packages (apt upgrade + Docker engine)
 ```
+
+> **`--system` scope:** When passed, `update.sh` runs `apt-get upgrade` and updates the Docker engine in addition to pulling new container images. Rollback via `restore.sh` covers data and configuration, but not the Docker engine or OS packages — ensure you have a snapshot or can re-run the upgrade if needed.
 
 ---
 
@@ -526,6 +533,118 @@ make cron-remove
 
 ---
 
+### 11. `uninstall-vaultwarden.sh`
+**Purpose:** Full idempotent removal of all VaultWarden-OCI components, data, and system configuration installed by `setup.sh`
+
+> ⚠️ **This operation is irreversible.** All data, encrypted secrets, the Age key, Docker volumes, and the project directory are permanently deleted. Create an emergency backup first: `sudo ./backup.sh --type emergency`
+
+```bash
+# Run from any directory — the script locates the project via SUDO_USER
+sudo bash ~/uninstall-vaultwarden.sh
+```
+
+**What it removes (14 steps, in order):**
+
+| Step | What is removed |
+|---|---|
+| 1 | Docker Compose stack (containers, volumes, networks) |
+| 2 | systemd timer and service units (`/etc/systemd/system/vaultwarden-*.{timer,service}`) |
+| 3 | `/opt/vaultwarden-scripts/` (installed script copies) |
+| 4 | `/etc/vaultwarden/` (EnvironmentFile and directory) |
+| 5 | `/var/lib/vaultwarden/` (database, logs, Caddy/Fail2ban state) |
+| 6 | Project clone directory (`~/VaultWarden-OCI/`, including secrets and Age key) |
+| 7 | `/var/lock/vaultwarden-setup.lock` |
+| 8 | `/usr/local/bin/sops` |
+| 9 | Docker CE packages, APT repo, GPG key, `/var/lib/docker`, `/var/lib/containerd`, `/etc/docker` |
+| 10 | Extra packages installed by `setup.sh`: `age`, `haveged`, `rclone`, `python3-argon2` |
+| 11 | UFW rules for ports 80 and 443 (Cloudflare-CIDR rules included; SSH rules preserved) |
+| 12 | `/swapfile` and associated `/etc/fstab` + `sysctl.conf` entries |
+| 13 | `/etc/apt/sources.list.d/ubuntu-universe.list` if created by `setup.sh` |
+| 14 | Removes the real user from the `docker` group; removes the empty `docker` group |
+
+**What it preserves (intentionally left untouched):**
+
+- SSH UFW rules
+- Common system tools: `curl`, `wget`, `git`, `jq`, `sqlite3`, `ufw`, `gpg`, `rsync`, `python3`
+- `/etc/ssh/sshd_config` — no SSH configuration is modified
+
+**Confirmation prompt:**
+
+The script requires typing `UNINSTALL` (all caps) at an interactive prompt before any changes are made. It cannot be piped or automated — a direct terminal session is required.
+
+```bash
+# Safe — aborts if not run as root
+sudo bash ~/VaultWarden-OCI/uninstall-vaultwarden.sh
+
+# The script will print a summary of what it will remove, then prompt:
+# Type 'UNINSTALL' to confirm, or anything else to abort:
+```
+
+> **No Makefile target exists for uninstall** by design — the extra friction of running the script directly is intentional for a destructive operation.
+
+---
+
+## 🏗️ Makefile Reference
+
+All common operations have Makefile shortcuts. Run `make help` to see the full target list.
+
+### Complete Target Table
+
+| Target | Equivalent command | Notes |
+|---|---|---|
+| `make help` | — | Print all targets with descriptions |
+| `make setup` | `sudo ./setup.sh` | Requires `sudo make setup` |
+| `make init-secrets` | `./setup-secrets.sh` | Interactive secrets initialisation |
+| `make edit-secrets` | `./edit-secrets.sh` | Open SOPS secrets editor |
+| `make test-secrets` | `./edit-secrets.sh --list` | Verify secrets decrypt correctly |
+| `make test-email` | `./maintenance.sh --test-email --verbose` | Test full email delivery chain |
+| `make up` / `make start` | `sudo ./startup.sh` | Start all services |
+| `make down` / `make stop` | `docker compose down` | Graceful shutdown |
+| `make restart` | `sudo ./startup.sh --force-restart` | Force restart all services |
+| `make safe-restart` | `sudo ./startup.sh --force-restart` + health check | Restarts with automatic rollback on failure |
+| `make status` | `docker compose ps` | Show service status table |
+| `make health` | `./health.sh` | Basic health check (`AUTO_RECOVER=true`, `COMPREHENSIVE=true` supported) |
+| `make health-email` | `./health.sh --comprehensive --email` | Health check with email notification |
+| `make logs` | `docker compose logs --tail=100 [SERVICE]` | Recent logs; pass `SERVICE=caddy` to filter, `FOLLOW=true` to tail |
+| `make logs-tail` | `docker compose logs -f -t --tail=100 [SERVICE]` | Follow logs with timestamps |
+| `make logs-postfix` | `docker compose logs -f -t --tail=100 postfix` | Postfix email logs shortcut |
+| `make backup` | `./backup.sh --type db --email` | DB backup (pass `TYPE=full` or `TYPE=emergency`) |
+| `make backup-full` | `./backup.sh --type full --email` | Full system backup |
+| `make backup-emergency` | `./backup.sh --type emergency --email` | Emergency kit (includes secrets) |
+| `make list-backups` | `./backup.sh --list` | List all available backups with metadata |
+| `make restore` | `./restore.sh` | Interactive restore (recommended) |
+| `make restore-db` | `./restore.sh --type db --force` | Restore latest database backup non-interactively |
+| `make update` | `./update.sh` | Pull latest container images |
+| `make update-system` | `./update.sh --system --email` | Update containers + apt + Docker engine |
+| `make maintenance` | `./maintenance.sh --comprehensive` | Full maintenance run |
+| `make maintenance-full` | `./maintenance.sh --comprehensive --email` | Full maintenance with email summary |
+| `make update-dns` | `./maintenance.sh --update-dns` | Update Cloudflare DNS A record |
+| `make db-maint` | `sudo ./maintenance.sh --db-maint` | Deep DB VACUUM (stops VaultWarden; confirms before running) |
+| `make db-backup` | `./backup.sh --type db` | Quick database backup |
+| `make breakglass-create` | `sudo ./create-breakglass-admin.sh --create` | Create emergency OS admin account |
+| `make breakglass-status` | `sudo ./create-breakglass-admin.sh --status` | Show break-glass admin status |
+| `make breakglass-remove` | `sudo ./create-breakglass-admin.sh --remove` | Remove break-glass admin account |
+| `make dev-setup` | Copy `.env.example` and override template | Prepare local development environment |
+| `make test` | `test-secrets` + `test-email` + `docker compose config` | Run all tests |
+| `make test-config` | `docker compose config > /dev/null` | Validate merged Docker Compose config (exits non-zero on error) |
+| `make dry-run` | All scripts with `--dry-run` | Preview all operations without executing |
+| `make clean` | `docker compose rm -f --stop` + `docker system prune -f` | Remove stopped containers and unused Docker resources |
+| `make clean-all` | `docker compose down -v` + `docker system prune -af --volumes` | **Destructive** — requires interactive TTY and `yes` confirmation |
+| `make prune` | `docker system prune -f` | Remove unused Docker resources only |
+| `make info` | — | Show domain, email, project state dir, service status, disk usage |
+| `make shell` | `docker compose exec [SERVICE] sh` | Open shell in a container (default: `vaultwarden`; pass `SERVICE=caddy`) |
+| `make version` | — | Show version info for all containers and Docker |
+| `make watch` | `watch -n 5 make status` | Auto-refresh service status every 5 s |
+| `make monitor` | `docker compose logs -f -t` | Follow all service logs in real-time |
+| `make fmt` | `docker compose config` + `edit-secrets.sh --list` | Validate Compose files and secrets |
+| `make config` | — | Show non-sensitive `.env` variables and service list |
+
+> **`make test-config`** is the quickest pre-deployment sanity check. It runs `docker compose config` against the merged Compose files and exits non-zero if the configuration is invalid — useful before `make up` or after editing any `.yml` file.
+
+> **`make logs SERVICE=name`** filters output to a single service. Example: `make logs SERVICE=postfix FOLLOW=true` follows Postfix logs in real-time.
+
+---
+
 ## 📚 Utility Libraries
 
 All libraries live in `lib/` and are sourced at the top of every script. At install time, `systemd-setup.sh` copies the entire `lib/` tree to `/opt/vaultwarden-scripts/lib/` and patches source paths.
@@ -618,6 +737,19 @@ Secrets collection, generation, hashing, validation, and recovery kit export. Us
 | `create_secrets_backup` | Timestamped backup of the encrypted secrets file — created atomically at mode 600 via `install -m 600` |
 | `generate_recovery_kit FILE` | Write a full plaintext recovery document — extracts secrets one key at a time via `sops --extract`, never materialises full plaintext JSON |
 | `offer_recovery_kit_export` | Interactive or auto prompt to export a recovery kit to tmpfs |
+
+### `lib/email.sh`
+Multi-provider email delivery chain. Sourced by `maintenance.sh`, `health.sh`, `backup.sh`, and any script that calls `send_notification_email`.
+
+| Function | Description |
+|---|---|
+| `send_email SUBJECT BODY [RECIPIENT]` | Attempt delivery via configured `EMAIL_MODE` chain (API → SMTP → host MTA) |
+| `send_via_api SUBJECT BODY RECIPIENT` | HTTP API delivery using `EMAIL_PROVIDER` and the matching API token |
+| `send_via_smtp SUBJECT BODY RECIPIENT` | SMTP relay delivery via `curl smtps`/`starttls` — no local daemon required |
+| `send_via_host_mta SUBJECT BODY RECIPIENT` | Delivery through Postfix sidecar on `127.0.0.1:587` |
+| `test_email_chain [RECIPIENT]` | Run a probe through all configured tiers and report which succeed — called by `maintenance.sh --test-email` |
+
+> **`EMAIL_MODE` and `EMAIL_PROVIDER`** are set in `.env`. See the [Email Customisation](ADVANCED-CUSTOMIZATION.md#-email-customisation) section of ADVANCED-CUSTOMIZATION.md for provider switching, tier configuration, and `VW_SMTP_*` sync requirements.
 
 ### `lib/simple_key_resilience.sh`
 Three-tier Age key protection strategy. Sourced by `backup.sh` (Tier 1 runs automatically on every backup) and available for manual use via the functions below.
