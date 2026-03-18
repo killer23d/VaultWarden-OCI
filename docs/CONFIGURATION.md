@@ -258,6 +258,8 @@ VW_SMTP_FROM_NAME=VaultWarden
 VW_SMTP_TIMEOUT=30
 ```
 
+> **⚠️ Keep `SMTP_FROM_EMAIL` and `VW_SMTP_FROM` in sync.** Both variables control the sender address for outbound email, but they are consumed by different components: `SMTP_FROM_EMAIL` is used by `lib/email.sh` (maintenance alerts, health notifications, backup reports), while `VW_SMTP_FROM` is used by the VaultWarden container itself (user registration, 2FA, emergency access emails). If they differ, VaultWarden app emails will appear to come from a different address than system notifications, and your SPF/DKIM alignment may break. **Always update both variables together** whenever you change your sending address or switch SMTP providers.
+
 ### Fail2Ban Email
 
 Fail2Ban notification addresses must also be **literal values** — `${ADMIN_EMAIL}` and `${DOMAIN_NAME}` are not expanded in `.env`:
@@ -355,7 +357,7 @@ BACKUP_RETENTION_DAYS=30               # Default retention for full backups (day
 
 # BACKUP_SCHEDULE is a reference value only — the actual automated schedule
 # is controlled by the systemd timer: vaultwarden-db-backup.timer (Mon-Sat 04:00)
-# and vaultwarden-full-backup.timer (Sunday).
+# and vaultwarden-full-backup.timer (Sunday 03:00).
 # To change the schedule: sudo systemctl edit vaultwarden-db-backup.timer
 # Legacy cron: cron-setup.sh hardcodes its own schedule independently.
 BACKUP_SCHEDULE="0 4 * * *"
@@ -376,11 +378,11 @@ sudo ./systemd-setup.sh --install
 | Timer | Schedule | Script |
 | :-- | :-- | :-- |
 | `vaultwarden-db-backup.timer` | Mon–Sat 04:00 (+60 s jitter) | `backup.sh --type db --rclone --email` |
-| `vaultwarden-full-backup.timer` | Sunday 04:00 | `backup.sh --type full --full-verification --rclone --email` |
-| `vaultwarden-health.timer` | Every 15 min | `health.sh --auto-recover --email` |
+| `vaultwarden-full-backup.timer` | Sunday 03:00 | `backup.sh --type full --full-verification --rclone --email` |
+| `vaultwarden-health.timer` | Every 30 min | `health.sh --auto-recover --email` |
 | `vaultwarden-maintenance.timer` | Sunday 02:00 | `maintenance.sh --comprehensive` |
 | `vaultwarden-dns-update.timer` | Every hour | `maintenance.sh --update-dns` |
-| `vaultwarden-firewall-update.timer` | Every 6 h | `maintenance.sh --update-firewall` |
+| `vaultwarden-firewall-update.timer` | Saturday 04:00 | `maintenance.sh --update-firewall` |
 
 All services emit `OnFailure=vaultwarden-notify-failure@%n.service` — failures trigger an email via the notification template unit.
 
