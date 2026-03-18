@@ -32,6 +32,107 @@ sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.c
 
 ---
 
+## 🔧 Docker Compose Override File
+
+`docker-compose.override.yml.example` is a **development-only** override template. Docker Compose automatically merges `docker-compose.override.yml` on top of `docker-compose.yml` when both files are present — no extra flags required.
+
+> ⚠️ **Never use `docker-compose.override.yml.example` in production.** The VaultWarden service entrypoint will abort startup if it detects `ENVIRONMENT=production`, preventing accidental activation.
+
+### What It Contains
+
+The override file modifies every core service for local development and testing:
+
+| Service | What changes |
+| :-- | :-- |
+| `vaultwarden` | Enables `LOG_LEVEL=debug`, `SIGNUPS_ALLOWED=true`, removes resource limits, exposes port `127.0.0.1:8080:80` |
+| `caddy` | Binds admin API to loopback (`127.0.0.1:2019`), exposes ports `8081`/`8443`, removes resource limits |
+| `postfix` | Relaxes TLS to `may`, exposes submission port `127.0.0.1:1025:587`, adds SASL debug logging |
+| `fail2ban` | Sets `F2B_LOG_LEVEL=DEBUG`, mounts workspace read-only for live config editing |
+| `email-tester` | Alpine-based SMTP test container; activated by `--profile development` or `--profile email-testing` |
+| `mailpit` | Email capture UI (`axllent/mailpit`) replacing abandoned mailhog; activated by `--profile email-capture` |
+
+All exposed ports bind to `127.0.0.1` exclusively. Use SSH port-forwarding to access them from a remote host.
+
+### When to Use It
+
+Use `docker-compose.override.yml.example` when you need to:
+
+- Test email delivery locally without sending real messages (Mailpit capture)
+- Debug container startup issues (`LOG_LEVEL=debug`, Caddy admin API)
+- Develop against a live VaultWarden instance with signups enabled
+- Test Fail2Ban filter patterns against live log output
+
+### Activating the Override
+
+```bash
+# 1. Copy the template (make dev-setup does this automatically)
+cp docker-compose.override.yml.example docker-compose.override.yml
+
+# 2. Customise as needed
+nano docker-compose.override.yml
+
+# 3. Validate the merged config
+docker compose -f docker-compose.yml -f docker-compose.override.yml config
+
+# 4. Start with a profile
+docker compose --profile development up -d
+```
+
+`make dev-setup` copies both `.env.example → .env` and `docker-compose.override.yml.example → docker-compose.override.yml` in one step.
+
+### Available Profiles
+
+| Profile | Services added | Use case |
+| :-- | :-- | :-- |
+| `development` | `email-tester` | Full dev environment with SMTP test utilities |
+| `email-testing` | `email-tester` | Focused SMTP integration testing |
+| `email-capture` | `mailpit` | Capture outbound email in a local UI instead of delivering it |
+
+```bash
+# Start all core services + email capture UI
+docker compose --profile email-capture up -d
+
+# Access Mailpit (SSH tunnel required from a remote host)
+# ssh -L 8025:localhost:8025 user@host
+# Then open: http://localhost:8025
+```
+
+### Production-Specific Overrides (Non-Dev Use Cases)
+
+The override file can also serve narrow production customisation needs without modifying the base template. Use a clean `docker-compose.override.yml` (not the example) for production overrides:
+
+**Disable the Postfix sidecar** when using `EMAIL_MODE=api` or `EMAIL_MODE=smtp` exclusively:
+
+```yaml
+# docker-compose.override.yml
+services:
+  postfix:
+    deploy:
+      replicas: 0
+```
+
+**Enable push notifications** when the network uses `internal: true` (requires removing the internal constraint):
+
+```yaml
+# docker-compose.override.yml
+networks:
+  vaultwarden:
+    internal: false
+```
+
+> See the [Email Customisation](#-email-customisation) section for the full three-tier delivery chain and provider switching.
+
+### Removing the Override
+
+To return to the base production configuration, remove or rename the file:
+
+```bash
+mv docker-compose.override.yml docker-compose.override.yml.bak
+./startup.sh --force
+```
+
+---
+
 ## ⏲️ Automation — systemd Timers
 
 Automation is managed by **systemd timers** (not cron). Install or remove them with:
