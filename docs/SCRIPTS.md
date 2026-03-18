@@ -531,6 +531,57 @@ make cron-list
 make cron-remove
 ```
 
+#### `vaultwarden-notify-failure@.service` *(failure notification template)*
+
+**Purpose:** Send an email notification whenever a VaultWarden systemd service fails. This is a [systemd template unit](https://www.freedesktop.org/software/systemd/man/systemd.unit.html#Description) — the `@` suffix means it is never started directly; instead, each service unit instantiates it via `OnFailure=vaultwarden-notify-failure@%n.service`.
+
+**How specifier expansion works:**
+
+| Specifier | Resolved to | Example |
+|---|---|---|
+| `%n` | Full name of the *triggering* unit (used in `OnFailure=`) | `vaultwarden-health.service` |
+| `%i` | Instance name — everything between `@` and `.service` | `vaultwarden-health.service` |
+
+When `vaultwarden-health.service` fails, systemd starts `vaultwarden-notify-failure@vaultwarden-health.service`. Inside that unit, `%i` resolves to `vaultwarden-health.service`, which is substituted into the email subject and body at runtime.
+
+**Email output:**
+
+```
+Subject: FAILURE: vaultwarden-health.service on vault.example.com
+
+The systemd unit vaultwarden-health.service failed at Tue Mar 17 21:00:05 UTC 2026.
+Check logs with:
+  journalctl -u vaultwarden-health.service -n 50
+```
+
+The subject and body are constructed entirely inside the unit's `ExecStart` bash snippet using `printf` (not echo) to ensure `\n` newlines expand correctly. The `%%s` in the unit file is a systemd-escaped `%s` that becomes a `printf` placeholder after systemd processes its own specifiers first.
+
+**Security hardening:** The unit runs as `root` (required to read `EnvironmentFile=/etc/vaultwarden/vaultwarden.env`) and applies the same hardening flags as all other VaultWarden service units.
+
+| Setting | Value | Reason |
+|---|---|---|
+| `NoNewPrivileges=yes` | Prevents privilege escalation after start | Consistent with all other units |
+| `PrivateTmp=yes` | Isolates `/tmp` namespace | `send_email()` creates temp files via `mktemp`; prevents cross-unit temp file collisions |
+| `TimeoutStartSec=30` | Abort if email delivery hangs | Prevents a blocked SMTP call from holding up the systemd job queue |
+| `Type=oneshot` | Unit exits after the command completes | Correct for a single-shot notification task |
+
+**Manual testing:**
+
+To verify the notification pipeline end-to-end without waiting for a real failure, start the template unit manually with any installed service name as the instance:
+
+```bash
+# Trigger a test notification as if vaultwarden-health.service had failed
+sudo systemctl start vaultwarden-notify-failure@vaultwarden-health.service
+
+# Check the notification unit's own logs
+journalctl -u vaultwarden-notify-failure@vaultwarden-health.service -n 30
+
+# Verify the outgoing email in the Postfix queue / delivery log
+docker compose logs postfix --tail=30
+```
+
+> **Email delivery prerequisite:** The notification unit calls `send_email()` from `lib/email.sh`, which uses the `EMAIL_MODE` and `EMAIL_PROVIDER` chain configured in `.env`. If email is not yet working, run `make test-email` first to diagnose the delivery path before testing failure notifications.
+
 ---
 
 ### 11. `uninstall-vaultwarden.sh`
