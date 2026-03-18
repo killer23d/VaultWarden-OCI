@@ -2,9 +2,9 @@
 
 This guide describes how to protect your **Age encryption key** against loss, solving the circular dependency in encrypted backups: you need the Age key to decrypt a backup, but the Age key lives on the server you are trying to recover.
 
-Related docs: [BACKUP-RESTORE.md](BACKUP-RESTORE.md) · [SECURITY.md](SECURITY.md)
+Related docs: [BACKUP-RESTORE.md](BACKUP-RESTORE.md) · [SECURITY.md](SECURITY.md) · [SCRIPTS.md](SCRIPTS.md)
 
-> **💡 Built-in alternatives:** Before using the manual GPG workflow below, consider the native three-tier protection in `lib/simple_key_resilience.sh`: **Tier 1** runs automatically on every `backup.sh` invocation (key health check + encrypt/decrypt roundtrip); **Tier 2** (`create_password_manager_escrow`) exports a password-manager-ready plaintext escrow; **Tier 3** generates a printable PDF/HTML paper backup. `./edit-secrets.sh --export-recovery-kit` also creates a full recovery document including the Age key and all secrets. See [BACKUP-RESTORE.md](BACKUP-RESTORE.md) for details. The GPG-based approach below is a supplementary option for those wanting an additional passphrase-protected layer independent of the project tooling.
+> **💡 Built-in alternatives:** Before using the manual GPG workflow below, consider the native three-tier protection in `lib/simple_key_resilience.sh`: **Tier 1** runs automatically on every `backup.sh` invocation (key health check + encrypt/decrypt roundtrip); **Tier 2** (`create_password_manager_escrow`) exports a password-manager-ready plaintext escrow; **Tier 3** generates a printable PDF/HTML paper backup. `./edit-secrets.sh --export-recovery-kit` also creates a full recovery document including the Age key and all secrets. See [BACKUP-RESTORE.md](BACKUP-RESTORE.md) for details on each tier. See [SCRIPTS.md](SCRIPTS.md) for the full `lib/simple_key_resilience.sh` function reference. The GPG-based approach below is a supplementary option for those wanting an additional passphrase-protected layer independent of the project tooling.
 
 ---
 
