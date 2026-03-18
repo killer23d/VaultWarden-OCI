@@ -206,27 +206,30 @@ prepare_docker_secrets() {
     return 1
   fi
 
-  # SECURITY FIX: Set umask 027 so secret files are created mode 640:
-  #   Owner (root):  read + write  (6)
-  #   Group (PGID):  read only     (4)
-  #   Other:         none          (0)
+  # SECURITY: Use umask 133 so secret files are created at mode 444 (r--r--r--).
   #
-  # WHY 027 INSTEAD OF 077:
-  # Docker Compose file-based secrets are bind-mounted into containers
-  # with the SAME permissions as the host file. Containers run as
-  # ${PUID}:${PGID} (non-root). With umask 077 the files were created
-  # at mode 600 (root-only), causing "Permission denied" on every
-  # /run/secrets/* read inside both vaultwarden_app and vaultwarden_caddy.
-  # umask 027 produces mode 640, allowing the group (PGID) to read.
+  # WHY 444 AND NOT 600 OR 640:
+  # Docker Compose file-based secrets are plain bind-mounts — the container
+  # sees the EXACT same permission bits as the host file. Older Docker Engine
+  # versions (pre-25) silently ignore the `mode:` field in the compose secrets
+  # block, so we cannot rely on Compose to override permissions at mount time.
   #
-  # SECURITY POSTURE:
-  # - Mode 640 prevents world-read (other = none)
-  # - Only root and the designated service group can read secrets
-  # - Combined with docker-compose.yml `mode: 0440` per-secret, the
-  #   in-container view is further restricted to 0440 (read-only for
-  #   owner+group, no write access inside the container).
+  # The container processes run as ${PUID}:${PGID} (non-root). With mode 600
+  # or 640 (root:root ownership) those processes are denied because:
+  #   600 → only root (uid 0) can read
+  #   640 → group-read requires the file's GID == PGID; host GID is 0 (root)
+  # Mode 444 (world-readable) lets any UID — including PUID — read the file.
+  #
+  # SECURITY POSTURE — why 444 is safe in this layout:
+  #   The parent directory  secrets/.docker_secrets/  is mode 700 (rwx------)
+  #   owned by root. An unprivileged OS user cannot traverse into it (execute
+  #   bit on the directory is required to stat/open entries). The world-read
+  #   bit on the files is therefore only reachable by root or by processes
+  #   running inside containers that have the path explicitly bind-mounted.
+  #   This matches Docker Swarm secrets, which are also 444 inside the
+  #   container mount namespace.
   _prepare_secrets_cleanup_umask=$(umask)
-  umask 027  # Creates files at mode 640 (rw-r-----)
+  umask 133  # 666 XOR 133 = 444 (r--r--r--)
 
   # FIX MEDIUM: use file-scoped _prepare_secrets_cleanup() instead of the
   # formerly nested cleanup_local() to prevent global namespace leakage.
@@ -294,14 +297,13 @@ PY
       if printf '%s' "$secret_value" > "$secret_file"; then
         local file_perms
         file_perms=$(_stat_octal_perms_local "$secret_file" 2>/dev/null || echo "unknown")
-        # Expected mode is 640 (umask 027 applied to new file creation).
-        # 600 would indicate umask was not applied correctly; 644/664/666
-        # would indicate an overly permissive umask elsewhere in the env.
-        if [[ "$file_perms" == "640" ]]; then
+        # Expected mode is 444 (umask 133 applied to new file creation).
+        # Anything else indicates the umask was not applied or was overridden.
+        if [[ "$file_perms" == "444" ]]; then
           log_debug "Secret created securely: $secret_name (permissions: $file_perms)"
           secrets_created=$(( secrets_created + 1 ))
         else
-          log_error "Secret file created with incorrect permissions: $secret_name ($file_perms, expected 640)"
+          log_error "Secret file created with incorrect permissions: $secret_name ($file_perms, expected 444)"
           secrets_failed=$(( secrets_failed + 1 ))
         fi
       else
@@ -608,9 +610,11 @@ update_cloudflare_ip_ranges() {
 #   completes and Docker has read them into the container namespace.
 #
 #   Do NOT add rm/shred calls here for the secrets directory. The files are
-#   intentionally left on disk; they are mode-640 (root:PGID rw-r-----),
-#   which is the correct long-term security posture for Docker secret
-#   bind-mounts on non-Swarm deployments.
+#   intentionally left on disk; they are mode 444 (r--r--r--) inside a
+#   mode-700 directory (rwx------) owned by root. Unprivileged OS users
+#   cannot traverse into the directory, so world-read on the files is
+#   unreachable without root or a bind-mount. This is equivalent to the
+#   security posture of Docker Swarm native secrets.
 # ---------------------------------------------------------------------------
 cleanup_on_exit() {
   return 0
