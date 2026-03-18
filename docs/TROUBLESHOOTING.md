@@ -407,6 +407,12 @@ grep CLOUDFLARE_ZONE_ID .env
 
 ## Email Issues
 
+> **For a comprehensive reference on email architecture, the three-tier provider
+> chain (`EMAIL_MODE` / `EMAIL_PROVIDER`), and a full troubleshooting decision
+> table, see [EMAIL.md](EMAIL.md).** The sections below cover the most common
+> Postfix relay issues; EMAIL.md covers provider-specific failures, VaultWarden
+> SMTP configuration, and the complete diagnostic flow.
+
 ### Email Not Sending (Postfix)
 
 **Symptoms**:
