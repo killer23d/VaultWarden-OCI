@@ -206,9 +206,27 @@ prepare_docker_secrets() {
     return 1
   fi
 
-  # SECURITY FIX: Set restrictive umask BEFORE creating any files
+  # SECURITY FIX: Set umask 027 so secret files are created mode 640:
+  #   Owner (root):  read + write  (6)
+  #   Group (PGID):  read only     (4)
+  #   Other:         none          (0)
+  #
+  # WHY 027 INSTEAD OF 077:
+  # Docker Compose file-based secrets are bind-mounted into containers
+  # with the SAME permissions as the host file. Containers run as
+  # ${PUID}:${PGID} (non-root). With umask 077 the files were created
+  # at mode 600 (root-only), causing "Permission denied" on every
+  # /run/secrets/* read inside both vaultwarden_app and vaultwarden_caddy.
+  # umask 027 produces mode 640, allowing the group (PGID) to read.
+  #
+  # SECURITY POSTURE:
+  # - Mode 640 prevents world-read (other = none)
+  # - Only root and the designated service group can read secrets
+  # - Combined with docker-compose.yml `mode: 0440` per-secret, the
+  #   in-container view is further restricted to 0440 (read-only for
+  #   owner+group, no write access inside the container).
   _prepare_secrets_cleanup_umask=$(umask)
-  umask 077 # Ensures all new files are created with 600 permissions
+  umask 027  # Creates files at mode 640 (rw-r-----)
 
   # FIX MEDIUM: use file-scoped _prepare_secrets_cleanup() instead of the
   # formerly nested cleanup_local() to prevent global namespace leakage.
@@ -276,11 +294,14 @@ PY
       if printf '%s' "$secret_value" > "$secret_file"; then
         local file_perms
         file_perms=$(_stat_octal_perms_local "$secret_file" 2>/dev/null || echo "unknown")
-        if [[ "$file_perms" == "600" ]]; then
+        # Expected mode is 640 (umask 027 applied to new file creation).
+        # 600 would indicate umask was not applied correctly; 644/664/666
+        # would indicate an overly permissive umask elsewhere in the env.
+        if [[ "$file_perms" == "640" ]]; then
           log_debug "Secret created securely: $secret_name (permissions: $file_perms)"
           secrets_created=$(( secrets_created + 1 ))
         else
-          log_error "Secret file created with incorrect permissions: $secret_name ($file_perms)"
+          log_error "Secret file created with incorrect permissions: $secret_name ($file_perms, expected 640)"
           secrets_failed=$(( secrets_failed + 1 ))
         fi
       else
@@ -587,8 +608,9 @@ update_cloudflare_ip_ranges() {
 #   completes and Docker has read them into the container namespace.
 #
 #   Do NOT add rm/shred calls here for the secrets directory. The files are
-#   intentionally left on disk; they are mode-600 and owned by root, which
-#   is the correct long-term security posture for Docker secret bind-mounts.
+#   intentionally left on disk; they are mode-640 (root:PGID rw-r-----),
+#   which is the correct long-term security posture for Docker secret
+#   bind-mounts on non-Swarm deployments.
 # ---------------------------------------------------------------------------
 cleanup_on_exit() {
   return 0
