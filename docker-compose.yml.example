@@ -11,6 +11,7 @@
 # ✅ Log rotation limits on all runtime services (disk-fill prevention)
 # ✅ Init container uses find -exec chmod (glob-safe, no silent no-op on empty dirs)
 # ✅ vaultwarden network marked internal: true (no unnecessary outbound access)
+# ✅ Docker secrets mounted mode 0440 so non-root containers can read them
 
 services:
   # =============================================================================
@@ -49,7 +50,7 @@ services:
       find /fail2ban -type d -exec chmod 750 {} + 2>/dev/null || true &&
       find /fail2ban -type f -exec chmod 640 {} + 2>/dev/null || true &&
       chmod 700 /secrets /secrets/.docker_secrets 2>/dev/null || true &&
-      find /secrets/.docker_secrets -type f -exec chmod 600 {} + 2>/dev/null || true &&
+      find /secrets/.docker_secrets -type f -exec chmod 440 {} + 2>/dev/null || true &&
       echo 'Init container completed - permissions set to ${PUID}:${PGID}'
       "
 
@@ -130,10 +131,17 @@ services:
       WEB_VAULT_FOLDER: web-vault/
 
     secrets:
-      - admin_token
-      - smtp_password
-      - push_installation_id
-      - push_installation_key
+      # mode 0440: owner+group read — containers run as ${PUID}:${PGID} and
+      # can read secrets without requiring world-read (0444) permissions.
+      # This is the minimum necessary permission for non-root secret access.
+      - source: admin_token
+        mode: 0440
+      - source: smtp_password
+        mode: 0440
+      - source: push_installation_id
+        mode: 0440
+      - source: push_installation_key
+        mode: 0440
 
     volumes:
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data:/data
@@ -207,8 +215,12 @@ services:
       TZ: ${TZ:-UTC}
 
     secrets:
-      - caddy_cloudflare_dns_token
-      - admin_basic_auth_hash
+      # mode 0440: owner+group read — containers run as ${PUID}:${PGID} and
+      # can read secrets without requiring world-read (0444) permissions.
+      - source: caddy_cloudflare_dns_token
+        mode: 0440
+      - source: admin_basic_auth_hash
+        mode: 0440
 
     volumes:
       - ${PWD}/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
@@ -295,7 +307,8 @@ services:
     # untrusted operators. Inspect with:
     #   docker exec vaultwarden_postfix cat /etc/postfix/sasl_passwd
     secrets:
-      - smtp_password
+      - source: smtp_password
+        mode: 0440
 
     ports:
       - "127.0.0.1:587:587"
@@ -377,7 +390,8 @@ services:
       CF_ZONE_ID: ${CLOUDFLARE_ZONE_ID}
 
     secrets:
-      - fail2ban_cloudflare_firewall_token
+      - source: fail2ban_cloudflare_firewall_token
+        mode: 0440
 
     volumes:
       - ${PWD}/fail2ban:/data/fail2ban:ro
@@ -487,10 +501,11 @@ networks:
 # ✅ Postfix capabilities hardened (6 caps only)
 # ✅ WebSocket support enabled by default
 # ✅ Log rotation limits on all runtime services
-# ✅ Secret dirs chmod 700, secret files chmod 600 via find -exec (glob-safe)
+# ✅ Secret dirs chmod 700, secret files chmod 440 via find -exec (group-readable by container user)
 # ✅ vaultwarden network internal: true (no container egress)
 # ✅ depends_on condition: service_completed_successfully for init-permissions
 # ✅ Healthchecks use 127.0.0.1 (IPv4-explicit, no ::1 ambiguity)
+# ✅ Docker secrets mode: 0440 (non-root container processes can read secrets)
 #
 # CLOUDFLARE RATE LIMITING (REQUIRED):
 # Configure these WAF rules in Cloudflare Dashboard:
@@ -537,6 +552,13 @@ networks:
 # on the host filesystem but is readable via `docker exec`. Restrict Docker
 # socket access to prevent unauthorised inspection.
 #
+# SECRET FILE PERMISSIONS:
+# Host-side secret files are created by startup.sh with umask 077 (mode 600).
+# Docker bind-mount secrets inherit the host file permissions verbatim.
+# mode: 0440 in the service secrets block overrides the in-container mount
+# permission so the non-root container process (PUID:PGID) can read them.
+# The init container enforces chmod 440 on all secret files for consistency.
+#
 # TESTING CHECKLIST:
 # □ Verify Caddy starts without errors: docker compose logs caddy
 # □ Verify caddy-cloudflare-ip module present:
@@ -550,7 +572,9 @@ networks:
 # □ Confirm fail2ban sees real IPs: docker exec vaultwarden_fail2ban fail2ban-client status vaultwarden-web-auth
 # □ Test WebSocket sync: Enable in client, verify real-time notifications
 # □ Check resource usage: docker stats (should be under limits)
-# □ Verify secret file perms: ls -la secrets/.docker_secrets/ (must show -rw-------)
+# □ Verify secret file perms: ls -la secrets/.docker_secrets/ (must show -r--r-----)
+# □ Verify in-container secret perms: docker exec vaultwarden_app ls -la /run/secrets/
+#     Must show: -r--r----- (mode 0440)
 # □ Verify network isolation: docker network inspect vaultwarden_network | grep Internal
 #     Must show: "Internal": true
 #
