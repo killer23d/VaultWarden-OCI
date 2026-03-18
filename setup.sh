@@ -371,8 +371,11 @@ install_dependencies() {
     fi
 
     # FIX [BUG-04]: Use apt-repo installation instead of curl|sh.
+    # FIX [BUG-FNAME]: Call install_docker() — the function defined above.
+    # The previous call to install_docker_apt was a stale name that did not
+    # match any defined function, causing "command not found" at runtime.
     if ! command -v docker >/dev/null 2>&1; then
-        install_docker_apt || return 1
+        install_docker || return 1
     fi
 
     if ! docker compose version >/dev/null 2>&1; then
