@@ -653,6 +653,229 @@ ${PROJECT_STATE_DIR}/logs/postfix/
 docker compose logs postfix   # live container output
 ```
 
+---
+
+## Caddy Configuration Reference
+
+The Caddyfile lives at `caddy/Caddyfile` and is injected into the container as a bind
+mount. `caddy/entrypoint.sh` substitutes environment variables (e.g. `{$DOMAIN_NAME}`,
+`{$PUSH_CSP}`) before Caddy starts, so the file on disk contains literal placeholder
+strings — the resolved values only exist inside the running container.
+
+### File Location
+
+```
+caddy/
+├── Caddyfile       # Main Caddy configuration (bind-mounted into container)
+└── entrypoint.sh   # Variable substitution + bcrypt cost validation on startup
+```
+
+> ⚠️ **Do not edit the Caddyfile inside the running container.** Changes made there are
+> lost on restart. Edit `caddy/Caddyfile` in the project directory and run
+> `make restart` to apply.
+
+### Caddyfile Structure
+
+The file is divided into four top-level blocks:
+
+| Block | Purpose |
+|---|---|
+| `{ … }` (global options) | ACME DNS provider, trusted proxy config, 4-log forensic architecture |
+| `127.0.0.1:8080 { … }` | Internal health check endpoint (loopback only, not internet-accessible) |
+| `{$DOMAIN_NAME} { … }` | Main site — security headers, routing, admin auth, WebSocket, catch-all |
+| `www.{$DOMAIN_NAME} { … }` | Permanent redirect www → apex |
+| `:80, :443 { … }` | Catch-all that returns 404 for direct-IP access |
+
+### Route Handlers (Main Site Block)
+
+Routes are evaluated in declaration order. Each handler uses `handle` (exclusive match)
+so only the first matching block fires:
+
+| # | Matcher | Handler | Log target |
+|---|---|---|---|
+| 1 | `@health path /alive` | `reverse_proxy vaultwarden:80` | `access_log` |
+| 2 | `handle /notifications/hub` | `reverse_proxy vaultwarden:80` (WebSocket headers forwarded) | `access_log` |
+| 3 | `@admin path /admin*` | `basic_auth` → `reverse_proxy vaultwarden:80` | `admin_log` |
+| 4 | `@auth_endpoints path /api/accounts/prelogin* /identity/connect/token*` | `reverse_proxy vaultwarden:80` | `auth_log` |
+| 5 | `handle` (default) | `reverse_proxy vaultwarden:80` | `access_log` |
+
+All `reverse_proxy` blocks unconditionally set `CF-Connecting-IP`, `X-Real-IP`,
+`X-Forwarded-For`, and `X-Request-ID` upstream headers using Caddy's resolved
+`{client_ip}` placeholder (derived from `trusted_proxies cloudflare` +
+`client_ip_headers Cf-Connecting-Ip`). This ensures VaultWarden always receives
+a non-empty, validated real IP regardless of upstream header content.
+
+### Adding a Custom Route
+
+To add a custom path — for example, exposing a status page at `/status` — add a
+new `handle` block **before** the default catch-all in `caddy/Caddyfile`:
+
+```caddyfile
+# Custom route example — add BEFORE the default handle {} block
+@status path /status
+handle @status {
+    log_name access_log
+    respond "OK" 200
+}
+```
+
+Then apply:
+```bash
+make restart
+# Verify config parses correctly before restarting:
+make test-config
+```
+
+> **Route ordering matters.** Caddy's `handle` directive uses exclusive matching —
+> place more-specific routes above the default `handle {}` block or they will never
+> fire.
+
+### Adjusting Rate Limiting
+
+Rate limiting for web traffic is enforced at the **Cloudflare WAF layer**, not
+inside the Caddyfile. To adjust limits:
+
+1. Go to **Cloudflare Dashboard → Security → WAF → Rate limiting rules**
+2. Locate the relevant rule (auth endpoints, admin panel, general API)
+3. Update the threshold and period
+
+The Caddyfile itself does not contain `rate_limit` directives. The `[vaultwarden-rate-limit]`
+Fail2Ban jail provides a secondary, coarser rate guard (30 requests / 1 min) at the
+application layer for cases where Cloudflare WAF rules have not yet fired.
+
+### Push Notifications and `internal: true`
+
+When `PUSH_ENABLED=true` is set in `.env`, the VaultWarden Docker network **must not**
+be marked `internal: true`. Push relay requires outbound HTTPS to `push.bitwarden.com`.
+`startup.sh` enforces this at launch and exits with an error if the combination is
+detected. `entrypoint.sh` also conditionally sets `{$PUSH_CSP}` — an empty string when
+push is disabled, or the Bitwarden push endpoints when enabled — so the
+`Content-Security-Policy` header does not unnecessarily widen its `connect-src`
+attack surface for non-push deployments.
+
+---
+
+## Fail2Ban Configuration Reference
+
+The Fail2Ban configuration lives entirely under `fail2ban/` and is bind-mounted
+into the `crazymax/fail2ban` container at startup.
+
+### Directory Layout
+
+```
+fail2ban/
+├── jail.d/
+│   └── vaultwarden-oci.conf      # All jail definitions (single file)
+├── filter.d/
+│   ├── vaultwarden-auth.conf     # VaultWarden app log — login failures
+│   ├── vaultwarden-admin.conf    # VaultWarden app log — admin token failures
+│   ├── vaultwarden-web-auth.conf # Caddy JSON log — web auth/API failures
+│   ├── vaultwarden-web-admin.conf# Caddy JSON log — admin path access
+│   ├── vaultwarden-web-caddy.conf# Legacy combined filter (kept for reference; not used by active jails)
+│   └── vaultwarden-security.conf # Caddy JSON log — catch-all security events
+└── action.d/
+    ├── cloudflare-apiv4.conf     # Cloudflare WAF Rulesets API ban/unban action
+    ├── cloudflare-apiv4-helpers.sh # Shell helpers called by the action
+    ├── smtp.conf                 # Email notification action (Postfix on 127.0.0.1:587)
+    └── smtp_notify.py            # Python email helper used by smtp.conf
+```
+
+### Active Jails and What They Target
+
+| Jail | Log source | Filter | `maxretry` / `bantime` | Ban method |
+|---|---|---|---|---|
+| `sshd` | `/var/log/ssh-auth.log` | `sshd` (built-in) | 3 / 24 h | local `iptables-multiport` |
+| `sshd-custom` | `/var/log/ssh-auth.log` | `sshd` (built-in) | 3 / 24 h | local `iptables-multiport` — **disabled by default** |
+| `vaultwarden-auth` | VaultWarden app log | `vaultwarden-auth` | 3 / 2 h | Cloudflare WAF |
+| `vaultwarden-admin` | VaultWarden app log | `vaultwarden-admin` | 2 / 24 h | Cloudflare WAF |
+| `vaultwarden-web-auth` | `caddy/access.log` | `vaultwarden-web-auth` | 10 / 1 h | Cloudflare WAF |
+| `vaultwarden-web-admin` | `caddy/access.log` | `vaultwarden-web-admin` | 5 / 24 h | Cloudflare WAF |
+| `vaultwarden-rate-limit` | `caddy/access.log` | `vaultwarden-web-auth` (reused) | 30 / 30 min | Cloudflare WAF |
+| `vaultwarden-security` | `caddy/access.log` | `vaultwarden-security` | 1 / 48 h | Cloudflare WAF |
+| `recidive` | Fail2Ban's own log | `recidive` (built-in) | 5 / 1 week | Cloudflare WAF |
+
+> **Dual-jail design for auth endpoints**: `vaultwarden-web-auth` (failure-based,
+> `maxretry=10/5m`) and `vaultwarden-rate-limit` (volume-based, `maxretry=30/1m`)
+> intentionally share the same filter and log file. Each enforces a distinct policy —
+> credential failures vs raw request volume — and both incrementing the same log line
+> is correct behaviour.
+
+### Dedicated Filters Prevent Double-Fire
+
+Each jail uses its **own dedicated filter** to prevent a single log line from
+incrementing multiple jails' counters simultaneously (double-fire). The legacy
+`vaultwarden-web-caddy.conf` filter was shared across both `web-auth` and `web-admin`
+and caused this problem; it is kept in `filter.d/` for reference only and is not
+referenced by any active jail.
+
+### Cloudflare WAF Ban Flow
+
+When a web jail threshold is reached:
+
+1. Fail2Ban calls `cloudflare-apiv4.conf` `actionban`
+2. `cloudflare-apiv4-helpers.sh` reads the API token from the Docker secret file
+   (`/run/secrets/fail2ban_cloudflare_firewall_token`) — never from an environment variable
+3. A WAF Custom Rule is created via the **Rulesets API**:
+   `PATCH /zones/{zone_id}/rulesets/phases/http_request_firewall_custom/entrypoint`
+4. The rule expression `(ip.src in {<banned_ip>})` blocks the IP at Cloudflare's edge
+5. On `actionunban`, the rule is removed (or the IP removed from the expression list)
+
+The `bantime` in each jail controls how long the rule persists. Fail2Ban manages
+removal automatically — no manual Cloudflare dashboard intervention is required.
+
+### Adding a Custom Jail
+
+1. **Create a filter** in `fail2ban/filter.d/my-custom.conf`:
+
+```ini
+[Definition]
+# Match lines from Caddy's JSON access log
+# {client_ip} field holds the real visitor IP (resolved by Caddy from CF-Connecting-IP)
+failregex = ^\{.*"client_ip":"<HOST>".*"uri":"/my-path.*"status":4\d\d.*\}$
+ignoreregex =
+```
+
+2. **Add a jail** in `fail2ban/jail.d/vaultwarden-oci.conf`:
+
+```ini
+[my-custom-jail]
+
+enabled  = true
+filter   = my-custom
+port     = 80,443
+logpath  = /var/log/caddy/access.log
+maxretry = 5
+bantime  = 1h
+findtime = 10m
+
+action = smtp[name=my-custom-jail, dest="%(destemail)s", sender="%(sender)s", host="127.0.0.1", port=587]
+         cloudflare-apiv4
+```
+
+3. **Reload Fail2Ban** inside the container:
+
+```bash
+docker compose exec fail2ban fail2ban-client reload
+
+# Verify the jail is active
+docker compose exec fail2ban fail2ban-client status my-custom-jail
+
+# Test your filter regex against a live log sample
+docker compose exec fail2ban fail2ban-regex \
+  /var/log/caddy/access.log \
+  /data/fail2ban/filter.d/my-custom.conf
+```
+
+> **Custom jail checklist:**
+> - Use a **dedicated filter** — never reuse an existing filter for a new jail unless
+>   you explicitly want both jails to increment on the same log line (as with `vaultwarden-rate-limit`).
+> - Include `\r?$` at the end of every `failregex` pattern to handle `\r\n` line endings
+>   on NFS-mounted log volumes (OCI File Storage).
+> - For SSH jails on a non-standard port, disable `[sshd]` before enabling `[sshd-custom]`
+>   to avoid both jails counting the same log lines and halving the effective `maxretry`.
+
+---
+
 ## Emergency Access
 
 ### Break-Glass Admin Account
