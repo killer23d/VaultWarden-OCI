@@ -2,7 +2,7 @@
 
 This guide walks through a complete deployment from a fresh OCI instance to a running vault. For a condensed version see the [README quickstart](../README.md).
 
-Related docs: [CONFIGURATION.md](CONFIGURATION.md) · [SECURITY.md](SECURITY.md) · [OPERATIONS.md](OPERATIONS.md)
+Related docs: [CONFIGURATION.md](CONFIGURATION.md) · [SECURITY.md](SECURITY.md) · [OPERATIONS.md](OPERATIONS.md) · [MIGRATION.md](MIGRATION.md)
 
 ---
 
@@ -23,7 +23,7 @@ Related docs: [CONFIGURATION.md](CONFIGURATION.md) · [SECURITY.md](SECURITY.md)
 > **⚠️ CRITICAL:** OCI blocks all inbound traffic by default at the hypervisor level. You must open ports 80 and 443 **before** running setup — Caddy cannot provision its TLS certificate otherwise.
 
 1. OCI Console → **Compute → Instances → your instance**
-2. Under “Primary VNIC” click **Subnet → Default Security List**
+2. Under "Primary VNIC" click **Subnet → Default Security List**
 3. Add **Ingress Rules** (one per row):
 
 | Rule | Source CIDR | Protocol | Port |
@@ -44,11 +44,13 @@ Cloudflare IPv4 ranges (verify at <https://www.cloudflare.com/ips-v4>):
 
 ## ☁️ Phase 1 — Cloudflare DNS Staging
 
-In your Cloudflare dashboard, set your DNS record to **DNS Only (Grey Cloud)** before running setup. This ensures clean DNS propagation during initial TLS provisioning. Caddy uses the **DNS-01 challenge** via your Cloudflare API token — it does **not** require direct HTTP access from Let’s Encrypt. Enable the orange proxy cloud after the stack is healthy.
+In your Cloudflare dashboard, set your DNS record to **DNS Only (Grey Cloud)** before running setup. This ensures clean DNS propagation during initial TLS provisioning. Caddy uses the **DNS-01 challenge** via your Cloudflare API token — it does **not** require direct HTTP access from Let's Encrypt. Enable the orange proxy cloud after the stack is healthy.
 
 ---
 
 ## 🛠️ Phase 2 — Server Setup
+
+> **💡 Migrating from an existing VaultWarden deployment?** Follow [MIGRATION.md](MIGRATION.md) instead — it covers database import, attachment transfer, and compatibility differences before you run setup.
 
 ```bash
 # Update system
@@ -208,7 +210,25 @@ sudo ./systemd-setup.sh --install
 
 **First week:**
 - ✅ Invite team members
-- ✅ Configure rclone for offsite backups; test sync
+- ✅ Configure rclone for offsite backups and test sync:
+  ```bash
+  # rclone is installed by setup.sh --auto
+  # If not already installed:
+  curl https://rclone.tech/install.sh | sudo bash
+
+  # Configure a remote (interactive wizard — supports S3, B2, Google Drive, etc.)
+  rclone config
+
+  # Set the remote name in .env
+  # RCLONE_REMOTE_NAME=your_remote_name
+
+  # Test with a dry-run backup sync
+  ./backup.sh --type db --rclone
+
+  # Verify files appeared on the remote
+  rclone ls your_remote_name:vaultwarden_backups/
+  ```
+  See [BACKUP-RESTORE.md](BACKUP-RESTORE.md#️-offsite-storage-rclone) for the full offsite storage reference, including supported remote types and systemd timer integration.
 - ✅ Test `./restore.sh --dry-run`
 - ✅ Review `docker compose logs fail2ban` for blocking activity
 - ✅ If push notifications enabled, verify `PUSH_ENABLED` and `internal: true` settings are compatible
@@ -246,7 +266,7 @@ sudo systemctl restart vaultwarden-db-backup.timer
 
 ## 🛠️ Troubleshooting Deployment
 
-**Service won’t start:**
+**Service won't start:**
 
 ```bash
 ./health.sh
@@ -256,7 +276,7 @@ docker compose config
 
 **TLS certificate not provisioning:**
 - Confirm Cloudflare record is set to **DNS Only (Grey Cloud)**
-- Confirm `caddy_cloudflare_dns_token` has `Zone:DNS:Edit` + `Zone:Zone:Read` permissions — Caddy uses the **DNS-01 challenge** and does not require inbound HTTP access from Let’s Encrypt
+- Confirm `caddy_cloudflare_dns_token` has `Zone:DNS:Edit` + `Zone:Zone:Read` permissions — Caddy uses the **DNS-01 challenge** and does not require inbound HTTP access from Let's Encrypt
 
 **Email not working:**
 
