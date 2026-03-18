@@ -298,6 +298,13 @@ make update
 make update-system
 ```
 
+> **`--system` scope:** `./update.sh --system` (alias `make update-system`) does three things in order:
+> 1. Runs `apt-get upgrade` to update OS packages
+> 2. Updates the Docker engine via apt
+> 3. Pulls new container images and restarts affected services
+>
+> **Rollback scope:** `restore.sh` covers data and configuration only. OS packages and the Docker engine are **not** rolled back automatically — ensure you have an OCI instance snapshot or are prepared to re-run the upgrade if the system update causes issues.
+
 ### Version Management
 
 **Production mode — pinned versions (default):**
