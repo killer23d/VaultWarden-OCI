@@ -152,72 +152,77 @@ resolve_github_latest() {
 #     but noble packages are ABI-compatible and work correctly on 24.10.
 #   - Installs docker-ce, docker-ce-cli, containerd.io, and the Compose plugin
 #     as explicit, auditable apt packages.
-install_docker_apt() {
-    log_info "Installing Docker via official apt repository (noble codename)..."
+install_docker() {
+    # Skip if Docker is already functional
+    if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
+        log_info "setup" "Docker already installed: $(docker --version)"
+        return 0
+    fi
 
+    local codename arch keyfile sources_file
+    codename=$(. /etc/os-release && echo "$VERSION_CODENAME")
+    arch=$(dpkg --print-architecture)
+    keyfile="/etc/apt/keyrings/docker.asc"
+    sources_file="/etc/apt/sources.list.d/docker.sources"
+
+    log_info "setup" "Installing Docker via official apt repository (${codename} codename)..."
+
+    # Ensure keyrings dir exists with correct permissions (must be 0755, not 0700)
     install -m 0755 -d /etc/apt/keyrings
 
-    # FIX-S03: Download Docker's GPG key to a temp file and verify its
-    # fingerprint programmatically before importing it into the apt keyring.
-    # A fingerprint that exists only in a comment is not a security control.
-    # Official fingerprint source: https://docs.docker.com/engine/install/ubuntu/
-    local docker_gpg_tmp="$TMP_WORKDIR/docker.gpg.asc"
-    curl -fsSL --max-time 30 https://download.docker.com/linux/ubuntu/gpg -o "$docker_gpg_tmp" || {
-        log_error "Failed to download Docker GPG key"
+    # Remove any old/broken Docker repo config that could conflict
+    rm -f /etc/apt/sources.list.d/docker.list
+    rm -f /etc/apt/keyrings/docker.gpg
+
+    # Download key in ASCII-armored format (.asc) — NOT dearmored (.gpg)
+    # APT's signed-by= works reliably with .asc on Ubuntu 22.04+
+    if ! curl -fsSL "https://download.docker.com/linux/ubuntu/gpg" -o "${keyfile}"; then
+        log_error "setup" "Failed to download Docker GPG key"
         return 1
-    }
+    fi
+    chmod a+r "${keyfile}"
 
-    local expected_fpr="9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
-    local actual_fpr
-    actual_fpr=$(gpg --with-colons --import-options show-only \
-        --import "$docker_gpg_tmp" 2>/dev/null \
-        | awk -F: '/^fpr/{print $10}' | head -1)
+    # Verify key fingerprint
+    local got_fp
+    got_fp=$(gpg --no-default-keyring \
+        --keyring "gnupg-ring:${keyfile}" \
+        --with-colons --fingerprint 2>/dev/null \
+        | awk -F: '/^fpr/{print $10; exit}')
+    local want_fp="9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
+    if [[ "${got_fp}" != "${want_fp}" ]]; then
+        log_error "setup" "Docker GPG key fingerprint mismatch: got ${got_fp}, want ${want_fp}"
+        return 1
+    fi
+    log_success "setup" "Docker GPG key fingerprint verified: ${want_fp}"
 
-    if [[ -z "$actual_fpr" ]]; then
-        log_error "Could not extract fingerprint from Docker GPG key — gpg parsing failed."
-        log_error "Verify manually: gpg --with-colons --import-options show-only --import ${docker_gpg_tmp}"
+    # Add repo using DEB822 format (.sources) — more reliable than one-liner .list
+    # Explicit Architectures field is required for ARM64 (aarch64) hosts
+    cat > "${sources_file}" <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: ${codename}
+Components: stable
+Architectures: ${arch}
+Signed-By: ${keyfile}
+EOF
+
+    if ! apt-get update; then
+        log_error "setup" "apt-get update failed after adding Docker repo"
         return 1
     fi
 
-    if [[ "$actual_fpr" != "$expected_fpr" ]]; then
-        log_error "Docker GPG fingerprint MISMATCH — refusing to add repository."
-        log_error "  Expected: $expected_fpr"
-        log_error "  Actual:   $actual_fpr"
-        log_error "This may indicate a supply chain attack or DNS/MITM compromise."
-        log_error "Verify at: https://docs.docker.com/engine/install/ubuntu/"
-        return 1
-    fi
-
-    log_success "Docker GPG key fingerprint verified: $actual_fpr"
-
-    # FIX [MEDIUM-install_docker_apt]: pipe gpg --dearmor through install(1)
-    # with explicit mode 0644 so the keyring file is never world-unreadable
-    # under a restrictive umask (e.g. 077). The previous redirect
-    # (gpg --dearmor > /etc/apt/keyrings/docker.gpg) created the file under
-    # the current umask before the subsequent chmod a+r could close the race.
-    gpg --dearmor "$docker_gpg_tmp" \
-        | install -m 0644 /dev/stdin /etc/apt/keyrings/docker.gpg || return 1
-
-    # Use 'noble' (24.04 LTS) codename for Ubuntu 24.10 — Docker does not
-    # publish a 24.10 (oracular) repository; noble packages run correctly
-    # on 24.10 (same ABI, tested upstream).
-    echo \
-      "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
-https://download.docker.com/linux/ubuntu noble stable" \
-      | tee /etc/apt/sources.list.d/docker.list > /dev/null
-
-    apt-get update -qq || return 1
-    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    if ! apt-get install -y \
         docker-ce \
         docker-ce-cli \
         containerd.io \
         docker-buildx-plugin \
-        docker-compose-plugin || return 1
+        docker-compose-plugin; then
+        log_error "setup" "Docker package installation failed"
+        return 1
+    fi
 
-    systemctl enable --now docker || return 1
-    usermod -aG docker "$(get_real_user)" || return 1
-    log_success "Docker installed via apt repository"
-    return 0
+    systemctl enable --now docker
+    log_success "setup" "Docker installed: $(docker --version)"
 }
 
 # FIX [C-05] + LOW (docker path): Preflight disk-space check before any phase.
