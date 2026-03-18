@@ -44,6 +44,7 @@ VaultWarden-OCI implements defense-in-depth with multiple security layers:
 │   - Capability Restrictions             │
 │   - Resource Limits                     │
 │   - Encrypted Secrets                   │
+│   - Network Isolation (internal: true)  │
 └─────────────────────────────────────────┘
                   ↓
 ┌─────────────────────────────────────────┐
@@ -454,6 +455,51 @@ postfix:
         memory: 64M
         cpus: '0.02'
 ```
+
+### Network Isolation (`internal: true`)
+
+By default the `vaultwarden` Docker network is marked `internal: true` in
+`docker-compose.yml.example`. This prevents any container on that network from
+making outbound connections to the internet.
+
+**What `internal: true` blocks**:
+- All outbound internet traffic originating from the VaultWarden, Caddy, or
+  Postfix containers
+- Any container-initiated calls to external APIs, update servers, or tracking endpoints
+
+**What `internal: true` allows**:
+- Container-to-container communication within the `vaultwarden` network (e.g.
+  Caddy → VaultWarden, Fail2Ban → Postfix)
+- Inbound connections routed through Caddy (Caddy itself has a separate bridge
+  network for host port binding)
+
+**Conflict with push notifications**: Push relay requires outbound HTTPS from
+the VaultWarden container to `push.bitwarden.com`. When `PUSH_ENABLED=true` is
+set in `.env`, the `internal: true` constraint **must be removed** from the
+network definition. `startup.sh` detects this combination at launch and exits
+with an error if both are present simultaneously. To enable push notifications
+while preserving isolation for the other containers, use
+`docker-compose.override.yml.example` to override only the network definition:
+
+```yaml
+# docker-compose.override.yml — relax internal: true for push notifications only
+networks:
+  vaultwarden:
+    internal: false
+```
+
+**Hardening**: If you do not use push notifications, keep `internal: true`
+(the default). Verify the setting is active:
+
+```bash
+# Confirm the network has no external gateway
+docker network inspect vaultwarden-oci_vaultwarden | grep -i internal
+# Expected: "Internal": true
+```
+
+> See also: [CONFIGURATION.md](CONFIGURATION.md) for `PUSH_ENABLED` details and
+> [DEPLOYMENT.md](DEPLOYMENT.md) for post-deployment checklist items related to
+> network isolation.
 
 ### Security Options
 
@@ -1067,6 +1113,7 @@ grep "ERROR" ${PROJECT_STATE_DIR}/logs/vaultwarden/vaultwarden.log
 - ✅ Configure email notifications and run `make test-email`
 - ✅ Verify all health checks pass: `./health.sh --comprehensive`
 - ✅ Restrict UFW ports 80/443 to Cloudflare CIDRs: `./maintenance.sh --update-firewall`
+- ✅ Confirm `internal: true` is active on the Docker network (unless push is enabled)
 
 ### Ongoing Operations
 - ✅ Monitor Fail2Ban logs weekly
