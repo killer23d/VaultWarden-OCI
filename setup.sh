@@ -182,12 +182,31 @@ install_docker() {
     fi
     chmod a+r "${keyfile}"
 
-    # Verify key fingerprint
+    # FIX [BUG-GPG]: gpg --keyring gnupg-ring: requires a binary .kbx keybox
+    # file, not an ASCII-armored .asc file. Passing the raw .asc causes gpg to
+    # produce no fingerprint output, making got_fp empty and the check always
+    # fail with "fingerprint mismatch: got , want ...".
+    #
+    # Fix: dearmor the downloaded .asc into a temporary binary .gpg file,
+    # verify the fingerprint against that binary, then remove the temp file.
+    # The signed-by= entry in .sources still points to the original .asc —
+    # APT on Ubuntu 22.04+ reads .asc natively; only the verification step
+    # needs the dearmored binary.
+    local dearmored_key
+    dearmored_key=$(mktemp -p "$TMP_WORKDIR" docker-key.XXXXXXXXXX.gpg)
+    if ! gpg --dearmor < "${keyfile}" > "${dearmored_key}" 2>/dev/null; then
+        log_error "setup" "Failed to dearmor Docker GPG key"
+        rm -f "${dearmored_key}"
+        return 1
+    fi
+
     local got_fp
     got_fp=$(gpg --no-default-keyring \
-        --keyring "gnupg-ring:${keyfile}" \
+        --keyring "gnupg-ring:${dearmored_key}" \
         --with-colons --fingerprint 2>/dev/null \
         | awk -F: '/^fpr/{print $10; exit}')
+    rm -f "${dearmored_key}"
+
     local want_fp="9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
     if [[ "${got_fp}" != "${want_fp}" ]]; then
         log_error "setup" "Docker GPG key fingerprint mismatch: got ${got_fp}, want ${want_fp}"
