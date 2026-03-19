@@ -74,6 +74,32 @@ perform_cleanup() {
 trap perform_cleanup EXIT
 
 # ---------------------------------------------------------------------------
+# _read_dotenv_value KEY [FILE]
+#
+# Read a single KEY from .env (or FILE) without sourcing the whole file.
+# Returns the value, or an empty string if the key is not found.
+# ---------------------------------------------------------------------------
+_read_dotenv_value() {
+    local key="$1"
+    local file="${2:-.env}"
+    [[ -f "$file" ]] || { echo ""; return 0; }
+    local val
+    val=$(grep -E "^${key}=" "$file" | head -1 | sed "s/^${key}=//;s/#.*$//;s/[[:space:]]*$//")
+    echo "$val"
+}
+
+# ---------------------------------------------------------------------------
+# _email_api_token_key PROVIDER
+#
+# Return the canonical secrets key for the given provider's HTTP API token,
+# e.g. mailersend → MAILERSEND_API_TOKEN
+# ---------------------------------------------------------------------------
+_email_api_token_key() {
+    local provider="${1,,}"   # lower-case
+    echo "${provider^^}_API_TOKEN"  # upper-case + _API_TOKEN
+}
+
+# ---------------------------------------------------------------------------
 # Help
 # ---------------------------------------------------------------------------
 show_help() {
@@ -92,10 +118,27 @@ MODES (mutually exclusive; default is interactive edit):
                                 admin_basic_auth_hash    (bcrypt re-hash)
                                 caddy_cloudflare_dns_token
                                 fail2ban_cloudflare_firewall_token
-                                smtp_password
+                                email_api_token          (HTTP API token for email
+                                                          provider; key name derived
+                                                          from EMAIL_PROVIDER in .env,
+                                                          e.g. MAILERSEND_API_TOKEN)
+                                smtp_password            (SMTP relay password;
+                                                          used when EMAIL_MODE=smtp
+                                                          or EMAIL_MODE=auto)
                                 push_installation_id
                                 push_installation_key
                                 backup_passphrase        (auto-generated)
+
+    EMAIL_MODE / EMAIL_PROVIDER quick reference (.env):
+        EMAIL_MODE=auto   — lib/email.sh tries API → SMTP → Postfix in order
+        EMAIL_MODE=api    — HTTP API only   (rotate: email_api_token)
+        EMAIL_MODE=smtp   — SMTP relay only (rotate: smtp_password)
+        EMAIL_MODE=host   — Postfix sidecar (no token or password needed)
+        EMAIL_PROVIDER=mailersend|sendgrid|mailgun|postmark|resend
+            → determines which key is stored, e.g.:
+               mailersend → MAILERSEND_API_TOKEN
+               sendgrid   → SENDGRID_API_TOKEN
+
     --export-recovery-kit   Generate a recovery document with unencrypted
                             secrets. This is the canonical standalone entry
                             point for recovery kit export. setup-secrets.sh
@@ -126,6 +169,8 @@ EXAMPLES:
     ./edit-secrets.sh --list                       # Show key names
     ./edit-secrets.sh --rotate admin_token         # Re-hash VW admin password
     ./edit-secrets.sh --rotate admin_token --dry-run  # Preview rotation
+    ./edit-secrets.sh --rotate email_api_token     # Replace email provider API key
+    ./edit-secrets.sh --rotate smtp_password       # Replace SMTP relay password
     ./edit-secrets.sh --rotate caddy_cloudflare_dns_token  # Replace CF token
     ./edit-secrets.sh --export-recovery-kit        # Export a recovery document
 
@@ -392,10 +437,15 @@ PYEOF
 # HIGH FIX: Atomic write — sops --encrypt writes to a temp file, then
 # mv atomically replaces SECRETS_FILE. An interrupted write leaves the
 # original file intact.
+#
+# email_api_token is a dynamic field: the YAML key name is resolved from
+# EMAIL_PROVIDER in .env (e.g. mailersend → MAILERSEND_API_TOKEN) so the
+# stored key always matches what lib/email.sh resolves at runtime.
 # ---------------------------------------------------------------------------
 
 _ROTATE_FIELDS=("admin_token" "admin_basic_auth_hash"
                 "caddy_cloudflare_dns_token" "fail2ban_cloudflare_firewall_token"
+                "email_api_token"
                 "smtp_password" "push_installation_id" "push_installation_key"
                 "backup_passphrase")
 
@@ -407,6 +457,7 @@ _FIELD_SERVICES=(
     [admin_basic_auth_hash]="vaultwarden"
     [caddy_cloudflare_dns_token]="caddy"
     [fail2ban_cloudflare_firewall_token]="fail2ban"
+    [email_api_token]="vaultwarden"
     [smtp_password]="vaultwarden"
     [push_installation_id]="vaultwarden"
     [push_installation_key]="vaultwarden"
@@ -444,10 +495,18 @@ _deploy_docker_secrets() {
 
     local old_umask; old_umask=$(umask); umask 077
     local deployed=0 failed=0
+
+    # Determine the dynamic email API token key from .env
+    local _email_provider _api_key_name
+    _email_provider=$(_read_dotenv_value "EMAIL_PROVIDER" .env)
+    _email_provider="${_email_provider:-mailersend}"
+    _api_key_name=$(_email_api_token_key "$_email_provider")
+
     local secret_fields=(
         "admin_token" "admin_basic_auth_hash" "smtp_password"
         "backup_passphrase" "push_installation_id" "push_installation_key"
         "caddy_cloudflare_dns_token" "fail2ban_cloudflare_firewall_token"
+        "$_api_key_name"
     )
     for field_name in "${secret_fields[@]}"; do
         local value
@@ -459,7 +518,7 @@ v = data.get(sys.argv[2], "")
 print(v if v is not None else "", end="")
 PY
 )
-        if [[ -n "$value" ]] && [[ "$value" != "CHANGE_ME"* ]] && [[ "$value" != "null" ]]; then
+        if [[ -n "$value" ]] && [[ "$value" != "CHANGE_ME"* ]] && [[ "$value" != "NOT_USED"* ]] && [[ "$value" != "null" ]]; then
             printf '%s' "$value" > "$docker_dir/$field_name"
             (( deployed++ ))
         fi
@@ -475,16 +534,32 @@ do_rotate() {
 
     if ! _validate_rotate_field "$field"; then exit 1; fi
 
+    # Resolve the actual YAML key name for the email_api_token virtual field.
+    # This ensures the key written to the secrets file always matches what
+    # lib/email.sh will look up (e.g. MAILERSEND_API_TOKEN, SENDGRID_API_TOKEN).
+    local actual_field="$field"
+    local _api_key_name=""
+    if [[ "$field" == "email_api_token" ]]; then
+        local _email_provider
+        _email_provider=$(_read_dotenv_value "EMAIL_PROVIDER" .env)
+        _email_provider="${_email_provider:-mailersend}"
+        _api_key_name=$(_email_api_token_key "$_email_provider")
+        actual_field="$_api_key_name"
+        log_info "EMAIL_PROVIDER=${_email_provider} → rotating secret key: ${actual_field}"
+        log_info "(To change provider, update EMAIL_PROVIDER in .env and re-run rotate)"
+        echo ""
+    fi
+
     # LOW FIX: --dry-run support for --rotate
     if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would rotate secret: $field"
+        log_info "[DRY RUN] Would rotate secret: $actual_field"
         local _svc="${_FIELD_SERVICES[$field]:-<service>}"
         log_info "[DRY RUN] After rotation, you would need to restart: $_svc"
         log_info "[DRY RUN] No changes written."
         return 0
     fi
 
-    log_info "Rotating secret: $field"
+    log_info "Rotating secret: $actual_field"
     echo ""
 
     local temp_plain
@@ -498,10 +573,25 @@ do_rotate() {
         return 1
     fi
 
-    # Delegate to the single canonical field-collection function in lib/secrets.sh
+    # For email_api_token, prompt directly (plain token, no hashing).
+    # For all other fields, delegate to the canonical collect_secret_field().
     local new_value
-    if ! new_value=$(collect_secret_field "$field"); then
-        return 1
+    if [[ "$field" == "email_api_token" ]]; then
+        local _raw_token
+        if ! read -r -s -t 120 -p "${actual_field}: " _raw_token; then
+            log_error "No input received (120s timeout). Aborting."
+            return 1
+        fi
+        echo ""
+        if [[ -z "$_raw_token" ]]; then
+            log_error "No token entered. Aborting."
+            return 1
+        fi
+        new_value="$_raw_token"
+    else
+        if ! new_value=$(collect_secret_field "$field"); then
+            return 1
+        fi
     fi
 
     local temp_patched
@@ -510,20 +600,19 @@ do_rotate() {
     # FIX [P3-H3]: use _secure_shred() for this plaintext patched temp file
     register_cleanup "_secure_shred '$temp_patched'"
 
-    python3 - "$temp_plain" "$field" "$new_value" "$temp_patched" << 'PYEOF'
+    python3 - "$temp_plain" "$actual_field" "$new_value" "$temp_patched" << 'PYEOF'
 import sys, yaml
 src_file, field, new_value, dst_file = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 with open(src_file) as f:
     data = yaml.safe_load(f)
-if field not in data:
-    sys.exit(f"Field '{field}' not found in secrets file")
+# For email_api_token the key may not exist yet (first time) — insert it.
 data[field] = new_value
 with open(dst_file, 'w') as f:
     yaml.dump(data, f, default_flow_style=False, allow_unicode=True)
 PYEOF
 
     if [[ $? -ne 0 ]]; then
-        log_error "Failed to patch YAML for field: $field"
+        log_error "Failed to patch YAML for field: $actual_field"
         return 1
     fi
 
@@ -562,7 +651,7 @@ PYEOF
 
     secure_secrets_file
 
-    log_success "Secret '$field' rotated successfully"
+    log_success "Secret '${actual_field}' rotated successfully"
 
     # FIX [P4-UX2]: Tell the operator exactly which Docker service to restart.
     local _affected_service="${_FIELD_SERVICES[$field]:-}"
