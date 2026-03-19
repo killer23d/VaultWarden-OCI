@@ -95,6 +95,26 @@
 #   LS-6 [MEDIUM]   _ork_generate_and_secure(): trap ... EXIT overwrote any
 #                   caller-level EXIT trap.
 #                   Fix: changed to trap ... RETURN for function-scoped cleanup.
+#
+# PATCHED BUGS (2026-03-19):
+#   LS-7 [MEDIUM]   generate_recovery_kit(): _sops_extract() was a nested
+#                   function defined inside generate_recovery_kit(), leaking
+#                   into the global bash namespace after the first call —
+#                   identical pattern to BUG-S3 / LS-6.
+#                   Fix: promoted to top-level _grk_sops_extract() with a
+#                   _grk_ prefix. The 'unset -f _sops_extract' workaround
+#                   has been removed as it was not a real fix.
+#   LS-8 [MEDIUM]   list_secrets() and list_secret_keys() called ensure_sops_env()
+#                   but never called cleanup_secrets_environment(), leaving
+#                   SOPS_AGE_KEY_FILE and SOPS_CONFIG exported into every child
+#                   process spawned after those calls (docker, curl, rclone, etc).
+#                   Fix: cleanup_secrets_environment() called on all return
+#                   paths in both functions.
+#   LS-9 [MEDIUM]   validate_required_secrets() and check_placeholder_values()
+#                   called ensure_sops_env() but never called
+#                   cleanup_secrets_environment(), same leak as LS-8.
+#                   Fix: cleanup_secrets_environment() called on all return
+#                   paths in both functions.
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     echo "Error: This library should be sourced, not executed directly"
@@ -251,6 +271,10 @@ decrypt_secret() {
 # to transit the shell pipeline buffer, which is not zeroed after completion.
 # Fix: decrypt only the YAML structure (key names) via python3; secret values
 # are never passed through the pipeline.
+#
+# LS-8 FIX: ensure_sops_env() was called but cleanup_secrets_environment()
+# was never called, leaving SOPS_AGE_KEY_FILE exported to all subsequent
+# child processes. Fix: call cleanup_secrets_environment() on all return paths.
 # ---------------------------------------------------------------------------
 list_secrets() {
     local secrets_file="${1:-$SECRETS_FILE}"
@@ -272,6 +296,9 @@ if isinstance(data, dict):
     for k in data.keys():
         print(k)
 " 2>/dev/null)
+
+    # LS-8 FIX: clean up SOPS env before returning
+    cleanup_secrets_environment
 
     if [[ -z "$keys" ]]; then
         log_error "list_secrets: decryption or parse failure"
@@ -296,7 +323,10 @@ validate_secrets_decryption() {
         return 1
     fi
     if ! ensure_sops_env; then return 1; fi
-    if ! sops -d "$secrets_file" >/dev/null 2>&1; then
+    local rc=0
+    sops -d "$secrets_file" >/dev/null 2>&1 || rc=$?
+    cleanup_secrets_environment
+    if [[ $rc -ne 0 ]]; then
         log_error "Cannot decrypt secrets file"
         return 1
     fi
@@ -320,13 +350,24 @@ validate_secrets_yaml() {
         return 1
     fi
     if ! ensure_sops_env; then return 1; fi
-    if ! sops -d --output-type json "$secrets_file" > /dev/null 2>&1; then
+    local rc=0
+    sops -d --output-type json "$secrets_file" > /dev/null 2>&1 || rc=$?
+    cleanup_secrets_environment
+    if [[ $rc -ne 0 ]]; then
         log_warn "Secrets file cannot be decrypted or contains invalid YAML"
         return 1
     fi
     return 0
 }
 
+# ---------------------------------------------------------------------------
+# validate_required_secrets [SECRETS_FILE]
+#
+# LS-9 FIX: ensure_sops_env() was called but cleanup_secrets_environment()
+# was never called on any return path, leaving SOPS_AGE_KEY_FILE exported
+# to all subsequent child processes.
+# Fix: call cleanup_secrets_environment() on all return paths.
+# ---------------------------------------------------------------------------
 validate_required_secrets() {
     local secrets_file="${1:-$SECRETS_FILE}"
     local required_secrets=("admin_token" "admin_basic_auth_hash" "caddy_cloudflare_dns_token" "fail2ban_cloudflare_firewall_token")
@@ -337,6 +378,8 @@ validate_required_secrets() {
             missing_secrets+=("$secret")
         fi
     done
+    # LS-9 FIX: clean up SOPS env before returning
+    cleanup_secrets_environment
     if [[ ${#missing_secrets[@]} -gt 0 ]]; then
         log_warn "Missing required secrets: ${missing_secrets[*]}"
         return 1
@@ -344,6 +387,14 @@ validate_required_secrets() {
     return 0
 }
 
+# ---------------------------------------------------------------------------
+# check_placeholder_values [SECRETS_FILE]
+#
+# LS-9 FIX: ensure_sops_env() was called but cleanup_secrets_environment()
+# was never called on any return path, leaving SOPS_AGE_KEY_FILE exported
+# to all subsequent child processes.
+# Fix: call cleanup_secrets_environment() on all return paths.
+# ---------------------------------------------------------------------------
 check_placeholder_values() {
     local secrets_file="${1:-$SECRETS_FILE}"
     local secrets_to_check=("admin_token" "admin_basic_auth_hash" "caddy_cloudflare_dns_token" "fail2ban_cloudflare_firewall_token")
@@ -357,6 +408,8 @@ check_placeholder_values() {
             fi
         fi
     done
+    # LS-9 FIX: clean up SOPS env before returning
+    cleanup_secrets_environment
     if [[ ${#placeholder_secrets[@]} -gt 0 ]]; then
         log_warn "Secrets with placeholders: ${placeholder_secrets[*]}"
         return 1
@@ -365,7 +418,12 @@ check_placeholder_values() {
 }
 
 # ---------------------------------------------------------------------------
-# list_secret_keys
+# list_secret_keys [SECRETS_FILE]
+#
+# LS-8 FIX: ensure_sops_env() was called but cleanup_secrets_environment()
+# was never called on any return path, leaving SOPS_AGE_KEY_FILE exported
+# to all subsequent child processes.
+# Fix: call cleanup_secrets_environment() on all return paths.
 # ---------------------------------------------------------------------------
 list_secret_keys() {
     local secrets_file="${1:-$SECRETS_FILE}"
@@ -377,6 +435,8 @@ list_secret_keys() {
     local keys
     keys=$(sops -d "$secrets_file" 2>/dev/null \
         | python3 -c "import yaml, sys; [print(k) for k in yaml.safe_load(sys.stdin).keys()]" 2>/dev/null)
+    # LS-8 FIX: clean up SOPS env before returning
+    cleanup_secrets_environment
     if [[ -z "$keys" ]]; then
         log_error "Could not list keys - decryption or parse failure"
         return 1
@@ -876,6 +936,28 @@ auto_generate_secret_field() {
 }
 
 # ---------------------------------------------------------------------------
+# _grk_sops_extract KEY SECRETS_FILE
+#
+# LS-7 FIX: Previously defined as _sops_extract() nested inside
+# generate_recovery_kit(). Bash promotes nested function definitions to the
+# global namespace after the outer function's first execution, making
+# _sops_extract callable from anywhere — the same namespace-pollution pattern
+# as BUG-S3 and LS-6. The 'unset -f _sops_extract' call that followed the
+# extraction loop was a workaround, not a real fix (it only cleaned up after
+# the fact and still leaked during the window of execution).
+# Fix: promoted to a top-level private function with the _grk_ prefix.
+# The 'unset -f _sops_extract' call has been removed entirely.
+# ---------------------------------------------------------------------------
+_grk_sops_extract() {
+    local _key="$1"
+    local _secrets_file="$2"
+    local _val
+    _val=$(sops -d --extract "[\"${_key}\"]" "$_secrets_file" 2>/dev/null) \
+        && printf '%s' "$_val" \
+        || printf '%s' "Not Set"
+}
+
+# ---------------------------------------------------------------------------
 # generate_recovery_kit OUTPUT_FILE
 #
 # CONTRACT: writes a plaintext file containing the Age private key and all
@@ -883,14 +965,12 @@ auto_generate_secret_field() {
 # calls _secure_shred() on $output_file. The offer_recovery_kit_export()
 # wrapper below does this correctly. Direct callers must do the same.
 #
-# LS-1 FIX: The previous implementation decrypted the full secrets set into
-# a single bash variable (secrets_json) via sops -d --output-type json, then
-# re-piped that variable through 8+ separate echo "$secrets_json" | jq
-# subshells. This exposed the complete plaintext payload in /proc/$$/fd/ pipe
-# buffers, readable by any process running as the same UID.
-# Fix: each secret is now extracted individually via
+# LS-1 FIX: each secret is extracted individually via
 #   sops -d --extract '["key"]' "$file"
 # so the full plaintext JSON is never materialised in a variable or pipe.
+#
+# LS-7 FIX: _sops_extract() nested function replaced with top-level
+# _grk_sops_extract() — see above.
 # ---------------------------------------------------------------------------
 generate_recovery_kit() {
     local output_file="$1"
@@ -944,24 +1024,18 @@ generate_recovery_kit() {
     if [[ -f "$secrets_file" ]]; then
         if ! ensure_sops_env; then return 1; fi
 
-        _sops_extract() {
-            local _key="$1"
-            local _val
-            _val=$(sops -d --extract "[\"${_key}\"]" "$secrets_file" 2>/dev/null) \
-                && printf '%s' "$_val" \
-                || printf '%s' "Not Set"
-        }
+        # LS-7 FIX: use top-level _grk_sops_extract() instead of the formerly
+        # nested _sops_extract() to avoid global namespace pollution.
+        vw_admin_hash=$(_grk_sops_extract admin_token              "$secrets_file")
+        caddy_hash=$(_grk_sops_extract    admin_basic_auth_hash    "$secrets_file")
+        smtp_pass=$(_grk_sops_extract     smtp_password            "$secrets_file")
+        backup_pass=$(_grk_sops_extract   backup_passphrase        "$secrets_file")
+        cf_dns=$(_grk_sops_extract        caddy_cloudflare_dns_token           "$secrets_file")
+        cf_fw=$(_grk_sops_extract         fail2ban_cloudflare_firewall_token   "$secrets_file")
+        push_id=$(_grk_sops_extract       push_installation_id     "$secrets_file")
+        push_key=$(_grk_sops_extract      push_installation_key    "$secrets_file")
 
-        vw_admin_hash=$(_sops_extract admin_token)
-        caddy_hash=$(_sops_extract admin_basic_auth_hash)
-        smtp_pass=$(_sops_extract smtp_password)
-        backup_pass=$(_sops_extract backup_passphrase)
-        cf_dns=$(_sops_extract caddy_cloudflare_dns_token)
-        cf_fw=$(_sops_extract fail2ban_cloudflare_firewall_token)
-        push_id=$(_sops_extract push_installation_id)
-        push_key=$(_sops_extract push_installation_key)
-
-        unset -f _sops_extract
+        # No 'unset -f _sops_extract' needed — the nested function no longer exists.
     else
         log_warn "secrets.yaml not found"
     fi
