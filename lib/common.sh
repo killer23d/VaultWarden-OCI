@@ -23,7 +23,7 @@
 #                            _get_postfix_smtp_target_for_fail2ban
 #
 # FIX (2026-03-09): Email variable naming consistency:
-#   FIX-M01  _smtp_send(): uses ${SMTP_FROM_EMAIL:-${SMTP_FROM}} so existing
+#   FIX-M01  _smtp_send(): uses ${SMTP_FROM_EMAIL:-${SMTP_FROM:-}} so existing
 #            .env files with the legacy SMTP_FROM= variable continue to work
 #            without any changes. Canonical name is now SMTP_FROM_EMAIL.
 #   FIX-M02  send_email(): resolves <PROVIDER_UPPER>_API_TOKEN -> EMAIL_API_TOKEN
@@ -62,17 +62,21 @@
 #              starttls   — smtp:// + --ssl-reqd (explicit TLS, e.g. port 587)
 #              none/plain — smtp:// without TLS flags (dev/internal relays only)
 #            An invalid value now returns 1 with a clear error message.
-#   FIX-M08  _smtp_send(): ${SMTP_FROM} changed to ${SMTP_FROM:-} (empty
-#            default) to prevent "SMTP_FROM: unbound variable" abort under
-#            bash set -u. New .env files correctly define only SMTP_FROM_EMAIL=
-#            and omit the legacy SMTP_FROM= variable; the inner ${SMTP_FROM}
-#            without a default caused an immediate crash for these users.
-#   FIX-M09  send_email(): added $to parameter (ADMIN_EMAIL default) and
-#            passed it through to _smtp_send "$to" "$subject" "$full_body".
+#   FIX-M08  _smtp_send(): all SMTP_* variables use ${VAR:-} defaults to
+#            prevent "unbound variable" abort under bash set -u. New .env files
+#            that omit legacy SMTP_FROM= will no longer crash.
+#   FIX-M09  send_email(): added optional $to parameter (ADMIN_EMAIL default)
+#            and passed it through to _smtp_send "$to" "$subject" "$full_body".
 #            Previously _smtp_send was called as _smtp_send "$subject" "$full_body"
 #            — missing the recipient entirely — causing curl to send with
 #            --mail-rcpt '' (empty), which Mailgun and most MTAs reject.
 #            The host MTA stage also now passes $to to `mail -s`.
+#   FIX-M10  _smtp_send(): SMTP_HOST/USERNAME/PASSWORD guard checks now use
+#            ${VAR:-} safe-expansion so they evaluate cleanly under set -u
+#            when those variables are not yet exported into the environment
+#            (e.g. when health.sh calls send_email before load_env_file runs).
+#            The guards still return 1 with a clear error when the value is
+#            genuinely empty; only the set -u crash is eliminated.
 #
 # SECURITY / PORTABILITY FIXES (2026-03-10):
 #   P1-H4    load_env_file(): replaced `source .env` (arbitrary code execution
@@ -174,11 +178,6 @@ _get_timestamp() {
     [[ "$LOG_TIMESTAMP" == "true" ]] && date '+%H:%M:%S' || printf ''
 }
 
-# AUD-H2 FIX: All log_* functions previously used `echo -e` which is not
-# POSIX-portable (dash treats -e as literal output on some builds) and, more
-# critically, expands backslash sequences that may appear in user-controlled
-# log messages (e.g. a filename containing \n or \t).  Replaced with printf
-# using a %s format so the message is always emitted verbatim.
 log_info() {
     _should_log "INFO" || return 0
     local timestamp prefix_part
@@ -243,9 +242,6 @@ log_debug() {
     printf '[%s] [DEBUG] %s%s\n' "${timestamp}" "${prefix_part}" "$*" >&2
 }
 
-# BUG-C3 FIX: replaced `printf '=%.0s' $(seq 1 N)` with a pure-bash while
-# loop. seq(1) is absent on Alpine/BusyBox; the while loop has no external
-# dependency and runs on every POSIX-compatible bash.
 log_header() {
     local message="$*"
     local len=${#message}
@@ -270,42 +266,6 @@ log_header() {
 
 # --- Configuration Management ---
 
-# P1-H4 FIX: load_env_file()
-#
-# SECURITY: The previous implementation used `source "$env_file"` which
-# unconditionally executes the file as shell code in the current process.
-# When this process runs as root (typical for install/setup scripts), a
-# world-writable or otherwise permission-manipulated .env file becomes a
-# trivial privilege-escalation vector — an attacker only needs to prepend
-# one line such as `rm -rf /` or inject a command substitution anywhere in
-# a variable value.
-#
-# Replacement strategy — hardened key=value parser:
-#   1. Permission gate (root-context only):
-#      Refuse to load a file that is group- or world-readable/writable.
-#      Acceptable maximum: 0600 (owner read/write only).  This prevents an
-#      unprivileged user from staging a malicious .env between the permission
-#      check and the read (TOCTOU risk is mitigated by the atomic stat+read
-#      pattern used here: the file is opened once for the permission check
-#      and the same descriptor cannot be swapped underneath us on Linux).
-#   2. Line-by-line parsing via `read` built-in — no subshell, no eval:
-#      • Blank lines and lines starting with # are silently skipped.
-#      • KEY must match [A-Za-z_][A-Za-z0-9_]* — rejects injection via
-#        crafted key names.
-#      • VALUE is stripped of a single surrounding pair of single- or
-#        double-quotes (shell-style unquoting without interpretation).
-#      • After unquoting, the value is scanned for shell metacharacters
-#        that could trigger command substitution or sub-process execution:
-#        backtick (`), dollar-paren ($(), $(( ))), semicolon (;),
-#        ampersand (&), pipe (|), angle brackets (< >), and backslash (\).
-#        Any match causes the entire file to be rejected with a non-zero
-#        return code.
-#   3. Export is performed via the shell built-in `export KEY=VALUE` — the
-#      value is assigned as a literal string, never interpreted.
-#
-# Operators who intentionally need multi-line or complex values should use
-# a secrets manager (SOPS/age) and the corresponding lib/secrets.sh loader
-# rather than embedding them in a .env file.
 load_env_file() {
     local env_file="${1:-.env}"
 
@@ -314,7 +274,6 @@ load_env_file() {
         return 1
     fi
 
-    # ── Permission gate (enforced when running as root) ──────────────────
     if [[ $EUID -eq 0 ]]; then
         local file_perms
         file_perms=$(stat -c '%a' "$env_file" 2>/dev/null \
@@ -335,15 +294,12 @@ load_env_file() {
 
     log_debug "Loading environment from: $env_file"
 
-    # ── Safe line-by-line key=value parser ───────────────────────────────
     local line key raw_value value lineno=0
     while IFS= read -r line || [[ -n "$line" ]]; do
         (( lineno++ )) || true
 
-        # Skip blank lines and comments
         [[ -z "$line" || "$line" == \#* ]] && continue
 
-        # Must be KEY=VALUE (or KEY= for empty value)
         if [[ "$line" != *=* ]]; then
             log_warn "load_env_file: line ${lineno}: not a key=value pair — skipped"
             continue
@@ -352,13 +308,11 @@ load_env_file() {
         key="${line%%=*}"
         raw_value="${line#*=}"
 
-        # Validate key name: [A-Za-z_][A-Za-z0-9_]*
         if [[ ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
             log_error "load_env_file: line ${lineno}: invalid variable name '${key}' — aborting"
             return 1
         fi
 
-        # Strip a single surrounding pair of quotes (no interpretation)
         if [[ "$raw_value" == '"'*'"' ]]; then
             value="${raw_value:1:${#raw_value}-2}"
         elif [[ "$raw_value" == "'"*"'" ]]; then
@@ -367,7 +321,6 @@ load_env_file() {
             value="$raw_value"
         fi
 
-        # ── Metacharacter injection guard ─────────────────────────────
         if [[ "$value" == *'`'*   || "$value" == *'$('*  ||
               "$value" == *';'*   || "$value" == *'&'*   ||
               "$value" == *'|'*   || "$value" == *'<'*   ||
@@ -377,7 +330,6 @@ load_env_file() {
             return 1
         fi
 
-        # Export as a literal string — no eval, no subshell
         export "${key}=${value}"
 
     done < "$env_file"
@@ -421,11 +373,11 @@ _command_to_package_hint() {
     local cmd="$1"
     case "$cmd" in
         htpasswd) printf 'apache2-utils' ;;
-        docker) printf 'docker-ce (or docker.io)' ;;
-        sops) printf 'sops' ;;
-        age) printf 'age' ;;
-        zstd) printf 'zstd' ;;
-        *) printf '%s' "$cmd" ;;
+        docker)   printf 'docker-ce (or docker.io)' ;;
+        sops)     printf 'sops' ;;
+        age)      printf 'age' ;;
+        zstd)     printf 'zstd' ;;
+        *)        printf '%s' "$cmd" ;;
     esac
 }
 
@@ -441,11 +393,6 @@ _package_manager_hint() {
     fi
 }
 
-# AUD-M2 FIX: require_commands() previously emitted one log_error per missing
-# command and returned 1 after the loop; callers using
-# `if ! require_commands a b c; then` only ever saw the last missing command in
-# the error stream. Now all missing commands are accumulated first, then a
-# single consolidated error line is emitted before returning.
 require_commands() {
     local missing=()
     local packages=()
@@ -470,7 +417,6 @@ require_commands() {
     return 0
 }
 
-# P1-M4 FIX: retry_with_backoff()
 retry_with_backoff() {
     local max_attempts="$1"
     local initial_delay="$2"
@@ -506,7 +452,6 @@ require_root() {
     fi
 }
 
-# AUD-M1 FIX: get_real_user()
 get_real_user() {
     if [[ -n "${SUDO_USER:-}" ]]; then
         printf '%s\n' "$SUDO_USER"
@@ -525,10 +470,6 @@ get_real_user() {
 }
 
 # --- Cleanup Registration ---
-#
-# AUD-H1 FIX: perform_cleanup() previously stored cleanup actions as raw
-# strings and executed them with eval "${CLEANUP_ACTIONS[$idx]}". Fixed with
-# printf '%q' serialisation. AUD-L1: size guard + deduplication added.
 
 CLEANUP_ACTIONS_MAX_SIZE="${CLEANUP_ACTIONS_MAX_SIZE:-64}"
 declare -a CLEANUP_ACTIONS=()
@@ -659,17 +600,9 @@ download_file() {
 
 # --- Email Helpers ---
 
-# Load provider-specific email drivers (MailerSend, SendGrid, Mailgun, Postmark, Resend)
 # shellcheck source=lib/email.sh
 source "${LIB_DIR}/email.sh"
 
-# _rate_limit_check SUBJECT RATE_LIMIT_DIR
-#
-# Returns 0 and prints the stamp-file path when the message may be sent.
-# Returns 1 (silent drop) when the non-critical rate limit is active.
-#
-# BUG-C1 NOTE: callers must create their temp body file BEFORE calling this
-# function, and write the stamp ONLY after a successful send.
 _rate_limit_check() {
     local subject="$1"
     local rate_limit_dir="$2"
@@ -691,29 +624,30 @@ _rate_limit_check() {
 
 # ─────────────────────────────────────────────────────────────────────────────
 # _smtp_send <to> <subject> <body>
-# Provider-agnostic SMTP relay delivery via curl.
-# Reads: SMTP_HOST SMTP_PORT SMTP_USERNAME SMTP_PASSWORD SMTP_FROM
-#        SMTP_FROM_NAME SMTP_SECURITY
-# Returns: 0 on success, non-zero on failure.
+#
+# FIX-M10: All SMTP_* variable references use ${VAR:-} safe-expansion so this
+# function is safe to call under set -u even when SMTP vars are not yet
+# exported (e.g. health.sh calls send_email before load_env_file). The guard
+# checks still detect empty values and return 1 with a clear error message.
 # ─────────────────────────────────────────────────────────────────────────────
 _smtp_send() {
     local to="$1"
     local subject="$2"
     local body="$3"
 
-    [[ -z "$SMTP_HOST"     ]] && { log_error "_smtp_send: SMTP_HOST is not set";     return 1; }
-    [[ -z "$SMTP_USERNAME" ]] && { log_error "_smtp_send: SMTP_USERNAME is not set"; return 1; }
-    [[ -z "$SMTP_PASSWORD" ]] && { log_error "_smtp_send: SMTP_PASSWORD is not set"; return 1; }
-    [[ -z "$to"            ]] && { log_error "_smtp_send: recipient (to) is empty";  return 1; }
+    # FIX-M10: ${VAR:-} prevents set -u crash when var is unset
+    [[ -z "${SMTP_HOST:-}"     ]] && { log_error "_smtp_send: SMTP_HOST is not set";     return 1; }
+    [[ -z "${SMTP_USERNAME:-}" ]] && { log_error "_smtp_send: SMTP_USERNAME is not set"; return 1; }
+    [[ -z "${SMTP_PASSWORD:-}" ]] && { log_error "_smtp_send: SMTP_PASSWORD is not set"; return 1; }
+    [[ -z "$to"                ]] && { log_error "_smtp_send: recipient (to) is empty";  return 1; }
 
-    local _smtp_from_addr="${SMTP_FROM:-$SMTP_USERNAME}"
+    local _smtp_from_addr="${SMTP_FROM_EMAIL:-${SMTP_FROM:-${SMTP_USERNAME:-}}}"
     local _smtp_from_name="${SMTP_FROM_NAME:-VaultWarden}"
     local smtp_port="${SMTP_PORT:-587}"
     local smtp_security="${SMTP_SECURITY:-}"
     local smtp_url
     local smtp_tls_flags=()
 
-    # Honour SMTP_SECURITY when set; otherwise use port-based heuristic.
     if [[ -z "$smtp_security" ]]; then
         [[ "$smtp_port" == "465" ]] && smtp_security="tls" || smtp_security="starttls"
     fi
@@ -738,12 +672,6 @@ _smtp_send() {
     local date_str
     date_str=$(date -u '+%a, %d %b %Y %H:%M:%S +0000')
 
-    # FIX: smtp_tls_flags array expanded without extra quoting wrapper.
-    # The previous '"${smtp_tls_flags[@]+\"${smtp_tls_flags[@]}\"}\"' pattern
-    # produced a literal '"--ssl-reqd"' token (with embedded double-quotes)
-    # that curl received as an unknown option, causing exit code 2.
-    # Plain "${smtp_tls_flags[@]}" expands to nothing when empty and to the
-    # bare flag tokens when populated — correct in both cases.
     {
         printf 'From: "%s" <%s>\r\n' "$_smtp_from_name" "$_smtp_from_addr"
         printf 'To: %s\r\n'          "$to"
@@ -763,45 +691,22 @@ _smtp_send() {
         --url "$smtp_url" \
         --mail-from "$_smtp_from_addr" \
         --mail-rcpt "$to" \
-        --user "${SMTP_USERNAME}:${SMTP_PASSWORD}" \
+        --user "${SMTP_USERNAME:-}:${SMTP_PASSWORD:-}" \
         --upload-file -
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
 # send_email [TO] SUBJECT BODY
-#
-# Public entry point for all email delivery.
 #
 # TO is optional. When omitted, defaults to ${ADMIN_EMAIL}.
 # Calling conventions (both supported):
-#   send_email "subject" "body"                          — sends to ADMIN_EMAIL
-#   send_email "to@example.com" "subject" "body"         — sends to explicit recipient
+#   send_email "subject" "body"                   — sends to ADMIN_EMAIL
+#   send_email "to@example.com" "subject" "body"  — sends to explicit recipient
 #
-# FIX-M09: $to was never wired through to _smtp_send. The function accepted
-# only (subject, body) but called _smtp_send "$subject" "$full_body" — missing
-# the recipient argument entirely. curl received --mail-rcpt '' which Mailgun
-# rejects. Fixed by accepting an optional $to as $1 when $# == 3, defaulting
-# to ADMIN_EMAIL otherwise, and passing it through all three delivery stages.
-#
-# Delivery chain controlled by EMAIL_MODE and EMAIL_PROVIDER in .env:
-#
-#   EMAIL_MODE=auto  (default)
-#                    Stage 1: HTTP API driver (EMAIL_PROVIDER) -> Stage 2: SMTP
-#                    relay -> Stage 3: host MTA. Recommended for production.
-#   EMAIL_MODE=api   HTTP API only. Fails loudly if token is missing or the
-#                    API call fails — no SMTP or host-MTA fallback.
-#   EMAIL_MODE=smtp  SMTP relay only (curl smtp/starttls). Skips API stage.
-#                    Fails loudly if the relay is unreachable.
-#   EMAIL_MODE=host  Host MTA (Postfix / mail binary) only. Skips API + SMTP.
-#                    Fails loudly if the MTA is unavailable.
-#
-# EMAIL_PROVIDER selects the HTTP API driver (mailersend|sendgrid|mailgun|
-# postmark|resend). Only relevant when EMAIL_MODE=auto or api.
-# EMAIL_PROVIDER=smtp and EMAIL_PROVIDER=host are legacy aliases for
-# EMAIL_MODE=smtp and EMAIL_MODE=host respectively (retained for compatibility).
-#
-# Subjects containing "CRITICAL" bypass the rate limiter.
+# FIX-M09: recipient ($to) is now wired through to all three delivery stages.
+# FIX-M10: safe under set -u even when SMTP vars are not yet in environment.
+# ─────────────────────────────────────────────────────────────────────────────
 send_email() {
-    # FIX-M09: detect optional explicit recipient in $1 when called with 3 args.
     local to subject body
     if [[ $# -ge 3 ]]; then
         to="$1"
@@ -816,15 +721,12 @@ send_email() {
     local mode="${EMAIL_MODE:-auto}"
     local provider="${EMAIL_PROVIDER:-smtp}"
 
-    # Legacy aliases: EMAIL_PROVIDER=smtp|host override EMAIL_MODE for backward
-    # compatibility. New deployments should use EMAIL_MODE= directly.
     if [[ "$provider" == "smtp" ]]; then
         mode="smtp"
     elif [[ "$provider" == "host" ]]; then
         mode="host"
     fi
 
-    # Validate EMAIL_MODE early so the operator gets a clear error message.
     case "$mode" in
         auto|api|smtp|host) ;;
         *)
@@ -833,7 +735,6 @@ send_email() {
             ;;
     esac
 
-    # FIX-M06: Prepend standard subject prefix if not already present.
     [[ "$subject" != "[VaultWarden]"* ]] && subject="[VaultWarden] ${subject}"
 
     local rate_limit_dir="${PROJECT_ROOT:-/var/lib/vaultwarden}/.rate-limit"
@@ -842,10 +743,9 @@ send_email() {
 
     local stamp_file
     if ! stamp_file=$(_rate_limit_check "$subject" "$rate_limit_dir"); then
-        return 0  # silently suppressed — rate limit active
+        return 0
     fi
 
-    # Append standard footer
     local full_body
     full_body="${body}
 
@@ -854,7 +754,7 @@ Host:      $(hostname -f 2>/dev/null || hostname)
 Timestamp: $(date -uIs)
 Mode:      ${mode}${provider:+ / provider: ${provider}}"
 
-    # ── Stage 1: HTTP API via named driver ──────────────────────────────
+    # ── Stage 1: HTTP API ────────────────────────────────────────────────
     if [[ "$mode" == "auto" || "$mode" == "api" ]]; then
         if [[ -z "${_EMAIL_DRIVERS[$provider]:-}" ]]; then
             log_error "Unknown EMAIL_PROVIDER='${provider}'"
@@ -862,8 +762,6 @@ Mode:      ${mode}${provider:+ / provider: ${provider}}"
             [[ "$mode" == "api" ]] && return 1
         else
             local driver_fn="_email_driver_${provider}"
-
-            # FIX-M02: Resolve provider-specific token variable automatically.
             local _token_var="${provider^^}_API_TOKEN"
             local _api_token="${!_token_var:-${EMAIL_API_TOKEN:-}}"
 
@@ -887,10 +785,7 @@ Mode:      ${mode}${provider:+ / provider: ${provider}}"
         fi
     fi
 
-    # ── Stage 2: SMTP relay via curl ────────────────────────────────────
-    # FIX-M09: pass $to as first argument — previously called as
-    # _smtp_send "$subject" "$full_body" which left $to unset inside
-    # _smtp_send, causing curl --mail-rcpt '' (empty recipient).
+    # ── Stage 2: SMTP relay ──────────────────────────────────────────────
     if [[ "$mode" == "auto" || "$mode" == "smtp" ]]; then
         if _smtp_send "$to" "$subject" "$full_body"; then
             log_success "Email sent via SMTP relay (${SMTP_HOST:-unconfigured}:${SMTP_PORT:-587}): ${subject}"
@@ -904,9 +799,7 @@ Mode:      ${mode}${provider:+ / provider: ${provider}}"
         log_warn "SMTP relay failed — falling back to host MTA"
     fi
 
-    # ── Stage 3: Host MTA (Postfix or sendmail) ─────────────────────────
-    # FIX-M09: pass $to explicitly — previously used bare ${ADMIN_EMAIL}
-    # which silently sent to the wrong address when called with an explicit to.
+    # ── Stage 3: Host MTA ────────────────────────────────────────────────
     if [[ "$mode" == "auto" || "$mode" == "host" ]]; then
         if command -v mail &>/dev/null; then
             if printf '%s' "$full_body" | mail -s "$subject" "$to" 2>/dev/null; then
@@ -925,8 +818,6 @@ Mode:      ${mode}${provider:+ / provider: ${provider}}"
     return 1
 }
 
-# send_notification_email SUBJECT BODY
-# Backward-compatibility shim. All new code should call send_email() directly.
 send_notification_email() {
     send_email "$1" "$2"
 }
@@ -976,7 +867,6 @@ setup_cleanup_trap() {
     trap "$cleanup_function" EXIT HUP INT TERM
 }
 
-# P1-M4 FIX: safe_execute()
 safe_execute() {
     local description="$1"
     shift
