@@ -27,7 +27,8 @@
 # Resend      200 JSON; from is composite string, to is string array
 #
 # --- FIX-M01 (2026-03-09) ----------------------------------------------------
-# All drivers now use ${SMTP_FROM_EMAIL:-${SMTP_FROM}} for the sender address.
+# All drivers use ${SMTP_FROM:-${SMTP_FROM_EMAIL}} (SMTP_FROM_EMAIL deprecated; 
+# SMTP_FROM is canonical) for the sender address.
 # Backward-compatibility for .env files still using the legacy SMTP_FROM= name.
 # DEPRECATED: SMTP_FROM_EMAIL is the legacy name. The canonical variable is
 # SMTP_FROM (standardised in .env.example). The SMTP_FROM_EMAIL fallback shim
