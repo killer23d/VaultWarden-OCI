@@ -903,15 +903,28 @@ update_dns_record() {
     local cf_token
     if [[ -f "$token_file" ]]; then
         local token_perms
-        token_perms=$(stat -c%a "$token_file" 2>/dev/null || stat -f%Lp "$token_file" 2>/dev/null || echo "")
-        if [[ -n "$token_perms" && "$token_perms" != "600" && "$token_perms" != "400" ]]; then
-            log_error "Cloudflare token file has insecure permissions ($token_perms): $token_file"
-            log_error "Fix with: chmod 600 '$token_file'"
-            return 1
-        fi
-        cf_token=$(cat "$token_file") || { log_error "Cannot read Cloudflare API token from host secret file"; return 1; }
+        token_perms=$(stat -c%a "$token_file" 2>/dev/null \
+                   || stat -f%Lp "$token_file" 2>/dev/null \
+                   || echo "")
+        case "$token_perms" in
+            444|400|600|640)
+                # All accepted: 444=bind-mount secret, 400/600/640=restricted
+                log_debug "Cloudflare token file permissions OK ($token_perms)"
+                ;;
+            "")
+                log_warn "Cannot determine permissions on $token_file — proceeding with caution"
+                ;;
+            *)
+                log_error "Cloudflare token file has insecure permissions ($token_perms): $token_file"
+                log_error "Expected 444 (docker secret) or 400/600. Fix with: chmod 444 '$token_file'"
+                return 1
+                ;;
+        esac
+        cf_token=$(cat "$token_file") \
+            || { log_error "Cannot read Cloudflare API token from host secret file"; return 1; }
     else
-        cf_token=$(docker compose exec -T caddy cat /run/secrets/caddy_cloudflare_dns_token 2>/dev/null) \
+        cf_token=$(docker compose exec -T caddy \
+            cat /run/secrets/caddy_cloudflare_dns_token 2>/dev/null) \
             || { log_error "Cannot read Cloudflare API token (host file: $token_file not found, Caddy container may be stopped)"; return 1; }
     fi
     [[ -z "$cf_token" ]] && { log_error "Cloudflare API token is empty"; return 1; }
