@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# startup.sh - Enhanced VaultWarden startup script with secure secrets handling
+# startup.sh - VaultWarden startup script with secure secrets handling
 
 set -euo pipefail
 
@@ -206,28 +206,10 @@ prepare_docker_secrets() {
     return 1
   fi
 
-  # SECURITY: Use umask 133 so secret files are created at mode 444 (r--r--r--).
-  #
-  # WHY 444 AND NOT 600 OR 640:
-  # Docker Compose file-based secrets are plain bind-mounts — the container
-  # sees the EXACT same permission bits as the host file. Older Docker Engine
-  # versions (pre-25) silently ignore the `mode:` field in the compose secrets
-  # block, so we cannot rely on Compose to override permissions at mount time.
-  #
-  # The container processes run as ${PUID}:${PGID} (non-root). With mode 600
-  # or 640 (root:root ownership) those processes are denied because:
-  #   600 → only root (uid 0) can read
-  #   640 → group-read requires the file's GID == PGID; host GID is 0 (root)
-  # Mode 444 (world-readable) lets any UID — including PUID — read the file.
-  #
-  # SECURITY POSTURE — why 444 is safe in this layout:
-  #   The parent directory  secrets/.docker_secrets/  is mode 700 (rwx------)
-  #   owned by root. An unprivileged OS user cannot traverse into it (execute
-  #   bit on the directory is required to stat/open entries). The world-read
-  #   bit on the files is therefore only reachable by root or by processes
-  #   running inside containers that have the path explicitly bind-mounted.
-  #   This matches Docker Swarm secrets, which are also 444 inside the
-  #   container mount namespace.
+  # SECURITY: Save and set umask 133 so new files default to 444.
+  # NOTE: umask alone is not fully reliable across all Ubuntu/sudo/PAM
+  # configurations — the explicit chmod 444 below is the authoritative
+  # permission-setting step. The umask remains as defence-in-depth.
   _prepare_secrets_cleanup_umask=$(umask)
   umask 133  # 666 XOR 133 = 444 (r--r--r--)
 
@@ -295,15 +277,24 @@ PY
     if [[ -n "$secret_value" ]] && [[ "$secret_value" != "CHANGE_ME"* ]] && \
        [[ "$secret_value" != "null" ]] && [[ "$secret_value" != "PLACEHOLDER"* ]]; then
       if printf '%s' "$secret_value" > "$secret_file"; then
-        local file_perms
-        file_perms=$(_stat_octal_perms_local "$secret_file" 2>/dev/null || echo "unknown")
-        # Expected mode is 444 (umask 133 applied to new file creation).
-        # Anything else indicates the umask was not applied or was overridden.
-        if [[ "$file_perms" == "444" ]]; then
-          log_debug "Secret created securely: $secret_name (permissions: $file_perms)"
-          secrets_created=$(( secrets_created + 1 ))
+        # FIX: explicitly enforce 444 permissions after write.
+        # Shell I/O redirection (>) inherits the process umask, but PAM,
+        # sudo, and certain Ubuntu profile configurations can silently reset
+        # umask to 022 mid-execution, yielding 644 instead of 444.
+        # chmod 444 here is the authoritative, unconditional permission step
+        # and is not subject to umask inheritance.
+        if chmod 444 "$secret_file"; then
+          local file_perms
+          file_perms=$(_stat_octal_perms_local "$secret_file" 2>/dev/null || echo "unknown")
+          if [[ "$file_perms" == "444" ]]; then
+            log_debug "Secret created securely: $secret_name (permissions: $file_perms)"
+            secrets_created=$(( secrets_created + 1 ))
+          else
+            log_error "Secret file has unexpected permissions after chmod: $secret_name ($file_perms, expected 444)"
+            secrets_failed=$(( secrets_failed + 1 ))
+          fi
         else
-          log_error "Secret file created with incorrect permissions: $secret_name ($file_perms, expected 444)"
+          log_error "Failed to set permissions on secret file: $secret_name"
           secrets_failed=$(( secrets_failed + 1 ))
         fi
       else
