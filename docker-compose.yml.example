@@ -182,23 +182,12 @@ services:
   # =============================================================================
   caddy:
     container_name: vaultwarden_caddy
-    # CaddyBuilds/caddy-cloudflare 2.11.1 — released 2026-02-24
-    # >= v2.11.0 bundles caddy-cloudflare-ip BY DEFAULT.
-    # This module rewrites remote_ip in access.log to the real client IP
-    # sourced from Cf-Connecting-Ip, which is mandatory for fail2ban Caddy
-    # filters to ban actual attackers instead of Cloudflare edge nodes.
-    # DO NOT downgrade below 2.11.0 without verifying the module is present:
-    #   docker run --rm ghcr.io/caddybuilds/caddy-cloudflare:<tag> caddy list-modules | grep cloudflare
-    #   Expected: http.ip_sources.cloudflare must appear in output
     image: ghcr.io/caddybuilds/caddy-cloudflare:${CADDY_VERSION:-2.11.1}
     restart: unless-stopped
     user: "${PUID}:${PGID}"
 
     depends_on:
       init-permissions:
-        # FIX [MEDIUM-depends_on]: same reasoning as vaultwarden — caddy must
-        # not start before /caddy_data and /caddy_config are owned/chmod'd
-        # by the init container.
         condition: service_completed_successfully
 
     entrypoint: /scripts/entrypoint.sh
@@ -224,12 +213,10 @@ services:
       - "127.0.0.1:8080:8080"
 
     networks:
-      - vaultwarden
+      - vaultwarden       # reaches vaultwarden_app (internal)
+      - caddy_external    # internet egress for ACME DNS-01 + Cloudflare API
 
     healthcheck:
-      # FIX [LOW-caddy-healthcheck]: use 127.0.0.1 instead of localhost to
-      # prevent IPv6 (::1) resolution failure when Caddy binds only to the
-      # IPv4 loopback for the admin/health endpoint on port 8080.
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8080/alive"]
       interval: 30s
       timeout: 5s
@@ -260,8 +247,22 @@ services:
           memory: 128M
           cpus: '0.1'
 
+# =============================================================================
+# Network Configuration
+# =============================================================================
+networks:
+  vaultwarden:
+    name: vaultwarden_network
+    driver: bridge
+    internal: true    # vaultwarden_app has no internet egress
+
+  caddy_external:
+    name: caddy_external_network
+    driver: bridge
+    # internal: false is the default — Caddy needs this for ACME + CF API
+
   # =============================================================================
-  # Postfix - Email Relay (HARDENED - Minimal Capabilities)
+  # Postfix - Email Relay (Minimal Capabilities)
   # =============================================================================
   postfix:
     container_name: vaultwarden_postfix
