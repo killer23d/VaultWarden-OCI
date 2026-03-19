@@ -841,6 +841,7 @@ create_empty_secrets_structure() {
 admin_token: PLACEHOLDER_NOT_CONFIGURED
 admin_basic_auth_hash: PLACEHOLDER_NOT_CONFIGURED
 smtp_password: PLACEHOLDER_NOT_CONFIGURED
+email_api_token: PLACEHOLDER_NOT_CONFIGURED
 backup_passphrase: PLACEHOLDER_NOT_CONFIGURED
 push_installation_id: PLACEHOLDER_NOT_CONFIGURED
 push_installation_key: PLACEHOLDER_NOT_CONFIGURED
