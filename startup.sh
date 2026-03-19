@@ -230,19 +230,16 @@ prepare_log_directories() {
 # ---------------------------------------------------------------------------
 # prepare_docker_secrets
 #
-# STARTUP-6 FIX: Secret files were created at mode 444 (world-readable) via
-# umask 133. This caused maintenance.sh's permission guard to reject them
-# when reading Cloudflare tokens (it correctly requires 600). Additionally,
-# world-readable secret files allow any local user to read token values,
-# which is unnecessary since only root (which runs this script) needs access.
+# Secret files are written at mode 444 (r--r--r--) intentionally.
+# Docker bind-mounts these files into containers that run as non-root UIDs
+# (e.g. 1001). Those UIDs must be able to read the files. The owning
+# directory (secrets/.docker_secrets) is mode 700 (rwx------) owned by root,
+# so unprivileged OS users cannot traverse into it to reach the files — the
+# world-read bit on the files is effectively unreachable from the host
+# without root. This is the standard posture for Docker bind-mount secrets.
 #
-# Fix: use umask 077 so new files default to 600 (owner read/write only).
-# chmod 600 is applied explicitly after each write as belt-and-suspenders,
-# and _stat_octal_perms_local() verifies the final permission is exactly 600.
-#
-# The secrets directory itself remains 700 (rwx------) providing an
-# additional layer: even if a file permission were somehow wrong, unprivileged
-# users cannot traverse into the directory to reach the files.
+# The permission guard in maintenance.sh is updated separately to accept 444
+# in addition to 600/400.
 # ---------------------------------------------------------------------------
 prepare_docker_secrets() {
   log_info "Preparing Docker secrets with enhanced security..."
@@ -267,11 +264,12 @@ prepare_docker_secrets() {
     return 1
   fi
 
-  # STARTUP-6 FIX: use umask 077 so files are born at 600, not 444.
-  # 444 caused maintenance.sh's permission guard to reject Cloudflare token
-  # files, and also allowed any local user to read secret values.
+  # Secret files must be 444 (r--r--r--) so non-root container UIDs can read
+  # them via Docker bind-mount. The containing directory is 700 (root-only
+  # traverse) so the world-read bit is unreachable from the host OS.
+  # umask 333 = 666 XOR 333 = 444.
   _prepare_secrets_cleanup_umask=$(umask)
-  umask 077  # 666 XOR 077 = 600 (rw-------)
+  umask 333
 
   # FIX MEDIUM: use file-scoped _prepare_secrets_cleanup() instead of the
   # formerly nested cleanup_local() to prevent global namespace leakage.
@@ -342,36 +340,34 @@ print(v, end="")
 PY
 )
 
-    # STARTUP-2 FIX: was '\\' (double-backslash, paste artifact); corrected
-    # to '\' (single backslash line continuation).
+    # STARTUP-2 FIX: single backslash line continuation
     if [[ -n "$secret_value" ]] && [[ "$secret_value" != "CHANGE_ME"* ]] \
        && [[ "$secret_value" != "null" ]] && [[ "$secret_value" != "PLACEHOLDER"* ]]; then
 
-      # STARTUP-6 FIX: write to a 600 temp file first, then mv atomically into
-      # the destination. This prevents the destination file from ever existing
-      # at a world-readable permission — shell '>' redirection creates a new
-      # inode using the process umask, but mktemp + chmod 600 + mv ensures the
-      # data is written into a pre-secured inode before it appears at its final
-      # path inside the secrets directory.
+      # Write to a temp file first so no partially-written file ever appears
+      # at the final path. chmod 444 before mv so the inode is secured before
+      # it becomes reachable at $secret_file.
       local secret_tmp
       secret_tmp=$(mktemp "${secrets_dir}/.secret_tmp_XXXXXXXXXX")
-      chmod 600 "$secret_tmp"
 
       if printf '%s' "$secret_value" > "$secret_tmp"; then
-        # mv is atomic on the same filesystem — the destination appears at
-        # mode 600 the instant it becomes visible at $secret_file.
+        # Explicitly set 444 on the temp file before moving it into place.
+        # The mv is atomic on the same filesystem — the destination is visible
+        # at $secret_file only after the inode is already at 444.
+        chmod 444 "$secret_tmp"
         if mv -f "$secret_tmp" "$secret_file"; then
-          # Belt-and-suspenders: enforce 600 on the destination after mv.
-          chmod 600 "$secret_file"
+          # Belt-and-suspenders: re-apply 444 on the destination after mv
+          # in case the filesystem or mv implementation reset permissions.
+          chmod 444 "$secret_file"
 
           local file_perms
-          # STARTUP-3 FIX: _stat_octal_perms_local defined above as a shim.
+          # STARTUP-3 FIX: _stat_octal_perms_local defined as shim above
           file_perms=$(_stat_octal_perms_local "$secret_file" 2>/dev/null || echo "unknown")
-          if [[ "$file_perms" == "600" ]]; then
+          if [[ "$file_perms" == "444" ]]; then
             log_debug "Secret created securely: $secret_name (permissions: $file_perms)"
             secrets_created=$(( secrets_created + 1 ))
           else
-            log_error "Secret file has unexpected permissions after chmod: $secret_name ($file_perms, expected 600)"
+            log_error "Secret file has unexpected permissions: $secret_name ($file_perms, expected 444)"
             secrets_failed=$(( secrets_failed + 1 ))
           fi
         else
