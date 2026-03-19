@@ -1072,10 +1072,6 @@ EOF
         # FIX [LOW-show_post_install_summary]: call get_age_public_key() (the
         # existing library function from lib/crypto.sh) instead of the fragile
         # inline `grep "public key" | cut -d: -f2 | tr -d ' '` pipeline.
-        # The library function handles edge cases (comments with colons,
-        # whitespace variants, multi-line output) correctly and is already
-        # tested. Using a different extraction method here risks showing a
-        # different key than what is actually embedded in .sops.yaml.
         local age_pub_key
         age_pub_key=$(get_age_public_key "secrets/keys/age-key.txt" 2>/dev/null || echo "MISSING")
         printf 'SOPS Age Public Key:  %s%s%s\n' "${COLOR_GREEN}" "${age_pub_key}" "${COLOR_RESET}"
@@ -1101,7 +1097,9 @@ EOF
             "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '  %s./edit-secrets.sh --rotate fail2ban_cloudflare_firewall_token%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '  %s./edit-secrets.sh --rotate smtp_password%s         (if using email notifications)\n' \
+        printf '  %s./edit-secrets.sh --rotate smtp_password%s         (if using SMTP/email notifications)\n' \
+            "${COLOR_YELLOW}" "${COLOR_RESET}"
+        printf '  %s./edit-secrets.sh --rotate email_api_token%s       (if using API-based email, e.g. MAILERSEND_API_TOKEN)\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '  %s./edit-secrets.sh --rotate push_installation_id%s  (optional — mobile push)\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
