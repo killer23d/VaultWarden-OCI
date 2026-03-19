@@ -1,21 +1,22 @@
 {
-        # Global ACME DNS configuration
-        # SECURITY: Token loaded from Docker secret via environment variable
+        # Global ACME DNS configuration via Cloudflare
         acme_dns cloudflare {env.CLOUDFLARE_API_TOKEN}
 
-        # Global server configuration
-        # Trust Cloudflare as the only proxy and allow client IP extraction from CF header
+        # Dynamically trust Cloudflare proxy IPs (caddy-cloudflare-ip module).
+        # Enables {client_ip} to resolve to the real visitor IP from CF headers.
         servers {
                 trusted_proxies cloudflare
                 client_ip_headers Cf-Connecting-Ip
         }
+}
 
-        # -----------------------------------------------------------------------
-        # 4-Log Forensic Architecture (per SECURITY.md)
-        # Route log output by named logger to prevent double-firing and achieve
-        # per-category retention targets (~3 GB total forensic capacity).
-        # -----------------------------------------------------------------------
-        log access_log {
+# ================================
+# Internal Health Check Endpoint
+# ================================
+# FIX [P3-M3]: Bind to loopback only — prevents unauthenticated access
+# from any other container on the shared Docker internal network.
+127.0.0.1:8080 {
+        log {
                 output file /var/log/caddy/access.log {
                         roll_size 50MB
                         roll_keep 20
@@ -32,11 +33,180 @@
                 level INFO
         }
 
-        log admin_log {
-                output file /var/log/caddy/admin_access.log {
-                        roll_size 25MB
-                        roll_keep 30
-                        roll_keep_for 90d
+        handle /alive {
+                reverse_proxy vaultwarden:80 {
+                        header_up Host {host}
+                        header_up CF-Connecting-IP {client_ip}
+                        header_up X-Real-IP {client_ip}
+                        header_up X-Forwarded-For {client_ip}
+                        header_up X-Request-ID {uuid}
+                }
+        }
+}
+
+# ================================
+# Main Site
+# ================================
+{$DOMAIN_NAME} {
+        log {
+                output file /var/log/caddy/access.log {
+                        roll_size 50MB
+                        roll_keep 20
+                        roll_keep_for 30d
+                }
+                format json {
+                        time_format "2006-01-02T15:04:05.000Z07:00"
+                        message_key "msg"
+                        level_key   "level"
+                        time_key    "ts"
+                        name_key    "logger"
+                        caller_key  "caller"
+                }
+                level INFO
+        }
+
+        # 1. Enhanced Security Headers (HARDENED)
+        header {
+                Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+                X-Content-Type-Options "nosniff"
+                X-Frame-Options "DENY"
+                X-XSS-Protection "1; mode=block"
+                Referrer-Policy "strict-origin-when-cross-origin"
+                Cross-Origin-Opener-Policy "same-origin"
+                Cross-Origin-Resource-Policy "same-origin"
+                # credentialless instead of require-corp — preserves Spectre isolation
+                # while allowing cross-origin no-credential fetches for WebAuthn/passkeys.
+                Cross-Origin-Embedder-Policy "credentialless"
+                X-DNS-Prefetch-Control "off"
+                # FIX [CF-1]: PUSH_CSP set by entrypoint.sh — empty string when
+                # PUSH_ENABLED!=true, Bitwarden push endpoints when true.
+                Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss://{$DOMAIN_NAME}{$PUSH_CSP}; frame-src 'self'; object-src 'none'; base-uri 'self';"
+                Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=(), usb=()"
+                X-Request-ID {uuid}
+                -Server
+                -X-Powered-By
+        }
+
+        # 2. Public Health Check
+        @health path /alive
+        handle @health {
+                reverse_proxy vaultwarden:80 {
+                        header_up Host {host}
+                        header_up CF-Connecting-IP {client_ip}
+                        header_up X-Real-IP {client_ip}
+                        header_up X-Forwarded-For {client_ip}
+                        header_up X-Request-ID {uuid}
+                }
+        }
+
+        # 3. WebSocket routing for notifications hub
+        # FIX [M-14]: Port 3012 removed in VaultWarden >= 1.30.0.
+        # All WebSocket real-time sync goes through main HTTP port 80.
+        handle /notifications/hub {
+                reverse_proxy vaultwarden:80 {
+                        header_up Host {host}
+                        header_up Connection {>Connection}
+                        header_up Upgrade {>Upgrade}
+                        header_up CF-Connecting-IP {client_ip}
+                        header_up X-Real-IP {client_ip}
+                        header_up X-Forwarded-For {client_ip}
+                        header_up X-Request-ID {uuid}
+                }
+        }
+
+        # 4. Admin Panel Protection
+        # FIX [P3-C2]: UA blocklist removed — trivially bypassed. Use
+        # Cloudflare WAF Managed Ruleset for scanner/bot detection instead.
+        @admin path /admin*
+        handle @admin {
+                log {
+                        output file /var/log/caddy/admin_access.log {
+                                roll_size 25MB
+                                roll_keep 30
+                                roll_keep_for 90d
+                        }
+                        format json {
+                                time_format "2006-01-02T15:04:05.000Z07:00"
+                                message_key "msg"
+                                level_key   "level"
+                                time_key    "ts"
+                                name_key    "logger"
+                        }
+                        level INFO
+                }
+
+                # NOTE: 'unsafe-inline' required by VaultWarden admin UI inline <script> blocks.
+                # Risk accepted: admin panel is protected by basic_auth + Cloudflare firewall rules.
+                header {
+                        Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss://{$DOMAIN_NAME}{$PUSH_CSP}; frame-src 'self'; object-src 'none'; base-uri 'self';"
+                }
+
+                basic_auth {
+                        {env.ADMIN_USERNAME} {env.ADMIN_HASH}
+                }
+
+                reverse_proxy vaultwarden:80 {
+                        header_up Host {host}
+                        header_up CF-Connecting-IP {client_ip}
+                        header_up X-Real-IP {client_ip}
+                        header_up X-Forwarded-For {client_ip}
+                        header_up X-Request-ID {uuid}
+                }
+        }
+
+        # 5. Auth Endpoints — dedicated log for Fail2Ban parsing
+        # FIX: Removed /identity/accounts/prelogin* — does not exist in VaultWarden.
+        # Only /api/accounts/prelogin and /identity/connect/token are valid.
+        @auth_endpoints path /api/accounts/prelogin* /identity/connect/token*
+        handle @auth_endpoints {
+                log {
+                        output file /var/log/caddy/auth_attempts.log {
+                                roll_size 25MB
+                                roll_keep 30
+                                roll_keep_for 90d
+                        }
+                        format json {
+                                time_format "2006-01-02T15:04:05.000Z07:00"
+                                message_key "msg"
+                                level_key   "level"
+                                time_key    "ts"
+                                name_key    "logger"
+                        }
+                        level INFO
+                }
+
+                reverse_proxy vaultwarden:80 {
+                        header_up Host {host}
+                        header_up CF-Connecting-IP {client_ip}
+                        header_up X-Real-IP {client_ip}
+                        header_up X-Forwarded-For {client_ip}
+                        header_up X-Request-ID {uuid}
+                        header_up X-Auth-Endpoint "true"
+                }
+        }
+
+        # 6. Default Reverse Proxy
+        handle {
+                reverse_proxy vaultwarden:80 {
+                        header_up Host {host}
+                        header_up CF-Connecting-IP {client_ip}
+                        header_up X-Real-IP {client_ip}
+                        header_up X-Forwarded-For {client_ip}
+                        header_up X-Request-ID {uuid}
+                }
+        }
+}
+
+# ================================
+# Redirect www → apex
+# ================================
+# Uses {$DOMAIN_NAME} env var for the redirect target (safe: expanded at runtime).
+www.{$DOMAIN_NAME} {
+        log {
+                output file /var/log/caddy/access.log {
+                        roll_size 50MB
+                        roll_keep 20
+                        roll_keep_for 30d
                 }
                 format json {
                         time_format "2006-01-02T15:04:05.000Z07:00"
@@ -48,23 +218,23 @@
                 level INFO
         }
 
-        log auth_log {
-                output file /var/log/caddy/auth_attempts.log {
-                        roll_size 25MB
-                        roll_keep 30
-                        roll_keep_for 90d
-                }
-                format json {
-                        time_format "2006-01-02T15:04:05.000Z07:00"
-                        message_key "msg"
-                        level_key   "level"
-                        time_key    "ts"
-                        name_key    "logger"
-                }
-                level INFO
+        @has_domain expression `{$DOMAIN_NAME} != ""`
+        handle @has_domain {
+                redir https://{$DOMAIN_NAME}{uri} 301
         }
+        handle {
+                abort
+        }
+}
 
-        log security_log {
+# ================================
+# Catch-all :80 and :443
+# ================================
+# SECURITY NOTE: Restrict TCP 80/443 to Cloudflare IP ranges at UFW/OCI
+# Security List level to prevent direct-IP access entirely.
+# Ref: https://www.cloudflare.com/ips/
+:80, :443 {
+        log {
                 output file /var/log/caddy/security.log {
                         roll_size 10MB
                         roll_keep 50
@@ -79,215 +249,6 @@
                 }
                 level WARN
         }
-}
 
-# ================================
-# Internal Health Check Endpoint
-# ================================
-# FIX [P3-M3]: Bind to loopback only — prevents unauthenticated access
-# from any other container on the shared Docker internal network.
-# The host-side 127.0.0.1 binding in docker-compose.yml is a separate,
-# complementary control; this binding is the container-layer guard.
-127.0.0.1:8080 {
-        log_name access_log
-        handle /alive {
-                reverse_proxy vaultwarden:80 {
-                        header_up Host {host}
-
-                        # FIX: Always send a non-empty, validated client IP to Vaultwarden
-                        # {client_ip} is derived considering trusted_proxies + client_ip_headers
-                        header_up CF-Connecting-IP {client_ip}
-                        header_up X-Real-IP {client_ip}
-                        header_up X-Forwarded-For {client_ip}
-
-                        # Trace id (useful for correlating logs)
-                        header_up X-Request-ID {uuid}
-                }
-        }
-}
-
-# ================================
-# Main Site
-# ================================
-{$DOMAIN_NAME} {
-        # Route all main-site traffic to the general access log
-        log_name access_log
-
-        # 1. Enhanced Security Headers (HARDENED)
-        header {
-                # HSTS with preload
-                Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-
-                # Classic security headers
-                X-Content-Type-Options "nosniff"
-                X-Frame-Options "DENY"
-                X-XSS-Protection "1; mode=block"
-                Referrer-Policy "strict-origin-when-cross-origin"
-
-                # Modern isolation headers (Spectre mitigation)
-                Cross-Origin-Opener-Policy "same-origin"
-                Cross-Origin-Resource-Policy "same-origin"
-                # FIX [P3-M2]: credentialless instead of require-corp.
-                # require-corp blocks cross-origin authenticators used by
-                # WebAuthn/passkey flows. credentialless preserves Spectre
-                # isolation while allowing cross-origin no-credential fetches.
-                Cross-Origin-Embedder-Policy "credentialless"
-                X-DNS-Prefetch-Control "off"
-
-                # Content Security Policy
-                # FIX [CF-1]: connect-src push endpoints are conditional on PUSH_ENABLED.
-                # PUSH_CSP is set to "" by entrypoint.sh when PUSH_ENABLED!=true, and to
-                # "https://push.bitwarden.com https://identity.bitwarden.com" when true.
-                # This prevents unnecessarily widening CSP attack surface for the majority
-                # of deployments that do not use Bitwarden push notifications.
-                Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss://{$DOMAIN_NAME}{$PUSH_CSP}; frame-src 'self'; object-src 'none'; base-uri 'self';"
-
-                # Permissions Policy (restrict dangerous features)
-                Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=(), usb=()"
-
-                # Request tracking (response header)
-                X-Request-ID {uuid}
-
-                # Remove server identification (security by obscurity)
-                -Server
-                -X-Powered-By
-        }
-
-        # 2. Public Health Check
-        @health path /alive
-        handle @health {
-                reverse_proxy vaultwarden:80 {
-                        header_up Host {host}
-
-                        # FIX: Send resolved client IP (never empty) to match Vaultwarden IP_HEADER=CF-Connecting-IP
-                        header_up CF-Connecting-IP {client_ip}
-                        header_up X-Real-IP {client_ip}
-                        header_up X-Forwarded-For {client_ip}
-                        header_up X-Request-ID {uuid}
-                }
-        }
-
-        # 3. WebSocket routing for notifications hub
-        # FIX [M-14]: Port 3012 was removed in VaultWarden >= 1.30.0.
-        # All WebSocket real-time sync now goes through the main HTTP port 80.
-        handle /notifications/hub {
-                reverse_proxy vaultwarden:80 {
-                        header_up Host {host}
-                        header_up Connection {>Connection}
-                        header_up Upgrade {>Upgrade}
-
-                        header_up CF-Connecting-IP {client_ip}
-                        header_up X-Real-IP {client_ip}
-                        header_up X-Forwarded-For {client_ip}
-                        header_up X-Request-ID {uuid}
-                }
-        }
-
-        # 4. Admin Panel Protection
-        # FIX [P3-C2]: @malicious_ua UA blocklist removed — trivially bypassed
-        # by any attacker that omits a scanner User-Agent string. The Cloudflare
-        # WAF Managed Ruleset (OWASP CRS / Cloudflare OWASP) is the correct and
-        # effective layer for scanner/bot detection. Keeping a local list here
-        # provides false confidence without meaningful security benefit.
-        # Configure: Cloudflare Dashboard → Security → WAF → Managed rules.
-        @admin path /admin*
-        handle @admin {
-                # Route admin traffic to the dedicated high-retention admin log
-                log_name admin_log
-
-                # NOTE: 'unsafe-inline' in script-src is required by VaultWarden's admin UI
-                # which renders inline <script> blocks. This cannot be removed without
-                # breaking admin panel functionality. Risk accepted: admin panel access is
-                # already protected by Caddy basic_auth and should only be accessible from
-                # trusted IPs via Cloudflare firewall rules.
-                # Stricter CSP for admin panel
-                # FIX [CF-1]: PUSH_CSP applied conditionally here as well.
-                header {
-                        Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss://{$DOMAIN_NAME}{$PUSH_CSP}; frame-src 'self'; object-src 'none'; base-uri 'self';"
-                        # FIX [P3-C1]: X-Admin-Access header removed.
-                        # Broadcasting panel existence in every response is an
-                        # unnecessary information disclosure. Removed entirely.
-                }
-
-                basic_auth {
-                        {env.ADMIN_USERNAME} {env.ADMIN_HASH}
-                }
-
-                reverse_proxy vaultwarden:80 {
-                        header_up Host {host}
-
-                        header_up CF-Connecting-IP {client_ip}
-                        header_up X-Real-IP {client_ip}
-                        header_up X-Forwarded-For {client_ip}
-                        header_up X-Request-ID {uuid}
-                }
-        }
-
-        # 5. Auth Endpoints (route to dedicated auth_attempts log for Fail2Ban)
-        # FIX: Removed /identity/accounts/prelogin* — this path does not exist in
-        # VaultWarden; only /api/accounts/prelogin is valid. Keeping the non-existent
-        # path caused confusion and could mask future misrouting.
-        @auth_endpoints path /api/accounts/prelogin* /identity/connect/token*
-        handle @auth_endpoints {
-                log_name auth_log
-
-                reverse_proxy vaultwarden:80 {
-                        header_up Host {host}
-
-                        header_up CF-Connecting-IP {client_ip}
-                        header_up X-Real-IP {client_ip}
-                        header_up X-Forwarded-For {client_ip}
-                        header_up X-Request-ID {uuid}
-
-                        header_up X-Auth-Endpoint "true"
-                }
-        }
-
-        # 6. Default Reverse Proxy
-        handle {
-                reverse_proxy vaultwarden:80 {
-                        header_up Host {host}
-
-                        header_up CF-Connecting-IP {client_ip}
-                        header_up X-Real-IP {client_ip}
-                        header_up X-Forwarded-For {client_ip}
-                        header_up X-Request-ID {uuid}
-                }
-        }
-}
-
-# ================================
-# Redirect www → apex
-# ================================
-# FIX: www. redirect block now uses a hardened literal-hostname pattern to prevent
-# Caddy from treating the unresolved {$DOMAIN_NAME} placeholder as a server name
-# and provisioning a cert for the literal string when started without the entrypoint.
-# The environment variable is still used for the redirect target (safe: Caddy expands
-# {$VAR} in directives at runtime, not in the site address label).
-www.{$DOMAIN_NAME} {
-        log_name access_log
-        @has_domain expression `{$DOMAIN_NAME} != ""`
-        handle @has_domain {
-                redir https://{$DOMAIN_NAME}{uri} 301
-        }
-        handle {
-                abort
-        }
-}
-
-# ================================
-# Catch-all :80 and :443
-# ================================
-# SECURITY NOTE: The :443 catch-all completes a TLS handshake (with a self-signed cert)
-# before returning 404, which reveals server presence to port scanners.
-# OPERATOR ACTION REQUIRED: Restrict TCP port 443 (and 80) to Cloudflare IP ranges
-# at the UFW / OCI Security List level to prevent direct-IP access entirely.
-# UFW example:
-#   sudo ufw delete allow 443/tcp
-#   for cidr in $(curl -s https://www.cloudflare.com/ips-v4); do sudo ufw allow from $cidr to any port 443 proto tcp; done
-# OCI: update the VCN ingress rules to allow 443 only from Cloudflare CIDRs.
-# Reference: https://www.cloudflare.com/ips/
-:80, :443 {
-        log_name security_log
         respond "Not Found" 404
 }
