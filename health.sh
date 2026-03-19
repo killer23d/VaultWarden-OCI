@@ -1,13 +1,5 @@
 #!/usr/bin/env bash
 # health.sh - Enhanced health monitoring for VaultWarden-OCI with auto-recovery
-# FIXED: Added --auto-recover flag for self-healing capabilities
-# FIXED: Proper DOMAIN error handling in check_service_accessibility
-# ENHANCED: Standardized error handling - functions return, main() decides exit strategy
-# FIXED: Backup decrypt verification works when backups/age key are root-only (auto sudo)
-# FIXED: Added timeout to SSL certificate check to prevent hanging
-# FIXED: NEW-BUG-06 - gate send_notification_email behind SEND_EMAIL flag
-# FIXED: BUG-T - removed dead check_results array (populated but never read)
-# FIXED: BUG-U - replaced echo -e with printf in generate_text_report (backslash safety)
 # FIXED: BUG-V - sanitize user-data before embedding in JSON string fields
 # FIXED: BUG-W - read BACKUP_DIR from .env; fall back to PROJECT_ROOT/backups
 # FIXED: Auto-recovery single-container limit - per-container recovery (not first-only)
@@ -20,6 +12,8 @@
 # FIXED: AUDIT-M2 - disk space check includes absolute free-space thresholds
 # FIXED: AUDIT-M3 - check guards mark components 'skipped' on premature exit
 # FIXED: AUDIT-L1 - backup freshness uses verified-timestamp not mtime
+# FIXED: ISSUE-1  - load SMTP_PASSWORD from SOPS secrets before checks run so
+#                   --email invocations (e.g. from systemd) have the credential
 
 set -euo pipefail
 
@@ -31,6 +25,7 @@ source "lib/common.sh"
 init_common_lib "$0"
 source "lib/docker.sh"
 source "lib/crypto.sh"
+source "lib/secrets.sh"
 
 # Configuration
 COMPREHENSIVE=false
@@ -475,9 +470,6 @@ check_ssl_certificates() {
     clean_domain=$(echo "$domain" | sed 's|https\?://||; s|/.*$||')
 
     # AUDIT-H1: Pre-resolve the domain before opening a TCP connection.
-    # If DNS returns NXDOMAIN / SERVFAIL the OS TCP stack will block for up to
-    # ~120 s (kernel retransmit) before the process-level timeout fires.
-    # Resolving first with a 3-second deadline avoids that hang entirely.
     if ! _resolve_domain "$clean_domain"; then
         health_log_warn "SSL check skipped: domain '$clean_domain' does not resolve (NXDOMAIN or DNS timeout)"
         HEALTH_RESULTS["ssl_certificates"]="degraded"
@@ -486,8 +478,6 @@ check_ssl_certificates() {
     fi
 
     local cert_info expiry_date expires_in
-    # timeout 5 wraps the openssl process; DNS is already confirmed above so
-    # the 5-second budget is spent only on the TLS handshake, not DNS.
     if cert_info=$(echo | timeout 5 openssl s_client \
             -servername "$clean_domain" \
             -connect "$clean_domain:443" 2>/dev/null | \
@@ -585,10 +575,7 @@ check_database_growth() {
 # AUDIT-L1: After a successful decryption-verify pass, write a
 # .vw_backup_verified.<basename> timestamp file.  check_backup_status() uses
 # the mtime of that verified-stamp instead of the backup file's own mtime for
-# freshness comparison.  This ensures that touch / rsync --no-times /
-# cp --preserve=timestamps cannot make a stale backup appear fresh — those
-# operations cannot update the verified-stamp without running the actual age
-# decryption.
+# freshness comparison.
 # ---------------------------------------------------------------------------
 _verify_backup_decryptable() {
     local backup_file="$1"
@@ -608,14 +595,12 @@ _verify_backup_decryptable() {
         return 1
     }
 
-    # Use sudo if required (common when backups and/or age key are root-only)
     if ! _maybe_sudo age -d -i "$age_key_file" "$backup_file" > /dev/null 2>&1; then
         health_log_error "CRITICAL: Failed to decrypt latest $backup_type backup!"
         return 1
     fi
 
-    # AUDIT-L1: Write verified-timestamp so freshness check cannot be spoofed
-    # by mtime manipulation (touch / rsync --no-times / cp --preserve).
+    # AUDIT-L1: Write verified-timestamp
     local state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
     local stamp_file="${state_dir}/.vw_backup_verified.$(basename "$backup_file")"
     install -m 600 /dev/null "${stamp_file}.tmp" 2>/dev/null && \
@@ -629,8 +614,7 @@ _verify_backup_decryptable() {
 # _backup_verified_age_days FILE
 #
 # AUDIT-L1: Return (via stdout) the age in days of the verified-stamp for
-# FILE.  Falls back to the file's own mtime when no stamp exists (first run
-# before any verify pass has written one).
+# FILE.  Falls back to the file's own mtime when no stamp exists.
 # ---------------------------------------------------------------------------
 _backup_verified_age_days() {
     local backup_file="$1"
@@ -641,7 +625,6 @@ _backup_verified_age_days() {
     if [[ -f "$stamp_file" ]]; then
         ref_epoch=$(cat "$stamp_file" 2>/dev/null || echo "0")
     else
-        # Fallback: use the backup file's own mtime (pre-stamp behaviour)
         ref_epoch=$(stat -c%Y "$backup_file" 2>/dev/null || \
                     stat -f%m "$backup_file" 2>/dev/null || echo "0")
     fi
@@ -679,7 +662,6 @@ check_backup_status() {
     local backup_failed=false
 
     if [[ -n "${latest_db_backup:-}" ]]; then
-        # AUDIT-L1: Use verified-stamp age, not raw mtime
         local db_backup_age
         db_backup_age=$(_backup_verified_age_days "$latest_db_backup")
 
@@ -698,7 +680,6 @@ check_backup_status() {
     fi
 
     if [[ -n "${latest_full_backup:-}" ]]; then
-        # AUDIT-L1: Use verified-stamp age, not raw mtime
         local full_backup_age
         full_backup_age=$(_backup_verified_age_days "$latest_full_backup")
 
@@ -729,6 +710,20 @@ check_backup_status() {
     fi
 }
 
+# ---------------------------------------------------------------------------
+# test_email_notifications
+#
+# ISSUE-1 FIX: When health.sh is invoked via the systemd service with --email,
+# SMTP_PASSWORD is never in the environment because load_env_file only reads
+# .env (plain key=value) and the password lives in secrets/secrets.yaml
+# (SOPS-encrypted).  _load_smtp_secret_from_sops() in main() resolves this
+# before checks begin, so by the time we reach here SMTP_PASSWORD is set.
+#
+# This function adds an explicit pre-flight guard: if SMTP_PASSWORD is still
+# empty when --email is passed, we mark the component failed immediately with
+# a clear message rather than letting send_notification_email fail silently
+# or produce a misleading SMTP auth error in the logs.
+# ---------------------------------------------------------------------------
 test_email_notifications() {
     health_log_info "Testing email notification functionality..."
     local admin_email
@@ -747,6 +742,16 @@ test_email_notifications() {
     fi
 
     if [[ "$SEND_EMAIL" == "true" ]]; then
+        # ISSUE-1 FIX: explicit SMTP_PASSWORD pre-flight guard.
+        # _load_smtp_secret_from_sops() already ran in main(); if the variable
+        # is still empty the secret is genuinely missing or SOPS failed.
+        if [[ -z "${SMTP_PASSWORD:-}" ]]; then
+            health_log_error "SMTP_PASSWORD is not set - cannot send email (check secrets/secrets.yaml decryption)"
+            HEALTH_RESULTS["email_notifications"]="failed"
+            HEALTH_DETAILS["email_notifications"]="SMTP_PASSWORD missing; secrets not loaded"
+            return 1
+        fi
+
         if send_notification_email "Health Check Test" "Email notifications are working correctly."; then
             health_log_success "Email notifications working"
             HEALTH_RESULTS["email_notifications"]="healthy"
@@ -872,24 +877,13 @@ check_configuration() {
 
 # ---------------------------------------------------------------------------
 # AUDIT-M1: check_security_status / check_fail2ban_status
-#
-# fail2ban-client status output format changed between 0.x and 1.x:
-#   0.x header: "Status"
-#   1.x header: "Status for the jail:"
-# Grepping for a specific string is brittle.  Instead:
-#   1. Try `fail2ban-client --json status` (available since 0.10 / 1.x);
-#      parse the JSON field .status to confirm the daemon responded.
-#   2. Fall back to plain `fail2ban-client status` and check only for a
-#      non-zero exit code, which is stable across all versions.
 # ---------------------------------------------------------------------------
 _check_fail2ban_responding() {
-    # First try: JSON output (stable across 1.x versions)
     if docker exec vaultwarden_fail2ban sh -c \
             'fail2ban-client --json status 2>/dev/null' \
             | grep -q '"status"' 2>/dev/null; then
         return 0
     fi
-    # Fallback: plain status — trust exit code only, not text parsing
     docker exec vaultwarden_fail2ban sh -c \
         'fail2ban-client status >/dev/null 2>&1'
 }
@@ -900,7 +894,6 @@ check_security_status() {
 
     local security_issues=()
 
-    # AUDIT-M1: version-stable fail2ban check
     _check_fail2ban_responding 2>/dev/null || \
         security_issues+=("fail2ban not responding")
 
@@ -1007,10 +1000,66 @@ generate_json_report() {
     fi
 }
 
+# ---------------------------------------------------------------------------
+# _load_smtp_secret_from_sops
+#
+# ISSUE-1 FIX: load_env_file reads only .env (plain key=value pairs).
+# SMTP_PASSWORD lives in secrets/secrets.yaml (SOPS-encrypted) and is never
+# exported into the process environment, so any --email invocation from
+# systemd (or cron) runs without the credential and silently fails.
+#
+# This function uses decrypt_secret() from lib/secrets.sh (already sourced
+# above) to extract smtp_password individually — no full plaintext JSON is
+# ever materialised — and exports SMTP_PASSWORD so send_notification_email
+# and the pre-flight guard in test_email_notifications() see it.
+#
+# Behaviour:
+#   - Skipped entirely when SEND_EMAIL=false (no SOPS call, no side-effects).
+#   - Skipped when SMTP_PASSWORD is already set (e.g. test overrides).
+#   - On SOPS failure: logs a warning and continues; the pre-flight guard in
+#     test_email_notifications() will then emit the actionable error.
+#   - Calls cleanup_secrets_environment() immediately after extraction so
+#     SOPS_AGE_KEY_FILE is not inherited by child processes (docker, curl…).
+# ---------------------------------------------------------------------------
+_load_smtp_secret_from_sops() {
+    # Nothing to do when email sending is disabled
+    [[ "$SEND_EMAIL" != "true" ]] && return 0
+
+    # Honour an already-set variable (useful for testing / manual overrides)
+    [[ -n "${SMTP_PASSWORD:-}" ]] && return 0
+
+    local secrets_file="${SECRETS_FILE:-secrets/secrets.yaml}"
+    if [[ ! -f "$secrets_file" ]]; then
+        log_warn "_load_smtp_secret_from_sops: secrets file not found: $secrets_file"
+        return 0
+    fi
+
+    local smtp_pw
+    if smtp_pw=$(decrypt_secret "smtp_password" "$secrets_file" 2>/dev/null) \
+       && [[ -n "$smtp_pw" ]] \
+       && [[ "$smtp_pw" != CHANGE_ME* ]]; then
+        export SMTP_PASSWORD="$smtp_pw"
+        log_debug "_load_smtp_secret_from_sops: SMTP_PASSWORD loaded from SOPS"
+    else
+        log_warn "_load_smtp_secret_from_sops: smtp_password not found or is a placeholder in secrets.yaml"
+    fi
+
+    # Immediately clean up SOPS env vars so child processes don't inherit the
+    # Age key file path (mirrors the BUG-S10 / LS-2 fixes in lib/secrets.sh).
+    cleanup_secrets_environment 2>/dev/null || true
+}
+
 main() {
     require_root "$@"
 
+    # Load .env first (plain variables: DOMAIN, ADMIN_EMAIL, SMTP_HOST, etc.)
     load_env_file 2>/dev/null || true
+
+    # ISSUE-1 FIX: Load SMTP_PASSWORD from SOPS *after* .env so the credential
+    # is present before check_container_status -> attempt_container_recovery
+    # (which may call send_notification_email) and before
+    # test_email_notifications() runs its pre-flight guard.
+    _load_smtp_secret_from_sops
 
     health_log_info "VaultWarden-OCI Health Monitor - Set-and-Forget Edition"
     [[ "$AUTO_RECOVER" == "true" ]] && health_log_info "🔧 Auto-recovery enabled"
@@ -1022,12 +1071,12 @@ main() {
     # (AUDIT-M3), ensuring the full report is always assembled and sent.
     set +e
 
-    run_check "containers"         check_container_status
-    run_check "accessibility"      check_service_accessibility
-    run_check "disk_space"         check_disk_space
-    run_check "ssl_certificates"   check_ssl_certificates
-    run_check "database_growth"    check_database_growth
-    run_check "backup_status"      check_backup_status
+    run_check "containers"          check_container_status
+    run_check "accessibility"       check_service_accessibility
+    run_check "disk_space"          check_disk_space
+    run_check "ssl_certificates"    check_ssl_certificates
+    run_check "database_growth"     check_database_growth
+    run_check "backup_status"       check_backup_status
     run_check "email_notifications" test_email_notifications
 
     if [[ "$COMPREHENSIVE" == "true" ]]; then
