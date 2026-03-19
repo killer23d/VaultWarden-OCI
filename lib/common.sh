@@ -763,56 +763,31 @@ _rate_limit_check() {
     return 0
 }
 
-# _smtp_send SUBJECT BODY
-#
+# ─────────────────────────────────────────────────────────────────────────────
+# _smtp_send <to> <subject> <body>
 # Provider-agnostic SMTP relay delivery via curl.
-# Builds a proper RFC 5322 message — required by all standards-compliant MTAs.
-# Missing headers cause rejection or body-as-headers corruption.
-#
-# Change SMTP_HOST/PORT/USERNAME/PASSWORD/SECURITY in .env to switch providers;
-# this function never needs to change.
-#
-# FIX-M01: uses _smtp_from_addr=${SMTP_FROM_EMAIL:-${SMTP_FROM:-}} so .env files
-# with the legacy SMTP_FROM= variable keep working without any changes.
-# FIX-M05: SMTP_FROM_NAME is RFC 5322 quoted-string escaped before embedding
-# in the From: header. Rule: \ -> \\ and " -> \" (RFC 5322 §3.2.4).
-# FIX-M07: SMTP_SECURITY (tls|starttls|none) is honoured when set explicitly.
-# When unset, port-based heuristic applies: 465 → tls, anything else → starttls.
-# FIX-M08: ${SMTP_FROM:-} uses empty default; see header for rationale.
+# Reads: SMTP_HOST SMTP_PORT SMTP_USERNAME SMTP_PASSWORD SMTP_FROM
+#        SMTP_FROM_NAME SMTP_SECURITY
+# Returns: 0 on success, non-zero on failure.
+# ─────────────────────────────────────────────────────────────────────────────
 _smtp_send() {
-    local subject="$1" body="$2"
+    local to="$1"
+    local subject="$2"
+    local body="$3"
 
-    if [[ -z "${SMTP_HOST:-}" || -z "${SMTP_USERNAME:-}" || -z "${SMTP_PASSWORD:-}" ]]; then
-        log_debug "SMTP relay not configured (SMTP_HOST/USERNAME/PASSWORD missing) — skipping"
-        return 1
-    fi
+    [[ -z "$SMTP_HOST"     ]] && { log_error "_smtp_send: SMTP_HOST is not set";     return 1; }
+    [[ -z "$SMTP_USERNAME" ]] && { log_error "_smtp_send: SMTP_USERNAME is not set"; return 1; }
+    [[ -z "$SMTP_PASSWORD" ]] && { log_error "_smtp_send: SMTP_PASSWORD is not set"; return 1; }
+    [[ -z "$to"            ]] && { log_error "_smtp_send: recipient (to) is empty";  return 1; }
 
-    # FIX-M01 + FIX-M08: canonical name is SMTP_FROM_EMAIL; fall back to
-    # legacy SMTP_FROM with an explicit empty default (:-) to prevent an
-    # "unbound variable" abort under set -u when both variables are absent.
-    local _smtp_from_addr="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
-
-    # FIX-M05: RFC 5322 quoted-string escaping for the display name.
-    # RFC 5322 §3.2.4: inside a quoted-string only \ and " are special and
-    # must be preceded by a backslash. Unescaped quotes break header parsing
-    # and cause 5xx rejections on most MTAs.
+    local _smtp_from_addr="${SMTP_FROM:-$SMTP_USERNAME}"
     local _smtp_from_name="${SMTP_FROM_NAME:-VaultWarden}"
-    _smtp_from_name="${_smtp_from_name//\\/\\\\}"   # \  ->  \\
-    _smtp_from_name="${_smtp_from_name//\"/\\\"}"   # "  ->  \"
-
-    # FIX-M07: Honour SMTP_SECURITY (tls|starttls|none) when set explicitly.
-    # Priority: explicit SMTP_SECURITY > port-based heuristic.
-    # The heuristic is retained as fallback so existing .env files that omit
-    # SMTP_SECURITY continue to work identically to before this fix.
-    #
-    # TLS flags are collected in an array; ${array[@]+\"${array[@]}\"} expands
-    # safely to nothing when the array is empty (set -u compatible).
-    local smtp_port="${SMTP_PORT:-465}"
+    local smtp_port="${SMTP_PORT:-587}"
     local smtp_security="${SMTP_SECURITY:-}"
     local smtp_url
     local smtp_tls_flags=()
 
-    # Apply port heuristic only when SMTP_SECURITY is unset
+    # Honour SMTP_SECURITY when set; otherwise use port-based heuristic.
     if [[ -z "$smtp_security" ]]; then
         [[ "$smtp_port" == "465" ]] && smtp_security="tls" || smtp_security="starttls"
     fi
@@ -827,42 +802,40 @@ _smtp_send() {
             ;;
         none|plain)
             smtp_url="smtp://${SMTP_HOST}:${smtp_port}"
-            log_warn "_smtp_send: SMTP_SECURITY=none — message will be sent in plaintext"
             ;;
         *)
-            log_error "_smtp_send: Unknown SMTP_SECURITY='${smtp_security}'. Valid values: tls starttls none"
+            log_error "_smtp_send: Unknown SMTP_SECURITY='${smtp_security}'. Valid: tls starttls none"
             return 1
             ;;
     esac
 
     local date_str
-    date_str=$(date -u "+%a, %d %b %Y %H:%M:%S +0000")
+    date_str=$(date -u '+%a, %d %b %Y %H:%M:%S +0000')
 
-    # RFC 5322 message: headers, blank line, body
-    # CRLF line endings required by SMTP spec (RFC 2822 §2.2)
+    # FIX: smtp_tls_flags expanded without extra quoting — previous
+    # '"${smtp_tls_flags[@]}"' expansion produced literal '"--ssl-reqd"'
+    # (with embedded quotes) which curl rejected as an unknown option.
     {
-        printf "From: \"%s\" <%s>\r\n" "${_smtp_from_name}" "${_smtp_from_addr}"
-        printf "To: %s\r\n"            "${ADMIN_EMAIL}"
-        printf "Subject: %s\r\n"       "${subject}"
-        printf "Date: %s\r\n"          "${date_str}"
-        printf "MIME-Version: 1.0\r\n"
-        printf "Content-Type: text/plain; charset=UTF-8\r\n"
-        printf "Content-Transfer-Encoding: 7bit\r\n"
-        printf "\r\n"
-        printf "%s\r\n"                "${body}"
+        printf 'From: "%s" <%s>\r\n' "$_smtp_from_name" "$_smtp_from_addr"
+        printf 'To: %s\r\n'          "$to"
+        printf 'Subject: %s\r\n'     "$subject"
+        printf 'Date: %s\r\n'        "$date_str"
+        printf 'MIME-Version: 1.0\r\n'
+        printf 'Content-Type: text/plain; charset=UTF-8\r\n'
+        printf 'Content-Transfer-Encoding: 7bit\r\n'
+        printf '\r\n'
+        printf '%s\r\n' "$body"
     } | curl -s \
         --connect-timeout 15 \
         --max-time 30 \
         --retry 2 \
         --retry-delay 5 \
-        "${smtp_tls_flags[@]+\"${smtp_tls_flags[@]}\"}" \
+        "${smtp_tls_flags[@]}" \
         --url "$smtp_url" \
-        --mail-from "${_smtp_from_addr}" \
-        --mail-rcpt "${ADMIN_EMAIL}" \
+        --mail-from "$_smtp_from_addr" \
+        --mail-rcpt "$to" \
         --user "${SMTP_USERNAME}:${SMTP_PASSWORD}" \
-        --upload-file - 2>/dev/null
-
-    return $?
+        --upload-file -
 }
 
 # send_email SUBJECT BODY
