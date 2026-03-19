@@ -290,15 +290,50 @@ create_backup() {
 
 # ---------------------------------------------------------------------------
 # --list mode: show key names only, no values
+#
+# FIX [email_api_token-list]: After setup.sh but before setup-secrets.sh,
+# secrets.yaml holds the generic key name "email_api_token". The operator
+# needs to know what the *resolved* key name will be (e.g. MAILERSEND_API_TOKEN)
+# so they can confirm what --rotate email_api_token will write.
+# Resolve EMAIL_PROVIDER from .env and annotate the email_api_token line
+# with its runtime key name, without exposing any values.
 # ---------------------------------------------------------------------------
 do_list_keys() {
     log_info "Secret key names in: $SECRETS_FILE"
     echo ""
-    if ! list_secret_keys "$SECRETS_FILE"; then
+
+    # Resolve the active provider token key name for annotation
+    local _email_provider _api_key_name
+    _email_provider=$(_read_dotenv_value "EMAIL_PROVIDER" .env)
+    _email_provider="${_email_provider:-mailersend}"
+    _api_key_name=$(_email_api_token_key "$_email_provider")
+
+    # list_secret_keys() prints one key per line; post-process to annotate
+    # the email_api_token entry and any already-promoted provider key.
+    local raw_keys
+    if ! raw_keys=$(list_secret_keys "$SECRETS_FILE" 2>&1); then
+        log_error "Failed to list secret keys"
         return 1
     fi
+
+    while IFS= read -r key; do
+        if [[ "$key" == "email_api_token" ]]; then
+            # Generic placeholder key — show what --rotate will resolve it to
+            printf '  %s  (→ will be stored as: %s when rotated via --rotate email_api_token)\n' \
+                "$key" "$_api_key_name"
+        elif [[ "$key" == "$_api_key_name" ]]; then
+            # Key has already been promoted by setup-secrets.sh
+            printf '  %s  (active provider token for EMAIL_PROVIDER=%s)\n' \
+                "$key" "$_email_provider"
+        else
+            printf '  %s\n' "$key"
+        fi
+    done <<< "$raw_keys"
+
     echo ""
-    log_info "Run './edit-secrets.sh --rotate <field>' to update a specific key."
+    log_info "Active EMAIL_PROVIDER: ${_email_provider}  →  token key: ${_api_key_name}"
+    log_info "Run './edit-secrets.sh --rotate email_api_token' to set or rotate the provider API key."
+    log_info "Run './edit-secrets.sh --rotate <field>' to update any other specific key."
     return 0
 }
 
