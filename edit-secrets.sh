@@ -7,6 +7,16 @@
 #   ./edit-secrets.sh --export-recovery-kit
 #
 # See also: ./setup-secrets.sh  (first-time creation and full reconfiguration)
+#
+# BUG FIX (2026-03-19):
+#   FIX-ES1 [HIGH] do_edit(), do_view(), do_rotate(), and _deploy_docker_secrets()
+#   called sops directly without first calling ensure_sops_env(). The
+#   validate_secrets() call in main() sets SOPS_AGE_KEY_FILE via ensure_sops_env(),
+#   but lib/secrets.sh cleanup_secrets_environment() (LS-2/LS-8 fixes) correctly
+#   unsets it after validation completes — before any of the action functions run.
+#   Fix: call ensure_sops_env() at the start of each function that invokes sops
+#   directly, and call cleanup_secrets_environment() when done, mirroring the
+#   pattern used throughout lib/secrets.sh.
 
 set -euo pipefail
 
@@ -247,6 +257,12 @@ check_prerequisites() {
 validate_secrets() {
     log_info "Validating secrets file..."
 
+    # FIX-ES1: ensure_sops_env is called here only for validation. The
+    # cleanup_secrets_environment() calls inside validate_secrets_decryption()
+    # and validate_secrets_yaml() (lib/secrets.sh LS-8/LS-9 fixes) will unset
+    # SOPS_AGE_KEY_FILE when they return. Each action function (do_edit,
+    # do_view, do_rotate, etc.) must call ensure_sops_env() independently
+    # before invoking sops.
     if ! ensure_sops_env; then return 1; fi
 
     if ! validate_secrets_decryption; then
@@ -343,13 +359,23 @@ do_list_keys() {
 do_view() {
     log_info "Opening secrets in view-only mode..."
 
+    # FIX-ES1: Re-establish SOPS env — cleanup_secrets_environment() called
+    # inside validate_secrets_decryption/yaml has already unset SOPS_AGE_KEY_FILE.
+    if ! ensure_sops_env; then
+        log_error "Failed to setup SOPS environment"
+        return 1
+    fi
+
     local temp_file
     temp_file=$(mktemp)
     chmod 600 "$temp_file"
     # FIX [P3-H3]: use _secure_shred() instead of rm -f for plaintext temp file
     register_cleanup "_secure_shred '$temp_file'"
 
-    if ! sops -d "$SECRETS_FILE" > "$temp_file"; then
+    local sops_rc=0
+    sops -d "$SECRETS_FILE" > "$temp_file" 2>&1 || sops_rc=$?
+    cleanup_secrets_environment
+    if [[ $sops_rc -ne 0 ]]; then
         log_error "Failed to decrypt secrets"
         return 1
     fi
@@ -520,7 +546,16 @@ _deploy_docker_secrets() {
     # FIX [P3-H3]: use _secure_shred() for this plaintext temp file
     register_cleanup "_secure_shred '$temp_plain'"
 
-    if ! sops -d "$SECRETS_FILE" > "$temp_plain" 2>/dev/null; then
+    # FIX-ES1: Re-establish SOPS env before calling sops directly.
+    if ! ensure_sops_env; then
+        log_error "Failed to setup SOPS environment for Docker secret deployment"
+        return 1
+    fi
+
+    local sops_rc=0
+    sops -d "$SECRETS_FILE" > "$temp_plain" 2>/dev/null || sops_rc=$?
+    cleanup_secrets_environment
+    if [[ $sops_rc -ne 0 ]]; then
         log_error "Cannot decrypt secrets for Docker secret deployment"
         return 1
     fi
@@ -529,7 +564,7 @@ _deploy_docker_secrets() {
     chmod 700 "$docker_dir"
 
     local old_umask; old_umask=$(umask); umask 077
-    local deployed=0 failed=0
+    local deployed=0
 
     # Determine the dynamic email API token key from .env
     local _email_provider _api_key_name
@@ -603,7 +638,15 @@ do_rotate() {
     # FIX [P3-H3]: use _secure_shred() for this plaintext temp file
     register_cleanup "_secure_shred '$temp_plain'"
 
-    if ! sops -d "$SECRETS_FILE" > "$temp_plain"; then
+    # FIX-ES1: Re-establish SOPS env before calling sops directly.
+    if ! ensure_sops_env; then
+        log_error "Failed to setup SOPS environment"
+        return 1
+    fi
+    local sops_rc=0
+    sops -d "$SECRETS_FILE" > "$temp_plain" 2>&1 || sops_rc=$?
+    cleanup_secrets_environment
+    if [[ $sops_rc -ne 0 ]]; then
         log_error "Failed to decrypt secrets for rotation"
         return 1
     fi
@@ -668,10 +711,17 @@ PYEOF
     local temp_enc
     temp_enc=$(mktemp --suffix=.yaml.enc --tmpdir="$(dirname "$SECRETS_FILE")")
     chmod 600 "$temp_enc"
-    # Remove temp_enc on any failure path (not via register_cleanup — we mv it on success).
-    local _enc_cleanup=true
 
-    if ! sops --encrypt "$temp_patched" > "$temp_enc"; then
+    # FIX-ES1: Re-establish SOPS env for the encrypt step.
+    if ! ensure_sops_env; then
+        log_error "Failed to setup SOPS environment for re-encryption"
+        rm -f "$temp_enc"
+        return 1
+    fi
+    local enc_rc=0
+    sops --encrypt "$temp_patched" > "$temp_enc" 2>&1 || enc_rc=$?
+    cleanup_secrets_environment
+    if [[ $enc_rc -ne 0 ]]; then
         log_error "Failed to re-encrypt secrets"
         rm -f "$temp_enc"
         return 1
@@ -682,7 +732,6 @@ PYEOF
         log_error "Atomic mv failed — encrypted output in: $temp_enc"
         return 1
     fi
-    _enc_cleanup=false
 
     secure_secrets_file
 
@@ -736,7 +785,17 @@ do_edit() {
     # FIX [P3-H3]: use _secure_shred() for this plaintext temp file
     register_cleanup "_secure_shred '$temp_file'"
 
-    if ! sops -d "$SECRETS_FILE" > "$temp_file"; then
+    # FIX-ES1: Re-establish SOPS env — validate_secrets() called ensure_sops_env()
+    # but cleanup_secrets_environment() inside validate_secrets_decryption/yaml
+    # has already unset SOPS_AGE_KEY_FILE by the time do_edit() runs.
+    if ! ensure_sops_env; then
+        log_error "Failed to setup SOPS environment"
+        return 1
+    fi
+    local sops_rc=0
+    sops -d "$SECRETS_FILE" > "$temp_file" 2>&1 || sops_rc=$?
+    cleanup_secrets_environment
+    if [[ $sops_rc -ne 0 ]]; then
         log_error "Failed to decrypt secrets"
         return 1
     fi
@@ -792,7 +851,16 @@ PYEOF
     encrypted_temp=$(mktemp --suffix=.yaml.enc --tmpdir="$(dirname "$SECRETS_FILE")")
     chmod 600 "$encrypted_temp"
 
-    if ! sops --encrypt "$temp_file" > "$encrypted_temp"; then
+    # FIX-ES1: Re-establish SOPS env for the encrypt step.
+    if ! ensure_sops_env; then
+        log_error "Failed to setup SOPS environment for encryption"
+        rm -f "$encrypted_temp"
+        return 1
+    fi
+    local enc_rc=0
+    sops --encrypt "$temp_file" > "$encrypted_temp" 2>&1 || enc_rc=$?
+    cleanup_secrets_environment
+    if [[ $enc_rc -ne 0 ]]; then
         log_error "Failed to encrypt secrets"
         rm -f "$encrypted_temp"
         return 1
@@ -829,7 +897,15 @@ _export_recovery_kit_safe() {
     chmod 600 "$temp_plain"
     register_cleanup "_secure_shred '$temp_plain'"
 
-    if ! sops -d "$SECRETS_FILE" > "$temp_plain"; then
+    # FIX-ES1: Re-establish SOPS env before calling sops directly.
+    if ! ensure_sops_env; then
+        log_error "Failed to setup SOPS environment"
+        return 1
+    fi
+    local sops_rc=0
+    sops -d "$SECRETS_FILE" > "$temp_plain" 2>&1 || sops_rc=$?
+    cleanup_secrets_environment
+    if [[ $sops_rc -ne 0 ]]; then
         log_error "Cannot decrypt secrets — aborting recovery kit export"
         return 1
     fi
@@ -872,7 +948,8 @@ main() {
     # This is the canonical single entry point for recovery kit export (Fix #1).
     if [[ "$EXPORT_RECOVERY_KIT" == "true" && "$_mode_count" -eq 0 ]]; then
         log_info "Running standalone recovery kit export..."
-        if ! ensure_sops_env; then exit 1; fi
+        # FIX-ES1: ensure_sops_env is called inside _export_recovery_kit_safe()
+        # directly before the sops call, so no need to set it here.
         _export_recovery_kit_safe
         exit $?
     fi
