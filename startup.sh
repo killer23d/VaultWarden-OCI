@@ -1,12 +1,31 @@
 #!/usr/bin/env bash
 # startup.sh - VaultWarden startup script with secure secrets handling
-# FIXED: STARTUP-1  - sleep "$RECOVERY_WAIT_TIME"... literal ellipsis removed
-# FIXED: STARTUP-2  - prepare_docker_secrets if-condition used \\ (double-backslash)
-#                     paste artifact; corrected to single \ line continuation
-# FIXED: STARTUP-3  - _stat_octal_perms_local undefined; added local shim
-# FIXED: STARTUP-4  - SOPS_AGE_KEY_FILE exported in prepare_docker_secrets and
-#                     never unset; cleanup_secrets_environment() called after decrypt
-# FIXED: STARTUP-5  - source "lib/secrets.sh" was missing
+#
+# PATCHED BUGS (2026-03-06 through 2026-03-11): see lib/secrets.sh header
+#
+# PATCHED BUGS (2026-03-19):
+#   STARTUP-1 [LOW]    show_help(): cosmetic, no functional change.
+#   STARTUP-2 [HIGH]   prepare_docker_secrets(): '\\' (double-backslash) used
+#                      as line continuation in compound condition — bash treats
+#                      the second backslash as a literal, breaking the test.
+#                      Replaced with a single '\' continuation.
+#   STARTUP-3 [MEDIUM] prepare_docker_secrets(): _stat_octal_perms_local()
+#                      called but not defined in this file. Added file-local
+#                      shim using portable GNU||BSD stat.
+#   STARTUP-4 [MEDIUM] prepare_docker_secrets(): SOPS_AGE_KEY_FILE exported
+#                      and never unset; all child processes inherited the Age
+#                      key path. Fixed via cleanup_secrets_environment() after
+#                      sops call.
+#   STARTUP-5 [MEDIUM] source "lib/secrets.sh" was missing; added so
+#                      cleanup_secrets_environment() is available.
+#   STARTUP-6 [HIGH]   prepare_docker_secrets(): secret files created at 444
+#                      (world-readable). maintenance.sh correctly rejects files
+#                      with permissions other than 600 when reading Cloudflare
+#                      tokens. Secret files must be 600 (owner-read only).
+#                      Root cause: umask 133 (-> 444) was intentional but
+#                      wrong — Docker bind-mounted secret files should be
+#                      readable only by the owning process (root), not by all
+#                      users. Fix: use umask 077 (-> 600) and chmod 600.
 
 set -euo pipefail
 
@@ -122,10 +141,10 @@ _startup_secure_wipe() {
 # _stat_octal_perms_local FILE
 #
 # STARTUP-3 FIX: prepare_docker_secrets() calls _stat_octal_perms_local to
-# verify chmod 444 succeeded, but the function was never defined in this file
+# verify chmod succeeded, but the function was never defined in this file
 # (it lives in lib/common.sh under a different name on some versions).
 # Define it here as a file-local shim so startup.sh is self-contained.
-# Returns the 3-digit octal permission string (e.g. "444", "600") on stdout.
+# Returns the 3-digit octal permission string (e.g. "600", "444") on stdout.
 # ---------------------------------------------------------------------------
 _stat_octal_perms_local() {
   local target="$1"
@@ -208,7 +227,23 @@ prepare_log_directories() {
   return 0
 }
 
-# ENHANCED: Secure secret file preparation with YAML extraction fix
+# ---------------------------------------------------------------------------
+# prepare_docker_secrets
+#
+# STARTUP-6 FIX: Secret files were created at mode 444 (world-readable) via
+# umask 133. This caused maintenance.sh's permission guard to reject them
+# when reading Cloudflare tokens (it correctly requires 600). Additionally,
+# world-readable secret files allow any local user to read token values,
+# which is unnecessary since only root (which runs this script) needs access.
+#
+# Fix: use umask 077 so new files default to 600 (owner read/write only).
+# chmod 600 is applied explicitly after each write as belt-and-suspenders,
+# and _stat_octal_perms_local() verifies the final permission is exactly 600.
+#
+# The secrets directory itself remains 700 (rwx------) providing an
+# additional layer: even if a file permission were somehow wrong, unprivileged
+# users cannot traverse into the directory to reach the files.
+# ---------------------------------------------------------------------------
 prepare_docker_secrets() {
   log_info "Preparing Docker secrets with enhanced security..."
 
@@ -232,12 +267,11 @@ prepare_docker_secrets() {
     return 1
   fi
 
-  # SECURITY: Save and set umask 133 so new files default to 444.
-  # NOTE: umask alone is not fully reliable across all Ubuntu/sudo/PAM
-  # configurations — the explicit chmod 444 below is the authoritative
-  # permission-setting step. The umask remains as defence-in-depth.
+  # STARTUP-6 FIX: use umask 077 so files are born at 600, not 444.
+  # 444 caused maintenance.sh's permission guard to reject Cloudflare token
+  # files, and also allowed any local user to read secret values.
   _prepare_secrets_cleanup_umask=$(umask)
-  umask 133  # 666 XOR 133 = 444 (r--r--r--)
+  umask 077  # 666 XOR 077 = 600 (rw-------)
 
   # FIX MEDIUM: use file-scoped _prepare_secrets_cleanup() instead of the
   # formerly nested cleanup_local() to prevent global namespace leakage.
@@ -308,34 +342,46 @@ print(v, end="")
 PY
 )
 
-    # STARTUP-2 FIX: corrected \\ (double-backslash paste artifact) to \
-    # (single backslash line continuation) in the compound condition.
-    if [[ -n "$secret_value" ]] && [[ "$secret_value" != "CHANGE_ME"* ]] && \
-       [[ "$secret_value" != "null" ]] && [[ "$secret_value" != "PLACEHOLDER"* ]]; then
-      if printf '%s' "$secret_value" > "$secret_file"; then
-        # FIX: explicitly enforce 444 permissions after write.
-        # Shell I/O redirection (>) inherits the process umask, but PAM,
-        # sudo, and certain Ubuntu profile configurations can silently reset
-        # umask to 022 mid-execution, yielding 644 instead of 444.
-        # chmod 444 here is the authoritative, unconditional permission step
-        # and is not subject to umask inheritance.
-        if chmod 444 "$secret_file"; then
+    # STARTUP-2 FIX: was '\\' (double-backslash, paste artifact); corrected
+    # to '\' (single backslash line continuation).
+    if [[ -n "$secret_value" ]] && [[ "$secret_value" != "CHANGE_ME"* ]] \
+       && [[ "$secret_value" != "null" ]] && [[ "$secret_value" != "PLACEHOLDER"* ]]; then
+
+      # STARTUP-6 FIX: write to a 600 temp file first, then mv atomically into
+      # the destination. This prevents the destination file from ever existing
+      # at a world-readable permission — shell '>' redirection creates a new
+      # inode using the process umask, but mktemp + chmod 600 + mv ensures the
+      # data is written into a pre-secured inode before it appears at its final
+      # path inside the secrets directory.
+      local secret_tmp
+      secret_tmp=$(mktemp "${secrets_dir}/.secret_tmp_XXXXXXXXXX")
+      chmod 600 "$secret_tmp"
+
+      if printf '%s' "$secret_value" > "$secret_tmp"; then
+        # mv is atomic on the same filesystem — the destination appears at
+        # mode 600 the instant it becomes visible at $secret_file.
+        if mv -f "$secret_tmp" "$secret_file"; then
+          # Belt-and-suspenders: enforce 600 on the destination after mv.
+          chmod 600 "$secret_file"
+
           local file_perms
-          # STARTUP-3 FIX: _stat_octal_perms_local is defined above as a shim
+          # STARTUP-3 FIX: _stat_octal_perms_local defined above as a shim.
           file_perms=$(_stat_octal_perms_local "$secret_file" 2>/dev/null || echo "unknown")
-          if [[ "$file_perms" == "444" ]]; then
+          if [[ "$file_perms" == "600" ]]; then
             log_debug "Secret created securely: $secret_name (permissions: $file_perms)"
             secrets_created=$(( secrets_created + 1 ))
           else
-            log_error "Secret file has unexpected permissions after chmod: $secret_name ($file_perms, expected 444)"
+            log_error "Secret file has unexpected permissions after chmod: $secret_name ($file_perms, expected 600)"
             secrets_failed=$(( secrets_failed + 1 ))
           fi
         else
-          log_error "Failed to set permissions on secret file: $secret_name"
+          log_error "Failed to move secret file into place: $secret_name"
+          rm -f "$secret_tmp" 2>/dev/null || true
           secrets_failed=$(( secrets_failed + 1 ))
         fi
       else
-        log_error "Failed to create secret file: $secret_name"
+        log_error "Failed to write secret to temp file: $secret_name"
+        rm -f "$secret_tmp" 2>/dev/null || true
         secrets_failed=$(( secrets_failed + 1 ))
       fi
     else
@@ -584,8 +630,8 @@ update_cloudflare_ip_ranges() {
   # shellcheck disable=SC2064
   trap "rm -f '$cf_ipv4_file' '$cf_ipv6_file'" RETURN
 
-  if ! curl -sf --max-time 15 "https://www.cloudflare.com/ips-v4" -o "$cf_ipv4_file" || \
-     ! curl -sf --max-time 15 "https://www.cloudflare.com/ips-v6" -o "$cf_ipv6_file"; then
+  if ! curl -sf --max-time 15 "https://www.cloudflare.com/ips-v4" -o "$cf_ipv4_file" \
+     || ! curl -sf --max-time 15 "https://www.cloudflare.com/ips-v6" -o "$cf_ipv6_file"; then
     log_error "Failed to fetch Cloudflare IP ranges — aborting firewall update"
     return 1
   fi
@@ -638,11 +684,9 @@ update_cloudflare_ip_ranges() {
 #   completes and Docker has read them into the container namespace.
 #
 #   Do NOT add rm/shred calls here for the secrets directory. The files are
-#   intentionally left on disk; they are mode 444 (r--r--r--) inside a
+#   intentionally left on disk; they are mode 600 (rw-------) inside a
 #   mode-700 directory (rwx------) owned by root. Unprivileged OS users
-#   cannot traverse into the directory, so world-read on the files is
-#   unreachable without root or a bind-mount. This is equivalent to the
-#   security posture of Docker Swarm native secrets.
+#   cannot traverse into the directory to reach the files.
 # ---------------------------------------------------------------------------
 cleanup_on_exit() {
   return 0
