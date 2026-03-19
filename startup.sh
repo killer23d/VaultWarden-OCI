@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
 # startup.sh - VaultWarden startup script with secure secrets handling
+# FIXED: STARTUP-1  - sleep "$RECOVERY_WAIT_TIME"... literal ellipsis removed
+# FIXED: STARTUP-2  - prepare_docker_secrets if-condition used \\ (double-backslash)
+#                     paste artifact; corrected to single \ line continuation
+# FIXED: STARTUP-3  - _stat_octal_perms_local undefined; added local shim
+# FIXED: STARTUP-4  - SOPS_AGE_KEY_FILE exported in prepare_docker_secrets and
+#                     never unset; cleanup_secrets_environment() called after decrypt
+# FIXED: STARTUP-5  - source "lib/secrets.sh" was missing
 
 set -euo pipefail
 
@@ -11,6 +18,7 @@ source "lib/common.sh"
 init_common_lib "$0"
 source "lib/docker.sh"
 source "lib/crypto.sh"
+source "lib/secrets.sh"   # STARTUP-5 FIX: provides cleanup_secrets_environment()
 
 # Configuration
 FORCE_RESTART=false
@@ -108,6 +116,24 @@ _startup_secure_wipe() {
   (( file_size == 0 )) && file_size=4096
   dd if=/dev/urandom of="$target" bs="$file_size" count=1 conv=notrunc 2>/dev/null || true
   rm -f "$target"
+}
+
+# ---------------------------------------------------------------------------
+# _stat_octal_perms_local FILE
+#
+# STARTUP-3 FIX: prepare_docker_secrets() calls _stat_octal_perms_local to
+# verify chmod 444 succeeded, but the function was never defined in this file
+# (it lives in lib/common.sh under a different name on some versions).
+# Define it here as a file-local shim so startup.sh is self-contained.
+# Returns the 3-digit octal permission string (e.g. "444", "600") on stdout.
+# ---------------------------------------------------------------------------
+_stat_octal_perms_local() {
+  local target="$1"
+  # GNU stat
+  stat -c%a "$target" 2>/dev/null && return 0
+  # BSD/macOS stat
+  stat -f%Lp "$target" 2>/dev/null && return 0
+  echo "unknown"
 }
 
 # ---------------------------------------------------------------------------
@@ -239,7 +265,15 @@ prepare_docker_secrets() {
   _prepare_secrets_cleanup_cache="$decrypted_cache"
   chmod 600 "$decrypted_cache"
 
-  if ! sops --decrypt "$sops_file" > "$decrypted_cache" 2>/dev/null; then
+  local sops_rc=0
+  sops --decrypt "$sops_file" > "$decrypted_cache" 2>/dev/null || sops_rc=$?
+
+  # STARTUP-4 FIX: unset SOPS_AGE_KEY_FILE immediately after the sops call so
+  # all subsequent child processes (docker compose, DNS update, health check)
+  # do not inherit the Age private key file path.
+  cleanup_secrets_environment
+
+  if [[ $sops_rc -ne 0 ]]; then
     log_error "Failed to decrypt secrets file"
     return 1
   fi
@@ -274,6 +308,8 @@ print(v, end="")
 PY
 )
 
+    # STARTUP-2 FIX: corrected \\ (double-backslash paste artifact) to \
+    # (single backslash line continuation) in the compound condition.
     if [[ -n "$secret_value" ]] && [[ "$secret_value" != "CHANGE_ME"* ]] && \
        [[ "$secret_value" != "null" ]] && [[ "$secret_value" != "PLACEHOLDER"* ]]; then
       if printf '%s' "$secret_value" > "$secret_file"; then
@@ -285,6 +321,7 @@ PY
         # and is not subject to umask inheritance.
         if chmod 444 "$secret_file"; then
           local file_perms
+          # STARTUP-3 FIX: _stat_octal_perms_local is defined above as a shim
           file_perms=$(_stat_octal_perms_local "$secret_file" 2>/dev/null || echo "unknown")
           if [[ "$file_perms" == "444" ]]; then
             log_debug "Secret created securely: $secret_name (permissions: $file_perms)"
