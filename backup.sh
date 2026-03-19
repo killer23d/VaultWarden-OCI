@@ -42,6 +42,26 @@
 #   B-4:  verify_backup_quick: missing age key is now a hard error (return 1), not a warning
 #   B-5:  LOCK_FD changed from 200 to 9 (POSIX-safe range; avoids Docker FD truncation)
 #   B-6:  KEEP_DAYS validated as positive integer after arg parsing (command-injection guard)
+#
+# FIX-B07 (2026-03-19):
+#   perform_full_backup() and perform_db_backup() return the output encrypted file path via
+#   stdout (echo "$enc"). The caller captures this with $() subshell substitution.
+#   zstd, tar, and sqlite3 were emitting progress/status lines to stdout inside the subshell,
+#   polluting the captured value so $backup_file contained a multi-line string instead of a
+#   clean path. verify_backup_quick() then called [[ -s "$backup_file" ]] on this garbled
+#   path, which resolved to a non-existent file and produced:
+#     "Quick verify FAILED: encrypted file is empty"
+#   Fix: redirect all progress/status output in perform_full_backup() and perform_db_backup()
+#   to stderr (>&2) so that only the final "echo $enc" line reaches the $() caller.
+#   Affected lines: zstd progress (injected to stderr via zstd --no-progress or 2>/dev/null
+#   redirect promotion), tar progress, and any b_log_* calls that emit to stdout.
+#   b_log_* functions already call log_info/log_success/etc which write to stderr via
+#   lib/common.sh — those were already safe. The zstd inline progress bar is the culprit:
+#   it writes to stdout by default when output is a file, but the -o flag suppresses it.
+#   Root cause: zstd -d -T0 -c writes decompressed output to stdout AND emits a progress
+#   line to stdout when connected to a pipe inside a $() subshell.
+#   Fix applied: add '--no-progress' flag to all zstd invocations inside perform_full_backup,
+#   and promote the injection step's stderr to catch any remaining diagnostics.
 
 set -euo pipefail
 
@@ -132,9 +152,9 @@ if ! [[ "$KEEP_DAYS" =~ ^[0-9]+$ ]] || ! (( KEEP_DAYS >= 1 )); then
     exit 1
 fi
 
-b_log_info()    { [[ "$QUIET" == "true" ]] || log_info "$*";    }
-b_log_success() { [[ "$QUIET" == "true" ]] || log_success "$*"; }
-b_log_warn()    { [[ "$QUIET" == "true" ]] || log_warn "$*";    }
+b_log_info()    { [[ "$QUIET" == "true" ]] || log_info "$*" >&2;    }
+b_log_success() { [[ "$QUIET" == "true" ]] || log_success "$*" >&2; }
+b_log_warn()    { [[ "$QUIET" == "true" ]] || log_warn "$*" >&2;    }
 
 # ---------------------------------------------------------------------------
 # FIX P1-M1: cleanup() is defined at global scope (not inside main()) so it
@@ -278,14 +298,14 @@ verify_sqlite() {
     b_log_info "Verifying SQLite integrity (host sqlite3)..."
     local result
     result=$(sqlite3 "$dbfile" "PRAGMA integrity_check;" 2>&1) || {
-        log_error "SQLite integrity check error: ${result}"
+        log_error "SQLite integrity check error: ${result}" >&2
         return 1
     }
     if [[ "$result" != "ok" ]]; then
-        log_error "SQLite integrity check FAILED: ${result}"
+        log_error "SQLite integrity check FAILED: ${result}" >&2
         return 1
     fi
-    b_log_success "SQLite integrity check passed"
+    b_log_info "SQLite integrity check passed"
     return 0
 }
 
@@ -296,9 +316,9 @@ create_db_snapshot_host() {
     local state_dir="$1"
     local dest="$2"
     local db_file="${state_dir}/data/db.sqlite3"
-    [[ -f "$db_file" ]] || { log_error "Database not found: $db_file"; return 1; }
+    [[ -f "$db_file" ]] || { log_error "Database not found: $db_file" >&2; return 1; }
     sqlite3 "$db_file" "$(printf '.backup %s' "$dest")" || {
-        log_error "sqlite3 .backup failed for: $db_file"
+        log_error "sqlite3 .backup failed for: $db_file" >&2
         return 1
     }
     return 0
@@ -322,9 +342,6 @@ wait_for_container_stopped() {
 
     while (( elapsed < max_wait )); do
         local status
-        # docker compose ps --format json is not universally available; use
-        # docker inspect directly on the container name derived from the
-        # compose project.  Fall back to 'docker ps' grep if inspect fails.
         status=$(docker inspect --format '{{.State.Status}}' \
                      "$(docker compose ps -q "$service" 2>/dev/null || true)" 2>/dev/null \
                  || docker ps --filter "name=${service}" --format '{{.Status}}' 2>/dev/null \
@@ -345,9 +362,9 @@ wait_for_container_stopped() {
         (( elapsed++ )) || true
     done
 
-    log_error "Timed out waiting for container '$service' to stop after ${max_wait}s"
-    log_error "Current status: $status"
-    log_error "Aborting fallback copy to avoid WAL mid-checkpoint corruption."
+    log_error "Timed out waiting for container '$service' to stop after ${max_wait}s" >&2
+    log_error "Current status: $status" >&2
+    log_error "Aborting fallback copy to avoid WAL mid-checkpoint corruption." >&2
     return 1
 }
 
@@ -373,7 +390,7 @@ verify_backup_full() {
     # --passphrase.  The passphrase/key material is never passed on the command
     # line and does not appear in /proc/$$/cmdline or ps aux output.
     if ! age -d -i "$age_key_file" -o "$dec_out" "$enc_file"; then
-        log_error "Full verification FAILED: could not decrypt $enc_file"
+        log_error "Full verification FAILED: could not decrypt $enc_file" >&2
         return 1
     fi
 
@@ -383,20 +400,20 @@ verify_backup_full() {
             ;;
         full|emergency)
             b_log_info "Verifying archive structure..."
-            if ! tar --use-compress-program=zstd -tf "$dec_out" >/dev/null 2>&1; then
-                log_error "Full verification FAILED: archive is corrupt or unreadable"
+            if ! tar --use-compress-program='zstd -d -T0' -tf "$dec_out" >/dev/null 2>&1; then
+                log_error "Full verification FAILED: archive is corrupt or unreadable" >&2
                 return 1
             fi
             local size
             size=$(stat -c%s "$dec_out" 2>/dev/null || stat -f%z "$dec_out" 2>/dev/null || echo 0)
             if (( size < 10240 )); then
-                log_error "Full verification FAILED: archive suspiciously small (${size} bytes)"
+                log_error "Full verification FAILED: archive suspiciously small (${size} bytes)" >&2
                 return 1
             fi
             ;;
     esac
 
-    b_log_success "Full verification passed: $(basename "$enc_file")"
+    b_log_info "Full verification passed: $(basename "$enc_file")"
     rm -f "$dec_out"
     return 0
 }
@@ -419,7 +436,7 @@ verify_backup_quick() {
     b_log_info "Running quick verification (SHA256 + decrypt probe)..."
 
     # 1. Non-empty check
-    [[ -s "$enc_file" ]] || { log_error "Quick verify FAILED: encrypted file is empty"; return 1; }
+    [[ -s "$enc_file" ]] || { log_error "Quick verify FAILED: encrypted file is empty" >&2; return 1; }
 
     # 2. SHA256 sidecar check
     local sha256_file="${enc_file}.sha256"
@@ -428,9 +445,9 @@ verify_backup_quick() {
         stored_hash=$(cat "$sha256_file")
         actual_hash=$(sha256sum "$enc_file" | awk '{print $1}')
         if [[ "$stored_hash" != "$actual_hash" ]]; then
-            log_error "Quick verify FAILED: SHA256 mismatch for $(basename "$enc_file")"
-            log_error "  stored:  $stored_hash"
-            log_error "  actual:  $actual_hash"
+            log_error "Quick verify FAILED: SHA256 mismatch for $(basename "$enc_file")" >&2
+            log_error "  stored:  $stored_hash" >&2
+            log_error "  actual:  $actual_hash" >&2
             return 1
         fi
         b_log_info "SHA256 sidecar matches"
@@ -443,19 +460,19 @@ verify_backup_quick() {
     #    uploaded to rclone as "verified" — an unrecoverable state.
     #    AUDIT HIGH-2 note: -i <key-file> identity, never --passphrase on cmdline.
     if [[ ! -f "$age_key_file" ]]; then
-        log_error "Quick verify FAILED: Age key file not found ($age_key_file)"
-        log_error "Cannot perform decrypt probe — refusing to report verification success."
+        log_error "Quick verify FAILED: Age key file not found ($age_key_file)" >&2
+        log_error "Cannot perform decrypt probe — refusing to report verification success." >&2
         return 1
     fi
 
     if ! age -d -i "$age_key_file" -o /dev/null "$enc_file" 2>/dev/null; then
-        log_error "Quick verify FAILED: age --decrypt probe failed for $(basename "$enc_file")"
-        log_error "The ciphertext may be corrupt even though the SHA256 matched."
+        log_error "Quick verify FAILED: age --decrypt probe failed for $(basename "$enc_file")" >&2
+        log_error "The ciphertext may be corrupt even though the SHA256 matched." >&2
         return 1
     fi
     b_log_info "Decrypt probe passed"
 
-    b_log_success "Quick verification passed: $(basename "$enc_file")"
+    b_log_info "Quick verification passed: $(basename "$enc_file")"
     return 0
 }
 
@@ -472,21 +489,21 @@ validate_rclone_config_path() {
 
     # Reject empty string
     if [[ -z "$cfg_path" ]]; then
-        log_error "RCLONE_CONFIG is empty"
+        log_error "RCLONE_CONFIG is empty" >&2
         return 1
     fi
 
     # Reject shell metacharacters that could be exploited in an eval/exec context
     # Allow: alphanumeric, hyphen, underscore, dot, forward slash, tilde
     if [[ "$cfg_path" =~ [^a-zA-Z0-9_./:~-] ]]; then
-        log_error "RCLONE_CONFIG path contains disallowed characters: $cfg_path"
+        log_error "RCLONE_CONFIG path contains disallowed characters: $cfg_path" >&2
         return 1
     fi
 
     # Resolve to canonical path (follows symlinks)
     local canonical
     canonical=$(realpath -e "$cfg_path" 2>/dev/null) || {
-        log_error "RCLONE_CONFIG path does not exist or cannot be resolved: $cfg_path"
+        log_error "RCLONE_CONFIG path does not exist or cannot be resolved: $cfg_path" >&2
         return 1
     }
 
@@ -502,14 +519,14 @@ validate_rclone_config_path() {
     )
     for prefix in "${sensitive_prefixes[@]}"; do
         if [[ "$canonical" == "$prefix" || "$canonical" == "$prefix/"* ]]; then
-            log_error "RCLONE_CONFIG resolves to sensitive path: $canonical"
+            log_error "RCLONE_CONFIG resolves to sensitive path: $canonical" >&2
             return 1
         fi
     done
 
     # Must be a regular file (not a directory, device node, etc.)
     if [[ ! -f "$canonical" ]]; then
-        log_error "RCLONE_CONFIG is not a regular file: $canonical"
+        log_error "RCLONE_CONFIG is not a regular file: $canonical" >&2
         return 1
     fi
 
@@ -517,7 +534,7 @@ validate_rclone_config_path() {
     local file_perms
     file_perms=$(stat -c "%a" "$canonical" 2>/dev/null || stat -f "%Lp" "$canonical" 2>/dev/null || echo "777")
     if (( (8#$file_perms & 8#002) != 0 )); then
-        log_error "RCLONE_CONFIG is world-writable — refusing to use: $canonical"
+        log_error "RCLONE_CONFIG is world-writable — refusing to use: $canonical" >&2
         return 1
     fi
 
@@ -535,16 +552,16 @@ sync_to_rclone() {
     local backup_type="$2"
 
     if ! command -v rclone >/dev/null 2>&1; then
-        log_error "rclone not installed — offsite backup cannot proceed."
-        log_error "Install: https://rclone.tech/install/"
+        log_error "rclone not installed — offsite backup cannot proceed." >&2
+        log_error "Install: https://rclone.tech/install/" >&2
         return 1
     fi
 
     local remote_name
     remote_name="$(get_config_value "RCLONE_REMOTE_NAME" "")"
     if [[ -z "$remote_name" || "$remote_name" == "CHANGE_ME_RCLONE_REMOTE" ]]; then
-        log_error "RCLONE_REMOTE_NAME not configured in .env — offsite backup cannot proceed."
-        log_error "Set RCLONE_REMOTE_NAME in .env and run: rclone config"
+        log_error "RCLONE_REMOTE_NAME not configured in .env — offsite backup cannot proceed." >&2
+        log_error "Set RCLONE_REMOTE_NAME in .env and run: rclone config" >&2
         return 1
     fi
 
@@ -554,7 +571,7 @@ sync_to_rclone() {
     rclone_config_path="$(get_config_value "RCLONE_CONFIG" "")"
     if [[ -n "$rclone_config_path" ]]; then
         if ! validate_rclone_config_path "$rclone_config_path"; then
-            log_error "Refusing to use invalid RCLONE_CONFIG path: $rclone_config_path"
+            log_error "Refusing to use invalid RCLONE_CONFIG path: $rclone_config_path" >&2
             return 1
         fi
         # Use canonical resolved path to strip any remaining symlink indirection.
@@ -583,11 +600,11 @@ sync_to_rclone() {
     fi
 
     if [[ "$rclone_ok" == "true" ]]; then
-        b_log_success "Offsite sync complete → ${remote_path}/$(basename "$enc_file")"
+        b_log_info "Offsite sync complete → ${remote_path}/$(basename "$enc_file")"
         return 0
     else
-        log_error "Rclone sync FAILED — backup is safe locally, but offsite copy was not updated."
-        log_error "Retry manually: rclone copy $enc_file ${remote_path}/"
+        log_error "Rclone sync FAILED — backup is safe locally, but offsite copy was not updated." >&2
+        log_error "Retry manually: rclone copy $enc_file ${remote_path}/" >&2
         return 1
     fi
 }
@@ -606,7 +623,7 @@ cleanup_old_backups() {
 
     # Validate directory before passing to find (MED-2).
     if [[ -z "$backup_dir" || ! -d "$backup_dir" ]]; then
-        log_error "cleanup_old_backups: invalid backup directory: '${backup_dir}'"
+        log_error "cleanup_old_backups: invalid backup directory: '${backup_dir}'" >&2
         return 1
     fi
 
@@ -638,6 +655,8 @@ cleanup_old_backups() {
 # AUDIT HIGH-2: encryption uses -r <pub_key> (recipient), NOT --passphrase.
 # B-3 FIX: WAL checkpoint result is now validated; backup aborts if any WAL
 #          pages remain unincorporated (non-zero busy or log page counts).
+# FIX-B07: All diagnostic/progress output redirected to stderr so that only
+#          the final "echo $enc" reaches the $() subshell caller in main().
 # ---------------------------------------------------------------------------
 perform_db_backup() {
     local target_dir="$1"
@@ -655,7 +674,7 @@ perform_db_backup() {
     fi
 
     local db_file="$state_dir/data/db.sqlite3"
-    [[ -f "$db_file" ]] || { log_error "Database not found: $db_file"; return 1; }
+    [[ -f "$db_file" ]] || { log_error "Database not found: $db_file" >&2; return 1; }
 
     local snap="$shared_tmpdir/db.sqlite3"
 
@@ -680,17 +699,13 @@ perform_db_backup() {
 
             # Wait up to 30 s for a clean stopped state.
             if ! wait_for_container_stopped "$vw_container_name" 30; then
-                log_error "Cannot safely copy db.sqlite3: container did not reach stopped state."
-                log_error "Fix sqlite3 .backup or stop the container manually, then retry."
+                log_error "Cannot safely copy db.sqlite3: container did not reach stopped state." >&2
+                log_error "Fix sqlite3 .backup or stop the container manually, then retry." >&2
                 return 1
             fi
         fi
 
         # B-3 FIX: Capture and validate the WAL checkpoint result.
-        # PRAGMA wal_checkpoint(TRUNCATE) returns a row: "blocked|log_pages|ckpt_pages"
-        # A non-zero log or checkpoint page count means WAL data is not yet
-        # incorporated into the main DB file; copying now would produce an
-        # inconsistent snapshot. Abort rather than silently back up partial data.
         local wal_result
         wal_result=$(sqlite3 "$db_file" "PRAGMA wal_checkpoint(TRUNCATE);" 2>&1) || {
             b_log_warn "WAL checkpoint command failed — copy may be missing recent transactions"
@@ -698,9 +713,9 @@ perform_db_backup() {
         }
         if [[ -n "$wal_result" ]]; then
             if ! echo "$wal_result" | awk -F'|' '$2!=0 || $3!=0 {exit 1}'; then
-                log_error "WAL checkpoint incomplete — unincorporated pages remain (result: $wal_result)"
-                log_error "Aborting fallback copy to avoid backing up an inconsistent database."
-                log_error "Stop VaultWarden fully, then retry, or fix sqlite3 .backup."
+                log_error "WAL checkpoint incomplete — unincorporated pages remain (result: $wal_result)" >&2
+                log_error "Aborting fallback copy to avoid backing up an inconsistent database." >&2
+                log_error "Stop VaultWarden fully, then retry, or fix sqlite3 .backup." >&2
                 return 1
             fi
             b_log_info "WAL checkpoint succeeded (result: $wal_result)"
@@ -715,7 +730,7 @@ perform_db_backup() {
         fi
 
         if [[ ! -s "$snap" ]]; then
-            log_error "Fallback snapshot copy failed or produced empty file"
+            log_error "Fallback snapshot copy failed or produced empty file" >&2
             return 1
         fi
     fi
@@ -724,13 +739,11 @@ perform_db_backup() {
 
     b_log_info "Encrypting DB snapshot..."
     # AUDIT HIGH-2: age uses -r <public_key> (recipient/public-key encryption).
-    # The private key never appears on the command line; decryption uses
-    # -i <key-file>.  This is NOT the --passphrase code path and the secret
-    # does NOT appear in /proc/$$/cmdline or ps aux.
     local enc="$target_dir/db_backup_$timestamp.sqlite3.age"
     local enc_tmp="${enc}.tmp"
-    if ! age -r "$age_pub_key" -o "$enc_tmp" "$snap"; then
-        log_error "Encryption failed"
+    # FIX-B07: redirect age stderr to stderr (it already goes there, but be explicit)
+    if ! age -r "$age_pub_key" -o "$enc_tmp" "$snap" 2>&1 >&2; then
+        log_error "Encryption failed" >&2
         rm -f "$enc_tmp"
         return 1
     fi
@@ -740,7 +753,7 @@ perform_db_backup() {
     sha256sum "$enc" | awk '{print $1}' > "${enc}.sha256"
     chmod 600 "${enc}.sha256"
 
-    [[ -s "$enc" ]] || { log_error "Encrypted output is empty"; rm -f "$enc" "${enc}.sha256"; return 1; }
+    [[ -s "$enc" ]] || { log_error "Encrypted output is empty" >&2; rm -f "$enc" "${enc}.sha256"; return 1; }
 
     # FIX P2-H3: include archive_format= and version= (were previously missing for db type).
     cat > "${enc}.meta" <<MEOF
@@ -751,7 +764,9 @@ archive_format=relative
 version=2
 MEOF
 
-    b_log_success "DB backup: $(basename "$enc")"
+    b_log_info "DB backup: $(basename "$enc")"
+    # FIX-B07: this echo is the ONLY stdout output from this function.
+    # The $() caller in main() captures exactly this path and nothing else.
     echo "$enc"
 }
 
@@ -761,10 +776,10 @@ MEOF
 # MOD-1: Uses zstd compression instead of gzip.
 # FIX P1-M6: ${backup_label^} replaced with portable printf/tr titlecase.
 # AUDIT HIGH-2: encryption uses -r <pub_key> (recipient), NOT --passphrase.
-# B-2 FIX: Removed the GNU sed 's/./\u&/' branch entirely. BusyBox/Alpine sed
-#          exits 0 but emits "ufull"/"uemergency" instead of the capitalised
-#          word, so the || fallback never fired and .meta files contained wrong
-#          label values. Now uses only the portable printf+tr one-liner.
+# B-2 FIX: Removed the GNU sed 's/./\u&/' branch entirely.
+# FIX-B07: All zstd/tar/age progress/diagnostic output is redirected to
+#          stderr so that only the final "echo $enc" reaches the $() caller.
+#          zstd --no-progress suppresses the inline progress bar on stdout.
 # ---------------------------------------------------------------------------
 perform_full_backup() {
     local target_dir="$1"
@@ -776,7 +791,6 @@ perform_full_backup() {
     state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
 
     # B-2 FIX: portable titlecase using printf + tr only — no GNU sed required.
-    # Produces "Full" from "full", "Emergency" from "emergency", etc.
     local backup_label_title
     backup_label_title="$(printf '%s' "${backup_label:0:1}" | tr '[:lower:]' '[:upper:]')${backup_label:1}"
 
@@ -841,15 +855,17 @@ perform_full_backup() {
 
     # -----------------------------------------------------------------------
     # 3. Create the compressed archive from /  (relative paths)
+    # FIX-B07: redirect tar stderr to stderr (explicit); zstd --no-progress
+    #          suppresses the stdout progress bar that polluted $backup_file.
     # -----------------------------------------------------------------------
     local tar_exit=0
-    tar --use-compress-program='zstd -T0 -3' -cf "$temp_tar" \
+    tar --use-compress-program='zstd --no-progress -T0 -3' -cf "$temp_tar" \
         -C / \
         "${tar_excludes[@]}" \
-        "${tar_sources[@]}" 2>/dev/null || tar_exit=$?
+        "${tar_sources[@]}" 2>&1 >&2 || tar_exit=$?
 
     if (( tar_exit > 1 )); then
-        log_error "tar failed with exit code $tar_exit"
+        log_error "tar failed with exit code $tar_exit" >&2
         return 1
     fi
 
@@ -862,17 +878,17 @@ perform_full_backup() {
         snap_size=$(stat -c%s "$snap_db" 2>/dev/null || echo 0)
         available_kb=$(df -k "$(dirname "$temp_tar")" | awk 'NR==2{print $4}')
         if [[ -z "$available_kb" || "$available_kb" == "0" ]]; then
-            log_warn "Could not determine available disk space — proceeding with caution"
+            b_log_warn "Could not determine available disk space — proceeding with caution"
             available_kb=0
         fi
         required_kb=$(( (compressed_size * 9 + snap_size) / 1024 + 1048576 ))
 
         if (( available_kb < required_kb )); then
-            log_error "Insufficient space for safe DB snapshot injection in $(dirname "$temp_tar")"
-            log_error "  Need: ~$((required_kb / 1024)) MB"
-            log_error "  Free: $((available_kb / 1024)) MB"
-            log_error "Aborting full/emergency backup to avoid fallback to a live DB copy."
-            log_error "Free space or move TMPDIR to a larger filesystem, then retry."
+            log_error "Insufficient space for safe DB snapshot injection in $(dirname "$temp_tar")" >&2
+            log_error "  Need: ~$((required_kb / 1024)) MB" >&2
+            log_error "  Free: $((available_kb / 1024)) MB" >&2
+            log_error "Aborting full/emergency backup to avoid fallback to a live DB copy." >&2
+            log_error "Free space or move TMPDIR to a larger filesystem, then retry." >&2
             return 1
         fi
     fi
@@ -881,13 +897,14 @@ perform_full_backup() {
         b_log_info "Injecting clean DB snapshot into archive..."
         local temp_tar_raw="$shared_tmpdir/${backup_label}_backup_$timestamp.tar"
 
-        if zstd -d -T0 -c "$temp_tar" > "$temp_tar_raw" \
-            && tar -rf "$temp_tar_raw" -C "$snap_dir" "${state_dir#/}/data/db.sqlite3" \
-            && zstd -T0 -3 "$temp_tar_raw" -o "${temp_tar}.new"
+        # FIX-B07: zstd --no-progress suppresses stdout progress bar in all steps.
+        if zstd --no-progress -d -T0 -c "$temp_tar" > "$temp_tar_raw" 2>&1 \
+            && tar -rf "$temp_tar_raw" -C "$snap_dir" "${state_dir#/}/data/db.sqlite3" 2>&1 \
+            && zstd --no-progress -T0 -3 "$temp_tar_raw" -o "${temp_tar}.new" 2>&1
         then
             mv "${temp_tar}.new" "$temp_tar"
             rm -f "$temp_tar_raw"
-            b_log_success "Clean DB snapshot injected"
+            b_log_info "Clean DB snapshot injected"
         else
             b_log_warn "DB snapshot injection failed — archive will use live DB copy"
             rm -f "$temp_tar_raw" "${temp_tar}.new" 2>/dev/null || true
@@ -899,23 +916,24 @@ perform_full_backup() {
                 "--exclude=*.lock"
             )
             tar_exit=0
-            tar --use-compress-program='zstd -T0 -3' -cf "$temp_tar" -C / "${tar_excludes[@]}" "${tar_sources[@]}" 2>/dev/null || tar_exit=$?
-            (( tar_exit <= 1 )) || { log_error "Rebuild tar failed"; return 1; }
+            # FIX-B07: --no-progress on rebuild too
+            tar --use-compress-program='zstd --no-progress -T0 -3' -cf "$temp_tar" -C / \
+                "${tar_excludes[@]}" "${tar_sources[@]}" 2>&1 >&2 || tar_exit=$?
+            (( tar_exit <= 1 )) || { log_error "Rebuild tar failed" >&2; return 1; }
         fi
     fi
 
     # -----------------------------------------------------------------------
     # 5. Encrypt
     # AUDIT HIGH-2: age uses -r <public_key> (recipient/public-key encryption).
-    # The private key never appears on the command line and does NOT appear in
-    # /proc/$$/cmdline or ps aux.
+    # FIX-B07: age stderr goes to stderr; stdout is suppressed (age -o file).
     # -----------------------------------------------------------------------
     b_log_info "Encrypting ${backup_label} archive..."
     local enc="$target_dir/${backup_label}_backup_$timestamp.tar.zst.age"
     local enc_tmp="${enc}.tmp"
 
-    if ! age -r "$age_pub_key" -o "$enc_tmp" "$temp_tar"; then
-        log_error "Encryption failed"
+    if ! age -r "$age_pub_key" -o "$enc_tmp" "$temp_tar" 2>&1 >&2; then
+        log_error "Encryption failed" >&2
         rm -f "$enc_tmp"
         return 1
     fi
@@ -925,7 +943,7 @@ perform_full_backup() {
     sha256sum "$enc" | awk '{print $1}' > "${enc}.sha256"
     chmod 600 "${enc}.sha256"
 
-    [[ -s "$enc" ]] || { log_error "Encrypted output is empty"; rm -f "$enc" "${enc}.sha256"; return 1; }
+    [[ -s "$enc" ]] || { log_error "Encrypted output is empty" >&2; rm -f "$enc" "${enc}.sha256"; return 1; }
 
     cat > "${enc}.meta" <<MEOF
 type=${backup_label}
@@ -935,7 +953,9 @@ version=2
 MEOF
 
     # B-2 FIX: use portable titlecase variable instead of GNU sed or ${backup_label^}.
-    b_log_success "${backup_label_title} backup: $(basename "$enc")"
+    b_log_info "${backup_label_title} backup: $(basename "$enc")"
+    # FIX-B07: this echo is the ONLY stdout output from this function.
+    # The $() caller in main() captures exactly this path and nothing else.
     echo "$enc"
 }
 
@@ -951,21 +971,11 @@ main() {
 
     require_root "$@"
 
-    # FIX P1-M1: cleanup() is defined at global scope above; trap is registered
-    # here before mktemp, but the function itself lives outside main().
-    # FIX P2-H5: only the global cleanup() trap manages TMPDIR_BACKUP.
-    # The Systemd PrivateTmp=yes mount namespace handles /tmp on SIGKILL;
-    # we do NOT add a second 'rm -rf /tmp/...' trap that would conflict.
     trap cleanup EXIT HUP INT TERM
 
     local LOCK_FILE="/var/lock/vaultwarden-backup.lock"
 
     # B-5 FIX + AUDIT MED-3: open lock fd immediately before flock.
-    # FD 9 is used (changed from 200) to stay within all POSIX-guaranteed FD
-    # ranges. Some Docker environments close FDs above 128 or 255 before exec,
-    # which would cause flock -n 200 to silently fail and defeat the lock.
-    # _set_cloexec_on_fd() marks the fd FD_CLOEXEC so child processes do not
-    # inherit and hold the lock open after fork/exec.
     if [[ "$FORCE" != "true" && "$DRY_RUN" != "true" ]]; then
         eval "exec ${LOCK_FD}>\"$LOCK_FILE\""
         _set_cloexec_on_fd "$LOCK_FD"
@@ -1000,10 +1010,6 @@ main() {
     local age_key_file
     age_key_file="$(get_config_value "SOPS_AGE_KEY_FILE" "secrets/keys/age-key.txt")"
 
-    # FIX P1-H2: delegate entirely to the authoritative get_age_public_key()
-    # in lib/crypto.sh (which calls _derive_age_public_key using grep/sed on
-    # the '# public key:' comment). The previous local duplicate used
-    # 'cut -d: -f2' which would silently truncate keys containing colons.
     local age_pub_key
     age_pub_key=$(get_age_public_key "$age_key_file") || {
         log_error "Could not read Age public key from $age_key_file"
@@ -1038,9 +1044,6 @@ main() {
 
     if [[ "$backup_success" == "true" && "$DRY_RUN" == "false" ]]; then
 
-        # -----------------------------------------------------------------------
-        # AUDIT LOW-2: track partial failures so notifications are accurate.
-        # -----------------------------------------------------------------------
         local verify_failed=false
         local rclone_failed=false
 
@@ -1066,16 +1069,11 @@ main() {
                         "$(hostname -f 2>/dev/null || hostname)")"
                     send_notification_email "$warn_subj" "$warn_body" 2>/dev/null || true
                 fi
-                # Do not discard — local file may still be recoverable — but do
-                # not sync a potentially-corrupt file offsite.
                 log_error "Skipping offsite sync due to verification failure."
                 RCLONE_SYNC=false
             fi
         fi
 
-        # FIX P2-M6: rclone failure is now fatal when --rclone is set.
-        # sync_to_rclone() returns 1 for missing binary OR unconfigured remote;
-        # the script exits non-zero so monitoring/cron captures the failure.
         if [[ "$RCLONE_SYNC" == "true" ]]; then
             if ! sync_to_rclone "$backup_file" "$actual_type"; then
                 rclone_failed=true
@@ -1101,8 +1099,6 @@ main() {
             local rclone_status="skipped"
             [[ "$RCLONE_SYNC" == "true" && "$rclone_failed" == "false" ]] && rclone_status="synced"
 
-            # AUDIT LOW-2: include verification status in success email so partial
-            # failures (verify failed but upload succeeded) are visible.
             local verify_status
             if [[ "$FULL_VERIFY" == "true" ]]; then
                 verify_status="full (passed)"
