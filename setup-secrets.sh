@@ -103,7 +103,8 @@ NOTES:
 
     The intended standalone order is:
         1. sudo ./setup.sh --domain DOMAIN --email EMAIL
-        2. nano .env           (set CLOUDFLARE_ZONE_ID, SMTP_HOST, etc.)
+        2. nano .env           (set CLOUDFLARE_ZONE_ID, EMAIL_MODE, EMAIL_PROVIDER,
+                                SMTP_HOST, etc.)
         3. ./setup-secrets.sh  (prompted for all credentials)
         4. make up
 
@@ -116,6 +117,7 @@ FEATURES:
     ✅ Cloudflare token validation
     ✅ Interactive prompts with confirmation
     ✅ Secure password generation (32-char minimum)
+    ✅ Collects email API token OR smtp_password based on EMAIL_MODE
 
 SECURITY ENHANCEMENTS:
     ✅ Caddy basic auth in htpasswd format (admin:\$2y\$14\$...)
@@ -391,6 +393,32 @@ yaml_escape() {
 }
 
 # ---------------------------------------------------------------------------
+# _read_dotenv_value KEY [FILE]
+#
+# Read a single KEY from .env (or FILE) without sourcing the whole file.
+# Returns the value, or an empty string if the key is not found.
+# ---------------------------------------------------------------------------
+_read_dotenv_value() {
+    local key="$1"
+    local file="${2:-.env}"
+    [[ -f "$file" ]] || { echo ""; return 0; }
+    local val
+    val=$(grep -E "^${key}=" "$file" | head -1 | sed "s/^${key}=//;s/#.*$//;s/[[:space:]]*$//")
+    echo "$val"
+}
+
+# ---------------------------------------------------------------------------
+# _email_api_token_key PROVIDER
+#
+# Return the canonical .env / secrets key name for the given provider's
+# HTTP API token, e.g. mailersend → MAILERSEND_API_TOKEN
+# ---------------------------------------------------------------------------
+_email_api_token_key() {
+    local provider="${1,,}"   # lower-case
+    echo "${provider^^}_API_TOKEN"  # upper-case + _API_TOKEN
+}
+
+# ---------------------------------------------------------------------------
 # Collect secrets
 #
 # FIX (HIGH): SECRET_* env vars must NOT be exported during the collection
@@ -411,6 +439,16 @@ yaml_escape() {
 #
 # All hashing logic (Argon2id, bcrypt) and format validation live exclusively
 # in lib/secrets.sh. collect_secrets() is a thin orchestration layer.
+#
+# EMAIL COLLECTION (fix: was missing API token entirely):
+#   The email tier is chosen by reading EMAIL_MODE from .env:
+#     auto  — collect BOTH the provider API token and smtp_password
+#             (lib/email.sh will try API first, then SMTP as fallback)
+#     api   — collect the provider API token only
+#     smtp  — collect smtp_password only
+#     host  — skip both (Postfix sidecar; no credential needed here)
+#   EMAIL_PROVIDER is read from .env to derive the exact key name,
+#   e.g. mailersend → MAILERSEND_API_TOKEN.
 # ---------------------------------------------------------------------------
 collect_secrets() {
     # Declare SECRETS as a local associative array.  No values are exported to
@@ -479,35 +517,125 @@ collect_secrets() {
     cf_fw=$(_get_field "fail2ban_cloudflare_firewall_token") || { log_error "Failed to collect fail2ban_cloudflare_firewall_token"; return 1; }
     _COLLECTED_SECRETS["fail2ban_cloudflare_firewall_token"]="$cf_fw"
 
-    # --- SMTP password ------------------------------------------------------
+    # --- Email credentials (API token + SMTP password) ----------------------
+    #
+    # Read EMAIL_MODE and EMAIL_PROVIDER from .env so we know which
+    # credential(s) to collect.  Defaults: mode=auto, provider=mailersend.
+    # ---------------------------------------------------------------------------
+    local _email_mode _email_provider _api_token_key
+    _email_mode=$(    _read_dotenv_value "EMAIL_MODE"     .env)
+    _email_provider=$(   _read_dotenv_value "EMAIL_PROVIDER" .env)
+    _email_mode="${_email_mode:-auto}"
+    _email_provider="${_email_provider:-mailersend}"
+    _api_token_key=$(_email_api_token_key "$_email_provider")
+
     echo ""
     log_info "═══════════════════════════════════════════════════════════"
-    log_info " SMTP Password (Email Notifications)"
+    log_info " Email Notifications"
     log_info "═══════════════════════════════════════════════════════════"
+    log_info "Current .env settings:"
+    log_info "  EMAIL_MODE     = $_email_mode"
+    log_info "  EMAIL_PROVIDER = $_email_provider"
+    echo ""
+    log_info "Delivery tiers (controlled by EMAIL_MODE in .env):"
+    log_info "  auto  — try API → SMTP → Postfix sidecar in order (recommended)"
+    log_info "  api   — HTTP API only   (requires ${_api_token_key} in secrets)"
+    log_info "  smtp  — SMTP relay only (requires smtp_password in secrets)"
+    log_info "  host  — Postfix sidecar only (no API token or SMTP password needed)"
     echo ""
 
-    local smtp_pass
-    if [[ "$AUTO_MODE" == "true" ]]; then
-        # auto_generate_secret_field emits CHANGE_ME_SMTP_PASSWORD for this
-        # field — correct behaviour; caller must rotate with edit-secrets.sh.
-        smtp_pass=$(auto_generate_secret_field "smtp_password") || { log_error "Failed to generate smtp_password"; return 1; }
-    else
-        # FIX [L-04]: Add -t 30 timeout to avoid hanging in non-interactive contexts
-        # FIX SS-L2: Route timeout warning to /dev/tty when available
-        local enable_email
-        if ! read -r -t 30 -p "Enable email notifications now? (yes/no): " enable_email; then
-            _warn_tty "WARNING: No input received (30s timeout). Treating as 'no'."
-            enable_email="no"
-        fi
-        if [[ "$enable_email" == "yes" ]]; then
-            smtp_pass=$(collect_secret_field "smtp_password") || { log_error "Failed to collect smtp_password"; return 1; }
-            log_success "SMTP password configured"
+    # ----------- Tier 1: provider HTTP API token ----------------------------
+    # Collected when EMAIL_MODE is 'api' or 'auto'.
+    # The key name written to secrets matches what lib/email.sh resolves:
+    #   EMAIL_PROVIDER=mailersend  →  MAILERSEND_API_TOKEN in secrets
+    #   EMAIL_PROVIDER=sendgrid    →  SENDGRID_API_TOKEN   in secrets
+    #   etc.
+    # The exact key is also added to .env.example as a blank placeholder;
+    # the secrets file is the authoritative store for the actual token value.
+    if [[ "$_email_mode" == "api" || "$_email_mode" == "auto" ]]; then
+        log_info " Tier 1 — ${_email_provider^} HTTP API Token"
+        log_info "  Secrets key  : ${_api_token_key}"
+        log_info "  .env key     : ${_api_token_key}=  (leave blank; value lives in secrets)"
+        log_info "  Get token at : https://app.${_email_provider}.com (or provider dashboard)"
+        echo ""
+
+        local email_api_token
+        if [[ "$AUTO_MODE" == "true" ]]; then
+            email_api_token="CHANGE_ME_${_api_token_key}"
+            log_warn "[AUTO] ${_api_token_key} → placeholder; rotate with:"
+            log_warn "  ./edit-secrets.sh --rotate email_api_token"
         else
-            smtp_pass="CHANGE_ME_SMTP_PASSWORD"
-            log_info "Email skipped - configure later with: ./edit-secrets.sh --rotate smtp_password"
+            local skip_api
+            if ! read -r -t 30 -p "Enter ${_api_token_key} now? (yes/no): " skip_api; then
+                _warn_tty "WARNING: No input received (30s timeout). Treating as 'no'."
+                skip_api="no"
+            fi
+            if [[ "$skip_api" == "yes" ]]; then
+                local _raw_token
+                if ! read -r -s -t 120 -p "${_api_token_key}: " _raw_token; then
+                    _warn_tty "WARNING: No input received (120s timeout). Using placeholder."
+                    _raw_token=""
+                fi
+                echo ""
+                if [[ -n "$_raw_token" ]]; then
+                    email_api_token="$_raw_token"
+                    log_success "${_api_token_key} stored"
+                else
+                    email_api_token="CHANGE_ME_${_api_token_key}"
+                    log_info "No value entered — using placeholder"
+                fi
+            else
+                email_api_token="CHANGE_ME_${_api_token_key}"
+                log_info "API token skipped — rotate later with:"
+                log_info "  ./edit-secrets.sh --rotate email_api_token"
+            fi
         fi
+        _COLLECTED_SECRETS["email_api_token"]="$email_api_token"
+        _COLLECTED_SECRETS["email_api_token_key"]="$_api_token_key"
+    else
+        # Not collecting API token for this mode; store empty so write_secrets
+        # can emit a clearly-labelled placeholder rather than missing the key.
+        _COLLECTED_SECRETS["email_api_token"]="NOT_USED_EMAIL_MODE=${_email_mode}"
+        _COLLECTED_SECRETS["email_api_token_key"]="$_api_token_key"
     fi
-    _COLLECTED_SECRETS["smtp_password"]="$smtp_pass"
+
+    # ----------- Tier 2: SMTP relay password --------------------------------
+    # Collected when EMAIL_MODE is 'smtp' or 'auto'.
+    if [[ "$_email_mode" == "smtp" || "$_email_mode" == "auto" ]]; then
+        echo ""
+        log_info " Tier 2 — SMTP Relay Password"
+        log_info "  Secrets key: smtp_password"
+        log_info "  .env keys  : SMTP_HOST / SMTP_PORT / SMTP_USERNAME  (non-secret)"
+        echo ""
+
+        local smtp_pass
+        if [[ "$AUTO_MODE" == "true" ]]; then
+            smtp_pass=$(auto_generate_secret_field "smtp_password") || { log_error "Failed to generate smtp_password"; return 1; }
+        else
+            local enable_smtp
+            if ! read -r -t 30 -p "Enter smtp_password now? (yes/no): " enable_smtp; then
+                _warn_tty "WARNING: No input received (30s timeout). Treating as 'no'."
+                enable_smtp="no"
+            fi
+            if [[ "$enable_smtp" == "yes" ]]; then
+                smtp_pass=$(collect_secret_field "smtp_password") || { log_error "Failed to collect smtp_password"; return 1; }
+                log_success "smtp_password configured"
+            else
+                smtp_pass="CHANGE_ME_SMTP_PASSWORD"
+                log_info "SMTP password skipped — rotate later with:"
+                log_info "  ./edit-secrets.sh --rotate smtp_password"
+            fi
+        fi
+        _COLLECTED_SECRETS["smtp_password"]="$smtp_pass"
+    elif [[ "$_email_mode" == "host" ]]; then
+        # Postfix sidecar: no SMTP relay password needed from secrets.
+        _COLLECTED_SECRETS["smtp_password"]="NOT_USED_EMAIL_MODE=host"
+        log_info "EMAIL_MODE=host: smtp_password not needed (Postfix sidecar handles delivery)"
+    else
+        # api-only mode: SMTP password not used, but store a clear placeholder
+        # so the secrets file always has all expected keys.
+        _COLLECTED_SECRETS["smtp_password"]="NOT_USED_EMAIL_MODE=${_email_mode}"
+    fi
 
     # --- Backup passphrase (always auto-generated) --------------------------
     echo ""
@@ -599,6 +727,9 @@ write_secrets() {
     # shellcheck disable=SC2064  # intentional — $temp_file must expand NOW
     register_cleanup "rm -f '$temp_file'"
 
+    # Resolve the actual provider API token key name written during collection.
+    local _api_key_name="${_COLLECTED_SECRETS[email_api_token_key]:-EMAIL_API_TOKEN}"
+
     # FIX (MEDIUM): All secret values are passed through yaml_escape() which
     # wraps them in YAML single-quoted scalars and escapes internal
     # single-quotes.  This prevents values containing : # [ { or leading
@@ -611,7 +742,14 @@ write_secrets() {
         printf 'admin_token: %s\n\n'                       "$(yaml_escape "${_COLLECTED_SECRETS[admin_token]}")"
         printf '# Caddy admin password (htpasswd format: admin:$2y$14$...)\n'
         printf 'admin_basic_auth_hash: %s\n\n'             "$(yaml_escape "${_COLLECTED_SECRETS[admin_basic_auth_hash]}")"
-        printf '# SMTP password for email notifications\n'
+        printf '# Email — Tier 1: provider HTTP API token\n'
+        printf '# Key name mirrors EMAIL_PROVIDER in .env, e.g. MAILERSEND_API_TOKEN\n'
+        printf '# lib/email.sh resolves <PROVIDER_UPPER>_API_TOKEN automatically.\n'
+        printf '# To rotate: ./edit-secrets.sh --rotate email_api_token\n'
+        printf '%s: %s\n\n'                                "$_api_key_name" "$(yaml_escape "${_COLLECTED_SECRETS[email_api_token]}")"
+        printf '# Email — Tier 2: SMTP relay password\n'
+        printf '# Used when EMAIL_MODE=smtp or EMAIL_MODE=auto (fallback from API).\n'
+        printf '# To rotate: ./edit-secrets.sh --rotate smtp_password\n'
         printf 'smtp_password: %s\n\n'                     "$(yaml_escape "${_COLLECTED_SECRETS[smtp_password]}")"
         printf '# Backup encryption passphrase\n'
         printf 'backup_passphrase: %s\n\n'                 "$(yaml_escape "${_COLLECTED_SECRETS[backup_passphrase]}")"
@@ -744,13 +882,20 @@ main() {
         # FIX SS-L1: cron-setup.sh was removed; reference systemd-setup.sh instead.
         echo "📋 Next Steps:"
         echo "   1. Verify .env settings:      nano .env"
-        echo "      ► Confirm: CLOUDFLARE_ZONE_ID, SMTP_HOST, SMTP_PORT, SMTP_USERNAME"
+        echo "      ► Confirm: CLOUDFLARE_ZONE_ID, EMAIL_MODE, EMAIL_PROVIDER,"
+        echo "                 SMTP_HOST, SMTP_PORT, SMTP_USERNAME"
         echo "   2. Start services:            make up"
         echo "   3. Setup automation:          sudo ./systemd-setup.sh --install"
         echo "   4. Export recovery kit:       ./edit-secrets.sh --export-recovery-kit"
         echo "   5. Test health:               ./health.sh"
         echo "   6. To rotate a single field:  ./edit-secrets.sh --rotate FIELD"
         echo "   7. To list secret keys:       ./edit-secrets.sh --list"
+        echo ""
+        echo "📧 Email mode reference (set EMAIL_MODE in .env):"
+        echo "   auto  — API → SMTP → Postfix fallback chain (recommended)"
+        echo "   api   — HTTP API only  (set EMAIL_PROVIDER + rotate email_api_token)"
+        echo "   smtp  — SMTP relay only (rotate smtp_password)"
+        echo "   host  — Postfix sidecar only (no token or password needed in secrets)"
         echo ""
         log_warn "⚠️  If you used --auto mode, scroll up to save the generated passwords!"
         echo ""
