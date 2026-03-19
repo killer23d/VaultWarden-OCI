@@ -29,6 +29,9 @@
 # --- FIX-M01 (2026-03-09) ----------------------------------------------------
 # All drivers now use ${SMTP_FROM_EMAIL:-${SMTP_FROM}} for the sender address.
 # Backward-compatibility for .env files still using the legacy SMTP_FROM= name.
+# DEPRECATED: SMTP_FROM_EMAIL is the legacy name. The canonical variable is
+# SMTP_FROM (standardised in .env.example). The SMTP_FROM_EMAIL fallback shim
+# will be removed in a future release once all deployments have migrated.
 #
 # --- FIX-M03 (2026-03-09) ----------------------------------------------------
 # All JSON-producing drivers (mailersend, sendgrid, postmark, resend) now
@@ -214,6 +217,8 @@ _email_driver_mailersend() {
     local s b fn fe ae
     s=$(_email_json_escape "$subject")
     b=$(_email_json_escape "$body")
+    # FIX-M01: SMTP_FROM_EMAIL is DEPRECATED; canonical name is SMTP_FROM.
+    # This shim will be removed once all deployments have migrated to SMTP_FROM=.
     local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
     # FIX-M03: JSON-escape envelope fields (fn=from_name, fe=from_email, ae=admin_email)
     fn=$(_email_json_escape "${SMTP_FROM_NAME:-VaultWarden}")
@@ -256,6 +261,8 @@ _email_driver_sendgrid() {
     local s b fn fe ae
     s=$(_email_json_escape "$subject")
     b=$(_email_json_escape "$body")
+    # FIX-M01: SMTP_FROM_EMAIL is DEPRECATED; canonical name is SMTP_FROM.
+    # This shim will be removed once all deployments have migrated to SMTP_FROM=.
     local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
     # FIX-M03: JSON-escape envelope fields
     fn=$(_email_json_escape "${SMTP_FROM_NAME:-VaultWarden}")
@@ -299,6 +306,8 @@ EOF
 # FIX EM-M3: domain validated against strict hostname regex before use in URL.
 _email_driver_mailgun() {
     local subject="$1" body="$2"
+    # FIX-M01: SMTP_FROM_EMAIL is DEPRECATED; canonical name is SMTP_FROM.
+    # This shim will be removed once all deployments have migrated to SMTP_FROM=.
     local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
 
     local domain="${MAILGUN_DOMAIN:-}"
@@ -312,7 +321,7 @@ _email_driver_mailgun() {
     # A crafted SMTP_FROM_EMAIL like user@host/path?q= would allow SSRF via
     # path traversal in the constructed curl URL.
     if [[ ! "$domain" =~ ^[a-zA-Z0-9.-]+$ ]]; then
-        log_error "Mailgun driver: invalid domain '${domain}' (failed hostname validation). Check MAILGUN_DOMAIN or SMTP_FROM_EMAIL."
+        log_error "Mailgun driver: invalid domain '${domain}' (failed hostname validation). Check MAILGUN_DOMAIN or SMTP_FROM."
         return 1
     fi
 
@@ -376,6 +385,8 @@ _email_driver_postmark() {
     local s b fn fe ae
     s=$(_email_json_escape "$subject")
     b=$(_email_json_escape "$body")
+    # FIX-M01: SMTP_FROM_EMAIL is DEPRECATED; canonical name is SMTP_FROM.
+    # This shim will be removed once all deployments have migrated to SMTP_FROM=.
     local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
     # FIX-M03: JSON-escape envelope fields. The Postmark driver uses inline
     # -d "{ ... }" rather than a heredoc, making unescaped quotes in display
@@ -441,6 +452,8 @@ _email_driver_resend() {
     local s b fn fe ae
     s=$(_email_json_escape "$subject")
     b=$(_email_json_escape "$body")
+    # FIX-M01: SMTP_FROM_EMAIL is DEPRECATED; canonical name is SMTP_FROM.
+    # This shim will be removed once all deployments have migrated to SMTP_FROM=.
     local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
     # FIX-M03: JSON-escape envelope fields
     fn=$(_email_json_escape "${SMTP_FROM_NAME:-VaultWarden}")
