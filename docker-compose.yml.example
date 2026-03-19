@@ -11,7 +11,9 @@
 # ✅ Log rotation limits on all runtime services (disk-fill prevention)
 # ✅ Init container uses find -exec chmod (glob-safe, no silent no-op on empty dirs)
 # ✅ vaultwarden network marked internal: true (no unnecessary outbound access)
+# ✅ caddy_external network for Caddy ACME + Cloudflare API egress only
 # ✅ Secret files mode 444 inside mode-700 directory (all Docker Engine versions)
+# ✅ fail2ban db directory root:root 755 (crazymax/fail2ban runs as root)
 
 services:
   # =============================================================================
@@ -36,7 +38,7 @@ services:
       mkdir -p /logs &&
       chown ${PUID}:${PGID} /logs &&
       mkdir -p /logs/vaultwarden /logs/caddy /logs/fail2ban /logs/postfix &&
-      chown -R ${PUID}:${PGID} /data /logs /fail2ban 2>/dev/null || true &&
+      chown -R ${PUID}:${PGID} /data /logs 2>/dev/null || true &&
       find /caddy_data -type d -exec chown ${PUID}:${PGID} {} + 2>/dev/null || true &&
       find /caddy_config -type d -exec chown ${PUID}:${PGID} {} + 2>/dev/null || true &&
       find /data -type d -exec chmod 750 {} + 2>/dev/null || true &&
@@ -47,8 +49,9 @@ services:
       find /caddy_data -type f -exec chmod 640 {} + 2>/dev/null || true &&
       find /caddy_config -type d -exec chmod 750 {} + 2>/dev/null || true &&
       find /caddy_config -type f -exec chmod 640 {} + 2>/dev/null || true &&
-      find /fail2ban -type d -exec chmod 750 {} + 2>/dev/null || true &&
-      find /fail2ban -type f -exec chmod 640 {} + 2>/dev/null || true &&
+      mkdir -p /fail2ban_db &&
+      chown 0:0 /fail2ban_db &&
+      chmod 755 /fail2ban_db &&
       chmod 700 /secrets /secrets/.docker_secrets 2>/dev/null || true &&
       find /secrets/.docker_secrets -type f -exec chmod 444 {} + 2>/dev/null || true &&
       echo 'Init container completed - permissions set to ${PUID}:${PGID}'
@@ -59,7 +62,11 @@ services:
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs:/logs
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/data:/caddy_data
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/config:/caddy_config
-      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/fail2ban:/fail2ban
+      # FIX: fail2ban db mounted separately as /fail2ban_db so init sets it
+      # root:root 755. crazymax/fail2ban runs as root and requires the db
+      # directory to be root-owned; the old /fail2ban mount inherited
+      # PUID:PGID ownership which blocked SQLite file creation.
+      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/fail2ban:/fail2ban_db
       - ${PWD}/secrets:/secrets
 
   # =============================================================================
@@ -75,11 +82,6 @@ services:
 
     depends_on:
       init-permissions:
-        # FIX [MEDIUM-depends_on]: ensure init-permissions has fully completed
-        # before vaultwarden starts. Without this condition, on a cold start
-        # Docker may launch vaultwarden (and fail2ban) before the init container
-        # has set directory ownership/permissions, causing permission-denied
-        # errors on /data and /logs at startup.
         condition: service_completed_successfully
 
     environment:
@@ -118,11 +120,9 @@ services:
       SMTP_TIMEOUT: ${SMTP_TIMEOUT:-15}
 
       # Push notifications (optional)
-      # WARNING: internal: true network blocks PUSH_RELAY_URI and
-      # PUSH_IDENTITY_URI outbound connections. If push notifications are
-      # required, either remove internal: true from the vaultwarden network
-      # or route push traffic through an egress proxy. See INTERNAL NETWORK
-      # NOTE in the deployment notes below.
+      # WARNING: vaultwarden network internal: true blocks PUSH_RELAY_URI and
+      # PUSH_IDENTITY_URI. Enable push only after adding vaultwarden_app to
+      # caddy_external or a dedicated egress network.
       PUSH_INSTALLATION_ID_FILE: /run/secrets/push_installation_id
       PUSH_INSTALLATION_KEY_FILE: /run/secrets/push_installation_key
 
@@ -144,9 +144,6 @@ services:
       - vaultwarden
 
     healthcheck:
-      # FIX [LOW-vaultwarden-healthcheck]: use 127.0.0.1 instead of localhost
-      # to prevent IPv6 (::1) resolution failure when the container listener
-      # is bound only to the IPv4 loopback interface.
       test: ["CMD", "curl", "-f", "http://127.0.0.1/alive"]
       interval: 30s
       timeout: 10s
@@ -182,6 +179,14 @@ services:
   # =============================================================================
   caddy:
     container_name: vaultwarden_caddy
+    # CaddyBuilds/caddy-cloudflare 2.11.1 — released 2026-02-24
+    # >= v2.11.0 bundles caddy-cloudflare-ip BY DEFAULT.
+    # This module rewrites remote_ip in access.log to the real client IP
+    # sourced from Cf-Connecting-Ip, which is mandatory for fail2ban Caddy
+    # filters to ban actual attackers instead of Cloudflare edge nodes.
+    # DO NOT downgrade below 2.11.0 without verifying the module is present:
+    #   docker run --rm ghcr.io/caddybuilds/caddy-cloudflare:<tag> caddy list-modules | grep cloudflare
+    #   Expected: http.ip_sources.cloudflare must appear in output
     image: ghcr.io/caddybuilds/caddy-cloudflare:${CADDY_VERSION:-2.11.1}
     restart: unless-stopped
     user: "${PUID}:${PGID}"
@@ -213,8 +218,8 @@ services:
       - "127.0.0.1:8080:8080"
 
     networks:
-      - vaultwarden       # reaches vaultwarden_app (internal)
-      - caddy_external    # internet egress for ACME DNS-01 + Cloudflare API
+      - vaultwarden      # reaches vaultwarden_app on the isolated internal network
+      - caddy_external   # internet egress for ACME DNS-01 challenges + Cloudflare API
 
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8080/alive"]
@@ -247,22 +252,8 @@ services:
           memory: 128M
           cpus: '0.1'
 
-# =============================================================================
-# Network Configuration
-# =============================================================================
-networks:
-  vaultwarden:
-    name: vaultwarden_network
-    driver: bridge
-    internal: true    # vaultwarden_app has no internet egress
-
-  caddy_external:
-    name: caddy_external_network
-    driver: bridge
-    # internal: false is the default — Caddy needs this for ACME + CF API
-
   # =============================================================================
-  # Postfix - Email Relay (Minimal Capabilities)
+  # Postfix - Email Relay (HARDENED - Minimal Capabilities)
   # =============================================================================
   postfix:
     container_name: vaultwarden_postfix
@@ -272,8 +263,6 @@ networks:
 
     depends_on:
       init-permissions:
-        # FIX [MEDIUM-depends_on]: postfix writes to /logs/postfix; init must
-        # complete first to ensure the directory exists with correct ownership.
         condition: service_completed_successfully
 
     environment:
@@ -354,17 +343,10 @@ networks:
     # HOST networking required for SSH iptables manipulation.
     # ACCEPTED RISK (NEW-3): host network_mode expands the attack surface and
     # bypasses Docker network isolation; this is a deliberate tradeoff.
-    # cap_add NET_ADMIN (+ NET_RAW) grants broad host network manipulation;
-    # consider pre-generating iptables rules via a privileged init container
-    # if further hardening is desired in future iterations.
     network_mode: host
 
     depends_on:
       init-permissions:
-        # FIX [MEDIUM-depends_on]: fail2ban sets inotify watches on log
-        # directories. On a cold start those directories may not exist or may
-        # have incorrect ownership until init-permissions completes, causing
-        # fail2ban to error and exit immediately.
         condition: service_completed_successfully
 
     environment:
@@ -383,6 +365,10 @@ networks:
 
     volumes:
       - ${PWD}/fail2ban:/data/fail2ban:ro
+      # FIX: db directory is now root:root 755 (set by init container above).
+      # crazymax/fail2ban runs as root and must own this directory to create
+      # and write fail2ban.sqlite3. Previously inherited PUID:PGID ownership
+      # caused "unable to open database file" on every startup.
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/fail2ban:/data/db
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/fail2ban:/var/log/fail2ban
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/vaultwarden:/var/log/vaultwarden:ro
@@ -446,34 +432,61 @@ networks:
   vaultwarden:
     name: vaultwarden_network
     driver: bridge
-    # WARNING: internal: true prevents ALL outbound connections from containers
-    # on this network, including PUSH_RELAY_URI and PUSH_IDENTITY_URI used by
-    # VaultWarden mobile push notifications. If push notifications are required:
-    #   1. Remove internal: true below, OR
-    #   2. Route push traffic via an egress proxy on a separate non-internal
-    #      network.
-    # Caddy handles all inbound external traffic via its published ports
-    # (80/443); no other service requires general egress.
+    # internal: true — vaultwarden_app and postfix have no internet egress.
+    # Caddy reaches vaultwarden_app via this network only (reverse proxy).
+    # Push notifications require either removing internal: true here or
+    # adding vaultwarden_app to caddy_external (adds egress risk).
     internal: true
+
+  caddy_external:
+    name: caddy_external_network
+    driver: bridge
+    # internal: false (default) — Caddy-only egress network.
+    # Required for:
+    #   1. ACME DNS-01 challenge: calls acme-v02.api.letsencrypt.org
+    #   2. Cloudflare DNS API: places/removes TXT challenge records
+    # No other service is attached to this network, so the blast radius
+    # of any Caddy compromise is limited to the Cloudflare API token scope.
 
 # =============================================================================
 # DEPLOYMENT NOTES - SECURITY HARDENED EDITION
 # =============================================================================
 #
-# VERSION PINS (updated 2026-02-27):
+# VERSION PINS (updated 2026-03-19):
 # - VaultWarden 1.35.4  — SECURITY release, upgrade mandatory
 # - Caddy 2.11.1        — caddy-cloudflare-ip bundled by default (>= 2.11.0)
 # - Fail2Ban 1.1.0-r3   — iptables-legacy fix
 # - Postfix 4.3.0       — latest stable
 #
+# NETWORK ARCHITECTURE:
+#
+#   [Internet] ──▶ caddy_external_network ──▶ [Caddy :80/:443]
+#                                                    │
+#                                          vaultwarden_network (internal)
+#                                                    │
+#                                    ┌───────────────┴────────────────┐
+#                               [VaultWarden]                    [Postfix]
+#
+#   Fail2Ban: host network (iptables access for SSH banning)
+#
+# CADDY EGRESS (caddy_external):
+# Only Caddy has internet egress, via caddy_external_network. This is the
+# minimum required for ACME DNS-01 certificate issuance and renewal via
+# the Cloudflare API. All other containers remain fully isolated.
+#
 # CADDY VERSION REQUIREMENT:
 # This stack requires caddy-cloudflare >= 2.11.0. The caddy-cloudflare-ip
 # module (http.ip_sources.cloudflare) is bundled by default from that version.
-# It rewrites remote_ip in access logs to the real client IP, which is
-# mandatory for all fail2ban Caddy-based jails to function correctly.
-# Verify the module is present after any Caddy image change:
+# Verify after any Caddy image change:
 #   docker run --rm ghcr.io/caddybuilds/caddy-cloudflare:2.11.1 caddy list-modules | grep cloudflare
 #   Must see: http.ip_sources.cloudflare
+#
+# FAIL2BAN DB DIRECTORY:
+# /var/lib/vaultwarden/fail2ban must be root:root 755 on the host.
+# The init container sets this automatically. If fail2ban reports
+# "unable to open database file", verify with:
+#   ls -la /var/lib/vaultwarden/fail2ban
+#   Must show: drwxr-xr-x root root
 #
 # SECURITY ENHANCEMENTS APPLIED:
 # ✅ Command injection protection (awk-based substitution in setup.sh)
@@ -483,16 +496,17 @@ networks:
 # ✅ Enhanced security headers (CORS, COOP, CORP, COEP)
 # ✅ Cloudflare WAF rate limiting (edge-based attack mitigation)
 # ✅ Modern isolation headers (Spectre mitigation)
-# ✅ Malicious user-agent blocking (scanner detection)
 # ✅ Init container capability restriction (CHOWN + FOWNER only)
 # ✅ Fail2Ban host networking for SSH protection
 # ✅ Postfix capabilities hardened (6 caps only)
 # ✅ WebSocket support enabled by default
 # ✅ Log rotation limits on all runtime services
 # ✅ Secret dirs chmod 700, secret files chmod 444 (world-read, dir-protected)
-# ✅ vaultwarden network internal: true (no container egress)
+# ✅ vaultwarden network internal: true (app/postfix no egress)
+# ✅ caddy_external network for Caddy ACME + Cloudflare API only
 # ✅ depends_on condition: service_completed_successfully for init-permissions
 # ✅ Healthchecks use 127.0.0.1 (IPv4-explicit, no ::1 ambiguity)
+# ✅ fail2ban db directory root:root 755 (fixed SQLite open failure)
 #
 # CLOUDFLARE RATE LIMITING (REQUIRED):
 # Configure these WAF rules in Cloudflare Dashboard:
@@ -514,9 +528,9 @@ networks:
 #
 # RESOURCE ALLOCATION (OPTIMIZED for <10 users on 6GB system):
 # - VaultWarden: 512M limit / 128M reservation
-# - Caddy: 512M limit / 128M reservation
-# - Fail2Ban: 512M limit / 128M reservation
-# - Postfix: 256M limit / 64M reservation (+ pids: 50)
+# - Caddy:       512M limit / 128M reservation
+# - Fail2Ban:    512M limit / 128M reservation
+# - Postfix:     256M limit /  64M reservation (+ pids: 50)
 # - Total limits: ~1.8GB (leaves 4.2GB for host OS and overhead)
 #
 # FAIL2BAN HOST NETWORKING IMPLICATIONS:
@@ -525,54 +539,40 @@ networks:
 # - SMTP configured for 127.0.0.1:587 (host-mode compatible)
 # - Cannot use networks: directive (mutually exclusive with network_mode: host)
 #
-# INTERNAL NETWORK NOTE:
-# The vaultwarden bridge network is marked internal: true. This means
-# containers cannot initiate outbound connections through it. Caddy
-# reaches the internet exclusively via its published ports. If any
-# container requires egress (e.g., VaultWarden push notifications,
-# external SMTP relay from within a container), either remove internal:
-# true or move that service to a separate non-internal network.
-#
 # POSTFIX SASL PASSWORD NOTE:
 # boky/postfix writes the SMTP relay password to /etc/postfix/sasl_passwd
-# inside the container (Postfix SASL requirement). This file is not exposed
-# on the host filesystem but is readable via `docker exec`. Restrict Docker
-# socket access to prevent unauthorised inspection.
+# inside the container (Postfix SASL requirement). Not exposed on the host
+# filesystem but readable via `docker exec`. Restrict Docker socket access.
 #
 # SECRET FILE PERMISSIONS:
-# Host-side secret files are created by startup.sh with umask 133 → mode 444
-# (r--r--r-- / world-readable). Docker Compose file-based secrets are plain
-# bind-mounts: the container sees the EXACT same permission bits as the host
-# file. Older Docker Engine versions silently ignore `uid`, `gid`, and `mode`
-# in the secrets block, so per-service permission overrides are not used.
-#
-# WHY 444 IS SAFE:
-#   The parent directory  secrets/.docker_secrets/  is mode 700 (rwx------)
-#   owned by root. An unprivileged OS user cannot traverse into it (execute
-#   bit on the directory is required to stat/open entries), so the world-read
-#   bit on individual files is unreachable without root access or an explicit
-#   bind-mount. This is the same security posture as Docker Swarm native
-#   secrets (also world-readable inside the container mount namespace).
+# Host-side secret files are mode 444 inside a mode-700 directory.
+# Docker Compose file-based secrets are plain bind-mounts — the container
+# sees the exact same permission bits. Older Docker Engine versions silently
+# ignore uid/gid/mode in the secrets block, so per-service overrides are
+# not used. The mode-700 parent directory prevents traversal by unprivileged
+# OS users despite the world-readable file bits.
 #
 # TESTING CHECKLIST:
-# □ Verify Caddy starts without errors: docker compose logs caddy
-# □ Verify caddy-cloudflare-ip module present:
+# □ Verify Caddy obtains cert:    docker logs -f vaultwarden_caddy
+#     Watch for: "certificate obtained successfully","identifier":"bw.lazymocha.com"
+# □ Verify site loads:            curl -I https://bw.lazymocha.com
+# □ Verify fail2ban db:           docker logs vaultwarden_fail2ban | grep -i error
+#     Must be silent (no "unable to open database file")
+# □ Verify caddy-cloudflare-ip:
 #     docker run --rm ghcr.io/caddybuilds/caddy-cloudflare:2.11.1 caddy list-modules | grep cloudflare
 #     Must see: http.ip_sources.cloudflare
-# □ Test basic auth works: curl -u admin:password https://vault.domain.com/admin
-# □ Verify secrets not in docker inspect: docker inspect vaultwarden_caddy | grep CLOUDFLARE
-# □ Test Postfix mail delivery: ./maintenance.sh --test-email --verbose
-# □ Test SSH ban works: Trigger 3 failed SSH attempts, verify iptables ban
-# □ Verify Fail2Ban can send email via 127.0.0.1:587
-# □ Confirm fail2ban sees real IPs: docker exec vaultwarden_fail2ban fail2ban-client status vaultwarden-web-auth
-# □ Test WebSocket sync: Enable in client, verify real-time notifications
-# □ Check resource usage: docker stats (should be under limits)
-# □ Verify host secret file perms: ls -la secrets/.docker_secrets/
-#     Must show: -r--r--r-- (mode 444) inside a drwx------ (mode 700) directory
-# □ Verify in-container secret perms: docker exec vaultwarden_app ls -la /run/secrets/
-#     Must show: -r--r--r-- (mode 444)
-# □ Verify network isolation: docker network inspect vaultwarden_network | grep Internal
-#     Must show: "Internal": true
+# □ Verify network isolation:
+#     docker network inspect vaultwarden_network | grep Internal  → "Internal": true
+#     docker network inspect caddy_external_network | grep Internal → "Internal": false
+# □ Verify fail2ban db dir perms: ls -la /var/lib/vaultwarden/fail2ban
+#     Must show: drwxr-xr-x root root
+# □ Test basic auth:              curl -u admin:password https://bw.lazymocha.com/admin
+# □ Verify secrets not exposed:   docker inspect vaultwarden_caddy | grep CLOUDFLARE
+# □ Test Postfix mail:            ./maintenance.sh --test-email --verbose
+# □ Test SSH ban:                 trigger 3 failed SSH attempts, verify iptables
+# □ Confirm fail2ban real IPs:
+#     docker exec vaultwarden_fail2ban fail2ban-client status vaultwarden-web-auth
+# □ Check resource usage:         docker stats
 #
 # PLATFORM COMPATIBILITY:
 # - SSH_LOG_PATH automatically detected by setup.sh
@@ -588,7 +588,7 @@ networks:
 # The postfix service grants exactly 6 capabilities (all others dropped):
 #   CHOWN, SETUID, SETGID, NET_BIND_SERVICE, DAC_OVERRIDE, FOWNER
 # DAC_OVERRIDE and FOWNER are required for mail spool access and must
-# not be removed. If mail delivery fails, verify these are present:
+# not be removed. Verify with:
 #   docker inspect vaultwarden_postfix | grep -A20 CapAdd
 #
 # =============================================================================
