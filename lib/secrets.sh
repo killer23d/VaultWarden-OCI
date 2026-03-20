@@ -536,10 +536,14 @@ auto_generate_secret_field() {
             vw_pass=$(generate_secure_string 32)
             {
                 printf '\n'
+                printf '\033[0;31m! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !\033[0m\n'
+                printf '\033[0;31m!\033[0m                                                             \033[0;31m!\033[0m\n'
                 printf '\033[0;31m AUTO-GENERATED VAULTWARDEN ADMIN PASSWORD:\033[0m\n'
                 printf '   \033[0;32m%s\033[0m\n' "$vw_pass"
                 printf '\n'
                 printf '\033[0;31m SAVE THIS PASSWORD SECURELY - It cannot be recovered!\033[0m\n'
+                printf '\033[0;31m!\033[0m                                                             \033[0;31m!\033[0m\n'
+                printf '\033[0;31m! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !\033[0m\n'
                 printf '\n'
             } > /dev/tty 2>/dev/null || {
                 log_warn "VaultWarden admin password auto-generated -- retrieve from recovery kit." >&2
@@ -560,10 +564,14 @@ auto_generate_secret_field() {
             caddy_pass=$(generate_secure_string 32)
             {
                 printf '\n'
+                printf '\033[0;31m! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !\033[0m\n'
+                printf '\033[0;31m!\033[0m                                                             \033[0;31m!\033[0m\n'
                 printf '\033[0;31m AUTO-GENERATED CADDY ADMIN PASSWORD:\033[0m\n'
                 printf '   \033[0;32m%s\033[0m\n' "$caddy_pass"
                 printf '\n'
                 printf '\033[0;31m SAVE THIS PASSWORD SECURELY - It cannot be recovered!\033[0m\n'
+                printf '\033[0;31m!\033[0m                                                             \033[0;31m!\033[0m\n'
+                printf '\033[0;31m! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !\033[0m\n'
                 printf '\n'
             } > /dev/tty 2>/dev/null || {
                 log_warn "Caddy admin password auto-generated -- retrieve from recovery kit." >&2
