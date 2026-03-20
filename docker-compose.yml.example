@@ -109,20 +109,25 @@ services:
       SHOW_PASSWORD_HINT: ${SHOW_PASSWORD_HINT:-false}
       IP_HEADER: CF-Connecting-IP
 
-      # Email configuration (via Postfix relay)
-      SMTP_HOST: ${SMTP_HOST:-}
+      # Email — VaultWarden → Postfix sidecar (same internal network, no egress needed)
+      # VW_SMTP_* vars point at the sidecar. SMTP_* vars (without VW_ prefix)
+      # are for the Postfix container's external relay config — do not mix them.
+      # Admin UI will show these defaults on first boot:
+      #   Host: postfix | Port: 587 | Security: Off | User/Pass: empty
+      SMTP_HOST: ${VW_SMTP_HOST:-postfix}
       SMTP_FROM: ${SMTP_FROM:-}
       SMTP_FROM_NAME: ${SMTP_FROM_NAME:-VaultWarden}
-      SMTP_PORT: ${SMTP_PORT:-587}
-      SMTP_SECURITY: ${SMTP_SECURITY:-starttls}
-      SMTP_USERNAME: ${SMTP_USERNAME:-}
-      SMTP_PASSWORD_FILE: /run/secrets/smtp_password
+      SMTP_PORT: ${VW_SMTP_PORT:-587}
+      SMTP_SECURITY: ${VW_SMTP_SECURITY:-off}
       SMTP_TIMEOUT: ${SMTP_TIMEOUT:-15}
 
       # Push notifications (optional)
-      # WARNING: vaultwarden network internal: true blocks PUSH_RELAY_URI and
-      # PUSH_IDENTITY_URI. Enable push only after adding vaultwarden_app to
-      # caddy_external or a dedicated egress network.
+      # Requires vaultwarden_app on caddy_external network (see networks: block below).
+      # vaultwarden_network internal: true blocks push.bitwarden.com — caddy_external
+      # provides the minimum egress needed. PUSH_ENABLED stays false until secrets
+      # are rotated via ./edit-secrets.sh --rotate push_installation_id / push_installation_key
+      PUSH_RELAY_URI: ${PUSH_RELAY_URI:-https://push.bitwarden.com}
+      PUSH_IDENTITY_URI: ${PUSH_IDENTITY_URI:-https://identity.bitwarden.com}
       PUSH_INSTALLATION_ID_FILE: /run/secrets/push_installation_id
       PUSH_INSTALLATION_KEY_FILE: /run/secrets/push_installation_key
 
@@ -132,7 +137,8 @@ services:
 
     secrets:
       - admin_token
-      - smtp_password
+      # smtp_password removed: VaultWarden → Postfix (plain, no auth).
+      # Postfix holds smtp_password for relay auth only.
       - push_installation_id
       - push_installation_key
 
@@ -141,7 +147,9 @@ services:
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/vaultwarden:/logs
 
     networks:
-      - vaultwarden
+      - vaultwarden     # internal: true — Caddy + Postfix on isolated network
+      - caddy_external  # internet egress for push.bitwarden.com only
+                        # Remove this line if push notifications are not needed.
 
     healthcheck:
       test: ["CMD", "curl", "-f", "http://127.0.0.1/alive"]
