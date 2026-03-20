@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # lib/secrets.sh - Shared secrets management functions
 # Used by edit-secrets.sh and setup-secrets.sh
+#
+# PATCHED BUGS (2026-03-20):
+#   UX: Color-coded password display in auto_generate_secret_field():
+#       - admin_token block: label lines now shown in red, password value in green.
+#       - admin_basic_auth_hash block: label lines now shown in red, password value in green.
+#       (These are UX improvements to password display coloring, not security fixes.)
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     echo "Error: This library should be sourced, not executed directly"
@@ -530,10 +536,10 @@ auto_generate_secret_field() {
             vw_pass=$(generate_secure_string 32)
             {
                 printf '\n'
-                printf ' AUTO-GENERATED VAULTWARDEN ADMIN PASSWORD:\n'
-                printf '   %s\n' "$vw_pass"
+                printf '\033[0;31m AUTO-GENERATED VAULTWARDEN ADMIN PASSWORD:\033[0m\n'
+                printf '   \033[0;32m%s\033[0m\n' "$vw_pass"
                 printf '\n'
-                printf ' SAVE THIS PASSWORD SECURELY - It cannot be recovered!\n'
+                printf '\033[0;31m SAVE THIS PASSWORD SECURELY - It cannot be recovered!\033[0m\n'
                 printf '\n'
             } > /dev/tty 2>/dev/null || {
                 log_warn "VaultWarden admin password auto-generated -- retrieve from recovery kit." >&2
@@ -554,10 +560,10 @@ auto_generate_secret_field() {
             caddy_pass=$(generate_secure_string 32)
             {
                 printf '\n'
-                printf ' AUTO-GENERATED CADDY ADMIN PASSWORD:\n'
-                printf '   %s\n' "$caddy_pass"
+                printf '\033[0;31m AUTO-GENERATED CADDY ADMIN PASSWORD:\033[0m\n'
+                printf '   \033[0;32m%s\033[0m\n' "$caddy_pass"
                 printf '\n'
-                printf ' SAVE THIS PASSWORD SECURELY - It cannot be recovered!\n'
+                printf '\033[0;31m SAVE THIS PASSWORD SECURELY - It cannot be recovered!\033[0m\n'
                 printf '\n'
             } > /dev/tty 2>/dev/null || {
                 log_warn "Caddy admin password auto-generated -- retrieve from recovery kit." >&2
