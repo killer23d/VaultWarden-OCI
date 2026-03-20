@@ -26,10 +26,12 @@
 #   FIX-M01  _smtp_send(): uses ${SMTP_FROM_EMAIL:-${SMTP_FROM:-}} so existing
 #            .env files with the legacy SMTP_FROM= variable continue to work
 #            without any changes. Canonical name is now SMTP_FROM_EMAIL.
-#   FIX-M02  send_email(): resolves <PROVIDER_UPPER>_API_TOKEN -> EMAIL_API_TOKEN
-#            automatically. MAILERSEND_API_TOKEN / SENDGRID_API_TOKEN etc. are
-#            picked up from secrets without also requiring EMAIL_API_TOKEN.
-#            Token is injected via inline env assignment to avoid global mutation.
+#   FIX-M02  send_email(): uses single canonical EMAIL_API_TOKEN env var for all
+#            providers. Token is loaded from SOPS key "email_api_key" and injected
+#            via inline env assignment to avoid global mutation.
+#            Per-provider key derivation (MAILERSEND_API_TOKEN etc.) removed;
+#            switching EMAIL_PROVIDER in .env is the only action needed to change
+#            provider — no re-keying of secrets.yaml required.
 #   FIX-M04  send_email(): EMAIL_MODE now implemented.
 #            Previously EMAIL_MODE was documented in .env.example but never read;
 #            all sends silently fell through all three stages regardless of the
@@ -755,6 +757,11 @@ Timestamp: $(date -uIs)
 Mode:      ${mode}${provider:+ / provider: ${provider}}"
 
     # ── Stage 1: HTTP API ────────────────────────────────────────────────
+    # TOKEN RESOLUTION: a single canonical key "email_api_key" is used for
+    # ALL providers. Changing EMAIL_PROVIDER in .env is the only action
+    # needed to switch providers; the token in secrets.yaml stays the same.
+    # EMAIL_API_TOKEN is the runtime env var all drivers read; it is injected
+    # here via inline assignment so the value is never globally exported.
     if [[ "$mode" == "auto" || "$mode" == "api" ]]; then
         if [[ -z "${_EMAIL_DRIVERS[$provider]:-}" ]]; then
             log_error "Unknown EMAIL_PROVIDER='${provider}'"
@@ -762,15 +769,15 @@ Mode:      ${mode}${provider:+ / provider: ${provider}}"
             [[ "$mode" == "api" ]] && return 1
         else
             local driver_fn="_email_driver_${provider}"
-            local _token_var="${provider^^}_API_TOKEN"
-            local _api_token="${!_token_var:-${EMAIL_API_TOKEN:-}}"
+            # Single canonical token source — no per-provider variable lookup.
+            local _api_token="${EMAIL_API_TOKEN:-}"
 
             if [[ -z "${_api_token}" ]]; then
                 if [[ "$mode" == "api" ]]; then
-                    log_error "EMAIL_MODE=api but ${_token_var} (and EMAIL_API_TOKEN) are empty — cannot send"
+                    log_error "EMAIL_MODE=api but EMAIL_API_TOKEN is empty — cannot send. Rotate with: ./edit-secrets.sh --rotate email_api_key"
                     return 1
                 fi
-                log_warn "EMAIL_PROVIDER=${provider} set but ${_token_var} (and EMAIL_API_TOKEN) are empty — falling back to SMTP"
+                log_warn "EMAIL_PROVIDER=${provider} set but EMAIL_API_TOKEN is empty — falling back to SMTP. Rotate with: ./edit-secrets.sh --rotate email_api_key"
             elif EMAIL_API_TOKEN="${_api_token}" "$driver_fn" "$subject" "$full_body"; then
                 log_success "Email sent via ${provider} API: ${subject}"
                 date +%s > "$stamp_file" 2>/dev/null || true

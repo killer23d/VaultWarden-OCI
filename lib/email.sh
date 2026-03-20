@@ -17,6 +17,17 @@
 # 3. Set EMAIL_PROVIDER=YOURPROVIDER in .env
 # No other files need changing.
 #
+# --- TOKEN RESOLUTION --------------------------------------------------------
+# All drivers receive the token exclusively via the EMAIL_API_TOKEN env var,
+# which is injected at call time by send_email() in lib/common.sh:
+#
+#   EMAIL_API_TOKEN="$(decrypt_secret email_api_key)" \
+#       _email_driver_PROVIDER "$subject" "$body"
+#
+# The secrets file stores ONE key:  email_api_key
+# Changing EMAIL_PROVIDER in .env is the only action required to switch
+# providers. The token value in secrets.yaml does NOT need re-keying.
+#
 # --- PROVIDER NOTES ----------------------------------------------------------
 # MailerSend  202 empty body (warnings may produce 202+JSON -- both = success)
 # SendGrid    202 empty body; content[] must be array of {type,value} objects
