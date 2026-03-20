@@ -103,8 +103,8 @@ _maybe_sudo() {
 
 _json_escape() {
     local s="$1"
-    s="${s//\\/\\\\}"   
-    s="${s//\"/\\\"}"   
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
     s="${s//$'\b'/\\b}"
     s="${s//$'\f'/\\f}"
     s="${s//$'\n'/\\n}"
@@ -117,7 +117,6 @@ run_check() {
     local component="$1"; shift
     local rc=0
     "$@" || rc=$?
-
     if [[ -z "${HEALTH_RESULTS[$component]+isset}" ]]; then
         HEALTH_RESULTS[$component]="skipped"
         HEALTH_DETAILS[$component]="Check exited prematurely (rc=${rc})"
@@ -635,10 +634,16 @@ test_email_notifications() {
     fi
 
     if [[ "$SEND_EMAIL" == "true" ]]; then
-        if [[ -z "${SMTP_PASSWORD:-}" ]]; then
-            health_log_error "SMTP_PASSWORD is not set - cannot send email (check secrets/secrets.yaml decryption)"
+        local provider="${EMAIL_PROVIDER:-smtp}"
+        local _token_var="${provider^^}_API_TOKEN"
+        local _api_token="${!_token_var:-${EMAIL_API_TOKEN:-}}"
+        local _has_api_token=false
+        [[ -n "$_api_token" ]] && _has_api_token=true
+
+        if [[ "$_has_api_token" == "false" && -z "${SMTP_PASSWORD:-}" ]]; then
+            health_log_error "No email credential available: ${_token_var} and SMTP_PASSWORD are both unset — check secrets/secrets.yaml decryption"
             HEALTH_RESULTS["email_notifications"]="failed"
-            HEALTH_DETAILS["email_notifications"]="SMTP_PASSWORD missing; secrets not loaded"
+            HEALTH_DETAILS["email_notifications"]="No API token or SMTP_PASSWORD; secrets not loaded"
             return 1
         fi
 
@@ -884,25 +889,67 @@ generate_json_report() {
     fi
 }
 
-_load_smtp_secret_from_sops() {
+_load_email_secrets_from_sops() {
     [[ "$SEND_EMAIL" != "true" ]] && return 0
-
-    [[ -n "${SMTP_PASSWORD:-}" ]] && return 0
 
     local secrets_file="${SECRETS_FILE:-secrets/secrets.yaml}"
     if [[ ! -f "$secrets_file" ]]; then
-        log_warn "_load_smtp_secret_from_sops: secrets file not found: $secrets_file"
+        log_warn "_load_email_secrets_from_sops: secrets file not found: $secrets_file"
         return 0
     fi
 
-    local smtp_pw
-    if smtp_pw=$(decrypt_secret "smtp_password" "$secrets_file" 2>/dev/null) \
-       && [[ -n "$smtp_pw" ]] \
-       && [[ "$smtp_pw" != CHANGE_ME* ]]; then
-        export SMTP_PASSWORD="$smtp_pw"
-        log_debug "_load_smtp_secret_from_sops: SMTP_PASSWORD loaded from SOPS"
-    else
-        log_warn "_load_smtp_secret_from_sops: smtp_password not found or is a placeholder in secrets.yaml"
+    local provider="${EMAIL_PROVIDER:-smtp}"
+    local _token_var="${provider^^}_API_TOKEN"
+
+    local _already_have_smtp=false
+    local _already_have_api=false
+    [[ -n "${SMTP_PASSWORD:-}"           ]] && _already_have_smtp=true
+    [[ -n "${!_token_var:-}"             ]] && _already_have_api=true
+    [[ -n "${EMAIL_API_TOKEN:-}"         ]] && _already_have_api=true
+    if [[ "$_already_have_smtp" == "true" && "$_already_have_api" == "true" ]]; then
+        log_debug "_load_email_secrets_from_sops: all credentials already set; skipping SOPS"
+        return 0
+    fi
+
+    if ! ensure_sops_env; then
+        log_warn "_load_email_secrets_from_sops: SOPS environment setup failed"
+        return 0
+    fi
+
+    if [[ "$_already_have_smtp" == "false" ]]; then
+        local smtp_pw
+        if smtp_pw=$(decrypt_secret "smtp_password" "$secrets_file" 2>/dev/null) \
+           && [[ -n "$smtp_pw" ]] \
+           && [[ "$smtp_pw" != CHANGE_ME* ]]; then
+            export SMTP_PASSWORD="$smtp_pw"
+            log_debug "_load_email_secrets_from_sops: SMTP_PASSWORD loaded from SOPS"
+        else
+            log_warn "_load_email_secrets_from_sops: smtp_password not found or is a placeholder"
+        fi
+    fi
+
+    if [[ "$_already_have_api" == "false" ]] \
+       && [[ "$provider" != "smtp" && "$provider" != "host" ]]; then
+        local sops_token_key="${provider,,}_api_token"
+        local api_token
+        if api_token=$(decrypt_secret "$sops_token_key" "$secrets_file" 2>/dev/null) \
+           && [[ -n "$api_token" ]] \
+           && [[ "$api_token" != CHANGE_ME* ]]; then
+            export "${_token_var}=${api_token}"
+            export EMAIL_API_TOKEN="${api_token}"
+            log_debug "_load_email_secrets_from_sops: ${_token_var} loaded from SOPS key '${sops_token_key}'"
+        else
+            local generic_token
+            if generic_token=$(decrypt_secret "email_api_token" "$secrets_file" 2>/dev/null) \
+               && [[ -n "$generic_token" ]] \
+               && [[ "$generic_token" != CHANGE_ME* ]]; then
+                export "${_token_var}=${generic_token}"
+                export EMAIL_API_TOKEN="${generic_token}"
+                log_debug "_load_email_secrets_from_sops: ${_token_var} loaded from SOPS key 'email_api_token' (fallback)"
+            else
+                log_warn "_load_email_secrets_from_sops: no API token found for provider '${provider}' (tried '${sops_token_key}' and 'email_api_token')"
+            fi
+        fi
     fi
 
     cleanup_secrets_environment 2>/dev/null || true
@@ -913,7 +960,7 @@ main() {
 
     load_env_file 2>/dev/null || true
 
-    _load_smtp_secret_from_sops
+    _load_email_secrets_from_sops
 
     health_log_info "VaultWarden-OCI Health Monitor - Set-and-Forget Edition"
     [[ "$AUTO_RECOVER" == "true" ]] && health_log_info "🔧 Auto-recovery enabled"
