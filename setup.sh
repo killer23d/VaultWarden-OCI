@@ -11,7 +11,7 @@ set +x
 #
 # Examples:
 #   SOPS_VERSION="v3.9.4"   <- pinned
-#   SOPS_VERSION=""          <- auto-resolve latest (default)
+#   SOPS_VERSION=""         <- auto-resolve latest (default)
 #
 # You may also override any of these from the environment before running:
 #   SOPS_VERSION=v3.9.4 sudo ./setup.sh --domain ...
