@@ -853,9 +853,14 @@ EOF
     if [[ -f "secrets/keys/age-key.txt" ]]; then
         local age_pub_key
         age_pub_key=$(get_age_public_key "secrets/keys/age-key.txt" 2>/dev/null || echo "MISSING")
+        local age_key_content
+        age_key_content=$(cat "secrets/keys/age-key.txt" 2>/dev/null || echo "ERROR: Could not read key file")
         printf 'SOPS Age Public Key:  %s%s%s\n' "${COLOR_GREEN}" "${age_pub_key}" "${COLOR_RESET}"
-        printf 'SOPS Age Private Key: %sCat secrets/keys/age-key.txt to view  (BACKUP THIS FILE!)%s\n' \
-            "${COLOR_RED}" "${COLOR_RESET}"
+        printf '\n%sSECRET KEY (BACKUP THIS FILE! - secrets/keys/age-key.txt):%s\n' "${COLOR_RED}" "${COLOR_RESET}"
+        printf '%s%s%s\n' "${COLOR_GREEN}" "${age_key_content}" "${COLOR_RESET}"
+        printf '\n%sTo view again at any time:%s\n' "${COLOR_RED}" "${COLOR_RESET}"
+        printf '  %scat secrets/keys/age-key.txt%s  %s(BACKUP THIS FILE!)%s\n' \
+            "${COLOR_GREEN}" "${COLOR_RESET}" "${COLOR_RED}" "${COLOR_RESET}"
     fi
 
     if [[ "$mode" == "auto" ]]; then
