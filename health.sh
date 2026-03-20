@@ -1,19 +1,5 @@
 #!/usr/bin/env bash
 # health.sh - Enhanced health monitoring for VaultWarden-OCI with auto-recovery
-# FIXED: BUG-V - sanitize user-data before embedding in JSON string fields
-# FIXED: BUG-W - read BACKUP_DIR from .env; fall back to PROJECT_ROOT/backups
-# FIXED: Auto-recovery single-container limit - per-container recovery (not first-only)
-# FIXED: H-M1 - use get_config_value() for DOMAIN in check_service_accessibility
-# FIXED: H-M2 - guard size_history_file with install -m 600 before writing
-# FIXED: H-L1 - add explicit parse-failure guard/log_warn in top CPU fallback
-# FIXED: H-L2 - vaultwarden-health.service ExecStart includes --auto-recover --email
-# FIXED: AUDIT-H1 - DNS pre-resolution guard in check_ssl_certificates prevents hang
-# FIXED: AUDIT-M1 - fail2ban check uses --json flag; version-stable output parsing
-# FIXED: AUDIT-M2 - disk space check includes absolute free-space thresholds
-# FIXED: AUDIT-M3 - check guards mark components 'skipped' on premature exit
-# FIXED: AUDIT-L1 - backup freshness uses verified-timestamp not mtime
-# FIXED: ISSUE-1  - load SMTP_PASSWORD from SOPS secrets before checks run so
-#                   --email invocations (e.g. from systemd) have the credential
 
 set -euo pipefail
 
@@ -37,7 +23,6 @@ ALERT_THRESHOLD=80
 OUTPUT_FILE=""
 RECOVERY_WAIT_TIME=30
 
-# Health check results storage
 declare -A HEALTH_RESULTS
 declare -A HEALTH_DETAILS
 OVERALL_STATUS="healthy"
@@ -78,7 +63,6 @@ CRON USAGE:
 EOF
 }
 
-# Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
         --comprehensive) COMPREHENSIVE=true; shift ;;
@@ -94,13 +78,11 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Logging helpers
 health_log_info() { [[ "$QUIET" == "true" ]] || log_info "$1"; }
 health_log_success() { [[ "$QUIET" == "true" ]] || log_success "$1"; }
 health_log_warn() { log_warn "$1"; ISSUES_FOUND+=("WARNING: $1"); }
 health_log_error() { log_error "$1"; ISSUES_FOUND+=("ERROR: $1"); CRITICAL_ISSUES+=("$1"); OVERALL_STATUS="unhealthy"; }
 
-# Run a command as root if needed (interactive -> sudo, non-interactive -> sudo -n)
 _maybe_sudo() {
     if is_root; then
         "$@"
@@ -112,7 +94,6 @@ _maybe_sudo() {
         return $?
     fi
 
-    # If running without a TTY (cron/non-interactive), don't prompt for password.
     if [[ -t 0 ]]; then
         sudo "$@"
     else
@@ -120,12 +101,10 @@ _maybe_sudo() {
     fi
 }
 
-# Escape a string for safe embedding inside a JSON double-quoted value.
-# Replaces \ -> \\, " -> \", and control characters \b \f \n \r \t.
 _json_escape() {
     local s="$1"
-    s="${s//\\/\\\\}"   # backslash first
-    s="${s//\"/\\\"}"   # double-quote
+    s="${s//\\/\\\\}"   
+    s="${s//\"/\\\"}"   
     s="${s//$'\b'/\\b}"
     s="${s//$'\f'/\\f}"
     s="${s//$'\n'/\\n}"
@@ -134,20 +113,11 @@ _json_escape() {
     printf '%s' "$s"
 }
 
-# ---------------------------------------------------------------------------
-# AUDIT-M3: run_check COMPONENT cmd [args...]
-#
-# Runs a check function under set +e and captures its exit code.  If the
-# function exits unexpectedly (e.g. via a nested set -e trap, a signal, or
-# an unhandled error) the component is recorded as 'skipped' and the overall
-# status is set to degraded so the report always reflects what ran.
-# ---------------------------------------------------------------------------
 run_check() {
     local component="$1"; shift
     local rc=0
     "$@" || rc=$?
-    # If the check set HEALTH_RESULTS for the component itself, honour it.
-    # If not (component key absent), the check exited prematurely — mark skipped.
+
     if [[ -z "${HEALTH_RESULTS[$component]+isset}" ]]; then
         HEALTH_RESULTS[$component]="skipped"
         HEALTH_DETAILS[$component]="Check exited prematurely (rc=${rc})"
@@ -157,23 +127,19 @@ run_check() {
     return 0
 }
 
-# Check if container is healthy
 container_is_healthy() {
     local container="$1"
 
-    # Check if container is running
     if ! docker ps --format '{{.Names}}' | grep -q "^${container}$"; then
         return 1
     fi
 
-    # Check health status
     local status
     status=$(docker inspect "$container" --format='{{.State.Health.Status}}' 2>/dev/null || echo "no-healthcheck")
 
     if [[ "$status" == "unhealthy" ]]; then
         return 1
     elif [[ "$status" == "no-healthcheck" ]]; then
-        # For containers without healthcheck, check if they're running
         local state
         state=$(docker inspect "$container" --format='{{.State.Status}}' 2>/dev/null || echo "unknown")
         [[ "$state" == "running" ]]
@@ -182,12 +148,10 @@ container_is_healthy() {
     fi
 }
 
-# Attempt automatic recovery of unhealthy container.
 attempt_container_recovery() {
     local container="$1"
     local service="$2"
 
-    # Check for maintenance lock file
     if [[ -f "/tmp/.vw_maintenance.lock" ]]; then
         log_warn "🔧 $service is stopped for planned maintenance. Skipping auto-recovery."
         return 0
@@ -195,12 +159,10 @@ attempt_container_recovery() {
 
     log_warn "🔧 Attempting automatic recovery of $service..."
 
-    # Attempt restart (once only)
     if docker compose restart "$service" 2>&1; then
         log_info "Restart command issued for $service, waiting ${RECOVERY_WAIT_TIME}s..."
         sleep "$RECOVERY_WAIT_TIME"
 
-        # Re-check health
         if container_is_healthy "$container"; then
             log_success "✅ Auto-recovery succeeded for $service"
             if [[ "$SEND_EMAIL" == "true" ]]; then
@@ -270,7 +232,6 @@ check_container_status() {
         fi
     done
 
-    # Re-check all containers after recovery attempts
     if [[ "$AUTO_RECOVER" == "true" ]] && \
        [[ ${#unhealthy_containers[@]} -gt 0 || ${#stopped_containers[@]} -gt 0 ]]; then
         unhealthy_containers=()
@@ -338,34 +299,19 @@ check_service_accessibility() {
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# AUDIT-M2: check_disk_space
-#
-# Checks both percentage-used and absolute free space.  Percentage alone
-# gives false confidence on large volumes (10 TB at 85% = 1.5 TB free) and
-# false alarms on small ones (10 GB at 79% = 2.1 GB free).  By also testing
-# absolute free KiB we catch the small-volume case regardless of percentage.
-#
-# Thresholds (absolute):
-#   WARN     < 2 GB free  (2 097 152 KiB)
-#   CRITICAL < 500 MB free (512 000 KiB)
-# ---------------------------------------------------------------------------
 check_disk_space() {
     health_log_info "Checking disk space usage..."
     local state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
 
-    # ── Helper: check one mount point ──────────────────────────────────────
     _check_mount() {
         local label="$1" mount="$2"
         local usage_percent free_kib
-        # df -k: columns are Filesystem 1K-blocks Used Available Use% Mounted
         read -r usage_percent free_kib < <(
             df -k "$mount" 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print $5, $4}'
         )
         usage_percent=${usage_percent:-0}
         free_kib=${free_kib:-0}
 
-        # Convert free KiB to human-readable for messages
         local free_human
         if   (( free_kib >= 1048576 )); then
             free_human="$(( free_kib / 1048576 )) GB"
@@ -375,16 +321,13 @@ check_disk_space() {
             free_human="${free_kib} KB"
         fi
 
-        # Critical: percentage threshold OR absolute < 500 MB
         if (( usage_percent > ALERT_THRESHOLD )) || (( free_kib < 512000 )); then
             health_log_error "CRITICAL: ${label} disk usage: ${usage_percent}% (${free_human} free)"
             HEALTH_RESULTS["disk_space"]="failed"
             HEALTH_DETAILS["disk_space"]="${label}: ${usage_percent}% used, ${free_human} free"
             return 1
-        # Warning: percentage > 70 OR absolute < 2 GB
         elif (( usage_percent > 70 )) || (( free_kib < 2097152 )); then
             health_log_warn "${label} disk usage high: ${usage_percent}% (${free_human} free)"
-            # Only downgrade to degraded; don't overwrite an existing failed state
             [[ "${HEALTH_RESULTS[disk_space]:-}" != "failed" ]] && {
                 HEALTH_RESULTS["disk_space"]="degraded"
                 HEALTH_DETAILS["disk_space"]="${label}: ${usage_percent}% used, ${free_human} free (warning)"
@@ -407,7 +350,6 @@ check_disk_space() {
         _check_mount "State dir (${state_dir})" "$state_dir" || disk_ok=false
     fi
 
-    # Ensure the key is always set even when both mounts pass
     if [[ -z "${HEALTH_RESULTS[disk_space]+isset}" ]]; then
         HEALTH_RESULTS["disk_space"]="healthy"
         HEALTH_DETAILS["disk_space"]="All mount points within thresholds"
@@ -416,24 +358,8 @@ check_disk_space() {
     [[ "$disk_ok" == "true" ]]
 }
 
-# ---------------------------------------------------------------------------
-# AUDIT-H1: check_ssl_certificates
-#
-# The previous implementation called `openssl s_client` directly behind a
-# `timeout 5` wrapper.  On systems where the domain resolves to NXDOMAIN,
-# the TCP connect() blocks for up to ~120 s (kernel retransmit timeout)
-# before the OS returns ECONNREFUSED — the `timeout 5` wrapping the
-# openssl *process* does kill it after 5 s, but only after the full TCP
-# timeout fires inside the kernel; on some distros/kernels the process-level
-# SIGTERM arrives after 2 min, not 5 s.
-#
-# Fix: resolve the domain with a 3-second deadline first.  If resolution
-# fails we emit a warning and skip the openssl call entirely, preventing
-# any TCP-level hang.
-# ---------------------------------------------------------------------------
 _resolve_domain() {
     local domain="$1"
-    # Try getent first (glibc, always present), then dig, then host.
     if command -v getent >/dev/null 2>&1; then
         timeout 3 getent hosts "$domain" >/dev/null 2>&1 && return 0
     fi
@@ -446,7 +372,6 @@ _resolve_domain() {
     if command -v host >/dev/null 2>&1; then
         timeout 3 host -W 3 "$domain" >/dev/null 2>&1 && return 0
     fi
-    # No resolver available — allow the openssl attempt to proceed (best effort)
     return 0
 }
 
@@ -469,7 +394,6 @@ check_ssl_certificates() {
 
     clean_domain=$(echo "$domain" | sed 's|https\?://||; s|/.*$||')
 
-    # AUDIT-H1: Pre-resolve the domain before opening a TCP connection.
     if ! _resolve_domain "$clean_domain"; then
         health_log_warn "SSL check skipped: domain '$clean_domain' does not resolve (NXDOMAIN or DNS timeout)"
         HEALTH_RESULTS["ssl_certificates"]="degraded"
@@ -535,7 +459,6 @@ check_database_growth() {
         local previous_size=0
         [[ -f "$size_history_file" ]] && previous_size=$(cat "$size_history_file" 2>/dev/null || echo "0")
 
-        # FIX (H-M2): Ensure the history file is created with mode 0600
         if [[ ! -f "$size_history_file" ]]; then
             install -m 600 /dev/null "$size_history_file" 2>/dev/null || true
         fi
@@ -569,14 +492,6 @@ check_database_growth() {
     fi
 }
 
-# ---------------------------------------------------------------------------
-# _verify_backup_decryptable
-#
-# AUDIT-L1: After a successful decryption-verify pass, write a
-# .vw_backup_verified.<basename> timestamp file.  check_backup_status() uses
-# the mtime of that verified-stamp instead of the backup file's own mtime for
-# freshness comparison.
-# ---------------------------------------------------------------------------
 _verify_backup_decryptable() {
     local backup_file="$1"
     local backup_type="$2"
@@ -600,7 +515,6 @@ _verify_backup_decryptable() {
         return 1
     fi
 
-    # AUDIT-L1: Write verified-timestamp
     local state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
     local stamp_file="${state_dir}/.vw_backup_verified.$(basename "$backup_file")"
     install -m 600 /dev/null "${stamp_file}.tmp" 2>/dev/null && \
@@ -610,12 +524,6 @@ _verify_backup_decryptable() {
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# _backup_verified_age_days FILE
-#
-# AUDIT-L1: Return (via stdout) the age in days of the verified-stamp for
-# FILE.  Falls back to the file's own mtime when no stamp exists.
-# ---------------------------------------------------------------------------
 _backup_verified_age_days() {
     local backup_file="$1"
     local state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
@@ -635,7 +543,6 @@ _backup_verified_age_days() {
 check_backup_status() {
     health_log_info "Checking backup status and integrity..."
 
-    # FIX (BUG-W): Read BACKUP_DIR from .env
     local backup_base_dir
     backup_base_dir="$PROJECT_ROOT/backups"
     if [[ -f ".env" ]]; then
@@ -710,20 +617,6 @@ check_backup_status() {
     fi
 }
 
-# ---------------------------------------------------------------------------
-# test_email_notifications
-#
-# ISSUE-1 FIX: When health.sh is invoked via the systemd service with --email,
-# SMTP_PASSWORD is never in the environment because load_env_file only reads
-# .env (plain key=value) and the password lives in secrets/secrets.yaml
-# (SOPS-encrypted).  _load_smtp_secret_from_sops() in main() resolves this
-# before checks begin, so by the time we reach here SMTP_PASSWORD is set.
-#
-# This function adds an explicit pre-flight guard: if SMTP_PASSWORD is still
-# empty when --email is passed, we mark the component failed immediately with
-# a clear message rather than letting send_notification_email fail silently
-# or produce a misleading SMTP auth error in the logs.
-# ---------------------------------------------------------------------------
 test_email_notifications() {
     health_log_info "Testing email notification functionality..."
     local admin_email
@@ -742,9 +635,6 @@ test_email_notifications() {
     fi
 
     if [[ "$SEND_EMAIL" == "true" ]]; then
-        # ISSUE-1 FIX: explicit SMTP_PASSWORD pre-flight guard.
-        # _load_smtp_secret_from_sops() already ran in main(); if the variable
-        # is still empty the secret is genuinely missing or SOPS failed.
         if [[ -z "${SMTP_PASSWORD:-}" ]]; then
             health_log_error "SMTP_PASSWORD is not set - cannot send email (check secrets/secrets.yaml decryption)"
             HEALTH_RESULTS["email_notifications"]="failed"
@@ -795,7 +685,6 @@ check_resource_usage() {
             cpu_usage=0
         fi
     else
-        # FIX (H-L1): Validate parsed value; warn and default to 0 on failure
         cpu_usage=$(top -bn1 | awk '/[Cc][Pp][Uu]/ && /[0-9]/ {
             for(i=1;i<=NF;i++) {
                 if ($i ~ /^[0-9.]+$/ && $(i-1) ~ /[uU][sS]/) { print $i; exit }
@@ -875,9 +764,6 @@ check_configuration() {
     fi
 }
 
-# ---------------------------------------------------------------------------
-# AUDIT-M1: check_security_status / check_fail2ban_status
-# ---------------------------------------------------------------------------
 _check_fail2ban_responding() {
     if docker exec vaultwarden_fail2ban sh -c \
             'fail2ban-client --json status 2>/dev/null' \
@@ -923,7 +809,6 @@ generate_report() {
     [[ "$JSON_OUTPUT" == "true" ]] && generate_json_report || generate_text_report
 }
 
-# FIX (BUG-U): Use printf '%b\n' instead of echo -e
 generate_text_report() {
     local report=""
     report+="VaultWarden-OCI Health Report - Set-and-Forget Edition\n"
@@ -961,7 +846,6 @@ generate_text_report() {
     fi
 }
 
-# FIX (BUG-V): Sanitize all user-controlled values before embedding in JSON
 generate_json_report() {
     local json_report="{"
     json_report+="\"timestamp\": \"$(date -Iseconds)\","
@@ -1000,32 +884,9 @@ generate_json_report() {
     fi
 }
 
-# ---------------------------------------------------------------------------
-# _load_smtp_secret_from_sops
-#
-# ISSUE-1 FIX: load_env_file reads only .env (plain key=value pairs).
-# SMTP_PASSWORD lives in secrets/secrets.yaml (SOPS-encrypted) and is never
-# exported into the process environment, so any --email invocation from
-# systemd (or cron) runs without the credential and silently fails.
-#
-# This function uses decrypt_secret() from lib/secrets.sh (already sourced
-# above) to extract smtp_password individually — no full plaintext JSON is
-# ever materialised — and exports SMTP_PASSWORD so send_notification_email
-# and the pre-flight guard in test_email_notifications() see it.
-#
-# Behaviour:
-#   - Skipped entirely when SEND_EMAIL=false (no SOPS call, no side-effects).
-#   - Skipped when SMTP_PASSWORD is already set (e.g. test overrides).
-#   - On SOPS failure: logs a warning and continues; the pre-flight guard in
-#     test_email_notifications() will then emit the actionable error.
-#   - Calls cleanup_secrets_environment() immediately after extraction so
-#     SOPS_AGE_KEY_FILE is not inherited by child processes (docker, curl…).
-# ---------------------------------------------------------------------------
 _load_smtp_secret_from_sops() {
-    # Nothing to do when email sending is disabled
     [[ "$SEND_EMAIL" != "true" ]] && return 0
 
-    # Honour an already-set variable (useful for testing / manual overrides)
     [[ -n "${SMTP_PASSWORD:-}" ]] && return 0
 
     local secrets_file="${SECRETS_FILE:-secrets/secrets.yaml}"
@@ -1044,21 +905,14 @@ _load_smtp_secret_from_sops() {
         log_warn "_load_smtp_secret_from_sops: smtp_password not found or is a placeholder in secrets.yaml"
     fi
 
-    # Immediately clean up SOPS env vars so child processes don't inherit the
-    # Age key file path (mirrors the BUG-S10 / LS-2 fixes in lib/secrets.sh).
     cleanup_secrets_environment 2>/dev/null || true
 }
 
 main() {
     require_root "$@"
 
-    # Load .env first (plain variables: DOMAIN, ADMIN_EMAIL, SMTP_HOST, etc.)
     load_env_file 2>/dev/null || true
 
-    # ISSUE-1 FIX: Load SMTP_PASSWORD from SOPS *after* .env so the credential
-    # is present before check_container_status -> attempt_container_recovery
-    # (which may call send_notification_email) and before
-    # test_email_notifications() runs its pre-flight guard.
     _load_smtp_secret_from_sops
 
     health_log_info "VaultWarden-OCI Health Monitor - Set-and-Forget Edition"
@@ -1066,9 +920,6 @@ main() {
     [[ "$COMPREHENSIVE" == "true" ]] && health_log_info "Running comprehensive health checks..." || \
         health_log_info "Running basic health checks..."
 
-    # Disable exit-on-error for the check loop; individual failures are non-fatal.
-    # run_check() wraps each call and marks components 'skipped' on premature exit
-    # (AUDIT-M3), ensuring the full report is always assembled and sent.
     set +e
 
     run_check "containers"          check_container_status
