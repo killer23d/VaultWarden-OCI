@@ -5,10 +5,11 @@ Description=VaultWarden DB Backup Timer daily 04:00
 Conflicts=shutdown.target
 
 [Timer]
-# SY-3: Changed from Mon-Sat to daily to close the ~47 h Saturday-night
-# backup gap (no DB snapshot was taken between Sat 04:00 and the Sunday
-# full backup at 03:00).
-OnCalendar=daily *-*-* 04:00:00
+# FIX: "daily *-*-* 04:00:00" was invalid — two calendar expressions on one
+# directive. "daily" is a shorthand for "*-*-* 00:00:00"; combining it with
+# an explicit timestamp is rejected by systemd as a bad unit file setting.
+# Correct form: use a single explicit timestamp expression.
+OnCalendar=*-*-* 04:00:00
 Persistent=true
 # P2-H: RandomizedDelaySec spreads post-reboot catch-up burst.
 # SSD-M3-timer: db-backup fires at 04:00 (+0-60s jitter), maintenance at
