@@ -4,6 +4,8 @@ Documentation=https://github.com/killer23d/VaultWarden-OCI
 After=docker.service network-online.target
 Requires=docker.service
 ConditionPathExists=/opt/vaultwarden-scripts/maintenance.sh
+# FIX: OnFailure belongs in [Unit], not [Service]. Moved from [Service] block.
+OnFailure=vaultwarden-notify-failure@%n.service
 
 [Service]
 Type=oneshot
@@ -20,5 +22,4 @@ PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths=/opt/vaultwarden-scripts /var/lib/vaultwarden /etc/vaultwarden
-OnFailure=vaultwarden-notify-failure@%n.service
 TimeoutStartSec=1800
