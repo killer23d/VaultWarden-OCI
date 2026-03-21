@@ -634,14 +634,11 @@ test_email_notifications() {
     fi
 
     if [[ "$SEND_EMAIL" == "true" ]]; then
-        local provider="${EMAIL_PROVIDER:-smtp}"
-        local _token_var="${provider^^}_API_TOKEN"
-        local _api_token="${!_token_var:-${EMAIL_API_TOKEN:-}}"
         local _has_api_token=false
-        [[ -n "$_api_token" ]] && _has_api_token=true
+        [[ -n "${EMAIL_API_TOKEN:-}" ]] && _has_api_token=true
 
         if [[ "$_has_api_token" == "false" && -z "${SMTP_PASSWORD:-}" ]]; then
-            health_log_error "No email credential available: ${_token_var} and SMTP_PASSWORD are both unset — check secrets/secrets.yaml decryption"
+            health_log_error "No email credential available: EMAIL_API_TOKEN env var and SMTP_PASSWORD are both unset — check that secrets.yaml key email_api_key decrypts successfully"
             HEALTH_RESULTS["email_notifications"]="failed"
             HEALTH_DETAILS["email_notifications"]="No API token or SMTP_PASSWORD; secrets not loaded"
             return 1
@@ -899,13 +896,11 @@ _load_email_secrets_from_sops() {
     fi
 
     local provider="${EMAIL_PROVIDER:-smtp}"
-    local _token_var="${provider^^}_API_TOKEN"
 
     local _already_have_smtp=false
     local _already_have_api=false
-    [[ -n "${SMTP_PASSWORD:-}"           ]] && _already_have_smtp=true
-    [[ -n "${!_token_var:-}"             ]] && _already_have_api=true
-    [[ -n "${EMAIL_API_TOKEN:-}"         ]] && _already_have_api=true
+    [[ -n "${SMTP_PASSWORD:-}"    ]] && _already_have_smtp=true
+    [[ -n "${EMAIL_API_TOKEN:-}"  ]] && _already_have_api=true
     if [[ "$_already_have_smtp" == "true" && "$_already_have_api" == "true" ]]; then
         log_debug "_load_email_secrets_from_sops: all credentials already set; skipping SOPS"
         return 0
@@ -928,27 +923,20 @@ _load_email_secrets_from_sops() {
         fi
     fi
 
+    # --- 2. API token — single canonical SOPS key for all providers ---------
+    # Secrets file always stores the token under "email_api_key" regardless of
+    # which EMAIL_PROVIDER is active. Switching providers requires only a
+    # .env change; no re-keying of secrets.yaml is needed.
     if [[ "$_already_have_api" == "false" ]] \
        && [[ "$provider" != "smtp" && "$provider" != "host" ]]; then
-        local sops_token_key="${provider,,}_api_token"
         local api_token
-        if api_token=$(decrypt_secret "$sops_token_key" "$secrets_file" 2>/dev/null) \
+        if api_token=$(decrypt_secret "email_api_key" "$secrets_file" 2>/dev/null) \
            && [[ -n "$api_token" ]] \
            && [[ "$api_token" != CHANGE_ME* ]]; then
-            export "${_token_var}=${api_token}"
             export EMAIL_API_TOKEN="${api_token}"
-            log_debug "_load_email_secrets_from_sops: ${_token_var} loaded from SOPS key '${sops_token_key}'"
+            log_debug "_load_email_secrets_from_sops: EMAIL_API_TOKEN loaded from SOPS key 'email_api_key'"
         else
-            local generic_token
-            if generic_token=$(decrypt_secret "email_api_token" "$secrets_file" 2>/dev/null) \
-               && [[ -n "$generic_token" ]] \
-               && [[ "$generic_token" != CHANGE_ME* ]]; then
-                export "${_token_var}=${generic_token}"
-                export EMAIL_API_TOKEN="${generic_token}"
-                log_debug "_load_email_secrets_from_sops: ${_token_var} loaded from SOPS key 'email_api_token' (fallback)"
-            else
-                log_warn "_load_email_secrets_from_sops: no API token found for provider '${provider}' (tried '${sops_token_key}' and 'email_api_token')"
-            fi
+            log_warn "_load_email_secrets_from_sops: email_api_key not found or is a placeholder in secrets.yaml — rotate with: ./edit-secrets.sh --rotate email_api_key"
         fi
     fi
 
