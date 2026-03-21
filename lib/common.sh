@@ -774,10 +774,10 @@ Mode:      ${mode}${provider:+ / provider: ${provider}}"
 
             if [[ -z "${_api_token}" ]]; then
                 if [[ "$mode" == "api" ]]; then
-                    log_error "EMAIL_MODE=api but EMAIL_API_TOKEN is empty — cannot send. Rotate with: ./edit-secrets.sh --rotate email_api_key"
+                    log_error "EMAIL_MODE=api but EMAIL_API_TOKEN is empty — cannot send. Run: ./edit-secrets.sh --rotate email_api_token"
                     return 1
                 fi
-                log_warn "EMAIL_PROVIDER=${provider} set but EMAIL_API_TOKEN is empty — falling back to SMTP. Rotate with: ./edit-secrets.sh --rotate email_api_key"
+                log_warn "EMAIL_PROVIDER=${provider} set but EMAIL_API_TOKEN is empty — falling back to SMTP. Run: ./edit-secrets.sh --rotate email_api_token"
             elif EMAIL_API_TOKEN="${_api_token}" "$driver_fn" "$subject" "$full_body"; then
                 log_success "Email sent via ${provider} API: ${subject}"
                 date +%s > "$stamp_file" 2>/dev/null || true
