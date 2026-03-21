@@ -886,6 +886,14 @@ generate_json_report() {
     fi
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# _load_email_secrets_from_sops
+#
+# API TOKEN RESOLUTION ORDER (matches edit-secrets.sh --rotate email_api_token):
+#   1. <PROVIDER_UPPER>_API_TOKEN  e.g. MAILGUN_API_TOKEN for EMAIL_PROVIDER=mailgun
+#      This is the key that edit-secrets.sh --rotate email_api_token actually writes.
+#   2. email_api_token             Generic/legacy fallback key.
+# ─────────────────────────────────────────────────────────────────────────────
 _load_email_secrets_from_sops() {
     [[ "$SEND_EMAIL" != "true" ]] && return 0
 
@@ -911,6 +919,7 @@ _load_email_secrets_from_sops() {
         return 0
     fi
 
+    # --- 1. SMTP password ---------------------------------------------------
     if [[ "$_already_have_smtp" == "false" ]]; then
         local smtp_pw
         if smtp_pw=$(decrypt_secret "smtp_password" "$secrets_file" 2>/dev/null) \
@@ -923,20 +932,31 @@ _load_email_secrets_from_sops() {
         fi
     fi
 
-    # --- 2. API token — single canonical SOPS key for all providers ---------
-    # Secrets file always stores the token under "email_api_key" regardless of
-    # which EMAIL_PROVIDER is active. Switching providers requires only a
-    # .env change; no re-keying of secrets.yaml is needed.
+    # --- 2. API token -------------------------------------------------------
+    # Resolution order (matches edit-secrets.sh --rotate email_api_token):
+    #   1. <PROVIDER_UPPER>_API_TOKEN  (e.g. MAILGUN_API_TOKEN)  — written by rotate
+    #   2. email_api_token             — generic/legacy fallback
     if [[ "$_already_have_api" == "false" ]] \
        && [[ "$provider" != "smtp" && "$provider" != "host" ]]; then
-        local api_token
-        if api_token=$(decrypt_secret "email_api_key" "$secrets_file" 2>/dev/null) \
+        local _provider_key="${provider^^}_API_TOKEN"
+        local api_token=""
+
+        # Try provider-specific key first (e.g. MAILGUN_API_TOKEN)
+        if api_token=$(decrypt_secret "$_provider_key" "$secrets_file" 2>/dev/null) \
            && [[ -n "$api_token" ]] \
-           && [[ "$api_token" != CHANGE_ME* ]]; then
+           && [[ "$api_token" != CHANGE_ME* ]] \
+           && [[ "$api_token" != NOT_USED* ]]; then
             export EMAIL_API_TOKEN="${api_token}"
-            log_debug "_load_email_secrets_from_sops: EMAIL_API_TOKEN loaded from SOPS key 'email_api_key'"
+            log_debug "_load_email_secrets_from_sops: EMAIL_API_TOKEN loaded from SOPS key '${_provider_key}'"
+        # Fall back to generic email_api_token key
+        elif api_token=$(decrypt_secret "email_api_token" "$secrets_file" 2>/dev/null) \
+           && [[ -n "$api_token" ]] \
+           && [[ "$api_token" != CHANGE_ME* ]] \
+           && [[ "$api_token" != NOT_USED* ]]; then
+            export EMAIL_API_TOKEN="${api_token}"
+            log_debug "_load_email_secrets_from_sops: EMAIL_API_TOKEN loaded from SOPS key 'email_api_token' (generic fallback)"
         else
-            log_warn "_load_email_secrets_from_sops: email_api_key not found or is a placeholder in secrets.yaml — rotate with: ./edit-secrets.sh --rotate email_api_key"
+            log_warn "_load_email_secrets_from_sops: no API token found for provider '${provider}' in secrets.yaml — run: ./edit-secrets.sh --rotate email_api_token"
         fi
     fi
 
