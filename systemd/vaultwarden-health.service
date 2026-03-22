@@ -4,17 +4,12 @@ Documentation=https://github.com/killer23d/VaultWarden-OCI
 After=docker.service network-online.target
 Requires=docker.service
 ConditionPathExists=/opt/vaultwarden-scripts/health.sh
-# FIX: OnFailure belongs in [Unit], not [Service]. Moved from [Service] block.
 OnFailure=vaultwarden-notify-failure@%n.service
 
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/vaultwarden-scripts
 EnvironmentFile=/etc/vaultwarden/vaultwarden.env
-# FIX (H-L2): Include --auto-recover and --email so that timer-driven runs
-# perform self-healing and send alerts as the "set-and-forget" design intends.
-# To run in passive/observe-only mode instead, remove those two flags and add
-# --quiet so failures are still journalled without triggering recovery actions.
 ExecStart=/opt/vaultwarden-scripts/health.sh --auto-recover --email
 User=root
 StandardOutput=journal
@@ -22,7 +17,6 @@ StandardError=journal
 SyslogIdentifier=vw-health
 NoNewPrivileges=yes
 PrivateTmp=yes
-# SY-1: Sandbox hardening — script can only write to its own directories.
 ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths=/opt/vaultwarden-scripts /var/lib/vaultwarden /etc/vaultwarden
