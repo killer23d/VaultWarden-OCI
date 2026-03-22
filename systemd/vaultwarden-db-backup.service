@@ -4,7 +4,6 @@ Documentation=https://github.com/killer23d/VaultWarden-OCI
 After=docker.service network-online.target
 Requires=docker.service
 ConditionPathExists=/opt/vaultwarden-scripts/backup.sh
-# FIX: OnFailure belongs in [Unit], not [Service]. Moved from [Service] block.
 OnFailure=vaultwarden-notify-failure@%n.service
 
 [Service]
@@ -18,9 +17,7 @@ StandardError=journal
 SyslogIdentifier=vw-db-backup
 NoNewPrivileges=yes
 PrivateTmp=yes
-# SY-1: Sandbox hardening — script can only write to its own directories.
 ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths=/opt/vaultwarden-scripts /var/lib/vaultwarden /etc/vaultwarden
-# Raise timeout: rclone sync to OCI Object Storage can be slow
 TimeoutStartSec=3600
