@@ -12,10 +12,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$SCRIPT_DIR"
-cd "$PROJECT_ROOT"
 
-source "lib/common.sh"
+source "$SCRIPT_DIR/lib/common.sh"
 init_common_lib "$0"
 
 INSTALL=false
@@ -26,7 +24,7 @@ DRY_RUN=false
 
 _ORIG_ARGS=("$@")
 
-UNIT_SOURCE_DIR="$PROJECT_ROOT/systemd"
+UNIT_SOURCE_DIR="$SCRIPT_DIR/systemd"
 UNIT_DEST_DIR="/etc/systemd/system"
 OPT_SCRIPTS_DIR="/opt/vaultwarden-scripts"
 ENV_DIR="/etc/vaultwarden"
@@ -68,7 +66,7 @@ OPTIONS:
 
 WHAT --install DOES:
     1. Copies maintenance.sh, backup.sh, health.sh -> /opt/vaultwarden-scripts/
-       (root:root 700, with SCRIPT_DIR + lib/ source paths patched)
+       (root:root 700; scripts are self-locating via BASH_SOURCE[0])
     2. Copies lib/ -> /opt/vaultwarden-scripts/lib/ (root:root 640)
     3. Copies .env -> /etc/vaultwarden/vaultwarden.env (root:root 600)
        (skipped if the EnvironmentFile already exists; warns if content differs)
@@ -139,29 +137,6 @@ _sha256() {
 }
 
 # ---------------------------------------------------------------------------
-# _sed_patch SRC DST
-#
-# Patches a script for installation into OPT_SCRIPTS_DIR:
-#   - SCRIPT_DIR   -> OPT_SCRIPTS_DIR  (where the script lives post-install)
-#   - PROJECT_ROOT -> OPT_SCRIPTS_DIR  (BUG-SY3: must NOT point at the git
-#     repo checkout; installed scripts must be self-contained in /opt/ so
-#     they keep working if the repo is moved or the ubuntu home dir changes)
-#   - source "lib/ -> source "$SCRIPT_DIR/lib/  (resolve lib relative to opt)
-#
-# Uses ASCII SOH (\001) as sed delimiter to survive paths containing |.
-# ---------------------------------------------------------------------------
-_sed_patch() {
-    local src="$1" dst="$2"
-    local D
-    D=$'\001'
-    sed \
-        -e "s${D}^SCRIPT_DIR=.*${D}SCRIPT_DIR=\"${OPT_SCRIPTS_DIR}\"${D}" \
-        -e "s${D}^PROJECT_ROOT=\"\$SCRIPT_DIR\"${D}PROJECT_ROOT=\"${OPT_SCRIPTS_DIR}\"${D}" \
-        -e "s${D}source \"lib/${D}source \"\$SCRIPT_DIR/lib/${D}g" \
-        "$src" > "$dst"
-}
-
-# ---------------------------------------------------------------------------
 # install_units
 # ---------------------------------------------------------------------------
 install_units() {
@@ -181,7 +156,7 @@ install_units() {
     _run mkdir -p "$OPT_SCRIPTS_DIR"
 
     if [[ "$DRY_RUN" == "false" ]]; then
-        cp -rP "$PROJECT_ROOT/lib" "$OPT_SCRIPTS_DIR/"
+        cp -rP "$SCRIPT_DIR/lib" "$OPT_SCRIPTS_DIR/"
         find "$OPT_SCRIPTS_DIR/lib" -type f -exec chmod 640 {} +  2>/dev/null || true
         find "$OPT_SCRIPTS_DIR/lib" -type d -exec chmod 750 {} +  2>/dev/null || true
         chown -R root:root "$OPT_SCRIPTS_DIR/lib"
@@ -192,22 +167,13 @@ install_units() {
 
     if [[ "$DRY_RUN" == "false" ]] && [[ ! -f "$OPT_SCRIPTS_DIR/lib/simple_key_resilience.sh" ]]; then
         log_error "CRITICAL: lib/simple_key_resilience.sh missing from repo -- key health checks disabled."
-        log_error "Ensure lib/simple_key_resilience.sh exists in: $PROJECT_ROOT/lib/"
+        log_error "Ensure lib/simple_key_resilience.sh exists in: $SCRIPT_DIR/lib/"
         return 1
     fi
 
-    local -a _tmpfiles=()
-    _cleanup_tmpfiles() {
-        local f
-        for f in "${_tmpfiles[@]:-}"; do
-            rm -f "$f" 2>/dev/null || true
-        done
-    }
-    trap '_cleanup_tmpfiles' EXIT
-
     local scripts_to_install=(maintenance.sh backup.sh health.sh)
     for script in "${scripts_to_install[@]}"; do
-        local src="$PROJECT_ROOT/$script"
+        local src="$SCRIPT_DIR/$script"
         if [[ ! -f "$src" ]]; then
             log_warn "Script not found, skipping: $src"
             continue
@@ -216,53 +182,10 @@ install_units() {
             log_info "[DRY RUN] Would install: $OPT_SCRIPTS_DIR/$script"
             continue
         fi
-
-        local tmp_script
-        tmp_script=$(mktemp "${TMPDIR:-/tmp}/vw-patch-XXXXXX")
-        _tmpfiles+=("$tmp_script")
-
-        if ! _sed_patch "$src" "$tmp_script"; then
-            log_error "sed patching failed for $script; aborting install."
-            return 1
-        fi
-
-        local tmp_verify
-        tmp_verify=$(mktemp "${TMPDIR:-/tmp}/vw-verify-XXXXXX")
-        _tmpfiles+=("$tmp_verify")
-        if ! _sed_patch "$src" "$tmp_verify"; then
-            log_error "sed verification pass failed for $script; aborting install."
-            return 1
-        fi
-        local expected_hash actual_hash
-        expected_hash=$(_sha256 "$tmp_verify")
-        actual_hash=$(_sha256 "$tmp_script")
-        if [[ "$expected_hash" != "$actual_hash" ]]; then
-            log_error "Content hash mismatch after patching $script:"
-            log_error "  expected sha256: $expected_hash"
-            log_error "  actual   sha256: $actual_hash"
-            log_error "Refusing to deploy a potentially corrupted file."
-            return 1
-        fi
-        # Belt-and-suspenders: also check line count floor
-        local src_lines installed_lines
-        src_lines=$(wc -l < "$src")
-        installed_lines=$(wc -l < "$tmp_script")
-        if (( installed_lines < src_lines - 1 )); then
-            log_error "Line count mismatch after patching $script:"
-            log_error "  source=${src_lines} lines  installed=${installed_lines} lines"
-            log_error "Refusing to deploy a potentially truncated file."
-            return 1
-        fi
-
-        chmod 700 "$tmp_script"
-        chown root:root "$tmp_script"
-        mv "$tmp_script" "$OPT_SCRIPTS_DIR/$script"
+        install -m 700 -o root -g root "$src" "$OPT_SCRIPTS_DIR/$script"
         log_success "Installed: $OPT_SCRIPTS_DIR/$script"
     done
     [[ "$DRY_RUN" == "false" ]] && chown root:root "$OPT_SCRIPTS_DIR" || true
-
-    trap - EXIT
-    _cleanup_tmpfiles
 
     # ------------------------------------------------------------------
     # 2. Create EnvironmentFile at /etc/vaultwarden/vaultwarden.env
@@ -273,8 +196,8 @@ install_units() {
         chmod 700 "$ENV_DIR"
         chown root:root "$ENV_DIR"
         if [[ ! -f "$ENV_FILE" ]]; then
-            if [[ -f "$PROJECT_ROOT/.env" ]]; then
-                cp "$PROJECT_ROOT/.env" "$ENV_FILE"
+            if [[ -f "$SCRIPT_DIR/.env" ]]; then
+                cp "$SCRIPT_DIR/.env" "$ENV_FILE"
                 chmod 600 "$ENV_FILE"
                 chown root:root "$ENV_FILE"
                 log_success "Copied .env -> $ENV_FILE"
@@ -288,9 +211,9 @@ install_units() {
         else
             # FIX-S11: Compare checksums and warn on drift after initial install.
             log_info "$ENV_FILE already exists -- checking for drift ..."
-            if [[ -f "$PROJECT_ROOT/.env" ]]; then
+            if [[ -f "$SCRIPT_DIR/.env" ]]; then
                 local repo_sum installed_sum
-                repo_sum=$(_sha256 "$PROJECT_ROOT/.env")
+                repo_sum=$(_sha256 "$SCRIPT_DIR/.env")
                 installed_sum=$(_sha256 "$ENV_FILE")
                 if [[ "$repo_sum" != "$installed_sum" ]]; then
                     log_warn "────────────────────────────────────────────────────────────────"
@@ -300,7 +223,7 @@ install_units() {
                     log_warn "New variables added to .env after initial setup will NOT be"
                     log_warn "visible to systemd units until $ENV_FILE is updated."
                     log_warn "Review differences and merge manually:"
-                    log_warn "  diff $PROJECT_ROOT/.env $ENV_FILE"
+                    log_warn "  diff $SCRIPT_DIR/.env $ENV_FILE"
                     log_warn "Then run: sudo ./setup-systemd.sh --install to re-copy."
                     log_warn "  (Back up $ENV_FILE first — it may contain live credentials)"
                     log_warn "────────────────────────────────────────────────────────────────"
@@ -476,38 +399,19 @@ validate_installation() {
     fi
 
     log_info "[6/6] Checking for split-brain (sha256 repo vs installed) ..."
-    local -a _validate_tmpfiles=()
-    _cleanup_validate_tmpfiles() {
-        local f
-        for f in "${_validate_tmpfiles[@]:-}"; do
-            rm -f "$f" 2>/dev/null || true
-        done
-    }
-    trap '_cleanup_validate_tmpfiles' RETURN
-
     for script in "${scripts_to_check[@]}"; do
-        local repo_src="$PROJECT_ROOT/$script"
+        local repo_src="$SCRIPT_DIR/$script"
         local installed="$OPT_SCRIPTS_DIR/$script"
         if [[ ! -f "$repo_src" || ! -f "$installed" ]]; then
             continue
         fi
 
-        local tmp_patched
-        tmp_patched=$(mktemp "${TMPDIR:-/tmp}/vw-validate-XXXXXX")
-        _validate_tmpfiles+=("$tmp_patched")
-
-        if ! _sed_patch "$repo_src" "$tmp_patched"; then
-            log_error "  ERROR: sed patch failed for $script during validation."
-            (( errors++ )) || true
-            continue
-        fi
-
         local expected_sum actual_sum
-        expected_sum=$(_sha256 "$tmp_patched")
+        expected_sum=$(_sha256 "$repo_src")
         actual_sum=$(_sha256 "$installed")
         if [[ "$expected_sum" != "$actual_sum" ]]; then
-            log_warn "  STALE: $installed does not match patched repo source"
-            log_warn "         expected sha256: $expected_sum"
+            log_warn "  STALE: $installed does not match repo source"
+            log_warn "         repo      sha256: $expected_sum"
             log_warn "         installed sha256: $actual_sum"
             log_warn "         Re-run: sudo ./setup-systemd.sh --install"
             (( warnings++ )) || true
