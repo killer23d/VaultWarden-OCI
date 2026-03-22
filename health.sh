@@ -5,8 +5,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR"
-# BUG-SY3: Do NOT cd into SCRIPT_DIR. When installed to /opt/vaultwarden-scripts/
-# this is wrong for all relative data paths. All paths are absolute below.
 
 source "$SCRIPT_DIR/lib/common.sh"
 init_common_lib "$0"
@@ -14,8 +12,6 @@ source "$SCRIPT_DIR/lib/docker.sh"
 source "$SCRIPT_DIR/lib/crypto.sh"
 source "$SCRIPT_DIR/lib/secrets.sh"
 
-# ENV_DIR: where vaultwarden.env lives (populated by EnvironmentFile= in the
-# service unit, but some functions also read it directly for specific keys).
 ENV_DIR="${ENV_DIR:-/etc/vaultwarden}"
 ENV_FILE="$ENV_DIR/vaultwarden.env"
 
@@ -391,7 +387,6 @@ check_ssl_certificates() {
     health_log_info "Checking SSL certificate expiration..."
     local domain clean_domain
 
-    # BUG-SY3: read from the absolute ENV_FILE path, not from a relative .env
     if [[ -f "$ENV_FILE" ]]; then
         domain=$(grep "^DOMAIN=" "$ENV_FILE" | head -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" || echo "")
     else
@@ -510,7 +505,6 @@ _verify_backup_decryptable() {
     local backup_type="$2"
     [[ -z "$backup_file" || ! -f "$backup_file" ]] && return 0
 
-    # BUG-SY3: age key lives in the repo secrets dir; use SCRIPT_DIR to find it
     local age_key_file="${DEFAULT_AGE_KEY_FILE:-$SCRIPT_DIR/secrets/keys/age-key.txt}"
     [[ ! -f "$age_key_file" ]] && {
         health_log_error "CRITICAL: Age key file missing: $age_key_file"
@@ -557,8 +551,6 @@ _backup_verified_age_days() {
 check_backup_status() {
     health_log_info "Checking backup status and integrity..."
 
-    # BUG-SY3: BACKUP_DIR is resolved via get_config_value which reads the
-    # EnvironmentFile (already loaded by systemd). Fall back to absolute default.
     local backup_base_dir
     backup_base_dir="${BACKUP_DIR:-/var/lib/vaultwarden/backups}"
     if [[ -f "$ENV_FILE" ]]; then
@@ -637,7 +629,6 @@ test_email_notifications() {
     health_log_info "Testing email notification functionality..."
     local admin_email
 
-    # BUG-SY3: read from absolute ENV_FILE, not relative .env
     if [[ -f "$ENV_FILE" ]]; then
         admin_email=$(grep "^ADMIN_EMAIL=" "$ENV_FILE" | head -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" || echo "")
     else
@@ -752,7 +743,6 @@ check_configuration() {
 
     local config_issues=()
 
-    # BUG-SY3: check ENV_FILE at its absolute path, not relative .env
     if [[ ! -f "$ENV_FILE" ]]; then
         config_issues+=("Missing env file: $ENV_FILE")
     else
@@ -766,13 +756,11 @@ check_configuration() {
     if [[ ! -f "$secrets_file" ]]; then
         config_issues+=("Missing secrets.yaml file")
     else
-        # BUG-SY3: call edit-secrets.sh by absolute path
         if ! "$SCRIPT_DIR/edit-secrets.sh" --list >/dev/null 2>&1; then
             config_issues+=("Secrets decryption failed")
         fi
     fi
 
-    # BUG-SY3: docker compose needs --project-directory when CWD is /opt/
     local compose_dir
     compose_dir="$(find /var/lib/vaultwarden /opt/vaultwarden-scripts -maxdepth 2 \
         -name "docker-compose.yml" -o -name "docker-compose.yaml" 2>/dev/null | head -1 | xargs -I{} dirname {} || true)"
@@ -815,11 +803,9 @@ check_security_status() {
     _check_fail2ban_responding 2>/dev/null || \
         security_issues+=("fail2ban not responding")
 
-    # BUG-SY3: age key path uses SCRIPT_DIR
     local age_key_file="${DEFAULT_AGE_KEY_FILE:-$SCRIPT_DIR/secrets/keys/age-key.txt}"
     check_age_key "$age_key_file" || security_issues+=("Age key validation failed")
 
-    # BUG-SY3: .sops.yaml lives in the repo, use SCRIPT_DIR
     if [[ -f "$SCRIPT_DIR/.sops.yaml" ]]; then
         grep -q "age:" "$SCRIPT_DIR/.sops.yaml" || security_issues+=("SOPS configuration missing Age key")
     else
@@ -921,7 +907,6 @@ generate_json_report() {
 _load_email_secrets_from_sops() {
     [[ "$SEND_EMAIL" != "true" ]] && return 0
 
-    # BUG-SY3: secrets file is relative to the repo/SCRIPT_DIR
     local secrets_file="${SECRETS_FILE:-$SCRIPT_DIR/secrets/secrets.yaml}"
     if [[ ! -f "$secrets_file" ]]; then
         log_warn "_load_email_secrets_from_sops: secrets file not found: $secrets_file"
