@@ -11,39 +11,15 @@
 #   sudo ./systemd-setup.sh --status     # Show timer/service status
 #   sudo ./systemd-setup.sh --dry-run    # Print actions without executing
 #
-# FIX-S06  (2026-03-09): --validate subcommand added. Checks scripts,
-#          lib/, unit files, timer enablement, EnvironmentFile permissions,
-#          and split-brain (installed-vs-repo staleness). Safe for CI/CD.
-# FIX-S07  (2026-03-09): Script patching no longer uses $() command
-#          substitution. bash $() strips trailing newlines silently.
-#          Patched content is now written via sed directly into a mktemp
-#          file; a line-count sanity check aborts on truncation.
-# FIX-S08  (2026-03-09): --remove now emits a prominent warning that
-#          /etc/vaultwarden/vaultwarden.env was intentionally left in
-#          place and may contain credentials.
-# FIX-S09  (2026-03-09): --validate now requires root. /etc/vaultwarden/
-#          is chmod 700 (root-only); running as non-root caused stat() to
-#          return "unknown" permissions (spurious WARN) and systemctl
-#          is-enabled to give inaccurate results on some D-Bus configs.
-# FIX-S10  (2026-03-10): SSD-H1  — tmp file cleanup uses a _tmpfiles
-#          finaliser array + single EXIT trap outside the per-script loop.
-# FIX-S11  (2026-03-10): SSD-M1  — .env vs vaultwarden.env checksum diff
-#          warns operator when variables have been added after first install.
-# FIX-S12  (2026-03-10): SSD-M2  — split-brain check [6/6] uses sha256sum
-#          content comparison instead of -nt mtime comparison.
-# FIX-S13  (2026-03-11): AUDIT   — sed delimiter changed from | to \001
-#          (ASCII SOH) to avoid breakage when paths contain |.
-# FIX-S14  (2026-03-11): AUDIT   — expected_sum uses temp file to avoid
-#          silent empty hash on sed failure (false-positive STALE).
-# FIX-S15  (2026-03-11): AUDIT   — remove_units() logs timer disable
-#          failures instead of hiding them behind 2>/dev/null || true.
-# FIX-S16  (2026-03-11): AUDIT   — install line-count check upgraded to
-#          sha256 content comparison to catch content corruption.
-# FIX-S17  (2026-03-11): AUDIT   — find -exec {} \; → -exec {} + for
-#          efficiency (one chmod call per batch, not per file).
-# FIX-S18  (2026-03-11): AUDIT   — show_status() wraps systemctl status
-#          in { ...; } || true so inactive-service non-zero exit does
-#          not abort the loop under set -e.
+# BUG-SY2  (2026-03-21): chmod 700 + chown now applied to tmpfile BEFORE
+#          mv so the installed script is never transiently non-executable.
+#          Previously chmod ran after mv — a window existed where systemd
+#          could exec the file and receive EACCES (Permission denied).
+# BUG-SY3  (2026-03-21): _sed_patch() now substitutes PROJECT_ROOT with
+#          OPT_SCRIPTS_DIR (/opt/vaultwarden-scripts) instead of the git
+#          repo checkout path. Installed scripts must be self-contained in
+#          /opt/ and must not reference the repo location, which can change
+#          or be deleted entirely after install.
 
 set -euo pipefail
 
@@ -60,11 +36,6 @@ STATUS=false
 VALIDATE=false
 DRY_RUN=false
 
-# FIX-S03: Capture original script arguments before the option-parsing loop
-# consumes them via `shift`. _require_root() previously used bare `$*` which
-# refers to the function's own (empty) positional parameters, so the re-run
-# hint always printed without a subcommand. ${_ORIG_ARGS[*]} preserves exactly
-# what the operator typed (e.g. --install --dry-run).
 _ORIG_ARGS=("$@")
 
 UNIT_SOURCE_DIR="$PROJECT_ROOT/systemd"
@@ -109,7 +80,7 @@ OPTIONS:
 
 WHAT --install DOES:
     1. Copies maintenance.sh, backup.sh, health.sh -> /opt/vaultwarden-scripts/
-       (root:root 700, with SCRIPT_DIR + lib/ source paths patched)
+       (root:root 700, with SCRIPT_DIR + PROJECT_ROOT patched to /opt/vaultwarden-scripts)
     2. Copies lib/ -> /opt/vaultwarden-scripts/lib/ (root:root 640)
     3. Copies .env -> /etc/vaultwarden/vaultwarden.env (root:root 600)
        (skipped if the EnvironmentFile already exists; warns if content differs)
@@ -151,9 +122,6 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# FIX-S03: Use ${_ORIG_ARGS[*]} (captured before option parsing) so the hint
-# reflects the exact subcommand the operator ran, e.g.:
-#   Use: sudo ./systemd-setup.sh --install
 _require_root() {
     if [[ $EUID -ne 0 ]]; then
         log_error "This script must be run as root."
@@ -163,7 +131,6 @@ _require_root() {
 }
 
 _run() {
-    # Execute or print-only depending on DRY_RUN.
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] $*"
     else
@@ -184,23 +151,13 @@ _sha256() {
     fi
 }
 
-# ---------------------------------------------------------------------------
-# _sed_patch SRC DST
-#
-# FIX-S13 (AUDIT MEDIUM): The previous implementation used | as the sed
-# delimiter.  If $OPT_SCRIPTS_DIR or $PROJECT_ROOT ever contain a literal
-# | character the substitution expressions break silently.  We switch to
-# ASCII SOH (\001) which cannot appear in a filesystem path on Linux/macOS.
-# ---------------------------------------------------------------------------
 _sed_patch() {
     local src="$1" dst="$2"
-    # Use printf to produce the \001 delimiter at runtime so the sed
-    # expressions remain readable without embedded control characters.
     local D
     D=$'\001'
     sed \
         -e "s${D}^SCRIPT_DIR=.*${D}SCRIPT_DIR=\"${OPT_SCRIPTS_DIR}\"${D}" \
-        -e "s${D}^PROJECT_ROOT=\"\$SCRIPT_DIR\"${D}PROJECT_ROOT=\"${PROJECT_ROOT}\"${D}" \
+        -e "s${D}^PROJECT_ROOT=\"\$SCRIPT_DIR\"${D}PROJECT_ROOT=\"${OPT_SCRIPTS_DIR}\"${D}" \
         -e "s${D}source \"lib/${D}source \"\$SCRIPT_DIR/lib/${D}g" \
         "$src" > "$dst"
 }
@@ -244,11 +201,6 @@ install_units() {
         return 1
     fi
 
-    # FIX-S10 (SSD-H1): Use a finaliser array + single EXIT trap outside the
-    # per-script loop.  Mirrors setup-secrets.sh pattern.  If set -e fires on
-    # any command inside the loop (e.g. wc -l failing), the EXIT handler
-    # removes every mktemp file that was created up to that point, so no tmp
-    # files are ever leaked regardless of where the interruption occurs.
     local -a _tmpfiles=()
     _cleanup_tmpfiles() {
         local f
@@ -270,33 +222,15 @@ install_units() {
             continue
         fi
 
-        # FIX-S07: Do NOT use $() command substitution to capture patched content.
-        # bash $() strips all trailing newlines — a script ending with one or more
-        # blank lines (common for readability) will lose those lines silently,
-        # causing the installed copy to quietly differ from the repo source.
-        #
-        # Fix: redirect sed output directly into a mktemp file, then run a
-        # content-hash sanity check before an atomic mv into place.
         local tmp_script
         tmp_script=$(mktemp "${TMPDIR:-/tmp}/vw-patch-XXXXXX")
-        # Register in finaliser array so the EXIT trap cleans it up even if
-        # set -e triggers before the mv below (FIX-S10 / SSD-H1).
         _tmpfiles+=("$tmp_script")
 
-        # FIX-S13: _sed_patch uses \001 delimiter; see helper above.
         if ! _sed_patch "$src" "$tmp_script"; then
             log_error "sed patching failed for $script; aborting install."
             return 1
         fi
 
-        # FIX-S16 (AUDIT LOW): The original line-count sanity check detects
-        # truncation only.  Content corruption that preserves the line count
-        # passes silently.  Replace with a sha256 content comparison:
-        #   - Compute the hash of what we would expect the patched file to
-        #     contain by running _sed_patch on the source into a second temp
-        #     file and hashing that.
-        #   - Compare against the actual temp file written above.
-        # A mismatch means sed produced unexpected output.
         local tmp_verify
         tmp_verify=$(mktemp "${TMPDIR:-/tmp}/vw-verify-XXXXXX")
         _tmpfiles+=("$tmp_verify")
@@ -314,7 +248,6 @@ install_units() {
             log_error "Refusing to deploy a potentially corrupted file."
             return 1
         fi
-        # Also retain the original line-count floor check as a belt-and-suspenders guard.
         local src_lines installed_lines
         src_lines=$(wc -l < "$src")
         installed_lines=$(wc -l < "$tmp_script")
@@ -325,9 +258,15 @@ install_units() {
             return 1
         fi
 
+        # BUG-SY2 (2026-03-21): Apply chmod + chown to the tmpfile BEFORE mv.
+        # Previously these ran after mv, leaving a window where the script
+        # existed at the destination as non-executable (mode 0600 from mktemp).
+        # systemd fires timers asynchronously and could exec the file in that
+        # window, receiving EACCES. Setting permissions before mv makes the
+        # install atomic: the file appears at its destination already executable.
+        chmod 700 "$tmp_script"
+        chown root:root "$tmp_script"
         mv "$tmp_script" "$OPT_SCRIPTS_DIR/$script"
-        chmod 700 "$OPT_SCRIPTS_DIR/$script"
-        chown root:root "$OPT_SCRIPTS_DIR/$script"
         log_success "Installed: $OPT_SCRIPTS_DIR/$script"
     done
     [[ "$DRY_RUN" == "false" ]] && chown root:root "$OPT_SCRIPTS_DIR" || true
@@ -359,9 +298,6 @@ install_units() {
                 chown root:root "$ENV_FILE"
             fi
         else
-            # FIX-S11 (SSD-M1): vaultwarden.env already exists from a prior
-            # --install. Compare checksums so the operator knows whether new
-            # variables added to .env after initial setup need to be merged.
             log_info "$ENV_FILE already exists -- checking for drift ..."
             if [[ -f "$PROJECT_ROOT/.env" ]]; then
                 local repo_sum installed_sum
@@ -438,9 +374,6 @@ remove_units() {
     _require_root
     log_header "VaultWarden-OCI systemd Timer Removal"
 
-    # FIX-S15 (AUDIT MEDIUM): Previously used 2>/dev/null || true together,
-    # which silently hid every timer disable failure.  Now capture the exit
-    # status and emit a log_warn per failed timer so the operator is informed.
     for timer in "${TIMERS[@]}"; do
         if systemctl is-enabled "$timer" &>/dev/null; then
             if _run systemctl disable --now "$timer"; then
@@ -464,11 +397,6 @@ remove_units() {
     log_success "All timer units removed and daemon reloaded."
     log_info "Scripts remain in $OPT_SCRIPTS_DIR -- remove manually if desired."
 
-    # FIX-S08: --remove intentionally does NOT delete $ENV_FILE because it may
-    # contain API tokens and SMTP credentials that the operator has not yet
-    # backed up elsewhere. Silently deleting a secrets file is a data-loss
-    # risk; silently retaining it is a data-retention risk. We keep it and
-    # emit a prominent warning so the operator makes a deliberate decision.
     if [[ -f "$ENV_FILE" ]]; then
         log_warn "────────────────────────────────────────────────────────────────"
         log_warn "NOTICE: EnvironmentFile was NOT removed automatically:"
@@ -485,29 +413,8 @@ remove_units() {
 
 # ---------------------------------------------------------------------------
 # validate_installation  (FIX-S06)
-#
-# Verifies that the installed state in /opt/ and /etc/systemd/system/ matches
-# the repository source. Exits 0 only if every check passes; exits 1 on any
-# error, making it safe to gate on in CI/CD or post-deploy pipelines.
-#
-# Checks performed:
-#   1. Required scripts present and executable in $OPT_SCRIPTS_DIR
-#   2. lib/ and simple_key_resilience.sh present in $OPT_SCRIPTS_DIR/lib/
-#   3. All unit files present in $UNIT_DEST_DIR
-#   4. All 6 timers enabled (systemctl is-enabled)
-#   5. EnvironmentFile $ENV_FILE exists with mode 600
-#   6. Split-brain: sha256sum of installed script vs patched repo source
-#      (FIX-S12 / SSD-M2 + FIX-S14: temp-file approach avoids silent empty
-#      hash when sed fails inside a pipeline subshell)
-#
-# FIX-S09: Requires root. /etc/vaultwarden/ is chmod 700; non-root stat()
-#   returns EACCES, triggering the "unknown" permissions fallback and a
-#   spurious WARN. systemctl is-enabled may also return inaccurate results
-#   without D-Bus access.
 # ---------------------------------------------------------------------------
 validate_installation() {
-    # FIX-S09: /etc/vaultwarden/ is root-only (chmod 700) and systemctl
-    # is-enabled requires D-Bus access. Require root like all other subcommands.
     _require_root
     log_header "VaultWarden-OCI Installation Validation"
     local errors=0
@@ -575,7 +482,6 @@ validate_installation() {
         log_error "  Run: sudo ./systemd-setup.sh --install  (or create it manually)"
         (( errors++ )) || true
     else
-        # stat -c is GNU (Linux); stat -f is BSD (macOS) — handle both
         local env_perms
         env_perms=$(stat -c '%a' "$ENV_FILE" 2>/dev/null || stat -f '%Lp' "$ENV_FILE" 2>/dev/null || echo "unknown")
         if [[ "$env_perms" != "600" ]]; then
@@ -587,16 +493,7 @@ validate_installation() {
         fi
     fi
 
-    # ── 6. Split-brain detection (FIX-S12 / SSD-M2 + FIX-S14) ──────────────
-    # FIX-S14 (AUDIT MEDIUM): The previous implementation computed expected_sum
-    # inside a subshell pipeline ( sed ... | sha256sum | awk ).  A sed failure
-    # inside that pipeline produces an empty string silently — every subsequent
-    # comparison then evaluates to != (since actual_sum is never empty), causing
-    # every split-brain check to warn STALE regardless of true state.
-    #
-    # Fix: write the patched output to a mktemp file using _sed_patch().  If
-    # _sed_patch fails we abort with an explicit error.  The hash is then
-    # computed from the file, which cannot be empty on a successful sed run.
+    # ── 6. Split-brain detection ─────────────────────────────────────────────
     log_info "[6/6] Checking for split-brain (sha256 repo vs installed) ..."
     local -a _validate_tmpfiles=()
     _cleanup_validate_tmpfiles() {
@@ -611,15 +508,13 @@ validate_installation() {
         local repo_src="$PROJECT_ROOT/$script"
         local installed="$OPT_SCRIPTS_DIR/$script"
         if [[ ! -f "$repo_src" || ! -f "$installed" ]]; then
-            continue  # already flagged in check 1 above
+            continue
         fi
 
         local tmp_patched
         tmp_patched=$(mktemp "${TMPDIR:-/tmp}/vw-validate-XXXXXX")
         _validate_tmpfiles+=("$tmp_patched")
 
-        # FIX-S14: Use _sed_patch (\001 delimiter, temp-file output) instead of
-        # inline pipeline so a sed failure is caught and reported explicitly.
         if ! _sed_patch "$repo_src" "$tmp_patched"; then
             log_error "  ERROR: sed patch failed for $script during validation."
             (( errors++ )) || true
@@ -664,16 +559,10 @@ show_status() {
     systemctl list-timers --all 2>/dev/null | grep vaultwarden || log_info "No vaultwarden timers active."
     echo ""
     for svc in "${SERVICES[@]}"; do
-        # Skip template unit in status loop
         [[ "$svc" == *"@"* ]] && continue
         log_info "--- $svc ---"
-        # FIX-S18 (AUDIT LOW): systemctl status exits non-zero for inactive
-        # services.  The previous code piped through '| head -12 || true'
-        # which only protected head's exit status, not systemctl's; under
-        # set -euo pipefail the non-zero status of the first element of the
-        # pipeline could still abort the loop.  Wrap the entire pipeline in
-        # { ...; } || true so the loop always continues regardless of the
-        # service state.
+        # FIX-S18: wrap in { ...; } || true so inactive-service non-zero exit
+        # does not abort the loop under set -e.
         { systemctl status "$svc" --no-pager -l 2>/dev/null | head -20; } || true
         echo ""
     done
