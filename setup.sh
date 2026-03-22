@@ -897,7 +897,7 @@ EOF
         printf '2. Set external tokens: %s(use ./edit-secrets.sh --rotate commands above)%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '3. Start services:      %smake up%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '4. Setup automation:    %ssudo ./systemd-setup.sh --install%s\n' \
+        printf '4. Setup automation:    %ssudo ./setup-systemd.sh --install%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '5. Export recovery kit: %s./edit-secrets.sh --export-recovery-kit%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
@@ -915,7 +915,7 @@ EOF
         printf '2. Configure secrets:   %s./setup-secrets.sh%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '   ► You will be prompted for all credentials\n'
         printf '3. Start services:      %smake up%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '4. Setup automation:    %ssudo ./systemd-setup.sh --install%s\n' \
+        printf '4. Setup automation:    %ssudo ./setup-systemd.sh --install%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '5. Export recovery kit: %s./edit-secrets.sh --export-recovery-kit%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
