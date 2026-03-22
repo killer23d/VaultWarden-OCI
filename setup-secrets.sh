@@ -861,13 +861,13 @@ main() {
         # Phase 2-C: Updated next-steps to reflect the new install order.
         # The user has already edited .env before running this script, so
         # step 1 is "Verify" not "Review/create".
-        # FIX SS-L1: cron-setup.sh was removed; reference systemd-setup.sh instead.
+        # FIX SS-L1: cron-setup.sh was removed; reference setup-systemd.sh instead.
         echo "📋 Next Steps:"
         echo "   1. Verify .env settings:      nano .env"
         echo "      ► Confirm: CLOUDFLARE_ZONE_ID, EMAIL_MODE, EMAIL_PROVIDER,"
         echo "                 SMTP_HOST, SMTP_PORT, SMTP_USERNAME"
         echo "   2. Start services:            make up"
-        echo "   3. Setup automation:          sudo ./systemd-setup.sh --install"
+        echo "   3. Setup automation:          sudo ./setup-systemd.sh --install"
         echo "   4. Export recovery kit:       ./edit-secrets.sh --export-recovery-kit"
         echo "   5. Test health:               ./health.sh"
         echo "   6. To rotate a single field:  ./edit-secrets.sh --rotate FIELD"
