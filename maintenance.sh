@@ -963,7 +963,9 @@ DNS record updated automatically." \
 validate_system_health() {
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would validate system health"; return 0; fi
     log_info "Validating system health after maintenance..."
-    ./health.sh --"$SCRIPT_DIR/health.sh" --quiet && { log_success "System health validation passed"; return 0; } || { log_warn "System health validation detected issues"; return 1; } && { log_success "System health validation passed"; return 0; } || { log_warn "System health validation detected issues"; return 1; }
+    "$SCRIPT_DIR/health.sh" --quiet \
+        && { log_success "System health validation passed"; return 0; } \
+        || { log_warn "System health validation detected issues"; return 1; }
 }
 
 # ---------------------------------------------------------------------------
