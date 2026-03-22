@@ -50,7 +50,7 @@
 #   SEC-M1 [MEDIUM] validate_directory_permissions() recursive path compared every
 #                   sub-directory against the top-level $expected_perms (700 for the
 #                   secrets dir), producing false-positive failures for lib/ dirs
-#                   installed at mode 750 by systemd-setup.sh. Fixed by accepting an
+#                   installed at mode 750 by setup-systemd.sh. Fixed by accepting an
 #                   optional $file_perms parameter (default 600) and validating each
 #                   sub-directory against its own actual expected mode via a new
 #                   $dir_perms parameter, defaulting to $expected_perms only when not
@@ -202,7 +202,7 @@ validate_file_permissions() {
 #
 # SEC-M1 FIX: The original recursive path validated every sub-directory
 # against $expected_perms (the top-level directory mode, e.g. 700 for the
-# secrets dir). lib/ subdirectories installed at 750 by systemd-setup.sh
+# secrets dir). lib/ subdirectories installed at 750 by setup-systemd.sh
 # therefore produced false-positive failures.
 #
 # Parameters:
