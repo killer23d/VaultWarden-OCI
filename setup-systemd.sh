@@ -1,25 +1,13 @@
 #!/usr/bin/env bash
 # setup-systemd.sh - Install and manage VaultWarden-OCI systemd timers
 #
-# Replaces cron-setup.sh for new deployments. Manages the 6 scheduled
-# service+timer pairs in the systemd/ directory.
-#
 # USAGE:
-#   sudo ./systemd-setup.sh --install    # Install and enable all timers
-#   sudo ./systemd-setup.sh --remove     # Disable and remove all units
-#   sudo ./systemd-setup.sh --validate   # Verify installed state vs repo
-#   sudo ./systemd-setup.sh --status     # Show timer/service status
-#   sudo ./systemd-setup.sh --dry-run    # Print actions without executing
+#   sudo ./setup-systemd.sh --install    # Install and enable all timers
+#   sudo ./setup-systemd.sh --remove     # Disable and remove all units
+#   sudo ./setup-systemd.sh --validate   # Verify installed state vs repo
+#   sudo ./setup-systemd.sh --status     # Show timer/service status
+#   sudo ./setup-systemd.sh --dry-run    # Print actions without executing
 #
-# BUG-SY2  (2026-03-21): chmod 700 + chown now applied to tmpfile BEFORE
-#          mv so the installed script is never transiently non-executable.
-#          Previously chmod ran after mv — a window existed where systemd
-#          could exec the file and receive EACCES (Permission denied).
-# BUG-SY3  (2026-03-21): _sed_patch() now substitutes PROJECT_ROOT with
-#          OPT_SCRIPTS_DIR (/opt/vaultwarden-scripts) instead of the git
-#          repo checkout path. Installed scripts must be self-contained in
-#          /opt/ and must not reference the repo location, which can change
-#          or be deleted entirely after install.
 
 set -euo pipefail
 
@@ -68,7 +56,7 @@ show_help() {
 VaultWarden-OCI systemd Timer Installer
 
 USAGE:
-    sudo ./systemd-setup.sh [OPTIONS]
+    sudo ./setup-systemd.sh [OPTIONS]
 
 OPTIONS:
     --install     Install and enable all systemd timer units
@@ -80,7 +68,7 @@ OPTIONS:
 
 WHAT --install DOES:
     1. Copies maintenance.sh, backup.sh, health.sh -> /opt/vaultwarden-scripts/
-       (root:root 700, with SCRIPT_DIR + PROJECT_ROOT patched to /opt/vaultwarden-scripts)
+       (root:root 700, with SCRIPT_DIR + lib/ source paths patched)
     2. Copies lib/ -> /opt/vaultwarden-scripts/lib/ (root:root 640)
     3. Copies .env -> /etc/vaultwarden/vaultwarden.env (root:root 600)
        (skipped if the EnvironmentFile already exists; warns if content differs)
@@ -104,7 +92,7 @@ VIEWING LOGS:
 
 MIGRATING FROM CRON:
     cron-setup.sh has been removed. To migrate:
-    1. sudo ./systemd-setup.sh --install
+    1. sudo ./setup-systemd.sh --install
     2. Remove old crontab entries: sudo crontab -e
     3. Verify timers: systemctl list-timers --all | grep vaultwarden
 EOF
@@ -146,11 +134,22 @@ _sha256() {
     if command -v sha256sum &>/dev/null; then
         sha256sum "$1" | awk '{print $1}'
     else
-        # macOS / BSDs ship shasum
         shasum -a 256 "$1" | awk '{print $1}'
     fi
 }
 
+# ---------------------------------------------------------------------------
+# _sed_patch SRC DST
+#
+# Patches a script for installation into OPT_SCRIPTS_DIR:
+#   - SCRIPT_DIR   -> OPT_SCRIPTS_DIR  (where the script lives post-install)
+#   - PROJECT_ROOT -> OPT_SCRIPTS_DIR  (BUG-SY3: must NOT point at the git
+#     repo checkout; installed scripts must be self-contained in /opt/ so
+#     they keep working if the repo is moved or the ubuntu home dir changes)
+#   - source "lib/ -> source "$SCRIPT_DIR/lib/  (resolve lib relative to opt)
+#
+# Uses ASCII SOH (\001) as sed delimiter to survive paths containing |.
+# ---------------------------------------------------------------------------
 _sed_patch() {
     local src="$1" dst="$2"
     local D
@@ -181,11 +180,8 @@ install_units() {
     log_info "Installing scripts to $OPT_SCRIPTS_DIR ..."
     _run mkdir -p "$OPT_SCRIPTS_DIR"
 
-    # Copy lib/ with -rP (no symlink-follow, same as cron-setup.sh BUG-C03 fix)
     if [[ "$DRY_RUN" == "false" ]]; then
         cp -rP "$PROJECT_ROOT/lib" "$OPT_SCRIPTS_DIR/"
-        # FIX-S17 (AUDIT LOW): Use + form so find passes all matched files to
-        # a single chmod invocation instead of forking one process per file.
         find "$OPT_SCRIPTS_DIR/lib" -type f -exec chmod 640 {} +  2>/dev/null || true
         find "$OPT_SCRIPTS_DIR/lib" -type d -exec chmod 750 {} +  2>/dev/null || true
         chown -R root:root "$OPT_SCRIPTS_DIR/lib"
@@ -194,7 +190,6 @@ install_units() {
         log_info "[DRY RUN] Would copy lib/ -> $OPT_SCRIPTS_DIR/lib/"
     fi
 
-    # Verify simple_key_resilience.sh is present (mirrors cron-setup.sh ISSUE 15 check)
     if [[ "$DRY_RUN" == "false" ]] && [[ ! -f "$OPT_SCRIPTS_DIR/lib/simple_key_resilience.sh" ]]; then
         log_error "CRITICAL: lib/simple_key_resilience.sh missing from repo -- key health checks disabled."
         log_error "Ensure lib/simple_key_resilience.sh exists in: $PROJECT_ROOT/lib/"
@@ -248,6 +243,7 @@ install_units() {
             log_error "Refusing to deploy a potentially corrupted file."
             return 1
         fi
+        # Belt-and-suspenders: also check line count floor
         local src_lines installed_lines
         src_lines=$(wc -l < "$src")
         installed_lines=$(wc -l < "$tmp_script")
@@ -258,12 +254,6 @@ install_units() {
             return 1
         fi
 
-        # BUG-SY2 (2026-03-21): Apply chmod + chown to the tmpfile BEFORE mv.
-        # Previously these ran after mv, leaving a window where the script
-        # existed at the destination as non-executable (mode 0600 from mktemp).
-        # systemd fires timers asynchronously and could exec the file in that
-        # window, receiving EACCES. Setting permissions before mv makes the
-        # install atomic: the file appears at its destination already executable.
         chmod 700 "$tmp_script"
         chown root:root "$tmp_script"
         mv "$tmp_script" "$OPT_SCRIPTS_DIR/$script"
@@ -271,8 +261,6 @@ install_units() {
     done
     [[ "$DRY_RUN" == "false" ]] && chown root:root "$OPT_SCRIPTS_DIR" || true
 
-    # Remove the EXIT trap now that all scripts are safely installed; normal
-    # path cleanup for any residual entries (mv already consumed them).
     trap - EXIT
     _cleanup_tmpfiles
 
@@ -298,6 +286,7 @@ install_units() {
                 chown root:root "$ENV_FILE"
             fi
         else
+            # FIX-S11: Compare checksums and warn on drift after initial install.
             log_info "$ENV_FILE already exists -- checking for drift ..."
             if [[ -f "$PROJECT_ROOT/.env" ]]; then
                 local repo_sum installed_sum
@@ -312,7 +301,7 @@ install_units() {
                     log_warn "visible to systemd units until $ENV_FILE is updated."
                     log_warn "Review differences and merge manually:"
                     log_warn "  diff $PROJECT_ROOT/.env $ENV_FILE"
-                    log_warn "Then run: sudo ./systemd-setup.sh --install to re-copy."
+                    log_warn "Then run: sudo ./setup-systemd.sh --install to re-copy."
                     log_warn "  (Back up $ENV_FILE first — it may contain live credentials)"
                     log_warn "────────────────────────────────────────────────────────────────"
                 else
@@ -327,7 +316,7 @@ install_units() {
     fi
 
     # ------------------------------------------------------------------
-    # 3. Copy unit files to /etc/systemd/system/
+    # 3. Install systemd unit files
     # ------------------------------------------------------------------
     log_info "Installing systemd unit files to $UNIT_DEST_DIR ..."
     local unit_ok=true
@@ -346,9 +335,6 @@ install_units() {
         log_warn "Some unit files were missing -- check the systemd/ directory."
     fi
 
-    # ------------------------------------------------------------------
-    # 4. Reload daemon + enable timers
-    # ------------------------------------------------------------------
     log_info "Reloading systemd daemon ..."
     _run systemctl daemon-reload
 
@@ -361,7 +347,7 @@ install_units() {
     log_success "Installation complete."
     log_info "Next steps:"
     log_info "  Verify:    systemctl list-timers --all | grep vaultwarden"
-    log_info "  Validate:  sudo ./systemd-setup.sh --validate"
+    log_info "  Validate:  sudo ./setup-systemd.sh --validate"
     log_info "  Test run:  sudo systemctl start vaultwarden-health.service"
     log_info "  View logs: journalctl -u vaultwarden-health.service -n 50"
     log_info "  Env file:  $ENV_FILE  (add EMAIL_PROVIDER credentials here)"
@@ -376,6 +362,7 @@ remove_units() {
 
     for timer in "${TIMERS[@]}"; do
         if systemctl is-enabled "$timer" &>/dev/null; then
+            # FIX-S15: log failures instead of hiding them
             if _run systemctl disable --now "$timer"; then
                 log_success "Disabled: $timer"
             else
@@ -412,7 +399,7 @@ remove_units() {
 }
 
 # ---------------------------------------------------------------------------
-# validate_installation  (FIX-S06)
+# validate_installation
 # ---------------------------------------------------------------------------
 validate_installation() {
     _require_root
@@ -420,7 +407,6 @@ validate_installation() {
     local errors=0
     local warnings=0
 
-    # ── 1. Scripts in /opt/vaultwarden-scripts/ ─────────────────────────────
     log_info "[1/6] Checking installed scripts ..."
     local scripts_to_check=(maintenance.sh backup.sh health.sh)
     for script in "${scripts_to_check[@]}"; do
@@ -436,7 +422,6 @@ validate_installation() {
         fi
     done
 
-    # ── 2. lib/ directory ───────────────────────────────────────────────────
     log_info "[2/6] Checking installed lib/ ..."
     if [[ ! -d "$OPT_SCRIPTS_DIR/lib" ]]; then
         log_error "  MISSING: $OPT_SCRIPTS_DIR/lib/"
@@ -452,7 +437,6 @@ validate_installation() {
         log_success "  OK: $critical_lib"
     fi
 
-    # ── 3. Unit files in /etc/systemd/system/ ───────────────────────────────
     log_info "[3/6] Checking installed unit files ..."
     for unit in "${SERVICES[@]}" "${TIMERS[@]}"; do
         local dest="$UNIT_DEST_DIR/$unit"
@@ -464,7 +448,6 @@ validate_installation() {
         fi
     done
 
-    # ── 4. Timers enabled ───────────────────────────────────────────────────
     log_info "[4/6] Checking timer enablement ..."
     for timer in "${TIMERS[@]}"; do
         if systemctl is-enabled "$timer" &>/dev/null; then
@@ -475,11 +458,10 @@ validate_installation() {
         fi
     done
 
-    # ── 5. EnvironmentFile ──────────────────────────────────────────────────
     log_info "[5/6] Checking EnvironmentFile ..."
     if [[ ! -f "$ENV_FILE" ]]; then
         log_error "  MISSING: $ENV_FILE"
-        log_error "  Run: sudo ./systemd-setup.sh --install  (or create it manually)"
+        log_error "  Run: sudo ./setup-systemd.sh --install  (or create it manually)"
         (( errors++ )) || true
     else
         local env_perms
@@ -493,7 +475,6 @@ validate_installation() {
         fi
     fi
 
-    # ── 6. Split-brain detection ─────────────────────────────────────────────
     log_info "[6/6] Checking for split-brain (sha256 repo vs installed) ..."
     local -a _validate_tmpfiles=()
     _cleanup_validate_tmpfiles() {
@@ -528,18 +509,17 @@ validate_installation() {
             log_warn "  STALE: $installed does not match patched repo source"
             log_warn "         expected sha256: $expected_sum"
             log_warn "         installed sha256: $actual_sum"
-            log_warn "         Re-run: sudo ./systemd-setup.sh --install"
+            log_warn "         Re-run: sudo ./setup-systemd.sh --install"
             (( warnings++ )) || true
         else
             log_success "  UP-TO-DATE: $script (sha256 match)"
         fi
     done
 
-    # ── Summary ──────────────────────────────────────────────────────────────
     echo ""
     if (( errors > 0 )); then
         log_error "Validation FAILED: ${errors} error(s), ${warnings} warning(s)."
-        log_error "Run: sudo ./systemd-setup.sh --install to resolve errors."
+        log_error "Run: sudo ./setup-systemd.sh --install to resolve errors."
         return 1
     elif (( warnings > 0 )); then
         log_warn  "Validation passed with ${warnings} warning(s) — review output above."
@@ -559,10 +539,9 @@ show_status() {
     systemctl list-timers --all 2>/dev/null | grep vaultwarden || log_info "No vaultwarden timers active."
     echo ""
     for svc in "${SERVICES[@]}"; do
+        # Skip the template unit — it has no standalone status
         [[ "$svc" == *"@"* ]] && continue
         log_info "--- $svc ---"
-        # FIX-S18: wrap in { ...; } || true so inactive-service non-zero exit
-        # does not abort the loop under set -e.
         { systemctl status "$svc" --no-pager -l 2>/dev/null | head -20; } || true
         echo ""
     done
