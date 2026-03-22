@@ -5,13 +5,19 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR"
-cd "$PROJECT_ROOT"
+# BUG-SY3: Do NOT cd into SCRIPT_DIR. When installed to /opt/vaultwarden-scripts/
+# this is wrong for all relative data paths. All paths are absolute below.
 
-source "lib/common.sh"
+source "$SCRIPT_DIR/lib/common.sh"
 init_common_lib "$0"
-source "lib/docker.sh"
-source "lib/crypto.sh"
-source "lib/secrets.sh"
+source "$SCRIPT_DIR/lib/docker.sh"
+source "$SCRIPT_DIR/lib/crypto.sh"
+source "$SCRIPT_DIR/lib/secrets.sh"
+
+# ENV_DIR: where vaultwarden.env lives (populated by EnvironmentFile= in the
+# service unit, but some functions also read it directly for specific keys).
+ENV_DIR="${ENV_DIR:-/etc/vaultwarden}"
+ENV_FILE="$ENV_DIR/vaultwarden.env"
 
 # Configuration
 COMPREHENSIVE=false
@@ -59,7 +65,7 @@ SET-AND-FORGET MONITORING:
     Auto-Recovery: Automatically restart unhealthy containers
 
 CRON USAGE:
-    */15 * * * * cd /opt/vaultwarden-scripts && ./health.sh --auto-recover >> /var/log/vaultwarden-health.log 2>&1
+    */15 * * * * /opt/vaultwarden-scripts/health.sh --auto-recover >> /var/log/vaultwarden-health.log 2>&1
 EOF
 }
 
@@ -78,10 +84,10 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-health_log_info() { [[ "$QUIET" == "true" ]] || log_info "$1"; }
+health_log_info()    { [[ "$QUIET" == "true" ]] || log_info "$1"; }
 health_log_success() { [[ "$QUIET" == "true" ]] || log_success "$1"; }
-health_log_warn() { log_warn "$1"; ISSUES_FOUND+=("WARNING: $1"); }
-health_log_error() { log_error "$1"; ISSUES_FOUND+=("ERROR: $1"); CRITICAL_ISSUES+=("$1"); OVERALL_STATUS="unhealthy"; }
+health_log_warn()    { log_warn "$1"; ISSUES_FOUND+=("WARNING: $1"); }
+health_log_error()   { log_error "$1"; ISSUES_FOUND+=("ERROR: $1"); CRITICAL_ISSUES+=("$1"); OVERALL_STATUS="unhealthy"; }
 
 _maybe_sudo() {
     if is_root; then
@@ -158,7 +164,14 @@ attempt_container_recovery() {
 
     log_warn "🔧 Attempting automatic recovery of $service..."
 
-    if docker compose restart "$service" 2>&1; then
+    # BUG-SY3: use --project-directory so docker compose does not depend on CWD
+    local compose_file
+    compose_file="$(find /opt/vaultwarden-scripts /var/lib/vaultwarden /etc/vaultwarden -maxdepth 2 \
+        -name "docker-compose.yml" -o -name "docker-compose.yaml" 2>/dev/null | head -1 || true)"
+    local compose_args=()
+    [[ -n "$compose_file" ]] && compose_args=(--project-directory "$(dirname "$compose_file")")
+
+    if docker compose "${compose_args[@]}" restart "$service" 2>&1; then
         log_info "Restart command issued for $service, waiting ${RECOVERY_WAIT_TIME}s..."
         sleep "$RECOVERY_WAIT_TIME"
 
@@ -378,8 +391,9 @@ check_ssl_certificates() {
     health_log_info "Checking SSL certificate expiration..."
     local domain clean_domain
 
-    if [[ -f ".env" ]]; then
-        domain=$(grep "^DOMAIN=" .env | head -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" || echo "")
+    # BUG-SY3: read from the absolute ENV_FILE path, not from a relative .env
+    if [[ -f "$ENV_FILE" ]]; then
+        domain=$(grep "^DOMAIN=" "$ENV_FILE" | head -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" || echo "")
     else
         domain=""
     fi
@@ -496,7 +510,8 @@ _verify_backup_decryptable() {
     local backup_type="$2"
     [[ -z "$backup_file" || ! -f "$backup_file" ]] && return 0
 
-    local age_key_file="${DEFAULT_AGE_KEY_FILE:-secrets/keys/age-key.txt}"
+    # BUG-SY3: age key lives in the repo secrets dir; use SCRIPT_DIR to find it
+    local age_key_file="${DEFAULT_AGE_KEY_FILE:-$SCRIPT_DIR/secrets/keys/age-key.txt}"
     [[ ! -f "$age_key_file" ]] && {
         health_log_error "CRITICAL: Age key file missing: $age_key_file"
         return 1
@@ -542,11 +557,13 @@ _backup_verified_age_days() {
 check_backup_status() {
     health_log_info "Checking backup status and integrity..."
 
+    # BUG-SY3: BACKUP_DIR is resolved via get_config_value which reads the
+    # EnvironmentFile (already loaded by systemd). Fall back to absolute default.
     local backup_base_dir
-    backup_base_dir="$PROJECT_ROOT/backups"
-    if [[ -f ".env" ]]; then
+    backup_base_dir="${BACKUP_DIR:-/var/lib/vaultwarden/backups}"
+    if [[ -f "$ENV_FILE" ]]; then
         local env_backup_dir
-        env_backup_dir=$(grep "^BACKUP_DIR=" .env | head -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" || echo "")
+        env_backup_dir=$(grep "^BACKUP_DIR=" "$ENV_FILE" | head -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" || echo "")
         [[ -n "$env_backup_dir" ]] && backup_base_dir="$env_backup_dir"
     fi
 
@@ -620,8 +637,9 @@ test_email_notifications() {
     health_log_info "Testing email notification functionality..."
     local admin_email
 
-    if [[ -f ".env" ]]; then
-        admin_email=$(grep "^ADMIN_EMAIL=" .env | head -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" || echo "")
+    # BUG-SY3: read from absolute ENV_FILE, not relative .env
+    if [[ -f "$ENV_FILE" ]]; then
+        admin_email=$(grep "^ADMIN_EMAIL=" "$ENV_FILE" | head -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" || echo "")
     else
         admin_email=""
     fi
@@ -734,24 +752,36 @@ check_configuration() {
 
     local config_issues=()
 
-    if [[ ! -f ".env" ]]; then
-        config_issues+=("Missing .env file")
+    # BUG-SY3: check ENV_FILE at its absolute path, not relative .env
+    if [[ ! -f "$ENV_FILE" ]]; then
+        config_issues+=("Missing env file: $ENV_FILE")
     else
         local required_vars=("DOMAIN" "ADMIN_EMAIL" "CLOUDFLARE_ZONE_ID")
         for var in "${required_vars[@]}"; do
-            grep -q "^${var}=" .env || config_issues+=("Missing $var in .env")
+            grep -q "^${var}=" "$ENV_FILE" || config_issues+=("Missing $var in $ENV_FILE")
         done
     fi
 
-    if [[ ! -f "secrets/secrets.yaml" ]]; then
+    local secrets_file="$SCRIPT_DIR/secrets/secrets.yaml"
+    if [[ ! -f "$secrets_file" ]]; then
         config_issues+=("Missing secrets.yaml file")
     else
-        if ! ./edit-secrets.sh --list >/dev/null 2>&1; then
+        # BUG-SY3: call edit-secrets.sh by absolute path
+        if ! "$SCRIPT_DIR/edit-secrets.sh" --list >/dev/null 2>&1; then
             config_issues+=("Secrets decryption failed")
         fi
     fi
 
-    docker compose config >/dev/null 2>&1 || config_issues+=("Docker Compose configuration error")
+    # BUG-SY3: docker compose needs --project-directory when CWD is /opt/
+    local compose_dir
+    compose_dir="$(find /var/lib/vaultwarden /opt/vaultwarden-scripts -maxdepth 2 \
+        -name "docker-compose.yml" -o -name "docker-compose.yaml" 2>/dev/null | head -1 | xargs -I{} dirname {} || true)"
+    if [[ -n "$compose_dir" ]]; then
+        docker compose --project-directory "$compose_dir" config >/dev/null 2>&1 \
+            || config_issues+=("Docker Compose configuration error")
+    else
+        config_issues+=("docker-compose.yml not found")
+    fi
 
     if [[ ${#config_issues[@]} -gt 0 ]]; then
         health_log_error "CRITICAL: Configuration issues: ${config_issues[*]}"
@@ -785,11 +815,13 @@ check_security_status() {
     _check_fail2ban_responding 2>/dev/null || \
         security_issues+=("fail2ban not responding")
 
-    local age_key_file="${DEFAULT_AGE_KEY_FILE:-secrets/keys/age-key.txt}"
+    # BUG-SY3: age key path uses SCRIPT_DIR
+    local age_key_file="${DEFAULT_AGE_KEY_FILE:-$SCRIPT_DIR/secrets/keys/age-key.txt}"
     check_age_key "$age_key_file" || security_issues+=("Age key validation failed")
 
-    if [[ -f ".sops.yaml" ]]; then
-        grep -q "age:" ".sops.yaml" || security_issues+=("SOPS configuration missing Age key")
+    # BUG-SY3: .sops.yaml lives in the repo, use SCRIPT_DIR
+    if [[ -f "$SCRIPT_DIR/.sops.yaml" ]]; then
+        grep -q "age:" "$SCRIPT_DIR/.sops.yaml" || security_issues+=("SOPS configuration missing Age key")
     else
         security_issues+=("SOPS configuration file missing")
     fi
@@ -886,18 +918,11 @@ generate_json_report() {
     fi
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# _load_email_secrets_from_sops
-#
-# API TOKEN RESOLUTION ORDER (matches edit-secrets.sh --rotate email_api_token):
-#   1. <PROVIDER_UPPER>_API_TOKEN  e.g. MAILGUN_API_TOKEN for EMAIL_PROVIDER=mailgun
-#      This is the key that edit-secrets.sh --rotate email_api_token actually writes.
-#   2. email_api_token             Generic/legacy fallback key.
-# ─────────────────────────────────────────────────────────────────────────────
 _load_email_secrets_from_sops() {
     [[ "$SEND_EMAIL" != "true" ]] && return 0
 
-    local secrets_file="${SECRETS_FILE:-secrets/secrets.yaml}"
+    # BUG-SY3: secrets file is relative to the repo/SCRIPT_DIR
+    local secrets_file="${SECRETS_FILE:-$SCRIPT_DIR/secrets/secrets.yaml}"
     if [[ ! -f "$secrets_file" ]]; then
         log_warn "_load_email_secrets_from_sops: secrets file not found: $secrets_file"
         return 0
@@ -919,7 +944,6 @@ _load_email_secrets_from_sops() {
         return 0
     fi
 
-    # --- 1. SMTP password ---------------------------------------------------
     if [[ "$_already_have_smtp" == "false" ]]; then
         local smtp_pw
         if smtp_pw=$(decrypt_secret "smtp_password" "$secrets_file" 2>/dev/null) \
@@ -932,23 +956,17 @@ _load_email_secrets_from_sops() {
         fi
     fi
 
-    # --- 2. API token -------------------------------------------------------
-    # Resolution order (matches edit-secrets.sh --rotate email_api_token):
-    #   1. <PROVIDER_UPPER>_API_TOKEN  (e.g. MAILGUN_API_TOKEN)  — written by rotate
-    #   2. email_api_token             — generic/legacy fallback
     if [[ "$_already_have_api" == "false" ]] \
        && [[ "$provider" != "smtp" && "$provider" != "host" ]]; then
         local _provider_key="${provider^^}_API_TOKEN"
         local api_token=""
 
-        # Try provider-specific key first (e.g. MAILGUN_API_TOKEN)
         if api_token=$(decrypt_secret "$_provider_key" "$secrets_file" 2>/dev/null) \
            && [[ -n "$api_token" ]] \
            && [[ "$api_token" != CHANGE_ME* ]] \
            && [[ "$api_token" != NOT_USED* ]]; then
             export EMAIL_API_TOKEN="${api_token}"
             log_debug "_load_email_secrets_from_sops: EMAIL_API_TOKEN loaded from SOPS key '${_provider_key}'"
-        # Fall back to generic email_api_token key
         elif api_token=$(decrypt_secret "email_api_token" "$secrets_file" 2>/dev/null) \
            && [[ -n "$api_token" ]] \
            && [[ "$api_token" != CHANGE_ME* ]] \
