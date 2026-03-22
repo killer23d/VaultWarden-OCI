@@ -5,14 +5,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$SCRIPT_DIR"
-cd "$PROJECT_ROOT"
-
-source "lib/common.sh"
+source "$SCRIPT_DIR/lib/common.sh"
 init_common_lib "$0"
-source "lib/docker.sh"
-source "lib/backup_utils.sh"
-source "lib/crypto.sh"
+source "$SCRIPT_DIR/lib/docker.sh"
+source "$SCRIPT_DIR/lib/backup_utils.sh"
+source "$SCRIPT_DIR/lib/crypto.sh"
 
 # ---------------------------------------------------------------------------
 # Configuration defaults
@@ -170,7 +167,7 @@ cleanup_logs() {
         "$state_dir/logs/vaultwarden"
         "$state_dir/logs/caddy"
         "$state_dir/logs/fail2ban"
-        "$PROJECT_ROOT/logs"
+        "$SCRIPT_DIR/logs"
     )
     for log_dir in "${log_dirs[@]}"; do
         if [[ -d "$log_dir" ]]; then
@@ -227,7 +224,7 @@ cleanup_backups() {
     if [[ "$DRY_RUN"       == "true" ]]; then log_info "[DRY RUN] Would clean up old backups based on retention policy"; return 0; fi
     log_info "Managing backup retention..."
     local backup_base_dir
-    backup_base_dir="$(get_config_value "BACKUP_DIR" "$PROJECT_ROOT/backups")"
+    backup_base_dir="$(get_config_value "BACKUP_DIR" "$SCRIPT_DIR/backups")"
     local had_real_error=false
     local backup_types=("db:$DB_BACKUP_RETENTION_DAYS" "full:$FULL_BACKUP_RETENTION_DAYS" "emergency:$EMERGENCY_BACKUP_RETENTION_DAYS")
     for backup_type_info in "${backup_types[@]}"; do
@@ -417,7 +414,7 @@ run_deep_db_maintenance() {
     log_info "Step 0/5: Creating pre-maintenance safety backup..."
     local backup_ts_marker
     backup_ts_marker=$(mktemp) && touch "$backup_ts_marker"
-    if ! ./backup.sh --type db; then
+    if ! "$SCRIPT_DIR/backup.sh" --type db; then
         rm -f "$backup_ts_marker"
         log_error "Pre-maintenance safety backup failed — aborting deep maintenance"
         if [[ "$DB_DEEP_FORCE" == "false" ]]; then
@@ -428,7 +425,7 @@ run_deep_db_maintenance() {
         fi
     else
         log_success "Pre-maintenance safety backup created"
-        local backup_base; backup_base=$(get_config_value "BACKUP_DIR" "${PROJECT_ROOT}/backups")
+        local backup_base; backup_base=$(get_config_value "BACKUP_DIR" "${SCRIPT_DIR}/backups")
         safety_backup_file=$(find "${backup_base}/db" -name "vaultwarden-db-*.age" -newer "$backup_ts_marker" 2>/dev/null | sort | tail -1) || true
         rm -f "$backup_ts_marker"
     fi
@@ -858,7 +855,7 @@ update_dns_record() {
     [[ -z "$domain"  ]] && { log_error "DOMAIN not set in .env"; return 1; }
     [[ -z "$zone_id" ]] && { log_error "CLOUDFLARE_ZONE_ID not set in .env"; return 1; }
 
-    local lock_dir="${PROJECT_ROOT}/.locks"
+    local lock_dir="${SCRIPT_DIR}/.locks"
     local DNS_LOCK="${lock_dir}/dns-update.lock"
     ensure_dir "$lock_dir" 700 "$(get_real_user)" || {
         log_error "Failed to initialize lock directory: $lock_dir"
@@ -899,7 +896,7 @@ update_dns_record() {
     # FIX HIGH: validate token file permissions before reading.
     # A world-readable token file (mode 644) is a security risk; abort with
     # a clear error so the operator is alerted and can fix the permissions.
-    local token_file="${PROJECT_ROOT}/secrets/.docker_secrets/caddy_cloudflare_dns_token"
+    local token_file="${SCRIPT_DIR}/secrets/.docker_secrets/caddy_cloudflare_dns_token"
     local cf_token
     if [[ -f "$token_file" ]]; then
         local token_perms
@@ -966,7 +963,7 @@ DNS record updated automatically." \
 validate_system_health() {
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would validate system health"; return 0; fi
     log_info "Validating system health after maintenance..."
-    ./health.sh --quiet && { log_success "System health validation passed"; return 0; } || { log_warn "System health validation detected issues"; return 1; }
+    ./health.sh --"$SCRIPT_DIR/health.sh" --quiet && { log_success "System health validation passed"; return 0; } || { log_warn "System health validation detected issues"; return 1; } && { log_success "System health validation passed"; return 0; } || { log_warn "System health validation detected issues"; return 1; }
 }
 
 # ---------------------------------------------------------------------------
@@ -1075,7 +1072,7 @@ main() {
         # low-numbered default descriptor would be.  The kernel releases the
         # flock automatically on script exit / SIGKILL — no manual cleanup needed.
         require_root "$@"
-        local ops_lock_dir="${PROJECT_ROOT}/.locks"
+        local ops_lock_dir="${SCRIPT_DIR}/.locks"
         ensure_dir "$ops_lock_dir" 700 "$(get_real_user)" || true
         exec 63>"${ops_lock_dir}/operations.lock"
         if ! flock -n 63; then
@@ -1101,7 +1098,7 @@ main() {
     # FIX HIGH: use FD 63 for operations.lock — consistent with update.sh.
     # High-numbered FDs are not inherited by child processes the way low-numbered
     # ones (e.g. FD 9) are, preventing children from silently holding the flock.
-    local ops_lock_dir="${PROJECT_ROOT}/.locks"
+    local ops_lock_dir="${SCRIPT_DIR}/.locks"
     ensure_dir "$ops_lock_dir" 700 "$(get_real_user)" || true
     exec 63>"${ops_lock_dir}/operations.lock"
     if ! flock -n 63; then
