@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# systemd-setup.sh - Install and manage VaultWarden-OCI systemd timers
+# setup-systemd.sh - Install and manage VaultWarden-OCI systemd timers
 #
 # Replaces cron-setup.sh for new deployments. Manages the 6 scheduled
 # service+timer pairs in the systemd/ directory.
