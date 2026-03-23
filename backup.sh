@@ -116,7 +116,7 @@ fcntl(\$fh, F_SETFD, \$flags | FD_CLOEXEC) or die;
 get_backup_dir() {
     local type="$1"
     local base_dir
-    base_dir="$(get_config_value "BACKUP_DIR" "$SCRIPT_DIR/backups")"
+    base_dir="$(get_config_value "BACKUP_DIR" "/var/lib/vaultwarden/backups")"
     local dir="$base_dir/$type"
     ensure_dir "$dir" 750 "$(get_real_user)"
     echo "$dir"
@@ -124,7 +124,7 @@ get_backup_dir() {
 
 list_backups() {
     local base_dir
-    base_dir="$(get_config_value "BACKUP_DIR" "$SCRIPT_DIR/backups")"
+    base_dir="$(get_config_value "BACKUP_DIR" "/var/lib/vaultwarden/backups")"
     log_header "Existing Backups — $(date)"
     if [[ ! -d "$base_dir" ]]; then
         log_warn "Backup directory not found: $base_dir"
