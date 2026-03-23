@@ -4,8 +4,6 @@
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_COMMON_LIB_LOADED:-}" ]] && return 0
 readonly VAULTWARDEN_COMMON_LIB_LOADED=1
-
-# COMPATIBILITY: Set the flag that lib/security.sh checks before loading.
 readonly LIB_COMMON_LOADED=1
 
 # --- Library Configuration ---
@@ -203,10 +201,10 @@ load_env_file() {
             value="$raw_value"
         fi
 
-        if [[ "$value" == *'`'*   || "$value" == *'$('*  ||
-              "$value" == *';'*   || "$value" == *'&'*   ||
-              "$value" == *'|'*   || "$value" == *'<'*   ||
-              "$value" == *'>'*   || "$value" == *'\'*   ]]; then
+        if [[ "$value" == *'`'* || "$value" == *'$('* ||
+              "$value" == *';'* || "$value" == *'&'* ||
+              "$value" == *'|'* || "$value" == *'<'* ||
+              "$value" == *'>'* || "$value" == *'\'* ]]; then
             log_error "load_env_file: line ${lineno}: value for '${key}' contains" \
                       "forbidden shell metacharacters — aborting load of '$env_file'"
             return 1
@@ -506,19 +504,13 @@ _rate_limit_check() {
 
 # ─────────────────────────────────────────────────────────────────────────────
 # _smtp_send <to> <subject> <body>
-#
-# FIX-M10: All SMTP_* variable references use ${VAR:-} safe-expansion so this
-# function is safe to call under set -u even when SMTP vars are not yet
-# exported (e.g. health.sh calls send_email before load_env_file). The guard
-# checks still detect empty values and return 1 with a clear error message.
 # ─────────────────────────────────────────────────────────────────────────────
 _smtp_send() {
     local to="$1"
     local subject="$2"
     local body="$3"
 
-    # FIX-M10: ${VAR:-} prevents set -u crash when var is unset
-    [[ -z "${SMTP_HOST:-}"     ]] && { log_error "_smtp_send: SMTP_HOST is not set";     return 1; }
+    [[ -z "${SMTP_HOST:-}"     ]] && { log_error "_smtp_send: SMTP_HOST is not set";      return 1; }
     [[ -z "${SMTP_USERNAME:-}" ]] && { log_error "_smtp_send: SMTP_USERNAME is not set"; return 1; }
     [[ -z "${SMTP_PASSWORD:-}" ]] && { log_error "_smtp_send: SMTP_PASSWORD is not set"; return 1; }
     [[ -z "$to"                ]] && { log_error "_smtp_send: recipient (to) is empty";  return 1; }
@@ -584,9 +576,6 @@ _smtp_send() {
 # Calling conventions (both supported):
 #   send_email "subject" "body"                   — sends to ADMIN_EMAIL
 #   send_email "to@example.com" "subject" "body"  — sends to explicit recipient
-#
-# FIX-M09: recipient ($to) is now wired through to all three delivery stages.
-# FIX-M10: safe under set -u even when SMTP vars are not yet in environment.
 # ─────────────────────────────────────────────────────────────────────────────
 send_email() {
     local to subject body
@@ -649,9 +638,10 @@ Mode:      ${mode}${provider:+ / provider: ${provider}}"
             [[ "$mode" == "api" ]] && return 1
         else
             local driver_fn="_email_driver_${provider}"
-            # Single canonical token source — no per-provider variable lookup.
             local _api_token="${EMAIL_API_TOKEN:-}"
-
+            if [[ -z "${_api_token}" ]] && declare -f decrypt_secret &>/dev/null; then
+                _api_token="$(decrypt_secret email_api_key 2>/dev/null || true)"
+            fi
             if [[ -z "${_api_token}" ]]; then
                 if [[ "$mode" == "api" ]]; then
                     log_error "EMAIL_MODE=api but EMAIL_API_TOKEN is empty — cannot send. Run: ./edit-secrets.sh --rotate email_api_token"
