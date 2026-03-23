@@ -146,11 +146,31 @@ log_header() {
 
 # --- Configuration Management ---
 
-load_env_file() {
-    local env_file="${1:-.env}"
+# Candidate paths searched (in order) when no explicit env_file is supplied.
+# /etc/vaultwarden/vaultwarden.env is the production location written by
+# setup-systemd.sh --install; .env covers interactive / development use.
+_ENV_FILE_SEARCH_PATHS=(
+    ".env"
+    "/etc/vaultwarden/vaultwarden.env"
+)
 
-    if [[ ! -f "$env_file" ]]; then
-        log_error "Environment file not found: $env_file"
+load_env_file() {
+    local env_file="${1:-}"
+
+    # When called without an argument (the common case), resolve the first
+    # candidate path that actually exists on disk.
+    if [[ -z "$env_file" ]]; then
+        local candidate
+        for candidate in "${_ENV_FILE_SEARCH_PATHS[@]}"; do
+            if [[ -f "$candidate" ]]; then
+                env_file="$candidate"
+                break
+            fi
+        done
+    fi
+
+    if [[ -z "$env_file" || ! -f "$env_file" ]]; then
+        log_error "Environment file not found: ${env_file:-.env} (also searched: ${_ENV_FILE_SEARCH_PATHS[*]})"
         return 1
     fi
 
@@ -204,7 +224,7 @@ load_env_file() {
         if [[ "$value" == *'`'* || "$value" == *'$('* ||
               "$value" == *';'* || "$value" == *'&'* ||
               "$value" == *'|'* || "$value" == *'<'* ||
-              "$value" == *'>'* || "$value" == *'\'* ]]; then
+              "$value" == *'>'* || "$value" == *'\\'* ]]; then
             log_error "load_env_file: line ${lineno}: value for '${key}' contains" \
                       "forbidden shell metacharacters — aborting load of '$env_file'"
             return 1
