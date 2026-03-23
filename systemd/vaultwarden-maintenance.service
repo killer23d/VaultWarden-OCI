@@ -10,6 +10,9 @@ OnFailure=vaultwarden-notify-failure@%n.service
 Type=oneshot
 WorkingDirectory=/opt/vaultwarden-scripts
 EnvironmentFile=/etc/vaultwarden/vaultwarden.env
+# Clear any stale lock files left by a prior crash or hard reboot.
+# /run/lock is a tmpfs — a file here after reboot is always stale.
+ExecStartPre=/bin/bash -c 'rm -f /run/lock/vaultwarden-*.lock'
 ExecStart=/opt/vaultwarden-scripts/maintenance.sh --comprehensive
 User=root
 StandardOutput=journal
@@ -23,3 +26,5 @@ ProtectHome=yes
 # /run/lock is needed for the flock() lock file (ProtectSystem=strict makes /var/lock read-only)
 ReadWritePaths=/opt/vaultwarden-scripts /var/lib/vaultwarden /etc/vaultwarden /run/lock
 TimeoutStartSec=1800
+# Exit 1 = skipped/nothing-to-do; treat as success so OnFailure= is not fired.
+SuccessExitStatus=0 1
