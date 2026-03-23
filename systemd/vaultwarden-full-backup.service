@@ -4,13 +4,14 @@ Documentation=https://github.com/killer23d/VaultWarden-OCI
 After=docker.service network-online.target
 Requires=docker.service
 ConditionPathExists=/opt/vaultwarden-scripts/backup.sh
-# FIX: OnFailure belongs in [Unit], not [Service]. Moved from [Service] block.
 OnFailure=vaultwarden-notify-failure@%n.service
 
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/vaultwarden-scripts
 EnvironmentFile=/etc/vaultwarden/vaultwarden.env
+# Clear any stale lock files left by a prior crash or hard reboot.
+ExecStartPre=/bin/bash -c 'rm -f /run/lock/vaultwarden-*.lock'
 ExecStart=/opt/vaultwarden-scripts/backup.sh --type full --rclone --email
 User=root
 StandardOutput=journal
@@ -18,10 +19,10 @@ StandardError=journal
 SyslogIdentifier=vw-full-backup
 NoNewPrivileges=yes
 PrivateTmp=yes
-# SY-1: Sandbox hardening — script can only write to its own directories.
 ProtectSystem=strict
 ProtectHome=yes
-# /run/lock is needed for the flock() lock file (ProtectSystem=strict makes /var/lock read-only)
+# /run/lock needed for flock() lock file (ProtectSystem=strict makes /var/lock read-only)
 ReadWritePaths=/opt/vaultwarden-scripts /var/lib/vaultwarden /etc/vaultwarden /run/lock
-# Raise timeout: rclone sync to OCI Object Storage can be slow
-TimeoutStartSec=3600
+TimeoutStartSec=7200
+# Exit 1 = warning (e.g. rclone not configured); treat as success.
+SuccessExitStatus=0 1
