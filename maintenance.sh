@@ -171,8 +171,6 @@ cleanup_logs() {
     )
     for log_dir in "${log_dirs[@]}"; do
         if [[ -d "$log_dir" ]]; then
-            # FIX MEDIUM: use -print0 + mapfile -d '' to be null-safe;
-            # empty find output produces zero array elements, not one empty element.
             local -a old_log_files=()
             mapfile -d '' old_log_files < <(
                 find "$log_dir" -name "*.log*" -type f -mtime +"$LOG_RETENTION_DAYS" -print0 2>/dev/null
@@ -182,14 +180,11 @@ cleanup_logs() {
             done
         fi
     done
-    # Only pass directories that exist to find, preventing abort under
-    # set -e when log dirs are absent on fresh installs.
     local existing_log_dirs=()
     for log_dir in "${log_dirs[@]}"; do
         [[ -d "$log_dir" ]] && existing_log_dirs+=("$log_dir")
     done
     if [[ ${#existing_log_dirs[@]} -gt 0 ]]; then
-        # FIX MEDIUM (null-safe): use -print0 + mapfile -d '' for large-log scan too
         local -a large_log_files=()
         mapfile -d '' large_log_files < <(
             find "${existing_log_dirs[@]}" -name "*.log" -type f -size +100M -print0 2>/dev/null
@@ -201,7 +196,6 @@ cleanup_logs() {
             fi
             local rotated_name="${log_file}.$(date +%Y%m%d)"
             if mv "$log_file" "$rotated_name"; then
-                # FIX LOW: handle gzip failure — warn and attempt cleanup of uncompressed rotated file
                 if gzip "$rotated_name"; then
                     log_debug "Rotated large log: $(basename "$log_file")"
                     ((logs_cleaned++))
@@ -321,13 +315,9 @@ optimize_database() {
         log_info "Stopping VaultWarden service..."
         docker compose stop vaultwarden || { log_error "Failed to stop VaultWarden"; return 1; }
         log_success "VaultWarden stopped"
-        # FIX HIGH: replace hardcoded 3s sleep with WAL quiesce poll
-        # Ensures WAL is fully flushed before wal_checkpoint(TRUNCATE)/VACUUM
         _wait_wal_quiesce "$host_db_path" 30
     fi
 
-    # FIX LOW: write safety backup to /tmp (separate filesystem) to avoid
-    # full-disk on the live DB filesystem preventing the safety backup.
     local backup_file="/tmp/vw-db-pre-optimization-$(date +%Y%m%d-%H%M%S).sqlite3"
     cp "$host_db_path" "$backup_file" || {
         log_error "Failed to create safety backup"
@@ -433,8 +423,6 @@ run_deep_db_maintenance() {
     log_info "Stopping VaultWarden container..."
     docker compose stop vaultwarden && log_success "VaultWarden container stopped" || log_warn "Failed to stop vaultwarden container"
 
-    # FIX HIGH: replace hardcoded 5s sleep with WAL quiesce poll to guarantee
-    # WAL is fully flushed before wal_checkpoint(TRUNCATE) and VACUUM run.
     log_info "Waiting for WAL to quiesce before maintenance..."
     _wait_wal_quiesce "$db_file" 30
 
@@ -490,8 +478,6 @@ run_deep_db_maintenance() {
     echo ""
     if [[ "$maintenance_successful" == "true" && -n "$safety_backup_file" && -f "$safety_backup_file" ]]; then
         log_info "Cleaning up temporary safety backup..."
-        # FIX MEDIUM: remove all companion sidecar files via glob rather than
-        # hardcoded .sha256/.meta suffixes, so future extensions are also cleaned.
         local removed_sidecars=0
         for sidecar in "${safety_backup_file}".*; do
             [[ -f "$sidecar" ]] && rm -f "$sidecar" && (( removed_sidecars++ )) || true
@@ -519,8 +505,6 @@ verbose_log() {
 test_postfix_container() {
     log_info "Testing postfix container status..."
 
-    # FIX MEDIUM: docker compose ps always exits 0 regardless of running state.
-    # Use docker inspect to reliably check whether the container is actually running.
     local postfix_running
     postfix_running=$(docker inspect vaultwarden_postfix --format '{{.State.Running}}' 2>/dev/null || echo "false")
 
@@ -577,9 +561,6 @@ test_postfix_container() {
 test_fail2ban_integration() {
     log_info "Testing fail2ban integration..."
 
-    # Use docker inspect to check actual running state.
-    # `docker compose ps fail2ban` always exits 0 (it lists config, not state),
-    # so it cannot be used as a running-state guard.
     local f2b_running
     f2b_running=$(docker inspect vaultwarden_fail2ban --format '{{.State.Running}}' 2>/dev/null || echo "false")
     if [[ "$f2b_running" != "true" ]]; then
@@ -765,15 +746,9 @@ update_firewall_ranges() {
         log_error "Failed to fetch Cloudflare IP ranges - aborting firewall update"; return 1
     fi
 
-    # FIX MEDIUM: _ufw_allow_range must NOT run inside a command-substitution
-    # subshell — ufw failures would be silently swallowed and the exit status
-    # discarded. Instead the function runs directly and communicates its result
-    # via a nameref variable '_ufw_result' that the caller sets before invoking.
-    # This keeps ufw in the same shell so set -e / error propagation works.
     _ufw_allow_range() {
         local range="$1" label="$2"
-        # _ufw_result is a nameref set by the caller (local -n _ufw_result=...)
-        # shellcheck disable=SC2034  # used via nameref
+        # shellcheck disable=SC2034  # _ufw_result used via nameref by caller
         _ufw_result=false
         if ! ufw status | grep -q "$range"; then
             if ufw allow proto tcp from "$range" to any port 80  comment "${label}" >/dev/null 2>&1 && \
@@ -820,9 +795,6 @@ update_firewall_ranges() {
         log_success "New Cloudflare IP ranges added successfully"
         log_info "Removing outdated Cloudflare IP ranges..."
         local removed_count=0
-        # FIX LOW: correctly strip brackets from rule numbers — awk '{print $1}'
-        # breaks on padded numbers like '[ 1]' (extracts '[' not '1').
-        # Use sed to strip leading '[' and trailing ']' reliably.
         local -a old_rule_nums=()
         mapfile -t old_rule_nums < <(
             ufw status numbered \
@@ -855,27 +827,19 @@ update_dns_record() {
     [[ -z "$domain"  ]] && { log_error "DOMAIN not set in .env"; return 1; }
     [[ -z "$zone_id" ]] && { log_error "CLOUDFLARE_ZONE_ID not set in .env"; return 1; }
 
-    local lock_dir="${SCRIPT_DIR}/.locks"
-    local DNS_LOCK="${lock_dir}/dns-update.lock"
-    ensure_dir "$lock_dir" 700 "$(get_real_user)" || {
-        log_error "Failed to initialize lock directory: $lock_dir"
-        return 1
-    }
-
-    # FIX MEDIUM: mark DNS lock FD close-on-exec so child processes
-    # (curl, dig, jq, send_notification_email) do not inherit the open FD
-    # and hold the flock after update_dns_record() returns.
-    # bash does not expose O_CLOEXEC via exec redirection directly, so we
-    # open the FD then immediately set FD_CLOEXEC via a /proc/self/fd symlink
-    # (Linux) or fall back gracefully on other platforms.
+    # Use /run/lock (tmpfs, writable under ProtectSystem=strict, auto-cleared on reboot).
+    # FD 242 is a high-numbered descriptor unlikely to conflict with any
+    # standard FD; the kernel releases the flock on script exit / SIGKILL.
+    local DNS_LOCK="/run/lock/vaultwarden-dns-update.lock"
     exec 242>"$DNS_LOCK"
     if ! flock -n 242; then
         log_info "DNS update already in progress (lock: $DNS_LOCK). Skipping."
         return 0
     fi
-    # Set close-on-exec on FD 242 so child processes do not inherit it
+    # Set close-on-exec on FD 242 so child processes (curl, dig, jq) do not
+    # inherit the open FD and hold the flock inadvertently.
     if [[ -e /proc/self/fd/242 ]]; then
-        python3 -c "import os, fcntl; flags = fcntl.fcntl(242, fcntl.F_GETFD); fcntl.fcntl(242, fcntl.F_SETFD, flags | fcntl.FD_CLOEXEC)" 2>/dev/null || true
+        python3 -c "import fcntl; flags = fcntl.fcntl(242, fcntl.F_GETFD); fcntl.fcntl(242, fcntl.F_SETFD, flags | fcntl.FD_CLOEXEC)" 2>/dev/null || true
     fi
 
     log_info "Checking if DNS update needed for $domain..."
@@ -893,9 +857,6 @@ update_dns_record() {
     fi
     log_info "DNS update needed: $dns_ip -> $current_ip"
 
-    # FIX HIGH: validate token file permissions before reading.
-    # A world-readable token file (mode 644) is a security risk; abort with
-    # a clear error so the operator is alerted and can fix the permissions.
     local token_file="${SCRIPT_DIR}/secrets/.docker_secrets/caddy_cloudflare_dns_token"
     local cf_token
     if [[ -f "$token_file" ]]; then
@@ -905,7 +866,6 @@ update_dns_record() {
                    || echo "")
         case "$token_perms" in
             444|400|600|640)
-                # All accepted: 444=bind-mount secret, 400/600/640=restricted
                 log_debug "Cloudflare token file permissions OK ($token_perms)"
                 ;;
             "")
@@ -975,8 +935,6 @@ generate_maintenance_summary() {
     local log_cleanup="$1" backup_cleanup="$2" docker_cleanup="$3"
     local db_optimization="$4" firewall_update="$5" dns_update="$6" health_validation="$7"
 
-    # FIX MEDIUM: use printf instead of echo -e to avoid BUG-U class issues
-    # where escape sequences in variable content are misinterpreted.
     local summary
     summary="VaultWarden Maintenance Summary - $(date)\n\nMaintenance Results:\n"
 
@@ -1032,18 +990,27 @@ generate_maintenance_summary() {
     [[ "$CLEAN_DOCKER"  == "true" && "$docker_cleanup" == "2" ]] && ((critical_failures++))
     [[ $critical_failures -eq 0 ]] && summary+="\n🎉 Overall Status: SUCCESS\n" || summary+="\n⚠️  Overall Status: COMPLETED WITH ISSUES\n"
 
-    # FIX MEDIUM: printf '%b' interprets \n escapes in the accumulated string
-    # without the portability hazards of echo -e (e.g. -e being echoed literally
-    # on some shells, or \x sequences in user-controlled data being expanded).
     printf '%b' "$summary"
 
     if [[ "$EMAIL_NOTIFY" == "true" ]]; then
         local subj; [[ $critical_failures -eq 0 ]] && subj="VaultWarden Maintenance: SUCCESS" || subj="VaultWarden Maintenance: ISSUES DETECTED"
-        # Render summary to a plain string for email (no escape sequences)
         local email_body
         email_body=$(printf '%b' "$summary")
         send_notification_email "$subj" "$email_body" && log_info "Summary emailed" || log_warn "Failed to send summary email"
     fi
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# _load_env — gracefully load .env; non-fatal when running under systemd
+# (environment already injected via EnvironmentFile= in the unit file).
+# Returns 0 always; individual functions will still fail on missing vars.
+# ---------------------------------------------------------------------------
+_load_env() {
+    if load_env_file 2>/dev/null; then
+        return 0
+    fi
+    log_warn "No .env file found — relying on environment already set (e.g. systemd EnvironmentFile)"
     return 0
 }
 
@@ -1059,50 +1026,44 @@ perform_cleanup() {
 main() {
     log_header "VaultWarden-OCI Maintenance Manager"
 
-    local state_dir
-    state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
-    mkdir -p "$state_dir/.locks" 2>/dev/null || true
-
     CLEANUP_ACTIONS=()
     trap perform_cleanup EXIT
 
+    # All transient lock files live in /run/lock (tmpfs):
+    #   - Always writable even under systemd ProtectSystem=strict
+    #     (listed in ReadWritePaths= in every unit that calls this script)
+    #   - Auto-cleared on reboot, so stale locks from crashed runs never
+    #     block subsequent scheduled invocations
+    #
+    # FD 63 is used for the operations lock (high-numbered, not inherited
+    # by child processes as low-numbered FDs can be).
+    local OPS_LOCK="/run/lock/vaultwarden-operations.lock"
+
     # ---- Deep DB maintenance: self-contained sub-command ----
     if [[ "$DB_DEEP_MAINT" == "true" ]]; then
-        # FIX HIGH: use FD 63 for operations.lock — consistent with update.sh.
-        # FD 63 is a high-numbered descriptor that is not inherited by child
-        # processes (docker compose, sqlite3, backup.sh, health.sh) as a
-        # low-numbered default descriptor would be.  The kernel releases the
-        # flock automatically on script exit / SIGKILL — no manual cleanup needed.
         require_root "$@"
-        local ops_lock_dir="${SCRIPT_DIR}/.locks"
-        ensure_dir "$ops_lock_dir" 700 "$(get_real_user)" || true
-        exec 63>"${ops_lock_dir}/operations.lock"
+        exec 63>"$OPS_LOCK"
         if ! flock -n 63; then
             log_error "Another operation (update/restore/maintenance) is already running. Aborting."
             exit 1
         fi
         touch /tmp/.vw_maintenance.lock
         CLEANUP_ACTIONS+=("rm -f /tmp/.vw_maintenance.lock 2>/dev/null || true")
-        if ! load_env_file; then log_error "Failed to load configuration"; exit 1; fi
+        _load_env
         run_deep_db_maintenance
         exit $?
     fi
 
     # ---- Email diagnostic: self-contained sub-command ----
     if [[ "$TEST_EMAIL" == "true" ]]; then
-        if ! load_env_file; then log_error "Failed to load configuration"; exit 1; fi
+        _load_env
         run_email_diagnostics
         exit $?
     fi
 
     # ---- Routine or targeted maintenance ----
     require_root "$@"
-    # FIX HIGH: use FD 63 for operations.lock — consistent with update.sh.
-    # High-numbered FDs are not inherited by child processes the way low-numbered
-    # ones (e.g. FD 9) are, preventing children from silently holding the flock.
-    local ops_lock_dir="${SCRIPT_DIR}/.locks"
-    ensure_dir "$ops_lock_dir" 700 "$(get_real_user)" || true
-    exec 63>"${ops_lock_dir}/operations.lock"
+    exec 63>"$OPS_LOCK"
     if ! flock -n 63; then
         log_error "Another operation (update/restore/maintenance) is already running. Aborting."
         exit 1
@@ -1110,11 +1071,11 @@ main() {
     touch /tmp/.vw_maintenance.lock
     CLEANUP_ACTIONS+=("rm -f /tmp/.vw_maintenance.lock 2>/dev/null || true")
 
-    [[ "$DRY_RUN"        == "true" ]] && log_warn "DRY RUN MODE - No changes will be made"
-    [[ "$TARGETED_MODE"  == "true" ]] && log_info "Targeted mode — running requested task(s) only"
-    [[ "$COMPREHENSIVE"  == "true" ]] && log_info "Running comprehensive maintenance..."
+    [[ "$DRY_RUN"       == "true" ]] && log_warn "DRY RUN MODE - No changes will be made"
+    [[ "$TARGETED_MODE" == "true" ]] && log_info "Targeted mode — running requested task(s) only"
+    [[ "$COMPREHENSIVE" == "true" ]] && log_info "Running comprehensive maintenance..."
 
-    if ! load_env_file; then log_error "Failed to load configuration"; exit 1; fi
+    _load_env
 
     local log_cleanup_result=0 backup_cleanup_result=0 docker_cleanup_result=0
     local db_optimization_result=0 firewall_update_result=1 dns_update_result=1
