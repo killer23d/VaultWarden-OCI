@@ -555,7 +555,10 @@ _smtp_send() {
         printf 'Content-Type: text/plain; charset=UTF-8\r\n'
         printf 'Content-Transfer-Encoding: 7bit\r\n'
         printf '\r\n'
-        printf '%s\r\n' "$body"
+        while IFS= read -r line; do
+            printf '%s\r\n' "$line"
+        done <<< "$body"
+        printf '\r\n'
     } | curl -s \
         --connect-timeout 15 \
         --max-time 30 \
