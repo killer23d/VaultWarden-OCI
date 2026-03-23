@@ -741,7 +741,12 @@ main() {
 
     trap cleanup EXIT HUP INT TERM
 
-    local LOCK_FILE="/var/lock/vaultwarden-backup.lock"
+    # /run/lock is the FHS-correct location for transient process lock files.
+    # /var/lock is a legacy symlink to /run/lock on modern systemd systems,
+    # but ProtectSystem=strict in systemd units makes /var/lock read-only while
+    # /run/lock remains writable (it is a tmpfs mount).  Using /run/lock
+    # directly avoids the read-only filesystem error when running under systemd.
+    local LOCK_FILE="/run/lock/vaultwarden-backup.lock"
 
     if [[ "$FORCE" != "true" && "$DRY_RUN" != "true" ]]; then
         eval "exec ${LOCK_FD}>\"$LOCK_FILE\""
