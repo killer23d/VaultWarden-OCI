@@ -10,7 +10,10 @@ OnFailure=vaultwarden-notify-failure@%n.service
 Type=oneshot
 WorkingDirectory=/opt/vaultwarden-scripts
 EnvironmentFile=/etc/vaultwarden/vaultwarden.env
-ExecStart=/opt/vaultwarden-scripts/health.sh --auto-recover --email
+# --email is intentionally omitted here. Add it once EMAIL_API_TOKEN or
+# SMTP credentials are set in /etc/vaultwarden/vaultwarden.env, otherwise
+# the service exits 1 on every run (no credentials → email fails → exit 1).
+ExecStart=/opt/vaultwarden-scripts/health.sh --auto-recover
 User=root
 StandardOutput=journal
 StandardError=journal
@@ -22,3 +25,8 @@ ProtectHome=yes
 # /run/lock needed if health ever acquires a lock; also harmless
 ReadWritePaths=/opt/vaultwarden-scripts /var/lib/vaultwarden /etc/vaultwarden /run/lock
 TimeoutStartSec=300
+# Exit code 1 from health.sh means 'degraded but not critical' (e.g. no backups
+# yet on first run). Treat it as success so OnFailure= is not triggered for
+# normal degraded states. Only exit >=2 (script crash / unhandled error) fires
+# the failure notification.
+SuccessExitStatus=0 1
