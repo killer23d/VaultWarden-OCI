@@ -548,6 +548,26 @@ _backup_verified_age_days() {
     echo $(( ($(date +%s) - ref_epoch) / 86400 ))
 }
 
+# ---------------------------------------------------------------------------
+# check_backup_status
+#
+# Three-state logic for backup directory and backup file presence:
+#
+#   State 1 — Directory absent (fresh install, never backed up yet):
+#     Auto-create the directory tree (base/full, base/db, base/emergency) with
+#     mode 750 so the very next backup.sh run can write into it.  Emit a WARN
+#     (not CRITICAL) and set status="initialising" so the overall health result
+#     stays healthy.  No alert email is sent.
+#
+#   State 2 — Directory present but no backup files found:
+#     Emit a WARN for each missing backup type and set status="degraded".
+#     This covers the window between dir creation and the first scheduled run.
+#     Overall health stays healthy (degraded != failed).
+#
+#   State 3 — Backup files exist:
+#     Check age and decrypt integrity.  Stale (>2d DB, >7d full) or corrupt
+#     backups are escalated to CRITICAL / status="failed" as before.
+# ---------------------------------------------------------------------------
 check_backup_status() {
     health_log_info "Checking backup status and integrity..."
 
@@ -559,14 +579,36 @@ check_backup_status() {
         [[ -n "$env_backup_dir" ]] && backup_base_dir="$env_backup_dir"
     fi
 
-    local latest_db_backup latest_full_backup
+    # ---- State 1: directory absent → auto-initialise, warn only ------------
+    if [[ ! -d "$backup_base_dir" ]]; then
+        health_log_info "Backup directory not found: $backup_base_dir — initialising structure..."
+        local _owner
+        _owner=$(get_real_user 2>/dev/null || echo "root")
+        local _init_ok=true
+        for _subdir in full db emergency; do
+            if ! mkdir -p "${backup_base_dir}/${_subdir}" 2>/dev/null; then
+                log_warn "Could not create backup subdir: ${backup_base_dir}/${_subdir}"
+                _init_ok=false
+            fi
+        done
+        if [[ "$_init_ok" == "true" ]]; then
+            chmod 750 "$backup_base_dir" 2>/dev/null || true
+            chown "${_owner}" "$backup_base_dir" 2>/dev/null || true
+            health_log_warn "Backup directory initialised: $backup_base_dir — no backups yet (first run pending)"
+            HEALTH_RESULTS["backup_status"]="initialising"
+            HEALTH_DETAILS["backup_status"]="Directory created; awaiting first backup run"
+        else
+            # mkdir failed (permissions issue) — this is a real problem
+            health_log_error "CRITICAL: Cannot create backup directory: $backup_base_dir"
+            HEALTH_RESULTS["backup_status"]="failed"
+            HEALTH_DETAILS["backup_status"]="Cannot create backup directory"
+            return 1
+        fi
+        return 0
+    fi
 
-    [[ ! -d "$backup_base_dir" ]] && {
-        health_log_error "CRITICAL: Backup directory not found: $backup_base_dir"
-        HEALTH_RESULTS["backup_status"]="failed"
-        HEALTH_DETAILS["backup_status"]="Backup directory missing"
-        return 1
-    }
+    # ---- State 2 / 3: directory exists — check for backup files -----------
+    local latest_db_backup="" latest_full_backup=""
 
     [[ -d "$backup_base_dir/db" ]] && \
         latest_db_backup=$(find "$backup_base_dir/db" -name "*.age" -type f 2>/dev/null | sort | tail -1)
@@ -590,8 +632,9 @@ check_backup_status() {
             health_log_success "Database backup recent (${db_backup_age}d) and decryptable"
         fi
     else
-        backup_issues+=("No database backups found")
-        backup_failed=true
+        # State 2: dir exists but no files yet — warn, not critical
+        health_log_warn "No database backups found in $backup_base_dir/db — first backup run pending"
+        backup_issues+=("No database backups yet")
     fi
 
     if [[ -n "${latest_full_backup:-}" ]]; then
@@ -608,8 +651,9 @@ check_backup_status() {
             health_log_success "Full backup recent (${full_backup_age}d) and decryptable"
         fi
     else
-        backup_issues+=("No full backups found")
-        backup_failed=true
+        # State 2: dir exists but no files yet — warn, not critical
+        health_log_warn "No full backups found in $backup_base_dir/full — first backup run pending"
+        backup_issues+=("No full backups yet")
     fi
 
     if [[ "$backup_failed" == "true" ]]; then
@@ -617,6 +661,11 @@ check_backup_status() {
         HEALTH_RESULTS["backup_status"]="failed"
         HEALTH_DETAILS["backup_status"]="Issues: ${backup_issues[*]}"
         return 1
+    elif [[ ${#backup_issues[@]} -gt 0 ]]; then
+        # Warnings only (missing files, not stale/corrupt existing ones)
+        HEALTH_RESULTS["backup_status"]="degraded"
+        HEALTH_DETAILS["backup_status"]="Pending: ${backup_issues[*]}"
+        return 0
     else
         health_log_success "Backup status OK"
         HEALTH_RESULTS["backup_status"]="healthy"
@@ -842,10 +891,11 @@ generate_text_report() {
         local status="${HEALTH_RESULTS[$component]}"
         local details="${HEALTH_DETAILS[$component]:-}"
         case $status in
-            "healthy")  report+="  ✅ $component: $status" ;;
-            "degraded") report+="  ⚠️  $component: $status" ;;
-            "failed")   report+="  ❌ $component: $status" ;;
-            "skipped")  report+="  ⏭️  $component: $status" ;;
+            "healthy")       report+="  ✅ $component: $status" ;;
+            "degraded")      report+="  ⚠️  $component: $status" ;;
+            "initialising")  report+="  🔄 $component: $status" ;;
+            "failed")        report+="  ❌ $component: $status" ;;
+            "skipped")       report+="  ⏭️  $component: $status" ;;
         esac
         [[ -n "$details" ]] && report+=" - $details"
         report+="\n"
