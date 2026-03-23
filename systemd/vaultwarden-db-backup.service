@@ -10,6 +10,8 @@ OnFailure=vaultwarden-notify-failure@%n.service
 Type=oneshot
 WorkingDirectory=/opt/vaultwarden-scripts
 EnvironmentFile=/etc/vaultwarden/vaultwarden.env
+# Clear any stale lock files left by a prior crash or hard reboot.
+ExecStartPre=/bin/bash -c 'rm -f /run/lock/vaultwarden-*.lock'
 ExecStart=/opt/vaultwarden-scripts/backup.sh --type db --rclone --email
 User=root
 StandardOutput=journal
@@ -22,3 +24,5 @@ ProtectHome=yes
 # /run/lock is needed for the flock() lock file (ProtectSystem=strict makes /var/lock read-only)
 ReadWritePaths=/opt/vaultwarden-scripts /var/lib/vaultwarden /etc/vaultwarden /run/lock
 TimeoutStartSec=3600
+# Exit 1 = warning (e.g. rclone not configured); treat as success.
+SuccessExitStatus=0 1
