@@ -590,7 +590,7 @@ _smtp_send() {
         printf '\r\n'
     )
 
-    # ── Path A: SMTP_PASSWORD present → direct external relay ────────────────
+    # ── Path A: SMTP_PASSWORD present → direct external relay ────────────────────
     if [[ -n "${SMTP_PASSWORD:-}" ]]; then
         [[ -z "${SMTP_HOST:-}"     ]] && { log_error "_smtp_send: SMTP_HOST is not set";     return 1; }
         [[ -z "${SMTP_USERNAME:-}" ]] && { log_error "_smtp_send: SMTP_USERNAME is not set"; return 1; }
@@ -656,8 +656,9 @@ _smtp_send() {
 # TO is optional; defaults to ${ADMIN_EMAIL}.
 # Tries providers in order: HTTP API → SMTP/Postfix sidecar → host MTA.
 #
-# Token resolution for HTTP API providers (BUG-EM8 FIX):
-#   The secrets file canonical key is 'email_api_token' (not 'email_api_key').
+# Token resolution for HTTP API providers:
+#   The canonical secrets key is 'email_api_token'. This matches what
+#   ./edit-secrets.sh --rotate email_api_token writes into secrets.yaml.
 #   Resolution order:
 #     1. EMAIL_API_TOKEN env var (direct override, e.g. set in shell)
 #     2. decrypt_secret email_api_token  (from secrets.yaml via SOPS/age)
@@ -709,7 +710,7 @@ Host:      $(hostname -f 2>/dev/null || hostname)
 Timestamp: $(date -uIs)
 Mode:      ${mode}${provider:+ / provider: ${provider}}"
 
-    # ── Stage 1: HTTP API ────────────────────────────────────────────────
+    # ── Stage 1: HTTP API ────────────────────────────────────────────────────────────────
     if [[ "$mode" == "auto" || "$mode" == "api" ]]; then
         if [[ -z "${_EMAIL_DRIVERS[$provider]:-}" ]]; then
             log_error "Unknown EMAIL_PROVIDER='${provider}'"
@@ -718,7 +719,8 @@ Mode:      ${mode}${provider:+ / provider: ${provider}}"
         else
             local driver_fn="_email_driver_${provider}"
             local _api_token="${EMAIL_API_TOKEN:-}"
-            # BUG-EM8 FIX: canonical secrets key is 'email_api_token', not 'email_api_key'
+            # Canonical secrets key is 'email_api_token'.
+            # edit-secrets.sh --rotate email_api_token writes under this exact key.
             if [[ -z "${_api_token}" ]] && declare -f decrypt_secret &>/dev/null; then
                 _api_token="$(decrypt_secret email_api_token 2>/dev/null || true)"
             fi
@@ -742,7 +744,7 @@ Mode:      ${mode}${provider:+ / provider: ${provider}}"
         fi
     fi
 
-    # ── Stage 2: SMTP relay (Postfix sidecar) ─────────────────────────────
+    # ── Stage 2: SMTP relay (Postfix sidecar) ───────────────────────────────────
     if [[ "$mode" == "auto" || "$mode" == "smtp" ]]; then
         if _smtp_send "$to" "$subject" "$full_body"; then
             log_success "Email sent via SMTP relay (${SMTP_HOST:-unconfigured}:${SMTP_PORT:-587}): ${subject}"
@@ -756,7 +758,7 @@ Mode:      ${mode}${provider:+ / provider: ${provider}}"
         log_warn "SMTP relay failed — falling back to host MTA"
     fi
 
-    # ── Stage 3: Host MTA ────────────────────────────────────────────────
+    # ── Stage 3: Host MTA ────────────────────────────────────────────────────────────
     if [[ "$mode" == "auto" || "$mode" == "host" ]]; then
         if command -v mail &>/dev/null; then
             if printf '%s' "$full_body" | mail -s "$subject" "$to" 2>/dev/null; then
