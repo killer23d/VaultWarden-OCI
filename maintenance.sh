@@ -7,15 +7,18 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/common.sh"
 init_common_lib "$0"
-# FIX-MAINT-1: source lib/secrets.sh so that decrypt_secret is available when
-# send_email() (called from lib/common.sh) tries to resolve EMAIL_API_TOKEN
-# from secrets/secrets.yaml via SOPS/age.  Without this, the declare -f guard
-# in send_email() evaluates to false and EMAIL_API_TOKEN stays empty, causing
-# the warning "EMAIL_PROVIDER=mailgun set but EMAIL_API_TOKEN is empty".
-source "$SCRIPT_DIR/lib/secrets.sh"
 source "$SCRIPT_DIR/lib/docker.sh"
 source "$SCRIPT_DIR/lib/backup_utils.sh"
 source "$SCRIPT_DIR/lib/crypto.sh"
+# FIX-MAINT-1 (revised): source lib/secrets.sh so that decrypt_secret is
+# available when send_email() tries to resolve EMAIL_API_TOKEN from
+# secrets/secrets.yaml via SOPS/age.  lib/secrets.sh recomputes its own
+# SCRIPT_DIR (→ lib/) at load time so it can find crypto.sh as a sibling;
+# that overwrites our project-root SCRIPT_DIR.  Save and restore it.
+_MAINT_SCRIPT_DIR="$SCRIPT_DIR"
+source "$SCRIPT_DIR/lib/secrets.sh"
+SCRIPT_DIR="$_MAINT_SCRIPT_DIR"
+unset _MAINT_SCRIPT_DIR
 
 # ---------------------------------------------------------------------------
 # Configuration defaults
@@ -833,17 +836,12 @@ update_dns_record() {
     [[ -z "$domain"  ]] && { log_error "DOMAIN not set in .env"; return 1; }
     [[ -z "$zone_id" ]] && { log_error "CLOUDFLARE_ZONE_ID not set in .env"; return 1; }
 
-    # Use /run/lock (tmpfs, writable under ProtectSystem=strict, auto-cleared on reboot).
-    # FD 242 is a high-numbered descriptor unlikely to conflict with any
-    # standard FD; the kernel releases the flock on script exit / SIGKILL.
     local DNS_LOCK="/run/lock/vaultwarden-dns-update.lock"
     exec 242>"$DNS_LOCK"
     if ! flock -n 242; then
         log_info "DNS update already in progress (lock: $DNS_LOCK). Skipping."
         return 0
     fi
-    # Set close-on-exec on FD 242 so child processes (curl, dig, jq) do not
-    # inherit the open FD and hold the flock inadvertently.
     if [[ -e /proc/self/fd/242 ]]; then
         python3 -c "import fcntl; flags = fcntl.fcntl(242, fcntl.F_GETFD); fcntl.fcntl(242, fcntl.F_SETFD, flags | fcntl.FD_CLOEXEC)" 2>/dev/null || true
     fi
@@ -1035,14 +1033,6 @@ main() {
     CLEANUP_ACTIONS=()
     trap perform_cleanup EXIT
 
-    # All transient lock files live in /run/lock (tmpfs):
-    #   - Always writable even under systemd ProtectSystem=strict
-    #     (listed in ReadWritePaths= in every unit that calls this script)
-    #   - Auto-cleared on reboot, so stale locks from crashed runs never
-    #     block subsequent scheduled invocations
-    #
-    # FD 63 is used for the operations lock (high-numbered, not inherited
-    # by child processes as low-numbered FDs can be).
     local OPS_LOCK="/run/lock/vaultwarden-operations.lock"
 
     # ---- Deep DB maintenance: self-contained sub-command ----
@@ -1087,7 +1077,6 @@ main() {
     local db_optimization_result=0 firewall_update_result=1 dns_update_result=1
     local health_validation_result=0
 
-    # ---- Phase 1 & 2: skipped entirely in targeted mode ----
     if [[ "$TARGETED_MODE" == "false" ]]; then
         log_info "=== Phase 1: System Cleanup ==="
         cleanup_logs    || log_cleanup_result=$?
@@ -1102,7 +1091,6 @@ main() {
         optimize_database || db_optimization_result=$?
     fi
 
-    # ---- Phase 3: Targeted tasks (always run when flagged) ----
     if [[ "$UPDATE_FIREWALL" == "true" || "$UPDATE_DNS" == "true" ]]; then
         if [[ "$TARGETED_MODE" == "true" ]]; then
             log_info "=== Targeted Task(s) ==="
@@ -1117,13 +1105,11 @@ main() {
         fi
     fi
 
-    # ---- Phase 4: Health check (skipped in targeted mode) ----
     if [[ "$TARGETED_MODE" == "false" ]]; then
         log_info "=== Phase 4: Health Validation ==="
         validate_system_health || health_validation_result=$?
     fi
 
-    # ---- Phase 5: Summary ----
     log_info "=== Summary ==="
     generate_maintenance_summary \
         "$log_cleanup_result" "$backup_cleanup_result" "$docker_cleanup_result" \
