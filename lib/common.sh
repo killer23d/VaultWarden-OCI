@@ -504,26 +504,14 @@ download_file() {
 source "${LIB_DIR}/email.sh"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# _resolve_rate_limit_dir
+# _resolve_rate_limit_dir  (BUG-EM7 FIX)
 #
-# BUG-EM7 FIX: rate-limit directory "Permission denied" when run as non-root.
-#
-# Previously send_email() hardcoded PROJECT_ROOT/.rate-limit as the stamp
-# directory. When maintenance.sh runs as the ubuntu user (non-root),
-# PROJECT_ROOT may contain a .rate-limit directory previously created by a
-# root invocation (cron, sudo make up, etc.), leaving it owned root:root 700.
-# The ubuntu user cannot write into it, so every successful email ended with:
-#   Permission denied: .rate-limit/.vw_last_email_<hash>
-#
-# This function tries candidates in priority order and returns the first one
+# Tries candidate directories in priority order and returns the first one
 # that is (or can be) created AND is writable by the current user:
-#   1. PROJECT_ROOT/.rate-limit   — preferred; keeps files in the project dir
-#   2. XDG_CACHE_HOME/vaultwarden/rate-limit  — user-scoped XDG cache
-#   3. HOME/.cache/vaultwarden/rate-limit      — fallback if XDG unset
-#   4. /tmp/vaultwarden-rate-limit-<euid>      — last resort (tmpfs)
-#
-# Output: prints the chosen directory path on stdout; returns 0 on success,
-# 1 if no writable location could be found (email still sent, just not stamped).
+#   1. PROJECT_ROOT/.rate-limit   — preferred
+#   2. XDG_CACHE_HOME/vaultwarden/rate-limit
+#   3. HOME/.cache/vaultwarden/rate-limit
+#   4. /tmp/vaultwarden-rate-limit-<euid>  (last resort)
 # ─────────────────────────────────────────────────────────────────────────────
 _resolve_rate_limit_dir() {
     local candidates=(
@@ -534,10 +522,8 @@ _resolve_rate_limit_dir() {
 
     local dir
     for dir in "${candidates[@]}"; do
-        # Try to create it if absent; silence errors (may lack permission)
         mkdir -p "$dir" 2>/dev/null || true
         chmod 700 "$dir" 2>/dev/null || true
-        # Test writability by attempting a temp-file creation
         if [[ -d "$dir" ]] && touch "${dir}/.write_test_$$" 2>/dev/null; then
             rm -f "${dir}/.write_test_$$" 2>/dev/null || true
             printf '%s\n' "$dir"
@@ -546,7 +532,6 @@ _resolve_rate_limit_dir() {
     done
 
     log_debug "_resolve_rate_limit_dir: no writable candidate found; rate-limiting disabled for this run"
-    # Return /tmp as a best-effort non-fatal fallback
     printf '/tmp\n'
     return 1
 }
@@ -571,16 +556,10 @@ _rate_limit_check() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# _smtp_send <to> <subject> <body>
+# _smtp_send <to> <subject> <body>  (BUG-EM6 FIX)
 #
-# BUG-EM6 FIX: Host-side SMTP delivery strategy.
-#
-# When SMTP_PASSWORD is absent (normal host-side invocation), routes through
-# the Postfix sidecar at VW_SMTP_HOST_PORT (default 127.0.0.1:587) with no
-# credentials. Postfix holds the relay credentials internally.
-#
-# When SMTP_PASSWORD IS present (direct SMTP override, e.g. dev/test), the
-# original behaviour of connecting directly to SMTP_HOST is preserved.
+# Path A: SMTP_PASSWORD present → direct external relay (dev/test override)
+# Path B: no SMTP_PASSWORD → route through Postfix sidecar at 127.0.0.1:587
 # ─────────────────────────────────────────────────────────────────────────────
 _smtp_send() {
     local to="$1"
@@ -612,7 +591,6 @@ _smtp_send() {
     )
 
     # ── Path A: SMTP_PASSWORD present → direct external relay ────────────────
-    # Used only when an explicit relay override is configured (e.g. dev/test).
     if [[ -n "${SMTP_PASSWORD:-}" ]]; then
         [[ -z "${SMTP_HOST:-}"     ]] && { log_error "_smtp_send: SMTP_HOST is not set";     return 1; }
         [[ -z "${SMTP_USERNAME:-}" ]] && { log_error "_smtp_send: SMTP_USERNAME is not set"; return 1; }
@@ -648,9 +626,7 @@ _smtp_send() {
         return $?
     fi
 
-    # ── Path B: No SMTP_PASSWORD → route through Postfix sidecar ────────────
-    # BUG-EM6 FIX: Normal production host-side path.
-    # Postfix sidecar listens on 127.0.0.1:587 (loopback-only port binding).
+    # ── Path B: No SMTP_PASSWORD → Postfix sidecar (normal production path) ───
     local _sidecar_addr="${VW_SMTP_HOST_PORT:-127.0.0.1:587}"
     local _sidecar_host _sidecar_port
     _sidecar_host="${_sidecar_addr%:*}"
@@ -677,10 +653,14 @@ _smtp_send() {
 # ─────────────────────────────────────────────────────────────────────────────
 # send_email [TO] SUBJECT BODY
 #
-# TO is optional. When omitted, defaults to ${ADMIN_EMAIL}.
-# Calling conventions (both supported):
-#   send_email "subject" "body"                   — sends to ADMIN_EMAIL
-#   send_email "to@example.com" "subject" "body"  — sends to explicit recipient
+# TO is optional; defaults to ${ADMIN_EMAIL}.
+# Tries providers in order: HTTP API → SMTP/Postfix sidecar → host MTA.
+#
+# Token resolution for HTTP API providers (BUG-EM8 FIX):
+#   The secrets file canonical key is 'email_api_token' (not 'email_api_key').
+#   Resolution order:
+#     1. EMAIL_API_TOKEN env var (direct override, e.g. set in shell)
+#     2. decrypt_secret email_api_token  (from secrets.yaml via SOPS/age)
 # ─────────────────────────────────────────────────────────────────────────────
 send_email() {
     local to subject body
@@ -713,9 +693,6 @@ send_email() {
 
     [[ "$subject" != "[VaultWarden]"* ]] && subject="[VaultWarden] ${subject}"
 
-    # BUG-EM7 FIX: use _resolve_rate_limit_dir() instead of hardcoded path.
-    # Falls back gracefully when PROJECT_ROOT/.rate-limit is owned by root and
-    # the current user lacks write permission (e.g. interactive ubuntu session).
     local rate_limit_dir
     rate_limit_dir=$(_resolve_rate_limit_dir)
 
@@ -741,8 +718,9 @@ Mode:      ${mode}${provider:+ / provider: ${provider}}"
         else
             local driver_fn="_email_driver_${provider}"
             local _api_token="${EMAIL_API_TOKEN:-}"
+            # BUG-EM8 FIX: canonical secrets key is 'email_api_token', not 'email_api_key'
             if [[ -z "${_api_token}" ]] && declare -f decrypt_secret &>/dev/null; then
-                _api_token="$(decrypt_secret email_api_key 2>/dev/null || true)"
+                _api_token="$(decrypt_secret email_api_token 2>/dev/null || true)"
             fi
             if [[ -z "${_api_token}" ]]; then
                 if [[ "$mode" == "api" ]]; then
@@ -764,7 +742,7 @@ Mode:      ${mode}${provider:+ / provider: ${provider}}"
         fi
     fi
 
-    # ── Stage 2: SMTP relay (via Postfix sidecar on host) ────────────────
+    # ── Stage 2: SMTP relay (Postfix sidecar) ─────────────────────────────
     if [[ "$mode" == "auto" || "$mode" == "smtp" ]]; then
         if _smtp_send "$to" "$subject" "$full_body"; then
             log_success "Email sent via SMTP relay (${SMTP_HOST:-unconfigured}:${SMTP_PORT:-587}): ${subject}"
