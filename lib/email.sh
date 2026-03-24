@@ -21,10 +21,10 @@
 # All drivers receive the token exclusively via the EMAIL_API_TOKEN env var,
 # which is injected at call time by send_email() in lib/common.sh:
 #
-#   EMAIL_API_TOKEN="$(decrypt_secret email_api_key)" \
+#   EMAIL_API_TOKEN="$(decrypt_secret email_api_token)" \
 #       _email_driver_PROVIDER "$subject" "$body"
 #
-# The secrets file stores ONE key:  email_api_key
+# The secrets file stores ONE key:  email_api_token
 # Changing EMAIL_PROVIDER in .env is the only action required to switch
 # providers. The token value in secrets.yaml does NOT need re-keying.
 #
