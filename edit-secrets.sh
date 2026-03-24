@@ -17,6 +17,17 @@
 #   Fix: call ensure_sops_env() at the start of each function that invokes sops
 #   directly, and call cleanup_secrets_environment() when done, mirroring the
 #   pattern used throughout lib/secrets.sh.
+#
+# BUG FIX (2026-03-24):
+#   FIX-ES2 [HIGH] do_edit() and do_rotate() called `sops --encrypt "$temp_file"`
+#   with no --age flag. SOPS matches .sops.yaml creation rules by INPUT FILE PATH.
+#   A temp file under /tmp (or /dev/shm) does not match the secrets/secrets.yaml
+#   path_regex, so sops exited with "no matching creation rule found". The error
+#   was silently swallowed (redirected into $encrypted_temp, then deleted on
+#   cleanup), producing only the opaque "Failed to encrypt secrets" message.
+#   Fix: replace the bare sops --encrypt calls with encrypt_sops_file() from
+#   lib/crypto.sh, which explicitly passes --age "$age_public_key" and never
+#   depends on .sops.yaml path_regex matching for temp file paths.
 
 set -euo pipefail
 
@@ -705,23 +716,21 @@ PYEOF
     fi
 
     log_info "Re-encrypting secrets (atomic write)..."
-    # HIGH FIX: Write encrypted output to a temp file on the same filesystem
-    # as SECRETS_FILE so that mv(1) is atomic. If sops --encrypt is interrupted,
-    # the original SECRETS_FILE is untouched.
+    # FIX-ES2: Use encrypt_sops_file() from lib/crypto.sh which passes --age
+    # explicitly. The previous bare `sops --encrypt "$temp_patched"` matched
+    # creation rules by file path — a /tmp path never matches the
+    # secrets/secrets.yaml path_regex in .sops.yaml, causing silent failure.
+    # encrypt_sops_file() writes to an internal temp on the same filesystem as
+    # $temp_patched and atomically mv's it, so we then mv the result to
+    # SECRETS_FILE for a fully atomic two-step replace.
     local temp_enc
     temp_enc=$(mktemp --suffix=.yaml.enc --tmpdir="$(dirname "$SECRETS_FILE")")
     chmod 600 "$temp_enc"
+    # Pre-stage: copy patched plain into temp_enc location so encrypt_sops_file
+    # can atomically replace it (encrypt_sops_file does cp+sops+mv internally).
+    cp "$temp_patched" "$temp_enc"
 
-    # FIX-ES1: Re-establish SOPS env for the encrypt step.
-    if ! ensure_sops_env; then
-        log_error "Failed to setup SOPS environment for re-encryption"
-        rm -f "$temp_enc"
-        return 1
-    fi
-    local enc_rc=0
-    sops --encrypt "$temp_patched" > "$temp_enc" 2>&1 || enc_rc=$?
-    cleanup_secrets_environment
-    if [[ $enc_rc -ne 0 ]]; then
+    if ! encrypt_sops_file "$temp_enc" "$AGE_KEY_FILE"; then
         log_error "Failed to re-encrypt secrets"
         rm -f "$temp_enc"
         return 1
@@ -844,23 +853,24 @@ PYEOF
     fi
 
     log_info "Encrypting changes (atomic write)..."
-    # HIGH FIX: Write encrypted output to a temp file on the same filesystem
-    # as SECRETS_FILE so that mv(1) is atomic. An interrupted sops call leaves
-    # the original SECRETS_FILE intact.
+    # FIX-ES2: Use encrypt_sops_file() from lib/crypto.sh which passes --age
+    # explicitly, bypassing .sops.yaml path_regex matching entirely.
+    # The previous bare `sops --encrypt "$temp_file"` failed because $temp_file
+    # is a /tmp/... path that does not match the secrets/secrets.yaml path_regex
+    # creation rule in .sops.yaml, causing sops to exit with
+    # "no matching creation rule found" — an error silently swallowed by the
+    # redirect into $encrypted_temp (which was then cleaned up on EXIT).
+    #
+    # Strategy: copy $temp_file into a staging file on the same filesystem as
+    # SECRETS_FILE, call encrypt_sops_file() which does an atomic in-place
+    # encrypt (cp → sops --encrypt --in-place → mv internally), then mv the
+    # resulting encrypted staging file over SECRETS_FILE.
     local encrypted_temp
     encrypted_temp=$(mktemp --suffix=.yaml.enc --tmpdir="$(dirname "$SECRETS_FILE")")
     chmod 600 "$encrypted_temp"
+    cp "$temp_file" "$encrypted_temp"
 
-    # FIX-ES1: Re-establish SOPS env for the encrypt step.
-    if ! ensure_sops_env; then
-        log_error "Failed to setup SOPS environment for encryption"
-        rm -f "$encrypted_temp"
-        return 1
-    fi
-    local enc_rc=0
-    sops --encrypt "$temp_file" > "$encrypted_temp" 2>&1 || enc_rc=$?
-    cleanup_secrets_environment
-    if [[ $enc_rc -ne 0 ]]; then
+    if ! encrypt_sops_file "$encrypted_temp" "$AGE_KEY_FILE"; then
         log_error "Failed to encrypt secrets"
         rm -f "$encrypted_temp"
         return 1
