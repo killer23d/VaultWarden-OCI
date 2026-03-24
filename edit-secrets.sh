@@ -42,6 +42,17 @@
 #   Also: change staging file suffix from .yaml.enc to .yaml so the intent
 #   is unambiguous and does not rely on --input-type yaml in encrypt_sops_file()
 #   to paper over an extension mismatch.
+#
+# BUG FIX (2026-03-24):
+#   FIX-ES4 [HIGH] do_rotate() and _deploy_docker_secrets() used a helper
+#   _email_api_token_key() to derive a provider-specific key name from
+#   EMAIL_PROVIDER in .env (e.g. mailgun → MAILGUN_API_TOKEN) and wrote that
+#   derived key into secrets.yaml. However, send_email() in lib/common.sh always
+#   calls decrypt_secret with the fixed key "email_api_token", so the token was
+#   never found and the WARN "EMAIL_API_TOKEN is empty" was emitted on every run.
+#   Fix (Option B — canonical fixed key): remove _email_api_token_key() and
+#   always store the email provider API token under the fixed key "email_api_token"
+#   in secrets.yaml. This matches what lib/common.sh decrypt_secret reads.
 
 set -euo pipefail
 
@@ -124,17 +135,6 @@ _read_dotenv_value() {
 }
 
 # ---------------------------------------------------------------------------
-# _email_api_token_key PROVIDER
-#
-# Return the canonical secrets key for the given provider's HTTP API token,
-# e.g. mailersend → MAILERSEND_API_TOKEN
-# ---------------------------------------------------------------------------
-_email_api_token_key() {
-    local provider="${1,,}"   # lower-case
-    echo "${provider^^}_API_TOKEN"  # upper-case + _API_TOKEN
-}
-
-# ---------------------------------------------------------------------------
 # _validate_yaml_no_duplicates FILE
 #
 # FIX-ES3: Python's yaml.safe_load() silently drops duplicate keys (last
@@ -200,9 +200,11 @@ MODES (mutually exclusive; default is interactive edit):
                                 caddy_cloudflare_dns_token
                                 fail2ban_cloudflare_firewall_token
                                 email_api_token          (HTTP API token for email
-                                                          provider; key name derived
-                                                          from EMAIL_PROVIDER in .env,
-                                                          e.g. MAILERSEND_API_TOKEN)
+                                                          provider; always stored
+                                                          under the fixed key
+                                                          "email_api_token" in
+                                                          secrets.yaml regardless
+                                                          of EMAIL_PROVIDER)
                                 smtp_password            (SMTP relay password;
                                                           used when EMAIL_MODE=smtp
                                                           or EMAIL_MODE=auto)
@@ -216,9 +218,8 @@ MODES (mutually exclusive; default is interactive edit):
         EMAIL_MODE=smtp   — SMTP relay only (rotate: smtp_password)
         EMAIL_MODE=host   — Postfix sidecar (no token or password needed)
         EMAIL_PROVIDER=mailersend|sendgrid|mailgun|postmark|resend
-            → determines which key is stored, e.g.:
-               mailersend → MAILERSEND_API_TOKEN
-               sendgrid   → SENDGRID_API_TOKEN
+            → selects which HTTP driver lib/email.sh uses at runtime;
+              the token is always stored as "email_api_token" in secrets.yaml.
 
     --export-recovery-kit   Generate a recovery document with unencrypted
                             secrets. This is the canonical standalone entry
@@ -377,26 +378,11 @@ create_backup() {
 
 # ---------------------------------------------------------------------------
 # --list mode: show key names only, no values
-#
-# FIX [email_api_token-list]: After setup.sh but before setup-secrets.sh,
-# secrets.yaml holds the generic key name "email_api_token". The operator
-# needs to know what the *resolved* key name will be (e.g. MAILERSEND_API_TOKEN)
-# so they can confirm what --rotate email_api_token will write.
-# Resolve EMAIL_PROVIDER from .env and annotate the email_api_token line
-# with its runtime key name, without exposing any values.
 # ---------------------------------------------------------------------------
 do_list_keys() {
     log_info "Secret key names in: $SECRETS_FILE"
     echo ""
 
-    # Resolve the active provider token key name for annotation
-    local _email_provider _api_key_name
-    _email_provider=$(_read_dotenv_value "EMAIL_PROVIDER" .env)
-    _email_provider="${_email_provider:-mailersend}"
-    _api_key_name=$(_email_api_token_key "$_email_provider")
-
-    # list_secret_keys() prints one key per line; post-process to annotate
-    # the email_api_token entry and any already-promoted provider key.
     local raw_keys
     if ! raw_keys=$(list_secret_keys "$SECRETS_FILE" 2>&1); then
         log_error "Failed to list secret keys"
@@ -405,20 +391,14 @@ do_list_keys() {
 
     while IFS= read -r key; do
         if [[ "$key" == "email_api_token" ]]; then
-            # Generic placeholder key — show what --rotate will resolve it to
-            printf '  %s  (→ will be stored as: %s when rotated via --rotate email_api_token)\n' \
-                "$key" "$_api_key_name"
-        elif [[ "$key" == "$_api_key_name" ]]; then
-            # Key has already been promoted by setup-secrets.sh
-            printf '  %s  (active provider token for EMAIL_PROVIDER=%s)\n' \
-                "$key" "$_email_provider"
+            printf '  %s  (email provider API token — used by EMAIL_PROVIDER=%s)\n' \
+                "$key" "$(_read_dotenv_value EMAIL_PROVIDER .env || echo smtp)"
         else
             printf '  %s\n' "$key"
         fi
     done <<< "$raw_keys"
 
     echo ""
-    log_info "Active EMAIL_PROVIDER: ${_email_provider}  →  token key: ${_api_key_name}"
     log_info "Run './edit-secrets.sh --rotate email_api_token' to set or rotate the provider API key."
     log_info "Run './edit-secrets.sh --rotate <field>' to update any other specific key."
     return 0
@@ -562,17 +542,9 @@ PYEOF
 # ---------------------------------------------------------------------------
 # --rotate FIELD mode
 #
-# FIX #2: _collect_new_value() has been removed. All per-field collection,
-# hashing (Argon2id / bcrypt), and validation is now handled by the single
-# canonical collect_secret_field() function in lib/secrets.sh.
-#
-# HIGH FIX: Atomic write — sops --encrypt writes to a temp file, then
-# mv atomically replaces SECRETS_FILE. An interrupted write leaves the
-# original file intact.
-#
-# email_api_token is a dynamic field: the YAML key name is resolved from
-# EMAIL_PROVIDER in .env (e.g. mailersend → MAILERSEND_API_TOKEN) so the
-# stored key always matches what lib/email.sh resolves at runtime.
+# FIX-ES4: email_api_token is now a fixed canonical key. do_rotate() stores
+# the token directly under "email_api_token" in secrets.yaml — no provider-
+# specific derivation. This matches what decrypt_secret reads in lib/common.sh.
 # ---------------------------------------------------------------------------
 
 _ROTATE_FIELDS=("admin_token" "admin_basic_auth_hash"
@@ -609,6 +581,8 @@ _validate_rotate_field() {
 # FIX [M-10]: Deploy all Docker secret files from the encrypted YAML.
 # Mirrors the logic in startup.sh prepare_docker_secrets() so the bind-mounted
 # files in secrets/.docker_secrets/ stay in sync after a rotation.
+#
+# FIX-ES4: Always use "email_api_token" as the key name — no provider derivation.
 _deploy_docker_secrets() {
     local docker_dir="$PROJECT_ROOT/secrets/.docker_secrets"
     local temp_plain
@@ -637,17 +611,12 @@ _deploy_docker_secrets() {
     local old_umask; old_umask=$(umask); umask 077
     local deployed=0
 
-    # Determine the dynamic email API token key from .env
-    local _email_provider _api_key_name
-    _email_provider=$(_read_dotenv_value "EMAIL_PROVIDER" .env)
-    _email_provider="${_email_provider:-mailersend}"
-    _api_key_name=$(_email_api_token_key "$_email_provider")
-
+    # FIX-ES4: canonical fixed key — no provider derivation
     local secret_fields=(
         "admin_token" "admin_basic_auth_hash" "smtp_password"
         "backup_passphrase" "push_installation_id" "push_installation_key"
         "caddy_cloudflare_dns_token" "fail2ban_cloudflare_firewall_token"
-        "$_api_key_name"
+        "email_api_token"
     )
     for field_name in "${secret_fields[@]}"; do
         local value
@@ -675,21 +644,9 @@ do_rotate() {
 
     if ! _validate_rotate_field "$field"; then exit 1; fi
 
-    # Resolve the actual YAML key name for the email_api_token virtual field.
-    # This ensures the key written to the secrets file always matches what
-    # lib/email.sh will look up (e.g. MAILERSEND_API_TOKEN, SENDGRID_API_TOKEN).
+    # FIX-ES4: email_api_token is a fixed canonical key — no provider derivation.
+    # actual_field == field for all cases including email_api_token.
     local actual_field="$field"
-    local _api_key_name=""
-    if [[ "$field" == "email_api_token" ]]; then
-        local _email_provider
-        _email_provider=$(_read_dotenv_value "EMAIL_PROVIDER" .env)
-        _email_provider="${_email_provider:-mailersend}"
-        _api_key_name=$(_email_api_token_key "$_email_provider")
-        actual_field="$_api_key_name"
-        log_info "EMAIL_PROVIDER=${_email_provider} → rotating secret key: ${actual_field}"
-        log_info "(To change provider, update EMAIL_PROVIDER in .env and re-run rotate)"
-        echo ""
-    fi
 
     # LOW FIX: --dry-run support for --rotate
     if [[ "$DRY_RUN" == "true" ]]; then
@@ -727,7 +684,7 @@ do_rotate() {
     local new_value
     if [[ "$field" == "email_api_token" ]]; then
         local _raw_token
-        if ! read -r -s -t 120 -p "${actual_field}: " _raw_token; then
+        if ! read -r -s -t 120 -p "email_api_token (your ${EMAIL_PROVIDER:-email} API key): " _raw_token; then
             log_error "No input received (120s timeout). Aborting."
             return 1
         fi
@@ -974,16 +931,6 @@ _export_recovery_kit_safe() {
 
     log_success "No placeholder values detected — proceeding with export"
 
-    # Delegate to the upstream offer_recovery_kit_export() from lib/secrets.sh.
-    # That function handles the Age key inclusion, tar creation, and GPG
-    # signing. We only intercept it to add the placeholder guard above and
-    # enforce a secure tar mode below.
-    #
-    # HIGH FIX: The upstream function uses `tar cf` which inherits the calling
-    # umask. We override umask to 0177 (result: 0600) for the duration of
-    # the export and restore it immediately after. This is belt-and-suspenders:
-    # the underlying tar call in lib/secrets.sh is also patched to pass
-    # --mode=0600 when creating the archive entry.
     local old_umask; old_umask=$(umask)
     umask 0177
     offer_recovery_kit_export "true"
@@ -1004,8 +951,6 @@ main() {
     # This is the canonical single entry point for recovery kit export (Fix #1).
     if [[ "$EXPORT_RECOVERY_KIT" == "true" && "$_mode_count" -eq 0 ]]; then
         log_info "Running standalone recovery kit export..."
-        # FIX-ES1: ensure_sops_env is called inside _export_recovery_kit_safe()
-        # directly before the sops call, so no need to set it here.
         _export_recovery_kit_safe
         exit $?
     fi
