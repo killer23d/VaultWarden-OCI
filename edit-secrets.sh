@@ -28,6 +28,20 @@
 #   Fix: replace the bare sops --encrypt calls with encrypt_sops_file() from
 #   lib/crypto.sh, which explicitly passes --age "$age_public_key" and never
 #   depends on .sops.yaml path_regex matching for temp file paths.
+#
+# BUG FIX (2026-03-24):
+#   FIX-ES3 [HIGH] do_edit() YAML validator used yaml.safe_load() which silently
+#   deduplicates keys. SOPS uses Go's yaml.v3 which strictly rejects duplicate
+#   mapping keys. An accidental duplicate key (e.g. "email_api_token" on two
+#   lines) passed Python validation but was rejected by SOPS with:
+#       yaml: unmarshal errors:
+#         line N: mapping key "X" already defined at line 1
+#   Fix: replace yaml.safe_load() with a custom loader that raises ValueError
+#   on duplicate keys. Applied to both the post-edit validation in do_edit()
+#   and the patched-YAML validation in do_rotate().
+#   Also: change staging file suffix from .yaml.enc to .yaml so the intent
+#   is unambiguous and does not rely on --input-type yaml in encrypt_sops_file()
+#   to paper over an extension mismatch.
 
 set -euo pipefail
 
@@ -118,6 +132,52 @@ _read_dotenv_value() {
 _email_api_token_key() {
     local provider="${1,,}"   # lower-case
     echo "${provider^^}_API_TOKEN"  # upper-case + _API_TOKEN
+}
+
+# ---------------------------------------------------------------------------
+# _validate_yaml_no_duplicates FILE
+#
+# FIX-ES3: Python's yaml.safe_load() silently drops duplicate keys (last
+# value wins), so the old validator passed files that SOPS (Go yaml.v3)
+# would reject with "mapping key X already defined at line N".
+#
+# This function uses a custom Loader that raises ValueError on the first
+# duplicate mapping key found, matching SOPS's strict behaviour.  Returns
+# 0 on valid YAML with no duplicates, 1 otherwise (error printed to stderr).
+# ---------------------------------------------------------------------------
+_validate_yaml_no_duplicates() {
+    local yaml_file="$1"
+    python3 - "$yaml_file" <<'PYEOF'
+import sys, yaml
+
+class _NoDupLoader(yaml.SafeLoader):
+    pass
+
+def _check_no_dup_mapping(loader, node):
+    keys_seen = {}
+    for key_node, _ in node.value:
+        key = loader.construct_object(key_node)
+        if key in keys_seen:
+            raise ValueError(
+                f"Duplicate mapping key '{key}' "
+                f"(first at line {keys_seen[key]}, "
+                f"again at line {key_node.start_mark.line + 1})"
+            )
+        keys_seen[key] = key_node.start_mark.line + 1
+    return loader.construct_mapping(node, deep=True)
+
+_NoDupLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _check_no_dup_mapping,
+)
+
+try:
+    with open(sys.argv[1], 'r', encoding='utf-8') as f:
+        yaml.load(f, Loader=_NoDupLoader)
+except (yaml.YAMLError, ValueError) as exc:
+    print(str(exc), file=sys.stderr)
+    sys.exit(1)
+PYEOF
 }
 
 # ---------------------------------------------------------------------------
@@ -705,29 +765,21 @@ PYEOF
         return 1
     fi
 
-    if ! python3 - "$temp_patched" <<'PYEOF' 2>/dev/null
-import sys, yaml
-with open(sys.argv[1]) as f:
-    yaml.safe_load(f)
-PYEOF
-    then
+    # FIX-ES3: Use strict duplicate-key validator instead of bare yaml.safe_load
+    if ! _validate_yaml_no_duplicates "$temp_patched" 2>&1; then
         log_error "Patched YAML is invalid - aborting"
         return 1
     fi
 
     log_info "Re-encrypting secrets (atomic write)..."
-    # FIX-ES2: Use encrypt_sops_file() from lib/crypto.sh which passes --age
-    # explicitly. The previous bare `sops --encrypt "$temp_patched"` matched
-    # creation rules by file path — a /tmp path never matches the
-    # secrets/secrets.yaml path_regex in .sops.yaml, causing silent failure.
-    # encrypt_sops_file() writes to an internal temp on the same filesystem as
-    # $temp_patched and atomically mv's it, so we then mv the result to
+    # FIX-ES2 + FIX-ES3: Pass a plain .yaml staging file to encrypt_sops_file().
+    # Using .yaml (not .yaml.enc) avoids extension-strip confusion inside
+    # encrypt_sops_file()'s own mktemp call. encrypt_sops_file() handles the
+    # cp → sops --encrypt --in-place → mv cycle; we then mv the result to
     # SECRETS_FILE for a fully atomic two-step replace.
     local temp_enc
-    temp_enc=$(mktemp --suffix=.yaml.enc --tmpdir="$(dirname "$SECRETS_FILE")")
+    temp_enc=$(mktemp --suffix=.yaml --tmpdir="$(dirname "$SECRETS_FILE")")
     chmod 600 "$temp_enc"
-    # Pre-stage: copy patched plain into temp_enc location so encrypt_sops_file
-    # can atomically replace it (encrypt_sops_file does cp+sops+mv internally).
     cp "$temp_patched" "$temp_enc"
 
     if ! encrypt_sops_file "$temp_enc" "$AGE_KEY_FILE"; then
@@ -830,13 +882,15 @@ do_edit() {
 
     log_info "Changes detected, validating..."
 
-    if ! python3 - "$temp_file" <<'PYEOF' 2>/dev/null
-import sys, yaml
-with open(sys.argv[1]) as f:
-    yaml.safe_load(f)
-PYEOF
-    then
-        log_error "Invalid YAML structure after editing"
+    # FIX-ES3: Use strict duplicate-key YAML validator.
+    # yaml.safe_load() silently deduplicates keys; SOPS (Go yaml.v3) rejects
+    # them. Catch the error here with a human-readable message so the operator
+    # is offered the chance to fix it in the editor rather than hitting the
+    # opaque SOPS unmarshal error.
+    local yaml_err
+    if ! yaml_err=$(_validate_yaml_no_duplicates "$temp_file" 2>&1); then
+        log_error "Invalid YAML structure after editing:"
+        log_error "  $yaml_err"
         # FIX [L-04]: Add -t 30 timeout
         if ! read -r -t 30 -p "Discard changes? (yes/no): " discard; then
             log_warn "No input received (30s timeout). Discarding changes."
@@ -853,20 +907,12 @@ PYEOF
     fi
 
     log_info "Encrypting changes (atomic write)..."
-    # FIX-ES2: Use encrypt_sops_file() from lib/crypto.sh which passes --age
-    # explicitly, bypassing .sops.yaml path_regex matching entirely.
-    # The previous bare `sops --encrypt "$temp_file"` failed because $temp_file
-    # is a /tmp/... path that does not match the secrets/secrets.yaml path_regex
-    # creation rule in .sops.yaml, causing sops to exit with
-    # "no matching creation rule found" — an error silently swallowed by the
-    # redirect into $encrypted_temp (which was then cleaned up on EXIT).
-    #
-    # Strategy: copy $temp_file into a staging file on the same filesystem as
-    # SECRETS_FILE, call encrypt_sops_file() which does an atomic in-place
-    # encrypt (cp → sops --encrypt --in-place → mv internally), then mv the
-    # resulting encrypted staging file over SECRETS_FILE.
+    # FIX-ES2 + FIX-ES3: Use a plain .yaml staging file (not .yaml.enc) placed
+    # in the same directory as SECRETS_FILE so the final mv is atomic.
+    # encrypt_sops_file() handles cp → sops --encrypt --in-place → internal mv;
+    # we then mv its output over SECRETS_FILE.
     local encrypted_temp
-    encrypted_temp=$(mktemp --suffix=.yaml.enc --tmpdir="$(dirname "$SECRETS_FILE")")
+    encrypted_temp=$(mktemp --suffix=.yaml --tmpdir="$(dirname "$SECRETS_FILE")")
     chmod 600 "$encrypted_temp"
     cp "$temp_file" "$encrypted_temp"
 
