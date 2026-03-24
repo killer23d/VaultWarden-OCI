@@ -80,6 +80,25 @@
 #                   world-readable.
 #                   Fix: chmod 600 "$tmp_file" immediately after mktemp,
 #                   before the cp and sops calls.
+#
+# PATCHED BUGS (2026-03-24):
+#   BUG-CRY-ES2b [HIGH]
+#       encrypt_sops_file(): mktemp creates an internal staging file as
+#       "${file}.sops.XXXXXX". When the caller passes a file whose name ends
+#       in .yaml.enc (as edit-secrets.sh now does for its staging files), the
+#       staging file name has no recognised extension (e.g.
+#       secrets/tmp.XXXX.yaml.enc.sops.YYYYYY). SOPS infers input format from
+#       the file extension; an unrecognised extension causes:
+#           'Failed to get the data tree from the file'
+#       Fix: always pass --input-type yaml --output-type yaml to `sops
+#       --encrypt` so format inference from the filename is bypassed entirely.
+#   BUG-CRY-ES2c [MEDIUM]
+#       encrypt_sops_file(): `sops --encrypt ... 2>/dev/null` silently
+#       discarded the real error message. Operators only ever saw the generic
+#       'Failed to encrypt file with SOPS' log line, making diagnosis
+#       impossible without attaching strace.
+#       Fix: capture sops stderr into a variable; if sops exits non-zero,
+#       emit the captured output via log_error before returning 1.
 
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_CRYPTO_LIB_LOADED:-}" ]] && return 0
@@ -217,6 +236,15 @@ decrypt_sops_file() {
 # any content is written, to eliminate the world-readable race window that
 # exists between mktemp (creates file at process umask, typically 644) and
 # the subsequent SOPS write.
+#
+# BUG-CRY-ES2b FIX: Always pass --input-type yaml --output-type yaml so SOPS
+# does not try to infer the format from the staging file's extension. The
+# staging file is named "${file}.sops.XXXXXX" and when $file itself ends in
+# .yaml.enc the staging name has no recognised extension, causing SOPS to
+# abort with 'Failed to get the data tree from the file'.
+#
+# BUG-CRY-ES2c FIX: Capture sops stderr and emit it via log_error on
+# failure instead of silently discarding it with 2>/dev/null.
 encrypt_sops_file() {
     local file="$1"
     local age_key_file="${2:-$DEFAULT_AGE_KEY_FILE}"
@@ -242,9 +270,11 @@ encrypt_sops_file() {
         return 1
     fi
 
-    # CRY-M2 FIX: encrypt to a temp file; only overwrite original on success
+    # CRY-M2 FIX: encrypt to a temp file; only overwrite original on success.
+    # Use a .yaml suffix so SOPS can always infer the format on this side too
+    # (belt-and-braces alongside the explicit --input-type flag below).
     local tmp_file
-    tmp_file=$(mktemp "${file}.sops.XXXXXX") || {
+    tmp_file=$(mktemp "${file%.*}.sops.XXXXXX.yaml") || {
         log_error "Failed to create temp file for SOPS encryption: $file"
         return 1
     }
@@ -263,9 +293,24 @@ encrypt_sops_file() {
         return 1
     fi
 
-    if ! sops --encrypt --age "$age_public_key" --in-place "$tmp_file" 2>/dev/null; then
+    # BUG-CRY-ES2b FIX: pass --input-type yaml --output-type yaml explicitly
+    # so SOPS does not attempt to infer the format from the file extension.
+    # BUG-CRY-ES2c FIX: capture stderr so we can surface the real error
+    # message on failure instead of silently swallowing it.
+    local sops_stderr
+    local sops_rc=0
+    sops_stderr=$(sops --encrypt \
+        --age "$age_public_key" \
+        --input-type yaml \
+        --output-type yaml \
+        --in-place "$tmp_file" 2>&1) || sops_rc=$?
+
+    if [[ $sops_rc -ne 0 ]]; then
         rm -f "$tmp_file"
         log_error "Failed to encrypt file with SOPS: $file"
+        if [[ -n "$sops_stderr" ]]; then
+            log_error "sops error: $sops_stderr"
+        fi
         return 1
     fi
 
