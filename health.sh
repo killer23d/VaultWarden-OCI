@@ -233,23 +233,30 @@ attempt_container_recovery() {
         if container_is_healthy "$container"; then
             log_success "✅ Auto-recovery succeeded for $service"
             if [[ "$SEND_EMAIL" == "true" ]]; then
-                send_notification_email "✅ $service Auto-Recovered" \
-                    "Service $service was unhealthy and has been automatically restarted.\n\nContainer: $container\nRecovery time: ${RECOVERY_WAIT_TIME}s\nStatus: Now healthy\n\nThis was an automated recovery action. The service should now be functioning normally."
+                local _body
+                _body=$(printf 'Service %s was unhealthy and has been automatically restarted.\n\nContainer: %s\nRecovery time: %ss\nStatus: Now healthy\n\nThis was an automated recovery action. The service should now be functioning normally.' \
+                    "$service" "$container" "$RECOVERY_WAIT_TIME")
+                send_notification_email "✅ $service Auto-Recovered" "$_body"
             fi
             return 0
         else
             log_error "❌ Auto-recovery failed for $service - container still unhealthy"
             if [[ "$SEND_EMAIL" == "true" ]]; then
-                send_notification_email "❌ $service Auto-Recovery Failed" \
-                    "Service $service remains unhealthy after automatic restart attempt.\n\nContainer: $container\nRecovery attempt: Failed after ${RECOVERY_WAIT_TIME}s wait\nStatus: Still unhealthy\n\nMANUAL INTERVENTION REQUIRED:\n1. Check container logs: docker compose logs $service\n2. Check container status: docker compose ps $service\n3. Manual restart: docker compose restart $service\n4. If persistent, check configuration and resources"
+                local _body
+                _body=$(printf 'Service %s remains unhealthy after automatic restart attempt.\n\nContainer: %s\nRecovery attempt: Failed after %ss wait\nStatus: Still unhealthy\n\nMANUAL INTERVENTION REQUIRED:\n1. Check container logs: docker compose logs %s\n2. Check container status: docker compose ps %s\n3. Manual restart: docker compose restart %s\n4. If persistent, check configuration and resources' \
+                    "$service" "$container" "$RECOVERY_WAIT_TIME" \
+                    "$service" "$service" "$service")
+                send_notification_email "❌ $service Auto-Recovery Failed" "$_body"
             fi
             return 1
         fi
     else
         log_error "❌ Failed to execute restart command for $service"
         if [[ "$SEND_EMAIL" == "true" ]]; then
-            send_notification_email "❌ Cannot Restart $service" \
-                "Automatic restart command failed for service $service.\n\nContainer: $container\nError: Docker compose restart command failed\n\nIMMEDIATE ACTION REQUIRED:\n1. Check Docker daemon: systemctl status docker\n2. Check Docker Compose: docker compose ps\n3. Check system resources: df -h && free -h\n4. Attempt manual restart: docker compose restart $service"
+            local _body
+            _body=$(printf 'Automatic restart command failed for service %s.\n\nContainer: %s\nError: Docker compose restart command failed\n\nIMMEDIATE ACTION REQUIRED:\n1. Check Docker daemon: systemctl status docker\n2. Check Docker Compose: docker compose ps\n3. Check system resources: df -h && free -h\n4. Attempt manual restart: docker compose restart %s' \
+                "$service" "$container" "$service")
+            send_notification_email "❌ Cannot Restart $service" "$_body"
         fi
         return 1
     fi
@@ -1114,11 +1121,25 @@ main() {
 
     generate_report
 
+    # BUG-EM1 FIX: the critical alert email body previously used \n escape
+    # sequences inside a double-quoted string passed directly to
+    # send_notification_email().  Bash does NOT expand \n in double quotes —
+    # they arrive at the function as literal backslash-n characters, which the
+    # email library passes verbatim (showing \n or \n\ in the rendered email
+    # body depending on how the provider's JSON payload is assembled).
+    #
+    # Fix: build the body with printf into a local variable first.  printf
+    # expands \n to real newline (0x0A) characters before the string is
+    # assigned, so send_notification_email receives a properly-formatted
+    # multi-line body regardless of how it encodes the payload.
     if [[ "$SEND_EMAIL" == "true" ]] && [[ ${#CRITICAL_ISSUES[@]} -gt 0 ]]; then
-        local issue_summary
-        issue_summary=$(printf "%s\n" "${CRITICAL_ISSUES[@]}")
-        send_notification_email "CRITICAL: VaultWarden Health Check Issues" \
-            "The following critical issues were found:\n\n$issue_summary\n\nAuto-Recovery: $([[ "$AUTO_RECOVER" == "true" ]] && echo "Enabled (attempted)" || echo "Disabled")\n\nPlease investigate and resolve these issues immediately."
+        local issue_list issue_summary email_body recovery_status
+        issue_list=$(printf '%s\n' "${CRITICAL_ISSUES[@]}")
+        issue_summary=$(printf '%s' "$issue_list")
+        recovery_status=$([[ "$AUTO_RECOVER" == "true" ]] && echo "Enabled (attempted)" || echo "Disabled")
+        email_body=$(printf 'The following critical issues were found:\n\n%s\n\nAuto-Recovery: %s\n\nPlease investigate and resolve these issues immediately.' \
+            "$issue_summary" "$recovery_status")
+        send_notification_email "CRITICAL: VaultWarden Health Check Issues" "$email_body"
     fi
 
     if [[ "$OVERALL_STATUS" == "healthy" ]]; then
