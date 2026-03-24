@@ -78,6 +78,8 @@ WHAT --install DOES:
        and sets SOPS_AGE_KEY_FILE=/etc/vaultwarden/age-key.txt in the EnvironmentFile.
        This is required because systemd units run with ProtectHome=yes, which makes
        /home/ubuntu/ (and any symlinks into it) inaccessible to the service process.
+       If the source file is absent but the key already exists at the destination,
+       SOPS_AGE_KEY_FILE is still corrected to the absolute path (BUG-AK5).
     5. Copies systemd/*.{service,timer} -> /etc/systemd/system/
     6. systemctl daemon-reload
     7. systemctl enable --now for all 6 timers
@@ -277,7 +279,11 @@ install_units() {
             log_info "[DRY RUN] Would set SOPS_AGE_KEY_FILE=$AGE_KEY_DEST in $ENV_FILE"
         else
             log_warn "[DRY RUN] Age key source not found: $age_key_src"
-            log_warn "[DRY RUN] Set SOPS_AGE_KEY_FILE manually in $ENV_FILE after install."
+            if [[ -f "$AGE_KEY_DEST" ]]; then
+                log_info "[DRY RUN] Key already at $AGE_KEY_DEST -- would correct SOPS_AGE_KEY_FILE"
+            else
+                log_warn "[DRY RUN] Set SOPS_AGE_KEY_FILE manually in $ENV_FILE after install."
+            fi
         fi
     else
         if [[ -f "$age_key_src" ]]; then
@@ -288,10 +294,24 @@ install_units() {
             log_success "SOPS_AGE_KEY_FILE=$AGE_KEY_DEST set in $ENV_FILE"
         else
             log_warn "Age key source not found: $age_key_src"
-            log_warn "Backup and health services require SOPS_AGE_KEY_FILE to be set."
-            log_warn "After placing your age-key.txt, run:"
-            log_warn "  sudo install -m 600 -o root -g root /path/to/age-key.txt $AGE_KEY_DEST"
-            log_warn "  sudo ./setup-systemd.sh --install"
+            # BUG-AK5 FIX: even when the source file is absent (already deployed
+            # from a prior --install), always correct SOPS_AGE_KEY_FILE to the
+            # canonical absolute path if the key exists at $AGE_KEY_DEST.
+            # A stale relative SOPS_AGE_KEY_FILE=secrets/keys/age-key.txt in the
+            # env file (written before BUG-AK1 was fixed) would otherwise persist
+            # across subsequent --install runs, causing backup.sh and health.sh to
+            # look for the key in the wrong location and fail with "Age key file
+            # not found: /opt/vaultwarden-scripts/secrets/keys/age-key.txt".
+            if [[ -f "$AGE_KEY_DEST" ]]; then
+                _set_env_var "SOPS_AGE_KEY_FILE" "$AGE_KEY_DEST" "$ENV_FILE"
+                log_success "SOPS_AGE_KEY_FILE=$AGE_KEY_DEST corrected in $ENV_FILE (BUG-AK5)"
+                log_info "  Key already present at $AGE_KEY_DEST -- no copy needed."
+            else
+                log_warn "Backup and health services require SOPS_AGE_KEY_FILE to be set."
+                log_warn "After placing your age-key.txt, run:"
+                log_warn "  sudo install -m 600 -o root -g root /path/to/age-key.txt $AGE_KEY_DEST"
+                log_warn "  sudo ./setup-systemd.sh --install"
+            fi
         fi
     fi
 
