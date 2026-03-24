@@ -29,6 +29,10 @@ UNIT_DEST_DIR="/etc/systemd/system"
 OPT_SCRIPTS_DIR="/opt/vaultwarden-scripts"
 ENV_DIR="/etc/vaultwarden"
 ENV_FILE="$ENV_DIR/vaultwarden.env"
+# BUG-AK1 FIX: Age key must live under /etc/vaultwarden/ so systemd services
+# running with ProtectHome=yes can reach it.  /home/ubuntu/ is invisible to
+# those processes regardless of symlinks.
+AGE_KEY_DEST="$ENV_DIR/age-key.txt"
 
 TIMERS=(
     vaultwarden-maintenance.timer
@@ -70,9 +74,14 @@ WHAT --install DOES:
     2. Copies lib/ -> /opt/vaultwarden-scripts/lib/ (root:root 640)
     3. Copies .env -> /etc/vaultwarden/vaultwarden.env (root:root 600)
        (skipped if the EnvironmentFile already exists; warns if content differs)
-    4. Copies systemd/*.{service,timer} -> /etc/systemd/system/
-    5. systemctl daemon-reload
-    6. systemctl enable --now for all 6 timers
+    4. Copies secrets/keys/age-key.txt -> /etc/vaultwarden/age-key.txt (root:root 600)
+       and sets SOPS_AGE_KEY_FILE=/etc/vaultwarden/age-key.txt in the EnvironmentFile.
+       This is required because systemd units run with ProtectHome=yes, which makes
+       /home/ubuntu/ (and any symlinks into it) inaccessible to the service process.
+    5. Copies systemd/*.{service,timer} -> /etc/systemd/system/
+    6. systemctl daemon-reload
+    7. systemctl enable --now for all 6 timers
+    8. systemctl reset-failed for all managed services (clears stale failed status)
 
 WHAT --validate CHECKS:
     1. Scripts present and executable in /opt/vaultwarden-scripts/
@@ -80,7 +89,9 @@ WHAT --validate CHECKS:
     3. All unit files present in /etc/systemd/system/
     4. All 6 timers enabled (systemctl is-enabled)
     5. EnvironmentFile /etc/vaultwarden/vaultwarden.env exists (mode 600)
-    6. Installed scripts match repo source checksum (sha256 split-brain detection)
+    6. Age key /etc/vaultwarden/age-key.txt exists (mode 600)
+    7. SOPS_AGE_KEY_FILE is set in the EnvironmentFile
+    8. Installed scripts match repo source checksum (sha256 split-brain detection)
        Re-run --install after any git pull to keep /opt/ in sync.
 
 VIEWING LOGS:
@@ -133,6 +144,22 @@ _sha256() {
         sha256sum "$1" | awk '{print $1}'
     else
         shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# _set_env_var KEY VALUE FILE
+# Add or replace a KEY=VALUE line in an env file.
+# If the key already exists (with any value), it is replaced in-place.
+# If it does not exist, it is appended.
+# ---------------------------------------------------------------------------
+_set_env_var() {
+    local key="$1" value="$2" file="$3"
+    if grep -q "^${key}=" "$file" 2>/dev/null; then
+        # Replace existing line (sed -i is portable on GNU/Linux)
+        sed -i "s|^${key}=.*|${key}=${value}|" "$file"
+    else
+        echo "${key}=${value}" >> "$file"
     fi
 }
 
@@ -225,7 +252,7 @@ install_units() {
                     log_warn "Review differences and merge manually:"
                     log_warn "  diff $SCRIPT_DIR/.env $ENV_FILE"
                     log_warn "Then run: sudo ./setup-systemd.sh --install to re-copy."
-                    log_warn "  (Back up $ENV_FILE first — it may contain live credentials)"
+                    log_warn "  (Back up $ENV_FILE first -- it may contain live credentials)"
                     log_warn "────────────────────────────────────────────────────────────────"
                 else
                     log_success "$ENV_FILE is identical to repo .env (checksums match)"
@@ -239,7 +266,37 @@ install_units() {
     fi
 
     # ------------------------------------------------------------------
-    # 3. Install systemd unit files
+    # 3. Install age key to /etc/vaultwarden/age-key.txt
+    #    (BUG-AK1 FIX: ProtectHome=yes makes /home/ubuntu/ inaccessible)
+    # ------------------------------------------------------------------
+    log_info "Installing age key to $AGE_KEY_DEST ..."
+    local age_key_src="$SCRIPT_DIR/secrets/keys/age-key.txt"
+    if [[ "$DRY_RUN" == "true" ]]; then
+        if [[ -f "$age_key_src" ]]; then
+            log_info "[DRY RUN] Would copy $age_key_src -> $AGE_KEY_DEST (600 root:root)"
+            log_info "[DRY RUN] Would set SOPS_AGE_KEY_FILE=$AGE_KEY_DEST in $ENV_FILE"
+        else
+            log_warn "[DRY RUN] Age key source not found: $age_key_src"
+            log_warn "[DRY RUN] Set SOPS_AGE_KEY_FILE manually in $ENV_FILE after install."
+        fi
+    else
+        if [[ -f "$age_key_src" ]]; then
+            install -m 600 -o root -g root "$age_key_src" "$AGE_KEY_DEST"
+            log_success "Installed age key: $AGE_KEY_DEST"
+            # Ensure SOPS_AGE_KEY_FILE is set correctly in the EnvironmentFile
+            _set_env_var "SOPS_AGE_KEY_FILE" "$AGE_KEY_DEST" "$ENV_FILE"
+            log_success "SOPS_AGE_KEY_FILE=$AGE_KEY_DEST set in $ENV_FILE"
+        else
+            log_warn "Age key source not found: $age_key_src"
+            log_warn "Backup and health services require SOPS_AGE_KEY_FILE to be set."
+            log_warn "After placing your age-key.txt, run:"
+            log_warn "  sudo install -m 600 -o root -g root /path/to/age-key.txt $AGE_KEY_DEST"
+            log_warn "  sudo ./setup-systemd.sh --install"
+        fi
+    fi
+
+    # ------------------------------------------------------------------
+    # 4. Install systemd unit files
     # ------------------------------------------------------------------
     log_info "Installing systemd unit files to $UNIT_DEST_DIR ..."
     local unit_ok=true
@@ -267,6 +324,16 @@ install_units() {
         log_success "Enabled: $timer"
     done
 
+    # ------------------------------------------------------------------
+    # 5. Clear stale failed status from previous runs
+    # ------------------------------------------------------------------
+    log_info "Clearing stale failed status from all managed services ..."
+    for svc in "${SERVICES[@]}"; do
+        [[ "$svc" == *"@"* ]] && continue  # skip template unit
+        _run systemctl reset-failed "$svc" 2>/dev/null || true
+    done
+    log_success "Stale failed states cleared."
+
     log_success "Installation complete."
     log_info "Next steps:"
     log_info "  Verify:    systemctl list-timers --all | grep vaultwarden"
@@ -274,6 +341,7 @@ install_units() {
     log_info "  Test run:  sudo systemctl start vaultwarden-health.service"
     log_info "  View logs: journalctl -u vaultwarden-health.service -n 50"
     log_info "  Env file:  $ENV_FILE  (add EMAIL_PROVIDER credentials here)"
+    log_info "  Age key:   $AGE_KEY_DEST  (copied from secrets/keys/age-key.txt)"
 }
 
 # ---------------------------------------------------------------------------
@@ -315,7 +383,7 @@ remove_units() {
         log_warn "Review its contents and remove it manually once you have"
         log_warn "confirmed the credentials are no longer needed or have been"
         log_warn "migrated elsewhere:"
-        log_warn "  sudo rm -f $ENV_FILE"
+        log_warn "  sudo rm -f $ENV_FILE $AGE_KEY_DEST"
         log_warn "  sudo rmdir --ignore-fail-on-non-empty $ENV_DIR"
         log_warn "────────────────────────────────────────────────────────────────"
     fi
@@ -330,7 +398,7 @@ validate_installation() {
     local errors=0
     local warnings=0
 
-    log_info "[1/6] Checking installed scripts ..."
+    log_info "[1/7] Checking installed scripts ..."
     local scripts_to_check=(maintenance.sh backup.sh health.sh)
     for script in "${scripts_to_check[@]}"; do
         local installed="$OPT_SCRIPTS_DIR/$script"
@@ -345,7 +413,7 @@ validate_installation() {
         fi
     done
 
-    log_info "[2/6] Checking installed lib/ ..."
+    log_info "[2/7] Checking installed lib/ ..."
     if [[ ! -d "$OPT_SCRIPTS_DIR/lib" ]]; then
         log_error "  MISSING: $OPT_SCRIPTS_DIR/lib/"
         (( errors++ )) || true
@@ -360,7 +428,7 @@ validate_installation() {
         log_success "  OK: $critical_lib"
     fi
 
-    log_info "[3/6] Checking installed unit files ..."
+    log_info "[3/7] Checking installed unit files ..."
     for unit in "${SERVICES[@]}" "${TIMERS[@]}"; do
         local dest="$UNIT_DEST_DIR/$unit"
         if [[ ! -f "$dest" ]]; then
@@ -371,7 +439,7 @@ validate_installation() {
         fi
     done
 
-    log_info "[4/6] Checking timer enablement ..."
+    log_info "[4/7] Checking timer enablement ..."
     for timer in "${TIMERS[@]}"; do
         if systemctl is-enabled "$timer" &>/dev/null; then
             log_success "  ENABLED:     $timer"
@@ -381,7 +449,7 @@ validate_installation() {
         fi
     done
 
-    log_info "[5/6] Checking EnvironmentFile ..."
+    log_info "[5/7] Checking EnvironmentFile ..."
     if [[ ! -f "$ENV_FILE" ]]; then
         log_error "  MISSING: $ENV_FILE"
         log_error "  Run: sudo ./setup-systemd.sh --install  (or create it manually)"
@@ -398,7 +466,42 @@ validate_installation() {
         fi
     fi
 
-    log_info "[6/6] Checking for split-brain (sha256 repo vs installed) ..."
+    log_info "[6/7] Checking age key installation (BUG-AK1) ..."
+    if [[ ! -f "$AGE_KEY_DEST" ]]; then
+        log_error "  MISSING: $AGE_KEY_DEST"
+        log_error "  Backup/health services cannot encrypt/decrypt without this key."
+        log_error "  Fix: sudo ./setup-systemd.sh --install  (requires secrets/keys/age-key.txt)"
+        (( errors++ )) || true
+    else
+        local key_perms
+        key_perms=$(stat -c '%a' "$AGE_KEY_DEST" 2>/dev/null || stat -f '%Lp' "$AGE_KEY_DEST" 2>/dev/null || echo "unknown")
+        if [[ "$key_perms" != "600" ]]; then
+            log_warn "  PERMISSIONS: $AGE_KEY_DEST is mode $key_perms (expected 600)"
+            log_warn "  Fix: sudo chmod 600 $AGE_KEY_DEST"
+            (( warnings++ )) || true
+        else
+            log_success "  OK: $AGE_KEY_DEST (mode 600)"
+        fi
+    fi
+    if [[ -f "$ENV_FILE" ]]; then
+        if grep -q "^SOPS_AGE_KEY_FILE=" "$ENV_FILE" 2>/dev/null; then
+            local configured_path
+            configured_path=$(grep "^SOPS_AGE_KEY_FILE=" "$ENV_FILE" | head -1 | cut -d= -f2-)
+            if [[ "$configured_path" == "$AGE_KEY_DEST" ]]; then
+                log_success "  SOPS_AGE_KEY_FILE=$AGE_KEY_DEST (correct)"
+            else
+                log_warn "  SOPS_AGE_KEY_FILE is set to '$configured_path' (expected $AGE_KEY_DEST)"
+                log_warn "  Fix: sudo ./setup-systemd.sh --install"
+                (( warnings++ )) || true
+            fi
+        else
+            log_error "  SOPS_AGE_KEY_FILE not set in $ENV_FILE"
+            log_error "  Fix: sudo ./setup-systemd.sh --install"
+            (( errors++ )) || true
+        fi
+    fi
+
+    log_info "[7/7] Checking for split-brain (sha256 repo vs installed) ..."
     for script in "${scripts_to_check[@]}"; do
         local repo_src="$SCRIPT_DIR/$script"
         local installed="$OPT_SCRIPTS_DIR/$script"
@@ -426,7 +529,7 @@ validate_installation() {
         log_error "Run: sudo ./setup-systemd.sh --install to resolve errors."
         return 1
     elif (( warnings > 0 )); then
-        log_warn  "Validation passed with ${warnings} warning(s) — review output above."
+        log_warn  "Validation passed with ${warnings} warning(s) -- review output above."
         return 0
     else
         log_success "Validation PASSED: installation is consistent with repository."
@@ -443,7 +546,7 @@ show_status() {
     systemctl list-timers --all 2>/dev/null | grep vaultwarden || log_info "No vaultwarden timers active."
     echo ""
     for svc in "${SERVICES[@]}"; do
-        # Skip the template unit — it has no standalone status
+        # Skip the template unit -- it has no standalone status
         [[ "$svc" == *"@"* ]] && continue
         log_info "--- $svc ---"
         { systemctl status "$svc" --no-pager -l 2>/dev/null | head -20; } || true
