@@ -524,49 +524,55 @@ _rate_limit_check() {
 
 # ─────────────────────────────────────────────────────────────────────────────
 # _smtp_send <to> <subject> <body>
+#
+# BUG-EM6 FIX: Host-side SMTP delivery strategy.
+#
+# This function is called by send_email() Tier-2 (SMTP relay) when running on
+# the HOST (maintenance.sh, cron jobs, systemd units). It must NOT attempt a
+# direct connection to the external SMTP relay because:
+#   1. SMTP_PASSWORD lives inside a Docker secret file, not in the host env.
+#   2. Requiring SMTP credentials on the host would mean storing them in .env
+#      in plaintext, defeating the secrets-management design.
+#
+# CORRECT HOST-SIDE EMAIL PATH:
+#   send_email (host) → _smtp_send → Postfix sidecar (127.0.0.1:587, no auth)
+#     → Postfix (inside Docker) → external relay (STARTTLS + SASL auth)
+#
+# How it works:
+#   When SMTP_PASSWORD is absent (normal host-side invocation), _smtp_send
+#   connects to the Postfix sidecar at VW_SMTP_HOST_PORT (default 127.0.0.1:587)
+#   with no credentials. Postfix holds the relay credentials internally via its
+#   Docker secret + sasl_passwd file. The host-side port is bound loopback-only
+#   (127.0.0.1:587 in docker-compose.yml) so there is no open-relay exposure.
+#
+#   When SMTP_PASSWORD IS present (direct SMTP override, e.g. dev/test), the
+#   original behaviour of connecting directly to SMTP_HOST is preserved.
+#
+# Variables consumed:
+#   VW_SMTP_HOST_PORT  — host:port of the Postfix sidecar loopback binding
+#                        default: 127.0.0.1:587  (matches docker-compose.yml ports:)
+#   SMTP_HOST          — external relay host  (used only when SMTP_PASSWORD is set)
+#   SMTP_PORT          — external relay port  (used only when SMTP_PASSWORD is set)
+#   SMTP_USERNAME      — external relay user  (used only when SMTP_PASSWORD is set)
+#   SMTP_PASSWORD      — external relay pass  (when set → direct relay, skip sidecar)
+#   SMTP_SECURITY      — tls | starttls | none (applies to direct relay path only)
+#   SMTP_FROM / SMTP_FROM_NAME / SMTP_FROM_EMAIL — envelope sender
 # ─────────────────────────────────────────────────────────────────────────────
 _smtp_send() {
     local to="$1"
     local subject="$2"
     local body="$3"
 
-    [[ -z "${SMTP_HOST:-}"     ]] && { log_error "_smtp_send: SMTP_HOST is not set";      return 1; }
-    [[ -z "${SMTP_USERNAME:-}" ]] && { log_error "_smtp_send: SMTP_USERNAME is not set"; return 1; }
-    [[ -z "${SMTP_PASSWORD:-}" ]] && { log_error "_smtp_send: SMTP_PASSWORD is not set"; return 1; }
-    [[ -z "$to"                ]] && { log_error "_smtp_send: recipient (to) is empty";  return 1; }
+    [[ -z "$to" ]] && { log_error "_smtp_send: recipient (to) is empty"; return 1; }
 
     local _smtp_from_addr="${SMTP_FROM_EMAIL:-${SMTP_FROM:-${SMTP_USERNAME:-}}}"
     local _smtp_from_name="${SMTP_FROM_NAME:-VaultWarden}"
-    local smtp_port="${SMTP_PORT:-587}"
-    local smtp_security="${SMTP_SECURITY:-}"
-    local smtp_url
-    local smtp_tls_flags=()
-
-    if [[ -z "$smtp_security" ]]; then
-        [[ "$smtp_port" == "465" ]] && smtp_security="tls" || smtp_security="starttls"
-    fi
-
-    case "${smtp_security,,}" in
-        tls|ssl)
-            smtp_url="smtps://${SMTP_HOST}:${smtp_port}"
-            ;;
-        starttls)
-            smtp_url="smtp://${SMTP_HOST}:${smtp_port}"
-            smtp_tls_flags=(--ssl-reqd)
-            ;;
-        none|plain)
-            smtp_url="smtp://${SMTP_HOST}:${smtp_port}"
-            ;;
-        *)
-            log_error "_smtp_send: Unknown SMTP_SECURITY='${smtp_security}'. Valid: tls starttls none"
-            return 1
-            ;;
-    esac
 
     local date_str
     date_str=$(date -u '+%a, %d %b %Y %H:%M:%S +0000')
 
-    {
+    local _msg
+    _msg=$(
         printf 'From: "%s" <%s>\r\n' "$_smtp_from_name" "$_smtp_from_addr"
         printf 'To: %s\r\n'          "$to"
         printf 'Subject: %s\r\n'     "$subject"
@@ -579,17 +585,75 @@ _smtp_send() {
             printf '%s\r\n' "$line"
         done <<< "$body"
         printf '\r\n'
-    } | curl -s \
+    )
+
+    # ── Path A: SMTP_PASSWORD present → direct external relay ────────────────
+    # Used only when an explicit relay override is configured (e.g. dev/test).
+    # Normal production deployments do NOT set SMTP_PASSWORD in the host env;
+    # the credential lives inside the Docker secret and is only accessible to
+    # the Postfix container.
+    if [[ -n "${SMTP_PASSWORD:-}" ]]; then
+        [[ -z "${SMTP_HOST:-}"     ]] && { log_error "_smtp_send: SMTP_HOST is not set";     return 1; }
+        [[ -z "${SMTP_USERNAME:-}" ]] && { log_error "_smtp_send: SMTP_USERNAME is not set"; return 1; }
+
+        local smtp_port="${SMTP_PORT:-587}"
+        local smtp_security="${SMTP_SECURITY:-}"
+        local smtp_url
+        local smtp_tls_flags=()
+
+        [[ -z "$smtp_security" ]] && { [[ "$smtp_port" == "465" ]] && smtp_security="tls" || smtp_security="starttls"; }
+
+        case "${smtp_security,,}" in
+            tls|ssl)    smtp_url="smtps://${SMTP_HOST}:${smtp_port}" ;;
+            starttls)   smtp_url="smtp://${SMTP_HOST}:${smtp_port}"; smtp_tls_flags=(--ssl-reqd) ;;
+            none|plain) smtp_url="smtp://${SMTP_HOST}:${smtp_port}" ;;
+            *)
+                log_error "_smtp_send: Unknown SMTP_SECURITY='${smtp_security}'. Valid: tls starttls none"
+                return 1
+                ;;
+        esac
+
+        printf '%s' "$_msg" | curl -s \
+            --connect-timeout 15 \
+            --max-time 30 \
+            --retry 2 \
+            --retry-delay 5 \
+            "${smtp_tls_flags[@]}" \
+            --url "$smtp_url" \
+            --mail-from "$_smtp_from_addr" \
+            --mail-rcpt "$to" \
+            --user "${SMTP_USERNAME}:${SMTP_PASSWORD}" \
+            --upload-file -
+        return $?
+    fi
+
+    # ── Path B: No SMTP_PASSWORD → route through Postfix sidecar ────────────
+    # BUG-EM6 FIX: This is the normal production host-side path.
+    # Postfix sidecar listens on 127.0.0.1:587 (loopback-only port binding in
+    # docker-compose.yml). No credentials needed — Postfix trusts loopback
+    # submissions and relays outbound using its own internal SASL credentials.
+    local _sidecar_addr="${VW_SMTP_HOST_PORT:-127.0.0.1:587}"
+    local _sidecar_host _sidecar_port
+    # Split host:port — handle IPv4 addresses (no brackets needed)
+    _sidecar_host="${_sidecar_addr%:*}"
+    _sidecar_port="${_sidecar_addr##*:}"
+
+    log_debug "_smtp_send: no SMTP_PASSWORD — routing through Postfix sidecar at ${_sidecar_addr}"
+
+    printf '%s' "$_msg" | curl -s \
         --connect-timeout 15 \
         --max-time 30 \
         --retry 2 \
         --retry-delay 5 \
-        "${smtp_tls_flags[@]}" \
-        --url "$smtp_url" \
+        --url "smtp://${_sidecar_host}:${_sidecar_port}" \
         --mail-from "$_smtp_from_addr" \
         --mail-rcpt "$to" \
-        --user "${SMTP_USERNAME:-}:${SMTP_PASSWORD:-}" \
         --upload-file -
+    local _rc=$?
+    if [[ $_rc -ne 0 ]]; then
+        log_warn "_smtp_send: Postfix sidecar at ${_sidecar_addr} returned curl exit ${_rc}. Is the container running and port 127.0.0.1:587 bound?"
+    fi
+    return $_rc
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -649,11 +713,6 @@ Timestamp: $(date -uIs)
 Mode:      ${mode}${provider:+ / provider: ${provider}}"
 
     # ── Stage 1: HTTP API ────────────────────────────────────────────────
-    # TOKEN RESOLUTION: a single canonical key "email_api_key" is used for
-    # ALL providers. Changing EMAIL_PROVIDER in .env is the only action
-    # needed to switch providers; the token in secrets.yaml stays the same.
-    # EMAIL_API_TOKEN is the runtime env var all drivers read; it is injected
-    # here via inline assignment so the value is never globally exported.
     if [[ "$mode" == "auto" || "$mode" == "api" ]]; then
         if [[ -z "${_EMAIL_DRIVERS[$provider]:-}" ]]; then
             log_error "Unknown EMAIL_PROVIDER='${provider}'"
@@ -685,7 +744,7 @@ Mode:      ${mode}${provider:+ / provider: ${provider}}"
         fi
     fi
 
-    # ── Stage 2: SMTP relay ──────────────────────────────────────────────
+    # ── Stage 2: SMTP relay (via Postfix sidecar on host) ────────────────
     if [[ "$mode" == "auto" || "$mode" == "smtp" ]]; then
         if _smtp_send "$to" "$subject" "$full_body"; then
             log_success "Email sent via SMTP relay (${SMTP_HOST:-unconfigured}:${SMTP_PORT:-587}): ${subject}"
