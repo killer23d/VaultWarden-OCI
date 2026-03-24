@@ -7,6 +7,14 @@
 #       - admin_token block: label lines now shown in red, password value in green.
 #       - admin_basic_auth_hash block: label lines now shown in red, password value in green.
 #       (These are UX improvements to password display coloring, not security fixes.)
+#
+# PATCHED BUGS (2026-03-24):
+#   FIX-SS1: Add email_api_token to collect_secret_field() and
+#   auto_generate_secret_field(). Previously both functions fell through to
+#   the *) error branch, causing edit-secrets.sh --rotate email_api_token to
+#   fail with "unknown field" when collect_secret_field was called as a
+#   fallback. The canonical secrets key for any email provider API token is
+#   'email_api_token' (matching what decrypt_secret reads in lib/common.sh).
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     echo "Error: This library should be sourced, not executed directly"
@@ -484,6 +492,21 @@ collect_secret_field() {
             printf '%s' "$token"
             ;;
 
+        email_api_token)
+            # FIX-SS1: Canonical key for the email provider HTTP API token.
+            # Stored as-is (no hashing). Works for any EMAIL_PROVIDER value.
+            log_info "Enter your email provider API key (Mailgun, MailerSend, SendGrid, etc.)" >&2
+            log_info "This is stored as 'email_api_token' and used by all HTTP email drivers." >&2
+            local token
+            read -r -s -p "Email API token: " token
+            echo "" >&2
+            if [[ -z "$token" ]]; then
+                log_error "No token entered. Aborting." >&2
+                return 1
+            fi
+            printf '%s' "$token"
+            ;;
+
         smtp_password)
             local pw
             read -r -s -p "SMTP password: " pw
@@ -601,6 +624,13 @@ auto_generate_secret_field() {
             printf '%s' "CHANGE_ME_FIREWALL_TOKEN"
             ;;
 
+        email_api_token)
+            # FIX-SS1: Placeholder for the email provider API token.
+            # Must be set via: ./edit-secrets.sh --rotate email_api_token
+            log_warn "Auto mode: Using placeholder for email API token - configure via --rotate email_api_token" >&2
+            printf '%s' "CHANGE_ME_EMAIL_API_TOKEN"
+            ;;
+
         smtp_password)
             log_warn "Auto mode: Using placeholder for SMTP password - configure later in .env" >&2
             printf '%s' "CHANGE_ME_SMTP_PASSWORD"
@@ -681,7 +711,7 @@ generate_recovery_kit() {
 
     local vw_admin_hash="Not Set" caddy_hash="Not Set" smtp_pass="Not Set"
     local backup_pass="Not Set" cf_dns="Not Set" cf_fw="Not Set"
-    local push_id="Not Set" push_key="Not Set"
+    local push_id="Not Set" push_key="Not Set" email_api_tok="Not Set"
 
     if [[ -f "$secrets_file" ]]; then
         if ! ensure_sops_env; then return 1; fi
@@ -694,6 +724,7 @@ generate_recovery_kit() {
         cf_fw=$(_grk_sops_extract         fail2ban_cloudflare_firewall_token   "$secrets_file")
         push_id=$(_grk_sops_extract       push_installation_id     "$secrets_file")
         push_key=$(_grk_sops_extract      push_installation_key    "$secrets_file")
+        email_api_tok=$(_grk_sops_extract email_api_token          "$secrets_file")
 
     else
         log_warn "secrets.yaml not found"
@@ -712,16 +743,16 @@ generate_recovery_kit() {
 ██║  ██╗███████╗╚██████╗╚██████╔╝ ╚████╔╝ ███████╗██║  ██╗   ██║   
 ╚═╝  ╚═╝╚══════╝ ╚═════╝ ╚═════╝   ╚═══╝  ╚══════╝╚═╝  ╚═╝   ╚═╝   
                                                                    
-██╗  ██╗██╗████████╗
+██╗  ██╗██╗███████╗
 ██║ ██╔╝██║╚══██╔══╝
 █████╔╝ ██║   ██║   
 ██╔═██╗ ██║   ██║   
 ██║  ██╗██║   ██║   
 ╚═╝  ╚═╝╚═╝   ╚═╝   
 
-════════════════════════════════════════════════════════════════════════════
+══════════════════════════════════════════════════════════════════════════
                             🚨 CRITICAL SECURITY DOCUMENT 🚨
-════════════════════════════════════════════════════════════════════════════
+══════════════════════════════════════════════════════════════════════════
 Created: $date_val
 Server:  $hostname_val
 Domain:  $domain
@@ -731,9 +762,9 @@ WARNING: This file contains highly sensitive UNENCRYPTED secrets.
 2. Print a physical copy for your fireproof safe (optional).
 3. DELETE THIS FILE from the server immediately after saving.
 
-════════════════════════════════════════════════════════════════════════════
+══════════════════════════════════════════════════════════════════════════
 SECTION 1: ENCRYPTION KEYS (THE MOST IMPORTANT PART)
-════════════════════════════════════════════════════════════════════════════
+══════════════════════════════════════════════════════════════════════════
 If you lose this key, your backups are FOREVER USELESS.
 
 [AGE PRIVATE KEY]
@@ -742,9 +773,9 @@ $priv_key
 [AGE PUBLIC KEY]
 $pub_key
 
-════════════════════════════════════════════════════════════════════════════
+══════════════════════════════════════════════════════════════════════════
 SECTION 2: SERVER SECRETS (DECRYPTED)
-════════════════════════════════════════════════════════════════════════════
+══════════════════════════════════════════════════════════════════════════
 
 [SYSTEM CREDENTIALS]
 Backup Encryption Passphrase:
@@ -752,6 +783,9 @@ $backup_pass
 
 SMTP Password (Email):
 $smtp_pass
+
+Email API Token (email_api_token):
+$email_api_tok
 
 Cloudflare DNS Token:
 $cf_dns
@@ -774,9 +808,9 @@ Caddy Basic Auth Hash (Bcrypt):
 $caddy_hash
 (Note: Original password cannot be recovered from hash. Reset if lost.)
 
-════════════════════════════════════════════════════════════════════════════
+══════════════════════════════════════════════════════════════════════════
 SECTION 3: DISASTER RECOVERY & MIGRATION CHECKLIST
-════════════════════════════════════════════════════════════════════════════
+══════════════════════════════════════════════════════════════════════════
 
 TO RESTORE THIS SERVER ON NEW HARDWARE:
 
@@ -817,9 +851,9 @@ TO RESTORE THIS SERVER ON NEW HARDWARE:
    [ ] Check health:
        ./health.sh
 
-════════════════════════════════════════════════════════════════════════════
+══════════════════════════════════════════════════════════════════════════
 END OF RECOVERY KIT
-════════════════════════════════════════════════════════════════════════════
+══════════════════════════════════════════════════════════════════════════
 EOF
 
     chmod 600 "$output_file"
