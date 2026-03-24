@@ -128,6 +128,46 @@ run_check() {
     return 0
 }
 
+# ---------------------------------------------------------------------------
+# _resolve_age_key
+#
+# BUG-AK2 FIX: health.sh previously hardcoded DEFAULT_AGE_KEY_FILE which
+# falls back to $SCRIPT_DIR/secrets/keys/age-key.txt.  Under systemd with
+# ProtectHome=yes, SCRIPT_DIR=/opt/vaultwarden-scripts — that path does not
+# exist.  setup-systemd.sh --install copies the key to
+# /etc/vaultwarden/age-key.txt and sets SOPS_AGE_KEY_FILE in the env file,
+# but health.sh never honoured that variable for its internal checks.
+#
+# Resolution order (mirrors backup.sh / crypto.sh):
+#   1. SOPS_AGE_KEY_FILE  (set by setup-systemd.sh --install in vaultwarden.env)
+#   2. DEFAULT_AGE_KEY_FILE  (explicit env-var override)
+#   3. /etc/vaultwarden/age-key.txt  (canonical systemd install path)
+#   4. $SCRIPT_DIR/secrets/keys/age-key.txt  (local/dev fallback)
+#
+# Prints the resolved path to stdout; returns 0 if the file exists, 1 if not.
+# ---------------------------------------------------------------------------
+_resolve_age_key() {
+    local candidates=(
+        "${SOPS_AGE_KEY_FILE:-}"
+        "${DEFAULT_AGE_KEY_FILE:-}"
+        "/etc/vaultwarden/age-key.txt"
+        "$SCRIPT_DIR/secrets/keys/age-key.txt"
+    )
+    for candidate in "${candidates[@]}"; do
+        [[ -z "$candidate" ]] && continue
+        if [[ -f "$candidate" ]]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    # None found — return the first non-empty candidate for a useful error message
+    for candidate in "${candidates[@]}"; do
+        [[ -n "$candidate" ]] && { echo "$candidate"; return 1; }
+    done
+    echo "$SCRIPT_DIR/secrets/keys/age-key.txt"
+    return 1
+}
+
 container_is_healthy() {
     local container="$1"
 
@@ -505,8 +545,13 @@ _verify_backup_decryptable() {
     local backup_type="$2"
     [[ -z "$backup_file" || ! -f "$backup_file" ]] && return 0
 
-    local age_key_file="${DEFAULT_AGE_KEY_FILE:-$SCRIPT_DIR/secrets/keys/age-key.txt}"
-    [[ ! -f "$age_key_file" ]] && {
+    # BUG-AK2 FIX: use _resolve_age_key() so SOPS_AGE_KEY_FILE (set by
+    # setup-systemd.sh --install in /etc/vaultwarden/vaultwarden.env) is
+    # honoured.  The old DEFAULT_AGE_KEY_FILE fallback always resolved to
+    # $SCRIPT_DIR/secrets/keys/age-key.txt which does not exist under
+    # systemd (ProtectHome=yes, SCRIPT_DIR=/opt/vaultwarden-scripts).
+    local age_key_file
+    age_key_file=$(_resolve_age_key) || {
         health_log_error "CRITICAL: Age key file missing: $age_key_file"
         return 1
     }
@@ -852,7 +897,11 @@ check_security_status() {
     _check_fail2ban_responding 2>/dev/null || \
         security_issues+=("fail2ban not responding")
 
-    local age_key_file="${DEFAULT_AGE_KEY_FILE:-$SCRIPT_DIR/secrets/keys/age-key.txt}"
+    # BUG-AK2 FIX: use _resolve_age_key() instead of the hardcoded
+    # DEFAULT_AGE_KEY_FILE fallback so the systemd-installed key at
+    # /etc/vaultwarden/age-key.txt is found.
+    local age_key_file
+    age_key_file=$(_resolve_age_key 2>/dev/null) || true
     check_age_key "$age_key_file" || security_issues+=("Age key validation failed")
 
     if [[ -f "$SCRIPT_DIR/.sops.yaml" ]]; then
