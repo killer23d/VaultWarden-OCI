@@ -138,6 +138,14 @@ run_check() {
 # /etc/vaultwarden/age-key.txt and sets SOPS_AGE_KEY_FILE in the env file,
 # but health.sh never honoured that variable for its internal checks.
 #
+# BUG-AK3 FIX: When /etc/vaultwarden/vaultwarden.env contains a stale
+# relative SOPS_AGE_KEY_FILE=secrets/keys/age-key.txt (written before the
+# BUG-AK1 fix), the old error-fallback loop returned that relative string
+# immediately, masking the hardcoded /etc/vaultwarden/age-key.txt candidate.
+# Fix: skip any candidate that is a relative path AND does not exist on disk.
+# Absolute non-existent paths are still returned so callers get a useful
+# diagnostic.
+#
 # Resolution order (mirrors backup.sh / crypto.sh):
 #   1. SOPS_AGE_KEY_FILE  (set by setup-systemd.sh --install in vaultwarden.env)
 #   2. DEFAULT_AGE_KEY_FILE  (explicit env-var override)
@@ -155,16 +163,27 @@ _resolve_age_key() {
     )
     for candidate in "${candidates[@]}"; do
         [[ -z "$candidate" ]] && continue
+        # BUG-AK3 FIX: skip relative paths that don't exist — they come from a
+        # stale env file and must not shadow the absolute fallbacks below them.
+        [[ "$candidate" != /* && ! -f "$candidate" ]] && continue
         if [[ -f "$candidate" ]]; then
             echo "$candidate"
             return 0
         fi
     done
-    # None found — return the first non-empty candidate for a useful error message
+    # None found — return the first non-empty absolute candidate (or last
+    # resort relative one) for a useful error message.
     for candidate in "${candidates[@]}"; do
-        [[ -n "$candidate" ]] && { echo "$candidate"; return 1; }
+        [[ -z "$candidate" ]] && continue
+        # Prefer absolute paths in the error message; skip bare relative ones.
+        if [[ "$candidate" == /* ]]; then
+            echo "$candidate"
+            return 1
+        fi
     done
-    echo "$SCRIPT_DIR/secrets/keys/age-key.txt"
+    # All candidates were relative and non-existent — fall back to the
+    # canonical install path so the error message is actionable.
+    echo "/etc/vaultwarden/age-key.txt"
     return 1
 }
 
