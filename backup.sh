@@ -110,6 +110,58 @@ fcntl(\$fh, F_SETFD, \$flags | FD_CLOEXEC) or die;
 }
 
 # ---------------------------------------------------------------------------
+# _resolve_age_key
+#
+# BUG-AK4 FIX: backup.sh previously called
+#   get_config_value "SOPS_AGE_KEY_FILE" "$SCRIPT_DIR/secrets/keys/age-key.txt"
+# in three separate places (main, verify_backup_full, verify_backup_quick).
+# Under systemd with ProtectHome=yes the installed key lives at
+# /etc/vaultwarden/age-key.txt and is set via SOPS_AGE_KEY_FILE in the
+# EnvironmentFile.  However load_env_file() can overwrite SOPS_AGE_KEY_FILE
+# with a stale relative value from the env file (written before the BUG-AK1
+# fix), causing get_config_value() to fall back to the non-existent
+# $SCRIPT_DIR/secrets/keys/age-key.txt path.
+#
+# Additionally verify_backup_full() re-called get_config_value() independently
+# instead of reusing the already-resolved path from main().
+#
+# Fix: single _resolve_age_key() function (mirrors health.sh BUG-AK2/AK3 fix).
+# Resolution order:
+#   1. SOPS_AGE_KEY_FILE env var — only if absolute path, or relative and exists
+#   2. /etc/vaultwarden/age-key.txt  (canonical systemd install path, BUG-AK1)
+#   3. $SCRIPT_DIR/secrets/keys/age-key.txt  (local/dev fallback)
+#
+# Prints the resolved path to stdout; returns 0 if file exists, 1 if not.
+# ---------------------------------------------------------------------------
+_resolve_age_key() {
+    local candidates=(
+        "${SOPS_AGE_KEY_FILE:-}"
+        "/etc/vaultwarden/age-key.txt"
+        "$SCRIPT_DIR/secrets/keys/age-key.txt"
+    )
+    for candidate in "${candidates[@]}"; do
+        [[ -z "$candidate" ]] && continue
+        # Skip relative paths that don't exist — they come from a stale env
+        # file and must not shadow the absolute fallbacks below them.
+        [[ "$candidate" != /* && ! -f "$candidate" ]] && continue
+        if [[ -f "$candidate" ]]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    # None found — return first non-empty absolute candidate for a useful error.
+    for candidate in "${candidates[@]}"; do
+        [[ -z "$candidate" ]] && continue
+        if [[ "$candidate" == /* ]]; then
+            echo "$candidate"
+            return 1
+        fi
+    done
+    echo "/etc/vaultwarden/age-key.txt"
+    return 1
+}
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -259,8 +311,14 @@ verify_backup_full() {
 
     b_log_info "Running full verification (decrypt + integrity check)..."
 
+    # BUG-AK4 FIX: use _resolve_age_key() instead of re-calling
+    # get_config_value() independently, which could resolve a stale relative
+    # SOPS_AGE_KEY_FILE from the env file and produce a non-existent path.
     local age_key_file
-    age_key_file="$(get_config_value "SOPS_AGE_KEY_FILE" "$SCRIPT_DIR/secrets/keys/age-key.txt")"
+    age_key_file=$(_resolve_age_key) || {
+        log_error "Age key file not found: $age_key_file" >&2
+        return 1
+    }
 
     local dec_out="$shared_tmpdir/verify_$(basename "$enc_file" .age)"
 
@@ -815,8 +873,15 @@ main() {
     local state_dir
     state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
 
+    # BUG-AK4 FIX: use _resolve_age_key() so SOPS_AGE_KEY_FILE env var is
+    # only honoured when it is an absolute path or exists as a relative one.
+    # A stale relative value from the env file (written before BUG-AK1 fix)
+    # is skipped and the canonical /etc/vaultwarden/age-key.txt is tried next.
     local age_key_file
-    age_key_file="$(get_config_value "SOPS_AGE_KEY_FILE" "$SCRIPT_DIR/secrets/keys/age-key.txt")"
+    age_key_file=$(_resolve_age_key) || {
+        log_error "Age key file not found: $age_key_file"
+        exit 1
+    }
 
     local age_pub_key
     age_pub_key=$(get_age_public_key "$age_key_file") || {
