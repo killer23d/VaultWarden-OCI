@@ -14,6 +14,9 @@
 # ✅ caddy_external network for Caddy ACME + Cloudflare API egress only
 # ✅ Secret files mode 444 inside mode-700 directory (all Docker Engine versions)
 # ✅ fail2ban db directory root:root 755 (crazymax/fail2ban runs as root)
+# ✅ BUG-EM1: SMTP_AUTH_MECHANISM=none + SMTP_EXPLICIT_TLS=false added to vaultwarden env
+# ✅ BUG-EM2: Postfix host port 127.0.0.1:587 removed (VW uses Docker network, not host)
+# ✅ BUG-EM3: WEBSOCKET_ENABLED default hardened to true (was undefined → empty → disabled)
 
 services:
   # =============================================================================
@@ -96,7 +99,10 @@ services:
       EMERGENCY_ACCESS_ALLOWED: ${EMERGENCY_ACCESS_ALLOWED:-true}
       SENDS_ALLOWED: ${SENDS_ALLOWED:-true}
       WEB_VAULT_ENABLED: ${WEB_VAULT_ENABLED:-true}
-      WEBSOCKET_ENABLED: ${WEBSOCKET_ENABLED:-true}
+      # BUG-EM3 FIX: was ${WEBSOCKET_ENABLED:-true} but WEBSOCKET_ENABLED is not
+      # defined in .env.example, causing Compose to warn and substitute empty string
+      # which silently disables WebSockets. Hardcoded to true (always-on for this stack).
+      WEBSOCKET_ENABLED: "true"
       # FIX [HIGH-PUSH_ENABLED]: default is false here AND in .env.example.
       # PUSH_ENABLED=true with placeholder push_installation_id /
       # push_installation_key values causes VaultWarden to log a push-relay
@@ -109,16 +115,34 @@ services:
       SHOW_PASSWORD_HINT: ${SHOW_PASSWORD_HINT:-false}
       IP_HEADER: CF-Connecting-IP
 
+      # ---------------------------------------------------------------------------
       # Email — VaultWarden → Postfix sidecar (same internal network, no egress needed)
-      # VW_SMTP_* vars point at the sidecar. SMTP_* vars (without VW_ prefix)
-      # are for the Postfix container's external relay config — do not mix them.
-      # Admin UI will show these defaults on first boot:
-      #   Host: postfix | Port: 587 | Security: Off | User/Pass: empty
+      #
+      # VW_SMTP_* vars point at the Postfix sidecar on the internal Docker network.
+      # SMTP_* vars (without VW_ prefix) are for the Postfix container's external
+      # relay config — do NOT mix them here.
+      #
+      # BUG-EM1 FIX: SMTP_AUTH_MECHANISM and SMTP_EXPLICIT_TLS MUST be set
+      # explicitly.  VaultWarden defaults to SMTP_AUTH_MECHANISM=Plain which
+      # causes it to attempt SASL AUTH against Postfix.  The Postfix sidecar
+      # accepts unauthenticated relay from the internal Docker network only —
+      # there is no AUTH exchange.  Without these two vars, VaultWarden either
+      # hangs waiting for an AUTH challenge or fails with "authentication required"
+      # depending on the Postfix SASL policy, and NO email leaves the application.
+      #
+      # Admin UI defaults shown on first boot:
+      #   Host: postfix | Port: 587 | Security: Off | Auth: None | User/Pass: empty
+      # ---------------------------------------------------------------------------
       SMTP_HOST: ${VW_SMTP_HOST:-postfix}
-      SMTP_FROM: ${SMTP_FROM:-}
-      SMTP_FROM_NAME: ${SMTP_FROM_NAME:-VaultWarden}
       SMTP_PORT: ${VW_SMTP_PORT:-587}
       SMTP_SECURITY: ${VW_SMTP_SECURITY:-off}
+      # BUG-EM1: These two lines are the critical fix.
+      # SMTP_AUTH_MECHANISM=none  — do NOT attempt SASL AUTH against Postfix sidecar
+      # SMTP_EXPLICIT_TLS=false   — do NOT attempt STARTTLS/TLS on the plain internal link
+      SMTP_AUTH_MECHANISM: ${VW_SMTP_AUTH_MECHANISM:-none}
+      SMTP_EXPLICIT_TLS: ${VW_SMTP_EXPLICIT_TLS:-false}
+      SMTP_FROM: ${SMTP_FROM:-}
+      SMTP_FROM_NAME: ${SMTP_FROM_NAME:-VaultWarden}
       SMTP_TIMEOUT: ${SMTP_TIMEOUT:-15}
 
       # Push notifications (optional)
@@ -296,8 +320,12 @@ services:
     secrets:
       - smtp_password
 
-    ports:
-      - "127.0.0.1:587:587"
+    # BUG-EM2 FIX: Removed host-side ports: - 127.0.0.1:587:587
+    # VaultWarden reaches Postfix via the internal Docker network (postfix:587),
+    # not via host loopback. Exposing port 587 on the host allowed any process
+    # on the machine to relay mail through Postfix unauthenticated — an open
+    # relay risk. No external service needs to reach Postfix directly.
+    # If you need to test Postfix from the host: docker exec vaultwarden_postfix ...
 
     networks:
       - vaultwarden
@@ -477,6 +505,13 @@ networks:
 #
 #   Fail2Ban: host network (iptables access for SSH banning)
 #
+# EMAIL FLOW (BUG-EM1 context):
+#   VaultWarden → postfix:587 (internal network, no TLS, no AUTH)
+#     → Postfix sidecar → external SMTP relay (STARTTLS, SASL auth)
+#   VaultWarden must use SMTP_AUTH_MECHANISM=none and SMTP_EXPLICIT_TLS=false.
+#   The Postfix sidecar holds SMTP credentials for the external relay leg.
+#   VaultWarden itself has NO credentials — authentication is Postfix's job.
+#
 # CADDY EGRESS (caddy_external):
 # Only Caddy has internet egress, via caddy_external_network. This is the
 # minimum required for ACME DNS-01 certificate issuance and renewal via
@@ -515,6 +550,9 @@ networks:
 # ✅ depends_on condition: service_completed_successfully for init-permissions
 # ✅ Healthchecks use 127.0.0.1 (IPv4-explicit, no ::1 ambiguity)
 # ✅ fail2ban db directory root:root 755 (fixed SQLite open failure)
+# ✅ BUG-EM1: SMTP_AUTH_MECHANISM=none prevents VaultWarden SASL AUTH against Postfix
+# ✅ BUG-EM2: Postfix host port 587 removed (no open relay on host loopback)
+# ✅ BUG-EM3: WEBSOCKET_ENABLED hardcoded true (was undefined in .env → disabled)
 #
 # CLOUDFLARE RATE LIMITING (REQUIRED):
 # Configure these WAF rules in Cloudflare Dashboard:
@@ -581,6 +619,8 @@ networks:
 # □ Confirm fail2ban real IPs:
 #     docker exec vaultwarden_fail2ban fail2ban-client status vaultwarden-web-auth
 # □ Check resource usage:         docker stats
+# □ Verify VaultWarden SMTP:      check admin UI → SMTP settings show auth=none, TLS=off
+#     docker logs vaultwarden_app | grep -i smtp
 #
 # PLATFORM COMPATIBILITY:
 # - SSH_LOG_PATH automatically detected by setup.sh
