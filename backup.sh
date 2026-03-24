@@ -549,7 +549,13 @@ perform_db_backup() {
     b_log_info "Encrypting DB snapshot..."
     local enc="$target_dir/db_backup_$timestamp.sqlite3.age"
     local enc_tmp="${enc}.tmp"
-    if ! age -r "$age_pub_key" -o "$enc_tmp" "$snap" 2>&1 >&2; then
+    # FIX: age writes ciphertext to -o file, not stdout.  Using "2>&1 >&2" inside
+    # a command-substitution context ($(...)) erroneously redirects age's stderr
+    # to the capture pipe, polluting $backup_file with error text and causing
+    # verify_backup_quick to see a non-existent path.  Use 2>/dev/null instead:
+    # age emits nothing useful on stderr for a successful "-o file" run, and the
+    # if-branch below already emits a log_error on failure.
+    if ! age -r "$age_pub_key" -o "$enc_tmp" "$snap" 2>/dev/null; then
         log_error "Encryption failed" >&2
         rm -f "$enc_tmp"
         return 1
@@ -640,6 +646,9 @@ perform_full_backup() {
     fi
 
     local tar_exit=0
+    # FIX: "2>&1 >&2" is a no-op round-trip inside a $() context and can leak
+    # tar warnings into the captured return value.  Use plain "2>&1" to route
+    # tar's stderr properly; tar exit-code handling below is unchanged.
     tar --use-compress-program='zstd --no-progress -T0 -3' -cf "$temp_tar" \
         -C / \
         "${tar_excludes[@]}" \
@@ -675,9 +684,11 @@ perform_full_backup() {
         b_log_info "Injecting clean DB snapshot into archive..."
         local temp_tar_raw="$shared_tmpdir/${backup_label}_backup_$timestamp.tar"
 
-        if zstd --no-progress -d -T0 -c "$temp_tar" > "$temp_tar_raw" 2>&1 \
-            && tar -rf "$temp_tar_raw" -C "$snap_dir" "${state_dir#/}/data/db.sqlite3" 2>&1 \
-            && zstd --no-progress -T0 -3 "$temp_tar_raw" -o "${temp_tar}.new" 2>&1
+        # FIX: same "2>&1 >&2" issue — redirect stderr to the journal (>&2) so
+        # zstd/tar progress does not pollute the function's captured stdout.
+        if zstd --no-progress -d -T0 -c "$temp_tar" 2>&1 >&2 > "$temp_tar_raw" \
+            && tar -rf "$temp_tar_raw" -C "$snap_dir" "${state_dir#/}/data/db.sqlite3" 2>&1 >&2 \
+            && zstd --no-progress -T0 -3 "$temp_tar_raw" -o "${temp_tar}.new" 2>&1 >&2
         then
             mv "${temp_tar}.new" "$temp_tar"
             rm -f "$temp_tar_raw"
@@ -703,7 +714,10 @@ perform_full_backup() {
     local enc="$target_dir/${backup_label}_backup_$timestamp.tar.zst.age"
     local enc_tmp="${enc}.tmp"
 
-    if ! age -r "$age_pub_key" -o "$enc_tmp" "$temp_tar" 2>&1 >&2; then
+    # FIX: same root-cause as perform_db_backup — replace "2>&1 >&2" with
+    # "2>/dev/null" so age's stderr cannot leak into the $() capture and
+    # corrupt the $backup_file path returned by this function.
+    if ! age -r "$age_pub_key" -o "$enc_tmp" "$temp_tar" 2>/dev/null; then
         log_error "Encryption failed" >&2
         rm -f "$enc_tmp"
         return 1
