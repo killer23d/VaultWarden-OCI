@@ -76,7 +76,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if ! [[ "$KEEP_DAYS" =~ ^[0-9]+$ ]] || ! (( KEEP_DAYS >= 1 )); then
+if ! [[  "$KEEP_DAYS" =~ ^[0-9]+$ ]] || ! (( KEEP_DAYS >= 1 )); then
     log_error "Invalid --keep value: '${KEEP_DAYS}' — must be a positive integer (e.g. 14)"
     exit 1
 fi
@@ -474,6 +474,7 @@ cleanup_old_backups() {
     fi
     return 0
 }
+
 perform_db_backup() {
     local target_dir="$1"
     local timestamp="$2"
@@ -646,16 +647,28 @@ perform_full_backup() {
     fi
 
     local tar_exit=0
-    # FIX: "2>&1 >&2" is a no-op round-trip inside a $() context and can leak
-    # tar warnings into the captured return value.  Use plain "2>&1" to route
-    # tar's stderr properly; tar exit-code handling below is unchanged.
+    # BUG-FB1 FIX: '2>&1 >&2' inside a $() context leaks tar stderr into the
+    # capture pipe that populates $backup_file in main(), producing a multi-line
+    # garbage path that verify_backup_quick cannot stat.  Replace with
+    # '2>/dev/null' — tar writes the archive to the explicit -f target, not
+    # stdout, so suppressing stderr is safe here; exit code still propagates.
     tar --use-compress-program='zstd --no-progress -T0 -3' -cf "$temp_tar" \
         -C / \
         "${tar_excludes[@]}" \
-        "${tar_sources[@]}" 2>&1 >&2 || tar_exit=$?
+        "${tar_sources[@]}" 2>/dev/null || tar_exit=$?
 
     if (( tar_exit > 1 )); then
         log_error "tar failed with exit code $tar_exit" >&2
+        return 1
+    fi
+
+    # BUG-FB2 FIX: guard against a silently-empty archive before attempting
+    # snapshot injection or encryption.  A zero-byte $temp_tar here means
+    # tar/zstd failed without a detectable exit code (e.g. SIGPIPE on the
+    # zstd compressor side).  Failing early produces a clear error rather than
+    # an empty encrypted file that passes the filename check but fails verify.
+    if [[ ! -s "$temp_tar" ]]; then
+        log_error "tar produced an empty archive — aborting backup" >&2
         return 1
     fi
 
@@ -663,7 +676,7 @@ perform_full_backup() {
         local compressed_size snap_size available_kb required_kb
         compressed_size=$(stat -c%s "$temp_tar" 2>/dev/null || echo 0)
         snap_size=$(stat -c%s "$snap_db" 2>/dev/null || echo 0)
-        available_kb=$(df -k "$(dirname "$temp_tar")" | awk 'NR==2{print $4}')
+        available_kb=$(df -k "$(dirname "$temp_tar")" | awk 'END{print $4}')
         if [[ -z "$available_kb" || "$available_kb" == "0" ]]; then
             b_log_warn "Could not determine available disk space — proceeding with caution"
             available_kb=0
@@ -684,11 +697,14 @@ perform_full_backup() {
         b_log_info "Injecting clean DB snapshot into archive..."
         local temp_tar_raw="$shared_tmpdir/${backup_label}_backup_$timestamp.tar"
 
-        # FIX: same "2>&1 >&2" issue — redirect stderr to the journal (>&2) so
-        # zstd/tar progress does not pollute the function's captured stdout.
-        if zstd --no-progress -d -T0 -c "$temp_tar" 2>&1 >&2 > "$temp_tar_raw" \
-            && tar -rf "$temp_tar_raw" -C "$snap_dir" "${state_dir#/}/data/db.sqlite3" 2>&1 >&2 \
-            && zstd --no-progress -T0 -3 "$temp_tar_raw" -o "${temp_tar}.new" 2>&1 >&2
+        # BUG-FB1 FIX: same root cause — all '2>&1 >&2' replaced with '2>/dev/null'.
+        # zstd/tar write to explicit targets (-c to stdout captured by >, -f file,
+        # -o file); their stderr is noise in the $() context and must not reach
+        # the capture pipe.  Exit codes are still checked by the && chain and the
+        # explicit '|| tar_exit=$?' below.
+        if zstd --no-progress -d -T0 -c "$temp_tar" 2>/dev/null > "$temp_tar_raw" \
+            && tar -rf "$temp_tar_raw" -C "$snap_dir" "${state_dir#/}/data/db.sqlite3" 2>/dev/null \
+            && zstd --no-progress -T0 -3 "$temp_tar_raw" -o "${temp_tar}.new" 2>/dev/null
         then
             mv "${temp_tar}.new" "$temp_tar"
             rm -f "$temp_tar_raw"
@@ -705,8 +721,13 @@ perform_full_backup() {
             )
             tar_exit=0
             tar --use-compress-program='zstd --no-progress -T0 -3' -cf "$temp_tar" -C / \
-                "${tar_excludes[@]}" "${tar_sources[@]}" 2>&1 >&2 || tar_exit=$?
+                "${tar_excludes[@]}" "${tar_sources[@]}" 2>/dev/null || tar_exit=$?
             (( tar_exit <= 1 )) || { log_error "Rebuild tar failed" >&2; return 1; }
+            # Guard the fallback archive too.
+            if [[ ! -s "$temp_tar" ]]; then
+                log_error "Fallback tar also produced an empty archive — aborting" >&2
+                return 1
+            fi
         fi
     fi
 
@@ -714,9 +735,10 @@ perform_full_backup() {
     local enc="$target_dir/${backup_label}_backup_$timestamp.tar.zst.age"
     local enc_tmp="${enc}.tmp"
 
-    # FIX: same root-cause as perform_db_backup — replace "2>&1 >&2" with
-    # "2>/dev/null" so age's stderr cannot leak into the $() capture and
-    # corrupt the $backup_file path returned by this function.
+    # BUG-FB1 FIX: same root-cause as perform_db_backup — replace '2>&1 >&2'
+    # with '2>/dev/null' so age's stderr cannot leak into the $() capture and
+    # corrupt the $backup_file path returned by this function.  age writes the
+    # ciphertext to -o enc_tmp, not stdout; suppressing stderr is correct.
     if ! age -r "$age_pub_key" -o "$enc_tmp" "$temp_tar" 2>/dev/null; then
         log_error "Encryption failed" >&2
         rm -f "$enc_tmp"
