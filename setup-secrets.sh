@@ -431,12 +431,12 @@ _read_dotenv_value() {
 #
 # EMAIL COLLECTION:
 #   The email tier is chosen by reading EMAIL_MODE from .env:
-#     auto  — collect BOTH the API token (email_api_key) and smtp_password
+#     auto  — collect BOTH the API token (email_api_token) and smtp_password
 #             (lib/email.sh will try API first, then SMTP as fallback)
-#     api   — collect email_api_key only
+#     api   — collect email_api_token only
 #     smtp  — collect smtp_password only
 #     host  — skip both (Postfix sidecar; no credential needed here)
-#   A single canonical key "email_api_key" is used for ALL providers.
+#   A single canonical key "email_api_token" is used for ALL providers.
 #   Changing EMAIL_PROVIDER in .env is the only action needed to switch;
 #   the token value in secrets.yaml does not need re-keying.
 # ---------------------------------------------------------------------------
@@ -528,60 +528,60 @@ collect_secrets() {
     echo ""
     log_info "Delivery tiers (controlled by EMAIL_MODE in .env):"
     log_info "  auto  — try API → SMTP → Postfix sidecar in order (recommended)"
-    log_info "  api   — HTTP API only   (requires email_api_key in secrets)"
+    log_info "  api   — HTTP API only   (requires email_api_token in secrets)"
     log_info "  smtp  — SMTP relay only (requires smtp_password in secrets)"
     log_info "  host  — Postfix sidecar only (no token or SMTP password needed)"
     echo ""
-    log_info "One token key (email_api_key) works for ALL providers."
+    log_info "One token key (email_api_token) works for ALL providers."
     log_info "To switch providers: change EMAIL_PROVIDER in .env only."
-    log_info "To rotate the token: ./edit-secrets.sh --rotate email_api_key"
+    log_info "To rotate the token: ./edit-secrets.sh --rotate email_api_token"
     echo ""
 
     # ----------- Tier 1: provider HTTP API token ----------------------------
-    # Single canonical key "email_api_key" used for all providers.
+    # Single canonical key "email_api_token" used for all providers.
     # No per-provider key derivation — switching EMAIL_PROVIDER in .env is
     # the only change needed; the token value in secrets.yaml stays the same.
     if [[ "$_email_mode" == "api" || "$_email_mode" == "auto" ]]; then
         log_info " Tier 1 — Email API Token (all providers)"
-        log_info "  Secrets key  : email_api_key"
+        log_info "  Secrets key  : email_api_token"
         log_info "  Active provider: $_email_provider (set EMAIL_PROVIDER in .env to change)"
         log_info "  Get token at : provider dashboard (MailerSend / SendGrid / Mailgun etc.)"
         echo ""
 
         local email_api_token
         if [[ "$AUTO_MODE" == "true" ]]; then
-            email_api_token="CHANGE_ME_EMAIL_API_KEY"
-            log_warn "[AUTO] email_api_key → placeholder; rotate with:"
-            log_warn "  ./edit-secrets.sh --rotate email_api_key"
+            email_api_token="CHANGE_ME_EMAIL_API_TOKEN"
+            log_warn "[AUTO] email_api_token → placeholder; rotate with:"
+            log_warn "  ./edit-secrets.sh --rotate email_api_token"
         else
             local skip_api
-            if ! read -r -t 30 -p "Enter email_api_key now? (yes/no): " skip_api; then
+            if ! read -r -t 30 -p "Enter email_api_token now? (yes/no): " skip_api; then
                 _warn_tty "WARNING: No input received (30s timeout). Treating as 'no'."
                 skip_api="no"
             fi
             if [[ "$skip_api" == "yes" ]]; then
                 local _raw_token
-                if ! read -r -s -t 120 -p "email_api_key: " _raw_token; then
+                if ! read -r -s -t 120 -p "email_api_token: " _raw_token; then
                     _warn_tty "WARNING: No input received (120s timeout). Using placeholder."
                     _raw_token=""
                 fi
                 echo ""
                 if [[ -n "$_raw_token" ]]; then
                     email_api_token="$_raw_token"
-                    log_success "email_api_key stored"
+                    log_success "email_api_token stored"
                 else
-                    email_api_token="CHANGE_ME_EMAIL_API_KEY"
+                    email_api_token="CHANGE_ME_EMAIL_API_TOKEN"
                     log_info "No value entered — using placeholder"
                 fi
             else
-                email_api_token="CHANGE_ME_EMAIL_API_KEY"
+                email_api_token="CHANGE_ME_EMAIL_API_TOKEN"
                 log_info "API token skipped — rotate later with:"
-                log_info "  ./edit-secrets.sh --rotate email_api_key"
+                log_info "  ./edit-secrets.sh --rotate email_api_token"
             fi
         fi
-        _COLLECTED_SECRETS["email_api_key"]="$email_api_token"
+        _COLLECTED_SECRETS["email_api_token"]="$email_api_token"
     else
-        _COLLECTED_SECRETS["email_api_key"]="NOT_USED_EMAIL_MODE=${_email_mode}"
+        _COLLECTED_SECRETS["email_api_token"]="NOT_USED_EMAIL_MODE=${_email_mode}"
     fi
 
     # ----------- Tier 2: SMTP relay password --------------------------------
@@ -727,8 +727,8 @@ write_secrets() {
         printf '# Email — Tier 1: HTTP API token (all providers)\n'
         printf '# Single key regardless of EMAIL_PROVIDER. Change EMAIL_PROVIDER in .env\n'
         printf '# to switch providers; no re-keying of this secret is required.\n'
-        printf '# To rotate: ./edit-secrets.sh --rotate email_api_key\n'
-        printf 'email_api_key: %s\n\n'                     "$(yaml_escape "${_COLLECTED_SECRETS[email_api_key]:-}")"
+        printf '# To rotate: ./edit-secrets.sh --rotate email_api_token\n'
+        printf 'email_api_token: %s\n\n'                   "$(yaml_escape "${_COLLECTED_SECRETS[email_api_token]:-}")"
         printf '# Email — Tier 2: SMTP relay password\n'
         printf '# Used when EMAIL_MODE=smtp or EMAIL_MODE=auto (fallback from API).\n'
         printf '# To rotate: ./edit-secrets.sh --rotate smtp_password\n'
@@ -875,7 +875,7 @@ main() {
         echo ""
         echo "📧 Email mode reference (set EMAIL_MODE in .env):"
         echo "   auto  — API → SMTP → Postfix fallback chain (recommended)"
-        echo "   api   — HTTP API only  (set EMAIL_PROVIDER + rotate email_api_key)"
+        echo "   api   — HTTP API only  (set EMAIL_PROVIDER + rotate email_api_token)"
         echo "   smtp  — SMTP relay only (rotate smtp_password)"
         echo "   host  — Postfix sidecar only (no token or password needed in secrets)"
         echo ""
