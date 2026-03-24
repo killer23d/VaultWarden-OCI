@@ -7,6 +7,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/common.sh"
 init_common_lib "$0"
+# FIX-MAINT-1: source lib/secrets.sh so that decrypt_secret is available when
+# send_email() (called from lib/common.sh) tries to resolve EMAIL_API_TOKEN
+# from secrets/secrets.yaml via SOPS/age.  Without this, the declare -f guard
+# in send_email() evaluates to false and EMAIL_API_TOKEN stays empty, causing
+# the warning "EMAIL_PROVIDER=mailgun set but EMAIL_API_TOKEN is empty".
+source "$SCRIPT_DIR/lib/secrets.sh"
 source "$SCRIPT_DIR/lib/docker.sh"
 source "$SCRIPT_DIR/lib/backup_utils.sh"
 source "$SCRIPT_DIR/lib/crypto.sh"
