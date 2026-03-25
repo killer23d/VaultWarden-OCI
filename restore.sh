@@ -1,74 +1,5 @@
 #!/usr/bin/env bash
 # restore.sh - VaultWarden-OCI safe restore
-#
-# Supports both archive formats:
-#   version=2 / archive_format=relative  →  staged restore (atomic, safe)
-#   version=1 (legacy absolute paths)    →  direct -C / extraction (backward compat)
-#
-# Safety features:
-#   - require_root enforced via lib/common.sh (--list is exempt)
-#   - All decrypted artifacts in mktemp dir + EXIT/INT/TERM trap
-#   - Host sqlite3 for integrity checks (FIX-R06: Docker dependency removed)
-#   - tar member validation blocks path traversal before extraction
-#     (FIX-R01: now applied to BOTH legacy v1 AND current v2 paths)
-#   - Staged full restore: extract → validate → atomic mv (all-or-nothing)
-#   - PROJECT_ROOT config files (.env, docker-compose.yml, caddy/, fail2ban/)
-#     restored from archive after STATE_DIR promotion; secrets/ and *.sh
-#     scripts are intentionally excluded
-#   - Pre-restore emergency snapshot before any destructive operation
-#   - AGE_KEY_FILE read from .env (SOPS_AGE_KEY_FILE) with safe default
-#   - .sha256 sidecar verified before decryption (FIX-R05)
-#   - flock mutex prevents concurrent restore races (FIX-R03)
-#     NOTE: The operations mutex (FD 200) also blocks concurrent backup.sh
-#     runs from racing against a restore — both scripts acquire the same
-#     VW_OPERATIONS_LOCK before operating on the database directory.
-#   - .pre-restore-* artefacts pruned to keep last 3 (FIX-R08)
-#
-# FIXES (this revision):
-#   P1-C1  tar_validate_members() and staged restore now use -I zstd for
-#          .tar.zst archives instead of the implicit -z (gzip) flag.
-#   P1-C2  Legacy v1 absolute-path restore now calls chown -R after
-#          extraction to fix root:root ownership on restored files.
-#   P1-H1  _find_latest_backup() stat pipeline race condition fixed;
-#          stat failure no longer silently returns an empty string.
-#   P2-H3  archive_format default changed from "absolute" (v1 legacy) to
-#          "relative" for archives whose filename implies zstd/v2. Also
-#          adds filename-based heuristic as a fallback when .meta is absent.
-#   P1-M1  cleanup() moved to global scope; no longer silently defined
-#          inside main() on every invocation.
-#   P1-M3  Operations mutex moved from FD 9 to FD 200 to avoid subshell
-#          inheritance collisions with update.sh (which also uses FD 9).
-#   P1-M7  Pre-restore snapshot failure is now a configurable hard-fail
-#          controlled by RESTORE_SNAPSHOT_HARD_FAIL (default: true).
-#          Use --no-backup or set RESTORE_SNAPSHOT_HARD_FAIL=false to
-#          revert to warn-only behaviour.
-#
-# AUDIT FIXES (current revision):
-#   AUD-R1  age passphrase never passed on CLI; -i keyfile used exclusively
-#           — passphrase is never visible in ps aux or /proc/$$/cmdline.
-#   AUD-R2  restore_db(): live DB copied to .rollback-<ts> before cp;
-#           on cp failure the rollback copy is restored automatically so
-#           the original live database is never lost.
-#   AUD-R3  select_backup_file() / interactive selection: input validated
-#           as a positive integer before use as array index; non-numeric
-#           or out-of-range input prints an error and re-prompts.
-#   AUD-R4  verify_sqlite(): WAL checkpoint (TRUNCATE) issued before
-#           PRAGMA integrity_check so unresolved WAL pages are folded
-#           into the main DB file first, avoiding false corruption reports.
-#   AUD-R5  Concurrent backup+restore protection: both scripts acquire
-#           VW_OPERATIONS_LOCK (FD 200) via flock -n; documented here.
-#
-# FIX-R09 (this revision):
-#   local STATE_DIR AGE_KEY_FILE PUID PGID declared all four variables
-#   as bare locals with no initial value. In bash, `local VAR` without
-#   an assignment sets VAR to empty string in the local scope, shadowing
-#   any exported variable of the same name — including those written by
-#   load_env_file(). get_config_value() uses ${!key} indirect expansion
-#   and therefore read the empty local instead of the exported value,
-#   causing the FIX-R07 hard-fail PUID/PGID check to always trigger even
-#   when .env was correctly populated with PUID=<uid> and PGID=<gid>.
-#   Fix: each variable is now declared and assigned atomically on its own
-#   line (local VAR="$(…)") so the local scope is never empty.
 
 set -euo pipefail
 
@@ -76,7 +7,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR"
 cd "$PROJECT_ROOT"
 
-# Shared operations lock (update.sh/maintenance.sh/restore.sh/backup.sh)
 VW_LOCK_DIR="${PROJECT_ROOT}/.locks"
 VW_OPERATIONS_LOCK="${VW_LOCK_DIR}/operations.lock"
 
@@ -98,8 +28,6 @@ FORCE=false
 NO_PRE_BACKUP=false
 SKIP_VERIFICATION=false
 RESTORE_ENV=true
-# P1-M7: configurable hard-fail for pre-restore snapshot. Override via env
-# or set to false to revert to legacy warn-only behaviour.
 RESTORE_SNAPSHOT_HARD_FAIL="${RESTORE_SNAPSHOT_HARD_FAIL:-true}"
 
 show_help() {
@@ -108,6 +36,11 @@ VaultWarden-OCI Restore Script
 
 USAGE:
     sudo ./restore.sh [OPTIONS]
+
+    When run without --file or --latest, an interactive numbered menu is
+    presented showing all available backups grouped by type (db / full /
+    emergency), sorted newest-first.  Enter the number of the backup you
+    want to restore and confirm the plan before the restore begins.
 
 OPTIONS:
     --list                  List available backups and exit (no root required)
@@ -126,7 +59,8 @@ ENVIRONMENT:
                                        (default: true = hard-fail)
 
 EXAMPLES:
-    ./restore.sh --list
+    sudo ./restore.sh                  # interactive numbered menu (default)
+    ./restore.sh --list                # list backups only (no root needed)
     sudo ./restore.sh --latest --type db --force
     sudo ./restore.sh --file backups/full/full_backup_20260101_120000.tar.gz.age
 EOF
@@ -148,11 +82,6 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# ---------------------------------------------------------------------------
-# P1-M1 FIX: cleanup() at global scope so it is registered exactly once and
-# is never silently re-defined on every call to main(). TMPDIR_RESTORE is
-# declared here as an empty global; main() sets it before mktemp runs.
-# ---------------------------------------------------------------------------
 TMPDIR_RESTORE=""
 cleanup() { [[ -n "$TMPDIR_RESTORE" ]] && rm -rf "$TMPDIR_RESTORE" 2>/dev/null || true; }
 trap cleanup EXIT HUP INT TERM
@@ -161,12 +90,6 @@ trap cleanup EXIT HUP INT TERM
 # Helpers
 # ---------------------------------------------------------------------------
 
-# P1-H1 FIX: Guard each stat call so a missing/unreadable file does not
-# silently produce an empty timestamp string that propagates through sort/tail
-# and causes _find_latest_backup to return nothing. The pipeline now uses a
-# subshell-safe approach: stat failure emits "0" (epoch) so the file remains
-# in the sorted list rather than being silently dropped; tail -1 then returns
-# it as a candidate and the caller can validate it exists.
 _find_latest_backup() {
     local dir="$1"
     [[ -d "$dir" ]] || return 1
@@ -180,7 +103,6 @@ _find_latest_backup() {
         mtime=$(stat -c%Y "$f" 2>/dev/null \
              || stat -f%m "$f" 2>/dev/null \
              || echo 0)
-        # Ensure mtime is numeric; treat non-numeric as 0
         [[ "$mtime" =~ ^[0-9]+$ ]] || mtime=0
         if (( mtime > best_mtime )); then
             best_mtime=$mtime
@@ -209,11 +131,124 @@ list_backups() {
     done
 }
 
-# AUD-R3: Interactive backup selector with integer validation.
-# Lists available backup files and prompts the operator for a selection.
-# Input is validated as a positive integer within the valid range before
-# being used as an array index — a non-numeric or out-of-range entry
-# triggers an error message and re-prompt rather than a bash subscript error.
+_INTERACTIVE_FILES=()
+_INTERACTIVE_TYPES=()
+
+list_all_backups_interactive() {
+    _INTERACTIVE_FILES=()
+    _INTERACTIVE_TYPES=()
+
+    local types=("db" "full" "emergency")
+    local global_index=0
+    local any_found=false
+
+    for t in "${types[@]}"; do
+        local dir="$PROJECT_ROOT/backups/$t"
+        [[ -d "$dir" ]] || continue
+
+        # Collect .age files for this type, newest-first by modification time
+        local -a type_files=()
+        while IFS= read -r f; do
+            type_files+=("$f")
+        done < <(
+            find "$dir" -name "*.age" -type f -print0 2>/dev/null \
+            | xargs -0 -r stat --printf '%Y\t%n\n' 2>/dev/null \
+            | sort -rn \
+            | cut -f2
+        )
+
+        # Fallback for macOS / systems where GNU stat --printf is unavailable
+        if [[ ${#type_files[@]} -eq 0 ]]; then
+            while IFS= read -r f; do
+                type_files+=("$f")
+            done < <(find "$dir" -name "*.age" -type f 2>/dev/null | sort -r)
+        fi
+
+        [[ ${#type_files[@]} -eq 0 ]] && continue
+        any_found=true
+
+        # Section header
+        echo ""
+        printf '  ── %s backups ──\n' "${t^^}"
+
+        for f in "${type_files[@]}"; do
+            (( global_index++ ))
+            _INTERACTIVE_FILES+=("$f")
+            _INTERACTIVE_TYPES+=("$t")
+
+            local size
+            size=$(du -sh "$f" 2>/dev/null | cut -f1)
+            size="${size:-?}"
+
+            local mtime_str
+            mtime_str=$(stat -c '%y' "$f" 2>/dev/null \
+                     || stat -f '%Sm' "$f" 2>/dev/null \
+                     || echo "unknown")
+            mtime_str="${mtime_str:0:19}"
+
+            printf '  [%3d]  %-10s  %6s  %s  %s\n' \
+                "$global_index" \
+                "($t)" \
+                "$size" \
+                "$mtime_str" \
+                "$(basename "$f")"
+        done
+    done
+
+    echo ""
+
+    if [[ "$any_found" == "false" ]]; then
+        log_error "No backup files found under $PROJECT_ROOT/backups/"
+        return 1
+    fi
+
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# select_backup_interactive
+# ---------------------------------------------------------------------------
+select_backup_interactive() {
+    log_info "No backup specified — listing available backups:"
+
+    list_all_backups_interactive || return 1
+
+    local total="${#_INTERACTIVE_FILES[@]}"
+
+    local choice
+    while true; do
+        read -r -p "  Enter number to restore (1-${total}), or q to quit: " choice
+
+        [[ "$choice" == "q" || "$choice" == "Q" ]] && {
+            log_info "Restore cancelled."
+            exit 0
+        }
+
+        if ! [[ "$choice" =~ ^[0-9]+$ ]]; then
+            log_error "Invalid input '${choice}': please enter a number between 1 and ${total}."
+            continue
+        fi
+        if (( choice < 1 || choice > total )); then
+            log_error "Out of range: please enter a number between 1 and ${total}."
+            continue
+        fi
+        break
+    done
+
+    BACKUP_FILE="${_INTERACTIVE_FILES[$(( choice - 1 ))]}"
+    RESTORE_TYPE="${_INTERACTIVE_TYPES[$(( choice - 1 ))]}"
+
+    echo ""
+    log_info "Selected backup:"
+    log_info "  File: $(basename "$BACKUP_FILE")"
+    log_info "  Type: $RESTORE_TYPE"
+    log_info "  Path: $BACKUP_FILE"
+    echo ""
+}
+
+# ---------------------------------------------------------------------------
+# select_backup_file (kept for direct --type-scoped selection, unchanged)
+# ---------------------------------------------------------------------------
 select_backup_file() {
     local dir="$1"
     [[ -d "$dir" ]] || { log_error "Backup directory not found: $dir"; return 1; }
@@ -231,14 +266,14 @@ select_backup_file() {
     echo "Available backups:"
     local i
     for (( i=0; i<${#files[@]}; i++ )); do
-        printf '  [%d] %s\n' "$(( i + 1 ))" "$(basename "${files[$i]}")" \
-            $(ls -lh "${files[$i]}" 2>/dev/null | awk '{print "("$5")"}')
+        local size
+        size=$(du -sh "${files[$i]}" 2>/dev/null | cut -f1)
+        printf '  [%d] %s (%s)\n' "$(( i + 1 ))" "$(basename "${files[$i]}")" "${size:-?}"
     done
 
     local choice
     while true; do
         read -r -p "Enter number (1-${#files[@]}): " choice
-        # AUD-R3: Validate as a positive integer
         if ! [[ "$choice" =~ ^[0-9]+$ ]]; then
             log_error "Invalid input '${choice}': please enter a number between 1 and ${#files[@]}."
             continue
@@ -254,6 +289,14 @@ select_backup_file() {
     log_info "Selected: $(basename "$BACKUP_FILE")"
 }
 
+# ---------------------------------------------------------------------------
+# resolve_backup_file
+#
+# Priority:
+#   1. --latest flag           → automatic selection (unchanged)
+#   2. --file FILE             → direct path (unchanged)
+#   3. (neither)               → interactive numbered menu (NEW)
+# ---------------------------------------------------------------------------
 resolve_backup_file() {
     if [[ "$USE_LATEST" == "true" ]]; then
         if [[ -n "$RESTORE_TYPE" ]]; then
@@ -292,8 +335,12 @@ resolve_backup_file() {
         return 0
     fi
 
-    log_error "No backup specified. Use --file FILE or --latest."
-    return 1
+    # -----------------------------------------------------------------------
+    # Neither --file nor --latest was supplied: present interactive menu.
+    # This is the normal human-operator path.
+    # -----------------------------------------------------------------------
+    select_backup_interactive || return 1
+    return 0
 }
 
 read_meta_field() {
@@ -309,13 +356,6 @@ read_meta_field() {
     fi
 }
 
-# ---------------------------------------------------------------------------
-# P1-C1 FIX: Determine the decompression filter from the actual filename so
-# that .tar.zst archives are decompressed with zstd (-I zstd) rather than
-# the implicit -z (gzip) flag that tar applies to .tar.gz files.
-# Returns the tar filter option string (e.g. "-I zstd", "-z", "-j", or "")
-# for use with -t and -x operations.
-# ---------------------------------------------------------------------------
 _tar_filter_for_file() {
     local f="$1"
     case "$f" in
@@ -327,12 +367,6 @@ _tar_filter_for_file() {
     esac
 }
 
-# Block archives containing ../  traversal sequences.
-# NOTE: This function also rejects absolute paths (/). For the legacy v1
-# restore path, use check_traversal_only() below, which only checks for
-# ../ sequences (v1 archives intentionally use absolute paths).
-# P1-C1 FIX: Uses _tar_filter_for_file() so .tar.zst archives are listed
-# with -I zstd instead of the incorrect implicit -z (gzip) flag.
 tar_validate_members() {
     local tarfile="$1"
     local filter
@@ -351,9 +385,6 @@ tar_validate_members() {
     return 0
 }
 
-# FIX-R01 helper: Traversal-only check for legacy v1 absolute-path archives.
-# v1 archives use absolute paths by design, so we only reject ../ sequences.
-# P1-C1 FIX: Uses _tar_filter_for_file() for correct decompression.
 check_traversal_only() {
     local tarfile="$1"
     local filter
@@ -371,26 +402,9 @@ check_traversal_only() {
     return 0
 }
 
-# AUD-R4 FIX: Issue a WAL checkpoint before running PRAGMA integrity_check.
-# If the backup was created while SQLite had an open WAL file that was not
-# checkpointed, the restored database will have unpersisted pages in the WAL.
-# Running integrity_check without checkpointing first can produce false
-# corruption errors because integrity_check operates on the main DB file only
-# and does not replay WAL pages. TRUNCATE mode folds all WAL frames into the
-# main file and resets the WAL to zero length, ensuring integrity_check sees
-# a fully consistent on-disk state.
-#
-# FIX-R06: Replace verify_sqlite_docker() with verify_sqlite() using the
-# host sqlite3 binary. sqlite3 is installed by setup.sh's basic_packages
-# array. Spinning up an alpine:latest container with --user root to run a
-# one-line SQL command is an unnecessary supply-chain risk and Docker dep.
 verify_sqlite() {
     local dbfile="$1"
     log_info "Checkpointing WAL before integrity check..."
-    # AUD-R4: Checkpoint the WAL first so unresolved WAL pages are folded
-    # into the main DB file. Ignore errors here — the file may have no WAL
-    # at all (freshly-copied DB backups typically do not), and a failure to
-    # checkpoint is not itself evidence of corruption.
     sqlite3 "$dbfile" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1 || true
 
     log_info "Verifying SQLite integrity (host sqlite3)..."
@@ -412,9 +426,6 @@ purge_wal_shm() {
     rm -f "${db}-wal" "${db}-shm" 2>/dev/null || true
 }
 
-# P1-M7 FIX: Pre-restore snapshot failure is now a hard-fail by default.
-# Set RESTORE_SNAPSHOT_HARD_FAIL=false (or pass --no-backup) to revert to
-# warn-only behaviour for environments where backup.sh may not be available.
 create_pre_restore_snapshot() {
     [[ "$NO_PRE_BACKUP" == "true" ]] && { log_info "Skipping pre-restore snapshot (--no-backup)"; return 0; }
     [[ "$DRY_RUN"       == "true" ]] && { log_info "[DRY RUN] Would run: ./backup.sh --type emergency"; return 0; }
@@ -447,14 +458,6 @@ create_pre_restore_snapshot() {
     fi
 }
 
-# FIX-R08: Prune .pre-restore-* artefacts created by restore_db / restore_full.
-# Each restore renames the current db file or state directory to a timestamped
-# .pre-restore-<ts> path. Without pruning these accumulate indefinitely and
-# will eventually exhaust disk space on a 40 GiB OCI boot volume.
-#
-# Keeps the $keep_count most recent artefacts; removes the rest.
-# Sort order is lexicographic on the timestamp suffix (YYYYmmdd-HHMMSS), which
-# equals chronological order without needing stat.
 cleanup_pre_restore_artefacts() {
     local base_path="$1"
     local keep_count="${2:-3}"
@@ -486,12 +489,6 @@ cleanup_pre_restore_artefacts() {
 
 # ---------------------------------------------------------------------------
 # DB restore
-# AUD-R1: age decryption uses -i <keyfile> exclusively — the passphrase is
-#         never passed on the command line and is therefore not visible in
-#         ps aux or /proc/$$/cmdline.
-# AUD-R2: A rollback copy of the live database is created before any write.
-#         If the cp to the live path fails the rollback copy is automatically
-#         promoted back so the operator is never left with a missing database.
 # ---------------------------------------------------------------------------
 restore_db() {
     local backup_file="$1"
@@ -503,16 +500,12 @@ restore_db() {
 
     local dec_db="$tmpdir/db.sqlite3"
 
-    # AUD-R1: -i flag reads the identity (private key) from a file.
-    # No --passphrase argument is ever passed; passphrase stays off the CLI.
     log_info "Decrypting database backup..."
     age -d -i "$age_key_file" -o "$dec_db" "$backup_file" || {
         log_error "Decryption failed — verify the age key is correct."
         return 1
     }
 
-    # AUD-R4: WAL checkpoint + integrity check via verify_sqlite()
-    # FIX-R06: Use host sqlite3 instead of Docker alpine container.
     if [[ "$SKIP_VERIFICATION" != "true" ]]; then
         verify_sqlite "$dec_db" || return 1
     fi
@@ -524,9 +517,6 @@ restore_db() {
     local ts
     ts="$(date +%Y%m%d-%H%M%S)"
 
-    # AUD-R2: Create a rollback copy BEFORE touching the live database.
-    # If the subsequent cp fails (e.g. disk full mid-write), restore the
-    # rollback copy so the live database is never absent.
     local rollback_path=""
     if [[ -f "$db_path" ]]; then
         rollback_path="${db_path}.rollback-${ts}"
@@ -535,14 +525,12 @@ restore_db() {
             log_error "Failed to create rollback copy of live database — aborting restore."
             return 1
         }
-        # Also keep the pre-restore snapshot for later pruning
         log_info "Saving current DB as pre-restore copy (${db_path}.pre-restore-${ts})..."
         cp -a "$db_path" "${db_path}.pre-restore-${ts}"
     fi
 
     log_info "Restoring database..."
     if ! cp -f "$dec_db" "$db_path"; then
-        # AUD-R2 rollback: cp failed; restore the live database from rollback
         log_error "cp to live DB path failed — rolling back from: $(basename "${rollback_path:-none}")"
         if [[ -n "$rollback_path" && -f "$rollback_path" ]]; then
             if cp -a "$rollback_path" "$db_path"; then
@@ -555,7 +543,6 @@ restore_db() {
         return 1
     fi
 
-    # Remove the temporary rollback copy now that the restore succeeded
     [[ -n "$rollback_path" ]] && rm -f "$rollback_path" 2>/dev/null || true
 
     purge_wal_shm "$db_path"
@@ -575,13 +562,8 @@ restore_full() {
     local puid="$4"
     local pgid="$5"
     local tmpdir="$6"
-    local archive_format="$7"   # "relative" | "absolute" (legacy)
+    local archive_format="$7"
 
-    # P1-C1 FIX: Name the decrypted file with the correct extension so that
-    # _tar_filter_for_file() can derive the right decompressor. Strip the
-    # outer .age suffix and keep the inner archive extension (.tar.gz /
-    # .tar.zst etc.).  Fall back to .tar.gz for archives with no recognised
-    # inner extension so existing behaviour is preserved.
     local inner_name
     inner_name="${backup_file%.age}"
     case "$inner_name" in
@@ -590,11 +572,9 @@ restore_full() {
     esac
     local dec_tar="$tmpdir/$(basename "$inner_name")"
 
-    # Determine tar filter once so all tar invocations below are consistent.
     local tar_filter
     tar_filter="$(_tar_filter_for_file "$dec_tar")"
 
-    # AUD-R1: age -d -i <keyfile> — no passphrase on command line.
     log_info "Decrypting archive..."
     age -d -i "$age_key_file" -o "$dec_tar" "$backup_file" || {
         log_error "Decryption failed — verify the age key is correct."
@@ -608,13 +588,9 @@ restore_full() {
     fi
 
     if [[ "$archive_format" == "absolute" ]]; then
-        # -------------------------------------------------------------------
-        # LEGACY path: version=1 absolute-path archive → extract directly to /
-        # -------------------------------------------------------------------
         log_warn "Legacy archive format detected (version=1, absolute paths)."
         log_warn "Extracting directly to / — no staging available for this format."
 
-        # FIX-R01: Path traversal check on the legacy path.
         if [[ "$SKIP_VERIFICATION" != "true" ]]; then
             log_info "Validating archive members (path traversal check — legacy format)..."
             check_traversal_only "$dec_tar" || {
@@ -638,12 +614,6 @@ restore_full() {
         tar $tar_filter -xf "$dec_tar" -C / \
             --no-same-owner --no-same-permissions --delay-directory-restore
 
-        # P1-C2 FIX: Fix ownership on the restored state directory so that
-        # containers do not start as root:root. Without this fixup the
-        # extracted files retain root:root ownership from the tar stream and
-        # VaultWarden cannot write to its data directory, causing silent
-        # startup failures that are not immediately obvious as a restore issue.
-        local state_rel="${state_dir#/}"
         if [[ -d "$state_dir" ]]; then
             log_info "Fixing ownership on restored state directory (${puid}:${pgid})..."
             chown -R "${puid}:${pgid}" "$state_dir/data" 2>/dev/null || \
@@ -655,9 +625,6 @@ restore_full() {
         return 0
     fi
 
-    # -----------------------------------------------------------------------
-    # CURRENT path: version=2 relative-path archive → staged restore
-    # -----------------------------------------------------------------------
     if [[ "$SKIP_VERIFICATION" != "true" ]]; then
         log_info "Validating archive members (path traversal check)..."
         tar_validate_members "$dec_tar" || return 1
@@ -668,7 +635,6 @@ restore_full() {
         return 0
     fi
 
-    # Stage extraction
     local staging="$tmpdir/stage"
     mkdir -p "$staging"
     log_info "Extracting archive to staging directory..."
@@ -676,7 +642,6 @@ restore_full() {
     tar $tar_filter -xf "$dec_tar" -C "$staging" \
         --no-same-owner --no-same-permissions --delay-directory-restore
 
-    # Validate expected paths exist in staging
     local rel_state="${state_dir#/}"
     if [[ ! -d "$staging/$rel_state" ]]; then
         log_error "Staging validation failed: expected directory not found: $staging/$rel_state"
@@ -686,7 +651,6 @@ restore_full() {
         return 1
     fi
 
-    # Atomic swap: rename current state dir to .pre-restore-<ts>, mv staged dir in
     local ts
     ts="$(date +%Y%m%d-%H%M%S)"
     if [[ -d "$state_dir" ]]; then
@@ -697,26 +661,14 @@ restore_full() {
     log_info "Promoting staged restore to live path..."
     mv "$staging/$rel_state" "$state_dir"
 
-    # Fix ownership on restored data
     chown -R "${puid}:${pgid}" "$state_dir/data" 2>/dev/null || \
         log_warn "Could not set ownership on $state_dir/data"
     purge_wal_shm "$state_dir/data/db.sqlite3" || true
 
-    # -----------------------------------------------------------------------
-    # Restore PROJECT_ROOT config files from staging.
-    #
-    # Intentional exclusions:
-    #   *.sh scripts  — may be running and are not data; operator should
-    #                   update scripts manually if needed
-    #   secrets/      — the live age key decrypted this archive; overwriting
-    #                   it with an archived version would break access to all
-    #                   backups made after that key was rotated
-    # -----------------------------------------------------------------------
     local rel_project="${PROJECT_ROOT#/}"
     if [[ -d "$staging/$rel_project" ]]; then
         log_info "Restoring project config files from archive..."
 
-        # Explicit config files (safe to replace while scripts are running)
         local config_files=(
             docker-compose.yml
             docker-compose.override.yml
@@ -734,9 +686,6 @@ restore_full() {
             fi
         done
 
-        # Config directories (caddy, fail2ban, nginx — excludes secrets/)
-        # Preserve a timestamped backup of any existing directory before applying
-        # restored content, so local customizations are recoverable.
         local config_dirs=(caddy fail2ban nginx)
         for d in "${config_dirs[@]}"; do
             local src_dir="$staging/$rel_project/$d"
@@ -769,10 +718,6 @@ restore_full() {
 main() {
     log_header "VaultWarden-OCI Restore Utility"
 
-    # FIX-R04: --list does not require root. It only reads local backup file
-    # metadata (find + ls on the backups/ tree). Requiring root prevented
-    # non-privileged operators from inspecting what backups are available
-    # before deciding whether a restore is needed.
     if [[ "$LIST_ONLY" == "true" ]]; then
         list_backups
         exit 0
@@ -780,20 +725,11 @@ main() {
 
     require_root "$@"
 
-    # Shared operations mutex to prevent overlap with update/maintenance jobs.
-    # AUD-R5: backup.sh also acquires this lock (FD 200) before operating on
-    # the database directory, so a concurrent backup run and restore run cannot
-    # both proceed — whichever acquires the lock second will exit with an error.
     ensure_dir "$VW_LOCK_DIR" 700 "$(get_real_user)" || {
         log_error "Failed to initialize operations lock directory: $VW_LOCK_DIR"
         exit 1
     }
 
-    # P1-M3 FIX: Use FD 200 (instead of FD 9) for the operations mutex so
-    # that subshells spawned by restore.sh do not inherit the same FD as
-    # update.sh (which uses FD 9). Inheriting the same FD causes the child
-    # to hold the lock open after the parent releases it, preventing any
-    # subsequent operation from acquiring the mutex until the subshell exits.
     exec 200>"$VW_OPERATIONS_LOCK"
     if ! flock -n 200; then
         log_error "Another update/restore/maintenance/backup operation is already running."
@@ -801,11 +737,6 @@ main() {
         exit 1
     fi
 
-    # FIX-R03: Prevent concurrent restore runs.
-    # A race between two simultaneous restores — or a restore racing with a
-    # running backup — can corrupt the atomic state-dir swap in restore_full():
-    # if both runs reach the mv step concurrently the .pre-restore-<ts> swap
-    # may clobber itself, leaving the vault in an unrecoverable split state.
     local RESTORE_LOCK_FILE="/var/lock/vaultwarden-restore.lock"
     local RESTORE_LOCK_FD=203
     eval "exec ${RESTORE_LOCK_FD}>\"$RESTORE_LOCK_FILE\""
@@ -816,26 +747,10 @@ main() {
         exit 1
     fi
 
-    # Load environment
     load_env_file || { log_error "Failed to load .env"; exit 1; }
 
-    # FIX-R09: Do NOT use bare `local VAR` declarations for variables that
-    # have already been exported into the environment by load_env_file().
-    # In bash, `local VAR` without an assignment unconditionally sets VAR to
-    # the empty string in the local scope, shadowing the exported value.
-    # get_config_value() uses ${!key} indirect expansion and therefore reads
-    # the empty local instead of the exported env var, making PUID/PGID
-    # always appear unset even when correctly defined in .env.
-    # Fix: declare and assign every variable atomically on the same line so
-    # the local scope is initialised from the environment in one operation.
     local STATE_DIR="$(get_config_value    "PROJECT_STATE_DIR"   "/var/lib/vaultwarden")"
     local AGE_KEY_FILE="$(get_config_value "SOPS_AGE_KEY_FILE"   "secrets/keys/age-key.txt")"
-
-    # FIX-R07: Make missing PUID/PGID a hard error rather than silently
-    # defaulting to 1001. On a fresh restore target UID 1001 may belong to
-    # a different user or be unallocated. Containers running as the wrong UID
-    # cannot write to the restored data directory and fail with misleading
-    # permission errors that are not immediately obvious as a restore problem.
     local PUID="$(get_config_value "PUID" "")"
     local PGID="$(get_config_value "PGID" "")"
 
@@ -852,12 +767,6 @@ main() {
     resolve_backup_file || exit 1
     [[ -f "$BACKUP_FILE" ]] || { log_error "Backup file not found: $BACKUP_FILE"; exit 1; }
 
-    # FIX-R05: Verify .sha256 sidecar before attempting decryption.
-    # backup.sh writes a .sha256 file alongside every .age archive. Checking
-    # it here detects bitrot and accidental or deliberate tampering without
-    # consuming the Age key — fast, key-less, defence-in-depth.
-    # Warn-only (not hard-fail) when the sidecar is absent for backward
-    # compatibility with v1 backups that pre-date sidecar generation.
     local sha256_sidecar="${BACKUP_FILE}.sha256"
     if [[ -f "$sha256_sidecar" && "$SKIP_VERIFICATION" != "true" ]]; then
         log_info "Verifying backup checksum before decryption..."
@@ -880,21 +789,6 @@ main() {
         log_warn "(Backups created before v2 did not generate sidecar files.)"
     fi
 
-    # P2-H3 FIX: Read archive_format from .meta but use a smarter default
-    # when the field is absent. backup_utils.sh's create_backup_metadata()
-    # does not write version= or archive_format= fields, so all meta files
-    # produced by the current backup.sh lack these keys and read_meta_field
-    # always falls back to the default.
-    #
-    # Strategy (in priority order):
-    #   1. Explicit field in .meta file — authoritative when present.
-    #   2. Filename heuristic: .tar.zst implies v2/relative (backup.sh has
-    #      used zstd + relative paths since v2 was introduced).
-    #   3. If version=2 is present in .meta but archive_format is missing,
-    #      default to "relative" (v2 always uses relative paths).
-    #   4. Hard fallback: "absolute" only when version=1 is explicit.
-    #      Ambiguous cases (no meta, no zst extension) warn and default to
-    #      "relative" so v2 archives are not silently extracted as legacy.
     local meta_file="${BACKUP_FILE}.meta"
     local archive_version archive_format
 
@@ -902,29 +796,22 @@ main() {
     archive_format="$( read_meta_field "$meta_file" "archive_format" "")"
 
     if [[ -z "$archive_format" ]]; then
-        # Heuristic 1: zstd extension → v2/relative
         if [[ "$BACKUP_FILE" == *.tar.zst.age || "$BACKUP_FILE" == *.zst.age ]]; then
             archive_format="relative"
             log_info "archive_format not in .meta; inferred 'relative' from .zst extension."
-        # Heuristic 2: explicit version=2 in meta → relative
         elif [[ "$archive_version" == "2" ]]; then
             archive_format="relative"
             log_info "archive_format not in .meta; defaulting to 'relative' (version=2)."
-        # Heuristic 3: explicit version=1 → absolute (legacy)
         elif [[ "$archive_version" == "1" ]]; then
             archive_format="absolute"
             log_info "archive_format not in .meta; defaulting to 'absolute' (version=1 legacy)."
         else
-            # No meta, no version, no recognised extension — warn and default
-            # to 'relative' so a v2 archive is not inadvertently extracted as
-            # a legacy absolute-path archive (which would clobber / as root).
             archive_format="relative"
             log_warn "archive_format and version absent from .meta; defaulting to 'relative'."
             log_warn "If this is a v1 (absolute-path) archive, add --type and re-check the .meta file."
         fi
     fi
 
-    # Normalise absent version for display
     [[ -z "$archive_version" ]] && archive_version="unknown"
 
     log_info "Restore plan:"
@@ -934,7 +821,6 @@ main() {
     log_info "  State dir:      $STATE_DIR"
     log_info "  Age key:        $AGE_KEY_FILE"
 
-    # Confirmation
     if [[ "$FORCE" != "true" && "$DRY_RUN" != "true" ]]; then
         echo ""
         log_warn  "WARNING: This will overwrite current data."
@@ -944,8 +830,6 @@ main() {
         [[ "$confirm" == "yes" ]] || { log_info "Restore cancelled."; exit 0; }
     fi
 
-    # NOTE: cleanup() and its trap are registered at global scope (above main)
-    # so that mktemp failures after set -e cannot leave decrypted data in /tmp.
     local old_umask
     old_umask=$(umask)
     umask 077
@@ -959,7 +843,6 @@ main() {
 
     create_pre_restore_snapshot || exit 1
 
-    # Stop services
     if [[ "$DRY_RUN" != "true" ]]; then
         if docker compose ps --status running --services 2>/dev/null | grep -q .; then
             log_info "Stopping services..."
@@ -967,7 +850,6 @@ main() {
         fi
     fi
 
-    # Perform restore
     case "$RESTORE_TYPE" in
         db)
             restore_db \
@@ -985,9 +867,6 @@ main() {
             ;;
     esac
 
-    # FIX-R08: Prune old .pre-restore-* artefacts after a successful restore.
-    # Each restore run creates a dated rollback copy; without pruning these
-    # accumulate indefinitely. Keep the 3 most recent for safety.
     if [[ "$DRY_RUN" != "true" ]]; then
         case "$RESTORE_TYPE" in
             db)
@@ -999,13 +878,6 @@ main() {
         esac
     fi
 
-    # FIX-R02: Use docker compose up -d instead of docker compose start.
-    # docker compose start only resumes ALREADY-CREATED containers.
-    # On a fresh disaster-recovery server no containers have ever been
-    # created, so start exits silently, the vault is completely down, and
-    # the restore incorrectly reports success. docker compose up -d
-    # --remove-orphans creates containers if they do not exist AND starts
-    # them if they are stopped — correct in both scenarios.
     if [[ "$DRY_RUN" != "true" ]]; then
         log_info "Starting services..."
         if ! docker compose up -d --remove-orphans; then
@@ -1014,7 +886,6 @@ main() {
             exit 1
         fi
 
-        # Wait for services to initialize with retry loop for cold-start DR
         log_info "Waiting for services to initialize (up to 60s on cold start)..."
         local max_wait=60 waited=0
         while (( waited < max_wait )); do
