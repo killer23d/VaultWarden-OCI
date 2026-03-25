@@ -57,6 +57,18 @@
 #           into the main DB file first, avoiding false corruption reports.
 #   AUD-R5  Concurrent backup+restore protection: both scripts acquire
 #           VW_OPERATIONS_LOCK (FD 200) via flock -n; documented here.
+#
+# FIX-R09 (this revision):
+#   local STATE_DIR AGE_KEY_FILE PUID PGID declared all four variables
+#   as bare locals with no initial value. In bash, `local VAR` without
+#   an assignment sets VAR to empty string in the local scope, shadowing
+#   any exported variable of the same name — including those written by
+#   load_env_file(). get_config_value() uses ${!key} indirect expansion
+#   and therefore read the empty local instead of the exported value,
+#   causing the FIX-R07 hard-fail PUID/PGID check to always trigger even
+#   when .env was correctly populated with PUID=<uid> and PGID=<gid>.
+#   Fix: each variable is now declared and assigned atomically on its own
+#   line (local VAR="$(…)") so the local scope is never empty.
 
 set -euo pipefail
 
@@ -807,17 +819,25 @@ main() {
     # Load environment
     load_env_file || { log_error "Failed to load .env"; exit 1; }
 
-    local STATE_DIR AGE_KEY_FILE PUID PGID
-    STATE_DIR="$(get_config_value    "PROJECT_STATE_DIR"   "/var/lib/vaultwarden")"
-    AGE_KEY_FILE="$(get_config_value "SOPS_AGE_KEY_FILE"   "secrets/keys/age-key.txt")"
+    # FIX-R09: Do NOT use bare `local VAR` declarations for variables that
+    # have already been exported into the environment by load_env_file().
+    # In bash, `local VAR` without an assignment unconditionally sets VAR to
+    # the empty string in the local scope, shadowing the exported value.
+    # get_config_value() uses ${!key} indirect expansion and therefore reads
+    # the empty local instead of the exported env var, making PUID/PGID
+    # always appear unset even when correctly defined in .env.
+    # Fix: declare and assign every variable atomically on the same line so
+    # the local scope is initialised from the environment in one operation.
+    local STATE_DIR="$(get_config_value    "PROJECT_STATE_DIR"   "/var/lib/vaultwarden")"
+    local AGE_KEY_FILE="$(get_config_value "SOPS_AGE_KEY_FILE"   "secrets/keys/age-key.txt")"
 
     # FIX-R07: Make missing PUID/PGID a hard error rather than silently
     # defaulting to 1001. On a fresh restore target UID 1001 may belong to
     # a different user or be unallocated. Containers running as the wrong UID
     # cannot write to the restored data directory and fail with misleading
     # permission errors that are not immediately obvious as a restore problem.
-    PUID="$(get_config_value "PUID" "")"
-    PGID="$(get_config_value "PGID" "")"
+    local PUID="$(get_config_value "PUID" "")"
+    local PGID="$(get_config_value "PGID" "")"
 
     if [[ -z "$PUID" || -z "$PGID" ]]; then
         log_error "PUID and PGID must be set in .env before restoring."
