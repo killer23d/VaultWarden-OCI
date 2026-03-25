@@ -474,8 +474,13 @@ sync_to_rclone() {
         rclone_config_arg=(--config "$canonical_cfg")
     fi
 
-    local remote_path="${remote_name}:vaultwarden_backups/${backup_type}"
-    b_log_info "Syncing backup to rclone remote: ${remote_path}/"
+    local remote_base_path
+    remote_base_path="$(get_config_value "RCLONE_REMOTE_PATH" "vaultwarden_backups")"
+    remote_base_path="${remote_base_path#/}"
+    remote_base_path="${remote_base_path%/}"
+
+local remote_path="${remote_name}:${remote_base_path}/${backup_type}"
+b_log_info "Syncing backup to rclone remote: ${remote_path}/"
 
     local rclone_ok=true
 
