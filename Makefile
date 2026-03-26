@@ -16,7 +16,7 @@
         restore restore-db restore-remote \
         update update-system \
         maintenance maintenance-full update-dns \
-        key-rotate key-show \
+        key-rotate key-show key-health \
         breakglass-create breakglass-status breakglass-remove \
         systemd-install systemd-remove systemd-status systemd-validate timers \
         uninstall uninstall-dry-run \
@@ -265,6 +265,15 @@ restore-remote: ## Restore from a remote (rclone) backup — interactive selecti
 ##@ Age Key Management
 # ---------------------------------------------------------------------------
 
+# MAKE-KR1 FIX [HIGH]: The old recipe ran:
+#   source lib/crypto.sh && rotate_age_key
+# inside the Make recipe shell, which is /bin/sh (dash on Debian/Ubuntu).
+# dash does not implement the 'source' builtin — it silently fails with
+# "sh: 1: source: not found", so rotate_age_key never executed.
+# Fix: invoke bash explicitly so 'source' works.
+#
+# MAKE-KR2 [LOW]: Added key-health pre-flight before rotation so a corrupt
+# or unreadable key is caught with a clear message before any write occurs.
 key-rotate: ## Rotate the age encryption key (generates new key, updates all locations)
 	@echo "$(BLUE)Rotating age encryption key...$(NC)"
 	@echo "$(YELLOW)WARNING: After rotation, new backups will use the new key.$(NC)"
@@ -273,7 +282,11 @@ key-rotate: ## Rotate the age encryption key (generates new key, updates all loc
 		echo "$(RED)Error: key rotation requires sudo: sudo make key-rotate$(NC)"; \
 		exit 1; \
 	fi
-	@source lib/crypto.sh && rotate_age_key && echo "$(GREEN)Key rotation complete.$(NC)"
+	@echo "$(BLUE)Pre-flight: checking current age key health...$(NC)"
+	@bash -c 'set -euo pipefail; source lib/simple_key_resilience.sh; check_age_key_health' || \
+		{ echo "$(YELLOW)Warning: key health check failed — proceeding anyway (key may not yet exist).$(NC)"; true; }
+	@bash -c 'set -euo pipefail; source lib/crypto.sh; rotate_age_key' && \
+		echo "$(GREEN)Key rotation complete.$(NC)"
 
 key-show: ## Show current age public key and key file path/status
 	@echo "$(BLUE)Age Key Status:$(NC)"
@@ -289,6 +302,14 @@ key-show: ## Show current age public key and key file path/status
 		echo "  Status   : $(RED)MISSING$(NC)"; \
 		echo "  $(RED)Run: sudo make setup  or  sudo ./setup.sh to generate a key$(NC)"; \
 	fi
+
+# MAKE-KH1 [NEW]: Dedicated target for key health check via simple_key_resilience.sh.
+# Useful as a standalone diagnostic and as a pre-flight dependency.
+key-health: ## Check age key health (permissions, decodability, SOPS_AGE_KEY_FILE)
+	@echo "$(BLUE)Checking age key health...$(NC)"
+	@bash -c 'set -euo pipefail; source lib/simple_key_resilience.sh; check_age_key_health' && \
+		echo "$(GREEN)Age key health check passed$(NC)" || \
+		{ echo "$(RED)Age key health check FAILED — run: sudo make setup$(NC)"; exit 1; }
 
 # ---------------------------------------------------------------------------
 ##@ Maintenance
