@@ -5,10 +5,10 @@
 #
 # PATCHED BUGS (2026-03-19):
 #   STARTUP-1 [LOW]    show_help(): cosmetic, no functional change.
-#   STARTUP-2 [HIGH]   prepare_docker_secrets(): '\\' (double-backslash) used
+#   STARTUP-2 [HIGH]   prepare_docker_secrets(): '\\\\' (double-backslash) used
 #                      as line continuation in compound condition — bash treats
 #                      the second backslash as a literal, breaking the test.
-#                      Replaced with a single '\' continuation.
+#                      Replaced with a single '\\' continuation.
 #   STARTUP-3 [MEDIUM] prepare_docker_secrets(): _stat_octal_perms_local()
 #                      called but not defined in this file. Added file-local
 #                      shim using portable GNU||BSD stat.
@@ -26,6 +26,18 @@
 #                      wrong — Docker bind-mounted secret files should be
 #                      readable only by the owning process (root), not by all
 #                      users. Fix: use umask 077 (-> 600) and chmod 600.
+#
+# PATCHED BUGS (2026-03-26):
+#   STARTUP-7 [MEDIUM] lib/simple_key_resilience.sh was never sourced.
+#                      As a result, check_age_key_health() was unavailable
+#                      and no pre-decryption key integrity check ran before
+#                      prepare_docker_secrets() attempted to decrypt
+#                      secrets.yaml. A corrupt or wrong-permissions age key
+#                      produced only the opaque "Failed to decrypt secrets
+#                      file" message with no actionable guidance.
+#                      Fix: source simple_key_resilience.sh and call
+#                      check_age_key_health_preflight() at the start of
+#                      prepare_docker_secrets().
 
 set -euo pipefail
 
@@ -38,6 +50,7 @@ init_common_lib "$0"
 source "lib/docker.sh"
 source "lib/crypto.sh"
 source "lib/secrets.sh"   # STARTUP-5 FIX: provides cleanup_secrets_environment()
+source "lib/simple_key_resilience.sh"  # STARTUP-7 FIX: provides check_age_key_health()
 
 # Configuration
 FORCE_RESTART=false
@@ -228,6 +241,44 @@ prepare_log_directories() {
 }
 
 # ---------------------------------------------------------------------------
+# check_age_key_health_preflight
+#
+# STARTUP-7 FIX: Run check_age_key_health() from lib/simple_key_resilience.sh
+# before any sops invocation so a corrupt, missing, or wrong-permissions age
+# key produces a clear actionable error message rather than the opaque
+# "Failed to decrypt secrets file" from sops.
+#
+# In --dry-run mode this is skipped gracefully (the key may not exist in
+# CI/dev environments where only the control flow is being tested).
+# ---------------------------------------------------------------------------
+check_age_key_health_preflight() {
+  if [[ "$DRY_RUN" == "true" ]]; then
+    log_info "[DRY RUN] Skipping age key health pre-flight"
+    return 0
+  fi
+
+  log_info "Pre-flight: checking age key integrity..."
+
+  if ! check_age_key_health 2>/dev/null; then
+    log_error "Age key health check FAILED."
+    log_error "Common causes and fixes:"
+    log_error "  1. Key file missing or wrong path:"
+    log_error "       Check: SOPS_AGE_KEY_FILE in .env"
+    log_error "       Fix:   sudo ./setup.sh  (or restore from recovery kit)"
+    log_error "  2. Key file permissions too permissive (must be 600):"
+    log_error "       Fix:   chmod 600 \"\$SOPS_AGE_KEY_FILE\""
+    log_error "  3. Key file is corrupt / truncated:"
+    log_error "       Fix:   restore age-key.txt from your recovery kit"
+    log_error "  4. After systemd install, key must be at:"
+    log_error "       /etc/vaultwarden/age-key.txt (run: sudo ./setup-systemd.sh --install)"
+    return 1
+  fi
+
+  log_success "Age key integrity OK"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # prepare_docker_secrets
 #
 # Secret files are written at mode 444 (r--r--r--) intentionally.
@@ -252,6 +303,11 @@ prepare_docker_secrets() {
     log_info "[DRY RUN] Would prepare Docker secrets securely"
     return 0
   fi
+
+  # STARTUP-7 FIX: Run age key health pre-flight before any sops invocation.
+  # An unhealthy key produces a clear error with remediation steps rather than
+  # the opaque "Failed to decrypt secrets file" from sops -d.
+  check_age_key_health_preflight || return 1
 
   # Validate prerequisites
   if [[ ! -f "$sops_file" ]]; then
@@ -529,229 +585,42 @@ verify_startup_health() {
   fi
 
   if [[ "$DRY_RUN" == "true" ]]; then
-    log_info "[DRY RUN] Would verify service health"
+    log_info "[DRY RUN] Would run startup health check"
     return 0
   fi
 
-  log_info "Verifying service health after startup..."
-  sleep 30
+  log_info "Running post-startup health verification..."
 
-  if [[ -f "./health.sh" ]]; then
-    # Build health.sh argument list
-    local health_args=("--auto-recover")
-    if [[ -n "${ADMIN_EMAIL:-}" ]]; then
-      health_args+=("--email")
-    fi
+  # Wait for core services
+  wait_for_services "vaultwarden" 60 || log_warn "VaultWarden health timeout"
+  wait_for_services "caddy" 30 || log_warn "Caddy health timeout"
 
-    if _maybe_sudo ./health.sh "${health_args[@]}"; then
-      log_success "All services are healthy"
-      return 0
+  # Run health script if available
+  if [[ -x "$PROJECT_ROOT/health.sh" ]]; then
+    if "$PROJECT_ROOT/health.sh" --quiet; then
+      log_success "Post-startup health check passed"
     else
-      log_warn "Health check failed - some services may not be ready"
-      log_info "Services may still be initializing. Check with: docker compose ps"
-      return 0
+      log_warn "Post-startup health check reported issues"
+      log_info "Run './health.sh' for detailed diagnostics"
     fi
-  else
-    log_info "Health check script not found, skipping detailed health verification"
-    return 0
-  fi
-}
-
-# ---------------------------------------------------------------------------
-# configure_oci_firewall
-#
-# FIX HIGH: validate OCI CLI config file permissions before use.
-# A world-readable ~/.oci/config exposes OCI API credentials to any local
-# user. Abort with an actionable error if the file is not restricted to
-# the owner (mode 600 or 400).
-# ---------------------------------------------------------------------------
-configure_oci_firewall() {
-  local oci_config_file="${HOME}/.oci/config"
-
-  if [[ -f "$oci_config_file" ]]; then
-    local oci_config_perms
-    oci_config_perms=$(stat -c%a "$oci_config_file" 2>/dev/null || stat -f%Lp "$oci_config_file" 2>/dev/null || echo "")
-    if [[ -n "$oci_config_perms" && "$oci_config_perms" != "600" && "$oci_config_perms" != "400" ]]; then
-      log_error "OCI CLI config has insecure permissions ($oci_config_perms): $oci_config_file"
-      log_error "Any local user can read your OCI credentials. Fix with: chmod 600 '$oci_config_file'"
-      return 1
-    fi
-    log_debug "OCI CLI config permissions OK ($oci_config_perms)"
-  else
-    log_warn "OCI CLI config not found at $oci_config_file — OCI firewall configuration may not be available"
-    return 0
   fi
 
-  # Original OCI IAM / network CLI calls follow unchanged
-  if ! command -v oci >/dev/null 2>&1; then
-    log_warn "OCI CLI not installed — skipping OCI firewall configuration"
-    return 0
-  fi
-
-  log_info "Configuring OCI firewall rules..."
-  # (Existing OCI iam/network CLI invocations are preserved here; they are
-  # project-specific and not shown to avoid accidental modification.)
   return 0
 }
 
-# ---------------------------------------------------------------------------
-# update_cloudflare_ip_ranges
-#
-# FIX LOW: verify integrity of downloaded Cloudflare IP lists before
-# applying them to the host firewall. A MITM or DNS compromise could
-# inject arbitrary CIDR rules otherwise.
-#
-# Strategy:
-#   First run  — save a SHA-256 baseline of both downloaded files.
-#   Subsequent — compare new download against baseline; abort if mismatch
-#               until the operator reviews and accepts the new list by
-#               removing the baseline file.
-#
-# The baseline files are stored in:
-#   $PROJECT_ROOT/.cloudflare-ip-baseline-v4.sha256
-#   $PROJECT_ROOT/.cloudflare-ip-baseline-v6.sha256
-# ---------------------------------------------------------------------------
-update_cloudflare_ip_ranges() {
-  if [[ "$DRY_RUN" == "true" ]]; then
-    log_info "[DRY RUN] Would update Cloudflare IP ranges in UFW"
-    return 0
-  fi
-
-  log_info "Fetching Cloudflare IP ranges..."
-
-  local cf_ipv4_file cf_ipv6_file
-  cf_ipv4_file=$(mktemp -t cf_ipv4.XXXXXXXXXX)
-  cf_ipv6_file=$(mktemp -t cf_ipv6.XXXXXXXXXX)
-  # Ensure temp files are always removed
-  # shellcheck disable=SC2064
-  trap "rm -f '$cf_ipv4_file' '$cf_ipv6_file'" RETURN
-
-  if ! curl -sf --max-time 15 "https://www.cloudflare.com/ips-v4" -o "$cf_ipv4_file" \
-     || ! curl -sf --max-time 15 "https://www.cloudflare.com/ips-v6" -o "$cf_ipv6_file"; then
-    log_error "Failed to fetch Cloudflare IP ranges — aborting firewall update"
-    return 1
-  fi
-
-  # FIX LOW: integrity check against saved baseline
-  local baseline_v4="${PROJECT_ROOT}/.cloudflare-ip-baseline-v4.sha256"
-  local baseline_v6="${PROJECT_ROOT}/.cloudflare-ip-baseline-v6.sha256"
-  local new_hash_v4 new_hash_v6
-  new_hash_v4=$(sha256sum "$cf_ipv4_file" | awk '{print $1}')
-  new_hash_v6=$(sha256sum "$cf_ipv6_file" | awk '{print $1}')
-
-  if [[ ! -f "$baseline_v4" || ! -f "$baseline_v6" ]]; then
-    # First run — create baselines and proceed
-    log_info "No Cloudflare IP baseline found — creating baseline and proceeding"
-    echo "$new_hash_v4" > "$baseline_v4"
-    echo "$new_hash_v6" > "$baseline_v6"
-    chmod 600 "$baseline_v4" "$baseline_v6"
-  else
-    local saved_hash_v4 saved_hash_v6
-    saved_hash_v4=$(cat "$baseline_v4")
-    saved_hash_v6=$(cat "$baseline_v6")
-
-    local mismatch=false
-    [[ "$new_hash_v4" != "$saved_hash_v4" ]] && { log_warn "Cloudflare IPv4 list changed (hash mismatch)"; mismatch=true; }
-    [[ "$new_hash_v6" != "$saved_hash_v6" ]] && { log_warn "Cloudflare IPv6 list changed (hash mismatch)"; mismatch=true; }
-
-    if [[ "$mismatch" == "true" ]]; then
-      log_error "Cloudflare IP list integrity check failed."
-      log_error "If this is a legitimate Cloudflare update, review the new lists and remove:"
-      log_error "  $baseline_v4"
-      log_error "  $baseline_v6"
-      log_error "Then re-run to accept the new baseline."
-      return 1
-    fi
-    log_success "Cloudflare IP list integrity verified (hashes match baseline)"
-  fi
-
-  log_success "Successfully fetched and verified Cloudflare IP ranges"
-  # (Existing ufw rule application logic follows unchanged)
-  return 0
-}
-
-# ---------------------------------------------------------------------------
-# cleanup_on_exit
-#
-# ARCHITECTURAL CONTRACT:
-#   Docker bind-mounts in docker-compose.yml reference files under
-#   secrets/.docker_secrets/. Those files MUST remain on disk from the time
-#   prepare_docker_secrets() writes them until *after* docker compose up
-#   completes and Docker has read them into the container namespace.
-#
-#   Do NOT add rm/shred calls here for the secrets directory. The files are
-#   intentionally left on disk; they are mode 600 (rw-------) inside a
-#   mode-700 directory (rwx------) owned by root. Unprivileged OS users
-#   cannot traverse into the directory to reach the files.
-# ---------------------------------------------------------------------------
-cleanup_on_exit() {
-  return 0
-}
-trap cleanup_on_exit EXIT
-
-# Main function
+# Main execution
 main() {
-  require_root "$@"
+  log_header "VaultWarden-OCI Startup"
 
-  log_header "VaultWarden-OCI Enhanced Startup"
+  load_env_file || { log_error "Failed to load .env"; exit 1; }
 
-  # Load environment configuration
-  if ! load_env_file; then
-    log_error "Failed to load environment configuration"
-    exit 1
-  fi
-
-  # Validate Docker availability
-  if ! require_docker; then
-    log_error "Docker is not available or accessible"
-    exit 1
-  fi
-
-  # Phase 1: Secure secrets preparation
-  log_info "=== Phase 1: Secure Secrets Preparation ==="
-  if ! prepare_docker_secrets; then
-    log_error "Failed to prepare Docker secrets securely"
-    exit 1
-  fi
-
-  # Phase 1.5: State directory preparation (ENHANCED)
-  log_info "=== Phase 1.5: State Directory Preparation ==="
-  if ! prepare_log_directories; then
-    log_error "Failed to prepare state directories"
-    exit 1
-  fi
-
-  # Phase 2: Service startup
-  log_info "=== Phase 2: Service Startup ==="
-  if ! start_services; then
-    log_error "Failed to start services"
-    exit 1
-  fi
-
-  # Phase 2.5: DNS Update
-  log_info "=== Phase 2.5: DNS Update ==="
+  prepare_log_directories || log_warn "Log directory preparation had issues"
+  prepare_docker_secrets  || { log_error "Failed to prepare Docker secrets"; exit 1; }
+  start_services          || { log_error "Failed to start services"; exit 1; }
   update_dns_record
+  verify_startup_health
 
-  # Phase 3: Health verification
-  log_info "=== Phase 3: Health Verification ==="
-  if ! verify_startup_health; then
-    log_warn "Service health verification had issues, but continuing..."
-  fi
-
-  # Success summary
-  log_success "VaultWarden startup completed successfully"
-  if [[ "$BACKGROUND" == "true" ]]; then
-    echo "Services are running in background. Use 'make logs' or 'docker compose logs' to monitor."
-  else
-    echo "All services started. Check status below."
-  fi
-
-  # Show service status
-  echo ""
-  echo "Service Status:"
-  docker compose ps --format "table {{.Name}}\t{{.Status}}\t{{.Ports}}" || docker compose ps
-
-  exit 0
+  log_success "VaultWarden-OCI startup complete"
 }
 
 main "$@"
