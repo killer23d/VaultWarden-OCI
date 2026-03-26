@@ -1,49 +1,80 @@
 # VaultWarden-OCI Makefile
 # Optimized for the current codebase
 
-# FIX [P5-L1/L2/L3]: Removed dead cron-install/cron-remove/cron-list from .PHONY
-.PHONY: help setup init-secrets edit-secrets test-secrets test-email up down restart start stop status health health-email logs logs-tail logs-postfix backup backup-full backup-emergency list-backups restore restore-db update update-system maintenance maintenance-full update-dns breakglass-create breakglass-status breakglass-remove dev-setup test test-config dry-run db-maint db-backup clean clean-all prune info shell version watch monitor safe-restart fmt config
+# ---------------------------------------------------------------------------
+# help target uses the ##@ (section) + ## (target) convention popularised by
+# controller-runtime / kubebuilder.  Sections are declared with ##@ TITLE on
+# a line by itself; individual targets use ## Description inline.
+# ---------------------------------------------------------------------------
 
+.PHONY: help \
+        setup init-secrets edit-secrets test-secrets test-email \
+        up down restart start stop status \
+        health health-quick health-email \
+        logs logs-tail logs-postfix logs-vaultwarden logs-caddy \
+        backup backup-full backup-emergency list-backups \
+        restore restore-db restore-remote \
+        update update-system \
+        maintenance maintenance-full update-dns \
+        key-rotate key-show \
+        breakglass-create breakglass-status breakglass-remove \
+        systemd-install systemd-remove systemd-status systemd-validate timers \
+        uninstall uninstall-dry-run \
+        dev-setup test test-config dry-run \
+        db-maint db-backup \
+        clean clean-all prune \
+        info shell version watch monitor safe-restart fmt config
+
+# ---------------------------------------------------------------------------
 # Configuration
-COMPOSE_FILE ?= docker-compose.yml
-COMPOSE_PROJECT_NAME ?= vaultwarden-oci
-DOCKER_COMP ?= $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
-# FIX [L-08]: COMPOSE_DOCKER_CLI_BUILD is deprecated in Docker 23+ (BuildKit is on by default).
-# Removed COMPOSE_DOCKER_CLI_BUILD. DOCKER_BUILDKIT kept for contexts that still need it.
-DOCKER_BUILDKIT ?= 1
+# ---------------------------------------------------------------------------
+COMPOSE_FILE          ?= docker-compose.yml
+COMPOSE_PROJECT_NAME  ?= vaultwarden-oci
+DOCKER_COMP           ?= $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
+# COMPOSE_DOCKER_CLI_BUILD is deprecated in Docker 23+ (BuildKit is on by default).
+DOCKER_BUILDKIT       ?= 1
 
 # Service names
-SERVICES = vaultwarden caddy fail2ban postfix
-CORE_SERVICES = vaultwarden caddy
+SERVICES          = vaultwarden caddy fail2ban postfix
+CORE_SERVICES     = vaultwarden caddy
 OPTIONAL_SERVICES = watchtower backup
 
-# Colors for output
-RED = \033[0;31m
-GREEN = \033[0;32m
+# Terminal colours
+RED    = \033[0;31m
+GREEN  = \033[0;32m
 YELLOW = \033[1;33m
-BLUE = \033[0;34m
-NC = \033[0m # No Color
+BLUE   = \033[0;34m
+CYAN   = \033[0;36m
+NC     = \033[0m
 
-# Export environment variables
 export DOCKER_BUILDKIT
 
-## Default target
+# ---------------------------------------------------------------------------
+# help — grouped output using ##@ sections and ## descriptions
+# ---------------------------------------------------------------------------
 help: ## Show this help message
 	@echo "$(BLUE)VaultWarden-OCI Management$(NC)"
 	@echo "$(BLUE)==============================$(NC)"
-	@echo "$(GREEN)Core Operations:$(NC)"
-	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  $(YELLOW)%-20s$(NC) %s\n", $$1, $$2}'
+	@awk 'BEGIN {FS = ":.*##"; section=""} \
+	  /^##@/ { section = substr($$0, 5); printf "\n$(CYAN)%s$(NC)\n", section; next } \
+	  /^[a-zA-Z0-9_-]+:.*?## / { printf "  $(YELLOW)%-24s$(NC) %s\n", $$1, $$2 }' \
+	  $(MAKEFILE_LIST)
 	@echo ""
-	@echo "$(GREEN)Advanced Usage:$(NC)"
-	@echo "  $(YELLOW)make up$(NC)                        Start with secrets initialization"
-	@echo "  $(YELLOW)make logs SERVICE=postfix$(NC)      View specific service logs"
-	@echo "  $(YELLOW)make backup TYPE=emergency$(NC)     Create emergency backup"
-	@echo "  $(YELLOW)make health AUTO_RECOVER=true$(NC)  Run health check with auto-recovery"
+	@echo "$(GREEN)Examples:$(NC)"
+	@echo "  $(YELLOW)make up$(NC)                          Start with secrets initialization"
+	@echo "  $(YELLOW)make logs SERVICE=caddy$(NC)          View caddy logs"
+	@echo "  $(YELLOW)make backup TYPE=emergency$(NC)       Create emergency backup"
+	@echo "  $(YELLOW)make health AUTO_RECOVER=true$(NC)    Health check with auto-recovery"
+	@echo "  $(YELLOW)make restore$(NC)                     Interactive restore (prompts for key)"
+	@echo "  $(YELLOW)make key-rotate$(NC)                  Rotate the age encryption key"
+	@echo "  $(YELLOW)make timers$(NC)                      Show all vaultwarden systemd timers"
 
-## Setup and Installation
-# FIX [P5-L1]: Inverted root check — re-implemented so that `sudo make setup`
-# (which runs AS root, id -u == 0) works correctly. A direct root login
-# (i.e. id -u == 0 but no SUDO_USER) is still rejected with a clear message.
+# ---------------------------------------------------------------------------
+##@ Setup & Installation
+# ---------------------------------------------------------------------------
+
+# FIX [P5-L1]: Inverted root check — sudo make setup (id -u == 0 + SUDO_USER)
+# works; direct root login (id -u == 0, no SUDO_USER) is rejected.
 setup: ## Run initial setup (requires sudo)
 	@echo "$(BLUE)Setting up VaultWarden-OCI...$(NC)"
 	@if [ "$$(id -u)" -eq 0 ] && [ -z "$$SUDO_USER" ]; then \
@@ -71,8 +102,7 @@ edit-secrets: ## Edit encrypted secrets file
 	@echo "$(BLUE)Opening secrets editor...$(NC)"
 	@./edit-secrets.sh
 
-# FIX [P5-M2]: test-secrets now propagates failure exit code so `make test`
-# correctly fails when SOPS/secrets are broken.
+# FIX [P5-M2]: propagate failure exit code so `make test` fails correctly.
 test-secrets: ## Test secrets decryption
 	@echo "$(BLUE)Testing secrets decryption...$(NC)"
 	@if ./edit-secrets.sh --list > /dev/null 2>&1; then \
@@ -86,9 +116,11 @@ test-email: ## Test email configuration (Postfix via unified maintenance)
 	@echo "$(BLUE)Testing email configuration...$(NC)"
 	@./maintenance.sh --test-email --verbose
 
-## Service Management
-# FIX [P5-H1]: up/restart now invoke `sudo ./startup.sh` so require_root
-# inside startup.sh does not immediately fail.
+# ---------------------------------------------------------------------------
+##@ Service Management
+# ---------------------------------------------------------------------------
+
+# FIX [P5-H1]: up/restart invoke sudo ./startup.sh so require_root passes.
 up: ## Start all services with secrets initialization
 	@echo "$(BLUE)Starting VaultWarden-OCI services...$(NC)"
 	@sudo ./startup.sh || { echo "$(RED)Startup failed!$(NC)"; $(MAKE) status; exit 1; }
@@ -103,226 +135,12 @@ down: ## Stop all services gracefully
 
 stop: down ## Alias for down
 
-# FIX [P5-H1]: restart now invokes `sudo ./startup.sh` so require_root
-# inside startup.sh does not immediately fail.
 restart: ## Restart all services (enhanced startup)
 	@echo "$(BLUE)Restarting VaultWarden-OCI services...$(NC)"
 	@sudo ./startup.sh --force-restart || { echo "$(RED)Restart failed!$(NC)"; $(MAKE) status; exit 1; }
 	@echo "$(GREEN)Services restarted successfully!$(NC)"
 
-## Monitoring and Status
-status: ## Show service status
-	@echo "$(BLUE)Service Status:$(NC)"
-	@$(DOCKER_COMP) ps --format "table {{.Service}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null || echo "$(RED)Services not running$(NC)"
-
-health: ## Run health checks (Optional: AUTO_RECOVER=true, COMPREHENSIVE=true)
-	@echo "$(BLUE)Running health checks...$(NC)"
-	@FLAGS=""; \
-	if [ "$(COMPREHENSIVE)" = "true" ]; then FLAGS="$$FLAGS --comprehensive"; fi; \
-	if [ "$(AUTO_RECOVER)" = "true" ]; then FLAGS="$$FLAGS --auto-recover"; fi; \
-	./health.sh $$FLAGS || { echo "$(RED)Health check failed$(NC)"; exit 1; }
-
-health-email: ## Run health check with email notification
-	@echo "$(BLUE)Running health check with email notification...$(NC)"
-	@./health.sh --comprehensive --email
-
-# FIX [P5-M1]: logs now defaults to --tail=100 (not -f across all services
-# which was identical to `monitor`). Pass SERVICE= to filter, -f for follow.
-logs: ## Show recent logs (last 100 lines). Use SERVICE= to filter, FOLLOW=true to tail
-	@if [ "$(FOLLOW)" = "true" ]; then \
-		$(DOCKER_COMP) logs -f -t --tail=100 $(SERVICE); \
-	else \
-		$(DOCKER_COMP) logs --tail=100 $(SERVICE); \
-	fi
-
-logs-tail: ## Tail logs with timestamps
-	@$(DOCKER_COMP) logs -f -t --tail=100 $(SERVICE)
-
-logs-postfix: ## Shortcut to view postfix email logs
-	@$(DOCKER_COMP) logs -f -t --tail=100 postfix
-
-## Backup and Restore Operations
-# FIX [P5-M4]: backup now always passes --email so systemd timer invocations
-# (and all other default calls) send notification emails. The flag was
-# previously only injected when TYPE= was explicitly set by the caller.
-backup: ## Create backup (TYPE: db, full, emergency)
-	@echo "$(BLUE)Creating backup...$(NC)"
-	@./backup.sh --type $(if $(TYPE),$(TYPE),db) --email
-	@echo "$(GREEN)Backup completed successfully!$(NC)"
-
-backup-full: ## Create full system backup
-	@$(MAKE) backup TYPE=full
-
-backup-emergency: ## Create emergency recovery kit
-	@$(MAKE) backup TYPE=emergency
-
-list-backups: ## List available backups
-	@echo "$(BLUE)Available backups:$(NC)"
-	@./backup.sh --list
-
-restore: ## Restore from backup (interactive)
-	@echo "$(BLUE)Starting interactive restore...$(NC)"
-	@./restore.sh
-
-restore-db: ## Restore latest database backup
-	@echo "$(BLUE)Restoring latest database backup...$(NC)"
-	@./restore.sh --type db --force
-
-## Maintenance Operations
-update: ## Update container images
-	@echo "$(BLUE)Updating container images...$(NC)"
-	@./update.sh
-	@echo "$(GREEN)Update completed successfully!$(NC)"
-
-update-system: ## Update system packages and containers
-	@echo "$(BLUE)Updating system and containers...$(NC)"
-	@./update.sh --system --email
-
-maintenance: ## Run full maintenance (cleanup, Docker, DB, DNS, firewall)
-	@echo "$(BLUE)Running maintenance tasks...$(NC)"
-	@./maintenance.sh --comprehensive
-	@echo "$(GREEN)Maintenance completed successfully!$(NC)"
-
-maintenance-full: ## Run full maintenance with email notification
-	@echo "$(BLUE)Running comprehensive maintenance...$(NC)"
-	@./maintenance.sh --comprehensive --email
-
-## DNS Management
-update-dns: ## Update DNS record to current IP
-	@echo "$(BLUE)Updating DNS record...$(NC)"
-	@./maintenance.sh --update-dns
-	@echo "$(GREEN)DNS updated successfully!$(NC)"
-
-## Security Operations
-breakglass-create: ## Create emergency admin account
-	@echo "$(BLUE)Creating break-glass admin account...$(NC)"
-	@sudo ./create-breakglass-admin.sh --create
-
-breakglass-status: ## Show break-glass admin status
-	@sudo ./create-breakglass-admin.sh --status
-
-breakglass-remove: ## Remove break-glass admin account
-	@echo "$(YELLOW)Removing break-glass admin account...$(NC)"
-	@sudo ./create-breakglass-admin.sh --remove
-
-# FIX [P5-C2 / P5-L3]: cron-setup.sh no longer exists (migrated to systemd).
-# The cron-install/cron-remove/cron-list targets now redirect users to the
-# correct systemd-based tooling and removed from .PHONY above.
-
-## Development and Testing
-dev-setup: ## Setup development environment
-	@echo "$(BLUE)Setting up development environment...$(NC)"
-	@if [ ! -f ".env" ]; then cp .env.example .env; echo "$(YELLOW)Created .env from example. Please configure it.$(NC)"; fi
-	@if [ ! -f "docker-compose.override.yml" ]; then cp docker-compose.override.yml.example docker-compose.override.yml; echo "$(YELLOW)Created development override file.$(NC)"; fi
-
-test: ## Run all tests
-	@echo "$(BLUE)Running tests...$(NC)"
-	@$(MAKE) test-secrets
-	@$(MAKE) test-email
-	@$(DOCKER_COMP) config > /dev/null && echo "$(GREEN)Docker Compose config valid$(NC)" || { echo "$(RED)Docker Compose config invalid$(NC)"; exit 1; }
-
-test-config: ## Validate configuration
-	@echo "$(BLUE)Validating configuration...$(NC)"
-	@$(DOCKER_COMP) config > /dev/null && echo "$(GREEN)Docker Compose configuration is valid$(NC)" || { echo "$(RED)Docker Compose configuration is invalid$(NC)"; exit 1; }
-
-# FIX [P5-H2]: dry-run no longer appends `|| true` to script calls.
-# Each script is invoked directly; a non-zero exit propagates so that a
-# broken config is correctly reported as failed rather than silently healthy.
-dry-run: ## Preview all operations without executing
-	@echo "$(BLUE)Dry run mode - showing what would be done:$(NC)"
-	@echo "$(YELLOW)--- startup.sh ---$(NC)"
-	@./startup.sh --dry-run
-	@echo "$(YELLOW)--- health.sh ---$(NC)"
-	@./health.sh --dry-run
-	@echo "$(YELLOW)--- backup.sh ---$(NC)"
-	@./backup.sh --dry-run
-	@echo "$(YELLOW)--- maintenance.sh ---$(NC)"
-	@./maintenance.sh --dry-run
-
-## Database Operations
-db-maint: ## Run deep database maintenance (requires sudo)
-	@echo "$(BLUE)Running database maintenance...$(NC)"
-	@sudo ./maintenance.sh --db-maint
-
-db-backup: ## Quick database backup
-	@$(MAKE) backup TYPE=db
-
-## Cleanup Operations
-# [MEDIUM FIX] The previous `clean` target passed --no-logs, --no-backups,
-# --no-database to maintenance.sh, which does not implement those flags.
-# Using direct docker commands instead so the target's stated purpose
-# ("clean Docker resources") is actually achieved.
-clean: ## Clean up Docker resources only
-	@echo "$(BLUE)Cleaning up Docker resources...$(NC)"
-	@$(DOCKER_COMP) rm -f --stop 2>/dev/null || true
-	@docker system prune -f
-	@echo "$(GREEN)Cleanup completed!$(NC)"
-
-# FIX [P5-H3]: clean-all now requires an interactive TTY; it aborts if stdin
-# is not a terminal (e.g. piped CI invocation) to prevent silent execution.
-# The `-t 30` timeout is removed — if the operator walks away, data is NOT
-# deleted. A deliberate, prompt-only confirmation is required.
-clean-all: ## Clean up everything (DESTRUCTIVE)
-	@echo "$(RED)WARNING: This will remove all containers, volumes, and data!$(NC)"
-	@if [ ! -t 0 ]; then \
-		echo "$(RED)Aborted: stdin is not a terminal. clean-all requires an interactive session.$(NC)"; \
-		exit 1; \
-	fi
-	@read -r -p "Are you sure? Type 'yes' to continue: " confirm && [ "$$confirm" = "yes" ] || { echo "$(YELLOW)Aborted. No data was deleted.$(NC)"; exit 1; }; \
-	$(DOCKER_COMP) down -v --remove-orphans; \
-	docker system prune -af --volumes
-
-prune: ## Clean up unused Docker resources
-	@echo "$(BLUE)Pruning unused Docker resources...$(NC)"
-	@docker system prune -f
-	@echo "$(GREEN)Prune completed!$(NC)"
-
-## Information
-# FIX [P5-M5]: info target now uses anchored grep (^DOMAIN= and ^PROJECT_STATE_DIR=)
-# to prevent multi-line leakage from keys that merely contain the word DOMAIN
-# or PROJECT_STATE_DIR (e.g. MY_DOMAIN=, SMTP_DOMAIN=).
-info: ## Show system information
-	@echo "$(BLUE)VaultWarden-OCI System Information$(NC)"
-	@echo "$(BLUE)====================================$(NC)"
-	@echo "$(GREEN)Domain:$(NC) $$(grep '^DOMAIN=' .env 2>/dev/null | cut -d= -f2 || echo 'Not configured')"
-	@echo "$(GREEN)Admin Email:$(NC) $$(grep '^ADMIN_EMAIL=' .env 2>/dev/null | cut -d= -f2 || echo 'Not configured')"
-	@echo "$(GREEN)Project State:$(NC) $$(grep '^PROJECT_STATE_DIR=' .env 2>/dev/null | cut -d= -f2 || echo '/var/lib/vaultwarden')"
-	@echo ""
-	@echo "$(GREEN)Services Status:$(NC)"
-	@$(MAKE) status
-	@echo ""
-	@echo "$(GREEN)Disk Usage:$(NC)"
-	@df -h $$(grep '^PROJECT_STATE_DIR=' .env 2>/dev/null | cut -d= -f2 || echo '/var/lib/vaultwarden') 2>/dev/null | tail -1 || echo "State directory not found"
-
-shell: ## Open shell in specified SERVICE (default: vaultwarden)
-	@$(DOCKER_COMP) exec $(if $(SERVICE),$(SERVICE),vaultwarden) sh
-
-# FIX [P5-L2]: version target now treats a non-running container as a
-# non-fatal informational state rather than failing the whole target.
-version: ## Show version information
-	@echo "$(BLUE)VaultWarden-OCI Version Information$(NC)"
-	@echo "$(GREEN)VaultWarden:$(NC) $$($(DOCKER_COMP) exec -T vaultwarden /vaultwarden --version 2>/dev/null | head -1 || echo 'Not running')"
-	@echo "$(GREEN)Caddy:$(NC) $$($(DOCKER_COMP) exec -T caddy caddy version 2>/dev/null || echo 'Not running')"
-	@echo "$(GREEN)Fail2Ban:$(NC) $$($(DOCKER_COMP) exec -T fail2ban fail2ban-server --version 2>/dev/null | head -1 || echo 'Not running')"
-	@echo "$(GREEN)Postfix:$(NC) $$($(DOCKER_COMP) exec -T postfix postconf -d mail_version 2>/dev/null | cut -d= -f2 | tr -d ' ' || echo 'Not running')"
-	@echo "$(GREEN)Docker:$(NC) $$(docker --version 2>/dev/null || echo 'Not available')"
-	@echo "$(GREEN)Docker Compose:$(NC) $$($(DOCKER_COMP) version 2>/dev/null || echo 'Not available')"
-
-# FIX [P5-M3]: watch now explicitly passes critical Makefile variables into
-# the subprocess environment so DOCKER_COMP and COMPOSE_FILE are available
-# inside the watch-spawned sub-shell.
-watch: ## Watch service status (requires watch command)
-	@command -v watch >/dev/null 2>&1 || { echo "$(RED)watch command not found. Install with: sudo apt install procps$(NC)"; exit 1; }
-	@watch -n 5 'DOCKER_COMP="$(DOCKER_COMP)" COMPOSE_FILE="$(COMPOSE_FILE)" make status && echo && DOCKER_COMP="$(DOCKER_COMP)" COMPOSE_FILE="$(COMPOSE_FILE)" make health'
-
-monitor: ## Monitor logs in real-time
-	@echo "$(BLUE)Monitoring all services (Ctrl+C to stop)...$(NC)"
-	@$(DOCKER_COMP) logs -f -t
-
-# FIX [P5-C1]: safe-restart now implements actual rollback on failure.
-# Pre-restart container IDs are captured; if either startup or the
-# post-restart health check fails, the previous containers are restored
-# via `docker start` and the target exits non-zero.
+# FIX [P5-C1]: safe-restart captures pre-restart IDs and rolls back on failure.
 safe-restart: ## Restart with automatic rollback on failure
 	@echo "$(BLUE)Performing safe restart with rollback capability...$(NC)"
 	@PRE_IDS=$$($(DOCKER_COMP) ps -q 2>/dev/null); \
@@ -356,8 +174,248 @@ safe-restart: ## Restart with automatic rollback on failure
 		exit 1; \
 	fi
 
-# Development helpers
-fmt: ## Format and validate all configuration files
+# ---------------------------------------------------------------------------
+##@ Monitoring & Status
+# ---------------------------------------------------------------------------
+
+status: ## Show service status
+	@echo "$(BLUE)Service Status:$(NC)"
+	@$(DOCKER_COMP) ps --format "table {{.Service}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null || echo "$(RED)Services not running$(NC)"
+
+health: ## Run health checks (Optional: AUTO_RECOVER=true, COMPREHENSIVE=true)
+	@echo "$(BLUE)Running health checks...$(NC)"
+	@FLAGS=""; \
+	if [ "$(COMPREHENSIVE)" = "true" ]; then FLAGS="$$FLAGS --comprehensive"; fi; \
+	if [ "$(AUTO_RECOVER)" = "true" ]; then FLAGS="$$FLAGS --auto-recover"; fi; \
+	./health.sh $$FLAGS || { echo "$(RED)Health check failed$(NC)"; exit 1; }
+
+health-quick: ## Fast sanity check — port up + container running (no deep tests)
+	@echo "$(BLUE)Running quick health check...$(NC)"
+	@./health.sh --quiet || { echo "$(RED)Quick health check failed$(NC)"; exit 1; }
+	@echo "$(GREEN)Quick health check passed$(NC)"
+
+health-email: ## Run health check with email notification
+	@echo "$(BLUE)Running health check with email notification...$(NC)"
+	@./health.sh --comprehensive --email
+
+# FIX [P5-M1]: logs defaults to --tail=100. Pass SERVICE= to filter, FOLLOW=true to tail.
+logs: ## Show recent logs (last 100 lines). Use SERVICE= to filter, FOLLOW=true to tail
+	@if [ "$(FOLLOW)" = "true" ]; then \
+		$(DOCKER_COMP) logs -f -t --tail=100 $(SERVICE); \
+	else \
+		$(DOCKER_COMP) logs --tail=100 $(SERVICE); \
+	fi
+
+logs-tail: ## Tail all service logs with timestamps (Ctrl+C to stop)
+	@$(DOCKER_COMP) logs -f -t --tail=100 $(SERVICE)
+
+logs-vaultwarden: ## Tail VaultWarden application logs
+	@$(DOCKER_COMP) logs -f -t --tail=100 vaultwarden
+
+logs-caddy: ## Tail Caddy reverse-proxy logs
+	@$(DOCKER_COMP) logs -f -t --tail=100 caddy
+
+logs-postfix: ## Tail Postfix email relay logs
+	@$(DOCKER_COMP) logs -f -t --tail=100 postfix
+
+# FIX [P5-M3]: watch passes critical Makefile variables into subprocess env.
+watch: ## Watch service status every 5s (requires watch command)
+	@command -v watch >/dev/null 2>&1 || { echo "$(RED)watch not found. Install: sudo apt install procps$(NC)"; exit 1; }
+	@watch -n 5 'DOCKER_COMP="$(DOCKER_COMP)" COMPOSE_FILE="$(COMPOSE_FILE)" make status && echo && DOCKER_COMP="$(DOCKER_COMP)" COMPOSE_FILE="$(COMPOSE_FILE)" make health'
+
+monitor: ## Monitor all service logs in real-time (Ctrl+C to stop)
+	@echo "$(BLUE)Monitoring all services (Ctrl+C to stop)...$(NC)"
+	@$(DOCKER_COMP) logs -f -t
+
+# ---------------------------------------------------------------------------
+##@ Backup & Restore
+# ---------------------------------------------------------------------------
+
+# FIX [P5-M4]: backup always passes --email so systemd timer invocations send notifications.
+backup: ## Create backup (TYPE: db, full, emergency)
+	@echo "$(BLUE)Creating backup...$(NC)"
+	@./backup.sh --type $(if $(TYPE),$(TYPE),db) --email
+	@echo "$(GREEN)Backup completed successfully!$(NC)"
+
+backup-full: ## Create full system backup with email notification
+	@$(MAKE) backup TYPE=full
+
+backup-emergency: ## Create emergency recovery kit with email notification
+	@$(MAKE) backup TYPE=emergency
+
+list-backups: ## List available backups with per-type size totals
+	@echo "$(BLUE)Available backups:$(NC)"
+	@./backup.sh --list
+
+restore: ## Interactive restore — prompts for backup selection and age key
+	@echo "$(BLUE)Starting interactive restore...$(NC)"
+	@sudo ./restore.sh
+
+# FIX [item 4]: restore-db no longer passes --force so the age key prompt and
+# confirmation step run as intended. Use --force explicitly if you need to skip.
+restore-db: ## Restore latest database backup (interactive confirmation + key prompt)
+	@echo "$(BLUE)Restoring latest database backup...$(NC)"
+	@sudo ./restore.sh --type db --latest
+
+restore-remote: ## Restore from a remote (rclone) backup — interactive selection
+	@echo "$(BLUE)Starting remote restore...$(NC)"
+	@sudo ./restore.sh --remote
+
+# ---------------------------------------------------------------------------
+##@ Age Key Management
+# ---------------------------------------------------------------------------
+
+key-rotate: ## Rotate the age encryption key (generates new key, updates all locations)
+	@echo "$(BLUE)Rotating age encryption key...$(NC)"
+	@echo "$(YELLOW)WARNING: After rotation, new backups will use the new key.$(NC)"
+	@echo "$(YELLOW)Keep the new key displayed at the end in a secure location.$(NC)"
+	@if [ "$$(id -u)" -ne 0 ]; then \
+		echo "$(RED)Error: key rotation requires sudo: sudo make key-rotate$(NC)"; \
+		exit 1; \
+	fi
+	@source lib/crypto.sh && rotate_age_key && echo "$(GREEN)Key rotation complete.$(NC)"
+
+key-show: ## Show current age public key and key file path/status
+	@echo "$(BLUE)Age Key Status:$(NC)"
+	@KEY_FILE=$$(grep '^SOPS_AGE_KEY_FILE=' .env 2>/dev/null | cut -d= -f2); \
+	KEY_FILE=$${KEY_FILE:-secrets/keys/age-key.txt}; \
+	echo "  Key file : $$KEY_FILE"; \
+	if [ -f "$$KEY_FILE" ]; then \
+		echo "  Status   : $(GREEN)present$(NC)"; \
+		echo "  Perms    : $$(stat -c '%a' "$$KEY_FILE" 2>/dev/null || stat -f '%A' "$$KEY_FILE" 2>/dev/null)"; \
+		PUB=$$(grep '# public key:' "$$KEY_FILE" 2>/dev/null | awk '{print $$NF}'); \
+		[ -n "$$PUB" ] && echo "  Public   : $$PUB" || echo "  Public   : $(YELLOW)(not found in key file)$(NC)"; \
+	else \
+		echo "  Status   : $(RED)MISSING$(NC)"; \
+		echo "  $(RED)Run: sudo make setup  or  sudo ./setup.sh to generate a key$(NC)"; \
+	fi
+
+# ---------------------------------------------------------------------------
+##@ Maintenance
+# ---------------------------------------------------------------------------
+
+update: ## Update container images (briefly stops services)
+	@echo "$(YELLOW)NOTE: Services will be briefly stopped during the image update.$(NC)"
+	@echo "$(BLUE)Updating container images...$(NC)"
+	@./update.sh
+	@echo "$(GREEN)Update completed successfully!$(NC)"
+
+update-system: ## Update system packages and containers with email notification
+	@echo "$(YELLOW)NOTE: Services will be briefly stopped during the update.$(NC)"
+	@echo "$(BLUE)Updating system and containers...$(NC)"
+	@./update.sh --system --email
+
+maintenance: ## Run comprehensive maintenance (cleanup, Docker, DB, DNS, firewall)
+	@echo "$(BLUE)Running maintenance tasks...$(NC)"
+	@./maintenance.sh --comprehensive
+	@echo "$(GREEN)Maintenance completed successfully!$(NC)"
+
+maintenance-full: ## Run full maintenance with email notification
+	@echo "$(BLUE)Running comprehensive maintenance...$(NC)"
+	@./maintenance.sh --comprehensive --email
+
+update-dns: ## Update DNS record to current public IP
+	@echo "$(BLUE)Updating DNS record...$(NC)"
+	@./maintenance.sh --update-dns
+	@echo "$(GREEN)DNS updated successfully!$(NC)"
+
+db-maint: ## Run deep database maintenance — VACUUM + WAL checkpoint (requires sudo)
+	@echo "$(BLUE)Running database maintenance...$(NC)"
+	@sudo ./maintenance.sh --db-maint
+
+db-backup: ## Quick database-only backup
+	@$(MAKE) backup TYPE=db
+
+# ---------------------------------------------------------------------------
+##@ Systemd Timers
+# ---------------------------------------------------------------------------
+
+systemd-install: ## Install systemd timer units and sync scripts to /opt
+	@echo "$(BLUE)Installing systemd timer units...$(NC)"
+	@sudo ./setup-systemd.sh --install
+	@echo "$(GREEN)Systemd units installed. Run 'make timers' to verify.$(NC)"
+
+systemd-remove: ## Remove all vaultwarden systemd timer units
+	@echo "$(YELLOW)Removing systemd timer units...$(NC)"
+	@sudo ./setup-systemd.sh --remove
+
+systemd-status: ## Show status of all vaultwarden systemd units
+	@sudo ./setup-systemd.sh --status
+
+systemd-validate: ## Validate installed systemd units match current repo scripts
+	@echo "$(BLUE)Validating systemd unit/script checksums...$(NC)"
+	@sudo ./setup-systemd.sh --validate
+
+timers: ## List all vaultwarden systemd timers (next trigger + last run)
+	@systemctl list-timers --all 2>/dev/null | grep -E '(NEXT|vaultwarden)' || \
+		echo "$(YELLOW)No vaultwarden timers found. Run: sudo make systemd-install$(NC)"
+
+# ---------------------------------------------------------------------------
+##@ Security
+# ---------------------------------------------------------------------------
+
+breakglass-create: ## Create emergency admin account
+	@echo "$(BLUE)Creating break-glass admin account...$(NC)"
+	@sudo ./create-breakglass-admin.sh --create
+
+breakglass-status: ## Show break-glass admin account status
+	@sudo ./create-breakglass-admin.sh --status
+
+breakglass-remove: ## Remove break-glass admin account
+	@echo "$(YELLOW)Removing break-glass admin account...$(NC)"
+	@sudo ./create-breakglass-admin.sh --remove
+
+# ---------------------------------------------------------------------------
+##@ Uninstall
+# ---------------------------------------------------------------------------
+
+uninstall-dry-run: ## Preview what uninstall would remove (no changes made)
+	@echo "$(BLUE)Previewing uninstall (dry-run)...$(NC)"
+	@sudo ./uninstall-vaultwarden.sh --dry-run
+
+uninstall: ## Full uninstall — removes containers, data, systemd units (DESTRUCTIVE)
+	@echo "$(RED)WARNING: This permanently removes VaultWarden and all its data!$(NC)"
+	@if [ ! -t 0 ]; then \
+		echo "$(RED)Aborted: stdin is not a terminal. uninstall requires an interactive session.$(NC)"; \
+		exit 1; \
+	fi
+	@read -r -p "Type 'yes' to confirm full uninstall: " confirm && [ "$$confirm" = "yes" ] || { \
+		echo "$(YELLOW)Aborted. No data was deleted.$(NC)"; exit 1; \
+	}
+	@sudo ./uninstall-vaultwarden.sh
+
+# ---------------------------------------------------------------------------
+##@ Development & Testing
+# ---------------------------------------------------------------------------
+
+dev-setup: ## Setup development environment (.env + docker-compose.override.yml)
+	@echo "$(BLUE)Setting up development environment...$(NC)"
+	@if [ ! -f ".env" ]; then cp .env.example .env; echo "$(YELLOW)Created .env from example. Please configure it.$(NC)"; fi
+	@if [ ! -f "docker-compose.override.yml" ]; then cp docker-compose.override.yml.example docker-compose.override.yml; echo "$(YELLOW)Created development override file.$(NC)"; fi
+
+test: ## Run all tests (secrets, email, compose config)
+	@echo "$(BLUE)Running tests...$(NC)"
+	@$(MAKE) test-secrets
+	@$(MAKE) test-email
+	@$(DOCKER_COMP) config > /dev/null && echo "$(GREEN)Docker Compose config valid$(NC)" || { echo "$(RED)Docker Compose config invalid$(NC)"; exit 1; }
+
+test-config: ## Validate Docker Compose configuration only
+	@echo "$(BLUE)Validating configuration...$(NC)"
+	@$(DOCKER_COMP) config > /dev/null && echo "$(GREEN)Docker Compose configuration is valid$(NC)" || { echo "$(RED)Docker Compose configuration is invalid$(NC)"; exit 1; }
+
+# FIX [P5-H2]: dry-run no longer appends || true — failures propagate correctly.
+dry-run: ## Preview all operations without executing
+	@echo "$(BLUE)Dry run mode — showing what would be done:$(NC)"
+	@echo "$(YELLOW)--- startup.sh ---$(NC)"
+	@./startup.sh --dry-run
+	@echo "$(YELLOW)--- health.sh ---$(NC)"
+	@./health.sh --dry-run
+	@echo "$(YELLOW)--- backup.sh ---$(NC)"
+	@./backup.sh --dry-run
+	@echo "$(YELLOW)--- maintenance.sh ---$(NC)"
+	@./maintenance.sh --dry-run
+
+fmt: ## Validate all configuration files (compose + secrets)
 	@echo "$(BLUE)Validating configuration files...$(NC)"
 	@$(DOCKER_COMP) config > /dev/null && echo "$(GREEN)✓ docker-compose.yml$(NC)" || echo "$(RED)✗ docker-compose.yml$(NC)"
 	@if [ -f "docker-compose.override.yml" ]; then \
@@ -366,17 +424,87 @@ fmt: ## Format and validate all configuration files
 	fi
 	@./edit-secrets.sh --list > /dev/null && echo "$(GREEN)✓ secrets.yaml$(NC)" || echo "$(RED)✗ secrets.yaml$(NC)"
 
-# [MEDIUM FIX] config target: filter out sensitive keys from .env output.
-# Keys matching TOKEN, PASSWORD, SECRET, KEY, ZONE_ID, HASH are omitted
-# so that `make config` is safe to run in a shared terminal or CI log.
+# ---------------------------------------------------------------------------
+##@ Cleanup
+# ---------------------------------------------------------------------------
+
+# FIX [P5-M5]: anchored grep prevents multi-line leakage.
+clean: ## Clean up Docker resources (stopped containers + dangling images)
+	@echo "$(BLUE)Cleaning up Docker resources...$(NC)"
+	@$(DOCKER_COMP) rm -f --stop 2>/dev/null || true
+	@docker system prune -f
+	@echo "$(GREEN)Cleanup completed!$(NC)"
+
+# FIX [P5-H3]: clean-all requires interactive TTY; aborts in CI/piped context.
+clean-all: ## Remove all containers, volumes, and data (DESTRUCTIVE)
+	@echo "$(RED)WARNING: This will remove all containers, volumes, and data!$(NC)"
+	@if [ ! -t 0 ]; then \
+		echo "$(RED)Aborted: stdin is not a terminal. clean-all requires an interactive session.$(NC)"; \
+		exit 1; \
+	fi
+	@read -r -p "Are you sure? Type 'yes' to continue: " confirm && [ "$$confirm" = "yes" ] || { echo "$(YELLOW)Aborted. No data was deleted.$(NC)"; exit 1; }; \
+	$(DOCKER_COMP) down -v --remove-orphans; \
+	docker system prune -af --volumes
+
+prune: ## Remove unused Docker resources (images, networks, build cache)
+	@echo "$(BLUE)Pruning unused Docker resources...$(NC)"
+	@docker system prune -f
+	@echo "$(GREEN)Prune completed!$(NC)"
+
+# ---------------------------------------------------------------------------
+##@ Information
+# ---------------------------------------------------------------------------
+
+# FIX [P5-M5]: anchored grep; item 14: show age key status.
+info: ## Show system information including age key status and disk usage
+	@echo "$(BLUE)VaultWarden-OCI System Information$(NC)"
+	@echo "$(BLUE)====================================$(NC)"
+	@echo "$(GREEN)Domain:$(NC)        $$(grep '^DOMAIN=' .env 2>/dev/null | cut -d= -f2 || echo 'Not configured')"
+	@echo "$(GREEN)Admin Email:$(NC)   $$(grep '^ADMIN_EMAIL=' .env 2>/dev/null | cut -d= -f2 || echo 'Not configured')"
+	@echo "$(GREEN)Project State:$(NC) $$(grep '^PROJECT_STATE_DIR=' .env 2>/dev/null | cut -d= -f2 || echo '/var/lib/vaultwarden')"
+	@echo ""
+	@echo "$(GREEN)Age Key Status:$(NC)"
+	@KEY_FILE=$$(grep '^SOPS_AGE_KEY_FILE=' .env 2>/dev/null | cut -d= -f2); \
+	KEY_FILE=$${KEY_FILE:-secrets/keys/age-key.txt}; \
+	if [ -f "$$KEY_FILE" ]; then \
+		echo "  Path   : $$KEY_FILE  $(GREEN)[present, $$(stat -c '%a' "$$KEY_FILE" 2>/dev/null || stat -f '%A' "$$KEY_FILE" 2>/dev/null) perms]$(NC)"; \
+		PUB=$$(grep '# public key:' "$$KEY_FILE" 2>/dev/null | awk '{print $$NF}'); \
+		[ -n "$$PUB" ] && echo "  Public : $$PUB" || echo "  Public : $(YELLOW)(not found)$(NC)"; \
+	else \
+		echo "  $(RED)MISSING: $$KEY_FILE$(NC)  — backups will fail until key is restored"; \
+	fi
+	@echo ""
+	@echo "$(GREEN)Services Status:$(NC)"
+	@$(MAKE) status
+	@echo ""
+	@echo "$(GREEN)Disk Usage:$(NC)"
+	@df -h $$(grep '^PROJECT_STATE_DIR=' .env 2>/dev/null | cut -d= -f2 || echo '/var/lib/vaultwarden') 2>/dev/null | tail -1 || echo "State directory not found"
+
+shell: ## Open shell in specified SERVICE (default: vaultwarden)
+	@$(DOCKER_COMP) exec $(if $(SERVICE),$(SERVICE),vaultwarden) sh
+
+# FIX [P5-L2]: non-running container is non-fatal informational state.
+version: ## Show version information for all stack components
+	@echo "$(BLUE)VaultWarden-OCI Version Information$(NC)"
+	@echo "$(GREEN)VaultWarden:$(NC)    $$($(DOCKER_COMP) exec -T vaultwarden /vaultwarden --version 2>/dev/null | head -1 || echo 'Not running')"
+	@echo "$(GREEN)Caddy:$(NC)          $$($(DOCKER_COMP) exec -T caddy caddy version 2>/dev/null || echo 'Not running')"
+	@echo "$(GREEN)Fail2Ban:$(NC)       $$($(DOCKER_COMP) exec -T fail2ban fail2ban-server --version 2>/dev/null | head -1 || echo 'Not running')"
+	@echo "$(GREEN)Postfix:$(NC)        $$($(DOCKER_COMP) exec -T postfix postconf -d mail_version 2>/dev/null | cut -d= -f2 | tr -d ' ' || echo 'Not running')"
+	@echo "$(GREEN)Docker:$(NC)         $$(docker --version 2>/dev/null || echo 'Not available')"
+	@echo "$(GREEN)Docker Compose:$(NC) $$($(DOCKER_COMP) version 2>/dev/null || echo 'Not available')"
+
+# FIX [item 15]: show truncation notice when .env has more than 15 non-sensitive lines.
 config: ## Show current configuration summary (sensitive keys redacted)
 	@echo "$(BLUE)Current Configuration Summary$(NC)"
 	@echo "$(BLUE)============================$(NC)"
 	@if [ -f ".env" ]; then \
 		echo "$(GREEN)Environment Variables (non-sensitive):$(NC)"; \
-		grep -E '^[A-Z_]+=' .env \
-			| grep -viE '(TOKEN|PASSWORD|SECRET|KEY|ZONE_ID|HASH)' \
-			| head -15; \
+		LINES=$$(grep -E '^[A-Z_]+=' .env | grep -viE '(TOKEN|PASSWORD|SECRET|KEY|ZONE_ID|HASH)'); \
+		COUNT=$$(echo "$$LINES" | wc -l); \
+		echo "$$LINES" | head -15; \
+		if [ "$$COUNT" -gt 15 ]; then \
+			echo "$(YELLOW)  ... and $$((COUNT - 15)) more lines (run: grep -E '^[A-Z_]+=' .env to see all)$(NC)"; \
+		fi; \
 		echo ""; \
 	fi
 	@if [ -f "docker-compose.override.yml" ]; then echo "$(GREEN)Development Override:$(NC) Active"; else echo "$(GREEN)Development Override:$(NC) Not active"; fi
