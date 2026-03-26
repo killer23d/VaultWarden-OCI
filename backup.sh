@@ -162,6 +162,65 @@ _resolve_age_key() {
 }
 
 # ---------------------------------------------------------------------------
+# _resolve_rclone_config
+#
+# When backup.sh is invoked as root (via sudo or a systemd service unit),
+# rclone defaults to /root/.config/rclone/rclone.conf, which does not exist
+# when the remote was configured by a non-root user (e.g. ubuntu).
+#
+# Resolution order (first existing readable file wins):
+#   1. RCLONE_CONFIG env var / .env value  — explicit always takes priority
+#   2. /etc/rclone/rclone.conf             — system-wide location (best practice)
+#   3. /root/.config/rclone/rclone.conf   — root's own config (if present)
+#   4. $SUDO_USER home                     — the invoking user when run via sudo
+#   5. /home/*/.config/rclone/rclone.conf — single-user host heuristic
+#
+# Prints the resolved absolute path to stdout.
+# Returns 0 on success, 1 when no config file is found.
+# ---------------------------------------------------------------------------
+_resolve_rclone_config() {
+    local cfg_from_env
+    cfg_from_env="$(get_config_value "RCLONE_CONFIG" "")"
+
+    # Priority 1: explicit value from .env / environment
+    if [[ -n "$cfg_from_env" ]]; then
+        echo "$cfg_from_env"
+        return 0
+    fi
+
+    # Priority 2: system-wide config (canonical location for root-run services)
+    if [[ -f "/etc/rclone/rclone.conf" ]]; then
+        echo "/etc/rclone/rclone.conf"
+        return 0
+    fi
+
+    # Priority 3: root's own config
+    if [[ -f "/root/.config/rclone/rclone.conf" ]]; then
+        echo "/root/.config/rclone/rclone.conf"
+        return 0
+    fi
+
+    # Priority 4: the user who called sudo (most common single-user case)
+    if [[ -n "${SUDO_USER:-}" ]]; then
+        local sudo_user_home
+        sudo_user_home="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6 || true)"
+        if [[ -n "$sudo_user_home" && -f "$sudo_user_home/.config/rclone/rclone.conf" ]]; then
+            echo "$sudo_user_home/.config/rclone/rclone.conf"
+            return 0
+        fi
+    fi
+
+    # Priority 5: single non-root user heuristic (globbing — only safe on
+    # single-user hosts; multi-user hosts should set RCLONE_CONFIG in .env)
+    local found_cfg
+    for found_cfg in /home/*/.config/rclone/rclone.conf; do
+        [[ -f "$found_cfg" ]] && echo "$found_cfg" && return 0
+    done
+
+    return 1
+}
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -460,27 +519,64 @@ sync_to_rclone() {
         return 1
     fi
 
+    # ------------------------------------------------------------------
+    # Resolve rclone config path.
+    # When RCLONE_CONFIG is set in .env it is used directly (and validated).
+    # When it is not set, _resolve_rclone_config() searches well-known
+    # locations so that root/systemd invocations find the config that was
+    # set up by a non-root user without requiring manual .env edits.
+    # ------------------------------------------------------------------
     local rclone_config_arg=()
     local rclone_config_path
     rclone_config_path="$(get_config_value "RCLONE_CONFIG" "")"
+
     if [[ -n "$rclone_config_path" ]]; then
+        # Explicit path from .env — validate it strictly.
         if ! validate_rclone_config_path "$rclone_config_path"; then
             log_error "Refusing to use invalid RCLONE_CONFIG path: $rclone_config_path" >&2
             return 1
         fi
-
         local canonical_cfg
         canonical_cfg=$(realpath -e "$rclone_config_path")
         rclone_config_arg=(--config "$canonical_cfg")
+        b_log_info "Using rclone config (from .env): $canonical_cfg"
+    else
+        # Not set in .env — auto-discover across well-known locations.
+        local discovered_cfg
+        if discovered_cfg=$(_resolve_rclone_config); then
+            if ! validate_rclone_config_path "$discovered_cfg"; then
+                log_error "Auto-discovered rclone config failed validation: $discovered_cfg" >&2
+                log_error "Set RCLONE_CONFIG=/path/to/rclone.conf in .env to override." >&2
+                return 1
+            fi
+            local canonical_discovered
+            canonical_discovered=$(realpath -e "$discovered_cfg")
+            rclone_config_arg=(--config "$canonical_discovered")
+            b_log_info "Using rclone config (auto-discovered): $canonical_discovered"
+            b_log_info "Tip: set RCLONE_CONFIG=$canonical_discovered in .env to make this explicit."
+        else
+            log_error "No rclone config file found. rclone cannot authenticate." >&2
+            log_error "Options:" >&2
+            log_error "  1. Set RCLONE_CONFIG=/path/to/rclone.conf in .env" >&2
+            log_error "  2. Copy config to /etc/rclone/rclone.conf (system-wide)" >&2
+            log_error "  3. Run: rclone config  (as root, so /root/.config/rclone/rclone.conf is created)" >&2
+            return 1
+        fi
     fi
 
+    # ------------------------------------------------------------------
+    # Build remote destination path.
+    # RCLONE_REMOTE_PATH in .env sets the subfolder inside the remote
+    # (default: vaultwarden_backups).  The backup type (db/full/emergency)
+    # is always appended so each type lands in its own subdirectory.
+    # ------------------------------------------------------------------
     local remote_base_path
     remote_base_path="$(get_config_value "RCLONE_REMOTE_PATH" "vaultwarden_backups")"
     remote_base_path="${remote_base_path#/}"
     remote_base_path="${remote_base_path%/}"
 
-local remote_path="${remote_name}:${remote_base_path}/${backup_type}"
-b_log_info "Syncing backup to rclone remote: ${remote_path}/"
+    local remote_path="${remote_name}:${remote_base_path}/${backup_type}"
+    b_log_info "Syncing backup to rclone remote: ${remote_path}/"
 
     local rclone_ok=true
 
@@ -503,7 +599,7 @@ b_log_info "Syncing backup to rclone remote: ${remote_path}/"
         return 0
     else
         log_error "Rclone sync FAILED — backup is safe locally, but offsite copy was not updated." >&2
-        log_error "Retry manually: rclone copy $enc_file ${remote_path}/" >&2
+        log_error "Retry manually: rclone copy ${rclone_config_arg[*]} $enc_file ${remote_path}/" >&2
         return 1
     fi
 }
