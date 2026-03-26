@@ -11,6 +11,7 @@ init_common_lib "$0"
 source "$SCRIPT_DIR/lib/docker.sh"
 source "$SCRIPT_DIR/lib/crypto.sh"
 source "$SCRIPT_DIR/lib/secrets.sh"
+source "$SCRIPT_DIR/lib/simple_key_resilience.sh"
 
 ENV_DIR="${ENV_DIR:-/etc/vaultwarden}"
 ENV_FILE="$ENV_DIR/vaultwarden.env"
@@ -923,12 +924,17 @@ check_security_status() {
     _check_fail2ban_responding 2>/dev/null || \
         security_issues+=("fail2ban not responding")
 
-    # BUG-AK2 FIX: use _resolve_age_key() instead of the hardcoded
-    # DEFAULT_AGE_KEY_FILE fallback so the systemd-installed key at
-    # /etc/vaultwarden/age-key.txt is found.
-    local age_key_file
-    age_key_file=$(_resolve_age_key 2>/dev/null) || true
-    check_age_key "$age_key_file" || security_issues+=("Age key validation failed")
+    # Wire: use simple_verify_age_key() from lib/simple_key_resilience.sh
+    # instead of the old two-step _resolve_age_key() + check_age_key() pair.
+    # simple_verify_age_key() resolves the key path internally (honouring
+    # SOPS_AGE_KEY_FILE, /etc/vaultwarden/age-key.txt, and the local dev
+    # fallback), then validates permissions, ownership, and performs a
+    # crypto roundtrip — a strict superset of the previous check_age_key().
+    # BUG-AK2 / BUG-AK3 resilience is preserved via _resolve_age_key() inside
+    # the library.
+    if ! simple_verify_age_key 2>/dev/null; then
+        security_issues+=("Age key validation failed")
+    fi
 
     if [[ -f "$SCRIPT_DIR/.sops.yaml" ]]; then
         grep -q "age:" "$SCRIPT_DIR/.sops.yaml" || security_issues+=("SOPS configuration missing Age key")
