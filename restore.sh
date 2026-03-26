@@ -1241,8 +1241,8 @@ main() {
 
     local STATE_DIR; STATE_DIR="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
     local AGE_KEY_FILE; AGE_KEY_FILE="$(get_config_value "SOPS_AGE_KEY_FILE" "secrets/keys/age-key.txt")"
-    local PUID; PUID="$(get_config_value "PUID" "")"
-    local PGID; PGID="$(get_config_value "PGID" "")"
+    local PUID="$(get_config_value "PUID" "")"
+    local PGID="$(get_config_value "PGID" "")"
 
     if [[ -z "$PUID" || -z "$PGID" ]]; then
         log_error "PUID and PGID must be set in .env before restoring."
