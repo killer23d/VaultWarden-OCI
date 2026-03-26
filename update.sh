@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 # update.sh - VaultWarden-OCI update script
 # Updates system packages, Docker images, and restarts services.
+#
+# PATCHED BUGS (2026-03-26):
+#   UPDATE-1 [MEDIUM] lib/simple_key_resilience.sh was never sourced.
+#                     update.sh calls apply_updates_and_restart() which
+#                     re-starts services via docker compose up.  If the
+#                     age key is corrupt or has wrong permissions at
+#                     restart time, the next backup or maintenance run
+#                     fails with a cryptic SOPS error rather than a clear
+#                     message.  Fix: source simple_key_resilience.sh and
+#                     call check_age_key_health_for_update() in main()
+#                     before any update operations.
 
 set -euo pipefail
 
@@ -10,6 +21,7 @@ cd "$SCRIPT_DIR"
 source "lib/common.sh"
 init_common_lib "$0"
 source "lib/docker.sh"
+source "lib/simple_key_resilience.sh"  # UPDATE-1 FIX: provides check_age_key_health()
 
 UPDATE_SYSTEM=false
 UPDATE_IMAGES=false
@@ -92,6 +104,42 @@ ensure_caddy_entrypoint_executable() {
         return 1
     fi
     log_info "caddy/entrypoint.sh execute bit OK"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# check_age_key_health_for_update
+#
+# UPDATE-1 FIX: Verify the age key is present, readable (mode 600), and
+# decodeable before running any update operations.  A healthy key at update
+# time means the next backup/maintenance systemd timer will succeed.
+# In --dry-run mode the check is skipped gracefully (key may not exist
+# in CI/dev environments).
+# ---------------------------------------------------------------------------
+check_age_key_health_for_update() {
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Skipping age key health check"
+        return 0
+    fi
+
+    log_info "Pre-flight: checking age key integrity..."
+
+    if ! check_age_key_health 2>/dev/null; then
+        log_warn "Age key health check FAILED."
+        log_warn "Backup and maintenance operations will fail until the key is repaired."
+        log_warn "Common causes:"
+        log_warn "  1. Key file missing or wrong path (check SOPS_AGE_KEY_FILE in .env)"
+        log_warn "  2. Wrong permissions (must be 600): chmod 600 \"\$SOPS_AGE_KEY_FILE\""
+        log_warn "  3. Key file corrupt — restore from recovery kit"
+        log_warn "  4. After systemd install, key must be at /etc/vaultwarden/age-key.txt"
+        log_warn "     Run: sudo ./setup-systemd.sh --install"
+        log_warn "Continuing with update — fix the key before the next backup timer fires."
+        # Non-fatal for update: the update itself does not use the key,
+        # but we want the operator to know about the problem.
+        return 0
+    fi
+
+    log_success "Age key integrity OK"
     return 0
 }
 
@@ -224,6 +272,11 @@ main() {
     load_env_file || { log_error "Failed to load .env"; exit 1; }
 
     log_header "VaultWarden-OCI Update"
+
+    # UPDATE-1 FIX: Check age key health before update so any key regression
+    # (e.g. wrong permissions after git pull) is surfaced here rather than
+    # silently causing backup/maintenance failures later.
+    check_age_key_health_for_update
 
     run_pre_update_backup
 
