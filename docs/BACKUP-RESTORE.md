@@ -197,7 +197,7 @@ RCLONE_CONFIG=/path/to/rclone.conf
 rclone ls your_remote_name:vaultwarden_backups/
 ```
 
-`sudo ./systemd-setup.sh --install` provisions systemd timers for automated backups:
+`sudo make systemd-install` provisions systemd timers for automated backups:
 
 | Timer | Schedule | Command |
 | :-- | :-- | :-- |
@@ -207,8 +207,7 @@ rclone ls your_remote_name:vaultwarden_backups/
 Check timer status:
 
 ```bash
-systemctl status vaultwarden-db-backup.timer
-systemctl status vaultwarden-full-backup.timer
+make timers
 journalctl -u vaultwarden-db-backup.service --since today
 ```
 
@@ -216,29 +215,119 @@ journalctl -u vaultwarden-db-backup.service --since today
 
 ## ⏪ Restoring
 
+### The Restore Flow (12 Steps)
+
+`restore.sh` now follows a numbered, auditable sequence designed to minimise downtime and operator interactions:
+
+| Step | What happens |
+| :-- | :-- |
+| 1 | Select backup (interactive menu, `--file`, `--latest`, or `--remote`) |
+| 2 | **Prompt for the age decryption key** — the key that encrypted *this specific backup* |
+| 3 | Verify `.sha256` sidecar checksum |
+| 4 | Parse `.meta` sidecar (version/format detection) |
+| 5 | Final operator confirmation prompt |
+| 6 | Pre-restore emergency snapshot (unless `--no-backup`) |
+| 7 | Stop Docker services |
+| 8 | Perform restore (`db` / `full` / `emergency`) |
+| 9 | Prune old pre-restore artefacts |
+| 10 | **Generate + rotate a new age key** |
+| 11 | **Display new key prominently — operator must press Enter to confirm** |
+| 12 | Start services + health check |
+
+> **Why rotate the key after restore?** A restore rewrites data from a potentially old backup. The key in use at backup time may have been compromised or lost. Generating a new key immediately after restore ensures the next backup uses a fresh, uncompromised key and brings the stack to a known-good security baseline with a single operation.
+
+### Supplying the Decryption Key
+
+At step 2, `restore.sh` resolves the decryption key using the following priority order:
+
+| Priority | Source | Use case |
+| :-- | :-- | :-- |
+| 1 (highest) | `--key-file <path>` CLI flag | Scripted / automated restores |
+| 2 | `RESTORE_AGE_KEY_FILE` env var (set in `.env`) | CI pipelines / systemd |
+| 3 | Interactive `read -s` prompt (no terminal echo) | Normal operator restore |
+| 4 (fallback) | Press Enter (blank) → uses `SOPS_AGE_KEY_FILE` | Restoring with the current key |
+
+The entered key is written to a `chmod 600` temp file inside the restore temp directory. The `cleanup()` trap **always** wipes it on exit regardless of success or failure.
+
+Before any restore work begins, the key is validated with a live **encrypt/decrypt round-trip** so a wrong key is caught immediately.
+
 ### Interactive Restore (Recommended)
 
 ```bash
-./restore.sh      # lists backups, prompts for selection
+# Standard interactive restore — prompts for backup selection and age key:
+sudo ./restore.sh
 make restore
-```
 
-`restore.sh` selects the newest backup by **file modification time** (not lexicographic filename order), so it reliably finds the latest regardless of filename format.
+# Restore from a remote (rclone) backup:
+sudo ./restore.sh --remote
+make restore-remote
+```
 
 ### Command-Line Restore
 
 ```bash
 # Restore the latest backup of a specific type
-./restore.sh --latest --type full
-./restore.sh --latest --type db
+sudo ./restore.sh --latest --type full
+sudo ./restore.sh --latest --type db
+
+# Supply the decryption key non-interactively
+sudo ./restore.sh --latest --type db --key-file /path/to/old-age-key.txt
+
+# Automated pipeline restore (no prompts; key via env)
+RESTORE_AGE_KEY_FILE=/root/keys/age-key-old.txt \
+  sudo ./restore.sh --latest --type db --force
+
+# Restore a specific file
+sudo ./restore.sh --file /path/to/backup.age
+sudo ./restore.sh --file /path/to/backup.age --force
 
 # Restore the latest backup, skip confirmation and skip pre-restore backup
 # (used internally by update.sh rollback)
-./restore.sh --latest --type full --force --no-backup
+sudo ./restore.sh --latest --type full --force --no-backup
+```
 
-# Restore a specific file
-./restore.sh --file /path/to/backup.age
-./restore.sh --file /path/to/backup.age --force
+> **Note on `--force`:** Suppresses the confirmation prompt (step 5) and the key acknowledgement prompt (step 11). Useful for automated invocations. The key prompt (step 2) is still evaluated — supply a key via `--key-file` or `RESTORE_AGE_KEY_FILE`, or set `SOPS_AGE_KEY_FILE` as the fallback.
+
+### Post-Restore Key Rotation
+
+After data is successfully restored (step 10), a brand-new age key pair is atomically generated and installed to **all configured locations** before services start:
+
+- `secrets/keys/age-key.txt` — project-local copy (atomic `mktemp` → `mv`, no 644 exposure window)
+- `/etc/vaultwarden/age-key.txt` — systemd canonical location, only if the file already exists
+- `SOPS_AGE_KEY_FILE=` updated in `.env` via in-place `sed`
+- `SOPS_AGE_KEY_FILE=` updated in `/etc/vaultwarden/vaultwarden.env` if present
+- The old key is preserved as `age-key.txt.pre-rotate-<timestamp>` before overwrite
+
+The new key is then displayed in the same prominent banner style as a fresh `setup.sh` run (step 11):
+
+```
+  ╬══════════════════════════════════════════════════════════╣
+  ║       ⚠️  SAVE YOUR NEW AGE ENCRYPTION KEY  ⚠️         ║
+  ╚══════════════════════════════════════════════════════════╝
+
+  Private key:   AGE-SECRET-KEY-1...
+  Public key:    age1...
+  Installed at:  secrets/keys/age-key.txt
+```
+
+The operator must press Enter to confirm they have saved the key before services start. Under `--force`, this acknowledgement step is suppressed (suitable for automated pipelines).
+
+**Key rotation failure is non-fatal** — if key generation fails for any reason, services still start and a recovery message is shown. The old key remains in place.
+
+**After restore, re-run the Tier 2 escrow** to update your password manager with the new key:
+
+```bash
+source lib/simple_key_resilience.sh
+create_password_manager_escrow ~/vaultwarden-age-key-escrow.txt
+# Copy to password manager, then:
+shred -fuz ~/vaultwarden-age-key-escrow.txt
+```
+
+**Quick key status check:**
+
+```bash
+make key-show    # shows path, permissions, public key
+make key-rotate  # standalone key rotation (outside of restore)
 ```
 
 ### Exit Codes
@@ -257,7 +346,7 @@ make restore
 
 ```bash
 docker compose stop vaultwarden
-./restore.sh --latest --type db
+make restore-db    # prompts for backup and age key interactively
 make health
 ```
 
@@ -265,7 +354,7 @@ make health
 
 ```bash
 docker compose down
-./restore.sh --latest --type full
+make restore       # interactive: select full backup, supply age key
 docker compose config   # validate
 make start
 ```
@@ -282,14 +371,20 @@ chmod +x *.sh
 # 3. Pull emergency kit from offsite
 rclone copy your_remote_name:vaultwarden_backups/emergency/ ./backups/emergency/
 
-# 4. Run setup (generates baseline config)
+# 4. Run setup (generates baseline config, new age key)
 sudo ./setup.sh --domain vault.yourdomain.com --email admin@yourdomain.com
 
-# 5. Restore emergency kit (overwrites generated config)
-./restore.sh --file ./backups/emergency/emergency_backup-TIMESTAMP.tar.zst.age --force
+# 5. Restore emergency kit
+#    restore.sh will prompt for the age key that encrypted this backup.
+#    Use the key from INSIDE the emergency kit (extracted separately), or
+#    pass it directly with --key-file.
+sudo ./restore.sh --file ./backups/emergency/emergency_backup-TIMESTAMP.tar.zst.age \
+  --key-file /path/to/age-key-from-emergency-kit.txt
 
-# 6. Verify
+# 6. A new age key is generated automatically after the restore.
+#    Save the new key when prompted, then verify:
 make health
+make key-show
 ```
 
 > **Note:** Emergency kit archives use the `.tar.zst.age` extension (zstd-compressed). Adjust the filename to match your actual backup file.
@@ -299,13 +394,13 @@ make health
 `update.sh` triggers this automatically when its post-update health check fails:
 
 ```bash
-./restore.sh --latest --type full --force --no-backup
+sudo ./restore.sh --latest --type full --force --no-backup
 ```
 
 If you need to trigger it manually:
 
 ```bash
-./restore.sh --latest --type full --force
+make restore    # interactive: select full backup, supply age key
 ```
 
 ---
@@ -345,7 +440,7 @@ docker compose start vaultwarden
 **"Encryption failed" / Age key missing**
 
 ```bash
-ls -l secrets/keys/age-key.txt
+make key-show   # check path, permissions, public key
 
 # Manual health check (validates key format + encrypt/decrypt roundtrip)
 source lib/simple_key_resilience.sh && simple_verify_age_key
@@ -355,18 +450,24 @@ source lib/simple_key_resilience.sh && simple_verify_age_key
 sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.com
 ```
 
-**"Decryption failed" on restore**
+**"Wrong key / decryption failed during restore" (step 2 validation)**
 
 ```bash
-# Verify checksum — .sha256 is generated automatically alongside every .age archive
+# restore.sh validates the key with a live encrypt/decrypt round-trip
+# before any restore work begins. If you see this error:
+
+# 1. Confirm you are using the key that was active when this backup was created.
+#    The public key comment in the backup's age header should match:
+grep '# public key:' /path/to/old-age-key.txt
+
+# 2. Verify the checksum of the backup archive first:
 sha256sum -c backup.age.sha256
 
-# Make sure the Age key matches the backup
-# The public key comment in the key file must match the recipient in the archive
-grep '# public key:' secrets/keys/age-key.txt
+# 3. Try an older backup (the key may have been rotated since this backup was made):
+make restore    # select an older backup from the list
 
-# Try an older backup
-./restore.sh --file /path/to/older-backup.age
+# 4. If you have a matching key file, pass it directly:
+sudo ./restore.sh --file /path/to/backup.age --key-file /path/to/matching-age-key.txt
 ```
 
 **"rclone sync failed"**
@@ -386,6 +487,17 @@ rclone config show your_remote_name
 
 `--keep` accepts only a positive integer. Values like `"14; rm -rf /"` are rejected immediately after argument parsing as a command-injection guard.
 
+**"New key not showing after restore"**
+
+If key rotation failed non-fatally during restore, services are still running with the old key. Check:
+
+```bash
+make key-show                     # confirm current key path and public key
+make key-rotate                   # rotate manually if needed (requires sudo)
+make systemd-validate             # confirm systemd scripts are in sync
+sudo make systemd-install         # re-sync /opt scripts and reload timers
+```
+
 ---
 
 ## ⏱️ Recovery Time Reference
@@ -402,5 +514,5 @@ rclone config show your_remote_name
 
 **Daily:** Automated db backup runs, SHA-256 + decrypt probe passes, and offsite sync succeeds
 **Weekly:** Full backup with `--full-verification`; offsite sync verified
-**Monthly:** Emergency kit created; `restore.sh` tested; Tier 2 escrow refreshed if Age key was rotated
-**Quarterly:** Full disaster recovery drill on a fresh instance
+**Monthly:** Emergency kit created; `restore.sh` tested; Tier 2 escrow refreshed if Age key was rotated (`make key-show` to confirm)
+**Quarterly:** Full disaster recovery drill on a fresh instance; verify `make timers` shows expected schedules
