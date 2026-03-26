@@ -46,15 +46,50 @@
 #                   YYYYMMDD-HHMMSS timestamp embedded in the filename as the
 #                   primary age source. Falls back to ctime only for files
 #                   predating the naming convention (no timestamp in name).
+# QOL (2026-03-26):
+#   ITEM-10 [QOL]   list_backups(): added per-type size totals and a grand-
+#                   total summary line. Operators using `make list-backups`
+#                   (or backup.sh --list) on an OCI free-tier VM can now see
+#                   total disk consumption at a glance without manual du(1).
+#                   Uses the same portable _stat_file_size() helper already
+#                   relied on by get_backup_statistics(). A new pure-bash
+#                   _format_bytes_human() helper formats byte counts as MB
+#                   (one decimal place) without requiring numfmt (GNU-only).
 
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_BACKUP_UTILS_LIB_LOADED:-}" ]] && return 0
 readonly VAULTWARDEN_BACKUP_UTILS_LIB_LOADED=1
 
+# ---------------------------------------------------------------------------
+# _format_bytes_human BYTES
+#
+# ITEM-10: Formats a raw byte count as a human-readable MB string with one
+# decimal place, e.g. 1234567 → "1.2 MB". Pure bash integer arithmetic —
+# no numfmt (GNU-only), no awk floating-point, no bc dependency.
+#
+# Outputs to stdout. Returns 0. Input must be a non-negative integer; any
+# non-integer input is treated as 0.
+# ---------------------------------------------------------------------------
+_format_bytes_human() {
+    local bytes="${1:-0}"
+    [[ "$bytes" =~ ^[0-9]+$ ]] || bytes=0
+
+    local kb=$(( bytes / 1024 ))
+    local mb_int=$(( kb / 1024 ))
+    # One decimal place: compute tenths from the remainder KB after removing
+    # whole-MB portion, then scale to 0–9.
+    local mb_rem_kb=$(( kb - mb_int * 1024 ))
+    local mb_dec=$(( mb_rem_kb * 10 / 1024 ))
+
+    printf '%d.%d MB' "$mb_int" "$mb_dec"
+}
+
 # --- Backup Validation Functions ---
 
 # List available backups in a directory - STANDARDIZED: Returns exit code
 # FIX [ISSUE 13]: Use stat instead of date -r for cross-platform mtime display.
+# ITEM-10: Print per-type file count + total size after each type block, plus
+#          a grand-total line at the end of all output.
 list_backups() {
     local backup_base_dir="${1:-backups}"
 
@@ -69,6 +104,11 @@ list_backups() {
     local backup_types=("db" "full" "emergency")
     local found_backups=false
 
+    # Grand-total accumulators
+    local grand_total_files=0
+    local grand_total_bytes=0
+    local grand_total_types=0
+
     for backup_type in "${backup_types[@]}"; do
         local type_dir="$backup_base_dir/$backup_type"
 
@@ -77,6 +117,11 @@ list_backups() {
             if backups=$(find "$type_dir" -name "*.age" -type f 2>/dev/null | sort); then
                 if [[ -n "$backups" ]]; then
                     echo "=== $backup_type backups ==="
+
+                    # Per-type accumulators
+                    local type_count=0
+                    local type_bytes=0
+
                     while IFS= read -r backup_file; do
                         local basename_file size_info age_info
                         basename_file=$(basename "$backup_file")
@@ -84,8 +129,6 @@ list_backups() {
 
                         # FIX [ISSUE 13]: stat -c '%y' is Linux (GNU coreutils);
                         # fall back to BSD stat -f '%Sm' for macOS compatibility.
-                        # Both are far more portable than 'date -r FILE' which is
-                        # macOS-only and silently fails on every Linux system.
                         age_info=$(stat -c '%y' "$backup_file" 2>/dev/null \
                             | cut -c1-16 \
                             || stat -f '%Sm' -t '%Y-%m-%d %H:%M' "$backup_file" 2>/dev/null \
@@ -97,12 +140,31 @@ list_backups() {
                         if [[ -f "$backup_file.meta" ]]; then
                             local vw_version
                             vw_version=$(grep "vaultwarden_version=" "$backup_file.meta" 2>/dev/null | cut -d= -f2 || echo "unknown")
-                            printf "    \u2514\u2500 VaultWarden: %s\n" "$vw_version"
+                            printf "    └─ VaultWarden: %s\n" "$vw_version"
                         fi
+
+                        # ITEM-10: accumulate raw bytes for the summary line.
+                        # _stat_file_size() is exported by lib/crypto.sh and
+                        # chooses GNU (-c%s) or BSD (-f%z) stat automatically.
+                        local raw_bytes=0
+                        if declare -f _stat_file_size &>/dev/null; then
+                            raw_bytes=$(_stat_file_size "$backup_file" 2>/dev/null || echo 0)
+                            [[ "$raw_bytes" =~ ^[0-9]+$ ]] || raw_bytes=0
+                        fi
+                        type_bytes=$(( type_bytes + raw_bytes ))
+                        (( type_count++ )) || true
 
                         found_backups=true
                     done <<< "$backups"
+
+                    # ITEM-10: per-type summary line
+                    printf "[%s: %d file(s), %s]\n" \
+                        "$backup_type" "$type_count" "$(_format_bytes_human "$type_bytes")"
                     echo ""
+
+                    grand_total_files=$(( grand_total_files + type_count ))
+                    grand_total_bytes=$(( grand_total_bytes + type_bytes ))
+                    (( grand_total_types++ )) || true
                 fi
             fi
         fi
@@ -111,6 +173,15 @@ list_backups() {
     if [[ "$found_backups" == "false" ]]; then
         echo "No backups found in $backup_base_dir"
         return 1
+    fi
+
+    # ITEM-10: grand-total line — only shown when there is more than one
+    # active type, so a single-type install doesn't get a redundant line.
+    if (( grand_total_types > 1 )); then
+        printf "Total: %d file(s), %s  (%d type(s) with backups)\n" \
+            "$grand_total_files" \
+            "$(_format_bytes_human "$grand_total_bytes")" \
+            "$grand_total_types"
     fi
 
     return 0
@@ -600,6 +671,6 @@ EOF
 export -f list_backups validate_backup_integrity check_backup_disk_space
 export -f cleanup_old_backups get_backup_statistics create_backup_metadata
 export -f verify_backup_integrity get_backup_size _backup_ctime_age_days
-export -f _backup_filename_age_days
+export -f _backup_filename_age_days _format_bytes_human
 
 log_debug "Backup utilities library loaded successfully - standardized error handling" 2>/dev/null || true
