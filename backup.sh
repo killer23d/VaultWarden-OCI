@@ -10,6 +10,7 @@ init_common_lib "$0"
 source "$SCRIPT_DIR/lib/docker.sh"
 source "$SCRIPT_DIR/lib/backup_utils.sh"
 source "$SCRIPT_DIR/lib/crypto.sh"
+source "$SCRIPT_DIR/lib/simple_key_resilience.sh"
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -983,6 +984,17 @@ main() {
         log_error "Age key file not found: $age_key_file"
         exit 1
     }
+
+    # Wire: verify age key health (permissions, ownership, crypto roundtrip)
+    # before attempting any backup so a corrupt or mis-permissioned key is
+    # caught here rather than at encryption time.
+    if [[ "$DRY_RUN" != "true" ]]; then
+        SOPS_AGE_KEY_FILE="$age_key_file" simple_verify_age_key || {
+            log_error "Age key health check failed — aborting backup to avoid encrypting with a bad key."
+            log_error "Run './health.sh --comprehensive' for diagnostics."
+            exit 1
+        }
+    fi
 
     local age_pub_key
     age_pub_key=$(get_age_public_key "$age_key_file") || {
