@@ -32,7 +32,7 @@ TMP_WORKDIR=$(mktemp -d -t vw_setup.XXXXXXXXXX) || {
 umask "$old_umask"
 trap 'rm -rf "$TMP_WORKDIR"' EXIT
 
-REQUIRED_LIBS=("lib/common.sh" "lib/crypto.sh" "lib/docker.sh" "lib/security.sh" "lib/backup_utils.sh" "lib/secrets.sh")
+REQUIRED_LIBS=("lib/common.sh" "lib/crypto.sh" "lib/docker.sh" "lib/security.sh" "lib/backup_utils.sh" "lib/secrets.sh" "lib/simple_key_resilience.sh")
 for lib in "${REQUIRED_LIBS[@]}"; do
     if [[ ! -f "$lib" ]]; then
         echo "ERROR: Required library not found: $lib" >&2
@@ -43,6 +43,7 @@ done
 source "lib/common.sh"
 init_common_lib "$0"
 source "lib/crypto.sh"
+source "lib/simple_key_resilience.sh"
 source "lib/docker.sh"
 
 DOMAIN=""
@@ -623,6 +624,20 @@ generate_age_keys() {
     generate_age_key "$age_key_file" "$FORCE" || return 1
     chown "$real_user:$(id -g -n "$real_user")" "$age_key_file" || return 1
     chmod 600 "$age_key_file" || return 1
+
+    # Wire: verify the freshly written key before create_sops_config() tries
+    # to derive the public key from it.  simple_verify_age_key() resolves the
+    # path internally (honouring SOPS_AGE_KEY_FILE / _resolve_age_key()), then
+    # validates permissions, ownership, and runs a crypto roundtrip.  Catching
+    # a corrupt or mis-permissioned key here prevents a confusing failure later
+    # when sops --encrypt is first attempted.
+    if ! SOPS_AGE_KEY_FILE="$age_key_file" simple_verify_age_key; then
+        log_error "Age key verification failed immediately after generation — aborting."
+        log_error "Key file: $age_key_file"
+        log_error "Check disk space, filesystem errors, or re-run setup."
+        return 1
+    fi
+
     return 0
 }
 
