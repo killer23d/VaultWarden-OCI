@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # restore.sh - VaultWarden-OCI safe restore
+# Supports both local backup selection and rclone remote backup pull.
 
 set -euo pipefail
 
@@ -29,6 +30,7 @@ NO_PRE_BACKUP=false
 SKIP_VERIFICATION=false
 RESTORE_ENV=true
 RESTORE_SNAPSHOT_HARD_FAIL="${RESTORE_SNAPSHOT_HARD_FAIL:-true}"
+USE_REMOTE=false   # set by --remote; skip local/remote menu and go straight to remote listing
 
 show_help() {
     cat << 'EOF'
@@ -38,15 +40,16 @@ USAGE:
     sudo ./restore.sh [OPTIONS]
 
     When run without --file or --latest, an interactive numbered menu is
-    presented showing all available backups grouped by type (db / full /
-    emergency), sorted newest-first.  Enter the number of the backup you
-    want to restore and confirm the plan before the restore begins.
+    presented.  If rclone is configured, you are first asked whether to
+    restore from a LOCAL or REMOTE backup; then a numbered list of the
+    available backups from that source is shown.
 
 OPTIONS:
-    --list                  List available backups and exit (no root required)
+    --list                  List available local backups and exit (no root required)
     --file FILE             Restore a specific backup file (.age)
     --type TYPE             db | full | emergency (helps resolve --latest)
-    --latest                Use newest backup (optionally filtered by --type)
+    --latest                Use newest local backup (optionally filtered by --type)
+    --remote                Skip the local/remote menu and go straight to remote listing
     --no-backup             Skip pre-restore emergency snapshot
     --skip-verification     Skip integrity check (not recommended)
     --skip-env              Do not restore archived .env over current .env
@@ -59,8 +62,9 @@ ENVIRONMENT:
                                        (default: true = hard-fail)
 
 EXAMPLES:
-    sudo ./restore.sh                  # interactive numbered menu (default)
-    ./restore.sh --list                # list backups only (no root needed)
+    sudo ./restore.sh                          # interactive menu (local or remote)
+    sudo ./restore.sh --remote                 # interactive menu (remote only)
+    ./restore.sh --list                        # list local backups only (no root needed)
     sudo ./restore.sh --latest --type db --force
     sudo ./restore.sh --file backups/full/full_backup_20260101_120000.tar.gz.age
 EOF
@@ -72,6 +76,7 @@ while [[ $# -gt 0 ]]; do
         --file)               BACKUP_FILE="$2";       shift 2 ;;
         --type)               RESTORE_TYPE="$2";      shift 2 ;;
         --latest)             USE_LATEST=true;        shift ;;
+        --remote)             USE_REMOTE=true;        shift ;;
         --no-backup)          NO_PRE_BACKUP=true;     shift ;;
         --skip-verification)  SKIP_VERIFICATION=true; shift ;;
         --skip-env)           RESTORE_ENV=false;      shift ;;
@@ -85,6 +90,152 @@ done
 TMPDIR_RESTORE=""
 cleanup() { [[ -n "$TMPDIR_RESTORE" ]] && rm -rf "$TMPDIR_RESTORE" 2>/dev/null || true; }
 trap cleanup EXIT HUP INT TERM
+
+# ---------------------------------------------------------------------------
+# _resolve_rclone_config
+#
+# Mirrors the same function in backup.sh.  When RCLONE_CONFIG is not set in
+# .env, searches well-known locations so that root/systemd invocations can
+# find the config that was set up by a non-root user.
+#
+# Resolution order (first existing readable file wins):
+#   1. RCLONE_CONFIG from .env            — explicit, always wins
+#   2. /etc/rclone/rclone.conf            — system-wide (best for systemd)
+#   3. /root/.config/rclone/rclone.conf   — root's own config
+#   4. $SUDO_USER home                    — invoking user when run via sudo
+#   5. /home/*/.config/rclone/rclone.conf — single non-root user heuristic
+#
+# Prints the resolved absolute path to stdout.
+# Returns 0 on success, 1 when no config file is found.
+# ---------------------------------------------------------------------------
+_resolve_rclone_config() {
+    local cfg_from_env
+    cfg_from_env="$(get_config_value "RCLONE_CONFIG" "")"
+
+    if [[ -n "$cfg_from_env" ]]; then
+        echo "$cfg_from_env"
+        return 0
+    fi
+
+    if [[ -f "/etc/rclone/rclone.conf" ]]; then
+        echo "/etc/rclone/rclone.conf"
+        return 0
+    fi
+
+    if [[ -f "/root/.config/rclone/rclone.conf" ]]; then
+        echo "/root/.config/rclone/rclone.conf"
+        return 0
+    fi
+
+    if [[ -n "${SUDO_USER:-}" ]]; then
+        local sudo_user_home
+        sudo_user_home="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6 || true)"
+        if [[ -n "$sudo_user_home" && -f "$sudo_user_home/.config/rclone/rclone.conf" ]]; then
+            echo "$sudo_user_home/.config/rclone/rclone.conf"
+            return 0
+        fi
+    fi
+
+    local found_cfg
+    for found_cfg in /home/*/.config/rclone/rclone.conf; do
+        [[ -f "$found_cfg" ]] && echo "$found_cfg" && return 0
+    done
+
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# _validate_rclone_config_path
+#
+# Validates that the given path is a safe, non-world-writable regular file
+# that does not resolve into a sensitive system directory.
+# ---------------------------------------------------------------------------
+_validate_rclone_config_path() {
+    local cfg_path="$1"
+
+    [[ -z "$cfg_path" ]] && { log_error "rclone config path is empty" >&2; return 1; }
+
+    if [[ "$cfg_path" =~ [^a-zA-Z0-9_./:~-] ]]; then
+        log_error "rclone config path contains disallowed characters: $cfg_path" >&2
+        return 1
+    fi
+
+    local canonical
+    canonical=$(realpath -e "$cfg_path" 2>/dev/null) || {
+        log_error "rclone config path does not exist or cannot be resolved: $cfg_path" >&2
+        return 1
+    }
+
+    local -a sensitive_prefixes=(
+        "/etc/passwd" "/etc/shadow" "/etc/sudoers" "/etc/ssh"
+        "/root" "/proc" "/sys"
+    )
+    for prefix in "${sensitive_prefixes[@]}"; do
+        if [[ "$canonical" == "$prefix" || "$canonical" == "$prefix/"* ]]; then
+            log_error "rclone config resolves to sensitive path: $canonical" >&2
+            return 1
+        fi
+    done
+
+    [[ -f "$canonical" ]] || { log_error "rclone config is not a regular file: $canonical" >&2; return 1; }
+
+    local file_perms
+    file_perms=$(stat -c "%a" "$canonical" 2>/dev/null || stat -f "%Lp" "$canonical" 2>/dev/null || echo "777")
+    if (( (8#$file_perms & 8#002) != 0 )); then
+        log_error "rclone config is world-writable — refusing to use: $canonical" >&2
+        return 1
+    fi
+
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# _build_rclone_config_arg
+#
+# Resolves and validates the rclone config path, then populates the global
+# RCLONE_CONFIG_ARG array with (--config <path>) or leaves it empty if rclone
+# is not configured.
+#
+# Returns 0 if a valid config was found, 1 if not (rclone unavailable).
+# ---------------------------------------------------------------------------
+RCLONE_CONFIG_ARG=()
+_build_rclone_config_arg() {
+    RCLONE_CONFIG_ARG=()
+
+    local cfg_path
+    if cfg_path=$(_resolve_rclone_config); then
+        if ! _validate_rclone_config_path "$cfg_path"; then
+            log_warn "rclone config failed validation: $cfg_path"
+            return 1
+        fi
+        local canonical
+        canonical=$(realpath -e "$cfg_path")
+        RCLONE_CONFIG_ARG=(--config "$canonical")
+        log_info "Using rclone config: $canonical"
+        return 0
+    fi
+
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# _rclone_is_available
+#
+# Returns 0 if rclone is installed, RCLONE_REMOTE_NAME is configured, and a
+# valid config file can be located.  Used to decide whether to offer the
+# remote restore option.
+# ---------------------------------------------------------------------------
+_rclone_is_available() {
+    command -v rclone >/dev/null 2>&1 || return 1
+
+    local remote_name
+    remote_name="$(get_config_value "RCLONE_REMOTE_NAME" "")"
+    [[ -n "$remote_name" && "$remote_name" != "CHANGE_ME_RCLONE_REMOTE" ]] || return 1
+
+    _resolve_rclone_config >/dev/null 2>&1 || return 1
+
+    return 0
+}
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -146,7 +297,6 @@ list_all_backups_interactive() {
         local dir="$PROJECT_ROOT/backups/$t"
         [[ -d "$dir" ]] || continue
 
-        # Collect .age files for this type, newest-first by modification time
         local -a type_files=()
         while IFS= read -r f; do
             type_files+=("$f")
@@ -157,7 +307,6 @@ list_all_backups_interactive() {
             | cut -f2
         )
 
-        # Fallback for macOS / systems where GNU stat --printf is unavailable
         if [[ ${#type_files[@]} -eq 0 ]]; then
             while IFS= read -r f; do
                 type_files+=("$f")
@@ -167,7 +316,6 @@ list_all_backups_interactive() {
         [[ ${#type_files[@]} -eq 0 ]] && continue
         any_found=true
 
-        # Section header
         echo ""
         printf '  ── %s backups ──\n' "${t^^}"
 
@@ -206,10 +354,10 @@ list_all_backups_interactive() {
 }
 
 # ---------------------------------------------------------------------------
-# select_backup_interactive
+# select_backup_interactive  (local backups)
 # ---------------------------------------------------------------------------
 select_backup_interactive() {
-    log_info "No backup specified — listing available backups:"
+    log_info "Listing local backups:"
 
     list_all_backups_interactive || return 1
 
@@ -290,12 +438,282 @@ select_backup_file() {
 }
 
 # ---------------------------------------------------------------------------
+# list_remote_backups
+#
+# Lists .age files on the configured rclone remote under
+# RCLONE_REMOTE_PATH/{db,full,emergency}/ and populates:
+#   _REMOTE_FILES[]  — remote path strings (e.g. remote:BW-Backup/db/file.age)
+#   _REMOTE_TYPES[]  — backup type for each entry
+#
+# Returns 0 if at least one remote file was found, 1 otherwise.
+# ---------------------------------------------------------------------------
+_REMOTE_FILES=()
+_REMOTE_TYPES=()
+
+list_remote_backups() {
+    _REMOTE_FILES=()
+    _REMOTE_TYPES=()
+
+    local remote_name
+    remote_name="$(get_config_value "RCLONE_REMOTE_NAME" "")"
+
+    local remote_base_path
+    remote_base_path="$(get_config_value "RCLONE_REMOTE_PATH" "vaultwarden_backups")"
+    remote_base_path="${remote_base_path#/}"
+    remote_base_path="${remote_base_path%/}"
+
+    _build_rclone_config_arg || {
+        log_error "Cannot list remote backups: no valid rclone config found."
+        log_error "Set RCLONE_CONFIG in .env or run: rclone config"
+        return 1
+    }
+
+    local global_index=0
+    local any_found=false
+    local types=("db" "full" "emergency")
+
+    for t in "${types[@]}"; do
+        local remote_dir="${remote_name}:${remote_base_path}/${t}"
+        local -a type_files=()
+
+        # rclone lsf outputs one filename per line (no path prefix).
+        # --include '*.age' filters to encrypted backup files only.
+        while IFS= read -r fname; do
+            [[ -z "$fname" || "$fname" != *.age ]] && continue
+            type_files+=("${remote_dir}/${fname}")
+        done < <(
+            rclone lsf "${RCLONE_CONFIG_ARG[@]}" \
+                --include "*.age" \
+                --files-only \
+                "$remote_dir" 2>/dev/null \
+            | sort -r
+        )
+
+        [[ ${#type_files[@]} -eq 0 ]] && continue
+        any_found=true
+
+        echo ""
+        printf '  ── %s backups (remote) ──\n' "${t^^}"
+
+        for remote_file in "${type_files[@]}"; do
+            (( global_index++ ))
+            _REMOTE_FILES+=("$remote_file")
+            _REMOTE_TYPES+=("$t")
+
+            # rclone lsl gives size + date; parse for display.
+            local size_str="?"
+            local date_str="unknown"
+            local lsl_line
+            lsl_line=$(
+                rclone lsl "${RCLONE_CONFIG_ARG[@]}" "$remote_file" 2>/dev/null | head -1 || true
+            )
+            if [[ -n "$lsl_line" ]]; then
+                # Format: "  <bytes> <YYYY-MM-DD> <HH:MM:SS.nnn> <filename>"
+                local raw_bytes raw_date raw_time
+                read -r raw_bytes raw_date raw_time _ <<< "$lsl_line" || true
+                if [[ "$raw_bytes" =~ ^[0-9]+$ ]]; then
+                    # Convert bytes to human-readable
+                    if   (( raw_bytes >= 1073741824 )); then
+                        size_str="$(( raw_bytes / 1073741824 ))G"
+                    elif (( raw_bytes >= 1048576 )); then
+                        size_str="$(( raw_bytes / 1048576 ))M"
+                    elif (( raw_bytes >= 1024 )); then
+                        size_str="$(( raw_bytes / 1024 ))K"
+                    else
+                        size_str="${raw_bytes}B"
+                    fi
+                fi
+                [[ -n "$raw_date" && -n "$raw_time" ]] && date_str="${raw_date} ${raw_time:0:8}"
+            fi
+
+            printf '  [%3d]  %-10s  %6s  %s  %s\n' \
+                "$global_index" \
+                "($t)" \
+                "$size_str" \
+                "$date_str" \
+                "$(basename "$remote_file")"
+        done
+    done
+
+    echo ""
+
+    if [[ "$any_found" == "false" ]]; then
+        log_warn "No remote backup files found under ${remote_name}:${remote_base_path}/"
+        log_warn "Remote checked: ${remote_name}:${remote_base_path}/{db,full,emergency}/"
+        return 1
+    fi
+
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# pull_remote_backup
+#
+# Downloads the chosen remote .age file plus its .sha256 and .meta sidecars
+# into a secure temp directory ($TMPDIR_RESTORE/remote_pull/).
+# Sets BACKUP_FILE to the local path of the downloaded file.
+#
+# Args: $1 = remote file path  (e.g. remote:BW-Backup/db/db_backup_....age)
+#       $2 = backup type       (db | full | emergency)
+# ---------------------------------------------------------------------------
+pull_remote_backup() {
+    local remote_file="$1"
+    local btype="$2"
+
+    log_info "Downloading remote backup: $(basename "$remote_file") ..."
+
+    local pull_dir="$TMPDIR_RESTORE/remote_pull"
+    mkdir -p "$pull_dir"
+    chmod 700 "$pull_dir"
+
+    # Download the primary .age file
+    if ! rclone copy "${RCLONE_CONFIG_ARG[@]}" \
+            "$remote_file" "$pull_dir/" \
+            --checksum 2>&1; then
+        log_error "Failed to download backup from remote: $remote_file"
+        return 1
+    fi
+
+    local local_file="$pull_dir/$(basename "$remote_file")"
+    [[ -s "$local_file" ]] || {
+        log_error "Downloaded file is empty or missing: $local_file"
+        return 1
+    }
+
+    # Download sidecars (non-fatal — may not exist for older backups)
+    rclone copy "${RCLONE_CONFIG_ARG[@]}" \
+        "${remote_file}.sha256" "$pull_dir/" --checksum 2>/dev/null || true
+    rclone copy "${RCLONE_CONFIG_ARG[@]}" \
+        "${remote_file}.meta"   "$pull_dir/" --checksum 2>/dev/null || true
+
+    # Restrict permissions on all pulled files
+    chmod 600 "$pull_dir"/*.age   2>/dev/null || true
+    chmod 600 "$pull_dir"/*.sha256 2>/dev/null || true
+    chmod 600 "$pull_dir"/*.meta  2>/dev/null || true
+
+    local pulled_size
+    pulled_size=$(stat -c%s "$local_file" 2>/dev/null || stat -f%z "$local_file" 2>/dev/null || echo 0)
+    log_info "Downloaded $(basename "$local_file") ($(( pulled_size / 1024 )) KiB)"
+
+    BACKUP_FILE="$local_file"
+    RESTORE_TYPE="$btype"
+
+    echo ""
+    log_info "Remote backup pulled to local staging:"
+    log_info "  File: $(basename "$BACKUP_FILE")"
+    log_info "  Type: $RESTORE_TYPE"
+    log_info "  Path: $BACKUP_FILE"
+    echo ""
+}
+
+# ---------------------------------------------------------------------------
+# select_backup_source
+#
+# When neither --file nor --latest is given, asks the user whether to restore
+# from LOCAL backups or REMOTE backups (if rclone is configured and working).
+# Falls back to the local menu if rclone is not available.
+# ---------------------------------------------------------------------------
+select_backup_source() {
+    # If --remote was passed explicitly, skip the menu and go straight to remote.
+    if [[ "$USE_REMOTE" == "true" ]]; then
+        _select_remote_backup
+        return $?
+    fi
+
+    # If rclone is not available, silently fall through to local.
+    if ! _rclone_is_available; then
+        log_info "No backup specified — listing available local backups:"
+        select_backup_interactive
+        return $?
+    fi
+
+    # Both local and remote are available — ask the user.
+    echo ""
+    log_info "Where would you like to restore from?"
+    printf '  [1]  LOCAL  — backups on this server (%s/backups/)\n' "$PROJECT_ROOT"
+
+    local remote_name remote_base_path
+    remote_name="$(get_config_value "RCLONE_REMOTE_NAME" "")"
+    remote_base_path="$(get_config_value "RCLONE_REMOTE_PATH" "vaultwarden_backups")"
+    remote_base_path="${remote_base_path#/}"; remote_base_path="${remote_base_path%/}"
+    printf '  [2]  REMOTE — %s:%s/\n' "$remote_name" "$remote_base_path"
+    echo ""
+
+    local source_choice
+    while true; do
+        read -r -p "  Enter 1 (local) or 2 (remote), or q to quit: " source_choice
+        case "$source_choice" in
+            1) break ;;
+            2) break ;;
+            q|Q) log_info "Restore cancelled."; exit 0 ;;
+            *) log_error "Invalid choice — enter 1, 2, or q." ;;
+        esac
+    done
+
+    echo ""
+
+    if [[ "$source_choice" == "1" ]]; then
+        select_backup_interactive
+    else
+        _select_remote_backup
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# _select_remote_backup  (internal)
+#
+# Lists remote backups, prompts the user to pick one, then downloads it.
+# ---------------------------------------------------------------------------
+_select_remote_backup() {
+    log_info "Listing remote backups:"
+
+    # Ensure config arg is populated before listing
+    if ! _build_rclone_config_arg; then
+        log_error "Cannot access remote backups: no valid rclone config found."
+        log_error "Options:"
+        log_error "  1. Set RCLONE_CONFIG=/path/to/rclone.conf in .env"
+        log_error "  2. Copy config to /etc/rclone/rclone.conf (system-wide)"
+        log_error "  3. Run: rclone config (as the user who will run restore.sh)"
+        return 1
+    fi
+
+    list_remote_backups || return 1
+
+    local total="${#_REMOTE_FILES[@]}"
+
+    local choice
+    while true; do
+        read -r -p "  Enter number to restore (1-${total}), or q to quit: " choice
+
+        [[ "$choice" == "q" || "$choice" == "Q" ]] && {
+            log_info "Restore cancelled."
+            exit 0
+        }
+
+        if ! [[ "$choice" =~ ^[0-9]+$ ]]; then
+            log_error "Invalid input '${choice}': please enter a number between 1 and ${total}."
+            continue
+        fi
+        if (( choice < 1 || choice > total )); then
+            log_error "Out of range: please enter a number between 1 and ${total}."
+            continue
+        fi
+        break
+    done
+
+    local selected_remote="${_REMOTE_FILES[$(( choice - 1 ))]}"
+    local selected_type="${_REMOTE_TYPES[$(( choice - 1 ))]}"
+
+    pull_remote_backup "$selected_remote" "$selected_type"
+}
+
+# ---------------------------------------------------------------------------
 # resolve_backup_file
 #
 # Priority:
 #   1. --latest flag           → automatic selection (unchanged)
 #   2. --file FILE             → direct path (unchanged)
-#   3. (neither)               → interactive numbered menu (NEW)
+#   3. (neither)               → select_backup_source() (local OR remote menu)
 # ---------------------------------------------------------------------------
 resolve_backup_file() {
     if [[ "$USE_LATEST" == "true" ]]; then
@@ -335,11 +753,8 @@ resolve_backup_file() {
         return 0
     fi
 
-    # -----------------------------------------------------------------------
-    # Neither --file nor --latest was supplied: present interactive menu.
-    # This is the normal human-operator path.
-    # -----------------------------------------------------------------------
-    select_backup_interactive || return 1
+    # Neither --file nor --latest: present local/remote source menu.
+    select_backup_source || return 1
     return 0
 }
 
@@ -737,7 +1152,7 @@ main() {
         exit 1
     fi
 
-    local RESTORE_LOCK_FILE="/var/lock/vaultwarden-restore.lock"
+    local RESTORE_LOCK_FILE="/run/lock/vaultwarden-restore.lock"
     local RESTORE_LOCK_FD=203
     eval "exec ${RESTORE_LOCK_FD}>\"$RESTORE_LOCK_FILE\""
     if ! flock -n $RESTORE_LOCK_FD; then
@@ -749,10 +1164,14 @@ main() {
 
     load_env_file || { log_error "Failed to load .env"; exit 1; }
 
-    local STATE_DIR="$(get_config_value    "PROJECT_STATE_DIR"   "/var/lib/vaultwarden")"
-    local AGE_KEY_FILE="$(get_config_value "SOPS_AGE_KEY_FILE"   "secrets/keys/age-key.txt")"
-    local PUID="$(get_config_value "PUID" "")"
-    local PGID="$(get_config_value "PGID" "")"
+    local STATE_DIR
+    STATE_DIR="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
+    local AGE_KEY_FILE
+    AGE_KEY_FILE="$(get_config_value "SOPS_AGE_KEY_FILE" "secrets/keys/age-key.txt")"
+    local PUID
+    PUID="$(get_config_value "PUID" "")"
+    local PGID
+    PGID="$(get_config_value "PGID" "")"
 
     if [[ -z "$PUID" || -z "$PGID" ]]; then
         log_error "PUID and PGID must be set in .env before restoring."
@@ -763,6 +1182,18 @@ main() {
     fi
 
     [[ -f "$AGE_KEY_FILE" ]] || { log_error "Age key not found: $AGE_KEY_FILE"; exit 1; }
+
+    # Create the secure temp dir early so pull_remote_backup() can use it.
+    local old_umask
+    old_umask=$(umask)
+    umask 077
+    local tmp_parent
+    tmp_parent="$(dirname "$STATE_DIR")"
+    TMPDIR_RESTORE="$(mktemp -d -p "$tmp_parent" vw_restore.XXXXXXXXXX)" || {
+        log_error "Failed to create secure temporary directory"
+        exit 1
+    }
+    umask "$old_umask"
 
     resolve_backup_file || exit 1
     [[ -f "$BACKUP_FILE" ]] || { log_error "Backup file not found: $BACKUP_FILE"; exit 1; }
@@ -829,17 +1260,6 @@ main() {
         read -r -p "Type 'yes' to proceed: " confirm
         [[ "$confirm" == "yes" ]] || { log_info "Restore cancelled."; exit 0; }
     fi
-
-    local old_umask
-    old_umask=$(umask)
-    umask 077
-    local tmp_parent
-    tmp_parent="$(dirname "$STATE_DIR")"
-    TMPDIR_RESTORE="$(mktemp -d -p "$tmp_parent" vw_restore.XXXXXXXXXX)" || {
-        log_error "Failed to create secure temporary directory"
-        exit 1
-    }
-    umask "$old_umask"
 
     create_pre_restore_snapshot || exit 1
 
