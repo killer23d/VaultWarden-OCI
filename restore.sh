@@ -15,9 +15,10 @@ VW_OPERATIONS_LOCK="${VW_LOCK_DIR}/operations.lock"
 
 source "lib/common.sh"
 init_common_lib "$0"
-source "lib/docker.sh"       2>/dev/null || true
-source "lib/backup_utils.sh" 2>/dev/null || true
-source "lib/crypto.sh"       2>/dev/null || true
+source "lib/docker.sh"                  2>/dev/null || true
+source "lib/backup_utils.sh"            2>/dev/null || true
+source "lib/crypto.sh"                  2>/dev/null || true
+source "lib/simple_key_resilience.sh"   2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -504,6 +505,10 @@ resolve_backup_file() {
 #
 # Sets global AGE_KEY_FILE to the path of the resolved key file.
 # Returns 0 on success, 1 on validation failure.
+#
+# Validation is delegated to simple_verify_age_key() from
+# lib/simple_key_resilience.sh, which performs permissions + ownership +
+# crypto roundtrip checks and honours the full _resolve_age_key() chain.
 # ---------------------------------------------------------------------------
 _prompt_age_key() {
     local configured_key="$1"  # the key currently in .env (fallback)
@@ -524,7 +529,10 @@ _prompt_age_key() {
         [[ -f "$supplied_path" ]] || {
             log_error "Supplied age key file not found: $supplied_path"; return 1
         }
-        if ! _validate_age_key_file "$supplied_path"; then
+        # simple_verify_age_key() accepts an explicit path argument;
+        # passing SOPS_AGE_KEY_FILE overrides _resolve_age_key() internals
+        # so the supplied path is used directly without precedence games.
+        if ! SOPS_AGE_KEY_FILE="$supplied_path" simple_verify_age_key; then
             log_error "Supplied age key failed validation: $supplied_path"
             return 1
         fi
@@ -600,7 +608,8 @@ _prompt_age_key() {
     printf '%s\n' "$key_input" > "$staged_key_file"
     chmod 600 "$staged_key_file"
 
-    if ! _validate_age_key_file "$staged_key_file"; then
+    # Validate via simple_verify_age_key() (permissions + roundtrip)
+    if ! SOPS_AGE_KEY_FILE="$staged_key_file" simple_verify_age_key; then
         rm -f "$staged_key_file"
         log_error "Age key validation failed — wrong key or corrupted input."
         log_error "Ensure you pasted the complete AGE-SECRET-KEY-1... line."
@@ -609,70 +618,6 @@ _prompt_age_key() {
 
     AGE_KEY_FILE="$staged_key_file"
     log_success "Age key accepted and staged for decryption."
-    return 0
-}
-
-# ---------------------------------------------------------------------------
-# _validate_age_key_file  KEY_FILE
-#
-# Validates that KEY_FILE contains a usable age private key by:
-#   1. Checking the AGE-SECRET-KEY-1 prefix exists in the file.
-#   2. Performing a live encrypt/decrypt round-trip with age.
-#
-# Returns 0 if valid, 1 otherwise.
-# Deliberately does NOT call check_age_key() from lib/crypto.sh because that
-# function also checks permissions (600) — a freshly staged temp file may
-# satisfy that, but a user-supplied file on a different filesystem may not.
-# We do our own targeted validation here.
-# ---------------------------------------------------------------------------
-_validate_age_key_file() {
-    local key_file="$1"
-
-    [[ -f "$key_file" ]] || { log_error "Age key file not found: $key_file"; return 1; }
-
-    # Check for private key line
-    grep -qm1 '^AGE-SECRET-KEY-1' "$key_file" 2>/dev/null || {
-        log_error "File does not contain an AGE-SECRET-KEY-1 private key line: $key_file"
-        return 1
-    }
-
-    # Derive public key — needed for the encrypt half of the round-trip
-    local pub_key
-    pub_key=$(age-keygen -y "$key_file" 2>/dev/null) || {
-        # age-keygen -y requires a well-formed file; a bare private-key line
-        # file still works because age itself accepts it for decryption.
-        # Fall back: try encryption with a dummy recipient if -y fails.
-        # Actually try a direct decrypt probe instead.
-        local tmp_probe; tmp_probe=$(mktemp) || return 1
-        chmod 600 "$tmp_probe"
-        # Encrypt a known plaintext with the configured key's public key,
-        # then try to decrypt with the supplied key.
-        local test_pt="vaultwarden-restore-probe-$$"
-        local configured_pub
-        configured_pub=$(age-keygen -y "$1" 2>/dev/null) || {
-            rm -f "$tmp_probe"
-            # Cannot derive public key at all — do a simpler existence check
-            log_warn "_validate_age_key_file: age-keygen -y failed; skipping round-trip (key format may be non-standard)"
-            return 0
-        }
-        printf '%s' "$test_pt" | age -r "$configured_pub" -o "$tmp_probe" 2>/dev/null || { rm -f "$tmp_probe"; return 1; }
-        local dec; dec=$(age -d -i "$key_file" "$tmp_probe" 2>/dev/null) || { rm -f "$tmp_probe"; return 1; }
-        rm -f "$tmp_probe"
-        [[ "$dec" == "$test_pt" ]] || return 1
-        return 0
-    }
-
-    # age-keygen -y succeeded — do a proper round-trip
-    local tmp_enc; tmp_enc=$(mktemp) || return 1
-    chmod 600 "$tmp_enc"
-    local test_pt="vaultwarden-restore-probe-$$"
-    local ok=false
-    if printf '%s' "$test_pt" | age -r "$pub_key" -o "$tmp_enc" 2>/dev/null; then
-        local dec; dec=$(age -d -i "$key_file" "$tmp_enc" 2>/dev/null) || true
-        [[ "$dec" == "$test_pt" ]] && ok=true
-    fi
-    rm -f "$tmp_enc"
-    [[ "$ok" == "true" ]] || { log_error "Age key round-trip failed — key may be wrong or corrupted."; return 1; }
     return 0
 }
 
@@ -726,8 +671,11 @@ _rotate_age_key() {
     fi
     chmod 600 "$new_key_tmp"
 
-    # Validate the new key before installing anywhere
-    if ! _validate_age_key_file "$new_key_tmp"; then
+    # Validate the new key before installing anywhere.
+    # simple_verify_age_key() performs permissions + ownership +
+    # crypto roundtrip; SOPS_AGE_KEY_FILE is set inline so it resolves
+    # to the temp path directly without running _resolve_age_key().
+    if ! SOPS_AGE_KEY_FILE="$new_key_tmp" simple_verify_age_key; then
         log_error "Newly generated key failed validation — aborting key rotation."
         return 1
     fi
