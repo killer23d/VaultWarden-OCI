@@ -1,0 +1,126 @@
+# =============================================================================
+# VaultWarden-OCI .gitignore
+# =============================================================================
+# SECURITY: This file prevents accidental commits of secrets, keys, and
+# local runtime configuration. Never remove these entries.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Live environment & secrets — NEVER commit these
+# ---------------------------------------------------------------------------
+.env
+secrets/
+!secrets/.gitkeep
+
+# Age encryption keys — anywhere in the tree
+*.age
+age-key.txt
+age-key.txt.pre-rotate-*
+
+# SOPS encrypted files that are generated at runtime (not templates)
+secrets.yaml
+secrets.yaml.bak
+
+# ---------------------------------------------------------------------------
+# Local Docker Compose overrides — generated from *.example templates
+# ---------------------------------------------------------------------------
+docker-compose.yml
+docker-compose.override.yml
+
+# ---------------------------------------------------------------------------
+# Backup archives — can be very large and contain sensitive data
+# ---------------------------------------------------------------------------
+backups/
+!backups/.gitkeep
+
+# ---------------------------------------------------------------------------
+# Log directories
+# ---------------------------------------------------------------------------
+logs/
+*.log
+*.log.*
+
+# ---------------------------------------------------------------------------
+# Runtime state directories
+# ---------------------------------------------------------------------------
+data/
+caddy/data/
+caddy/config/
+
+# Temporary restore / backup working directories
+.restore-tmp*/
+.backup-tmp*/
+
+# ---------------------------------------------------------------------------
+# OS & editor noise
+# ---------------------------------------------------------------------------
+
+# macOS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# Linux
+*~
+.nfs*
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Vim / Neovim
+*.swp
+*.swo
+*.swn
+[._]*.s[a-v][a-z]
+[._]*.sw[a-p]
+Session.vim
+.netrwhist
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# JetBrains IDEs
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# Emacs
+\#*\#
+.\#*
+
+# ---------------------------------------------------------------------------
+# Python (if any tooling scripts are added)
+# ---------------------------------------------------------------------------
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# ---------------------------------------------------------------------------
+# Testing artefacts
+# ---------------------------------------------------------------------------
+.coverage
+htmlcov/
+.pytest_cache/
+*.test.log
+
+# ---------------------------------------------------------------------------
+# Miscellaneous temporary files
+# ---------------------------------------------------------------------------
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
