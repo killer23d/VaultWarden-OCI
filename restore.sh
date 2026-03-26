@@ -27,6 +27,7 @@ BACKUP_FILE=""
 RESTORE_TYPE=""
 USE_LATEST=false
 LIST_ONLY=false
+LIST_REMOTE=false
 DRY_RUN=false
 FORCE=false
 NO_PRE_BACKUP=false
@@ -57,6 +58,7 @@ USAGE:
 
 OPTIONS:
     --list                  List available local backups and exit (no root required)
+    --list --remote         List available remote backups and exit (no root required)
     --file FILE             Restore a specific backup file (.age)
     --type TYPE             db | full | emergency (helps resolve --latest)
     --latest                Use newest local backup (optionally filtered by --type)
@@ -79,6 +81,7 @@ EXAMPLES:
     sudo ./restore.sh                                   # interactive (local or remote)
     sudo ./restore.sh --remote                          # interactive (remote only)
     ./restore.sh --list                                 # list local backups (no root)
+    ./restore.sh --list --remote                        # list remote backups (no root)
     sudo ./restore.sh --latest --type db --force
     sudo ./restore.sh --file backups/full/full_backup_20260101_120000.tar.zst.age
     sudo ./restore.sh --key-file /tmp/old-age-key.txt   # supply key non-interactively
@@ -102,6 +105,9 @@ while [[ $# -gt 0 ]]; do
         *)                    log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done
+
+# --list --remote combination
+[[ "$LIST_ONLY" == "true" && "$USE_REMOTE" == "true" ]] && LIST_REMOTE=true
 
 TMPDIR_RESTORE=""
 cleanup() { [[ -n "$TMPDIR_RESTORE" ]] && rm -rf "$TMPDIR_RESTORE" 2>/dev/null || true; }
@@ -141,7 +147,8 @@ _validate_rclone_config_path() {
     canonical=$(realpath -e "$cfg_path" 2>/dev/null) || {
         log_error "rclone config path does not exist: $cfg_path" >&2; return 1
     }
-    local -a sensitive_prefixes=("/etc/passwd" "/etc/shadow" "/etc/sudoers" "/etc/ssh" "/root" "/proc" "/sys")
+    # Block clearly sensitive paths; /root/.config/rclone/rclone.conf is legitimate
+    local -a sensitive_prefixes=("/etc/passwd" "/etc/shadow" "/etc/sudoers" "/etc/ssh" "/root/.ssh" "/proc" "/sys")
     for prefix in "${sensitive_prefixes[@]}"; do
         [[ "$canonical" == "$prefix" || "$canonical" == "$prefix/"* ]] && {
             log_error "rclone config resolves to sensitive path: $canonical" >&2; return 1
@@ -168,12 +175,42 @@ _build_rclone_config_arg() {
     return 1
 }
 
+# ---------------------------------------------------------------------------
+# _rclone_is_available
+# Returns 0 if rclone + remote name + config are all present and valid.
+# Sets RCLONE_UNAVAIL_REASON (global) with a human-readable explanation
+# whenever it returns 1, so callers can surface a useful message.
+# ---------------------------------------------------------------------------
+RCLONE_UNAVAIL_REASON=""
 _rclone_is_available() {
-    command -v rclone >/dev/null 2>&1 || return 1
-    local remote_name; remote_name="$(get_config_value "RCLONE_REMOTE_NAME" "")"
-    [[ -n "$remote_name" && "$remote_name" != "CHANGE_ME_RCLONE_REMOTE" ]] || return 1
-    _resolve_rclone_config >/dev/null 2>&1 || return 1
+    RCLONE_UNAVAIL_REASON=""
+    if ! command -v rclone >/dev/null 2>&1; then
+        RCLONE_UNAVAIL_REASON="rclone binary not found (install rclone to enable remote backups)"
+        return 1
+    fi
+    local remote_name
+    remote_name="$(get_config_value "RCLONE_REMOTE_NAME" "")"
+    if [[ -z "$remote_name" || "$remote_name" == "CHANGE_ME_RCLONE_REMOTE" ]]; then
+        RCLONE_UNAVAIL_REASON="RCLONE_REMOTE_NAME is not configured in .env (set it to your rclone remote name)"
+        return 1
+    fi
+    if ! _resolve_rclone_config >/dev/null 2>&1; then
+        RCLONE_UNAVAIL_REASON="rclone config file not found — set RCLONE_CONFIG in .env or run: rclone config"
+        return 1
+    fi
     return 0
+}
+
+# ---------------------------------------------------------------------------
+# _rclone_diagnose
+# Emits a single log_warn line explaining why remote is unavailable.
+# Call this whenever _rclone_is_available returns 1 and you want to tell
+# the operator why the remote option is missing from the menu.
+# ---------------------------------------------------------------------------
+_rclone_diagnose() {
+    if [[ -n "$RCLONE_UNAVAIL_REASON" ]]; then
+        log_warn "Remote backups unavailable: $RCLONE_UNAVAIL_REASON"
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -195,17 +232,91 @@ _find_latest_backup() {
 }
 
 list_backups() {
+    # List local backups (always), then remote backups when rclone is available
+    # or when --remote is explicitly requested.
+    local show_remote=false
+    [[ "${1:-}" == "--remote" ]] && show_remote=true
+    _rclone_is_available && show_remote=true
+
+    if [[ "$show_remote" == "false" ]]; then
+        # Local only
+        local types=("db" "full" "emergency")
+        for t in "${types[@]}"; do
+            echo ""
+            log_info "Available ${t} backups:"
+            if [[ -d "$PROJECT_ROOT/backups/$t" ]]; then
+                find "$PROJECT_ROOT/backups/$t" -name "*.age" -type f \
+                    -exec ls -lh {} \; 2>/dev/null | sort -r | head -n 20 || true
+            else
+                echo "  (none)"
+            fi
+        done
+        return 0
+    fi
+
+    # Local section
+    log_info "── LOCAL backups ──"
     local types=("db" "full" "emergency")
     for t in "${types[@]}"; do
         echo ""
-        log_info "Available ${t} backups:"
+        log_info "  Available local ${t} backups:"
         if [[ -d "$PROJECT_ROOT/backups/$t" ]]; then
             find "$PROJECT_ROOT/backups/$t" -name "*.age" -type f \
                 -exec ls -lh {} \; 2>/dev/null | sort -r | head -n 20 || true
         else
-            echo "  (none)"
+            echo "    (none)"
         fi
     done
+
+    # Remote section
+    echo ""
+    if _rclone_is_available; then
+        log_info "── REMOTE backups ──"
+        _build_rclone_config_arg || {
+            log_warn "Could not build rclone config argument — skipping remote listing."
+            return 0
+        }
+        local remote_name; remote_name="$(get_config_value "RCLONE_REMOTE_NAME" "")"
+        local remote_base_path; remote_base_path="$(get_config_value "RCLONE_REMOTE_PATH" "vaultwarden_backups")"
+        remote_base_path="${remote_base_path#/}"; remote_base_path="${remote_base_path%/}"
+        local found_remote=false
+        for t in "${types[@]}"; do
+            local remote_dir="${remote_name}:${remote_base_path}/${t}"
+            local -a type_files=()
+            while IFS= read -r fname; do
+                [[ -z "$fname" || "$fname" != *.age ]] && continue
+                type_files+=("${remote_dir}/${fname}")
+            done < <(
+                rclone lsf "${RCLONE_CONFIG_ARG[@]}" --include "*.age" --files-only \
+                    "$remote_dir" 2>/dev/null | sort -r
+            )
+            [[ ${#type_files[@]} -eq 0 ]] && continue
+            found_remote=true
+            echo ""
+            log_info "  Available remote ${t} backups:"
+            for remote_file in "${type_files[@]}"; do
+                local size_str="?" date_str="unknown"
+                local lsl_line
+                lsl_line=$(rclone lsl "${RCLONE_CONFIG_ARG[@]}" "$remote_file" 2>/dev/null | head -1 || true)
+                if [[ -n "$lsl_line" ]]; then
+                    local raw_bytes raw_date raw_time
+                    read -r raw_bytes raw_date raw_time _ <<< "$lsl_line" || true
+                    if [[ "$raw_bytes" =~ ^[0-9]+$ ]]; then
+                        if   (( raw_bytes >= 1073741824 )); then size_str="$(( raw_bytes / 1073741824 ))G"
+                        elif (( raw_bytes >= 1048576    )); then size_str="$(( raw_bytes / 1048576    ))M"
+                        elif (( raw_bytes >= 1024       )); then size_str="$(( raw_bytes / 1024       ))K"
+                        else size_str="${raw_bytes}B"; fi
+                    fi
+                    [[ -n "$raw_date" && -n "$raw_time" ]] && date_str="${raw_date} ${raw_time:0:8}"
+                fi
+                printf '    %-10s  %6s  %s  %s\n' \
+                    "($t)" "$size_str" "$date_str" "$(basename "$remote_file")"
+            done
+        done
+        [[ "$found_remote" == "false" ]] && log_warn "  No remote backup files found under ${remote_name}:${remote_base_path}/"
+    else
+        _rclone_diagnose
+    fi
 }
 
 _INTERACTIVE_FILES=()
@@ -401,6 +512,8 @@ pull_remote_backup() {
 select_backup_source() {
     if [[ "$USE_REMOTE" == "true" ]]; then _select_remote_backup; return $?; fi
     if ! _rclone_is_available; then
+        # Tell the operator WHY remote is not in the menu.
+        _rclone_diagnose
         log_info "No backup specified — listing available local backups:"
         select_backup_interactive; return $?
     fi
@@ -1081,8 +1194,23 @@ restore_full() {
 main() {
     log_header "VaultWarden-OCI Restore Utility"
 
+    # Load .env unconditionally and early so every code path — including
+    # --list and the rclone availability checks — can read config values
+    # such as RCLONE_REMOTE_NAME and RCLONE_CONFIG.
+    load_env_file 2>/dev/null || true   # best-effort; hard error below if root required
+
     if [[ "$LIST_ONLY" == "true" ]]; then
-        list_backups
+        if [[ "$LIST_REMOTE" == "true" ]]; then
+            # Remote listing: need a valid rclone setup
+            if ! _rclone_is_available; then
+                _rclone_diagnose
+                exit 1
+            fi
+            _build_rclone_config_arg || exit 1
+            list_remote_backups
+        else
+            list_backups
+        fi
         exit 0
     fi
 
@@ -1108,6 +1236,7 @@ main() {
         exit 1
     }
 
+    # Re-load .env strictly now that we are root (surfaces hard errors).
     load_env_file || { log_error "Failed to load .env"; exit 1; }
 
     local STATE_DIR; STATE_DIR="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
