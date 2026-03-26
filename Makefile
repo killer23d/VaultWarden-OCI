@@ -11,8 +11,8 @@
         setup init-secrets edit-secrets test-secrets test-email \
         up down restart start stop status \
         health health-quick health-email \
-        logs logs-tail logs-postfix logs-vaultwarden logs-caddy \
-        backup backup-full backup-emergency list-backups \
+        logs logs-tail logs-postfix logs-vaultwarden logs-caddy logs-fail2ban \
+        backup backup-full backup-emergency list-backups backup-status \
         restore restore-db restore-remote \
         update update-system \
         maintenance maintenance-full update-dns \
@@ -23,7 +23,7 @@
         dev-setup test test-config dry-run \
         db-maint db-backup \
         clean clean-all prune \
-        info shell version watch monitor safe-restart fmt config
+        info shell version watch monitor safe-restart fmt config lint diagnose
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -68,6 +68,9 @@ help: ## Show this help message
 	@echo "  $(YELLOW)make restore$(NC)                     Interactive restore (prompts for key)"
 	@echo "  $(YELLOW)make key-rotate$(NC)                  Rotate the age encryption key"
 	@echo "  $(YELLOW)make timers$(NC)                      Show all vaultwarden systemd timers"
+	@echo "  $(YELLOW)make diagnose$(NC)                    Full diagnostic dump for support/debug"
+	@echo "  $(YELLOW)make backup-status$(NC)               Show backup health summary"
+	@echo "  $(YELLOW)make lint$(NC)                        Shellcheck all scripts"
 
 # ---------------------------------------------------------------------------
 ##@ Setup & Installation
@@ -218,22 +221,110 @@ logs-caddy: ## Tail Caddy reverse-proxy logs
 logs-postfix: ## Tail Postfix email relay logs
 	@$(DOCKER_COMP) logs -f -t --tail=100 postfix
 
-# FIX [P5-M3]: watch passes critical Makefile variables into subprocess env.
+# QOL [item 3]: logs-fail2ban was missing; fail2ban is a first-class service
+# and the first place to check for false-positive IP bans.
+logs-fail2ban: ## Tail Fail2ban intrusion-prevention logs
+	@$(DOCKER_COMP) logs -f -t --tail=100 fail2ban
+
+# FIX [P5-M3] + QOL [item 9]: watch now calls health-quick (port+container probe)
+# instead of the full health.sh run.  Running the comprehensive health stack every
+# 5 s hammers the VaultWarden HTTPS endpoint, SQLite, Docker API, and Fail2ban;
+# health-quick is the right tool for a status-loop context.
 watch: ## Watch service status every 5s (requires watch command)
 	@command -v watch >/dev/null 2>&1 || { echo "$(RED)watch not found. Install: sudo apt install procps$(NC)"; exit 1; }
-	@watch -n 5 'DOCKER_COMP="$(DOCKER_COMP)" COMPOSE_FILE="$(COMPOSE_FILE)" make status && echo && DOCKER_COMP="$(DOCKER_COMP)" COMPOSE_FILE="$(COMPOSE_FILE)" make health'
+	@watch -n 5 'DOCKER_COMP="$(DOCKER_COMP)" COMPOSE_FILE="$(COMPOSE_FILE)" make status && echo && DOCKER_COMP="$(DOCKER_COMP)" COMPOSE_FILE="$(COMPOSE_FILE)" make health-quick'
 
 monitor: ## Monitor all service logs in real-time (Ctrl+C to stop)
 	@echo "$(BLUE)Monitoring all services (Ctrl+C to stop)...$(NC)"
 	@$(DOCKER_COMP) logs -f -t
 
+# QOL [item 2]: Single command that dumps everything needed for a support/debug
+# session: version, compose validity, age key, disk, last backup, containers,
+# and the last 20 lines from each service.  Does not require any flags.
+diagnose: ## Full diagnostic dump — versions, key status, disk, containers, last backup, recent logs
+	@echo "$(BLUE)╔══════════════════════════════════════════════════════════╗$(NC)"
+	@echo "$(BLUE)║         VaultWarden-OCI — Diagnostic Report             ║$(NC)"
+	@echo "$(BLUE)╚══════════════════════════════════════════════════════════╝$(NC)"
+	@echo ""
+	@echo "$(CYAN)── Stack Version ─────────────────────────────────────────$(NC)"
+	@echo "  Repo version : $$(cat VERSION 2>/dev/null || echo 'unknown')"
+	@echo "  Docker       : $$(docker --version 2>/dev/null || echo 'not available')"
+	@echo "  Compose      : $$($(DOCKER_COMP) version --short 2>/dev/null || echo 'not available')"
+	@echo ""
+	@echo "$(CYAN)── Configuration ─────────────────────────────────────────$(NC)"
+	@echo "  Domain       : $$(grep '^DOMAIN=' .env 2>/dev/null | cut -d= -f2 || echo 'not configured')"
+	@echo "  Admin email  : $$(grep '^ADMIN_EMAIL=' .env 2>/dev/null | cut -d= -f2 || echo 'not configured')"
+	@echo "  State dir    : $$(grep '^PROJECT_STATE_DIR=' .env 2>/dev/null | cut -d= -f2 || echo '/var/lib/vaultwarden')"
+	@echo ""
+	@echo "$(CYAN)── Compose Config Validity ───────────────────────────────$(NC)"
+	@$(DOCKER_COMP) config > /dev/null 2>&1 && echo "  $(GREEN)✓ docker-compose.yml is valid$(NC)" || echo "  $(RED)✗ docker-compose.yml is INVALID$(NC)"
+	@if [ -f "docker-compose.override.yml" ]; then \
+		$(DOCKER_COMP) -f docker-compose.yml -f docker-compose.override.yml config > /dev/null 2>&1 && \
+		echo "  $(GREEN)✓ docker-compose.override.yml is valid$(NC)" || \
+		echo "  $(RED)✗ docker-compose.override.yml is INVALID$(NC)"; \
+	fi
+	@echo ""
+	@echo "$(CYAN)── Age Key ────────────────────────────────────────────────$(NC)"
+	@KEY_FILE=$$(grep '^SOPS_AGE_KEY_FILE=' .env 2>/dev/null | cut -d= -f2); \
+	KEY_FILE=$${KEY_FILE:-secrets/keys/age-key.txt}; \
+	echo "  Path   : $$KEY_FILE"; \
+	if [ -f "$$KEY_FILE" ]; then \
+		echo "  Status : $(GREEN)present$(NC)  perms: $$(stat -c '%a' "$$KEY_FILE" 2>/dev/null || stat -f '%A' "$$KEY_FILE" 2>/dev/null)"; \
+		PUB=$$(grep '# public key:' "$$KEY_FILE" 2>/dev/null | awk '{print $$NF}'); \
+		[ -n "$$PUB" ] && echo "  Public : $$PUB" || echo "  Public : $(YELLOW)(not found in key file)$(NC)"; \
+	else \
+		echo "  Status : $(RED)MISSING — backups will fail$(NC)"; \
+	fi
+	@echo ""
+	@echo "$(CYAN)── Disk Usage ─────────────────────────────────────────────$(NC)"
+	@STATE_DIR=$$(grep '^PROJECT_STATE_DIR=' .env 2>/dev/null | cut -d= -f2 || echo '/var/lib/vaultwarden'); \
+	df -h "$$STATE_DIR" 2>/dev/null | tail -1 || echo "  State directory not found"
+	@BACKUP_DIR=$$(grep '^BACKUP_DIR=' .env 2>/dev/null | cut -d= -f2 || echo 'backups'); \
+	if [ -d "$$BACKUP_DIR" ]; then \
+		echo "  Backup dir ($$BACKUP_DIR): $$(du -sh "$$BACKUP_DIR" 2>/dev/null | cut -f1)"; \
+	else \
+		echo "  Backup dir $$BACKUP_DIR: not found"; \
+	fi
+	@echo ""
+	@echo "$(CYAN)── Last Backup Per Type ───────────────────────────────────$(NC)"
+	@BACKUP_DIR=$$(grep '^BACKUP_DIR=' .env 2>/dev/null | cut -d= -f2 || echo 'backups'); \
+	for TYPE in db full emergency; do \
+		LAST=$$(ls -t "$$BACKUP_DIR/$${TYPE}/"*.age 2>/dev/null | head -1); \
+		if [ -n "$$LAST" ]; then \
+			echo "  $$TYPE : $$(basename $$LAST)"; \
+		else \
+			echo "  $$TYPE : $(YELLOW)none found$(NC)"; \
+		fi; \
+	done
+	@echo ""
+	@echo "$(CYAN)── Container State ────────────────────────────────────────$(NC)"
+	@$(DOCKER_COMP) ps --format "table {{.Service}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null || echo "  $(RED)Services not running$(NC)"
+	@echo ""
+	@echo "$(CYAN)── Recent Logs (last 20 lines per service) ────────────────$(NC)"
+	@for SVC in vaultwarden caddy fail2ban postfix; do \
+		echo ""; \
+		echo "$(YELLOW)--- $$SVC ---$(NC)"; \
+		$(DOCKER_COMP) logs --tail=20 --no-log-prefix $$SVC 2>/dev/null || echo "  (not running or no logs)"; \
+	done
+	@echo ""
+	@echo "$(CYAN)── Systemd Timers ─────────────────────────────────────────$(NC)"
+	@systemctl list-timers --all 2>/dev/null | grep -E '(NEXT|vaultwarden)' || echo "  No vaultwarden timers found"
+	@echo ""
+	@echo "$(GREEN)Diagnostic complete. Paste the above output when filing a support request.$(NC)"
+
 # ---------------------------------------------------------------------------
 ##@ Backup & Restore
 # ---------------------------------------------------------------------------
 
-# FIX [P5-M4]: backup always passes --email so systemd timer invocations send notifications.
+# QOL [item 5]: backup now emits a visible notice when TYPE defaults to 'db'
+# so an operator who forgot TYPE=full gets clear feedback rather than silent
+# partial coverage.
 backup: ## Create backup (TYPE: db, full, emergency)
 	@echo "$(BLUE)Creating backup...$(NC)"
+	@if [ -z "$(TYPE)" ]; then \
+		echo "$(YELLOW)No TYPE specified — defaulting to TYPE=db (database only).$(NC)"; \
+		echo "$(YELLOW)Use 'make backup TYPE=full' or 'make backup TYPE=emergency' for broader coverage.$(NC)"; \
+	fi
 	@./backup.sh --type $(if $(TYPE),$(TYPE),db) --email
 	@echo "$(GREEN)Backup completed successfully!$(NC)"
 
@@ -246,6 +337,36 @@ backup-emergency: ## Create emergency recovery kit with email notification
 list-backups: ## List available backups with per-type size totals
 	@echo "$(BLUE)Available backups:$(NC)"
 	@./backup.sh --list
+
+# QOL [item 14]: backup-status provides a richer summary: last backup time per
+# type, total backup dir size, retention window, and number of archives retained.
+backup-status: ## Show backup health summary — last run, size, retention, count per type
+	@echo "$(BLUE)╔══════════════════════════════════════════════════════════╗$(NC)"
+	@echo "$(BLUE)║             Backup Status Summary                       ║$(NC)"
+	@echo "$(BLUE)╚══════════════════════════════════════════════════════════╝$(NC)"
+	@echo ""
+	@BACKUP_DIR=$$(grep '^BACKUP_DIR=' .env 2>/dev/null | cut -d= -f2 || echo 'backups'); \
+	RETENTION=$$(grep '^BACKUP_RETENTION_DAYS=' .env 2>/dev/null | cut -d= -f2 || echo '14'); \
+	echo "  Backup directory : $$BACKUP_DIR"; \
+	echo "  Retention window : $$RETENTION days"; \
+	TOTAL=$$(du -sh "$$BACKUP_DIR" 2>/dev/null | cut -f1 || echo 'n/a'); \
+	echo "  Total size       : $$TOTAL"; \
+	echo ""; \
+	echo "$(CYAN)  Type        Last Backup                         Count$(NC)"; \
+	echo "  ──────────────────────────────────────────────────────"; \
+	for TYPE in db full emergency; do \
+		DIR="$$BACKUP_DIR/$$TYPE"; \
+		COUNT=$$(ls "$$DIR/"*.age 2>/dev/null | wc -l | tr -d ' '); \
+		LAST=$$(ls -t "$$DIR/"*.age 2>/dev/null | head -1); \
+		if [ -n "$$LAST" ]; then \
+			LAST_NAME=$$(basename "$$LAST"); \
+			echo "  $$(printf '%-11s' $$TYPE) $$LAST_NAME   $$COUNT"; \
+		else \
+			echo "  $$(printf '%-11s' $$TYPE) $(YELLOW)none$(NC)                                       0"; \
+		fi; \
+	done
+	@echo ""
+	@echo "$(GREEN)Run 'make list-backups' for full listing or 'make diagnose' for complete system state.$(NC)"
 
 restore: ## Interactive restore — prompts for backup selection and age key
 	@echo "$(BLUE)Starting interactive restore...$(NC)"
@@ -367,9 +488,17 @@ systemd-validate: ## Validate installed systemd units match current repo scripts
 	@echo "$(BLUE)Validating systemd unit/script checksums...$(NC)"
 	@sudo ./setup-systemd.sh --validate
 
-timers: ## List all vaultwarden systemd timers (next trigger + last run)
+# QOL [item 15]: timers now also shows the OnCalendar schedule from .env
+# so there is a single view of "configured schedule / next trigger / last run".
+timers: ## List all vaultwarden systemd timers (next trigger + last run + .env schedule)
+	@echo "$(BLUE)Systemd Timer Status:$(NC)"
 	@systemctl list-timers --all 2>/dev/null | grep -E '(NEXT|vaultwarden)' || \
 		echo "$(YELLOW)No vaultwarden timers found. Run: sudo make systemd-install$(NC)"
+	@echo ""
+	@echo "$(CYAN)Configured schedules in .env:$(NC)"
+	@grep -E '^BACKUP_SCHEDULE' .env 2>/dev/null | while IFS= read -r line; do \
+		echo "  $$line"; \
+	done || echo "  $(YELLOW)No BACKUP_SCHEDULE_* variables found in .env$(NC)"
 
 # ---------------------------------------------------------------------------
 ##@ Security
@@ -445,6 +574,33 @@ fmt: ## Validate all configuration files (compose + secrets)
 	fi
 	@./edit-secrets.sh --list > /dev/null && echo "$(GREEN)✓ secrets.yaml$(NC)" || echo "$(RED)✗ secrets.yaml$(NC)"
 
+# QOL [item 12]: lint runs shellcheck over all *.sh files in the repo root and
+# lib/ so regressions (unquoted variables, SC2086, wrong shell directives) are
+# caught before commit.  Gracefully skips if shellcheck is not installed and
+# prints the install command.
+lint: ## Run shellcheck over all shell scripts (install: sudo apt install shellcheck)
+	@echo "$(BLUE)Linting shell scripts with shellcheck...$(NC)"
+	@if ! command -v shellcheck >/dev/null 2>&1; then \
+		echo "$(YELLOW)shellcheck not installed. Install with: sudo apt install shellcheck$(NC)"; \
+		exit 0; \
+	fi
+	@FAILED=0; \
+	for f in *.sh lib/*.sh; do \
+		[ -f "$$f" ] || continue; \
+		if shellcheck -S warning "$$f"; then \
+			echo "  $(GREEN)✓ $$f$(NC)"; \
+		else \
+			echo "  $(RED)✗ $$f$(NC)"; \
+			FAILED=$$((FAILED + 1)); \
+		fi; \
+	done; \
+	if [ "$$FAILED" -gt 0 ]; then \
+		echo "$(RED)$$FAILED script(s) failed shellcheck$(NC)"; \
+		exit 1; \
+	else \
+		echo "$(GREEN)All scripts passed shellcheck$(NC)"; \
+	fi
+
 # ---------------------------------------------------------------------------
 ##@ Cleanup
 # ---------------------------------------------------------------------------
@@ -476,10 +632,12 @@ prune: ## Remove unused Docker resources (images, networks, build cache)
 ##@ Information
 # ---------------------------------------------------------------------------
 
-# FIX [P5-M5]: anchored grep; item 14: show age key status.
-info: ## Show system information including age key status and disk usage
+# QOL [item 1 + item 13]: info now reads VERSION file and shows backup dir size
+# + retention window alongside the state directory disk usage.
+info: ## Show system information including version, age key status, and disk usage
 	@echo "$(BLUE)VaultWarden-OCI System Information$(NC)"
 	@echo "$(BLUE)====================================$(NC)"
+	@echo "$(GREEN)Stack version:$(NC) $$(cat VERSION 2>/dev/null || echo 'unknown')"
 	@echo "$(GREEN)Domain:$(NC)        $$(grep '^DOMAIN=' .env 2>/dev/null | cut -d= -f2 || echo 'Not configured')"
 	@echo "$(GREEN)Admin Email:$(NC)   $$(grep '^ADMIN_EMAIL=' .env 2>/dev/null | cut -d= -f2 || echo 'Not configured')"
 	@echo "$(GREEN)Project State:$(NC) $$(grep '^PROJECT_STATE_DIR=' .env 2>/dev/null | cut -d= -f2 || echo '/var/lib/vaultwarden')"
@@ -499,14 +657,24 @@ info: ## Show system information including age key status and disk usage
 	@$(MAKE) status
 	@echo ""
 	@echo "$(GREEN)Disk Usage:$(NC)"
-	@df -h $$(grep '^PROJECT_STATE_DIR=' .env 2>/dev/null | cut -d= -f2 || echo '/var/lib/vaultwarden') 2>/dev/null | tail -1 || echo "State directory not found"
+	@STATE_DIR=$$(grep '^PROJECT_STATE_DIR=' .env 2>/dev/null | cut -d= -f2 || echo '/var/lib/vaultwarden'); \
+	df -h "$$STATE_DIR" 2>/dev/null | tail -1 || echo "State directory not found"
+	@BACKUP_DIR=$$(grep '^BACKUP_DIR=' .env 2>/dev/null | cut -d= -f2 || echo 'backups'); \
+	RETENTION=$$(grep '^BACKUP_RETENTION_DAYS=' .env 2>/dev/null | cut -d= -f2 || echo '14'); \
+	if [ -d "$$BACKUP_DIR" ]; then \
+		echo "  Backups ($$BACKUP_DIR, retention: $$RETENTION days): $$(du -sh "$$BACKUP_DIR" 2>/dev/null | cut -f1)"; \
+	fi
 
 shell: ## Open shell in specified SERVICE (default: vaultwarden)
+	@echo "$(BLUE)Opening shell in $(if $(SERVICE),$(SERVICE),vaultwarden)...$(NC)"
 	@$(DOCKER_COMP) exec $(if $(SERVICE),$(SERVICE),vaultwarden) sh
 
+# QOL [item 1]: version now reads the VERSION file so the repo version is
+# always displayed alongside the running container versions.
 # FIX [P5-L2]: non-running container is non-fatal informational state.
 version: ## Show version information for all stack components
 	@echo "$(BLUE)VaultWarden-OCI Version Information$(NC)"
+	@echo "$(GREEN)Stack version:$(NC)  $$(cat VERSION 2>/dev/null || echo 'unknown')"
 	@echo "$(GREEN)VaultWarden:$(NC)    $$($(DOCKER_COMP) exec -T vaultwarden /vaultwarden --version 2>/dev/null | head -1 || echo 'Not running')"
 	@echo "$(GREEN)Caddy:$(NC)          $$($(DOCKER_COMP) exec -T caddy caddy version 2>/dev/null || echo 'Not running')"
 	@echo "$(GREEN)Fail2Ban:$(NC)       $$($(DOCKER_COMP) exec -T fail2ban fail2ban-server --version 2>/dev/null | head -1 || echo 'Not running')"
