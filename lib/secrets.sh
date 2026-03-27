@@ -15,15 +15,28 @@
 #   fail with "unknown field" when collect_secret_field was called as a
 #   fallback. The canonical secrets key for any email provider API token is
 #   'email_api_token' (matching what decrypt_secret reads in lib/common.sh).
+#
+# PATCHED BUGS (2026-03-26):
+#   FIX-SD1: Replace global SCRIPT_DIR assignment with a private
+#   _SECRETS_LIB_DIR variable. lib/secrets.sh is a sourced library; setting
+#   SCRIPT_DIR at global scope overwrites the caller's SCRIPT_DIR (which
+#   points to the project root) with the lib/ directory. Any subsequent
+#   `source "$SCRIPT_DIR/lib/..."` call in the calling script then resolves
+#   to `lib/lib/...`, causing "No such file or directory" errors (e.g.
+#   health.sh line 14: lib/lib/simple_key_resilience.sh). Using a private
+#   variable scoped to this file fixes all callers without requiring each
+#   caller to save/restore SCRIPT_DIR.
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     echo "Error: This library should be sourced, not executed directly"
     exit 1
 fi
 
-# Source crypto library for hash functions
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/crypto.sh"
+# Source crypto library for hash functions.
+# Use a private variable so we do not clobber the caller's SCRIPT_DIR.
+_SECRETS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${_SECRETS_LIB_DIR}/crypto.sh"
+unset _SECRETS_LIB_DIR
 
 # Configuration
 SECRETS_FILE="${SECRETS_FILE:-secrets/secrets.yaml}"
