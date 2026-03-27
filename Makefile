@@ -117,7 +117,7 @@ test-secrets: ## Test secrets decryption
 
 test-email: ## Test email configuration (Postfix via unified maintenance)
 	@echo "$(BLUE)Testing email configuration...$(NC)"
-	@./maintenance.sh --test-email --verbose
+	@sudo ./maintenance.sh --test-email --verbose
 
 # ---------------------------------------------------------------------------
 ##@ Service Management
@@ -144,13 +144,15 @@ restart: ## Restart all services (enhanced startup)
 	@echo "$(GREEN)Services restarted successfully!$(NC)"
 
 # FIX [P5-C1]: safe-restart captures pre-restart IDs and rolls back on failure.
+# sudo is required for ./startup.sh (require_root) and for ./health.sh
+# (require_root) used in the post-restart verification step.
 safe-restart: ## Restart with automatic rollback on failure
 	@echo "$(BLUE)Performing safe restart with rollback capability...$(NC)"
 	@PRE_IDS=$$($(DOCKER_COMP) ps -q 2>/dev/null); \
 	if sudo ./startup.sh --force-restart; then \
 		echo "$(GREEN)Restart successful — running post-restart health check (10s grace)...$(NC)"; \
 		sleep 10; \
-		if ./health.sh --quiet; then \
+		if sudo ./health.sh --quiet; then \
 			echo "$(GREEN)Health check passed — safe restart completed$(NC)"; \
 		else \
 			echo "$(RED)Health check failed after restart — initiating rollback...$(NC)"; \
@@ -190,16 +192,16 @@ health: ## Run health checks (Optional: AUTO_RECOVER=true, COMPREHENSIVE=true)
 	@FLAGS=""; \
 	if [ "$(COMPREHENSIVE)" = "true" ]; then FLAGS="$$FLAGS --comprehensive"; fi; \
 	if [ "$(AUTO_RECOVER)" = "true" ]; then FLAGS="$$FLAGS --auto-recover"; fi; \
-	./health.sh $$FLAGS || { echo "$(RED)Health check failed$(NC)"; exit 1; }
+	sudo ./health.sh $$FLAGS || { echo "$(RED)Health check failed$(NC)"; exit 1; }
 
 health-quick: ## Fast sanity check — port up + container running (no deep tests)
 	@echo "$(BLUE)Running quick health check...$(NC)"
-	@./health.sh --quiet || { echo "$(RED)Quick health check failed$(NC)"; exit 1; }
+	@sudo ./health.sh --quiet || { echo "$(RED)Quick health check failed$(NC)"; exit 1; }
 	@echo "$(GREEN)Quick health check passed$(NC)"
 
 health-email: ## Run health check with email notification
 	@echo "$(BLUE)Running health check with email notification...$(NC)"
-	@./health.sh --comprehensive --email
+	@sudo ./health.sh --comprehensive --email
 
 # FIX [P5-M1]: logs defaults to --tail=100. Pass SERVICE= to filter, FOLLOW=true to tail.
 logs: ## Show recent logs (last 100 lines). Use SERVICE= to filter, FOLLOW=true to tail
@@ -325,7 +327,7 @@ backup: ## Create backup (TYPE: db, full, emergency)
 		echo "$(YELLOW)No TYPE specified — defaulting to TYPE=db (database only).$(NC)"; \
 		echo "$(YELLOW)Use 'make backup TYPE=full' or 'make backup TYPE=emergency' for broader coverage.$(NC)"; \
 	fi
-	@./backup.sh --type $(if $(TYPE),$(TYPE),db) --email
+	@sudo ./backup.sh --type $(if $(TYPE),$(TYPE),db) --email
 	@echo "$(GREEN)Backup completed successfully!$(NC)"
 
 backup-full: ## Create full system backup with email notification
@@ -336,7 +338,7 @@ backup-emergency: ## Create emergency recovery kit with email notification
 
 list-backups: ## List available backups with per-type size totals
 	@echo "$(BLUE)Available backups:$(NC)"
-	@./backup.sh --list
+	@sudo ./backup.sh --list
 
 # QOL [item 14]: backup-status provides a richer summary: last backup time per
 # type, total backup dir size, retention window, and number of archives retained.
@@ -449,16 +451,16 @@ update-system: ## Update system packages and containers with email notification
 
 maintenance: ## Run comprehensive maintenance (cleanup, Docker, DB, DNS, firewall)
 	@echo "$(BLUE)Running maintenance tasks...$(NC)"
-	@./maintenance.sh --comprehensive
+	@sudo ./maintenance.sh --comprehensive
 	@echo "$(GREEN)Maintenance completed successfully!$(NC)"
 
 maintenance-full: ## Run full maintenance with email notification
 	@echo "$(BLUE)Running comprehensive maintenance...$(NC)"
-	@./maintenance.sh --comprehensive --email
+	@sudo ./maintenance.sh --comprehensive --email
 
 update-dns: ## Update DNS record to current public IP
 	@echo "$(BLUE)Updating DNS record...$(NC)"
-	@./maintenance.sh --update-dns
+	@sudo ./maintenance.sh --update-dns
 	@echo "$(GREEN)DNS updated successfully!$(NC)"
 
 db-maint: ## Run deep database maintenance — VACUUM + WAL checkpoint (requires sudo)
@@ -554,16 +556,17 @@ test-config: ## Validate Docker Compose configuration only
 	@$(DOCKER_COMP) config > /dev/null && echo "$(GREEN)Docker Compose configuration is valid$(NC)" || { echo "$(RED)Docker Compose configuration is invalid$(NC)"; exit 1; }
 
 # FIX [P5-H2]: dry-run no longer appends || true — failures propagate correctly.
+# sudo is required for all four scripts (require_root in each).
 dry-run: ## Preview all operations without executing
 	@echo "$(BLUE)Dry run mode — showing what would be done:$(NC)"
 	@echo "$(YELLOW)--- startup.sh ---$(NC)"
-	@./startup.sh --dry-run
+	@sudo ./startup.sh --dry-run
 	@echo "$(YELLOW)--- health.sh ---$(NC)"
-	@./health.sh --dry-run
+	@sudo ./health.sh --dry-run
 	@echo "$(YELLOW)--- backup.sh ---$(NC)"
-	@./backup.sh --dry-run
+	@sudo ./backup.sh --dry-run
 	@echo "$(YELLOW)--- maintenance.sh ---$(NC)"
-	@./maintenance.sh --dry-run
+	@sudo ./maintenance.sh --dry-run
 
 fmt: ## Validate all configuration files (compose + secrets)
 	@echo "$(BLUE)Validating configuration files...$(NC)"
