@@ -463,6 +463,9 @@ check_age_key() {
             log_error "check_age_key: cannot create temp file for round-trip test — key NOT verified"
             return 1
         }
+        # BUG-#12 FIX: Secure the temp file immediately after mktemp to close the
+        # window between creation (at process umask) and first write.
+        install -m 600 /dev/null "$tmp_enc"
 
         local round_trip_ok=false
         # BUG-P4-6 FIX: Validate that the decrypted output matches the original

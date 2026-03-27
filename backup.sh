@@ -293,8 +293,8 @@ auto_determine_backup_type() {
 
     local full_backup_dir last_full full_age_days=999
     full_backup_dir=$(get_backup_dir "full")
-    last_full=$(find "$full_backup_dir" -name "*.age" -type f -print0 2>/dev/null \
-                | sort -z | tr '\0' '\n' | tail -1 || true)
+    last_full=$(find "$full_backup_dir" -name "*.age" -type f -printf '%T@ %p\n' 2>/dev/null \
+                | sort -n | tail -1 | cut -d' ' -f2- || true)
     if [[ -n "$last_full" ]]; then
         local full_mtime
         full_mtime=$(stat -c %Y "$last_full" 2>/dev/null || stat -f %m "$last_full" 2>/dev/null || echo "0")
@@ -971,7 +971,7 @@ main() {
     umask 077
     TMPDIR_BACKUP="$(mktemp -d -t vw_backup.XXXXXXXXXX)" || {
         log_error "Failed to create secure temporary directory"
-        exit 2
+        exit 1
     }
     umask "$old_umask"
 
@@ -981,7 +981,7 @@ main() {
         log_header "VaultWarden-OCI Backup"
     fi
 
-    load_env_file || { log_error "Failed to load .env"; exit 2; }
+    load_env_file || { log_error "Failed to load .env"; exit 1; }
 
     local state_dir
     state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
@@ -993,7 +993,7 @@ main() {
     local age_key_file
     age_key_file=$(_resolve_age_key) || {
         log_error "Age key file not found: $age_key_file"
-        exit 2
+        exit 1
     }
 
     # Wire: verify age key health (permissions, ownership, crypto roundtrip)
@@ -1003,14 +1003,14 @@ main() {
         SOPS_AGE_KEY_FILE="$age_key_file" simple_verify_age_key || {
             log_error "Age key health check failed — aborting backup to avoid encrypting with a bad key."
             log_error "Run './health.sh --comprehensive' for diagnostics."
-            exit 2
+            exit 1
         }
     fi
 
     local age_pub_key
     age_pub_key=$(get_age_public_key "$age_key_file") || {
         log_error "Could not read Age public key from $age_key_file"
-        exit 2
+        exit 1
     }
 
     local actual_type="$BACKUP_TYPE"
@@ -1036,8 +1036,15 @@ main() {
                 && backup_success=true
             ;;
         *)
-            log_error "Invalid backup type: $actual_type"; exit 2 ;;
+            log_error "Invalid backup type: $actual_type"; exit 1 ;;
     esac
+
+    if [[ "$backup_success" == "true" ]]; then
+        [[ "$backup_file" == *.age && -f "$backup_file" ]] || {
+            log_error "backup_file is invalid or missing: ${backup_file:-empty}"
+            exit 1
+        }
+    fi
 
     if [[ "$backup_success" == "true" && "$DRY_RUN" == "false" ]]; then
 
@@ -1048,7 +1055,7 @@ main() {
             if ! verify_backup_full "$backup_file" "$actual_type" "$TMPDIR_BACKUP"; then
                 log_error "Backup verification failed — discarding corrupt archive."
                 rm -f "$backup_file" "${backup_file}.meta" "${backup_file}.sha256"
-                exit 2
+                exit 1
             fi
         else
             if ! verify_backup_quick "$backup_file" "$age_key_file"; then
@@ -1081,7 +1088,7 @@ main() {
                     send_notification_email "$subj" "$bdy" 2>/dev/null || true
                 fi
                 log_error "Offsite sync failed — see above. Local backup is safe."
-                exit 1
+                exit 2
             fi
         fi
 
@@ -1129,7 +1136,7 @@ main() {
             send_notification_email "$subject" "$body" 2>/dev/null || true
         fi
         log_error "Backup failed"
-        exit 2
+        exit 1
     fi
 }
 

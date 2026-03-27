@@ -419,7 +419,7 @@ _read_dotenv_value() {
     local file="${2:-.env}"
     [[ -f "$file" ]] || { echo ""; return 0; }
     local val
-    val=$(grep -E "^${key}=" "$file" | head -1 | sed "s/^${key}=//;s/#.*$//;s/[[:space:]]*$//")
+    val=$(grep -E "^${key}=" "$file" | head -1 | sed "s/^${key}=//;s/[[:space:]]\+#.*$//;s/[[:space:]]*$//")
     echo "$val"
 }
 

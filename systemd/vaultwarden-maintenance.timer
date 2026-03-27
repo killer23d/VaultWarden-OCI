@@ -1,7 +1,7 @@
 [Unit]
 Description=VaultWarden Maintenance Timer Mon-Sat 02:05
 # SY-2: Prevent this timer firing mid-shutdown.
-Conflicts=shutdown.target
+Conflicts=shutdown.target vaultwarden-db-backup.service
 # Issue #57: OnFailure on the timer unit catches calendar parse errors or
 # systemd activation failures that would otherwise go unnotified.
 OnFailure=vaultwarden-notify-failure@%n.service

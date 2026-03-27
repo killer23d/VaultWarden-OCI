@@ -937,6 +937,7 @@ _display_new_key() {
     echo ""
     log_info  "  Private key (keep secret; required for decryption):"
     echo      ""
+    { set +x; } 2>/dev/null
     echo      "  ${priv_key_line:-<could not read key — check $ROTATED_KEY_FILE>}"
     echo      ""
     log_info  "  Public key (safe to share; used for encryption):"
@@ -991,7 +992,8 @@ tar_validate_members() {
     local members
     # shellcheck disable=SC2086
     members="$(tar $filter -tf "$tarfile")" || { log_error "Cannot list archive members"; return 1; }
-    echo "$members" | grep -qE '(^/|(^|/)\.\.(\/|$))' && {
+    # Catch absolute paths, classic ../ traversal, and ./.. relative traversal.
+    echo "$members" | grep -qE '(^/|(^|/)\.\.(\/|$)|^\./\.\.)' && {
         log_error "Archive contains unsafe paths. Refusing to extract."; return 1
     }
     return 0
@@ -1154,7 +1156,7 @@ restore_full() {
         fi
         [[ "$DRY_RUN" == "true" ]] && { log_info "[DRY RUN] Would tar -xf to /"; return 0; }
         # shellcheck disable=SC2086
-        tar $tar_filter -xf "$dec_tar" -C / --no-same-owner --no-same-permissions --delay-directory-restore
+        tar $tar_filter -xf "$dec_tar" -C / --no-same-owner --no-same-permissions --no-overwrite-dir --no-unlink --delay-directory-restore
         [[ -d "$state_dir" ]] && chown -R "${puid}:${pgid}" "$state_dir/data" 2>/dev/null || true
         purge_wal_shm "$state_dir/data/db.sqlite3" || true
         log_success "Legacy archive restored."
@@ -1168,7 +1170,7 @@ restore_full() {
     mkdir -p "$staging"
     log_info "Extracting archive to staging directory..."
     # shellcheck disable=SC2086
-    tar $tar_filter -xf "$dec_tar" -C "$staging" --no-same-owner --no-same-permissions --delay-directory-restore
+    tar $tar_filter -xf "$dec_tar" -C "$staging" --no-same-owner --no-same-permissions --no-overwrite-dir --no-unlink --delay-directory-restore
 
     local rel_state="${state_dir#/}"
     if [[ ! -d "$staging/$rel_state" ]]; then

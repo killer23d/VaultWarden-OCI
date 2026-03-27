@@ -327,6 +327,11 @@ EOF
 # FIX EM-M3: domain validated against strict hostname regex before use in URL.
 _email_driver_mailgun() {
     local subject="$1" body="$2"
+    # Strip embedded newlines/carriage-returns to prevent header injection.
+    subject="${subject//$'\r'/}"
+    subject="${subject//$'\n'/}"
+    body="${body//$'\r'/}"
+    body="${body//$'\n'/ }"
     # FIX-M01: SMTP_FROM_EMAIL is DEPRECATED; canonical name is SMTP_FROM.
     # This shim will be removed once all deployments have migrated to SMTP_FROM=.
     local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
