@@ -130,6 +130,9 @@ decrypt_secret() {
 
     local value
     local rc=0
+    # BUG-#18 FIX: Suppress xtrace around secret decryption to prevent value
+    # appearing in debug logs or core dumps via set -x output.
+    { set +x; } 2>/dev/null
     value=$(sops -d --extract "[\"$key\"]" "$secrets_file" 2>/dev/null) || rc=$?
 
     # BUG-S10 FIX: unset key file path from environment so child processes do
@@ -142,6 +145,8 @@ decrypt_secret() {
     fi
 
     printf '%s' "$value"
+    # BUG-#18 FIX: Unset plaintext value immediately after use.
+    unset value
     return 0
 }
 
@@ -239,11 +244,14 @@ check_placeholder_values() {
     local placeholder_secrets=()
     for secret in "${secrets_to_check[@]}"; do
         local value
+        # BUG-#18 FIX: Suppress xtrace to prevent plaintext secret appearing in debug logs.
+        { set +x; } 2>/dev/null
         if value=$(sops -d --extract "[\"$secret\"]" "$secrets_file" 2>/dev/null); then
             if [[ "$value" =~ ^(CHANGE_ME|PLACEHOLDER_NOT_CONFIGURED) ]] || [[ -z "$value" ]]; then
                 placeholder_secrets+=("$secret")
             fi
         fi
+        unset value
     done
     # LS-9 FIX: clean up SOPS env before returning
     cleanup_secrets_environment
@@ -683,9 +691,12 @@ _grk_sops_extract() {
     local _key="$1"
     local _secrets_file="$2"
     local _val
+    # BUG-#18 FIX: Suppress xtrace to prevent plaintext secret appearing in debug logs.
+    { set +x; } 2>/dev/null
     _val=$(sops -d --extract "[\"${_key}\"]" "$_secrets_file" 2>/dev/null) \
         && printf '%s' "$_val" \
         || printf '%s' "Not Set"
+    unset _val
 }
 
 generate_recovery_kit() {
@@ -709,6 +720,9 @@ generate_recovery_kit() {
         log_error "Failed to derive Age public key"
         return 1
     fi
+    # BUG-#17 FIX: Use quoted heredoc and printf for Age private key; prevent trace leakage.
+    # Suppress xtrace before reading the private key to prevent it appearing in debug logs.
+    { set +x; } 2>/dev/null
     priv_key=$(cat "$age_key")
 
     local domain="Not Configured"
@@ -875,6 +889,10 @@ TO RESTORE THIS SERVER ON NEW HARDWARE:
 END OF RECOVERY KIT
 ══════════════════════════════════════════════════════════════════════════
 EOF
+
+    # BUG-#17 FIX: Unset plaintext Age private key from memory immediately after
+    # the heredoc that wrote it to the output file.
+    unset priv_key
 
     chmod 600 "$output_file"
 }

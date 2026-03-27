@@ -735,6 +735,32 @@ _prompt_age_key() {
 }
 
 # ---------------------------------------------------------------------------
+# _prune_old_age_keys <keys_dir>
+#
+# BUG-#11 FIX: Prune old Age private key backups — keep only 2 most recent.
+# Old key material has no operational value once a new key is active and
+# backed up; retaining it indefinitely increases exposure if the secrets/keys/
+# directory is ever compromised.
+# ---------------------------------------------------------------------------
+_prune_old_age_keys() {
+    local keys_dir="$1"
+    [[ -d "$keys_dir" ]] || return 0
+    local -a old_keys
+    # Find all age-key backup files (timestamped), sorted oldest-first
+    mapfile -t old_keys < <(find "$keys_dir" -maxdepth 1 -name "age-key.txt.pre-rotate-*" -type f \
+        | sort)
+    local count=${#old_keys[@]}
+    # Keep 2 most recent; delete the rest
+    if (( count > 2 )); then
+        local delete_count=$(( count - 2 ))
+        for (( i=0; i<delete_count; i++ )); do
+            log_info "Pruning old Age key backup: $(basename "${old_keys[$i]}")"
+            rm -f "${old_keys[$i]}" 2>/dev/null || log_warn "Failed to prune: ${old_keys[$i]}"
+        done
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # _rotate_age_key
 #
 # Generates a fresh age key pair and installs it to every configured location
@@ -876,6 +902,12 @@ _rotate_age_key() {
     fi
 
     log_success "Key rotation complete."
+
+    # ------------------------------------------------------------------
+    # 7. Prune old Age private key backups — keep only 2 most recent
+    # ------------------------------------------------------------------
+    _prune_old_age_keys "$local_key_dir"
+
     return 0
 }
 

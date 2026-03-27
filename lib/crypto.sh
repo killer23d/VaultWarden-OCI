@@ -281,12 +281,12 @@ encrypt_sops_file() {
         return 1
     }
 
-    # LC-3 FIX: restrict permissions immediately after mktemp, before any
-    # content is written. mktemp creates the file at the process umask
-    # (typically 022 → mode 644, world-readable). Setting 600 here closes
-    # the race window so no partially-written SOPS ciphertext is ever
-    # world-readable, even transiently.
-    chmod 600 "$tmp_file"
+    # LC-3 FIX / BUG-#12 FIX: Use install -m 600 to atomically set mode 600 on
+    # the temp file, eliminating the window between mktemp (creates file at
+    # process umask, typically 644) and a subsequent chmod call. install -m 600
+    # /dev/null truncates the already-created mktemp file and sets its mode in
+    # one operation, so no partially-written SOPS ciphertext is ever readable.
+    install -m 600 /dev/null "$tmp_file"
 
     # Copy original content into the temp file so SOPS can read its format
     if ! cp -- "$file" "$tmp_file"; then

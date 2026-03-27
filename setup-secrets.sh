@@ -52,7 +52,23 @@ _run_cleanup_action() {
             local target="${action#rm -f }"
             # Strip surrounding single-quotes added by register_cleanup callers.
             target="${target//\'/}"
-            [[ -n "$target" && "$target" != *$'\n'* ]] && rm -f "$target" 2>/dev/null || true
+            if [[ -z "$target" || "$target" == *$'\n'* ]]; then
+                return 0
+            fi
+            # BUG-#15 FIX: Validate cleanup target resolves inside allowed
+            # directories before rm -f to prevent glob expansion or path
+            # traversal from deleting files outside /tmp or secrets/.
+            local resolved
+            resolved=$(realpath -m "$target" 2>/dev/null) || {
+                log_warn "_run_cleanup_action: realpath failed for target — refusing rm: $target"
+                return 1
+            }
+            local allowed_secrets="${PROJECT_ROOT:-/opt/vaultwarden-scripts}/secrets"
+            if [[ "$resolved" != /tmp/* && "$resolved" != "$allowed_secrets"/* ]]; then
+                log_warn "_run_cleanup_action: refusing rm on path outside allowed dirs: $resolved"
+                return 1
+            fi
+            rm -f "$target" 2>/dev/null || true
             ;;
         *)
             # Unknown action: log and skip rather than eval.
