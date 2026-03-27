@@ -401,7 +401,10 @@ services:
       - NET_RAW
 
     healthcheck:
-      test: ["CMD", "fail2ban-client", "status"]
+      # BUG-P4-2 FIX: Use sh -c form — fail2ban-client is not in the default
+      # PATH for CMD-form healthchecks in the crazymax/fail2ban slim image.
+      # 'fail2ban-client ping' returns "Server replied: pong" on success.
+      test: ["CMD-SHELL", "fail2ban-client ping 2>/dev/null | grep -q pong || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3

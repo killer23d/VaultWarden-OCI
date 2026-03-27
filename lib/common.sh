@@ -575,6 +575,10 @@ _rate_limit_check() {
     if [[ "$subject" != *"CRITICAL"* ]] && [[ -f "$last_email_file" ]]; then
         local last_time current_time
         last_time=$(cat "$last_email_file" 2>/dev/null || printf '0')
+        # BUG-P4-4 FIX: date +%s is not POSIX but is supported by both GNU coreutils
+        # and BSD date. It IS available on all supported platforms (Linux/macOS/Alpine).
+        # The original comment claiming it was GNU-only was incorrect — no change needed
+        # to the date call itself. Document this explicitly.
         current_time=$(date +%s)
         if (( current_time - last_time < 3600 )); then
             log_debug "Email rate limited for non-critical notification: $subject"

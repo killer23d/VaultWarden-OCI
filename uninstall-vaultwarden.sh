@@ -64,7 +64,14 @@ if command -v docker &>/dev/null; then
     # Remove named volumes (project prefix is the directory basename)
     PROJECT_NAME=$(basename "${PROJECT_DIR}" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')
     for vol in $(docker volume ls -q 2>/dev/null | grep -E "^(${PROJECT_NAME}_|vaultwarden)" || true); do
-        docker volume rm "$vol" 2>/dev/null && success "Removed Docker volume: ${vol}" || true
+        # BUG-P4-9 FIX: Log a warning when docker volume rm fails rather than
+        # silently swallowing the error. A volume that cannot be removed means
+        # data is still in use or the uninstall is incomplete.
+        if docker volume rm "$vol" 2>/dev/null; then
+            success "Removed Docker volume: ${vol}"
+        else
+            warn "Could not remove volume '${vol}' (may still be in use). Run 'docker volume rm ${vol}' manually after all containers stop."
+        fi
     done
 
     # Remove custom bridge networks created by this project
