@@ -91,6 +91,15 @@ write_secret_file() {
         return 1
     fi
 
+    # BUG-#31 FIX: Verify the written file is non-empty when the source value
+    # was non-empty. A zero-byte file after a successful printf return indicates
+    # a disk-full or I/O error that printf did not propagate as a non-zero exit.
+    if [[ -n "$value" && ! -s "$dest" ]]; then
+        log_error "write_secret_file: file is empty after write — possible disk-full: $dest"
+        rm -f "$dest"
+        return 1
+    fi
+
     chmod 600 "$dest"
     return 0
 }
@@ -161,6 +170,9 @@ list_secrets() {
     if ! ensure_sops_env; then return 1; fi
 
     local keys
+    # BUG-#29 FIX: Suppress xtrace before sops to prevent the key file path
+    # from appearing in trace output (bash -x / set -x logs).
+    { set +x; } 2>/dev/null
     keys=$(sops -d "$secrets_file" 2>/dev/null \
         | python3 -c "
 import yaml, sys

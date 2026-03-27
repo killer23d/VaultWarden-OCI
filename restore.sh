@@ -1252,8 +1252,11 @@ main() {
         log_error "Failed to initialize operations lock directory: $VW_LOCK_DIR"; exit 1
     }
 
-    exec 200>"$VW_OPERATIONS_LOCK"
-    flock -n 200 || {
+    # BUG-#19 FIX: Use bash 4.1+ automatic FD allocation instead of hardcoded
+    # FD 200 for the operations lock, preventing silent clobber of any open FD.
+    local OPS_LOCK_FD
+    exec {OPS_LOCK_FD}>"$VW_OPERATIONS_LOCK"
+    flock -n "$OPS_LOCK_FD" || {
         log_error "Another update/restore/maintenance/backup operation is already running."
         log_error "Lock file: $VW_OPERATIONS_LOCK"
         exit 1
