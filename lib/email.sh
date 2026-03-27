@@ -197,11 +197,18 @@ _email_bearer_post() {
     local tmp cfg code
     tmp=$(mktemp -t vw_email.XXXXXXXXXX)
     cfg=$(mktemp -t vw_ecfg.XXXXXXXXXX)
+    # BUG-#40 FIX: Use install -m 600 to atomically secure the curl config
+    # temp file before writing the bearer token, eliminating the mktemp
+    # (world-readable) → chmod 600 race window.
+    if ! install -m 600 /dev/null "$cfg" 2>/dev/null; then
+        rm -f "$tmp" "$cfg"
+        log_error "_email_bearer_post: failed to secure curl config temp file"
+        return 1
+    fi
     trap 'rm -f "$tmp" "$cfg" 2>/dev/null; trap - RETURN' RETURN
 
     # Write the token into the curl config file -- never on the command line
     printf 'header = "Authorization: Bearer %s"\n' "${EMAIL_API_TOKEN}" >"$cfg"
-    chmod 600 "$cfg"
 
     code=$(curl -s \
         --config "$cfg" \

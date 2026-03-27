@@ -182,6 +182,12 @@ cleanup_logs() {
         if [[ -d "$log_dir" ]]; then
             local -a old_log_files=()
             mapfile -d '' old_log_files < <(
+                # BUG-#28 NOTE: Log cleanup uses -mtime (last content modification
+                # time), which is correct for log files. Unlike backup files, logs
+                # do not have embedded timestamps in their filenames. -ctime would
+                # be wrong here as it fires on any metadata change (chmod, chown),
+                # not just age. rsync of log archives is not a use case for this
+                # deployment, so -mtime manipulation is not a concern.
                 find "$log_dir" -name "*.log*" -type f -mtime +"$LOG_RETENTION_DAYS" -print0 2>/dev/null
             )
             for log_file in "${old_log_files[@]}"; do
@@ -837,13 +843,12 @@ update_dns_record() {
     [[ -z "$zone_id" ]] && { log_error "CLOUDFLARE_ZONE_ID not set in .env"; return 1; }
 
     local DNS_LOCK="/run/lock/vaultwarden-dns-update.lock"
-    exec 242>"$DNS_LOCK"
-    if ! flock -n 242; then
+    # BUG-#20 FIX: Use automatic FD allocation instead of hardcoded FD 242.
+    local _DNS_LOCK_FD
+    exec {_DNS_LOCK_FD}>"$DNS_LOCK"
+    if ! flock -n "$_DNS_LOCK_FD"; then
         log_info "DNS update already in progress (lock: $DNS_LOCK). Skipping."
         return 0
-    fi
-    if [[ -e /proc/self/fd/242 ]]; then
-        python3 -c "import fcntl; flags = fcntl.fcntl(242, fcntl.F_GETFD); fcntl.fcntl(242, fcntl.F_SETFD, flags | fcntl.FD_CLOEXEC)" 2>/dev/null || true
     fi
 
     log_info "Checking if DNS update needed for $domain..."
@@ -1038,8 +1043,10 @@ main() {
     # ---- Deep DB maintenance: self-contained sub-command ----
     if [[ "$DB_DEEP_MAINT" == "true" ]]; then
         require_root "$@"
-        exec 63>"$OPS_LOCK"
-        if ! flock -n 63; then
+        # BUG-#20 FIX: Use automatic FD allocation instead of hardcoded FD 63.
+        local _OPS_LOCK_FD
+        exec {_OPS_LOCK_FD}>"$OPS_LOCK"
+        if ! flock -n "$_OPS_LOCK_FD"; then
             log_error "Another operation (update/restore/maintenance) is already running. Aborting."
             exit 1
         fi
@@ -1059,8 +1066,10 @@ main() {
 
     # ---- Routine or targeted maintenance ----
     require_root "$@"
-    exec 63>"$OPS_LOCK"
-    if ! flock -n 63; then
+    # BUG-#20 FIX: Use automatic FD allocation instead of hardcoded FD 63.
+    local _OPS_LOCK_FD
+    exec {_OPS_LOCK_FD}>"$OPS_LOCK"
+    if ! flock -n "$_OPS_LOCK_FD"; then
         log_error "Another operation (update/restore/maintenance) is already running. Aborting."
         exit 1
     fi

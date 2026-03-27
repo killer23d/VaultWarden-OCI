@@ -367,8 +367,12 @@ check_backup_disk_space() {
     local required_space_mb="${2:-1000}"  # Default 1GB
 
     if [[ ! -d "$target_dir" ]]; then
-        log_error "Target directory not found: $target_dir"
-        return 1
+        # BUG-#35 FIX: Return 0 (skip check) when directory does not yet exist.
+        # On the first run the backup destination has not been created yet; returning
+        # 1 (error) would block valid first-run backups. Log at debug level only —
+        # this is expected during initial setup.
+        log_debug "check_backup_disk_space: backup_dir does not exist yet: $target_dir"
+        return 0
     fi
 
     # BUG-B1 FIX: portable df — column 4 is Available (1 KiB blocks) on

@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import ipaddress
 import smtplib
+import ssl
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -77,7 +78,14 @@ def _send(host: str, port: int, sender: str, dest: str, msg: MIMEMultipart) -> N
     try:
         server.ehlo()
         if server.has_extn("STARTTLS"):
-            server.starttls()
+            # BUG-#38 FIX: Use ssl.create_default_context() for TLS certificate
+            # validation. Without this, the SMTP connection is vulnerable to
+            # man-in-the-middle attacks (the cert is never verified).
+            # For localhost postfix (127.0.0.1:587), STARTTLS is typically not
+            # advertised, so this block is skipped; the context is still correct
+            # for deployments that route to a remote TLS-capable relay.
+            context = ssl.create_default_context()
+            server.starttls(context=context)
             server.ehlo()
         else:
             print(

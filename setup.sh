@@ -950,9 +950,10 @@ main() {
     if ! is_root; then log_error "Must run as root."; exit 1; fi
     
     local SETUP_LOCK_FILE="/var/lock/vaultwarden-setup.lock"
-    local SETUP_LOCK_FD=202
-    exec 202>"$SETUP_LOCK_FILE"
-    if ! flock -n $SETUP_LOCK_FD; then
+    # BUG-#21 FIX: Use automatic FD allocation instead of hardcoded FD 202.
+    local SETUP_LOCK_FD
+    exec {SETUP_LOCK_FD}>"$SETUP_LOCK_FILE"
+    if ! flock -n "$SETUP_LOCK_FD"; then
         log_error "Another setup instance is already running (could not acquire lock)."
         log_error "Wait for it to complete, then retry."
         log_error "If the lock is stale, remove: ${SETUP_LOCK_FILE}"

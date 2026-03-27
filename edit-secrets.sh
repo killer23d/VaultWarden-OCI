@@ -426,7 +426,13 @@ do_view() {
 
     local temp_file
     temp_file=$(mktemp)
-    chmod 600 "$temp_file"
+    # BUG-#30 FIX: Make chmod failure a hard abort — if we can't secure the
+    # temp file, we must not proceed as secrets could be exposed to other users.
+    if ! install -m 600 /dev/null "$temp_file" 2>/dev/null; then
+        rm -f "$temp_file"
+        log_error "Failed to secure temp file: $temp_file"
+        return 1
+    fi
     # FIX [P3-H3]: use _secure_shred() instead of rm -f for plaintext temp file
     register_cleanup "_secure_shred" "$temp_file"
 
@@ -594,7 +600,13 @@ _deploy_docker_secrets() {
     local docker_dir="$PROJECT_ROOT/secrets/.docker_secrets"
     local temp_plain
     temp_plain=$(mktemp --suffix=.yaml)
-    chmod 600 "$temp_plain"
+    # BUG-#30 FIX: Make chmod failure a hard abort — if we can't secure the
+    # temp file, we must not proceed as secrets could be exposed to other users.
+    if ! install -m 600 /dev/null "$temp_plain" 2>/dev/null; then
+        rm -f "$temp_plain"
+        log_error "Failed to secure temp file: $temp_plain"
+        return 1
+    fi
     # FIX [P3-H3]: use _secure_shred() for this plaintext temp file
     register_cleanup "_secure_shred" "$temp_plain"
 
@@ -669,7 +681,13 @@ do_rotate() {
 
     local temp_plain
     temp_plain=$(mktemp --suffix=.yaml)
-    chmod 600 "$temp_plain"
+    # BUG-#30 FIX: Make chmod failure a hard abort — if we can't secure the
+    # temp file, we must not proceed as secrets could be exposed to other users.
+    if ! install -m 600 /dev/null "$temp_plain" 2>/dev/null; then
+        rm -f "$temp_plain"
+        log_error "Failed to secure temp file: $temp_plain"
+        return 1
+    fi
     # FIX [P3-H3]: use _secure_shred() for this plaintext temp file
     register_cleanup "_secure_shred" "$temp_plain"
 
@@ -709,7 +727,13 @@ do_rotate() {
 
     local temp_patched
     temp_patched=$(mktemp --suffix=.yaml)
-    chmod 600 "$temp_patched"
+    # BUG-#30 FIX: Make chmod failure a hard abort — if we can't secure the
+    # temp file, we must not proceed as secrets could be exposed to other users.
+    if ! install -m 600 /dev/null "$temp_patched" 2>/dev/null; then
+        rm -f "$temp_patched"
+        log_error "Failed to secure temp file: $temp_patched"
+        return 1
+    fi
     # FIX [P3-H3]: use _secure_shred() for this plaintext patched temp file
     register_cleanup "_secure_shred" "$temp_patched"
 
@@ -743,7 +767,13 @@ PYEOF
     # SECRETS_FILE for a fully atomic two-step replace.
     local temp_enc
     temp_enc=$(mktemp --suffix=.yaml --tmpdir="$(dirname "$SECRETS_FILE")")
-    chmod 600 "$temp_enc"
+    # BUG-#30 FIX: Make chmod failure a hard abort — if we can't secure the
+    # temp file, we must not proceed as secrets could be exposed to other users.
+    if ! install -m 600 /dev/null "$temp_enc" 2>/dev/null; then
+        rm -f "$temp_enc"
+        log_error "Failed to secure temp file: $temp_enc"
+        return 1
+    fi
     cp "$temp_patched" "$temp_enc"
 
     if ! encrypt_sops_file "$temp_enc" "$AGE_KEY_FILE"; then
@@ -806,7 +836,13 @@ do_edit() {
 
     local temp_file
     temp_file=$(mktemp --suffix=.yaml)
-    chmod 600 "$temp_file"
+    # BUG-#30 FIX: Make chmod failure a hard abort — if we can't secure the
+    # temp file, we must not proceed as secrets could be exposed to other users.
+    if ! install -m 600 /dev/null "$temp_file" 2>/dev/null; then
+        rm -f "$temp_file"
+        log_error "Failed to secure temp file: $temp_file"
+        return 1
+    fi
     # FIX [P3-H3]: use _secure_shred() for this plaintext temp file
     register_cleanup "_secure_shred" "$temp_file"
 
@@ -877,7 +913,13 @@ do_edit() {
     # we then mv its output over SECRETS_FILE.
     local encrypted_temp
     encrypted_temp=$(mktemp --suffix=.yaml --tmpdir="$(dirname "$SECRETS_FILE")")
-    chmod 600 "$encrypted_temp"
+    # BUG-#30 FIX: Make chmod failure a hard abort — if we can't secure the
+    # temp file, we must not proceed as secrets could be exposed to other users.
+    if ! install -m 600 /dev/null "$encrypted_temp" 2>/dev/null; then
+        rm -f "$encrypted_temp"
+        log_error "Failed to secure temp file: $encrypted_temp"
+        return 1
+    fi
     cp "$temp_file" "$encrypted_temp"
 
     if ! encrypt_sops_file "$encrypted_temp" "$AGE_KEY_FILE"; then
@@ -914,7 +956,13 @@ _export_recovery_kit_safe() {
 
     local temp_plain
     temp_plain=$(mktemp --suffix=.yaml)
-    chmod 600 "$temp_plain"
+    # BUG-#30 FIX: Make chmod failure a hard abort — if we can't secure the
+    # temp file, we must not proceed as secrets could be exposed to other users.
+    if ! install -m 600 /dev/null "$temp_plain" 2>/dev/null; then
+        rm -f "$temp_plain"
+        log_error "Failed to secure temp file: $temp_plain"
+        return 1
+    fi
     register_cleanup "_secure_shred" "$temp_plain"
 
     # FIX-ES1: Re-establish SOPS env before calling sops directly.

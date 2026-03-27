@@ -371,6 +371,13 @@ prepare_docker_secrets() {
 
   # Clean existing secret files atomically
   if [[ -d "$secrets_dir" ]]; then
+    # BUG-#32 FIX: Validate secrets_dir resolves inside PROJECT_ROOT before rm -rf.
+    local _resolved_secrets_dir
+    _resolved_secrets_dir=$(realpath -m "$secrets_dir" 2>/dev/null || echo "")
+    if [[ -z "$_resolved_secrets_dir" || "$_resolved_secrets_dir" != "${PROJECT_ROOT}"* ]]; then
+      log_error "startup.sh: secrets_dir '$secrets_dir' resolves outside PROJECT_ROOT — refusing rm -rf"
+      return 1
+    fi
     rm -rf "${secrets_dir:?}"/*
   fi
 
