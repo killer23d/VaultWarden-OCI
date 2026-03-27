@@ -193,6 +193,38 @@ _prepare_secrets_cleanup() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# _validate_admin_token_format SECRETS_DIR
+#
+# BUG-#4 FIX: Enforce hashed admin_token — refuse to start with plaintext.
+# VaultWarden accepts Argon2id ($argon2id) or bcrypt ($2a/$2b/$2y) hashes.
+# A plain-text token is less secure and indicates setup-secrets.sh did not
+# hash it.  Call this after prepare_docker_secrets() writes the token file.
+# ---------------------------------------------------------------------------
+_validate_admin_token_format() {
+  local token_file="$1/admin_token"
+  if [[ ! -f "$token_file" ]]; then return 0; fi  # not yet written — skip
+  local token_val
+  token_val=$(cat "$token_file" 2>/dev/null || true)
+  case "$token_val" in
+    \$argon2*|\$2a\$*|\$2b\$*|\$2y\$*)
+      return 0  # hashed — OK
+      ;;
+    CHANGE_ME*|PLACEHOLDER*)
+      return 0  # placeholder — already caught by other validation
+      ;;
+    '')
+      return 0  # empty — already caught
+      ;;
+    *)
+      log_error "SECURITY: admin_token appears to be plain text (does not start with \$argon2, \$2a\$, \$2b\$, or \$2y\$)."
+      log_error "Run: ./setup-secrets.sh to generate a properly hashed token."
+      log_error "Refusing to start with a plain-text admin token."
+      return 1
+      ;;
+  esac
+}
+
 # ENHANCED: Prepare log directories with correct ownership
 prepare_log_directories() {
   log_info "Ensuring base state directory exists..."
@@ -459,6 +491,9 @@ PY
     log_warn "No secrets were created. Verify secrets.yaml contains valid values."
     return 1
   fi
+
+  # BUG-#4 FIX: Reject a plain-text admin_token before any service is started.
+  _validate_admin_token_format "$secrets_dir" || return 1
 
   return 0
 }

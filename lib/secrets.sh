@@ -117,6 +117,11 @@ generate_admin_token() {
     return 0
 }
 
+# SECURITY: Decrypted value is returned via printf to stdout (command substitution).
+# Callers MUST capture via local variable assignment only:
+#   local value; value=$(decrypt_secret "key") || return 1
+# NEVER pass the result directly as a positional argument to an external command:
+#   some_cmd "$(decrypt_secret "key")"  # WRONG: appears in /proc/$$/cmdline
 decrypt_secret() {
     local key="$1"
     local secrets_file="${2:-$SECRETS_FILE}"
