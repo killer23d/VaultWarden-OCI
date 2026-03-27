@@ -1345,6 +1345,21 @@ main() {
     # ------------------------------------------------------------------
     # Step 7: Stop services
     # ------------------------------------------------------------------
+    # BUG-#2 FIX: Install a safety-net ERR trap before stopping services so
+    # that if any step between here and the final `docker compose up -d`
+    # fails unexpectedly, services are automatically restarted.  Without this
+    # trap, `set -euo pipefail` would propagate the error and leave services
+    # permanently stopped, requiring manual intervention.
+    _restore_safety_net() {
+        local rc=$?
+        if [[ $rc -ne 0 ]]; then
+            log_warn "Restore encountered an error (exit $rc) — attempting to restart services..."
+            docker compose up -d --remove-orphans 2>/dev/null || \
+                log_error "CRITICAL: Failed to restart services after restore error. Manual intervention required: docker compose up -d"
+        fi
+    }
+    trap _restore_safety_net ERR
+
     if [[ "$DRY_RUN" != "true" ]]; then
         if docker compose ps --status running --services 2>/dev/null | grep -q .; then
             log_info "Stopping services..."
@@ -1403,6 +1418,9 @@ main() {
             log_error "Investigate with: docker compose logs --tail=50"
             exit 1
         fi
+        # BUG-#2 FIX: Services are now running — clear the safety-net ERR trap
+        # so errors in the post-startup health check do not trigger a restart.
+        trap - ERR
 
         log_info "Waiting for services to initialize (up to 60s)..."
         local max_wait=60 waited=0

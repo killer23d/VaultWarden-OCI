@@ -37,7 +37,29 @@ fi
 
 # FIX [M-17]: Separate assignment from export so the exit code of the command
 # substitution is not masked by the 'export' builtin under POSIX set -eu.
-_token=$(cat /run/secrets/caddy_cloudflare_dns_token) || { echo "ERROR: cannot read CF token" >&2; exit 1; }
+# BUG-#5 FIX: Capture stderr to distinguish permission-denied from other read
+# errors.  If the container user is non-root and the secret file is mode 0400
+# root-owned, cat will fail with "Permission denied" — surface that clearly.
+_caddy_secret_err=$(mktemp)
+# Ensure temp file is removed on any exit path (success or failure).
+trap 'rm -f "$_caddy_secret_err"' EXIT
+if ! _token=$(cat /run/secrets/caddy_cloudflare_dns_token 2>"$_caddy_secret_err"); then
+    _err=$(cat "$_caddy_secret_err" 2>/dev/null || true)
+    rm -f "$_caddy_secret_err"
+    case "$_err" in
+        *"Permission denied"*)
+            echo "ERROR: Permission denied reading Cloudflare token secret." >&2
+            echo "       The Caddy container must run as root (user: root) to read Docker secrets." >&2
+            echo "       Check the 'user:' directive in docker-compose.yml for the caddy service." >&2
+            ;;
+        *)
+            echo "ERROR: Cannot read Cloudflare API token secret: $_err" >&2
+            ;;
+    esac
+    exit 1
+fi
+rm -f "$_caddy_secret_err"
+trap - EXIT
 
 if [ -z "$_token" ]; then
     echo "ERROR: Cloudflare API token is empty" >&2

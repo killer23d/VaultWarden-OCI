@@ -108,13 +108,20 @@ _secure_shred() {
 }
 
 # ---------------------------------------------------------------------------
-# Cleanup
+# Cleanup — safe array-based dispatch; no eval.
+# register_cleanup FUNCTION ARG  — register a single-argument cleanup call.
+# perform_cleanup                — execute in reverse registration order.
 # ---------------------------------------------------------------------------
-CLEANUP_ACTIONS=()
-register_cleanup() { CLEANUP_ACTIONS+=("$1"); }
+CLEANUP_FUNCS=()
+CLEANUP_ARGS=()
+register_cleanup() { CLEANUP_FUNCS+=("$1"); CLEANUP_ARGS+=("$2"); }
 perform_cleanup() {
-    for ((idx=${#CLEANUP_ACTIONS[@]}-1; idx>=0; idx--)); do
-        eval "${CLEANUP_ACTIONS[$idx]}" 2>/dev/null || true
+    # BUG-#7 FIX: Execute cleanup actions without eval to eliminate shell
+    # injection risk.  Each action is stored as a (function, arg) pair in
+    # parallel arrays and dispatched via direct function call.
+    local idx
+    for ((idx=${#CLEANUP_FUNCS[@]}-1; idx>=0; idx--)); do
+        "${CLEANUP_FUNCS[$idx]}" "${CLEANUP_ARGS[$idx]}" 2>/dev/null || true
     done
 }
 trap perform_cleanup EXIT
@@ -421,7 +428,7 @@ do_view() {
     temp_file=$(mktemp)
     chmod 600 "$temp_file"
     # FIX [P3-H3]: use _secure_shred() instead of rm -f for plaintext temp file
-    register_cleanup "_secure_shred '$temp_file'"
+    register_cleanup "_secure_shred" "$temp_file"
 
     local sops_rc=0
     sops -d "$SECRETS_FILE" > "$temp_file" 2>&1 || sops_rc=$?
@@ -589,7 +596,7 @@ _deploy_docker_secrets() {
     temp_plain=$(mktemp --suffix=.yaml)
     chmod 600 "$temp_plain"
     # FIX [P3-H3]: use _secure_shred() for this plaintext temp file
-    register_cleanup "_secure_shred '$temp_plain'"
+    register_cleanup "_secure_shred" "$temp_plain"
 
     # FIX-ES1: Re-establish SOPS env before calling sops directly.
     if ! ensure_sops_env; then
@@ -664,7 +671,7 @@ do_rotate() {
     temp_plain=$(mktemp --suffix=.yaml)
     chmod 600 "$temp_plain"
     # FIX [P3-H3]: use _secure_shred() for this plaintext temp file
-    register_cleanup "_secure_shred '$temp_plain'"
+    register_cleanup "_secure_shred" "$temp_plain"
 
     # FIX-ES1: Re-establish SOPS env before calling sops directly.
     if ! ensure_sops_env; then
@@ -704,7 +711,7 @@ do_rotate() {
     temp_patched=$(mktemp --suffix=.yaml)
     chmod 600 "$temp_patched"
     # FIX [P3-H3]: use _secure_shred() for this plaintext patched temp file
-    register_cleanup "_secure_shred '$temp_patched'"
+    register_cleanup "_secure_shred" "$temp_patched"
 
     python3 - "$temp_plain" "$actual_field" "$new_value" "$temp_patched" << 'PYEOF'
 import sys, yaml
@@ -801,7 +808,7 @@ do_edit() {
     temp_file=$(mktemp --suffix=.yaml)
     chmod 600 "$temp_file"
     # FIX [P3-H3]: use _secure_shred() for this plaintext temp file
-    register_cleanup "_secure_shred '$temp_file'"
+    register_cleanup "_secure_shred" "$temp_file"
 
     # FIX-ES1: Re-establish SOPS env — validate_secrets() called ensure_sops_env()
     # but cleanup_secrets_environment() inside validate_secrets_decryption/yaml
@@ -908,7 +915,7 @@ _export_recovery_kit_safe() {
     local temp_plain
     temp_plain=$(mktemp --suffix=.yaml)
     chmod 600 "$temp_plain"
-    register_cleanup "_secure_shred '$temp_plain'"
+    register_cleanup "_secure_shred" "$temp_plain"
 
     # FIX-ES1: Re-establish SOPS env before calling sops directly.
     if ! ensure_sops_env; then

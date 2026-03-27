@@ -73,13 +73,13 @@ while [[ $# -gt 0 ]]; do
         --full-verification)      FULL_VERIFY=true; shift ;;
         --skip-full-verification) FULL_VERIFY=false; shift ;;
         --help)                   show_help; exit 0 ;;
-        *)                        log_error "Unknown option: $1"; show_help; exit 1 ;;
+        *)                        log_error "Unknown option: $1"; show_help; exit 2 ;;
     esac
 done
 
 if ! [[  "$KEEP_DAYS" =~ ^[0-9]+$ ]] || ! (( KEEP_DAYS >= 1 )); then
     log_error "Invalid --keep value: '${KEEP_DAYS}' — must be a positive integer (e.g. 14)"
-    exit 1
+    exit 2
 fi
 
 b_log_info()    { [[ "$QUIET" == "true" ]] || log_info "$*" >&2;    }
