@@ -104,6 +104,8 @@
 [[ -n "${VAULTWARDEN_CRYPTO_LIB_LOADED:-}" ]] && return 0
 readonly VAULTWARDEN_CRYPTO_LIB_LOADED=1
 
+set -euo pipefail
+
 # --- Configuration ---
 DEFAULT_AGE_KEY_FILE="secrets/keys/age-key.txt"
 

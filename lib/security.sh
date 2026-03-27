@@ -75,6 +75,8 @@ if [[ -n "${LIB_SECURITY_LOADED:-}" ]]; then
 fi
 readonly LIB_SECURITY_LOADED=1
 
+set -euo pipefail
+
 # Ensure common.sh is loaded first
 if [[ -z "${LIB_COMMON_LOADED:-}" ]]; then
     echo "Error: lib/common.sh must be loaded before lib/security.sh"

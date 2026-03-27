@@ -150,7 +150,15 @@ update_system_packages() {
         return 0
     fi
     apt-get update -qq
-    DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
+    # Issue #51: Add explicit dpkg conffile options to prevent interactive
+    # prompts when a package upgrade finds a modified config file.  Without
+    # these, dpkg can still prompt under certain conditions even with
+    # DEBIAN_FRONTEND=noninteractive, hanging the systemd timer indefinitely.
+    # --force-confdef: accept the default (keep or replace) automatically.
+    # --force-confold: keep the existing config if no default is defined.
+    DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
+        -o Dpkg::Options::="--force-confdef" \
+        -o Dpkg::Options::="--force-confold"
     if [[ -f /var/run/reboot-required ]]; then
         log_warn "A system reboot is required due to package updates."
     fi
@@ -171,6 +179,7 @@ check_image_updates() {
     fi
 
     local updated=0
+    local failed=0
     for image in "${images[@]}"; do
         log_info "  Pulling $image..."
         if [[ "$DRY_RUN" == "true" ]]; then
@@ -180,7 +189,13 @@ check_image_updates() {
 
         local old_id new_id
         old_id=$(docker inspect --format='{{.Id}}' "$image" 2>/dev/null || echo "")
-        docker pull "$image" --quiet 2>/dev/null || docker pull "$image" 2>&1 | tail -1
+        # Issue #21: use pull_image_with_retry() for exponential backoff and
+        # permanent-error detection; track failures so caller sees non-zero.
+        if ! pull_image_with_retry "$image"; then
+            log_error "  [FAILED] Could not pull: $image"
+            (( failed++ )) || true
+            continue
+        fi
         new_id=$(docker inspect --format='{{.Id}}' "$image" 2>/dev/null || echo "")
 
         if [[ -n "$old_id" && "$old_id" != "$new_id" ]]; then
@@ -196,7 +211,9 @@ check_image_updates() {
     else
         log_info "All Docker images are up to date"
     fi
-    return 0
+
+    # Issue #21: return non-zero if any pull failed so caller can warn.
+    (( failed > 0 )) && return 1 || return 0
 }
 
 verify_image_digests() {
@@ -217,6 +234,8 @@ verify_image_digests() {
         digest=$(docker inspect --format='{{index .RepoDigests 0}}' "$image" 2>/dev/null | awk -F'@' '{print $2}' || echo "")
         if [[ -z "$digest" ]]; then
             log_warn "  No digest available for $image (local-only image?)"
+            # Issue #22: count missing digests as failures so caller is notified.
+            (( failed++ )) || true
         else
             log_info "  Digest integrity OK for $image (${digest:0:18}...)"
         fi
@@ -259,7 +278,10 @@ run_pre_update_backup() {
         return 0
     fi
     log_info "Creating pre-update safety backup..."
-    if "${SCRIPT_DIR}/backup.sh" --type db --quiet; then
+    # Issue #47: --quiet removed so backup failure details appear in the update
+    # log and operators can diagnose the cause without inspecting backup logs
+    # separately.
+    if "${SCRIPT_DIR}/backup.sh" --type db; then
         log_success "Pre-update safety backup created"
     else
         log_warn "Pre-update backup failed — continuing with update anyway"

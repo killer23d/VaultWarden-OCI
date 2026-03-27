@@ -10,8 +10,10 @@ OnFailure=vaultwarden-notify-failure@%n.service
 Type=oneshot
 WorkingDirectory=/opt/vaultwarden-scripts
 EnvironmentFile=/etc/vaultwarden/vaultwarden.env
-# Clear any stale lock files left by a prior crash or hard reboot.
-ExecStartPre=/bin/bash -c 'rm -f /run/lock/vaultwarden-*.lock'
+# Clear only this service's stale lock file left by a prior crash or hard reboot.
+# Scoped to avoid racing with restore.sh or maintenance.sh that may hold
+# their own lock files concurrently (e.g. after Persistent=true catch-up).
+ExecStartPre=/bin/bash -c 'rm -f /run/lock/vaultwarden-backup.lock'
 ExecStart=/opt/vaultwarden-scripts/backup.sh --type full --rclone --email
 User=root
 StandardOutput=journal
@@ -24,5 +26,10 @@ ProtectHome=yes
 # /run/lock needed for flock() lock file (ProtectSystem=strict makes /var/lock read-only)
 ReadWritePaths=/opt/vaultwarden-scripts /var/lib/vaultwarden /etc/vaultwarden /run/lock
 TimeoutStartSec=7200
-# Exit 1 = warning (e.g. rclone not configured); treat as success.
+# Exit code contract (matches backup.sh):
+#   0 = full success (backup created, rclone synced)
+#   1 = partial success / warning (rclone not configured, offsite sync failed
+#       but local backup is intact) — treated as success so OnFailure= is silent
+#   2 = fatal failure (env load failed, age key missing/corrupt, backup
+#       creation failed, encryption failed) — triggers OnFailure=
 SuccessExitStatus=0 1

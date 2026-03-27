@@ -26,7 +26,7 @@ LIST_ONLY=false      # set by --list; print existing backups and exit (no root n
 RCLONE_SYNC=false    # set by --rclone; sync encrypted backup to rclone remote after creation
 FULL_VERIFY=false    # set by --full-verification; decrypt + integrity check before sync
 
-LOCK_FD=9
+LOCK_FD=""   # Assigned by exec {LOCK_FD}>file (bash 4.1+ automatic FD allocation)
 
 show_help() {
     cat << 'EOF'
@@ -87,7 +87,14 @@ b_log_success() { [[ "$QUIET" == "true" ]] || log_success "$*" >&2; }
 b_log_warn()    { [[ "$QUIET" == "true" ]] || log_warn "$*" >&2;    }
 
 TMPDIR_BACKUP=""
-cleanup() { [[ -n "$TMPDIR_BACKUP" ]] && rm -rf "$TMPDIR_BACKUP" 2>/dev/null || true; }
+LOCK_FILE=""   # Promoted to script level so cleanup() can remove it on EXIT
+cleanup() {
+    [[ -n "$TMPDIR_BACKUP" ]] && rm -rf "$TMPDIR_BACKUP" 2>/dev/null || true
+    # Remove the lock file so it does not block the next invocation.
+    # Under systemd (ProtectSystem=strict), /run/lock is tmpfs and resets on
+    # reboot anyway; this matters for manual/sudo invocations.
+    [[ -n "${LOCK_FILE:-}" ]] && rm -f "$LOCK_FILE" 2>/dev/null || true
+}
 
 _set_cloexec_on_fd() {
     local fd="$1"
@@ -942,12 +949,16 @@ main() {
     # but ProtectSystem=strict in systemd units makes /var/lock read-only while
     # /run/lock remains writable (it is a tmpfs mount).  Using /run/lock
     # directly avoids the read-only filesystem error when running under systemd.
-    local LOCK_FILE="/run/lock/vaultwarden-backup.lock"
+    # LOCK_FILE is a script-level variable (declared at the top) so cleanup()
+    # can remove it unconditionally on EXIT via the trap set above.
+    LOCK_FILE="/run/lock/vaultwarden-backup.lock"
 
     if [[ "$FORCE" != "true" && "$DRY_RUN" != "true" ]]; then
-        eval "exec ${LOCK_FD}>\"$LOCK_FILE\""
+        # Issue #10: Use bash 4.1+ automatic FD allocation instead of hardcoded
+        # FD 9, which could silently clobber an already-open file descriptor.
+        exec {LOCK_FD}>"$LOCK_FILE"
         _set_cloexec_on_fd "$LOCK_FD"
-        if ! flock -n $LOCK_FD; then
+        if ! flock -n "$LOCK_FD"; then
             log_error "Another backup is already running (could not acquire lock)."
             log_info  "Wait for it to finish or use --force if you are certain it is stuck."
             log_error "If the lock is stale, remove: ${LOCK_FILE}"
@@ -960,7 +971,7 @@ main() {
     umask 077
     TMPDIR_BACKUP="$(mktemp -d -t vw_backup.XXXXXXXXXX)" || {
         log_error "Failed to create secure temporary directory"
-        exit 1
+        exit 2
     }
     umask "$old_umask"
 
@@ -970,7 +981,7 @@ main() {
         log_header "VaultWarden-OCI Backup"
     fi
 
-    load_env_file || { log_error "Failed to load .env"; exit 1; }
+    load_env_file || { log_error "Failed to load .env"; exit 2; }
 
     local state_dir
     state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
@@ -982,7 +993,7 @@ main() {
     local age_key_file
     age_key_file=$(_resolve_age_key) || {
         log_error "Age key file not found: $age_key_file"
-        exit 1
+        exit 2
     }
 
     # Wire: verify age key health (permissions, ownership, crypto roundtrip)
@@ -992,14 +1003,14 @@ main() {
         SOPS_AGE_KEY_FILE="$age_key_file" simple_verify_age_key || {
             log_error "Age key health check failed — aborting backup to avoid encrypting with a bad key."
             log_error "Run './health.sh --comprehensive' for diagnostics."
-            exit 1
+            exit 2
         }
     fi
 
     local age_pub_key
     age_pub_key=$(get_age_public_key "$age_key_file") || {
         log_error "Could not read Age public key from $age_key_file"
-        exit 1
+        exit 2
     }
 
     local actual_type="$BACKUP_TYPE"
@@ -1025,7 +1036,7 @@ main() {
                 && backup_success=true
             ;;
         *)
-            log_error "Invalid backup type: $actual_type"; exit 1 ;;
+            log_error "Invalid backup type: $actual_type"; exit 2 ;;
     esac
 
     if [[ "$backup_success" == "true" && "$DRY_RUN" == "false" ]]; then
@@ -1037,7 +1048,7 @@ main() {
             if ! verify_backup_full "$backup_file" "$actual_type" "$TMPDIR_BACKUP"; then
                 log_error "Backup verification failed — discarding corrupt archive."
                 rm -f "$backup_file" "${backup_file}.meta" "${backup_file}.sha256"
-                exit 1
+                exit 2
             fi
         else
             if ! verify_backup_quick "$backup_file" "$age_key_file"; then
@@ -1118,7 +1129,7 @@ main() {
             send_notification_email "$subject" "$body" 2>/dev/null || true
         fi
         log_error "Backup failed"
-        exit 1
+        exit 2
     fi
 }
 

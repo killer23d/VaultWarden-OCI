@@ -59,6 +59,8 @@
 [[ -n "${VAULTWARDEN_DOCKER_LIB_LOADED:-}" ]] && return 0
 readonly VAULTWARDEN_DOCKER_LIB_LOADED=1
 
+set -euo pipefail
+
 # ---------------------------------------------------------------------------
 # DOCKER_PROJECT_LABEL — default guard
 #
@@ -434,7 +436,10 @@ exec_oneshot_in_service() {
     docker container start "$container_id" >/dev/null 2>&1 || start_rc=$?
     if [[ $start_rc -ne 0 ]]; then
         log_error "exec_oneshot_in_service: 'docker container start' failed (rc=${start_rc}) for service '$service'"
-        docker container rm -f "$container_id" >/dev/null 2>&1 || true
+        local docker_err
+        if ! docker_err=$(docker container rm -f "$container_id" 2>&1 >/dev/null); then
+            log_debug "exec_oneshot_in_service: docker container rm failed (non-fatal): $docker_err"
+        fi
         return 1
     fi
 
@@ -444,7 +449,10 @@ exec_oneshot_in_service() {
     # Replay container output (stdout+stderr) through our logger.
     docker container logs "$container_id" 2>&1 || true
 
-    docker container rm -f "$container_id" >/dev/null 2>&1 || true
+    local docker_err
+    if ! docker_err=$(docker container rm -f "$container_id" 2>&1 >/dev/null); then
+        log_debug "exec_oneshot_in_service: docker container rm failed (non-fatal): $docker_err"
+    fi
 
     return "${exit_code:-1}"
 }
@@ -514,7 +522,10 @@ cleanup_containers() {
     if ! require_docker; then return 1; fi
     local _prune_args=()
     mapfile -t _prune_args < <(_docker_prune_filter)
-    docker container prune -f "${_prune_args[@]}" >/dev/null 2>&1
+    local docker_err
+    if ! docker_err=$(docker container prune -f "${_prune_args[@]}" 2>&1 >/dev/null); then
+        log_debug "cleanup_containers: docker container prune failed (non-fatal): $docker_err"
+    fi
     return 0
 }
 
@@ -523,7 +534,10 @@ cleanup_images() {
     if ! require_docker; then return 1; fi
     local _prune_args=()
     mapfile -t _prune_args < <(_docker_prune_filter)
-    docker image prune -f "${_prune_args[@]}" >/dev/null 2>&1
+    local docker_err
+    if ! docker_err=$(docker image prune -f "${_prune_args[@]}" 2>&1 >/dev/null); then
+        log_debug "cleanup_images: docker image prune failed (non-fatal): $docker_err"
+    fi
     return 0
 }
 
@@ -553,12 +567,18 @@ cleanup_volumes() {
         # label filter supported — safe to use volume prune
         local _prune_args=()
         mapfile -t _prune_args < <(_docker_prune_filter)
-        docker volume prune -f "${_prune_args[@]}" >/dev/null 2>&1
+        local docker_err
+        if ! docker_err=$(docker volume prune -f "${_prune_args[@]}" 2>&1 >/dev/null); then
+            log_debug "cleanup_volumes: docker volume prune failed (non-fatal): $docker_err"
+        fi
     else
         # Older engine: fall back to compose-scoped volume removal
         log_debug "cleanup_volumes: Docker Engine ${docker_version_str} < 25.0; "\
                   "falling back to 'docker compose down -v' for safe scoped volume cleanup"
-        docker compose down -v >/dev/null 2>&1 || true
+        local docker_err
+        if ! docker_err=$(docker compose down -v 2>&1 >/dev/null); then
+            log_debug "cleanup_volumes: docker compose down -v failed (non-fatal): $docker_err"
+        fi
     fi
     return 0
 }
@@ -568,7 +588,10 @@ cleanup_networks() {
     if ! require_docker; then return 1; fi
     local _prune_args=()
     mapfile -t _prune_args < <(_docker_prune_filter)
-    docker network prune -f "${_prune_args[@]}" >/dev/null 2>&1
+    local docker_err
+    if ! docker_err=$(docker network prune -f "${_prune_args[@]}" 2>&1 >/dev/null); then
+        log_debug "cleanup_networks: docker network prune failed (non-fatal): $docker_err"
+    fi
     return 0
 }
 
@@ -636,9 +659,22 @@ wait_for_service_ready() {
     log_info "Waiting for service '$service' to become ready (timeout: ${timeout}s)..."
 
     while [[ $count -lt $timeout ]]; do
-        local current_status current_health
-        current_status=$(get_service_status "$service")
-        current_health=$(get_service_health "$service")
+        local current_status current_health raw_json
+        # Issue #58: wrap docker compose ps in timeout 10 so a hung Docker
+        # daemon does not block the entire polling loop indefinitely.
+        raw_json=$(timeout 10 docker compose ps "$service" --format json 2>/dev/null) || {
+            log_warn "wait_for_service_ready: docker compose ps timed out — daemon may be unresponsive"
+            sleep 2
+            count=$(( count + 1 ))
+            continue
+        }
+        current_status=$(printf '%s' "$raw_json" \
+            | jq -r 'if type == "array" then .[0].State // "not_found" else .State // "not_found" end' 2>/dev/null \
+            || echo "not_found")
+        current_health=$(printf '%s' "$raw_json" \
+            | jq -r 'if type == "array" then (.[0].Health // "none") else (.Health // "none") end' 2>/dev/null \
+            || echo "none")
+        current_health="${current_health:-none}"
 
         # AUD-D1 FIX: no-healthcheck containers — running + health=="none"
         # means healthy by definition; return immediately.

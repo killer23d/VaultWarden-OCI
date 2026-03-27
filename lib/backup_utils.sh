@@ -60,6 +60,8 @@
 [[ -n "${VAULTWARDEN_BACKUP_UTILS_LIB_LOADED:-}" ]] && return 0
 readonly VAULTWARDEN_BACKUP_UTILS_LIB_LOADED=1
 
+set -euo pipefail
+
 # ---------------------------------------------------------------------------
 # _format_bytes_human BYTES
 #

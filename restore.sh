@@ -1228,9 +1228,11 @@ main() {
     }
 
     local RESTORE_LOCK_FILE="/run/lock/vaultwarden-restore.lock"
-    local RESTORE_LOCK_FD=203
-    eval "exec ${RESTORE_LOCK_FD}>\"$RESTORE_LOCK_FILE\""
-    flock -n $RESTORE_LOCK_FD || {
+    # Issue #10: Use bash 4.1+ automatic FD allocation instead of hardcoded
+    # FD 203, which could silently clobber an already-open file descriptor.
+    local RESTORE_LOCK_FD
+    exec {RESTORE_LOCK_FD}>"$RESTORE_LOCK_FILE"
+    flock -n "$RESTORE_LOCK_FD" || {
         log_error "Another restore is already running."
         log_error "If the lock is stale, remove: ${RESTORE_LOCK_FILE}"
         exit 1

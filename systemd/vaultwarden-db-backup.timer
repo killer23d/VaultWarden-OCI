@@ -3,6 +3,9 @@ Description=VaultWarden DB Backup Timer daily 04:00
 # SY-2: Prevent this timer firing mid-shutdown and interrupting a live
 # SQLite WAL checkpoint.
 Conflicts=shutdown.target
+# Issue #57: OnFailure on the timer unit catches calendar parse errors or
+# systemd activation failures that would otherwise go unnotified.
+OnFailure=vaultwarden-notify-failure@%n.service
 
 [Timer]
 # FIX: "daily *-*-* 04:00:00" was invalid — two calendar expressions on one

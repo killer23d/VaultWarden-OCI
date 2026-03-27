@@ -50,6 +50,21 @@ NC     = \033[0m
 export DOCKER_BUILDKIT
 
 # ---------------------------------------------------------------------------
+# require-root — macro included at the start of any target needing root.
+# Issue #59: when sudo prompts for a password in a non-TTY Make session the
+# prompt is buffered and the mysterious 'Error 1' / timeout appears instead.
+# This macro provides a clear message so operators know exactly what to do.
+# ---------------------------------------------------------------------------
+define require-root
+@if [ "$$(id -u)" -ne 0 ]; then \
+    if ! sudo -n true 2>/dev/null; then \
+        printf '$(RED)Error: This target requires root. Run: sudo make $@$(NC)\n'; \
+        exit 1; \
+    fi; \
+fi
+endef
+
+# ---------------------------------------------------------------------------
 # help — grouped output using ##@ sections and ## descriptions
 # ---------------------------------------------------------------------------
 help: ## Show this help message
@@ -322,6 +337,7 @@ diagnose: ## Full diagnostic dump — versions, key status, disk, containers, la
 # so an operator who forgot TYPE=full gets clear feedback rather than silent
 # partial coverage.
 backup: ## Create backup (TYPE: db, full, emergency)
+	$(call require-root)
 	@echo "$(BLUE)Creating backup...$(NC)"
 	@if [ -z "$(TYPE)" ]; then \
 		echo "$(YELLOW)No TYPE specified — defaulting to TYPE=db (database only).$(NC)"; \
@@ -371,12 +387,14 @@ backup-status: ## Show backup health summary — last run, size, retention, coun
 	@echo "$(GREEN)Run 'make list-backups' for full listing or 'make diagnose' for complete system state.$(NC)"
 
 restore: ## Interactive restore — prompts for backup selection and age key
+	$(call require-root)
 	@echo "$(BLUE)Starting interactive restore...$(NC)"
 	@sudo ./restore.sh
 
 # FIX [item 4]: restore-db no longer passes --force so the age key prompt and
 # confirmation step run as intended. Use --force explicitly if you need to skip.
 restore-db: ## Restore latest database backup (interactive confirmation + key prompt)
+	$(call require-root)
 	@echo "$(BLUE)Restoring latest database backup...$(NC)"
 	@sudo ./restore.sh --type db --latest
 
@@ -398,13 +416,10 @@ restore-remote: ## Restore from a remote (rclone) backup — interactive selecti
 # MAKE-KR2 [LOW]: Added key-health pre-flight before rotation so a corrupt
 # or unreadable key is caught with a clear message before any write occurs.
 key-rotate: ## Rotate the age encryption key (generates new key, updates all locations)
+	$(call require-root)
 	@echo "$(BLUE)Rotating age encryption key...$(NC)"
 	@echo "$(YELLOW)WARNING: After rotation, new backups will use the new key.$(NC)"
 	@echo "$(YELLOW)Keep the new key displayed at the end in a secure location.$(NC)"
-	@if [ "$$(id -u)" -ne 0 ]; then \
-		echo "$(RED)Error: key rotation requires sudo: sudo make key-rotate$(NC)"; \
-		exit 1; \
-	fi
 	@echo "$(BLUE)Pre-flight: checking current age key health...$(NC)"
 	@bash -c 'set -euo pipefail; source lib/simple_key_resilience.sh; check_age_key_health' || \
 		{ echo "$(YELLOW)Warning: key health check failed — proceeding anyway (key may not yet exist).$(NC)"; true; }
@@ -439,22 +454,26 @@ key-health: ## Check age key health (permissions, decodability, SOPS_AGE_KEY_FIL
 # ---------------------------------------------------------------------------
 
 update: ## Update container images (briefly stops services)
+	$(call require-root)
 	@echo "$(YELLOW)NOTE: Services will be briefly stopped during the image update.$(NC)"
 	@echo "$(BLUE)Updating container images...$(NC)"
 	@./update.sh
 	@echo "$(GREEN)Update completed successfully!$(NC)"
 
 update-system: ## Update system packages and containers with email notification
+	$(call require-root)
 	@echo "$(YELLOW)NOTE: Services will be briefly stopped during the update.$(NC)"
 	@echo "$(BLUE)Updating system and containers...$(NC)"
 	@./update.sh --system --email
 
 maintenance: ## Run comprehensive maintenance (cleanup, Docker, DB, DNS, firewall)
+	$(call require-root)
 	@echo "$(BLUE)Running maintenance tasks...$(NC)"
 	@sudo ./maintenance.sh --comprehensive
 	@echo "$(GREEN)Maintenance completed successfully!$(NC)"
 
 maintenance-full: ## Run full maintenance with email notification
+	$(call require-root)
 	@echo "$(BLUE)Running comprehensive maintenance...$(NC)"
 	@sudo ./maintenance.sh --comprehensive --email
 
@@ -475,11 +494,13 @@ db-backup: ## Quick database-only backup
 # ---------------------------------------------------------------------------
 
 systemd-install: ## Install systemd timer units and sync scripts to /opt
+	$(call require-root)
 	@echo "$(BLUE)Installing systemd timer units...$(NC)"
 	@sudo ./setup-systemd.sh --install
 	@echo "$(GREEN)Systemd units installed. Run 'make timers' to verify.$(NC)"
 
 systemd-remove: ## Remove all vaultwarden systemd timer units
+	$(call require-root)
 	@echo "$(YELLOW)Removing systemd timer units...$(NC)"
 	@sudo ./setup-systemd.sh --remove
 
