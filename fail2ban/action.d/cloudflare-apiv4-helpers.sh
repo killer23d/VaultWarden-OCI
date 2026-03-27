@@ -15,11 +15,15 @@
 # Returns 1 on chmod failure (hard error — would expose live CF token).
 # ---------------------------------------------------------------------------
 _make_curl_cfg() {
+  # BUG-#16 FIX: Use install -m 600 to create the temp file at mode 600
+  # atomically, eliminating the mktemp (world-readable) → chmod 600 race window.
+  # The bearer token is never written until after the file is secured.
   local cfg
   cfg="$(mktemp)"
-  if ! chmod 600 "$cfg" 2>/dev/null; then
+  # Secure the file atomically before writing the bearer token.
+  if ! install -m 600 /dev/null "$cfg" 2>/dev/null; then
     rm -f "$cfg"
-    echo "[cloudflare-apiv4] ERROR: chmod 600 failed on curl config tempfile — aborting to protect CF token" >&2
+    echo "[cloudflare-apiv4] ERROR: Failed to secure curl config tempfile — aborting to protect CF token" >&2
     return 1
   fi
   printf "header = \"Authorization: Bearer %s\"\nheader = \"Content-Type: application/json\"\n" \
@@ -43,9 +47,11 @@ _cf_api_call() {
 
   if [ -n "$body" ]; then
     http_code=$(curl -sS -o "$response_file" -D "$header_file" -w "%{http_code}" \
+      --connect-timeout 10 --max-time 30 \
       --config "$cfg_file" -X "$method" "$endpoint" --data "$body" || echo "000")
   else
     http_code=$(curl -sS -o "$response_file" -D "$header_file" -w "%{http_code}" \
+      --connect-timeout 10 --max-time 30 \
       --config "$cfg_file" -X "$method" "$endpoint" || echo "000")
   fi
   rm -f "$cfg_file" 2>/dev/null || true
@@ -97,7 +103,15 @@ _cf_retry() {
     out="$(_cf_api_call "$endpoint" "$method" "$body")" && { printf "%s" "$out"; return 0; }
     rc=$?
     if [ "$rc" -eq 2 ] && printf "%s" "$out" | grep -q "^RETRY_AFTER:"; then
-      sleep "${out#RETRY_AFTER:}"
+      retry_delay="${out#RETRY_AFTER:}"
+      # BUG-#37 FIX: Validate Retry-After is a positive integer and clamp to
+      # max 60s to prevent injected header values from hanging Fail2Ban.
+      # Non-numeric or out-of-range values fall back to the safe default of 5s.
+      case "$retry_delay" in
+        ''|*[!0-9]*) retry_delay=5 ;;
+      esac
+      if [ "$retry_delay" -gt 60 ]; then retry_delay=60; fi
+      sleep "$retry_delay"
     else
       # Pick the i-th element from the static delay table (falls back to last).
       delay="$(printf "%s" "$delays" | awk -v n="$i" '{

@@ -16,6 +16,12 @@ Description=VaultWarden Failure Notification for %i
 #   service units. The notify-failure service runs as root and calls
 #   send_email(), which creates temp files via mktemp in _email_bearer_post().
 #   PrivateTmp=yes isolates those temp files from the shared /tmp namespace.
+#
+# BUG-#8 FIX: Assign %i to shell variable before use to prevent word-split
+#   on unit names with special chars. %i is now assigned to FAILED_UNIT at
+#   the top of the bash -c script, before any shell evaluation. The printf
+#   format string uses %s placeholders with $FAILED_UNIT as the argument, and
+#   the send_email subject uses ${FAILED_UNIT} instead of bare %i.
 
 [Service]
 Type=oneshot
@@ -23,11 +29,13 @@ WorkingDirectory=/opt/vaultwarden-scripts
 EnvironmentFile=/etc/vaultwarden/vaultwarden.env
 ExecStart=/bin/bash -c '\
   set -euo pipefail; \
+  FAILED_UNIT="%i"; \
   LIB_DIR=/opt/vaultwarden-scripts/lib; \
   source "${LIB_DIR}/common.sh"; \
   init_common_lib notify-failure; \
-  body=$(printf "The systemd unit %i failed at %%s.\nCheck logs with:\n  journalctl -u %i -n 50\n" "$(date)"); \
-  send_email "FAILURE: %i on $(hostname -f 2>/dev/null || hostname)" "${body}" \
+  body=$(printf "The systemd unit %s failed at %%s.\nCheck logs with:\n  journalctl -u %s -n 50\n" \
+    "$FAILED_UNIT" "$(date)" "$FAILED_UNIT"); \
+  send_email "FAILURE: ${FAILED_UNIT} on $(hostname -f 2>/dev/null || hostname)" "${body}" \
 '
 User=root
 SyslogIdentifier=vw-notify
