@@ -465,11 +465,21 @@ check_age_key() {
         }
 
         local round_trip_ok=false
+        # BUG-P4-6 FIX: Validate that the decrypted output matches the original
+        # plaintext byte-for-byte. A successful exit code from age -d only confirms
+        # the ciphertext was well-formed; it does not guarantee the key produced the
+        # correct plaintext (e.g. a truncated or partially-overwritten key file could
+        # decrypt to garbage with exit 0 in some age versions).
         if printf '%s' "$test_plaintext" \
                | age -r "$age_public_key" -o "$tmp_enc" 2>/dev/null; then
             local decrypted
-            decrypted=$(age -d -i "$age_key_file" "$tmp_enc" 2>/dev/null) || true
-            [[ "$decrypted" == "$test_plaintext" ]] && round_trip_ok=true
+            if decrypted=$(age -d -i "$age_key_file" "$tmp_enc" 2>/dev/null); then
+                if [[ "$decrypted" == "$test_plaintext" ]]; then
+                    round_trip_ok=true
+                else
+                    log_error "check_age_key: decrypt round-trip produced wrong output — key may be corrupt. Restore from backup: ${age_key_file}.bak or re-run key generation."
+                fi
+            fi
         fi
         rm -f "$tmp_enc"
 

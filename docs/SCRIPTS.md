@@ -889,9 +889,13 @@ source "lib/crypto.sh"
 # … additional libraries as needed
 ```
 
-### Flock-Based Mutual Exclusion (Systemd Timers)
+### Flock-Based Mutual Exclusion
 
-Health and maintenance timer-triggered services are wrapped with `flock -n LOCKFILE CMD`. If the previous run is still active, the new invocation exits immediately — no queuing, no duplicate alerts. Lock FD 9 is used throughout (within the POSIX-guaranteed range).
+All scripts use `flock -n` on a dedicated lock file per operation type.
+Lock file descriptors use **bash 4.1+ automatic FD allocation** (`exec {FD}>file`)
+so that no hardcoded FD number can silently clobber an open file descriptor
+inherited from the calling process or a library. The kernel releases the lock
+automatically on any process exit, including SIGKILL and OOM kill.
 
 ---
 

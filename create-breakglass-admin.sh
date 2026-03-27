@@ -728,6 +728,17 @@ main() {
         fi
     fi
 
+    # BUG-P4-10 FIX: Add flock guard to prevent concurrent --create/--remove
+    # invocations from racing on /etc/sudoers.d/ writes.
+    local _BG_LOCK_FILE="/run/lock/vaultwarden-breakglass.lock"
+    local _BG_LOCK_FD
+    exec {_BG_LOCK_FD}>"$_BG_LOCK_FILE"
+    if ! flock -n "$_BG_LOCK_FD"; then
+        log_error "Another breakglass operation is already running."
+        log_error "If the lock is stale, remove: ${_BG_LOCK_FILE}"
+        exit 1
+    fi
+
     # Handle user removal
     if [[ "$REMOVE_USER" == "true" ]]; then
         if remove_breakglass_user; then
