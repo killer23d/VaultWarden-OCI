@@ -64,6 +64,8 @@
 [[ -n "${VAULTWARDEN_KEY_RESILIENCE_LIB_LOADED:-}" ]] && return 0
 readonly VAULTWARDEN_KEY_RESILIENCE_LIB_LOADED=1
 
+set -euo pipefail
+
 # === TIER 1: Age Key Health Check ===
 
 # BUG-R1 FIX: replaced stat -c '%a' (GNU-only) with _stat_octal_perms_local()

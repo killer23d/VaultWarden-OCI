@@ -3,11 +3,19 @@ Description=VaultWarden Full Backup Timer Sunday 03:00
 # SY-2: Prevent this timer firing mid-shutdown and interrupting a live
 # SQLite WAL checkpoint.
 Conflicts=shutdown.target
+# Issue #57: OnFailure on the timer unit catches calendar parse errors or
+# systemd activation failures that would otherwise go unnotified.
+OnFailure=vaultwarden-notify-failure@%n.service
 
 [Timer]
 # Weekly full backup every Sunday at 03:00.
 # Weekday-prefixed form: "Sun *-*-* 03:00:00" is valid systemd calendar syntax.
 OnCalendar=Sun *-*-* 03:00:00
+# Issue #56: With Persistent=true and a weekly schedule, if the host is down
+# for more than one week only a single catch-up backup fires on next boot.
+# This is expected systemd behaviour (it replays only the most recent missed
+# activation, not every missed one). Ensure external monitoring or alerting
+# is in place so a multi-week outage does not silently lose backup coverage.
 Persistent=true
 # P2-H: Extended RandomizedDelaySec to 300 s (5 min) for the heaviest
 # job (full backup) to give maximum spread after an unclean reboot burst.

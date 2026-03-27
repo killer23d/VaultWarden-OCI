@@ -118,6 +118,8 @@ fi
 [[ -n "${LIB_EMAIL_LOADED:-}" ]] && return 0
 readonly LIB_EMAIL_LOADED=1
 
+set -euo pipefail
+
 # -- DRIVER REGISTRY ----------------------------------------------------------
 # Key   = value accepted in EMAIL_PROVIDER env var
 # Value = suffix of the driver function (_email_driver_<value>)

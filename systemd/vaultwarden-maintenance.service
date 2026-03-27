@@ -10,9 +10,11 @@ OnFailure=vaultwarden-notify-failure@%n.service
 Type=oneshot
 WorkingDirectory=/opt/vaultwarden-scripts
 EnvironmentFile=/etc/vaultwarden/vaultwarden.env
-# Clear any stale lock files left by a prior crash or hard reboot.
+# Clear only this service's stale lock file left by a prior crash or hard reboot.
 # /run/lock is a tmpfs — a file here after reboot is always stale.
-ExecStartPre=/bin/bash -c 'rm -f /run/lock/vaultwarden-*.lock'
+# Scoped to avoid racing with backup.sh or restore.sh that may hold their
+# own lock files concurrently (e.g. after Persistent=true catch-up).
+ExecStartPre=/bin/bash -c 'rm -f /run/lock/vaultwarden-maintenance.lock'
 ExecStart=/opt/vaultwarden-scripts/maintenance.sh --comprehensive
 User=root
 StandardOutput=journal

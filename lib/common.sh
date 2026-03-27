@@ -190,6 +190,21 @@ load_env_file() {
                 return 1
             fi
         fi
+    else
+        # Issue #42: Non-root — cannot enforce strict permissions, but warn if
+        # the file is world-readable since it may contain secrets.
+        local file_perms
+        file_perms=$(stat -c '%a' "$env_file" 2>/dev/null \
+                     || stat -f '%OLp' "$env_file" 2>/dev/null \
+                     || printf 'unknown')
+
+        if [[ "$file_perms" != "unknown" ]]; then
+            local perm_int=$(( 8#${file_perms} ))
+            if (( perm_int & 0004 )); then
+                log_warn "load_env_file: '$env_file' is world-readable (${file_perms})." \
+                         " Consider: chmod 640 '$env_file'"
+            fi
+        fi
     fi
 
     log_debug "Loading environment from: $env_file"
@@ -374,10 +389,20 @@ get_real_user() {
 CLEANUP_ACTIONS_MAX_SIZE="${CLEANUP_ACTIONS_MAX_SIZE:-64}"
 declare -a CLEANUP_ACTIONS=()
 
+# Separator token used to store multiple arguments in a single CLEANUP_ACTIONS element.
+# Unit-separator (0x1f) is safe: it cannot appear in normal shell arguments.
+# Defined at module scope to document the protocol; inlined in each function so
+# neither register_cleanup nor perform_cleanup requires an exported variable.
+_CLEANUP_SEP=$'\x1f'
+
 register_cleanup() {
-    local serialised
-    serialised=$(printf '%q ' "$@")
-    serialised="${serialised% }"
+    # Serialise all arguments with the unit-separator so eval is not needed.
+    local _sep=$'\x1f'
+    local serialised="" sep="" arg
+    for arg in "$@"; do
+        serialised+="${sep}${arg}"
+        sep="$_sep"
+    done
 
     local entry
     for entry in "${CLEANUP_ACTIONS[@]+${CLEANUP_ACTIONS[@]}}"; do
@@ -402,9 +427,15 @@ perform_cleanup() {
 
     for (( idx = ${#CLEANUP_ACTIONS[@]} - 1; idx >= 0; idx-- )); do
         entry="${CLEANUP_ACTIONS[$idx]}"
-        eval "set -- ${entry}"  # shellcheck disable=SC2034
-        if ! "$@"; then
-            log_warn "Cleanup action failed (exit $?): $entry"
+        # Split on separator without eval — no shell injection risk.
+        # The separator matches the one used in register_cleanup.
+        local _sep=$'\x1f'
+        local action_args=()
+        IFS="$_sep" read -r -a action_args <<< "$entry"
+        if [[ ${#action_args[@]} -gt 0 ]]; then
+            if ! "${action_args[@]}"; then
+                log_warn "Cleanup action failed: ${action_args[*]}"
+            fi
         fi
     done
 
@@ -539,7 +570,7 @@ _resolve_rate_limit_dir() {
 _rate_limit_check() {
     local subject="$1"
     local rate_limit_dir="$2"
-    local last_email_file="$rate_limit_dir/.vw_last_email_$(printf '%s' "$subject" | md5sum | cut -d' ' -f1)"
+    local last_email_file="$rate_limit_dir/.vw_last_email_$(printf '%s' "$subject" | sha256sum | cut -c1-16)"
 
     if [[ "$subject" != *"CRITICAL"* ]] && [[ -f "$last_email_file" ]]; then
         local last_time current_time

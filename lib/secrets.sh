@@ -38,6 +38,8 @@ _SECRETS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${_SECRETS_LIB_DIR}/crypto.sh"
 unset _SECRETS_LIB_DIR
 
+set -euo pipefail
+
 # Configuration
 SECRETS_FILE="${SECRETS_FILE:-secrets/secrets.yaml}"
 AGE_KEY_FILE="${AGE_KEY_FILE:-secrets/keys/age-key.txt}"
