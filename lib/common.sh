@@ -889,7 +889,7 @@ init_common_lib() {
     # A plaintext token is a security risk; Vaultwarden requires bcrypt.
     if [[ -n "${ADMIN_TOKEN:-}" && "${ADMIN_TOKEN}" != '$2y$'* ]]; then
         echo "ERROR: ADMIN_TOKEN is set but does not appear to be a bcrypt hash (expected prefix: \$2y\$)." >&2
-        echo "       Hash your admin token with: echo -n 'yourpassword' | argon2 ... or use setup-secrets.sh" >&2
+        echo "       Hash your admin token with bcrypt, e.g. via: htpasswd -bnBC 12 '' 'yourpassword' | tr -d ':\n' or use setup-secrets.sh" >&2
         exit 1
     fi
 
