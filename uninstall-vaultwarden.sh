@@ -4,7 +4,7 @@
 # Run from the user's home directory: bash ~/uninstall-vaultwarden.sh
 # Must be run as root (or via sudo).
 
-set -uo pipefail
+set -euo pipefail
 
 # ─── Colour helpers ──────────────────────────────────────────────────────────
 RED='\033[0;31m'; YELLOW='\033[1;33m'; GREEN='\033[0;32m'; RESET='\033[0m'
@@ -171,8 +171,13 @@ fi
 # ═══════════════════════════════════════════════════════════════
 # STEP 7 — Remove setup lock file
 # ═══════════════════════════════════════════════════════════════
-info "Step 7: Removing setup lock file..."
-rm -f /var/lock/vaultwarden-setup.lock && success "Removed /var/lock/vaultwarden-setup.lock" || true
+info "Step 7: Removing setup lock files..."
+# Remove both legacy (/var/lock) and current (/run/lock) paths for forward/backward compatibility.
+# /run/lock is a tmpfs and resets on reboot, but remove it here for manual-invocation cleanup.
+rm -f /var/lock/vaultwarden-setup.lock 2>/dev/null && \
+    success "Removed /var/lock/vaultwarden-setup.lock (legacy)" || true
+rm -f /run/lock/vaultwarden-setup.lock 2>/dev/null && \
+    success "Removed /run/lock/vaultwarden-setup.lock" || true
 
 # ═══════════════════════════════════════════════════════════════
 # STEP 8 — Remove SOPS binary

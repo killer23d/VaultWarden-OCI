@@ -949,8 +949,12 @@ main() {
     log_header "VaultWarden-OCI Setup - Security Hardened Edition"
     if ! is_root; then log_error "Must run as root."; exit 1; fi
     
-    local SETUP_LOCK_FILE="/var/lock/vaultwarden-setup.lock"
+    local SETUP_LOCK_FILE="/run/lock/vaultwarden-setup.lock"
     # BUG-#21 FIX: Use automatic FD allocation instead of hardcoded FD 202.
+    # BUG-#21-B FIX: /run/lock is the FHS-correct transient lock location; /var/lock
+    #   is a legacy symlink that ProtectSystem=strict makes read-only in systemd units.
+    # BUG-#21-C FIX: Register a trap to remove the lock file on EXIT so a crash
+    #   does not leave a stale lock that blocks the next invocation.
     local SETUP_LOCK_FD
     exec {SETUP_LOCK_FD}>"$SETUP_LOCK_FILE"
     if ! flock -n "$SETUP_LOCK_FD"; then
@@ -959,6 +963,8 @@ main() {
         log_error "If the lock is stale, remove: ${SETUP_LOCK_FILE}"
         exit 1
     fi
+    _setup_cleanup() { rm -f "$SETUP_LOCK_FILE" 2>/dev/null || true; }
+    trap _setup_cleanup EXIT HUP INT TERM
 
     if [[ -n "${SOPS_VERSION:-}" ]]; then
         log_info "SOPS version pinned: ${SOPS_VERSION}"
