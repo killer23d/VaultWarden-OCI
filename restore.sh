@@ -15,10 +15,20 @@ VW_OPERATIONS_LOCK="${VW_LOCK_DIR}/operations.lock"
 
 source "lib/common.sh"
 init_common_lib "$0"
-source "lib/docker.sh"                  2>/dev/null || true
-source "lib/backup_utils.sh"            2>/dev/null || true
-source "lib/crypto.sh"                  2>/dev/null || true
-source "lib/simple_key_resilience.sh"   2>/dev/null || true
+_source_lib() {
+    local lib="$1"
+    # shellcheck source=/dev/null
+    if ! source "$lib" 2>/dev/null; then
+        echo "ERROR: restore.sh: failed to load required library: $lib" >&2
+        echo "       Ensure you are running from the project root directory." >&2
+        exit 1
+    fi
+}
+_source_lib "lib/docker.sh"
+_source_lib "lib/backup_utils.sh"
+_source_lib "lib/crypto.sh"
+_source_lib "lib/simple_key_resilience.sh"
+unset -f _source_lib
 
 # ---------------------------------------------------------------------------
 # Configuration

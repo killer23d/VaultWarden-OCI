@@ -321,6 +321,18 @@ optimize_database() {
     local was_running=false
     is_service_running "vaultwarden" && was_running=true || log_warn "VaultWarden not running, will optimize offline database"
 
+    # Safety net: if anything causes an early exit after VaultWarden is stopped,
+    # ensure it is restarted. RETURN trap fires on both normal return and set -e exits.
+    _db_opt_cleanup() {
+        if [[ "$was_running" == "true" ]]; then
+            if ! is_service_running "vaultwarden" 2>/dev/null; then
+                log_warn "optimize_database: safety net restarting VaultWarden..."
+                docker compose up -d vaultwarden 2>&1 || log_error "Safety net restart failed — manual intervention required"
+            fi
+        fi
+    }
+    trap '_db_opt_cleanup' RETURN
+
     local size_bytes_before
     size_bytes_before=$(stat -c%s "$host_db_path" 2>/dev/null || echo "0")
     local size_kb_before=$(( size_bytes_before / 1024 ))
@@ -415,6 +427,20 @@ run_deep_db_maintenance() {
 
     local safety_backup_file=""
     local maintenance_successful=false
+    local was_running=false
+    is_service_running "vaultwarden" && was_running=true || true
+
+    # Safety net: if anything causes an early exit after VaultWarden is stopped,
+    # ensure it is restarted. RETURN trap fires on both normal return and set -e exits.
+    _deep_db_cleanup() {
+        if [[ "$was_running" == "true" ]]; then
+            if ! is_service_running "vaultwarden" 2>/dev/null; then
+                log_warn "run_deep_db_maintenance: safety net restarting VaultWarden..."
+                docker compose up -d vaultwarden 2>&1 || log_error "Safety net restart failed — manual intervention required"
+            fi
+        fi
+    }
+    trap '_deep_db_cleanup' RETURN
 
     log_info "Step 0/5: Creating pre-maintenance safety backup..."
     local backup_ts_marker
@@ -753,7 +779,7 @@ update_firewall_ranges() {
     local cf_ipv4_file cf_ipv6_file
     cf_ipv4_file=$(mktemp -t cf_ipv4.XXXXXXXXXX)
     cf_ipv6_file=$(mktemp -t cf_ipv6.XXXXXXXXXX)
-    CLEANUP_ACTIONS+=("rm -f '$cf_ipv4_file' '$cf_ipv6_file' 2>/dev/null || true")
+    register_cleanup rm -f "$cf_ipv4_file" "$cf_ipv6_file"
     if retry_with_backoff 3 2 curl -sf --max-time 10 "https://www.cloudflare.com/ips-v4" -o "$cf_ipv4_file" && \
        retry_with_backoff 3 2 curl -sf --max-time 10 "https://www.cloudflare.com/ips-v6" -o "$cf_ipv6_file"; then
         log_success "Successfully fetched current Cloudflare IP ranges"
@@ -1026,17 +1052,11 @@ _load_env() {
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
-perform_cleanup() {
-    for ((idx=${#CLEANUP_ACTIONS[@]}-1; idx>=0; idx--)); do
-        eval "${CLEANUP_ACTIONS[$idx]}" 2>/dev/null || true
-    done
-}
-
 main() {
     log_header "VaultWarden-OCI Maintenance Manager"
 
     CLEANUP_ACTIONS=()
-    trap perform_cleanup EXIT
+    trap 'perform_cleanup' EXIT HUP INT TERM
 
     local OPS_LOCK="/run/lock/vaultwarden-operations.lock"
 
@@ -1051,7 +1071,7 @@ main() {
             exit 1
         fi
         touch /tmp/.vw_maintenance.lock
-        CLEANUP_ACTIONS+=("rm -f /tmp/.vw_maintenance.lock 2>/dev/null || true")
+        register_cleanup rm -f /tmp/.vw_maintenance.lock
         _load_env
         run_deep_db_maintenance
         exit $?
@@ -1074,7 +1094,7 @@ main() {
         exit 1
     fi
     touch /tmp/.vw_maintenance.lock
-    CLEANUP_ACTIONS+=("rm -f /tmp/.vw_maintenance.lock 2>/dev/null || true")
+    register_cleanup rm -f /tmp/.vw_maintenance.lock
 
     [[ "$DRY_RUN"       == "true" ]] && log_warn "DRY RUN MODE - No changes will be made"
     [[ "$TARGETED_MODE" == "true" ]] && log_info "Targeted mode — running requested task(s) only"
