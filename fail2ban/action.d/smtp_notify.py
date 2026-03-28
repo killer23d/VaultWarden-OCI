@@ -15,6 +15,7 @@ import smtplib
 import ssl
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -63,7 +64,7 @@ def _get_whois_info(ip: str) -> str:
         return f"Whois error: {exc}"
 
 
-def _send(host: str, port: int, sender: str, dest: str, msg: MIMEMultipart) -> None:
+def _send(host: str, port: int, sender: str, dest: str, msg: MIMEMultipart, *, require_tls: bool = False) -> None:
     """Send msg via SMTP with STARTTLS upgrade.
 
     STARTTLS is attempted on every connection so that if host is ever
@@ -71,8 +72,8 @@ def _send(host: str, port: int, sender: str, dest: str, msg: MIMEMultipart) -> N
     On loopback postfix containers that do not advertise STARTTLS the
     starttls() call will raise SMTPException; the except block logs a
     warning but still delivers (acceptable for localhost-only deployments).
-    To enforce TLS on remote relays, set require_tls=True via [Init] in
-    smtp.conf and pass --require-tls here.
+    To enforce TLS on remote relays, pass --require-tls on the command line;
+    delivery will be aborted if STARTTLS is not offered by the server.
     """
     server = smtplib.SMTP(host, port, timeout=15)
     try:
@@ -88,6 +89,11 @@ def _send(host: str, port: int, sender: str, dest: str, msg: MIMEMultipart) -> N
             server.starttls(context=context)
             server.ehlo()
         else:
+            if require_tls:
+                raise smtplib.SMTPException(
+                    f"STARTTLS not offered by {host}:{port} and --require-tls is set. "
+                    "Refusing plaintext delivery."
+                )
             print(
                 f"[smtp_notify] WARNING: STARTTLS not offered by {host}:{port} — "
                 "connection is plaintext. Use a TLS-capable relay for remote hosts.",
@@ -121,7 +127,7 @@ Time: {_utcnow()}
 Regards,
 Fail2Ban"""
     msg = _build_msg(args.sender, args.dest, subject, body)
-    _send(args.host, int(args.port), args.sender, args.dest, msg)
+    _send(args.host, int(args.port), args.sender, args.dest, msg, require_tls=args.require_tls)
     print("Jail start notification sent successfully")
 
 
@@ -141,13 +147,20 @@ Please verify this was intentional. If unexpected, investigate immediately.
 Regards,
 Fail2Ban"""
     msg = _build_msg(args.sender, args.dest, subject, body)
-    _send(args.host, int(args.port), args.sender, args.dest, msg)
+    _send(args.host, int(args.port), args.sender, args.dest, msg, require_tls=args.require_tls)
     print("Jail stop notification sent successfully")
 
 
 def action_ban(args: argparse.Namespace) -> None:
     ip = _validate_ip(args.ip)
-    whois_info = _get_whois_info(ip)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(_get_whois_info, ip)
+        try:
+            whois_info = future.result(timeout=3)
+        except FuturesTimeoutError:
+            whois_info = "Whois lookup skipped (deadline exceeded)"
+        except Exception as exc:  # pylint: disable=broad-except
+            whois_info = f"Whois error: {exc}"
     subject = f"[Fail2Ban] {args.name}: BANNED {ip} after {args.failures} attempts"
     body = f"""SECURITY ALERT
 
@@ -174,7 +187,7 @@ This is an automated security notification from your VaultWarden-OCI deployment.
 Regards,
 Fail2Ban Security Monitor"""
     msg = _build_msg(args.sender, args.dest, subject, body)
-    _send(args.host, int(args.port), args.sender, args.dest, msg)
+    _send(args.host, int(args.port), args.sender, args.dest, msg, require_tls=args.require_tls)
     print(f"Ban notification sent for IP {ip}")
 
 
@@ -196,7 +209,7 @@ This IP is now able to access your services again. Continue monitoring for suspi
 Regards,
 Fail2Ban Security Monitor"""
     msg = _build_msg(args.sender, args.dest, subject, body)
-    _send(args.host, int(args.port), args.sender, args.dest, msg)
+    _send(args.host, int(args.port), args.sender, args.dest, msg, require_tls=args.require_tls)
     print(f"Unban notification sent for IP {ip}")
 
 
@@ -210,6 +223,12 @@ def main() -> None:
     parser.add_argument("--port",     required=True)
     parser.add_argument("--ip",       default="")
     parser.add_argument("--failures", default="0")
+    parser.add_argument(
+        "--require-tls",
+        action="store_true",
+        default=False,
+        help="Abort delivery if STARTTLS is not offered by the SMTP server (safe default for remote relays).",
+    )
     args = parser.parse_args()
 
     dispatch = {
