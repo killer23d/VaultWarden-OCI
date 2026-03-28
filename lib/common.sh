@@ -6,6 +6,8 @@
 readonly VAULTWARDEN_COMMON_LIB_LOADED=1
 readonly LIB_COMMON_LOADED=1
 
+set -euo pipefail
+
 # --- Library Configuration ---
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$LIB_DIR/.." && pwd)"
@@ -882,6 +884,14 @@ init_common_lib() {
     local script_name="$1"
 
     set -euo pipefail
+
+    # Warn if ADMIN_TOKEN is set but is not a bcrypt hash (must start with $2y$).
+    # A plaintext token is a security risk; Vaultwarden requires bcrypt.
+    if [[ -n "${ADMIN_TOKEN:-}" && "${ADMIN_TOKEN}" != '$2y$'* ]]; then
+        echo "ERROR: ADMIN_TOKEN is set but does not appear to be a bcrypt hash (expected prefix: \$2y\$)." >&2
+        echo "       Hash your admin token with bcrypt, e.g. via: htpasswd -bnBC 12 '' 'yourpassword' | tr -d ':\n' or use setup-secrets.sh" >&2
+        exit 1
+    fi
 
     set_log_prefix "$(basename -- "$script_name" .sh)"
 

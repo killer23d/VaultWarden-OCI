@@ -419,7 +419,10 @@ _read_dotenv_value() {
     local file="${2:-.env}"
     [[ -f "$file" ]] || { echo ""; return 0; }
     local val
-    val=$(grep -E "^${key}=" "$file" | head -1 | sed "s/^${key}=//;s/#.*$//;s/[[:space:]]*$//")
+    # Strip inline comments (one-or-more whitespace then #) and trailing whitespace.
+    # Requiring at least one space before # deliberately preserves passwords that
+    # contain '#' (e.g. "p@ss#1") while correctly stripping "VALUE  # comment".
+    val=$(grep -E "^${key}=" "$file" | head -1 | sed "s/^${key}=//;s/[[:space:]]\+#.*$//;s/[[:space:]]*$//")
     echo "$val"
 }
 
