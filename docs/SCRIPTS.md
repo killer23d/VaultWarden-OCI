@@ -865,13 +865,24 @@ main() {
 ### Trap-Based Cleanup
 
 ```bash
-CLEANUP_ACTIONS=()
-register_cleanup() { CLEANUP_ACTIONS+=("$1"); }
+# Safe: arguments serialised with a unit-separator; no eval needed.
+_CLEANUP_SEP=$'\x1f'
+
+register_cleanup() {
+    local serialised="" sep="" arg
+    for arg in "$@"; do serialised+="${sep}${arg}"; sep="$_CLEANUP_SEP"; done
+    CLEANUP_ACTIONS+=("$serialised")
+}
+
 perform_cleanup() {
-    for ((idx=${#CLEANUP_ACTIONS[@]}-1; idx>=0; idx--)); do
-        eval "${CLEANUP_ACTIONS[$idx]}" 2>/dev/null || true
+    local idx action_args=()
+    for (( idx = ${#CLEANUP_ACTIONS[@]} - 1; idx >= 0; idx-- )); do
+        IFS="$_CLEANUP_SEP" read -r -a action_args <<< "${CLEANUP_ACTIONS[$idx]}"
+        [[ ${#action_args[@]} -gt 0 ]] && "${action_args[@]}" || true
     done
 }
+
+CLEANUP_ACTIONS=()
 trap perform_cleanup EXIT
 ```
 
