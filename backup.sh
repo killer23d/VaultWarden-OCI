@@ -586,6 +586,27 @@ sync_to_rclone() {
     local remote_path="${remote_name}:${remote_base_path}/${backup_type}"
     b_log_info "Syncing backup to rclone remote: ${remote_path}/"
 
+    # ------------------------------------------------------------------
+    # Pre-flight connectivity check: verify the remote is reachable
+    # before spending time on the actual copy operation. A mis-pointed
+    # remote (typo, expired credentials, network outage) is caught here
+    # and reported immediately rather than silently wasting the backup window.
+    # ------------------------------------------------------------------
+    b_log_info "Pre-flight check: testing connectivity to rclone remote '${remote_name}'..."
+    if ! rclone lsd "${rclone_config_arg[@]}" "${remote_name}:" --contimeout 10s --timeout 30s &>/dev/null; then
+        log_error "Pre-flight check FAILED: cannot reach rclone remote '${remote_name}'. Aborting offsite sync." >&2
+        log_error "Verify credentials and network, then retry: rclone lsd ${remote_name}:" >&2
+        if declare -f send_notification_email &>/dev/null; then
+            send_notification_email \
+                "[VaultWarden] BACKUP ABORTED: rclone remote unreachable" \
+                "$(printf 'Pre-flight connectivity check failed for remote: %s\nHost: %s\n\nVerify rclone credentials and network connectivity, then re-run the backup.\n' \
+                    "${remote_name}" "$(hostname -f 2>/dev/null || hostname)")" \
+                2>/dev/null || true
+        fi
+        return 1
+    fi
+    b_log_info "Pre-flight check passed: rclone remote '${remote_name}' is reachable."
+
     local rclone_ok=true
 
     if ! rclone copy "${rclone_config_arg[@]}" "$enc_file" "$remote_path/" --checksum 2>&1; then

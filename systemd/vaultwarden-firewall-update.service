@@ -25,4 +25,7 @@ ProtectHome=yes
 ReadWritePaths=/opt/vaultwarden-scripts /var/lib/vaultwarden /etc/vaultwarden
 AmbientCapabilities=CAP_NET_ADMIN
 CapabilityBoundingSet=CAP_NET_ADMIN
-TimeoutStartSec=300
+# Timeout prevents indefinite hang if Cloudflare API is unreachable.
+# A hung unit blocks the systemd activation queue on an unattended server.
+TimeoutStartSec=30
+TimeoutStopSec=10
