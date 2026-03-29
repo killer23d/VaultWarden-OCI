@@ -25,7 +25,19 @@ fi
 
 # FIX [M-16]: Validate required environment variables BEFORE Caddyfile validation
 # so we never print "validation passed" when DOMAIN_NAME is unset.
+# C-07: Validate DOMAIN_NAME is set and looks like a valid FQDN (not localhost/bare IP)
 : "${DOMAIN_NAME:?ERROR: DOMAIN_NAME environment variable must be set}"
+case "$DOMAIN_NAME" in
+    localhost|127.0.0.1|0.0.0.0)
+        echo "ERROR: DOMAIN_NAME='$DOMAIN_NAME' is not a valid production domain" >&2
+        exit 1
+        ;;
+    *[!a-zA-Z0-9._-]*)
+        echo "ERROR: DOMAIN_NAME='$DOMAIN_NAME' contains invalid characters (allowed: a-z A-Z 0-9 . _ -)" >&2
+        exit 1
+        ;;
+esac
+echo "✓ DOMAIN_NAME validated: ${DOMAIN_NAME}"
 
 # =============================================================================
 # SECURITY: Load Cloudflare API Token
@@ -186,6 +198,7 @@ echo "✓ Caddyfile validation passed"
 echo "==================================================================="
 echo " Starting Caddy Server"
 echo " Domain: ${DOMAIN_NAME}"
+echo " Caddy: $(caddy version 2>/dev/null || echo 'unknown')"  # C-08: log Caddy version at startup
 echo "==================================================================="
 
 exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
