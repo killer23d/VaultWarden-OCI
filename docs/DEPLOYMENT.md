@@ -166,7 +166,7 @@ See [CONFIGURATION.md](CONFIGURATION.md) for the full variable reference.
 | **fail2ban** | Brute-force detection & SSH protection | 512 MB |
 | **postfix** | Last-resort host MTA (optional — primary email is `lib/email.sh` API chain) | 256 MB |
 
-> **Caddy version note.** Caddy >= 2.11.0 bundles `caddy-cloudflare-ip` by default. This module rewrites `remote_ip` in access logs to the real client IP from the `Cf-Connecting-Ip` header. **This is required for Fail2Ban to ban actual attackers rather than Cloudflare edge nodes.** Do not downgrade below 2.11.0.
+> **Caddy version note.** Caddy >= 2.11.2 bundles `caddy-cloudflare-ip` by default. This module rewrites `remote_ip` in access logs to the real client IP from the `Cf-Connecting-Ip` header. **This is required for Fail2Ban to ban actual attackers rather than Cloudflare edge nodes.** Do not downgrade below 2.11.2. *(2.11.2 fixes a TLS ACME renewal regression introduced in 2.11.1.)*
 
 Once healthy, switch Cloudflare to **Proxied (Orange Cloud)** and set SSL/TLS to **Full (Strict)**.
 
@@ -287,7 +287,7 @@ grep -E 'EMAIL_MODE|EMAIL_PROVIDER|SMTP_HOST' .env
 ```
 
 **Fail2Ban banning Cloudflare IPs instead of attackers:**
-- Confirm `CADDY_VERSION` is `2.11.1` or later (requires `caddy-cloudflare-ip` module)
+- Confirm `CADDY_VERSION` is `2.11.2` or later (requires `caddy-cloudflare-ip` module; 2.11.2 fixes a TLS ACME renewal regression)
 - Caddy access logs must show `remote_ip` as the real client IP, not a Cloudflare edge IP
 
 **Push notifications not working (silent failures):**

@@ -338,6 +338,24 @@ install_units() {
     log_info "Reloading systemd daemon ..."
     _run systemctl daemon-reload
 
+    # ------------------------------------------------------------------
+    # P5-SD1 FIX: Validate OnCalendar expressions before enabling timers.
+    # An invalid expression causes systemctl enable --now to fail with a
+    # cryptic 'Failed to start' error; surfacing it here with a clear
+    # warning gives operators actionable information before activation.
+    # ------------------------------------------------------------------
+    if command -v systemd-analyze >/dev/null 2>&1; then
+        for unit in "${UNIT_DEST_DIR}"/vaultwarden-*.timer; do
+            [[ -f "$unit" ]] || continue
+            local cal_expr; cal_expr=$(grep -m1 'OnCalendar=' "$unit" | cut -d= -f2-)
+            if [[ -n "$cal_expr" ]]; then
+                if ! systemd-analyze calendar "$cal_expr" >/dev/null 2>&1; then
+                    log_warn "Timer $(basename "$unit") has an invalid OnCalendar expression '$cal_expr' — check the unit file"
+                fi
+            fi
+        done
+    fi
+
     log_info "Enabling and starting timers ..."
     for timer in "${TIMERS[@]}"; do
         _run systemctl enable --now "$timer"

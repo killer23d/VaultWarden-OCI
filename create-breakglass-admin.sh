@@ -733,6 +733,9 @@ main() {
     local _BG_LOCK_FILE="/run/lock/vaultwarden-breakglass.lock"
     local _BG_LOCK_FD
     exec {_BG_LOCK_FD}>"$_BG_LOCK_FILE"
+    # P4-S7 FIX: Register EXIT trap to remove the lock file so a crash or
+    # early exit never leaves a stale lock blocking future invocations.
+    trap 'rm -f "${_BG_LOCK_FILE:-}"' EXIT
     if ! flock -n "$_BG_LOCK_FD"; then
         log_error "Another breakglass operation is already running."
         log_error "If the lock is stale, remove: ${_BG_LOCK_FILE}"

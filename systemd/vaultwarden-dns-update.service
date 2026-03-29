@@ -25,3 +25,6 @@ ProtectHome=yes
 # /run/lock is needed for the flock() lock file (ProtectSystem=strict makes /var/lock read-only)
 ReadWritePaths=/opt/vaultwarden-scripts /var/lib/vaultwarden /etc/vaultwarden /run/lock
 TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target
