@@ -10,7 +10,9 @@ All security fixes applied in a single authoritative location:
 from __future__ import annotations
 
 import argparse
+import html
 import ipaddress
+import shutil  # P7-31 fix: needed for shutil.which("whois") availability check
 import smtplib
 import ssl
 import subprocess
@@ -38,11 +40,14 @@ def _validate_ip(ip: str) -> str:
 def _get_whois_info(ip: str) -> str:
     """Run whois against a validated IP address and return relevant lines."""
     # _validate_ip must be called before this function.
+    # P7-31 fix: check whois is available before spawning subprocess to avoid CalledProcessError.
+    if not shutil.which("whois"):
+        return "whois not available"
     try:
         result = subprocess.check_output(
             ["whois", ip],
             text=True,
-            timeout=10,
+            timeout=1,  # P7-33 fix: subprocess timeout must be < executor timeout (3s); set to 3-2=1
             stderr=subprocess.DEVNULL,
         )
         keywords = {
@@ -101,15 +106,25 @@ def _send(host: str, port: int, sender: str, dest: str, msg: MIMEMultipart, *, r
             )
         server.send_message(msg)
     finally:
-        server.quit()
+        # P7-32 fix: wrap quit() in its own try/except so a broken SMTP connection
+        # during cleanup does not mask the original exception from the outer block.
+        try:
+            server.quit()
+        except smtplib.SMTPException:
+            pass
 
 
 def _build_msg(sender: str, dest: str, subject: str, body: str) -> MIMEMultipart:
-    msg = MIMEMultipart()
+    # P7-35 fix: Use MIMEMultipart("alternative") to deliver both plain-text and HTML
+    # versions. Email clients that support HTML will render the HTML part; others fall
+    # back to plain text.  Plain part is attached first per RFC 2046 ordering.
+    msg = MIMEMultipart("alternative")
     msg["From"] = sender
     msg["To"] = dest
     msg["Subject"] = subject
     msg.attach(MIMEText(body, "plain"))
+    html_body = f"<html><body><pre>{html.escape(body)}</pre></body></html>"
+    msg.attach(MIMEText(html_body, "html"))
     return msg
 
 
@@ -230,6 +245,12 @@ def main() -> None:
         help="Abort delivery if STARTTLS is not offered by the SMTP server (safe default for remote relays).",
     )
     args = parser.parse_args()
+    # P7-34 fix: coerce --failures to int after parsing; fail2ban tag substitution
+    # produces strings and the value may arrive as a non-numeric token on edge cases.
+    try:
+        args.failures = int(args.failures)
+    except (ValueError, TypeError):
+        args.failures = 0
 
     dispatch = {
         "start": action_start,
