@@ -9,6 +9,13 @@
         servers {
                 trusted_proxies cloudflare
                 client_ip_headers Cf-Connecting-Ip
+                # C-03: Connection timeouts — Caddy 2.x global hardening
+                timeouts {
+                        read_body   10s
+                        read_header 10s
+                        write       30s
+                        idle        120s
+                }
         }
 }
 
@@ -21,6 +28,10 @@
 # Responds directly (no upstream proxy) — Caddy health is independent
 # of VaultWarden health; each service has its own healthcheck.
 http://127.0.0.1:8080 {
+        # C-05: Suppress health check log noise — these are internal Docker probes only
+        log {
+                output discard
+        }
         respond /alive 200
 }
 
@@ -37,6 +48,8 @@ http://127.0.0.1:8080 {
                         roll_size 50MB
                         roll_keep 20
                         roll_keep_for 30d
+                        # C-01: Caddy 2.10+ best practice — compress rotated logs with zstd
+                        roll_compression zstd
                 }
                 format json {
                         time_format "2006-01-02T15:04:05.000Z07:00"
@@ -70,6 +83,9 @@ http://127.0.0.1:8080 {
                 -Server
                 -X-Powered-By
         }
+
+        # C-02: Response compression — zstd preferred, gzip as fallback (Caddy 2.x best practice)
+        encode zstd gzip
 
         # 2. Public Health Check
         @health path /alive
@@ -110,6 +126,11 @@ http://127.0.0.1:8080 {
                         Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss://{$DOMAIN_NAME}{$PUSH_CSP}; frame-src 'self'; object-src 'none'; base-uri 'self';"
                 }
 
+                # C-04: Limit request body to prevent DoS against admin endpoint
+                request_body {
+                        max_size 2MB
+                }
+
                 basic_auth {
                         {env.ADMIN_USERNAME} {env.ADMIN_HASH}
                 }
@@ -130,6 +151,10 @@ http://127.0.0.1:8080 {
         # filter matches on uri field.
         @auth_endpoints path /api/accounts/prelogin* /identity/connect/token*
         handle @auth_endpoints {
+                # C-04: Limit auth request body to prevent amplification attacks
+                request_body {
+                        max_size 512KB
+                }
                 reverse_proxy vaultwarden:80 {
                         header_up Host {host}
                         header_up CF-Connecting-IP {client_ip}
@@ -166,6 +191,8 @@ www.{$DOMAIN_NAME} {
                         roll_size 50MB
                         roll_keep 20
                         roll_keep_for 30d
+                        # C-01: Caddy 2.10+ best practice — compress rotated logs with zstd
+                        roll_compression zstd
                 }
                 format json {
                         time_format "2006-01-02T15:04:05.000Z07:00"
@@ -192,6 +219,8 @@ www.{$DOMAIN_NAME} {
                         roll_size 10MB
                         roll_keep 50
                         roll_keep_for 180d
+                        # C-01: Caddy 2.10+ best practice — compress rotated logs with zstd
+                        roll_compression zstd
                 }
                 format json {
                         time_format "2006-01-02T15:04:05.000Z07:00"
