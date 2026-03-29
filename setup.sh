@@ -752,6 +752,11 @@ set_script_permissions() {
 }
 
 setup_firewall() {
+    # SECURITY: UFW rules must be applied AFTER Docker installation.
+    # Docker rewrites iptables chains during installation; rules set before
+    # Docker is installed are silently bypassed by Docker's DOCKER-USER chain.
+    # This function is called after install_dependencies (which installs Docker),
+    # ensuring the correct order of operations.
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would configure firewall"; return 0; fi
 
     local ssh_port
