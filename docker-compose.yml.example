@@ -94,6 +94,10 @@ services:
       ADMIN_TOKEN_FILE: /run/secrets/admin_token
       TZ: ${TZ:-UTC}
       LOG_FILE: /logs/vaultwarden.log
+      # CRITICAL: Do NOT set LOG_LEVEL to 'critical' or 'error' in production.
+      # Values below 'warn' suppress request-level log entries, making failed
+      # login events invisible to Fail2ban. Brute-force attacks will proceed
+      # in silence. 'warn' is the minimum required for Fail2ban integration.
       LOG_LEVEL: warn
       EXTENDED_LOGGING: true
       SIGNUPS_ALLOWED: ${SIGNUPS_ALLOWED:-false}
@@ -279,6 +283,10 @@ services:
     container_name: vaultwarden_postfix
     # boky/postfix 4.3.0 — latest stable
     image: boky/postfix:${POSTFIX_VERSION:-4.3.0}
+    # REQUIRED: unless-stopped ensures the notification pipeline is self-healing.
+    # A Postfix crash without auto-restart leaves the entire email alert system
+    # silently broken — Fail2ban and backup failure emails will be lost until
+    # the container is manually restarted.
     restart: unless-stopped
 
     depends_on:

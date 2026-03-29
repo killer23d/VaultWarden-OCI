@@ -8,6 +8,10 @@ OnFailure=vaultwarden-notify-failure@%n.service
 
 [Service]
 Type=oneshot
+# NOTE: The working directory and ExecStart path must match your actual install
+# directory. If you installed to a different location, update both
+# WorkingDirectory and ExecStart (and ConditionPathExists in [Unit]) to match.
+# Default install path used by setup.sh is /opt/vaultwarden-scripts.
 WorkingDirectory=/opt/vaultwarden-scripts
 EnvironmentFile=/etc/vaultwarden/vaultwarden.env
 # --email is intentionally omitted here. Add it once EMAIL_API_TOKEN or
