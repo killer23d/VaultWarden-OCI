@@ -608,9 +608,16 @@ sync_to_rclone() {
     b_log_info "Pre-flight check passed: rclone remote '${remote_name}' is reachable."
 
     local rclone_ok=true
+    local rclone_stderr_tmp="${TMPDIR_BACKUP}/rclone_stderr.tmp"
 
-    if ! rclone copy "${rclone_config_arg[@]}" "$enc_file" "$remote_path/" --checksum 2>&1; then
+    local rclone_exit=0
+    rclone copy "${rclone_config_arg[@]}" "$enc_file" "$remote_path/" --checksum 2>"${rclone_stderr_tmp}" || rclone_exit=$?
+    if (( rclone_exit != 0 )); then
         rclone_ok=false
+        local rclone_err
+        rclone_err=$(head -20 "${rclone_stderr_tmp}" 2>/dev/null || true)
+        log_error "[backup] rclone upload FAILED (exit ${rclone_exit}). The backup was NOT delivered to remote storage." >&2
+        log_error "[backup] rclone error output: ${rclone_err}" >&2
     fi
 
     local meta_file="${enc_file}.meta"
@@ -1003,6 +1010,20 @@ main() {
     fi
 
     load_env_file || { log_error "Failed to load .env"; exit 1; }
+
+    # P3-01: BACKUP_ENCRYPTION_ENABLED — default true; warn loudly if operator disables it.
+    # NOTE: This codebase always encrypts backups via age (see perform_db_backup /
+    # perform_full_backup). BACKUP_ENCRYPTION_ENABLED is an operator-facing safety
+    # indicator: if deliberately set to false, the warning below fires so the admin
+    # knows they are accepting responsibility for plaintext remote storage. The actual
+    # encryption path is unchanged; this flag does not bypass it.
+    local backup_encryption_enabled
+    backup_encryption_enabled="$(get_config_value "BACKUP_ENCRYPTION_ENABLED" "true")"
+    if [[ "${backup_encryption_enabled}" == "false" ]]; then
+        log_warn "[backup] WARNING: BACKUP_ENCRYPTION_ENABLED=false — backup archive will be stored" \
+                 "in PLAINTEXT on remote storage. Set BACKUP_ENCRYPTION_ENABLED=true in .env" \
+                 "unless you have an independent encryption layer on the remote."
+    fi
 
     local state_dir
     state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
