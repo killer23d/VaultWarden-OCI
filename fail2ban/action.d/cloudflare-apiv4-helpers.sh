@@ -1,4 +1,5 @@
-#!/bin/sh
+#!/usr/bin/env bash
+# P7-27 fix: changed from #!/bin/sh — this file uses `local` which is not POSIX sh.
 # cloudflare-apiv4-helpers.sh
 # Shared helper functions sourced by actionban and actionunban in
 # cloudflare-apiv4.conf.  Never executed directly.
@@ -7,6 +8,115 @@
 #   CF_TOKEN   – Cloudflare API bearer token
 #
 # Requires: curl, jq, awk, mktemp
+
+# ---------------------------------------------------------------------------
+# _cf_load_token
+# Read the Cloudflare API bearer token from the Docker secret file into
+# CF_TOKEN (exported).  Returns 1 with a descriptive error if the file is
+# missing, unreadable, or empty.  Used by actionstart/_cf_validate_token.
+# ---------------------------------------------------------------------------
+_cf_load_token() {
+  local _cf_token_path="/run/secrets/fail2ban_cloudflare_firewall_token"
+  if [ ! -e "$_cf_token_path" ]; then
+    echo "[cloudflare-apiv4] ERROR: token file not found: $_cf_token_path" >&2
+    return 1
+  fi
+  CF_TOKEN="$(cat "$_cf_token_path")" || {
+    echo "[cloudflare-apiv4] ERROR: permission denied reading $_cf_token_path" >&2
+    return 1
+  }
+  [ -n "$CF_TOKEN" ] || {
+    echo "[cloudflare-apiv4] ERROR: token file is empty: $_cf_token_path" >&2
+    return 1
+  }
+  export CF_TOKEN
+}
+
+# ---------------------------------------------------------------------------
+# _validate_ip <candidate>
+# Validate <candidate> using Python3 ipaddress module for strict RFC-compliant
+# IPv4 and IPv6 parsing.  Returns 0 if valid, 1 otherwise.
+# P7-20 fix: moved from inline definitions in actionban/actionunban.
+# ---------------------------------------------------------------------------
+_validate_ip() {
+  local candidate="$1"
+  python3 -c "import ipaddress; ipaddress.ip_address('$candidate')" 2>/dev/null || return 1
+}
+
+# ---------------------------------------------------------------------------
+# _cf_get_or_create_waf_ruleset <zone_id>
+# Return the zone WAF Custom Rules (http_request_firewall_custom) ruleset ID.
+# Creates an empty zone-level ruleset if none exists yet.
+# P7-20 fix: moved from inline definition in actionban.
+# ---------------------------------------------------------------------------
+_cf_get_or_create_waf_ruleset() {
+  local zone_id="$1" out ruleset_id
+  out="$(_cf_api_call \
+    "https://api.cloudflare.com/client/v4/zones/${zone_id}/rulesets" "GET")" || return 1
+  ruleset_id=$(printf "%s" "$out" | jq -r \
+    ".result[] | select(.phase==\"http_request_firewall_custom\" and .kind==\"zone\") | .id" \
+    | head -n1)
+
+  if [ -n "$ruleset_id" ]; then
+    printf "%s" "$ruleset_id"
+    return 0
+  fi
+
+  # No ruleset yet — create an empty zone-level one.
+  local create_body
+  create_body="$(printf \
+    "{\"name\":\"fail2ban custom rules\",\"kind\":\"zone\",\"phase\":\"http_request_firewall_custom\",\"rules\":[]}")"
+  out="$(_cf_retry \
+    "https://api.cloudflare.com/client/v4/zones/${zone_id}/rulesets" "POST" "$create_body")" \
+    || return 1
+  printf "%s" "$out" | jq -r ".result.id"
+}
+
+# ---------------------------------------------------------------------------
+# _cf_get_waf_ruleset_id <zone_id>
+# Return the zone WAF Custom Rules ruleset ID, or empty string if none exists.
+# P7-20 fix: moved from inline definition in actionunban.
+# ---------------------------------------------------------------------------
+_cf_get_waf_ruleset_id() {
+  local zone_id="$1" out
+  out="$(_cf_api_call \
+    "https://api.cloudflare.com/client/v4/zones/${zone_id}/rulesets" "GET")" || return 1
+  printf "%s" "$out" | jq -r \
+    ".result[] | select(.phase==\"http_request_firewall_custom\" and .kind==\"zone\") | .id" \
+    | head -n1
+}
+
+# ---------------------------------------------------------------------------
+# _cf_find_rule_id <zone_id> <ruleset_id> <tag>
+# Find a rule inside a ruleset by its exact description tag.
+# Returns the rule ID string, or empty string if not found.
+# P7-20 fix: moved from inline definitions in actionban/actionunban.
+# ---------------------------------------------------------------------------
+_cf_find_rule_id() {
+  local zone_id="$1" ruleset_id="$2" tag="$3" out
+  out="$(_cf_api_call \
+    "https://api.cloudflare.com/client/v4/zones/${zone_id}/rulesets/${ruleset_id}" "GET")" \
+    || return 1
+  printf "%s" "$out" | jq -r \
+    ".result.rules // [] | .[] | select(.description == \"${tag}\") | .id" | head -n1
+}
+
+# ---------------------------------------------------------------------------
+# _cf_validate_token
+# Validate the Cloudflare API token by calling the /user/tokens/verify endpoint.
+# Returns 0 if valid, 1 otherwise. Used by actionstart for early token detection.
+# P7-23 fix: new function for startup token validation.
+# ---------------------------------------------------------------------------
+_cf_validate_token() {
+  local cfg result
+  _cf_load_token || return 1
+  cfg=$(_make_curl_cfg) || return 1
+  result=$(curl -sf --max-time 10 --config "$cfg" \
+      "https://api.cloudflare.com/client/v4/user/tokens/verify" \
+      | jq -r '.success' 2>/dev/null)
+  rm -f "$cfg" 2>/dev/null
+  [ "$result" = "true" ]  # P7-26 note: consistent with POSIX [ ] style used elsewhere in file
+}
 
 # ---------------------------------------------------------------------------
 # _make_curl_cfg
@@ -74,6 +184,17 @@ _cf_api_call() {
     return 0
   fi
 
+  # P7-24 fix: Guard against non-numeric http_code before arithmetic comparison.
+  # curl failures already produce "000" via `|| echo "000"`, but an unexpected
+  # non-numeric value would cause `[ -ge ]` to abort with a syntax error.
+  case "$http_code" in
+    ''|*[!0-9]*)
+      echo "[cloudflare-apiv4] ERROR: curl returned non-numeric HTTP code: '${http_code}' (timeout or connection failure)" >&2
+      rm -f "$header_file" "$response_file"
+      return 1
+      ;;
+  esac
+
   # Standard 2xx JSON envelope with success:true.
   if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ] && \
      jq -e ".success == true" "$response_file" >/dev/null 2>&1; then
@@ -95,8 +216,8 @@ _cf_api_call() {
 # On 429, sleeps the Retry-After value from the header instead.
 # ---------------------------------------------------------------------------
 _cf_retry() {
-  local endpoint="$1" method="$2" body="${3:-}" attempts="${4:-4}"
-  local delays="${5:-2 4 8 16}"
+  local endpoint="$1" method="$2" body="${3:-}" attempts="${4:-5}"  # P7-25 fix: default attempts raised from 4 to 5
+  local delays="${5:-2 4 8 16 32}"
   local i=1 out rc delay
 
   while [ "$i" -le "$attempts" ]; do
