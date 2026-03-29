@@ -43,13 +43,13 @@ Verify the current list at <https://www.cloudflare.com/ips-v4>.
 
 4. Also add an SSH rule: Source `0.0.0.0/0` (or your IP), Protocol TCP, Port `22`.
 
-> **Why not UFW?** OCI Security Lists drop packets at the hypervisor — before the VM’s network stack — making them a harder control than host-level UFW.
+> **Why not UFW?** OCI Security Lists drop packets at the hypervisor — before the VM's network stack — making them a harder control than host-level UFW.
 
 ---
 
 ### Step 1 — Cloudflare DNS Staging (Grey Cloud First)
 
-In your Cloudflare dashboard set your DNS record to **DNS Only (Grey Cloud)** before running setup. Caddy must reach Let’s Encrypt directly to provision its TLS certificate on first boot. You can enable the orange proxy cloud after the stack is running.
+In your Cloudflare dashboard set your DNS record to **DNS Only (Grey Cloud)** before running setup. Caddy must reach Let's Encrypt directly to provision its TLS certificate on first boot. You can enable the orange proxy cloud after the stack is running.
 
 ---
 
@@ -77,6 +77,8 @@ cd VaultWarden-OCI
 ```
 
 > **`--auto` vs `--use-latest`:** `--auto` is fully non-interactive and does not change container version pins. Pass `--use-latest` separately if you want all container image tags set to `latest` instead of the pinned versions in `.env`.
+
+> **`setup.sh` display fix:** The post-install checklist now correctly displays the bare domain name (`DOMAIN_NAME`) rather than the value of the `DOMAIN` variable, which may include the `https://` prefix.
 
 ---
 
@@ -127,13 +129,17 @@ See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for every available variable 
 
 Once healthy, switch the Cloudflare record to **Proxied (Orange Cloud)** and set SSL/TLS encryption to **Full (Strict)**.
 
+> **`startup.sh` diagnostic improvement:** If the post-startup quiet health check exits non-zero, `startup.sh` now automatically re-runs `./health.sh` in verbose mode so full diagnostics are always visible to the operator.
+
+> **`health.sh` fix:** Configuration validation now correctly checks for `DOMAIN_NAME` (the canonical env var) instead of `DOMAIN`.
+
 ---
 
 ### Step 5 — Finish Up (Recommended)
 
 ```bash
 # Set up automated backups, updates, health checks, and maintenance via systemd timers
-sudo ./systemd-setup.sh --install
+sudo ./setup-systemd.sh --install
 
 # Export a plaintext recovery kit to your password manager
 # Run this AFTER all secrets are configured so everything is included
@@ -142,6 +148,8 @@ sudo ./systemd-setup.sh --install
 # Create emergency admin for OCI serial console recovery
 ./create-breakglass-admin.sh    # or: make breakglass-create
 ```
+
+> **`setup-systemd.sh` improvement:** `--install` now validates all `OnCalendar=` expressions via `systemd-analyze calendar` before enabling timers and warns on invalid expressions. All generated service units now include an `[Install]` section (`WantedBy=multi-user.target`) so `systemctl enable` is no longer a no-op. See [docs/ADVANCED-CUSTOMIZATION.md](docs/ADVANCED-CUSTOMIZATION.md) for timer details.
 
 The installed systemd timer schedule:
 
@@ -226,10 +234,12 @@ Full details, provider setup, Postfix MTA configuration, and troubleshooting: **
 
 | Container | Role |
 | :-- | :-- |
-| **Caddy** | TLS termination, reverse proxy, security headers, 4-tier structured JSON logging (512 MB limit) |
+| **Caddy** | TLS termination, reverse proxy, security headers, 4-tier structured JSON logging (512 MB limit). Now requires **Caddy ≥ 2.11.2**; uses `encode zstd gzip`, `roll_compression zstd`, connection timeouts in the global `servers` block, `request_body` size limits on admin/auth handlers, and health-check log suppression. |
 | **VaultWarden** | Password manager application (512 MB limit) |
 | **Postfix** | Containerised SMTP relay — last-resort MTA for `lib/email.sh` and sole email path for Fail2Ban; binds `127.0.0.1:587` (256 MB limit) |
 | **Fail2ban** | Brute-force detection → Cloudflare edge blocking; Host networking for SSH protection (512 MB limit) |
+
+> The `docker-compose.yml.example` template now enforces `read_only` filesystems, `tmpfs` mounts, `ulimits` (nofile), `no-new-privileges:true`, and tightened Caddy log rotation. See [docs/ADVANCED-CUSTOMIZATION.md](docs/ADVANCED-CUSTOMIZATION.md) for override details.
 
 ### Scripts
 
@@ -237,15 +247,16 @@ Full details, provider setup, Postfix MTA configuration, and troubleshooting: **
 | :-- | :-- |
 | `setup.sh` | One-time system setup: installs deps, generates `.env` and `docker-compose.yml` from templates, creates Age key, SOPS config, and empty secrets structure. In `--auto` mode, also auto-generates passwords/passphrases via `setup-secrets.sh --auto --quiet-summary` after all infra phases complete, then shows a single consolidated summary screen. |
 | `setup-secrets.sh` | Initial secrets bootstrap — prompted interactively or via `--auto`. Standalone flow: run **after** editing `.env`. Supports `--quiet-summary` to suppress its completion banner when called from `setup.sh`. |
-| `startup.sh` | Start / stop / restart services |
-| `health.sh` | Health monitoring with optional auto-recovery (`--auto-recover`) and email alerting (`--email`) |
+| `startup.sh` | Start / stop / restart services. Post-startup health check now re-runs verbose diagnostics automatically on failure. |
+| `health.sh` | Health monitoring with optional auto-recovery (`--auto-recover`) and email alerting (`--email`). Configuration validation now checks `DOMAIN_NAME` (canonical var). |
 | `backup.sh` | Encrypted database and full-system backups. Uses host `sqlite3` with the Online Backup API for atomic, WAL-safe DB snapshots — no Docker container required for backup integrity checks. Accepts `--keep N` to override retention days (must be a positive integer). |
-| `restore.sh` | Interactive or automated restore. Uses host `sqlite3` for archive integrity verification — no Docker required. |
-| `update.sh` | Safe container + system updates with auto-rollback |
+| `restore.sh` | Interactive or automated restore with a reworked flow: interactive Age decryption key prompt; `--key-file` flag and `RESTORE_AGE_KEY_FILE` env var for scripted/CI use; pre-restore key round-trip validation; post-restore automatic Age key generation and rotation. Uses host `sqlite3` for archive integrity verification — no Docker required. `restore_db()` now respects `DRY_RUN` before overwriting the live database. |
+| `update.sh` | Safe container + system updates with auto-rollback. Now sources `lib/simple_key_resilience.sh` and checks Age key health before update operations; enforces Caddy `entrypoint.sh` execute bit before `docker compose up`. |
 | `maintenance.sh` | Cleanup, DNS update, DB maintenance, email test |
 | `edit-secrets.sh` | Secure secrets editor (Age + SOPS) — rotate individual fields, list keys, export recovery kit |
-| `systemd-setup.sh` | Install / remove automation via systemd timers and services. All timer-triggered services use `OnFailure=vaultwarden-notify-failure@%n.service` for automatic email alerting on any failure. |
-| `create-breakglass-admin.sh` | Emergency OCI serial console admin |
+| `setup-systemd.sh` | Install / remove automation via systemd timers and services. `--install` now validates `OnCalendar=` expressions before enabling timers. All timer-triggered services use `OnFailure=vaultwarden-notify-failure@%n.service` for automatic email alerting on any failure. |
+| `create-breakglass-admin.sh` | Emergency OCI serial console admin. Now includes a `trap` guard ensuring the operations lock file is always cleaned up on any exit path. |
+| `uninstall-vaultwarden.sh` | Full stack removal |
 
 Full reference: [docs/SCRIPTS.md](docs/SCRIPTS.md)
 
@@ -269,8 +280,8 @@ All live configuration is generated from `.example` templates by `setup.sh`. Edi
 | Template | Generates |
 | :-- | :-- |
 | `docker-compose.yml.example` | `docker-compose.yml` |
-| `docker-compose.override.yml.example` | `docker-compose.override.yml` (email decoupling) |
-| `.env.example` | `.env` |
+| `docker-compose.override.yml.example` | `docker-compose.override.yml` (email decoupling; dev-only warning banner added) |
+| `.env.example` | `.env` (sentinel tokens for all external credentials; `LOG_LEVEL=warn` default; `PUSH_ENABLED=false`; Mailgun EU region note) |
 
 ---
 
@@ -279,11 +290,11 @@ All live configuration is generated from `.example` templates by `setup.sh`. Edi
 - **Edge WAF & Host Protection** — Cloudflare proxy + Fail2ban pushes WAF bans to Cloudflare API. Fail2ban also runs in host network mode for direct iptables SSH protection.
 - **Host firewall** — UFW opens 80/443/22; Cloudflare IP restriction enforced at OCI Security List level
 - **Encrypted secrets** — Age + SOPS; no plaintext credentials at rest. `cleanup_secrets_environment()` unsets all SOPS environment variables after every operation.
-- **HTTPS** — Automatic Let’s Encrypt via Caddy with HSTS, CSP, and security headers
-- **Container hardening** — Non-root execution, capability restrictions, memory limits
+- **HTTPS** — Automatic Let's Encrypt via Caddy with HSTS, CSP, and security headers
+- **Container hardening** — Non-root execution, capability restrictions, memory limits, `read_only` filesystems, `no-new-privileges:true`, and `tmpfs` mounts (see `docker-compose.yml.example`)
 - **Docker-free backup integrity** — `backup.sh` and `restore.sh` use host `sqlite3` (SQLite Online Backup API) for atomic DB snapshots and `PRAGMA integrity_check`; no ephemeral alpine containers with read-write mounts over live vault data
-- **Systemd hardening** — All service units run with `NoNewPrivileges=yes` and `PrivateTmp=yes`; failure notifications are wired via `OnFailure=` on every unit
-- **Structured forensic logging** — Caddy uses a 4-tier named-logger architecture (access, admin, auth, security) with independent rotation and retention targets (~3 GB total capacity)
+- **Systemd hardening** — All service units run with `NoNewPrivileges=yes` and `PrivateTmp=yes`; `[Install]` sections added so `systemctl enable` works correctly; failure notifications are wired via `OnFailure=` on every unit
+- **Structured forensic logging** — Caddy uses a 4-tier named-logger architecture (access, admin, auth, security) with independent rotation and retention targets (~3 GB total capacity); health-check requests are suppressed from logs
 
 Full details: [docs/SECURITY.md](docs/SECURITY.md)
 
@@ -291,7 +302,7 @@ Full details: [docs/SECURITY.md](docs/SECURITY.md)
 
 ## 🔄 Update & Rollback
 
-`update.sh` runs a fully phased cycle: pre-update health check → backup → pull → restart → post-update health check. If the post-update health check fails, it **automatically rolls back** via `restore.sh --latest`. See [docs/OPERATIONS.md](docs/OPERATIONS.md) for the full phase diagram.
+`update.sh` runs a fully phased cycle: pre-update health check → backup → pull → restart → post-update health check. If the post-update health check fails, it **automatically rolls back** via `restore.sh --latest`. Age key health is now validated before any update operation begins. See [docs/OPERATIONS.md](docs/OPERATIONS.md) for the full phase diagram.
 
 ---
 
@@ -310,6 +321,8 @@ Retention is configurable: pass `--keep N` to `backup.sh` (N must be a positive 
 sudo ./backup.sh --type full --keep 30
 ```
 
+The restore flow now includes an interactive Age decryption key prompt, a pre-restore key round-trip validation, and automatic post-restore key rotation. Pass `--key-file <path>` or set `RESTORE_AGE_KEY_FILE` for non-interactive/CI restores. See [docs/BACKUP-RESTORE.md](docs/BACKUP-RESTORE.md) for the full 12-step restore procedure.
+
 > **⚠️ Keep a separate copy of `secrets/keys/age-key.txt`** — it is required to decrypt all backups on a new server. Run `./edit-secrets.sh --export-recovery-kit` after setup to store it in your password manager alongside all other credentials.
 
 Full procedures: [docs/BACKUP-RESTORE.md](docs/BACKUP-RESTORE.md)
@@ -326,8 +339,14 @@ make update / update-system            # Updates
 make maintenance                       # Full maintenance run
 make breakglass-create / status        # Emergency admin
 make test-email / test-secrets         # Diagnostics
-make logs [SERVICE=name]               # Container logs
+make logs [SERVICE=name]               # Container logs (defaults to --tail=100)
+make diagnose                          # One-command debug dump: versions, key status, disk, containers, logs
+make backup-status                     # Last backup times, directory size, retention window
+make lint                              # shellcheck all *.sh scripts
+make version                           # Stack version from VERSION file
 ```
+
+> Several Makefile fixes landed in v1.0.0: `safe-restart` now rolls back on health-check failure; `key-rotate` invokes `bash` explicitly (fixes dash compatibility) and runs a `key-health` pre-flight; `restore-db` no longer passes `--force` so the Age key prompt runs as intended; `watch` uses `health-quick` to avoid hammering the HTTPS endpoint. See [CHANGELOG.md](CHANGELOG.md) for the full list.
 
 ---
 
