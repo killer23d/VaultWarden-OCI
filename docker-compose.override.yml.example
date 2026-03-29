@@ -1,3 +1,12 @@
+# =============================================================================
+# DEVELOPMENT OVERRIDE — DO NOT USE IN PRODUCTION                      O-01
+# =============================================================================
+# This file overrides docker-compose.yml for local development ONLY.
+# It relaxes security constraints (read_only, caps, resource limits) to
+# ease local debugging. NEVER copy this file to a production server.
+# Production: use docker-compose.yml without any override file.
+# =============================================================================
+
 # VaultWarden-OCI Development Override Configuration
 
 # This file provides development-friendly overrides that:

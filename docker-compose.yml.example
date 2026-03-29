@@ -183,8 +183,20 @@ services:
     cap_drop:
       - ALL
 
+    # D-01: Read-only root filesystem; writable tmpfs only where VaultWarden needs it
+    read_only: true
     tmpfs:
-      - /tmp
+      - /tmp:size=64m,mode=1777   # 64m sufficient for VaultWarden temp files; 1777 = world-writable sticky
+      - /run:size=16m,mode=0755   # 16m for PID files and runtime state
+
+    # D-02: Limit file descriptors to prevent runaway resource exhaustion
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+      nproc:
+        soft: 512
+        hard: 512
 
     logging:
       driver: "json-file"
@@ -208,6 +220,8 @@ services:
     container_name: vaultwarden_caddy
     # CaddyBuilds/caddy-cloudflare 2.11.1 — released 2026-02-24
     # >= v2.11.0 bundles caddy-cloudflare-ip BY DEFAULT.
+    # D-03: Pin to an immutable tag or digest in production to prevent silent breaking changes.
+    # Example pin: ghcr.io/caddybuilds/caddy-cloudflare:2.11.2@sha256:<digest>
     image: ghcr.io/caddybuilds/caddy-cloudflare:${CADDY_VERSION:-2.11.1}
     restart: unless-stopped
     # BUG-#5 FIX: Caddy must run as root so entrypoint.sh can read Docker
@@ -261,11 +275,20 @@ services:
     cap_add:
       - NET_BIND_SERVICE
 
+    # D-02: Limit file descriptors to prevent runaway resource exhaustion
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+      nproc:
+        soft: 512
+        hard: 512
+
     logging:
       driver: "json-file"
       options:
-        max-size: "20m"
-        max-file: "5"
+        max-size: "10m"   # D-07: Caddy logs are already in /var/log/caddy — Docker logs are redundant
+        max-file: "3"
 
     deploy:
       resources:
