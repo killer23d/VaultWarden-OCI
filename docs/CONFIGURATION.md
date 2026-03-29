@@ -70,10 +70,11 @@ VAULTWARDEN_VERSION=1.35.4   # Pin for stability; blank = latest
                               # 1.35.4 is a security release (2026-02-23):
                               # fixes GHSA-w9f8-m526-h7fh, GHSA-h4hq-rgvh-wh27,
                               # GHSA-r32r-j5jq-3w4m — upgrade strongly advised
-CADDY_VERSION=2.11.1          # CaddyBuilds/caddy-cloudflare build
-                              # >= 2.11.0: caddy-cloudflare-ip bundled by default,
-                              # rewrites remote_ip to real client IP in access logs
-                              # (required for Fail2Ban to ban attackers, not CF nodes)
+CADDY_VERSION=2.11.2          # CaddyBuilds/caddy-cloudflare build
+                              # >= 2.11.2: current stable; fixes TLS ACME renewal
+                              # regression introduced in 2.11.1; caddy-cloudflare-ip
+                              # bundled by default, rewrites remote_ip to real client
+                              # IP in access logs (required for Fail2Ban accuracy)
 FAIL2BAN_VERSION=1.1.0-r3     # iptables-legacy fix included; do not downgrade to 1.1.0
 POSTFIX_VERSION=4.3.0         # boky/postfix — used when EMAIL_MODE=host or as MTA fallback
 ```

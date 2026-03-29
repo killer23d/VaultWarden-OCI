@@ -642,7 +642,8 @@ verify_startup_health() {
     if "$PROJECT_ROOT/health.sh" --quiet; then
       log_success "Post-startup health check passed"
     else
-      log_warn "Post-startup health check reported issues"
+      log_warn "Post-startup health check reported issues — re-running for full diagnostics:"
+      "$PROJECT_ROOT/health.sh" || true
       log_info "Run './health.sh' for detailed diagnostics"
     fi
   fi

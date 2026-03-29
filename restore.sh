@@ -1112,6 +1112,12 @@ restore_db() {
         cp -a "$db_path" "${db_path}.pre-restore-${ts}"
     fi
 
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would overwrite $db_path with decrypted database"
+        [[ -n "$rollback_path" ]] && rm -f "$rollback_path" 2>/dev/null || true
+        return 0
+    fi
+
     log_info "Restoring database..."
     if ! cp -f "$dec_db" "$db_path"; then
         log_error "cp to live DB failed — rolling back..."

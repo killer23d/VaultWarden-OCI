@@ -29,3 +29,6 @@ CapabilityBoundingSet=CAP_NET_ADMIN
 # A hung unit blocks the systemd activation queue on an unattended server.
 TimeoutStartSec=30
 TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

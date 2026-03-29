@@ -97,6 +97,49 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 > Place entries here during development; move to a versioned section on release.
 
+### Added
+- **`caddy/Caddyfile`** — Caddy 2.11 compliance: `encode zstd gzip` on main site
+  block; `roll_compression zstd` in all three log blocks; connection timeouts merged
+  into global `servers` block; `request_body` size limits on admin and auth handlers;
+  health-check log suppression (`output discard`). *(Phase 2)*
+- **`caddy/entrypoint.sh`** — FQDN validation for `DOMAIN_NAME` at startup; Caddy
+  version logged on container start. *(Phase 2)*
+
+### Changed
+- **`.env.example`** — sentinel tokens for all external credentials; `LOG_LEVEL=warn`
+  default; `PUSH_ENABLED=false`; Mailgun EU region note; backup retention comment.
+  *(Phase 3)*
+- **`docker-compose.yml.example`** — `read_only` filesystem; `tmpfs` mounts; `ulimits`
+  (nofile); image-pin comment; `restart: unless-stopped`; `no-new-privileges:true`;
+  Caddy log rotation tightened. *(Phase 3)*
+- **`docker-compose.override.yml.example`** — dev-only warning banner; no plaintext
+  secrets. *(Phase 3)*
+- **Caddy minimum version** bumped to `2.11.2` (fixes TLS ACME renewal regression
+  introduced in 2.11.1). *(Phase 4/5)*
+
+### Fixed
+- **`restore.sh`** — `restore_db()` now checks `DRY_RUN` before overwriting the live
+  database file, matching the dry-run guards already present for full/emergency
+  restores. *(Phase 4 — P4-S1)*
+- **`health.sh`** — `check_configuration()` now checks for `DOMAIN_NAME` (the
+  canonical env var) instead of `DOMAIN` when validating `.env` required fields.
+  *(Phase 4 — P4-S2)*
+- **`startup.sh`** — post-startup health check now re-runs `./health.sh` (verbose)
+  when `./health.sh --quiet` exits non-zero, ensuring full diagnostics reach the
+  operator instead of being silently swallowed. *(Phase 4 — P4-S5)*
+- **`setup.sh`** — post-install checklist now displays `CLEAN_DOMAIN` (the bare
+  domain written to `.env` as `DOMAIN_NAME`) instead of the `DOMAIN` variable
+  which may include the `https://` protocol prefix. *(Phase 4 — P4-S6)*
+- **`create-breakglass-admin.sh`** — added `trap 'rm -f "${_BG_LOCK_FILE:-}"' EXIT`
+  guard so the operations lock file is always cleaned up on any exit path.
+  *(Phase 4 — P4-S7)*
+- **`setup-systemd.sh`** — `--install` now validates all `OnCalendar=` expressions
+  via `systemd-analyze calendar` before enabling timers and warns on invalid
+  expressions. *(Phase 5 — P5-SD1)*
+- **`systemd/*.service`** — added `[Install]` section (`WantedBy=multi-user.target`) to all
+  generated service unit files so `systemctl enable` is no longer a no-op.
+  *(Phase 5 — P5-SD2)*
+
 ---
 
 [1.0.0]: https://github.com/killer23d/VaultWarden-OCI/releases/tag/v1.0.0

@@ -32,3 +32,6 @@ ReadWritePaths=/opt/vaultwarden-scripts /var/lib/vaultwarden /etc/vaultwarden /r
 TimeoutStartSec=1800
 # Exit 1 = skipped/nothing-to-do; treat as success so OnFailure= is not fired.
 SuccessExitStatus=0 1
+
+[Install]
+WantedBy=multi-user.target

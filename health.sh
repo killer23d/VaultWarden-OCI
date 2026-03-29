@@ -867,7 +867,7 @@ check_configuration() {
     if [[ ! -f "$ENV_FILE" ]]; then
         config_issues+=("Missing env file: $ENV_FILE")
     else
-        local required_vars=("DOMAIN" "ADMIN_EMAIL" "CLOUDFLARE_ZONE_ID")
+        local required_vars=("DOMAIN_NAME" "ADMIN_EMAIL" "CLOUDFLARE_ZONE_ID")
         for var in "${required_vars[@]}"; do
             grep -q "^${var}=" "$ENV_FILE" || config_issues+=("Missing $var in $ENV_FILE")
         done

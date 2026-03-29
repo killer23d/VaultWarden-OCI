@@ -34,3 +34,6 @@ TimeoutStartSec=300
 # normal degraded states. Only exit >=2 (script crash / unhandled error) fires
 # the failure notification.
 SuccessExitStatus=0 1
+
+[Install]
+WantedBy=multi-user.target
