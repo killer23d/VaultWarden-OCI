@@ -198,7 +198,8 @@ echo "✓ Caddyfile validation passed"
 echo "==================================================================="
 echo " Starting Caddy Server"
 echo " Domain: ${DOMAIN_NAME}"
-echo " Caddy: $(caddy version 2>/dev/null || echo 'unknown')"  # C-08: log Caddy version at startup
+# C-08: log Caddy version at startup
+echo " Caddy: $(caddy version 2>/dev/null || echo 'unknown')"
 echo "==================================================================="
 
 exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
