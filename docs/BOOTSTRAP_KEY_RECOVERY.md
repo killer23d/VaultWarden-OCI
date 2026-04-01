@@ -4,7 +4,7 @@ This guide describes how to protect your **Age encryption key** against loss, so
 
 Related docs: [BACKUP-RESTORE.md](BACKUP-RESTORE.md) · [SECURITY.md](SECURITY.md) · [SCRIPTS.md](SCRIPTS.md)
 
-> **💡 Built-in alternatives:** Before using the manual GPG workflow below, consider the native three-tier protection in `lib/simple_key_resilience.sh`: **Tier 1** runs automatically on every `backup.sh` invocation (key health check + encrypt/decrypt roundtrip); **Tier 2** (`create_password_manager_escrow`) exports a password-manager-ready plaintext escrow; **Tier 3** generates a printable PDF/HTML paper backup. `./edit-secrets.sh --export-recovery-kit` also creates a full recovery document including the Age key and all secrets. See [BACKUP-RESTORE.md](BACKUP-RESTORE.md) for details on each tier. See [SCRIPTS.md](SCRIPTS.md) for the full `lib/simple_key_resilience.sh` function reference. The GPG-based approach below is a supplementary option for those wanting an additional passphrase-protected layer independent of the project tooling.
+> **💡 Built-in alternatives:** Before using the manual GPG workflow below, consider the native three-tier protection in `lib/simple_key_resilience.sh`: **Tier 1** (`simple_verify_age_key`) runs automatically on every `backup.sh` invocation — checking permissions, ownership, and performing an encrypt/decrypt roundtrip; **Tier 2** (`create_password_manager_escrow`) exports a password-manager-ready plaintext escrow; **Tier 3** (`create_printable_key_backup`) generates a printable PDF paper backup (HTML fallback if `wkhtmltopdf` is unavailable, with a 30-minute auto-delete reminder). `./edit-secrets.sh --export-recovery-kit` also creates a full recovery document including the Age key and all secrets. See [BACKUP-RESTORE.md](BACKUP-RESTORE.md) for details on each tier. See [SCRIPTS.md](SCRIPTS.md) for the full `lib/simple_key_resilience.sh` function reference. The GPG-based approach below is a supplementary option for those wanting an additional passphrase-protected layer independent of the project tooling.
 
 ---
 
@@ -64,9 +64,12 @@ gpg --export-secret-keys --armor YOUR_GPG_KEY_ID > gpg-private-key-backup.asc
 Before encrypting the key for offsite storage, confirm it is valid and the roundtrip works:
 
 ```bash
-# Check key structure and perform encrypt/decrypt roundtrip
+# Check key structure and perform encrypt/decrypt roundtrip (lib/crypto.sh)
 source lib/crypto.sh
 check_age_key secrets/keys/age-key.txt
+
+# Or use the Makefile shortcut
+make key-health
 
 # Manually verify the key format (private key must start with AGE-SECRET-KEY-1)
 grep '^AGE-SECRET-KEY-1' secrets/keys/age-key.txt
@@ -139,7 +142,9 @@ sudo ./setup.sh --domain vault.yourdomain.com --email admin@yourdomain.com
 mkdir -p secrets/keys
 mv ../age-key.txt secrets/keys/
 chmod 600 secrets/keys/age-key.txt
-./restore.sh --file ../emergency_backup_YYYYMMDD_HHMMSS.tar.zst.age --force
+# Supply the key non-interactively with --key-file, or omit to be prompted
+./restore.sh --file ../emergency_backup_YYYYMMDD_HHMMSS.tar.zst.age \
+             --key-file secrets/keys/age-key.txt --force
 
 # 7. Verify
 make health
@@ -220,6 +225,7 @@ echo "✅ All recovery tests passed"
 | Monthly | Create new emergency kit: `./backup.sh --type emergency` |
 | Quarterly | Full recovery test (procedure above) |
 | After any Age key rotation | Re-run Tier 2 escrow (`create_password_manager_escrow`) and re-wrap with GPG |
+| After any Age key rotation | `make key-rotate` triggers the built-in key rotation workflow |
 | Yearly | Optionally rotate GPG bootstrap passphrase |
 
 ---
@@ -231,4 +237,4 @@ echo "✅ All recovery tests passed"
 - Store bootstrap key and backups in **different** locations and cloud accounts
 - Label files clearly: `"VaultWarden Bootstrap Key — Required for Recovery"`
 - Never leave the Age key unencrypted on any networked system
-- Verify the Age key is structurally valid (`check_age_key`) before wrapping it for offsite storage
+- Verify the Age key is structurally valid (`check_age_key` or `make key-health`) before wrapping it for offsite storage
