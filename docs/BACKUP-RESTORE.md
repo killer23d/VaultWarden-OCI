@@ -1,6 +1,6 @@
 # Backup & Restore — VaultWarden-OCI
 
-All backups are encrypted with **Age** and managed by `backup.sh`. The backup lock uses `flock` on FD 9 (POSIX-safe range, changed from FD 200 to survive Docker FD truncation) with `FD_CLOEXEC` set so child processes cannot inherit and hold the lock open after fork/exec. The kernel releases the lock automatically on any process exit, including SIGKILL and OOM kill.
+All backups are encrypted with **Age** and managed by `backup.sh`. The backup lock uses `flock` with bash automatic FD allocation (`exec {LOCK_FD}>file`) so the kernel assigns a safe, unused file descriptor at runtime. `FD_CLOEXEC` is set so child processes cannot inherit and hold the lock open after fork/exec. The kernel releases the lock automatically on any process exit, including SIGKILL and OOM kill.
 
 Related docs: [OPERATIONS.md](OPERATIONS.md) · [SCRIPTS.md](SCRIPTS.md) · [ADVANCED-CUSTOMIZATION.md](ADVANCED-CUSTOMIZATION.md) · [BOOTSTRAP_KEY_RECOVERY.md](BOOTSTRAP_KEY_RECOVERY.md)
 
@@ -175,7 +175,7 @@ create_printable_key_backup ~/vaultwarden-key-backup.pdf
 
 `backup.sh` reads `RCLONE_REMOTE_NAME` from `.env` and syncs the encrypted `.age`, `.meta`, and `.sha256` sidecars to `${RCLONE_REMOTE_NAME}:vaultwarden_backups/${type}/` when `--rclone` is passed.
 
-**Rclone failure is fatal when `--rclone` is set** — a missing binary or unconfigured remote causes a non-zero exit so monitoring and the systemd timer capture the failure. The rclone config path (`RCLONE_CONFIG`) is validated before use: shell metacharacters, world-writable files, and paths resolving into `/etc`, `/root`, `/proc`, or `/sys` are all rejected.
+**Rclone failure is fatal when `--rclone` is set** — a missing binary or unconfigured remote causes a non-zero exit so monitoring and the systemd timer capture the failure. The rclone config path (`RCLONE_CONFIG`) is validated before use: shell metacharacters, world-writable files, and paths resolving into sensitive system locations are all rejected.
 
 ```bash
 # 1. Install rclone (if not already present)
@@ -296,12 +296,12 @@ After data is successfully restored (step 10), a brand-new age key pair is atomi
 - `/etc/vaultwarden/age-key.txt` — systemd canonical location, only if the file already exists
 - `SOPS_AGE_KEY_FILE=` updated in `.env` via in-place `sed`
 - `SOPS_AGE_KEY_FILE=` updated in `/etc/vaultwarden/vaultwarden.env` if present
-- The old key is preserved as `age-key.txt.pre-rotate-<timestamp>` before overwrite
+- The old key is preserved as `age-key.txt.pre-rotate-<timestamp>` before overwrite (only the 2 most recent backups are kept)
 
 The new key is then displayed in the same prominent banner style as a fresh `setup.sh` run (step 11):
 
 ```
-  ╬══════════════════════════════════════════════════════════╣
+  ╔══════════════════════════════════════════════════════════╗
   ║       ⚠️  SAVE YOUR NEW AGE ENCRYPTION KEY  ⚠️         ║
   ╚══════════════════════════════════════════════════════════╝
 
@@ -334,9 +334,8 @@ make key-rotate  # standalone key rotation (outside of restore)
 
 | Code | Meaning |
 | :-- | :-- |
-| `0` | Restore completed, all health checks passed |
+| `0` | Restore completed successfully |
 | `1` | Restore failed or critical phase error |
-| `2` | Restore completed but post-restore health check reported issues |
 
 ---
 
@@ -480,7 +479,7 @@ rclone config show your_remote_name
 # If RCLONE_CONFIG is set, verify it passes validation:
 # - no shell metacharacters
 # - regular file, not world-writable
-# - does not resolve into /etc, /root, /proc, /sys
+# - does not resolve into a sensitive system path
 ```
 
 **"Invalid --keep value"**
