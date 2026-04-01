@@ -176,7 +176,7 @@ Once healthy, switch Cloudflare to **Proxied (Orange Cloud)** and set SSL/TLS to
 
 ```bash
 # Install automated backups, health checks, maintenance, and DNS/firewall updates
-sudo ./systemd-setup.sh --install
+sudo ./setup-systemd.sh --install
 
 # Create break-glass emergency admin for OCI serial console
 ./create-breakglass-admin.sh
@@ -187,12 +187,15 @@ sudo ./systemd-setup.sh --install
 ./backup.sh --type emergency
 # or: make backup / make backup-emergency
 
+# Export and store the recovery kit (Age key + secrets) offline
+./edit-secrets.sh --export-recovery-kit
+
 # Test email delivery
 ./maintenance.sh --test-email --verbose
 # or: make test-email
 ```
 
-> **Note:** `cron-setup.sh` has been removed from the repository. Use `systemd-setup.sh --install` to install all scheduled jobs. If you have legacy cron jobs from a prior installation, remove them to avoid duplicate runs.
+> **Note:** `cron-setup.sh` has been removed from the repository. Use `setup-systemd.sh --install` to install all scheduled jobs. If you have legacy cron jobs from a prior installation, remove them to avoid duplicate runs.
 
 **🎉 Vault is live at `https://vault.yourdomain.com`**
 
@@ -206,7 +209,9 @@ sudo ./systemd-setup.sh --install
 - ✅ Test email notifications: `make test-email`
 - ✅ Test break-glass admin via OCI Console Connection
 - ✅ Create and test a backup: `make backup-emergency`
-- ✅ Confirm systemd timers are active: `sudo systemctl list-timers 'vaultwarden-*'`
+- ✅ Validate systemd timer installation: `sudo ./setup-systemd.sh --validate`
+- ✅ Confirm timers are running: `sudo ./setup-systemd.sh --status`
+- ✅ Store the recovery kit offline: `./edit-secrets.sh --export-recovery-kit`
 
 **First week:**
 - ✅ Invite team members
@@ -316,8 +321,9 @@ sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.c
 **Systemd timers not running:**
 
 ```bash
-sudo systemctl list-timers 'vaultwarden-*'          # list all VaultWarden timers
-sudo journalctl -u vaultwarden-db-backup.service -n 50  # last 50 lines for backup service
+sudo ./setup-systemd.sh --status              # list all VaultWarden timers
+sudo ./setup-systemd.sh --validate            # check for split-brain / missing files
+journalctl -u vaultwarden-db-backup.service -n 50   # last 50 lines for backup service
 sudo systemctl status vaultwarden-health.timer      # check a specific timer
 ```
 
