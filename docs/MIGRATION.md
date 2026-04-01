@@ -165,7 +165,7 @@ nano .env
 **3. Import to VaultWarden:**
 ```bash
 # Web vault: Login → Settings → Import Data
-# Select “Bitwarden (json)” and upload bitwarden-export.json
+# Select "Bitwarden (json)" and upload bitwarden-export.json
 ```
 
 **4. Migrate organisations (if applicable):**
@@ -249,7 +249,7 @@ sudo ./setup.sh --domain vault.example.com --email admin@example.com --auto
 | Security | DIY | Dual Fail2ban (host-networking) + Cloudflare-only firewall |
 | Email | Manual SMTP daemon | `lib/email.sh` multi-provider chain (API → SMTP → host MTA, no sidecar required) |
 | Caddy | Any version | >= 2.11.0 required (`caddy-cloudflare-ip` bundled; needed for correct Fail2Ban IP logging) |
-| Push notifications | Manual | Requires `internal: true` removed from the `vaultwarden` network when `PUSH_ENABLED=true` |
+| Push notifications | Manual | `vaultwarden` network is `internal: true`; add VaultWarden to `caddy_external` network when `PUSH_ENABLED=true` (see `docker-compose.yml.example`) |
 | Backups | Manual | Automated via systemd timers (Mon-Sat DB, Sunday full) |
 | Encryption | None | Age-encrypted backups and secrets (SOPS) |
 
@@ -322,7 +322,7 @@ cd /path/to/VaultWarden-OCI
 
 ```bash
 # Install systemd timers (daily backups, health checks, maintenance, DNS/firewall updates)
-sudo ./systemd-setup.sh --install
+sudo ./setup-systemd.sh --install
 
 # Confirm timers are active
 sudo systemctl list-timers 'vaultwarden-*'
@@ -391,7 +391,7 @@ sudo chown -R 1000:1000 /var/lib/vaultwarden/data/attachments
 sudo chmod -R 755      /var/lib/vaultwarden/data/attachments
 ```
 
-### Users can’t log in
+### Users can't log in
 
 ```bash
 # Check secrets are decryptable
@@ -430,7 +430,7 @@ sudo systemctl list-timers 'vaultwarden-*'
 sudo journalctl -u vaultwarden-db-backup.service -n 50
 
 # Re-install timers if missing
-sudo ./systemd-setup.sh --install
+sudo ./setup-systemd.sh --install
 ```
 
 ---
