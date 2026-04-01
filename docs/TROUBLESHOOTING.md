@@ -62,7 +62,7 @@ docker compose logs vaultwarden | tail -100
 make logs SERVICE=vaultwarden
 
 # Check for database issues (uses host sqlite3)
-sudo sqlite3 "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data/bwdata/db.sqlite3" 'PRAGMA integrity_check;'
+sudo sqlite3 "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data/db.sqlite3" 'PRAGMA integrity_check;'
 
 # Check resource usage
 docker stats $(docker compose ps -q vaultwarden)
@@ -208,7 +208,7 @@ sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
 cat .env | grep -v "^#"
 
 # Verify critical variables are set
-grep -E "DOMAIN|CLOUDFLARE_ZONE_ID|SMTP_HOST|ADMIN_EMAIL" .env
+grep -E "DOMAIN_NAME|CLOUDFLARE_ZONE_ID|SMTP_HOST|ADMIN_EMAIL" .env
 
 # Check if services are using environment
 docker compose config | grep -A 5 environment
@@ -366,7 +366,7 @@ sudo ufw status
 # sudo ufw enable
 
 # Schedule safe recurring firewall updates (Saturday 4 AM via systemd timer)
-make cron-install
+make systemd-install
 ```
 
 ### DNS Not Updating
@@ -937,7 +937,7 @@ sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
 du -h ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data/db.sqlite3
 
 # Check database integrity (uses host sqlite3)
-sudo sqlite3 "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data/bwdata/db.sqlite3" 'PRAGMA integrity_check;'
+sudo sqlite3 "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data/db.sqlite3" 'PRAGMA integrity_check;'
 
 # Review VaultWarden logs
 docker compose logs vaultwarden | grep -i slow
@@ -961,26 +961,26 @@ docker compose restart vaultwarden
 
 ## Cron / Automation Issues
 
-### Cron Jobs Not Running
+### Systemd Timers Not Running
 
 **Symptoms**:
-- No entries in cron log files
 - Scheduled backups or maintenance not occurring
 - Health alerts not being sent
+- Timers absent from `systemctl list-timers`
 
 **Diagnosis**:
 ```bash
 # List installed VaultWarden systemd timers
-sudo ./systemd-setup.sh --list
-make cron-list
+sudo ./setup-systemd.sh --status
+make systemd-status
 
 # Validate security and dependencies
-sudo ./systemd-setup.sh --validate
+sudo ./setup-systemd.sh --validate
 
-# Check cron logs
-tail -50 /var/log/vaultwarden-cron/maintenance.log
-tail -50 /var/log/vaultwarden-cron/backup.log
-tail -50 /var/log/vaultwarden-cron/health.log
+# Check timer logs via journald
+journalctl -u vaultwarden-maintenance.service -n 50
+journalctl -u vaultwarden-db-backup.service -n 100
+journalctl -u vaultwarden-health.service -n 50
 
 # Check systemd timer status
 systemctl list-timers --all | grep vaultwarden
@@ -989,23 +989,24 @@ systemctl list-timers --all | grep vaultwarden
 **Solutions**:
 ```bash
 # (Re-)install systemd timers
-sudo ./systemd-setup.sh --install
-make cron-install
+sudo ./setup-systemd.sh --install
+make systemd-install
 
 # After pulling a repo update, re-install to sync /opt/ scripts
-sudo ./systemd-setup.sh --install
+sudo ./setup-systemd.sh --install
 
 # Check for split-brain (stale /opt/ scripts)
-sudo ./systemd-setup.sh --list
+sudo ./setup-systemd.sh --validate
 # Look for: ⚠️  SPLIT-BRAIN DETECTED warning
 
 # Verify flock is installed
 command -v flock || sudo apt install util-linux
 ```
 
-> **Note**: Automation is managed via **systemd timers** (`systemd-setup.sh`), not
-> cron. There is no `cron-setup.sh` in the repository. Use `systemd-setup.sh`
-> for all scheduling operations.
+> **Note**: Automation is managed via **systemd timers** (`setup-systemd.sh`), not
+> cron. There is no `cron-setup.sh` in the repository. Use `setup-systemd.sh`
+> for all scheduling operations. Timer logs are written to the systemd journal
+> and are viewed with `journalctl`, not as flat log files.
 
 ## Getting Help
 
@@ -1014,6 +1015,9 @@ command -v flock || sudo apt install util-linux
 When reporting issues, include:
 
 ```bash
+# Full diagnostic dump (versions, key status, disk, containers, last backup, recent logs)
+make diagnose > diagnose-report.txt
+
 # System information
 ./health.sh --comprehensive --json > health-report.json
 
@@ -1031,10 +1035,10 @@ docker stats --no-stream > resource-usage.txt
 make version > version-info.txt
 
 # Systemd timer status
-sudo ./systemd-setup.sh --list > cron-status.txt
+sudo ./setup-systemd.sh --status > timer-status.txt
 
 # Fail2Ban jail status
-docker compose exec fail2ban fail2ban-client status >> cron-status.txt
+docker compose exec fail2ban fail2ban-client status >> timer-status.txt
 ```
 
 ### Emergency Recovery
