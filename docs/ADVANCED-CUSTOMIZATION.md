@@ -135,12 +135,13 @@ mv docker-compose.override.yml docker-compose.override.yml.bak
 
 ## ⏲️ Automation — systemd Timers
 
-Automation is managed by **systemd timers** (not cron). Install or remove them with:
+Automation is managed by **systemd timers** (not cron). Install, validate, or remove them with:
 
 ```bash
-sudo ./systemd-setup.sh --install    # install all timers and services
-sudo ./systemd-setup.sh --remove     # remove all timers and services
-sudo ./systemd-setup.sh --status     # show status of all units
+sudo ./setup-systemd.sh --install    # install all timers and services
+sudo ./setup-systemd.sh --validate   # verify installed state matches repo
+sudo ./setup-systemd.sh --remove     # remove all timers and services
+sudo ./setup-systemd.sh --status     # show status of all units
 ```
 
 ### Installed Timer Schedule
@@ -181,7 +182,7 @@ journalctl -u vaultwarden-health.service -n 50
 
 ### Modifying a Timer Schedule
 
-Edit the `.timer` file directly (do not use `systemd-setup.sh` — it would overwrite your change on next install):
+Edit the `.timer` file directly (do not use `setup-systemd.sh` — it would overwrite your change on next install):
 
 ```bash
 sudo systemctl edit --full vaultwarden-db-backup.timer
@@ -586,7 +587,7 @@ rclone copy backups/full/ s3:my-bucket/vaultwarden/full/
 
 ## 💾 Backup Retention Customisation
 
-Default retention is **14 days** for all backup tiers. Override at runtime or in `.env`:
+Default retention is **30 days** for all backup types (controlled by `BACKUP_RETENTION_DAYS` in `.env`). Override at runtime or in `.env`:
 
 ```bash
 # Keep 30 days of full backups
@@ -598,9 +599,16 @@ sudo ./backup.sh --type db --keep 7
 
 The `--keep` value **must be a positive integer**. Non-integer values are rejected with an error before any backup or cleanup operation begins.
 
-To set a permanent default, edit `KEEP_DAYS` in `.env`:
+To set a permanent default, edit `BACKUP_RETENTION_DAYS` in `.env`:
 ```bash
-KEEP_DAYS=30
+BACKUP_RETENTION_DAYS=30
+```
+
+Per-type overrides take precedence over the global default:
+```bash
+# Per-type retention (uncomment in .env to override BACKUP_RETENTION_DAYS)
+BACKUP_RETENTION_DB_DAYS=14    # retention for --type db backups
+BACKUP_RETENTION_FULL_DAYS=60  # retention for --type full backups
 ```
 
 > **Retention on restored hosts:** Backup retention age is calculated from the **timestamp embedded in the filename** (e.g., `vaultwarden-full-20260312-030000.tar.gz.age`), not from the file's `ctime`. This means backups restored to a new host are cleaned up correctly based on their original creation date, not the date they were copied.
@@ -707,4 +715,4 @@ curl -sX POST https://your-webhook-url/notify \
 - Verify with `./health.sh` or `make health`
 - Commit template changes to version control
 - Create a backup before major changes: `./backup.sh --type full`
-- After re-installing automation: `sudo ./systemd-setup.sh --install && systemctl list-timers --all | grep vaultwarden`
+- After re-installing automation: `sudo ./setup-systemd.sh --install && systemctl list-timers --all | grep vaultwarden`
