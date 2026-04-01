@@ -35,13 +35,15 @@ Two additional consumers sit outside `lib/email.sh` and use SMTP directly:
 
 | Consumer | How it sends email | Variables |
 | :-- | :-- | :-- |
-| **VaultWarden container** | Built-in SMTP client | `VW_SMTP_*` in `.env` |
+| **VaultWarden container** | Built-in SMTP client → Postfix sidecar | `VW_SMTP_*` in `.env` |
 | **Fail2Ban container** | `mail` binary → Postfix sidecar on `127.0.0.1:587` | `F2B_DEST_MAIL`, `F2B_SENDER` in `.env` |
 
-> **Why two separate SMTP blocks?** Docker Compose does not expand `${VAR}`
-> references inside `.env` files — they are passed as literal strings. The
-> `VW_SMTP_*` block must therefore be set to **literal values** and kept in
-> sync with the `SMTP_*` block whenever you change your relay settings.
+> **VaultWarden routes through Postfix, not the external relay directly.**
+> The `VW_SMTP_*` block points at the internal Postfix sidecar
+> (`VW_SMTP_HOST=postfix`, port 587, no auth, no TLS). Postfix then relays
+> outbound using the `SMTP_HOST` / `SMTP_USERNAME` credentials. This means
+> VaultWarden's SMTP settings are fixed and do not need updating when you
+> change your upstream relay provider.
 
 ---
 
@@ -73,8 +75,9 @@ EMAIL_PROVIDER=mailersend    # change to: sendgrid | mailgun | postmark | resend
 
 ### 3. Store the API token in secrets
 
-`lib/email.sh` resolves `<PROVIDER_UPPER>_API_TOKEN` automatically — you never
-set `EMAIL_API_TOKEN` directly:
+`lib/email.sh` uses a single canonical secret key (`email_api_token`) and
+resolves the correct provider token automatically based on `EMAIL_PROVIDER`.
+Store the token under the provider-specific name:
 
 ```bash
 # MailerSend
@@ -93,12 +96,28 @@ set `EMAIL_API_TOKEN` directly:
 ./edit-secrets.sh --rotate RESEND_API_TOKEN
 ```
 
+In `.env`, uncomment **only** the line matching your `EMAIL_PROVIDER` and leave
+its value blank (the actual token lives in the encrypted secrets file):
+
+```bash
+MAILERSEND_API_TOKEN=
+# SENDGRID_API_TOKEN=
+# MAILGUN_API_TOKEN=
+# POSTMARK_API_TOKEN=
+# RESEND_API_TOKEN=
+```
+
 ### 4. Set sender address in `.env`
 
 ```bash
-SMTP_FROM_EMAIL=noreply@vault.yourdomain.com
+SMTP_FROM=noreply@vault.yourdomain.com
 SMTP_FROM_NAME=VaultWarden
 ```
+
+> **`SMTP_FROM` is the canonical sender variable.** The legacy name
+> `SMTP_FROM_EMAIL` still works via a backward-compatibility shim but is
+> deprecated and will be removed in a future release. Migrate any existing
+> `.env` files to `SMTP_FROM=`.
 
 ### 5. Test delivery
 
@@ -123,7 +142,7 @@ SMTP_HOST=smtp.mailersend.net
 SMTP_PORT=587
 SMTP_SECURITY=starttls    # starttls (port 587) or on (SSL/TLS, port 465)
 SMTP_USERNAME=your-smtp-username
-# SMTP_FROM_EMAIL and SMTP_FROM_NAME already set above
+# SMTP_FROM and SMTP_FROM_NAME already set above
 SMTP_TIMEOUT=30
 ```
 
@@ -133,25 +152,30 @@ Store the SMTP password in secrets (never in `.env`):
 ./edit-secrets.sh --rotate smtp_password
 ```
 
-### VaultWarden container SMTP (keep in sync)
+### VaultWarden container SMTP
 
-The VaultWarden container has its own SMTP client that does **not** use
-`lib/email.sh`. Its variables must be **literal values** in `.env` — they
-cannot reference other variables:
+VaultWarden routes all its email through the **Postfix sidecar**, not directly
+through the external SMTP relay. The `VW_SMTP_*` block must point at the
+Postfix container on the internal Docker network:
 
 ```bash
-VW_SMTP_HOST=smtp.mailersend.net      # ← literal, not ${SMTP_HOST}
+VW_SMTP_HOST=postfix       # Docker service name of the Postfix sidecar
 VW_SMTP_PORT=587
-VW_SMTP_SECURITY=starttls
-VW_SMTP_USERNAME=your-smtp-username   # ← literal, not ${SMTP_USERNAME}
-VW_SMTP_FROM=noreply@vault.yourdomain.com
-VW_SMTP_FROM_NAME=VaultWarden
-VW_SMTP_TIMEOUT=30
+VW_SMTP_SECURITY=off       # plain — TLS is handled by Postfix → upstream relay
+VW_SMTP_AUTH_MECHANISM=none  # no auth on the internal link
+VW_SMTP_EXPLICIT_TLS=false
 ```
 
-> **Rule of thumb:** whenever you update `SMTP_HOST`, `SMTP_PORT`,
-> `SMTP_USERNAME`, or `SMTP_FROM_EMAIL`, update the corresponding `VW_SMTP_*`
-> line to the same literal value.
+> **`VW_SMTP_AUTH_MECHANISM=none` is required.** Without it, VaultWarden
+> defaults to `Plain` auth and attempts SASL authentication against Postfix.
+> The sidecar has no AUTH configured for the internal link, so the connection
+> hangs or returns "authentication required", blocking all VaultWarden email.
+> `VW_SMTP_EXPLICIT_TLS=false` prevents VaultWarden from attempting STARTTLS
+> on the plain internal link.
+
+When you change your upstream relay provider, you only update the `SMTP_*`
+variables. The `VW_SMTP_*` block stays fixed — VaultWarden always talks to
+the Postfix sidecar.
 
 ---
 
@@ -293,6 +317,27 @@ F2B_ACTION="%(action_mwl)s"               # email + Cloudflare ban
 
 ---
 
+## Mailgun Region
+
+Mailgun operates two independent API fleets. Set `MAILGUN_REGION` in `.env` to
+match your account:
+
+| `MAILGUN_REGION` | API endpoint | Account at |
+| :-- | :-- | :-- |
+| `us` (default) | `api.mailgun.net` | mailgun.com |
+| `eu` | `api.eu.mailgun.net` | eu.mailgun.com |
+
+EU-region accounts always receive HTTP 404 from the US endpoint. If you see
+`Domain not found` errors, verify `MAILGUN_REGION=eu` is set.
+
+To override the sending domain (defaults to the domain portion of `SMTP_FROM`):
+
+```bash
+MAILGUN_DOMAIN=mg.yourdomain.com  # optional — set only if different from SMTP_FROM domain
+```
+
+---
+
 ## EMAIL_MODE Reference
 
 | Value | Behaviour | When to use |
@@ -316,16 +361,16 @@ F2B_ACTION="%(action_mwl)s"               # email + Cloudflare ban
 | `SMTP_PORT` | `587` | SMTP relay port |
 | `SMTP_SECURITY` | `starttls` | `starttls` or `on` (SSL/TLS) |
 | `SMTP_USERNAME` | *(empty)* | SMTP relay username |
-| `SMTP_FROM_EMAIL` | *(empty)* | Sender address for `lib/email.sh` |
+| `SMTP_FROM` | *(empty)* | Sender address for `lib/email.sh` and Postfix relay |
 | `SMTP_FROM_NAME` | `VaultWarden` | Sender display name |
 | `SMTP_TIMEOUT` | `30` | Seconds before curl gives up |
-| `VW_SMTP_HOST` | *(empty)* | VaultWarden container SMTP host (literal) |
-| `VW_SMTP_PORT` | `587` | VaultWarden container SMTP port (literal) |
-| `VW_SMTP_SECURITY` | `starttls` | VaultWarden container TLS mode (literal) |
-| `VW_SMTP_USERNAME` | *(empty)* | VaultWarden container SMTP user (literal) |
-| `VW_SMTP_FROM` | *(empty)* | VaultWarden container sender address (literal) |
-| `VW_SMTP_FROM_NAME` | `VaultWarden` | VaultWarden container sender name (literal) |
-| `VW_SMTP_TIMEOUT` | `30` | VaultWarden container SMTP timeout (literal) |
+| `VW_SMTP_HOST` | `postfix` | VaultWarden SMTP host — Postfix sidecar service name |
+| `VW_SMTP_PORT` | `587` | VaultWarden SMTP port — internal Postfix port |
+| `VW_SMTP_SECURITY` | `off` | VaultWarden TLS mode — plain on the internal link |
+| `VW_SMTP_AUTH_MECHANISM` | `none` | VaultWarden auth — must be `none` for the internal link |
+| `VW_SMTP_EXPLICIT_TLS` | `false` | VaultWarden STARTTLS — must be `false` on the internal link |
+| `MAILGUN_REGION` | `us` | Mailgun API region: `us` or `eu` |
+| `MAILGUN_DOMAIN` | *(domain from `SMTP_FROM`)* | Mailgun sending domain override |
 | `ALLOWED_SENDER_DOMAINS` | *(empty)* | Postfix: domains accepted for relay |
 | `POSTFIX_MYHOSTNAME` | `postfix` | Postfix `myhostname` value |
 | `POSTFIX_SMTP_TLS_SECURITY_LEVEL` | `encrypt` | Postfix upstream TLS level |
@@ -334,6 +379,10 @@ F2B_ACTION="%(action_mwl)s"               # email + Cloudflare ban
 | `F2B_DEST_MAIL` | *(empty)* | Fail2Ban notification recipient (literal) |
 | `F2B_SENDER` | *(empty)* | Fail2Ban sender address (literal) |
 | `F2B_ACTION` | `%(action_mwl)s` | Fail2Ban action (email + CF ban) |
+
+> **Deprecated:** `SMTP_FROM_EMAIL` is the legacy sender variable. A
+> backward-compatibility shim maps it to `SMTP_FROM` at runtime. Migrate
+> to `SMTP_FROM=` — the shim will be removed in a future release.
 
 ### Secrets (via `./edit-secrets.sh`)
 
@@ -344,7 +393,7 @@ F2B_ACTION="%(action_mwl)s"               # email + Cloudflare ban
 | `MAILGUN_API_TOKEN` | `lib/email.sh` tier 1 | Mailgun HTTP API token |
 | `POSTMARK_API_TOKEN` | `lib/email.sh` tier 1 | Postmark HTTP API token |
 | `RESEND_API_TOKEN` | `lib/email.sh` tier 1 | Resend HTTP API token |
-| `smtp_password` | `lib/email.sh` tier 2, VaultWarden, Postfix | SMTP relay password |
+| `smtp_password` | `lib/email.sh` tier 2, Postfix | SMTP relay password |
 
 ---
 
@@ -411,13 +460,15 @@ docker exec vaultwarden_fail2ban fail2ban-client get vaultwarden-web-auth action
 
 | Symptom | Likely cause | Fix |
 | :-- | :-- | :-- |
-| API tier always fails | Token not set or wrong key name | Run `./edit-secrets.sh` and verify `<PROVIDER_UPPER>_API_TOKEN` is set |
+| API tier always fails | Token not set or wrong key name | Run `./edit-secrets.sh` and verify the matching `<PROVIDER_UPPER>_API_TOKEN` is set |
 | SMTP tier `SSL handshake failed` | `SMTP_SECURITY` mismatch | `starttls` → port 587; `on` → port 465 |
-| VaultWarden sends email but `lib/email.sh` does not | `VW_SMTP_*` and `SMTP_*` out of sync | Update `VW_SMTP_*` to match `SMTP_*` literal values |
+| VaultWarden email fails with "authentication required" | `VW_SMTP_AUTH_MECHANISM` not set to `none` | Set `VW_SMTP_AUTH_MECHANISM=none` and `VW_SMTP_EXPLICIT_TLS=false` in `.env` |
+| VaultWarden sends email but `lib/email.sh` does not | `SMTP_*` misconfigured; Postfix not relaying | Check Postfix logs: `docker compose logs postfix` |
 | Fail2Ban notifications not arriving | Postfix container not running | `docker compose up -d postfix` |
 | Fail2Ban notifications not arriving | `F2B_DEST_MAIL` contains `${ADMIN_EMAIL}` literal | Replace with the actual address in `.env` |
 | Postfix `Relay access denied` | `ALLOWED_SENDER_DOMAINS` not set | Set `ALLOWED_SENDER_DOMAINS=vault.yourdomain.com` in `.env` |
 | Postfix `SASL authentication failed` | Wrong SMTP password in secrets | `./edit-secrets.sh --rotate smtp_password` |
+| Mailgun HTTP 404 `Domain not found` | Wrong API region | Set `MAILGUN_REGION=eu` in `.env` for EU accounts |
 | All tiers fail silently on `EMAIL_MODE=auto` | `EMAIL_MODE` typo or not set | `grep EMAIL_MODE .env` — must be `auto`, `api`, `smtp`, or `host` |
 
 ---
