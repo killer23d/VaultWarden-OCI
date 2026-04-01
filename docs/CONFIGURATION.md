@@ -154,6 +154,12 @@ EMAIL_PROVIDER=mailersend   # mailersend | sendgrid | mailgun | postmark | resen
 | `postmark` | `POSTMARK_API_TOKEN` |
 | `resend` | `RESEND_API_TOKEN` |
 
+```bash
+# Mailgun only — must match your Mailgun account region
+MAILGUN_REGION=us   # us (default) or eu
+                    # EU-hosted accounts must set eu — all API calls return HTTP 404 otherwise
+```
+
 ### Tier 2 — SMTP Relay (curl, no daemon)
 
 Used when `EMAIL_MODE=auto` and the API path fails, or when `EMAIL_MODE=smtp`.
@@ -164,7 +170,7 @@ SMTP_PORT=587
 SMTP_SECURITY=starttls              # starttls or on (SSL/TLS)
 SMTP_USERNAME=your-smtp-username
 # SMTP_PASSWORD stored in secrets via ./edit-secrets.sh --rotate smtp_password
-SMTP_FROM_EMAIL=noreply@vault.yourdomain.com
+SMTP_FROM=noreply@vault.yourdomain.com
 SMTP_FROM_NAME=VaultWarden
 SMTP_TIMEOUT=30
 ```
@@ -247,19 +253,21 @@ docker exec vaultwarden_postfix postconf smtp_tls_security_level
 
 ### VaultWarden Container SMTP
 
-The VaultWarden container uses its own set of SMTP variables. Docker Compose does **not** expand `${VAR}` references in `.env` files — these must be **literal values**, kept in sync with the `SMTP_*` block above:
+The VaultWarden container does **not** connect directly to the external SMTP relay. Instead, it talks to the **Postfix sidecar** at hostname `postfix`, port `587`, with no authentication — Postfix handles the authenticated relay upstream.
+
+Docker Compose maps the `SMTP_*` variables into the VaultWarden container environment via `${VAR}` expansion in the Compose YAML, so these `VW_SMTP_*` variables are the values injected into VaultWarden's environment:
 
 ```bash
-VW_SMTP_HOST=smtp.mailersend.net
+VW_SMTP_HOST=postfix          # Always the Postfix sidecar hostname — not the external relay
 VW_SMTP_PORT=587
-VW_SMTP_SECURITY=starttls
-VW_SMTP_USERNAME=your-smtp-username
-VW_SMTP_FROM=noreply@vault.yourdomain.com
-VW_SMTP_FROM_NAME=VaultWarden
-VW_SMTP_TIMEOUT=30
+VW_SMTP_SECURITY=off          # Plain connection to sidecar — Postfix handles TLS upstream
+VW_SMTP_AUTH_MECHANISM=none   # No auth on the internal sidecar link
+VW_SMTP_EXPLICIT_TLS=false    # Do not attempt STARTTLS on the internal link
 ```
 
-> **⚠️ Keep `SMTP_FROM_EMAIL` and `VW_SMTP_FROM` in sync.** Both variables control the sender address for outbound email, but they are consumed by different components: `SMTP_FROM_EMAIL` is used by `lib/email.sh` (maintenance alerts, health notifications, backup reports), while `VW_SMTP_FROM` is used by the VaultWarden container itself (user registration, 2FA, emergency access emails). If they differ, VaultWarden app emails will appear to come from a different address than system notifications, and your SPF/DKIM alignment may break. **Always update both variables together** whenever you change your sending address or switch SMTP providers.
+> **⚠️ `VW_SMTP_AUTH_MECHANISM=none` and `VW_SMTP_EXPLICIT_TLS=false` are critical.** Without `AUTH_MECHANISM=none`, VaultWarden defaults to `Plain` and attempts SASL authentication against the Postfix sidecar. The sidecar has no AUTH configured for the internal network link — the connection hangs or fails with "authentication required", blocking all outgoing VaultWarden email. `VW_SMTP_EXPLICIT_TLS=false` prevents VaultWarden from attempting STARTTLS on the plain internal link.
+
+> **Admin UI (SMTP Settings):** Host = `postfix`, Port = `587`, Security = `Off`, Authentication mechanism = `None`, Username/Password = empty.
 
 ### Fail2Ban Email
 
@@ -308,7 +316,11 @@ WEB_VAULT_ENABLED=true
 PASSWORD_ITERATIONS=600000        # Argon2 / PBKDF2 iterations
 PASSWORD_HINTS_ALLOWED=false
 SHOW_PASSWORD_HINT=false
-DISABLE_ADMIN_TOKEN=false
+LOG_LEVEL=warn                    # trace | debug | info | warn | error
+ADMIN_TOKEN=                      # Must be an Argon2id hash — never plaintext.
+                                  # Generate: docker run --rm -it vaultwarden/server /vaultwarden hash --preset owasp
+                                  # Use ./edit-secrets.sh for production; never commit a real token.
+DISABLE_ADMIN_TOKEN=false         # Set true to completely disable /admin panel
 DISABLE_ICON_DOWNLOAD=false
 
 # Icon cache
@@ -350,17 +362,41 @@ Add `push_installation_id` and `push_installation_key` via `./edit-secrets.sh`.
 ## 💾 Backup
 
 ```bash
+BACKUP_ENCRYPTION_ENABLED=true         # Encrypt backup archives before upload.
+                                        # Set false only if the rclone remote provides
+                                        # its own encryption. false ships raw SQLite
+                                        # in plaintext to remote storage.
 BACKUP_VERIFICATION_MODE=quick_check   # quick_check or integrity_check
-RCLONE_REMOTE_NAME=CHANGE_ME_RCLONE_REMOTE  # rclone remote for offsite sync
-BACKUP_RETENTION_DAYS=30               # Default retention for full backups (days).
-                                        # DB backups default to 14 days.
-                                        # Override per-run: backup.sh --keep N
+BACKUP_RETENTION_DAYS=30               # Fallback retention for all backup types (days).
+BACKUP_RETENTION_DB_DAYS=14            # Retention for --type db backups (overrides above)
+BACKUP_RETENTION_FULL_DAYS=60          # Retention for --type full backups (overrides above)
+
+# Rclone offsite backup
+RCLONE_REMOTE_NAME=CHANGE_ME_RCLONE_REMOTE  # rclone remote name (run: rclone config)
+RCLONE_CONFIG=                               # Absolute path to rclone.conf.
+                                              # Required when running as root / systemd —
+                                              # root resolves ~ to /root/.config/rclone/
+                                              # which does not exist for non-root users.
+                                              # Leave blank to let backup.sh auto-discover.
+RCLONE_REMOTE_PATH=BW-Backup                 # Subfolder inside remote; backup type
+                                              # (db/full/emergency) is appended automatically.
+
+# Age encryption key — canonical path for systemd services
+# setup-systemd.sh --install copies the key here so systemd units
+# (ProtectHome=yes) can access it. Do not change unless you also
+# update AGE_KEY_DEST in setup-systemd.sh.
+SOPS_AGE_KEY_FILE=/etc/vaultwarden/age-key.txt
+
+# Non-interactive restore decryption key
+# Leave blank for normal interactive use. Set to an absolute key file path
+# only for automated / pipeline-driven restores.
+# Priority: --key-file CLI flag > RESTORE_AGE_KEY_FILE > interactive prompt > SOPS_AGE_KEY_FILE
+RESTORE_AGE_KEY_FILE=
 
 # BACKUP_SCHEDULE is a reference value only — the actual automated schedule
-# is controlled by the systemd timer: vaultwarden-db-backup.timer (Mon-Sat 04:00)
+# is controlled by the systemd timer: vaultwarden-db-backup.timer (Mon–Sat 04:00)
 # and vaultwarden-full-backup.timer (Sunday 03:00).
 # To change the schedule: sudo systemctl edit vaultwarden-db-backup.timer
-# Legacy cron: cron-setup.sh hardcodes its own schedule independently.
 BACKUP_SCHEDULE="0 4 * * *"
 ```
 
@@ -370,10 +406,10 @@ See [BACKUP-RESTORE.md](BACKUP-RESTORE.md) for procedures.
 
 ## 🔁 Automation (Systemd)
 
-Scheduled jobs are managed by systemd timers installed by `systemd-setup.sh`:
+Scheduled jobs are managed by systemd timers installed by `setup-systemd.sh`:
 
 ```bash
-sudo ./systemd-setup.sh --install
+sudo ./setup-systemd.sh --install
 ```
 
 | Timer | Schedule | Script |
@@ -387,7 +423,7 @@ sudo ./systemd-setup.sh --install
 
 All services emit `OnFailure=vaultwarden-notify-failure@%n.service` — failures trigger an email via the notification template unit.
 
-> **Legacy:** `cron-setup.sh` is **no longer present** in the repository. If you have legacy cron jobs from a prior install, remove them and migrate to `systemd-setup.sh --install`.
+> **Legacy:** `cron-setup.sh` is **no longer present** in the repository. If you have legacy cron jobs from a prior install, remove them and migrate to `setup-systemd.sh --install`.
 
 ---
 
