@@ -45,9 +45,6 @@ docker compose kill
 
 ```bash
 # Enhanced restart (preferred)
-./startup.sh --force
-
-# --force-restart is a legacy alias for --force
 ./startup.sh --force-restart
 
 # Or via Makefile
@@ -78,6 +75,13 @@ make health
 #  ✓ Database size and growth rate
 #  ✓ Backup age and decryptability (missing Age key = hard failure)
 #  ✓ Email notification configuration
+```
+
+#### Quick Health Check
+
+```bash
+# Fast sanity check — port up + container running (no deep tests)
+make health-quick
 ```
 
 #### Comprehensive Health Check
@@ -127,16 +131,22 @@ docker inspect $(docker compose ps -q vaultwarden) | jq '.[0].State.Health'
 #### Viewing Logs
 
 ```bash
-# All services (follow)
-docker compose logs --follow
+# All services — last 100 lines (default)
 make logs
+
+# Tail / follow all services
+make logs FOLLOW=true
+make logs-tail
 
 # Specific service
 docker compose logs vaultwarden --follow --tail=50
 make logs SERVICE=vaultwarden
 
-# Postfix email logs shortcut
-make logs-postfix
+# Per-service shortcuts
+make logs-vaultwarden   # VaultWarden application logs
+make logs-caddy         # Caddy reverse-proxy logs
+make logs-postfix       # Postfix email relay logs
+make logs-fail2ban      # Fail2ban intrusion-prevention logs
 
 # With timestamps
 docker compose logs --follow --timestamps
@@ -207,8 +217,9 @@ du -sh /var/lib/vaultwarden/logs/*
 
 ```bash
 ./backup.sh --type db
-make backup   # same
-make db-backup
+make backup        # defaults to TYPE=db if omitted
+make backup TYPE=db
+make db-backup     # alias
 
 # Features:
 #  - WAL checkpoint verified for completion before snapshot
@@ -224,6 +235,7 @@ make db-backup
 ```bash
 ./backup.sh --type full
 make backup-full
+make backup TYPE=full
 
 # Includes: database, config files, Caddy certificates, logs
 # Excludes: secrets (use --type emergency for those)
@@ -245,6 +257,7 @@ make backup-full
 ```bash
 ./backup.sh --type emergency
 make backup-emergency
+make backup TYPE=emergency
 
 # Includes everything, including secrets — full disaster recovery
 # Retention: 90 days
@@ -271,6 +284,9 @@ Supported remotes: Google Drive, Amazon S3, Backblaze B2, Dropbox, OneDrive, and
 ./backup.sh --list
 make list-backups
 
+# Backup health summary — last run time, size, retention, count per type
+make backup-status
+
 # Interactive restore (recommended)
 ./restore.sh
 make restore
@@ -278,8 +294,11 @@ make restore
 # Restore specific file
 ./restore.sh --file /path/to/backup.age
 
-# Restore latest DB backup (non-interactive)
+# Restore latest DB backup (interactive confirmation + key prompt)
 make restore-db
+
+# Restore from a remote (rclone) backup — interactive selection
+make restore-remote
 ```
 
 ---
@@ -458,9 +477,26 @@ make test-secrets
 ./edit-secrets.sh
 # 2. Update admin_token, admin_basic_auth_hash, smtp_password, etc.
 # 3. Restart to apply
-./startup.sh --force
+./startup.sh --force-restart
 ./health.sh
 ```
+
+### Age Key Management
+
+```bash
+# Show current age public key and key file path/status
+make key-show
+
+# Check age key health (permissions, decodability, SOPS_AGE_KEY_FILE)
+make key-health
+
+# Rotate the age encryption key
+# Generates a new key and updates all locations.
+# WARNING: store the new key displayed at the end in a secure location.
+sudo make key-rotate
+```
+
+> **Key rotation note:** After rotation, new backups will use the new key. Existing backups remain decryptable only with the old key. Export and store both keys offline before rotation.
 
 ### Break-Glass Admin Management
 
@@ -488,40 +524,41 @@ make breakglass-remove
 ### Installing Systemd Timers
 
 ```bash
-sudo ./systemd-setup.sh --install
-make cron-install
+sudo ./setup-systemd.sh --install
+make systemd-install
 ```
 
 ### Actual Schedule
 
 | Schedule | Job |
 |---|---|
-| Daily 2 AM (Mon–Sat) | Comprehensive maintenance (Sunday skipped to avoid overlap with full backup) |
-| Mon–Sat 4 AM (+ 0–60 s jitter) | Database backup with fast verification + rclone sync |
+| Mon–Sat 02:05 (+ 0–30 s jitter) | Comprehensive maintenance (Sunday skipped to avoid overlap with full backup) |
+| Daily 04:00 (+ 0–30 s jitter) | Database backup with fast verification + rclone sync |
 | Every 30 minutes | Health check with auto-recovery + email on failure |
 | Saturday 4 AM | Cloudflare firewall IP range update |
 | Sunday 3 AM | Weekly full backup with comprehensive verification + rclone sync |
 | Every hour | DNS A record update via `maintenance.sh --update-dns` |
 
-> **Note:** Maintenance is intentionally skipped on Sunday to prevent overlap with the 3 AM full backup. `RandomizedDelaySec=60` on the database backup timer spreads post-reboot catch-up bursts.
+> **Note:** Maintenance is intentionally skipped on Sunday to prevent overlap with the 3 AM full backup. `RandomizedDelaySec=30` on the database backup and maintenance timers spreads post-reboot catch-up bursts.
 
 ```bash
-# View installed timers
-sudo ./systemd-setup.sh --list
-make cron-list
+# View installed timers (next trigger + last run)
+make timers
+sudo ./setup-systemd.sh --status
 
-# Validate security and detect split-brain (stale /opt/ scripts)
-sudo ./systemd-setup.sh --validate
+# Validate installed units match current repo scripts
+sudo ./setup-systemd.sh --validate
+make systemd-validate
 
 # Remove timers
-sudo ./systemd-setup.sh --remove
-make cron-remove
+sudo ./setup-systemd.sh --remove
+make systemd-remove
 
 # Re-run after pulling repo updates to keep /opt/ in sync
-sudo ./systemd-setup.sh --install
+sudo ./setup-systemd.sh --install
 ```
 
-> **Migration note:** The earlier `cron-setup.sh` has been replaced by `systemd-setup.sh`. If you set up on a previous version, remove old cron entries (`sudo crontab -l`, delete the VaultWarden block with `sudo crontab -e`), then run `sudo ./systemd-setup.sh --install`.
+> **Migration note:** The earlier `cron-setup.sh` has been replaced by `setup-systemd.sh`. If you set up on a previous version, remove old cron entries (`sudo crontab -l`, delete the VaultWarden block with `sudo crontab -e`), then run `sudo ./setup-systemd.sh --install`.
 
 ### Failure Notifications
 
@@ -617,7 +654,10 @@ docker compose logs fail2ban
 docker compose logs postfix
 
 # 5. Force restart
-./startup.sh --force
+./startup.sh --force-restart
+
+# 6. Full diagnostic dump
+make diagnose
 ```
 
 ### High Resource Usage
@@ -678,6 +718,7 @@ df -h
 
 # 2. Check Age key
 ls -la secrets/keys/age-key.txt
+make key-health
 
 # 3. Test backup manually
 ./backup.sh --type db
@@ -711,7 +752,7 @@ sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
 ./maintenance.sh --update-firewall
 
 # 6. Restart and verify
-./startup.sh --force
+./startup.sh --force-restart
 ./health.sh
 ```
 
@@ -751,10 +792,11 @@ sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
 - ✅ Review and update documentation
 - ✅ Audit user accounts and permissions
 - ✅ Test complete system rebuild from backup
-- ✅ Run `sudo ./systemd-setup.sh --validate` to detect any split-brain between `/opt/` and the current repo
+- ✅ Run `sudo ./setup-systemd.sh --validate` to detect any split-brain between `/opt/` and the current repo
 
 ### Annual
 - ✅ Rotate all secrets (tokens, passwords)
+- ✅ Rotate the Age encryption key (`sudo make key-rotate`) and store the new key offline
 - ✅ Review and update security policies
 - ✅ Audit complete system configuration
 - ✅ Update to latest stable container versions
@@ -768,28 +810,40 @@ sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
 # Service Management
 make start              # Start all services (alias: make up)
 make stop               # Stop all services (alias: make down)
-make restart            # Restart with enhanced script
+make restart            # Restart with enhanced startup script
 make safe-restart       # Restart with auto-rollback on failure
 make status             # Show service status
 
 # Monitoring
 make health                        # Basic health check
+make health-quick                  # Fast sanity check (port + container only)
 make health AUTO_RECOVER=true      # With auto-recovery
 make health COMPREHENSIVE=true     # Comprehensive check
 make health-email                  # Comprehensive + email
-make logs                          # All service logs
+make logs                          # All service logs (last 100 lines)
+make logs FOLLOW=true              # Follow / tail all service logs
 make logs SERVICE=vaultwarden      # Specific service
-make logs-postfix                  # Postfix email logs
+make logs-tail                     # Tail all services with timestamps
+make logs-vaultwarden              # Tail VaultWarden logs
+make logs-caddy                    # Tail Caddy logs
+make logs-postfix                  # Tail Postfix email logs
+make logs-fail2ban                 # Tail Fail2ban logs
 make monitor                       # Real-time log stream
-make watch                         # Live status + health
+make watch                         # Live status + quick health every 5 s
+make diagnose                      # Full diagnostic dump (versions, key, disk, containers, logs)
 
 # Backups
-make backup              # Database backup
-make backup-full         # Full system backup
-make backup-emergency    # Emergency recovery kit
+make backup              # Database backup (TYPE=db default)
+make backup TYPE=full    # Full system backup
+make backup TYPE=emergency # Emergency recovery kit
+make backup-full         # Alias for TYPE=full
+make backup-emergency    # Alias for TYPE=emergency
+make db-backup           # Alias for TYPE=db
+make backup-status       # Backup health summary (last run, size, retention, count)
 make list-backups        # List available backups
 make restore             # Interactive restore
 make restore-db          # Restore latest DB backup
+make restore-remote      # Restore from rclone remote (interactive)
 
 # Updates & Maintenance
 make update              # Update container images
@@ -799,6 +853,13 @@ make maintenance-full    # Comprehensive + email notification
 make db-maint            # Deep database maintenance (sudo)
 make update-dns          # Update Cloudflare DNS record
 make test-email          # Full email diagnostic
+make lint                # Shellcheck all shell scripts
+make prune               # Remove unused Docker resources
+
+# Age Key Management
+make key-show            # Show age public key and key file status
+make key-health          # Check age key health (permissions, decodability)
+sudo make key-rotate     # Rotate the age encryption key
 
 # Security
 make edit-secrets        # Edit encrypted secrets
@@ -808,17 +869,27 @@ make breakglass-status   # Check emergency admin status
 make breakglass-remove   # Remove emergency admin
 
 # Automation
-make cron-install        # Install systemd timers (delegates to systemd-setup.sh)
-make cron-list           # List scheduled timers
-make cron-remove         # Remove timers
+make systemd-install     # Install systemd timer units
+make systemd-status      # Show status of all vaultwarden systemd units
+make systemd-validate    # Validate installed units match current repo scripts
+make systemd-remove      # Remove all vaultwarden systemd timer units
+make timers              # List timers (next trigger + last run + .env schedule)
+
+# Uninstall
+make uninstall-dry-run   # Preview what uninstall would remove
+make uninstall           # Full uninstall (DESTRUCTIVE — interactive confirmation required)
+
+# Development
+make dev-setup           # Setup development environment
+make test                # Run all tests (secrets, email, compose config)
+make test-config         # Validate docker-compose config only
+make fmt                 # Validate all config files
+make dry-run             # Preview all operations without executing
 
 # Configuration & Info
-make config              # Show configuration summary
-make test-config         # Validate docker-compose config
-make fmt                 # Validate all config files
-make info                # System info + service status
+make config              # Show configuration summary (sensitive keys redacted)
+make info                # System info + version + age key + disk usage
 make version             # Container version info
-make dry-run             # Preview all operations
 make shell               # Shell in vaultwarden container
 make shell SERVICE=caddy # Shell in specific container
 ```
