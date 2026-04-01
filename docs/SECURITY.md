@@ -198,9 +198,9 @@ backup_passphrase: "optional"
 
 The secrets management layer (`lib/secrets.sh`, `edit-secrets.sh`, `setup-secrets.sh`) implements several hardened behaviours:
 
-- **Umask guard on file creation**: `write_secret_file()` saves and restores the process umask around every secret file write, ensuring files are born at mode `600` — not world-readable at any point (BUG-S7 fix).
-- **SOPS key scoping**: `decrypt_secret()` unsets `SOPS_AGE_KEY_FILE` immediately after each `sops -d` call so no child process (Docker, rclone, curl) inherits the Age key file path (BUG-S10 fix).
-- **Key-names-only listing**: `list_secrets()` decodes only YAML key names via `python3/yaml` — secret values are never decrypted into the shell pipeline buffer (BUG-S11 fix).
+- **Umask guard on file creation**: `write_secret_file()` saves and restores the process umask around every secret file write, ensuring files are born at mode `600` — not world-readable at any point.
+- **SOPS key scoping**: `decrypt_secret()` unsets `SOPS_AGE_KEY_FILE` immediately after each `sops -d` call so no child process (Docker, rclone, curl) inherits the Age key file path.
+- **Key-names-only listing**: `list_secrets()` decodes only YAML key names via `python3/yaml` — secret values are never decrypted into the shell pipeline buffer.
 - **Environment cleanup**: `cleanup_secrets_environment()` actively unsets `SOPS_AGE_KEY_FILE` and `SOPS_CONFIG` when called at the end of any secrets workflow. SOPS variables do not persist for the script lifetime.
 - **Process privacy**: SOPS key path is never exposed in process list (`ps aux`)
 - **Secure temp files**: Proper cleanup of temporary decrypted data via EXIT trap on a dedicated tmpfs path
@@ -643,8 +643,8 @@ header {
 
 ### 4-Log Forensic Architecture (~3 GB Total Capacity)
 
-Caddy routes log output by named logger to dedicated files, preventing
-double-firing across log categories and enabling per-category retention targets.
+Caddy routes log output to dedicated files per category, enabling per-category
+retention targets.
 
 ```
 Main Access Log:   50MB × 20 files = 1GB    (30-day retention)   → access.log
@@ -685,11 +685,11 @@ All Caddy logs use structured JSON format for easy parsing:
 # VaultWarden application logs
 ${PROJECT_STATE_DIR}/logs/vaultwarden/vaultwarden.log
 
-# Caddy logs (4 specialised forensic logs)
-${PROJECT_STATE_DIR}/logs/caddy/access.log        # General access (access_log)
-${PROJECT_STATE_DIR}/logs/caddy/admin_access.log  # Admin panel traffic (admin_log)
-${PROJECT_STATE_DIR}/logs/caddy/auth_attempts.log # Auth endpoints (auth_log)
-${PROJECT_STATE_DIR}/logs/caddy/security.log      # Catch-all / suspicious (security_log)
+# Caddy logs (4 forensic log files)
+${PROJECT_STATE_DIR}/logs/caddy/access.log        # General access (main site)
+${PROJECT_STATE_DIR}/logs/caddy/admin_access.log  # Admin panel traffic
+${PROJECT_STATE_DIR}/logs/caddy/auth_attempts.log # Auth endpoints
+${PROJECT_STATE_DIR}/logs/caddy/security.log      # Direct-IP / catch-all block
 
 # Fail2Ban logs
 ${PROJECT_STATE_DIR}/logs/fail2ban/fail2ban.log
@@ -1126,7 +1126,7 @@ grep "ERROR" ${PROJECT_STATE_DIR}/logs/vaultwarden/vaultwarden.log
 - ✅ Monitor resource usage monthly
 - ✅ Review forensic logs for incidents
 - ✅ Keep break-glass admin credentials secure
-- ✅ Run `sudo ./systemd-setup.sh --validate` after pulling repo updates
+- ✅ Run `sudo ./setup-systemd.sh --validate` after pulling repo updates
 
 ### Incident Response
 
@@ -1176,7 +1176,7 @@ If you detect suspicious activity:
 
    # Update admin token and hash
    # Restart services
-   ./startup.sh --force
+   ./startup.sh --force-restart
 
    # Verify security
    ./health.sh --comprehensive
