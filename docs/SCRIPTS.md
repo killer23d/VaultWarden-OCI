@@ -25,7 +25,7 @@ Complete reference for all management scripts and utility libraries in VaultWard
 | 7 | `update.sh` | Updates | — |
 | 8 | `maintenance.sh` | Maintenance (merged) | `--db-maint` only |
 | 9 | `create-breakglass-admin.sh` | Emergency | ✅ |
-| 10 | `systemd-setup.sh` | Automation | ✅ |
+| 10 | `setup-systemd.sh` | Automation | ✅ |
 | 11 | `uninstall-vaultwarden.sh` | Uninstall | ✅ |
 
 **Utility libraries (8):** `lib/common.sh`, `lib/docker.sh`, `lib/crypto.sh`, `lib/security.sh`, `lib/backup_utils.sh`, `lib/secrets.sh`, `lib/simple_key_resilience.sh`, `lib/email.sh`
@@ -185,6 +185,7 @@ make health                        # Basic
 make health AUTO_RECOVER=true      # With auto-recovery
 make health COMPREHENSIVE=true     # Comprehensive
 make health-email                  # Comprehensive + email
+make health-quick                  # Fast port + container check (no deep tests)
 ```
 
 > **Systemd note:** The `vaultwarden-health.service` unit runs `health.sh --auto-recover --email` by default. To switch to passive/observe-only mode, edit the unit's `ExecStart` to remove those flags and add `--quiet`.
@@ -252,6 +253,7 @@ make backup              # Database backup
 make backup-full         # Full backup
 make backup-emergency    # Emergency kit
 make list-backups        # List all available backups
+make backup-status       # Show backup health summary (last run, size, retention, count per type)
 ```
 
 > **`zstd` dependency:** Full backups require `zstd` for compression. `setup.sh` installs it automatically. If you installed before this was added to the package list, run `sudo apt install zstd`.
@@ -275,6 +277,7 @@ make list-backups        # List all available backups
 | `--force` | Skip confirmation prompts |
 | `--no-backup` | Skip pre-restore emergency snapshot |
 | `--skip-verification` | Skip integrity check |
+| `--remote` | Restore from a remote (rclone) backup — interactive selection |
 | `--dry-run` | Preview operations |
 
 ```bash
@@ -285,13 +288,16 @@ make restore
 # Specific file
 ./restore.sh --file /path/to/backup.age --force
 
-# Latest DB backup (non-interactive)
+# Latest DB backup (non-interactive — runs age key prompt and confirmation)
 ./restore.sh --latest --type db
 make restore-db
 
 # Latest full backup, skip confirmation and pre-restore snapshot
 # (used internally by update.sh rollback)
 ./restore.sh --latest --type full --force --no-backup
+
+# Restore from a remote (rclone) backup
+make restore-remote
 ```
 
 > **Retention note:** Backup file timestamps are embedded in filenames (`YYYYMMDD-HHMMSS`). The retention logic reads these embedded timestamps rather than filesystem `ctime`, so restored backups retain their original age and are cleaned up on the correct schedule regardless of when they were copied to the host.
@@ -479,13 +485,13 @@ make breakglass-remove
 
 ---
 
-### 10. `systemd-setup.sh`
+### 10. `setup-systemd.sh`
 **Purpose:** Install, validate, and manage automated systemd timers with security hardening
 
-> **Note:** This script replaces the former `cron-setup.sh`. All Makefile targets (`make cron-install`, `make cron-list`, `make cron-remove`) delegate to `systemd-setup.sh`. If you have an older deployment that used `cron-setup.sh`, remove those cron entries (`sudo crontab -r`) and install the systemd units with `sudo ./systemd-setup.sh --install`.
+> **Note:** This script replaces the former `cron-setup.sh`. All Makefile targets (`make systemd-install`, `make systemd-list`, `make systemd-remove`) delegate to `setup-systemd.sh`. If you have an older deployment that used `cron-setup.sh`, remove those cron entries (`sudo crontab -r`) and install the systemd units with `sudo ./setup-systemd.sh --install`.
 
 ```bash
-sudo ./systemd-setup.sh [OPTIONS]
+sudo ./setup-systemd.sh [OPTIONS]
 ```
 
 **Key features:**
@@ -521,14 +527,16 @@ Sunday maintenance is intentionally absent — the 3 AM full backup fills that s
 **Failure notifications:** Every service unit sets `OnFailure=vaultwarden-notify-failure@%n.service`. That template unit sources `lib/common.sh`, calls `send_email()`, and is hardened with `NoNewPrivileges=yes` and `PrivateTmp=yes`.
 
 ```bash
-sudo ./systemd-setup.sh --install
-sudo ./systemd-setup.sh --list
-sudo ./systemd-setup.sh --validate
-sudo ./systemd-setup.sh --remove
+sudo ./setup-systemd.sh --install
+sudo ./setup-systemd.sh --list
+sudo ./setup-systemd.sh --validate
+sudo ./setup-systemd.sh --remove
 
-make cron-install
-make cron-list
-make cron-remove
+make systemd-install
+make systemd-status
+make systemd-validate
+make systemd-remove
+make timers          # List all vaultwarden timers (next trigger + last run)
 ```
 
 #### `vaultwarden-notify-failure@.service` *(failure notification template)*
@@ -631,7 +639,12 @@ sudo bash ~/VaultWarden-OCI/uninstall-vaultwarden.sh
 # Type 'UNINSTALL' to confirm, or anything else to abort:
 ```
 
-> **No Makefile target exists for uninstall** by design — the extra friction of running the script directly is intentional for a destructive operation.
+```bash
+make uninstall-dry-run   # Preview what would be removed (no changes)
+make uninstall           # Full uninstall (requires interactive TTY + 'yes' confirmation)
+```
+
+> **No Makefile target exists for uninstall via direct script** by design — the extra friction of running the script directly is intentional for a destructive operation.
 
 ---
 
@@ -655,16 +668,22 @@ All common operations have Makefile shortcuts. Run `make help` to see the full t
 | `make safe-restart` | `sudo ./startup.sh --force-restart` + health check | Restarts with automatic rollback on failure |
 | `make status` | `docker compose ps` | Show service status table |
 | `make health` | `./health.sh` | Basic health check (`AUTO_RECOVER=true`, `COMPREHENSIVE=true` supported) |
+| `make health-quick` | `./health.sh --quiet` | Fast port + container check (no deep tests) |
 | `make health-email` | `./health.sh --comprehensive --email` | Health check with email notification |
 | `make logs` | `docker compose logs --tail=100 [SERVICE]` | Recent logs; pass `SERVICE=caddy` to filter, `FOLLOW=true` to tail |
 | `make logs-tail` | `docker compose logs -f -t --tail=100 [SERVICE]` | Follow logs with timestamps |
+| `make logs-vaultwarden` | `docker compose logs -f -t --tail=100 vaultwarden` | Tail VaultWarden application logs |
+| `make logs-caddy` | `docker compose logs -f -t --tail=100 caddy` | Tail Caddy reverse-proxy logs |
 | `make logs-postfix` | `docker compose logs -f -t --tail=100 postfix` | Postfix email logs shortcut |
+| `make logs-fail2ban` | `docker compose logs -f -t --tail=100 fail2ban` | Tail Fail2ban intrusion-prevention logs |
 | `make backup` | `./backup.sh --type db --email` | DB backup (pass `TYPE=full` or `TYPE=emergency`) |
 | `make backup-full` | `./backup.sh --type full --email` | Full system backup |
 | `make backup-emergency` | `./backup.sh --type emergency --email` | Emergency kit (includes secrets) |
 | `make list-backups` | `./backup.sh --list` | List all available backups with metadata |
+| `make backup-status` | — | Backup health summary: last run, size, retention, count per type |
 | `make restore` | `./restore.sh` | Interactive restore (recommended) |
-| `make restore-db` | `./restore.sh --type db --force` | Restore latest database backup non-interactively |
+| `make restore-db` | `./restore.sh --type db --latest` | Restore latest database backup (runs key prompt + confirmation) |
+| `make restore-remote` | `./restore.sh --remote` | Restore from a remote (rclone) backup — interactive selection |
 | `make update` | `./update.sh` | Pull latest container images |
 | `make update-system` | `./update.sh --system --email` | Update containers + apt + Docker engine |
 | `make maintenance` | `./maintenance.sh --comprehensive` | Full maintenance run |
@@ -672,9 +691,19 @@ All common operations have Makefile shortcuts. Run `make help` to see the full t
 | `make update-dns` | `./maintenance.sh --update-dns` | Update Cloudflare DNS A record |
 | `make db-maint` | `sudo ./maintenance.sh --db-maint` | Deep DB VACUUM (stops VaultWarden; confirms before running) |
 | `make db-backup` | `./backup.sh --type db` | Quick database backup |
+| `make key-rotate` | `lib/crypto.sh rotate_age_key` | Rotate the Age encryption key (generates new key, updates all locations) |
+| `make key-show` | — | Show current Age public key and key file path/status |
+| `make key-health` | `lib/simple_key_resilience.sh check_age_key_health` | Check Age key health (permissions, decodability) |
 | `make breakglass-create` | `sudo ./create-breakglass-admin.sh --create` | Create emergency OS admin account |
 | `make breakglass-status` | `sudo ./create-breakglass-admin.sh --status` | Show break-glass admin status |
 | `make breakglass-remove` | `sudo ./create-breakglass-admin.sh --remove` | Remove break-glass admin account |
+| `make systemd-install` | `sudo ./setup-systemd.sh --install` | Install systemd units and sync scripts to `/opt` |
+| `make systemd-remove` | `sudo ./setup-systemd.sh --remove` | Remove all vaultwarden systemd timer units |
+| `make systemd-status` | `sudo ./setup-systemd.sh --status` | Show status of all vaultwarden systemd units |
+| `make systemd-validate` | `sudo ./setup-systemd.sh --validate` | Validate installed units match current repo scripts |
+| `make timers` | `systemctl list-timers` | Show all vaultwarden timers (next trigger + last run + `.env` schedule) |
+| `make uninstall-dry-run` | `sudo ./uninstall-vaultwarden.sh --dry-run` | Preview what uninstall would remove (no changes) |
+| `make uninstall` | `sudo ./uninstall-vaultwarden.sh` | Full uninstall — removes containers, data, systemd units (DESTRUCTIVE) |
 | `make dev-setup` | Copy `.env.example` and override template | Prepare local development environment |
 | `make test` | `test-secrets` + `test-email` + `docker compose config` | Run all tests |
 | `make test-config` | `docker compose config > /dev/null` | Validate merged Docker Compose config (exits non-zero on error) |
@@ -682,6 +711,8 @@ All common operations have Makefile shortcuts. Run `make help` to see the full t
 | `make clean` | `docker compose rm -f --stop` + `docker system prune -f` | Remove stopped containers and unused Docker resources |
 | `make clean-all` | `docker compose down -v` + `docker system prune -af --volumes` | **Destructive** — requires interactive TTY and `yes` confirmation |
 | `make prune` | `docker system prune -f` | Remove unused Docker resources only |
+| `make lint` | `shellcheck -S warning *.sh lib/*.sh` | Run shellcheck over all shell scripts (install: `sudo apt install shellcheck`) |
+| `make diagnose` | — | Full diagnostic dump: versions, key status, disk, containers, last backup, recent logs |
 | `make info` | — | Show domain, email, project state dir, service status, disk usage |
 | `make shell` | `docker compose exec [SERVICE] sh` | Open shell in a container (default: `vaultwarden`; pass `SERVICE=caddy`) |
 | `make version` | — | Show version info for all containers and Docker |
@@ -698,7 +729,7 @@ All common operations have Makefile shortcuts. Run `make help` to see the full t
 
 ## 📚 Utility Libraries
 
-All libraries live in `lib/` and are sourced at the top of every script. At install time, `systemd-setup.sh` copies the entire `lib/` tree to `/opt/vaultwarden-scripts/lib/` and patches source paths.
+All libraries live in `lib/` and are sourced at the top of every script. At install time, `setup-systemd.sh` copies the entire `lib/` tree to `/opt/vaultwarden-scripts/lib/` and patches source paths.
 
 ### `lib/common.sh`
 Core functions used by every script.
@@ -742,6 +773,7 @@ Encryption, decryption, and key management.
 | `secure_file PATH` | Set restrictive permissions on a file |
 | `check_age_key PATH` | Validate Age key file (used by `health.sh`) — **fail-closed**: returns 1 if temp file cannot be created for round-trip test |
 | `generate_bcrypt_hash PASSWORD ROUNDS` | bcrypt hash via `htpasswd`; cost factor validated to [10–31] |
+| `rotate_age_key` | Generate a new Age key, re-encrypt all secrets, and update all references |
 
 ### `lib/security.sh`
 Centralised security validation.
@@ -914,7 +946,7 @@ automatically on any process exit, including SIGKILL and OOM kill.
 
 ### Script Execution
 1. **Run from project root** — all scripts resolve paths relative to `SCRIPT_DIR`
-2. **Use `sudo` where required** — `setup.sh`, `systemd-setup.sh`, `create-breakglass-admin.sh`, `maintenance.sh --db-maint`, and direct `backup.sh` calls in production
+2. **Use `sudo` where required** — `setup.sh`, `setup-systemd.sh`, `create-breakglass-admin.sh`, `maintenance.sh --db-maint`, and direct `backup.sh` calls in production
 3. **Check `--help` first** — every script supports `--help`
 4. **Use `--dry-run`** — preview any operation before applying
 
@@ -931,7 +963,7 @@ automatically on any process exit, including SIGKILL and OOM kill.
 5. **Re-run `--install` after repo updates** — keeps `/opt/` scripts in sync with the git repo
 
 ### Operational Excellence
-1. **Install systemd timers** — `sudo ./systemd-setup.sh --install` for hands-off operation
+1. **Install systemd timers** — `sudo ./setup-systemd.sh --install` for hands-off operation
 2. **Monitor regularly** — `make health` or rely on the every-30-min timer check
 3. **Test backups** — periodically run `./restore.sh` to verify recoverability
-4. **Validate after updates** — `sudo ./systemd-setup.sh --validate` detects split-brain between `/opt/` and the repo
+4. **Validate after updates** — `sudo ./setup-systemd.sh --validate` detects split-brain between `/opt/` and the repo
