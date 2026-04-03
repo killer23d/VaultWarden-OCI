@@ -885,13 +885,20 @@ init_common_lib() {
 
     set -euo pipefail
 
-    # Warn if ADMIN_TOKEN is set but is not a bcrypt hash (must start with $2y$).
-    # A plaintext token is a security risk; Vaultwarden requires bcrypt.
-    if [[ -n "${ADMIN_TOKEN:-}" && "${ADMIN_TOKEN}" != '$2y$'* ]]; then
-        echo "ERROR: ADMIN_TOKEN is set but does not appear to be a bcrypt hash (expected prefix: \$2y\$)." >&2
-        echo "       Hash your admin token with bcrypt, e.g. via: htpasswd -bnBC 12 '' 'yourpassword' | tr -d ':\n' or use setup-secrets.sh" >&2
-        exit 1
-    fi
+    # BUG-1 FIX: The ADMIN_TOKEN bcrypt-prefix check that previously lived here
+    # fired before any caller had a chance to run load_env_file().  This caused
+    # a false-positive fatal error whenever ADMIN_TOKEN was inherited in the
+    # shell environment from a previous run (e.g. exported from .env as plain
+    # text) even though the secrets-derived hashed value in
+    # secrets/.docker_secrets/admin_token was perfectly valid.
+    #
+    # The authoritative format check is _validate_admin_token_format() in
+    # startup.sh, which runs after prepare_docker_secrets() has written the
+    # decrypted token file.  It covers Argon2id, $2a$, $2b$, and $2y$ prefixes
+    # and is the correct place for this guard.
+    #
+    # Callers that need an early token-format sanity check should call
+    # _validate_admin_token_format() from their own main() AFTER load_env_file().
 
     set_log_prefix "$(basename -- "$script_name" .sh)"
 
