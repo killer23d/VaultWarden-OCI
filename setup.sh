@@ -548,6 +548,34 @@ setup_directories() {
     find "${project_state_dir}" -type d -exec chmod 750 {} \; 2>/dev/null || return 1
     find "${project_state_dir}" -type f -exec chmod 640 {} \; 2>/dev/null || true
 
+    # BUG-caddy-perms FIX: Caddy runs as root inside its container and writes
+    # access logs to ${project_state_dir}/logs/caddy/access.log via a bind-mount.
+    #
+    # The broad 'find chmod 750' above sets this directory to 750:
+    #   owner=PUID  group=PGID  other=---
+    #
+    # On OCI Compute, Docker maps container UID 0 to an unprivileged host UID
+    # (userns-remap or equivalent hypervisor isolation). Container root is NOT
+    # host root. Any chmod/chown attempted inside the container on this
+    # bind-mount fails with EPERM. Both the init container and caddy/entrypoint.sh
+    # attempted 'chmod 755 /logs/caddy' — both fail silently on OCI.
+    #
+    # The definitive fix: set 755 here, running as real host root (setup.sh
+    # is always invoked via 'sudo ./setup.sh'). This executes AFTER the broad
+    # find chmod 750, overriding it for this specific directory.
+    #
+    # 755 rationale: Caddy's container UID falls into 'other' (it is neither
+    # PUID nor PGID). 'other' needs at least r-x (5) to enter the directory
+    # and rw- (6) on the log file itself. 755 grants r-x to 'other', and
+    # Caddy creates access.log with mode 0644 (rw-r--r--), satisfying both.
+    #
+    # fail2ban uses the same pattern (chown 0:0 + chmod 755 in the init
+    # container) because it also runs as root and needs a root-writable dir.
+    # Caddy's directory is owned by PUID:PGID (not root) so we cannot simply
+    # chown it; 755 on a PUID-owned dir gives Caddy write access via 'other'.
+    chmod 755 "${project_state_dir}/logs/caddy" || return 1
+    log_info "Set ${project_state_dir}/logs/caddy to 755 (Caddy runs as root in container)"
+
     return 0
 }
 
