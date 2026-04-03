@@ -38,6 +38,20 @@
 #                      Fix: source simple_key_resilience.sh and call
 #                      check_age_key_health_preflight() at the start of
 #                      prepare_docker_secrets().
+#
+# PATCHED BUGS (2026-04-03):
+#   STARTUP-8 [MEDIUM] wait_for_services() was called with bare service names
+#                      ('vaultwarden', 'caddy') but docker inspect requires the
+#                      full container_name set in docker-compose.yml
+#                      ('vaultwarden_app', 'vaultwarden_caddy'). docker inspect
+#                      on an unknown name exits 1 and returns empty strings for
+#                      both health and running status. The polling loop ran to
+#                      the full timeout on every startup (90s total), then
+#                      emitted misleading WARN messages despite the stack being
+#                      fully healthy. Fix: resolve container ID via
+#                      `docker compose ps -q <service>` so the lookup is
+#                      correct regardless of COMPOSE_PROJECT_NAME, then pass
+#                      that ID to docker inspect.
 
 set -euo pipefail
 
@@ -576,46 +590,74 @@ update_dns_record() {
 }
 
 # ---------------------------------------------------------------------------
-# wait_for_services CONTAINER_NAME [TIMEOUT_SECONDS]
+# _resolve_container_id SERVICE_NAME
 #
-# FIX MEDIUM: docker compose ps always exits 0 and its stdout format varies
-# between Compose versions, making it unreliable for healthy-state detection.
-# Use `docker inspect .State.Health.Status` instead — a stable JSON field
-# that returns 'healthy', 'unhealthy', 'starting', or '' (no healthcheck).
-# If the container has no healthcheck configured, fall back to checking that
-# .State.Running is true.
+# STARTUP-8 FIX: Resolve a Compose service name to its running container ID
+# using `docker compose ps -q <service>`. This is correct regardless of
+# COMPOSE_PROJECT_NAME because Compose tracks the mapping internally.
+#
+# Returns the container ID on stdout, or empty string if not found.
+# ---------------------------------------------------------------------------
+_resolve_container_id() {
+  local service="$1"
+  docker compose ps -q "$service" 2>/dev/null | head -n1 || echo ""
+}
+
+# ---------------------------------------------------------------------------
+# wait_for_services SERVICE_NAME [TIMEOUT_SECONDS]
+#
+# STARTUP-8 FIX: Resolve the Compose service name to a container ID first,
+# then pass the ID to docker inspect. This avoids the previous bug where
+# bare service names ('vaultwarden', 'caddy') were passed directly to
+# docker inspect, which requires the full container_name
+# ('vaultwarden_app', 'vaultwarden_caddy'). Unknown names caused docker
+# inspect to return exit 1 and empty strings for all fields, so the loop
+# always ran to the full timeout and emitted misleading WARN messages.
+#
+# If the container has no HEALTHCHECK directive, fall back to .State.Running.
 # ---------------------------------------------------------------------------
 wait_for_services() {
-  local container_name="$1"
+  local service_name="$1"
   local timeout_seconds="${2:-60}"
   local waited=0
   local interval=5
 
-  log_info "Waiting for $container_name to become healthy (timeout: ${timeout_seconds}s)..."
+  log_info "Waiting for $service_name to become healthy (timeout: ${timeout_seconds}s)..."
 
   while (( waited < timeout_seconds )); do
+    # STARTUP-8 FIX: resolve service → container ID via Compose, not by name.
+    local container_id
+    container_id=$(_resolve_container_id "$service_name")
+
+    if [[ -z "$container_id" ]]; then
+      log_debug "$service_name: no container ID yet (compose ps returned empty), waited ${waited}s"
+      sleep "$interval"
+      (( waited += interval ))
+      continue
+    fi
+
     local health_status running_status
-    health_status=$(docker inspect "$container_name" --format '{{.State.Health.Status}}' 2>/dev/null || echo "")
-    running_status=$(docker inspect "$container_name" --format '{{.State.Running}}' 2>/dev/null || echo "false")
+    health_status=$(docker inspect "$container_id" --format '{{.State.Health.Status}}' 2>/dev/null || echo "")
+    running_status=$(docker inspect "$container_id" --format '{{.State.Running}}' 2>/dev/null || echo "false")
 
     if [[ "$health_status" == "healthy" ]]; then
-      log_success "$container_name is healthy (${waited}s)"
+      log_success "$service_name is healthy (${waited}s)"
       return 0
     elif [[ -z "$health_status" && "$running_status" == "true" ]]; then
       # No healthcheck configured — running state is sufficient
-      log_success "$container_name is running (no healthcheck, ${waited}s)"
+      log_success "$service_name is running (no healthcheck, ${waited}s)"
       return 0
     elif [[ "$health_status" == "unhealthy" ]]; then
-      log_warn "$container_name is unhealthy after ${waited}s"
+      log_warn "$service_name is unhealthy after ${waited}s"
       return 1
     fi
 
-    log_debug "$container_name status: health=${health_status:-none} running=${running_status}, waited ${waited}s"
+    log_debug "$service_name status: health=${health_status:-none} running=${running_status}, waited ${waited}s"
     sleep "$interval"
     (( waited += interval ))
   done
 
-  log_warn "$container_name did not become healthy within ${timeout_seconds}s"
+  log_warn "$service_name did not become healthy within ${timeout_seconds}s"
   return 1
 }
 
@@ -633,8 +675,10 @@ verify_startup_health() {
 
   log_info "Running post-startup health verification..."
 
-  # Wait for core services
-  wait_for_services "vaultwarden" 60 || log_warn "VaultWarden health timeout"
+  # STARTUP-8 FIX: pass Compose service names (not container_name values).
+  # Timeout for vaultwarden increased to 90s: start_period=40s + interval=30s
+  # means first healthy signal can arrive up to ~70s after container start.
+  wait_for_services "vaultwarden" 90 || log_warn "VaultWarden health timeout"
   wait_for_services "caddy" 30 || log_warn "Caddy health timeout"
 
   # Run health script if available
