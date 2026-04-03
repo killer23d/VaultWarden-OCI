@@ -24,51 +24,95 @@ if [ "$DEBUG_ENTRYPOINT" = "true" ]; then
 fi
 
 # =============================================================================
-# BUG-caddy-perms-2 FIX: Ensure log directory exists BEFORE caddy run.
+# BUG-caddy-perms-3 FIX: Ensure log directory AND log files exist and are
+# writable by this process before caddy run is called.
 #
-# What we do and why:
+# WHY TWO STEPS:
 #
-#   mkdir -p /var/log/caddy
-#     Creates the directory in the container overlay if the bind-mount was
-#     not pre-created on the host. If the bind-mount already exists (normal
-#     production case) this is a no-op and always succeeds.
+#   Step 1 — directory: mkdir -p /var/log/caddy
+#     Creates the bind-mount target inside the container overlay if the host
+#     directory was not pre-created. No-op if it already exists.
 #
-#   test -w /var/log/caddy
-#     Verify the directory is actually writable by this process before Caddy
-#     tries to open access.log. If it is not writable (host permissions were
-#     not set correctly by the init container or setup.sh) we emit a clear
-#     actionable error and abort rather than letting Caddy crash with a
-#     cryptic 'open /var/log/caddy/access.log: permission denied' message.
+#   Step 2 — files: touch /var/log/caddy/access.log + security.log
+#     Caddy's FileWriter calls open() with O_CREAT | O_WRONLY on startup.
+#     On OCI Compute with userns-remap, container UID 0 maps to an
+#     unprivileged host UID. The bind-mounted /var/log/caddy is owned by
+#     PUID:PGID. Mode 755 gives 'other' r-x but NOT write. O_CREAT on a
+#     non-existent file inside a directory where 'other' has no write bit
+#     fails with EACCES — the exact error observed in production.
 #
-# What we do NOT do and why:
+#     If touch succeeds, caddy's open() on an already-existing file only
+#     needs write permission on the FILE itself (which caddy owns after
+#     creating it), not on the directory. Files created by container root
+#     are owned by the host root (mapped UID) and get mode 0644 by default.
 #
-#   chmod 755 /var/log/caddy  <-- REMOVED (BUG-caddy-perms-2)
-#     This call was present in the previous version but fails unconditionally
-#     on OCI Compute with EPERM because:
+#     If touch fails, the only fix is to run on the HOST (as real root):
+#       sudo touch /var/lib/vaultwarden/logs/caddy/access.log \
+#                  /var/lib/vaultwarden/logs/caddy/security.log
+#       sudo chown root:root /var/lib/vaultwarden/logs/caddy/access.log \
+#                            /var/lib/vaultwarden/logs/caddy/security.log
+#       sudo chmod 644 /var/lib/vaultwarden/logs/caddy/access.log \
+#                      /var/lib/vaultwarden/logs/caddy/security.log
+#       sudo chmod 755 /var/lib/vaultwarden/logs/caddy
+#     setup.sh does this automatically for new installs.
 #
-#     1. The Caddy service has cap_drop: ALL and cap_add: [NET_BIND_SERVICE]
-#        only. FOWNER and DAC_OVERRIDE are absent. Without FOWNER a process
-#        cannot chmod a directory it does not own, even at UID 0 inside the
-#        container.
-#
-#     2. The bind-mount directory is owned by PUID:PGID on the host. On OCI
-#        Compute, Docker maps container UID 0 to an unprivileged host UID
-#        that is NOT PUID. So container root does not own the directory and
-#        the chmod fails with EPERM.
-#
-#     The correct fix is to set the mode on the host BEFORE the bind-mount
-#     is attached. This is now done in two places (defence in depth):
-#       - docker-compose.yml init command: chmod 755 /logs/caddy BEFORE
-#         the chown -R that hands /logs to PUID:PGID (while root still owns it)
-#       - setup.sh setup_directories(): chmod 755 after the broad find chmod 750
-#         (running as real host root, no UID remapping)
+# WHY NOT chmod INSIDE THE CONTAINER:
+#   cap_drop: ALL + cap_add: [NET_BIND_SERVICE] only.
+#   FOWNER and DAC_OVERRIDE are absent. chmod on a directory owned by
+#   another UID fails EPERM unconditionally, regardless of container root.
 # =============================================================================
 mkdir -p /var/log/caddy
-if ! test -w /var/log/caddy; then
-    echo "ERROR: /var/log/caddy is not writable by this container." >&2
-    echo "       Host directory: \${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy" >&2
-    echo "       Run on the host: sudo chmod 755 /var/lib/vaultwarden/logs/caddy" >&2
-    echo "       Then: docker compose up -d --force-recreate caddy" >&2
+
+# Check directory is reachable (can at minimum list it)
+if ! test -d /var/log/caddy; then
+    echo "ERROR: /var/log/caddy does not exist and could not be created." >&2
+    exit 1
+fi
+
+# Attempt to pre-create log files so caddy run's open(O_CREAT) doesn't need
+# directory write permission — only file write permission (which it will have
+# as owner of the file it just created or that root created here).
+_log_touch_failed=false
+touch /var/log/caddy/access.log  2>/dev/null || _log_touch_failed=true
+touch /var/log/caddy/security.log 2>/dev/null || _log_touch_failed=true
+
+if [ "$_log_touch_failed" = "true" ]; then
+    echo "" >&2
+    echo "ERROR: Cannot create log files in /var/log/caddy." >&2
+    echo "" >&2
+    echo "This is caused by OCI Compute userns-remap: container UID 0 maps to an" >&2
+    echo "unprivileged host UID that does NOT own /var/lib/vaultwarden/logs/caddy." >&2
+    echo "" >&2
+    echo "ONE-TIME HOST FIX (run on the server as ubuntu/root):" >&2
+    echo "" >&2
+    echo "  LOG_DIR=\${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy" >&2
+    echo "  sudo mkdir -p \"\$LOG_DIR\"" >&2
+    echo "  sudo touch \"\$LOG_DIR/access.log\" \"\$LOG_DIR/security.log\"" >&2
+    echo "  sudo chown root:root \"\$LOG_DIR/access.log\" \"\$LOG_DIR/security.log\"" >&2
+    echo "  sudo chmod 644 \"\$LOG_DIR/access.log\" \"\$LOG_DIR/security.log\"" >&2
+    echo "  sudo chmod 755 \"\$LOG_DIR\"" >&2
+    echo "  cd ~/VaultWarden-OCI" >&2
+    echo "  docker compose up -d --force-recreate caddy" >&2
+    echo "" >&2
+    echo "setup.sh performs this automatically for new installs." >&2
+    exit 1
+fi
+
+# Final writability probe: verify caddy will actually be able to write to the
+# log files before handing off to 'caddy run'.
+if ! test -w /var/log/caddy/access.log; then
+    echo "" >&2
+    echo "ERROR: /var/log/caddy/access.log exists but is NOT writable by this container." >&2
+    echo "" >&2
+    echo "The file is likely owned by PUID:PGID from a previous run." >&2
+    echo "Run the following on the host to fix ownership:" >&2
+    echo "" >&2
+    echo "  LOG_DIR=\${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy" >&2
+    echo "  sudo chown root:root \"\$LOG_DIR/access.log\" \"\$LOG_DIR/security.log\"" >&2
+    echo "  sudo chmod 644 \"\$LOG_DIR/access.log\" \"\$LOG_DIR/security.log\"" >&2
+    echo "  sudo chmod 755 \"\$LOG_DIR\"" >&2
+    echo "  cd ~/VaultWarden-OCI" >&2
+    echo "  docker compose up -d --force-recreate caddy" >&2
     exit 1
 fi
 
