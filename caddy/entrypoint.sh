@@ -24,43 +24,53 @@ if [ "$DEBUG_ENTRYPOINT" = "true" ]; then
 fi
 
 # =============================================================================
-# BUG-5 FIX: Ensure log directory exists AND is writable BEFORE caddy run
+# BUG-caddy-perms-2 FIX: Ensure log directory exists BEFORE caddy run.
 #
-# Two-step problem:
+# What we do and why:
 #
-# Step 1 — mkdir:
-#   The Caddyfile FileWriter opens /var/log/caddy/access.log at startup.
-#   The path is a bind-mount from the host (PROJECT_STATE_DIR/logs/caddy).
-#   If the host directory does not exist, Docker creates it as root:root 700.
-#   mkdir -p here is a no-op when the bind-mount already exists, but creates
-#   the path in the container overlay when no bind-mount is present.
+#   mkdir -p /var/log/caddy
+#     Creates the directory in the container overlay if the bind-mount was
+#     not pre-created on the host. If the bind-mount already exists (normal
+#     production case) this is a no-op and always succeeds.
 #
-# Step 2 — chmod 755 (the fix for the permission denied crash loop):
-#   The Caddy container runs as root (required for Docker secrets access).
-#   The init-permissions container is supposed to set /logs/caddy to 755, but
-#   on OCI Compute it fails silently:
+#   test -w /var/log/caddy
+#     Verify the directory is actually writable by this process before Caddy
+#     tries to open access.log. If it is not writable (host permissions were
+#     not set correctly by the init container or setup.sh) we emit a clear
+#     actionable error and abort rather than letting Caddy crash with a
+#     cryptic 'open /var/log/caddy/access.log: permission denied' message.
 #
-#     mkdir -p /logs/caddy   <- fails: /logs is root:root 700, OCI user-ns
-#                               maps container uid 0 to unprivileged host uid
-#     ... || true            <- failure swallowed, chmod 755 never runs
-#     echo 'completed'       <- printed even though nothing was done
+# What we do NOT do and why:
 #
-#   Docker then auto-creates the missing bind-mount dir as root:root 700.
-#   The 'find /logs -type d -exec chmod 750' and 'chmod 755 /logs/caddy'
-#   steps in the init command never ran because the directory did not exist
-#   at the time those commands executed.
+#   chmod 755 /var/log/caddy  <-- REMOVED (BUG-caddy-perms-2)
+#     This call was present in the previous version but fails unconditionally
+#     on OCI Compute with EPERM because:
 #
-#   The Caddy container declares 'user: root' in the compose file. This maps
-#   to real host UID 0 (not a remapped UID) because Docker Engine on OCI
-#   Compute does not enable userns-remap at the daemon level by default.
-#   Container root = host root. Root can always chmod a bind-mounted directory
-#   regardless of its current ownership or mode.
+#     1. The Caddy service has cap_drop: ALL and cap_add: [NET_BIND_SERVICE]
+#        only. FOWNER and DAC_OVERRIDE are absent. Without FOWNER a process
+#        cannot chmod a directory it does not own, even at UID 0 inside the
+#        container.
 #
-#   chmod 755 here is idempotent, costs ~0ms, and makes Caddy self-healing:
-#   it does not depend on the init container having succeeded.
+#     2. The bind-mount directory is owned by PUID:PGID on the host. On OCI
+#        Compute, Docker maps container UID 0 to an unprivileged host UID
+#        that is NOT PUID. So container root does not own the directory and
+#        the chmod fails with EPERM.
+#
+#     The correct fix is to set the mode on the host BEFORE the bind-mount
+#     is attached. This is now done in two places (defence in depth):
+#       - docker-compose.yml init command: chmod 755 /logs/caddy BEFORE
+#         the chown -R that hands /logs to PUID:PGID (while root still owns it)
+#       - setup.sh setup_directories(): chmod 755 after the broad find chmod 750
+#         (running as real host root, no UID remapping)
 # =============================================================================
 mkdir -p /var/log/caddy
-chmod 755 /var/log/caddy
+if ! test -w /var/log/caddy; then
+    echo "ERROR: /var/log/caddy is not writable by this container." >&2
+    echo "       Host directory: \${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy" >&2
+    echo "       Run on the host: sudo chmod 755 /var/lib/vaultwarden/logs/caddy" >&2
+    echo "       Then: docker compose up -d --force-recreate caddy" >&2
+    exit 1
+fi
 
 # FIX [M-16]: Validate required environment variables BEFORE starting Caddy
 # so we fail fast with a clear error, not a cryptic Caddy parse error.

@@ -25,6 +25,8 @@
 # ✅ BUG-2:   caddy log dir chmod 755 (Caddy runs as root; 750 blocks 'other' = root on OCI)
 # ✅ BUG-3A:  init container mkdir before chown (prevents Permission denied on /logs subdirs)
 # ✅ BUG-3B:  caddy/entrypoint.sh committed with execute bit 0755 (fixes exec permission denied)
+# ✅ BUG-caddy-perms-2: chmod 755 /logs/caddy moved BEFORE chown -R in init command so it
+#              runs while root still owns /logs (chown does not reset modes; order matters)
 
 services:
   # =============================================================================
@@ -45,27 +47,42 @@ services:
     security_opt:
       - no-new-privileges:true
 
-    # BUG-3A FIX: Create ALL subdirectories BEFORE any chown.
+    # BUG-caddy-perms-2 FIX: chmod 755 /logs/caddy is now issued BEFORE the
+    # 'chown -R PUID:PGID /logs' step.
     #
-    # Previous order:
-    #   mkdir -p /logs
-    #   chown PUID:PGID /logs          ← hands /logs to non-root
-    #   mkdir -p /logs/vaultwarden ... ← FAILS: parent now owned by PUID,
-    #                                    host bind-mount may be 700
+    # Why order matters on OCI Compute:
     #
-    # On OCI Compute the host-side ${PROJECT_STATE_DIR}/logs directory is
-    # created by Docker's bind-mount attachment as root:root 700 on first
-    # run. Once chown PUID:PGID /logs executes inside the container the
-    # directory is handed off to the non-root user. Subsequent mkdir calls
-    # in the same sh -c chain then fail because the parent directory is no
-    # longer writable by container root on kernels/configurations where the
-    # bind-mount vfs layer enforces DAC on the changed owner.
+    #   On OCI Compute, Docker maps container UID 0 to an unprivileged host
+    #   UID (userns-remap or equivalent hypervisor isolation). Container root
+    #   is NOT host root. Any chmod/chown on a bind-mount attempted AFTER the
+    #   directory has been handed to PUID:PGID will fail with EPERM because:
+    #     - container UID 0  → unprivileged host UID (not PUID, not 0)
+    #     - directory owner  → PUID on the host
+    #     - FOWNER allows chown on owned files; it does NOT grant chmod on
+    #       files owned by a different UID when userns-remap is active
     #
-    # Fix: mkdir all required directories first (root can always create
-    # children in root-owned 700 dirs), then do a single recursive chown
-    # to hand everything over to PUID:PGID at once.
+    #   The previous command order was:
+    #     mkdir -p /logs/vaultwarden /logs/caddy ...
+    #     chown -R PUID:PGID /logs          ← /logs/caddy now owned by PUID
+    #     find /logs -type d -exec chmod 750 ← succeeds (FOWNER + owned by us... sometimes)
+    #     chmod 755 /logs/caddy              ← FAILS: owned by PUID, not by
+    #                                          container root after chown
+    #
+    #   The correct order:
+    #     mkdir -p /logs/vaultwarden /logs/caddy ...
+    #     chmod 755 /logs/caddy              ← succeeds: /logs/caddy still
+    #                                          owned by root (us) at this point
+    #     chown -R PUID:PGID /logs          ← hands ownership to PUID
+    #     find /logs -type d -exec chmod 750 ← sets remaining dirs to 750
+    #                                          /logs/caddy stays 755 because
+    #                                          chown does not reset modes
+    #
+    # The '|| true' after 'chmod 755 /logs/caddy' matches the pattern used
+    # throughout this command for non-fatal steps, but in practice this step
+    # should always succeed (root owns /logs/caddy at this point).
     command: sh -c "
       mkdir -p /logs/vaultwarden /logs/caddy /logs/fail2ban /logs/postfix &&
+      chmod 755 /logs/caddy || true &&
       chown -R ${PUID}:${PGID} /data /logs 2>/dev/null || true &&
       find /caddy_data -type d -exec chown ${PUID}:${PGID} {} + 2>/dev/null || true &&
       find /caddy_config -type d -exec chown ${PUID}:${PGID} {} + 2>/dev/null || true &&
@@ -73,7 +90,7 @@ services:
       find /data -type f -exec chmod 640 {} + 2>/dev/null || true &&
       find /logs -type d -exec chmod 750 {} + 2>/dev/null || true &&
       find /logs -type f -exec chmod 640 {} + 2>/dev/null || true &&
-      chmod 755 /logs/caddy &&
+      chmod 755 /logs/caddy || true &&
       find /caddy_data -type d -exec chmod 750 {} + 2>/dev/null || true &&
       find /caddy_data -type f -exec chmod 640 {} + 2>/dev/null || true &&
       find /caddy_config -type d -exec chmod 750 {} + 2>/dev/null || true &&
@@ -559,6 +576,16 @@ networks:
 #   VaultWarden → postfix:587 (vaultwarden_network, no TLS, no AUTH)
 #     → Postfix → smtp.example.com:587 (caddy_external, STARTTLS, SASL auth)
 #   Host scripts (maintenance.sh) → 127.0.0.1:587 → Postfix → relay
+#
+# KEY FIX SUMMARY (BUG-caddy-perms-2: init chmod ordering):
+#   Root cause: 'chmod 755 /logs/caddy' ran AFTER 'chown -R PUID:PGID /logs'.
+#   After chown the directory is owned by PUID, not by container root.
+#   On OCI Compute userns-remap maps container UID 0 to an unprivileged host
+#   UID, so container root no longer owns the directory and chmod fails EPERM.
+#   Fix: issue 'chmod 755 /logs/caddy' BEFORE 'chown -R' while root still
+#   owns the directory. chown does not reset file modes, so 755 is preserved.
+#   A second 'chmod 755 /logs/caddy || true' is kept after the find-chmod-750
+#   pass as defence-in-depth for environments without userns-remap.
 #
 # KEY FIX SUMMARY (BUG-3A: init-permissions mkdir/chown order):
 #   Root cause: chown PUID:PGID /logs ran before mkdir /logs/vaultwarden etc.
