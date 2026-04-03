@@ -35,6 +35,11 @@
 #              'other' on its own dirs, causing cert key permission denied on OCI Compute.
 # ✅ BUG-entrypoint-exec: entrypoint.sh must be mode 0755; a blanket 'find -exec chmod 644'
 #              on the repo working tree strips the execute bit → runc EPERM at container init.
+# ✅ BUG-caddy-log-order: logs/caddy setup (mkdir+touch+chown 0:0+chmod 755) now runs BEFORE
+#              the find /logs sweep. Previous ordering let find stomp logs/caddy back to 750
+#              and log files back to 640/PUID before the repair ops ran, causing chown 0:0
+#              to silently fail (EPERM on wrong mapped UID) so touch in entrypoint always
+#              failed on OCI Compute userns-remap after every make up cycle.
 
 services:
   # =============================================================================
@@ -63,10 +68,10 @@ services:
     # Each service runs as a specific UID; that UID must own its writable dirs.
     #
     #   /data, /logs            → PUID:PGID   (vaultwarden app user)
-    #   /logs/caddy             → mode 755 + log files root:root 644
-    #                             (Caddy=root; logs dir owned by PUID but
-    #                              mode 755 lets 'other'=root enter + write
-    #                              files it owns)
+    #   /logs/caddy             → dir: PUID:PGID mode 755 (other=caddy-root can enter)
+    #                             files: root:root mode 644 (caddy-root owns and writes them)
+    #                             CRITICAL ORDER: set up logs/caddy BEFORE find /logs sweep
+    #                             so find does not stomp these back to 750/640.
     #   /caddy_data, /caddy_config → LEFT AS ROOT:ROOT (set by host/setup.sh)
     #                             Caddy runs as user: root and must own these
     #                             dirs to create TLS certs and config cache.
@@ -76,24 +81,36 @@ services:
     #
     # AUTHORITATIVE HOST FIX for existing installs (see DEPLOYMENT NOTES below).
     # setup.sh handles this for NEW installs.
+    #
+    # ORDERING INVARIANT (OCI userns-remap):
+    #   All logs/caddy ops (mkdir, touch, chown 0:0, chmod 644/755) MUST complete
+    #   before `find /logs` runs. Once find sets files to 640 and dirs to 750,
+    #   chown on files owned by a different mapped UID is EPERM (no CAP_CHOWN
+    #   across UID namespaces for non-owner). The || true on chown would swallow
+    #   the error and leave files at 640/PUID — breaking the entrypoint touch check.
     # ---------------------------------------------------------------------------
     command: sh -c "
-      mkdir -p /logs/vaultwarden /logs/caddy /logs/fail2ban /logs/postfix &&
-      chmod 755 /logs/caddy || true &&
+      mkdir -p /data /logs/vaultwarden /logs/fail2ban /logs/postfix &&
+
+      mkdir -p /logs/caddy &&
+      touch /logs/caddy/access.log /logs/caddy/security.log || true &&
+      chown 0:0 /logs/caddy/access.log /logs/caddy/security.log || true &&
+      chmod 644 /logs/caddy/access.log /logs/caddy/security.log || true &&
+      chmod 755 /logs/caddy &&
+
       chown -R ${PUID}:${PGID} /data /logs 2>/dev/null || true &&
       find /data -type d -exec chmod 750 {} + 2>/dev/null || true &&
       find /data -type f -exec chmod 640 {} + 2>/dev/null || true &&
       find /logs -type d -exec chmod 750 {} + 2>/dev/null || true &&
-      find /logs -type f -exec chmod 640 {} + 2>/dev/null || true &&
-      chmod 755 /logs/caddy || true &&
+      find /logs -path '*/caddy' -prune -o -type f -exec chmod 640 {} + 2>/dev/null || true &&
+
+      chmod 755 /logs/caddy &&
+
       mkdir -p /fail2ban_db &&
       chown 0:0 /fail2ban_db &&
       chmod 755 /fail2ban_db &&
       chmod 700 /secrets /secrets/.docker_secrets 2>/dev/null || true &&
       find /secrets/.docker_secrets -type f -exec chmod 444 {} + 2>/dev/null || true &&
-      touch /logs/caddy/access.log /logs/caddy/security.log || true &&
-      chown 0:0 /logs/caddy/access.log /logs/caddy/security.log || true &&
-      chmod 644 /logs/caddy/access.log /logs/caddy/security.log || true &&
       echo 'Init container completed - permissions set to ${PUID}:${PGID}'
       "
 
