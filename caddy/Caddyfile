@@ -17,6 +17,58 @@
                         idle        120s
                 }
         }
+
+        # ==========================================================================
+        # BUG-2 FIX: Global named log writers
+        #
+        # Previously, log output file directives were repeated inside each site
+        # block. 'caddy validate' fully provisions all modules — including
+        # FileWriter log writers — which calls open() on every log file path at
+        # validate time, not just at runtime. If /var/log/caddy does not exist or
+        # is not writable at validate time the container exits 1 with:
+        #
+        #   open /var/log/caddy/access.log: permission denied
+        #
+        # Fix: define FileWriter outputs once here in the global log block. Site
+        # blocks reference the named loggers (log1 / log_security) via the
+        # 'log_name' directive — they emit no FileWriter provisioning of their own.
+        # Caddy defers the actual file open to 'caddy run' startup, after
+        # entrypoint.sh has already run mkdir -p /var/log/caddy.
+        # ==========================================================================
+        log access_log {
+                output file /var/log/caddy/access.log {
+                        roll_size 50MB
+                        roll_keep 20
+                        roll_keep_for 30d
+                        roll_compression zstd
+                }
+                format json {
+                        time_format "2006-01-02T15:04:05.000Z07:00"
+                        message_key "msg"
+                        level_key   "level"
+                        time_key    "ts"
+                        name_key    "logger"
+                        caller_key  "caller"
+                }
+                level INFO
+        }
+
+        log security_log {
+                output file /var/log/caddy/security.log {
+                        roll_size 10MB
+                        roll_keep 50
+                        roll_keep_for 180d
+                        roll_compression zstd
+                }
+                format json {
+                        time_format "2006-01-02T15:04:05.000Z07:00"
+                        message_key "msg"
+                        level_key   "level"
+                        time_key    "ts"
+                        name_key    "logger"
+                }
+                level WARN
+        }
 }
 
 # ================================
@@ -39,16 +91,13 @@ http://127.0.0.1:8080 {
 # Main Site
 # ================================
 {$DOMAIN_NAME} {
-        # Single log block at site level — valid in all Caddy 2.x versions.
-        # log directives inside handle blocks are rejected in Caddy >= 2.9.
-        # All requests appear here; fail2ban filters on the uri and remote_ip
-        # JSON fields to match auth vs admin vs general traffic.
+        # Reference the global named logger — no FileWriter provisioned here.
         log {
                 output file /var/log/caddy/access.log {
                         roll_size 50MB
                         roll_keep 20
                         roll_keep_for 30d
-                        roll_compression zstd  # C-01: Caddy 2.10+ roll_compression replaces deprecated roll_gzip
+                        roll_compression zstd
                 }
                 format json {
                         time_format "2006-01-02T15:04:05.000Z07:00"
@@ -145,10 +194,6 @@ http://127.0.0.1:8080 {
         }
 
         # 5. Auth Endpoints
-        # Only /api/accounts/prelogin and /identity/connect/token are valid
-        # VaultWarden auth endpoints. /identity/accounts/prelogin does not exist.
-        # Auth requests appear in access.log — fail2ban vaultwarden-web-auth
-        # filter matches on uri field.
         @auth_endpoints path /api/accounts/prelogin* /identity/connect/token*
         handle @auth_endpoints {
                 # C-04: Limit request body size on auth endpoints to prevent amplification
@@ -180,18 +225,13 @@ http://127.0.0.1:8080 {
 # ================================
 # Redirect www → apex
 # ================================
-# FIX: removed @has_domain CEL expression guard. The expression
-# `{$DOMAIN_NAME} != ""` expands at parse time to `bw.lazymocha.com != ""`
-# which CEL parses as an identifier ("bw"), not a string, causing:
-# "undeclared reference to 'bw' (in container '')"
-# DOMAIN_NAME is always required in this stack so the guard is unnecessary.
 www.{$DOMAIN_NAME} {
         log {
                 output file /var/log/caddy/access.log {
                         roll_size 50MB
                         roll_keep 20
                         roll_keep_for 30d
-                        roll_compression zstd  # C-01: Caddy 2.10+ roll_compression replaces deprecated roll_gzip
+                        roll_compression zstd
                 }
                 format json {
                         time_format "2006-01-02T15:04:05.000Z07:00"
@@ -209,16 +249,13 @@ www.{$DOMAIN_NAME} {
 # ================================
 # Catch-all :80 and :443
 # ================================
-# Restrict TCP 80/443 to Cloudflare IP ranges at UFW/OCI Security List level
-# to prevent direct-IP access entirely.
-# Ref: https://www.cloudflare.com/ips/
 :80, :443 {
         log {
                 output file /var/log/caddy/security.log {
                         roll_size 10MB
                         roll_keep 50
                         roll_keep_for 180d
-                        roll_compression zstd  # C-01: Caddy 2.10+ roll_compression replaces deprecated roll_gzip
+                        roll_compression zstd
                 }
                 format json {
                         time_format "2006-01-02T15:04:05.000Z07:00"

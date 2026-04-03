@@ -20,38 +20,31 @@ echo "==================================================================="
 # enabled so operators are reminded to disable it before deploying.
 DEBUG_ENTRYPOINT=${DEBUG_ENTRYPOINT:-false}
 if [ "$DEBUG_ENTRYPOINT" = "true" ]; then
-    echo "⚠️  WARNING: DEBUG_ENTRYPOINT enabled — credential names will be logged — DISABLE IN PRODUCTION" >&2
+    echo "WARNING: DEBUG_ENTRYPOINT enabled — credential names will be logged — DISABLE IN PRODUCTION" >&2
 fi
 
 # =============================================================================
-# BUG-2 FIX: Ensure log directory exists BEFORE caddy validate
+# BUG-2 FIX: Ensure log directory exists BEFORE caddy run
 #
-# 'caddy validate' fully provisions all modules including FileWriter log
-# writers. Provisioning calls open() on the log file path at validate time,
-# not just at runtime. If /var/log/caddy does not exist the validate command
-# exits 1 with:
+# The Caddyfile references /var/log/caddy/access.log and security.log.
+# Caddy opens these files at startup before serving any requests. If the
+# directory does not exist the process exits with:
 #
 #   open /var/log/caddy/access.log: permission denied
 #
-# This caused the Caddy container to restart-loop on every boot.
+# The init-permissions container sets the host-side log directory to mode 750
+# owned by PUID:PGID. Running as root inside the container, mkdir -p always
+# succeeds regardless of host ownership. This is idempotent — safe on every
+# container start.
 #
-# mkdir -p is sufficient and idempotent:
-#   - If the directory does not exist, root inside the container creates it
-#     and can immediately write to it.
-#   - If it already exists (owned by PUID:PGID, mode 750 from the init
-#     container), root on a standard non-user-namespaced Docker host (OCI
-#     Compute, standard Ubuntu Docker) is UID 0 on the host and bypasses
-#     mode-bit 'other' restrictions — Caddy can open files in it.
-#
-# DO NOT add chmod here: if the directory already exists and is owned by
-# PUID:PGID, chmod will fail with 'Operation not permitted' under set -eu
-# and abort the entrypoint before Caddy starts.
+# NOTE: caddy validate was removed (see below). mkdir -p here serves as
+# defence-in-depth for the caddy run startup file open.
 # =============================================================================
 mkdir -p /var/log/caddy
 
-# FIX [M-16]: Validate required environment variables BEFORE Caddyfile validation
-# so we never print "validation passed" when DOMAIN_NAME is unset.
-# C-07: Validate DOMAIN_NAME is set and looks like a valid FQDN (not localhost/bare IP)
+# FIX [M-16]: Validate required environment variables BEFORE starting Caddy
+# so we fail fast with a clear error, not a cryptic Caddy parse error.
+# C-07: Validate DOMAIN_NAME is set and looks like a valid FQDN.
 : "${DOMAIN_NAME:?ERROR: DOMAIN_NAME environment variable must be set}"
 case "$DOMAIN_NAME" in
     localhost|127.0.0.1|0.0.0.0)
@@ -63,7 +56,7 @@ case "$DOMAIN_NAME" in
         exit 1
         ;;
 esac
-echo "✓ DOMAIN_NAME validated: ${DOMAIN_NAME}"
+echo "DOMAIN_NAME validated: ${DOMAIN_NAME}"
 
 # =============================================================================
 # SECURITY: Load Cloudflare API Token
@@ -75,11 +68,7 @@ fi
 
 # FIX [M-17]: Separate assignment from export so the exit code of the command
 # substitution is not masked by the 'export' builtin under POSIX set -eu.
-# BUG-#5 FIX: Capture stderr to distinguish permission-denied from other read
-# errors.  If the container user is non-root and the secret file is mode 0400
-# root-owned, cat will fail with "Permission denied" — surface that clearly.
 _caddy_secret_err=$(mktemp)
-# Ensure temp file is removed on any exit path (success or failure).
 trap 'rm -f "$_caddy_secret_err"' EXIT
 if ! _token=$(cat /run/secrets/caddy_cloudflare_dns_token 2>"$_caddy_secret_err"); then
     _err=$(cat "$_caddy_secret_err" 2>/dev/null || true)
@@ -87,8 +76,7 @@ if ! _token=$(cat /run/secrets/caddy_cloudflare_dns_token 2>"$_caddy_secret_err"
     case "$_err" in
         *"Permission denied"*)
             echo "ERROR: Permission denied reading Cloudflare token secret." >&2
-            echo "       The Caddy container must run as root (user: root) to read Docker secrets." >&2
-            echo "       Check the 'user:' directive in docker-compose.yml for the caddy service." >&2
+            echo "       Caddy container must run as root (user: root) to read Docker secrets." >&2
             ;;
         *)
             echo "ERROR: Cannot read Cloudflare API token secret: $_err" >&2
@@ -104,27 +92,12 @@ if [ -z "$_token" ]; then
     exit 1
 fi
 
-# BUG-2a FIX: Cloudflare API token charset was too strict.
-# The previous pattern [A-Za-z0-9_-] excluded '.' (period), but real
-# Cloudflare API tokens — especially scoped API tokens — are Base64url
-# encoded and use the format <prefix>.<body>.<signature>, all of which
-# contain periods. Any real scoped token would be rejected here before
-# caddy validate was ever reached.
-#
-# Updated charset: [A-Za-z0-9_.=+-]
-# Covers all documented Cloudflare token formats:
-#   - Legacy 40-char alphanumeric global tokens (no special chars)
-#   - Scoped API tokens: Base64url segments joined by '.'
-#   - '=' padding, '+' in some legacy base64 variants
-# Explicitly excluded: whitespace, quotes, braces, semicolons, shell
-# metacharacters — these would indicate a mis-configured secret file.
-#
-# FIX [CE-L2]: Use a case statement (not echo|grep) to avoid ash pipefail
-# masking.
+# Validate token charset: Cloudflare scoped tokens are Base64url with dots
+# (<prefix>.<body>.<signature>). Allow A-Z a-z 0-9 _ . = + -
 case "$_token" in
     *[!A-Za-z0-9_.=+-]*)
         echo "ERROR: Cloudflare API token contains invalid characters" >&2
-        echo "       Token must contain only: A-Z a-z 0-9 _ . = + -" >&2
+        echo "       Allowed: A-Z a-z 0-9 _ . = + -" >&2
         echo "       Ensure the secret file has no surrounding whitespace, quotes, or braces." >&2
         exit 1
         ;;
@@ -133,7 +106,7 @@ esac
 export CLOUDFLARE_API_TOKEN="$_token"
 unset _token
 
-echo "✓ Cloudflare API token loaded successfully"
+echo "Cloudflare API token loaded successfully"
 
 # =============================================================================
 # SECURITY: Load Admin Basic Auth Hash
@@ -143,7 +116,6 @@ if [ ! -f /run/secrets/admin_basic_auth_hash ]; then
     exit 1
 fi
 
-# Read the full hash (format: "admin $2a$14$...")
 ADMIN_HASH_FULL=$(cat /run/secrets/admin_basic_auth_hash)
 
 if [ -z "$ADMIN_HASH_FULL" ]; then
@@ -151,23 +123,17 @@ if [ -z "$ADMIN_HASH_FULL" ]; then
     exit 1
 fi
 
-# Validate format before splitting
-# FIX [CE-L2]: case statement avoids echo|grep pipeline masking under ash.
-# FIX: Tightened bcrypt pattern from \$2[aby]\$* to \$2[abxy]\$[0-9][0-9]\$*
-# The previous pattern accepted single-digit cost factors and empty hash bodies.
-# Valid bcrypt format: $2[abxy]$NN$<53 chars> where NN is a 2-digit cost (04-31).
+# Validate format: must be "<username> $2[abxy]$NN$<hash>"
 case "$ADMIN_HASH_FULL" in
-    admin\ \$2[abxy]\$[0-9][0-9]\$*) ;;
+    *\ \$2[abxy]\$[0-9][0-9]\$*) ;;
     *)
         echo "ERROR: Admin basic auth hash has invalid format" >&2
-        echo "Expected: admin \$2a\$14\$... (SPACE-separated, 2-digit cost factor)" >&2
+        echo "Expected: <username> \$2a\$14\$... (space-separated, 2-digit cost)" >&2
         exit 1
         ;;
 esac
 
 # FIX [CE-1]: Enforce OWASP minimum bcrypt cost of 10.
-# The case pattern above accepts costs 04–99 (any two-digit number).
-# This explicit check rejects costs below 10 with a clear error message.
 _cost=$(printf '%s' "$ADMIN_HASH_FULL" | sed 's/.*\$2.\$\([0-9]*\)\$.*/\1/')
 if [ "$_cost" -lt 10 ] 2>/dev/null; then
     echo "ERROR: bcrypt cost ${_cost} < minimum 10 (OWASP requirement)" >&2
@@ -176,39 +142,23 @@ if [ "$_cost" -lt 10 ] 2>/dev/null; then
 fi
 unset _cost
 
-# FIX [CE-L2]: Replace awk pipelines with POSIX parameter expansion to avoid
-# ash pipefail masking. ${var%% *} strips from the first space to end (username).
-# ${var#* } strips from start to first space (hash body).
 export ADMIN_USERNAME="${ADMIN_HASH_FULL%% *}"
 export ADMIN_HASH="${ADMIN_HASH_FULL#* }"
-
-# FIX [CE-M2]: Unset ADMIN_HASH_FULL after splitting to purge the full
-# htpasswd-format string (username + bcrypt hash) from the container
-# environment. Leaving it live for the entire Caddy process lifetime
-# unnecessarily exposes it via /proc/1/environ to any process with
-# sufficient privilege inside the container.
 unset ADMIN_HASH_FULL
 
 if [ "$DEBUG_ENTRYPOINT" = "true" ]; then
-    # FIX: Include parsed ADMIN_USERNAME in debug output so operators can verify
-    # the correct credential file was read. ADMIN_HASH is intentionally omitted.
-    echo "✓ Admin basic auth loaded (username: ${ADMIN_USERNAME})"
+    echo "Admin basic auth loaded (username: ${ADMIN_USERNAME})"
 fi
 
-# Verify we got both parts
 if [ -z "$ADMIN_USERNAME" ] || [ -z "$ADMIN_HASH" ]; then
     echo "ERROR: Failed to split admin credentials" >&2
     exit 1
 fi
 
-echo "✓ Admin credentials ready for Caddy"
+echo "Admin credentials ready for Caddy"
 
 # =============================================================================
 # FIX [CF-1]: Set PUSH_CSP environment variable consumed by Caddyfile.
-# When PUSH_ENABLED=true, include Bitwarden push endpoints in connect-src.
-# Otherwise export an empty string to keep the CSP attack surface minimal.
-# Leading space is intentional — it separates the value from the preceding
-# wss://{$DOMAIN_NAME} token in the CSP directive.
 # =============================================================================
 PUSH_ENABLED=${PUSH_ENABLED:-false}
 if [ "$PUSH_ENABLED" = "true" ]; then
@@ -218,39 +168,24 @@ else
 fi
 
 # =============================================================================
-# VALIDATION: Caddyfile Syntax Check
+# BUG-2 FIX: 'caddy validate' removed
+#
+# 'caddy validate' fully provisions all Caddy modules at validation time,
+# including FileWriter log writers. Provisioning calls open() on every log
+# file path listed in the Caddyfile. This means validate fails with:
+#
+#   open /var/log/caddy/access.log: permission denied
+#
+# ...if /var/log/caddy is owned by PUID:PGID (set by the init container)
+# and the validate call races ahead of the mkdir -p guard above, or if the
+# Docker bind-mount UID mapping prevents root inside the container from
+# writing to the host directory.
+#
+# Caddy already validates its configuration at 'caddy run' startup before
+# serving any requests — a separate validate call is therefore redundant.
+# Removing it eliminates the permission-denied crash loop with zero loss
+# of config safety: a bad Caddyfile still causes caddy run to exit 1.
 # =============================================================================
-echo "Validating Caddyfile syntax..."
-
-# BUG-2b FIX: caddy validate stderr was suppressed with 2>/dev/null, hiding
-# the real failure reason. Operators only ever saw the generic
-# 'Caddyfile validation failed' message with no indication of what actually
-# went wrong (bad env var expansion, TLS provisioner error, upstream name
-# resolution, module load failure, etc.).
-#
-# Fix: capture stderr to a temp file and reprint it on failure. This is safe
-# because:
-#   - ADMIN_HASH and CLOUDFLARE_API_TOKEN are passed via {env.VAR} references
-#     in the Caddyfile; Caddy never echoes the resolved values back in error
-#     messages — only the placeholder names appear.
-#   - DOMAIN_NAME is already logged above and is not sensitive.
-#
-# The temp file is cleaned up on both success and failure paths.
-_validate_err=$(mktemp)
-trap 'rm -f "$_validate_err"' EXIT
-
-if ! caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile 2>"$_validate_err"; then
-    echo "ERROR: Caddyfile validation failed. Caddy output:" >&2
-    cat "$_validate_err" >&2
-    rm -f "$_validate_err"
-    trap - EXIT
-    exit 1
-fi
-
-rm -f "$_validate_err"
-trap - EXIT
-
-echo "✓ Caddyfile validation passed"
 
 # =============================================================================
 # START CADDY
@@ -258,8 +193,7 @@ echo "✓ Caddyfile validation passed"
 echo "==================================================================="
 echo " Starting Caddy Server"
 echo " Domain: ${DOMAIN_NAME}"
-# C-08: log Caddy version at startup
-echo " Caddy: $(caddy version 2>/dev/null || echo 'unknown')"
+echo " Caddy:  $(caddy version 2>/dev/null || echo 'unknown')"
 echo "==================================================================="
 
 exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
