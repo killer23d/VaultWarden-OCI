@@ -30,6 +30,11 @@
 # ✅ BUG-caddy-logfile-perms: access.log + security.log pre-created root:root 644 (best-effort
 #              || true in init; authoritative fix is host-side sudo commands in setup.sh)
 # ✅ BUG-init-exit1: all caddy log file ops now use || true so init never exits 1 on OCI
+# ✅ BUG-caddy-data-perms: removed find /caddy_data + /caddy_config chown PUID:PGID from init.
+#              Caddy runs as user: root — chowning its data/config to PUID:PGID made Caddy
+#              'other' on its own dirs, causing cert key permission denied on OCI Compute.
+# ✅ BUG-entrypoint-exec: entrypoint.sh must be mode 0755; a blanket 'find -exec chmod 644'
+#              on the repo working tree strips the execute bit → runc EPERM at container init.
 
 services:
   # =============================================================================
@@ -51,60 +56,36 @@ services:
       - no-new-privileges:true
 
     # ---------------------------------------------------------------------------
-    # OWNERSHIP MODEL FOR /logs/caddy ON OCI COMPUTE
+    # OWNERSHIP MODEL — OCI COMPUTE (userns-remap)
     # ---------------------------------------------------------------------------
     #
-    # OCI Compute uses userns-remap (or equivalent hypervisor UID isolation).
-    # Container UID 0 maps to an unprivileged host UID that is NOT PUID and
-    # NOT host root. This creates two constraints:
+    # Container UID 0 maps to an unprivileged host UID (≠ PUID, ≠ host root).
+    # Each service runs as a specific UID; that UID must own its writable dirs.
     #
-    #   A. /logs/caddy directory must be mode 755 so container root (in 'other'
-    #      bucket relative to PUID:PGID-owned dir) can enter it.
+    #   /data, /logs            → PUID:PGID   (vaultwarden app user)
+    #   /logs/caddy             → mode 755 + log files root:root 644
+    #                             (Caddy=root; logs dir owned by PUID but
+    #                              mode 755 lets 'other'=root enter + write
+    #                              files it owns)
+    #   /caddy_data, /caddy_config → LEFT AS ROOT:ROOT (set by host/setup.sh)
+    #                             Caddy runs as user: root and must own these
+    #                             dirs to create TLS certs and config cache.
+    #                             DO NOT chown to PUID:PGID here.
+    #   /fail2ban_db            → root:root 755  (fail2ban runs as root)
+    #   /secrets                → mode 700/444   (secrets hardening)
     #
-    #   B. access.log and security.log must be owned by the same UID as the
-    #      Caddy container process (container UID 0) so Caddy can open/write
-    #      them. If they are owned by PUID:PGID, Caddy is in 'other' and with
-    #      mode 640 gets zero write permission -> EPERM.
-    #
-    # The init container attempts to fix both, but ALL caddy-log operations
-    # use '|| true' because:
-    #
-    #   - chmod 755 /logs/caddy: if /logs is already owned by PUID (re-run),
-    #     container root (OCI-mapped unprivileged UID) may not own the dir
-    #     and chmod fails EPERM.
-    #
-    #   - touch access.log security.log: requires write+execute on /logs/caddy.
-    #     mode 755 gives 'other' r-x only (no write). If the files don't exist
-    #     yet, O_CREAT fails EACCES.
-    #
-    #   - chown 0:0 + chmod 644: only succeeds if touch succeeded and the
-    #     kernel agrees that container UID 0 owns the newly created files.
-    #
-    # AUTHORITATIVE FIX for existing installs (run once on the host):
-    #   sudo touch /var/lib/vaultwarden/logs/caddy/access.log \
-    #              /var/lib/vaultwarden/logs/caddy/security.log
-    #   sudo chown root:root /var/lib/vaultwarden/logs/caddy/access.log \
-    #                        /var/lib/vaultwarden/logs/caddy/security.log
-    #   sudo chmod 644 /var/lib/vaultwarden/logs/caddy/access.log \
-    #                  /var/lib/vaultwarden/logs/caddy/security.log
-    #
+    # AUTHORITATIVE HOST FIX for existing installs (see DEPLOYMENT NOTES below).
     # setup.sh handles this for NEW installs.
     # ---------------------------------------------------------------------------
     command: sh -c "
       mkdir -p /logs/vaultwarden /logs/caddy /logs/fail2ban /logs/postfix &&
       chmod 755 /logs/caddy || true &&
       chown -R ${PUID}:${PGID} /data /logs 2>/dev/null || true &&
-      find /caddy_data -type d -exec chown ${PUID}:${PGID} {} + 2>/dev/null || true &&
-      find /caddy_config -type d -exec chown ${PUID}:${PGID} {} + 2>/dev/null || true &&
       find /data -type d -exec chmod 750 {} + 2>/dev/null || true &&
       find /data -type f -exec chmod 640 {} + 2>/dev/null || true &&
       find /logs -type d -exec chmod 750 {} + 2>/dev/null || true &&
       find /logs -type f -exec chmod 640 {} + 2>/dev/null || true &&
       chmod 755 /logs/caddy || true &&
-      find /caddy_data -type d -exec chmod 750 {} + 2>/dev/null || true &&
-      find /caddy_data -type f -exec chmod 640 {} + 2>/dev/null || true &&
-      find /caddy_config -type d -exec chmod 750 {} + 2>/dev/null || true &&
-      find /caddy_config -type f -exec chmod 640 {} + 2>/dev/null || true &&
       mkdir -p /fail2ban_db &&
       chown 0:0 /fail2ban_db &&
       chmod 755 /fail2ban_db &&
@@ -470,24 +451,35 @@ networks:
     driver: bridge
 
 # =============================================================================
-# DEPLOYMENT NOTES
+# DEPLOYMENT NOTES — OCI COMPUTE PERMISSIONS (one-time host fix)
 # =============================================================================
 #
-# OCI COMPUTE - CADDY LOG FILE PERMISSIONS (one-time host fix):
+# On OCI Compute, userns-remap means container UID 0 is an unprivileged
+# host UID. Three separate directories need root:root ownership so the
+# Caddy container (user: root) can write to them. Run ONCE on the host:
 #
-#   On OCI Compute, userns-remap means container UID 0 is an unprivileged
-#   host UID. Caddy log files must be owned by root:root (host) so that
-#   container root = file owner = rw access. Run once on the host:
+#   STATE=${PROJECT_STATE_DIR:-/var/lib/vaultwarden}
 #
-#     LOG_DIR=/var/lib/vaultwarden/logs/caddy
-#     sudo mkdir -p $LOG_DIR
-#     sudo touch $LOG_DIR/access.log $LOG_DIR/security.log
-#     sudo chown root:root $LOG_DIR/access.log $LOG_DIR/security.log
-#     sudo chmod 644 $LOG_DIR/access.log $LOG_DIR/security.log
-#     sudo chmod 755 $LOG_DIR
+#   # TLS cert + ACME data
+#   sudo mkdir -p "$STATE/caddy/data" "$STATE/caddy/config"
+#   sudo chown -R root:root "$STATE/caddy"
+#   sudo find "$STATE/caddy" -type d -exec chmod 755 {} +
+#   sudo find "$STATE/caddy" -type f -exec chmod 644 {} +
 #
-#   After running the above, the init container and Caddy will work on
-#   every subsequent 'docker compose up' without any further intervention.
-#   setup.sh performs this automatically for new installs.
+#   # Log files
+#   sudo mkdir -p "$STATE/logs/caddy"
+#   sudo touch "$STATE/logs/caddy/access.log" "$STATE/logs/caddy/security.log"
+#   sudo chown root:root "$STATE/logs/caddy/access.log" \
+#                        "$STATE/logs/caddy/security.log"
+#   sudo chmod 644 "$STATE/logs/caddy/access.log" \
+#                  "$STATE/logs/caddy/security.log"
+#   sudo chmod 755 "$STATE/logs/caddy"
+#
+#   # Entrypoint execute bit (must be 0755, not 0644)
+#   chmod 755 caddy/entrypoint.sh
+#
+#   docker compose up -d --force-recreate caddy
+#
+# setup.sh performs all of the above automatically for NEW installs.
 #
 # =============================================================================
