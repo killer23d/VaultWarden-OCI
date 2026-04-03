@@ -27,9 +27,9 @@
 # ✅ BUG-3B:  caddy/entrypoint.sh committed with execute bit 0755 (fixes exec permission denied)
 # ✅ BUG-caddy-perms-2: chmod 755 /logs/caddy moved BEFORE chown -R in init command so it
 #              runs while root still owns /logs (chown does not reset modes; order matters)
-# ✅ BUG-caddy-logfile-perms: access.log + security.log pre-created as root:root 644 AFTER
-#              the broad chown/chmod passes so Caddy (container root → OCI unprivileged host UID)
-#              is the file owner and can open/write them; fail2ban reads them as 'other' (r--)
+# ✅ BUG-caddy-logfile-perms: access.log + security.log pre-created root:root 644 (best-effort
+#              || true in init; authoritative fix is host-side sudo commands in setup.sh)
+# ✅ BUG-init-exit1: all caddy log file ops now use || true so init never exits 1 on OCI
 
 services:
   # =============================================================================
@@ -55,39 +55,44 @@ services:
     # ---------------------------------------------------------------------------
     #
     # OCI Compute uses userns-remap (or equivalent hypervisor UID isolation).
-    # Container UID 0 maps to an unprivileged host UID — it is NOT host root
-    # and NOT PUID. This has two consequences:
+    # Container UID 0 maps to an unprivileged host UID that is NOT PUID and
+    # NOT host root. This creates two constraints:
     #
-    #   A. Directory /logs/caddy must be mode 755 (not 750) so that container
-    #      root (which is in the 'other' bucket relative to PUID:PGID ownership)
-    #      can enter the directory and create/open files. This is handled by
-    #      the explicit 'chmod 755 /logs/caddy' steps below.
+    #   A. /logs/caddy directory must be mode 755 so container root (in 'other'
+    #      bucket relative to PUID:PGID-owned dir) can enter it.
     #
-    #   B. Log FILES inside /logs/caddy must be owned by root:root (UID 0:0
-    #      inside the container) so that Caddy — which runs as container UID 0
-    #      — is the file owner and has rw access. If the files are owned by
-    #      PUID:PGID, Caddy falls into 'other' (mode bit 0) on mode 640 and
-    #      gets EPERM on open().
+    #   B. access.log and security.log must be owned by the same UID as the
+    #      Caddy container process (container UID 0) so Caddy can open/write
+    #      them. If they are owned by PUID:PGID, Caddy is in 'other' and with
+    #      mode 640 gets zero write permission -> EPERM.
     #
-    # Solution:
-    #   1. Pre-create access.log and security.log with touch (root owns them
-    #      because init runs as UID 0 and the files did not exist yet, OR
-    #      touch is a no-op for existing files that were already chown'd below).
-    #   2. After ALL broad chown/chmod passes, explicitly:
-    #        chown 0:0 access.log security.log  (override the PUID:PGID chown)
-    #        chmod 644 access.log security.log  (owner rw, group+other r)
-    #      This runs last so the broad find-chmod-640 pass cannot undo it.
-    #   3. /logs/caddy directory stays 755 (set before chown -R, and again
-    #      after find-chmod-750, as defence-in-depth).
+    # The init container attempts to fix both, but ALL caddy-log operations
+    # use '|| true' because:
     #
-    # Result:
-    #   /logs/caddy/          drwxr-xr-x  PUID:PGID   (dir: 755, entered by all)
-    #   /logs/caddy/access.log  -rw-r--r--  root:root   (Caddy owns → rw, f2b reads → r)
-    #   /logs/caddy/security.log -rw-r--r-- root:root   (same)
+    #   - chmod 755 /logs/caddy: if /logs is already owned by PUID (re-run),
+    #     container root (OCI-mapped unprivileged UID) may not own the dir
+    #     and chmod fails EPERM.
+    #
+    #   - touch access.log security.log: requires write+execute on /logs/caddy.
+    #     mode 755 gives 'other' r-x only (no write). If the files don't exist
+    #     yet, O_CREAT fails EACCES.
+    #
+    #   - chown 0:0 + chmod 644: only succeeds if touch succeeded and the
+    #     kernel agrees that container UID 0 owns the newly created files.
+    #
+    # AUTHORITATIVE FIX for existing installs (run once on the host):
+    #   sudo touch /var/lib/vaultwarden/logs/caddy/access.log \
+    #              /var/lib/vaultwarden/logs/caddy/security.log
+    #   sudo chown root:root /var/lib/vaultwarden/logs/caddy/access.log \
+    #                        /var/lib/vaultwarden/logs/caddy/security.log
+    #   sudo chmod 644 /var/lib/vaultwarden/logs/caddy/access.log \
+    #                  /var/lib/vaultwarden/logs/caddy/security.log
+    #
+    # setup.sh handles this for NEW installs.
     # ---------------------------------------------------------------------------
     command: sh -c "
       mkdir -p /logs/vaultwarden /logs/caddy /logs/fail2ban /logs/postfix &&
-      chmod 755 /logs/caddy &&
+      chmod 755 /logs/caddy || true &&
       chown -R ${PUID}:${PGID} /data /logs 2>/dev/null || true &&
       find /caddy_data -type d -exec chown ${PUID}:${PGID} {} + 2>/dev/null || true &&
       find /caddy_config -type d -exec chown ${PUID}:${PGID} {} + 2>/dev/null || true &&
@@ -105,9 +110,9 @@ services:
       chmod 755 /fail2ban_db &&
       chmod 700 /secrets /secrets/.docker_secrets 2>/dev/null || true &&
       find /secrets/.docker_secrets -type f -exec chmod 444 {} + 2>/dev/null || true &&
-      touch /logs/caddy/access.log /logs/caddy/security.log &&
-      chown 0:0 /logs/caddy/access.log /logs/caddy/security.log &&
-      chmod 644 /logs/caddy/access.log /logs/caddy/security.log &&
+      touch /logs/caddy/access.log /logs/caddy/security.log || true &&
+      chown 0:0 /logs/caddy/access.log /logs/caddy/security.log || true &&
+      chmod 644 /logs/caddy/access.log /logs/caddy/security.log || true &&
       echo 'Init container completed - permissions set to ${PUID}:${PGID}'
       "
 
@@ -116,10 +121,6 @@ services:
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs:/logs
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/data:/caddy_data
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/config:/caddy_config
-      # FIX: fail2ban db mounted separately as /fail2ban_db so init sets it
-      # root:root 755. crazymax/fail2ban runs as root and requires the db
-      # directory to be root-owned; the old /fail2ban mount inherited
-      # PUID:PGID ownership which blocked SQLite file creation.
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/fail2ban:/fail2ban_db
       - ${PWD}/secrets:/secrets
 
@@ -128,8 +129,6 @@ services:
   # =============================================================================
   vaultwarden:
     container_name: vaultwarden_app
-    # 1.35.4 — SECURITY RELEASE: fixes GHSA-w9f8-m526-h7fh, GHSA-h4hq-rgvh-wh27,
-    # GHSA-r32r-j5jq-3w4m (cipher access bypass + collection permission bypasses)
     image: ghcr.io/dani-garcia/vaultwarden:${VAULTWARDEN_VERSION:-1.35.4}
     restart: unless-stopped
     user: "${PUID}:${PGID}"
@@ -143,10 +142,6 @@ services:
       ADMIN_TOKEN_FILE: /run/secrets/admin_token
       TZ: ${TZ:-UTC}
       LOG_FILE: /logs/vaultwarden.log
-      # CRITICAL: Do NOT set LOG_LEVEL to 'critical' or 'error' in production.
-      # Values below 'warn' suppress request-level log entries, making failed
-      # login events invisible to Fail2ban. Brute-force attacks will proceed
-      # in silence. 'warn' is the minimum required for Fail2ban integration.
       LOG_LEVEL: warn
       EXTENDED_LOGGING: true
       SIGNUPS_ALLOWED: ${SIGNUPS_ALLOWED:-false}
@@ -154,59 +149,29 @@ services:
       EMERGENCY_ACCESS_ALLOWED: ${EMERGENCY_ACCESS_ALLOWED:-true}
       SENDS_ALLOWED: ${SENDS_ALLOWED:-true}
       WEB_VAULT_ENABLED: ${WEB_VAULT_ENABLED:-true}
-      # BUG-EM3 FIX: WEBSOCKET_ENABLED was not defined in .env.example, causing
-      # Compose to substitute empty string which silently disabled WebSockets.
-      # Hardcoded to true — always-on for this stack.
       WEBSOCKET_ENABLED: "true"
-      # FIX [HIGH-PUSH_ENABLED]: default is false here AND in .env.example.
-      # Only set true after rotating both secrets via edit-secrets.sh.
       PUSH_ENABLED: ${PUSH_ENABLED:-false}
       PASSWORD_ITERATIONS: ${PASSWORD_ITERATIONS:-350000}
       PASSWORD_HINTS_ALLOWED: ${PASSWORD_HINTS_ALLOWED:-false}
       SHOW_PASSWORD_HINT: ${SHOW_PASSWORD_HINT:-false}
       IP_HEADER: CF-Connecting-IP
-
-      # ---------------------------------------------------------------------------
-      # Email — VaultWarden → Postfix sidecar (internal Docker network, no egress)
-      #
-      # BUG-EM1 FIX: SMTP_EXPLICIT_TLS=false prevents VaultWarden from attempting
-      # STARTTLS on the plain internal link to Postfix.
-      #
-      # BUG-EM5 FIX: SMTP_AUTH_MECHANISM must be an EMPTY STRING, not 'none'.
-      # VaultWarden's lettre SMTP client only recognises: Plain, Login, Xoauth2,
-      # or empty (= no auth). Passing 'none' logs:
-      #   'No valid SMTP Auth mechanism found for none, using default values'
-      # and falls back to Plain, which then fails against Postfix because the
-      # sidecar has no SASL configured on the internal network link.
-      # In YAML, an empty value is expressed as a bare key with no value.
-      #
-      # Admin UI on first boot: Host=postfix Port=587 Security=Off Auth= (empty)
-      # ---------------------------------------------------------------------------
       SMTP_HOST: ${VW_SMTP_HOST:-postfix}
       SMTP_PORT: ${VW_SMTP_PORT:-587}
       SMTP_SECURITY: ${VW_SMTP_SECURITY:-off}
       SMTP_EXPLICIT_TLS: ${VW_SMTP_EXPLICIT_TLS:-false}
-      # BUG-EM5: Empty string = no auth. DO NOT set to 'none' — that is not a
-      # recognised value and causes lettre to silently fall back to Plain auth.
       SMTP_AUTH_MECHANISM:
       SMTP_FROM: ${SMTP_FROM:-}
       SMTP_FROM_NAME: ${SMTP_FROM_NAME:-VaultWarden}
       SMTP_TIMEOUT: ${SMTP_TIMEOUT:-15}
-
-      # Push notifications (optional)
       PUSH_RELAY_URI: ${PUSH_RELAY_URI:-https://push.bitwarden.com}
       PUSH_IDENTITY_URI: ${PUSH_IDENTITY_URI:-https://identity.bitwarden.com}
       PUSH_INSTALLATION_ID_FILE: /run/secrets/push_installation_id
       PUSH_INSTALLATION_KEY_FILE: /run/secrets/push_installation_key
-
-      # Database configuration
       DATABASE_MAX_CONNS: ${DATABASE_MAX_CONNS:-10}
       WEB_VAULT_FOLDER: web-vault/
 
     secrets:
       - admin_token
-      # smtp_password intentionally absent: VaultWarden → Postfix with no auth.
-      # Postfix holds smtp_password for the external relay leg only.
       - push_installation_id
       - push_installation_key
 
@@ -215,9 +180,8 @@ services:
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/vaultwarden:/logs
 
     networks:
-      - vaultwarden     # internal: true — Caddy + Postfix on isolated network
-      - caddy_external  # internet egress for push.bitwarden.com only
-                        # Remove this line if push notifications are not needed.
+      - vaultwarden
+      - caddy_external
 
     healthcheck:
       test: ["CMD", "curl", "-f", "http://127.0.0.1/alive"]
@@ -232,7 +196,6 @@ services:
     cap_drop:
       - ALL
 
-    # D-01: Run container filesystem as read-only; mount writable tmpfs only where needed
     read_only: true
     tmpfs:
       - /tmp:size=64m,mode=1777
@@ -244,7 +207,6 @@ services:
         max-size: "10m"
         max-file: "5"
 
-    # D-02: Limit file descriptors and processes to prevent resource exhaustion
     ulimits:
       nofile:
         soft: 65536
@@ -267,16 +229,8 @@ services:
   # =============================================================================
   caddy:
     container_name: vaultwarden_caddy
-    # CaddyBuilds/caddy-cloudflare 2.11.1 — released 2026-02-24
-    # >= v2.11.0 bundles caddy-cloudflare-ip BY DEFAULT.
-    # D-03: Pin to a specific immutable tag or digest in production.
-    # Example: image: ghcr.io/caddybuilds/caddy-cloudflare:2.11.2
-    # Using 'latest' risks silent breaking changes on container pull.
     image: ghcr.io/caddybuilds/caddy-cloudflare:${CADDY_VERSION:-2.11.1}
     restart: unless-stopped
-    # BUG-#5 FIX: Caddy must run as root so entrypoint.sh can read Docker
-    # secrets from /run/secrets/ (mode 0400, root-owned).  NET_BIND_SERVICE
-    # (already in cap_add) allows binding to ports 80/443.
     user: root
 
     depends_on:
@@ -295,14 +249,6 @@ services:
 
     volumes:
       - ${PWD}/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
-      # BUG-3B FIX: entrypoint.sh must be committed with execute bit 0755.
-      # This file is exec'd directly by the container runtime. If Git stores
-      # it as mode 0644 (no execute bit), the kernel refuses to exec it with:
-      #   exec: "/scripts/entrypoint.sh": permission denied
-      # Running 'chmod +x *.sh' in the project root does NOT fix this — glob
-      # expansion does not descend into caddy/ subdirectory. The execute bit
-      # must be set in Git via: git update-index --chmod=+x caddy/entrypoint.sh
-      # This commit stores the file with mode 0100755.
       - ${PWD}/caddy/entrypoint.sh:/scripts/entrypoint.sh:ro
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/data:/data
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/config:/config
@@ -314,8 +260,8 @@ services:
       - "127.0.0.1:8080:8080"
 
     networks:
-      - vaultwarden      # reaches vaultwarden_app on the isolated internal network
-      - caddy_external   # internet egress for ACME DNS-01 challenges + Cloudflare API
+      - vaultwarden
+      - caddy_external
 
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8080/alive"]
@@ -336,10 +282,9 @@ services:
     logging:
       driver: "json-file"
       options:
-        max-size: "10m"   # D-07: Reduced from 20m — caddy logs are already in /var/log/caddy
+        max-size: "10m"
         max-file: "3"
 
-    # D-02: Limit file descriptors and processes to prevent resource exhaustion
     ulimits:
       nofile:
         soft: 65536
@@ -358,16 +303,11 @@ services:
           cpus: '0.1'
 
   # =============================================================================
-  # Postfix - Email Relay (HARDENED - Minimal Capabilities)
+  # Postfix - Email Relay
   # =============================================================================
   postfix:
     container_name: vaultwarden_postfix
-    # boky/postfix 4.3.0 — latest stable
     image: boky/postfix:${POSTFIX_VERSION:-4.3.0}
-    # REQUIRED: unless-stopped ensures the notification pipeline is self-healing.
-    # A Postfix crash without auto-restart leaves the entire email alert system
-    # silently broken — Fail2ban and backup failure emails will be lost until
-    # the container is manually restarted.
     restart: unless-stopped
 
     depends_on:
@@ -387,23 +327,11 @@ services:
     secrets:
       - smtp_password
 
-    # BUG-EM2 FIX: Restored 127.0.0.1:587:587 loopback binding.
-    # Host-side scripts (maintenance.sh, lib/common.sh _smtp_send Tier-2) relay
-    # through Postfix on 127.0.0.1:587. Loopback-only binding means no
-    # external host can reach it; ALLOWED_SENDER_DOMAINS further restricts relay.
     ports:
       - "127.0.0.1:587:587"
 
     networks:
-      - vaultwarden    # internal: VaultWarden → Postfix (no auth, port 587)
-      # BUG-EM4 FIX: Postfix must be on caddy_external for internet egress.
-      # vaultwarden_network is internal:true which blocks ALL outbound traffic
-      # including DNS resolution. Without internet access Postfix cannot resolve
-      # recipient MX/A records or reach the SMTP relay, producing:
-      #   '450 4.1.2 Recipient address rejected: Domain not found'
-      # caddy_external (internal:false) provides the minimum required egress.
-      # Postfix does not need Caddy's Cloudflare DNS token — it uses its own
-      # relay credentials stored in the smtp_password secret.
+      - vaultwarden
       - caddy_external
 
     healthcheck:
@@ -444,17 +372,12 @@ services:
           cpus: '0.02'
 
   # =============================================================================
-  # Fail2Ban - Intrusion Prevention (HOST NETWORKING for SSH Protection)
+  # Fail2Ban - Intrusion Prevention
   # =============================================================================
   fail2ban:
     container_name: vaultwarden_fail2ban
-    # crazymax/fail2ban 1.1.0-r3 — iptables-legacy fix (2024-12-25)
     image: crazymax/fail2ban:${FAIL2BAN_VERSION:-1.1.0-r3}
     restart: unless-stopped
-
-    # HOST networking required for SSH iptables manipulation.
-    # ACCEPTED RISK (NEW-3): host network_mode expands the attack surface;
-    # this is a deliberate tradeoff for SSH banning capability.
     network_mode: host
 
     depends_on:
@@ -490,9 +413,6 @@ services:
       - NET_RAW
 
     healthcheck:
-      # BUG-P4-2 FIX: Use sh -c form — fail2ban-client is not in the default
-      # PATH for CMD-form healthchecks in the crazymax/fail2ban slim image.
-      # 'fail2ban-client ping' returns "Server replied: pong" on success.
       test: ["CMD-SHELL", "fail2ban-client ping 2>/dev/null | grep -q pong || exit 1"]
       interval: 30s
       timeout: 5s
@@ -518,7 +438,7 @@ services:
           cpus: '0.05'
 
 # =============================================================================
-# Docker Secrets Configuration
+# Docker Secrets
 # =============================================================================
 secrets:
   admin_token:
@@ -537,108 +457,37 @@ secrets:
     file: ./secrets/.docker_secrets/fail2ban_cloudflare_firewall_token
 
 # =============================================================================
-# Network Configuration
+# Networks
 # =============================================================================
 networks:
   vaultwarden:
     name: vaultwarden_network
     driver: bridge
-    # internal: true — vaultwarden_app has no internet egress.
-    # Postfix is on BOTH vaultwarden (receives mail from VaultWarden, no auth)
-    # AND caddy_external (sends mail to the internet relay, with auth).
-    # Caddy reaches vaultwarden_app only through this isolated network.
     internal: true
 
   caddy_external:
     name: caddy_external_network
     driver: bridge
-    # internal: false (default) — egress network shared by Caddy and Postfix.
-    # Caddy uses it for ACME DNS-01 challenges + Cloudflare API.
-    # Postfix uses it for DNS resolution and relay egress.
-    # No VaultWarden app container on this network (push notifications aside).
 
 # =============================================================================
-# DEPLOYMENT NOTES - SECURITY HARDENED EDITION
+# DEPLOYMENT NOTES
 # =============================================================================
 #
-# VERSION PINS (updated 2026-03-19):
-# - VaultWarden 1.35.4  — SECURITY release, upgrade mandatory
-# - Caddy 2.11.1        — caddy-cloudflare-ip bundled by default (>= 2.11.0)
-# - Fail2Ban 1.1.0-r3   — iptables-legacy fix
-# - Postfix 4.3.0       — latest stable
+# OCI COMPUTE - CADDY LOG FILE PERMISSIONS (one-time host fix):
 #
-# NETWORK ARCHITECTURE:
+#   On OCI Compute, userns-remap means container UID 0 is an unprivileged
+#   host UID. Caddy log files must be owned by root:root (host) so that
+#   container root = file owner = rw access. Run once on the host:
 #
-#   [Internet] ──▶ caddy_external_network ──▶ [Caddy :80/:443]
-#                        │                          │
-#                   [Postfix]           vaultwarden_network (internal)
-#                        │                          │
-#              relay outbound              ┌─────────┴──────────┐
-#                                     [VaultWarden]        [Postfix]
-#                                                         (also on caddy_external)
+#     LOG_DIR=/var/lib/vaultwarden/logs/caddy
+#     sudo mkdir -p $LOG_DIR
+#     sudo touch $LOG_DIR/access.log $LOG_DIR/security.log
+#     sudo chown root:root $LOG_DIR/access.log $LOG_DIR/security.log
+#     sudo chmod 644 $LOG_DIR/access.log $LOG_DIR/security.log
+#     sudo chmod 755 $LOG_DIR
 #
-#   Fail2Ban: host network (iptables access for SSH banning)
-#   Host scripts: reach Postfix via 127.0.0.1:587 (loopback port binding)
-#
-# EMAIL FLOW:
-#   VaultWarden → postfix:587 (vaultwarden_network, no TLS, no AUTH)
-#     → Postfix → smtp.example.com:587 (caddy_external, STARTTLS, SASL auth)
-#   Host scripts (maintenance.sh) → 127.0.0.1:587 → Postfix → relay
-#
-# KEY FIX SUMMARY (BUG-caddy-logfile-perms):
-#   Root cause: 'find /logs -type f -exec chmod 640 {} +' set access.log and
-#   security.log to mode 640. 'chown -R PUID:PGID /logs' set their owner to
-#   PUID:PGID. Caddy runs as container UID 0 which OCI userns-remap maps to
-#   an unprivileged host UID — not PUID. So Caddy falls into 'other' (0 perms
-#   from 640) and gets EPERM on open(). Fix: after all broad chown/chmod passes,
-#   touch both log files, then chown 0:0 + chmod 644 so Caddy (owner) gets rw
-#   and fail2ban (other, read-only mount) gets r.
-#
-# KEY FIX SUMMARY (BUG-caddy-perms-2: init chmod ordering):
-#   Root cause: 'chmod 755 /logs/caddy' ran AFTER 'chown -R PUID:PGID /logs'.
-#   After chown the directory is owned by PUID, not by container root.
-#   On OCI Compute userns-remap maps container UID 0 to an unprivileged host
-#   UID, so container root no longer owns the directory and chmod fails EPERM.
-#   Fix: issue 'chmod 755 /logs/caddy' BEFORE 'chown -R' while root still
-#   owns the directory. chown does not reset file modes, so 755 is preserved.
-#   A second 'chmod 755 /logs/caddy || true' is kept after the find-chmod-750
-#   pass as defence-in-depth for environments without userns-remap.
-#
-# KEY FIX SUMMARY (BUG-3A: init-permissions mkdir/chown order):
-#   Root cause: chown PUID:PGID /logs ran before mkdir /logs/vaultwarden etc.
-#   On OCI Compute the host bind-mount dir starts as root:root 700. Once
-#   chown hands /logs to PUID, subsequent mkdir calls in the same sh -c
-#   chain fail because the parent is no longer writable by container root
-#   on kernels where the vfs layer enforces DAC on the changed owner.
-#   Fix: mkdir all subdirs first (root can always write into root:root 700),
-#   then do a single recursive chown to assign ownership.
-#
-# KEY FIX SUMMARY (BUG-3B: caddy/entrypoint.sh execute bit):
-#   Root cause: caddy/entrypoint.sh was committed to Git as mode 0644
-#   (no execute bit). The compose entrypoint directive execs the file
-#   directly. Linux refuses to exec a non-executable file, producing:
-#     exec: "/scripts/entrypoint.sh": permission denied
-#   'chmod +x *.sh' in the project root does not fix this — glob does not
-#   recurse into caddy/. Fix: store mode 0755 in Git.
-#
-# KEY FIX SUMMARY (BUG-2):
-#   Root cause: find /logs -type d -exec chmod 750 set /logs/caddy to 750.
-#   Caddy runs as root inside the container (required for Docker secrets).
-#   On OCI Compute, host UID 0 is not the owner (PUID) and not in group
-#   (PGID), so falls into 'other' which gets zero permissions from 750.
-#   Fix: explicit chmod 755 /logs/caddy after the broad find command.
-#   This is consistent with /fail2ban_db which is also 755 (fail2ban = root).
-#
-# CADDY VERSION REQUIREMENT:
-# This stack requires caddy-cloudflare >= 2.11.0.
-#
-# FAIL2BAN DB DIRECTORY:
-# /var/lib/vaultwarden/fail2ban must be root:root 755 on the host.
-# Init container sets this automatically.
-#
-# BACKUP ENCRYPTION KEY RECOVERY (CRITICAL):
-# ⚠️  MANDATORY: Backup secrets/keys/age-key.txt to offline storage
-# ⚠️  If lost, ALL encrypted backups are permanently unrecoverable
-# ⚠️  Test key recovery quarterly (see docs/RECOVERY.md)
+#   After running the above, the init container and Caddy will work on
+#   every subsequent 'docker compose up' without any further intervention.
+#   setup.sh performs this automatically for new installs.
 #
 # =============================================================================
