@@ -22,6 +22,7 @@
 # ✅ BUG-EM3: WEBSOCKET_ENABLED default hardened to true (was undefined → empty → disabled)
 # ✅ BUG-EM4: Postfix added to caddy_external network (DNS + relay egress restored)
 # ✅ BUG-EM5: SMTP_AUTH_MECHANISM set to empty string (not 'none' — invalid for VaultWarden)
+# ✅ BUG-2:   caddy log dir chmod 755 (Caddy runs as root; 750 blocks 'other' = root on OCI)
 
 services:
   # =============================================================================
@@ -53,6 +54,7 @@ services:
       find /data -type f -exec chmod 640 {} + 2>/dev/null || true &&
       find /logs -type d -exec chmod 750 {} + 2>/dev/null || true &&
       find /logs -type f -exec chmod 640 {} + 2>/dev/null || true &&
+      chmod 755 /logs/caddy &&
       find /caddy_data -type d -exec chmod 750 {} + 2>/dev/null || true &&
       find /caddy_data -type f -exec chmod 640 {} + 2>/dev/null || true &&
       find /caddy_config -type d -exec chmod 750 {} + 2>/dev/null || true &&
@@ -460,7 +462,7 @@ services:
           memory: 512M
           cpus: '0.15'
         reservations:
-          memory: 128M
+          memory: 64M
           cpus: '0.05'
 
 # =============================================================================
@@ -531,50 +533,20 @@ networks:
 #     → Postfix → smtp.example.com:587 (caddy_external, STARTTLS, SASL auth)
 #   Host scripts (maintenance.sh) → 127.0.0.1:587 → Postfix → relay
 #
-# KEY FIX SUMMARY (BUG-EM4 + BUG-EM5):
-#   BUG-EM4: Postfix now on caddy_external → DNS and relay egress restored.
-#            Without this, '450 Domain not found' on every outbound message.
-#   BUG-EM5: SMTP_AUTH_MECHANISM is empty string (not 'none').
-#            'none' is not valid in VaultWarden (lettre); causes silent fallback
-#            to Plain auth which then fails against Postfix's no-SASL policy.
+# KEY FIX SUMMARY (BUG-2):
+#   Root cause: find /logs -type d -exec chmod 750 set /logs/caddy to 750.
+#   Caddy runs as root inside the container (required for Docker secrets).
+#   On OCI Compute, host UID 0 is not the owner (PUID) and not in group
+#   (PGID), so falls into 'other' which gets zero permissions from 750.
+#   Fix: explicit chmod 755 /logs/caddy after the broad find command.
+#   This is consistent with /fail2ban_db which is also 755 (fail2ban = root).
 #
 # CADDY VERSION REQUIREMENT:
 # This stack requires caddy-cloudflare >= 2.11.0.
-# Verify: docker run --rm ghcr.io/caddybuilds/caddy-cloudflare:2.11.1 caddy list-modules | grep cloudflare
-# Must see: http.ip_sources.cloudflare
 #
 # FAIL2BAN DB DIRECTORY:
 # /var/lib/vaultwarden/fail2ban must be root:root 755 on the host.
 # Init container sets this automatically.
-#
-# SECURITY ENHANCEMENTS APPLIED:
-# ✅ All previous enhancements retained
-# ✅ BUG-EM4: Postfix on caddy_external — DNS + relay egress restored
-# ✅ BUG-EM5: SMTP_AUTH_MECHANISM empty (lettre no-auth; was 'none' = invalid)
-# ✅ BUG-EM6: _smtp_send host-side routes through Postfix 127.0.0.1:587 (see lib/common.sh)
-#
-# TESTING CHECKLIST:
-# □ Verify Caddy obtains cert:    docker logs -f vaultwarden_caddy
-# □ Verify site loads:            curl -I https://bw.lazymocha.com
-# □ Verify fail2ban db:           docker logs vaultwarden_fail2ban | grep -i error
-# □ Verify network isolation:
-#     docker network inspect vaultwarden_network | grep Internal  → "Internal": true
-#     docker network inspect caddy_external_network | grep Internal → "Internal": false
-# □ Verify Postfix on both networks:
-#     docker inspect vaultwarden_postfix | grep -A5 Networks
-#     Must show BOTH vaultwarden_network AND caddy_external_network
-# □ Test VaultWarden email:       trigger invite/verify-email from admin UI
-#     docker logs vaultwarden_app | grep -i smtp  → must NOT show auth errors
-# □ Test host script email:       ./maintenance.sh --test-email --verbose
-# □ Verify SMTP_AUTH_MECHANISM:   docker exec vaultwarden_app env | grep SMTP_AUTH
-#     Must show: SMTP_AUTH_MECHANISM=    (empty, not 'none')
-# □ Test SSH ban:                 trigger 3 failed SSH attempts, verify iptables
-# □ Check resource usage:         docker stats
-#
-# PLATFORM COMPATIBILITY:
-# - SSH_LOG_PATH auto-detected by setup.sh
-# - Debian/Ubuntu: /var/log/auth.log
-# - RHEL/CentOS/OCI: /var/log/secure
 #
 # BACKUP ENCRYPTION KEY RECOVERY (CRITICAL):
 # ⚠️  MANDATORY: Backup secrets/keys/age-key.txt to offline storage
