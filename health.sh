@@ -450,24 +450,59 @@ _resolve_domain() {
     return 0
 }
 
-check_ssl_certificates() {
-    health_log_info "Checking SSL certificate expiration..."
-    local domain clean_domain
+# ---------------------------------------------------------------------------
+# _get_domain
+#
+# BUG-health-envread-1 FIX: check_ssl_certificates() previously grepped
+# "^DOMAIN=" from $ENV_FILE — but the project .env uses DOMAIN_NAME= (not
+# DOMAIN=). This caused domain to always be empty on non-systemd installs,
+# making the SSL check permanently report "No domain configured / degraded".
+#
+# Resolution order:
+#   1. $DOMAIN_NAME  — canonical project .env variable (already in env via
+#                      load_env_file() called in main())
+#   2. $DOMAIN       — legacy / vaultwarden internal fallback
+#   3. grep DOMAIN_NAME= $ENV_FILE  — systemd-installed env file fallback
+#   4. grep DOMAIN=   $ENV_FILE     — legacy systemd fallback
+#
+# Prints the domain (stripped of https:// prefix and trailing path) to
+# stdout, or empty string if none found.
+# ---------------------------------------------------------------------------
+_get_domain() {
+    local raw=""
 
-    if [[ -f "$ENV_FILE" ]]; then
-        domain=$(grep "^DOMAIN=" "$ENV_FILE" | head -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" || echo "")
-    else
-        domain=""
+    # 1. Prefer already-loaded env var (set by load_env_file in main)
+    if [[ -n "${DOMAIN_NAME:-}" ]]; then
+        raw="$DOMAIN_NAME"
+    elif [[ -n "${DOMAIN:-}" ]]; then
+        raw="$DOMAIN"
+    elif [[ -f "$ENV_FILE" ]]; then
+        # 3. systemd install: DOMAIN_NAME= in /etc/vaultwarden/vaultwarden.env
+        raw=$(grep "^DOMAIN_NAME=" "$ENV_FILE" | head -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" || echo "")
+        if [[ -z "$raw" ]]; then
+            # 4. legacy DOMAIN= fallback
+            raw=$(grep "^DOMAIN=" "$ENV_FILE" | head -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" || echo "")
+        fi
     fi
 
-    if [[ -z "$domain" ]]; then
+    # Strip protocol prefix and trailing path so callers get a bare hostname
+    printf '%s' "$raw" | sed 's|https\?://||; s|/.*$||'
+}
+
+check_ssl_certificates() {
+    health_log_info "Checking SSL certificate expiration..."
+
+    # BUG-health-envread-1 FIX: use _get_domain() instead of directly grepping
+    # $ENV_FILE for "^DOMAIN=" (the project .env uses DOMAIN_NAME=, not DOMAIN=).
+    local clean_domain
+    clean_domain=$(_get_domain)
+
+    if [[ -z "$clean_domain" ]]; then
         health_log_warn "No domain configured for SSL check"
         HEALTH_RESULTS["ssl_certificates"]="degraded"
         HEALTH_DETAILS["ssl_certificates"]="No domain configured"
         return 0
     fi
-
-    clean_domain=$(echo "$domain" | sed 's|https\?://||; s|/.*$||')
 
     if ! _resolve_domain "$clean_domain"; then
         health_log_warn "SSL check skipped: domain '$clean_domain' does not resolve (NXDOMAIN or DNS timeout)"
@@ -746,15 +781,40 @@ check_backup_status() {
     fi
 }
 
+# ---------------------------------------------------------------------------
+# _get_admin_email
+#
+# BUG-health-envread-2 FIX: test_email_notifications() previously grepped
+# "^ADMIN_EMAIL=" from $ENV_FILE which resolves to
+# /etc/vaultwarden/vaultwarden.env — a path only present on systemd-installed
+# hosts.  On standard installs, ADMIN_EMAIL lives in the project .env and is
+# already exported into the environment by load_env_file() in main().
+# Grepping a non-existent file always returned empty, making email
+# notifications permanently show as "not configured / degraded".
+#
+# Resolution order:
+#   1. $ADMIN_EMAIL — already in environment from load_env_file()
+#   2. grep ADMIN_EMAIL= $ENV_FILE — systemd-installed env file fallback
+# ---------------------------------------------------------------------------
+_get_admin_email() {
+    if [[ -n "${ADMIN_EMAIL:-}" ]]; then
+        printf '%s' "$ADMIN_EMAIL"
+        return 0
+    fi
+    if [[ -f "$ENV_FILE" ]]; then
+        grep "^ADMIN_EMAIL=" "$ENV_FILE" | head -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" || true
+    fi
+}
+
 test_email_notifications() {
     health_log_info "Testing email notification functionality..."
-    local admin_email
 
-    if [[ -f "$ENV_FILE" ]]; then
-        admin_email=$(grep "^ADMIN_EMAIL=" "$ENV_FILE" | head -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" || echo "")
-    else
-        admin_email=""
-    fi
+    # BUG-health-envread-2 FIX: use _get_admin_email() instead of grepping
+    # $ENV_FILE directly — the env file path resolves to
+    # /etc/vaultwarden/vaultwarden.env which does not exist on non-systemd
+    # installs. ADMIN_EMAIL is already in the environment from load_env_file().
+    local admin_email
+    admin_email=$(_get_admin_email)
 
     if [[ -z "$admin_email" ]]; then
         health_log_warn "ADMIN_EMAIL not configured - email notifications disabled"
