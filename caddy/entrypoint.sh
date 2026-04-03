@@ -24,7 +24,7 @@ if [ "$DEBUG_ENTRYPOINT" = "true" ]; then
 fi
 
 # =============================================================================
-# BUG-2 FIX: Ensure log directory exists and is writable BEFORE caddy validate
+# BUG-2 FIX: Ensure log directory exists BEFORE caddy validate
 #
 # 'caddy validate' fully provisions all modules including FileWriter log
 # writers. Provisioning calls open() on the log file path at validate time,
@@ -35,17 +35,19 @@ fi
 #
 # This caused the Caddy container to restart-loop on every boot.
 #
-# The init-permissions container sets the host-side log directory to mode 750
-# owned by PUID:PGID. Caddy runs as root inside the container, so mkdir -p
-# here always succeeds regardless of the host directory's ownership. chmod 755
-# ensures root (our process) and group members can read; world-readable is
-# acceptable for log dirs (fail2ban reads them, and the files themselves have
-# tighter permissions set by Caddy's FileWriter).
+# mkdir -p is sufficient and idempotent:
+#   - If the directory does not exist, root inside the container creates it
+#     and can immediately write to it.
+#   - If it already exists (owned by PUID:PGID, mode 750 from the init
+#     container), root on a standard non-user-namespaced Docker host (OCI
+#     Compute, standard Ubuntu Docker) is UID 0 on the host and bypasses
+#     mode-bit 'other' restrictions — Caddy can open files in it.
 #
-# This mkdir is idempotent — safe to run on every container start.
+# DO NOT add chmod here: if the directory already exists and is owned by
+# PUID:PGID, chmod will fail with 'Operation not permitted' under set -eu
+# and abort the entrypoint before Caddy starts.
 # =============================================================================
 mkdir -p /var/log/caddy
-chmod 755 /var/log/caddy
 
 # FIX [M-16]: Validate required environment variables BEFORE Caddyfile validation
 # so we never print "validation passed" when DOMAIN_NAME is unset.
