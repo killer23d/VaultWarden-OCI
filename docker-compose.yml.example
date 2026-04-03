@@ -23,6 +23,8 @@
 # ✅ BUG-EM4: Postfix added to caddy_external network (DNS + relay egress restored)
 # ✅ BUG-EM5: SMTP_AUTH_MECHANISM set to empty string (not 'none' — invalid for VaultWarden)
 # ✅ BUG-2:   caddy log dir chmod 755 (Caddy runs as root; 750 blocks 'other' = root on OCI)
+# ✅ BUG-3A:  init container mkdir before chown (prevents Permission denied on /logs subdirs)
+# ✅ BUG-3B:  caddy/entrypoint.sh committed with execute bit 0755 (fixes exec permission denied)
 
 services:
   # =============================================================================
@@ -43,9 +45,26 @@ services:
     security_opt:
       - no-new-privileges:true
 
+    # BUG-3A FIX: Create ALL subdirectories BEFORE any chown.
+    #
+    # Previous order:
+    #   mkdir -p /logs
+    #   chown PUID:PGID /logs          ← hands /logs to non-root
+    #   mkdir -p /logs/vaultwarden ... ← FAILS: parent now owned by PUID,
+    #                                    host bind-mount may be 700
+    #
+    # On OCI Compute the host-side ${PROJECT_STATE_DIR}/logs directory is
+    # created by Docker's bind-mount attachment as root:root 700 on first
+    # run. Once chown PUID:PGID /logs executes inside the container the
+    # directory is handed off to the non-root user. Subsequent mkdir calls
+    # in the same sh -c chain then fail because the parent directory is no
+    # longer writable by container root on kernels/configurations where the
+    # bind-mount vfs layer enforces DAC on the changed owner.
+    #
+    # Fix: mkdir all required directories first (root can always create
+    # children in root-owned 700 dirs), then do a single recursive chown
+    # to hand everything over to PUID:PGID at once.
     command: sh -c "
-      mkdir -p /logs &&
-      chown ${PUID}:${PGID} /logs &&
       mkdir -p /logs/vaultwarden /logs/caddy /logs/fail2ban /logs/postfix &&
       chown -R ${PUID}:${PGID} /data /logs 2>/dev/null || true &&
       find /caddy_data -type d -exec chown ${PUID}:${PGID} {} + 2>/dev/null || true &&
@@ -251,6 +270,14 @@ services:
 
     volumes:
       - ${PWD}/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # BUG-3B FIX: entrypoint.sh must be committed with execute bit 0755.
+      # This file is exec'd directly by the container runtime. If Git stores
+      # it as mode 0644 (no execute bit), the kernel refuses to exec it with:
+      #   exec: "/scripts/entrypoint.sh": permission denied
+      # Running 'chmod +x *.sh' in the project root does NOT fix this — glob
+      # expansion does not descend into caddy/ subdirectory. The execute bit
+      # must be set in Git via: git update-index --chmod=+x caddy/entrypoint.sh
+      # This commit stores the file with mode 0100755.
       - ${PWD}/caddy/entrypoint.sh:/scripts/entrypoint.sh:ro
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/data:/data
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/config:/config
@@ -532,6 +559,23 @@ networks:
 #   VaultWarden → postfix:587 (vaultwarden_network, no TLS, no AUTH)
 #     → Postfix → smtp.example.com:587 (caddy_external, STARTTLS, SASL auth)
 #   Host scripts (maintenance.sh) → 127.0.0.1:587 → Postfix → relay
+#
+# KEY FIX SUMMARY (BUG-3A: init-permissions mkdir/chown order):
+#   Root cause: chown PUID:PGID /logs ran before mkdir /logs/vaultwarden etc.
+#   On OCI Compute the host bind-mount dir starts as root:root 700. Once
+#   chown hands /logs to PUID, subsequent mkdir calls in the same sh -c
+#   chain fail because the parent is no longer writable by container root
+#   on kernels where the vfs layer enforces DAC on the changed owner.
+#   Fix: mkdir all subdirs first (root can always write into root:root 700),
+#   then do a single recursive chown to assign ownership.
+#
+# KEY FIX SUMMARY (BUG-3B: caddy/entrypoint.sh execute bit):
+#   Root cause: caddy/entrypoint.sh was committed to Git as mode 0644
+#   (no execute bit). The compose entrypoint directive execs the file
+#   directly. Linux refuses to exec a non-executable file, producing:
+#     exec: "/scripts/entrypoint.sh": permission denied
+#   'chmod +x *.sh' in the project root does not fix this — glob does not
+#   recurse into caddy/. Fix: store mode 0755 in Git.
 #
 # KEY FIX SUMMARY (BUG-2):
 #   Root cause: find /logs -type d -exec chmod 750 set /logs/caddy to 750.
