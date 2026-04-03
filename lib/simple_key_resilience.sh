@@ -573,3 +573,17 @@ EOF
 
     return 0
 }
+
+# ---------------------------------------------------------------------------
+# check_age_key_health
+#
+# Public entry-point called by startup.sh, update.sh, and Makefile.
+# Delegates to simple_verify_age_key() which performs:
+#   1. Key file exists at SOPS_AGE_KEY_FILE
+#   2. Permissions are 600 (auto-corrects if not)
+#   3. Encrypt/decrypt roundtrip confirms operational validity
+# ---------------------------------------------------------------------------
+check_age_key_health() {
+    simple_verify_age_key
+}
+
