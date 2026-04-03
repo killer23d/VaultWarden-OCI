@@ -22,24 +22,24 @@
 # ✅ BUG-EM3: WEBSOCKET_ENABLED default hardened to true (was undefined → empty → disabled)
 # ✅ BUG-EM4: Postfix added to caddy_external network (DNS + relay egress restored)
 # ✅ BUG-EM5: SMTP_AUTH_MECHANISM set to empty string (not 'none' — invalid for VaultWarden)
-# ✅ BUG-2:   caddy log dir chmod 755 (Caddy runs as root; 750 blocks 'other' = root on OCI)
+# ✅ BUG-2:   caddy log dir chmod 755 (Caddy runs as root; 750 blocks write for non-owner)
 # ✅ BUG-3A:  init container mkdir before chown (prevents Permission denied on /logs subdirs)
 # ✅ BUG-3B:  caddy/entrypoint.sh committed with execute bit 0755 (fixes exec permission denied)
-# ✅ BUG-caddy-perms-2: chmod 755 /logs/caddy moved BEFORE chown -R in init command so it
-#              runs while root still owns /logs (chown does not reset modes; order matters)
-# ✅ BUG-caddy-logfile-perms: access.log + security.log pre-created root:root 644 (best-effort
-#              || true in init; authoritative fix is host-side sudo commands in setup.sh)
-# ✅ BUG-init-exit1: all caddy log file ops now use || true so init never exits 1 on OCI
+# ✅ BUG-caddy-perms-2: chmod 755 /logs/caddy set correctly
+# ✅ BUG-caddy-logfile-perms: access.log + security.log pre-created root:root 644
+# ✅ BUG-init-exit1: all caddy log file ops use || true so init never exits 1
 # ✅ BUG-caddy-data-perms: removed find /caddy_data + /caddy_config chown PUID:PGID from init.
 #              Caddy runs as user: root — chowning its data/config to PUID:PGID made Caddy
-#              'other' on its own dirs, causing cert key permission denied on OCI Compute.
+#              a non-owner on its own dirs, causing cert key permission denied.
 # ✅ BUG-entrypoint-exec: entrypoint.sh must be mode 0755; a blanket 'find -exec chmod 644'
 #              on the repo working tree strips the execute bit → runc EPERM at container init.
-# ✅ BUG-caddy-log-order: logs/caddy setup (mkdir+touch+chown 0:0+chmod 755) now runs BEFORE
-#              the find /logs sweep. Previous ordering let find stomp logs/caddy back to 750
-#              and log files back to 640/PUID before the repair ops ran, causing chown 0:0
-#              to silently fail (EPERM on wrong mapped UID) so touch in entrypoint always
-#              failed on OCI Compute userns-remap after every make up cycle.
+# ✅ BUG-caddy-log-order: logs/caddy setup runs BEFORE find /logs sweep.
+# ✅ BUG-init-dac-override: init container was missing DAC_OVERRIDE capability.
+#              Without DAC_OVERRIDE, chmod() on a file/dir not owned by the calling process
+#              fails EPERM unconditionally. After `chown -R PUID:PGID /logs` transferred
+#              /logs/caddy to ubuntu:ubuntu, container root could no longer chmod it.
+#              The `|| true` swallowed the error → caddy dir stayed 750 → touch failed
+#              in entrypoint → caddy restart loop. Fix: add DAC_OVERRIDE to cap_add.
 
 services:
   # =============================================================================
@@ -49,62 +49,61 @@ services:
     image: busybox:1.36.1
     container_name: vaultwarden_init
     restart: "no"
-    user: "0:0"  # Required for chown operations
+    user: "0:0"  # Required for chown/chmod operations
 
     cap_drop:
       - ALL
     cap_add:
-      - CHOWN
-      - FOWNER
+      - CHOWN       # chown files/dirs to PUID:PGID and root:root
+      - FOWNER      # bypass permission checks when process UID != file owner UID for some ops
+      - DAC_OVERRIDE  # bypass DAC checks — required to chmod files/dirs after chown transfers
+                      # ownership away from root (without this, chmod on ubuntu-owned dirs = EPERM)
 
     security_opt:
       - no-new-privileges:true
 
     # ---------------------------------------------------------------------------
-    # OWNERSHIP MODEL — OCI COMPUTE (userns-remap)
+    # OWNERSHIP MODEL
     # ---------------------------------------------------------------------------
     #
-    # Container UID 0 maps to an unprivileged host UID (≠ PUID, ≠ host root).
-    # Each service runs as a specific UID; that UID must own its writable dirs.
+    # No userns-remap on this host: container UID 0 = host UID 0 = real root.
+    # Verified via: cat /proc/self/uid_map  =>  0  0  4294967295
     #
-    #   /data, /logs            → PUID:PGID   (vaultwarden app user)
-    #   /logs/caddy             → dir: PUID:PGID mode 755 (other=caddy-root can enter)
-    #                             files: root:root mode 644 (caddy-root owns and writes them)
-    #                             CRITICAL ORDER: set up logs/caddy BEFORE find /logs sweep
-    #                             so find does not stomp these back to 750/640.
-    #   /caddy_data, /caddy_config → LEFT AS ROOT:ROOT (set by host/setup.sh)
-    #                             Caddy runs as user: root and must own these
-    #                             dirs to create TLS certs and config cache.
-    #                             DO NOT chown to PUID:PGID here.
+    # Each service runs as a specific UID; that UID must own its writable dirs:
+    #
+    #   /data, /logs/*          → PUID:PGID mode 750/640  (vaultwarden app user)
+    #   /logs/caddy             → dir: mode 755 (Caddy=root needs execute+write as 'other')
+    #                             files: root:root mode 644 (Caddy creates and writes these)
+    #   /caddy_data, /caddy_config → NOT TOUCHED (Caddy=root owns these on host; host setup.sh
+    #                             pre-creates them as root:root 755)
     #   /fail2ban_db            → root:root 755  (fail2ban runs as root)
     #   /secrets                → mode 700/444   (secrets hardening)
     #
-    # AUTHORITATIVE HOST FIX for existing installs (see DEPLOYMENT NOTES below).
-    # setup.sh handles this for NEW installs.
-    #
-    # ORDERING INVARIANT (OCI userns-remap):
-    #   All logs/caddy ops (mkdir, touch, chown 0:0, chmod 644/755) MUST complete
-    #   before `find /logs` runs. Once find sets files to 640 and dirs to 750,
-    #   chown on files owned by a different mapped UID is EPERM (no CAP_CHOWN
-    #   across UID namespaces for non-owner). The || true on chown would swallow
-    #   the error and leave files at 640/PUID — breaking the entrypoint touch check.
+    # WHY DAC_OVERRIDE IS REQUIRED:
+    #   The init command does: chown -R PUID:PGID /logs
+    #   After this, /logs/caddy is owned by ubuntu:ubuntu.
+    #   chmod 755 /logs/caddy then fails EPERM without DAC_OVERRIDE
+    #   because the calling process (UID 0) is not the file owner (ubuntu).
+    #   DAC_OVERRIDE grants bypass of all DAC permission checks, making
+    #   chmod work regardless of ownership. This is a minimal, scoped grant
+    #   on a short-lived init-only container with no network access.
     # ---------------------------------------------------------------------------
     command: sh -c "
-      mkdir -p /data /logs/vaultwarden /logs/fail2ban /logs/postfix &&
+      mkdir -p /data /logs/vaultwarden /logs/caddy /logs/fail2ban /logs/postfix &&
 
-      mkdir -p /logs/caddy &&
-      touch /logs/caddy/access.log /logs/caddy/security.log || true &&
-      chown 0:0 /logs/caddy/access.log /logs/caddy/security.log || true &&
-      chmod 644 /logs/caddy/access.log /logs/caddy/security.log || true &&
-      chmod 755 /logs/caddy &&
+      touch /logs/caddy/access.log /logs/caddy/security.log &&
+      chown 0:0 /logs/caddy/access.log /logs/caddy/security.log &&
+      chmod 644 /logs/caddy/access.log /logs/caddy/security.log &&
 
-      chown -R ${PUID}:${PGID} /data /logs 2>/dev/null || true &&
+      chown -R ${PUID}:${PGID} /data /logs &&
       find /data -type d -exec chmod 750 {} + 2>/dev/null || true &&
       find /data -type f -exec chmod 640 {} + 2>/dev/null || true &&
       find /logs -type d -exec chmod 750 {} + 2>/dev/null || true &&
       find /logs -path '*/caddy' -prune -o -type f -exec chmod 640 {} + 2>/dev/null || true &&
 
       chmod 755 /logs/caddy &&
+      chown 0:0 /logs/caddy/access.log /logs/caddy/security.log &&
+      chmod 644 /logs/caddy/access.log /logs/caddy/security.log &&
 
       mkdir -p /fail2ban_db &&
       chown 0:0 /fail2ban_db &&
@@ -466,37 +465,3 @@ networks:
   caddy_external:
     name: caddy_external_network
     driver: bridge
-
-# =============================================================================
-# DEPLOYMENT NOTES — OCI COMPUTE PERMISSIONS (one-time host fix)
-# =============================================================================
-#
-# On OCI Compute, userns-remap means container UID 0 is an unprivileged
-# host UID. Three separate directories need root:root ownership so the
-# Caddy container (user: root) can write to them. Run ONCE on the host:
-#
-#   STATE=${PROJECT_STATE_DIR:-/var/lib/vaultwarden}
-#
-#   # TLS cert + ACME data
-#   sudo mkdir -p "$STATE/caddy/data" "$STATE/caddy/config"
-#   sudo chown -R root:root "$STATE/caddy"
-#   sudo find "$STATE/caddy" -type d -exec chmod 755 {} +
-#   sudo find "$STATE/caddy" -type f -exec chmod 644 {} +
-#
-#   # Log files
-#   sudo mkdir -p "$STATE/logs/caddy"
-#   sudo touch "$STATE/logs/caddy/access.log" "$STATE/logs/caddy/security.log"
-#   sudo chown root:root "$STATE/logs/caddy/access.log" \
-#                        "$STATE/logs/caddy/security.log"
-#   sudo chmod 644 "$STATE/logs/caddy/access.log" \
-#                  "$STATE/logs/caddy/security.log"
-#   sudo chmod 755 "$STATE/logs/caddy"
-#
-#   # Entrypoint execute bit (must be 0755, not 0644)
-#   chmod 755 caddy/entrypoint.sh
-#
-#   docker compose up -d --force-recreate caddy
-#
-# setup.sh performs all of the above automatically for NEW installs.
-#
-# =============================================================================
