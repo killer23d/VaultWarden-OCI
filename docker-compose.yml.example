@@ -27,6 +27,9 @@
 # ✅ BUG-3B:  caddy/entrypoint.sh committed with execute bit 0755 (fixes exec permission denied)
 # ✅ BUG-caddy-perms-2: chmod 755 /logs/caddy moved BEFORE chown -R in init command so it
 #              runs while root still owns /logs (chown does not reset modes; order matters)
+# ✅ BUG-caddy-logfile-perms: access.log + security.log pre-created as root:root 644 AFTER
+#              the broad chown/chmod passes so Caddy (container root → OCI unprivileged host UID)
+#              is the file owner and can open/write them; fail2ban reads them as 'other' (r--)
 
 services:
   # =============================================================================
@@ -47,42 +50,44 @@ services:
     security_opt:
       - no-new-privileges:true
 
-    # BUG-caddy-perms-2 FIX: chmod 755 /logs/caddy is now issued BEFORE the
-    # 'chown -R PUID:PGID /logs' step.
+    # ---------------------------------------------------------------------------
+    # OWNERSHIP MODEL FOR /logs/caddy ON OCI COMPUTE
+    # ---------------------------------------------------------------------------
     #
-    # Why order matters on OCI Compute:
+    # OCI Compute uses userns-remap (or equivalent hypervisor UID isolation).
+    # Container UID 0 maps to an unprivileged host UID — it is NOT host root
+    # and NOT PUID. This has two consequences:
     #
-    #   On OCI Compute, Docker maps container UID 0 to an unprivileged host
-    #   UID (userns-remap or equivalent hypervisor isolation). Container root
-    #   is NOT host root. Any chmod/chown on a bind-mount attempted AFTER the
-    #   directory has been handed to PUID:PGID will fail with EPERM because:
-    #     - container UID 0  → unprivileged host UID (not PUID, not 0)
-    #     - directory owner  → PUID on the host
-    #     - FOWNER allows chown on owned files; it does NOT grant chmod on
-    #       files owned by a different UID when userns-remap is active
+    #   A. Directory /logs/caddy must be mode 755 (not 750) so that container
+    #      root (which is in the 'other' bucket relative to PUID:PGID ownership)
+    #      can enter the directory and create/open files. This is handled by
+    #      the explicit 'chmod 755 /logs/caddy' steps below.
     #
-    #   The previous command order was:
-    #     mkdir -p /logs/vaultwarden /logs/caddy ...
-    #     chown -R PUID:PGID /logs          ← /logs/caddy now owned by PUID
-    #     find /logs -type d -exec chmod 750 ← succeeds (FOWNER + owned by us... sometimes)
-    #     chmod 755 /logs/caddy              ← FAILS: owned by PUID, not by
-    #                                          container root after chown
+    #   B. Log FILES inside /logs/caddy must be owned by root:root (UID 0:0
+    #      inside the container) so that Caddy — which runs as container UID 0
+    #      — is the file owner and has rw access. If the files are owned by
+    #      PUID:PGID, Caddy falls into 'other' (mode bit 0) on mode 640 and
+    #      gets EPERM on open().
     #
-    #   The correct order:
-    #     mkdir -p /logs/vaultwarden /logs/caddy ...
-    #     chmod 755 /logs/caddy              ← succeeds: /logs/caddy still
-    #                                          owned by root (us) at this point
-    #     chown -R PUID:PGID /logs          ← hands ownership to PUID
-    #     find /logs -type d -exec chmod 750 ← sets remaining dirs to 750
-    #                                          /logs/caddy stays 755 because
-    #                                          chown does not reset modes
+    # Solution:
+    #   1. Pre-create access.log and security.log with touch (root owns them
+    #      because init runs as UID 0 and the files did not exist yet, OR
+    #      touch is a no-op for existing files that were already chown'd below).
+    #   2. After ALL broad chown/chmod passes, explicitly:
+    #        chown 0:0 access.log security.log  (override the PUID:PGID chown)
+    #        chmod 644 access.log security.log  (owner rw, group+other r)
+    #      This runs last so the broad find-chmod-640 pass cannot undo it.
+    #   3. /logs/caddy directory stays 755 (set before chown -R, and again
+    #      after find-chmod-750, as defence-in-depth).
     #
-    # The '|| true' after 'chmod 755 /logs/caddy' matches the pattern used
-    # throughout this command for non-fatal steps, but in practice this step
-    # should always succeed (root owns /logs/caddy at this point).
+    # Result:
+    #   /logs/caddy/          drwxr-xr-x  PUID:PGID   (dir: 755, entered by all)
+    #   /logs/caddy/access.log  -rw-r--r--  root:root   (Caddy owns → rw, f2b reads → r)
+    #   /logs/caddy/security.log -rw-r--r-- root:root   (same)
+    # ---------------------------------------------------------------------------
     command: sh -c "
       mkdir -p /logs/vaultwarden /logs/caddy /logs/fail2ban /logs/postfix &&
-      chmod 755 /logs/caddy || true &&
+      chmod 755 /logs/caddy &&
       chown -R ${PUID}:${PGID} /data /logs 2>/dev/null || true &&
       find /caddy_data -type d -exec chown ${PUID}:${PGID} {} + 2>/dev/null || true &&
       find /caddy_config -type d -exec chown ${PUID}:${PGID} {} + 2>/dev/null || true &&
@@ -100,6 +105,9 @@ services:
       chmod 755 /fail2ban_db &&
       chmod 700 /secrets /secrets/.docker_secrets 2>/dev/null || true &&
       find /secrets/.docker_secrets -type f -exec chmod 444 {} + 2>/dev/null || true &&
+      touch /logs/caddy/access.log /logs/caddy/security.log &&
+      chown 0:0 /logs/caddy/access.log /logs/caddy/security.log &&
+      chmod 644 /logs/caddy/access.log /logs/caddy/security.log &&
       echo 'Init container completed - permissions set to ${PUID}:${PGID}'
       "
 
@@ -576,6 +584,15 @@ networks:
 #   VaultWarden → postfix:587 (vaultwarden_network, no TLS, no AUTH)
 #     → Postfix → smtp.example.com:587 (caddy_external, STARTTLS, SASL auth)
 #   Host scripts (maintenance.sh) → 127.0.0.1:587 → Postfix → relay
+#
+# KEY FIX SUMMARY (BUG-caddy-logfile-perms):
+#   Root cause: 'find /logs -type f -exec chmod 640 {} +' set access.log and
+#   security.log to mode 640. 'chown -R PUID:PGID /logs' set their owner to
+#   PUID:PGID. Caddy runs as container UID 0 which OCI userns-remap maps to
+#   an unprivileged host UID — not PUID. So Caddy falls into 'other' (0 perms
+#   from 640) and gets EPERM on open(). Fix: after all broad chown/chmod passes,
+#   touch both log files, then chown 0:0 + chmod 644 so Caddy (owner) gets rw
+#   and fail2ban (other, read-only mount) gets r.
 #
 # KEY FIX SUMMARY (BUG-caddy-perms-2: init chmod ordering):
 #   Root cause: 'chmod 755 /logs/caddy' ran AFTER 'chown -R PUID:PGID /logs'.
