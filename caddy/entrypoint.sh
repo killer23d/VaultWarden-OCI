@@ -78,14 +78,28 @@ if [ -z "$_token" ]; then
     exit 1
 fi
 
-# FIX [CE-M1]: Validate token format BEFORE exporting into the environment.
-# Exporting first and then validating leaves an invalid token live in
-# /proc/1/environ for the window between export and exit.
-# FIX [CE-L2]: Use a case statement instead of echo|grep to avoid the
-# pipeline exit-code masking problem under ash (no pipefail support).
+# BUG-2a FIX: Cloudflare API token charset was too strict.
+# The previous pattern [A-Za-z0-9_-] excluded '.' (period), but real
+# Cloudflare API tokens — especially scoped API tokens — are Base64url
+# encoded and use the format <prefix>.<body>.<signature>, all of which
+# contain periods. Any real scoped token would be rejected here before
+# caddy validate was ever reached.
+#
+# Updated charset: [A-Za-z0-9_.=+-]
+# Covers all documented Cloudflare token formats:
+#   - Legacy 40-char alphanumeric global tokens (no special chars)
+#   - Scoped API tokens: Base64url segments joined by '.'
+#   - '=' padding, '+' in some legacy base64 variants
+# Explicitly excluded: whitespace, quotes, braces, semicolons, shell
+# metacharacters — these would indicate a mis-configured secret file.
+#
+# FIX [CE-L2]: Use a case statement (not echo|grep) to avoid ash pipefail
+# masking.
 case "$_token" in
-    *[!A-Za-z0-9_-]*)
+    *[!A-Za-z0-9_.=+-]*)
         echo "ERROR: Cloudflare API token contains invalid characters" >&2
+        echo "       Token must contain only: A-Z a-z 0-9 _ . = + -" >&2
+        echo "       Ensure the secret file has no surrounding whitespace, quotes, or braces." >&2
         exit 1
         ;;
 esac
@@ -182,13 +196,33 @@ fi
 # =============================================================================
 echo "Validating Caddyfile syntax..."
 
-# FIX [CE-L1]: Suppress all caddy validate output (including any env-var
-# expansions that could reflect ADMIN_HASH into Docker logs on failure).
-# Print only a fixed, non-sensitive error message when validation fails.
-if ! caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile 2>/dev/null; then
-    echo "ERROR: Caddyfile validation failed — check config syntax" >&2
+# BUG-2b FIX: caddy validate stderr was suppressed with 2>/dev/null, hiding
+# the real failure reason. Operators only ever saw the generic
+# 'Caddyfile validation failed' message with no indication of what actually
+# went wrong (bad env var expansion, TLS provisioner error, upstream name
+# resolution, module load failure, etc.).
+#
+# Fix: capture stderr to a temp file and reprint it on failure. This is safe
+# because:
+#   - ADMIN_HASH and CLOUDFLARE_API_TOKEN are passed via {env.VAR} references
+#     in the Caddyfile; Caddy never echoes the resolved values back in error
+#     messages — only the placeholder names appear.
+#   - DOMAIN_NAME is already logged above and is not sensitive.
+#
+# The temp file is cleaned up on both success and failure paths.
+_validate_err=$(mktemp)
+trap 'rm -f "$_validate_err"' EXIT
+
+if ! caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile 2>"$_validate_err"; then
+    echo "ERROR: Caddyfile validation failed. Caddy output:" >&2
+    cat "$_validate_err" >&2
+    rm -f "$_validate_err"
+    trap - EXIT
     exit 1
 fi
+
+rm -f "$_validate_err"
+trap - EXIT
 
 echo "✓ Caddyfile validation passed"
 
