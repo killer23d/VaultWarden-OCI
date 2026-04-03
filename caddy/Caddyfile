@@ -19,21 +19,19 @@
         }
 
         # ==========================================================================
-        # BUG-2 FIX: Global named log writers
+        # BUG-4 FIX: Global named log writers — single FileWriter per log file
         #
-        # Previously, log output file directives were repeated inside each site
-        # block. 'caddy validate' fully provisions all modules — including
-        # FileWriter log writers — which calls open() on every log file path at
-        # validate time, not just at runtime. If /var/log/caddy does not exist or
-        # is not writable at validate time the container exits 1 with:
+        # Each named log block here is the ONE place Caddy provisions a FileWriter
+        # for that path. Site blocks below reference these writers by name using
+        # the 'log_name' directive. 'log_name' routes a site's log output to an
+        # already-provisioned named logger — it does NOT open any files itself.
         #
-        #   open /var/log/caddy/access.log: permission denied
-        #
-        # Fix: define FileWriter outputs once here in the global log block. Site
-        # blocks reference the named loggers (log1 / log_security) via the
-        # 'log_name' directive — they emit no FileWriter provisioning of their own.
-        # Caddy defers the actual file open to 'caddy run' startup, after
-        # entrypoint.sh has already run mkdir -p /var/log/caddy.
+        # Previous bug: site blocks each had their own full 'log { output file }'
+        # block. Caddy provisioned a separate FileWriter for each, causing 4
+        # concurrent open() calls on the same paths at config-load time. On OCI
+        # Compute the /var/log/caddy directory is owned by PUID:PGID mode 750;
+        # container root maps to an unprivileged host UID, so 'other=0' from 750
+        # blocked every open() with: permission denied
         # ==========================================================================
         log access_log {
                 output file /var/log/caddy/access.log {
@@ -80,7 +78,7 @@
 # Responds directly (no upstream proxy) — Caddy health is independent
 # of VaultWarden health; each service has its own healthcheck.
 http://127.0.0.1:8080 {
-        # C-05: Suppress health check log noise
+        # C-05: Suppress health check log noise — no file writer needed here
         log {
                 output discard
         }
@@ -91,23 +89,11 @@ http://127.0.0.1:8080 {
 # Main Site
 # ================================
 {$DOMAIN_NAME} {
-        # Reference the global named logger — no FileWriter provisioned here.
+        # BUG-4 FIX: Use log_name to route to the global 'access_log' writer.
+        # This does NOT open any files — it simply tags this site's log records
+        # with the named logger, which was already provisioned in the options stanza.
         log {
-                output file /var/log/caddy/access.log {
-                        roll_size 50MB
-                        roll_keep 20
-                        roll_keep_for 30d
-                        roll_compression zstd
-                }
-                format json {
-                        time_format "2006-01-02T15:04:05.000Z07:00"
-                        message_key "msg"
-                        level_key   "level"
-                        time_key    "ts"
-                        name_key    "logger"
-                        caller_key  "caller"
-                }
-                level INFO
+                log_name access_log
         }
 
         # 1. Enhanced Security Headers (HARDENED)
@@ -226,21 +212,9 @@ http://127.0.0.1:8080 {
 # Redirect www → apex
 # ================================
 www.{$DOMAIN_NAME} {
+        # BUG-4 FIX: log_name reference only — no FileWriter provisioned here.
         log {
-                output file /var/log/caddy/access.log {
-                        roll_size 50MB
-                        roll_keep 20
-                        roll_keep_for 30d
-                        roll_compression zstd
-                }
-                format json {
-                        time_format "2006-01-02T15:04:05.000Z07:00"
-                        message_key "msg"
-                        level_key   "level"
-                        time_key    "ts"
-                        name_key    "logger"
-                }
-                level INFO
+                log_name access_log
         }
 
         redir https://{$DOMAIN_NAME}{uri} 301
@@ -250,21 +224,9 @@ www.{$DOMAIN_NAME} {
 # Catch-all :80 and :443
 # ================================
 :80, :443 {
+        # BUG-4 FIX: log_name reference only — routes to global security_log writer.
         log {
-                output file /var/log/caddy/security.log {
-                        roll_size 10MB
-                        roll_keep 50
-                        roll_keep_for 180d
-                        roll_compression zstd
-                }
-                format json {
-                        time_format "2006-01-02T15:04:05.000Z07:00"
-                        message_key "msg"
-                        level_key   "level"
-                        time_key    "ts"
-                        name_key    "logger"
-                }
-                level WARN
+                log_name security_log
         }
 
         respond "Not Found" 404
