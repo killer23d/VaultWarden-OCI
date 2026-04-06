@@ -759,23 +759,83 @@ create_docker_compose() {
     return 0
 }
 
+# ---------------------------------------------------------------------------
+# set_script_permissions
+# ---------------------------------------------------------------------------
+# Ensures every script that an admin might invoke after a fresh clone is
+# executable without requiring a manual 'chmod +x' pass. Git does not
+# preserve execute bits across clones on some systems/clients, so we set
+# them here explicitly.
+#
+# Covers:
+#   - Root-level *.sh scripts (operator-facing)
+#   - caddy/entrypoint.sh  (run as container CMD; must be +x before 'make up')
+#   - fail2ban/*.sh        (any helper scripts present in that subdir)
+#   - lib/*.sh             (sourced, not executed directly — kept 644)
+# ---------------------------------------------------------------------------
 set_script_permissions() {
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would set script permissions"; return 0; fi
 
     local real_user; real_user=$(get_real_user)
     local real_group; real_group=$(id -g -n "$real_user")
-    local scripts=("setup.sh" "setup-secrets.sh" "edit-secrets.sh" "health.sh" "update.sh" "backup.sh" "restore.sh" "startup.sh" "maintenance.sh" "create-breakglass-admin.sh")
-    for script in "${scripts[@]}"; do
+
+    # ------------------------------------------------------------------
+    # 1. Root-level operator scripts — chmod +x
+    # ------------------------------------------------------------------
+    local root_scripts=(
+        "setup.sh"
+        "setup-secrets.sh"
+        "setup-systemd.sh"
+        "edit-secrets.sh"
+        "health.sh"
+        "update.sh"
+        "backup.sh"
+        "restore.sh"
+        "startup.sh"
+        "maintenance.sh"
+        "create-breakglass-admin.sh"
+        "uninstall-vaultwarden.sh"
+    )
+    for script in "${root_scripts[@]}"; do
         if [[ -f "$script" ]]; then
             chmod +x "$script"
             chown "$real_user:$real_group" "$script" 2>/dev/null || true
+            log_success "Set +x: $script"
         fi
     done
 
+    # ------------------------------------------------------------------
+    # 2. caddy/entrypoint.sh — must be executable before 'make up';
+    #    Docker copies it into the image with its host permissions, so a
+    #    missing +x bit causes 'permission denied' at container start.
+    # ------------------------------------------------------------------
+    if [[ -d "caddy" ]]; then
+        find "caddy" -maxdepth 1 -name "*.sh" | while IFS= read -r script; do
+            chmod +x "$script"
+            chown "$real_user:$real_group" "$script" 2>/dev/null || true
+            log_success "Set +x: $script"
+        done
+    fi
+
+    # ------------------------------------------------------------------
+    # 3. fail2ban/*.sh — same rationale as caddy/entrypoint.sh
+    # ------------------------------------------------------------------
+    if [[ -d "fail2ban" ]]; then
+        find "fail2ban" -maxdepth 1 -name "*.sh" | while IFS= read -r script; do
+            chmod +x "$script"
+            chown "$real_user:$real_group" "$script" 2>/dev/null || true
+            log_success "Set +x: $script"
+        done
+    fi
+
+    # ------------------------------------------------------------------
+    # 4. lib/*.sh — sourced (not executed), keep 644 read-only for non-root
+    # ------------------------------------------------------------------
     if [[ -d "lib" ]]; then
         find "lib" -name "*.sh" -exec chown "$real_user:$real_group" {} \; 2>/dev/null || true
         find "lib" -name "*.sh" -exec chmod 644 {} \; 2>/dev/null || true
     fi
+
     return 0
 }
 
