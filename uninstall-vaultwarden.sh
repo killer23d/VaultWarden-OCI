@@ -205,10 +205,25 @@ else
 fi
 
 info "Removing Docker APT repo and GPG key..."
-rm -f /etc/apt/sources.list.d/docker.list \
-    && success "Removed /etc/apt/sources.list.d/docker.list" || true
+# BUG-UN1 FIX: setup.sh downloads the Docker GPG key as an armored ASCII file
+# (/etc/apt/keyrings/docker.asc) — not a dearmored .gpg binary. The old
+# uninstaller removed docker.gpg (which never existed after a clean setup.sh
+# run), leaving docker.asc on disk. Removing both extensions handles systems
+# set up with either version of setup.sh.
+rm -f /etc/apt/keyrings/docker.asc \
+    && success "Removed /etc/apt/keyrings/docker.asc" || true
 rm -f /etc/apt/keyrings/docker.gpg \
-    && success "Removed /etc/apt/keyrings/docker.gpg" || true
+    && success "Removed /etc/apt/keyrings/docker.gpg (legacy)" || true
+
+# BUG-UN2 FIX: setup.sh writes the Docker apt source in DEB822 format at
+# docker.sources, not the one-liner docker.list format. The old uninstaller
+# only removed docker.list (which never exists after a clean setup.sh run),
+# leaving docker.sources on disk and keeping Docker's APT repo active.
+# Removing both extensions handles systems set up with either version.
+rm -f /etc/apt/sources.list.d/docker.sources \
+    && success "Removed /etc/apt/sources.list.d/docker.sources" || true
+rm -f /etc/apt/sources.list.d/docker.list \
+    && success "Removed /etc/apt/sources.list.d/docker.list (legacy)" || true
 
 info "Removing Docker runtime data at /var/lib/docker and /var/lib/containerd..."
 rm -rf /var/lib/docker    && success "Removed /var/lib/docker"    || true
@@ -223,10 +238,25 @@ apt-get autoremove -y 2>/dev/null && success "apt autoremove done." || true
 # ═══════════════════════════════════════════════════════════════
 info "Step 10: Removing packages installed by setup.sh..."
 # Only remove packages not typically pre-installed on a base Ubuntu 24.04 image.
-# 'age', 'haveged', 'rclone', 'python3-argon2', 'sysstat' are safe to remove.
-# Common tools (curl, wget, git, jq, etc.) are intentionally LEFT in place
-# as they are standard and may be relied upon by other things.
-EXTRA_PKGS=(age haveged rclone python3-argon2)
+# Common tools (curl, wget, git, jq, sqlite3, make, nano, ufw, etc.) are
+# intentionally LEFT in place as they are standard and may be relied upon by
+# other things on the system.
+#
+# BUG-UN3 FIX: apache2-utils (htpasswd) was installed by setup.sh for Caddy
+#   basic-auth hash generation but was missing from this list.
+# BUG-UN4 FIX: cron was installed by setup.sh but was missing from this list.
+# BUG-UN5 FIX: haveged is a systemd service that setup.sh enables; explicitly
+#   disable and stop it before purging so its enabled symlink is cleaned up
+#   before the package is removed, avoiding a stale unit warning.
+EXTRA_PKGS=(age haveged rclone python3-argon2 apache2-utils cron)
+
+# Disable haveged first so its enabled symlink is removed cleanly before purge.
+if systemctl is-enabled haveged &>/dev/null 2>&1; then
+    systemctl disable --now haveged 2>/dev/null \
+        && success "Disabled haveged service before purge." \
+        || warn "Could not disable haveged (may already be inactive)."
+fi
+
 for pkg in "${EXTRA_PKGS[@]}"; do
     if dpkg -s "$pkg" &>/dev/null 2>&1; then
         DEBIAN_FRONTEND=noninteractive apt-get remove -y --purge "$pkg" 2>/dev/null \
