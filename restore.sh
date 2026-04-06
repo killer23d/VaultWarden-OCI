@@ -306,12 +306,15 @@ _prompt_rclone_remote_name() {
         [[ "$remote_name" == "q" || "$remote_name" == "Q" ]] && {
             log_info "Restore cancelled."; return 1
         }
-        # Validate: non-empty and only safe characters (alphanumeric, hyphen, underscore, dot).
+        # Validate: non-empty and only safe characters (alphanumeric, hyphen, underscore).
+        # Dots are intentionally excluded: rclone remote names do not require them
+        # and allowing dots could permit path-traversal sequences if the name is
+        # ever embedded in a file path.
         if [[ -z "$remote_name" ]]; then
             log_error "Remote name cannot be empty."; continue
         fi
-        if [[ "$remote_name" =~ [^a-zA-Z0-9._-] ]]; then
-            log_error "Remote name contains invalid characters. Use only letters, digits, '.', '_', or '-'."
+        if [[ "$remote_name" =~ [^a-zA-Z0-9_-] ]]; then
+            log_error "Remote name contains invalid characters. Use only letters, digits, '_', or '-'."
             continue
         fi
         break
@@ -325,6 +328,13 @@ _prompt_rclone_remote_name() {
     fi
     # Strip leading/trailing slashes for consistency.
     remote_path="${remote_path#/}"; remote_path="${remote_path%/}"
+    # Validate: reject path-traversal sequences and unsafe characters.
+    # Only alphanumeric, hyphen, underscore, dot, and forward-slash are allowed
+    # (forward slash separates path segments; dot is safe inside segments).
+    if [[ "$remote_path" =~ \.\. || "$remote_path" =~ [^a-zA-Z0-9_./-] ]]; then
+        log_error "Remote path contains unsafe characters or '..' sequences. Using default: vaultwarden_backups"
+        remote_path="vaultwarden_backups"
+    fi
 
     # Issue FIX: store in session variables; never written to .env.
     _SESSION_RCLONE_REMOTE_NAME="$remote_name"
@@ -1482,6 +1492,13 @@ main() {
             log_error "Find values with: id <your-username>"
             exit 1
         fi
+    fi
+    # Validate that PUID and PGID are numeric and within valid UID/GID range (0-65535).
+    if ! [[ "$PUID" =~ ^[0-9]+$ ]] || (( PUID > 65535 )); then
+        log_error "PUID must be a numeric value between 0 and 65535 (got: '$PUID')"; exit 1
+    fi
+    if ! [[ "$PGID" =~ ^[0-9]+$ ]] || (( PGID > 65535 )); then
+        log_error "PGID must be a numeric value between 0 and 65535 (got: '$PGID')"; exit 1
     fi
 
     # Create the secure temp dir early so remote pull and key staging can use it.

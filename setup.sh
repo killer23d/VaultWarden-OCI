@@ -532,12 +532,25 @@ setup_directories() {
         chown "$real_user:$real_group" "$dir" || return 1
     done
 
-    ensure_dir "backups" 755 || return 1
-    chown "$real_user:$real_group" "backups" || return 1
-
     local puid; puid=$(id -u "$real_user")
     local pgid; pgid=$(id -g "$real_user")
     local project_state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
+
+    # BUG-R1 FIX: Create the backup directory tree that backup.sh and restore.sh
+    # actually use.  The old "ensure_dir backups" line created $PROJECT_ROOT/backups/
+    # which neither script ever reads — dead code.  Both backup.sh (get_backup_dir,
+    # line 238) and restore.sh (now aligned) read BACKUP_DIR with the default
+    # /var/lib/vaultwarden/backups.  Pre-creating the {db,full,emergency}
+    # sub-directories here means: (a) the first backup.sh run works without root
+    # luck, and (b) restore.sh --list immediately finds the correct tree.
+    local backup_base_dir="${BACKUP_DIR:-/var/lib/vaultwarden/backups}"
+    if ! mkdir -p "${backup_base_dir}"/{db,full,emergency}; then
+        log_error "Failed to create backup directories under ${backup_base_dir}"
+        return 1
+    fi
+    chmod 750 "${backup_base_dir}" "${backup_base_dir}"/{db,full,emergency} || return 1
+    chown -R "${puid}:${pgid}" "${backup_base_dir}" || return 1
+    log_info "Backup directories created: ${backup_base_dir}/{db,full,emergency}"
 
     if ! mkdir -p "${project_state_dir}"/{data,logs/{vaultwarden,caddy,fail2ban,postfix},caddy/{data,config},fail2ban}; then
         return 1
