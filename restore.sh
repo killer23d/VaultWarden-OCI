@@ -3,6 +3,18 @@
 # Supports local and rclone remote backup selection.
 # After restore: prompts for the decryption key, restores data, then
 # generates/rotates a fresh age key and displays it like a new setup.
+#
+# PATCHED BUGS:
+#   BUG-R1 [HIGH]  Every backup search path was hardcoded as
+#                  $PROJECT_ROOT/backups/<type>/.  backup.sh stores backups
+#                  at get_config_value("BACKUP_BASE_DIR",
+#                  "/var/lib/vaultwarden/backups") — under /var/ on a
+#                  standard install.  The mismatch caused --list to always
+#                  show "(none)", --latest to always fail, and the interactive
+#                  menu to be empty.
+#                  Fix: derive BACKUP_BASE_DIR from .env (same key/default
+#                  that backup.sh uses) and replace every $PROJECT_ROOT/backups
+#                  reference with $BACKUP_BASE_DIR.
 
 set -euo pipefail
 
@@ -47,6 +59,11 @@ RESTORE_SNAPSHOT_HARD_FAIL="${RESTORE_SNAPSHOT_HARD_FAIL:-true}"
 USE_REMOTE=false
 KEY_FILE_ARG=""   # set by --key-file; path to age private key for this restore
 
+# BUG-R1 FIX: declared here (empty) so set -u never fires before main()
+# initialises it via get_config_value().  Every function that references
+# BACKUP_BASE_DIR is only called after main() has set it.
+BACKUP_BASE_DIR=""
+
 show_help() {
     cat << 'EOF'
 VaultWarden-OCI Restore Script
@@ -83,6 +100,8 @@ OPTIONS:
     --help                  Show this help
 
 ENVIRONMENT:
+    BACKUP_BASE_DIR=<path>             Override backup storage root
+                                       (default: /var/lib/vaultwarden/backups)
     RESTORE_SNAPSHOT_HARD_FAIL=false   Demote snapshot failure to a warning
                                        (default: true = hard-fail)
     RESTORE_AGE_KEY_FILE=<path>        Non-interactive equivalent of --key-file
@@ -93,7 +112,7 @@ EXAMPLES:
     ./restore.sh --list                                 # list local backups (no root)
     ./restore.sh --list --remote                        # list remote backups (no root)
     sudo ./restore.sh --latest --type db --force
-    sudo ./restore.sh --file backups/full/full_backup_20260101_120000.tar.zst.age
+    sudo ./restore.sh --file /var/lib/vaultwarden/backups/full/full_backup_20260101_120000.tar.zst.age
     sudo ./restore.sh --key-file /tmp/old-age-key.txt   # supply key non-interactively
 EOF
 }
@@ -253,9 +272,9 @@ list_backups() {
         local types=("db" "full" "emergency")
         for t in "${types[@]}"; do
             echo ""
-            log_info "Available ${t} backups:"
-            if [[ -d "$PROJECT_ROOT/backups/$t" ]]; then
-                find "$PROJECT_ROOT/backups/$t" -name "*.age" -type f \
+            log_info "Available ${t} backups (${BACKUP_BASE_DIR}/${t}/):"
+            if [[ -d "$BACKUP_BASE_DIR/$t" ]]; then
+                find "$BACKUP_BASE_DIR/$t" -name "*.age" -type f \
                     -exec ls -lh {} \; 2>/dev/null | sort -r | head -n 20 || true
             else
                 echo "  (none)"
@@ -265,13 +284,13 @@ list_backups() {
     fi
 
     # Local section
-    log_info "── LOCAL backups ──"
+    log_info "── LOCAL backups (${BACKUP_BASE_DIR}/) ──"
     local types=("db" "full" "emergency")
     for t in "${types[@]}"; do
         echo ""
         log_info "  Available local ${t} backups:"
-        if [[ -d "$PROJECT_ROOT/backups/$t" ]]; then
-            find "$PROJECT_ROOT/backups/$t" -name "*.age" -type f \
+        if [[ -d "$BACKUP_BASE_DIR/$t" ]]; then
+            find "$BACKUP_BASE_DIR/$t" -name "*.age" -type f \
                 -exec ls -lh {} \; 2>/dev/null | sort -r | head -n 20 || true
         else
             echo "    (none)"
@@ -339,7 +358,7 @@ list_all_backups_interactive() {
     local global_index=0 any_found=false
 
     for t in "${types[@]}"; do
-        local dir="$PROJECT_ROOT/backups/$t"
+        local dir="$BACKUP_BASE_DIR/$t"
         [[ -d "$dir" ]] || continue
 
         local -a type_files=()
@@ -372,12 +391,12 @@ list_all_backups_interactive() {
         done
     done
     echo ""
-    [[ "$any_found" == "false" ]] && { log_error "No backup files found under $PROJECT_ROOT/backups/"; return 1; }
+    [[ "$any_found" == "false" ]] && { log_error "No backup files found under $BACKUP_BASE_DIR/"; return 1; }
     return 0
 }
 
 select_backup_interactive() {
-    log_info "Listing local backups:"
+    log_info "Listing local backups (${BACKUP_BASE_DIR}/):"
     list_all_backups_interactive || return 1
     local total="${#_INTERACTIVE_FILES[@]}" choice
     while true; do
@@ -529,7 +548,7 @@ select_backup_source() {
     fi
     echo ""
     log_info "Where would you like to restore from?"
-    printf '  [1]  LOCAL  — backups on this server (%s/backups/)\n' "$PROJECT_ROOT"
+    printf '  [1]  LOCAL  — backups on this server (%s/)\n' "$BACKUP_BASE_DIR"
     local remote_name remote_base_path
     remote_name="$(get_config_value "RCLONE_REMOTE_NAME" "")"
     remote_base_path="$(get_config_value "RCLONE_REMOTE_PATH" "vaultwarden_backups")"
@@ -576,20 +595,20 @@ _select_remote_backup() {
 resolve_backup_file() {
     if [[ "$USE_LATEST" == "true" ]]; then
         if [[ -n "$RESTORE_TYPE" ]]; then
-            BACKUP_FILE="$(_find_latest_backup "$PROJECT_ROOT/backups/$RESTORE_TYPE" || true)"
-            [[ -n "$BACKUP_FILE" ]] || { log_error "No backups found for type: $RESTORE_TYPE"; return 1; }
+            BACKUP_FILE="$(_find_latest_backup "$BACKUP_BASE_DIR/$RESTORE_TYPE" || true)"
+            [[ -n "$BACKUP_FILE" ]] || { log_error "No backups found for type: $RESTORE_TYPE (looked in $BACKUP_BASE_DIR/$RESTORE_TYPE)"; return 1; }
             return 0
         fi
         local best="" best_mtime=0 candidate mtime
         for t in db full emergency; do
-            candidate="$(_find_latest_backup "$PROJECT_ROOT/backups/$t" || true)"
+            candidate="$(_find_latest_backup "$BACKUP_BASE_DIR/$t" || true)"
             if [[ -n "$candidate" ]]; then
                 mtime=$(stat -c%Y "$candidate" 2>/dev/null || stat -f%m "$candidate" 2>/dev/null || echo 0)
                 [[ "$mtime" =~ ^[0-9]+$ ]] || mtime=0
                 if (( mtime > best_mtime )); then best_mtime="$mtime"; best="$candidate"; RESTORE_TYPE="$t"; fi
             fi
         done
-        [[ -n "$best" ]] || { log_error "No backups found in any backup directory"; return 1; }
+        [[ -n "$best" ]] || { log_error "No backups found in any backup directory under $BACKUP_BASE_DIR/"; return 1; }
         BACKUP_FILE="$best"; return 0
     fi
 
@@ -1249,6 +1268,12 @@ main() {
     # such as RCLONE_REMOTE_NAME and RCLONE_CONFIG.
     load_env_file 2>/dev/null || true   # best-effort; hard error below if root required
 
+    # BUG-R1 FIX: resolve the backup storage root from .env using the same
+    # key and default that backup.sh uses.  Every search path in this script
+    # is built from BACKUP_BASE_DIR, never from PROJECT_ROOT/backups.
+    BACKUP_BASE_DIR="$(get_config_value "BACKUP_BASE_DIR" "/var/lib/vaultwarden/backups")"
+    log_info "Backup storage root: $BACKUP_BASE_DIR"
+
     if [[ "$LIST_ONLY" == "true" ]]; then
         if [[ "$LIST_REMOTE" == "true" ]]; then
             # Remote listing: need a valid rclone setup
@@ -1293,6 +1318,10 @@ main() {
 
     # Re-load .env strictly now that we are root (surfaces hard errors).
     load_env_file || { log_error "Failed to load .env"; exit 1; }
+
+    # Re-resolve BACKUP_BASE_DIR now that .env is fully loaded (first load
+    # above was best-effort and may have been missing values).
+    BACKUP_BASE_DIR="$(get_config_value "BACKUP_BASE_DIR" "/var/lib/vaultwarden/backups")"
 
     local STATE_DIR; STATE_DIR="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
     local AGE_KEY_FILE; AGE_KEY_FILE="$(get_config_value "SOPS_AGE_KEY_FILE" "secrets/keys/age-key.txt")"
