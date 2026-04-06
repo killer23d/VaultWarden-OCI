@@ -7,14 +7,14 @@
 # PATCHED BUGS:
 #   BUG-R1 [HIGH]  Every backup search path was hardcoded as
 #                  $PROJECT_ROOT/backups/<type>/.  backup.sh stores backups
-#                  at get_config_value("BACKUP_BASE_DIR",
+#                  at get_config_value("BACKUP_DIR",
 #                  "/var/lib/vaultwarden/backups") — under /var/ on a
 #                  standard install.  The mismatch caused --list to always
 #                  show "(none)", --latest to always fail, and the interactive
 #                  menu to be empty.
-#                  Fix: derive BACKUP_BASE_DIR from .env (same key/default
-#                  that backup.sh uses) and replace every $PROJECT_ROOT/backups
-#                  reference with $BACKUP_BASE_DIR.
+#                  Fix: derive BACKUP_BASE_DIR from .env using the same key
+#                  ("BACKUP_DIR") and default that backup.sh uses, and replace
+#                  every $PROJECT_ROOT/backups reference with $BACKUP_BASE_DIR.
 
 set -euo pipefail
 
@@ -64,6 +64,18 @@ KEY_FILE_ARG=""   # set by --key-file; path to age private key for this restore
 # BACKUP_BASE_DIR is only called after main() has set it.
 BACKUP_BASE_DIR=""
 
+# Issue: session-scoped rclone remote name / path for emergency restores.
+# When .env is absent (fresh server), _prompt_rclone_remote_name() fills
+# these; they are used in place of the .env values for this run only and
+# are never written back to disk.
+_SESSION_RCLONE_REMOTE_NAME=""
+_SESSION_RCLONE_REMOTE_PATH=""
+
+# Set by _rclone_is_available() when rclone binary + config are present but
+# RCLONE_REMOTE_NAME is missing — signals that an interactive prompt is
+# needed rather than a hard failure.
+RCLONE_NEEDS_INTERACTIVE_NAME=false
+
 show_help() {
     cat << 'EOF'
 VaultWarden-OCI Restore Script
@@ -100,11 +112,16 @@ OPTIONS:
     --help                  Show this help
 
 ENVIRONMENT:
-    BACKUP_BASE_DIR=<path>             Override backup storage root
+    BACKUP_DIR=<path>                  Override backup storage root
                                        (default: /var/lib/vaultwarden/backups)
+                                       Must match the BACKUP_DIR value used in backup.sh.
     RESTORE_SNAPSHOT_HARD_FAIL=false   Demote snapshot failure to a warning
                                        (default: true = hard-fail)
     RESTORE_AGE_KEY_FILE=<path>        Non-interactive equivalent of --key-file
+
+    RCLONE_REMOTE_NAME is read from .env when available.  On a fresh server
+    where .env does not yet exist, restore.sh will interactively prompt for
+    the remote name (and optionally the remote path) when --remote is used.
 
 EXAMPLES:
     sudo ./restore.sh                                   # interactive (local or remote)
@@ -209,18 +226,31 @@ _build_rclone_config_arg() {
 # Returns 0 if rclone + remote name + config are all present and valid.
 # Sets RCLONE_UNAVAIL_REASON (global) with a human-readable explanation
 # whenever it returns 1, so callers can surface a useful message.
+#
+# Issue FIX: also sets RCLONE_NEEDS_INTERACTIVE_NAME=true when rclone binary
+# and config are present but RCLONE_REMOTE_NAME is missing/placeholder.
+# This distinguishes "prompt needed" from "rclone not installed" so that
+# select_backup_source() can trigger _prompt_rclone_remote_name() instead
+# of hiding the REMOTE option when --remote was explicitly requested.
 # ---------------------------------------------------------------------------
 RCLONE_UNAVAIL_REASON=""
 _rclone_is_available() {
     RCLONE_UNAVAIL_REASON=""
+    RCLONE_NEEDS_INTERACTIVE_NAME=false
     if ! command -v rclone >/dev/null 2>&1; then
         RCLONE_UNAVAIL_REASON="rclone binary not found (install rclone to enable remote backups)"
         return 1
     fi
     local remote_name
-    remote_name="$(get_config_value "RCLONE_REMOTE_NAME" "")"
+    # Issue FIX: resolve remote name from session variable first (set by
+    # _prompt_rclone_remote_name() during an emergency restore), then fall
+    # back to the .env value.
+    remote_name="${_SESSION_RCLONE_REMOTE_NAME:-$(get_config_value "RCLONE_REMOTE_NAME" "")}"
     if [[ -z "$remote_name" || "$remote_name" == "CHANGE_ME_RCLONE_REMOTE" ]]; then
         RCLONE_UNAVAIL_REASON="RCLONE_REMOTE_NAME is not configured in .env (set it to your rclone remote name)"
+        # Signal that an interactive prompt can resolve this rather than
+        # treating it as a permanent hard failure.
+        RCLONE_NEEDS_INTERACTIVE_NAME=true
         return 1
     fi
     if ! _resolve_rclone_config >/dev/null 2>&1; then
@@ -241,6 +271,69 @@ _rclone_diagnose() {
         log_warn "Remote backups unavailable: $RCLONE_UNAVAIL_REASON"
     fi
 }
+
+# ---------------------------------------------------------------------------
+# _prompt_rclone_remote_name
+#
+# Issue FIX: Interactively prompts the operator for the rclone remote name
+# (and optionally the remote path) when RCLONE_REMOTE_NAME is not set in
+# .env — typically during an emergency restore on a fresh server where .env
+# does not yet exist.
+#
+# Sets _SESSION_RCLONE_REMOTE_NAME and _SESSION_RCLONE_REMOTE_PATH for use
+# in this restore session only.  The values are NEVER written to .env; the
+# operator's real .env will be restored from the backup itself.
+#
+# Returns 0 on success, 1 if the user quits or input is invalid on a
+# non-interactive (pipe/CI) terminal.
+# ---------------------------------------------------------------------------
+_prompt_rclone_remote_name() {
+    # Non-interactive guard: stdin must be a TTY for prompts to work.
+    if [[ ! -t 0 ]]; then
+        log_error "Cannot prompt for rclone remote name: stdin is not a TTY."
+        log_error "Supply RCLONE_REMOTE_NAME in .env or pipe input is not supported for this prompt."
+        return 1
+    fi
+
+    echo ""
+    log_info "RCLONE_REMOTE_NAME is not set in .env (or .env does not exist)."
+    log_info "This is normal when restoring to a fresh server."
+    echo ""
+
+    local remote_name=""
+    while true; do
+        read -r -p "  Enter rclone remote name (e.g. 'b2', 'gdrive', 's3'), or q to quit: " remote_name
+        [[ "$remote_name" == "q" || "$remote_name" == "Q" ]] && {
+            log_info "Restore cancelled."; return 1
+        }
+        # Validate: non-empty and only safe characters (alphanumeric, hyphen, underscore, dot).
+        if [[ -z "$remote_name" ]]; then
+            log_error "Remote name cannot be empty."; continue
+        fi
+        if [[ "$remote_name" =~ [^a-zA-Z0-9._-] ]]; then
+            log_error "Remote name contains invalid characters. Use only letters, digits, '.', '_', or '-'."
+            continue
+        fi
+        break
+    done
+
+    # Prompt for the remote path (subfolder), defaulting to vaultwarden_backups.
+    local remote_path=""
+    read -r -p "  Enter rclone remote path (subfolder, default: vaultwarden_backups): " remote_path
+    if [[ -z "$remote_path" ]]; then
+        remote_path="vaultwarden_backups"
+    fi
+    # Strip leading/trailing slashes for consistency.
+    remote_path="${remote_path#/}"; remote_path="${remote_path%/}"
+
+    # Issue FIX: store in session variables; never written to .env.
+    _SESSION_RCLONE_REMOTE_NAME="$remote_name"
+    _SESSION_RCLONE_REMOTE_PATH="$remote_path"
+
+    log_info "Using rclone remote for this session: ${remote_name}:${remote_path}/"
+    return 0
+}
+
 
 # ---------------------------------------------------------------------------
 # Backup listing helpers
@@ -450,8 +543,14 @@ _REMOTE_TYPES=()
 list_remote_backups() {
     _REMOTE_FILES=()
     _REMOTE_TYPES=()
-    local remote_name; remote_name="$(get_config_value "RCLONE_REMOTE_NAME" "")"
-    local remote_base_path; remote_base_path="$(get_config_value "RCLONE_REMOTE_PATH" "vaultwarden_backups")"
+    # Issue FIX: prefer session-scoped remote name/path (set by
+    # _prompt_rclone_remote_name() during an emergency restore without .env)
+    # over values from .env, so a fresh-server restore can proceed without
+    # a pre-existing .env.
+    local remote_name
+    remote_name="${_SESSION_RCLONE_REMOTE_NAME:-$(get_config_value "RCLONE_REMOTE_NAME" "")}"
+    local remote_base_path
+    remote_base_path="${_SESSION_RCLONE_REMOTE_PATH:-$(get_config_value "RCLONE_REMOTE_PATH" "vaultwarden_backups")}"
     remote_base_path="${remote_base_path#/}"; remote_base_path="${remote_base_path%/}"
 
     _build_rclone_config_arg || {
@@ -539,7 +638,26 @@ pull_remote_backup() {
 }
 
 select_backup_source() {
-    if [[ "$USE_REMOTE" == "true" ]]; then _select_remote_backup; return $?; fi
+    if [[ "$USE_REMOTE" == "true" ]]; then
+        # Issue FIX: when --remote was explicitly requested but RCLONE_REMOTE_NAME
+        # is missing (e.g. on a fresh server without .env), prompt for it instead
+        # of hard-failing.  RCLONE_NEEDS_INTERACTIVE_NAME is set by
+        # _rclone_is_available() to distinguish this case from "rclone not installed".
+        if ! _rclone_is_available; then
+            if [[ "$RCLONE_NEEDS_INTERACTIVE_NAME" == "true" ]]; then
+                _prompt_rclone_remote_name || return 1
+                # Re-check availability now that the session name is set.
+                if ! _rclone_is_available; then
+                    _rclone_diagnose
+                    return 1
+                fi
+            else
+                _rclone_diagnose
+                return 1
+            fi
+        fi
+        _select_remote_backup; return $?
+    fi
     if ! _rclone_is_available; then
         # Tell the operator WHY remote is not in the menu.
         _rclone_diagnose
@@ -549,9 +667,10 @@ select_backup_source() {
     echo ""
     log_info "Where would you like to restore from?"
     printf '  [1]  LOCAL  — backups on this server (%s/)\n' "$BACKUP_BASE_DIR"
+    # Issue FIX: use session remote name/path if available (set during prompt).
     local remote_name remote_base_path
-    remote_name="$(get_config_value "RCLONE_REMOTE_NAME" "")"
-    remote_base_path="$(get_config_value "RCLONE_REMOTE_PATH" "vaultwarden_backups")"
+    remote_name="${_SESSION_RCLONE_REMOTE_NAME:-$(get_config_value "RCLONE_REMOTE_NAME" "")}"
+    remote_base_path="${_SESSION_RCLONE_REMOTE_PATH:-$(get_config_value "RCLONE_REMOTE_PATH" "vaultwarden_backups")}"
     remote_base_path="${remote_base_path#/}"; remote_base_path="${remote_base_path%/}"
     printf '  [2]  REMOTE — %s:%s/\n' "$remote_name" "$remote_base_path"
     echo ""
@@ -1269,17 +1388,24 @@ main() {
     load_env_file 2>/dev/null || true   # best-effort; hard error below if root required
 
     # BUG-R1 FIX: resolve the backup storage root from .env using the same
-    # key and default that backup.sh uses.  Every search path in this script
-    # is built from BACKUP_BASE_DIR, never from PROJECT_ROOT/backups.
-    BACKUP_BASE_DIR="$(get_config_value "BACKUP_BASE_DIR" "/var/lib/vaultwarden/backups")"
+    # key ("BACKUP_DIR") and default that backup.sh uses.  Every search path
+    # in this script is built from BACKUP_BASE_DIR, never from PROJECT_ROOT/backups.
+    BACKUP_BASE_DIR="$(get_config_value "BACKUP_DIR" "/var/lib/vaultwarden/backups")"
     log_info "Backup storage root: $BACKUP_BASE_DIR"
 
     if [[ "$LIST_ONLY" == "true" ]]; then
         if [[ "$LIST_REMOTE" == "true" ]]; then
-            # Remote listing: need a valid rclone setup
+            # Remote listing: if RCLONE_REMOTE_NAME is missing, prompt for it
+            # (Issue FIX: supports emergency listing without .env).
             if ! _rclone_is_available; then
-                _rclone_diagnose
-                exit 1
+                if [[ "$RCLONE_NEEDS_INTERACTIVE_NAME" == "true" ]]; then
+                    _prompt_rclone_remote_name || exit 1
+                    if ! _rclone_is_available; then
+                        _rclone_diagnose; exit 1
+                    fi
+                else
+                    _rclone_diagnose; exit 1
+                fi
             fi
             _build_rclone_config_arg || exit 1
             list_remote_backups
@@ -1317,21 +1443,45 @@ main() {
     }
 
     # Re-load .env strictly now that we are root (surfaces hard errors).
-    load_env_file || { log_error "Failed to load .env"; exit 1; }
+    # Issue FIX: when USE_REMOTE=true and .env is absent (emergency restore
+    # on a fresh server), treat the load failure as a warning rather than a
+    # hard exit — the operator is about to restore .env from the backup.
+    if ! load_env_file; then
+        if [[ "$USE_REMOTE" == "true" ]] && [[ ! -f "${PROJECT_ROOT}/.env" ]]; then
+            log_warn ".env not found — operating in bootstrap/emergency-restore mode."
+            log_warn "PUID, PGID, and age key will be prompted if not set."
+        else
+            log_error "Failed to load .env"; exit 1
+        fi
+    fi
 
-    # Re-resolve BACKUP_BASE_DIR now that .env is fully loaded (first load
-    # above was best-effort and may have been missing values).
-    BACKUP_BASE_DIR="$(get_config_value "BACKUP_BASE_DIR" "/var/lib/vaultwarden/backups")"
+    # BUG-R1 FIX: re-resolve BACKUP_BASE_DIR now that .env is fully loaded,
+    # using the same config key ("BACKUP_DIR") and default that backup.sh uses.
+    BACKUP_BASE_DIR="$(get_config_value "BACKUP_DIR" "/var/lib/vaultwarden/backups")"
 
     local STATE_DIR; STATE_DIR="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
     local AGE_KEY_FILE; AGE_KEY_FILE="$(get_config_value "SOPS_AGE_KEY_FILE" "secrets/keys/age-key.txt")"
-    local PUID="$(get_config_value "PUID" "")"
-    local PGID="$(get_config_value "PGID" "")"
+    local PUID; PUID="$(get_config_value "PUID" "")"
+    local PGID; PGID="$(get_config_value "PGID" "")"
 
+    # Issue FIX: if PUID/PGID are not in .env (bootstrap mode), prompt for them
+    # interactively so a bare-metal emergency restore can proceed without a
+    # pre-existing .env.
     if [[ -z "$PUID" || -z "$PGID" ]]; then
-        log_error "PUID and PGID must be set in .env before restoring."
-        log_error "Find values with: id <your-username>"
-        exit 1
+        if [[ -t 0 ]]; then
+            log_warn "PUID and/or PGID are not set in .env."
+            if [[ -z "$PUID" ]]; then
+                read -r -p "  Enter PUID (numeric user ID, e.g. $(id -u)): " PUID
+            fi
+            if [[ -z "$PGID" ]]; then
+                read -r -p "  Enter PGID (numeric group ID, e.g. $(id -g)): " PGID
+            fi
+        fi
+        if [[ -z "$PUID" || -z "$PGID" ]]; then
+            log_error "PUID and PGID must be set in .env (or entered interactively) before restoring."
+            log_error "Find values with: id <your-username>"
+            exit 1
+        fi
     fi
 
     # Create the secure temp dir early so remote pull and key staging can use it.
