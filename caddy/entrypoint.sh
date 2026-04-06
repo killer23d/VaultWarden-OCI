@@ -24,6 +24,54 @@ if [ "$DEBUG_ENTRYPOINT" = "true" ]; then
 fi
 
 # =============================================================================
+# read_secret <secret_path> <out_var>
+#
+# Reads the content of a Docker secret file into the variable named by
+# <out_var>.  Exits 1 with an actionable message on any failure.
+#
+# Design notes:
+#   - No mktemp/trap needed: stderr is captured inline via a subshell and
+#     process substitution is not required — a single $(... 2>&1) call gives
+#     us both the value and the error text without touching the filesystem.
+#   - Existence is checked first so the "not found" message names the secret,
+#     not a generic "No such file" from cat.
+#   - 'Permission denied' is distinguished from other errors because it has a
+#     specific, actionable fix (container must run as root to read /run/secrets).
+#   - Assignment and export are intentionally separated (FIX [M-17]): under
+#     POSIX set -eu, 'export VAR=$(cmd)' masks the exit code of cmd because
+#     'export' itself succeeds.  Assign first, check exit code, then export.
+# =============================================================================
+read_secret() {
+    _rs_path="$1"
+    _rs_var="$2"
+
+    if [ ! -f "$_rs_path" ]; then
+        echo "ERROR: Secret not found: $_rs_path" >&2
+        echo "       Ensure the Docker secret is declared in compose.yaml and the service is restarted." >&2
+        exit 1
+    fi
+
+    # Capture both value and any error message in one read; stderr is merged
+    # into stdout only for the error-path branch below.
+    _rs_out=$(cat "$_rs_path" 2>&1) || {
+        case "$_rs_out" in
+            *"Permission denied"*)
+                echo "ERROR: Permission denied reading secret: $_rs_path" >&2
+                echo "       The Caddy container must run as root (user: root) to read Docker secrets." >&2
+                ;;
+            *)
+                echo "ERROR: Cannot read secret $_rs_path: $_rs_out" >&2
+                ;;
+        esac
+        exit 1
+    }
+
+    # On success _rs_out holds the file content; assign to caller's variable.
+    eval "${_rs_var}='${_rs_out}'"
+    unset _rs_path _rs_var _rs_out
+}
+
+# =============================================================================
 # BUG-caddy-perms-3 FIX: Ensure log directory AND log files exist and are
 # writable by this process before caddy run is called.
 #
@@ -135,31 +183,7 @@ echo "DOMAIN_NAME validated: ${DOMAIN_NAME}"
 # =============================================================================
 # SECURITY: Load Cloudflare API Token
 # =============================================================================
-if [ ! -f /run/secrets/caddy_cloudflare_dns_token ]; then
-    echo "ERROR: Cloudflare API token secret not found" >&2
-    exit 1
-fi
-
-# FIX [M-17]: Separate assignment from export so the exit code of the command
-# substitution is not masked by the 'export' builtin under POSIX set -eu.
-_caddy_secret_err=$(mktemp)
-trap 'rm -f "$_caddy_secret_err"' EXIT
-if ! _token=$(cat /run/secrets/caddy_cloudflare_dns_token 2>"$_caddy_secret_err"); then
-    _err=$(cat "$_caddy_secret_err" 2>/dev/null || true)
-    rm -f "$_caddy_secret_err"
-    case "$_err" in
-        *"Permission denied"*)
-            echo "ERROR: Permission denied reading Cloudflare token secret." >&2
-            echo "       Caddy container must run as root (user: root) to read Docker secrets." >&2
-            ;;
-        *)
-            echo "ERROR: Cannot read Cloudflare API token secret: $_err" >&2
-            ;;
-    esac
-    exit 1
-fi
-rm -f "$_caddy_secret_err"
-trap - EXIT
+read_secret /run/secrets/caddy_cloudflare_dns_token _token
 
 if [ -z "$_token" ]; then
     echo "ERROR: Cloudflare API token is empty" >&2
@@ -185,12 +209,7 @@ echo "Cloudflare API token loaded successfully"
 # =============================================================================
 # SECURITY: Load Admin Basic Auth Hash
 # =============================================================================
-if [ ! -f /run/secrets/admin_basic_auth_hash ]; then
-    echo "ERROR: Admin basic auth hash secret not found" >&2
-    exit 1
-fi
-
-ADMIN_HASH_FULL=$(cat /run/secrets/admin_basic_auth_hash)
+read_secret /run/secrets/admin_basic_auth_hash ADMIN_HASH_FULL
 
 if [ -z "$ADMIN_HASH_FULL" ]; then
     echo "ERROR: Admin basic auth hash is empty" >&2
