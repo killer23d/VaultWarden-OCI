@@ -343,11 +343,19 @@ install_units() {
     # An invalid expression causes systemctl enable --now to fail with a
     # cryptic 'Failed to start' error; surfacing it here with a clear
     # warning gives operators actionable information before activation.
+    #
+    # TIMER-1 FIX: Anchor the grep pattern with ^ so only lines where
+    # OnCalendar= is the very first character are matched. Without the
+    # anchor, grep -m1 'OnCalendar=' matched comment lines containing
+    # the string (e.g. the BUG-TM1 comment in vaultwarden-maintenance.timer)
+    # before reaching the real directive, causing systemd-analyze to
+    # validate the comment text and emit a false-positive WARN.
     # ------------------------------------------------------------------
     if command -v systemd-analyze >/dev/null 2>&1; then
         for unit in "${UNIT_DEST_DIR}"/vaultwarden-*.timer; do
             [[ -f "$unit" ]] || continue
-            local cal_expr; cal_expr=$(grep -m1 'OnCalendar=' "$unit" | cut -d= -f2-)
+            # TIMER-1 FIX: '^OnCalendar=' anchors to directive lines only.
+            local cal_expr; cal_expr=$(grep -m1 '^OnCalendar=' "$unit" | cut -d= -f2-)
             if [[ -n "$cal_expr" ]]; then
                 if ! systemd-analyze calendar "$cal_expr" >/dev/null 2>&1; then
                     log_warn "Timer $(basename "$unit") has an invalid OnCalendar expression '$cal_expr' — check the unit file"

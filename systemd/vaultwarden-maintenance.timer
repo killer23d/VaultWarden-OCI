@@ -7,11 +7,15 @@ Conflicts=shutdown.target vaultwarden-db-backup.service
 OnFailure=vaultwarden-notify-failure@%n.service
 
 [Timer]
-# BUG-TM1 FIX: Changed from 02:00:00 to 02:05:00 to prevent lock collision
-# with vaultwarden-dns-update.timer (OnCalendar=hourly fires at :00 each hour).
-# Both services call maintenance.sh which acquires /run/lock/vaultwarden-
-# operations.lock. The 5-minute offset guarantees the dns-update service has
-# completed before maintenance attempts to acquire the same lock.
+# TIMER-2 / BUG-TM1 FIX: Changed from 02:00:00 to 02:05:00 to prevent lock
+# collision with vaultwarden-dns-update.timer (fires at :00 each hour).
+# Both services call maintenance.sh which acquires the vaultwarden-operations
+# lock. The 5-minute offset ensures dns-update has released the lock before
+# maintenance attempts to acquire it.
+# NOTE: comment previously contained an embedded 'OnCalendar=' substring
+# which caused the P5-SD1 validator in setup-systemd.sh to match this comment
+# line instead of the directive below, producing a false-positive WARN.
+# Fixed by rewording (TIMER-2) and anchoring the grep pattern (TIMER-1).
 OnCalendar=Mon-Sat *-*-* 02:05:00
 Persistent=true
 # P2-H: RandomizedDelaySec spreads post-reboot catch-up burst.
