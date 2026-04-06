@@ -40,13 +40,19 @@
 #              /logs/caddy to ubuntu:ubuntu, container root could no longer chmod it.
 #              The `|| true` swallowed the error → caddy dir stayed 750 → touch failed
 #              in entrypoint → caddy restart loop. Fix: add DAC_OVERRIDE to cap_add.
+# ✅ FIX-busybox-version: init container image tag driven by BUSYBOX_VERSION in .env
+#              (previously hardcoded busybox:1.36.1 — bypassed the version-pin system).
+# ✅ FIX-push-secrets-optional: push_installation_id / push_installation_key marked
+#              required: false — Compose skips mounting absent secret files instead of
+#              aborting; eliminates 'secret not found' log noise on deployments where
+#              PUSH_ENABLED=false (the default for ~95% of installs).
 
 services:
   # =============================================================================
   # Init Container - Permissions Setup
   # =============================================================================
   init-permissions:
-    image: busybox:1.36.1
+    image: busybox:${BUSYBOX_VERSION:-1.36.1}
     container_name: vaultwarden_init
     restart: "no"
     user: "0:0"  # Required for chown/chmod operations
@@ -446,8 +452,10 @@ secrets:
     file: ./secrets/.docker_secrets/smtp_password
   push_installation_id:
     file: ./secrets/.docker_secrets/push_installation_id
+    required: false  # absent by default; Compose skips mount when PUSH_ENABLED=false
   push_installation_key:
     file: ./secrets/.docker_secrets/push_installation_key
+    required: false  # absent by default; Compose skips mount when PUSH_ENABLED=false
   caddy_cloudflare_dns_token:
     file: ./secrets/.docker_secrets/caddy_cloudflare_dns_token
   fail2ban_cloudflare_firewall_token:
