@@ -40,7 +40,7 @@ _cf_load_token() {
 # ---------------------------------------------------------------------------
 _validate_ip() {
   local candidate="$1"
-  python3 -c "import ipaddress; ipaddress.ip_address('$candidate')" 2>/dev/null || return 1
+  python3 -c "import sys, ipaddress; ipaddress.ip_address(sys.argv[1])" "$candidate" 2>/dev/null || return 1
 }
 
 # ---------------------------------------------------------------------------
