@@ -630,27 +630,52 @@ sync_to_rclone() {
         rclone copy "${rclone_config_arg[@]}" "$sha256_file" "$remote_path/" --checksum 2>&1 || true
     fi
 
-# rclone exit 0 does not guarantee the remote file is intact or
-# non-zero-byte (e.g. partial upload, provider quirk, silent truncation).
+    # ------------------------------------------------------------------
+    # Remote size verification.
+    #
+    # A successful rclone exit code does not guarantee the remote file is
+    # intact or non-zero-byte (silent partial upload, provider quirk,
+    # network truncation).  Query rclone size and confirm the remote object
+    # is non-zero before declaring the offsite sync successful.
+    #
+    # Parsing strategy: `rclone size` prints a line such as:
+    #   Total size: 1234567 (1.177 MiB)
+    # Use awk to extract the raw byte count robustly — no PCRE lookaheads,
+    # no grep -P required, works on GNU/BusyBox/macOS awk equally.
+    # ------------------------------------------------------------------
     local remote_file_path="${remote_path}/$(basename "$enc_file")"
+    local rclone_size_out rclone_size_err_tmp="${TMPDIR_BACKUP}/rclone_size_stderr.tmp"
     local remote_size_bytes=0
-    local rclone_size_out
+    local remote_size_human=""
 
-    if rclone_size_out=$(rclone size "${rclone_config_arg[@]}" "$remote_file_path" 2>/dev/null); then
-        remote_size_bytes=$(printf '%s' "$rclone_size_out" \
-            | grep -i "^Total size:" \
-            | grep -oP '\d+(?=\s+Byte)' \
-            | head -1 || echo 0)
+    if rclone_size_out=$(rclone size "${rclone_config_arg[@]}" "$remote_file_path" \
+                             2>"$rclone_size_err_tmp"); then
+        # Extract the raw byte integer from "Total size: <N> (<human>)"
+        # awk splits on whitespace; field 3 is the raw number when the line
+        # starts with "Total size:".
+        remote_size_bytes=$(printf '%s\n' "$rclone_size_out" \
+            | awk 'tolower($0) ~ /^total size:/ { gsub(/[^0-9]/, "", $3); print $3+0; exit }')
         remote_size_bytes="${remote_size_bytes:-0}"
+
+        # Capture the human-readable portion "(1.177 MiB)" for the log line.
+        remote_size_human=$(printf '%s\n' "$rclone_size_out" \
+            | awk 'tolower($0) ~ /^total size:/ { for(i=4;i<=NF;i++) printf "%s ", $i; exit }' \
+            | sed 's/[[:space:]]*$//')
+    else
+        local rclone_size_err
+        rclone_size_err=$(cat "$rclone_size_err_tmp" 2>/dev/null || true)
+        log_error "[backup] rclone size query failed for: ${remote_file_path}" >&2
+        [[ -n "$rclone_size_err" ]] && log_error "[backup] rclone size error: ${rclone_size_err}" >&2
     fi
 
-    if (( remote_size_bytes == 0 )); then
-        log_error "[backup] Remote size verification FAILED: ${remote_file_path} is zero bytes or unreachable." >&2
+    if [[ -z "$remote_size_bytes" || "$remote_size_bytes" -eq 0 ]]; then
+        log_error "[backup] Remote size verification FAILED: ${remote_file_path} reported zero bytes or is unreachable." >&2
         log_error "[backup] The upload may have silently failed. Treat this backup as NOT offsite." >&2
         return 1
     fi
-    
-    b_log_info "Offsite sync complete → ${remote_file_path} (${remote_size_bytes} bytes)"
+
+    b_log_info "Remote size verified: ${remote_file_path} — ${remote_size_bytes} bytes ${remote_size_human}"
+    b_log_info "Offsite sync complete → ${remote_file_path}"
 
 }
 
