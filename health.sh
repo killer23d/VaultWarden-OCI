@@ -130,6 +130,7 @@ Comprehensive mode adds:
   - Extended API endpoint testing
   - Backup integrity verification
   - Fail2Ban rule validation
+  - Fail2Ban filter regex drift detection (vaultwarden-auth against live log)
 
 Exit codes:
   0 - All checks passed
@@ -379,6 +380,69 @@ _check_fail2ban() {
         else
             _warn "fail2ban:jails" "Cannot retrieve Fail2Ban jail status"
         fi
+
+        _check_fail2ban_filter_drift
+    fi
+}
+
+# -----------------------------------------------------------------------------
+# Fail2Ban filter drift detection (comprehensive mode only)
+#
+# Runs fail2ban-regex inside the fail2ban container against the live
+# vaultwarden application log using the vaultwarden-auth filter.  If the log
+# file has content but the match count is zero, the datepattern or failregex
+# has silently drifted out of sync with the actual log format — warn loudly so
+# the operator can update the filter before the jail stops detecting attacks.
+#
+# The check is deliberately non-fatal (warn, not fail) because a freshly
+# rotated or empty log file would also produce zero matches; the log-size
+# guard below avoids false positives in that case.
+# -----------------------------------------------------------------------------
+_check_fail2ban_filter_drift() {
+    local log_file="/var/log/vaultwarden/vaultwarden.log"
+    local filter_conf="/etc/fail2ban/filter.d/vaultwarden-auth.conf"
+
+    log_info "Checking Fail2Ban filter regex drift (vaultwarden-auth)..."
+
+    # Confirm both paths exist inside the container before running the test.
+    if ! docker exec vaultwarden_fail2ban test -f "$log_file" 2>/dev/null; then
+        _warn "fail2ban:filter-drift" \
+            "Cannot run filter drift check — log file not found inside container: ${log_file}"
+        return
+    fi
+    if ! docker exec vaultwarden_fail2ban test -f "$filter_conf" 2>/dev/null; then
+        _warn "fail2ban:filter-drift" \
+            "Cannot run filter drift check — filter conf not found inside container: ${filter_conf}"
+        return
+    fi
+
+    # Skip the regex test on an effectively empty log to avoid false positives
+    # right after log rotation when there is no content to match against.
+    local log_lines
+    log_lines=$(docker exec vaultwarden_fail2ban wc -l < "$log_file" 2>/dev/null || echo 0)
+    if [[ "$log_lines" -lt 10 ]]; then
+        _warn "fail2ban:filter-drift" \
+            "Skipping filter drift check — log file has fewer than 10 lines (${log_lines}); may be freshly rotated"
+        return
+    fi
+
+    # Run fail2ban-regex and capture stdout; exit code is always 0 so use grep.
+    local regex_output match_count
+    regex_output=$(docker exec vaultwarden_fail2ban \
+        fail2ban-regex "$log_file" "$filter_conf" 2>&1 || true)
+
+    # fail2ban-regex reports "Lines: N lines, X ignored, Y matched, Z missed"
+    # Extract the matched count.  If the line is absent the parse falls back to 0.
+    match_count=$(echo "$regex_output" \
+        | grep -oP '(?<=,\s)\d+(?=\s+matched)' \
+        | head -1 || echo 0)
+
+    if [[ "$match_count" -eq 0 ]]; then
+        _warn "fail2ban:filter-drift" \
+            "vaultwarden-auth filter matched 0 lines in a ${log_lines}-line log — datepattern or failregex may have drifted. Run: docker exec vaultwarden_fail2ban fail2ban-regex ${log_file} ${filter_conf}"
+    else
+        _pass "fail2ban:filter-drift" \
+            "vaultwarden-auth filter matched ${match_count} lines — filter is aligned with log format"
     fi
 }
 
