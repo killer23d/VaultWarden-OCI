@@ -26,8 +26,10 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
-# /run/lock needed if health ever acquires a lock; also harmless
-ReadWritePaths=/opt/vaultwarden-scripts /var/lib/vaultwarden /etc/vaultwarden /run/lock
+# /run/lock needed if health ever acquires a lock; also harmless.
+# /opt/vaultwarden-scripts is intentionally absent: scripts are read+executed only,
+# never written to. ProtectSystem=strict already makes it read-only.
+ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock
 TimeoutStartSec=300
 # Exit code contract (mirrors health.sh --show-help exit codes):
 #   0 — all checks passed             → success, no notification
