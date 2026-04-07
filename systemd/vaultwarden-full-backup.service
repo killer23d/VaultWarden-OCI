@@ -25,9 +25,10 @@ ProtectSystem=strict
 ProtectHome=yes
 # NOTE: SOPS_AGE_KEY_FILE must reside under /etc/vaultwarden/ (or another
 # ReadWritePaths entry). Paths under /home/ are inaccessible with ProtectHome=yes.
-# /run/lock needed for flock() lock file (ProtectSystem=strict makes /var/lock read-only).
-# /opt/vaultwarden-scripts is intentionally absent: scripts are read+executed only,
-# never written to. ProtectSystem=strict already makes it read-only.
+# /run/lock needed for flock() lock file (ProtectSystem=strict makes /var/lock read-only)
+# /opt/vaultwarden-scripts is intentionally excluded: scripts are read+executed
+# only and must not be writable at runtime (defence-in-depth against a
+# compromised script overwriting its siblings).
 ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock
 TimeoutStartSec=7200
 # Exit code contract (matches backup.sh):
