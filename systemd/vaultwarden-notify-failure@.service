@@ -15,7 +15,7 @@ ExecStart=/bin/bash -c '\
   init_common_lib notify-failure; \
   body=$(printf "The systemd unit %s failed at %%s.\nCheck logs with:\n  journalctl -u %s -n 50\n" \
     "$FAILED_UNIT" "$(date)" "$FAILED_UNIT"); \
-  send_email "FAILURE: ${FAILED_UNIT} on $(hostname -f 2>/dev/null || hostname)" "${body}" \
+  send_email "FAILURE: ${FAILED_UNIT} on %H" "${body}" \
     || { touch "/var/lib/vaultwarden/NOTIFY_FAILED_${FAILED_UNIT}" 2>/dev/null || true; } \
 '
 User=root
