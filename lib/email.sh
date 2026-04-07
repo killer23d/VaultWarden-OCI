@@ -12,7 +12,7 @@
 #   - Clean up:     temp files via local trap on RETURN
 #
 # --- HOW TO ADD A NEW PROVIDER -----------------------------------------------
-# 1. Add one entry in _EMAIL_DRIVERS below (key = EMAIL_PROVIDER value)
+# 1. Add one case arm in _email_driver_lookup() below
 # 2. Write one function:  _email_driver_YOURPROVIDER() { ... }
 # 3. Set EMAIL_PROVIDER=YOURPROVIDER in .env
 # No other files need changing.
@@ -38,7 +38,7 @@
 # Resend      200 JSON; from is composite string, to is string array
 #
 # --- FIX-M01 (2026-03-09) ----------------------------------------------------
-# All drivers use ${SMTP_FROM:-${SMTP_FROM_EMAIL}} (SMTP_FROM_EMAIL deprecated; 
+# All drivers use ${SMTP_FROM:-${SMTP_FROM_EMAIL}} (SMTP_FROM_EMAIL deprecated;
 # SMTP_FROM is canonical) for the sender address.
 # Backward-compatibility for .env files still using the legacy SMTP_FROM= name.
 # DEPRECATED: SMTP_FROM_EMAIL is the legacy name. The canonical variable is
@@ -100,12 +100,17 @@
 # SMTP_FROM_EMAIL containing path components or query strings would otherwise
 # allow SSRF / URL path traversal.
 #
-# --- FIX EM-L1 (2026-03-10) --------------------------------------------------
-# bash does not export associative arrays to subshells. _EMAIL_DRIVERS is now
-# mirrored into two plain indexed arrays (_EMAIL_DRIVERS_KEYS /
-# _EMAIL_DRIVERS_VALS) which ARE exportable. _email_driver_lookup() rebuilds
-# the mapping at query time, so the dispatcher in common.sh works correctly
-# whether lib/email.sh was sourced in the parent shell or a child subshell.
+# --- FIX EM-L1 (2026-04-06) --------------------------------------------------
+# Replaced the associative-array/plain-array dual registry with a single
+# case-based _email_driver_lookup(). This removes dual-maintenance risk,
+# works reliably in subshells, and avoids silent lookup failures when a new
+# provider is added in one place but not the other.
+#
+# --- FIX EM-L2 (2026-04-06) --------------------------------------------------
+# Mailgun and Postmark curl config temp files are now created with
+# install -m 600 /dev/null "$cfg" before secrets are written, matching the
+# hardened pattern already used by _email_bearer_post(). This removes the
+# mktemp -> chmod TOCTOU window.
 # -----------------------------------------------------------------------------
 
 # Prevent direct execution
@@ -120,48 +125,21 @@ readonly LIB_EMAIL_LOADED=1
 
 set -euo pipefail
 
-# -- DRIVER REGISTRY ----------------------------------------------------------
-# Key   = value accepted in EMAIL_PROVIDER env var
-# Value = suffix of the driver function (_email_driver_<value>)
-# 'smtp' and 'host' are reserved -- handled in send_email() in common.sh
-#
-# FIX EM-L1: bash cannot export associative arrays.  We keep the associative
-# array for in-process lookups but also maintain two plain indexed arrays that
-# ARE exported so that child subshells can reconstruct the mapping via
-# _email_driver_lookup() without re-sourcing the file.
-declare -A _EMAIL_DRIVERS=(
-    [mailersend]="mailersend"
-    [sendgrid]="sendgrid"
-    [mailgun]="mailgun"
-    [postmark]="postmark"
-    [resend]="resend"
-)
-
-# Serialised exportable shadow of _EMAIL_DRIVERS (plain indexed arrays)
-_EMAIL_DRIVERS_KEYS=(mailersend sendgrid mailgun postmark resend)
-_EMAIL_DRIVERS_VALS=(mailersend sendgrid mailgun postmark resend)
-export _EMAIL_DRIVERS_KEYS _EMAIL_DRIVERS_VALS
-
 # _email_driver_lookup PROVIDER
 # Prints the driver function suffix for PROVIDER, or returns 1 if unknown.
-# Works in subshells where _EMAIL_DRIVERS (associative) is not present by
-# falling back to the exported plain-array shadow.
+# Implemented as a single case statement so it works consistently in both the
+# current shell and child subshells without exported registry state.
 _email_driver_lookup() {
     local provider="${1,,}"
-    # Fast path: associative array available (same shell as source)
-    if declare -p _EMAIL_DRIVERS &>/dev/null 2>&1; then
-        local val="${_EMAIL_DRIVERS[$provider]:-}"
-        [[ -n "$val" ]] && { printf '%s' "$val"; return 0; }
-    fi
-    # Fallback: linear scan of the exported plain-array shadow
-    local i
-    for i in "${!_EMAIL_DRIVERS_KEYS[@]}"; do
-        if [[ "${_EMAIL_DRIVERS_KEYS[$i]}" == "$provider" ]]; then
-            printf '%s' "${_EMAIL_DRIVERS_VALS[$i]}"
+    case "$provider" in
+        mailersend|sendgrid|mailgun|postmark|resend)
+            printf '%s' "$provider"
             return 0
-        fi
-    done
-    return 1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 # -- HELPER: JSON string escape -----------------------------------------------
@@ -169,12 +147,8 @@ _email_driver_lookup() {
 # characters that MUST be escaped in a JSON string value.
 _email_json_escape() {
     local str="$1"
-    # FIX EM-M2: Remove control characters U+0000-U+001F that are not \n \r \t.
-    # LC_ALL=C ensures single-byte interpretation; the character class covers
-    # all C0 controls; \n \r \t are excluded because we re-encode them below.
     str=$(LC_ALL=C printf '%s' "$str" \
         | LC_ALL=C sed 's/[\x00-\x08\x0b\x0c\x0e-\x1f]//g')
-    # Encode the five mandatory JSON escape sequences (order matters: \ first)
     str="${str//\\/\\\\}"
     str="${str//\"/\\\"}"
     str="${str//$'\n'/\\n}"
@@ -184,22 +158,11 @@ _email_json_escape() {
 }
 
 # -- HELPER: shared Bearer-token POST -----------------------------------------
-# Used by MailerSend, SendGrid, Resend.
-# Sets _ECURL_CODE and _ECURL_BODY for callers to inspect.
-# Returns 0 on HTTP 2xx, 1 otherwise.
-#
-# FIX EM-H1: The Authorization header is written to a temp curl config file
-# and passed via --config @- (stdin) so the token never appears in the process
-# table or in bash error/trace output.
-# FIX EM-M1: --retry-all-errors added so HTTP 5xx also triggers the retry loop.
 _email_bearer_post() {
     local url="$1" payload="$2"
     local tmp cfg code
     tmp=$(mktemp -t vw_email.XXXXXXXXXX)
     cfg=$(mktemp -t vw_ecfg.XXXXXXXXXX)
-    # BUG-#40 FIX: Use install -m 600 to atomically secure the curl config
-    # temp file before writing the bearer token, eliminating the mktemp
-    # (world-readable) → chmod 600 race window.
     if ! install -m 600 /dev/null "$cfg" 2>/dev/null; then
         rm -f "$tmp" "$cfg"
         log_error "_email_bearer_post: failed to secure curl config temp file"
@@ -207,7 +170,6 @@ _email_bearer_post() {
     fi
     trap 'rm -f "$tmp" "$cfg" 2>/dev/null; trap - RETURN' RETURN
 
-    # Write the token into the curl config file -- never on the command line
     printf 'header = "Authorization: Bearer %s"\n' "${EMAIL_API_TOKEN}" >"$cfg"
 
     code=$(curl -s \
@@ -229,19 +191,12 @@ _email_bearer_post() {
 }
 
 # -- DRIVER: MailerSend -------------------------------------------------------
-# Docs:    https://developers.mailersend.com/api/v1/email.html
-# Auth:    Authorization: Bearer {token}
-# Success: HTTP 202 empty body; 202+JSON = queued with warnings (still success)
-# Error:   HTTP 422 JSON { "message": "...", "errors": { ... } }
 _email_driver_mailersend() {
     local subject="$1" body="$2"
     local s b fn fe ae
     s=$(_email_json_escape "$subject")
     b=$(_email_json_escape "$body")
-    # FIX-M01: SMTP_FROM_EMAIL is DEPRECATED; canonical name is SMTP_FROM.
-    # This shim will be removed once all deployments have migrated to SMTP_FROM=.
     local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
-    # FIX-M03: JSON-escape envelope fields (fn=from_name, fe=from_email, ae=admin_email)
     fn=$(_email_json_escape "${SMTP_FROM_NAME:-VaultWarden}")
     fe=$(_email_json_escape "${_from_email}")
     ae=$(_email_json_escape "${ADMIN_EMAIL}")
@@ -258,13 +213,7 @@ _email_driver_mailersend() {
 EOF
 )
 
-    # FIX-B01: _email_bearer_post returns 0 for all 2xx (including 202), so the
-    # previous `&& return 0 / if 202` pattern had a permanently dead branch.
-    # Restructured to if/else: on success, log any non-empty body as a warning
-    # (202+JSON = queued with API warnings) then return 0; on failure log the
-    # HTTP code and return 1.
     if _email_bearer_post "https://api.mailersend.com/v1/email" "$payload"; then
-        # Non-empty body on a 2xx indicates queued-with-warnings from MailerSend.
         [[ -n "${_ECURL_BODY}" ]] && log_warn "MailerSend: queued with warnings: ${_ECURL_BODY}"
         return 0
     fi
@@ -273,19 +222,12 @@ EOF
 }
 
 # -- DRIVER: SendGrid ---------------------------------------------------------
-# Docs:    https://docs.sendgrid.com/api-reference/mail-send/mail-send
-# Auth:    Authorization: Bearer {api_key}
-# IMPORTANT: content MUST be [{"type":"text/plain","value":"..."}] not a string
-# Success: HTTP 202 empty body
 _email_driver_sendgrid() {
     local subject="$1" body="$2"
     local s b fn fe ae
     s=$(_email_json_escape "$subject")
     b=$(_email_json_escape "$body")
-    # FIX-M01: SMTP_FROM_EMAIL is DEPRECATED; canonical name is SMTP_FROM.
-    # This shim will be removed once all deployments have migrated to SMTP_FROM=.
     local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
-    # FIX-M03: JSON-escape envelope fields
     fn=$(_email_json_escape "${SMTP_FROM_NAME:-VaultWarden}")
     fe=$(_email_json_escape "${_from_email}")
     ae=$(_email_json_escape "${ADMIN_EMAIL}")
@@ -312,28 +254,12 @@ EOF
 }
 
 # -- DRIVER: Mailgun ----------------------------------------------------------
-# Docs:    https://documentation.mailgun.com/docs/mailgun/api-reference/
-# Auth:    HTTP Basic Auth -- username "api", password = API key (NOT Bearer)
-# Payload: multipart/form-data (-F flags) -- NOT JSON
-# NOTE:    No JSON escaping needed; curl handles multipart field encoding.
-# Success: HTTP 200 JSON { "id": "...", "message": "Queued. Thank you." }
-#
-# Regions:
-#   MAILGUN_REGION=us  (default) -- api.mailgun.net    (accounts at mailgun.com)
-#   MAILGUN_REGION=eu             -- api.eu.mailgun.net (accounts at eu.mailgun.com)
-# FIX-B02: EU-region accounts received HTTP 404 from the hardcoded US endpoint.
-# FIX EM-H1: --user credential moved to curl config file (not process table).
-# FIX EM-M1: --retry-all-errors added.
-# FIX EM-M3: domain validated against strict hostname regex before use in URL.
 _email_driver_mailgun() {
     local subject="$1" body="$2"
-    # Strip embedded newlines/carriage-returns to prevent header injection.
     subject="${subject//$'\r'/}"
     subject="${subject//$'\n'/}"
     body="${body//$'\r'/}"
     body="${body//$'\n'/ }"
-    # FIX-M01: SMTP_FROM_EMAIL is DEPRECATED; canonical name is SMTP_FROM.
-    # This shim will be removed once all deployments have migrated to SMTP_FROM=.
     local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
 
     local domain="${MAILGUN_DOMAIN:-}"
@@ -343,18 +269,11 @@ _email_driver_mailgun() {
         return 1
     fi
 
-    # FIX EM-M3: Validate domain is a safe hostname before embedding in URL.
-    # A crafted SMTP_FROM_EMAIL like user@host/path?q= would allow SSRF via
-    # path traversal in the constructed curl URL.
     if [[ ! "$domain" =~ ^[a-zA-Z0-9.-]+$ ]]; then
         log_error "Mailgun driver: invalid domain '${domain}' (failed hostname validation). Check MAILGUN_DOMAIN or SMTP_FROM."
         return 1
     fi
 
-    # FIX-B02: Select the correct regional API endpoint.
-    # Mailgun US and EU are completely separate fleets; using the wrong endpoint
-    # always returns HTTP 404 ("Domain not found"), which is indistinguishable
-    # from a misconfigured MAILGUN_DOMAIN and produces confusing log output.
     local mg_region="${MAILGUN_REGION:-us}"
     local mg_api_host
     case "${mg_region,,}" in
@@ -369,11 +288,14 @@ _email_driver_mailgun() {
     local tmp cfg code
     tmp=$(mktemp -t vw_email.XXXXXXXXXX)
     cfg=$(mktemp -t vw_ecfg.XXXXXXXXXX)
+    if ! install -m 600 /dev/null "$cfg" 2>/dev/null; then
+        rm -f "$tmp" "$cfg"
+        log_error "Mailgun driver: failed to secure curl config temp file"
+        return 1
+    fi
     trap 'rm -f "$tmp" "$cfg" 2>/dev/null; trap - RETURN' RETURN
 
-    # FIX EM-H1: Write Basic Auth credential to config file -- not process table.
     printf 'user = "api:%s"\n' "${EMAIL_API_TOKEN}" >"$cfg"
-    chmod 600 "$cfg"
 
     code=$(curl -s \
         --config "$cfg" \
@@ -398,25 +320,12 @@ _email_driver_mailgun() {
 }
 
 # -- DRIVER: Postmark ---------------------------------------------------------
-# Docs:    https://postmarkapp.com/developer/api/email-api
-# Auth:    X-Postmark-Server-Token: {token}  (NOT Authorization: Bearer)
-# Payload: JSON PascalCase; From and To are plain strings
-# IMPORTANT: HTTP 200 does NOT mean success -- must check ErrorCode in body
-# Success: HTTP 200 JSON { "ErrorCode": 0, ... }
-#
-# FIX EM-H1: X-Postmark-Server-Token moved to curl config file.
-# FIX EM-M1: --retry-all-errors added.
 _email_driver_postmark() {
     local subject="$1" body="$2"
     local s b fn fe ae
     s=$(_email_json_escape "$subject")
     b=$(_email_json_escape "$body")
-    # FIX-M01: SMTP_FROM_EMAIL is DEPRECATED; canonical name is SMTP_FROM.
-    # This shim will be removed once all deployments have migrated to SMTP_FROM=.
     local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
-    # FIX-M03: JSON-escape envelope fields. The Postmark driver uses inline
-    # -d "{ ... }" rather than a heredoc, making unescaped quotes in display
-    # names particularly hard to spot and immediately fatal (HTTP 400).
     fn=$(_email_json_escape "${SMTP_FROM_NAME:-VaultWarden}")
     fe=$(_email_json_escape "${_from_email}")
     ae=$(_email_json_escape "${ADMIN_EMAIL}")
@@ -424,11 +333,14 @@ _email_driver_postmark() {
     local tmp cfg code
     tmp=$(mktemp -t vw_email.XXXXXXXXXX)
     cfg=$(mktemp -t vw_ecfg.XXXXXXXXXX)
+    if ! install -m 600 /dev/null "$cfg" 2>/dev/null; then
+        rm -f "$tmp" "$cfg"
+        log_error "Postmark driver: failed to secure curl config temp file"
+        return 1
+    fi
     trap 'rm -f "$tmp" "$cfg" 2>/dev/null; trap - RETURN' RETURN
 
-    # FIX EM-H1: Token written to config file -- never on the command line.
     printf 'header = "X-Postmark-Server-Token: %s"\n' "${EMAIL_API_TOKEN}" >"$cfg"
-    chmod 600 "$cfg"
 
     local payload
     payload=$(cat <<EOF
@@ -469,19 +381,12 @@ EOF
 }
 
 # -- DRIVER: Resend -----------------------------------------------------------
-# Docs:    https://resend.com/docs/api-reference/emails/send-email
-# Auth:    Authorization: Bearer {token}
-# IMPORTANT: from is a string "Name <email>"; to is ["email"] not [{email:...}]
-# Success: HTTP 200 JSON { "id": "..." }
 _email_driver_resend() {
     local subject="$1" body="$2"
     local s b fn fe ae
     s=$(_email_json_escape "$subject")
     b=$(_email_json_escape "$body")
-    # FIX-M01: SMTP_FROM_EMAIL is DEPRECATED; canonical name is SMTP_FROM.
-    # This shim will be removed once all deployments have migrated to SMTP_FROM=.
     local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
-    # FIX-M03: JSON-escape envelope fields
     fn=$(_email_json_escape "${SMTP_FROM_NAME:-VaultWarden}")
     fe=$(_email_json_escape "${_from_email}")
     ae=$(_email_json_escape "${ADMIN_EMAIL}")
@@ -502,12 +407,8 @@ EOF
     return 1
 }
 
-# Export all driver functions and the lookup helper so they are available in
-# subshells.  _EMAIL_DRIVERS_KEYS/_EMAIL_DRIVERS_VALS (plain indexed arrays)
-# are already exported above; _email_driver_lookup() uses them as the fallback
-# when the associative _EMAIL_DRIVERS is unavailable in a child subshell (EM-L1).
 export -f _email_json_escape _email_bearer_post _email_driver_lookup
 export -f _email_driver_mailersend _email_driver_sendgrid _email_driver_mailgun
 export -f _email_driver_postmark _email_driver_resend
 
-log_debug "lib/email.sh loaded (drivers: ${!_EMAIL_DRIVERS[*]})"
+log_debug "lib/email.sh loaded (drivers: mailersend sendgrid mailgun postmark resend)"
