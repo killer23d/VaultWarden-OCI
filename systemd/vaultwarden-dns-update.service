@@ -22,8 +22,13 @@ PrivateTmp=yes
 # SY-1: Sandbox hardening — script can only write to its own directories.
 ProtectSystem=strict
 ProtectHome=yes
+# NOTE: SOPS_AGE_KEY_FILE must reside under /etc/vaultwarden/ (or another
+# ReadWritePaths entry). Paths under /home/ are inaccessible with ProtectHome=yes.
 # /run/lock is needed for the flock() lock file (ProtectSystem=strict makes /var/lock read-only)
-ReadWritePaths=/opt/vaultwarden-scripts /var/lib/vaultwarden /etc/vaultwarden /run/lock
+# /opt/vaultwarden-scripts is intentionally excluded: scripts are read+executed
+# only and must not be writable at runtime (defence-in-depth against a
+# compromised script overwriting its siblings).
+ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock
 TimeoutStartSec=120
 
 [Install]
