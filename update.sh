@@ -12,6 +12,19 @@
 #                     message.  Fix: source simple_key_resilience.sh and
 #                     call check_age_key_health_for_update() in main()
 #                     before any update operations.
+#
+# PATCHED BUGS (2026-04-06):
+#   UPDATE-2 [HIGH]   No rollback on partial image pull failure.
+#                     If docker compose pull succeeded for some images but
+#                     failed for others (network drop, rate limit, registry
+#                     error), docker compose up -d was still called, bringing
+#                     the stack up in a split old/new image state with only
+#                     a log_warn and no operator-visible abort.
+#                     Fix: snapshot all image Ids before pulling, detect a
+#                     partial-pull result (exit 2 from check_image_updates),
+#                     roll back any pulled images to their pre-pull digest via
+#                     rollback_image_digests(), and exit 1 before calling
+#                     apply_updates_and_restart().
 
 set -euo pipefail
 
@@ -165,6 +178,128 @@ update_system_packages() {
     log_success "System packages updated"
 }
 
+# ---------------------------------------------------------------------------
+# snapshot_image_digests
+#
+# UPDATE-2 FIX: Record the current image Id for every service image before
+# any pull begins.  The associative array _PRE_PULL_IDS maps image name to
+# its pre-pull docker image Id.  Used by rollback_image_digests() to restore
+# a coherent image set if the pull is only partially successful.
+#
+# Must be called before check_image_updates().
+# ---------------------------------------------------------------------------
+declare -A _PRE_PULL_IDS=()
+
+snapshot_image_digests() {
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would snapshot pre-pull image digests"
+        return 0
+    fi
+
+    log_info "Snapshotting pre-pull image digests..."
+
+    local images=()
+    while IFS= read -r img; do
+        [[ -n "$img" ]] && images+=("$img")
+    done < <(docker compose config --images 2>/dev/null || true)
+
+    for image in "${images[@]}"; do
+        local id
+        id=$(docker inspect --format='{{.Id}}' "$image" 2>/dev/null || echo "")
+        _PRE_PULL_IDS["$image"]="$id"
+        if [[ -n "$id" ]]; then
+            log_info "  Snapshot: $image → ${id:7:12}..."
+        else
+            log_info "  Snapshot: $image → (not present locally)"
+        fi
+    done
+
+    log_info "Pre-pull snapshot complete (${#_PRE_PULL_IDS[@]} image(s))"
+}
+
+# ---------------------------------------------------------------------------
+# rollback_image_digests
+#
+# UPDATE-2 FIX: Called when check_image_updates() detects a partial pull
+# failure (some images updated, some not).  For each image that was pulled
+# successfully (i.e. its Id changed from the snapshot), re-tag the pre-pull
+# image Id back to the image name so that docker compose up -d will use the
+# original cohesive set rather than a split old/new mix.
+#
+# Uses `docker tag <pre-pull-id> <image-name>` which is a metadata-only
+# operation (no data moved) and is always safe even if the registry is
+# unreachable.
+# ---------------------------------------------------------------------------
+rollback_image_digests() {
+    if [[ ${#_PRE_PULL_IDS[@]} -eq 0 ]]; then
+        log_warn "No pre-pull snapshot available — cannot roll back image digests."
+        log_warn "Inspect running containers manually before restarting services."
+        return 1
+    fi
+
+    log_warn "Rolling back pulled images to pre-pull digests..."
+
+    local rolled_back=0
+    local rollback_failed=0
+
+    for image in "${!_PRE_PULL_IDS[@]}"; do
+        local pre_id="${_PRE_PULL_IDS[$image]}"
+        local cur_id
+        cur_id=$(docker inspect --format='{{.Id}}' "$image" 2>/dev/null || echo "")
+
+        if [[ -z "$pre_id" ]]; then
+            # Image was not present before the pull; nothing to roll back to.
+            log_info "  Skipping rollback for $image (was not present before pull)"
+            continue
+        fi
+
+        if [[ "$cur_id" == "$pre_id" ]]; then
+            log_info "  Unchanged (no rollback needed): $image"
+            continue
+        fi
+
+        # Image was updated during this run — restore the pre-pull tag.
+        log_warn "  Restoring: $image → ${pre_id:7:12}..."
+        if docker tag "$pre_id" "$image" 2>/dev/null; then
+            log_warn "  Restored:  $image"
+            (( ++rolled_back )) || true
+        else
+            log_error "  Rollback FAILED for $image (pre-pull Id: ${pre_id:7:12})"
+            log_error "  The pre-pull image layer may have been pruned."
+            log_error "  Run 'docker compose pull' again once the network issue is resolved."
+            (( ++rollback_failed )) || true
+        fi
+    done
+
+    if (( rollback_failed > 0 )); then
+        log_error "Rollback incomplete: $rollback_failed image(s) could not be restored."
+        log_error "Do NOT run 'docker compose up -d' until all images are at consistent versions."
+        log_error "Pull again from a stable network: sudo ./update.sh --images"
+        return 1
+    fi
+
+    if (( rolled_back > 0 )); then
+        log_warn "Rollback complete: $rolled_back image(s) restored to pre-pull state."
+        log_warn "The stack will restart on the previous cohesive image set."
+    else
+        log_info "Rollback: no images required restoration."
+    fi
+
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# check_image_updates
+#
+# Returns:
+#   0  — all images pulled successfully (or already up to date)
+#   1  — all pulls failed (nothing was updated)
+#   2  — partial failure: some images were updated, some failed (split state)
+#
+# UPDATE-2 FIX: exit code 2 distinguishes a partial pull from a total failure
+# so main() can detect the split-version risk and call rollback_image_digests()
+# before aborting.
+# ---------------------------------------------------------------------------
 check_image_updates() {
     log_info "Checking for image updates..."
 
@@ -212,8 +347,20 @@ check_image_updates() {
         log_info "All Docker images are up to date"
     fi
 
-    # Issue #21: return non-zero if any pull failed so caller can warn.
-    (( failed > 0 )) && return 1 || return 0
+    if (( failed == 0 )); then
+        return 0
+    fi
+
+    # UPDATE-2 FIX: distinguish total failure (nothing updated, return 1)
+    # from partial failure (some updated, some failed, return 2 — split risk).
+    if (( updated > 0 )); then
+        log_error "$failed image pull(s) FAILED after $updated succeeded — stack would be in a split-version state."
+        return 2
+    fi
+
+    # All pulls failed — nothing changed on disk.
+    log_error "All $failed image pull(s) failed — no images were updated."
+    return 1
 }
 
 verify_image_digests() {
@@ -307,7 +454,40 @@ main() {
     fi
 
     if [[ "$UPDATE_IMAGES" == "true" ]] || [[ "$FORCE" == "true" ]]; then
-        check_image_updates || log_warn "Image check encountered issues"
+        # UPDATE-2 FIX: Snapshot pre-pull image Ids before pulling so that
+        # rollback_image_digests() can restore a coherent set on partial failure.
+        snapshot_image_digests
+
+        local pull_rc=0
+        check_image_updates || pull_rc=$?
+
+        if (( pull_rc == 2 )); then
+            # Partial pull — some images updated, some failed.  Roll back the
+            # successfully pulled images to their pre-pull state so the stack
+            # remains on a consistent version set, then abort.
+            log_error "Partial image pull detected (UPDATE-2): rolling back to prevent a split-version stack."
+            rollback_image_digests || true
+            if [[ "$EMAIL_NOTIFY" == "true" ]]; then
+                local subject="[VaultWarden] Update ABORTED: partial image pull on $(date)"
+                local body
+                body="$(printf 'A partial docker image pull was detected on host: %s\nTime: %s\n\nSome images were updated and some failed. The pulled images have been\nrolled back to their pre-pull digests to prevent a split-version stack.\n\nResolve the network or registry issue, then retry:\n  sudo ./update.sh --images\n' \
+                    "$(hostname -f 2>/dev/null || hostname)" "$(date)")"
+                send_notification_email "$subject" "$body" 2>/dev/null || true
+            fi
+            exit 1
+        elif (( pull_rc != 0 )); then
+            # Total failure — nothing was pulled; no rollback needed.
+            log_warn "Image pull failed for all images — no images were updated. Services not restarted."
+            if [[ "$EMAIL_NOTIFY" == "true" ]]; then
+                local subject="[VaultWarden] Update WARNING: image pull failed on $(date)"
+                local body
+                body="$(printf 'All docker image pulls failed on host: %s\nTime: %s\n\nNo images were updated. Services remain on their current versions.\n\nResolve the network or registry issue, then retry:\n  sudo ./update.sh --images\n' \
+                    "$(hostname -f 2>/dev/null || hostname)" "$(date)")"
+                send_notification_email "$subject" "$body" 2>/dev/null || true
+            fi
+            exit 1
+        fi
+
         verify_image_digests || log_warn "Digest verification had issues"
     fi
 
