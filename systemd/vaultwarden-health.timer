@@ -1,7 +1,11 @@
 [Unit]
 Description=VaultWarden Health Check Timer every 30 min
 # SY-2: Prevent this timer firing mid-shutdown.
-Conflicts=shutdown.target
+# FIX: Added vaultwarden-maintenance.service — Persistent=true can trigger
+# a post-reboot catch-up burst while maintenance holds the operations lock,
+# causing the health check to return a false-negative degraded result and
+# fire a spurious alert. Mirrors vaultwarden-db-backup.timer.
+Conflicts=shutdown.target vaultwarden-maintenance.service
 # Issue #57: OnFailure on the timer unit catches calendar parse errors or
 # systemd activation failures that would otherwise go unnotified.
 OnFailure=vaultwarden-notify-failure@%n.service
