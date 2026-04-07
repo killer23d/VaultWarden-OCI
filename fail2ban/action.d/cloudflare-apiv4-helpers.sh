@@ -197,7 +197,7 @@ _cf_api_call() {
   if [ "$http_code" = "429" ]; then
     local retry_after
     retry_after=$(awk -F": *" \
-      "tolower(\$1)==\"retry-after\"{gsub(\"\\r\",\"\",\$2);print \$2;exit}" \
+      "tolower(\$1)==\"retry-after\"{gsub(\"\\\r\",\"\",\$2);print \$2;exit}" \
       "$header_file")
     [ -n "$retry_after" ] || retry_after=5
     rm -f "$header_file" "$response_file"
@@ -237,14 +237,20 @@ _cf_api_call() {
 }
 
 # ---------------------------------------------------------------------------
-# _cf_retry <endpoint> <method> [body] [attempts=5] [delays="2 4 8 16 32"]
+# _cf_retry <endpoint> <method> [body] [attempts=4] [delays="2 4 8 16"]
 # Retry wrapper with static delay table (POSIX sh portable; no bash ** needed).
-# Delays (seconds): attempt 1→2, 2→4, 3→8, 4→16, 5→32.
+# Delays (seconds): attempt 1→2, 2→4, 3→8, 4→16.
 # On 429, sleeps the Retry-After value from the header instead.
+#
+# Defaults are sized to stay safely within Fail2Ban's default actiontimeout
+# of 60 s: max accumulated sleep = 30 s, plus up to 30 s of curl --max-time
+# per attempt, leaving a comfortable margin before the process is killed.
+# If more retries are needed, raise actiontimeout in jail.d before raising
+# attempts here (e.g. actiontimeout = 120 in [DEFAULT]).
 # ---------------------------------------------------------------------------
 _cf_retry() {
-  local endpoint="$1" method="$2" body="${3:-}" attempts="${4:-5}"  # P7-25 fix: default attempts raised from 4 to 5
-  local delays="${5:-2 4 8 16 32}"
+  local endpoint="$1" method="$2" body="${3:-}" attempts="${4:-4}"
+  local delays="${5:-2 4 8 16}"
   local i=1 out rc delay
 
   while [ "$i" -le "$attempts" ]; do
