@@ -164,10 +164,16 @@ if ! test -w /var/log/caddy/access.log; then
     exit 1
 fi
 
+# Derive DOMAIN_NAME from DOMAIN when not explicitly set — single source of truth.
+# Strips the https:// (or http://) prefix so Caddy receives a bare hostname.
+# If DOMAIN_NAME is already present in the environment it is left untouched.
+: "${DOMAIN_NAME:=${DOMAIN#https://}}"
+: "${DOMAIN_NAME:=${DOMAIN#http://}}"
+
 # FIX [M-16]: Validate required environment variables BEFORE starting Caddy
 # so we fail fast with a clear error, not a cryptic Caddy parse error.
 # C-07: Validate DOMAIN_NAME is set and looks like a valid FQDN.
-: "${DOMAIN_NAME:?ERROR: DOMAIN_NAME environment variable must be set}"
+: "${DOMAIN_NAME:?ERROR: DOMAIN_NAME could not be derived — ensure DOMAIN=https://your.host}"
 case "$DOMAIN_NAME" in
     localhost|127.0.0.1|0.0.0.0)
         echo "ERROR: DOMAIN_NAME='$DOMAIN_NAME' is not a valid production domain" >&2
