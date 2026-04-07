@@ -630,14 +630,28 @@ sync_to_rclone() {
         rclone copy "${rclone_config_arg[@]}" "$sha256_file" "$remote_path/" --checksum 2>&1 || true
     fi
 
-    if [[ "$rclone_ok" == "true" ]]; then
-        b_log_info "Offsite sync complete → ${remote_path}/$(basename "$enc_file")"
-        return 0
-    else
-        log_error "Rclone sync FAILED — backup is safe locally, but offsite copy was not updated." >&2
-        log_error "Retry manually: rclone copy ${rclone_config_arg[*]} $enc_file ${remote_path}/" >&2
+# rclone exit 0 does not guarantee the remote file is intact or
+# non-zero-byte (e.g. partial upload, provider quirk, silent truncation).
+    local remote_file_path="${remote_path}/$(basename "$enc_file")"
+    local remote_size_bytes=0
+    local rclone_size_out
+
+    if rclone_size_out=$(rclone size "${rclone_config_arg[@]}" "$remote_file_path" 2>/dev/null); then
+        remote_size_bytes=$(printf '%s' "$rclone_size_out" \
+            | grep -i "^Total size:" \
+            | grep -oP '\d+(?=\s+Byte)' \
+            | head -1 || echo 0)
+        remote_size_bytes="${remote_size_bytes:-0}"
+    fi
+
+    if (( remote_size_bytes == 0 )); then
+        log_error "[backup] Remote size verification FAILED: ${remote_file_path} is zero bytes or unreachable." >&2
+        log_error "[backup] The upload may have silently failed. Treat this backup as NOT offsite." >&2
         return 1
     fi
+    
+    b_log_info "Offsite sync complete → ${remote_file_path} (${remote_size_bytes} bytes)"
+
 }
 
 cleanup_old_backups() {
