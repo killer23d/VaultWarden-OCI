@@ -2,26 +2,6 @@
 Description=VaultWarden Failure Notification for %i
 # Template unit: instantiated by OnFailure=vaultwarden-notify-failure@%n.service
 # %i receives the failed unit name (e.g. vaultwarden-health.service)
-#
-# FIX-S02 — three defects corrected in the inline ExecStart bash script:
-#   1. LIB_DIR hardcoded before source: unambiguous path, not reliant on
-#      BASH_SOURCE[0] resolution inside a bash -c exec context.
-#   2. init_common_lib called: enables set -euo pipefail, sets log prefix,
-#      and cd to PROJECT_ROOT — matching all other VaultWarden scripts.
-#   3. printf used for email body: bash "..." strings do not expand \n;
-#      printf does. %%s escapes the printf placeholder from systemd specifier
-#      expansion (%s = user shell); systemd expands %% → % before bash runs.
-#
-# FIX-S05: Added NoNewPrivileges=yes and PrivateTmp=yes to match all other
-#   service units. The notify-failure service runs as root and calls
-#   send_email(), which creates temp files via mktemp in _email_bearer_post().
-#   PrivateTmp=yes isolates those temp files from the shared /tmp namespace.
-#
-# BUG-#8 FIX: Assign %i to shell variable before use to prevent word-split
-#   on unit names with special chars. %i is now assigned to FAILED_UNIT at
-#   the top of the bash -c script, before any shell evaluation. The printf
-#   format string uses %s placeholders with $FAILED_UNIT as the argument, and
-#   the send_email subject uses ${FAILED_UNIT} instead of bare %i.
 
 [Service]
 Type=oneshot
@@ -36,6 +16,7 @@ ExecStart=/bin/bash -c '\
   body=$(printf "The systemd unit %s failed at %%s.\nCheck logs with:\n  journalctl -u %s -n 50\n" \
     "$FAILED_UNIT" "$(date)" "$FAILED_UNIT"); \
   send_email "FAILURE: ${FAILED_UNIT} on $(hostname -f 2>/dev/null || hostname)" "${body}" \
+    || { touch "/var/lib/vaultwarden/NOTIFY_FAILED_${FAILED_UNIT}" 2>/dev/null || true; } \
 '
 User=root
 SyslogIdentifier=vw-notify
