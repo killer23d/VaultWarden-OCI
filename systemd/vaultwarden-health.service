@@ -29,11 +29,15 @@ ProtectHome=yes
 # /run/lock needed if health ever acquires a lock; also harmless
 ReadWritePaths=/opt/vaultwarden-scripts /var/lib/vaultwarden /etc/vaultwarden /run/lock
 TimeoutStartSec=300
-# Exit code 1 from health.sh means 'degraded but not critical' (e.g. no backups
-# yet on first run). Treat it as success so OnFailure= is not triggered for
-# normal degraded states. Only exit >=2 (script crash / unhandled error) fires
-# the failure notification.
-SuccessExitStatus=0 1
+# Exit code contract (mirrors health.sh --show-help exit codes):
+#   0 — all checks passed             → success, no notification
+#   1 — one or more warnings          → OnFailure= fires, admin is notified
+#   2 — one or more failures          → OnFailure= fires, admin is notified
+#   3 — first-run / no backup yet     → success, no notification (transient state)
+#
+# Only exit 3 is treated as success in addition to 0.  Exits 1 and 2 both
+# reach OnFailure= so degraded/down states are never silently swallowed.
+SuccessExitStatus=0 3
 
 [Install]
 WantedBy=multi-user.target
