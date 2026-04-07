@@ -252,6 +252,26 @@ services:
       DOMAIN: ${DOMAIN}
       TZ: ${TZ:-UTC}
 
+    # ---------------------------------------------------------------------------
+    # DNS-01 ACME token — REQUIRED for TLS certificate issuance
+    # ---------------------------------------------------------------------------
+    # caddy_cloudflare_dns_token is the Cloudflare API token Caddy uses to
+    # complete DNS-01 ACME challenges and obtain/renew TLS certificates for
+    # DOMAIN. Without it, Caddy cannot issue a certificate and will either
+    # fail to start or enter a restart loop with no obvious error message.
+    #
+    # The token is NOT an environment variable — it is injected as a Docker
+    # secret at runtime (see the secrets: block at the bottom of this file).
+    # Do NOT paste the token value anywhere in this file or in .env.
+    #
+    # To provision:  make edit-secrets  (or: ./edit-secrets.sh --rotate cloudflare_dns_token)
+    #
+    # Required Cloudflare API token permissions:
+    #   Zone → DNS → Edit     (for the zone containing DOMAIN)
+    #   Zone → Zone → Read    (zone listing, required by the ACME DNS plugin)
+    #
+    # See also: CADDY_CF_DNS_TOKEN comment in .env.example
+    # ---------------------------------------------------------------------------
     secrets:
       - caddy_cloudflare_dns_token
       - admin_basic_auth_hash
