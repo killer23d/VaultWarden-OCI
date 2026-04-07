@@ -23,6 +23,10 @@ REAL_USER="${SUDO_USER:-${USER:-ubuntu}}"
 REAL_HOME=$(getent passwd "$REAL_USER" 2>/dev/null | cut -d: -f6 || echo "/home/$REAL_USER")
 PROJECT_DIR="${REAL_HOME}/VaultWarden-OCI"
 
+# Sentinel written by setup.sh to record that Docker was installed by this
+# project.  Used in Step 9 to avoid removing a pre-existing system Docker.
+DOCKER_SENTINEL="/var/lib/vaultwarden/.docker_installed_by_setup"
+
 echo ""
 echo "════════════════════════════════════════════════════════════"
 echo "   VaultWarden-OCI Full Uninstaller"
@@ -191,47 +195,69 @@ fi
 
 # ═══════════════════════════════════════════════════════════════
 # STEP 9 — Remove Docker (packages, APT repo, GPG key)
+#
+# FIX (Issue 2): Only remove Docker packages if setup.sh installed them.
+# setup.sh writes a sentinel file ($DOCKER_SENTINEL) immediately after a
+# successful Docker installation.  If the sentinel is absent, Docker was
+# pre-existing and must not be removed — silently destroying a system-level
+# Docker installation that may be serving unrelated containers would be
+# catastrophic.  In that case we warn and skip package removal; APT repo /
+# GPG key / runtime-data cleanup is likewise skipped because those artefacts
+# were not created by this project.
 # ═══════════════════════════════════════════════════════════════
 info "Step 9: Removing Docker CE packages..."
-if command -v docker &>/dev/null || dpkg -l docker-ce &>/dev/null 2>&1; then
-    DEBIAN_FRONTEND=noninteractive apt-get remove -y --purge \
-        docker-ce docker-ce-cli containerd.io \
-        docker-buildx-plugin docker-compose-plugin \
-        docker-ce-rootless-extras 2>/dev/null \
-        && success "Docker packages removed." \
-        || warn "Some Docker packages were not installed (that's fine)."
+
+if [[ -f "$DOCKER_SENTINEL" ]]; then
+    info "Docker sentinel found — Docker was installed by setup.sh; proceeding with removal."
+    rm -f "$DOCKER_SENTINEL" 2>/dev/null || true
+
+    if command -v docker &>/dev/null || dpkg -l docker-ce &>/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get remove -y --purge \
+            docker-ce docker-ce-cli containerd.io \
+            docker-buildx-plugin docker-compose-plugin \
+            docker-ce-rootless-extras 2>/dev/null \
+            && success "Docker packages removed." \
+            || warn "Some Docker packages were not installed (that's fine)."
+    else
+        info "Docker packages not detected — skipping."
+    fi
+
+    info "Removing Docker APT repo and GPG key..."
+    # BUG-UN1 FIX: setup.sh downloads the Docker GPG key as an armored ASCII
+    # file (/etc/apt/keyrings/docker.asc) — not a dearmored .gpg binary.
+    # Removing both extensions handles systems set up with either version.
+    rm -f /etc/apt/keyrings/docker.asc \
+        && success "Removed /etc/apt/keyrings/docker.asc" || true
+    rm -f /etc/apt/keyrings/docker.gpg \
+        && success "Removed /etc/apt/keyrings/docker.gpg (legacy)" || true
+
+    # BUG-UN2 FIX: setup.sh writes the Docker APT source in DEB822 format at
+    # docker.sources, not the one-liner docker.list format.  Removing both
+    # extensions handles systems set up with either version.
+    rm -f /etc/apt/sources.list.d/docker.sources \
+        && success "Removed /etc/apt/sources.list.d/docker.sources" || true
+    rm -f /etc/apt/sources.list.d/docker.list \
+        && success "Removed /etc/apt/sources.list.d/docker.list (legacy)" || true
+
+    info "Removing Docker runtime data at /var/lib/docker and /var/lib/containerd..."
+    rm -rf /var/lib/docker     && success "Removed /var/lib/docker"     || true
+    rm -rf /var/lib/containerd && success "Removed /var/lib/containerd" || true
+    rm -rf /etc/docker         && success "Removed /etc/docker"         || true
+
+    apt-get update -qq 2>/dev/null || true
+    apt-get autoremove -y 2>/dev/null && success "apt autoremove done." || true
 else
-    info "Docker packages not detected — skipping."
+    # No sentinel — Docker was not installed by setup.sh.
+    # Removing it here would silently destroy a system-level Docker
+    # installation that may be serving unrelated containers.
+    warn "Docker sentinel not found at ${DOCKER_SENTINEL}."
+    warn "Docker does not appear to have been installed by setup.sh."
+    warn "Skipping Docker package/repo/data removal to protect any"
+    warn "pre-existing Docker installation on this system."
+    warn "If you do want Docker removed, run manually:"
+    warn "  apt-get remove --purge docker-ce docker-ce-cli containerd.io \\"
+    warn "    docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras"
 fi
-
-info "Removing Docker APT repo and GPG key..."
-# BUG-UN1 FIX: setup.sh downloads the Docker GPG key as an armored ASCII file
-# (/etc/apt/keyrings/docker.asc) — not a dearmored .gpg binary. The old
-# uninstaller removed docker.gpg (which never existed after a clean setup.sh
-# run), leaving docker.asc on disk. Removing both extensions handles systems
-# set up with either version of setup.sh.
-rm -f /etc/apt/keyrings/docker.asc \
-    && success "Removed /etc/apt/keyrings/docker.asc" || true
-rm -f /etc/apt/keyrings/docker.gpg \
-    && success "Removed /etc/apt/keyrings/docker.gpg (legacy)" || true
-
-# BUG-UN2 FIX: setup.sh writes the Docker apt source in DEB822 format at
-# docker.sources, not the one-liner docker.list format. The old uninstaller
-# only removed docker.list (which never exists after a clean setup.sh run),
-# leaving docker.sources on disk and keeping Docker's APT repo active.
-# Removing both extensions handles systems set up with either version.
-rm -f /etc/apt/sources.list.d/docker.sources \
-    && success "Removed /etc/apt/sources.list.d/docker.sources" || true
-rm -f /etc/apt/sources.list.d/docker.list \
-    && success "Removed /etc/apt/sources.list.d/docker.list (legacy)" || true
-
-info "Removing Docker runtime data at /var/lib/docker and /var/lib/containerd..."
-rm -rf /var/lib/docker    && success "Removed /var/lib/docker"    || true
-rm -rf /var/lib/containerd && success "Removed /var/lib/containerd" || true
-rm -rf /etc/docker         && success "Removed /etc/docker"         || true
-
-apt-get update -qq 2>/dev/null || true
-apt-get autoremove -y 2>/dev/null && success "apt autoremove done." || true
 
 # ═══════════════════════════════════════════════════════════════
 # STEP 10 — Remove installed system packages added by setup.sh
@@ -268,22 +294,36 @@ apt-get autoremove -y 2>/dev/null || true
 
 # ═══════════════════════════════════════════════════════════════
 # STEP 11 — Remove UFW rules added by setup.sh
+#
+# FIX (Issue 3): The previous while-loop had no iteration cap.  If
+# `ufw delete` exits 0 but leaves the matching rule in place (corrupted
+# UFW state, silent no-op, etc.) the grep condition stays true and the
+# script hangs forever.
+#
+# Replaced with a bounded for-loop (20 iterations).  Normal deletion
+# takes at most 2 passes; 20 is a generous hard cap that guarantees
+# termination even under degraded UFW state.  An explicit `|| break`
+# on the delete call exits immediately on the first hard failure.
 # ═══════════════════════════════════════════════════════════════
 info "Step 11: Removing UFW rules for ports 80 and 443..."
 if command -v ufw &>/dev/null; then
-    # Delete rules for ports 80 and 443 (both direct and Cloudflare-CIDR rules)
-    # Run twice — ufw may have duplicate rules
+    # Delete simple allow rules first (covers the common case in one pass)
     ufw delete allow 80/tcp  2>/dev/null || true
     ufw delete allow 443/tcp 2>/dev/null || true
-    # Also remove any Cloudflare-CIDR specific rules for port 80/443
-    # by re-running delete on numbered rules that match
-    while ufw status numbered 2>/dev/null | grep -qE "(80|443)/tcp"; do
+
+    # Delete any remaining numbered rules that match ports 80 or 443
+    # (e.g. Cloudflare-CIDR rules added during setup).
+    # Capped at 20 iterations — normal cleanup finishes in ≤2 passes.
+    for _ufw_i in {1..20}; do
+        # Re-query each iteration; rule numbers shift after each deletion.
         RULE_NUM=$(ufw status numbered 2>/dev/null \
             | grep -E "(80|443)/tcp" \
-            | awk -F'[][]' '{print $2}' | head -1)
-        [[ -n "$RULE_NUM" ]] \
-            && yes | ufw delete "$RULE_NUM" 2>/dev/null || break
+            | awk -F'[][]' '{print $2}' \
+            | head -1)
+        [[ -n "$RULE_NUM" ]] || break   # no more matching rules — done
+        yes | ufw delete "$RULE_NUM" 2>/dev/null || break
     done
+
     success "UFW port 80/443 rules removed (SSH rules preserved)."
 else
     info "ufw not found — skipping firewall cleanup."
