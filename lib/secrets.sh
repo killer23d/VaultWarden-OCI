@@ -26,6 +26,18 @@
 #   health.sh line 14: lib/lib/simple_key_resilience.sh). Using a private
 #   variable scoped to this file fixes all callers without requiring each
 #   caller to save/restore SCRIPT_DIR.
+#
+# PATCHED BUGS (2026-04-06):
+#   FIX-SEC1: Surface sops stderr in all decrypt/validate paths so that
+#   failures produce actionable diagnostics instead of generic one-liners.
+#   decrypt_secret(), validate_secrets_decryption(), validate_secrets_yaml(),
+#   validate_required_secrets(), list_secrets(), and list_secret_keys() each
+#   previously suppressed sops stderr with 2>/dev/null, making it impossible
+#   to distinguish wrong-key, missing-key-file, corrupt-ciphertext, and
+#   network errors from log output alone. Fix: capture stderr into a local
+#   variable; emit it via log_error on non-zero exit, including the expected
+#   SOPS_AGE_KEY_FILE path. Pattern mirrors the BUG-CRY-ES2c fix in
+#   encrypt_sops_file().
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     echo "Error: This library should be sourced, not executed directly"
@@ -139,17 +151,29 @@ decrypt_secret() {
 
     local value
     local rc=0
+    local sops_stderr
     # BUG-#18 FIX: Suppress xtrace around secret decryption to prevent value
     # appearing in debug logs or core dumps via set -x output.
     { set +x; } 2>/dev/null
-    value=$(sops -d --extract "[\"$key\"]" "$secrets_file" 2>/dev/null) || rc=$?
+    # FIX-SEC1: Capture sops stderr so failures emit actionable diagnostics
+    # rather than a generic one-liner. The key file path is included to help
+    # operators confirm which AGE key was expected during disaster recovery.
+    sops_stderr=$(sops -d --extract "[\"$key\"]" "$secrets_file" 2>&1 >/dev/null) || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        { set +x; } 2>/dev/null
+        value=$(sops -d --extract "[\"$key\"]" "$secrets_file" 2>/dev/null) || rc=$?
+    fi
 
     # BUG-S10 FIX: unset key file path from environment so child processes do
     # not inherit it.
     unset SOPS_AGE_KEY_FILE
 
     if [[ $rc -ne 0 ]]; then
-        log_error "decrypt_secret: failed to decrypt key '$key'"
+        log_error "decrypt_secret: failed to decrypt key '$key' from $secrets_file (sops exit $rc)"
+        log_error "  Expected AGE key: ${SOPS_AGE_KEY_FILE:-<unset — ensure_sops_env ran>}"
+        if [[ -n "${sops_stderr:-}" ]]; then
+            log_error "  sops error: $sops_stderr"
+        fi
         return 1
     fi
 
@@ -170,22 +194,31 @@ list_secrets() {
     if ! ensure_sops_env; then return 1; fi
 
     local keys
+    local sops_stderr
+    local rc=0
     # BUG-#29 FIX: Suppress xtrace before sops to prevent the key file path
     # from appearing in trace output (bash -x / set -x logs).
     { set +x; } 2>/dev/null
-    keys=$(sops -d "$secrets_file" 2>/dev/null \
-        | python3 -c "
+    # FIX-SEC1: Capture sops stderr for actionable diagnostics on failure.
+    sops_stderr=$(sops -d "$secrets_file" 2>&1 >/dev/null) || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        keys=$(sops -d "$secrets_file" 2>/dev/null \
+            | python3 -c "
 import yaml, sys
 data = yaml.safe_load(sys.stdin)
 if isinstance(data, dict):
     for k in data.keys():
         print(k)
-" 2>/dev/null)
+" 2>/dev/null) || rc=$?
+    fi
 
     cleanup_secrets_environment
 
-    if [[ -z "$keys" ]]; then
-        log_error "list_secrets: decryption or parse failure"
+    if [[ $rc -ne 0 || -z "$keys" ]]; then
+        log_error "list_secrets: decryption or parse failure for $secrets_file (sops exit $rc)"
+        if [[ -n "${sops_stderr:-}" ]]; then
+            log_error "  sops error: $sops_stderr"
+        fi
         return 1
     fi
 
@@ -205,10 +238,17 @@ validate_secrets_decryption() {
     fi
     if ! ensure_sops_env; then return 1; fi
     local rc=0
-    sops -d "$secrets_file" >/dev/null 2>&1 || rc=$?
+    local sops_stderr
+    # FIX-SEC1: Capture sops stderr so the operator knows whether failure is a
+    # wrong key, missing key file, corrupt MAC, or other sops-level error.
+    sops_stderr=$(sops -d "$secrets_file" 2>&1 >/dev/null) || rc=$?
     cleanup_secrets_environment
     if [[ $rc -ne 0 ]]; then
-        log_error "Cannot decrypt secrets file"
+        log_error "Cannot decrypt secrets file: $secrets_file (sops exit $rc)"
+        log_error "  Check AGE key at: ${SOPS_AGE_KEY_FILE:-<unset>}"
+        if [[ -n "${sops_stderr:-}" ]]; then
+            log_error "  sops error: $sops_stderr"
+        fi
         return 1
     fi
     return 0
@@ -222,10 +262,15 @@ validate_secrets_yaml() {
     fi
     if ! ensure_sops_env; then return 1; fi
     local rc=0
-    sops -d --output-type json "$secrets_file" > /dev/null 2>&1 || rc=$?
+    local sops_stderr
+    # FIX-SEC1: Capture sops stderr for actionable diagnostics.
+    sops_stderr=$(sops -d --output-type json "$secrets_file" 2>&1 >/dev/null) || rc=$?
     cleanup_secrets_environment
     if [[ $rc -ne 0 ]]; then
-        log_warn "Secrets file cannot be decrypted or contains invalid YAML"
+        log_warn "Secrets file cannot be decrypted or contains invalid YAML: $secrets_file (sops exit $rc)"
+        if [[ -n "${sops_stderr:-}" ]]; then
+            log_warn "  sops error: $sops_stderr"
+        fi
         return 1
     fi
     return 0
@@ -237,8 +282,15 @@ validate_required_secrets() {
     if ! ensure_sops_env; then return 1; fi
     local missing_secrets=()
     for secret in "${required_secrets[@]}"; do
-        if ! sops -d --extract "[\"$secret\"]" "$secrets_file" >/dev/null 2>&1; then
+        local sops_stderr rc=0
+        # FIX-SEC1: Capture sops stderr per-key so missing vs. undecryptable
+        # secrets produce distinct diagnostic messages.
+        sops_stderr=$(sops -d --extract "[\"$secret\"]" "$secrets_file" 2>&1 >/dev/null) || rc=$?
+        if [[ $rc -ne 0 ]]; then
             missing_secrets+=("$secret")
+            if [[ -n "${sops_stderr:-}" ]]; then
+                log_debug "validate_required_secrets: sops error for '$secret': $sops_stderr"
+            fi
         fi
     done
     cleanup_secrets_environment
@@ -282,11 +334,20 @@ list_secret_keys() {
     fi
     if ! ensure_sops_env; then return 1; fi
     local keys
-    keys=$(sops -d "$secrets_file" 2>/dev/null \
-        | python3 -c "import yaml, sys; [print(k) for k in yaml.safe_load(sys.stdin).keys()]" 2>/dev/null)
+    local sops_stderr
+    local rc=0
+    # FIX-SEC1: Capture sops stderr for actionable diagnostics on failure.
+    sops_stderr=$(sops -d "$secrets_file" 2>&1 >/dev/null) || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        keys=$(sops -d "$secrets_file" 2>/dev/null \
+            | python3 -c "import yaml, sys; [print(k) for k in yaml.safe_load(sys.stdin).keys()]" 2>/dev/null) || rc=$?
+    fi
     cleanup_secrets_environment
-    if [[ -z "$keys" ]]; then
-        log_error "Could not list keys - decryption or parse failure"
+    if [[ $rc -ne 0 || -z "$keys" ]]; then
+        log_error "list_secret_keys: decryption or parse failure for $secrets_file (sops exit $rc)"
+        if [[ -n "${sops_stderr:-}" ]]; then
+            log_error "  sops error: $sops_stderr"
+        fi
         return 1
     fi
     echo "$keys"
