@@ -571,6 +571,27 @@ _check_config() {
 }
 
 # =============================================================================
+# NOTIFY-FAILURE DEAD-LETTER CHECKS
+# =============================================================================
+
+_check_notify_failures() {
+    local state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
+    local -a markers=()
+    mapfile -t markers < <(find "$state_dir" -maxdepth 1 -name 'NOTIFY_FAILED_*' 2>/dev/null | sort)
+
+    if [[ ${#markers[@]} -eq 0 ]]; then
+        _pass "notify:dead-letter" "No lost failure notifications"
+        return
+    fi
+
+    for marker in "${markers[@]}"; do
+        local unit="${marker##*/NOTIFY_FAILED_}"
+        _fail "notify:dead-letter" \
+            "SMTP was down when ${unit} failed — notification lost. Investigate and remove: ${marker}"
+    done
+}
+
+# =============================================================================
 # COMPREHENSIVE CHECKS
 # =============================================================================
 
@@ -710,6 +731,7 @@ main() {
     _check_dns
     _check_backups
     _check_config
+    _check_notify_failures
 
     # Comprehensive extras
     if $COMPREHENSIVE; then
