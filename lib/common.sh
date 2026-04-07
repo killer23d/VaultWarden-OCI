@@ -593,6 +593,50 @@ _rate_limit_check() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# clear_email_rate_limit SUBJECT
+#
+# Removes the rate-limit stamp file for SUBJECT so that the *next* call to
+# send_email() for this subject fires immediately, regardless of how recently
+# the previous alert was sent.
+#
+# Call this from health-check or monitoring scripts when a previously-alerting
+# condition returns to a healthy state.  This ensures that if the same
+# condition flaps, the recovery → next-fault cycle always produces a fresh
+# notification rather than waiting out the 1-hour TTL.
+#
+# Usage:
+#   clear_email_rate_limit "Health check failed"   # matches send_email subject
+#
+# The subject is normalised the same way send_email() normalises it:
+# "[VaultWarden] " is prepended if not already present, so callers may pass
+# the bare subject or the prefixed form interchangeably.
+# ─────────────────────────────────────────────────────────────────────────────
+clear_email_rate_limit() {
+    local subject="${1:-}"
+    [[ -z "$subject" ]] && { log_warn "clear_email_rate_limit: subject is empty — nothing to clear"; return 0; }
+
+    # Mirror the normalisation applied inside send_email().
+    [[ "$subject" != "[VaultWarden]"* ]] && subject="[VaultWarden] ${subject}"
+
+    local rate_limit_dir
+    rate_limit_dir=$(_resolve_rate_limit_dir) || {
+        log_debug "clear_email_rate_limit: rate-limit dir unavailable — nothing to clear"
+        return 0
+    }
+
+    local stamp_file="$rate_limit_dir/.vw_last_email_$(printf '%s' "$subject" | sha256sum | cut -c1-16)"
+
+    if [[ -f "$stamp_file" ]]; then
+        rm -f "$stamp_file" 2>/dev/null || true
+        log_debug "clear_email_rate_limit: cleared stamp for '${subject}'"
+    else
+        log_debug "clear_email_rate_limit: no stamp found for '${subject}' — nothing to clear"
+    fi
+
+    return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # _smtp_send <to> <subject> <body>  (BUG-EM6 FIX)
 #
 # Path A: SMTP_PASSWORD present → direct external relay (dev/test override)
@@ -916,6 +960,7 @@ export -f has_command require_commands retry_with_backoff is_root require_root g
 export -f register_cleanup perform_cleanup
 export -f ensure_dir secure_file test_connectivity test_http download_file
 export -f _resolve_rate_limit_dir _rate_limit_check send_email send_notification_email _smtp_send
+export -f clear_email_rate_limit
 export -f validate_email validate_domain validate_port validate_ip validate_url
 export -f setup_error_trap setup_cleanup_trap safe_execute
 export -f init_common_lib
