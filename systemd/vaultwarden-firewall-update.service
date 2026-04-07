@@ -22,7 +22,11 @@ PrivateTmp=yes
 # CAP_NET_ADMIN is required for iptables/nftables rules.
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/opt/vaultwarden-scripts /var/lib/vaultwarden /etc/vaultwarden
+# /opt/vaultwarden-scripts is intentionally excluded: scripts are read+executed
+# only and must not be writable at runtime (defence-in-depth against a
+# compromised script overwriting its siblings).
+# Note: /run/lock is not listed — this unit does not use flock().
+ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden
 AmbientCapabilities=CAP_NET_ADMIN
 CapabilityBoundingSet=CAP_NET_ADMIN
 # Timeout prevents indefinite hang if Cloudflare API is unreachable.
