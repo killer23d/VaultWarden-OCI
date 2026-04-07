@@ -6,44 +6,25 @@
 # busybox ash, not bash. POSIX sh only — do NOT add bash constructs or pipes
 # that rely on pipefail (ash does not support set -o pipefail). Test all
 # pipeline additions manually for failure propagation.
-# WARNING [CE-L2]: ash has no pipefail support. Pipelines silently swallow
-# errors from all stages except the last command. Avoid pipelines for any
-# command whose failure must abort the script. Use intermediate variables,
-# case statements, or explicit exit checks instead.
 set -eu
 
 echo "==================================================================="
 echo " Caddy Entrypoint - Loading Secrets"
 echo "==================================================================="
 
-# FIX [CE-2]: Emit a loud production warning immediately when debug mode is
-# enabled so operators are reminded to disable it before deploying.
 DEBUG_ENTRYPOINT=${DEBUG_ENTRYPOINT:-false}
 if [ "$DEBUG_ENTRYPOINT" = "true" ]; then
     echo "WARNING: DEBUG_ENTRYPOINT enabled — credential names will be logged — DISABLE IN PRODUCTION" >&2
 fi
 
 # =============================================================================
-# read_secret <secret_path> <out_var>
+# read_secret <secret_path>
 #
-# Reads the content of a Docker secret file into the variable named by
-# <out_var>.  Exits 1 with an actionable message on any failure.
-#
-# Design notes:
-#   - No mktemp/trap needed: stderr is captured inline via a subshell and
-#     process substitution is not required — a single $(... 2>&1) call gives
-#     us both the value and the error text without touching the filesystem.
-#   - Existence is checked first so the "not found" message names the secret,
-#     not a generic "No such file" from cat.
-#   - 'Permission denied' is distinguished from other errors because it has a
-#     specific, actionable fix (container must run as root to read /run/secrets).
-#   - Assignment and export are intentionally separated (FIX [M-17]): under
-#     POSIX set -eu, 'export VAR=$(cmd)' masks the exit code of cmd because
-#     'export' itself succeeds.  Assign first, check exit code, then export.
+# Reads the content of a Docker secret file and writes it to stdout.
+# Exits 1 with an actionable message on any failure.
 # =============================================================================
 read_secret() {
     _rs_path="$1"
-    _rs_var="$2"
 
     if [ ! -f "$_rs_path" ]; then
         echo "ERROR: Secret not found: $_rs_path" >&2
@@ -51,8 +32,6 @@ read_secret() {
         exit 1
     fi
 
-    # Capture both value and any error message in one read; stderr is merged
-    # into stdout only for the error-path branch below.
     _rs_out=$(cat "$_rs_path" 2>&1) || {
         case "$_rs_out" in
             *"Permission denied"*)
@@ -66,9 +45,8 @@ read_secret() {
         exit 1
     }
 
-    # On success _rs_out holds the file content; assign to caller's variable.
-    eval "${_rs_var}='${_rs_out}'"
-    unset _rs_path _rs_var _rs_out
+    printf '%s' "$_rs_out"
+    unset _rs_path _rs_out
 }
 
 # =============================================================================
