@@ -9,6 +9,25 @@
 #
 # Requires: curl, jq, awk, mktemp
 
+# Secured tmpdir for all temp files created by this script.
+# Mode 0700 ensures no world-readable file ever appears in /tmp.
+# Created on first use; persistent across bans within the same F2B process.
+_CF_TMPDIR="/run/fail2ban/curl-cfg"
+
+# ---------------------------------------------------------------------------
+# _cf_ensure_tmpdir
+# Create the secured temp directory if it does not already exist.
+# Called by _make_curl_cfg and _cf_api_call before mktemp.
+# ---------------------------------------------------------------------------
+_cf_ensure_tmpdir() {
+  if [ ! -d "$_CF_TMPDIR" ]; then
+    mkdir -p -m 0700 "$_CF_TMPDIR" 2>/dev/null || {
+      echo "[cloudflare-apiv4] ERROR: cannot create secured tmpdir $_CF_TMPDIR" >&2
+      return 1
+    }
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # _cf_load_token
 # Read the Cloudflare API bearer token from the Docker secret file into
@@ -122,15 +141,22 @@ _cf_validate_token() {
 # _make_curl_cfg
 # Write bearer token to a mode-600 temp file so it never appears in
 # /proc/<PID>/cmdline.  Prints the tempfile path on stdout.
-# Returns 1 on chmod failure (hard error — would expose live CF token).
+# Returns 1 on any error (hard — would expose live CF token).
+#
+# FIX: temp file is created inside $_CF_TMPDIR (mode 0700, under /run/fail2ban)
+# instead of /tmp. This eliminates the window where a world-readable empty
+# file exists in a world-writable directory before install secures it.
+# The install -m 600 step is retained for defence-in-depth.
 # ---------------------------------------------------------------------------
 _make_curl_cfg() {
-  # BUG-#16 FIX: Use install -m 600 to create the temp file at mode 600
-  # atomically, eliminating the mktemp (world-readable) → chmod 600 race window.
-  # The bearer token is never written until after the file is secured.
   local cfg
-  cfg="$(mktemp)"
+  _cf_ensure_tmpdir || return 1
+  cfg="$(mktemp --tmpdir="$_CF_TMPDIR" fail2ban-curl-cfg.XXXXXXXXXX)" || {
+    echo "[cloudflare-apiv4] ERROR: mktemp failed in $_CF_TMPDIR" >&2
+    return 1
+  }
   # Secure the file atomically before writing the bearer token.
+  # install -m 600 is O_CREAT|O_TRUNC with explicit mode — no chmod race.
   if ! install -m 600 /dev/null "$cfg" 2>/dev/null; then
     rm -f "$cfg"
     echo "[cloudflare-apiv4] ERROR: Failed to secure curl config tempfile — aborting to protect CF token" >&2
@@ -151,8 +177,9 @@ _cf_api_call() {
   local endpoint="$1" method="$2" body="${3:-}"
   local response_file header_file cfg_file http_code
 
-  response_file="$(mktemp)"
-  header_file="$(mktemp)"
+  _cf_ensure_tmpdir || return 1
+  response_file="$(mktemp --tmpdir="$_CF_TMPDIR" fail2ban-resp.XXXXXXXXXX)"
+  header_file="$(mktemp --tmpdir="$_CF_TMPDIR" fail2ban-hdr.XXXXXXXXXX)"
   cfg_file="$(_make_curl_cfg)" || return 1
 
   if [ -n "$body" ]; then
@@ -210,9 +237,9 @@ _cf_api_call() {
 }
 
 # ---------------------------------------------------------------------------
-# _cf_retry <endpoint> <method> [body] [attempts=4] [delays="2 4 8 16"]
+# _cf_retry <endpoint> <method> [body] [attempts=5] [delays="2 4 8 16 32"]
 # Retry wrapper with static delay table (POSIX sh portable; no bash ** needed).
-# Delays (seconds): attempt 1→2, 2→4, 3→8, 4→16.
+# Delays (seconds): attempt 1→2, 2→4, 3→8, 4→16, 5→32.
 # On 429, sleeps the Retry-After value from the header instead.
 # ---------------------------------------------------------------------------
 _cf_retry() {
