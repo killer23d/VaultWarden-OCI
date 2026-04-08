@@ -157,18 +157,17 @@ http://127.0.0.1:8080 {
 	# fail2ban vaultwarden-admin filter matches on that field.
 	@admin path /admin*
 	handle @admin {
-		# FIX-CF1: Reject any request that is NOT from the configured admin
-		# CIDR range or loopback (127.0.0.1) before basic_auth is evaluated.
-		# The client IP is already the real visitor IP because
+		# FIX-CF1: Reject any request that is NOT from the configured
+		# ADMIN_ALLOW_CIDR range or loopback (127.0.0.1) before basic_auth
+		# is evaluated. The client IP is already the real visitor IP because
 		# 'trusted_proxies cloudflare' + 'client_ip_headers Cf-Connecting-Ip'
 		# resolve it in the global servers block above.
 		#
-		# ADMIN_ALLOW_CIDR controls which source networks can reach /admin.
-		# Default: 192.168.0.0/16  (set in .env / .env.example)
-		# OCI VCN (10.x.x.x): set ADMIN_ALLOW_CIDR=10.0.0.0/8
-		# Multiple CIDRs: Caddy accepts space-separated values, e.g.:
-		#   ADMIN_ALLOW_CIDR=192.168.0.0/16 10.0.0.0/8 172.16.0.0/12
-		@admin_remote not remote_ip {$ADMIN_ALLOW_CIDR} 127.0.0.1
+		# ADMIN_ALLOW_CIDR is read from the environment at Caddy startup.
+		# Default: 192.168.0.0/16 (set in .env.example).
+		# OCI VCN admins on 10.x.x.x: set ADMIN_ALLOW_CIDR=10.0.0.0/8 in .env
+		# Multiple CIDRs: space-separated, e.g. "10.0.0.0/8 172.16.0.0/12"
+		@admin_remote not remote_ip {env.ADMIN_ALLOW_CIDR} 127.0.0.1
 		respond @admin_remote 403
 
 		header {
