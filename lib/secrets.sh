@@ -51,6 +51,19 @@
 #   any other $ sequences in the static body text. Changed to a quoted
 #   delimiter (<< 'EOF') for the static block, then appended all dynamic
 #   values with explicit printf calls.
+#
+#   FIX-VAL1: validate_required_secrets() hard-coded only 4 keys; added
+#   email_api_token and backup_passphrase. Missing backup_passphrase caused
+#   backup.sh to silently create unencrypted backups. Per-key log_error lines
+#   added so admins see one clear message per absent secret.
+#
+#   FIX-VAL2: check_placeholder_values() mirrored the same 4-key gap;
+#   email_api_token and backup_passphrase added to match validate_required_secrets().
+#   Per-key log_warn lines added so each stale placeholder is individually surfaced.
+#
+#   FIX-VAL3: Both functions now emit one diagnostic line per problem before
+#   the final aggregated summary, giving operators a clear, actionable message
+#   for each missing or placeholder secret rather than a single bulk warning.
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     echo "Error: This library should be sourced, not executed directly"
@@ -296,7 +309,18 @@ validate_secrets_yaml() {
 
 validate_required_secrets() {
     local secrets_file="${1:-$SECRETS_FILE}"
-    local required_secrets=("admin_token" "admin_basic_auth_hash" "caddy_cloudflare_dns_token" "fail2ban_cloudflare_firewall_token")
+    # FIX-VAL1: Added email_api_token and backup_passphrase. Both keys are
+    # consumed at runtime (email delivery and backup.sh respectively) but were
+    # absent from this list, allowing silent failures. backup_passphrase being
+    # absent caused backup.sh to silently produce unencrypted backups.
+    local required_secrets=(
+        "admin_token"
+        "admin_basic_auth_hash"
+        "caddy_cloudflare_dns_token"
+        "fail2ban_cloudflare_firewall_token"
+        "email_api_token"
+        "backup_passphrase"
+    )
     if ! ensure_sops_env; then return 1; fi
     local missing_secrets=()
     for secret in "${required_secrets[@]}"; do
@@ -305,6 +329,9 @@ validate_required_secrets() {
         # secrets produce distinct diagnostic messages.
         sops_stderr=$(sops -d --extract "[\"$secret\"]" "$secrets_file" 2>&1 >/dev/null) || rc=$?
         if [[ $rc -ne 0 ]]; then
+            # FIX-VAL3: One clear log_error per missing key so the admin sees
+            # an individual actionable line for each absent secret.
+            log_error "validate_required_secrets: required secret '$secret' is missing or unreadable"
             missing_secrets+=("$secret")
             if [[ -n "${sops_stderr:-}" ]]; then
                 log_debug "validate_required_secrets: sops error for '$secret': $sops_stderr"
@@ -313,7 +340,7 @@ validate_required_secrets() {
     done
     cleanup_secrets_environment
     if [[ ${#missing_secrets[@]} -gt 0 ]]; then
-        log_warn "Missing required secrets: ${missing_secrets[*]}"
+        log_warn "Missing required secrets (${#missing_secrets[@]}): ${missing_secrets[*]}"
         return 1
     fi
     return 0
@@ -321,7 +348,17 @@ validate_required_secrets() {
 
 check_placeholder_values() {
     local secrets_file="${1:-$SECRETS_FILE}"
-    local secrets_to_check=("admin_token" "admin_basic_auth_hash" "caddy_cloudflare_dns_token" "fail2ban_cloudflare_firewall_token")
+    # FIX-VAL2: Added email_api_token and backup_passphrase to mirror the
+    # required_secrets list in validate_required_secrets(). These keys were
+    # absent, so a CHANGE_ME placeholder in either would pass undetected.
+    local secrets_to_check=(
+        "admin_token"
+        "admin_basic_auth_hash"
+        "caddy_cloudflare_dns_token"
+        "fail2ban_cloudflare_firewall_token"
+        "email_api_token"
+        "backup_passphrase"
+    )
     if ! ensure_sops_env; then return 1; fi
     local placeholder_secrets=()
     for secret in "${secrets_to_check[@]}"; do
@@ -330,6 +367,9 @@ check_placeholder_values() {
         { set +x; } 2>/dev/null
         if value=$(sops -d --extract "[\"$secret\"]" "$secrets_file" 2>/dev/null); then
             if [[ "$value" =~ ^(CHANGE_ME|PLACEHOLDER_NOT_CONFIGURED) ]] || [[ -z "$value" ]]; then
+                # FIX-VAL3: One clear log_warn per placeholder key so the admin
+                # sees an individual actionable line for each stale value.
+                log_warn "check_placeholder_values: secret '$secret' is set to a placeholder or is empty"
                 placeholder_secrets+=("$secret")
             fi
         fi
@@ -338,7 +378,7 @@ check_placeholder_values() {
     # LS-9 FIX: clean up SOPS env before returning
     cleanup_secrets_environment
     if [[ ${#placeholder_secrets[@]} -gt 0 ]]; then
-        log_warn "Secrets with placeholders: ${placeholder_secrets[*]}"
+        log_warn "Secrets with placeholders (${#placeholder_secrets[@]}): ${placeholder_secrets[*]}"
         return 1
     fi
     return 0
