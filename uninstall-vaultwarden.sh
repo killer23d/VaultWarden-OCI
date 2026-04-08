@@ -3,6 +3,17 @@
 # Full idempotent uninstaller for killer23d/VaultWarden-OCI
 # Run from the user's home directory: bash ~/uninstall-vaultwarden.sh
 # Must be run as root (or via sudo).
+#
+# PATCHED BUGS:
+#   UN-KEY1 [HIGH] Step 6 previously rm -rf'd the project directory — which
+#                  includes secrets/keys/age-key.txt — without first checking
+#                  whether the encryption key had been saved elsewhere.
+#                  Destroying the age key renders ALL existing Age-encrypted
+#                  backups permanently unrecoverable.
+#                  Fix: if secrets/keys/age-key.txt exists, require the
+#                  operator to pass --i-have-saved-my-recovery-kit.  Without
+#                  the flag the script prints the Age public key fingerprint
+#                  and refuses to proceed.
 
 set -euo pipefail
 
@@ -12,6 +23,30 @@ info()    { echo -e "${YELLOW}[INFO]${RESET}  $*"; }
 success() { echo -e "${GREEN}[OK]${RESET}    $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${RESET}  $*"; }
 die()     { echo -e "${RED}[ERROR]${RESET} $*" >&2; exit 1; }
+
+# ─── Argument parsing ─────────────────────────────────────────────────────────
+# --i-have-saved-my-recovery-kit  Bypass the age-key destruction guard.
+#                                  Use only after confirming the key is safely
+#                                  backed up outside the project directory.
+I_HAVE_SAVED_RECOVERY_KIT=false
+for _arg in "$@"; do
+    case "$_arg" in
+        --i-have-saved-my-recovery-kit) I_HAVE_SAVED_RECOVERY_KIT=true ;;
+        --help)
+            echo "Usage: sudo bash $0 [--i-have-saved-my-recovery-kit]"
+            echo ""
+            echo "  --i-have-saved-my-recovery-kit"
+            echo "      Bypass the age encryption-key destruction guard."
+            echo "      Only pass this flag after you have confirmed that"
+            echo "      secrets/keys/age-key.txt (and its Age public key) are"
+            echo "      safely stored outside the project directory.  Without"
+            echo "      this key, ALL existing encrypted backups are permanently"
+            echo "      unrecoverable."
+            exit 0
+            ;;
+        *) ;;
+    esac
+done
 
 # ─── Root check ───────────────────────────────────────────────────────────────
 [[ $EUID -eq 0 ]] || die "Run as root: sudo bash $0"
@@ -40,6 +75,64 @@ echo ""
 read -r -p "Type 'UNINSTALL' to confirm, or anything else to abort: " CONFIRM
 [[ "$CONFIRM" == "UNINSTALL" ]] || { info "Aborted — nothing changed."; exit 0; }
 echo ""
+
+# ═══════════════════════════════════════════════════════════════
+# UN-KEY1 FIX — Age encryption-key destruction guard
+#
+# secrets/keys/age-key.txt is the master decryption key for ALL
+# Age-encrypted backups.  Deleting it without a confirmed off-system
+# copy makes every existing backup permanently unrecoverable.
+#
+# If the key file exists and --i-have-saved-my-recovery-kit was NOT
+# passed, print the Age public key fingerprint and refuse to continue.
+# This gives the admin a last-chance visual confirmation that they are
+# looking at the correct key before it is destroyed.
+# ═══════════════════════════════════════════════════════════════
+AGE_KEY_FILE="${PROJECT_DIR}/secrets/keys/age-key.txt"
+
+if [[ -f "$AGE_KEY_FILE" ]]; then
+    if [[ "$I_HAVE_SAVED_RECOVERY_KIT" == "false" ]]; then
+        echo ""
+        echo "════════════════════════════════════════════════════════════"
+        echo -e "${RED}  ⚠  ENCRYPTION KEY DESTRUCTION WARNING  ⚠${RESET}"
+        echo "════════════════════════════════════════════════════════════"
+        warn "The Age encryption key exists at:"
+        warn "  ${AGE_KEY_FILE}"
+        warn ""
+        warn "Deleting it makes ALL existing Age-encrypted backups"
+        warn "PERMANENTLY UNRECOVERABLE — there is no way to restore"
+        warn "them without this key."
+        warn ""
+        warn "Age public key (confirm this matches your recovery kit):"
+        echo ""
+        # Extract and display the public key line so the admin can verify
+        # it matches what they have saved before proceeding.
+        if command -v age-keygen >/dev/null 2>&1; then
+            grep -E '^# public key:' "$AGE_KEY_FILE" 2>/dev/null \
+                || grep -E '^age1' "$AGE_KEY_FILE" 2>/dev/null \
+                || echo "  (Could not extract public key — inspect ${AGE_KEY_FILE} manually)"
+        else
+            grep -E '^# public key:|^age1' "$AGE_KEY_FILE" 2>/dev/null \
+                || echo "  (Could not extract public key — inspect ${AGE_KEY_FILE} manually)"
+        fi
+        echo ""
+        warn "To proceed, re-run with the flag confirming you have saved"
+        warn "the recovery kit to a location OUTSIDE this directory:"
+        warn ""
+        warn "  sudo bash $0 --i-have-saved-my-recovery-kit"
+        warn ""
+        warn "Or, to inspect and back up the key first:"
+        warn "  cat ${AGE_KEY_FILE}"
+        echo "════════════════════════════════════════════════════════════"
+        echo ""
+        die "Uninstall aborted — age key not confirmed saved. No changes made."
+    else
+        warn "Recovery-kit flag passed — proceeding with age key destruction."
+        warn "Ensure secrets/keys/age-key.txt is backed up outside this host."
+    fi
+else
+    info "Age key not found at ${AGE_KEY_FILE} — no encryption-key guard needed."
+fi
 
 # ═══════════════════════════════════════════════════════════════
 # STEP 1 — Stop & remove Docker containers, volumes, networks
@@ -163,6 +256,9 @@ fi
 
 # ═══════════════════════════════════════════════════════════════
 # STEP 6 — Remove the cloned project directory (secrets, keys, config)
+#
+# UN-KEY1 FIX: the age-key guard above this step ensures the operator
+# has confirmed they have saved the recovery kit before we reach here.
 # ═══════════════════════════════════════════════════════════════
 info "Step 6: Removing project directory ${PROJECT_DIR}..."
 if [[ -d "$PROJECT_DIR" ]]; then
