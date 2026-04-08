@@ -99,6 +99,18 @@
 #       impossible without attaching strace.
 #       Fix: capture sops stderr into a variable; if sops exits non-zero,
 #       emit the captured output via log_error before returning 1.
+#
+# PATCHED BUGS (2026-04-08):
+#   CRY-M1-followup [MEDIUM]
+#       generate_secure_string(): the retry condition used -ge (greater-than-
+#       or-equal), which accepted any string of $length or more characters.
+#       A dd partial-read or a pipefail-swallowed error could theoretically
+#       produce a shorter string that still passes -ge if the pipe filled
+#       a buffer with extra bytes. Replaced with a strict -eq assertion.
+#       sleep 1 between retries removed: /dev/urandom on modern Linux never
+#       blocks, so the sleep adds up to 5 s of latency for no benefit.
+#       The || true that previously swallowed the dd pipeline rc is removed;
+#       the -eq guard now serves as the explicit failure detector.
 
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_CRYPTO_LIB_LOADED:-}" ]] && return 0
@@ -246,7 +258,7 @@ decrypt_sops_file() {
 # abort with 'Failed to get the data tree from the file'.
 #
 # BUG-CRY-ES2c FIX: Capture sops stderr and emit it via log_error on
-# failure instead of silently discarding it with 2>/dev/null.
+# failure instead of silently swallowing it with 2>/dev/null.
 encrypt_sops_file() {
     local file="$1"
     local age_key_file="${2:-$DEFAULT_AGE_KEY_FILE}"
@@ -557,6 +569,18 @@ decrypt_data() {
 # short string.  We now use dd bs=1 count=$length 2>/dev/null as the consumer,
 # which reads exactly the requested number of bytes in a single pass with no
 # broken-pipe risk.
+#
+# CRY-M1-followup FIX:
+#   - Removed sleep 1 between retry attempts. /dev/urandom on modern Linux
+#     (kernel >= 3.17 with getrandom(2)) never truly blocks once the entropy
+#     pool is initialised; sleeping wastes up to 5 s per secret during
+#     early-boot container setup for no benefit.
+#   - Replaced the -ge (greater-than-or-equal) retry guard with a strict -eq
+#     assertion. dd bs=1 count=$length reads exactly $length bytes from
+#     /dev/urandom; any shorter output indicates a pipeline error that must
+#     be retried, not silently accepted. The previous || true swallowing the
+#     dd rc is replaced by capturing rc explicitly and letting the -eq guard
+#     detect any mismatch.
 generate_secure_string() {
     local length="${1:-32}"
     local charset="${2:-A-Za-z0-9}"
@@ -572,18 +596,23 @@ generate_secure_string() {
         # CRY-M1 FIX: dd bs=1 count=$length avoids the SIGPIPE that head -c
         # sends to tr when it finishes reading, which would exit non-zero under
         # set -euo pipefail.
+        #
+        # CRY-M1-followup: capture rc explicitly; do not swallow with || true.
+        local _pipe_rc=0
         random_string=$(LC_ALL=C tr -dc "$charset" < /dev/urandom \
-                        | dd bs=1 count="$length" 2>/dev/null || true)
+                        | dd bs=1 count="$length" 2>/dev/null) || _pipe_rc=$?
 
-        if [[ ${#random_string} -ge $length ]]; then
-            printf '%s' "${random_string:0:$length}"
+        # Strict equality: dd bs=1 count=$length must yield exactly $length
+        # bytes.  Any shortfall (pipeline error, empty charset, partial read)
+        # is treated as a failure and retried.
+        if [[ ${#random_string} -eq $length ]]; then
+            printf '%s' "$random_string"
             return 0
         fi
-
-        sleep 1
+        # /dev/urandom never blocks on modern Linux; no sleep needed here.
     done
 
-    log_error "Failed to generate secure random string from /dev/urandom"
+    log_error "Failed to generate secure random string from /dev/urandom after 5 attempts"
     return 1
 }
 
