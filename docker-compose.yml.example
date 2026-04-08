@@ -50,6 +50,10 @@
 #              entrypoint derives DOMAIN_NAME=${DOMAIN#https://} at runtime so operators
 #              only set one variable. fail2ban F2B_SENDER uses ${F2B_SENDER} (literal
 #              value in .env) — Docker Compose does not expand ${VAR} in .env files.
+# ✅ FIX-vw-pids-limit: vaultwarden service now has deploy.resources.limits.pids: 200
+#              to bound PID exhaustion on constrained OCI VMs; consistent with postfix
+#              pattern (pids: 50). The nproc ulimit caps threads per-process but does
+#              not enforce the cgroup pids controller — this fills that gap.
 
 services:
   # =============================================================================
@@ -227,6 +231,8 @@ services:
         limits:
           memory: 512M
           cpus: '0.3'
+          pids: 200  # Caps cgroup-level PID count; complements nproc ulimit which only
+                     # bounds threads per-process. Prevents PID exhaustion on 1-2 GB OCI VMs.
         reservations:
           memory: 128M
           cpus: '0.1'
