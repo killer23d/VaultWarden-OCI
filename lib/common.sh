@@ -542,6 +542,23 @@ download_file() {
 source "${LIB_DIR}/email.sh"
 
 # ─────────────────────────────────────────────────────────────────────────────
+# _normalise_email_subject SUBJECT
+#
+# Single source of truth for the [VaultWarden] subject prefix used by every
+# email-related function.  Prepends the prefix when not already present and
+# prints the normalised subject to stdout.
+#
+# Both send_email() and clear_email_rate_limit() call this helper so that the
+# two functions always hash the same string when computing the rate-limit stamp
+# file path.  If the prefix is ever changed it only needs updating here.
+# ─────────────────────────────────────────────────────────────────────────────
+_normalise_email_subject() {
+    local subject="$1"
+    [[ "$subject" != "[VaultWarden]"* ]] && subject="[VaultWarden] ${subject}"
+    printf '%s\n' "$subject"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # _resolve_rate_limit_dir  (BUG-EM7 FIX)
 #
 # Tries candidate directories in priority order and returns the first one
@@ -612,16 +629,15 @@ _rate_limit_check() {
 # Usage:
 #   clear_email_rate_limit "Health check failed"   # matches send_email subject
 #
-# The subject is normalised the same way send_email() normalises it:
-# "[VaultWarden] " is prepended if not already present, so callers may pass
-# the bare subject or the prefixed form interchangeably.
+# The subject is normalised via _normalise_email_subject() — the same helper
+# used by send_email() — so callers may pass the bare subject or the prefixed
+# form interchangeably and the stamp file path always matches.
 # ─────────────────────────────────────────────────────────────────────────────
 clear_email_rate_limit() {
     local subject="${1:-}"
     [[ -z "$subject" ]] && { log_warn "clear_email_rate_limit: subject is empty — nothing to clear"; return 0; }
 
-    # Mirror the normalisation applied inside send_email().
-    [[ "$subject" != "[VaultWarden]"* ]] && subject="[VaultWarden] ${subject}"
+    subject=$(_normalise_email_subject "$subject")
 
     local rate_limit_dir
     rate_limit_dir=$(_resolve_rate_limit_dir) || {
@@ -778,7 +794,7 @@ send_email() {
             ;;
     esac
 
-    [[ "$subject" != "[VaultWarden]"* ]] && subject="[VaultWarden] ${subject}"
+    subject=$(_normalise_email_subject "$subject")
 
     local rate_limit_dir
     rate_limit_dir=$(_resolve_rate_limit_dir)
@@ -964,7 +980,8 @@ export -f load_env_file get_config_value require_config
 export -f has_command require_commands retry_with_backoff is_root require_root get_real_user
 export -f register_cleanup perform_cleanup
 export -f ensure_dir secure_file test_connectivity test_http download_file
-export -f _resolve_rate_limit_dir _rate_limit_check send_email send_notification_email _smtp_send
+export -f _normalise_email_subject _resolve_rate_limit_dir _rate_limit_check
+export -f send_email send_notification_email _smtp_send
 export -f clear_email_rate_limit
 export -f validate_email validate_domain validate_port validate_ip validate_url
 export -f setup_error_trap setup_cleanup_trap safe_execute
