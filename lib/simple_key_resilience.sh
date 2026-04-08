@@ -59,6 +59,18 @@
 #                   is ever introduced.
 #                   Fix: replaced with printf '%s' "$test_data" | age ... for
 #                   deterministic, newline-free byte handling.
+#
+# PATCHED BUGS (2026-04-08):
+#   SKR-M5 [MEDIUM] check_age_key_health(): performed an encrypt/decrypt
+#                   roundtrip against the on-disk key only. A DR scenario where
+#                   a new age key is restored while the old public key remains
+#                   in .sops.yaml would pass the health check yet fail to
+#                   decrypt any real secret.
+#                   Fix: after the roundtrip succeeds, derive the on-disk public
+#                   key and compare it against every age: recipient in .sops.yaml.
+#                   Emit a specific actionable error if none match:
+#                   "age key on disk does not match .sops.yaml recipient —
+#                    secrets were encrypted to a different key"
 
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_KEY_RESILIENCE_LIB_LOADED:-}" ]] && return 0
@@ -575,6 +587,27 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# _sops_yaml_age_recipients [SOPS_YAML]
+#
+# Extract all age: recipient public keys from the given .sops.yaml file.
+# Prints one key per line.  Returns 1 if the file does not exist or contains
+# no age recipients.
+#
+# Relies only on grep and sed; no yq or Python dependency required.
+# ---------------------------------------------------------------------------
+_sops_yaml_age_recipients() {
+    local sops_yaml="${1:-.sops.yaml}"
+    [[ -f "$sops_yaml" ]] || return 1
+
+    # Match lines of the form:  - age1...  (with any leading whitespace/dash)
+    local keys
+    keys=$(grep -E '^[[:space:]]*-[[:space:]]*(age1[a-z0-9]+)' "$sops_yaml" \
+           | sed -E 's/^[[:space:]]*-[[:space:]]*//')
+    [[ -n "$keys" ]] || return 1
+    printf '%s\n' "$keys"
+}
+
+# ---------------------------------------------------------------------------
 # check_age_key_health
 #
 # Public entry-point called by startup.sh, update.sh, and Makefile.
@@ -582,8 +615,56 @@ EOF
 #   1. Key file exists at SOPS_AGE_KEY_FILE
 #   2. Permissions are 600 (auto-corrects if not)
 #   3. Encrypt/decrypt roundtrip confirms operational validity
+#
+# SKR-M5 FIX: additionally cross-checks the on-disk public key against the
+# age: recipient list in .sops.yaml.  A mismatch means a new age key was
+# restored while the old public key remains in .sops.yaml — all existing
+# secrets will be unreadable even though the roundtrip passes.
+# Specific error emitted on mismatch:
+#   "age key on disk does not match .sops.yaml recipient —
+#    secrets were encrypted to a different key"
 # ---------------------------------------------------------------------------
 check_age_key_health() {
-    simple_verify_age_key
-}
+    # Step 1: standard file / permission / roundtrip checks
+    simple_verify_age_key || return 1
 
+    # Step 2: cross-check on-disk public key against .sops.yaml recipient list
+    local age_key="${SOPS_AGE_KEY_FILE:-secrets/keys/age-key.txt}"
+    local sops_yaml="${SOPS_CONFIG_FILE:-.sops.yaml}"
+
+    if [[ ! -f "$sops_yaml" ]]; then
+        log_debug "check_age_key_health: .sops.yaml not found at '$sops_yaml' — skipping recipient check"
+        return 0
+    fi
+
+    local disk_pub
+    if ! disk_pub=$(_derive_age_public_key "$age_key" 2>/dev/null); then
+        log_error "check_age_key_health: cannot derive public key from $age_key"
+        return 1
+    fi
+
+    local recipients
+    if ! recipients=$(_sops_yaml_age_recipients "$sops_yaml"); then
+        log_warn "check_age_key_health: no age recipients found in $sops_yaml — skipping recipient check"
+        return 0
+    fi
+
+    local recipient matched=0
+    while IFS= read -r recipient; do
+        if [[ "$recipient" == "$disk_pub" ]]; then
+            matched=1
+            break
+        fi
+    done <<< "$recipients"
+
+    if [[ "$matched" -eq 0 ]]; then
+        log_error "age key on disk does not match .sops.yaml recipient — secrets were encrypted to a different key"
+        log_error "  on-disk public key : $disk_pub"
+        log_error "  .sops.yaml expects : $(printf '%s\n' "$recipients" | head -1) (and possibly more)"
+        log_error "  To fix: re-encrypt secrets with the current key, or restore the original age key."
+        return 1
+    fi
+
+    log_debug "check_age_key_health: .sops.yaml recipient check passed"
+    return 0
+}
