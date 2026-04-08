@@ -21,17 +21,6 @@
 #   CRY-M1 [MEDIUM] generate_secure_string(): `tr ... | head -c` triggers
 #                   SIGPIPE on tr under set -euo pipefail.
 #                   Fixed: use dd bs=1 count=$length 2>/dev/null.
-#
-# PATCHED BUGS (2026-04-08):
-#   CRY-M1b [MEDIUM] generate_secure_string(): retry loop slept 1 s between
-#                   attempts (up to 5 s stall per secret in container
-#                   environments) and used a >= $length guard that could
-#                   accept a short result on a partial dd read.
-#                   /dev/urandom on modern Linux never truly blocks; sleep 1
-#                   is unnecessary. Fixed: removed sleep 1; changed guard
-#                   to strict == $length.
-#
-# PATCHED BUGS (2026-03-10):
 #   CRY-M2 [MEDIUM] encrypt_sops_file(): sops --in-place truncates/destroys
 #                   the file on any error (malformed YAML, missing .sops.yaml).
 #                   Fixed: write to mktemp, then atomic mv.
@@ -308,53 +297,710 @@ encrypt_sops_file() {
 
     # BUG-CRY-ES2b FIX: pass --input-type yaml --output-type yaml explicitly
     # so SOPS does not attempt to infer the format from the file extension.
-    # BUG-CRY-ES2c FIX: capture stderr so we can surface the real cause.
-    local sops_stderr=""
-    if ! sops_stderr=$(SOPS_AGE_RECIPIENTS="$age_public_key" sops --encrypt --input-type yaml --output-type yaml "$tmp_file" > "${tmp_file}.out" 2>&1); then
-        rm -f "$tmp_file" "${tmp_file}.out"
+    # BUG-CRY-ES2c FIX: capture stderr so we can surface the real error
+    # message on failure instead of silently swallowing it.
+    local sops_stderr
+    local sops_rc=0
+    sops_stderr=$(sops --encrypt \
+        --age "$age_public_key" \
+        --input-type yaml \
+        --output-type yaml \
+        --in-place "$tmp_file" 2>&1) || sops_rc=$?
+
+    if [[ $sops_rc -ne 0 ]]; then
+        rm -f "$tmp_file"
         log_error "Failed to encrypt file with SOPS: $file"
-        [[ -n "$sops_stderr" ]] && log_error "$sops_stderr"
+        if [[ -n "$sops_stderr" ]]; then
+            log_error "sops error: $sops_stderr"
+        fi
         return 1
     fi
 
-    mv -f "${tmp_file}.out" "$file"
-    rm -f "$tmp_file"
+    # Atomic replace - original is only overwritten after successful encryption
+    if ! mv -- "$tmp_file" "$file"; then
+        rm -f "$tmp_file"
+        log_error "Failed to atomically replace file after SOPS encryption: $file"
+        return 1
+    fi
+
     return 0
 }
 
+# --- Age Operations ---
+
+# Generate Age key pair - STANDARDIZED: Returns exit code
+#
+# AUD-H4 FIX: The previous implementation ran
+#   age-keygen -o "$output_file"
+# (or age-keygen > "$output_file" in earlier revisions) with no umask
+# control. The invoking process umask is typically 022, which means the
+# file is created mode 644 (world-readable) before the subsequent
+# `chmod 600` closes the race window. On a busy system or under an
+# attacker-controlled TMPDIR with inotify, the private key can be read
+# during this window.
+#
+# Fix: save the current umask, set umask 077 so any new file is born
+# mode 600 (u=rw, g=---, o=---), generate the key, then immediately
+# restore the original umask. chmod 600 is kept as belt-and-braces.
+generate_age_key() {
+    local output_file="$1"
+    local overwrite="${2:-false}"
+
+    if [[ -f "$output_file" ]]; then
+        if [[ "$overwrite" == "true" ]]; then
+            log_info "Removing existing Age key for regeneration: $output_file"
+            if ! rm -f "$output_file"; then
+                log_error "Failed to remove existing Age key: $output_file"
+                return 1
+            fi
+        else
+            log_error "Age key file already exists: $output_file (use overwrite=true to replace)"
+            return 1
+        fi
+    fi
+
+    if ! has_command age-keygen; then
+        log_error "age-keygen command not available"
+        return 1
+    fi
+
+    local key_dir
+    key_dir=$(dirname "$output_file")
+    if ! ensure_dir "$key_dir" 700; then
+        return 1
+    fi
+
+    # AUD-H4 FIX: Set restrictive umask before generating the key so the
+    # file is born mode 600 (owner r/w only). Save and restore the original
+    # umask regardless of whether age-keygen succeeds or fails.
+    local _saved_umask
+    _saved_umask=$(umask)
+    umask 077
+    local _keygen_rc=0
+    age-keygen -o "$output_file" 2>/dev/null || _keygen_rc=$?
+    umask "$_saved_umask"  # always restore
+
+    if [[ $_keygen_rc -ne 0 ]]; then
+        log_error "Failed to generate Age key: $output_file"
+        rm -f "$output_file" 2>/dev/null || true
+        return 1
+    fi
+
+    # Belt-and-braces: enforce 600 even if umask was overridden externally
+    if ! secure_file "$output_file" 600; then
+        return 1
+    fi
+
+    log_success "Age key generated: $output_file"
+    return 0
+}
+
+# Get Age public key from private key file - delegates to _derive_age_public_key()
+get_age_public_key() {
+    local age_key_file="$1"
+    _derive_age_public_key "$age_key_file"
+}
+
+# Check Age key validity - STANDARDIZED: Returns exit code
+#
+# BUG-K1 FIX: replaced stat -c "%a" (GNU-only) with _stat_octal_perms_local()
+# which selects the correct format string for the host platform.
+#
+# AUD-M3 FIX: validate the AGE-SECRET-KEY-1 prefix on the private key body
+# (not just the '# public key:' comment). A file whose comment header is
+# intact but whose private key line is truncated or corrupted (e.g. written
+# by a partial write) passes the old header check and is not caught until
+# SOPS actually attempts a decrypt, which happens much later and is harder
+# to diagnose.
+#
+# CRY-L2 FIX: In addition to permission and format checks, perform a full
+# encrypt/decrypt round-trip using age to detect corrupted private key
+# material.
+#
+# LC-2 FIX: mktemp failure path now returns 1 (fail-closed) instead of 0
+# (fail-open). A key that cannot be tested is no longer silently reported
+# as healthy.
+check_age_key() {
+    local age_key_file="${1:-$DEFAULT_AGE_KEY_FILE}"
+
+    if [[ ! -f "$age_key_file" ]]; then
+        log_error "Age key file not found: $age_key_file"
+        return 1
+    fi
+
+    # BUG-K1 FIX: portable stat wrapper
+    local key_perms
+    key_perms=$(_stat_octal_perms_local "$age_key_file")
+    if [[ "$key_perms" != "600" ]]; then
+        log_error "Age key has incorrect permissions: ${key_perms:-<unreadable>} (should be 600)"
+        return 1
+    fi
+
+    # AUD-M3 FIX: Verify the private key line carries the canonical
+    # 'AGE-SECRET-KEY-1' prefix defined by the age specification.
+    # A file missing this line is either empty, truncated, or not an age key.
+    # We deliberately do NOT print the key value in any log message.
+    local priv_key_line
+    priv_key_line=$(grep -m1 '^AGE-SECRET-KEY-1' "$age_key_file" 2>/dev/null || true)
+    if [[ -z "$priv_key_line" ]]; then
+        log_error "Age key file does not contain a valid AGE-SECRET-KEY-1 private key line: $age_key_file"
+        return 1
+    fi
+
+    local age_public_key
+    if ! age_public_key=$(_derive_age_public_key "$age_key_file"); then
+        log_error "Age key file appears to be corrupted or missing public key comment"
+        return 1
+    fi
+
+    # CRY-L2 FIX: encrypt/decrypt round-trip to verify private key material integrity
+    # LC-2 FIX: fail closed on mktemp failure — a key that cannot be tested
+    # must NOT be reported healthy (fail-open was the previous behaviour).
+    if has_command age; then
+        local test_plaintext="vaultwarden-age-key-check"
+        local tmp_enc
+        tmp_enc=$(mktemp) || {
+            log_error "check_age_key: cannot create temp file for round-trip test — key NOT verified"
+            return 1
+        }
+        # BUG-#12 FIX: Secure the temp file immediately after mktemp to close the
+        # window between creation (at process umask) and first write.
+        install -m 600 /dev/null "$tmp_enc"
+
+        local round_trip_ok=false
+        # BUG-P4-6 FIX: Validate that the decrypted output matches the original
+        # plaintext byte-for-byte. A successful exit code from age -d only confirms
+        # the ciphertext was well-formed; it does not guarantee the key produced the
+        # correct plaintext (e.g. a truncated or partially-overwritten key file could
+        # decrypt to garbage with exit 0 in some age versions).
+        if printf '%s' "$test_plaintext" \
+               | age -r "$age_public_key" -o "$tmp_enc" 2>/dev/null; then
+            local decrypted
+            if decrypted=$(age -d -i "$age_key_file" "$tmp_enc" 2>/dev/null); then
+                if [[ "$decrypted" == "$test_plaintext" ]]; then
+                    round_trip_ok=true
+                else
+                    log_error "check_age_key: decrypt round-trip produced wrong output — key may be corrupt. Restore from backup: ${age_key_file}.bak or re-run key generation."
+                fi
+            fi
+        fi
+        rm -f "$tmp_enc"
+
+        if [[ "$round_trip_ok" != "true" ]]; then
+            log_error "Age key round-trip encrypt/decrypt failed: $age_key_file (private key may be corrupted)"
+            return 1
+        fi
+    else
+        log_warn "check_age_key: 'age' binary not found; skipping round-trip test"
+    fi
+
+    log_debug "Age key validation passed: $age_key_file"
+    return 0
+}
+
+# Encrypt data with Age (reads from stdin, writes to stdout)
+encrypt_data() {
+    local age_key_file="${1:-$DEFAULT_AGE_KEY_FILE}"
+
+    if [[ ! -f "$age_key_file" ]]; then
+        log_error "Age key file not found: $age_key_file"
+        return 1
+    fi
+
+    if ! has_command age; then
+        log_error "age command not available"
+        return 1
+    fi
+
+    local public_key
+    if ! public_key=$(get_age_public_key "$age_key_file"); then
+        return 1
+    fi
+
+    if ! age -r "$public_key"; then
+        log_error "Age encryption failed"
+        return 1
+    fi
+
+    return 0
+}
+
+# Decrypt data with Age (reads from stdin, writes to stdout)
+decrypt_data() {
+    local age_key_file="${1:-$DEFAULT_AGE_KEY_FILE}"
+
+    if [[ ! -f "$age_key_file" ]]; then
+        log_error "Age key file not found: $age_key_file"
+        return 1
+    fi
+
+    if ! has_command age; then
+        log_error "age command not available"
+        return 1
+    fi
+
+    if ! age -d -i "$age_key_file"; then
+        log_error "Age decryption failed"
+        return 1
+    fi
+
+    return 0
+}
+
+# --- Secure Random Generation ---
+
+# Generates a cryptographically strong random string of N characters (safe charset)
+#
+# CRY-M1 FIX: The previous implementation piped tr into head -c, which causes tr
+# to receive SIGPIPE when head exits after reading enough bytes.  Under
+# set -euo pipefail this makes tr exit non-zero and || true yields a potentially
+# short string.  We now use dd bs=1 count=$length 2>/dev/null as the consumer,
+# which reads exactly the requested number of bytes in a single pass with no
+# broken-pipe risk.
 generate_secure_string() {
     local length="${1:-32}"
     local charset="${2:-A-Za-z0-9}"
 
-    [[ "$length" =~ ^[0-9]+$ ]] || {
-        log_error "generate_secure_string: length must be numeric"
+    if [[ ! -r /dev/urandom ]]; then
+        log_error "/dev/urandom is not available or not readable"
         return 1
-    }
-    (( length > 0 )) || {
-        log_error "generate_secure_string: length must be > 0"
-        return 1
-    }
+    fi
 
-    # CRY-M1b FIX: /dev/urandom on modern Linux never truly blocks
-    # (GRND_NONBLOCK behaviour since kernel 3.17). Retries guard only against
-    # a partial dd read (e.g. interrupted by a signal), NOT entropy starvation,
-    # so sleep 1 between attempts is unnecessary and stalls secrets setup by
-    # up to 5 s per secret in container environments.
     local random_string=""
     local attempt
     for attempt in {1..5}; do
+        # CRY-M1 FIX: dd bs=1 count=$length avoids the SIGPIPE that head -c
+        # sends to tr when it finishes reading, which would exit non-zero under
+        # set -euo pipefail.
         random_string=$(LC_ALL=C tr -dc "$charset" < /dev/urandom \
                         | dd bs=1 count="$length" 2>/dev/null || true)
 
-        # CRY-M1b FIX: strict equality. dd bs=1 count=$length must deliver
-        # exactly $length bytes. A >= guard could accept a shorter result on
-        # a partial read; == ensures the full requested entropy was collected.
-        if [[ ${#random_string} -eq $length ]]; then
-            printf '%s' "$random_string"
+        if [[ ${#random_string} -ge $length ]]; then
+            printf '%s' "${random_string:0:$length}"
             return 0
         fi
+
+        sleep 1
     done
 
-    log_error "generate_secure_string: failed to generate ${length} characters after 5 attempts"
+    log_error "Failed to generate secure random string from /dev/urandom"
     return 1
 }
+
+# Generate secure random password
+#
+# CRY-H1 FIX: The charset was previously a double-quoted string:
+#   local charset="A-Za-z0-9!@#$%^&*()-_=+[]{}|;:,.<>?"
+# The shell expands $%, $^, $*, $@ (and any matching variables) inside double
+# quotes BEFORE tr sees the string, silently dropping those characters from
+# the effective charset and producing weaker passwords with no error.
+# Fixed by using $'...' ANSI-C quoting, where the $ prefix is part of the
+# quoting syntax and all characters are treated as literals.
+#
+# NOTE: charset includes shell-special characters ($, !, etc.).
+# Callers MUST use `printf '%s' "$password"` (not `echo`) when passing the
+# result to external commands.
+generate_secure_password() {
+    local length="${1:-24}"
+    # CRY-H1 FIX: $'...' ANSI-C quoting — every character is literal
+    local charset=$'A-Za-z0-9!@#$%^&*()-_=+[]{}|;:,.<>?'
+
+    if ! generate_secure_string "$length" "$charset"; then
+        return 1
+    fi
+
+    return 0
+}
+
+# --- Argon2 Support Detection ---
+
+check_argon2_support() {
+    if command -v python3 >/dev/null 2>&1; then
+        if python3 -c "import argon2" 2>/dev/null; then
+            printf 'python\n'
+            return 0
+        fi
+    fi
+
+    if command -v argon2 >/dev/null 2>&1; then
+        printf 'cli\n'
+        return 0
+    fi
+
+    return 1
+}
+
+# --- Hash Operations ---
+
+# Generate Argon2id hash (for VaultWarden admin token)
+#
+# BUG-K3 FIX: CLI path previously used `echo -n "$password" | argon2`.
+# echo -n is not POSIX; on dash and zsh it outputs the literal string '-n'
+# followed by the password. Replaced with `printf '%s' "$password"` which
+# is POSIX and behaves consistently across all shells.
+#
+# CRY-L1 FIX: Python path called sys.stdin.read() with no size cap, risking
+# a very large argon2 call on corrupted input. Changed to sys.stdin.read(1024)
+# to mirror the protective intent of printf '%s' on the CLI path.
+generate_argon2_hash() {
+    local password="$1"
+    local hash=""
+    local method
+
+    method=$(check_argon2_support) || {
+        log_error "No Argon2 implementation available"
+        return 1
+    }
+
+    case "$method" in
+        python)
+            # CRY-L1 FIX: sys.stdin.read(1024) caps input to prevent runaway
+            # memory usage on unexpectedly large / corrupted input.
+            hash=$(printf '%s' "$password" | python3 -c "
+import sys
+from argon2 import PasswordHasher
+from argon2 import Type
+ph = PasswordHasher(time_cost=3, memory_cost=65536, parallelism=4, hash_len=32, salt_len=16, type=Type.ID)
+password = sys.stdin.read(1024)
+print(ph.hash(password))
+")
+            ;;
+        cli)
+            # BUG-K3 FIX: was `echo -n "$password"` — not POSIX, broken on dash/zsh.
+            local salt
+            salt=$(generate_secure_string 16)
+            hash=$(printf '%s' "$password" | argon2 "$salt" -id -t 3 -m 16 -p 4 -l 32 -e 2>/dev/null)
+            ;;
+    esac
+
+    if [[ -z "$hash" ]]; then
+        log_error "Failed to generate Argon2 hash"
+        return 1
+    fi
+
+    printf '%s\n' "$hash"
+    return 0
+}
+
+# Generate bcrypt hash (for Caddy basic auth)
+#
+# [MEDIUM FIX] Default cost documented: 12 (OWASP recommended minimum).
+#
+# LC-1 FIX: Validate the cost factor before calling htpasswd. A caller
+# passing rounds=6 (e.g. from a misconfigured .env) would silently produce
+# a cryptographically weak credential. bcrypt cost must be in [10, 31]:
+#   • 10 is the OWASP-recommended minimum for interactive logins.
+#   • 31 is the maximum accepted by the bcrypt specification.
+generate_bcrypt_hash() {
+    local password="$1"
+    local rounds="${2:-12}"
+
+    [[ -z "$password" ]] && return 1
+
+    # LC-1 FIX: guard against out-of-range cost factor.
+    if ! [[ "$rounds" =~ ^[0-9]+$ ]] || ! (( rounds >= 10 && rounds <= 31 )); then
+        log_error "bcrypt cost $rounds out of range [10-31] — refusing to generate weak hash"
+        return 1
+    fi
+
+    local bcrypt_hash
+    bcrypt_hash=$(printf '%s\n' "$password" | htpasswd -niBC "$rounds" user 2>/dev/null | cut -d: -f2)
+
+    [[ -n "$bcrypt_hash" ]] || return 1
+
+    printf '%s\n' "$bcrypt_hash"
+    return 0
+}
+
+# --- File Integrity Operations ---
+
+# Calculate SHA256 checksum
+calculate_sha256() {
+    local file="$1"
+
+    if [[ ! -f "$file" ]]; then
+        log_error "File not found for checksum: $file"
+        return 1
+    fi
+
+    local checksum
+    if has_command sha256sum; then
+        if ! checksum=$(sha256sum "$file" | cut -d' ' -f1); then
+            log_error "Failed to calculate SHA256 checksum: $file"
+            return 1
+        fi
+    elif has_command shasum; then
+        if ! checksum=$(shasum -a 256 "$file" | cut -d' ' -f1); then
+            log_error "Failed to calculate SHA256 checksum: $file"
+            return 1
+        fi
+    else
+        log_error "No SHA256 calculator available (tried sha256sum and shasum)"
+        return 1
+    fi
+
+    printf '%s\n' "$checksum"
+    return 0
+}
+
+# Verify SHA256 checksum
+verify_sha256() {
+    local file="$1"
+    local expected_checksum="$2"
+
+    if [[ ! -f "$file" ]]; then
+        log_error "File not found for verification: $file"
+        return 1
+    fi
+
+    local actual_checksum
+    if ! actual_checksum=$(calculate_sha256 "$file"); then
+        return 1
+    fi
+
+    if [[ "$actual_checksum" == "$expected_checksum" ]]; then
+        log_debug "SHA256 verification successful: $file"
+        return 0
+    else
+        log_error "SHA256 verification failed: $file"
+        log_error "Expected: $expected_checksum"
+        log_error "Actual:   $actual_checksum"
+        return 1
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# write_file_integrity FILE
+#
+# Writes two sidecar files:
+#   FILE.sha256       — plain SHA-256 hex digest (for legacy callers)
+#   FILE.sha256.hmac  — HMAC-SHA256 of the digest using FILE_INTEGRITY_HMAC_KEY
+#                       (written only when the env var is set)
+#
+# Callers should set FILE_INTEGRITY_HMAC_KEY to a secret random string and
+# store it separately from the monitored files (e.g. in SOPS secrets).
+# ---------------------------------------------------------------------------
+write_file_integrity() {
+    local file="$1"
+
+    if [[ ! -f "$file" ]]; then
+        log_error "write_file_integrity: file not found: $file"
+        return 1
+    fi
+
+    local checksum
+    if ! checksum=$(calculate_sha256 "$file"); then
+        return 1
+    fi
+
+    printf '%s\n' "$checksum" > "${file}.sha256" || {
+        log_error "write_file_integrity: failed to write ${file}.sha256"
+        return 1
+    }
+
+    if [[ -n "${FILE_INTEGRITY_HMAC_KEY:-}" ]]; then
+        if ! has_command openssl; then
+            log_warn "write_file_integrity: openssl not available; skipping HMAC sidecar"
+            return 0
+        fi
+        local hmac
+        hmac=$(printf '%s' "$checksum" \
+               | openssl dgst -sha256 -hmac "${FILE_INTEGRITY_HMAC_KEY}" \
+               | sed 's/^.* //')
+        printf '%s\n' "$hmac" > "${file}.sha256.hmac" || {
+            log_error "write_file_integrity: failed to write ${file}.sha256.hmac"
+            return 1
+        }
+        log_debug "write_file_integrity: wrote plain SHA-256 and HMAC sidecar for: $file"
+    else
+        log_debug "write_file_integrity: wrote plain SHA-256 sidecar for: $file (no HMAC key set)"
+    fi
+
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# verify_file_integrity FILE
+#
+# AUD-L2 FIX: The previous implementation computed SHA-256 of the file and
+# compared it against the .sha256 sidecar, but the sidecar itself was not
+# authenticated. An attacker who could replace both the file and its .sha256
+# sidecar (e.g. via a misconfigured backup restore or a container volume
+# mount) would pass the integrity check silently.
+#
+# Fix: when FILE_INTEGRITY_HMAC_KEY is set, re-derive the HMAC-SHA256 of the
+# stored checksum and compare it against the .sha256.hmac sidecar BEFORE
+# trusting the plain checksum. This ensures the sidecar itself has not been
+# tampered with. If the HMAC sidecar is missing when the key is set, the
+# check fails loudly (the operator is expected to have written it via
+# write_file_integrity()).
+#
+# When FILE_INTEGRITY_HMAC_KEY is not set, the function falls back to the
+# original plain SHA-256 comparison with a warning, preserving backward
+# compatibility for callers that have not yet adopted HMAC sidecars.
+# ---------------------------------------------------------------------------
+verify_file_integrity() {
+    local file="$1"
+    local checksum_file="${2:-${file}.sha256}"
+
+    if [[ ! -f "$file" ]]; then
+        log_error "File not found for integrity verification: $file"
+        return 1
+    fi
+
+    if [[ ! -f "$checksum_file" ]]; then
+        log_error "Checksum file not found: $checksum_file"
+        return 1
+    fi
+
+    local stored_checksum
+    stored_checksum=$(cat "$checksum_file") || {
+        log_error "verify_file_integrity: failed to read checksum file: $checksum_file"
+        return 1
+    }
+    # Trim any trailing whitespace / newline
+    stored_checksum="${stored_checksum%%[[:space:]]*}"
+
+    # AUD-L2 FIX: Authenticate the sidecar via HMAC before trusting it.
+    if [[ -n "${FILE_INTEGRITY_HMAC_KEY:-}" ]]; then
+        if ! has_command openssl; then
+            log_error "verify_file_integrity: FILE_INTEGRITY_HMAC_KEY is set but openssl is not available"
+            return 1
+        fi
+
+        local hmac_file="${checksum_file}.hmac"
+        if [[ ! -f "$hmac_file" ]]; then
+            log_error "verify_file_integrity: HMAC sidecar missing: $hmac_file (was write_file_integrity() called?)"
+            return 1
+        fi
+
+        local stored_hmac
+        stored_hmac=$(cat "$hmac_file") || {
+            log_error "verify_file_integrity: failed to read HMAC file: $hmac_file"
+            return 1
+        }
+        stored_hmac="${stored_hmac%%[[:space:]]*}"
+
+        local expected_hmac
+        expected_hmac=$(printf '%s' "$stored_checksum" \
+                        | openssl dgst -sha256 -hmac "${FILE_INTEGRITY_HMAC_KEY}" \
+                        | sed 's/^.* //')
+
+        if [[ "$expected_hmac" != "$stored_hmac" ]]; then
+            log_error "verify_file_integrity: HMAC verification FAILED for sidecar: $checksum_file"
+            log_error "  Sidecar may have been tampered with alongside the monitored file."
+            return 1
+        fi
+        log_debug "verify_file_integrity: HMAC sidecar authenticated for: $file"
+    else
+        log_warn "verify_file_integrity: FILE_INTEGRITY_HMAC_KEY is not set; sidecar is unauthenticated."
+        log_warn "  An attacker who replaces both the file and its .sha256 sidecar will pass this check."
+        log_warn "  Set FILE_INTEGRITY_HMAC_KEY and use write_file_integrity() to enable authenticated checking."
+    fi
+
+    # Plain SHA-256 comparison (always performed; HMAC authentication above
+    # ensures the stored_checksum value is trustworthy when the key is set).
+    local actual_checksum
+    if ! actual_checksum=$(calculate_sha256 "$file"); then
+        return 1
+    fi
+
+    if [[ "$actual_checksum" == "$stored_checksum" ]]; then
+        log_debug "File integrity verified: $file"
+        return 0
+    else
+        log_error "File integrity check FAILED: $file"
+        log_error "  Expected: $stored_checksum"
+        log_error "  Actual:   $actual_checksum"
+        return 1
+    fi
+}
+
+# --- Secure File Operations ---
+
+# Securely wipe file before deletion
+#
+# BUG-K2 FIX: stat -c%s is GNU-only; macOS/BSD needs stat -f%z.
+# Replaced with portable _stat_file_size() wrapper.
+secure_delete() {
+    local file="$1"
+
+    if [[ ! -f "$file" ]]; then
+        log_error "File not found for secure deletion: $file"
+        return 1
+    fi
+
+    if has_command shred; then
+        if shred -vfz -n 3 "$file" 2>/dev/null; then
+            log_debug "File securely deleted with shred: $file"
+            return 0
+        fi
+    fi
+
+    # Fallback: overwrite with random data then delete
+    if has_command dd && [[ -c /dev/urandom ]]; then
+        # BUG-K2 FIX: portable file size
+        local file_size
+        file_size=$(_stat_file_size "$file" 2>/dev/null || printf '4096')
+        # Guard against empty/zero size to prevent dd bs=0 error
+        [[ -z "$file_size" || "$file_size" -eq 0 ]] && file_size=4096
+        if dd if=/dev/urandom of="$file" bs="$file_size" count=1 2>/dev/null; then
+            rm -f "$file"
+            log_debug "File securely deleted with dd: $file"
+            return 0
+        fi
+    fi
+
+    rm -f "$file"
+    log_warn "File deleted but not securely wiped: $file"
+    return 0
+}
+
+# --- Enhanced Security Validation ---
+
+# Comprehensive cryptographic environment check
+validate_crypto_environment() {
+    log_debug "Validating cryptographic environment..."
+
+    local issues=()
+
+    if ! has_command age; then
+        issues+=("age command not available")
+    fi
+
+    if ! has_command age-keygen; then
+        issues+=("age-keygen command not available")
+    fi
+
+    if ! has_command sops; then
+        issues+=("sops command not available")
+    fi
+
+    if [[ -f "$DEFAULT_AGE_KEY_FILE" ]]; then
+        if ! check_age_key "$DEFAULT_AGE_KEY_FILE"; then
+            issues+=("Default Age key validation failed")
+        fi
+    fi
+
+    if [[ ${#issues[@]} -gt 0 ]]; then
+        log_error "Cryptographic environment validation failed:"
+        for issue in "${issues[@]}"; do
+            log_error "  - $issue"
+        done
+        return 1
+    fi
+
+    log_debug "Cryptographic environment validation passed"
+    return 0
+}
+
+# Export functions for use by scripts
+export -f _stat_octal_perms_local _stat_file_size
+export -f _derive_age_public_key
+export -f is_sops_encrypted decrypt_sops_file encrypt_sops_file
+export -f generate_age_key get_age_public_key check_age_key encrypt_data decrypt_data
+export -f generate_secure_string generate_secure_password check_argon2_support generate_argon2_hash generate_bcrypt_hash
+export -f calculate_sha256 verify_sha256 write_file_integrity verify_file_integrity secure_delete validate_crypto_environment
+export DEFAULT_AGE_KEY_FILE
+
+log_debug "Enhanced crypto library loaded successfully - standardized error handling with Age key validation" 2>/dev/null || true
