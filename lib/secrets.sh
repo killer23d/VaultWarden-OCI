@@ -72,6 +72,15 @@
 #   during post-setup validation. Fix: capture stderr per key, log an explicit
 #   error on non-zero exit, and return 1 after cleanup so unreadable secrets are
 #   surfaced as validation errors instead of being silently ignored.
+#
+# PATCHED BUGS (2026-04-08):
+#   SS-RK1 [MEDIUM] offer_recovery_kit_export(): recovery kit visibility
+#                   depended on /dev/tty. On SSH/jumphost/nohup flows the
+#                   tty write path can be unavailable, so the operator may
+#                   never see or save the kit. Fix: always write a timestamped
+#                   copy to ./recovery-kit-<epoch>.txt with mode 600 before
+#                   the interactive tmpfs export path, then emit a prominent
+#                   warning to save and delete the file.
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     echo "Error: This library should be sourced, not executed directly"
@@ -1127,6 +1136,23 @@ _ork_generate_and_secure() {
 
 offer_recovery_kit_export() {
     local auto_export="${1:-false}"
+
+    # SS-RK1 FIX: Always persist a secure on-disk copy in the current working
+    # directory before any /dev/tty-dependent display flow. This prevents the
+    # recovery kit from being lost when setup runs through an SSH jumphost,
+    # nohup, or other detached TTY environment.
+    local recovery_file="./recovery-kit-$(date +%s).txt"
+    if generate_recovery_kit "$recovery_file"; then
+        chmod 600 "$recovery_file"
+        log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        log_warn "  RECOVERY KIT SAVED TO: $recovery_file"
+        log_warn "  SAVE THIS FILE SECURELY AND DELETE IT WHEN DONE."
+        log_warn "  It contains your Age private key and all credentials."
+        log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    else
+        log_error "Failed to write recovery kit to disk"
+        return 1
+    fi
 
     local tmpfs_base
     if ! tmpfs_base=$(_tmpfs_dir); then
