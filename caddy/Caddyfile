@@ -152,11 +152,19 @@ http://127.0.0.1:8080 {
         # 4. Admin Panel Protection
         # NOTE: 'unsafe-inline' required by VaultWarden admin UI inline
         # <script> blocks. Risk accepted: admin panel is protected by
-        # basic_auth + Cloudflare WAF firewall rules.
+        # basic_auth, IP allowlist, and Cloudflare WAF firewall rules.
         # Admin requests appear in access.log with uri starting /admin —
         # fail2ban vaultwarden-admin filter matches on that field.
         @admin path /admin*
         handle @admin {
+                # FIX-CF1: Reject any request that is NOT from the internal LAN
+                # (192.168.0.0/16) or loopback (127.0.0.1) before basic_auth is
+                # evaluated. The client IP is already the real visitor IP because
+                # 'trusted_proxies cloudflare' + 'client_ip_headers Cf-Connecting-Ip'
+                # resolve it in the global servers block above.
+                @admin_remote not remote_ip 192.168.0.0/16 127.0.0.1
+                respond @admin_remote 403
+
                 header {
                         Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss://{$DOMAIN_NAME}{$PUSH_CSP}; frame-src 'self'; object-src 'none'; base-uri 'self';"
                 }
