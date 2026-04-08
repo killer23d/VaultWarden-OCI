@@ -18,14 +18,20 @@
 #                      sops call.
 #   STARTUP-5 [MEDIUM] source "lib/secrets.sh" was missing; added so
 #                      cleanup_secrets_environment() is available.
-#   STARTUP-6 [HIGH]   prepare_docker_secrets(): secret files created at 444
-#                      (world-readable). maintenance.sh correctly rejects files
-#                      with permissions other than 600 when reading Cloudflare
-#                      tokens. Secret files must be 600 (owner-read only).
-#                      Root cause: umask 133 (-> 444) was intentional but
-#                      wrong — Docker bind-mounted secret files should be
-#                      readable only by the owning process (root), not by all
-#                      users. Fix: use umask 077 (-> 600) and chmod 600.
+#   STARTUP-6 [MEDIUM] prepare_docker_secrets(): secret files were previously
+#                      created at 600 (owner-read-only). Docker bind-mounts
+#                      these files into containers running as non-root UIDs
+#                      (e.g. 1001) that are not the owning user, so 600 made
+#                      the files unreadable by the container processes.
+#                      Fix: use umask 333 (→ 444, r--r--r--) so all UIDs
+#                      inside containers can read them. The containing
+#                      directory (secrets/.docker_secrets) is mode 700
+#                      (rwx------) owned by root, so unprivileged OS users
+#                      cannot traverse into it — the world-read bit on the
+#                      files is effectively unreachable from the host without
+#                      root. maintenance.sh's permission guard explicitly
+#                      allows 444 (alongside 400/600/640) so DNS updates work
+#                      correctly on every boot.
 #
 # PATCHED BUGS (2026-03-26):
 #   STARTUP-7 [MEDIUM] lib/simple_key_resilience.sh was never sourced.
@@ -335,8 +341,9 @@ check_age_key_health_preflight() {
 # world-read bit on the files is effectively unreachable from the host
 # without root. This is the standard posture for Docker bind-mount secrets.
 #
-# The permission guard in maintenance.sh is updated separately to accept 444
-# in addition to 600/400.
+# maintenance.sh's update_dns_record() explicitly allows 444 in its
+# permission guard (case 444|400|600|640), so DNS updates succeed on every
+# boot without any permission conflict.
 # ---------------------------------------------------------------------------
 prepare_docker_secrets() {
   log_info "Preparing Docker secrets with enhanced security..."
