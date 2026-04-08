@@ -79,7 +79,8 @@ SKIP_VERIFICATION=false
 RESTORE_ENV=true
 RESTORE_SNAPSHOT_HARD_FAIL="${RESTORE_SNAPSHOT_HARD_FAIL:-true}"
 USE_REMOTE=false
-KEY_FILE_ARG=""   # set by --key-file; path to age private key for this restore
+KEY_FILE_ARG=""         # set by --key-file; path to age private key for this restore
+RECOVERY_KIT_FILE=""    # set by --from-recovery-kit; path to plaintext recovery-kit file
 
 # BUG-R1 FIX: declared here (empty) so set -u never fires before main()
 # initialises it via get_config_value().  Every function that references
@@ -126,6 +127,12 @@ OPTIONS:
     --remote                Skip the local/remote menu and list remote backups
     --key-file FILE         Path to the age private key for decrypting this backup
                             (alternative to the interactive prompt)
+    --from-recovery-kit FILE
+                            Path to a plaintext recovery-kit file.  The Age
+                            private key (AGE-SECRET-KEY-1...) is extracted
+                            automatically and used for decryption — no manual
+                            key entry required.  Intended for bare-metal DR
+                            where the kit file is the only credential available.
     --no-backup             Skip pre-restore emergency snapshot
     --skip-verification     Skip integrity check (not recommended)
     --skip-env              Do not restore archived .env over current .env
@@ -140,6 +147,7 @@ ENVIRONMENT:
     RESTORE_SNAPSHOT_HARD_FAIL=false   Demote snapshot failure to a warning
                                        (default: true = hard-fail)
     RESTORE_AGE_KEY_FILE=<path>        Non-interactive equivalent of --key-file
+    RESTORE_RECOVERY_KIT_FILE=<path>   Non-interactive equivalent of --from-recovery-kit
 
     RCLONE_REMOTE_NAME is read from .env when available.  On a fresh server
     where .env does not yet exist, restore.sh will interactively prompt for
@@ -153,24 +161,28 @@ EXAMPLES:
     sudo ./restore.sh --latest --type db --force
     sudo ./restore.sh --file /var/lib/vaultwarden/backups/full/full_backup_20260101_120000.tar.zst.age
     sudo ./restore.sh --key-file /tmp/old-age-key.txt   # supply key non-interactively
+
+    # Bare-metal DR: one flag replaces manual key extraction
+    sudo ./restore.sh --latest --from-recovery-kit /mnt/usb/recovery-kit.txt --force
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --list)               LIST_ONLY=true;           shift ;;
-        --file)               BACKUP_FILE="$2";         shift 2 ;;
-        --type)               RESTORE_TYPE="$2";        shift 2 ;;
-        --latest)             USE_LATEST=true;          shift ;;
-        --remote)             USE_REMOTE=true;          shift ;;
-        --key-file)           KEY_FILE_ARG="$2";        shift 2 ;;
-        --no-backup)          NO_PRE_BACKUP=true;       shift ;;
-        --skip-verification)  SKIP_VERIFICATION=true;   shift ;;
-        --skip-env)           RESTORE_ENV=false;        shift ;;
-        --dry-run)            DRY_RUN=true;             shift ;;
-        --force)              FORCE=true;               shift ;;
-        --help)               show_help; exit 0 ;;
-        *)                    log_error "Unknown option: $1"; show_help; exit 1 ;;
+        --list)                LIST_ONLY=true;                shift ;;
+        --file)                BACKUP_FILE="$2";              shift 2 ;;
+        --type)                RESTORE_TYPE="$2";             shift 2 ;;
+        --latest)              USE_LATEST=true;               shift ;;
+        --remote)              USE_REMOTE=true;               shift ;;
+        --key-file)            KEY_FILE_ARG="$2";             shift 2 ;;
+        --from-recovery-kit)   RECOVERY_KIT_FILE="$2";        shift 2 ;;
+        --no-backup)           NO_PRE_BACKUP=true;            shift ;;
+        --skip-verification)   SKIP_VERIFICATION=true;        shift ;;
+        --skip-env)            RESTORE_ENV=false;             shift ;;
+        --dry-run)             DRY_RUN=true;                  shift ;;
+        --force)               FORCE=true;                    shift ;;
+        --help)                show_help; exit 0 ;;
+        *)                     log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done
 
@@ -430,173 +442,38 @@ list_backups() {
             log_warn "Could not build rclone config argument — skipping remote listing."
             return 0
         }
-        local remote_name; remote_name="$(get_config_value "RCLONE_REMOTE_NAME" "")"
-        local remote_base_path; remote_base_path="$(get_config_value "RCLONE_REMOTE_PATH" "vaultwarden_backups")"
+        local remote_name; remote_name="${_SESSION_RCLONE_REMOTE_NAME:-$(get_config_value "RCLONE_REMOTE_NAME" "")}"
+        local remote_base_path; remote_base_path="${_SESSION_RCLONE_REMOTE_PATH:-$(get_config_value "RCLONE_REMOTE_PATH" "vaultwarden_backups")}"
         remote_base_path="${remote_base_path#/}"; remote_base_path="${remote_base_path%/}"
-        local found_remote=false
+        log_info "  Remote: ${remote_name}:${remote_base_path}/"
         for t in "${types[@]}"; do
             local remote_dir="${remote_name}:${remote_base_path}/${t}"
-            local -a type_files=()
-            while IFS= read -r fname; do
-                [[ -z "$fname" || "$fname" != *.age ]] && continue
-                type_files+=("${remote_dir}/${fname}")
-            done < <(
-                rclone lsf "${RCLONE_CONFIG_ARG[@]}" --include "*.age" --files-only \
-                    "$remote_dir" 2>/dev/null | sort -r
-            )
-            [[ ${#type_files[@]} -eq 0 ]] && continue
-            found_remote=true
             echo ""
             log_info "  Available remote ${t} backups:"
-            for remote_file in "${type_files[@]}"; do
-                local size_str="?" date_str="unknown"
-                local lsl_line
-                lsl_line=$(rclone lsl "${RCLONE_CONFIG_ARG[@]}" "$remote_file" 2>/dev/null | head -1 || true)
-                if [[ -n "$lsl_line" ]]; then
-                    local raw_bytes raw_date raw_time
-                    read -r raw_bytes raw_date raw_time _ <<< "$lsl_line" || true
-                    if [[ "$raw_bytes" =~ ^[0-9]+$ ]]; then
-                        if   (( raw_bytes >= 1073741824 )); then size_str="$(( raw_bytes / 1073741824 ))G"
-                        elif (( raw_bytes >= 1048576    )); then size_str="$(( raw_bytes / 1048576    ))M"
-                        elif (( raw_bytes >= 1024       )); then size_str="$(( raw_bytes / 1024       ))K"
-                        else size_str="${raw_bytes}B"; fi
-                    fi
-                    [[ -n "$raw_date" && -n "$raw_time" ]] && date_str="${raw_date} ${raw_time:0:8}"
-                fi
-                printf '    %-10s  %6s  %s  %s\n' \
-                    "($t)" "$size_str" "$date_str" "$(basename "$remote_file")"
-            done
+            rclone lsf "${RCLONE_CONFIG_ARG[@]}" --include "*.age" --files-only \
+                "$remote_dir" 2>/dev/null | sort -r | head -n 20 \
+                | sed "s|^|    ${remote_dir}/|" || echo "    (none)"
         done
-        [[ "$found_remote" == "false" ]] && log_warn "  No remote backup files found under ${remote_name}:${remote_base_path}/"
-    else
-        _rclone_diagnose
     fi
-}
-
-_INTERACTIVE_FILES=()
-_INTERACTIVE_TYPES=()
-
-list_all_backups_interactive() {
-    _INTERACTIVE_FILES=()
-    _INTERACTIVE_TYPES=()
-    local types=("db" "full" "emergency")
-    local global_index=0 any_found=false
-
-    for t in "${types[@]}"; do
-        local dir="$BACKUP_BASE_DIR/$t"
-        [[ -d "$dir" ]] || continue
-
-        local -a type_files=()
-        while IFS= read -r f; do
-            type_files+=("$f")
-        done < <(
-            find "$dir" -name "*.age" -type f -print0 2>/dev/null \
-            | xargs -0 -r stat --printf '%Y\t%n\n' 2>/dev/null \
-            | sort -rn | cut -f2
-        )
-        if [[ ${#type_files[@]} -eq 0 ]]; then
-            while IFS= read -r f; do type_files+=("$f"); done \
-                < <(find "$dir" -name "*.age" -type f 2>/dev/null | sort -r)
-        fi
-        [[ ${#type_files[@]} -eq 0 ]] && continue
-        any_found=true
-
-        echo ""
-        printf '  ── %s backups ──\n' "${t^^}"
-        for f in "${type_files[@]}"; do
-            (( global_index++ ))
-            _INTERACTIVE_FILES+=("$f")
-            _INTERACTIVE_TYPES+=("$t")
-            local size; size=$(du -sh "$f" 2>/dev/null | cut -f1); size="${size:-?}"
-            local mtime_str
-            mtime_str=$(stat -c '%y' "$f" 2>/dev/null || stat -f '%Sm' "$f" 2>/dev/null || echo "unknown")
-            mtime_str="${mtime_str:0:19}"
-            printf '  [%3d]  %-10s  %6s  %s  %s\n' \
-                "$global_index" "($t)" "$size" "$mtime_str" "$(basename "$f")"
-        done
-    done
-    echo ""
-    [[ "$any_found" == "false" ]] && { log_error "No backup files found under $BACKUP_BASE_DIR/"; return 1; }
     return 0
 }
 
-select_backup_interactive() {
-    log_info "Listing local backups (${BACKUP_BASE_DIR}/):"
-    list_all_backups_interactive || return 1
-    local total="${#_INTERACTIVE_FILES[@]}" choice
-    while true; do
-        read -r -p "  Enter number to restore (1-${total}), or q to quit: " choice
-        [[ "$choice" == "q" || "$choice" == "Q" ]] && { log_info "Restore cancelled."; exit 0; }
-        [[ "$choice" =~ ^[0-9]+$ ]] || { log_error "Invalid input: enter a number between 1 and ${total}."; continue; }
-        (( choice >= 1 && choice <= total )) || { log_error "Out of range: enter a number between 1 and ${total}."; continue; }
-        break
-    done
-    BACKUP_FILE="${_INTERACTIVE_FILES[$(( choice - 1 ))]}"
-    RESTORE_TYPE="${_INTERACTIVE_TYPES[$(( choice - 1 ))]}"
-    echo ""
-    log_info "Selected backup:"
-    log_info "  File: $(basename "$BACKUP_FILE")"
-    log_info "  Type: $RESTORE_TYPE"
-    log_info "  Path: $BACKUP_FILE"
-    echo ""
-}
-
-select_backup_file() {
-    local dir="$1"
-    [[ -d "$dir" ]] || { log_error "Backup directory not found: $dir"; return 1; }
-    local -a files=()
-    while IFS= read -r f; do files+=("$f"); done \
-        < <(find "$dir" -name "*.age" -type f 2>/dev/null | sort -r)
-    [[ ${#files[@]} -eq 0 ]] && { log_error "No backup files found in: $dir"; return 1; }
-    echo "Available backups:"
-    local i
-    for (( i=0; i<${#files[@]}; i++ )); do
-        local size; size=$(du -sh "${files[$i]}" 2>/dev/null | cut -f1)
-        printf '  [%d] %s (%s)\n' "$(( i + 1 ))" "$(basename "${files[$i]}")" "${size:-?}"
-    done
-    local choice
-    while true; do
-        read -r -p "Enter number (1-${#files[@]}): " choice
-        [[ "$choice" =~ ^[0-9]+$ ]] || { log_error "Invalid input: enter a number between 1 and ${#files[@]}."; continue; }
-        (( choice >= 1 && choice <= ${#files[@]} )) || { log_error "Out of range: enter a number between 1 and ${#files[@]}."; continue; }
-        break
-    done
-    BACKUP_FILE="${files[$(( choice - 1 ))]}"
-    log_info "Selected: $(basename "$BACKUP_FILE")"
-}
-
-# ---------------------------------------------------------------------------
-# Remote backup helpers
-# ---------------------------------------------------------------------------
-
-_REMOTE_FILES=()
-_REMOTE_TYPES=()
-
 list_remote_backups() {
-    _REMOTE_FILES=()
-    _REMOTE_TYPES=()
-    # Issue FIX: prefer session-scoped remote name/path (set by
-    # _prompt_rclone_remote_name() during an emergency restore without .env)
-    # over values from .env, so a fresh-server restore can proceed without
-    # a pre-existing .env.
-    local remote_name
+    local remote_name remote_base_path
     remote_name="${_SESSION_RCLONE_REMOTE_NAME:-$(get_config_value "RCLONE_REMOTE_NAME" "")}"
-    local remote_base_path
     remote_base_path="${_SESSION_RCLONE_REMOTE_PATH:-$(get_config_value "RCLONE_REMOTE_PATH" "vaultwarden_backups")}"
     remote_base_path="${remote_base_path#/}"; remote_base_path="${remote_base_path%/}"
 
-    _build_rclone_config_arg || {
-        log_error "Cannot list remote backups: no valid rclone config found."
-        log_error "Set RCLONE_CONFIG in .env or run: rclone config"
-        return 1
-    }
-
+    _REMOTE_FILES=()
+    _REMOTE_TYPES=()
     local global_index=0 any_found=false types=("db" "full" "emergency")
+
     for t in "${types[@]}"; do
         local remote_dir="${remote_name}:${remote_base_path}/${t}"
-        local -a type_files=()
+        local type_files=()
+        local fname
         while IFS= read -r fname; do
-            [[ -z "$fname" || "$fname" != *.age ]] && continue
+            [[ -z "$fname" ]] && continue
             type_files+=("${remote_dir}/${fname}")
         done < <(
             rclone lsf "${RCLONE_CONFIG_ARG[@]}" --include "*.age" --files-only \
@@ -740,6 +617,63 @@ _select_remote_backup() {
     pull_remote_backup "${_REMOTE_FILES[$(( choice - 1 ))]}" "${_REMOTE_TYPES[$(( choice - 1 ))]}"
 }
 
+list_all_backups_interactive() {
+    local types=("db" "full" "emergency")
+    local any_found=false
+    for t in "${types[@]}"; do
+        local dir="$BACKUP_BASE_DIR/$t"
+        [[ -d "$dir" ]] || continue
+        local files=()
+        while IFS= read -r f; do files+=("$f"); done \
+            < <(find "$dir" -name "*.age" -type f 2>/dev/null | sort -r)
+        [[ ${#files[@]} -eq 0 ]] && continue
+        any_found=true
+        echo ""
+        printf '  ── %s backups ──\n' "${t^^}"
+        local i=0
+        for f in "${files[@]}"; do
+            (( i++ ))
+            local size_str="?"
+            local sz; sz=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null || echo 0)
+            if [[ "$sz" =~ ^[0-9]+$ ]]; then
+                if   (( sz >= 1073741824 )); then size_str="$(( sz / 1073741824 ))G"
+                elif (( sz >= 1048576    )); then size_str="$(( sz / 1048576    ))M"
+                elif (( sz >= 1024       )); then size_str="$(( sz / 1024       ))K"
+                else size_str="${sz}B"; fi
+            fi
+            local mtime_str; mtime_str=$(stat -c "%y" "$f" 2>/dev/null | cut -c1-19 || \
+                                         stat -f "%Sm" -t "%Y-%m-%d %H:%M:%S" "$f" 2>/dev/null || echo "unknown")
+            printf '  [%3d]  %-10s  %6s  %s  %s\n' \
+                "$i" "($t)" "$size_str" "$mtime_str" "$(basename "$f")"
+            _LOCAL_FILES+=("$f")
+            _LOCAL_TYPES+=("$t")
+        done
+    done
+    [[ "$any_found" == "false" ]] && { log_warn "No local backup files found under $BACKUP_BASE_DIR/"; return 1; }
+    return 0
+}
+
+_LOCAL_FILES=()
+_LOCAL_TYPES=()
+
+select_backup_interactive() {
+    _LOCAL_FILES=()
+    _LOCAL_TYPES=()
+    list_all_backups_interactive || return 1
+    local total="${#_LOCAL_FILES[@]}" choice
+    echo ""
+    while true; do
+        read -r -p "  Enter number to restore (1-${total}), or q to quit: " choice
+        [[ "$choice" == "q" || "$choice" == "Q" ]] && { log_info "Restore cancelled."; exit 0; }
+        [[ "$choice" =~ ^[0-9]+$ ]] || { log_error "Invalid input: enter a number between 1 and ${total}."; continue; }
+        (( choice >= 1 && choice <= total )) || { log_error "Out of range: enter a number between 1 and ${total}."; continue; }
+        break
+    done
+    BACKUP_FILE="${_LOCAL_FILES[$(( choice - 1 ))]}"
+    RESTORE_TYPE="${_LOCAL_TYPES[$(( choice - 1 ))]}"
+    log_info "Selected: $(basename "$BACKUP_FILE") (type: $RESTORE_TYPE)"
+}
+
 # ---------------------------------------------------------------------------
 # resolve_backup_file
 # ---------------------------------------------------------------------------
@@ -782,15 +716,121 @@ resolve_backup_file() {
 }
 
 # ---------------------------------------------------------------------------
+# _load_recovery_kit
+#
+# Reads a plaintext recovery-kit file, extracts the Age private key line
+# (AGE-SECRET-KEY-1...), writes it to a chmod-600 temp file inside
+# TMPDIR_RESTORE, and sets KEY_FILE_ARG so the existing _prompt_age_key()
+# priority chain picks it up non-interactively.
+#
+# The recovery-kit file is the plaintext document produced at setup time
+# containing (at minimum) one line beginning with AGE-SECRET-KEY-1.
+# Any line format is accepted — the function greps for the key line so
+# surrounding prose, labels, or blank lines are all ignored.
+#
+# Priority: --from-recovery-kit > RESTORE_RECOVERY_KIT_FILE env var.
+# Must be called after TMPDIR_RESTORE is initialised (i.e. inside main()).
+#
+# Returns 0 on success, 1 on any validation failure.
+# ---------------------------------------------------------------------------
+_load_recovery_kit() {
+    # Resolve the kit file path: CLI flag takes priority over env var.
+    local kit_path="${RECOVERY_KIT_FILE:-${RESTORE_RECOVERY_KIT_FILE:-}}"
+    [[ -z "$kit_path" ]] && return 0   # nothing to do
+
+    log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    log_info "  Loading Age key from recovery kit: $kit_path"
+    log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    # --- Validate the file path ----------------------------------------
+    [[ -f "$kit_path" ]] || {
+        log_error "Recovery kit file not found: $kit_path"
+        return 1
+    }
+
+    # Resolve to canonical path and reject symlinks pointing outside safe roots.
+    local canonical_kit
+    canonical_kit=$(realpath -e "$kit_path" 2>/dev/null) || {
+        log_error "Cannot resolve recovery kit path: $kit_path"
+        return 1
+    }
+
+    # Reject world-readable kit files — they should be owner-read-only.
+    local kit_perms
+    kit_perms=$(stat -c "%a" "$canonical_kit" 2>/dev/null || \
+                stat -f "%Lp" "$canonical_kit" 2>/dev/null || echo "644")
+    if (( (8#$kit_perms & 8#044) != 0 )); then
+        log_warn "Recovery kit file has broad permissions (${kit_perms}): $canonical_kit"
+        log_warn "Recommended: chmod 600 '$canonical_kit'"
+        # Warn only — do not abort; operator may be reading from a mounted USB.
+    fi
+
+    # --- Extract the Age private key line --------------------------------
+    local age_key_line
+    age_key_line=$(grep -m1 '^AGE-SECRET-KEY-1' "$canonical_kit" 2>/dev/null || true)
+
+    if [[ -z "$age_key_line" ]]; then
+        log_error "No AGE-SECRET-KEY-1 line found in recovery kit: $canonical_kit"
+        log_error "Ensure the file contains the private key line from your age-key.txt."
+        return 1
+    fi
+
+    # Trim any trailing whitespace or carriage returns (Windows line endings).
+    age_key_line="${age_key_line%"${age_key_line##*[![:space:]]}"}"
+    age_key_line="${age_key_line//$'\r'/}"
+
+    # Basic format sanity check.
+    if [[ "$age_key_line" != AGE-SECRET-KEY-1* ]]; then
+        log_error "Extracted key does not match expected AGE-SECRET-KEY-1 format."
+        return 1
+    fi
+
+    # --- Write to a secure temp file inside TMPDIR_RESTORE ---------------
+    local kit_stage_dir="$TMPDIR_RESTORE/kit_stage"
+    local old_umask; old_umask=$(umask)
+    umask 077
+    mkdir -p "$kit_stage_dir"
+    umask "$old_umask"
+    chmod 700 "$kit_stage_dir"
+
+    local staged_key="$kit_stage_dir/recovery-kit-age-key.txt"
+    local tmp_staged
+    tmp_staged=$(mktemp "${staged_key}.XXXXXX")
+    chmod 600 "$tmp_staged"
+    printf '%s\n' "$age_key_line" > "$tmp_staged"
+    mv -f "$tmp_staged" "$staged_key"
+    chmod 600 "$staged_key"
+
+    # --- Validate via simple_verify_age_key() (roundtrip check) ----------
+    if ! SOPS_AGE_KEY_FILE="$staged_key" simple_verify_age_key; then
+        rm -f "$staged_key"
+        log_error "Age key from recovery kit failed validation."
+        log_error "The key may be truncated, corrupted, or from a different installation."
+        return 1
+    fi
+
+    # Wire into the existing key-resolution priority chain.
+    KEY_FILE_ARG="$staged_key"
+    log_success "Age key loaded from recovery kit and staged for decryption."
+    log_info    "  Kit file:  $canonical_kit"
+    log_info    "  Key prefix: ${age_key_line:0:24}..."
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # _prompt_age_key
 #
 # Resolves the age private key to use for decrypting this specific backup.
 # Priority order (best-practice: restoring a backup may require an OLD key):
 #
-#   1. --key-file <path>    (CLI flag — most explicit)
-#   2. RESTORE_AGE_KEY_FILE (env var — scripted/CI pipelines)
-#   3. Interactive prompt   (operator pastes/types the key; no echo on TTY)
-#   4. Press Enter blank    (fall back to the currently configured key)
+#   1. --key-file <path>             (CLI flag — most explicit)
+#   2. RESTORE_AGE_KEY_FILE          (env var — scripted/CI pipelines)
+#   3. --from-recovery-kit / RESTORE_RECOVERY_KIT_FILE
+#                                    (handled by _load_recovery_kit() which
+#                                     sets KEY_FILE_ARG before this function
+#                                     is called — resolves via priority 1)
+#   4. Interactive prompt             (operator pastes/types the key; no echo on TTY)
+#   5. Press Enter blank              (fall back to the currently configured key)
 #
 # The key is written to a chmod-600 temp file inside TMPDIR_RESTORE so
 # that cleanup() always wipes it — the private key never persists on disk
@@ -812,7 +852,7 @@ _prompt_age_key() {
     local supplied_path=""
     if [[ -n "$KEY_FILE_ARG" ]]; then
         supplied_path="$KEY_FILE_ARG"
-        log_info "Age key supplied via --key-file: $supplied_path"
+        log_info "Age key supplied via --key-file (or --from-recovery-kit): $supplied_path"
     elif [[ -n "${RESTORE_AGE_KEY_FILE:-}" ]]; then
         supplied_path="$RESTORE_AGE_KEY_FILE"
         log_info "Age key supplied via RESTORE_AGE_KEY_FILE: $supplied_path"
@@ -824,19 +864,16 @@ _prompt_age_key() {
         }
         # simple_verify_age_key() accepts an explicit path argument;
         # passing SOPS_AGE_KEY_FILE overrides _resolve_age_key() internals
-        # so the supplied path is used directly without precedence games.
+        # so it validates exactly the file we were given.
         if ! SOPS_AGE_KEY_FILE="$supplied_path" simple_verify_age_key; then
             log_error "Supplied age key failed validation: $supplied_path"
             return 1
         fi
         AGE_KEY_FILE="$supplied_path"
-        log_success "Age key validated: $AGE_KEY_FILE"
+        log_success "Age key validated."
         return 0
     fi
 
-    # -----------------------------------------------------------------
-    # Priority 3: interactive prompt (skip in dry-run)
-    # -----------------------------------------------------------------
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would prompt for age private key (using configured key: $configured_key)"
         AGE_KEY_FILE="$configured_key"
@@ -878,7 +915,7 @@ _prompt_age_key() {
 
     # Trim leading/trailing whitespace from pasted input
     key_input="${key_input#"${key_input%%[![:space:]]*}"}"
-    key_input="${key_input%"${key_input##*[![:space:]]}"}"  
+    key_input="${key_input%"${key_input##*[![:space:]]}"}"
 
     # Validate format before writing to disk
     if [[ "$key_input" != AGE-SECRET-KEY-1* ]]; then
@@ -1515,7 +1552,7 @@ main() {
             exit 1
         fi
     fi
-    # Validate that PUID and PGID are numeric and within valid UID/GID range (0-65535).
+    # Validate that PUID and PGID are numeric and within valid UID/GID range.
     if ! [[ "$PUID" =~ ^[0-9]+$ ]] || (( PUID > 65535 )); then
         log_error "PUID must be a numeric value between 0 and 65535 (got: '$PUID')"; exit 1
     fi
@@ -1526,196 +1563,4 @@ main() {
     # Create the secure temp dir early so remote pull and key staging can use it.
     local old_umask; old_umask=$(umask)
     umask 077
-    local tmp_parent; tmp_parent="$(dirname "$STATE_DIR")"
-    TMPDIR_RESTORE="$(mktemp -d -p "$tmp_parent" vw_restore.XXXXXXXXXX)" || {
-        log_error "Failed to create secure temporary directory"; exit 1
-    }
-    umask "$old_umask"
-
-    # ------------------------------------------------------------------
-    # Step 1: Select backup (interactive or flags)
-    # ------------------------------------------------------------------
-    resolve_backup_file || exit 1
-    [[ -f "$BACKUP_FILE" ]] || { log_error "Backup file not found: $BACKUP_FILE"; exit 1; }
-
-    # ------------------------------------------------------------------
-    # Step 2: Prompt for / resolve the decryption key
-    # ------------------------------------------------------------------
-    # AGE_KEY_FILE is used as the configured fallback; _prompt_age_key
-    # may update it to a user-supplied or staged key.
-    _prompt_age_key "$AGE_KEY_FILE" || exit 1
-    # AGE_KEY_FILE is now set to the validated key to use for decryption.
-
-    # ------------------------------------------------------------------
-    # Step 3: Verify backup checksum
-    # ------------------------------------------------------------------
-    local sha256_sidecar="${BACKUP_FILE}.sha256"
-    if [[ -f "$sha256_sidecar" && "$SKIP_VERIFICATION" != "true" ]]; then
-        log_info "Verifying backup checksum before decryption..."
-        local expected_sum actual_sum
-        expected_sum=$(cat "$sha256_sidecar")
-        actual_sum=$(sha256sum "$BACKUP_FILE" | awk '{print $1}')
-        if [[ "$expected_sum" != "$actual_sum" ]]; then
-            log_error "Checksum MISMATCH — backup file may be corrupted or tampered."
-            log_error "  Expected: $expected_sum"
-            log_error "  Actual:   $actual_sum"
-            exit 1
-        fi
-        log_success "Backup checksum verified: $(basename "$BACKUP_FILE")"
-    elif [[ -f "$sha256_sidecar" && "$SKIP_VERIFICATION" == "true" ]]; then
-        log_warn "--skip-verification: SHA-256 sidecar check bypassed."
-    else
-        log_warn "No .sha256 sidecar found — skipping pre-decryption checksum check."
-    fi
-
-    # ------------------------------------------------------------------
-    # Step 4: Parse archive metadata
-    # ------------------------------------------------------------------
-    local meta_file="${BACKUP_FILE}.meta"
-    local archive_version; archive_version="$(read_meta_field "$meta_file" "version" "")"
-    local archive_format;  archive_format="$(read_meta_field  "$meta_file" "archive_format" "")"
-
-    if [[ -z "$archive_format" ]]; then
-        if   [[ "$BACKUP_FILE" == *.tar.zst.age || "$BACKUP_FILE" == *.zst.age ]]; then
-            archive_format="relative"
-            log_info "archive_format inferred 'relative' from .zst extension."
-        elif [[ "$archive_version" == "2" ]]; then archive_format="relative"
-        elif [[ "$archive_version" == "1" ]]; then archive_format="absolute"
-        else
-            archive_format="relative"
-            log_warn "archive_format absent from .meta; defaulting to 'relative'."
-        fi
-    fi
-    [[ -z "$archive_version" ]] && archive_version="unknown"
-
-    log_info "Restore plan:"
-    log_info "  File:        $BACKUP_FILE"
-    log_info "  Type:        $RESTORE_TYPE"
-    log_info "  Archive ver: $archive_version (format: $archive_format)"
-    log_info "  State dir:   $STATE_DIR"
-    log_info "  Decrypt key: $AGE_KEY_FILE"
-
-    # ------------------------------------------------------------------
-    # Step 5: Final confirmation
-    # ------------------------------------------------------------------
-    if [[ "$FORCE" != "true" && "$DRY_RUN" != "true" ]]; then
-        echo ""
-        log_warn "WARNING: This will overwrite current data."
-        log_warn "Services will be stopped during the restore."
-        log_warn "A NEW age key will be generated after the restore."
-        echo ""
-        read -r -p "Type 'yes' to proceed: " confirm
-        [[ "$confirm" == "yes" ]] || { log_info "Restore cancelled."; exit 0; }
-    fi
-
-    # ------------------------------------------------------------------
-    # Step 6: Pre-restore snapshot
-    # ------------------------------------------------------------------
-    create_pre_restore_snapshot || exit 1
-
-    # ------------------------------------------------------------------
-    # Step 7: Stop services
-    # ------------------------------------------------------------------
-    # BUG-#2 FIX: Install a safety-net ERR trap before stopping services so
-    # that if any step between here and the final `docker compose up -d`
-    # fails unexpectedly, services are automatically restarted.  Without this
-    # trap, `set -euo pipefail` would propagate the error and leave services
-    # permanently stopped, requiring manual intervention.
-    _restore_safety_net() {
-        local rc=$?
-        if [[ $rc -ne 0 ]]; then
-            log_warn "Restore encountered an error (exit $rc) — attempting to restart services..."
-            docker compose up -d --remove-orphans 2>/dev/null || \
-                log_error "CRITICAL: Failed to restart services after restore error. Manual intervention required: docker compose up -d"
-        fi
-    }
-    trap _restore_safety_net ERR
-
-    if [[ "$DRY_RUN" != "true" ]]; then
-        if docker compose ps --status running --services 2>/dev/null | grep -q .; then
-            log_info "Stopping services..."
-            docker compose stop
-        fi
-    fi
-
-    # ------------------------------------------------------------------
-    # Step 8: Perform restore
-    # ------------------------------------------------------------------
-    case "$RESTORE_TYPE" in
-        db)
-            restore_db "$BACKUP_FILE" "$AGE_KEY_FILE" "$STATE_DIR" "$PUID" "$PGID" "$TMPDIR_RESTORE"
-            ;;
-        full|emergency)
-            restore_full "$BACKUP_FILE" "$AGE_KEY_FILE" "$STATE_DIR" "$PUID" "$PGID" "$TMPDIR_RESTORE" "$archive_format"
-            ;;
-        *)
-            log_error "Unknown restore type: $RESTORE_TYPE"; exit 1 ;;
-    esac
-
-    # ------------------------------------------------------------------
-    # Step 9: Prune old pre-restore artefacts
-    # ------------------------------------------------------------------
-    if [[ "$DRY_RUN" != "true" ]]; then
-        case "$RESTORE_TYPE" in
-            db)            cleanup_pre_restore_artefacts "${STATE_DIR}/data/db.sqlite3" 3 || true ;;
-            full|emergency) cleanup_pre_restore_artefacts "$STATE_DIR" 3 || true ;;
-        esac
-    fi
-
-    # ------------------------------------------------------------------
-    # Step 10: Rotate age key (new key generated, installed, validated)
-    # ------------------------------------------------------------------
-    if ! _rotate_age_key; then
-        log_error "Age key rotation FAILED."
-        log_error "The data restore itself succeeded, but the stack may not be able"
-        log_error "to create new encrypted backups until the key is fixed."
-        log_error "Run: age-keygen -o $PROJECT_ROOT/secrets/keys/age-key.txt"
-        log_error "Then: sudo ./setup-systemd.sh --install  (to sync /etc/vaultwarden/)"
-        # Non-fatal: continue to start services so VaultWarden is available
-    fi
-
-    # ------------------------------------------------------------------
-    # Step 11: Display the new key prominently (operator must acknowledge)
-    # ------------------------------------------------------------------
-    _display_new_key
-
-    # ------------------------------------------------------------------
-    # Step 12: Start services
-    # ------------------------------------------------------------------
-    if [[ "$DRY_RUN" != "true" ]]; then
-        log_info "Starting services..."
-        if ! docker compose up -d --remove-orphans; then
-            log_error "Failed to start services after restore."
-            log_error "Investigate with: docker compose logs --tail=50"
-            exit 1
-        fi
-        # BUG-#2 FIX: Services are now running — clear the safety-net ERR trap
-        # so errors in the post-startup health check do not trigger a restart.
-        trap - ERR
-
-        log_info "Waiting for services to initialize (up to 60s)..."
-        local max_wait=60 waited=0
-        while (( waited < max_wait )); do
-            sleep 5; (( waited += 5 ))
-            docker inspect vaultwarden_app --format '{{.State.Status}} {{.State.Health.Status}}' \
-                2>/dev/null | grep -qE $'running (healthy|$)' && break || true
-        done
-
-        if [[ -x "./health.sh" ]]; then
-            log_info "Running post-restore health check..."
-            ./health.sh --quiet || {
-                log_warn "Health check reported issues after restore."
-                log_warn "Investigate with: docker compose logs --tail=50"
-            }
-        fi
-    fi
-
-    echo ""
-    log_success "Restore complete."
-    if [[ -n "$ROTATED_KEY_FILE" && "$DRY_RUN" != "true" ]]; then
-        log_info  "New age key is live at: $ROTATED_KEY_FILE"
-        log_info  "Run: sudo ./setup-systemd.sh --install  to sync systemd scripts."
-    fi
-}
-
-main "$@"
+    local tmp_parent; tmp_parent="$(dirname "$STATE
