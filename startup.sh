@@ -58,6 +58,19 @@
 #                      `docker compose ps -q <service>` so the lookup is
 #                      correct regardless of COMPOSE_PROJECT_NAME, then pass
 #                      that ID to docker inspect.
+#
+# PATCHED BUGS (2026-04-07):
+#   STARTUP-9 [MEDIUM] Plaintext EMAIL_API_TOKEN or SMTP_PASSWORD values loaded
+#                      from .env silently override the SOPS-managed workflow.
+#                      send_email() prefers EMAIL_API_TOKEN from the environment
+#                      before decrypting email_api_token from secrets.yaml, and
+#                      _smtp_send() switches to direct external SMTP whenever
+#                      SMTP_PASSWORD is non-empty. Because load_env_file() runs
+#                      before prepare_docker_secrets(), an accidentally-populated
+#                      .env can create split-brain configuration with no
+#                      operator warning. Fix: add a startup guard that inspects
+#                      the loaded environment after SOPS secrets are prepared and
+#                      emits loud warnings when these plaintext overrides are set.
 
 set -euo pipefail
 
@@ -211,6 +224,51 @@ _prepare_secrets_cleanup() {
     _startup_secure_wipe "$_prepare_secrets_cleanup_cache"
     _prepare_secrets_cleanup_cache=""
   fi
+}
+
+# ---------------------------------------------------------------------------
+# warn_plaintext_secret_overrides
+#
+# STARTUP-9 FIX: detect split-brain email secret configuration where
+# plaintext values from .env are loaded into the process environment while
+# the SOPS-managed secret workflow is also present. These plaintext values
+# silently change runtime behavior:
+#   - SMTP_PASSWORD makes _smtp_send() bypass the Postfix sidecar and talk
+#     directly to the external relay.
+#   - EMAIL_API_TOKEN prevents send_email() from falling back to
+#     decrypt_secret email_api_token from secrets.yaml.
+#
+# This guard intentionally warns, rather than aborting, so startup remains
+# backwards compatible for admins who knowingly use direct environment-based
+# overrides. The warning is emitted after prepare_docker_secrets() so the
+# message reflects the real runtime state once SOPS material is available.
+# ---------------------------------------------------------------------------
+warn_plaintext_secret_overrides() {
+  local override_detected=false
+  local env_file="${1:-.env}"
+  local secrets_dir="${2:-secrets/.docker_secrets}"
+
+  if [[ -n "${SMTP_PASSWORD:-}" ]]; then
+    override_detected=true
+    log_warn "SECURITY: SMTP_PASSWORD is set in the runtime environment after SOPS secrets were prepared."
+    if [[ -f "$secrets_dir/smtp_password" ]]; then
+      log_warn "SECURITY: Plaintext SMTP_PASSWORD overrides the SOPS-managed smtp_password workflow and forces direct external SMTP auth."
+    else
+      log_warn "SECURITY: Plaintext SMTP_PASSWORD is active from ${env_file}; this bypasses the intended SOPS-managed secret path when configured later."
+    fi
+  fi
+
+  if [[ -n "${EMAIL_API_TOKEN:-}" ]]; then
+    override_detected=true
+    log_warn "SECURITY: EMAIL_API_TOKEN is set in the runtime environment after SOPS secrets were prepared."
+    log_warn "SECURITY: Plaintext EMAIL_API_TOKEN overrides the SOPS-managed email_api_token secret because send_email() checks the environment before decrypting secrets.yaml."
+  fi
+
+  if [[ "$override_detected" == "true" ]]; then
+    log_warn "SECURITY: Detected split-brain email secret configuration. Remove plaintext secret values from ${env_file} and keep them only in SOPS-managed secrets."
+  fi
+
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -710,6 +768,7 @@ main() {
 
   prepare_log_directories || log_warn "Log directory preparation had issues"
   prepare_docker_secrets  || { log_error "Failed to prepare Docker secrets"; exit 1; }
+  warn_plaintext_secret_overrides
   start_services          || { log_error "Failed to start services"; exit 1; }
   update_dns_record
   verify_startup_health
