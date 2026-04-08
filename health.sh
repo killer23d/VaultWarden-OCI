@@ -43,6 +43,7 @@ ENV_FILE="${SCRIPT_DIR}/.env"
 
 # Health check configuration
 HEALTH_TIMEOUT=${HEALTH_TIMEOUT:-10}
+HEALTH_CONNECT_TIMEOUT=${HEALTH_CONNECT_TIMEOUT:-3}
 HEALTH_RETRIES=${HEALTH_RETRIES:-3}
 HEALTH_RETRY_DELAY=${HEALTH_RETRY_DELAY:-2}
 
@@ -304,15 +305,21 @@ _check_vaultwarden_api() {
 
     log_info "Checking VaultWarden API..."
 
-    # Internal health check (direct to container)
+    # Internal health check (direct to container).
+    # --connect-timeout bounds TCP/TLS handshake separately from total transfer
+    # time; without it a hung handshake consumes the full --max-time budget.
     local internal_response
     if internal_response=$(timeout "$HEALTH_TIMEOUT" curl -sf \
+        --connect-timeout "$HEALTH_CONNECT_TIMEOUT" \
         --max-time "$HEALTH_TIMEOUT" \
         "http://127.0.0.1:80/alive" 2>/dev/null); then
         _pass "vaultwarden:alive" "VaultWarden /alive endpoint responding"
     else
         # Try via docker network
-        if docker exec vaultwarden_app curl -sf "http://127.0.0.1/alive" &>/dev/null; then
+        if docker exec vaultwarden_app curl -sf \
+            --connect-timeout "$HEALTH_CONNECT_TIMEOUT" \
+            --max-time "$HEALTH_TIMEOUT" \
+            "http://127.0.0.1/alive" &>/dev/null; then
             _pass "vaultwarden:alive" "VaultWarden /alive endpoint responding (via container)"
         else
             _fail "vaultwarden:alive" "VaultWarden /alive endpoint not responding"
@@ -323,6 +330,7 @@ _check_vaultwarden_api() {
     if [[ -n "$domain" ]]; then
         local external_code
         external_code=$(timeout "$HEALTH_TIMEOUT" curl -so /dev/null \
+            --connect-timeout "$HEALTH_CONNECT_TIMEOUT" \
             --max-time "$HEALTH_TIMEOUT" \
             -w "%{http_code}" \
             "https://${domain}/alive" 2>/dev/null || echo "000")
@@ -339,6 +347,7 @@ _check_vaultwarden_api() {
     if $COMPREHENSIVE && [[ -n "$domain" ]]; then
         local api_code
         api_code=$(timeout "$HEALTH_TIMEOUT" curl -so /dev/null \
+            --connect-timeout "$HEALTH_CONNECT_TIMEOUT" \
             --max-time "$HEALTH_TIMEOUT" \
             -w "%{http_code}" \
             "https://${domain}/api/server-info" 2>/dev/null || echo "000")
@@ -511,9 +520,13 @@ _check_network() {
     log_info "Checking network connectivity..."
 
     # Check outbound internet connectivity
-    if timeout "$HEALTH_TIMEOUT" curl -sf --max-time "$HEALTH_TIMEOUT" \
+    if timeout "$HEALTH_TIMEOUT" curl -sf \
+        --connect-timeout "$HEALTH_CONNECT_TIMEOUT" \
+        --max-time "$HEALTH_TIMEOUT" \
         "https://1.1.1.1" &>/dev/null || \
-       timeout "$HEALTH_TIMEOUT" curl -sf --max-time "$HEALTH_TIMEOUT" \
+       timeout "$HEALTH_TIMEOUT" curl -sf \
+        --connect-timeout "$HEALTH_CONNECT_TIMEOUT" \
+        --max-time "$HEALTH_TIMEOUT" \
         "https://cloudflare.com" &>/dev/null; then
         _pass "network:outbound" "Outbound internet connectivity OK"
     else
@@ -523,6 +536,7 @@ _check_network() {
     # Check Cloudflare API reachability
     local cf_code
     cf_code=$(timeout "$HEALTH_TIMEOUT" curl -so /dev/null \
+        --connect-timeout "$HEALTH_CONNECT_TIMEOUT" \
         --max-time "$HEALTH_TIMEOUT" \
         -w "%{http_code}" \
         "https://api.cloudflare.com/" 2>/dev/null || echo "000")
@@ -710,7 +724,7 @@ _generate_report() {
         echo "Generated: $(date)"
         echo "Host: $(hostname)"
         echo "Mode: $( $COMPREHENSIVE && echo comprehensive || echo standard )"
-        echo "=""=""=""=""=""=""=""=""=""=""=""=""=""=""=""=""=""=""=""=""=""=""=""=""=""=""=""=""=""=""
+        echo "="*"="*"="*"="*"="*"="*"="*"="*"="*"="*"="*"="*"="*"="*"="*"="*"="*"="*"="*"="*"="*"="*"="*"="*"="*"="*"="*"="*"="*"="
         echo ""
         echo "SUMMARY: $passed passed, $warnings warnings, $failed failed (total: $total)"
         echo ""
