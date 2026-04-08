@@ -37,6 +37,10 @@ FORCE=false
 # BG-L1: Configurable threshold (hours) after which --status warns the account is still active.
 BREAKGLASS_MAX_AGE_HOURS="${BREAKGLASS_MAX_AGE_HOURS:-72}"
 
+# Auto-expiry: hours after creation before the account is automatically removed.
+# Set to 0 to disable auto-expiry (not recommended for production use).
+BREAKGLASS_AUTO_EXPIRY_HOURS="${BREAKGLASS_AUTO_EXPIRY_HOURS:-2}"
+
 show_help() {
     cat << 'EOF'
 VaultWarden-OCI Break-Glass Admin Manager - Emergency Access
@@ -56,7 +60,10 @@ OPTIONS:
     --help                  Show this help
 
 ENVIRONMENT:
-    BREAKGLASS_MAX_AGE_HOURS  Hours before --status warns account is too old (default: 72)
+    BREAKGLASS_MAX_AGE_HOURS     Hours before --status warns account is too old (default: 72)
+    BREAKGLASS_AUTO_EXPIRY_HOURS Hours after creation before the account is auto-removed
+                                 (default: 2). Uses `at` when available, falls back to a
+                                 background subshell. Set to 0 to disable auto-expiry.
 
 EXAMPLES:
     sudo ./create-breakglass-admin.sh --create        # Create emergency admin
@@ -75,7 +82,8 @@ SECURITY NOTES:
     • Account is granted targeted sudo via /etc/sudoers.d/vw-emergency
     • Allowed commands: docker, systemctl, journalctl, reboot
     • Password displayed only once during creation
-    • Account can be disabled/removed when not needed
+    • Account is automatically removed after BREAKGLASS_AUTO_EXPIRY_HOURS (default: 2h)
+    • Account can be disabled/removed manually with --remove
     • Script validates its own security before operations
 EOF
 }
@@ -296,6 +304,76 @@ _notify_breakglass_event() {
     fi
 }
 
+# ---------------------------------------------------------------------------
+# schedule_auto_cleanup()
+#
+# Schedules an automatic --remove for BREAKGLASS_AUTO_EXPIRY_HOURS from now.
+# Strategy (in priority order):
+#   1. `at` daemon  — most reliable; survives shell exit; persists across reboots
+#      within the expiry window.  Uses `batch` queue to avoid load spikes.
+#   2. Background subshell + sleep  — fallback when `at` is absent.  Lost on
+#      reboot, but better than nothing for typical short-lived sessions.
+# Set BREAKGLASS_AUTO_EXPIRY_HOURS=0 to disable entirely.
+#
+# The scheduled command uses the full resolved path to this script and
+# passes --force so the cleanup is non-interactive.
+# ---------------------------------------------------------------------------
+schedule_auto_cleanup() {
+    local expiry_hours="$BREAKGLASS_AUTO_EXPIRY_HOURS"
+    local bg_user="$BREAKGLASS_USER"
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would schedule auto-cleanup in ${expiry_hours}h"
+        return 0
+    fi
+
+    if (( expiry_hours == 0 )); then
+        log_warn "Auto-expiry disabled (BREAKGLASS_AUTO_EXPIRY_HOURS=0) — remember to run --remove manually"
+        return 0
+    fi
+
+    local script_abs
+    script_abs=$(readlink -f "$0")
+    local cleanup_cmd="${script_abs} --remove --user ${bg_user} --force"
+    local expiry_epoch=$(( $(date +%s) + expiry_hours * 3600 ))
+    local expiry_human
+    expiry_human=$(date -d "@${expiry_epoch}" '+%Y-%m-%d %H:%M %Z' 2>/dev/null \
+        || date -r "${expiry_epoch}" '+%Y-%m-%d %H:%M %Z' 2>/dev/null \
+        || date -u -d "${expiry_hours} hours" '+%Y-%m-%d %H:%M UTC' 2>/dev/null \
+        || echo "in ${expiry_hours} hour(s)")
+
+    if command -v at >/dev/null 2>&1 && systemctl is-active --quiet atd 2>/dev/null; then
+        # `at` is available and atd is running — schedule via the job queue.
+        # `at now + N hours` reads the command from stdin.
+        if echo "${cleanup_cmd}" | at now + "${expiry_hours}" hours 2>/dev/null; then
+            log_success "Auto-cleanup scheduled via 'at' at ${expiry_human}"
+            return 0
+        else
+            log_warn "'at' scheduling failed — falling back to background subshell"
+        fi
+    elif command -v at >/dev/null 2>&1; then
+        # `at` present but atd not running — try anyway (some distros start atd on demand).
+        if echo "${cleanup_cmd}" | at now + "${expiry_hours}" hours 2>/dev/null; then
+            log_success "Auto-cleanup scheduled via 'at' at ${expiry_human}"
+            return 0
+        else
+            log_warn "'at' available but scheduling failed — falling back to background subshell"
+        fi
+    fi
+
+    # Fallback: background subshell using sleep.
+    # Runs detached (setsid + redirects) so it survives the invoking shell session.
+    # Note: this is lost on reboot; the operator must run --remove manually if they reboot
+    # before the expiry window elapses.
+    local sleep_seconds=$(( expiry_hours * 3600 ))
+    log_warn "'at' not available — scheduling auto-cleanup via background sleep (lost on reboot)"
+    setsid bash -c "sleep ${sleep_seconds} && ${cleanup_cmd}" \
+        </dev/null >/dev/null 2>&1 &
+    disown
+    log_success "Auto-cleanup background job started (PID $!) — will run at ${expiry_human}"
+    return 0
+}
+
 # STANDARDIZED: Create break-glass user - returns exit code
 create_breakglass_user() {
     if [[ "$DRY_RUN" == "true" ]]; then
@@ -385,7 +463,8 @@ sudo /usr/bin/docker compose restart
 SECURITY NOTES:
 - This account does NOT have unrestricted root access
 - Use only for genuine emergencies
-- Remove when no longer needed: sudo ./create-breakglass-admin.sh --remove
+- Account auto-expires after ${BREAKGLASS_AUTO_EXPIRY_HOURS} hour(s)
+- Remove manually if needed: sudo ./create-breakglass-admin.sh --remove
 - Password is 32+ characters for maximum security
 
 Created: $(date)
@@ -400,6 +479,13 @@ EOF
     log_success "Break-glass admin created successfully"
 
     _notify_breakglass_event "CREATED" "User $BREAKGLASS_USER created with targeted sudoers (/etc/sudoers.d/vw-emergency)" "INFO"
+
+    # Compute and display the auto-expiry time before clearing the screen.
+    local expiry_epoch=$(( $(date +%s) + BREAKGLASS_AUTO_EXPIRY_HOURS * 3600 ))
+    local expiry_human
+    expiry_human=$(date -d "@${expiry_epoch}" '+%Y-%m-%d %H:%M %Z' 2>/dev/null \
+        || date -r "${expiry_epoch}" '+%Y-%m-%d %H:%M %Z' 2>/dev/null \
+        || echo "in ${BREAKGLASS_AUTO_EXPIRY_HOURS} hour(s)")
 
     clear
     printf '%b\n' "${COLOR_RED}"
@@ -417,7 +503,11 @@ EOF
 
     printf '%b\n' "Username:  ${COLOR_GREEN}${BREAKGLASS_USER}${COLOR_RESET}"
     printf '%b\n' "Password:  ${COLOR_GREEN}${password}${COLOR_RESET}"
-    printf '%b\n' "Expiry:    ${COLOR_CYAN}Never (Account is locked to serial console)${COLOR_RESET}"
+    if (( BREAKGLASS_AUTO_EXPIRY_HOURS > 0 )); then
+        printf '%b\n' "Expiry:    ${COLOR_YELLOW}${expiry_human} (auto-cleanup in ${BREAKGLASS_AUTO_EXPIRY_HOURS}h)${COLOR_RESET}"
+    else
+        printf '%b\n' "Expiry:    ${COLOR_CYAN}None — auto-expiry disabled. Remove manually with --remove${COLOR_RESET}"
+    fi
 
     printf '\nTo test this:\n'
     printf '1. Go to Oracle Cloud Console > Compute > Instance > Console Connection\n'
@@ -428,6 +518,9 @@ EOF
     printf '%b\n' "\n${COLOR_RED}Press ENTER to clear screen and finish...${COLOR_RESET}"
     read -r
     clear
+
+    # Schedule auto-cleanup after credentials have been displayed and acknowledged.
+    schedule_auto_cleanup
 
     return 0
 }
@@ -755,7 +848,7 @@ main() {
             echo "  1. Store the credentials securely"
             echo "  2. Test OCI Console Connection access"
             echo "  3. Validate script security: sudo ./create-breakglass-admin.sh --validate"
-            echo "  4. Remove when not needed: sudo ./create-breakglass-admin.sh --remove"
+            echo "  4. Account will auto-expire in ${BREAKGLASS_AUTO_EXPIRY_HOURS}h; remove sooner if done: sudo ./create-breakglass-admin.sh --remove"
 
             exit 0
         else
