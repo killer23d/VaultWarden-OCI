@@ -38,6 +38,19 @@
 #   variable; emit it via log_error on non-zero exit, including the expected
 #   SOPS_AGE_KEY_FILE path. Pattern mirrors the BUG-CRY-ES2c fix in
 #   encrypt_sops_file().
+#
+# PATCHED BUGS (2026-04-07):
+#   FIX-PERF1: decrypt_secret() called sops twice per key: once to capture
+#   stderr and once to capture the plaintext value. Replaced with a single
+#   sops invocation that writes stderr to a mktemp file (cleaned up
+#   unconditionally via trap) and stdout to the value variable.
+#
+#   FIX-HEREDOC1: generate_recovery_kit() used an unquoted heredoc (<< EOF).
+#   Shell expansion inside an unquoted heredoc silently drops the $2y prefix
+#   from bcrypt hashes (e.g. $caddy_hash = "admin $2y$12$...") and expands
+#   any other $ sequences in the static body text. Changed to a quoted
+#   delimiter (<< 'EOF') for the static block, then appended all dynamic
+#   values with explicit printf calls.
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     echo "Error: This library should be sourced, not executed directly"
@@ -149,26 +162,31 @@ decrypt_secret() {
 
     if ! ensure_sops_env; then return 1; fi
 
-    local value
-    local rc=0
-    local sops_stderr
+    # FIX-PERF1: Use a single sops invocation. stderr goes to a mktemp file
+    # (cleaned up unconditionally via trap); stdout is captured as the value.
+    # This halves the number of age decryptions compared to the previous
+    # two-call pattern (once for stderr, once for value).
+    local _tmp_err
+    _tmp_err=$(mktemp) || { log_error "decrypt_secret: mktemp failed"; return 1; }
+    # Unconditional cleanup: remove the temp file whether we succeed or fail.
+    # shellcheck disable=SC2064
+    trap "rm -f '$_tmp_err'" RETURN
+
+    local value rc=0
     # BUG-#18 FIX: Suppress xtrace around secret decryption to prevent value
     # appearing in debug logs or core dumps via set -x output.
     { set +x; } 2>/dev/null
-    # FIX-SEC1: Capture sops stderr so failures emit actionable diagnostics
-    # rather than a generic one-liner. The key file path is included to help
-    # operators confirm which AGE key was expected during disaster recovery.
-    sops_stderr=$(sops -d --extract "[\"$key\"]" "$secrets_file" 2>&1 >/dev/null) || rc=$?
-    if [[ $rc -eq 0 ]]; then
-        { set +x; } 2>/dev/null
-        value=$(sops -d --extract "[\"$key\"]" "$secrets_file" 2>/dev/null) || rc=$?
-    fi
+    # FIX-SEC1 / FIX-PERF1: Single call — stdout → value, stderr → temp file.
+    # The key file path is included in error output to aid disaster recovery.
+    value=$(sops -d --extract "[\"$key\"]" "$secrets_file" 2>"$_tmp_err") || rc=$?
 
     # BUG-S10 FIX: unset key file path from environment so child processes do
     # not inherit it.
     unset SOPS_AGE_KEY_FILE
 
     if [[ $rc -ne 0 ]]; then
+        local sops_stderr
+        sops_stderr=$(cat "$_tmp_err")
         log_error "decrypt_secret: failed to decrypt key '$key' from $secrets_file (sops exit $rc)"
         log_error "  Expected AGE key: ${SOPS_AGE_KEY_FILE:-<unset — ensure_sops_env ran>}"
         if [[ -n "${sops_stderr:-}" ]]; then
@@ -842,10 +860,16 @@ generate_recovery_kit() {
         return 1
     fi
 
-    cat > "$output_file" << EOF
-██████╗ ███████╗ ██████╗ ██████╗ ██╗   ██╗███████╗██████╗ ██╗   ██╗
+    # FIX-HEREDOC1: Use a quoted delimiter (<< 'EOF') so that the shell does
+    # NOT expand any $ sequences inside the static body. Variables such as
+    # $caddy_hash contain bcrypt hashes of the form "admin $2y$12$..." where
+    # $2y would be silently dropped by shell expansion in an unquoted heredoc,
+    # producing a garbled hash that cannot be used for Caddy auth recovery.
+    # All dynamic values are injected after the static block with printf.
+    cat >> "$output_file" << 'EOF'
+██████╗ ███████╗ ██████╗ ██████╗██╗   ██╗███████╗██████╗ ██╗   ██╗
 ██╔══██╗██╔════╝██╔════╝██╔═══██╗██║   ██║██╔════╝██╔══██╗╚██╗ ██╔╝
-██████╔╝█████╗  ██║     ██║   ██║██║   ██║█████╗  ██████╔╝ ╚████╔╝ 
+██████╔╝█████╗  ██║     ██║   ██║██║   ██║█████╗  ██████╔╝ ╚████╔╟ 
 ██╔══██╗██╔══╝  ██║     ██║   ██║╚██╗ ██╔╝██╔══╝  ██╔══██╗  ╚██╔╝  
 ██║  ██╗███████╗╚██████╗╚██████╔╝ ╚████╔╝ ███████╗██║  ██╗   ██║   
 ╚═╝  ╚═╝╚══════╝ ╚═════╝ ╚═════╝   ╚═══╝  ╚══════╝╚═╝  ╚═╝   ╚═╝   
@@ -857,77 +881,93 @@ generate_recovery_kit() {
 ██║  ██╗██║   ██║   
 ╚═╝  ╚═╝╚═╝   ╚═╝   
 
-══════════════════════════════════════════════════════════════════════════
-                            🚨 CRITICAL SECURITY DOCUMENT 🚨
-══════════════════════════════════════════════════════════════════════════
-Created: $date_val
-Server:  $hostname_val
-Domain:  $domain
+EOF
+
+    # Inject all dynamic values explicitly so that $ characters in secrets
+    # (e.g. bcrypt hashes: $2y$12$...) are written verbatim.
+    printf '%s\n' \
+        "\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550" \
+        "                            \U0001F6A8 CRITICAL SECURITY DOCUMENT \U0001F6A8" \
+        "\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550" \
+        >> "$output_file"
+    printf 'Created: %s\n' "$date_val"      >> "$output_file"
+    printf 'Server:  %s\n' "$hostname_val" >> "$output_file"
+    printf 'Domain:  %s\n' "$domain"       >> "$output_file"
+    cat >> "$output_file" << 'EOF'
 
 WARNING: This file contains highly sensitive UNENCRYPTED secrets.
 1. Save this to your Password Manager (Secure Note) IMMEDIATELY.
 2. Print a physical copy for your fireproof safe (optional).
 3. DELETE THIS FILE from the server immediately after saving.
 
-══════════════════════════════════════════════════════════════════════════
+════════════════════════════════════════════════════════════════════════
 SECTION 1: ENCRYPTION KEYS (THE MOST IMPORTANT PART)
-══════════════════════════════════════════════════════════════════════════
+════════════════════════════════════════════════════════════════════════
 If you lose this key, your backups are FOREVER USELESS.
 
 [AGE PRIVATE KEY]
-$priv_key
+EOF
+    printf '%s\n' "$priv_key" >> "$output_file"
+    cat >> "$output_file" << 'EOF'
 
 [AGE PUBLIC KEY]
-$pub_key
+EOF
+    printf '%s\n' "$pub_key" >> "$output_file"
+    cat >> "$output_file" << 'EOF'
 
-══════════════════════════════════════════════════════════════════════════
+════════════════════════════════════════════════════════════════════════
 SECTION 2: SERVER SECRETS (DECRYPTED)
-══════════════════════════════════════════════════════════════════════════
+════════════════════════════════════════════════════════════════════════
 
 [SYSTEM CREDENTIALS]
 Backup Encryption Passphrase:
-$backup_pass
-
-SMTP Password (Email):
-$smtp_pass
-
-Email API Token (email_api_token):
-$email_api_tok
-
-Cloudflare DNS Token:
-$cf_dns
-
-Cloudflare Firewall Token:
-$cf_fw
-
-[PUSH NOTIFICATIONS]
-Installation ID:  $push_id
-Installation Key: $push_key
-
-[ADMIN ACCESS]
-Admin Email: $admin_email
+EOF
+    printf '%s\n' "$backup_pass" >> "$output_file"
+    printf '\nSMTP Password (Email):\n' >> "$output_file"
+    printf '%s\n' "$smtp_pass" >> "$output_file"
+    printf '\nEmail API Token (email_api_token):\n' >> "$output_file"
+    printf '%s\n' "$email_api_tok" >> "$output_file"
+    printf '\nCloudflare DNS Token:\n' >> "$output_file"
+    printf '%s\n' "$cf_dns" >> "$output_file"
+    printf '\nCloudflare Firewall Token:\n' >> "$output_file"
+    printf '%s\n' "$cf_fw" >> "$output_file"
+    printf '\n[PUSH NOTIFICATIONS]\n' >> "$output_file"
+    printf 'Installation ID:  %s\n' "$push_id" >> "$output_file"
+    printf 'Installation Key: %s\n' "$push_key" >> "$output_file"
+    printf '\n[ADMIN ACCESS]\n' >> "$output_file"
+    printf 'Admin Email: %s\n' "$admin_email" >> "$output_file"
+    cat >> "$output_file" << 'EOF'
 
 VaultWarden Admin Password Hash (Argon2id):
-$vw_admin_hash
+EOF
+    printf '%s\n' "$vw_admin_hash" >> "$output_file"
+    cat >> "$output_file" << 'EOF'
 (Note: Original password cannot be recovered from hash. Reset if lost.)
 
 Caddy Basic Auth Hash (Bcrypt):
-$caddy_hash
+EOF
+    printf '%s\n' "$caddy_hash" >> "$output_file"
+    cat >> "$output_file" << 'EOF'
 (Note: Original password cannot be recovered from hash. Reset if lost.)
 
-══════════════════════════════════════════════════════════════════════════
+════════════════════════════════════════════════════════════════════════
 SECTION 3: DISASTER RECOVERY & MIGRATION CHECKLIST
-══════════════════════════════════════════════════════════════════════════
+════════════════════════════════════════════════════════════════════════
 
 TO RESTORE THIS SERVER ON NEW HARDWARE:
 
 1. PREPARATION
    [ ] Install Git, Docker, and SOPS on new server.
    [ ] Clone the repository:
-       git clone $repo_clone_url
-   [ ] Run setup:
-       cd $(basename "$repo_clone_url" .git)
-       ./setup.sh --domain $domain --email $admin_email
+EOF
+    printf '       git clone %s\n' "$repo_clone_url" >> "$output_file"
+    # repo_basename: strip trailing .git if present
+    local repo_basename
+    repo_basename=$(basename "$repo_clone_url" .git)
+    printf '   [ ] Run setup:\n' >> "$output_file"
+    printf '       cd %s\n' "$repo_basename" >> "$output_file"
+    printf '       ./setup.sh --domain %s --email %s\n' "$domain" "$admin_email" >> "$output_file"
+    cat >> "$output_file" << 'EOF'
 
 2. RESTORE KEYS
    [ ] Create key directory:
@@ -958,9 +998,9 @@ TO RESTORE THIS SERVER ON NEW HARDWARE:
    [ ] Check health:
        ./health.sh
 
-══════════════════════════════════════════════════════════════════════════
+════════════════════════════════════════════════════════════════════════
 END OF RECOVERY KIT
-══════════════════════════════════════════════════════════════════════════
+════════════════════════════════════════════════════════════════════════
 EOF
 
     # BUG-#17 FIX: Unset plaintext Age private key from memory immediately after
@@ -975,16 +1015,16 @@ _ork_generate_and_secure() {
 
     {
         printf '\n'
-        printf '════════════════════════════════════════════════════════════\n'
+        printf '\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\n'
         printf ' SECURITY NOTICE -- PLAINTEXT FILE ABOUT TO BE WRITTEN\n'
-        printf '════════════════════════════════════════════════════════════\n'
+        printf '\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\n'
         printf 'The recovery kit will be written to:\n'
         printf '  %s\n' "$output_file"
         printf '\n'
         printf 'Even on tmpfs, this file is visible to root and may appear\n'
         printf 'in OCI block-volume snapshots if /tmp falls back to disk.\n'
         printf 'The file will be securely deleted after you confirm.\n'
-        printf '════════════════════════════════════════════════════════════\n'
+        printf '\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\n'
         printf '\n'
     } > /dev/tty 2>/dev/null || true
 
