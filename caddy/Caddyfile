@@ -1,73 +1,73 @@
 {
-        # Global ACME DNS configuration via Cloudflare
-        acme_dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+	# Global ACME DNS configuration via Cloudflare
+	acme_dns cloudflare {env.CLOUDFLARE_API_TOKEN}
 
-        # Dynamically trust Cloudflare proxy IPs (caddy-cloudflare-ip module).
-        # Rewrites remote_ip in access logs to the real visitor IP from
-        # Cf-Connecting-Ip — required for fail2ban to ban actual attackers
-        # rather than Cloudflare edge node IPs.
-        servers {
-                trusted_proxies cloudflare
-                client_ip_headers Cf-Connecting-Ip
-                # C-03: Connection timeouts — Caddy 2.x global hardening
-                timeouts {
-                        read_body   10s
-                        read_header 10s
-                        write       30s
-                        idle        120s
-                }
-        }
+	# Dynamically trust Cloudflare proxy IPs (caddy-cloudflare-ip module).
+	# Rewrites remote_ip in access logs to the real visitor IP from
+	# Cf-Connecting-Ip — required for fail2ban to ban actual attackers
+	# rather than Cloudflare edge node IPs.
+	servers {
+		trusted_proxies cloudflare
+		client_ip_headers Cf-Connecting-Ip
+		# C-03: Connection timeouts — Caddy 2.x global hardening
+		timeouts {
+			read_body   10s
+			read_header 10s
+			write       30s
+			idle        120s
+		}
+	}
 
-        # ==========================================================================
-        # BUG-4b FIX: Global named log writers — single FileWriter per log file
-        #
-        # Pattern: site blocks name their logger with 'log <name>' (no output
-        # block). Global writers here use 'include http.log.access.<name>' to
-        # subscribe to that named logger's output and write it to a file.
-        #
-        # This is the officially documented pattern from caddyserver.com/docs/
-        # caddyfile/directives/log — the 'two files for one subdomain' example.
-        #
-        # Result: exactly 2 FileWriter open() calls at 'caddy run' startup,
-        # both after entrypoint.sh has already run 'mkdir -p /var/log/caddy'.
-        # Zero FileWriter calls during 'caddy validate' (already removed).
-        # ==========================================================================
-        log access_log {
-                include http.log.access.access
-                output file /var/log/caddy/access.log {
-                        roll_size 50MB
-                        roll_keep 20
-                        roll_keep_for 30d
-                        roll_compression zstd
-                }
-                format json {
-                        time_format "2006-01-02T15:04:05.000Z07:00"
-                        message_key "msg"
-                        level_key   "level"
-                        time_key    "ts"
-                        name_key    "logger"
-                        caller_key  "caller"
-                }
-                level INFO
-        }
+	# ==========================================================================
+	# BUG-4b FIX: Global named log writers — single FileWriter per log file
+	#
+	# Pattern: site blocks name their logger with 'log <name>' (no output
+	# block). Global writers here use 'include http.log.access.<name>' to
+	# subscribe to that named logger's output and write it to a file.
+	#
+	# This is the officially documented pattern from caddyserver.com/docs/
+	# caddyfile/directives/log — the 'two files for one subdomain' example.
+	#
+	# Result: exactly 2 FileWriter open() calls at 'caddy run' startup,
+	# both after entrypoint.sh has already run 'mkdir -p /var/log/caddy'.
+	# Zero FileWriter calls during 'caddy validate' (already removed).
+	# ==========================================================================
+	log access_log {
+		include http.log.access.access
+		output file /var/log/caddy/access.log {
+			roll_size 50MB
+			roll_keep 20
+			roll_keep_for 30d
+			roll_compression zstd
+		}
+		format json {
+			time_format "2006-01-02T15:04:05.000Z07:00"
+			message_key "msg"
+			level_key   "level"
+			time_key    "ts"
+			name_key    "logger"
+			caller_key  "caller"
+		}
+		level INFO
+	}
 
-        log security_log {
-                include http.log.access.security
-                output file /var/log/caddy/security.log {
-                        roll_size 10MB
-                        roll_keep 50
-                        roll_keep_for 180d
-                        roll_compression zstd
-                }
-                format json {
-                        time_format "2006-01-02T15:04:05.000Z07:00"
-                        message_key "msg"
-                        level_key   "level"
-                        time_key    "ts"
-                        name_key    "logger"
-                }
-                level WARN
-        }
+	log security_log {
+		include http.log.access.security
+		output file /var/log/caddy/security.log {
+			roll_size 10MB
+			roll_keep 50
+			roll_keep_for 180d
+			roll_compression zstd
+		}
+		format json {
+			time_format "2006-01-02T15:04:05.000Z07:00"
+			message_key "msg"
+			level_key   "level"
+			time_key    "ts"
+			name_key    "logger"
+		}
+		level WARN
+	}
 }
 
 # ================================
@@ -79,162 +79,168 @@
 # Responds directly (no upstream proxy) — Caddy health is independent
 # of VaultWarden health; each service has its own healthcheck.
 http://127.0.0.1:8080 {
-        # C-05: Suppress health check log noise — output discard is a direct
-        # FileWriter that writes nowhere; it does not open any file on disk.
-        log {
-                output discard
-        }
-        respond /alive 200
+	# C-05: Suppress health check log noise — output discard is a direct
+	# FileWriter that writes nowhere; it does not open any file on disk.
+	log {
+		output discard
+	}
+	respond /alive 200
 }
 
 # ================================
 # Main Site
 # ================================
 {$DOMAIN_NAME} {
-        # BUG-4b FIX: Name this site's logger 'access'. No output block here —
-        # the global 'access_log' writer above subscribes to
-        # 'http.log.access.access' and handles all file I/O.
-        log access
+	# BUG-4b FIX: Name this site's logger 'access'. No output block here —
+	# the global 'access_log' writer above subscribes to
+	# 'http.log.access.access' and handles all file I/O.
+	log access
 
-        # 1. Enhanced Security Headers (HARDENED)
-        header {
-                Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-                X-Content-Type-Options "nosniff"
-                X-Frame-Options "DENY"
-                X-XSS-Protection "1; mode=block"
-                Referrer-Policy "strict-origin-when-cross-origin"
-                Cross-Origin-Opener-Policy "same-origin"
-                Cross-Origin-Resource-Policy "same-origin"
-                # credentialless instead of require-corp — preserves Spectre isolation
-                # while allowing cross-origin no-credential fetches for WebAuthn/passkeys.
-                Cross-Origin-Embedder-Policy "credentialless"
-                X-DNS-Prefetch-Control "off"
-                # PUSH_CSP set by entrypoint.sh — empty string when PUSH_ENABLED!=true,
-                # Bitwarden push endpoints appended when true.
-                Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss://{$DOMAIN_NAME}{$PUSH_CSP}; frame-src 'self'; object-src 'none'; base-uri 'self';"
-                Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=(), usb=()"
-                X-Request-ID {uuid}
-                -Server
-                -X-Powered-By
-        }
+	# 1. Enhanced Security Headers (HARDENED)
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		X-XSS-Protection "1; mode=block"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Cross-Origin-Opener-Policy "same-origin"
+		Cross-Origin-Resource-Policy "same-origin"
+		# credentialless instead of require-corp — preserves Spectre isolation
+		# while allowing cross-origin no-credential fetches for WebAuthn/passkeys.
+		Cross-Origin-Embedder-Policy "credentialless"
+		X-DNS-Prefetch-Control "off"
+		# PUSH_CSP set by entrypoint.sh — empty string when PUSH_ENABLED!=true,
+		# Bitwarden push endpoints appended when true.
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss://{$DOMAIN_NAME}{$PUSH_CSP}; frame-src 'self'; object-src 'none'; base-uri 'self';"
+		Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=(), usb=()"
+		X-Request-ID {uuid}
+		-Server
+		-X-Powered-By
+	}
 
-        # 2a. Response compression (Caddy 2.x best practice — gzip + zstd)
-        # C-02: encode improves performance for all text/JSON responses from VaultWarden.
-        encode zstd gzip
+	# 2a. Response compression (Caddy 2.x best practice — gzip + zstd)
+	# C-02: encode improves performance for all text/JSON responses from VaultWarden.
+	encode zstd gzip
 
-        # 2. Public Health Check
-        @health path /alive
-        handle @health {
-                reverse_proxy vaultwarden:80 {
-                        header_up Host {host}
-                        header_up CF-Connecting-IP {client_ip}
-                        header_up X-Real-IP {client_ip}
-                        header_up X-Forwarded-For {client_ip}
-                        header_up X-Request-ID {uuid}
-                }
-        }
+	# 2. Public Health Check
+	@health path /alive
+	handle @health {
+		reverse_proxy vaultwarden:80 {
+			header_up Host {host}
+			header_up CF-Connecting-IP {client_ip}
+			header_up X-Real-IP {client_ip}
+			header_up X-Forwarded-For {client_ip}
+			header_up X-Request-ID {uuid}
+		}
+	}
 
-        # 3. WebSocket routing for notifications hub
-        # Port 3012 removed in VaultWarden >= 1.30.0.
-        # All WebSocket real-time sync goes through main HTTP port 80.
-        handle /notifications/hub {
-                reverse_proxy vaultwarden:80 {
-                        header_up Host {host}
-                        header_up Connection {>Connection}
-                        header_up Upgrade {>Upgrade}
-                        header_up CF-Connecting-IP {client_ip}
-                        header_up X-Real-IP {client_ip}
-                        header_up X-Forwarded-For {client_ip}
-                        header_up X-Request-ID {uuid}
-                }
-        }
+	# 3. WebSocket routing for notifications hub
+	# Port 3012 removed in VaultWarden >= 1.30.0.
+	# All WebSocket real-time sync goes through main HTTP port 80.
+	handle /notifications/hub {
+		reverse_proxy vaultwarden:80 {
+			header_up Host {host}
+			header_up Connection {>Connection}
+			header_up Upgrade {>Upgrade}
+			header_up CF-Connecting-IP {client_ip}
+			header_up X-Real-IP {client_ip}
+			header_up X-Forwarded-For {client_ip}
+			header_up X-Request-ID {uuid}
+		}
+	}
 
-        # 4. Admin Panel Protection
-        # NOTE: 'unsafe-inline' required by VaultWarden admin UI inline
-        # <script> blocks. Risk accepted: admin panel is protected by
-        # basic_auth, IP allowlist, and Cloudflare WAF firewall rules.
-        # Admin requests appear in access.log with uri starting /admin —
-        # fail2ban vaultwarden-admin filter matches on that field.
-        @admin path /admin*
-        handle @admin {
-                # FIX-CF1: Reject any request that is NOT from the internal LAN
-                # (192.168.0.0/16) or loopback (127.0.0.1) before basic_auth is
-                # evaluated. The client IP is already the real visitor IP because
-                # 'trusted_proxies cloudflare' + 'client_ip_headers Cf-Connecting-Ip'
-                # resolve it in the global servers block above.
-                @admin_remote not remote_ip 192.168.0.0/16 127.0.0.1
-                respond @admin_remote 403
+	# 4. Admin Panel Protection
+	# NOTE: 'unsafe-inline' required by VaultWarden admin UI inline
+	# <script> blocks. Risk accepted: admin panel is protected by
+	# basic_auth, IP allowlist, and Cloudflare WAF firewall rules.
+	# Admin requests appear in access.log with uri starting /admin —
+	# fail2ban vaultwarden-admin filter matches on that field.
+	@admin path /admin*
+	handle @admin {
+		# FIX-CF1: Reject any request that is NOT from the configured admin
+		# CIDR range or loopback (127.0.0.1) before basic_auth is evaluated.
+		# The client IP is already the real visitor IP because
+		# 'trusted_proxies cloudflare' + 'client_ip_headers Cf-Connecting-Ip'
+		# resolve it in the global servers block above.
+		#
+		# ADMIN_ALLOW_CIDR controls which source networks can reach /admin.
+		# Default: 192.168.0.0/16  (set in .env / .env.example)
+		# OCI VCN (10.x.x.x): set ADMIN_ALLOW_CIDR=10.0.0.0/8
+		# Multiple CIDRs: Caddy accepts space-separated values, e.g.:
+		#   ADMIN_ALLOW_CIDR=192.168.0.0/16 10.0.0.0/8 172.16.0.0/12
+		@admin_remote not remote_ip {$ADMIN_ALLOW_CIDR} 127.0.0.1
+		respond @admin_remote 403
 
-                header {
-                        Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss://{$DOMAIN_NAME}{$PUSH_CSP}; frame-src 'self'; object-src 'none'; base-uri 'self';"
-                }
+		header {
+			Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss://{$DOMAIN_NAME}{$PUSH_CSP}; frame-src 'self'; object-src 'none'; base-uri 'self';"
+		}
 
-                # C-04: Limit request body size for admin endpoint to prevent DoS
-                request_body {
-                        max_size 2MB
-                }
+		# C-04: Limit request body size for admin endpoint to prevent DoS
+		request_body {
+			max_size 2MB
+		}
 
-                basic_auth {
-                        {env.ADMIN_USERNAME} {env.ADMIN_HASH}
-                }
+		basic_auth {
+			{env.ADMIN_USERNAME} {env.ADMIN_HASH}
+		}
 
-                reverse_proxy vaultwarden:80 {
-                        header_up Host {host}
-                        header_up CF-Connecting-IP {client_ip}
-                        header_up X-Real-IP {client_ip}
-                        header_up X-Forwarded-For {client_ip}
-                        header_up X-Request-ID {uuid}
-                }
-        }
+		reverse_proxy vaultwarden:80 {
+			header_up Host {host}
+			header_up CF-Connecting-IP {client_ip}
+			header_up X-Real-IP {client_ip}
+			header_up X-Forwarded-For {client_ip}
+			header_up X-Request-ID {uuid}
+		}
+	}
 
-        # 5. Auth Endpoints
-        @auth_endpoints path /api/accounts/prelogin* /identity/connect/token*
-        handle @auth_endpoints {
-                # C-04: Limit request body size on auth endpoints to prevent amplification
-                request_body {
-                        max_size 512KB
-                }
-                reverse_proxy vaultwarden:80 {
-                        header_up Host {host}
-                        header_up CF-Connecting-IP {client_ip}
-                        header_up X-Real-IP {client_ip}
-                        header_up X-Forwarded-For {client_ip}
-                        header_up X-Request-ID {uuid}
-                        header_up X-Auth-Endpoint "true"
-                }
-        }
+	# 5. Auth Endpoints
+	@auth_endpoints path /api/accounts/prelogin* /identity/connect/token*
+	handle @auth_endpoints {
+		# C-04: Limit request body size on auth endpoints to prevent amplification
+		request_body {
+			max_size 512KB
+		}
+		reverse_proxy vaultwarden:80 {
+			header_up Host {host}
+			header_up CF-Connecting-IP {client_ip}
+			header_up X-Real-IP {client_ip}
+			header_up X-Forwarded-For {client_ip}
+			header_up X-Request-ID {uuid}
+			header_up X-Auth-Endpoint "true"
+		}
+	}
 
-        # 6. Default Reverse Proxy
-        handle {
-                reverse_proxy vaultwarden:80 {
-                        header_up Host {host}
-                        header_up CF-Connecting-IP {client_ip}
-                        header_up X-Real-IP {client_ip}
-                        header_up X-Forwarded-For {client_ip}
-                        header_up X-Request-ID {uuid}
-                }
-        }
+	# 6. Default Reverse Proxy
+	handle {
+		reverse_proxy vaultwarden:80 {
+			header_up Host {host}
+			header_up CF-Connecting-IP {client_ip}
+			header_up X-Real-IP {client_ip}
+			header_up X-Forwarded-For {client_ip}
+			header_up X-Request-ID {uuid}
+		}
+	}
 }
 
 # ================================
 # Redirect www -> apex
 # ================================
 www.{$DOMAIN_NAME} {
-        # BUG-4b FIX: Same named logger 'access' as main site — both hostnames
-        # are included by the global access_log writer via
-        # 'include http.log.access.access'. No file open happens here.
-        log access
+	# BUG-4b FIX: Same named logger 'access' as main site — both hostnames
+	# are included by the global access_log writer via
+	# 'include http.log.access.access'. No file open happens here.
+	log access
 
-        redir https://{$DOMAIN_NAME}{uri} 301
+	redir https://{$DOMAIN_NAME}{uri} 301
 }
 
 # ================================
 # Catch-all :80 and :443
 # ================================
 :80, :443 {
-        # BUG-4b FIX: Named logger 'security' — consumed by global security_log
-        # writer via 'include http.log.access.security'. No file open here.
-        log security
+	# BUG-4b FIX: Named logger 'security' — consumed by global security_log
+	# writer via 'include http.log.access.security'. No file open here.
+	log security
 
-        respond "Not Found" 404
+	respond "Not Found" 404
 }
