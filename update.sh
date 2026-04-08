@@ -25,6 +25,17 @@
 #                     roll back any pulled images to their pre-pull digest via
 #                     rollback_image_digests(), and exit 1 before calling
 #                     apply_updates_and_restart().
+#
+# PATCHED BUGS (2026-04-07):
+#   UPDATE-3 [HIGH]   Pre-update backup existed but used the wrong backup mode
+#                     and treated failures as non-fatal. The previous
+#                     run_pre_update_backup() invoked ./backup.sh --type db and
+#                     continued on failure, which does not provide a clean full
+#                     pre-update rollback point for compose-level changes.
+#                     Fix: run ./backup.sh --type pre-update before any update
+#                     work, abort on failure, and make the log message explicit
+#                     so operators know the update did not proceed without a
+#                     restorable safety net.
 
 set -euo pipefail
 
@@ -421,19 +432,16 @@ run_pre_update_backup() {
         return 0
     fi
     if [[ ! -x "${SCRIPT_DIR}/backup.sh" ]]; then
-        log_warn "backup.sh not found or not executable — skipping pre-update backup"
+        log_error "backup.sh not found or not executable — aborting update"
+        return 1
+    fi
+    log_info "Creating pre-update backup via ./backup.sh --type pre-update..."
+    if "${SCRIPT_DIR}/backup.sh" --type pre-update; then
+        log_success "Pre-update backup created"
         return 0
     fi
-    log_info "Creating pre-update safety backup..."
-    # Issue #47: --quiet removed so backup failure details appear in the update
-    # log and operators can diagnose the cause without inspecting backup logs
-    # separately.
-    if "${SCRIPT_DIR}/backup.sh" --type db; then
-        log_success "Pre-update safety backup created"
-    else
-        log_warn "Pre-update backup failed — continuing with update anyway"
-        log_warn "Consider running './backup.sh --type full' manually before proceeding"
-    fi
+    log_error "Pre-update backup failed — aborting update to avoid an unsafe rollback point"
+    return 1
 }
 
 main() {
@@ -447,7 +455,7 @@ main() {
     # silently causing backup/maintenance failures later.
     check_age_key_health_for_update
 
-    run_pre_update_backup
+    run_pre_update_backup || exit 1
 
     if [[ "$UPDATE_SYSTEM" == "true" ]]; then
         update_system_packages

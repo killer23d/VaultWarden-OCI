@@ -64,6 +64,14 @@
 #   FIX-VAL3: Both functions now emit one diagnostic line per problem before
 #   the final aggregated summary, giving operators a clear, actionable message
 #   for each missing or placeholder secret rather than a single bulk warning.
+#
+# PATCHED BUGS (2026-04-07):
+#   FIX-SEC2: check_placeholder_values() previously suppressed sops stderr with
+#   2>/dev/null and treated any non-zero decrypt as a silent non-placeholder.
+#   That masked wrong-key, missing-key-file, and corrupt-ciphertext failures
+#   during post-setup validation. Fix: capture stderr per key, log an explicit
+#   error on non-zero exit, and return 1 after cleanup so unreadable secrets are
+#   surfaced as validation errors instead of being silently ignored.
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     echo "Error: This library should be sourced, not executed directly"
@@ -361,22 +369,39 @@ check_placeholder_values() {
     )
     if ! ensure_sops_env; then return 1; fi
     local placeholder_secrets=()
+    local unreadable_secrets=()
     for secret in "${secrets_to_check[@]}"; do
-        local value
+        local value sops_stderr rc=0
         # BUG-#18 FIX: Suppress xtrace to prevent plaintext secret appearing in debug logs.
         { set +x; } 2>/dev/null
-        if value=$(sops -d --extract "[\"$secret\"]" "$secrets_file" 2>/dev/null); then
-            if [[ "$value" =~ ^(CHANGE_ME|PLACEHOLDER_NOT_CONFIGURED) ]] || [[ -z "$value" ]]; then
-                # FIX-VAL3: One clear log_warn per placeholder key so the admin
-                # sees an individual actionable line for each stale value.
-                log_warn "check_placeholder_values: secret '$secret' is set to a placeholder or is empty"
-                placeholder_secrets+=("$secret")
+        sops_stderr=$(sops -d --extract "[\"$secret\"]" "$secrets_file" 2>&1 >/dev/null) || rc=$?
+        if [[ $rc -ne 0 ]]; then
+            log_error "check_placeholder_values: failed to read secret '$secret' from $secrets_file (sops exit $rc)"
+            if [[ -n "${sops_stderr:-}" ]]; then
+                log_error "  sops error: $sops_stderr"
             fi
+            unreadable_secrets+=("$secret")
+            continue
+        fi
+        value=$(sops -d --extract "[\"$secret\"]" "$secrets_file" 2>/dev/null) || {
+            log_error "check_placeholder_values: internal error re-reading secret '$secret' after successful validation"
+            unreadable_secrets+=("$secret")
+            continue
+        }
+        if [[ "$value" =~ ^(CHANGE_ME|PLACEHOLDER_NOT_CONFIGURED) ]] || [[ -z "$value" ]]; then
+            # FIX-VAL3: One clear log_warn per placeholder key so the admin
+            # sees an individual actionable line for each stale value.
+            log_warn "check_placeholder_values: secret '$secret' is set to a placeholder or is empty"
+            placeholder_secrets+=("$secret")
         fi
         unset value
     done
     # LS-9 FIX: clean up SOPS env before returning
     cleanup_secrets_environment
+    if [[ ${#unreadable_secrets[@]} -gt 0 ]]; then
+        log_error "Unreadable secrets during placeholder check (${#unreadable_secrets[@]}): ${unreadable_secrets[*]}"
+        return 1
+    fi
     if [[ ${#placeholder_secrets[@]} -gt 0 ]]; then
         log_warn "Secrets with placeholders (${#placeholder_secrets[@]}): ${placeholder_secrets[*]}"
         return 1
