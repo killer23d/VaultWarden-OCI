@@ -22,6 +22,14 @@ fi
 #
 # Reads the content of a Docker secret file and writes it to stdout.
 # Exits 1 with an actionable message on any failure.
+#
+# USAGE — always capture via command substitution:
+#   value=$(read_secret /run/secrets/my_secret)
+#
+# DO NOT pass a variable name as a second argument; read_secret is a
+# stdout-returning function (POSIX sh has no namerefs). The second-arg
+# pattern silently leaves the variable unset and triggers an unbound-
+# variable abort under `set -eu`.  (BUG-ENT-1 root cause)
 # =============================================================================
 read_secret() {
     _rs_path="$1"
@@ -166,8 +174,15 @@ echo "DOMAIN_NAME validated: ${DOMAIN_NAME}"
 
 # =============================================================================
 # SECURITY: Load Cloudflare API Token
+#
+# BUG-ENT-1 FIX: Capture read_secret output via $(...) command substitution.
+# The previous call `read_secret ... _token` passed the variable name as a
+# dead second argument — read_secret is a stdout-returning function and has no
+# way to populate the caller's variable. Under `set -eu`, the subsequent
+# `[ -z "$_token" ]` check would abort with "unbound variable", making Caddy
+# undeployable. Correct pattern: _token=$(read_secret <path>)
 # =============================================================================
-read_secret /run/secrets/caddy_cloudflare_dns_token _token
+_token=$(read_secret /run/secrets/caddy_cloudflare_dns_token)
 
 if [ -z "$_token" ]; then
     echo "ERROR: Cloudflare API token is empty" >&2
@@ -192,8 +207,12 @@ echo "Cloudflare API token loaded successfully"
 
 # =============================================================================
 # SECURITY: Load Admin Basic Auth Hash
+#
+# BUG-ENT-1 FIX: Same stdout-capture fix applied here.
+# Previous call: `read_secret ... ADMIN_HASH_FULL` — variable never populated.
+# Corrected to: ADMIN_HASH_FULL=$(read_secret <path>)
 # =============================================================================
-read_secret /run/secrets/admin_basic_auth_hash ADMIN_HASH_FULL
+ADMIN_HASH_FULL=$(read_secret /run/secrets/admin_basic_auth_hash)
 
 if [ -z "$ADMIN_HASH_FULL" ]; then
     echo "ERROR: Admin basic auth hash is empty" >&2
