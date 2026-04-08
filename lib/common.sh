@@ -247,7 +247,12 @@ load_env_file() {
             return 1
         fi
 
-        export "${key}=${value}"
+        # Use declare -x instead of export "${key}=${value}" to prevent
+        # re-expansion of the RHS. export "key=value" passes the value through
+        # word-splitting in older bash and always re-expands $VAR references in
+        # the value string, which silently corrupts passwords such as Pass$word.
+        # declare -x assigns the literal string without any further expansion.
+        declare -x "$key"="$value"
 
     done < "$env_file"
 
