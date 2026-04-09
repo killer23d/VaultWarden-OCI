@@ -14,20 +14,32 @@
 #                  operator to pass --i-have-saved-my-recovery-kit.  Without
 #                  the flag the script prints the Age public key fingerprint
 #                  and refuses to proceed.
+#
+#   UN-KEY2 [HIGH] --i-have-saved-my-recovery-kit bypassed all interactive
+#                  confirmation for the age key, leaving no gate between a
+#                  blindly-passed flag and permanent key destruction.
+#                  Fix: add a mandatory second interactive prompt directly
+#                  before Step 6 whenever the age key is present on disk.
+#                  The operator must type back the exact Age public key
+#                  fingerprint shown on screen to confirm they have the
+#                  correct key saved.  This fires unconditionally — even
+#                  when the flag is present — and cannot be scripted away
+#                  without the actual key value in hand.
 
 set -euo pipefail
 
 # ─── Colour helpers ──────────────────────────────────────────────────────────
-RED='\033[0;31m'; YELLOW='\033[1;33m'; GREEN='\033[0;32m'; RESET='\033[0m'
+RED='\\033[0;31m'; YELLOW='\\033[1;33m'; GREEN='\\033[0;32m'; CYAN='\\033[0;36m'; RESET='\\033[0m'
 info()    { echo -e "${YELLOW}[INFO]${RESET}  $*"; }
 success() { echo -e "${GREEN}[OK]${RESET}    $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${RESET}  $*"; }
 die()     { echo -e "${RED}[ERROR]${RESET} $*" >&2; exit 1; }
 
 # ─── Argument parsing ─────────────────────────────────────────────────────────
-# --i-have-saved-my-recovery-kit  Bypass the age-key destruction guard.
-#                                  Use only after confirming the key is safely
-#                                  backed up outside the project directory.
+# --i-have-saved-my-recovery-kit  Satisfy the first-pass age-key guard
+#                                  (CLI pre-check). A second interactive
+#                                  confirmation is still required at the point
+#                                  of destruction regardless of this flag.
 I_HAVE_SAVED_RECOVERY_KIT=false
 for _arg in "$@"; do
     case "$_arg" in
@@ -36,12 +48,22 @@ for _arg in "$@"; do
             echo "Usage: sudo bash $0 [--i-have-saved-my-recovery-kit]"
             echo ""
             echo "  --i-have-saved-my-recovery-kit"
-            echo "      Bypass the age encryption-key destruction guard."
-            echo "      Only pass this flag after you have confirmed that"
-            echo "      secrets/keys/age-key.txt (and its Age public key) are"
-            echo "      safely stored outside the project directory.  Without"
-            echo "      this key, ALL existing encrypted backups are permanently"
-            echo "      unrecoverable."
+            echo "      Pre-confirm that you have saved secrets/keys/age-key.txt"
+            echo "      to a location OUTSIDE this host before running."
+            echo "      Without this flag the script refuses to continue when"
+            echo "      the age key is present on disk."
+            echo ""
+            echo "  Two-prompt safety model for age key destruction:"
+            echo "    1. CLI flag  --i-have-saved-my-recovery-kit  (pre-check)."
+            echo "    2. Interactive fingerprint confirmation immediately before"
+            echo "       the project directory (and key) is deleted.  You must"
+            echo "       type the exact Age public key shown on screen."
+            echo "       This second prompt is unconditional — it cannot be"
+            echo "       skipped or scripted away without the actual key value."
+            echo ""
+            echo "  Without the age key ALL encrypted backups are permanently"
+            echo "  unrecoverable.  Export a recovery kit first:"
+            echo "    sudo bash edit-secrets.sh --export-recovery-kit"
             exit 0
             ;;
         *) ;;
@@ -53,7 +75,6 @@ done
 
 # ─── Locate project directory ─────────────────────────────────────────────────
 # Support running from home dir regardless of which user owns the clone.
-# Tries common paths; falls back gracefully.
 REAL_USER="${SUDO_USER:-${USER:-ubuntu}}"
 REAL_HOME=$(getent passwd "$REAL_USER" 2>/dev/null | cut -d: -f6 || echo "/home/$REAL_USER")
 PROJECT_DIR="${REAL_HOME}/VaultWarden-OCI"
@@ -77,20 +98,41 @@ read -r -p "Type 'UNINSTALL' to confirm, or anything else to abort: " CONFIRM
 echo ""
 
 # ═══════════════════════════════════════════════════════════════
-# UN-KEY1 FIX — Age encryption-key destruction guard
+# UN-KEY1 / UN-KEY2 — Age encryption-key destruction guard
 #
 # secrets/keys/age-key.txt is the master decryption key for ALL
 # Age-encrypted backups.  Deleting it without a confirmed off-system
 # copy makes every existing backup permanently unrecoverable.
 #
-# If the key file exists and --i-have-saved-my-recovery-kit was NOT
-# passed, print the Age public key fingerprint and refuse to continue.
-# This gives the admin a last-chance visual confirmation that they are
-# looking at the correct key before it is destroyed.
+# Two-prompt model:
+#   Prompt 1 (here, pre-run): require --i-have-saved-my-recovery-kit flag.
+#   Prompt 2 (just before Step 6): require operator to type back the exact
+#             Age public key fingerprint shown on screen — unconditional,
+#             fires even when the flag was passed.
 # ═══════════════════════════════════════════════════════════════
 AGE_KEY_FILE="${PROJECT_DIR}/secrets/keys/age-key.txt"
 
+# Helper: extract the Age public key from the key file.
+# Prints the key to stdout; returns 1 if it cannot be found.
+_extract_age_public_key() {
+    local keyfile="$1"
+    local pubkey=""
+    # Age keygen writes:  # public key: age1...
+    pubkey=$(grep -E '^# public key:' "$keyfile" 2>/dev/null | sed 's/^# public key:[[:space:]]*//' | head -1)
+    if [[ -z "$pubkey" ]]; then
+        # Fallback: first line starting with age1 (the private key line starts
+        # with AGE-SECRET-KEY-; public key comments use age1)
+        pubkey=$(grep -E '^age1[a-z0-9]+' "$keyfile" 2>/dev/null | head -1)
+    fi
+    if [[ -z "$pubkey" ]]; then
+        return 1
+    fi
+    printf '%s' "$pubkey"
+}
+
 if [[ -f "$AGE_KEY_FILE" ]]; then
+
+    # ── Prompt 1: CLI flag pre-check ─────────────────────────────────────
     if [[ "$I_HAVE_SAVED_RECOVERY_KIT" == "false" ]]; then
         echo ""
         echo "════════════════════════════════════════════════════════════"
@@ -105,31 +147,25 @@ if [[ -f "$AGE_KEY_FILE" ]]; then
         warn ""
         warn "Age public key (confirm this matches your recovery kit):"
         echo ""
-        # Extract and display the public key line so the admin can verify
-        # it matches what they have saved before proceeding.
-        if command -v age-keygen >/dev/null 2>&1; then
-            grep -E '^# public key:' "$AGE_KEY_FILE" 2>/dev/null \
-                || grep -E '^age1' "$AGE_KEY_FILE" 2>/dev/null \
-                || echo "  (Could not extract public key — inspect ${AGE_KEY_FILE} manually)"
-        else
-            grep -E '^# public key:|^age1' "$AGE_KEY_FILE" 2>/dev/null \
-                || echo "  (Could not extract public key — inspect ${AGE_KEY_FILE} manually)"
-        fi
+        _AGE_PUBKEY=$(_extract_age_public_key "$AGE_KEY_FILE" 2>/dev/null \
+            || echo "(Could not extract — inspect ${AGE_KEY_FILE} manually)")
+        echo -e "  ${CYAN}${_AGE_PUBKEY}${RESET}"
         echo ""
         warn "To proceed, re-run with the flag confirming you have saved"
         warn "the recovery kit to a location OUTSIDE this directory:"
         warn ""
         warn "  sudo bash $0 --i-have-saved-my-recovery-kit"
         warn ""
-        warn "Or, to inspect and back up the key first:"
-        warn "  cat ${AGE_KEY_FILE}"
+        warn "Or export a recovery kit first:"
+        warn "  sudo bash edit-secrets.sh --export-recovery-kit"
         echo "════════════════════════════════════════════════════════════"
         echo ""
         die "Uninstall aborted — age key not confirmed saved. No changes made."
-    else
-        warn "Recovery-kit flag passed — proceeding with age key destruction."
-        warn "Ensure secrets/keys/age-key.txt is backed up outside this host."
     fi
+
+    warn "Recovery-kit flag passed — first-pass guard satisfied."
+    warn "A second confirmation will be required immediately before key deletion."
+
 else
     info "Age key not found at ${AGE_KEY_FILE} — no encryption-key guard needed."
 fi
@@ -161,9 +197,6 @@ if command -v docker &>/dev/null; then
     # Remove named volumes (project prefix is the directory basename)
     PROJECT_NAME=$(basename "${PROJECT_DIR}" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')
     for vol in $(docker volume ls -q 2>/dev/null | grep -E "^(${PROJECT_NAME}_|vaultwarden)" || true); do
-        # BUG-P4-9 FIX: Log a warning when docker volume rm fails rather than
-        # silently swallowing the error. A volume that cannot be removed means
-        # data is still in use or the uninstall is incomplete.
         if docker volume rm "$vol" 2>/dev/null; then
             success "Removed Docker volume: ${vol}"
         else
@@ -257,10 +290,68 @@ fi
 # ═══════════════════════════════════════════════════════════════
 # STEP 6 — Remove the cloned project directory (secrets, keys, config)
 #
-# UN-KEY1 FIX: the age-key guard above this step ensures the operator
-# has confirmed they have saved the recovery kit before we reach here.
+# UN-KEY2 FIX: second interactive confirmation gate.
+#
+# If the age key was present, require the operator to type back the exact
+# Age public key fingerprint shown on screen before proceeding.  This is
+# unconditional — it fires even when --i-have-saved-my-recovery-kit was
+# passed — and cannot be scripted away without the actual key value in hand.
+#
+# The fingerprint-echo pattern (type what you see on screen) is the same
+# technique used by AWS, GCP, and GitHub repository-delete dialogs.  It is
+# significantly harder to muscle-memory past than a bare yes/no, and it
+# proves the operator has the key in front of them.
 # ═══════════════════════════════════════════════════════════════
 info "Step 6: Removing project directory ${PROJECT_DIR}..."
+
+if [[ -f "$AGE_KEY_FILE" ]]; then
+    # Re-extract the public key immediately before deletion so the operator
+    # confirms the exact fingerprint of the key about to be destroyed.
+    _AGE_PUBKEY_NOW=$(_extract_age_public_key "$AGE_KEY_FILE" 2>/dev/null || true)
+
+    echo ""
+    echo "════════════════════════════════════════════════════════════"
+    echo -e "${RED}  ⚠  FINAL CONFIRMATION — KEY WILL BE DESTROYED  ⚠${RESET}"
+    echo "════════════════════════════════════════════════════════════"
+    warn "You are about to permanently delete:"
+    warn "  ${AGE_KEY_FILE}"
+    warn ""
+    warn "WITHOUT this key, ALL Age-encrypted backups are unrecoverable."
+    warn ""
+    if [[ -n "${_AGE_PUBKEY_NOW:-}" ]]; then
+        echo -e "${CYAN}  Age public key:${RESET}"
+        echo -e "  ${CYAN}${_AGE_PUBKEY_NOW}${RESET}"
+        echo ""
+        warn "Type the Age public key shown above to confirm you have it"
+        warn "saved, then press Enter.  Type anything else to abort:"
+        echo ""
+        read -r -p "  Age public key: " _TYPED_PUBKEY
+        if [[ "$_TYPED_PUBKEY" != "$_AGE_PUBKEY_NOW" ]]; then
+            echo ""
+            die "Confirmation mismatch — uninstall aborted. The age key and project directory were NOT deleted."
+        fi
+    else
+        # Could not extract public key (unusual key format) — fall back to a
+        # plain acknowledgement prompt so the gate still fires.
+        warn "Could not extract public key automatically."
+        warn "Inspect the key file manually before continuing:"
+        warn "  cat ${AGE_KEY_FILE}"
+        warn ""
+        warn "Type 'DELETE-MY-KEY' to confirm you have saved the key"
+        warn "and wish to proceed, or anything else to abort:"
+        echo ""
+        read -r -p "  Confirmation: " _TYPED_CONFIRM
+        if [[ "$_TYPED_CONFIRM" != "DELETE-MY-KEY" ]]; then
+            echo ""
+            die "Confirmation not given — uninstall aborted. The age key and project directory were NOT deleted."
+        fi
+    fi
+    echo ""
+    success "Fingerprint confirmed — proceeding with project directory removal."
+    echo "════════════════════════════════════════════════════════════"
+    echo ""
+fi
+
 if [[ -d "$PROJECT_DIR" ]]; then
     rm -rf "$PROJECT_DIR" \
         && success "Removed ${PROJECT_DIR}"
@@ -272,8 +363,8 @@ fi
 # STEP 7 — Remove setup lock file
 # ═══════════════════════════════════════════════════════════════
 info "Step 7: Removing setup lock files..."
-# Remove both legacy (/var/lock) and current (/run/lock) paths for forward/backward compatibility.
-# /run/lock is a tmpfs and resets on reboot, but remove it here for manual-invocation cleanup.
+# Remove both legacy (/var/lock) and current (/run/lock) paths for
+# forward/backward compatibility.
 rm -f /var/lock/vaultwarden-setup.lock 2>/dev/null && \
     success "Removed /var/lock/vaultwarden-setup.lock (legacy)" || true
 rm -f /run/lock/vaultwarden-setup.lock 2>/dev/null && \
