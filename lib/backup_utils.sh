@@ -55,6 +55,17 @@
 #                   relied on by get_backup_statistics(). A new pure-bash
 #                   _format_bytes_human() helper formats byte counts as MB
 #                   (one decimal place) without requiring numfmt (GNU-only).
+# PATCHED BUGS (2026-04-09):
+#   FIX-VAL-TAR [MEDIUM] validate_backup_integrity(): age decryption was
+#                   tested against /dev/null only, confirming the envelope and
+#                   key but not the inner gzip/tar payload. A backup whose age
+#                   layer succeeded but whose tar stream was truncated or
+#                   corrupt would pass verification and be silently unusable
+#                   at restore time. Added a second read-only pass that pipes
+#                   age output directly into `tar -tz` (list only, no
+#                   extraction) to exercise the full decrypt->untar path.
+#                   PIPESTATUS captures age and tar exit codes independently
+#                   so both failure modes produce a distinct error message.
 
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_BACKUP_UTILS_LIB_LOADED:-}" ]] && return 0
@@ -189,9 +200,29 @@ list_backups() {
     return 0
 }
 
-# Validate backup file integrity - STANDARDIZED: Returns exit code
+# ---------------------------------------------------------------------------
+# validate_backup_integrity BACKUP_FILE [AGE_KEY_FILE]
+#
+# Validates a .age backup archive end-to-end:
+#   1. File exists and is large enough to be plausible.
+#   2. SHA-256 checksum matches the paired .sha256 sidecar (if present).
+#   3. age decryption succeeds (correct key, intact envelope).
+#   4. FIX-VAL-TAR: the inner gzip/tar stream is structurally valid.
+#      Step 3 alone cannot catch a backup where age encryption succeeded
+#      but the tar payload was truncated or silently corrupted; such a
+#      backup passes step 3 and is unusable at restore time. Step 4 pipes
+#      the decryption output directly into `tar -tz` (list only, no
+#      extraction, no state change) to exercise the full path.
+#
+# PIPESTATUS usage: the pipe `age -d ... | tar -tz` is run in a subshell
+# that captures both exit codes via "${PIPESTATUS[@]}". This is safe under
+# set -euo pipefail because the subshell itself is the last command before
+# the status capture; the outer script's errexit is not triggered by the
+# inner pipe failure.
+#
 # FIX [ISSUE 7]: Decryption test uses direct redirect; avoids pipeline
 # PIPESTATUS trap under set -euo pipefail.
+# ---------------------------------------------------------------------------
 validate_backup_integrity() {
     local backup_file="$1"
     local age_key_file="${2:-secrets/keys/age-key.txt}"
@@ -232,16 +263,47 @@ validate_backup_integrity() {
         fi
     fi
 
-    # FIX [ISSUE 7]: Test decryption by redirecting age output directly to
-    # /dev/null. This avoids the pipeline PIPESTATUS trap: age's own exit code
-    # is captured directly, so any decryption failure (wrong key, corrupt file,
-    # truncated header) correctly propagates as a non-zero return.
+    # ---------------------------------------------------------------------------
+    # Pass 1 (FIX [ISSUE 7]): age envelope + key check.
+    # Decrypt to /dev/null. Confirms the age header is intact and the
+    # supplied key can open the file. Does NOT validate the tar payload.
+    # ---------------------------------------------------------------------------
     if ! age -d -i "$age_key_file" "$backup_file" > /dev/null 2>&1; then
-        log_error "Backup file decryption test failed (wrong key or corrupt file)"
+        log_error "Backup file decryption test failed (wrong key or corrupt age envelope)"
         return 1
     fi
 
-    log_success "Backup integrity validation passed"
+    # ---------------------------------------------------------------------------
+    # Pass 2 (FIX-VAL-TAR): inner tar stream check.
+    # Pipe the decrypted bytes directly into `tar -tz` (list only, no
+    # extraction). This exercises the complete decrypt->untar path without
+    # writing any files or mutating any state.
+    #
+    # Capture both PIPESTATUS values in a subshell so that set -e in the
+    # outer script does not abort on the inner pipe failure before we can
+    # read the statuses and emit a specific error message.
+    # ---------------------------------------------------------------------------
+    local pipe_statuses
+    pipe_statuses=$(set +e; age -d -i "$age_key_file" "$backup_file" 2>/dev/null | tar -tz >/dev/null 2>&1; echo "${PIPESTATUS[*]}")
+
+    local age_status tar_status
+    read -r age_status tar_status <<< "$pipe_statuses"
+
+    if (( age_status != 0 )); then
+        # Should not happen: pass 1 already succeeded. Treat as a transient
+        # I/O error (e.g. the file was modified between the two reads).
+        log_error "Backup tar-stream check: age decryption failed on second read (file may have changed)"
+        return 1
+    fi
+
+    if (( tar_status != 0 )); then
+        log_error "Backup tar-stream check failed: inner tar payload is corrupt or truncated"
+        log_error "  age decryption: OK  |  tar -tz: FAILED (exit ${tar_status})"
+        log_error "  The .age envelope is valid but the archive will not restore correctly."
+        return 1
+    fi
+
+    log_success "Backup integrity validation passed (age envelope OK, tar stream OK)"
     return 0
 }
 
