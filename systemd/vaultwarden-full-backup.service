@@ -31,6 +31,7 @@ ProtectHome=yes
 # compromised script overwriting its siblings).
 ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock
 TimeoutStartSec=7200
+TimeoutStopSec=60
 # Exit code contract (matches backup.sh):
 #   exit 0 = success (backup created, rclone synced)
 #   exit 2 = partial success / rclone-skipped (non-fatal; local backup intact)

@@ -2,6 +2,9 @@
 Description=VaultWarden Failure Notification for %i
 # Template unit: instantiated by OnFailure=vaultwarden-notify-failure@%n.service
 # %i receives the failed unit name (e.g. vaultwarden-health.service)
+# Guard: if the env file is absent systemd logs a clear condition-not-met
+# message rather than a cryptic EnvironmentFile load failure.
+ConditionPathExists=/etc/vaultwarden/vaultwarden.env
 
 [Service]
 Type=oneshot
@@ -21,6 +24,7 @@ ExecStart=/bin/bash -c '\
 User=root
 SyslogIdentifier=vw-notify
 TimeoutStartSec=30
+TimeoutStopSec=15
 NoNewPrivileges=yes
 PrivateTmp=yes
 

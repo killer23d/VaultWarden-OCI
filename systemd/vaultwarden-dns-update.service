@@ -30,6 +30,7 @@ ProtectHome=yes
 # compromised script overwriting its siblings).
 ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock
 TimeoutStartSec=120
+TimeoutStopSec=30
 
 [Install]
 WantedBy=multi-user.target

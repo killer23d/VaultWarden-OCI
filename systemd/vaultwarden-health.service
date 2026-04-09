@@ -32,6 +32,7 @@ ProtectHome=yes
 # compromised script overwriting its siblings).
 ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock
 TimeoutStartSec=300
+TimeoutStopSec=60
 # Exit code contract (mirrors health.sh --show-help exit codes):
 #   0 — all checks passed             → success, no notification
 #   1 — one or more warnings          → OnFailure= fires, admin is notified

@@ -33,6 +33,7 @@ ProtectHome=yes
 # compromised script overwriting its siblings).
 ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock
 TimeoutStartSec=1800
+TimeoutStopSec=60
 # Exit 1 = skipped/nothing-to-do; treat as success so OnFailure= is not fired.
 SuccessExitStatus=0 1
 
