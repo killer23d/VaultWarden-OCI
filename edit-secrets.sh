@@ -108,6 +108,39 @@ _secure_shred() {
 }
 
 # ---------------------------------------------------------------------------
+# _secure_shred_dir DIR
+# Shred every file inside DIR then remove the directory itself.
+# Registered as a cleanup handler for tmpfs-backed temp directories so the
+# EXIT trap wipes the whole tree even after a crash or Ctrl-C.
+# ---------------------------------------------------------------------------
+_secure_shred_dir() {
+    local dir="$1"
+    [[ -d "$dir" ]] || return 0
+    while IFS= read -r -d "" f; do
+        _secure_shred "$f" 2>/dev/null || true
+    done < <(find "$dir" -type f -print0 2>/dev/null)
+    rm -rf "$dir"
+}
+
+# ---------------------------------------------------------------------------
+# _secure_tmpdir
+#
+# Create and return a fresh temp directory.  Prefers /dev/shm (tmpfs — data
+# never touches a persistent block-volume) with a fallback to /tmp when
+# /dev/shm is absent or not writable (e.g. some container runtimes).
+#
+# FIX [SEC-TMPFS]: Without this, mktemp on OCI block-volume /tmp leaves
+# plaintext YAML on disk across reboots until the next successful cleanup.
+# ---------------------------------------------------------------------------
+_secure_tmpdir() {
+    if [[ -d /dev/shm && -w /dev/shm ]]; then
+        mktemp -d -p /dev/shm
+    else
+        mktemp -d
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Cleanup — safe array-based dispatch; no eval.
 # register_cleanup FUNCTION ARG  — register a single-argument cleanup call.
 # perform_cleanup                — execute in reverse registration order.
@@ -424,17 +457,16 @@ do_view() {
         return 1
     fi
 
-    local temp_file
-    temp_file=$(mktemp)
-    # BUG-#30 FIX: Make chmod failure a hard abort — if we can't secure the
-    # temp file, we must not proceed as secrets could be exposed to other users.
+    # FIX [SEC-TMPFS]: Use /dev/shm-backed temp dir so plaintext YAML never
+    # lands on block-volume /tmp and can't survive a reboot if cleanup is skipped.
+    local _view_tmpdir
+    _view_tmpdir=$(_secure_tmpdir)
+    register_cleanup "_secure_shred_dir" "$_view_tmpdir"
+    local temp_file="$_view_tmpdir/secrets-view.yaml"
     if ! install -m 600 /dev/null "$temp_file" 2>/dev/null; then
-        rm -f "$temp_file"
         log_error "Failed to secure temp file: $temp_file"
         return 1
     fi
-    # FIX [P3-H3]: use _secure_shred() instead of rm -f for plaintext temp file
-    register_cleanup "_secure_shred" "$temp_file"
 
     local sops_rc=0
     sops -d "$SECRETS_FILE" > "$temp_file" 2>&1 || sops_rc=$?
@@ -598,17 +630,16 @@ _validate_rotate_field() {
 # FIX-ES4: Always use "email_api_token" as the key name — no provider derivation.
 _deploy_docker_secrets() {
     local docker_dir="$PROJECT_ROOT/secrets/.docker_secrets"
-    local temp_plain
-    temp_plain=$(mktemp --suffix=.yaml)
-    # BUG-#30 FIX: Make chmod failure a hard abort — if we can't secure the
-    # temp file, we must not proceed as secrets could be exposed to other users.
+
+    # FIX [SEC-TMPFS]: tmpfs-backed temp dir for Docker secret plaintext.
+    local _deploy_tmpdir
+    _deploy_tmpdir=$(_secure_tmpdir)
+    register_cleanup "_secure_shred_dir" "$_deploy_tmpdir"
+    local temp_plain="$_deploy_tmpdir/secrets-deploy.yaml"
     if ! install -m 600 /dev/null "$temp_plain" 2>/dev/null; then
-        rm -f "$temp_plain"
         log_error "Failed to secure temp file: $temp_plain"
         return 1
     fi
-    # FIX [P3-H3]: use _secure_shred() for this plaintext temp file
-    register_cleanup "_secure_shred" "$temp_plain"
 
     # FIX-ES1: Re-establish SOPS env before calling sops directly.
     if ! ensure_sops_env; then
@@ -679,17 +710,15 @@ do_rotate() {
     log_info "Rotating secret: $actual_field"
     echo ""
 
-    local temp_plain
-    temp_plain=$(mktemp --suffix=.yaml)
-    # BUG-#30 FIX: Make chmod failure a hard abort — if we can't secure the
-    # temp file, we must not proceed as secrets could be exposed to other users.
+    # FIX [SEC-TMPFS]: tmpfs-backed temp dir for rotation plaintext.
+    local _rotate_tmpdir
+    _rotate_tmpdir=$(_secure_tmpdir)
+    register_cleanup "_secure_shred_dir" "$_rotate_tmpdir"
+    local temp_plain="$_rotate_tmpdir/secrets-rotate.yaml"
     if ! install -m 600 /dev/null "$temp_plain" 2>/dev/null; then
-        rm -f "$temp_plain"
         log_error "Failed to secure temp file: $temp_plain"
         return 1
     fi
-    # FIX [P3-H3]: use _secure_shred() for this plaintext temp file
-    register_cleanup "_secure_shred" "$temp_plain"
 
     # FIX-ES1: Re-establish SOPS env before calling sops directly.
     if ! ensure_sops_env; then
@@ -725,17 +754,12 @@ do_rotate() {
         fi
     fi
 
-    local temp_patched
-    temp_patched=$(mktemp --suffix=.yaml)
-    # BUG-#30 FIX: Make chmod failure a hard abort — if we can't secure the
-    # temp file, we must not proceed as secrets could be exposed to other users.
+    # Reuse the same tmpfs dir for the patched plaintext file.
+    local temp_patched="$_rotate_tmpdir/secrets-patched.yaml"
     if ! install -m 600 /dev/null "$temp_patched" 2>/dev/null; then
-        rm -f "$temp_patched"
         log_error "Failed to secure temp file: $temp_patched"
         return 1
     fi
-    # FIX [P3-H3]: use _secure_shred() for this plaintext patched temp file
-    register_cleanup "_secure_shred" "$temp_patched"
 
     python3 - "$temp_plain" "$actual_field" "$new_value" "$temp_patched" << 'PYEOF'
 import sys, yaml
@@ -834,17 +858,17 @@ do_edit() {
     # MEDIUM FIX: Warn user if their editor is known to fork (return before save).
     _check_editor_forks
 
-    local temp_file
-    temp_file=$(mktemp --suffix=.yaml)
-    # BUG-#30 FIX: Make chmod failure a hard abort — if we can't secure the
-    # temp file, we must not proceed as secrets could be exposed to other users.
+    # FIX [SEC-TMPFS]: Prefer /dev/shm so the decrypted editor buffer never
+    # lands on persistent block-volume /tmp.  The directory-level cleanup via
+    # _secure_shred_dir() fires on EXIT, Ctrl-C, and crashes alike.
+    local _edit_tmpdir
+    _edit_tmpdir=$(_secure_tmpdir)
+    register_cleanup "_secure_shred_dir" "$_edit_tmpdir"
+    local temp_file="$_edit_tmpdir/secrets-edit.yaml"
     if ! install -m 600 /dev/null "$temp_file" 2>/dev/null; then
-        rm -f "$temp_file"
         log_error "Failed to secure temp file: $temp_file"
         return 1
     fi
-    # FIX [P3-H3]: use _secure_shred() for this plaintext temp file
-    register_cleanup "_secure_shred" "$temp_file"
 
     # FIX-ES1: Re-establish SOPS env — validate_secrets() called ensure_sops_env()
     # but cleanup_secrets_environment() inside validate_secrets_decryption/yaml
@@ -954,16 +978,16 @@ do_edit() {
 _export_recovery_kit_safe() {
     log_info "Validating secrets before recovery kit export..."
 
-    local temp_plain
-    temp_plain=$(mktemp --suffix=.yaml)
-    # BUG-#30 FIX: Make chmod failure a hard abort — if we can't secure the
-    # temp file, we must not proceed as secrets could be exposed to other users.
+    # FIX [SEC-TMPFS]: tmpfs-backed temp dir so recovery kit plaintext
+    # doesn't persist on block-volume /tmp across a crash or reboot.
+    local _export_tmpdir
+    _export_tmpdir=$(_secure_tmpdir)
+    register_cleanup "_secure_shred_dir" "$_export_tmpdir"
+    local temp_plain="$_export_tmpdir/secrets-export.yaml"
     if ! install -m 600 /dev/null "$temp_plain" 2>/dev/null; then
-        rm -f "$temp_plain"
         log_error "Failed to secure temp file: $temp_plain"
         return 1
     fi
-    register_cleanup "_secure_shred" "$temp_plain"
 
     # FIX-ES1: Re-establish SOPS env before calling sops directly.
     if ! ensure_sops_env; then
