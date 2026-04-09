@@ -63,6 +63,21 @@
 #                   log lines.
 #                   Fix: add --quiet and pipe stderr through tail -5 so only
 #                   the last 5 summary/error lines reach the journal.
+#
+# PATCHED BUGS (2026-04-09):
+#   IMG-R1 [LOW]    cleanup_images(): called `docker image prune -f` with no
+#                   time filter, wiping every dangling image layer including
+#                   recent layers that could serve as a manual rollback
+#                   reference after a bad update. The maintenance timer runs
+#                   independently of update.sh's snapshot/rollback mechanism,
+#                   so a post-update maintenance run could destroy the only
+#                   copy of the previous image before the operator validates
+#                   the new one.
+#                   Fix: add --filter "until=48h" to preserve the last 48
+#                   hours of image layers as a passive rollback buffer.
+#                   Note: --all is intentionally omitted; `docker image prune`
+#                   without --all only removes dangling (untagged) layers —
+#                   named images in active use are never touched regardless.
 
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_DOCKER_LIB_LOADED:-}" ]] && return 0
@@ -552,13 +567,34 @@ cleanup_containers() {
     return 0
 }
 
-# Clean up unused images
+# ---------------------------------------------------------------------------
+# cleanup_images  (IMG-R1 FIX)
+#
+# Removes dangling (untagged) image layers that are older than 48 hours.
+#
+# The --filter "until=48h" guard preserves the most recent two days of
+# pulled image layers as a passive rollback buffer. This is important
+# because the maintenance timer runs independently of update.sh's own
+# snapshot/rollback mechanism: without a time filter, a routine maintenance
+# run shortly after a bad update could destroy the previous image layers
+# before the operator has had a chance to validate or roll back.
+#
+# Rationale for NOT using --all:
+#   `docker image prune` without --all only removes *dangling* images —
+#   untagged layers that are no longer referenced by any tag or container.
+#   Named, tagged images in active use are never affected regardless of
+#   the time filter. Adding --all would also remove unused-but-tagged
+#   images (e.g. a previous version still tagged locally), which is
+#   outside the intended scope of routine maintenance cleanup.
+# ---------------------------------------------------------------------------
 cleanup_images() {
     if ! require_docker; then return 1; fi
     local _prune_args=()
     mapfile -t _prune_args < <(_docker_prune_filter)
     local docker_err
-    if ! docker_err=$(docker image prune -f "${_prune_args[@]}" 2>&1 >/dev/null); then
+    # IMG-R1 FIX: --filter "until=48h" retains the last 48 hours of dangling
+    # image layers as a rollback buffer; see function header for rationale.
+    if ! docker_err=$(docker image prune -f --filter "until=48h" "${_prune_args[@]}" 2>&1 >/dev/null); then
         log_debug "cleanup_images: docker image prune failed (non-fatal): $docker_err"
     fi
     return 0
