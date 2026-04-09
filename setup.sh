@@ -483,7 +483,6 @@ create_env_file() {
     temp_env=$(mktemp -p "$(dirname "$env_file")" .env.tmp.XXXXXXXXXX) || return 1
 
     AWK_DOMAIN="$domain_with_protocol" \
-    AWK_NAME="$clean_domain" \
     AWK_EMAIL="$ADMIN_EMAIL" \
     AWK_UID="$user_id" \
     AWK_GID="$group_id" \
@@ -492,7 +491,6 @@ create_env_file() {
     awk '
         {
             sub(/^DOMAIN=.*/, "DOMAIN=" ENVIRON["AWK_DOMAIN"]);
-            sub(/^DOMAIN_NAME=.*/, "DOMAIN_NAME=" ENVIRON["AWK_NAME"]);
             sub(/^ADMIN_EMAIL=.*/, "ADMIN_EMAIL=" ENVIRON["AWK_EMAIL"]);
             sub(/^PUID=.*/, "PUID=" ENVIRON["AWK_UID"]);
             sub(/^PGID=.*/, "PGID=" ENVIRON["AWK_GID"]);
