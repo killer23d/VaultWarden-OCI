@@ -54,6 +54,15 @@
 #                   Fix: exponential backoff (5→10→20 s); permanent-error
 #                   keywords (not found, unauthorized, denied, does not exist,
 #                   no such manifest) cause an immediate bail-out.
+#
+# PATCHED BUGS (2026-04-08):
+#   AUD-D4 [MEDIUM] pull_images(): ran `docker compose pull` without --quiet,
+#                   producing multi-megabyte per-layer progress output on every
+#                   update-timer run. On a VPS with limited disk the systemd
+#                   journal's SystemMaxUse cap causes this noise to evict useful
+#                   log lines.
+#                   Fix: add --quiet and pipe stderr through tail -5 so only
+#                   the last 5 summary/error lines reach the journal.
 
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_DOCKER_LIB_LOADED:-}" ]] && return 0
@@ -291,16 +300,30 @@ recreate_services() {
 
 # --- Image Management ---
 
+# ---------------------------------------------------------------------------
+# pull_images  (AUD-D4 FIX)
+#
+# Uses --quiet to suppress per-layer progress bars. Without it, a full pull
+# of the four project images (vaultwarden, caddy, fail2ban, postfix) produces
+# several hundred KB of output per run that floods the systemd journal on
+# every update-timer invocation. On a VPS with a limited SystemMaxUse journal
+# cap this noise evicts genuinely useful log lines.
+#
+# stderr is merged and passed through `tail -5` so only the last 5 lines
+# (summary digests or any error message) reach the journal. Pull errors are
+# still surfaced: docker compose pull --quiet exits non-zero on failure and
+# the error text appears in the final tail output.
+# ---------------------------------------------------------------------------
 pull_images() {
     local services=("$@")
     if ! require_docker; then return 1; fi
     if [[ ${#services[@]} -eq 0 ]]; then
-        if ! docker compose pull; then
+        if ! docker compose pull --quiet 2>&1 | tail -5; then
             log_error "Failed to pull all images"
             return 1
         fi
     else
-        if ! docker compose pull "${services[@]}"; then
+        if ! docker compose pull --quiet "${services[@]}" 2>&1 | tail -5; then
             log_error "Failed to pull images for services: ${services[*]}"
             return 1
         fi
