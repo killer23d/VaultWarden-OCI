@@ -43,6 +43,48 @@ _source_lib "lib/simple_key_resilience.sh"
 unset -f _source_lib
 
 # ---------------------------------------------------------------------------
+# DR pre-flight: .env guard
+# ---------------------------------------------------------------------------
+# On a fresh (disaster-recovery) host the operator will not yet have a .env.
+# Sourcing .env.example — which contains REPLACE_ME placeholders — or running
+# with completely unset variables would silently corrupt the restore.  Catch
+# this early, before any config values are read, and give the operator a
+# single, actionable error message.
+#
+# Exemptions:
+#   --help           show usage without a live config
+#   --list           list local backups without requiring .env
+#   --list --remote  list remote backups; operator may be prompted for remote
+#   --remote         bare-metal DR path; .env will be restored from backup
+_require_env_for_live_restore() {
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+            --help|--list|--remote) return 0 ;;
+        esac
+    done
+
+    if [[ ! -f "${PROJECT_ROOT}/.env" ]]; then
+        echo "" >&2
+        echo "ERROR: .env not found." >&2
+        echo "" >&2
+        echo "  On a fresh server, copy the example file and fill in your values:" >&2
+        echo "" >&2
+        echo "    cp .env.example .env" >&2
+        echo "    nano .env   # set DOMAIN, CLOUDFLARE_*, PUID, PGID, etc." >&2
+        echo "" >&2
+        echo "  For a bare-metal disaster-recovery restore (no .env yet)," >&2
+        echo "  use --remote so restore.sh can download and restore your" >&2
+        echo "  .env from the encrypted remote backup:" >&2
+        echo "" >&2
+        echo "    sudo ./restore.sh --remote" >&2
+        echo "" >&2
+        exit 1
+    fi
+}
+_require_env_for_live_restore "$@"
+
+# ---------------------------------------------------------------------------
 # Dependency pre-flight
 # ---------------------------------------------------------------------------
 check_dependencies() {
