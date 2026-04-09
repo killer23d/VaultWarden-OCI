@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # backup.sh - VaultWarden-OCI backup (atomic DB snapshot, relative-path archive, age encryption)
-# archive_format=relative: archives use paths relative to / so restores can stage safely.
 
 set -euo pipefail
 
@@ -90,9 +89,6 @@ TMPDIR_BACKUP=""
 LOCK_FILE=""   # Promoted to script level so cleanup() can remove it on EXIT
 cleanup() {
     [[ -n "$TMPDIR_BACKUP" ]] && rm -rf "$TMPDIR_BACKUP" 2>/dev/null || true
-    # Remove the lock file so it does not block the next invocation.
-    # Under systemd (ProtectSystem=strict), /run/lock is tmpfs and resets on
-    # reboot anyway; this matters for manual/sudo invocations.
     [[ -n "${LOCK_FILE:-}" ]] && rm -f "$LOCK_FILE" 2>/dev/null || true
 }
 
@@ -117,30 +113,6 @@ fcntl(\$fh, F_SETFD, \$flags | FD_CLOEXEC) or die;
     fi
 }
 
-# ---------------------------------------------------------------------------
-# _resolve_age_key
-#
-# BUG-AK4 FIX: backup.sh previously called
-#   get_config_value "SOPS_AGE_KEY_FILE" "$SCRIPT_DIR/secrets/keys/age-key.txt"
-# in three separate places (main, verify_backup_full, verify_backup_quick).
-# Under systemd with ProtectHome=yes the installed key lives at
-# /etc/vaultwarden/age-key.txt and is set via SOPS_AGE_KEY_FILE in the
-# EnvironmentFile.  However load_env_file() can overwrite SOPS_AGE_KEY_FILE
-# with a stale relative value from the env file (written before the BUG-AK1
-# fix), causing get_config_value() to fall back to the non-existent
-# $SCRIPT_DIR/secrets/keys/age-key.txt path.
-#
-# Additionally verify_backup_full() re-called get_config_value() independently
-# instead of reusing the already-resolved path from main().
-#
-# Fix: single _resolve_age_key() function (mirrors health.sh BUG-AK2/AK3 fix).
-# Resolution order:
-#   1. SOPS_AGE_KEY_FILE env var — only if absolute path, or relative and exists
-#   2. /etc/vaultwarden/age-key.txt  (canonical systemd install path, BUG-AK1)
-#   3. $SCRIPT_DIR/secrets/keys/age-key.txt  (local/dev fallback)
-#
-# Prints the resolved path to stdout; returns 0 if file exists, 1 if not.
-# ---------------------------------------------------------------------------
 _resolve_age_key() {
     local candidates=(
         "${SOPS_AGE_KEY_FILE:-}"
@@ -149,15 +121,12 @@ _resolve_age_key() {
     )
     for candidate in "${candidates[@]}"; do
         [[ -z "$candidate" ]] && continue
-        # Skip relative paths that don't exist — they come from a stale env
-        # file and must not shadow the absolute fallbacks below them.
         [[ "$candidate" != /* && ! -f "$candidate" ]] && continue
         if [[ -f "$candidate" ]]; then
             echo "$candidate"
             return 0
         fi
     done
-    # None found — return first non-empty absolute candidate for a useful error.
     for candidate in "${candidates[@]}"; do
         [[ -z "$candidate" ]] && continue
         if [[ "$candidate" == /* ]]; then
@@ -169,23 +138,6 @@ _resolve_age_key() {
     return 1
 }
 
-# ---------------------------------------------------------------------------
-# _resolve_rclone_config
-#
-# When backup.sh is invoked as root (via sudo or a systemd service unit),
-# rclone defaults to /root/.config/rclone/rclone.conf, which does not exist
-# when the remote was configured by a non-root user (e.g. ubuntu).
-#
-# Resolution order (first existing readable file wins):
-#   1. RCLONE_CONFIG env var / .env value  — explicit always takes priority
-#   2. /etc/rclone/rclone.conf             — system-wide location (best practice)
-#   3. /root/.config/rclone/rclone.conf   — root's own config (if present)
-#   4. $SUDO_USER home                     — the invoking user when run via sudo
-#   5. /home/*/.config/rclone/rclone.conf — single-user host heuristic
-#
-# Prints the resolved absolute path to stdout.
-# Returns 0 on success, 1 when no config file is found.
-# ---------------------------------------------------------------------------
 _resolve_rclone_config() {
     local cfg_from_env
     cfg_from_env="$(get_config_value "RCLONE_CONFIG" "")"
@@ -378,9 +330,6 @@ verify_backup_full() {
 
     b_log_info "Running full verification (decrypt + integrity check)..."
 
-    # BUG-AK4 FIX: use _resolve_age_key() instead of re-calling
-    # get_config_value() independently, which could resolve a stale relative
-    # SOPS_AGE_KEY_FILE from the env file and produce a non-existent path.
     local age_key_file
     age_key_file=$(_resolve_age_key) || {
         log_error "Age key file not found: $age_key_file" >&2
@@ -462,7 +411,6 @@ verify_backup_quick() {
 validate_rclone_config_path() {
     local cfg_path="$1"
 
-    # Reject empty string
     if [[ -z "$cfg_path" ]]; then
         log_error "RCLONE_CONFIG is empty" >&2
         return 1
@@ -527,19 +475,11 @@ sync_to_rclone() {
         return 1
     fi
 
-    # ------------------------------------------------------------------
-    # Resolve rclone config path.
-    # When RCLONE_CONFIG is set in .env it is used directly (and validated).
-    # When it is not set, _resolve_rclone_config() searches well-known
-    # locations so that root/systemd invocations find the config that was
-    # set up by a non-root user without requiring manual .env edits.
-    # ------------------------------------------------------------------
     local rclone_config_arg=()
     local rclone_config_path
     rclone_config_path="$(get_config_value "RCLONE_CONFIG" "")"
 
     if [[ -n "$rclone_config_path" ]]; then
-        # Explicit path from .env — validate it strictly.
         if ! validate_rclone_config_path "$rclone_config_path"; then
             log_error "Refusing to use invalid RCLONE_CONFIG path: $rclone_config_path" >&2
             return 1
@@ -549,7 +489,6 @@ sync_to_rclone() {
         rclone_config_arg=(--config "$canonical_cfg")
         b_log_info "Using rclone config (from .env): $canonical_cfg"
     else
-        # Not set in .env — auto-discover across well-known locations.
         local discovered_cfg
         if discovered_cfg=$(_resolve_rclone_config); then
             if ! validate_rclone_config_path "$discovered_cfg"; then
@@ -572,12 +511,6 @@ sync_to_rclone() {
         fi
     fi
 
-    # ------------------------------------------------------------------
-    # Build remote destination path.
-    # RCLONE_REMOTE_PATH in .env sets the subfolder inside the remote
-    # (default: vaultwarden_backups).  The backup type (db/full/emergency)
-    # is always appended so each type lands in its own subdirectory.
-    # ------------------------------------------------------------------
     local remote_base_path
     remote_base_path="$(get_config_value "RCLONE_REMOTE_PATH" "vaultwarden_backups")"
     remote_base_path="${remote_base_path#/}"
@@ -585,13 +518,6 @@ sync_to_rclone() {
 
     local remote_path="${remote_name}:${remote_base_path}/${backup_type}"
     b_log_info "Syncing backup to rclone remote: ${remote_path}/"
-
-    # ------------------------------------------------------------------
-    # Pre-flight connectivity check: verify the remote is reachable
-    # before spending time on the actual copy operation. A mis-pointed
-    # remote (typo, expired credentials, network outage) is caught here
-    # and reported immediately rather than silently wasting the backup window.
-    # ------------------------------------------------------------------
     b_log_info "Pre-flight check: testing connectivity to rclone remote '${remote_name}'..."
     if ! rclone lsd "${rclone_config_arg[@]}" "${remote_name}:" --contimeout 10s --timeout 30s &>/dev/null; then
         log_error "Pre-flight check FAILED: cannot reach rclone remote '${remote_name}'. Aborting offsite sync." >&2
@@ -630,19 +556,6 @@ sync_to_rclone() {
         rclone copy "${rclone_config_arg[@]}" "$sha256_file" "$remote_path/" --checksum 2>&1 || true
     fi
 
-    # ------------------------------------------------------------------
-    # Remote size verification.
-    #
-    # A successful rclone exit code does not guarantee the remote file is
-    # intact or non-zero-byte (silent partial upload, provider quirk,
-    # network truncation).  Query rclone size and confirm the remote object
-    # is non-zero before declaring the offsite sync successful.
-    #
-    # Parsing strategy: `rclone size` prints a line such as:
-    #   Total size: 1234567 (1.177 MiB)
-    # Use awk to extract the raw byte count robustly — no PCRE lookaheads,
-    # no grep -P required, works on GNU/BusyBox/macOS awk equally.
-    # ------------------------------------------------------------------
     local remote_file_path="${remote_path}/$(basename "$enc_file")"
     local rclone_size_out rclone_size_err_tmp="${TMPDIR_BACKUP}/rclone_size_stderr.tmp"
     local remote_size_bytes=0
@@ -650,14 +563,11 @@ sync_to_rclone() {
 
     if rclone_size_out=$(rclone size "${rclone_config_arg[@]}" "$remote_file_path" \
                              2>"$rclone_size_err_tmp"); then
-        # Extract the raw byte integer from "Total size: <N> (<human>)"
-        # awk splits on whitespace; field 3 is the raw number when the line
-        # starts with "Total size:".
+
         remote_size_bytes=$(printf '%s\n' "$rclone_size_out" \
             | awk 'tolower($0) ~ /^total size:/ { gsub(/[^0-9]/, "", $3); print $3+0; exit }')
         remote_size_bytes="${remote_size_bytes:-0}"
 
-        # Capture the human-readable portion "(1.177 MiB)" for the log line.
         remote_size_human=$(printf '%s\n' "$rclone_size_out" \
             | awk 'tolower($0) ~ /^total size:/ { for(i=4;i<=NF;i++) printf "%s ", $i; exit }' \
             | sed 's/[[:space:]]*$//')
@@ -784,12 +694,6 @@ perform_db_backup() {
     b_log_info "Encrypting DB snapshot..."
     local enc="$target_dir/db_backup_$timestamp.sqlite3.age"
     local enc_tmp="${enc}.tmp"
-    # FIX: age writes ciphertext to -o file, not stdout.  Using "2>&1 >&2" inside
-    # a command-substitution context ($(...)) erroneously redirects age's stderr
-    # to the capture pipe, polluting $backup_file with error text and causing
-    # verify_backup_quick to see a non-existent path.  Use 2>/dev/null instead:
-    # age emits nothing useful on stderr for a successful "-o file" run, and the
-    # if-branch below already emits a log_error on failure.
     if ! age -r "$age_pub_key" -o "$enc_tmp" "$snap" 2>/dev/null; then
         log_error "Encryption failed" >&2
         rm -f "$enc_tmp"
@@ -881,11 +785,6 @@ perform_full_backup() {
     fi
 
     local tar_exit=0
-    # BUG-FB1 FIX: '2>&1 >&2' inside a $() context leaks tar stderr into the
-    # capture pipe that populates $backup_file in main(), producing a multi-line
-    # garbage path that verify_backup_quick cannot stat.  Replace with
-    # '2>/dev/null' — tar writes the archive to the explicit -f target, not
-    # stdout, so suppressing stderr is safe here; exit code still propagates.
     tar --use-compress-program='zstd --no-progress -T0 -3' -cf "$temp_tar" \
         -C / \
         "${tar_excludes[@]}" \
@@ -896,11 +795,6 @@ perform_full_backup() {
         return 1
     fi
 
-    # BUG-FB2 FIX: guard against a silently-empty archive before attempting
-    # snapshot injection or encryption.  A zero-byte $temp_tar here means
-    # tar/zstd failed without a detectable exit code (e.g. SIGPIPE on the
-    # zstd compressor side).  Failing early produces a clear error rather than
-    # an empty encrypted file that passes the filename check but fails verify.
     if [[ ! -s "$temp_tar" ]]; then
         log_error "tar produced an empty archive — aborting backup" >&2
         return 1
@@ -931,11 +825,6 @@ perform_full_backup() {
         b_log_info "Injecting clean DB snapshot into archive..."
         local temp_tar_raw="$shared_tmpdir/${backup_label}_backup_$timestamp.tar"
 
-        # BUG-FB1 FIX: same root cause — all '2>&1 >&2' replaced with '2>/dev/null'.
-        # zstd/tar write to explicit targets (-c to stdout captured by >, -f file,
-        # -o file); their stderr is noise in the $() context and must not reach
-        # the capture pipe.  Exit codes are still checked by the && chain and the
-        # explicit '|| tar_exit=$?' below.
         if zstd --no-progress -d -T0 -c "$temp_tar" 2>/dev/null > "$temp_tar_raw" \
             && tar -rf "$temp_tar_raw" -C "$snap_dir" "${state_dir#/}/data/db.sqlite3" 2>/dev/null \
             && zstd --no-progress -T0 -3 "$temp_tar_raw" -o "${temp_tar}.new" 2>/dev/null
@@ -957,7 +846,6 @@ perform_full_backup() {
             tar --use-compress-program='zstd --no-progress -T0 -3' -cf "$temp_tar" -C / \
                 "${tar_excludes[@]}" "${tar_sources[@]}" 2>/dev/null || tar_exit=$?
             (( tar_exit <= 1 )) || { log_error "Rebuild tar failed" >&2; return 1; }
-            # Guard the fallback archive too.
             if [[ ! -s "$temp_tar" ]]; then
                 log_error "Fallback tar also produced an empty archive — aborting" >&2
                 return 1
@@ -969,10 +857,6 @@ perform_full_backup() {
     local enc="$target_dir/${backup_label}_backup_$timestamp.tar.zst.age"
     local enc_tmp="${enc}.tmp"
 
-    # BUG-FB1 FIX: same root-cause as perform_db_backup — replace '2>&1 >&2'
-    # with '2>/dev/null' so age's stderr cannot leak into the $() capture and
-    # corrupt the $backup_file path returned by this function.  age writes the
-    # ciphertext to -o enc_tmp, not stdout; suppressing stderr is correct.
     if ! age -r "$age_pub_key" -o "$enc_tmp" "$temp_tar" 2>/dev/null; then
         log_error "Encryption failed" >&2
         rm -f "$enc_tmp"
@@ -1011,18 +895,9 @@ main() {
 
     trap cleanup EXIT HUP INT TERM
 
-    # /run/lock is the FHS-correct location for transient process lock files.
-    # /var/lock is a legacy symlink to /run/lock on modern systemd systems,
-    # but ProtectSystem=strict in systemd units makes /var/lock read-only while
-    # /run/lock remains writable (it is a tmpfs mount).  Using /run/lock
-    # directly avoids the read-only filesystem error when running under systemd.
-    # LOCK_FILE is a script-level variable (declared at the top) so cleanup()
-    # can remove it unconditionally on EXIT via the trap set above.
     LOCK_FILE="/run/lock/vaultwarden-backup.lock"
 
     if [[ "$FORCE" != "true" && "$DRY_RUN" != "true" ]]; then
-        # Issue #10: Use bash 4.1+ automatic FD allocation instead of hardcoded
-        # FD 9, which could silently clobber an already-open file descriptor.
         exec {LOCK_FD}>"$LOCK_FILE"
         _set_cloexec_on_fd "$LOCK_FD"
         if ! flock -n "$LOCK_FD"; then
@@ -1050,12 +925,6 @@ main() {
 
     load_env_file || { log_error "Failed to load .env"; exit 1; }
 
-    # P3-01: BACKUP_ENCRYPTION_ENABLED — default true; warn loudly if operator disables it.
-    # NOTE: This codebase always encrypts backups via age (see perform_db_backup /
-    # perform_full_backup). BACKUP_ENCRYPTION_ENABLED is an operator-facing safety
-    # indicator: if deliberately set to false, the warning below fires so the admin
-    # knows they are accepting responsibility for plaintext remote storage. The actual
-    # encryption path is unchanged; this flag does not bypass it.
     local backup_encryption_enabled
     backup_encryption_enabled="$(get_config_value "BACKUP_ENCRYPTION_ENABLED" "true")"
     if [[ "${backup_encryption_enabled}" == "false" ]]; then
@@ -1067,19 +936,12 @@ main() {
     local state_dir
     state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
 
-    # BUG-AK4 FIX: use _resolve_age_key() so SOPS_AGE_KEY_FILE env var is
-    # only honoured when it is an absolute path or exists as a relative one.
-    # A stale relative value from the env file (written before BUG-AK1 fix)
-    # is skipped and the canonical /etc/vaultwarden/age-key.txt is tried next.
     local age_key_file
     age_key_file=$(_resolve_age_key) || {
         log_error "Age key file not found: $age_key_file"
         exit 1
     }
 
-    # Wire: verify age key health (permissions, ownership, crypto roundtrip)
-    # before attempting any backup so a corrupt or mis-permissioned key is
-    # caught here rather than at encryption time.
     if [[ "$DRY_RUN" != "true" ]]; then
         SOPS_AGE_KEY_FILE="$age_key_file" simple_verify_age_key || {
             log_error "Age key health check failed — aborting backup to avoid encrypting with a bad key."
