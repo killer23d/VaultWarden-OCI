@@ -263,7 +263,11 @@ load_env_file() {
 get_config_value() {
     local key="$1"
     local default="${2:-}"
-    local value="${!key:-$default}"
+    local value="${!key:-}"
+    if [[ -z "$value" && -n "$default" ]]; then
+        log_debug "get_config_value: '$key' not set in environment — using default: '$default'"
+        value="$default"
+    fi
     printf '%s\n' "$value"
 }
 
