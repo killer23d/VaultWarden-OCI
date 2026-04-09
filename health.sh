@@ -70,6 +70,75 @@ CERT_WARN_DAYS=${CERT_WARN_DAYS:-30}
 CERT_CRIT_DAYS=${CERT_CRIT_DAYS:-7}
 
 # =============================================================================
+# ALERT COOLDOWN
+# =============================================================================
+#
+# Problem: health.sh runs every few minutes via systemd timer. Without rate-
+# limiting, a single flapping failure (e.g., container restarting during a
+# Docker update) sends one email per invocation — dozens per hour — causing
+# alert fatigue that leads admins to ignore the notification channel entirely.
+#
+# Solution: per-failure-type lockfiles under /run/vw-health-alert/.
+# Each failure key gets its own lock file. flock -w 0 (non-blocking) succeeds
+# only if no other process holds the lock. The lock is held for
+# ALERT_COOLDOWN_SECONDS (default 3600) via a background sleep, after which
+# flock releases it automatically — no cron cleanup required.
+#
+# Result: at most one alert fires per failure key per hour. A single
+# "all-clear" recovery email fires once when every failure resolves, guarded
+# by its own lock with a 24-hour TTL so a flap sequence doesn't re-send the
+# clear immediately.
+#
+# Lock directory lives under /run (tmpfs) so it is automatically cleaned up
+# on reboot and does not accumulate state across restarts.
+
+ALERT_LOCK_DIR="/run/vw-health-alert"
+ALERT_COOLDOWN_SECONDS=${ALERT_COOLDOWN_SECONDS:-3600}     # 1 hour per failure key
+ALERT_RECOVERY_TTL=${ALERT_RECOVERY_TTL:-86400}            # 24 hours for clear-state lock
+
+# _acquire_alert_lock KEY
+#
+# Returns 0 (success) if this invocation should send an alert for KEY —
+# i.e., the cooldown has expired or this is the first alert for this key.
+# Returns 1 if the alert was already sent within the cooldown window.
+#
+# The lock is held by a background sleep process for ALERT_COOLDOWN_SECONDS.
+# When that sleep exits, flock automatically releases the lock and the next
+# invocation can acquire it and send a fresh alert.
+_acquire_alert_lock() {
+    local key="$1"
+    # Sanitise the key so it is safe as a filename (replace non-alphanum with _)
+    local safe_key
+    safe_key=$(printf '%s' "$key" | tr -cs '[:alnum:]-' '_')
+    local lock_file="${ALERT_LOCK_DIR}/${safe_key}.lock"
+
+    mkdir -p "${ALERT_LOCK_DIR}" 2>/dev/null || true
+
+    # Open the lock file on fd 200 and attempt a non-blocking exclusive lock.
+    # If the lock is already held (cooldown active), flock exits non-zero and
+    # we return 1 — caller skips sending the alert.
+    exec 200>"${lock_file}" 2>/dev/null || return 1
+    flock -w 0 200 2>/dev/null || return 1
+
+    # Lock acquired — hold it for the cooldown window via a background sleep
+    # that keeps fd 200 open. The subshell closes when sleep exits, releasing
+    # the lock automatically without any cleanup cron job.
+    ( sleep "${ALERT_COOLDOWN_SECONDS}" ) 200>&200 &
+    disown $!
+
+    return 0
+}
+
+# _release_recovery_lock
+#
+# Removes the recovery-state lock file so the next failure cycle can send
+# a fresh clear-state email when it resolves.  Called only when failures are
+# detected (i.e., we are NOT in a clean state).
+_release_recovery_lock() {
+    rm -f "${ALERT_LOCK_DIR}/recovery.lock" 2>/dev/null || true
+}
+
+# =============================================================================
 # GLOBAL STATE
 # =============================================================================
 
@@ -140,7 +209,18 @@ Comprehensive mode adds:
   - Fail2Ban filter regex drift detection (vaultwarden-auth against live log)
 
 Environment variables:
-  HEALTH_API_STRICT=true   Promote /api/server-info non-200 from warning to failure
+  HEALTH_API_STRICT=true          Promote /api/server-info non-200 from warning to failure
+  ALERT_COOLDOWN_SECONDS=3600     Minimum seconds between repeat alerts for the same
+                                  failure key (default: 3600 = 1 hour)
+  ALERT_RECOVERY_TTL=86400        Minimum seconds between clear-state recovery emails
+                                  (default: 86400 = 24 hours)
+
+Alert cooldown:
+  Alerts are rate-limited per failure key using lockfiles under
+  /run/vw-health-alert/. At most one alert fires per failure key per
+  ALERT_COOLDOWN_SECONDS window. A single clear-state recovery email fires
+  once when all checks pass, then is suppressed for ALERT_RECOVERY_TTL
+  seconds. Lock files live on tmpfs and are cleaned up automatically on reboot.
 
 Exit codes:
   0 - All checks passed
@@ -777,7 +857,7 @@ _check_container_resources() {
 }
 
 # =============================================================================
-# NOTIFICATION
+# NOTIFICATION  (with per-key alert cooldown)
 # =============================================================================
 
 _send_notification() {
@@ -797,6 +877,67 @@ _send_notification() {
         log_warn "Failed to send health notification email"
 }
 
+# _notify_failures
+#
+# Iterates every recorded failure/warning and fires at most one email per
+# failure key per ALERT_COOLDOWN_SECONDS window.  Failures that are still
+# within their cooldown window are silently skipped — the operator already
+# knows about them.
+_notify_failures() {
+    # Collect all failing/warning check names into a deduped key list.
+    # We use the check name directly as the lock key so each independent
+    # failure type has its own cooldown timer.
+    local alerted_any=false
+
+    for name in "${check_order[@]}"; do
+        local status="${check_results[$name]:-}"
+        [[ "$status" == "fail" || "$status" == "warn" ]] || continue
+
+        # Attempt to acquire the per-key cooldown lock.  Returns 1 (skip) if
+        # an alert was already sent within the cooldown window.
+        if ! _acquire_alert_lock "$name"; then
+            log_info "Alert cooldown active for '${name}' — suppressing repeat notification"
+            continue
+        fi
+
+        local message="${check_messages[$name]:-}"
+        local subject body
+        subject="VaultWarden Health [${status^^}]: ${name} on $(hostname)"
+        body="Health check alert at $(date).\n\nCheck : ${name}\nStatus: ${status^^}\nDetail: ${message}\n\nThis alert will not repeat for ${ALERT_COOLDOWN_SECONDS}s ($(( ALERT_COOLDOWN_SECONDS / 60 )) min).\nRun './health.sh --report' for full status."
+
+        _send_notification "$subject" "$body" || true
+        alerted_any=true
+        log_info "Alert sent for '${name}' (${status})"
+    done
+
+    # Reset the recovery lock whenever we have active failures so the next
+    # all-clear cycle is able to send a fresh recovery email.
+    if [[ $failed -gt 0 || $warnings -gt 0 ]]; then
+        _release_recovery_lock
+    fi
+}
+
+# _notify_recovery
+#
+# Fires a single "all clear" email when every check passes.  Guarded by its
+# own lock (ALERT_RECOVERY_TTL) so a brief flap that clears within minutes
+# does not re-send the recovery email on every passing invocation.
+_notify_recovery() {
+    [[ $failed -eq 0 && $warnings -eq 0 ]] || return 0
+
+    if ! _acquire_alert_lock "recovery"; then
+        log_info "Recovery notification already sent within TTL — suppressing"
+        return 0
+    fi
+
+    local subject body
+    subject="VaultWarden Health RECOVERED on $(hostname)"
+    body="All health checks passed at $(date).\n\nPassed : $passed\nWarnings: 0\nFailed : 0\n\nNo further alerts will fire until the next failure."
+
+    _send_notification "$subject" "$body" || true
+    log_info "Recovery notification sent"
+}
+
 # =============================================================================
 # REPORT GENERATION
 # =============================================================================
@@ -813,7 +954,7 @@ _generate_report() {
         echo "Generated: $(date)"
         echo "Host: $(hostname)"
         echo "Mode: $( $COMPREHENSIVE && echo comprehensive || echo standard )"
-        echo "="*"="*"="*"="*"="*"="*"="*"="*"="*"="*"="*"="*"="*"="*"="*"="*"="*"="*"="*"="*"="*"="*"="*"="*"="*"="*"="*"="*"="*"="
+        echo "================================================================="
         echo ""
         echo "SUMMARY: $passed passed, $warnings warnings, $failed failed (total: $total)"
         echo ""
@@ -920,13 +1061,10 @@ main() {
         _generate_report
     fi
 
-    # Send notification if there are failures or warnings
-    if [[ $failed -gt 0 || $warnings -gt 0 ]]; then
-        local subject body
-        subject="VaultWarden Health Alert: ${failed} failed, ${warnings} warnings on $(hostname)"
-        body="Health check completed at $(date).\n\nFailed: $failed\nWarnings: $warnings\nPassed: $passed\n\nRun './health.sh --report' for details."
-        _send_notification "$subject" "$body" || true
-    fi
+    # Send per-key rate-limited alerts for any failures/warnings, then a
+    # single recovery email when everything clears.
+    _notify_failures
+    _notify_recovery
 
     # Exit code
     if [[ $failed -gt 0 ]]; then
