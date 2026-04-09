@@ -62,8 +62,12 @@ OPTIONS:
 ENVIRONMENT:
     BREAKGLASS_MAX_AGE_HOURS     Hours before --status warns account is too old (default: 72)
     BREAKGLASS_AUTO_EXPIRY_HOURS Hours after creation before the account is auto-removed
-                                 (default: 2). Uses `at` when available, falls back to a
-                                 background subshell. Set to 0 to disable auto-expiry.
+                                 (default: 2). Scheduler priority:
+                                   1. `at` + atd running
+                                   2. `at` present (tries on-demand activation)
+                                   3. systemd-run transient timer (survives reboots)
+                                   4. background sleep subshell (lost on reboot)
+                                 Set to 0 to disable auto-expiry entirely.
 
 EXAMPLES:
     sudo ./create-breakglass-admin.sh --create        # Create emergency admin
@@ -308,15 +312,21 @@ _notify_breakglass_event() {
 # schedule_auto_cleanup()
 #
 # Schedules an automatic --remove for BREAKGLASS_AUTO_EXPIRY_HOURS from now.
-# Strategy (in priority order):
-#   1. `at` daemon  — most reliable; survives shell exit; persists across reboots
-#      within the expiry window.  Uses `batch` queue to avoid load spikes.
-#   2. Background subshell + sleep  — fallback when `at` is absent.  Lost on
-#      reboot, but better than nothing for typical short-lived sessions.
-# Set BREAKGLASS_AUTO_EXPIRY_HOURS=0 to disable entirely.
+# Scheduler priority (first available method wins):
 #
-# The scheduled command uses the full resolved path to this script and
-# passes --force so the cleanup is non-interactive.
+#   1. `at` + atd running       Most reliable; persists across reboots within
+#                               the expiry window. Uses stdin submission.
+#   2. `at` present, atd absent Tries submission anyway (some distros activate
+#                               atd on first use).
+#   3. systemd-run --on-active  Transient one-shot timer. Survives reboots
+#                               because systemd re-arms the timer from the
+#                               monotonic offset on resume. No persistent unit
+#                               file; cleaned up automatically after the job
+#                               runs. Preferred over the sleep subshell.
+#   4. setsid+sleep subshell    Last resort. Runs detached from the terminal
+#                               but is LOST on reboot. Operator is warned.
+#
+# Set BREAKGLASS_AUTO_EXPIRY_HOURS=0 to disable entirely.
 # ---------------------------------------------------------------------------
 schedule_auto_cleanup() {
     local expiry_hours="$BREAKGLASS_AUTO_EXPIRY_HOURS"
@@ -342,35 +352,65 @@ schedule_auto_cleanup() {
         || date -u -d "${expiry_hours} hours" '+%Y-%m-%d %H:%M UTC' 2>/dev/null \
         || echo "in ${expiry_hours} hour(s)")
 
+    # ------------------------------------------------------------------
+    # Tier 1 & 2: `at` scheduler
+    # ------------------------------------------------------------------
     if command -v at >/dev/null 2>&1 && systemctl is-active --quiet atd 2>/dev/null; then
         # `at` is available and atd is running — schedule via the job queue.
-        # `at now + N hours` reads the command from stdin.
         if echo "${cleanup_cmd}" | at now + "${expiry_hours}" hours 2>/dev/null; then
             log_success "Auto-cleanup scheduled via 'at' at ${expiry_human}"
             return 0
         else
-            log_warn "'at' scheduling failed — falling back to background subshell"
+            log_warn "'at' scheduling failed — trying next tier"
         fi
     elif command -v at >/dev/null 2>&1; then
-        # `at` present but atd not running — try anyway (some distros start atd on demand).
+        # `at` present but atd not confirmed running — try anyway (some
+        # distros start atd on demand via socket activation).
         if echo "${cleanup_cmd}" | at now + "${expiry_hours}" hours 2>/dev/null; then
             log_success "Auto-cleanup scheduled via 'at' at ${expiry_human}"
             return 0
         else
-            log_warn "'at' available but scheduling failed — falling back to background subshell"
+            log_warn "'at' available but scheduling failed — trying next tier"
         fi
     fi
 
-    # Fallback: background subshell using sleep.
-    # Runs detached (setsid + redirects) so it survives the invoking shell session.
-    # Note: this is lost on reboot; the operator must run --remove manually if they reboot
-    # before the expiry window elapses.
+    # ------------------------------------------------------------------
+    # Tier 3: systemd-run transient timer.
+    #
+    # --on-active schedules the unit to run N time after activation.
+    # Transient timers are re-armed by systemd from their monotonic offset
+    # on resume, so a reboot within the expiry window does NOT lose the
+    # cleanup job. The unit is automatically removed after it fires.
+    # UNIT NAME is fixed (vw-breakglass-cleanup) so a duplicate run
+    # (e.g. --force recreate) replaces any existing timer rather than
+    # stacking multiple timers for the same account.
+    # ------------------------------------------------------------------
+    if command -v systemd-run >/dev/null 2>&1 && systemctl is-system-running >/dev/null 2>&1; then
+        if systemd-run \
+                --on-active="${expiry_hours}h" \
+                --unit="vw-breakglass-cleanup" \
+                --description="VaultWarden breakglass auto-cleanup for ${bg_user}" \
+                -- bash -c "${cleanup_cmd}" 2>/dev/null; then
+            log_success "Auto-cleanup scheduled via systemd transient timer at ${expiry_human} (reboot-safe)"
+            return 0
+        else
+            log_warn "systemd-run scheduling failed — falling back to background sleep"
+        fi
+    fi
+
+    # ------------------------------------------------------------------
+    # Tier 4: background subshell using sleep.
+    # Runs detached (setsid + redirects) so it survives the invoking shell
+    # session, but it is LOST ON REBOOT. The operator must run --remove
+    # manually if the host is rebooted before expiry elapses.
+    # ------------------------------------------------------------------
     local sleep_seconds=$(( expiry_hours * 3600 ))
-    log_warn "'at' not available — scheduling auto-cleanup via background sleep (lost on reboot)"
+    log_warn "'at' and systemd-run not available or failed — scheduling auto-cleanup via background sleep"
+    log_warn "WARNING: This cleanup job is NOT reboot-safe. Run --remove manually if you reboot this host."
     setsid bash -c "sleep ${sleep_seconds} && ${cleanup_cmd}" \
         </dev/null >/dev/null 2>&1 &
     disown
-    log_success "Auto-cleanup background job started (PID $!) — will run at ${expiry_human}"
+    log_success "Auto-cleanup background job started (PID $!) — will run at ${expiry_human} (NOT reboot-safe)"
     return 0
 }
 
@@ -562,6 +602,13 @@ remove_breakglass_user() {
         fi
     fi
 
+    # Cancel the transient systemd cleanup timer if it is still pending,
+    # so it does not fire and attempt --remove on an already-removed account.
+    if systemctl is-active --quiet vw-breakglass-cleanup.timer 2>/dev/null; then
+        systemctl stop vw-breakglass-cleanup.timer 2>/dev/null || true
+        log_info "Stopped pending systemd transient cleanup timer (vw-breakglass-cleanup)"
+    fi
+
     # Legacy cleanup for older installs that added the user to the sudo group.
     if groups "$BREAKGLASS_USER" 2>/dev/null | grep -qw "sudo"; then
         if command -v gpasswd >/dev/null 2>&1; then
@@ -713,6 +760,15 @@ show_breakglass_status() {
             echo "  Account: ✅ Password set"
         else
             echo "  Account: ⚠️  No password or locked"
+        fi
+
+        # Show cleanup timer status if it is still pending.
+        if systemctl is-active --quiet vw-breakglass-cleanup.timer 2>/dev/null; then
+            local timer_left
+            timer_left=$(systemctl show vw-breakglass-cleanup.timer -p NextElapseUSecRealtime 2>/dev/null | cut -d= -f2 || echo "unknown")
+            echo "  Auto-cleanup timer: ✅ Pending via systemd (vw-breakglass-cleanup)"
+        else
+            echo "  Auto-cleanup timer: ℹ️  Not active via systemd (may be scheduled via 'at')"
         fi
 
     else
