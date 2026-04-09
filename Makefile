@@ -17,11 +17,16 @@ YELLOW := \033[1;33m
 BLUE   := \033[0;34m
 NC     := \033[0m
 
+# ── Restore configuration ───────────────────────────────────────────────────
+# Override on the command line to target a specific archive, e.g.:
+#   sudo make restore BACKUP_FILE=backups/db/vaultwarden-db-20250101-120000.age
+BACKUP_FILE ?=
+
 # ── Phony targets ───────────────────────────────────────────────────────────
 .PHONY: help \
         setup init-secrets edit-secrets test-secrets test-email \
         up down restart status logs \
-        backup restore \
+        backup restore restore-preflight \
         key-health key-backup key-escrow \
         update check-updates update-system update-dns \
         maintenance maintenance-full \
@@ -157,10 +162,59 @@ backup: ## Run manual backup
 	@./backup.sh
 	@echo "$(GREEN)Backup completed!$(NC)"
 
-restore: ## Restore from backup (interactive)
+# ---------------------------------------------------------------------------
+# restore-preflight: sanity-check the host before launching restore.sh.
+#
+# A panicked admin on a fresh or broken host gets clear, actionable error
+# messages instead of a cryptic age/tar failure buried in restore output.
+#
+# Three checks (all must pass):
+#   1. Docker daemon is reachable — restore.sh needs docker compose.
+#   2. Secrets file is present and decryptable — the age key must be in
+#      place before a restore is attempted (uses edit-secrets.sh --list,
+#      the same path exercised by `make test-secrets`).
+#   3. BACKUP_FILE exists — only validated when the caller has explicitly
+#      set BACKUP_FILE=…; omitting it is still valid (restore.sh prompts
+#      interactively).
+# ---------------------------------------------------------------------------
+restore-preflight: ## Pre-flight checks before restore (docker, secrets, backup file)
+	$(call require-root)
+	@echo "$(BLUE)Running restore pre-flight checks...$(NC)"
+	@if ! docker info > /dev/null 2>&1; then \
+		echo "$(RED)ERROR: Docker daemon is not running or not reachable.$(NC)"; \
+		echo "$(RED)       Start Docker first: sudo systemctl start docker$(NC)"; \
+		exit 1; \
+	fi
+	@echo "$(GREEN)  ✓ Docker daemon is reachable$(NC)"
+	@if [ ! -f "secrets/secrets.yaml" ]; then \
+		echo "$(RED)ERROR: secrets/secrets.yaml not found.$(NC)"; \
+		echo "$(RED)       Run: sudo make setup  (or: sudo ./setup.sh ...)$(NC)"; \
+		exit 1; \
+	fi
+	@if ! ./edit-secrets.sh --list > /dev/null 2>&1; then \
+		echo "$(RED)ERROR: Cannot decrypt secrets/secrets.yaml — age key may be missing or wrong.$(NC)"; \
+		echo "$(RED)       Ensure your age key is present (SOPS_AGE_KEY_FILE in .env) then re-run.$(NC)"; \
+		exit 1; \
+	fi
+	@echo "$(GREEN)  ✓ Secrets file is present and decryptable$(NC)"
+	@if [ -n "$(BACKUP_FILE)" ]; then \
+		if [ ! -f "$(BACKUP_FILE)" ]; then \
+			echo "$(RED)ERROR: Backup file not found: $(BACKUP_FILE)$(NC)"; \
+			echo "$(RED)       Run: make backup  or specify a valid path with BACKUP_FILE=<path>$(NC)"; \
+			exit 1; \
+		fi; \
+		echo "$(GREEN)  ✓ Backup file exists: $(BACKUP_FILE)$(NC)"; \
+	fi
+	@echo "$(GREEN)Pre-flight checks passed. Proceeding with restore...$(NC)"
+
+restore: restore-preflight ## Restore from backup (interactive); optionally set BACKUP_FILE=<path>
 	$(call require-root)
 	@echo "$(YELLOW)Starting restore process...$(NC)"
-	@./restore.sh
+	@if [ -n "$(BACKUP_FILE)" ]; then \
+		./restore.sh "$(BACKUP_FILE)"; \
+	else \
+		./restore.sh; \
+	fi
 
 # ===========================================================================
 ##@ Key Management
