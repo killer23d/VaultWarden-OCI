@@ -54,6 +54,10 @@
 #              to bound PID exhaustion on constrained OCI VMs; consistent with postfix
 #              pattern (pids: 50). The nproc ulimit caps threads per-process but does
 #              not enforce the cgroup pids controller — this fills that gap.
+# ✅ FIX-caddy-version-fallback: compose fallback tag aligned with .env.example pin.
+#              ${CADDY_VERSION:-2.11.1} diverged from CADDY_VERSION=2.11.2 in .env.example;
+#              admins deploying without .env would silently pull the wrong image tag.
+#              Changed to :-2.11.2 so both paths resolve to the same image.
 
 services:
   # =============================================================================
@@ -242,7 +246,10 @@ services:
   # =============================================================================
   caddy:
     container_name: vaultwarden_caddy
-    image: ghcr.io/caddybuilds/caddy-cloudflare:${CADDY_VERSION:-2.11.1}
+    # FIX-caddy-version-fallback: fallback tag aligned with .env.example pin (2.11.2).
+    # Previously :-2.11.1, which diverged from CADDY_VERSION=2.11.2 in .env.example.
+    # Admins deploying without a .env file would silently pull the wrong image tag.
+    image: ghcr.io/caddybuilds/caddy-cloudflare:${CADDY_VERSION:-2.11.2}
     restart: unless-stopped
     user: root
 
