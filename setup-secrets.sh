@@ -479,7 +479,7 @@ collect_secrets() {
     # Declare SECRETS as a local associative array.  No values are exported to
     # the environment during collection; write_secrets() receives them via the
     # nameref / indirect mechanism below.
-    declare -gA _COLLECTED_SECRETS
+    declare -A _COLLECTED_SECRETS
 
     # Helper: call the right lib function based on AUTO_MODE
     _get_field() {

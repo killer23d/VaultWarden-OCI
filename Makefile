@@ -23,7 +23,7 @@ NC     := \033[0m
         up down restart status logs \
         backup restore \
         key-health key-backup key-escrow \
-        update update-system update-dns \
+        update check-updates update-system update-dns \
         maintenance maintenance-full \
         install-systemd remove-systemd systemd-status systemd-validate \
         test fmt lint shellcheck \
@@ -195,6 +195,20 @@ update: ## Update container images (briefly stops services)
 	@echo "$(BLUE)Updating container images...$(NC)"
 	@./update.sh
 	@echo "$(GREEN)Update completed successfully!$(NC)"
+
+check-updates: ## Show available image updates without applying them
+	@echo "$(BLUE)Checking configured image tags against remote registries...$(NC)"
+	@bash -eu -o pipefail -c '\
+		set -a; source .env.example; set +a; \
+		images="ghcr.io/dani-garcia/vaultwarden:$${VAULTWARDEN_VERSION} ghcr.io/caddybuilds/caddy-cloudflare:$${CADDY_VERSION} boky/postfix:$${POSTFIX_VERSION} crazymax/fail2ban:$${FAIL2BAN_VERSION} busybox:$${BUSYBOX_VERSION}"; \
+		for image in $$images; do \
+			echo "$(YELLOW)==> $$image$(NC)"; \
+			if docker manifest inspect "$$image" >/dev/null 2>&1; then \
+				echo "$(GREEN)Available$(NC)"; \
+			else \
+				echo "$(RED)Not found or registry unavailable$(NC)"; \
+			fi; \
+		done'
 
 update-system: ## Update system packages and containers with email notification
 	$(call require-root)
