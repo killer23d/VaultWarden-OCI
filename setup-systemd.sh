@@ -71,7 +71,9 @@ OPTIONS:
 WHAT --install DOES:
     1. Copies maintenance.sh, backup.sh, health.sh -> /opt/vaultwarden-scripts/
        (root:root 700; scripts are self-locating via BASH_SOURCE[0])
-    2. Copies lib/ -> /opt/vaultwarden-scripts/lib/ (root:root 640)
+    2. Copies lib/ -> /opt/vaultwarden-scripts/lib/ (root:root 644)
+       lib files are 644 (world-readable) so a non-root service User= can
+       still source lib/common.sh if the unit is ever changed from root.
     3. Copies .env -> /etc/vaultwarden/vaultwarden.env (root:root 600)
        (skipped if the EnvironmentFile already exists; warns if content differs)
     4. Copies secrets/keys/age-key.txt -> /etc/vaultwarden/age-key.txt (root:root 600)
@@ -83,11 +85,12 @@ WHAT --install DOES:
     5. Copies systemd/*.{service,timer} -> /etc/systemd/system/
     6. systemctl daemon-reload
     7. systemctl enable --now for all 6 timers
-    8. systemctl reset-failed for all managed services (clears stale failed status)
+    8. Verifies timers appear in 'systemctl list-timers --all' (TIMER-CHECK)
+    9. systemctl reset-failed for all managed services (clears stale failed status)
 
 WHAT --validate CHECKS:
     1. Scripts present and executable in /opt/vaultwarden-scripts/
-    2. lib/ and simple_key_resilience.sh present
+    2. lib/ present; lib/*.sh files are readable (mode 644 recommended)
     3. All unit files present in /etc/systemd/system/
     4. All 6 timers enabled (systemctl is-enabled)
     5. EnvironmentFile /etc/vaultwarden/vaultwarden.env exists (mode 600)
@@ -186,12 +189,29 @@ install_units() {
 
     if [[ "$DRY_RUN" == "false" ]]; then
         cp -rP "$SCRIPT_DIR/lib" "$OPT_SCRIPTS_DIR/"
-        find "$OPT_SCRIPTS_DIR/lib" -type f -exec chmod 640 {} +  2>/dev/null || true
-        find "$OPT_SCRIPTS_DIR/lib" -type d -exec chmod 750 {} +  2>/dev/null || true
+
+        # FIX [LIB-PERM]: lib files are installed 644 root:root (not 640).
+        #
+        # Rationale: these files are sourced by maintenance.sh, backup.sh,
+        # and health.sh at runtime. If the systemd unit's User= directive is
+        # ever changed from root to a service account, a 640 root:root mode
+        # causes every "source lib/common.sh" call to fail silently (bash
+        # reports the permission error to stderr but continues, leaving all
+        # lib functions undefined). 644 keeps the files non-writable by
+        # everyone except root while still allowing any user to read them --
+        # the same policy used for system libraries in /usr/lib.
+        #
+        # If your threat model requires stricter access (e.g. lib files
+        # contain inline credentials), set User= to a dedicated group,
+        # change these lines to chmod 640 and chown root:<service-group>,
+        # and add the service account to that group. Document the choice.
+        find "$OPT_SCRIPTS_DIR/lib" -type f -name '*.sh' -exec chmod 644 {} +
+        find "$OPT_SCRIPTS_DIR/lib" -type f ! -name '*.sh' -exec chmod 640 {} +  2>/dev/null || true
+        find "$OPT_SCRIPTS_DIR/lib" -type d -exec chmod 755 {} +
         chown -R root:root "$OPT_SCRIPTS_DIR/lib"
-        log_success "Installed lib/ to $OPT_SCRIPTS_DIR/lib/"
+        log_success "Installed lib/ to $OPT_SCRIPTS_DIR/lib/ (*.sh: 644, other files: 640)"
     else
-        log_info "[DRY RUN] Would copy lib/ -> $OPT_SCRIPTS_DIR/lib/"
+        log_info "[DRY RUN] Would copy lib/ -> $OPT_SCRIPTS_DIR/lib/ (*.sh: 644 root:root)"
     fi
 
     if [[ "$DRY_RUN" == "false" ]] && [[ ! -f "$OPT_SCRIPTS_DIR/lib/simple_key_resilience.sh" ]]; then
@@ -375,6 +395,34 @@ install_units() {
     done
 
     # ------------------------------------------------------------------
+    # FIX [TIMER-CHECK]: Verify that timers are actually scheduled after
+    # enablement. 'systemctl enable --now' exits 0 even when a timer
+    # cannot fire (e.g. missing Docker socket, failed dependency). Checking
+    # 'list-timers --all' for at least one vaultwarden entry confirms the
+    # kernel timer subsystem accepted our units as active/waiting.
+    # ------------------------------------------------------------------
+    if [[ "$DRY_RUN" == "false" ]]; then
+        log_info "Verifying timers are scheduled ..."
+        if systemctl list-timers --all 2>/dev/null | grep -q 'vaultwarden'; then
+            log_success "Timers confirmed active in systemd timer queue."
+        else
+            log_warn "────────────────────────────────────────────────────────────────"
+            log_warn "WARNING: No vaultwarden timers appear in 'systemctl list-timers'"
+            log_warn "         after enablement. Possible causes:"
+            log_warn "  - Docker socket (docker.socket / docker.service) not yet active"
+            log_warn "  - A Requires= or After= dependency in the .service unit is unmet"
+            log_warn "  - systemd version too old to honour the OnCalendar= expression"
+            log_warn "Investigate with:"
+            log_warn "  systemctl list-timers --all | grep vaultwarden"
+            log_warn "  journalctl -xe --unit vaultwarden-health.timer"
+            log_warn "  systemctl status vaultwarden-health.timer"
+            log_warn "────────────────────────────────────────────────────────────────"
+        fi
+    else
+        log_info "[DRY RUN] Would check: systemctl list-timers --all | grep vaultwarden"
+    fi
+
+    # ------------------------------------------------------------------
     # 5. Clear stale failed status from previous runs
     # ------------------------------------------------------------------
     log_info "Clearing stale failed status from all managed services ..."
@@ -448,7 +496,7 @@ validate_installation() {
     local errors=0
     local warnings=0
 
-    log_info "[1/7] Checking installed scripts ..."
+    log_info "[1/8] Checking installed scripts ..."
     local scripts_to_check=(maintenance.sh backup.sh health.sh)
     for script in "${scripts_to_check[@]}"; do
         local installed="$OPT_SCRIPTS_DIR/$script"
@@ -463,12 +511,42 @@ validate_installation() {
         fi
     done
 
-    log_info "[2/7] Checking installed lib/ ..."
+    # ------------------------------------------------------------------
+    # FIX [VALIDATE-LIBPERM]: Check lib/ presence AND file permissions.
+    # lib/*.sh files must be at least world-readable (644) so that a
+    # non-root service user (User= in the unit) can source them. Warn on
+    # 600 or 640 modes that predate the LIB-PERM fix.
+    # ------------------------------------------------------------------
+    log_info "[2/8] Checking installed lib/ and file permissions ..."
     if [[ ! -d "$OPT_SCRIPTS_DIR/lib" ]]; then
         log_error "  MISSING: $OPT_SCRIPTS_DIR/lib/"
         (( errors++ )) || true
     else
         log_success "  OK: $OPT_SCRIPTS_DIR/lib/"
+        # Check that every *.sh lib file is readable by others (mode ends in 4 or higher)
+        local bad_perm_files=()
+        while IFS= read -r -d '' libfile; do
+            local fmode
+            fmode=$(stat -c '%a' "$libfile" 2>/dev/null || stat -f '%Lp' "$libfile" 2>/dev/null || echo "000")
+            # Extract the 'other' permission digit (last character of octal mode)
+            local other_bit="${fmode: -1}"
+            if (( other_bit < 4 )); then
+                bad_perm_files+=("$libfile ($fmode)")
+            fi
+        done < <(find "$OPT_SCRIPTS_DIR/lib" -type f -name '*.sh' -print0 2>/dev/null)
+
+        if [[ ${#bad_perm_files[@]} -gt 0 ]]; then
+            log_warn "  PERM WARNING: The following lib/*.sh files are not world-readable."
+            log_warn "  A non-root service User= will fail to source them silently:"
+            for f in "${bad_perm_files[@]}"; do
+                log_warn "    $f"
+            done
+            log_warn "  Fix: sudo find $OPT_SCRIPTS_DIR/lib -name '*.sh' -exec chmod 644 {} +"
+            log_warn "  Or re-run: sudo ./setup-systemd.sh --install"
+            (( warnings++ )) || true
+        else
+            log_success "  OK: all lib/*.sh files are world-readable (mode >= 644)"
+        fi
     fi
     local critical_lib="$OPT_SCRIPTS_DIR/lib/simple_key_resilience.sh"
     if [[ ! -f "$critical_lib" ]]; then
@@ -478,7 +556,7 @@ validate_installation() {
         log_success "  OK: $critical_lib"
     fi
 
-    log_info "[3/7] Checking installed unit files ..."
+    log_info "[3/8] Checking installed unit files ..."
     for unit in "${SERVICES[@]}" "${TIMERS[@]}"; do
         local dest="$UNIT_DEST_DIR/$unit"
         if [[ ! -f "$dest" ]]; then
@@ -489,7 +567,7 @@ validate_installation() {
         fi
     done
 
-    log_info "[4/7] Checking timer enablement ..."
+    log_info "[4/8] Checking timer enablement ..."
     for timer in "${TIMERS[@]}"; do
         if systemctl is-enabled "$timer" &>/dev/null; then
             log_success "  ENABLED:     $timer"
@@ -499,7 +577,7 @@ validate_installation() {
         fi
     done
 
-    log_info "[5/7] Checking EnvironmentFile ..."
+    log_info "[5/8] Checking EnvironmentFile ..."
     if [[ ! -f "$ENV_FILE" ]]; then
         log_error "  MISSING: $ENV_FILE"
         log_error "  Run: sudo ./setup-systemd.sh --install  (or create it manually)"
@@ -516,7 +594,7 @@ validate_installation() {
         fi
     fi
 
-    log_info "[6/7] Checking age key installation (BUG-AK1) ..."
+    log_info "[6/8] Checking age key installation (BUG-AK1) ..."
     if [[ ! -f "$AGE_KEY_DEST" ]]; then
         log_error "  MISSING: $AGE_KEY_DEST"
         log_error "  Backup/health services cannot encrypt/decrypt without this key."
@@ -551,7 +629,7 @@ validate_installation() {
         fi
     fi
 
-    log_info "[7/7] Checking for split-brain (sha256 repo vs installed) ..."
+    log_info "[7/8] Checking for split-brain (sha256 repo vs installed) ..."
     for script in "${scripts_to_check[@]}"; do
         local repo_src="$SCRIPT_DIR/$script"
         local installed="$OPT_SCRIPTS_DIR/$script"
@@ -572,6 +650,25 @@ validate_installation() {
             log_success "  UP-TO-DATE: $script (sha256 match)"
         fi
     done
+
+    # ------------------------------------------------------------------
+    # FIX [TIMER-CHECK]: Verify timers are actually scheduled.
+    # 'systemctl is-enabled' only checks the enabled symlink; it does NOT
+    # confirm the timer fired or is waiting. list-timers --all shows the
+    # kernel timer queue and catches silent activation failures.
+    # ------------------------------------------------------------------
+    log_info "[8/8] Checking timers are scheduled (systemctl list-timers) ..."
+    if systemctl list-timers --all 2>/dev/null | grep -q 'vaultwarden'; then
+        log_success "  Timers are present and scheduled in the systemd timer queue."
+    else
+        log_warn "  WARNING: No vaultwarden timers found in 'systemctl list-timers --all'."
+        log_warn "  Timers are enabled but not scheduled — check systemd logs:"
+        log_warn "    journalctl -xe --unit vaultwarden-health.timer"
+        log_warn "    systemctl status vaultwarden-health.timer"
+        log_warn "  Common cause: Docker socket not yet active at enable time."
+        log_warn "  Try: sudo systemctl start vaultwarden-health.timer"
+        (( warnings++ )) || true
+    fi
 
     echo ""
     if (( errors > 0 )); then
