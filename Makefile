@@ -115,6 +115,17 @@ up: ## Start all services with secrets initialization
 		echo "$(YELLOW)No secrets file found. Initializing...$(NC)"; \
 		./setup-secrets.sh; \
 	fi
+# ── Pre-flight: verify the decoded admin_token secret file is non-empty. ────
+# secrets/secrets.yaml being present only means the SOPS-encrypted source
+# exists. The decoded file in secrets/.docker_secrets/ is written by
+# setup-secrets.sh (or edit-secrets.sh). An empty file causes VaultWarden to
+# start with admin panel DISABLED — confusing and hard to diagnose.
+# `test -s` = file exists AND size > 0.
+	@if ! test -s secrets/.docker_secrets/admin_token; then \
+		echo "$(RED)ERROR: secrets/.docker_secrets/admin_token is missing or empty.$(NC)"; \
+		echo "$(RED)       Run ./setup-secrets.sh (or make init-secrets) to generate secrets.$(NC)"; \
+		exit 1; \
+	fi
 	@docker compose up -d
 	@echo "$(GREEN)Services started successfully!$(NC)"
 
