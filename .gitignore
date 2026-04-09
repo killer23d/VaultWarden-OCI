@@ -23,8 +23,6 @@ secrets.yaml.bak
 
 # ---------------------------------------------------------------------------
 # Local Docker Compose overrides — generated from *.example templates
-# Both the production override and the dev override are local-only files.
-# They are NOT committed even though their *.example counterparts are.
 # ---------------------------------------------------------------------------
 docker-compose.yml
 docker-compose.override.yml
