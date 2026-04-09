@@ -30,6 +30,7 @@ ADMIN_EMAIL=""
 OVERWRITE=false
 NON_INTERACTIVE=false
 SKIP_CHECKS=false
+SKIP_DNS_CHECK=false
 CLEAN_DOMAIN=""
 
 show_help() {
@@ -41,7 +42,8 @@ OPTIONS:
   --email EMAIL         Administrator email address
   --overwrite           Overwrite existing .env file without prompting
   --non-interactive     Skip all interactive prompts
-  --skip-checks         Skip system requirement checks
+  --skip-checks         Skip system requirement checks (also skips DNS check)
+  --skip-dns-check      Skip DNS propagation check only (use in CI / local testing)
   --help                Show this help message
 
 EXAMPLE:
@@ -55,7 +57,8 @@ while [[ $# -gt 0 ]]; do
         --email) ADMIN_EMAIL="$2"; shift 2 ;;
         --overwrite) OVERWRITE=true; shift ;;
         --non-interactive) NON_INTERACTIVE=true; shift ;;
-        --skip-checks) SKIP_CHECKS=true; shift ;;
+        --skip-checks) SKIP_CHECKS=true; SKIP_DNS_CHECK=true; shift ;;
+        --skip-dns-check) SKIP_DNS_CHECK=true; shift ;;
         --help|-h) show_help; exit 0 ;;
         *) echo "Unknown option: $1"; show_help; exit 1 ;;
     esac
@@ -132,6 +135,115 @@ if [[ "$SKIP_CHECKS" == "false" ]]; then
     fi
 
     log_success "System requirements met"
+fi
+
+# =============================================================================
+# DNS PROPAGATION PRE-FLIGHT
+#
+# Rationale: Caddy requests a TLS certificate on the first `docker compose up`.
+# If the domain does not yet point to this machine's public IP, the ACME
+# HTTP-01 challenge will fail. Repeated failures consume the Let's Encrypt
+# failed-authorizations rate limit (5 per hostname per hour) and can lock the
+# domain out of certificate issuance for up to 6 hours.
+#
+# This check resolves the domain and compares it to the host's public IP
+# BEFORE writing .env or starting any services. Mismatches produce a clear
+# warning and — in interactive mode — require explicit admin confirmation
+# before proceeding.
+# =============================================================================
+
+check_dns_propagation() {
+    local domain="$1"
+
+    log_info "Checking DNS propagation for ${domain}..."
+
+    # --- Resolve domain to IP ------------------------------------------------
+    local resolved_ip=""
+
+    if command -v dig &>/dev/null; then
+        # +time=3 +tries=2 keeps the timeout short on OCI where the default
+        # resolver can be slow; +short emits only the A record value.
+        resolved_ip=$(dig +short +time=3 +tries=2 "${domain}" A 2>/dev/null \
+            | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' \
+            | head -1 || true)
+    fi
+
+    # Fallback: nslookup (available on more minimal images)
+    if [[ -z "$resolved_ip" ]] && command -v nslookup &>/dev/null; then
+        resolved_ip=$(nslookup "${domain}" 2>/dev/null \
+            | awk '/^Address/ && NR>2 {print $2; exit}' \
+            | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' \
+            | head -1 || true)
+    fi
+
+    # --- Determine this host's public IPv4 -----------------------------------
+    # api.ipify.org is Cloudflare/Akamai-backed; timeout=5 is generous for
+    # an OCI instance that has outbound internet (required for ACME anyway).
+    local host_ip=""
+    host_ip=$(curl -sf --max-time 5 --connect-timeout 3 \
+        "https://api.ipify.org" 2>/dev/null \
+        | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' || true)
+
+    # --- Compare & decide ----------------------------------------------------
+    if [[ -z "$resolved_ip" ]]; then
+        _dns_preflight_warn \
+            "Could not resolve ${domain} — DNS may not be configured yet." \
+            "(resolved: <none>, host: ${host_ip:-unknown})"
+        return
+    fi
+
+    if [[ -z "$host_ip" ]]; then
+        log_warn "DNS pre-flight: cannot determine host public IP (no outbound connectivity?)."
+        log_warn "Resolved ${domain} -> ${resolved_ip}. Proceeding anyway — verify manually."
+        return
+    fi
+
+    if [[ "$resolved_ip" == "$host_ip" ]]; then
+        log_success "DNS propagation OK: ${domain} -> ${resolved_ip} (matches host IP)"
+        return
+    fi
+
+    _dns_preflight_warn \
+        "DNS mismatch: ${domain} resolves to ${resolved_ip} but this host's public IP is ${host_ip}." \
+        "Caddy's ACME certificate request will fail until DNS propagation completes."
+}
+
+# _dns_preflight_warn  — called when DNS does not match.
+# In interactive mode: print warning and ask the admin to confirm.
+# In non-interactive mode: print warning and exit 1.
+_dns_preflight_warn() {
+    local msg1="$1" msg2="${2:-}"
+
+    printf "\n"
+    printf "${COLOR_YELLOW}[WARN]${COLOR_RESET}  *** DNS PRE-FLIGHT FAILED ***\n"
+    printf "${COLOR_YELLOW}[WARN]${COLOR_RESET}  %s\n" "$msg1"
+    [[ -n "$msg2" ]] && printf "${COLOR_YELLOW}[WARN]${COLOR_RESET}  %s\n" "$msg2"
+    printf "${COLOR_YELLOW}[WARN]${COLOR_RESET}  If you start services now, Caddy may exhaust the Let's Encrypt\n"
+    printf "${COLOR_YELLOW}[WARN]${COLOR_RESET}  rate limit and lock this domain out of TLS issuance for ~6 hours.\n"
+    printf "${COLOR_YELLOW}[WARN]${COLOR_RESET}  Wait for DNS propagation to complete before starting the stack.\n"
+    printf "\n"
+
+    if [[ "$NON_INTERACTIVE" == "true" ]]; then
+        log_error "DNS pre-flight failed in non-interactive mode. Exiting."
+        log_error "Pass --skip-dns-check to bypass this check (e.g. in CI / local testing)."
+        exit 1
+    fi
+
+    # Interactive: let the admin decide
+    local response=""
+    read -r -p "  Proceed anyway? This may cause a Let's Encrypt rate-limit. [y/N] " response
+    if [[ ! "$response" =~ ^[Yy]$ ]]; then
+        log_info "Aborted. Re-run after DNS has propagated."
+        exit 0
+    fi
+
+    log_warn "Proceeding at operator request. Verify DNS before starting the stack."
+    printf "\n"
+}
+
+# Run the DNS pre-flight (skipped by --skip-checks or --skip-dns-check)
+if [[ "$SKIP_DNS_CHECK" == "false" ]]; then
+    check_dns_propagation "${clean_domain}"
 fi
 
 # =============================================================================
