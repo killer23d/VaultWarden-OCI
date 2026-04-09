@@ -73,6 +73,7 @@ SKIP_BACKUP=false
 VIEW_ONLY=false
 LIST_KEYS=false
 ROTATE_FIELD=""   # non-empty triggers --rotate mode
+RESTART_AFTER=false  # --restart-after: auto docker compose restart after rotation
 EXPORT_RECOVERY_KIT=false
 DRY_RUN=false
 # FIX [L-07]: Maximum recursive edit attempts before aborting
@@ -270,6 +271,11 @@ EDIT OPTIONS:
     --editor EDITOR         Use specific editor (default: $EDITOR or nano)
     --no-backup             Skip creating backup before edit
     --dry-run               Preview what --rotate would change without writing
+    --restart-after         After a successful --rotate, automatically run
+                            'docker compose restart <affected_service>' so the
+                            new secret takes effect immediately.  Without this
+                            flag the script prints a manual restart reminder
+                            instead (safer for unattended or scripted runs).
     --help                  Show this help
 
 FEATURES:
@@ -279,22 +285,24 @@ FEATURES:
     ✅ --rotate calls collect_secret_field() from lib/secrets.sh (single
        source of truth for hashing — no duplicate Argon2id/bcrypt logic)
     ✅ --rotate uses atomic write (temp file → mv) to prevent partial writes
+    ✅ --restart-after auto-restarts the affected Docker service post-rotation
     ✅ --list shows key names without decrypting values
     ✅ Prompts to export recovery kit upon any modification
     ✅ Recovery kit export validates no PLACEHOLDER values remain
     ✅ --rotate --dry-run previews which values would change
 
 EXAMPLES:
-    ./edit-secrets.sh                              # Interactive edit
-    ./edit-secrets.sh --editor vim                 # Edit with vim
-    ./edit-secrets.sh --view                       # View only
-    ./edit-secrets.sh --list                       # Show key names
-    ./edit-secrets.sh --rotate admin_token         # Re-hash VW admin password
-    ./edit-secrets.sh --rotate admin_token --dry-run  # Preview rotation
-    ./edit-secrets.sh --rotate email_api_token     # Replace email provider API key
-    ./edit-secrets.sh --rotate smtp_password       # Replace SMTP relay password
-    ./edit-secrets.sh --rotate caddy_cloudflare_dns_token  # Replace CF token
-    ./edit-secrets.sh --export-recovery-kit        # Export a recovery document
+    ./edit-secrets.sh                                          # Interactive edit
+    ./edit-secrets.sh --editor vim                             # Edit with vim
+    ./edit-secrets.sh --view                                   # View only
+    ./edit-secrets.sh --list                                   # Show key names
+    ./edit-secrets.sh --rotate admin_token                     # Re-hash VW admin password
+    ./edit-secrets.sh --rotate admin_token --dry-run           # Preview rotation
+    ./edit-secrets.sh --rotate admin_token --restart-after     # Rotate + auto-restart vaultwarden
+    ./edit-secrets.sh --rotate caddy_cloudflare_dns_token --restart-after  # Rotate + restart caddy
+    ./edit-secrets.sh --rotate email_api_token                 # Replace email provider API key
+    ./edit-secrets.sh --rotate smtp_password                   # Replace SMTP relay password
+    ./edit-secrets.sh --export-recovery-kit                    # Export a recovery document
 
 SEE ALSO:
     ./setup-secrets.sh  - First-time creation or full reconfiguration
@@ -311,12 +319,19 @@ while [[ $# -gt 0 ]]; do
         --view)                VIEW_ONLY=true; shift ;;
         --list)                LIST_KEYS=true; shift ;;
         --rotate)              ROTATE_FIELD="$2"; shift 2 ;;
+        --restart-after)       RESTART_AFTER=true; shift ;;
         --export-recovery-kit) EXPORT_RECOVERY_KIT=true; shift ;;
         --dry-run)             DRY_RUN=true; shift ;;
         --help)                show_help; exit 0 ;;
         *)                     log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done
+
+# --restart-after is only valid with --rotate
+if [[ "$RESTART_AFTER" == "true" && -z "$ROTATE_FIELD" ]]; then
+    log_error "--restart-after requires --rotate FIELD"
+    exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # Mutual-exclusion guard
@@ -702,7 +717,12 @@ do_rotate() {
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would rotate secret: $actual_field"
         local _svc="${_FIELD_SERVICES[$field]:-<service>}"
-        log_info "[DRY RUN] After rotation, you would need to restart: $_svc"
+        log_info "[DRY RUN] Affected Docker service: $_svc"
+        if [[ "$RESTART_AFTER" == "true" ]]; then
+            log_info "[DRY RUN] --restart-after is set: would run 'docker compose restart $_svc'"
+        else
+            log_info "[DRY RUN] Manual restart required: make restart  (or: docker compose restart $_svc)"
+        fi
         log_info "[DRY RUN] No changes written."
         return 0
     fi
@@ -816,15 +836,6 @@ PYEOF
 
     log_success "Secret '${actual_field}' rotated successfully"
 
-    # FIX [P4-UX2]: Tell the operator exactly which Docker service to restart.
-    local _affected_service="${_FIELD_SERVICES[$field]:-}"
-    if [[ -n "$_affected_service" ]]; then
-        log_warn "Restart the following Docker service for the new secret to take effect:"
-        log_warn "  docker compose restart $_affected_service"
-    else
-        log_warn "Run 'docker compose restart <service>' for the new secret to take effect"
-    fi
-
     # FIX [M-10]: After successful rotation, redeploy Docker secret files so
     # the live bind-mounted secrets stay in sync with the encrypted YAML.
     log_info "Redeploying Docker secret files..."
@@ -832,6 +843,35 @@ PYEOF
         log_success "Docker secret files updated"
     else
         log_warn "Could not auto-redeploy Docker secret files. Run: ./startup.sh or ./setup-secrets.sh"
+    fi
+
+    # FIX [P4-UX2]: Inform operator which service must be restarted so the
+    # running container picks up the new secret from its environment.
+    # --restart-after performs the restart automatically; without it an
+    # explicit prompt is printed (lower-risk default for part-time admins).
+    local _affected_service="${_FIELD_SERVICES[$field]:-}"
+    if [[ "$RESTART_AFTER" == "true" ]]; then
+        if [[ -n "$_affected_service" ]]; then
+            log_info "Restarting Docker service: $_affected_service ..."
+            local restart_rc=0
+            docker compose restart "$_affected_service" 2>&1 || restart_rc=$?
+            if [[ $restart_rc -eq 0 ]]; then
+                log_success "Service '$_affected_service' restarted — new secret is active."
+            else
+                log_warn "'docker compose restart $_affected_service' failed (exit $restart_rc)."
+                log_warn "Restart manually: make restart  (or: docker compose restart $_affected_service)"
+            fi
+        else
+            log_warn "No service mapping found for '$field'. Restart manually: make restart"
+        fi
+    else
+        # Default: explicit prompt — safer for unattended or scripted invocations.
+        log_warn "Secret rotated. Restart required: make restart"
+        if [[ -n "$_affected_service" ]]; then
+            log_warn "  Affected service: $_affected_service"
+            log_warn "  Quick restart:    docker compose restart $_affected_service"
+        fi
+        log_warn "  Or add --restart-after to rotate and restart in one step."
     fi
 
     offer_recovery_kit_export "$EXPORT_RECOVERY_KIT"
