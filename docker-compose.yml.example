@@ -1,64 +1,7 @@
 # VaultWarden-OCI - Production Docker Compose Configuration (SECURITY HARDENED)
 #
-# D-05: Set project name to avoid conflicts with other Compose stacks on the same host.
 # Override in .env: COMPOSE_PROJECT_NAME=vaultwarden
 #
-# SECURITY ENHANCEMENTS APPLIED:
-# ✅ Cloudflare token loaded via entrypoint (no command-line exposure)
-# ✅ Reduced container capabilities (minimal privilege)
-# ✅ Optimized resource limits (appropriate for <10 users)
-# ✅ Enhanced security headers and modern isolation
-# ✅ Cloudflare WAF rate limiting (edge protection)
-# ✅ Fail2Ban SSH protection via host networking (FIXED)
-# ✅ Postfix capabilities hardened (CHOWN, SETUID, SETGID, NET_BIND_SERVICE, DAC_OVERRIDE, FOWNER only)
-# ✅ Log rotation limits on all runtime services (disk-fill prevention)
-# ✅ Init container uses find -exec chmod (glob-safe, no silent no-op on empty dirs)
-# ✅ vaultwarden network marked internal: true (no unnecessary outbound access)
-# ✅ caddy_external network for Caddy ACME + Cloudflare API egress only
-# ✅ Secret files mode 444 inside mode-700 directory (all Docker Engine versions)
-# ✅ fail2ban db directory root:root 755 (crazymax/fail2ban runs as root)
-# ✅ BUG-EM1: SMTP_AUTH_MECHANISM empty + SMTP_EXPLICIT_TLS=false added to vaultwarden env
-# ✅ BUG-EM2: Postfix host port restored as 127.0.0.1:587 loopback-only (host scripts use it)
-# ✅ BUG-EM3: WEBSOCKET_ENABLED default hardened to true (was undefined → empty → disabled)
-# ✅ BUG-EM4: Postfix added to caddy_external network (DNS + relay egress restored)
-# ✅ BUG-EM5: SMTP_AUTH_MECHANISM set to empty string (not 'none' — invalid for VaultWarden)
-# ✅ BUG-2:   caddy log dir chmod 755 (Caddy runs as root; 750 blocks write for non-owner)
-# ✅ BUG-3A:  init container mkdir before chown (prevents Permission denied on /logs subdirs)
-# ✅ BUG-3B:  caddy/entrypoint.sh committed with execute bit 0755 (fixes exec permission denied)
-# ✅ BUG-caddy-perms-2: chmod 755 /logs/caddy set correctly
-# ✅ BUG-caddy-logfile-perms: access.log + security.log pre-created root:root 644
-# ✅ BUG-init-exit1: all caddy log file ops use || true so init never exits 1
-# ✅ BUG-caddy-data-perms: removed find /caddy_data + /caddy_config chown PUID:PGID from init.
-#              Caddy runs as user: root — chowning its data/config to PUID:PGID made Caddy
-#              a non-owner on its own dirs, causing cert key permission denied.
-# ✅ BUG-entrypoint-exec: entrypoint.sh must be mode 0755; a blanket 'find -exec chmod 644'
-#              on the repo working tree strips the execute bit → runc EPERM at container init.
-# ✅ BUG-caddy-log-order: logs/caddy setup runs BEFORE find /logs sweep.
-# ✅ BUG-init-dac-override: init container was missing DAC_OVERRIDE capability.
-#              Without DAC_OVERRIDE, chmod() on a file/dir not owned by the calling process
-#              fails EPERM unconditionally. After `chown -R PUID:PGID /logs` transferred
-#              /logs/caddy to ubuntu:ubuntu, container root could no longer chmod it.
-#              The `|| true` swallowed the error → caddy dir stayed 750 → touch failed
-#              in entrypoint → caddy restart loop. Fix: add DAC_OVERRIDE to cap_add.
-# ✅ FIX-busybox-version: init container image tag driven by BUSYBOX_VERSION in .env
-#              (previously hardcoded busybox:1.36.1 — bypassed the version-pin system).
-# ✅ FIX-push-secrets-optional: push_installation_id / push_installation_key marked
-#              required: false — Compose skips mounting absent secret files instead of
-#              aborting; eliminates 'secret not found' log noise on deployments where
-#              PUSH_ENABLED=false (the default for ~95% of installs).
-# ✅ FIX-domain-single-source: caddy service passes DOMAIN (not DOMAIN_NAME); the
-#              entrypoint derives DOMAIN_NAME=${DOMAIN#https://} at runtime so operators
-#              only set one variable. fail2ban F2B_SENDER uses ${F2B_SENDER} (literal
-#              value in .env) — Docker Compose does not expand ${VAR} in .env files.
-# ✅ FIX-vw-pids-limit: vaultwarden service now has deploy.resources.limits.pids: 200
-#              to bound PID exhaustion on constrained OCI VMs; consistent with postfix
-#              pattern (pids: 50). The nproc ulimit caps threads per-process but does
-#              not enforce the cgroup pids controller — this fills that gap.
-# ✅ FIX-caddy-version-fallback: compose fallback tag aligned with .env.example pin.
-#              ${CADDY_VERSION:-2.11.1} diverged from CADDY_VERSION=2.11.2 in .env.example;
-#              admins deploying without .env would silently pull the wrong image tag.
-#              Changed to :-2.11.2 so both paths resolve to the same image.
-
 services:
   # =============================================================================
   # Init Container - Permissions Setup
@@ -80,32 +23,6 @@ services:
     security_opt:
       - no-new-privileges:true
 
-    # ---------------------------------------------------------------------------
-    # OWNERSHIP MODEL
-    # ---------------------------------------------------------------------------
-    #
-    # No userns-remap on this host: container UID 0 = host UID 0 = real root.
-    # Verified via: cat /proc/self/uid_map  =>  0  0  4294967295
-    #
-    # Each service runs as a specific UID; that UID must own its writable dirs:
-    #
-    #   /data, /logs/*          → PUID:PGID mode 750/640  (vaultwarden app user)
-    #   /logs/caddy             → dir: mode 755 (Caddy=root needs execute+write as 'other')
-    #                             files: root:root mode 644 (Caddy creates and writes these)
-    #   /caddy_data, /caddy_config → NOT TOUCHED (Caddy=root owns these on host; host setup.sh
-    #                             pre-creates them as root:root 755)
-    #   /fail2ban_db            → root:root 755  (fail2ban runs as root)
-    #   /secrets                → mode 700/444   (secrets hardening)
-    #
-    # WHY DAC_OVERRIDE IS REQUIRED:
-    #   The init command does: chown -R PUID:PGID /logs
-    #   After this, /logs/caddy is owned by ubuntu:ubuntu.
-    #   chmod 755 /logs/caddy then fails EPERM without DAC_OVERRIDE
-    #   because the calling process (UID 0) is not the file owner (ubuntu).
-    #   DAC_OVERRIDE grants bypass of all DAC permission checks, making
-    #   chmod work regardless of ownership. This is a minimal, scoped grant
-    #   on a short-lived init-only container with no network access.
-    # ---------------------------------------------------------------------------
     command: sh -c "
       mkdir -p /data /logs/vaultwarden /logs/caddy /logs/fail2ban /logs/postfix &&
 
@@ -246,9 +163,6 @@ services:
   # =============================================================================
   caddy:
     container_name: vaultwarden_caddy
-    # FIX-caddy-version-fallback: fallback tag aligned with .env.example pin (2.11.2).
-    # Previously :-2.11.1, which diverged from CADDY_VERSION=2.11.2 in .env.example.
-    # Admins deploying without a .env file would silently pull the wrong image tag.
     image: ghcr.io/caddybuilds/caddy-cloudflare:${CADDY_VERSION:-2.11.2}
     restart: unless-stopped
     user: root
@@ -260,31 +174,9 @@ services:
     entrypoint: /scripts/entrypoint.sh
 
     environment:
-      # DOMAIN_NAME is derived from DOMAIN inside caddy/entrypoint.sh
-      # (strips the https:// prefix). Pass DOMAIN as the canonical source.
       DOMAIN: ${DOMAIN}
       TZ: ${TZ:-UTC}
 
-    # ---------------------------------------------------------------------------
-    # DNS-01 ACME token — REQUIRED for TLS certificate issuance
-    # ---------------------------------------------------------------------------
-    # caddy_cloudflare_dns_token is the Cloudflare API token Caddy uses to
-    # complete DNS-01 ACME challenges and obtain/renew TLS certificates for
-    # DOMAIN. Without it, Caddy cannot issue a certificate and will either
-    # fail to start or enter a restart loop with no obvious error message.
-    #
-    # The token is NOT an environment variable — it is injected as a Docker
-    # secret at runtime (see the secrets: block at the bottom of this file).
-    # Do NOT paste the token value anywhere in this file or in .env.
-    #
-    # To provision:  make edit-secrets  (or: ./edit-secrets.sh --rotate cloudflare_dns_token)
-    #
-    # Required Cloudflare API token permissions:
-    #   Zone → DNS → Edit     (for the zone containing DOMAIN)
-    #   Zone → Zone → Read    (zone listing, required by the ACME DNS plugin)
-    #
-    # See also: CADDY_CF_DNS_TOKEN comment in .env.example
-    # ---------------------------------------------------------------------------
     secrets:
       - caddy_cloudflare_dns_token
       - admin_basic_auth_hash
