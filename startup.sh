@@ -84,6 +84,25 @@
 #                         exit 2 → log_error + exit 1 (critical failure, abort)
 #                       This matches the documented exit-code contract in
 #                       health.sh's --help output.
+#
+# PATCHED BUGS (2026-04-08 batch 2):
+#   STARTUP-11 [MEDIUM] prepare_docker_secrets(): Python heredoc opened
+#                       'secrets.yaml' with a hardcoded relative path, entirely
+#                       ignoring the SECRETS_FILE variable defined in
+#                       lib/secrets.sh. Although startup.sh cds to PROJECT_ROOT
+#                       early on, the heredoc was also inconsistent with the
+#                       rest of the secrets subsystem. Fix: pass "$SECRETS_FILE"
+#                       as sys.argv[1] and open sys.argv[1] in the Python
+#                       snippet so the path is always explicit and absolute.
+#
+#   STARTUP-12 [LOW]   pull_images() ran unconditionally on every startup,
+#                       including the systemd ExecStart path. On metered or
+#                       slow OCI connections this adds 30-120s to every restart
+#                       unnecessarily. Fix: add --skip-pull flag (SKIP_PULL=false
+#                       default). Documented in show_help(). systemd operators
+#                       should pass --skip-pull; update.sh and manual
+#                       ./startup.sh (or ./startup.sh --force) remain the
+#                       intended pull path.
 
 set -euo pipefail
 
@@ -104,6 +123,10 @@ SKIP_HEALTH_CHECK=false
 BACKGROUND=false
 DRY_RUN=false
 DO_DOWN=false
+# STARTUP-12 FIX: skip docker compose pull on routine restarts (e.g. systemd
+# ExecStart). Pass --skip-pull in the unit file; use update.sh or a manual
+# ./startup.sh without the flag when an image refresh is desired.
+SKIP_PULL=false
 
 show_help() {
 cat << 'EOF'
@@ -116,13 +139,16 @@ OPTIONS:
   --force          Force restart of all services (preferred flag)
   --force-restart  Alias for --force (legacy, kept for compatibility)
   --skip-health    Skip post-startup health check
+  --skip-pull      Skip docker compose pull (use for systemd restarts
+                   or when images are already current)
   --background     Start services in background (daemon mode)
   --dry-run        Show what would be done without executing
   --down           Stop all services (delegates to docker compose down)
   --help           Show this help
 
 EXAMPLES:
-  ./startup.sh                    # Normal startup
+  ./startup.sh                    # Normal startup (pulls latest images)
+  ./startup.sh --skip-pull        # Restart without pulling (fast path)
   ./startup.sh --force            # Force restart all services
   ./startup.sh --background       # Start in daemon mode
   ./startup.sh --down             # Stop all services
@@ -135,6 +161,7 @@ while [[ $# -gt 0 ]]; do
     --force)         FORCE_RESTART=true; shift ;;
     --force-restart) FORCE_RESTART=true; shift ;;
     --skip-health)   SKIP_HEALTH_CHECK=true; shift ;;
+    --skip-pull)     SKIP_PULL=true; shift ;;
     --background)    BACKGROUND=true; shift ;;
     --dry-run)       DRY_RUN=true; shift ;;
     --down)          DO_DOWN=true; shift ;;
@@ -426,8 +453,15 @@ prepare_docker_secrets() {
   # STARTUP-7 FIX: fail fast with actionable diagnostics if the age key is bad
   check_age_key_health_preflight || return 1
 
-  if [[ ! -f "secrets.yaml" ]]; then
-    log_warn "secrets.yaml not found; skipping Docker secrets preparation"
+  # STARTUP-11 FIX: Use the canonical SECRETS_FILE path (defined in
+  # lib/secrets.sh, defaults to secrets/secrets.yaml) rather than a bare
+  # relative 'secrets.yaml'. The variable is already absolute when the caller
+  # has cd'd to PROJECT_ROOT, but using it explicitly makes the code
+  # consistent with every other secrets consumer in the codebase.
+  local secrets_file="${SECRETS_FILE:-secrets/secrets.yaml}"
+
+  if [[ ! -f "$secrets_file" ]]; then
+    log_warn "$secrets_file not found; skipping Docker secrets preparation"
     return 0
   fi
 
@@ -445,13 +479,15 @@ prepare_docker_secrets() {
   cache_file=$(mktemp)
   _prepare_secrets_cleanup_cache="$cache_file"
 
-  if ! sops -d secrets.yaml > "$cache_file"; then
-    log_error "Failed to decrypt secrets.yaml"
+  if ! sops -d "$secrets_file" > "$cache_file"; then
+    log_error "Failed to decrypt $secrets_file"
     return 1
   fi
 
   # Minimal parser for the known flat structure used by this project.
   # We intentionally avoid yq/jq dependency here.
+  # STARTUP-11 FIX: pass the secrets file path as sys.argv[1] so the Python
+  # snippet never opens a hardcoded relative path.
   while IFS='=' read -r key value; do
     [[ -z "$key" ]] && continue
     local target_file="${secrets_dir}/${key}"
@@ -463,9 +499,9 @@ prepare_docker_secrets() {
       chmod 444 "$target_file"
     fi
   done < <(
-    python3 - <<'PY'
+    python3 - "$secrets_file" <<'PY'
 import sys, yaml
-with open('secrets.yaml', 'r', encoding='utf-8') as f:
+with open(sys.argv[1], 'r', encoding='utf-8') as f:
     data = yaml.safe_load(f) or {}
 for k, v in data.items():
     if isinstance(v, (str, int, float)):
@@ -524,8 +560,17 @@ cleanup_orphaned_resources() {
 
 # ---------------------------------------------------------------------------
 # pull_images
+#
+# STARTUP-12 FIX: guard with SKIP_PULL so that systemd ExecStart restarts
+# (which pass --skip-pull) are instant. Image refreshes should go through
+# update.sh or a manual ./startup.sh without --skip-pull.
 # ---------------------------------------------------------------------------
 pull_images() {
+  if [[ "$SKIP_PULL" == "true" ]]; then
+    log_info "Skipping docker compose pull (--skip-pull)"
+    return 0
+  fi
+
   log_info "Pulling latest container images..."
 
   if [[ "$DRY_RUN" == "true" ]]; then
