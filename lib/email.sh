@@ -36,6 +36,9 @@
 #             Set MAILGUN_REGION=eu in .env for EU-hosted accounts.
 # Postmark    200 JSON PascalCase; check ErrorCode in body, not just HTTP code
 # Resend      200 JSON; from is composite string, to is string array
+# host        Delegates to sendmail -t via the postfix sidecar container.
+#             No API token required. Set EMAIL_MODE=host and EMAIL_PROVIDER=host
+#             in .env to use this driver.
 #
 # --- FIX-M01 (2026-03-09) ----------------------------------------------------
 # All drivers use ${SMTP_FROM:-${SMTP_FROM_EMAIL}} (SMTP_FROM_EMAIL deprecated;
@@ -111,6 +114,25 @@
 # install -m 600 /dev/null "$cfg" before secrets are written, matching the
 # hardened pattern already used by _email_bearer_post(). This removes the
 # mktemp -> chmod TOCTOU window.
+#
+# --- FIX EM-H2 (2026-04-08) --------------------------------------------------
+# _email_bearer_post(): response body temp file 'tmp' was created with plain
+# mktemp, relying on umask for its mode. On systems with a permissive umask
+# (e.g. 0022) the file is world-readable (644), exposing raw API response
+# bodies that may contain token echoes or user data. Fix: harden with
+# install -m 600 /dev/null before writing, matching the existing pattern
+# used for 'cfg' in this function and already applied in _email_driver_mailgun
+# and _email_driver_postmark (FIX EM-L2).
+#
+# --- FIX EM-H3 (2026-04-08) --------------------------------------------------
+# No _email_driver_postfix() function existed for EMAIL_MODE=host, despite
+# being documented in comments and edit-secrets.sh help text.
+# send_email() in lib/common.sh fell through to "no driver" and silently
+# discarded all alerts. An admin who set EMAIL_MODE=host received zero
+# notification that email delivery was broken.
+# Fix: add _email_driver_postfix() that pipes a minimal RFC-2822 message to
+# sendmail -t (provided by the postfix sidecar container). Add a 'host' case
+# arm to _email_driver_lookup() so the driver is discovered normally.
 # -----------------------------------------------------------------------------
 
 # Prevent direct execution
@@ -134,6 +156,11 @@ _email_driver_lookup() {
     case "$provider" in
         mailersend|sendgrid|mailgun|postmark|resend)
             printf '%s' "$provider"
+            return 0
+            ;;
+        # FIX EM-H3: host/postfix driver for EMAIL_MODE=host (postfix sidecar)
+        host|postfix)
+            printf '%s' "postfix"
             return 0
             ;;
         *)
@@ -162,6 +189,14 @@ _email_bearer_post() {
     local url="$1" payload="$2"
     local tmp cfg code
     tmp=$(mktemp -t vw_email.XXXXXXXXXX)
+    # FIX EM-H2: harden tmp with install -m 600 so the response body file is
+    # never world-readable regardless of the process umask. Matches the
+    # existing pattern used for cfg below and in Mailgun/Postmark drivers.
+    if ! install -m 600 /dev/null "$tmp" 2>/dev/null; then
+        rm -f "$tmp"
+        log_error "_email_bearer_post: failed to secure response temp file"
+        return 1
+    fi
     cfg=$(mktemp -t vw_ecfg.XXXXXXXXXX)
     if ! install -m 600 /dev/null "$cfg" 2>/dev/null; then
         rm -f "$tmp" "$cfg"
@@ -407,8 +442,40 @@ EOF
     return 1
 }
 
+# -- DRIVER: host/postfix (EMAIL_MODE=host, postfix sidecar) ------------------
+# FIX EM-H3: Implements the EMAIL_MODE=host driver that was documented but
+# missing. Pipes a minimal RFC-2822 message to sendmail -t which is provided
+# by the postfix sidecar container. No API token is required or read.
+#
+# Usage: set EMAIL_MODE=host and EMAIL_PROVIDER=host (or EMAIL_PROVIDER=postfix)
+# in .env. sendmail must be on PATH (standard in the postfix sidecar image).
+_email_driver_postfix() {
+    local subject="$1" body="$2"
+    local _from_email="${SMTP_FROM:-${SMTP_FROM_EMAIL:-}}"
+    local from_name="${SMTP_FROM_NAME:-VaultWarden}"
+    local to_addr="${ADMIN_EMAIL:-}"
+
+    if [[ -z "$to_addr" ]]; then
+        log_error "postfix driver: ADMIN_EMAIL is not set"
+        return 1
+    fi
+
+    if ! command -v sendmail >/dev/null 2>&1; then
+        log_error "postfix driver: sendmail not found in PATH — is the postfix sidecar running?"
+        return 1
+    fi
+
+    # Pipe a minimal RFC-2822 message to sendmail -t.
+    # sendmail -t reads recipients from To:/Cc:/Bcc: headers so no separate
+    # envelope argument is needed. -oi prevents a line with a single '.' from
+    # prematurely ending the message body.
+    printf 'From: %s <%s>\nTo: %s\nSubject: %s\n\n%s\n' \
+        "$from_name" "$_from_email" "$to_addr" "$subject" "$body" \
+        | sendmail -t -oi
+}
+
 export -f _email_json_escape _email_bearer_post _email_driver_lookup
 export -f _email_driver_mailersend _email_driver_sendgrid _email_driver_mailgun
-export -f _email_driver_postmark _email_driver_resend
+export -f _email_driver_postmark _email_driver_resend _email_driver_postfix
 
-log_debug "lib/email.sh loaded (drivers: mailersend sendgrid mailgun postmark resend)"
+log_debug "lib/email.sh loaded (drivers: mailersend sendgrid mailgun postmark resend host/postfix)"
