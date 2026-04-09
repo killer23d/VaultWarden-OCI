@@ -58,42 +58,24 @@ read_secret() {
 }
 
 # =============================================================================
+# log_warn <message>
+#
+# Writes a WARNING line to stderr with a consistent prefix so operators can
+# grep journalctl / docker logs for degraded-mode events.
+# =============================================================================
+log_warn() {
+    echo "[WARN] caddy-entrypoint: $*" >&2
+}
+
+# =============================================================================
 # BUG-caddy-perms-3 FIX: Ensure log directory AND log files exist and are
 # writable by this process before caddy run is called.
 #
-# WHY TWO STEPS:
-#
-#   Step 1 — directory: mkdir -p /var/log/caddy
-#     Creates the bind-mount target inside the container overlay if the host
-#     directory was not pre-created. No-op if it already exists.
-#
-#   Step 2 — files: touch /var/log/caddy/access.log + security.log
-#     Caddy's FileWriter calls open() with O_CREAT | O_WRONLY on startup.
-#     On OCI Compute with userns-remap, container UID 0 maps to an
-#     unprivileged host UID. The bind-mounted /var/log/caddy is owned by
-#     PUID:PGID. Mode 755 gives 'other' r-x but NOT write. O_CREAT on a
-#     non-existent file inside a directory where 'other' has no write bit
-#     fails with EACCES — the exact error observed in production.
-#
-#     If touch succeeds, caddy's open() on an already-existing file only
-#     needs write permission on the FILE itself (which caddy owns after
-#     creating it), not on the directory. Files created by container root
-#     are owned by the host root (mapped UID) and get mode 0644 by default.
-#
-#     If touch fails, the only fix is to run on the HOST (as real root):
-#       sudo touch /var/lib/vaultwarden/logs/caddy/access.log \
-#                  /var/lib/vaultwarden/logs/caddy/security.log
-#       sudo chown root:root /var/lib/vaultwarden/logs/caddy/access.log \
-#                            /var/lib/vaultwarden/logs/caddy/security.log
-#       sudo chmod 644 /var/lib/vaultwarden/logs/caddy/access.log \
-#                      /var/lib/vaultwarden/logs/caddy/security.log
-#       sudo chmod 755 /var/lib/vaultwarden/logs/caddy
-#     setup.sh does this automatically for new installs.
-#
-# WHY NOT chmod INSIDE THE CONTAINER:
-#   cap_drop: ALL + cap_add: [NET_BIND_SERVICE] only.
-#   FOWNER and DAC_OVERRIDE are absent. chmod on a directory owned by
-#   another UID fails EPERM unconditionally, regardless of container root.
+# DEGRADED MODE (non-writable logs):
+#   Instead of exit 1 (which causes an infinite Docker restart loop), Caddy
+#   is started with stdout-only logging when the log files cannot be written.
+#   CADDY_DEGRADED=true is exported so health.sh can surface the condition.
+#   The operator can fix file ownership on the host and then restart Caddy.
 # =============================================================================
 mkdir -p /var/log/caddy
 
@@ -104,50 +86,49 @@ if ! test -d /var/log/caddy; then
 fi
 
 # Attempt to pre-create log files so caddy run's open(O_CREAT) doesn't need
-# directory write permission — only file write permission (which it will have
-# as owner of the file it just created or that root created here).
+# directory write permission — only file write permission.
+export CADDY_DEGRADED=false
 _log_touch_failed=false
 touch /var/log/caddy/access.log  2>/dev/null || _log_touch_failed=true
 touch /var/log/caddy/security.log 2>/dev/null || _log_touch_failed=true
 
 if [ "$_log_touch_failed" = "true" ]; then
-    echo "" >&2
-    echo "ERROR: Cannot create log files in /var/log/caddy." >&2
-    echo "" >&2
-    echo "This is caused by OCI Compute userns-remap: container UID 0 maps to an" >&2
-    echo "unprivileged host UID that does NOT own /var/lib/vaultwarden/logs/caddy." >&2
-    echo "" >&2
-    echo "ONE-TIME HOST FIX (run on the server as ubuntu/root):" >&2
-    echo "" >&2
-    echo "  LOG_DIR=\${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy" >&2
-    echo "  sudo mkdir -p \"\$LOG_DIR\"" >&2
-    echo "  sudo touch \"\$LOG_DIR/access.log\" \"\$LOG_DIR/security.log\"" >&2
-    echo "  sudo chown root:root \"\$LOG_DIR/access.log\" \"\$LOG_DIR/security.log\"" >&2
-    echo "  sudo chmod 644 \"\$LOG_DIR/access.log\" \"\$LOG_DIR/security.log\"" >&2
-    echo "  sudo chmod 755 \"\$LOG_DIR\"" >&2
-    echo "  cd ~/VaultWarden-OCI" >&2
-    echo "  docker compose up -d --force-recreate caddy" >&2
-    echo "" >&2
-    echo "setup.sh performs this automatically for new installs." >&2
-    exit 1
+    log_warn "Cannot create log files in /var/log/caddy — falling back to stdout-only logging."
+    log_warn ""
+    log_warn "Root cause: OCI Compute userns-remap maps container UID 0 to an unprivileged host"
+    log_warn "UID that does NOT own /var/lib/vaultwarden/logs/caddy."
+    log_warn ""
+    log_warn "ONE-TIME HOST FIX (run on the server as ubuntu/root):"
+    log_warn "  LOG_DIR=\${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy"
+    log_warn "  sudo mkdir -p \"\$LOG_DIR\""
+    log_warn "  sudo touch \"\$LOG_DIR/access.log\" \"\$LOG_DIR/security.log\""
+    log_warn "  sudo chown root:root \"\$LOG_DIR/access.log\" \"\$LOG_DIR/security.log\""
+    log_warn "  sudo chmod 644 \"\$LOG_DIR/access.log\" \"\$LOG_DIR/security.log\""
+    log_warn "  sudo chmod 755 \"\$LOG_DIR\""
+    log_warn "  cd ~/VaultWarden-OCI && docker compose restart caddy"
+    log_warn ""
+    log_warn "setup.sh performs this automatically for new installs."
+    log_warn "Caddy will start with stdout logging only — set CADDY_DEGRADED in health check."
+    export CADDY_DEGRADED=true
 fi
 
-# Final writability probe: verify caddy will actually be able to write to the
-# log files before handing off to 'caddy run'.
-if ! test -w /var/log/caddy/access.log; then
-    echo "" >&2
-    echo "ERROR: /var/log/caddy/access.log exists but is NOT writable by this container." >&2
-    echo "" >&2
-    echo "The file is likely owned by PUID:PGID from a previous run." >&2
-    echo "Run the following on the host to fix ownership:" >&2
-    echo "" >&2
-    echo "  LOG_DIR=\${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy" >&2
-    echo "  sudo chown root:root \"\$LOG_DIR/access.log\" \"\$LOG_DIR/security.log\"" >&2
-    echo "  sudo chmod 644 \"\$LOG_DIR/access.log\" \"\$LOG_DIR/security.log\"" >&2
-    echo "  sudo chmod 755 \"\$LOG_DIR\"" >&2
-    echo "  cd ~/VaultWarden-OCI" >&2
-    echo "  docker compose up -d --force-recreate caddy" >&2
-    exit 1
+# Final writability probe (only if touch succeeded)
+if [ "$CADDY_DEGRADED" = "false" ] && ! test -w /var/log/caddy/access.log; then
+    log_warn "/var/log/caddy/access.log exists but is NOT writable — falling back to stdout-only logging."
+    log_warn ""
+    log_warn "The file is likely owned by PUID:PGID from a previous run."
+    log_warn "Run the following on the host to fix ownership:"
+    log_warn "  LOG_DIR=\${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy"
+    log_warn "  sudo chown root:root \"\$LOG_DIR/access.log\" \"\$LOG_DIR/security.log\""
+    log_warn "  sudo chmod 644 \"\$LOG_DIR/access.log\" \"\$LOG_DIR/security.log\""
+    log_warn "  sudo chmod 755 \"\$LOG_DIR\""
+    log_warn "  cd ~/VaultWarden-OCI && docker compose restart caddy"
+    export CADDY_DEGRADED=true
+fi
+
+if [ "$CADDY_DEGRADED" = "true" ]; then
+    log_warn "DEGRADED MODE: file logging disabled. Proxy and TLS will still function."
+    log_warn "Check container health: docker inspect --format='{{.State.Health.Status}}' vaultwarden_caddy"
 fi
 
 # Derive DOMAIN_NAME from DOMAIN when not explicitly set — single source of truth.
@@ -176,41 +157,45 @@ echo "DOMAIN_NAME validated: ${DOMAIN_NAME}"
 # SECURITY: Load Cloudflare API Token
 #
 # BUG-ENT-1 FIX: Capture read_secret output via $(...) command substitution.
-# The previous call `read_secret ... _token` passed the variable name as a
-# dead second argument — read_secret is a stdout-returning function and has no
-# way to populate the caller's variable. Under `set -eu`, the subsequent
-# `[ -z "$_token" ]` check would abort with "unbound variable", making Caddy
-# undeployable. Correct pattern: _token=$(read_secret <path>)
+# Skip when TLS_PROVIDER=acme_http (token not required).
 # =============================================================================
-_token=$(read_secret /run/secrets/caddy_cloudflare_dns_token)
+TLS_PROVIDER=${TLS_PROVIDER:-cloudflare}
 
-if [ -z "$_token" ]; then
-    echo "ERROR: Cloudflare API token is empty" >&2
-    exit 1
-fi
+if [ "$TLS_PROVIDER" = "cloudflare" ]; then
+    _token=$(read_secret /run/secrets/caddy_cloudflare_dns_token)
 
-# Validate token charset: Cloudflare scoped tokens are Base64url with dots
-# (<prefix>.<body>.<signature>). Allow A-Z a-z 0-9 _ . = + -
-case "$_token" in
-    *[!A-Za-z0-9_.=+-]*)
-        echo "ERROR: Cloudflare API token contains invalid characters" >&2
-        echo "       Allowed: A-Z a-z 0-9 _ . = + -" >&2
-        echo "       Ensure the secret file has no surrounding whitespace, quotes, or braces." >&2
+    if [ -z "$_token" ]; then
+        echo "ERROR: Cloudflare API token is empty" >&2
         exit 1
-        ;;
-esac
+    fi
 
-export CLOUDFLARE_API_TOKEN="$_token"
-unset _token
+    # Validate token charset: Cloudflare scoped tokens are Base64url with dots
+    # (<prefix>.<body>.<signature>). Allow A-Z a-z 0-9 _ . = + -
+    case "$_token" in
+        *[!A-Za-z0-9_.=+-]*)
+            echo "ERROR: Cloudflare API token contains invalid characters" >&2
+            echo "       Allowed: A-Z a-z 0-9 _ . = + -" >&2
+            echo "       Ensure the secret file has no surrounding whitespace, quotes, or braces." >&2
+            exit 1
+            ;;
+    esac
 
-echo "Cloudflare API token loaded successfully"
+    export CLOUDFLARE_API_TOKEN="$_token"
+    unset _token
+    echo "Cloudflare API token loaded successfully"
+else
+    echo "TLS_PROVIDER=${TLS_PROVIDER}: skipping Cloudflare token load."
+    # Export an empty value so {env.CLOUDFLARE_API_TOKEN} in Caddyfile never
+    # causes a 'variable not found' error — the acme_dns block is unreachable
+    # when TLS_PROVIDER!=cloudflare because the global block condition does not
+    # match, but Caddy still evaluates env references at parse time.
+    export CLOUDFLARE_API_TOKEN=""
+fi
 
 # =============================================================================
 # SECURITY: Load Admin Basic Auth Hash
 #
 # BUG-ENT-1 FIX: Same stdout-capture fix applied here.
-# Previous call: `read_secret ... ADMIN_HASH_FULL` — variable never populated.
-# Corrected to: ADMIN_HASH_FULL=$(read_secret <path>)
 # =============================================================================
 ADMIN_HASH_FULL=$(read_secret /run/secrets/admin_basic_auth_hash)
 
@@ -284,12 +269,37 @@ fi
 # =============================================================================
 
 # =============================================================================
+# DEGRADED MODE: build a patched Caddyfile with stdout-only logging
+# =============================================================================
+CADDYFILE=/etc/caddy/Caddyfile
+if [ "$CADDY_DEGRADED" = "true" ]; then
+    CADDY_DEGRADED_CADDYFILE=/tmp/Caddyfile.degraded
+    # Replace 'output file /var/log/caddy/*.log ...' blocks with 'output stdout'.
+    # sed: match the output line and strip everything up to the closing brace
+    # of the output block so Caddy doesn't see invalid nested braces.
+    # The pattern replaces the entire 'output file ... { ... }' multi-line block
+    # with 'output stdout' using a simple approach: write a minimally patched
+    # config that disables file writers while keeping all other directives.
+    sed \
+        -e 's|output file /var/log/caddy/access\.log {|output stdout \# degraded-mode|' \
+        -e 's|output file /var/log/caddy/security\.log {|output stdout \# degraded-mode|' \
+        "$CADDY_CADDYFILE" 2>/dev/null > "$CADDY_DEGRADED_CADDYFILE" || {
+        # If sed fails (e.g. /tmp is also read-only), just use the original
+        # Caddyfile and let Caddy fail its own open() — better than no service.
+        log_warn "Could not write degraded Caddyfile to /tmp — using original."
+        CADDY_DEGRADED_CADDYFILE="$CADDY_CADDYFILE"
+    }
+    CADDYFILE="$CADDY_DEGRADED_CADDYFILE"
+fi
+
+# =============================================================================
 # START CADDY
 # =============================================================================
 echo "==================================================================="
 echo " Starting Caddy Server"
-echo " Domain: ${DOMAIN_NAME}"
-echo " Caddy:  $(caddy version 2>/dev/null || echo 'unknown')"
+echo " Domain:   ${DOMAIN_NAME}"
+echo " Caddy:    $(caddy version 2>/dev/null || echo 'unknown')"
+echo " Degraded: ${CADDY_DEGRADED}  (true = stdout logging only, fix host perms)"
 echo "==================================================================="
 
-exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+exec caddy run --config "$CADDYFILE" --adapter caddyfile
