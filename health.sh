@@ -47,6 +47,11 @@ HEALTH_CONNECT_TIMEOUT=${HEALTH_CONNECT_TIMEOUT:-3}
 HEALTH_RETRIES=${HEALTH_RETRIES:-3}
 HEALTH_RETRY_DELAY=${HEALTH_RETRY_DELAY:-2}
 
+# When true, a non-200 response from /api/server-info is recorded as a hard
+# failure (exit 2) rather than a warning (exit 1). Set in .env or the
+# calling environment to opt in to stricter alerting.
+HEALTH_API_STRICT=${HEALTH_API_STRICT:-false}
+
 # Auto-fix configuration
 AUTO_FIX=${AUTO_FIX:-false}
 FIX_MAX_RESTARTS=${FIX_MAX_RESTARTS:-3}
@@ -116,7 +121,8 @@ Options:
 Checks performed:
   - Docker container status and health
   - SSL certificate validity and expiry
-  - VaultWarden API responsiveness
+  - VaultWarden /alive liveness probe (internal + external HTTPS)
+  - VaultWarden /api/server-info readiness probe (requires live DB connection)
   - Fail2Ban status and jail activity
   - Disk space utilization
   - Memory utilization
@@ -128,10 +134,13 @@ Checks performed:
 Comprehensive mode adds:
   - Detailed container resource usage
   - SSL certificate chain validation
-  - Extended API endpoint testing
+  - Extended /api/server-info endpoint testing (explicit comprehensive result)
   - Backup integrity verification
   - Fail2Ban rule validation
   - Fail2Ban filter regex drift detection (vaultwarden-auth against live log)
+
+Environment variables:
+  HEALTH_API_STRICT=true   Promote /api/server-info non-200 from warning to failure
 
 Exit codes:
   0 - All checks passed
@@ -299,11 +308,18 @@ _check_ssl() {
 # VAULTWARDEN API CHECKS
 # =============================================================================
 
-_check_vaultwarden_api() {
+# -----------------------------------------------------------------------------
+# _check_vaultwarden_alive
+#
+# Liveness probe: checks /alive (Rocket framework built-in).
+# Returns 200 as long as the process is running — does NOT require a live
+# DB connection. Used to detect process crashes or container restarts.
+# -----------------------------------------------------------------------------
+_check_vaultwarden_alive() {
     local domain
     domain="$(_get_domain)"
 
-    log_info "Checking VaultWarden API..."
+    log_info "Checking VaultWarden liveness (/alive)..."
 
     # Internal health check (direct to container).
     # --connect-timeout bounds TCP/TLS handshake separately from total transfer
@@ -342,18 +358,91 @@ _check_vaultwarden_api() {
             *) _warn "vaultwarden:external" "VaultWarden HTTPS returned HTTP $external_code" ;;
         esac
     fi
+}
 
-    # Comprehensive: test additional endpoints
-    if $COMPREHENSIVE && [[ -n "$domain" ]]; then
-        local api_code
-        api_code=$(timeout "$HEALTH_TIMEOUT" curl -so /dev/null \
+# -----------------------------------------------------------------------------
+# _check_vaultwarden_server_info
+#
+# Readiness probe: checks /api/server-info.
+# This endpoint exercises the database connection path; it will return a
+# non-200 code (or time out) if the DB is locked, the secrets mount has
+# failed, or the application is in a degraded state despite /alive returning
+# 200. Running this in the default (non-comprehensive) path ensures that the
+# systemd health timer catches real service outages, not just process crashes.
+#
+# Default behaviour: non-200 is recorded as a WARNING (exit 1) so a single
+# transient blip does not wake the operator at 3 AM. Set HEALTH_API_STRICT=true
+# in .env to promote non-200 to a hard FAILURE (exit 2).
+# -----------------------------------------------------------------------------
+_check_vaultwarden_server_info() {
+    local domain
+    domain="$(_get_domain)"
+
+    log_info "Checking VaultWarden readiness (/api/server-info)..."
+
+    # Internal readiness probe — direct to container, bypasses Caddy.
+    local internal_code
+    internal_code=$(timeout "$HEALTH_TIMEOUT" curl -so /dev/null \
+        --connect-timeout "$HEALTH_CONNECT_TIMEOUT" \
+        --max-time "$HEALTH_TIMEOUT" \
+        -w "%{http_code}" \
+        "http://127.0.0.1:80/api/server-info" 2>/dev/null || echo "000")
+
+    case "$internal_code" in
+        200)
+            _pass "vaultwarden:server-info" "VaultWarden /api/server-info responding (HTTP $internal_code)"
+            ;;
+        000)
+            # Connection refused or timeout — hard fail regardless of HEALTH_API_STRICT
+            _fail "vaultwarden:server-info" "VaultWarden /api/server-info not reachable internally (connection failed)"
+            ;;
+        *)
+            if [[ "${HEALTH_API_STRICT:-false}" == "true" ]]; then
+                _fail "vaultwarden:server-info" "VaultWarden /api/server-info returned HTTP ${internal_code} (HEALTH_API_STRICT=true)"
+            else
+                _warn "vaultwarden:server-info" "VaultWarden /api/server-info returned HTTP ${internal_code} (set HEALTH_API_STRICT=true to treat as failure)"
+            fi
+            ;;
+    esac
+
+    # External readiness probe (only when domain is configured)
+    if [[ -n "$domain" ]]; then
+        local external_code
+        external_code=$(timeout "$HEALTH_TIMEOUT" curl -so /dev/null \
             --connect-timeout "$HEALTH_CONNECT_TIMEOUT" \
             --max-time "$HEALTH_TIMEOUT" \
             -w "%{http_code}" \
             "https://${domain}/api/server-info" 2>/dev/null || echo "000")
-        case "$api_code" in
-            200) _pass "vaultwarden:api" "VaultWarden API endpoint responding (HTTP $api_code)" ;;
-            *) _warn "vaultwarden:api" "VaultWarden API returned HTTP $api_code" ;;
+
+        case "$external_code" in
+            200)
+                _pass "vaultwarden:server-info:external" "VaultWarden /api/server-info HTTPS responding (HTTP $external_code)"
+                ;;
+            000)
+                _fail "vaultwarden:server-info:external" "VaultWarden /api/server-info HTTPS not reachable (connection failed)"
+                ;;
+            *)
+                if [[ "${HEALTH_API_STRICT:-false}" == "true" ]]; then
+                    _fail "vaultwarden:server-info:external" "VaultWarden /api/server-info HTTPS returned HTTP ${external_code} (HEALTH_API_STRICT=true)"
+                else
+                    _warn "vaultwarden:server-info:external" "VaultWarden /api/server-info HTTPS returned HTTP ${external_code}"
+                fi
+                ;;
+        esac
+    fi
+
+    # Comprehensive: record an explicit named result for the extended path
+    # (keeps the --comprehensive output consistent with prior behaviour).
+    if $COMPREHENSIVE && [[ -n "$domain" ]]; then
+        local comp_code
+        comp_code=$(timeout "$HEALTH_TIMEOUT" curl -so /dev/null \
+            --connect-timeout "$HEALTH_CONNECT_TIMEOUT" \
+            --max-time "$HEALTH_TIMEOUT" \
+            -w "%{http_code}" \
+            "https://${domain}/api/server-info" 2>/dev/null || echo "000")
+        case "$comp_code" in
+            200) _pass "vaultwarden:api" "VaultWarden API endpoint responding (HTTP $comp_code)" ;;
+            *) _warn "vaultwarden:api" "VaultWarden API returned HTTP $comp_code" ;;
         esac
     fi
 }
@@ -801,7 +890,8 @@ main() {
     # Run all checks
     _check_containers
     _check_ssl
-    _check_vaultwarden_api
+    _check_vaultwarden_alive
+    _check_vaultwarden_server_info
     _check_fail2ban
     _check_disk
     _check_memory
