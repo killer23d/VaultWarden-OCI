@@ -29,7 +29,7 @@
 set -euo pipefail
 
 # ─── Colour helpers ──────────────────────────────────────────────────────────
-RED='\\033[0;31m'; YELLOW='\\033[1;33m'; GREEN='\\033[0;32m'; CYAN='\\033[0;36m'; RESET='\\033[0m'
+RED=$'\033[0;31m'; YELLOW=$'\033[1;33m'; GREEN=$'\033[0;32m'; CYAN=$'\033[0;36m'; RESET=$'\033[0m'
 info()    { echo -e "${YELLOW}[INFO]${RESET}  $*"; }
 success() { echo -e "${GREEN}[OK]${RESET}    $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${RESET}  $*"; }
@@ -40,18 +40,30 @@ die()     { echo -e "${RED}[ERROR]${RESET} $*" >&2; exit 1; }
 #                                  (CLI pre-check). A second interactive
 #                                  confirmation is still required at the point
 #                                  of destruction regardless of this flag.
+# --force                          Skip ALL AGE key checks (both prompts).
+#                                  Use only in CI/automation pipelines where
+#                                  the key is confirmed saved externally.
 I_HAVE_SAVED_RECOVERY_KIT=false
+FORCE=false
 for _arg in "$@"; do
     case "$_arg" in
         --i-have-saved-my-recovery-kit) I_HAVE_SAVED_RECOVERY_KIT=true ;;
+        --force) FORCE=true ;;
         --help)
-            echo "Usage: sudo bash $0 [--i-have-saved-my-recovery-kit]"
+            echo "Usage: sudo bash $0 [--i-have-saved-my-recovery-kit] [--force]"
             echo ""
             echo "  --i-have-saved-my-recovery-kit"
             echo "      Pre-confirm that you have saved secrets/keys/age-key.txt"
             echo "      to a location OUTSIDE this host before running."
             echo "      Without this flag the script refuses to continue when"
             echo "      the age key is present on disk."
+            echo ""
+            echo "  --force"
+            echo "      Skip ALL AGE key checks (both the CLI flag pre-check"
+            echo "      and the interactive fingerprint confirmation)."
+            echo "      WARNING: destructive — implies --i-have-saved-my-recovery-kit"
+            echo "      and bypasses the fingerprint gate. Use only in automated/CI"
+            echo "      pipelines where the key is confirmed saved by external means."
             echo ""
             echo "  Two-prompt safety model for age key destruction:"
             echo "    1. CLI flag  --i-have-saved-my-recovery-kit  (pre-check)."
@@ -109,6 +121,8 @@ echo ""
 #   Prompt 2 (just before Step 6): require operator to type back the exact
 #             Age public key fingerprint shown on screen — unconditional,
 #             fires even when the flag was passed.
+#
+# --force bypasses BOTH prompts. Use only in CI/automation.
 # ═══════════════════════════════════════════════════════════════
 AGE_KEY_FILE="${PROJECT_DIR}/secrets/keys/age-key.txt"
 
@@ -130,10 +144,10 @@ _extract_age_public_key() {
     printf '%s' "$pubkey"
 }
 
-if [[ -f "$AGE_KEY_FILE" ]]; then
+if [[ -f "$AGE_KEY_FILE" ]] && [[ "$FORCE" == "false" ]]; then
 
     # ── Prompt 1: CLI flag pre-check ─────────────────────────────────────
-    if [[ "$I_HAVE_SAVED_RECOVERY_KIT" == "false" ]]; then
+    if [[ "$I_HAVE_SAVED_RECOVERY_KIT" == "false" ]] && [[ "$FORCE" == "false" ]]; then
         echo ""
         echo "════════════════════════════════════════════════════════════"
         echo -e "${RED}  ⚠  ENCRYPTION KEY DESTRUCTION WARNING  ⚠${RESET}"
@@ -167,7 +181,11 @@ if [[ -f "$AGE_KEY_FILE" ]]; then
     warn "A second confirmation will be required immediately before key deletion."
 
 else
-    info "Age key not found at ${AGE_KEY_FILE} — no encryption-key guard needed."
+    if [[ "$FORCE" == "true" ]] && [[ -f "$AGE_KEY_FILE" ]]; then
+        warn "--force active — skipping ALL AGE key checks. Key WILL be deleted without confirmation."
+    else
+        info "Age key not found at ${AGE_KEY_FILE} — no encryption-key guard needed."
+    fi
 fi
 
 # ═══════════════════════════════════════════════════════════════
@@ -301,10 +319,12 @@ fi
 # technique used by AWS, GCP, and GitHub repository-delete dialogs.  It is
 # significantly harder to muscle-memory past than a bare yes/no, and it
 # proves the operator has the key in front of them.
+#
+# --force bypasses this gate entirely.
 # ═══════════════════════════════════════════════════════════════
 info "Step 6: Removing project directory ${PROJECT_DIR}..."
 
-if [[ -f "$AGE_KEY_FILE" ]]; then
+if [[ -f "$AGE_KEY_FILE" ]] && [[ "$FORCE" == "false" ]]; then
     # Re-extract the public key immediately before deletion so the operator
     # confirms the exact fingerprint of the key about to be destroyed.
     _AGE_PUBKEY_NOW=$(_extract_age_public_key "$AGE_KEY_FILE" 2>/dev/null || true)
