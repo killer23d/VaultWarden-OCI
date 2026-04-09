@@ -116,6 +116,19 @@ test-email: ## Send a test email notification
 up: ## Start all services with secrets initialization
 	$(call require-root)
 	@echo "$(BLUE)Starting VaultWarden services...$(NC)"
+# ── Pre-flight: refuse to start with the dev-only override present. ─────────
+# docker-compose.override.yml is the local-development override created by
+# copying docker-compose.override.dev.yml.example. Production hosts should not
+# carry it at all; if it is present, abort before docker compose implicitly
+# loads it and applies debug settings, relaxed hardening, or loopback-only
+# development port mappings.
+	@if [ -f "docker-compose.override.yml" ]; then \
+		echo "$(RED)ERROR: docker-compose.override.yml exists.$(NC)"; \
+		echo "$(RED)       This file is for local development only and must not$(NC)"; \
+		echo "$(RED)       be present on a production host. Remove it, then$(NC)"; \
+		echo "$(RED)       re-run: sudo make up$(NC)"; \
+		exit 1; \
+	fi
 	@if [ ! -f "secrets/secrets.yaml" ]; then \
 		echo "$(YELLOW)No secrets file found. Initializing...$(NC)"; \
 		./setup-secrets.sh; \
