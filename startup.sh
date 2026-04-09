@@ -70,6 +70,20 @@
 #                      operator warning. Fix: add a startup guard that inspects
 #                      the loaded environment after SOPS secrets are prepared and
 #                      emits loud warnings when these plaintext overrides are set.
+#
+# PATCHED BUGS (2026-04-08):
+#   STARTUP-10 [MEDIUM] run_health_check() treated exit 1 (warnings) and
+#                       exit 2 (critical failures) from health.sh identically —
+#                       both non-zero codes fell through to a single log_warn,
+#                       giving the operator a false green signal when the stack
+#                       was critically unhealthy. health.sh has always emitted
+#                       exit 0/1/2 correctly; the caller did not honour them.
+#                       Fix: capture the exit code explicitly and map:
+#                         exit 0 → log_success (all checks passed)
+#                         exit 1 → log_warn   (warnings present, startup continues)
+#                         exit 2 → log_error + exit 1 (critical failure, abort)
+#                       This matches the documented exit-code contract in
+#                       health.sh's --help output.
 
 set -euo pipefail
 
@@ -604,6 +618,16 @@ wait_for_services() {
 
 # ---------------------------------------------------------------------------
 # run_health_check
+#
+# STARTUP-10 FIX: honour health.sh's documented exit-code contract:
+#   exit 0  — all checks passed        → log_success, continue
+#   exit 1  — one or more warnings     → log_warn, continue (degraded but ok)
+#   exit 2  — one or more failures     → log_error, abort startup
+#   exit 3+ — health.sh itself crashed → log_error, abort startup
+#
+# We must NOT use `if ./health.sh; then` because that collapses all
+# non-zero codes to the same branch, hiding critical failures behind a
+# warning message and giving the operator a false green signal.
 # ---------------------------------------------------------------------------
 run_health_check() {
   if [[ "$SKIP_HEALTH_CHECK" == "true" ]]; then
@@ -617,11 +641,29 @@ run_health_check() {
   fi
 
   log_info "Running post-start health check..."
-  if ./health.sh; then
-    log_success "Health check passed"
-  else
-    log_warn "Health check reported issues"
-  fi
+
+  # Disable errexit around health.sh so we can capture its exit code cleanly.
+  # The outer set -euo pipefail would abort the script before we could inspect
+  # the code if health.sh exits non-zero.
+  local health_exit=0
+  ./health.sh || health_exit=$?
+
+  case "$health_exit" in
+    0)
+      log_success "Health check passed — all checks healthy"
+      ;;
+    1)
+      log_warn "Health check completed with warnings — review output above"
+      # Non-critical: startup continues, but operator should investigate
+      ;;
+    *)
+      # exit 2 = one or more critical failures; exit 3+ = health.sh crash
+      log_error "Health check reported CRITICAL failures (exit ${health_exit}) — stack is unhealthy"
+      log_error "Startup aborted. Investigate the failures above, then re-run ./startup.sh"
+      log_error "To skip this gate during recovery: ./startup.sh --skip-health"
+      return 1
+      ;;
+  esac
 
   return 0
 }
@@ -652,7 +694,7 @@ main() {
 
   if [[ "$BACKGROUND" != "true" ]]; then
     wait_for_services || true
-    run_health_check || true
+    run_health_check || exit 1
     show_status || true
   fi
 

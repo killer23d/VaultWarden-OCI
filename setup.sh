@@ -32,6 +32,7 @@ NON_INTERACTIVE=false
 SKIP_CHECKS=false
 SKIP_DNS_CHECK=false
 CLEAN_DOMAIN=""
+CHECK_OVERRIDE_ONLY=false
 
 show_help() {
     cat <<EOF
@@ -44,6 +45,7 @@ OPTIONS:
   --non-interactive     Skip all interactive prompts
   --skip-checks         Skip system requirement checks (also skips DNS check)
   --skip-dns-check      Skip DNS propagation check only (use in CI / local testing)
+  --check-override      Check docker-compose.override.yml for dangerous dev tags and exit
   --help                Show this help message
 
 EXAMPLE:
@@ -59,6 +61,7 @@ while [[ $# -gt 0 ]]; do
         --non-interactive) NON_INTERACTIVE=true; shift ;;
         --skip-checks) SKIP_CHECKS=true; SKIP_DNS_CHECK=true; shift ;;
         --skip-dns-check) SKIP_DNS_CHECK=true; shift ;;
+        --check-override) CHECK_OVERRIDE_ONLY=true; shift ;;
         --help|-h) show_help; exit 0 ;;
         *) echo "Unknown option: $1"; show_help; exit 1 ;;
     esac
@@ -92,6 +95,84 @@ validate_email() {
     [[ "$email" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]] || return 1
     return 0
 }
+
+# =============================================================================
+# OVERRIDE FILE SAFETY CHECK
+#
+# Warns loudly when docker-compose.override.yml is present in the project root
+# and contains an image tag that looks like a pre-release / dev build
+# (':testing', ':dev', ':nightly', ':edge', ':canary', ':beta', ':alpha').
+#
+# This is a safeguard against accidentally running unvetted image builds on a
+# production VaultWarden instance. The check is non-destructive: it only emits
+# warnings (or in non-interactive mode, exits non-zero) — it never modifies the
+# compose file.
+#
+# Called automatically during normal setup AND via --check-override for
+# standalone use in CI or pre-flight scripts.
+# =============================================================================
+
+check_override_for_testing_tags() {
+    local override_file="${SCRIPT_DIR}/docker-compose.override.yml"
+
+    if [[ ! -f "$override_file" ]]; then
+        # Nothing to check — this is the normal production state.
+        return 0
+    fi
+
+    log_info "Checking docker-compose.override.yml for pre-release image tags..."
+
+    # Patterns that indicate a non-stable image tag on any 'image:' line.
+    # Extended regex; matches tags like :testing, :dev, :nightly, :edge, etc.
+    local danger_pattern=':([Tt]esting|[Dd]ev|[Nn]ightly|[Ee]dge|[Cc]anary|[Bb]eta|[Aa]lpha)'
+    local matched_lines
+    matched_lines=$(grep -En "image:.*${danger_pattern}" "$override_file" 2>/dev/null || true)
+
+    if [[ -z "$matched_lines" ]]; then
+        log_success "docker-compose.override.yml: no pre-release image tags detected"
+        return 0
+    fi
+
+    printf "\n"
+    printf "${COLOR_RED}[ERROR]${COLOR_RESET} *** DANGEROUS OVERRIDE DETECTED ***\n"
+    printf "${COLOR_RED}[ERROR]${COLOR_RESET} docker-compose.override.yml contains pre-release image tags.\n"
+    printf "${COLOR_RED}[ERROR]${COLOR_RESET} Running unvetted dev/testing builds on a production password\n"
+    printf "${COLOR_RED}[ERROR]${COLOR_RESET} manager is a critical security risk.\n"
+    printf "\n"
+    printf "${COLOR_YELLOW}[WARN]${COLOR_RESET}  Offending lines:\n"
+    while IFS= read -r line; do
+        printf "${COLOR_YELLOW}[WARN]${COLOR_RESET}    %s\n" "$line"
+    done <<< "$matched_lines"
+    printf "\n"
+    printf "${COLOR_YELLOW}[WARN]${COLOR_RESET}  To fix:\n"
+    printf "${COLOR_YELLOW}[WARN]${COLOR_RESET}    1. Remove or rename docker-compose.override.yml (production should\n"
+    printf "${COLOR_YELLOW}[WARN]${COLOR_RESET}       not have an override file at all).\n"
+    printf "${COLOR_YELLOW}[WARN]${COLOR_RESET}    2. If you intended this for development, copy from:\n"
+    printf "${COLOR_YELLOW}[WARN]${COLOR_RESET}       docker-compose.override.dev.yml.example\n"
+    printf "${COLOR_YELLOW}[WARN]${COLOR_RESET}       and ensure ENVIRONMENT=development (not production) is set.\n"
+    printf "\n"
+
+    if [[ "$NON_INTERACTIVE" == "true" ]]; then
+        log_error "Pre-release image tags in override file detected in non-interactive mode. Aborting."
+        return 1
+    fi
+
+    local response=""
+    read -r -p "  Proceed anyway? This may expose production data to untested code. [y/N] " response
+    if [[ ! "$response" =~ ^[Yy]$ ]]; then
+        log_info "Aborted. Remove or correct docker-compose.override.yml before proceeding."
+        exit 0
+    fi
+
+    log_warn "Proceeding at operator request. Review override file before starting the stack."
+    printf "\n"
+}
+
+# Handle --check-override standalone mode (no --domain / --email required)
+if [[ "$CHECK_OVERRIDE_ONLY" == "true" ]]; then
+    check_override_for_testing_tags
+    exit $?
+fi
 
 # =============================================================================
 # VALIDATION
@@ -136,6 +217,11 @@ if [[ "$SKIP_CHECKS" == "false" ]]; then
 
     log_success "System requirements met"
 fi
+
+# Run override safety check early — before writing .env or touching state dirs.
+# An operator who accidentally copied the dev override file to production will
+# see the warning here, before any services start.
+check_override_for_testing_tags
 
 # =============================================================================
 # DNS PROPAGATION PRE-FLIGHT
