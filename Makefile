@@ -60,8 +60,6 @@ help: ## Show this help message
 ##@ Setup & Installation
 # ===========================================================================
 
-# FIX [P5-L1]: Inverted root check — sudo make setup (id -u == 0 + SUDO_USER)
-# works; direct root login (id -u == 0, no SUDO_USER) is rejected.
 setup: ## Run initial setup (requires sudo)
 	@echo "$(BLUE)Setting up VaultWarden-OCI...$(NC)"
 	@if [ "$$(id -u)" -eq 0 ] && [ -z "$$SUDO_USER" ]; then \
@@ -95,7 +93,6 @@ edit-secrets: ## Edit encrypted secrets file
 	@echo "$(BLUE)Opening secrets editor...$(NC)"
 	@./edit-secrets.sh
 
-# FIX [P5-M2]: propagate failure exit code so `make test` fails correctly.
 test-secrets: ## Test secrets decryption
 	@echo "$(BLUE)Testing secrets decryption...$(NC)"
 	@if ./edit-secrets.sh --list > /dev/null 2>&1; then \
