@@ -111,6 +111,20 @@
 #       blocks, so the sleep adds up to 5 s of latency for no benefit.
 #       The || true that previously swallowed the dd pipeline rc is removed;
 #       the -eq guard now serves as the explicit failure detector.
+#
+# PATCHED BUGS (2026-04-09):
+#   FIX-ENC-RT1 [HIGH]
+#       encrypt_sops_file(): sops --encrypt exits 0 but writes unreadable
+#       ciphertext when the Age public key in .sops.yaml is stale, rotated,
+#       or mismatched. The failure was previously not surfaced until 'make up'
+#       startup time, producing a cryptic SOPS decryption error rather than
+#       a clear error at secret-write time.
+#       Fix: after the atomic mv succeeds, immediately perform a sops -d
+#       round-trip validation. If decryption fails, the original file is
+#       restored from a pre-write backup (written before the mv with
+#       install -m 600), a clear diagnostic is emitted pointing at the Age
+#       key and .sops.yaml, and the function returns 1. The backup is cleaned
+#       up unconditionally on both success and failure paths.
 
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_CRYPTO_LIB_LOADED:-}" ]] && return 0
@@ -259,6 +273,20 @@ decrypt_sops_file() {
 #
 # BUG-CRY-ES2c FIX: Capture sops stderr and emit it via log_error on
 # failure instead of silently swallowing it with 2>/dev/null.
+#
+# FIX-ENC-RT1 FIX: After the atomic mv, perform a sops -d round-trip on the
+# live secrets file to verify the ciphertext is actually readable with the
+# current Age key. sops --encrypt exits 0 even when the recipient key in
+# .sops.yaml is stale or rotated; the resulting ciphertext is silently
+# unreadable and the failure only surfaces at 'make up' startup time.
+# Round-trip approach:
+#   1. Before mv, write a pre-write backup (install -m 600) of the original
+#      plaintext staging file.
+#   2. After mv succeeds, run `sops -d <live_file> > /dev/null`.
+#   3. On success: remove the backup, return 0.
+#   4. On failure: restore the original file from the backup, remove the
+#      backup, emit a clear diagnostic including the Age key path and
+#      .sops.yaml location, return 1.
 encrypt_sops_file() {
     local file="$1"
     local age_key_file="${2:-$DEFAULT_AGE_KEY_FILE}"
@@ -328,13 +356,94 @@ encrypt_sops_file() {
         return 1
     fi
 
-    # Atomic replace - original is only overwritten after successful encryption
+    # -----------------------------------------------------------------------
+    # FIX-ENC-RT1: Pre-write backup for round-trip restore path.
+    #
+    # Write a secure copy of the ORIGINAL (pre-encryption) plaintext staging
+    # file before we atomically replace it. This is the restore point used
+    # below if the round-trip decryption check fails, ensuring the caller
+    # can retry after fixing .sops.yaml or the Age key.
+    #
+    # The backup is intentionally a copy of $file (the plaintext staging
+    # file supplied by the caller, e.g. a mktemp produced by write_secrets()),
+    # NOT a copy of $tmp_file (the just-encrypted ciphertext). The plaintext
+    # staging file is transient and controlled by the caller; placing the
+    # backup next to it keeps cleanup straightforward.
+    # -----------------------------------------------------------------------
+    local pre_write_backup
+    pre_write_backup=$(mktemp "${file%.*}.pre-enc.XXXXXX") || {
+        # Backup creation failure is non-fatal for the encrypt path itself,
+        # but we must skip the round-trip check because we have no restore
+        # point. Log a warning and proceed without validation.
+        log_warn "encrypt_sops_file: could not create pre-write backup for round-trip check; skipping validation"
+        if ! mv -- "$tmp_file" "$file"; then
+            rm -f "$tmp_file"
+            log_error "Failed to atomically replace file after SOPS encryption: $file"
+            return 1
+        fi
+        return 0
+    }
+    install -m 600 /dev/null "$pre_write_backup"
+    cp -- "$file" "$pre_write_backup"
+
+    # Atomic replace — original is only overwritten after successful encryption.
     if ! mv -- "$tmp_file" "$file"; then
-        rm -f "$tmp_file"
+        rm -f "$tmp_file" "$pre_write_backup"
         log_error "Failed to atomically replace file after SOPS encryption: $file"
         return 1
     fi
 
+    # -----------------------------------------------------------------------
+    # FIX-ENC-RT1: Round-trip decryption validation.
+    #
+    # Verify the newly-written ciphertext is actually readable with the
+    # current Age key. sops --encrypt exits 0 even when the recipient key in
+    # .sops.yaml is stale or rotated; the round-trip catches this immediately
+    # instead of at 'make up' startup time.
+    #
+    # - Suppress xtrace so the Age key file path does not appear in bash -x
+    #   output (consistent with decrypt_secret() in lib/secrets.sh).
+    # - Discard decrypted output to /dev/null; we only need the exit code.
+    # - On failure: restore $file from $pre_write_backup and return 1.
+    # - Unconditionally remove $pre_write_backup on both paths.
+    # -----------------------------------------------------------------------
+    local rt_stderr
+    local rt_rc=0
+    { set +x; } 2>/dev/null
+    rt_stderr=$(SOPS_AGE_KEY_FILE="$age_key_file" \
+                sops --decrypt \
+                --input-type yaml \
+                --output-type yaml \
+                "$file" > /dev/null 2>&1) || rt_rc=$?
+
+    if [[ $rt_rc -ne 0 ]]; then
+        # Round-trip failed: restore the original plaintext file so the
+        # caller can retry after fixing the key / .sops.yaml, then abort.
+        log_error "encrypt_sops_file: SOPS round-trip validation FAILED for: $file"
+        log_error "  The ciphertext was written successfully but cannot be decrypted."
+        log_error "  This typically means the Age public key in .sops.yaml is stale,"
+        log_error "  rotated, or does not match the private key at: $age_key_file"
+        log_error "  Check: cat .sops.yaml   (confirm 'age:' recipient matches your key)"
+        log_error "  Check: age-keygen -y $age_key_file   (derive the current public key)"
+        if [[ -n "${rt_stderr:-}" ]]; then
+            log_error "  sops decrypt error: $rt_stderr"
+        fi
+        log_error "  Restoring original file from pre-write backup..."
+        if cp -- "$pre_write_backup" "$file"; then
+            log_info "  Original file restored successfully."
+        else
+            log_error "  CRITICAL: failed to restore original file from backup: $pre_write_backup"
+            log_error "  Manual recovery required. Backup is at: $pre_write_backup"
+            # Do NOT remove the backup if restore failed — it is the only copy.
+            return 1
+        fi
+        rm -f "$pre_write_backup"
+        return 1
+    fi
+
+    # Round-trip passed: clean up backup and return success.
+    rm -f "$pre_write_backup"
+    log_debug "encrypt_sops_file: round-trip validation passed for: $file"
     return 0
 }
 
