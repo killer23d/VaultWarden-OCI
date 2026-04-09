@@ -221,9 +221,13 @@ install_units() {
     # ------------------------------------------------------------------
     log_info "Setting up EnvironmentFile at $ENV_FILE ..."
     if [[ "$DRY_RUN" == "false" ]]; then
-        mkdir -p "$ENV_DIR"
-        chmod 700 "$ENV_DIR"
-        chown root:root "$ENV_DIR"
+        # FIX-ENV-DIR: use install -d to create the directory with the correct
+        # mode atomically. The previous mkdir -p + chmod 700 two-step had a
+        # TOCTOU race window between mkdir and chmod where a concurrent
+        # non-root process could list $ENV_DIR before permissions were
+        # restricted. install(1) creates the directory with the correct mode
+        # and ownership in a single syscall, eliminating the window.
+        install -d -m 700 -o root -g root "$ENV_DIR"
         if [[ ! -f "$ENV_FILE" ]]; then
             if [[ -f "$SCRIPT_DIR/.env" ]]; then
                 cp "$SCRIPT_DIR/.env" "$ENV_FILE"
