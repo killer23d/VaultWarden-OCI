@@ -14,6 +14,10 @@ OnFailure=vaultwarden-notify-failure@%n.service
 # Correct form: use a single explicit timestamp expression.
 OnCalendar=*-*-* 04:00:00
 Persistent=true
+# Ensure Docker is healthy before any boot-triggered catch-up fires.
+# Without this, Persistent=true causes an immediate activation on reboot
+# which may race against the Docker daemon still starting up.
+OnBootSec=2min
 # P2-H: RandomizedDelaySec spreads post-reboot catch-up burst.
 # SSD-M3-timer: db-backup fires at 04:00 (+0-60s jitter), maintenance at
 # 02:00 (+0-30s) — 2 h nominal gap prevents Sunday overlap without needing

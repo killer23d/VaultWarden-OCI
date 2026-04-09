@@ -13,6 +13,10 @@ OnFailure=vaultwarden-notify-failure@%n.service
 [Timer]
 OnCalendar=*:0/30
 Persistent=true
+# Ensure Docker is healthy before any boot-triggered catch-up fires.
+# Without this, Persistent=true causes an immediate activation on reboot
+# which may race against the Docker daemon still starting up.
+OnBootSec=2min
 # NEW-timer: Added RandomizedDelaySec to prevent a guaranteed immediate
 # zero-jitter fire at every boot. Without this, Persistent=true causes
 # the health check to fire instantly on boot with no spreading.

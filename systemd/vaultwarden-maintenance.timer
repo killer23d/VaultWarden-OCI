@@ -20,6 +20,10 @@ OnFailure=vaultwarden-notify-failure@%n.service
 # The existing Conflicts=vaultwarden-db-backup.service prevents overlap.
 OnCalendar=*-*-* 02:05:00
 Persistent=true
+# Ensure Docker is healthy before any boot-triggered catch-up fires.
+# Without this, Persistent=true causes an immediate activation on reboot
+# which may race against the Docker daemon still starting up.
+OnBootSec=2min
 # P2-H: RandomizedDelaySec spreads post-reboot catch-up burst.
 RandomizedDelaySec=30
 

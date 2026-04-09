@@ -17,6 +17,10 @@ OnCalendar=Sun *-*-* 03:00:00
 # activation, not every missed one). Ensure external monitoring or alerting
 # is in place so a multi-week outage does not silently lose backup coverage.
 Persistent=true
+# Ensure Docker is healthy before any boot-triggered catch-up fires.
+# Without this, Persistent=true causes an immediate activation on reboot
+# which may race against the Docker daemon still starting up.
+OnBootSec=2min
 # P2-H: Extended RandomizedDelaySec to 300 s (5 min) for the heaviest
 # job (full backup) to give maximum spread after an unclean reboot burst.
 RandomizedDelaySec=300
