@@ -892,12 +892,19 @@ main() {
         exit 1
     fi
 
-    # Safety net: ensure no SECRET_* vars leaked into the environment.
-    # _COLLECTED_SECRETS is already cleared inside write_secrets(), but sweep
-    # for any stragglers introduced by future changes.
-    while IFS= read -r var; do
-        unset "$var"
-    done < <(compgen -v SECRET_ 2>/dev/null || true)
+    # FIX (Issue 4): Scope the SECRET_* cleanup sweep to only the exact keys
+    # defined and used by this script. The previous compgen -v SECRET_ prefix
+    # sweep was overly broad and would unset any SECRET_* variable exported by
+    # a parent process (e.g. SECRET_KEY from a CI system), which is destructive
+    # in shared-host or CI environments.
+    for _cleanup_key in \
+        admin_token admin_basic_auth_hash \
+        caddy_cloudflare_dns_token fail2ban_cloudflare_firewall_token \
+        email_api_token smtp_password backup_passphrase \
+        push_installation_id push_installation_key; do
+        unset "SECRET_${_cleanup_key}" 2>/dev/null || true
+    done
+    unset _cleanup_key
 
     # Phase 1-B: Gate the entire completion output on QUIET_SUMMARY.
     #
