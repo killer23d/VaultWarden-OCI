@@ -21,9 +21,7 @@
 	# The caddy-cloudflare build includes this module; it is safe to declare
 	# unconditionally. Sites using acme_http override this per-site via the
 	# (tls_http) snippet which sets its own ACME issuer and disables dns.
-	tls {
-    dns cloudflare {env.CLOUDFLARE_API_TOKEN}
-	}
+	acme_dns cloudflare {env.CLOUDFLARE_API_TOKEN}
 
 	# Trust Cloudflare proxy IPs only when running behind Cloudflare.
 	# In acme_http mode the operator may use a different proxy or none at all.
