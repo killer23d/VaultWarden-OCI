@@ -727,6 +727,88 @@ collect_secrets() {
 }
 
 # ---------------------------------------------------------------------------
+# export_docker_secrets
+#
+# Decrypt every canonical key from the SOPS-encrypted secrets/secrets.yaml
+# and write a corresponding plain-text file under secrets/.docker_secrets/.
+# Each file is created with mode 600 (enforced by write_secret_file()) and
+# the directory is ensured at mode 700.
+#
+# This function must be called AFTER write_secrets() has moved the encrypted
+# file to its final location.  It is the authoritative step that satisfies
+# the `make up` pre-flight check:
+#   test -s secrets/.docker_secrets/admin_token
+#
+# Security properties:
+#   - SOPS env is set up and torn down within this function.
+#   - decrypt_secret() suppresses xtrace and unsets the value after printf.
+#   - write_secret_file() verifies non-empty write and sets chmod 600.
+#   - Plaintext local variables are unset immediately after the write call.
+# ---------------------------------------------------------------------------
+export_docker_secrets() {
+    local docker_secrets_dir="$PROJECT_ROOT/secrets/.docker_secrets"
+
+    log_info "Exporting decrypted secrets to Docker secrets directory..."
+
+    # Ensure the directory exists with tight permissions.
+    if ! mkdir -p "$docker_secrets_dir"; then
+        log_error "export_docker_secrets: failed to create $docker_secrets_dir"
+        return 1
+    fi
+    chmod 700 "$docker_secrets_dir"
+
+    if ! ensure_sops_env; then
+        log_error "export_docker_secrets: failed to set up SOPS environment"
+        return 1
+    fi
+
+    # Canonical list of keys that must have corresponding flat files.
+    # Keep in sync with validate_required_secrets() in lib/secrets.sh.
+    local -a _keys=(
+        admin_token
+        admin_basic_auth_hash
+        caddy_cloudflare_dns_token
+        fail2ban_cloudflare_firewall_token
+        email_api_token
+        smtp_password
+        backup_passphrase
+        push_installation_id
+        push_installation_key
+    )
+
+    local _failed=0
+    local _key _value
+
+    for _key in "${_keys[@]}"; do
+        # decrypt_secret() handles SOPS env, xtrace suppression, and stderr capture.
+        _value=$(decrypt_secret "$_key" "$SECRETS_FILE") || {
+            log_error "export_docker_secrets: failed to decrypt '$_key'"
+            _failed=$(( _failed + 1 ))
+            continue
+        }
+
+        if ! write_secret_file "${docker_secrets_dir}/${_key}" "$_value"; then
+            log_error "export_docker_secrets: failed to write ${docker_secrets_dir}/${_key}"
+            _failed=$(( _failed + 1 ))
+        fi
+
+        # Unset plaintext value immediately after the write.
+        unset _value
+    done
+    unset _key
+
+    cleanup_secrets_environment
+
+    if [[ $_failed -gt 0 ]]; then
+        log_error "export_docker_secrets: $_failed key(s) failed to export"
+        return 1
+    fi
+
+    log_success "Docker secrets exported to: $docker_secrets_dir"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # Write secrets (atomic)
 # ---------------------------------------------------------------------------
 write_secrets() {
@@ -825,11 +907,20 @@ write_secrets() {
 
     log_success "Secrets encrypted and written to: $SECRETS_FILE"
 
+    # Ensure the Docker secrets directory exists (may not yet exist on first run).
     local docker_secrets_dir="$PROJECT_ROOT/secrets/.docker_secrets"
     if [[ ! -d "$docker_secrets_dir" ]]; then
         mkdir -p "$docker_secrets_dir"
         chmod 700 "$docker_secrets_dir"
         log_info "Created Docker secrets directory: $docker_secrets_dir"
+    fi
+
+    # Export decrypted flat files so that `make up` pre-flight checks pass.
+    # This is the authoritative write of secrets/.docker_secrets/* and must
+    # run every time write_secrets() succeeds.
+    if ! export_docker_secrets; then
+        log_error "Failed to export Docker secret files — run ./setup-secrets.sh again"
+        return 1
     fi
 
     return 0
@@ -927,6 +1018,7 @@ main() {
         log_success "✅ Caddy admin hash in htpasswd format: admin:\$2y\$14\$..."
         log_success "✅ VaultWarden admin hash in Argon2id format"
         log_success "✅ All secrets protected with Age encryption"
+        log_success "✅ Docker secret files written to: secrets/.docker_secrets/"
         echo ""
         # Phase 2-C: Updated next-steps to reflect the new install order.
         # The user has already edited .env before running this script, so
