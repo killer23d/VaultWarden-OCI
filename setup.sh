@@ -504,6 +504,9 @@ create_env_file() {
     AWK_UID="$user_id" \
     AWK_GID="$group_id" \
     AWK_SMTP_FROM="noreply@$clean_domain" \
+    AWK_F2B_DEST_MAIL="$ADMIN_EMAIL" \
+    AWK_F2B_SENDER="fail2ban@$clean_domain" \
+    AWK_ALLOWED_SENDER_DOMAINS="$clean_domain" \
     AWK_SSH_LOG="$detected_ssh_log_path" \
     awk '
         {
@@ -512,6 +515,9 @@ create_env_file() {
             sub(/^PUID=.*/, "PUID=" ENVIRON["AWK_UID"]);
             sub(/^PGID=.*/, "PGID=" ENVIRON["AWK_GID"]);
             sub(/^SMTP_FROM=.*/, "SMTP_FROM=" ENVIRON["AWK_SMTP_FROM"]);
+            sub(/^F2B_DEST_MAIL=.*/, "F2B_DEST_MAIL=" ENVIRON["AWK_F2B_DEST_MAIL"]);
+            sub(/^F2B_SENDER=.*/, "F2B_SENDER=" ENVIRON["AWK_F2B_SENDER"]);
+            sub(/^ALLOWED_SENDER_DOMAINS=.*/, "ALLOWED_SENDER_DOMAINS=" ENVIRON["AWK_ALLOWED_SENDER_DOMAINS"]);
             sub(/^SSH_LOG_PATH=.*/, "SSH_LOG_PATH=" ENVIRON["AWK_SSH_LOG"]);
             print;
         }' "$env_file" > "$temp_env"
