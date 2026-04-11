@@ -893,8 +893,8 @@ generate_recovery_kit() {
     local domain="Not Configured"
     local admin_email="Not Configured"
     if [[ -f "$env_file" ]]; then
-        domain=$(grep "^DOMAIN=" "$env_file" | cut -d= -f2 || echo "Not Configured")
-        admin_email=$(grep "^ADMIN_EMAIL=" "$env_file" | cut -d= -f2 || echo "Not Configured")
+        domain=$(grep "^DOMAIN=" "$env_file" 2>/dev/null | cut -d= -f2 || echo "Not Configured")
+        admin_email=$(grep "^ADMIN_EMAIL=" "$env_file" 2>/dev/null | cut -d= -f2 || echo "Not Configured")
     fi
 
     local repo_clone_url

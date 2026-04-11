@@ -101,6 +101,18 @@
 #                       should pass --skip-pull; update.sh and manual
 #                       ./startup.sh (or ./startup.sh --force) remain the
 #                       intended pull path.
+#
+# PATCHED BUGS (2026-04-11):
+#   STARTUP-13 [HIGH]  prepare_docker_secrets(): Python heredoc was passed
+#                      "$secrets_file" (the SOPS-encrypted source) as sys.argv[1]
+#                      instead of "$cache_file" (the already-decrypted output
+#                      of `sops -d`). yaml.safe_load() parsed the ENC[AES256_GCM,…]
+#                      ciphertext strings from the encrypted file as plain YAML
+#                      string values and printed them verbatim. Every secret file
+#                      in secrets/.docker_secrets/ was written with raw SOPS
+#                      ciphertext instead of the decrypted token value.
+#                      Fix: pass "$cache_file" to the Python snippet so it reads
+#                      the plaintext YAML that sops -d already wrote.
 
 set -euo pipefail
 trap 'rc=$?; log_error "STARTUP FAILED at line ${LINENO} (exit ${rc}) — check journalctl -u vaultwarden-startup"; exit "$rc"' ERR
@@ -297,11 +309,35 @@ load_environment() {
   log_info "Loading environment configuration..."
 
   if [ -f ".env" ]; then
+    # Permission check: if .env is not readable by the current user, fail early
+    # with a clear, actionable error. This happens when setup.sh was run as root
+    # without SUDO_USER set (e.g. sudo make setup) and get_real_user() fell back
+    # to 'root', causing .env to be chowned root:root 600.
+    if [[ ! -r ".env" ]]; then
+      log_error ".env is not readable by the current user ($(id -un))."
+      log_error "Fix ownership: sudo chown $(id -un):$(id -gn) .env"
+      return 1
+    fi
     set -a
     # shellcheck disable=SC1091
     source ".env"
     set +a
     log_success "Environment loaded from .env"
+
+    # Warn if .env is root-owned while startup is running as a non-root user.
+    # startup.sh runs via `sudo ./startup.sh` so it CAN read root:root 600 .env,
+    # but non-root tools (edit-secrets.sh, etc.) will get Permission denied.
+    local env_owner
+    env_owner=$(stat -c '%U' ".env" 2>/dev/null || echo "unknown")
+    local real_user
+    real_user=$(id -un)
+    if [[ "$env_owner" == "root" && "$real_user" != "root" ]]; then
+      local real_group
+      real_group=$(id -gn "${real_user}" 2>/dev/null || echo "${real_user}")
+      log_warn ".env is owned by root but startup is running as ${real_user}."
+      log_warn "Non-root tools (edit-secrets.sh, etc.) cannot read .env."
+      log_warn "Fix: sudo chown ${real_user}:${real_group} .env"
+    fi
   else
     log_error ".env file not found!"
     log_info "Copy .env.example to .env and configure it first"
@@ -563,7 +599,7 @@ prepare_docker_secrets() {
       chmod 444 "$target_file"
     fi
   done < <(
-    python3 - "$secrets_file" <<'PY'
+    python3 - "$cache_file" <<'PY'
 import sys, yaml
 with open(sys.argv[1], 'r', encoding='utf-8') as f:
     data = yaml.safe_load(f) or {}
