@@ -131,13 +131,21 @@ trap perform_cleanup EXIT
 #
 # Read a single KEY from .env (or FILE) without sourcing the whole file.
 # Returns the value, or an empty string if the key is not found.
+#
+# FIX (Issue 1 / HIGH): Require at least one whitespace character before #
+# to distinguish inline comments from embedded # in values (e.g. p@ss#1).
+# Synced to the safe pattern already present in setup-secrets.sh.
 # ---------------------------------------------------------------------------
 _read_dotenv_value() {
     local key="$1"
     local file="${2:-.env}"
     [[ -f "$file" ]] || { echo ""; return 0; }
     local val
-    val=$(grep -E "^${key}=" "$file" | head -1 | sed "s/^${key}=//;s/#.*$//;s/[[:space:]]*$//")
+    # Strip inline comments (one-or-more whitespace then #) and trailing
+    # whitespace.  Requiring [[:space:]]\+ before # deliberately preserves
+    # passwords containing '#' (e.g. "p@ss#1") while correctly stripping
+    # "VALUE  # comment".
+    val=$(grep -E "^${key}=" "$file" | head -1 | sed "s/^${key}=//;s/[[:space:]]\+#.*$//;s/[[:space:]]*$//")
     echo "$val"
 }
 
@@ -385,6 +393,12 @@ create_backup() {
 
 # ---------------------------------------------------------------------------
 # --list mode: show key names only, no values
+#
+# FIX (Issue 4 / LOW): Fix EMAIL_PROVIDER fallback to cover both the error
+# case and the empty-value case.  The previous `|| echo smtp` fallback only
+# fired when _read_dotenv_value returned a non-zero exit code (i.e. on
+# error), not when the key existed but had a blank value.  Use a separate
+# variable with shell default expansion instead.
 # ---------------------------------------------------------------------------
 do_list_keys() {
     log_info "Secret key names in: $SECRETS_FILE"
@@ -398,8 +412,11 @@ do_list_keys() {
 
     while IFS= read -r key; do
         if [[ "$key" == "email_api_token" ]]; then
+            local _provider
+            _provider=$(_read_dotenv_value EMAIL_PROVIDER .env)
+            _provider="${_provider:-mailersend}"
             printf '  %s  (email provider API token — used by EMAIL_PROVIDER=%s)\n' \
-                "$key" "$(_read_dotenv_value EMAIL_PROVIDER .env || echo smtp)"
+                "$key" "$_provider"
         else
             printf '  %s\n' "$key"
         fi
@@ -517,6 +534,11 @@ _validate_editor_saved() {
 # Scans a decrypted YAML file for any values that start with PLACEHOLDER_
 # or equal PLACEHOLDER_NOT_CONFIGURED. Returns 1 (with a list of offending
 # keys) if any are found, so recovery kit export can be aborted.
+#
+# FIX (Issue 2 / MEDIUM): Replace yaml.safe_load() with the _NoDupLoader
+# already defined in _validate_yaml_no_duplicates so that a file with a
+# duplicate key cannot silently pass the placeholder check (safe_load hides
+# duplicates; _NoDupLoader raises ValueError on the first one found).
 # ---------------------------------------------------------------------------
 _validate_no_placeholders() {
     local plain_yaml="$1"
@@ -525,8 +547,29 @@ _validate_no_placeholders() {
     offending=$(python3 - "$plain_yaml" <<'PYEOF' 2>/dev/null
 import sys, yaml
 
+class _NoDupLoader(yaml.SafeLoader):
+    pass
+
+def _check_no_dup_mapping(loader, node):
+    keys_seen = {}
+    for key_node, _ in node.value:
+        key = loader.construct_object(key_node)
+        if key in keys_seen:
+            raise ValueError(
+                f"Duplicate mapping key '{key}' "
+                f"(first at line {keys_seen[key]}, "
+                f"again at line {key_node.start_mark.line + 1})"
+            )
+        keys_seen[key] = key_node.start_mark.line + 1
+    return loader.construct_mapping(node, deep=True)
+
+_NoDupLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _check_no_dup_mapping,
+)
+
 with open(sys.argv[1], 'r', encoding='utf-8') as f:
-    data = yaml.safe_load(f) or {}
+    data = yaml.load(f, Loader=_NoDupLoader) or {}
 
 bad = []
 for k, v in data.items():
@@ -596,6 +639,10 @@ _validate_rotate_field() {
 # files in secrets/.docker_secrets/ stay in sync after a rotation.
 #
 # FIX-ES4: Always use "email_api_token" as the key name — no provider derivation.
+#
+# FIX (Issue 6 / MEDIUM): Log a log_warn for each field skipped due to a
+# CHANGE_ME/NOT_USED/null placeholder so the admin can see exactly which
+# Docker secret files were not written and which rotations are still pending.
 _deploy_docker_secrets() {
     local docker_dir="$PROJECT_ROOT/secrets/.docker_secrets"
     local temp_plain
@@ -650,6 +697,9 @@ PY
         if [[ -n "$value" ]] && [[ "$value" != "CHANGE_ME"* ]] && [[ "$value" != "NOT_USED"* ]] && [[ "$value" != "null" ]]; then
             printf '%s' "$value" > "$docker_dir/$field_name"
             (( deployed++ ))
+        else
+            # FIX (Issue 6): Warn so the admin knows which files were not written.
+            log_warn "Docker secret '$field_name' skipped (still placeholder — rotate with: ./edit-secrets.sh --rotate $field_name)"
         fi
     done
     umask "$old_umask"
@@ -708,8 +758,15 @@ do_rotate() {
     # For all other fields, delegate to the canonical collect_secret_field().
     local new_value
     if [[ "$field" == "email_api_token" ]]; then
+        # FIX (Issue 5 / LOW): Read EMAIL_PROVIDER from .env rather than relying
+        # on the calling shell's environment.  An admin running the script in a
+        # clean shell would otherwise see the generic "email" fallback in the
+        # prompt instead of the actual configured provider name.
+        local _ep
+        _ep=$(_read_dotenv_value EMAIL_PROVIDER .env)
+        _ep="${_ep:-email}"
         local _raw_token
-        if ! read -r -s -t 120 -p "email_api_token (your ${EMAIL_PROVIDER:-email} API key): " _raw_token; then
+        if ! read -r -s -t 120 -p "email_api_token (${_ep} API key): " _raw_token; then
             log_error "No input received (120s timeout). Aborting."
             return 1
         fi
@@ -737,15 +794,32 @@ do_rotate() {
     # FIX [P3-H3]: use _secure_shred() for this plaintext patched temp file
     register_cleanup "_secure_shred" "$temp_patched"
 
+    # FIX (Issue 3 / MEDIUM): Replace yaml.safe_load + yaml.dump round-trip
+    # with a line-by-line regex substitution so YAML comments (inline field
+    # documentation added by setup-secrets.sh's write_secrets()) are preserved
+    # on every rotation.  yaml.dump() strips all comments on first write.
     python3 - "$temp_plain" "$actual_field" "$new_value" "$temp_patched" << 'PYEOF'
-import sys, yaml
+import sys, re
+
 src_file, field, new_value, dst_file = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-with open(src_file) as f:
-    data = yaml.safe_load(f)
-# For email_api_token the key may not exist yet (first time) — insert it.
-data[field] = new_value
-with open(dst_file, 'w') as f:
-    yaml.dump(data, f, default_flow_style=False, allow_unicode=True)
+
+with open(src_file, 'r', encoding='utf-8') as f:
+    content = f.read()
+
+# Replace the value for the given key while preserving all comments and
+# surrounding whitespace.  The pattern matches the key at the start of a
+# line followed by optional spaces/colon-space and the rest of the line.
+# Both bare values and YAML single-quoted scalars are replaced.
+pattern = r'^(' + re.escape(field) + r':\s*).*$'
+replacement = lambda m: m.group(1) + new_value
+new_content, n = re.subn(pattern, replacement, content, flags=re.MULTILINE)
+
+if n == 0:
+    # Key not yet present (e.g. first-time email_api_token insert) — append it.
+    new_content = content.rstrip('\n') + '\n' + field + ': ' + new_value + '\n'
+
+with open(dst_file, 'w', encoding='utf-8') as f:
+    f.write(new_content)
 PYEOF
 
     if [[ $? -ne 0 ]]; then
