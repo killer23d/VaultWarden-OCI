@@ -140,6 +140,9 @@ _read_dotenv_value() {
     local key="$1"
     local file="${2:-.env}"
     [[ -f "$file" ]] || { echo ""; return 0; }
+    # If the file is not readable (e.g. root:root 600 but we're non-root),
+    # return empty string silently rather than emitting a permission error.
+    [[ -r "$file" ]] || { echo ""; return 0; }
     local val
     # Strip inline comments (one-or-more whitespace then #) and trailing
     # whitespace.  Requiring [[:space:]]\+ before # deliberately preserves
