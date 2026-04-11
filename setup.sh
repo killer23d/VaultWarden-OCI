@@ -459,15 +459,16 @@ create_env_file() {
         grep -qF "ADMIN_EMAIL=$ADMIN_EMAIL" "$env_file" && email_matches=true
 
         if [[ "$USE_LATEST" == "true" ]]; then
-            # Latest mode: all version fields must already be 'latest'
+            # Latest mode: ALL version fields must already be 'latest'
             if grep -qE '^VAULTWARDEN_VERSION=latest' "$env_file" && \
                grep -qE '^CADDY_VERSION=latest'       "$env_file" && \
                grep -qE '^FAIL2BAN_VERSION=latest'    "$env_file" && \
-               grep -qE '^POSTFIX_VERSION=latest'     "$env_file"; then
+               grep -qE '^POSTFIX_VERSION=latest'     "$env_file" && \
+               grep -qE '^BUSYBOX_VERSION=latest'     "$env_file"; then
                 latest_matches=true
             fi
         else
-            if ! grep -qE '^(VAULTWARDEN|CADDY|FAIL2BAN|POSTFIX)_VERSION=latest' "$env_file"; then
+            if ! grep -qE '^(VAULTWARDEN|CADDY|FAIL2BAN|POSTFIX|BUSYBOX)_VERSION=latest' "$env_file"; then
                 latest_matches=true
             fi
         fi
@@ -524,6 +525,7 @@ create_env_file() {
             sub(/^CADDY_VERSION=.*/, "CADDY_VERSION=latest");
             sub(/^FAIL2BAN_VERSION=.*/, "FAIL2BAN_VERSION=latest");
             sub(/^POSTFIX_VERSION=.*/, "POSTFIX_VERSION=latest");
+            sub(/^BUSYBOX_VERSION=.*/, "BUSYBOX_VERSION=latest");
             print;
         }' "$env_file" > "$temp_env"
         mv "$temp_env" "$env_file" || return 1
