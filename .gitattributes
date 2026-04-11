@@ -8,11 +8,7 @@ Makefile linguist-language=Makefile
 *.yaml linguist-data
 *.txt linguist-documentation
 LICENSE linguist-documentation
-
-# BUG-EP1 FIX: Ensure all shell scripts are checked out with LF line endings
-# on every platform (prevents CRLF breaking the shebang line on Windows
-# clones that might then be copied to Linux hosts via rsync/scp).
-# Note: git does not track execute bits via .gitattributes; the +x bit on
-# caddy/entrypoint.sh is tracked in the git object store via
-# 'git update-index --chmod=+x' and persists across all clones.
 *.sh text eol=lf
+Makefile text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
