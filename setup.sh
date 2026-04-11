@@ -1076,6 +1076,12 @@ EOF
             "${COLOR_GREEN}" "${COLOR_RESET}" "${COLOR_RED}" "${COLOR_RESET}"
     fi
 
+    # Determine correct edit command based on actual .env ownership
+    local env_owner
+    env_owner=$(stat -c '%U' "$PROJECT_ROOT/.env" 2>/dev/null || echo "root")
+    local env_edit_cmd="nano .env"
+    [[ "$env_owner" == "root" ]] && env_edit_cmd="sudo nano .env"
+
     if [[ "$mode" == "auto" ]]; then
         printf '\n%s--- AUTO-GENERATED CREDENTIALS (scroll up to save plaintext passwords) ---%s\n' \
             "${COLOR_CYAN}" "${COLOR_RESET}"
@@ -1104,7 +1110,7 @@ EOF
             "${COLOR_YELLOW}" "${COLOR_RESET}"
 
         printf '\n%s--- NEXT STEPS ---%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
-        printf '1. Edit .env:           %snano .env%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
+        printf '1. Edit .env:           %s%s%s\n' "${COLOR_YELLOW}" "$env_edit_cmd" "${COLOR_RESET}"
         printf '   ► Set: CLOUDFLARE_ZONE_ID, SMTP_HOST, SMTP_PORT, SMTP_USERNAME\n'
         printf '   ► Verify: DOMAIN and ADMIN_EMAIL are correct\n'
         printf '2. Set external tokens: %s(use ./edit-secrets.sh --rotate commands above)%s\n' \
@@ -1122,7 +1128,7 @@ EOF
         printf '2. [ ] Admin Email:   %s%s%s\n' "${COLOR_GREEN}" "${ADMIN_EMAIL:-Not Set}" "${COLOR_RESET}"
 
         printf '\n%s--- NEXT STEPS ---%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
-        printf '1. Edit .env:           %snano .env%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
+        printf '1. Edit .env:           %s%s%s\n' "${COLOR_YELLOW}" "$env_edit_cmd" "${COLOR_RESET}"
         printf '   ► Set: CLOUDFLARE_ZONE_ID, SMTP_HOST, SMTP_PORT, SMTP_USERNAME\n'
         printf '   ► Verify: DOMAIN and ADMIN_EMAIL are correct\n'
         printf '2. Configure secrets:   %s./setup-secrets.sh%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"

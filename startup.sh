@@ -573,6 +573,29 @@ for k, v in data.items():
 PY
   )
 
+  # Sanity-check: if any secret file starts with "ENC[", SOPS decryption
+  # silently produced raw ciphertext — fail loudly before containers start.
+  local bad_secrets=()
+  local f _head
+  for f in "$secrets_dir"/*; do
+    [[ -f "$f" ]] || continue
+    if read -r -n 4 _head < "$f" 2>/dev/null && [[ "$_head" == "ENC[" ]]; then
+      bad_secrets+=("$(basename "$f")")
+    fi
+  done
+  if [[ ${#bad_secrets[@]} -gt 0 ]]; then
+    log_error "prepare_docker_secrets: secret file(s) contain raw SOPS ciphertext — decryption failed silently:"
+    local s
+    for s in "${bad_secrets[@]}"; do
+      log_error "  ${secrets_dir}/${s}"
+    done
+    log_error "Remediation:"
+    log_error "  1. Run: make key-health  (verify age key is present and readable)"
+    log_error "  2. Run: sudo rm -f ${secrets_dir}/*  (clear stale files)"
+    log_error "  3. Run: make up  (re-decrypt and restart)"
+    return 1
+  fi
+
   cleanup_secrets_environment || true
   _prepare_secrets_cleanup
   trap - EXIT
