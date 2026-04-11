@@ -1,5 +1,5 @@
 {
-	# Global ACME DNS configuration via Cloudflare
+	# Global options
 	# TLS_PROVIDER selects the certificate issuance method:
 	#
 	#   cloudflare  (default)
@@ -17,14 +17,7 @@
 	#
 	# Set in .env:  TLS_PROVIDER=cloudflare  (or acme_http)
 
-	# DNS-01 challenge via Cloudflare — always registered at the global level.
-	# The caddy-cloudflare build includes this module; it is safe to declare
-	# unconditionally. Sites using acme_http override this per-site via the
-	# (tls_http) snippet which sets its own ACME issuer and disables dns.
-	acme_dns cloudflare {env.CLOUDFLARE_API_TOKEN}
-
 	# Trust Cloudflare proxy IPs only when running behind Cloudflare.
-	# In acme_http mode the operator may use a different proxy or none at all.
 	servers {
 		trusted_proxies cloudflare
 		client_ip_headers Cf-Connecting-Ip
@@ -38,18 +31,7 @@
 	}
 
 	# ==========================================================================
-	# BUG-4b FIX: Global named log writers — single FileWriter per log file
-	#
-	# Pattern: site blocks name their logger with 'log <name>' (no output
-	# block). Global writers here use 'include http.log.access.<name>' to
-	# subscribe to that named logger's output and write it to a file.
-	#
-	# This is the officially documented pattern from caddyserver.com/docs/
-	# caddyfile/directives/log — the 'two files for one subdomain' example.
-	#
-	# Result: exactly 2 FileWriter open() calls at 'caddy run' startup,
-	# both after entrypoint.sh has already run 'mkdir -p /var/log/caddy'.
-	# Zero FileWriter calls during 'caddy validate' (already removed).
+	# Global named log writers — single FileWriter per log file
 	# ==========================================================================
 	log access_log {
 		include http.log.access.access
@@ -97,19 +79,23 @@
 #   import tls_{$TLS_PROVIDER:cloudflare}
 #
 # cloudflare — DNS-01 via Cloudflare API token (default).
-#   Requires CLOUDFLARE_API_TOKEN env var (loaded by entrypoint.sh).
+#   The dns.providers.cloudflare module is present in this build but
+#   acme_dns is NOT a supported global option. DNS-01 is configured
+#   per-site inside the tls directive here.
 # acme_http  — HTTP-01 via port 80. No DNS provider credential needed.
-#   Port 80 must be reachable from the ACME server (Let's Encrypt).
 
 (tls_cloudflare) {
-	# DNS-01 is already configured in the global block above;
-	# this snippet exists so the import directive below always resolves.
+	# DNS-01 challenge via Cloudflare API token.
+	# dns.providers.cloudflare is compiled into this build;
+	# the token is injected by entrypoint.sh as CLOUDFLARE_API_TOKEN.
+	tls {
+		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+	}
 }
 
 (tls_http) {
 	# Opt out of DNS-01 — use standard ACME HTTP-01 challenge.
 	# Caddy will listen on :80 for /.well-known/acme-challenge/ requests.
-	# The tls block here overrides the global acme_dns for this site only.
 	tls {
 		issuer acme {
 			dir https://acme-v02.api.letsencrypt.org/directory
@@ -121,14 +107,7 @@
 # ================================
 # Internal Health Check Endpoint
 # ================================
-# http:// prefix required — prevents Caddy attempting TLS for 127.0.0.1.
-# Without it Caddy treats this as a site block, tries OCSP stapling for
-# 127.0.0.1, and the container enters "unhealthy" state permanently.
-# Responds directly (no upstream proxy) — Caddy health is independent
-# of VaultWarden health; each service has its own healthcheck.
 http://127.0.0.1:8080 {
-	# C-05: Suppress health check log noise — output discard is a direct
-	# FileWriter that writes nowhere; it does not open any file on disk.
 	log {
 		output discard
 	}
@@ -139,16 +118,11 @@ http://127.0.0.1:8080 {
 # Main Site
 # ================================
 {$DOMAIN_NAME} {
-	# BUG-4b FIX: Name this site's logger 'access'. No output block here —
-	# the global 'access_log' writer above subscribes to
-	# 'http.log.access.access' and handles all file I/O.
 	log access
 
-	# Import the TLS snippet for the selected provider.
-	# TLS_PROVIDER defaults to 'cloudflare' (backward-compatible).
 	import tls_{$TLS_PROVIDER:cloudflare}
 
-	# 1. Enhanced Security Headers (HARDENED)
+	# 1. Enhanced Security Headers
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
 		X-Content-Type-Options "nosniff"
@@ -157,12 +131,8 @@ http://127.0.0.1:8080 {
 		Referrer-Policy "strict-origin-when-cross-origin"
 		Cross-Origin-Opener-Policy "same-origin"
 		Cross-Origin-Resource-Policy "same-origin"
-		# credentialless instead of require-corp — preserves Spectre isolation
-		# while allowing cross-origin no-credential fetches for WebAuthn/passkeys.
 		Cross-Origin-Embedder-Policy "credentialless"
 		X-DNS-Prefetch-Control "off"
-		# PUSH_CSP set by entrypoint.sh — empty string when PUSH_ENABLED!=true,
-		# Bitwarden push endpoints appended when true.
 		Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss://{$DOMAIN_NAME}{$PUSH_CSP}; frame-src 'self'; object-src 'none'; base-uri 'self';"
 		Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=(), usb=()"
 		X-Request-ID {uuid}
@@ -170,8 +140,6 @@ http://127.0.0.1:8080 {
 		-X-Powered-By
 	}
 
-	# 2a. Response compression (Caddy 2.x best practice — gzip + zstd)
-	# C-02: encode improves performance for all text/JSON responses from VaultWarden.
 	encode zstd gzip
 
 	# 2. Public Health Check
@@ -186,9 +154,7 @@ http://127.0.0.1:8080 {
 		}
 	}
 
-	# 3. WebSocket routing for notifications hub
-	# Port 3012 removed in VaultWarden >= 1.30.0.
-	# All WebSocket real-time sync goes through main HTTP port 80.
+	# 3. WebSocket routing
 	handle /notifications/hub {
 		reverse_proxy vaultwarden:80 {
 			header_up Host {host}
@@ -202,24 +168,8 @@ http://127.0.0.1:8080 {
 	}
 
 	# 4. Admin Panel Protection
-	# NOTE: 'unsafe-inline' required by VaultWarden admin UI inline
-	# <script> blocks. Risk accepted: admin panel is protected by
-	# basic_auth, IP allowlist, and Cloudflare WAF firewall rules.
-	# Admin requests appear in access.log with uri starting /admin —
-	# fail2ban vaultwarden-admin filter matches on that field.
 	@admin path /admin*
 	handle @admin {
-		# FIX-CF1: Reject any request that is NOT from the configured
-		# ADMIN_ALLOW_CIDR range(s) or loopback (127.0.0.1) before
-		# basic_auth is evaluated. The client IP is already the real
-		# visitor IP because 'trusted_proxies cloudflare' +
-		# 'client_ip_headers Cf-Connecting-Ip' resolve it in the
-		# global servers block above.
-		#
-		# ADMIN_ALLOW_CIDR is set in .env (default: 192.168.0.0/16).
-		# OCI VCNs typically use 10.0.0.0/8 — update .env accordingly.
-		# Multiple CIDRs are supported (space-separated in the env var):
-		#   ADMIN_ALLOW_CIDR=192.168.0.0/16 10.0.0.0/8
 		@admin_remote not remote_ip {$ADMIN_ALLOW_CIDR} 127.0.0.1
 		respond @admin_remote 403
 
@@ -227,7 +177,6 @@ http://127.0.0.1:8080 {
 			Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss://{$DOMAIN_NAME}{$PUSH_CSP}; frame-src 'self'; object-src 'none'; base-uri 'self';"
 		}
 
-		# C-04: Limit request body size for admin endpoint to prevent DoS
 		request_body {
 			max_size 2MB
 		}
@@ -248,7 +197,6 @@ http://127.0.0.1:8080 {
 	# 5. Auth Endpoints
 	@auth_endpoints path /api/accounts/prelogin* /identity/connect/token*
 	handle @auth_endpoints {
-		# C-04: Limit request body size on auth endpoints to prevent amplification
 		request_body {
 			max_size 512KB
 		}
@@ -278,11 +226,7 @@ http://127.0.0.1:8080 {
 # Redirect www -> apex
 # ================================
 www.{$DOMAIN_NAME} {
-	# BUG-4b FIX: Same named logger 'access' as main site — both hostnames
-	# are included by the global access_log writer via
-	# 'include http.log.access.access'. No file open happens here.
 	log access
-
 	redir https://{$DOMAIN_NAME}{uri} 301
 }
 
@@ -290,9 +234,6 @@ www.{$DOMAIN_NAME} {
 # Catch-all :80 and :443
 # ================================
 :80, :443 {
-	# BUG-4b FIX: Named logger 'security' — consumed by global security_log
-	# writer via 'include http.log.access.security'. No file open here.
 	log security
-
 	respond "Not Found" 404
 }
