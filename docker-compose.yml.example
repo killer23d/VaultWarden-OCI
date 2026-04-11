@@ -386,10 +386,8 @@ secrets:
     file: ./secrets/.docker_secrets/smtp_password
   push_installation_id:
     file: ./secrets/.docker_secrets/push_installation_id
-    required: false  # absent by default; Compose skips mount when PUSH_ENABLED=false
   push_installation_key:
     file: ./secrets/.docker_secrets/push_installation_key
-    required: false  # absent by default; Compose skips mount when PUSH_ENABLED=false
   caddy_cloudflare_dns_token:
     file: ./secrets/.docker_secrets/caddy_cloudflare_dns_token
   fail2ban_cloudflare_firewall_token:
