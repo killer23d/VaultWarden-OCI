@@ -283,7 +283,7 @@ if [ "$CADDY_DEGRADED" = "true" ]; then
     sed \
         -e 's|output file /var/log/caddy/access\.log {|output stdout \# degraded-mode|' \
         -e 's|output file /var/log/caddy/security\.log {|output stdout \# degraded-mode|' \
-        "$CADDY_CADDYFILE" 2>/dev/null > "$CADDY_DEGRADED_CADDYFILE" || {
+        "$CADDYFILE" 2>/dev/null > "$CADDY_DEGRADED_CADDYFILE" || {
         # If sed fails (e.g. /tmp is also read-only), just use the original
         # Caddyfile and let Caddy fail its own open() — better than no service.
         log_warn "Could not write degraded Caddyfile to /tmp — using original."
