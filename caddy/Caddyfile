@@ -12,19 +12,16 @@
 	#     HTTP-01 challenge via port 80 (no DNS provider needed).
 	#     Use this when migrating away from Cloudflare or when
 	#     the Cloudflare API token is unavailable.
-	#     Domain MUST resolve to this server’s public IP.
+	#     Domain MUST resolve to this server's public IP.
 	#     CLOUDFLARE_API_TOKEN is not required in this mode.
 	#
 	# Set in .env:  TLS_PROVIDER=cloudflare  (or acme_http)
 
-	# Only activate acme_dns when using the cloudflare provider.
-	# When TLS_PROVIDER is not set it defaults to cloudflare (backward-compat).
-	{$TLS_PROVIDER:cloudflare} cloudflare {
-		# This block is evaluated literally by Caddy only when the environment
-		# variable expands to the word "cloudflare" — otherwise it becomes a
-		# no-op site option that Caddy ignores gracefully.
-		acme_dns cloudflare {env.CLOUDFLARE_API_TOKEN}
-	}
+	# DNS-01 challenge via Cloudflare — always registered at the global level.
+	# The caddy-cloudflare build includes this module; it is safe to declare
+	# unconditionally. Sites using acme_http override this per-site via the
+	# (tls_http) snippet which sets its own ACME issuer and disables dns.
+	acme_dns cloudflare {env.CLOUDFLARE_API_TOKEN}
 
 	# Trust Cloudflare proxy IPs only when running behind Cloudflare.
 	# In acme_http mode the operator may use a different proxy or none at all.
@@ -102,7 +99,7 @@
 # cloudflare — DNS-01 via Cloudflare API token (default).
 #   Requires CLOUDFLARE_API_TOKEN env var (loaded by entrypoint.sh).
 # acme_http  — HTTP-01 via port 80. No DNS provider credential needed.
-#   Port 80 must be reachable from the ACME server (Let’s Encrypt).
+#   Port 80 must be reachable from the ACME server (Let's Encrypt).
 
 (tls_cloudflare) {
 	# DNS-01 is already configured in the global block above;
@@ -112,8 +109,12 @@
 (tls_http) {
 	# Opt out of DNS-01 — use standard ACME HTTP-01 challenge.
 	# Caddy will listen on :80 for /.well-known/acme-challenge/ requests.
+	# The tls block here overrides the global acme_dns for this site only.
 	tls {
-		ca https://acme-v02.api.letsencrypt.org/directory
+		issuer acme {
+			dir https://acme-v02.api.letsencrypt.org/directory
+			disable_http_challenge false
+		}
 	}
 }
 
