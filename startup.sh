@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 # startup.sh - VaultWarden startup script with secure secrets handling
 #
-# PATCHED BUGS (2026-03-06 through 2026-03-11): see lib/secrets.sh header
-#
 # PATCHED BUGS (2026-03-19):
 #   STARTUP-1 [LOW]    show_help(): cosmetic, no functional change.
 #   STARTUP-2 [HIGH]   prepare_docker_secrets(): '\\' (double-backslash) used
