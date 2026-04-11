@@ -404,7 +404,23 @@ setup_user_permissions() {
 
     local real_user; real_user=$(get_real_user)
     id "$real_user" >/dev/null 2>&1 || return 1
-    groups "$real_user" | grep -q docker || usermod -aG docker "$real_user" || return 1
+
+    # Ensure the docker group exists before attempting usermod.
+    # On OCI instances where Docker binaries are pre-installed but the daemon
+    # has never been started, the package postinst may not have created the
+    # group yet (or it was stripped from the base image). This is the
+    # post-install step recommended by https://docs.docker.com/engine/install/linux-postinstall/
+    if ! getent group docker >/dev/null 2>&1; then
+        log_info "'docker' group not found — creating it now"
+        groupadd --system docker || return 1
+        log_success "Created system group 'docker'"
+    fi
+
+    if ! groups "$real_user" | grep -q '\bdocker\b'; then
+        usermod -aG docker "$real_user" || return 1
+        log_success "Added ${real_user} to the 'docker' group"
+        log_info "Note: group membership takes effect on next login / new shell for ${real_user}"
+    fi
 
     find "$PROJECT_ROOT" -maxdepth 1 \
         ! -name 'secrets' \
