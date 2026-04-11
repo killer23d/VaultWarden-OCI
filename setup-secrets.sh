@@ -35,6 +35,14 @@ EXPORT_RECOVERY_KIT=false
 QUIET_SUMMARY=false
 
 # ---------------------------------------------------------------------------
+# FIX (Issue 3): Declare _COLLECTED_SECRETS at script top-level so its
+# lifecycle is controlled entirely by this script — not by function scope.
+# collect_secrets() populates it; write_secrets() reads and zeros it.
+# The EXIT trap below zeroes any remaining keys if the script aborts early.
+# ---------------------------------------------------------------------------
+declare -A _COLLECTED_SECRETS
+
+# ---------------------------------------------------------------------------
 # Cleanup
 # ---------------------------------------------------------------------------
 CLEANUP_ACTIONS=()
@@ -78,6 +86,13 @@ _run_cleanup_action() {
 }
 
 perform_cleanup() {
+    # FIX (Issue 3): Zero all collected secret values on any EXIT so plaintext
+    # secrets are not left live in the process if the script aborts early.
+    for key in "${!_COLLECTED_SECRETS[@]}"; do
+        _COLLECTED_SECRETS["$key"]=""
+    done
+    unset _COLLECTED_SECRETS 2>/dev/null || true
+
     for ((idx=${#CLEANUP_ACTIONS[@]}-1; idx>=0; idx--)); do
         _run_cleanup_action "${CLEANUP_ACTIONS[$idx]}"
     done
@@ -339,7 +354,10 @@ check_reconfiguration() {
 
     if [[ "$FORCE" == "true" ]]; then
         log_info "Force mode - reconfiguring secrets"
-        create_secrets_backup
+        # FIX (Issue 6): Do not write a backup when --dry-run is also active.
+        # An admin running --dry-run --force expects a preview only; writing a
+        # real backup file is a side-effect they do not expect.
+        [[ "$DRY_RUN" != "true" ]] && create_secrets_backup
         return 0
     fi
 
@@ -373,6 +391,15 @@ check_reconfiguration() {
 ensure_argon2_available() {
     if check_argon2_support >/dev/null 2>&1; then return 0; fi
 
+    # FIX (Issue 2): Gate on an import check first so we skip the pip install
+    # entirely when argon2-cffi is already installed under a different path
+    # (e.g. system package).  Only proceed to install if the module is genuinely
+    # absent.  Use a pinned version range to prevent silent breaking upgrades and
+    # add a PEP 668 (externally-managed-environment) fallback via --user.
+    if python3 -c "import argon2" 2>/dev/null; then
+        return 0
+    fi
+
     log_warn "Argon2 not detected"
 
     if [[ "$AUTO_MODE" != "true" ]]; then
@@ -384,7 +411,12 @@ ensure_argon2_available() {
             install_it="no"
         fi
         if [[ "$install_it" == "yes" ]]; then
-            pip3 install argon2-cffi && return 0
+            # FIX (Issue 2): Pinned version range prevents silent breaking upgrades.
+            # PEP 668 fallback: if the system Python is externally managed, try --user.
+            if pip3 install --quiet "argon2-cffi>=21.3,<24" 2>/dev/null || \
+               python3 -m pip install --quiet --user "argon2-cffi>=21.3,<24" 2>/dev/null; then
+                return 0
+            fi
         fi
     fi
 
@@ -460,10 +492,8 @@ _read_dotenv_value() {
 #   the token value in secrets.yaml does not need re-keying.
 # ---------------------------------------------------------------------------
 collect_secrets() {
-    # Declare SECRETS as a local associative array.  No values are exported to
-    # the environment during collection; write_secrets() receives them via the
-    # nameref / indirect mechanism below.
-    declare -gA _COLLECTED_SECRETS
+    # _COLLECTED_SECRETS is declared at script top-level (see top of file).
+    # Populate it here; write_secrets() reads and zeroes it.
 
     # Helper: call the right lib function based on AUTO_MODE
     _get_field() {
@@ -769,6 +799,8 @@ write_secrets() {
         _COLLECTED_SECRETS["$key"]=""
     done
     unset _COLLECTED_SECRETS
+    # Re-declare as empty so the EXIT trap does not error on an unbound variable.
+    declare -A _COLLECTED_SECRETS
 
     if ! ensure_sops_env; then
         log_error "Failed to setup SOPS environment"
@@ -817,6 +849,18 @@ main() {
     if ! require_commands sops age python3 jq htpasswd; then
         log_error "Missing required commands"
         log_info "Install htpasswd with: sudo apt-get install apache2-utils"
+        exit 1
+    fi
+
+    # FIX (Issue 5): Verify that the installed htpasswd binary supports bcrypt
+    # (-B flag).  Some minimal apache2-utils builds ship without bcrypt support;
+    # the failure would otherwise surface deep inside lib/secrets.sh with an
+    # opaque error.  Run a quick smoke-test here and exit early with a clear
+    # install hint if bcrypt is unavailable.
+    if ! htpasswd -nbB _test_ _test123_ &>/dev/null; then
+        log_error "htpasswd on this system does not support bcrypt (-B flag)"
+        log_error "This is required for Caddy admin basic-auth hashing."
+        log_info  "Fix: sudo apt-get install --reinstall apache2-utils"
         exit 1
     fi
 
