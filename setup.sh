@@ -537,6 +537,15 @@ create_env_file() {
         mv "$temp_env" "$env_file" || return 1
     fi
 
+    # Ensure the canonical production Age key path is written to .env so the
+    # verification in generate_age_keys() always succeeds on a clean install.
+    temp_env=$(mktemp -p "$(dirname "$env_file")" .env.tmp.XXXXXXXXXX) || return 1
+    awk '{
+        sub(/^SOPS_AGE_KEY_FILE=.*/, "SOPS_AGE_KEY_FILE=/etc/vaultwarden/age-key.txt");
+        print;
+    }' "$env_file" > "$temp_env"
+    mv "$temp_env" "$env_file" || return 1
+
     chown "$real_user:$(id -g -n "$real_user")" "$env_file" || return 1
     chmod 600 "$env_file" || return 1
     return 0
@@ -700,6 +709,63 @@ generate_age_keys() {
         log_error "Check disk space, filesystem errors, or re-run setup."
         return 1
     fi
+
+    # ── Canonical production install ─────────────────────────────────────────
+    # Install the key to the canonical root-owned path outside the repo tree.
+    # Guard: if the canonical key already exists and FORCE != true, verify it
+    # with check_age_key and skip re-install if healthy.
+    local canonical_key="/etc/vaultwarden/age-key.txt"
+    local do_install=true
+    if [[ -f "$canonical_key" ]] && [[ "$FORCE" != "true" ]]; then
+        if check_age_key "$canonical_key" 2>/dev/null; then
+            log_info "Canonical Age key already present and healthy: $canonical_key"
+            do_install=false
+        else
+            log_warn "Canonical Age key exists but is invalid — reinstalling: $canonical_key"
+        fi
+    fi
+
+    if [[ "$do_install" == "true" ]]; then
+        install -d -m 700 /etc/vaultwarden || {
+            log_error "Failed to create /etc/vaultwarden directory."
+            return 1
+        }
+        install -m 600 "$age_key_file" "$canonical_key" || {
+            log_error "Failed to install Age key to $canonical_key."
+            return 1
+        }
+        chown root:root /etc/vaultwarden "$canonical_key" || {
+            log_error "Failed to set ownership on $canonical_key."
+            return 1
+        }
+        log_success "Age key installed: $canonical_key (mode 600, root:root)"
+    fi
+
+    # ── Update .env atomically to the canonical path ─────────────────────────
+    local env_file="$PROJECT_ROOT/.env"
+    if [[ -f "$env_file" ]]; then
+        local temp_env
+        temp_env=$(mktemp -p "$(dirname "$env_file")" .env.tmp.XXXXXXXXXX) || return 1
+        awk '{
+            sub(/^SOPS_AGE_KEY_FILE=.*/, "SOPS_AGE_KEY_FILE=/etc/vaultwarden/age-key.txt");
+            print;
+        }' "$env_file" > "$temp_env"
+        mv "$temp_env" "$env_file" || { rm -f "$temp_env"; return 1; }
+        log_success "SOPS_AGE_KEY_FILE updated to $canonical_key in .env"
+    fi
+
+    # ── Verify .env now points to the canonical path ─────────────────────────
+    local configured_path
+    configured_path=$(grep '^SOPS_AGE_KEY_FILE=' "${env_file:-$PROJECT_ROOT/.env}" 2>/dev/null | cut -d= -f2)
+    if [[ "$configured_path" != "$canonical_key" ]]; then
+        log_error "After installation, .env SOPS_AGE_KEY_FILE still points to: ${configured_path:-<unset>}"
+        log_error "Expected: $canonical_key"
+        log_error "Update .env manually: SOPS_AGE_KEY_FILE=$canonical_key"
+        return 1
+    fi
+
+    log_info "Production key: $canonical_key"
+    log_info "Repo-local copy retained for local/dev use: $age_key_file"
 
     return 0
 }
@@ -999,10 +1065,14 @@ EOF
         local age_key_content
         age_key_content=$(cat "secrets/keys/age-key.txt" 2>/dev/null || echo "ERROR: Could not read key file")
         printf 'SOPS Age Public Key:  %s%s%s\n' "${COLOR_GREEN}" "${age_pub_key}" "${COLOR_RESET}"
-        printf '\n%sSECRET KEY (BACKUP THIS FILE! - secrets/keys/age-key.txt):%s\n' "${COLOR_RED}" "${COLOR_RESET}"
+        printf '\n%sSECRET KEY (BACKUP THIS FILE!):%s\n' "${COLOR_RED}" "${COLOR_RESET}"
+        printf '%sSECRET KEY (production): %s/etc/vaultwarden/age-key.txt%s\n' "${COLOR_RED}" "${COLOR_GREEN}" "${COLOR_RESET}"
+        printf '%sSECRET KEY (repo-local): %ssecrets/keys/age-key.txt%s\n' "${COLOR_RED}" "${COLOR_GREEN}" "${COLOR_RESET}"
         printf '%s%s%s\n' "${COLOR_GREEN}" "${age_key_content}" "${COLOR_RESET}"
         printf '\n%sTo view again at any time:%s\n' "${COLOR_RED}" "${COLOR_RESET}"
-        printf '  %scat secrets/keys/age-key.txt%s  %s(BACKUP THIS FILE!)%s\n' \
+        printf '  %ssudo cat /etc/vaultwarden/age-key.txt%s  %s(production — root-owned, mode 600)%s\n' \
+            "${COLOR_GREEN}" "${COLOR_RESET}" "${COLOR_RED}" "${COLOR_RESET}"
+        printf '  %scat secrets/keys/age-key.txt%s  %s(repo-local copy — intentional for local dev only)%s\n' \
             "${COLOR_GREEN}" "${COLOR_RESET}" "${COLOR_RED}" "${COLOR_RESET}"
     fi
 

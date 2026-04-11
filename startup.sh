@@ -433,14 +433,79 @@ prepare_log_directories() {
 # "Failed to decrypt secrets file" from sops.
 # ---------------------------------------------------------------------------
 check_age_key_health_preflight() {
-  local age_key="${SOPS_AGE_KEY_FILE:-${HOME:-/root}/.config/sops/age/keys.txt}"
+  # Resolve the configured key path from .env (already sourced by load_environment)
+  local configured_key="${SOPS_AGE_KEY_FILE:-}"
 
-  if ! check_age_key_health "$age_key"; then
-    log_error "Age key health check failed: $age_key"
+  # If SOPS_AGE_KEY_FILE is empty, fall back to the SOPS default
+  if [[ -z "$configured_key" ]]; then
+    configured_key="${HOME:-/root}/.config/sops/age/keys.txt"
+  fi
+
+  # Fast path: configured key exists and is healthy — proceed
+  if check_age_key_health "$configured_key" 2>/dev/null; then
+    return 0
+  fi
+
+  # Configured key is missing or unhealthy. Collect diagnostic context.
+  local repo_local_key="${SCRIPT_DIR}/secrets/keys/age-key.txt"
+  local canonical_key="/etc/vaultwarden/age-key.txt"
+
+  log_error "Age key health check FAILED for configured path: ${configured_key}"
+  log_error ""
+  log_error "SOPS cannot decrypt secrets without a valid Age private key."
+  log_error ""
+
+  # Case 1: configured path IS the canonical path — just report it missing.
+  if [[ "$configured_key" == "$canonical_key" ]]; then
+    log_error "Remediation:"
+    log_error "  The canonical key file does not exist or is not readable."
+    log_error "  Re-run setup to install it:"
+    log_error "    sudo ./setup.sh --domain <your-domain> --email <your-email>"
+    if [[ -f "$repo_local_key" ]]; then
+      log_error ""
+      log_warn "  A repo-local key was detected at: ${repo_local_key}"
+      log_warn "  If this is the correct production key, install it with:"
+      log_warn "    sudo install -d -m 700 /etc/vaultwarden"
+      log_warn "    sudo install -m 600 ${repo_local_key} /etc/vaultwarden/age-key.txt"
+      log_warn "    sudo chown root:root /etc/vaultwarden /etc/vaultwarden/age-key.txt"
+      log_warn "  Then run: make key-health to verify before retrying startup."
+    fi
     return 1
   fi
 
-  return 0
+  # Case 2: configured path is NOT canonical — check whether the canonical path
+  # exists so the operator understands the full picture.
+  log_error "  Configured key path (from .env):  ${configured_key}"
+  log_error "  Canonical production path:         ${canonical_key}"
+  log_error ""
+
+  if [[ -f "$canonical_key" ]]; then
+    log_warn "  A key exists at the canonical production path (${canonical_key})."
+    log_warn "  .env currently points elsewhere. To fix:"
+    log_warn "    1. Update SOPS_AGE_KEY_FILE in .env to: ${canonical_key}"
+    log_warn "    2. Verify with: make key-health"
+    log_warn "    3. Retry: make up  (or ./startup.sh)"
+  elif [[ -f "$repo_local_key" ]]; then
+    log_warn "  A repo-local key was detected at: ${repo_local_key}"
+    log_warn "  This is NOT auto-loaded in production. Remediation options:"
+    log_warn ""
+    log_warn "  Option A — Production: install key to canonical path and update .env:"
+    log_warn "    sudo install -d -m 700 /etc/vaultwarden"
+    log_warn "    sudo install -m 600 ${repo_local_key} /etc/vaultwarden/age-key.txt"
+    log_warn "    sudo chown root:root /etc/vaultwarden /etc/vaultwarden/age-key.txt"
+    log_warn "    # Then set SOPS_AGE_KEY_FILE=${canonical_key} in .env"
+    log_warn "    make key-health && make up"
+    log_warn ""
+    log_warn "  Option B — Local/dev only: update .env to point at the repo-local key:"
+    log_warn "    # Set SOPS_AGE_KEY_FILE=${repo_local_key} in .env"
+    log_warn "    make key-health && make up"
+  else
+    log_error "  No key was found at either path. Run: sudo make setup"
+  fi
+
+  log_error ""
+  log_error "Run 'make key-health' for a detailed key status report."
+  return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -738,7 +803,11 @@ main() {
 
   if [[ "$BACKGROUND" != "true" ]]; then
     wait_for_services || true
-    run_health_check || exit 1
+    run_health_check || {
+      log_error "Startup tip: if the failure is key-related, run: make key-health"
+      log_error "Canonical production key path: /etc/vaultwarden/age-key.txt"
+      exit 1
+    }
     show_status || true
   fi
 
