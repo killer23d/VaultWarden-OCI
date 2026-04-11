@@ -1052,7 +1052,7 @@ EOF
 main() {
     log_header "VaultWarden-OCI Setup - Security Hardened Edition"
     if ! is_root; then log_error "Must run as root."; exit 1; fi
-    
+
     local SETUP_LOCK_FILE="/run/lock/vaultwarden-setup.lock"
     # BUG-#21 FIX: Use automatic FD allocation instead of hardcoded FD 202.
     # BUG-#21-B FIX: /run/lock is the FHS-correct transient lock location; /var/lock
