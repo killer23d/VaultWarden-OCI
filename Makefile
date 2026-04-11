@@ -3,8 +3,10 @@
 # ===========================================================================
 # Usage:
 #   sudo make setup          — First-time installation
-#   make up                  — Start services
+#   make up                  — Start services  (no sudo needed; user must be
+#                              in the `docker` group: sudo usermod -aG docker $USER)
 #   make down                — Stop services
+#   make restart             — Restart services
 #   make status              — Show service status
 #   make logs                — Follow service logs
 #   make help                — Show this help
@@ -35,9 +37,26 @@ BACKUP_FILE ?=
         uninstall
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
+# require-root: used only for targets that genuinely need elevated privileges
+# (setup, backup, restore, key operations, maintenance, systemd, uninstall).
+# Service management targets (up, down, restart) do NOT use this — they rely
+# on the user being in the `docker` group instead.
 define require-root
 	@if [ "$$(id -u)" -ne 0 ]; then \
 		echo "$(RED)Error: Run with sudo: sudo make $@$(NC)"; \
+		exit 1; \
+	fi
+endef
+
+# check-docker: lightweight guard used by `up`.  Verifies the Docker daemon
+# is reachable without requiring root.  If it fails, the user most likely
+# needs to be added to the `docker` group.
+define check-docker
+	@if ! docker info > /dev/null 2>&1; then \
+		echo "$(RED)Error: Cannot connect to the Docker daemon.$(NC)"; \
+		echo "$(RED)       Either Docker is not running, or your user is not in the docker group.$(NC)"; \
+		echo "$(YELLOW)       Fix: sudo usermod -aG docker $$USER  then log out and back in.$(NC)"; \
+		echo "$(YELLOW)       Or start Docker: sudo systemctl start docker$(NC)"; \
 		exit 1; \
 	fi
 endef
@@ -110,8 +129,13 @@ test-email: ## Send a test email notification
 ##@ Service Management
 # ===========================================================================
 
+# up / down / restart do NOT require root.  The invoking user must be a
+# member of the `docker` group.  If they are not, `check-docker` (above)
+# prints a clear fix command.  This matches standard Docker deployment
+# practice and avoids running compose as root unnecessarily.
+
 up: ## Start all services with secrets initialization
-	$(call require-root)
+	$(call check-docker)
 	@echo "$(BLUE)Starting VaultWarden services...$(NC)"
 # ── Pre-flight: refuse to start with the dev-only override present. ─────────
 # docker-compose.override.yml is the local-development override created by
@@ -123,7 +147,7 @@ up: ## Start all services with secrets initialization
 		echo "$(RED)ERROR: docker-compose.override.yml exists.$(NC)"; \
 		echo "$(RED)       This file is for local development only and must not$(NC)"; \
 		echo "$(RED)       be present on a production host. Remove it, then$(NC)"; \
-		echo "$(RED)       re-run: sudo make up$(NC)"; \
+		echo "$(RED)       re-run: make up$(NC)"; \
 		exit 1; \
 	fi
 	@if [ ! -f "secrets/secrets.yaml" ]; then \
@@ -145,13 +169,11 @@ up: ## Start all services with secrets initialization
 	@echo "$(GREEN)Services started successfully!$(NC)"
 
 down: ## Stop all services
-	$(call require-root)
 	@echo "$(BLUE)Stopping VaultWarden services...$(NC)"
 	@docker compose down
 	@echo "$(GREEN)Services stopped.$(NC)"
 
 restart: ## Restart all services
-	$(call require-root)
 	@echo "$(BLUE)Restarting VaultWarden services...$(NC)"
 	@docker compose restart
 	@echo "$(GREEN)Services restarted.$(NC)"
