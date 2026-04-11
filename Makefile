@@ -197,7 +197,17 @@ up: ## Start all services (runs startup.sh for health checks)
 		echo "$(RED)       Run ./setup-secrets.sh (or make init-secrets) to generate secrets.$(NC)"; \
 		exit 1; \
 	fi
-	@sudo ./startup.sh || { echo "$(RED)Startup failed!$(NC)"; $(MAKE) status; exit 1; }
+	@sudo ./startup.sh || { \
+		echo "$(RED)Startup failed!$(NC)"; \
+		$(MAKE) status; \
+		echo ""; \
+		echo "$(YELLOW)If startup failed due to a missing or misconfigured Age key:$(NC)"; \
+		echo "$(YELLOW)  Run: make key-health$(NC)"; \
+		CONFIGURED_KEY=$$(grep '^SOPS_AGE_KEY_FILE=' .env 2>/dev/null | cut -d= -f2); \
+		[ -n "$$CONFIGURED_KEY" ] && echo "$(YELLOW)  Configured key path (from .env): $$CONFIGURED_KEY$(NC)"; \
+		echo "$(YELLOW)  Canonical production path:        /etc/vaultwarden/age-key.txt$(NC)"; \
+		exit 1; \
+	}
 	@echo "$(GREEN)Services started successfully!$(NC)"
 
 start: up ## Alias for up
@@ -213,7 +223,12 @@ stop: down ## Alias for down
 restart: ## Restart all services (via startup.sh)
 	$(call check-docker)
 	@echo "$(BLUE)Restarting VaultWarden services...$(NC)"
-	@sudo ./startup.sh --force-restart || { echo "$(RED)Restart failed!$(NC)"; $(MAKE) status; exit 1; }
+	@sudo ./startup.sh --force-restart || { \
+		echo "$(RED)Restart failed!$(NC)"; \
+		$(MAKE) status; \
+		echo "$(YELLOW)If restart failed due to a key issue, run: make key-health$(NC)"; \
+		exit 1; \
+	}
 	@echo "$(GREEN)Services restarted.$(NC)"
 
 # FIX [P5-C1]: safe-restart captures pre-restart container IDs and rolls back
@@ -432,9 +447,26 @@ restore-remote: ## Restore from a remote (rclone) backup — interactive selecti
 
 key-health: ## Check age key health (permissions, decodability, SOPS_AGE_KEY_FILE)
 	@echo "$(BLUE)Checking age key health...$(NC)"
+	@CONFIGURED_KEY=$$(grep '^SOPS_AGE_KEY_FILE=' .env 2>/dev/null | cut -d= -f2); \
+	CONFIGURED_KEY=$${CONFIGURED_KEY:-secrets/keys/age-key.txt}; \
+	echo "$(CYAN)  Configured key path (SOPS_AGE_KEY_FILE): $$CONFIGURED_KEY$(NC)"; \
+	echo "$(CYAN)  Canonical production path:                /etc/vaultwarden/age-key.txt$(NC)"
 	@bash -c 'set -euo pipefail; source lib/simple_key_resilience.sh; check_age_key_health' && \
 		echo "$(GREEN)Age key health check passed$(NC)" || \
-		{ echo "$(RED)Age key health check FAILED — run: sudo make setup$(NC)"; exit 1; }
+		{ \
+		  echo "$(RED)Age key health check FAILED$(NC)"; \
+		  echo ""; \
+		  echo "$(YELLOW)Remediation steps:$(NC)"; \
+		  echo "$(YELLOW)  1. Production fix — install key to canonical path:$(NC)"; \
+		  echo "$(YELLOW)       sudo install -d -m 700 /etc/vaultwarden$(NC)"; \
+		  echo "$(YELLOW)       sudo install -m 600 secrets/keys/age-key.txt /etc/vaultwarden/age-key.txt$(NC)"; \
+		  echo "$(YELLOW)       sudo chown root:root /etc/vaultwarden /etc/vaultwarden/age-key.txt$(NC)"; \
+		  echo "$(YELLOW)       # Set SOPS_AGE_KEY_FILE=/etc/vaultwarden/age-key.txt in .env$(NC)"; \
+		  echo "$(YELLOW)       make key-health$(NC)"; \
+		  echo ""; \
+		  echo "$(YELLOW)  2. Or re-run full setup: sudo make setup$(NC)"; \
+		  exit 1; \
+		}
 
 key-show: ## Show current age public key and key file path/status
 	@echo "$(BLUE)Age Key Status:$(NC)"

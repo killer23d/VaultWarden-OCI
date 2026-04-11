@@ -330,6 +330,21 @@ check_prerequisites() {
         log_error "Missing prerequisites:"
         for item in "${missing[@]}"; do log_error "  - $item"; done
         echo ""
+        # If the configured key is missing but the canonical or repo-local key exists,
+        # give the operator a targeted hint.
+        local canonical_key="/etc/vaultwarden/age-key.txt"
+        local repo_local_key="${PROJECT_ROOT}/secrets/keys/age-key.txt"
+        if [[ ! -f "$AGE_KEY_FILE" ]]; then
+            if [[ -f "$canonical_key" && "$AGE_KEY_FILE" != "$canonical_key" ]]; then
+                log_warn "A key exists at the canonical production path: ${canonical_key}"
+                log_warn "Update SOPS_AGE_KEY_FILE in .env to: ${canonical_key}"
+                log_warn "Then run: make key-health"
+            elif [[ -f "$repo_local_key" && "$AGE_KEY_FILE" != "$repo_local_key" ]]; then
+                log_warn "A repo-local key was detected at: ${repo_local_key}"
+                log_warn "For production: install it to ${canonical_key} and update .env."
+                log_warn "For local/dev: set SOPS_AGE_KEY_FILE=${repo_local_key} in .env."
+            fi
+        fi
         log_info "To create secrets, run: ./setup-secrets.sh"
         return 1
     fi
@@ -423,6 +438,7 @@ do_list_keys() {
     done <<< "$raw_keys"
 
     echo ""
+    log_info "Canonical production key path: /etc/vaultwarden/age-key.txt (installed by setup.sh)"
     log_info "Run './edit-secrets.sh --rotate email_api_token' to set or rotate the provider API key."
     log_info "Run './edit-secrets.sh --rotate <field>' to update any other specific key."
     return 0
