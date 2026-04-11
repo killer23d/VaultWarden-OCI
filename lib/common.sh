@@ -379,19 +379,30 @@ require_root() {
 }
 
 get_real_user() {
-    if [[ -n "${SUDO_USER:-}" ]]; then
+    # Prefer SUDO_USER — set reliably by sudo regardless of shell nesting depth
+    if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
         printf '%s\n' "$SUDO_USER"
         return 0
     fi
 
-    if [[ -n "${USER:-}" ]]; then
+    # logname resolves the login user even through sudo/su chains
+    local login_user
+    if login_user=$(logname 2>/dev/null) \
+        && [[ -n "$login_user" && "$login_user" != "root" ]]; then
+        printf '%s\n' "$login_user"
+        return 0
+    fi
+
+    # $USER is often "root" in `sudo make` sub-shells — only trust it when non-root
+    if [[ -n "${USER:-}" && "${USER}" != "root" ]]; then
         printf '%s\n' "$USER"
         return 0
     fi
 
+    # Genuine root context (direct root login, sudo su -, etc.)
     local effective_user
     effective_user=$(id -un 2>/dev/null) || effective_user="root"
-    log_warn "get_real_user: SUDO_USER and USER are both unset; falling back to '${effective_user}' (from id -un). If this is unexpected, verify the invocation context."
+    log_warn "get_real_user: could not resolve a non-root user; using '${effective_user}'. If unexpected, verify sudo invocation context (use: sudo ./setup.sh, not sudo make setup)."
     printf '%s\n' "$effective_user"
 }
 
