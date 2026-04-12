@@ -18,7 +18,13 @@ EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
 # Scoped to avoid racing with restore.sh or maintenance.sh that may hold
 # their own lock files concurrently (e.g. after Persistent=true catch-up).
 ExecStartPre=/bin/bash -c 'rm -f /run/lock/vaultwarden-backup.lock'
-ExecStart=/opt/vaultwarden-scripts/backup.sh --type db --rclone --email
+# NOTE: --email is intentionally omitted. The email step requires EMAIL_PROVIDER
+# credentials in /etc/vaultwarden/vaultwarden.env. Without them backup.sh exits 1
+# even when the backup itself succeeded, which triggers OnFailure= spuriously.
+# Add --email back manually once EMAIL_PROVIDER credentials are configured:
+#   sudo systemctl edit vaultwarden-db-backup.service
+# Failures are still reported via OnFailure=vaultwarden-notify-failure@%n.service.
+ExecStart=/opt/vaultwarden-scripts/backup.sh --type db --rclone
 User=root
 StandardOutput=journal
 StandardError=journal
