@@ -40,6 +40,10 @@ services:
       chown 0:0 /logs/caddy/access.log /logs/caddy/security.log &&
       chmod 644 /logs/caddy/access.log /logs/caddy/security.log &&
 
+      mkdir -p /caddy_data /caddy_config &&
+      chown 0:0 /caddy_data /caddy_config &&
+      chmod 700 /caddy_data /caddy_config &&
+
       mkdir -p /fail2ban_db &&
       chown 0:0 /fail2ban_db &&
       chmod 755 /fail2ban_db &&
