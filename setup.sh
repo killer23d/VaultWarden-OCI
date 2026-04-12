@@ -2,7 +2,6 @@
 # setup.sh - VaultWarden-OCI Setup Script
 
 set -euo pipefail
-set +x
 
 # =============================================================================
 # DEPENDENCY VERSION PINS
@@ -116,9 +115,21 @@ if ! validate_email_secure "$ADMIN_EMAIL"; then log_error "Invalid email format"
 resolve_github_latest() {
     local repo="$1"
     local tag
+    local api_response
 
-    tag=$(curl -fsSL --max-time 30 "https://api.github.com/repos/${repo}/releases/latest" \
-        | jq -r '.tag_name // empty')
+    # Use a temp file so curl errors are not silently swallowed by the pipe.
+    local api_tmpfile
+    api_tmpfile=$(mktemp -p "$TMP_WORKDIR" gh-latest.XXXXXXXXXX.json)
+
+    if ! curl -fsSL --max-time 30 \
+            "https://api.github.com/repos/${repo}/releases/latest" \
+            -o "$api_tmpfile" 2>/dev/null; then
+        log_error "Could not fetch release info for ${repo} from GitHub API."
+        log_error "Set SOPS_VERSION=vX.Y.Z at the top of setup.sh to bypass."
+        return 1
+    fi
+
+    tag=$(jq -r '.tag_name // empty' "$api_tmpfile")
 
     if [[ -z "$tag" ]] || [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9] ]]; then
         log_error "Could not resolve a valid release tag for ${repo}."
@@ -131,7 +142,7 @@ resolve_github_latest() {
 
 install_docker() {
     # Skip if Docker is already functional
-    if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
+    if command -v docker &>/dev/null && docker info &>/dev/null; then
         log_info "setup" "Docker already installed: $(docker --version)"
         return 0
     fi
@@ -498,6 +509,8 @@ create_env_file() {
 
     local temp_env
     temp_env=$(mktemp -p "$(dirname "$env_file")" .env.tmp.XXXXXXXXXX) || return 1
+    # Ensure temp file is cleaned up on any failure path from this point.
+    trap 'rm -f "$temp_env" 2>/dev/null || true' RETURN
 
     AWK_DOMAIN="$domain_with_protocol" \
     AWK_EMAIL="$ADMIN_EMAIL" \
@@ -589,8 +602,9 @@ setup_directories() {
 
     chown -R "${puid}:${pgid}" "$project_state_dir" || return 1
 
-    find "${project_state_dir}" -type d -exec chmod 750 {} \; 2>/dev/null || return 1
-    find "${project_state_dir}" -type f -exec chmod 640 {} \; 2>/dev/null || true
+    # Use {} + (batch exec) instead of {} \; (per-file exec) for performance.
+    find "${project_state_dir}" -type d -exec chmod 750 {} + 2>/dev/null || return 1
+    find "${project_state_dir}" -type f -exec chmod 640 {} + 2>/dev/null || true
 
     # BUG-caddy-perms FIX: Caddy runs as root inside its container and writes
     # access logs to ${project_state_dir}/logs/caddy/access.log via a bind-mount.
@@ -909,32 +923,34 @@ set_script_permissions() {
     # 2. caddy/entrypoint.sh — must be executable before 'make up';
     #    Docker copies it into the image with its host permissions, so a
     #    missing +x bit causes 'permission denied' at container start.
+    #    Use process substitution to avoid a pipe-subshell so log_success
+    #    calls take effect in the current shell.
     # ------------------------------------------------------------------
     if [[ -d "caddy" ]]; then
-        find "caddy" -maxdepth 1 -name "*.sh" | while IFS= read -r script; do
+        while IFS= read -r script; do
             chmod +x "$script"
             chown "$real_user:$real_group" "$script" 2>/dev/null || true
             log_success "Set +x: $script"
-        done
+        done < <(find "caddy" -maxdepth 1 -name "*.sh")
     fi
 
     # ------------------------------------------------------------------
     # 3. fail2ban/*.sh — same rationale as caddy/entrypoint.sh
     # ------------------------------------------------------------------
     if [[ -d "fail2ban" ]]; then
-        find "fail2ban" -maxdepth 1 -name "*.sh" | while IFS= read -r script; do
+        while IFS= read -r script; do
             chmod +x "$script"
             chown "$real_user:$real_group" "$script" 2>/dev/null || true
             log_success "Set +x: $script"
-        done
+        done < <(find "fail2ban" -maxdepth 1 -name "*.sh")
     fi
 
     # ------------------------------------------------------------------
     # 4. lib/*.sh — sourced (not executed), keep 644 read-only for non-root
     # ------------------------------------------------------------------
     if [[ -d "lib" ]]; then
-        find "lib" -name "*.sh" -exec chown "$real_user:$real_group" {} \; 2>/dev/null || true
-        find "lib" -name "*.sh" -exec chmod 644 {} \; 2>/dev/null || true
+        find "lib" -name "*.sh" -exec chown "$real_user:$real_group" {} + 2>/dev/null || true
+        find "lib" -name "*.sh" -exec chmod 644 {} + 2>/dev/null || true
     fi
 
     return 0
@@ -983,7 +999,11 @@ setup_firewall() {
         log_warn "  See: https://www.cloudflare.com/ips-v4 and https://www.cloudflare.com/ips-v6"
     fi
 
-    if ufw status | grep -q "Status: active" && \
+    # Check firewall state once and reuse the result.
+    local ufw_active=false
+    ufw status | grep -q "Status: active" && ufw_active=true
+
+    if [[ "$ufw_active" == "true" ]] && \
        ufw status | grep -q "80/tcp" && \
        ufw status | grep -q "443/tcp" && \
        ufw status | grep -q "${ssh_port}/tcp"; then
@@ -1005,7 +1025,7 @@ setup_firewall() {
         ufw allow 443/tcp
     fi
 
-    ufw status | grep -q "Status: active" || ufw --force enable
+    [[ "$ufw_active" == "false" ]] && ufw --force enable
     return 0
 }
 
