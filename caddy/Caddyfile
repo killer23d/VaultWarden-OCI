@@ -225,7 +225,7 @@ http://127.0.0.1:8080 {
 # ================================
 # Redirect www -> apex
 # ================================
-{$DOMAIN_NAME} {
+www.{$DOMAIN_NAME} {
 	log access
 	redir https://{$DOMAIN_NAME}{uri} 301
 }
