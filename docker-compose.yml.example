@@ -42,7 +42,11 @@ services:
 
       mkdir -p /caddy_data /caddy_config &&
       chown 0:0 /caddy_data /caddy_config &&
-      chmod 700 /caddy_data /caddy_config &&
+      chmod 755 /caddy_data /caddy_config &&
+
+      mkdir -p /caddy_data/caddy/certificates /caddy_data/caddy/locks /caddy_data/caddy/ocsp &&
+      chown -R 0:0 /caddy_data/caddy &&
+      find /caddy_data/caddy -type d -exec chmod 755 {} + 2>/dev/null || true &&
 
       mkdir -p /fail2ban_db &&
       chown 0:0 /fail2ban_db &&
