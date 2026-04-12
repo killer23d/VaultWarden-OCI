@@ -1,38 +1,33 @@
 [Unit]
-Description=VaultWarden Firewall Update
-After=network-online.target docker.service
-ConditionPathExists=/opt/vaultwarden-scripts/maintenance.sh
-# FIX-S01: OnFailure= added — firewall update failures now trigger an email
-# notification via the shared template unit, consistent with all other
-# VaultWarden service units (maintenance, backup, health, dns-update).
+Description=VaultWarden Firewall Rule Update
+Documentation=https://github.com/killer23d/VaultWarden-OCI
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/opt/vaultwarden-scripts/firewall-update.sh
 OnFailure=vaultwarden-notify-failure@%n.service
 
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/vaultwarden-scripts
-EnvironmentFile=/etc/vaultwarden/vaultwarden.env
-ExecStart=/opt/vaultwarden-scripts/maintenance.sh --update-firewall
+# Leading dash makes the file optional: the service starts even if
+# /etc/vaultwarden/vaultwarden.env does not yet exist (e.g. before
+# setup-systemd.sh --install has run). Missing required vars are caught
+# and reported by the script itself.
+EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
+ExecStart=/opt/vaultwarden-scripts/firewall-update.sh
 User=root
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=vw-firewall
+SyslogIdentifier=vw-firewall-update
 NoNewPrivileges=yes
 PrivateTmp=yes
-# SY-1: Sandbox hardening — script can only write to its own directories.
-# CAP_NET_ADMIN is required for iptables/nftables rules.
 ProtectSystem=strict
-ProtectHome=yes
-# /opt/vaultwarden-scripts is intentionally excluded: scripts are read+executed
-# only and must not be writable at runtime (defence-in-depth against a
-# compromised script overwriting its siblings).
-# Note: /run/lock is not listed — this unit does not use flock().
-ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden
-AmbientCapabilities=CAP_NET_ADMIN
-CapabilityBoundingSet=CAP_NET_ADMIN
-# Timeout prevents indefinite hang if Cloudflare API is unreachable.
-# A hung unit blocks the systemd activation queue on an unattended server.
-TimeoutStartSec=30
-TimeoutStopSec=10
+# read-only (not yes) so that any user-home paths referenced in .env
+# remain readable by the service.
+ProtectHome=read-only
+ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock
+TimeoutStartSec=60
+TimeoutStopSec=30
 
 [Install]
 WantedBy=multi-user.target

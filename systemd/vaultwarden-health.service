@@ -13,7 +13,11 @@ Type=oneshot
 # WorkingDirectory and ExecStart (and ConditionPathExists in [Unit]) to match.
 # Default install path used by setup.sh is /opt/vaultwarden-scripts.
 WorkingDirectory=/opt/vaultwarden-scripts
-EnvironmentFile=/etc/vaultwarden/vaultwarden.env
+# Leading dash makes the file optional: the service starts even if
+# /etc/vaultwarden/vaultwarden.env does not yet exist (e.g. before
+# setup-systemd.sh --install has run). Missing required vars are caught
+# and reported by the script itself.
+EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
 # --email is intentionally omitted here. Add it once EMAIL_API_TOKEN or
 # SMTP credentials are set in /etc/vaultwarden/vaultwarden.env, otherwise
 # the service exits 1 on every run (no credentials → email fails → exit 1).
@@ -25,7 +29,9 @@ SyslogIdentifier=vw-health
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
-ProtectHome=yes
+# read-only (not yes) so that any user-home paths referenced in .env
+# (e.g. RCLONE_CONFIG) remain readable by the service.
+ProtectHome=read-only
 # /run/lock needed if health ever acquires a lock; also harmless
 # /opt/vaultwarden-scripts is intentionally excluded: scripts are read+executed
 # only and must not be writable at runtime (defence-in-depth against a

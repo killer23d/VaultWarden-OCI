@@ -1,35 +1,32 @@
 [Unit]
-Description=VaultWarden DNS Update
+Description=VaultWarden Dynamic DNS Update
+Documentation=https://github.com/killer23d/VaultWarden-OCI
 After=network-online.target
 Wants=network-online.target
-ConditionPathExists=/opt/vaultwarden-scripts/maintenance.sh
-# FIX-S01: OnFailure= added — DNS update failures now trigger an email
-# notification via the shared template unit, consistent with all other
-# VaultWarden service units (maintenance, backup, health, firewall).
+ConditionPathExists=/opt/vaultwarden-scripts/dns-update.sh
 OnFailure=vaultwarden-notify-failure@%n.service
 
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/vaultwarden-scripts
-EnvironmentFile=/etc/vaultwarden/vaultwarden.env
-ExecStart=/opt/vaultwarden-scripts/maintenance.sh --update-dns
+# Leading dash makes the file optional: the service starts even if
+# /etc/vaultwarden/vaultwarden.env does not yet exist (e.g. before
+# setup-systemd.sh --install has run). Missing required vars are caught
+# and reported by the script itself.
+EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
+ExecStart=/opt/vaultwarden-scripts/dns-update.sh
 User=root
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=vw-dns-update
 NoNewPrivileges=yes
 PrivateTmp=yes
-# SY-1: Sandbox hardening — script can only write to its own directories.
 ProtectSystem=strict
-ProtectHome=yes
-# NOTE: SOPS_AGE_KEY_FILE must reside under /etc/vaultwarden/ (or another
-# ReadWritePaths entry). Paths under /home/ are inaccessible with ProtectHome=yes.
-# /run/lock is needed for the flock() lock file (ProtectSystem=strict makes /var/lock read-only)
-# /opt/vaultwarden-scripts is intentionally excluded: scripts are read+executed
-# only and must not be writable at runtime (defence-in-depth against a
-# compromised script overwriting its siblings).
+# read-only (not yes) so that any user-home paths referenced in .env
+# remain readable by the service.
+ProtectHome=read-only
 ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock
-TimeoutStartSec=120
+TimeoutStartSec=60
 TimeoutStopSec=30
 
 [Install]

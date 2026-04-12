@@ -1,5 +1,5 @@
 [Unit]
-Description=VaultWarden Comprehensive Maintenance
+Description=VaultWarden Maintenance Tasks
 Documentation=https://github.com/killer23d/VaultWarden-OCI
 After=docker.service network-online.target
 Requires=docker.service
@@ -9,33 +9,28 @@ OnFailure=vaultwarden-notify-failure@%n.service
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/vaultwarden-scripts
-EnvironmentFile=/etc/vaultwarden/vaultwarden.env
-# Clear only this service's stale lock file left by a prior crash or hard reboot.
-# /run/lock is a tmpfs — a file here after reboot is always stale.
-# Scoped to avoid racing with backup.sh or restore.sh that may hold their
-# own lock files concurrently (e.g. after Persistent=true catch-up).
-ExecStartPre=/bin/bash -c 'rm -f /run/lock/vaultwarden-maintenance.lock'
-ExecStart=/opt/vaultwarden-scripts/maintenance.sh --comprehensive
+# Leading dash makes the file optional: the service starts even if
+# /etc/vaultwarden/vaultwarden.env does not yet exist (e.g. before
+# setup-systemd.sh --install has run). Missing required vars are caught
+# and reported by the script itself.
+EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
+ExecStart=/opt/vaultwarden-scripts/maintenance.sh
 User=root
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=vw-maintenance
 NoNewPrivileges=yes
 PrivateTmp=yes
-# SY-1: Sandbox hardening — script can only write to its own directories.
 ProtectSystem=strict
-ProtectHome=yes
-# NOTE: SOPS_AGE_KEY_FILE must reside under /etc/vaultwarden/ (or another
-# ReadWritePaths entry). Paths under /home/ are inaccessible with ProtectHome=yes.
-# /run/lock is needed for the flock() lock file (ProtectSystem=strict makes /var/lock read-only)
+# read-only (not yes) so that any user-home paths referenced in .env
+# (e.g. RCLONE_CONFIG) remain readable by the service.
+ProtectHome=read-only
+# /run/lock needed for flock() lock file
 # /opt/vaultwarden-scripts is intentionally excluded: scripts are read+executed
-# only and must not be writable at runtime (defence-in-depth against a
-# compromised script overwriting its siblings).
+# only and must not be writable at runtime.
 ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock
-TimeoutStartSec=1800
+TimeoutStartSec=3600
 TimeoutStopSec=60
-# Exit 1 = skipped/nothing-to-do; treat as success so OnFailure= is not fired.
-SuccessExitStatus=0 1
 
 [Install]
 WantedBy=multi-user.target
