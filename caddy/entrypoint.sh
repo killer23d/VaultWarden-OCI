@@ -186,9 +186,7 @@ if [ "$TLS_PROVIDER" = "cloudflare" ]; then
 else
     echo "TLS_PROVIDER=${TLS_PROVIDER}: skipping Cloudflare token load."
     # Export an empty value so {env.CLOUDFLARE_API_TOKEN} in Caddyfile never
-    # causes a 'variable not found' error — the acme_dns block is unreachable
-    # when TLS_PROVIDER!=cloudflare because the global block condition does not
-    # match, but Caddy still evaluates env references at parse time.
+    # causes a 'variable not found' error.
     export CLOUDFLARE_API_TOKEN=""
 fi
 
@@ -249,45 +247,49 @@ else
 fi
 
 # =============================================================================
-# BUG-2 FIX: 'caddy validate' removed
-#
-# 'caddy validate' fully provisions all Caddy modules at validation time,
-# including FileWriter log writers. Provisioning calls open() on every log
-# file path listed in the Caddyfile. This means validate fails with:
-#
-#   open /var/log/caddy/access.log: permission denied
-#
-# ...if /var/log/caddy is owned by PUID:PGID (set by the init container)
-# and the validate call races ahead of the mkdir -p guard above, or if the
-# Docker bind-mount UID mapping prevents root inside the container from
-# writing to the host directory.
-#
-# Caddy already validates its configuration at 'caddy run' startup before
-# serving any requests — a separate validate call is therefore redundant.
-# Removing it eliminates the permission-denied crash loop with zero loss
-# of config safety: a bad Caddyfile still causes caddy run to exit 1.
+# BUG-2 FIX: 'caddy validate' removed — Caddy validates at 'caddy run' startup.
 # =============================================================================
 
 # =============================================================================
 # DEGRADED MODE: build a patched Caddyfile with stdout-only logging
+#
+# BUG-DEGRADE-1 FIX: The previous sed approach replaced only the
+# 'output file /var/log/caddy/*.log {' line but left the entire nested
+# block body (roll_size, roll_keep, roll_compression, closing brace)
+# as orphaned content, producing:
+#   Error: server block without any key is global configuration
+#
+# Fix: use awk to track brace depth and consume the entire
+# 'output file ... { ... }' block, emitting 'output stdout' instead.
 # =============================================================================
 CADDYFILE=/etc/caddy/Caddyfile
 if [ "$CADDY_DEGRADED" = "true" ]; then
     CADDY_DEGRADED_CADDYFILE=/tmp/Caddyfile.degraded
-    # Replace 'output file /var/log/caddy/*.log ...' blocks with 'output stdout'.
-    # sed: match the output line and strip everything up to the closing brace
-    # of the output block so Caddy doesn't see invalid nested braces.
-    # The pattern replaces the entire 'output file ... { ... }' multi-line block
-    # with 'output stdout' using a simple approach: write a minimally patched
-    # config that disables file writers while keeping all other directives.
-    sed \
-        -e 's|output file /var/log/caddy/access\.log {|output stdout \# degraded-mode|' \
-        -e 's|output file /var/log/caddy/security\.log {|output stdout \# degraded-mode|' \
-        "$CADDYFILE" 2>/dev/null > "$CADDY_DEGRADED_CADDYFILE" || {
-        # If sed fails (e.g. /tmp is also read-only), just use the original
-        # Caddyfile and let Caddy fail its own open() — better than no service.
+    awk '
+        /output file \/var\/log\/caddy\// {
+            print "\t\t\toutput stdout # degraded-mode"
+            depth = 0
+            # count the opening brace on this line
+            for (i = 1; i <= length($0); i++) {
+                c = substr($0, i, 1)
+                if (c == "{") depth++
+                if (c == "}") depth--
+            }
+            # consume subsequent lines until the block closes
+            while (depth > 0) {
+                if ((getline line) <= 0) break
+                for (i = 1; i <= length(line); i++) {
+                    c = substr(line, i, 1)
+                    if (c == "{") depth++
+                    if (c == "}") depth--
+                }
+            }
+            next
+        }
+        { print }
+    ' "$CADDYFILE" > "$CADDY_DEGRADED_CADDYFILE" 2>/dev/null || {
         log_warn "Could not write degraded Caddyfile to /tmp — using original."
-        CADDY_DEGRADED_CADDYFILE="$CADDY_CADDYFILE"
+        CADDY_DEGRADED_CADDYFILE="$CADDYFILE"
     }
     CADDYFILE="$CADDY_DEGRADED_CADDYFILE"
 fi
