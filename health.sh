@@ -39,7 +39,14 @@ source "${SCRIPT_DIR}/lib/email.sh" 2>/dev/null || {
 
 # Load environment
 ENV_FILE="${SCRIPT_DIR}/.env"
-[[ -f "${ENV_FILE}" ]] && source "${ENV_FILE}" 2>/dev/null || true
+if [[ -f "${ENV_FILE}" ]]; then
+    if [[ ! -r "${ENV_FILE}" ]]; then
+        log_error "health.sh: '${ENV_FILE}' is not readable by $(id -un) — config variables will be unset."
+        log_error "Fix ownership: sudo chown $(id -un):$(id -gn) '${ENV_FILE}'"
+    else
+        load_env_file "${ENV_FILE}" || true
+    fi
+fi
 
 # Health check configuration
 HEALTH_TIMEOUT=${HEALTH_TIMEOUT:-10}
@@ -256,14 +263,14 @@ _fail() { _record "$1" fail "$2"; }
 # =============================================================================
 
 _get_domain() {
-    # Priority: DOMAIN_NAME (bare) → DOMAIN (strip protocol) → grep .env → empty
+    # Priority: DOMAIN_NAME (bare) → DOMAIN (strip protocol) → empty
+    # DOMAIN is already exported by load_env_file() at startup; a direct
+    # grep on ${ENV_FILE} would bypass the already-loaded environment and
+    # silently return empty when .env is root-owned (permission denied).
     if [[ -n "${DOMAIN_NAME:-}" ]]; then
         echo "${DOMAIN_NAME}"
     elif [[ -n "${DOMAIN:-}" ]]; then
         echo "${DOMAIN#https://}" | sed 's|http://||'
-    elif [[ -f "${ENV_FILE}" ]]; then
-        grep -oP '(?<=^DOMAIN=https://)\S+' "${ENV_FILE}" 2>/dev/null | head -1 || \
-        grep -oP '(?<=^DOMAIN=)\S+' "${ENV_FILE}" 2>/dev/null | head -1 | sed 's|https://||' | sed 's|http://||'
     else
         echo ""
     fi
@@ -790,10 +797,12 @@ _check_config() {
 
     if [[ ! -f "$ENV_FILE" ]]; then
         config_issues+=("Missing env file: $ENV_FILE")
+    elif [[ ! -r "$ENV_FILE" ]]; then
+        config_issues+=("$ENV_FILE is not readable by $(id -un) — run: sudo chown $(id -un):$(id -gn) $ENV_FILE")
     else
         local required_vars=("DOMAIN" "ADMIN_EMAIL" "CLOUDFLARE_ZONE_ID")
         for var in "${required_vars[@]}"; do
-            grep -q "^${var}=" "$ENV_FILE" || config_issues+=("Missing $var in $ENV_FILE")
+            [[ -n "${!var:-}" ]] || config_issues+=("${var} is not set — verify '${var}=' is present in ${ENV_FILE}")
         done
     fi
 
