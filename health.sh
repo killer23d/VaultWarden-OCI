@@ -802,7 +802,7 @@ _check_config() {
     else
         local required_vars=("DOMAIN" "ADMIN_EMAIL" "CLOUDFLARE_ZONE_ID")
         for var in "${required_vars[@]}"; do
-            [[ -n "${!var:-}" ]] || config_issues+=("Missing $var in environment (check $ENV_FILE)")
+            [[ -n "${!var:-}" ]] || config_issues+=("${var} is not set — verify '${var}=' is present in ${ENV_FILE}")
         done
     fi
 

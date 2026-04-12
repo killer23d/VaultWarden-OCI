@@ -569,7 +569,7 @@ collect_secrets() {
     _email_mode=$(    _read_dotenv_value "EMAIL_MODE"     .env)
     _email_provider=$(   _read_dotenv_value "EMAIL_PROVIDER" .env)
     if [[ -z "$_email_mode" && -f ".env" && ! -r ".env" ]]; then
-        log_warn "collect_secrets: .env is not readable by $(id -un); EMAIL_MODE/EMAIL_PROVIDER defaulting to 'auto'/'mailersend'."
+        log_warn "setup-secrets.sh: .env is not readable by $(id -un); EMAIL_MODE/EMAIL_PROVIDER defaulting to 'auto'/'mailersend'."
         log_warn "Fix ownership: sudo chown $(id -un):$(id -gn) .env"
     fi
     _email_mode="${_email_mode:-auto}"
