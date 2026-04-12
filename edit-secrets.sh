@@ -141,8 +141,12 @@ _read_dotenv_value() {
     local file="${2:-.env}"
     [[ -f "$file" ]] || { echo ""; return 0; }
     # If the file is not readable (e.g. root:root 600 but we're non-root),
-    # return empty string silently rather than emitting a permission error.
-    [[ -r "$file" ]] || { echo ""; return 0; }
+    # warn to stderr (keeping stdout clean for callers that capture the return
+    # value) and return an empty string.
+    if [[ ! -r "$file" ]]; then
+        log_warn "_read_dotenv_value: '${file}' is not readable by $(id -un) — returning empty for key '${key}'" >&2
+        echo ""; return 0
+    fi
     local val
     # Strip inline comments (one-or-more whitespace then #) and trailing
     # whitespace.  Requiring [[:space:]]\+ before # deliberately preserves

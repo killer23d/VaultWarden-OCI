@@ -641,28 +641,6 @@ PY
 }
 
 # ---------------------------------------------------------------------------
-# get_config_value KEY DEFAULT
-# ---------------------------------------------------------------------------
-get_config_value() {
-  local key="$1"
-  local default_value="${2:-}"
-
-  if [[ -f ".env" ]]; then
-    local value
-    value=$(grep -E "^${key}=" .env 2>/dev/null | tail -n1 | cut -d= -f2- || true)
-    value="${value%\"}"
-    value="${value#\"}"
-    if [[ -n "$value" ]]; then
-      printf '%s\n' "$value"
-      return 0
-    fi
-  fi
-
-  printf '%s\n' "$default_value"
-  return 0
-}
-
-# ---------------------------------------------------------------------------
 # cleanup_orphaned_resources
 # ---------------------------------------------------------------------------
 cleanup_orphaned_resources() {

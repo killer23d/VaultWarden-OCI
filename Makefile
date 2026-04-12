@@ -77,6 +77,19 @@ define check-docker
 	fi
 endef
 
+# check-env-readable: guard for targets that read .env directly.
+# Emits a clear error and actionable fix when .env exists but is not readable
+# by the current user (e.g. root:root 600 with a non-root invoking user).
+# Safe to call when .env does not exist — the guard only fires when the file
+# is present but unreadable.
+define check-env-readable
+	@if [ -f ".env" ] && [ ! -r ".env" ]; then \
+		echo "$(RED)Error: .env is not readable by $$(id -un).$(NC)"; \
+		echo "$(YELLOW)Fix: sudo chown $$(id -un):$$(id -gn) .env$(NC)"; \
+		exit 1; \
+	fi
+endef
+
 # ===========================================================================
 ##@ Help
 # ===========================================================================
@@ -355,6 +368,7 @@ list-backups: ## List available backups with per-type size totals
 	@sudo ./backup.sh --list
 
 backup-status: ## Show backup health summary — last run, size, retention, count per type
+	$(call check-env-readable)
 	@echo "$(BLUE)╔══════════════════════════════════════════════════════════╗$(NC)"
 	@echo "$(BLUE)║             Backup Status Summary                       ║$(NC)"
 	@echo "$(BLUE)╚══════════════════════════════════════════════════════════╝$(NC)"
@@ -446,6 +460,7 @@ restore-remote: ## Restore from a remote (rclone) backup — interactive selecti
 # ===========================================================================
 
 key-health: ## Check age key health (permissions, decodability, SOPS_AGE_KEY_FILE)
+	$(call check-env-readable)
 	@echo "$(BLUE)Checking age key health...$(NC)"
 	@CONFIGURED_KEY=$$(grep '^SOPS_AGE_KEY_FILE=' .env 2>/dev/null | cut -d= -f2); \
 	CONFIGURED_KEY=$${CONFIGURED_KEY:-secrets/keys/age-key.txt}; \
@@ -469,6 +484,7 @@ key-health: ## Check age key health (permissions, decodability, SOPS_AGE_KEY_FIL
 		}
 
 key-show: ## Show current age public key and key file path/status
+	$(call check-env-readable)
 	@echo "$(BLUE)Age Key Status:$(NC)"
 	@KEY_FILE=$$(grep '^SOPS_AGE_KEY_FILE=' .env 2>/dev/null | cut -d= -f2); \
 	KEY_FILE=$${KEY_FILE:-secrets/keys/age-key.txt}; \
@@ -490,6 +506,7 @@ key-backup: ## Create printable key backup (PDF or HTML)
 
 key-escrow: ## Create password manager escrow copy
 	$(call require-root)
+	$(call check-env-readable)
 	@echo "$(BLUE)Creating password manager escrow...$(NC)"
 	@KEY_FILE=$$(grep '^SOPS_AGE_KEY_FILE=' .env 2>/dev/null | cut -d= -f2); \
 	KEY_FILE=$${KEY_FILE:-secrets/keys/age-key.txt}; \
@@ -590,6 +607,7 @@ systemd-validate: ## Validate systemd unit files
 # QOL: timers shows the OnCalendar schedule from .env alongside the next
 # trigger and last run — a single view of configured schedule vs live state.
 timers: ## List all vaultwarden systemd timers (next trigger + last run + .env schedule)
+	$(call check-env-readable)
 	@echo "$(BLUE)Systemd Timer Status:$(NC)"
 	@systemctl list-timers --all 2>/dev/null | grep -E '(NEXT|vaultwarden)' || \
 		echo "$(YELLOW)No vaultwarden timers found. Run: sudo make install-systemd$(NC)"
@@ -682,6 +700,7 @@ shellcheck: ## Run shellcheck on all shell scripts
 # ===========================================================================
 
 info: ## Show system information including version, age key status, and disk usage
+	$(call check-env-readable)
 	@echo "$(BLUE)VaultWarden-OCI System Information$(NC)"
 	@echo "$(BLUE)====================================$(NC)"
 	@echo "$(GREEN)Stack version:$(NC) $$(cat VERSION 2>/dev/null || echo 'unknown')"
@@ -729,6 +748,7 @@ shell: ## Open shell in specified SERVICE (default: vaultwarden)
 
 # FIX [item 15]: show truncation notice when .env has more than 15 non-sensitive lines.
 config: ## Show current configuration summary (sensitive keys redacted)
+	$(call check-env-readable)
 	@echo "$(BLUE)Current Configuration Summary$(NC)"
 	@echo "$(BLUE)============================$(NC)"
 	@if [ -f ".env" ]; then \
@@ -747,6 +767,7 @@ config: ## Show current configuration summary (sensitive keys redacted)
 	@$(DOCKER_COMP) config --services 2>/dev/null || echo "Configuration invalid"
 
 diagnose: ## Full diagnostic dump — versions, key status, disk, containers, last backup, recent logs
+	$(call check-env-readable)
 	@echo "$(BLUE)╔══════════════════════════════════════════════════════════╗$(NC)"
 	@echo "$(BLUE)║         VaultWarden-OCI — Diagnostic Report             ║$(NC)"
 	@echo "$(BLUE)╚══════════════════════════════════════════════════════════╝$(NC)"
