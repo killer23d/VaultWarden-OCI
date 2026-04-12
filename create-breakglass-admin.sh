@@ -14,12 +14,23 @@ init_common_lib "$0"
 source "lib/crypto.sh"
 source "lib/security.sh"
 
-# FIX [L-05]: Source SSH_PORT from .env so instructions show the correct port.
-# $SSH_PORT defaults to 22 if not set or not found in .env.
+# FIX [L-05]: Read SSH_PORT from the environment first, then fall back to .env.
+#
+# Rationale for NO 2>/dev/null on the grep:
+#   _require_root (called inside main() via is_root) exits early when the
+#   caller is not root.  By the time execution reaches this block we are
+#   guaranteed to be running as root, so a read error on .env is not a
+#   permissions issue under normal conditions — it signals a misconfigured
+#   setup (e.g. unexpected ownership or a broken filesystem mount) that
+#   must fail loudly rather than silently default to port 22 and print
+#   wrong emergency-access instructions.
+#
+#   The [[ -f ]] guard already handles the "file does not exist" case, so
+#   the only remaining stderr output from grep would be a genuine I/O
+#   error; let it propagate so the operator sees it.
 SSH_PORT="${SSH_PORT:-}"
 if [[ -z "$SSH_PORT" ]] && [[ -f "${PROJECT_ROOT}/.env" ]]; then
-    # Use grep -m1 to take the first match; strip surrounding quotes/spaces robustly.
-    SSH_PORT=$(grep -m1 -E '^[[:space:]]*SSH_PORT[[:space:]]*=' "${PROJECT_ROOT}/.env" 2>/dev/null \
+    SSH_PORT=$(grep -m1 -E '^[[:space:]]*SSH_PORT[[:space:]]*=' "${PROJECT_ROOT}/.env" \
         | sed 's/^[^=]*=[[:space:]]*//' | tr -d '"'"'" | tr -d '[:space:]') || true
 fi
 SSH_PORT="${SSH_PORT:-22}"
@@ -533,7 +544,7 @@ EOF
   _    _  ___  ____  _   _  _  _  ____  _ 
  ( \/\/ )/ __)(_  _)( )_( )( \/ )(__  )(_)
   )    (( (__  _)(_  ) _ (  )  (  _)(_  _ 
- (__/\__)\___)(____)((_) (_)(_/\_)(____)((_)
+ (__/\__)\___)(____)( (_) (_)(_/\_)(____)((_)
 EOF
     printf '%b\n' "${COLOR_RESET}"
 
