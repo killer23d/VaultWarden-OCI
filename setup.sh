@@ -634,6 +634,47 @@ setup_directories() {
     chmod 755 "${project_state_dir}/logs/caddy" || return 1
     log_info "Set ${project_state_dir}/logs/caddy to 755 (Caddy runs as root in container)"
 
+    # BUG-caddy-storage FIX: Caddy's TLS storage directories must be owned by
+    # root:root and traversable (755) so Caddy can write certificate material
+    # during the first ACME negotiation.
+    #
+    # Why root:root, not PUID:PGID:
+    #   Caddy runs as UID 0 inside its container. On OCI Compute, userns-remap
+    #   maps container UID 0 to an unprivileged host UID (e.g. 165536+), which
+    #   is neither PUID nor PGID. The broad 'chown -R PUID:PGID' pass above
+    #   would assign these directories to PUID, making them unreachable by the
+    #   remapped container root. We do a second targeted chown pass here,
+    #   running as real host root (setup.sh always runs under sudo), so the
+    #   inodes end up owned by host UID 0 — the only identity the remapped
+    #   container root maps to.
+    #
+    # Why 755, not 700:
+    #   700 is rwx------: only the exact owning UID can enter. The remapped
+    #   container UID is not host root (0), so 700 blocks traversal with
+    #   EACCES. 755 grants r-x to all, which is sufficient for a
+    #   non-world-writable storage directory containing private keys (the
+    #   keys themselves are created by Caddy with mode 0600).
+    #
+    # Pre-creating certificates/, locks/, ocsp/:
+    #   Caddy's ACME client attempts to mkdir these paths during the first TLS
+    #   negotiation, often under concurrent request load. Pre-creating them
+    #   here (owned by root:root, mode 755) eliminates the first-run race
+    #   where two goroutines simultaneously attempt to mkdir the same path.
+    local caddy_data_dir="${project_state_dir}/caddy/data"
+    local caddy_config_dir="${project_state_dir}/caddy/config"
+
+    mkdir -p \
+        "${caddy_data_dir}/caddy/certificates" \
+        "${caddy_data_dir}/caddy/locks" \
+        "${caddy_data_dir}/caddy/ocsp"
+
+    chown -R root:root "${caddy_data_dir}" "${caddy_config_dir}" || return 1
+    find "${caddy_data_dir}" "${caddy_config_dir}" -type d -exec chmod 755 {} + || return 1
+    find "${caddy_data_dir}" "${caddy_config_dir}" -type f -exec chmod 600 {} + 2>/dev/null || true
+
+    log_info "Set ${caddy_data_dir} and ${caddy_config_dir} to root:root 755 (Caddy ACME storage)"
+    log_info "Pre-created Caddy ACME subtree: certificates/ locks/ ocsp/"
+
     return 0
 }
 
