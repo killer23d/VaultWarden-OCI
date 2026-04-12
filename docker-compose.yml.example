@@ -239,6 +239,7 @@ services:
         limits:
           memory: 512M
           cpus: '0.25'
+          pids: 200  # Consistent PID cap; Caddy spawns goroutines per connection.
         reservations:
           memory: 128M
           cpus: '0.1'
@@ -276,7 +277,8 @@ services:
       - caddy_external
 
     healthcheck:
-      test: ["CMD", "sh", "-c", "nc -z localhost 587 2>/dev/null"]
+      # Use postfix's own status command instead of nc which may not be present.
+      test: ["CMD-SHELL", "postfix status 2>/dev/null || exit 1"]
       interval: 120s
       timeout: 10s
       retries: 5
@@ -377,6 +379,7 @@ services:
         limits:
           memory: 512M
           cpus: '0.15'
+          pids: 100  # fail2ban spawns action subprocesses; cap to prevent runaway banning storms.
         reservations:
           memory: 64M
           cpus: '0.05'
