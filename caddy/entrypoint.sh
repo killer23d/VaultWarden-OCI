@@ -136,6 +136,7 @@ fi
 # If DOMAIN_NAME is already present in the environment it is left untouched.
 : "${DOMAIN_NAME:=${DOMAIN#https://}}"
 : "${DOMAIN_NAME:=${DOMAIN#http://}}"
+export DOMAIN_NAME="${DOMAIN_NAME}"
 
 # FIX [M-16]: Validate required environment variables BEFORE starting Caddy
 # so we fail fast with a clear error, not a cryptic Caddy parse error.
