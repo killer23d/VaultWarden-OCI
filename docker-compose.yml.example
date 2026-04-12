@@ -180,6 +180,9 @@ services:
     environment:
       DOMAIN: ${DOMAIN}
       TZ: ${TZ:-UTC}
+      TLS_PROVIDER: ${TLS_PROVIDER:-cloudflare}
+      ADMIN_ALLOW_CIDR: ${ADMIN_ALLOW_CIDR}
+      PUSH_ENABLED: ${PUSH_ENABLED:-false}
 
     secrets:
       - caddy_cloudflare_dns_token
