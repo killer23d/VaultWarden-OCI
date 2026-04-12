@@ -247,12 +247,16 @@ load_env_file() {
             return 1
         fi
 
-        # Use declare -x instead of export "${key}=${value}" to prevent
-        # re-expansion of the RHS. export "key=value" passes the value through
-        # word-splitting in older bash and always re-expands $VAR references in
-        # the value string, which silently corrupts passwords such as Pass$word.
-        # declare -x assigns the literal string without any further expansion.
-        declare -x "$key"="$value"
+        # BUG FIX: declare -x inside a function only exports to the function's
+        # local scope — variables vanish when load_env_file returns, so
+        # get_config_value always saw empty strings for every .env key.
+        #
+        # Fix: printf -v writes the literal value into a global variable without
+        # any re-expansion of the RHS (safe for passwords like Pass$word), and
+        # the subsequent export propagates it to the calling script's environment
+        # where get_config_value can read it via ${!key}.
+        printf -v "$key" '%s' "$value"
+        export "$key"
 
     done < "$env_file"
 
