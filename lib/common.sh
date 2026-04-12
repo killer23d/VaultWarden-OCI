@@ -783,6 +783,21 @@ _smtp_send() {
 #   Resolution order:
 #     1. EMAIL_API_TOKEN env var (direct override, e.g. set in shell)
 #     2. decrypt_secret email_api_token  (from secrets.yaml via SOPS/age)
+#
+# --- FIX EM-L1-B (2026-04-12) -----------------------------------------------
+# The _EMAIL_DRIVERS associative array was removed in FIX EM-L1 when the
+# provider registry was refactored to the case-based _email_driver_lookup()
+# in lib/email.sh, but this function was not updated. Under set -u, any
+# reference to ${_EMAIL_DRIVERS[$provider]:-} on an undeclared associative
+# array triggers: "lib/common.sh: line N: mailgun: unbound variable".
+#
+# Fix: replace _EMAIL_DRIVERS lookups with _email_driver_lookup():
+#   - _email_driver_lookup validates the provider and returns the driver
+#     function suffix, including the host→postfix alias (FIX EM-H3).
+#   - The driver function name is built from the returned suffix so host
+#     and postfix both resolve to _email_driver_postfix automatically.
+#   - The error message lists the canonical provider names from the
+#     lookup function's own case arms.
 # ─────────────────────────────────────────────────────────────────────────────
 send_email() {
     local to subject body
@@ -831,14 +846,16 @@ Host:      $(hostname -f 2>/dev/null || hostname)
 Timestamp: $(date -uIs)
 Mode:      ${mode}${provider:+ / provider: ${provider}}"
 
-    # ── Stage 1: HTTP API ────────────────────────────────────────────────────────────────
+    # ── Stage 1: HTTP API ─────────────────────────────────────────────────────
     if [[ "$mode" == "auto" || "$mode" == "api" ]]; then
-        if [[ -z "${_EMAIL_DRIVERS[$provider]:-}" ]]; then
+        # FIX EM-L1-B: use _email_driver_lookup() — _EMAIL_DRIVERS no longer exists.
+        local driver_suffix
+        if ! driver_suffix=$(_email_driver_lookup "$provider" 2>/dev/null); then
             log_error "Unknown EMAIL_PROVIDER='${provider}'"
-            log_info  "Valid providers: ${!_EMAIL_DRIVERS[*]} smtp host"
+            log_info  "Valid providers: mailersend sendgrid mailgun postmark resend smtp host"
             [[ "$mode" == "api" ]] && return 1
         else
-            local driver_fn="_email_driver_${provider}"
+            local driver_fn="_email_driver_${driver_suffix}"
             local _api_token="${EMAIL_API_TOKEN:-}"
             # Canonical secrets key is 'email_api_token'.
             # edit-secrets.sh --rotate email_api_token writes under this exact key.
@@ -865,7 +882,7 @@ Mode:      ${mode}${provider:+ / provider: ${provider}}"
         fi
     fi
 
-    # ── Stage 2: SMTP relay (Postfix sidecar) ───────────────────────────────────
+    # ── Stage 2: SMTP relay (Postfix sidecar) ─────────────────────────────────
     if [[ "$mode" == "auto" || "$mode" == "smtp" ]]; then
         if _smtp_send "$to" "$subject" "$full_body"; then
             log_success "Email sent via SMTP relay (${SMTP_HOST:-unconfigured}:${SMTP_PORT:-587}): ${subject}"
@@ -879,7 +896,7 @@ Mode:      ${mode}${provider:+ / provider: ${provider}}"
         log_warn "SMTP relay failed — falling back to host MTA"
     fi
 
-    # ── Stage 3: Host MTA ────────────────────────────────────────────────────────────
+    # ── Stage 3: Host MTA ─────────────────────────────────────────────────────
     if [[ "$mode" == "auto" || "$mode" == "host" ]]; then
         if command -v mail &>/dev/null; then
             if printf '%s' "$full_body" | mail -s "$subject" "$to" 2>/dev/null; then
