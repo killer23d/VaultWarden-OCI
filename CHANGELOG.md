@@ -109,6 +109,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`.env.example`** — sentinel tokens for all external credentials; `LOG_LEVEL=warn`
   default; `PUSH_ENABLED=false`; Mailgun EU region note; backup retention comment.
   *(Phase 3)*
+- **`.env.example`** (`STARTUP-14`) — updated `SOPS_AGE_KEY_FILE` comment block
+  (`WHAT HAPPENS IF THE PATHS DISAGREE`) to document the auto-recovery behaviour
+  introduced in STARTUP-14: startup.sh no longer exits with an error when the
+  configured key path is absent but `secrets/keys/age-key.txt` is healthy; it
+  auto-recovers for the current boot and prints an ACTION REQUIRED advisory.
+  Updated item 14 in TEMPLATE REPLACEMENT NOTES accordingly.
 - **`docker-compose.yml.example`** — `read_only` filesystem; `tmpfs` mounts; `ulimits`
   (nofile); image-pin comment; `restart: unless-stopped`; `no-new-privileges:true`;
   Caddy log rotation tightened. *(Phase 3)*
@@ -139,6 +145,54 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`systemd/*.service`** — added `[Install]` section (`WantedBy=multi-user.target`) to all
   generated service unit files so `systemctl enable` is no longer a no-op.
   *(Phase 5 — P5-SD2)*
+- **`startup.sh`** (`STARTUP-8`) — `wait_for_services()` was called with bare service
+  names (`vaultwarden`, `caddy`) but `docker inspect` requires the full container name
+  set in `docker-compose.yml`. `docker inspect` on an unknown name exits 1 and returns
+  empty strings for health/running status, causing the polling loop to run for the full
+  90 s timeout on every startup before emitting misleading WARN messages despite the
+  stack being healthy. Fix: resolve container ID via `docker compose ps -q <service>`
+  so the lookup is correct regardless of `COMPOSE_PROJECT_NAME`.
+- **`startup.sh`** (`STARTUP-9`) — plaintext `EMAIL_API_TOKEN` or `SMTP_PASSWORD`
+  values in `.env` silently overrode the SOPS-managed workflow: `send_email()` preferred
+  `EMAIL_API_TOKEN` from the environment before decrypting from `secrets.yaml`, and
+  `_smtp_send()` switched to direct external SMTP whenever `SMTP_PASSWORD` was non-empty.
+  Fix: startup guard inspects the loaded environment after SOPS secrets are prepared and
+  emits loud warnings when these plaintext overrides are detected.
+- **`startup.sh`** (`STARTUP-10`) — `run_health_check()` treated `health.sh` exit 1
+  (warnings) and exit 2 (critical failures) identically — both fell through to a single
+  `log_warn`, giving operators a false green signal on a critically unhealthy stack.
+  Fix: capture the exit code explicitly and map: exit 0 → log_success, exit 1 →
+  log_warn (startup continues), exit 2 → log_error + abort. Matches the documented
+  exit-code contract in `health.sh --help`.
+- **`startup.sh`** (`STARTUP-11`) — `prepare_docker_secrets()` Python heredoc opened
+  `secrets.yaml` with a hardcoded relative path, ignoring the `SECRETS_FILE` variable
+  defined in `lib/secrets.sh`. Fix: pass `"$SECRETS_FILE"` as `sys.argv[1]` so the path
+  is always explicit and consistent with the rest of the secrets subsystem.
+- **`startup.sh`** (`STARTUP-12`) — `pull_images()` ran unconditionally on every
+  startup, including the systemd `ExecStart` path, adding 30–120 s to every restart on
+  metered or slow OCI connections. Fix: add `--skip-pull` flag (`SKIP_PULL=false`
+  default). Documented in `show_help()`. systemd operators should pass `--skip-pull`;
+  `update.sh` and manual `./startup.sh` remain the intended pull path.
+- **`startup.sh`** (`STARTUP-13`) — **HIGH** — `prepare_docker_secrets()` Python heredoc
+  was passed `"$secrets_file"` (the SOPS-encrypted source) as `sys.argv[1]` instead of
+  `"$cache_file"` (the decrypted output of `sops -d`). `yaml.safe_load()` parsed the
+  `ENC[AES256_GCM,…]` ciphertext strings as plain YAML and wrote them verbatim to
+  every file under `secrets/.docker_secrets/`. All Docker secret files contained raw
+  SOPS ciphertext rather than the actual decrypted token values. Fix: pass `"$cache_file"`
+  to the Python snippet so it reads the plaintext YAML that `sops -d` already wrote.
+- **`startup.sh`** (`STARTUP-14`) — **HIGH** — `check_age_key_health_preflight()`
+  aborted startup unconditionally when `SOPS_AGE_KEY_FILE` pointed at a non-existent
+  path (e.g. `/etc/vaultwarden/age-key.txt` not yet installed) even when the repo-local
+  key (`secrets/keys/age-key.txt`) was present and healthy. This blocked `make up` on
+  hosts where `setup.sh` placed the key under `secrets/keys/` but `.env` still
+  referenced the canonical system path — a common state after a fresh clone or
+  migration. `edit-secrets.sh` and `make test-secrets` succeeded on the same host
+  because they locate the key differently. Fix: if the configured path is absent but
+  the repo-local key passes `check_age_key_health()`, export
+  `SOPS_AGE_KEY_FILE=secrets/keys/age-key.txt` for the lifetime of the current process
+  only and continue startup, while emitting a prominent ACTION REQUIRED advisory (logged
+  at WARN level and repeated at the end of startup) instructing the operator to install
+  the key to `/etc/vaultwarden/age-key.txt` or update `.env` before the next restart.
 
 ---
 
