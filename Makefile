@@ -42,7 +42,7 @@ BACKUP_FILE ?=
         watch monitor \
         backup backup-full backup-emergency list-backups backup-status \
         restore restore-preflight restore-db restore-remote \
-        key-health key-backup key-escrow key-rotate key-show \
+        key-health key-backup key-escrow key-rotate key-show key-install \
         update check-updates update-system update-dns \
         maintenance maintenance-full \
         db-maint db-backup \
@@ -215,7 +215,8 @@ up: ## Start all services (runs startup.sh for health checks)
 		$(MAKE) status; \
 		echo ""; \
 		echo "$(YELLOW)If startup failed due to a missing or misconfigured Age key:$(NC)"; \
-		echo "$(YELLOW)  Run: make key-health$(NC)"; \
+		echo "$(YELLOW)  Diagnose: make key-health$(NC)"; \
+		echo "$(YELLOW)  Auto-fix: sudo make key-install$(NC)"; \
 		CONFIGURED_KEY=$$(grep '^SOPS_AGE_KEY_FILE=' .env 2>/dev/null | cut -d= -f2); \
 		[ -n "$$CONFIGURED_KEY" ] && echo "$(YELLOW)  Configured key path (from .env): $$CONFIGURED_KEY$(NC)"; \
 		echo "$(YELLOW)  Canonical production path:        /etc/vaultwarden/age-key.txt$(NC)"; \
@@ -472,16 +473,77 @@ key-health: ## Check age key health (permissions, decodability, SOPS_AGE_KEY_FIL
 		  echo "$(RED)Age key health check FAILED$(NC)"; \
 		  echo ""; \
 		  echo "$(YELLOW)Remediation steps:$(NC)"; \
-		  echo "$(YELLOW)  1. Production fix — install key to canonical path:$(NC)"; \
+		  echo "$(YELLOW)  1. Auto-install (recommended) — installs key to configured path:$(NC)"; \
+		  echo "$(YELLOW)       sudo make key-install$(NC)"; \
+		  echo "$(YELLOW)       make key-health$(NC)"; \
+		  echo ""; \
+		  echo "$(YELLOW)  2. Manual production fix — install key to canonical path:$(NC)"; \
 		  echo "$(YELLOW)       sudo install -d -m 700 /etc/vaultwarden$(NC)"; \
 		  echo "$(YELLOW)       sudo install -m 600 secrets/keys/age-key.txt /etc/vaultwarden/age-key.txt$(NC)"; \
 		  echo "$(YELLOW)       sudo chown root:root /etc/vaultwarden /etc/vaultwarden/age-key.txt$(NC)"; \
 		  echo "$(YELLOW)       # Set SOPS_AGE_KEY_FILE=/etc/vaultwarden/age-key.txt in .env$(NC)"; \
 		  echo "$(YELLOW)       make key-health$(NC)"; \
 		  echo ""; \
-		  echo "$(YELLOW)  2. Or re-run full setup: sudo make setup$(NC)"; \
+		  echo "$(YELLOW)  3. Or re-run full setup: sudo make setup$(NC)"; \
 		  exit 1; \
 		}
+
+# ---------------------------------------------------------------------------
+# key-install: install the Age private key from secrets/keys/age-key.txt to
+# the path configured in SOPS_AGE_KEY_FILE (default: /etc/vaultwarden/age-key.txt).
+#
+# This is the fast-path fix for the most common startup failure:
+#   "Age key missing: /etc/vaultwarden/age-key.txt"
+#
+# When to use:
+#   SOPS_AGE_KEY_FILE in .env points to /etc/vaultwarden/age-key.txt (or any
+#   system path) but the file does not yet exist there, while the key is
+#   already present at secrets/keys/age-key.txt (placed by setup-secrets.sh
+#   or the initial age-keygen run).
+#
+# What it does:
+#   1. Reads SOPS_AGE_KEY_FILE from .env.
+#   2. If the target already exists and is non-empty, exits without changes.
+#   3. Creates the parent directory (mode 700, root:root).
+#   4. Copies secrets/keys/age-key.txt → SOPS_AGE_KEY_FILE (mode 600, root:root).
+#   5. Runs make key-health to confirm the install succeeded.
+#
+# Important:
+#   - Requires sudo (modifies /etc or another system path).
+#   - Does NOT generate a new key — it only installs an existing one.
+#   - If secrets/keys/age-key.txt is also missing, run: sudo make setup
+# ---------------------------------------------------------------------------
+key-install: ## Install Age key from secrets/keys/ to the path in SOPS_AGE_KEY_FILE
+	$(call require-root)
+	$(call check-env-readable)
+	@echo "$(BLUE)Installing Age key...$(NC)"
+	@CONFIGURED_KEY=$$(grep '^SOPS_AGE_KEY_FILE=' .env 2>/dev/null | cut -d= -f2); \
+	CONFIGURED_KEY=$${CONFIGURED_KEY:-/etc/vaultwarden/age-key.txt}; \
+	REPO_KEY="secrets/keys/age-key.txt"; \
+	echo "  Target path  : $$CONFIGURED_KEY"; \
+	echo "  Source key   : $$REPO_KEY"; \
+	echo ""; \
+	if [ -s "$$CONFIGURED_KEY" ]; then \
+		echo "$(GREEN)  ✓ Key already present at $$CONFIGURED_KEY — no action needed.$(NC)"; \
+		echo "$(GREEN)    Run 'make key-health' to verify integrity.$(NC)"; \
+		exit 0; \
+	fi; \
+	if [ ! -f "$$REPO_KEY" ]; then \
+		echo "$(RED)ERROR: Source key not found at $$REPO_KEY$(NC)"; \
+		echo "$(RED)       No key to install. Run: sudo make setup to generate one.$(NC)"; \
+		exit 1; \
+	fi; \
+	TARGET_DIR=$$(dirname "$$CONFIGURED_KEY"); \
+	echo "$(BLUE)  Creating parent directory: $$TARGET_DIR$(NC)"; \
+	install -d -m 700 "$$TARGET_DIR"; \
+	chown root:root "$$TARGET_DIR"; \
+	echo "$(BLUE)  Copying key to: $$CONFIGURED_KEY$(NC)"; \
+	install -m 600 "$$REPO_KEY" "$$CONFIGURED_KEY"; \
+	chown root:root "$$CONFIGURED_KEY"; \
+	echo "$(GREEN)  ✓ Key installed at $$CONFIGURED_KEY (mode 600, root:root)$(NC)"; \
+	echo ""
+	@echo "$(BLUE)Verifying installation with key-health...$(NC)"
+	@$(MAKE) key-health
 
 key-show: ## Show current age public key and key file path/status
 	$(call check-env-readable)
@@ -496,7 +558,7 @@ key-show: ## Show current age public key and key file path/status
 		[ -n "$$PUB" ] && echo "  Public   : $$PUB" || echo "  Public   : $(YELLOW)(not found in key file)$(NC)"; \
 	else \
 		echo "  Status   : $(RED)MISSING$(NC)"; \
-		echo "  $(RED)Run: sudo make setup  or  sudo ./setup.sh to generate a key$(NC)"; \
+		echo "  $(RED)Run: sudo make key-install  (or: sudo make setup to generate a new key)$(NC)"; \
 	fi
 
 key-backup: ## Create printable key backup (PDF or HTML)
@@ -716,7 +778,7 @@ info: ## Show system information including version, age key status, and disk usa
 		PUB=$$(grep '# public key:' "$$KEY_FILE" 2>/dev/null | awk '{print $$NF}'); \
 		[ -n "$$PUB" ] && echo "  Public : $$PUB" || echo "  Public : $(YELLOW)(not found)$(NC)"; \
 	else \
-		echo "  $(RED)MISSING: $$KEY_FILE$(NC)  — backups will fail until key is restored"; \
+		echo "  $(RED)MISSING: $$KEY_FILE$(NC)  — run: sudo make key-install"; \
 	fi
 	@echo ""
 	@echo "$(GREEN)Services Status:$(NC)"
@@ -799,7 +861,7 @@ diagnose: ## Full diagnostic dump — versions, key status, disk, containers, la
 		PUB=$$(grep '# public key:' "$$KEY_FILE" 2>/dev/null | awk '{print $$NF}'); \
 		[ -n "$$PUB" ] && echo "  Public : $$PUB" || echo "  Public : $(YELLOW)(not found in key file)$(NC)"; \
 	else \
-		echo "  Status : $(RED)MISSING — backups will fail$(NC)"; \
+		echo "  Status : $(RED)MISSING — run: sudo make key-install$(NC)"; \
 	fi
 	@echo ""
 	@echo "$(CYAN)── Disk Usage ─────────────────────────────────────────────$(NC)"
