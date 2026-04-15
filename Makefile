@@ -448,10 +448,13 @@ key-health: ## Check age key health (permissions, decodability, SOPS_AGE_KEY_FIL
 #
 # What it does:
 #   1. Reads SOPS_AGE_KEY_FILE from .env.
-#   2. If the target already exists and is non-empty, exits without changes.
-#   3. Creates the parent directory (mode 700, root:root).
-#   4. Copies secrets/keys/age-key.txt → SOPS_AGE_KEY_FILE (mode 600, root:root).
-#   5. Runs make key-health to confirm the install succeeded.
+#   2. Self-referential path check (CONFIGURED == REPO_KEY):
+#      - File exists  → informational message, exit 0 (no install needed).
+#      - File missing → actionable error directing to ./setup-secrets.sh, exit 1.
+#   3. If target already exists and is non-empty, exits without changes.
+#   4. Creates the parent directory (mode 700, root:root).
+#   5. Copies secrets/keys/age-key.txt → SOPS_AGE_KEY_FILE (mode 600, root:root).
+#   6. Runs make key-health to confirm the install succeeded.
 #
 # Important:
 #   - Requires sudo (modifies /etc or another system path).
@@ -468,6 +471,22 @@ key-install: ## Install Age key from secrets/keys/ to the path in SOPS_AGE_KEY_F
 	echo "  Target path  : $$CONFIGURED_KEY"; \
 	echo "  Source key   : $$REPO_KEY"; \
 	echo ""; \
+	if [ "$$CONFIGURED_KEY" = "$$REPO_KEY" ]; then \
+		echo "$(CYAN)  Note: SOPS_AGE_KEY_FILE points at the repo-local key (Stage 1 / dev path).$(NC)"; \
+		echo "$(CYAN)        Installation to a system path is not needed at this lifecycle stage.$(NC)"; \
+		echo "$(CYAN)        The key is used in-place from: $$REPO_KEY$(NC)"; \
+		echo ""; \
+		if [ -s "$$CONFIGURED_KEY" ]; then \
+			echo "$(GREEN)  ✓ Key file exists and is non-empty at $$CONFIGURED_KEY$(NC)"; \
+			echo "$(GREEN)    Run 'make key-health' to verify decryption integrity.$(NC)"; \
+			exit 0; \
+		else \
+			echo "$(RED)  ✗ Key file NOT FOUND at $$CONFIGURED_KEY$(NC)"; \
+			echo "$(RED)    Secrets have not been initialised on this host yet.$(NC)"; \
+			echo "$(RED)    Run: ./setup-secrets.sh  (or: make init-secrets)$(NC)"; \
+			exit 1; \
+		fi; \
+	fi; \
 	if [ -s "$$CONFIGURED_KEY" ]; then \
 		echo "$(GREEN)  ✓ Key already present at $$CONFIGURED_KEY — no action needed.$(NC)"; \
 		echo "$(GREEN)    Run 'make key-health' to verify integrity.$(NC)"; \
