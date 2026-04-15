@@ -113,6 +113,27 @@
 #                      ciphertext instead of the decrypted token value.
 #                      Fix: pass "$cache_file" to the Python snippet so it reads
 #                      the plaintext YAML that sops -d already wrote.
+#
+# PATCHED BUGS (2026-04-15):
+#   STARTUP-14 [HIGH]  check_age_key_health_preflight(): when SOPS_AGE_KEY_FILE
+#                      pointed at a non-existent path (e.g. /etc/vaultwarden/
+#                      age-key.txt not yet installed) but the repo-local key
+#                      (secrets/keys/age-key.txt) was present and healthy,
+#                      startup aborted unconditionally with "Age key missing".
+#                      This blocked `make up` on any host where setup placed the
+#                      key under secrets/keys/ but .env still referenced the
+#                      canonical system path — a common state after a fresh
+#                      clone/migration when the key has not yet been installed
+#                      to /etc/vaultwarden/.
+#                      Both edit-secrets.sh and make test-secrets succeeded on
+#                      the same host because they locate keys differently.
+#                      Fix: if the configured path is absent but the repo-local
+#                      key passes check_age_key_health(), export
+#                      SOPS_AGE_KEY_FILE=<repo-local-path> for the lifetime of
+#                      this process only and continue startup, while emitting a
+#                      prominent ACTION REQUIRED advisory to update .env or
+#                      install the key to the canonical system path before the
+#                      next restart.
 
 set -euo pipefail
 trap 'rc=$?; log_error "STARTUP FAILED at line ${LINENO} (exit ${rc}) — check journalctl -u vaultwarden-startup"; exit "$rc"' ERR
@@ -467,6 +488,15 @@ prepare_log_directories() {
 # before any sops invocation so a corrupt, missing, or wrong-permissions age
 # key produces a clear actionable error message rather than the opaque
 # "Failed to decrypt secrets file" from sops.
+#
+# STARTUP-14 FIX: When the configured key path does not exist but the
+# repo-local key (secrets/keys/age-key.txt) is present and healthy, export
+# SOPS_AGE_KEY_FILE to the repo-local path for the current process only and
+# continue startup. A prominent ACTION REQUIRED advisory is printed so the
+# operator knows to either install the key to the canonical system path or
+# update .env before the next restart. This unblocks `make up` on hosts
+# where setup placed the key under secrets/keys/ but .env still points at
+# /etc/vaultwarden/age-key.txt (e.g. after a fresh clone or migration).
 # ---------------------------------------------------------------------------
 check_age_key_health_preflight() {
   # Resolve the configured key path from .env (already sourced by load_environment)
@@ -486,6 +516,47 @@ check_age_key_health_preflight() {
   local repo_local_key="${SCRIPT_DIR}/secrets/keys/age-key.txt"
   local canonical_key="/etc/vaultwarden/age-key.txt"
 
+  # ---------------------------------------------------------------------------
+  # STARTUP-14 FIX: auto-recover using the repo-local key
+  #
+  # If the repo-local key exists and is healthy, export it for this process
+  # only so SOPS can decrypt secrets without operator intervention. Emit a
+  # prominent advisory so the operator fixes .env before the next restart.
+  # This is NOT a silent fallback — the advisory is logged at WARN level and
+  # repeated at the end of startup so it cannot be missed.
+  # ---------------------------------------------------------------------------
+  if [[ -f "$repo_local_key" ]] && check_age_key_health "$repo_local_key" 2>/dev/null; then
+    log_warn "=========================================================="
+    log_warn "ACTION REQUIRED — Age key path mismatch detected"
+    log_warn "=========================================================="
+    log_warn "Configured path (SOPS_AGE_KEY_FILE in .env): ${configured_key}"
+    log_warn "That file does not exist or failed the health check."
+    log_warn ""
+    log_warn "A healthy repo-local key was found at: ${repo_local_key}"
+    log_warn "Using it for THIS startup only (process-scoped override)."
+    log_warn ""
+    log_warn "This is a temporary workaround. Before the next restart, do ONE of:"
+    log_warn ""
+    log_warn "  Option A — Install key to canonical system path (recommended for production):"
+    log_warn "    sudo install -d -m 700 /etc/vaultwarden"
+    log_warn "    sudo install -m 600 ${repo_local_key} ${canonical_key}"
+    log_warn "    sudo chown root:root /etc/vaultwarden ${canonical_key}"
+    log_warn "    # Verify: make key-health"
+    log_warn ""
+    log_warn "  Option B — Update .env to point at the repo-local key (local/dev only):"
+    log_warn "    sed -i 's|^SOPS_AGE_KEY_FILE=.*|SOPS_AGE_KEY_FILE=${repo_local_key}|' .env"
+    log_warn "    # Verify: make key-health"
+    log_warn ""
+    log_warn "  Option C — Run setup again to reinstall everything cleanly:"
+    log_warn "    sudo ./setup.sh --domain <your-domain> --email <your-email>"
+    log_warn "=========================================================="
+
+    # Export the repo-local path for this process only
+    export SOPS_AGE_KEY_FILE="$repo_local_key"
+    return 0
+  fi
+
+  # No usable key found anywhere — abort with full diagnostics.
   log_error "Age key health check FAILED for configured path: ${configured_key}"
   log_error ""
   log_error "SOPS cannot decrypt secrets without a valid Age private key."
@@ -521,22 +592,8 @@ check_age_key_health_preflight() {
     log_warn "    1. Update SOPS_AGE_KEY_FILE in .env to: ${canonical_key}"
     log_warn "    2. Verify with: make key-health"
     log_warn "    3. Retry: make up  (or ./startup.sh)"
-  elif [[ -f "$repo_local_key" ]]; then
-    log_warn "  A repo-local key was detected at: ${repo_local_key}"
-    log_warn "  This is NOT auto-loaded in production. Remediation options:"
-    log_warn ""
-    log_warn "  Option A — Production: install key to canonical path and update .env:"
-    log_warn "    sudo install -d -m 700 /etc/vaultwarden"
-    log_warn "    sudo install -m 600 ${repo_local_key} /etc/vaultwarden/age-key.txt"
-    log_warn "    sudo chown root:root /etc/vaultwarden /etc/vaultwarden/age-key.txt"
-    log_warn "    # Then set SOPS_AGE_KEY_FILE=${canonical_key} in .env"
-    log_warn "    make key-health && make up"
-    log_warn ""
-    log_warn "  Option B — Local/dev only: update .env to point at the repo-local key:"
-    log_warn "    # Set SOPS_AGE_KEY_FILE=${repo_local_key} in .env"
-    log_warn "    make key-health && make up"
   else
-    log_error "  No key was found at either path. Run: sudo make setup"
+    log_error "  No key was found at any known path. Run: sudo make setup"
   fi
 
   log_error ""
@@ -551,6 +608,7 @@ prepare_docker_secrets() {
   log_info "Preparing Docker secrets from SOPS..."
 
   # STARTUP-7 FIX: fail fast with actionable diagnostics if the age key is bad
+  # STARTUP-14 FIX: auto-recover with repo-local key if configured path missing
   check_age_key_health_preflight || return 1
 
   # STARTUP-11 FIX: Use the canonical SECRETS_FILE path (defined in
@@ -846,6 +904,20 @@ main() {
       exit 1
     }
     show_status || true
+  fi
+
+  # STARTUP-14: Re-emit the key-path advisory at the end of a successful
+  # startup so the operator notices it even if startup output is long.
+  if [[ "${SOPS_AGE_KEY_FILE:-}" == "${SCRIPT_DIR}/secrets/keys/age-key.txt" ]]; then
+    local cfg_key
+    cfg_key=$(grep '^SOPS_AGE_KEY_FILE=' .env 2>/dev/null | cut -d= -f2- || echo "(unknown)")
+    if [[ "$cfg_key" != "${SCRIPT_DIR}/secrets/keys/age-key.txt" ]]; then
+      log_warn "=========================================================="
+      log_warn "REMINDER: SOPS_AGE_KEY_FILE in .env (${cfg_key}) was overridden"
+      log_warn "at runtime by the repo-local key. Update .env or install"
+      log_warn "the key to /etc/vaultwarden/age-key.txt before next restart."
+      log_warn "=========================================================="
+    fi
   fi
 
   log_success "VaultWarden-OCI startup completed"
