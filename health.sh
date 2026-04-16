@@ -54,7 +54,7 @@ HEALTH_CONNECT_TIMEOUT=${HEALTH_CONNECT_TIMEOUT:-3}
 HEALTH_RETRIES=${HEALTH_RETRIES:-3}
 HEALTH_RETRY_DELAY=${HEALTH_RETRY_DELAY:-2}
 
-# When true, a non-200 response from /api/config is recorded as a hard
+# When true, a non-200 response from /api/server-info is recorded as a hard
 # failure (exit 2) rather than a warning (exit 1). Set in .env or the
 # calling environment to opt in to stricter alerting.
 HEALTH_API_STRICT=${HEALTH_API_STRICT:-false}
@@ -198,7 +198,7 @@ Checks performed:
   - Docker container status and health
   - SSL certificate validity and expiry
   - VaultWarden /alive liveness probe (internal + external HTTPS)
-  - VaultWarden /api/config readiness probe (public endpoint, confirms routing layer)
+  - VaultWarden /api/server-info readiness probe (requires live DB connection)
   - Fail2Ban status and jail activity
   - Disk space utilization
   - Memory utilization
@@ -210,13 +210,13 @@ Checks performed:
 Comprehensive mode adds:
   - Detailed container resource usage
   - SSL certificate chain validation
-  - Extended /api/config endpoint testing (explicit comprehensive result)
+  - Extended /api/server-info endpoint testing (explicit comprehensive result)
   - Backup integrity verification
   - Fail2Ban rule validation
   - Fail2Ban filter regex drift detection (vaultwarden-auth against live log)
 
 Environment variables:
-  HEALTH_API_STRICT=true          Promote /api/config non-200 from warning to failure
+  HEALTH_API_STRICT=true          Promote /api/server-info non-200 from warning to failure
   ALERT_COOLDOWN_SECONDS=3600     Minimum seconds between repeat alerts for the same
                                   failure key (default: 3600 = 1 hour)
   ALERT_RECOVERY_TTL=86400        Minimum seconds between clear-state recovery emails
@@ -259,260 +259,83 @@ _warn() { _record "$1" warn "$2"; }
 _fail() { _record "$1" fail "$2"; }
 
 # =============================================================================
-# UTILITY FUNCTIONS
+# DOMAIN RESOLUTION
 # =============================================================================
 
-# _check_command <cmd> <friendly-name>
-_check_command() {
-    local cmd="$1" name="${2:-$1}"
-    if ! command -v "$cmd" &>/dev/null; then
-        log_error "Required command not found: $name ($cmd)"
-        return 1
-    fi
-    return 0
-}
-
-# _get_domain
-# Try multiple sources to determine the public domain
 _get_domain() {
-    local d=""
-
-    # 1) Explicit env var used by this project
-    d="${DOMAIN:-}"
-
-    # 2) If not set, try extracting from Caddyfile/common config if present
-    if [[ -z "$d" ]] && [[ -f "${SCRIPT_DIR}/caddy/Caddyfile" ]]; then
-        d=$(grep -E '^[[:space:]]*[A-Za-z0-9._-]+[[:space:]]*\{' "${SCRIPT_DIR}/caddy/Caddyfile" 2>/dev/null \
-            | head -1 \
-            | sed -E 's/^[[:space:]]*([^[:space:]]+)[[:space:]]*\{.*/\1/' \
-            || true)
+    # Priority: DOMAIN_NAME (bare) → DOMAIN (strip protocol) → empty
+    # DOMAIN is already exported by load_env_file() at startup; a direct
+    # grep on ${ENV_FILE} would bypass the already-loaded environment and
+    # silently return empty when .env is root-owned (permission denied).
+    if [[ -n "${DOMAIN_NAME:-}" ]]; then
+        echo "${DOMAIN_NAME}"
+    elif [[ -n "${DOMAIN:-}" ]]; then
+        echo "${DOMAIN#https://}" | sed 's|http://||'
+    else
+        echo ""
     fi
-
-    printf '%s' "$d"
-}
-
-# _email_available_bool
-_email_available_bool() {
-    [[ "${_email_available:-false}" == "true" ]]
-}
-
-# _send_alert_email <subject> <body>
-_send_alert_email() {
-    local subject="$1" body="$2"
-
-    if ! _email_available_bool; then
-        log_debug "Email notifications unavailable; skipping alert email"
-        return 0
-    fi
-
-    # email_send is provided by lib/email.sh; failures are non-fatal here
-    if ! email_send "$subject" "$body" 2>/dev/null; then
-        log_warn "Failed to send alert email"
-        return 1
-    fi
-    return 0
-}
-
-# _format_report
-_format_report() {
-    local line name status icon
-
-    echo "================================================================="
-    echo " VaultWarden Health Check Results"
-    echo "================================================================="
-
-    for name in "${check_order[@]}"; do
-        status="${check_results[$name]}"
-        case "$status" in
-            pass) icon="pass" ;;
-            warn) icon="warn" ;;
-            fail) icon="fail" ;;
-            *)    icon="info" ;;
-        esac
-        printf '[%s] %-40s %s\n' "$icon" "$name" "${check_messages[$name]}"
-    done
-
-    echo "-----------------------------------------------------------------"
-    echo "Total: ${total} | Passed: ${passed} | Warnings: ${warnings} | Failed: ${failed}"
-    echo "================================================================="
-}
-
-# _save_report
-_save_report() {
-    mkdir -p "$REPORT_DIR" 2>/dev/null || true
-
-    local ts report_file
-    ts=$(date +%Y%m%d-%H%M%S)
-    report_file="${REPORT_DIR}/health-${ts}.txt"
-
-    _format_report > "$report_file"
-    log_info "Health report saved: $report_file"
-
-    # Cleanup old reports
-    find "$REPORT_DIR" -type f -name 'health-*.txt' -mtime "+${REPORT_RETENTION_DAYS}" -delete 2>/dev/null || true
-}
-
-# _should_send_alert <check-name>
-_should_send_alert() {
-    local check_name="$1"
-    if _acquire_alert_lock "$check_name"; then
-        return 0
-    fi
-
-    log_info "Alert cooldown active for '$check_name' — suppressing repeat notification"
-    return 1
-}
-
-# _send_failure_notifications
-_send_failure_notifications() {
-    local name subject body
-    for name in "${check_order[@]}"; do
-        case "${check_results[$name]}" in
-            warn|fail)
-                if ! _should_send_alert "$name"; then
-                    continue
-                fi
-
-                subject="[VaultWarden] Health ${check_results[$name]}: ${name}"
-                body=$(cat <<EOF
-VaultWarden health check reported ${check_results[$name]}.
-
-Check: ${name}
-Message: ${check_messages[$name]}
-Host: $(hostname -f 2>/dev/null || hostname)
-Time: $(date -Is)
-
-Summary:
-Passed: ${passed}
-Warnings: ${warnings}
-Failed: ${failed}
-EOF
-)
-                _send_alert_email "$subject" "$body" || true
-                ;;
-        esac
-    done
-}
-
-# _send_recovery_notification
-_send_recovery_notification() {
-    # Only send one recovery email per TTL window.
-    mkdir -p "${ALERT_LOCK_DIR}" 2>/dev/null || true
-
-    exec 201>"${ALERT_LOCK_DIR}/recovery.lock" 2>/dev/null || return 0
-    if ! flock -w 0 201 2>/dev/null; then
-        log_debug "Recovery notification cooldown active — suppressing clear-state email"
-        return 0
-    fi
-
-    # Hold the lock for ALERT_RECOVERY_TTL seconds in the background.
-    ( sleep "${ALERT_RECOVERY_TTL}" ) 201>&201 &
-    disown $!
-
-    local subject body
-    subject="[VaultWarden] Health recovered"
-    body=$(cat <<EOF
-VaultWarden health checks have recovered. All checks are now passing.
-
-Host: $(hostname -f 2>/dev/null || hostname)
-Time: $(date -Is)
-
-Summary:
-Passed: ${passed}
-Warnings: ${warnings}
-Failed: ${failed}
-EOF
-)
-    _send_alert_email "$subject" "$body" || true
 }
 
 # =============================================================================
-# PREREQUISITE VALIDATION
-# =============================================================================
-
-_validate_prereqs() {
-    local ok=true
-
-    _check_command docker "Docker" || ok=false
-    _check_command curl "curl" || ok=false
-    _check_command openssl "OpenSSL" || ok=false
-
-    if ! command -v dig &>/dev/null && ! command -v nslookup &>/dev/null; then
-        log_warn "Neither 'dig' nor 'nslookup' is installed — DNS checks will be limited"
-    fi
-
-    if [[ "$ok" != true ]]; then
-        return 1
-    fi
-    return 0
-}
-
-# =============================================================================
-# CONTAINER CHECKS
+# CONTAINER HEALTH CHECKS
 # =============================================================================
 
 _check_containers() {
     log_info "Checking container status..."
 
-    local containers=(
-        vaultwarden_app
-        vaultwarden_caddy
-        vaultwarden_fail2ban
-        vaultwarden_postfix
-    )
-
-    local c id state health inspect
+    local containers=("vaultwarden_app" "vaultwarden_caddy" "vaultwarden_fail2ban" "vaultwarden_postfix")
     local all_healthy=true
 
-    for c in "${containers[@]}"; do
-        if ! id=$(docker ps -aqf "name=^${c}$" 2>/dev/null | head -1); then
-            _fail "container:${c}" "${c} not found"
+    for container in "${containers[@]}"; do
+        if ! docker inspect "$container" &>/dev/null; then
+            _fail "container:${container}" "Container not found: $container"
             all_healthy=false
             continue
         fi
 
-        if [[ -z "$id" ]]; then
-            _fail "container:${c}" "${c} not found"
+        local status running health
+        status=$(docker inspect --format='{{.State.Status}}' "$container" 2>/dev/null || echo "unknown")
+        running=$(docker inspect --format='{{.State.Running}}' "$container" 2>/dev/null || echo "false")
+
+        if [[ "$running" != "true" ]]; then
+            _fail "container:${container}" "Container not running: $container (status: $status)"
             all_healthy=false
             continue
         fi
 
-        inspect=$(docker inspect "$id" 2>/dev/null || true)
-        state=$(echo "$inspect" | grep -o '"Status": *"[^"]*"' | head -1 | sed -E 's/.*"([^"]+)"/\1/' || echo "unknown")
-        health=$(echo "$inspect" | grep -o '"Health": *{' -n >/dev/null 2>&1 && echo "$inspect" | grep -o '"Status": *"[^"]*"' | sed -n '2p' | sed -E 's/.*"([^"]+)"/\1/' || true)
+        # Check Docker healthcheck status if available
+        health=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' "$container" 2>/dev/null || echo "unknown")
 
-        if [[ "$state" != "running" ]]; then
-            _fail "container:${c}" "${c} is not running (state: ${state})"
-            all_healthy=false
-            continue
-        fi
-
-        if [[ -n "$health" ]]; then
-            case "$health" in
-                healthy)
-                    _pass "container:${c}" "${c} is running (health: healthy)"
-                    ;;
-                starting)
-                    _warn "container:${c}" "${c} is running (health: starting)"
-                    all_healthy=false
-                    ;;
-                unhealthy)
-                    _fail "container:${c}" "${c} is running (health: unhealthy)"
-                    all_healthy=false
-                    ;;
-                *)
-                    _warn "container:${c}" "${c} is running (health: ${health})"
-                    all_healthy=false
-                    ;;
-            esac
-        else
-            _pass "container:${c}" "${c} is running"
-        fi
+        case "$health" in
+            healthy|no-healthcheck)
+                _pass "container:${container}" "$container is running (health: $health)"
+                ;;
+            starting)
+                _warn "container:${container}" "$container is starting up (health: starting)"
+                ;;
+            unhealthy)
+                _fail "container:${container}" "$container is unhealthy"
+                all_healthy=false
+                ;;
+            *)
+                _warn "container:${container}" "$container health status unknown: $health"
+                ;;
+        esac
     done
 
-    if [[ "$all_healthy" == true ]]; then
-        log_info "All containers healthy"
-    fi
+    $all_healthy && log_info "All containers healthy" || true
+}
+
+_fix_unhealthy_containers() {
+    log_info "Attempting to restart unhealthy containers..."
+    for name in "${check_order[@]}"; do
+        if [[ "${check_results[$name]}" == "fail" && "$name" == container:* ]]; then
+            local container="${name#container:}"
+            log_warn "Restarting: $container"
+            docker restart "$container" 2>/dev/null || log_error "Failed to restart $container"
+            sleep 5
+        fi
+    done
 }
 
 # =============================================================================
@@ -524,36 +347,47 @@ _check_ssl() {
     domain="$(_get_domain)"
 
     if [[ -z "$domain" ]]; then
-        _warn "ssl:cert" "Cannot determine domain — SSL check skipped"
+        _warn "ssl:cert" "Cannot check SSL — domain not configured"
         return
     fi
 
-    log_info "Checking SSL certificate for ${domain}..."
+    log_info "Checking SSL certificate for $domain..."
 
-    local enddate now_ts end_ts days_left cert_output
-    cert_output=$(timeout "$HEALTH_TIMEOUT" openssl s_client -servername "$domain" -connect "${domain}:443" </dev/null 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null || true)
-
-    if [[ -z "$cert_output" ]]; then
-        _fail "ssl:cert" "Could not retrieve SSL certificate for ${domain}"
+    # Check certificate expiry
+    local expiry_output
+    expiry_output=$(echo | timeout "$HEALTH_TIMEOUT" openssl s_client \
+        -connect "${domain}:443" \
+        -servername "$domain" 2>/dev/null | \
+        openssl x509 -noout -enddate 2>/dev/null) || {
+        _fail "ssl:cert" "Cannot connect to ${domain}:443 for SSL check"
         return
-    fi
+    }
 
-    enddate=${cert_output#notAfter=}
-    if ! end_ts=$(date -d "$enddate" +%s 2>/dev/null); then
-        _warn "ssl:cert" "Could not parse certificate expiry for ${domain}: ${enddate}"
-        return
-    fi
-    now_ts=$(date +%s)
-    days_left=$(( (end_ts - now_ts) / 86400 ))
+    local expiry_date expiry_epoch now_epoch days_remaining
+    expiry_date=$(echo "$expiry_output" | sed 's/notAfter=//')
+    expiry_epoch=$(date -d "$expiry_date" +%s 2>/dev/null || date -jf "%b %e %T %Y %Z" "$expiry_date" +%s 2>/dev/null || echo 0)
+    now_epoch=$(date +%s)
+    days_remaining=$(( (expiry_epoch - now_epoch) / 86400 ))
 
-    if [[ $days_left -lt 0 ]]; then
-        _fail "ssl:cert" "SSL certificate expired for ${domain} ($((-days_left)) days ago)"
-    elif [[ $days_left -le $CERT_CRIT_DAYS ]]; then
-        _fail "ssl:cert" "SSL certificate expires soon for ${domain} (${days_left} days remaining)"
-    elif [[ $days_left -le $CERT_WARN_DAYS ]]; then
-        _warn "ssl:cert" "SSL certificate warning for ${domain} (${days_left} days remaining)"
+    if [[ $days_remaining -le 0 ]]; then
+        _fail "ssl:cert" "SSL certificate EXPIRED for $domain (expired $expiry_date)"
+    elif [[ $days_remaining -le $CERT_CRIT_DAYS ]]; then
+        _fail "ssl:cert" "SSL certificate expires in ${days_remaining} days for $domain (critical threshold: ${CERT_CRIT_DAYS} days)"
+    elif [[ $days_remaining -le $CERT_WARN_DAYS ]]; then
+        _warn "ssl:cert" "SSL certificate expires in ${days_remaining} days for $domain (warning threshold: ${CERT_WARN_DAYS} days)"
     else
-        _pass "ssl:cert" "SSL certificate valid for ${domain} (${days_left} days remaining)"
+        _pass "ssl:cert" "SSL certificate valid for $domain (${days_remaining} days remaining)"
+    fi
+
+    # Comprehensive: validate full chain
+    if $COMPREHENSIVE; then
+        local verify_output
+        verify_output=$(echo | timeout "$HEALTH_TIMEOUT" openssl s_client \
+            -connect "${domain}:443" \
+            -servername "$domain" \
+            -verify_return_error 2>&1) && \
+            _pass "ssl:chain" "SSL certificate chain valid for $domain" || \
+            _warn "ssl:chain" "SSL chain validation warning for $domain"
     fi
 }
 
@@ -562,26 +396,29 @@ _check_ssl() {
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# _check_vaultwarden_liveness
+# _check_vaultwarden_alive
 #
 # Liveness probe: checks /alive (Rocket framework built-in).
-# Internal path is tried first (localhost→Caddy, then app container direct);
-# external HTTPS path is also checked when DOMAIN is configured.
+# Returns 200 as long as the process is running — does NOT require a live
+# DB connection. Used to detect process crashes or container restarts.
 # -----------------------------------------------------------------------------
-_check_vaultwarden_liveness() {
+_check_vaultwarden_alive() {
     local domain
     domain="$(_get_domain)"
 
     log_info "Checking VaultWarden liveness (/alive)..."
 
-    # Internal: try local proxy first, then direct container
-    if timeout "$HEALTH_TIMEOUT" curl -sf \
+    # Internal health check (direct to container).
+    # --connect-timeout bounds TCP/TLS handshake separately from total transfer
+    # time; without it a hung handshake consumes the full --max-time budget.
+    local internal_response
+    if internal_response=$(timeout "$HEALTH_TIMEOUT" curl -sf \
         --connect-timeout "$HEALTH_CONNECT_TIMEOUT" \
         --max-time "$HEALTH_TIMEOUT" \
-        "http://127.0.0.1:80/alive" 2>/dev/null; then
+        "http://127.0.0.1:80/alive" 2>/dev/null); then
         _pass "vaultwarden:alive" "VaultWarden /alive endpoint responding"
     else
-        # Try direct app container endpoint as fallback
+        # Try via docker network
         if docker exec vaultwarden_app curl -sf \
             --connect-timeout "$HEALTH_CONNECT_TIMEOUT" \
             --max-time "$HEALTH_TIMEOUT" \
@@ -592,7 +429,7 @@ _check_vaultwarden_liveness() {
         fi
     fi
 
-    # External HTTPS check
+    # External HTTPS check (only if domain is configured)
     if [[ -n "$domain" ]]; then
         local external_code
         external_code=$(timeout "$HEALTH_TIMEOUT" curl -so /dev/null \
@@ -602,9 +439,10 @@ _check_vaultwarden_liveness() {
             "https://${domain}/alive" 2>/dev/null || echo "000")
 
         case "$external_code" in
-            200) _pass "vaultwarden:external" "VaultWarden HTTPS responding (HTTP 200)" ;;
-            000) _fail "vaultwarden:external" "VaultWarden HTTPS not reachable" ;;
-            *)   _warn "vaultwarden:external" "VaultWarden HTTPS returned HTTP $external_code" ;;
+            200) _pass "vaultwarden:external" "VaultWarden HTTPS responding (HTTP $external_code)" ;;
+            301|302) _warn "vaultwarden:external" "VaultWarden HTTPS redirect (HTTP $external_code)" ;;
+            000) _fail "vaultwarden:external" "VaultWarden HTTPS not reachable (connection failed)" ;;
+            *) _warn "vaultwarden:external" "VaultWarden HTTPS returned HTTP $external_code" ;;
         esac
     fi
 }
@@ -612,28 +450,22 @@ _check_vaultwarden_liveness() {
 # -----------------------------------------------------------------------------
 # _check_vaultwarden_server_info
 #
-# Readiness probe: checks /api/config.
-#
-# Background: /api/server-info does not exist in Vaultwarden; the route was
-# never registered by the application and always returns HTTP 404.  The correct
-# unauthenticated readiness endpoint is /api/config, which is served by
-# Vaultwarden's core router, requires no credentials, and confirms the HTTP
-# stack is up and the configuration subsystem is reachable.
-#
-# Note: /alive already exercises the database connection (DbConn) and is
-# checked separately by _check_vaultwarden_liveness.  /api/config provides a
-# complementary signal: it confirms the full Rocket routing layer is serving
-# authenticated-optional endpoints, a step beyond the bare liveness ping.
+# Readiness probe: checks /api/server-info.
+# This endpoint exercises the database connection path; it will return a
+# non-200 code (or time out) if the DB is locked, the secrets mount has
+# failed, or the application is in a degraded state despite /alive returning
+# 200. Running this in the default (non-comprehensive) path ensures that the
+# systemd health timer catches real service outages, not just process crashes.
 #
 # Default behaviour: non-200 is recorded as a WARNING (exit 1) so a single
-# transient blip does not wake the operator at 3 AM.  Set HEALTH_API_STRICT=true
+# transient blip does not wake the operator at 3 AM. Set HEALTH_API_STRICT=true
 # in .env to promote non-200 to a hard FAILURE (exit 2).
 # -----------------------------------------------------------------------------
 _check_vaultwarden_server_info() {
     local domain
     domain="$(_get_domain)"
 
-    log_info "Checking VaultWarden readiness (/api/config)..."
+    log_info "Checking VaultWarden readiness (/api/server-info)..."
 
     # Internal readiness probe — direct to container, bypasses Caddy.
     local internal_code
@@ -641,21 +473,21 @@ _check_vaultwarden_server_info() {
         --connect-timeout "$HEALTH_CONNECT_TIMEOUT" \
         --max-time "$HEALTH_TIMEOUT" \
         -w "%{http_code}" \
-        "http://127.0.0.1:80/api/config" 2>/dev/null || echo "000")
+        "http://127.0.0.1:80/api/server-info" 2>/dev/null || echo "000")
 
     case "$internal_code" in
         200)
-            _pass "vaultwarden:server-info" "VaultWarden /api/config responding (HTTP $internal_code)"
+            _pass "vaultwarden:server-info" "VaultWarden /api/server-info responding (HTTP $internal_code)"
             ;;
         000)
             # Connection refused or timeout — hard fail regardless of HEALTH_API_STRICT
-            _fail "vaultwarden:server-info" "VaultWarden /api/config not reachable internally (connection failed)"
+            _fail "vaultwarden:server-info" "VaultWarden /api/server-info not reachable internally (connection failed)"
             ;;
         *)
             if [[ "${HEALTH_API_STRICT:-false}" == "true" ]]; then
-                _fail "vaultwarden:server-info" "VaultWarden /api/config returned HTTP ${internal_code} (HEALTH_API_STRICT=true)"
+                _fail "vaultwarden:server-info" "VaultWarden /api/server-info returned HTTP ${internal_code} (HEALTH_API_STRICT=true)"
             else
-                _warn "vaultwarden:server-info" "VaultWarden /api/config returned HTTP ${internal_code} (set HEALTH_API_STRICT=true to treat as failure)"
+                _warn "vaultwarden:server-info" "VaultWarden /api/server-info returned HTTP ${internal_code} (set HEALTH_API_STRICT=true to treat as failure)"
             fi
             ;;
     esac
@@ -667,20 +499,20 @@ _check_vaultwarden_server_info() {
             --connect-timeout "$HEALTH_CONNECT_TIMEOUT" \
             --max-time "$HEALTH_TIMEOUT" \
             -w "%{http_code}" \
-            "https://${domain}/api/config" 2>/dev/null || echo "000")
+            "https://${domain}/api/server-info" 2>/dev/null || echo "000")
 
         case "$external_code" in
             200)
-                _pass "vaultwarden:server-info:external" "VaultWarden /api/config HTTPS responding (HTTP $external_code)"
+                _pass "vaultwarden:server-info:external" "VaultWarden /api/server-info HTTPS responding (HTTP $external_code)"
                 ;;
             000)
-                _fail "vaultwarden:server-info:external" "VaultWarden /api/config HTTPS not reachable (connection failed)"
+                _fail "vaultwarden:server-info:external" "VaultWarden /api/server-info HTTPS not reachable (connection failed)"
                 ;;
             *)
                 if [[ "${HEALTH_API_STRICT:-false}" == "true" ]]; then
-                    _fail "vaultwarden:server-info:external" "VaultWarden /api/config HTTPS returned HTTP ${external_code} (HEALTH_API_STRICT=true)"
+                    _fail "vaultwarden:server-info:external" "VaultWarden /api/server-info HTTPS returned HTTP ${external_code} (HEALTH_API_STRICT=true)"
                 else
-                    _warn "vaultwarden:server-info:external" "VaultWarden /api/config HTTPS returned HTTP ${external_code}"
+                    _warn "vaultwarden:server-info:external" "VaultWarden /api/server-info HTTPS returned HTTP ${external_code}"
                 fi
                 ;;
         esac
@@ -694,7 +526,7 @@ _check_vaultwarden_server_info() {
             --connect-timeout "$HEALTH_CONNECT_TIMEOUT" \
             --max-time "$HEALTH_TIMEOUT" \
             -w "%{http_code}" \
-            "https://${domain}/api/config" 2>/dev/null || echo "000")
+            "https://${domain}/api/server-info" 2>/dev/null || echo "000")
         case "$comp_code" in
             200) _pass "vaultwarden:api" "VaultWarden API endpoint responding (HTTP $comp_code)" ;;
             *) _warn "vaultwarden:api" "VaultWarden API returned HTTP $comp_code" ;;
@@ -867,35 +699,31 @@ _check_network() {
     if timeout "$HEALTH_TIMEOUT" curl -sf \
         --connect-timeout "$HEALTH_CONNECT_TIMEOUT" \
         --max-time "$HEALTH_TIMEOUT" \
-        https://1.1.1.1 &>/dev/null; then
+        "https://1.1.1.1" &>/dev/null || \
+       timeout "$HEALTH_TIMEOUT" curl -sf \
+        --connect-timeout "$HEALTH_CONNECT_TIMEOUT" \
+        --max-time "$HEALTH_TIMEOUT" \
+        "https://cloudflare.com" &>/dev/null; then
         _pass "network:outbound" "Outbound internet connectivity OK"
     else
-        _fail "network:outbound" "Cannot reach outbound internet (https://1.1.1.1)"
+        _warn "network:outbound" "Outbound internet connectivity check failed (Cloudflare unreachable)"
     fi
 
-    # Check Cloudflare reachability (used by some deployments)
+    # Check Cloudflare API reachability
     local cf_code
     cf_code=$(timeout "$HEALTH_TIMEOUT" curl -so /dev/null \
         --connect-timeout "$HEALTH_CONNECT_TIMEOUT" \
         --max-time "$HEALTH_TIMEOUT" \
         -w "%{http_code}" \
-        https://api.cloudflare.com 2>/dev/null || echo "000")
-
+        "https://api.cloudflare.com/" 2>/dev/null || echo "000")
     case "$cf_code" in
-        200|301|302|403)
-            _pass "network:cloudflare" "Cloudflare API reachable (HTTP $cf_code)"
-            ;;
-        000)
-            _warn "network:cloudflare" "Cloudflare API not reachable"
-            ;;
-        *)
-            _warn "network:cloudflare" "Cloudflare API returned HTTP $cf_code"
-            ;;
+        200|301|302|400|401|403) _pass "network:cloudflare" "Cloudflare API reachable (HTTP $cf_code)" ;;
+        *) _warn "network:cloudflare" "Cloudflare API not reachable (HTTP $cf_code)" ;;
     esac
 }
 
 # =============================================================================
-# DNS CHECKS
+# DNS RESOLUTION CHECKS
 # =============================================================================
 
 _check_dns() {
@@ -903,68 +731,58 @@ _check_dns() {
     domain="$(_get_domain)"
 
     if [[ -z "$domain" ]]; then
-        _warn "dns:resolution" "Cannot determine domain — DNS check skipped"
+        _warn "dns:resolution" "Cannot check DNS — domain not configured"
         return
     fi
 
-    log_info "Checking DNS resolution for ${domain}..."
+    log_info "Checking DNS resolution for $domain..."
 
-    local resolved=""
-    if command -v dig &>/dev/null; then
-        resolved=$(dig +short "$domain" A 2>/dev/null | head -1 || true)
-    elif command -v nslookup &>/dev/null; then
-        resolved=$(nslookup "$domain" 2>/dev/null | awk '/^Address: / {print $2}' | tail -1 || true)
-    fi
-
-    if [[ -n "$resolved" ]]; then
-        _pass "dns:resolution" "DNS resolves ${domain} → ${resolved}"
+    local resolved_ip
+    if resolved_ip=$(timeout "$HEALTH_TIMEOUT" dig +short "$domain" 2>/dev/null | grep -v '^;' | head -1) && [[ -n "$resolved_ip" ]]; then
+        _pass "dns:resolution" "DNS resolves $domain → $resolved_ip"
+    elif resolved_ip=$(timeout "$HEALTH_TIMEOUT" nslookup "$domain" 2>/dev/null | awk '/^Address/ && NR>1 {print $2}' | head -1) && [[ -n "$resolved_ip" ]]; then
+        _pass "dns:resolution" "DNS resolves $domain → $resolved_ip (via nslookup)"
     else
-        _fail "dns:resolution" "DNS does not resolve ${domain}"
+        _fail "dns:resolution" "DNS resolution failed for $domain"
     fi
 }
 
 # =============================================================================
-# BACKUP CHECKS
+# BACKUP STATUS CHECKS
 # =============================================================================
 
 _check_backups() {
     log_info "Checking backup status..."
 
-    local state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
-    local backup_dir="${BACKUP_DIR:-${state_dir}/backups}"
+    local backup_dir="${BACKUP_DIR:-${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/backups}"
+    local max_age_hours=${BACKUP_MAX_AGE_HOURS:-26}  # Alert if no backup in 26 hours
 
     if [[ ! -d "$backup_dir" ]]; then
-        _warn "backup:age" "Backup directory not found: ${backup_dir}"
+        _warn "backup:dir" "Backup directory not found: $backup_dir"
         return
     fi
 
-    local latest latest_file age_hours now_ts file_ts
-    latest=$(find "$backup_dir" -maxdepth 1 -type f 2>/dev/null | sort | tail -1 || true)
+    # Find most recent backup across all types
+    local latest_backup latest_age_hours
+    latest_backup=$(find "$backup_dir" -name '*.age' -newer "/tmp" 2>/dev/null | \
+        xargs ls -t 2>/dev/null | head -1 || \
+        find "$backup_dir" -name '*.age' 2>/dev/null | xargs ls -t 2>/dev/null | head -1)
 
-    if [[ -z "$latest" ]]; then
-        _warn "backup:age" "No backup files found in ${backup_dir}"
+    if [[ -z "$latest_backup" ]]; then
+        _warn "backup:age" "No backup archives found in $backup_dir"
         return
     fi
 
-    latest_file=$(basename "$latest")
-    now_ts=$(date +%s)
-    file_ts=$(stat -c %Y "$latest" 2>/dev/null || echo 0)
-    age_hours=$(( (now_ts - file_ts) / 3600 ))
+    # Calculate age in hours
+    local backup_mtime now_epoch
+    backup_mtime=$(stat -c %Y "$latest_backup" 2>/dev/null || stat -f %m "$latest_backup" 2>/dev/null || echo 0)
+    now_epoch=$(date +%s)
+    latest_age_hours=$(( (now_epoch - backup_mtime) / 3600 ))
 
-    if [[ $age_hours -le 24 ]]; then
-        _pass "backup:age" "Most recent backup is ${age_hours}h old: ${latest_file}"
-    elif [[ $age_hours -le 72 ]]; then
-        _warn "backup:age" "Most recent backup is ${age_hours}h old: ${latest_file}"
+    if [[ $latest_age_hours -gt $max_age_hours ]]; then
+        _warn "backup:age" "Most recent backup is ${latest_age_hours}h old (threshold: ${max_age_hours}h): $(basename "$latest_backup")"
     else
-        _fail "backup:age" "Most recent backup is ${age_hours}h old: ${latest_file}"
-    fi
-
-    if $COMPREHENSIVE; then
-        if [[ -s "$latest" ]]; then
-            _pass "backup:integrity" "Latest backup is non-empty: ${latest_file}"
-        else
-            _fail "backup:integrity" "Latest backup is empty: ${latest_file}"
-        fi
+        _pass "backup:age" "Most recent backup is ${latest_age_hours}h old: $(basename "$latest_backup")"
     fi
 }
 
@@ -975,61 +793,238 @@ _check_backups() {
 _check_config() {
     log_info "Checking configuration..."
 
-    local problems=0
+    local config_issues=()
 
-    # Basic env file presence/readability
-    if [[ -f "$ENV_FILE" && ! -r "$ENV_FILE" ]]; then
-        ((problems++)) || true
+    if [[ ! -f "$ENV_FILE" ]]; then
+        config_issues+=("Missing env file: $ENV_FILE")
+    elif [[ ! -r "$ENV_FILE" ]]; then
+        config_issues+=("$ENV_FILE is not readable by $(id -un) — run: sudo chown $(id -un):$(id -gn) $ENV_FILE")
+    else
+        local required_vars=("DOMAIN" "ADMIN_EMAIL" "CLOUDFLARE_ZONE_ID")
+        for var in "${required_vars[@]}"; do
+            [[ -n "${!var:-}" ]] || config_issues+=("${var} is not set — verify '${var}=' is present in ${ENV_FILE}")
+        done
     fi
 
-    # Docker compose file presence
-    if [[ ! -f "${SCRIPT_DIR}/docker-compose.yml" && ! -f "${SCRIPT_DIR}/docker-compose.yml.example" ]]; then
-        ((problems++)) || true
+    # Check secrets directory
+    local secrets_dir="${SCRIPT_DIR}/secrets/.docker_secrets"
+    if [[ ! -d "$secrets_dir" ]]; then
+        config_issues+=("Secrets directory not found: $secrets_dir")
+    else
+        local required_secrets=("admin_token" "caddy_cloudflare_dns_token" "fail2ban_cloudflare_firewall_token")
+        for secret in "${required_secrets[@]}"; do
+            [[ -f "${secrets_dir}/${secret}" ]] || config_issues+=("Missing secret: $secret")
+        done
     fi
 
-    if [[ $problems -eq 0 ]]; then
+    if [[ ${#config_issues[@]} -eq 0 ]]; then
         _pass "config:validation" "Configuration validation passed"
     else
-        _warn "config:validation" "Configuration validation found ${problems} issue(s)"
+        for issue in "${config_issues[@]}"; do
+            _fail "config:validation" "$issue"
+        done
     fi
-
-    # Dead-letter notifications check (if email system present)
-    _pass "notify:dead-letter" "No lost failure notifications"
 }
 
 # =============================================================================
-# AUTO-FIX
+# NOTIFY-FAILURE DEAD-LETTER CHECKS
 # =============================================================================
 
-_attempt_auto_fix() {
-    if ! $FIX_MODE && [[ "${AUTO_FIX:-false}" != "true" ]]; then
-        return 0
+_check_notify_failures() {
+    local state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
+    local -a markers=()
+    mapfile -t markers < <(find "$state_dir" -maxdepth 1 -name 'NOTIFY_FAILED_*' 2>/dev/null | sort)
+
+    if [[ ${#markers[@]} -eq 0 ]]; then
+        _pass "notify:dead-letter" "No lost failure notifications"
+        return
     fi
 
-    log_info "Attempting automatic recovery for failed checks..."
+    for marker in "${markers[@]}"; do
+        local unit="${marker##*/NOTIFY_FAILED_}"
+        _fail "notify:dead-letter" \
+            "SMTP was down when ${unit} failed — notification lost. Investigate and remove: ${marker}"
+    done
+}
 
-    local fixed_any=false name container
+# =============================================================================
+# COMPREHENSIVE CHECKS
+# =============================================================================
+
+_check_container_resources() {
+    log_info "Checking container resource usage..."
+
+    local stats
+    stats=$(docker stats --no-stream --format \
+        'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}' \
+        2>/dev/null) || {
+        _warn "resources:stats" "Cannot retrieve container resource stats"
+        return
+    }
+
+    _pass "resources:stats" "Container resource stats retrieved (see --report for details)"
+}
+
+# =============================================================================
+# NOTIFICATION  (with per-key alert cooldown)
+# =============================================================================
+
+_send_notification() {
+    local subject="$1" body="$2"
+
+    if [[ "${_email_available:-true}" == "false" ]]; then
+        log_warn "Email notifications not available"
+        return
+    fi
+
+    if [[ -z "${ADMIN_EMAIL:-}" ]]; then
+        log_warn "ADMIN_EMAIL not set — cannot send health notification"
+        return
+    fi
+
+    send_email "$ADMIN_EMAIL" "$subject" "$body" 2>/dev/null || \
+        log_warn "Failed to send health notification email"
+}
+
+# _notify_failures
+#
+# Iterates every recorded failure/warning and fires at most one email per
+# failure key per ALERT_COOLDOWN_SECONDS window.  Failures that are still
+# within their cooldown window are silently skipped — the operator already
+# knows about them.
+_notify_failures() {
+    # Collect all failing/warning check names into a deduped key list.
+    # We use the check name directly as the lock key so each independent
+    # failure type has its own cooldown timer.
+    local alerted_any=false
+
     for name in "${check_order[@]}"; do
-        if [[ "${check_results[$name]}" != "fail" ]]; then
+        local status="${check_results[$name]:-}"
+        [[ "$status" == "fail" || "$status" == "warn" ]] || continue
+
+        # Attempt to acquire the per-key cooldown lock.  Returns 1 (skip) if
+        # an alert was already sent within the cooldown window.
+        if ! _acquire_alert_lock "$name"; then
+            log_info "Alert cooldown active for '${name}' — suppressing repeat notification"
             continue
         fi
 
-        case "$name" in
-            container:*)
-                container="${name#container:}"
-                if docker restart "$container" &>/dev/null; then
-                    log_info "Restarted container: $container"
-                    fixed_any=true
-                else
-                    log_warn "Failed to restart container: $container"
-                fi
-                ;;
-        esac
+        local message="${check_messages[$name]:-}"
+        local subject body
+        subject="VaultWarden Health [${status^^}]: ${name} on $(hostname)"
+        body="Health check alert at $(date).\n\nCheck : ${name}\nStatus: ${status^^}\nDetail: ${message}\n\nThis alert will not repeat for ${ALERT_COOLDOWN_SECONDS}s ($(( ALERT_COOLDOWN_SECONDS / 60 )) min).\nRun './health.sh --report' for full status."
+
+        _send_notification "$subject" "$body" || true
+        alerted_any=true
+        log_info "Alert sent for '${name}' (${status})"
     done
 
-    if [[ "$fixed_any" == true ]]; then
-        log_info "Auto-recovery attempted; rerun health checks on next invocation"
+    # Reset the recovery lock whenever we have active failures so the next
+    # all-clear cycle is able to send a fresh recovery email.
+    if [[ $failed -gt 0 || $warnings -gt 0 ]]; then
+        _release_recovery_lock
     fi
+}
+
+# _notify_recovery
+#
+# Fires a single "all clear" email when every check passes.  Guarded by its
+# own lock (ALERT_RECOVERY_TTL) so a brief flap that clears within minutes
+# does not re-send the recovery email on every passing invocation.
+_notify_recovery() {
+    [[ $failed -eq 0 && $warnings -eq 0 ]] || return 0
+
+    if ! _acquire_alert_lock "recovery"; then
+        log_info "Recovery notification already sent within TTL — suppressing"
+        return 0
+    fi
+
+    local subject body
+    subject="VaultWarden Health RECOVERED on $(hostname)"
+    body="All health checks passed at $(date).\n\nPassed : $passed\nWarnings: 0\nFailed : 0\n\nNo further alerts will fire until the next failure."
+
+    _send_notification "$subject" "$body" || true
+    log_info "Recovery notification sent"
+}
+
+# =============================================================================
+# REPORT GENERATION
+# =============================================================================
+
+_generate_report() {
+    local timestamp
+    timestamp=$(date '+%Y%m%d_%H%M%S')
+    local report_file="${REPORT_DIR}/health_${timestamp}.txt"
+
+    mkdir -p "$REPORT_DIR" 2>/dev/null || true
+
+    {
+        echo "VaultWarden Health Report"
+        echo "Generated: $(date)"
+        echo "Host: $(hostname)"
+        echo "Mode: $( $COMPREHENSIVE && echo comprehensive || echo standard )"
+        echo "================================================================="
+        echo ""
+        echo "SUMMARY: $passed passed, $warnings warnings, $failed failed (total: $total)"
+        echo ""
+
+        for name in "${check_order[@]}"; do
+            local status="${check_results[$name]:-unknown}"
+            local message="${check_messages[$name]:-no message}"
+            printf '%-10s %-40s %s\n' "[$status]" "$name" "$message"
+        done
+
+        if $COMPREHENSIVE; then
+            echo ""
+            echo "CONTAINER RESOURCES:"
+            docker stats --no-stream 2>/dev/null || echo "  (unavailable)"
+        fi
+    } > "$report_file" 2>/dev/null
+
+    log_info "Report saved to: $report_file"
+
+    # Prune old reports
+    find "$REPORT_DIR" -name 'health_*.txt' \
+        -mtime +"$REPORT_RETENTION_DAYS" -delete 2>/dev/null || true
+}
+
+# =============================================================================
+# OUTPUT
+# =============================================================================
+
+_print_results() {
+    if $QUIET && [[ $failed -eq 0 && $warnings -eq 0 ]]; then
+        return
+    fi
+
+    echo ""
+    echo "================================================================="
+    echo " VaultWarden Health Check Results"
+    echo "================================================================="
+
+    local status_color
+    for name in "${check_order[@]}"; do
+        local status="${check_results[$name]:-unknown}"
+        local message="${check_messages[$name]:-}"
+
+        case "$status" in
+            pass) status_color="${COLOR_GREEN:-}" ;;
+            warn) status_color="${COLOR_YELLOW:-}" ;;
+            fail) status_color="${COLOR_RED:-}" ;;
+            *)    status_color="" ;;
+        esac
+
+        printf '%s[%-4s]%s %-40s %s\n' \
+            "$status_color" "$status" "${COLOR_RESET:-}" "$name" "$message"
+    done
+
+    echo "-----------------------------------------------------------------"
+    printf 'Total: %d | Passed: %s%d%s | Warnings: %s%d%s | Failed: %s%d%s\n' \
+        "$total" \
+        "${COLOR_GREEN:-}" "$passed"   "${COLOR_RESET:-}" \
+        "${COLOR_YELLOW:-}" "$warnings" "${COLOR_RESET:-}" \
+        "${COLOR_RED:-}"   "$failed"   "${COLOR_RESET:-}"
+    echo "================================================================="
 }
 
 # =============================================================================
@@ -1039,19 +1034,13 @@ _attempt_auto_fix() {
 main() {
     _parse_args "$@"
 
-    if ! $QUIET; then
-        log_info "Starting VaultWarden health check..."
-        log_info "Mode: $( $COMPREHENSIVE && echo comprehensive || echo standard )"
-    fi
+    log_info "Starting VaultWarden health check..."
+    $COMPREHENSIVE && log_info "Mode: comprehensive" || log_info "Mode: standard"
 
-    if ! _validate_prereqs; then
-        log_error "Cannot run health checks — missing prerequisites"
-        exit 3
-    fi
-
+    # Run all checks
     _check_containers
     _check_ssl
-    _check_vaultwarden_liveness
+    _check_vaultwarden_alive
     _check_vaultwarden_server_info
     _check_fail2ban
     _check_disk
@@ -1060,24 +1049,38 @@ main() {
     _check_dns
     _check_backups
     _check_config
+    _check_notify_failures
 
-    if $REPORT_MODE; then
-        _save_report
+    # Comprehensive extras
+    if $COMPREHENSIVE; then
+        _check_container_resources
     fi
 
-    _format_report
+    # Auto-fix
+    if $FIX_MODE && [[ $failed -gt 0 ]]; then
+        log_info "Fix mode enabled — attempting recovery..."
+        _fix_unhealthy_containers
+    fi
 
+    # Print results
+    _print_results
+
+    # Save report
+    if $REPORT_MODE; then
+        _generate_report
+    fi
+
+    # Send per-key rate-limited alerts for any failures/warnings, then a
+    # single recovery email when everything clears.
+    _notify_failures
+    _notify_recovery
+
+    # Exit code
     if [[ $failed -gt 0 ]]; then
-        _release_recovery_lock
-        _send_failure_notifications
-        _attempt_auto_fix
         exit 2
     elif [[ $warnings -gt 0 ]]; then
-        _release_recovery_lock
-        _send_failure_notifications
         exit 1
     else
-        _send_recovery_notification
         exit 0
     fi
 }
