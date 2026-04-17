@@ -501,18 +501,26 @@ ensure_dir() {
 secure_file() {
     local file="$1"
     local mode="${2:-600}"
+    local owner="${3:-}"
+    local group="${4:-}"
 
     if [[ ! -f "$file" ]]; then
         log_error "File not found: $file"
         return 1
     fi
-
     if ! chmod "$mode" "$file"; then
         log_error "Failed to secure file: $file"
         return 1
     fi
-
-    log_debug "Secured file: $file (mode: $mode)"
+    if [[ -n "$owner" ]]; then
+        local chown_target="$owner"
+        [[ -n "$group" ]] && chown_target="$owner:$group"
+        if ! chown "$chown_target" "$file"; then
+            log_error "Failed to set ownership on file: $file ($chown_target)"
+            return 1
+        fi
+    fi
+    log_debug "Secured file: $file (mode: $mode${owner:+, owner: $owner${group:+:$group}})"
     return 0
 }
 
