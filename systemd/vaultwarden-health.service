@@ -25,7 +25,7 @@ ExecCondition=/bin/bash -c '! test -f /tmp/.vw_maintenance.lock'
 # --email is intentionally omitted here. Add it once EMAIL_API_TOKEN or
 # SMTP credentials are set in /etc/vaultwarden/vaultwarden.env, otherwise
 # the service exits 1 on every run (no credentials → email fails → exit 1).
-ExecStart=/opt/vaultwarden-scripts/health.sh --auto-recover
+ExecStart=/opt/vaultwarden-scripts/health.sh --fix
 User=root
 StandardOutput=journal
 StandardError=journal
