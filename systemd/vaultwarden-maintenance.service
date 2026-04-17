@@ -3,6 +3,12 @@ Description=VaultWarden Maintenance Tasks
 Documentation=https://github.com/killer23d/VaultWarden-OCI
 After=docker.service network-online.target
 Requires=docker.service
+# Prevent the maintenance *job* from running while a backup is in progress.
+# These Conflicts= directives belong on the service unit (not the timer) so
+# that only the job execution is gated — not the timer that schedules it.
+# A Conflicts= on a .timer unit would deactivate the timer itself whenever
+# the conflicting service runs, causing NEXT='-' until a manual restart.
+Conflicts=vaultwarden-db-backup.service vaultwarden-full-backup.service
 ConditionPathExists=/opt/vaultwarden-scripts/maintenance.sh
 OnFailure=vaultwarden-notify-failure@%n.service
 
