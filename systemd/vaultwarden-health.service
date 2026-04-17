@@ -18,6 +18,10 @@ WorkingDirectory=/opt/vaultwarden-scripts
 # setup-systemd.sh --install has run). Missing required vars are caught
 # and reported by the script itself.
 EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
+# If maintenance is running, skip this invocation and let the next timer tick
+# execute normally. This avoids false-negative health alerts during deep
+# maintenance windows without disabling the timer.
+ExecCondition=/bin/bash -c '! test -f /tmp/.vw_maintenance.lock'
 # --email is intentionally omitted here. Add it once EMAIL_API_TOKEN or
 # SMTP credentials are set in /etc/vaultwarden/vaultwarden.env, otherwise
 # the service exits 1 on every run (no credentials → email fails → exit 1).

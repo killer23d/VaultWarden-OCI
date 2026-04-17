@@ -85,7 +85,7 @@ WHAT --install DOES:
     5. Copies systemd/*.{service,timer} -> /etc/systemd/system/
     6. systemctl daemon-reload
     7. systemctl enable --now for all 6 timers
-    8. Verifies timers appear in 'systemctl list-timers --all' (TIMER-CHECK)
+    8. Verifies all managed timers are active and have a next trigger (TIMER-CHECK)
     9. systemctl reset-failed for all managed services (clears stale failed status)
 
 WHAT --validate CHECKS:
@@ -138,6 +138,34 @@ _run() {
     else
         "$@"
     fi
+}
+
+# ---------------------------------------------------------------------------
+# _timer_has_next_trigger TIMER
+# Returns success when TIMER has a next scheduled trigger.
+# For calendar timers this is sourced from NextElapseUSecRealtime; "n/a"
+# indicates no future activation is scheduled.
+# ---------------------------------------------------------------------------
+_timer_has_next_trigger() {
+    local timer="$1"
+    local next_elapse
+    next_elapse="$(systemctl show "$timer" --property=NextElapseUSecRealtime --value 2>/dev/null || true)"
+    [[ -n "$next_elapse" && "$next_elapse" != "n/a" ]]
+}
+
+# ---------------------------------------------------------------------------
+# _count_healthy_managed_timers
+# Returns the number of managed timers that are active and have a next trigger.
+# ---------------------------------------------------------------------------
+_count_healthy_managed_timers() {
+    local healthy_count=0
+    local timer
+    for timer in "${TIMERS[@]}"; do
+        if systemctl is-active --quiet "$timer" && _timer_has_next_trigger "$timer"; then
+            ((healthy_count++))
+        fi
+    done
+    printf '%s\n' "$healthy_count"
 }
 
 # ---------------------------------------------------------------------------
@@ -395,31 +423,45 @@ install_units() {
     done
 
     # ------------------------------------------------------------------
-    # FIX [TIMER-CHECK]: Verify that timers are actually scheduled after
-    # enablement. 'systemctl enable --now' exits 0 even when a timer
-    # cannot fire (e.g. missing Docker socket, failed dependency). Checking
-    # 'list-timers --all' for at least one vaultwarden entry confirms the
-    # kernel timer subsystem accepted our units as active/waiting.
+    # FIX [TIMER-CHECK]: Verify managed timers are healthy after enablement.
+    # list-timers output can lag briefly right after daemon-reload/enable.
+    # Check each managed timer state directly and allow a short settle period.
+    # Healthy = timer unit is active AND has a next trigger scheduled.
     # ------------------------------------------------------------------
     if [[ "$DRY_RUN" == "false" ]]; then
         log_info "Verifying timers are scheduled ..."
-        if systemctl list-timers --all 2>/dev/null | grep -q 'vaultwarden'; then
-            log_success "Timers confirmed active in systemd timer queue."
+        local expected_count="${#TIMERS[@]}"
+        local healthy_count=0
+        local attempts=10
+        local delay_seconds=1
+        local i
+        for (( i=1; i<=attempts; i++ )); do
+            healthy_count=$(_count_healthy_managed_timers)
+            if [[ "$healthy_count" -eq "$expected_count" ]]; then
+                break
+            fi
+            sleep "$delay_seconds"
+        done
+
+        if [[ "$healthy_count" -eq "$expected_count" ]]; then
+            log_success "All managed timers are healthy ($healthy_count/$expected_count)."
         else
             log_warn "────────────────────────────────────────────────────────────────"
-            log_warn "WARNING: No vaultwarden timers appear in 'systemctl list-timers'"
-            log_warn "         after enablement. Possible causes:"
-            log_warn "  - Docker socket (docker.socket / docker.service) not yet active"
-            log_warn "  - A Requires= or After= dependency in the .service unit is unmet"
-            log_warn "  - systemd version too old to honour the OnCalendar= expression"
+            log_warn "WARNING: Not all managed timers are healthy after enablement"
+            log_warn "         (healthy: $healthy_count/$expected_count)."
+            log_warn "Possible causes:"
+            log_warn "  - A timer unit has an invalid setting (e.g. bad OnCalendar)"
+            log_warn "  - A timer is being stopped by a conflicting unit relationship"
+            log_warn "  - A timer is active but has no next trigger (NEXT='-')"
+            log_warn "  - systemd daemon has stale unit state (retry daemon-reload)"
             log_warn "Investigate with:"
             log_warn "  systemctl list-timers --all | grep vaultwarden"
+            log_warn "  systemctl status ${TIMERS[0]}"
             log_warn "  journalctl -xe --unit vaultwarden-health.timer"
-            log_warn "  systemctl status vaultwarden-health.timer"
             log_warn "────────────────────────────────────────────────────────────────"
         fi
     else
-        log_info "[DRY RUN] Would check: systemctl list-timers --all | grep vaultwarden"
+        log_info "[DRY RUN] Would check: systemctl is-active + NextElapseUSecRealtime for all managed timers"
     fi
 
     # ------------------------------------------------------------------
@@ -652,21 +694,24 @@ validate_installation() {
     done
 
     # ------------------------------------------------------------------
-    # FIX [TIMER-CHECK]: Verify timers are actually scheduled.
-    # 'systemctl is-enabled' only checks the enabled symlink; it does NOT
-    # confirm the timer fired or is waiting. list-timers --all shows the
-    # kernel timer queue and catches silent activation failures.
+    # FIX [TIMER-CHECK]: Verify timers are healthy.
+    # 'systemctl is-enabled' only checks the symlink; it does NOT confirm
+    # the timer unit is currently active in systemd nor that it has a future
+    # trigger time.
     # ------------------------------------------------------------------
     log_info "[8/8] Checking timers are scheduled (systemctl list-timers) ..."
-    if systemctl list-timers --all 2>/dev/null | grep -q 'vaultwarden'; then
-        log_success "  Timers are present and scheduled in the systemd timer queue."
+    local expected_count="${#TIMERS[@]}"
+    local healthy_count
+    healthy_count=$(_count_healthy_managed_timers)
+    if [[ "$healthy_count" -eq "$expected_count" ]]; then
+        log_success "  All managed timers are healthy ($healthy_count/$expected_count)."
     else
-        log_warn "  WARNING: No vaultwarden timers found in 'systemctl list-timers --all'."
-        log_warn "  Timers are enabled but not scheduled — check systemd logs:"
+        log_warn "  WARNING: Managed timers healthy: $healthy_count/$expected_count."
+        log_warn "  One or more timers are enabled but unhealthy (inactive or NEXT='-') — check:"
+        log_warn "    systemctl list-timers --all | grep vaultwarden"
+        log_warn "    systemctl status vaultwarden-db-backup.timer"
         log_warn "    journalctl -xe --unit vaultwarden-health.timer"
-        log_warn "    systemctl status vaultwarden-health.timer"
-        log_warn "  Common cause: Docker socket not yet active at enable time."
-        log_warn "  Try: sudo systemctl start vaultwarden-health.timer"
+        log_warn "  Try: sudo systemctl restart vaultwarden-db-backup.timer vaultwarden-health.timer"
         (( warnings++ )) || true
     fi
 
