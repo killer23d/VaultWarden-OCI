@@ -657,7 +657,7 @@ start_services() {
 wait_for_services() {
   log_info "Waiting for critical services to become ready..."
 
-  local services=(vaultwarden caddy)
+  local services=(vaultwarden caddy fail2ban)
   local timeout=90
   local interval=3
   local progress_interval=9   # emit a status line every 3rd poll

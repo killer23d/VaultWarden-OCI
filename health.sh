@@ -80,8 +80,8 @@ CERT_CRIT_DAYS=${CERT_CRIT_DAYS:-7}
 # The fail2ban daemon socket may not be ready immediately after container
 # start. Retry up to FAIL2BAN_PING_RETRIES times with FAIL2BAN_PING_DELAY
 # seconds between attempts before recording a result.
-FAIL2BAN_PING_RETRIES=${FAIL2BAN_PING_RETRIES:-3}
-FAIL2BAN_PING_DELAY=${FAIL2BAN_PING_DELAY:-5}
+FAIL2BAN_PING_RETRIES=${FAIL2BAN_PING_RETRIES:-5}
+FAIL2BAN_PING_DELAY=${FAIL2BAN_PING_DELAY:-6}
 
 # =============================================================================
 # ALERT COOLDOWN
@@ -224,8 +224,8 @@ Comprehensive mode adds:
 
 Environment variables:
   HEALTH_API_STRICT=true          Promote /api/config non-200 from warning to failure
-  FAIL2BAN_PING_RETRIES=3         Ping attempts before recording fail2ban result (default: 3)
-  FAIL2BAN_PING_DELAY=5           Seconds between fail2ban ping retries (default: 5)
+  FAIL2BAN_PING_RETRIES=5         Ping attempts before recording fail2ban result (default: 5)
+  FAIL2BAN_PING_DELAY=6           Seconds between fail2ban ping retries (default: 6)
   ALERT_COOLDOWN_SECONDS=3600     Minimum seconds between repeat alerts for the same
                                   failure key (default: 3600 = 1 hour)
   ALERT_RECOVERY_TTL=86400        Minimum seconds between clear-state recovery emails
@@ -559,7 +559,7 @@ _check_vaultwarden_server_info() {
 #
 # Retry logic:
 #   - Attempt fail2ban-client ping up to FAIL2BAN_PING_RETRIES times
-#     (default: 3), waiting FAIL2BAN_PING_DELAY seconds (default: 5) between
+#     (default: 5), waiting FAIL2BAN_PING_DELAY seconds (default: 6) between
 #     each attempt.
 #   - If the container's Docker health status is still "starting" when all
 #     retries are exhausted, record a WARNING rather than a hard FAILURE —
@@ -571,6 +571,17 @@ _check_vaultwarden_server_info() {
 # -----------------------------------------------------------------------------
 _check_fail2ban() {
     log_info "Checking Fail2Ban..."
+
+    # Capture container health at function entry so we know whether we entered
+    # during the container's startup window. Docker's lightweight healthcheck
+    # may promote the container from "starting" to "healthy" while the fail2ban
+    # daemon socket is still being created — a normal occurrence during the first
+    # 30–60 s after container start. Preserving the initial state lets us
+    # downgrade to a WARNING rather than a hard FAILURE in that case.
+    local initial_container_health
+    initial_container_health=$(docker inspect \
+        --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' \
+        vaultwarden_fail2ban 2>/dev/null || echo "unknown")
 
     local attempt ping_result
     for (( attempt=1; attempt<=FAIL2BAN_PING_RETRIES; attempt++ )); do
@@ -593,17 +604,21 @@ _check_fail2ban() {
 
     # All retries exhausted without a pong — determine severity from container health.
     if [[ -z "${check_results[fail2ban:daemon]:-}" ]]; then
-        local container_health
-        container_health=$(docker inspect \
+        local current_container_health
+        current_container_health=$(docker inspect \
             --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' \
             vaultwarden_fail2ban 2>/dev/null || echo "unknown")
 
-        if [[ "$container_health" == "starting" ]]; then
+        # Downgrade to WARNING if the container was in its startup window when
+        # this check began OR is still starting now. This covers the race where
+        # Docker's lightweight healthcheck promotes fail2ban to "healthy" (process
+        # is alive) while the daemon socket is still being created.
+        if [[ "$initial_container_health" == "starting" || "$current_container_health" == "starting" ]]; then
             _warn "fail2ban:daemon" \
-                "Fail2Ban daemon not yet responding (container still starting — retried ${FAIL2BAN_PING_RETRIES}x/${FAIL2BAN_PING_DELAY}s)"
+                "Fail2Ban daemon not yet responding (container was starting when check began — retried ${FAIL2BAN_PING_RETRIES}×${FAIL2BAN_PING_DELAY}s; will resolve automatically)"
         else
             _fail "fail2ban:daemon" \
-                "Fail2Ban daemon not responding to ping after ${FAIL2BAN_PING_RETRIES} attempts (container health: ${container_health})"
+                "Fail2Ban daemon not responding to ping after ${FAIL2BAN_PING_RETRIES} attempts (container health: ${current_container_health})"
         fi
         return
     fi
