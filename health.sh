@@ -37,15 +37,38 @@ source "${SCRIPT_DIR}/lib/email.sh" 2>/dev/null || {
 # CONFIGURATION
 # =============================================================================
 
-# Load environment
-ENV_FILE="${SCRIPT_DIR}/.env"
-if [[ -f "${ENV_FILE}" ]]; then
+# Load environment.
+#
+_resolve_env_file() {
+    local candidates=(
+        "${SCRIPT_DIR}/.env"
+        "/etc/vaultwarden/vaultwarden.env"
+    )
+    for candidate in "${candidates[@]}"; do
+        if [[ -f "$candidate" ]]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    echo ""
+    return 1
+}
+
+ENV_FILE="$(_resolve_env_file || true)"
+
+if [[ -n "${ENV_FILE}" ]]; then
     if [[ ! -r "${ENV_FILE}" ]]; then
         log_error "health.sh: '${ENV_FILE}' is not readable by $(id -un) — config variables will be unset."
         log_error "Fix ownership: sudo chown $(id -un):$(id -gn) '${ENV_FILE}'"
     else
         load_env_file "${ENV_FILE}" || true
     fi
+else
+    # Neither candidate path exists; the script may still work if the
+    # caller (e.g., systemd EnvironmentFile=) has already exported the
+    # required variables into the process environment.
+    log_warn "health.sh: no .env file found at '${SCRIPT_DIR}/.env' or '/etc/vaultwarden/vaultwarden.env' — relying on inherited environment"
+    ENV_FILE="/etc/vaultwarden/vaultwarden.env"  # canonical path for error messages
 fi
 
 # Health check configuration
@@ -881,11 +904,10 @@ _check_config() {
         done
     fi
 
-    # Check secrets directory
+     # Check secrets directory.
+    #
     local secrets_dir="${SCRIPT_DIR}/secrets/.docker_secrets"
-    if [[ ! -d "$secrets_dir" ]]; then
-        config_issues+=("Secrets directory not found: $secrets_dir")
-    else
+    if [[ -d "$secrets_dir" ]]; then
         local required_secrets=("admin_token" "caddy_cloudflare_dns_token" "fail2ban_cloudflare_firewall_token")
         for secret in "${required_secrets[@]}"; do
             [[ -f "${secrets_dir}/${secret}" ]] || config_issues+=("Missing secret: $secret")
@@ -910,7 +932,7 @@ _check_config() {
         for issue in "${root_owned_issues[@]}"; do
             _warn "permissions:project-files" "$issue"
         done
-    else
+    elif [[ -f "${SCRIPT_DIR}/.env" || -f "${SCRIPT_DIR}/Makefile" ]]; then
         _pass "permissions:project-files" "Project file ownership is correct"
     fi
 
