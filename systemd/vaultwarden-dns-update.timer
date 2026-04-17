@@ -7,7 +7,8 @@ Conflicts=shutdown.target
 OnFailure=vaultwarden-notify-failure@%n.service
 
 [Timer]
-OnCalendar=hourly
+# Use explicit hourly form to avoid ambiguity across docs/distributions.
+OnCalendar=*-*-* *:00:00
 Persistent=true
 # Ensure Docker is healthy before any boot-triggered catch-up fires.
 # Without this, Persistent=true causes an immediate activation on reboot

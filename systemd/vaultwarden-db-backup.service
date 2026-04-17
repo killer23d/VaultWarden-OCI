@@ -14,6 +14,10 @@ WorkingDirectory=/opt/vaultwarden-scripts
 # setup-systemd.sh --install has run). Missing required vars are caught
 # and reported by the script itself.
 EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
+# If maintenance is running, skip this invocation and let the next timer tick
+# execute normally. This prevents backup/maintenance overlap without stopping
+# or deactivating the timer itself.
+ExecCondition=/bin/bash -c '! test -f /tmp/.vw_maintenance.lock'
 # Clear only this service's stale lock file left by a prior crash or hard reboot.
 # Scoped to avoid racing with restore.sh or maintenance.sh that may hold
 # their own lock files concurrently (e.g. after Persistent=true catch-up).
