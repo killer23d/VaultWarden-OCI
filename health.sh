@@ -459,12 +459,16 @@ _check_vaultwarden_alive() {
 # -----------------------------------------------------------------------------
 # _check_vaultwarden_server_info
 #
-# Readiness probe: checks /api/config.
-# This endpoint exercises the database connection path; it will return a
-# non-200 code (or time out) if the DB is locked, the secrets mount has
-# failed, or the application is in a degraded state despite /alive returning
-# 200. Running this in the default (non-comprehensive) path ensures that the
-# systemd health timer catches real service outages, not just process crashes.
+# Readiness probe: checks /api/config (internal + external).
+# - Internal (`vaultwarden:server-info`) executes inside vaultwarden_app and
+#   validates the VaultWarden process, DB path, and mounted secrets.
+# - External (`vaultwarden:server-info:external`) validates the full HTTPS
+#   path (DNS/cert/Caddy reverse-proxy routing) through the public domain.
+#
+# Both checks are intentionally kept: internal success does not guarantee the
+# external path is healthy (e.g., Caddy/cert/DNS failures), and external
+# success does not isolate app-internal failures as clearly as the container
+# direct check.
 #
 # Default behaviour: non-200 is recorded as a WARNING (exit 1) so a single
 # transient blip does not wake the operator at 3 AM. Set HEALTH_API_STRICT=true
@@ -476,13 +480,17 @@ _check_vaultwarden_server_info() {
 
     log_info "Checking VaultWarden readiness (/api/config)..."
 
-    # Internal readiness probe — direct to container, bypasses Caddy.
+    # Internal readiness probe — exec into the vaultwarden container to bypass
+    # Caddy. vaultwarden_app's port 80 is not published to the host; a direct
+    # curl to http://127.0.0.1:80 from the host reaches Caddy (which returns 404
+    # for /api/config on plain HTTP) rather than VaultWarden. Using docker exec
+    # ensures this check reflects the true application state.
     local internal_code
-    internal_code=$(timeout "$HEALTH_TIMEOUT" curl -so /dev/null \
+    internal_code=$(docker exec vaultwarden_app curl -so /dev/null \
         --connect-timeout "$HEALTH_CONNECT_TIMEOUT" \
         --max-time "$HEALTH_TIMEOUT" \
         -w "%{http_code}" \
-        "http://127.0.0.1:80/api/config" 2>/dev/null || echo "000")
+        "http://127.0.0.1/api/config" 2>/dev/null || echo "000")
 
     case "$internal_code" in
         200)
@@ -882,6 +890,28 @@ _check_config() {
         for secret in "${required_secrets[@]}"; do
             [[ -f "${secrets_dir}/${secret}" ]] || config_issues+=("Missing secret: $secret")
         done
+    fi
+
+    # Check for root-owned project files that break non-sudo operations.
+    # Common symptom: setup.sh or startup.sh ran as root and left files owned
+    # by root that the operator (non-root ubuntu user) cannot read or edit.
+    local root_owned_issues=()
+    for f in ".env" "Makefile" "health.sh" "startup.sh" "backup.sh" "edit-secrets.sh"; do
+        local fpath="${SCRIPT_DIR}/${f}"
+        if [[ -e "$fpath" ]]; then
+            local owner
+            owner=$(stat -c '%U' "$fpath" 2>/dev/null || echo "unknown")
+            if [[ "$owner" == "root" ]]; then
+                root_owned_issues+=("${f} is owned by root — run: sudo make fix-permissions")
+            fi
+        fi
+    done
+    if [[ ${#root_owned_issues[@]} -gt 0 ]]; then
+        for issue in "${root_owned_issues[@]}"; do
+            _warn "permissions:project-files" "$issue"
+        done
+    else
+        _pass "permissions:project-files" "Project file ownership is correct"
     fi
 
     if [[ ${#config_issues[@]} -eq 0 ]]; then

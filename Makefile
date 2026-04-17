@@ -48,7 +48,7 @@ BACKUP_FILE ?=
         db-maint db-backup \
         install-systemd remove-systemd systemd-status systemd-validate timers \
         breakglass-create breakglass-status breakglass-remove \
-        dev-setup test test-config dry-run fmt lint shellcheck \
+        dev-setup fix-permissions test test-config dry-run fmt lint shellcheck \
         info version shell config diagnose \
         clean clean-all prune \
         uninstall uninstall-dry-run
@@ -144,6 +144,37 @@ dev-setup: ## Set up development environment (.env + docker-compose.override.yml
 	@echo "$(BLUE)Setting up development environment...$(NC)"
 	@if [ ! -f ".env" ]; then cp .env.example .env; echo "$(YELLOW)Created .env from example. Please configure it.$(NC)"; fi
 	@if [ ! -f "docker-compose.override.yml" ]; then cp docker-compose.override.yml.example docker-compose.override.yml; echo "$(YELLOW)Created development override file.$(NC)"; fi
+
+fix-permissions: ## Fix file ownership after sudo operations leave root-owned files
+	$(call require-root)
+	@echo "$(BLUE)Fixing file ownership...$(NC)"
+	@REAL_USER=$$(logname 2>/dev/null || echo "$${SUDO_USER:-ubuntu}"); \
+	REAL_GROUP=$$(id -gn "$$REAL_USER" 2>/dev/null || echo "$$REAL_USER"); \
+	echo "$(CYAN)  Target user : $$REAL_USER:$$REAL_GROUP$(NC)"; \
+	echo ""; \
+	for item in \
+	    CHANGELOG.md Makefile README.md VERSION \
+	    backup.sh create-breakglass-admin.sh edit-secrets.sh health.sh \
+	    maintenance.sh restore.sh setup-secrets.sh setup-systemd.sh \
+	    setup.sh startup.sh uninstall-vaultwarden.sh update.sh \
+	    backups caddy docs fail2ban lib logs ssl systemd \
+	    docker-compose.yml.example .env.example .sops.yaml \
+	    .gitattributes .gitignore; do \
+	    [ -e "$$item" ] && chown -R "$$REAL_USER:$$REAL_GROUP" "$$item" 2>/dev/null && \
+	        echo "$(GREEN)  ✓ $$item$(NC)" || true; \
+	done; \
+	if [ -f ".env" ]; then \
+	    chown "$$REAL_USER:$$REAL_GROUP" .env; \
+	    chmod 600 .env; \
+	    echo "$(GREEN)  ✓ .env → $$REAL_USER:$$REAL_GROUP (mode 600)$(NC)"; \
+	fi; \
+	if [ -f "docker-compose.yml" ]; then \
+	    chown "$$REAL_USER:$$REAL_GROUP" docker-compose.yml; \
+	    echo "$(GREEN)  ✓ docker-compose.yml$(NC)"; \
+	fi; \
+	echo ""; \
+	echo "$(GREEN)File ownership fixed for user $$REAL_USER.$(NC)"; \
+	echo "$(CYAN)Note: secrets/ and secrets/.docker_secrets/ are intentionally left restricted.$(NC)"
 
 init-secrets: ## Initialize secrets file (interactive)
 	@echo "$(BLUE)Initializing secrets...$(NC)"
