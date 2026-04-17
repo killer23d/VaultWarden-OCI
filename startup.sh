@@ -1,119 +1,6 @@
 #!/usr/bin/env bash
 # startup.sh - VaultWarden startup script with secure secrets handling
 #
-# PATCHED BUGS (2026-03-19):
-#   STARTUP-1 [LOW]    show_help(): cosmetic, no functional change.
-#   STARTUP-2 [HIGH]   prepare_docker_secrets(): '\\' (double-backslash) used
-#                      as line continuation in compound condition — bash treats
-#                      the second backslash as a literal, breaking the test.
-#                      Replaced with a single '\' continuation.
-#   STARTUP-3 [MEDIUM] prepare_docker_secrets(): _stat_octal_perms_local()
-#                      called but not defined in this file. Added file-local
-#                      shim using portable GNU||BSD stat.
-#   STARTUP-4 [MEDIUM] prepare_docker_secrets(): SOPS_AGE_KEY_FILE exported
-#                      and never unset; all child processes inherited the Age
-#                      key path. Fixed via cleanup_secrets_environment() after
-#                      sops call.
-#   STARTUP-5 [MEDIUM] source "lib/secrets.sh" was missing; added so
-#                      cleanup_secrets_environment() is available.
-#   STARTUP-6 [MEDIUM] prepare_docker_secrets(): secret files were previously
-#                      created at 600 (owner-read-only). Docker bind-mounts
-#                      these files into containers running as non-root UIDs
-#                      (e.g. 1001) that are not the owning user, so 600 made
-#                      the files unreadable by the container processes.
-#                      Fix: use umask 333 (→ 444, r--r--r--) so all UIDs
-#                      inside containers can read them. The containing
-#                      directory (secrets/.docker_secrets) is mode 700
-#                      owned by root, so unprivileged OS users cannot traverse
-#                      into it — the world-read bit on the files is effectively
-#                      unreachable from the host without root. maintenance.sh's
-#                      permission guard explicitly allows 444 (alongside
-#                      400/600/640) so DNS updates work correctly on every boot.
-#
-# PATCHED BUGS (2026-03-26):
-#   STARTUP-7 [MEDIUM] lib/simple_key_resilience.sh was never sourced.
-#                      As a result, check_age_key_health() was unavailable
-#                      and no pre-decryption key integrity check ran before
-#                      prepare_docker_secrets() attempted to decrypt
-#                      secrets.yaml. A corrupt or wrong-permissions age key
-#                      produced only the opaque "Failed to decrypt secrets
-#                      file" message with no actionable guidance.
-#                      Fix: source simple_key_resilience.sh and call
-#                      check_age_key_health_preflight() at the start of
-#                      prepare_docker_secrets().
-#
-# PATCHED BUGS (2026-04-03):
-#   STARTUP-8 [MEDIUM] wait_for_services() was called with bare service names
-#                      ('vaultwarden', 'caddy') but docker inspect requires the
-#                      full container_name set in docker-compose.yml
-#                      ('vaultwarden_app', 'vaultwarden_caddy'). docker inspect
-#                      on an unknown name exits 1 and returns empty strings for
-#                      both health and running status. The polling loop ran to
-#                      the full timeout on every startup (90s total), then
-#                      emitted misleading WARN messages despite the stack being
-#                      fully healthy. Fix: resolve container ID via
-#                      `docker compose ps -q <service>` so the lookup is
-#                      correct regardless of COMPOSE_PROJECT_NAME, then pass
-#                      that ID to docker inspect.
-#
-# PATCHED BUGS (2026-04-07):
-#   STARTUP-9 [MEDIUM] Plaintext EMAIL_API_TOKEN or SMTP_PASSWORD values loaded
-#                      from .env silently override the SOPS-managed workflow.
-#                      send_email() prefers EMAIL_API_TOKEN from the environment
-#                      before decrypting email_api_token from secrets.yaml, and
-#                      _smtp_send() switches to direct external SMTP whenever
-#                      SMTP_PASSWORD is non-empty. Because load_env_file() runs
-#                      before prepare_docker_secrets(), an accidentally-populated
-#                      .env can create split-brain configuration with no
-#                      operator warning. Fix: add a startup guard that inspects
-#                      the loaded environment after SOPS secrets are prepared and
-#                      emits loud warnings when these plaintext overrides are set.
-#
-# PATCHED BUGS (2026-04-08):
-#   STARTUP-10 [MEDIUM] run_health_check() treated exit 1 (warnings) and
-#                       exit 2 (critical failures) from health.sh identically —
-#                       both non-zero codes fell through to a single log_warn,
-#                       giving the operator a false green signal when the stack
-#                       was critically unhealthy. health.sh has always emitted
-#                       exit 0/1/2 correctly; the caller did not honour them.
-#                       Fix: capture the exit code explicitly and map:
-#                         exit 0 → log_success (all checks passed)
-#                         exit 1 → log_warn   (warnings present, startup continues)
-#                         exit 2 → log_error + exit 1 (critical failure, abort)
-#                       This matches the documented exit-code contract in
-#                       health.sh's --help output.
-#
-# PATCHED BUGS (2026-04-08 batch 2):
-#   STARTUP-11 [MEDIUM] prepare_docker_secrets(): Python heredoc opened
-#                       'secrets.yaml' with a hardcoded relative path, entirely
-#                       ignoring the SECRETS_FILE variable defined in
-#                       lib/secrets.sh. Although startup.sh cds to PROJECT_ROOT
-#                       early on, the heredoc was also inconsistent with the
-#                       rest of the secrets subsystem. Fix: pass "$SECRETS_FILE"
-#                       as sys.argv[1] and open sys.argv[1] in the Python
-#                       snippet so the path is always explicit and absolute.
-#
-#   STARTUP-12 [LOW]   pull_images() ran unconditionally on every startup,
-#                       including the systemd ExecStart path. On metered or
-#                       slow OCI connections this adds 30-120s to every restart
-#                       unnecessarily. Fix: add --skip-pull flag (SKIP_PULL=false
-#                       default). Documented in show_help(). systemd operators
-#                       should pass --skip-pull; update.sh and manual
-#                       ./startup.sh (or ./startup.sh --force) remain the
-#                       intended pull path.
-#
-# PATCHED BUGS (2026-04-11):
-#   STARTUP-13 [HIGH]  prepare_docker_secrets(): Python heredoc was passed
-#                      "$secrets_file" (the SOPS-encrypted source) as sys.argv[1]
-#                      instead of "$cache_file" (the already-decrypted output
-#                      of `sops -d`). yaml.safe_load() parsed the ENC[AES256_GCM,…]
-#                      ciphertext strings from the encrypted file as plain YAML
-#                      string values and printed them verbatim. Every secret file
-#                      in secrets/.docker_secrets/ was written with raw SOPS
-#                      ciphertext instead of the decrypted token value.
-#                      Fix: pass "$cache_file" to the Python snippet so it reads
-#                      the plaintext YAML that sops -d already wrote.
-#
 # PATCHED BUGS (2026-04-15):
 #   STARTUP-14 [HIGH]  check_age_key_health_preflight(): when SOPS_AGE_KEY_FILE
 #                      pointed at a non-existent path (e.g. /etc/vaultwarden/
@@ -766,10 +653,6 @@ start_services() {
 
 # ---------------------------------------------------------------------------
 # wait_for_services
-#
-# STARTUP-8 FIX: resolve each compose service to its real container ID via
-# `docker compose ps -q <service>` before inspecting, because container_name
-# may differ from the service key and bare names cause false timeout warnings.
 # ---------------------------------------------------------------------------
 wait_for_services() {
   log_info "Waiting for critical services to become ready..."
@@ -777,10 +660,13 @@ wait_for_services() {
   local services=(vaultwarden caddy)
   local timeout=90
   local interval=3
+  local progress_interval=9   # emit a status line every 3rd poll
   local elapsed=0
+  local next_progress=0
 
   while (( elapsed < timeout )); do
     local all_ready=true
+    local status_parts=()
 
     for service in "${services[@]}"; do
       local container_id
@@ -788,7 +674,8 @@ wait_for_services() {
 
       if [[ -z "$container_id" ]]; then
         all_ready=false
-        break
+        status_parts+=("${service}:not-found")
+        continue
       fi
 
       local running
@@ -798,13 +685,17 @@ wait_for_services() {
 
       if [[ "$running" != "true" ]]; then
         all_ready=false
-        break
+        status_parts+=("${service}:not-running")
+        continue
       fi
 
       if [[ "$health" != "healthy" && "$health" != "none" ]]; then
         all_ready=false
-        break
+        status_parts+=("${service}:${health}")
+        continue
       fi
+
+      status_parts+=("${service}:ready")
     done
 
     if [[ "$all_ready" == "true" ]]; then
@@ -812,8 +703,17 @@ wait_for_services() {
       return 0
     fi
 
+    # Emit a progress line periodically so the operator can see the wait is
+    # active and which container is still not ready — prevents the terminal
+    # from appearing frozen during slow-start containers (e.g. fail2ban).
+    if (( elapsed >= next_progress )); then
+      local remaining=$(( timeout - elapsed ))
+      log_info "Still waiting... ${elapsed}s elapsed, up to ${remaining}s remaining — $(IFS=', '; echo "${status_parts[*]}")"
+      next_progress=$(( elapsed + progress_interval ))
+    fi
+
     sleep "$interval"
-    elapsed=$((elapsed + interval))
+    elapsed=$(( elapsed + interval ))
   done
 
   log_warn "Service readiness check timed out after ${timeout}s"
@@ -822,16 +722,6 @@ wait_for_services() {
 
 # ---------------------------------------------------------------------------
 # run_health_check
-#
-# STARTUP-10 FIX: honour health.sh's documented exit-code contract:
-#   exit 0  — all checks passed        → log_success, continue
-#   exit 1  — one or more warnings     → log_warn, continue (degraded but ok)
-#   exit 2  — one or more failures     → log_error, abort startup
-#   exit 3+ — health.sh itself crashed → log_error, abort startup
-#
-# We must NOT use `if ./health.sh; then` because that collapses all
-# non-zero codes to the same branch, hiding critical failures behind a
-# warning message and giving the operator a false green signal.
 # ---------------------------------------------------------------------------
 run_health_check() {
   if [[ "$SKIP_HEALTH_CHECK" == "true" ]]; then
