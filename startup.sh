@@ -653,14 +653,22 @@ start_services() {
 
 # ---------------------------------------------------------------------------
 # wait_for_services
+#
+# Polls each critical service for Docker health status and exits as soon as
+# all services report healthy (or "none" for containers without a healthcheck).
+#
+# Poll interval is 1s so the loop breaks within ~1s of the last service
+# becoming ready, rather than up to the old 3s interval.
+# Progress lines are still emitted every ~9s to keep output readable without
+# flooding the terminal on slow starts (e.g. fail2ban initialising iptables).
 # ---------------------------------------------------------------------------
 wait_for_services() {
   log_info "Waiting for critical services to become ready..."
 
   local services=(vaultwarden caddy fail2ban)
   local timeout=90
-  local interval=3
-  local progress_interval=9   # emit a status line every 3rd poll
+  local interval=1          # poll every 1s for near-instant early exit
+  local progress_interval=9 # emit a status line every ~9s
   local elapsed=0
   local next_progress=0
 
