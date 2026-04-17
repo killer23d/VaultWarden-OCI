@@ -2,85 +2,6 @@
 # lib/secrets.sh - Shared secrets management functions
 # Used by edit-secrets.sh and setup-secrets.sh
 #
-# PATCHED BUGS (2026-03-20):
-#   UX: Color-coded password display in auto_generate_secret_field():
-#       - admin_token block: label lines now shown in red, password value in green.
-#       - admin_basic_auth_hash block: label lines now shown in red, password value in green.
-#       (These are UX improvements to password display coloring, not security fixes.)
-#
-# PATCHED BUGS (2026-03-24):
-#   FIX-SS1: Add email_api_token to collect_secret_field() and
-#   auto_generate_secret_field(). Previously both functions fell through to
-#   the *) error branch, causing edit-secrets.sh --rotate email_api_token to
-#   fail with "unknown field" when collect_secret_field was called as a
-#   fallback. The canonical secrets key for any email provider API token is
-#   'email_api_token' (matching what decrypt_secret reads in lib/common.sh).
-#
-# PATCHED BUGS (2026-03-26):
-#   FIX-SD1: Replace global SCRIPT_DIR assignment with a private
-#   _SECRETS_LIB_DIR variable. lib/secrets.sh is a sourced library; setting
-#   SCRIPT_DIR at global scope overwrites the caller's SCRIPT_DIR (which
-#   points to the project root) with the lib/ directory. Any subsequent
-#   `source "$SCRIPT_DIR/lib/..."` call in the calling script then resolves
-#   to `lib/lib/...`, causing "No such file or directory" errors (e.g.
-#   health.sh line 14: lib/lib/simple_key_resilience.sh). Using a private
-#   variable scoped to this file fixes all callers without requiring each
-#   caller to save/restore SCRIPT_DIR.
-#
-# PATCHED BUGS (2026-04-06):
-#   FIX-SEC1: Surface sops stderr in all decrypt/validate paths so that
-#   failures produce actionable diagnostics instead of generic one-liners.
-#   decrypt_secret(), validate_secrets_decryption(), validate_secrets_yaml(),
-#   validate_required_secrets(), list_secrets(), and list_secret_keys() each
-#   previously suppressed sops stderr with 2>/dev/null, making it impossible
-#   to distinguish wrong-key, missing-key-file, corrupt-ciphertext, and
-#   network errors from log output alone. Fix: capture stderr into a local
-#   variable; emit it via log_error on non-zero exit, including the expected
-#   SOPS_AGE_KEY_FILE path. Pattern mirrors the BUG-CRY-ES2c fix in
-#   encrypt_sops_file().
-#
-# PATCHED BUGS (2026-04-07):
-#   FIX-PERF1: decrypt_secret() called sops twice per key: once to capture
-#   stderr and once to capture the plaintext value. Replaced with a single
-#   sops invocation that writes stderr to a mktemp file (cleaned up
-#   unconditionally via trap) and stdout to the value variable.
-#
-#   FIX-HEREDOC1: generate_recovery_kit() used an unquoted heredoc (<< EOF).
-#   Shell expansion inside an unquoted heredoc silently drops the $2y prefix
-#   from bcrypt hashes (e.g. $caddy_hash = "admin $2y$12$...") and expands
-#   any other $ sequences in the static body text. Changed to a quoted
-#   delimiter (<< 'EOF') for the static block, then appended all dynamic
-#   values with explicit printf calls.
-#
-#   FIX-VAL1: validate_required_secrets() hard-coded only 4 keys; added
-#   email_api_token and backup_passphrase. Missing backup_passphrase caused
-#   backup.sh to silently create unencrypted backups. Per-key log_error lines
-#   added so admins see one clear message per absent secret.
-#
-#   FIX-VAL2: check_placeholder_values() mirrored the same 4-key gap;
-#   email_api_token and backup_passphrase added to match validate_required_secrets().
-#   Per-key log_warn lines added so each stale placeholder is individually surfaced.
-#
-#   FIX-VAL3: Both functions now emit one diagnostic line per problem before
-#   the final aggregated summary, giving operators a clear, actionable message
-#   for each missing or placeholder secret rather than a single bulk warning.
-#
-# PATCHED BUGS (2026-04-07):
-#   FIX-SEC2: check_placeholder_values() previously suppressed sops stderr with
-#   2>/dev/null and treated any non-zero decrypt as a silent non-placeholder.
-#   That masked wrong-key, missing-key-file, and corrupt-ciphertext failures
-#   during post-setup validation. Fix: capture stderr per key, log an explicit
-#   error on non-zero exit, and return 1 after cleanup so unreadable secrets are
-#   surfaced as validation errors instead of being silently ignored.
-#
-# PATCHED BUGS (2026-04-08):
-#   SS-RK1 [MEDIUM] offer_recovery_kit_export(): recovery kit visibility
-#                   depended on /dev/tty. On SSH/jumphost/nohup flows the
-#                   tty write path can be unavailable, so the operator may
-#                   never see or save the kit. Fix: always write a timestamped
-#                   copy to ./recovery-kit-<epoch>.txt with mode 600 before
-#                   the interactive tmpfs export path, then emit a prominent
-#                   warning to save and delete the file.
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     echo "Error: This library should be sourced, not executed directly"
@@ -605,9 +526,10 @@ secure_secrets_file() {
     local secrets_file="${1:-$SECRETS_FILE}"
     if [[ ! -f "$secrets_file" ]]; then return 0; fi
     chmod 600 "$secrets_file"
-    local real_user
+    local real_user real_group
     real_user=$(get_real_user)
-    chown "$real_user:$real_user" "$secrets_file"
+    real_group=$(id -gn "$real_user" 2>/dev/null || printf '%s' "$real_user")
+    chown "$real_user:$real_group" "$secrets_file"
     return 0
 }
 
