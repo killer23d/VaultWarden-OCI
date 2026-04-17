@@ -1,46 +1,88 @@
 # ===========================================================================
 # VaultWarden-OCI — Makefile
 # ===========================================================================
-# Usage:
-#   make [target]
 #
-# Run 'make help' for a full list of targets with descriptions.
-#
-# All targets that require root run: $(call require-root)
-# All targets that need .env readable run: $(call check-env-readable)
-#
-# Variables:
-#   SOPS        path to sops binary  (default: sops)
-#   DOCKER      path to docker binary (default: docker)
-#   COMPOSE     docker compose command (default: docker compose)
+# Targets
+# -------
+#   help                Show this help
+#   setup               Full first-time setup (root)
+#   dev-setup           Create .env + docker-compose.override.yml for dev
+#   fix-permissions     Restore ownership after sudo leaves root-owned files
+#   start               Start production services
+#   stop                Stop services
+#   restart             Restart services
+#   status              Show container status
+#   logs                Tail all service logs
+#   ps                  Show running containers
+#   update              Pull latest images and restart
+#   update-check        Check for image updates (no pull)
+#   backup              Manual backup
+#   restore             Interactive restore wizard
+#   backup-pull         Pull latest backup from remote
+#   backup-push         Push latest backup to remote
+#   backup-list         List available backups
+#   backup-clean        Prune old backups
+#   health              Run health checks
+#   maintenance         Run maintenance tasks
+#   test                Full test suite
+#   test-config         Validate .env + docker-compose.yml
+#   dry-run             Show what `make start` would do
+#   fmt                 Format shell scripts with shfmt
+#   lint / shellcheck   Run shellcheck on all shell scripts
+#   init-secrets        Initialise secrets file (interactive)
+#   edit-secrets        Edit encrypted secrets
+#   test-secrets        Test SOPS decryption
+#   rotate-secrets      Rotate encryption keys
+#   key-install         Install age key to system location (root)
+#   install-key-root    Alias for key-install (legacy)
+#   key-health          Check age key health
+#   key-show            Show age public key + path
+#   key-backup          Back up age key to secure location
+#   key-escrow          Generate encrypted escrow package
+#   ssl-renew           Force TLS certificate renewal
+#   ssl-status          Show TLS certificate status
+#   fail2ban-status     Show fail2ban jail status
+#   fail2ban-unban      Unban an IP  (IP=x.x.x.x)
+#   fail2ban-reload     Reload fail2ban config
+#   notify-test         Send a test notification
+#   email-test          Alias for notify-test
+#   smtp-test           Test SMTP connectivity
+#   compose-validate    Validate docker-compose files
+#   pre-flight-check    Run pre-flight checks
+#   breakglass-admin    Create emergency admin account
+#   check-domain        Validate domain DNS resolution
+#   clean               Remove generated runtime files
+#   prune               Remove stopped containers + dangling images
+#   purge               Destroy all data (DESTRUCTIVE)
+#   uninstall           Fully remove VaultWarden-OCI
 # ===========================================================================
 
-# --- Tool paths (override via env if needed) ---
+# --- Tool paths (override via environment if needed) ---
 SOPS    ?= sops
 DOCKER  ?= docker
 COMPOSE ?= docker compose
 
-# --- Colour codes (ANSI) ---
+# --- ANSI colour codes ---
 RED    := \033[0;31m
 GREEN  := \033[0;32m
 YELLOW := \033[1;33m
 BLUE   := \033[0;34m
 CYAN   := \033[0;36m
-NC     := \033[0m   # No Colour
+NC     := \033[0m
 
 # ---------------------------------------------------------------------------
 # Internal macros
 # ---------------------------------------------------------------------------
 
-# require-root — abort immediately if not running under sudo / as root.
+# require-root: abort unless running under sudo / as root.
 define require-root
 	@if [ "$$(id -u)" -ne 0 ]; then \
-		echo "$(RED)ERROR: This target must be run as root (use sudo make $@).$(NC)"; \
+		echo "$(RED)ERROR: This target must be run as root (use: sudo make $@).$(NC)"; \
 		exit 1; \
 	fi
 endef
 
-# check-env-readable — abort if .env is missing or not readable by current user.
+# check-env-readable: abort unless .env exists and is readable.
 define check-env-readable
 	@if [ ! -f ".env" ]; then \
 		echo "$(RED)ERROR: .env not found. Run: sudo make setup$(NC)"; \
@@ -85,21 +127,27 @@ help: ## Show this help message
 # ---------------------------------------------------------------------------
 setup: ## Full first-time setup (requires root)
 	$(call require-root)
-	@echo "$(BLUE)Running full setup...$(NC)"
+	@echo "$(BLUE)Running full setup…$(NC)"
 	@./setup.sh
 
 dev-setup: ## Set up development environment (.env + docker-compose.override.yml)
 	$(call require-root)
-	@echo "$(BLUE)Setting up development environment...$(NC)"
-	@if [ ! -f ".env" ]; then cp .env.example .env; echo "$(YELLOW)Created .env from template — edit before starting.$(NC)"; fi
-	@if [ ! -f "docker-compose.override.yml" ]; then cp docker-compose.override.dev.yml.example docker-compose.override.yml; echo "$(YELLOW)Created development override file.$(NC)"; fi
+	@echo "$(BLUE)Setting up development environment…$(NC)"
+	@if [ ! -f ".env" ]; then \
+		cp .env.example .env; \
+		echo "$(YELLOW)Created .env from template — edit before starting.$(NC)"; \
+	fi
+	@if [ ! -f "docker-compose.override.yml" ]; then \
+		cp docker-compose.override.dev.yml.example docker-compose.override.yml; \
+		echo "$(YELLOW)Created development override file.$(NC)"; \
+	fi
 
 # ---------------------------------------------------------------------------
 # fix-permissions
 # ---------------------------------------------------------------------------
 fix-permissions: ## Fix file ownership after sudo operations leave root-owned files
 	$(call require-root)
-	@echo "$(BLUE)Fixing file ownership...$(NC)"
+	@echo "$(BLUE)Fixing file ownership…$(NC)"
 	@REAL_USER=$$(logname 2>/dev/null || echo "$${SUDO_USER:-ubuntu}"); \
 	REAL_GROUP=$$(id -gn "$$REAL_USER" 2>/dev/null || echo "$$REAL_USER"); \
 	echo "$(CYAN)  Target user : $$REAL_USER:$$REAL_GROUP$(NC)"; \
@@ -110,8 +158,8 @@ fix-permissions: ## Fix file ownership after sudo operations leave root-owned fi
 	    maintenance.sh restore.sh setup-secrets.sh setup-systemd.sh \
 	    setup.sh startup.sh uninstall-vaultwarden.sh update.sh \
 	    backups caddy docs fail2ban lib logs ssl systemd \
-	    docker-compose.yml.example docker-compose.override.yml.example .env.example .sops.yaml \
-	    .gitattributes .gitignore; do \
+	    docker-compose.yml.example docker-compose.override.yml.example \
+	    .env.example .sops.yaml .gitattributes .gitignore; do \
 	    [ -e "$$item" ] && chown -R "$$REAL_USER:$$REAL_GROUP" "$$item" 2>/dev/null && \
 	        echo "$(GREEN)  ✓ $$item$(NC)" || true; \
 	done; \
@@ -137,21 +185,21 @@ fix-permissions: ## Fix file ownership after sudo operations leave root-owned fi
 	echo "$(CYAN)Note: secrets/ and secrets/.docker_secrets/ are intentionally left restricted.$(NC)"
 
 init-secrets: ## Initialize secrets file (interactive)
-	@echo "$(BLUE)Initializing secrets...$(NC)"
+	@echo "$(BLUE)Initializing secrets…$(NC)"
 	@if [ ! -f "secrets/secrets.yaml" ]; then \
-		echo "$(BLUE)No secrets file found. Running setup-secrets.sh...$(NC)"; \
+		echo "$(BLUE)No secrets file found. Running setup-secrets.sh…$(NC)"; \
 		./setup-secrets.sh; \
 	else \
 		echo "$(YELLOW)Secrets file already exists. Use 'make edit-secrets' to modify.$(NC)"; \
 	fi
 
 edit-secrets: ## Edit encrypted secrets file
-	@echo "$(BLUE)Opening secrets editor...$(NC)"
+	@echo "$(BLUE)Opening secrets editor…$(NC)"
 	@./edit-secrets.sh
 
 # FIX [P5-M2]: propagate failure exit code so `make test` fails correctly.
 test-secrets: ## Test secrets decryption
-	@echo "$(BLUE)Testing secrets decryption...$(NC)"
+	@echo "$(BLUE)Testing secrets decryption…$(NC)"
 	@if ./edit-secrets.sh --list > /dev/null 2>&1; then \
 		echo "$(GREEN)Secrets decryption: OK$(NC)"; \
 	else \
@@ -161,17 +209,17 @@ test-secrets: ## Test secrets decryption
 
 rotate-secrets: ## Rotate encryption keys and re-encrypt secrets
 	$(call require-root)
-	@echo "$(BLUE)Rotating secrets...$(NC)"
+	@echo "$(BLUE)Rotating secrets…$(NC)"
 	@./setup-secrets.sh --rotate
 
 # ---------------------------------------------------------------------------
 # Docker lifecycle
 # ---------------------------------------------------------------------------
 
-# ── Pre-flight: refuse to start with the dev-only override present. ─────────
+# ── Pre-flight: refuse to start with the dev-only override present ─────────
 # docker-compose.override.yml is the local-development override.
 # It MUST NOT be present in production — it exposes ports, disables TLS,
-# and mounts source trees that don't exist on a production host.
+# and mounts source trees that do not exist on a production host.
 # ────────────────────────────────────────────────────────────────────────────
 start: ## Start all services (production)
 	$(call check-env-readable)
@@ -181,15 +229,15 @@ start: ## Start all services (production)
 		echo "$(YELLOW)       Remove it: rm docker-compose.override.yml$(NC)"; \
 		exit 1; \
 	fi
-	@echo "$(BLUE)Starting VaultWarden services...$(NC)"
+	@echo "$(BLUE)Starting VaultWarden services…$(NC)"
 	@./startup.sh
 
 stop: ## Stop all services
-	@echo "$(BLUE)Stopping VaultWarden services...$(NC)"
+	@echo "$(BLUE)Stopping VaultWarden services…$(NC)"
 	@$(COMPOSE) down
 
 restart: ## Restart all services
-	@echo "$(BLUE)Restarting VaultWarden services...$(NC)"
+	@echo "$(BLUE)Restarting VaultWarden services…$(NC)"
 	@$(MAKE) stop
 	@$(MAKE) start
 
@@ -207,7 +255,7 @@ ps: ## Show running containers
 # test / lint
 # ---------------------------------------------------------------------------
 test: ## Run full test suite
-	@echo "$(BLUE)Running tests...$(NC)"
+	@echo "$(BLUE)Running tests…$(NC)"
 	@$(MAKE) test-config
 	@$(MAKE) test-secrets
 	@$(MAKE) shellcheck
@@ -215,7 +263,7 @@ test: ## Run full test suite
 
 test-config: ## Validate .env and docker-compose.yml
 	$(call check-env-readable)
-	@echo "$(BLUE)Validating configuration...$(NC)"
+	@echo "$(BLUE)Validating configuration…$(NC)"
 	@$(COMPOSE) config --quiet && echo "$(GREEN)docker-compose config: OK$(NC)"
 
 dry-run: ## Show what 'make start' would do (no side effects)
@@ -225,7 +273,7 @@ dry-run: ## Show what 'make start' would do (no side effects)
 
 fmt: ## Format shell scripts with shfmt (if installed)
 	@if command -v shfmt >/dev/null 2>&1; then \
-		echo "$(BLUE)Formatting shell scripts...$(NC)"; \
+		echo "$(BLUE)Formatting shell scripts…$(NC)"; \
 		shfmt -w -i 4 -ci *.sh lib/*.sh; \
 		echo "$(GREEN)Done.$(NC)"; \
 	else \
@@ -236,7 +284,7 @@ lint: shellcheck ## Alias for shellcheck
 
 shellcheck: ## Run shellcheck on all shell scripts
 	@if command -v shellcheck >/dev/null 2>&1; then \
-		echo "$(BLUE)Running shellcheck...$(NC)"; \
+		echo "$(BLUE)Running shellcheck…$(NC)"; \
 		shellcheck -x *.sh lib/*.sh && echo "$(GREEN)shellcheck: OK$(NC)"; \
 	else \
 		echo "$(YELLOW)shellcheck not installed — skipping$(NC)"; \
@@ -247,11 +295,11 @@ shellcheck: ## Run shellcheck on all shell scripts
 # ---------------------------------------------------------------------------
 update: ## Pull latest images and restart services
 	$(call require-root)
-	@echo "$(BLUE)Updating VaultWarden...$(NC)"
+	@echo "$(BLUE)Updating VaultWarden…$(NC)"
 	@./update.sh
 
 update-check: ## Check for available image updates (no pull)
-	@echo "$(BLUE)Checking for updates...$(NC)"
+	@echo "$(BLUE)Checking for updates…$(NC)"
 	@$(DOCKER) compose pull --dry-run 2>&1 | grep -E "Pulling|up to date" || true
 
 # ---------------------------------------------------------------------------
@@ -259,22 +307,22 @@ update-check: ## Check for available image updates (no pull)
 # ---------------------------------------------------------------------------
 backup: ## Run a manual backup
 	$(call require-root)
-	@echo "$(BLUE)Running backup...$(NC)"
+	@echo "$(BLUE)Running backup…$(NC)"
 	@./backup.sh
 
 restore: ## Run interactive restore wizard
 	$(call require-root)
-	@echo "$(BLUE)Starting restore wizard...$(NC)"
+	@echo "$(BLUE)Starting restore wizard…$(NC)"
 	@./restore.sh
 
 backup-pull: ## Pull latest backup from remote storage
 	$(call require-root)
-	@echo "$(BLUE)Pulling backup from remote...$(NC)"
+	@echo "$(BLUE)Pulling backup from remote…$(NC)"
 	@./backup.sh --pull
 
 backup-push: ## Push latest backup to remote storage
 	$(call require-root)
-	@echo "$(BLUE)Pushing backup to remote...$(NC)"
+	@echo "$(BLUE)Pushing backup to remote…$(NC)"
 	@./backup.sh --push
 
 backup-list: ## List available backups
@@ -283,7 +331,7 @@ backup-list: ## List available backups
 
 backup-clean: ## Remove old backups beyond retention policy
 	$(call require-root)
-	@echo "$(BLUE)Cleaning old backups...$(NC)"
+	@echo "$(BLUE)Cleaning old backups…$(NC)"
 	@./backup.sh --clean
 
 # ---------------------------------------------------------------------------
@@ -291,12 +339,12 @@ backup-clean: ## Remove old backups beyond retention policy
 # ---------------------------------------------------------------------------
 health: ## Run health checks
 	$(call check-env-readable)
-	@echo "$(BLUE)Running health checks...$(NC)"
+	@echo "$(BLUE)Running health checks…$(NC)"
 	@./health.sh
 
 maintenance: ## Run maintenance tasks (vacuum, integrity check, etc.)
 	$(call require-root)
-	@echo "$(BLUE)Running maintenance...$(NC)"
+	@echo "$(BLUE)Running maintenance…$(NC)"
 	@./maintenance.sh
 
 # ---------------------------------------------------------------------------
@@ -324,7 +372,7 @@ key-install: ## Install age key from repo to system location (requires root)
 	chown root:root "$$CONFIGURED_KEY"; \
 	echo "$(GREEN)  ✓ Key installed at $$CONFIGURED_KEY (mode 600, root:root)$(NC)"; \
 	echo ""
-	@echo "$(BLUE)Verifying installation with key-health...$(NC)"
+	@echo "$(BLUE)Verifying installation with key-health…$(NC)"
 	@$(MAKE) key-health
 
 install-key-root: key-install ## Alias for key-install (legacy name)
@@ -413,7 +461,7 @@ key-escrow: ## Generate encrypted escrow package (requires GPG or another age ke
 # ---------------------------------------------------------------------------
 ssl-renew: ## Force SSL certificate renewal
 	$(call require-root)
-	@echo "$(BLUE)Forcing SSL certificate renewal...$(NC)"
+	@echo "$(BLUE)Forcing SSL certificate renewal…$(NC)"
 	@$(COMPOSE) exec caddy caddy reload --config /etc/caddy/Caddyfile --force
 
 ssl-status: ## Show SSL certificate status
@@ -441,26 +489,26 @@ fail2ban-reload: ## Reload fail2ban configuration
 # ---------------------------------------------------------------------------
 notify-test: ## Send a test notification
 	$(call check-env-readable)
-	@echo "$(BLUE)Sending test notification...$(NC)"
+	@echo "$(BLUE)Sending test notification…$(NC)"
 	@bash -c "source lib/common.sh; init_common_lib Makefile; send_notification_email 'VaultWarden Test' 'This is a test notification from make notify-test.'"
 
 email-test: notify-test ## Alias for notify-test
 
 smtp-test: ## Test SMTP connectivity only
 	$(call check-env-readable)
-	@echo "$(BLUE)Testing SMTP connectivity...$(NC)"
+	@echo "$(BLUE)Testing SMTP connectivity…$(NC)"
 	@bash -c "source lib/common.sh; init_common_lib Makefile; source lib/email.sh; test_smtp_connectivity"
 
 # ---------------------------------------------------------------------------
 # compose / pre-flight
 # ---------------------------------------------------------------------------
 compose-validate: ## Validate docker-compose files without starting
-	@echo "$(BLUE)Validating docker-compose configuration...$(NC)"
+	@echo "$(BLUE)Validating docker-compose configuration…$(NC)"
 	@$(COMPOSE) config --quiet && echo "$(GREEN)Configuration valid.$(NC)"
 
 pre-flight-check: ## Run pre-flight checks before starting services
 	$(call check-env-readable)
-	@echo "$(BLUE)Running pre-flight checks...$(NC)"
+	@echo "$(BLUE)Running pre-flight checks…$(NC)"
 	@./startup.sh --preflight
 
 # ---------------------------------------------------------------------------
@@ -468,12 +516,12 @@ pre-flight-check: ## Run pre-flight checks before starting services
 # ---------------------------------------------------------------------------
 breakglass-admin: ## Create a break-glass admin account (emergency access)
 	$(call require-root)
-	@echo "$(BLUE)Creating break-glass admin account...$(NC)"
+	@echo "$(BLUE)Creating break-glass admin account…$(NC)"
 	@./create-breakglass-admin.sh
 
 check-domain: ## Validate domain DNS resolution
 	$(call check-env-readable)
-	@echo "$(BLUE)Checking domain DNS...$(NC)"
+	@echo "$(BLUE)Checking domain DNS…$(NC)"
 	@DOMAIN=$$(grep '^DOMAIN=' .env 2>/dev/null | cut -d= -f2); \
 	if [ -z "$$DOMAIN" ]; then echo "$(YELLOW)DOMAIN not set in .env$(NC)"; exit 0; fi; \
 	echo "  Domain: $$DOMAIN"; \
@@ -488,13 +536,13 @@ check-domain: ## Validate domain DNS resolution
 # clean / prune / purge / uninstall
 # ---------------------------------------------------------------------------
 clean: ## Remove generated files (.env, docker-compose.yml, override)
-	@echo "$(YELLOW)Removing generated files...$(NC)"
+	@echo "$(YELLOW)Removing generated files…$(NC)"
 	@rm -f .env docker-compose.yml docker-compose.override.yml
 	@echo "$(GREEN)Done.$(NC)"
 
 prune: ## Remove stopped containers and dangling images
 	$(call require-root)
-	@echo "$(BLUE)Pruning Docker resources...$(NC)"
+	@echo "$(BLUE)Pruning Docker resources…$(NC)"
 	@$(DOCKER) system prune -f
 
 purge: ## Stop services, remove volumes and generated files (DESTRUCTIVE)
