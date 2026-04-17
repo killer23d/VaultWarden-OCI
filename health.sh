@@ -615,7 +615,7 @@ _check_fail2ban() {
         # is alive) while the daemon socket is still being created.
         if [[ "$initial_container_health" == "starting" || "$current_container_health" == "starting" ]]; then
             _warn "fail2ban:daemon" \
-                "Fail2Ban daemon not yet responding (container was starting when check began — retried ${FAIL2BAN_PING_RETRIES}×${FAIL2BAN_PING_DELAY}s; will resolve automatically)"
+                "Fail2Ban daemon not yet responding (container was starting when check began — retried ${FAIL2BAN_PING_RETRIES}x${FAIL2BAN_PING_DELAY}s; will resolve automatically)"
         else
             _fail "fail2ban:daemon" \
                 "Fail2Ban daemon not responding to ping after ${FAIL2BAN_PING_RETRIES} attempts (container health: ${current_container_health})"
