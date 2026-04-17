@@ -1,7 +1,7 @@
 [Unit]
 Description=VaultWarden Maintenance Timer Daily 02:05
 # SY-2: Prevent this timer firing mid-shutdown.
-Conflicts=shutdown.target vaultwarden-db-backup.service
+Conflicts=shutdown.target
 # Issue #57: OnFailure on the timer unit catches calendar parse errors or
 # systemd activation failures that would otherwise go unnotified.
 OnFailure=vaultwarden-notify-failure@%n.service
@@ -17,7 +17,9 @@ OnFailure=vaultwarden-notify-failure@%n.service
 # image prune run every day, including Sunday — the day the weekly full backup
 # fires at 03:00. Without daily maintenance, WAL files and unused images
 # accumulate an extra day every week before that backup.
-# The existing Conflicts=vaultwarden-db-backup.service prevents overlap.
+# Overlap with db-backup (04:00) is prevented by Conflicts= in the
+# maintenance *service* unit (not here — a Conflicts= on a timer unit
+# deactivates the timer itself, which is incorrect).
 OnCalendar=*-*-* 02:05:00
 Persistent=true
 # Ensure Docker is healthy before any boot-triggered catch-up fires.
