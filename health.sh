@@ -54,7 +54,7 @@ HEALTH_CONNECT_TIMEOUT=${HEALTH_CONNECT_TIMEOUT:-3}
 HEALTH_RETRIES=${HEALTH_RETRIES:-3}
 HEALTH_RETRY_DELAY=${HEALTH_RETRY_DELAY:-2}
 
-# When true, a non-200 response from /api/server-info is recorded as a hard
+# When true, a non-200 response from /api/config is recorded as a hard
 # failure (exit 2) rather than a warning (exit 1). Set in .env or the
 # calling environment to opt in to stricter alerting.
 HEALTH_API_STRICT=${HEALTH_API_STRICT:-false}
@@ -198,7 +198,7 @@ Checks performed:
   - Docker container status and health
   - SSL certificate validity and expiry
   - VaultWarden /alive liveness probe (internal + external HTTPS)
-  - VaultWarden /api/server-info readiness probe (requires live DB connection)
+  - VaultWarden /api/config readiness probe (requires live DB connection)
   - Fail2Ban status and jail activity
   - Disk space utilization
   - Memory utilization
@@ -210,13 +210,13 @@ Checks performed:
 Comprehensive mode adds:
   - Detailed container resource usage
   - SSL certificate chain validation
-  - Extended /api/server-info endpoint testing (explicit comprehensive result)
+  - Extended /api/config endpoint testing (explicit comprehensive result)
   - Backup integrity verification
   - Fail2Ban rule validation
   - Fail2Ban filter regex drift detection (vaultwarden-auth against live log)
 
 Environment variables:
-  HEALTH_API_STRICT=true          Promote /api/server-info non-200 from warning to failure
+  HEALTH_API_STRICT=true          Promote /api/config non-200 from warning to failure
   ALERT_COOLDOWN_SECONDS=3600     Minimum seconds between repeat alerts for the same
                                   failure key (default: 3600 = 1 hour)
   ALERT_RECOVERY_TTL=86400        Minimum seconds between clear-state recovery emails
@@ -450,7 +450,7 @@ _check_vaultwarden_alive() {
 # -----------------------------------------------------------------------------
 # _check_vaultwarden_server_info
 #
-# Readiness probe: checks /api/server-info.
+# Readiness probe: checks /api/config.
 # This endpoint exercises the database connection path; it will return a
 # non-200 code (or time out) if the DB is locked, the secrets mount has
 # failed, or the application is in a degraded state despite /alive returning
@@ -465,7 +465,7 @@ _check_vaultwarden_server_info() {
     local domain
     domain="$(_get_domain)"
 
-    log_info "Checking VaultWarden readiness (/api/server-info)..."
+    log_info "Checking VaultWarden readiness (/api/config)..."
 
     # Internal readiness probe — direct to container, bypasses Caddy.
     local internal_code
@@ -473,21 +473,21 @@ _check_vaultwarden_server_info() {
         --connect-timeout "$HEALTH_CONNECT_TIMEOUT" \
         --max-time "$HEALTH_TIMEOUT" \
         -w "%{http_code}" \
-        "http://127.0.0.1:80/api/server-info" 2>/dev/null || echo "000")
+        "http://127.0.0.1:80/api/config" 2>/dev/null || echo "000")
 
     case "$internal_code" in
         200)
-            _pass "vaultwarden:server-info" "VaultWarden /api/server-info responding (HTTP $internal_code)"
+            _pass "vaultwarden:server-info" "VaultWarden /api/config responding (HTTP $internal_code)"
             ;;
         000)
             # Connection refused or timeout — hard fail regardless of HEALTH_API_STRICT
-            _fail "vaultwarden:server-info" "VaultWarden /api/server-info not reachable internally (connection failed)"
+            _fail "vaultwarden:server-info" "VaultWarden /api/config not reachable internally (connection failed)"
             ;;
         *)
             if [[ "${HEALTH_API_STRICT:-false}" == "true" ]]; then
-                _fail "vaultwarden:server-info" "VaultWarden /api/server-info returned HTTP ${internal_code} (HEALTH_API_STRICT=true)"
+                _fail "vaultwarden:server-info" "VaultWarden /api/config returned HTTP ${internal_code} (HEALTH_API_STRICT=true)"
             else
-                _warn "vaultwarden:server-info" "VaultWarden /api/server-info returned HTTP ${internal_code} (set HEALTH_API_STRICT=true to treat as failure)"
+                _warn "vaultwarden:server-info" "VaultWarden /api/config returned HTTP ${internal_code} (set HEALTH_API_STRICT=true to treat as failure)"
             fi
             ;;
     esac
@@ -499,20 +499,20 @@ _check_vaultwarden_server_info() {
             --connect-timeout "$HEALTH_CONNECT_TIMEOUT" \
             --max-time "$HEALTH_TIMEOUT" \
             -w "%{http_code}" \
-            "https://${domain}/api/server-info" 2>/dev/null || echo "000")
+            "https://${domain}/api/config" 2>/dev/null || echo "000")
 
         case "$external_code" in
             200)
-                _pass "vaultwarden:server-info:external" "VaultWarden /api/server-info HTTPS responding (HTTP $external_code)"
+                _pass "vaultwarden:server-info:external" "VaultWarden /api/config HTTPS responding (HTTP $external_code)"
                 ;;
             000)
-                _fail "vaultwarden:server-info:external" "VaultWarden /api/server-info HTTPS not reachable (connection failed)"
+                _fail "vaultwarden:server-info:external" "VaultWarden /api/config HTTPS not reachable (connection failed)"
                 ;;
             *)
                 if [[ "${HEALTH_API_STRICT:-false}" == "true" ]]; then
-                    _fail "vaultwarden:server-info:external" "VaultWarden /api/server-info HTTPS returned HTTP ${external_code} (HEALTH_API_STRICT=true)"
+                    _fail "vaultwarden:server-info:external" "VaultWarden /api/config HTTPS returned HTTP ${external_code} (HEALTH_API_STRICT=true)"
                 else
-                    _warn "vaultwarden:server-info:external" "VaultWarden /api/server-info HTTPS returned HTTP ${external_code}"
+                    _warn "vaultwarden:server-info:external" "VaultWarden /api/config HTTPS returned HTTP ${external_code}"
                 fi
                 ;;
         esac
@@ -526,7 +526,7 @@ _check_vaultwarden_server_info() {
             --connect-timeout "$HEALTH_CONNECT_TIMEOUT" \
             --max-time "$HEALTH_TIMEOUT" \
             -w "%{http_code}" \
-            "https://${domain}/api/server-info" 2>/dev/null || echo "000")
+            "https://${domain}/api/config" 2>/dev/null || echo "000")
         case "$comp_code" in
             200) _pass "vaultwarden:api" "VaultWarden API endpoint responding (HTTP $comp_code)" ;;
             *) _warn "vaultwarden:api" "VaultWarden API returned HTTP $comp_code" ;;
