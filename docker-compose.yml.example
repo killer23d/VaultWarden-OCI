@@ -124,7 +124,7 @@ services:
       - caddy_external
 
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://127.0.0.1/alive"]
+      test: ["wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:80/alive"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -185,7 +185,7 @@ services:
       DOMAIN: ${DOMAIN}
       TZ: ${TZ:-UTC}
       TLS_PROVIDER: ${TLS_PROVIDER:-cloudflare}
-      ADMIN_ALLOW_CIDR: ${ADMIN_ALLOW_CIDR}
+      ADMIN_ALLOW_CIDR: ${ADMIN_ALLOW_CIDR:-127.0.0.1/32}
       PUSH_ENABLED: ${PUSH_ENABLED:-false}
 
     secrets:
