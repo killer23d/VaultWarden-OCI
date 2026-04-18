@@ -158,7 +158,7 @@ fix-permissions: ## Fix file ownership after sudo operations leave root-owned fi
 	    maintenance.sh restore.sh setup-secrets.sh setup-systemd.sh \
 	    setup.sh startup.sh uninstall-vaultwarden.sh update.sh \
 	    backups caddy docs fail2ban lib logs ssl systemd \
-	    docker-compose.yml.example .env.example .sops.yaml \
+	    docker-compose.yml.example docker-compose.override.yml.example .env.example .sops.yaml \
 	    .gitattributes .gitignore; do \
 	    [ -e "$$item" ] && chown -R "$$REAL_USER:$$REAL_GROUP" "$$item" 2>/dev/null && \
 	        echo "$(GREEN)  ✓ $$item$(NC)" || true; \
@@ -171,6 +171,14 @@ fix-permissions: ## Fix file ownership after sudo operations leave root-owned fi
 	if [ -f "docker-compose.yml" ]; then \
 	    chown "$$REAL_USER:$$REAL_GROUP" docker-compose.yml; \
 	    echo "$(GREEN)  ✓ docker-compose.yml$(NC)"; \
+	fi; \
+	if [ -f "docker-compose.override.yml" ]; then \
+	    chown "$$REAL_USER:$$REAL_GROUP" docker-compose.override.yml; \
+	    echo "$(GREEN)  ✓ docker-compose.override.yml$(NC)"; \
+	fi; \
+	if [ -f "caddy/entrypoint.sh" ] && [ ! -x "caddy/entrypoint.sh" ]; then \
+	    chmod +x "caddy/entrypoint.sh"; \
+	    echo "$(GREEN)  ✓ caddy/entrypoint.sh → +x$(NC)"; \
 	fi; \
 	echo ""; \
 	echo "$(GREEN)File ownership fixed for user $$REAL_USER.$(NC)"; \
