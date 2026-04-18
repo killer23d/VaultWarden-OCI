@@ -1,6 +1,10 @@
-# VaultWarden-OCI - Production Docker Compose Configuration (SECURITY HARDENED)
+# VaultWarden-OCI - Production Docker Compose Configuration
 #
 # Override in .env: COMPOSE_PROJECT_NAME=vaultwarden
+#
+# Push Notifications: Push secret files must exist even if push is disabled.
+# The setup script (or init container) creates placeholder files automatically.
+# Set PUSH_ENABLED=true and populate the secret files to enable push.
 #
 services:
   # =============================================================================
@@ -37,6 +41,7 @@ services:
       find /logs -path '*/caddy' -prune -o -type f -exec chmod 640 {} + 2>/dev/null || true &&
 
       chmod 755 /logs/caddy &&
+
       chown 0:0 /logs/caddy/access.log /logs/caddy/security.log &&
       chmod 644 /logs/caddy/access.log /logs/caddy/security.log &&
 
@@ -51,8 +56,15 @@ services:
       mkdir -p /fail2ban_db &&
       chown 0:0 /fail2ban_db &&
       chmod 755 /fail2ban_db &&
+
       chmod 700 /secrets /secrets/.docker_secrets 2>/dev/null || true &&
       find /secrets/.docker_secrets -type f -exec chmod 444 {} + 2>/dev/null || true &&
+
+      touch /secrets/.docker_secrets/push_installation_id &&
+      touch /secrets/.docker_secrets/push_installation_key &&
+      chmod 444 /secrets/.docker_secrets/push_installation_id &&
+      chmod 444 /secrets/.docker_secrets/push_installation_key &&
+
       echo 'Init container completed - permissions set to ${PUID}:${PGID}'
       "
 
@@ -105,6 +117,9 @@ services:
       SMTP_TIMEOUT: ${SMTP_TIMEOUT:-15}
       PUSH_RELAY_URI: ${PUSH_RELAY_URI:-https://push.bitwarden.com}
       PUSH_IDENTITY_URI: ${PUSH_IDENTITY_URI:-https://identity.bitwarden.com}
+      # CHANGED: _FILE vars are always set; files always exist (init creates placeholders).
+      # When PUSH_ENABLED=false, vaultwarden ignores these files entirely.
+      # To enable push: set PUSH_ENABLED=true and populate both secret files.
       PUSH_INSTALLATION_ID_FILE: /run/secrets/push_installation_id
       PUSH_INSTALLATION_KEY_FILE: /run/secrets/push_installation_key
       DATABASE_MAX_CONNS: ${DATABASE_MAX_CONNS:-10}
@@ -121,10 +136,9 @@ services:
 
     networks:
       - vaultwarden
-      - caddy_external
 
     healthcheck:
-      test: ["wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:80/alive"]
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://127.0.0.1:80/alive || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -160,8 +174,7 @@ services:
         limits:
           memory: 512M
           cpus: '0.3'
-          pids: 200  # Caps cgroup-level PID count; complements nproc ulimit which only
-                     # bounds threads per-process. Prevents PID exhaustion on 1-2 GB OCI VMs.
+          pids: 200
         reservations:
           memory: 128M
           cpus: '0.1'
@@ -185,6 +198,8 @@ services:
       DOMAIN: ${DOMAIN}
       TZ: ${TZ:-UTC}
       TLS_PROVIDER: ${TLS_PROVIDER:-cloudflare}
+      # CHANGED: Default to localhost-only if unset, preventing a silent deny-all
+      # that causes 403 on /admin with no obvious error message.
       ADMIN_ALLOW_CIDR: ${ADMIN_ALLOW_CIDR:-127.0.0.1/32}
       PUSH_ENABLED: ${PUSH_ENABLED:-false}
 
@@ -243,7 +258,7 @@ services:
         limits:
           memory: 512M
           cpus: '0.25'
-          pids: 200  # Consistent PID cap; Caddy spawns goroutines per connection.
+          pids: 200
         reservations:
           memory: 128M
           cpus: '0.1'
@@ -278,10 +293,8 @@ services:
 
     networks:
       - vaultwarden
-      - caddy_external
 
     healthcheck:
-      # Use postfix's own status command instead of nc which may not be present.
       test: ["CMD-SHELL", "postfix status 2>/dev/null || exit 1"]
       interval: 120s
       timeout: 10s
@@ -338,8 +351,8 @@ services:
       F2B_DB_PURGE_AGE: 1d
       PACKAGES: whois
       F2B_DEST_MAIL: ${ADMIN_EMAIL}
-      # F2B_SENDER is a literal value set in .env — Docker Compose does not
-      # expand ${VAR} in .env files, so it must be an explicit literal there.
+      # F2B_SENDER must be a literal value in .env — Docker Compose does not
+      # expand ${VAR} references inside .env files themselves.
       # Example: F2B_SENDER=fail2ban@vault.example.com
       F2B_SENDER: ${F2B_SENDER}
       CF_API_TOKEN_FILE: /run/secrets/fail2ban_cloudflare_firewall_token
@@ -383,7 +396,7 @@ services:
         limits:
           memory: 512M
           cpus: '0.15'
-          pids: 100  # fail2ban spawns action subprocesses; cap to prevent runaway banning storms.
+          pids: 100
         reservations:
           memory: 64M
           cpus: '0.05'
