@@ -17,11 +17,11 @@
 	#
 	# Set in .env:  TLS_PROVIDER=cloudflare  (or acme_http)
 
-	# Trust Cloudflare proxy IPs only when running behind Cloudflare.
+	# Trust Cloudflare proxy IPs — real client IP extracted from Cf-Connecting-Ip.
+	# {client_ip} resolves to the visitor's IP; {remote_ip} is the Cloudflare edge node.
 	servers {
 		trusted_proxies cloudflare
 		client_ip_headers Cf-Connecting-Ip
-		# C-03: Connection timeouts — Caddy 2.x global hardening
 		timeouts {
 			read_body   10s
 			read_header 10s
@@ -36,8 +36,8 @@
 	log access_log {
 		include http.log.access.access
 		output file /var/log/caddy/access.log {
-			roll_size 50MB
-			roll_keep 20
+			roll_size     50MB
+			roll_keep     20
 			roll_keep_for 30d
 			roll_compression zstd
 		}
@@ -55,8 +55,8 @@
 	log security_log {
 		include http.log.access.security
 		output file /var/log/caddy/security.log {
-			roll_size 10MB
-			roll_keep 50
+			roll_size     10MB
+			roll_keep     50
 			roll_keep_for 180d
 			roll_compression zstd
 		}
@@ -79,23 +79,15 @@
 #   import tls_{$TLS_PROVIDER:cloudflare}
 #
 # cloudflare — DNS-01 via Cloudflare API token (default).
-#   The dns.providers.cloudflare module is present in this build but
-#   acme_dns is NOT a supported global option. DNS-01 is configured
-#   per-site inside the tls directive here.
 # acme_http  — HTTP-01 via port 80. No DNS provider credential needed.
 
 (tls_cloudflare) {
-	# DNS-01 challenge via Cloudflare API token.
-	# dns.providers.cloudflare is compiled into this build;
-	# the token is injected by entrypoint.sh as CLOUDFLARE_API_TOKEN.
 	tls {
 		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
 	}
 }
 
 (tls_http) {
-	# Opt out of DNS-01 — use standard ACME HTTP-01 challenge.
-	# Caddy will listen on :80 for /.well-known/acme-challenge/ requests.
 	tls {
 		issuer acme {
 			dir https://acme-v02.api.letsencrypt.org/directory
@@ -118,24 +110,24 @@ http://127.0.0.1:8080 {
 # Main Site
 # ================================
 {$DOMAIN_NAME} {
-	log access
+	log access_log
 
 	import tls_{$TLS_PROVIDER:cloudflare}
 
 	# 1. Enhanced Security Headers
 	header {
-		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-		X-Content-Type-Options "nosniff"
-		X-Frame-Options "DENY"
-		X-XSS-Protection "1; mode=block"
-		Referrer-Policy "strict-origin-when-cross-origin"
-		Cross-Origin-Opener-Policy "same-origin"
-		Cross-Origin-Resource-Policy "same-origin"
-		Cross-Origin-Embedder-Policy "credentialless"
-		X-DNS-Prefetch-Control "off"
-		Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss://{$DOMAIN_NAME}{$PUSH_CSP}; frame-src 'self'; object-src 'none'; base-uri 'self';"
-		Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=(), usb=()"
-		X-Request-ID {uuid}
+		Strict-Transport-Security          "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options             "nosniff"
+		X-Frame-Options                    "DENY"
+		X-XSS-Protection                   "1; mode=block"
+		Referrer-Policy                    "strict-origin-when-cross-origin"
+		Cross-Origin-Opener-Policy         "same-origin"
+		Cross-Origin-Resource-Policy       "same-origin"
+		Cross-Origin-Embedder-Policy       "credentialless"
+		X-DNS-Prefetch-Control             "off"
+		Content-Security-Policy            "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss://{$DOMAIN_NAME}{$PUSH_CSP}; frame-src 'self'; object-src 'none'; base-uri 'self';"
+		Permissions-Policy                 "geolocation=(), microphone=(), camera=(), payment=(), usb=()"
+		X-Request-ID                       {uuid}
 		-Server
 		-X-Powered-By
 	}
@@ -146,32 +138,34 @@ http://127.0.0.1:8080 {
 	@health path /alive
 	handle @health {
 		reverse_proxy vaultwarden:80 {
-			header_up Host {host}
+			header_up Host             {host}
 			header_up CF-Connecting-IP {client_ip}
-			header_up X-Real-IP {client_ip}
-			header_up X-Forwarded-For {client_ip}
-			header_up X-Request-ID {uuid}
+			header_up X-Real-IP        {client_ip}
+			header_up X-Forwarded-For  {client_ip}
+			header_up X-Request-ID     {uuid}
 		}
 	}
 
 	# 3. WebSocket routing
 	handle /notifications/hub {
 		reverse_proxy vaultwarden:80 {
-			header_up Host {host}
-			header_up Connection {>Connection}
-			header_up Upgrade {>Upgrade}
+			header_up Host             {host}
+			header_up Connection       {>Connection}
+			header_up Upgrade          {>Upgrade}
 			header_up CF-Connecting-IP {client_ip}
-			header_up X-Real-IP {client_ip}
-			header_up X-Forwarded-For {client_ip}
-			header_up X-Request-ID {uuid}
+			header_up X-Real-IP        {client_ip}
+			header_up X-Forwarded-For  {client_ip}
+			header_up X-Request-ID     {uuid}
 		}
 	}
 
 	# 4. Admin Panel Protection
+	# Uses {client_ip} (real visitor IP via Cf-Connecting-Ip) instead of
+	# {remote_ip} (Cloudflare edge node IP) so ADMIN_ALLOW_CIDR matches correctly.
 	@admin path /admin*
 	handle @admin {
-		@admin_remote not remote_ip {$ADMIN_ALLOW_CIDR} 127.0.0.1
-		respond @admin_remote 403
+		@admin_blocked not client_ip {$ADMIN_ALLOW_CIDR:127.0.0.1/32} 127.0.0.1
+		respond @admin_blocked 403
 
 		header {
 			Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss://{$DOMAIN_NAME}{$PUSH_CSP}; frame-src 'self'; object-src 'none'; base-uri 'self';"
@@ -186,11 +180,11 @@ http://127.0.0.1:8080 {
 		}
 
 		reverse_proxy vaultwarden:80 {
-			header_up Host {host}
+			header_up Host             {host}
 			header_up CF-Connecting-IP {client_ip}
-			header_up X-Real-IP {client_ip}
-			header_up X-Forwarded-For {client_ip}
-			header_up X-Request-ID {uuid}
+			header_up X-Real-IP        {client_ip}
+			header_up X-Forwarded-For  {client_ip}
+			header_up X-Request-ID     {uuid}
 		}
 	}
 
@@ -201,23 +195,23 @@ http://127.0.0.1:8080 {
 			max_size 512KB
 		}
 		reverse_proxy vaultwarden:80 {
-			header_up Host {host}
+			header_up Host             {host}
 			header_up CF-Connecting-IP {client_ip}
-			header_up X-Real-IP {client_ip}
-			header_up X-Forwarded-For {client_ip}
-			header_up X-Request-ID {uuid}
-			header_up X-Auth-Endpoint "true"
+			header_up X-Real-IP        {client_ip}
+			header_up X-Forwarded-For  {client_ip}
+			header_up X-Request-ID     {uuid}
+			header_up X-Auth-Endpoint  "true"
 		}
 	}
 
 	# 6. Default Reverse Proxy
 	handle {
 		reverse_proxy vaultwarden:80 {
-			header_up Host {host}
+			header_up Host             {host}
 			header_up CF-Connecting-IP {client_ip}
-			header_up X-Real-IP {client_ip}
-			header_up X-Forwarded-For {client_ip}
-			header_up X-Request-ID {uuid}
+			header_up X-Real-IP        {client_ip}
+			header_up X-Forwarded-For  {client_ip}
+			header_up X-Request-ID     {uuid}
 		}
 	}
 }
@@ -225,8 +219,10 @@ http://127.0.0.1:8080 {
 # ================================
 # Redirect www -> apex
 # ================================
-{$DOMAIN_NAME} {
-	log access
+www.{$DOMAIN_NAME} {
+	log {
+		output discard
+	}
 	redir https://{$DOMAIN_NAME}{uri} 301
 }
 
@@ -234,6 +230,8 @@ http://127.0.0.1:8080 {
 # Catch-all :80 and :443
 # ================================
 :80, :443 {
-	log security
+	log {
+		output discard
+	}
 	respond "Not Found" 404
 }
