@@ -46,6 +46,7 @@ DO_DOWN=false
 # ExecStart). Pass --skip-pull in the unit file; use update.sh or a manual
 # ./startup.sh without the flag when an image refresh is desired.
 SKIP_PULL=false
+SKIP_EGRESS_FIX=false
 
 show_help() {
 cat << 'EOF'
@@ -61,6 +62,8 @@ OPTIONS:
   --skip-pull      Skip docker compose pull (use for systemd restarts
                    or when images are already current)
   --background     Start services in background (daemon mode)
+  --skip-egress-fix  Skip automatic egress NAT remediation for
+                     non-internal VaultWarden Docker bridge networks
   --dry-run        Show what would be done without executing
   --down           Stop all services (delegates to docker compose down)
   --help           Show this help
@@ -82,6 +85,7 @@ while [[ $# -gt 0 ]]; do
     --skip-health)   SKIP_HEALTH_CHECK=true; shift ;;
     --skip-pull)     SKIP_PULL=true; shift ;;
     --background)    BACKGROUND=true; shift ;;
+    --skip-egress-fix) SKIP_EGRESS_FIX=true; shift ;;
     --dry-run)       DRY_RUN=true; shift ;;
     --down)          DO_DOWN=true; shift ;;
     --help)          show_help; exit 0 ;;
@@ -652,6 +656,81 @@ start_services() {
 }
 
 # ---------------------------------------------------------------------------
+# ensure_vaultwarden_egress_nat
+#
+# Admin-friendly, idempotent fallback for hardened VMs where Docker's normal
+# MASQUERADE behavior is missing/overridden. We only target non-internal
+# bridge networks attached to the vaultwarden container.
+# ---------------------------------------------------------------------------
+ensure_vaultwarden_egress_nat() {
+  if [[ "$SKIP_EGRESS_FIX" == "true" ]]; then
+    log_info "Skipping automatic egress NAT remediation (--skip-egress-fix)"
+    return 0
+  fi
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    log_info "[DRY RUN] Would verify/add MASQUERADE for vaultwarden non-internal bridge networks"
+    return 0
+  fi
+
+  if ! command -v iptables >/dev/null 2>&1; then
+    log_warn "iptables not found; skipping egress NAT remediation"
+    return 0
+  fi
+
+  # Preferred path: use repo-managed setup helper so NAT + DOCKER-USER
+  # remediation stays in one place and can also be reused outside startup.
+  if [[ -x "./setup-iptables.sh" ]]; then
+    if ./setup-iptables.sh; then
+      log_success "Egress firewall remediation completed via setup-iptables.sh"
+      return 0
+    fi
+    log_warn "setup-iptables.sh failed; falling back to inline NAT remediation"
+  fi
+
+  local container_id
+  container_id=$(docker compose ps -q vaultwarden 2>/dev/null || true)
+  if [[ -z "$container_id" ]]; then
+    log_warn "vaultwarden container not found; skipping egress NAT remediation"
+    return 0
+  fi
+
+  local network_name
+  local fixed_any=false
+  while IFS= read -r network_name; do
+    [[ -z "$network_name" ]] && continue
+
+    local driver internal subnet
+    driver=$(docker network inspect -f '{{.Driver}}' "$network_name" 2>/dev/null || echo "")
+    internal=$(docker network inspect -f '{{.Internal}}' "$network_name" 2>/dev/null || echo "")
+    subnet=$(docker network inspect -f '{{with index .IPAM.Config 0}}{{.Subnet}}{{end}}' "$network_name" 2>/dev/null || echo "")
+
+    [[ "$driver" == "bridge" ]] || continue
+    [[ "$internal" == "false" ]] || continue
+    [[ -n "$subnet" ]] || continue
+
+    if _maybe_sudo iptables -t nat -C POSTROUTING -s "$subnet" -j MASQUERADE >/dev/null 2>&1; then
+      continue
+    fi
+
+    if _maybe_sudo iptables -t nat -A POSTROUTING -s "$subnet" -j MASQUERADE >/dev/null 2>&1; then
+      log_info "Added MASQUERADE fallback for network ${network_name} (${subnet})"
+      fixed_any=true
+    else
+      log_warn "Could not add MASQUERADE fallback for network ${network_name} (${subnet})"
+    fi
+  done < <(docker inspect -f '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' "$container_id" 2>/dev/null || true)
+
+  if [[ "$fixed_any" == "true" ]]; then
+    log_success "Egress NAT remediation applied for VaultWarden network attachments"
+  else
+    log_info "Egress NAT remediation check complete (no changes needed)"
+  fi
+
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # wait_for_services
 # ---------------------------------------------------------------------------
 wait_for_services() {
@@ -785,6 +864,7 @@ main() {
   cleanup_orphaned_resources || true
   pull_images || exit 1
   start_services || exit 1
+  ensure_vaultwarden_egress_nat || true
 
   if [[ "$BACKGROUND" != "true" ]]; then
     wait_for_services || true
