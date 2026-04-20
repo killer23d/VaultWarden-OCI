@@ -159,6 +159,27 @@ http://127.0.0.1:8080 {
 		}
 	}
 
+	# 3b. 2FA Connector endpoints (Duo, WebAuthn redirect)
+	# VaultWarden diagnostics require these routes to have NO X-Frame-Options
+	# and NO Content-Security-Policy — the global header block above sets both,
+	# so we explicitly delete them here for these paths only.
+	@twofactor path /duo-connector.html /_duo* /webauthn-connector.html
+	handle @twofactor {
+		header {
+			-X-Frame-Options
+			-Content-Security-Policy
+			Referrer-Policy          "same-origin"
+			X-XSS-Protection         "0"
+		}
+		reverse_proxy vaultwarden:80 {
+			header_up Host             {host}
+			header_up CF-Connecting-IP {client_ip}
+			header_up X-Real-IP        {client_ip}
+			header_up X-Forwarded-For  {client_ip}
+			header_up X-Request-ID     {uuid}
+		}
+	}
+
 	# 4. Admin Panel Protection
 	# Uses {client_ip} (real visitor IP via Cf-Connecting-Ip) instead of
 	# {remote_ip} (Cloudflare edge node IP) so ADMIN_ALLOW_CIDR matches correctly.
