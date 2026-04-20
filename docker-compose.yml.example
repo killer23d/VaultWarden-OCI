@@ -136,6 +136,7 @@ services:
 
     networks:
       - vaultwarden
+      - vaultwarden_egress
 
     dns:
       - 1.1.1.1
@@ -432,6 +433,13 @@ networks:
     name: vaultwarden_network
     driver: bridge
     internal: true
+
+  # Dedicated outbound network for VaultWarden-only egress.
+  # Keeps the app/service mesh network air-gapped while allowing
+  # external calls (HIBP, push/identity, etc.) from vaultwarden_app.
+  vaultwarden_egress:
+    name: vaultwarden_egress_network
+    driver: bridge
 
   caddy_external:
     name: caddy_external_network
