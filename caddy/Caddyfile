@@ -159,24 +159,23 @@ http://127.0.0.1:8080 {
 		}
 	}
 
-	# 3b. 2FA Connector endpoints (Duo, WebAuthn redirect)
-	# VaultWarden diagnostics require these routes to have NO X-Frame-Options
-	# and NO Content-Security-Policy — the global header block above sets both,
-	# so we explicitly delete them here for these paths only.
+		# 3b. 2FA Connector endpoints (Duo, WebAuthn redirect)
+	# VaultWarden diagnostics require these routes to return NO X-Frame-Options
+	# and NO Content-Security-Policy. The global header{} block above sets both,
+	# so we strip them at the reverse_proxy response level using header_down.
 	@twofactor path /duo-connector.html /_duo* /webauthn-connector.html
 	handle @twofactor {
-		header {
-			-X-Frame-Options
-			-Content-Security-Policy
-			Referrer-Policy          "same-origin"
-			X-XSS-Protection         "0"
-		}
 		reverse_proxy vaultwarden:80 {
 			header_up Host             {host}
 			header_up CF-Connecting-IP {client_ip}
 			header_up X-Real-IP        {client_ip}
 			header_up X-Forwarded-For  {client_ip}
 			header_up X-Request-ID     {uuid}
+			# Strip headers that must be absent on 2FA connector responses
+			header_down -X-Frame-Options
+			header_down -Content-Security-Policy
+			header_down Referrer-Policy     "same-origin"
+			header_down X-XSS-Protection    "0"
 		}
 	}
 
