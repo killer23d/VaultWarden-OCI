@@ -136,6 +136,7 @@ services:
 
     networks:
       - vaultwarden
+      - vaultwarden_egress
 
     dns:
       - 1.1.1.1
@@ -296,6 +297,8 @@ services:
       - "127.0.0.1:587:587"
 
     networks:
+      # Internal-only attachment is intentional. Postfix relays outbound mail
+      # using RELAYHOST from within the app mesh; do not attach to egress net.
       - vaultwarden
 
     healthcheck:
@@ -432,6 +435,16 @@ networks:
     name: vaultwarden_network
     driver: bridge
     internal: true
+
+  # Dedicated outbound network for VaultWarden-only egress.
+  # Keeps the app/service mesh network air-gapped while allowing
+  # external calls (HIBP, push/identity, etc.) from vaultwarden_app.
+  vaultwarden_egress:
+    name: vaultwarden_egress_network
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.21.0.0/16
 
   caddy_external:
     name: caddy_external_network
