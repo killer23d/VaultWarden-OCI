@@ -681,7 +681,7 @@ ensure_vaultwarden_egress_nat() {
   # Preferred path: use repo-managed setup helper so NAT + DOCKER-USER
   # remediation stays in one place and can also be reused outside startup.
   if [[ -x "./setup-iptables.sh" ]]; then
-    if ./setup-iptables.sh; then
+    if _maybe_sudo ./setup-iptables.sh; then
       log_success "Egress firewall remediation completed via setup-iptables.sh"
       return 0
     fi
@@ -709,11 +709,11 @@ ensure_vaultwarden_egress_nat() {
     [[ "$internal" == "false" ]] || continue
     [[ -n "$subnet" ]] || continue
 
-    if _maybe_sudo iptables -t nat -C POSTROUTING -s "$subnet" -j MASQUERADE >/dev/null 2>&1; then
+    if _maybe_sudo iptables -t nat -C POSTROUTING -s "$subnet" ! -o docker0 -j MASQUERADE >/dev/null 2>&1; then
       continue
     fi
 
-    if _maybe_sudo iptables -t nat -A POSTROUTING -s "$subnet" -j MASQUERADE >/dev/null 2>&1; then
+    if _maybe_sudo iptables -t nat -A POSTROUTING -s "$subnet" ! -o docker0 -j MASQUERADE >/dev/null 2>&1; then
       log_info "Added MASQUERADE fallback for network ${network_name} (${subnet})"
       fixed_any=true
     else
@@ -862,9 +862,9 @@ main() {
   prepare_docker_secrets || exit 1
   warn_plaintext_secret_overrides || true
   cleanup_orphaned_resources || true
+  ensure_vaultwarden_egress_nat || true
   pull_images || exit 1
   start_services || exit 1
-  ensure_vaultwarden_egress_nat || true
 
   if [[ "$BACKGROUND" != "true" ]]; then
     wait_for_services || true

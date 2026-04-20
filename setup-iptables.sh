@@ -63,12 +63,12 @@ SUBNETS+=("172.21.0.0/16")
 mapfile -t UNIQUE_SUBNETS < <(printf '%s\n' "${SUBNETS[@]}" | awk 'NF && !seen[$0]++')
 
 for subnet in "${UNIQUE_SUBNETS[@]}"; do
-  if iptables -t nat -C POSTROUTING -s "$subnet" -j MASQUERADE >/dev/null 2>&1; then
+  if iptables -t nat -C POSTROUTING -s "$subnet" ! -o docker0 -j MASQUERADE >/dev/null 2>&1; then
     echo "OK: MASQUERADE already present for $subnet"
     continue
   fi
 
-  iptables -t nat -A POSTROUTING -s "$subnet" -j MASQUERADE
+  iptables -t nat -A POSTROUTING -s "$subnet" ! -o docker0 -j MASQUERADE
   echo "ADDED: MASQUERADE for $subnet"
 done
 
@@ -87,6 +87,13 @@ if iptables -t filter -S DOCKER-USER >/dev/null 2>&1; then
     echo "ADDED: DOCKER-USER ACCEPT for RFC1918 10.0.0.0/8"
   else
     echo "OK: DOCKER-USER ACCEPT already present for RFC1918 10.0.0.0/8"
+  fi
+
+  if ! iptables -t filter -C DOCKER-USER -s 192.168.0.0/16 -j ACCEPT >/dev/null 2>&1; then
+    iptables -t filter -I DOCKER-USER 3 -s 192.168.0.0/16 -j ACCEPT
+    echo "ADDED: DOCKER-USER ACCEPT for RFC1918 192.168.0.0/16"
+  else
+    echo "OK: DOCKER-USER ACCEPT already present for RFC1918 192.168.0.0/16"
   fi
 else
   echo "WARN: DOCKER-USER chain not available; skipping forward-policy remediation"
