@@ -762,11 +762,16 @@ perform_full_backup() {
     b_log_info "Archiving state (relative paths, safe for staged restore)..."
 
     local tar_excludes=(
+        "--exclude=${SCRIPT_DIR#/}/.git"
         "--exclude=${SCRIPT_DIR#/}/backups"
         "--exclude=${SCRIPT_DIR#/}/logs"
+        "--exclude=${SCRIPT_DIR#/}/.rate-limit"
+        "--exclude=${state_dir#/}/backups"
         "--exclude=${state_dir#/}/logs"
         "--exclude=*.sock"
         "--exclude=*.lock"
+        "--exclude=*.tmp"
+        "--exclude=*.age.tmp"
     )
 
     local tar_sources=()
@@ -836,11 +841,16 @@ perform_full_backup() {
             b_log_warn "DB snapshot injection failed — archive will use live DB copy"
             rm -f "$temp_tar_raw" "${temp_tar}.new" 2>/dev/null || true
             tar_excludes=(
+                "--exclude=${SCRIPT_DIR#/}/.git"
                 "--exclude=${SCRIPT_DIR#/}/backups"
                 "--exclude=${SCRIPT_DIR#/}/logs"
+                "--exclude=${SCRIPT_DIR#/}/.rate-limit"
+                "--exclude=${state_dir#/}/backups"
                 "--exclude=${state_dir#/}/logs"
                 "--exclude=*.sock"
                 "--exclude=*.lock"
+                "--exclude=*.tmp"
+                "--exclude=*.age.tmp"
             )
             tar_exit=0
             tar --use-compress-program='zstd --no-progress -T0 -3' -cf "$temp_tar" -C / \
