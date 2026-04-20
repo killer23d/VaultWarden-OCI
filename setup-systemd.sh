@@ -368,6 +368,66 @@ install_units() {
     fi
 
     # ------------------------------------------------------------------
+    # 3b. Copy rclone config to /etc/vaultwarden/rclone.conf
+    # ------------------------------------------------------------------
+    local rclone_dest="$ENV_DIR/rclone.conf"
+    log_info "Setting up rclone config at $rclone_dest ..."
+
+    # Check if RCLONE_CONFIG is already correctly set in the env file
+    local existing_rclone_cfg=""
+    if [[ -f "$ENV_FILE" ]]; then
+        existing_rclone_cfg=$(grep "^RCLONE_CONFIG=" "$ENV_FILE" | head -1 | cut -d= -f2- || true)
+    fi
+
+    if [[ -n "$existing_rclone_cfg" && "$existing_rclone_cfg" == "$rclone_dest" && -f "$rclone_dest" ]]; then
+        log_success "rclone config already at $rclone_dest (RCLONE_CONFIG in env is correct)"
+    else
+        # Resolve source: repo-local → sudo user → root → heuristic
+        local rclone_src=""
+        if [[ -f "$SCRIPT_DIR/rclone.conf" ]]; then
+            rclone_src="$SCRIPT_DIR/rclone.conf"
+        elif [[ -n "${SUDO_USER:-}" ]]; then
+            local sudo_home
+            sudo_home="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6 || true)"
+            [[ -n "$sudo_home" && -f "$sudo_home/.config/rclone/rclone.conf" ]] \
+                && rclone_src="$sudo_home/.config/rclone/rclone.conf"
+        fi
+        if [[ -z "$rclone_src" && -f "/root/.config/rclone/rclone.conf" ]]; then
+            rclone_src="/root/.config/rclone/rclone.conf"
+        fi
+        if [[ -z "$rclone_src" ]]; then
+            local found_cfg
+            for found_cfg in /home/*/.config/rclone/rclone.conf; do
+                [[ -f "$found_cfg" ]] && rclone_src="$found_cfg" && break
+            done
+        fi
+
+        if [[ -n "$rclone_src" ]]; then
+            if [[ "$DRY_RUN" == "true" ]]; then
+                log_info "[DRY RUN] Would copy $rclone_src -> $rclone_dest (600 root:root)"
+                log_info "[DRY RUN] Would set RCLONE_CONFIG=$rclone_dest in $ENV_FILE"
+            else
+                install -m 600 -o root -g root "$rclone_src" "$rclone_dest"
+                _set_env_var "RCLONE_CONFIG" "$rclone_dest" "$ENV_FILE"
+                log_success "Installed rclone config: $rclone_dest (source: $rclone_src)"
+                log_success "RCLONE_CONFIG=$rclone_dest set in $ENV_FILE"
+                if [[ "$rclone_src" != "$rclone_dest" ]]; then
+                    log_info "ADMIN NOTE: if you re-run 'rclone config' interactively as a non-root"
+                    log_info "  user, re-run --install to sync the updated token to $rclone_dest."
+                fi
+            fi
+        else
+            log_warn "No rclone.conf found — offsite backup (--rclone) will not work until"
+            log_warn "rclone is configured. Steps:"
+            log_warn "  1. Run: rclone config   (configure your remote)"
+            log_warn "  2. Run: sudo ./setup-systemd.sh --install  (copies conf to $rclone_dest)"
+            log_warn "  Or manually:"
+            log_warn "    sudo install -m 600 -o root -g root ~/.config/rclone/rclone.conf $rclone_dest"
+            log_warn "    echo RCLONE_CONFIG=$rclone_dest | sudo tee -a $ENV_FILE"
+        fi
+    fi
+
+    # ------------------------------------------------------------------
     # 4. Install systemd unit files
     # ------------------------------------------------------------------
     log_info "Installing systemd unit files to $UNIT_DEST_DIR ..."
