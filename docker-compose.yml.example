@@ -137,13 +137,6 @@ services:
     networks:
       - vaultwarden
       - vaultwarden_egress
-<<<<<<< codex/evaluate-network-configuration-best-practices
-=======
-
-    dns:
-      - 1.1.1.1
-      - 8.8.8.8
->>>>>>> main
 
     healthcheck:
       test: ["CMD-SHELL", "curl --fail --silent --max-time 5 http://127.0.0.1:80/alive || exit 1"]
@@ -445,10 +438,7 @@ networks:
   vaultwarden_egress:
     name: vaultwarden_egress_network
     driver: bridge
-<<<<<<< codex/evaluate-network-configuration-best-practices
     internal: false  # explicit: outbound-only internet path for vaultwarden_app
-=======
->>>>>>> main
     ipam:
       config:
         - subnet: 172.21.0.0/16

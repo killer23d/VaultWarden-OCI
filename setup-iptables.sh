@@ -72,6 +72,26 @@ for subnet in "${UNIQUE_SUBNETS[@]}"; do
   echo "ADDED: MASQUERADE for $subnet"
 done
 
+# Ensure DOCKER-USER permits forwarding from common Docker private ranges.
+# This addresses hosts with restrictive default forward policy.
+if iptables -t filter -S DOCKER-USER >/dev/null 2>&1; then
+  if ! iptables -t filter -C DOCKER-USER -s 172.16.0.0/12 -j ACCEPT >/dev/null 2>&1; then
+    iptables -t filter -I DOCKER-USER 1 -s 172.16.0.0/12 -j ACCEPT
+    echo "ADDED: DOCKER-USER ACCEPT for RFC1918 172.16.0.0/12"
+  else
+    echo "OK: DOCKER-USER ACCEPT already present for RFC1918 172.16.0.0/12"
+  fi
+
+  if ! iptables -t filter -C DOCKER-USER -s 10.0.0.0/8 -j ACCEPT >/dev/null 2>&1; then
+    iptables -t filter -I DOCKER-USER 2 -s 10.0.0.0/8 -j ACCEPT
+    echo "ADDED: DOCKER-USER ACCEPT for RFC1918 10.0.0.0/8"
+  else
+    echo "OK: DOCKER-USER ACCEPT already present for RFC1918 10.0.0.0/8"
+  fi
+else
+  echo "WARN: DOCKER-USER chain not available; skipping forward-policy remediation"
+fi
+
 if command -v netfilter-persistent >/dev/null 2>&1; then
   netfilter-persistent save >/dev/null 2>&1 || true
   echo "INFO: persisted iptables rules with netfilter-persistent"
