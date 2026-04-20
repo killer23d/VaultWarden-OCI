@@ -53,15 +53,20 @@ RuntimeDirectoryMode=0755
 ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock /run/vw-health-alert
 TimeoutStartSec=300
 TimeoutStopSec=60
-# Exit code contract (mirrors health.sh --show-help exit codes):
+# Exit code contract:
 #   0 — all checks passed             → success, no notification
-#   1 — one or more warnings          → OnFailure= fires, admin is notified
+#   1 — one or more warnings          → success (non-critical, no OnFailure= noise)
 #   2 — one or more failures          → OnFailure= fires, admin is notified
-#   3 — first-run / no backup yet     → success, no notification (transient state)
+#   3 — first-run / no backup yet     → success (transient state, expected on new install)
 #
-# Only exit 3 is treated as success in addition to 0.  Exits 1 and 2 both
-# reach OnFailure= so degraded/down states are never silently swallowed.
-SuccessExitStatus=0 3
+# Exit 1 is intentionally treated as success here because health.sh exits 1
+# for advisory warnings (disk usage approaching threshold, last backup older
+# than soft limit, etc.) that do not require immediate admin action.
+# Routing exit 1 through OnFailure= would generate spurious failure alerts
+# on every routine health run that contains any non-critical finding.
+# Exit 2 (hard failures: container down, DB corrupt, key missing) still
+# triggers OnFailure= and delivers an alert.
+SuccessExitStatus=0 1 3
 
 [Install]
 WantedBy=multi-user.target
