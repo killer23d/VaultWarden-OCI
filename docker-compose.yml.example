@@ -297,6 +297,8 @@ services:
       - "127.0.0.1:587:587"
 
     networks:
+      # Internal-only attachment is intentional. Postfix relays outbound mail
+      # using RELAYHOST from within the app mesh; do not attach to egress net.
       - vaultwarden
 
     healthcheck:
@@ -440,6 +442,9 @@ networks:
   vaultwarden_egress:
     name: vaultwarden_egress_network
     driver: bridge
+    ipam:
+      config:
+        - subnet: 172.21.0.0/16
 
   caddy_external:
     name: caddy_external_network
