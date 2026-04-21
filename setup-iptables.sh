@@ -29,12 +29,28 @@ if [[ "${EUID}" -ne 0 ]]; then
   exit 1
 fi
 
-# Collect all non-internal bridge network subnets defined by the compose project.
-mapfile -t NETWORK_NAMES < <(docker compose -f "$COMPOSE_FILE" config --services >/dev/null 2>&1 && \
-  docker compose -f "$COMPOSE_FILE" config --format json 2>/dev/null | \
-  python3 -c 'import json,sys; c=json.load(sys.stdin); nets=c.get("networks",{}); [print(n) for n,v in nets.items() if v.get("driver","bridge")=="bridge" and v.get("internal",False) is False]')
+NETWORK_NAMES=()
+set +e
+mapfile -t NETWORK_NAMES < <(
+  docker compose -f "$COMPOSE_FILE" config --services >/dev/null 2>&1 &&
+  docker compose -f "$COMPOSE_FILE" config --format json 2>/dev/null |
+  python3 -c '
+import json, sys
+c = json.load(sys.stdin)
+nets = c.get("networks", {})
+for name, cfg in nets.items():
+    if cfg.get("driver", "bridge") != "bridge":
+        continue
+    if cfg.get("internal", False) is True:
+        continue
+    if cfg.get("external", False) is True:
+        continue
+    print(name)
+' 2>/dev/null
+)
+set -e
 
-# Fallback when --format json is not available in older docker compose versions.
+# Fallback when JSON config discovery is unavailable or returns nothing.
 if [[ ${#NETWORK_NAMES[@]} -eq 0 ]]; then
   NETWORK_NAMES=(vaultwarden_egress caddy_external)
 fi
