@@ -72,6 +72,22 @@ for subnet in "${UNIQUE_SUBNETS[@]}"; do
   echo "ADDED: MASQUERADE for $subnet"
 done
 
+# Remove OCI's default FORWARD REJECT rule if present (safe to run repeatedly).
+# On a fresh Oracle Cloud instance, OCI injects:
+#   -A FORWARD -j REJECT --reject-with icmp-host-prohibited
+# into the FORWARD chain. This blocks all container-to-container and
+# container-to-internet forwarding until removed, making a fresh deploy fail
+# silently. The while loop handles the case where the rule appears more than once.
+count=0
+while iptables -D FORWARD -j REJECT --reject-with icmp-host-prohibited 2>/dev/null; do
+  count=$((count + 1))
+done
+if [[ $count -gt 0 ]]; then
+  echo "REMOVED: OCI default FORWARD REJECT rule (x${count})"
+else
+  echo "OK: OCI FORWARD REJECT rule not present (nothing to remove)"
+fi
+
 # Ensure DOCKER-USER permits forwarding from common Docker private ranges.
 # This addresses hosts with restrictive default forward policy.
 if iptables -t filter -S DOCKER-USER >/dev/null 2>&1; then
