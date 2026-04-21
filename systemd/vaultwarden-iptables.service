@@ -1,0 +1,61 @@
+# vaultwarden-iptables.service
+#
+# Applies VaultWarden NAT/DOCKER-USER iptables rules after Docker starts.
+#
+# WHY THIS EXISTS
+# ---------------
+# setup-iptables.sh is also called by startup.sh, but if the host reboots
+# and Docker recreates the DOCKER-USER chain on its own startup, any rules
+# previously inserted into that chain are wiped. netfilter-persistent cannot
+# protect DOCKER-USER entries because Docker owns and rebuilds that chain.
+#
+# This unit runs AFTER docker.service so the DOCKER-USER chain already exists
+# when setup-iptables.sh inserts its ACCEPT rules, making the configuration
+# survive every host reboot deterministically.
+#
+# INSTALL
+# -------
+#   sudo cp systemd/vaultwarden-iptables.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now vaultwarden-iptables.service
+#
+# Or use the provided setup-systemd.sh which handles this automatically.
+
+[Unit]
+Description=VaultWarden iptables NAT and DOCKER-USER rules
+Documentation=https://github.com/killer23d/VaultWarden-OCI
+After=network-online.target docker.service
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+
+# Resolve the project root relative to this unit's installed location.
+# setup-iptables.sh uses SCRIPT_DIR to locate docker-compose.yml, so
+# WorkingDirectory must point to the repo root.
+WorkingDirectory=/opt/VaultWarden-OCI
+
+ExecStart=/opt/VaultWarden-OCI/setup-iptables.sh
+ExecStop=/bin/true
+
+# On failure wait 10 s then retry up to 3 times, in case Docker is still
+# initialising its bridge networks during a race at boot.
+Restart=on-failure
+RestartSec=10s
+StartLimitIntervalSec=60s
+StartLimitBurst=3
+
+# Tighten the unit's own privileges — the script itself re-execs via sudo
+# if not already root, so we allow that escalation path here.
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/run/xtables.lock
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vaultwarden-iptables
+
+[Install]
+WantedBy=multi-user.target
