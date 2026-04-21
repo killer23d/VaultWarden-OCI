@@ -1278,6 +1278,19 @@ main() {
         log_warn "Review the output above for details. These phases can be re-run manually."
     fi
 
+    if [[ -x "${SCRIPT_DIR}/setup-iptables.sh" ]]; then
+        echo "INFO: Applying VaultWarden iptables rules..."
+        if "${SCRIPT_DIR}/setup-iptables.sh"; then
+            echo "OK: VaultWarden iptables rules applied"
+        else
+            echo "WARN: setup-iptables.sh did not complete successfully" >&2
+            echo "WARN: Run it manually after setup, or enable systemd/vaultwarden-iptables.service" >&2
+        fi
+    else
+        echo "WARN: setup-iptables.sh not found or not executable" >&2
+        echo "WARN: Run it manually after setup, or enable systemd/vaultwarden-iptables.service" >&2
+    fi
+
     if [[ "$AUTO_MODE" == "true" ]]; then
         log_info "=== Auto Mode: Configuring secrets ==="
         chmod +x "$PROJECT_ROOT/setup-secrets.sh" 2>/dev/null || true
