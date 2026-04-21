@@ -41,17 +41,33 @@ fi
 
 declare -a SUBNETS=()
 for net in "${NETWORK_NAMES[@]}"; do
-  full_name=$(docker compose -f "$COMPOSE_FILE" config 2>/dev/null | awk -v n="$net" '
-    $1=="name:" {project=$2}
-    $1==n":" {in_block=1; next}
-    in_block && $1=="name:" {print $2; exit}
-    in_block && /^[^ ]/ {in_block=0}
-  ')
+  # Resolve subnet directly from the JSON config — avoids fragile YAML awk parsing.
+  subnet=$(docker compose -f "$COMPOSE_FILE" config --format json 2>/dev/null | \
+    python3 -c "
+import json, sys
+c = json.load(sys.stdin)
+nets = c.get('networks', {})
+n = nets.get('$net', {})
+cfgs = n.get('ipam', {}).get('config', [])
+print(cfgs[0]['subnet'] if cfgs else '')
+" 2>/dev/null || true)
 
-  [[ -n "${full_name:-}" ]] || full_name="${net}_network"
+  # Fallback: inspect the running network by constructed name when no static subnet is pinned.
+  if [[ -z "${subnet:-}" ]]; then
+    full_name=$(docker compose -f "$COMPOSE_FILE" config --format json 2>/dev/null | \
+      python3 -c "
+import json, sys
+c = json.load(sys.stdin)
+nets = c.get('networks', {})
+n = nets.get('$net', {})
+print(n.get('name', '${net}_network'))
+" 2>/dev/null || true)
+    [[ -n "${full_name:-}" ]] || full_name="${net}_network"
+    subnet=$(docker network inspect -f '{{with index .IPAM.Config 0}}{{.Subnet}}{{end}}' \
+      "$full_name" 2>/dev/null || true)
+  fi
 
-  subnet=$(docker network inspect -f '{{with index .IPAM.Config 0}}{{.Subnet}}{{end}}' "$full_name" 2>/dev/null || true)
-  if [[ -n "$subnet" ]]; then
+  if [[ -n "${subnet:-}" ]]; then
     SUBNETS+=("$subnet")
   fi
 done
