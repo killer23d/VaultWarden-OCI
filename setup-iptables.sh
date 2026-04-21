@@ -121,28 +121,16 @@ else
 fi
 
 # Ensure DOCKER-USER permits forwarding from common Docker private ranges.
-# This addresses hosts with restrictive default forward policy.
+# Keep this idempotent and append-only so repeated runs remain predictable.
 if iptables -t filter -S DOCKER-USER >/dev/null 2>&1; then
-  if ! iptables -t filter -C DOCKER-USER -s 172.16.0.0/12 -j ACCEPT >/dev/null 2>&1; then
-    iptables -t filter -I DOCKER-USER 1 -s 172.16.0.0/12 -j ACCEPT
-    echo "ADDED: DOCKER-USER ACCEPT for RFC1918 172.16.0.0/12"
-  else
-    echo "OK: DOCKER-USER ACCEPT already present for RFC1918 172.16.0.0/12"
-  fi
-
-  if ! iptables -t filter -C DOCKER-USER -s 10.0.0.0/8 -j ACCEPT >/dev/null 2>&1; then
-    iptables -t filter -I DOCKER-USER 2 -s 10.0.0.0/8 -j ACCEPT
-    echo "ADDED: DOCKER-USER ACCEPT for RFC1918 10.0.0.0/8"
-  else
-    echo "OK: DOCKER-USER ACCEPT already present for RFC1918 10.0.0.0/8"
-  fi
-
-  if ! iptables -t filter -C DOCKER-USER -s 192.168.0.0/16 -j ACCEPT >/dev/null 2>&1; then
-    iptables -t filter -I DOCKER-USER 3 -s 192.168.0.0/16 -j ACCEPT
-    echo "ADDED: DOCKER-USER ACCEPT for RFC1918 192.168.0.0/16"
-  else
-    echo "OK: DOCKER-USER ACCEPT already present for RFC1918 192.168.0.0/16"
-  fi
+  for cidr in "172.16.0.0/12" "10.0.0.0/8" "192.168.0.0/16"; do
+    if ! iptables -t filter -C DOCKER-USER -s "$cidr" -j ACCEPT >/dev/null 2>&1; then
+      iptables -t filter -A DOCKER-USER -s "$cidr" -j ACCEPT
+      echo "ADDED: DOCKER-USER ACCEPT for RFC1918 $cidr"
+    else
+      echo "OK: DOCKER-USER ACCEPT already present for RFC1918 $cidr"
+    fi
+  done
 else
   echo "WARN: DOCKER-USER chain not available; skipping forward-policy remediation"
 fi
