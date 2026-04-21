@@ -446,9 +446,10 @@ networks:
   caddy_external:
     name: caddy_external_network
     driver: bridge
-    # Pinned subnet prevents Docker from assigning a dynamic address that
-    # could fall outside the 172.16.0.0/12 RFC1918 range covered by the
-    # DOCKER-USER catch-all in setup-iptables.sh.
+    # Pinned subnet keeps the reverse-proxy network deterministic and within
+    # RFC1918 space that is already allowed by the DOCKER-USER catch-all in
+    # setup-iptables.sh. This network is a regular bridge network, not an
+    # external Compose-managed network.
     ipam:
       config:
         - subnet: 172.22.0.0/16
