@@ -160,19 +160,45 @@ http://127.0.0.1:8080 {
 		}
 	}
 
-	# 3b. 2FA Connector endpoints — strip X-Frame-Options and CSP from RESPONSE headers
-	# header_down fires on the upstream response, after defer has already run — this is immune.
-	@twofactor path /duo-connector.html /_duo* /webauthn-connector.html
-		handle @twofactor {
-    	reverse_proxy vaultwarden:80 {
-        	header_up   Host             {host}
-        	header_up   CF-Connecting-IP {client_ip}
-        	header_up   X-Real-IP        {client_ip}
-        	header_up   X-Forwarded-For  {client_ip}
-        	header_up   X-Request-ID     {uuid}
-        	header_down -X-Frame-Options
-        	header_down -Content-Security-Policy
-    	}
+	# 3b. 2FA Connector endpoints
+	# Use route (not handle) so directives execute in declared order.
+	# The non-deferred header deletions here run AFTER the global deferred header
+	# block finalizes, because route guarantees sequential directive application
+	# within its scope and the inner header block without defer wins last.
+	route /duo-connector.html {
+		header -X-Frame-Options
+		header -Content-Security-Policy
+		reverse_proxy vaultwarden:80 {
+			header_up Host             {host}
+			header_up CF-Connecting-IP {client_ip}
+			header_up X-Real-IP        {client_ip}
+			header_up X-Forwarded-For  {client_ip}
+			header_up X-Request-ID     {uuid}
+		}
+	}
+
+	route /_duo* {
+		header -X-Frame-Options
+		header -Content-Security-Policy
+		reverse_proxy vaultwarden:80 {
+			header_up Host             {host}
+			header_up CF-Connecting-IP {client_ip}
+			header_up X-Real-IP        {client_ip}
+			header_up X-Forwarded-For  {client_ip}
+			header_up X-Request-ID     {uuid}
+		}
+	}
+
+	route /webauthn-connector.html {
+		header -X-Frame-Options
+		header -Content-Security-Policy
+		reverse_proxy vaultwarden:80 {
+			header_up Host             {host}
+			header_up CF-Connecting-IP {client_ip}
+			header_up X-Real-IP        {client_ip}
+			header_up X-Forwarded-For  {client_ip}
+			header_up X-Request-ID     {uuid}
+		}
 	}
 
 	# 4. Admin Panel Protection
