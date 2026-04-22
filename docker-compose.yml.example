@@ -334,6 +334,8 @@ services:
           memory: 64M
           cpus: '0.02'
 
+    command: sh -c "[ -f /etc/aliases ] || echo 'postmaster: root' > /etc/aliases && newaliases && exec /entrypoint.sh"
+
   # =============================================================================
   # Fail2Ban - Intrusion Prevention
   # =============================================================================
@@ -371,6 +373,9 @@ services:
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/vaultwarden:/var/log/vaultwarden:ro
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy:/var/log/caddy:ro
       - ${SSH_LOG_PATH:-/var/log/secure}:/var/log/ssh-auth.log:ro
+    
+    ports:
+      - "127.0.0.1:587:587"
 
     cap_drop:
       - ALL
