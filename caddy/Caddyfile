@@ -161,25 +161,21 @@ http://127.0.0.1:8080 {
 	}
 
 	# 3b. 2FA Connector endpoints
-	# Deletion headers MUST also use "defer" to fire at the same response-
-	# finalization phase as the global "header { defer ... }" block above.
-	# Without defer here, the global block re-applies them afterward.
+	# header_down strips these from the upstream response at transport layer,
+	# before the global defer block runs — this is the only reliable approach.
 	# Paths verified against Vaultwarden web-vault:
 	#   /duo-redirect-connector.html  — Duo Universal Prompt (current)
 	#   /webauthn-connector.html      — WebAuthn/FIDO2
 	@twofactor path /duo-redirect-connector.html /webauthn-connector.html
 	handle @twofactor {
-		header {
-			defer
-			-X-Frame-Options
-			-Content-Security-Policy
-		}
 		reverse_proxy vaultwarden:80 {
-			header_up Host             {host}
-			header_up CF-Connecting-IP {client_ip}
-			header_up X-Real-IP        {client_ip}
-			header_up X-Forwarded-For  {client_ip}
-			header_up X-Request-ID     {uuid}
+			header_up   Host             {host}
+			header_up   CF-Connecting-IP {client_ip}
+			header_up   X-Real-IP        {client_ip}
+			header_up   X-Forwarded-For  {client_ip}
+			header_up   X-Request-ID     {uuid}
+			header_down -X-Frame-Options
+			header_down -Content-Security-Policy
 		}
 	}
 
