@@ -334,11 +334,6 @@ services:
           memory: 64M
           cpus: '0.02'
 
-    command:
-      - sh
-      - -c
-      - "[ -f /etc/aliases ] || echo 'postmaster: root' > /etc/aliases && newaliases && exec /entrypoint.sh"
-
   # =============================================================================
   # Fail2Ban - Intrusion Prevention
   # =============================================================================
