@@ -114,8 +114,9 @@ http://127.0.0.1:8080 {
 
 	import tls_{$TLS_PROVIDER:cloudflare}
 
-	# 1. Enhanced Security Headers
+	# 1. Enhanced Security Headers (applied globally, deferred so matchers can override)
 	header {
+		defer
 		Strict-Transport-Security          "max-age=31536000; includeSubDomains; preload"
 		X-Content-Type-Options             "nosniff"
 		X-Frame-Options                    "SAMEORIGIN"
@@ -159,29 +160,26 @@ http://127.0.0.1:8080 {
 		}
 	}
 
-		# 3b. 2FA Connector endpoints (Duo, WebAuthn redirect)
-	# VaultWarden diagnostics require these routes to return NO X-Frame-Options
-	# and NO Content-Security-Policy. The global header{} block above sets both,
-	# so we strip them at the reverse_proxy response level using header_down.
+	# 3b. 2FA Connector endpoints — must NOT have X-Frame-Options or CSP
+	# The global `header { defer }` runs last; we use a route-scoped header
+	# block INSIDE handle to delete those two headers after they are set.
 	@twofactor path /duo-connector.html /_duo* /webauthn-connector.html
 	handle @twofactor {
+		header {
+			defer
+			-X-Frame-Options
+			-Content-Security-Policy
+		}
 		reverse_proxy vaultwarden:80 {
 			header_up Host             {host}
 			header_up CF-Connecting-IP {client_ip}
 			header_up X-Real-IP        {client_ip}
 			header_up X-Forwarded-For  {client_ip}
 			header_up X-Request-ID     {uuid}
-			# Strip headers that must be absent on 2FA connector responses
-			header_down -X-Frame-Options
-			header_down -Content-Security-Policy
-			header_down Referrer-Policy     "same-origin"
-			header_down X-XSS-Protection    "0"
 		}
 	}
 
 	# 4. Admin Panel Protection
-	# Uses {client_ip} (real visitor IP via Cf-Connecting-Ip) instead of
-	# {remote_ip} (Cloudflare edge node IP) so ADMIN_ALLOW_CIDR matches correctly.
 	@admin path /admin*
 	handle @admin {
 		@admin_blocked not client_ip {$ADMIN_ALLOW_CIDR:127.0.0.1/32} 127.0.0.1
