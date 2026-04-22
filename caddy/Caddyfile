@@ -161,37 +161,19 @@ http://127.0.0.1:8080 {
 	}
 
 	# 3b. 2FA Connector endpoints
-	# Use route (not handle) so directives execute in declared order.
-	# The non-deferred header deletions here run AFTER the global deferred header
-	# block finalizes, because route guarantees sequential directive application
-	# within its scope and the inner header block without defer wins last.
-	route /duo-connector.html {
-		header -X-Frame-Options
-		header -Content-Security-Policy
-		reverse_proxy vaultwarden:80 {
-			header_up Host             {host}
-			header_up CF-Connecting-IP {client_ip}
-			header_up X-Real-IP        {client_ip}
-			header_up X-Forwarded-For  {client_ip}
-			header_up X-Request-ID     {uuid}
+	# Deletion headers MUST also use "defer" to fire at the same response-
+	# finalization phase as the global "header { defer ... }" block above.
+	# Without defer here, the global block re-applies them afterward.
+	# Paths verified against Vaultwarden web-vault:
+	#   /duo-redirect-connector.html  — Duo Universal Prompt (current)
+	#   /webauthn-connector.html      — WebAuthn/FIDO2
+	@twofactor path /duo-redirect-connector.html /webauthn-connector.html
+	handle @twofactor {
+		header {
+			defer
+			-X-Frame-Options
+			-Content-Security-Policy
 		}
-	}
-
-	route /_duo* {
-		header -X-Frame-Options
-		header -Content-Security-Policy
-		reverse_proxy vaultwarden:80 {
-			header_up Host             {host}
-			header_up CF-Connecting-IP {client_ip}
-			header_up X-Real-IP        {client_ip}
-			header_up X-Forwarded-For  {client_ip}
-			header_up X-Request-ID     {uuid}
-		}
-	}
-
-	route /webauthn-connector.html {
-		header -X-Frame-Options
-		header -Content-Security-Policy
 		reverse_proxy vaultwarden:80 {
 			header_up Host             {host}
 			header_up CF-Connecting-IP {client_ip}
