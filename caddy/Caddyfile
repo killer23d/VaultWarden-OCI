@@ -74,12 +74,6 @@
 # ================================
 # TLS Provider Snippets
 # ================================
-#
-# Import the correct snippet inside your site block with:
-#   import tls_{$TLS_PROVIDER:cloudflare}
-#
-# cloudflare — DNS-01 via Cloudflare API token (default).
-# acme_http  — HTTP-01 via port 80. No DNS provider credential needed.
 
 (tls_cloudflare) {
 	tls {
@@ -93,6 +87,22 @@
 			dir https://acme-v02.api.letsencrypt.org/directory
 			disable_http_challenge false
 		}
+	}
+}
+
+# ================================
+# Shared reverse_proxy snippet
+# Strips Vaultwarden's own XFO and CSP so Caddy controls exactly one copy.
+# ================================
+(proxy_vaultwarden) {
+	reverse_proxy vaultwarden:80 {
+		header_up   Host             {host}
+		header_up   CF-Connecting-IP {client_ip}
+		header_up   X-Real-IP        {client_ip}
+		header_up   X-Forwarded-For  {client_ip}
+		header_up   X-Request-ID     {uuid}
+		header_down -X-Frame-Options
+		header_down -Content-Security-Policy
 	}
 }
 
@@ -114,20 +124,21 @@ http://127.0.0.1:8080 {
 
 	import tls_{$TLS_PROVIDER:cloudflare}
 
-	# 1. Enhanced Security Headers — excludes X-Frame-Options and CSP
-	# Those two are set per-route below so 2FA connectors can omit them.
+	# 1. Security headers applied to every response.
+	# XFO and CSP are NOT here — they are set per-handle below
+	# so the 2FA connector handles can omit them entirely.
 	header {
 		defer
-		Strict-Transport-Security          "max-age=31536000; includeSubDomains; preload"
-		X-Content-Type-Options             "nosniff"
-		X-XSS-Protection                   "0"
-		Referrer-Policy                    "same-origin"
-		Cross-Origin-Opener-Policy         "same-origin"
-		Cross-Origin-Resource-Policy       "same-origin"
-		Cross-Origin-Embedder-Policy       "credentialless"
-		X-DNS-Prefetch-Control             "off"
-		Permissions-Policy                 "geolocation=(), microphone=(), camera=(), payment=(), usb=()"
-		X-Request-ID                       {uuid}
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options    "nosniff"
+		X-XSS-Protection          "0"
+		Referrer-Policy           "same-origin"
+		Cross-Origin-Opener-Policy    "same-origin"
+		Cross-Origin-Resource-Policy  "same-origin"
+		Cross-Origin-Embedder-Policy  "credentialless"
+		X-DNS-Prefetch-Control    "off"
+		Permissions-Policy        "geolocation=(), microphone=(), camera=(), payment=(), usb=()"
+		X-Request-ID              {uuid}
 		-Server
 		-X-Powered-By
 	}
@@ -137,41 +148,33 @@ http://127.0.0.1:8080 {
 	# 2. Public Health Check
 	@health path /alive
 	handle @health {
-		reverse_proxy vaultwarden:80 {
-			header_up Host             {host}
-			header_up CF-Connecting-IP {client_ip}
-			header_up X-Real-IP        {client_ip}
-			header_up X-Forwarded-For  {client_ip}
-			header_up X-Request-ID     {uuid}
-		}
+		import proxy_vaultwarden
 	}
 
 	# 3. WebSocket routing
 	handle /notifications/hub {
 		reverse_proxy vaultwarden:80 {
-			header_up Host             {host}
-			header_up Connection       {>Connection}
-			header_up Upgrade          {>Upgrade}
-			header_up CF-Connecting-IP {client_ip}
-			header_up X-Real-IP        {client_ip}
-			header_up X-Forwarded-For  {client_ip}
-			header_up X-Request-ID     {uuid}
+			header_up   Host             {host}
+			header_up   Connection       {>Connection}
+			header_up   Upgrade          {>Upgrade}
+			header_up   CF-Connecting-IP {client_ip}
+			header_up   X-Real-IP        {client_ip}
+			header_up   X-Forwarded-For  {client_ip}
+			header_up   X-Request-ID     {uuid}
+			header_down -X-Frame-Options
+			header_down -Content-Security-Policy
 		}
 	}
 
-	# 3b. 2FA Connector endpoints — NO X-Frame-Options, NO CSP (required by spec)
+	# 3b. 2FA Connector endpoints
+	# Vaultwarden's XFO and CSP are stripped via header_down in proxy_vaultwarden.
+	# No header{} block here means Caddy adds nothing — result: zero XFO/CSP headers.
 	@twofactor path /duo-redirect-connector.html /webauthn-connector.html
 	handle @twofactor {
-		reverse_proxy vaultwarden:80 {
-			header_up Host             {host}
-			header_up CF-Connecting-IP {client_ip}
-			header_up X-Real-IP        {client_ip}
-			header_up X-Forwarded-For  {client_ip}
-			header_up X-Request-ID     {uuid}
-		}
+		import proxy_vaultwarden
 	}
 
-	# 4. Admin Panel Protection
+	# 4. Admin Panel
 	@admin path /admin*
 	handle @admin {
 		@admin_blocked not client_ip {$ADMIN_ALLOW_CIDR:127.0.0.1/32} 127.0.0.1
@@ -190,13 +193,7 @@ http://127.0.0.1:8080 {
 			{env.ADMIN_USERNAME} {env.ADMIN_HASH}
 		}
 
-		reverse_proxy vaultwarden:80 {
-			header_up Host             {host}
-			header_up CF-Connecting-IP {client_ip}
-			header_up X-Real-IP        {client_ip}
-			header_up X-Forwarded-For  {client_ip}
-			header_up X-Request-ID     {uuid}
-		}
+		import proxy_vaultwarden
 	}
 
 	# 5. Auth Endpoints
@@ -210,28 +207,24 @@ http://127.0.0.1:8080 {
 			max_size 512KB
 		}
 		reverse_proxy vaultwarden:80 {
-			header_up Host             {host}
-			header_up CF-Connecting-IP {client_ip}
-			header_up X-Real-IP        {client_ip}
-			header_up X-Forwarded-For  {client_ip}
-			header_up X-Request-ID     {uuid}
-			header_up X-Auth-Endpoint  "true"
+			header_up   Host             {host}
+			header_up   CF-Connecting-IP {client_ip}
+			header_up   X-Real-IP        {client_ip}
+			header_up   X-Forwarded-For  {client_ip}
+			header_up   X-Request-ID     {uuid}
+			header_up   X-Auth-Endpoint  "true"
+			header_down -X-Frame-Options
+			header_down -Content-Security-Policy
 		}
 	}
 
-	# 6. Default Reverse Proxy — all other paths get XFO + CSP
+	# 6. Default — all other paths get XFO + CSP from Caddy (Vaultwarden's copy stripped)
 	handle {
 		header {
 			X-Frame-Options         "SAMEORIGIN"
 			Content-Security-Policy "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://haveibeenpwned.com; font-src 'self' data:; connect-src 'self' https://api.pwnedpasswords.com https://api.2fa.directory https://app.simplelogin.io/api/ https://app.addy.io/api/ https://api.fastmail.com/ https://api.forwardemail.net wss://{$DOMAIN_NAME}{$PUSH_CSP}; manifest-src 'self'; form-action 'self'; object-src 'self' blob:; child-src 'self' https://*.duosecurity.com https://*.duofederal.com; frame-src 'self' https://*.duosecurity.com https://*.duofederal.com; frame-ancestors 'self' chrome-extension://nngceckbapebfimnlniiiahkandclblb chrome-extension://jbkfoedolllekgbhcbcoahefnbanhhlh moz-extension://*; base-uri 'self';"
 		}
-		reverse_proxy vaultwarden:80 {
-			header_up Host             {host}
-			header_up CF-Connecting-IP {client_ip}
-			header_up X-Real-IP        {client_ip}
-			header_up X-Forwarded-For  {client_ip}
-			header_up X-Request-ID     {uuid}
-		}
+		import proxy_vaultwarden
 	}
 }
 
