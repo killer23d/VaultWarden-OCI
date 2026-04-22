@@ -161,22 +161,18 @@ http://127.0.0.1:8080 {
 	}
 
 	# 3b. 2FA Connector endpoints — must NOT have X-Frame-Options or CSP
-	# The global `header { defer }` runs last; we use a route-scoped header
-	# block INSIDE handle to delete those two headers after they are set.
+	# Use route (not handle) to guarantee evaluation order AFTER global header defer block
 	@twofactor path /duo-connector.html /_duo* /webauthn-connector.html
-	handle @twofactor {
-		header {
-			defer
-			-X-Frame-Options
-			-Content-Security-Policy
-		}
-		reverse_proxy vaultwarden:80 {
-			header_up Host             {host}
-			header_up CF-Connecting-IP {client_ip}
-			header_up X-Real-IP        {client_ip}
-			header_up X-Forwarded-For  {client_ip}
-			header_up X-Request-ID     {uuid}
-		}
+		route @twofactor {
+    		header -X-Frame-Options
+    		header -Content-Security-Policy
+    	reverse_proxy vaultwarden:80 {
+        	header_up Host             {host}
+        	header_up CF-Connecting-IP {client_ip}
+        	header_up X-Real-IP        {client_ip}
+        	header_up X-Forwarded-For  {client_ip}
+        	header_up X-Request-ID     {uuid}
+    	}
 	}
 
 	# 4. Admin Panel Protection
