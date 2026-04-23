@@ -293,9 +293,9 @@ services:
       - "127.0.0.1:587:587"
 
     networks:
-      # Internal-only attachment is intentional. Postfix relays outbound mail
-      # using RELAYHOST from within the app mesh; do not attach to egress net.
+      # Primary internal mesh: vaultwarden_app reaches postfix via hostname 'postfix'.
       - vaultwarden
+      - postfix_relay
 
     healthcheck:
       test: ["CMD-SHELL", "postfix status 2>/dev/null || exit 1"]
@@ -453,3 +453,13 @@ networks:
     ipam:
       config:
         - subnet: 172.22.0.0/16
+
+  # Dedicated non-internal bridge for postfix host port-binding.
+  # fail2ban (network_mode: host) reaches it via the host loopback.
+  postfix_relay:
+    name: postfix_relay_network
+    driver: bridge
+    internal: false
+    ipam:
+      config:
+        - subnet: 172.23.0.0/16
