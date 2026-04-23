@@ -998,11 +998,15 @@ _send_notification() {
 
     if [[ -z "${ADMIN_EMAIL:-}" ]]; then
         log_warn "ADMIN_EMAIL not set — cannot send health notification"
-        return
+        return 1
     fi
 
-    send_email "$ADMIN_EMAIL" "$subject" "$body" 2>/dev/null || \
+    if ! send_email "$ADMIN_EMAIL" "$subject" "$body" 2>/dev/null; then
         log_warn "Failed to send health notification email"
+        return 1
+    fi
+
+    return 0
 }
 
 # _notify_failures
@@ -1033,7 +1037,18 @@ _notify_failures() {
         subject="VaultWarden Health [${status^^}]: ${name} on $(hostname)"
         body="Health check alert at $(date).\n\nCheck : ${name}\nStatus: ${status^^}\nDetail: ${message}\n\nThis alert will not repeat for ${ALERT_COOLDOWN_SECONDS}s ($(( ALERT_COOLDOWN_SECONDS / 60 )) min).\nRun './health.sh --report' for full status."
 
-        _send_notification "$subject" "$body" || true
+        # Health alerts already have per-check cooldown via _acquire_alert_lock.
+        # Clear send_email's global subject stamp so active incidents can notify
+        # each cooldown window instead of being silently suppressed for 1 hour.
+        clear_email_rate_limit "$subject"
+
+        if ! _send_notification "$subject" "$body"; then
+            log_warn "_notify_failures: delivery failed for '${name}' — releasing alert lock for retry next cycle"
+            local safe_name
+            safe_name=$(printf '%s' "$name" | tr -cs '[:alnum:]-' '_')
+            rm -f "${ALERT_LOCK_DIR:-/tmp/vw-alerts}/${safe_name}.lock" 2>/dev/null || true
+            continue
+        fi
         alerted_any=true
         log_info "Alert sent for '${name}' (${status})"
     done
