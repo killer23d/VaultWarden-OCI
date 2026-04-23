@@ -176,13 +176,30 @@ fix-permissions: ## Fix file ownership after sudo operations leave root-owned fi
 	    chown "$$REAL_USER:$$REAL_GROUP" docker-compose.override.yml; \
 	    echo "$(GREEN)  ✓ docker-compose.override.yml$(NC)"; \
 	fi; \
-	if [ -f "caddy/entrypoint.sh" ] && [ ! -x "caddy/entrypoint.sh" ]; then \
+		if [ -f "caddy/entrypoint.sh" ] && [ ! -x "caddy/entrypoint.sh" ]; then \
 	    chmod +x "caddy/entrypoint.sh"; \
 	    echo "$(GREEN)  ✓ caddy/entrypoint.sh → +x$(NC)"; \
 	fi; \
+	if [ -d "secrets/keys" ]; then \
+	    chown "$$REAL_USER:$$REAL_GROUP" secrets/keys; \
+	    find secrets/keys -maxdepth 1 -name "*.txt" -exec chown "$$REAL_USER:$$REAL_GROUP" {} \; \
+	              -exec chmod 600 {} \; 2>/dev/null; \
+	    echo "$(GREEN)  ✓ secrets/keys/ → $$REAL_USER:$$REAL_GROUP (keys 600)$(NC)"; \
+	fi; \
+	if [ -d "/etc/vaultwarden" ]; then \
+	    chmod 700 /etc/vaultwarden; \
+	    chown root:root /etc/vaultwarden; \
+	    if [ -f "/etc/vaultwarden/age-key.txt" ]; then \
+	        chmod 600 /etc/vaultwarden/age-key.txt; \
+	        chown root:root /etc/vaultwarden/age-key.txt; \
+	        echo "$(GREEN)  ✓ /etc/vaultwarden/age-key.txt → root:root 600$(NC)"; \
+	    fi; \
+	    echo "$(GREEN)  ✓ /etc/vaultwarden/ → root:root 700$(NC)"; \
+	fi; \
 	echo ""; \
 	echo "$(GREEN)File ownership fixed for user $$REAL_USER.$(NC)"; \
-	echo "$(CYAN)Note: secrets/ and secrets/.docker_secrets/ are intentionally left restricted.$(NC)"
+	echo "$(CYAN)Note: secrets/.docker_secrets/ is intentionally left restricted (root:root 444).$(NC)"; \
+	echo "$(CYAN)      /etc/vaultwarden/ is intentionally root:root 700 (system key store).$(NC)"
 
 init-secrets: ## Initialize secrets file (interactive)
 	@echo "$(BLUE)Initializing secrets...$(NC)"
@@ -453,6 +470,7 @@ key-health: ## Check age key health (permissions, decodability, SOPS_AGE_KEY_FIL
 	@CONFIGURED_KEY=$$(grep '^SOPS_AGE_KEY_FILE=' .env 2>/dev/null | cut -d= -f2); \
 	CONFIGURED_KEY=$${CONFIGURED_KEY:-secrets/keys/age-key.txt}; \
 	bash -c "source lib/common.sh; init_common_lib startup.sh; \
+	         source lib/crypto.sh; \
 	         source lib/simple_key_resilience.sh; \
 	         if check_age_key_health \"$$CONFIGURED_KEY\"; then \
 	           echo \"$(GREEN)  ✓ Age key is healthy$(NC)\"; \
@@ -582,7 +600,9 @@ key-backup: ## Backup age key to a secure offline location (interactive)
 key-escrow: ## Generate encrypted escrow package (requires GPG or another age key)
 	$(call require-root)
 	@echo "$(BLUE)Age Key Escrow$(NC)"
-	@bash -c "source lib/common.sh; init_common_lib startup.sh; source lib/simple_key_resilience.sh; \
+	@bash -c "source lib/common.sh; init_common_lib startup.sh; \
+	          source lib/crypto.sh; \
+	          source lib/simple_key_resilience.sh; \
 	          KEY_FILE=$$(grep '^SOPS_AGE_KEY_FILE=' .env 2>/dev/null | cut -d= -f2); \
 	          KEY_FILE=$${KEY_FILE:-secrets/keys/age-key.txt}; \
 	          create_key_escrow \"$$KEY_FILE\""
