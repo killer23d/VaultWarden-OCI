@@ -1,76 +1,5 @@
 #!/usr/bin/env bash
 # lib/simple_key_resilience.sh - Streamlined key protection for single admin
-#
-# PATCHED BUGS (2026-03-06):
-#   BUG-R1 [HIGH]   simple_verify_age_key(): stat -c '%a' is GNU-only; macOS needs
-#                   stat -f '%OLp'. Replaced with _stat_octal_perms_local() from
-#                   crypto.sh (which must be loaded before this library).
-#   BUG-R2 [MEDIUM] create_printable_key_backup(): trap used single quotes, so
-#                   $temp_html was NOT expanded at registration time. EXIT handler
-#                   fired with the literal string '$temp_html', leaving the temp
-#                   file (containing the plaintext Age key) undeleted on error.
-#                   Fixed: double-quote wrapper + single-quoted variable value,
-#                   matching the pattern in create_password_manager_escrow().
-#   BUG-R3 [MEDIUM] create_printable_key_backup(): qrencode was called with the
-#                   raw Age private key as a positional argument, exposing it in
-#                   /proc/<pid>/cmdline and `ps aux` output. Key now piped via
-#                   stdin using a temp FIFO-style process substitution.
-#   BUG-R4 [LOW]    _secure_remove_file(): stat -c%s is GNU-only. Replaced with
-#                   the portable _stat_file_size() helper from crypto.sh.
-#
-# PATCHED BUGS (2026-03-10):
-#   SKR-H1 [HIGH]   create_printable_key_backup(): key_content held the live
-#                   plaintext Age private key in the process environment. Added
-#                   explicit `unset key_content` immediately after the heredoc
-#                   write. Also HTML-escape special characters in key_content
-#                   before embedding to prevent display corruption.
-#   SKR-M1 [MEDIUM] simple_verify_age_key(): chmod/chown auto-fix was silent.
-#                   Now emits log_warn when permissions or ownership are wrong,
-#                   making silent privilege escalation visible in logs.
-#   SKR-M2 [MEDIUM] create_printable_key_backup(): HTML fallback left the
-#                   plaintext key file on disk with no auto-deletion mechanism.
-#                   A self-delete reminder is now embedded in the HTML file and
-#                   an at(1) job (or cron fallback) is scheduled to remind the
-#                   operator 30 minutes after creation.
-#   SKR-L1 [MEDIUM] create_password_manager_escrow(): trap ... EXIT overwrote
-#                   any caller-level EXIT trap. Changed to trap ... RETURN so
-#                   cleanup is scoped to the function and the caller's trap is
-#                   preserved.
-#
-# PATCHED BUGS (2026-03-11):
-#   SKR-M3 [MEDIUM] verify_key_replica(): compared replicas only by SHA-256
-#                   hash. A consistently-corrupt primary causes all replicas to
-#                   match the corrupt hash, hiding the corruption.
-#                   Fix: after the hash check passes, perform a functional
-#                   encrypt/decrypt roundtrip against each replica key file to
-#                   confirm it is operationally valid, not just byte-identical.
-#   SKR-M4 [MEDIUM] restore_key_from_replica(): used cp for the restore, so a
-#                   crash mid-copy could leave a partial/truncated primary key.
-#                   Fix: cp to a .tmp sidecar first, then atomic mv into place.
-#   SKR-L2 [LOW]    verify_key_replica(): if the replica list is empty the
-#                   function returned 0 (success) silently.
-#                   Fix: detect empty replica array and return 1 with log_warn.
-#
-# PATCHED BUGS (2026-03-13):
-#   SK-1  [MEDIUM]  simple_verify_age_key(): used echo "$test_data" | age ...
-#                   for the crypto round-trip. echo appends a trailing newline;
-#                   the comparison only held because $() strips trailing newlines
-#                   — a fragile coincidence that breaks if read -r or binary data
-#                   is ever introduced.
-#                   Fix: replaced with printf '%s' "$test_data" | age ... for
-#                   deterministic, newline-free byte handling.
-#
-# PATCHED BUGS (2026-04-08):
-#   SKR-M5 [MEDIUM] check_age_key_health(): performed an encrypt/decrypt
-#                   roundtrip against the on-disk key only. A DR scenario where
-#                   a new age key is restored while the old public key remains
-#                   in .sops.yaml would pass the health check yet fail to
-#                   decrypt any real secret.
-#                   Fix: after the roundtrip succeeds, derive the on-disk public
-#                   key and compare it against every age: recipient in .sops.yaml.
-#                   Emit a specific actionable error if none match:
-#                   "age key on disk does not match .sops.yaml recipient —
-#                    secrets were encrypted to a different key"
 
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_KEY_RESILIENCE_LIB_LOADED:-}" ]] && return 0
@@ -96,15 +25,10 @@ simple_verify_age_key() {
     local perms
     perms=$(_stat_octal_perms_local "$age_key" 2>/dev/null || echo "")
     if [[ "$perms" != "600" ]]; then
-        # SKR-M1 FIX: log the bad permissions BEFORE fixing so the event is
-        # visible in audit logs — a silent auto-fix could mask a privilege
-        # escalation that temporarily widened the key's permissions.
         log_warn "Age key permissions were ${perms:-<unreadable>} (expected 600) — auto-correcting to 600"
         chmod 600 "$age_key"
     fi
 
-    # FIX [M-05]: Also restore ownership to the real user after chmod.
-    # SKR-M1 FIX: log whenever ownership correction is required.
     local real_user real_group
     real_user=$(get_real_user 2>/dev/null || echo "root")
     real_group=$(id -gn "$real_user" 2>/dev/null || echo "$real_user")
@@ -112,21 +36,26 @@ simple_verify_age_key() {
     current_owner=$(stat -c '%U:%G' "$age_key" 2>/dev/null || stat -f '%Su:%Sg' "$age_key" 2>/dev/null || echo "")
     if [[ -n "$current_owner" && "$current_owner" != "${real_user}:${real_group}" ]]; then
         log_warn "Age key ownership was '${current_owner}' (expected '${real_user}:${real_group}') — auto-correcting"
-        chown "${real_user}:${real_group}" "$age_key" 2>/dev/null || \
-            log_warn "Could not restore ownership of $age_key to ${real_user}:${real_group}"
+        if [[ "$(id -u)" -eq 0 ]]; then
+            chown "${real_user}:${real_group}" "$age_key" 2>/dev/null || \
+                log_warn "Could not restore ownership of $age_key to ${real_user}:${real_group}"
+        else
+            log_warn "Cannot correct ownership of $age_key — re-run with sudo (sudo make key-health)"
+        fi
+    elif [[ -n "$current_owner" ]]; then
+        # Ownership is already correct — no action needed.
+        :
     else
-        # Still attempt chown silently if we couldn't read current ownership,
-        # but only warn if it actually fails.
-        chown "${real_user}:${real_group}" "$age_key" 2>/dev/null || \
-            log_warn "Could not restore ownership of $age_key to ${real_user}:${real_group}"
+        # Could not read ownership at all — attempt chown only if root.
+        if [[ "$(id -u)" -eq 0 ]]; then
+            chown "${real_user}:${real_group}" "$age_key" 2>/dev/null || \
+                log_warn "Could not restore ownership of $age_key to ${real_user}:${real_group}"
+        else
+            log_warn "Cannot verify ownership of $age_key — re-run with sudo for full check"
+        fi
     fi
 
     # Check 3: Validity — Encrypt/Decrypt roundtrip
-    # SK-1 FIX: use printf '%s' instead of echo to avoid appending a trailing
-    # newline. The old echo-based comparison only worked because $() strips
-    # trailing newlines — a fragile coincidence. printf '%s' emits exactly the
-    # bytes in $test_data with no newline, making the comparison deterministic
-    # and safe if the callers ever switch to read -r or binary data.
     local test_data="vw-key-check-$(date +%s)"
     local result
 
