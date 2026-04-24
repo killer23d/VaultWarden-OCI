@@ -1043,7 +1043,10 @@ _notify_failures() {
         clear_email_rate_limit "$subject"
 
         if ! _send_notification "$subject" "$body"; then
-            log_warn "_notify_failures: delivery failed for '${name}' — will retry after cooldown (${ALERT_COOLDOWN_SECONDS}s)"
+            log_warn "_notify_failures: delivery failed for '${name}' — releasing alert lock for retry next cycle"
+            local safe_name
+            safe_name=$(printf '%s' "$name" | tr -cs '[:alnum:]-' '_')
+            rm -f "${ALERT_LOCK_DIR:-/tmp/vw-alerts}/${safe_name}.lock" 2>/dev/null || true
             continue
         fi
         alerted_any=true
