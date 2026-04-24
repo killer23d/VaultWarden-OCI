@@ -148,9 +148,6 @@ log_header() {
 
 # --- Configuration Management ---
 
-# Candidate paths searched (in order) when no explicit env_file is supplied.
-# /etc/vaultwarden/vaultwarden.env is the production location written by
-# setup-systemd.sh --install; .env covers interactive / development use.
 _ENV_FILE_SEARCH_PATHS=(
     ".env"
     "/etc/vaultwarden/vaultwarden.env"
@@ -159,8 +156,6 @@ _ENV_FILE_SEARCH_PATHS=(
 load_env_file() {
     local env_file="${1:-}"
 
-    # When called without an argument (the common case), resolve the first
-    # candidate path that actually exists on disk.
     if [[ -z "$env_file" ]]; then
         local candidate
         for candidate in "${_ENV_FILE_SEARCH_PATHS[@]}"; do
@@ -193,8 +188,7 @@ load_env_file() {
             fi
         fi
     else
-        # Issue #42: Non-root — cannot enforce strict permissions, but warn if
-        # the file is world-readable since it may contain secrets.
+    
         local file_perms
         file_perms=$(stat -c '%a' "$env_file" 2>/dev/null \
                      || stat -f '%OLp' "$env_file" 2>/dev/null \
@@ -247,14 +241,6 @@ load_env_file() {
             return 1
         fi
 
-        # BUG FIX: declare -x inside a function only exports to the function's
-        # local scope — variables vanish when load_env_file returns, so
-        # get_config_value always saw empty strings for every .env key.
-        #
-        # Fix: printf -v writes the literal value into a global variable without
-        # any re-expansion of the RHS (safe for passwords like Pass$word), and
-        # the subsequent export propagates it to the calling script's environment
-        # where get_config_value can read it via ${!key}.
         printf -v "$key" '%s' "$value"
         export "$key"
 
@@ -415,14 +401,9 @@ get_real_user() {
 CLEANUP_ACTIONS_MAX_SIZE="${CLEANUP_ACTIONS_MAX_SIZE:-64}"
 declare -a CLEANUP_ACTIONS=()
 
-# Separator token used to store multiple arguments in a single CLEANUP_ACTIONS element.
-# Unit-separator (0x1f) is safe: it cannot appear in normal shell arguments.
-# Defined at module scope to document the protocol; inlined in each function so
-# neither register_cleanup nor perform_cleanup requires an exported variable.
 _CLEANUP_SEP=$'\x1f'
 
 register_cleanup() {
-    # Serialise all arguments with the unit-separator so eval is not needed.
     local _sep=$'\x1f'
     local serialised="" sep="" arg
     for arg in "$@"; do
@@ -453,8 +434,6 @@ perform_cleanup() {
 
     for (( idx = ${#CLEANUP_ACTIONS[@]} - 1; idx >= 0; idx-- )); do
         entry="${CLEANUP_ACTIONS[$idx]}"
-        # Split on separator without eval — no shell injection risk.
-        # The separator matches the one used in register_cleanup.
         local _sep=$'\x1f'
         local action_args=()
         IFS="$_sep" read -r -a action_args <<< "$entry"
@@ -586,8 +565,6 @@ _normalise_email_subject() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# _resolve_rate_limit_dir  (BUG-EM7 FIX)
-#
 # Tries candidate directories in priority order and returns the first one
 # that is (or can be) created AND is writable by the current user:
 #   1. PROJECT_ROOT/.rate-limit   — preferred
@@ -626,10 +603,6 @@ _rate_limit_check() {
     if [[ "$subject" != *"CRITICAL"* ]] && [[ -f "$last_email_file" ]]; then
         local last_time current_time
         last_time=$(cat "$last_email_file" 2>/dev/null || printf '0')
-        # BUG-P4-4 FIX: date +%s is not POSIX but is supported by both GNU coreutils
-        # and BSD date. It IS available on all supported platforms (Linux/macOS/Alpine).
-        # The original comment claiming it was GNU-only was incorrect — no change needed
-        # to the date call itself. Document this explicitly.
         current_time=$(date +%s)
         if (( current_time - last_time < 3600 )); then
             log_debug "Email rate limited for non-critical notification: $subject"
@@ -685,10 +658,38 @@ clear_email_rate_limit() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# _resolve_smtp_method
+#
+# Single source of truth for the SMTP transport label used in delivery
+# metadata and log lines.  Prints one of two values to stdout:
+#
+#   "smtp (direct relay)"    — SMTP_PASSWORD is set; _smtp_send() will
+#                              authenticate directly to SMTP_HOST.
+#   "smtp (postfix sidecar)" — No SMTP_PASSWORD; _smtp_send() will route
+#                              through the Postfix sidecar at VW_SMTP_HOST_PORT
+#                              (default 127.0.0.1:587).
+#
+# Both send_email() and _smtp_send() derive their label from this function
+# so that the metadata footer and the actual transport path always agree,
+# regardless of future changes to either caller.
+# ─────────────────────────────────────────────────────────────────────────────
+_resolve_smtp_method() {
+    if [[ -n "${SMTP_PASSWORD:-}" ]]; then
+        printf 'smtp (direct relay)\n'
+    else
+        printf 'smtp (postfix sidecar)\n'
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # _smtp_send <to> <subject> <body>  (BUG-EM6 FIX)
 #
 # Path A: SMTP_PASSWORD present → direct external relay (dev/test override)
 # Path B: no SMTP_PASSWORD → route through Postfix sidecar at 127.0.0.1:587
+#
+# The transport path selected here must always match the label returned by
+# _resolve_smtp_method().  If a new transport path is ever added, update
+# both functions together.
 # ─────────────────────────────────────────────────────────────────────────────
 _smtp_send() {
     local to="$1"
@@ -719,7 +720,9 @@ _smtp_send() {
         printf '\r\n'
     )
 
-    # ── Path A: SMTP_PASSWORD present → direct external relay ────────────────────
+    # ── Path A: SMTP_PASSWORD present → direct external relay ─────────────────
+    # This branch must stay in sync with _resolve_smtp_method returning
+    # "smtp (direct relay)".
     if [[ -n "${SMTP_PASSWORD:-}" ]]; then
         [[ -z "${SMTP_HOST:-}"     ]] && { log_error "_smtp_send: SMTP_HOST is not set";     return 1; }
         [[ -z "${SMTP_USERNAME:-}" ]] && { log_error "_smtp_send: SMTP_USERNAME is not set"; return 1; }
@@ -756,6 +759,8 @@ _smtp_send() {
     fi
 
     # ── Path B: No SMTP_PASSWORD → Postfix sidecar (normal production path) ───
+    # This branch must stay in sync with _resolve_smtp_method returning
+    # "smtp (postfix sidecar)".
     local _sidecar_addr="${VW_SMTP_HOST_PORT:-127.0.0.1:587}"
     local _sidecar_host _sidecar_port
     _sidecar_host="${_sidecar_addr%:*}"
@@ -923,16 +928,12 @@ send_email() {
 
     # ── Stage 2: SMTP relay (Postfix sidecar or direct relay) ─────────────────
     if [[ "$mode" == "auto" || "$mode" == "smtp" ]]; then
-        # Mirror _smtp_send()'s own path decision: direct relay when
-        # SMTP_PASSWORD is set, Postfix sidecar otherwise.
-        local smtp_method
-        if [[ -n "${SMTP_PASSWORD:-}" ]]; then
-            smtp_method="smtp (direct relay)"
-        else
-            smtp_method="smtp (postfix sidecar)"
-        fi
-
-        local smtp_body
+        # _resolve_smtp_method() is the single source of truth for the transport
+        # label.  _smtp_send() selects its actual path using the same condition
+        # (SMTP_PASSWORD presence), so the metadata footer always matches what
+        # was actually used.
+        local smtp_method smtp_body
+        smtp_method="$(_resolve_smtp_method)"
         smtp_body="$(_build_email_metadata_body \
             "$base_body" "$host_fqdn" "$ts" "$mode" "$provider" \
             "$smtp_method")"
@@ -1071,21 +1072,6 @@ init_common_lib() {
 
     set -euo pipefail
 
-    # BUG-1 FIX: The ADMIN_TOKEN bcrypt-prefix check that previously lived here
-    # fired before any caller had a chance to run load_env_file().  This caused
-    # a false-positive fatal error whenever ADMIN_TOKEN was inherited in the
-    # shell environment from a previous run (e.g. exported from .env as plain
-    # text) even though the secrets-derived hashed value in
-    # secrets/.docker_secrets/admin_token was perfectly valid.
-    #
-    # The authoritative format check is _validate_admin_token_format() in
-    # startup.sh, which runs after prepare_docker_secrets() has written the
-    # decrypted token file.  It covers Argon2id, $2a$, $2b$, and $2y$ prefixes
-    # and is the correct place for this guard.
-    #
-    # Callers that need an early token-format sanity check should call
-    # _validate_admin_token_format() from their own main() AFTER load_env_file().
-
     set_log_prefix "$(basename -- "$script_name" .sh)"
 
     cd "$PROJECT_ROOT"
@@ -1102,6 +1088,7 @@ export -f has_command require_commands retry_with_backoff is_root require_root g
 export -f register_cleanup perform_cleanup
 export -f ensure_dir secure_file test_connectivity test_http download_file
 export -f _normalise_email_subject _resolve_rate_limit_dir _rate_limit_check
+export -f _resolve_smtp_method
 export -f _build_email_metadata_body
 export -f send_email send_notification_email _smtp_send
 export -f clear_email_rate_limit
