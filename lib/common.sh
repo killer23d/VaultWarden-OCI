@@ -954,6 +954,8 @@ Mode:      ${mode}${provider:+ / provider: ${provider}}"
             return 0
         fi
         log_error "Emergency API bypass failed via ${provider}"
+    elif [[ "$mode" == "auto" && "$host_mta_failed" == "true" ]]; then
+        log_error "Emergency API bypass skipped: EMAIL_API_TOKEN not resolved for provider '${provider}' — run: ./edit-secrets.sh --rotate email_api_token"
     fi
 
     log_error "All email delivery methods failed (mode=${mode}, provider=${provider}, subject=${subject})"
