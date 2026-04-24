@@ -1016,17 +1016,12 @@ _send_notification() {
 # within their cooldown window are silently skipped — the operator already
 # knows about them.
 _notify_failures() {
-    # Collect all failing/warning check names into a deduped key list.
-    # We use the check name directly as the lock key so each independent
-    # failure type has its own cooldown timer.
     local alerted_any=false
 
     for name in "${check_order[@]}"; do
         local status="${check_results[$name]:-}"
         [[ "$status" == "fail" || "$status" == "warn" ]] || continue
 
-        # Attempt to acquire the per-key cooldown lock.  Returns 1 (skip) if
-        # an alert was already sent within the cooldown window.
         if ! _acquire_alert_lock "$name"; then
             log_info "Alert cooldown active for '${name}' — suppressing repeat notification"
             continue
@@ -1034,18 +1029,21 @@ _notify_failures() {
 
         local message="${check_messages[$name]:-}"
         local subject body
+
+        # Capture date once so the subject and body share a consistent timestamp.
+        local alert_date
+        alert_date="$(date)"
+
         subject="VaultWarden Health [${status^^}]: ${name} on $(hostname)"
-        printf -v body 'Health check alert at %s\n\nCheck : %s\nStatus: %s\nDetail: %s\n\nThis alert will not repeat for %ss (%s min).\nRun '\''./health.sh --report'\'' for full status.' \
-            "$(date)" \
+        printf -v body \
+            'Health check alert at %s\n\nCheck : %s\nStatus: %s\nDetail: %s\n\nThis alert will not repeat for %ss (%s min).\nRun '\''./health.sh --report'\'' for full status.' \
+            "$alert_date" \
             "$name" \
             "${status^^}" \
             "$message" \
             "$ALERT_COOLDOWN_SECONDS" \
             "$(( ALERT_COOLDOWN_SECONDS / 60 ))"
 
-        # Health alerts already have per-check cooldown via _acquire_alert_lock.
-        # Clear send_email's global subject stamp so active incidents can notify
-        # each cooldown window instead of being silently suppressed for 1 hour.
         clear_email_rate_limit "$subject"
 
         if ! _send_notification "$subject" "$body"; then
@@ -1059,8 +1057,6 @@ _notify_failures() {
         log_info "Alert sent for '${name}' (${status})"
     done
 
-    # Reset the recovery lock whenever we have active failures so the next
-    # all-clear cycle is able to send a fresh recovery email.
     if [[ $failed -gt 0 || $warnings -gt 0 ]]; then
         _release_recovery_lock
     fi
@@ -1080,9 +1076,15 @@ _notify_recovery() {
     fi
 
     local subject body
+
+    # Capture date once so subject and body are consistent.
+    local recovery_date
+    recovery_date="$(date)"
+
     subject="VaultWarden Health RECOVERED on $(hostname)"
-    printf -v body 'All health checks passed at %s\n\nPassed : %s\nWarnings: 0\nFailed : 0\n\nNo further alerts will fire until the next failure.' \
-        "$(date)" \
+    printf -v body \
+        'All health checks passed at %s\n\nPassed : %s\nWarnings: 0\nFailed : 0\n\nNo further alerts will fire until the next failure.' \
+        "$recovery_date" \
         "$passed"
 
     _send_notification "$subject" "$body" || true
