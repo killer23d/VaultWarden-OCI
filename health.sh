@@ -110,60 +110,65 @@ FAIL2BAN_PING_DELAY=${FAIL2BAN_PING_DELAY:-6}
 # ALERT COOLDOWN
 # =============================================================================
 #
-# Problem: health.sh runs every few minutes via systemd timer. Without rate-
-# limiting, a single flapping failure (e.g., container restarting during a
-# Docker update) sends one email per invocation — dozens per hour — causing
-# alert fatigue that leads admins to ignore the notification channel entirely.
-#
-# Solution: per-failure-type lockfiles under /run/vw-health-alert/.
-# Each failure key gets its own lock file. flock -w 0 (non-blocking) succeeds
-# only if no other process holds the lock. The lock is held for
-# ALERT_COOLDOWN_SECONDS (default 3600) via a background sleep, after which
-# flock releases it automatically — no cron cleanup required.
-#
-# Result: at most one alert fires per failure key per hour. A single
-# "all-clear" recovery email fires once when every failure resolves, guarded
-# by its own lock with a 24-hour TTL so a flap sequence doesn't re-send the
-# clear immediately.
-#
-# Lock directory lives under /run (tmpfs) so it is automatically cleaned up
-# on reboot and does not accumulate state across restarts.
+# Cooldown state lives on persistent disk, not /run (which is wiped on
+# container/host restart). Files are named <safe_key>.cooldown and contain
+# a Unix epoch timestamp written at send time. TTL is checked on read.
+# This survives reboots, container restarts, and systemd RuntimeDirectory
+# teardown without losing cooldown state.
+# =============================================================================
 
-ALERT_LOCK_DIR="/run/vw-health-alert"
-ALERT_COOLDOWN_SECONDS=${ALERT_COOLDOWN_SECONDS:-3600}     # 1 hour per failure key
-ALERT_RECOVERY_TTL=${ALERT_RECOVERY_TTL:-86400}            # 24 hours for clear-state lock
+ALERT_LOCK_DIR="${ALERT_STATE_DIR:-/var/lib/vaultwarden/.vw-health-alert}"
+ALERT_COOLDOWN_SECONDS=${ALERT_COOLDOWN_SECONDS:-3600}
+ALERT_RECOVERY_TTL=${ALERT_RECOVERY_TTL:-86400}
 
 # _acquire_alert_lock KEY
 #
-# Returns 0 (success) if this invocation should send an alert for KEY —
-# i.e., the cooldown has expired or this is the first alert for this key.
-# Returns 1 if the alert was already sent within the cooldown window.
+# Returns 0 if an alert should fire for KEY (cooldown expired or first alert).
+# Returns 1 if still within the cooldown window.
+# On return 0, writes the current epoch to the cooldown file — the caller
+# MUST send the alert (or explicitly call _release_alert_lock KEY on failure).
 #
-# The lock is held by a background sleep process for ALERT_COOLDOWN_SECONDS.
-# When that sleep exits, flock automatically releases the lock and the next
-# invocation can acquire it and send a fresh alert.
+# Uses a per-key timestamp file on persistent storage instead of flock on
+# /run so that cooldown state survives container/host restarts.
 _acquire_alert_lock() {
     local key="$1"
-    # Sanitise the key so it is safe as a filename (replace non-alphanum with _)
     local safe_key
     safe_key=$(printf '%s' "$key" | tr -cs '[:alnum:]-' '_')
-    local lock_file="${ALERT_LOCK_DIR}/${safe_key}.lock"
 
     mkdir -p "${ALERT_LOCK_DIR}" 2>/dev/null || true
 
-    # Open the lock file on fd 200 and attempt a non-blocking exclusive lock.
-    # If the lock is already held (cooldown active), flock exits non-zero and
-    # we return 1 — caller skips sending the alert.
-    exec 200>"${lock_file}" 2>/dev/null || return 1
-    flock -w 0 200 2>/dev/null || return 1
+    local state_file="${ALERT_LOCK_DIR}/${safe_key}.cooldown"
+    local ttl="${2:-${ALERT_COOLDOWN_SECONDS}}"
+    local now
+    now=$(date +%s)
 
-    # Lock acquired — hold it for the cooldown window via a background sleep
-    # that keeps fd 200 open. The subshell closes when sleep exits, releasing
-    # the lock automatically without any cleanup cron job.
-    ( sleep "${ALERT_COOLDOWN_SECONDS}" ) 200>&200 &
-    disown $!
+    if [[ -f "$state_file" ]]; then
+        local last_sent
+        last_sent=$(cat "$state_file" 2>/dev/null || printf '0')
+        if (( now - last_sent < ttl )); then
+            return 1   # still within cooldown
+        fi
+    fi
+
+    # Atomically claim the slot: write timestamp before returning 0.
+    # Use a temp file + mv for atomic replacement (avoids partial reads).
+    local tmp_file
+    tmp_file=$(mktemp "${ALERT_LOCK_DIR}/.tmp.XXXXXXXXXX")
+    printf '%s\n' "$now" > "$tmp_file"
+    mv -f "$tmp_file" "$state_file"
 
     return 0
+}
+
+# _release_alert_lock KEY
+#
+# Removes the cooldown stamp for KEY so the next run can re-send immediately.
+# Call this when a delivery failure occurs so the alert retries next cycle.
+_release_alert_lock() {
+    local key="$1"
+    local safe_key
+    safe_key=$(printf '%s' "$key" | tr -cs '[:alnum:]-' '_')
+    rm -f "${ALERT_LOCK_DIR}/${safe_key}.cooldown" 2>/dev/null || true
 }
 
 # _release_recovery_lock
@@ -172,7 +177,7 @@ _acquire_alert_lock() {
 # a fresh clear-state email when it resolves.  Called only when failures are
 # detected (i.e., we are NOT in a clean state).
 _release_recovery_lock() {
-    rm -f "${ALERT_LOCK_DIR}/recovery.lock" 2>/dev/null || true
+    rm -f "${ALERT_LOCK_DIR}/recovery.cooldown" 2>/dev/null || true
 }
 
 # =============================================================================
@@ -255,11 +260,11 @@ Environment variables:
                                   (default: 86400 = 24 hours)
 
 Alert cooldown:
-  Alerts are rate-limited per failure key using lockfiles under
-  /run/vw-health-alert/. At most one alert fires per failure key per
-  ALERT_COOLDOWN_SECONDS window. A single clear-state recovery email fires
-  once when all checks pass, then is suppressed for ALERT_RECOVERY_TTL
-  seconds. Lock files live on tmpfs and are cleaned up automatically on reboot.
+  Alerts are rate-limited per failure key using timestamp files under
+  /var/lib/vaultwarden/.vw-health-alert/. At most one alert fires per failure 
+  key per ALERT_COOLDOWN_SECONDS window. A single clear-state recovery email 
+  fires once when all checks pass, then is suppressed for ALERT_RECOVERY_TTL
+  seconds. State survives reboots and container restarts.
 
 Exit codes:
   0 - All checks passed
@@ -295,10 +300,6 @@ _fail() { _record "$1" fail "$2"; }
 # =============================================================================
 
 _get_domain() {
-    # Priority: DOMAIN_NAME (bare) → DOMAIN (strip protocol) → empty
-    # DOMAIN is already exported by load_env_file() at startup; a direct
-    # grep on ${ENV_FILE} would bypass the already-loaded environment and
-    # silently return empty when .env is root-owned (permission denied).
     if [[ -n "${DOMAIN_NAME:-}" ]]; then
         echo "${DOMAIN_NAME}"
     elif [[ -n "${DOMAIN:-}" ]]; then
@@ -335,7 +336,6 @@ _check_containers() {
             continue
         fi
 
-        # Check Docker healthcheck status if available
         health=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' "$container" 2>/dev/null || echo "unknown")
 
         case "$health" in
@@ -385,7 +385,6 @@ _check_ssl() {
 
     log_info "Checking SSL certificate for $domain..."
 
-    # Check certificate expiry
     local expiry_output
     expiry_output=$(echo | timeout "$HEALTH_TIMEOUT" openssl s_client \
         -connect "${domain}:443" \
@@ -411,7 +410,6 @@ _check_ssl() {
         _pass "ssl:cert" "SSL certificate valid for $domain (${days_remaining} days remaining)"
     fi
 
-    # Comprehensive: validate full chain
     if $COMPREHENSIVE; then
         local verify_output
         verify_output=$(echo | timeout "$HEALTH_TIMEOUT" openssl s_client \
@@ -427,22 +425,12 @@ _check_ssl() {
 # VAULTWARDEN API CHECKS
 # =============================================================================
 
-# -----------------------------------------------------------------------------
-# _check_vaultwarden_alive
-#
-# Liveness probe: checks /alive (Rocket framework built-in).
-# Returns 200 as long as the process is running — does NOT require a live
-# DB connection. Used to detect process crashes or container restarts.
-# -----------------------------------------------------------------------------
 _check_vaultwarden_alive() {
     local domain
     domain="$(_get_domain)"
 
     log_info "Checking VaultWarden liveness (/alive)..."
 
-    # Internal health check (direct to container).
-    # --connect-timeout bounds TCP/TLS handshake separately from total transfer
-    # time; without it a hung handshake consumes the full --max-time budget.
     local internal_response
     if internal_response=$(timeout "$HEALTH_TIMEOUT" curl -sf \
         --connect-timeout "$HEALTH_CONNECT_TIMEOUT" \
@@ -450,7 +438,6 @@ _check_vaultwarden_alive() {
         "http://127.0.0.1:80/alive" 2>/dev/null); then
         _pass "vaultwarden:alive" "VaultWarden /alive endpoint responding"
     else
-        # Try via docker network
         if docker exec vaultwarden_app curl -sf \
             --connect-timeout "$HEALTH_CONNECT_TIMEOUT" \
             --max-time "$HEALTH_TIMEOUT" \
@@ -461,7 +448,6 @@ _check_vaultwarden_alive() {
         fi
     fi
 
-    # External HTTPS check (only if domain is configured)
     if [[ -n "$domain" ]]; then
         local external_code
         external_code=$(timeout "$HEALTH_TIMEOUT" curl -so /dev/null \
@@ -479,35 +465,12 @@ _check_vaultwarden_alive() {
     fi
 }
 
-# -----------------------------------------------------------------------------
-# _check_vaultwarden_server_info
-#
-# Readiness probe: checks /api/config (internal + external).
-# - Internal (`vaultwarden:server-info`) executes inside vaultwarden_app and
-#   validates the VaultWarden process, DB path, and mounted secrets.
-# - External (`vaultwarden:server-info:external`) validates the full HTTPS
-#   path (DNS/cert/Caddy reverse-proxy routing) through the public domain.
-#
-# Both checks are intentionally kept: internal success does not guarantee the
-# external path is healthy (e.g., Caddy/cert/DNS failures), and external
-# success does not isolate app-internal failures as clearly as the container
-# direct check.
-#
-# Default behaviour: non-200 is recorded as a WARNING (exit 1) so a single
-# transient blip does not wake the operator at 3 AM. Set HEALTH_API_STRICT=true
-# in .env to promote non-200 to a hard FAILURE (exit 2).
-# -----------------------------------------------------------------------------
 _check_vaultwarden_server_info() {
     local domain
     domain="$(_get_domain)"
 
     log_info "Checking VaultWarden readiness (/api/config)..."
 
-    # Internal readiness probe — exec into the vaultwarden container to bypass
-    # Caddy. vaultwarden_app's port 80 is not published to the host; a direct
-    # curl to http://127.0.0.1:80 from the host reaches Caddy (which returns 404
-    # for /api/config on plain HTTP) rather than VaultWarden. Using docker exec
-    # ensures this check reflects the true application state.
     local internal_code
     internal_code=$(docker exec vaultwarden_app curl -so /dev/null \
         --connect-timeout "$HEALTH_CONNECT_TIMEOUT" \
@@ -520,7 +483,6 @@ _check_vaultwarden_server_info() {
             _pass "vaultwarden:server-info" "VaultWarden /api/config responding (HTTP $internal_code)"
             ;;
         000)
-            # Connection refused or timeout — hard fail regardless of HEALTH_API_STRICT
             _fail "vaultwarden:server-info" "VaultWarden /api/config not reachable internally (connection failed)"
             ;;
         *)
@@ -532,7 +494,6 @@ _check_vaultwarden_server_info() {
             ;;
     esac
 
-    # External readiness probe (only when domain is configured)
     if [[ -n "$domain" ]]; then
         local external_code
         external_code=$(timeout "$HEALTH_TIMEOUT" curl -so /dev/null \
@@ -558,8 +519,6 @@ _check_vaultwarden_server_info() {
         esac
     fi
 
-    # Comprehensive: record an explicit named result for the extended path
-    # (keeps the --comprehensive output consistent with prior behaviour).
     if $COMPREHENSIVE && [[ -n "$domain" ]]; then
         local comp_code
         comp_code=$(timeout "$HEALTH_TIMEOUT" curl -so /dev/null \
@@ -578,37 +537,9 @@ _check_vaultwarden_server_info() {
 # FAIL2BAN CHECKS
 # =============================================================================
 
-# -----------------------------------------------------------------------------
-# _check_fail2ban
-#
-# Validates that the fail2ban daemon is responsive inside its container.
-#
-# The fail2ban socket (/var/run/fail2ban/fail2ban.sock) is created after the
-# daemon completes initialisation, which can take several seconds after the
-# container transitions to "running". A single immediate ping therefore
-# produces a spurious failure during every normal startup sequence.
-#
-# Retry logic:
-#   - Attempt fail2ban-client ping up to FAIL2BAN_PING_RETRIES times
-#     (default: 5), waiting FAIL2BAN_PING_DELAY seconds (default: 6) between
-#     each attempt.
-#   - If the container's Docker health status is still "starting" when all
-#     retries are exhausted, record a WARNING rather than a hard FAILURE —
-#     the daemon is likely still initialising and the container has not yet
-#     been declared unhealthy by Docker itself.
-#   - Only record a hard FAILURE when the container health is NOT "starting"
-#     (i.e., healthy or unhealthy) and the daemon still does not respond,
-#     which indicates a genuine runtime problem.
-# -----------------------------------------------------------------------------
 _check_fail2ban() {
     log_info "Checking Fail2Ban..."
 
-    # Capture container health at function entry so we know whether we entered
-    # during the container's startup window. Docker's lightweight healthcheck
-    # may promote the container from "starting" to "healthy" while the fail2ban
-    # daemon socket is still being created — a normal occurrence during the first
-    # 30–60 s after container start. Preserving the initial state lets us
-    # downgrade to a WARNING rather than a hard FAILURE in that case.
     local initial_container_health
     initial_container_health=$(docker inspect \
         --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' \
@@ -619,7 +550,6 @@ _check_fail2ban() {
         if ping_result=$(docker exec vaultwarden_fail2ban fail2ban-client ping 2>/dev/null); then
             if echo "$ping_result" | grep -q pong; then
                 _pass "fail2ban:daemon" "Fail2Ban daemon responding to ping"
-                # Proceed to jail / comprehensive checks below
                 break
             else
                 _warn "fail2ban:daemon" "Fail2Ban ping response unexpected: $ping_result"
@@ -633,17 +563,12 @@ _check_fail2ban() {
         fi
     done
 
-    # All retries exhausted without a pong — determine severity from container health.
     if [[ -z "${check_results[fail2ban:daemon]:-}" ]]; then
         local current_container_health
         current_container_health=$(docker inspect \
             --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' \
             vaultwarden_fail2ban 2>/dev/null || echo "unknown")
 
-        # Downgrade to WARNING if the container was in its startup window when
-        # this check began OR is still starting now. This covers the race where
-        # Docker's lightweight healthcheck promotes fail2ban to "healthy" (process
-        # is alive) while the daemon socket is still being created.
         if [[ "$initial_container_health" == "starting" || "$current_container_health" == "starting" ]]; then
             _warn "fail2ban:daemon" \
                 "Fail2Ban daemon not yet responding (container was starting when check began — retried ${FAIL2BAN_PING_RETRIES}x${FAIL2BAN_PING_DELAY}s; will resolve automatically)"
@@ -654,7 +579,6 @@ _check_fail2ban() {
         return
     fi
 
-    # Check active jails (comprehensive mode)
     if $COMPREHENSIVE; then
         local jails_output
         jails_output=$(docker exec vaultwarden_fail2ban fail2ban-client status 2>/dev/null || echo "")
@@ -668,26 +592,12 @@ _check_fail2ban() {
     fi
 }
 
-# -----------------------------------------------------------------------------
-# Fail2Ban filter drift detection (comprehensive mode only)
-#
-# Runs fail2ban-regex inside the fail2ban container against the live
-# vaultwarden application log using the vaultwarden-auth filter.  If the log
-# file has content but the match count is zero, the datepattern or failregex
-# has silently drifted out of sync with the actual log format — warn loudly so
-# the operator can update the filter before the jail stops detecting attacks.
-#
-# The check is deliberately non-fatal (warn, not fail) because a freshly
-# rotated or empty log file would also produce zero matches; the log-size
-# guard below avoids false positives in that case.
-# -----------------------------------------------------------------------------
 _check_fail2ban_filter_drift() {
     local log_file="/var/log/vaultwarden/vaultwarden.log"
     local filter_conf="/etc/fail2ban/filter.d/vaultwarden-auth.conf"
 
     log_info "Checking Fail2Ban filter regex drift (vaultwarden-auth)..."
 
-    # Confirm both paths exist inside the container before running the test.
     if ! docker exec vaultwarden_fail2ban test -f "$log_file" 2>/dev/null; then
         _warn "fail2ban:filter-drift" \
             "Cannot run filter drift check — log file not found inside container: ${log_file}"
@@ -699,8 +609,6 @@ _check_fail2ban_filter_drift() {
         return
     fi
 
-    # Skip the regex test on an effectively empty log to avoid false positives
-    # right after log rotation when there is no content to match against.
     local log_lines
     log_lines=$(docker exec vaultwarden_fail2ban wc -l < "$log_file" 2>/dev/null || echo 0)
     if [[ "$log_lines" -lt 10 ]]; then
@@ -709,13 +617,10 @@ _check_fail2ban_filter_drift() {
         return
     fi
 
-    # Run fail2ban-regex and capture stdout; exit code is always 0 so use grep.
     local regex_output match_count
     regex_output=$(docker exec vaultwarden_fail2ban \
         fail2ban-regex "$log_file" "$filter_conf" 2>&1 || true)
 
-    # fail2ban-regex reports "Lines: N lines, X ignored, Y matched, Z missed"
-    # Extract the matched count.  If the line is absent the parse falls back to 0.
     match_count=$(echo "$regex_output" \
         | grep -oP '(?<=,\s)\d+(?=\s+matched)' \
         | head -1 || echo 0)
@@ -738,7 +643,6 @@ _check_disk() {
 
     local state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
 
-    # Check main state directory
     local usage_pct
     usage_pct=$(df -h "$state_dir" 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print $5}' || echo "0")
 
@@ -750,7 +654,6 @@ _check_disk() {
         _pass "disk:state" "Disk usage OK: ${usage_pct}% on $state_dir"
     fi
 
-    # Check root partition separately if different
     local root_usage
     root_usage=$(df -h / 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print $5}' || echo "0")
     if [[ "$root_usage" -ge "$DISK_CRIT_THRESHOLD" ]] 2>/dev/null && [[ "$root_usage" != "$usage_pct" ]]; then
@@ -793,7 +696,6 @@ _check_memory() {
 _check_network() {
     log_info "Checking network connectivity..."
 
-    # Check outbound internet connectivity
     if timeout "$HEALTH_TIMEOUT" curl -sf \
         --connect-timeout "$HEALTH_CONNECT_TIMEOUT" \
         --max-time "$HEALTH_TIMEOUT" \
@@ -807,7 +709,6 @@ _check_network() {
         _warn "network:outbound" "Outbound internet connectivity check failed (Cloudflare unreachable)"
     fi
 
-    # Check Cloudflare API reachability
     local cf_code
     cf_code=$(timeout "$HEALTH_TIMEOUT" curl -so /dev/null \
         --connect-timeout "$HEALTH_CONNECT_TIMEOUT" \
@@ -853,14 +754,13 @@ _check_backups() {
     log_info "Checking backup status..."
 
     local backup_dir="${BACKUP_DIR:-${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/backups}"
-    local max_age_hours=${BACKUP_MAX_AGE_HOURS:-26}  # Alert if no backup in 26 hours
+    local max_age_hours=${BACKUP_MAX_AGE_HOURS:-26}
 
     if [[ ! -d "$backup_dir" ]]; then
         _warn "backup:dir" "Backup directory not found: $backup_dir"
         return
     fi
 
-    # Find most recent backup across all types
     local latest_backup latest_age_hours
     latest_backup=$(find "$backup_dir" -name '*.age' -newer "/tmp" 2>/dev/null | \
         xargs ls -t 2>/dev/null | head -1 || \
@@ -871,7 +771,6 @@ _check_backups() {
         return
     fi
 
-    # Calculate age in hours
     local backup_mtime now_epoch
     backup_mtime=$(stat -c %Y "$latest_backup" 2>/dev/null || stat -f %m "$latest_backup" 2>/dev/null || echo 0)
     now_epoch=$(date +%s)
@@ -904,8 +803,6 @@ _check_config() {
         done
     fi
 
-     # Check secrets directory.
-    #
     local secrets_dir="${SCRIPT_DIR}/secrets/.docker_secrets"
     if [[ -d "$secrets_dir" ]]; then
         local required_secrets=("admin_token" "caddy_cloudflare_dns_token" "fail2ban_cloudflare_firewall_token")
@@ -914,9 +811,6 @@ _check_config() {
         done
     fi
 
-    # Check for root-owned project files that break non-sudo operations.
-    # Common symptom: setup.sh or startup.sh ran as root and left files owned
-    # by root that the operator (non-root ubuntu user) cannot read or edit.
     local root_owned_issues=()
     for f in ".env" "Makefile" "health.sh" "startup.sh" "backup.sh" "edit-secrets.sh"; do
         local fpath="${SCRIPT_DIR}/${f}"
@@ -985,7 +879,7 @@ _check_container_resources() {
 }
 
 # =============================================================================
-# NOTIFICATION  (with per-key alert cooldown)
+# NOTIFICATION (with per-key alert cooldown)
 # =============================================================================
 
 _send_notification() {
@@ -1009,12 +903,7 @@ _send_notification() {
     return 0
 }
 
-# _notify_failures
-#
-# Iterates every recorded failure/warning and fires at most one email per
-# failure key per ALERT_COOLDOWN_SECONDS window.  Failures that are still
-# within their cooldown window are silently skipped — the operator already
-# knows about them.
+# _notify_failures — fixed version
 _notify_failures() {
     local alerted_any=false
 
@@ -1028,31 +917,26 @@ _notify_failures() {
         fi
 
         local message="${check_messages[$name]:-}"
-        local subject body
-
-        # Capture date once so the subject and body share a consistent timestamp.
-        local alert_date
+        local alert_date subject body
         alert_date="$(date)"
 
         subject="VaultWarden Health [${status^^}]: ${name} on $(hostname)"
         printf -v body \
             'Health check alert at %s\n\nCheck : %s\nStatus: %s\nDetail: %s\n\nThis alert will not repeat for %ss (%s min).\nRun '\''./health.sh --report'\'' for full status.' \
-            "$alert_date" \
-            "$name" \
-            "${status^^}" \
-            "$message" \
-            "$ALERT_COOLDOWN_SECONDS" \
-            "$(( ALERT_COOLDOWN_SECONDS / 60 ))"
+            "$alert_date" "$name" "${status^^}" "$message" \
+            "$ALERT_COOLDOWN_SECONDS" "$(( ALERT_COOLDOWN_SECONDS / 60 ))"
 
-        clear_email_rate_limit "$subject"
+        # NOTE: clear_email_rate_limit removed from here.
+        # The flock/timestamp cooldown (above) is the deduplication layer.
+        # Clearing the rate-limit stamp before sending defeated both guards
+        # simultaneously on delivery failure, causing alert storms.
 
         if ! _send_notification "$subject" "$body"; then
-            log_warn "_notify_failures: delivery failed for '${name}' — releasing alert lock for retry next cycle"
-            local safe_name
-            safe_name=$(printf '%s' "$name" | tr -cs '[:alnum:]-' '_')
-            rm -f "${ALERT_LOCK_DIR:-/tmp/vw-alerts}/${safe_name}.lock" 2>/dev/null || true
+            log_warn "_notify_failures: delivery failed for '${name}' — releasing cooldown for retry next cycle"
+            _release_alert_lock "$name"
             continue
         fi
+
         alerted_any=true
         log_info "Alert sent for '${name}' (${status})"
     done
@@ -1062,30 +946,21 @@ _notify_failures() {
     fi
 }
 
-# _notify_recovery
-#
-# Fires a single "all clear" email when every check passes.  Guarded by its
-# own lock (ALERT_RECOVERY_TTL) so a brief flap that clears within minutes
-# does not re-send the recovery email on every passing invocation.
+# _notify_recovery — updated to use ALERT_RECOVERY_TTL via _acquire_alert_lock
 _notify_recovery() {
     [[ $failed -eq 0 && $warnings -eq 0 ]] || return 0
 
-    if ! _acquire_alert_lock "recovery"; then
+    if ! _acquire_alert_lock "recovery" "${ALERT_RECOVERY_TTL}"; then
         log_info "Recovery notification already sent within TTL — suppressing"
         return 0
     fi
 
-    local subject body
-
-    # Capture date once so subject and body are consistent.
-    local recovery_date
+    local recovery_date subject body
     recovery_date="$(date)"
-
     subject="VaultWarden Health RECOVERED on $(hostname)"
     printf -v body \
         'All health checks passed at %s\n\nPassed : %s\nWarnings: 0\nFailed : 0\n\nNo further alerts will fire until the next failure.' \
-        "$recovery_date" \
-        "$passed"
+        "$recovery_date" "$passed"
 
     _send_notification "$subject" "$body" || true
     log_info "Recovery notification sent"
@@ -1127,7 +1002,6 @@ _generate_report() {
 
     log_info "Report saved to: $report_file"
 
-    # Prune old reports
     find "$REPORT_DIR" -name 'health_*.txt' \
         -mtime +"$REPORT_RETENTION_DAYS" -delete 2>/dev/null || true
 }
@@ -1181,7 +1055,6 @@ main() {
     log_info "Starting VaultWarden health check..."
     $COMPREHENSIVE && log_info "Mode: comprehensive" || log_info "Mode: standard"
 
-    # Run all checks
     _check_containers
     _check_ssl
     _check_vaultwarden_alive
@@ -1195,31 +1068,24 @@ main() {
     _check_config
     _check_notify_failures
 
-    # Comprehensive extras
     if $COMPREHENSIVE; then
         _check_container_resources
     fi
 
-    # Auto-fix
     if $FIX_MODE && [[ $failed -gt 0 ]]; then
         log_info "Fix mode enabled — attempting recovery..."
         _fix_unhealthy_containers
     fi
 
-    # Print results
     _print_results
 
-    # Save report
     if $REPORT_MODE; then
         _generate_report
     fi
 
-    # Send per-key rate-limited alerts for any failures/warnings, then a
-    # single recovery email when everything clears.
     _notify_failures
     _notify_recovery
 
-    # Exit code
     if [[ $failed -gt 0 ]]; then
         exit 2
     elif [[ $warnings -gt 0 ]]; then
