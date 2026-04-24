@@ -792,32 +792,6 @@ _smtp_send() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# _build_email_metadata_body BASE_BODY HOST_FQDN TIMESTAMP MODE PROVIDER METHOD
-#
-# Single source of truth for the "Email delivery metadata" footer appended to
-# every outbound notification.  Accepts all fields as arguments so the caller
-# controls what appears in each label without duplicating the template.
-#
-# Output is printed to stdout so callers capture it with $(...) or printf -v.
-# ─────────────────────────────────────────────────────────────────────────────
-_build_email_metadata_body() {
-    local base_body="$1"
-    local host_fqdn="$2"
-    local ts="$3"
-    local mode="$4"
-    local provider="$5"
-    local method="$6"
-
-    printf '%s\n\nEmail delivery metadata:\nHost:      %s\nTimestamp: %s\nMode:      %s\nProvider:  %s\nMethod:    %s' \
-        "$base_body" \
-        "$host_fqdn" \
-        "$ts" \
-        "$mode" \
-        "$provider" \
-        "$method"
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
 # send_email [TO] SUBJECT BODY
 #
 # TO is optional; defaults to ${ADMIN_EMAIL}.
@@ -829,6 +803,21 @@ _build_email_metadata_body() {
 #   Resolution order:
 #     1. EMAIL_API_TOKEN env var (direct override, e.g. set in shell)
 #     2. decrypt_secret email_api_token  (from secrets.yaml via SOPS/age)
+#
+# --- FIX EM-L1-B (2026-04-12) -----------------------------------------------
+# The _EMAIL_DRIVERS associative array was removed in FIX EM-L1 when the
+# provider registry was refactored to the case-based _email_driver_lookup()
+# in lib/email.sh, but this function was not updated. Under set -u, any
+# reference to ${_EMAIL_DRIVERS[$provider]:-} on an undeclared associative
+# array triggers: "lib/common.sh: line N: mailgun: unbound variable".
+#
+# Fix: replace _EMAIL_DRIVERS lookups with _email_driver_lookup():
+#   - _email_driver_lookup validates the provider and returns the driver
+#     function suffix, including the host→postfix alias (FIX EM-H3).
+#   - The driver function name is built from the returned suffix so host
+#     and postfix both resolve to _email_driver_postfix automatically.
+#   - The error message lists the canonical provider names from the
+#     lookup function's own case arms.
 # ─────────────────────────────────────────────────────────────────────────────
 send_email() {
     local to subject body
@@ -869,19 +858,18 @@ send_email() {
         return 0
     fi
 
-    # Capture shared metadata values once — avoids repeated subshell forks
-    # and guarantees a consistent timestamp across all delivery-path bodies.
-    local host_fqdn ts
+    local host_fqdn
     host_fqdn="$(hostname -f 2>/dev/null || hostname)"
-    ts="$(date -uIs)"
 
-    local base_body="$body"
+    local base_body
+    base_body="${body}"
 
     local api_token=""
     local api_driver_fn=""
 
     # ── Stage 1: HTTP API ─────────────────────────────────────────────────────
     if [[ "$mode" == "auto" || "$mode" == "api" ]]; then
+        # FIX EM-L1-B: use _email_driver_lookup() — _EMAIL_DRIVERS no longer exists.
         local driver_suffix
         if ! driver_suffix=$(_email_driver_lookup "$provider" 2>/dev/null); then
             log_error "Unknown EMAIL_PROVIDER='${provider}'"
@@ -890,24 +878,29 @@ send_email() {
         else
             local driver_fn="_email_driver_${driver_suffix}"
             local _api_token="${EMAIL_API_TOKEN:-}"
-            if [[ -z "$_api_token" ]] && declare -f decrypt_secret &>/dev/null; then
+            # Canonical secrets key is 'email_api_token'.
+            # edit-secrets.sh --rotate email_api_token writes under this exact key.
+            if [[ -z "${_api_token}" ]] && declare -f decrypt_secret &>/dev/null; then
                 _api_token="$(decrypt_secret email_api_token 2>/dev/null || true)"
             fi
-            api_token="$_api_token"
-            api_driver_fn="$driver_fn"
-
+            api_token="${_api_token}"
+            api_driver_fn="${driver_fn}"
             local api_body
-            api_body="$(_build_email_metadata_body \
-                "$base_body" "$host_fqdn" "$ts" "$mode" "$provider" \
-                "api (${provider})")"
+            api_body="${base_body}
 
-            if [[ -z "$_api_token" ]]; then
+Email delivery metadata:
+Host:      ${host_fqdn}
+Timestamp: $(date -uIs)
+Mode:      ${mode}
+Provider:  ${provider}
+Method:    api (${provider})"
+            if [[ -z "${_api_token}" ]]; then
                 if [[ "$mode" == "api" ]]; then
                     log_error "EMAIL_MODE=api but EMAIL_API_TOKEN is empty — cannot send. Run: ./edit-secrets.sh --rotate email_api_token"
                     return 1
                 fi
                 log_warn "EMAIL_PROVIDER=${provider} set but EMAIL_API_TOKEN is empty — falling back to SMTP. Run: ./edit-secrets.sh --rotate email_api_token"
-            elif EMAIL_API_TOKEN="$_api_token" "$driver_fn" "$subject" "$api_body"; then
+            elif EMAIL_API_TOKEN="${_api_token}" "$driver_fn" "$subject" "$api_body"; then
                 log_success "Email sent via ${provider} API: ${subject}"
                 date +%s > "$stamp_file" 2>/dev/null || true
                 return 0
@@ -921,21 +914,18 @@ send_email() {
         fi
     fi
 
-    # ── Stage 2: SMTP relay (Postfix sidecar or direct relay) ─────────────────
+    # ── Stage 2: SMTP relay (Postfix sidecar) ─────────────────────────────────
     if [[ "$mode" == "auto" || "$mode" == "smtp" ]]; then
-        # Mirror _smtp_send()'s own path decision: direct relay when
-        # SMTP_PASSWORD is set, Postfix sidecar otherwise.
-        local smtp_method
-        if [[ -n "${SMTP_PASSWORD:-}" ]]; then
-            smtp_method="smtp (direct relay)"
-        else
-            smtp_method="smtp (postfix sidecar)"
-        fi
+        local smtp_method="smtp (direct relay)"
+        [[ -z "${SMTP_PASSWORD:-}" ]] && smtp_method="smtp (postfix sidecar)"
+        local smtp_body="${base_body}
 
-        local smtp_body
-        smtp_body="$(_build_email_metadata_body \
-            "$base_body" "$host_fqdn" "$ts" "$mode" "$provider" \
-            "$smtp_method")"
+Email delivery metadata:
+Host:      ${host_fqdn}
+Timestamp: $(date -uIs)
+Mode:      ${mode}
+Provider:  ${provider}
+Method:    ${smtp_method}"
 
         if _smtp_send "$to" "$subject" "$smtp_body"; then
             log_success "Email sent via SMTP relay (${SMTP_HOST:-unconfigured}:${SMTP_PORT:-587}): ${subject}"
@@ -952,10 +942,14 @@ send_email() {
     local host_mta_failed=false
     # ── Stage 3: Host MTA ─────────────────────────────────────────────────────
     if [[ "$mode" == "auto" || "$mode" == "host" ]]; then
-        local host_body
-        host_body="$(_build_email_metadata_body \
-            "$base_body" "$host_fqdn" "$ts" "$mode" "$provider" \
-            "host mta (sendmail/postfix)")"
+        local host_body="${base_body}
+
+Email delivery metadata:
+Host:      ${host_fqdn}
+Timestamp: $(date -uIs)
+Mode:      ${mode}
+Provider:  ${provider}
+Method:    host mta (sendmail/postfix)"
 
         if command -v mail &>/dev/null; then
             if printf '%s' "$host_body" | mail -s "$subject" "$to" 2>/dev/null; then
@@ -973,20 +967,22 @@ send_email() {
         fi
     fi
 
-    # ── Stage 4 (auto): Emergency direct API bypass ────────────────────────────
+    # ── Stage 4 (auto): Emergency direct API bypass ──────────────────────────
+    # When SMTP/host MTA are unavailable (e.g., postfix sidecar down), retry
+    # direct API delivery as an out-of-band path.
     if [[ "$mode" == "auto" && "$host_mta_failed" == "true" && -n "$api_token" && -n "$api_driver_fn" ]]; then
         log_error "SMTP/host MTA delivery unavailable — attempting emergency API bypass (${provider})"
+        local emergency_body="${base_body}
 
-        local emergency_body
-        emergency_body="$(_build_email_metadata_body \
-            "$base_body" "$host_fqdn" "$ts" "$mode" "$provider" \
-            "api emergency bypass (${provider})")"
-        # Append the delivery warning note specific to this bypass path.
-        emergency_body="${emergency_body}
+Email delivery metadata:
+Host:      ${host_fqdn}
+Timestamp: $(date -uIs)
+Mode:      ${mode}
+Provider:  ${provider}
+Method:    api emergency bypass (${provider})
 
 ⚠ Delivery note: Sent via emergency API bypass after SMTP/host MTA failure."
-
-        if EMAIL_API_TOKEN="$api_token" "$api_driver_fn" "$subject" "$emergency_body"; then
+        if EMAIL_API_TOKEN="${api_token}" "$api_driver_fn" "$subject" "$emergency_body"; then
             log_success "Emergency API bypass succeeded via ${provider}: ${subject}"
             date +%s > "$stamp_file" 2>/dev/null || true
             return 0
@@ -1102,7 +1098,6 @@ export -f has_command require_commands retry_with_backoff is_root require_root g
 export -f register_cleanup perform_cleanup
 export -f ensure_dir secure_file test_connectivity test_http download_file
 export -f _normalise_email_subject _resolve_rate_limit_dir _rate_limit_check
-export -f _build_email_metadata_body
 export -f send_email send_notification_email _smtp_send
 export -f clear_email_rate_limit
 export -f validate_email validate_domain validate_port validate_ip validate_url
