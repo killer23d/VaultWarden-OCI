@@ -682,6 +682,32 @@ _resolve_smtp_method() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# _build_email_metadata_body BASE_BODY HOST_FQDN TIMESTAMP MODE PROVIDER METHOD
+#
+# Single source of truth for the "Email delivery metadata" footer appended to
+# every outbound notification.  Accepts all fields as arguments so the caller
+# controls what appears in each label without duplicating the template.
+#
+# Output is printed to stdout so callers capture it with $(...) or printf -v.
+# ─────────────────────────────────────────────────────────────────────────────
+_build_email_metadata_body() {
+    local base_body="$1"
+    local host_fqdn="$2"
+    local ts="$3"
+    local mode="$4"
+    local provider="$5"
+    local method="$6"
+
+    printf '%s\n\nEmail delivery metadata:\nHost:      %s\nTimestamp: %s\nMode:      %s\nProvider:  %s\nMethod:    %s' \
+        "$base_body" \
+        "$host_fqdn" \
+        "$ts" \
+        "$mode" \
+        "$provider" \
+        "$method"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # _smtp_send <to> <subject> <body>  (BUG-EM6 FIX)
 #
 # Path A: SMTP_PASSWORD present → direct external relay (dev/test override)
@@ -794,32 +820,6 @@ _smtp_send() {
         log_warn "_smtp_send: Postfix sidecar at ${_sidecar_addr} returned curl exit ${_rc}. Is the container running and port 127.0.0.1:587 bound?"
     fi
     return $_rc
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# _build_email_metadata_body BASE_BODY HOST_FQDN TIMESTAMP MODE PROVIDER METHOD
-#
-# Single source of truth for the "Email delivery metadata" footer appended to
-# every outbound notification.  Accepts all fields as arguments so the caller
-# controls what appears in each label without duplicating the template.
-#
-# Output is printed to stdout so callers capture it with $(...) or printf -v.
-# ─────────────────────────────────────────────────────────────────────────────
-_build_email_metadata_body() {
-    local base_body="$1"
-    local host_fqdn="$2"
-    local ts="$3"
-    local mode="$4"
-    local provider="$5"
-    local method="$6"
-
-    printf '%s\n\nEmail delivery metadata:\nHost:      %s\nTimestamp: %s\nMode:      %s\nProvider:  %s\nMethod:    %s' \
-        "$base_body" \
-        "$host_fqdn" \
-        "$ts" \
-        "$mode" \
-        "$provider" \
-        "$method"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
