@@ -763,11 +763,23 @@ _smtp_send() {
 
     log_debug "_smtp_send: no SMTP_PASSWORD — routing through Postfix sidecar at ${_sidecar_addr}"
 
+    # Fast sidecar liveness probe to avoid long curl timeouts when postfix
+    # is down/unbound on localhost.
+    if command -v nc >/dev/null 2>&1; then
+        if ! nc -z -w 2 "$_sidecar_host" "$_sidecar_port" >/dev/null 2>&1; then
+            log_warn "_smtp_send: Postfix sidecar unreachable at ${_sidecar_addr} (probe failed) — skipping SMTP attempt"
+            return 1
+        fi
+    elif ! (echo >/dev/tcp/"$_sidecar_host"/"$_sidecar_port") >/dev/null 2>&1; then
+        log_warn "_smtp_send: Postfix sidecar unreachable at ${_sidecar_addr} (probe failed) — skipping SMTP attempt"
+        return 1
+    fi
+
     printf '%s' "$_msg" | curl -s \
-        --connect-timeout 15 \
-        --max-time 30 \
-        --retry 2 \
-        --retry-delay 5 \
+        --connect-timeout 5 \
+        --max-time 15 \
+        --retry 1 \
+        --retry-delay 2 \
         --url "smtp://${_sidecar_host}:${_sidecar_port}" \
         --mail-from "$_smtp_from_addr" \
         --mail-rcpt "$to" \
@@ -854,6 +866,9 @@ Host:      $(hostname -f 2>/dev/null || hostname)
 Timestamp: $(date -uIs)
 Mode:      ${mode}${provider:+ / provider: ${provider}}"
 
+    local api_token=""
+    local api_driver_fn=""
+
     # ── Stage 1: HTTP API ─────────────────────────────────────────────────────
     if [[ "$mode" == "auto" || "$mode" == "api" ]]; then
         # FIX EM-L1-B: use _email_driver_lookup() — _EMAIL_DRIVERS no longer exists.
@@ -870,6 +885,8 @@ Mode:      ${mode}${provider:+ / provider: ${provider}}"
             if [[ -z "${_api_token}" ]] && declare -f decrypt_secret &>/dev/null; then
                 _api_token="$(decrypt_secret email_api_token 2>/dev/null || true)"
             fi
+            api_token="${_api_token}"
+            api_driver_fn="${driver_fn}"
             if [[ -z "${_api_token}" ]]; then
                 if [[ "$mode" == "api" ]]; then
                     log_error "EMAIL_MODE=api but EMAIL_API_TOKEN is empty — cannot send. Run: ./edit-secrets.sh --rotate email_api_token"
@@ -885,7 +902,7 @@ Mode:      ${mode}${provider:+ / provider: ${provider}}"
                     log_error "EMAIL_MODE=api: ${provider} API failed — no fallback configured"
                     return 1
                 fi
-                log_warn "${provider} API failed — falling back to SMTP relay"
+                log_error "${provider} API failed — falling back to SMTP relay"
             fi
         fi
     fi
@@ -904,6 +921,7 @@ Mode:      ${mode}${provider:+ / provider: ${provider}}"
         log_warn "SMTP relay failed — falling back to host MTA"
     fi
 
+    local host_mta_failed=false
     # ── Stage 3: Host MTA ─────────────────────────────────────────────────────
     if [[ "$mode" == "auto" || "$mode" == "host" ]]; then
         if command -v mail &>/dev/null; then
@@ -912,11 +930,30 @@ Mode:      ${mode}${provider:+ / provider: ${provider}}"
                 date +%s > "$stamp_file" 2>/dev/null || true
                 return 0
             fi
+            host_mta_failed=true
+        else
+            host_mta_failed=true
         fi
         if [[ "$mode" == "host" ]]; then
             log_error "EMAIL_MODE=host: host MTA failed or not available — no fallback configured"
             return 1
         fi
+    fi
+
+    # ── Stage 4 (auto): Emergency direct API bypass ──────────────────────────
+    # When SMTP/host MTA are unavailable (e.g., postfix sidecar down), retry
+    # direct API delivery as an out-of-band path.
+    if [[ "$mode" == "auto" && "$host_mta_failed" == "true" && -n "$api_token" && -n "$api_driver_fn" ]]; then
+        log_error "SMTP/host MTA delivery unavailable — attempting emergency API bypass (${provider})"
+        local emergency_body="${full_body}
+
+⚠ Delivery note: Sent via emergency API bypass after SMTP/host MTA failure."
+        if EMAIL_API_TOKEN="${api_token}" "$api_driver_fn" "$subject" "$emergency_body"; then
+            log_success "Emergency API bypass succeeded via ${provider}: ${subject}"
+            date +%s > "$stamp_file" 2>/dev/null || true
+            return 0
+        fi
+        log_error "Emergency API bypass failed via ${provider}"
     fi
 
     log_error "All email delivery methods failed (mode=${mode}, provider=${provider}, subject=${subject})"
