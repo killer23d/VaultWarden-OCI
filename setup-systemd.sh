@@ -290,26 +290,66 @@ install_units() {
                 chown root:root "$ENV_FILE"
             fi
         else
-            # FIX-S11: Compare checksums and warn on drift after initial install.
+            # ----------------------------------------------------------------
+            # ENV-MERGE: On re-install, perform a safe additive merge instead
+            # of a full overwrite.
+            #
+            # Strategy:
+            #   - Lines already present in the installed file are NEVER touched
+            #     (live credentials, tokens, and operator overrides are preserved).
+            #   - Keys present in repo .env but ABSENT from the installed file
+            #     are APPENDED as a clearly-marked block.
+            #   - If every key is already present (files may still differ in
+            #     value), a checksum comparison is shown so the operator can
+            #     review value drift intentionally.
+            #
+            # This eliminates the persistent DRIFT DETECTED warning on every
+            # --install while keeping the installed file safe from blind overwrites.
+            # ----------------------------------------------------------------
             log_info "$ENV_FILE already exists -- checking for drift ..."
             if [[ -f "$SCRIPT_DIR/.env" ]]; then
                 local repo_sum installed_sum
                 repo_sum=$(_sha256 "$SCRIPT_DIR/.env")
                 installed_sum=$(_sha256 "$ENV_FILE")
-                if [[ "$repo_sum" != "$installed_sum" ]]; then
-                    log_warn "────────────────────────────────────────────────────────────────"
-                    log_warn "DRIFT DETECTED: .env and $ENV_FILE differ."
-                    log_warn "  repo .env  sha256: $repo_sum"
-                    log_warn "  installed  sha256: $installed_sum"
-                    log_warn "New variables added to .env after initial setup will NOT be"
-                    log_warn "visible to systemd units until $ENV_FILE is updated."
-                    log_warn "Review differences and merge manually:"
-                    log_warn "  diff $SCRIPT_DIR/.env $ENV_FILE"
-                    log_warn "Then run: sudo ./setup-systemd.sh --install to re-copy."
-                    log_warn "  (Back up $ENV_FILE first -- it may contain live credentials)"
-                    log_warn "────────────────────────────────────────────────────────────────"
-                else
+                if [[ "$repo_sum" == "$installed_sum" ]]; then
                     log_success "$ENV_FILE is identical to repo .env (checksums match)"
+                else
+                    # Collect keys from repo .env that are absent in the installed file.
+                    local missing_keys=()
+                    while IFS= read -r line; do
+                        # Skip blanks and comments
+                        [[ -z "$line" || "$line" == '#'* ]] && continue
+                        local key="${line%%=*}"
+                        [[ -z "$key" ]] && continue
+                        if ! grep -q "^${key}=" "$ENV_FILE" 2>/dev/null; then
+                            missing_keys+=("$line")
+                        fi
+                    done < "$SCRIPT_DIR/.env"
+                    if [[ "${#missing_keys[@]}" -gt 0 ]]; then
+                        log_info "Merging ${#missing_keys[@]} new variable(s) from repo .env into $ENV_FILE ..."
+                        {
+                            printf '\n# --- Merged by setup-systemd.sh on %s ---\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+                            for entry in "${missing_keys[@]}"; do
+                                printf '%s\n' "$entry"
+                            done
+                        } >> "$ENV_FILE"
+                        log_success "Merged new keys into $ENV_FILE -- review and set their values:"
+                        for entry in "${missing_keys[@]}"; do
+                            log_info "  + ${entry%%=*}"
+                        done
+                        log_info "Edit: sudo nano $ENV_FILE"
+                    else
+                        # Files differ in VALUE only (not in which keys are present).
+                        # This is expected if the operator has customised values.
+                        # Inform without alarming; show a diff command for review.
+                        log_info "────────────────────────────────────────────────────────────────"
+                        log_info "NOTE: $ENV_FILE has the same keys as repo .env but values differ."
+                        log_info "  repo .env  sha256: $repo_sum"
+                        log_info "  installed  sha256: $installed_sum"
+                        log_info "This is normal if you have set live credentials or custom values."
+                        log_info "To review:  diff $SCRIPT_DIR/.env $ENV_FILE"
+                        log_info "────────────────────────────────────────────────────────────────"
+                    fi
                 fi
             else
                 log_info "No repo .env found -- skipping drift check"
