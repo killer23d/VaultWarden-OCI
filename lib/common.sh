@@ -858,13 +858,11 @@ send_email() {
         return 0
     fi
 
-    local full_body
-    full_body="${body}
+    local host_fqdn
+    host_fqdn="$(hostname -f 2>/dev/null || hostname)"
 
----
-Host:      $(hostname -f 2>/dev/null || hostname)
-Timestamp: $(date -uIs)
-Mode:      ${mode}${provider:+ / provider: ${provider}}"
+    local base_body
+    base_body="${body}"
 
     local api_token=""
     local api_driver_fn=""
@@ -887,13 +885,22 @@ Mode:      ${mode}${provider:+ / provider: ${provider}}"
             fi
             api_token="${_api_token}"
             api_driver_fn="${driver_fn}"
+            local api_body
+            api_body="${base_body}
+
+Email delivery metadata:
+Host:      ${host_fqdn}
+Timestamp: $(date -uIs)
+Mode:      ${mode}
+Provider:  ${provider}
+Method:    api (${provider})"
             if [[ -z "${_api_token}" ]]; then
                 if [[ "$mode" == "api" ]]; then
                     log_error "EMAIL_MODE=api but EMAIL_API_TOKEN is empty — cannot send. Run: ./edit-secrets.sh --rotate email_api_token"
                     return 1
                 fi
                 log_warn "EMAIL_PROVIDER=${provider} set but EMAIL_API_TOKEN is empty — falling back to SMTP. Run: ./edit-secrets.sh --rotate email_api_token"
-            elif EMAIL_API_TOKEN="${_api_token}" "$driver_fn" "$subject" "$full_body"; then
+            elif EMAIL_API_TOKEN="${_api_token}" "$driver_fn" "$subject" "$api_body"; then
                 log_success "Email sent via ${provider} API: ${subject}"
                 date +%s > "$stamp_file" 2>/dev/null || true
                 return 0
@@ -909,7 +916,18 @@ Mode:      ${mode}${provider:+ / provider: ${provider}}"
 
     # ── Stage 2: SMTP relay (Postfix sidecar) ─────────────────────────────────
     if [[ "$mode" == "auto" || "$mode" == "smtp" ]]; then
-        if _smtp_send "$to" "$subject" "$full_body"; then
+        local smtp_method="smtp (direct relay)"
+        [[ -z "${SMTP_PASSWORD:-}" ]] && smtp_method="smtp (postfix sidecar)"
+        local smtp_body="${base_body}
+
+Email delivery metadata:
+Host:      ${host_fqdn}
+Timestamp: $(date -uIs)
+Mode:      ${mode}
+Provider:  ${provider}
+Method:    ${smtp_method}"
+
+        if _smtp_send "$to" "$subject" "$smtp_body"; then
             log_success "Email sent via SMTP relay (${SMTP_HOST:-unconfigured}:${SMTP_PORT:-587}): ${subject}"
             date +%s > "$stamp_file" 2>/dev/null || true
             return 0
@@ -924,8 +942,17 @@ Mode:      ${mode}${provider:+ / provider: ${provider}}"
     local host_mta_failed=false
     # ── Stage 3: Host MTA ─────────────────────────────────────────────────────
     if [[ "$mode" == "auto" || "$mode" == "host" ]]; then
+        local host_body="${base_body}
+
+Email delivery metadata:
+Host:      ${host_fqdn}
+Timestamp: $(date -uIs)
+Mode:      ${mode}
+Provider:  ${provider}
+Method:    host mta (sendmail/postfix)"
+
         if command -v mail &>/dev/null; then
-            if printf '%s' "$full_body" | mail -s "$subject" "$to" 2>/dev/null; then
+            if printf '%s' "$host_body" | mail -s "$subject" "$to" 2>/dev/null; then
                 log_success "Email sent via host MTA: ${subject}"
                 date +%s > "$stamp_file" 2>/dev/null || true
                 return 0
@@ -945,7 +972,14 @@ Mode:      ${mode}${provider:+ / provider: ${provider}}"
     # direct API delivery as an out-of-band path.
     if [[ "$mode" == "auto" && "$host_mta_failed" == "true" && -n "$api_token" && -n "$api_driver_fn" ]]; then
         log_error "SMTP/host MTA delivery unavailable — attempting emergency API bypass (${provider})"
-        local emergency_body="${full_body}
+        local emergency_body="${base_body}
+
+Email delivery metadata:
+Host:      ${host_fqdn}
+Timestamp: $(date -uIs)
+Mode:      ${mode}
+Provider:  ${provider}
+Method:    api emergency bypass (${provider})
 
 ⚠ Delivery note: Sent via emergency API bypass after SMTP/host MTA failure."
         if EMAIL_API_TOKEN="${api_token}" "$api_driver_fn" "$subject" "$emergency_body"; then

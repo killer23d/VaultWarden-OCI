@@ -1035,7 +1035,13 @@ _notify_failures() {
         local message="${check_messages[$name]:-}"
         local subject body
         subject="VaultWarden Health [${status^^}]: ${name} on $(hostname)"
-        body="Health check alert at $(date).\n\nCheck : ${name}\nStatus: ${status^^}\nDetail: ${message}\n\nThis alert will not repeat for ${ALERT_COOLDOWN_SECONDS}s ($(( ALERT_COOLDOWN_SECONDS / 60 )) min).\nRun './health.sh --report' for full status."
+        printf -v body 'Health check alert at %s\n\nCheck : %s\nStatus: %s\nDetail: %s\n\nThis alert will not repeat for %ss (%s min).\nRun '\''./health.sh --report'\'' for full status.' \
+            "$(date)" \
+            "$name" \
+            "${status^^}" \
+            "$message" \
+            "$ALERT_COOLDOWN_SECONDS" \
+            "$(( ALERT_COOLDOWN_SECONDS / 60 ))"
 
         # Health alerts already have per-check cooldown via _acquire_alert_lock.
         # Clear send_email's global subject stamp so active incidents can notify
@@ -1075,7 +1081,9 @@ _notify_recovery() {
 
     local subject body
     subject="VaultWarden Health RECOVERED on $(hostname)"
-    body="All health checks passed at $(date).\n\nPassed : $passed\nWarnings: 0\nFailed : 0\n\nNo further alerts will fire until the next failure."
+    printf -v body 'All health checks passed at %s\n\nPassed : %s\nWarnings: 0\nFailed : 0\n\nNo further alerts will fire until the next failure.' \
+        "$(date)" \
+        "$passed"
 
     _send_notification "$subject" "$body" || true
     log_info "Recovery notification sent"
