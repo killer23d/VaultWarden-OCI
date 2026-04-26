@@ -806,7 +806,9 @@ _check_network() {
 _check_smtp() {
     log_info "Checking Postfix SMTP sidecar on port 587..."
 
-    # Skip if using a direct external relay (no local sidecar)
+    # Skip only when using a direct external relay with no local sidecar:
+    # SMTP_PASSWORD set (credentials for external relay) AND
+    # VW_SMTP_HOST_PORT not set (no local sidecar address configured).
     if [[ -n "${SMTP_PASSWORD:-}" && -z "${VW_SMTP_HOST_PORT:-}" ]]; then
         _pass "smtp:sidecar" "Direct external SMTP relay configured — sidecar check skipped"
         return
