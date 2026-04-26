@@ -232,13 +232,19 @@ load_env_file() {
             value="$raw_value"
         fi
 
-        if [[ "$value" == *'`'* || "$value" == *'$('* ||
-              "$value" == *';'* || "$value" == *'&'* ||
-              "$value" == *'|'* || "$value" == *'<'* ||
-              "$value" == *'>'* || "$value" == *'\\'* ]]; then
+        # Injection guard: only $( and ` are genuine risks here because we use
+        # printf -v (not eval) for assignment. Bare $, |, <, >, and \ are
+        # inert in this context and must be allowed for strong passwords.
+        if [[ "$value" == *'`'* || "$value" == *'$('* ]]; then
             log_error "load_env_file: line ${lineno}: value for '${key}' contains" \
-                      "forbidden shell metacharacters — aborting load of '$env_file'"
+                      "shell command-substitution syntax (\`...\` or \$(...))" \
+                      "— aborting load of '${env_file}'. Quote or escape the value."
             return 1
+        fi
+        # Warn (non-fatal) for chars that are unusual in config but legal
+        if [[ "$value" == *';'* || "$value" == *'&'* ]]; then
+            log_warn "load_env_file: line ${lineno}: value for '${key}' contains" \
+                     "';' or '&' — loaded as literal. If unintended, check '${env_file}'."
         fi
 
         printf -v "$key" '%s' "$value"

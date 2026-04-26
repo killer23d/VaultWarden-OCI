@@ -476,7 +476,7 @@ main() {
             log_error "Partial image pull detected (UPDATE-2): rolling back to prevent a split-version stack."
             rollback_image_digests || true
             if [[ "$EMAIL_NOTIFY" == "true" ]]; then
-                local subject="[VaultWarden] Update ABORTED: partial image pull on $(date)"
+                local subject="[VaultWarden] Update ABORTED: partial image pull"
                 local body
                 body="$(printf 'A partial docker image pull was detected on host: %s\nTime: %s\n\nSome images were updated and some failed. The pulled images have been\nrolled back to their pre-pull digests to prevent a split-version stack.\n\nResolve the network or registry issue, then retry:\n  sudo ./update.sh --images\n' \
                     "$(hostname -f 2>/dev/null || hostname)" "$(date)")"
@@ -487,7 +487,7 @@ main() {
             # Total failure — nothing was pulled; no rollback needed.
             log_warn "Image pull failed for all images — no images were updated. Services not restarted."
             if [[ "$EMAIL_NOTIFY" == "true" ]]; then
-                local subject="[VaultWarden] Update WARNING: image pull failed on $(date)"
+                local subject="[VaultWarden] Update WARNING: image pull failed"
                 local body
                 body="$(printf 'All docker image pulls failed on host: %s\nTime: %s\n\nNo images were updated. Services remain on their current versions.\n\nResolve the network or registry issue, then retry:\n  sudo ./update.sh --images\n' \
                     "$(hostname -f 2>/dev/null || hostname)" "$(date)")"
@@ -501,7 +501,7 @@ main() {
 
     apply_updates_and_restart || {
         if [[ "$EMAIL_NOTIFY" == "true" ]]; then
-            local subject="[VaultWarden] Update FAILED: $(date)"
+            local subject="[VaultWarden] Update FAILED"
             local body
             body="$(printf 'Update failed on host: %s\nTime: %s\n\nCheck logs for details.\n' \
                 "$(hostname -f 2>/dev/null || hostname)" "$(date)")"
@@ -511,7 +511,7 @@ main() {
     }
 
     if [[ "$EMAIL_NOTIFY" == "true" ]]; then
-        local subject="[VaultWarden] Update completed: $(date)"
+        local subject="[VaultWarden] Update completed"
         local body
         body="$(printf 'System packages: %s\nDocker images:   %s\nHost:            %s\nTime:            %s\n' \
             "$( [[ $UPDATE_SYSTEM == true ]] && echo updated || echo skipped )" \

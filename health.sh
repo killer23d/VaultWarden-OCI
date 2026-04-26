@@ -107,6 +107,31 @@ FAIL2BAN_PING_RETRIES=${FAIL2BAN_PING_RETRIES:-5}
 FAIL2BAN_PING_DELAY=${FAIL2BAN_PING_DELAY:-6}
 
 # =============================================================================
+# SINGLETON LOCK — prevents overlapping health-check runs
+# =============================================================================
+
+_HEALTH_RUN_LOCK_FILE="/run/lock/vaultwarden-health.lock"
+_HEALTH_LOCK_FD=""
+
+_acquire_run_lock() {
+    exec {_HEALTH_LOCK_FD}>"$_HEALTH_RUN_LOCK_FILE" 2>/dev/null || {
+        log_warn "Cannot open run-lock ${_HEALTH_RUN_LOCK_FILE} — proceeding without singleton guard"
+        _HEALTH_LOCK_FD=""
+        return 0
+    }
+    if ! flock -n "$_HEALTH_LOCK_FD" 2>/dev/null; then
+        log_info "Another health check is already running — exiting"
+        exit 0
+    fi
+}
+
+_release_run_lock() {
+    [[ -n "${_HEALTH_LOCK_FD:-}" ]] || return 0
+    flock -u "$_HEALTH_LOCK_FD" 2>/dev/null || true
+    eval "exec ${_HEALTH_LOCK_FD}>&-" 2>/dev/null || true
+}
+
+# =============================================================================
 # ALERT COOLDOWN
 # =============================================================================
 #
@@ -359,13 +384,49 @@ _check_containers() {
 }
 
 _fix_unhealthy_containers() {
-    log_info "Attempting to restart unhealthy containers..."
+    local fix_lock_dir="${ALERT_LOCK_DIR}"
+    local max_restarts="${MAX_AUTO_RESTARTS:-3}"
+    local window_hours="${RESTART_COUNT_WINDOW_HOURS:-6}"
+
+    log_info "Fix mode: attempting recovery for failed containers..."
+
     for name in "${check_order[@]}"; do
-        if [[ "${check_results[$name]}" == "fail" && "$name" == container:* ]]; then
-            local container="${name#container:}"
-            log_warn "Restarting: $container"
-            docker restart "$container" 2>/dev/null || log_error "Failed to restart $container"
-            sleep 5
+        [[ "${check_results[$name]:-}" == "fail" ]] || continue
+        [[ "$name" == container:* ]] || continue
+
+        local container="${name#container:}"
+        local safe_name
+        safe_name=$(printf '%s' "$container" | tr -cs '[:alnum:]-' '_')
+        local count_file="${fix_lock_dir}/restart_count_${safe_name}"
+        local window_file="${fix_lock_dir}/restart_window_${safe_name}"
+
+        mkdir -p "$fix_lock_dir" 2>/dev/null || true
+
+        # Reset counter when outside the rolling window
+        local now; now=$(date +%s)
+        local window_start=$(( now - window_hours * 3600 ))
+        local window_ts; window_ts=$(cat "$window_file" 2>/dev/null || echo 0)
+        if (( window_ts < window_start )); then
+            printf '0\n'  > "$count_file"
+            printf '%s\n' "$now" > "$window_file"
+        fi
+
+        local count; count=$(cat "$count_file" 2>/dev/null || echo 0)
+
+        if (( count >= max_restarts )); then
+            log_warn "Fix mode: ${container} suppressed — already auto-restarted ${count}x in the last ${window_hours}h. Investigate manually."
+            _warn "fix:restart-limit" \
+                "${container} auto-restart suppressed after ${count} attempts in ${window_hours}h — manual intervention required"
+            continue
+        fi
+
+        log_warn "Fix mode: restarting ${container} (attempt $(( count + 1 ))/${max_restarts} in ${window_hours}h window)..."
+        if docker restart "$container" 2>/dev/null; then
+            printf '%s\n' $(( count + 1 )) > "$count_file"
+            log_info "Fix mode: ${container} restarted successfully"
+            sleep 8
+        else
+            log_error "Fix mode: failed to restart ${container}"
         fi
     done
 }
@@ -643,23 +704,40 @@ _check_disk() {
 
     local state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
 
-    local usage_pct
-    usage_pct=$(df -h "$state_dir" 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print $5}' || echo "0")
+    # Resolve mount points to detect shared filesystems
+    local state_mount root_mount
+    state_mount=$(df --output=target "$state_dir" 2>/dev/null | tail -1 || echo "")
+    root_mount=$(df --output=target / 2>/dev/null | tail -1 || echo "/")
 
-    if [[ "$usage_pct" -ge "$DISK_CRIT_THRESHOLD" ]] 2>/dev/null; then
-        _fail "disk:state" "Disk usage critical: ${usage_pct}% on $state_dir (threshold: ${DISK_CRIT_THRESHOLD}%)"
-    elif [[ "$usage_pct" -ge "$DISK_WARN_THRESHOLD" ]] 2>/dev/null; then
-        _warn "disk:state" "Disk usage warning: ${usage_pct}% on $state_dir (threshold: ${DISK_WARN_THRESHOLD}%)"
+    local usage_pct
+    usage_pct=$(df "$state_dir" 2>/dev/null \
+        | awk 'NR==2 {gsub(/%/,"",$5); print $5}' || echo "0")
+
+    if (( usage_pct >= DISK_CRIT_THRESHOLD )); then
+        _fail "disk:state" \
+            "Disk usage critical: ${usage_pct}% on ${state_dir} (mount: ${state_mount}) — threshold: ${DISK_CRIT_THRESHOLD}%"
+    elif (( usage_pct >= DISK_WARN_THRESHOLD )); then
+        _warn "disk:state" \
+            "Disk usage warning: ${usage_pct}% on ${state_dir} (mount: ${state_mount}) — threshold: ${DISK_WARN_THRESHOLD}%"
     else
-        _pass "disk:state" "Disk usage OK: ${usage_pct}% on $state_dir"
+        _pass "disk:state" \
+            "Disk OK: ${usage_pct}% on ${state_dir} (mount: ${state_mount})"
     fi
 
-    local root_usage
-    root_usage=$(df -h / 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print $5}' || echo "0")
-    if [[ "$root_usage" -ge "$DISK_CRIT_THRESHOLD" ]] 2>/dev/null && [[ "$root_usage" != "$usage_pct" ]]; then
-        _fail "disk:root" "Root partition critical: ${root_usage}% (threshold: ${DISK_CRIT_THRESHOLD}%)"
-    elif [[ "$root_usage" -ge "$DISK_WARN_THRESHOLD" ]] 2>/dev/null && [[ "$root_usage" != "$usage_pct" ]]; then
-        _warn "disk:root" "Root partition warning: ${root_usage}% (threshold: ${DISK_WARN_THRESHOLD}%)"
+    # Only check root separately if it is on a different filesystem
+    if [[ -n "$state_mount" && "$state_mount" != "$root_mount" ]]; then
+        local root_usage
+        root_usage=$(df / 2>/dev/null \
+            | awk 'NR==2 {gsub(/%/,"",$5); print $5}' || echo "0")
+        if (( root_usage >= DISK_CRIT_THRESHOLD )); then
+            _fail "disk:root" \
+                "Root partition critical: ${root_usage}% on / — threshold: ${DISK_CRIT_THRESHOLD}%"
+        elif (( root_usage >= DISK_WARN_THRESHOLD )); then
+            _warn "disk:root" \
+                "Root partition warning: ${root_usage}% on / — threshold: ${DISK_WARN_THRESHOLD}%"
+        else
+            _pass "disk:root" "Root partition OK: ${root_usage}% on /"
+        fi
     fi
 }
 
@@ -719,6 +797,59 @@ _check_network() {
         200|301|302|400|401|403) _pass "network:cloudflare" "Cloudflare API reachable (HTTP $cf_code)" ;;
         *) _warn "network:cloudflare" "Cloudflare API not reachable (HTTP $cf_code)" ;;
     esac
+}
+
+# =============================================================================
+# SMTP SIDECAR HEALTH CHECK
+# =============================================================================
+
+_check_smtp() {
+    log_info "Checking Postfix SMTP sidecar on port 587..."
+
+    # Skip if using a direct external relay (no local sidecar)
+    if [[ -n "${SMTP_PASSWORD:-}" && -z "${VW_SMTP_HOST_PORT:-}" ]]; then
+        _pass "smtp:sidecar" "Direct external SMTP relay configured — sidecar check skipped"
+        return
+    fi
+
+    local sidecar_addr="${VW_SMTP_HOST_PORT:-127.0.0.1:587}"
+    local sidecar_host="${sidecar_addr%:*}"
+    local sidecar_port="${sidecar_addr##*:}"
+
+    # Port probe
+    local port_open=false
+    if command -v nc >/dev/null 2>&1; then
+        nc -z -w 3 "$sidecar_host" "$sidecar_port" >/dev/null 2>&1 && port_open=true
+    elif (echo >/dev/tcp/"$sidecar_host"/"$sidecar_port") >/dev/null 2>&1; then
+        port_open=true
+    else
+        _warn "smtp:sidecar" "Cannot probe port ${sidecar_addr} — nc not available and /dev/tcp failed"
+        return
+    fi
+
+    if ! $port_open; then
+        _fail "smtp:sidecar" \
+            "Postfix sidecar not listening on ${sidecar_addr} — email delivery will fail silently"
+        return
+    fi
+
+    # Banner probe: confirm it's actually an SMTP server, not a stray process
+    local banner=""
+    if command -v nc >/dev/null 2>&1; then
+        banner=$(printf 'QUIT\r\n' | nc -w 3 "$sidecar_host" "$sidecar_port" 2>/dev/null \
+            | head -1 | tr -d '\r' || true)
+    fi
+
+    if [[ "$banner" == "220"* ]]; then
+        _pass "smtp:sidecar" \
+            "Postfix sidecar healthy on ${sidecar_addr} (banner: ${banner:0:60})"
+    elif [[ -n "$banner" ]]; then
+        _warn "smtp:sidecar" \
+            "Postfix sidecar port open but unexpected banner: '${banner:0:60}'"
+    else
+        _pass "smtp:sidecar" \
+            "Postfix sidecar port ${sidecar_addr} open (banner unavailable)"
+    fi
 }
 
 # =============================================================================
@@ -809,6 +940,28 @@ _check_config() {
         for secret in "${required_secrets[@]}"; do
             [[ -f "${secrets_dir}/${secret}" ]] || config_issues+=("Missing secret: $secret")
         done
+    fi
+
+    # --- Age encryption key validation ---
+    local age_key_file="${SOPS_AGE_KEY_FILE:-${SCRIPT_DIR}/secrets/keys/age-key.txt}"
+    if [[ ! -f "$age_key_file" ]]; then
+        config_issues+=("Age key not found: ${age_key_file} — backups cannot encrypt. Run: ./edit-secrets.sh --init-key")
+    elif [[ ! -r "$age_key_file" ]]; then
+        config_issues+=("Age key not readable: ${age_key_file} — check file permissions")
+    else
+        if ! grep -q '^AGE-SECRET-KEY-' "$age_key_file" 2>/dev/null; then
+            config_issues+=("Age key malformed or empty: ${age_key_file} — missing AGE-SECRET-KEY line")
+        else
+            local age_key_perms
+            age_key_perms=$(stat -c '%a' "$age_key_file" 2>/dev/null || echo "unknown")
+            if [[ "$age_key_perms" != "600" && "$age_key_perms" != "400" ]]; then
+                _warn "config:age-key" \
+                    "Age key has insecure permissions (${age_key_perms}): ${age_key_file} — run: chmod 600 '${age_key_file}'"
+            else
+                _pass "config:age-key" \
+                    "Age key present and valid (${age_key_file}, perms: ${age_key_perms})"
+            fi
+        fi
     fi
 
     local root_owned_issues=()
@@ -1050,6 +1203,8 @@ _print_results() {
 # =============================================================================
 
 main() {
+    _acquire_run_lock
+    trap '_release_run_lock' EXIT HUP INT TERM
     _parse_args "$@"
 
     log_info "Starting VaultWarden health check..."
@@ -1063,6 +1218,7 @@ main() {
     _check_disk
     _check_memory
     _check_network
+    _check_smtp
     _check_dns
     _check_backups
     _check_config

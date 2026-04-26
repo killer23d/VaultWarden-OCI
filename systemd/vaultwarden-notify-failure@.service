@@ -13,10 +13,20 @@ EnvironmentFile=/etc/vaultwarden/vaultwarden.env
 ExecStart=/bin/bash -c '\
   set -euo pipefail; \
   FAILED_UNIT="%i"; \
+  COOLDOWN_DIR="/var/lib/vaultwarden/.vw-health-alert"; \
+  mkdir -p "$COOLDOWN_DIR" 2>/dev/null || true; \
+  SAFE_UNIT=$(printf "%%s" "$FAILED_UNIT" | tr -cs "[:alnum:]-" "_"); \
+  COOLDOWN_FILE="${COOLDOWN_DIR}/notify_failure_${SAFE_UNIT}.cooldown"; \
+  NOW=$(date +%%s); \
+  LAST=$(cat "$COOLDOWN_FILE" 2>/dev/null || echo 0); \
+  if (( NOW - LAST < 3600 )); then \
+    exit 0; \
+  fi; \
+  printf "%%s\n" "$NOW" > "$COOLDOWN_FILE"; \
   LIB_DIR=/opt/vaultwarden-scripts/lib; \
   source "${LIB_DIR}/common.sh"; \
   init_common_lib notify-failure; \
-  body=$(printf "The systemd unit %s failed at %%s.\nCheck logs with:\n  journalctl -u %s -n 50\n" \
+  body=$(printf "The systemd unit %%s failed at %%s.\nCheck logs with:\n  journalctl -u %%s -n 50\n" \
     "$FAILED_UNIT" "$(date)" "$FAILED_UNIT"); \
   send_email "FAILURE: ${FAILED_UNIT} on %H" "${body}" \
     || { touch "/var/lib/vaultwarden/NOTIFY_FAILED_${FAILED_UNIT}" 2>/dev/null || true; } \
