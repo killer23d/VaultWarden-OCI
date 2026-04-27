@@ -204,8 +204,8 @@ fix-permissions: ## Fix file ownership after sudo operations leave root-owned fi
 init-secrets: ## Initialize secrets file (interactive)
 	@echo "$(BLUE)Initializing secrets...$(NC)"
 	@if [ ! -f "secrets/secrets.yaml" ]; then \
-		echo "$(BLUE)No secrets file found. Running setup-secrets.sh...$(NC)"; \
-		./setup-secrets.sh; \
+		echo "$(BLUE)No secrets file found. Running setup.sh --phase=secrets...$(NC)"; \
+		./setup.sh --phase=secrets; \
 	else \
 		echo "$(YELLOW)Secrets file already exists. Use 'make edit-secrets' to modify.$(NC)"; \
 	fi
@@ -253,7 +253,7 @@ up: ## Start all services (runs startup.sh for health checks)
 	fi
 	@if [ ! -f "secrets/secrets.yaml" ]; then \
 		echo "$(YELLOW)No secrets file found. Initializing...$(NC)"; \
-		./setup-secrets.sh; \
+		./setup.sh --phase=secrets; \
 	fi
 # ── Pre-flight: admin_token decoded-secret guard. ───────────────────────────
 # MAKEFILE-UP1 FIX [MEDIUM]: startup.sh's prepare_docker_secrets() is the
@@ -272,7 +272,7 @@ up: ## Start all services (runs startup.sh for health checks)
 #     check_age_key_health_preflight() provides the actionable error message.
 	@if ! test -f "secrets/secrets.yaml"; then \
 		echo "$(RED)ERROR: secrets/secrets.yaml not found — secrets have never been initialised.$(NC)"; \
-		echo "$(RED)       Run: ./setup-secrets.sh  (or: make init-secrets)$(NC)"; \
+		echo "$(RED)       Run: ./setup.sh --phase=secrets  (or: make init-secrets)$(NC)"; \
 		exit 1; \
 	elif ! test -s "secrets/.docker_secrets/admin_token"; then \
 		echo "$(YELLOW)WARN: secrets/.docker_secrets/admin_token is absent or empty.$(NC)"; \
@@ -347,15 +347,15 @@ status: ## Show service status
 
 health: ## Run health checks (set AUTO_RECOVER=true to auto-recover)
 	@echo "$(BLUE)Running health checks...$(NC)"
-	@sudo ./health.sh $(if $(filter true,$(AUTO_RECOVER)),--auto-recover,)
+	@sudo ./maintenance.sh health $(if $(filter true,$(AUTO_RECOVER)),--fix,)
 
 health-quick: ## Quick health check (essential services only)
 	@echo "$(BLUE)Running quick health check...$(NC)"
-	@sudo ./health.sh --quick
+	@sudo ./maintenance.sh health --quick
 
 health-email: ## Test email health
 	@echo "$(BLUE)Testing email health...$(NC)"
-	@sudo ./health.sh --email
+	@sudo ./maintenance.sh health --email
 
 watch: ## Watch service logs in real-time (Ctrl+C to stop)
 	$(call check-docker)
@@ -540,7 +540,7 @@ key-install: ## Install Age key from secrets/keys/ to the path in SOPS_AGE_KEY_F
 		else \
 			echo "$(RED)  ✗ Key file NOT FOUND at $$CONFIGURED_KEY$(NC)"; \
 			echo "$(RED)    Secrets have not been initialised on this host yet.$(NC)"; \
-			echo "$(RED)    Run: ./setup-secrets.sh  (or: make init-secrets)$(NC)"; \
+			echo "$(RED)    Run: ./setup.sh --phase=secrets  (or: make init-secrets)$(NC)"; \
 			exit 1; \
 		fi; \
 	fi; \
@@ -640,7 +640,7 @@ key-rotate: ## Rotate age encryption key (re-encrypts all secrets)
 update: ## Update all container images and restart
 	$(call require-root)
 	@echo "$(BLUE)Updating VaultWarden-OCI...$(NC)"
-	@./update.sh
+	@./maintenance.sh update
 
 check-updates: ## Check for available container image updates (no restart)
 	$(call check-docker)
@@ -695,12 +695,12 @@ db-backup: ## Quick database backup via maintenance script
 install-systemd: ## Install systemd service units and timers
 	$(call require-root)
 	@echo "$(BLUE)Installing systemd units...$(NC)"
-	@./setup-systemd.sh --install
+	@./setup.sh --phase=systemd --install
 
 remove-systemd: ## Remove systemd service units
 	$(call require-root)
 	@echo "$(BLUE)Removing systemd units...$(NC)"
-	@./setup-systemd.sh --remove
+	@./setup.sh --phase=systemd --remove
 
 systemd-status: ## Show systemd unit status
 	@echo "$(BLUE)Systemd Unit Status:$(NC)"
@@ -712,7 +712,7 @@ systemd-status: ## Show systemd unit status
 systemd-validate: ## Validate systemd unit files
 	$(call require-root)
 	@echo "$(BLUE)Validating systemd units...$(NC)"
-	@./setup-systemd.sh --validate
+	@./setup.sh --phase=systemd --validate
 
 timers: ## Show scheduled systemd timer status
 	@echo "$(BLUE)Scheduled Timers:$(NC)"
