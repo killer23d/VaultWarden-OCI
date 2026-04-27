@@ -9,7 +9,6 @@ init_common_lib "$0"
 source "$SCRIPT_DIR/lib/docker.sh"
 source "$SCRIPT_DIR/lib/backup_utils.sh"
 source "$SCRIPT_DIR/lib/crypto.sh"
-source "$SCRIPT_DIR/lib/simple_key_resilience.sh"
 
 # ---------------------------------------------------------------------------
 # Configuration

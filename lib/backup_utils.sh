@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# P4 merge SKIPPED: combining backup_utils.sh (744 lines) + secrets.sh (~1098 lines)
+# would produce an ~1842-line file exceeding the maintainability threshold.
+# These libraries remain separate.
 # lib/backup_utils.sh - Backup utility functions for VaultWarden-OCI-NG
 #
 # PATCHED BUGS (2026-03-06):

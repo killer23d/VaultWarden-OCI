@@ -242,9 +242,9 @@ install_units() {
         log_info "[DRY RUN] Would copy lib/ -> $OPT_SCRIPTS_DIR/lib/ (*.sh: 644 root:root)"
     fi
 
-    if [[ "$DRY_RUN" == "false" ]] && [[ ! -f "$OPT_SCRIPTS_DIR/lib/simple_key_resilience.sh" ]]; then
-        log_error "CRITICAL: lib/simple_key_resilience.sh missing from repo -- key health checks disabled."
-        log_error "Ensure lib/simple_key_resilience.sh exists in: $SCRIPT_DIR/lib/"
+    if [[ "$DRY_RUN" == "false" ]] && [[ ! -f "$OPT_SCRIPTS_DIR/lib/crypto.sh" ]]; then
+        log_error "CRITICAL: lib/crypto.sh missing from repo -- key health checks disabled."
+        log_error "Ensure lib/crypto.sh exists in: $SCRIPT_DIR/lib/"
         return 1
     fi
 
@@ -690,7 +690,7 @@ validate_installation() {
             log_success "  OK: all lib/*.sh files are world-readable (mode >= 644)"
         fi
     fi
-    local critical_lib="$OPT_SCRIPTS_DIR/lib/simple_key_resilience.sh"
+    local critical_lib="$OPT_SCRIPTS_DIR/lib/crypto.sh"
     if [[ ! -f "$critical_lib" ]]; then
         log_error "  MISSING: $critical_lib"
         (( errors++ )) || true

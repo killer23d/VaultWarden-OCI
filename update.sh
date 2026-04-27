@@ -45,7 +45,7 @@ cd "$SCRIPT_DIR"
 source "lib/common.sh"
 init_common_lib "$0"
 source "lib/docker.sh"
-source "lib/simple_key_resilience.sh"  # UPDATE-1 FIX: provides check_age_key_health()
+source "lib/crypto.sh"  # provides check_age_key_health() (merged from lib/simple_key_resilience.sh)
 
 UPDATE_SYSTEM=false
 UPDATE_IMAGES=false

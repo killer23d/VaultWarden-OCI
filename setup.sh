@@ -31,7 +31,7 @@ TMP_WORKDIR=$(mktemp -d -t vw_setup.XXXXXXXXXX) || {
 umask "$old_umask"
 trap 'rm -rf "$TMP_WORKDIR"' EXIT
 
-REQUIRED_LIBS=("lib/common.sh" "lib/crypto.sh" "lib/docker.sh" "lib/security.sh" "lib/backup_utils.sh" "lib/secrets.sh" "lib/simple_key_resilience.sh")
+REQUIRED_LIBS=("lib/common.sh" "lib/crypto.sh" "lib/docker.sh" "lib/backup_utils.sh" "lib/secrets.sh")
 for lib in "${REQUIRED_LIBS[@]}"; do
     if [[ ! -f "$lib" ]]; then
         echo "ERROR: Required library not found: $lib" >&2
@@ -42,7 +42,6 @@ done
 source "lib/common.sh"
 init_common_lib "$0"
 source "lib/crypto.sh"
-source "lib/simple_key_resilience.sh"
 source "lib/docker.sh"
 
 DOMAIN=""

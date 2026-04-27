@@ -487,7 +487,7 @@ _read_dotenv_value() {
 # EMAIL COLLECTION:
 #   The email tier is chosen by reading EMAIL_MODE from .env:
 #     auto  — collect BOTH the API token (email_api_token) and smtp_password
-#             (lib/email.sh will try API first, then SMTP as fallback)
+#             (email driver will try API first, then SMTP as fallback)
 #     api   — collect email_api_token only
 #     smtp  — collect smtp_password only
 #     host  — skip both (Postfix sidecar; no credential needed here)

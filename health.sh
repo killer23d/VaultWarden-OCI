@@ -3,7 +3,7 @@
 # Monitors: containers, SSL certificates, VaultWarden API, fail2ban, disk,
 #           memory, network connectivity, backup status, and DNS resolution.
 # Auto-recovery: Attempts container restarts for unhealthy services
-# Notifications: Email alerts via lib/email.sh multi-provider chain
+# Notifications: Email alerts via lib/common.sh multi-provider chain (email functions inlined)
 # Usage: ./health.sh [--comprehensive] [--fix] [--report] [--help]
 # Requires: docker, curl, openssl, dig/nslookup (for DNS checks)
 
@@ -27,11 +27,7 @@ source "${SCRIPT_DIR}/lib/common.sh" 2>/dev/null || {
 }
 
 # Source email library for notifications
-# shellcheck source=lib/email.sh
-source "${SCRIPT_DIR}/lib/email.sh" 2>/dev/null || {
-    log_warn "lib/email.sh not found — email notifications disabled"
-    _email_available=false
-}
+# (email functions are inlined into lib/common.sh which is already sourced above)
 
 # =============================================================================
 # CONFIGURATION

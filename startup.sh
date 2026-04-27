@@ -33,8 +33,7 @@ source "lib/common.sh"
 init_common_lib "$0"
 source "lib/docker.sh"
 source "lib/crypto.sh"
-source "lib/secrets.sh"   # STARTUP-5 FIX: provides cleanup_secrets_environment()
-source "lib/simple_key_resilience.sh"  # STARTUP-7 FIX: provides check_age_key_health()
+source "lib/secrets.sh"   # provides cleanup_secrets_environment()
 
 # Configuration
 FORCE_RESTART=false
@@ -375,7 +374,7 @@ prepare_log_directories() {
 # ---------------------------------------------------------------------------
 # check_age_key_health_preflight
 #
-# STARTUP-7 FIX: Run check_age_key_health() from lib/simple_key_resilience.sh
+# STARTUP-7 FIX: Run check_age_key_health() from lib/crypto.sh
 # before any sops invocation so a corrupt, missing, or wrong-permissions age
 # key produces a clear actionable error message rather than the opaque
 # "Failed to decrypt secrets file" from sops.
