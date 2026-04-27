@@ -2466,7 +2466,7 @@ install_units() {
     fi
 
     if [[ "$DRY_RUN" == "false" ]] && [[ ! -f "$OPT_SCRIPTS_DIR/lib/crypto.sh" ]]; then
-        log_error "CRITICAL: lib/crypto.sh missing from repo -- key health checks disabled."
+        log_error "CRITICAL: lib/crypto.sh missing from repo -- installation aborted."
         log_error "Ensure lib/crypto.sh exists in: $PROJECT_ROOT/lib/"
         return 1
     fi
@@ -2551,7 +2551,7 @@ install_units() {
                     if [[ "${#missing_keys[@]}" -gt 0 ]]; then
                         log_info "Merging ${#missing_keys[@]} new variable(s) from repo .env into $ENV_FILE ..."
                         {
-                            printf '\n# --- Merged by setup-systemd.sh on %s ---\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+                            printf '\n# --- Merged by setup.sh --phase=systemd on %s ---\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
                             for entry in "${missing_keys[@]}"; do
                                 printf '%s\n' "$entry"
                             done
