@@ -52,6 +52,7 @@ SKIP_DEPS=false
 FORCE=false
 DRY_RUN=false
 PHASE=""
+PHASE_ARGS=()
 ENTROPY_THRESHOLD=200
 ENTROPY_MAX_WAIT=60
 CLEAN_DOMAIN=""
@@ -90,8 +91,8 @@ while [[ $# -gt 0 ]]; do
         --skip-deps) SKIP_DEPS=true; shift ;;
         --force) FORCE=true; shift ;;
         --dry-run) DRY_RUN=true; shift ;;
-        --phase=secrets) PHASE="secrets"; shift ;;
-        --phase=systemd) PHASE="systemd"; shift ;;
+        --phase=secrets) PHASE="secrets"; shift; PHASE_ARGS=("$@"); break ;;
+        --phase=systemd) PHASE="systemd"; shift; PHASE_ARGS=("$@"); break ;;
         --help) show_help; exit 0 ;;
         *) log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
@@ -3106,11 +3107,11 @@ main() {
     if [[ -n "$PHASE" ]]; then
         case "$PHASE" in
             secrets)
-                run_phase_secrets "$@"
+                run_phase_secrets "${PHASE_ARGS[@]}"
                 return $?
                 ;;
             systemd)
-                run_phase_systemd "$@"
+                run_phase_systemd "${PHASE_ARGS[@]}"
                 return $?
                 ;;
         esac
