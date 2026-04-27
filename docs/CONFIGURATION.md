@@ -107,7 +107,7 @@ Manage secrets with `./edit-secrets.sh`. They are encrypted with Age + SOPS; nev
 
 | Secret | Purpose |
 | :-- | :-- |
-| `smtp_password` | SMTP relay password — used by `lib/email.sh` SMTP path **and** the Postfix MTA sidecar |
+| `smtp_password` | SMTP relay password — used by `lib/common.sh` (email functions) SMTP path **and** the Postfix MTA sidecar |
 | `<PROVIDER>_API_TOKEN` | HTTP API token for the selected email provider (see Email section below) |
 | `push_installation_id` | Bitwarden push notification installation ID |
 | `push_installation_key` | Bitwarden push notification installation key |
@@ -118,7 +118,7 @@ Manage secrets with `./edit-secrets.sh`. They are encrypted with Age + SOPS; nev
 
 ## 📧 Email Configuration
 
-Email delivery is handled by **`lib/email.sh`** — a pure bash + curl multi-provider chain with automatic fallback. The Postfix sidecar acts as the last-resort host MTA tier when both the API and SMTP relay paths are unavailable or disabled.
+Email delivery is handled by **`lib/common.sh` (email functions)** — a pure bash + curl multi-provider chain with automatic fallback. The Postfix sidecar acts as the last-resort host MTA tier when both the API and SMTP relay paths are unavailable or disabled.
 
 ### Delivery Chain
 
@@ -144,7 +144,7 @@ EMAIL_MODE=auto
 EMAIL_PROVIDER=mailersend   # mailersend | sendgrid | mailgun | postmark | resend
 ```
 
-`lib/email.sh` automatically resolves the API token from `<PROVIDER_UPPER>_API_TOKEN` in secrets — you do not need to set `EMAIL_API_TOKEN` separately:
+`lib/common.sh` (email functions) automatically resolves the API token from `<PROVIDER_UPPER>_API_TOKEN` in secrets — you do not need to set `EMAIL_API_TOKEN` separately:
 
 | `EMAIL_PROVIDER` | Secret key to set via `./edit-secrets.sh` |
 | :-- | :-- |
@@ -181,7 +181,7 @@ The `postfix` service in `docker-compose.yml` runs `boky/postfix` as a container
 
 **How it works:**
 
-- `lib/email.sh` connects to `127.0.0.1:587` (Fail2Ban uses host networking; VaultWarden uses the Docker bridge) when the host MTA path is selected.
+- `lib/common.sh` (email functions) connects to `127.0.0.1:587` (Fail2Ban uses host networking; VaultWarden uses the Docker bridge) when the host MTA path is selected.
 - The Postfix container authenticates upstream using the same `smtp_password` secret as tier 2.
 - Postfix forwards mail through `RELAYHOST` (your upstream SMTP provider) — it is a relay, not a standalone mail server. It does **not** send mail directly to recipient MX records.
 

@@ -727,7 +727,7 @@ make key-health
 journalctl -u vaultwarden-db-backup.service --no-pager
 
 # 5. Manually test Age key round-trip
-source lib/simple_key_resilience.sh && simple_verify_age_key
+simple_verify_age_key
 ```
 
 ---

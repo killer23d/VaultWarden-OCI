@@ -118,8 +118,6 @@ help: ## Show this help message
 ##@ Setup & Installation
 # ===========================================================================
 
-# FIX [P5-L1]: Inverted root check — sudo make setup (id -u == 0 + SUDO_USER)
-# works; direct root login (id -u == 0, no SUDO_USER) is rejected.
 setup: ## Run initial setup (requires sudo)
 	@echo "$(BLUE)Setting up VaultWarden-OCI...$(NC)"
 	@if [ "$$(id -u)" -eq 0 ] && [ -z "$$SUDO_USER" ]; then \
@@ -214,7 +212,6 @@ edit-secrets: ## Edit encrypted secrets file
 	@echo "$(BLUE)Opening secrets editor...$(NC)"
 	@./edit-secrets.sh
 
-# FIX [P5-M2]: propagate failure exit code so `make test` fails correctly.
 test-secrets: ## Test secrets decryption
 	@echo "$(BLUE)Testing secrets decryption...$(NC)"
 	@if ./edit-secrets.sh --list > /dev/null 2>&1; then \
@@ -314,8 +311,6 @@ restart: ## Restart all services (via startup.sh)
 	}
 	@echo "$(GREEN)Services restarted.$(NC)"
 
-# FIX [P5-C1]: safe-restart captures pre-restart container IDs and rolls back
-# on failure. sudo is required for both startup.sh and health.sh (require_root).
 safe-restart: ## Restart with automatic rollback on failure
 	$(call check-docker)
 	@echo "$(BLUE)Safe restart with rollback capability...$(NC)"
@@ -454,11 +449,6 @@ restore-remote: ## Restore from remote storage (rclone)
 ##@ Key Management
 # ===========================================================================
 
-# FIX [P5-K1]: key-health was a no-op (empty body) in earlier versions.
-# Replaced with a shell block that reads SOPS_AGE_KEY_FILE from .env,
-# checks file existence/permissions, then runs lib/simple_key_resilience.sh's
-# check_age_key_health() via a one-shot bash invocation.
-
 key-health: ## Check age key health (permissions, decodability, SOPS_AGE_KEY_FILE)
 	$(call check-env-readable)
 	@echo "$(BLUE)Age Key Health Check:$(NC)"
@@ -471,7 +461,6 @@ key-health: ## Check age key health (permissions, decodability, SOPS_AGE_KEY_FIL
 	CONFIGURED_KEY=$${CONFIGURED_KEY:-secrets/keys/age-key.txt}; \
 	bash -c "source lib/common.sh; init_common_lib startup.sh; \
 	         source lib/crypto.sh; \
-	         source lib/simple_key_resilience.sh; \
 	         if check_age_key_health \"$$CONFIGURED_KEY\"; then \
 	           echo \"$(GREEN)  ✓ Age key is healthy$(NC)\"; \
 	         else \
@@ -602,14 +591,10 @@ key-escrow: ## Generate encrypted escrow package (requires GPG or another age ke
 	@echo "$(BLUE)Age Key Escrow$(NC)"
 	@bash -c "source lib/common.sh; init_common_lib startup.sh; \
 	          source lib/crypto.sh; \
-	          source lib/simple_key_resilience.sh; \
 	          KEY_FILE=$$(grep '^SOPS_AGE_KEY_FILE=' .env 2>/dev/null | cut -d= -f2); \
 	          KEY_FILE=$${KEY_FILE:-secrets/keys/age-key.txt}; \
 	          create_key_escrow \"$$KEY_FILE\""
 
-# MAKE-KR2 [LOW]: key-health pre-flight before rotation so a corrupt or
-# missing key is caught early with a clear error rather than allowing
-# rotation to half-complete and leave secrets in an inconsistent state.
 key-rotate: ## Rotate age encryption key (re-encrypts all secrets)
 	$(call require-root)
 	$(call check-env-readable)
@@ -691,7 +676,6 @@ db-backup: ## Quick database backup via maintenance script
 ##@ Systemd Integration
 # ===========================================================================
 
-# FIX: install-systemd was missing the sudo guard; added require-root.
 install-systemd: ## Install systemd service units and timers
 	$(call require-root)
 	@echo "$(BLUE)Installing systemd units...$(NC)"

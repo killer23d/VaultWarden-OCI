@@ -385,7 +385,7 @@ docker compose run --rm -e DEBUG_ENTRYPOINT=true caddy
 
 ## 📧 Email Customisation
 
-Email delivery is handled by **`lib/email.sh`** — a pure bash + curl multi-provider chain. The Postfix sidecar container (`postfix` service, `boky/postfix`) provides the **last-resort host MTA tier** when both the HTTP API and SMTP relay paths fail or are disabled.
+Email delivery is handled by **`lib/common.sh` (email functions)** — a pure bash + curl multi-provider chain. The Postfix sidecar container (`postfix` service, `boky/postfix`) provides the **last-resort host MTA tier** when both the HTTP API and SMTP relay paths fail or are disabled.
 
 ### Delivery Chain
 
@@ -527,7 +527,7 @@ sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.c
 
 ### Decoupled VaultWarden Email Override
 
-The `docker-compose.override.yml.example` is provided to decouple VaultWarden's built-in SMTP from the `lib/email.sh` chain (e.g. to route VaultWarden app emails through a different provider than maintenance/health alert emails):
+The `docker-compose.override.yml.example` is provided to decouple VaultWarden's built-in SMTP from the `lib/common.sh` (email functions) chain (e.g. to route VaultWarden app emails through a different provider than maintenance/health alert emails):
 
 ```bash
 cp docker-compose.override.yml.example docker-compose.override.yml
