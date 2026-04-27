@@ -561,7 +561,7 @@ _email_driver_lookup() {
             printf '%s' "$provider"
             return 0
             ;;
-        # FIX EM-H3: host/postfix driver for EMAIL_MODE=host (postfix sidecar)
+        # host/postfix driver for EMAIL_MODE=host (postfix sidecar)
         host|postfix)
             printf '%s' "postfix"
             return 0
@@ -592,7 +592,7 @@ _email_bearer_post() {
     local url="$1" payload="$2"
     local tmp cfg code
     tmp=$(mktemp -t vw_email.XXXXXXXXXX)
-    # FIX EM-H2: harden tmp with install -m 600 so the response body file is
+    # Harden tmp with install -m 600 so the response body file is
     # never world-readable regardless of the process umask. Matches the
     # existing pattern used for cfg below and in Mailgun/Postmark drivers.
     if ! install -m 600 /dev/null "$tmp" 2>/dev/null; then
@@ -846,9 +846,9 @@ EOF
 }
 
 # -- DRIVER: host/postfix (EMAIL_MODE=host, postfix sidecar) ------------------
-# FIX EM-H3: Implements the EMAIL_MODE=host driver that was documented but
-# missing. Pipes a minimal RFC-2822 message to sendmail -t which is provided
-# by the postfix sidecar container. No API token is required or read.
+# Implements the EMAIL_MODE=host driver. Pipes a minimal RFC-2822 message to
+# sendmail -t which is provided by the postfix sidecar container. No API token
+# is required or read.
 #
 # Usage: set EMAIL_MODE=host and EMAIL_PROVIDER=host (or EMAIL_PROVIDER=postfix)
 # in .env. sendmail must be on PATH (standard in the postfix sidecar image).

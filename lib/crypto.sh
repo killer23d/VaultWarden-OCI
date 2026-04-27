@@ -136,34 +136,25 @@ decrypt_sops_file() {
 
 # Encrypt file with SOPS - STANDARDIZED: Returns exit code
 #
-# CRY-M2 FIX: sops --in-place will truncate/destroy the target file on any
-# error (malformed YAML, missing .sops.yaml rule, etc.).  We now encrypt to
-# a mktemp file and atomically rename it over the original only on success,
-# matching the safe pattern used by write_secrets() in setup.sh --phase=secrets.
+# Encrypts to a mktemp staging file and atomically renames it over the
+# original only on success, preventing truncation/destruction of the target
+# file on any error (malformed YAML, missing .sops.yaml rule, etc.).
 #
-# [MEDIUM FIX] Replaced `age-keygen -y` with _derive_age_public_key() for
-# Ubuntu 22.04 compatibility and codebase consistency.
+# chmod 600 is applied to the staging file immediately after mktemp, before
+# any content is written, to eliminate the world-readable race window between
+# mktemp (creates at process umask) and the subsequent SOPS write.
 #
-# LC-3 FIX: chmod 600 applied to tmp_file immediately after mktemp, before
-# any content is written, to eliminate the world-readable race window that
-# exists between mktemp (creates file at process umask, typically 644) and
-# the subsequent SOPS write.
+# Always passes --input-type yaml --output-type yaml so SOPS does not try to
+# infer the format from the staging file's extension, preventing failures when
+# the staging filename has no recognised extension.
 #
-# BUG-CRY-ES2b FIX: Always pass --input-type yaml --output-type yaml so SOPS
-# does not try to infer the format from the staging file's extension. The
-# staging file is named "${file}.sops.XXXXXX" and when $file itself ends in
-# .yaml.enc the staging name has no recognised extension, causing SOPS to
-# abort with 'Failed to get the data tree from the file'.
+# sops stderr is captured and emitted via log_error on failure instead of
+# being silently swallowed.
 #
-# BUG-CRY-ES2c FIX: Capture sops stderr and emit it via log_error on
-# failure instead of silently swallowing it with 2>/dev/null.
-#
-# FIX-ENC-RT1 FIX: After the atomic mv, perform a sops -d round-trip on the
-# live secrets file to verify the ciphertext is actually readable with the
-# current Age key. sops --encrypt exits 0 even when the recipient key in
-# .sops.yaml is stale or rotated; the resulting ciphertext is silently
-# unreadable and the failure only surfaces at 'make up' startup time.
-# Round-trip approach:
+# After the atomic mv, a sops -d round-trip verifies the ciphertext is
+# readable with the current Age key. sops --encrypt exits 0 even when the
+# recipient key in .sops.yaml is stale or rotated, so the round-trip catches
+# silently unreadable ciphertext before it reaches startup:
 #   1. Before mv, write a pre-write backup (install -m 600) of the original
 #      plaintext staging file.
 #   2. After mv succeeds, run `sops -d <live_file> > /dev/null`.
@@ -1730,7 +1721,7 @@ generate_breakglass_password() {
 # Removes files or directories. Uses rm -f / rm -rf (no overwrite loops).
 #
 # ─────────────────────────────────────────────────────────────────────────
-# SEC-M2 CALLER CONTRACT (PRECONDITION — NOT AUTOMATICALLY ENFORCED):
+# CALLER CONTRACT (PRECONDITION — NOT AUTOMATICALLY ENFORCED):
 #
 #   This function uses rm -f / rm -rf. On un-encrypted storage, deleted
 #   file content remains physically recoverable until the blocks are

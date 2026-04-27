@@ -13,9 +13,7 @@ Persistent=true
 # Without this, Persistent=true causes an immediate activation on reboot
 # which may race against the Docker daemon still starting up.
 OnBootSec=2min
-# NEW-timer: Added RandomizedDelaySec to prevent a guaranteed immediate
-# zero-jitter fire at every boot. Without this, Persistent=true causes
-# the health check to fire instantly on boot with no spreading.
+# RandomizedDelaySec prevents a zero-jitter health check firing at every boot.
 RandomizedDelaySec=60
 
 [Install]

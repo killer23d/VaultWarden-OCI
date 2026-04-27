@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# maintenance.sh - System cleanup, optimization, DNS update, and on-demand DB/Email maintenance
-# Merged: db-maint.sh (on-demand deep DB maintenance) + update-dns.sh (Cloudflare DDNS) + simple-email-test.sh
+# maintenance.sh - System cleanup, health monitoring, DNS update, and on-demand DB/Email operations
 
 set -euo pipefail
 
@@ -10,11 +9,8 @@ init_common_lib "$0"
 source "$SCRIPT_DIR/lib/docker.sh"
 source "$SCRIPT_DIR/lib/backup_utils.sh"
 source "$SCRIPT_DIR/lib/crypto.sh"
-# FIX-MAINT-1 (revised): source lib/secrets.sh so that decrypt_secret is
-# available when send_email() tries to resolve EMAIL_API_TOKEN from
-# secrets/secrets.yaml via SOPS/age.  lib/secrets.sh recomputes its own
-# SCRIPT_DIR (→ lib/) at load time so it can find crypto.sh as a sibling;
-# that overwrites our project-root SCRIPT_DIR.  Save and restore it.
+# lib/secrets.sh recomputes SCRIPT_DIR (→ lib/) at load time so it can find
+# crypto.sh as a sibling; save and restore the project-root SCRIPT_DIR.
 _MAINT_SCRIPT_DIR="$SCRIPT_DIR"
 source "$SCRIPT_DIR/lib/secrets.sh"
 SCRIPT_DIR="$_MAINT_SCRIPT_DIR"
@@ -65,9 +61,9 @@ USAGE:
     ./maintenance.sh --update [UPDATE-OPTIONS]
 
 SUBCOMMANDS (double-dash format):
-    --health            Run system health checks (equivalent to the former health.sh)
+    --health            Run system health checks
                         Accepts health options: --comprehensive --fix --report --help
-    --update            Update system packages and Docker images (equivalent to the former update.sh)
+    --update            Update system packages and Docker images
                         Options: --system --images --all --force --dry-run --skip-backup --email
 
 TARGETED (single-task) OPTIONS:
@@ -202,12 +198,6 @@ cleanup_logs() {
         if [[ -d "$log_dir" ]]; then
             local -a old_log_files=()
             mapfile -d '' old_log_files < <(
-                # BUG-#28 NOTE: Log cleanup uses -mtime (last content modification
-                # time), which is correct for log files. Unlike backup files, logs
-                # do not have embedded timestamps in their filenames. -ctime would
-                # be wrong here as it fires on any metadata change (chmod, chown),
-                # not just age. rsync of log archives is not a use case for this
-                # deployment, so -mtime manipulation is not a concern.
                 find "$log_dir" -name "*.log*" -type f -mtime +"$LOG_RETENTION_DAYS" -print0 2>/dev/null
             )
             for log_file in "${old_log_files[@]}"; do
@@ -889,7 +879,7 @@ update_dns_record() {
     [[ -z "$zone_id" ]] && { log_error "CLOUDFLARE_ZONE_ID not set in .env"; return 1; }
 
     local DNS_LOCK="/run/lock/vaultwarden-dns-update.lock"
-    # BUG-#20 FIX: Use automatic FD allocation instead of hardcoded FD 242.
+    # Use automatic FD allocation instead of hardcoded FD.
     local _DNS_LOCK_FD
     exec {_DNS_LOCK_FD}>"$DNS_LOCK"
     if ! flock -n "$_DNS_LOCK_FD"; then
@@ -1070,7 +1060,7 @@ _load_env() {
 }
 
 # ---------------------------------------------------------------------------
-# run_health_check — inline of the former health.sh logic
+# run_health_check
 # ---------------------------------------------------------------------------
 run_health_check() {
 # Load environment.
@@ -2293,7 +2283,7 @@ main "$@"    _health_main "$@"
 }
 
 # ---------------------------------------------------------------------------
-# run_update — inline of the former update.sh logic
+# run_update
 # ---------------------------------------------------------------------------
 run_update() {
 local UPDATE_SYSTEM=false
@@ -2783,7 +2773,7 @@ main() {
     # ---- Deep DB maintenance: self-contained sub-command ----
     if [[ "$DB_DEEP_MAINT" == "true" ]]; then
         require_root "$@"
-        # BUG-#20 FIX: Use automatic FD allocation instead of hardcoded FD 63.
+        # Use automatic FD allocation instead of hardcoded FD.
         local _OPS_LOCK_FD
         exec {_OPS_LOCK_FD}>"$OPS_LOCK"
         if ! flock -n "$_OPS_LOCK_FD"; then
@@ -2806,7 +2796,7 @@ main() {
 
     # ---- Routine or targeted maintenance ----
     require_root "$@"
-    # BUG-#20 FIX: Use automatic FD allocation instead of hardcoded FD 63.
+    # Use automatic FD allocation instead of hardcoded FD.
     local _OPS_LOCK_FD
     exec {_OPS_LOCK_FD}>"$OPS_LOCK"
     if ! flock -n "$_OPS_LOCK_FD"; then

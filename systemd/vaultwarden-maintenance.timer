@@ -7,11 +7,9 @@ Conflicts=shutdown.target
 OnFailure=vaultwarden-notify-failure@%n.service
 
 [Timer]
-# BUG-TM1 FIX: Changed from 02:00:00 to 02:05:00 to prevent lock collision
-# with vaultwarden-dns-update.timer (which fires at :00 each hour).
-# Both services call maintenance.sh which acquires /run/lock/vaultwarden-
-# operations.lock. The 5-minute offset guarantees the dns-update service has
-# completed before maintenance attempts to acquire the same lock.
+# Offset from :00 to prevent lock collision with vaultwarden-dns-update.timer.
+# Both services acquire the operations lock; the 5-minute offset ensures the
+# dns-update run completes before maintenance attempts to acquire it.
 #
 # Changed from Mon-Sat to daily (*-*-*) so that SQLite WAL vacuum and Docker
 # image prune run every day, including Sunday — the day the weekly full backup

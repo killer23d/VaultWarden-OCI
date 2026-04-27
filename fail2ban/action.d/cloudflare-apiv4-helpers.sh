@@ -143,7 +143,7 @@ _cf_validate_token() {
 # /proc/<PID>/cmdline.  Prints the tempfile path on stdout.
 # Returns 1 on any error (hard — would expose live CF token).
 #
-# FIX: temp file is created inside $_CF_TMPDIR (mode 0700, under /run/fail2ban)
+# Temp file is created inside $_CF_TMPDIR (mode 0700, under /run/fail2ban)
 # instead of /tmp. This eliminates the window where a world-readable empty
 # file exists in a world-writable directory before install secures it.
 # The install -m 600 step is retained for defence-in-depth.
@@ -258,7 +258,7 @@ _cf_retry() {
     rc=$?
     if [ "$rc" -eq 2 ] && printf "%s" "$out" | grep -q "^RETRY_AFTER:"; then
       retry_delay="${out#RETRY_AFTER:}"
-      # BUG-#37 FIX: Validate Retry-After is a positive integer and clamp to
+      # Validate Retry-After is a positive integer and clamp to
       # max 60s to prevent injected header values from hanging Fail2Ban.
       # Non-numeric or out-of-range values fall back to the safe default of 5s.
       case "$retry_delay" in

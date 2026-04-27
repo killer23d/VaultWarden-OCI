@@ -3,18 +3,6 @@
 # Supports local and rclone remote backup selection.
 # After restore: prompts for the decryption key, restores data, then
 # generates/rotates a fresh age key and displays it like a new setup.
-#
-# PATCHED BUGS:
-#   BUG-R1 [HIGH]  Every backup search path was hardcoded as
-#                  $PROJECT_ROOT/backups/<type>/.  backup.sh stores backups
-#                  at get_config_value("BACKUP_DIR",
-#                  "/var/lib/vaultwarden/backups") — under /var/ on a
-#                  standard install.  The mismatch caused --list to always
-#                  show "(none)", --latest to always fail, and the interactive
-#                  menu to be empty.
-#                  Fix: derive BACKUP_BASE_DIR from .env using the same key
-#                  ("BACKUP_DIR") and default that backup.sh uses, and replace
-#                  every $PROJECT_ROOT/backups reference with $BACKUP_BASE_DIR.
 
 set -euo pipefail
 
@@ -123,7 +111,7 @@ USE_REMOTE=false
 KEY_FILE_ARG=""         # set by --key-file; path to age private key for this restore
 RECOVERY_KIT_FILE=""    # set by --from-recovery-kit; path to plaintext recovery-kit file
 
-# BUG-R1 FIX: declared here (empty) so set -u never fires before main()
+# declared here (empty) so set -u never fires before main()
 # initialises it via get_config_value().  Every function that references
 # BACKUP_BASE_DIR is only called after main() has set it.
 BACKUP_BASE_DIR=""
@@ -995,7 +983,7 @@ _prompt_age_key() {
 # ---------------------------------------------------------------------------
 # _prune_old_age_keys <keys_dir>
 #
-# BUG-#11 FIX: Prune old Age private key backups — keep only 2 most recent.
+# Prune old Age private key backups — keep only 2 most recent.
 # Old key material has no operational value once a new key is active and
 # backed up; retaining it indefinitely increases exposure if the secrets/keys/
 # directory is ever compromised.
@@ -1497,7 +1485,7 @@ main() {
     # such as RCLONE_REMOTE_NAME and RCLONE_CONFIG.
     load_env_file 2>/dev/null || true   # best-effort; hard error below if root required
 
-    # BUG-R1 FIX: resolve the backup storage root from .env using the same
+    # Resolve the backup storage root from .env using the same
     # key ("BACKUP_DIR") and default that backup.sh uses.  Every search path
     # in this script is built from BACKUP_BASE_DIR, never from PROJECT_ROOT/backups.
     BACKUP_BASE_DIR="$(get_config_value "BACKUP_DIR" "/var/lib/vaultwarden/backups")"
@@ -1531,8 +1519,8 @@ main() {
         log_error "Failed to initialize operations lock directory: $VW_LOCK_DIR"; exit 1
     }
 
-    # BUG-#19 FIX: Use bash 4.1+ automatic FD allocation instead of hardcoded
-    # FD 200 for the operations lock, preventing silent clobber of any open FD.
+    # Use bash 4.1+ automatic FD allocation instead of hardcoded
+    # FD for the operations lock, preventing silent clobber of any open FD.
     local OPS_LOCK_FD
     exec {OPS_LOCK_FD}>"$VW_OPERATIONS_LOCK"
     flock -n "$OPS_LOCK_FD" || {
@@ -1565,7 +1553,7 @@ main() {
         fi
     fi
 
-    # BUG-R1 FIX: re-resolve BACKUP_BASE_DIR now that .env is fully loaded,
+    # Re-resolve BACKUP_BASE_DIR now that .env is fully loaded,
     # using the same config key ("BACKUP_DIR") and default that backup.sh uses.
     BACKUP_BASE_DIR="$(get_config_value "BACKUP_DIR" "/var/lib/vaultwarden/backups")"
 

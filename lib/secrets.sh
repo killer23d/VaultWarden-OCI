@@ -70,7 +70,7 @@ write_secret_file() {
         return 1
     fi
 
-    # BUG-#31 FIX: Verify the written file is non-empty when the source value
+    # Verify the written file is non-empty when the source value
     # was non-empty. A zero-byte file after a successful printf return indicates
     # a disk-full or I/O error that printf did not propagate as a non-zero exit.
     if [[ -n "$value" && ! -s "$dest" ]]; then
@@ -116,10 +116,8 @@ decrypt_secret() {
 
     if ! ensure_sops_env; then return 1; fi
 
-    # FIX-PERF1: Use a single sops invocation. stderr goes to a mktemp file
+    # Use a single sops invocation. stderr goes to a mktemp file
     # (cleaned up unconditionally via trap); stdout is captured as the value.
-    # This halves the number of age decryptions compared to the previous
-    # two-call pattern (once for stderr, once for value).
     local _tmp_err
     _tmp_err=$(mktemp) || { log_error "decrypt_secret: mktemp failed"; return 1; }
     # Unconditional cleanup: remove the temp file whether we succeed or fail.
@@ -127,15 +125,14 @@ decrypt_secret() {
     trap "rm -f '$_tmp_err'" RETURN
 
     local value rc=0
-    # BUG-#18 FIX: Suppress xtrace around secret decryption to prevent value
+    # Suppress xtrace around secret decryption to prevent value
     # appearing in debug logs or core dumps via set -x output.
     { set +x; } 2>/dev/null
-    # FIX-SEC1 / FIX-PERF1: Single call — stdout → value, stderr → temp file.
+    # Single sops call — stdout → value, stderr → temp file.
     # The key file path is included in error output to aid disaster recovery.
     value=$(sops -d --extract "[\"$key\"]" "$secrets_file" 2>"$_tmp_err") || rc=$?
 
-    # BUG-S10 FIX: unset key file path from environment so child processes do
-    # not inherit it.
+    # Unset key file path from environment so child processes do not inherit it.
     unset SOPS_AGE_KEY_FILE
 
     if [[ $rc -ne 0 ]]; then
@@ -150,7 +147,7 @@ decrypt_secret() {
     fi
 
     printf '%s' "$value"
-    # BUG-#18 FIX: Unset plaintext value immediately after use.
+    # Unset plaintext value immediately after use.
     unset value
     return 0
 }
@@ -168,10 +165,10 @@ list_secrets() {
     local keys
     local sops_stderr
     local rc=0
-    # BUG-#29 FIX: Suppress xtrace before sops to prevent the key file path
+    # Suppress xtrace before sops to prevent the key file path
     # from appearing in trace output (bash -x / set -x logs).
     { set +x; } 2>/dev/null
-    # FIX-SEC1: Capture sops stderr for actionable diagnostics on failure.
+    # Capture sops stderr for actionable diagnostics on failure.
     sops_stderr=$(sops -d "$secrets_file" 2>&1 >/dev/null) || rc=$?
     if [[ $rc -eq 0 ]]; then
         keys=$(sops -d "$secrets_file" 2>/dev/null \
@@ -211,7 +208,7 @@ validate_secrets_decryption() {
     if ! ensure_sops_env; then return 1; fi
     local rc=0
     local sops_stderr
-    # FIX-SEC1: Capture sops stderr so the operator knows whether failure is a
+    # Capture sops stderr so the operator knows whether failure is a
     # wrong key, missing key file, corrupt MAC, or other sops-level error.
     sops_stderr=$(sops -d "$secrets_file" 2>&1 >/dev/null) || rc=$?
     cleanup_secrets_environment
@@ -235,7 +232,7 @@ validate_secrets_yaml() {
     if ! ensure_sops_env; then return 1; fi
     local rc=0
     local sops_stderr
-    # FIX-SEC1: Capture sops stderr for actionable diagnostics.
+    # Capture sops stderr for actionable diagnostics.
     sops_stderr=$(sops -d --output-type json "$secrets_file" 2>&1 >/dev/null) || rc=$?
     cleanup_secrets_environment
     if [[ $rc -ne 0 ]]; then
@@ -250,10 +247,6 @@ validate_secrets_yaml() {
 
 validate_required_secrets() {
     local secrets_file="${1:-$SECRETS_FILE}"
-    # FIX-VAL1: Added email_api_token and backup_passphrase. Both keys are
-    # consumed at runtime (email delivery and backup.sh respectively) but were
-    # absent from this list, allowing silent failures. backup_passphrase being
-    # absent caused backup.sh to silently produce unencrypted backups.
     local required_secrets=(
         "admin_token"
         "admin_basic_auth_hash"
@@ -266,11 +259,11 @@ validate_required_secrets() {
     local missing_secrets=()
     for secret in "${required_secrets[@]}"; do
         local sops_stderr rc=0
-        # FIX-SEC1: Capture sops stderr per-key so missing vs. undecryptable
+        # Capture sops stderr per-key so missing vs. undecryptable
         # secrets produce distinct diagnostic messages.
         sops_stderr=$(sops -d --extract "[\"$secret\"]" "$secrets_file" 2>&1 >/dev/null) || rc=$?
         if [[ $rc -ne 0 ]]; then
-            # FIX-VAL3: One clear log_error per missing key so the admin sees
+            # One clear log_error per missing key so the admin sees
             # an individual actionable line for each absent secret.
             log_error "validate_required_secrets: required secret '$secret' is missing or unreadable"
             missing_secrets+=("$secret")
@@ -289,9 +282,6 @@ validate_required_secrets() {
 
 check_placeholder_values() {
     local secrets_file="${1:-$SECRETS_FILE}"
-    # FIX-VAL2: Added email_api_token and backup_passphrase to mirror the
-    # required_secrets list in validate_required_secrets(). These keys were
-    # absent, so a CHANGE_ME placeholder in either would pass undetected.
     local secrets_to_check=(
         "admin_token"
         "admin_basic_auth_hash"
@@ -305,7 +295,7 @@ check_placeholder_values() {
     local unreadable_secrets=()
     for secret in "${secrets_to_check[@]}"; do
         local value sops_stderr rc=0
-        # BUG-#18 FIX: Suppress xtrace to prevent plaintext secret appearing in debug logs.
+        # Suppress xtrace to prevent plaintext secret appearing in debug logs.
         { set +x; } 2>/dev/null
         sops_stderr=$(sops -d --extract "[\"$secret\"]" "$secrets_file" 2>&1 >/dev/null) || rc=$?
         if [[ $rc -ne 0 ]]; then
@@ -322,7 +312,7 @@ check_placeholder_values() {
             continue
         }
         if [[ "$value" =~ ^(CHANGE_ME|PLACEHOLDER_NOT_CONFIGURED) ]] || [[ -z "$value" ]]; then
-            # FIX-VAL3: One clear log_warn per placeholder key so the admin
+            # One clear log_warn per placeholder key so the admin
             # sees an individual actionable line for each stale value.
             log_warn "check_placeholder_values: secret '$secret' is set to a placeholder or is empty"
             placeholder_secrets+=("$secret")
@@ -352,7 +342,7 @@ list_secret_keys() {
     local keys
     local sops_stderr
     local rc=0
-    # FIX-SEC1: Capture sops stderr for actionable diagnostics on failure.
+    # Capture sops stderr for actionable diagnostics on failure.
     sops_stderr=$(sops -d "$secrets_file" 2>&1 >/dev/null) || rc=$?
     if [[ $rc -eq 0 ]]; then
         keys=$(sops -d "$secrets_file" 2>/dev/null \
@@ -412,7 +402,7 @@ _secure_shred() {
         shred -fuz "$target" 2>/dev/null && return 0
     fi
     # dd fallback: overwrite with random bytes then unlink
-    # BUG-S1 FIX: portable stat (GNU -c%s || BSD -f%z), with safe default
+    # Portable stat (GNU -c%s || BSD -f%z), with safe default
     local file_size
     file_size=$(stat -c%s "$target" 2>/dev/null || stat -f%z "$target" 2>/dev/null || echo "4096")
     [[ -z "$file_size" || ! "$file_size" =~ ^[0-9]+$ ]] && file_size=4096
@@ -611,7 +601,7 @@ collect_secret_field() {
             ;;
 
         email_api_token)
-            # FIX-SS1: Canonical key for the email provider HTTP API token.
+            # Canonical key for the email provider HTTP API token.
             # Stored as-is (no hashing). Works for any EMAIL_PROVIDER value.
             log_info "Enter your email provider API key (Mailgun, MailerSend, SendGrid, etc.)" >&2
             log_info "This is stored as 'email_api_token' and used by all HTTP email drivers." >&2
@@ -743,7 +733,7 @@ auto_generate_secret_field() {
             ;;
 
         email_api_token)
-            # FIX-SS1: Placeholder for the email provider API token.
+            # Placeholder for the email provider API token.
             # Must be set via: ./edit-secrets.sh --rotate email_api_token
             log_warn "Auto mode: Using placeholder for email API token - configure via --rotate email_api_token" >&2
             printf '%s' "CHANGE_ME_EMAIL_API_TOKEN"
@@ -781,7 +771,7 @@ _grk_sops_extract() {
     local _key="$1"
     local _secrets_file="$2"
     local _val
-    # BUG-#18 FIX: Suppress xtrace to prevent plaintext secret appearing in debug logs.
+    # Suppress xtrace to prevent plaintext secret appearing in debug logs.
     { set +x; } 2>/dev/null
     _val=$(sops -d --extract "[\"${_key}\"]" "$_secrets_file" 2>/dev/null) \
         && printf '%s' "$_val" \
@@ -810,10 +800,8 @@ generate_recovery_kit() {
         log_error "Failed to derive Age public key"
         return 1
     fi
-    # BUG-#17 FIX: Use quoted heredoc and printf for Age private key; prevent trace leakage.
     # Suppress xtrace before reading the private key to prevent it appearing in debug logs.
-    { set +x; } 2>/dev/null
-    priv_key=$(cat "$age_key")
+    { set +x; } 2>/dev/null    priv_key=$(cat "$age_key")
 
     local domain="Not Configured"
     local admin_email="Not Configured"
@@ -859,7 +847,7 @@ generate_recovery_kit() {
         return 1
     fi
 
-    # FIX-HEREDOC1: Use a quoted delimiter (<< 'EOF') so that the shell does
+    # Use a quoted delimiter (<< 'EOF') so that the shell does
     # NOT expand any $ sequences inside the static body. Variables such as
     # $caddy_hash contain bcrypt hashes of the form "admin $2y$12$..." where
     # $2y would be silently dropped by shell expansion in an unquoted heredoc,
@@ -1002,7 +990,7 @@ END OF RECOVERY KIT
 ════════════════════════════════════════════════════════════════════════
 EOF
 
-    # BUG-#17 FIX: Unset plaintext Age private key from memory immediately after
+    # Unset plaintext Age private key from memory immediately after
     # the heredoc that wrote it to the output file.
     unset priv_key
 

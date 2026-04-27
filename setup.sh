@@ -76,8 +76,8 @@ OPTIONS:
                   './edit-secrets.sh --export-recovery-kit' BEFORE using
                   --force on a running installation.
   --dry-run       Print what would happen without making any changes.
-  --phase=secrets   Run ONLY the secrets configuration phase (formerly setup-secrets.sh)
-  --phase=systemd   Run ONLY the systemd installation phase (formerly setup-systemd.sh)
+  --phase=secrets   Run ONLY the secrets configuration phase
+  --phase=systemd   Run ONLY the systemd installation phase
   --help          Show this help and exit.
 EOF
 }
@@ -585,13 +585,7 @@ setup_directories() {
     local pgid; pgid=$(id -g "$real_user")
     local project_state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
 
-    # BUG-R1 FIX: Create the backup directory tree that backup.sh and restore.sh
-    # actually use.  The old "ensure_dir backups" line created $PROJECT_ROOT/backups/
-    # which neither script ever reads — dead code.  Both backup.sh (get_backup_dir,
-    # line 238) and restore.sh (now aligned) read BACKUP_DIR with the default
-    # /var/lib/vaultwarden/backups.  Pre-creating the {db,full,emergency}
-    # sub-directories here means: (a) the first backup.sh run works without root
-    # luck, and (b) restore.sh --list immediately finds the correct tree.
+    # Create the backup directory tree that backup.sh and restore.sh require.
     local backup_base_dir="${BACKUP_DIR:-/var/lib/vaultwarden/backups}"
     if ! mkdir -p "${backup_base_dir}"/{db,full,emergency}; then
         log_error "Failed to create backup directories under ${backup_base_dir}"
@@ -611,7 +605,7 @@ setup_directories() {
     find "${project_state_dir}" -type d -exec chmod 750 {} + 2>/dev/null || return 1
     find "${project_state_dir}" -type f -exec chmod 640 {} + 2>/dev/null || true
 
-    # BUG-caddy-perms FIX: Caddy runs as root inside its container and writes
+    # Caddy runs as root inside its container and writes
     # access logs to ${project_state_dir}/logs/caddy/access.log via a bind-mount.
     #
     # The broad 'find chmod 750' above sets this directory to 750:
@@ -639,7 +633,7 @@ setup_directories() {
     chmod 755 "${project_state_dir}/logs/caddy" || return 1
     log_info "Set ${project_state_dir}/logs/caddy to 755 (Caddy runs as root in container)"
 
-    # BUG-caddy-storage FIX: Caddy's TLS storage directories must be owned by
+    # Caddy's TLS storage directories must be owned by
     # root:root and traversable (755) so Caddy can write certificate material
     # during the first ACME negotiation.
     #
@@ -1110,9 +1104,7 @@ show_post_install_summary() {
     local mode="${1:-interactive}"
     [[ "$mode" == "interactive" ]] && clear
 
-    # FIX [BUG-10]: printf throughout; no echo -e.
-    printf '%s' "${COLOR_RED}"
-    cat << "EOF"
+    printf '%s' "${COLOR_RED}"    cat << "EOF"
     ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !
     !                                                             !
     !   CRITICAL: SAVE THIS INFORMATION FOR DISASTER RECOVERY     !
@@ -1212,13 +1204,13 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# run_phase_secrets — inline of the former setup-secrets.sh logic
+# run_phase_secrets
 # ---------------------------------------------------------------------------
 run_phase_secrets() {
 local CLEANUP_ACTIONS=()
 _ss_register_cleanup() { CLEANUP_ACTIONS+=("$1"); }
 
-# FIX (MEDIUM): Replace eval with a named dispatch helper to eliminate the
+# Replace eval with a named dispatch helper to eliminate the
 # structural eval risk.  Each cleanup action is a string token whose first
 # word is looked up in the dispatch table; unknown tokens are logged and
 # skipped rather than executed as arbitrary shell code.
@@ -1233,9 +1225,9 @@ _ss_run_cleanup_action() {
             if [[ -z "$target" || "$target" == *$'\n'* ]]; then
                 return 0
             fi
-            # BUG-#15 FIX: Validate cleanup target resolves inside allowed
-            # directories before rm -f to prevent glob expansion or path
-            # traversal from deleting files outside /tmp or secrets/.
+            # Validate cleanup target resolves inside allowed directories before
+            # rm -f to prevent glob expansion or path traversal from deleting
+            # files outside /tmp or secrets/.
             local resolved
             resolved=$(realpath -m "$target" 2>/dev/null) || {
                 log_warn "_run_cleanup_action: realpath failed for target — refusing rm: $target"
@@ -1256,8 +1248,7 @@ _ss_run_cleanup_action() {
 }
 
 _ss_perform_cleanup() {
-    # FIX (Issue 3): Zero all collected secret values on any EXIT so plaintext
-    # secrets are not left live in the process if the script aborts early.
+    # Zero all collected secret values on any EXIT to prevent plaintext credentials in process memory.
     for key in "${!_COLLECTED_SECRETS[@]}"; do
         _COLLECTED_SECRETS["$key"]=""
     done
@@ -1427,10 +1418,10 @@ fix_prerequisites() {
                     log_error "Failed to extract Age public key"
                     return 1
                 fi
-                # FIX (MEDIUM): Validate the Age public key format before writing
-                # .sops.yaml.  An empty or malformed key is accepted silently by the
-                # previous code, causing sops --encrypt to fail later with a confusing
-                # error.  Age public keys always begin with "age1" and consist of
+                # Validate the Age public key format before writing
+                # .sops.yaml.  An empty or malformed key is accepted silently,
+                # causing sops --encrypt to fail later with a confusing error.
+                # Age public keys always begin with "age1" and consist of
                 # lowercase bech32 characters (a-z0-9).
                 if [[ -z "$age_public_key" ]] || \
                    ! [[ "$age_public_key" =~ ^age1[a-z0-9]{58}$ ]]; then
@@ -1497,7 +1488,7 @@ validate_existing_secrets() {
 # automated pipelines capturing stdout are not silently confused by the
 # default-to-'no' decision.
 #
-# FIX (LOW): Suppress /dev/tty output when --quiet-summary is active to
+# Suppress /dev/tty output when --quiet-summary is active to
 # prevent unexpected terminal output during silent sub-invocations.
 # ---------------------------------------------------------------------------
 _warn_tty() {
@@ -1524,7 +1515,7 @@ check_reconfiguration() {
 
     if [[ "$FORCE" == "true" ]]; then
         log_info "Force mode - reconfiguring secrets"
-        # FIX (Issue 6): Do not write a backup when --dry-run is also active.
+        # Do not write a backup when --dry-run is active.
         # An admin running --dry-run --force expects a preview only; writing a
         # real backup file is a side-effect they do not expect.
         [[ "$DRY_RUN" != "true" ]] && create_secrets_backup
@@ -1539,8 +1530,8 @@ check_reconfiguration() {
     fi
 
     echo ""
-    # FIX [L-04]: Add -t 30 timeout to avoid hanging in non-interactive contexts
-    # FIX SS-L2: Route timeout warning to /dev/tty when available
+    # Add -t 30 timeout to avoid hanging in non-interactive contexts;
+    # route timeout warning to /dev/tty when available.
     local confirm
     if ! read -r -t 30 -p "Reconfigure secrets? (yes/no): " confirm; then
         _warn_tty "WARNING: No input received (30s timeout). Treating as 'no'."
@@ -1561,7 +1552,7 @@ check_reconfiguration() {
 ensure_argon2_available() {
     if check_argon2_support >/dev/null 2>&1; then return 0; fi
 
-    # FIX (Issue 2): Gate on an import check first so we skip the pip install
+    # Gate on an import check first so we skip the pip install
     # entirely when argon2-cffi is already installed under a different path
     # (e.g. system package).  Only proceed to install if the module is genuinely
     # absent.  Use a pinned version range to prevent silent breaking upgrades and
@@ -1573,15 +1564,15 @@ ensure_argon2_available() {
     log_warn "Argon2 not detected"
 
     if [[ "$AUTO_MODE" != "true" ]]; then
-        # FIX [L-04]: Add -t 30 timeout to avoid hanging in non-interactive contexts
-        # FIX SS-L2: Route timeout warning to /dev/tty when available
+        # Add -t 30 timeout to avoid hanging in non-interactive contexts;
+        # route timeout warning to /dev/tty when available.
         local install_it
         if ! read -r -t 30 -p "Install Python argon2-cffi? (yes/no): " install_it; then
             _warn_tty "WARNING: No input received (30s timeout). Treating as 'no'."
             install_it="no"
         fi
         if [[ "$install_it" == "yes" ]]; then
-            # FIX (Issue 2): Pinned version range prevents silent breaking upgrades.
+            # Pinned version range prevents silent breaking upgrades.
             # PEP 668 fallback: if the system Python is externally managed, try --user.
             if pip3 install --quiet "argon2-cffi>=21.3,<24" 2>/dev/null || \
                python3 -m pip install --quiet --user "argon2-cffi>=21.3,<24" 2>/dev/null; then
@@ -1597,7 +1588,7 @@ ensure_argon2_available() {
 # ---------------------------------------------------------------------------
 # yaml_escape VALUE
 #
-# FIX (MEDIUM): Secret values must be YAML-safe.  Values containing : # [ {
+# Secret values must be YAML-safe.  Values containing : # [ {
 # or leading whitespace produce malformed YAML when written with bare printf
 # '%s'.  This helper wraps the value in YAML single-quote scalars and escapes
 # any literal single-quote characters inside the value (YAML spec: '' → ').
@@ -1635,7 +1626,7 @@ _read_dotenv_value() {
 # ---------------------------------------------------------------------------
 # Collect secrets
 #
-# FIX (HIGH): SECRET_* env vars must NOT be exported during the collection
+# SECRET_* env vars must NOT be exported during the collection
 # phase because they are visible in /proc/$$/environ to all subprocesses.
 # All secret values are stored exclusively in the local SECRETS associative
 # array.  The export loop that previously ran at the end of collect_secrets()
@@ -1871,8 +1862,8 @@ collect_secrets() {
             _COLLECTED_SECRETS["push_installation_id"]=$(auto_generate_secret_field "push_installation_id")
             _COLLECTED_SECRETS["push_installation_key"]=$(auto_generate_secret_field "push_installation_key")
         else
-            # FIX [L-04]: Add -t 30 timeout to avoid hanging in non-interactive contexts
-            # FIX SS-L2: Route timeout warning to /dev/tty when available
+            # Add -t 30 timeout to avoid hanging in non-interactive contexts;
+            # route timeout warning to /dev/tty when available.
             local do_push
             if ! read -r -t 30 -p "Configure push notifications? (yes/no): " do_push; then
                 _warn_tty "WARNING: No input received (30s timeout). Treating as 'no'."
@@ -1892,12 +1883,6 @@ collect_secrets() {
         _COLLECTED_SECRETS["push_installation_id"]="CHANGE_ME_OR_LEAVE_EMPTY"
         _COLLECTED_SECRETS["push_installation_key"]="CHANGE_ME_OR_LEAVE_EMPTY"
     fi
-
-    # FIX (HIGH): The previous export loop:
-    #   for key in "${!SECRETS[@]}"; do export "SECRET_$key=${SECRETS[$key]}"; done
-    # made all plaintext secrets visible in /proc/$$/environ to every subprocess
-    # spawned during the collection phase.  It has been removed entirely.
-    # write_secrets() now reads directly from _COLLECTED_SECRETS[].
 
     echo ""
     log_success "All secrets collected successfully"
@@ -1997,7 +1982,7 @@ write_secrets() {
 
     log_info "Writing secrets to encrypted YAML file..."
 
-    # FIX (HIGH): Detect and report mkdir failure explicitly instead of
+    # Detect and report mkdir failure explicitly instead of
     # swallowing it with '2>/dev/null || true'.  A failed mkdir would cause
     # the subsequent mktemp -p to fail with an opaque "No such file or
     # directory" error that hides the true root cause.
@@ -2021,7 +2006,7 @@ write_secrets() {
     # shellcheck disable=SC2064  # intentional — $temp_file must expand NOW
     _ss_register_cleanup "rm -f '$temp_file'"
 
-    # FIX (MEDIUM): All secret values are passed through yaml_escape() which
+    # All secret values are passed through yaml_escape() which
     # wraps them in YAML single-quoted scalars and escapes internal
     # single-quotes.  This prevents values containing : # [ { or leading
     # whitespace from producing malformed YAML.
@@ -2121,7 +2106,7 @@ _ss_main() {
         exit 1
     fi
 
-    # FIX (Issue 5): Verify that the installed htpasswd binary supports bcrypt
+    # Verify that the installed htpasswd binary supports bcrypt
     # (-B flag).  Some minimal apache2-utils builds ship without bcrypt support;
     # the failure would otherwise surface deep inside lib/secrets.sh with an
     # opaque error.  Run a quick smoke-test here and exit early with a clear
@@ -2161,11 +2146,11 @@ _ss_main() {
         exit 1
     fi
 
-    # FIX (Issue 4): Scope the SECRET_* cleanup sweep to only the exact keys
-    # defined and used by this script. The previous compgen -v SECRET_ prefix
-    # sweep was overly broad and would unset any SECRET_* variable exported by
-    # a parent process (e.g. SECRET_KEY from a CI system), which is destructive
-    # in shared-host or CI environments.
+    # Scope the SECRET_* cleanup sweep to only the exact keys
+    # defined and used by this script. A broader compgen -v SECRET_ prefix
+    # sweep would unset any SECRET_* variable exported by a parent process
+    # (e.g. SECRET_KEY from a CI system), which is destructive in shared-host
+    # or CI environments.
     for _cleanup_key in \
         admin_token admin_basic_auth_hash \
         caddy_cloudflare_dns_token fail2ban_cloudflare_firewall_token \
@@ -2201,7 +2186,6 @@ _ss_main() {
         # Phase 2-C: Updated next-steps to reflect the new install order.
         # The user has already edited .env before running this script, so
         # step 1 is "Verify" not "Review/create".
-        # FIX SS-L1: cron-setup.sh was removed; reference setup.sh --phase=systemd instead.
         echo "📋 Next Steps:"
         echo "   1. Verify .env settings:      nano .env"
         echo "      ► Confirm: CLOUDFLARE_ZONE_ID, EMAIL_MODE, EMAIL_PROVIDER,"
@@ -2233,7 +2217,7 @@ _ss_main() {
 }
 
 # ---------------------------------------------------------------------------
-# run_phase_systemd — inline of the former setup-systemd.sh logic
+# run_phase_systemd
 # ---------------------------------------------------------------------------
 run_phase_systemd() {
 local INSTALL=false
@@ -2437,7 +2421,7 @@ install_units() {
     if [[ "$DRY_RUN" == "false" ]]; then
         cp -rP "$PROJECT_ROOT/lib" "$OPT_SCRIPTS_DIR/"
 
-        # FIX [LIB-PERM]: lib files are installed 644 root:root (not 640).
+        # lib files are installed 644 root:root (not 640).
         #
         # Rationale: these files are sourced by maintenance.sh and backup.sh
         # at runtime. If the systemd unit's User= directive is
@@ -2488,7 +2472,7 @@ install_units() {
     # ------------------------------------------------------------------
     log_info "Setting up EnvironmentFile at $ENV_FILE ..."
     if [[ "$DRY_RUN" == "false" ]]; then
-        # FIX-ENV-DIR: use install -d to create the directory with the correct
+        # Use install -d to create the directory with the correct
         # mode atomically. The previous mkdir -p + chmod 700 two-step had a
         # TOCTOU race window between mkdir and chmod where a concurrent
         # non-root process could list $ENV_DIR before permissions were
@@ -2709,22 +2693,19 @@ install_units() {
     _run systemctl daemon-reload
 
     # ------------------------------------------------------------------
-    # P5-SD1 FIX: Validate OnCalendar expressions before enabling timers.
+    # Validate OnCalendar expressions before enabling timers.
     # An invalid expression causes systemctl enable --now to fail with a
     # cryptic 'Failed to start' error; surfacing it here with a clear
     # warning gives operators actionable information before activation.
     #
-    # TIMER-1 FIX: Anchor the grep pattern with ^ so only lines where
-    # OnCalendar= is the very first character are matched. Without the
-    # anchor, grep -m1 'OnCalendar=' matched comment lines containing
-    # the string (e.g. the BUG-TM1 comment in vaultwarden-maintenance.timer)
-    # before reaching the real directive, causing systemd-analyze to
-    # validate the comment text and emit a false-positive WARN.
+    # '^OnCalendar=' anchors the grep pattern so only directive lines are
+    # matched (not comment lines), preventing systemd-analyze from
+    # validating comment text and emitting false-positive warnings.
     # ------------------------------------------------------------------
     if command -v systemd-analyze >/dev/null 2>&1; then
         for unit in "${UNIT_DEST_DIR}"/vaultwarden-*.timer; do
             [[ -f "$unit" ]] || continue
-            # TIMER-1 FIX: '^OnCalendar=' anchors to directive lines only.
+            # '^OnCalendar=' anchors to directive lines only.
             local cal_expr; cal_expr=$(grep -m1 '^OnCalendar=' "$unit" | cut -d= -f2-)
             if [[ -n "$cal_expr" ]]; then
                 if ! systemd-analyze calendar "$cal_expr" >/dev/null 2>&1; then
@@ -2741,7 +2722,7 @@ install_units() {
     done
 
     # ------------------------------------------------------------------
-    # FIX [TIMER-CHECK]: Verify managed timers are healthy after enablement.
+    # Verify managed timers are healthy after enablement.
     # list-timers output can lag briefly right after daemon-reload/enable.
     # Check each managed timer state directly and allow a short settle period.
     # Healthy = timer unit is active AND has a next trigger scheduled.
@@ -2811,7 +2792,6 @@ remove_units() {
 
     for timer in "${TIMERS[@]}"; do
         if systemctl is-enabled "$timer" &>/dev/null; then
-            # FIX-S15: log failures instead of hiding them
             if _run systemctl disable --now "$timer"; then
                 log_success "Disabled: $timer"
             else
@@ -2872,10 +2852,10 @@ validate_installation() {
     done
 
     # ------------------------------------------------------------------
-    # FIX [VALIDATE-LIBPERM]: Check lib/ presence AND file permissions.
+    # Check lib/ presence AND file permissions.
     # lib/*.sh files must be at least world-readable (644) so that a
     # non-root service user (User= in the unit) can source them. Warn on
-    # 600 or 640 modes that predate the LIB-PERM fix.
+    # 600 or 640 modes.
     # ------------------------------------------------------------------
     log_info "[2/8] Checking installed lib/ and file permissions ..."
     if [[ ! -d "$OPT_SCRIPTS_DIR/lib" ]]; then
@@ -3012,7 +2992,7 @@ validate_installation() {
     done
 
     # ------------------------------------------------------------------
-    # FIX [TIMER-CHECK]: Verify timers are healthy.
+    # Verify timers are healthy.
     # 'systemctl is-enabled' only checks the symlink; it does NOT confirm
     # the timer unit is currently active in systemd nor that it has a future
     # trigger time.
@@ -3116,11 +3096,10 @@ main() {
     if ! is_root; then log_error "Must run as root."; exit 1; fi
 
     local SETUP_LOCK_FILE="/run/lock/vaultwarden-setup.lock"
-    # BUG-#21 FIX: Use automatic FD allocation instead of hardcoded FD 202.
-    # BUG-#21-B FIX: /run/lock is the FHS-correct transient lock location; /var/lock
+    # Use automatic FD allocation instead of hardcoded FD for the lock.
+    # /run/lock is the FHS-correct transient lock location; /var/lock
     #   is a legacy symlink that ProtectSystem=strict makes read-only in systemd units.
-    # BUG-#21-C FIX: Register a trap to remove the lock file on EXIT so a crash
-    #   does not leave a stale lock that blocks the next invocation.
+    # A trap removes the lock file on EXIT so a crash does not leave a stale lock.
     local SETUP_LOCK_FD
     exec {SETUP_LOCK_FD}>"$SETUP_LOCK_FILE"
     if ! flock -n "$SETUP_LOCK_FD"; then
