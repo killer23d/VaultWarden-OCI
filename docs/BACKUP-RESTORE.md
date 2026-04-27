@@ -282,7 +282,7 @@ sudo ./restore.sh --file /path/to/backup.age
 sudo ./restore.sh --file /path/to/backup.age --force
 
 # Restore the latest backup, skip confirmation and skip pre-restore backup
-# (used internally by update.sh rollback)
+# (used internally by maintenance.sh --update rollback)
 sudo ./restore.sh --latest --type full --force --no-backup
 ```
 
@@ -390,7 +390,7 @@ make key-show
 
 ### Scenario 4 — Failed Update (Auto-Rollback)
 
-`update.sh` triggers this automatically when its post-update health check fails:
+`maintenance.sh --update` triggers this automatically when its post-update health check fails:
 
 ```bash
 sudo ./restore.sh --latest --type full --force --no-backup

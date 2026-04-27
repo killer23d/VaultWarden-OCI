@@ -6,8 +6,8 @@ Complete reference for all management scripts and utility libraries in VaultWard
 > - `db-maint.sh` → `./maintenance.sh --db-maint`
 > - `update-dns.sh` → `./maintenance.sh --update-dns`
 > - `test-email-simple.sh` → `./maintenance.sh --test-email`
-> - `health.sh` → `./maintenance.sh health` *(removed; use `./maintenance.sh health` directly)*
-> - `update.sh` → `./maintenance.sh update` *(removed; use `./maintenance.sh update` directly)*
+> - `health.sh` → `./maintenance.sh --health` *(removed; use `./maintenance.sh --health` directly)*
+> - `update.sh` → `./maintenance.sh --update` *(removed; use `./maintenance.sh --update` directly)*
 > - `setup-secrets.sh` → `./setup.sh --phase=secrets` *(removed; use `./setup.sh --phase=secrets` directly)*
 > - `setup-systemd.sh` → `./setup.sh --phase=systemd` *(removed; use `./setup.sh --phase=systemd` directly)*
 >
@@ -136,7 +136,7 @@ sudo ./setup.sh --phase=systemd --install
 2. Creates `${PROJECT_STATE_DIR}/logs/` subdirectories with correct ownership
 3. Starts all containers with `docker compose up -d`
 4. Updates Cloudflare DNS A record
-5. Runs `./maintenance.sh health` post-startup
+5. Runs `./maintenance.sh --health` post-startup
 
 > **Push notifications note:** If `PUSH_ENABLED=true` is set in `.env`, the VaultWarden network must **not** be marked `internal: true` in `docker-compose.yml`. Push relay requires outbound HTTPS access to `push.bitwarden.com`. `startup.sh` will exit with an error if it detects `PUSH_ENABLED=true` while the network is internal.
 
@@ -159,11 +159,11 @@ make restart   # Force restart
 
 ---
 
-### 3. `maintenance.sh health` subcommand
+### 3. `maintenance.sh --health` subcommand
 **Purpose:** System health monitoring — runs checks and optionally auto-recovers.
 
 ```bash
-./maintenance.sh health [OPTIONS]
+./maintenance.sh --health [OPTIONS]
 ```
 
 **Always-on checks:**
@@ -189,7 +189,7 @@ make restart   # Force restart
 | `--alert-threshold N` | Set alert threshold % (default: 80) |
 
 ```bash
-./maintenance.sh health --comprehensive --auto-recover --email
+./maintenance.sh --health --comprehensive --auto-recover --email
 
 make health                        # Basic
 make health AUTO_RECOVER=true      # With auto-recovery
@@ -198,7 +198,7 @@ make health-email                  # Comprehensive + email
 make health-quick                  # Fast port + container check (no deep tests)
 ```
 
-> **Systemd note:** The `vaultwarden-health.service` unit runs `maintenance.sh health --auto-recover --email` by default.
+> **Systemd note:** The `vaultwarden-health.service` unit runs `maintenance.sh --health --auto-recover --email` by default.
 
 ---
 
@@ -303,7 +303,7 @@ make restore
 make restore-db
 
 # Latest full backup, skip confirmation and pre-restore snapshot
-# (used internally by update.sh rollback)
+# (used internally by maintenance.sh --update rollback)
 ./restore.sh --latest --type full --force --no-backup
 
 # Restore from a remote (rclone) backup
@@ -357,11 +357,11 @@ make test-secrets    # runs --list internally
 
 ---
 
-### 6. `maintenance.sh update` subcommand
+### 6. `maintenance.sh --update` subcommand
 **Purpose:** Update Docker images and optionally system packages, with pre/post health checks and automatic rollback.
 
 ```bash
-./maintenance.sh update [OPTIONS]
+./maintenance.sh --update [OPTIONS]
 ```
 
 **Options:**
@@ -374,8 +374,8 @@ make test-secrets    # runs --list internally
 | `--dry-run` | Preview operations |
 
 ```bash
-./maintenance.sh update
-./maintenance.sh update --system --email
+./maintenance.sh --update
+./maintenance.sh --update --system --email
 
 make update           # Containers only
 make update-system    # Containers + system packages (apt upgrade + Docker engine)
@@ -438,7 +438,7 @@ make update-system    # Containers + system packages (apt upgrade + Docker engin
 | `--update-firewall` | Fetch latest Cloudflare IPs and update UFW rules (adds new rules before removing old ones) |
 | `--update-dns` | Check current public IP and update Cloudflare DNS A record |
 
-**`health` subcommand** *(merged from the former `health.sh`):*
+**`--health` subcommand** *(merged from the former `health.sh`):*
 
 | Option | Description |
 |---|---|
@@ -450,7 +450,7 @@ make update-system    # Containers + system packages (apt upgrade + Docker engin
 | `--output FILE` | Save report to file |
 | `--alert-threshold N` | Set alert threshold % (default: 80) |
 
-**`update` subcommand** *(merged from the former `update.sh`):*
+**`--update` subcommand** *(merged from the former `update.sh`):*
 
 | Option | Description |
 |---|---|
@@ -483,13 +483,13 @@ make test-email
 make update-dns
 
 # Health check
-./maintenance.sh health
-./maintenance.sh health --comprehensive --auto-recover --email
+./maintenance.sh --health
+./maintenance.sh --health --comprehensive --auto-recover --email
 make health
 
 # Update
-./maintenance.sh update
-./maintenance.sh update --system --email
+./maintenance.sh --update
+./maintenance.sh --update --system --email
 make update
 ```
 
@@ -560,7 +560,7 @@ sudo ./setup.sh --phase=systemd [OPTIONS]
 |---|---|---|
 | Daily 2 AM (Mon–Sat) | `vaultwarden-maintenance` | `maintenance.sh --comprehensive` |
 | Mon–Sat 4 AM + 0–60 s jitter | `vaultwarden-db-backup` | `backup.sh --type db --rclone --email` |
-| Every 30 min | `vaultwarden-health` | `maintenance.sh health --auto-recover --email` |
+| Every 30 min | `vaultwarden-health` | `maintenance.sh --health --auto-recover --email` |
 | Saturday 4 AM | `vaultwarden-firewall-update` | `maintenance.sh --update-firewall` |
 | Sunday 3 AM | `vaultwarden-full-backup` | `backup.sh --type full --full-verification --rclone --email` |
 | Every hour | `vaultwarden-dns-update` | `maintenance.sh --update-dns` |
@@ -710,9 +710,9 @@ All common operations have Makefile shortcuts. Run `make help` to see the full t
 | `make restart` | `sudo ./startup.sh --force-restart` | Force restart all services |
 | `make safe-restart` | `sudo ./startup.sh --force-restart` + health check | Restarts with automatic rollback on failure |
 | `make status` | `docker compose ps` | Show service status table |
-| `make health` | `./maintenance.sh health` | Basic health check (`AUTO_RECOVER=true`, `COMPREHENSIVE=true` supported) |
-| `make health-quick` | `./maintenance.sh health --quiet` | Fast port + container check (no deep tests) |
-| `make health-email` | `./maintenance.sh health --comprehensive --email` | Health check with email notification |
+| `make health` | `./maintenance.sh --health` | Basic health check (`AUTO_RECOVER=true`, `COMPREHENSIVE=true` supported) |
+| `make health-quick` | `./maintenance.sh --health --quiet` | Fast port + container check (no deep tests) |
+| `make health-email` | `./maintenance.sh --health --comprehensive --email` | Health check with email notification |
 | `make logs` | `docker compose logs --tail=100 [SERVICE]` | Recent logs; pass `SERVICE=caddy` to filter, `FOLLOW=true` to tail |
 | `make logs-tail` | `docker compose logs -f -t --tail=100 [SERVICE]` | Follow logs with timestamps |
 | `make logs-vaultwarden` | `docker compose logs -f -t --tail=100 vaultwarden` | Tail VaultWarden application logs |
@@ -727,8 +727,8 @@ All common operations have Makefile shortcuts. Run `make help` to see the full t
 | `make restore` | `./restore.sh` | Interactive restore (recommended) |
 | `make restore-db` | `./restore.sh --type db --latest` | Restore latest database backup (runs key prompt + confirmation) |
 | `make restore-remote` | `./restore.sh --remote` | Restore from a remote (rclone) backup — interactive selection |
-| `make update` | `./maintenance.sh update` | Pull latest container images |
-| `make update-system` | `./maintenance.sh update --system --email` | Update containers + apt + Docker engine |
+| `make update` | `./maintenance.sh --update` | Pull latest container images |
+| `make update-system` | `./maintenance.sh --update --system --email` | Update containers + apt + Docker engine |
 | `make maintenance` | `./maintenance.sh --comprehensive` | Full maintenance run |
 | `make maintenance-full` | `./maintenance.sh --comprehensive --email` | Full maintenance with email summary |
 | `make update-dns` | `./maintenance.sh --update-dns` | Update Cloudflare DNS A record |

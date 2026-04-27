@@ -1042,17 +1042,17 @@ rclone config
 
 ```bash
 # Basic health check (containers + service accessibility)
-./maintenance.sh health
+./maintenance.sh --health
 
 # Comprehensive check (adds disk, SSL, DB, backups, resources, config, security)
-./maintenance.sh health --comprehensive
+./maintenance.sh --health --comprehensive
 
 # With automatic recovery of unhealthy containers
-./maintenance.sh health --auto-recover
+./maintenance.sh --health --auto-recover
 
 # Full comprehensive check with email alert and auto-recovery
 # (this is what the systemd vaultwarden-health timer runs)
-./maintenance.sh health --comprehensive --email --auto-recover
+./maintenance.sh --health --comprehensive --email --auto-recover
 ```
 
 Checks performed:
@@ -1111,7 +1111,7 @@ grep "ERROR" ${PROJECT_STATE_DIR}/logs/vaultwarden/vaultwarden.log
 - ✅ Test emergency access procedures
 - ✅ Create initial encrypted backup
 - ✅ Configure email notifications and run `make test-email`
-- ✅ Verify all health checks pass: `./maintenance.sh health --comprehensive`
+- ✅ Verify all health checks pass: `./maintenance.sh --health --comprehensive`
 - ✅ Restrict UFW ports 80/443 to Cloudflare CIDRs: `./maintenance.sh --update-firewall`
 - ✅ Confirm `internal: true` is active on the Docker network (unless push is enabled)
 
@@ -1179,7 +1179,7 @@ If you detect suspicious activity:
    ./startup.sh --force-restart
 
    # Verify security
-   ./maintenance.sh health --comprehensive
+   ./maintenance.sh --health --comprehensive
    ```
 
 ## Security Troubleshooting

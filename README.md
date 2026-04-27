@@ -124,12 +124,12 @@ See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for every available variable 
 
 ```bash
 ./startup.sh          # start all services  (or: make start)
-./maintenance.sh health  # verify everything is healthy  (or: make health)
+./maintenance.sh --health  # verify everything is healthy  (or: make health)
 ```
 
 Once healthy, switch the Cloudflare record to **Proxied (Orange Cloud)** and set SSL/TLS encryption to **Full (Strict)**.
 
-> **`startup.sh` diagnostic improvement:** If the post-startup quiet health check exits non-zero, `startup.sh` now automatically re-runs `./maintenance.sh health` in verbose mode so full diagnostics are always visible to the operator.
+> **`startup.sh` diagnostic improvement:** If the post-startup quiet health check exits non-zero, `startup.sh` now automatically re-runs `./maintenance.sh --health` in verbose mode so full diagnostics are always visible to the operator.
 
 > **Health check fix:** Configuration validation now correctly checks for `DOMAIN_NAME` (the canonical env var) instead of `DOMAIN`.
 
@@ -295,7 +295,7 @@ Full details: [docs/SECURITY.md](docs/SECURITY.md)
 
 ## 🔄 Update & Rollback
 
-`maintenance.sh update` runs a fully phased cycle: pre-update health check → backup → pull → restart → post-update health check. If the post-update health check fails, it **automatically rolls back** via `restore.sh --latest`. Age key health is now validated before any update operation begins. See [docs/OPERATIONS.md](docs/OPERATIONS.md) for the full phase diagram.
+`maintenance.sh --update` runs a fully phased cycle: pre-update health check → backup → pull → restart → post-update health check. If the post-update health check fails, it **automatically rolls back** via `restore.sh --latest`. Age key health is now validated before any update operation begins. See [docs/OPERATIONS.md](docs/OPERATIONS.md) for the full phase diagram.
 
 ---
 

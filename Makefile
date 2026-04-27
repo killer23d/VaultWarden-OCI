@@ -262,7 +262,7 @@ up: ## Start all services (runs startup.sh for health checks)
 #
 # New behaviour:
 #   - If secrets.yaml is ABSENT → secrets were never initialised; abort and
-#     direct the operator to ./setup-secrets.sh  (unchanged intent).
+#     direct the operator to ./setup.sh --phase=secrets  (unchanged intent).
 #   - If secrets.yaml is PRESENT but admin_token is missing/empty → warn and
 #     continue; startup.sh will decrypt and regenerate the docker-secret files.
 #     If decryption itself fails (wrong/missing Age key), startup.sh's own
@@ -342,15 +342,15 @@ status: ## Show service status
 
 health: ## Run health checks (set AUTO_RECOVER=true to auto-recover)
 	@echo "$(BLUE)Running health checks...$(NC)"
-	@sudo ./maintenance.sh health $(if $(filter true,$(AUTO_RECOVER)),--fix,)
+	@sudo ./maintenance.sh --health $(if $(filter true,$(AUTO_RECOVER)),--fix,)
 
 health-quick: ## Quick health check (essential services only)
 	@echo "$(BLUE)Running quick health check...$(NC)"
-	@sudo ./maintenance.sh health --quick
+	@sudo ./maintenance.sh --health --quick
 
 health-email: ## Test email health
 	@echo "$(BLUE)Testing email health...$(NC)"
-	@sudo ./maintenance.sh health --email
+	@sudo ./maintenance.sh --health --email
 
 watch: ## Watch service logs in real-time (Ctrl+C to stop)
 	$(call check-docker)
@@ -489,14 +489,14 @@ key-health: ## Check age key health (permissions, decodability, SOPS_AGE_KEY_FIL
 # When to use:
 #   SOPS_AGE_KEY_FILE in .env points to /etc/vaultwarden/age-key.txt (or any
 #   system path) but the file does not yet exist there, while the key is
-#   already present at secrets/keys/age-key.txt (placed by setup-secrets.sh
+#   already present at secrets/keys/age-key.txt (placed by setup.sh --phase=secrets
 #   or the initial age-keygen run).
 #
 # What it does:
 #   1. Reads SOPS_AGE_KEY_FILE from .env.
 #   2. Self-referential path check (CONFIGURED == REPO_KEY):
 #      - File exists  → informational message, exit 0 (no install needed).
-#      - File missing → actionable error directing to ./setup-secrets.sh, exit 1.
+#      - File missing → actionable error directing to ./setup.sh --phase=secrets, exit 1.
 #   3. If target already exists and is non-empty, exits without changes.
 #   4. Creates the parent directory (mode 700, root:root).
 #   5. Copies secrets/keys/age-key.txt → SOPS_AGE_KEY_FILE (mode 600, root:root).
@@ -625,7 +625,7 @@ key-rotate: ## Rotate age encryption key (re-encrypts all secrets)
 update: ## Update all container images and restart
 	$(call require-root)
 	@echo "$(BLUE)Updating VaultWarden-OCI...$(NC)"
-	@./maintenance.sh update
+	@./maintenance.sh --update
 
 check-updates: ## Check for available container image updates (no restart)
 	$(call check-docker)

@@ -954,7 +954,7 @@ main() {
     if [[ "$DRY_RUN" != "true" ]]; then
         SOPS_AGE_KEY_FILE="$age_key_file" simple_verify_age_key || {
             log_error "Age key health check failed — aborting backup to avoid encrypting with a bad key."
-            log_error "Run './maintenance.sh health --comprehensive' for diagnostics."
+            log_error "Run './maintenance.sh --health --comprehensive' for diagnostics."
             exit 1
         }
     fi

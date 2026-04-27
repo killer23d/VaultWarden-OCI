@@ -296,7 +296,7 @@ EOF
 # LOW FIX: _notify_breakglass_event()
 #
 # Emits a notification via the same send_notification_email() / send_email()
-# path used by health.sh and maintenance.sh so breakglass activity is
+# path used by maintenance.sh --health so breakglass activity is
 # visible in the operator's alert channel, not just a local log file.
 # Non-fatal: a delivery failure is logged as a warning only.
 # ---------------------------------------------------------------------------

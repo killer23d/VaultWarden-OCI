@@ -95,7 +95,7 @@ sudo chown -R 1000:1000 /var/lib/vaultwarden/data/attachments
 # Navigate to https://vault.example.com/admin
 
 # Run health checks
-./maintenance.sh health
+./maintenance.sh --health
 
 # Verify all vaults are accessible
 # Log in with existing credentials and inspect data
@@ -282,7 +282,7 @@ sudo chown -R 1000:1000 /var/lib/vaultwarden/data
 # 5. Start and verify
 cd /path/to/VaultWarden-OCI
 ./startup.sh
-./maintenance.sh health
+./maintenance.sh --health
 ```
 
 ---
@@ -315,7 +315,7 @@ cd /path/to/VaultWarden-OCI
 ./startup.sh --force
 
 # Verify health
-./maintenance.sh health
+./maintenance.sh --health
 ```
 
 ### Set Up Automation

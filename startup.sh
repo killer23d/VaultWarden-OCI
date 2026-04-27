@@ -42,7 +42,7 @@ BACKGROUND=false
 DRY_RUN=false
 DO_DOWN=false
 # STARTUP-12 FIX: skip docker compose pull on routine restarts (e.g. systemd
-# ExecStart). Pass --skip-pull in the unit file; use update.sh or a manual
+# ExecStart). Pass --skip-pull in the unit file; use maintenance.sh --update or a manual
 # ./startup.sh without the flag when an image refresh is desired.
 SKIP_PULL=false
 SKIP_EGRESS_FIX=false
@@ -612,7 +612,7 @@ cleanup_orphaned_resources() {
 #
 # STARTUP-12 FIX: guard with SKIP_PULL so that systemd ExecStart restarts
 # (which pass --skip-pull) are instant. Image refreshes should go through
-# update.sh or a manual ./startup.sh without --skip-pull.
+# maintenance.sh --update or a manual ./startup.sh without --skip-pull.
 # ---------------------------------------------------------------------------
 pull_images() {
   if [[ "$SKIP_PULL" == "true" ]]; then
@@ -814,11 +814,11 @@ run_health_check() {
 
   log_info "Running post-start health check..."
 
-  # Disable errexit around maintenance.sh health so we can capture its exit code cleanly.
+  # Disable errexit around maintenance.sh --health so we can capture its exit code cleanly.
   # The outer set -euo pipefail would abort the script before we could inspect
-  # the code if maintenance.sh health exits non-zero.
+  # the code if maintenance.sh --health exits non-zero.
   local health_exit=0
-  ./maintenance.sh health || health_exit=$?
+  ./maintenance.sh --health || health_exit=$?
 
   case "$health_exit" in
     0)

@@ -69,7 +69,7 @@
 #                   time filter, wiping every dangling image layer including
 #                   recent layers that could serve as a manual rollback
 #                   reference after a bad update. The maintenance timer runs
-#                   independently of update.sh's snapshot/rollback mechanism,
+#                   independently of maintenance.sh --update 's snapshot/rollback mechanism,
 #                   so a post-update maintenance run could destroy the only
 #                   copy of the previous image before the operator validates
 #                   the new one.
@@ -574,7 +574,7 @@ cleanup_containers() {
 #
 # The --filter "until=48h" guard preserves the most recent two days of
 # pulled image layers as a passive rollback buffer. This is important
-# because the maintenance timer runs independently of update.sh's own
+# because the maintenance timer runs independently of maintenance.sh --update 's own
 # snapshot/rollback mechanism: without a time filter, a routine maintenance
 # run shortly after a bad update could destroy the previous image layers
 # before the operator has had a chance to validate or roll back.

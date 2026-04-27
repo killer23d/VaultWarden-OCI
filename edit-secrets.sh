@@ -6,7 +6,7 @@
 # Canonical standalone recovery-kit export:
 #   ./edit-secrets.sh --export-recovery-kit
 #
-# See also: ./setup-secrets.sh  (first-time creation and full reconfiguration)
+# See also: ./setup.sh --phase=secrets  (first-time creation and full reconfiguration)
 #
 # BUG FIX (2026-03-19):
 #   FIX-ES1 [HIGH] do_edit(), do_view(), do_rotate(), and _deploy_docker_secrets()
@@ -134,7 +134,7 @@ trap perform_cleanup EXIT
 #
 # FIX (Issue 1 / HIGH): Require at least one whitespace character before #
 # to distinguish inline comments from embedded # in values (e.g. p@ss#1).
-# Synced to the safe pattern already present in setup-secrets.sh.
+# Synced to the safe pattern already present in setup.sh --phase=secrets.
 # ---------------------------------------------------------------------------
 _read_dotenv_value() {
     local key="$1"
@@ -245,7 +245,7 @@ MODES (mutually exclusive; default is interactive edit):
 
     --export-recovery-kit   Generate a recovery document with unencrypted
                             secrets. This is the canonical standalone entry
-                            point for recovery kit export. setup-secrets.sh
+                            point for recovery kit export. setup.sh --phase=secrets
                             delegates its post-setup prompt here.
 
 EDIT OPTIONS:
@@ -279,7 +279,7 @@ EXAMPLES:
     ./edit-secrets.sh --export-recovery-kit        # Export a recovery document
 
 SEE ALSO:
-    ./setup-secrets.sh  - First-time creation or full reconfiguration
+    ./setup.sh --phase=secrets  - First-time creation or full reconfiguration
 HELP
 }
 
@@ -352,7 +352,7 @@ check_prerequisites() {
                 log_warn "For local/dev: set SOPS_AGE_KEY_FILE=${repo_local_key} in .env."
             fi
         fi
-        log_info "To create secrets, run: ./setup-secrets.sh"
+        log_info "To create secrets, run: ./setup.sh --phase=secrets"
         return 1
     fi
 
@@ -611,7 +611,7 @@ PYEOF
         while IFS= read -r key; do
             log_error "  - $key"
         done <<< "$offending"
-        log_error "Run './setup-secrets.sh' or './edit-secrets.sh --rotate <field>' to configure these fields first."
+        log_error "Run './setup.sh --phase=secrets' or './edit-secrets.sh --rotate <field>' to configure these fields first."
         return 1
     fi
 
@@ -819,7 +819,7 @@ do_rotate() {
 
     # FIX (Issue 3 / MEDIUM): Replace yaml.safe_load + yaml.dump round-trip
     # with a line-by-line regex substitution so YAML comments (inline field
-    # documentation added by setup-secrets.sh's write_secrets()) are preserved
+    # documentation added by setup.sh --phase=secrets write_secrets()) are preserved
     # on every rotation.  yaml.dump() strips all comments on first write.
     python3 - "$temp_plain" "$actual_field" "$new_value" "$temp_patched" << 'PYEOF'
 import sys, re
@@ -904,7 +904,7 @@ PYEOF
     if _deploy_docker_secrets 2>/dev/null; then
         log_success "Docker secret files updated"
     else
-        log_warn "Could not auto-redeploy Docker secret files. Run: ./startup.sh or ./setup-secrets.sh"
+        log_warn "Could not auto-redeploy Docker secret files. Run: ./startup.sh or ./setup.sh --phase=secrets"
     fi
 
     offer_recovery_kit_export "$EXPORT_RECOVERY_KIT"

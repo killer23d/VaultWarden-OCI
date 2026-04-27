@@ -712,7 +712,7 @@ curl -sX POST https://your-webhook-url/notify \
 - Validate with `docker compose config` before applying
 - Run `sudo ./setup.sh --force ...` to regenerate
 - Restart with `./startup.sh --force`
-- Verify with `./maintenance.sh health` or `make health`
+- Verify with `./maintenance.sh --health` or `make health`
 - Commit template changes to version control
 - Create a backup before major changes: `./backup.sh --type full`
 - After re-installing automation: `sudo ./setup.sh --phase=systemd --install && systemctl list-timers --all | grep vaultwarden`

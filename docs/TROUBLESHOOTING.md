@@ -4,7 +4,7 @@ Common issues and solutions for VaultWarden-OCI deployment and operations.
 
 ## General Troubleshooting Approach
 
-1. **Check service status**: `./maintenance.sh health` or `make health`
+1. **Check service status**: `./maintenance.sh --health` or `make health`
 2. **Review logs**: `docker compose logs` or `make logs`
 3. **Validate configuration**: `docker compose config` or `make test-config`
 4. **Check resources**: `docker stats`
@@ -22,7 +22,7 @@ Common issues and solutions for VaultWarden-OCI deployment and operations.
 **Diagnosis**:
 ```bash
 # Check service status
-./maintenance.sh health
+./maintenance.sh --health
 docker compose ps
 
 # View logs
@@ -668,7 +668,7 @@ make restore-db
 ./restore.sh --file /path/to/older-backup.age
 
 # After restore, verify services
-./maintenance.sh health --comprehensive
+./maintenance.sh --health --comprehensive
 ```
 
 ### Offsite Backup Sync Fails
@@ -1019,7 +1019,7 @@ When reporting issues, include:
 make diagnose > diagnose-report.txt
 
 # System information
-./maintenance.sh health --comprehensive --json > health-report.json
+./maintenance.sh --health --comprehensive --json > health-report.json
 
 # Service logs
 docker compose logs > service-logs.txt

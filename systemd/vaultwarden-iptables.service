@@ -19,7 +19,7 @@
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now vaultwarden-iptables.service
 #
-# Or use the provided setup-systemd.sh which handles this automatically.
+# Or use the provided setup.sh --phase=systemd which handles this automatically.
 
 [Unit]
 Description=VaultWarden iptables NAT and DOCKER-USER rules

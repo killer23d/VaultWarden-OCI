@@ -153,7 +153,7 @@ See [CONFIGURATION.md](CONFIGURATION.md) for the full variable reference.
 ./startup.sh        # start all containers
 # or: make start
 
-./maintenance.sh health         # verify everything is healthy
+./maintenance.sh --health         # verify everything is healthy
 # or: make health
 ```
 
@@ -274,7 +274,7 @@ sudo systemctl restart vaultwarden-db-backup.timer
 **Service won't start:**
 
 ```bash
-./maintenance.sh health
+./maintenance.sh --health
 docker compose logs vaultwarden
 docker compose config
 ```

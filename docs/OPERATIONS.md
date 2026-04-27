@@ -61,7 +61,7 @@ make safe-restart
 #### Basic Health Check
 
 ```bash
-./maintenance.sh health
+./maintenance.sh --health
 
 # Or via Makefile
 make health
@@ -87,7 +87,7 @@ make health-quick
 #### Comprehensive Health Check
 
 ```bash
-./maintenance.sh health --comprehensive
+./maintenance.sh --health --comprehensive
 
 # Additional checks:
 #  ✓ CPU and memory usage vs alert threshold
@@ -99,10 +99,10 @@ make health-quick
 
 ```bash
 # Automatically restart unhealthy containers
-./maintenance.sh health --auto-recover
+./maintenance.sh --health --auto-recover
 
 # Combined — comprehensive check + auto-recovery + email alert
-./maintenance.sh health --comprehensive --auto-recover --email
+./maintenance.sh --health --comprehensive --auto-recover --email
 
 # Or via Makefile
 make health AUTO_RECOVER=true
@@ -309,15 +309,15 @@ make restore-remote
 
 ```bash
 # Update container images (respects version pins in .env)
-./maintenance.sh update
+./maintenance.sh --update
 make update
 
 # Update containers + system packages
-./maintenance.sh update --system
+./maintenance.sh --update --system
 make update-system
 ```
 
-> **`--system` scope:** `./maintenance.sh update --system` (alias `make update-system`) does three things in order:
+> **`--system` scope:** `./maintenance.sh --update --system` (alias `make update-system`) does three things in order:
 > 1. Runs `apt-get upgrade` to update OS packages
 > 2. Updates the Docker engine via apt
 > 3. Pulls new container images and restarts affected services
@@ -354,7 +354,7 @@ nano .env
 docker compose pull vaultwarden
 docker compose up -d vaultwarden
 
-./maintenance.sh health
+./maintenance.sh --health
 ```
 
 > **VaultWarden 1.30.0+ note:** Port 3012 (legacy WebSocket) was removed. All real-time sync now goes through the main HTTP port 80. The Caddyfile `/notifications/hub` block already routes to `vaultwarden:80`; no manual change is needed for upgrades.
@@ -478,7 +478,7 @@ make test-secrets
 # 2. Update admin_token, admin_basic_auth_hash, smtp_password, etc.
 # 3. Restart to apply
 ./startup.sh --force-restart
-./maintenance.sh health
+./maintenance.sh --health
 ```
 
 ### Age Key Management
@@ -753,7 +753,7 @@ sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
 
 # 6. Restart and verify
 ./startup.sh --force-restart
-./maintenance.sh health
+./maintenance.sh --health
 ```
 
 **Template best practices:**
