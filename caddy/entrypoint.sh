@@ -29,7 +29,7 @@ fi
 # DO NOT pass a variable name as a second argument; read_secret is a
 # stdout-returning function (POSIX sh has no namerefs). The second-arg
 # pattern silently leaves the variable unset and triggers an unbound-
-# variable abort under `set -eu`.  (BUG-ENT-1 root cause)
+# variable abort under `set -eu`.
 # =============================================================================
 read_secret() {
     _rs_path="$1"
@@ -68,7 +68,7 @@ log_warn() {
 }
 
 # =============================================================================
-# BUG-caddy-perms-3 FIX: Ensure log directory AND log files exist and are
+# Ensure log directory AND log files exist and are
 # writable by this process before caddy run is called.
 #
 # DEGRADED MODE (non-writable logs):
@@ -138,7 +138,7 @@ fi
 : "${DOMAIN_NAME:=${DOMAIN#http://}}"
 export DOMAIN_NAME="${DOMAIN_NAME}"
 
-# FIX [M-16]: Validate required environment variables BEFORE starting Caddy
+# Validate required environment variables BEFORE starting Caddy
 # so we fail fast with a clear error, not a cryptic Caddy parse error.
 # C-07: Validate DOMAIN_NAME is set and looks like a valid FQDN.
 : "${DOMAIN_NAME:?ERROR: DOMAIN_NAME could not be derived — ensure DOMAIN=https://your.host}"
@@ -157,7 +157,7 @@ echo "DOMAIN_NAME validated: ${DOMAIN_NAME}"
 # =============================================================================
 # SECURITY: Load Cloudflare API Token
 #
-# BUG-ENT-1 FIX: Capture read_secret output via $(...) command substitution.
+# Capture read_secret output via $(...) command substitution.
 # Skip when TLS_PROVIDER=acme_http (token not required).
 # =============================================================================
 TLS_PROVIDER=${TLS_PROVIDER:-cloudflare}
@@ -193,8 +193,6 @@ fi
 
 # =============================================================================
 # SECURITY: Load Admin Basic Auth Hash
-#
-# BUG-ENT-1 FIX: Same stdout-capture fix applied here.
 # =============================================================================
 ADMIN_HASH_FULL=$(read_secret /run/secrets/admin_basic_auth_hash)
 
@@ -213,7 +211,7 @@ case "$ADMIN_HASH_FULL" in
         ;;
 esac
 
-# FIX [CE-1]: Enforce OWASP minimum bcrypt cost of 10.
+# Enforce OWASP minimum bcrypt cost of 10.
 _cost=$(printf '%s' "$ADMIN_HASH_FULL" | sed 's/.*\$2.\$\([0-9]*\)\$.*/\1/')
 if [ "$_cost" -lt 10 ] 2>/dev/null; then
     echo "ERROR: bcrypt cost ${_cost} < minimum 10 (OWASP requirement)" >&2
@@ -238,7 +236,7 @@ fi
 echo "Admin credentials ready for Caddy"
 
 # =============================================================================
-# FIX [CF-1]: Set PUSH_CSP environment variable consumed by Caddyfile.
+# Set PUSH_CSP environment variable consumed by Caddyfile.
 # =============================================================================
 PUSH_ENABLED=${PUSH_ENABLED:-false}
 if [ "$PUSH_ENABLED" = "true" ]; then
@@ -248,19 +246,19 @@ else
 fi
 
 # =============================================================================
-# BUG-2 FIX: 'caddy validate' removed — Caddy validates at 'caddy run' startup.
+# 'caddy validate' removed — Caddy validates at 'caddy run' startup.
 # =============================================================================
 
 # =============================================================================
 # DEGRADED MODE: build a patched Caddyfile with stdout-only logging
 #
-# BUG-DEGRADE-1 FIX: The previous sed approach replaced only the
+# The previous sed approach replaced only the
 # 'output file /var/log/caddy/*.log {' line but left the entire nested
 # block body (roll_size, roll_keep, roll_compression, closing brace)
 # as orphaned content, producing:
 #   Error: server block without any key is global configuration
 #
-# Fix: use awk to track brace depth and consume the entire
+# Uses awk to track brace depth and consume the entire
 # 'output file ... { ... }' block, emitting 'output stdout' instead.
 # =============================================================================
 CADDYFILE=/etc/caddy/Caddyfile

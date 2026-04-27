@@ -52,7 +52,7 @@ require_docker() {
 }
 
 # ---------------------------------------------------------------------------
-# require_jq  (FIX [MEDIUM] — jq dependency undeclared)
+# require_jq
 # ---------------------------------------------------------------------------
 require_jq() {
     if ! command -v jq >/dev/null 2>&1; then
@@ -87,7 +87,7 @@ get_service_status() {
     local raw_json
     raw_json=$(docker compose ps "$service" --format json 2>/dev/null)
 
-    # AUD-D2: guard against non-JSON output (Compose v1, plain-text mode)
+    # Guard against non-JSON output (Compose v1, plain-text mode)
     if ! printf '%s' "$raw_json" | jq -e . >/dev/null 2>&1; then
         log_debug "get_service_status: non-JSON output from docker compose ps for '$service'; falling back to not_found"
         echo "not_found"
@@ -626,8 +626,8 @@ wait_for_service_ready() {
 
     while [[ $count -lt $timeout ]]; do
         local current_status current_health raw_json
-        # Issue #58: wrap docker compose ps in timeout 10 so a hung Docker
-        # daemon does not block the entire polling loop indefinitely.
+        # Wrap docker compose ps in a timeout so a hung Docker daemon
+        # does not block the entire polling loop indefinitely.
         raw_json=$(timeout 10 docker compose ps "$service" --format json 2>/dev/null) || {
             log_warn "wait_for_service_ready: docker compose ps timed out — daemon may be unresponsive"
             sleep 2

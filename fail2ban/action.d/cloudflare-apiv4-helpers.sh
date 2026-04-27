@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# P7-27 fix: changed from #!/bin/sh — this file uses `local` which is not POSIX sh.
 # cloudflare-apiv4-helpers.sh
 # Shared helper functions sourced by actionban and actionunban in
 # cloudflare-apiv4.conf.  Never executed directly.
@@ -55,7 +54,6 @@ _cf_load_token() {
 # _validate_ip <candidate>
 # Validate <candidate> using Python3 ipaddress module for strict RFC-compliant
 # IPv4 and IPv6 parsing.  Returns 0 if valid, 1 otherwise.
-# P7-20 fix: moved from inline definitions in actionban/actionunban.
 # ---------------------------------------------------------------------------
 _validate_ip() {
   local candidate="$1"
@@ -66,7 +64,6 @@ _validate_ip() {
 # _cf_get_or_create_waf_ruleset <zone_id>
 # Return the zone WAF Custom Rules (http_request_firewall_custom) ruleset ID.
 # Creates an empty zone-level ruleset if none exists yet.
-# P7-20 fix: moved from inline definition in actionban.
 # ---------------------------------------------------------------------------
 _cf_get_or_create_waf_ruleset() {
   local zone_id="$1" out ruleset_id
@@ -94,7 +91,6 @@ _cf_get_or_create_waf_ruleset() {
 # ---------------------------------------------------------------------------
 # _cf_get_waf_ruleset_id <zone_id>
 # Return the zone WAF Custom Rules ruleset ID, or empty string if none exists.
-# P7-20 fix: moved from inline definition in actionunban.
 # ---------------------------------------------------------------------------
 _cf_get_waf_ruleset_id() {
   local zone_id="$1" out
@@ -109,7 +105,6 @@ _cf_get_waf_ruleset_id() {
 # _cf_find_rule_id <zone_id> <ruleset_id> <tag>
 # Find a rule inside a ruleset by its exact description tag.
 # Returns the rule ID string, or empty string if not found.
-# P7-20 fix: moved from inline definitions in actionban/actionunban.
 # ---------------------------------------------------------------------------
 _cf_find_rule_id() {
   local zone_id="$1" ruleset_id="$2" tag="$3" out
@@ -124,7 +119,6 @@ _cf_find_rule_id() {
 # _cf_validate_token
 # Validate the Cloudflare API token by calling the /user/tokens/verify endpoint.
 # Returns 0 if valid, 1 otherwise. Used by actionstart for early token detection.
-# P7-23 fix: new function for startup token validation.
 # ---------------------------------------------------------------------------
 _cf_validate_token() {
   local cfg result
@@ -134,7 +128,7 @@ _cf_validate_token() {
       "https://api.cloudflare.com/client/v4/user/tokens/verify" \
       | jq -r '.success' 2>/dev/null)
   rm -f "$cfg" 2>/dev/null
-  [ "$result" = "true" ]  # P7-26 note: consistent with POSIX [ ] style used elsewhere in file
+  [ "$result" = "true" ]  # Consistent with POSIX [ ] style used elsewhere in file
 }
 
 # ---------------------------------------------------------------------------
@@ -211,9 +205,8 @@ _cf_api_call() {
     return 0
   fi
 
-  # P7-24 fix: Guard against non-numeric http_code before arithmetic comparison.
-  # curl failures already produce "000" via `|| echo "000"`, but an unexpected
-  # non-numeric value would cause `[ -ge ]` to abort with a syntax error.
+  # Guard against non-numeric http_code before arithmetic comparison.
+  # An unexpected non-numeric value would cause `[ -ge ]` to abort with a syntax error.
   case "$http_code" in
     ''|*[!0-9]*)
       echo "[cloudflare-apiv4] ERROR: curl returned non-numeric HTTP code: '${http_code}' (timeout or connection failure)" >&2

@@ -2411,10 +2411,8 @@ update_system_packages() {
         return 0
     fi
     apt-get update -qq
-    # Issue #51: Add explicit dpkg conffile options to prevent interactive
-    # prompts when a package upgrade finds a modified config file.  Without
-    # these, dpkg can still prompt under certain conditions even with
-    # DEBIAN_FRONTEND=noninteractive, hanging the systemd timer indefinitely.
+    # Add explicit dpkg conffile options to prevent interactive
+    # prompts when a package upgrade finds a modified config file.
     # --force-confdef: accept the default (keep or replace) automatically.
     # --force-confold: keep the existing config if no default is defined.
     DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
@@ -2569,7 +2567,7 @@ check_image_updates() {
 
         local old_id new_id
         old_id=$(docker inspect --format='{{.Id}}' "$image" 2>/dev/null || echo "")
-        # Issue #21: use pull_image_with_retry() for exponential backoff and
+        # Use pull_image_with_retry() for exponential backoff and
         # permanent-error detection; track failures so caller sees non-zero.
         if ! pull_image_with_retry "$image"; then
             log_error "  [FAILED] Could not pull: $image"
@@ -2625,7 +2623,7 @@ verify_image_digests() {
         digest=$(docker inspect --format='{{index .RepoDigests 0}}' "$image" 2>/dev/null | awk -F'@' '{print $2}' || echo "")
         if [[ -z "$digest" ]]; then
             log_warn "  No digest available for $image (local-only image?)"
-            # Issue #22: count missing digests as failures so caller is notified.
+            # Count missing digests as failures so caller is notified.
             (( failed++ )) || true
         else
             log_info "  Digest integrity OK for $image (${digest:0:18}...)"

@@ -801,7 +801,8 @@ generate_recovery_kit() {
         return 1
     fi
     # Suppress xtrace before reading the private key to prevent it appearing in debug logs.
-    { set +x; } 2>/dev/null    priv_key=$(cat "$age_key")
+    { set +x; } 2>/dev/null
+    priv_key=$(cat "$age_key")
 
     local domain="Not Configured"
     local admin_email="Not Configured"

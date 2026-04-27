@@ -1,8 +1,8 @@
 [Unit]
 Description=VaultWarden Maintenance Timer Daily 02:05
-# SY-2: Prevent this timer firing mid-shutdown.
+# Prevent this timer firing mid-shutdown.
 Conflicts=shutdown.target
-# Issue #57: OnFailure on the timer unit catches calendar parse errors or
+# OnFailure on the timer unit catches calendar parse errors or
 # systemd activation failures that would otherwise go unnotified.
 OnFailure=vaultwarden-notify-failure@%n.service
 
@@ -24,7 +24,7 @@ Persistent=true
 # Without this, Persistent=true causes an immediate activation on reboot
 # which may race against the Docker daemon still starting up.
 OnBootSec=2min
-# P2-H: RandomizedDelaySec spreads post-reboot catch-up burst.
+# RandomizedDelaySec spreads post-reboot catch-up burst.
 RandomizedDelaySec=30
 
 [Install]

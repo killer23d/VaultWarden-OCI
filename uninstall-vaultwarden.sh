@@ -4,27 +4,6 @@
 # Run from the user's home directory: bash ~/uninstall-vaultwarden.sh
 # Must be run as root (or via sudo).
 #
-# PATCHED BUGS:
-#   UN-KEY1 [HIGH] Step 6 previously rm -rf'd the project directory — which
-#                  includes secrets/keys/age-key.txt — without first checking
-#                  whether the encryption key had been saved elsewhere.
-#                  Destroying the age key renders ALL existing Age-encrypted
-#                  backups permanently unrecoverable.
-#                  Fix: if secrets/keys/age-key.txt exists, require the
-#                  operator to pass --i-have-saved-my-recovery-kit.  Without
-#                  the flag the script prints the Age public key fingerprint
-#                  and refuses to proceed.
-#
-#   UN-KEY2 [HIGH] --i-have-saved-my-recovery-kit bypassed all interactive
-#                  confirmation for the age key, leaving no gate between a
-#                  blindly-passed flag and permanent key destruction.
-#                  Fix: add a mandatory second interactive prompt directly
-#                  before Step 6 whenever the age key is present on disk.
-#                  The operator must type back the exact Age public key
-#                  fingerprint shown on screen to confirm they have the
-#                  correct key saved.  This fires unconditionally — even
-#                  when the flag is present — and cannot be scripted away
-#                  without the actual key value in hand.
 
 set -euo pipefail
 
@@ -403,7 +382,7 @@ fi
 # ═══════════════════════════════════════════════════════════════
 # STEP 9 — Remove Docker (packages, APT repo, GPG key)
 #
-# FIX (Issue 2): Only remove Docker packages if setup.sh installed them.
+# Only remove Docker packages if setup.sh installed them.
 # setup.sh writes a sentinel file ($DOCKER_SENTINEL) immediately after a
 # successful Docker installation.  If the sentinel is absent, Docker was
 # pre-existing and must not be removed — silently destroying a system-level
@@ -430,7 +409,7 @@ if [[ -f "$DOCKER_SENTINEL" ]]; then
     fi
 
     info "Removing Docker APT repo and GPG key..."
-    # BUG-UN1 FIX: setup.sh downloads the Docker GPG key as an armored ASCII
+    # setup.sh downloads the Docker GPG key as an armored ASCII
     # file (/etc/apt/keyrings/docker.asc) — not a dearmored .gpg binary.
     # Removing both extensions handles systems set up with either version.
     rm -f /etc/apt/keyrings/docker.asc \
@@ -438,7 +417,7 @@ if [[ -f "$DOCKER_SENTINEL" ]]; then
     rm -f /etc/apt/keyrings/docker.gpg \
         && success "Removed /etc/apt/keyrings/docker.gpg (legacy)" || true
 
-    # BUG-UN2 FIX: setup.sh writes the Docker APT source in DEB822 format at
+    # setup.sh writes the Docker APT source in DEB822 format at
     # docker.sources, not the one-liner docker.list format.  Removing both
     # extensions handles systems set up with either version.
     rm -f /etc/apt/sources.list.d/docker.sources \
@@ -475,10 +454,10 @@ info "Step 10: Removing packages installed by setup.sh..."
 # intentionally LEFT in place as they are standard and may be relied upon by
 # other things on the system.
 #
-# BUG-UN3 FIX: apache2-utils (htpasswd) was installed by setup.sh for Caddy
-#   basic-auth hash generation but was missing from this list.
-# BUG-UN4 FIX: cron was installed by setup.sh but was missing from this list.
-# BUG-UN5 FIX: haveged is a systemd service that setup.sh enables; explicitly
+# apache2-utils (htpasswd) was installed by setup.sh for Caddy basic-auth hash
+#   generation and must be removed here.
+# cron was installed by setup.sh and must be removed here.
+# haveged is a systemd service that setup.sh enables; explicitly
 #   disable and stop it before purging so its enabled symlink is cleaned up
 #   before the package is removed, avoiding a stale unit warning.
 EXTRA_PKGS=(age haveged rclone python3-argon2 apache2-utils cron)
@@ -502,12 +481,12 @@ apt-get autoremove -y 2>/dev/null || true
 # ═══════════════════════════════════════════════════════════════
 # STEP 11 — Remove UFW rules added by setup.sh
 #
-# FIX (Issue 3): The previous while-loop had no iteration cap.  If
+# The previous while-loop had no iteration cap.  If
 # `ufw delete` exits 0 but leaves the matching rule in place (corrupted
 # UFW state, silent no-op, etc.) the grep condition stays true and the
 # script hangs forever.
 #
-# Replaced with a bounded for-loop (20 iterations).  Normal deletion
+# Uses a bounded for-loop (20 iterations).  Normal deletion
 # takes at most 2 passes; 20 is a generous hard cap that guarantees
 # termination even under degraded UFW state.  An explicit `|| break`
 # on the delete call exits immediately on the first hard failure.

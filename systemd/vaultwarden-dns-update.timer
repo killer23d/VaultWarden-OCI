@@ -1,8 +1,8 @@
 [Unit]
 Description=VaultWarden DNS Update Timer hourly
-# SY-2: Prevent this timer firing mid-shutdown.
+# Prevent this timer firing mid-shutdown.
 Conflicts=shutdown.target
-# Issue #57: OnFailure on the timer unit catches calendar parse errors or
+# OnFailure on the timer unit catches calendar parse errors or
 # systemd activation failures that would otherwise go unnotified.
 OnFailure=vaultwarden-notify-failure@%n.service
 
@@ -14,9 +14,8 @@ Persistent=true
 # Without this, Persistent=true causes an immediate activation on reboot
 # which may race against the Docker daemon still starting up.
 OnBootSec=2min
-# SSD-M3/P2-H: Added RandomizedDelaySec to spread post-reboot catch-up
-# burst and prevent simultaneous maintenance.sh --update-dns invocations
-# competing for the FD-9 operations.lock alongside other timers.
+# RandomizedDelaySec spreads post-reboot catch-up burst and prevents
+# simultaneous --update-dns invocations competing for the operations lock.
 RandomizedDelaySec=120
 
 [Install]
