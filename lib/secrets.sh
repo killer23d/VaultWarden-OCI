@@ -3,7 +3,7 @@
 # would produce an ~1842-line file exceeding the maintainability threshold.
 # These libraries remain separate.
 # lib/secrets.sh - Shared secrets management functions
-# Used by edit-secrets.sh and setup-secrets.sh
+# Used by edit-secrets.sh and setup.sh (--phase=secrets)
 #
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
@@ -988,14 +988,14 @@ EOF
 
    OPTION B: From Secrets Above (Manual Rebuild)
    [ ] Run secrets setup:
-       ./setup-secrets.sh
+       ./setup.sh --phase=secrets
    [ ] Manually enter the values from [SECTION 2] when prompted.
 
 4. FINALIZATION
    [ ] Start services:
        make up
    [ ] Check health:
-       ./health.sh
+       ./maintenance.sh --health
 
 ════════════════════════════════════════════════════════════════════════
 END OF RECOVERY KIT

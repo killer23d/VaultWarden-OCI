@@ -76,8 +76,8 @@ OPTIONS:
                   './edit-secrets.sh --export-recovery-kit' BEFORE using
                   --force on a running installation.
   --dry-run       Print what would happen without making any changes.
-  --phase=secrets   Run ONLY the secrets configuration phase (equivalent to setup-secrets.sh)
-  --phase=systemd   Run ONLY the systemd installation phase (equivalent to setup-systemd.sh)
+  --phase=secrets   Run ONLY the secrets configuration phase (formerly setup-secrets.sh)
+  --phase=systemd   Run ONLY the systemd installation phase (formerly setup-systemd.sh)
   --help          Show this help and exit.
 EOF
 }
@@ -945,11 +945,7 @@ set_script_permissions() {
     # ------------------------------------------------------------------
     local root_scripts=(
         "setup.sh"
-        "setup-secrets.sh"
-        "setup-systemd.sh"
         "edit-secrets.sh"
-        "health.sh"
-        "update.sh"
         "backup.sh"
         "restore.sh"
         "startup.sh"
@@ -1216,7 +1212,7 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# run_phase_secrets — inline of setup-secrets.sh logic
+# run_phase_secrets — inline of the former setup-secrets.sh logic
 # ---------------------------------------------------------------------------
 run_phase_secrets() {
 local CLEANUP_ACTIONS=()
@@ -1282,7 +1278,7 @@ _ss_show_help() {
 VaultWarden Interactive Secrets Setup (Idempotent - Security Hardened)
 
 USAGE:
-    ./setup-secrets.sh [OPTIONS]
+    ./setup.sh --phase=secrets [OPTIONS]
 
 OPTIONS:
     --auto                  Auto-generate passwords; external credentials
@@ -1310,7 +1306,7 @@ NOTES:
         1. sudo ./setup.sh --domain DOMAIN --email EMAIL
         2. nano .env           (set CLOUDFLARE_ZONE_ID, EMAIL_MODE, EMAIL_PROVIDER,
                                 SMTP_HOST, etc.)
-        3. ./setup-secrets.sh  (prompted for all credentials)
+        3. ./setup.sh --phase=secrets  (prompted for all credentials)
         4. make up
 
 FEATURES:
@@ -1331,11 +1327,11 @@ SECURITY ENHANCEMENTS:
     ✅ Enhanced error messages
 
 EXAMPLES:
-    ./setup-secrets.sh                  # Interactive setup
-    ./setup-secrets.sh --auto           # Automated with generated passwords
-    ./setup-secrets.sh --force          # Reconfigure without prompting
-    ./setup-secrets.sh --skip-optional  # Skip push notifications
-    ./setup-secrets.sh --export-recovery-kit # Prompt for kit after setup
+    ./setup.sh --phase=secrets                  # Interactive setup
+    ./setup.sh --phase=secrets --auto           # Automated with generated passwords
+    ./setup.sh --phase=secrets --force          # Reconfigure without prompting
+    ./setup.sh --phase=secrets --skip-optional  # Skip push notifications
+    ./setup.sh --phase=secrets --export-recovery-kit # Prompt for kit after setup
 
 SEE ALSO:
     ./edit-secrets.sh --list                  # Show existing secret key names
@@ -1743,7 +1739,7 @@ collect_secrets() {
     _email_mode=$(    _read_dotenv_value "EMAIL_MODE"     .env)
     _email_provider=$(   _read_dotenv_value "EMAIL_PROVIDER" .env)
     if [[ -z "$_email_mode" && -f ".env" && ! -r ".env" ]]; then
-        log_warn "setup-secrets.sh: .env is not readable by $(id -un); EMAIL_MODE/EMAIL_PROVIDER defaulting to 'auto'/'mailersend'."
+        log_warn "setup.sh --phase=secrets: .env is not readable by $(id -un); EMAIL_MODE/EMAIL_PROVIDER defaulting to 'auto'/'mailersend'."
         log_warn "Fix ownership: sudo chown $(id -un):$(id -gn) .env"
     fi
     _email_mode="${_email_mode:-auto}"
@@ -2205,7 +2201,7 @@ _ss_main() {
         # Phase 2-C: Updated next-steps to reflect the new install order.
         # The user has already edited .env before running this script, so
         # step 1 is "Verify" not "Review/create".
-        # FIX SS-L1: cron-setup.sh was removed; reference setup-systemd.sh instead.
+        # FIX SS-L1: cron-setup.sh was removed; reference setup.sh --phase=systemd instead.
         echo "📋 Next Steps:"
         echo "   1. Verify .env settings:      nano .env"
         echo "      ► Confirm: CLOUDFLARE_ZONE_ID, EMAIL_MODE, EMAIL_PROVIDER,"
@@ -2213,7 +2209,7 @@ _ss_main() {
         echo "   2. Start services:            make up"
         echo "   3. Setup automation:          sudo ./setup.sh --phase=systemd --install"
         echo "   4. Export recovery kit:       ./edit-secrets.sh --export-recovery-kit"
-        echo "   5. Test health:               ./maintenance.sh health"
+        echo "   5. Test health:               ./maintenance.sh --health"
         echo "   6. To rotate a single field:  ./edit-secrets.sh --rotate FIELD"
         echo "   7. To list secret keys:       ./edit-secrets.sh --list"
         echo ""
@@ -2237,7 +2233,7 @@ _ss_main() {
 }
 
 # ---------------------------------------------------------------------------
-# run_phase_systemd — inline of setup-systemd.sh logic
+# run_phase_systemd — inline of the former setup-systemd.sh logic
 # ---------------------------------------------------------------------------
 run_phase_systemd() {
 local INSTALL=false
@@ -2292,7 +2288,7 @@ OPTIONS:
     --help        Show this help
 
 WHAT --install DOES:
-    1. Copies maintenance.sh, backup.sh, health.sh -> /opt/vaultwarden-scripts/
+    1. Copies maintenance.sh, backup.sh -> /opt/vaultwarden-scripts/
        (root:root 700; scripts are self-locating via BASH_SOURCE[0])
     2. Copies lib/ -> /opt/vaultwarden-scripts/lib/ (root:root 644)
        lib files are 644 (world-readable) so a non-root service User= can
@@ -2443,8 +2439,8 @@ install_units() {
 
         # FIX [LIB-PERM]: lib files are installed 644 root:root (not 640).
         #
-        # Rationale: these files are sourced by maintenance.sh, backup.sh,
-        # and health.sh at runtime. If the systemd unit's User= directive is
+        # Rationale: these files are sourced by maintenance.sh and backup.sh
+        # at runtime. If the systemd unit's User= directive is
         # ever changed from root to a service account, a 640 root:root mode
         # causes every "source lib/common.sh" call to fail silently (bash
         # reports the permission error to stderr but continues, leaving all
@@ -2471,7 +2467,7 @@ install_units() {
         return 1
     fi
 
-    local scripts_to_install=(maintenance.sh backup.sh health.sh)
+    local scripts_to_install=(maintenance.sh backup.sh)
     for script in "${scripts_to_install[@]}"; do
         local src="$PROJECT_ROOT/$script"
         if [[ ! -f "$src" ]]; then
@@ -2613,7 +2609,7 @@ install_units() {
             # canonical absolute path if the key exists at $AGE_KEY_DEST.
             # A stale relative SOPS_AGE_KEY_FILE=secrets/keys/age-key.txt in the
             # env file (written before BUG-AK1 was fixed) would otherwise persist
-            # across subsequent --install runs, causing backup.sh and health.sh to
+            # across subsequent --install runs, causing backup.sh to
             # look for the key in the wrong location and fail with "Age key file
             # not found: /opt/vaultwarden-scripts/secrets/keys/age-key.txt".
             if [[ -f "$AGE_KEY_DEST" ]]; then
@@ -2861,7 +2857,7 @@ validate_installation() {
     local warnings=0
 
     log_info "[1/8] Checking installed scripts ..."
-    local scripts_to_check=(maintenance.sh backup.sh health.sh)
+    local scripts_to_check=(maintenance.sh backup.sh)
     for script in "${scripts_to_check[@]}"; do
         local installed="$OPT_SCRIPTS_DIR/$script"
         if [[ ! -f "$installed" ]]; then

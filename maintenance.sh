@@ -61,12 +61,13 @@ VaultWarden-OCI Maintenance Script
 
 USAGE:
     ./maintenance.sh [OPTIONS]
-    ./maintenance.sh SUBCOMMAND [SUBCOMMAND-OPTIONS]
+    ./maintenance.sh --health [HEALTH-OPTIONS]
+    ./maintenance.sh --update [UPDATE-OPTIONS]
 
-SUBCOMMANDS:
-    health              Run system health checks (equivalent to health.sh)
-                        Accepts health.sh options: --comprehensive --fix --report --help
-    update              Update system packages and Docker images (equivalent to update.sh)
+SUBCOMMANDS (double-dash format):
+    --health            Run system health checks (equivalent to the former health.sh)
+                        Accepts health options: --comprehensive --fix --report --help
+    --update            Update system packages and Docker images (equivalent to the former update.sh)
                         Options: --system --images --all --force --dry-run --skip-backup --email
 
 TARGETED (single-task) OPTIONS:
@@ -119,8 +120,8 @@ EXAMPLES:
     ./maintenance.sh --test-email --recipient admin@example.com
     sudo ./maintenance.sh --db-maint              # Deep DB maintenance (interactive)
     sudo ./maintenance.sh --db-maint --force      # Deep DB maintenance (non-interactive)
-    ./maintenance.sh health                       # Run health checks
-    ./maintenance.sh update --all                 # Update system + images
+    ./maintenance.sh --health                     # Run health checks
+    ./maintenance.sh --update --all               # Update system + images
 EOF
 }
 
@@ -151,12 +152,12 @@ while [[ $# -gt 0 ]]; do
         --recipient)       TEST_RECIPIENT="$2";  shift 2 ;;
         --verbose)         VERBOSE=true;         shift ;;
         --help)            show_help; exit 0 ;;
-        health)
+        health|--health)
             shift
             run_health_check "$@"
             exit $?
             ;;
-        update)
+        update|--update)
             shift
             run_update "$@"
             exit $?
@@ -977,7 +978,7 @@ DNS record updated automatically." \
 validate_system_health() {
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would validate system health"; return 0; fi
     log_info "Validating system health after maintenance..."
-    "$SCRIPT_DIR/health.sh" --quiet \
+    "$SCRIPT_DIR/maintenance.sh" --health --quiet \
         && { log_success "System health validation passed"; return 0; } \
         || { log_warn "System health validation detected issues"; return 1; }
 }
@@ -1069,7 +1070,7 @@ _load_env() {
 }
 
 # ---------------------------------------------------------------------------
-# run_health_check — inline of health.sh logic
+# run_health_check — inline of the former health.sh logic
 # ---------------------------------------------------------------------------
 run_health_check() {
 # Load environment.
@@ -1093,7 +1094,7 @@ local ENV_FILE="$(_resolve_env_file || true)"
 
 if [[ -n "${ENV_FILE}" ]]; then
     if [[ ! -r "${ENV_FILE}" ]]; then
-        log_error "health.sh: '${ENV_FILE}' is not readable by $(id -un) — config variables will be unset."
+        log_error "maintenance.sh --health: '${ENV_FILE}' is not readable by $(id -un) — config variables will be unset."
         log_error "Fix ownership: sudo chown $(id -un):$(id -gn) '${ENV_FILE}'"
     else
         load_env_file "${ENV_FILE}" || true
@@ -1102,7 +1103,7 @@ else
     # Neither candidate path exists; the script may still work if the
     # caller (e.g., systemd EnvironmentFile=) has already exported the
     # required variables into the process environment.
-    log_warn "health.sh: no .env file found at '${SCRIPT_DIR}/.env' or '/etc/vaultwarden/vaultwarden.env' — relying on inherited environment"
+    log_warn "maintenance.sh --health: no .env file found at '${SCRIPT_DIR}/.env' or '/etc/vaultwarden/vaultwarden.env' — relying on inherited environment"
     ENV_FILE="/etc/vaultwarden/vaultwarden.env"  # canonical path for error messages
 fi
 
@@ -1280,7 +1281,7 @@ _health_parse_args() {
 
 _show_help() {
     cat <<'EOF'
-Usage: ./health.sh [OPTIONS]
+Usage: ./maintenance.sh --health [OPTIONS]
 
 Options:
   --comprehensive, -c  Run all checks including extended diagnostics
@@ -2002,7 +2003,7 @@ _check_config() {
     fi
 
     local root_owned_issues=()
-    for f in ".env" "Makefile" "health.sh" "startup.sh" "backup.sh" "edit-secrets.sh"; do
+    for f in ".env" "Makefile" "startup.sh" "backup.sh" "edit-secrets.sh"; do
         local fpath="${SCRIPT_DIR}/${f}"
         if [[ -e "$fpath" ]]; then
             local owner
@@ -2112,7 +2113,7 @@ _notify_failures() {
 
         subject="VaultWarden Health [${status^^}]: ${name} on $(hostname)"
         printf -v body \
-            'Health check alert at %s\n\nCheck : %s\nStatus: %s\nDetail: %s\n\nThis alert will not repeat for %ss (%s min).\nRun '\''./health.sh --report'\'' for full status.' \
+            'Health check alert at %s\n\nCheck : %s\nStatus: %s\nDetail: %s\n\nThis alert will not repeat for %ss (%s min).\nRun '\''./maintenance.sh --health --report'\'' for full status.' \
             "$alert_date" "$name" "${status^^}" "$message" \
             "$ALERT_COOLDOWN_SECONDS" "$(( ALERT_COOLDOWN_SECONDS / 60 ))"
 
@@ -2292,7 +2293,7 @@ main "$@"    _health_main "$@"
 }
 
 # ---------------------------------------------------------------------------
-# run_update — inline of update.sh logic
+# run_update — inline of the former update.sh logic
 # ---------------------------------------------------------------------------
 run_update() {
 local UPDATE_SYSTEM=false
@@ -2307,7 +2308,7 @@ _update_show_help() {
 VaultWarden-OCI Update Script
 
 USAGE:
-    sudo ./update.sh [OPTIONS]
+    sudo ./maintenance.sh --update [OPTIONS]
 
 OPTIONS:
     --system         Update system packages (apt upgrade)
@@ -2320,10 +2321,10 @@ OPTIONS:
     --help           Show this help
 
 EXAMPLES:
-    sudo ./update.sh --system        # Update system packages only
-    sudo ./update.sh --images        # Update Docker images only
-    sudo ./update.sh --all           # Full system + image update
-    sudo ./update.sh --all --email   # Full update with email notification
+    sudo ./maintenance.sh --update --system        # Update system packages only
+    sudo ./maintenance.sh --update --images        # Update Docker images only
+    sudo ./maintenance.sh --update --all           # Full system + image update
+    sudo ./maintenance.sh --update --all --email   # Full update with email notification
 EOF
 }
 
@@ -2357,7 +2358,7 @@ fi
 #   - Any chmod 644/640 sweep over the repo directory
 #   - rsync/scp from a source where the bit was lost
 # startup.sh already guards this inside prepare_log_directories(); this
-# function mirrors that guard so update.sh is also resilient.
+# function mirrors that guard so the update subcommand is also resilient.
 # ---------------------------------------------------------------------------
 ensure_caddy_entrypoint_executable() {
     local ep="${SCRIPT_DIR}/caddy/entrypoint.sh"
@@ -2529,7 +2530,7 @@ rollback_image_digests() {
     if (( rollback_failed > 0 )); then
         log_error "Rollback incomplete: $rollback_failed image(s) could not be restored."
         log_error "Do NOT run 'docker compose up -d' until all images are at consistent versions."
-        log_error "Pull again from a stable network: sudo ./update.sh --images"
+        log_error "Pull again from a stable network: sudo ./maintenance.sh --update --images"
         return 1
     fi
 
@@ -2717,7 +2718,7 @@ _update_main() {
             if [[ "$EMAIL_NOTIFY" == "true" ]]; then
                 local subject="[VaultWarden] Update ABORTED: partial image pull"
                 local body
-                body="$(printf 'A partial docker image pull was detected on host: %s\nTime: %s\n\nSome images were updated and some failed. The pulled images have been\nrolled back to their pre-pull digests to prevent a split-version stack.\n\nResolve the network or registry issue, then retry:\n  sudo ./update.sh --images\n' \
+                body="$(printf 'A partial docker image pull was detected on host: %s\nTime: %s\n\nSome images were updated and some failed. The pulled images have been\nrolled back to their pre-pull digests to prevent a split-version stack.\n\nResolve the network or registry issue, then retry:\n  sudo ./maintenance.sh --update --images\n' \
                     "$(hostname -f 2>/dev/null || hostname)" "$(date)")"
                 send_notification_email "$subject" "$body" 2>/dev/null || true
             fi
@@ -2728,7 +2729,7 @@ _update_main() {
             if [[ "$EMAIL_NOTIFY" == "true" ]]; then
                 local subject="[VaultWarden] Update WARNING: image pull failed"
                 local body
-                body="$(printf 'All docker image pulls failed on host: %s\nTime: %s\n\nNo images were updated. Services remain on their current versions.\n\nResolve the network or registry issue, then retry:\n  sudo ./update.sh --images\n' \
+                body="$(printf 'All docker image pulls failed on host: %s\nTime: %s\n\nNo images were updated. Services remain on their current versions.\n\nResolve the network or registry issue, then retry:\n  sudo ./maintenance.sh --update --images\n' \
                     "$(hostname -f 2>/dev/null || hostname)" "$(date)")"
                 send_notification_email "$subject" "$body" 2>/dev/null || true
             fi

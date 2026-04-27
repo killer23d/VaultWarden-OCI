@@ -42,7 +42,7 @@ BACKGROUND=false
 DRY_RUN=false
 DO_DOWN=false
 # STARTUP-12 FIX: skip docker compose pull on routine restarts (e.g. systemd
-# ExecStart). Pass --skip-pull in the unit file; use update.sh or a manual
+# ExecStart). Pass --skip-pull in the unit file; use maintenance.sh --update or a manual
 # ./startup.sh without the flag when an image refresh is desired.
 SKIP_PULL=false
 SKIP_EGRESS_FIX=false
@@ -612,7 +612,7 @@ cleanup_orphaned_resources() {
 #
 # STARTUP-12 FIX: guard with SKIP_PULL so that systemd ExecStart restarts
 # (which pass --skip-pull) are instant. Image refreshes should go through
-# update.sh or a manual ./startup.sh without --skip-pull.
+# maintenance.sh --update or a manual ./startup.sh without --skip-pull.
 # ---------------------------------------------------------------------------
 pull_images() {
   if [[ "$SKIP_PULL" == "true" ]]; then
@@ -807,18 +807,18 @@ run_health_check() {
     return 0
   fi
 
-  if [[ ! -x "./health.sh" ]]; then
-    log_warn "health.sh not executable or missing; skipping health check"
+  if [[ ! -x "./maintenance.sh" ]]; then
+    log_warn "maintenance.sh not executable or missing; skipping health check"
     return 0
   fi
 
   log_info "Running post-start health check..."
 
-  # Disable errexit around health.sh so we can capture its exit code cleanly.
+  # Disable errexit around maintenance.sh --health so we can capture its exit code cleanly.
   # The outer set -euo pipefail would abort the script before we could inspect
-  # the code if health.sh exits non-zero.
+  # the code if maintenance.sh --health exits non-zero.
   local health_exit=0
-  ./health.sh || health_exit=$?
+  ./maintenance.sh --health || health_exit=$?
 
   case "$health_exit" in
     0)
@@ -829,7 +829,7 @@ run_health_check() {
       # Non-critical: startup continues, but operator should investigate
       ;;
     *)
-      # exit 2 = one or more critical failures; exit 3+ = health.sh crash
+      # exit 2 = one or more critical failures; exit 3+ = maintenance.sh crash
       log_error "Health check reported CRITICAL failures (exit ${health_exit}) — stack is unhealthy"
       log_error "Startup aborted. Investigate the failures above, then re-run ./startup.sh"
       log_error "To skip this gate during recovery: ./startup.sh --skip-health"

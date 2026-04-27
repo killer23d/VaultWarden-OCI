@@ -114,7 +114,7 @@ Then supply the external credentials that `--auto` cannot generate for you:
 ./edit-secrets.sh --rotate push_installation_key
 ```
 
-**Interactive install (no `--auto`):** `setup.sh` creates the skeleton and displays a next-steps screen. Follow the steps printed on screen — edit `.env` first, then run `./setup-secrets.sh` to be prompted for all credentials at once.
+**Interactive install (no `--auto`):** `setup.sh` creates the skeleton and displays a next-steps screen. Follow the steps printed on screen — edit `.env` first, then run `./setup.sh --phase=secrets` to be prompted for all credentials at once.
 
 See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for every available variable and [docs/EMAIL.md](docs/EMAIL.md) for a full email setup walkthrough.
 
@@ -124,14 +124,14 @@ See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for every available variable 
 
 ```bash
 ./startup.sh          # start all services  (or: make start)
-./health.sh           # verify everything is healthy  (or: make health)
+./maintenance.sh --health  # verify everything is healthy  (or: make health)
 ```
 
 Once healthy, switch the Cloudflare record to **Proxied (Orange Cloud)** and set SSL/TLS encryption to **Full (Strict)**.
 
-> **`startup.sh` diagnostic improvement:** If the post-startup quiet health check exits non-zero, `startup.sh` now automatically re-runs `./health.sh` in verbose mode so full diagnostics are always visible to the operator.
+> **`startup.sh` diagnostic improvement:** If the post-startup quiet health check exits non-zero, `startup.sh` now automatically re-runs `./maintenance.sh --health` in verbose mode so full diagnostics are always visible to the operator.
 
-> **`health.sh` fix:** Configuration validation now correctly checks for `DOMAIN_NAME` (the canonical env var) instead of `DOMAIN`.
+> **Health check fix:** Configuration validation now correctly checks for `DOMAIN_NAME` (the canonical env var) instead of `DOMAIN`.
 
 ---
 
@@ -139,7 +139,7 @@ Once healthy, switch the Cloudflare record to **Proxied (Orange Cloud)** and set
 
 ```bash
 # Set up automated backups, updates, health checks, and maintenance via systemd timers
-sudo ./setup-systemd.sh --install
+sudo ./setup.sh --phase=systemd --install
 
 # Export a plaintext recovery kit to your password manager
 # Run this AFTER all secrets are configured so everything is included
@@ -149,7 +149,7 @@ sudo ./setup-systemd.sh --install
 ./create-breakglass-admin.sh    # or: make breakglass-create
 ```
 
-> **`setup-systemd.sh` improvement:** `--install` now validates all `OnCalendar=` expressions via `systemd-analyze calendar` before enabling timers and warns on invalid expressions. All generated service units now include an `[Install]` section (`WantedBy=multi-user.target`) so `systemctl enable` is no longer a no-op. See [docs/ADVANCED-CUSTOMIZATION.md](docs/ADVANCED-CUSTOMIZATION.md) for timer details.
+> **`setup.sh --phase=systemd` improvement:** `--install` now validates all `OnCalendar=` expressions via `systemd-analyze calendar` before enabling timers and warns on invalid expressions. All generated service units now include an `[Install]` section (`WantedBy=multi-user.target`) so `systemctl enable` is no longer a no-op. See [docs/ADVANCED-CUSTOMIZATION.md](docs/ADVANCED-CUSTOMIZATION.md) for timer details.
 
 The installed systemd timer schedule:
 
@@ -246,12 +246,9 @@ Full details, provider setup, Postfix MTA configuration, and troubleshooting: **
 | Script | Purpose |
 | :-- | :-- |
 | `setup.sh` | One-time system setup: installs deps, generates `.env` and `docker-compose.yml` from templates, creates Age key, SOPS config, and empty secrets structure. Use `--phase=secrets` for the secrets bootstrap phase or `--phase=systemd` for the systemd integration phase. In `--auto` mode, also auto-generates passwords/passphrases after all infra phases complete, then shows a single consolidated summary screen. |
-| `setup-secrets.sh` | **Deprecated shim** — delegates to `./setup.sh --phase=secrets`. |
 | `startup.sh` | Start / stop / restart services. Post-startup health check re-runs verbose diagnostics automatically on failure. |
-| `health.sh` | **Deprecated shim** — delegates to `./maintenance.sh health`. |
 | `backup.sh` | Encrypted database and full-system backups. Uses host `sqlite3` with the Online Backup API for atomic, WAL-safe DB snapshots — no Docker container required for backup integrity checks. Accepts `--keep N` to override retention days (must be a positive integer). |
 | `restore.sh` | Interactive or automated restore with a reworked flow: interactive Age decryption key prompt; `--key-file` flag and `RESTORE_AGE_KEY_FILE` env var for scripted/CI use; pre-restore key round-trip validation; post-restore automatic Age key generation and rotation. Uses host `sqlite3` for archive integrity verification — no Docker required. |
-| `update.sh` | **Deprecated shim** — delegates to `./maintenance.sh update`. |
 | `maintenance.sh` | System cleanup, DNS update, DB maintenance, email test, health monitoring (`health` subcommand), and container updates (`update` subcommand). |
 | `edit-secrets.sh` | Secure secrets editor (Age + SOPS) — rotate individual fields, list keys, export recovery kit |
 | `create-breakglass-admin.sh` | Emergency OCI serial console admin. |
@@ -298,7 +295,7 @@ Full details: [docs/SECURITY.md](docs/SECURITY.md)
 
 ## 🔄 Update & Rollback
 
-`update.sh` runs a fully phased cycle: pre-update health check → backup → pull → restart → post-update health check. If the post-update health check fails, it **automatically rolls back** via `restore.sh --latest`. Age key health is now validated before any update operation begins. See [docs/OPERATIONS.md](docs/OPERATIONS.md) for the full phase diagram.
+`maintenance.sh --update` runs a fully phased cycle: pre-update health check → backup → pull → restart → post-update health check. If the post-update health check fails, it **automatically rolls back** via `restore.sh --latest`. Age key health is now validated before any update operation begins. See [docs/OPERATIONS.md](docs/OPERATIONS.md) for the full phase diagram.
 
 ---
 

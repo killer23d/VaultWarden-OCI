@@ -4,7 +4,7 @@ Common issues and solutions for VaultWarden-OCI deployment and operations.
 
 ## General Troubleshooting Approach
 
-1. **Check service status**: `./health.sh` or `make health`
+1. **Check service status**: `./maintenance.sh --health` or `make health`
 2. **Review logs**: `docker compose logs` or `make logs`
 3. **Validate configuration**: `docker compose config` or `make test-config`
 4. **Check resources**: `docker stats`
@@ -22,7 +22,7 @@ Common issues and solutions for VaultWarden-OCI deployment and operations.
 **Diagnosis**:
 ```bash
 # Check service status
-./health.sh
+./maintenance.sh --health
 docker compose ps
 
 # View logs
@@ -264,7 +264,7 @@ sops -d secrets/secrets.yaml
 ### Secrets Environment Leaking to Child Processes
 
 **Symptoms**:
-- `SOPS_AGE_KEY_FILE` remains set after running `./setup.sh`, `./edit-secrets.sh`, or `./setup-secrets.sh`
+- `SOPS_AGE_KEY_FILE` remains set after running `./setup.sh`, `./edit-secrets.sh`, or `./setup.sh --phase=secrets`
 - Docker or rclone subprocesses inherit the Age key file path (visible via `ps aux`)
 
 **Diagnosis**:
@@ -668,7 +668,7 @@ make restore-db
 ./restore.sh --file /path/to/older-backup.age
 
 # After restore, verify services
-./health.sh --comprehensive
+./maintenance.sh --health --comprehensive
 ```
 
 ### Offsite Backup Sync Fails
@@ -971,11 +971,11 @@ docker compose restart vaultwarden
 **Diagnosis**:
 ```bash
 # List installed VaultWarden systemd timers
-sudo ./setup-systemd.sh --status
+sudo ./setup.sh --phase=systemd --status
 make systemd-status
 
 # Validate security and dependencies
-sudo ./setup-systemd.sh --validate
+sudo ./setup.sh --phase=systemd --validate
 
 # Check timer logs via journald
 journalctl -u vaultwarden-maintenance.service -n 50
@@ -989,22 +989,22 @@ systemctl list-timers --all | grep vaultwarden
 **Solutions**:
 ```bash
 # (Re-)install systemd timers
-sudo ./setup-systemd.sh --install
+sudo ./setup.sh --phase=systemd --install
 make systemd-install
 
 # After pulling a repo update, re-install to sync /opt/ scripts
-sudo ./setup-systemd.sh --install
+sudo ./setup.sh --phase=systemd --install
 
 # Check for split-brain (stale /opt/ scripts)
-sudo ./setup-systemd.sh --validate
+sudo ./setup.sh --phase=systemd --validate
 # Look for: ⚠️  SPLIT-BRAIN DETECTED warning
 
 # Verify flock is installed
 command -v flock || sudo apt install util-linux
 ```
 
-> **Note**: Automation is managed via **systemd timers** (`setup-systemd.sh`), not
-> cron. There is no `cron-setup.sh` in the repository. Use `setup-systemd.sh`
+> **Note**: Automation is managed via **systemd timers** (`setup.sh --phase=systemd`), not
+> cron. There is no `cron-setup.sh` in the repository. Use `setup.sh --phase=systemd`
 > for all scheduling operations. Timer logs are written to the systemd journal
 > and are viewed with `journalctl`, not as flat log files.
 
@@ -1019,7 +1019,7 @@ When reporting issues, include:
 make diagnose > diagnose-report.txt
 
 # System information
-./health.sh --comprehensive --json > health-report.json
+./maintenance.sh --health --comprehensive --json > health-report.json
 
 # Service logs
 docker compose logs > service-logs.txt
@@ -1035,7 +1035,7 @@ docker stats --no-stream > resource-usage.txt
 make version > version-info.txt
 
 # Systemd timer status
-sudo ./setup-systemd.sh --status > timer-status.txt
+sudo ./setup.sh --phase=systemd --status > timer-status.txt
 
 # Fail2Ban jail status
 docker compose exec fail2ban fail2ban-client status >> timer-status.txt

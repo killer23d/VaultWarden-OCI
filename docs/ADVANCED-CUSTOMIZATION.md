@@ -138,10 +138,10 @@ mv docker-compose.override.yml docker-compose.override.yml.bak
 Automation is managed by **systemd timers** (not cron). Install, validate, or remove them with:
 
 ```bash
-sudo ./setup-systemd.sh --install    # install all timers and services
-sudo ./setup-systemd.sh --validate   # verify installed state matches repo
-sudo ./setup-systemd.sh --remove     # remove all timers and services
-sudo ./setup-systemd.sh --status     # show status of all units
+sudo ./setup.sh --phase=systemd --install    # install all timers and services
+sudo ./setup.sh --phase=systemd --validate   # verify installed state matches repo
+sudo ./setup.sh --phase=systemd --remove     # remove all timers and services
+sudo ./setup.sh --phase=systemd --status     # show status of all units
 ```
 
 ### Installed Timer Schedule
@@ -182,7 +182,7 @@ journalctl -u vaultwarden-health.service -n 50
 
 ### Modifying a Timer Schedule
 
-Edit the `.timer` file directly (do not use `setup-systemd.sh` — it would overwrite your change on next install):
+Edit the `.timer` file directly (do not use `setup.sh --phase=systemd` — it would overwrite your change on next install):
 
 ```bash
 sudo systemctl edit --full vaultwarden-db-backup.timer
@@ -712,7 +712,7 @@ curl -sX POST https://your-webhook-url/notify \
 - Validate with `docker compose config` before applying
 - Run `sudo ./setup.sh --force ...` to regenerate
 - Restart with `./startup.sh --force`
-- Verify with `./health.sh` or `make health`
+- Verify with `./maintenance.sh --health` or `make health`
 - Commit template changes to version control
 - Create a backup before major changes: `./backup.sh --type full`
-- After re-installing automation: `sudo ./setup-systemd.sh --install && systemctl list-timers --all | grep vaultwarden`
+- After re-installing automation: `sudo ./setup.sh --phase=systemd --install && systemctl list-timers --all | grep vaultwarden`

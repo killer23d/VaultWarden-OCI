@@ -3,7 +3,7 @@ Description=VaultWarden Health Monitor
 Documentation=https://github.com/killer23d/VaultWarden-OCI
 After=docker.service network-online.target
 Requires=docker.service
-ConditionPathExists=/opt/vaultwarden-scripts/health.sh
+ConditionPathExists=/opt/vaultwarden-scripts/maintenance.sh
 OnFailure=vaultwarden-notify-failure@%n.service
 
 [Service]
@@ -15,7 +15,7 @@ Type=oneshot
 WorkingDirectory=/opt/vaultwarden-scripts
 # Leading dash makes the file optional: the service starts even if
 # /etc/vaultwarden/vaultwarden.env does not yet exist (e.g. before
-# setup-systemd.sh --install has run). Missing required vars are caught
+# setup.sh --phase=systemd --install has run). Missing required vars are caught
 # and reported by the script itself.
 EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
 # If maintenance is running, skip this invocation and let the next timer tick
@@ -25,7 +25,7 @@ ExecCondition=/bin/bash -c '! test -f /tmp/.vw_maintenance.lock'
 # --email is intentionally omitted here. Add it once EMAIL_API_TOKEN or
 # SMTP credentials are set in /etc/vaultwarden/vaultwarden.env, otherwise
 # the service exits 1 on every run (no credentials → email fails → exit 1).
-ExecStart=/opt/vaultwarden-scripts/health.sh --fix
+ExecStart=/opt/vaultwarden-scripts/maintenance.sh --health --fix
 User=root
 StandardOutput=journal
 StandardError=journal
@@ -52,7 +52,7 @@ TimeoutStopSec=60
 #   2 — one or more failures          → OnFailure= fires, admin is notified
 #   3 — first-run / no backup yet     → success (transient state, expected on new install)
 #
-# Exit 1 is intentionally treated as success here because health.sh exits 1
+# Exit 1 is intentionally treated as success here because `maintenance.sh --health` exits 1
 # for advisory warnings (disk usage approaching threshold, last backup older
 # than soft limit, etc.) that do not require immediate admin action.
 # Routing exit 1 through OnFailure= would generate spurious failure alerts

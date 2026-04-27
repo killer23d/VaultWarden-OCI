@@ -139,7 +139,7 @@ decrypt_sops_file() {
 # CRY-M2 FIX: sops --in-place will truncate/destroy the target file on any
 # error (malformed YAML, missing .sops.yaml rule, etc.).  We now encrypt to
 # a mktemp file and atomically rename it over the original only on success,
-# matching the safe pattern used by write_secrets() in setup-secrets.sh.
+# matching the safe pattern used by write_secrets() in setup.sh --phase=secrets.
 #
 # [MEDIUM FIX] Replaced `age-keygen -y` with _derive_age_public_key() for
 # Ubuntu 22.04 compatibility and codebase consistency.
@@ -1347,7 +1347,7 @@ _sops_yaml_age_recipients() {
 # ---------------------------------------------------------------------------
 # check_age_key_health
 #
-# Public entry-point for key health checks (called by startup.sh, update.sh, Makefile).
+# Public entry-point for key health checks (called by startup.sh, maintenance.sh --update, Makefile).
 # Delegates to simple_verify_age_key() for file/permission/roundtrip checks,
 # then cross-checks the on-disk public key against the .sops.yaml recipient list.
 # A mismatch means a new age key was restored while .sops.yaml still references the old key.
