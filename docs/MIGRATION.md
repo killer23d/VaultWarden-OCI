@@ -95,7 +95,7 @@ sudo chown -R 1000:1000 /var/lib/vaultwarden/data/attachments
 # Navigate to https://vault.example.com/admin
 
 # Run health checks
-./health.sh
+./maintenance.sh health
 
 # Verify all vaults are accessible
 # Log in with existing credentials and inspect data
@@ -282,7 +282,7 @@ sudo chown -R 1000:1000 /var/lib/vaultwarden/data
 # 5. Start and verify
 cd /path/to/VaultWarden-OCI
 ./startup.sh
-./health.sh
+./maintenance.sh health
 ```
 
 ---
@@ -305,7 +305,7 @@ cd /path/to/VaultWarden-OCI
 
 ```bash
 # Regenerate bcrypt hash for admin basic auth using the built-in tool
-./setup-secrets.sh --hash-only
+./setup.sh --phase=secrets --hash-only
 
 # Update secrets
 ./edit-secrets.sh
@@ -315,14 +315,14 @@ cd /path/to/VaultWarden-OCI
 ./startup.sh --force
 
 # Verify health
-./health.sh
+./maintenance.sh health
 ```
 
 ### Set Up Automation
 
 ```bash
 # Install systemd timers (daily backups, health checks, maintenance, DNS/firewall updates)
-sudo ./setup-systemd.sh --install
+sudo ./setup.sh --phase=systemd --install
 
 # Confirm timers are active
 sudo systemctl list-timers 'vaultwarden-*'
@@ -430,7 +430,7 @@ sudo systemctl list-timers 'vaultwarden-*'
 sudo journalctl -u vaultwarden-db-backup.service -n 50
 
 # Re-install timers if missing
-sudo ./setup-systemd.sh --install
+sudo ./setup.sh --phase=systemd --install
 ```
 
 ---

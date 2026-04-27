@@ -945,11 +945,7 @@ set_script_permissions() {
     # ------------------------------------------------------------------
     local root_scripts=(
         "setup.sh"
-        "setup-secrets.sh"
-        "setup-systemd.sh"
         "edit-secrets.sh"
-        "health.sh"
-        "update.sh"
         "backup.sh"
         "restore.sh"
         "startup.sh"
@@ -2292,7 +2288,7 @@ OPTIONS:
     --help        Show this help
 
 WHAT --install DOES:
-    1. Copies maintenance.sh, backup.sh, health.sh -> /opt/vaultwarden-scripts/
+    1. Copies maintenance.sh, backup.sh -> /opt/vaultwarden-scripts/
        (root:root 700; scripts are self-locating via BASH_SOURCE[0])
     2. Copies lib/ -> /opt/vaultwarden-scripts/lib/ (root:root 644)
        lib files are 644 (world-readable) so a non-root service User= can
@@ -2443,8 +2439,8 @@ install_units() {
 
         # FIX [LIB-PERM]: lib files are installed 644 root:root (not 640).
         #
-        # Rationale: these files are sourced by maintenance.sh, backup.sh,
-        # and health.sh at runtime. If the systemd unit's User= directive is
+        # Rationale: these files are sourced by maintenance.sh and backup.sh
+        # at runtime. If the systemd unit's User= directive is
         # ever changed from root to a service account, a 640 root:root mode
         # causes every "source lib/common.sh" call to fail silently (bash
         # reports the permission error to stderr but continues, leaving all
@@ -2471,7 +2467,7 @@ install_units() {
         return 1
     fi
 
-    local scripts_to_install=(maintenance.sh backup.sh health.sh)
+    local scripts_to_install=(maintenance.sh backup.sh)
     for script in "${scripts_to_install[@]}"; do
         local src="$PROJECT_ROOT/$script"
         if [[ ! -f "$src" ]]; then
@@ -2613,7 +2609,7 @@ install_units() {
             # canonical absolute path if the key exists at $AGE_KEY_DEST.
             # A stale relative SOPS_AGE_KEY_FILE=secrets/keys/age-key.txt in the
             # env file (written before BUG-AK1 was fixed) would otherwise persist
-            # across subsequent --install runs, causing backup.sh and health.sh to
+            # across subsequent --install runs, causing backup.sh to
             # look for the key in the wrong location and fail with "Age key file
             # not found: /opt/vaultwarden-scripts/secrets/keys/age-key.txt".
             if [[ -f "$AGE_KEY_DEST" ]]; then
@@ -2861,7 +2857,7 @@ validate_installation() {
     local warnings=0
 
     log_info "[1/8] Checking installed scripts ..."
-    local scripts_to_check=(maintenance.sh backup.sh health.sh)
+    local scripts_to_check=(maintenance.sh backup.sh)
     for script in "${scripts_to_check[@]}"; do
         local installed="$OPT_SCRIPTS_DIR/$script"
         if [[ ! -f "$installed" ]]; then

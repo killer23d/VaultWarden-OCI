@@ -6,10 +6,10 @@ Complete reference for all management scripts and utility libraries in VaultWard
 > - `db-maint.sh` → `./maintenance.sh --db-maint`
 > - `update-dns.sh` → `./maintenance.sh --update-dns`
 > - `test-email-simple.sh` → `./maintenance.sh --test-email`
-> - `health.sh` → `./maintenance.sh health` *(shim kept for backwards compatibility)*
-> - `update.sh` → `./maintenance.sh update` *(shim kept for backwards compatibility)*
-> - `setup-secrets.sh` → `./setup.sh --phase=secrets` *(shim kept for backwards compatibility)*
-> - `setup-systemd.sh` → `./setup.sh --phase=systemd` *(shim kept for backwards compatibility)*
+> - `health.sh` → `./maintenance.sh health` *(removed; use `./maintenance.sh health` directly)*
+> - `update.sh` → `./maintenance.sh update` *(removed; use `./maintenance.sh update` directly)*
+> - `setup-secrets.sh` → `./setup.sh --phase=secrets` *(removed; use `./setup.sh --phase=secrets` directly)*
+> - `setup-systemd.sh` → `./setup.sh --phase=systemd` *(removed; use `./setup.sh --phase=systemd` directly)*
 >
 > Library consolidation: `lib/security.sh` and `lib/simple_key_resilience.sh` were merged into `lib/crypto.sh`; `lib/email.sh` was inlined into `lib/common.sh`.
 >
@@ -22,17 +22,13 @@ Complete reference for all management scripts and utility libraries in VaultWard
 | # | Script | Category | sudo? |
 |---|---|---|---|
 | 1 | `setup.sh` | Initialisation + secrets + systemd phases | ✅ |
-| — | `setup-secrets.sh` | **Shim** → `./setup.sh --phase=secrets` | — |
-| — | `setup-systemd.sh` | **Shim** → `./setup.sh --phase=systemd` | — |
 | 2 | `startup.sh` | Service management | — |
-| 3 | `health.sh` | **Shim** → `./maintenance.sh health` | — |
-| 4 | `backup.sh` | Backup | — |
-| 5 | `restore.sh` | Backup | — |
-| 6 | `edit-secrets.sh` | Secrets | — |
-| 7 | `update.sh` | **Shim** → `./maintenance.sh update` | — |
-| 8 | `maintenance.sh` | Maintenance + health + update (merged) | `--db-maint` only |
-| 9 | `create-breakglass-admin.sh` | Emergency | ✅ |
-| 10 | `uninstall-vaultwarden.sh` | Uninstall | ✅ |
+| 3 | `backup.sh` | Backup | — |
+| 4 | `restore.sh` | Backup | — |
+| 5 | `edit-secrets.sh` | Secrets | — |
+| 6 | `maintenance.sh` | Maintenance + health + update (merged) | `--db-maint` only |
+| 7 | `create-breakglass-admin.sh` | Emergency | ✅ |
+| 8 | `uninstall-vaultwarden.sh` | Uninstall | ✅ |
 
 **Utility libraries (5):** `lib/common.sh` *(includes email)*, `lib/docker.sh`, `lib/crypto.sh` *(includes key resilience + security)*, `lib/backup_utils.sh`, `lib/secrets.sh`
 
@@ -85,15 +81,11 @@ sudo ./setup.sh --phase=systemd --install
 
 ---
 
-### `setup-secrets.sh` *(deprecated shim — use `./setup.sh --phase=secrets`)*
-**Purpose:** Backwards-compatible shim. All invocations are forwarded to `./setup.sh --phase=secrets "$@"`.
+### `setup.sh --phase=secrets`
+**Purpose:** Secrets configuration phase — interactive or automated secrets bootstrap.
 
 ```bash
-# Preferred
 ./setup.sh --phase=secrets [OPTIONS]
-
-# Legacy (still works via shim)
-./setup-secrets.sh [OPTIONS]
 ```
 
 **Called automatically by `setup.sh --auto`.** Run the secrets phase standalone when you need to re-initialise secrets without re-running full setup — for example, after a partial setup failure, on a cloned deployment, or when rotating all secrets at once.
@@ -167,15 +159,11 @@ make restart   # Force restart
 
 ---
 
-### 3. `health.sh` *(deprecated shim — use `./maintenance.sh health`)*
-**Purpose:** Backwards-compatible shim. All invocations are forwarded to `./maintenance.sh health "$@"`.
+### 3. `maintenance.sh health` subcommand
+**Purpose:** System health monitoring — runs checks and optionally auto-recovers.
 
 ```bash
-# Preferred
 ./maintenance.sh health [OPTIONS]
-
-# Legacy (still works via shim)
-./health.sh [OPTIONS]
 ```
 
 **Always-on checks:**
@@ -369,15 +357,11 @@ make test-secrets    # runs --list internally
 
 ---
 
-### 7. `update.sh` *(deprecated shim — use `./maintenance.sh update`)*
-**Purpose:** Backwards-compatible shim. All invocations are forwarded to `./maintenance.sh update "$@"`.
+### 6. `maintenance.sh update` subcommand
+**Purpose:** Update Docker images and optionally system packages, with pre/post health checks and automatic rollback.
 
 ```bash
-# Preferred
 ./maintenance.sh update [OPTIONS]
-
-# Legacy (still works via shim)
-./update.sh [OPTIONS]
 ```
 
 **Options:**
@@ -401,7 +385,7 @@ make update-system    # Containers + system packages (apt upgrade + Docker engin
 
 ---
 
-### 8. `maintenance.sh` *(merged script)*
+### 7. `maintenance.sh` *(merged script)*
 **Purpose:** Routine cleanup, optimisation, DNS update, deep DB maintenance, email diagnostics, health monitoring, and updates — all in one script with sub-command modes
 
 ```bash
@@ -544,15 +528,11 @@ make breakglass-remove
 
 ---
 
-### 10. `setup-systemd.sh` *(deprecated shim — use `./setup.sh --phase=systemd`)*
-**Purpose:** Backwards-compatible shim. All invocations are forwarded to `./setup.sh --phase=systemd "$@"`.
+### 9. `setup.sh --phase=systemd`
+**Purpose:** Systemd integration phase — installs scripts and timers, validates configuration.
 
 ```bash
-# Preferred
 sudo ./setup.sh --phase=systemd [OPTIONS]
-
-# Legacy (still works via shim)
-sudo ./setup-systemd.sh [OPTIONS]
 ```
 
 > **Note:** This phase replaces the former `cron-setup.sh`. If you have an older deployment that used `cron-setup.sh`, remove those cron entries (`sudo crontab -r`) and install the systemd units with `sudo ./setup.sh --phase=systemd --install`.
@@ -655,7 +635,7 @@ docker compose logs postfix --tail=30
 
 ---
 
-### 11. `uninstall-vaultwarden.sh`
+### 10. `uninstall-vaultwarden.sh`
 **Purpose:** Full idempotent removal of all VaultWarden-OCI components, data, and system configuration installed by `setup.sh`
 
 > ⚠️ **This operation is irreversible.** All data, encrypted secrets, the Age key, Docker volumes, and the project directory are permanently deleted. Create an emergency backup first: `sudo ./backup.sh --type emergency`
@@ -792,7 +772,7 @@ All common operations have Makefile shortcuts. Run `make help` to see the full t
 
 ## 📚 Utility Libraries
 
-All libraries live in `lib/` and are sourced at the top of every script. At install time, `setup-systemd.sh` copies the entire `lib/` tree to `/opt/vaultwarden-scripts/lib/` and patches source paths.
+All libraries live in `lib/` and are sourced at the top of every script. At install time, `setup.sh --phase=systemd` copies the entire `lib/` tree to `/opt/vaultwarden-scripts/lib/` and patches source paths.
 
 ### `lib/common.sh`
 Core functions used by every script. *(Also includes email delivery functions, merged from the former `lib/email.sh`.)*
@@ -957,7 +937,7 @@ automatically on any process exit, including SIGKILL and OOM kill.
 
 ### Script Execution
 1. **Run from project root** — all scripts resolve paths relative to `SCRIPT_DIR`
-2. **Use `sudo` where required** — `setup.sh`, `setup-systemd.sh`, `create-breakglass-admin.sh`, `maintenance.sh --db-maint`, and direct `backup.sh` calls in production
+2. **Use `sudo` where required** — `setup.sh`, `create-breakglass-admin.sh`, `maintenance.sh --db-maint`, and direct `backup.sh` calls in production
 3. **Check `--help` first** — every script supports `--help`
 4. **Use `--dry-run`** — preview any operation before applying
 
@@ -974,7 +954,7 @@ automatically on any process exit, including SIGKILL and OOM kill.
 5. **Re-run `--install` after repo updates** — keeps `/opt/` scripts in sync with the git repo
 
 ### Operational Excellence
-1. **Install systemd timers** — `sudo ./setup-systemd.sh --install` for hands-off operation
+1. **Install systemd timers** — `sudo ./setup.sh --phase=systemd --install` for hands-off operation
 2. **Monitor regularly** — `make health` or rely on the every-30-min timer check
 3. **Test backups** — periodically run `./restore.sh` to verify recoverability
-4. **Validate after updates** — `sudo ./setup-systemd.sh --validate` detects split-brain between `/opt/` and the repo
+4. **Validate after updates** — `sudo ./setup.sh --phase=systemd --validate` detects split-brain between `/opt/` and the repo

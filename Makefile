@@ -152,9 +152,9 @@ fix-permissions: ## Fix file ownership after sudo operations leave root-owned fi
 	echo ""; \
 	for item in \
 	    CHANGELOG.md Makefile README.md VERSION \
-	    backup.sh create-breakglass-admin.sh edit-secrets.sh health.sh \
-	    maintenance.sh restore.sh setup-secrets.sh setup-systemd.sh \
-	    setup.sh startup.sh uninstall-vaultwarden.sh update.sh \
+	    backup.sh create-breakglass-admin.sh edit-secrets.sh \
+	    maintenance.sh restore.sh \
+	    setup.sh startup.sh uninstall-vaultwarden.sh \
 	    backups caddy docs fail2ban lib logs ssl systemd \
 	    docker-compose.yml.example docker-compose.override.yml.example .env.example .sops.yaml \
 	    .gitattributes .gitignore; do \

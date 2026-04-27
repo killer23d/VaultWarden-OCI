@@ -61,7 +61,7 @@ make safe-restart
 #### Basic Health Check
 
 ```bash
-./health.sh
+./maintenance.sh health
 
 # Or via Makefile
 make health
@@ -87,7 +87,7 @@ make health-quick
 #### Comprehensive Health Check
 
 ```bash
-./health.sh --comprehensive
+./maintenance.sh health --comprehensive
 
 # Additional checks:
 #  ✓ CPU and memory usage vs alert threshold
@@ -99,10 +99,10 @@ make health-quick
 
 ```bash
 # Automatically restart unhealthy containers
-./health.sh --auto-recover
+./maintenance.sh health --auto-recover
 
 # Combined — comprehensive check + auto-recovery + email alert
-./health.sh --comprehensive --auto-recover --email
+./maintenance.sh health --comprehensive --auto-recover --email
 
 # Or via Makefile
 make health AUTO_RECOVER=true
@@ -309,15 +309,15 @@ make restore-remote
 
 ```bash
 # Update container images (respects version pins in .env)
-./update.sh
+./maintenance.sh update
 make update
 
 # Update containers + system packages
-./update.sh --system
+./maintenance.sh update --system
 make update-system
 ```
 
-> **`--system` scope:** `./update.sh --system` (alias `make update-system`) does three things in order:
+> **`--system` scope:** `./maintenance.sh update --system` (alias `make update-system`) does three things in order:
 > 1. Runs `apt-get upgrade` to update OS packages
 > 2. Updates the Docker engine via apt
 > 3. Pulls new container images and restarts affected services
@@ -354,7 +354,7 @@ nano .env
 docker compose pull vaultwarden
 docker compose up -d vaultwarden
 
-./health.sh
+./maintenance.sh health
 ```
 
 > **VaultWarden 1.30.0+ note:** Port 3012 (legacy WebSocket) was removed. All real-time sync now goes through the main HTTP port 80. The Caddyfile `/notifications/hub` block already routes to `vaultwarden:80`; no manual change is needed for upgrades.
@@ -478,7 +478,7 @@ make test-secrets
 # 2. Update admin_token, admin_basic_auth_hash, smtp_password, etc.
 # 3. Restart to apply
 ./startup.sh --force-restart
-./health.sh
+./maintenance.sh health
 ```
 
 ### Age Key Management
@@ -524,7 +524,7 @@ make breakglass-remove
 ### Installing Systemd Timers
 
 ```bash
-sudo ./setup-systemd.sh --install
+sudo ./setup.sh --phase=systemd --install
 make systemd-install
 ```
 
@@ -544,21 +544,21 @@ make systemd-install
 ```bash
 # View installed timers (next trigger + last run)
 make timers
-sudo ./setup-systemd.sh --status
+sudo ./setup.sh --phase=systemd --status
 
 # Validate installed units match current repo scripts
-sudo ./setup-systemd.sh --validate
+sudo ./setup.sh --phase=systemd --validate
 make systemd-validate
 
 # Remove timers
-sudo ./setup-systemd.sh --remove
+sudo ./setup.sh --phase=systemd --remove
 make systemd-remove
 
 # Re-run after pulling repo updates to keep /opt/ in sync
-sudo ./setup-systemd.sh --install
+sudo ./setup.sh --phase=systemd --install
 ```
 
-> **Migration note:** The earlier `cron-setup.sh` has been replaced by `setup-systemd.sh`. If you set up on a previous version, remove old cron entries (`sudo crontab -l`, delete the VaultWarden block with `sudo crontab -e`), then run `sudo ./setup-systemd.sh --install`.
+> **Migration note:** The earlier `cron-setup.sh` has been replaced by the `setup.sh --phase=systemd` systemd integration. If you set up on a previous version, remove old cron entries (`sudo crontab -l`, delete the VaultWarden block with `sudo crontab -e`), then run `sudo ./setup.sh --phase=systemd --install`.
 
 ### Failure Notifications
 
@@ -753,7 +753,7 @@ sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
 
 # 6. Restart and verify
 ./startup.sh --force-restart
-./health.sh
+./maintenance.sh health
 ```
 
 **Template best practices:**
@@ -792,7 +792,7 @@ sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
 - ✅ Review and update documentation
 - ✅ Audit user accounts and permissions
 - ✅ Test complete system rebuild from backup
-- ✅ Run `sudo ./setup-systemd.sh --validate` to detect any split-brain between `/opt/` and the current repo
+- ✅ Run `sudo ./setup.sh --phase=systemd --validate` to detect any split-brain between `/opt/` and the current repo
 
 ### Annual
 - ✅ Rotate all secrets (tokens, passwords)

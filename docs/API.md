@@ -5,7 +5,7 @@ VaultWarden implements the **Bitwarden API**, making it compatible with all offi
 > **Scope of this document:** This guide covers three distinct API surfaces:
 > - **Bitwarden client API** (`/api/*`, `/identity/*`) — used by the official Bitwarden web vault, browser extension, desktop, and CLI clients
 > - **VaultWarden admin API** (`/admin/*`) — used for server administration tasks such as user management and organisation control
-> - **Management script CLI** — the project's own shell scripts (`backup.sh`, `health.sh`, `maintenance.sh`, etc.) documented in [SCRIPTS.md](SCRIPTS.md)
+> - **Management script CLI** — the project's own shell scripts (`backup.sh`, `maintenance.sh`, etc.) documented in [SCRIPTS.md](SCRIPTS.md)
 >
 > The Bitwarden client and admin APIs are served by the VaultWarden container. The management CLI runs on the host and communicates with Docker, not with the VaultWarden HTTP API.
 
