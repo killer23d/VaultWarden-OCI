@@ -235,12 +235,12 @@ MODES (mutually exclusive; default is interactive edit):
                                 backup_passphrase        (auto-generated)
 
     EMAIL_MODE / EMAIL_PROVIDER quick reference (.env):
-        EMAIL_MODE=auto   — lib/email.sh tries API → SMTP → Postfix in order
+        EMAIL_MODE=auto   — email driver tries API → SMTP → Postfix in order
         EMAIL_MODE=api    — HTTP API only   (rotate: email_api_token)
         EMAIL_MODE=smtp   — SMTP relay only (rotate: smtp_password)
         EMAIL_MODE=host   — Postfix sidecar (no token or password needed)
         EMAIL_PROVIDER=mailersend|sendgrid|mailgun|postmark|resend
-            → selects which HTTP driver lib/email.sh uses at runtime;
+            → selects which HTTP driver is used at runtime;
               the token is always stored as "email_api_token" in secrets.yaml.
 
     --export-recovery-kit   Generate a recovery document with unencrypted

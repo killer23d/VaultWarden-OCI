@@ -247,7 +247,7 @@ sudo ./setup.sh --domain vault.example.com --email admin@example.com --auto
 | Configuration | Manual | Template-based (`setup.sh`) |
 | Resource limits | Manual / none | Pre-configured limits for 6 GB systems |
 | Security | DIY | Dual Fail2ban (host-networking) + Cloudflare-only firewall |
-| Email | Manual SMTP daemon | `lib/email.sh` multi-provider chain (API → SMTP → host MTA, no sidecar required) |
+| Email | Manual SMTP daemon | `lib/common.sh` (email functions) multi-provider chain (API → SMTP → host MTA, no sidecar required) |
 | Caddy | Any version | >= 2.11.0 required (`caddy-cloudflare-ip` bundled; needed for correct Fail2Ban IP logging) |
 | Push notifications | Manual | `vaultwarden` network is `internal: true`; add VaultWarden to `caddy_external` network when `PUSH_ENABLED=true` (see `docker-compose.yml.example`) |
 | Backups | Manual | Automated via systemd timers (Mon-Sat DB, Sunday full) |
@@ -331,11 +331,11 @@ sudo systemctl list-timers 'vaultwarden-*'
 ./backup.sh --type db
 ./backup.sh --list
 
-# Test email (uses lib/email.sh multi-provider chain)
+# Test email (uses lib/common.sh multi-provider chain)
 ./maintenance.sh --test-email --verbose
 ```
 
-> **Email migration note:** VaultWarden-OCI no longer requires a Postfix sidecar container for email. `lib/email.sh` provides an API → SMTP → host MTA fallback chain. Set `EMAIL_PROVIDER` and the corresponding API token secret (`<PROVIDER_UPPER>_API_TOKEN`) via `./edit-secrets.sh`. See [CONFIGURATION.md](CONFIGURATION.md) for the full email configuration reference.
+> **Email migration note:** VaultWarden-OCI no longer requires a Postfix sidecar container for email. `lib/common.sh` (email functions) provides an API → SMTP → host MTA fallback chain. Set `EMAIL_PROVIDER` and the corresponding API token secret (`<PROVIDER_UPPER>_API_TOKEN`) via `./edit-secrets.sh`. See [CONFIGURATION.md](CONFIGURATION.md) for the full email configuration reference.
 
 ### Update Client Applications
 

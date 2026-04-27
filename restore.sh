@@ -39,7 +39,6 @@ _source_lib() {
 _source_lib "lib/docker.sh"
 _source_lib "lib/backup_utils.sh"
 _source_lib "lib/crypto.sh"
-_source_lib "lib/simple_key_resilience.sh"
 unset -f _source_lib
 
 # ---------------------------------------------------------------------------
@@ -882,7 +881,7 @@ _load_recovery_kit() {
 # Returns 0 on success, 1 on validation failure.
 #
 # Validation is delegated to simple_verify_age_key() from
-# lib/simple_key_resilience.sh, which performs permissions + ownership +
+# lib/crypto.sh, which performs permissions + ownership +
 # crypto roundtrip checks and honours the full _resolve_age_key() chain.
 # ---------------------------------------------------------------------------
 _prompt_age_key() {

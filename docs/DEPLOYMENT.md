@@ -164,7 +164,7 @@ See [CONFIGURATION.md](CONFIGURATION.md) for the full variable reference.
 | **vaultwarden** | Password manager app | 512 MB |
 | **caddy** | TLS + reverse proxy | 512 MB |
 | **fail2ban** | Brute-force detection & SSH protection | 512 MB |
-| **postfix** | Last-resort host MTA (optional — primary email is `lib/email.sh` API chain) | 256 MB |
+| **postfix** | Last-resort host MTA (optional — primary email is `lib/common.sh` (email functions) API chain) | 256 MB |
 
 > **Caddy version note.** Caddy >= 2.11.2 bundles `caddy-cloudflare-ip` by default. This module rewrites `remote_ip` in access logs to the real client IP from the `Cf-Connecting-Ip` header. **This is required for Fail2Ban to ban actual attackers rather than Cloudflare edge nodes.** Do not downgrade below 2.11.2. *(2.11.2 fixes a TLS ACME renewal regression introduced in 2.11.1.)*
 

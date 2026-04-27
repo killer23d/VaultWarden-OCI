@@ -10,13 +10,13 @@ Related docs: [CONFIGURATION.md](CONFIGURATION.md) · [ADVANCED-CUSTOMIZATION.md
 
 ## Architecture Overview
 
-Email is handled by **`lib/email.sh`** — a pure bash + curl multi-provider
+Email is handled by **`lib/common.sh` (email functions)** — a pure bash + curl multi-provider
 chain. No mail daemon is required on the host. The delivery chain has three
 tiers attempted in order when `EMAIL_MODE=auto`:
 
 ```
                 ┌─────────────────────────────────────┐
-                │         lib/email.sh                │
+                │         lib/common.sh                │
                 │                                     │
   EMAIL_MODE    │  Tier 1 ── HTTP API                 │  MailerSend, SendGrid,
      =auto  ──► │           (curl + JSON)             │  Mailgun, Postmark,
@@ -31,7 +31,7 @@ tiers attempted in order when `EMAIL_MODE=auto`:
                 └─────────────────────────────────────┘
 ```
 
-Two additional consumers sit outside `lib/email.sh` and use SMTP directly:
+Two additional consumers sit outside `lib/common.sh` (email functions) and use SMTP directly:
 
 | Consumer | How it sends email | Variables |
 | :-- | :-- | :-- |
@@ -75,7 +75,7 @@ EMAIL_PROVIDER=mailersend    # change to: sendgrid | mailgun | postmark | resend
 
 ### 3. Store the API token in secrets
 
-`lib/email.sh` uses a single canonical secret key (`email_api_token`) and
+`lib/common.sh` (email functions) uses a single canonical secret key (`email_api_token`) and
 resolves the correct provider token automatically based on `EMAIL_PROVIDER`.
 Store the token under the provider-specific name:
 
@@ -190,7 +190,7 @@ which calls the host `mail` binary targeting `127.0.0.1:587`.
 
 Fail2Ban runs with `network_mode: host`, so it reaches the Postfix container
 at `127.0.0.1:587` (Postfix binds `127.0.0.1:587` on the host via its
-published port). Fail2Ban does not use `lib/email.sh` — it calls the `mail`
+published port). Fail2Ban does not use `lib/common.sh` (email functions) — it calls the `mail`
 binary directly. If Postfix is not running, Fail2Ban ban notifications are
 silently dropped.
 
@@ -361,7 +361,7 @@ MAILGUN_DOMAIN=mg.yourdomain.com  # optional — set only if different from SMTP
 | `SMTP_PORT` | `587` | SMTP relay port |
 | `SMTP_SECURITY` | `starttls` | `starttls` or `on` (SSL/TLS) |
 | `SMTP_USERNAME` | *(empty)* | SMTP relay username |
-| `SMTP_FROM` | *(empty)* | Sender address for `lib/email.sh` and Postfix relay |
+| `SMTP_FROM` | *(empty)* | Sender address for `lib/common.sh` (email functions) and Postfix relay |
 | `SMTP_FROM_NAME` | `VaultWarden` | Sender display name |
 | `SMTP_TIMEOUT` | `30` | Seconds before curl gives up |
 | `VW_SMTP_HOST` | `postfix` | VaultWarden SMTP host — Postfix sidecar service name |
@@ -388,12 +388,12 @@ MAILGUN_DOMAIN=mg.yourdomain.com  # optional — set only if different from SMTP
 
 | Secret key | Used by | Description |
 | :-- | :-- | :-- |
-| `MAILERSEND_API_TOKEN` | `lib/email.sh` tier 1 | MailerSend HTTP API token |
-| `SENDGRID_API_TOKEN` | `lib/email.sh` tier 1 | SendGrid HTTP API token |
-| `MAILGUN_API_TOKEN` | `lib/email.sh` tier 1 | Mailgun HTTP API token |
-| `POSTMARK_API_TOKEN` | `lib/email.sh` tier 1 | Postmark HTTP API token |
-| `RESEND_API_TOKEN` | `lib/email.sh` tier 1 | Resend HTTP API token |
-| `smtp_password` | `lib/email.sh` tier 2, Postfix | SMTP relay password |
+| `MAILERSEND_API_TOKEN` | `lib/common.sh` (email functions) tier 1 | MailerSend HTTP API token |
+| `SENDGRID_API_TOKEN` | `lib/common.sh` (email functions) tier 1 | SendGrid HTTP API token |
+| `MAILGUN_API_TOKEN` | `lib/common.sh` (email functions) tier 1 | Mailgun HTTP API token |
+| `POSTMARK_API_TOKEN` | `lib/common.sh` (email functions) tier 1 | Postmark HTTP API token |
+| `RESEND_API_TOKEN` | `lib/common.sh` (email functions) tier 1 | Resend HTTP API token |
+| `smtp_password` | `lib/common.sh` (email functions) tier 2, Postfix | SMTP relay password |
 
 ---
 
@@ -406,13 +406,13 @@ MAILGUN_DOMAIN=mg.yourdomain.com  # optional — set only if different from SMTP
 # or: make test-email
 ```
 
-This exercises the full `lib/email.sh` chain from tier 1 through to tier 3 and
+This exercises the full `lib/common.sh` (email functions) chain from tier 1 through to tier 3 and
 prints which tier succeeded or failed.
 
 ### Check which tier delivered
 
 ```bash
-# lib/email.sh logs to the maintenance log — look for tier labels:
+# lib/common.sh logs to the maintenance log — look for tier labels:
 grep -E 'EMAIL|SMTP|MTA|tier' /var/lib/vaultwarden/logs/maintenance.log | tail -30
 ```
 
@@ -463,7 +463,7 @@ docker exec vaultwarden_fail2ban fail2ban-client get vaultwarden-web-auth action
 | API tier always fails | Token not set or wrong key name | Run `./edit-secrets.sh` and verify the matching `<PROVIDER_UPPER>_API_TOKEN` is set |
 | SMTP tier `SSL handshake failed` | `SMTP_SECURITY` mismatch | `starttls` → port 587; `on` → port 465 |
 | VaultWarden email fails with "authentication required" | `VW_SMTP_AUTH_MECHANISM` not set to `none` | Set `VW_SMTP_AUTH_MECHANISM=none` and `VW_SMTP_EXPLICIT_TLS=false` in `.env` |
-| VaultWarden sends email but `lib/email.sh` does not | `SMTP_*` misconfigured; Postfix not relaying | Check Postfix logs: `docker compose logs postfix` |
+| VaultWarden sends email but `lib/common.sh` (email functions) does not | `SMTP_*` misconfigured; Postfix not relaying | Check Postfix logs: `docker compose logs postfix` |
 | Fail2Ban notifications not arriving | Postfix container not running | `docker compose up -d postfix` |
 | Fail2Ban notifications not arriving | `F2B_DEST_MAIL` contains `${ADMIN_EMAIL}` literal | Replace with the actual address in `.env` |
 | Postfix `Relay access denied` | `ALLOWED_SENDER_DOMAINS` not set | Set `ALLOWED_SENDER_DOMAINS=vault.yourdomain.com` in `.env` |

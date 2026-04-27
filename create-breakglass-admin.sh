@@ -11,8 +11,7 @@ cd "$PROJECT_ROOT"
 
 source "lib/common.sh"
 init_common_lib "$0"
-source "lib/crypto.sh"
-source "lib/security.sh"
+source "lib/crypto.sh"  # provides security functions (merged from lib/security.sh)
 
 # FIX [L-05]: Read SSH_PORT from the environment first, then fall back to .env.
 #
@@ -187,8 +186,8 @@ validate_script_security() {
         log_warn "Script in unexpected location: $script_path"
     fi
 
-    # Validate lib/security.sh is available and secure
-    local security_lib="$PROJECT_ROOT/lib/security.sh"
+    # Validate lib/crypto.sh is available and secure (security functions merged here)
+    local security_lib="$PROJECT_ROOT/lib/crypto.sh"
     if [[ ! -f "$security_lib" ]]; then
         log_error "SECURITY: Required security library not found: $security_lib"
         return 1

@@ -174,7 +174,7 @@ The installed systemd timer schedule:
 
 ## 📧 Email Delivery
 
-Email is handled by **`lib/email.sh`** — a pure bash + curl multi-provider chain. No mail daemon is required on the host. Three tiers are attempted in order when `EMAIL_MODE=auto`:
+Email is handled by **`lib/common.sh`** (email functions) — a pure bash + curl multi-provider chain. No mail daemon is required on the host. Three tiers are attempted in order when `EMAIL_MODE=auto`:
 
 ```
 Tier 1 ─ HTTP API       →  MailerSend, SendGrid, Mailgun, Postmark, Resend
@@ -236,7 +236,7 @@ Full details, provider setup, Postfix MTA configuration, and troubleshooting: **
 | :-- | :-- |
 | **Caddy** | TLS termination, reverse proxy, security headers, 4-tier structured JSON logging (512 MB limit). Now requires **Caddy ≥ 2.11.2**; uses `encode zstd gzip`, `roll_compression zstd`, connection timeouts in the global `servers` block, `request_body` size limits on admin/auth handlers, and health-check log suppression. |
 | **VaultWarden** | Password manager application (512 MB limit) |
-| **Postfix** | Containerised SMTP relay — last-resort MTA for `lib/email.sh` and sole email path for Fail2Ban; binds `127.0.0.1:587` (256 MB limit) |
+| **Postfix** | Containerised SMTP relay — last-resort MTA for the email chain in `lib/common.sh` and sole email path for Fail2Ban; binds `127.0.0.1:587` (256 MB limit) |
 | **Fail2ban** | Brute-force detection → Cloudflare edge blocking; Host networking for SSH protection (512 MB limit) |
 
 > The `docker-compose.yml.example` template now enforces `read_only` filesystems, `tmpfs` mounts, `ulimits` (nofile), `no-new-privileges:true`, and tightened Caddy log rotation. See [docs/ADVANCED-CUSTOMIZATION.md](docs/ADVANCED-CUSTOMIZATION.md) for override details.
@@ -245,17 +245,16 @@ Full details, provider setup, Postfix MTA configuration, and troubleshooting: **
 
 | Script | Purpose |
 | :-- | :-- |
-| `setup.sh` | One-time system setup: installs deps, generates `.env` and `docker-compose.yml` from templates, creates Age key, SOPS config, and empty secrets structure. In `--auto` mode, also auto-generates passwords/passphrases via `setup-secrets.sh --auto --quiet-summary` after all infra phases complete, then shows a single consolidated summary screen. |
-| `setup-secrets.sh` | Initial secrets bootstrap — prompted interactively or via `--auto`. Standalone flow: run **after** editing `.env`. Supports `--quiet-summary` to suppress its completion banner when called from `setup.sh`. |
-| `startup.sh` | Start / stop / restart services. Post-startup health check now re-runs verbose diagnostics automatically on failure. |
-| `health.sh` | Health monitoring with optional auto-recovery (`--auto-recover`) and email alerting (`--email`). Configuration validation now checks `DOMAIN_NAME` (canonical var). |
+| `setup.sh` | One-time system setup: installs deps, generates `.env` and `docker-compose.yml` from templates, creates Age key, SOPS config, and empty secrets structure. Use `--phase=secrets` for the secrets bootstrap phase or `--phase=systemd` for the systemd integration phase. In `--auto` mode, also auto-generates passwords/passphrases after all infra phases complete, then shows a single consolidated summary screen. |
+| `setup-secrets.sh` | **Deprecated shim** — delegates to `./setup.sh --phase=secrets`. |
+| `startup.sh` | Start / stop / restart services. Post-startup health check re-runs verbose diagnostics automatically on failure. |
+| `health.sh` | **Deprecated shim** — delegates to `./maintenance.sh health`. |
 | `backup.sh` | Encrypted database and full-system backups. Uses host `sqlite3` with the Online Backup API for atomic, WAL-safe DB snapshots — no Docker container required for backup integrity checks. Accepts `--keep N` to override retention days (must be a positive integer). |
-| `restore.sh` | Interactive or automated restore with a reworked flow: interactive Age decryption key prompt; `--key-file` flag and `RESTORE_AGE_KEY_FILE` env var for scripted/CI use; pre-restore key round-trip validation; post-restore automatic Age key generation and rotation. Uses host `sqlite3` for archive integrity verification — no Docker required. `restore_db()` now respects `DRY_RUN` before overwriting the live database. |
-| `update.sh` | Safe container + system updates with auto-rollback. Now sources `lib/simple_key_resilience.sh` and checks Age key health before update operations; enforces Caddy `entrypoint.sh` execute bit before `docker compose up`. |
-| `maintenance.sh` | Cleanup, DNS update, DB maintenance, email test |
+| `restore.sh` | Interactive or automated restore with a reworked flow: interactive Age decryption key prompt; `--key-file` flag and `RESTORE_AGE_KEY_FILE` env var for scripted/CI use; pre-restore key round-trip validation; post-restore automatic Age key generation and rotation. Uses host `sqlite3` for archive integrity verification — no Docker required. |
+| `update.sh` | **Deprecated shim** — delegates to `./maintenance.sh update`. |
+| `maintenance.sh` | System cleanup, DNS update, DB maintenance, email test, health monitoring (`health` subcommand), and container updates (`update` subcommand). |
 | `edit-secrets.sh` | Secure secrets editor (Age + SOPS) — rotate individual fields, list keys, export recovery kit |
-| `setup-systemd.sh` | Install / remove automation via systemd timers and services. `--install` now validates `OnCalendar=` expressions before enabling timers. All timer-triggered services use `OnFailure=vaultwarden-notify-failure@%n.service` for automatic email alerting on any failure. |
-| `create-breakglass-admin.sh` | Emergency OCI serial console admin. Now includes a `trap` guard ensuring the operations lock file is always cleaned up on any exit path. |
+| `create-breakglass-admin.sh` | Emergency OCI serial console admin. |
 | `uninstall-vaultwarden.sh` | Full stack removal |
 
 Full reference: [docs/SCRIPTS.md](docs/SCRIPTS.md)
@@ -264,14 +263,11 @@ Full reference: [docs/SCRIPTS.md](docs/SCRIPTS.md)
 
 | Library | Purpose |
 | :-- | :-- |
-| `common.sh` | Logging, validation, shared utilities |
-| `crypto.sh` | Age / SOPS encryption & decryption. bcrypt cost factor is validated to a minimum of 10 on all hash operations. |
+| `common.sh` | Logging, validation, shared utilities, and multi-provider email delivery |
+| `crypto.sh` | Age / SOPS encryption & decryption, security validation, and Age key resilience (health check, escrow, paper backup). bcrypt cost factor is validated to a minimum of 10 on all hash operations. |
 | `docker.sh` | Docker lifecycle management |
-| `security.sh` | Security validation helpers |
 | `backup_utils.sh` | Backup-specific shared logic including SQLite Online Backup API integrity verification |
 | `secrets.sh` | Secrets collection, auto-generation, hashing (Argon2id + bcrypt), Cloudflare token validation, recovery kit generation |
-| `email.sh` | Multi-provider email delivery: HTTP API (tier 1) → SMTP relay via curl (tier 2) → host MTA/Postfix (tier 3). Resolves `<PROVIDER_UPPER>_API_TOKEN` from secrets automatically. |
-| `simple_key_resilience.sh` | Three-tier Age key protection: health check with auto-permission fix and encrypt/decrypt roundtrip (Tier 1); password-manager-ready plaintext escrow export (Tier 2); printable PDF/HTML paper backup with optional QR code via `qrencode` and `wkhtmltopdf` (Tier 3) |
 
 ### Configuration Templates
 

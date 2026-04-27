@@ -124,9 +124,9 @@ For the WAL checkpoint fallback path (used only when the host `sqlite3` binary c
 
 ---
 
-## 🔑 Age Key Protection (`lib/simple_key_resilience.sh`)
+## 🔑 Age Key Protection (`lib/crypto.sh`)
 
-Your Age key (`secrets/keys/age-key.txt`) is the single point of failure for all backup decryption. If you lose it, **every backup is permanently unrecoverable**. `lib/simple_key_resilience.sh` provides three complementary protection tiers.
+Your Age key (`secrets/keys/age-key.txt`) is the single point of failure for all backup decryption. If you lose it, **every backup is permanently unrecoverable**. `lib/crypto.sh` provides three complementary protection tiers.
 
 > **Lost your Age key?** See [BOOTSTRAP_KEY_RECOVERY.md](BOOTSTRAP_KEY_RECOVERY.md) for the complete recovery procedure, including the GPG-wrapped offsite key workflow and a quarterly recovery drill.
 
@@ -141,7 +141,7 @@ No action required — this runs automatically.
 Exports a formatted plain-text document containing the Age private key, public key, and recovery instructions — ready to paste as a Secure Note in Bitwarden, 1Password, or similar.
 
 ```bash
-source lib/simple_key_resilience.sh
+
 create_password_manager_escrow ~/vaultwarden-age-key-escrow.txt
 
 # ⚠️ Copy contents to your password manager NOW, then securely delete:
@@ -158,7 +158,7 @@ Generates a printable PDF (or HTML if `wkhtmltopdf` is not installed) containing
 # Install optional dependencies
 sudo apt install qrencode wkhtmltopdf
 
-source lib/simple_key_resilience.sh
+
 create_printable_key_backup ~/vaultwarden-key-backup.pdf
 
 # Print and store in a fireproof safe, then delete the file
@@ -317,7 +317,7 @@ The operator must press Enter to confirm they have saved the key before services
 **After restore, re-run the Tier 2 escrow** to update your password manager with the new key:
 
 ```bash
-source lib/simple_key_resilience.sh
+
 create_password_manager_escrow ~/vaultwarden-age-key-escrow.txt
 # Copy to password manager, then:
 shred -fuz ~/vaultwarden-age-key-escrow.txt
@@ -442,7 +442,7 @@ docker compose start vaultwarden
 make key-show   # check path, permissions, public key
 
 # Manual health check (validates key format + encrypt/decrypt roundtrip)
-source lib/simple_key_resilience.sh && simple_verify_age_key
+simple_verify_age_key
 
 # If missing, restore from your password manager escrow (Tier 2)
 # or from an emergency kit, then re-run setup:
