@@ -11,7 +11,7 @@ services:
   # Init Container - Permissions Setup
   # =============================================================================
   init-permissions:
-    image: busybox:${BUSYBOX_VERSION:-1.36.1}
+    image: busybox:${BUSYBOX_VERSION:-1.37.0}
     container_name: vaultwarden_init
     restart: "no"
     user: "0:0"  # Required for chown/chmod operations
@@ -81,7 +81,7 @@ services:
   # =============================================================================
   vaultwarden:
     container_name: vaultwarden_app
-    image: ghcr.io/dani-garcia/vaultwarden:${VAULTWARDEN_VERSION:-1.35.4}
+    image: ghcr.io/dani-garcia/vaultwarden:${VAULTWARDEN_VERSION:-1.35.8}
     restart: unless-stopped
     user: "${PUID}:${PGID}"
 
@@ -269,7 +269,7 @@ services:
   # =============================================================================
   postfix:
     container_name: vaultwarden_postfix
-    image: boky/postfix:${POSTFIX_VERSION:-4.3.0}
+    image: boky/postfix:${POSTFIX_VERSION:-5.1.0}
     restart: unless-stopped
 
     depends_on:
@@ -342,7 +342,7 @@ services:
   # =============================================================================
   fail2ban:
     container_name: vaultwarden_fail2ban
-    image: crazymax/fail2ban:${FAIL2BAN_VERSION:-1.1.0-r3}
+    image: crazymax/fail2ban:${FAIL2BAN_VERSION:-1.1.0-r4}
     restart: unless-stopped
     network_mode: host
 
