@@ -328,13 +328,57 @@ safe-restart: ## Restart with automatic rollback on failure
 		exit 1; \
 	fi
 
-status: ## Show service status
+status: ## Show service status, backup health, disk usage, and Fail2Ban summary
 	$(call check-docker)
 	@echo "$(BLUE)VaultWarden Service Status:$(NC)"
 	@$(DOCKER_COMP) ps
 	@echo ""
 	@echo "$(CYAN)Resource usage:$(NC)"
 	@docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}" 2>/dev/null | grep -E "vaultwarden|caddy|fail2ban|postfix" || true
+	@echo ""
+	@echo "$(CYAN)Backup status:$(NC)"
+	@BACKUP_DIR=$$(grep '^BACKUP_DIR=' .env 2>/dev/null | cut -d= -f2-); \
+	BACKUP_DIR=$${BACKUP_DIR:-/var/lib/vaultwarden/backups}; \
+	for btype in db full emergency; do \
+		DIR="$$BACKUP_DIR/$$btype"; \
+		if [ -d "$$DIR" ]; then \
+			LATEST=$$(find "$$DIR" -name "*.age" -type f 2>/dev/null | sort | tail -1); \
+			if [ -n "$$LATEST" ]; then \
+				TS=$$(basename "$$LATEST" | grep -oE '[0-9]{8}[_-][0-9]{6}' | head -1 || true); \
+				SIZE=$$(du -sh "$$LATEST" 2>/dev/null | cut -f1 || echo "?"); \
+				echo "  $(GREEN)$$btype$(NC): $$(basename $$LATEST)  ($$SIZE)  $$TS"; \
+			else \
+				echo "  $(YELLOW)$$btype$(NC): no backups found"; \
+			fi; \
+		else \
+			echo "  $(YELLOW)$$btype$(NC): backup directory not found ($$DIR)"; \
+		fi; \
+	done
+	@echo ""
+	@echo "$(CYAN)Disk usage:$(NC)"
+	@STATE_DIR=$$(grep '^PROJECT_STATE_DIR=' .env 2>/dev/null | cut -d= -f2-); \
+	STATE_DIR=$${STATE_DIR:-/var/lib/vaultwarden}; \
+	BACKUP_DIR=$$(grep '^BACKUP_DIR=' .env 2>/dev/null | cut -d= -f2-); \
+	BACKUP_DIR=$${BACKUP_DIR:-/var/lib/vaultwarden/backups}; \
+	for DIR in "$$STATE_DIR" "$$BACKUP_DIR"; do \
+		if [ -d "$$DIR" ]; then \
+			AVAIL=$$(df -h "$$DIR" 2>/dev/null | awk 'END {print $$4}'); \
+			USED=$$(df -h  "$$DIR" 2>/dev/null | awk 'END {printf "%s/%s (%s used)", $$3, $$2, $$5}'); \
+			echo "  $$DIR — available: $$AVAIL  ($$USED)"; \
+		fi; \
+	done
+	@echo ""
+	@echo "$(CYAN)Fail2Ban bans:$(NC)"
+	@if docker inspect vaultwarden_fail2ban --format '{{.State.Running}}' 2>/dev/null | grep -q true; then \
+		docker exec vaultwarden_fail2ban sh -c \
+		  'fail2ban-client status 2>/dev/null | grep "Jail list" | sed "s/.*Jail list://;s/,/ /g" | tr -s " " "\n" | grep -v "^$$"' \
+		  2>/dev/null | while read -r jail; do \
+		    COUNT=$$(docker exec vaultwarden_fail2ban sh -c "fail2ban-client status $$jail 2>/dev/null | grep 'Currently banned' | awk '{print \$$NF}'" 2>/dev/null || echo 0); \
+		    echo "  $$jail: $$COUNT banned IP(s)"; \
+		done || echo "  $(YELLOW)fail2ban-client not responding$(NC)"; \
+	else \
+		echo "  $(YELLOW)fail2ban container not running$(NC)"; \
+	fi
 
 # ===========================================================================
 ##@ Health & Monitoring

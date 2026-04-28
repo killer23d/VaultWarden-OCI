@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/common.sh"
 init_common_lib "$0"
 source "$SCRIPT_DIR/lib/docker.sh"
-source "$SCRIPT_DIR/lib/backup_utils.sh"
+source "$SCRIPT_DIR/lib/backup-utils.sh"
 source "$SCRIPT_DIR/lib/crypto.sh"
 # lib/secrets.sh recomputes SCRIPT_DIR (→ lib/) at load time so it can find
 # crypto.sh as a sibling; save and restore the project-root SCRIPT_DIR.
@@ -404,6 +404,7 @@ run_deep_db_maintenance() {
     log_info "Step 0/5: Creating pre-maintenance safety backup..."
     local backup_ts_marker
     backup_ts_marker=$(mktemp) && touch "$backup_ts_marker"
+    log_info "Invoking: $SCRIPT_DIR/backup.sh --type db"
     if ! "$SCRIPT_DIR/backup.sh" --type db; then
         rm -f "$backup_ts_marker"
         log_error "Pre-maintenance safety backup failed — aborting deep maintenance"
@@ -917,6 +918,7 @@ DNS record updated automatically." \
 validate_system_health() {
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would validate system health"; return 0; fi
     log_info "Validating system health after maintenance..."
+    log_info "Invoking: $SCRIPT_DIR/maintenance.sh --health --quiet"
     "$SCRIPT_DIR/maintenance.sh" --health --quiet \
         && { log_success "System health validation passed"; return 0; } \
         || { log_warn "System health validation detected issues"; return 1; }

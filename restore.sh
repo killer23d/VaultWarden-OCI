@@ -25,7 +25,7 @@ _source_lib() {
     fi
 }
 _source_lib "lib/docker.sh"
-_source_lib "lib/backup_utils.sh"
+_source_lib "lib/backup-utils.sh"
 _source_lib "lib/crypto.sh"
 unset -f _source_lib
 

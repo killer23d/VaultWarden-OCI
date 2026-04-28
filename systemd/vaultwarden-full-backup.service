@@ -24,7 +24,10 @@ ExecStartPre=/bin/bash -c 'rm -f /run/lock/vaultwarden-backup.lock'
 # Add --email back manually once EMAIL_PROVIDER credentials are configured:
 #   sudo systemctl edit vaultwarden-full-backup.service
 # Failures are still reported via OnFailure=vaultwarden-notify-failure@%n.service.
-ExecStart=/opt/vaultwarden-scripts/backup.sh --type full --rclone
+# --full-verification decrypts the archive and performs a zstd+tar structural
+# integrity check before the offsite rclone sync.  This catches silent
+# compression or encryption failures that the quick SHA256 probe alone would miss.
+ExecStart=/opt/vaultwarden-scripts/backup.sh --type full --rclone --full-verification
 User=root
 StandardOutput=journal
 StandardError=journal

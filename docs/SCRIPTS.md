@@ -28,7 +28,7 @@ Complete reference for all management scripts and utility libraries in VaultWard
 | 7 | `create-breakglass-admin.sh` | Emergency | ✅ |
 | 8 | `uninstall-vaultwarden.sh` | Uninstall | ✅ |
 
-**Utility libraries (5):** `lib/common.sh` *(includes email)*, `lib/docker.sh`, `lib/crypto.sh` *(includes key resilience + security)*, `lib/backup_utils.sh`, `lib/secrets.sh`
+**Utility libraries (5):** `lib/common.sh` *(includes email)*, `lib/docker.sh`, `lib/crypto.sh` *(includes key resilience + security)*, `lib/backup-utils.sh`, `lib/secrets.sh`
 
 ---
 
@@ -825,7 +825,7 @@ Encryption, decryption, key management, security validation, and key resilience.
 | `create_password_manager_escrow OUTPUT_FILE` | Writes formatted plain-text escrow document for password manager storage *(from simple_key_resilience.sh)* |
 | `create_printable_key_backup [OUTPUT_PDF]` | Generates printable PDF or HTML paper backup with Age key + optional QR code *(from simple_key_resilience.sh)* |
 
-### `lib/backup_utils.sh`
+### `lib/backup-utils.sh`
 Backup-specific helpers.
 
 | Function | Description |
