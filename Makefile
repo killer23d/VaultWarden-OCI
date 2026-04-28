@@ -363,7 +363,7 @@ status: ## Show service status, backup health, disk usage, and Fail2Ban summary
 	for DIR in "$$STATE_DIR" "$$BACKUP_DIR"; do \
 		if [ -d "$$DIR" ]; then \
 			AVAIL=$$(df -h "$$DIR" 2>/dev/null | awk 'END {print $$4}'); \
-			USED=$$(df -h  "$$DIR" 2>/dev/null | awk 'END {printf "%s/%s (%s used)", $$3, $$2, $$5}'); \
+			USED=$$(df -h "$$DIR" 2>/dev/null | awk 'END {printf "%s/%s (%s used)", $$3, $$2, $$5}'); \
 			echo "  $$DIR — available: $$AVAIL  ($$USED)"; \
 		fi; \
 	done
