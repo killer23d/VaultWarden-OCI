@@ -627,6 +627,7 @@ ensure_vaultwarden_egress_nat() {
   # Preferred path: use repo-managed setup helper so NAT + DOCKER-USER
   # remediation stays in one place and can also be reused outside startup.
   if [[ -x "./setup-iptables.sh" ]]; then
+    log_info "Invoking: $SCRIPT_DIR/setup-iptables.sh"
     if _maybe_sudo ./setup-iptables.sh; then
       log_success "Egress firewall remediation completed via setup-iptables.sh"
       return 0
@@ -764,6 +765,7 @@ run_health_check() {
   # Disable errexit around maintenance.sh --health so we can capture its exit code cleanly.
   # The outer set -euo pipefail would abort the script before we could inspect
   # the code if maintenance.sh --health exits non-zero.
+  log_info "Invoking: $SCRIPT_DIR/maintenance.sh --health"
   local health_exit=0
   ./maintenance.sh --health || health_exit=$?
 

@@ -75,20 +75,19 @@ _require_env_for_live_restore "$@"
 # Dependency pre-flight
 # ---------------------------------------------------------------------------
 check_dependencies() {
-    local missing=()
-    local required_cmds=(docker age sops sqlite3 sha256sum)
-    for cmd in "${required_cmds[@]}"; do
-        if ! command -v "$cmd" >/dev/null 2>&1; then
-            missing+=("$cmd")
-        fi
-    done
-    if [[ ${#missing[@]} -gt 0 ]]; then
-        echo "ERROR: restore.sh: the following required tools are not installed:" >&2
-        for cmd in "${missing[@]}"; do
-            echo "         - $cmd" >&2
-        done
-        echo "       Install the missing tools before running a restore." >&2
+    local -a hard=(docker age age-keygen sqlite3 sha256sum tar)
+    local -a soft=(sops zstd rclone)
+    local missing_hard=() missing_soft=()
+    for c in "${hard[@]}"; do command -v "$c" >/dev/null 2>&1 || missing_hard+=("$c"); done
+    for c in "${soft[@]}"; do command -v "$c" >/dev/null 2>&1 || missing_soft+=("$c"); done
+    if [[ ${#missing_hard[@]} -gt 0 ]]; then
+        echo "ERROR: restore.sh: the following required tools are not installed: ${missing_hard[*]}" >&2
+        echo "       Install with: apt-get install -y age sqlite3 coreutils tar" >&2
+        echo "       age-keygen is part of the 'age' package on most distributions." >&2
         exit 1
+    fi
+    if [[ ${#missing_soft[@]} -gt 0 ]]; then
+        echo "WARN: restore.sh: optional tools missing (some features will be disabled): ${missing_soft[*]}" >&2
     fi
 }
 check_dependencies
@@ -181,6 +180,11 @@ ENVIRONMENT:
     RCLONE_REMOTE_NAME is read from .env when available.  On a fresh server
     where .env does not yet exist, restore.sh will interactively prompt for
     the remote name (and optionally the remote path) when --remote is used.
+
+    NOTE: On a fresh bare-metal server, 'rclone config' must already be
+    configured before using --remote.  The rclone remote credentials are
+    NOT stored in the backup archive.  Run 'rclone config' to add the
+    remote, verify with 'rclone listremotes', then re-run restore.sh.
 
 EXAMPLES:
     sudo ./restore.sh                                   # interactive (local or remote)
@@ -379,6 +383,20 @@ _prompt_rclone_remote_name() {
         if [[ "$remote_name" =~ [^a-zA-Z0-9_-] ]]; then
             log_error "Remote name contains invalid characters. Use only letters, digits, '_', or '-'."
             continue
+        fi
+        if command -v rclone >/dev/null 2>&1; then
+            local configured_remotes
+            configured_remotes=$(rclone listremotes 2>/dev/null || true)
+            if ! printf '%s\n' "$configured_remotes" | grep -qxF "${remote_name}:"; then
+                log_error "Remote '${remote_name}' not found in rclone config."
+                if [[ -n "$configured_remotes" ]]; then
+                    log_warn "  Configured remotes: $(printf '%s' "$configured_remotes" | tr '\n' ' ')"
+                    log_warn "  Run 'rclone config' to add the remote, then retry."
+                else
+                    log_warn "  No remotes configured. Run 'rclone config' to add one first."
+                fi
+                continue
+            fi
         fi
         break
     done
@@ -1024,6 +1042,7 @@ _prune_old_age_keys() {
 # ---------------------------------------------------------------------------
 ROTATED_KEY_FILE=""
 ROTATED_PUB_KEY=""
+ROTATED_KIT_FILE=""
 
 _rotate_age_key() {
     if [[ "$DRY_RUN" == "true" ]]; then
@@ -1097,6 +1116,32 @@ _rotate_age_key() {
     log_success "  New key installed: $local_key_file"
 
     ROTATED_KEY_FILE="$local_key_file"
+
+    # ------------------------------------------------------------------
+    # 2b. Write a local recovery-kit file so the operator has a copy
+    #     that survives independently of secrets/keys/
+    # ------------------------------------------------------------------
+    local kit_ts; kit_ts=$(date +%Y%m%d-%H%M%S)
+    local kit_file="/root/vaultwarden-recovery-kit-${kit_ts}.txt"
+    {
+        echo "# VaultWarden-OCI Recovery Kit"
+        echo "# Generated: $(date -u)"
+        echo "# Host:      $(hostname -f 2>/dev/null || hostname)"
+        echo "# IMPORTANT: Store this file offline in a secure password manager or USB."
+        echo "#            Required to decrypt future backups created after this date."
+        echo "#            Delete this file from /root/ once safely copied offline."
+        echo ""
+        cat "$new_key_tmp"
+    } > "$kit_file" 2>/dev/null || true
+    if [[ -f "$kit_file" ]]; then
+        chmod 600 "$kit_file" 2>/dev/null || true
+        ROTATED_KIT_FILE="$kit_file"
+        log_warn "  Recovery kit saved: $kit_file"
+        log_warn "  ← COPY THIS FILE OFFLINE NOW, then delete it from /root/"
+    else
+        log_warn "  Could not write recovery kit to /root/ — save the key manually."
+        ROTATED_KIT_FILE=""
+    fi
 
     # ------------------------------------------------------------------
     # 3. Install to systemd location /etc/vaultwarden/age-key.txt
@@ -1203,7 +1248,18 @@ _display_new_key() {
     echo ""
 
     if [[ "$FORCE" != "true" ]]; then
-        read -r -p "  Press Enter to confirm you have saved the key and start services... " _
+        if [[ -n "${ROTATED_KIT_FILE:-}" ]]; then
+            log_warn "  Recovery kit written to: $ROTATED_KIT_FILE"
+            log_warn "  Copy it offline NOW, then delete it: rm -f '$ROTATED_KIT_FILE'"
+            echo ""
+        fi
+        local _confirm=""
+        while [[ "$_confirm" != "SAVED" ]]; do
+            read -r -p "  Type SAVED (all caps) to confirm the key is recorded and start services: " _confirm
+            if [[ "$_confirm" != "SAVED" ]]; then
+                log_warn "  Please type exactly: SAVED"
+            fi
+        done
     fi
     echo ""
 }
@@ -1283,6 +1339,7 @@ create_pre_restore_snapshot() {
         sqlite3 "$db_path" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1 || true
     if [[ -x "./backup.sh" ]]; then
         log_info "Creating pre-restore emergency snapshot..."
+        log_info "Invoking: $SCRIPT_DIR/backup.sh --type emergency --quiet"
         if ! ./backup.sh --type emergency --quiet; then
             if [[ "${RESTORE_SNAPSHOT_HARD_FAIL}" == "true" ]]; then
                 log_error "Pre-restore snapshot FAILED (hard-fail)."
@@ -1582,11 +1639,15 @@ main() {
         fi
     fi
     # Validate that PUID and PGID are numeric and within valid UID/GID range.
-    if ! [[ "$PUID" =~ ^[0-9]+$ ]] || (( PUID > 65535 )); then
-        log_error "PUID must be a numeric value between 0 and 65535 (got: '$PUID')"; exit 1
+    if ! [[ "$PUID" =~ ^[0-9]+$ ]] || (( PUID < 100 || PUID > 65534 )); then
+        log_error "PUID must be a non-root numeric UID between 100 and 65534 (got: '$PUID')"
+        log_error "Find your user UID with: id -u <your-username>"
+        exit 1
     fi
-    if ! [[ "$PGID" =~ ^[0-9]+$ ]] || (( PGID > 65535 )); then
-        log_error "PGID must be a numeric value between 0 and 65535 (got: '$PGID')"; exit 1
+    if ! [[ "$PGID" =~ ^[0-9]+$ ]] || (( PGID < 100 || PGID > 65534 )); then
+        log_error "PGID must be a non-root numeric GID between 100 and 65534 (got: '$PGID')"
+        log_error "Find your group GID with: id -g <your-username>"
+        exit 1
     fi
 
     # Create the secure temp dir early so remote pull and key staging can use it.
@@ -1768,6 +1829,7 @@ main() {
 
         if [[ -x "./maintenance.sh" ]]; then
             log_info "Running post-restore health check..."
+            log_info "Invoking: $SCRIPT_DIR/maintenance.sh --health --quiet"
             ./maintenance.sh --health --quiet || {
                 log_warn "Health check reported issues after restore."
                 log_warn "Investigate with: docker compose logs --tail=50"

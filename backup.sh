@@ -369,6 +369,7 @@ verify_backup_full() {
 verify_backup_quick() {
     local enc_file="$1"
     local age_key_file="$2"
+    local _quick_verify_hash_skipped=false
 
     b_log_info "Running quick verification (SHA256 + decrypt probe)..."
 
@@ -387,7 +388,8 @@ verify_backup_quick() {
         fi
         b_log_info "SHA256 sidecar matches"
     else
-        b_log_warn "No SHA256 sidecar found — skipping hash check"
+        b_log_warn "No SHA256 sidecar found — hash check skipped"
+        _quick_verify_hash_skipped=true
     fi
 
     if [[ ! -f "$age_key_file" ]]; then
@@ -403,7 +405,11 @@ verify_backup_quick() {
     fi
     b_log_info "Decrypt probe passed"
 
-    b_log_info "Quick verification passed: $(basename "$enc_file")"
+    if [[ "$_quick_verify_hash_skipped" == "true" ]]; then
+        b_log_info "Quick verification passed (no .sha256 sidecar — hash check skipped): $(basename "$enc_file")"
+    else
+        b_log_info "Quick verification passed (SHA256 + decrypt probe): $(basename "$enc_file")"
+    fi
     return 0
 }
 
@@ -674,6 +680,21 @@ perform_db_backup() {
             b_log_info "WAL checkpoint succeeded (result: $wal_result)"
         fi
 
+        # Extra safety: confirm no process still holds the file open
+        # before doing a raw copy (lsof may not be installed everywhere,
+        # so this is a best-effort guard rather than a hard gate).
+        if command -v lsof >/dev/null 2>&1; then
+            local open_procs
+            open_procs=$(lsof "$db_file" 2>/dev/null | grep -v "^COMMAND" | wc -l)
+            if (( open_procs > 0 )); then
+                log_error "lsof reports $open_procs process(es) still have $db_file open." >&2
+                log_error "Cannot safely copy WAL database. Stop all processes first, then retry." >&2
+                return 1
+            fi
+            b_log_info "lsof check passed: no open handles on $db_file"
+        else
+            b_log_warn "lsof not available — cannot verify file handles before WAL fallback copy"
+        fi
         cp "$db_file" "$snap"
 
         if [[ "$container_was_running" == "true" ]]; then
@@ -891,6 +912,30 @@ MEOF
 }
 
 # ---------------------------------------------------------------------------
+# _check_backup_deps
+# ---------------------------------------------------------------------------
+_check_backup_deps() {
+    local -a hard=(age tar sha256sum)
+    local -a soft=(age-keygen sqlite3 zstd rclone)
+    local missing_hard=() missing_soft=()
+    for c in "${hard[@]}"; do command -v "$c" >/dev/null 2>&1 || missing_hard+=("$c"); done
+    for c in "${soft[@]}"; do command -v "$c" >/dev/null 2>&1 || missing_soft+=("$c"); done
+    if [[ ${#missing_hard[@]} -gt 0 ]]; then
+        log_error "backup.sh: required tools missing: ${missing_hard[*]}"
+        log_error "  Install with: apt-get install -y age coreutils tar"
+        exit 1
+    fi
+    if [[ ${#missing_soft[@]} -gt 0 ]]; then
+        log_warn "backup.sh: optional tools missing (some features disabled): ${missing_soft[*]}"
+        # Specifically warn about age-keygen absence since it is needed for restore key rotation
+        if [[ " ${missing_soft[*]} " =~ " age-keygen " ]]; then
+            log_warn "  age-keygen is missing — post-restore key rotation in restore.sh will fail."
+            log_warn "  It is part of the 'age' package: apt-get install -y age"
+        fi
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 main() {
@@ -901,6 +946,7 @@ main() {
     fi
 
     require_root "$@"
+    _check_backup_deps
 
     trap cleanup EXIT HUP INT TERM
 
