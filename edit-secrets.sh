@@ -398,6 +398,10 @@ do_list_keys() {
     done <<< "$raw_keys"
 
     echo ""
+    log_warn "⚠  Hashed fields: admin_token and admin_basic_auth_hash are one-way Argon2id/bcrypt hashes."
+    log_warn "   Decrypting the secrets file will show the hash, not the original password."
+    log_warn "   To change them: ./edit-secrets.sh --rotate admin_token"
+    echo ""
     log_info "Canonical production key path: /etc/vaultwarden/age-key.txt (installed by setup.sh)"
     log_info "Run './edit-secrets.sh --rotate email_api_token' to set or rotate the provider API key."
     log_info "Run './edit-secrets.sh --rotate <field>' to update any other specific key."
@@ -409,6 +413,8 @@ do_list_keys() {
 # ---------------------------------------------------------------------------
 do_view() {
     log_info "Opening secrets in view-only mode..."
+    log_warn "⚠  Hashed fields (admin_token, admin_basic_auth_hash) are stored as one-way hashes."
+    log_warn "   The displayed hash is NOT the password. Use '--rotate <field>' to change them."
 
     # Re-establish SOPS env — cleanup_secrets_environment() called
     # inside validate_secrets_decryption/yaml has already unset SOPS_AGE_KEY_FILE.
@@ -418,7 +424,7 @@ do_view() {
     fi
 
     local temp_file
-    temp_file=$(mktemp)
+    temp_file=$(mktemp -p /dev/shm 2>/dev/null || mktemp)
     # Make chmod failure a hard abort — if we can't secure the
     # temp file, we must not proceed as secrets could be exposed to other users.
     if ! install -m 600 /dev/null "$temp_file" 2>/dev/null; then
@@ -454,20 +460,23 @@ do_view() {
 # an empty or unchanged temp file before the user has saved.
 # ---------------------------------------------------------------------------
 _check_editor_forks() {
+    # If the user already added a wait/nofork flag, skip the warning entirely.
+    case "$EDITOR_CMD" in
+        *--wait*|*--nofork*|-f|*\ -f\ *|*\ -f) return 0 ;;
+    esac
+
     local editor_bin
-    editor_bin=$(basename "$EDITOR_CMD")
-    # Strip leading path components and any wrapper flags (take first word)
-    editor_bin="${editor_bin%% *}"
+    editor_bin="$(basename "${EDITOR_CMD%% *}")"
 
     for forking in "${_FORKING_EDITORS[@]}"; do
         if [[ "$editor_bin" == "$forking" ]]; then
             log_warn "EDITOR '$editor_bin' is known to fork and return immediately."
             log_warn "The script may re-encrypt before you save your changes."
             case "$editor_bin" in
-                code)   log_warn "Use:  EDITOR='code --wait' ./edit-secrets.sh" ;;
+                code)      log_warn "Use:  EDITOR='code --wait' ./edit-secrets.sh" ;;
                 gvim|mvim) log_warn "Use:  EDITOR='gvim --nofork' ./edit-secrets.sh" ;;
-                atom)   log_warn "Use:  EDITOR='atom --wait' ./edit-secrets.sh" ;;
-                *)      log_warn "Pass a '--wait' or '--nofork' flag to your editor." ;;
+                atom)      log_warn "Use:  EDITOR='atom --wait' ./edit-secrets.sh" ;;
+                *)         log_warn "Pass a '--wait' or '--nofork' flag to your editor." ;;
             esac
             log_warn "Proceeding anyway — verify your changes are saved before this script exits."
             return 0
@@ -619,7 +628,7 @@ _validate_rotate_field() {
 _deploy_docker_secrets() {
     local docker_dir="$PROJECT_ROOT/secrets/.docker_secrets"
     local temp_plain
-    temp_plain=$(mktemp --suffix=.yaml)
+    temp_plain=$(mktemp -p /dev/shm --suffix=.yaml 2>/dev/null || mktemp --suffix=.yaml)
     # Make chmod failure a hard abort — if we can't secure the
     # temp file, we must not proceed as secrets could be exposed to other users.
     if ! install -m 600 /dev/null "$temp_plain" 2>/dev/null; then
@@ -703,7 +712,7 @@ do_rotate() {
     echo ""
 
     local temp_plain
-    temp_plain=$(mktemp --suffix=.yaml)
+    temp_plain=$(mktemp -p /dev/shm --suffix=.yaml 2>/dev/null || mktemp --suffix=.yaml)
     # Make chmod failure a hard abort — if we can't secure the
     # temp file, we must not proceed as secrets could be exposed to other users.
     if ! install -m 600 /dev/null "$temp_plain" 2>/dev/null; then
@@ -756,7 +765,7 @@ do_rotate() {
     fi
 
     local temp_patched
-    temp_patched=$(mktemp --suffix=.yaml)
+    temp_patched=$(mktemp -p /dev/shm --suffix=.yaml 2>/dev/null || mktemp --suffix=.yaml)
     # Make chmod failure a hard abort — if we can't secure the
     # temp file, we must not proceed as secrets could be exposed to other users.
     if ! install -m 600 /dev/null "$temp_patched" 2>/dev/null; then
@@ -882,7 +891,7 @@ do_edit() {
     _check_editor_forks
 
     local temp_file
-    temp_file=$(mktemp --suffix=.yaml)
+    temp_file=$(mktemp -p /dev/shm --suffix=.yaml 2>/dev/null || mktemp --suffix=.yaml)
     # Make chmod failure a hard abort — if we can't secure the
     # temp file, we must not proceed as secrets could be exposed to other users.
     if ! install -m 600 /dev/null "$temp_file" 2>/dev/null; then
@@ -1002,7 +1011,7 @@ _export_recovery_kit_safe() {
     log_info "Validating secrets before recovery kit export..."
 
     local temp_plain
-    temp_plain=$(mktemp --suffix=.yaml)
+    temp_plain=$(mktemp -p /dev/shm --suffix=.yaml 2>/dev/null || mktemp --suffix=.yaml)
     # Make chmod failure a hard abort — if we can't secure the
     # temp file, we must not proceed as secrets could be exposed to other users.
     if ! install -m 600 /dev/null "$temp_plain" 2>/dev/null; then

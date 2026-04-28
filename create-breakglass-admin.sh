@@ -409,18 +409,21 @@ schedule_auto_cleanup() {
     fi
 
     # ------------------------------------------------------------------
-    # Tier 4: background subshell using sleep.
-    # Runs detached (setsid + redirects) so it survives the invoking shell
-    # session, but it is LOST ON REBOOT. The operator must run --remove
-    # manually if the host is rebooted before expiry elapses.
+    # Tier 4: last-resort background sleep subshell.
+    # SECURITY RISK: This is a detached root process with no tracked PID.
+    # It will NOT survive a reboot. Treat it as a best-effort reminder ONLY —
+    # not a security control. Manual --remove is the only reliable cleanup path.
     # ------------------------------------------------------------------
     local sleep_seconds=$(( expiry_hours * 3600 ))
-    log_warn "'at' and systemd-run not available or failed — scheduling auto-cleanup via background sleep"
-    log_warn "WARNING: This cleanup job is NOT reboot-safe. Run --remove manually if you reboot this host."
+    log_error "WARNING: All reliable schedulers (at, systemd-run) are unavailable."
+    log_error "  Auto-cleanup will use a background root subshell — this is NOT reboot-safe"
+    log_error "  and runs as an untracked detached process. If this host reboots before"
+    log_error "  ${expiry_human}, the breakglass account will NOT be auto-removed."
+    log_warn  "  Mandatory: run 'sudo $0 --remove' manually when done."
     setsid bash -c "sleep ${sleep_seconds} && ${cleanup_cmd}" \
         </dev/null >/dev/null 2>&1 &
     disown
-    log_success "Auto-cleanup background job started (PID $!) — will run at ${expiry_human} (NOT reboot-safe)"
+    log_warn "Fallback auto-cleanup background job started (NOT reboot-safe) — target: ${expiry_human}"
     return 0
 }
 
