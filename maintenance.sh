@@ -122,57 +122,6 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# Argument Parsing
-# ---------------------------------------------------------------------------
-[[ $# -eq 0 ]] && { show_help; exit 0; }
-
-# Track which flags were explicitly set so we can detect targeted mode
-_ROUTINE_OVERRIDE=false
-
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        --comprehensive)
-            COMPREHENSIVE=true; UPDATE_FIREWALL=true; UPDATE_DNS=true
-            _ROUTINE_OVERRIDE=true; shift ;;
-        --no-logs)      CLEAN_LOGS=false;        _ROUTINE_OVERRIDE=true; shift ;;
-        --no-backups)   CLEAN_BACKUPS=false;     _ROUTINE_OVERRIDE=true; shift ;;
-        --no-docker)    CLEAN_DOCKER=false;      _ROUTINE_OVERRIDE=true; shift ;;
-        --no-database)  OPTIMIZE_DATABASE=false; _ROUTINE_OVERRIDE=true; shift ;;
-        --update-firewall) UPDATE_FIREWALL=true; shift ;;
-        --update-dns)      UPDATE_DNS=true;      shift ;;
-        --dry-run)         DRY_RUN=true;         shift ;;
-        --email)           EMAIL_NOTIFY=true;    shift ;;
-        --db-maint)        DB_DEEP_MAINT=true;   shift ;;
-        --force)           DB_DEEP_FORCE=true;   shift ;;
-        --test-email)      TEST_EMAIL=true;      shift ;;
-        --recipient)       TEST_RECIPIENT="$2";  shift 2 ;;
-        --verbose)         VERBOSE=true;         shift ;;
-        --help)            show_help; exit 0 ;;
-        health|--health)
-            shift
-            run_health_check "$@"
-            exit $?
-            ;;
-        update|--update)
-            shift
-            run_update "$@"
-            exit $?
-            ;;
-        *) log_error "Unknown option: $1"; show_help; exit 1 ;;
-    esac
-done
-
-if [[ "$_ROUTINE_OVERRIDE" == "false" && "$DB_DEEP_MAINT" == "false" && "$TEST_EMAIL" == "false" ]]; then
-    if [[ "$UPDATE_DNS" == "true" || "$UPDATE_FIREWALL" == "true" ]]; then
-        TARGETED_MODE=true
-        CLEAN_LOGS=false
-        CLEAN_BACKUPS=false
-        CLEAN_DOCKER=false
-        OPTIMIZE_DATABASE=false
-    fi
-fi
-
-# ---------------------------------------------------------------------------
 # ROUTINE: Log cleanup and rotation
 # ---------------------------------------------------------------------------
 cleanup_logs() {
@@ -2279,7 +2228,7 @@ _health_main() {
     fi
 }
 
-main "$@"    _health_main "$@"
+    _health_main "$@"
 }
 
 # ---------------------------------------------------------------------------
@@ -2866,5 +2815,57 @@ main() {
         log_error "Maintenance completed with critical failures"; exit 1
     fi
 }
+
+# ---------------------------------------------------------------------------
+# Argument Parsing & Execution
+# ---------------------------------------------------------------------------
+
+[[ $# -eq 0 ]] && { show_help; exit 0; }
+
+# Track which flags were explicitly set so we can detect targeted mode
+_ROUTINE_OVERRIDE=false
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --comprehensive)
+            COMPREHENSIVE=true; UPDATE_FIREWALL=true; UPDATE_DNS=true
+            _ROUTINE_OVERRIDE=true; shift ;;
+        --no-logs)      CLEAN_LOGS=false;        _ROUTINE_OVERRIDE=true; shift ;;
+        --no-backups)   CLEAN_BACKUPS=false;     _ROUTINE_OVERRIDE=true; shift ;;
+        --no-docker)    CLEAN_DOCKER=false;      _ROUTINE_OVERRIDE=true; shift ;;
+        --no-database)  OPTIMIZE_DATABASE=false; _ROUTINE_OVERRIDE=true; shift ;;
+        --update-firewall) UPDATE_FIREWALL=true; shift ;;
+        --update-dns)      UPDATE_DNS=true;      shift ;;
+        --dry-run)         DRY_RUN=true;         shift ;;
+        --email)           EMAIL_NOTIFY=true;    shift ;;
+        --db-maint)        DB_DEEP_MAINT=true;   shift ;;
+        --force)           DB_DEEP_FORCE=true;   shift ;;
+        --test-email)      TEST_EMAIL=true;      shift ;;
+        --recipient)       TEST_RECIPIENT="$2";  shift 2 ;;
+        --verbose)         VERBOSE=true;         shift ;;
+        --help)            show_help; exit 0 ;;
+        health|--health)
+            shift
+            run_health_check "$@"
+            exit $?
+            ;;
+        update|--update)
+            shift
+            run_update "$@"
+            exit $?
+            ;;
+        *) log_error "Unknown option: $1"; show_help; exit 1 ;;
+    esac
+done
+
+if [[ "$_ROUTINE_OVERRIDE" == "false" && "$DB_DEEP_MAINT" == "false" && "$TEST_EMAIL" == "false" ]]; then
+    if [[ "$UPDATE_DNS" == "true" || "$UPDATE_FIREWALL" == "true" ]]; then
+        TARGETED_MODE=true
+        CLEAN_LOGS=false
+        CLEAN_BACKUPS=false
+        CLEAN_DOCKER=false
+        OPTIMIZE_DATABASE=false
+    fi
+fi
 
 main "$@"
