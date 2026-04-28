@@ -6,10 +6,8 @@ Complete reference for all management scripts and utility libraries in VaultWard
 > - `db-maint.sh` → `./maintenance.sh --db-maint`
 > - `update-dns.sh` → `./maintenance.sh --update-dns`
 > - `test-email-simple.sh` → `./maintenance.sh --test-email`
-> - `health.sh` → `./maintenance.sh --health` *(removed; use `./maintenance.sh --health` directly)*
-> - `update.sh` → `./maintenance.sh --update` *(removed; use `./maintenance.sh --update` directly)*
-> - `setup-secrets.sh` → `./setup.sh --phase=secrets` *(removed; use `./setup.sh --phase=secrets` directly)*
-> - `setup-systemd.sh` → `./setup.sh --phase=systemd` *(removed; use `./setup.sh --phase=systemd` directly)*
+> - `health.sh` and `update.sh` are now subcommands: `./maintenance.sh --health` and `./maintenance.sh --update`
+> - `setup-secrets.sh` and `setup-systemd.sh` are now phases: `./setup.sh --phase=secrets` and `./setup.sh --phase=systemd`
 >
 > Library consolidation: `lib/security.sh` and `lib/simple_key_resilience.sh` were merged into `lib/crypto.sh`; `lib/email.sh` was inlined into `lib/common.sh`.
 >
@@ -62,8 +60,8 @@ sudo ./setup.sh --domain vault.example.com --email admin@example.com [OPTIONS]
 | `--skip-deps` | Skip dependency installation |
 | `--force` | Overwrite existing configuration files |
 | `--dry-run` | Show what would be done without executing |
-| `--phase=secrets` | Run ONLY the secrets configuration phase (equivalent to the former `setup-secrets.sh`) |
-| `--phase=systemd` | Run ONLY the systemd installation phase (equivalent to the former `setup-systemd.sh`) |
+| `--phase=secrets` | Run ONLY the secrets configuration phase |
+| `--phase=systemd` | Run ONLY the systemd installation phase |
 
 ```bash
 sudo ./setup.sh --domain vault.example.com --email admin@example.com --auto
@@ -438,7 +436,7 @@ make update-system    # Containers + system packages (apt upgrade + Docker engin
 | `--update-firewall` | Fetch latest Cloudflare IPs and update UFW rules (adds new rules before removing old ones) |
 | `--update-dns` | Check current public IP and update Cloudflare DNS A record |
 
-**`--health` subcommand** *(merged from the former `health.sh`):*
+**`--health` subcommand:**
 
 | Option | Description |
 |---|---|
@@ -450,7 +448,7 @@ make update-system    # Containers + system packages (apt upgrade + Docker engin
 | `--output FILE` | Save report to file |
 | `--alert-threshold N` | Set alert threshold % (default: 80) |
 
-**`--update` subcommand** *(merged from the former `update.sh`):*
+**`--update` subcommand:**
 
 | Option | Description |
 |---|---|

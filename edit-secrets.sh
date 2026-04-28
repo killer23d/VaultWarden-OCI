@@ -8,51 +8,6 @@
 #
 # See also: ./setup.sh --phase=secrets  (first-time creation and full reconfiguration)
 #
-# BUG FIX (2026-03-19):
-#   FIX-ES1 [HIGH] do_edit(), do_view(), do_rotate(), and _deploy_docker_secrets()
-#   called sops directly without first calling ensure_sops_env(). The
-#   validate_secrets() call in main() sets SOPS_AGE_KEY_FILE via ensure_sops_env(),
-#   but lib/secrets.sh cleanup_secrets_environment() (LS-2/LS-8 fixes) correctly
-#   unsets it after validation completes — before any of the action functions run.
-#   Fix: call ensure_sops_env() at the start of each function that invokes sops
-#   directly, and call cleanup_secrets_environment() when done, mirroring the
-#   pattern used throughout lib/secrets.sh.
-#
-# BUG FIX (2026-03-24):
-#   FIX-ES2 [HIGH] do_edit() and do_rotate() called `sops --encrypt "$temp_file"`
-#   with no --age flag. SOPS matches .sops.yaml creation rules by INPUT FILE PATH.
-#   A temp file under /tmp (or /dev/shm) does not match the secrets/secrets.yaml
-#   path_regex, so sops exited with "no matching creation rule found". The error
-#   was silently swallowed (redirected into $encrypted_temp, then deleted on
-#   cleanup), producing only the opaque "Failed to encrypt secrets" message.
-#   Fix: replace the bare sops --encrypt calls with encrypt_sops_file() from
-#   lib/crypto.sh, which explicitly passes --age "$age_public_key" and never
-#   depends on .sops.yaml path_regex matching for temp file paths.
-#
-# BUG FIX (2026-03-24):
-#   FIX-ES3 [HIGH] do_edit() YAML validator used yaml.safe_load() which silently
-#   deduplicates keys. SOPS uses Go's yaml.v3 which strictly rejects duplicate
-#   mapping keys. An accidental duplicate key (e.g. "email_api_token" on two
-#   lines) passed Python validation but was rejected by SOPS with:
-#       yaml: unmarshal errors:
-#         line N: mapping key "X" already defined at line 1
-#   Fix: replace yaml.safe_load() with a custom loader that raises ValueError
-#   on duplicate keys. Applied to both the post-edit validation in do_edit()
-#   and the patched-YAML validation in do_rotate().
-#   Also: change staging file suffix from .yaml.enc to .yaml so the intent
-#   is unambiguous and does not rely on --input-type yaml in encrypt_sops_file()
-#   to paper over an extension mismatch.
-#
-# BUG FIX (2026-03-24):
-#   FIX-ES4 [HIGH] do_rotate() and _deploy_docker_secrets() used a helper
-#   _email_api_token_key() to derive a provider-specific key name from
-#   EMAIL_PROVIDER in .env (e.g. mailgun → MAILGUN_API_TOKEN) and wrote that
-#   derived key into secrets.yaml. However, send_email() in lib/common.sh always
-#   calls decrypt_secret with the fixed key "email_api_token", so the token was
-#   never found and the WARN "EMAIL_API_TOKEN is empty" was emitted on every run.
-#   Fix (Option B — canonical fixed key): remove _email_api_token_key() and
-#   always store the email provider API token under the fixed key "email_api_token"
-#   in secrets.yaml. This matches what lib/common.sh decrypt_secret reads.
 
 set -euo pipefail
 
@@ -75,7 +30,7 @@ LIST_KEYS=false
 ROTATE_FIELD=""   # non-empty triggers --rotate mode
 EXPORT_RECOVERY_KIT=false
 DRY_RUN=false
-# FIX [L-07]: Maximum recursive edit attempts before aborting
+# Maximum recursive edit attempts before aborting
 readonly MAX_EDIT_ATTEMPTS=5
 
 # Known forking editors that return before the user has saved.
@@ -85,7 +40,7 @@ _FORKING_EDITORS=("gvim" "mvim" "code" "atom" "subl" "sublime_text" "gedit" "kat
 # ---------------------------------------------------------------------------
 # Secure shred helper
 # ---------------------------------------------------------------------------
-# FIX [P3-H3]: Use _secure_shred() instead of plain rm -f for all plaintext
+# Use _secure_shred() instead of plain rm -f for all plaintext
 # YAML temp files so decrypted data cannot be recovered from CoW filesystems
 # (btrfs, APFS, ZFS) where overwrite-in-place is a no-op.
 # Tries shred(1), then srm(1), then falls back to a best-effort
@@ -116,7 +71,7 @@ CLEANUP_FUNCS=()
 CLEANUP_ARGS=()
 register_cleanup() { CLEANUP_FUNCS+=("$1"); CLEANUP_ARGS+=("$2"); }
 perform_cleanup() {
-    # BUG-#7 FIX: Execute cleanup actions without eval to eliminate shell
+    # Execute cleanup actions without eval to eliminate shell
     # injection risk.  Each action is stored as a (function, arg) pair in
     # parallel arrays and dispatched via direct function call.
     local idx
@@ -132,7 +87,7 @@ trap perform_cleanup EXIT
 # Read a single KEY from .env (or FILE) without sourcing the whole file.
 # Returns the value, or an empty string if the key is not found.
 #
-# FIX (Issue 1 / HIGH): Require at least one whitespace character before #
+# Require at least one whitespace character before #
 # to distinguish inline comments from embedded # in values (e.g. p@ss#1).
 # Synced to the safe pattern already present in setup.sh --phase=secrets.
 # ---------------------------------------------------------------------------
@@ -159,7 +114,7 @@ _read_dotenv_value() {
 # ---------------------------------------------------------------------------
 # _validate_yaml_no_duplicates FILE
 #
-# FIX-ES3: Python's yaml.safe_load() silently drops duplicate keys (last
+# Python's yaml.safe_load() silently drops duplicate keys (last
 # value wins), so the old validator passed files that SOPS (Go yaml.v3)
 # would reject with "mapping key X already defined at line N".
 #
@@ -366,12 +321,11 @@ check_prerequisites() {
 validate_secrets() {
     log_info "Validating secrets file..."
 
-    # FIX-ES1: ensure_sops_env is called here only for validation. The
+    # ensure_sops_env is called here only for validation. The
     # cleanup_secrets_environment() calls inside validate_secrets_decryption()
-    # and validate_secrets_yaml() (lib/secrets.sh LS-8/LS-9 fixes) will unset
-    # SOPS_AGE_KEY_FILE when they return. Each action function (do_edit,
-    # do_view, do_rotate, etc.) must call ensure_sops_env() independently
-    # before invoking sops.
+    # and validate_secrets_yaml() will unset SOPS_AGE_KEY_FILE when they return.
+    # Each action function (do_edit, do_view, do_rotate, etc.) must call
+    # ensure_sops_env() independently before invoking sops.
     if ! ensure_sops_env; then return 1; fi
 
     if ! validate_secrets_decryption; then
@@ -416,11 +370,10 @@ create_backup() {
 # ---------------------------------------------------------------------------
 # --list mode: show key names only, no values
 #
-# FIX (Issue 4 / LOW): Fix EMAIL_PROVIDER fallback to cover both the error
-# case and the empty-value case.  The previous `|| echo smtp` fallback only
-# fired when _read_dotenv_value returned a non-zero exit code (i.e. on
-# error), not when the key existed but had a blank value.  Use a separate
-# variable with shell default expansion instead.
+# EMAIL_PROVIDER fallback covers both the error case and the empty-value case.
+# The `|| echo smtp` pattern only fires on non-zero exit code from
+# _read_dotenv_value, not when the key exists with a blank value.
+# Shell default expansion handles the empty-value case correctly.
 # ---------------------------------------------------------------------------
 do_list_keys() {
     log_info "Secret key names in: $SECRETS_FILE"
@@ -457,7 +410,7 @@ do_list_keys() {
 do_view() {
     log_info "Opening secrets in view-only mode..."
 
-    # FIX-ES1: Re-establish SOPS env — cleanup_secrets_environment() called
+    # Re-establish SOPS env — cleanup_secrets_environment() called
     # inside validate_secrets_decryption/yaml has already unset SOPS_AGE_KEY_FILE.
     if ! ensure_sops_env; then
         log_error "Failed to setup SOPS environment"
@@ -466,14 +419,14 @@ do_view() {
 
     local temp_file
     temp_file=$(mktemp)
-    # BUG-#30 FIX: Make chmod failure a hard abort — if we can't secure the
+    # Make chmod failure a hard abort — if we can't secure the
     # temp file, we must not proceed as secrets could be exposed to other users.
     if ! install -m 600 /dev/null "$temp_file" 2>/dev/null; then
         rm -f "$temp_file"
         log_error "Failed to secure temp file: $temp_file"
         return 1
     fi
-    # FIX [P3-H3]: use _secure_shred() instead of rm -f for plaintext temp file
+    # use _secure_shred() instead of rm -f for plaintext temp file
     register_cleanup "_secure_shred" "$temp_file"
 
     local sops_rc=0
@@ -558,7 +511,7 @@ _validate_editor_saved() {
 # or equal PLACEHOLDER_NOT_CONFIGURED. Returns 1 (with a list of offending
 # keys) if any are found, so recovery kit export can be aborted.
 #
-# FIX (Issue 2 / MEDIUM): Replace yaml.safe_load() with the _NoDupLoader
+# Replace yaml.safe_load() with the _NoDupLoader
 # already defined in _validate_yaml_no_duplicates so that a file with a
 # duplicate key cannot silently pass the placeholder check (safe_load hides
 # duplicates; _NoDupLoader raises ValueError on the first one found).
@@ -621,7 +574,7 @@ PYEOF
 # ---------------------------------------------------------------------------
 # --rotate FIELD mode
 #
-# FIX-ES4: email_api_token is now a fixed canonical key. do_rotate() stores
+# email_api_token is a fixed canonical key. do_rotate() stores
 # the token directly under "email_api_token" in secrets.yaml — no provider-
 # specific derivation. This matches what decrypt_secret reads in lib/common.sh.
 # ---------------------------------------------------------------------------
@@ -632,7 +585,7 @@ _ROTATE_FIELDS=("admin_token" "admin_basic_auth_hash"
                 "smtp_password" "push_installation_id" "push_installation_key"
                 "backup_passphrase")
 
-# FIX [P4-UX2]: Map each rotatable field to the Docker service(s) that consume
+# Map each rotatable field to the Docker service(s) that consume
 # it so the post-rotation message tells the operator exactly what to restart.
 declare -A _FIELD_SERVICES
 _FIELD_SERVICES=(
@@ -657,30 +610,27 @@ _validate_rotate_field() {
     return 1
 }
 
-# FIX [M-10]: Deploy all Docker secret files from the encrypted YAML.
+# Deploy all Docker secret files from the encrypted YAML.
 # Mirrors the logic in startup.sh prepare_docker_secrets() so the bind-mounted
 # files in secrets/.docker_secrets/ stay in sync after a rotation.
-#
-# FIX-ES4: Always use "email_api_token" as the key name — no provider derivation.
-#
-# FIX (Issue 6 / MEDIUM): Log a log_warn for each field skipped due to a
-# CHANGE_ME/NOT_USED/null placeholder so the admin can see exactly which
-# Docker secret files were not written and which rotations are still pending.
+# Always use "email_api_token" as the key name — no provider derivation.
+# Warns for each field skipped due to a CHANGE_ME/NOT_USED/null placeholder
+# so the admin can see which Docker secret files were not written.
 _deploy_docker_secrets() {
     local docker_dir="$PROJECT_ROOT/secrets/.docker_secrets"
     local temp_plain
     temp_plain=$(mktemp --suffix=.yaml)
-    # BUG-#30 FIX: Make chmod failure a hard abort — if we can't secure the
+    # Make chmod failure a hard abort — if we can't secure the
     # temp file, we must not proceed as secrets could be exposed to other users.
     if ! install -m 600 /dev/null "$temp_plain" 2>/dev/null; then
         rm -f "$temp_plain"
         log_error "Failed to secure temp file: $temp_plain"
         return 1
     fi
-    # FIX [P3-H3]: use _secure_shred() for this plaintext temp file
+    # use _secure_shred() for this plaintext temp file
     register_cleanup "_secure_shred" "$temp_plain"
 
-    # FIX-ES1: Re-establish SOPS env before calling sops directly.
+    # Re-establish SOPS env before calling sops directly.
     if ! ensure_sops_env; then
         log_error "Failed to setup SOPS environment for Docker secret deployment"
         return 1
@@ -700,7 +650,7 @@ _deploy_docker_secrets() {
     local old_umask; old_umask=$(umask); umask 077
     local deployed=0
 
-    # FIX-ES4: canonical fixed key — no provider derivation
+    # canonical fixed key — no provider derivation
     local secret_fields=(
         "admin_token" "admin_basic_auth_hash" "smtp_password"
         "backup_passphrase" "push_installation_id" "push_installation_key"
@@ -721,7 +671,7 @@ PY
             printf '%s' "$value" > "$docker_dir/$field_name"
             (( deployed++ ))
         else
-            # FIX (Issue 6): Warn so the admin knows which files were not written.
+            # Warn so the admin knows which files were not written.
             log_warn "Docker secret '$field_name' skipped (still placeholder — rotate with: ./edit-secrets.sh --rotate $field_name)"
         fi
     done
@@ -736,7 +686,7 @@ do_rotate() {
 
     if ! _validate_rotate_field "$field"; then exit 1; fi
 
-    # FIX-ES4: email_api_token is a fixed canonical key — no provider derivation.
+    # email_api_token is a fixed canonical key — no provider derivation.
     # actual_field == field for all cases including email_api_token.
     local actual_field="$field"
 
@@ -754,17 +704,17 @@ do_rotate() {
 
     local temp_plain
     temp_plain=$(mktemp --suffix=.yaml)
-    # BUG-#30 FIX: Make chmod failure a hard abort — if we can't secure the
+    # Make chmod failure a hard abort — if we can't secure the
     # temp file, we must not proceed as secrets could be exposed to other users.
     if ! install -m 600 /dev/null "$temp_plain" 2>/dev/null; then
         rm -f "$temp_plain"
         log_error "Failed to secure temp file: $temp_plain"
         return 1
     fi
-    # FIX [P3-H3]: use _secure_shred() for this plaintext temp file
+    # use _secure_shred() for this plaintext temp file
     register_cleanup "_secure_shred" "$temp_plain"
 
-    # FIX-ES1: Re-establish SOPS env before calling sops directly.
+    # Re-establish SOPS env before calling sops directly.
     if ! ensure_sops_env; then
         log_error "Failed to setup SOPS environment"
         return 1
@@ -781,7 +731,7 @@ do_rotate() {
     # For all other fields, delegate to the canonical collect_secret_field().
     local new_value
     if [[ "$field" == "email_api_token" ]]; then
-        # FIX (Issue 5 / LOW): Read EMAIL_PROVIDER from .env rather than relying
+        # Read EMAIL_PROVIDER from .env rather than relying
         # on the calling shell's environment.  An admin running the script in a
         # clean shell would otherwise see the generic "email" fallback in the
         # prompt instead of the actual configured provider name.
@@ -807,17 +757,17 @@ do_rotate() {
 
     local temp_patched
     temp_patched=$(mktemp --suffix=.yaml)
-    # BUG-#30 FIX: Make chmod failure a hard abort — if we can't secure the
+    # Make chmod failure a hard abort — if we can't secure the
     # temp file, we must not proceed as secrets could be exposed to other users.
     if ! install -m 600 /dev/null "$temp_patched" 2>/dev/null; then
         rm -f "$temp_patched"
         log_error "Failed to secure temp file: $temp_patched"
         return 1
     fi
-    # FIX [P3-H3]: use _secure_shred() for this plaintext patched temp file
+    # use _secure_shred() for this plaintext patched temp file
     register_cleanup "_secure_shred" "$temp_patched"
 
-    # FIX (Issue 3 / MEDIUM): Replace yaml.safe_load + yaml.dump round-trip
+    # Replace yaml.safe_load + yaml.dump round-trip
     # with a line-by-line regex substitution so YAML comments (inline field
     # documentation added by setup.sh --phase=secrets write_secrets()) are preserved
     # on every rotation.  yaml.dump() strips all comments on first write.
@@ -850,21 +800,21 @@ PYEOF
         return 1
     fi
 
-    # FIX-ES3: Use strict duplicate-key validator instead of bare yaml.safe_load
+    # Use strict duplicate-key validator instead of bare yaml.safe_load
     if ! _validate_yaml_no_duplicates "$temp_patched" 2>&1; then
         log_error "Patched YAML is invalid - aborting"
         return 1
     fi
 
     log_info "Re-encrypting secrets (atomic write)..."
-    # FIX-ES2 + FIX-ES3: Pass a plain .yaml staging file to encrypt_sops_file().
+    # Pass a plain .yaml staging file to encrypt_sops_file().
     # Using .yaml (not .yaml.enc) avoids extension-strip confusion inside
     # encrypt_sops_file()'s own mktemp call. encrypt_sops_file() handles the
     # cp → sops --encrypt --in-place → mv cycle; we then mv the result to
     # SECRETS_FILE for a fully atomic two-step replace.
     local temp_enc
     temp_enc=$(mktemp --suffix=.yaml --tmpdir="$(dirname "$SECRETS_FILE")")
-    # BUG-#30 FIX: Make chmod failure a hard abort — if we can't secure the
+    # Make chmod failure a hard abort — if we can't secure the
     # temp file, we must not proceed as secrets could be exposed to other users.
     if ! install -m 600 /dev/null "$temp_enc" 2>/dev/null; then
         rm -f "$temp_enc"
@@ -889,7 +839,7 @@ PYEOF
 
     log_success "Secret '${actual_field}' rotated successfully"
 
-    # FIX [P4-UX2]: Tell the operator exactly which Docker service to restart.
+    # Tell the operator exactly which Docker service to restart.
     local _affected_service="${_FIELD_SERVICES[$field]:-}"
     if [[ -n "$_affected_service" ]]; then
         log_warn "Restart the following Docker service for the new secret to take effect:"
@@ -898,7 +848,7 @@ PYEOF
         log_warn "Run 'docker compose restart <service>' for the new secret to take effect"
     fi
 
-    # FIX [M-10]: After successful rotation, redeploy Docker secret files so
+    # After successful rotation, redeploy Docker secret files so
     # the live bind-mounted secrets stay in sync with the encrypted YAML.
     log_info "Redeploying Docker secret files..."
     if _deploy_docker_secrets 2>/dev/null; then
@@ -915,7 +865,7 @@ PYEOF
 # ---------------------------------------------------------------------------
 # Default: interactive edit
 # ---------------------------------------------------------------------------
-# FIX [L-07]: Added _depth parameter to prevent unbounded recursion when the
+# _depth parameter prevents unbounded recursion when the
 # user repeatedly saves invalid YAML and chooses not to discard changes.
 #
 # MEDIUM FIX: Editor fork detection + post-edit file-size check added.
@@ -933,17 +883,17 @@ do_edit() {
 
     local temp_file
     temp_file=$(mktemp --suffix=.yaml)
-    # BUG-#30 FIX: Make chmod failure a hard abort — if we can't secure the
+    # Make chmod failure a hard abort — if we can't secure the
     # temp file, we must not proceed as secrets could be exposed to other users.
     if ! install -m 600 /dev/null "$temp_file" 2>/dev/null; then
         rm -f "$temp_file"
         log_error "Failed to secure temp file: $temp_file"
         return 1
     fi
-    # FIX [P3-H3]: use _secure_shred() for this plaintext temp file
+    # use _secure_shred() for this plaintext temp file
     register_cleanup "_secure_shred" "$temp_file"
 
-    # FIX-ES1: Re-establish SOPS env — validate_secrets() called ensure_sops_env()
+    # Re-establish SOPS env — validate_secrets() called ensure_sops_env()
     # but cleanup_secrets_environment() inside validate_secrets_decryption/yaml
     # has already unset SOPS_AGE_KEY_FILE by the time do_edit() runs.
     if ! ensure_sops_env; then
@@ -979,7 +929,7 @@ do_edit() {
 
     log_info "Changes detected, validating..."
 
-    # FIX-ES3: Use strict duplicate-key YAML validator.
+    # Use strict duplicate-key YAML validator.
     # yaml.safe_load() silently deduplicates keys; SOPS (Go yaml.v3) rejects
     # them. Catch the error here with a human-readable message so the operator
     # is offered the chance to fix it in the editor rather than hitting the
@@ -988,7 +938,7 @@ do_edit() {
     if ! yaml_err=$(_validate_yaml_no_duplicates "$temp_file" 2>&1); then
         log_error "Invalid YAML structure after editing:"
         log_error "  $yaml_err"
-        # FIX [L-04]: Add -t 30 timeout
+        # Add -t 30 timeout to avoid hanging indefinitely
         if ! read -r -t 30 -p "Discard changes? (yes/no): " discard; then
             log_warn "No input received (30s timeout). Discarding changes."
             discard="yes"
@@ -1004,13 +954,13 @@ do_edit() {
     fi
 
     log_info "Encrypting changes (atomic write)..."
-    # FIX-ES2 + FIX-ES3: Use a plain .yaml staging file (not .yaml.enc) placed
+    # Use a plain .yaml staging file (not .yaml.enc) placed
     # in the same directory as SECRETS_FILE so the final mv is atomic.
     # encrypt_sops_file() handles cp → sops --encrypt --in-place → internal mv;
     # we then mv its output over SECRETS_FILE.
     local encrypted_temp
     encrypted_temp=$(mktemp --suffix=.yaml --tmpdir="$(dirname "$SECRETS_FILE")")
-    # BUG-#30 FIX: Make chmod failure a hard abort — if we can't secure the
+    # Make chmod failure a hard abort — if we can't secure the
     # temp file, we must not proceed as secrets could be exposed to other users.
     if ! install -m 600 /dev/null "$encrypted_temp" 2>/dev/null; then
         rm -f "$encrypted_temp"
@@ -1053,7 +1003,7 @@ _export_recovery_kit_safe() {
 
     local temp_plain
     temp_plain=$(mktemp --suffix=.yaml)
-    # BUG-#30 FIX: Make chmod failure a hard abort — if we can't secure the
+    # Make chmod failure a hard abort — if we can't secure the
     # temp file, we must not proceed as secrets could be exposed to other users.
     if ! install -m 600 /dev/null "$temp_plain" 2>/dev/null; then
         rm -f "$temp_plain"
@@ -1062,7 +1012,7 @@ _export_recovery_kit_safe() {
     fi
     register_cleanup "_secure_shred" "$temp_plain"
 
-    # FIX-ES1: Re-establish SOPS env before calling sops directly.
+    # Re-establish SOPS env before calling sops directly.
     if ! ensure_sops_env; then
         log_error "Failed to setup SOPS environment"
         return 1

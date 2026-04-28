@@ -13,7 +13,7 @@ source "lib/common.sh"
 init_common_lib "$0"
 source "lib/crypto.sh"  # provides security functions (merged from lib/security.sh)
 
-# FIX [L-05]: Read SSH_PORT from the environment first, then fall back to .env.
+# Read SSH_PORT from the environment first, then fall back to .env.
 #
 # Rationale for NO 2>/dev/null on the grep:
 #   _require_root (called inside main() via is_root) exits early when the
@@ -461,7 +461,7 @@ create_breakglass_user() {
         return 1
     fi
 
-    # FIX [M-09]: Use heredoc to set password — avoids "echo USER:PASS | chpasswd" which
+    # Use heredoc to set password — avoids "echo USER:PASS | chpasswd" which
     # exposes the password in /proc/<pid>/cmdline via the echo subprocess.
     if ! chpasswd <<< "${BREAKGLASS_USER}:${password}"; then
         log_error "Failed to set user password"

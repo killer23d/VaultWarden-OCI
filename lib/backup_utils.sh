@@ -1,74 +1,5 @@
 #!/usr/bin/env bash
-# P4 merge SKIPPED: combining backup_utils.sh (744 lines) + secrets.sh (~1098 lines)
-# would produce an ~1842-line file exceeding the maintainability threshold.
-# These libraries remain separate.
-# lib/backup_utils.sh - Backup utility functions for VaultWarden-OCI-NG
-#
-# PATCHED BUGS (2026-03-06):
-#   BUG-B1 [HIGH]   check_backup_disk_space(): df --output=avail is GNU-only.
-#                   BSD/macOS df does not support --output=. Replaced with a
-#                   portable awk one-liner.
-#   BUG-B2 [HIGH]   get_backup_statistics(): find -exec stat -c%s {} + is
-#                   GNU-only. Replaced with find | while + _stat_file_size().
-#   BUG-B3 [MEDIUM] create_backup_metadata(): stat -c%s GNU-only. Replaced
-#                   with _stat_file_size() helper from lib/crypto.sh.
-#   BUG-B4 [MEDIUM] cleanup_old_backups(): unquoted -mtime +$retention_days.
-#                   Quoted to prevent set -u unbound-variable failure.
-#   BUG-B5 [LOW]    create_backup_metadata(): $? anti-pattern after heredoc.
-#                   Replaced with direct 'if ! cat > file <<EOF' test.
-# PATCHED BUGS (2026-03-10):
-#   P2-M3 [MEDIUM]  cleanup_old_backups(): orphaned .meta/.sha256 sidecars
-#                   (no corresponding .age file) were never removed, causing
-#                   indefinite accumulation. Added a second sweep that finds
-#                   and removes all sidecar files whose base .age is absent.
-# PATCHED BUGS (2026-03-11) - Audit remediation:
-#   AUD-B1 [HIGH]   verify_backup_integrity(): sqlite3 PRAGMA integrity_check
-#                   now operates on a private copy of the database in a
-#                   restricted tmpdir rather than the live file. This prevents
-#                   SQLite WAL-mode inconsistency when VaultWarden is running.
-#   AUD-B2 [MEDIUM] get_backup_size(): was using du -sh which returns a
-#                   human-readable string unsuitable for arithmetic. Now
-#                   returns raw bytes via portable stat (GNU|BSD) so callers
-#                   can safely compare values numerically.
-#   AUD-B3 [LOW]    cleanup_old_backups(): -mtime reflects last content-
-#                   modification time and can be fooled by rsync --times or
-#                   touch. Replaced with a portable stat-based ctime age check
-#                   so preserved-timestamp restores never bypass retention.
-# PATCHED BUGS (2026-03-13):
-#   LB-1  [CRITICAL] verify_backup_integrity(): three sequential cp calls
-#                   could produce an inconsistent DB snapshot (VaultWarden can
-#                   commit a transaction between the first and second cp).
-#                   Replaced with sqlite3 .backup (SQLite Online Backup API)
-#                   which holds the necessary read lock for a fully consistent
-#                   copy regardless of WAL activity.
-#   LB-2  [HIGH]    _backup_ctime_age_days() / cleanup_old_backups(): ctime is
-#                   reset by cp, mv across filesystems, chmod, or chown, so
-#                   backups restored to a fresh host appear 0 days old and are
-#                   never cleaned up (unbounded retention).
-#                   Fix: new _backup_filename_age_days() parses the immutable
-#                   YYYYMMDD-HHMMSS timestamp embedded in the filename as the
-#                   primary age source. Falls back to ctime only for files
-#                   predating the naming convention (no timestamp in name).
-# QOL (2026-03-26):
-#   ITEM-10 [QOL]   list_backups(): added per-type size totals and a grand-
-#                   total summary line. Operators using `make list-backups`
-#                   (or backup.sh --list) on an OCI free-tier VM can now see
-#                   total disk consumption at a glance without manual du(1).
-#                   Uses the same portable _stat_file_size() helper already
-#                   relied on by get_backup_statistics(). A new pure-bash
-#                   _format_bytes_human() helper formats byte counts as MB
-#                   (one decimal place) without requiring numfmt (GNU-only).
-# PATCHED BUGS (2026-04-09):
-#   FIX-VAL-TAR [MEDIUM] validate_backup_integrity(): age decryption was
-#                   tested against /dev/null only, confirming the envelope and
-#                   key but not the inner gzip/tar payload. A backup whose age
-#                   layer succeeded but whose tar stream was truncated or
-#                   corrupt would pass verification and be silently unusable
-#                   at restore time. Added a second read-only pass that pipes
-#                   age output directly into `tar -tz` (list only, no
-#                   extraction) to exercise the full decrypt->untar path.
-#                   PIPESTATUS captures age and tar exit codes independently
-#                   so both failure modes produce a distinct error message.
+# backup_utils.sh — Shared backup/restore utilities
 
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_BACKUP_UTILS_LIB_LOADED:-}" ]] && return 0
@@ -103,7 +34,6 @@ _format_bytes_human() {
 # --- Backup Validation Functions ---
 
 # List available backups in a directory - STANDARDIZED: Returns exit code
-# FIX [ISSUE 13]: Use stat instead of date -r for cross-platform mtime display.
 # ITEM-10: Print per-type file count + total size after each type block, plus
 #          a grand-total line at the end of all output.
 list_backups() {
@@ -143,7 +73,7 @@ list_backups() {
                         basename_file=$(basename "$backup_file")
                         size_info=$(du -h "$backup_file" 2>/dev/null | cut -f1 || echo "unknown")
 
-                        # FIX [ISSUE 13]: stat -c '%y' is Linux (GNU coreutils);
+                        # stat -c '%y' is Linux (GNU coreutils);
                         # fall back to BSD stat -f '%Sm' for macOS compatibility.
                         age_info=$(stat -c '%y' "$backup_file" 2>/dev/null \
                             | cut -c1-16 \
@@ -210,7 +140,7 @@ list_backups() {
 #   1. File exists and is large enough to be plausible.
 #   2. SHA-256 checksum matches the paired .sha256 sidecar (if present).
 #   3. age decryption succeeds (correct key, intact envelope).
-#   4. FIX-VAL-TAR: the inner gzip/tar stream is structurally valid.
+#   4. Inner gzip/tar stream is structurally valid.
 #      Step 3 alone cannot catch a backup where age encryption succeeded
 #      but the tar payload was truncated or silently corrupted; such a
 #      backup passes step 3 and is unusable at restore time. Step 4 pipes
@@ -223,7 +153,7 @@ list_backups() {
 # the status capture; the outer script's errexit is not triggered by the
 # inner pipe failure.
 #
-# FIX [ISSUE 7]: Decryption test uses direct redirect; avoids pipeline
+# Decryption test uses direct redirect; avoids pipeline
 # PIPESTATUS trap under set -euo pipefail.
 # ---------------------------------------------------------------------------
 validate_backup_integrity() {
@@ -267,7 +197,7 @@ validate_backup_integrity() {
     fi
 
     # ---------------------------------------------------------------------------
-    # Pass 1 (FIX [ISSUE 7]): age envelope + key check.
+    # Pass 1: age envelope + key check.
     # Decrypt to /dev/null. Confirms the age header is intact and the
     # supplied key can open the file. Does NOT validate the tar payload.
     # ---------------------------------------------------------------------------
@@ -277,7 +207,7 @@ validate_backup_integrity() {
     fi
 
     # ---------------------------------------------------------------------------
-    # Pass 2 (FIX-VAL-TAR): inner tar stream check.
+    # Pass 2: inner tar stream check.
     # Pipe the decrypted bytes directly into `tar -tz` (list only, no
     # extraction). This exercises the complete decrypt->untar path without
     # writing any files or mutating any state.
@@ -313,7 +243,7 @@ validate_backup_integrity() {
 # ---------------------------------------------------------------------------
 # verify_backup_integrity DB_PATH [AGE_KEY_FILE]
 #
-# LB-1 FIX [CRITICAL]: The previous implementation copied the live .db,
+# The previous implementation copied the live .db,
 # -wal, and -shm files with three sequential cp calls. VaultWarden can commit
 # a transaction between the first and second cp, producing an inconsistent
 # snapshot. SQLite's PRAGMA integrity_check on such a pair can return a false
@@ -357,7 +287,7 @@ verify_backup_integrity() {
     db_base=$(basename "$db_path")
     local db_copy="$work_dir/$db_base"
 
-    # LB-1 FIX: use SQLite Online Backup API via the sqlite3 .backup dot-command.
+    # Use SQLite Online Backup API via the sqlite3 .backup dot-command.
     # This acquires the correct shared read lock and integrates any pending WAL
     # frames before writing the copy, guaranteeing a consistent snapshot even
     # while VaultWarden is running in WAL mode.
@@ -387,7 +317,7 @@ verify_backup_integrity() {
 # ---------------------------------------------------------------------------
 # get_backup_size BACKUP_FILE
 #
-# AUD-B2 FIX [MEDIUM]: The previous implementation used 'du -sh' which returns
+# The previous implementation used 'du -sh' which returns
 # a human-readable string (e.g. "4.2M"). Any caller attempting arithmetic on
 # that value would silently get 0 (in (( )) context) or an error. Changed to
 # return the raw byte count via portable stat (GNU: -c%s, BSD/macOS: -f%z) so
@@ -419,7 +349,7 @@ get_backup_size() {
 
 # Check available disk space for backup operations - STANDARDIZED: Returns exit code
 #
-# BUG-B1 FIX: df --output=avail is GNU coreutils-only. BSD/macOS df does not
+# df --output=avail is GNU coreutils-only. BSD/macOS df does not
 # support the --output= long option and the function always reported
 # 'Cannot determine available disk space' on macOS.
 #
@@ -432,7 +362,7 @@ check_backup_disk_space() {
     local required_space_mb="${2:-1000}"  # Default 1GB
 
     if [[ ! -d "$target_dir" ]]; then
-        # BUG-#35 FIX: Return 0 (skip check) when directory does not yet exist.
+        # Return 0 (skip check) when directory does not yet exist.
         # On the first run the backup destination has not been created yet; returning
         # 1 (error) would block valid first-run backups. Log at debug level only —
         # this is expected during initial setup.
@@ -440,10 +370,10 @@ check_backup_disk_space() {
         return 0
     fi
 
-    # BUG-B1 FIX: portable df — column 4 is Available (1 KiB blocks) on
+    # portable df — column 4 is Available (1 KiB blocks) on
     # both GNU df and BSD/macOS df.
     local available_space_kb
-    # FIX [L-11]: Use awk 'END' (last line) instead of 'NR==2' to handle long
+    # Use awk 'END' (last line) instead of 'NR==2' to handle long
     # filesystem paths that cause df to wrap output across two lines.
     available_space_kb=$(df "$target_dir" 2>/dev/null | awk 'END {print $4}')
 
@@ -466,7 +396,7 @@ check_backup_disk_space() {
 # ---------------------------------------------------------------------------
 # _backup_filename_age_days FILE
 #
-# LB-2 FIX: Primary age source for retention. Extracts the YYYYMMDD-HHMMSS
+# Primary age source for retention. Extracts the YYYYMMDD-HHMMSS
 # timestamp embedded in the backup filename (e.g.
 #   db-20240315-143022.age  → 20240315-143022)
 # and converts it to whole days elapsed since that timestamp.
@@ -532,25 +462,12 @@ _backup_ctime_age_days() {
 
 # Clean up old backups based on retention policy - STANDARDIZED: Returns exit code
 #
-# BUG-B4 FIX: unquoted $retention_days in find -mtime argument. Under set -u
-# an unset variable throws 'unbound variable'. Quoted the argument.
+# Removes .age backup files older than $retention_days. A second sweep removes
+# orphaned .meta and .sha256 sidecar files whose corresponding .age primary no
+# longer exists (e.g. after a partial cleanup or manual deletion).
 #
-# P2-M3 FIX: orphaned sidecar sweep.
-# The original code only searched for *.age files and deleted their paired
-# sidecars when an .age file crossed the retention threshold. This left
-# orphaned .meta and .sha256 files behind whenever an .age file had already
-# been removed by an earlier run, a manual deletion, or an interrupted
-# cleanup, causing them to accumulate indefinitely.
-# The fix adds a second sweep after the .age pass: for every .meta and
-# .sha256 file found in the directory, if the corresponding .age file does
-# not exist, the sidecar is removed immediately (no age-based threshold
-# needed — if the primary is gone the sidecar is always orphaned).
-#
-# LB-2 FIX: Replaced ctime-only age check with _backup_filename_age_days().
-# The filename timestamp is immutable across cp/mv/chmod/chown and reliably
-# reflects when the backup was created. Falls back to _backup_ctime_age_days()
-# only when the filename contains no recognisable YYYYMMDD-HHMMSS stamp
-# (i.e. files predating the current naming convention).
+# Age is determined by the embedded YYYYMMDD-HHMMSS timestamp in the filename
+# when available; falls back to the file's ctime for legacy filenames.
 cleanup_old_backups() {
     local backup_dir="$1"
     local backup_type="$2"
@@ -570,7 +487,7 @@ cleanup_old_backups() {
 
     local deleted_count=0
 
-    # LB-2 FIX: prefer filename-embedded timestamp for age calculation;
+    # Prefer filename-embedded timestamp for age calculation;
     # fall back to ctime only for files without a recognisable timestamp.
     while IFS= read -r backup_file; do
         if [[ -n "$backup_file" ]]; then
@@ -589,11 +506,8 @@ cleanup_old_backups() {
         fi
     done < <(find "$backup_dir" -name "*.age" -type f 2>/dev/null)
 
-    # P2-M3 FIX: sweep for orphaned sidecars (.meta and .sha256) whose
-    # corresponding .age primary file no longer exists. These are left behind
-    # when the .age file was removed by a previous (possibly partial) cleanup
-    # run, a manual deletion, or any other out-of-band removal. Because the
-    # primary is gone there is no meaningful retention check — every orphan
+    # Sweep for orphaned sidecars (.meta and .sha256) whose
+    # corresponding .age primary no longer exists. Every orphan
     # is removed unconditionally.
     local orphan_count=0
     while IFS= read -r sidecar; do
@@ -626,7 +540,7 @@ cleanup_old_backups() {
 
 # Get backup statistics - STANDARDIZED: Returns exit code
 #
-# BUG-B2 FIX: find -exec stat -c%s {} + is GNU-only. On macOS stat -c%s
+# find -exec stat -c%s {} + is GNU-only. On macOS stat -c%s
 # errors and awk sums to 0, reporting all backup sizes as 0 MB.
 #
 # Replaced with a find | while loop using _stat_file_size() (exported by
@@ -653,7 +567,7 @@ get_backup_statistics() {
             local count=0
             local size_bytes=0
 
-            # BUG-B2 FIX: portable size accumulation via _stat_file_size()
+            # portable size accumulation via _stat_file_size()
             while IFS= read -r f; do
                 local fsz
                 fsz=$(_stat_file_size "$f" 2>/dev/null || echo 0)
@@ -682,9 +596,9 @@ get_backup_statistics() {
 
 # Create backup metadata file - STANDARDIZED: Returns exit code
 #
-# BUG-B3 FIX: stat -c%s is GNU-only. Replaced with _stat_file_size() from
+# stat -c%s is GNU-only. Replaced with _stat_file_size() from
 # lib/crypto.sh for consistent portable behaviour.
-# BUG-B5 FIX: replaced '$? -eq 0' anti-pattern after heredoc with a direct
+# replaced '$? -eq 0' anti-pattern after heredoc with a direct
 # 'if ! cat > file <<EOF' guard.
 create_backup_metadata() {
     local backup_file="$1"
@@ -700,7 +614,7 @@ create_backup_metadata() {
     local timestamp file_size checksum hostname
 
     timestamp=$(date -Iseconds)
-    # BUG-B3 FIX: use portable _stat_file_size() wrapper
+    # use portable _stat_file_size() wrapper
     file_size=$(_stat_file_size "$backup_file" 2>/dev/null || echo "0")
     [[ -z "$file_size" || ! "$file_size" =~ ^[0-9]+$ ]] && file_size=0
     hostname=$(hostname -f 2>/dev/null || hostname)
@@ -715,7 +629,7 @@ create_backup_metadata() {
         vw_version=$(docker compose exec -T vaultwarden /vaultwarden --version 2>/dev/null | head -1 || echo "unknown")
     fi
 
-    # BUG-B5 FIX: test the cat heredoc directly instead of checking $?
+    # test the cat heredoc directly instead of checking $?
     # after the fact, which is an anti-pattern ($? may be stale or from
     # a different command in complex pipelines).
     if ! cat > "$metadata_file" <<EOF

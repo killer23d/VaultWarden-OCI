@@ -3,18 +3,6 @@
 # Supports local and rclone remote backup selection.
 # After restore: prompts for the decryption key, restores data, then
 # generates/rotates a fresh age key and displays it like a new setup.
-#
-# PATCHED BUGS:
-#   BUG-R1 [HIGH]  Every backup search path was hardcoded as
-#                  $PROJECT_ROOT/backups/<type>/.  backup.sh stores backups
-#                  at get_config_value("BACKUP_DIR",
-#                  "/var/lib/vaultwarden/backups") — under /var/ on a
-#                  standard install.  The mismatch caused --list to always
-#                  show "(none)", --latest to always fail, and the interactive
-#                  menu to be empty.
-#                  Fix: derive BACKUP_BASE_DIR from .env using the same key
-#                  ("BACKUP_DIR") and default that backup.sh uses, and replace
-#                  every $PROJECT_ROOT/backups reference with $BACKUP_BASE_DIR.
 
 set -euo pipefail
 
@@ -123,7 +111,7 @@ USE_REMOTE=false
 KEY_FILE_ARG=""         # set by --key-file; path to age private key for this restore
 RECOVERY_KIT_FILE=""    # set by --from-recovery-kit; path to plaintext recovery-kit file
 
-# BUG-R1 FIX: declared here (empty) so set -u never fires before main()
+# declared here (empty) so set -u never fires before main()
 # initialises it via get_config_value().  Every function that references
 # BACKUP_BASE_DIR is only called after main() has set it.
 BACKUP_BASE_DIR=""
@@ -302,7 +290,7 @@ _build_rclone_config_arg() {
 # Sets RCLONE_UNAVAIL_REASON (global) with a human-readable explanation
 # whenever it returns 1, so callers can surface a useful message.
 #
-# Issue FIX: also sets RCLONE_NEEDS_INTERACTIVE_NAME=true when rclone binary
+# Also sets RCLONE_NEEDS_INTERACTIVE_NAME=true when rclone binary
 # and config are present but RCLONE_REMOTE_NAME is missing/placeholder.
 # This distinguishes "prompt needed" from "rclone not installed" so that
 # select_backup_source() can trigger _prompt_rclone_remote_name() instead
@@ -317,7 +305,7 @@ _rclone_is_available() {
         return 1
     fi
     local remote_name
-    # Issue FIX: resolve remote name from session variable first (set by
+    # Resolve remote name from session variable first (set by
     # _prompt_rclone_remote_name() during an emergency restore), then fall
     # back to the .env value.
     remote_name="${_SESSION_RCLONE_REMOTE_NAME:-$(get_config_value "RCLONE_REMOTE_NAME" "")}"
@@ -350,7 +338,7 @@ _rclone_diagnose() {
 # ---------------------------------------------------------------------------
 # _prompt_rclone_remote_name
 #
-# Issue FIX: Interactively prompts the operator for the rclone remote name
+# Interactively prompts the operator for the rclone remote name
 # (and optionally the remote path) when RCLONE_REMOTE_NAME is not set in
 # .env — typically during an emergency restore on a fresh server where .env
 # does not yet exist.
@@ -411,7 +399,7 @@ _prompt_rclone_remote_name() {
         remote_path="vaultwarden_backups"
     fi
 
-    # Issue FIX: store in session variables; never written to .env.
+    # Store in session variables; never written to .env.
     _SESSION_RCLONE_REMOTE_NAME="$remote_name"
     _SESSION_RCLONE_REMOTE_PATH="$remote_path"
 
@@ -589,7 +577,7 @@ pull_remote_backup() {
 
 select_backup_source() {
     if [[ "$USE_REMOTE" == "true" ]]; then
-        # Issue FIX: when --remote was explicitly requested but RCLONE_REMOTE_NAME
+        # When --remote was explicitly requested but RCLONE_REMOTE_NAME
         # is missing (e.g. on a fresh server without .env), prompt for it instead
         # of hard-failing.  RCLONE_NEEDS_INTERACTIVE_NAME is set by
         # _rclone_is_available() to distinguish this case from "rclone not installed".
@@ -617,7 +605,7 @@ select_backup_source() {
     echo ""
     log_info "Where would you like to restore from?"
     printf '  [1]  LOCAL  — backups on this server (%s/)\n' "$BACKUP_BASE_DIR"
-    # Issue FIX: use session remote name/path if available (set during prompt).
+    # Use session remote name/path if available (set during interactive prompt).
     local remote_name remote_base_path
     remote_name="${_SESSION_RCLONE_REMOTE_NAME:-$(get_config_value "RCLONE_REMOTE_NAME" "")}"
     remote_base_path="${_SESSION_RCLONE_REMOTE_PATH:-$(get_config_value "RCLONE_REMOTE_PATH" "vaultwarden_backups")}"
@@ -995,7 +983,7 @@ _prompt_age_key() {
 # ---------------------------------------------------------------------------
 # _prune_old_age_keys <keys_dir>
 #
-# BUG-#11 FIX: Prune old Age private key backups — keep only 2 most recent.
+# Prune old Age private key backups — keep only 2 most recent.
 # Old key material has no operational value once a new key is active and
 # backed up; retaining it indefinitely increases exposure if the secrets/keys/
 # directory is ever compromised.
@@ -1497,7 +1485,7 @@ main() {
     # such as RCLONE_REMOTE_NAME and RCLONE_CONFIG.
     load_env_file 2>/dev/null || true   # best-effort; hard error below if root required
 
-    # BUG-R1 FIX: resolve the backup storage root from .env using the same
+    # Resolve the backup storage root from .env using the same
     # key ("BACKUP_DIR") and default that backup.sh uses.  Every search path
     # in this script is built from BACKUP_BASE_DIR, never from PROJECT_ROOT/backups.
     BACKUP_BASE_DIR="$(get_config_value "BACKUP_DIR" "/var/lib/vaultwarden/backups")"
@@ -1506,7 +1494,7 @@ main() {
     if [[ "$LIST_ONLY" == "true" ]]; then
         if [[ "$LIST_REMOTE" == "true" ]]; then
             # Remote listing: if RCLONE_REMOTE_NAME is missing, prompt for it
-            # (Issue FIX: supports emergency listing without .env).
+            # to support emergency listing without .env.
             if ! _rclone_is_available; then
                 if [[ "$RCLONE_NEEDS_INTERACTIVE_NAME" == "true" ]]; then
                     _prompt_rclone_remote_name || exit 1
@@ -1531,8 +1519,8 @@ main() {
         log_error "Failed to initialize operations lock directory: $VW_LOCK_DIR"; exit 1
     }
 
-    # BUG-#19 FIX: Use bash 4.1+ automatic FD allocation instead of hardcoded
-    # FD 200 for the operations lock, preventing silent clobber of any open FD.
+    # Use bash 4.1+ automatic FD allocation instead of hardcoded
+    # FD for the operations lock, preventing silent clobber of any open FD.
     local OPS_LOCK_FD
     exec {OPS_LOCK_FD}>"$VW_OPERATIONS_LOCK"
     flock -n "$OPS_LOCK_FD" || {
@@ -1542,7 +1530,7 @@ main() {
     }
 
     local RESTORE_LOCK_FILE="/run/lock/vaultwarden-restore.lock"
-    # Issue #10: Use bash 4.1+ automatic FD allocation instead of hardcoded
+    # Use bash 4.1+ automatic FD allocation instead of hardcoded
     # FD 203, which could silently clobber an already-open file descriptor.
     local RESTORE_LOCK_FD
     exec {RESTORE_LOCK_FD}>"$RESTORE_LOCK_FILE"
@@ -1553,9 +1541,9 @@ main() {
     }
 
     # Re-load .env strictly now that we are root (surfaces hard errors).
-    # Issue FIX: when USE_REMOTE=true and .env is absent (emergency restore
-    # on a fresh server), treat the load failure as a warning rather than a
-    # hard exit — the operator is about to restore .env from the backup.
+    # When USE_REMOTE=true and .env is absent (emergency restore on a fresh
+    # server), treat the load failure as a warning rather than a hard exit —
+    # the operator is about to restore .env from the backup.
     if ! load_env_file; then
         if [[ "$USE_REMOTE" == "true" ]] && [[ ! -f "${PROJECT_ROOT}/.env" ]]; then
             log_warn ".env not found — operating in bootstrap/emergency-restore mode."
@@ -1565,7 +1553,7 @@ main() {
         fi
     fi
 
-    # BUG-R1 FIX: re-resolve BACKUP_BASE_DIR now that .env is fully loaded,
+    # Re-resolve BACKUP_BASE_DIR now that .env is fully loaded,
     # using the same config key ("BACKUP_DIR") and default that backup.sh uses.
     BACKUP_BASE_DIR="$(get_config_value "BACKUP_DIR" "/var/lib/vaultwarden/backups")"
 
@@ -1574,7 +1562,7 @@ main() {
     local PUID; PUID="$(get_config_value "PUID" "")"
     local PGID; PGID="$(get_config_value "PGID" "")"
 
-    # Issue FIX: if PUID/PGID are not in .env (bootstrap mode), prompt for them
+    # If PUID/PGID are not in .env (bootstrap mode), prompt for them
     # interactively so a bare-metal emergency restore can proceed without a
     # pre-existing .env.
     if [[ -z "$PUID" || -z "$PGID" ]]; then
@@ -1604,4 +1592,195 @@ main() {
     # Create the secure temp dir early so remote pull and key staging can use it.
     local old_umask; old_umask=$(umask)
     umask 077
-    local tmp_parent; tmp_parent="$(dirname "$STATE
+    local tmp_parent; tmp_parent="$(dirname "$STATE_DIR")"
+    TMPDIR_RESTORE="$(mktemp -d -p "$tmp_parent" vw_restore.XXXXXXXXXX)" || {
+        log_error "Failed to create secure temporary directory"; exit 1
+    }
+    umask "$old_umask"
+
+    # Load Age key from recovery kit if supplied (must be after TMPDIR_RESTORE is set).
+    _load_recovery_kit || exit 1
+
+    # ------------------------------------------------------------------
+    # Step 1: Select backup (interactive or flags)
+    # ------------------------------------------------------------------
+    resolve_backup_file || exit 1
+    [[ -f "$BACKUP_FILE" ]] || { log_error "Backup file not found: $BACKUP_FILE"; exit 1; }
+
+    # ------------------------------------------------------------------
+    # Step 2: Prompt for / resolve the decryption key
+    # ------------------------------------------------------------------
+    _prompt_age_key "$AGE_KEY_FILE" || exit 1
+
+    # ------------------------------------------------------------------
+    # Step 3: Verify backup checksum
+    # ------------------------------------------------------------------
+    local sha256_sidecar="${BACKUP_FILE}.sha256"
+    if [[ -f "$sha256_sidecar" && "$SKIP_VERIFICATION" != "true" ]]; then
+        log_info "Verifying backup checksum before decryption..."
+        local expected_sum actual_sum
+        expected_sum=$(cat "$sha256_sidecar")
+        actual_sum=$(sha256sum "$BACKUP_FILE" | awk '{print $1}')
+        if [[ "$expected_sum" != "$actual_sum" ]]; then
+            log_error "Checksum MISMATCH — backup file may be corrupted or tampered."
+            log_error "  Expected: $expected_sum"
+            log_error "  Actual:   $actual_sum"
+            exit 1
+        fi
+        log_success "Backup checksum verified: $(basename "$BACKUP_FILE")"
+    elif [[ -f "$sha256_sidecar" && "$SKIP_VERIFICATION" == "true" ]]; then
+        log_warn "--skip-verification: SHA-256 sidecar check bypassed."
+    else
+        log_warn "No .sha256 sidecar found — skipping pre-decryption checksum check."
+    fi
+
+    # ------------------------------------------------------------------
+    # Step 4: Parse archive metadata
+    # ------------------------------------------------------------------
+    local meta_file="${BACKUP_FILE}.meta"
+    local archive_version; archive_version="$(read_meta_field "$meta_file" "version" "")"
+    local archive_format;  archive_format="$(read_meta_field  "$meta_file" "archive_format" "")"
+
+    if [[ -z "$archive_format" ]]; then
+        if   [[ "$BACKUP_FILE" == *.tar.zst.age || "$BACKUP_FILE" == *.zst.age ]]; then
+            archive_format="relative"
+            log_info "archive_format inferred 'relative' from .zst extension."
+        elif [[ "$archive_version" == "2" ]]; then archive_format="relative"
+        elif [[ "$archive_version" == "1" ]]; then archive_format="absolute"
+        else
+            archive_format="relative"
+            log_warn "archive_format absent from .meta; defaulting to 'relative'."
+        fi
+    fi
+    [[ -z "$archive_version" ]] && archive_version="unknown"
+
+    log_info "Restore plan:"
+    log_info "  File:        $BACKUP_FILE"
+    log_info "  Type:        $RESTORE_TYPE"
+    log_info "  Archive ver: $archive_version (format: $archive_format)"
+    log_info "  State dir:   $STATE_DIR"
+    log_info "  Decrypt key: $AGE_KEY_FILE"
+
+    # ------------------------------------------------------------------
+    # Step 5: Final confirmation
+    # ------------------------------------------------------------------
+    if [[ "$FORCE" != "true" && "$DRY_RUN" != "true" ]]; then
+        echo ""
+        log_warn "WARNING: This will overwrite current data."
+        log_warn "Services will be stopped during the restore."
+        log_warn "A NEW age key will be generated after the restore."
+        echo ""
+        read -r -p "Type 'yes' to proceed: " confirm
+        [[ "$confirm" == "yes" ]] || { log_info "Restore cancelled."; exit 0; }
+    fi
+
+    # ------------------------------------------------------------------
+    # Step 6: Pre-restore snapshot
+    # ------------------------------------------------------------------
+    create_pre_restore_snapshot || exit 1
+
+    # ------------------------------------------------------------------
+    # Step 7: Stop services
+    # ------------------------------------------------------------------
+    # Install a safety-net ERR trap so that if any step between here and
+    # the final `docker compose up -d` fails, services are automatically
+    # restarted. Without this, set -euo pipefail would leave services
+    # permanently stopped, requiring manual intervention.
+    _restore_safety_net() {
+        local rc=$?
+        if [[ $rc -ne 0 ]]; then
+            log_warn "Restore encountered an error (exit $rc) — attempting to restart services..."
+            docker compose up -d --remove-orphans 2>/dev/null || \
+                log_error "CRITICAL: Failed to restart services after restore error. Manual intervention required: docker compose up -d"
+        fi
+    }
+    trap _restore_safety_net ERR
+
+    if [[ "$DRY_RUN" != "true" ]]; then
+        if docker compose ps --status running --services 2>/dev/null | grep -q .; then
+            log_info "Stopping services..."
+            docker compose stop
+        fi
+    fi
+
+    # ------------------------------------------------------------------
+    # Step 8: Perform restore
+    # ------------------------------------------------------------------
+    case "$RESTORE_TYPE" in
+        db)
+            restore_db "$BACKUP_FILE" "$AGE_KEY_FILE" "$STATE_DIR" "$PUID" "$PGID" "$TMPDIR_RESTORE"
+            ;;
+        full|emergency)
+            restore_full "$BACKUP_FILE" "$AGE_KEY_FILE" "$STATE_DIR" "$PUID" "$PGID" "$TMPDIR_RESTORE" "$archive_format"
+            ;;
+        *)
+            log_error "Unknown restore type: $RESTORE_TYPE"; exit 1 ;;
+    esac
+
+    # ------------------------------------------------------------------
+    # Step 9: Prune old pre-restore artefacts
+    # ------------------------------------------------------------------
+    if [[ "$DRY_RUN" != "true" ]]; then
+        case "$RESTORE_TYPE" in
+            db)             cleanup_pre_restore_artefacts "${STATE_DIR}/data/db.sqlite3" 3 || true ;;
+            full|emergency) cleanup_pre_restore_artefacts "$STATE_DIR" 3 || true ;;
+        esac
+    fi
+
+    # ------------------------------------------------------------------
+    # Step 10: Rotate age key (new key generated, installed, validated)
+    # ------------------------------------------------------------------
+    if ! _rotate_age_key; then
+        log_error "Age key rotation FAILED."
+        log_error "The data restore itself succeeded, but the stack may not be able"
+        log_error "to create new encrypted backups until the key is fixed."
+        log_error "Run: age-keygen -o $PROJECT_ROOT/secrets/keys/age-key.txt"
+        log_error "Then: sudo ./setup.sh --phase=systemd --install  (to sync /etc/vaultwarden/)"
+        # Non-fatal: continue to start services so VaultWarden is available.
+    fi
+
+    # ------------------------------------------------------------------
+    # Step 11: Display the new key prominently (operator must acknowledge)
+    # ------------------------------------------------------------------
+    _display_new_key
+
+    # ------------------------------------------------------------------
+    # Step 12: Start services
+    # ------------------------------------------------------------------
+    if [[ "$DRY_RUN" != "true" ]]; then
+        log_info "Starting services..."
+        if ! docker compose up -d --remove-orphans; then
+            log_error "Failed to start services after restore."
+            log_error "Investigate with: docker compose logs --tail=50"
+            exit 1
+        fi
+        # Services are now running — clear the safety-net ERR trap so that
+        # errors in the post-startup health check do not trigger a restart.
+        trap - ERR
+
+        log_info "Waiting for services to initialize (up to 60s)..."
+        local max_wait=60 waited=0
+        while (( waited < max_wait )); do
+            sleep 5; (( waited += 5 ))
+            docker inspect vaultwarden_app --format '{{.State.Status}} {{.State.Health.Status}}' \
+                2>/dev/null | grep -qE $'running (healthy|$)' && break || true
+        done
+
+        if [[ -x "./maintenance.sh" ]]; then
+            log_info "Running post-restore health check..."
+            ./maintenance.sh --health --quiet || {
+                log_warn "Health check reported issues after restore."
+                log_warn "Investigate with: docker compose logs --tail=50"
+            }
+        fi
+    fi
+
+    echo ""
+    log_success "Restore complete."
+    if [[ -n "$ROTATED_KEY_FILE" && "$DRY_RUN" != "true" ]]; then
+        log_info  "New age key is live at: $ROTATED_KEY_FILE"
+        log_info  "Run: sudo ./setup.sh --phase=systemd --install  (to sync /etc/vaultwarden/)"
+    fi
+}
+
+main "$@"

@@ -1,26 +1,5 @@
 #!/usr/bin/env bash
 # startup.sh - VaultWarden startup script with secure secrets handling
-#
-# PATCHED BUGS (2026-04-15):
-#   STARTUP-14 [HIGH]  check_age_key_health_preflight(): when SOPS_AGE_KEY_FILE
-#                      pointed at a non-existent path (e.g. /etc/vaultwarden/
-#                      age-key.txt not yet installed) but the repo-local key
-#                      (secrets/keys/age-key.txt) was present and healthy,
-#                      startup aborted unconditionally with "Age key missing".
-#                      This blocked `make up` on any host where setup placed the
-#                      key under secrets/keys/ but .env still referenced the
-#                      canonical system path — a common state after a fresh
-#                      clone/migration when the key has not yet been installed
-#                      to /etc/vaultwarden/.
-#                      Both edit-secrets.sh and make test-secrets succeeded on
-#                      the same host because they locate keys differently.
-#                      Fix: if the configured path is absent but the repo-local
-#                      key passes check_age_key_health(), export
-#                      SOPS_AGE_KEY_FILE=<repo-local-path> for the lifetime of
-#                      this process only and continue startup, while emitting a
-#                      prominent ACTION REQUIRED advisory to update .env or
-#                      install the key to the canonical system path before the
-#                      next restart.
 
 set -euo pipefail
 trap 'rc=$?; log_error "STARTUP FAILED at line ${LINENO} (exit ${rc}) — check journalctl -u vaultwarden-startup"; exit "$rc"' ERR
@@ -41,9 +20,8 @@ SKIP_HEALTH_CHECK=false
 BACKGROUND=false
 DRY_RUN=false
 DO_DOWN=false
-# STARTUP-12 FIX: skip docker compose pull on routine restarts (e.g. systemd
-# ExecStart). Pass --skip-pull in the unit file; use maintenance.sh --update or a manual
-# ./startup.sh without the flag when an image refresh is desired.
+# Pass --skip-pull in the unit file to avoid image pulls on routine service restarts;
+# use maintenance.sh --update or ./startup.sh (without the flag) to refresh images.
 SKIP_PULL=false
 SKIP_EGRESS_FIX=false
 
@@ -148,10 +126,6 @@ _startup_secure_wipe() {
 # ---------------------------------------------------------------------------
 # _stat_octal_perms_local FILE
 #
-# STARTUP-3 FIX: prepare_docker_secrets() calls _stat_octal_perms_local to
-# verify chmod succeeded, but the function was never defined in this file
-# (it lives in lib/common.sh under a different name on some versions).
-# Define it here as a file-local shim so startup.sh is self-contained.
 # Returns the 3-digit octal permission string (e.g. "600", "444") on stdout.
 # ---------------------------------------------------------------------------
 _stat_octal_perms_local() {
@@ -166,13 +140,7 @@ _stat_octal_perms_local() {
 # ---------------------------------------------------------------------------
 # _prepare_secrets_cleanup
 #
-# FIX MEDIUM: cleanup_local() was previously defined as a nested function
-# inside prepare_docker_secrets(). In bash, nested function definitions are
-# globally scoped after first execution, leaking the symbol into the global
-# namespace and making it callable from any subsequent code.
-#
-# Renamed to _prepare_secrets_cleanup() and defined at file scope so the
-# name is explicit and does not shadow any standard utility.
+# Cleans up temporary files and restores umask after prepare_docker_secrets().
 # ---------------------------------------------------------------------------
 _prepare_secrets_cleanup_umask=""
 _prepare_secrets_cleanup_cache=""
@@ -191,9 +159,8 @@ _prepare_secrets_cleanup() {
 # ---------------------------------------------------------------------------
 # warn_plaintext_secret_overrides
 #
-# STARTUP-9 FIX: detect split-brain secret configuration caused by plaintext
-# EMAIL_API_TOKEN / SMTP_PASSWORD values in .env overriding SOPS-managed
-# secrets. Emits warnings only; does not block startup.
+# Detects split-brain secret configuration where plaintext EMAIL_API_TOKEN or
+# SMTP_PASSWORD values in .env override SOPS-managed secrets. Emits warnings only.
 # ---------------------------------------------------------------------------
 warn_plaintext_secret_overrides() {
   local warned=false
@@ -341,7 +308,7 @@ prepare_log_directories() {
     return 1
   fi
 
-  # Create log subdirectories with correct ownership (RUNTIME FIX)
+  # Create log subdirectories with correct ownership
   log_info "Creating log subdirectories with correct permissions..."
   if ! _maybe_sudo mkdir -p "${project_state_dir}/logs"/{vaultwarden,caddy,fail2ban,postfix}; then
     log_warn "Failed to create log subdirectories (init container will try)"
@@ -355,13 +322,13 @@ prepare_log_directories() {
     log_success "Log subdirectories created with correct permissions"
   fi
 
-  # Create backup directory (RUNTIME FIX)
+  # Create backup directory
   if [ ! -d "${PROJECT_ROOT}/backups" ]; then
     mkdir -p "${PROJECT_ROOT}/backups" 2>/dev/null || true
     log_info "Created backup directory"
   fi
 
-  # Ensure Caddy entrypoint is executable (RUNTIME FIX)
+  # Ensure Caddy entrypoint is executable
   if [ -f "${PROJECT_ROOT}/caddy/entrypoint.sh" ]; then
     chmod +x "${PROJECT_ROOT}/caddy/entrypoint.sh" 2>/dev/null || true
     log_info "Ensured Caddy entrypoint is executable"
@@ -374,19 +341,14 @@ prepare_log_directories() {
 # ---------------------------------------------------------------------------
 # check_age_key_health_preflight
 #
-# STARTUP-7 FIX: Run check_age_key_health() from lib/crypto.sh
-# before any sops invocation so a corrupt, missing, or wrong-permissions age
-# key produces a clear actionable error message rather than the opaque
-# "Failed to decrypt secrets file" from sops.
+# Runs check_age_key_health() before any SOPS invocation so a corrupt,
+# missing, or wrong-permissions age key produces a clear actionable error
+# rather than an opaque decryption failure from SOPS.
 #
-# STARTUP-14 FIX: When the configured key path does not exist but the
-# repo-local key (secrets/keys/age-key.txt) is present and healthy, export
-# SOPS_AGE_KEY_FILE to the repo-local path for the current process only and
-# continue startup. A prominent ACTION REQUIRED advisory is printed so the
-# operator knows to either install the key to the canonical system path or
-# update .env before the next restart. This unblocks `make up` on hosts
-# where setup placed the key under secrets/keys/ but .env still points at
-# /etc/vaultwarden/age-key.txt (e.g. after a fresh clone or migration).
+# If the configured key path does not exist but the repo-local key is
+# present and healthy, the key path is overridden for this process only and
+# a prominent ACTION REQUIRED advisory is printed so the operator fixes
+# .env before the next restart.
 # ---------------------------------------------------------------------------
 check_age_key_health_preflight() {
   # Resolve the configured key path from .env (already sourced by load_environment)
@@ -406,15 +368,6 @@ check_age_key_health_preflight() {
   local repo_local_key="${SCRIPT_DIR}/secrets/keys/age-key.txt"
   local canonical_key="/etc/vaultwarden/age-key.txt"
 
-  # ---------------------------------------------------------------------------
-  # STARTUP-14 FIX: auto-recover using the repo-local key
-  #
-  # If the repo-local key exists and is healthy, export it for this process
-  # only so SOPS can decrypt secrets without operator intervention. Emit a
-  # prominent advisory so the operator fixes .env before the next restart.
-  # This is NOT a silent fallback — the advisory is logged at WARN level and
-  # repeated at the end of startup so it cannot be missed.
-  # ---------------------------------------------------------------------------
   if [[ -f "$repo_local_key" ]] && check_age_key_health "$repo_local_key" 2>/dev/null; then
     log_warn "=========================================================="
     log_warn "ACTION REQUIRED — Age key path mismatch detected"
@@ -497,15 +450,10 @@ check_age_key_health_preflight() {
 prepare_docker_secrets() {
   log_info "Preparing Docker secrets from SOPS..."
 
-  # STARTUP-7 FIX: fail fast with actionable diagnostics if the age key is bad
-  # STARTUP-14 FIX: auto-recover with repo-local key if configured path missing
   check_age_key_health_preflight || return 1
 
-  # STARTUP-11 FIX: Use the canonical SECRETS_FILE path (defined in
-  # lib/secrets.sh, defaults to secrets/secrets.yaml) rather than a bare
-  # relative 'secrets.yaml'. The variable is already absolute when the caller
-  # has cd'd to PROJECT_ROOT, but using it explicitly makes the code
-  # consistent with every other secrets consumer in the codebase.
+  # Use SECRETS_FILE (from lib/secrets.sh, defaults to secrets/secrets.yaml)
+  # for consistency with all other secrets consumers in the codebase.
   local secrets_file="${SECRETS_FILE:-secrets/secrets.yaml}"
 
   if [[ ! -f "$secrets_file" ]]; then
@@ -534,8 +482,7 @@ prepare_docker_secrets() {
 
   # Minimal parser for the known flat structure used by this project.
   # We intentionally avoid yq/jq dependency here.
-  # STARTUP-11 FIX: pass the secrets file path as sys.argv[1] so the Python
-  # snippet never opens a hardcoded relative path.
+  # Pass secrets file path as argument to avoid hardcoded relative paths.
   while IFS='=' read -r key value; do
     [[ -z "$key" ]] && continue
     local target_file="${secrets_dir}/${key}"
@@ -610,9 +557,9 @@ cleanup_orphaned_resources() {
 # ---------------------------------------------------------------------------
 # pull_images
 #
-# STARTUP-12 FIX: guard with SKIP_PULL so that systemd ExecStart restarts
-# (which pass --skip-pull) are instant. Image refreshes should go through
-# maintenance.sh --update or a manual ./startup.sh without --skip-pull.
+# Guarded by --skip-pull so systemd ExecStart restarts are instant.
+# Image refreshes go through maintenance.sh --update or a manual
+# ./startup.sh without --skip-pull.
 # ---------------------------------------------------------------------------
 pull_images() {
   if [[ "$SKIP_PULL" == "true" ]]; then
@@ -875,8 +822,7 @@ main() {
     show_status || true
   fi
 
-  # STARTUP-14: Re-emit the key-path advisory at the end of a successful
-  # startup so the operator notices it even if startup output is long.
+  # Re-emit the key-path advisory at end of startup so it is not missed.
   if [[ "${SOPS_AGE_KEY_FILE:-}" == "${SCRIPT_DIR}/secrets/keys/age-key.txt" ]]; then
     local cfg_key
     cfg_key=$(grep '^SOPS_AGE_KEY_FILE=' .env 2>/dev/null | cut -d= -f2- || echo "(unknown)")

@@ -2,82 +2,6 @@
 # lib/docker.sh - Docker operations library for VaultWarden-OCI-NG
 # ENHANCED: Reinforced standardized error handling patterns
 # All functions return exit codes, callers decide exit strategy
-#
-# PATCHED BUGS (2026-03-06):
-#   BUG-D1 [MEDIUM] wait_for_service_ready(): trailing newline after progress
-#                   dots was emitted unconditionally, producing a spurious
-#                   blank line when the service was ready before any dots
-#                   were printed. Added dots_printed flag.
-#   BUG-D2 [MEDIUM] exec_oneshot_in_service(): 'docker container start
-#                   --attach' mixed the container's stderr with the host
-#                   shell's log output and could miss output from very fast-
-#                   exiting containers. Replaced with start→wait→logs→rm.
-#   BUG-D3 [LOW]    _docker_prune_filter(): emitted '--filter VALUE' as one
-#                   token. Word-splitting in callers requires two tokens.
-#                   Changed to emit two newline-separated tokens and updated
-#                   all four cleanup_*() callers to use mapfile + array.
-#
-# PATCHED BUGS (2026-03-10):
-#   DOC-H1 [HIGH]   exec_oneshot_in_service(): docker container start failure
-#                   was silently swallowed by || true; docker container wait
-#                   would then block forever. Now checks start exit code
-#                   explicitly, cleans up the orphaned container, and returns 1.
-#   DOC-M1 [MEDIUM] Added run_in_service_full_env() helper for running one-shot
-#                   commands with the full service environment (env vars,
-#                   volumes, networks) against any service, including stopped.
-#   DOC-M2 [MEDIUM] cleanup_volumes() now checks Docker Engine version; falls
-#                   back to docker compose down -v on engines < 25.0 where
-#                   docker volume prune --filter label= is unsupported.
-#   DOC-L1 [LOW]    run_in_service() deprecation is now enforced: the function
-#                   logs an error and returns 1. Removed from export -f.
-#
-# PATCHED BUGS (2026-03-11):
-#   AUD-D1 [MEDIUM] wait_for_container_healthy() / is_service_healthy():
-#                   containers with no HEALTHCHECK defined return an empty
-#                   Health string from docker compose ps --format json.
-#                   The empty string was treated as "not yet healthy" causing
-#                   wait_for_service_ready() to spin until timeout.
-#                   Fix: get_service_health() now maps an empty string to
-#                   "none"; is_service_healthy() treats "none" as healthy
-#                   (already done), and wait_for_service_ready() detects the
-#                   "no-healthcheck" case via a dedicated helper and returns
-#                   immediately.
-#   AUD-D2 [MEDIUM] get_service_status() / get_service_health(): docker
-#                   compose ps --format json may emit plain-text (Compose v1
-#                   or degraded mode). jq then exits non-zero but the error
-#                   was swallowed inside a subshell even under set -e.
-#                   Fix: validate raw output is parseable JSON before piping
-#                   to jq; return "not_found"/"none" on parse failure.
-#   AUD-D3 [LOW]    pull_image_with_retry(): hardcoded 5 s sleep with no
-#                   backoff; no distinction between transient and permanent
-#                   errors.
-#                   Fix: exponential backoff (5→10→20 s); permanent-error
-#                   keywords (not found, unauthorized, denied, does not exist,
-#                   no such manifest) cause an immediate bail-out.
-#
-# PATCHED BUGS (2026-04-08):
-#   AUD-D4 [MEDIUM] pull_images(): ran `docker compose pull` without --quiet,
-#                   producing multi-megabyte per-layer progress output on every
-#                   update-timer run. On a VPS with limited disk the systemd
-#                   journal's SystemMaxUse cap causes this noise to evict useful
-#                   log lines.
-#                   Fix: add --quiet and pipe stderr through tail -5 so only
-#                   the last 5 summary/error lines reach the journal.
-#
-# PATCHED BUGS (2026-04-09):
-#   IMG-R1 [LOW]    cleanup_images(): called `docker image prune -f` with no
-#                   time filter, wiping every dangling image layer including
-#                   recent layers that could serve as a manual rollback
-#                   reference after a bad update. The maintenance timer runs
-#                   independently of maintenance.sh --update 's snapshot/rollback mechanism,
-#                   so a post-update maintenance run could destroy the only
-#                   copy of the previous image before the operator validates
-#                   the new one.
-#                   Fix: add --filter "until=48h" to preserve the last 48
-#                   hours of image layers as a passive rollback buffer.
-#                   Note: --all is intentionally omitted; `docker image prune`
-#                   without --all only removes dangling (untagged) layers —
-#                   named images in active use are never touched regardless.
 
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_DOCKER_LIB_LOADED:-}" ]] && return 0
@@ -88,11 +12,11 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # DOCKER_PROJECT_LABEL — default guard
 #
-# [MEDIUM FIX] The cleanup_*() functions pass this value as a --filter
-# argument to `docker prune`. If the caller has not set the variable, the
-# empty string would produce `--filter ''` which causes docker to error OR,
-# worse, to match every object on the host. Default to the Compose project
-# label so only this project's resources are pruned.
+# The cleanup_*() functions pass this value as a --filter argument to
+# `docker prune`. If the caller has not set the variable, the empty string
+# would produce `--filter ''` which causes docker to error OR, worse, to
+# match every object on the host. Default to the Compose project label so
+# only this project's resources are pruned.
 # ---------------------------------------------------------------------------
 DOCKER_PROJECT_LABEL="${DOCKER_PROJECT_LABEL:-label=com.docker.compose.project=vaultwarden-oci}"
 export DOCKER_PROJECT_LABEL
@@ -128,7 +52,7 @@ require_docker() {
 }
 
 # ---------------------------------------------------------------------------
-# require_jq  (FIX [MEDIUM] — jq dependency undeclared)
+# require_jq
 # ---------------------------------------------------------------------------
 require_jq() {
     if ! command -v jq >/dev/null 2>&1; then
@@ -143,11 +67,10 @@ require_jq() {
 
 # Get container status for a service
 #
-# [MEDIUM FIX] docker compose ps --format json returns a JSON array when
-# multiple replicas are running. The jq filter handles both scalar and array.
-# [MEDIUM FIX] Added require_jq() guard.
-# AUD-D2 FIX: validate raw output is valid JSON before piping to jq; return
-# "not_found" gracefully on Compose v1 plain-text or other non-JSON output.
+# docker compose ps --format json returns a JSON array when multiple replicas
+# are running. The jq filter handles both scalar and array.
+# Validates raw output is valid JSON before piping to jq; returns "not_found"
+# gracefully on Compose v1 plain-text or other non-JSON output.
 get_service_status() {
     local service="$1"
 
@@ -164,7 +87,7 @@ get_service_status() {
     local raw_json
     raw_json=$(docker compose ps "$service" --format json 2>/dev/null)
 
-    # AUD-D2 FIX: guard against non-JSON output (Compose v1, plain-text mode)
+    # Guard against non-JSON output (Compose v1, plain-text mode)
     if ! printf '%s' "$raw_json" | jq -e . >/dev/null 2>&1; then
         log_debug "get_service_status: non-JSON output from docker compose ps for '$service'; falling back to not_found"
         echo "not_found"
@@ -188,11 +111,11 @@ is_service_running() {
 
 # Get service health status
 #
-# [MEDIUM FIX] Same jq array-vs-object fix as get_service_status().
-# [MEDIUM FIX] Added require_jq() guard.
-# AUD-D1 FIX: an empty Health field (no HEALTHCHECK defined) is now
-#             explicitly mapped to "none" so callers never see an empty string.
-# AUD-D2 FIX: validate raw output is valid JSON before piping to jq.
+# docker compose ps --format json returns a JSON array when multiple replicas
+# are running. The jq filter handles both scalar and array.
+# An empty Health field (no HEALTHCHECK defined) is explicitly mapped to
+# "none" so callers never see an empty string.
+# Validates raw output is valid JSON before piping to jq.
 get_service_health() {
     local service="$1"
 
@@ -209,7 +132,7 @@ get_service_health() {
     local raw_json
     raw_json=$(docker compose ps "$service" --format json 2>/dev/null)
 
-    # AUD-D2 FIX: guard against non-JSON output
+    # Guard against non-JSON output (Compose v1, plain-text mode)
     if ! printf '%s' "$raw_json" | jq -e . >/dev/null 2>&1; then
         log_debug "get_service_health: non-JSON output from docker compose ps for '$service'; falling back to none"
         echo "none"
@@ -217,7 +140,7 @@ get_service_health() {
     fi
 
     local health
-    # AUD-D1 FIX: empty string and null both map to "none" via // "none"
+    # Empty string and null both map to "none" via // "none"
     health=$(printf '%s' "$raw_json" \
         | jq -r 'if type == "array" then (.[0].Health // "none") else (.Health // "none") end' 2>/dev/null)
 
@@ -234,7 +157,7 @@ is_service_healthy() {
     [[ "$status" == "running" ]] && [[ "$health" =~ ^(healthy|none)$ ]]
 }
 
-# AUD-D1 FIX: helper — returns 0 when a service has no HEALTHCHECK defined.
+# Helper — returns 0 when a service has no HEALTHCHECK defined.
 # Used by wait_for_service_ready() to short-circuit the polling loop.
 _service_has_no_healthcheck() {
     local service="$1"
@@ -316,7 +239,7 @@ recreate_services() {
 # --- Image Management ---
 
 # ---------------------------------------------------------------------------
-# pull_images  (AUD-D4 FIX)
+# pull_images
 #
 # Uses --quiet to suppress per-layer progress bars. Without it, a full pull
 # of the four project images (vaultwarden, caddy, fail2ban, postfix) produces
@@ -347,7 +270,7 @@ pull_images() {
 }
 
 # ---------------------------------------------------------------------------
-# pull_image_with_retry  (AUD-D3 FIX)
+# pull_image_with_retry
 #
 # Retries a `docker pull` up to MAX_RETRIES times with exponential backoff.
 # Permanent errors (image not found, auth failure, etc.) cause an immediate
@@ -375,9 +298,9 @@ pull_image_with_retry() {
             return 0
         fi
 
-        # AUD-D3 FIX: detect permanent errors and bail immediately.
-        # These indicate the image reference itself is invalid or the
-        # credentials are wrong — retrying will not help.
+        # Detect permanent errors and bail immediately — these indicate
+        # the image reference itself is invalid or the credentials are wrong;
+        # retrying will not help.
         local lower_output
         lower_output=$(printf '%s' "$pull_output" | tr '[:upper:]' '[:lower:]')
         if printf '%s' "$lower_output" | grep -qE \
@@ -390,7 +313,7 @@ pull_image_with_retry() {
 
         if [[ $attempt -lt $max_retries ]]; then
             sleep "$sleep_secs"
-            sleep_secs=$(( sleep_secs * 2 ))  # AUD-D3 FIX: exponential backoff
+            sleep_secs=$(( sleep_secs * 2 ))  # exponential backoff
         fi
 
         attempt=$(( attempt + 1 ))
@@ -428,14 +351,14 @@ exec_in_service() {
 # environment (env vars, volumes, networks) against a stopped service,
 # use run_in_service_full_env() instead.
 #
-# BUG-D2 FIX: 'docker container start --attach' was replaced with a
+# 'docker container start --attach' was replaced with a
 # start→wait→logs→rm sequence. Benefits:
 #   1. Decouples output capture from execution — no missed output on
 #      very fast-exiting containers.
 #   2. Container's stderr no longer mixes inline with host log_error output.
 #   3. Exit code is captured cleanly via 'docker container wait'.
 #
-# DOC-H1 FIX: docker container start exit code is now checked explicitly.
+# docker container start exit code is now checked explicitly.
 # If start fails (OOM, volume mount error, etc.) the orphaned container is
 # removed and the function returns 1 immediately instead of hanging forever
 # on docker container wait.
@@ -540,12 +463,7 @@ run_in_service() {
 
 # _docker_prune_filter  — emit --filter args as separate newline-delimited tokens
 #
-# BUG-D3 FIX: the previous implementation emitted '--filter VALUE' as a single
-# string. Callers used unquoted $(_docker_prune_filter) for word-splitting, but
-# that only works reliably when the two tokens are separated by IFS whitespace.
-# Using printf '%s\n' for each token and mapfile in callers is the correct
-# approach: it handles label values that contain spaces and avoids SC2046.
-#
+# Emits '--filter VALUE' as separate tokens using printf '%s\n'.
 # Callers should use:
 #   mapfile -t _prune_args < <(_docker_prune_filter)
 #   docker prune -f "${_prune_args[@]}"
@@ -695,32 +613,21 @@ follow_service_logs() {
 
 # Wait for service to be ready
 #
-# BUG-D1 FIX: the trailing 'echo ""' (newline after progress dots) was
-# emitted unconditionally. When the service became ready in less than
-# dot_interval (5) seconds no dots were ever printed, producing a spurious
-# blank line in log output.
-# Added a dots_printed flag that is set to true on the first dot emission
-# and checked before printing the trailing newline.
-#
-# AUD-D1 FIX: if the service has no HEALTHCHECK defined, is_service_healthy()
-# will return true the moment the container is running (health=="none").
-# However, because docker compose ps may briefly return an empty Health field
-# before the container reaches "running", we also add an explicit early-exit
-# path: once the container is running AND health is "none", we return 0
-# immediately without waiting for the full polling loop.
+# A dots_printed flag tracks whether any progress dots were emitted; the
+# trailing newline is only printed if at least one dot was output.
 wait_for_service_ready() {
     local service="$1"
     local timeout="${2:-60}"
     local count=0
     local dot_interval=5
-    local dots_printed=false   # BUG-D1 FIX: track whether any dots were emitted
+    local dots_printed=false   # tracks whether any dots were emitted
 
     log_info "Waiting for service '$service' to become ready (timeout: ${timeout}s)..."
 
     while [[ $count -lt $timeout ]]; do
         local current_status current_health raw_json
-        # Issue #58: wrap docker compose ps in timeout 10 so a hung Docker
-        # daemon does not block the entire polling loop indefinitely.
+        # Wrap docker compose ps in a timeout so a hung Docker daemon
+        # does not block the entire polling loop indefinitely.
         raw_json=$(timeout 10 docker compose ps "$service" --format json 2>/dev/null) || {
             log_warn "wait_for_service_ready: docker compose ps timed out — daemon may be unresponsive"
             sleep 2
@@ -735,8 +642,8 @@ wait_for_service_ready() {
             || echo "none")
         current_health="${current_health:-none}"
 
-        # AUD-D1 FIX: no-healthcheck containers — running + health=="none"
-        # means healthy by definition; return immediately.
+        # No-healthcheck containers: running + health=="none" means healthy
+        # by definition; return immediately.
         if [[ "$current_status" == "running" && "$current_health" == "none" ]]; then
             [[ "$dots_printed" == "true" ]] && echo "" >&2
             log_success "Service '$service' is ready (no healthcheck; running after ${count}s)"

@@ -1,27 +1,26 @@
 [Unit]
 Description=VaultWarden DB Backup Timer daily 04:00
-# SY-2: Prevent this timer firing mid-shutdown and interrupting a live
+# Prevent this timer firing mid-shutdown and interrupting a live
 # SQLite WAL checkpoint.
 Conflicts=shutdown.target
-# Issue #57: OnFailure on the timer unit catches calendar parse errors or
+# OnFailure on the timer unit catches calendar parse errors or
 # systemd activation failures that would otherwise go unnotified.
 OnFailure=vaultwarden-notify-failure@%n.service
 
 [Timer]
-# FIX: "daily *-*-* 04:00:00" was invalid — two calendar expressions on one
+# "daily *-*-* 04:00:00" was invalid — two calendar expressions on one
 # directive. "daily" is a shorthand for "*-*-* 00:00:00"; combining it with
 # an explicit timestamp is rejected by systemd as a bad unit file setting.
-# Correct form: use a single explicit timestamp expression.
+# Use a single explicit timestamp expression.
 OnCalendar=*-*-* 04:00:00
 Persistent=true
 # Ensure Docker is healthy before any boot-triggered catch-up fires.
 # Without this, Persistent=true causes an immediate activation on reboot
 # which may race against the Docker daemon still starting up.
 OnBootSec=2min
-# P2-H: RandomizedDelaySec spreads post-reboot catch-up burst.
-# SSD-M3-timer: db-backup fires at 04:00 (+0-60s jitter), maintenance at
-# 02:00 (+0-30s) — 2 h nominal gap prevents Sunday overlap without needing
-# explicit After= ordering between the two services.
+# RandomizedDelaySec spreads post-reboot catch-up burst.
+# db-backup fires at 04:00 (+0-60s jitter), maintenance at 02:05 (+0-30s) —
+# the 2 h nominal gap prevents Sunday overlap without explicit After= ordering.
 RandomizedDelaySec=60
 
 [Install]
