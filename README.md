@@ -263,7 +263,7 @@ Full reference: [docs/SCRIPTS.md](docs/SCRIPTS.md)
 | `common.sh` | Logging, validation, shared utilities, and multi-provider email delivery |
 | `crypto.sh` | Age / SOPS encryption & decryption, security validation, and Age key resilience (health check, escrow, paper backup). bcrypt cost factor is validated to a minimum of 10 on all hash operations. |
 | `docker.sh` | Docker lifecycle management |
-| `backup_utils.sh` | Backup-specific shared logic including SQLite Online Backup API integrity verification |
+| `backup-utils.sh` | Backup-specific shared logic including SQLite Online Backup API integrity verification |
 | `secrets.sh` | Secrets collection, auto-generation, hashing (Argon2id + bcrypt), Cloudflare token validation, recovery kit generation |
 
 ### Configuration Templates

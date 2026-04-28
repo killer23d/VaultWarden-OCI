@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# backup_utils.sh — Shared backup/restore utilities
+# backup-utils.sh — Shared backup/restore utilities
 
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_BACKUP_UTILS_LIB_LOADED:-}" ]] && return 0

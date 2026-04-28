@@ -990,7 +990,7 @@ Backup process:
 8. Cleanup temporary files securely from private tmpdir
 ```
 
-> **Backup integrity note**: `verify_backup_integrity()` in `lib/backup_utils.sh`
+> **Backup integrity note**: `verify_backup_integrity()` in `lib/backup-utils.sh`
 > uses the SQLite Online Backup API (`.backup` dot-command) rather than OS-level
 > `cp` to create the verification snapshot. This holds the correct shared read lock
 > and guarantees a consistent copy even while VaultWarden is actively writing.
