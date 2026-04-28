@@ -91,26 +91,6 @@ cleanup() {
     [[ -n "${LOCK_FILE:-}" ]] && rm -f "$LOCK_FILE" 2>/dev/null || true
 }
 
-_set_cloexec_on_fd() {
-    local fd="$1"
-    if command -v python3 >/dev/null 2>&1; then
-        python3 - "$fd" <<'PYEOF' 2>/dev/null || true
-import fcntl, sys, os
-fd = int(sys.argv[1])
-flags = fcntl.fcntl(fd, fcntl.F_GETFD)
-fcntl.fcntl(fd, fcntl.F_SETFD, flags | fcntl.FD_CLOEXEC)
-PYEOF
-    elif command -v perl >/dev/null 2>&1; then
-        perl -e "
-use Fcntl;
-my \$fd = $fd;
-my \$flags = fcntl(STDIN, F_GETFD, 0) or die;
-# reopen via /proc or fallback
-open(my \$fh, \">&=\", \$fd) or die;
-fcntl(\$fh, F_SETFD, \$flags | FD_CLOEXEC) or die;
-" 2>/dev/null || true
-    fi
-}
 
 _resolve_age_key() {
     local candidates=(
@@ -815,6 +795,10 @@ perform_full_backup() {
         "${tar_excludes[@]}" \
         "${tar_sources[@]}" 2>/dev/null || tar_exit=$?
 
+    # tar exits 1 when files change during archival (e.g. SQLite WAL pages written
+    # live). This is tolerated here because the atomic DB snapshot injected above
+    # replaces the live db.sqlite3 in the archive; any WAL noise on other files is
+    # benign for a VaultWarden state snapshot. Hard errors (exit > 1) still abort.
     if (( tar_exit > 1 )); then
         log_error "tar failed with exit code $tar_exit" >&2
         return 1
@@ -954,7 +938,7 @@ main() {
 
     if [[ "$FORCE" != "true" && "$DRY_RUN" != "true" ]]; then
         exec {LOCK_FD}>"$LOCK_FILE"
-        _set_cloexec_on_fd "$LOCK_FD"
+        # bash 4.1+ sets FD_CLOEXEC automatically on {var} file descriptor allocation.
         if ! flock -n "$LOCK_FD"; then
             log_error "Another backup is already running (could not acquire lock)."
             log_info  "Wait for it to finish or use --force if you are certain it is stuck."
@@ -966,7 +950,7 @@ main() {
     local old_umask
     old_umask=$(umask)
     umask 077
-    TMPDIR_BACKUP="$(mktemp -d -t vw_backup.XXXXXXXXXX)" || {
+    TMPDIR_BACKUP="$(mktemp -d -p /dev/shm 2>/dev/null || mktemp -d -t vw_backup.XXXXXXXXXX)" || {
         log_error "Failed to create secure temporary directory"
         exit 1
     }
@@ -998,7 +982,7 @@ main() {
     }
 
     if [[ "$DRY_RUN" != "true" ]]; then
-        SOPS_AGE_KEY_FILE="$age_key_file" simple_verify_age_key || {
+        SOPS_AGE_KEY_FILE="$age_key_file" check_age_key_health || {
             log_error "Age key health check failed — aborting backup to avoid encrypting with a bad key."
             log_error "Run './maintenance.sh --health --comprehensive' for diagnostics."
             exit 1
