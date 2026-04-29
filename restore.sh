@@ -1680,7 +1680,7 @@ main() {
     if [[ -f "$sha256_sidecar" && "$SKIP_VERIFICATION" != "true" ]]; then
         log_info "Verifying backup checksum before decryption..."
         local expected_sum actual_sum
-        expected_sum=$(cat "$sha256_sidecar")
+        expected_sum=$(awk '{print $1}' "$sha256_sidecar")
         actual_sum=$(sha256sum "$BACKUP_FILE" | awk '{print $1}')
         if [[ "$expected_sum" != "$actual_sum" ]]; then
             log_error "Checksum MISMATCH — backup file may be corrupted or tampered."
