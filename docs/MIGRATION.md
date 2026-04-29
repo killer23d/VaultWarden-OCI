@@ -224,7 +224,7 @@ Settings → Server URL → https://vault.example.com
 **OCI-specific considerations:**
 
 | Detail | Notes |
-|---|---|
+| :-- | :-- |
 | SSH log path | `/var/log/secure` (not `/var/log/auth.log`) — auto-detected by `setup.sh` |
 | Dynamic IPs | Automated Cloudflare DNS updates via `maintenance.sh --update-dns` (runs hourly via `vaultwarden-dns-update.timer`) |
 | Break-glass admin | Essential for OCI Serial Console emergency access |
@@ -243,7 +243,7 @@ sudo ./setup.sh --domain vault.example.com --email admin@example.com --auto
 **Key differences in VaultWarden-OCI:**
 
 | Feature | Generic Docker Compose | VaultWarden-OCI |
-|---|---|---|
+| :-- | :-- | :-- |
 | Configuration | Manual | Template-based (`setup.sh`) |
 | Resource limits | Manual / none | Pre-configured limits for 6 GB systems |
 | Security | DIY | Dual Fail2ban (host-networking) + Cloudflare-only firewall |

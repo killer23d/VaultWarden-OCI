@@ -194,7 +194,7 @@ journalctl -u vaultwarden-db-backup.service -n 50 --no-pager
 #### Log Retention (Caddy)
 
 | Log | Max Size | Retention |
-|---|---|---|
+| :-- | :-- | :-- |
 | Main access | 1 GB | 30 days |
 | Admin access | 750 MB | 90 days |
 | Auth attempts | 750 MB | 90 days |
@@ -531,7 +531,7 @@ make systemd-install
 ### Actual Schedule
 
 | Schedule | Job |
-|---|---|
+| :-- | :-- |
 | Mon–Sat 02:05 (+ 0–30 s jitter) | Comprehensive maintenance (Sunday skipped to avoid overlap with full backup) |
 | Daily 04:00 (+ 0–30 s jitter) | Database backup with fast verification + rclone sync |
 | Every 30 minutes | Health check with auto-recovery + email on failure |

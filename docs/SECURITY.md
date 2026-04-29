@@ -1,4 +1,4 @@
-# Security Guide - VaultWarden-OCI
+# Security Guide — VaultWarden-OCI
 
 This comprehensive security guide covers the multi-layered security approach implemented in VaultWarden-OCI, including Cloudflare-only blocking for web traffic, encrypted secrets management, firewall hardening, and emergency access procedures.
 
@@ -589,7 +589,7 @@ remind operators to disable it.
 Cloudflare WAF rules must be configured manually in the Cloudflare dashboard:
 
 | Rule | Path | Limit | Action |
-|---|---|---|---|
+| :-- | :-- | :-- | :-- |
 | Auth endpoint protection | `/identity/connect/token*`, `/api/accounts/prelogin*` | 10 req / 1 min per IP | Block (429) |
 | Admin panel protection | `/admin*` | 5 req / 1 min per IP | Block (429) |
 | General API protection (optional) | `/api/*` | 100 req / 1 min per IP | Managed Challenge |
@@ -725,7 +725,7 @@ caddy/
 The file is divided into four top-level blocks:
 
 | Block | Purpose |
-|---|---|
+| :-- | :-- |
 | `{ … }` (global options) | ACME DNS provider, trusted proxy config, 4-log forensic architecture |
 | `127.0.0.1:8080 { … }` | Internal health check endpoint (loopback only, not internet-accessible) |
 | `{$DOMAIN_NAME} { … }` | Main site — security headers, routing, admin auth, WebSocket, catch-all |
@@ -738,7 +738,7 @@ Routes are evaluated in declaration order. Each handler uses `handle` (exclusive
 so only the first matching block fires:
 
 | # | Matcher | Handler | Log target |
-|---|---|---|---|
+| :-- | :-- | :-- | :-- |
 | 1 | `@health path /alive` | `reverse_proxy vaultwarden:80` | `access_log` |
 | 2 | `handle /notifications/hub` | `reverse_proxy vaultwarden:80` (WebSocket headers forwarded) | `access_log` |
 | 3 | `@admin path /admin*` | `basic_auth` → `reverse_proxy vaultwarden:80` | `admin_log` |
@@ -829,7 +829,7 @@ fail2ban/
 ### Active Jails and What They Target
 
 | Jail | Log source | Filter | `maxretry` / `bantime` | Ban method |
-|---|---|---|---|---|
+| :-- | :-- | :-- | :-- | :-- |
 | `sshd` | `/var/log/ssh-auth.log` | `sshd` (built-in) | 3 / 24 h | local `iptables-multiport` |
 | `sshd-custom` | `/var/log/ssh-auth.log` | `sshd` (built-in) | 3 / 24 h | local `iptables-multiport` — **disabled by default** |
 | `vaultwarden-auth` | VaultWarden app log | `vaultwarden-auth` | 3 / 2 h | Cloudflare WAF |
