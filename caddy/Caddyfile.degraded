@@ -1,5 +1,11 @@
 {
-	# Global options
+	# Global options — DEGRADED MODE variant
+	# Identical to caddy/Caddyfile except all 'output file ...' log blocks are
+	# replaced with 'output stdout'.  Used when Caddy cannot write to the host
+	# log directory (userns-remap UID mismatch, permissions not yet fixed, etc.).
+	# Selected by caddy/entrypoint.sh when CADDY_DEGRADED=true.
+	# DO NOT add 'output file' directives here — that defeats the purpose.
+
 	# TLS_PROVIDER selects the certificate issuance method:
 	#
 	#   cloudflare  (default)
@@ -31,16 +37,11 @@
 	}
 
 	# ==========================================================================
-	# Global named log writers — single FileWriter per log file
+	# Global named log writers — stdout only (degraded mode)
 	# ==========================================================================
 	log access_log {
 		include http.log.access.access
-		output file /var/log/caddy/access.log {
-			roll_size     50MB
-			roll_keep     20
-			roll_keep_for 30d
-			roll_compression zstd
-		}
+		output stdout
 		format json {
 			time_format "2006-01-02T15:04:05.000Z07:00"
 			message_key "msg"
@@ -54,12 +55,7 @@
 
 	log security_log {
 		include http.log.access.security
-		output file /var/log/caddy/security.log {
-			roll_size     10MB
-			roll_keep     50
-			roll_keep_for 180d
-			roll_compression zstd
-		}
+		output stdout
 		format json {
 			time_format "2006-01-02T15:04:05.000Z07:00"
 			message_key "msg"

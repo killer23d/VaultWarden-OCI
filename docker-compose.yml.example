@@ -28,6 +28,11 @@ services:
       - no-new-privileges:true
 
     command: sh -c "
+      [ -d /secrets/.docker_secrets ] || {
+        echo 'ERROR: /secrets/.docker_secrets not found.' >&2
+        echo '       Run: sudo make setup  (or: sudo ./setup.sh --domain <domain> --email <email>)' >&2
+        exit 1
+      } &&
       mkdir -p /data /logs/vaultwarden /logs/caddy /logs/fail2ban /logs/postfix &&
 
       touch /logs/caddy/access.log /logs/caddy/security.log &&
@@ -74,7 +79,7 @@ services:
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/data:/caddy_data
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/config:/caddy_config
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/fail2ban:/fail2ban_db
-      - ${PWD}/secrets:/secrets
+      - ./secrets:/secrets
 
   # =============================================================================
   # VaultWarden - Main Application
@@ -176,6 +181,9 @@ services:
         soft: 512
         hard: 512
 
+    # NOTE: deploy.resources is evaluated only in Docker Swarm mode.
+    # In standalone 'docker compose', cpu and pid limits are silently ignored.
+    # Memory enforcement uses the top-level mem_limit / memswap_limit above.
     deploy:
       resources:
         limits:
@@ -215,8 +223,9 @@ services:
       - admin_basic_auth_hash
 
     volumes:
-      - ${PWD}/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - ${PWD}/caddy/entrypoint.sh:/scripts/entrypoint.sh:ro
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy/Caddyfile.degraded:/etc/caddy/Caddyfile.degraded:ro
+      - ./caddy/entrypoint.sh:/scripts/entrypoint.sh:ro
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/data:/data
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/config:/config
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy:/var/log/caddy
@@ -260,6 +269,9 @@ services:
         soft: 512
         hard: 512
 
+    # NOTE: deploy.resources is evaluated only in Docker Swarm mode.
+    # In standalone 'docker compose', cpu and pid limits are silently ignored.
+    # Memory enforcement uses the top-level mem_limit / memswap_limit above.
     deploy:
       resources:
         limits:
@@ -330,9 +342,9 @@ services:
         max-size: "5m"
         max-file: "3"
 
-    command:
-      sh -c "newaliases && exec postfix start-fg"
-
+    # NOTE: deploy.resources is evaluated only in Docker Swarm mode.
+    # In standalone 'docker compose', cpu and pid limits are silently ignored.
+    # Memory enforcement uses the top-level mem_limit / memswap_limit above.
     deploy:
       resources:
         limits:
@@ -371,7 +383,7 @@ services:
       - fail2ban_cloudflare_firewall_token
 
     volumes:
-      - ${PWD}/fail2ban:/data/fail2ban:ro
+      - ./fail2ban:/data/fail2ban:ro
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/fail2ban:/data/db
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/fail2ban:/var/log/fail2ban
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/vaultwarden:/var/log/vaultwarden:ro
@@ -400,6 +412,9 @@ services:
         max-size: "5m"
         max-file: "3"
 
+    # NOTE: deploy.resources is evaluated only in Docker Swarm mode.
+    # In standalone 'docker compose', cpu and pid limits are silently ignored.
+    # Memory enforcement uses the top-level mem_limit / memswap_limit above.
     deploy:
       resources:
         limits:

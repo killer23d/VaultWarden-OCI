@@ -144,6 +144,7 @@ _stat_octal_perms_local() {
 # ---------------------------------------------------------------------------
 _prepare_secrets_cleanup_umask=""
 _prepare_secrets_cleanup_cache=""
+_prepare_secrets_prev_exit_trap=""
 
 _prepare_secrets_cleanup() {
   if [[ -n "$_prepare_secrets_cleanup_umask" ]]; then
@@ -257,7 +258,7 @@ load_environment() {
       real_group=$(id -gn "${real_user}" 2>/dev/null || echo "${real_user}")
       log_warn ".env is owned by root but startup is running as ${real_user}."
       log_warn "Non-root tools (edit-secrets.sh, etc.) cannot read .env."
-      log_warn "Fix: sudo chown ${real_user}:${real_group} .env"
+      log_warn "Fix: sudo chown ${real_user}:${real_group} .env && sudo chmod 600 .env"
     fi
   else
     log_error ".env file not found!"
@@ -511,7 +512,10 @@ prepare_docker_secrets() {
   local old_umask
   old_umask=$(umask)
   _prepare_secrets_cleanup_umask="$old_umask"
-  trap _prepare_secrets_cleanup EXIT
+  # Compose with any existing EXIT trap so we don't silently discard it.
+  _prepare_secrets_prev_exit_trap="$(trap -p EXIT 2>/dev/null | sed "s/^trap -- '//;s/' EXIT$//")"
+  # shellcheck disable=SC2064  # intentional: expand _prepare_secrets_prev_exit_trap now to compose traps
+  trap "_prepare_secrets_cleanup; ${_prepare_secrets_prev_exit_trap:-:}" EXIT
   umask 333
 
   local cache_file
@@ -572,7 +576,14 @@ PY
 
   cleanup_secrets_environment || true
   _prepare_secrets_cleanup
-  trap - EXIT
+  # Restore any previously registered EXIT trap instead of clearing all handlers.
+  if [[ -n "$_prepare_secrets_prev_exit_trap" ]]; then
+    # shellcheck disable=SC2064  # intentional: expand variable now to restore original trap
+    trap "${_prepare_secrets_prev_exit_trap}" EXIT 2>/dev/null || trap - EXIT
+  else
+    trap - EXIT
+  fi
+  _prepare_secrets_prev_exit_trap=""
 
   log_success "Docker secrets prepared"
   return 0

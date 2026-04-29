@@ -133,10 +133,12 @@ fi
 
 # Derive DOMAIN_NAME from DOMAIN when not explicitly set — single source of truth.
 # Strips the https:// (or http://) prefix so Caddy receives a bare hostname.
-# If DOMAIN_NAME is already present in the environment it is left untouched.
-: "${DOMAIN_NAME:=${DOMAIN#https://}}"
-: "${DOMAIN_NAME:=${DOMAIN#http://}}"
-export DOMAIN_NAME="${DOMAIN_NAME}"
+# Two unconditional assignments: strip https:// first, then strip any remaining http://.
+# Using := (only-if-unset) would silently skip the second strip when DOMAIN starts
+# with http:// because the first := already set DOMAIN_NAME to "http://host".
+DOMAIN_NAME="${DOMAIN#https://}"
+DOMAIN_NAME="${DOMAIN_NAME#http://}"
+export DOMAIN_NAME
 
 # Validate required environment variables BEFORE starting Caddy
 # so we fail fast with a clear error, not a cryptic Caddy parse error.
@@ -161,6 +163,18 @@ echo "DOMAIN_NAME validated: ${DOMAIN_NAME}"
 # Skip when TLS_PROVIDER=acme_http (token not required).
 # =============================================================================
 TLS_PROVIDER=${TLS_PROVIDER:-cloudflare}
+
+# Validate TLS_PROVIDER early so an unsupported value produces a clear message
+# instead of a cryptic 'undefined snippet: tls_<value>' error from Caddy.
+case "$TLS_PROVIDER" in
+    cloudflare|acme_http) ;;
+    *)
+        echo "ERROR: TLS_PROVIDER='$TLS_PROVIDER' is not supported." >&2
+        echo "       Supported values: cloudflare, acme_http" >&2
+        echo "       Update TLS_PROVIDER in .env and restart Caddy." >&2
+        exit 1
+        ;;
+esac
 
 if [ "$TLS_PROVIDER" = "cloudflare" ]; then
     _token=$(read_secret /run/secrets/caddy_cloudflare_dns_token)
@@ -250,47 +264,20 @@ fi
 # =============================================================================
 
 # =============================================================================
-# DEGRADED MODE: build a patched Caddyfile with stdout-only logging
+# DEGRADED MODE: use the pre-committed Caddyfile.degraded
 #
-# The previous sed approach replaced only the
-# 'output file /var/log/caddy/*.log {' line but left the entire nested
-# block body (roll_size, roll_keep, roll_compression, closing brace)
-# as orphaned content, producing:
-#   Error: server block without any key is global configuration
-#
-# Uses awk to track brace depth and consume the entire
-# 'output file ... { ... }' block, emitting 'output stdout' instead.
+# caddy/Caddyfile.degraded is identical to caddy/Caddyfile except all
+# 'output file /var/log/caddy/...' blocks are replaced with 'output stdout'.
+# Using a static file avoids the maintenance burden and edge-case failures
+# of the previous runtime awk rewriter.
 # =============================================================================
 CADDYFILE=/etc/caddy/Caddyfile
 if [ "$CADDY_DEGRADED" = "true" ]; then
-    CADDY_DEGRADED_CADDYFILE=/tmp/Caddyfile.degraded
-    awk '
-        /output file \/var\/log\/caddy\// {
-            print "\t\t\toutput stdout # degraded-mode"
-            depth = 0
-            # count the opening brace on this line
-            for (i = 1; i <= length($0); i++) {
-                c = substr($0, i, 1)
-                if (c == "{") depth++
-                if (c == "}") depth--
-            }
-            # consume subsequent lines until the block closes
-            while (depth > 0) {
-                if ((getline line) <= 0) break
-                for (i = 1; i <= length(line); i++) {
-                    c = substr(line, i, 1)
-                    if (c == "{") depth++
-                    if (c == "}") depth--
-                }
-            }
-            next
-        }
-        { print }
-    ' "$CADDYFILE" > "$CADDY_DEGRADED_CADDYFILE" 2>/dev/null || {
-        log_warn "Could not write degraded Caddyfile to /tmp — using original."
-        CADDY_DEGRADED_CADDYFILE="$CADDYFILE"
-    }
-    CADDYFILE="$CADDY_DEGRADED_CADDYFILE"
+    if [ -f /etc/caddy/Caddyfile.degraded ]; then
+        CADDYFILE=/etc/caddy/Caddyfile.degraded
+    else
+        log_warn "Caddyfile.degraded not found — using original (file logging may fail)."
+    fi
 fi
 
 # =============================================================================

@@ -587,6 +587,11 @@ generate_bcrypt_hash() {
 
     [[ -z "$password" ]] && return 1
 
+    if ! has_command htpasswd; then
+        log_error "htpasswd not available — install apache2-utils: sudo apt install apache2-utils"
+        return 1
+    fi
+
     if ! [[ "$rounds" =~ ^[0-9]+$ ]] || ! (( rounds >= 10 && rounds <= 31 )); then
         log_error "bcrypt cost $rounds out of range [10-31] — refusing to generate weak hash"
         return 1
@@ -1113,6 +1118,10 @@ verify_key_replica() {
         log_debug "verify_key_replica: OK — $replica"
     done
 
+    if [[ $all_ok -ne 0 ]]; then
+        log_error "KEY REPLICA DEGRADED — backup will proceed but key redundancy is impaired."
+        log_error "EMAIL ALERT REQUIRED: check replicas immediately with: make key-health"
+    fi
     return "$all_ok"
 }
 
@@ -1196,7 +1205,7 @@ create_printable_key_backup() {
     old_umask=$(umask)
     umask 077
     local temp_html
-    temp_html=$(mktemp --suffix=.html)
+    temp_html=$(mktemp /tmp/vw-key-backup-XXXXXX.html)
     umask "$old_umask"
 
     # shellcheck disable=SC2064  # intentional: expand $temp_html now
@@ -1758,7 +1767,7 @@ secure_cleanup() {
     # persisted to an encrypted destination. This is a soft reminder only;
     # deletion proceeds regardless so that existing callers are not broken.
     if [[ "$encrypted_confirmed" != "encrypted" ]]; then
-        log_warn "secure_cleanup: caller has not confirmed encrypted destination for '$target'." \
+        log_debug "secure_cleanup: caller has not confirmed encrypted destination for '$target'." \
                  "Pass 'encrypted' as \$3 after verifying data is on an encrypted volume." \
                  "Plaintext residue may survive on un-encrypted storage."
     fi
