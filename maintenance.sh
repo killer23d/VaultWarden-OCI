@@ -816,7 +816,7 @@ update_firewall_ranges() {
 }
 
 # ---------------------------------------------------------------------------
-# TARGETED: DNS update
+# TARGETED: DNS update  (Cloudflare-proxy-safe)
 # ---------------------------------------------------------------------------
 update_dns_record() {
     if [[ "$UPDATE_DNS" != "true" ]]; then log_info "Skipping DNS update"; return 0; fi
@@ -829,7 +829,6 @@ update_dns_record() {
     [[ -z "$zone_id" ]] && { log_error "CLOUDFLARE_ZONE_ID not set in .env"; return 1; }
 
     local DNS_LOCK="/run/lock/vaultwarden-dns-update.lock"
-    # Use automatic FD allocation instead of hardcoded FD.
     local _DNS_LOCK_FD
     exec {_DNS_LOCK_FD}>"$DNS_LOCK"
     if ! flock -n "$_DNS_LOCK_FD"; then
@@ -838,20 +837,16 @@ update_dns_record() {
     fi
 
     log_info "Checking if DNS update needed for $domain..."
+
+    # ── Step 1: get origin server's real public IP ────────────────────────
     local current_ip
     current_ip=$(curl -s --max-time 10 https://checkip.amazonaws.com 2>/dev/null | tr -d '\n\r ') || true
     [[ -z "$current_ip" ]] && { log_error "Cannot determine current external IP"; return 1; }
-    [[ ! "$current_ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] && { log_error "Invalid IP format: $current_ip"; return 1; }
+    [[ ! "$current_ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] && {
+        log_error "Invalid IP format: $current_ip"; return 1
+    }
 
-    local dns_ip
-    dns_ip=$(dig +short "$domain" @1.1.1.1 2>/dev/null | head -1) || { log_error "Cannot resolve DNS for $domain"; return 1; }
-    [[ -z "$dns_ip" ]] && { log_warn "No DNS record found for $domain, proceeding with update"; dns_ip="(none)"; }
-
-    if [[ "$current_ip" == "$dns_ip" ]]; then
-        log_success "DNS record up to date: $domain -> $current_ip"; return 0
-    fi
-    log_info "DNS update needed: $dns_ip -> $current_ip"
-
+    # ── Step 2: read Cloudflare API token (unchanged from original) ───────
     local token_file="${SCRIPT_DIR}/secrets/.docker_secrets/caddy_cloudflare_dns_token"
     local cf_token
     if [[ -f "$token_file" ]]; then
@@ -881,16 +876,36 @@ update_dns_record() {
     fi
     [[ -z "$cf_token" ]] && { log_error "Cloudflare API token is empty"; return 1; }
 
-    local record_id
-    record_id=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records?type=A&name=$domain" \
-                -H "Authorization: Bearer $cf_token" -H "Content-Type: application/json" | \
-                jq -r '.result[0].id // empty' 2>/dev/null)
+    # ── Step 3: query Cloudflare API for BOTH record_id AND stored origin IP
+    #    This is the key fix: .content is the real origin IP, never the proxy IP,
+    #    regardless of whether the orange-cloud proxy is enabled.
+    local cf_response record_id stored_ip
+    cf_response=$(curl -s --max-time 15 \
+        -X GET "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records?type=A&name=$domain" \
+        -H "Authorization: Bearer $cf_token" \
+        -H "Content-Type: application/json") \
+        || { log_error "Cloudflare API request failed (network error)"; return 1; }
+
+    record_id=$(echo "$cf_response" | jq -r '.result[0].id   // empty' 2>/dev/null)
+    stored_ip=$(echo "$cf_response" | jq -r '.result[0].content // empty' 2>/dev/null)
+
     [[ -z "$record_id" ]] && { log_error "Cannot find DNS record ID for $domain"; return 1; }
 
+    # ── Step 4: compare origin IP with stored origin IP (proxy-safe) ──────
+    if [[ "$current_ip" == "$stored_ip" ]]; then
+        log_success "DNS record up to date: $domain -> $current_ip (CF record content matches, proxy state irrelevant)"
+        return 0
+    fi
+
+    log_info "DNS update needed: stored_ip=$stored_ip -> current_ip=$current_ip"
+
+    # ── Step 5: update the record ─────────────────────────────────────────
     local response
-    response=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records/$record_id" \
-               -H "Authorization: Bearer $cf_token" -H "Content-Type: application/json" \
-               --data "{\"type\":\"A\",\"name\":\"$domain\",\"content\":\"$current_ip\",\"ttl\":300}")
+    response=$(curl -s --max-time 15 \
+        -X PUT "https://api.cloudflare.com/client/v4/zones/$zone_id/dns_records/$record_id" \
+        -H "Authorization: Bearer $cf_token" \
+        -H "Content-Type: application/json" \
+        --data "{\"type\":\"A\",\"name\":\"$domain\",\"content\":\"$current_ip\",\"ttl\":300}")
 
     if echo "$response" | jq -e '.success' >/dev/null 2>&1; then
         log_success "DNS updated successfully: $domain -> $current_ip"
@@ -898,7 +913,7 @@ update_dns_record() {
             local admin_email; admin_email=$(get_config_value "ADMIN_EMAIL" "")
             if [[ -n "$admin_email" ]]; then
                 send_notification_email "VaultWarden IP Address Changed" \
-"Old IP: $dns_ip
+"Old IP: $stored_ip
 New IP: $current_ip
 Domain: $domain
 DNS record updated automatically." \
