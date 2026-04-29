@@ -925,17 +925,26 @@ do_edit() {
         return 1
     fi
 
+    # Inject inline YAML hints for hashed fields so the operator knows not to
+    # type plaintext values directly. SOPS preserves YAML comments on re-encrypt,
+    # so the hints will survive a save-and-re-encrypt cycle. Guard each substitution
+    # with a negative-lookahead grep so we never insert duplicate comment lines on
+    # subsequent edits (idempotent across re-opens).
+    if ! grep -q "^# HASHED (Argon2id)" "$temp_file"; then
+        sed -i \
+            -e 's|^admin_token:|# HASHED (Argon2id) — do NOT type plaintext here. Use: ./edit-secrets.sh --rotate admin_token\nadmin_token:|' \
+            "$temp_file"
+    fi
+    if ! grep -q "^# HASHED (bcrypt)" "$temp_file"; then
+        sed -i \
+            -e 's|^admin_basic_auth_hash:|# HASHED (bcrypt) — do NOT type plaintext here. Use: ./edit-secrets.sh --rotate admin_basic_auth_hash\nadmin_basic_auth_hash:|' \
+            "$temp_file"
+    fi
+
+    # Compute checksum AFTER comment injection so that a no-op editor session
+    # (open + close without changes) is correctly detected as "no changes".
     local before_checksum
     before_checksum=$(calculate_sha256 "$temp_file")
-
-    # Inject inline YAML hints for hashed fields so the operator knows not to
-    # type plaintext values directly. These comment lines are stripped by SOPS
-    # when re-encrypting (SOPS preserves YAML comments), so they survive a
-    # save-and-re-encrypt cycle.
-    sed -i \
-        -e 's|^admin_token:|# HASHED (Argon2id) — do NOT type plaintext here. Use: ./edit-secrets.sh --rotate admin_token\nadmin_token:|' \
-        -e 's|^admin_basic_auth_hash:|# HASHED (bcrypt) — do NOT type plaintext here. Use: ./edit-secrets.sh --rotate admin_basic_auth_hash\nadmin_basic_auth_hash:|' \
-        "$temp_file"
 
     if ! "$EDITOR_CMD" "$temp_file"; then
         log_error "Editor exited with error"

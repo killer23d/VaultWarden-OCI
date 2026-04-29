@@ -84,6 +84,12 @@ services:
     image: ghcr.io/dani-garcia/vaultwarden:${VAULTWARDEN_VERSION:-1.35.8}
     restart: unless-stopped
     user: "${PUID}:${PGID}"
+    # memswap_limit equal to mem_limit disables swap for this container, preventing
+    # decrypted secrets and DB content from being paged to disk. Must be a top-level
+    # service property — not under deploy.resources.limits — to be applied by
+    # docker compose in standalone (non-Swarm) mode.
+    mem_limit: 512M
+    memswap_limit: 512M
 
     depends_on:
       init-permissions:
@@ -174,7 +180,6 @@ services:
       resources:
         limits:
           memory: 512M
-          memswap_limit: 512M   # equal to memory = no swap; prevents secrets paging to disk
           cpus: '0.3'
           pids: 200
         reservations:
