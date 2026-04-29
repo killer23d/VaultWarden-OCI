@@ -181,6 +181,49 @@ warn_plaintext_secret_overrides() {
 }
 
 # ---------------------------------------------------------------------------
+# check_email_config_consistency
+#
+# Cross-checks EMAIL_MODE against the presence of the required secret so the
+# operator gets an actionable warning at startup rather than a silent failure
+# on first email send.
+#
+# This is a WARN, not an error — email is not required for the stack to start.
+# ---------------------------------------------------------------------------
+check_email_config_consistency() {
+  local email_mode="${EMAIL_MODE:-auto}"
+  local secrets_dir="${PROJECT_ROOT}/secrets/.docker_secrets"
+
+  case "$email_mode" in
+    api)
+      # EMAIL_MODE=api requires email_api_token to be present and non-empty.
+      local token_file="${secrets_dir}/email_api_token"
+      if [[ ! -f "$token_file" ]] || [[ ! -s "$token_file" ]]; then
+        log_warn "EMAIL_MODE=api is set but '${token_file}' is absent or empty."
+        log_warn "  All alert emails will fail silently until the token is populated."
+        log_warn "  Fix: ./edit-secrets.sh --rotate email_api_token"
+      fi
+      ;;
+    smtp)
+      # EMAIL_MODE=smtp requires smtp_password.
+      local pw_file="${secrets_dir}/smtp_password"
+      if [[ ! -f "$pw_file" ]] || [[ ! -s "$pw_file" ]]; then
+        log_warn "EMAIL_MODE=smtp is set but '${pw_file}' is absent or empty."
+        log_warn "  SMTP relay authentication will fail on first send."
+        log_warn "  Fix: ./edit-secrets.sh --rotate smtp_password"
+      fi
+      ;;
+    auto|host)
+      # auto and host do not require a specific secret — skip.
+      ;;
+    *)
+      log_warn "EMAIL_MODE='${email_mode}' is not a recognised value (auto|api|smtp|host)."
+      log_warn "  Email delivery may fail. Check EMAIL_MODE in .env."
+      ;;
+  esac
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # load_environment
 # ---------------------------------------------------------------------------
 load_environment() {
@@ -808,6 +851,7 @@ main() {
   prepare_directories || exit 1
   prepare_log_directories || log_warn "Log directory preparation had issues"
   prepare_docker_secrets || exit 1
+  check_email_config_consistency || true   # warn only, never block startup
   warn_plaintext_secret_overrides || true
   cleanup_orphaned_resources || true
   ensure_vaultwarden_egress_nat || true

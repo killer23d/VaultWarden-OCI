@@ -720,6 +720,10 @@ do_rotate() {
         log_error "Failed to secure temp file: $temp_plain"
         return 1
     fi
+    if [[ -n "$temp_plain" && "$temp_plain" != /dev/shm/* ]]; then
+        log_warn "rotate: /dev/shm unavailable — plaintext temp file is disk-backed: $temp_plain"
+        log_warn "        Ensure full-disk encryption is active on this host."
+    fi
     # use _secure_shred() for this plaintext temp file
     register_cleanup "_secure_shred" "$temp_plain"
 
@@ -772,6 +776,10 @@ do_rotate() {
         rm -f "$temp_patched"
         log_error "Failed to secure temp file: $temp_patched"
         return 1
+    fi
+    if [[ -n "$temp_patched" && "$temp_patched" != /dev/shm/* ]]; then
+        log_warn "rotate: /dev/shm unavailable — patched temp file is disk-backed: $temp_patched"
+        log_warn "        Ensure full-disk encryption is active on this host."
     fi
     # use _secure_shred() for this plaintext patched temp file
     register_cleanup "_secure_shred" "$temp_patched"
@@ -919,6 +927,15 @@ do_edit() {
 
     local before_checksum
     before_checksum=$(calculate_sha256 "$temp_file")
+
+    # Inject inline YAML hints for hashed fields so the operator knows not to
+    # type plaintext values directly. These comment lines are stripped by SOPS
+    # when re-encrypting (SOPS preserves YAML comments), so they survive a
+    # save-and-re-encrypt cycle.
+    sed -i \
+        -e 's|^admin_token:|# HASHED (Argon2id) — do NOT type plaintext here. Use: ./edit-secrets.sh --rotate admin_token\nadmin_token:|' \
+        -e 's|^admin_basic_auth_hash:|# HASHED (bcrypt) — do NOT type plaintext here. Use: ./edit-secrets.sh --rotate admin_basic_auth_hash\nadmin_basic_auth_hash:|' \
+        "$temp_file"
 
     if ! "$EDITOR_CMD" "$temp_file"; then
         log_error "Editor exited with error"

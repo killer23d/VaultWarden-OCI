@@ -1653,11 +1653,17 @@ main() {
     # Create the secure temp dir early so remote pull and key staging can use it.
     local old_umask; old_umask=$(umask)
     umask 077
-    local tmp_parent; tmp_parent="$(dirname "$STATE_DIR")"
-    TMPDIR_RESTORE="$(mktemp -d -p "$tmp_parent" vw_restore.XXXXXXXXXX)" || {
+    # Prefer /dev/shm (RAM-backed tmpfs) so decrypted material never touches disk.
+    # Fall back to a mktemp in /tmp (or the OS default) when /dev/shm is absent or
+    # not writable — this is the same pattern used by backup.sh.
+    TMPDIR_RESTORE="$(mktemp -d -p /dev/shm vw_restore.XXXXXXXXXX 2>/dev/null || mktemp -d -t vw_restore.XXXXXXXXXX)" || {
         log_error "Failed to create secure temporary directory"; exit 1
     }
     umask "$old_umask"
+    if [[ "$TMPDIR_RESTORE" != /dev/shm/* ]]; then
+        log_warn "TMPDIR_RESTORE: /dev/shm unavailable — restore temp dir is disk-backed: $TMPDIR_RESTORE"
+        log_warn "  Decrypted material will be on disk. Ensure full-disk encryption is active."
+    fi
 
     # Load Age key from recovery kit if supplied (must be after TMPDIR_RESTORE is set).
     _load_recovery_kit || exit 1
