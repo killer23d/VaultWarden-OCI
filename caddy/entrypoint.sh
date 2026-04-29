@@ -131,9 +131,9 @@ if [ "$CADDY_DEGRADED" = "true" ]; then
     log_warn "Check container health: docker inspect --format='{{.State.Health.Status}}' vaultwarden_caddy"
 fi
 
-# Derive DOMAIN_NAME from DOMAIN when not explicitly set — single source of truth.
-# Strips the https:// (or http://) prefix so Caddy receives a bare hostname.
-# Two unconditional assignments: strip https:// first, then strip any remaining http://.
+# Derive DOMAIN_NAME from DOMAIN — strip https:// first, then http:// from the result.
+# Two unconditional assignments handle http://example.com correctly:
+#   first strip is a no-op, second strips http://.
 # Using := (only-if-unset) would silently skip the second strip when DOMAIN starts
 # with http:// because the first := already set DOMAIN_NAME to "http://host".
 DOMAIN_NAME="${DOMAIN#https://}"

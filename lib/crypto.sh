@@ -1205,7 +1205,13 @@ create_printable_key_backup() {
     old_umask=$(umask)
     umask 077
     local temp_html
-    temp_html=$(mktemp /tmp/vw-key-backup-XXXXXX.html)
+    # mktemp without --suffix: use POSIX-portable template (XXXXXX at the end),
+    # then rename to .html so the OS registers the correct MIME type when opened.
+    local _tmp_base
+    _tmp_base=$(mktemp /tmp/vw-key-backup.XXXXXX)
+    temp_html="${_tmp_base}.html"
+    mv -- "$_tmp_base" "$temp_html"
+    unset _tmp_base
     umask "$old_umask"
 
     # shellcheck disable=SC2064  # intentional: expand $temp_html now
