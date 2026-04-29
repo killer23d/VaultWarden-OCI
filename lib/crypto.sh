@@ -730,8 +730,9 @@ verify_file_integrity() {
         log_error "verify_file_integrity: failed to read checksum file: $checksum_file"
         return 1
     }
-    # Trim any trailing whitespace / newline
-    stored_checksum="${stored_checksum%%[[:space:]]*}"
+    # Extract just the first whitespace-delimited token (hex digest).
+    # awk '{print $1}' handles both bare-digest and full sha256sum output formats.
+    stored_checksum=$(awk '{print $1}' <<< "$stored_checksum")
 
     if [[ -n "${FILE_INTEGRITY_HMAC_KEY:-}" ]]; then
         if ! has_command openssl; then
@@ -750,7 +751,7 @@ verify_file_integrity() {
             log_error "verify_file_integrity: failed to read HMAC file: $hmac_file"
             return 1
         }
-        stored_hmac="${stored_hmac%%[[:space:]]*}"
+        stored_hmac=$(awk '{print $1}' <<< "$stored_hmac")
 
         local expected_hmac
         expected_hmac=$(printf '%s' "$stored_checksum" \
@@ -1307,10 +1308,9 @@ EOF
                 log_info "Scheduled security reminder in 30 minutes via at(1)." || \
                 log_warn "Could not schedule at(1) reminder; set a manual reminder to delete $output_html"
         else
-            # Fallback: background subshell reminder (best-effort)
-            ( sleep 1800 && eval "$remind_cmd" ) &
-            disown 2>/dev/null || true
-            log_info "Scheduled background security reminder in 30 minutes (at not available)."
+            log_warn "at(1) not available — cannot schedule auto-reminder."
+            log_warn "SECURITY: Manually delete the plaintext key file within 30 minutes:"
+            log_warn "          shred -fuz '$output_html'"
         fi
     fi
 
@@ -1329,7 +1329,7 @@ _sops_yaml_age_recipients() {
 
     # Match lines of the form:  - age1...  (with any leading whitespace/dash)
     local keys
-    keys=$(grep -E '^[[:space:]]*-[[:space:]]*(age1[a-z0-9]+)' "$sops_yaml" \
+    keys=$(grep -E '^[[:space:]]*-[[:space:]]*(age1[A-Za-z0-9]+)' "$sops_yaml" \
            | sed -E 's/^[[:space:]]*-[[:space:]]*//')
     [[ -n "$keys" ]] || return 1
     printf '%s\n' "$keys"
