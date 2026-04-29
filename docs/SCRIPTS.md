@@ -18,7 +18,7 @@ Complete reference for all management scripts and utility libraries in VaultWard
 ## 🗂️ Script Inventory
 
 | # | Script | Category | sudo? |
-|---|---|---|---|
+| :-- | :-- | :-- | :-- |
 | 1 | `setup.sh` | Initialisation + secrets + systemd phases | ✅ |
 | 2 | `startup.sh` | Service management | — |
 | 3 | `backup.sh` | Backup | — |
@@ -52,7 +52,7 @@ sudo ./setup.sh --domain vault.example.com --email admin@example.com [OPTIONS]
 **Options:**
 
 | Option | Description |
-|---|---|
+| :-- | :-- |
 | `--domain DOMAIN` | VaultWarden domain — required (unless using `--phase`) |
 | `--email EMAIL` | Administrator email — required (unless using `--phase`) |
 | `--auto` | Automated setup with minimal prompts |
@@ -98,7 +98,7 @@ sudo ./setup.sh --phase=systemd --install
 **Options:**
 
 | Option | Description |
-|---|---|
+| :-- | :-- |
 | `--auto` | Non-interactive — auto-generate required secrets; set `CHANGE_ME` for optional fields |
 | `--quiet-summary` | Suppress verbose output (used internally by `setup.sh --auto`) |
 | `--hash-only` | Generate and print a bcrypt hash for the supplied password without modifying secrets |
@@ -141,7 +141,7 @@ sudo ./setup.sh --phase=systemd --install
 **Options:**
 
 | Option | Description |
-|---|---|
+| :-- | :-- |
 | `--force` | Force restart (preferred flag) — stops containers then restarts |
 | `--force-restart` | Legacy alias for `--force` (kept for compatibility) |
 | `--skip-health` | Skip post-startup health check |
@@ -177,7 +177,7 @@ make restart   # Force restart
 **Options:**
 
 | Option | Description |
-|---|---|
+| :-- | :-- |
 | `--comprehensive` | Add resource usage, configuration, and security checks |
 | `--auto-recover` | Attempt automatic container restart on failure |
 | `--email` | Send email if critical issues found |
@@ -212,7 +212,7 @@ make health-quick                  # Fast port + container check (no deep tests)
 **Backup types:**
 
 | Type | Contents | Retention |
-|---|---|---|
+| :-- | :-- | :-- |
 | `auto` | Auto-selects `db` or `full` based on DB age and last full backup age | — |
 | `db` | SQLite database only | 14 days |
 | `full` | Database + config + Caddy certs + logs (no secrets) | 30 days |
@@ -229,7 +229,7 @@ make health-quick                  # Fast port + container check (no deep tests)
 **Options:**
 
 | Option | Description |
-|---|---|
+| :-- | :-- |
 | `--type TYPE` | `auto` (default), `db`, `full`, or `emergency` |
 | `--rclone` | Sync encrypted backup to rclone remote after creation (non-fatal on failure) |
 | `--full-verification` | End-to-end decrypt + integrity check before sync (fatal on failure) |
@@ -278,7 +278,7 @@ make backup-status       # Show backup health summary (last run, size, retention
 **Options:**
 
 | Option | Description |
-|---|---|
+| :-- | :-- |
 | `--file FILE` | Specific backup file to restore |
 | `--latest` | Use the newest backup (optionally filtered by `--type`) |
 | `--type TYPE` | Filter backup list by type |
@@ -332,7 +332,7 @@ make restore-remote
 **Options:**
 
 | Option | Description |
-|---|---|
+| :-- | :-- |
 | `--editor EDITOR` | Specify editor (default: nano) |
 | `--rotate FIELD` | Rotate (regenerate) a single secret field |
 | `--export-recovery-kit` | Export a plaintext recovery document (key + all secrets) — written to tmpfs, never to persistent disk |
@@ -355,7 +355,7 @@ make test-secrets    # runs --list internally
 
 ---
 
-### 6. `maintenance.sh --update` subcommand
+### `maintenance.sh --update` subcommand
 **Purpose:** Update Docker images and optionally system packages, with pre/post health checks and automatic rollback.
 
 ```bash
@@ -365,7 +365,7 @@ make test-secrets    # runs --list internally
 **Options:**
 
 | Option | Description |
-|---|---|
+| :-- | :-- |
 | `--system` | Also update system packages (apt) and Docker engine |
 | `--email` | Send email notification on completion |
 | `--no-backup` | Skip pre-update emergency backup |
@@ -393,7 +393,7 @@ make update-system    # Containers + system packages (apt upgrade + Docker engin
 **Modes overview:**
 
 | Mode | Command | Cleanup runs? |
-|---|---|---|
+| :-- | :-- | :-- |
 | Routine | `--comprehensive` | ✅ |
 | Targeted DNS | `--update-dns` (alone) | ❌ |
 | Targeted Firewall | `--update-firewall` (alone) | ❌ |
@@ -405,7 +405,7 @@ make update-system    # Containers + system packages (apt upgrade + Docker engin
 **Routine options:**
 
 | Option | Description |
-|---|---|
+| :-- | :-- |
 | `--comprehensive` | Full routine: cleanup + DB opt + firewall + DNS + health |
 | `--no-logs` | Skip log cleanup |
 | `--no-backups` | Skip backup pruning |
@@ -417,14 +417,14 @@ make update-system    # Containers + system packages (apt upgrade + Docker engin
 **Deep DB maintenance options:**
 
 | Option | Description |
-|---|---|
+| :-- | :-- |
 | `--db-maint` | Run full VACUUM cycle (stops VaultWarden; prompts for confirmation) |
 | `--db-maint --force` | Skip the confirmation prompt |
 
 **Email diagnostic options:**
 
 | Option | Description |
-|---|---|
+| :-- | :-- |
 | `--test-email` | Run Postfix + fail2ban + end-to-end email tests |
 | `--verbose` | Detailed output (only meaningful with `--test-email`) |
 | `--recipient EMAIL` | Override default `ADMIN_EMAIL` recipient |
@@ -432,14 +432,14 @@ make update-system    # Containers + system packages (apt upgrade + Docker engin
 **Targeted options:**
 
 | Option | Description |
-|---|---|
+| :-- | :-- |
 | `--update-firewall` | Fetch latest Cloudflare IPs and update UFW rules (adds new rules before removing old ones) |
 | `--update-dns` | Check current public IP and update Cloudflare DNS A record |
 
 **`--health` subcommand:**
 
 | Option | Description |
-|---|---|
+| :-- | :-- |
 | `--comprehensive` | Add resource usage, configuration, and security checks |
 | `--auto-recover` | Attempt automatic container restart on failure |
 | `--email` | Send email if critical issues found |
@@ -451,7 +451,7 @@ make update-system    # Containers + system packages (apt upgrade + Docker engin
 **`--update` subcommand:**
 
 | Option | Description |
-|---|---|
+| :-- | :-- |
 | `--system` | Also update system packages (apt) and Docker engine |
 | `--email` | Send email notification on completion |
 | `--no-backup` | Skip pre-update emergency backup |
@@ -509,7 +509,7 @@ make update
 **Options:**
 
 | Option | Description |
-|---|---|
+| :-- | :-- |
 | `--create` | Create the emergency admin account |
 | `--status` | Show current break-glass admin status |
 | `--password` | Generate a new emergency password |
@@ -526,7 +526,7 @@ make breakglass-remove
 
 ---
 
-### 9. `setup.sh --phase=systemd`
+### `setup.sh --phase=systemd`
 **Purpose:** Systemd integration phase — installs scripts and timers, validates configuration.
 
 ```bash
@@ -545,7 +545,7 @@ sudo ./setup.sh --phase=systemd [OPTIONS]
 **Options:**
 
 | Option | Description |
-|---|---|
+| :-- | :-- |
 | `--install` | Install systemd units and enable timers |
 | `--remove` | Disable and remove units; remove `/opt/` script copies |
 | `--list` | List current timers + check for split-brain |
@@ -555,7 +555,7 @@ sudo ./setup.sh --phase=systemd [OPTIONS]
 **Installed schedule:**
 
 | Schedule | Service unit | Job |
-|---|---|---|
+| :-- | :-- | :-- |
 | Daily 2 AM (Mon–Sat) | `vaultwarden-maintenance` | `maintenance.sh --comprehensive` |
 | Mon–Sat 4 AM + 0–60 s jitter | `vaultwarden-db-backup` | `backup.sh --type db --rclone --email` |
 | Every 30 min | `vaultwarden-health` | `maintenance.sh --health --auto-recover --email` |
@@ -587,7 +587,7 @@ make timers          # List all vaultwarden timers (next trigger + last run)
 **How specifier expansion works:**
 
 | Specifier | Resolved to | Example |
-|---|---|---|
+| :-- | :-- | :-- |
 | `%n` | Full name of the *triggering* unit (used in `OnFailure=`) | `vaultwarden-health.service` |
 | `%i` | Instance name — everything between `@` and `.service` | `vaultwarden-health.service` |
 
@@ -608,7 +608,7 @@ The subject and body are constructed entirely inside the unit's `ExecStart` bash
 **Security hardening:** The unit runs as `root` (required to read `EnvironmentFile=/etc/vaultwarden/vaultwarden.env`) and applies the same hardening flags as all other VaultWarden service units.
 
 | Setting | Value | Reason |
-|---|---|---|
+| :-- | :-- | :-- |
 | `NoNewPrivileges=yes` | Prevents privilege escalation after start | Consistent with all other units |
 | `PrivateTmp=yes` | Isolates `/tmp` namespace | `send_email()` creates temp files via `mktemp`; prevents cross-unit temp file collisions |
 | `TimeoutStartSec=30` | Abort if email delivery hangs | Prevents a blocked SMTP call from holding up the systemd job queue |
@@ -646,7 +646,7 @@ sudo bash ~/uninstall-vaultwarden.sh
 **What it removes (14 steps, in order):**
 
 | Step | What is removed |
-|---|---|
+| :-- | :-- |
 | 1 | Docker Compose stack (containers, volumes, networks) |
 | 2 | systemd timer and service units (`/etc/systemd/system/vaultwarden-*.{timer,service}`) |
 | 3 | `/opt/vaultwarden-scripts/` (installed script copies) |
@@ -696,7 +696,7 @@ All common operations have Makefile shortcuts. Run `make help` to see the full t
 ### Complete Target Table
 
 | Target | Equivalent command | Notes |
-|---|---|---|
+| :-- | :-- | :-- |
 | `make help` | — | Print all targets with descriptions |
 | `make setup` | `sudo ./setup.sh` | Requires `sudo make setup` |
 | `make init-secrets` | `./setup.sh --phase=secrets` | Interactive secrets initialisation |
@@ -776,7 +776,7 @@ All libraries live in `lib/` and are sourced at the top of every script. At inst
 Core functions used by every script. *(Also includes email delivery functions, merged from the former `lib/email.sh`.)*
 
 | Function | Description |
-|---|---|
+| :-- | :-- |
 | `init_common_lib "$0"` | Initialise library with script context |
 | `log_info/success/warn/error` | Colour-coded logging |
 | `require_commands` | Assert required binaries are present |
@@ -792,7 +792,7 @@ Core functions used by every script. *(Also includes email delivery functions, m
 Docker and Docker Compose helpers.
 
 | Function | Description |
-|---|---|
+| :-- | :-- |
 | `require_docker` | Verify Docker daemon is accessible |
 | `is_service_running NAME` | Check if a Compose service is running |
 | `wait_for_service NAME TIMEOUT` | Poll until service is healthy |
@@ -804,7 +804,7 @@ Docker and Docker Compose helpers.
 Encryption, decryption, key management, security validation, and key resilience. *(Merged from the former `lib/security.sh` and `lib/simple_key_resilience.sh`.)*
 
 | Function | Description |
-|---|---|
+| :-- | :-- |
 | `generate_age_key PATH` | Generate an Age identity key |
 | `get_age_public_key PATH` | Extract the Age public key |
 | `encrypt_data / decrypt_data` | Age encrypt / decrypt |
@@ -829,7 +829,7 @@ Encryption, decryption, key management, security validation, and key resilience.
 Backup-specific helpers.
 
 | Function | Description |
-|---|---|
+| :-- | :-- |
 | `check_backup_disk_space DIR MIN_MB` | Verify available disk space |
 | `list_backups DIR` | List backups with metadata |
 | `get_backup_metadata FILE` | Extract metadata from a backup file |
@@ -841,7 +841,7 @@ Backup-specific helpers.
 Secrets collection, generation, hashing, validation, and recovery kit export. Used by `setup.sh --phase=secrets` and `edit-secrets.sh`.
 
 | Function | Description |
-|---|---|
+| :-- | :-- |
 | `collect_secret_field FIELD` | Interactive prompt, hash, and validate a single secret field — plaintext displayed via `/dev/tty` only, never stderr |
 | `auto_generate_secret_field FIELD` | Non-interactive generation or CHANGE_ME placeholder per field — plaintext routed to `/dev/tty` only |
 | `ensure_sops_env` | Set `SOPS_AGE_KEY_FILE` and `SOPS_CONFIG` for sops calls |

@@ -141,8 +141,8 @@ No action required — this runs automatically.
 Exports a formatted plain-text document containing the Age private key, public key, and recovery instructions — ready to paste as a Secure Note in Bitwarden, 1Password, or similar.
 
 ```bash
-
-create_password_manager_escrow ~/vaultwarden-age-key-escrow.txt
+# Export the Age key escrow document via edit-secrets.sh:
+./edit-secrets.sh --export-recovery-kit
 
 # ⚠️ Copy contents to your password manager NOW, then securely delete:
 shred -fuz ~/vaultwarden-age-key-escrow.txt
@@ -158,8 +158,9 @@ Generates a printable PDF (or HTML if `wkhtmltopdf` is not installed) containing
 # Install optional dependencies
 sudo apt install qrencode wkhtmltopdf
 
-
-create_printable_key_backup ~/vaultwarden-key-backup.pdf
+# create_printable_key_backup is a library function in lib/crypto.sh.
+# Invoke it via the Makefile target, which sources the library automatically:
+make key-backup
 
 # Print and store in a fireproof safe, then delete the file
 ```
@@ -231,7 +232,7 @@ journalctl -u vaultwarden-db-backup.service --since today
 | 8 | Perform restore (`db` / `full` / `emergency`) |
 | 9 | Prune old pre-restore artefacts |
 | 10 | **Generate + rotate a new age key** |
-| 11 | **Display new key prominently — operator must press Enter to confirm** |
+| 11 | **Display new key prominently — operator must type `SAVED` (all caps) to confirm** |
 | 12 | Start services + health check |
 
 > **Why rotate the key after restore?** A restore rewrites data from a potentially old backup. The key in use at backup time may have been compromised or lost. Generating a new key immediately after restore ensures the next backup uses a fresh, uncompromised key and brings the stack to a known-good security baseline with a single operation.
@@ -310,15 +311,14 @@ The new key is then displayed in the same prominent banner style as a fresh `set
   Installed at:  secrets/keys/age-key.txt
 ```
 
-The operator must press Enter to confirm they have saved the key before services start. Under `--force`, this acknowledgement step is suppressed (suitable for automated pipelines).
+The operator must type `SAVED` (all caps) to confirm they have saved the key before services start. Under `--force`, this acknowledgement step is suppressed (suitable for automated pipelines).
 
 **Key rotation failure is non-fatal** — if key generation fails for any reason, services still start and a recovery message is shown. The old key remains in place.
 
 **After restore, re-run the Tier 2 escrow** to update your password manager with the new key:
 
 ```bash
-
-create_password_manager_escrow ~/vaultwarden-age-key-escrow.txt
+./edit-secrets.sh --export-recovery-kit
 # Copy to password manager, then:
 shred -fuz ~/vaultwarden-age-key-escrow.txt
 ```

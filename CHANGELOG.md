@@ -43,7 +43,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     all configured locations (`secrets/keys/age-key.txt`,
     `/etc/vaultwarden/age-key.txt`, `.env`, `vaultwarden.env`).
   - Step 11: new key displayed in prominent banner (same style as
-    `setup.sh` fresh install); operator must press Enter to confirm.
+    `setup.sh` fresh install); operator must type `SAVED` (all caps) to confirm.
   - Key rotation failure is non-fatal — services start regardless.
   - `--key-file <path>` CLI flag for non-interactive / scripted restores.
   - `RESTORE_AGE_KEY_FILE` env var for CI pipeline use.
