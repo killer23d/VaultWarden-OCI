@@ -720,6 +720,10 @@ do_rotate() {
         log_error "Failed to secure temp file: $temp_plain"
         return 1
     fi
+    if [[ -n "$temp_plain" && "$temp_plain" != /dev/shm/* ]]; then
+        log_warn "rotate: /dev/shm unavailable — plaintext temp file is disk-backed: $temp_plain"
+        log_warn "        Ensure full-disk encryption is active on this host."
+    fi
     # use _secure_shred() for this plaintext temp file
     register_cleanup "_secure_shred" "$temp_plain"
 
@@ -772,6 +776,10 @@ do_rotate() {
         rm -f "$temp_patched"
         log_error "Failed to secure temp file: $temp_patched"
         return 1
+    fi
+    if [[ -n "$temp_patched" && "$temp_patched" != /dev/shm/* ]]; then
+        log_warn "rotate: /dev/shm unavailable — patched temp file is disk-backed: $temp_patched"
+        log_warn "        Ensure full-disk encryption is active on this host."
     fi
     # use _secure_shred() for this plaintext patched temp file
     register_cleanup "_secure_shred" "$temp_patched"
@@ -917,6 +925,24 @@ do_edit() {
         return 1
     fi
 
+    # Inject inline YAML hints for hashed fields so the operator knows not to
+    # type plaintext values directly. SOPS preserves YAML comments on re-encrypt,
+    # so the hints will survive a save-and-re-encrypt cycle. Guard each substitution
+    # with a negative-lookahead grep so we never insert duplicate comment lines on
+    # subsequent edits (idempotent across re-opens).
+    if ! grep -q "^# HASHED (Argon2id)" "$temp_file"; then
+        sed -i \
+            -e 's|^admin_token:|# HASHED (Argon2id) — do NOT type plaintext here. Use: ./edit-secrets.sh --rotate admin_token\nadmin_token:|' \
+            "$temp_file"
+    fi
+    if ! grep -q "^# HASHED (bcrypt)" "$temp_file"; then
+        sed -i \
+            -e 's|^admin_basic_auth_hash:|# HASHED (bcrypt) — do NOT type plaintext here. Use: ./edit-secrets.sh --rotate admin_basic_auth_hash\nadmin_basic_auth_hash:|' \
+            "$temp_file"
+    fi
+
+    # Compute checksum AFTER comment injection so that a no-op editor session
+    # (open + close without changes) is correctly detected as "no changes".
     local before_checksum
     before_checksum=$(calculate_sha256 "$temp_file")
 

@@ -120,15 +120,19 @@ else
   echo "OK: OCI FORWARD REJECT rule not present (nothing to remove)"
 fi
 
-# Ensure DOCKER-USER permits forwarding from common Docker private ranges.
+# Accept only the three pinned VaultWarden compose subnets in DOCKER-USER.
+# Using pinned subnets (not all RFC1918) prevents any future Docker project
+# on this host from inheriting unrestricted forwarding between all networks.
+# Subnets: 172.21.0.0/16 (vaultwarden_egress), 172.22.0.0/16 (caddy_external),
+#          172.23.0.0/16 (postfix_relay) — pinned in docker-compose.yml.example.
 # Keep this idempotent and append-only so repeated runs remain predictable.
 if iptables -t filter -S DOCKER-USER >/dev/null 2>&1; then
-  for cidr in "172.16.0.0/12" "10.0.0.0/8" "192.168.0.0/16"; do
+  for cidr in "172.21.0.0/16" "172.22.0.0/16" "172.23.0.0/16"; do
     if ! iptables -t filter -C DOCKER-USER -s "$cidr" -j ACCEPT >/dev/null 2>&1; then
       iptables -t filter -A DOCKER-USER -s "$cidr" -j ACCEPT
-      echo "ADDED: DOCKER-USER ACCEPT for RFC1918 $cidr"
+      echo "ADDED: DOCKER-USER ACCEPT for pinned VaultWarden subnet $cidr"
     else
-      echo "OK: DOCKER-USER ACCEPT already present for RFC1918 $cidr"
+      echo "OK: DOCKER-USER ACCEPT already present for pinned subnet $cidr"
     fi
   done
 else
