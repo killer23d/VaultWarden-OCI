@@ -944,8 +944,12 @@ _prompt_age_key() {
 
     local key_input=""
     if [[ -t 0 ]]; then
-        # Interactive terminal: suppress echo
-        IFS= read -r -s -p "  Age private key (hidden): " key_input || true
+        # Interactive terminal: suppress echo with a 300s timeout.
+        if ! IFS= read -r -s -t 300 -p "  Age private key (hidden): " key_input; then
+            echo "" >&2
+            log_error "Timed out waiting for AGE key input (300s). Re-run restore.sh to retry."
+            exit 1
+        fi
         echo ""   # newline after silent input
     else
         # Non-interactive pipe: read normally
