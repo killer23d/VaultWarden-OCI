@@ -1,15 +1,9 @@
-# VaultWarden-OCI - Production Docker Compose Configuration
-#
-# Override in .env: COMPOSE_PROJECT_NAME=vaultwarden
-#
-# Push Notifications: Push secret files must exist even if push is disabled.
-# The setup script (or init container) creates placeholder files automatically.
-# Set PUSH_ENABLED=true and populate the secret files to enable push.
-#
+# VaultWarden-OCI Production Compose
+# Core flow: init-permissions -> vaultwarden + caddy -> postfix -> fail2ban
+# Fill .env mandatory section first, then run setup secrets.
+
 services:
-  # =============================================================================
-  # Init Container - Permissions Setup
-  # =============================================================================
+  # -------------------- Mandatory startup: permissions init --------------------
   init-permissions:
     image: busybox:${BUSYBOX_VERSION:-1.37.0}
     container_name: vaultwarden_init
@@ -86,9 +80,7 @@ services:
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/fail2ban:/fail2ban_db
       - ./secrets:/secrets
 
-  # =============================================================================
-  # VaultWarden - Main Application
-  # =============================================================================
+  # -------------------- Core service: VaultWarden --------------------
   vaultwarden:
     container_name: vaultwarden_app
     image: ghcr.io/dani-garcia/vaultwarden:${VAULTWARDEN_VERSION:-1.35.8}
@@ -199,9 +191,7 @@ services:
           memory: 128M
           cpus: '0.1'
 
-  # =============================================================================
-  # Caddy - Reverse Proxy with SSL Termination
-  # =============================================================================
+  # -------------------- Core service: Caddy reverse proxy --------------------
   caddy:
     container_name: vaultwarden_caddy
     image: ghcr.io/caddybuilds/caddy-cloudflare:${CADDY_VERSION:-2.11.2}
@@ -287,9 +277,7 @@ services:
           memory: 128M
           cpus: '0.1'
 
-  # =============================================================================
-  # Postfix - Email Relay
-  # =============================================================================
+  # -------------------- Optional sidecar: Postfix relay --------------------
   postfix:
     container_name: vaultwarden_postfix
     image: boky/postfix:${POSTFIX_VERSION:-5.1.0}
@@ -360,9 +348,7 @@ services:
           memory: 64M
           cpus: '0.02'
 
-  # =============================================================================
-  # Fail2Ban - Intrusion Prevention
-  # =============================================================================
+  # -------------------- Optional sidecar: Fail2Ban --------------------
   fail2ban:
     container_name: vaultwarden_fail2ban
     image: crazymax/fail2ban:${FAIL2BAN_VERSION:-1.1.0-r4}
