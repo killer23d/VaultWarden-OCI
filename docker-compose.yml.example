@@ -1,11 +1,7 @@
-# VaultWarden-OCI - Production Docker Compose Configuration
-#
-# Override in .env: COMPOSE_PROJECT_NAME=vaultwarden
-#
-# Push Notifications: Push secret files must exist even if push is disabled.
-# The setup script (or init container) creates placeholder files automatically.
-# Set PUSH_ENABLED=true and populate the secret files to enable push.
-#
+# VaultWarden-OCI Production Compose
+# Core flow: init-permissions -> vaultwarden + caddy -> postfix -> fail2ban
+# Fill .env mandatory section first, then run setup secrets.
+
 services:
   # =============================================================================
   # Init Container - Permissions Setup

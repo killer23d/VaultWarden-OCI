@@ -1,46 +1,13 @@
 # =============================================================================
-# !! DEV-ONLY OVERRIDE — NEVER COPY TO docker-compose.override.yml IN PROD !!
+# DEVELOPMENT ONLY — DO NOT USE IN PRODUCTION
 # =============================================================================
-# RENAME NOTICE (2026-04-08):
-#   This file was previously named docker-compose.override.yml.example.
-#   It has been renamed to docker-compose.override.dev.yml.example so the
-#   .dev. infix is unmistakable in any file listing.  The correct workflow:
+# This file is only for local testing/debugging.
+# It reduces security defaults and exposes extra localhost ports.
+# Production should run docker-compose.yml only.
 #
-#     DEVELOPMENT:  cp docker-compose.override.dev.yml.example \
-#                      docker-compose.override.yml
-#     PRODUCTION:   DO NOT create docker-compose.override.yml at all.
-#
-#   setup.sh warns if docker-compose.override.yml exists and contains
-#   an image tag matching ':testing' or ':dev' variants.
-# =============================================================================
-# O-01: This file overrides docker-compose.yml for local development only.
-# It MUST NOT be copied to production. It disables security features
-# (read_only, caps, seccomp) to ease local debugging.
-# Production deployments: use docker-compose.yml only.
-# =============================================================================
-# O-02: Do NOT set real secrets here. Use Docker Secrets via setup-secrets.sh.
-# For local dev, use: make dev-secrets
-# =============================================================================
-
-# VaultWarden-OCI Development Override Configuration
-
-# This file provides development-friendly overrides that:
-# 1. Enable additional logging and debugging
-# 2. Add development email testing capabilities
-# 3. Expose additional ports for testing
-# 4. Reduce security restrictions for easier development
-
-# =============================================================================
-# CHANGES FROM BASE docker-compose.yml.example
-# =============================================================================
-# - mailhog replaced with mailpit (mailhog abandoned since 2022, has CVEs;
-#   mailpit is the community-standard drop-in: same ports, ARM64-native)
-# - logging: stanzas added to all services (larger caps than prod for
-#   debug verbosity, but still bounded to prevent local disk fill)
-# - ALL exposed ports now bind to 127.0.0.1 exclusively (not 0.0.0.0)
-#   to prevent accidental public exposure of the Caddy Admin API (2019),
-#   Mailpit web UI (8025), and debug SMTP (1025/1026) if the OCI VCN
-#   Security List is ever misconfigured.
+# Usage:
+#   cp docker-compose.override.dev.yml.example docker-compose.override.yml
+#   docker compose --profile development up -d
 # =============================================================================
 
 services:
