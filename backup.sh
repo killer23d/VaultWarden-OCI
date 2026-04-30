@@ -9,6 +9,7 @@ init_common_lib "$0"
 source "$SCRIPT_DIR/lib/docker.sh"
 source "$SCRIPT_DIR/lib/backup-utils.sh"
 source "$SCRIPT_DIR/lib/crypto.sh"
+source "$SCRIPT_DIR/lib/storage.sh"  # provides require_project_state_ready()
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -985,6 +986,9 @@ main() {
     fi
 
     load_env_file || { log_error "Failed to load .env"; exit 1; }
+
+    # Fail closed if the expected data volume is not mounted.
+    require_project_state_ready || exit 1
 
     local backup_encryption_enabled
     backup_encryption_enabled="$(get_config_value "BACKUP_ENCRYPTION_ENABLED" "true")"

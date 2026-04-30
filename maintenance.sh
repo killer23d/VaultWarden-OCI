@@ -15,6 +15,7 @@ _MAINT_SCRIPT_DIR="$SCRIPT_DIR"
 source "$SCRIPT_DIR/lib/secrets.sh"
 SCRIPT_DIR="$_MAINT_SCRIPT_DIR"
 unset _MAINT_SCRIPT_DIR
+source "$SCRIPT_DIR/lib/storage.sh"  # provides require_project_state_ready()
 
 # ---------------------------------------------------------------------------
 # Configuration defaults
@@ -2838,6 +2839,9 @@ main() {
     [[ "$COMPREHENSIVE" == "true" ]] && log_info "Running comprehensive maintenance..."
 
     _load_env
+
+    # Fail closed if the expected data volume is not mounted.
+    require_project_state_ready || exit 1
 
     local log_cleanup_result=0 backup_cleanup_result=0 docker_cleanup_result=0
     local db_optimization_result=0 firewall_update_result=1 dns_update_result=1

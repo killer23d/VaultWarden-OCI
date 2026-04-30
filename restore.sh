@@ -27,6 +27,7 @@ _source_lib() {
 _source_lib "lib/docker.sh"
 _source_lib "lib/backup-utils.sh"
 _source_lib "lib/crypto.sh"
+_source_lib "lib/storage.sh"
 unset -f _source_lib
 
 # ---------------------------------------------------------------------------
@@ -1613,6 +1614,11 @@ main() {
             log_error "Failed to load .env"; exit 1
         fi
     fi
+
+    # Fail closed if the expected data volume is not mounted.
+    # In bootstrap/emergency-restore mode (--remote without .env), DATA_VOLUME_DEVICE
+    # will be unset, so the guard is a no-op and restore can proceed.
+    require_project_state_ready || exit 1
 
     # Re-resolve BACKUP_BASE_DIR now that .env is fully loaded,
     # using the same config key ("BACKUP_DIR") and default that backup.sh uses.

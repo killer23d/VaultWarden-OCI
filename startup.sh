@@ -13,6 +13,7 @@ init_common_lib "$0"
 source "lib/docker.sh"
 source "lib/crypto.sh"
 source "lib/secrets.sh"   # provides cleanup_secrets_environment()
+source "lib/storage.sh"  # provides require_project_state_ready()
 
 # Configuration
 FORCE_RESTART=false
@@ -858,6 +859,8 @@ main() {
   log_info "Starting VaultWarden-OCI startup workflow..."
 
   load_environment || exit 1
+  # Fail closed if the expected data volume is not mounted.
+  require_project_state_ready || exit 1
   validate_prerequisites || exit 1
   prepare_directories || exit 1
   prepare_log_directories || log_warn "Log directory preparation had issues"

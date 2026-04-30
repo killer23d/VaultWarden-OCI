@@ -31,7 +31,7 @@ TMP_WORKDIR=$(mktemp -d -t vw_setup.XXXXXXXXXX) || {
 umask "$old_umask"
 trap 'rm -rf "$TMP_WORKDIR"' EXIT
 
-REQUIRED_LIBS=("lib/common.sh" "lib/crypto.sh" "lib/docker.sh" "lib/backup-utils.sh" "lib/secrets.sh")
+REQUIRED_LIBS=("lib/common.sh" "lib/crypto.sh" "lib/docker.sh" "lib/backup-utils.sh" "lib/secrets.sh" "lib/storage.sh")
 for lib in "${REQUIRED_LIBS[@]}"; do
     if [[ ! -f "$lib" ]]; then
         echo "ERROR: Required library not found: $lib" >&2
@@ -43,6 +43,7 @@ source "lib/common.sh"
 init_common_lib "$0"
 source "lib/crypto.sh"
 source "lib/docker.sh"
+source "lib/storage.sh"
 
 DOMAIN=""
 ADMIN_EMAIL=""
@@ -56,6 +57,11 @@ PHASE_ARGS=()
 ENTROPY_THRESHOLD=200
 ENTROPY_MAX_WAIT=60
 CLEAN_DOMAIN=""
+# Storage mode variables (defaults; overridden by --data-device/--data-mount
+# CLI flags or by DATA_VOLUME_DEVICE/DATA_VOLUME_MOUNT already set in the
+# calling environment).
+DATA_VOLUME_DEVICE="${DATA_VOLUME_DEVICE:-}"
+DATA_VOLUME_MOUNT="${DATA_VOLUME_MOUNT:-/mnt/vw-data}"
 
 show_help() {
     cat << 'EOF'
@@ -63,37 +69,46 @@ VaultWarden-OCI Setup Tool - Security Hardened Edition
 USAGE: sudo ./setup.sh --domain DOMAIN --email EMAIL [OPTIONS]
 
 OPTIONS:
-  --auto          Non-interactive install. Auto-generates passwords/passphrases;
-                  external credentials (CF tokens, SMTP) remain as CHANGE_ME
-                  placeholders — the post-install summary lists exact commands
-                  to rotate them. Does NOT imply --use-latest.
-  --use-latest    Override pinned container versions with 'latest' tags in .env.
-  --skip-deps     Skip dependency installation (assumes already installed).
-  --force         Overwrite existing .env, secrets, and docker-compose files.
-                  WARNING: Also regenerates the Age encryption key. All
-                  existing encrypted secrets become permanently unrecoverable
-                  without a prior recovery kit export. Run
-                  './edit-secrets.sh --export-recovery-kit' BEFORE using
-                  --force on a running installation.
-  --dry-run       Print what would happen without making any changes.
-  --phase=secrets   Run ONLY the secrets configuration phase
-  --phase=systemd   Run ONLY the systemd installation phase
-  --help          Show this help and exit.
+  --auto              Non-interactive install. Auto-generates passwords/passphrases;
+                      external credentials (CF tokens, SMTP) remain as CHANGE_ME
+                      placeholders — the post-install summary lists exact commands
+                      to rotate them. Does NOT imply --use-latest.
+  --use-latest        Override pinned container versions with 'latest' tags in .env.
+  --skip-deps         Skip dependency installation (assumes already installed).
+  --force             Overwrite existing .env, secrets, and docker-compose files.
+                      WARNING: Also regenerates the Age encryption key. All
+                      existing encrypted secrets become permanently unrecoverable
+                      without a prior recovery kit export. Run
+                      './edit-secrets.sh --export-recovery-kit' BEFORE using
+                      --force on a running installation.
+  --dry-run           Print what would happen without making any changes.
+  --data-device DEV   Use DEV as the dedicated VaultWarden data volume.
+                      The device is formatted (ext4, first run only) and
+                      mounted at DATA_VOLUME_MOUNT. A Docker systemd drop-in
+                      ensures the stack never starts without this mount.
+                      Example: --data-device /dev/sdb
+  --data-mount PATH   Mount point for the data volume (default: /mnt/vw-data).
+                      Must match PROJECT_STATE_DIR when DATA_VOLUME_DEVICE is set.
+  --phase=secrets     Run ONLY the secrets configuration phase
+  --phase=systemd     Run ONLY the systemd installation phase
+  --help              Show this help and exit.
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --domain) DOMAIN="$2"; shift 2 ;;
-        --email) ADMIN_EMAIL="$2"; shift 2 ;;
-        --auto) AUTO_MODE=true; shift ;;
-        --use-latest) USE_LATEST=true; shift ;;
-        --skip-deps) SKIP_DEPS=true; shift ;;
-        --force) FORCE=true; shift ;;
-        --dry-run) DRY_RUN=true; shift ;;
+        --domain)       DOMAIN="$2";              shift 2 ;;
+        --email)        ADMIN_EMAIL="$2";         shift 2 ;;
+        --auto)         AUTO_MODE=true;            shift ;;
+        --use-latest)   USE_LATEST=true;           shift ;;
+        --skip-deps)    SKIP_DEPS=true;            shift ;;
+        --force)        FORCE=true;                shift ;;
+        --dry-run)      DRY_RUN=true;              shift ;;
+        --data-device)  DATA_VOLUME_DEVICE="$2";   shift 2 ;;
+        --data-mount)   DATA_VOLUME_MOUNT="$2";    shift 2 ;;
         --phase=secrets) PHASE="secrets"; shift; PHASE_ARGS=("$@"); break ;;
         --phase=systemd) PHASE="systemd"; shift; PHASE_ARGS=("$@"); break ;;
-        --help) show_help; exit 0 ;;
+        --help)         show_help; exit 0 ;;
         *) log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done
@@ -463,6 +478,199 @@ detect_ssh_log_path() {
     echo "$ssh_log_path"
 }
 
+# ---------------------------------------------------------------------------
+# setup_data_volume
+# ---------------------------------------------------------------------------
+# Provisions the dedicated data volume when DATA_VOLUME_DEVICE is set.
+# Idempotent: safe to re-run. All decisions are based on current on-disk state
+# rather than flags, so re-running on an already-provisioned system is a no-op.
+#
+# Steps:
+#   1. Validate that DATA_VOLUME_DEVICE is a block device.
+#   2. Check filesystem type. Format ext4 only if the device is completely
+#      blank (no valid superblock). Aborts if a non-ext4 filesystem is found.
+#   3. Create mount point directory.
+#   4. Add a UUID-based fstab entry if absent (idempotent).
+#   5. Mount the device (idempotent — skips if already mounted).
+#   6. Write the sentinel file .vw-data-volume.
+# ---------------------------------------------------------------------------
+setup_data_volume() {
+    if [[ -z "${DATA_VOLUME_DEVICE:-}" ]]; then
+        log_info "DATA_VOLUME_DEVICE not set — skipping data volume provisioning (boot-only mode)"
+        return 0
+    fi
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would provision data volume: $DATA_VOLUME_DEVICE → $DATA_VOLUME_MOUNT"
+        return 0
+    fi
+
+    local device="$DATA_VOLUME_DEVICE"
+    local mount_point="$DATA_VOLUME_MOUNT"
+
+    # ── Require system utilities ──────────────────────────────────────────
+    require_commands blkid || return 1
+    require_commands mountpoint || return 1
+
+    # ── 1. Validate device ────────────────────────────────────────────────
+    if [[ ! -b "$device" ]]; then
+        log_error "DATA_VOLUME_DEVICE is not a block device: $device"
+        log_error "Check .env or verify the disk is attached to this instance."
+        return 1
+    fi
+
+    # Confirm device path has only safe characters to prevent command injection.
+    if [[ ! "$device" =~ ^/dev/[a-zA-Z0-9/]+$ ]]; then
+        log_error "DATA_VOLUME_DEVICE contains disallowed characters: $device"
+        return 1
+    fi
+
+    # ── 2. Filesystem check / format ──────────────────────────────────────
+    local fs_type
+    fs_type=$(blkid -o value -s TYPE "$device" 2>/dev/null || true)
+
+    if [[ -z "$fs_type" ]]; then
+        log_info "No filesystem found on $device — formatting as ext4..."
+        log_warn "ALL DATA ON $device WILL BE ERASED. This is expected on first run."
+        if ! mkfs.ext4 -F -L vw-data "$device" > /dev/null 2>&1; then
+            log_error "mkfs.ext4 failed for $device"
+            return 1
+        fi
+        log_success "Formatted $device as ext4 (label: vw-data)"
+    elif [[ "$fs_type" == "ext4" ]]; then
+        log_info "Existing ext4 filesystem found on $device — skipping format (idempotent)"
+    else
+        log_error "Unexpected filesystem type on $device: $fs_type"
+        log_error "Expected: ext4 or blank. Refusing to overwrite an existing filesystem."
+        log_error "If this is correct, set DATA_VOLUME_DEVICE= and manage the volume manually."
+        return 1
+    fi
+
+    # ── 3. Create mount point ─────────────────────────────────────────────
+    if [[ ! -d "$mount_point" ]]; then
+        mkdir -p "$mount_point" || { log_error "Cannot create mount point: $mount_point"; return 1; }
+        chmod 755 "$mount_point"
+        log_info "Created mount point: $mount_point"
+    fi
+
+    # ── 4. fstab entry (UUID-based, idempotent) ───────────────────────────
+    local dev_uuid
+    dev_uuid=$(blkid -o value -s UUID "$device" 2>/dev/null || true)
+    if [[ -z "$dev_uuid" ]]; then
+        log_error "Cannot determine UUID for $device — cannot create fstab entry"
+        return 1
+    fi
+
+    if ! grep -qF "UUID=$dev_uuid" /etc/fstab 2>/dev/null; then
+        log_info "Adding fstab entry for UUID=$dev_uuid → $mount_point"
+        printf 'UUID=%s\t%s\text4\tdefaults,nofail,x-systemd.after=local-fs.target\t0\t2\n' \
+            "$dev_uuid" "$mount_point" >> /etc/fstab || {
+            log_error "Failed to append to /etc/fstab"
+            return 1
+        }
+        log_success "fstab entry added (UUID=$dev_uuid)"
+    else
+        log_info "fstab entry already present for UUID=$dev_uuid (idempotent)"
+    fi
+
+    # Reload systemd unit state so new fstab mount units are visible.
+    systemctl daemon-reload 2>/dev/null || true
+
+    # ── 5. Mount (idempotent) ─────────────────────────────────────────────
+    if mountpoint -q "$mount_point" 2>/dev/null; then
+        log_info "$mount_point already mounted (idempotent)"
+    else
+        log_info "Mounting $device at $mount_point ..."
+        if ! mount "$mount_point"; then
+            log_error "mount failed for $mount_point"
+            log_error "Check /etc/fstab and verify the device is attached."
+            return 1
+        fi
+        log_success "Mounted $device at $mount_point"
+    fi
+
+    # ── 6. Sentinel file ──────────────────────────────────────────────────
+    local sentinel="$mount_point/.vw-data-volume"
+    if [[ ! -f "$sentinel" ]]; then
+        printf 'VaultWarden-OCI data volume\nDevice: %s\nMounted: %s\nCreated: %s\n' \
+            "$device" "$mount_point" "$(date -Iseconds)" > "$sentinel" || {
+            log_error "Failed to write sentinel file: $sentinel"
+            return 1
+        }
+        chmod 444 "$sentinel"
+        log_success "Sentinel file written: $sentinel"
+    else
+        log_info "Sentinel file already present: $sentinel (idempotent)"
+    fi
+
+    log_success "Data volume provisioning complete: $device → $mount_point"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# install_docker_mount_guard
+# ---------------------------------------------------------------------------
+# Creates a Docker systemd drop-in that adds RequiresMountsFor on
+# DATA_VOLUME_MOUNT, preventing Docker from starting if the data volume is
+# absent during boot (fail-closed behaviour).
+#
+# When DATA_VOLUME_DEVICE is blank (boot-only mode), any previously installed
+# drop-in is removed so the system is left clean.
+# Idempotent: re-running with the same mount path is a no-op.
+# ---------------------------------------------------------------------------
+install_docker_mount_guard() {
+    local drop_in_dir="/etc/systemd/system/docker.service.d"
+    local drop_in_file="$drop_in_dir/10-vaultwarden-data-volume.conf"
+
+    if [[ -z "${DATA_VOLUME_DEVICE:-}" ]]; then
+        # Boot-only mode: remove any stale guard from a previous configuration.
+        if [[ -f "$drop_in_file" ]]; then
+            log_info "DATA_VOLUME_DEVICE cleared — removing Docker mount guard drop-in"
+            rm -f "$drop_in_file"
+            systemctl daemon-reload 2>/dev/null || true
+        else
+            log_info "DATA_VOLUME_DEVICE not set — Docker mount guard not needed (boot-only mode)"
+        fi
+        return 0
+    fi
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would install Docker systemd mount guard for: $DATA_VOLUME_MOUNT"
+        return 0
+    fi
+
+    local mount_point="$DATA_VOLUME_MOUNT"
+
+    # Validate mount path has only safe characters.
+    if [[ ! "$mount_point" =~ ^/[a-zA-Z0-9/_-]+$ ]]; then
+        log_error "DATA_VOLUME_MOUNT contains disallowed characters: $mount_point"
+        return 1
+    fi
+
+    mkdir -p "$drop_in_dir" || { log_error "Cannot create drop-in directory: $drop_in_dir"; return 1; }
+
+    # Check if the drop-in already covers this mount path.
+    if [[ -f "$drop_in_file" ]] && grep -qF "RequiresMountsFor=$mount_point" "$drop_in_file" 2>/dev/null; then
+        log_info "Docker mount guard already installed for $mount_point (idempotent)"
+        return 0
+    fi
+
+    log_info "Installing Docker systemd mount guard for: $mount_point"
+    cat > "$drop_in_file" << DROPIN
+# Managed by VaultWarden-OCI setup.sh — do not edit by hand.
+# Requires the data volume to be mounted before Docker starts.
+# This prevents the stack from writing to the boot volume if the
+# data disk is absent (e.g. accidental detach after a reboot).
+[Unit]
+RequiresMountsFor=$mount_point
+DROPIN
+
+    chmod 644 "$drop_in_file" || return 1
+    systemctl daemon-reload 2>/dev/null || true
+    log_success "Docker mount guard installed: $drop_in_file"
+    return 0
+}
+
 create_env_file() {
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would create .env file"; return 0; fi
 
@@ -517,6 +725,15 @@ create_env_file() {
     # Ensure temp file is cleaned up on any failure path from this point.
     trap 'rm -f "$temp_env" 2>/dev/null || true' RETURN
 
+    # Compute PROJECT_STATE_DIR value: when a data volume is configured it MUST
+    # equal DATA_VOLUME_MOUNT; otherwise use the default boot-volume location.
+    local awk_state_dir
+    if [[ -n "${DATA_VOLUME_DEVICE:-}" ]]; then
+        awk_state_dir="${DATA_VOLUME_MOUNT:-/mnt/vw-data}"
+    else
+        awk_state_dir="/var/lib/vaultwarden"
+    fi
+
     AWK_DOMAIN="$domain_with_protocol" \
     AWK_EMAIL="$ADMIN_EMAIL" \
     AWK_UID="$user_id" \
@@ -526,6 +743,9 @@ create_env_file() {
     AWK_F2B_SENDER="fail2ban@$clean_domain" \
     AWK_ALLOWED_SENDER_DOMAINS="$clean_domain" \
     AWK_SSH_LOG="$detected_ssh_log_path" \
+    AWK_DATA_DEVICE="${DATA_VOLUME_DEVICE:-}" \
+    AWK_DATA_MOUNT="${DATA_VOLUME_MOUNT:-/mnt/vw-data}" \
+    AWK_STATE_DIR="$awk_state_dir" \
     awk '
         {
             sub(/^DOMAIN=.*/, "DOMAIN=" ENVIRON["AWK_DOMAIN"]);
@@ -537,6 +757,9 @@ create_env_file() {
             sub(/^F2B_SENDER=.*/, "F2B_SENDER=" ENVIRON["AWK_F2B_SENDER"]);
             sub(/^ALLOWED_SENDER_DOMAINS=.*/, "ALLOWED_SENDER_DOMAINS=" ENVIRON["AWK_ALLOWED_SENDER_DOMAINS"]);
             sub(/^SSH_LOG_PATH=.*/, "SSH_LOG_PATH=" ENVIRON["AWK_SSH_LOG"]);
+            sub(/^DATA_VOLUME_DEVICE=.*/, "DATA_VOLUME_DEVICE=" ENVIRON["AWK_DATA_DEVICE"]);
+            sub(/^DATA_VOLUME_MOUNT=.*/, "DATA_VOLUME_MOUNT=" ENVIRON["AWK_DATA_MOUNT"]);
+            sub(/^PROJECT_STATE_DIR=.*/, "PROJECT_STATE_DIR=" ENVIRON["AWK_STATE_DIR"]);
             print;
         }' "$env_file" > "$temp_env"
 
@@ -571,6 +794,21 @@ create_env_file() {
 
 setup_directories() {
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would setup directories"; return 0; fi
+
+    # If a separate data volume is configured, assert it is mounted and valid
+    # before we create any subdirectories inside it. This prevents accidentally
+    # writing the directory skeleton onto the boot volume if the mount failed.
+    # Export the storage vars so require_project_state_ready can read them.
+    export DATA_VOLUME_DEVICE="${DATA_VOLUME_DEVICE:-}"
+    export DATA_VOLUME_MOUNT="${DATA_VOLUME_MOUNT:-/mnt/vw-data}"
+    # Align PROJECT_STATE_DIR with the storage mode so the consistency check
+    # inside require_project_state_ready passes. In boot-only mode this is a no-op.
+    if [[ -n "${DATA_VOLUME_DEVICE:-}" ]]; then
+        export PROJECT_STATE_DIR="${DATA_VOLUME_MOUNT}"
+    else
+        export PROJECT_STATE_DIR="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
+    fi
+    require_project_state_ready || return 1
 
     local real_user; real_user=$(get_real_user)
     local real_group; real_group=$(id -g -n "$real_user")
@@ -3120,10 +3358,12 @@ main() {
     local setup_phases=(
         "check_disk_space:Disk Space Preflight:true"
         "create_swapfile:Swap Configuration:false"
+        "setup_data_volume:Data Volume Provisioning:true"
         "install_dependencies:Dependency Installation:true"
         "verify_dependencies:Dependency Verification:true"
         "setup_user_permissions:User Permissions:false"
         "create_env_file:Environment Configuration:true"
+        "install_docker_mount_guard:Docker Mount Guard:false"
         "create_docker_compose:Docker Compose Setup:true"
         "setup_directories:Directory Creation:true"
         "generate_age_keys:Encryption Keys:true"
