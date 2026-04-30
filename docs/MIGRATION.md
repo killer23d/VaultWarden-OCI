@@ -335,7 +335,7 @@ sudo systemctl list-timers 'vaultwarden-*'
 ./maintenance.sh --test-email --verbose
 ```
 
-> **Email migration note:** VaultWarden-OCI no longer requires a Postfix sidecar container for email. `lib/common.sh` (email functions) provides an API → SMTP → host MTA fallback chain. Set `EMAIL_PROVIDER` and the corresponding API token secret (`<PROVIDER_UPPER>_API_TOKEN`) via `./edit-secrets.sh`. See [CONFIGURATION.md](CONFIGURATION.md) for the full email configuration reference.
+> **Email migration note:** VaultWarden-OCI no longer requires a Postfix sidecar container for email. `lib/common.sh` (email functions) provides an API → SMTP → host MTA fallback chain. Set `EMAIL_PROVIDER` and the corresponding API token secret (`email_api_token`) via `./edit-secrets.sh`. See [CONFIGURATION.md](CONFIGURATION.md) for the full email configuration reference.
 
 ### Update Client Applications
 
@@ -417,7 +417,7 @@ curl -I https://vault.example.com/admin
 grep -E 'EMAIL_MODE|EMAIL_PROVIDER|SMTP_HOST' .env
 
 # Verify API token is set in secrets
-./edit-secrets.sh  # Check <PROVIDER_UPPER>_API_TOKEN
+./edit-secrets.sh  # Check email_api_token
 ```
 
 ### Systemd timers not running

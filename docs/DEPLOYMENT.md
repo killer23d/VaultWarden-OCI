@@ -117,7 +117,7 @@ Set at minimum:
   ```
 - `caddy_cloudflare_dns_token`
 - `fail2ban_cloudflare_firewall_token`
-- Email API token — name matches `<PROVIDER_UPPER>_API_TOKEN` (e.g. `MAILERSEND_API_TOKEN`)
+- Email API token — name matches `email_api_token` (e.g. `email_api_token`)
 - `smtp_password` (SMTP relay fallback, if used)
 
 ### Environment (.env)

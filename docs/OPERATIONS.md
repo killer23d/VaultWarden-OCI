@@ -525,7 +525,7 @@ make breakglass-remove
 
 ```bash
 sudo ./setup.sh --phase=systemd --install
-make systemd-install
+make install-systemd
 ```
 
 ### Actual Schedule
@@ -869,7 +869,7 @@ make breakglass-status   # Check emergency admin status
 make breakglass-remove   # Remove emergency admin
 
 # Automation
-make systemd-install     # Install systemd timer units
+make install-systemd     # Install systemd timer units
 make systemd-status      # Show status of all vaultwarden systemd units
 make systemd-validate    # Validate installed units match current repo scripts
 make systemd-remove      # Remove all vaultwarden systemd timer units

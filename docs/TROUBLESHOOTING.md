@@ -161,6 +161,80 @@ docker compose restart caddy
 > **Note**: The minimum enforced cost factor is **10** (OWASP minimum). A cost of **14** is
 > recommended for 2024+ hardware. The Caddy entrypoint validates this on every start.
 
+
+### Startup Fails: `docker-compose.override.yml exists`
+
+**Symptoms**:
+- `make up` exits before containers start
+- Error mentions development override is present
+
+**Diagnosis**:
+```bash
+ls -l docker-compose.override.yml
+make up
+```
+
+**Solutions**:
+```bash
+# Production hosts should not use dev override
+mv docker-compose.override.yml docker-compose.override.yml.bak
+
+# Start again
+make up
+```
+
+---
+
+### Startup Fails: User Not in Docker Group
+
+**Symptoms**:
+- `make up` returns `Cannot connect to the Docker daemon`
+- `docker info` fails as non-root
+
+**Diagnosis**:
+```bash
+id
+docker info
+```
+
+**Solutions**:
+```bash
+sudo usermod -aG docker $USER
+# log out and back in, then:
+docker info
+make up
+```
+
+---
+
+### Health Check Reports Placeholder Secrets (`CHANGE_ME`)
+
+**Symptoms**:
+- `make health` reports missing/placeholder secrets
+- Email/API/DNS integrations fail despite containers running
+
+**Diagnosis**:
+```bash
+./edit-secrets.sh --list
+./maintenance.sh --health
+```
+
+**Solutions**:
+```bash
+# Rotate each placeholder secret with real values
+./edit-secrets.sh --rotate caddy_cloudflare_dns_token
+./edit-secrets.sh --rotate fail2ban_cloudflare_firewall_token
+./edit-secrets.sh --rotate smtp_password
+
+# provider-specific token example
+./edit-secrets.sh --rotate email_api_token
+
+make restart
+make health
+```
+
+---
+
 ## Configuration Issues
 
 ### Template Validation Errors
@@ -366,7 +440,7 @@ sudo ufw status
 # sudo ufw enable
 
 # Schedule safe recurring firewall updates (Saturday 4 AM via systemd timer)
-make systemd-install
+make install-systemd
 ```
 
 ### DNS Not Updating
@@ -990,7 +1064,7 @@ systemctl list-timers --all | grep vaultwarden
 ```bash
 # (Re-)install systemd timers
 sudo ./setup.sh --phase=systemd --install
-make systemd-install
+make install-systemd
 
 # After pulling a repo update, re-install to sync /opt/ scripts
 sudo ./setup.sh --phase=systemd --install

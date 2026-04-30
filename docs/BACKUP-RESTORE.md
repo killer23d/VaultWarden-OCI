@@ -90,7 +90,7 @@ make list-backups
 
 ### Retention control
 
-The default retention is **14 days** for all types. Override with `--keep N`:
+Retention defaults are type-specific (`db` 14 days, `full` 30 days, `emergency` 90 days). Override per run with `--keep N`:
 
 ```bash
 sudo ./backup.sh --type db --keep 30
@@ -198,11 +198,11 @@ RCLONE_CONFIG=/path/to/rclone.conf
 rclone ls your_remote_name:vaultwarden_backups/
 ```
 
-`sudo make systemd-install` provisions systemd timers for automated backups:
+`sudo ./setup.sh --phase=systemd --install` (or `make install-systemd`) provisions systemd timers for automated backups:
 
 | Timer | Schedule | Command |
 | :-- | :-- | :-- |
-| `vaultwarden-db-backup.timer` | Daily (Mon–Sun) | `backup.sh --type db --rclone --email` |
+| `vaultwarden-db-backup.timer` | Daily (Mon–Sat) | `backup.sh --type db --rclone --email` |
 | `vaultwarden-full-backup.timer` | Weekly (Sunday) | `backup.sh --type full --full-verification --rclone --email` |
 
 Check timer status:
@@ -494,7 +494,7 @@ If key rotation failed non-fatally during restore, services are still running wi
 make key-show                     # confirm current key path and public key
 make key-rotate                   # rotate manually if needed (requires sudo)
 make systemd-validate             # confirm systemd scripts are in sync
-sudo make systemd-install         # re-sync /opt scripts and reload timers
+sudo make install-systemd         # re-sync /opt scripts and reload timers
 ```
 
 ---
