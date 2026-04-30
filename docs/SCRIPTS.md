@@ -573,7 +573,7 @@ sudo ./setup.sh --phase=systemd --list
 sudo ./setup.sh --phase=systemd --validate
 sudo ./setup.sh --phase=systemd --remove
 
-make systemd-install
+make install-systemd
 make systemd-status
 make systemd-validate
 make systemd-remove
@@ -738,7 +738,7 @@ All common operations have Makefile shortcuts. Run `make help` to see the full t
 | `make breakglass-create` | `sudo ./create-breakglass-admin.sh --create` | Create emergency OS admin account |
 | `make breakglass-status` | `sudo ./create-breakglass-admin.sh --status` | Show break-glass admin status |
 | `make breakglass-remove` | `sudo ./create-breakglass-admin.sh --remove` | Remove break-glass admin account |
-| `make systemd-install` | `sudo ./setup.sh --phase=systemd --install` | Install systemd units and sync scripts to `/opt` |
+| `make install-systemd` | `sudo ./setup.sh --phase=systemd --install` | Install systemd units and sync scripts to `/opt` |
 | `make systemd-remove` | `sudo ./setup.sh --phase=systemd --remove` | Remove all vaultwarden systemd timer units |
 | `make systemd-status` | `sudo ./setup.sh --phase=systemd --status` | Show status of all vaultwarden systemd units |
 | `make systemd-validate` | `sudo ./setup.sh --phase=systemd --validate` | Validate installed units match current repo scripts |

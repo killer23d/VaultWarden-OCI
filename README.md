@@ -102,9 +102,9 @@ Then supply the external credentials that `--auto` cannot generate for you:
 ./edit-secrets.sh --rotate caddy_cloudflare_dns_token
 ./edit-secrets.sh --rotate fail2ban_cloudflare_firewall_token
 
-# Email API token (required for Tier 1 — replace with your provider's key name)
-./edit-secrets.sh --rotate MAILERSEND_API_TOKEN
-# e.g. SENDGRID_API_TOKEN | MAILGUN_API_TOKEN | POSTMARK_API_TOKEN | RESEND_API_TOKEN
+## Email API token (required for Tier 1)
+./edit-secrets.sh --rotate email_api_token
+# Single canonical key used for all providers (selected by EMAIL_PROVIDER)
 
 # SMTP password (required for Tier 2 relay and Postfix sidecar)
 ./edit-secrets.sh --rotate smtp_password
@@ -170,6 +170,8 @@ The installed systemd timer schedule:
 
 **🎉 Your vault is live at `https://vault.yourdomain.com`**
 
+For day-2 operations and incident handling, keep [RUNBOOK.md](RUNBOOK.md) open in a second terminal session.
+
 ---
 
 ## 📧 Email Delivery
@@ -215,7 +217,7 @@ VW_SMTP_FROM=noreply@vault.yourdomain.com
 
 ```bash
 # Secrets
-./edit-secrets.sh --rotate MAILERSEND_API_TOKEN
+./edit-secrets.sh --rotate email_api_token
 ./edit-secrets.sh --rotate smtp_password
 ```
 

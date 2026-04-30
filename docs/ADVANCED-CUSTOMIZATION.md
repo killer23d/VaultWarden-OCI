@@ -413,18 +413,18 @@ Change `EMAIL_PROVIDER` in `.env` and rotate the matching token in secrets:
 EMAIL_PROVIDER=sendgrid
 
 # In secrets (rotate the matching key):
-./edit-secrets.sh --rotate SENDGRID_API_TOKEN
+./edit-secrets.sh --rotate email_api_token
 ```
 
 Supported providers and their secret key names:
 
 | Provider | `.env` value | Secret key |
 | :-- | :-- | :-- |
-| MailerSend | `mailersend` | `MAILERSEND_API_TOKEN` |
-| SendGrid | `sendgrid` | `SENDGRID_API_TOKEN` |
-| Mailgun | `mailgun` | `MAILGUN_API_TOKEN` |
-| Postmark | `postmark` | `POSTMARK_API_TOKEN` |
-| Resend | `resend` | `RESEND_API_TOKEN` |
+| MailerSend | `mailersend` | `email_api_token` |
+| SendGrid | `sendgrid` | `email_api_token` |
+| Mailgun | `mailgun` | `email_api_token` |
+| Postmark | `postmark` | `email_api_token` |
+| Resend | `resend` | `email_api_token` |
 
 ### Tier 2 — SMTP Relay Override
 

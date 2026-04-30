@@ -144,15 +144,15 @@ EMAIL_MODE=auto
 EMAIL_PROVIDER=mailersend   # mailersend | sendgrid | mailgun | postmark | resend
 ```
 
-`lib/common.sh` (email functions) automatically resolves the API token from `<PROVIDER_UPPER>_API_TOKEN` in secrets — you do not need to set `EMAIL_API_TOKEN` separately:
+`lib/common.sh` (email functions) automatically resolves the API token from `email_api_token` in secrets — you do not need to set `EMAIL_API_TOKEN` separately:
 
 | `EMAIL_PROVIDER` | Secret key to set via `./edit-secrets.sh` |
 | :-- | :-- |
-| `mailersend` | `MAILERSEND_API_TOKEN` |
-| `sendgrid` | `SENDGRID_API_TOKEN` |
-| `mailgun` | `MAILGUN_API_TOKEN` |
-| `postmark` | `POSTMARK_API_TOKEN` |
-| `resend` | `RESEND_API_TOKEN` |
+| `mailersend` | `email_api_token` |
+| `sendgrid` | `email_api_token` |
+| `mailgun` | `email_api_token` |
+| `postmark` | `email_api_token` |
+| `resend` | `email_api_token` |
 
 ```bash
 # Mailgun only — must match your Mailgun account region

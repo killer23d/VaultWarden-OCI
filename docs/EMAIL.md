@@ -77,34 +77,21 @@ EMAIL_PROVIDER=mailersend    # change to: sendgrid | mailgun | postmark | resend
 
 `lib/common.sh` (email functions) uses a single canonical secret key (`email_api_token`) and
 resolves the correct provider token automatically based on `EMAIL_PROVIDER`.
-Store the token under the provider-specific name:
+Store the token in the canonical `email_api_token` key (used for all providers):
 
 ```bash
-# MailerSend
-./edit-secrets.sh --rotate MAILERSEND_API_TOKEN
-
-# SendGrid
-./edit-secrets.sh --rotate SENDGRID_API_TOKEN
-
-# Mailgun
-./edit-secrets.sh --rotate MAILGUN_API_TOKEN
-
-# Postmark
-./edit-secrets.sh --rotate POSTMARK_API_TOKEN
-
-# Resend
-./edit-secrets.sh --rotate RESEND_API_TOKEN
+# Any provider selected by EMAIL_PROVIDER uses this same secrets key
+./edit-secrets.sh --rotate email_api_token
 ```
 
 In `.env`, uncomment **only** the line matching your `EMAIL_PROVIDER` and leave
 its value blank (the actual token lives in the encrypted secrets file):
 
 ```bash
-MAILERSEND_API_TOKEN=
-# SENDGRID_API_TOKEN=
-# MAILGUN_API_TOKEN=
-# POSTMARK_API_TOKEN=
-# RESEND_API_TOKEN=
+# keep provider selection in .env
+EMAIL_PROVIDER=mailersend
+
+# token value lives only in secrets.yaml (do not store plaintext in .env)
 ```
 
 ### 4. Set sender address in `.env`
@@ -388,11 +375,7 @@ MAILGUN_DOMAIN=mg.yourdomain.com  # optional — set only if different from SMTP
 
 | Secret key | Used by | Description |
 | :-- | :-- | :-- |
-| `MAILERSEND_API_TOKEN` | `lib/common.sh` (email functions) tier 1 | MailerSend HTTP API token |
-| `SENDGRID_API_TOKEN` | `lib/common.sh` (email functions) tier 1 | SendGrid HTTP API token |
-| `MAILGUN_API_TOKEN` | `lib/common.sh` (email functions) tier 1 | Mailgun HTTP API token |
-| `POSTMARK_API_TOKEN` | `lib/common.sh` (email functions) tier 1 | Postmark HTTP API token |
-| `RESEND_API_TOKEN` | `lib/common.sh` (email functions) tier 1 | Resend HTTP API token |
+| `email_api_token` | `lib/common.sh` (email functions) tier 1 | API token used by MailerSend / SendGrid / Mailgun / Postmark / Resend |
 | `smtp_password` | `lib/common.sh` (email functions) tier 2, Postfix | SMTP relay password |
 
 ---
@@ -460,7 +443,7 @@ docker exec vaultwarden_fail2ban fail2ban-client get vaultwarden-web-auth action
 
 | Symptom | Likely cause | Fix |
 | :-- | :-- | :-- |
-| API tier always fails | Token not set or wrong key name | Run `./edit-secrets.sh` and verify the matching `<PROVIDER_UPPER>_API_TOKEN` is set |
+| API tier always fails | Token not set or wrong key name | Run `./edit-secrets.sh` and verify the matching `email_api_token` is set |
 | SMTP tier `SSL handshake failed` | `SMTP_SECURITY` mismatch | `starttls` → port 587; `on` → port 465 |
 | VaultWarden email fails with "authentication required" | `VW_SMTP_AUTH_MECHANISM` not set to `none` | Set `VW_SMTP_AUTH_MECHANISM=none` and `VW_SMTP_EXPLICIT_TLS=false` in `.env` |
 | VaultWarden sends email but `lib/common.sh` (email functions) does not | `SMTP_*` misconfigured; Postfix not relaying | Check Postfix logs: `docker compose logs postfix` |
