@@ -80,6 +80,8 @@ cd VaultWarden-OCI
 
 > **`setup.sh` display fix:** The post-install checklist now correctly displays the bare domain name (`DOMAIN_NAME`) rather than the value of the `DOMAIN` variable, which may include the `https://` prefix.
 
+> **Separate data volume:** If you have a dedicated OCI block storage volume, pass `--data-device /dev/sdb` to provision it automatically. See [Separate Data Volume (Optional)](#separate-data-volume-optional) below.
+
 ---
 
 ### Step 3 — Configure Environment & External Credentials
@@ -174,6 +176,48 @@ For day-2 operations and incident handling, keep [RUNBOOK.md](RUNBOOK.md) open i
 
 ---
 
+### Separate Data Volume (Optional)
+
+OCI block storage volumes keep vault data independent of the boot volume, making snapshots, resizes, and instance replacements straightforward. Pass `--data-device` to `setup.sh` to enable this mode.
+
+**Prerequisites:** Attach a block storage volume to your OCI instance **before** running setup. Confirm the device name with `lsblk` — it typically appears as `/dev/sdb`.
+
+```bash
+# Provision a dedicated data volume in one step
+# WARNING: the device is formatted as ext4 if it has no existing filesystem
+sudo ./setup.sh --domain vault.yourdomain.com --email admin@yourdomain.com --auto \
+  --data-device /dev/sdb \
+  --data-mount /mnt/vw-data   # optional; /mnt/vw-data is the default
+```
+
+`setup.sh` handles the full provisioning cycle:
+
+- Formats the device as ext4 (skipped idempotently if a filesystem already exists)
+- Adds a UUID-based entry to `/etc/fstab` with `nofail` (no duplicate entries on re-run)
+- Mounts the volume and writes a sentinel file (`.vw-data-volume`) to confirm identity
+- Writes `DATA_VOLUME_DEVICE`, `DATA_VOLUME_MOUNT`, and `PROJECT_STATE_DIR=/mnt/vw-data` into `.env` so all persistent state lands on the data volume
+- Installs a systemd drop-in (`/etc/systemd/system/docker.service.d/10-vaultwarden-data-volume.conf`) with `RequiresMountsFor=` to prevent Docker from starting until the volume is mounted — eliminating silent data writes to the boot volume on reboot
+
+**Reverting to boot-only mode:** Re-run setup without `--data-device`. The drop-in is removed automatically and `PROJECT_STATE_DIR` reverts to `/var/lib/vaultwarden`.
+
+> **⚠️ Fail-closed guarantee:** In separate-volume mode, `startup.sh`, `backup.sh`, `restore.sh`, and `maintenance.sh` all exit immediately with a clear diagnostic error if the expected data volume is not mounted. Data is never silently written to the boot volume.
+
+**`.env` variables (set automatically by setup, verify if editing manually):**
+
+```bash
+# Boot-only mode (default)
+DATA_VOLUME_DEVICE=
+DATA_VOLUME_MOUNT=/mnt/vw-data
+PROJECT_STATE_DIR=/var/lib/vaultwarden
+
+# Separate-volume mode
+DATA_VOLUME_DEVICE=/dev/sdb
+DATA_VOLUME_MOUNT=/mnt/vw-data
+PROJECT_STATE_DIR=/mnt/vw-data   # MUST equal DATA_VOLUME_MOUNT
+```
+
+---
+
 ## 📧 Email Delivery
 
 Email is handled by **`lib/common.sh`** (email functions) — a pure bash + curl multi-provider chain. No mail daemon is required on the host. Three tiers are attempted in order when `EMAIL_MODE=auto`:
@@ -247,7 +291,7 @@ Full details, provider setup, Postfix MTA configuration, and troubleshooting: **
 
 | Script | Purpose |
 | :-- | :-- |
-| `setup.sh` | One-time system setup: installs deps, generates `.env` and `docker-compose.yml` from templates, creates Age key, SOPS config, and empty secrets structure. Use `--phase=secrets` for the secrets bootstrap phase or `--phase=systemd` for the systemd integration phase. In `--auto` mode, also auto-generates passwords/passphrases after all infra phases complete, then shows a single consolidated summary screen. |
+| `setup.sh` | One-time system setup: installs deps, generates `.env` and `docker-compose.yml` from templates, creates Age key, SOPS config, and empty secrets structure. Use `--phase=secrets` for the secrets bootstrap phase or `--phase=systemd` for the systemd integration phase. Pass `--data-device DEV` (and optionally `--data-mount PATH`) to provision a dedicated block storage data volume. In `--auto` mode, also auto-generates passwords/passphrases after all infra phases complete, then shows a single consolidated summary screen. |
 | `startup.sh` | Start / stop / restart services. Post-startup health check re-runs verbose diagnostics automatically on failure. |
 | `backup.sh` | Encrypted database and full-system backups. Uses host `sqlite3` with the Online Backup API for atomic, WAL-safe DB snapshots — no Docker container required for backup integrity checks. Accepts `--keep N` to override retention days (must be a positive integer). |
 | `restore.sh` | Interactive or automated restore with a reworked flow: interactive Age decryption key prompt; `--key-file` flag and `RESTORE_AGE_KEY_FILE` env var for scripted/CI use; pre-restore key round-trip validation; post-restore automatic Age key generation and rotation. Uses host `sqlite3` for archive integrity verification — no Docker required. |
@@ -267,6 +311,7 @@ Full reference: [docs/SCRIPTS.md](docs/SCRIPTS.md)
 | `docker.sh` | Docker lifecycle management |
 | `backup-utils.sh` | Backup-specific shared logic including SQLite Online Backup API integrity verification |
 | `secrets.sh` | Secrets collection, auto-generation, hashing (Argon2id + bcrypt), Cloudflare token validation, recovery kit generation |
+| `storage.sh` | Storage-mode guard library. `require_project_state_ready()` validates configuration consistency, block device availability, mount presence, and sentinel identity before any script writes to the state directory. No-op in boot-only mode (`DATA_VOLUME_DEVICE` blank). Sourced by `setup.sh`, `startup.sh`, `backup.sh`, `restore.sh`, and `maintenance.sh`. |
 
 ### Configuration Templates
 
@@ -276,7 +321,7 @@ All live configuration is generated from `.example` templates by `setup.sh`. Edi
 | :-- | :-- |
 | `docker-compose.yml.example` | `docker-compose.yml` |
 | `docker-compose.override.yml.example` | `docker-compose.override.yml` (email decoupling; dev-only warning banner added) |
-| `.env.example` | `.env` (sentinel tokens for all external credentials; `LOG_LEVEL=warn` default; `PUSH_ENABLED=false`; Mailgun EU region note) |
+| `.env.example` | `.env` (sentinel tokens for all external credentials; `LOG_LEVEL=warn` default; `PUSH_ENABLED=false`; Mailgun EU region note; `STORAGE MODE` block with `DATA_VOLUME_DEVICE`, `DATA_VOLUME_MOUNT`, and `PROJECT_STATE_DIR`) |
 
 ---
 
@@ -289,6 +334,7 @@ All live configuration is generated from `.example` templates by `setup.sh`. Edi
 - **Container hardening** — Non-root execution, capability restrictions, memory limits, `read_only` filesystems, `no-new-privileges:true`, and `tmpfs` mounts (see `docker-compose.yml.example`)
 - **Docker-free backup integrity** — `backup.sh` and `restore.sh` use host `sqlite3` (SQLite Online Backup API) for atomic DB snapshots and `PRAGMA integrity_check`; no ephemeral alpine containers with read-write mounts over live vault data
 - **Systemd hardening** — All service units run with `NoNewPrivileges=yes` and `PrivateTmp=yes`; `[Install]` sections added so `systemctl enable` works correctly; failure notifications are wired via `OnFailure=` on every unit
+- **Fail-closed volume guard** — In separate-volume mode, a systemd drop-in (`RequiresMountsFor=`) blocks Docker from starting if the data volume is absent; all operational scripts also exit non-zero before touching the state directory, preventing silent writes to the boot volume
 - **Structured forensic logging** — Caddy uses a 4-tier named-logger architecture (access, admin, auth, security) with independent rotation and retention targets (~3 GB total capacity); health-check requests are suppressed from logs
 
 Full details: [docs/SECURITY.md](docs/SECURITY.md)
