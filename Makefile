@@ -51,6 +51,7 @@ BACKUP_FILE ?=
         dev-setup fix-permissions test test-config dry-run fmt lint shellcheck \
         info version shell config diagnose \
         clean clean-all prune \
+        unban \
         uninstall uninstall-dry-run
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -410,6 +411,36 @@ monitor: ## Continuous health monitoring (30s intervals, Ctrl+C to stop)
 		docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}" 2>/dev/null | grep -E "vaultwarden|caddy|fail2ban|postfix" || true; \
 		sleep 30; \
 	done
+
+unban: ## Unban an IP from all fail2ban jails (IP=<address> required)
+	$(call require-root)
+	@if [ -z "$(IP)" ]; then \
+		echo "$(RED)Error: IP address required. Usage: sudo make unban IP=<address>$(NC)"; \
+		echo "$(CYAN)Example: sudo make unban IP=203.0.113.42$(NC)"; \
+		exit 1; \
+	fi
+	@echo "$(BLUE)Unbanning $(IP) from all fail2ban jails...$(NC)"
+	@if ! docker inspect vaultwarden_fail2ban --format '{{.State.Running}}' 2>/dev/null | grep -q true; then \
+		echo "$(RED)Error: fail2ban container is not running.$(NC)"; \
+		echo "$(YELLOW)Start the stack first: make up$(NC)"; \
+		exit 1; \
+	fi
+	@JAILS=$$(docker exec vaultwarden_fail2ban fail2ban-client status 2>/dev/null \
+		| grep 'Jail list' | sed 's/.*Jail list://;s/,/ /g' | tr -s ' ' '\n' | grep -v '^$$'); \
+	 FOUND=0; \
+	 for jail in $$JAILS; do \
+		if docker exec vaultwarden_fail2ban fail2ban-client status "$$jail" 2>/dev/null \
+			| grep -q '$(IP)'; then \
+			echo "  $(CYAN)Unbanning $(IP) from jail: $$jail$(NC)"; \
+			docker exec vaultwarden_fail2ban fail2ban-client set "$$jail" unbanip '$(IP)' \
+				&& echo "  $(GREEN)✓ Unbanned from $$jail$(NC)" \
+				|| echo "  $(YELLOW)⚠ Could not unban from $$jail (may have expired)$(NC)"; \
+			FOUND=1; \
+		fi; \
+	 done; \
+	 if [ "$$FOUND" -eq 0 ]; then \
+		echo "$(YELLOW)$(IP) is not currently banned in any jail.$(NC)"; \
+	 fi
 
 # ===========================================================================
 ##@ Logs

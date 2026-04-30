@@ -18,10 +18,11 @@ EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
 # execute normally. This prevents backup/maintenance overlap without stopping
 # or deactivating the timer itself.
 ExecCondition=/bin/bash -c '! test -f /tmp/.vw_maintenance.lock'
-# Clear only this service's stale lock file left by a prior crash or hard reboot.
-# Scoped to avoid racing with restore.sh or maintenance.sh that may hold
-# their own lock files concurrently (e.g. after Persistent=true catch-up).
-ExecStartPre=/bin/bash -c 'rm -f /run/lock/vaultwarden-backup.lock'
+# NOTE: ExecStartPre lock removal removed. Unconditionally deleting the lock
+# before every run races with a manual 'backup.sh' invocation running
+# concurrently: the timer's ExecStartPre would delete the flock held by the
+# manual process, allowing both to proceed simultaneously.
+# The flock in backup.sh main() is the authoritative exclusive guard.
 # NOTE: --email is intentionally omitted. The email step requires EMAIL_PROVIDER
 # credentials in /etc/vaultwarden/vaultwarden.env. Without them backup.sh exits 1
 # even when the backup itself succeeded, which triggers OnFailure= spuriously.

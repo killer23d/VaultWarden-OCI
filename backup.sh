@@ -325,6 +325,28 @@ verify_backup_full() {
     case "$backup_type" in
         db)
             verify_sqlite "$dec_out" || return 1
+
+            # Schema version compatibility check: compare backup DB schema version
+            # against the live database. A mismatch means the backup was taken at a
+            # different Vaultwarden version than what is currently running. Restoring
+            # an old-schema backup to a new-schema binary (or vice-versa) will silently
+            # break the application. This is the most dangerous scenario for DR.
+            local live_db_path
+            live_db_path="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")/data/db.sqlite3"
+            if command -v sqlite3 >/dev/null 2>&1 && [[ -f "$live_db_path" ]]; then
+                local backup_schema live_schema
+                backup_schema=$(sqlite3 "$dec_out" "PRAGMA user_version;" 2>/dev/null || echo "")
+                live_schema=$(sqlite3 "$live_db_path" "PRAGMA user_version;" 2>/dev/null || echo "")
+                if [[ -n "$backup_schema" && -n "$live_schema" ]]; then
+                    if [[ "$backup_schema" != "$live_schema" ]]; then
+                        log_warn "[backup] Schema version mismatch: backup=${backup_schema} live=${live_schema}" >&2
+                        log_warn "[backup] This backup may not be directly restorable to the running Vaultwarden version." >&2
+                        log_warn "[backup] Restore to a matching Vaultwarden version or run migrations after restore." >&2
+                    else
+                        b_log_info "Schema version matches live DB (user_version=${live_schema})"
+                    fi
+                fi
+            fi
             ;;
         full|emergency)
             b_log_info "Verifying archive structure..."

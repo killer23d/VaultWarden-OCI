@@ -11,11 +11,12 @@ OnFailure=vaultwarden-notify-failure@%n.service
 # Weekly full backup every Sunday at 03:00.
 # Weekday-prefixed form: "Sun *-*-* 03:00:00" is valid systemd calendar syntax.
 OnCalendar=Sun *-*-* 03:00:00
-# With Persistent=true and a weekly schedule, if the host is down for more
-# than one week only a single catch-up backup fires on next boot. This is
-# expected systemd behaviour. Ensure external monitoring is in place so a
-# multi-week outage does not silently lose backup coverage.
-Persistent=true
+# Set to false: a missed weekly full backup is not worth triggering a
+# boot-time I/O storm. When Persistent=true and multiple timers fire at
+# once after downtime, the Conflicts= rejection on the service units
+# triggers spurious OnFailure= notifications for jobs that were not broken.
+# Only the daily DB backup warrants persistent catch-up (see db-backup.timer).
+Persistent=false
 # Ensure Docker is healthy before any boot-triggered catch-up fires.
 # Without this, Persistent=true causes an immediate activation on reboot
 # which may race against the Docker daemon still starting up.

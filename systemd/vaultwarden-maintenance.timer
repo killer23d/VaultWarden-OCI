@@ -19,7 +19,12 @@ OnFailure=vaultwarden-notify-failure@%n.service
 # maintenance *service* unit (not here — a Conflicts= on a timer unit
 # deactivates the timer itself, which is incorrect).
 OnCalendar=*-*-* 02:05:00
-Persistent=true
+# Set to false: maintenance is not critical to catch-up on reboot. When
+# Persistent=true, a reboot after extended downtime causes all timers with
+# OnBootSec=2min to fire within a narrow window, competing for disk I/O and
+# triggering spurious Conflicts= rejections — which fire OnFailure= on services
+# that were not actually broken. A missed maintenance window is acceptable.
+Persistent=false
 # Ensure Docker is healthy before any boot-triggered catch-up fires.
 # Without this, Persistent=true causes an immediate activation on reboot
 # which may race against the Docker daemon still starting up.

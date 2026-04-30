@@ -172,10 +172,14 @@ cleanup_logs() {
             if mv "$log_file" "$rotated_name"; then
                 if gzip "$rotated_name"; then
                     log_debug "Rotated large log: $(basename "$log_file")"
-                    ((logs_cleaned++))
+                    ((logs_cleaned++)) || true
                 else
-                    log_warn "gzip failed for rotated log: $(basename "$rotated_name") — removing uncompressed file"
-                    rm -f "$rotated_name" || true
+                    # Restore original file on compression failure rather than destroying log data.
+                    # This is especially important when gzip fails due to a full disk — the log
+                    # contains the evidence of what caused the disk to fill up.
+                    log_warn "gzip failed for $(basename "$rotated_name") — restoring original log file"
+                    mv "$rotated_name" "$log_file" || \
+                        log_error "CRITICAL: cannot restore log after gzip failure: $rotated_name"
                 fi
             fi
         done
@@ -225,8 +229,15 @@ cleanup_docker_system() {
     local cleanup_success=true
     cleanup_containers || { log_warn "Container cleanup had issues"; cleanup_success=false; }
     cleanup_images     || { log_warn "Image cleanup had issues";     cleanup_success=false; }
-    log_info "Cleaning up unnamed Docker volumes..."
-    docker volume prune -f >/dev/null 2>&1 || { log_warn "Volume cleanup had issues"; cleanup_success=false; }
+    log_info "Cleaning up Docker images and build cache..."
+    # Skip 'docker volume prune': it removes ALL anonymous volumes not attached
+    # to a currently running container. If any service is temporarily stopped
+    # (e.g. crashed and not yet restarted by the health --fix path), its anonymous
+    # volumes would be permanently deleted. Named volumes (where all persistent
+    # VaultWarden data lives) are safe, but this is a latent footgun if the
+    # compose file is ever extended with anonymous volume mounts.
+    docker image prune -f >/dev/null 2>&1 || { log_warn "Image prune had issues"; cleanup_success=false; }
+    docker builder prune -f --filter until=24h >/dev/null 2>&1 || { log_warn "Builder cache prune had issues"; cleanup_success=false; }
     cleanup_networks   || { log_warn "Network cleanup had issues";   cleanup_success=false; }
     local space_reclaimed
     space_reclaimed=$(docker system df --format "table {{.Reclaimed}}" 2>/dev/null | tail -1 || echo "unknown")
@@ -304,13 +315,17 @@ optimize_database() {
         _wait_wal_quiesce "$host_db_path" 30
     fi
 
-    local backup_file="/tmp/vw-db-pre-optimization-$(date +%Y%m%d-%H%M%S).sqlite3"
-    cp "$host_db_path" "$backup_file" || {
-        log_error "Failed to create safety backup"
+    # Create an encrypted pre-optimization backup via backup.sh rather than a
+    # plaintext cp to /tmp. /tmp is world-readable and is wiped on reboot —
+    # making the safety net unreachable if VaultWarden fails to restart and the
+    # host reboots (e.g. a kernel panic immediately after package updates).
+    log_info "Creating encrypted pre-optimization backup via backup.sh..."
+    if ! "${SCRIPT_DIR}/backup.sh" --type db; then
+        log_error "Pre-optimization backup FAILED — aborting to avoid an unsafe rollback point"
         [[ "$was_running" == "true" ]] && docker compose up -d vaultwarden
         return 1
-    }
-    log_success "Safety backup created: $backup_file"
+    fi
+    log_success "Encrypted pre-optimization backup created in backup directory"
 
     log_info "Verifying integrity before optimization..."
     if ! sqlite3 "$host_db_path" "PRAGMA integrity_check;" | grep -qx "ok"; then
@@ -328,8 +343,7 @@ optimize_database() {
 
     log_info "Verifying integrity after optimization..."
     if ! sqlite3 "$host_db_path" "PRAGMA integrity_check;" | grep -qx "ok"; then
-        log_error "CRITICAL: Post-optimization integrity check failed! Restoring..."
-        cp "$backup_file" "$host_db_path" && log_success "Restored from backup" || log_error "CRITICAL: Restore failed!"
+        log_error "CRITICAL: Post-optimization integrity check failed! Manual restore from backup directory required."
         optimization_success=false
     else
         log_success "Post-optimization integrity check passed"
@@ -347,9 +361,8 @@ optimize_database() {
 
     if [[ "$optimization_success" == "true" ]]; then
         log_success "Database optimization completed. ${size_kb_before} KB → ${size_kb_after} KB"
-        rm -f "$backup_file"
     else
-        log_warn "Optimization completed with issues. Safety backup retained: $backup_file"
+        log_warn "Optimization completed with issues. Safety backup retained in backup directory."
     fi
     return $([[ "$optimization_success" == "true" ]] && echo 0 || echo 1)
 }
@@ -1879,33 +1892,51 @@ _check_backups() {
     log_info "Checking backup status..."
 
     local backup_dir="${BACKUP_DIR:-${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/backups}"
-    local max_age_hours=${BACKUP_MAX_AGE_HOURS:-26}
+    local now_epoch
+    now_epoch=$(date +%s)
 
     if [[ ! -d "$backup_dir" ]]; then
         _warn "backup:dir" "Backup directory not found: $backup_dir"
         return
     fi
 
-    local latest_backup latest_age_hours
-    latest_backup=$(find "$backup_dir" -name '*.age' -newer "/tmp" 2>/dev/null | \
-        xargs ls -t 2>/dev/null | head -1 || \
-        find "$backup_dir" -name '*.age' 2>/dev/null | xargs ls -t 2>/dev/null | head -1)
+    # Check each backup type independently so that stale full backups are not
+    # masked by a recent db backup.  A daily db backup passing the 26 h check
+    # would previously hide a full backup that hadn't run in 45+ days.
+    local -A max_age_hours=([db]=26 [full]=168)  # db: 26 h; full: 7 days
 
-    if [[ -z "$latest_backup" ]]; then
-        _warn "backup:age" "No backup archives found in $backup_dir"
-        return
-    fi
+    local any_found=false
+    for btype in db full; do
+        local type_dir="$backup_dir/$btype"
+        if [[ ! -d "$type_dir" ]]; then
+            _warn "backup:${btype}" "No $btype backup directory found: $type_dir"
+            continue
+        fi
 
-    local backup_mtime now_epoch
-    backup_mtime=$(stat -c %Y "$latest_backup" 2>/dev/null || stat -f %m "$latest_backup" 2>/dev/null || echo 0)
-    now_epoch=$(date +%s)
-    latest_age_hours=$(( (now_epoch - backup_mtime) / 3600 ))
+        local latest_file
+        latest_file=$(find "$type_dir" -maxdepth 1 -name '*.age' -type f \
+            -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
 
-    if [[ $latest_age_hours -gt $max_age_hours ]]; then
-        _warn "backup:age" "Most recent backup is ${latest_age_hours}h old (threshold: ${max_age_hours}h): $(basename "$latest_backup")"
-    else
-        _pass "backup:age" "Most recent backup is ${latest_age_hours}h old: $(basename "$latest_backup")"
-    fi
+        if [[ -z "$latest_file" ]]; then
+            _warn "backup:${btype}" "No $btype backups found in $type_dir"
+            continue
+        fi
+
+        any_found=true
+        local mtime age_h
+        mtime=$(stat -c %Y "$latest_file" 2>/dev/null || stat -f %m "$latest_file" 2>/dev/null || echo 0)
+        age_h=$(( (now_epoch - mtime) / 3600 ))
+
+        if (( age_h > max_age_hours[$btype] )); then
+            _warn "backup:${btype}" \
+                "$btype backup is ${age_h}h old (threshold: ${max_age_hours[$btype]}h): $(basename "$latest_file")"
+        else
+            _pass "backup:${btype}" \
+                "$btype backup is ${age_h}h old: $(basename "$latest_file")"
+        fi
+    done
+
+    [[ "$any_found" == "false" ]] && _warn "backup:age" "No backup archives found in $backup_dir"
 }
 
 # =============================================================================
@@ -2384,8 +2415,38 @@ update_system_packages() {
     DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
         -o Dpkg::Options::="--force-confdef" \
         -o Dpkg::Options::="--force-confold"
+
+    # If Docker itself was upgraded by apt, the daemon may need a restart.
+    # Attempting 'docker version' against the (now-stopped) old daemon returns
+    # an empty Server.Version, indicating the daemon needs to be restarted
+    # before 'docker compose pull' is safe to run.
+    if systemctl is-active docker >/dev/null 2>&1; then
+        if ! docker version --format '{{.Server.Version}}' >/dev/null 2>&1; then
+            log_warn "Docker daemon unreachable after package update — restarting daemon..."
+            if systemctl restart docker; then
+                sleep 5
+                if docker version >/dev/null 2>&1; then
+                    log_success "Docker daemon restarted successfully after package upgrade"
+                else
+                    log_error "CRITICAL: Docker daemon unhealthy after restart — manual intervention required"
+                    return 1
+                fi
+            else
+                log_error "CRITICAL: Docker daemon failed to restart after package upgrade"
+                return 1
+            fi
+        fi
+    fi
+
     if [[ -f /var/run/reboot-required ]]; then
         log_warn "A system reboot is required due to package updates."
+        log_warn "Schedule a maintenance window: sudo systemctl reboot"
+        if [[ "${EMAIL_NOTIFY:-false}" == "true" ]]; then
+            send_notification_email \
+                "VaultWarden Host: Reboot Required on $(hostname)" \
+                "$(printf 'A reboot is required on %s after package updates.\nSchedule a maintenance window to apply the kernel/library update.\n' "$(hostname -f 2>/dev/null || hostname)")" \
+                2>/dev/null || true
+        fi
     fi
     log_success "System packages updated"
 }
@@ -2631,8 +2692,10 @@ run_pre_update_backup() {
         log_error "backup.sh not found or not executable — aborting update"
         return 1
     fi
-    log_info "Creating pre-update backup via ./backup.sh --type pre-update..."
-    if "${SCRIPT_DIR}/backup.sh" --type pre-update; then
+    # Use '--type db' — 'pre-update' is not a valid backup type and hits the *)
+    # branch in backup.sh's case statement, causing exit 1 every time.
+    log_info "Creating pre-update safety backup via ./backup.sh --type db..."
+    if "${SCRIPT_DIR}/backup.sh" --type db; then
         log_success "Pre-update backup created"
         return 0
     fi

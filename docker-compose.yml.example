@@ -32,6 +32,15 @@ services:
         echo '       Run: sudo make setup' >&2
         exit 1
       } &&
+
+      SENTINEL='/data/.permissions-initialized' &&
+      NOW=\$(date +%s) &&
+      SENTINEL_AGE=86400 &&
+      if [ -f "\$SENTINEL" ] && [ \$(( NOW - \$(stat -c %Y "\$SENTINEL" 2>/dev/null || echo 0) )) -lt \$SENTINEL_AGE ]; then
+        echo 'Permissions initialized within 24h, skipping full scan.'
+        exit 0
+      fi &&
+
       mkdir -p /data /logs/vaultwarden /logs/caddy /logs/fail2ban /logs/postfix &&
 
       touch /logs/caddy/access.log /logs/caddy/security.log &&
@@ -69,6 +78,7 @@ services:
       chmod 444 /secrets/.docker_secrets/push_installation_id &&
       chmod 444 /secrets/.docker_secrets/push_installation_key &&
 
+      touch "\$SENTINEL" &&
       echo 'Init container completed - permissions set to ${PUID}:${PGID}'
       "
 
@@ -117,7 +127,7 @@ services:
       IP_HEADER: CF-Connecting-IP
       SMTP_HOST: ${VW_SMTP_HOST:-postfix}
       SMTP_PORT: ${VW_SMTP_PORT:-587}
-      SMTP_SECURITY: ${VW_SMTP_SECURITY:-off}
+      SMTP_SECURITY: ${VW_SMTP_SECURITY:-starttls}
       SMTP_EXPLICIT_TLS: ${VW_SMTP_EXPLICIT_TLS:-false}
       SMTP_AUTH_MECHANISM:
       SMTP_FROM: ${SMTP_FROM:-}
@@ -309,9 +319,14 @@ services:
       - postfix_relay
 
     healthcheck:
-      test: ["CMD-SHELL", "postfix status 2>/dev/null || exit 1"]
+      # Test actual Postfix process health AND TCP connectivity to the relay.
+      # 'postfix status' only confirms the master process is alive; it does
+      # NOT verify that the upstream relay is reachable. A misconfigured or
+      # expired relay credential would leave Postfix 'healthy' while silently
+      # queuing (and eventually bouncing) all outbound mail.
+      test: ["CMD-SHELL", "postfix status 2>/dev/null && nc -w 3 -q 1 ${SMTP_HOST:-localhost} ${SMTP_PORT:-587} </dev/null | grep -q '^2' || exit 1"]
       interval: 120s
-      timeout: 10s
+      timeout: 15s
       retries: 5
       start_period: 60s
 
@@ -363,7 +378,7 @@ services:
       TZ: ${TZ:-UTC}
       F2B_LOG_TARGET: STDOUT
       F2B_LOG_LEVEL: INFO
-      F2B_DB_PURGE_AGE: 1d
+      F2B_DB_PURGE_AGE: 30d
       PACKAGES: whois
       F2B_DEST_MAIL: ${ADMIN_EMAIL}
       F2B_SENDER: ${F2B_SENDER}
