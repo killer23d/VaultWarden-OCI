@@ -70,15 +70,49 @@ REAL_USER="${SUDO_USER:-${USER:-ubuntu}}"
 REAL_HOME=$(getent passwd "$REAL_USER" 2>/dev/null | cut -d: -f6 || echo "/home/$REAL_USER")
 PROJECT_DIR="${REAL_HOME}/VaultWarden-OCI"
 
+# ─── Resolve PROJECT_STATE_DIR from .env ─────────────────────────────────────
+# setup.sh writes PROJECT_STATE_DIR to .env:
+#   - boot-only mode:      PROJECT_STATE_DIR=/var/lib/vaultwarden  (default)
+#   - separate-volume mode: PROJECT_STATE_DIR=/mnt/vw-data  (or DATA_VOLUME_MOUNT)
+#
+# We must read this value here so that Steps 5 and the Docker sentinel check
+# operate on the *actual* state directory rather than the hardcoded boot-volume
+# path, which would silently skip the data directory in separate-volume mode.
+#
+# Resolution order:
+#   1. PROJECT_STATE_DIR in .env (explicit)
+#   2. DATA_VOLUME_MOUNT in .env  (separate-volume mode; equivalent to
+#      PROJECT_STATE_DIR when setup.sh ran in separate-volume mode)
+#   3. Hardcoded default /var/lib/vaultwarden (boot-only fallback)
+_read_env_value() {
+    # _read_env_value KEY FILE  -> prints value, empty string if not found
+    local key="$1" file="$2"
+    [[ -f "$file" ]] || return 0
+    grep -E "^${key}=" "$file" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' || true
+}
+
+_ENV_FILE="${PROJECT_DIR}/.env"
+_state_dir_raw="$(_read_env_value "PROJECT_STATE_DIR" "$_ENV_FILE")"
+if [[ -z "$_state_dir_raw" ]]; then
+    _state_dir_raw="$(_read_env_value "DATA_VOLUME_MOUNT" "$_ENV_FILE")"
+fi
+PROJECT_STATE_DIR="${_state_dir_raw:-/var/lib/vaultwarden}"
+
 # Sentinel written by setup.sh to record that Docker was installed by this
-# project.  Used in Step 9 to avoid removing a pre-existing system Docker.
-DOCKER_SENTINEL="/var/lib/vaultwarden/.docker_installed_by_setup"
+# project.  Path mirrors setup.sh:
+#   ${PROJECT_STATE_DIR}/.docker_installed_by_setup
+#
+# BUG FIX: was hardcoded to /var/lib/vaultwarden/.docker_installed_by_setup,
+# which is never found in separate-volume mode, causing Step 9 to always skip
+# Docker removal even when Docker was installed by setup.sh.
+DOCKER_SENTINEL="${PROJECT_STATE_DIR}/.docker_installed_by_setup"
 
 echo ""
 echo "════════════════════════════════════════════════════════════"
 echo "   VaultWarden-OCI Full Uninstaller"
-echo "   Project dir : ${PROJECT_DIR}"
-echo "   Running as  : $(whoami)  (real user: ${REAL_USER})"
+echo "   Project dir       : ${PROJECT_DIR}"
+echo "   Project state dir : ${PROJECT_STATE_DIR}"
+echo "   Running as        : $(whoami)  (real user: ${REAL_USER})"
 echo "════════════════════════════════════════════════════════════"
 echo ""
 warn "This will PERMANENTLY DELETE all data, secrets, containers,"
@@ -210,7 +244,7 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════
-# STEP 2 — Disable & remove systemd units
+# STEP 2 — Disable & remove systemd units + Docker mount guard drop-in
 # ═══════════════════════════════════════════════════════════════
 info "Step 2: Removing systemd timer/service units..."
 
@@ -245,7 +279,31 @@ for unit in "${TIMERS[@]}" "${SERVICES[@]}"; do
     if [[ -f "$DEST" ]]; then
         rm -f "$DEST" && success "Removed unit file: $DEST"
     fi
+    # Remove any per-unit drop-in directory (e.g. ReadWritePaths patches
+    # written by setup.sh --phase=systemd --install for separate-volume mode).
+    DROP_IN_DIR="/etc/systemd/system/${unit}.d"
+    if [[ -d "$DROP_IN_DIR" ]]; then
+        rm -rf "$DROP_IN_DIR" && success "Removed unit drop-in dir: $DROP_IN_DIR"
+    fi
 done
+
+# ── Docker systemd mount-guard drop-in ───────────────────────────────────────
+# setup.sh installs /etc/systemd/system/docker.service.d/10-vaultwarden-data-volume.conf
+# in separate-volume mode.  This drop-in adds RequiresMountsFor=<DATA_VOLUME_MOUNT>
+# to docker.service, which causes Docker to refuse to start unless the data
+# volume is mounted.  After a full uninstall this constraint is no longer valid
+# and must be removed so Docker can start normally.
+#
+# BUG FIX: this file was never removed by the uninstaller, leaving Docker in a
+# permanently broken state on separate-volume hosts after uninstall.
+_DOCKER_DROP_IN="/etc/systemd/system/docker.service.d/10-vaultwarden-data-volume.conf"
+if [[ -f "$_DOCKER_DROP_IN" ]]; then
+    rm -f "$_DOCKER_DROP_IN" && success "Removed Docker mount-guard drop-in: $_DOCKER_DROP_IN"
+    # Remove the drop-in directory only if it is now empty (it may contain
+    # unrelated drop-ins written by other tools).
+    rmdir "/etc/systemd/system/docker.service.d" 2>/dev/null \
+        && success "Removed empty Docker drop-in directory." || true
+fi
 
 if command -v systemctl &>/dev/null; then
     systemctl daemon-reload 2>/dev/null && success "systemd daemon reloaded."
@@ -274,14 +332,39 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════
-# STEP 5 — Remove /var/lib/vaultwarden (database & all runtime data)
+# STEP 5 — Remove PROJECT_STATE_DIR (database & all runtime data)
+#
+# BUG FIX: the previous version always deleted /var/lib/vaultwarden.
+# In separate-volume mode, the actual state directory is DATA_VOLUME_MOUNT
+# (e.g. /mnt/vw-data).  setup.sh sets PROJECT_STATE_DIR equal to that path;
+# the old hardcoded delete silently skipped it, leaving the entire database
+# and runtime state on disk.
+#
+# We always attempt /var/lib/vaultwarden as well because setup.sh creates it
+# regardless of storage mode (it writes the Docker sentinel there in
+# boot-only mode and uses it for the compose bind-mount source in both modes).
 # ═══════════════════════════════════════════════════════════════
-info "Step 5: Removing /var/lib/vaultwarden (database, logs, Caddy/Fail2ban state)..."
-if [[ -d /var/lib/vaultwarden ]]; then
-    rm -rf /var/lib/vaultwarden \
-        && success "Removed /var/lib/vaultwarden"
+info "Step 5: Removing runtime state directory (database, logs, Caddy/Fail2ban state)..."
+
+# Remove the resolved PROJECT_STATE_DIR (covers separate-volume and boot-only).
+if [[ -d "${PROJECT_STATE_DIR}" ]]; then
+    rm -rf "${PROJECT_STATE_DIR}" \
+        && success "Removed ${PROJECT_STATE_DIR}"
 else
-    info "/var/lib/vaultwarden not found — skipping."
+    info "${PROJECT_STATE_DIR} not found — skipping."
+fi
+
+# Also remove the boot-volume default if it differs from PROJECT_STATE_DIR
+# (handles the case where a previous boot-only install left artefacts behind
+# after a re-install in separate-volume mode, or where the operator changed
+# DATA_VOLUME_MOUNT mid-lifecycle).
+if [[ "${PROJECT_STATE_DIR}" != "/var/lib/vaultwarden" ]]; then
+    if [[ -d /var/lib/vaultwarden ]]; then
+        rm -rf /var/lib/vaultwarden \
+            && success "Removed /var/lib/vaultwarden (boot-volume default)"
+    else
+        info "/var/lib/vaultwarden not found — skipping."
+    fi
 fi
 
 # ═══════════════════════════════════════════════════════════════
@@ -390,11 +473,17 @@ fi
 # catastrophic.  In that case we warn and skip package removal; APT repo /
 # GPG key / runtime-data cleanup is likewise skipped because those artefacts
 # were not created by this project.
+#
+# BUG FIX: DOCKER_SENTINEL path is now derived from PROJECT_STATE_DIR
+# (see top of file).  The previous hardcoded path
+# /var/lib/vaultwarden/.docker_installed_by_setup was never found in
+# separate-volume mode, so Docker was silently left installed after every
+# full uninstall on those hosts.
 # ═══════════════════════════════════════════════════════════════
 info "Step 9: Removing Docker CE packages..."
 
 if [[ -f "$DOCKER_SENTINEL" ]]; then
-    info "Docker sentinel found — Docker was installed by setup.sh; proceeding with removal."
+    info "Docker sentinel found at ${DOCKER_SENTINEL} — Docker was installed by setup.sh; proceeding with removal."
     rm -f "$DOCKER_SENTINEL" 2>/dev/null || true
 
     if command -v docker &>/dev/null || dpkg -l docker-ce &>/dev/null 2>&1; then
