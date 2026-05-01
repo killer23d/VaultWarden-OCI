@@ -56,6 +56,13 @@ EXAMPLES:
     ./backup.sh --list                                                  # List existing backups (no sudo)
     sudo ./backup.sh --type db --rclone --email                         # DB backup + offsite sync + email
     sudo ./backup.sh --type full --full-verification --rclone --email   # Full verified offsite backup
+
+NOTE:
+    Backups are written to BACKUP_DIR (set in .env).  When BACKUP_DIR is not
+    explicitly configured, it defaults to $PROJECT_STATE_DIR/backups — which
+    keeps backups on the same volume as your VaultWarden data (correct for
+    both boot-volume and separate-volume storage modes).  If you override
+    BACKUP_DIR, ensure the path lives on the data volume, not the boot volume.
 EOF
 }
 
@@ -164,10 +171,26 @@ _resolve_rclone_config() {
 # Helpers
 # ---------------------------------------------------------------------------
 
+# _default_backup_dir
+# ---------------------------------------------------------------------------
+# Returns the default base directory for backups, derived from
+# PROJECT_STATE_DIR.  This keeps backups co-located with VaultWarden data
+# regardless of whether the install uses boot-volume or separate-volume
+# storage mode, without requiring the operator to explicitly set BACKUP_DIR.
+#
+# Callers use this value only when BACKUP_DIR is absent from .env; an
+# explicit BACKUP_DIR always takes precedence.
+# ---------------------------------------------------------------------------
+_default_backup_dir() {
+    local state_dir
+    state_dir="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
+    printf '%s/backups' "$state_dir"
+}
+
 get_backup_dir() {
     local type="$1"
     local base_dir
-    base_dir="$(get_config_value "BACKUP_DIR" "/var/lib/vaultwarden/backups")"
+    base_dir="$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")"
     local dir="$base_dir/$type"
     ensure_dir "$dir" 750 "$(get_real_user)"
     echo "$dir"
@@ -175,7 +198,7 @@ get_backup_dir() {
 
 list_backups() {
     local base_dir
-    base_dir="$(get_config_value "BACKUP_DIR" "/var/lib/vaultwarden/backups")"
+    base_dir="$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")"
     log_header "Existing Backups — $(date)"
     if [[ ! -d "$base_dir" ]]; then
         log_warn "Backup directory not found: $base_dir"
