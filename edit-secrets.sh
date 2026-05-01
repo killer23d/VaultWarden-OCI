@@ -8,6 +8,31 @@
 #
 # See also: ./setup.sh --phase=secrets  (first-time creation and full reconfiguration)
 #
+# ---------------------------------------------------------------------------
+# SCOPE AND STORAGE GUARD — READ BEFORE MODIFYING
+# ---------------------------------------------------------------------------
+# This script manages repo-managed encrypted configuration:
+#   secrets/secrets.yaml       — SOPS/Age-encrypted runtime secrets
+#   secrets/.docker_secrets/   — bind-mounted plaintext Docker secret files
+#   secrets/keys/              — Age key (local dev path)
+#   .env                       — project environment variables
+#   .sops.yaml                 — SOPS key-binding configuration
+#
+# It does NOT read from or write to PROJECT_STATE_DIR (the VaultWarden
+# runtime data directory, which in separate-volume mode lives on a dedicated
+# block device, e.g. /mnt/vw-data).
+#
+# Therefore this script intentionally does NOT call require_project_state_ready()
+# from lib/storage.sh.  Enforcing a storage guard here would prevent operators
+# from rotating credentials or exporting a recovery kit during the very
+# storage incidents where those actions are most needed.
+#
+# Post-rotation actions (Docker secret file sync, docker compose restart
+# guidance) may fail or be deferred when the stack is down — those failures
+# are already handled gracefully by _deploy_docker_secrets() and do_rotate().
+# A non-blocking preflight (_warn_if_stack_unavailable) informs the operator
+# if the data volume appears unavailable without halting execution.
+# ---------------------------------------------------------------------------
 
 set -euo pipefail
 
@@ -19,6 +44,43 @@ source "lib/common.sh"
 init_common_lib "$0"
 source "lib/crypto.sh"
 source "lib/secrets.sh"
+
+# ---------------------------------------------------------------------------
+# _warn_if_stack_unavailable
+#
+# Soft preflight: detects separate-volume mode and warns the operator if the
+# configured data volume mount point does not exist or is not mounted.
+# Advisory only — never exits or returns non-zero — so that all editing and
+# rotation modes remain usable during storage outages.
+#
+# Reads DATA_VOLUME_MOUNT and STORAGE_MODE from .env without sourcing it
+# (avoids polluting the shell environment with all other variables).
+# ---------------------------------------------------------------------------
+_warn_if_stack_unavailable() {
+    [[ ! -f "${PROJECT_ROOT}/.env" ]] && return 0
+
+    local storage_mode data_volume_mount
+    storage_mode=$(_read_dotenv_value "STORAGE_MODE" "${PROJECT_ROOT}/.env")
+    data_volume_mount=$(_read_dotenv_value "DATA_VOLUME_MOUNT" "${PROJECT_ROOT}/.env")
+
+    # Only relevant in separate-volume mode with a configured mount point.
+    [[ "${storage_mode:-boot}" != "volume" ]]    && return 0
+    [[ -z "${data_volume_mount}"               ]] && return 0
+
+    if ! mountpoint -q "${data_volume_mount}" 2>/dev/null; then
+        log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        log_warn "⚠  DATA VOLUME NOT MOUNTED: ${data_volume_mount}"
+        log_warn "   STORAGE_MODE=volume is configured but the mount point is"
+        log_warn "   absent or unmounted.  Secret editing and rotation will"
+        log_warn "   continue normally — this script does not require the data"
+        log_warn "   volume.  However, Docker-dependent post-rotation steps"
+        log_warn "   (secret file sync, service restart) may fail until the"
+        log_warn "   volume is mounted and the stack is brought back up."
+        log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    fi
+
+    return 0
+}
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -1083,6 +1145,12 @@ main() {
     log_header "VaultWarden Secrets Editor"
 
     if ! check_prerequisites; then exit 1; fi
+
+    # Soft preflight: warn if the data volume appears unavailable in
+    # separate-volume mode.  Non-blocking — this script operates on
+    # repo-managed encrypted files, not PROJECT_STATE_DIR.  See the SCOPE AND
+    # STORAGE GUARD section at the top of this file for the full rationale.
+    _warn_if_stack_unavailable
 
     # Standalone export: --export-recovery-kit with no other mode flag.
     # This is the canonical single entry point for recovery kit export (Fix #1).
