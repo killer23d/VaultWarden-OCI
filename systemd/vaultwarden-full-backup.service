@@ -39,11 +39,11 @@ ProtectHome=read-only
 # /run/lock needed for flock() lock file (ProtectSystem=strict makes /var/lock read-only).
 #
 # The first path in ReadWritePaths is the PROJECT_STATE_DIR.  In boot-volume
-# mode this is /var/lib/vaultwarden.  In separate-volume mode setup.sh patches
-# this line at install time to the configured DATA_VOLUME_MOUNT path so that
-# backup artefacts, lock files, and state written under PROJECT_STATE_DIR are
-# permitted by ProtectSystem=strict.  The installed unit is the source of
-# truth; do not edit it directly -- re-run setup.sh --phase=systemd --install.
+# mode this is /var/lib/vaultwarden.  In separate-volume mode, setup.sh installs a drop-in at:
+#   /etc/systemd/system/<unit>.d/10-state-dir.conf
+# that appends the DATA_VOLUME_MOUNT path to ReadWritePaths.
+# The base unit file is never modified. To inspect the merged result:
+#   systemctl cat <unit>
 #
 # /opt/vaultwarden-scripts is intentionally excluded: scripts are read+executed
 # only and must not be writable at runtime (defence-in-depth against a

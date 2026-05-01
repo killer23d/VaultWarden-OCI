@@ -29,10 +29,11 @@ ProtectSystem=strict
 # remain readable by the service.
 ProtectHome=read-only
 # The first path in ReadWritePaths is the PROJECT_STATE_DIR.  In boot-volume
-# mode this is /var/lib/vaultwarden.  In separate-volume mode setup.sh patches
-# this line at install time to the configured DATA_VOLUME_MOUNT path.
-# The installed unit is the source of truth; do not edit it directly --
-# re-run setup.sh --phase=systemd --install.
+# mode this is /var/lib/vaultwarden.  In separate-volume mode, setup.sh installs a drop-in at:
+#   /etc/systemd/system/<unit>.d/10-state-dir.conf
+# that appends the DATA_VOLUME_MOUNT path to ReadWritePaths.
+# The base unit file is never modified. To inspect the merged result:
+#   systemctl cat <unit>
 ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock
 TimeoutStartSec=60
 TimeoutStopSec=30
