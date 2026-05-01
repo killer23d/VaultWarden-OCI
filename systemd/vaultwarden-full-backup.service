@@ -18,15 +18,11 @@ EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
 # Scoped to avoid racing with restore.sh or maintenance.sh that may hold
 # their own lock files concurrently (e.g. after Persistent=true catch-up).
 ExecStartPre=/bin/bash -c 'rm -f /run/lock/vaultwarden-backup.lock'
-# NOTE: --email is intentionally omitted. The email step requires EMAIL_PROVIDER
-# credentials in /etc/vaultwarden/vaultwarden.env. Without them backup.sh exits 1
-# even when the backup itself succeeded, which triggers OnFailure= spuriously.
-# Add --email back manually once EMAIL_PROVIDER credentials are configured:
-#   sudo systemctl edit vaultwarden-full-backup.service
+# NOTE: --email is intentionally omitted. Add it back once EMAIL_PROVIDER
+# credentials are configured:  sudo systemctl edit vaultwarden-full-backup.service
 # Failures are still reported via OnFailure=vaultwarden-notify-failure@%n.service.
 # --full-verification decrypts the archive and performs a zstd+tar structural
-# integrity check before the offsite rclone sync.  This catches silent
-# compression or encryption failures that the quick SHA256 probe alone would miss.
+# integrity check before the offsite rclone sync.
 ExecStart=/opt/vaultwarden-scripts/backup.sh --type full --rclone --full-verification
 User=root
 StandardOutput=journal
@@ -36,12 +32,19 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 # read-only (not yes) so that RCLONE_CONFIG paths under /home remain
-# readable. rclone only reads rclone.conf — it never writes to /home —
-# so read-only access is both sufficient and still hardened.
+# readable. rclone only reads rclone.conf; it never writes to /home.
 ProtectHome=read-only
 # NOTE: SOPS_AGE_KEY_FILE must reside under /etc/vaultwarden/ (or another
 # ReadWritePaths entry). Paths under /home/ are read-only with ProtectHome=read-only.
-# /run/lock needed for flock() lock file (ProtectSystem=strict makes /var/lock read-only)
+# /run/lock needed for flock() lock file (ProtectSystem=strict makes /var/lock read-only).
+#
+# The first path in ReadWritePaths is the PROJECT_STATE_DIR.  In boot-volume
+# mode this is /var/lib/vaultwarden.  In separate-volume mode setup.sh patches
+# this line at install time to the configured DATA_VOLUME_MOUNT path so that
+# backup artefacts, lock files, and state written under PROJECT_STATE_DIR are
+# permitted by ProtectSystem=strict.  The installed unit is the source of
+# truth; do not edit it directly -- re-run setup.sh --phase=systemd --install.
+#
 # /opt/vaultwarden-scripts is intentionally excluded: scripts are read+executed
 # only and must not be writable at runtime (defence-in-depth against a
 # compromised script overwriting its siblings).
@@ -53,7 +56,7 @@ TimeoutStopSec=60
 #   exit 2 = partial success / rclone-skipped (non-fatal; local backup intact)
 #            treated as success so OnFailure= is silent
 #   exit 1 = fatal (env load failed, age key missing/corrupt, backup or
-#            encryption failed) — triggers OnFailure=
+#            encryption failed) -- triggers OnFailure=
 SuccessExitStatus=0 2
 
 [Install]

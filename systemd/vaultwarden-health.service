@@ -23,8 +23,7 @@ EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
 # maintenance windows without disabling the timer.
 ExecCondition=/bin/bash -c '! test -f /tmp/.vw_maintenance.lock'
 # --email is intentionally omitted here. Add it once EMAIL_API_TOKEN or
-# SMTP credentials are set in /etc/vaultwarden/vaultwarden.env, otherwise
-# the service exits 1 on every run (no credentials → email fails → exit 1).
+# SMTP credentials are set in /etc/vaultwarden/vaultwarden.env.
 ExecStart=/opt/vaultwarden-scripts/maintenance.sh --health --fix
 User=root
 StandardOutput=journal
@@ -37,26 +36,27 @@ ProtectSystem=strict
 # (e.g. RCLONE_CONFIG) remain readable by the service.
 ProtectHome=read-only
 # ReadWritePaths:
-#   /var/lib/vaultwarden  — health check reads DB / data dir
-#   /etc/vaultwarden      — reads env file, age key
-#   /run/lock             — flock() lock file (ProtectSystem=strict makes /var/lock read-only)
+#   /etc/vaultwarden  -- reads env file, age key
+#   /run/lock         -- flock() lock file (ProtectSystem=strict makes /var/lock read-only)
+#   PROJECT_STATE_DIR -- health check reads DB / data dir, writes cooldown stamps.
+#                        In boot-volume mode this is /var/lib/vaultwarden.
+#                        In separate-volume mode setup.sh patches this line at
+#                        install time to the configured DATA_VOLUME_MOUNT path.
+#                        The installed unit is the source of truth; do not edit
+#                        it directly -- re-run setup.sh --phase=systemd --install.
 # /opt/vaultwarden-scripts is intentionally excluded: scripts are read+executed
-# only and must not be writable at runtime (defence-in-depth against a
-# compromised script overwriting its siblings).
+# only and must not be writable at runtime.
 ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock
 TimeoutStartSec=300
 TimeoutStopSec=60
 # Exit code contract:
-#   0 — all checks passed             → success, no notification
-#   1 — one or more warnings          → success (non-critical, no OnFailure= noise)
-#   2 — one or more failures          → OnFailure= fires, admin is notified
-#   3 — first-run / no backup yet     → success (transient state, expected on new install)
+#   0 -- all checks passed           -> success, no notification
+#   1 -- one or more warnings        -> success (non-critical, no OnFailure= noise)
+#   2 -- one or more failures        -> OnFailure= fires, admin is notified
+#   3 -- first-run / no backup yet   -> success (transient, expected on new install)
 #
-# Exit 1 is intentionally treated as success here because `maintenance.sh --health` exits 1
-# for advisory warnings (disk usage approaching threshold, last backup older
-# than soft limit, etc.) that do not require immediate admin action.
-# Routing exit 1 through OnFailure= would generate spurious failure alerts
-# on every routine health run that contains any non-critical finding.
+# Exit 1 is intentionally treated as success because maintenance.sh --health
+# exits 1 for advisory warnings that do not require immediate action.
 # Exit 2 (hard failures: container down, DB corrupt, key missing) still
 # triggers OnFailure= and delivers an alert.
 SuccessExitStatus=0 1 3
