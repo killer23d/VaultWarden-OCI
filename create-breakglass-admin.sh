@@ -2,6 +2,20 @@
 # create-breakglass-admin.sh - Emergency admin account for OCI serial console access
 # SECURITY DESIGN: Creates a targeted-privilege account with least-privilege sudoers.
 # Grants only the specific commands needed for emergency VaultWarden recovery.
+#
+# STORAGE GUARD: Intentionally NOT sourced here (lib/storage.sh /
+# require_project_state_ready() are deliberately absent).
+#
+# Rationale: This is a host-level recovery tool.  Its primary use case is
+# precisely the situation where something is wrong with the VaultWarden
+# deployment — including a missing or unmounted data volume.  Blocking on
+# storage state would make the tool unavailable during the failures it is
+# designed to recover from.
+#
+# Operational note: Actions that contact the running Docker stack
+# (e.g. _restart_after_disable) will fail gracefully if the stack is down
+# because the data volume is not mounted.  The failure message tells the
+# operator to investigate and re-run when the volume is available.
 
 set -euo pipefail
 
@@ -546,7 +560,7 @@ EOF
   _    _  ___  ____  _   _  _  _  ____  _ 
  ( \/\/ )/ __)(_  _)( )_( )( \/ )(__  )(_)
   )    (( (__  _)(_  ) _ (  )  (  _)(_  _ 
- (__/\__)\___)(____)( (_) (_)(_/\_)(____)((_)
+ (__/\__)\___)(____)(( (_) (_)(_/\_)(____)((_)
 EOF
     printf '%b\n' "${COLOR_RESET}"
 
