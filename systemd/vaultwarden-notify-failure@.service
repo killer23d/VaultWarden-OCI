@@ -10,10 +10,15 @@ ConditionPathExists=/etc/vaultwarden/vaultwarden.env
 Type=oneshot
 WorkingDirectory=/opt/vaultwarden-scripts
 EnvironmentFile=/etc/vaultwarden/vaultwarden.env
+# Fallback: if PROJECT_STATE_DIR was not set in the env file (e.g. pre-storage-
+# mode installations), default to the boot-volume path so the cooldown and
+# sentinel writes succeed rather than expanding to an empty string.
+Environment=PROJECT_STATE_DIR=/var/lib/vaultwarden
 ExecStart=/bin/bash -c '\
   set -euo pipefail; \
   FAILED_UNIT="%i"; \
-  COOLDOWN_DIR="/var/lib/vaultwarden/.vw-health-alert"; \
+  STATE_DIR="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"; \
+  COOLDOWN_DIR="${STATE_DIR}/.vw-health-alert"; \
   mkdir -p "$COOLDOWN_DIR" 2>/dev/null || true; \
   SAFE_UNIT=$(printf "%%s" "$FAILED_UNIT" | tr -cs "[:alnum:]-" "_"); \
   COOLDOWN_FILE="${COOLDOWN_DIR}/notify_failure_${SAFE_UNIT}.cooldown"; \
@@ -30,7 +35,7 @@ ExecStart=/bin/bash -c '\
     body=$(printf "The systemd unit %%s failed at %%s.\nCheck logs with:\n  journalctl -u %%s -n 50\n" \
       "$FAILED_UNIT" "$(date)" "$FAILED_UNIT"); \
     send_email "FAILURE: ${FAILED_UNIT} on %H" "${body}" \
-      || { touch "/var/lib/vaultwarden/NOTIFY_FAILED_${FAILED_UNIT}" 2>/dev/null || true; }; \
+      || { touch "${STATE_DIR}/NOTIFY_FAILED_${FAILED_UNIT}" 2>/dev/null || true; }; \
   ) 9>"$LOCK_FILE" \
 '
 User=root
@@ -43,9 +48,18 @@ TimeoutStopSec=15
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
+# ProtectHome=yes is correct here: this unit does not need to read rclone.conf
+# or any other home-directory path. The stricter setting is intentional.
 ProtectHome=yes
 CapabilityBoundingSet=
 RestrictAddressFamilies=AF_INET AF_INET6
+# The first path in ReadWritePaths is the PROJECT_STATE_DIR.  In boot-volume
+# mode this is /var/lib/vaultwarden.  In separate-volume mode setup.sh patches
+# this line at install time to the configured DATA_VOLUME_MOUNT path so that
+# the cooldown stamp directory and the NOTIFY_FAILED sentinel file can be
+# created under ProtectSystem=strict.
+# The installed unit is the source of truth; do not edit it directly --
+# re-run setup.sh --phase=systemd --install.
 ReadWritePaths=/var/lib/vaultwarden /run/lock
 
 [Install]

@@ -1,0 +1,37 @@
+[Unit]
+Description=VaultWarden Maintenance (vacuum, log rotation, cert renewal)
+Documentation=https://github.com/killer23d/VaultWarden-OCI
+After=docker.service network-online.target
+Requires=docker.service
+ConditionPathExists=/opt/vaultwarden-scripts/maintenance.sh
+OnFailure=vaultwarden-notify-failure@%n.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/vaultwarden-scripts
+# Leading dash makes the file optional: the service starts even if
+# /etc/vaultwarden/vaultwarden.env does not yet exist (e.g. before
+# setup.sh --phase=systemd --install has run). Missing required vars are caught
+# and reported by the script itself.
+EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
+ExecStart=/opt/vaultwarden-scripts/maintenance.sh --vacuum --rotate-logs --renew-certs
+User=root
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vw-maintenance
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+# /run/lock needed for the maintenance lock file.
+# The first path in ReadWritePaths is the PROJECT_STATE_DIR.  In boot-volume
+# mode this is /var/lib/vaultwarden.  In separate-volume mode setup.sh patches
+# this line at install time to the configured DATA_VOLUME_MOUNT path.
+# The installed unit is the source of truth; do not edit it directly --
+# re-run setup.sh --phase=systemd --install.
+ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock
+TimeoutStartSec=1800
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target
