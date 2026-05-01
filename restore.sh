@@ -1507,16 +1507,19 @@ restore_full() {
         local _snap_dir="${state_dir}/.pre-restore-${ts}"
         mkdir -p "$_snap_dir"
         log_info "Backing up existing data to in-volume snapshot: $(basename "$_snap_dir") ..."
+
+        # Discover all non-snapshot subdirectories so this path remains correct
+        # if new subdirectories are added to the state layout in the future.
+        # Snapshot dirs (.pre-restore-*) are excluded to avoid nesting.
         local _subdir
-        for _subdir in data logs caddy fail2ban; do
-            if [[ -d "${state_dir}/${_subdir}" ]]; then
-                mv "${state_dir}/${_subdir}" "${_snap_dir}/" || {
-                    log_error "Failed to move ${state_dir}/${_subdir} into snapshot — aborting."
-                    log_error "Partial snapshot at: $_snap_dir"
-                    return 1
-                }
-            fi
-        done
+        while IFS= read -r -d '' _subdir; do
+            mv "$_subdir" "${_snap_dir}/" || {
+                log_error "Failed to move $_subdir into snapshot — aborting."
+                log_error "Partial snapshot at: $_snap_dir"
+                return 1
+            }
+        done < <(find "$state_dir" -maxdepth 1 -mindepth 1 -type d \
+                      ! -name '.pre-restore-*' -print0 2>/dev/null)
         unset _subdir
 
         log_info "Promoting staged restore to live volume..."
@@ -1833,9 +1836,12 @@ main() {
     # Step 9: Prune old pre-restore artefacts
     # ------------------------------------------------------------------
     if [[ "$DRY_RUN" != "true" ]]; then
+        # Number of pre-restore artefacts to keep — shared by both code paths
+        # so the retention policy stays consistent regardless of storage mode.
+        local _keep_artefacts=3
         case "$RESTORE_TYPE" in
             db)
-                cleanup_pre_restore_artefacts "${STATE_DIR}/data/db.sqlite3" 3 || true
+                cleanup_pre_restore_artefacts "${STATE_DIR}/data/db.sqlite3" "$_keep_artefacts" || true
                 ;;
             full|emergency)
                 if mountpoint -q "$STATE_DIR" 2>/dev/null; then
@@ -1850,8 +1856,8 @@ main() {
                              2>/dev/null | sort
                     )
                     local _snap_count="${#_vol_snaps[@]}"
-                    if (( _snap_count > 3 )); then
-                        local _to_remove=$(( _snap_count - 3 ))
+                    if (( _snap_count > _keep_artefacts )); then
+                        local _to_remove=$(( _snap_count - _keep_artefacts ))
                         local i
                         for (( i=0; i<_to_remove; i++ )); do
                             rm -rf "${_vol_snaps[$i]}" && \
@@ -1862,7 +1868,7 @@ main() {
                 else
                     # Boot-only mode: pre-restore snapshots are sibling
                     # directories of STATE_DIR (STATE_DIR.pre-restore-*).
-                    cleanup_pre_restore_artefacts "$STATE_DIR" 3 || true
+                    cleanup_pre_restore_artefacts "$STATE_DIR" "$_keep_artefacts" || true
                 fi
                 ;;
         esac
