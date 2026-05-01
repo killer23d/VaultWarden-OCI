@@ -1497,10 +1497,43 @@ restore_full() {
     fi
 
     local ts; ts="$(date +%Y%m%d-%H%M%S)"
-    [[ -d "$state_dir" ]] && mv "$state_dir" "${state_dir}.pre-restore-${ts}"
 
-    log_info "Promoting staged restore to live path..."
-    mv "$staging/$rel_state" "$state_dir"
+    if mountpoint -q "$state_dir" 2>/dev/null; then
+        # Separate-volume mode: state_dir is a live mountpoint — mv would fail
+        # with "Device or resource busy".  Instead, move each data subdirectory
+        # into an in-volume snapshot directory, then rsync the staged content
+        # onto the live mount.  This preserves rollback capability without
+        # needing to touch the mountpoint itself.
+        local _snap_dir="${state_dir}/.pre-restore-${ts}"
+        mkdir -p "$_snap_dir"
+        log_info "Backing up existing data to in-volume snapshot: $(basename "$_snap_dir") ..."
+        local _subdir
+        for _subdir in data logs caddy fail2ban; do
+            if [[ -d "${state_dir}/${_subdir}" ]]; then
+                mv "${state_dir}/${_subdir}" "${_snap_dir}/" || {
+                    log_error "Failed to move ${state_dir}/${_subdir} into snapshot — aborting."
+                    log_error "Partial snapshot at: $_snap_dir"
+                    return 1
+                }
+            fi
+        done
+        unset _subdir
+
+        log_info "Promoting staged restore to live volume..."
+        rsync -a --no-owner --no-group "$staging/$rel_state/" "$state_dir/" || {
+            log_error "rsync of staged content to $state_dir failed."
+            log_error "Previous data snapshot at: $_snap_dir"
+            log_error "Manual recovery: rsync -a '${_snap_dir}/' '$state_dir/'"
+            return 1
+        }
+    else
+        # Boot-only mode: atomic directory swap (fast path).
+        [[ -d "$state_dir" ]] && mv "$state_dir" "${state_dir}.pre-restore-${ts}"
+
+        log_info "Promoting staged restore to live path..."
+        mv "$staging/$rel_state" "$state_dir"
+    fi
+
     chown -R "${puid}:${pgid}" "$state_dir/data" 2>/dev/null || log_warn "Could not set ownership on $state_dir/data"
     purge_wal_shm "$state_dir/data/db.sqlite3" || true
 
@@ -1801,8 +1834,37 @@ main() {
     # ------------------------------------------------------------------
     if [[ "$DRY_RUN" != "true" ]]; then
         case "$RESTORE_TYPE" in
-            db)             cleanup_pre_restore_artefacts "${STATE_DIR}/data/db.sqlite3" 3 || true ;;
-            full|emergency) cleanup_pre_restore_artefacts "$STATE_DIR" 3 || true ;;
+            db)
+                cleanup_pre_restore_artefacts "${STATE_DIR}/data/db.sqlite3" 3 || true
+                ;;
+            full|emergency)
+                if mountpoint -q "$STATE_DIR" 2>/dev/null; then
+                    # Separate-volume mode: pre-restore snapshots are
+                    # .pre-restore-TIMESTAMP directories *inside* STATE_DIR
+                    # (created by the mountpoint-aware path in restore_full).
+                    # cleanup_pre_restore_artefacts expects sibling paths, so
+                    # handle this case directly.
+                    local -a _vol_snaps=()
+                    mapfile -t _vol_snaps < <(
+                        find "$STATE_DIR" -maxdepth 1 -name '.pre-restore-*' -type d \
+                             2>/dev/null | sort
+                    )
+                    local _snap_count="${#_vol_snaps[@]}"
+                    if (( _snap_count > 3 )); then
+                        local _to_remove=$(( _snap_count - 3 ))
+                        local i
+                        for (( i=0; i<_to_remove; i++ )); do
+                            rm -rf "${_vol_snaps[$i]}" && \
+                                log_info "  Pruned in-volume snapshot: $(basename "${_vol_snaps[$i]}")" || \
+                                log_warn "  Failed to prune: ${_vol_snaps[$i]}"
+                        done
+                    fi
+                else
+                    # Boot-only mode: pre-restore snapshots are sibling
+                    # directories of STATE_DIR (STATE_DIR.pre-restore-*).
+                    cleanup_pre_restore_artefacts "$STATE_DIR" 3 || true
+                fi
+                ;;
         esac
     fi
 
