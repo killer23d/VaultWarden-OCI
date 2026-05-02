@@ -86,6 +86,11 @@ PROJECT_DIR="${REAL_HOME}/VaultWarden-OCI"
 #   3. Hardcoded default /var/lib/vaultwarden (boot-only fallback)
 _read_env_value() {
     # _read_env_value KEY FILE  -> prints value, empty string if not found
+    #
+    # NOTE: This is an intentional self-contained copy of the helper that
+    # appears in setup.sh.  uninstall-vaultwarden.sh does not source any
+    # shared library so that it remains safe to run after a partial or broken
+    # installation.  Keep both copies in sync if the parsing logic changes.
     local key="$1" file="$2"
     [[ -f "$file" ]] || return 0
     grep -E "^${key}=" "$file" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d "\"'" || true

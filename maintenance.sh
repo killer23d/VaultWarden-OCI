@@ -67,6 +67,22 @@ _default_backup_dir() {
 }
 
 # ---------------------------------------------------------------------------
+# _default_alert_state_dir
+# ---------------------------------------------------------------------------
+# Returns the default directory for alert cooldown state files, derived from
+# PROJECT_STATE_DIR.  Mirrors the _default_backup_dir() pattern so that
+# alert cooldowns always survive reboots when using separate-volume storage.
+#
+# Callers use this value only when ALERT_STATE_DIR is absent from the
+# environment; an explicit ALERT_STATE_DIR always takes precedence.
+# ---------------------------------------------------------------------------
+_default_alert_state_dir() {
+    local state_dir
+    state_dir="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
+    printf '%s/.vw-health-alert' "$state_dir"
+}
+
+# ---------------------------------------------------------------------------
 # Help
 # ---------------------------------------------------------------------------
 show_help() {
@@ -1111,7 +1127,7 @@ local FIX_MAX_RESTARTS=${FIX_MAX_RESTARTS:-3}
 local FIX_RESTART_WINDOW=${FIX_RESTART_WINDOW:-300}  # 5 minutes
 
 # Report configuration
-local REPORT_DIR="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/reports"
+local REPORT_DIR; REPORT_DIR="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")/reports"
 local REPORT_RETENTION_DAYS=${REPORT_RETENTION_DAYS:-30}
 
 # Notification thresholds
@@ -1165,7 +1181,7 @@ _release_run_lock() {
 # teardown without losing cooldown state.
 # =============================================================================
 
-local ALERT_LOCK_DIR="${ALERT_STATE_DIR:-/var/lib/vaultwarden/.vw-health-alert}"
+local ALERT_LOCK_DIR="${ALERT_STATE_DIR:-$(_default_alert_state_dir)}"
 local ALERT_COOLDOWN_SECONDS=${ALERT_COOLDOWN_SECONDS:-3600}
 local ALERT_RECOVERY_TTL=${ALERT_RECOVERY_TTL:-86400}
 
