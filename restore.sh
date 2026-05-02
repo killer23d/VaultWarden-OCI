@@ -1852,6 +1852,9 @@ main() {
                     # handle this case directly.
                     local -a _vol_snaps=()
                     mapfile -t _vol_snaps < <(
+                        # sort is chronological here because snapshot names
+                        # contain a YYYYMMDD_HHMMSS timestamp suffix, making
+                        # alphabetical order equivalent to oldest-first.
                         find "$STATE_DIR" -maxdepth 1 -name '.pre-restore-*' -type d \
                              2>/dev/null | sort
                     )

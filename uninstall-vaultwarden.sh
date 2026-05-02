@@ -88,7 +88,7 @@ _read_env_value() {
     # _read_env_value KEY FILE  -> prints value, empty string if not found
     local key="$1" file="$2"
     [[ -f "$file" ]] || return 0
-    grep -E "^${key}=" "$file" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"' || true
+    grep -E "^${key}=" "$file" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d "\"'" || true
 }
 
 _ENV_FILE="${PROJECT_DIR}/.env"
