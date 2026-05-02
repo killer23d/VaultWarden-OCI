@@ -1508,9 +1508,10 @@ restore_full() {
         mkdir -p "$_snap_dir"
         log_info "Backing up existing data to in-volume snapshot: $(basename "$_snap_dir") ..."
 
-        # Discover all non-snapshot subdirectories so this path remains correct
-        # if new subdirectories are added to the state layout in the future.
-        # Snapshot dirs (.pre-restore-*) are excluded to avoid nesting.
+        # Discover all non-snapshot subdirectories and top-level files so this
+        # path remains correct if new items are added to the state layout in
+        # the future.  Snapshot dirs (.pre-restore-*) are excluded to avoid
+        # nesting.
         local _subdir
         while IFS= read -r -d '' _subdir; do
             mv "$_subdir" "${_snap_dir}/" || {
@@ -1518,7 +1519,8 @@ restore_full() {
                 log_error "Partial snapshot at: $_snap_dir"
                 return 1
             }
-        done < <(find "$state_dir" -maxdepth 1 -mindepth 1 -type d \
+        done < <(find "$state_dir" -maxdepth 1 -mindepth 1 \
+                      \( -type d -o -type f \) \
                       ! -name '.pre-restore-*' -print0 2>/dev/null)
         unset _subdir
 
