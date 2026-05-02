@@ -807,8 +807,7 @@ create_env_file() {
     # BACKUP_DIR already set by the operator is left untouched.
     if [[ -n "${DATA_VOLUME_DEVICE:-}" ]]; then
         local current_backup_dir
-        current_backup_dir=$(grep -E "^BACKUP_DIR=" "$env_file" 2>/dev/null \
-            | tail -1 | cut -d= -f2- | tr -d '"'"'" || true)
+        current_backup_dir=$(_read_env_value "BACKUP_DIR" "$env_file")
         if [[ -z "$current_backup_dir" ]]; then
             _set_env_var "BACKUP_DIR" "${DATA_VOLUME_MOUNT:-/mnt/vw-data}/backups" "$env_file"
             log_info "Auto-set BACKUP_DIR=${DATA_VOLUME_MOUNT:-/mnt/vw-data}/backups in .env (separate-volume mode)"
@@ -2669,6 +2668,21 @@ _set_env_var() {
 }
 
 # ---------------------------------------------------------------------------
+# _read_env_value KEY FILE
+# Read a KEY=VALUE from an env file, stripping surrounding double or single
+# quotes.  Returns an empty string when the key is absent or the file does
+# not exist.
+# ---------------------------------------------------------------------------
+_read_env_value() {
+    local key="$1" file="$2"
+    [[ -f "$file" ]] || return 0
+    # tail -1 keeps the last occurrence; cut -d= -f2- preserves '=' in values;
+    # tr strips both single and double quotes from the raw value.
+    grep -E "^${key}=" "$file" 2>/dev/null \
+        | tail -1 | cut -d= -f2- | tr -d "\"'" || true
+}
+
+# ---------------------------------------------------------------------------
 # _install_rwpaths_dropin
 # ---------------------------------------------------------------------------
 # In separate-volume mode every managed unit needs a ReadWritePaths drop-in
@@ -2686,10 +2700,8 @@ _install_rwpaths_dropin() {
     # standalone '--phase=systemd --install' runs (without CLI flags) pick up
     # the correct value written by a previous full setup run.
     if [[ -f "$ENV_FILE" ]]; then
-        data_device=$(grep -E "^DATA_VOLUME_DEVICE=" "$ENV_FILE" 2>/dev/null \
-            | tail -1 | cut -d= -f2- | tr -d '"'"'" || true)
-        data_mount=$(grep -E "^DATA_VOLUME_MOUNT=" "$ENV_FILE" 2>/dev/null \
-            | tail -1 | cut -d= -f2- | tr -d '"'"'" || true)
+        data_device=$(_read_env_value "DATA_VOLUME_DEVICE" "$ENV_FILE")
+        data_mount=$(_read_env_value "DATA_VOLUME_MOUNT"  "$ENV_FILE")
     fi
     # Fall back to script-scope variables (set via CLI flags or environment)
     [[ -z "$data_device" ]] && data_device="${DATA_VOLUME_DEVICE:-}"
