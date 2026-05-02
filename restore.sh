@@ -1539,6 +1539,11 @@ restore_full() {
         mv "$staging/$rel_state" "$state_dir"
     fi
 
+    # Ensure storage sentinel survives restores in separate-volume mode.
+    if [[ -n "${DATA_VOLUME_MOUNT:-}" ]] && mountpoint -q "${DATA_VOLUME_MOUNT}" 2>/dev/null; then
+        touch "${DATA_VOLUME_MOUNT}/.vw-data-volume" 2>/dev/null ||             log_warn "Could not re-touch volume sentinel at ${DATA_VOLUME_MOUNT}/.vw-data-volume"
+    fi
+
     chown -R "${puid}:${pgid}" "$state_dir/data" 2>/dev/null || log_warn "Could not set ownership on $state_dir/data"
     purge_wal_shm "$state_dir/data/db.sqlite3" || true
 

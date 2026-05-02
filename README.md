@@ -180,7 +180,7 @@ For day-2 operations and incident handling, keep [RUNBOOK.md](RUNBOOK.md) open i
 
 OCI block storage volumes keep vault data independent of the boot volume, making snapshots, resizes, and instance replacements straightforward. Pass `--data-device` to `setup.sh` to enable this mode.
 
-**Prerequisites:** Attach a block storage volume to your OCI instance **before** running setup. Confirm the device name with `lsblk` — it typically appears as `/dev/sdb`.
+**Prerequisites:** Attach a block storage volume to your OCI instance **before** running setup. Confirm the device name with `lsblk` — it typically appears as `/dev/sdb` (or `/dev/nvme1n1` on some shapes).
 
 ```bash
 # Provision a dedicated data volume in one step
@@ -201,6 +201,8 @@ sudo ./setup.sh --domain vault.yourdomain.com --email admin@yourdomain.com --aut
 **Reverting to boot-only mode:** Re-run setup without `--data-device`. The drop-in is removed automatically and `PROJECT_STATE_DIR` reverts to `/var/lib/vaultwarden`.
 
 > **⚠️ Fail-closed guarantee:** In separate-volume mode, `startup.sh`, `backup.sh`, `restore.sh`, and `maintenance.sh` all exit immediately with a clear diagnostic error if the expected data volume is not mounted. Data is never silently written to the boot volume.
+
+> **Restore safety note:** `restore.sh` now re-validates the mounted data-volume identity marker (`.vw-data-volume`) after restore promotion, so separate-volume guards continue to work even when restoring older archives.
 
 **`.env` variables (set automatically by setup, verify if editing manually):**
 

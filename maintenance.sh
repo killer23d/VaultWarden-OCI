@@ -82,6 +82,16 @@ _default_alert_state_dir() {
     printf '%s/.vw-health-alert' "$state_dir"
 }
 
+# _default_report_dir
+#
+# Returns the default directory for health reports, derived from
+# PROJECT_STATE_DIR for consistency across storage modes.
+_default_report_dir() {
+    local state_dir
+    state_dir="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
+    printf '%s/reports' "$state_dir"
+}
+
 # ---------------------------------------------------------------------------
 # Help
 # ---------------------------------------------------------------------------
@@ -1127,7 +1137,7 @@ local FIX_MAX_RESTARTS=${FIX_MAX_RESTARTS:-3}
 local FIX_RESTART_WINDOW=${FIX_RESTART_WINDOW:-300}  # 5 minutes
 
 # Report configuration
-local REPORT_DIR; REPORT_DIR="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")/reports"
+local REPORT_DIR; REPORT_DIR="$(_default_report_dir)"
 local REPORT_RETENTION_DAYS=${REPORT_RETENTION_DAYS:-30}
 
 # Notification thresholds
@@ -1741,7 +1751,7 @@ _check_fail2ban_filter_drift() {
 _check_disk() {
     log_info "Checking disk space..."
 
-    local state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
+    local state_dir; state_dir="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
 
     # Resolve mount points to detect shared filesystems
     local state_mount root_mount
@@ -1925,7 +1935,7 @@ _check_dns() {
 _check_backups() {
     log_info "Checking backup status..."
 
-    local backup_dir="${BACKUP_DIR:-${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/backups}"
+    local backup_dir; backup_dir="$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")"
     local now_epoch
     now_epoch=$(date +%s)
 
@@ -2056,7 +2066,7 @@ _check_config() {
 # =============================================================================
 
 _check_notify_failures() {
-    local state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
+    local state_dir; state_dir="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
     local -a markers=()
     mapfile -t markers < <(find "$state_dir" -maxdepth 1 -name 'NOTIFY_FAILED_*' 2>/dev/null | sort)
 
