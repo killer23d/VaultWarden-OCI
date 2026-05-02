@@ -13,6 +13,9 @@ EnvironmentFile=/etc/vaultwarden/vaultwarden.env
 # Fallback: if PROJECT_STATE_DIR was not set in the env file (e.g. pre-storage-
 # mode installations), default to the boot-volume path so the cooldown and
 # sentinel writes succeed rather than expanding to an empty string.
+# Note: systemd applies EnvironmentFile after Environment=, so a
+# PROJECT_STATE_DIR value in /etc/vaultwarden/vaultwarden.env overrides this
+# static default automatically — no drop-in required for separate-volume mode.
 Environment=PROJECT_STATE_DIR=/var/lib/vaultwarden
 ExecStart=/bin/bash -c '\
   set -euo pipefail; \

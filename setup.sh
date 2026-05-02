@@ -801,6 +801,20 @@ create_env_file() {
     }' "$env_file" > "$temp_env"
     mv "$temp_env" "$env_file" || return 1
 
+    # In separate-volume mode, auto-populate BACKUP_DIR if it is currently
+    # blank in .env.  This ensures backup.sh finds backups on the data volume
+    # without the operator having to manually edit the file.  An explicit
+    # BACKUP_DIR already set by the operator is left untouched.
+    if [[ -n "${DATA_VOLUME_DEVICE:-}" ]]; then
+        local current_backup_dir
+        current_backup_dir=$(grep -E "^BACKUP_DIR=" "$env_file" 2>/dev/null \
+            | tail -1 | cut -d= -f2- | tr -d '"'"'" || true)
+        if [[ -z "$current_backup_dir" ]]; then
+            _set_env_var "BACKUP_DIR" "${DATA_VOLUME_MOUNT:-/mnt/vw-data}/backups" "$env_file"
+            log_info "Auto-set BACKUP_DIR=${DATA_VOLUME_MOUNT:-/mnt/vw-data}/backups in .env (separate-volume mode)"
+        fi
+    fi
+
     chown "$real_user:$(id -g -n "$real_user")" "$env_file" || return 1
     chmod 600 "$env_file" || return 1
     return 0
@@ -2655,6 +2669,65 @@ _set_env_var() {
 }
 
 # ---------------------------------------------------------------------------
+# _install_rwpaths_dropin
+# ---------------------------------------------------------------------------
+# In separate-volume mode every managed unit needs a ReadWritePaths drop-in
+# so that ProtectSystem=strict allows writes to DATA_VOLUME_MOUNT.  Without
+# this drop-in, any write to DATA_VOLUME_MOUNT (backup files, health cooldown
+# stamps, DB operations) is silently blocked by the kernel, causing runtime
+# Permission denied errors that are hard to diagnose from the unit file alone.
+#
+# Boot-only mode (DATA_VOLUME_DEVICE empty): no-op.
+# Dry-run mode: logs what would be written without touching the filesystem.
+# ---------------------------------------------------------------------------
+_install_rwpaths_dropin() {
+    local data_device data_mount
+    # Read from the installed EnvironmentFile when available so that
+    # standalone '--phase=systemd --install' runs (without CLI flags) pick up
+    # the correct value written by a previous full setup run.
+    if [[ -f "$ENV_FILE" ]]; then
+        data_device=$(grep -E "^DATA_VOLUME_DEVICE=" "$ENV_FILE" 2>/dev/null \
+            | tail -1 | cut -d= -f2- | tr -d '"'"'" || true)
+        data_mount=$(grep -E "^DATA_VOLUME_MOUNT=" "$ENV_FILE" 2>/dev/null \
+            | tail -1 | cut -d= -f2- | tr -d '"'"'" || true)
+    fi
+    # Fall back to script-scope variables (set via CLI flags or environment)
+    [[ -z "$data_device" ]] && data_device="${DATA_VOLUME_DEVICE:-}"
+    [[ -z "$data_mount"  ]] && data_mount="${DATA_VOLUME_MOUNT:-}"
+
+    if [[ -z "$data_device" ]]; then
+        log_info "Boot-only mode — skipping per-unit ReadWritePaths drop-ins."
+        return 0
+    fi
+
+    if [[ -z "$data_mount" ]]; then
+        log_warn "DATA_VOLUME_MOUNT is empty — cannot write ReadWritePaths drop-ins."
+        return 1
+    fi
+
+    log_info "Installing per-unit ReadWritePaths drop-ins for DATA_VOLUME_MOUNT=${data_mount} ..."
+    local unit dropin_dir dropin_file
+    for unit in "${SERVICES[@]}" "${TIMERS[@]}"; do
+        dropin_dir="${UNIT_DEST_DIR}/${unit}.d"
+        dropin_file="${dropin_dir}/10-state-dir.conf"
+        if [[ "$DRY_RUN" == "true" ]]; then
+            log_info "[DRY RUN] Would write ReadWritePaths drop-in: $dropin_file"
+            continue
+        fi
+        mkdir -p "$dropin_dir" || { log_error "Cannot create drop-in dir: $dropin_dir"; return 1; }
+        cat > "$dropin_file" << DROPIN
+# Written by setup.sh --phase=systemd --install
+# Grants this unit write access to DATA_VOLUME_MOUNT under ProtectSystem=strict.
+# Remove by re-running setup.sh --phase=systemd --remove, or the uninstaller.
+[Service]
+ReadWritePaths=${data_mount}
+DROPIN
+        chmod 644 "$dropin_file"
+        log_success "Installed ReadWritePaths drop-in: $dropin_file"
+    done
+}
+
+# ---------------------------------------------------------------------------
 # install_units
 # ---------------------------------------------------------------------------
 install_units() {
@@ -2943,6 +3016,11 @@ install_units() {
     if [[ "$unit_ok" == "false" ]]; then
         log_warn "Some unit files were missing -- check the systemd/ directory."
     fi
+
+    # ------------------------------------------------------------------
+    # 4b. Write per-unit ReadWritePaths drop-ins (separate-volume mode)
+    # ------------------------------------------------------------------
+    _install_rwpaths_dropin
 
     log_info "Reloading systemd daemon ..."
     _run systemctl daemon-reload

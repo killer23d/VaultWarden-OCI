@@ -50,6 +50,23 @@ FULL_BACKUP_RETENTION_DAYS=30
 EMERGENCY_BACKUP_RETENTION_DAYS=90
 
 # ---------------------------------------------------------------------------
+# _default_backup_dir
+# ---------------------------------------------------------------------------
+# Returns the default base directory for backups, derived from
+# PROJECT_STATE_DIR.  Mirrors the same helper in backup.sh so that
+# cleanup_backups() and the deep-maintenance safety backup always resolve
+# to the same location as backup.sh, regardless of storage mode.
+#
+# Callers use this value only when BACKUP_DIR is absent from the environment;
+# an explicit BACKUP_DIR always takes precedence.
+# ---------------------------------------------------------------------------
+_default_backup_dir() {
+    local state_dir
+    state_dir="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
+    printf '%s/backups' "$state_dir"
+}
+
+# ---------------------------------------------------------------------------
 # Help
 # ---------------------------------------------------------------------------
 show_help() {
@@ -197,7 +214,7 @@ cleanup_backups() {
     if [[ "$DRY_RUN"       == "true" ]]; then log_info "[DRY RUN] Would clean up old backups based on retention policy"; return 0; fi
     log_info "Managing backup retention..."
     local backup_base_dir
-    backup_base_dir="$(get_config_value "BACKUP_DIR" "$SCRIPT_DIR/backups")"
+    backup_base_dir="$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")"
     local had_real_error=false
     local backup_types=("db:$DB_BACKUP_RETENTION_DAYS" "full:$FULL_BACKUP_RETENTION_DAYS" "emergency:$EMERGENCY_BACKUP_RETENTION_DAYS")
     for backup_type_info in "${backup_types[@]}"; do
@@ -430,7 +447,7 @@ run_deep_db_maintenance() {
         fi
     else
         log_success "Pre-maintenance safety backup created"
-        local backup_base; backup_base=$(get_config_value "BACKUP_DIR" "${SCRIPT_DIR}/backups")
+        local backup_base; backup_base=$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")
         safety_backup_file=$(find "${backup_base}/db" -name "vaultwarden-db-*.age" -newer "$backup_ts_marker" 2>/dev/null | sort | tail -1) || true
         rm -f "$backup_ts_marker"
     fi
@@ -1292,7 +1309,7 @@ Environment variables:
 
 Alert cooldown:
   Alerts are rate-limited per failure key using timestamp files under
-  /var/lib/vaultwarden/.vw-health-alert/. At most one alert fires per failure 
+  $PROJECT_STATE_DIR/.vw-health-alert/. At most one alert fires per failure 
   key per ALERT_COOLDOWN_SECONDS window. A single clear-state recovery email 
   fires once when all checks pass, then is suppressed for ALERT_RECOVERY_TTL
   seconds. State survives reboots and container restarts.
