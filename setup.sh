@@ -262,6 +262,20 @@ check_disk_space() {
         log_info "/var/lib/docker does not exist yet — skipping Docker data-root space check"
     fi
 
+    # In separate-volume mode, check the data volume only if it is already
+    # mounted (idempotent re-runs; first-run mounts happen in setup_data_volume).
+    local dv_mount="${DATA_VOLUME_MOUNT:-}"
+    if [[ -n "${DATA_VOLUME_DEVICE:-}" && -n "$dv_mount" ]] && \
+       mountpoint -q "$dv_mount" 2>/dev/null; then
+        local dv_available_kb
+        dv_available_kb=$(df -k "$dv_mount" | awk 'NR==2 {print $4}')
+        if (( dv_available_kb < min_free_kb )); then
+            log_error "Insufficient disk space on data volume $dv_mount. Required: 2 GiB, Available: $(( dv_available_kb / 1024 )) MiB"
+            return 1
+        fi
+        log_info "Disk space OK on $dv_mount (data volume): $(( dv_available_kb / 1024 )) MiB available"
+    fi
+
     return 0
 }
 
@@ -824,7 +838,10 @@ setup_directories() {
     local project_state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
 
     # Create the backup directory tree that backup.sh and restore.sh require.
-    local backup_base_dir="${BACKUP_DIR:-/var/lib/vaultwarden/backups}"
+    # Derive the default from project_state_dir so that separate-volume installs
+    # create backups on the data volume, consistent with what backup.sh produces
+    # at runtime via _default_backup_dir().
+    local backup_base_dir="${BACKUP_DIR:-${project_state_dir}/backups}"
     if ! mkdir -p "${backup_base_dir}"/{db,full,emergency}; then
         log_error "Failed to create backup directories under ${backup_base_dir}"
         return 1
