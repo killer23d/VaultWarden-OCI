@@ -365,13 +365,18 @@ fi
 # DATA_VOLUME_MOUNT mid-lifecycle).
 if [[ "${PROJECT_STATE_DIR}" != "/var/lib/vaultwarden" ]]; then
     if [[ -d /var/lib/vaultwarden ]]; then
-        rm -rf /var/lib/vaultwarden \
-            && success "Removed /var/lib/vaultwarden (boot-volume default)"
+        rm -rf /var/lib/vaultwarden             && success "Removed /var/lib/vaultwarden (boot-volume default)"
     else
         info "/var/lib/vaultwarden not found — skipping."
     fi
 fi
 
+# Advisory: in separate-volume mode, the dedicated data mount may remain mounted.
+if [[ "${PROJECT_STATE_DIR}" != "/var/lib/vaultwarden" ]] &&    mountpoint -q "${PROJECT_STATE_DIR}" 2>/dev/null; then
+    warn "Data volume is still mounted at ${PROJECT_STATE_DIR}."
+    warn "If it was added to /etc/fstab by setup.sh, remove the entry manually."
+    warn "To unmount: sudo umount ${PROJECT_STATE_DIR}"
+fi
 # ═══════════════════════════════════════════════════════════════
 # STEP 6 — Remove the cloned project directory (secrets, keys, config)
 #
