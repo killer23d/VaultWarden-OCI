@@ -58,13 +58,13 @@ services:
       chown 0:0 /logs/caddy/access.log /logs/caddy/security.log &&
       chmod 644 /logs/caddy/access.log /logs/caddy/security.log &&
 
-      mkdir -p /caddy_data /caddy_config &&
-      chown 0:0 /caddy_data /caddy_config &&
-      chmod 755 /caddy_data /caddy_config &&
+      mkdir -p /data/caddy /config/caddy &&
+      chown 0:0 /data/caddy /config/caddy &&
+      chmod 755 /data/caddy /config/caddy &&
 
-      mkdir -p /caddy_data/caddy/certificates /caddy_data/caddy/locks /caddy_data/caddy/ocsp &&
-      chown -R 0:0 /caddy_data/caddy &&
-      find /caddy_data/caddy -type d -exec chmod 755 {} + 2>/dev/null || true &&
+      mkdir -p /data/caddy/certificates /data/caddy/locks /data/caddy/ocsp &&
+      chown -R 0:0 /data/caddy &&
+      find /data/caddy -type d -exec chmod 755 {} + 2>/dev/null || true &&
 
       mkdir -p /fail2ban_db &&
       chown 0:0 /fail2ban_db &&
@@ -85,8 +85,8 @@ services:
     volumes:
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data:/data
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs:/logs
-      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/data:/caddy_data
-      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/config:/caddy_config
+      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/data:/data/caddy
+      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/config:/config/caddy
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/fail2ban:/fail2ban_db
       - ./secrets:/secrets
 
