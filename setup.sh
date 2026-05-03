@@ -2982,7 +2982,7 @@ remove_units() {
 
         for unit in "${TIMERS[@]}" "${SERVICES[@]}"; do
             local dest="$UNIT_DEST_DIR/$unit"
-        if [[ -f "$dest" ]]; then
+            if [[ -f "$dest" ]]; then
             _run rm -f "$dest"
             log_success "Removed: $dest"
         fi
