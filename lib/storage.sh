@@ -135,8 +135,11 @@ setup_data_volume() {
     if [[ -z "$fs_type" ]]; then
         log_info "No filesystem found on $device — formatting as ext4..."
         log_warn "ALL DATA ON $device WILL BE ERASED. Expected on first run."
-        mkfs.ext4 -F -L vw-data "$device" > /dev/null 2>&1 \
-            || { log_error "mkfs.ext4 failed for $device"; return 1; }
+        local mkfs_out
+        mkfs_out=$(mkfs.ext4 -F -L vw-data "$device" 2>&1) || {
+            log_error "mkfs.ext4 failed for $device: $mkfs_out"
+            return 1
+        }
         log_success "Formatted $device as ext4 (label: vw-data)"
     elif [[ "$fs_type" == "ext4" ]]; then
         log_info "Existing ext4 on $device — skipping format (idempotent)"

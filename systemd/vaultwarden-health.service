@@ -1,3 +1,11 @@
+[Unit]
+Description=VaultWarden Health Monitor
+Documentation=https://github.com/killer23d/VaultWarden-OCI
+After=docker.service network-online.target
+Requires=docker.service
+ConditionPathExists=/opt/vaultwarden-scripts/maintenance.sh
+OnFailure=vaultwarden-notify-failure@%n.service
+
 [Service]
 Type=oneshot
 # NOTE: The working directory and ExecStart path must match your actual install
@@ -55,3 +63,6 @@ TimeoutStopSec=30
 # Exit 2 (hard failures: container down, DB corrupt, key missing) still
 # triggers OnFailure= and delivers an alert.
 SuccessExitStatus=0 1 3
+
+[Install]
+WantedBy=multi-user.target

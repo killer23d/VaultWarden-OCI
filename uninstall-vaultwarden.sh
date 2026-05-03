@@ -269,6 +269,7 @@ SERVICES=(
     vaultwarden-dns-update.service
     vaultwarden-firewall-update.service
     vaultwarden-notify-failure@.service
+    vaultwarden-iptables.service
 )
 
 for unit in "${TIMERS[@]}"; do
@@ -377,6 +378,19 @@ if [[ "${PROJECT_STATE_DIR}" != "/var/lib/vaultwarden" ]] &&    mountpoint -q "$
     warn "If it was added to /etc/fstab by setup.sh, remove the entry manually."
     warn "To unmount: sudo umount ${PROJECT_STATE_DIR}"
 fi
+
+# Remove the fstab data-volume entry written by setup.sh (separate-volume mode only).
+# We match by mount point, not UUID, since the UUID is not stored here.
+# The guard prevents accidentally deleting a boot-volume fstab line.
+if [[ -n "${DATA_VOLUME_MOUNT:-}" ]] && \
+   grep -q "[[:space:]]${DATA_VOLUME_MOUNT}[[:space:]]" /etc/fstab 2>/dev/null; then
+    sed -i "\|[[:space:]]${DATA_VOLUME_MOUNT}[[:space:]]|d" /etc/fstab \
+        && success "Removed fstab entry for data volume: ${DATA_VOLUME_MOUNT}" \
+        || warn "Could not remove fstab entry for ${DATA_VOLUME_MOUNT} — remove it manually."
+else
+    info "No fstab data-volume entry found — nothing to remove."
+fi
+
 # ═══════════════════════════════════════════════════════════════
 # STEP 6 — Remove the cloned project directory (secrets, keys, config)
 #

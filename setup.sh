@@ -45,6 +45,25 @@ source "lib/crypto.sh"
 source "lib/docker.sh"
 source "lib/storage.sh"
 
+# Canonical list of units that receive a ReadWritePaths drop-in in separate-
+# volume mode. Used by both _install_rwpaths_dropin() and the cleanup block
+# in remove_units(). Update this list whenever a new managed unit is added.
+readonly -a _VW_DROPIN_UNITS=(
+    vaultwarden-maintenance.service
+    vaultwarden-db-backup.service
+    vaultwarden-full-backup.service
+    vaultwarden-health.service
+    vaultwarden-dns-update.service
+    vaultwarden-firewall-update.service
+    vaultwarden-notify-failure@.service
+    vaultwarden-maintenance.timer
+    vaultwarden-db-backup.timer
+    vaultwarden-full-backup.timer
+    vaultwarden-health.timer
+    vaultwarden-dns-update.timer
+    vaultwarden-firewall-update.timer
+)
+
 DOMAIN=""
 ADMIN_EMAIL=""
 AUTO_MODE=false
@@ -2329,6 +2348,7 @@ local -a SERVICES=(
     vaultwarden-dns-update.service
     vaultwarden-firewall-update.service
     vaultwarden-notify-failure@.service
+    vaultwarden-iptables.service
 )
 
 _sd_show_help() {
@@ -2529,21 +2549,7 @@ _install_rwpaths_dropin() {
     # works when called through the exact call chain that defines those
     # locals; any future caller outside that chain would silently iterate
     # zero units and install no drop-ins.
-    local -a _DROPIN_UNITS=(
-        vaultwarden-maintenance.service
-        vaultwarden-db-backup.service
-        vaultwarden-full-backup.service
-        vaultwarden-health.service
-        vaultwarden-dns-update.service
-        vaultwarden-firewall-update.service
-        vaultwarden-notify-failure@.service
-        vaultwarden-maintenance.timer
-        vaultwarden-db-backup.timer
-        vaultwarden-full-backup.timer
-        vaultwarden-health.timer
-        vaultwarden-dns-update.timer
-        vaultwarden-firewall-update.timer
-    )
+    local -a _DROPIN_UNITS=("${_VW_DROPIN_UNITS[@]}")
 
     log_info "Installing per-unit ReadWritePaths drop-ins for DATA_VOLUME_MOUNT=${data_mount} ..."
     local unit dropin_dir dropin_file
@@ -2619,7 +2625,7 @@ install_units() {
         return 1
     fi
 
-    local scripts_to_install=(maintenance.sh backup.sh)
+    local scripts_to_install=(maintenance.sh backup.sh setup-iptables.sh)
     for script in "${scripts_to_install[@]}"; do
         local src="$PROJECT_ROOT/$script"
         if [[ ! -f "$src" ]]; then
@@ -2975,7 +2981,7 @@ remove_units() {
     done
 
         for unit in "${TIMERS[@]}" "${SERVICES[@]}"; do
-        local dest="$UNIT_DEST_DIR/$unit"
+            local dest="$UNIT_DEST_DIR/$unit"
         if [[ -f "$dest" ]]; then
             _run rm -f "$dest"
             log_success "Removed: $dest"
@@ -2989,21 +2995,7 @@ remove_units() {
     # reinstall and makes 'systemctl cat <unit>' output misleading.
     # Safe in boot-only mode: the directories simply won't exist.
     # ------------------------------------------------------------------
-    local -a _DROPIN_UNITS=(
-        vaultwarden-maintenance.service
-        vaultwarden-db-backup.service
-        vaultwarden-full-backup.service
-        vaultwarden-health.service
-        vaultwarden-dns-update.service
-        vaultwarden-firewall-update.service
-        vaultwarden-notify-failure@.service
-        vaultwarden-maintenance.timer
-        vaultwarden-db-backup.timer
-        vaultwarden-full-backup.timer
-        vaultwarden-health.timer
-        vaultwarden-dns-update.timer
-        vaultwarden-firewall-update.timer
-    )
+    local -a _DROPIN_UNITS=("${_VW_DROPIN_UNITS[@]}")
     for unit in "${_DROPIN_UNITS[@]}"; do
         local dropin_dir="$UNIT_DEST_DIR/${unit}.d"
         local dropin_file="$dropin_dir/10-state-dir.conf"

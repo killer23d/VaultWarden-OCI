@@ -6,6 +6,35 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
+## [Unreleased]
+
+### Added
+- **Separate-volume storage mode** (`DATA_VOLUME_DEVICE` / `DATA_VOLUME_MOUNT`):
+  `setup.sh` can now format, UUID-mount, and persist a dedicated OCI block
+  volume for all VaultWarden state. Boot-only mode (blank `DATA_VOLUME_DEVICE`)
+  is unchanged and remains the default.
+- **`lib/storage.sh`** — new shared library providing `require_project_state_ready()`
+  (fail-closed guard against writing state to the boot volume when the data
+  disk is absent) and `setup_data_volume()` / `install_docker_mount_guard()`.
+  Sourced by all operational scripts.
+- **Docker systemd mount guard** — `setup.sh` installs a `RequiresMountsFor=`
+  drop-in on `docker.service` in separate-volume mode, preventing Docker from
+  starting if the data disk is not mounted.
+- **Per-unit `ReadWritePaths` drop-ins** — `setup.sh --phase=systemd --install`
+  appends `DATA_VOLUME_MOUNT` to each managed unit's `ReadWritePaths` so
+  `ProtectSystem=strict` does not silently block writes to the data volume.
+
+### Fixed
+- `_install_rwpaths_dropin()` no longer relies on dynamic scope to inherit
+  `SERVICES`/`TIMERS` from `run_phase_systemd()`; unit list is now self-contained
+  (`Bug A` fix).
+- `remove_units()` now cleans up per-unit `.d/` drop-in directories on
+  `setup.sh --phase=systemd --remove`.
+- `uninstall-vaultwarden.sh` now removes the Docker mount guard drop-in
+  (`10-vaultwarden-data-volume.conf`) so Docker is not left in a broken state
+  after uninstall on separate-volume hosts.
+- `BACKUP_DIR` default now derives from `PROJECT_STATE_DIR`, not a hardcoded
+  `/var/lib/vaultwarden` path, in both `setup.sh` and `restore.sh`.
 
 ## [1.0.0] — 2026-03-26
 

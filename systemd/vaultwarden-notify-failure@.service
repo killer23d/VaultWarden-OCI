@@ -56,13 +56,13 @@ ProtectSystem=strict
 ProtectHome=yes
 CapabilityBoundingSet=
 RestrictAddressFamilies=AF_INET AF_INET6
-# The first path in ReadWritePaths is the PROJECT_STATE_DIR.  In boot-volume
-# mode this is /var/lib/vaultwarden.  In separate-volume mode setup.sh patches
-# this line at install time to the configured DATA_VOLUME_MOUNT path so that
-# the cooldown stamp directory and the NOTIFY_FAILED sentinel file can be
-# created under ProtectSystem=strict.
-# The installed unit is the source of truth; do not edit it directly --
-# re-run setup.sh --phase=systemd --install.
+# NOTE: PROJECT_STATE_DIR is the directory where cooldown stamps and the
+# NOTIFY_FAILED sentinel file are written.  In boot-volume mode this is
+# /var/lib/vaultwarden.  In separate-volume mode, setup.sh installs a drop-in at:
+#   /etc/systemd/system/vaultwarden-notify-failure@.service.d/10-state-dir.conf
+# that appends the DATA_VOLUME_MOUNT path to ReadWritePaths.
+# The base unit file is never modified. To inspect the merged result:
+#   systemctl cat vaultwarden-notify-failure@.service
 ReadWritePaths=/var/lib/vaultwarden /run/lock
 
 [Install]
