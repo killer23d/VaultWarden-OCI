@@ -133,6 +133,12 @@ setup_data_volume() {
     local fs_type
     fs_type=$(blkid -o value -s TYPE "$device" 2>/dev/null || true)
     if [[ -z "$fs_type" ]]; then
+        # Safety: refuse to format a device that is currently mounted.
+        if mountpoint -q "$mount_point" 2>/dev/null; then
+            log_error "Refusing to format $device — $mount_point is currently mounted."
+            log_error "Unmount it first: sudo umount $mount_point"
+            return 1
+        fi
         log_info "No filesystem found on $device — formatting as ext4..."
         log_warn "ALL DATA ON $device WILL BE ERASED. Expected on first run."
         local mkfs_out
@@ -161,11 +167,12 @@ setup_data_volume() {
         || { log_error "Cannot determine UUID for $device"; return 1; }
 
     if ! grep -qF "UUID=$dev_uuid" /etc/fstab 2>/dev/null; then
-        printf 'UUID=%s\t%s\text4\tdefaults,nofail,x-systemd.after=local-fs.target\t0\t2\n' \
+        printf 'UUID=%s\t%s\text4\tnoatime,nofail,x-systemd.device-timeout=30s\t0\t2\n' \
             "$dev_uuid" "$mount_point" >> /etc/fstab \
             || { log_error "Failed to append to /etc/fstab"; return 1; }
         log_success "fstab entry added (UUID=$dev_uuid)"
-        systemctl daemon-reload 2>/dev/null || true
+        systemctl daemon-reload 2>/dev/null \
+            || log_warn "systemctl daemon-reload failed — reboot may be required to apply unit changes"
     else
         log_info "fstab entry already present for UUID=$dev_uuid (idempotent)"
     fi
@@ -211,7 +218,8 @@ install_docker_mount_guard() {
         if [[ -f "$drop_in_file" ]]; then
             log_info "DATA_VOLUME_DEVICE cleared — removing stale Docker mount guard"
             rm -f "$drop_in_file"
-            systemctl daemon-reload 2>/dev/null || true
+            systemctl daemon-reload 2>/dev/null \
+            || log_warn "systemctl daemon-reload failed — reboot may be required to apply unit changes"
         else
             log_info "DATA_VOLUME_DEVICE not set — Docker mount guard not needed"
         fi
@@ -246,7 +254,8 @@ RequiresMountsFor=${mount_point}
 DROPIN
 
     chmod 644 "$drop_in_file"
-    systemctl daemon-reload 2>/dev/null || true
+    systemctl daemon-reload 2>/dev/null \
+            || log_warn "systemctl daemon-reload failed — reboot may be required to apply unit changes"
     log_success "Docker mount guard installed: $drop_in_file"
     return 0
 }
