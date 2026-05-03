@@ -95,3 +95,155 @@ require_project_state_ready() {
 
     return 0
 }
+
+# ---------------------------------------------------------------------------
+# setup_data_volume
+# ---------------------------------------------------------------------------
+# Provisions the dedicated data volume when DATA_VOLUME_DEVICE is set.
+# Idempotent: safe to re-run. All decisions are based on current on-disk state.
+# Called only by setup.sh. Requires root.
+# ---------------------------------------------------------------------------
+setup_data_volume() {
+    # Guard: already loaded idempotency check at top of file is sufficient.
+    # This function must only run when sourced from setup.sh (DRY_RUN is set there).
+    local device="${DATA_VOLUME_DEVICE:-}"
+    local mount_point="${DATA_VOLUME_MOUNT:-/mnt/vw-data}"
+    local dry_run="${DRY_RUN:-false}"
+
+    if [[ -z "$device" ]]; then
+        log_info "DATA_VOLUME_DEVICE not set — skipping data volume provisioning (boot-only mode)"
+        return 0
+    fi
+    if [[ "$dry_run" == "true" ]]; then
+        log_info "[DRY RUN] Would provision data volume: $device → $mount_point"
+        return 0
+    fi
+
+    # Validate device is a real block device and path is safe
+    if [[ ! -b "$device" ]]; then
+        log_error "DATA_VOLUME_DEVICE is not a block device: $device"
+        return 1
+    fi
+    if [[ ! "$device" =~ ^/dev/[a-zA-Z0-9/]+$ ]]; then
+        log_error "DATA_VOLUME_DEVICE contains disallowed characters: $device"
+        return 1
+    fi
+
+    # Format only if blank (idempotent)
+    local fs_type
+    fs_type=$(blkid -o value -s TYPE "$device" 2>/dev/null || true)
+    if [[ -z "$fs_type" ]]; then
+        log_info "No filesystem found on $device — formatting as ext4..."
+        log_warn "ALL DATA ON $device WILL BE ERASED. Expected on first run."
+        mkfs.ext4 -F -L vw-data "$device" > /dev/null 2>&1 \
+            || { log_error "mkfs.ext4 failed for $device"; return 1; }
+        log_success "Formatted $device as ext4 (label: vw-data)"
+    elif [[ "$fs_type" == "ext4" ]]; then
+        log_info "Existing ext4 on $device — skipping format (idempotent)"
+    else
+        log_error "Unexpected filesystem '$fs_type' on $device. Refusing to overwrite."
+        log_error "If intentional, set DATA_VOLUME_DEVICE= and manage the volume manually."
+        return 1
+    fi
+
+    # Create mount point
+    [[ -d "$mount_point" ]] || mkdir -p "$mount_point" \
+        || { log_error "Cannot create mount point: $mount_point"; return 1; }
+    chmod 755 "$mount_point"
+
+    # fstab entry (UUID-based, idempotent)
+    local dev_uuid
+    dev_uuid=$(blkid -o value -s UUID "$device" 2>/dev/null || true)
+    [[ -n "$dev_uuid" ]] \
+        || { log_error "Cannot determine UUID for $device"; return 1; }
+
+    if ! grep -qF "UUID=$dev_uuid" /etc/fstab 2>/dev/null; then
+        printf 'UUID=%s\t%s\text4\tdefaults,nofail,x-systemd.after=local-fs.target\t0\t2\n' \
+            "$dev_uuid" "$mount_point" >> /etc/fstab \
+            || { log_error "Failed to append to /etc/fstab"; return 1; }
+        log_success "fstab entry added (UUID=$dev_uuid)"
+        systemctl daemon-reload 2>/dev/null || true
+    else
+        log_info "fstab entry already present for UUID=$dev_uuid (idempotent)"
+    fi
+
+    # Mount (idempotent)
+    if mountpoint -q "$mount_point" 2>/dev/null; then
+        log_info "$mount_point already mounted (idempotent)"
+    else
+        mount "$mount_point" \
+            || { log_error "mount failed for $mount_point — check /etc/fstab"; return 1; }
+        log_success "Mounted $device at $mount_point"
+    fi
+
+    # Sentinel file (idempotent)
+    local sentinel="$mount_point/.vw-data-volume"
+    if [[ ! -f "$sentinel" ]]; then
+        printf 'VaultWarden-OCI data volume\nDevice: %s\nMounted: %s\nCreated: %s\n' \
+            "$device" "$mount_point" "$(date -Iseconds)" > "$sentinel" \
+            || { log_error "Failed to write sentinel: $sentinel"; return 1; }
+        chmod 444 "$sentinel"
+        log_success "Sentinel written: $sentinel"
+    else
+        log_info "Sentinel already present (idempotent): $sentinel"
+    fi
+
+    log_success "Data volume ready: $device → $mount_point"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# install_docker_mount_guard
+# ---------------------------------------------------------------------------
+# Installs/removes a Docker systemd drop-in enforcing RequiresMountsFor on
+# DATA_VOLUME_MOUNT so Docker never starts without the data volume.
+# Idempotent. Called only by setup.sh. Requires root.
+# ---------------------------------------------------------------------------
+install_docker_mount_guard() {
+    local drop_in_dir="/etc/systemd/system/docker.service.d"
+    local drop_in_file="$drop_in_dir/10-vaultwarden-data-volume.conf"
+    local dry_run="${DRY_RUN:-false}"
+
+    if [[ -z "${DATA_VOLUME_DEVICE:-}" ]]; then
+        if [[ -f "$drop_in_file" ]]; then
+            log_info "DATA_VOLUME_DEVICE cleared — removing stale Docker mount guard"
+            rm -f "$drop_in_file"
+            systemctl daemon-reload 2>/dev/null || true
+        else
+            log_info "DATA_VOLUME_DEVICE not set — Docker mount guard not needed"
+        fi
+        return 0
+    fi
+
+    if [[ "$dry_run" == "true" ]]; then
+        log_info "[DRY RUN] Would install Docker mount guard for: ${DATA_VOLUME_MOUNT}"
+        return 0
+    fi
+
+    local mount_point="${DATA_VOLUME_MOUNT:-/mnt/vw-data}"
+    if [[ ! "$mount_point" =~ ^/[a-zA-Z0-9/_-]+$ ]]; then
+        log_error "DATA_VOLUME_MOUNT contains disallowed characters: $mount_point"
+        return 1
+    fi
+
+    mkdir -p "$drop_in_dir" \
+        || { log_error "Cannot create drop-in dir: $drop_in_dir"; return 1; }
+
+    if [[ -f "$drop_in_file" ]] \
+        && grep -qF "RequiresMountsFor=$mount_point" "$drop_in_file" 2>/dev/null; then
+        log_info "Docker mount guard already installed for $mount_point (idempotent)"
+        return 0
+    fi
+
+    cat > "$drop_in_file" << DROPIN
+# Managed by VaultWarden-OCI setup.sh — do not edit by hand.
+# Requires the data volume to be mounted before Docker starts.
+[Unit]
+RequiresMountsFor=${mount_point}
+DROPIN
+
+    chmod 644 "$drop_in_file"
+    systemctl daemon-reload 2>/dev/null || true
+    log_success "Docker mount guard installed: $drop_in_file"
+    return 0
+}

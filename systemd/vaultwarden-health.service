@@ -48,8 +48,8 @@ ProtectHome=read-only
 # /opt/vaultwarden-scripts is intentionally excluded: scripts are read+executed
 # only and must not be writable at runtime.
 ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock
-TimeoutStartSec=300
-TimeoutStopSec=60
+TimeoutStartSec=120
+TimeoutStopSec=30
 # Exit code contract:
 #   0 -- all checks passed           -> success, no notification
 #   1 -- one or more warnings        -> success (non-critical, no OnFailure= noise)
