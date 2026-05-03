@@ -2524,9 +2524,30 @@ _install_rwpaths_dropin() {
         return 1
     fi
 
+    # Self-contained unit list — do NOT rely on SERVICES/TIMERS from the
+    # enclosing run_phase_systemd() scope. Dynamic-scope inheritance only
+    # works when called through the exact call chain that defines those
+    # locals; any future caller outside that chain would silently iterate
+    # zero units and install no drop-ins.
+    local -a _DROPIN_UNITS=(
+        vaultwarden-maintenance.service
+        vaultwarden-db-backup.service
+        vaultwarden-full-backup.service
+        vaultwarden-health.service
+        vaultwarden-dns-update.service
+        vaultwarden-firewall-update.service
+        vaultwarden-notify-failure@.service
+        vaultwarden-maintenance.timer
+        vaultwarden-db-backup.timer
+        vaultwarden-full-backup.timer
+        vaultwarden-health.timer
+        vaultwarden-dns-update.timer
+        vaultwarden-firewall-update.timer
+    )
+
     log_info "Installing per-unit ReadWritePaths drop-ins for DATA_VOLUME_MOUNT=${data_mount} ..."
     local unit dropin_dir dropin_file
-    for unit in "${SERVICES[@]}" "${TIMERS[@]}"; do
+    for unit in "${_DROPIN_UNITS[@]}"; do
         dropin_dir="${UNIT_DEST_DIR}/${unit}.d"
         dropin_file="${dropin_dir}/10-state-dir.conf"
         if [[ "$DRY_RUN" == "true" ]]; then
@@ -2953,11 +2974,48 @@ remove_units() {
         fi
     done
 
-    for unit in "${TIMERS[@]}" "${SERVICES[@]}"; do
+        for unit in "${TIMERS[@]}" "${SERVICES[@]}"; do
         local dest="$UNIT_DEST_DIR/$unit"
         if [[ -f "$dest" ]]; then
             _run rm -f "$dest"
             log_success "Removed: $dest"
+        fi
+    done
+
+    # ------------------------------------------------------------------
+    # Clean up per-unit ReadWritePaths drop-in directories written by
+    # _install_rwpaths_dropin (separate-volume mode). Leaving stale .d/
+    # directories behind causes spurious ReadWritePaths entries on
+    # reinstall and makes 'systemctl cat <unit>' output misleading.
+    # Safe in boot-only mode: the directories simply won't exist.
+    # ------------------------------------------------------------------
+    local -a _DROPIN_UNITS=(
+        vaultwarden-maintenance.service
+        vaultwarden-db-backup.service
+        vaultwarden-full-backup.service
+        vaultwarden-health.service
+        vaultwarden-dns-update.service
+        vaultwarden-firewall-update.service
+        vaultwarden-notify-failure@.service
+        vaultwarden-maintenance.timer
+        vaultwarden-db-backup.timer
+        vaultwarden-full-backup.timer
+        vaultwarden-health.timer
+        vaultwarden-dns-update.timer
+        vaultwarden-firewall-update.timer
+    )
+    for unit in "${_DROPIN_UNITS[@]}"; do
+        local dropin_dir="$UNIT_DEST_DIR/${unit}.d"
+        local dropin_file="$dropin_dir/10-state-dir.conf"
+        if [[ -f "$dropin_file" ]]; then
+            _run rm -f "$dropin_file"
+            log_success "Removed ReadWritePaths drop-in: $dropin_file"
+        fi
+        # Remove the .d/ dir only if it is now empty (preserve any
+        # drop-ins installed by other tools, e.g. Docker or the OS).
+        if [[ -d "$dropin_dir" ]] && [[ -z "$(ls -A "$dropin_dir" 2>/dev/null)" ]]; then
+            _run rmdir "$dropin_dir"
+            log_success "Removed empty drop-in dir: $dropin_dir"
         fi
     done
 
