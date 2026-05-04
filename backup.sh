@@ -877,19 +877,35 @@ perform_full_backup() {
     fi
 
     if [[ "$db_snapshot_ok" == "true" ]]; then
-        b_log_info "Injecting clean DB snapshot into archive..."
-        local temp_tar_raw="$shared_tmpdir/${backup_label}_backup_$timestamp.tar"
+    b_log_info "Injecting clean DB snapshot into archive..."
+    local temp_tar_raw="$shared_tmpdir/${backup_label}_backup_$timestamp.tar"
 
-        if zstd --no-progress -d -T0 -c "$temp_tar" 2>/dev/null > "$temp_tar_raw" \
-            && tar -rf "$temp_tar_raw" -C "$snap_dir" "${state_dir#/}/data/db.sqlite3" 2>/dev/null \
-            && zstd --no-progress -T0 -3 "$temp_tar_raw" -o "${temp_tar}.new" 2>/dev/null
-        then
-            mv "${temp_tar}.new" "$temp_tar"
-            rm -f "$temp_tar_raw"
-            b_log_info "Clean DB snapshot injected"
-        else
-            b_log_warn "DB snapshot injection failed — archive will use live DB copy"
-            rm -f "$temp_tar_raw" "${temp_tar}.new" 2>/dev/null || true
+    # Pre-check: verify the snapshot staged at the expected relative path
+    # before attempting injection. Mismatch here means the path prefix
+    # derived from state_dir does not match what was staged — log clearly
+    # rather than silently falling through to the fallback rebuild.
+    local _snap_rel="${state_dir#/}/data/db.sqlite3"
+    if [[ ! -f "$snap_dir/$_snap_rel" ]]; then
+        b_log_warn "DB snapshot injection skipped: expected staged file not found:"
+        b_log_warn "  $snap_dir/$_snap_rel"
+        b_log_warn "Falling back to live DB in archive."
+        db_snapshot_ok=false
+    fi
+fi
+
+if [[ "$db_snapshot_ok" == "true" ]]; then
+    local _tar_inject_err
+    if zstd --no-progress -d -T0 -c "$temp_tar" 2>/dev/null > "$temp_tar_raw" \
+        && _tar_inject_err=$(tar -rf "$temp_tar_raw" -C "$snap_dir" "$_snap_rel" 2>&1) \
+        && zstd --no-progress -T0 -3 "$temp_tar_raw" -o "${temp_tar}.new" 2>/dev/null
+    then
+        mv "${temp_tar}.new" "$temp_tar"
+        rm -f "$temp_tar_raw"
+        b_log_info "Clean DB snapshot injected"
+    else
+        [[ -n "${_tar_inject_err:-}" ]] && b_log_warn "DB snapshot injection tar error: ${_tar_inject_err}"
+        b_log_warn "DB snapshot injection failed — archive will use live DB copy"
+        rm -f "$temp_tar_raw" "${temp_tar}.new" 2>/dev/null || true
             tar_excludes=(
                 "--exclude=${SCRIPT_DIR#/}/.git"
                 "--exclude=${SCRIPT_DIR#/}/backups"

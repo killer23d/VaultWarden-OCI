@@ -1540,9 +1540,22 @@ restore_full() {
     fi
 
     # Ensure storage sentinel survives restores in separate-volume mode.
+    # Primary path: DATA_VOLUME_MOUNT is populated (normal operation).
+    # Fallback path: DATA_VOLUME_MOUNT was not exported (partial env load) but
+    #   PROJECT_STATE_DIR is set and is itself a live mountpoint — in
+    #   separate-volume mode these two variables always resolve to the same path,
+    #   so the sentinel write is safe and correct.
+    _sentinel_dir=""
     if [[ -n "${DATA_VOLUME_MOUNT:-}" ]] && mountpoint -q "${DATA_VOLUME_MOUNT}" 2>/dev/null; then
-        touch "${DATA_VOLUME_MOUNT}/.vw-data-volume" 2>/dev/null ||             log_warn "Could not re-touch volume sentinel at ${DATA_VOLUME_MOUNT}/.vw-data-volume"
+        _sentinel_dir="${DATA_VOLUME_MOUNT}"
+    elif [[ -n "${STATE_DIR:-}" ]] && mountpoint -q "${STATE_DIR}" 2>/dev/null; then
+        _sentinel_dir="${STATE_DIR}"
     fi
+    if [[ -n "$_sentinel_dir" ]]; then
+        touch "${_sentinel_dir}/.vw-data-volume" 2>/dev/null || \
+            log_warn "Could not re-touch volume sentinel at ${_sentinel_dir}/.vw-data-volume"
+    fi
+    unset _sentinel_dir
 
     chown -R "${puid}:${pgid}" "$state_dir/data" 2>/dev/null || log_warn "Could not set ownership on $state_dir/data"
     purge_wal_shm "$state_dir/data/db.sqlite3" || true
