@@ -16,6 +16,7 @@
 #                                  (setup.sh only).
 
 [[ -n "${VAULTWARDEN_STORAGE_LIB_LOADED:-}" ]] && return 0
+set -euo pipefail
 readonly VAULTWARDEN_STORAGE_LIB_LOADED=1
 
 # ---------------------------------------------------------------------------
