@@ -2251,7 +2251,7 @@ _ss_main() {
     if ! require_commands sops age python3 jq htpasswd; then
         log_error "Missing required commands"
         log_info "Install htpasswd with: sudo apt-get install apache2-utils"
-        exit 1
+        return 1
     fi
 
     # Verify that the installed htpasswd binary supports bcrypt
@@ -2263,7 +2263,7 @@ _ss_main() {
         log_error "htpasswd on this system does not support bcrypt (-B flag)"
         log_error "This is required for Caddy admin basic-auth hashing."
         log_info  "Fix: sudo apt-get install --reinstall apache2-utils"
-        exit 1
+        return 1
     fi
 
     if ! ensure_prerequisites;    then exit 1; fi
@@ -2273,7 +2273,7 @@ _ss_main() {
         log_info "Keeping existing secrets - no changes made"
         log_info "Tip: to rotate a single field run: ./edit-secrets.sh --rotate FIELD"
         log_info "Tip: to export a recovery kit run:  ./edit-secrets.sh --export-recovery-kit"
-        exit 0
+        return 0
     fi
 
     echo ""
@@ -2282,7 +2282,7 @@ _ss_main() {
     log_info "═══════════════════════════════════════════════════════════"
     if ! collect_secrets; then
         log_error "Failed to collect secrets"
-        exit 1
+        return 1
     fi
 
     echo ""
@@ -2291,7 +2291,7 @@ _ss_main() {
     log_info "═══════════════════════════════════════════════════════════"
     if ! write_secrets; then
         log_error "Failed to write secrets"
-        exit 1
+        return 1
     fi
 
     # Scope the SECRET_* cleanup sweep to only the exact keys
@@ -3425,7 +3425,7 @@ main() {
     else
         show_post_install_summary "auto"
     fi
-    exit 0
+    return 0
 }
 
 main "$@"
