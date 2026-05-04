@@ -593,8 +593,6 @@ create_env_file() {
 
     local temp_env=""
     temp_env=$(mktemp -p "$(dirname "$env_file")" .env.tmp.XXXXXXXXXX) || return 1
-    # Ensure temp file is cleaned up on any failure path from this point.
-    trap 'rm -f "$temp_env" 2>/dev/null || true' RETURN
 
     # Compute PROJECT_STATE_DIR value: when a data volume is configured it MUST
     # equal DATA_VOLUME_MOUNT; otherwise use the default boot-volume location.
@@ -634,7 +632,7 @@ create_env_file() {
             print;
         }' "$env_file" > "$temp_env"
 
-    mv "$temp_env" "$env_file" || return 1
+    mv "$temp_env" "$env_file" || { rm -f "$temp_env"; return 1; }
 
     if [[ "$USE_LATEST" == "true" ]]; then
         temp_env=$(mktemp -p "$(dirname "$env_file")" .env.tmp.XXXXXXXXXX) || return 1
@@ -646,7 +644,7 @@ create_env_file() {
             sub(/^BUSYBOX_VERSION=.*/, "BUSYBOX_VERSION=latest");
             print;
         }' "$env_file" > "$temp_env"
-        mv "$temp_env" "$env_file" || return 1
+        mv "$temp_env" "$env_file" || { rm -f "$temp_env"; return 1; }
     fi
 
     # Ensure the canonical production Age key path is written to .env so the
@@ -656,7 +654,7 @@ create_env_file() {
         sub(/^SOPS_AGE_KEY_FILE=.*/, "SOPS_AGE_KEY_FILE=/etc/vaultwarden/age-key.txt");
         print;
     }' "$env_file" > "$temp_env"
-    mv "$temp_env" "$env_file" || return 1
+    mv "$temp_env" "$env_file" || { rm -f "$temp_env"; return 1; }
 
     # In separate-volume mode, auto-populate BACKUP_DIR if it is currently
     # blank in .env.  This ensures backup.sh finds backups on the data volume
