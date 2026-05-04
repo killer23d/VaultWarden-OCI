@@ -696,10 +696,17 @@ else
     info "/swapfile not found — skipping."
 fi
 
-# Remove fstab entry for swapfile
+# Remove fstab entry for swapfile — atomic mktemp + mv, consistent with Step 5c.
 if grep -q '^/swapfile' /etc/fstab 2>/dev/null; then
-    sed -i '/^\/swapfile[[:space:]]/d' /etc/fstab \
-        && success "Removed /swapfile entry from /etc/fstab."
+    _FSTAB_TMP=$(mktemp /etc/fstab.uninstall.XXXXXXXXXX)
+    if sed '/^\/swapfile[[:space:]]/d' /etc/fstab > "$_FSTAB_TMP" \
+       && mv -f "$_FSTAB_TMP" /etc/fstab; then
+        success "Removed /swapfile entry from /etc/fstab."
+    else
+        rm -f "$_FSTAB_TMP" 2>/dev/null || true
+        warn "Could not update /etc/fstab atomically — remove the swapfile entry manually:"
+        warn "  sudo nano /etc/fstab   # delete the line beginning with /swapfile"
+    fi
 fi
 
 # Remove vm.swappiness entry added by setup.sh
