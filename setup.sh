@@ -43,6 +43,8 @@ source "lib/common.sh"
 init_common_lib "$0"
 source "lib/crypto.sh"
 source "lib/docker.sh"
+source "lib/backup-utils.sh"
+source "lib/secrets.sh"
 source "lib/storage.sh"
 
 # ---------------------------------------------------------------------------
