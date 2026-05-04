@@ -562,11 +562,11 @@ sudo ./setup.sh --phase=systemd --install
 
 ### Failure Notifications
 
-Every systemd service unit sets `OnFailure=vaultwarden-notify-failure@%n.service`. That template unit sends an email via Postfix. To confirm failure email delivery:
+Every systemd service unit sets `OnFailure=vaultwarden-notify-failure.service`. That unit sends an email via Postfix. To confirm failure email delivery:
 
 ```bash
 # Simulate a failure notification
-systemctl start vaultwarden-notify-failure@vaultwarden-db-backup.service
+systemctl start vaultwarden-notify-failure.service
 ```
 
 ### Email Notifications

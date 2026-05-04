@@ -4,7 +4,7 @@ Documentation=https://github.com/killer23d/VaultWarden-OCI
 After=docker.service network-online.target
 Requires=docker.service
 ConditionPathExists=/opt/vaultwarden-scripts/backup.sh
-OnFailure=vaultwarden-notify-failure@%n.service
+OnFailure=vaultwarden-notify-failure.service
 
 [Service]
 Type=oneshot
@@ -25,7 +25,7 @@ ExecCondition=/bin/bash -c '! test -f /tmp/.vw_maintenance.lock'
 # The flock in backup.sh main() is the authoritative exclusive guard.
 # NOTE: --email is intentionally omitted. Add it back once EMAIL_PROVIDER
 # credentials are configured:  sudo systemctl edit vaultwarden-db-backup.service
-# Failures are still reported via OnFailure=vaultwarden-notify-failure@%n.service.
+# Failures are still reported via OnFailure=vaultwarden-notify-failure.service.
 # --full-verification decrypts the archive and runs a structural integrity check
 # (SQLite PRAGMA or tar -tz) before the offsite rclone sync.
 ExecStart=/opt/vaultwarden-scripts/backup.sh --type db --rclone --full-verification

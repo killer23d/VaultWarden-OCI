@@ -421,7 +421,7 @@ sudo ./setup.sh --phase=systemd --install
 | `vaultwarden-dns-update.timer` | Every hour | `maintenance.sh --update-dns` |
 | `vaultwarden-firewall-update.timer` | Saturday 04:00 | `maintenance.sh --update-firewall` |
 
-All services emit `OnFailure=vaultwarden-notify-failure@%n.service` — failures trigger an email via the notification template unit.
+All services emit `OnFailure=vaultwarden-notify-failure.service` — failures trigger an email via the notification unit.
 
 > **Legacy:** `cron-setup.sh` is **no longer present** in the repository. If you have legacy cron jobs from a prior install, remove them and migrate to `setup.sh --phase=systemd --install`.
 

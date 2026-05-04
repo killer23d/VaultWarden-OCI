@@ -1,7 +1,6 @@
 [Unit]
-Description=VaultWarden Failure Notification for %i
-# Template unit: instantiated by OnFailure=vaultwarden-notify-failure@%n.service
-# %i receives the failed unit name (e.g. vaultwarden-health.service)
+Description=VaultWarden Failure Notification
+# Shared notifier unit triggered by OnFailure=vaultwarden-notify-failure.service.
 # Guard: if the env file is absent systemd logs a clear condition-not-met
 # message rather than a cryptic EnvironmentFile load failure.
 ConditionPathExists=/etc/vaultwarden/vaultwarden.env
@@ -12,7 +11,7 @@ WorkingDirectory=/opt/vaultwarden-scripts
 EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
 ExecStart=/bin/bash -c '\
   set -euo pipefail; \
-  FAILED_UNIT="%i"; \
+  FAILED_UNIT="unknown-unit"; \
   STATE_DIR="${PROJECT_STATE_DIR:?PROJECT_STATE_DIR not set — check /etc/vaultwarden/vaultwarden.env}"; \
   COOLDOWN_DIR="${STATE_DIR}/.vw-health-alert"; \
   mkdir -p "$COOLDOWN_DIR" 2>/dev/null || true; \
@@ -28,8 +27,8 @@ ExecStart=/bin/bash -c '\
     LIB_DIR=/opt/vaultwarden-scripts/lib; \
     source "${LIB_DIR}/common.sh"; \
     init_common_lib notify-failure; \
-    body=$(printf "The systemd unit %%s failed at %%s.\nCheck logs with:\n  journalctl -u %%s -n 50\n" \
-      "$FAILED_UNIT" "$(date)" "$FAILED_UNIT"); \
+    body=$(printf "A VaultWarden systemd unit failed at %%s.\nReview failed units with:\n  systemctl --failed\n" \
+      "$(date)"); \
     send_email "FAILURE: ${FAILED_UNIT} on %H" "${body}" \
       || { touch "${STATE_DIR}/NOTIFY_FAILED_${FAILED_UNIT}" 2>/dev/null || true; }; \
   ) 9>"$LOCK_FILE" \
@@ -52,10 +51,10 @@ RestrictAddressFamilies=AF_INET AF_INET6
 # NOTE: PROJECT_STATE_DIR is the directory where cooldown stamps and the
 # NOTIFY_FAILED sentinel file are written.  In boot-volume mode this is
 # /var/lib/vaultwarden.  In separate-volume mode, setup.sh installs a drop-in at:
-#   /etc/systemd/system/vaultwarden-notify-failure@.service.d/10-state-dir.conf
+#   /etc/systemd/system/vaultwarden-notify-failure.service.d/10-state-dir.conf
 # that appends the DATA_VOLUME_MOUNT path to ReadWritePaths.
 # The base unit file is never modified. To inspect the merged result:
-#   systemctl cat vaultwarden-notify-failure@.service
+#   systemctl cat vaultwarden-notify-failure.service
 ReadWritePaths=/var/lib/vaultwarden /run/lock
 
 [Install]

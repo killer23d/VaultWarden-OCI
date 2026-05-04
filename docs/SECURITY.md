@@ -535,7 +535,7 @@ All VaultWarden systemd service units are hardened consistently:
 User=root
 NoNewPrivileges=yes
 PrivateTmp=yes          # Isolated /tmp per service (prevents name collisions)
-OnFailure=vaultwarden-notify-failure@%n.service
+OnFailure=vaultwarden-notify-failure.service
 EnvironmentFile=/etc/vaultwarden/vaultwarden.env
 ```
 
@@ -544,7 +544,7 @@ EnvironmentFile=/etc/vaultwarden/vaultwarden.env
   maintenance units.
 - `OnFailure=` is set on **all** service units — including `firewall-update` and
   `dns-update` — so no failure goes unnotified.
-- The `vaultwarden-notify-failure@.service` template uses `printf` for email body
+- The `vaultwarden-notify-failure.service` template uses `printf` for email body
   construction (bash `"..."` strings do not expand `\n`) and calls `init_common_lib`
   to enable `set -euo pipefail` consistently.
 

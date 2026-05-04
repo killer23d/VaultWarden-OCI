@@ -540,7 +540,7 @@ sudo ./setup.sh --phase=systemd [OPTIONS]
 - Patches `SCRIPT_DIR` and `lib/` source paths at install time (prevents local privilege escalation)
 - Split-brain detection: warns when `/opt/` scripts are older than the git repo copy
 - Installs and enables systemd `.service` + `.timer` unit pairs for each scheduled job
-- All service units include `NoNewPrivileges=yes`, `PrivateTmp=yes`, and `OnFailure=vaultwarden-notify-failure@%n.service`
+- All service units include `NoNewPrivileges=yes`, `PrivateTmp=yes`, and `OnFailure=vaultwarden-notify-failure.service`
 
 **Options:**
 
@@ -565,7 +565,7 @@ sudo ./setup.sh --phase=systemd [OPTIONS]
 
 Sunday maintenance is intentionally absent — the 3 AM full backup fills that slot. `RandomizedDelaySec=60` on `vaultwarden-db-backup` spreads post-reboot catch-up bursts.
 
-**Failure notifications:** Every service unit sets `OnFailure=vaultwarden-notify-failure@%n.service`. That template unit sources `lib/common.sh`, calls `send_email()`, and is hardened with `NoNewPrivileges=yes` and `PrivateTmp=yes`.
+**Failure notifications:** Every service unit sets `OnFailure=vaultwarden-notify-failure.service`. That unit sources `lib/common.sh`, calls `send_email()`, and is hardened with `NoNewPrivileges=yes` and `PrivateTmp=yes`.
 
 ```bash
 sudo ./setup.sh --phase=systemd --install
@@ -580,9 +580,9 @@ make systemd-remove
 make timers          # List all vaultwarden timers (next trigger + last run)
 ```
 
-#### `vaultwarden-notify-failure@.service` *(failure notification template)*
+#### `vaultwarden-notify-failure.service` *(failure notification service)*
 
-**Purpose:** Send an email notification whenever a VaultWarden systemd service fails. This is a [systemd template unit](https://www.freedesktop.org/software/systemd/man/systemd.unit.html#Description) — the `@` suffix means it is never started directly; instead, each service unit instantiates it via `OnFailure=vaultwarden-notify-failure@%n.service`.
+**Purpose:** Send an email notification whenever a VaultWarden systemd service fails. This is a shared oneshot service triggered by `OnFailure=vaultwarden-notify-failure.service`.
 
 **How specifier expansion works:**
 
@@ -591,7 +591,7 @@ make timers          # List all vaultwarden timers (next trigger + last run)
 | `%n` | Full name of the *triggering* unit (used in `OnFailure=`) | `vaultwarden-health.service` |
 | `%i` | Instance name — everything between `@` and `.service` | `vaultwarden-health.service` |
 
-When `vaultwarden-health.service` fails, systemd starts `vaultwarden-notify-failure@vaultwarden-health.service`. Inside that unit, `%i` resolves to `vaultwarden-health.service`, which is substituted into the email subject and body at runtime.
+When `vaultwarden-health.service` fails, systemd starts `vaultwarden-notify-failure.service`, which sends a generic failure notification email.
 
 **Email output:**
 
@@ -620,10 +620,10 @@ To verify the notification pipeline end-to-end without waiting for a real failur
 
 ```bash
 # Trigger a test notification as if vaultwarden-health.service had failed
-sudo systemctl start vaultwarden-notify-failure@vaultwarden-health.service
+sudo systemctl start vaultwarden-notify-failure.service
 
 # Check the notification unit's own logs
-journalctl -u vaultwarden-notify-failure@vaultwarden-health.service -n 30
+journalctl -u vaultwarden-notify-failure.service -n 30
 
 # Verify the outgoing email in the Postfix queue / delivery log
 docker compose logs postfix --tail=30
