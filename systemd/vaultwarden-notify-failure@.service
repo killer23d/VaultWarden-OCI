@@ -9,7 +9,7 @@ ConditionPathExists=/etc/vaultwarden/vaultwarden.env
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/vaultwarden-scripts
-EnvironmentFile=/etc/vaultwarden/vaultwarden.env
+EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
 ExecStart=/bin/bash -c '\
   set -euo pipefail; \
   FAILED_UNIT="%i"; \

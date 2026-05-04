@@ -50,6 +50,7 @@ StartLimitBurst=3
 # if not already root, so we allow that escalation path here.
 PrivateTmp=yes
 ProtectSystem=strict
+ProtectHome=yes
 ReadWritePaths=/run/xtables.lock
 
 StandardOutput=journal
