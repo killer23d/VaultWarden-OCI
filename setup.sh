@@ -2552,7 +2552,11 @@ _install_rwpaths_dropin() {
     local -a _DROPIN_UNITS=("${_VW_DROPIN_UNITS[@]}")
 
     log_info "Installing per-unit ReadWritePaths drop-ins for DATA_VOLUME_MOUNT=${data_mount} ..."
-    local unit dropin_dir dropin_file
+    local unit dropin_dir dropin_file _mount_unit
+    _mount_unit=$(systemd-escape --path --suffix=mount "$data_mount" 2>/dev/null) || {
+        log_error "systemd-escape failed for DATA_VOLUME_MOUNT=$data_mount"
+        return 1
+    }
     for unit in "${_DROPIN_UNITS[@]}"; do
         dropin_dir="${UNIT_DEST_DIR}/${unit}.d"
         dropin_file="${dropin_dir}/10-state-dir.conf"
@@ -2562,9 +2566,17 @@ _install_rwpaths_dropin() {
         fi
         mkdir -p "$dropin_dir" || { log_error "Cannot create drop-in dir: $dropin_dir"; return 1; }
         cat > "$dropin_file" << DROPIN
-# Written by setup.sh --phase=systemd --install
-# Grants this unit write access to DATA_VOLUME_MOUNT under ProtectSystem=strict.
-# Remove by re-running setup.sh --phase=systemd --remove, or the uninstaller.
+# Written by setup.sh --phase=systemd --install — do not edit by hand.
+# Regenerate: sudo ./setup.sh --phase=systemd --install
+#
+# [Unit]  After=  — this unit waits for the data volume to be mounted before
+#                   starting, even when triggered by a timer or dependency chain.
+# [Service] ReadWritePaths= — grants write access to DATA_VOLUME_MOUNT under
+#                             ProtectSystem=strict (without this, all writes to
+#                             the data volume are silently denied by the kernel).
+[Unit]
+After=${_mount_unit}
+
 [Service]
 ReadWritePaths=${data_mount}
 DROPIN
