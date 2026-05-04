@@ -722,7 +722,10 @@ setup_directories() {
         return 1
     fi
 
-    chown -R "${puid}:${pgid}" "$project_state_dir" || return 1
+    for _dir in data logs caddy fail2ban backups; do
+    [[ -d "${project_state_dir}/${_dir}" ]] && \
+        chown -R "${puid}:${pgid}" "${project_state_dir}/${_dir}" || return 1
+    done
 
     # Use {} + (batch exec) instead of {} \; (per-file exec) for performance.
     find "${project_state_dir}" -type d -exec chmod 750 {} + 2>/dev/null || return 1
