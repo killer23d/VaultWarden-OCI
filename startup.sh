@@ -308,34 +308,43 @@ validate_prerequisites() {
 # ---------------------------------------------------------------------------
 # prepare_directories
 # ---------------------------------------------------------------------------
+# Ensures all PROJECT_STATE_DIR subdirectories required by Docker bind mounts
+# exist on the host before `docker compose up`.  Uses absolute paths so that
+# separate-volume installs (PROJECT_STATE_DIR=/mnt/vw-data) create dirs on
+# the data volume, not under PROJECT_ROOT.
+#
+# prepare_log_directories() handles logs/ and backups/ with ownership logic;
+# this function covers the remaining non-log subtrees.
+# ---------------------------------------------------------------------------
 prepare_directories() {
-  log_info "Preparing required directories..."
+  local project_state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
 
   local required_dirs=(
-    "logs/vaultwarden"
-    "logs/caddy"
-    "logs/fail2ban"
-    "logs/postfix"
-    "ssl"
-    "caddy/data"
-    "caddy/config"
-    "fail2ban/data"
+    "${project_state_dir}/data"
+    "${project_state_dir}/caddy/data"
+    "${project_state_dir}/caddy/config"
+    "${project_state_dir}/fail2ban"
   )
 
   if [[ "$DRY_RUN" == "true" ]]; then
-    log_info "[DRY RUN] Would create directories: ${required_dirs[*]}"
+    log_info "[DRY RUN] Would create state directories: ${required_dirs[*]}"
     return 0
   fi
 
+  log_info "Preparing required state directories under ${project_state_dir}..."
+
+  local dir
   for dir in "${required_dirs[@]}"; do
-    mkdir -p "$dir"
+    if ! _maybe_sudo mkdir -p "$dir"; then
+      log_warn "Could not create directory: $dir (init container will retry)"
+    fi
   done
 
-  log_success "Directories prepared"
+  log_success "State directories prepared"
   return 0
 }
 
-# ENHANCED: Prepare log directories with correct ownership
+# Prepare log directories with correct ownership
 prepare_log_directories() {
   log_info "Ensuring base state directory exists..."
 
@@ -861,7 +870,6 @@ main() {
   log_info "Starting VaultWarden-OCI startup workflow..."
 
   load_environment || exit 1
-  # Fail closed if the expected data volume is not mounted.
   require_project_state_ready || exit 1
   validate_prerequisites || exit 1
   prepare_directories || exit 1
