@@ -1336,6 +1336,16 @@ run_phase_secrets() {
 local CLEANUP_ACTIONS=()
 _ss_register_cleanup() { CLEANUP_ACTIONS+=("$1"); }
 
+# Phase-local defaults (set -u safe): these flags are only parsed inside the
+# secrets phase and may be unset when the caller does not pass explicit options.
+local SKIP_VALIDATION=false
+local SKIP_OPTIONAL=false
+local AUTO_FIX=true
+local EXPORT_RECOVERY_KIT=false
+local QUIET_SUMMARY=false
+# Ensure cleanup trap can always iterate safely even when setup exits early.
+declare -A _COLLECTED_SECRETS=()
+
 # Replace eval with a named dispatch helper to eliminate the
 # structural eval risk.  Each cleanup action is a string token whose first
 # word is looked up in the dispatch table; unknown tokens are logged and
@@ -1475,6 +1485,15 @@ while [[ $# -gt 0 ]]; do
         *) log_error "Unknown option: $1"; _ss_show_help; exit 1 ;;
     esac
 done
+
+# Resolve the Age key path used by prerequisite checks in this phase.
+# Prefer an explicitly exported SOPS_AGE_KEY_FILE, otherwise default to the
+# repo-local key path produced during setup. Normalize relative paths to an
+# absolute path so checks work consistently regardless of the current CWD.
+local AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-secrets/keys/age-key.txt}"
+if [[ "$AGE_KEY_FILE" != /* ]]; then
+    AGE_KEY_FILE="$PROJECT_ROOT/$AGE_KEY_FILE"
+fi
 
 # ---------------------------------------------------------------------------
 # Prerequisites
