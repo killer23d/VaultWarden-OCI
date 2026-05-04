@@ -37,9 +37,17 @@ _storage_validate_paths() {
     local device="$1"
     local mount_point="$2"
 
-    if [[ -n "$device" && ! "$device" =~ ^/dev/[a-zA-Z0-9/]+$ ]]; then
-        log_error "DATA_VOLUME_DEVICE contains disallowed characters: $device"
-        log_error "Allowed pattern: /dev/<alphanumeric and / only>"
+    # Pattern: /dev/ followed by an alphanumeric character, then zero or more
+    # alphanumerics, forward slashes, hyphens, or underscores, with no
+    # consecutive slashes and no trailing slash.
+    # Accepts: /dev/sdb  /dev/nvme0n1  /dev/disk/by-id/scsi-0abc123
+    # Rejects: /dev/  /dev///sdb  /dev/sdb;rm -rf /
+    if [[ -n "$device" ]] \
+        && { [[ ! "$device" =~ ^/dev/[a-zA-Z0-9][a-zA-Z0-9/_-]*[a-zA-Z0-9]$|^/dev/[a-zA-Z0-9]$ ]] \
+             || [[ "$device" == *//* ]]; }; then
+        log_error "DATA_VOLUME_DEVICE contains disallowed characters or path structure: $device"
+        log_error "Allowed pattern: /dev/<alphanumeric start and end; no consecutive slashes>"
+        log_error "Examples: /dev/sdb  /dev/nvme0n1  /dev/disk/by-id/scsi-0abc"
         return 1
     fi
 
@@ -205,6 +213,24 @@ setup_data_volume() {
             log_error "Unmount it first, then re-run setup: sudo umount $mount_point"
             return 1
         fi
+        # Sanity-check device size before formatting.
+        # Minimum: 1 GiB (1073741824 bytes). A smaller device almost certainly
+        # means the wrong block device was specified in DATA_VOLUME_DEVICE.
+        local _dev_bytes
+        _dev_bytes=$(lsblk --nodeps --noheadings --bytes --output SIZE "$device" 2>/dev/null \
+                     | tr -d '[:space:]') || true
+        if [[ -z "$_dev_bytes" || ! "$_dev_bytes" =~ ^[0-9]+$ ]]; then
+            log_error "Cannot determine size of $device (lsblk failed or returned non-numeric output)."
+            log_error "Verify the device is attached and DATA_VOLUME_DEVICE is correct."
+            return 1
+        fi
+        if (( _dev_bytes < 1073741824 )); then
+            log_error "Device $device is too small: ${_dev_bytes} bytes (< 1 GiB minimum)."
+            log_error "A device this small almost certainly means DATA_VOLUME_DEVICE is wrong."
+            log_error "Verify the correct block device with: lsblk"
+            return 1
+        fi
+        log_info "Device size: $(( _dev_bytes / 1073741824 )) GiB — proceeding with format."
         log_info "No filesystem found on $device — formatting as ext4..."
         log_warn "ALL DATA ON $device WILL BE ERASED. This is expected on first run."
         local mkfs_out
@@ -257,14 +283,22 @@ setup_data_volume() {
         log_success "Mounted $device at $mount_point"
     fi
 
-    # 6. Sentinel file (idempotent, read-only).
+    # 6. Sentinel file (idempotent, read-only, immutable where supported).
+    #    The sentinel is the only positive proof that a given mountpoint IS the
+    #    VaultWarden data volume. Making it immutable with chattr +i protects it
+    #    from accidental rm -rf on the mount root while preserving the guard in
+    #    require_project_state_ready. The uninstaller runs chattr -i before wipe.
     local sentinel="$mount_point/.vw-data-volume"
     if [[ ! -f "$sentinel" ]]; then
         printf 'VaultWarden-OCI data volume\nDevice: %s\nMounted: %s\nCreated: %s\n' \
             "$device" "$mount_point" "$(date -Iseconds)" > "$sentinel" \
             || { log_error "Failed to write sentinel: $sentinel"; return 1; }
         chmod 444 "$sentinel"
-        log_success "Sentinel written: $sentinel"
+        if command -v chattr >/dev/null 2>&1; then
+            chattr +i "$sentinel" 2>/dev/null \
+                || log_warn "chattr +i failed on sentinel — immutability not set (non-fatal; sentinel is still 444)"
+        fi
+        log_success "Sentinel written and protected: $sentinel"
     else
         log_info "Sentinel already present (idempotent): $sentinel"
     fi
@@ -317,19 +351,33 @@ install_docker_mount_guard() {
     mkdir -p "$drop_in_dir" \
         || { log_error "Cannot create systemd drop-in dir: $drop_in_dir"; return 1; }
 
-    # Idempotency: skip if the file already encodes the current mount point.
+    # Idempotency: skip only when BOTH directives encode the current mount point.
+    # A file missing After= (written by an older version) must be overwritten.
     if [[ -f "$drop_in_file" ]] \
-        && grep -qF "RequiresMountsFor=$mount_point" "$drop_in_file" 2>/dev/null; then
-        log_info "Docker mount guard already installed for $mount_point (idempotent)"
+        && grep -qF "RequiresMountsFor=$mount_point" "$drop_in_file" 2>/dev/null \
+        && grep -qF "After="                         "$drop_in_file" 2>/dev/null; then
+        log_info "Docker mount guard already up to date for $mount_point (idempotent)"
         return 0
     fi
+
+    # Derive the systemd mount unit name from the mount path.
+    # systemd-escape --path --suffix=mount converts e.g. /mnt/vw-data
+    # to mnt-vw\x2ddata.mount — the canonical unit name systemd tracks.
+    local mount_unit
+    mount_unit=$(systemd-escape --path --suffix=mount "$mount_point" 2>/dev/null) || {
+        log_error "systemd-escape failed for mount point: $mount_point"
+        log_error "Ensure systemd-escape is available (package: systemd)"
+        return 1
+    }
 
     # Write drop-in (overwrites stale entry if mount point changed).
     {
         printf '# Managed by VaultWarden-OCI setup.sh — do not edit by hand.\n'
         printf '# Ensures Docker never starts before the data volume is mounted.\n'
+        printf '# Regenerate: sudo ./setup.sh --phase=systemd --install\n'
         printf '[Unit]\n'
-        printf 'RequiresMountsFor=%s\n' "$mount_point"
+        printf 'After=%s\n'              "$mount_unit"
+        printf 'RequiresMountsFor=%s\n'  "$mount_point"
     } > "$drop_in_file" \
         || { log_error "Failed to write Docker mount guard: $drop_in_file"; return 1; }
 

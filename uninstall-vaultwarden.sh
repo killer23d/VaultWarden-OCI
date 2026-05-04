@@ -359,6 +359,15 @@ info "Step 5: Removing runtime state directory (database, logs, Caddy/Fail2ban s
 
 # ── 5a: Wipe the resolved state directory ──────────────────────────────────
 if [[ -d "${PROJECT_STATE_DIR}" ]]; then
+    # Clear immutability from the data-volume sentinel before wiping.
+    # setup_data_volume writes chattr +i on .vw-data-volume so that accidental
+    # rm -rf cannot destroy it at runtime. That protection must be lifted here
+    # so that the intentional uninstall wipe can complete cleanly.
+    _sentinel="${PROJECT_STATE_DIR}/.vw-data-volume"
+    if [[ -f "$_sentinel" ]] && command -v chattr >/dev/null 2>&1; then
+        chattr -i "$_sentinel" 2>/dev/null \
+            || warn "chattr -i failed on sentinel — rm -rf may be incomplete if the file is immutable"
+    fi
     rm -rf "${PROJECT_STATE_DIR}" \
         && success "Removed ${PROJECT_STATE_DIR}"
 else
