@@ -1,6 +1,7 @@
 [Unit]
 Description=VaultWarden Firewall Update Timer Saturday 04:00
 # Prevent this timer firing mid-shutdown.
+After=
 Conflicts=shutdown.target
 # OnFailure on the timer unit catches calendar parse errors or
 # systemd activation failures that would otherwise go unnotified.

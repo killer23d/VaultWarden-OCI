@@ -2,6 +2,7 @@
 Description=VaultWarden Health Check Timer every 30 min
 # Prevent this timer firing mid-shutdown.
 Conflicts=shutdown.target
+After=
 # OnFailure on the timer unit catches calendar parse errors or
 # systemd activation failures that would otherwise go unnotified.
 OnFailure=vaultwarden-notify-failure.service

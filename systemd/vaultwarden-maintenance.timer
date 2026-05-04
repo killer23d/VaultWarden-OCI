@@ -1,6 +1,7 @@
 [Unit]
 Description=VaultWarden Maintenance Timer Daily 02:05
 # Prevent this timer firing mid-shutdown.
+After=
 Conflicts=shutdown.target
 # OnFailure on the timer unit catches calendar parse errors or
 # systemd activation failures that would otherwise go unnotified.

@@ -2,6 +2,7 @@
 Description=VaultWarden Full Backup Timer Sunday 03:00
 # Prevent this timer firing mid-shutdown and interrupting a live
 # SQLite WAL checkpoint.
+After=
 Conflicts=shutdown.target
 # OnFailure on the timer unit catches calendar parse errors or
 # systemd activation failures that would otherwise go unnotified.
