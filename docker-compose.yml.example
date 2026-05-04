@@ -2,6 +2,25 @@
 # Core flow: init-permissions -> vaultwarden + caddy -> postfix -> fail2ban
 # Fill .env mandatory section first, then run setup secrets.
 
+# ─── Storage mode note ────────────────────────────────────────────────────────
+# All persistent bind mounts below are rooted at PROJECT_STATE_DIR.
+#
+# Boot-only mode (DATA_VOLUME_DEVICE blank in .env):
+#   PROJECT_STATE_DIR defaults to /var/lib/vaultwarden on the boot volume.
+#   No special mount ordering is required.
+#
+# Separate-volume mode (DATA_VOLUME_DEVICE set in .env):
+#   PROJECT_STATE_DIR must equal DATA_VOLUME_MOUNT (enforced by setup.sh and
+#   all operational scripts).  The data volume MUST be mounted before Docker
+#   starts — otherwise Docker will silently create empty bind-mount directories
+#   on the boot volume, bypassing the sentinel check in startup.sh.
+#
+#   Always use the systemd unit or 'make start' / 'sudo ./startup.sh' rather
+#   than 'docker compose up' directly.  setup.sh --phase=systemd --install
+#   writes a per-unit drop-in (After=<mount.unit>, RequiresMountsFor=<mount>)
+#   that enforces correct ordering when the service is managed by systemd.
+# ──────────────────────────────────────────────────────────────────────────────
+
 services:
   # -------------------- Mandatory startup: permissions init --------------------
   init-permissions:

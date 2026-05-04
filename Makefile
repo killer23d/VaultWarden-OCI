@@ -342,8 +342,10 @@ status: ## Show service status, backup health, disk usage, and Fail2Ban summary
 	@docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}" 2>/dev/null | grep -E "vaultwarden|caddy|fail2ban|postfix" || true
 	@echo ""
 	@echo "$(CYAN)Backup status:$(NC)"
-	@BACKUP_DIR=$$(grep '^BACKUP_DIR=' .env 2>/dev/null | cut -d= -f2-); \
-	BACKUP_DIR=$${BACKUP_DIR:-/var/lib/vaultwarden/backups}; \
+	@STATE_DIR=$$(grep '^PROJECT_STATE_DIR=' .env 2>/dev/null | cut -d= -f2-); \
+	STATE_DIR=$${STATE_DIR:-/var/lib/vaultwarden}; \
+	BACKUP_DIR=$$(grep '^BACKUP_DIR=' .env 2>/dev/null | cut -d= -f2-); \
+	BACKUP_DIR=$${BACKUP_DIR:-$$STATE_DIR/backups}; \
 	for btype in db full emergency; do \
 		DIR="$$BACKUP_DIR/$$btype"; \
 		if [ -d "$$DIR" ]; then \
@@ -364,7 +366,7 @@ status: ## Show service status, backup health, disk usage, and Fail2Ban summary
 	@STATE_DIR=$$(grep '^PROJECT_STATE_DIR=' .env 2>/dev/null | cut -d= -f2-); \
 	STATE_DIR=$${STATE_DIR:-/var/lib/vaultwarden}; \
 	BACKUP_DIR=$$(grep '^BACKUP_DIR=' .env 2>/dev/null | cut -d= -f2-); \
-	BACKUP_DIR=$${BACKUP_DIR:-/var/lib/vaultwarden/backups}; \
+	BACKUP_DIR=$${BACKUP_DIR:-$$STATE_DIR/backups}; \
 	for DIR in "$$STATE_DIR" "$$BACKUP_DIR"; do \
 		if [ -d "$$DIR" ]; then \
 			AVAIL=$$(df -h "$$DIR" 2>/dev/null | awk 'END {print $$4}'); \

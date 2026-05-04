@@ -316,7 +316,6 @@ prepare_directories() {
     "logs/caddy"
     "logs/fail2ban"
     "logs/postfix"
-    "backups"
     "ssl"
     "caddy/data"
     "caddy/config"
@@ -368,9 +367,12 @@ prepare_log_directories() {
   fi
 
   # Create backup directory
-  if [ ! -d "${PROJECT_ROOT}/backups" ]; then
-    mkdir -p "${PROJECT_ROOT}/backups" 2>/dev/null || true
-    log_info "Created backup directory"
+  local backup_dir
+  backup_dir="$(get_config_value "BACKUP_DIR" "${project_state_dir}/backups")"
+  if ! _maybe_sudo mkdir -p "$backup_dir" 2>/dev/null; then
+    log_warn "Could not create backup directory: $backup_dir"
+  else
+    log_info "Backup directory ready: $backup_dir"
   fi
 
   # Ensure Caddy entrypoint is executable
