@@ -1232,7 +1232,8 @@ show_post_install_summary() {
     local mode="${1:-interactive}"
     [[ "$mode" == "interactive" ]] && clear
 
-    printf '%s' "${COLOR_RED}"    cat << "EOF"
+    printf '%s' "${COLOR_RED}"
+    cat << "EOF"
     ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !
     !                                                             !
     !   CRITICAL: SAVE THIS INFORMATION FOR DISASTER RECOVERY     !
