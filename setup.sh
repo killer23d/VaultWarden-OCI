@@ -45,6 +45,37 @@ source "lib/crypto.sh"
 source "lib/docker.sh"
 source "lib/storage.sh"
 
+# ---------------------------------------------------------------------------
+# _set_env_var KEY VALUE FILE
+# Add or replace a KEY=VALUE line in an env file.
+# If the key already exists (with any value), it is replaced in-place.
+# If it does not exist, it is appended.
+# ---------------------------------------------------------------------------
+_set_env_var() {
+    local key="$1" value="$2" file="$3"
+    if grep -q "^${key}=" "$file" 2>/dev/null; then
+        # Replace existing line (sed -i is portable on GNU/Linux)
+        sed -i "s|^${key}=.*|${key}=${value}|" "$file"
+    else
+        echo "${key}=${value}" >> "$file"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# _read_env_value KEY FILE
+# Read a KEY=VALUE from an env file, stripping surrounding double or single
+# quotes.  Returns an empty string when the key is absent or the file does
+# not exist.
+# ---------------------------------------------------------------------------
+_read_env_value() {
+    local key="$1" file="$2"
+    [[ -f "$file" ]] || return 0
+    # tail -1 keeps the last occurrence; cut -d= -f2- preserves '=' in values;
+    # tr strips both single and double quotes from the raw value.
+    grep -E "^${key}=" "$file" 2>/dev/null \
+        | tail -1 | cut -d= -f2- | tr -d "\"'" || true
+}
+
 # Canonical list of units that receive a ReadWritePaths drop-in in separate-
 # volume mode. Used by both _install_rwpaths_dropin() and the cleanup block
 # in remove_units(). Update this list whenever a new managed unit is added.
@@ -560,7 +591,7 @@ create_env_file() {
     local clean_domain; clean_domain=$(echo "$domain_with_protocol" | sed -E 's|https?://||; s|/.*$||')
     CLEAN_DOMAIN="$clean_domain"
 
-    local temp_env
+    local temp_env=""
     temp_env=$(mktemp -p "$(dirname "$env_file")" .env.tmp.XXXXXXXXXX) || return 1
     # Ensure temp file is cleaned up on any failure path from this point.
     trap 'rm -f "$temp_env" 2>/dev/null || true' RETURN
@@ -892,7 +923,7 @@ generate_age_keys() {
     # ── Update .env atomically to the canonical path ─────────────────────────
     local env_file="$PROJECT_ROOT/.env"
     if [[ -f "$env_file" ]]; then
-        local temp_env
+        local temp_env=""
         temp_env=$(mktemp -p "$(dirname "$env_file")" .env.tmp.XXXXXXXXXX) || return 1
         awk '{
             sub(/^SOPS_AGE_KEY_FILE=.*/, "SOPS_AGE_KEY_FILE=/etc/vaultwarden/age-key.txt");
@@ -2476,37 +2507,6 @@ _sha256() {
     else
         shasum -a 256 "$1" | awk '{print $1}'
     fi
-}
-
-# ---------------------------------------------------------------------------
-# _set_env_var KEY VALUE FILE
-# Add or replace a KEY=VALUE line in an env file.
-# If the key already exists (with any value), it is replaced in-place.
-# If it does not exist, it is appended.
-# ---------------------------------------------------------------------------
-_set_env_var() {
-    local key="$1" value="$2" file="$3"
-    if grep -q "^${key}=" "$file" 2>/dev/null; then
-        # Replace existing line (sed -i is portable on GNU/Linux)
-        sed -i "s|^${key}=.*|${key}=${value}|" "$file"
-    else
-        echo "${key}=${value}" >> "$file"
-    fi
-}
-
-# ---------------------------------------------------------------------------
-# _read_env_value KEY FILE
-# Read a KEY=VALUE from an env file, stripping surrounding double or single
-# quotes.  Returns an empty string when the key is absent or the file does
-# not exist.
-# ---------------------------------------------------------------------------
-_read_env_value() {
-    local key="$1" file="$2"
-    [[ -f "$file" ]] || return 0
-    # tail -1 keeps the last occurrence; cut -d= -f2- preserves '=' in values;
-    # tr strips both single and double quotes from the raw value.
-    grep -E "^${key}=" "$file" 2>/dev/null \
-        | tail -1 | cut -d= -f2- | tr -d "\"'" || true
 }
 
 # ---------------------------------------------------------------------------
