@@ -103,13 +103,13 @@ if [[ -z "$_state_dir_raw" ]]; then
 fi
 PROJECT_STATE_DIR="${_state_dir_raw:-/var/lib/vaultwarden}"
 
-# Sentinel written by setup.sh to record that Docker was installed by this
-# project.  Path mirrors setup.sh:
-#   ${PROJECT_STATE_DIR}/.docker_installed_by_setup
-#
-# BUG FIX: was hardcoded to /var/lib/vaultwarden/.docker_installed_by_setup,
-# which is never found in separate-volume mode, causing Step 9 to always skip
-# Docker removal even when Docker was installed by setup.sh.
+# Always read DATA_VOLUME_MOUNT independently — used by the fstab cleanup in
+# Step 5.  It may differ from PROJECT_STATE_DIR if the operator set them
+# separately, and we need the raw mount-point value regardless of which path
+# PROJECT_STATE_DIR resolved to.
+DATA_VOLUME_MOUNT="$(_read_env_value "DATA_VOLUME_MOUNT" "$_ENV_FILE")"
+
+# Sentinel written by setup.sh to record that Docker was installed by this project.
 DOCKER_SENTINEL="${PROJECT_STATE_DIR}/.docker_installed_by_setup"
 
 echo ""
@@ -338,21 +338,26 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════
-# STEP 5 — Remove PROJECT_STATE_DIR (database & all runtime data)
+# STEP 5 — Wipe data, unmount, then clean fstab
 #
-# BUG FIX: the previous version always deleted /var/lib/vaultwarden.
-# In separate-volume mode, the actual state directory is DATA_VOLUME_MOUNT
-# (e.g. /mnt/vw-data).  setup.sh sets PROJECT_STATE_DIR equal to that path;
-# the old hardcoded delete silently skipped it, leaving the entire database
-# and runtime state on disk.
+# Separate-volume mode sequence (order matters):
+#   5a. rm -rf the state directory contents (data is wiped from the volume).
+#   5b. umount the block device — must come AFTER data wipe so we are not
+#       holding an open filehandle, and BEFORE fstab cleanup so the mount
+#       unit can be stopped cleanly by systemd on the next boot if umount
+#       fails here.
+#   5c. sed the fstab entry — removing it while the device is still mounted
+#       is safe (kernel holds the mount independent of fstab), but doing it
+#       after umount means the entry is gone before any reboot path can
+#       re-mount a now-empty device.
+#   5d. Remove the orphaned mountpoint directory.
 #
-# We always attempt /var/lib/vaultwarden as well because setup.sh creates it
-# regardless of storage mode (it writes the Docker sentinel there in
-# boot-only mode and uses it for the compose bind-mount source in both modes).
+# Boot-only mode: PROJECT_STATE_DIR == /var/lib/vaultwarden — no mount
+# operations needed; rm -rf is sufficient.
 # ═══════════════════════════════════════════════════════════════
 info "Step 5: Removing runtime state directory (database, logs, Caddy/Fail2ban state)..."
 
-# Remove the resolved PROJECT_STATE_DIR (covers separate-volume and boot-only).
+# ── 5a: Wipe the resolved state directory ──────────────────────────────────
 if [[ -d "${PROJECT_STATE_DIR}" ]]; then
     rm -rf "${PROJECT_STATE_DIR}" \
         && success "Removed ${PROJECT_STATE_DIR}"
@@ -360,35 +365,85 @@ else
     info "${PROJECT_STATE_DIR} not found — skipping."
 fi
 
-# Also remove the boot-volume default if it differs from PROJECT_STATE_DIR
-# (handles the case where a previous boot-only install left artefacts behind
-# after a re-install in separate-volume mode, or where the operator changed
-# DATA_VOLUME_MOUNT mid-lifecycle).
+# Also wipe the boot-volume default when it differs from PROJECT_STATE_DIR.
+# Handles artefacts left by a prior boot-only install after re-install in
+# separate-volume mode, or a mid-lifecycle DATA_VOLUME_MOUNT change.
 if [[ "${PROJECT_STATE_DIR}" != "/var/lib/vaultwarden" ]]; then
     if [[ -d /var/lib/vaultwarden ]]; then
-        rm -rf /var/lib/vaultwarden             && success "Removed /var/lib/vaultwarden (boot-volume default)"
+        rm -rf /var/lib/vaultwarden \
+            && success "Removed /var/lib/vaultwarden (boot-volume residual)"
     else
         info "/var/lib/vaultwarden not found — skipping."
     fi
 fi
 
-# Advisory: in separate-volume mode, the dedicated data mount may remain mounted.
-if [[ "${PROJECT_STATE_DIR}" != "/var/lib/vaultwarden" ]] &&    mountpoint -q "${PROJECT_STATE_DIR}" 2>/dev/null; then
-    warn "Data volume is still mounted at ${PROJECT_STATE_DIR}."
-    warn "If it was added to /etc/fstab by setup.sh, remove the entry manually."
-    warn "To unmount: sudo umount ${PROJECT_STATE_DIR}"
+# ── 5b: Unmount the dedicated data volume (separate-volume mode only) ───────
+# We only attempt unmount when DATA_VOLUME_MOUNT is non-empty AND differs from
+# /var/lib/vaultwarden (the boot-volume path is never a separate mount).
+# A lazy unmount (-l) is used as the fallback: it detaches the filesystem from
+# the namespace immediately even if a process still holds a reference, allowing
+# the block device to be safely detached from OCI without a reboot.
+_UNMOUNT_TARGET="${DATA_VOLUME_MOUNT:-}"
+if [[ -n "$_UNMOUNT_TARGET" ]] && \
+   [[ "$_UNMOUNT_TARGET" != "/var/lib/vaultwarden" ]] && \
+   mountpoint -q "$_UNMOUNT_TARGET" 2>/dev/null; then
+
+    info "Unmounting data volume at ${_UNMOUNT_TARGET}..."
+    if umount "$_UNMOUNT_TARGET" 2>/dev/null; then
+        success "Unmounted ${_UNMOUNT_TARGET}"
+    else
+        warn "Normal umount failed (a process may still hold a reference)."
+        info "Attempting lazy unmount (umount -l)..."
+        if umount -l "$_UNMOUNT_TARGET" 2>/dev/null; then
+            success "Lazy-unmounted ${_UNMOUNT_TARGET} — device is now detachable from OCI."
+        else
+            warn "Lazy umount also failed. The volume is still mounted."
+            warn "Run manually after all processes have stopped:"
+            warn "  sudo umount ${_UNMOUNT_TARGET}"
+            warn "  sudo umount -l ${_UNMOUNT_TARGET}  # if the above fails"
+        fi
+    fi
 fi
 
-# Remove the fstab data-volume entry written by setup.sh (separate-volume mode only).
-# We match by mount point, not UUID, since the UUID is not stored here.
-# The guard prevents accidentally deleting a boot-volume fstab line.
+# ── 5c: Remove the fstab entry written by setup.sh ──────────────────────────
+# Guard: DATA_VOLUME_MOUNT must be non-empty AND the mount point must appear
+# in fstab before we run sed.  Matching on the mount-point field (field 2,
+# surrounded by whitespace) avoids accidental deletion of unrelated entries.
 if [[ -n "${DATA_VOLUME_MOUNT:-}" ]] && \
-   grep -q "[[:space:]]${DATA_VOLUME_MOUNT}[[:space:]]" /etc/fstab 2>/dev/null; then
-    sed -i "\|[[:space:]]${DATA_VOLUME_MOUNT}[[:space:]]|d" /etc/fstab \
-        && success "Removed fstab entry for data volume: ${DATA_VOLUME_MOUNT}" \
-        || warn "Could not remove fstab entry for ${DATA_VOLUME_MOUNT} — remove it manually."
+   grep -qE "[[:space:]]${DATA_VOLUME_MOUNT}[[:space:]]" /etc/fstab 2>/dev/null; then
+
+    # Write to a temp file then mv atomically — avoids a partial fstab on
+    # SIGINT or disk-full mid-write.
+    _FSTAB_TMP=$(mktemp /etc/fstab.uninstall.XXXXXXXXXX)
+    if sed "/[[:space:]]${DATA_VOLUME_MOUNT}[[:space:]]/d" /etc/fstab > "$_FSTAB_TMP" \
+       && mv -f "$_FSTAB_TMP" /etc/fstab; then
+        success "Removed fstab entry for data volume: ${DATA_VOLUME_MOUNT}"
+    else
+        rm -f "$_FSTAB_TMP" 2>/dev/null || true
+        warn "Could not update /etc/fstab atomically — remove the entry manually:"
+        warn "  grep -n '${DATA_VOLUME_MOUNT}' /etc/fstab   # find the line number"
+        warn "  sudo nano /etc/fstab                         # delete it"
+    fi
 else
-    info "No fstab data-volume entry found — nothing to remove."
+    info "No fstab data-volume entry found for '${DATA_VOLUME_MOUNT:-<unset>}' — nothing to remove."
+fi
+
+# ── 5d: Remove the orphaned mountpoint directory ────────────────────────────
+# After umount and fstab cleanup the mountpoint directory is an empty anchor
+# that setup.sh created with mkdir -p.  Remove it only if it is now empty and
+# is not /var/lib/vaultwarden (never remove that path here; Step 5a handles it).
+if [[ -n "${DATA_VOLUME_MOUNT:-}" ]] && \
+   [[ "${DATA_VOLUME_MOUNT}" != "/var/lib/vaultwarden" ]] && \
+   [[ -d "${DATA_VOLUME_MOUNT}" ]]; then
+
+    if rmdir "${DATA_VOLUME_MOUNT}" 2>/dev/null; then
+        success "Removed mountpoint directory: ${DATA_VOLUME_MOUNT}"
+    else
+        # Directory is not empty — residual files remain (umount may have
+        # failed, or files were written to the mountpoint before mount).
+        warn "${DATA_VOLUME_MOUNT} is not empty after unmount."
+        warn "Inspect and remove manually: sudo rm -rf ${DATA_VOLUME_MOUNT}"
+    fi
 fi
 
 # ═══════════════════════════════════════════════════════════════
