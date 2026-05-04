@@ -1548,8 +1548,8 @@ restore_full() {
     _sentinel_dir=""
     if [[ -n "${DATA_VOLUME_MOUNT:-}" ]] && mountpoint -q "${DATA_VOLUME_MOUNT}" 2>/dev/null; then
         _sentinel_dir="${DATA_VOLUME_MOUNT}"
-    elif [[ -n "${STATE_DIR:-}" ]] && mountpoint -q "${STATE_DIR}" 2>/dev/null; then
-        _sentinel_dir="${STATE_DIR}"
+    elif [[ -n "${state_dir:-}" ]] && mountpoint -q "${state_dir}" 2>/dev/null; then
+        _sentinel_dir="${state_dir}"
     fi
     if [[ -n "$_sentinel_dir" ]]; then
         touch "${_sentinel_dir}/.vw-data-volume" 2>/dev/null || \
