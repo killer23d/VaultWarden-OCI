@@ -268,7 +268,7 @@ SERVICES=(
     vaultwarden-health.service
     vaultwarden-dns-update.service
     vaultwarden-firewall-update.service
-    vaultwarden-notify-failure@.service
+    vaultwarden-notify-failure.service
     vaultwarden-iptables.service
 )
 

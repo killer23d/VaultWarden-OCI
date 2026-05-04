@@ -168,7 +168,7 @@ The installed systemd timer schedule:
 
 > **Viewing timer status:** `systemctl list-timers --all | grep vaultwarden` shows next fire time and last run for every timer.
 
-> **Failure notifications:** Every service unit has `OnFailure=vaultwarden-notify-failure@%n.service`. If any backup, health, or maintenance job fails, an email alert is sent automatically without requiring a separate monitoring tool.
+> **Failure notifications:** Every service unit has `OnFailure=vaultwarden-notify-failure.service`. If any backup, health, or maintenance job fails, an email alert is sent automatically without requiring a separate monitoring tool.
 
 **🎉 Your vault is live at `https://vault.yourdomain.com`**
 

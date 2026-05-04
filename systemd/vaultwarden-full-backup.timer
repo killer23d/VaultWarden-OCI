@@ -5,7 +5,7 @@ Description=VaultWarden Full Backup Timer Sunday 03:00
 Conflicts=shutdown.target
 # OnFailure on the timer unit catches calendar parse errors or
 # systemd activation failures that would otherwise go unnotified.
-OnFailure=vaultwarden-notify-failure@%n.service
+OnFailure=vaultwarden-notify-failure.service
 
 [Timer]
 # Weekly full backup every Sunday at 03:00.

@@ -4,7 +4,7 @@ Documentation=https://github.com/killer23d/VaultWarden-OCI
 After=docker.service network-online.target
 Requires=docker.service
 ConditionPathExists=/opt/vaultwarden-scripts/maintenance.sh
-OnFailure=vaultwarden-notify-failure@%n.service
+OnFailure=vaultwarden-notify-failure.service
 
 [Service]
 Type=oneshot

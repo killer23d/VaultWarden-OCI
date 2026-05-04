@@ -32,6 +32,8 @@ CORE_SERVICES     = vaultwarden caddy
 # Override on the command line to target a specific archive, e.g.:
 #   sudo make restore BACKUP_FILE=backups/db/vaultwarden-db-20250101-120000.age
 BACKUP_FILE ?=
+# Optional: sudo make setup DATA_DEVICE=/dev/sdb
+DATA_DEVICE ?=
 
 # ── Phony targets ───────────────────────────────────────────────────────────
 .PHONY: help \
@@ -131,7 +133,9 @@ setup: ## Run initial setup (requires sudo)
 	fi
 	@if [ ! -f ".env" ]; then echo "$(RED)Error: .env missing. Usage: sudo ./setup.sh --domain <domain> --email <email>$(NC)"; exit 1; fi
 	@echo "$(BLUE)==> Running setup.sh$(NC)" | tee -a setup.log
-	@if ./setup.sh 2>&1 | tee -a setup.log; then \
+	@SETUP_ARGS=""; \
+	[ -n "$(DATA_DEVICE)" ] && SETUP_ARGS="$$SETUP_ARGS --data-device $(DATA_DEVICE)"; \
+	if ./setup.sh $$SETUP_ARGS 2>&1 | tee -a setup.log; then \
 		echo "$(GREEN)==> setup.sh completed$(NC)" | tee -a setup.log; \
 	else \
 		echo "$(RED)==> FAILED: setup.sh — check setup.log for details; re-run: sudo make setup$(NC)" | tee -a setup.log; \
@@ -763,10 +767,19 @@ remove-systemd: ## Remove systemd service units
 
 systemd-status: ## Show systemd unit status
 	@echo "$(BLUE)Systemd Unit Status:$(NC)"
-	@systemctl status vaultwarden-startup.service 2>/dev/null || echo "  vaultwarden-startup.service: not found"
-	@systemctl status vaultwarden-db-backup.timer 2>/dev/null || echo "  vaultwarden-db-backup.timer: not found"
-	@systemctl status vaultwarden-full-backup.timer 2>/dev/null || echo "  vaultwarden-full-backup.timer: not found"
-	@systemctl status vaultwarden-health.timer 2>/dev/null || echo "  vaultwarden-health.timer: not found"
+	@for unit in \
+		vaultwarden-db-backup.timer \
+		vaultwarden-full-backup.timer \
+		vaultwarden-health.timer \
+		vaultwarden-maintenance.timer \
+		vaultwarden-dns-update.timer \
+		vaultwarden-firewall-update.timer \
+		vaultwarden-iptables.service \
+		vaultwarden-notify-failure.service; do \
+		systemctl status "$$unit" --no-pager -l 2>/dev/null \
+			|| echo "  $$unit: not found"; \
+		echo ""; \
+	done
 
 systemd-validate: ## Validate systemd unit files
 	$(call require-root)
@@ -841,6 +854,14 @@ info: ## Show deployment information
 		echo "  Domain    : $$(grep '^DOMAIN=' .env 2>/dev/null | cut -d= -f2)"; \
 		echo "  Admin     : $$(grep '^ADMIN_EMAIL=' .env 2>/dev/null | cut -d= -f2)"; \
 		echo "  State Dir : $$(grep '^PROJECT_STATE_DIR=' .env 2>/dev/null | cut -d= -f2-)"; \
+		DATA_DEV=$$(grep '^DATA_VOLUME_DEVICE=' .env 2>/dev/null | cut -d= -f2-); \
+		DATA_MNT=$$(grep '^DATA_VOLUME_MOUNT=' .env 2>/dev/null | cut -d= -f2-); \
+		if [ -n "$$DATA_DEV" ]; then \
+			MOUNTED=$$(mountpoint -q "$$DATA_MNT" 2>/dev/null && echo "$(GREEN)mounted$(NC)" || echo "$(RED)NOT MOUNTED$(NC)"); \
+			echo "  Volume    : $$DATA_DEV → $$DATA_MNT  [$$MOUNTED]"; \
+		else \
+			echo "  Volume    : boot-only mode"; \
+		fi; \
 	fi
 	@echo "  Version   : $$(cat VERSION 2>/dev/null || echo 'unknown')"
 	@echo "  Uptime    : $$(docker inspect --format='{{.State.StartedAt}}' vaultwarden_app 2>/dev/null || echo 'not running')"
@@ -873,6 +894,21 @@ diagnose: ## Full diagnostic dump (versions, status, health, key, logs tail)
 	@echo ""
 	@echo "$(CYAN)--- Container Status ---$(NC)"
 	@$(DOCKER_COMP) ps 2>/dev/null || echo "docker compose: not available"
+	@echo ""
+	@echo "$(CYAN)--- Storage ---$(NC)"
+	@STATE_DIR=$$(grep '^PROJECT_STATE_DIR=' .env 2>/dev/null | cut -d= -f2-); \
+	STATE_DIR=$${STATE_DIR:-/var/lib/vaultwarden}; \
+	DATA_DEV=$$(grep '^DATA_VOLUME_DEVICE=' .env 2>/dev/null | cut -d= -f2-); \
+	DATA_MNT=$$(grep '^DATA_VOLUME_MOUNT=' .env 2>/dev/null | cut -d= -f2-); \
+	if [ -n "$$DATA_DEV" ]; then \
+		echo "  Mode      : separate-volume ($$DATA_DEV → $$DATA_MNT)"; \
+		mountpoint -q "$$DATA_MNT" 2>/dev/null \
+			&& echo "  Mount     : $(GREEN)active$(NC)" \
+			|| echo "  Mount     : $(RED)NOT MOUNTED$(NC)"; \
+	else \
+		echo "  Mode      : boot-only"; \
+	fi; \
+	df -h "$$STATE_DIR" 2>/dev/null || true
 	@echo ""
 	@echo "$(CYAN)--- Key Health ---$(NC)"
 	@$(MAKE) key-health 2>/dev/null || echo "key-health: failed"

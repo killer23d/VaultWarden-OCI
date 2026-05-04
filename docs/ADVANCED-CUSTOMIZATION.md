@@ -165,9 +165,9 @@ All timers use `Persistent=true`. If the system reboots while a timer was due to
 
 Every service unit has:
 ```ini
-OnFailure=vaultwarden-notify-failure@%n.service
+OnFailure=vaultwarden-notify-failure.service
 ```
-If any timer-triggered job fails, an email alert is sent automatically via the shared `vaultwarden-notify-failure@.service` template unit. No external monitoring tool is required for basic failure alerting.
+If any timer-triggered job fails, an email alert is sent automatically via the shared `vaultwarden-notify-failure.service` template unit. No external monitoring tool is required for basic failure alerting.
 
 ### Viewing Timer Status
 

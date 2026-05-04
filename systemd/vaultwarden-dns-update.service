@@ -7,7 +7,7 @@ Wants=network-online.target
 # implemented in maintenance.sh via --update-dns. ConditionPathExists
 # guards against running if maintenance.sh has not been installed yet.
 ConditionPathExists=/opt/vaultwarden-scripts/maintenance.sh
-OnFailure=vaultwarden-notify-failure@%n.service
+OnFailure=vaultwarden-notify-failure.service
 
 [Service]
 Type=oneshot
