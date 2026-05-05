@@ -37,7 +37,7 @@ services:
         exec /start.sh
     # Expose VaultWarden directly for testing (loopback only)
     ports:
-      - "127.0.0.1:8080:80"
+      - "127.0.0.1:8082:80"
     # Development volume mounts
     volumes:
       # Allow live editing of web vault for development
@@ -130,7 +130,7 @@ services:
   # Email testing service (development only)
   # =============================================================================
   email-tester:
-    image: alpine:3.19
+    image: alpine:${ALPINE_VERSION:-3.19}
     container_name: vaultwarden_email_tester
     restart: "no"  # Don't restart automatically
     environment:
@@ -220,10 +220,8 @@ services:
   # axllent/mailpit is the actively maintained, ARM64-native drop-in replacement.
   # Port mapping is identical — no workflow changes required.
   # Web UI:  http://localhost:8025
-  # SMTP:    localhost:1026
-  # FIX [OV-L1]: Version is now sourced from MAILPIT_VERSION env var.
-  # Add MAILPIT_VERSION=v1.21.6 to .env.example so the version is visible
-  # and manageable rather than silently frozen at the inline default forever.
+  # SMTP:    localhost:1026 on the host, 1025 inside the mailpit container
+  # Version is sourced from MAILPIT_VERSION in .env.example with the same inline fallback.
   # =============================================================================
   mailpit:
     image: axllent/mailpit:${MAILPIT_VERSION:-v1.21.6}

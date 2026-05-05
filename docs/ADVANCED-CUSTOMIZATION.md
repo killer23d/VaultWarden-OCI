@@ -435,7 +435,7 @@ SMTP_HOST=smtp.sendgrid.net
 SMTP_PORT=587
 SMTP_SECURITY=starttls
 SMTP_USERNAME=apikey
-SMTP_FROM_EMAIL=noreply@vault.yourdomain.com
+SMTP_FROM=noreply@vault.yourdomain.com
 SMTP_FROM_NAME=VaultWarden
 SMTP_TIMEOUT=30
 ```
@@ -446,7 +446,7 @@ Set the SMTP password via secrets (shared with the Postfix sidecar):
 ./edit-secrets.sh --rotate smtp_password
 ```
 
-> **Keep VaultWarden SMTP in sync.** The VaultWarden container has its own parallel `VW_SMTP_*` variables in `.env` (Docker Compose does not expand `${VAR}` references in `.env` files — they must be literal values). Update both blocks together whenever you change SMTP provider.
+> **Do not point VaultWarden directly at the external relay.** Keep `VW_SMTP_HOST=postfix`, `VW_SMTP_SECURITY=off`, `VW_SMTP_AUTH_MECHANISM=none`, and `VW_SMTP_EXPLICIT_TLS=false`; only the `SMTP_*` block above changes when you switch upstream relay providers.
 
 ### Tier 3 — Postfix MTA Sidecar
 

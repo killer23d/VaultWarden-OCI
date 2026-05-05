@@ -24,7 +24,7 @@
 services:
   # -------------------- Mandatory startup: permissions init --------------------
   init-permissions:
-    image: busybox:${BUSYBOX_VERSION:-1.37.0}
+    image: busybox:${BUSYBOX_VERSION:-1.36.1}
     container_name: vaultwarden_init
     restart: "no"
     user: "0:0"  # Required for chown/chmod operations
@@ -40,66 +40,68 @@ services:
     security_opt:
       - no-new-privileges:true
 
-    command: sh -c "
-      [ -d /secrets/.docker_secrets ] || {
-        echo 'ERROR: /secrets/.docker_secrets not found.' >&2
-        echo '       Run: sudo make setup  (or: sudo ./setup.sh --domain <domain> --email <email>)' >&2
-        exit 1
-      } &&
-      [ -f /secrets/.docker_secrets/admin_token ] || {
-        echo 'ERROR: /secrets/.docker_secrets/admin_token missing — setup may be incomplete.' >&2
-        echo '       Run: sudo make setup' >&2
-        exit 1
-      } &&
+    command:
+      - sh
+      - -c
+      - |
+        [ -d /secrets/.docker_secrets ] || {
+          echo 'ERROR: /secrets/.docker_secrets not found.' >&2
+          echo '       Run: sudo make setup  (or: sudo ./setup.sh --domain <domain> --email <email>)' >&2
+          exit 1
+        } &&
+        [ -f /secrets/.docker_secrets/admin_token ] || {
+          echo 'ERROR: /secrets/.docker_secrets/admin_token missing — setup may be incomplete.' >&2
+          echo '       Run: sudo make setup' >&2
+          exit 1
+        } &&
 
-      SENTINEL='/data/.permissions-initialized' &&
-      NOW=\$(date +%s) &&
-      SENTINEL_AGE=86400 &&
-      if [ -f "\$SENTINEL" ] && [ \$(( NOW - \$(stat -c %Y "\$SENTINEL" 2>/dev/null || echo 0) )) -lt \$SENTINEL_AGE ]; then
-        echo 'Permissions initialized within 24h, skipping full scan.'
-        exit 0
-      fi &&
+        SENTINEL='/data/.permissions-initialized' &&
+        NOW=$$(date +%s) &&
+        SENTINEL_AGE=86400 &&
+        if [ -f "$$SENTINEL" ] && [ $$(( NOW - $$(stat -c %Y "$$SENTINEL" 2>/dev/null || echo 0) )) -lt $$SENTINEL_AGE ]; then
+          echo 'Permissions initialized within 24h, skipping full scan.'
+          exit 0
+        fi &&
 
-      mkdir -p /data /logs/vaultwarden /logs/caddy /logs/fail2ban /logs/postfix &&
+        mkdir -p /data /logs/vaultwarden /logs/caddy /logs/fail2ban /logs/postfix &&
 
-      touch /logs/caddy/access.log /logs/caddy/security.log &&
-      chown 0:0 /logs/caddy/access.log /logs/caddy/security.log &&
-      chmod 644 /logs/caddy/access.log /logs/caddy/security.log &&
+        touch /logs/caddy/access.log /logs/caddy/security.log &&
+        chown 0:0 /logs/caddy/access.log /logs/caddy/security.log &&
+        chmod 644 /logs/caddy/access.log /logs/caddy/security.log &&
 
-      chown -R ${PUID}:${PGID} /data /logs &&
-      find /data -type d -exec chmod 750 {} + 2>/dev/null || true &&
-      find /data -type f -exec chmod 640 {} + 2>/dev/null || true &&
-      find /logs -type d -exec chmod 750 {} + 2>/dev/null || true &&
-      find /logs -path '*/caddy' -prune -o -type f -exec chmod 640 {} + 2>/dev/null || true &&
+        chown -R ${PUID}:${PGID} /data /logs &&
+        find /data -type d -exec chmod 750 {} + 2>/dev/null || true &&
+        find /data -type f -exec chmod 640 {} + 2>/dev/null || true &&
+        find /logs -type d -exec chmod 750 {} + 2>/dev/null || true &&
+        find /logs -path '*/caddy' -prune -o -type f -exec chmod 640 {} + 2>/dev/null || true &&
 
-      chmod 755 /logs/caddy &&
+        chmod 755 /logs/caddy &&
 
-      chown 0:0 /logs/caddy/access.log /logs/caddy/security.log &&
-      chmod 644 /logs/caddy/access.log /logs/caddy/security.log &&
+        chown 0:0 /logs/caddy/access.log /logs/caddy/security.log &&
+        chmod 644 /logs/caddy/access.log /logs/caddy/security.log &&
 
-      mkdir -p /data/caddy /config/caddy &&
-      chown 0:0 /data/caddy /config/caddy &&
-      chmod 755 /data/caddy /config/caddy &&
+        mkdir -p /data/caddy /config/caddy &&
+        chown 0:0 /data/caddy /config/caddy &&
+        chmod 755 /data/caddy /config/caddy &&
 
-      mkdir -p /data/caddy/certificates /data/caddy/locks /data/caddy/ocsp &&
-      chown -R 0:0 /data/caddy &&
-      find /data/caddy -type d -exec chmod 755 {} + 2>/dev/null || true &&
+        mkdir -p /data/caddy/certificates /data/caddy/locks /data/caddy/ocsp &&
+        chown -R 0:0 /data/caddy &&
+        find /data/caddy -type d -exec chmod 755 {} + 2>/dev/null || true &&
 
-      mkdir -p /fail2ban_db &&
-      chown 0:0 /fail2ban_db &&
-      chmod 755 /fail2ban_db &&
+        mkdir -p /fail2ban_db &&
+        chown 0:0 /fail2ban_db &&
+        chmod 755 /fail2ban_db &&
 
-      chmod 700 /secrets /secrets/.docker_secrets 2>/dev/null || true &&
-      find /secrets/.docker_secrets -type f -exec chmod 444 {} + 2>/dev/null || true &&
+        chmod 700 /secrets /secrets/.docker_secrets 2>/dev/null || true &&
+        find /secrets/.docker_secrets -type f -exec chmod 444 {} + 2>/dev/null || true &&
 
-      touch /secrets/.docker_secrets/push_installation_id &&
-      touch /secrets/.docker_secrets/push_installation_key &&
-      chmod 444 /secrets/.docker_secrets/push_installation_id &&
-      chmod 444 /secrets/.docker_secrets/push_installation_key &&
+        touch /secrets/.docker_secrets/push_installation_id &&
+        touch /secrets/.docker_secrets/push_installation_key &&
+        chmod 444 /secrets/.docker_secrets/push_installation_id &&
+        chmod 444 /secrets/.docker_secrets/push_installation_key &&
 
-      touch "\$SENTINEL" &&
-      echo 'Init container completed - permissions set to ${PUID}:${PGID}'
-      "
+        touch "$$SENTINEL" &&
+        echo 'Init container completed - permissions set to ${PUID}:${PGID}'
 
     volumes:
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/data:/data
@@ -112,7 +114,7 @@ services:
   # -------------------- Core service: VaultWarden --------------------
   vaultwarden:
     container_name: vaultwarden_app
-    image: ghcr.io/dani-garcia/vaultwarden:${VAULTWARDEN_VERSION:-1.35.8}
+    image: ghcr.io/dani-garcia/vaultwarden:${VAULTWARDEN_VERSION:-1.35.4}
     restart: unless-stopped
     user: "${PUID}:${PGID}"
     # memswap_limit equal to mem_limit disables swap for this container, preventing
@@ -131,24 +133,33 @@ services:
       ADMIN_TOKEN_FILE: /run/secrets/admin_token
       TZ: ${TZ:-UTC}
       LOG_FILE: /logs/vaultwarden.log
-      LOG_LEVEL: warn
-      EXTENDED_LOGGING: true
+      LOG_LEVEL: ${LOG_LEVEL:-warn}
+      EXTENDED_LOGGING: ${EXTENDED_LOGGING:-true}
       SIGNUPS_ALLOWED: ${SIGNUPS_ALLOWED:-false}
       INVITATIONS_ALLOWED: ${INVITATIONS_ALLOWED:-true}
       EMERGENCY_ACCESS_ALLOWED: ${EMERGENCY_ACCESS_ALLOWED:-true}
       SENDS_ALLOWED: ${SENDS_ALLOWED:-true}
       WEB_VAULT_ENABLED: ${WEB_VAULT_ENABLED:-true}
-      WEBSOCKET_ENABLED: "true"
+      WEBSOCKET_ENABLED: ${WEBSOCKET_ENABLED:-true}
+      DISABLE_ADMIN_TOKEN: ${DISABLE_ADMIN_TOKEN:-false}
+      DISABLE_ICON_DOWNLOAD: ${DISABLE_ICON_DOWNLOAD:-false}
+      ICON_CACHE_TTL: ${ICON_CACHE_TTL:-2592000}
+      ICON_CACHE_NEGTTL: ${ICON_CACHE_NEGTTL:-259200}
+      ORG_CREATION_USERS: ${ORG_CREATION_USERS:-}
+      ORG_EVENTS_ENABLED: ${ORG_EVENTS_ENABLED:-false}
+      EVENTS_DAYS_RETAIN: ${EVENTS_DAYS_RETAIN:-365}
+      TRASH_AUTO_DELETE_DAYS: ${TRASH_AUTO_DELETE_DAYS:-30}
+      INCOMPLETE_2FA_TIME_LIMIT: ${INCOMPLETE_2FA_TIME_LIMIT:-3}
       PUSH_ENABLED: ${PUSH_ENABLED:-false}
       PASSWORD_ITERATIONS: ${PASSWORD_ITERATIONS:-600000}
       PASSWORD_HINTS_ALLOWED: ${PASSWORD_HINTS_ALLOWED:-false}
       SHOW_PASSWORD_HINT: ${SHOW_PASSWORD_HINT:-false}
-      IP_HEADER: CF-Connecting-IP
+      IP_HEADER: ${IP_HEADER:-CF-Connecting-IP}
       SMTP_HOST: ${VW_SMTP_HOST:-postfix}
       SMTP_PORT: ${VW_SMTP_PORT:-587}
-      SMTP_SECURITY: ${VW_SMTP_SECURITY:-starttls}
+      SMTP_SECURITY: ${VW_SMTP_SECURITY:-off}
       SMTP_EXPLICIT_TLS: ${VW_SMTP_EXPLICIT_TLS:-false}
-      SMTP_AUTH_MECHANISM:
+      SMTP_AUTH_MECHANISM: ${VW_SMTP_AUTH_MECHANISM:-none}
       SMTP_FROM: ${SMTP_FROM:-}
       SMTP_FROM_NAME: ${SMTP_FROM_NAME:-VaultWarden}
       SMTP_TIMEOUT: ${SMTP_TIMEOUT:-15}
@@ -160,7 +171,8 @@ services:
       PUSH_INSTALLATION_ID_FILE: /run/secrets/push_installation_id
       PUSH_INSTALLATION_KEY_FILE: /run/secrets/push_installation_key
       DATABASE_MAX_CONNS: ${DATABASE_MAX_CONNS:-10}
-      WEB_VAULT_FOLDER: web-vault/
+      DATABASE_TIMEOUT: ${DATABASE_TIMEOUT:-30}
+      WEB_VAULT_FOLDER: ${WEB_VAULT_FOLDER:-web-vault/}
 
     secrets:
       - admin_token
@@ -309,7 +321,7 @@ services:
   # -------------------- Optional sidecar: Postfix relay --------------------
   postfix:
     container_name: vaultwarden_postfix
-    image: boky/postfix:${POSTFIX_VERSION:-5.1.0}
+    image: boky/postfix:${POSTFIX_VERSION:-4.3.0}
     restart: unless-stopped
 
     depends_on:
@@ -385,7 +397,7 @@ services:
   # -------------------- Optional sidecar: Fail2Ban --------------------
   fail2ban:
     container_name: vaultwarden_fail2ban
-    image: crazymax/fail2ban:${FAIL2BAN_VERSION:-1.1.0-r4}
+    image: crazymax/fail2ban:${FAIL2BAN_VERSION:-1.1.0-r3}
     restart: unless-stopped
     network_mode: host
 
@@ -395,12 +407,13 @@ services:
 
     environment:
       TZ: ${TZ:-UTC}
-      F2B_LOG_TARGET: STDOUT
-      F2B_LOG_LEVEL: INFO
-      F2B_DB_PURGE_AGE: 30d
+      F2B_LOG_TARGET: ${F2B_LOG_TARGET:-STDOUT}
+      F2B_LOG_LEVEL: ${F2B_LOG_LEVEL:-INFO}
+      F2B_DB_PURGE_AGE: ${F2B_DB_PURGE_AGE:-1d}
+      F2B_MAX_RETRY: ${F2B_MAX_RETRY:-3}
       PACKAGES: whois
-      F2B_DEST_MAIL: ${ADMIN_EMAIL}
-      F2B_SENDER: ${F2B_SENDER}
+      F2B_DEST_MAIL: ${F2B_DEST_MAIL:-admin@example.com}
+      F2B_SENDER: ${F2B_SENDER:-fail2ban@example.com}
       CF_API_TOKEN_FILE: /run/secrets/fail2ban_cloudflare_firewall_token
       CF_ZONE_ID: ${CLOUDFLARE_ZONE_ID}
 

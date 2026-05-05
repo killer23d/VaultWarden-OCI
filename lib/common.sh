@@ -1182,7 +1182,7 @@ send_email() {
     fi
 
     local mode="${EMAIL_MODE:-auto}"
-    local provider="${EMAIL_PROVIDER:-smtp}"
+    local provider="${EMAIL_PROVIDER:-mailersend}"
 
     if [[ "$provider" == "smtp" ]]; then
         mode="smtp"
@@ -1434,4 +1434,4 @@ export -f validate_email validate_domain validate_port validate_ip validate_url
 export -f setup_error_trap setup_cleanup_trap safe_execute
 export -f init_common_lib
 
-log_debug "Common library loaded (email mode: ${EMAIL_MODE:-auto}, provider: ${EMAIL_PROVIDER:-smtp})"
+log_debug "Common library loaded (email mode: ${EMAIL_MODE:-auto}, provider: ${EMAIL_PROVIDER:-mailersend})"

@@ -234,9 +234,10 @@ Tier 2 ─ SMTP relay     →  curl smtps/starttls (no local daemon)
 Tier 3 ─ Host MTA       →  Postfix sidecar (boky/docker-postfix) on 127.0.0.1:587
 ```
 
-Fail2Ban uses the Postfix sidecar (Tier 3) exclusively for ban notifications,
-calling the host `mail` binary targeting `127.0.0.1:587`. The VaultWarden
-container has its own built-in SMTP client configured via `VW_SMTP_*` in `.env`.
+Fail2Ban uses the Postfix sidecar (Tier 3) for ban notifications via the
+host-loopback `127.0.0.1:587` listener. The VaultWarden container also has its
+own SMTP client; its `VW_SMTP_*` values must point at the internal `postfix`
+service, not directly at the external relay.
 
 **Minimum setup for operational alerts (all three tiers):**
 
@@ -248,17 +249,17 @@ SMTP_HOST=smtp.mailersend.net
 SMTP_PORT=587
 SMTP_SECURITY=starttls
 SMTP_USERNAME=your-smtp-username
-SMTP_FROM_EMAIL=noreply@vault.yourdomain.com
+SMTP_FROM=noreply@vault.yourdomain.com
 ALLOWED_SENDER_DOMAINS=vault.yourdomain.com
 F2B_DEST_MAIL=admin@yourdomain.com  # literal value — NOT ${ADMIN_EMAIL}
 F2B_SENDER=fail2ban@vault.yourdomain.com  # literal value — NOT fail2ban@${DOMAIN_NAME}
 
-# Keep VW_SMTP_* in sync with SMTP_* above (literal values only):
-VW_SMTP_HOST=smtp.mailersend.net
+# VaultWarden -> Postfix sidecar (internal Docker network; no auth/TLS here):
+VW_SMTP_HOST=postfix
 VW_SMTP_PORT=587
-VW_SMTP_SECURITY=starttls
-VW_SMTP_USERNAME=your-smtp-username
-VW_SMTP_FROM=noreply@vault.yourdomain.com
+VW_SMTP_SECURITY=off
+VW_SMTP_AUTH_MECHANISM=none
+VW_SMTP_EXPLICIT_TLS=false
 ```
 
 ```bash
