@@ -188,7 +188,6 @@ if [[ -z "$PHASE" ]] && ! validate_email_secure "$ADMIN_EMAIL"; then log_error "
 resolve_github_latest() {
     local repo="$1"
     local tag
-    local api_response
 
     # Use a temp file so curl errors are not silently swallowed by the pipe.
     local api_tmpfile
@@ -1342,6 +1341,7 @@ _ss_register_cleanup() { CLEANUP_ACTIONS+=("$1"); }
 
 # Phase-local defaults (set -u safe): these flags are only parsed inside the
 # secrets phase and may be unset when the caller does not pass explicit options.
+# shellcheck disable=SC2034  # SKIP_VALIDATION is parsed and reserved; validation-skip logic is a no-op placeholder
 local SKIP_VALIDATION=false
 local SKIP_OPTIONAL=false
 local AUTO_FIX=true
@@ -1475,6 +1475,7 @@ HELP
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
+# shellcheck disable=SC2034  # SKIP_VALIDATION is a documented option; validation-skip logic is a future placeholder
 while [[ $# -gt 0 ]]; do
     case $1 in
         --auto)                  AUTO_MODE=true;           shift ;;

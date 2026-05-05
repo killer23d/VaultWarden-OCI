@@ -244,7 +244,7 @@ _cf_api_call() {
 _cf_retry() {
   local endpoint="$1" method="$2" body="${3:-}" attempts="${4:-4}"
   local delays="${5:-2 4 8 16}"
-  local i=1 out rc delay
+  local i=1 out rc delay retry_delay
 
   while [ "$i" -le "$attempts" ]; do
     out="$(_cf_api_call "$endpoint" "$method" "$body")" && { printf "%s" "$out"; return 0; }

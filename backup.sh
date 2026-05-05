@@ -339,7 +339,8 @@ verify_backup_full() {
         return 1
     }
 
-    local dec_out="$shared_tmpdir/verify_$(basename "$enc_file" .age)"
+    local dec_out
+    dec_out="$shared_tmpdir/verify_$(basename "$enc_file" .age)"
 
     if ! age -d -i "$age_key_file" -o "$dec_out" "$enc_file"; then
         log_error "Full verification FAILED: could not decrypt $enc_file" >&2
@@ -564,17 +565,16 @@ sync_to_rclone() {
     fi
     b_log_info "Pre-flight check passed: rclone remote '${remote_name}' is reachable."
 
-    local rclone_ok=true
     local rclone_stderr_tmp="${TMPDIR_BACKUP}/rclone_stderr.tmp"
 
     local rclone_exit=0
     rclone copy "${rclone_config_arg[@]}" "$enc_file" "$remote_path/" --checksum 2>"${rclone_stderr_tmp}" || rclone_exit=$?
     if (( rclone_exit != 0 )); then
-        rclone_ok=false
         local rclone_err
         rclone_err=$(head -20 "${rclone_stderr_tmp}" 2>/dev/null || true)
         log_error "[backup] rclone upload FAILED (exit ${rclone_exit}). The backup was NOT delivered to remote storage." >&2
         log_error "[backup] rclone error output: ${rclone_err}" >&2
+        return 1
     fi
 
     local meta_file="${enc_file}.meta"
@@ -587,7 +587,8 @@ sync_to_rclone() {
         rclone copy "${rclone_config_arg[@]}" "$sha256_file" "$remote_path/" --checksum 2>&1 || true
     fi
 
-    local remote_file_path="${remote_path}/$(basename "$enc_file")"
+    local remote_file_path
+    remote_file_path="${remote_path}/$(basename "$enc_file")"
     local rclone_size_out rclone_size_err_tmp="${TMPDIR_BACKUP}/rclone_size_stderr.tmp"
     local remote_size_bytes=0
     local remote_size_human=""

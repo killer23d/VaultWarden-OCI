@@ -481,6 +481,7 @@ generate_secure_string() {
 
     local random_string=""
     local attempt
+    # shellcheck disable=SC2034  # attempt is the for loop variable; the body iterates only for the count
     for attempt in {1..5}; do
         local _pipe_rc=0
         random_string=$(LC_ALL=C tr -dc "$charset" < /dev/urandom \
@@ -918,7 +919,8 @@ simple_verify_age_key() {
     fi
 
     # Check 3: Validity — Encrypt/Decrypt roundtrip
-    local test_data="vw-key-check-$(date +%s)"
+    local test_data
+    test_data="vw-key-check-$(date +%s)"
     local result
 
     local public_key
@@ -1075,7 +1077,8 @@ verify_key_replica() {
         return 1
     fi
 
-    local test_data="vw-replica-check-$$-$(date +%s)"
+    local test_data
+    test_data="vw-replica-check-$$-$(date +%s)"
     local primary_pub
     if ! primary_pub=$(_derive_age_public_key "$primary_key" 2>/dev/null); then
         log_error "verify_key_replica: primary key is corrupt (cannot derive public key): $primary_key"
@@ -1761,6 +1764,7 @@ generate_breakglass_password() {
 # The $passes parameter is retained for backward compatibility but is ignored.
 secure_cleanup() {
     local target="$1"
+    # shellcheck disable=SC2034  # passes retained for backward compatibility; overwrite count has no effect on modern kernels
     local passes="${2:-3}"          # retained for backward compat; ignored
     local encrypted_confirmed="${3:-}"  # pass "encrypted" to silence warning
 
