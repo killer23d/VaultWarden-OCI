@@ -572,7 +572,8 @@ pull_remote_backup() {
     rclone copy "${RCLONE_CONFIG_ARG[@]}" "$remote_file" "$pull_dir/" --checksum 2>&1 || {
         log_error "Failed to download backup from remote: $remote_file"; return 1
     }
-    local local_file="$pull_dir/$(basename "$remote_file")"
+    local local_file
+    local_file="$pull_dir/$(basename "$remote_file")"
     [[ -s "$local_file" ]] || { log_error "Downloaded file is empty or missing: $local_file"; return 1; }
 
     rclone copy "${RCLONE_CONFIG_ARG[@]}" "${remote_file}.sha256" "$pull_dir/" --checksum 2>/dev/null || true
@@ -1448,7 +1449,8 @@ restore_full() {
         *.tar.zst|*.tar.gz|*.tar.bz2|*.tar.xz|*.tgz|*.tbz) : ;;
         *) inner_name="${inner_name}.tar.gz" ;;
     esac
-    local dec_tar="$tmpdir/$(basename "$inner_name")"
+    local dec_tar
+    dec_tar="$tmpdir/$(basename "$inner_name")"
     local tar_filter; tar_filter="$(_tar_filter_for_file "$dec_tar")"
 
     log_info "Decrypting archive..."

@@ -212,7 +212,8 @@ cleanup_logs() {
                 log_debug "Skipping rotation for Caddy log (handled internally): $log_file"
                 continue
             fi
-            local rotated_name="${log_file}.$(date +%Y%m%d)"
+            local rotated_name
+            rotated_name="${log_file}.$(date +%Y%m%d)"
             if mv "$log_file" "$rotated_name"; then
                 if gzip "$rotated_name"; then
                     log_debug "Rotated large log: $(basename "$log_file")"
@@ -408,7 +409,7 @@ optimize_database() {
     else
         log_warn "Optimization completed with issues. Safety backup retained in backup directory."
     fi
-    return $([[ "$optimization_success" == "true" ]] && echo 0 || echo 1)
+    [[ "$optimization_success" == "true" ]]
 }
 
 # ---------------------------------------------------------------------------
@@ -547,7 +548,7 @@ run_deep_db_maintenance() {
         log_warn "Maintenance did not complete successfully. Retaining safety backup: $safety_backup_file"
     fi
 
-    return $([[ "$maintenance_successful" == "true" ]] && echo 0 || echo 1)
+    [[ "$maintenance_successful" == "true" ]]
 }
 
 # ---------------------------------------------------------------------------
@@ -718,8 +719,10 @@ test_end_to_end_email() {
         return 1
     fi
 
-    local test_subject="VaultWarden Email Test - postfix - $(date)"
-    local test_body="VaultWarden notification test
+    local test_subject
+    test_subject="VaultWarden Email Test - postfix - $(date)"
+    local test_body
+    test_body="VaultWarden notification test
 Sent: $(date -Iseconds)
 Host: $(hostname -f 2>/dev/null || hostname)
 
@@ -1103,7 +1106,8 @@ _resolve_env_file() {
     return 1
 }
 
-local ENV_FILE="$(_resolve_env_file || true)"
+local ENV_FILE
+ENV_FILE="$(_resolve_env_file || true)"
 
 if [[ -n "${ENV_FILE}" ]]; then
     if [[ ! -r "${ENV_FILE}" ]]; then
@@ -1521,13 +1525,14 @@ _check_ssl() {
     fi
 
     if $COMPREHENSIVE; then
-        local verify_output
-        verify_output=$(echo | timeout "$HEALTH_TIMEOUT" openssl s_client \
+        if echo | timeout "$HEALTH_TIMEOUT" openssl s_client \
             -connect "${domain}:443" \
             -servername "$domain" \
-            -verify_return_error 2>&1) && \
-            _pass "ssl:chain" "SSL certificate chain valid for $domain" || \
+            -verify_return_error 2>&1 >/dev/null; then
+            _pass "ssl:chain" "SSL certificate chain valid for $domain"
+        else
             _warn "ssl:chain" "SSL chain validation warning for $domain"
+        fi
     fi
 }
 
@@ -1541,12 +1546,12 @@ _check_vaultwarden_alive() {
 
     log_info "Checking VaultWarden liveness (/alive)..."
 
-    local internal_response
-    if internal_response=$(timeout "$HEALTH_TIMEOUT" curl -sf \
+    local alive_response
+    if alive_response=$(timeout "$HEALTH_TIMEOUT" curl -sf \
         --connect-timeout "$HEALTH_CONNECT_TIMEOUT" \
         --max-time "$HEALTH_TIMEOUT" \
         "http://127.0.0.1:80/alive" 2>/dev/null); then
-        _pass "vaultwarden:alive" "VaultWarden /alive endpoint responding"
+        _pass "vaultwarden:alive" "VaultWarden /alive endpoint responding (response: ${alive_response:-<empty>})"
     else
         if docker exec vaultwarden_app curl -sf \
             --connect-timeout "$HEALTH_CONNECT_TIMEOUT" \
@@ -2097,7 +2102,9 @@ _check_container_resources() {
         return
     }
 
-    _pass "resources:stats" "Container resource stats retrieved (see --report for details)"
+    log_debug "Container resource stats:
+${stats}"
+    _pass "resources:stats" "Container resource stats retrieved"
 }
 
 # =============================================================================
@@ -2162,6 +2169,10 @@ _notify_failures() {
         alerted_any=true
         log_info "Alert sent for '${name}' (${status})"
     done
+
+    if [[ "$alerted_any" == "true" ]]; then
+        log_debug "_notify_failures: at least one alert was sent this cycle"
+    fi
 
     if [[ $failed -gt 0 || $warnings -gt 0 ]]; then
         _release_recovery_lock

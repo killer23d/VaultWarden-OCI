@@ -414,7 +414,8 @@ create_backup() {
         return 0
     fi
 
-    local backup_file="$SECRETS_BACKUP_DIR/secrets.yaml.backup-$(date +%Y%m%d-%H%M%S)"
+    local backup_file
+    backup_file="$SECRETS_BACKUP_DIR/secrets.yaml.backup-$(date +%Y%m%d-%H%M%S)"
     log_info "Creating backup: $(basename "$backup_file")"
 
     if ! cp "$SECRETS_FILE" "$backup_file"; then

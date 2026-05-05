@@ -793,7 +793,7 @@ show_breakglass_status() {
         if systemctl is-active --quiet vw-breakglass-cleanup.timer 2>/dev/null; then
             local timer_left
             timer_left=$(systemctl show vw-breakglass-cleanup.timer -p NextElapseUSecRealtime 2>/dev/null | cut -d= -f2 || echo "unknown")
-            echo "  Auto-cleanup timer: ✅ Pending via systemd (vw-breakglass-cleanup)"
+            echo "  Auto-cleanup timer: ✅ Pending via systemd (vw-breakglass-cleanup) [next: ${timer_left}]"
         else
             echo "  Auto-cleanup timer: ℹ️  Not active via systemd (may be scheduled via 'at')"
         fi

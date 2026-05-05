@@ -4,7 +4,6 @@
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_COMMON_LIB_LOADED:-}" ]] && return 0
 readonly VAULTWARDEN_COMMON_LIB_LOADED=1
-readonly LIB_COMMON_LOADED=1
 
 set -euo pipefail
 
@@ -20,18 +19,20 @@ LOG_LEVEL="${LOG_LEVEL:-INFO}"
 
 # Colors for output (if supported)
 if [[ -t 1 ]] && command -v tput >/dev/null 2>&1; then
-    readonly COLOR_RED=$(tput setaf 1)
-    readonly COLOR_GREEN=$(tput setaf 2)
-    readonly COLOR_YELLOW=$(tput setaf 3)
-    readonly COLOR_BLUE=$(tput setaf 4)
-    readonly COLOR_CYAN=$(tput setaf 6)
-    readonly COLOR_RESET=$(tput sgr0)
-    readonly COLOR_BOLD=$(tput bold)
+    COLOR_RED=$(tput setaf 1 2>/dev/null)     || COLOR_RED=""
+    COLOR_GREEN=$(tput setaf 2 2>/dev/null)   || COLOR_GREEN=""
+    COLOR_YELLOW=$(tput setaf 3 2>/dev/null)  || COLOR_YELLOW=""
+    COLOR_BLUE=$(tput setaf 4 2>/dev/null)    || COLOR_BLUE=""
+    COLOR_CYAN=$(tput setaf 6 2>/dev/null)    || COLOR_CYAN=""
+    COLOR_RESET=$(tput sgr0 2>/dev/null)      || COLOR_RESET=""
+    COLOR_BOLD=$(tput bold 2>/dev/null)       || COLOR_BOLD=""
+    readonly COLOR_RED COLOR_GREEN COLOR_YELLOW COLOR_BLUE COLOR_CYAN COLOR_RESET COLOR_BOLD
 else
     readonly COLOR_RED=""
     readonly COLOR_GREEN=""
     readonly COLOR_YELLOW=""
     readonly COLOR_BLUE=""
+    # shellcheck disable=SC2034  # COLOR_CYAN is used by sourcing scripts (setup.sh, create-breakglass-admin.sh)
     readonly COLOR_CYAN=""
     readonly COLOR_RESET=""
     readonly COLOR_BOLD=""
@@ -248,6 +249,7 @@ load_env_file() {
         fi
 
         printf -v "$key" '%s' "$value"
+        # shellcheck disable=SC2163  # export "$key" exports the variable whose name is in $key
         export "$key"
 
     done < "$env_file"
@@ -928,7 +930,8 @@ _resolve_rate_limit_dir() {
 _rate_limit_check() {
     local subject="$1"
     local rate_limit_dir="$2"
-    local last_email_file="$rate_limit_dir/.vw_last_email_$(printf '%s' "$subject" | sha256sum | cut -c1-16)"
+    local last_email_file
+    last_email_file="$rate_limit_dir/.vw_last_email_$(printf '%s' "$subject" | sha256sum | cut -c1-16)"
 
     if [[ "$subject" != *"CRITICAL"* ]] && [[ -f "$last_email_file" ]]; then
         local last_time current_time
@@ -975,7 +978,8 @@ clear_email_rate_limit() {
         return 0
     }
 
-    local stamp_file="$rate_limit_dir/.vw_last_email_$(printf '%s' "$subject" | sha256sum | cut -c1-16)"
+    local stamp_file
+    stamp_file="$rate_limit_dir/.vw_last_email_$(printf '%s' "$subject" | sha256sum | cut -c1-16)"
 
     if [[ -f "$stamp_file" ]]; then
         rm -f "$stamp_file" 2>/dev/null || true
@@ -1377,6 +1381,7 @@ setup_error_trap() {
 
 setup_cleanup_trap() {
     local cleanup_function="$1"
+    # shellcheck disable=SC2064  # intentional: $cleanup_function expands at registration to capture the function name
     trap "$cleanup_function" EXIT HUP INT TERM
 }
 

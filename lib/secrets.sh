@@ -367,7 +367,8 @@ create_secrets_backup() {
         log_debug "No secrets file to backup"
         return 0
     fi
-    local backup_file="$backup_dir/secrets.yaml.backup-$(date +%Y%m%d-%H%M%S)"
+    local backup_file
+    backup_file="$backup_dir/secrets.yaml.backup-$(date +%Y%m%d-%H%M%S)"
     log_info "Creating backup: $(basename "$backup_file")"
     # LS-4 FIX: pre-create at 600 so the file is never world-readable.
     if ! install -m 600 /dev/null "$backup_file"; then
@@ -1016,6 +1017,7 @@ _ork_generate_and_secure() {
         printf '\n'
     } > /dev/tty 2>/dev/null || true
 
+    # shellcheck disable=SC2064  # intentional: $output_file expands at registration to capture the path
     trap "_secure_shred '$output_file'; echo '[recovery-kit] Plaintext kit securely deleted.' >&2" RETURN
 
     if ! generate_recovery_kit "$output_file"; then
@@ -1035,7 +1037,9 @@ _ork_generate_and_secure() {
     log_warn "If you do not respond within 120 seconds it will be deleted automatically."
     echo ""
 
+    # shellcheck disable=SC2034  # user_ack is the read target; value not needed, only the timeout/EOF behaviour
     local user_ack
+    # shellcheck disable=SC2034
     if read -r -t 120 -p "Press Enter once you have saved the recovery kit: " user_ack 2>/dev/null \
        || true; then
         : 
@@ -1055,7 +1059,8 @@ offer_recovery_kit_export() {
     # directory before any /dev/tty-dependent display flow. This prevents the
     # recovery kit from being lost when setup runs through an SSH jumphost,
     # nohup, or other detached TTY environment.
-    local recovery_file="./recovery-kit-$(date +%s).txt"
+    local recovery_file
+    recovery_file="./recovery-kit-$(date +%s).txt"
     if generate_recovery_kit "$recovery_file"; then
         chmod 600 "$recovery_file"
         log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -1074,7 +1079,8 @@ offer_recovery_kit_export() {
         return 1
     fi
 
-    local output_file="${tmpfs_base}/vaultwarden-recovery-kit-$(date +%Y%m%d%H%M%S).txt"
+    local output_file
+    output_file="${tmpfs_base}/vaultwarden-recovery-kit-$(date +%Y%m%d%H%M%S).txt"
 
     if [[ "$auto_export" == "true" ]]; then
         log_info "Exporting recovery kit (--export-recovery-kit specified)..."
