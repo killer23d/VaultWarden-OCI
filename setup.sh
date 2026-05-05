@@ -2266,8 +2266,8 @@ _ss_main() {
         return 1
     fi
 
-    if ! ensure_prerequisites;    then exit 1; fi
-    if ! ensure_argon2_available; then exit 1; fi
+    if ! ensure_prerequisites;    then return 1; fi
+    if ! ensure_argon2_available; then return 1; fi
 
     if ! check_reconfiguration; then
         log_info "Keeping existing secrets - no changes made"
@@ -2359,7 +2359,7 @@ _ss_main() {
         fi
     fi
 
-    exit 0
+    return 0
 }
     _ss_main "$@"
 }
