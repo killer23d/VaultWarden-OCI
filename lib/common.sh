@@ -19,13 +19,13 @@ LOG_LEVEL="${LOG_LEVEL:-INFO}"
 
 # Colors for output (if supported)
 if [[ -t 1 ]] && command -v tput >/dev/null 2>&1; then
-    COLOR_RED=$(tput setaf 1)
-    COLOR_GREEN=$(tput setaf 2)
-    COLOR_YELLOW=$(tput setaf 3)
-    COLOR_BLUE=$(tput setaf 4)
-    COLOR_CYAN=$(tput setaf 6)
-    COLOR_RESET=$(tput sgr0)
-    COLOR_BOLD=$(tput bold)
+    COLOR_RED=$(tput setaf 1 2>/dev/null)     || COLOR_RED=""
+    COLOR_GREEN=$(tput setaf 2 2>/dev/null)   || COLOR_GREEN=""
+    COLOR_YELLOW=$(tput setaf 3 2>/dev/null)  || COLOR_YELLOW=""
+    COLOR_BLUE=$(tput setaf 4 2>/dev/null)    || COLOR_BLUE=""
+    COLOR_CYAN=$(tput setaf 6 2>/dev/null)    || COLOR_CYAN=""
+    COLOR_RESET=$(tput sgr0 2>/dev/null)      || COLOR_RESET=""
+    COLOR_BOLD=$(tput bold 2>/dev/null)       || COLOR_BOLD=""
     readonly COLOR_RED COLOR_GREEN COLOR_YELLOW COLOR_BLUE COLOR_CYAN COLOR_RESET COLOR_BOLD
 else
     readonly COLOR_RED=""

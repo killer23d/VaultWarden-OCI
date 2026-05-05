@@ -1546,12 +1546,12 @@ _check_vaultwarden_alive() {
 
     log_info "Checking VaultWarden liveness (/alive)..."
 
-    local internal_response
-    if internal_response=$(timeout "$HEALTH_TIMEOUT" curl -sf \
+    local alive_response
+    if alive_response=$(timeout "$HEALTH_TIMEOUT" curl -sf \
         --connect-timeout "$HEALTH_CONNECT_TIMEOUT" \
         --max-time "$HEALTH_TIMEOUT" \
         "http://127.0.0.1:80/alive" 2>/dev/null); then
-        _pass "vaultwarden:alive" "VaultWarden /alive endpoint responding (response: ${internal_response:-<empty>})"
+        _pass "vaultwarden:alive" "VaultWarden /alive endpoint responding (response: ${alive_response:-<empty>})"
     else
         if docker exec vaultwarden_app curl -sf \
             --connect-timeout "$HEALTH_CONNECT_TIMEOUT" \

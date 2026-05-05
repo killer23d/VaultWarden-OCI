@@ -1341,7 +1341,7 @@ _ss_register_cleanup() { CLEANUP_ACTIONS+=("$1"); }
 
 # Phase-local defaults (set -u safe): these flags are only parsed inside the
 # secrets phase and may be unset when the caller does not pass explicit options.
-# shellcheck disable=SC2034  # SKIP_VALIDATION is parsed and reserved; validation-skip logic is a no-op placeholder
+# shellcheck disable=SC2034  # SKIP_VALIDATION is parsed and reserved; validation-skip logic is a noop placeholder
 local SKIP_VALIDATION=false
 local SKIP_OPTIONAL=false
 local AUTO_FIX=true
