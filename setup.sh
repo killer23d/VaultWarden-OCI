@@ -114,6 +114,7 @@ CLEAN_DOMAIN=""
 # calling environment).
 DATA_VOLUME_DEVICE="${DATA_VOLUME_DEVICE:-}"
 DATA_VOLUME_MOUNT="${DATA_VOLUME_MOUNT:-/mnt/vw-data}"
+SETUP_LOCK_FILE=""
 
 show_help() {
     cat << 'EOF'
@@ -597,7 +598,7 @@ create_env_file() {
     temp_env=$(mktemp -p "$(dirname "$env_file")" .env.tmp.XXXXXXXXXX) || return 1
 
     # Compute PROJECT_STATE_DIR value: when a data volume is configured it MUST
-    # equal DATA_VOLUME_MOUNT; otherwise use the default boot-volume location.
+    # equal ; otherwise use the default boot-volume location.
     local awk_state_dir
     if [[ -n "${DATA_VOLUME_DEVICE:-}" ]]; then
         awk_state_dir="${DATA_VOLUME_MOUNT:-/mnt/vw-data}"
@@ -3332,7 +3333,7 @@ main() {
 
     if ! is_root; then log_error "Must run as root."; exit 1; fi
 
-    local SETUP_LOCK_FILE="/run/lock/vaultwarden-setup.lock"
+    SETUP_LOCK_FILE="/run/lock/vaultwarden-setup.lock"
     # Use automatic FD allocation instead of hardcoded FD for the lock.
     # /run/lock is the FHS-correct transient lock location; /var/lock
     #   is a legacy symlink that ProtectSystem=strict makes read-only in systemd units.
