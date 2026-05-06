@@ -559,7 +559,7 @@ download_file() {
 _email_driver_lookup() {
     local provider="${1,,}"
     case "$provider" in
-        mailersend|sendgrid|mailgun|postmark|resend)
+        mailersend|sendgrid|mailgun|postmark|resend|cyberpersons)
             printf '%s' "$provider"
             return 0
             ;;
@@ -844,6 +844,87 @@ EOF
 
     _email_bearer_post "https://api.resend.com/emails" "$payload" && return 0
     log_warn "Resend API HTTP ${_ECURL_CODE}: ${_ECURL_BODY}"
+    return 1
+}
+
+# -- DRIVER: CyberPersons (platform.cyberpersons.com) ---------------------------
+# Reference: https://cyberpanel.net/KnowledgeBase/sending-email-rest-api/
+#
+# Required env vars:
+#   EMAIL_API_TOKEN        — CyberPersons API key (sk_live_…)
+#   SMTP_FROM_EMAIL / SMTP_FROM — verified sender address
+#   ADMIN_EMAIL            — recipient
+#
+# Optional env vars:
+#   SMTP_FROM_NAME         — display name (default: VaultWarden)
+#   CYBERPANEL_EMAIL_TAGS  — comma-separated tag list, e.g. "vaultwarden,alerts"
+#                            Written as a JSON array in the request body.
+#                            If unset, defaults to ["vaultwarden"].
+#
+# Authentication: Bearer token via the shared _email_bearer_post() helper,
+# which writes the Authorization header to a chmod-600 curl config file.
+#
+# The driver sends plain-text only (text field).  The API accepts an optional
+# html field; callers that need HTML can extend this by adding an html argument.
+#
+# Tracking is explicitly disabled (click and open tracking) to avoid leaking
+# admin notification URLs to third-party tracking infrastructure.
+# -----------------------------------------------------------------------------
+_email_driver_cyberpersons() {
+    local subject="$1" body="$2"
+    local s b fn fe ae
+    s=$(_email_json_escape "$subject")
+    b=$(_email_json_escape "$body")
+    local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
+    fn=$(_email_json_escape "${SMTP_FROM_NAME:-VaultWarden}")
+    fe=$(_email_json_escape "${_from_email}")
+    ae=$(_email_json_escape "${ADMIN_EMAIL}")
+
+    # Build the tags JSON array from CYBERPANEL_EMAIL_TAGS (comma-separated).
+    # Default to a single "vaultwarden" tag when the variable is unset/empty.
+    local tags_json
+    if [[ -n "${CYBERPANEL_EMAIL_TAGS:-}" ]]; then
+        local tags_array=()
+        local raw_tag
+        IFS=',' read -ra tags_array <<< "${CYBERPANEL_EMAIL_TAGS}"
+        local tags_entries=""
+        local sep=""
+        for raw_tag in "${tags_array[@]}"; do
+            raw_tag="${raw_tag#"${raw_tag%%[![:space:]]*}"}"  # ltrim
+            raw_tag="${raw_tag%"${raw_tag##*[![:space:]]}"}"  # rtrim
+            [[ -z "$raw_tag" ]] && continue
+            local escaped_tag
+            escaped_tag=$(_email_json_escape "$raw_tag")
+            tags_entries+="${sep}\"${escaped_tag}\""
+            sep=", "
+        done
+        tags_json="[${tags_entries}]"
+    else
+        tags_json='["vaultwarden"]'
+    fi
+
+    local payload
+    payload=$(cat <<EOF
+{
+    "from":    "${fe}",
+    "to":      "${ae}",
+    "subject": "${s}",
+    "text":    "${b}",
+    "tags":    ${tags_json},
+    "headers": { "X-Mailer": "VaultWarden-OCI" }
+}
+EOF
+)
+
+    if _email_bearer_post "https://platform.cyberpersons.com/email/v1/send" "$payload"; then
+        # A non-empty body on a 2xx is informational (e.g. message_id echo).
+        [[ -n "${_ECURL_BODY}" ]] \
+            && log_debug "CyberPersons email API response: ${_ECURL_BODY}"
+        return 0
+    fi
+
+    # Surface the HTTP status and truncated response body for diagnostics.
+    log_warn "CyberPersons email API HTTP ${_ECURL_CODE}: ${_ECURL_BODY}"
     return 1
 }
 
@@ -1224,7 +1305,7 @@ send_email() {
         local driver_suffix
         if ! driver_suffix=$(_email_driver_lookup "$provider" 2>/dev/null); then
             log_error "Unknown EMAIL_PROVIDER='${provider}'"
-            log_info  "Valid providers: mailersend sendgrid mailgun postmark resend smtp host"
+            log_info  "Valid providers: mailersend sendgrid mailgun postmark resend cyberpersons smtp host"
             [[ "$mode" == "api" ]] && return 1
         else
             local driver_fn="_email_driver_${driver_suffix}"
@@ -1430,6 +1511,7 @@ export -f clear_email_rate_limit
 export -f _email_json_escape _email_bearer_post _email_driver_lookup
 export -f _email_driver_mailersend _email_driver_sendgrid _email_driver_mailgun
 export -f _email_driver_postmark _email_driver_resend _email_driver_postfix
+export -f _email_driver_cyberpersons
 export -f validate_email validate_domain validate_port validate_ip validate_url
 export -f setup_error_trap setup_cleanup_trap safe_execute
 export -f init_common_lib
