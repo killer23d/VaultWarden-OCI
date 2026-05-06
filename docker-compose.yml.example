@@ -355,7 +355,10 @@ services:
       # NOT verify that the upstream relay is reachable. A misconfigured or
       # expired relay credential would leave Postfix 'healthy' while silently
       # queuing (and eventually bouncing) all outbound mail.
-      test: ["CMD-SHELL", "postfix status 2>/dev/null && nc -w 3 -q 1 ${SMTP_HOST:-localhost} ${SMTP_PORT:-587} </dev/null | grep -q '^2' || exit 1"]
+      # NOTE: Use 'echo QUIT | nc' instead of 'nc -q 1' — BusyBox nc (Alpine/boky/postfix)
+      # does not support the -q flag (OpenBSD nc only). The QUIT command causes a
+      # graceful disconnect so nc exits cleanly without relying on -q.
+      test: ["CMD-SHELL", "postfix status 2>/dev/null && (echo QUIT | nc -w 3 ${SMTP_HOST:-localhost} ${SMTP_PORT:-587} 2>/dev/null | grep -q '^2') || exit 1"]
       interval: 120s
       timeout: 15s
       retries: 5
@@ -491,9 +494,11 @@ networks:
     driver: bridge
     internal: true
 
-  # Dedicated outbound network for VaultWarden-only egress.
-  # Keeps the app/service mesh network air-gapped while allowing
-  # external calls (HIBP, push/identity, etc.) from vaultwarden_app.
+  # vaultwarden_egress — outbound-only internet path for the vaultwarden_app container.
+  # Named *_egress to signal one-directional purpose: app → internet (HIBP, push/identity).
+  # Caddy does NOT join this network; it uses caddy_external for its own outbound needs.
+  # Keeping them separate enforces the security boundary: if Caddy is compromised, it
+  # cannot reach VaultWarden's egress path and vice-versa.
   vaultwarden_egress:
     name: vaultwarden_egress_network
     driver: bridge
@@ -502,13 +507,17 @@ networks:
       config:
         - subnet: 172.21.0.0/16
 
+  # caddy_external — inbound + outbound path for the Caddy reverse proxy.
+  # Named *_external (not *_egress) because traffic is bidirectional: inbound
+  # public requests arrive on ports 80/443, and Caddy also makes outbound calls
+  # (ACME/Let's Encrypt, Cloudflare DNS-01). Intentionally separate from
+  # vaultwarden_egress so the two services' internet paths remain air-gapped.
+  # Pinned subnet keeps this network deterministic and within RFC1918 space
+  # already allowed by the DOCKER-USER catch-all in setup-iptables.sh.
   caddy_external:
     name: caddy_external_network
     driver: bridge
-    # Pinned subnet keeps the reverse-proxy network deterministic and within
-    # RFC1918 space that is already allowed by the DOCKER-USER catch-all in
-    # setup-iptables.sh. This network is a regular bridge network, not an
-    # external Compose-managed network.
+    internal: false  # explicit: inbound (80/443) + outbound (ACME, CF DNS) for Caddy
     ipam:
       config:
         - subnet: 172.22.0.0/16

@@ -1182,7 +1182,7 @@ send_email() {
     fi
 
     local mode="${EMAIL_MODE:-auto}"
-    local provider="${EMAIL_PROVIDER:-mailersend}"
+    local provider="${EMAIL_PROVIDER:-smtp}"
 
     if [[ "$provider" == "smtp" ]]; then
         mode="smtp"
