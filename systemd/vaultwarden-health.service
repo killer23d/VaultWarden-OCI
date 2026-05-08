@@ -24,7 +24,7 @@ EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
 ExecCondition=/bin/bash -c '! test -f /tmp/.vw_maintenance.lock'
 # --email is intentionally omitted here. Add it once EMAIL_API_TOKEN or
 # SMTP credentials are set in /etc/vaultwarden/vaultwarden.env.
-ExecStart=/opt/vaultwarden-scripts/maintenance.sh --health --fix
+ExecStart=/opt/vaultwarden-scripts/maintenance.sh health --fix
 User=root
 StandardOutput=journal
 StandardError=journal

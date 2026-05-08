@@ -133,11 +133,16 @@ show_help() {
 VaultWarden-OCI Restore Script
 
 USAGE:
-    sudo ./restore.sh [OPTIONS]
+    sudo ./restore.sh [subcommand] [options]
 
-    When run without --file or --latest, an interactive numbered menu is
-    presented.  If rclone is configured, you are first asked whether to
-    restore from a LOCAL or REMOTE backup.
+SUBCOMMANDS:
+    latest [TYPE]     Restore the newest local backup (TYPE: db | full | emergency)
+    list              List available local backups (no root required)
+    list --remote     List available remote backups (no root required)
+
+    When no subcommand is given, an interactive numbered menu is presented.
+    If rclone is configured, you are first asked whether to restore from
+    a LOCAL or REMOTE backup.
 
     After the backup is selected you will be prompted for the age private
     key that was used to encrypt that backup.  Press Enter to use the key
@@ -190,18 +195,50 @@ ENVIRONMENT:
     remote, verify with 'rclone listremotes', then re-run restore.sh.
 
 EXAMPLES:
-    sudo ./restore.sh                                   # interactive (local or remote)
-    sudo ./restore.sh --remote                          # interactive (remote only)
-    ./restore.sh --list                                 # list local backups (no root)
-    ./restore.sh --list --remote                        # list remote backups (no root)
-    sudo ./restore.sh --latest --type db --force
-    sudo ./restore.sh --file "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/backups/full/full_backup_20260101_120000.tar.zst.age"
-    sudo ./restore.sh --key-file /tmp/old-age-key.txt   # supply key non-interactively
+    # ── QUICK START (most common) ────────────────────────────────
+    sudo ./restore.sh latest             # Restore newest backup (interactive confirm)
+    sudo ./restore.sh latest db          # Restore newest DB backup
+    sudo ./restore.sh latest --force     # Restore newest backup, no confirm prompts
+    ./restore.sh list                    # List local backups (no sudo)
+    ./restore.sh list --remote           # List remote backups (no sudo)
 
-    # Bare-metal DR: one flag replaces manual key extraction
-    sudo ./restore.sh --latest --from-recovery-kit /mnt/usb/recovery-kit.txt --force
+    # ── TARGETED RESTORE ───────────────────────────────────────────
+    sudo ./restore.sh --remote                          # Interactive remote restore
+    sudo ./restore.sh --latest --type db --force
+    sudo ./restore.sh --file "/var/lib/vaultwarden/backups/full/full_backup_20260101_120000.tar.zst.age"
+    sudo ./restore.sh --key-file /tmp/old-age-key.txt  # Supply key non-interactively
+
+    # ── BARE-METAL DISASTER RECOVERY ───────────────────────────────
+    sudo ./restore.sh latest --from-recovery-kit /mnt/usb/recovery-kit.txt --force
 EOF
 }
+
+# ---------------------------------------------------------------------------
+# Handle 'latest' and 'list' subcommands before the legacy flag parser runs.
+# This keeps the dispatch tight without touching the existing flag logic.
+# ---------------------------------------------------------------------------
+if [[ $# -gt 0 ]]; then
+    case "$1" in
+        latest)
+            shift
+            USE_LATEST=true
+            # Optional positional TYPE before any --flags
+            if [[ $# -gt 0 && "$1" != --* ]]; then
+                RESTORE_TYPE="$1"; shift
+            fi
+            # Pass remaining --flags to the legacy parser below
+            ;;
+        list)
+            shift
+            LIST_ONLY=true
+            # Allow 'list --remote' as a subcommand form
+            [[ "${1:-}" == "--remote" ]] && { USE_REMOTE=true; shift; }
+            ;;
+        --help|-h)
+            show_help; exit 0
+            ;;
+    esac
+fi
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -1953,8 +1990,8 @@ main() {
 
         if [[ -x "./maintenance.sh" ]]; then
             log_info "Running post-restore health check..."
-            log_info "Invoking: $SCRIPT_DIR/maintenance.sh --health --quiet"
-            ./maintenance.sh --health --quiet || {
+            log_info "Invoking: $SCRIPT_DIR/maintenance.sh health"
+            ./maintenance.sh health || {
                 log_warn "Health check reported issues after restore."
                 log_warn "Investigate with: docker compose logs --tail=50"
             }

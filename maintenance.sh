@@ -91,68 +91,73 @@ show_help() {
 VaultWarden-OCI Maintenance Script
 
 USAGE:
-    ./maintenance.sh [OPTIONS]
-    ./maintenance.sh --health [HEALTH-OPTIONS]
-    ./maintenance.sh --update [UPDATE-OPTIONS]
+    ./maintenance.sh <subcommand> [options]
 
-SUBCOMMANDS (double-dash format):
-    --health            Run system health checks
-                        Accepts health options: --comprehensive --fix --report --help
-    --update            Update system packages and Docker images
-                        Options: --system --images --all --force --dry-run --skip-backup --email
+SUBCOMMANDS:
+    run               Full routine maintenance (cleanup + optimize + health)
+    run --comprehensive   Full routine + firewall + DNS updates
+    health            Run system health checks
+    update            Update system packages and/or Docker images
+    db-maint          Deep database maintenance (VACUUM + WAL + backup)
+    test-email        Email diagnostics and test notification
+    update-dns        Update Cloudflare DNS A record only
+    update-firewall   Update Cloudflare IP ranges in firewall only
 
-TARGETED (single-task) OPTIONS:
-    --update-dns            Check and update Cloudflare DNS A record ONLY
-    --update-firewall       Update Cloudflare IP ranges in firewall ONLY
-
-    When called with ONLY one of the above, the routine cleanup/optimization
-    phases are skipped entirely. Combine with --comprehensive or routine
-    flags to include them alongside.
-
-ON-DEMAND DIAGNOSTICS & DEEP MAINTENANCE:
-    --db-maint              Run deep database maintenance (VACUUM + WAL checkpoint + backup)
-                            Stops the VaultWarden container; prompts for confirmation
-    --db-maint --force      Skip the confirmation prompt
-    --test-email            Run email diagnostics and send a test notification.
-                            Supports: --dry-run, --recipient EMAIL, --verbose
-                            May start the postfix container if it is stopped.
-    --recipient EMAIL       Override the default admin email recipient.
-                            Only meaningful with --test-email.
-    --verbose               Show detailed diagnostic output.
-                            Only meaningful with --test-email; ignored in all other modes.
-
-ROUTINE MAINTENANCE OPTIONS:
+RUN OPTIONS (used after 'run'):
     --comprehensive         Run everything: routine + firewall + DNS
     --no-logs               Skip log rotation and cleanup
     --no-backups            Skip backup cleanup
     --no-docker             Skip Docker cleanup
     --no-database           Skip scheduled database optimization
-    --dry-run               Show what would be done without executing.
-                            Supported by all modes including --test-email.
+    --update-dns            Include DNS update in this run
+    --update-firewall       Include firewall update in this run
+    --dry-run               Show what would be done without executing
     --email                 Send email notification on completion
-    --help                  Show this help
 
-BEHAVIOUR OVERVIEW:
-    --test-email            Run email diagnostics ONLY (no cleanup, no DB opt)
-    --db-maint              Run deep DB maintenance ONLY (no cleanup, no DB opt)
-    --update-dns alone      Run DNS update ONLY (no cleanup, no DB opt)
-    --update-firewall alone Run firewall update ONLY (no cleanup, no DB opt)
-    --comprehensive         Full routine + firewall + DNS + health check
-    No flags                Show this help
-    --dry-run               Preview any mode without making changes
+HEALTH OPTIONS (used after 'health'):
+    --comprehensive         Include extended checks
+    --fix                   Auto-restart unhealthy containers
+    --report                Write a report file
+
+UPDATE OPTIONS (used after 'update'):
+    --system                Update OS packages only
+    --images                Update Docker images only
+    --all                   Update OS packages + Docker images
+    --force                 Skip confirmation prompts
+    --dry-run               Preview without changes
+    --skip-backup           Skip pre-update backup
+    --email                 Notify on completion
+
+DB-MAINT OPTIONS (used after 'db-maint'):
+    --force                 Skip confirmation prompt
+    --dry-run               Preview without changes
+
+TEST-EMAIL OPTIONS (used after 'test-email'):
+    --recipient EMAIL       Override default admin email recipient
+    --verbose               Show detailed diagnostic output
+    --dry-run               Preview without sending
+
+GLOBAL OPTIONS:
+    --help, -h              Show this help
 
 EXAMPLES:
-    ./maintenance.sh --comprehensive              # Full maintenance
-    ./maintenance.sh --update-dns                 # DNS update ONLY
-    ./maintenance.sh --update-dns --email         # DNS update + notify on change
-    ./maintenance.sh --test-email                 # Email diagnostics
-    ./maintenance.sh --test-email --verbose       # Email diagnostics (detailed)
-    ./maintenance.sh --test-email --dry-run       # Preview email test without sending
-    ./maintenance.sh --test-email --recipient admin@example.com
-    sudo ./maintenance.sh --db-maint              # Deep DB maintenance (interactive)
-    sudo ./maintenance.sh --db-maint --force      # Deep DB maintenance (non-interactive)
-    ./maintenance.sh --health                     # Run health checks
-    ./maintenance.sh --update --all               # Update system + images
+    ./maintenance.sh run                          # Full routine maintenance
+    ./maintenance.sh run --comprehensive          # Full + firewall + DNS
+    ./maintenance.sh run --comprehensive --email  # Full + notify on completion
+    ./maintenance.sh run --dry-run                # Preview what run would do
+    ./maintenance.sh health                       # Health checks
+    ./maintenance.sh health --comprehensive --fix # Full health + auto-fix
+    sudo ./maintenance.sh update --all            # Update packages + images
+    sudo ./maintenance.sh db-maint                # Deep DB maintenance (interactive)
+    sudo ./maintenance.sh db-maint --force        # Deep DB maintenance (skip confirm)
+    ./maintenance.sh test-email                   # Email diagnostics
+    ./maintenance.sh test-email --verbose         # Email diagnostics (detailed)
+    ./maintenance.sh test-email --recipient admin@example.com
+    ./maintenance.sh update-dns                   # DNS update only
+    ./maintenance.sh update-firewall              # Firewall update only
+
+NOTE: Legacy double-dash flags (--health, --update, --db-maint, etc.) are
+      still accepted for backward compatibility with existing scripts.
 EOF
 }
 
@@ -3011,50 +3016,105 @@ main() {
 
 [[ $# -eq 0 ]] && { show_help; exit 0; }
 
-# Track which flags were explicitly set so we can detect targeted mode
-_ROUTINE_OVERRIDE=false
+_TASK="${1:-}"
 
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        --comprehensive)
-            COMPREHENSIVE=true; UPDATE_FIREWALL=true; UPDATE_DNS=true
-            _ROUTINE_OVERRIDE=true; shift ;;
-        --no-logs)      CLEAN_LOGS=false;        _ROUTINE_OVERRIDE=true; shift ;;
-        --no-backups)   CLEAN_BACKUPS=false;     _ROUTINE_OVERRIDE=true; shift ;;
-        --no-docker)    CLEAN_DOCKER=false;      _ROUTINE_OVERRIDE=true; shift ;;
-        --no-database)  OPTIMIZE_DATABASE=false; _ROUTINE_OVERRIDE=true; shift ;;
-        --update-firewall) UPDATE_FIREWALL=true; shift ;;
-        --update-dns)      UPDATE_DNS=true;      shift ;;
-        --dry-run)         DRY_RUN=true;         shift ;;
-        --email)           EMAIL_NOTIFY=true;    shift ;;
-        --db-maint)        DB_DEEP_MAINT=true;   shift ;;
-        --force)           DB_DEEP_FORCE=true;   shift ;;
-        --test-email)      TEST_EMAIL=true;      shift ;;
-        --recipient)       TEST_RECIPIENT="$2";  shift 2 ;;
-        --verbose)         VERBOSE=true;         shift ;;
-        --help)            show_help; exit 0 ;;
-        health|--health)
-            shift
-            run_health_check "$@"
-            exit $?
-            ;;
-        update|--update)
-            shift
-            run_update "$@"
-            exit $?
-            ;;
-        *) log_error "Unknown option: $1"; show_help; exit 1 ;;
-    esac
-done
-
-if [[ "$_ROUTINE_OVERRIDE" == "false" && "$DB_DEEP_MAINT" == "false" && "$TEST_EMAIL" == "false" ]]; then
-    if [[ "$UPDATE_DNS" == "true" || "$UPDATE_FIREWALL" == "true" ]]; then
+case "$_TASK" in
+    # ── Named subcommands (dispatched to existing functions) ───────────────
+    health|--health)
+        shift
+        run_health_check "$@"
+        exit $?
+        ;;
+    update|--update)
+        shift
+        run_update "$@"
+        exit $?
+        ;;
+    db-maint|--db-maint)
+        DB_DEEP_MAINT=true
+        shift
+        while [[ $# -gt 0 ]]; do
+            case $1 in
+                --force)   DB_DEEP_FORCE=true; shift ;;
+                --dry-run) DRY_RUN=true;       shift ;;
+                *) log_error "Unknown option for db-maint: $1"; show_help; exit 1 ;;
+            esac
+        done
+        main
+        exit $?
+        ;;
+    test-email|--test-email)
+        TEST_EMAIL=true
+        shift
+        while [[ $# -gt 0 ]]; do
+            case $1 in
+                --recipient) TEST_RECIPIENT="$2"; shift 2 ;;
+                --verbose)   VERBOSE=true;        shift   ;;
+                --dry-run)   DRY_RUN=true;        shift   ;;
+                *) log_error "Unknown option for test-email: $1"; show_help; exit 1 ;;
+            esac
+        done
+        main
+        exit $?
+        ;;
+    # ── Routine maintenance entry point ────────────────────────────────────
+    run|--comprehensive)
+        # 'run' = full routine maintenance; '--comprehensive' kept for compat.
+        [[ "$_TASK" == "--comprehensive" ]] && { COMPREHENSIVE=true; UPDATE_FIREWALL=true; UPDATE_DNS=true; }
+        shift
+        while [[ $# -gt 0 ]]; do
+            case $1 in
+                --comprehensive) COMPREHENSIVE=true; UPDATE_FIREWALL=true; UPDATE_DNS=true; shift ;;
+                --no-logs)       CLEAN_LOGS=false;        shift ;;
+                --no-backups)    CLEAN_BACKUPS=false;     shift ;;
+                --no-docker)     CLEAN_DOCKER=false;      shift ;;
+                --no-database)   OPTIMIZE_DATABASE=false; shift ;;
+                --update-dns)    UPDATE_DNS=true;         shift ;;
+                --update-firewall) UPDATE_FIREWALL=true;  shift ;;
+                --dry-run)       DRY_RUN=true;            shift ;;
+                --email)         EMAIL_NOTIFY=true;       shift ;;
+                *) log_error "Unknown option for run: $1"; show_help; exit 1 ;;
+            esac
+        done
+        main
+        exit $?
+        ;;
+    # ── Targeted single-task subcommands ───────────────────────────────────
+    update-dns|--update-dns)
+        UPDATE_DNS=true
         TARGETED_MODE=true
-        CLEAN_LOGS=false
-        CLEAN_BACKUPS=false
-        CLEAN_DOCKER=false
-        OPTIMIZE_DATABASE=false
-    fi
-fi
-
-main "$@"
+        CLEAN_LOGS=false; CLEAN_BACKUPS=false; CLEAN_DOCKER=false; OPTIMIZE_DATABASE=false
+        shift
+        while [[ $# -gt 0 ]]; do
+            case $1 in
+                --email)   EMAIL_NOTIFY=true; shift ;;
+                --dry-run) DRY_RUN=true;      shift ;;
+                *) log_error "Unknown option for update-dns: $1"; show_help; exit 1 ;;
+            esac
+        done
+        main
+        exit $?
+        ;;
+    update-firewall|--update-firewall)
+        UPDATE_FIREWALL=true
+        TARGETED_MODE=true
+        CLEAN_LOGS=false; CLEAN_BACKUPS=false; CLEAN_DOCKER=false; OPTIMIZE_DATABASE=false
+        shift
+        while [[ $# -gt 0 ]]; do
+            case $1 in
+                --dry-run) DRY_RUN=true; shift ;;
+                *) log_error "Unknown option for update-firewall: $1"; show_help; exit 1 ;;
+            esac
+        done
+        main
+        exit $?
+        ;;
+    --help|-h)
+        show_help; exit 0
+        ;;
+    *)
+        log_error "Unknown subcommand: $_TASK"
+        show_help
+        exit 1
+        ;;
+esac
