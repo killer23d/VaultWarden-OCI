@@ -52,19 +52,10 @@ EMERGENCY_BACKUP_RETENTION_DAYS=90
 # ---------------------------------------------------------------------------
 # _default_backup_dir
 # ---------------------------------------------------------------------------
-# Returns the default base directory for backups, derived from
-# PROJECT_STATE_DIR.  Mirrors the same helper in backup.sh so that
-# cleanup_backups() and the deep-maintenance safety backup always resolve
-# to the same location as backup.sh, regardless of storage mode.
-#
-# Callers use this value only when BACKUP_DIR is absent from the environment;
-# an explicit BACKUP_DIR always takes precedence.
+# Thin wrapper that delegates to vw_default_backup_dir() in lib/storage.sh.
+# Kept for backward compatibility with callers in this script.
 # ---------------------------------------------------------------------------
-_default_backup_dir() {
-    local state_dir
-    state_dir="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
-    printf '%s/backups' "$state_dir"
-}
+_default_backup_dir() { vw_default_backup_dir; }
 
 # ---------------------------------------------------------------------------
 # _default_alert_state_dir

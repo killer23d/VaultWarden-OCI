@@ -88,9 +88,9 @@ if ! [[  "$KEEP_DAYS" =~ ^[0-9]+$ ]] || ! (( KEEP_DAYS >= 1 )); then
     exit 2
 fi
 
-b_log_info()    { [[ "$QUIET" == "true" ]] || log_info "$*" >&2;    }
-b_log_success() { [[ "$QUIET" == "true" ]] || log_success "$*" >&2; }
-b_log_warn()    { [[ "$QUIET" == "true" ]] || log_warn "$*" >&2;    }
+backup_log_info()    { [[ "$QUIET" == "true" ]] || log_info "$*" >&2;    }
+backup_log_success() { [[ "$QUIET" == "true" ]] || log_success "$*" >&2; }
+backup_log_warn()    { [[ "$QUIET" == "true" ]] || log_warn "$*" >&2;    }
 
 TMPDIR_BACKUP=""
 LOCK_FILE=""   # Promoted to script level so cleanup() can remove it on EXIT
@@ -181,11 +181,7 @@ _resolve_rclone_config() {
 # Callers use this value only when BACKUP_DIR is absent from .env; an
 # explicit BACKUP_DIR always takes precedence.
 # ---------------------------------------------------------------------------
-_default_backup_dir() {
-    local state_dir
-    state_dir="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
-    printf '%s/backups' "$state_dir"
-}
+_default_backup_dir() { vw_default_backup_dir; }
 
 get_backup_dir() {
     local type="$1"
@@ -237,7 +233,7 @@ auto_determine_backup_type() {
     local db_file="$state_dir/data/db.sqlite3"
 
     if [[ ! -f "$db_file" ]]; then
-        b_log_info "Database not found — defaulting to full backup"
+        backup_log_info "Database not found — defaulting to full backup"
         echo "full"; return 0
     fi
 
@@ -265,7 +261,7 @@ auto_determine_backup_type() {
 
 verify_sqlite() {
     local dbfile="$1"
-    b_log_info "Verifying SQLite integrity (host sqlite3)..."
+    backup_log_info "Verifying SQLite integrity (host sqlite3)..."
     local result
     result=$(sqlite3 "$dbfile" "PRAGMA integrity_check;" 2>&1) || {
         log_error "SQLite integrity check error: ${result}" >&2
@@ -275,7 +271,7 @@ verify_sqlite() {
         log_error "SQLite integrity check FAILED: ${result}" >&2
         return 1
     fi
-    b_log_info "SQLite integrity check passed"
+    backup_log_info "SQLite integrity check passed"
     return 0
 }
 
@@ -296,7 +292,7 @@ wait_for_container_stopped() {
     local max_wait="${2:-30}"
     local elapsed=0
 
-    b_log_info "Waiting for container '$service' to reach stopped state (max ${max_wait}s)..."
+    backup_log_info "Waiting for container '$service' to reach stopped state (max ${max_wait}s)..."
 
     while (( elapsed < max_wait )); do
         local status
@@ -307,11 +303,11 @@ wait_for_container_stopped() {
 
         case "$status" in
             exited|dead|"")
-                b_log_info "Container '$service' is stopped (status: ${status:-exited})"
+                backup_log_info "Container '$service' is stopped (status: ${status:-exited})"
                 return 0
                 ;;
             removing|paused)
-                b_log_warn "Container '$service' in unexpected state: $status"
+                backup_log_warn "Container '$service' in unexpected state: $status"
                 return 1
                 ;;
         esac
@@ -331,7 +327,7 @@ verify_backup_full() {
     local backup_type="$2"
     local shared_tmpdir="$3"
 
-    b_log_info "Running full verification (decrypt + integrity check)..."
+    backup_log_info "Running full verification (decrypt + integrity check)..."
 
     local age_key_file
     age_key_file=$(_resolve_age_key) || {
@@ -368,13 +364,13 @@ verify_backup_full() {
                         log_warn "[backup] This backup may not be directly restorable to the running Vaultwarden version." >&2
                         log_warn "[backup] Restore to a matching Vaultwarden version or run migrations after restore." >&2
                     else
-                        b_log_info "Schema version matches live DB (user_version=${live_schema})"
+                        backup_log_info "Schema version matches live DB (user_version=${live_schema})"
                     fi
                 fi
             fi
             ;;
         full|emergency)
-            b_log_info "Verifying archive structure..."
+            backup_log_info "Verifying archive structure..."
             if ! tar --use-compress-program='zstd -d -T0' -tf "$dec_out" >/dev/null 2>&1; then
                 log_error "Full verification FAILED: archive is corrupt or unreadable" >&2
                 return 1
@@ -388,7 +384,7 @@ verify_backup_full() {
             ;;
     esac
 
-    b_log_info "Full verification passed: $(basename "$enc_file")"
+    backup_log_info "Full verification passed: $(basename "$enc_file")"
     rm -f "$dec_out"
     return 0
 }
@@ -398,7 +394,7 @@ verify_backup_quick() {
     local age_key_file="$2"
     local _quick_verify_hash_skipped=false
 
-    b_log_info "Running quick verification (SHA256 + decrypt probe)..."
+    backup_log_info "Running quick verification (SHA256 + decrypt probe)..."
 
     [[ -s "$enc_file" ]] || { log_error "Quick verify FAILED: encrypted file is empty" >&2; return 1; }
 
@@ -413,9 +409,9 @@ verify_backup_quick() {
             log_error "  actual:  $actual_hash" >&2
             return 1
         fi
-        b_log_info "SHA256 sidecar matches"
+        backup_log_info "SHA256 sidecar matches"
     else
-        b_log_warn "No SHA256 sidecar found — hash check skipped"
+        backup_log_warn "No SHA256 sidecar found — hash check skipped"
         _quick_verify_hash_skipped=true
     fi
 
@@ -430,12 +426,12 @@ verify_backup_quick() {
         log_error "The ciphertext may be corrupt even though the SHA256 matched." >&2
         return 1
     fi
-    b_log_info "Decrypt probe passed"
+    backup_log_info "Decrypt probe passed"
 
     if [[ "$_quick_verify_hash_skipped" == "true" ]]; then
-        b_log_info "Quick verification passed (no .sha256 sidecar — hash check skipped): $(basename "$enc_file")"
+        backup_log_info "Quick verification passed (no .sha256 sidecar — hash check skipped): $(basename "$enc_file")"
     else
-        b_log_info "Quick verification passed (SHA256 + decrypt probe): $(basename "$enc_file")"
+        backup_log_info "Quick verification passed (SHA256 + decrypt probe): $(basename "$enc_file")"
     fi
     return 0
 }
@@ -519,7 +515,7 @@ sync_to_rclone() {
         local canonical_cfg
         canonical_cfg=$(realpath -e "$rclone_config_path")
         rclone_config_arg=(--config "$canonical_cfg")
-        b_log_info "Using rclone config (from .env): $canonical_cfg"
+        backup_log_info "Using rclone config (from .env): $canonical_cfg"
     else
         local discovered_cfg
         if discovered_cfg=$(_resolve_rclone_config); then
@@ -531,8 +527,8 @@ sync_to_rclone() {
             local canonical_discovered
             canonical_discovered=$(realpath -e "$discovered_cfg")
             rclone_config_arg=(--config "$canonical_discovered")
-            b_log_info "Using rclone config (auto-discovered): $canonical_discovered"
-            b_log_info "Tip: set RCLONE_CONFIG=$canonical_discovered in .env to make this explicit."
+            backup_log_info "Using rclone config (auto-discovered): $canonical_discovered"
+            backup_log_info "Tip: set RCLONE_CONFIG=$canonical_discovered in .env to make this explicit."
         else
             log_error "No rclone config file found. rclone cannot authenticate." >&2
             log_error "Options:" >&2
@@ -549,8 +545,8 @@ sync_to_rclone() {
     remote_base_path="${remote_base_path%/}"
 
     local remote_path="${remote_name}:${remote_base_path}/${backup_type}"
-    b_log_info "Syncing backup to rclone remote: ${remote_path}/"
-    b_log_info "Pre-flight check: testing connectivity to rclone remote '${remote_name}'..."
+    backup_log_info "Syncing backup to rclone remote: ${remote_path}/"
+    backup_log_info "Pre-flight check: testing connectivity to rclone remote '${remote_name}'..."
     if ! rclone lsd "${rclone_config_arg[@]}" "${remote_name}:" --contimeout 10s --timeout 30s &>/dev/null; then
         log_error "Pre-flight check FAILED: cannot reach rclone remote '${remote_name}'. Aborting offsite sync." >&2
         log_error "Verify credentials and network, then retry: rclone lsd ${remote_name}:" >&2
@@ -563,7 +559,7 @@ sync_to_rclone() {
         fi
         return 1
     fi
-    b_log_info "Pre-flight check passed: rclone remote '${remote_name}' is reachable."
+    backup_log_info "Pre-flight check passed: rclone remote '${remote_name}' is reachable."
 
     local rclone_stderr_tmp="${TMPDIR_BACKUP}/rclone_stderr.tmp"
 
@@ -616,8 +612,8 @@ sync_to_rclone() {
         return 1
     fi
 
-    b_log_info "Remote size verified: ${remote_file_path} — ${remote_size_bytes} bytes ${remote_size_human}"
-    b_log_info "Offsite sync complete → ${remote_file_path}"
+    backup_log_info "Remote size verified: ${remote_file_path} — ${remote_size_bytes} bytes ${remote_size_human}"
+    backup_log_info "Offsite sync complete → ${remote_file_path}"
 
 }
 
@@ -631,12 +627,12 @@ cleanup_old_backups() {
         return 1
     fi
 
-    b_log_info "Pruning ${backup_type} backups older than ${keep_days} days..."
+    backup_log_info "Pruning ${backup_type} backups older than ${keep_days} days..."
 
     local deleted=0
 
     while IFS= read -r -d '' old_file; do
-        b_log_info "  Removing old backup: $(basename "$old_file")"
+        backup_log_info "  Removing old backup: $(basename "$old_file")"
         rm -f "$old_file" "${old_file}.sha256" "${old_file}.meta" 2>/dev/null || true
         (( ++deleted )) || true
     done < <(find "$backup_dir" -maxdepth 1 -type f -name "*.age" \
@@ -644,9 +640,9 @@ cleanup_old_backups() {
                  -print0 2>/dev/null)
 
     if (( deleted > 0 )); then
-        b_log_info "Pruned $deleted old backup(s)"
+        backup_log_info "Pruned $deleted old backup(s)"
     else
-        b_log_info "No old backups to prune"
+        backup_log_info "No old backups to prune"
     fi
     return 0
 }
@@ -659,10 +655,10 @@ perform_db_backup() {
     local state_dir
     state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
 
-    b_log_info "Performing database backup..."
+    backup_log_info "Performing database backup..."
 
     if [[ "$DRY_RUN" == "true" ]]; then
-        b_log_info "[DRY RUN] Would backup DB → $target_dir/db_backup_$timestamp.sqlite3.age"
+        backup_log_info "[DRY RUN] Would backup DB → $target_dir/db_backup_$timestamp.sqlite3.age"
         return 0
     fi
 
@@ -671,9 +667,9 @@ perform_db_backup() {
 
     local snap="$shared_tmpdir/db.sqlite3"
 
-    b_log_info "Creating atomic DB snapshot (sqlite3 .backup)..."
+    backup_log_info "Creating atomic DB snapshot (sqlite3 .backup)..."
     if ! create_db_snapshot_host "$state_dir" "$snap"; then
-        b_log_warn "Host sqlite3 snapshot failed — attempting offline fallback with WAL checkpoint"
+        backup_log_warn "Host sqlite3 snapshot failed — attempting offline fallback with WAL checkpoint"
 
         local vw_container_name
         vw_container_name="$(get_config_value "COMPOSE_SERVICE_NAME" "vaultwarden")"
@@ -682,7 +678,7 @@ perform_db_backup() {
         if docker compose ps --services --filter status=running 2>/dev/null \
                 | grep -qx "$vw_container_name"; then
             container_was_running=true
-            b_log_warn "Stopping $vw_container_name before fallback copy..."
+            backup_log_warn "Stopping $vw_container_name before fallback copy..."
             docker compose stop "$vw_container_name" 2>/dev/null || true
 
             if ! wait_for_container_stopped "$vw_container_name" 30; then
@@ -694,8 +690,8 @@ perform_db_backup() {
 
         local wal_result
         wal_result=$(sqlite3 "$db_file" "PRAGMA wal_checkpoint(TRUNCATE);" 2>&1) || {
-            b_log_warn "WAL checkpoint command failed — copy may be missing recent transactions"
-            b_log_warn "For guaranteed consistency, stop VaultWarden before backup or fix sqlite3 .backup"
+            backup_log_warn "WAL checkpoint command failed — copy may be missing recent transactions"
+            backup_log_warn "For guaranteed consistency, stop VaultWarden before backup or fix sqlite3 .backup"
         }
         if [[ -n "$wal_result" ]]; then
             if ! echo "$wal_result" | awk -F'|' '$2!=0 || $3!=0 {exit 1}'; then
@@ -704,7 +700,7 @@ perform_db_backup() {
                 log_error "Stop VaultWarden fully, then retry, or fix sqlite3 .backup." >&2
                 return 1
             fi
-            b_log_info "WAL checkpoint succeeded (result: $wal_result)"
+            backup_log_info "WAL checkpoint succeeded (result: $wal_result)"
         fi
 
         # Extra safety: confirm no process still holds the file open
@@ -718,16 +714,16 @@ perform_db_backup() {
                 log_error "Cannot safely copy WAL database. Stop all processes first, then retry." >&2
                 return 1
             fi
-            b_log_info "lsof check passed: no open handles on $db_file"
+            backup_log_info "lsof check passed: no open handles on $db_file"
         else
-            b_log_warn "lsof not available — cannot verify file handles before WAL fallback copy"
+            backup_log_warn "lsof not available — cannot verify file handles before WAL fallback copy"
         fi
         cp "$db_file" "$snap"
 
         if [[ "$container_was_running" == "true" ]]; then
-            b_log_info "Restarting $vw_container_name after fallback copy..."
+            backup_log_info "Restarting $vw_container_name after fallback copy..."
             docker compose start "$vw_container_name" 2>/dev/null || \
-                b_log_warn "Failed to restart $vw_container_name — restart manually"
+                backup_log_warn "Failed to restart $vw_container_name — restart manually"
         fi
 
         if [[ ! -s "$snap" ]]; then
@@ -738,7 +734,7 @@ perform_db_backup() {
 
     verify_sqlite "$snap" || return 1
 
-    b_log_info "Encrypting DB snapshot..."
+    backup_log_info "Encrypting DB snapshot..."
     local enc="$target_dir/db_backup_$timestamp.sqlite3.age"
     local enc_tmp="${enc}.tmp"
     if ! age -r "$age_pub_key" -o "$enc_tmp" "$snap" 2>/dev/null; then
@@ -762,7 +758,7 @@ archive_format=relative
 version=2
 MEOF
 
-    b_log_info "DB backup: $(basename "$enc")"
+    backup_log_info "DB backup: $(basename "$enc")"
     echo "$enc"
 }
 
@@ -778,10 +774,10 @@ perform_full_backup() {
     local backup_label_title
     backup_label_title="$(printf '%s' "${backup_label:0:1}" | tr '[:lower:]' '[:upper:]')${backup_label:1}"
 
-    b_log_info "Performing ${backup_label} backup (relative-path archive)..."
+    backup_log_info "Performing ${backup_label} backup (relative-path archive)..."
 
     if [[ "$DRY_RUN" == "true" ]]; then
-        b_log_info "[DRY RUN] Would create ${backup_label} backup → $target_dir/${backup_label}_backup_$timestamp.tar.zst.age"
+        backup_log_info "[DRY RUN] Would create ${backup_label} backup → $target_dir/${backup_label}_backup_$timestamp.tar.zst.age"
         return 0
     fi
 
@@ -798,15 +794,15 @@ perform_full_backup() {
     local db_snapshot_ok=false
 
     if [[ -f "$db_file" ]]; then
-        b_log_info "Creating atomic DB snapshot (sqlite3 .backup)..."
+        backup_log_info "Creating atomic DB snapshot (sqlite3 .backup)..."
         if create_db_snapshot_host "$state_dir" "$snap_db" 2>/dev/null; then
             db_snapshot_ok=true
         else
-            b_log_warn "Host sqlite3 snapshot failed — will use live DB file in archive"
+            backup_log_warn "Host sqlite3 snapshot failed — will use live DB file in archive"
         fi
     fi
 
-    b_log_info "Archiving state (relative paths, safe for staged restore)..."
+    backup_log_info "Archiving state (relative paths, safe for staged restore)..."
 
     local tar_excludes=(
         "--exclude=${SCRIPT_DIR#/}/.git"
@@ -862,7 +858,7 @@ perform_full_backup() {
         snap_size=$(stat -c%s "$snap_db" 2>/dev/null || echo 0)
         available_kb=$(df -k "$(dirname "$temp_tar")" | awk 'END{print $4}')
         if [[ -z "$available_kb" || "$available_kb" == "0" ]]; then
-            b_log_warn "Could not determine available disk space — proceeding with caution"
+            backup_log_warn "Could not determine available disk space — proceeding with caution"
             available_kb=0
         fi
         required_kb=$(( (compressed_size * 9 + snap_size) / 1024 + 1048576 ))
@@ -881,14 +877,14 @@ perform_full_backup() {
     # Pre-check: snap_db is staged at the expected relative path. If not,
     # log the exact path that was missing rather than silently falling through.
     if [[ ! -f "$snap_db" ]]; then
-        b_log_warn "DB snapshot injection skipped: staged file not found: $snap_db"
-        b_log_warn "Falling back to live DB in archive."
+        backup_log_warn "DB snapshot injection skipped: staged file not found: $snap_db"
+        backup_log_warn "Falling back to live DB in archive."
         db_snapshot_ok=false
     fi
 fi
 
     if [[ "$db_snapshot_ok" == "true" ]]; then
-    b_log_info "Injecting clean DB snapshot into archive..."
+    backup_log_info "Injecting clean DB snapshot into archive..."
     local temp_tar_raw="$shared_tmpdir/${backup_label}_backup_$timestamp.tar"
     local _tar_inject_err
 
@@ -898,10 +894,10 @@ fi
     then
         mv "${temp_tar}.new" "$temp_tar"
         rm -f "$temp_tar_raw"
-        b_log_info "Clean DB snapshot injected"
+        backup_log_info "Clean DB snapshot injected"
     else
-        [[ -n "${_tar_inject_err:-}" ]] && b_log_warn "DB snapshot injection tar error: ${_tar_inject_err}"
-        b_log_warn "DB snapshot injection failed — archive will use live DB copy"
+        [[ -n "${_tar_inject_err:-}" ]] && backup_log_warn "DB snapshot injection tar error: ${_tar_inject_err}"
+        backup_log_warn "DB snapshot injection failed — archive will use live DB copy"
         rm -f "$temp_tar_raw" "${temp_tar}.new" 2>/dev/null || true
             tar_excludes=(
                 "--exclude=${SCRIPT_DIR#/}/.git"
@@ -926,7 +922,7 @@ fi
         fi
     fi
 
-    b_log_info "Encrypting ${backup_label} archive..."
+    backup_log_info "Encrypting ${backup_label} archive..."
     local enc="$target_dir/${backup_label}_backup_$timestamp.tar.zst.age"
     local enc_tmp="${enc}.tmp"
 
@@ -950,7 +946,7 @@ archive_format=relative
 version=2
 MEOF
 
-    b_log_info "${backup_label_title} backup: $(basename "$enc")"
+    backup_log_info "${backup_label_title} backup: $(basename "$enc")"
     echo "$enc"
 }
 
@@ -1060,7 +1056,7 @@ main() {
     local actual_type="$BACKUP_TYPE"
     if [[ "$BACKUP_TYPE" == "auto" ]]; then
         actual_type=$(auto_determine_backup_type)
-        b_log_info "Auto-selected backup type: $actual_type"
+        backup_log_info "Auto-selected backup type: $actual_type"
     fi
 
     local timestamp
@@ -1136,9 +1132,9 @@ main() {
             fi
         fi
 
-        b_log_info "Cleaning up old backups (retention: $KEEP_DAYS days)..."
+        backup_log_info "Cleaning up old backups (retention: $KEEP_DAYS days)..."
         cleanup_old_backups "$backup_dir" "$actual_type" "$KEEP_DAYS" || \
-            b_log_warn "Failed to clean up some old backups"
+            backup_log_warn "Failed to clean up some old backups"
 
         if [[ "$EMAIL_NOTIFY" == "true" ]]; then
             local rclone_status="skipped"
@@ -1162,13 +1158,13 @@ main() {
                 "$rclone_status" \
                 "$(hostname -f 2>/dev/null || hostname)")"
             send_notification_email "$subject" "$body" 2>/dev/null || \
-                b_log_warn "Email notification failed (backup still succeeded)"
+                backup_log_warn "Email notification failed (backup still succeeded)"
         fi
 
-        b_log_success "Backup completed successfully"
+        backup_log_success "Backup completed successfully"
         exit 0
     elif [[ "$DRY_RUN" == "true" ]]; then
-        b_log_success "Dry run completed"
+        backup_log_success "Dry run completed"
         exit 0
     else
         if [[ "$EMAIL_NOTIFY" == "true" ]]; then
