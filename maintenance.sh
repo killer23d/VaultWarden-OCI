@@ -220,7 +220,11 @@ cleanup_logs() {
             fi
         done
     fi
-    [[ $logs_cleaned -gt 0 ]] && log_success "Cleaned up $logs_cleaned log files" || log_info "No old logs found to clean up"
+    if (( logs_cleaned > 0 )); then
+        log_success "Cleaned up $logs_cleaned log files"
+    else
+        log_info "No old logs found to clean up"
+    fi
     return 0
 }
 
@@ -325,7 +329,11 @@ optimize_database() {
     local host_db_path="$state_dir/data/db.sqlite3"
     if [[ ! -f "$host_db_path" ]]; then log_error "Database file not found: $host_db_path"; return 1; fi
     local was_running=false
-    is_service_running "vaultwarden" && was_running=true || log_warn "VaultWarden not running, will optimize offline database"
+    if is_service_running "vaultwarden"; then
+        was_running=true
+    else
+        log_warn "VaultWarden not running, will optimize offline database"
+    fi
 
     # Safety net: if anything causes an early exit after VaultWarden is stopped,
     # ensure it is restarted. RETURN trap fires on both normal return and set -e exits.
@@ -386,9 +394,19 @@ optimize_database() {
     fi
 
     if [[ "$was_running" == "true" ]]; then
-        docker compose up -d vaultwarden && log_success "VaultWarden restarted" || { log_error "Failed to restart VaultWarden"; optimization_success=false; }
+        if docker compose up -d vaultwarden; then
+            log_success "VaultWarden restarted"
+        else
+            log_error "Failed to restart VaultWarden"
+            optimization_success=false
+        fi
         sleep 5
-        is_service_running "vaultwarden" && log_success "VaultWarden healthy" || { log_error "VaultWarden not healthy after optimization"; optimization_success=false; }
+        if is_service_running "vaultwarden"; then
+            log_success "VaultWarden healthy"
+        else
+            log_error "VaultWarden not healthy after optimization"
+            optimization_success=false
+        fi
     fi
 
     local size_bytes_after
@@ -436,7 +454,7 @@ run_deep_db_maintenance() {
     local safety_backup_file=""
     local maintenance_successful=false
     local was_running=false
-    is_service_running "vaultwarden" && was_running=true || true
+    if is_service_running "vaultwarden"; then was_running=true; fi
 
     # Safety net: if anything causes an early exit after VaultWarden is stopped,
     # ensure it is restarted. RETURN trap fires on both normal return and set -e exits.
@@ -471,7 +489,11 @@ run_deep_db_maintenance() {
     fi
 
     log_info "Stopping VaultWarden container..."
-    docker compose stop vaultwarden && log_success "VaultWarden container stopped" || log_warn "Failed to stop vaultwarden container"
+    if docker compose stop vaultwarden; then
+        log_success "VaultWarden container stopped"
+    else
+        log_warn "Failed to stop vaultwarden container"
+    fi
 
     log_info "Waiting for WAL to quiesce before maintenance..."
     _wait_wal_quiesce "$db_file" 30
@@ -484,10 +506,18 @@ run_deep_db_maintenance() {
     log_success "Database integrity check passed"
 
     log_info "Step 2/5: Committing WAL file (PRAGMA wal_checkpoint(TRUNCATE))..."
-    sqlite3 "$db_file" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1 && log_success "WAL checkpointed" || log_warn "Could not checkpoint WAL. Proceeding."
+    if sqlite3 "$db_file" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1; then
+        log_success "WAL checkpointed"
+    else
+        log_warn "Could not checkpoint WAL. Proceeding."
+    fi
 
     log_info "Step 3/5: Optimizing database stats (PRAGMA optimize)..."
-    sqlite3 "$db_file" "PRAGMA optimize;" >/dev/null 2>&1 && log_success "Optimization complete" || log_warn "Could not optimize. Proceeding."
+    if sqlite3 "$db_file" "PRAGMA optimize;" >/dev/null 2>&1; then
+        log_success "Optimization complete"
+    else
+        log_warn "Could not optimize. Proceeding."
+    fi
 
     log_info "Step 4/5: Reclaiming free space (VACUUM)... This may take a moment."
     if ! sqlite3 "$db_file" "VACUUM;" >/dev/null 2>&1; then
@@ -530,11 +560,16 @@ run_deep_db_maintenance() {
         log_info "Cleaning up temporary safety backup..."
         local removed_sidecars=0
         for sidecar in "${safety_backup_file}".*; do
-            [[ -f "$sidecar" ]] && rm -f "$sidecar" && (( removed_sidecars++ )) || true
+            if [[ -f "$sidecar" ]]; then
+                rm -f "$sidecar"
+                (( removed_sidecars++ )) || true
+            fi
         done
-        rm -f "$safety_backup_file" \
-            && log_success "Removed safety backup: $(basename "$safety_backup_file") (+${removed_sidecars} sidecar(s))" \
-            || log_warn "Could not remove safety backup: $safety_backup_file"
+        if rm -f "$safety_backup_file"; then
+            log_success "Removed safety backup: $(basename "$safety_backup_file") (+${removed_sidecars} sidecar(s))"
+        else
+            log_warn "Could not remove safety backup: $safety_backup_file"
+        fi
     elif [[ -n "$safety_backup_file" && -f "$safety_backup_file" ]]; then
         log_warn "Maintenance did not complete successfully. Retaining safety backup: $safety_backup_file"
     fi
@@ -780,6 +815,7 @@ run_email_diagnostics() {
 # ---------------------------------------------------------------------------
 # TARGETED: Firewall IP range update
 # ---------------------------------------------------------------------------
+# shellcheck disable=SC2120  # $@ is forwarded to require_root; callers pass no args intentionally
 update_firewall_ranges() {
     if [[ "$UPDATE_FIREWALL" != "true" ]]; then log_info "Skipping firewall update"; return 0; fi
     if [[ "$DRY_RUN"         == "true" ]]; then log_info "[DRY RUN] Would safely update Cloudflare IP ranges in firewall"; return 0; fi
@@ -963,13 +999,15 @@ update_dns_record() {
         if [[ "$EMAIL_NOTIFY" == "true" ]]; then
             local admin_email; admin_email=$(get_config_value "ADMIN_EMAIL" "")
             if [[ -n "$admin_email" ]]; then
-                send_notification_email "VaultWarden IP Address Changed" \
+                if send_notification_email "VaultWarden IP Address Changed" \
 "Old IP: $stored_ip
 New IP: $current_ip
 Domain: $domain
-DNS record updated automatically." \
-                    && log_info "DNS change notification sent" \
-                    || log_warn "Failed to send DNS change notification email"
+DNS record updated automatically."; then
+                    log_info "DNS change notification sent"
+                else
+                    log_warn "Failed to send DNS change notification email"
+                fi
             fi
         fi
     else
@@ -985,9 +1023,13 @@ validate_system_health() {
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would validate system health"; return 0; fi
     log_info "Validating system health after maintenance..."
     log_info "Invoking: $SCRIPT_DIR/maintenance.sh --health --quiet"
-    "$SCRIPT_DIR/maintenance.sh" --health --quiet \
-        && { log_success "System health validation passed"; return 0; } \
-        || { log_warn "System health validation detected issues"; return 1; }
+    if "$SCRIPT_DIR/maintenance.sh" --health --quiet; then
+        log_success "System health validation passed"
+        return 0
+    else
+        log_warn "System health validation detected issues"
+        return 1
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -1050,15 +1092,28 @@ generate_maintenance_summary() {
     [[ "$CLEAN_LOGS"    == "true" && "$log_cleanup"    != "0" ]] && ((critical_failures++))
     [[ "$CLEAN_BACKUPS" == "true" && "$backup_cleanup" != "0" ]] && ((critical_failures++))
     [[ "$CLEAN_DOCKER"  == "true" && "$docker_cleanup" == "2" ]] && ((critical_failures++))
-    [[ $critical_failures -eq 0 ]] && summary+="\n🎉 Overall Status: SUCCESS\n" || summary+="\n⚠️  Overall Status: COMPLETED WITH ISSUES\n"
+    if [[ $critical_failures -eq 0 ]]; then
+        summary+="\n🎉 Overall Status: SUCCESS\n"
+    else
+        summary+="\n⚠️  Overall Status: COMPLETED WITH ISSUES\n"
+    fi
 
     printf '%b' "$summary"
 
     if [[ "$EMAIL_NOTIFY" == "true" ]]; then
-        local subj; [[ $critical_failures -eq 0 ]] && subj="VaultWarden Maintenance: SUCCESS" || subj="VaultWarden Maintenance: ISSUES DETECTED"
+        local subj
+        if [[ $critical_failures -eq 0 ]]; then
+            subj="VaultWarden Maintenance: SUCCESS"
+        else
+            subj="VaultWarden Maintenance: ISSUES DETECTED"
+        fi
         local email_body
         email_body=$(printf '%b' "$summary")
-        send_notification_email "$subj" "$email_body" && log_info "Summary emailed" || log_warn "Failed to send summary email"
+        if send_notification_email "$subj" "$email_body"; then
+            log_info "Summary emailed"
+        else
+            log_warn "Failed to send summary email"
+        fi
     fi
     return 0
 }
@@ -1372,7 +1427,8 @@ _get_domain() {
     if [[ -n "${DOMAIN_NAME:-}" ]]; then
         echo "${DOMAIN_NAME}"
     elif [[ -n "${DOMAIN:-}" ]]; then
-        echo "${DOMAIN#https://}" | sed 's|http://||'
+        local _d="${DOMAIN#https://}"
+        echo "${_d#http://}"
     else
         echo ""
     fi
@@ -1424,7 +1480,7 @@ _check_containers() {
         esac
     done
 
-    $all_healthy && log_info "All containers healthy" || true
+    if $all_healthy; then log_info "All containers healthy"; fi
 }
 
 _fix_unhealthy_containers() {
@@ -1500,7 +1556,7 @@ _check_ssl() {
     }
 
     local expiry_date expiry_epoch now_epoch days_remaining
-    expiry_date=$(echo "$expiry_output" | sed 's/notAfter=//')
+    expiry_date="${expiry_output#notAfter=}"
     expiry_epoch=$(date -d "$expiry_date" +%s 2>/dev/null || date -jf "%b %e %T %Y %Z" "$expiry_date" +%s 2>/dev/null || echo 0)
     now_epoch=$(date +%s)
     days_remaining=$(( (expiry_epoch - now_epoch) / 86400 ))
@@ -1519,7 +1575,7 @@ _check_ssl() {
         if echo | timeout "$HEALTH_TIMEOUT" openssl s_client \
             -connect "${domain}:443" \
             -servername "$domain" \
-            -verify_return_error 2>&1 >/dev/null; then
+            -verify_return_error >/dev/null 2>&1; then
             _pass "ssl:chain" "SSL certificate chain valid for $domain"
         else
             _warn "ssl:chain" "SSL chain validation warning for $domain"
@@ -2279,7 +2335,11 @@ _health_main() {
     _health_parse_args "$@"
 
     log_info "Starting VaultWarden health check..."
-    $COMPREHENSIVE && log_info "Mode: comprehensive" || log_info "Mode: standard"
+    if $COMPREHENSIVE; then
+        log_info "Mode: comprehensive"
+    else
+        log_info "Mode: standard"
+    fi
 
     _check_containers
     _check_ssl

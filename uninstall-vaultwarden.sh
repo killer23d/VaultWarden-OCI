@@ -4,6 +4,7 @@
 # Run from the user's home directory: bash ~/uninstall-vaultwarden.sh
 # Must be run as root (or via sudo).
 #
+# shellcheck disable=SC2015  # cmd && log_success || log_warn is intentional cleanup idiom throughout
 
 set -euo pipefail
 

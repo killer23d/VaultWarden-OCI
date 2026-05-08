@@ -125,20 +125,6 @@ _startup_secure_wipe() {
 }
 
 # ---------------------------------------------------------------------------
-# _stat_octal_perms_local FILE
-#
-# Returns the 3-digit octal permission string (e.g. "600", "444") on stdout.
-# ---------------------------------------------------------------------------
-_stat_octal_perms_local() {
-  local target="$1"
-  # GNU stat
-  stat -c%a "$target" 2>/dev/null && return 0
-  # BSD/macOS stat
-  stat -f%Lp "$target" 2>/dev/null && return 0
-  echo "unknown"
-}
-
-# ---------------------------------------------------------------------------
 # _prepare_secrets_cleanup
 #
 # Cleans up temporary files and restores umask after prepare_docker_secrets().
@@ -548,7 +534,7 @@ prepare_docker_secrets() {
     printf '%s' "$value" > "$target_file"
 
     local perms
-    perms=$(_stat_octal_perms_local "$target_file")
+    perms=$(_stat_octal_perms "$target_file")
     if [[ "$perms" != "444" ]]; then
       chmod 444 "$target_file"
     fi
