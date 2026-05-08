@@ -172,8 +172,8 @@ load_env_file() {
         return 1
     fi
 
+    local file_perms
     if [[ $EUID -eq 0 ]]; then
-        local file_perms
         file_perms=$(stat -c '%a' "$env_file" 2>/dev/null \
                      || stat -f '%OLp' "$env_file" 2>/dev/null \
                      || printf 'unknown')

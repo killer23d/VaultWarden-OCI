@@ -848,7 +848,7 @@ _restart_after_disable() {
         "docker compose restart ${service} exited with code ${_rc}. Breakglass token is still ACTIVE." \
         "CRITICAL"
 
-    return "$_rc"
+    return $_rc
 }
 
 # ENHANCED: Main function with proper error handling, exit strategy, and security validation

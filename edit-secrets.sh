@@ -593,7 +593,8 @@ _validate_editor_saved() {
 _validate_no_placeholders() {
     local plain_yaml="$1"
 
-    local offending _py_rc=0
+    local offending
+    local _py_rc=0
     offending=$(python3 - "$plain_yaml" <<'PYEOF' 2>/dev/null
 import sys, yaml
 
