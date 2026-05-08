@@ -67,24 +67,26 @@ BREAKGLASS_AUTO_EXPIRY_HOURS="${BREAKGLASS_AUTO_EXPIRY_HOURS:-2}"
 
 show_help() {
     cat << 'EOF'
-VaultWarden-OCI Break-Glass Admin Manager - Emergency Access
+VaultWarden-OCI Break-Glass Admin Manager — Emergency Access
 
 USAGE:
-    sudo ./create-breakglass-admin.sh [OPTIONS]
+    sudo ./create-breakglass-admin.sh <subcommand> [options]
 
-OPTIONS:
-    --create                Create break-glass admin account (targeted sudo)
-    --remove                Remove break-glass admin account
-    --reset-password        Reset break-glass admin password
-    --status                Show break-glass admin status
-    --validate              Validate script security only (no operations)
-    --user USERNAME         Specify username (default: vw-emergency)
-    --force                 Force operations without confirmation
-    --dry-run               Show what would be done without executing
-    --help                  Show this help
+SUBCOMMANDS:
+    create          Create break-glass admin account (targeted sudo)
+    remove          Remove break-glass admin account
+    reset-password  Reset break-glass admin password
+    status          Show break-glass admin status
+    validate        Validate script security only (no operations)
+
+GLOBAL OPTIONS:
+    --user USERNAME  Specify username (default: vw-emergency)
+    --force          Force operations without confirmation
+    --dry-run        Show what would be done without executing
+    --help, -h       Show this help
 
 ENVIRONMENT:
-    BREAKGLASS_MAX_AGE_HOURS     Hours before --status warns account is too old (default: 72)
+    BREAKGLASS_MAX_AGE_HOURS     Hours before status warns account is too old (default: 72)
     BREAKGLASS_AUTO_EXPIRY_HOURS Hours after creation before the account is auto-removed
                                  (default: 2). Scheduler priority:
                                    1. `at` + atd running
@@ -94,11 +96,12 @@ ENVIRONMENT:
                                  Set to 0 to disable auto-expiry entirely.
 
 EXAMPLES:
-    sudo ./create-breakglass-admin.sh --create        # Create emergency admin
-    sudo ./create-breakglass-admin.sh --status        # Check status
-    sudo ./create-breakglass-admin.sh --validate      # Validate script security
-    sudo ./create-breakglass-admin.sh --reset-password # Reset password
-    sudo ./create-breakglass-admin.sh --remove        # Remove account
+    sudo ./create-breakglass-admin.sh create         # Create emergency admin
+    sudo ./create-breakglass-admin.sh status         # Check status
+    sudo ./create-breakglass-admin.sh validate       # Validate script security
+    sudo ./create-breakglass-admin.sh reset-password # Reset password
+    sudo ./create-breakglass-admin.sh remove         # Remove account
+    sudo ./create-breakglass-admin.sh remove --force # Remove without confirmation
 
 BREAK-GLASS ADMIN PURPOSE:
     Emergency access when SSH is broken or firewall blocks access.
@@ -111,8 +114,11 @@ SECURITY NOTES:
     • Allowed commands: docker, systemctl, journalctl, reboot
     • Password displayed only once during creation
     • Account is automatically removed after BREAKGLASS_AUTO_EXPIRY_HOURS (default: 2h)
-    • Account can be disabled/removed manually with --remove
+    • Account can be disabled/removed manually with 'remove'
     • Script validates its own security before operations
+
+NOTE: Legacy flags (--create, --remove, --status, --reset-password, --validate)
+      are still accepted for backward compatibility.
 EOF
 }
 
@@ -216,18 +222,31 @@ validate_script_security() {
     return 0
 }
 
-# Argument Parsing
+# ---------------------------------------------------------------------------
+# Argument Parsing — subcommand-first dispatch
+# ---------------------------------------------------------------------------
+[[ $# -eq 0 ]] && { show_help; exit 0; }
+
+case "$1" in
+    create|--create)                    CREATE_USER=true;    shift ;;
+    remove|--remove)                    REMOVE_USER=true;    shift ;;
+    reset-password|--reset-password)    RESET_PASSWORD=true; shift ;;
+    status|--status)                    SHOW_STATUS=true;    shift ;;
+    validate|--validate)                VALIDATE_ONLY=true;  shift ;;
+    --help|-h)                          show_help; exit 0 ;;
+    *)
+        log_error "Unknown subcommand: $1  (expected: create | remove | reset-password | status | validate)"
+        show_help; exit 1
+        ;;
+esac
+
+# Parse remaining global options
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --create) CREATE_USER=true; shift ;;
-        --remove) REMOVE_USER=true; shift ;;
-        --reset-password) RESET_PASSWORD=true; shift ;;
-        --status) SHOW_STATUS=true; shift ;;
-        --validate) VALIDATE_ONLY=true; shift ;;
-        --user) BREAKGLASS_USER="$2"; shift 2 ;;
-        --force) FORCE=true; shift ;;
-        --dry-run) DRY_RUN=true; shift ;;
-        --help) show_help; exit 0 ;;
+        --user)    BREAKGLASS_USER="$2"; shift 2 ;;
+        --force)   FORCE=true;           shift ;;
+        --dry-run) DRY_RUN=true;         shift ;;
+        --help|-h) show_help; exit 0 ;;
         *) log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done
@@ -235,12 +254,6 @@ done
 # Validation
 if [[ "$CREATE_USER" == "true" && "$REMOVE_USER" == "true" ]]; then
     log_error "Cannot create and remove at the same time"
-    exit 1
-fi
-
-if [[ "$VALIDATE_ONLY" == "false" ]] && [[ "$CREATE_USER" == "false" && "$REMOVE_USER" == "false" && "$RESET_PASSWORD" == "false" && "$SHOW_STATUS" == "false" ]]; then
-    log_error "Must specify --create, --remove, --reset-password, --status, or --validate"
-    show_help
     exit 1
 fi
 

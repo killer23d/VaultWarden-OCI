@@ -138,10 +138,10 @@ mv docker-compose.override.yml docker-compose.override.yml.bak
 Automation is managed by **systemd timers** (not cron). Install, validate, or remove them with:
 
 ```bash
-sudo ./setup.sh --phase=systemd --install    # install all timers and services
-sudo ./setup.sh --phase=systemd --validate   # verify installed state matches repo
-sudo ./setup.sh --phase=systemd --remove     # remove all timers and services
-sudo ./setup.sh --phase=systemd --status     # show status of all units
+sudo ./setup.sh systemd install    # install all timers and services
+sudo ./setup.sh systemd validate   # verify installed state matches repo
+sudo ./setup.sh systemd remove     # remove all timers and services
+sudo ./setup.sh systemd status     # show status of all units
 ```
 
 ### Installed Timer Schedule
@@ -182,7 +182,7 @@ journalctl -u vaultwarden-health.service -n 50
 
 ### Modifying a Timer Schedule
 
-Edit the `.timer` file directly (do not use `setup.sh --phase=systemd` — it would overwrite your change on next install):
+Edit the `.timer` file directly (do not use `setup.sh systemd` — it would overwrite your change on next install):
 
 ```bash
 sudo systemctl edit --full vaultwarden-db-backup.timer
@@ -538,12 +538,12 @@ nano docker-compose.override.yml   # customise VaultWarden SMTP overrides
 
 ```bash
 # Full chain (auto — tests API → SMTP → MTA in order)
-./maintenance.sh --test-email --verbose
+./maintenance.sh test-email --verbose
 
 # Force a specific tier
-EMAIL_MODE=api  ./maintenance.sh --test-email --verbose
-EMAIL_MODE=smtp ./maintenance.sh --test-email --verbose
-EMAIL_MODE=host ./maintenance.sh --test-email --verbose
+EMAIL_MODE=api  ./maintenance.sh test-email --verbose
+EMAIL_MODE=smtp ./maintenance.sh test-email --verbose
+EMAIL_MODE=host ./maintenance.sh test-email --verbose
 
 # Makefile shortcut
 make test-email
@@ -591,10 +591,10 @@ Default retention is **30 days** for all backup types (controlled by `BACKUP_RET
 
 ```bash
 # Keep 30 days of full backups
-sudo ./backup.sh --type full --keep 30
+sudo ./backup.sh run full --keep 30
 
 # Keep 7 days of DB snapshots
-sudo ./backup.sh --type db --keep 7
+sudo ./backup.sh run db --keep 7
 ```
 
 The `--keep` value **must be a positive integer**. Non-integer values are rejected with an error before any backup or cleanup operation begins.
@@ -712,7 +712,7 @@ curl -sX POST https://your-webhook-url/notify \
 - Validate with `docker compose config` before applying
 - Run `sudo ./setup.sh --force ...` to regenerate
 - Restart with `./startup.sh --force`
-- Verify with `./maintenance.sh --health` or `make health`
+- Verify with `./maintenance.sh health` or `make health`
 - Commit template changes to version control
-- Create a backup before major changes: `./backup.sh --type full`
-- After re-installing automation: `sudo ./setup.sh --phase=systemd --install && systemctl list-timers --all | grep vaultwarden`
+- Create a backup before major changes: `./backup.sh run full`
+- After re-installing automation: `sudo ./setup.sh systemd install && systemctl list-timers --all | grep vaultwarden`

@@ -109,7 +109,7 @@ SMTP_FROM_NAME=VaultWarden
 ### 5. Test delivery
 
 ```bash
-./maintenance.sh --test-email --verbose
+./maintenance.sh test-email --verbose
 # or: make test-email
 ```
 
@@ -385,7 +385,7 @@ MAILGUN_DOMAIN=mg.yourdomain.com  # optional — set only if different from SMTP
 ### End-to-end delivery test
 
 ```bash
-./maintenance.sh --test-email --verbose
+./maintenance.sh test-email --verbose
 # or: make test-email
 ```
 

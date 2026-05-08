@@ -95,7 +95,7 @@ sudo chown -R 1000:1000 /var/lib/vaultwarden/data/attachments
 # Navigate to https://vault.example.com/admin
 
 # Run health checks
-./maintenance.sh --health
+./maintenance.sh health
 
 # Verify all vaults are accessible
 # Log in with existing credentials and inspect data
@@ -226,7 +226,7 @@ Settings → Server URL → https://vault.example.com
 | Detail | Notes |
 | :-- | :-- |
 | SSH log path | `/var/log/secure` (not `/var/log/auth.log`) — auto-detected by `setup.sh` |
-| Dynamic IPs | Automated Cloudflare DNS updates via `maintenance.sh --update-dns` (runs hourly via `vaultwarden-dns-update.timer`) |
+| Dynamic IPs | Automated Cloudflare DNS updates via `maintenance.sh update-dns` (runs hourly via `vaultwarden-dns-update.timer`) |
 | Break-glass admin | Essential for OCI Serial Console emergency access |
 | Firewall | Pre-configured for Cloudflare-only web traffic |
 
@@ -235,7 +235,7 @@ Settings → Server URL → https://vault.example.com
 sudo ./setup.sh --domain vault.example.com --email admin@example.com --auto
 
 # Create break-glass admin for emergency console access
-./create-breakglass-admin.sh --create
+./create-breakglass-admin.sh create
 ```
 
 ### Migrating from a Generic Docker Compose Deployment
@@ -282,7 +282,7 @@ sudo chown -R 1000:1000 /var/lib/vaultwarden/data
 # 5. Start and verify
 cd /path/to/VaultWarden-OCI
 ./startup.sh
-./maintenance.sh --health
+./maintenance.sh health
 ```
 
 ---
@@ -297,7 +297,7 @@ cd /path/to/VaultWarden-OCI
 - ✅ **2FA** — test two-factor authentication
 - ✅ **Attachments** — verify file downloads work
 - ✅ **Sends** — test Send functionality
-- ✅ **Email** — test email notifications (`./maintenance.sh --test-email`)
+- ✅ **Email** — test email notifications (`./maintenance.sh test-email`)
 - ✅ **Admin panel** — verify admin access works
 - ✅ **Systemd timers** — confirm scheduled jobs are active: `sudo systemctl list-timers 'vaultwarden-*'`
 
@@ -305,7 +305,7 @@ cd /path/to/VaultWarden-OCI
 
 ```bash
 # Regenerate bcrypt hash for admin basic auth using the built-in tool
-./setup.sh --phase=secrets --hash-only
+./setup.sh secrets --hash-only
 
 # Update secrets
 ./edit-secrets.sh
@@ -315,24 +315,24 @@ cd /path/to/VaultWarden-OCI
 ./startup.sh --force
 
 # Verify health
-./maintenance.sh --health
+./maintenance.sh health
 ```
 
 ### Set Up Automation
 
 ```bash
 # Install systemd timers (daily backups, health checks, maintenance, DNS/firewall updates)
-sudo ./setup.sh --phase=systemd --install
+sudo ./setup.sh systemd install
 
 # Confirm timers are active
 sudo systemctl list-timers 'vaultwarden-*'
 
 # Verify backups work
-./backup.sh --type db
-./backup.sh --list
+./backup.sh run db
+./backup.sh list
 
 # Test email (uses lib/common.sh multi-provider chain)
-./maintenance.sh --test-email --verbose
+./maintenance.sh test-email --verbose
 ```
 
 > **Email migration note:** VaultWarden-OCI no longer requires a Postfix sidecar container for email. `lib/common.sh` (email functions) provides an API → SMTP → host MTA fallback chain. Set `EMAIL_PROVIDER` and the corresponding API token secret (`email_api_token`) via `./edit-secrets.sh`. See [CONFIGURATION.md](CONFIGURATION.md) for the full email configuration reference.
@@ -359,7 +359,7 @@ If migration fails:
 ```bash
 # Point DNS back to old server IP (update Cloudflare manually)
 # Or trigger an immediate DNS update if old IP still valid:
-./maintenance.sh --update-dns
+./maintenance.sh update-dns
 
 # Notify users to switch back
 # Restore old system from backup if needed
@@ -377,7 +377,7 @@ If migration fails:
 sudo sqlite3 /var/lib/vaultwarden/data/db.sqlite3 'PRAGMA integrity_check;'
 
 # Run deep maintenance if WAL corruption is suspected
-sudo ./maintenance.sh --db-maint
+sudo ./maintenance.sh db-maint
 ```
 
 ### Attachments not accessible
@@ -411,7 +411,7 @@ curl -I https://vault.example.com/admin
 
 ```bash
 # Full email diagnostics
-./maintenance.sh --test-email --verbose
+./maintenance.sh test-email --verbose
 
 # Check configured email mode and provider
 grep -E 'EMAIL_MODE|EMAIL_PROVIDER|SMTP_HOST' .env
@@ -430,7 +430,7 @@ sudo systemctl list-timers 'vaultwarden-*'
 sudo journalctl -u vaultwarden-db-backup.service -n 50
 
 # Re-install timers if missing
-sudo ./setup.sh --phase=systemd --install
+sudo ./setup.sh systemd install
 ```
 
 ---

@@ -125,10 +125,20 @@ SETUP_LOCK_FILE=""
 
 show_help() {
     cat << 'EOF'
-VaultWarden-OCI Setup Tool - Security Hardened Edition
-USAGE: sudo ./setup.sh --domain DOMAIN --email EMAIL [OPTIONS]
+VaultWarden-OCI Setup Tool — Security Hardened Edition
 
-OPTIONS:
+USAGE:
+    sudo ./setup.sh --domain DOMAIN --email EMAIL [OPTIONS]   # Full setup
+    sudo ./setup.sh secrets [OPTIONS]                         # Secrets phase only
+    sudo ./setup.sh systemd <install|remove|validate|status> [OPTIONS]  # Systemd phase
+
+SUBCOMMANDS:
+    secrets    Configure encrypted secrets (admin password, API tokens, SMTP, etc.)
+               Run this after editing .env with your Cloudflare zone / email settings.
+    systemd    Install, validate, or remove VaultWarden systemd timers.
+               Sub-actions: install | remove | validate | status
+
+FULL SETUP OPTIONS (used after --domain / --email):
   --auto              Non-interactive install. Auto-generates passwords/passphrases;
                       external credentials (CF tokens, SMTP) remain as CHANGE_ME
                       placeholders — the post-install summary lists exact commands
@@ -151,11 +161,65 @@ OPTIONS:
                       Example: --data-device /dev/sdb
   --data-mount PATH   Mount point for the data volume (default: /mnt/vw-data).
                       Must match PROJECT_STATE_DIR when DATA_VOLUME_DEVICE is set.
-  --phase=secrets     Run ONLY the secrets configuration phase
-  --phase=systemd     Run ONLY the systemd installation phase
-  --help              Show this help and exit.
+
+GLOBAL OPTIONS:
+  --help, -h          Show this help and exit.
+
+EXAMPLES:
+    # ── First-time setup ──────────────────────────────────────────
+    sudo ./setup.sh --domain vault.example.com --email admin@example.com
+    sudo ./setup.sh --domain vault.example.com --email admin@example.com --auto
+
+    # ── Secrets configuration ─────────────────────────────────────
+    ./setup.sh secrets                   # Interactive credential setup
+    ./setup.sh secrets --auto            # Automated with generated passwords
+    ./setup.sh secrets --force           # Reconfigure without prompting
+    ./setup.sh secrets --skip-optional   # Skip push notification keys
+    ./setup.sh secrets --export-recovery-kit
+
+    # ── Systemd timer management ──────────────────────────────────
+    sudo ./setup.sh systemd install      # Install and enable all timers
+    sudo ./setup.sh systemd validate     # Detect split-brain vs /opt/
+    sudo ./setup.sh systemd status       # Show timer status
+    sudo ./setup.sh systemd remove       # Disable and remove all timers
+    sudo ./setup.sh systemd install --dry-run
+
+NOTE: Legacy phase flags (--phase=secrets, --phase=systemd) are still accepted
+      for backward compatibility with existing automation.
 EOF
 }
+
+# ---------------------------------------------------------------------------
+# Argument Parsing — subcommand-first dispatch
+# Pre-scan for positional subcommands (secrets, systemd) or legacy --phase=X
+# aliases before consuming regular --flags.
+# ---------------------------------------------------------------------------
+if [[ $# -gt 0 ]]; then
+    case "$1" in
+        secrets|--phase=secrets)
+            PHASE="secrets"
+            shift
+            PHASE_ARGS=("$@")
+            # Skip remaining flag parsing — PHASE_ARGS carries everything
+            set --   # clear $@ so the while loop below is a no-op
+            ;;
+        systemd|--phase=systemd)
+            PHASE="systemd"
+            shift
+            # 'systemd install' vs 'systemd --install' — normalise positional
+            if [[ $# -gt 0 && "$1" != --* ]]; then
+                PHASE_ARGS=("--${1}"); shift
+                PHASE_ARGS+=("$@")
+            else
+                PHASE_ARGS=("$@")
+            fi
+            set --
+            ;;
+        --help|-h)
+            show_help; exit 0
+            ;;
+    esac
+fi
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -168,9 +232,7 @@ while [[ $# -gt 0 ]]; do
         --dry-run)      DRY_RUN=true;              shift ;;
         --data-device)  DATA_VOLUME_DEVICE="$2";   shift 2 ;;
         --data-mount)   DATA_VOLUME_MOUNT="$2";    shift 2 ;;
-        --phase=secrets) PHASE="secrets"; shift; PHASE_ARGS=("$@"); break ;;
-        --phase=systemd) PHASE="systemd"; shift; PHASE_ARGS=("$@"); break ;;
-        --help)         show_help; exit 0 ;;
+        --help|-h)      show_help; exit 0 ;;
         *) log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done
@@ -1443,7 +1505,7 @@ _ss_show_help() {
 VaultWarden Interactive Secrets Setup (Idempotent - Security Hardened)
 
 USAGE:
-    ./setup.sh --phase=secrets [OPTIONS]
+    ./setup.sh secrets [OPTIONS]
 
 OPTIONS:
     --auto                  Auto-generate passwords; external credentials
@@ -1471,7 +1533,7 @@ NOTES:
         1. sudo ./setup.sh --domain DOMAIN --email EMAIL
         2. nano .env           (set CLOUDFLARE_ZONE_ID, EMAIL_MODE, EMAIL_PROVIDER,
                                 SMTP_HOST, etc.)
-        3. ./setup.sh --phase=secrets  (prompted for all credentials)
+        3. ./setup.sh secrets  (prompted for all credentials)
         4. make up
 
 FEATURES:
@@ -1492,11 +1554,11 @@ SECURITY ENHANCEMENTS:
     ✅ Enhanced error messages
 
 EXAMPLES:
-    ./setup.sh --phase=secrets                  # Interactive setup
-    ./setup.sh --phase=secrets --auto           # Automated with generated passwords
-    ./setup.sh --phase=secrets --force          # Reconfigure without prompting
-    ./setup.sh --phase=secrets --skip-optional  # Skip push notifications
-    ./setup.sh --phase=secrets --export-recovery-kit # Prompt for kit after setup
+    ./setup.sh secrets                        # Interactive setup
+    ./setup.sh secrets --auto                 # Automated with generated passwords
+    ./setup.sh secrets --force                # Reconfigure without prompting
+    ./setup.sh secrets --skip-optional        # Skip push notifications
+    ./setup.sh secrets --export-recovery-kit  # Prompt for kit after setup
 
 SEE ALSO:
     ./edit-secrets.sh --list                  # Show existing secret key names
@@ -2356,9 +2418,9 @@ _ss_main() {
         echo "      ► Confirm: CLOUDFLARE_ZONE_ID, EMAIL_MODE, EMAIL_PROVIDER,"
         echo "                 SMTP_HOST, SMTP_PORT, SMTP_USERNAME"
         echo "   2. Start services:            make up"
-        echo "   3. Setup automation:          sudo ./setup.sh --phase=systemd --install"
+        echo "   3. Setup automation:          sudo ./setup.sh systemd install"
         echo "   4. Export recovery kit:       ./edit-secrets.sh --export-recovery-kit"
-        echo "   5. Test health:               ./maintenance.sh --health"
+        echo "   5. Test health:               ./maintenance.sh health"
         echo "   6. To rotate a single field:  ./edit-secrets.sh --rotate FIELD"
         echo "   7. To list secret keys:       ./edit-secrets.sh --list"
         echo ""
@@ -2427,17 +2489,23 @@ _sd_show_help() {
 VaultWarden-OCI systemd Timer Installer
 
 USAGE:
-    sudo ./setup.sh --phase=systemd [OPTIONS]
+    sudo ./setup.sh systemd <action> [OPTIONS]
+    sudo ./setup.sh systemd install    # Install and enable all timers
+    sudo ./setup.sh systemd remove     # Disable and remove all timers
+    sudo ./setup.sh systemd validate   # Verify installed state vs repo
+    sudo ./setup.sh systemd status     # Show timer and service status
+
+ACTIONS:
+    install   Install and enable all systemd timer units
+    remove    Disable and remove all systemd timer units
+    validate  Verify installed state matches repo; detect split-brain
+    status    Show timer and service status
 
 OPTIONS:
-    --install     Install and enable all systemd timer units
-    --remove      Disable and remove all systemd timer units
-    --validate    Verify installed state matches repo; detect split-brain
-    --status      Show timer and service status
     --dry-run     Print actions without executing
     --help        Show this help
 
-WHAT --install DOES:
+WHAT install DOES:
     1. Copies maintenance.sh, backup.sh -> /opt/vaultwarden-scripts/
        (root:root 700; scripts are self-locating via BASH_SOURCE[0])
     2. Copies lib/ -> /opt/vaultwarden-scripts/lib/ (root:root 644)
@@ -2457,7 +2525,7 @@ WHAT --install DOES:
     8. Verifies all managed timers are active and have a next trigger (TIMER-CHECK)
     9. systemctl reset-failed for all managed services (clears stale failed status)
 
-WHAT --validate CHECKS:
+WHAT validate CHECKS:
     1. Scripts present and executable in /opt/vaultwarden-scripts/
     2. lib/ present; lib/*.sh files are readable (mode 644 recommended)
     3. All unit files present in /etc/systemd/system/
@@ -2466,7 +2534,7 @@ WHAT --validate CHECKS:
     6. Age key /etc/vaultwarden/age-key.txt exists (mode 600)
     7. SOPS_AGE_KEY_FILE is set in the EnvironmentFile
     8. Installed scripts match repo source checksum (sha256 split-brain detection)
-       Re-run --install after any git pull to keep /opt/ in sync.
+       Re-run install after any git pull to keep /opt/ in sync.
 
 VIEWING LOGS:
     journalctl -u vaultwarden-health.service -n 50
@@ -2475,7 +2543,7 @@ VIEWING LOGS:
 
 MIGRATING FROM CRON:
     cron-setup.sh has been removed. To migrate:
-    1. sudo ./setup.sh --phase=systemd --install
+    1. sudo ./setup.sh systemd install
     2. Remove old crontab entries: sudo crontab -e
     3. Verify timers: systemctl list-timers --all | grep vaultwarden
 EOF

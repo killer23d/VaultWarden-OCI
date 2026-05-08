@@ -196,7 +196,7 @@ backup_passphrase: "optional"
 
 ### Enhanced Security Features
 
-The secrets management layer (`lib/secrets.sh`, `edit-secrets.sh`, `setup.sh --phase=secrets`) implements several hardened behaviours:
+The secrets management layer (`lib/secrets.sh`, `edit-secrets.sh`, `setup.sh secrets`) implements several hardened behaviours:
 
 - **Umask guard on file creation**: `write_secret_file()` saves and restores the process umask around every secret file write, ensuring files are born at mode `600` — not world-readable at any point.
 - **SOPS key scoping**: `decrypt_secret()` unsets `SOPS_AGE_KEY_FILE` immediately after each `sops -d` call so no child process (Docker, rclone, curl) inherits the Age key file path.
@@ -331,7 +331,7 @@ sudo ufw allow from 2400:cb00::/32 to any port 443 proto tcp
 
 > **OPERATOR ACTION REQUIRED**: During initial setup, `setup.sh` opens ports 80 and 443
 > to all sources. You must restrict those rules to Cloudflare CIDRs after deployment using
-> `./maintenance.sh --update-firewall` or by running the UFW commands in
+> `./maintenance.sh update-firewall` or by running the UFW commands in
 > `docker-compose.yml.example` comments.
 
 ### SSH Protection
@@ -348,7 +348,7 @@ old ones to eliminate race conditions:
 
 ```bash
 # Safe update (targeted mode — skips routine cleanup)
-./maintenance.sh --update-firewall
+./maintenance.sh update-firewall
 
 # Features:
 # 1. Fetches current Cloudflare IPv4 + IPv6 ranges
@@ -939,13 +939,13 @@ A dedicated emergency admin account for OCI serial console access:
 
 ```bash
 # Create emergency admin
-sudo ./create-breakglass-admin.sh --create
+sudo ./create-breakglass-admin.sh create
 
 # Or use Makefile
 make breakglass-create
 
 # Check status
-sudo ./create-breakglass-admin.sh --status
+sudo ./create-breakglass-admin.sh status
 make breakglass-status
 ```
 
@@ -1007,10 +1007,10 @@ excluded from retention enforcement.
 
 ```bash
 # Standard backup (checksum-based verification + Age decrypt probe)
-./backup.sh --type db
+./backup.sh run db
 
 # Full backup with end-to-end recoverability test
-./backup.sh --type full --full-verification
+./backup.sh run full --full-verification
 
 # Verification process (--full-verification):
 1. SHA-256 checksum check
@@ -1028,7 +1028,7 @@ excluded from retention enforcement.
 rclone config
 
 # Backup with remote sync
-./backup.sh --type db --rclone
+./backup.sh run db --rclone
 
 # Security features:
 # - Encrypted BEFORE upload (Age encryption at rest)
@@ -1042,17 +1042,17 @@ rclone config
 
 ```bash
 # Basic health check (containers + service accessibility)
-./maintenance.sh --health
+./maintenance.sh health
 
 # Comprehensive check (adds disk, SSL, DB, backups, resources, config, security)
-./maintenance.sh --health --comprehensive
+./maintenance.sh health --comprehensive
 
 # With automatic recovery of unhealthy containers
-./maintenance.sh --health --auto-recover
+./maintenance.sh health --auto-recover
 
 # Full comprehensive check with email alert and auto-recovery
 # (this is what the systemd vaultwarden-health timer runs)
-./maintenance.sh --health --comprehensive --email --auto-recover
+./maintenance.sh health --comprehensive --email --auto-recover
 ```
 
 Checks performed:
@@ -1111,8 +1111,8 @@ grep "ERROR" ${PROJECT_STATE_DIR}/logs/vaultwarden/vaultwarden.log
 - ✅ Test emergency access procedures
 - ✅ Create initial encrypted backup
 - ✅ Configure email notifications and run `make test-email`
-- ✅ Verify all health checks pass: `./maintenance.sh --health --comprehensive`
-- ✅ Restrict UFW ports 80/443 to Cloudflare CIDRs: `./maintenance.sh --update-firewall`
+- ✅ Verify all health checks pass: `./maintenance.sh health --comprehensive`
+- ✅ Restrict UFW ports 80/443 to Cloudflare CIDRs: `./maintenance.sh update-firewall`
 - ✅ Confirm `internal: true` is active on the Docker network (unless push is enabled)
 
 ### Ongoing Operations
@@ -1126,7 +1126,7 @@ grep "ERROR" ${PROJECT_STATE_DIR}/logs/vaultwarden/vaultwarden.log
 - ✅ Monitor resource usage monthly
 - ✅ Review forensic logs for incidents
 - ✅ Keep break-glass admin credentials secure
-- ✅ Run `sudo ./setup.sh --phase=systemd --validate` after pulling repo updates
+- ✅ Run `sudo ./setup.sh systemd validate` after pulling repo updates
 
 ### Incident Response
 
@@ -1166,7 +1166,7 @@ If you detect suspicious activity:
    # Access admin panel → Users → Disable
 
    # Create incident backup
-   ./backup.sh --type emergency
+   ./backup.sh run emergency
    ```
 
 4. **Recovery**:
@@ -1179,7 +1179,7 @@ If you detect suspicious activity:
    ./startup.sh --force-restart
 
    # Verify security
-   ./maintenance.sh --health --comprehensive
+   ./maintenance.sh health --comprehensive
    ```
 
 ## Security Troubleshooting
@@ -1230,16 +1230,16 @@ docker compose logs postfix          # live output
 make logs-postfix                    # shortcut
 
 # Run full email diagnostic (4 tests)
-./maintenance.sh --test-email
+./maintenance.sh test-email
 
 # Verbose output for detailed diagnosis
-./maintenance.sh --test-email --verbose
+./maintenance.sh test-email --verbose
 
 # Test with specific recipient
-./maintenance.sh --test-email --recipient admin@example.com
+./maintenance.sh test-email --recipient admin@example.com
 
 # Preview without sending (dry-run)
-./maintenance.sh --test-email --dry-run
+./maintenance.sh test-email --dry-run
 
 # Verify SMTP settings in .env
 grep -E 'SMTP|POSTFIX|ALLOWED_SENDER' .env
