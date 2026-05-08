@@ -95,8 +95,8 @@ backup_log_warn()    { [[ "$QUIET" == "true" ]] || log_warn "$*" >&2;    }
 TMPDIR_BACKUP=""
 LOCK_FILE=""   # Promoted to script level so cleanup() can remove it on EXIT
 cleanup() {
-    [[ -n "$TMPDIR_BACKUP" ]] && rm -rf "$TMPDIR_BACKUP" 2>/dev/null || true
-    [[ -n "${LOCK_FILE:-}" ]] && rm -f "$LOCK_FILE" 2>/dev/null || true
+    if [[ -n "$TMPDIR_BACKUP" ]]; then rm -rf "$TMPDIR_BACKUP" 2>/dev/null; fi
+    if [[ -n "${LOCK_FILE:-}" ]]; then rm -f "$LOCK_FILE" 2>/dev/null; fi
 }
 
 
@@ -708,7 +708,7 @@ perform_db_backup() {
         # so this is a best-effort guard rather than a hard gate).
         if command -v lsof >/dev/null 2>&1; then
             local open_procs
-            open_procs=$(lsof "$db_file" 2>/dev/null | grep -v "^COMMAND" | wc -l)
+            open_procs=$(lsof "$db_file" 2>/dev/null | grep -vc "^COMMAND")
             if (( open_procs > 0 )); then
                 log_error "lsof reports $open_procs process(es) still have $db_file open." >&2
                 log_error "Cannot safely copy WAL database. Stop all processes first, then retry." >&2

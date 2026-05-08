@@ -226,7 +226,9 @@ done
 [[ "$LIST_ONLY" == "true" && "$USE_REMOTE" == "true" ]] && LIST_REMOTE=true
 
 TMPDIR_RESTORE=""
-cleanup() { [[ -n "$TMPDIR_RESTORE" ]] && rm -rf "$TMPDIR_RESTORE" 2>/dev/null || true; }
+cleanup() {
+    if [[ -n "$TMPDIR_RESTORE" ]]; then rm -rf "$TMPDIR_RESTORE" 2>/dev/null; fi
+}
 trap cleanup EXIT HUP INT TERM
 
 # ---------------------------------------------------------------------------
@@ -447,6 +449,7 @@ _find_latest_backup() {
     return 1
 }
 
+# shellcheck disable=SC2120  # $1 is an optional --remote flag; called without args when listing local only
 list_backups() {
     # List local backups (always), then remote backups when rclone is available
     # or when --remote is explicitly requested.
@@ -1343,6 +1346,8 @@ create_pre_restore_snapshot() {
     [[ "$DRY_RUN"       == "true" ]] && { log_info "[DRY RUN] Would run: ./backup.sh --type emergency"; return 0; }
     local state_dir; state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
     local db_path="$state_dir/data/db.sqlite3"
+    # Best-effort WAL checkpoint; swallow all failures intentionally.
+    # shellcheck disable=SC2015
     [[ -f "$db_path" ]] && command -v sqlite3 >/dev/null 2>&1 && \
         sqlite3 "$db_path" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1 || true
     if [[ -x "./backup.sh" ]]; then
@@ -1415,6 +1420,7 @@ restore_db() {
 
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would overwrite $db_path with decrypted database"
+        # shellcheck disable=SC2015  # intentional cleanup: swallow rm failure
         [[ -n "$rollback_path" ]] && rm -f "$rollback_path" 2>/dev/null || true
         return 0
     fi
@@ -1423,13 +1429,16 @@ restore_db() {
     if ! cp -f "$dec_db" "$db_path"; then
         log_error "cp to live DB failed — rolling back..."
         if [[ -n "$rollback_path" && -f "$rollback_path" ]]; then
-            cp -a "$rollback_path" "$db_path" && log_warn "Rollback successful." || {
+            if cp -a "$rollback_path" "$db_path"; then
+                log_warn "Rollback successful."
+            else
                 log_error "CRITICAL: Rollback failed. Manual recovery:"
                 log_error "  cp '${rollback_path}' '${db_path}'"
-            }
+            fi
         fi
         return 1
     fi
+    # shellcheck disable=SC2015  # intentional cleanup: swallow rm failure
     [[ -n "$rollback_path" ]] && rm -f "$rollback_path" 2>/dev/null || true
 
     purge_wal_shm "$db_path"
@@ -1475,6 +1484,7 @@ restore_full() {
         [[ "$DRY_RUN" == "true" ]] && { log_info "[DRY RUN] Would tar -xf to /"; return 0; }
         # shellcheck disable=SC2086
         tar $tar_filter -xf "$dec_tar" -C / --no-same-owner --no-same-permissions --no-overwrite-dir --no-unlink --delay-directory-restore
+        # shellcheck disable=SC2015  # best-effort chown; intentionally swallows failure
         [[ -d "$state_dir" ]] && chown -R "${puid}:${pgid}" "$state_dir/data" 2>/dev/null || true
         purge_wal_shm "$state_dir/data/db.sqlite3" || true
         log_success "Legacy archive restored."
@@ -1885,9 +1895,11 @@ main() {
                         local _to_remove=$(( _snap_count - _keep_artefacts ))
                         local i
                         for (( i=0; i<_to_remove; i++ )); do
-                            rm -rf "${_vol_snaps[$i]}" && \
-                                log_info "  Pruned in-volume snapshot: $(basename "${_vol_snaps[$i]}")" || \
+                            if rm -rf "${_vol_snaps[$i]}"; then
+                                log_info "  Pruned in-volume snapshot: $(basename "${_vol_snaps[$i]}")"
+                            else
                                 log_warn "  Failed to prune: ${_vol_snaps[$i]}"
+                            fi
                         done
                     fi
                 else
@@ -1934,6 +1946,7 @@ main() {
         local max_wait=60 waited=0
         while (( waited < max_wait )); do
             sleep 5; (( waited += 5 ))
+            # shellcheck disable=SC2015  # intentional: break on healthy match, continue on no-match
             docker inspect vaultwarden_app --format '{{.State.Status}} {{.State.Health.Status}}' \
                 2>/dev/null | grep -qE $'running (healthy|$)' && break || true
         done

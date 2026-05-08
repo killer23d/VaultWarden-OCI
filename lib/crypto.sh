@@ -1072,7 +1072,7 @@ verify_key_replica() {
     fi
 
     local primary_hash
-    primary_hash=$(sha256sum "$primary_key" 2>/dev/null | awk '{print $1}')
+    primary_hash=$(calculate_sha256 "$primary_key" 2>/dev/null)
     if [[ -z "$primary_hash" ]]; then
         log_error "verify_key_replica: could not hash primary key: $primary_key"
         return 1
@@ -1103,7 +1103,7 @@ verify_key_replica() {
 
         # Step 1: hash comparison (quick byte-level check)
         local replica_hash
-        replica_hash=$(sha256sum "$replica" 2>/dev/null | awk '{print $1}')
+        replica_hash=$(calculate_sha256 "$replica" 2>/dev/null)
         if [[ "$replica_hash" != "$primary_hash" ]]; then
             log_warn "verify_key_replica: replica hash mismatch: $replica"
             all_ok=1
@@ -1323,9 +1323,11 @@ EOF
         # Schedule an auto-delete reminder 30 minutes from now.
         local remind_cmd="echo 'SECURITY REMINDER: Delete plaintext Age key backup: shred -fuz \"${output_html}\"' | logger -t vaultwarden-key-reminder 2>/dev/null; wall 'SECURITY REMINDER: VaultWarden plaintext key backup still exists at ${output_html} — delete it now with: shred -fuz ${output_html}' 2>/dev/null || true"
         if command -v at >/dev/null 2>&1; then
-            echo "$remind_cmd" | at "now + 30 minutes" 2>/dev/null && \
-                log_info "Scheduled security reminder in 30 minutes via at(1)." || \
+            if echo "$remind_cmd" | at "now + 30 minutes" 2>/dev/null; then
+                log_info "Scheduled security reminder in 30 minutes via at(1)."
+            else
                 log_warn "Could not schedule at(1) reminder; set a manual reminder to delete $output_html"
+            fi
         else
             log_warn "at(1) not available — cannot schedule auto-reminder."
             log_warn "SECURITY: Manually delete the plaintext key file within 30 minutes:"
@@ -1804,7 +1806,7 @@ export -f is_sops_encrypted decrypt_sops_file encrypt_sops_file
 export -f generate_age_key get_age_public_key check_age_key encrypt_data decrypt_data
 export -f generate_secure_string generate_secure_password check_argon2_support generate_argon2_hash generate_bcrypt_hash
 export -f calculate_sha256 verify_sha256 write_file_integrity verify_file_integrity secure_delete validate_crypto_environment
-export -f simple_verify_age_key create_password_manager_escrow _secure_remove_file _html_escape
+export -f simple_verify_age_key create_password_manager_escrow _secure_remove_file
 export -f create_printable_key_backup verify_key_replica restore_key_from_replica
 export -f check_age_key_health _sops_yaml_age_recipients
 export -f _stat_owner _stat_group

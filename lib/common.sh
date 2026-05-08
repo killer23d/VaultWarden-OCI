@@ -172,8 +172,8 @@ load_env_file() {
         return 1
     fi
 
+    local file_perms
     if [[ $EUID -eq 0 ]]; then
-        local file_perms
         file_perms=$(stat -c '%a' "$env_file" 2>/dev/null \
                      || stat -f '%OLp' "$env_file" 2>/dev/null \
                      || printf 'unknown')
@@ -190,7 +190,6 @@ load_env_file() {
         fi
     else
     
-        local file_perms
         file_perms=$(stat -c '%a' "$env_file" 2>/dev/null \
                      || stat -f '%OLp' "$env_file" 2>/dev/null \
                      || printf 'unknown')
@@ -236,6 +235,7 @@ load_env_file() {
         # Injection guard: only $( and ` are genuine risks here because we use
         # printf -v (not eval) for assignment. Bare $, |, <, >, and \ are
         # inert in this context and must be allowed for strong passwords.
+        # shellcheck disable=SC2016  # single quotes are intentional: checking for literal $( and `
         if [[ "$value" == *'`'* || "$value" == *'$('* ]]; then
             log_error "load_env_file: line ${lineno}: value for '${key}' contains" \
                       "shell command-substitution syntax (\`...\` or \$(...))" \

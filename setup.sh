@@ -56,10 +56,17 @@ source "lib/storage.sh"
 _set_env_var() {
     local key="$1" value="$2" file="$3"
     if grep -q "^${key}=" "$file" 2>/dev/null; then
-        # Replace existing line (sed -i is portable on GNU/Linux)
-        sed -i "s|^${key}=.*|${key}=${value}|" "$file"
+        # Escape characters that are special in the sed replacement field:
+        #   \   → must be escaped first to avoid double-escaping
+        #   &   → refers to the matched pattern in sed replacement
+        #   |   → our chosen delimiter; must be literal in the replacement
+        local escaped_value
+        escaped_value="${value//\\/\\\\}"
+        escaped_value="${escaped_value//&/\\&}"
+        escaped_value="${escaped_value//|/\\|}"
+        sed -i "s|^${key}=.*|${key}=${escaped_value}|" "$file"
     else
-        echo "${key}=${value}" >> "$file"
+        printf '%s=%s\n' "$key" "$value" >> "$file"
     fi
 }
 
@@ -208,7 +215,7 @@ validate_email_secure() {
     return 0
 }
 
-if [[ -z "$PHASE" ]] && ([[ -z "$DOMAIN" ]] || [[ -z "$ADMIN_EMAIL" ]]); then show_help; exit 1; fi
+if [[ -z "$PHASE" ]] && { [[ -z "$DOMAIN" ]] || [[ -z "$ADMIN_EMAIL" ]]; }; then show_help; exit 1; fi
 if [[ -z "$PHASE" ]] && ! validate_domain_secure "$DOMAIN"; then log_error "Invalid domain format"; exit 1; fi
 if [[ -z "$PHASE" ]] && ! validate_email_secure "$ADMIN_EMAIL"; then log_error "Invalid email format"; exit 1; fi
 
@@ -1843,6 +1850,7 @@ collect_secrets() {
     log_info " Caddy Admin Panel Password"
     log_info "═══════════════════════════════════════════════════════════"
     log_info "This password will be hashed with bcrypt for Caddy basic auth"
+    # shellcheck disable=SC2016  # single quotes intentional: showing literal bcrypt format
     log_info 'Format: htpasswd (admin:$2y$14$...)'
     echo ""
 
@@ -2098,7 +2106,8 @@ export_docker_secrets() {
     local _key _value
 
     for _key in "${_keys[@]}"; do
-        # decrypt_secret() handles SOPS env, xtrace suppression, and stderr capture.
+        # decrypt_secret() takes optional SECRETS_FILE as $2; pass the global here.
+        # shellcheck disable=SC2153  # SECRETS_FILE is a global env var, not a typo of secrets_file
         _value=$(decrypt_secret "$_key" "$SECRETS_FILE") || {
             log_error "export_docker_secrets: failed to decrypt '$_key'"
             _failed=$(( _failed + 1 ))
@@ -2171,6 +2180,7 @@ write_secrets() {
         printf '# Encrypted with: SOPS + Age\n\n'
         printf '# VaultWarden admin password (Argon2id hash)\n'
         printf 'admin_token: %s\n\n'                       "$(yaml_escape "${_COLLECTED_SECRETS[admin_token]}")"
+        # shellcheck disable=SC2016  # single quotes intentional: showing literal bcrypt format example
         printf '# Caddy admin password (htpasswd format: admin:$2y$14$...)\n'
         printf 'admin_basic_auth_hash: %s\n\n'             "$(yaml_escape "${_COLLECTED_SECRETS[admin_basic_auth_hash]}")"
         printf '# Email — Tier 1: HTTP API token (all providers)\n'
@@ -2681,7 +2691,7 @@ install_units() {
         install -m 700 -o root -g root "$src" "$OPT_SCRIPTS_DIR/$script"
         log_success "Installed: $OPT_SCRIPTS_DIR/$script"
     done
-    [[ "$DRY_RUN" == "false" ]] && chown root:root "$OPT_SCRIPTS_DIR" || true
+    if [[ "$DRY_RUN" == "false" ]]; then chown root:root "$OPT_SCRIPTS_DIR"; fi
 
     # ------------------------------------------------------------------
     # 2. Create EnvironmentFile at /etc/vaultwarden/vaultwarden.env

@@ -594,6 +594,7 @@ _validate_no_placeholders() {
     local plain_yaml="$1"
 
     local offending
+    local _py_rc=0
     offending=$(python3 - "$plain_yaml" <<'PYEOF' 2>/dev/null
 import sys, yaml
 
@@ -631,9 +632,9 @@ if bad:
     print("\n".join(bad))
     sys.exit(1)
 PYEOF
-)
+    ) || _py_rc=$?
 
-    if [[ $? -ne 0 ]]; then
+    if [[ $_py_rc -ne 0 ]]; then
         log_error "Recovery kit contains unconfigured placeholder values for:"
         while IFS= read -r key; do
             log_error "  - $key"
@@ -853,7 +854,8 @@ do_rotate() {
     # with a line-by-line regex substitution so YAML comments (inline field
     # documentation added by setup.sh --phase=secrets write_secrets()) are preserved
     # on every rotation.  yaml.dump() strips all comments on first write.
-    python3 - "$temp_plain" "$actual_field" "$new_value" "$temp_patched" << 'PYEOF'
+    local _patch_rc=0
+    python3 - "$temp_plain" "$actual_field" "$new_value" "$temp_patched" << 'PYEOF' || _patch_rc=$?
 import sys, re
 
 src_file, field, new_value, dst_file = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
@@ -877,7 +879,7 @@ with open(dst_file, 'w', encoding='utf-8') as f:
     f.write(new_content)
 PYEOF
 
-    if [[ $? -ne 0 ]]; then
+    if [[ $_patch_rc -ne 0 ]]; then
         log_error "Failed to patch YAML for field: $actual_field"
         return 1
     fi

@@ -28,7 +28,7 @@ SECRETS_BACKUP_DIR="${SECRETS_BACKUP_DIR:-secrets}"
 # ensure_sops_env
 # ---------------------------------------------------------------------------
 ensure_sops_env() {
-    local age_key="${1:-$AGE_KEY_FILE}"
+    local age_key="$AGE_KEY_FILE"
 
     if [[ ! "$age_key" = /* ]]; then
         age_key="${PROJECT_ROOT:-$(pwd)}/$age_key"
@@ -853,6 +853,8 @@ generate_recovery_kit() {
     # $2y would be silently dropped by shell expansion in an unquoted heredoc,
     # producing a garbled hash that cannot be used for Caddy auth recovery.
     # All dynamic values are injected after the static block with printf.
+    # The heredoc-interspersed structure prevents full { } >> grouping here.
+    # shellcheck disable=SC2129
     cat >> "$output_file" << 'EOF'
 ██████╗ ███████╗ ██████╗ ██████╗██╗   ██╗███████╗██████╗ ██╗   ██╗
 ██╔══██╗██╔════╝██╔════╝██╔═══██╗██║   ██║██╔════╝██╔══██╗╚██╗ ██╔╝
@@ -951,9 +953,11 @@ EOF
     # repo_basename: strip trailing .git if present
     local repo_basename
     repo_basename=$(basename "$repo_clone_url" .git)
-    printf '   [ ] Run setup:\n' >> "$output_file"
-    printf '       cd %s\n' "$repo_basename" >> "$output_file"
-    printf '       ./setup.sh --domain %s --email %s\n' "$domain" "$admin_email" >> "$output_file"
+    {
+        printf '   [ ] Run setup:\n'
+        printf '       cd %s\n' "$repo_basename"
+        printf '       ./setup.sh --domain %s --email %s\n' "$domain" "$admin_email"
+    } >> "$output_file"
     cat >> "$output_file" << 'EOF'
 
 2. RESTORE KEYS
