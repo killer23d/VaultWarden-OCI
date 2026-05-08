@@ -881,6 +881,7 @@ simple_verify_age_key() {
     # Check 1: File exists
     if [[ ! -f "$age_key" ]]; then
         log_error "Age key missing: $age_key"
+        log_error "If you are restoring a backup, see BACKUP-RESTORE.md for key recovery steps."
         return 1
     fi
 

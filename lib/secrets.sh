@@ -45,8 +45,6 @@ ensure_sops_env() {
     return 0
 }
 
-setup_secrets_environment() { ensure_sops_env "${1:-}"; }
-
 cleanup_secrets_environment() {
     unset SOPS_AGE_KEY_FILE
     unset SOPS_CONFIG

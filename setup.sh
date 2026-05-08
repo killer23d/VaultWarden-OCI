@@ -133,7 +133,9 @@ OPTIONS:
                       existing encrypted secrets become permanently unrecoverable
                       without a prior recovery kit export. Run
                       './edit-secrets.sh --export-recovery-kit' BEFORE using
-                      --force on a running installation.
+                      --force on a running installation. To confirm you understand,
+                      set VW_FORCE_ACK=I_UNDERSTAND_LOSING_OLD_BACKUPS in the
+                      environment (or answer 'yes' at the interactive prompt).
   --dry-run           Print what would happen without making any changes.
   --data-device DEV   Use DEV as the dedicated VaultWarden data volume.
                       The device is formatted (ext4, first run only) and
@@ -165,6 +167,31 @@ while [[ $# -gt 0 ]]; do
         *) log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done
+
+# ---------------------------------------------------------------------------
+# FORCE safety gate — must run before any validation so --dry-run --force
+# can still preview without triggering the prompt.
+# ---------------------------------------------------------------------------
+if [[ "$FORCE" == "true" ]] && [[ "$DRY_RUN" != "true" ]]; then
+    if [[ "${VW_FORCE_ACK:-}" != "I_UNDERSTAND_LOSING_OLD_BACKUPS" ]]; then
+        log_error "--force regenerates the Age key and permanently orphans all existing"
+        log_error "encrypted backups unless you have first exported a recovery kit."
+        log_error ""
+        log_error "  Export your recovery kit FIRST: ./edit-secrets.sh --export-recovery-kit"
+        log_error ""
+        log_error "If you have already done that, re-run with:"
+        log_error "  VW_FORCE_ACK=I_UNDERSTAND_LOSING_OLD_BACKUPS sudo ./setup.sh --force ..."
+        exit 2
+    fi
+    if [[ -t 0 ]]; then
+        read -r -p "WARNING: This will rotate the Age key and can orphan old backups. Continue? [yes/NO] " _force_answer
+        if [[ "$_force_answer" != "yes" ]]; then
+            log_info "Aborting setup --force at operator request."
+            exit 1
+        fi
+        unset _force_answer
+    fi
+fi
 
 validate_domain_secure() {
     local domain="$1"
@@ -1608,28 +1635,6 @@ secrets_are_configured() {
     if ! check_placeholder_values 2>/dev/null; then
         return 1
     fi
-    return 0
-}
-
-validate_existing_secrets() {
-    log_info "Validating existing secrets..."
-
-    if ! ensure_sops_env; then return 1; fi
-
-    local issues=()
-
-    validate_secrets_decryption || issues+=("Cannot decrypt secrets file")
-    validate_secrets_yaml       || issues+=("Invalid YAML structure")
-    validate_required_secrets   || issues+=("Missing required secrets")
-    check_placeholder_values    || issues+=("Contains placeholder values")
-
-    if [[ ${#issues[@]} -gt 0 ]]; then
-        log_warn "Validation issues found:"
-        for issue in "${issues[@]}"; do log_warn "  - $issue"; done
-        return 1
-    fi
-
-    log_success "Existing secrets are valid"
     return 0
 }
 

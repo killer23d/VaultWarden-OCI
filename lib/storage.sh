@@ -14,6 +14,8 @@
 #   setup_data_volume            — provisions the volume (setup.sh only).
 #   install_docker_mount_guard   — installs/removes Docker systemd drop-in
 #                                  (setup.sh only).
+#   vw_default_backup_dir        — canonical default backup root directory,
+#                                  derived from PROJECT_STATE_DIR.
 
 [[ -n "${VAULTWARDEN_STORAGE_LIB_LOADED:-}" ]] && return 0
 set -euo pipefail
@@ -385,4 +387,21 @@ install_docker_mount_guard() {
     _storage_daemon_reload
     log_success "Docker mount guard installed: $drop_in_file"
     return 0
+}
+
+# ---------------------------------------------------------------------------
+# vw_default_backup_dir
+#
+# Returns the default base directory for backups, derived from
+# PROJECT_STATE_DIR. Keeps backups co-located with VaultWarden data
+# regardless of storage mode (boot-only or separate-volume) without
+# requiring the operator to explicitly set BACKUP_DIR.
+#
+# Callers use this value only when BACKUP_DIR is absent from .env; an
+# explicit BACKUP_DIR always takes precedence.
+# ---------------------------------------------------------------------------
+vw_default_backup_dir() {
+    local state_dir
+    state_dir="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
+    printf '%s/backups' "$state_dir"
 }
