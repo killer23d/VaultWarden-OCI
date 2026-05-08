@@ -53,18 +53,18 @@ Orphaned sidecar files (`.meta`, `.sha256`) whose corresponding `.age` primary i
 ### Database Backup (Daily)
 
 ```bash
-./backup.sh --type db                        # default
-./backup.sh --type db --rclone               # with offsite sync
-./backup.sh --type db --email                # with email notification
+./backup.sh run db                        # default
+./backup.sh run db --rclone               # with offsite sync
+./backup.sh run db --email                # with email notification
 make backup TYPE=db                          # silent (no email)
 ```
 
 ### Full System Backup (Weekly)
 
 ```bash
-./backup.sh --type full                      # fast checksum + decrypt probe
-./backup.sh --type full --full-verification  # end-to-end decrypt + integrity test
-./backup.sh --type full --full-verification --rclone --email
+./backup.sh run full                      # fast checksum + decrypt probe
+./backup.sh run full --full-verification  # end-to-end decrypt + integrity test
+./backup.sh run full --full-verification --rclone --email
 make backup-full                             # full backup with email
 ```
 
@@ -74,8 +74,8 @@ make backup-full                             # full backup with email
 ### Emergency Recovery Kit (As Needed)
 
 ```bash
-./backup.sh --type emergency                  # includes secrets + Age key
-./backup.sh --type emergency --full-verification --rclone --email
+./backup.sh run emergency                  # includes secrets + Age key
+./backup.sh run emergency --full-verification --rclone --email
 make backup-emergency                         # emergency kit with email
 ```
 
@@ -84,7 +84,7 @@ make backup-emergency                         # emergency kit with email
 ### List & Inspect Backups
 
 ```bash
-./backup.sh --list
+./backup.sh list
 make list-backups
 ```
 
@@ -93,7 +93,7 @@ make list-backups
 Retention defaults are type-specific (`db` 14 days, `full` 30 days, `emergency` 90 days). Override per run with `--keep N`:
 
 ```bash
-sudo ./backup.sh --type db --keep 30
+sudo ./backup.sh run db --keep 30
 ```
 
 `--keep` accepts only positive integers; non-integer or shell-injectable values (e.g. `"14; rm -rf /"`) are rejected immediately after argument parsing.
@@ -192,18 +192,18 @@ RCLONE_REMOTE_NAME=your_remote_name
 RCLONE_CONFIG=/path/to/rclone.conf
 
 # 5. Test
-./backup.sh --type db --rclone
+./backup.sh run db --rclone
 
 # 6. Verify remote contents
 rclone ls your_remote_name:vaultwarden_backups/
 ```
 
-`sudo ./setup.sh --phase=systemd --install` (or `make install-systemd`) provisions systemd timers for automated backups:
+`sudo ./setup.sh systemd install` (or `make install-systemd`) provisions systemd timers for automated backups:
 
 | Timer | Schedule | Command |
 | :-- | :-- | :-- |
-| `vaultwarden-db-backup.timer` | Daily (Mon–Sat) | `backup.sh --type db --rclone --email` |
-| `vaultwarden-full-backup.timer` | Weekly (Sunday) | `backup.sh --type full --full-verification --rclone --email` |
+| `vaultwarden-db-backup.timer` | Daily (Mon–Sat) | `backup.sh run db --rclone --email` |
+| `vaultwarden-full-backup.timer` | Weekly (Sunday) | `backup.sh run full --full-verification --rclone --email` |
 
 Check timer status:
 
@@ -268,23 +268,23 @@ make restore-remote
 
 ```bash
 # Restore the latest backup of a specific type
-sudo ./restore.sh --latest --type full
-sudo ./restore.sh --latest --type db
+sudo ./restore.sh latest full
+sudo ./restore.sh latest db
 
 # Supply the decryption key non-interactively
-sudo ./restore.sh --latest --type db --key-file /path/to/old-age-key.txt
+sudo ./restore.sh latest db --key-file /path/to/old-age-key.txt
 
 # Automated pipeline restore (no prompts; key via env)
 RESTORE_AGE_KEY_FILE=/root/keys/age-key-old.txt \
-  sudo ./restore.sh --latest --type db --force
+  sudo ./restore.sh latest db --force
 
 # Restore a specific file
 sudo ./restore.sh --file /path/to/backup.age
 sudo ./restore.sh --file /path/to/backup.age --force
 
 # Restore the latest backup, skip confirmation and skip pre-restore backup
-# (used internally by maintenance.sh --update rollback)
-sudo ./restore.sh --latest --type full --force --no-backup
+# (used internally by maintenance.sh update rollback)
+sudo ./restore.sh latest full --force --no-backup
 ```
 
 > **Note on `--force`:** Suppresses the confirmation prompt (step 5) and the key acknowledgement prompt (step 11). Useful for automated invocations. The key prompt (step 2) is still evaluated — supply a key via `--key-file` or `RESTORE_AGE_KEY_FILE`, or set `SOPS_AGE_KEY_FILE` as the fallback.
@@ -390,10 +390,10 @@ make key-show
 
 ### Scenario 4 — Failed Update (Auto-Rollback)
 
-`maintenance.sh --update` triggers this automatically when its post-update health check fails:
+`maintenance.sh update` triggers this automatically when its post-update health check fails:
 
 ```bash
-sudo ./restore.sh --latest --type full --force --no-backup
+sudo ./restore.sh latest full --force --no-backup
 ```
 
 If you need to trigger it manually:
@@ -417,8 +417,8 @@ df -h
 
 ```bash
 docker compose logs vaultwarden
-./maintenance.sh --db-maint   # offline SQLite VACUUM + WAL checkpoint
-./backup.sh --type db
+./maintenance.sh db-maint   # offline SQLite VACUUM + WAL checkpoint
+./backup.sh run db
 ```
 
 **"WAL checkpoint incomplete"**
@@ -428,12 +428,12 @@ This means unincorporated WAL pages remain after `PRAGMA wal_checkpoint(TRUNCATE
 ```bash
 # Option 1: Stop VaultWarden and retry
 docker compose stop vaultwarden
-./backup.sh --type db
+./backup.sh run db
 docker compose start vaultwarden
 
 # Option 2: Run offline maintenance to force a clean checkpoint
-./maintenance.sh --db-maint
-./backup.sh --type db
+./maintenance.sh db-maint
+./backup.sh run db
 ```
 
 **"Encryption failed" / Age key missing**
@@ -474,7 +474,7 @@ sudo ./restore.sh --file /path/to/backup.age --key-file /path/to/matching-age-ke
 ```bash
 rclone lsd your_remote_name:
 rclone config show your_remote_name
-./backup.sh --type db --rclone 2>&1 | tee /tmp/backup-debug.log
+./backup.sh run db --rclone 2>&1 | tee /tmp/backup-debug.log
 
 # If RCLONE_CONFIG is set, verify it passes validation:
 # - no shell metacharacters

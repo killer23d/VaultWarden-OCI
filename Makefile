@@ -207,8 +207,8 @@ fix-permissions: ## Fix file ownership after sudo operations leave root-owned fi
 init-secrets: ## Initialize secrets file (interactive)
 	@echo "$(BLUE)Initializing secrets...$(NC)"
 	@if [ ! -f "secrets/secrets.yaml" ]; then \
-		echo "$(BLUE)No secrets file found. Running setup.sh --phase=secrets...$(NC)"; \
-		./setup.sh --phase=secrets; \
+		echo "$(BLUE)No secrets file found. Running setup.sh secrets...$(NC)"; \
+		./setup.sh secrets; \
 	else \
 		echo "$(YELLOW)Secrets file already exists. Use 'make edit-secrets' to modify.$(NC)"; \
 	fi
@@ -228,7 +228,7 @@ test-secrets: ## Test secrets decryption
 
 test-email: ## Send a test email notification
 	@echo "$(BLUE)Sending test email...$(NC)"
-	@./backup.sh --test-email
+	@./backup.sh test-email
 
 # ===========================================================================
 ##@ Service Management
@@ -255,7 +255,7 @@ up: ## Start all services (runs startup.sh for health checks)
 	fi
 	@if [ ! -f "secrets/secrets.yaml" ]; then \
 		echo "$(YELLOW)No secrets file found. Initializing...$(NC)"; \
-		./setup.sh --phase=secrets; \
+		./setup.sh secrets; \
 	fi
 # ── Pre-flight: admin_token decoded-secret guard. ───────────────────────────
 # MAKEFILE-UP1 FIX [MEDIUM]: startup.sh's prepare_docker_secrets() is the
@@ -274,7 +274,7 @@ up: ## Start all services (runs startup.sh for health checks)
 #     check_age_key_health_preflight() provides the actionable error message.
 	@if ! test -f "secrets/secrets.yaml"; then \
 		echo "$(RED)ERROR: secrets/secrets.yaml not found — secrets have never been initialised.$(NC)"; \
-		echo "$(RED)       Run: ./setup.sh --phase=secrets  (or: make init-secrets)$(NC)"; \
+		echo "$(RED)       Run: ./setup.sh secrets  (or: make init-secrets)$(NC)"; \
 		exit 1; \
 	elif ! test -s "secrets/.docker_secrets/admin_token"; then \
 		echo "$(YELLOW)WARN: secrets/.docker_secrets/admin_token is absent or empty.$(NC)"; \
@@ -393,15 +393,15 @@ status: ## Show service status, backup health, disk usage, and Fail2Ban summary
 
 health: ## Run health checks (set AUTO_RECOVER=true to auto-recover)
 	@echo "$(BLUE)Running health checks...$(NC)"
-	@sudo ./maintenance.sh --health $(if $(filter true,$(AUTO_RECOVER)),--fix,)
+	@sudo ./maintenance.sh health $(if $(filter true,$(AUTO_RECOVER)),--fix,)
 
 health-quick: ## Quick health check (essential services only)
 	@echo "$(BLUE)Running quick health check...$(NC)"
-	@sudo ./maintenance.sh --health --quick
+	@sudo ./maintenance.sh health --quick
 
 health-email: ## Test email health
 	@echo "$(BLUE)Testing email health...$(NC)"
-	@sudo ./maintenance.sh --health --email
+	@sudo ./maintenance.sh health --email
 
 watch: ## Watch service logs in real-time (Ctrl+C to stop)
 	$(call check-docker)
@@ -485,26 +485,26 @@ logs-fail2ban: ## Tail fail2ban logs
 backup: ## Run incremental database backup
 	$(call require-root)
 	@echo "$(BLUE)Running database backup...$(NC)"
-	@./backup.sh --type db
+	@./backup.sh run db
 
 backup-full: ## Run full backup (database + attachments + config)
 	$(call require-root)
 	@echo "$(BLUE)Running full backup...$(NC)"
-	@./backup.sh --type full
+	@./backup.sh run full
 
 backup-emergency: ## Create emergency backup kit
 	$(call require-root)
 	@echo "$(BLUE)Creating emergency backup...$(NC)"
-	@./backup.sh --type emergency
+	@./backup.sh run emergency
 
 list-backups: ## List available backups with sizes
 	$(call require-root)
 	@echo "$(BLUE)Available backups:$(NC)"
-	@./backup.sh --list
+	@./backup.sh list
 
 backup-status: ## Show backup health summary
 	$(call require-root)
-	@./backup.sh --status
+	@./backup.sh list
 
 restore: ## Interactive restore (guided)
 	$(call require-root)
@@ -519,7 +519,7 @@ restore-preflight: ## Verify restore prerequisites without executing
 restore-db: ## Restore database only from latest backup
 	$(call require-root)
 	@echo "$(BLUE)Restoring database from latest backup...$(NC)"
-	@./restore.sh --latest --type db
+	@./restore.sh latest db
 
 restore-remote: ## Restore from remote storage (rclone)
 	$(call require-root)
@@ -610,7 +610,7 @@ key-install: ## Install Age key from secrets/keys/ to the path in SOPS_AGE_KEY_F
 		else \
 			echo "$(RED)  ✗ Key file NOT FOUND at $$CONFIGURED_KEY$(NC)"; \
 			echo "$(RED)    Secrets have not been initialised on this host yet.$(NC)"; \
-			echo "$(RED)    Run: ./setup.sh --phase=secrets  (or: make init-secrets)$(NC)"; \
+			echo "$(RED)    Run: ./setup.sh secrets  (or: make init-secrets)$(NC)"; \
 			exit 1; \
 		fi; \
 	fi; \
@@ -706,7 +706,7 @@ key-rotate: ## Rotate age encryption key (re-encrypts all secrets)
 update: ## Update all container images and restart
 	$(call require-root)
 	@echo "$(BLUE)Updating VaultWarden-OCI...$(NC)"
-	@./maintenance.sh --update
+	@./maintenance.sh update
 
 check-updates: ## Check for available container image updates (no restart)
 	$(call check-docker)
@@ -727,7 +727,7 @@ update-system: ## Update host OS packages
 update-dns: ## Update Cloudflare DNS records
 	$(call check-env-readable)
 	@echo "$(BLUE)Updating DNS records...$(NC)"
-	@./maintenance.sh --update-dns
+	@./maintenance.sh update-dns
 
 # ===========================================================================
 ##@ Maintenance
@@ -746,7 +746,7 @@ maintenance-full: ## Run full maintenance with all checks
 db-maint: ## Run database maintenance (VACUUM, integrity check)
 	$(call require-root)
 	@echo "$(BLUE)Running database maintenance...$(NC)"
-	@./maintenance.sh --db-maint
+	@./maintenance.sh db-maint
 
 db-backup: ## Quick database backup via maintenance script
 	$(call require-root)
@@ -760,12 +760,12 @@ db-backup: ## Quick database backup via maintenance script
 install-systemd: ## Install systemd service units and timers
 	$(call require-root)
 	@echo "$(BLUE)Installing systemd units...$(NC)"
-	@./setup.sh --phase=systemd --install
+	@./setup.sh systemd install
 
 remove-systemd: ## Remove systemd service units
 	$(call require-root)
 	@echo "$(BLUE)Removing systemd units...$(NC)"
-	@./setup.sh --phase=systemd --remove
+	@./setup.sh systemd remove
 
 systemd-status: ## Show systemd unit status
 	@echo "$(BLUE)Systemd Unit Status:$(NC)"
@@ -786,7 +786,7 @@ systemd-status: ## Show systemd unit status
 systemd-validate: ## Validate systemd unit files
 	$(call require-root)
 	@echo "$(BLUE)Validating systemd units...$(NC)"
-	@./setup.sh --phase=systemd --validate
+	@./setup.sh systemd validate
 
 timers: ## Show scheduled systemd timer status
 	@echo "$(BLUE)Scheduled Timers:$(NC)"
@@ -799,17 +799,17 @@ timers: ## Show scheduled systemd timer status
 breakglass-create: ## Create emergency break-glass admin account
 	$(call require-root)
 	@echo "$(BLUE)Creating break-glass admin account...$(NC)"
-	@./create-breakglass-admin.sh
+	@./create-breakglass-admin.sh create
 
 breakglass-status: ## Check break-glass admin account status
 	$(call require-root)
 	@echo "$(BLUE)Break-glass admin status:$(NC)"
-	@./create-breakglass-admin.sh --status
+	@./create-breakglass-admin.sh status
 
 breakglass-remove: ## Remove break-glass admin account
 	$(call require-root)
 	@echo "$(BLUE)Removing break-glass admin account...$(NC)"
-	@./create-breakglass-admin.sh --remove
+	@./create-breakglass-admin.sh remove --force
 
 # ===========================================================================
 ##@ Testing & Development

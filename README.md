@@ -116,7 +116,7 @@ Then supply the external credentials that `--auto` cannot generate for you:
 ./edit-secrets.sh --rotate push_installation_key
 ```
 
-**Interactive install (no `--auto`):** `setup.sh` creates the skeleton and displays a next-steps screen. Follow the steps printed on screen — edit `.env` first, then run `./setup.sh --phase=secrets` to be prompted for all credentials at once.
+**Interactive install (no `--auto`):** `setup.sh` creates the skeleton and displays a next-steps screen. Follow the steps printed on screen — edit `.env` first, then run `./setup.sh secrets` to be prompted for all credentials at once.
 
 See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for every available variable and [docs/EMAIL.md](docs/EMAIL.md) for a full email setup walkthrough.
 
@@ -126,12 +126,12 @@ See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for every available variable 
 
 ```bash
 ./startup.sh          # start all services  (or: make start)
-./maintenance.sh --health  # verify everything is healthy  (or: make health)
+./maintenance.sh health  # verify everything is healthy  (or: make health)
 ```
 
 Once healthy, switch the Cloudflare record to **Proxied (Orange Cloud)** and set SSL/TLS encryption to **Full (Strict)**.
 
-> **`startup.sh` diagnostic improvement:** If the post-startup quiet health check exits non-zero, `startup.sh` now automatically re-runs `./maintenance.sh --health` in verbose mode so full diagnostics are always visible to the operator.
+> **`startup.sh` diagnostic improvement:** If the post-startup quiet health check exits non-zero, `startup.sh` now automatically re-runs `./maintenance.sh health` in verbose mode so full diagnostics are always visible to the operator.
 
 > **Health check fix:** Configuration validation now correctly checks for `DOMAIN_NAME` (the canonical env var) instead of `DOMAIN`.
 
@@ -141,7 +141,7 @@ Once healthy, switch the Cloudflare record to **Proxied (Orange Cloud)** and set
 
 ```bash
 # Set up automated backups, updates, health checks, and maintenance via systemd timers
-sudo ./setup.sh --phase=systemd --install
+sudo ./setup.sh systemd install
 
 # Export a plaintext recovery kit to your password manager
 # Run this AFTER all secrets are configured so everything is included
@@ -151,7 +151,7 @@ sudo ./setup.sh --phase=systemd --install
 ./create-breakglass-admin.sh    # or: make breakglass-create
 ```
 
-> **`setup.sh --phase=systemd` improvement:** `--install` now validates all `OnCalendar=` expressions via `systemd-analyze calendar` before enabling timers and warns on invalid expressions. All generated service units now include an `[Install]` section (`WantedBy=multi-user.target`) so `systemctl enable` is no longer a no-op. See [docs/ADVANCED-CUSTOMIZATION.md](docs/ADVANCED-CUSTOMIZATION.md) for timer details.
+> **`setup.sh systemd` improvement:** `--install` now validates all `OnCalendar=` expressions via `systemd-analyze calendar` before enabling timers and warns on invalid expressions. All generated service units now include an `[Install]` section (`WantedBy=multi-user.target`) so `systemctl enable` is no longer a no-op. See [docs/ADVANCED-CUSTOMIZATION.md](docs/ADVANCED-CUSTOMIZATION.md) for timer details.
 
 The installed systemd timer schedule:
 
@@ -270,7 +270,7 @@ VW_SMTP_EXPLICIT_TLS=false
 
 ```bash
 # Test end-to-end
-./maintenance.sh --test-email --verbose
+./maintenance.sh test-email --verbose
 ```
 
 Full details, provider setup, Postfix MTA configuration, and troubleshooting: **[docs/EMAIL.md](docs/EMAIL.md)**
@@ -346,7 +346,7 @@ Full details: [docs/SECURITY.md](docs/SECURITY.md)
 
 ## 🔄 Update & Rollback
 
-`maintenance.sh --update` runs a fully phased cycle: pre-update health check → backup → pull → restart → post-update health check. If the post-update health check fails, it **automatically rolls back** via `restore.sh --latest`. Age key health is now validated before any update operation begins. See [docs/OPERATIONS.md](docs/OPERATIONS.md) for the full phase diagram.
+`maintenance.sh update` runs a fully phased cycle: pre-update health check → backup → pull → restart → post-update health check. If the post-update health check fails, it **automatically rolls back** via `restore.sh latest`. Age key health is now validated before any update operation begins. See [docs/OPERATIONS.md](docs/OPERATIONS.md) for the full phase diagram.
 
 ---
 
@@ -362,7 +362,7 @@ Three backup tiers with encrypted output (Age key required to restore):
 
 Retention is configurable: pass `--keep N` to `backup.sh` (N must be a positive integer), or edit `KEEP_DAYS` in `.env`. Example — keep 30 days of weekly full backups:
 ```bash
-sudo ./backup.sh --type full --keep 30
+sudo ./backup.sh run full --keep 30
 ```
 
 The restore flow now includes an interactive Age decryption key prompt, a pre-restore key round-trip validation, and automatic post-restore key rotation. Pass `--key-file <path>` or set `RESTORE_AGE_KEY_FILE` for non-interactive/CI restores. See [docs/BACKUP-RESTORE.md](docs/BACKUP-RESTORE.md) for the full 12-step restore procedure.

@@ -20,7 +20,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Docker systemd mount guard** — `setup.sh` installs a `RequiresMountsFor=`
   drop-in on `docker.service` in separate-volume mode, preventing Docker from
   starting if the data disk is not mounted.
-- **Per-unit `ReadWritePaths` drop-ins** — `setup.sh --phase=systemd --install`
+- **Per-unit `ReadWritePaths` drop-ins** — `setup.sh systemd install`
   appends `DATA_VOLUME_MOUNT` to each managed unit's `ReadWritePaths` so
   `ProtectSystem=strict` does not silently block writes to the data volume.
 
@@ -29,7 +29,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `SERVICES`/`TIMERS` from `run_phase_systemd()`; unit list is now self-contained
   (`Bug A` fix).
 - `remove_units()` now cleans up per-unit `.d/` drop-in directories on
-  `setup.sh --phase=systemd --remove`.
+  `setup.sh systemd remove`.
 - `uninstall-vaultwarden.sh` now removes the Docker mount guard drop-in
   (`10-vaultwarden-data-volume.conf`) so Docker is not left in a broken state
   after uninstall on separate-volume hosts.

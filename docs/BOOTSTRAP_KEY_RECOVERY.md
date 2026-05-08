@@ -222,7 +222,7 @@ echo "✅ All recovery tests passed"
 
 | Frequency | Task |
 | :-- | :-- |
-| Monthly | Create new emergency kit: `./backup.sh --type emergency` |
+| Monthly | Create new emergency kit: `./backup.sh run emergency` |
 | Quarterly | Full recovery test (procedure above) |
 | After any Age key rotation | Re-run Tier 2 escrow (`create_password_manager_escrow`) and re-wrap with GPG |
 | After any Age key rotation | `make key-rotate` triggers the built-in key rotation workflow |

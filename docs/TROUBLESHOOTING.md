@@ -4,7 +4,7 @@ Common issues and solutions for VaultWarden-OCI deployment and operations.
 
 ## General Troubleshooting Approach
 
-1. **Check service status**: `./maintenance.sh --health` or `make health`
+1. **Check service status**: `./maintenance.sh health` or `make health`
 2. **Review logs**: `docker compose logs` or `make logs`
 3. **Validate configuration**: `docker compose config` or `make test-config`
 4. **Check resources**: `docker stats`
@@ -22,7 +22,7 @@ Common issues and solutions for VaultWarden-OCI deployment and operations.
 **Diagnosis**:
 ```bash
 # Check service status
-./maintenance.sh --health
+./maintenance.sh health
 docker compose ps
 
 # View logs
@@ -71,7 +71,7 @@ docker stats $(docker compose ps -q vaultwarden)
 **Solutions**:
 ```bash
 # Deep database maintenance (stops VaultWarden temporarily)
-sudo ./maintenance.sh --db-maint
+sudo ./maintenance.sh db-maint
 # or via Makefile:
 make db-maint
 
@@ -216,7 +216,7 @@ make up
 **Diagnosis**:
 ```bash
 ./edit-secrets.sh --list
-./maintenance.sh --health
+./maintenance.sh health
 ```
 
 **Solutions**:
@@ -338,7 +338,7 @@ sops -d secrets/secrets.yaml
 ### Secrets Environment Leaking to Child Processes
 
 **Symptoms**:
-- `SOPS_AGE_KEY_FILE` remains set after running `./setup.sh`, `./edit-secrets.sh`, or `./setup.sh --phase=secrets`
+- `SOPS_AGE_KEY_FILE` remains set after running `./setup.sh`, `./edit-secrets.sh`, or `./setup.sh secrets`
 - Docker or rclone subprocesses inherit the Age key file path (visible via `ps aux`)
 
 **Diagnosis**:
@@ -398,13 +398,13 @@ sudo ufw status
 ./startup.sh --force
 
 # Update DNS if IP changed (targeted mode — no cleanup)
-./maintenance.sh --update-dns
+./maintenance.sh update-dns
 
 # Verify Cloudflare proxy is enabled
 # Check Cloudflare dashboard: DNS → Proxied (orange cloud)
 
 # Update firewall if Cloudflare IPs changed
-./maintenance.sh --update-firewall
+./maintenance.sh update-firewall
 ```
 
 ### Firewall Blocking Access
@@ -429,7 +429,7 @@ curl -I https://vault.example.com
 **Solutions**:
 ```bash
 # Safely update Cloudflare IP ranges (adds new rules before removing old)
-./maintenance.sh --update-firewall
+./maintenance.sh update-firewall
 
 # If firewall is blocking everything, check UFW
 sudo ufw status
@@ -466,7 +466,7 @@ echo "DNS IP:    $(dig +short vault.example.com @1.1.1.1 | head -1)"
 **Solutions**:
 ```bash
 # Manual DNS update (targeted mode — no routine cleanup)
-./maintenance.sh --update-dns
+./maintenance.sh update-dns
 
 # Or via Makefile
 make update-dns
@@ -502,15 +502,15 @@ docker compose logs postfix
 make logs-postfix                    # shortcut with timestamps
 
 # Run full email diagnostic (4 tests)
-./maintenance.sh --test-email
+./maintenance.sh test-email
 # or via Makefile:
 make test-email
 
 # Verbose diagnostic output
-./maintenance.sh --test-email --verbose
+./maintenance.sh test-email --verbose
 
 # Preview without sending
-./maintenance.sh --test-email --dry-run
+./maintenance.sh test-email --dry-run
 
 # Check postfix relay configuration
 docker compose exec postfix postconf relayhost
@@ -550,7 +550,7 @@ docker compose restart postfix
 docker compose logs postfix | grep -i "auth\|error\|fatal"
 
 # Run verbose email diagnostic
-./maintenance.sh --test-email --verbose
+./maintenance.sh test-email --verbose
 ```
 
 **Solutions**:
@@ -599,7 +599,7 @@ docker compose exec fail2ban cat /data/fail2ban/action.d/smtp.conf
 docker compose restart fail2ban
 
 # Re-run email diagnostic
-./maintenance.sh --test-email --verbose
+./maintenance.sh test-email --verbose
 ```
 
 ## Backup and Restore Issues
@@ -620,7 +620,7 @@ df -h ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}
 ls -l secrets/keys/age-key.txt
 
 # Test backup with dry-run
-./backup.sh --type db --dry-run
+./backup.sh run db --dry-run
 
 # Check VaultWarden status
 docker compose ps vaultwarden
@@ -629,16 +629,16 @@ docker compose ps vaultwarden
 **Solutions**:
 ```bash
 # Free up disk space
-./maintenance.sh --comprehensive
+./maintenance.sh run --comprehensive
 
 # If Age key missing, regenerate
 sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
 
 # Retry backup
-./backup.sh --type db
+./backup.sh run db
 
 # List existing backups
-./backup.sh --list
+./backup.sh list
 make list-backups
 ```
 
@@ -655,7 +655,7 @@ make list-backups
 ls -l secrets/keys/age-key.txt
 
 # Confirm the quick-verify actually tests decryption
-./backup.sh --type db --list
+./backup.sh run db --list
 ```
 
 **Explanation**: The `verify_backup_quick()` function previously returned **success (0)**
@@ -679,7 +679,7 @@ sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
 **Symptoms**:
 - Old backups accumulate past the configured retention period
 - This is most common after restoring the project to a new OCI instance
-- `./backup.sh --list` shows backups with correct timestamps but `ctime = now`
+- `./backup.sh list` shows backups with correct timestamps but `ctime = now`
 
 **Explanation**: Backup age is now determined from the **filename-embedded timestamp**
 (`YYYYMMDD-HHMMSS`), which is immutable across filesystem operations (`cp`, `mv`,
@@ -690,7 +690,7 @@ remains unchanged and is always the primary age source.
 **Diagnosis**:
 ```bash
 # List backups and confirm timestamp in filenames
-./backup.sh --list
+./backup.sh list
 # e.g. db-20240315-143022.age → created 15 March 2024
 
 # Confirm retention setting
@@ -726,7 +726,7 @@ sops -d secrets/secrets.yaml > /dev/null
 cat backup.age.meta
 
 # List all available backups
-./backup.sh --list
+./backup.sh list
 ```
 
 **Solutions**:
@@ -742,7 +742,7 @@ make restore-db
 ./restore.sh --file /path/to/older-backup.age
 
 # After restore, verify services
-./maintenance.sh --health --comprehensive
+./maintenance.sh health --comprehensive
 ```
 
 ### Offsite Backup Sync Fails
@@ -778,7 +778,7 @@ echo "test" | rclone rcat your_remote_name:test.txt
 rclone cat your_remote_name:test.txt
 
 # Retry backup with rclone sync
-./backup.sh --type db --rclone
+./backup.sh run db --rclone
 ```
 
 ## Security Issues
@@ -907,7 +907,7 @@ curl -u "admin:your_password" https://vault.example.com/admin
 **Diagnosis**:
 ```bash
 # Check break-glass admin status
-sudo ./create-breakglass-admin.sh --status
+sudo ./create-breakglass-admin.sh status
 make breakglass-status
 
 # Verify user exists
@@ -920,8 +920,8 @@ sudo cat /home/vw-breakglass/.ssh/authorized_keys
 **Solutions**:
 ```bash
 # Remove and recreate break-glass admin
-sudo ./create-breakglass-admin.sh --remove
-sudo ./create-breakglass-admin.sh --create
+sudo ./create-breakglass-admin.sh remove
+sudo ./create-breakglass-admin.sh create
 # or:
 make breakglass-remove
 make breakglass-create
@@ -962,7 +962,7 @@ sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
 ./startup.sh --force
 
 # Run database maintenance if VaultWarden is CPU-heavy
-sudo ./maintenance.sh --db-maint
+sudo ./maintenance.sh db-maint
 ```
 
 ### High Memory Usage
@@ -995,7 +995,7 @@ sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
 ./startup.sh --force
 
 # Run comprehensive maintenance to free resources
-./maintenance.sh --comprehensive
+./maintenance.sh run --comprehensive
 ```
 
 ### Slow Database Performance
@@ -1020,11 +1020,11 @@ docker compose logs vaultwarden | grep -i slow
 **Solutions**:
 ```bash
 # Deep database maintenance: VACUUM + WAL checkpoint + optimize
-sudo ./maintenance.sh --db-maint
+sudo ./maintenance.sh db-maint
 make db-maint
 
 # Non-interactive (skip confirmation prompt)
-sudo ./maintenance.sh --db-maint --force
+sudo ./maintenance.sh db-maint --force
 
 # Review and remove old items via admin panel:
 # https://vault.example.com/admin → Users → Purge Trash / Sends
@@ -1045,11 +1045,11 @@ docker compose restart vaultwarden
 **Diagnosis**:
 ```bash
 # List installed VaultWarden systemd timers
-sudo ./setup.sh --phase=systemd --status
+sudo ./setup.sh systemd status
 make systemd-status
 
 # Validate security and dependencies
-sudo ./setup.sh --phase=systemd --validate
+sudo ./setup.sh systemd validate
 
 # Check timer logs via journald
 journalctl -u vaultwarden-maintenance.service -n 50
@@ -1063,22 +1063,22 @@ systemctl list-timers --all | grep vaultwarden
 **Solutions**:
 ```bash
 # (Re-)install systemd timers
-sudo ./setup.sh --phase=systemd --install
+sudo ./setup.sh systemd install
 make install-systemd
 
 # After pulling a repo update, re-install to sync /opt/ scripts
-sudo ./setup.sh --phase=systemd --install
+sudo ./setup.sh systemd install
 
 # Check for split-brain (stale /opt/ scripts)
-sudo ./setup.sh --phase=systemd --validate
+sudo ./setup.sh systemd validate
 # Look for: ⚠️  SPLIT-BRAIN DETECTED warning
 
 # Verify flock is installed
 command -v flock || sudo apt install util-linux
 ```
 
-> **Note**: Automation is managed via **systemd timers** (`setup.sh --phase=systemd`), not
-> cron. There is no `cron-setup.sh` in the repository. Use `setup.sh --phase=systemd`
+> **Note**: Automation is managed via **systemd timers** (`setup.sh systemd`), not
+> cron. There is no `cron-setup.sh` in the repository. Use `setup.sh systemd`
 > for all scheduling operations. Timer logs are written to the systemd journal
 > and are viewed with `journalctl`, not as flat log files.
 
@@ -1093,7 +1093,7 @@ When reporting issues, include:
 make diagnose > diagnose-report.txt
 
 # System information
-./maintenance.sh --health --comprehensive --json > health-report.json
+./maintenance.sh health --comprehensive --json > health-report.json
 
 # Service logs
 docker compose logs > service-logs.txt
@@ -1109,7 +1109,7 @@ docker stats --no-stream > resource-usage.txt
 make version > version-info.txt
 
 # Systemd timer status
-sudo ./setup.sh --phase=systemd --status > timer-status.txt
+sudo ./setup.sh systemd status > timer-status.txt
 
 # Fail2Ban jail status
 docker compose exec fail2ban fail2ban-client status >> timer-status.txt
@@ -1124,7 +1124,7 @@ If all else fails:
 docker compose down
 
 # 2. Create emergency backup (if possible)
-./backup.sh --type emergency
+./backup.sh run emergency
 
 # 3. Restore from last known good backup
 ./restore.sh

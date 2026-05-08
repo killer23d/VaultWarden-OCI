@@ -61,7 +61,7 @@ make safe-restart
 #### Basic Health Check
 
 ```bash
-./maintenance.sh --health
+./maintenance.sh health
 
 # Or via Makefile
 make health
@@ -87,7 +87,7 @@ make health-quick
 #### Comprehensive Health Check
 
 ```bash
-./maintenance.sh --health --comprehensive
+./maintenance.sh health --comprehensive
 
 # Additional checks:
 #  ✓ CPU and memory usage vs alert threshold
@@ -99,10 +99,10 @@ make health-quick
 
 ```bash
 # Automatically restart unhealthy containers
-./maintenance.sh --health --auto-recover
+./maintenance.sh health --auto-recover
 
 # Combined — comprehensive check + auto-recovery + email alert
-./maintenance.sh --health --comprehensive --auto-recover --email
+./maintenance.sh health --comprehensive --auto-recover --email
 
 # Or via Makefile
 make health AUTO_RECOVER=true
@@ -216,7 +216,7 @@ du -sh /var/lib/vaultwarden/logs/*
 #### Database Backup (Quick — Daily)
 
 ```bash
-./backup.sh --type db
+./backup.sh run db
 make backup        # defaults to TYPE=db if omitted
 make backup TYPE=db
 make db-backup     # alias
@@ -233,7 +233,7 @@ make db-backup     # alias
 #### Full System Backup
 
 ```bash
-./backup.sh --type full
+./backup.sh run full
 make backup-full
 make backup TYPE=full
 
@@ -246,7 +246,7 @@ make backup TYPE=full
 #### Full Backup with End-to-End Verification
 
 ```bash
-./backup.sh --type full --full-verification
+./backup.sh run full --full-verification
 
 # Process: create → decrypt → extract → integrity check → verify files → cleanup
 # Recommended: weekly (matches systemd timer default)
@@ -255,7 +255,7 @@ make backup TYPE=full
 #### Emergency Recovery Kit
 
 ```bash
-./backup.sh --type emergency
+./backup.sh run emergency
 make backup-emergency
 make backup TYPE=emergency
 
@@ -271,8 +271,8 @@ rclone config
 # Set RCLONE_REMOTE_NAME in .env
 
 # Backup + sync to remote
-./backup.sh --type db --rclone
-./backup.sh --type full --rclone --email
+./backup.sh run db --rclone
+./backup.sh run full --rclone --email
 ```
 
 Supported remotes: Google Drive, Amazon S3, Backblaze B2, Dropbox, OneDrive, and all other rclone-supported providers.
@@ -281,7 +281,7 @@ Supported remotes: Google Drive, Amazon S3, Backblaze B2, Dropbox, OneDrive, and
 
 ```bash
 # List all backups
-./backup.sh --list
+./backup.sh list
 make list-backups
 
 # Backup health summary — last run time, size, retention, count per type
@@ -309,15 +309,15 @@ make restore-remote
 
 ```bash
 # Update container images (respects version pins in .env)
-./maintenance.sh --update
+./maintenance.sh update
 make update
 
 # Update containers + system packages
-./maintenance.sh --update --system
+./maintenance.sh update --system
 make update-system
 ```
 
-> **`--system` scope:** `./maintenance.sh --update --system` (alias `make update-system`) does three things in order:
+> **`--system` scope:** `./maintenance.sh update --system` (alias `make update-system`) does three things in order:
 > 1. Runs `apt-get upgrade` to update OS packages
 > 2. Updates the Docker engine via apt
 > 3. Pulls new container images and restarts affected services
@@ -348,13 +348,13 @@ nano .env
 # e.g. VAULTWARDEN_VERSION=1.35.4
 
 # Create emergency backup first
-./backup.sh --type emergency
+./backup.sh run emergency
 
 # Pull and restart
 docker compose pull vaultwarden
 docker compose up -d vaultwarden
 
-./maintenance.sh --health
+./maintenance.sh health
 ```
 
 > **VaultWarden 1.30.0+ note:** Port 3012 (legacy WebSocket) was removed. All real-time sync now goes through the main HTTP port 80. The Caddyfile `/notifications/hub` block already routes to `vaultwarden:80`; no manual change is needed for upgrades.
@@ -367,15 +367,15 @@ docker compose up -d vaultwarden
 
 ```bash
 # Full maintenance: cleanup + Docker prune + DB optimisation + DNS + firewall
-./maintenance.sh --comprehensive
+./maintenance.sh run --comprehensive
 make maintenance
 
 # With email summary
-./maintenance.sh --comprehensive --email
+./maintenance.sh run --comprehensive --email
 make maintenance-full
 
 # Dry run — preview without changes
-./maintenance.sh --comprehensive --dry-run
+./maintenance.sh run --comprehensive --dry-run
 ```
 
 ### Targeted Tasks
@@ -385,10 +385,10 @@ When called with only a targeted flag, routine cleanup is **skipped entirely**:
 ```bash
 # Update Cloudflare IP ranges in UFW firewall
 # (adds new rules BEFORE removing old ones — no race condition)
-./maintenance.sh --update-firewall        # Automated weekly via systemd (Saturday 4 AM)
+./maintenance.sh update-firewall        # Automated weekly via systemd (Saturday 4 AM)
 
 # Check and update Cloudflare DNS A record
-./maintenance.sh --update-dns             # Automated hourly via systemd
+./maintenance.sh update-dns             # Automated hourly via systemd
 make update-dns
 ```
 
@@ -398,11 +398,11 @@ This **stops VaultWarden temporarily** and runs a full VACUUM cycle. Use it when
 
 ```bash
 # Interactive (prompts for confirmation)
-sudo ./maintenance.sh --db-maint
+sudo ./maintenance.sh db-maint
 make db-maint
 
 # Non-interactive (skip confirmation)
-sudo ./maintenance.sh --db-maint --force
+sudo ./maintenance.sh db-maint --force
 
 # Steps performed:
 #  1. Pre-maintenance encrypted backup
@@ -421,17 +421,17 @@ sudo ./maintenance.sh --db-maint --force
 
 ```bash
 # Run full email diagnostic suite
-./maintenance.sh --test-email
+./maintenance.sh test-email
 make test-email
 
 # Verbose diagnostics
-./maintenance.sh --test-email --verbose
+./maintenance.sh test-email --verbose
 
 # Override recipient
-./maintenance.sh --test-email --recipient admin@example.com
+./maintenance.sh test-email --recipient admin@example.com
 
 # Dry run (reports system state, does not send)
-./maintenance.sh --test-email --dry-run
+./maintenance.sh test-email --dry-run
 
 # Tests performed:
 #  1. Postfix container running and port 587 responding
@@ -478,7 +478,7 @@ make test-secrets
 # 2. Update admin_token, admin_basic_auth_hash, smtp_password, etc.
 # 3. Restart to apply
 ./startup.sh --force-restart
-./maintenance.sh --health
+./maintenance.sh health
 ```
 
 ### Age Key Management
@@ -502,18 +502,18 @@ sudo make key-rotate
 
 ```bash
 # Create emergency admin account
-./create-breakglass-admin.sh --create
+./create-breakglass-admin.sh create
 make breakglass-create
 
 # Check status
-./create-breakglass-admin.sh --status
+./create-breakglass-admin.sh status
 make breakglass-status
 
 # Generate new password
 ./create-breakglass-admin.sh --password
 
 # Remove when no longer needed
-./create-breakglass-admin.sh --remove
+./create-breakglass-admin.sh remove
 make breakglass-remove
 ```
 
@@ -524,7 +524,7 @@ make breakglass-remove
 ### Installing Systemd Timers
 
 ```bash
-sudo ./setup.sh --phase=systemd --install
+sudo ./setup.sh systemd install
 make install-systemd
 ```
 
@@ -537,28 +537,28 @@ make install-systemd
 | Every 30 minutes | Health check with auto-recovery + email on failure |
 | Saturday 4 AM | Cloudflare firewall IP range update |
 | Sunday 3 AM | Weekly full backup with comprehensive verification + rclone sync |
-| Every hour | DNS A record update via `maintenance.sh --update-dns` |
+| Every hour | DNS A record update via `maintenance.sh update-dns` |
 
 > **Note:** Maintenance is intentionally skipped on Sunday to prevent overlap with the 3 AM full backup. `RandomizedDelaySec=30` on the database backup and maintenance timers spreads post-reboot catch-up bursts.
 
 ```bash
 # View installed timers (next trigger + last run)
 make timers
-sudo ./setup.sh --phase=systemd --status
+sudo ./setup.sh systemd status
 
 # Validate installed units match current repo scripts
-sudo ./setup.sh --phase=systemd --validate
+sudo ./setup.sh systemd validate
 make systemd-validate
 
 # Remove timers
-sudo ./setup.sh --phase=systemd --remove
+sudo ./setup.sh systemd remove
 make systemd-remove
 
 # Re-run after pulling repo updates to keep /opt/ in sync
-sudo ./setup.sh --phase=systemd --install
+sudo ./setup.sh systemd install
 ```
 
-> **Migration note:** The earlier `cron-setup.sh` has been replaced by the `setup.sh --phase=systemd` systemd integration. If you set up on a previous version, remove old cron entries (`sudo crontab -l`, delete the VaultWarden block with `sudo crontab -e`), then run `sudo ./setup.sh --phase=systemd --install`.
+> **Migration note:** The earlier `cron-setup.sh` has been replaced by the `setup.sh systemd` systemd integration. If you set up on a previous version, remove old cron entries (`sudo crontab -l`, delete the VaultWarden block with `sudo crontab -e`), then run `sudo ./setup.sh systemd install`.
 
 ### Failure Notifications
 
@@ -575,7 +575,7 @@ All notifications use the containerised Postfix relay (`bokysan/docker-postfix`,
 
 ```bash
 # Full diagnostic
-./maintenance.sh --test-email --verbose
+./maintenance.sh test-email --verbose
 
 # Check Postfix logs
 docker compose logs postfix
@@ -624,7 +624,7 @@ du -sh /var/lib/vaultwarden/logs/*
 ls -lh /var/lib/vaultwarden/backups/
 
 # 3. Run maintenance
-./maintenance.sh --comprehensive
+./maintenance.sh run --comprehensive
 
 # 4. Adjust resource limits if needed
 # Edit docker-compose.yml.example then:
@@ -673,14 +673,14 @@ docker compose logs <container> --tail=100
 du -sh /var/lib/vaultwarden/logs/*
 
 # 4. Run maintenance
-./maintenance.sh --comprehensive
+./maintenance.sh run --comprehensive
 ```
 
 ### Email Not Working
 
 ```bash
 # Full diagnostic
-./maintenance.sh --test-email --verbose
+./maintenance.sh test-email --verbose
 
 # Individual checks
 docker compose ps postfix
@@ -721,7 +721,7 @@ ls -la secrets/keys/age-key.txt
 make key-health
 
 # 3. Test backup manually
-./backup.sh --type db
+./backup.sh run db
 
 # 4. Check systemd job output
 journalctl -u vaultwarden-db-backup.service --no-pager
@@ -743,17 +743,17 @@ nano .env.example
 docker compose -f docker-compose.yml.example config
 
 # 3. Backup before applying
-./backup.sh --type emergency
+./backup.sh run emergency
 
 # 4. Apply to production
 sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
 
 # 5. Re-apply Cloudflare firewall CIDRs (setup --force resets UFW rules)
-./maintenance.sh --update-firewall
+./maintenance.sh update-firewall
 
 # 6. Restart and verify
 ./startup.sh --force-restart
-./maintenance.sh --health
+./maintenance.sh health
 ```
 
 **Template best practices:**
@@ -788,11 +788,11 @@ sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
 
 ### Quarterly
 - ✅ Test emergency procedures (break-glass admin)
-- ✅ Update Cloudflare IP ranges (`./maintenance.sh --update-firewall`) — also automated weekly via systemd
+- ✅ Update Cloudflare IP ranges (`./maintenance.sh update-firewall`) — also automated weekly via systemd
 - ✅ Review and update documentation
 - ✅ Audit user accounts and permissions
 - ✅ Test complete system rebuild from backup
-- ✅ Run `sudo ./setup.sh --phase=systemd --validate` to detect any split-brain between `/opt/` and the current repo
+- ✅ Run `sudo ./setup.sh systemd validate` to detect any split-brain between `/opt/` and the current repo
 
 ### Annual
 - ✅ Rotate all secrets (tokens, passwords)
