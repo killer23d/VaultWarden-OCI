@@ -55,7 +55,7 @@ for _arg in "$@"; do
             echo ""
             echo "  Without the age key ALL encrypted backups are permanently"
             echo "  unrecoverable.  Export a recovery kit first:"
-            echo "    sudo bash edit-secrets.sh --export-recovery-kit"
+            echo "    sudo bash edit-secrets.sh export-recovery-kit"
             exit 0
             ;;
         *) ;;
@@ -190,7 +190,7 @@ if [[ -f "$AGE_KEY_FILE" ]] && [[ "$FORCE" == "false" ]]; then
         warn "  sudo bash $0 --i-have-saved-my-recovery-kit"
         warn ""
         warn "Or export a recovery kit first:"
-        warn "  sudo bash edit-secrets.sh --export-recovery-kit"
+        warn "  sudo bash edit-secrets.sh export-recovery-kit"
         echo "════════════════════════════════════════════════════════════"
         echo ""
         die "Uninstall aborted — age key not confirmed saved. No changes made."
@@ -287,7 +287,7 @@ for unit in "${TIMERS[@]}" "${SERVICES[@]}"; do
         rm -f "$DEST" && success "Removed unit file: $DEST"
     fi
     # Remove any per-unit drop-in directory (e.g. ReadWritePaths patches
-    # written by setup.sh --phase=systemd --install for separate-volume mode).
+    # written by setup.sh systemd install for separate-volume mode).
     DROP_IN_DIR="/etc/systemd/system/${unit}.d"
     if [[ -d "$DROP_IN_DIR" ]]; then
         rm -rf "$DROP_IN_DIR" && success "Removed unit drop-in dir: $DROP_IN_DIR"

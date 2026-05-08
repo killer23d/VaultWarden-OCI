@@ -1176,7 +1176,7 @@ If you detect suspicious activity:
 
    # Update admin token and hash
    # Restart services
-   ./startup.sh --force-restart
+   ./startup.sh --force
 
    # Verify security
    ./maintenance.sh health --comprehensive

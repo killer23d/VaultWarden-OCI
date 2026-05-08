@@ -492,7 +492,7 @@ cleanup_containers() {
 #
 # The --filter "until=48h" guard preserves the most recent two days of
 # pulled image layers as a passive rollback buffer. This is important
-# because the maintenance timer runs independently of maintenance.sh --update 's own
+# because the maintenance timer runs independently of maintenance.sh update 's own
 # snapshot/rollback mechanism: without a time filter, a routine maintenance
 # run shortly after a bad update could destroy the previous image layers
 # before the operator has had a chance to validate or roll back.

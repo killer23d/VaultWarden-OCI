@@ -376,7 +376,7 @@ install_docker_mount_guard() {
     {
         printf '# Managed by VaultWarden-OCI setup.sh — do not edit by hand.\n'
         printf '# Ensures Docker never starts before the data volume is mounted.\n'
-        printf '# Regenerate: sudo ./setup.sh --phase=systemd --install\n'
+        printf '# Regenerate: sudo ./setup.sh systemd install\n'
         printf '[Unit]\n'
         printf 'After=%s\n'              "$mount_unit"
         printf 'RequiresMountsFor=%s\n'  "$mount_point"

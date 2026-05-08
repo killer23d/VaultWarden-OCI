@@ -115,7 +115,7 @@ sudo ./setup.sh systemd install
 ./setup.sh secrets --hash-only
 
 # Confirm the result
-./edit-secrets.sh --view
+./edit-secrets.sh view
 ```
 
 > After the secrets phase runs, use `./edit-secrets.sh` for all subsequent edits — it safely decrypts, edits, re-encrypts, and backs up the secrets file.
@@ -343,10 +343,10 @@ make restore-remote
 ```bash
 ./edit-secrets.sh
 ./edit-secrets.sh --editor vim
-./edit-secrets.sh --rotate smtp_password
-./edit-secrets.sh --export-recovery-kit
-./edit-secrets.sh --view
-./edit-secrets.sh --list
+./edit-secrets.sh rotate smtp_password
+./edit-secrets.sh export-recovery-kit
+./edit-secrets.sh view
+./edit-secrets.sh list
 make edit-secrets
 make test-secrets    # runs --list internally
 ```
@@ -701,12 +701,12 @@ All common operations have Makefile shortcuts. Run `make help` to see the full t
 | `make setup` | `sudo ./setup.sh` | Requires `sudo make setup` |
 | `make init-secrets` | `./setup.sh secrets` | Interactive secrets initialisation |
 | `make edit-secrets` | `./edit-secrets.sh` | Open SOPS secrets editor |
-| `make test-secrets` | `./edit-secrets.sh --list` | Verify secrets decrypt correctly |
+| `make test-secrets` | `./edit-secrets.sh list` | Verify secrets decrypt correctly |
 | `make test-email` | `./maintenance.sh test-email --verbose` | Test full email delivery chain |
 | `make up` / `make start` | `sudo ./startup.sh` | Start all services |
 | `make down` / `make stop` | `docker compose down` | Graceful shutdown |
-| `make restart` | `sudo ./startup.sh --force-restart` | Force restart all services |
-| `make safe-restart` | `sudo ./startup.sh --force-restart` + health check | Restarts with automatic rollback on failure |
+| `make restart` | `sudo ./startup.sh --force` | Force restart all services |
+| `make safe-restart` | `sudo ./startup.sh --force` + health check | Restarts with automatic rollback on failure |
 | `make status` | `docker compose ps` | Show service status table |
 | `make health` | `./maintenance.sh health` | Basic health check (`AUTO_RECOVER=true`, `COMPREHENSIVE=true` supported) |
 | `make health-quick` | `./maintenance.sh health --quiet` | Fast port + container check (no deep tests) |
@@ -723,7 +723,7 @@ All common operations have Makefile shortcuts. Run `make help` to see the full t
 | `make list-backups` | `./backup.sh list` | List all available backups with metadata |
 | `make backup-status` | — | Backup health summary: last run, size, retention, count per type |
 | `make restore` | `./restore.sh` | Interactive restore (recommended) |
-| `make restore-db` | `./restore.sh --type db --latest` | Restore latest database backup (runs key prompt + confirmation) |
+| `make restore-db` | `./restore.sh latest db --latest` | Restore latest database backup (runs key prompt + confirmation) |
 | `make restore-remote` | `./restore.sh --remote` | Restore from a remote (rclone) backup — interactive selection |
 | `make update` | `./maintenance.sh update` | Pull latest container images |
 | `make update-system` | `./maintenance.sh update --system --email` | Update containers + apt + Docker engine |
@@ -759,7 +759,7 @@ All common operations have Makefile shortcuts. Run `make help` to see the full t
 | `make version` | — | Show version info for all containers and Docker |
 | `make watch` | `watch -n 5 make status` | Auto-refresh service status every 5 s |
 | `make monitor` | `docker compose logs -f -t` | Follow all service logs in real-time |
-| `make fmt` | `docker compose config` + `edit-secrets.sh --list` | Validate Compose files and secrets |
+| `make fmt` | `docker compose config` + `edit-secrets.sh list` | Validate Compose files and secrets |
 | `make config` | — | Show non-sensitive `.env` variables and service list |
 
 > **`make test-config`** is the quickest pre-deployment sanity check. It runs `docker compose config` against the merged Compose files and exits non-zero if the configuration is invalid — useful before `make up` or after editing any `.yml` file.

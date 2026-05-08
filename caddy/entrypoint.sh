@@ -74,7 +74,7 @@ log_warn() {
 # DEGRADED MODE (non-writable logs):
 #   Instead of exit 1 (which causes an infinite Docker restart loop), Caddy
 #   is started with stdout-only logging when the log files cannot be written.
-#   CADDY_DEGRADED=true is exported so maintenance.sh --health can surface the condition.
+#   CADDY_DEGRADED=true is exported so maintenance.sh health can surface the condition.
 #   The operator can fix file ownership on the host and then restart Caddy.
 # =============================================================================
 mkdir -p /var/log/caddy

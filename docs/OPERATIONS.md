@@ -29,7 +29,7 @@ make start   # alias: make up
 
 ```bash
 # Graceful shutdown via startup.sh
-./startup.sh --down
+./startup.sh stop
 
 # Or via Makefile
 make stop   # alias: make down
@@ -45,7 +45,7 @@ docker compose kill
 
 ```bash
 # Enhanced restart (preferred)
-./startup.sh --force-restart
+./startup.sh --force
 
 # Or via Makefile
 make restart
@@ -469,7 +469,7 @@ docker compose logs fail2ban | grep "cloudflare-apiv4"
 make edit-secrets
 
 # View decrypted secrets without editing
-./edit-secrets.sh --view
+./edit-secrets.sh view
 make test-secrets
 
 # Rotate secrets:
@@ -477,7 +477,7 @@ make test-secrets
 ./edit-secrets.sh
 # 2. Update admin_token, admin_basic_auth_hash, smtp_password, etc.
 # 3. Restart to apply
-./startup.sh --force-restart
+./startup.sh --force
 ./maintenance.sh health
 ```
 
@@ -654,7 +654,7 @@ docker compose logs fail2ban
 docker compose logs postfix
 
 # 5. Force restart
-./startup.sh --force-restart
+./startup.sh --force
 
 # 6. Full diagnostic dump
 make diagnose
@@ -686,7 +686,7 @@ du -sh /var/lib/vaultwarden/logs/*
 docker compose ps postfix
 docker compose logs postfix
 grep SMTP .env
-./edit-secrets.sh --view    # View smtp_password and verify decryption
+./edit-secrets.sh view    # View smtp_password and verify decryption
 ```
 
 ### Fail2ban Not Blocking
@@ -752,7 +752,7 @@ sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
 ./maintenance.sh update-firewall
 
 # 6. Restart and verify
-./startup.sh --force-restart
+./startup.sh --force
 ./maintenance.sh health
 ```
 

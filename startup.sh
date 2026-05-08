@@ -22,20 +22,23 @@ BACKGROUND=false
 DRY_RUN=false
 DO_DOWN=false
 # Pass --skip-pull in the unit file to avoid image pulls on routine service restarts;
-# use maintenance.sh --update or ./startup.sh (without the flag) to refresh images.
+# use maintenance.sh update or ./startup.sh (without the flag) to refresh images.
 SKIP_PULL=false
 SKIP_EGRESS_FIX=false
 
 show_help() {
 cat << 'EOF'
-VaultWarden-OCI Startup Script with Enhanced Security
+VaultWarden-OCI Startup Script
 
 USAGE:
-  ./startup.sh [OPTIONS]
+  ./startup.sh [OPTIONS]         # Start all services (normal path)
+  ./startup.sh stop              # Stop all services
 
-OPTIONS:
-  --force          Force restart of all services (preferred flag)
-  --force-restart  Alias for --force (legacy, kept for compatibility)
+SUBCOMMANDS:
+  stop             Stop all services (delegates to docker compose down)
+
+STARTUP OPTIONS:
+  --force          Force restart of all services
   --skip-health    Skip post-startup health check
   --skip-pull      Skip docker compose pull (use for systemd restarts
                    or when images are already current)
@@ -43,35 +46,46 @@ OPTIONS:
   --skip-egress-fix  Skip automatic egress NAT remediation for
                      non-internal VaultWarden Docker bridge networks
   --dry-run        Show what would be done without executing
-  --down           Stop all services (delegates to docker compose down)
-  --help           Show this help
+
+GLOBAL OPTIONS:
+  --help, -h       Show this help
 
 EXAMPLES:
   ./startup.sh                    # Normal startup (pulls latest images)
   ./startup.sh --skip-pull        # Restart without pulling (fast path)
   ./startup.sh --force            # Force restart all services
   ./startup.sh --background       # Start in daemon mode
-  ./startup.sh --down             # Stop all services
+  ./startup.sh stop               # Stop all services
 EOF
 }
 
-# Argument parsing
+# Argument parsing — subcommand-first, then options.
+# 'stop' is the only positional subcommand.
+if [[ $# -gt 0 ]]; then
+  case "$1" in
+    stop)
+      DO_DOWN=true; shift
+      ;;
+    --help|-h)
+      show_help; exit 0
+      ;;
+  esac
+fi
+
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --force)         FORCE_RESTART=true; shift ;;
-    --force-restart) FORCE_RESTART=true; shift ;;
-    --skip-health)   SKIP_HEALTH_CHECK=true; shift ;;
-    --skip-pull)     SKIP_PULL=true; shift ;;
-    --background)    BACKGROUND=true; shift ;;
-    --skip-egress-fix) SKIP_EGRESS_FIX=true; shift ;;
-    --dry-run)       DRY_RUN=true; shift ;;
-    --down)          DO_DOWN=true; shift ;;
-    --help)          show_help; exit 0 ;;
-    *) log_error "Unknown option: $1"; show_help; exit 1 ;;
+    --force)           FORCE_RESTART=true;   shift ;;
+    --skip-health)     SKIP_HEALTH_CHECK=true; shift ;;
+    --skip-pull)       SKIP_PULL=true;        shift ;;
+    --background)      BACKGROUND=true;       shift ;;
+    --skip-egress-fix) SKIP_EGRESS_FIX=true;  shift ;;
+    --dry-run)         DRY_RUN=true;          shift ;;
+    --help|-h)         show_help; exit 0 ;;
+    *) log_error "Unknown option: '$1'"; show_help; exit 1 ;;
   esac
 done
 
-# --down: stop all services and exit immediately
+# stop subcommand: stop all services and exit immediately
 if [[ "$DO_DOWN" == "true" ]]; then
   log_info "Stopping VaultWarden services..."
   docker compose down
@@ -188,7 +202,7 @@ check_email_config_consistency() {
       if [[ ! -f "$token_file" ]] || [[ ! -s "$token_file" ]]; then
         log_warn "EMAIL_MODE=api is set but '${token_file}' is absent or empty."
         log_warn "  All alert emails will fail silently until the token is populated."
-        log_warn "  Fix: ./edit-secrets.sh --rotate email_api_token"
+        log_warn "  Fix: ./edit-secrets.sh rotate email_api_token"
       fi
       ;;
     smtp)
@@ -197,7 +211,7 @@ check_email_config_consistency() {
       if [[ ! -f "$pw_file" ]] || [[ ! -s "$pw_file" ]]; then
         log_warn "EMAIL_MODE=smtp is set but '${pw_file}' is absent or empty."
         log_warn "  SMTP relay authentication will fail on first send."
-        log_warn "  Fix: ./edit-secrets.sh --rotate smtp_password"
+        log_warn "  Fix: ./edit-secrets.sh rotate smtp_password"
       fi
       ;;
     auto|host)
@@ -610,7 +624,7 @@ cleanup_orphaned_resources() {
 # pull_images
 #
 # Guarded by --skip-pull so systemd ExecStart restarts are instant.
-# Image refreshes go through maintenance.sh --update or a manual
+# Image refreshes go through maintenance.sh update or a manual
 # ./startup.sh without --skip-pull.
 # ---------------------------------------------------------------------------
 pull_images() {
@@ -814,12 +828,12 @@ run_health_check() {
 
   log_info "Running post-start health check..."
 
-  # Disable errexit around maintenance.sh --health so we can capture its exit code cleanly.
+  # Disable errexit around maintenance.sh health so we can capture its exit code cleanly.
   # The outer set -euo pipefail would abort the script before we could inspect
-  # the code if maintenance.sh --health exits non-zero.
-  log_info "Invoking: $SCRIPT_DIR/maintenance.sh --health"
+  # the code if maintenance.sh health exits non-zero.
+  log_info "Invoking: $SCRIPT_DIR/maintenance.sh health"
   local health_exit=0
-  ./maintenance.sh --health || health_exit=$?
+  ./maintenance.sh health || health_exit=$?
 
   case "$health_exit" in
     0)

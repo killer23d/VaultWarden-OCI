@@ -62,7 +62,7 @@ scp db.sqlite3.backup user@new-server:/tmp/
 **3. Import on the target system:**
 ```bash
 # Stop VaultWarden-OCI services
-./startup.sh --down
+./startup.sh stop
 
 # Copy database to correct location
 # NOTE: VaultWarden-OCI stores the database at:
@@ -271,7 +271,7 @@ sudo ./setup.sh --domain vault.example.com --email admin@example.com
 nano .env
 
 # 4. Migrate data
-./startup.sh --down
+./startup.sh stop
 
 cd /tmp
 tar -xzf vaultwarden-backup.tar.gz

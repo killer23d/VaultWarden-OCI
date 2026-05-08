@@ -219,7 +219,7 @@ edit-secrets: ## Edit encrypted secrets file
 
 test-secrets: ## Test secrets decryption
 	@echo "$(BLUE)Testing secrets decryption...$(NC)"
-	@if ./edit-secrets.sh --list > /dev/null 2>&1; then \
+	@if ./edit-secrets.sh list > /dev/null 2>&1; then \
 		echo "$(GREEN)Secrets decryption: OK$(NC)"; \
 	else \
 		echo "$(RED)Secrets decryption: FAILED$(NC)"; \
@@ -267,7 +267,7 @@ up: ## Start all services (runs startup.sh for health checks)
 #
 # New behaviour:
 #   - If secrets.yaml is ABSENT → secrets were never initialised; abort and
-#     direct the operator to ./setup.sh --phase=secrets  (unchanged intent).
+#     direct the operator to ./setup.sh secrets  (unchanged intent).
 #   - If secrets.yaml is PRESENT but admin_token is missing/empty → warn and
 #     continue; startup.sh will decrypt and regenerate the docker-secret files.
 #     If decryption itself fails (wrong/missing Age key), startup.sh's own
@@ -308,7 +308,7 @@ stop: down ## Alias for down
 restart: ## Restart all services (via startup.sh)
 	$(call check-docker)
 	@echo "$(BLUE)Restarting VaultWarden services...$(NC)"
-	@sudo ./startup.sh --force-restart || { \
+	@sudo ./startup.sh --force || { \
 		echo "$(RED)Restart failed!$(NC)"; \
 		$(MAKE) status; \
 		echo "$(YELLOW)If restart failed due to a key issue, run: make key-health$(NC)"; \
@@ -320,7 +320,7 @@ safe-restart: ## Restart with automatic rollback on failure
 	$(call check-docker)
 	@echo "$(BLUE)Safe restart with rollback capability...$(NC)"
 	@PRE_IDS=$$(docker compose ps -q 2>/dev/null || true); \
-	if sudo ./startup.sh --force-restart; then \
+	if sudo ./startup.sh --force; then \
 		echo "$(GREEN)Safe restart completed successfully.$(NC)"; \
 	else \
 		echo "$(RED)Restart failed! Attempting rollback...$(NC)"; \
@@ -570,14 +570,14 @@ key-health: ## Check age key health (permissions, decodability, SOPS_AGE_KEY_FIL
 # When to use:
 #   SOPS_AGE_KEY_FILE in .env points to /etc/vaultwarden/age-key.txt (or any
 #   system path) but the file does not yet exist there, while the key is
-#   already present at secrets/keys/age-key.txt (placed by setup.sh --phase=secrets
+#   already present at secrets/keys/age-key.txt (placed by setup.sh secrets
 #   or the initial age-keygen run).
 #
 # What it does:
 #   1. Reads SOPS_AGE_KEY_FILE from .env.
 #   2. Self-referential path check (CONFIGURED == REPO_KEY):
 #      - File exists  → informational message, exit 0 (no install needed).
-#      - File missing → actionable error directing to ./setup.sh --phase=secrets, exit 1.
+#      - File missing → actionable error directing to ./setup.sh secrets, exit 1.
 #   3. If target already exists and is non-empty, exits without changes.
 #   4. Creates the parent directory (mode 700, root:root).
 #   5. Copies secrets/keys/age-key.txt → SOPS_AGE_KEY_FILE (mode 600, root:root).

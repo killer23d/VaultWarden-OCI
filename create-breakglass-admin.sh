@@ -58,7 +58,7 @@ VALIDATE_ONLY=false
 DRY_RUN=false
 FORCE=false
 
-# BG-L1: Configurable threshold (hours) after which --status warns the account is still active.
+# BG-L1: Configurable threshold (hours) after which the status subcommand warns the account is still active.
 BREAKGLASS_MAX_AGE_HOURS="${BREAKGLASS_MAX_AGE_HOURS:-72}"
 
 # Auto-expiry: hours after creation before the account is automatically removed.
@@ -117,8 +117,6 @@ SECURITY NOTES:
     • Account can be disabled/removed manually with 'remove'
     • Script validates its own security before operations
 
-NOTE: Legacy flags (--create, --remove, --status, --reset-password, --validate)
-      are still accepted for backward compatibility.
 EOF
 }
 
@@ -126,7 +124,7 @@ EOF
 # BG-M1 FIX: validate_script_security()
 #
 # Two-tier enforcement:
-#   strict=true  → hard-fail on ANY permission/ownership deviation (--validate mode)
+#   strict=true  → hard-fail on ANY permission/ownership deviation (validate subcommand)
 #   strict=false → hard-fail ONLY when the script is world-writable (o+w set),
 #                  because that is an active privilege-escalation vector regardless
 #                  of operational mode. Non-critical deviations (e.g. not yet
@@ -175,7 +173,7 @@ validate_script_security() {
 
     # ------------------------------------------------------------------
     # Full ownership + permission check (root:root 700).
-    # In strict mode (--validate) this is a hard error.
+    # In strict mode (validate subcommand) this is a hard error.
     # In non-strict mode it is a warning so fresh installs aren't blocked.
     # ------------------------------------------------------------------
     if ! validate_file_permissions "$script_path" "700" "root" "root"; then
@@ -228,11 +226,11 @@ validate_script_security() {
 [[ $# -eq 0 ]] && { show_help; exit 0; }
 
 case "$1" in
-    create|--create)                    CREATE_USER=true;    shift ;;
-    remove|--remove)                    REMOVE_USER=true;    shift ;;
-    reset-password|--reset-password)    RESET_PASSWORD=true; shift ;;
-    status|--status)                    SHOW_STATUS=true;    shift ;;
-    validate|--validate)                VALIDATE_ONLY=true;  shift ;;
+    create)                    CREATE_USER=true;    shift ;;
+    remove)                    REMOVE_USER=true;    shift ;;
+    reset-password)    RESET_PASSWORD=true; shift ;;
+    status)                    SHOW_STATUS=true;    shift ;;
+    validate)                VALIDATE_ONLY=true;  shift ;;
     --help|-h)                          show_help; exit 0 ;;
     *)
         log_error "Unknown subcommand: $1  (expected: create | remove | reset-password | status | validate)"
@@ -323,7 +321,7 @@ EOF
 # LOW FIX: _notify_breakglass_event()
 #
 # Emits a notification via the same send_notification_email() / send_email()
-# path used by maintenance.sh --health so breakglass activity is
+# path used by maintenance.sh health so breakglass activity is
 # visible in the operator's alert channel, not just a local log file.
 # Non-fatal: a delivery failure is logged as a warning only.
 # ---------------------------------------------------------------------------
@@ -348,7 +346,7 @@ _notify_breakglass_event() {
 # ---------------------------------------------------------------------------
 # schedule_auto_cleanup()
 #
-# Schedules an automatic --remove for BREAKGLASS_AUTO_EXPIRY_HOURS from now.
+# Schedules an automatic 'remove' for BREAKGLASS_AUTO_EXPIRY_HOURS from now.
 # Scheduler priority (first available method wins):
 #
 #   1. `at` + atd running       Most reliable; persists across reboots within
@@ -375,13 +373,13 @@ schedule_auto_cleanup() {
     fi
 
     if (( expiry_hours == 0 )); then
-        log_warn "Auto-expiry disabled (BREAKGLASS_AUTO_EXPIRY_HOURS=0) — remember to run --remove manually"
+        log_warn "Auto-expiry disabled (BREAKGLASS_AUTO_EXPIRY_HOURS=0) — remember to run 'remove' manually"
         return 0
     fi
 
     local script_abs
     script_abs=$(readlink -f "$0")
-    local cleanup_cmd="${script_abs} --remove --user ${bg_user} --force"
+    local cleanup_cmd="${script_abs} remove --user ${bg_user} --force"
     local expiry_epoch=$(( $(date +%s) + expiry_hours * 3600 ))
     local expiry_human
     expiry_human=$(date -d "@${expiry_epoch}" '+%Y-%m-%d %H:%M %Z' 2>/dev/null \
@@ -439,14 +437,14 @@ schedule_auto_cleanup() {
     # Tier 4: last-resort background sleep subshell.
     # SECURITY RISK: This is a detached root process with no tracked PID.
     # It will NOT survive a reboot. Treat it as a best-effort reminder ONLY —
-    # not a security control. Manual --remove is the only reliable cleanup path.
+    # not a security control. Manual 'remove' subcommand is the only reliable cleanup path.
     # ------------------------------------------------------------------
     local sleep_seconds=$(( expiry_hours * 3600 ))
     log_error "WARNING: All reliable schedulers (at, systemd-run) are unavailable."
     log_error "  Auto-cleanup will use a background root subshell — this is NOT reboot-safe"
     log_error "  and runs as an untracked detached process. If this host reboots before"
     log_error "  ${expiry_human}, the breakglass account will NOT be auto-removed."
-    log_warn  "  Mandatory: run 'sudo $0 --remove' manually when done."
+    log_warn  "  Mandatory: run 'sudo $0 remove' manually when done."
     setsid bash -c "sleep ${sleep_seconds} && ${cleanup_cmd}" \
         </dev/null >/dev/null 2>&1 &
     disown
@@ -467,7 +465,7 @@ create_breakglass_user() {
     if check_user_exists; then
         if [[ "$FORCE" != "true" ]]; then
             log_error "User already exists: $BREAKGLASS_USER"
-            log_info "Use --force to recreate or --reset-password to change password"
+            log_info "Use --force to recreate or 'reset-password' to change password"
             return 1
         else
             log_warn "User exists, recreating with --force"
@@ -544,7 +542,7 @@ SECURITY NOTES:
 - This account does NOT have unrestricted root access
 - Use only for genuine emergencies
 - Account auto-expires after ${BREAKGLASS_AUTO_EXPIRY_HOURS} hour(s)
-- Remove manually if needed: sudo ./create-breakglass-admin.sh --remove
+- Remove manually if needed: sudo ./create-breakglass-admin.sh remove
 - Password is 32+ characters for maximum security
 
 Created: $(date)
@@ -586,7 +584,7 @@ EOF
     if (( BREAKGLASS_AUTO_EXPIRY_HOURS > 0 )); then
         printf '%b\n' "Expiry:    ${COLOR_YELLOW}${expiry_human} (auto-cleanup in ${BREAKGLASS_AUTO_EXPIRY_HOURS}h)${COLOR_RESET}"
     else
-        printf '%b\n' "Expiry:    ${COLOR_CYAN}None — auto-expiry disabled. Remove manually with --remove${COLOR_RESET}"
+        printf '%b\n' "Expiry:    ${COLOR_CYAN}None — auto-expiry disabled. Remove manually with: sudo $0 remove${COLOR_RESET}"
     fi
 
     printf '\nTo test this:\n'
@@ -643,7 +641,7 @@ remove_breakglass_user() {
     fi
 
     # Cancel the transient systemd cleanup timer if it is still pending,
-    # so it does not fire and attempt --remove on an already-removed account.
+    # so it does not fire and attempt 'remove' on an already-removed account.
     if systemctl is-active --quiet vw-breakglass-cleanup.timer 2>/dev/null; then
         systemctl stop vw-breakglass-cleanup.timer 2>/dev/null || true
         log_info "Stopped pending systemd transient cleanup timer (vw-breakglass-cleanup)"
@@ -854,7 +852,7 @@ _restart_after_disable() {
     log_error "  1. Investigate: docker compose logs $service"
     log_error "  2. Fix the underlying issue (port conflict, OOM, config error)"
     log_error "  3. Re-run: docker compose restart $service"
-    log_error "  4. Confirm: ./create-breakglass-admin.sh --status"
+    log_error "  4. Confirm: ./create-breakglass-admin.sh status"
 
     _notify_breakglass_event \
         "DISABLE_FAILED" \
@@ -943,8 +941,8 @@ main() {
             log_info "🎯 Next Steps:"
             echo "  1. Store the credentials securely"
             echo "  2. Test OCI Console Connection access"
-            echo "  3. Validate script security: sudo ./create-breakglass-admin.sh --validate"
-            echo "  4. Account will auto-expire in ${BREAKGLASS_AUTO_EXPIRY_HOURS}h; remove sooner if done: sudo ./create-breakglass-admin.sh --remove"
+            echo "  3. Validate script security: sudo ./create-breakglass-admin.sh validate"
+            echo "  4. Account will auto-expire in ${BREAKGLASS_AUTO_EXPIRY_HOURS}h; remove sooner if done: sudo ./create-breakglass-admin.sh remove"
 
             exit 0
         else
