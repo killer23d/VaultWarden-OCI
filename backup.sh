@@ -32,56 +32,137 @@ show_help() {
 VaultWarden-OCI Backup Script
 
 USAGE:
-    sudo ./backup.sh [OPTIONS]
+    sudo ./backup.sh <subcommand> [options]
+    ./backup.sh list                                    # No root required
 
-OPTIONS:
-    --type TYPE              auto (default) | db | full | emergency
-    --dry-run                Show what would be done without executing
+SUBCOMMANDS:
+    run [TYPE]        Create a backup  (TYPE: auto | db | full | emergency)
+    list              List existing backups (no root required)
+    verify            Verify the most recent backup's integrity
+    rotate            Apply retention policy and prune old backups
+
+RUN OPTIONS (used after 'run'):
     --keep N                 Retention period in days (default: 14)
     --quiet                  Suppress non-error output
     --force                  Ignore locks and force backup
     --email                  Send email notification on completion/failure
-    --list                   List existing backups and exit (no root required)
     --rclone                 Sync encrypted backup to rclone remote after creation
     --full-verification      End-to-end decrypt + integrity check before sync (fatal on failure)
     --skip-full-verification Fast checksum only — explicit default
-    --help                   Show this help
+    --dry-run                Show what would be done without executing
+
+GLOBAL OPTIONS:
+    --help, -h               Show this help
 
 EXAMPLES:
-    sudo ./backup.sh                                                    # Auto mode
-    sudo ./backup.sh --type db                                          # Database-only backup
-    sudo ./backup.sh --type full                                        # Full state backup
-    sudo ./backup.sh --keep 30                                          # Keep 30 days of backups
-    sudo ./backup.sh --type db --email                                  # DB backup with email notification
-    ./backup.sh --list                                                  # List existing backups (no sudo)
-    sudo ./backup.sh --type db --rclone --email                         # DB backup + offsite sync + email
-    sudo ./backup.sh --type full --full-verification --rclone --email   # Full verified offsite backup
+    sudo ./backup.sh run                # Auto-mode backup (db or full based on schedule)
+    sudo ./backup.sh run db             # Database-only backup
+    sudo ./backup.sh run full           # Full state backup
+    sudo ./backup.sh run db --email     # DB backup with email notification
+    sudo ./backup.sh run db --rclone --email          # DB backup + offsite + notify
+    sudo ./backup.sh run full --full-verification --rclone --email
+    ./backup.sh list                    # List existing backups (no sudo)
+    sudo ./backup.sh verify             # Verify the latest backup
+    sudo ./backup.sh rotate --keep 30   # Prune backups older than 30 days
 
-NOTE:
-    Backups are written to BACKUP_DIR (set in .env).  When BACKUP_DIR is not
-    explicitly configured, it defaults to $PROJECT_STATE_DIR/backups — which
-    keeps backups on the same volume as your VaultWarden data (correct for
-    both boot-volume and separate-volume storage modes).  If you override
-    BACKUP_DIR, ensure the path lives on the data volume, not the boot volume.
+NOTE: Legacy flags (--type, --list, etc.) are still accepted for backward
+      compatibility with existing automation and systemd timer units.
+
+      Backups are written to BACKUP_DIR (set in .env).  When BACKUP_DIR is not
+      explicitly configured, it defaults to \$PROJECT_STATE_DIR/backups — which
+      keeps backups on the same volume as your VaultWarden data (correct for
+      both boot-volume and separate-volume storage modes).  If you override
+      BACKUP_DIR, ensure the path lives on the data volume, not the boot volume.
 EOF
 }
 
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        --type)                   BACKUP_TYPE="$2"; shift 2 ;;
-        --dry-run)                DRY_RUN=true;     shift ;;
-        --keep)                   KEEP_DAYS="$2";   shift 2 ;;
-        --quiet)                  QUIET=true;       shift ;;
-        --force)                  FORCE=true;       shift ;;
-        --email)                  EMAIL_NOTIFY=true; shift ;;
-        --list)                   LIST_ONLY=true;   shift ;;
-        --rclone)                 RCLONE_SYNC=true; shift ;;
-        --full-verification)      FULL_VERIFY=true; shift ;;
-        --skip-full-verification) FULL_VERIFY=false; shift ;;
-        --help)                   show_help; exit 0 ;;
-        *)                        log_error "Unknown option: $1"; show_help; exit 2 ;;
+# ---------------------------------------------------------------------------
+# Argument Parsing & Execution
+# ---------------------------------------------------------------------------
+# Subcommand-first dispatch. Legacy --flags are passed through transparently
+# via the default branch so existing automation is never broken.
+# ---------------------------------------------------------------------------
+
+_SUBCMD=""
+if [[ $# -gt 0 ]]; then
+    case "$1" in
+        run|list|verify|rotate)
+            _SUBCMD="$1"
+            shift
+            ;;
+        --help|-h)
+            show_help; exit 0
+            ;;
     esac
-done
+fi
+
+case "$_SUBCMD" in
+    run)
+        # Optional positional TYPE (db|full|emergency|auto) before any --flags
+        if [[ $# -gt 0 && "$1" != --* ]]; then
+            BACKUP_TYPE="$1"; shift
+        fi
+        while [[ $# -gt 0 ]]; do
+            case $1 in
+                --keep)                   KEEP_DAYS="$2";    shift 2 ;;
+                --quiet)                  QUIET=true;        shift ;;
+                --force)                  FORCE=true;        shift ;;
+                --email)                  EMAIL_NOTIFY=true; shift ;;
+                --rclone)                 RCLONE_SYNC=true;  shift ;;
+                --full-verification)      FULL_VERIFY=true;  shift ;;
+                --skip-full-verification) FULL_VERIFY=false; shift ;;
+                --dry-run)                DRY_RUN=true;      shift ;;
+                *) log_error "Unknown option for run: $1"; show_help; exit 2 ;;
+            esac
+        done
+        ;;
+    list)
+        # 'list' subcommand — no root required
+        LIST_ONLY=true
+        ;;
+    verify)
+        # 'verify' subcommand — full integrity check on the latest backup
+        FULL_VERIFY=true
+        while [[ $# -gt 0 ]]; do
+            case $1 in
+                --type) BACKUP_TYPE="$2"; shift 2 ;;
+                --quiet) QUIET=true; shift ;;
+                *) log_error "Unknown option for verify: $1"; show_help; exit 2 ;;
+            esac
+        done
+        ;;
+    rotate)
+        # 'rotate' subcommand — prune old backups without creating a new one
+        LIST_ONLY=false
+        while [[ $# -gt 0 ]]; do
+            case $1 in
+                --keep)  KEEP_DAYS="$2"; shift 2 ;;
+                --quiet) QUIET=true;     shift ;;
+                --dry-run) DRY_RUN=true; shift ;;
+                *) log_error "Unknown option for rotate: $1"; show_help; exit 2 ;;
+            esac
+        done
+        ;;
+    "")
+        # No recognized subcommand — legacy flag-only mode for backward compat
+        while [[ $# -gt 0 ]]; do
+            case $1 in
+                --type)                   BACKUP_TYPE="$2"; shift 2 ;;
+                --dry-run)                DRY_RUN=true;     shift ;;
+                --keep)                   KEEP_DAYS="$2";   shift 2 ;;
+                --quiet)                  QUIET=true;       shift ;;
+                --force)                  FORCE=true;       shift ;;
+                --email)                  EMAIL_NOTIFY=true; shift ;;
+                --list)                   LIST_ONLY=true;   shift ;;
+                --rclone)                 RCLONE_SYNC=true; shift ;;
+                --full-verification)      FULL_VERIFY=true; shift ;;
+                --skip-full-verification) FULL_VERIFY=false; shift ;;
+                --help)                   show_help; exit 0 ;;
+                *)                        log_error "Unknown option: $1"; show_help; exit 2 ;;
+            esac
+        done
+        ;;
+esac
 
 if ! [[  "$KEEP_DAYS" =~ ^[0-9]+$ ]] || ! (( KEEP_DAYS >= 1 )); then
     log_error "Invalid --keep value: '${KEEP_DAYS}' — must be a positive integer (e.g. 14)"
