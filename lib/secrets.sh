@@ -734,7 +734,7 @@ auto_generate_secret_field() {
         email_api_token)
             # Placeholder for the email provider API token.
             # Must be set via: ./edit-secrets.sh rotate email_api_token
-            log_warn "Auto mode: Using placeholder for email API token - configure via --rotate email_api_token" >&2
+            log_warn "Auto mode: Using placeholder for email API token - configure via rotate email_api_token" >&2
             printf '%s' "CHANGE_ME_EMAIL_API_TOKEN"
             ;;
 
