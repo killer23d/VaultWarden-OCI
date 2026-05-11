@@ -144,7 +144,7 @@ UNINSTALL="$REPO/uninstall-vaultwarden.sh"
 
 # uninstall is destructive: zero args → exit 1
 expect_exit 1 "uninstall-vaultwarden.sh: zero args → exit 1" "$UNINSTALL"
-expect_output_contains "uninstall-vaultwarden.sh: zero args → shows USAGE" "USAGE|usage|subcommand|run" "$UNINSTALL" || true
+expect_output_contains "uninstall-vaultwarden.sh: zero args → shows USAGE" "USAGE|usage|subcommand|run" "$UNINSTALL"
 expect_exit 0 "uninstall-vaultwarden.sh: --help → exit 0" "$UNINSTALL" --help
 expect_exit 0 "uninstall-vaultwarden.sh: -h → exit 0" "$UNINSTALL" -h
 expect_exit 0 "uninstall-vaultwarden.sh: help → exit 0" "$UNINSTALL" help
