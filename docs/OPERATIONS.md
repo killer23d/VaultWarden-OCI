@@ -99,17 +99,17 @@ make health-quick
 
 ```bash
 # Automatically restart unhealthy containers
-./maintenance.sh health --auto-recover
+./maintenance.sh health --fix
 
-# Combined — comprehensive check + auto-recovery + email alert
-./maintenance.sh health --comprehensive --auto-recover --email
+# Combined — comprehensive check + auto-recovery
+./maintenance.sh health --comprehensive --fix
 
 # Or via Makefile
 make health AUTO_RECOVER=true
-make health-email   # comprehensive + email
+make health-quick   # comprehensive check
 ```
 
-> **Note:** Supported flags: `--comprehensive` (runs additional checks), `--auto-recover` (restarts unhealthy containers), and `--quiet` (suppresses non-error console output).
+> **Note:** Supported flags: `--comprehensive` (runs additional checks), `--fix` (restarts unhealthy containers), `--report` (save report to file), and `--quiet` (suppresses non-error console output).
 
 #### Container-Specific Status
 
@@ -781,7 +781,7 @@ sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
 
 ### Monthly
 - ✅ Review comprehensive maintenance results
-- ✅ Test backup restoration (`./restore.sh`)
+- ✅ Test backup restoration (`./restore.sh interactive`)
 - ✅ Review security logs
 - ✅ Check for available updates
 - ✅ Verify break-glass admin access

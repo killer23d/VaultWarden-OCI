@@ -573,7 +573,7 @@ sudo ./setup.sh systemd [OPTIONS]
 | :-- | :-- | :-- |
 | Daily 2 AM (Mon–Sat) | `vaultwarden-maintenance` | `maintenance.sh run --comprehensive` |
 | Mon–Sat 4 AM + 0–60 s jitter | `vaultwarden-db-backup` | `backup.sh run db --rclone --email` |
-| Every 30 min | `vaultwarden-health` | `maintenance.sh health --auto-recover --email` |
+| Every 30 min | `vaultwarden-health` | `maintenance.sh health --fix` |
 | Saturday 4 AM | `vaultwarden-firewall-update` | `maintenance.sh update-firewall` |
 | Sunday 3 AM | `vaultwarden-full-backup` | `backup.sh run full --full-verification --rclone --email` |
 | Every hour | `vaultwarden-dns-update` | `maintenance.sh update-dns` |
@@ -969,5 +969,5 @@ automatically on any process exit, including SIGKILL and OOM kill.
 ### Operational Excellence
 1. **Install systemd timers** — `sudo ./setup.sh systemd install` for hands-off operation
 2. **Monitor regularly** — `make health` or rely on the every-30-min timer check
-3. **Test backups** — periodically run `./restore.sh` to verify recoverability
+3. **Test backups** — periodically run `./restore.sh interactive` to verify recoverability
 4. **Validate after updates** — `sudo ./setup.sh systemd validate` detects split-brain between `/opt/` and the repo

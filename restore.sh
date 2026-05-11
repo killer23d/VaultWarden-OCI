@@ -91,7 +91,10 @@ check_dependencies() {
         echo "WARN: restore.sh: optional tools missing (some features will be disabled): ${missing_soft[*]}" >&2
     fi
 }
-check_dependencies
+# Skip heavy dependency checks for help-only invocations
+if [[ "${1:-}" != "--help" && "${1:-}" != "-h" && "${1:-}" != "help" ]]; then
+    check_dependencies
+fi
 
 # ---------------------------------------------------------------------------
 # Configuration

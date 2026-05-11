@@ -8,6 +8,64 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ---
 ## [Unreleased]
 
+### ⚠️ BREAKING: Project-Wide CLI Refactor — Pure Subcommand Pattern
+
+**Every operator-facing script now uses a strict verb-first subcommand pattern.**
+No `--flag` top-level dispatchers, no transparent aliases, no silent unknown-argument
+acceptance. This is a breaking change for any operator or automation that called
+scripts with the old flag syntax.
+
+#### Old → New Invocation Mapping
+
+| Script | Old (pre-refactor) | New (subcommand) |
+| :-- | :-- | :-- |
+| `backup.sh` | `./backup.sh` (no args) | `./backup.sh` → now prints help + exits 0 |
+| `backup.sh` | `./backup.sh --type db --rclone` | `./backup.sh run db --rclone` |
+| `backup.sh` | `./backup.sh --type full --rclone` | `./backup.sh run full --rclone` |
+| `backup.sh` | `./backup.sh --list` | `./backup.sh list` |
+| `restore.sh` | `./restore.sh` (no args) | exits 1 + shows help; use `./restore.sh interactive` |
+| `restore.sh` | `./restore.sh --remote` | `./restore.sh interactive --remote` |
+| `restore.sh` | `./restore.sh --file PATH` | `./restore.sh interactive --file PATH` |
+| `restore.sh` | `./restore.sh --preflight` | `./restore.sh interactive --dry-run` |
+| `setup.sh` | `./setup.sh systemd --install` | `./setup.sh systemd install` |
+| `setup.sh` | `./setup.sh systemd --remove` | `./setup.sh systemd remove` |
+| `setup.sh` | `./setup.sh systemd --validate` | `./setup.sh systemd validate` |
+| `setup.sh` | `./setup.sh systemd --status` | `./setup.sh systemd status` |
+| `maintenance.sh` | `./maintenance.sh` (no args) | `./maintenance.sh run` |
+| `maintenance.sh` | `./maintenance.sh --full` | `./maintenance.sh run --comprehensive` |
+| `maintenance.sh` | `./maintenance.sh --backup` | `./backup.sh run db` |
+| `maintenance.sh` | `./maintenance.sh health --auto-recover` | `./maintenance.sh health --fix` |
+| `uninstall-vaultwarden.sh` | `./uninstall-vaultwarden.sh` | `./uninstall-vaultwarden.sh run` |
+| `uninstall-vaultwarden.sh` | `./uninstall-vaultwarden.sh --i-have-saved-my-recovery-kit` | `./uninstall-vaultwarden.sh run --i-have-saved-my-recovery-kit` |
+
+#### Scripts Changed
+
+- **`backup.sh`** — zero-arg → `show_help; exit 0`; `help` bare-word arm added
+- **`restore.sh`** — `interactive` subcommand added for the former no-subcommand interactive mode; zero-arg → `show_help; exit 1`; `help` bare-word arm added; `_require_env_for_live_restore` updated
+- **`setup.sh`** — `*)` catch-all added to top-level dispatch; `systemd` arm no longer converts positional `install` → `--install`; `run_phase_systemd` now accepts `install|remove|validate|status` as positional sub-actions; `help` bare-word arm added
+- **`maintenance.sh`** — `help` bare-word arm added; `health` sub-parser now exits 1 on unknown options (was `log_warn` + continue)
+- **`startup.sh`** — `help` bare-word arm added; unknown first positional emits "Unknown subcommand" (was "Unknown option")
+- **`edit-secrets.sh`** — `help` bare-word arm added; `*)` catch-all added
+- **`create-breakglass-admin.sh`** — `help` bare-word arm added
+- **`uninstall-vaultwarden.sh`** — full refactor: `show_help()` function extracted; `run` subcommand added; zero-arg guard exits 1; `for _arg` loop replaced with `case "$1"`; silent `*) ;;` fallthrough removed
+
+#### Infrastructure / Call-Site Updates
+
+- `systemd/vaultwarden-db-backup.service` — `ExecStart` updated to `backup.sh run db …`
+- `systemd/vaultwarden-full-backup.service` — `ExecStart` updated to `backup.sh run full …`
+- `Makefile` — 10 targets updated: `test-email`, `health-quick`, `health-email`, `restore`, `restore-preflight`, `restore-remote`, `maintenance`, `maintenance-full`, `db-backup`, `uninstall`, `uninstall-dry-run`
+- All documentation code blocks updated in: `SCRIPTS.md`, `OPERATIONS.md`, `BACKUP-RESTORE.md`, `DEPLOYMENT.md`, `BOOTSTRAP_KEY_RECOVERY.md`, `TROUBLESHOOTING.md`, `CONFIGURATION.md`, `SECURITY.md`, `README.md`
+
+### Added
+- **`tests/cli-smoke.sh`** — smoke test suite covering `--help` / `--dry-run` / zero-arg behaviour for every Type A script subcommand.
+
+### Fixed
+- `backup.sh` zero-arg no longer exits with code 2 and a misleading error; now correctly shows help and exits 0.
+- `restore.sh` zero-arg no longer silently drops into interactive mode on a destructive script; now exits 1 with usage.
+- `setup.sh systemd` no longer silently converts `install` → `--install` internally.
+- `maintenance.sh health` no longer silently accepts and ignores unknown option flags (`--auto-recover`, `--email`, `--quick`) via a `log_warn` loop.
+- `uninstall-vaultwarden.sh` no longer silently accepts all unknown arguments via `*) ;;`.
+
 ### Added
 - **Separate-volume storage mode** (`DATA_VOLUME_DEVICE` / `DATA_VOLUME_MOUNT`):
   `setup.sh` can now format, UUID-mount, and persist a dedicated OCI block
