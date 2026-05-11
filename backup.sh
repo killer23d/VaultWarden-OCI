@@ -51,8 +51,8 @@ RUN OPTIONS (used after 'run'):
     --skip-full-verification Fast checksum only — explicit default
     --dry-run                Show what would be done without executing
 
-GLOBAL OPTIONS:
-    --help, -h               Show this help
+GLOBAL SUBCOMMAND:
+    help                     Show this help
 
 EXAMPLES:
     sudo ./backup.sh run                # Auto-mode backup (db or full based on schedule)
@@ -68,9 +68,6 @@ EOF
 # ---------------------------------------------------------------------------
 # Argument Parsing & Execution
 # ---------------------------------------------------------------------------
-# Subcommand-first dispatch. Legacy --flags are passed through transparently
-# via the default branch so existing automation is never broken.
-# ---------------------------------------------------------------------------
 
 _SUBCMD=""
 if [[ $# -eq 0 ]]; then
@@ -82,13 +79,13 @@ case "$1" in
         _SUBCMD="$1"
         shift
         ;;
-    help|--help|-h)
+    help)
         show_help; exit 0
         ;;
     *)
         log_error "Unknown subcommand: '$1'"
         log_error "Valid subcommands: run [TYPE] | list | verify | rotate"
-        log_error "Run './backup.sh --help' for usage."
+        log_error "Run './backup.sh help' for usage."
         exit 1
         ;;
 esac

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # edit-secrets.sh - VaultWarden secrets editor
-# Modes: edit (default) | view | list | rotate FIELD | export-recovery-kit
+# Modes: edit | view | list | rotate FIELD | export-recovery-kit
 # Safe to re-run multiple times.  Uses your $EDITOR or falls back to nano.
 #
 # Canonical standalone recovery-kit export:
@@ -229,9 +229,10 @@ show_help() {
 VaultWarden Secrets Editor
 
 USAGE:
-    ./edit-secrets.sh [subcommand] [options]
+    ./edit-secrets.sh <subcommand> [options]
 
-SUBCOMMANDS (mutually exclusive; default is interactive edit):
+SUBCOMMANDS (mutually exclusive):
+    edit                    Interactively edit decrypted secrets, then re-encrypt
     view                    View decrypted secrets read-only (no changes saved)
     list                    List secret key names only (no values shown)
     rotate FIELD            Re-collect and re-hash a single named field, then
@@ -271,7 +272,9 @@ OPTIONS:
     --editor EDITOR         Use specific editor (default: $EDITOR or nano)
     --no-backup             Skip creating backup before edit
     --dry-run               Preview what 'rotate' would change without writing
-    --help, -h              Show this help
+
+GLOBAL SUBCOMMAND:
+    help                    Show this help
 
 FEATURES:
     ✅ Automatic backup before every edit
@@ -286,8 +289,8 @@ FEATURES:
     ✅ 'rotate --dry-run' previews which values would change
 
 EXAMPLES:
-    ./edit-secrets.sh                              # Interactive edit
-    ./edit-secrets.sh --editor vim                 # Edit with vim
+    ./edit-secrets.sh edit                         # Interactive edit
+    ./edit-secrets.sh edit --editor vim            # Edit with vim
     ./edit-secrets.sh view                         # View only
     ./edit-secrets.sh list                         # Show key names
     ./edit-secrets.sh rotate admin_token           # Re-hash VW admin password
@@ -305,41 +308,46 @@ HELP
 # ---------------------------------------------------------------------------
 # Argument parsing — subcommand-first, then options.
 # ---------------------------------------------------------------------------
-# Pre-scan for recognized subcommands: view | list | rotate | export-recovery-kit
-if [[ $# -gt 0 ]]; then
-    case "$1" in
-        view)
-            VIEW_ONLY=true; shift
-            ;;
-        list)
-            LIST_KEYS=true; shift
-            ;;
-        rotate)
-            shift
-            if [[ $# -eq 0 || "$1" == --* ]]; then
-                log_error "'rotate' requires a FIELD argument."
-                log_error "Example: ./edit-secrets.sh rotate admin_token"
-                exit 1
-            fi
-            ROTATE_FIELD="$1"; shift
-            ;;
-        export-recovery-kit)
-            EXPORT_RECOVERY_KIT=true; shift
-            ;;
-        help|--help|-h)
-            show_help; exit 0
-            ;;
-        --*)
-            # Falls through to the options while-loop below
-            ;;
-        *)
-            log_error "Unknown subcommand: '$1'"
-            log_error "Valid subcommands: view | list | rotate FIELD | export-recovery-kit"
-            log_error "Run './edit-secrets.sh --help' for usage."
-            show_help; exit 1
-            ;;
-    esac
+# Pre-scan for recognized subcommands: edit | view | list | rotate | export-recovery-kit
+if [[ $# -eq 0 ]]; then
+    log_error "Missing subcommand. Use './edit-secrets.sh edit' for interactive editing."
+    log_error "Run './edit-secrets.sh help' for usage."
+    show_help
+    exit 1
 fi
+
+case "$1" in
+    edit)
+        shift
+        ;;
+    view)
+        VIEW_ONLY=true; shift
+        ;;
+    list)
+        LIST_KEYS=true; shift
+        ;;
+    rotate)
+        shift
+        if [[ $# -eq 0 || "$1" == --* ]]; then
+            log_error "'rotate' requires a FIELD argument."
+            log_error "Example: ./edit-secrets.sh rotate admin_token"
+            exit 1
+        fi
+        ROTATE_FIELD="$1"; shift
+        ;;
+    export-recovery-kit)
+        EXPORT_RECOVERY_KIT=true; shift
+        ;;
+    help)
+        show_help; exit 0
+        ;;
+    *)
+        log_error "Unknown subcommand: '$1'"
+        log_error "Valid subcommands: edit | view | list | rotate FIELD | export-recovery-kit | help"
+        log_error "Run './edit-secrets.sh help' for usage."
+        show_help; exit 1
+        ;;
+esac
 
 # Parse remaining options
 while [[ $# -gt 0 ]]; do
@@ -347,7 +355,6 @@ while [[ $# -gt 0 ]]; do
         --editor)  EDITOR_CMD="$2"; shift 2 ;;
         --no-backup) SKIP_BACKUP=true; shift ;;
         --dry-run) DRY_RUN=true; shift ;;
-        --help|-h) show_help; exit 0 ;;
         *)         log_error "Unknown option: '$1'"; show_help; exit 1 ;;
     esac
 done

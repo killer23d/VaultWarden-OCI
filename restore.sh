@@ -40,15 +40,14 @@ unset -f _source_lib
 # single, actionable error message.
 #
 # Exemptions:
-#   --help           show usage without a live config
+#   help             show usage without a live config
 #   list             list local backups without requiring .env
 #   list --remote    list remote backups; operator may be prompted for remote
-#   --remote         bare-metal DR path; .env will be restored from backup
 _require_env_for_live_restore() {
     local arg
     for arg in "$@"; do
         case "$arg" in
-            help|--help|-h|list) return 0 ;;
+            help|list) return 0 ;;
         esac
     done
 
@@ -70,7 +69,6 @@ _require_env_for_live_restore() {
         exit 1
     fi
 }
-_require_env_for_live_restore "$@"
 
 # ---------------------------------------------------------------------------
 # Dependency pre-flight
@@ -91,10 +89,10 @@ check_dependencies() {
         echo "WARN: restore.sh: optional tools missing (some features will be disabled): ${missing_soft[*]}" >&2
     fi
 }
-# Skip heavy dependency checks for help-only invocations
-if [[ "${1:-}" != "--help" && "${1:-}" != "-h" && "${1:-}" != "help" ]]; then
-    check_dependencies
-fi
+# Skip heavy dependency checks until a live restore/list subcommand is known.
+case "${1:-}" in
+    latest|list|interactive) check_dependencies ;;
+esac
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -170,7 +168,9 @@ OPTIONS (used after a subcommand):
     --skip-env              Do not restore archived .env over current .env
     --dry-run               Show what would happen without making changes
     --force                 Skip confirmation prompts
-    --help, -h              Show this help
+
+GLOBAL SUBCOMMAND:
+    help                    Show this help
 
 ENVIRONMENT:
     BACKUP_DIR=<path>                  Override backup storage root
@@ -206,20 +206,20 @@ EOF
 # 'latest', 'list', and 'interactive' are positional subcommands.
 # ---------------------------------------------------------------------------
 
-# Handle --help / -h / help before the .env check so they always work.
+# Handle help before the .env check so it always works.
 if [[ $# -gt 0 ]]; then
     case "$1" in
-        help|--help|-h) show_help; exit 0 ;;
+        help) show_help; exit 0 ;;
     esac
 fi
+
+_ORIGINAL_ARGS=("$@")
 
 # Zero arguments → show help and exit 1 (restore is a destructive operation)
 if [[ $# -eq 0 ]]; then
     show_help
     exit 1
 fi
-
-_require_env_for_live_restore "$@"
 
 case "$1" in
     latest)
@@ -243,11 +243,13 @@ case "$1" in
     *)
         log_error "Unknown subcommand: '$1'"
         log_error "Valid subcommands: latest [TYPE] | list [--remote] | interactive"
-        log_error "Run './restore.sh --help' for usage."
+        log_error "Run './restore.sh help' for usage."
         show_help
         exit 1
         ;;
 esac
+
+_require_env_for_live_restore "${_ORIGINAL_ARGS[@]}"
 
 # Parse remaining options (apply to interactive mode, 'latest', or 'list')
 while [[ $# -gt 0 ]]; do
@@ -261,7 +263,6 @@ while [[ $# -gt 0 ]]; do
         --skip-env)            RESTORE_ENV=false;        shift ;;
         --dry-run)             DRY_RUN=true;             shift ;;
         --force)               FORCE=true;               shift ;;
-        --help|-h)             show_help; exit 0 ;;
         *)                     log_error "Unknown option: '$1'"; show_help; exit 1 ;;
     esac
 done

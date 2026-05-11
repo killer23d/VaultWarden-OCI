@@ -137,8 +137,8 @@ TEST-EMAIL OPTIONS (used after 'test-email'):
     --verbose               Show detailed diagnostic output
     --dry-run               Preview without sending
 
-GLOBAL OPTIONS:
-    --help, -h              Show this help
+GLOBAL SUBCOMMAND:
+    help                    Show this help
 
 EXAMPLES:
     ./maintenance.sh run                          # Full routine maintenance
@@ -1334,11 +1334,10 @@ local QUIET=false
 _health_parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --comprehensive|-c)  COMPREHENSIVE=true;  shift ;;
+            --comprehensive)     COMPREHENSIVE=true;  shift ;;
             --fix|-f)            FIX_MODE=true;       shift ;;
             --report|-r)         REPORT_MODE=true;    shift ;;
             --quiet|-q)          QUIET=true;          shift ;;
-            --help|-h)           _show_help;          exit 0 ;;
             *)                   log_error "Unknown option for 'health': $1"; _show_help; exit 1 ;;
         esac
     done
@@ -1349,11 +1348,10 @@ _show_help() {
 Usage: ./maintenance.sh health [OPTIONS]
 
 Options:
-  --comprehensive, -c  Run all checks including extended diagnostics
+  --comprehensive     Run all checks including extended diagnostics
   --fix, -f            Attempt automatic recovery for failed checks
   --report, -r         Save health report to file
   --quiet, -q          Suppress non-critical output
-  --help, -h           Show this help message
 
 Checks performed:
   - Docker container status and health
@@ -2413,7 +2411,6 @@ OPTIONS:
     --dry-run        Show what would be done without executing
     --skip-backup    Skip pre-update safety backup
     --email          Send email notification on completion/failure
-    --help           Show this help
 
 EXAMPLES:
     sudo ./maintenance.sh update --system        # Update system packages only
@@ -2432,7 +2429,6 @@ while [[ $# -gt 0 ]]; do
         --dry-run)     DRY_RUN=true;        shift ;;
         --skip-backup) SKIP_BACKUP=true;    shift ;;
         --email)       EMAIL_NOTIFY=true;   shift ;;
-        --help)        _update_show_help; exit 0 ;;
         *)             log_error "Unknown option: $1"; _update_show_help; exit 1 ;;
     esac
 done
@@ -2800,10 +2796,8 @@ run_pre_update_backup() {
         log_error "backup.sh not found or not executable — aborting update"
         return 1
     fi
-    # Use '--type db' — 'pre-update' is not a valid backup type and hits the *)
-    # branch in backup.sh's case statement, causing exit 1 every time.
     log_info "Creating pre-update safety backup via ./backup.sh run db..."
-    if "${SCRIPT_DIR}/backup.sh" --type db; then
+    if "${SCRIPT_DIR}/backup.sh" run db; then
         log_success "Pre-update backup created"
         return 0
     fi
@@ -3105,12 +3099,12 @@ case "$_TASK" in
         main
         exit $?
         ;;
-    help|--help|-h)
+    help)
         show_help; exit 0
         ;;
     *)
         log_error "Unknown subcommand: '$_TASK'"
-        log_error "Run './maintenance.sh --help' for usage."
+        log_error "Run './maintenance.sh help' for usage."
         exit 1
         ;;
 esac
