@@ -23,7 +23,7 @@ ExecStartPre=/bin/bash -c 'rm -f /run/lock/vaultwarden-backup.lock'
 # Failures are still reported via OnFailure=vaultwarden-notify-failure.service.
 # --full-verification decrypts the archive and performs a zstd+tar structural
 # integrity check before the offsite rclone sync.
-ExecStart=/opt/vaultwarden-scripts/backup.sh --type full --rclone --full-verification
+ExecStart=/opt/vaultwarden-scripts/backup.sh run full --rclone --full-verification
 User=root
 StandardOutput=journal
 StandardError=journal

@@ -66,8 +66,17 @@ if [[ $# -gt 0 ]]; then
     stop)
       DO_DOWN=true; shift
       ;;
-    --help|-h)
+    help|--help|-h)
       show_help; exit 0
+      ;;
+    --*)
+      # Falls through to the options while-loop below
+      ;;
+    *)
+      log_error "Unknown subcommand: '$1'"
+      log_error "Valid subcommands: stop"
+      log_error "Run './startup.sh --help' for usage."
+      show_help; exit 1
       ;;
   esac
 fi

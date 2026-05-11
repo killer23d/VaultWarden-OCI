@@ -127,6 +127,7 @@ sudo ./setup.sh systemd install
 
 ```bash
 ./startup.sh [OPTIONS]
+./startup.sh stop
 ```
 
 **What it does:**
@@ -138,7 +139,14 @@ sudo ./setup.sh systemd install
 
 > **Push notifications note:** If `PUSH_ENABLED=true` is set in `.env`, the VaultWarden network must **not** be marked `internal: true` in `docker-compose.yml`. Push relay requires outbound HTTPS access to `push.bitwarden.com`. `startup.sh` will exit with an error if it detects `PUSH_ENABLED=true` while the network is internal.
 
-**Options:**
+**Subcommands:**
+
+| Subcommand | Description |
+| :-- | :-- |
+| *(none)* | Start all services (default behaviour) |
+| `stop` | Stop all containers gracefully |
+
+**Options (modifiers):**
 
 | Option | Description |
 | :-- | :-- |
@@ -179,24 +187,20 @@ make restart   # Force restart
 | Option | Description |
 | :-- | :-- |
 | `--comprehensive` | Add resource usage, configuration, and security checks |
-| `--auto-recover` | Attempt automatic container restart on failure |
-| `--email` | Send email if critical issues found |
+| `--fix` | Attempt automatic container restart on failure |
+| `--report` | Save health report to file |
 | `--quiet` | Suppress non-error console output |
-| `--json` | Output results as JSON |
-| `--output FILE` | Save report to file |
-| `--alert-threshold N` | Set alert threshold % (default: 80) |
 
 ```bash
-./maintenance.sh health --comprehensive --auto-recover --email
+./maintenance.sh health
+./maintenance.sh health --comprehensive --fix
 
 make health                        # Basic
-make health AUTO_RECOVER=true      # With auto-recovery
-make health COMPREHENSIVE=true     # Comprehensive
-make health-email                  # Comprehensive + email
-make health-quick                  # Fast port + container check (no deep tests)
+make health AUTO_RECOVER=true      # With auto-recovery (passes --fix)
+make health-quick                  # Comprehensive check
 ```
 
-> **Systemd note:** The `vaultwarden-health.service` unit runs `maintenance.sh health --auto-recover --email` by default.
+> **Systemd note:** The `vaultwarden-health.service` unit runs `maintenance.sh health --fix` by default.
 
 ---
 
@@ -204,10 +208,19 @@ make health-quick                  # Fast port + container check (no deep tests)
 **Purpose:** Create Age-encrypted backups with integrity verification
 
 ```bash
-./backup.sh [OPTIONS]
+./backup.sh <subcommand> [OPTIONS]
 ```
 
-> **`sudo` note:** Direct invocations require `sudo` in production deployments where `${PROJECT_STATE_DIR}` is root-owned (the default after `setup.sh`). The `--list` flag does **not** require root (reads metadata only). Makefile targets (`make backup`, `make backup-full`, etc.) and systemd jobs run as root automatically.
+> **`sudo` note:** Direct invocations require `sudo` in production deployments where `${PROJECT_STATE_DIR}` is root-owned (the default after `setup.sh`). The `list` subcommand does **not** require root (reads metadata only). Makefile targets (`make backup`, `make backup-full`, etc.) and systemd jobs run as root automatically.
+
+**Subcommands:**
+
+| Subcommand | Description |
+| :-- | :-- |
+| `run [TYPE]` | Create a backup. TYPE: `auto` (default), `db`, `full`, `emergency` |
+| `list` | List existing backups and exit (no root required) |
+| `verify` | Run end-to-end integrity verification on the latest backup |
+| `rotate` | Prune old backups without creating a new one |
 
 **Backup types:**
 
@@ -226,11 +239,10 @@ make health-quick                  # Fast port + container check (no deep tests)
 5. Quick decrypt probe — **fails the backup if the Age key is absent** (never silently skips)
 6. Optional end-to-end `--full-verification` (decrypt + extract + integrity check)
 
-**Options:**
+**Options (used after `run`):**
 
 | Option | Description |
 | :-- | :-- |
-| `--type TYPE` | `auto` (default), `db`, `full`, or `emergency` |
 | `--rclone` | Sync encrypted backup to rclone remote after creation (non-fatal on failure) |
 | `--full-verification` | End-to-end decrypt + integrity check before sync (fatal on failure) |
 | `--skip-full-verification` | Fast checksum only — explicit default |
@@ -238,7 +250,6 @@ make health-quick                  # Fast port + container check (no deep tests)
 | `--email` | Send email notification on completion/failure |
 | `--quiet` | Suppress non-error output |
 | `--force` | Ignore locks and force backup |
-| `--list` | List existing backups and exit (no root required) |
 | `--dry-run` | Preview operations without executing |
 
 ```bash
@@ -272,29 +283,38 @@ make backup-status       # Show backup health summary (last run, size, retention
 **Purpose:** Restore from an Age-encrypted backup
 
 ```bash
-./restore.sh [OPTIONS]
+./restore.sh <subcommand> [OPTIONS]
 ```
 
-**Options:**
+**Subcommands:**
+
+| Subcommand | Description |
+| :-- | :-- |
+| `latest [TYPE]` | Restore the newest local backup. TYPE: `db`, `full`, `emergency` |
+| `list` | List available local backups (no root required) |
+| `list --remote` | List available remote backups (no root required) |
+| `interactive` | Interactive guided restore — shows a numbered backup selection menu |
+
+**Options (used after a subcommand):**
 
 | Option | Description |
 | :-- | :-- |
 | `--file FILE` | Specific backup file to restore |
-| `--latest` | Use the newest backup (optionally filtered by `--type`) |
-| `--type TYPE` | Filter backup list by type |
+| `--remote` | Skip the local/remote menu; restore from rclone remote |
+| `--key-file FILE` | Path to the age private key for decrypting this backup |
+| `--from-recovery-kit FILE` | Path to a plaintext recovery-kit file; Age key extracted automatically |
 | `--force` | Skip confirmation prompts |
 | `--no-backup` | Skip pre-restore emergency snapshot |
 | `--skip-verification` | Skip integrity check |
-| `--remote` | Restore from a remote (rclone) backup — interactive selection |
 | `--dry-run` | Preview operations |
 
 ```bash
-# Interactive (recommended)
-./restore.sh
+# Interactive menu (recommended)
+./restore.sh interactive
 make restore
 
 # Specific file
-./restore.sh --file /path/to/backup.age --force
+./restore.sh interactive --file /path/to/backup.age --force
 
 # Latest DB backup (non-interactive — runs age key prompt and confirmation)
 ./restore.sh latest db
@@ -305,6 +325,7 @@ make restore-db
 ./restore.sh latest full --force --no-backup
 
 # Restore from a remote (rclone) backup
+./restore.sh interactive --remote
 make restore-remote
 ```
 
@@ -316,7 +337,7 @@ make restore-remote
 **Purpose:** Securely edit SOPS-encrypted secrets
 
 ```bash
-./edit-secrets.sh [OPTIONS]
+./edit-secrets.sh [subcommand] [OPTIONS]
 ```
 
 **Key features:**
@@ -329,15 +350,21 @@ make restore-remote
 **Managed secrets:**
 `admin_token`, `admin_basic_auth_hash`, `smtp_password`, `push_installation_id`, `push_installation_key`, `caddy_cloudflare_dns_token`, `fail2ban_cloudflare_firewall_token`, `backup_passphrase`
 
+**Subcommands:**
+
+| Subcommand | Description |
+| :-- | :-- |
+| *(none)* | Open encrypted secrets in editor (interactive) |
+| `view` | View decrypted secrets without editing |
+| `list` | List all available secret key names |
+| `rotate FIELD` | Rotate (regenerate) a single secret field |
+| `export-recovery-kit` | Export a plaintext recovery document (key + all secrets) — written to tmpfs, never to persistent disk |
+
 **Options:**
 
 | Option | Description |
 | :-- | :-- |
 | `--editor EDITOR` | Specify editor (default: nano) |
-| `--rotate FIELD` | Rotate (regenerate) a single secret field |
-| `--export-recovery-kit` | Export a plaintext recovery document (key + all secrets) — written to tmpfs, never to persistent disk |
-| `--view` | View decrypted secrets without editing |
-| `--list` | List all available secret key names |
 | `--no-backup` | Skip automatic backup before editing |
 
 ```bash
@@ -348,7 +375,7 @@ make restore-remote
 ./edit-secrets.sh view
 ./edit-secrets.sh list
 make edit-secrets
-make test-secrets    # runs --list internally
+make test-secrets    # runs list internally
 ```
 
 > **Recovery kit security:** `--export-recovery-kit` writes the plaintext kit to a tmpfs path (`/dev/shm` → `/run/user/UID` → `/tmp` priority order) and prints a `WARNING` banner to the terminal before opening the file. Copy the kit to offline storage immediately and delete the file when done. The kit is **never** written to persistent disk.
@@ -387,22 +414,22 @@ make update-system    # Containers + system packages (apt upgrade + Docker engin
 **Purpose:** Routine cleanup, optimisation, DNS update, deep DB maintenance, email diagnostics, health monitoring, and updates — all in one script with sub-command modes
 
 ```bash
-./maintenance.sh [OPTIONS | SUBCOMMAND]
+./maintenance.sh <subcommand> [OPTIONS]
 ```
 
-**Modes overview:**
+**Subcommands overview:**
 
-| Mode | Command | Cleanup runs? |
+| Subcommand | Purpose | Cleanup runs? |
 | :-- | :-- | :-- |
-| Routine | `--comprehensive` | ✅ |
-| Targeted DNS | `--update-dns` (alone) | ❌ |
-| Targeted Firewall | `--update-firewall` (alone) | ❌ |
-| Deep DB maintenance | `--db-maint` | ❌ |
-| Email diagnostics | `--test-email` | ❌ |
-| Health check | `health` subcommand | ❌ |
-| Update | `update` subcommand | ❌ |
+| `run` | Routine maintenance (pass `--comprehensive` for full run) | ✅ |
+| `update-dns` | Update Cloudflare DNS A record (targeted) | ❌ |
+| `update-firewall` | Fetch latest Cloudflare IPs and update UFW rules (targeted) | ❌ |
+| `db-maint` | Full VACUUM cycle — stops VaultWarden; prompts for confirmation | ❌ |
+| `test-email` | Run Postfix + fail2ban + end-to-end email diagnostics | ❌ |
+| `health` | System health monitoring | ❌ |
+| `update` | Update Docker images and optionally system packages | ❌ |
 
-**Routine options:**
+**`run` options:**
 
 | Option | Description |
 | :-- | :-- |
@@ -414,41 +441,29 @@ make update-system    # Containers + system packages (apt upgrade + Docker engin
 | `--email` | Send summary email on completion |
 | `--dry-run` | Preview any mode without changes |
 
-**Deep DB maintenance options:**
+**`db-maint` options:**
 
 | Option | Description |
 | :-- | :-- |
-| `--db-maint` | Run full VACUUM cycle (stops VaultWarden; prompts for confirmation) |
-| `--db-maint --force` | Skip the confirmation prompt |
+| `--force` | Skip the confirmation prompt |
 
-**Email diagnostic options:**
+**`test-email` options:**
 
 | Option | Description |
 | :-- | :-- |
-| `--test-email` | Run Postfix + fail2ban + end-to-end email tests |
-| `--verbose` | Detailed output (only meaningful with `--test-email`) |
+| `--verbose` | Detailed output |
 | `--recipient EMAIL` | Override default `ADMIN_EMAIL` recipient |
 
-**Targeted options:**
-
-| Option | Description |
-| :-- | :-- |
-| `--update-firewall` | Fetch latest Cloudflare IPs and update UFW rules (adds new rules before removing old ones) |
-| `--update-dns` | Check current public IP and update Cloudflare DNS A record |
-
-**`--health` subcommand:**
+**`health` options:**
 
 | Option | Description |
 | :-- | :-- |
 | `--comprehensive` | Add resource usage, configuration, and security checks |
-| `--auto-recover` | Attempt automatic container restart on failure |
-| `--email` | Send email if critical issues found |
+| `--fix` | Attempt automatic container restart on failure |
+| `--report` | Save health report to file |
 | `--quiet` | Suppress non-error console output |
-| `--json` | Output results as JSON |
-| `--output FILE` | Save report to file |
-| `--alert-threshold N` | Set alert threshold % (default: 80) |
 
-**`--update` subcommand:**
+**`update` options:**
 
 | Option | Description |
 | :-- | :-- |
@@ -482,7 +497,7 @@ make update-dns
 
 # Health check
 ./maintenance.sh health
-./maintenance.sh health --comprehensive --auto-recover --email
+./maintenance.sh health --comprehensive --fix
 make health
 
 # Update
@@ -497,7 +512,7 @@ make update
 **Purpose:** Emergency OS admin account for OCI Serial Console access
 
 ```bash
-./create-breakglass-admin.sh [OPTIONS]
+./create-breakglass-admin.sh <subcommand>
 ```
 
 **Key features:**
@@ -506,15 +521,15 @@ make update
 - Comprehensive audit logging
 - Security validation via `lib/crypto.sh` (merged security functions)
 
-**Options:**
+**Subcommands:**
 
-| Option | Description |
+| Subcommand | Description |
 | :-- | :-- |
-| `--create` | Create the emergency admin account |
-| `--status` | Show current break-glass admin status |
-| `--password` | Generate a new emergency password |
-| `--validate` | Run security validation |
-| `--remove` | Remove the emergency admin account |
+| `create` | Create the emergency admin account |
+| `status` | Show current break-glass admin status |
+| `reset-password` | Generate a new emergency password |
+| `validate` | Run security validation |
+| `remove` | Remove the emergency admin account |
 
 ```bash
 ./create-breakglass-admin.sh create
@@ -558,7 +573,7 @@ sudo ./setup.sh systemd [OPTIONS]
 | :-- | :-- | :-- |
 | Daily 2 AM (Mon–Sat) | `vaultwarden-maintenance` | `maintenance.sh run --comprehensive` |
 | Mon–Sat 4 AM + 0–60 s jitter | `vaultwarden-db-backup` | `backup.sh run db --rclone --email` |
-| Every 30 min | `vaultwarden-health` | `maintenance.sh health --auto-recover --email` |
+| Every 30 min | `vaultwarden-health` | `maintenance.sh health --fix` |
 | Saturday 4 AM | `vaultwarden-firewall-update` | `maintenance.sh update-firewall` |
 | Sunday 3 AM | `vaultwarden-full-backup` | `backup.sh run full --full-verification --rclone --email` |
 | Every hour | `vaultwarden-dns-update` | `maintenance.sh update-dns` |
@@ -702,15 +717,15 @@ All common operations have Makefile shortcuts. Run `make help` to see the full t
 | `make init-secrets` | `./setup.sh secrets` | Interactive secrets initialisation |
 | `make edit-secrets` | `./edit-secrets.sh` | Open SOPS secrets editor |
 | `make test-secrets` | `./edit-secrets.sh list` | Verify secrets decrypt correctly |
-| `make test-email` | `./maintenance.sh test-email --verbose` | Test full email delivery chain |
+| `make test-email` | `./maintenance.sh test-email` | Test full email delivery chain |
 | `make up` / `make start` | `sudo ./startup.sh` | Start all services |
 | `make down` / `make stop` | `docker compose down` | Graceful shutdown |
 | `make restart` | `sudo ./startup.sh --force` | Force restart all services |
 | `make safe-restart` | `sudo ./startup.sh --force` + health check | Restarts with automatic rollback on failure |
 | `make status` | `docker compose ps` | Show service status table |
-| `make health` | `./maintenance.sh health` | Basic health check (`AUTO_RECOVER=true`, `COMPREHENSIVE=true` supported) |
-| `make health-quick` | `./maintenance.sh health --quiet` | Fast port + container check (no deep tests) |
-| `make health-email` | `./maintenance.sh health --comprehensive --email` | Health check with email notification |
+| `make health` | `./maintenance.sh health` | Basic health check (`AUTO_RECOVER=true` passes `--fix`) |
+| `make health-quick` | `./maintenance.sh health --comprehensive` | Comprehensive health check |
+| `make health-email` | `./maintenance.sh health --report` | Health check with report output |
 | `make logs` | `docker compose logs --tail=100 [SERVICE]` | Recent logs; pass `SERVICE=caddy` to filter, `FOLLOW=true` to tail |
 | `make logs-tail` | `docker compose logs -f -t --tail=100 [SERVICE]` | Follow logs with timestamps |
 | `make logs-vaultwarden` | `docker compose logs -f -t --tail=100 vaultwarden` | Tail VaultWarden application logs |
@@ -722,9 +737,9 @@ All common operations have Makefile shortcuts. Run `make help` to see the full t
 | `make backup-emergency` | `./backup.sh run emergency --email` | Emergency kit (includes secrets) |
 | `make list-backups` | `./backup.sh list` | List all available backups with metadata |
 | `make backup-status` | — | Backup health summary: last run, size, retention, count per type |
-| `make restore` | `./restore.sh` | Interactive restore (recommended) |
-| `make restore-db` | `./restore.sh latest db --latest` | Restore latest database backup (runs key prompt + confirmation) |
-| `make restore-remote` | `./restore.sh --remote` | Restore from a remote (rclone) backup — interactive selection |
+| `make restore` | `./restore.sh interactive` | Interactive restore (recommended) |
+| `make restore-db` | `./restore.sh latest db` | Restore latest database backup (runs key prompt + confirmation) |
+| `make restore-remote` | `./restore.sh interactive --remote` | Restore from a remote (rclone) backup — interactive selection |
 | `make update` | `./maintenance.sh update` | Pull latest container images |
 | `make update-system` | `./maintenance.sh update --system --email` | Update containers + apt + Docker engine |
 | `make maintenance` | `./maintenance.sh run --comprehensive` | Full maintenance run |
@@ -954,5 +969,5 @@ automatically on any process exit, including SIGKILL and OOM kill.
 ### Operational Excellence
 1. **Install systemd timers** — `sudo ./setup.sh systemd install` for hands-off operation
 2. **Monitor regularly** — `make health` or rely on the every-30-min timer check
-3. **Test backups** — periodically run `./restore.sh` to verify recoverability
+3. **Test backups** — periodically run `./restore.sh interactive` to verify recoverability
 4. **Validate after updates** — `sudo ./setup.sh systemd validate` detects split-brain between `/opt/` and the repo

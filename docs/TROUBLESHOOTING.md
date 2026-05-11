@@ -732,14 +732,14 @@ cat backup.age.meta
 **Solutions**:
 ```bash
 # Interactive restore (prompts for file selection)
-./restore.sh
+./restore.sh interactive
 
 # Restore latest DB backup directly
 ./restore.sh latest db
 make restore-db
 
 # Try older backup if current is corrupt
-./restore.sh --file /path/to/older-backup.age
+./restore.sh interactive --file /path/to/older-backup.age
 
 # After restore, verify services
 ./maintenance.sh health --comprehensive
@@ -1127,7 +1127,7 @@ docker compose down
 ./backup.sh run emergency
 
 # 3. Restore from last known good backup
-./restore.sh
+./restore.sh interactive
 
 # 4. If complete failure, rebuild from emergency kit
 # See BACKUP-RESTORE.md → Complete System Loss

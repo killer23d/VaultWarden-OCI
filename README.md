@@ -148,7 +148,7 @@ sudo ./setup.sh systemd install
 ./edit-secrets.sh export-recovery-kit
 
 # Create emergency admin for OCI serial console recovery
-./create-breakglass-admin.sh    # or: make breakglass-create
+./create-breakglass-admin.sh create    # or: make breakglass-create
 ```
 
 > **`setup.sh systemd` improvement:** `--install` now validates all `OnCalendar=` expressions via `systemd-analyze calendar` before enabling timers and warns on invalid expressions. All generated service units now include an `[Install]` section (`WantedBy=multi-user.target`) so `systemctl enable` is no longer a no-op. See [docs/ADVANCED-CUSTOMIZATION.md](docs/ADVANCED-CUSTOMIZATION.md) for timer details.

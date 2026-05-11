@@ -416,7 +416,7 @@ sudo ./setup.sh systemd install
 | :-- | :-- | :-- |
 | `vaultwarden-db-backup.timer` | Mon–Sat 04:00 (+60 s jitter) | `backup.sh run db --rclone --email` |
 | `vaultwarden-full-backup.timer` | Sunday 03:00 | `backup.sh run full --full-verification --rclone --email` |
-| `vaultwarden-health.timer` | Every 30 min | `maintenance.sh health --auto-recover --email` |
+| `vaultwarden-health.timer` | Every 30 min | `maintenance.sh health --fix` |
 | `vaultwarden-maintenance.timer` | Sunday 02:00 | `maintenance.sh run --comprehensive` |
 | `vaultwarden-dns-update.timer` | Every hour | `maintenance.sh update-dns` |
 | `vaultwarden-firewall-update.timer` | Saturday 04:00 | `maintenance.sh update-firewall` |

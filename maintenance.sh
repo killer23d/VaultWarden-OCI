@@ -1024,8 +1024,8 @@ DNS record updated automatically."; then
 validate_system_health() {
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would validate system health"; return 0; fi
     log_info "Validating system health after maintenance..."
-    log_info "Invoking: $SCRIPT_DIR/maintenance.sh" health --quiet"
-    if "$SCRIPT_DIR/maintenance.sh" --health --quiet; then
+    log_info "Invoking: $SCRIPT_DIR/maintenance.sh health --quiet"
+    if "$SCRIPT_DIR/maintenance.sh" health --quiet; then
         log_success "System health validation passed"
         return 0
     else
@@ -1339,7 +1339,7 @@ _health_parse_args() {
             --report|-r)         REPORT_MODE=true;    shift ;;
             --quiet|-q)          QUIET=true;          shift ;;
             --help|-h)           _show_help;          exit 0 ;;
-            *)                   log_warn "Unknown option: $1"; shift ;;
+            *)                   log_error "Unknown option for 'health': $1"; _show_help; exit 1 ;;
         esac
     done
 }
@@ -3105,7 +3105,7 @@ case "$_TASK" in
         main
         exit $?
         ;;
-    --help|-h)
+    help|--help|-h)
         show_help; exit 0
         ;;
     *)

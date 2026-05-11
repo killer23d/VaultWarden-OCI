@@ -1048,11 +1048,11 @@ rclone config
 ./maintenance.sh health --comprehensive
 
 # With automatic recovery of unhealthy containers
-./maintenance.sh health --auto-recover
+./maintenance.sh health --fix
 
-# Full comprehensive check with email alert and auto-recovery
+# Full comprehensive check with auto-recovery
 # (this is what the systemd vaultwarden-health timer runs)
-./maintenance.sh health --comprehensive --email --auto-recover
+./maintenance.sh health --comprehensive --fix
 ```
 
 Checks performed:

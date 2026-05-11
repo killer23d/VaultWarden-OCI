@@ -28,7 +28,7 @@ ExecCondition=/bin/bash -c '! test -f /tmp/.vw_maintenance.lock'
 # Failures are still reported via OnFailure=vaultwarden-notify-failure.service.
 # --full-verification decrypts the archive and runs a structural integrity check
 # (SQLite PRAGMA or tar -tz) before the offsite rclone sync.
-ExecStart=/opt/vaultwarden-scripts/backup.sh --type db --rclone --full-verification
+ExecStart=/opt/vaultwarden-scripts/backup.sh run db --rclone --full-verification
 User=root
 StandardOutput=journal
 StandardError=journal
