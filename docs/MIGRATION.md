@@ -45,8 +45,8 @@ git clone https://github.com/killer23d/VaultWarden-OCI.git
 cd VaultWarden-OCI
 chmod +x *.sh
 
-sudo ./setup.sh --domain vault.example.com --email admin@example.com
-./edit-secrets.sh
+sudo ./setup.sh install --domain vault.example.com --email admin@example.com
+./edit-secrets.sh edit
 nano .env
 ```
 
@@ -122,8 +122,8 @@ bw export --output vault-export.json --format json
 
 **2. Set up target:**
 ```bash
-sudo ./setup.sh --domain vault.example.com --email admin@example.com
-./edit-secrets.sh
+sudo ./setup.sh install --domain vault.example.com --email admin@example.com
+./edit-secrets.sh edit
 nano .env
 ./startup.sh
 ```
@@ -156,8 +156,8 @@ bw export --output bitwarden-export.json --format json
 ```bash
 git clone https://github.com/killer23d/VaultWarden-OCI.git
 cd VaultWarden-OCI
-sudo ./setup.sh --domain vault.example.com --email admin@example.com
-./edit-secrets.sh
+sudo ./setup.sh install --domain vault.example.com --email admin@example.com
+./edit-secrets.sh edit
 nano .env
 ./startup.sh
 ```
@@ -232,7 +232,7 @@ Settings → Server URL → https://vault.example.com
 
 ```bash
 # Standard setup auto-detects OCI / Oracle Linux
-sudo ./setup.sh --domain vault.example.com --email admin@example.com --auto
+sudo ./setup.sh install --domain vault.example.com --email admin@example.com --auto
 
 # Create break-glass admin for emergency console access
 ./create-breakglass-admin.sh create
@@ -266,8 +266,8 @@ scp vaultwarden-backup.tar.gz user@new-server:/tmp/
 # 3. Set up VaultWarden-OCI
 git clone https://github.com/killer23d/VaultWarden-OCI.git
 cd VaultWarden-OCI
-sudo ./setup.sh --domain vault.example.com --email admin@example.com
-./edit-secrets.sh
+sudo ./setup.sh install --domain vault.example.com --email admin@example.com
+./edit-secrets.sh edit
 nano .env
 
 # 4. Migrate data
@@ -308,7 +308,7 @@ cd /path/to/VaultWarden-OCI
 ./setup.sh secrets --hash-only
 
 # Update secrets
-./edit-secrets.sh
+./edit-secrets.sh edit
 # Set: admin_basic_auth_hash (and admin_token if desired)
 
 # Restart services to apply
@@ -335,7 +335,7 @@ sudo systemctl list-timers 'vaultwarden-*'
 ./maintenance.sh test-email --verbose
 ```
 
-> **Email migration note:** VaultWarden-OCI no longer requires a Postfix sidecar container for email. `lib/common.sh` (email functions) provides an API → SMTP → host MTA fallback chain. Set `EMAIL_PROVIDER` and the corresponding API token secret (`email_api_token`) via `./edit-secrets.sh`. See [CONFIGURATION.md](CONFIGURATION.md) for the full email configuration reference.
+> **Email migration note:** VaultWarden-OCI no longer requires a Postfix sidecar container for email. `lib/common.sh` (email functions) provides an API → SMTP → host MTA fallback chain. Set `EMAIL_PROVIDER` and the corresponding API token secret (`email_api_token`) via `./edit-secrets.sh edit`. See [CONFIGURATION.md](CONFIGURATION.md) for the full email configuration reference.
 
 ### Update Client Applications
 
@@ -395,7 +395,7 @@ sudo chmod -R 755      /var/lib/vaultwarden/data/attachments
 
 ```bash
 # Check secrets are decryptable
-./edit-secrets.sh --test
+./edit-secrets.sh list
 
 # Verify VaultWarden is running
 docker compose ps vaultwarden
@@ -417,7 +417,7 @@ curl -I https://vault.example.com/admin
 grep -E 'EMAIL_MODE|EMAIL_PROVIDER|SMTP_HOST' .env
 
 # Verify API token is set in secrets
-./edit-secrets.sh  # Check email_api_token
+./edit-secrets.sh edit  # Check email_api_token
 ```
 
 ### Systemd timers not running

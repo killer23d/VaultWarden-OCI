@@ -44,7 +44,7 @@ make restart
 docker compose -f docker-compose.yml.example config
 
 # Regenerate from templates
-sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
+sudo ./setup.sh install --domain vault.example.com --email admin@example.com --force
 ./startup.sh --force
 ```
 
@@ -85,7 +85,7 @@ docker inspect $(docker compose ps -q vaultwarden) | grep -A 10 Memory
 
 # Increase limits if needed (edit template)
 nano docker-compose.yml.example
-sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
+sudo ./setup.sh install --domain vault.example.com --email admin@example.com --force
 ./startup.sh --force
 ```
 
@@ -103,7 +103,7 @@ docker compose logs caddy | grep -i error
 make logs SERVICE=caddy
 
 # Verify Cloudflare API token
-./edit-secrets.sh --test
+./edit-secrets.sh list
 
 # Check DNS resolution
 dig +short vault.example.com
@@ -116,7 +116,7 @@ curl -X GET "https://api.cloudflare.com/client/v4/zones" \
 **Solutions**:
 ```bash
 # Verify Cloudflare DNS token in secrets
-./edit-secrets.sh
+./edit-secrets.sh edit
 # Ensure caddy_cloudflare_dns_token is set
 
 # Restart Caddy to retry
@@ -141,7 +141,7 @@ docker compose logs caddy | tail -30
 # Verify the cost factor of your current hash (factor is between the second and third $)
 # Example hash: $2b$06$... means cost=6 (too low)
 grep admin_basic_auth_hash secrets/secrets.yaml   # encrypted; use edit-secrets.sh
-./edit-secrets.sh --test
+./edit-secrets.sh list
 ```
 
 **Solutions**:
@@ -151,7 +151,7 @@ grep admin_basic_auth_hash secrets/secrets.yaml   # encrypted; use edit-secrets.
 docker run --rm -it ghcr.io/caddybuilds/caddy-cloudflare:latest caddy hash-password --cost 14
 
 # Update the hash in secrets
-./edit-secrets.sh
+./edit-secrets.sh edit
 # Set admin_basic_auth_hash to the new hash string
 
 # Restart Caddy
@@ -266,7 +266,7 @@ nano docker-compose.yml.example
 docker compose -f docker-compose.yml.example config
 
 # Regenerate from fixed template
-sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
+sudo ./setup.sh install --domain vault.example.com --email admin@example.com --force
 ```
 
 ### Environment Variable Issues
@@ -312,7 +312,7 @@ nano .env
 **Diagnosis**:
 ```bash
 # Test secrets decryption
-./edit-secrets.sh --test
+./edit-secrets.sh list
 make test-secrets
 
 # Verify Age key exists
@@ -325,7 +325,7 @@ ls -la secrets/
 **Solutions**:
 ```bash
 # If Age key is missing, regenerate
-sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
+sudo ./setup.sh install --domain vault.example.com --email admin@example.com --force
 
 # Fix permissions
 chmod 700 secrets/
@@ -338,7 +338,7 @@ sops -d secrets/secrets.yaml
 ### Secrets Environment Leaking to Child Processes
 
 **Symptoms**:
-- `SOPS_AGE_KEY_FILE` remains set after running `./setup.sh`, `./edit-secrets.sh`, or `./setup.sh secrets`
+- `SOPS_AGE_KEY_FILE` remains set after running `./setup.sh`, `./edit-secrets.sh edit`, or `./setup.sh secrets`
 - Docker or rclone subprocesses inherit the Age key file path (visible via `ps aux`)
 
 **Diagnosis**:
@@ -362,7 +362,7 @@ unset SOPS_AGE_KEY_FILE
 unset SOPS_CONFIG
 
 # Re-run the affected script
-./edit-secrets.sh
+./edit-secrets.sh edit
 ```
 
 ## Network and Connectivity Issues
@@ -524,7 +524,7 @@ nano .env
 # Check: SMTP_HOST, SMTP_PORT, SMTP_USERNAME, ALLOWED_SENDER_DOMAINS
 
 # Verify SMTP password in secrets
-./edit-secrets.sh
+./edit-secrets.sh edit
 # Check: smtp_password
 
 # Restart postfix
@@ -544,7 +544,7 @@ docker compose restart postfix
 **Diagnosis**:
 ```bash
 # Check SMTP credentials
-./edit-secrets.sh --test
+./edit-secrets.sh list
 
 # View postfix logs for auth errors
 docker compose logs postfix | grep -i "auth\|error\|fatal"
@@ -556,7 +556,7 @@ docker compose logs postfix | grep -i "auth\|error\|fatal"
 **Solutions**:
 ```bash
 # Update SMTP password
-./edit-secrets.sh
+./edit-secrets.sh edit
 # Set correct smtp_password
 
 # Verify SMTP settings
@@ -575,7 +575,7 @@ docker compose restart postfix vaultwarden
 
 **Symptoms**:
 - Fail2Ban ban notifications not arriving
-- `fail2ban cannot reach postfix SMTP` error in `--test-email` output
+- `fail2ban cannot reach postfix SMTP` error in `maintenance.sh test-email` output
 
 **Diagnosis**:
 ```bash
@@ -632,7 +632,7 @@ docker compose ps vaultwarden
 ./maintenance.sh run --comprehensive
 
 # If Age key missing, regenerate
-sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
+sudo ./setup.sh install --domain vault.example.com --email admin@example.com --force
 
 # Retry backup
 ./backup.sh run db
@@ -655,7 +655,7 @@ make list-backups
 ls -l secrets/keys/age-key.txt
 
 # Confirm the quick-verify actually tests decryption
-./backup.sh run db --list
+./backup.sh list
 ```
 
 **Explanation**: The `verify_backup_quick()` function previously returned **success (0)**
@@ -671,7 +671,7 @@ ls -l secrets/keys/age-key.txt
 
 # If key is missing: restore from your offline copy (recovery kit)
 # If no offline copy exists, regenerate (WARNING: old backups become unrecoverable)
-sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
+sudo ./setup.sh install --domain vault.example.com --email admin@example.com --force
 ```
 
 ### Backup Retention Not Cleaning Up Old Backups
@@ -739,7 +739,7 @@ cat backup.age.meta
 make restore-db
 
 # Try older backup if current is corrupt
-./restore.sh interactive --file /path/to/older-backup.age
+./restore.sh latest --file /path/to/older-backup.age
 
 # After restore, verify services
 ./maintenance.sh health --comprehensive
@@ -811,7 +811,7 @@ docker compose logs fail2ban | grep -i cloudflare
 docker compose restart fail2ban
 
 # Verify Cloudflare firewall token
-./edit-secrets.sh
+./edit-secrets.sh edit
 # Check: fail2ban_cloudflare_firewall_token
 
 # Test Cloudflare firewall token against the WAF Custom Rules endpoint (Rulesets API)
@@ -878,7 +878,7 @@ docker compose exec fail2ban grep 'r?\$' /data/fail2ban/filter.d/vaultwarden-web
 docker compose logs caddy | grep admin
 
 # Verify admin_basic_auth_hash in secrets
-./edit-secrets.sh --test
+./edit-secrets.sh list
 ```
 
 **Solutions**:
@@ -887,7 +887,7 @@ docker compose logs caddy | grep admin
 docker run --rm -it ghcr.io/caddybuilds/caddy-cloudflare:latest caddy hash-password --cost 14
 
 # Update secrets with new hash
-./edit-secrets.sh
+./edit-secrets.sh edit
 # Set: admin_basic_auth_hash (paste bcrypt hash)
 
 # Restart Caddy to apply new hash
@@ -907,7 +907,7 @@ curl -u "admin:your_password" https://vault.example.com/admin
 **Diagnosis**:
 ```bash
 # Check break-glass admin status
-sudo ./create-breakglass-admin.sh status
+sudo ./create-breakglass-admin.sh list
 make breakglass-status
 
 # Verify user exists
@@ -920,7 +920,7 @@ sudo cat /home/vw-breakglass/.ssh/authorized_keys
 **Solutions**:
 ```bash
 # Remove and recreate break-glass admin
-sudo ./create-breakglass-admin.sh remove
+sudo ./create-breakglass-admin.sh revoke
 sudo ./create-breakglass-admin.sh create
 # or:
 make breakglass-remove
@@ -958,7 +958,7 @@ nano docker-compose.yml.example
 # Increase cpus value for affected container
 
 # Regenerate and apply
-sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
+sudo ./setup.sh install --domain vault.example.com --email admin@example.com --force
 ./startup.sh --force
 
 # Run database maintenance if VaultWarden is CPU-heavy
@@ -991,7 +991,7 @@ docker inspect $(docker compose ps -q vaultwarden) | grep -A 10 Memory
 nano docker-compose.yml.example
 
 # Regenerate and restart
-sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
+sudo ./setup.sh install --domain vault.example.com --email admin@example.com --force
 ./startup.sh --force
 
 # Run comprehensive maintenance to free resources

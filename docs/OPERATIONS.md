@@ -238,7 +238,7 @@ make backup-full
 make backup TYPE=full
 
 # Includes: database, config files, Caddy certificates, logs
-# Excludes: secrets (use --type emergency for those)
+# Excludes: secrets (use backup.sh run emergency for those)
 # Retention: 30 days
 # Requires: zstd (installed by setup.sh)
 ```
@@ -292,7 +292,7 @@ make backup-status
 make restore
 
 # Restore specific file
-./restore.sh interactive --file /path/to/backup.age
+./restore.sh latest --file /path/to/backup.age
 
 # Restore latest DB backup (interactive confirmation + key prompt)
 make restore-db
@@ -329,7 +329,7 @@ make update-system
 **Production mode — pinned versions (default):**
 
 ```bash
-# .env (set by setup.sh --auto)
+# .env (set by setup.sh install --auto)
 VAULTWARDEN_VERSION=1.35.4
 CADDY_VERSION=2.11.1
 FAIL2BAN_VERSION=1.1.0-r3
@@ -465,7 +465,7 @@ docker compose logs fail2ban | grep "cloudflare-apiv4"
 
 ```bash
 # Edit secrets interactively
-./edit-secrets.sh
+./edit-secrets.sh edit
 make edit-secrets
 
 # View decrypted secrets without editing
@@ -474,7 +474,7 @@ make test-secrets
 
 # Rotate secrets:
 # 1. Edit
-./edit-secrets.sh
+./edit-secrets.sh edit
 # 2. Update admin_token, admin_basic_auth_hash, smtp_password, etc.
 # 3. Restart to apply
 ./startup.sh --force
@@ -506,14 +506,14 @@ sudo make key-rotate
 make breakglass-create
 
 # Check status
-./create-breakglass-admin.sh status
+./create-breakglass-admin.sh list
 make breakglass-status
 
 # Generate new password
-./create-breakglass-admin.sh reset-password
+./create-breakglass-admin.sh create --force
 
 # Remove when no longer needed
-./create-breakglass-admin.sh remove
+./create-breakglass-admin.sh revoke
 make breakglass-remove
 ```
 
@@ -628,7 +628,7 @@ ls -lh /var/lib/vaultwarden/backups/
 
 # 4. Adjust resource limits if needed
 # Edit docker-compose.yml.example then:
-sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
+sudo ./setup.sh install --domain vault.example.com --email admin@example.com --force
 ```
 
 ---
@@ -746,7 +746,7 @@ docker compose -f docker-compose.yml.example config
 ./backup.sh run emergency
 
 # 4. Apply to production
-sudo ./setup.sh --force --domain vault.example.com --email admin@example.com
+sudo ./setup.sh install --domain vault.example.com --email admin@example.com --force
 
 # 5. Re-apply Cloudflare firewall CIDRs (setup --force resets UFW rules)
 ./maintenance.sh update-firewall

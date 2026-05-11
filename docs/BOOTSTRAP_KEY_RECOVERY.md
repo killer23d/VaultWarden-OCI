@@ -136,15 +136,15 @@ rclone copy your_remote_name:vaultwarden_backups/emergency/ ./
 git clone https://github.com/killer23d/VaultWarden-OCI.git
 cd VaultWarden-OCI
 chmod +x *.sh
-sudo ./setup.sh --domain vault.yourdomain.com --email admin@yourdomain.com
+sudo ./setup.sh install --domain vault.yourdomain.com --email admin@yourdomain.com
 
 # 6. Place Age key and restore
 mkdir -p secrets/keys
 mv ../age-key.txt secrets/keys/
 chmod 600 secrets/keys/age-key.txt
-# Supply the key non-interactively with --key-file, or omit to be prompted
-./restore.sh interactive --file ../emergency_backup_YYYYMMDD_HHMMSS.tar.zst.age \
-             --key-file secrets/keys/age-key.txt --force
+# Supply the key non-interactively with RESTORE_AGE_KEY_FILE, or omit to be prompted
+RESTORE_AGE_KEY_FILE=secrets/keys/age-key.txt \
+  ./restore.sh latest --file ../emergency_backup_YYYYMMDD_HHMMSS.tar.zst.age --force
 
 # 7. Verify
 make health

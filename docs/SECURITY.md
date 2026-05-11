@@ -196,7 +196,7 @@ backup_passphrase: "optional"
 
 ### Enhanced Security Features
 
-The secrets management layer (`lib/secrets.sh`, `edit-secrets.sh`, `setup.sh secrets`) implements several hardened behaviours:
+The secrets management layer (`lib/secrets.sh`, `edit-secrets.sh edit`, `setup.sh secrets`) implements several hardened behaviours:
 
 - **Umask guard on file creation**: `write_secret_file()` saves and restores the process umask around every secret file write, ensuring files are born at mode `600` — not world-readable at any point.
 - **SOPS key scoping**: `decrypt_secret()` unsets `SOPS_AGE_KEY_FILE` immediately after each `sops -d` call so no child process (Docker, rclone, curl) inherits the Age key file path.
@@ -212,13 +212,13 @@ The secrets management layer (`lib/secrets.sh`, `edit-secrets.sh`, `setup.sh sec
 
 ```bash
 # Edit secrets securely (recommended)
-./edit-secrets.sh
+./edit-secrets.sh edit
 
 # Specify editor
-./edit-secrets.sh --editor vim
+./edit-secrets.sh edit --editor vim
 
 # Validate secrets without editing
-./edit-secrets.sh --test
+./edit-secrets.sh list
 # or manually:
 sops -d secrets/secrets.yaml > /dev/null && echo "Valid"
 
@@ -945,7 +945,7 @@ sudo ./create-breakglass-admin.sh create
 make breakglass-create
 
 # Check status
-sudo ./create-breakglass-admin.sh status
+sudo ./create-breakglass-admin.sh list
 make breakglass-status
 ```
 
@@ -1172,7 +1172,7 @@ If you detect suspicious activity:
 4. **Recovery**:
    ```bash
    # If compromised, rotate all secrets
-   ./edit-secrets.sh
+   ./edit-secrets.sh edit
 
    # Update admin token and hash
    # Restart services
@@ -1245,7 +1245,7 @@ make logs-postfix                    # shortcut
 grep -E 'SMTP|POSTFIX|ALLOWED_SENDER' .env
 
 # Verify SMTP password in secrets
-./edit-secrets.sh
+./edit-secrets.sh edit
 ```
 
 ## Compliance and Hardening

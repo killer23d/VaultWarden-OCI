@@ -68,7 +68,17 @@ chmod +x *.sh
 # External credentials (CF tokens, SMTP, push keys) are left as
 # CHANGE_ME placeholders — the post-install summary lists the exact
 # ./edit-secrets.sh rotate commands to fill them in.
-sudo ./setup.sh --domain vault.yourdomain.com --email admin@yourdomain.com --auto
+# Full install — explicit subcommand form (recommended)
+sudo ./setup.sh install --domain vault.yourdomain.com --email admin@yourdomain.com --auto
+
+# All setup.sh entry points:
+sudo ./setup.sh install --domain DOMAIN --email EMAIL [--auto] [--use-latest] [--skip-deps] [--force] [--dry-run]
+sudo ./setup.sh secrets           # Configure/rotate secrets interactively
+sudo ./setup.sh systemd install   # Install and enable all systemd timers
+sudo ./setup.sh systemd status    # Show timer status
+sudo ./setup.sh systemd validate  # Detect stale install paths
+sudo ./setup.sh systemd remove    # Disable and remove all timers
+./setup.sh help                   # Full usage reference
 
 # Re-login so your user picks up the docker group
 exit
@@ -76,7 +86,7 @@ exit
 cd VaultWarden-OCI
 ```
 
-> **`--auto` vs `--use-latest`:** `--auto` is fully non-interactive and does not change container version pins. Pass `--use-latest` separately if you want all container image tags set to `latest` instead of the pinned versions in `.env`.
+> **`--auto` vs `--use-latest`:** `setup.sh install --auto` is fully non-interactive and does not change container version pins. Pass `--use-latest` separately if you want all container image tags set to `latest` instead of the pinned versions in `.env`.
 
 > **`setup.sh` display fix:** The post-install checklist now correctly displays the bare domain name (`DOMAIN_NAME`) rather than the value of the `DOMAIN` variable, which may include the `https://` prefix.
 
@@ -151,7 +161,7 @@ sudo ./setup.sh systemd install
 ./create-breakglass-admin.sh create    # or: make breakglass-create
 ```
 
-> **`setup.sh systemd` improvement:** `--install` now validates all `OnCalendar=` expressions via `systemd-analyze calendar` before enabling timers and warns on invalid expressions. All generated service units now include an `[Install]` section (`WantedBy=multi-user.target`) so `systemctl enable` is no longer a no-op. See [docs/ADVANCED-CUSTOMIZATION.md](docs/ADVANCED-CUSTOMIZATION.md) for timer details.
+> **`setup.sh systemd` improvement:** `setup.sh systemd install` now validates all `OnCalendar=` expressions via `systemd-analyze calendar` before enabling timers and warns on invalid expressions. All generated service units now include an `[Install]` section (`WantedBy=multi-user.target`) so `systemctl enable` is no longer a no-op. See [docs/ADVANCED-CUSTOMIZATION.md](docs/ADVANCED-CUSTOMIZATION.md) for timer details.
 
 The installed systemd timer schedule:
 
@@ -185,7 +195,7 @@ OCI block storage volumes keep vault data independent of the boot volume, making
 ```bash
 # Provision a dedicated data volume in one step
 # WARNING: the device is formatted as ext4 if it has no existing filesystem
-sudo ./setup.sh --domain vault.yourdomain.com --email admin@yourdomain.com --auto \
+sudo ./setup.sh install --domain vault.yourdomain.com --email admin@yourdomain.com --auto \
   --data-device /dev/sdb \
   --data-mount /mnt/vw-data   # optional; /mnt/vw-data is the default
 ```
@@ -294,7 +304,7 @@ Full details, provider setup, Postfix MTA configuration, and troubleshooting: **
 
 | Script | Purpose |
 | :-- | :-- |
-| `setup.sh` | One-time system setup: installs deps, generates `.env` and `docker-compose.yml` from templates, creates Age key, SOPS config, and empty secrets structure. Use `--phase=secrets` for the secrets bootstrap phase or `--phase=systemd` for the systemd integration phase. Pass `--data-device DEV` (and optionally `--data-mount PATH`) to provision a dedicated block storage data volume. In `--auto` mode, also auto-generates passwords/passphrases after all infra phases complete, then shows a single consolidated summary screen. |
+| `setup.sh` | One-time system setup: installs deps, generates `.env` and `docker-compose.yml` from templates, creates Age key, SOPS config, and empty secrets structure. Subcommands: `install --domain DOMAIN --email EMAIL` runs the full install; `secrets` bootstraps or rotates credentials; `systemd <install|remove|validate|status>` manages systemd timer integration. Pass `--data-device DEV` (and optionally `--data-mount PATH`) to provision a dedicated block storage data volume. In `--auto` mode, also auto-generates passwords/passphrases after all infra phases complete, then shows a single consolidated summary screen. |
 | `startup.sh` | Start / stop / restart services. Post-startup health check re-runs verbose diagnostics automatically on failure. |
 | `backup.sh` | Encrypted database and full-system backups. Uses host `sqlite3` with the Online Backup API for atomic, WAL-safe DB snapshots — no Docker container required for backup integrity checks. Accepts `--keep N` to override retention days (must be a positive integer). |
 | `restore.sh` | Interactive or automated restore with a reworked flow: interactive Age decryption key prompt; `--key-file` flag and `RESTORE_AGE_KEY_FILE` env var for scripted/CI use; pre-restore key round-trip validation; post-restore automatic Age key generation and rotation. Uses host `sqlite3` for archive integrity verification — no Docker required. |

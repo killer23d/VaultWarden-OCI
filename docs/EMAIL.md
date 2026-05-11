@@ -273,7 +273,7 @@ container entirely. Edit `docker-compose.yml.example`:
 
 ```yaml
 # Comment out or remove the postfix service block, then regenerate:
-sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.com
+sudo ./setup.sh install --domain vault.yourdomain.com --email admin@yourdomain.com --force
 ./startup.sh --force
 ```
 
@@ -371,7 +371,7 @@ MAILGUN_DOMAIN=mg.yourdomain.com  # optional — set only if different from SMTP
 > backward-compatibility shim maps it to `SMTP_FROM` at runtime. Migrate
 > to `SMTP_FROM=` — the shim will be removed in a future release.
 
-### Secrets (via `./edit-secrets.sh`)
+### Secrets (via `./edit-secrets.sh edit`)
 
 | Secret key | Used by | Description |
 | :-- | :-- | :-- |
@@ -443,7 +443,7 @@ docker exec vaultwarden_fail2ban fail2ban-client get vaultwarden-web-auth action
 
 | Symptom | Likely cause | Fix |
 | :-- | :-- | :-- |
-| API tier always fails | Token not set or wrong key name | Run `./edit-secrets.sh` and verify the matching `email_api_token` is set |
+| API tier always fails | Token not set or wrong key name | Run `./edit-secrets.sh edit` and verify the matching `email_api_token` is set |
 | SMTP tier `SSL handshake failed` | `SMTP_SECURITY` mismatch | `starttls` → port 587; `on` → port 465 |
 | VaultWarden email fails with "authentication required" | `VW_SMTP_AUTH_MECHANISM` not set to `none` | Set `VW_SMTP_AUTH_MECHANISM=none` and `VW_SMTP_EXPLICIT_TLS=false` in `.env` |
 | VaultWarden sends email but `lib/common.sh` (email functions) does not | `SMTP_*` misconfigured; Postfix not relaying | Check Postfix logs: `docker compose logs postfix` |

@@ -24,7 +24,7 @@ nano docker-compose.yml.example
 docker compose -f docker-compose.yml.example config
 
 # 3. Regenerate and apply
-sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.com
+sudo ./setup.sh install --domain vault.yourdomain.com --email admin@yourdomain.com --force
 
 # 4. Restart services
 ./startup.sh --force
@@ -205,7 +205,7 @@ AGE_VERSION=""           # blank = auto-resolve latest
 Or override at runtime without editing the file:
 
 ```bash
-SOPS_VERSION=v3.9.4 sudo ./setup.sh --domain vault.yourdomain.com --email admin@yourdomain.com
+SOPS_VERSION=v3.9.4 sudo ./setup.sh install --domain vault.yourdomain.com --email admin@yourdomain.com
 ```
 
 | Variable | Default | Example |
@@ -521,7 +521,7 @@ services:
 Comment out or delete the entire `postfix:` service block in `docker-compose.yml.example`, then regenerate:
 
 ```bash
-sudo ./setup.sh --force --domain vault.yourdomain.com --email admin@yourdomain.com
+sudo ./setup.sh install --domain vault.yourdomain.com --email admin@yourdomain.com --force
 ./startup.sh --force
 ```
 
@@ -607,8 +607,8 @@ BACKUP_RETENTION_DAYS=30
 Per-type overrides take precedence over the global default:
 ```bash
 # Per-type retention (uncomment in .env to override BACKUP_RETENTION_DAYS)
-BACKUP_RETENTION_DB_DAYS=14    # retention for --type db backups
-BACKUP_RETENTION_FULL_DAYS=60  # retention for --type full backups
+BACKUP_RETENTION_DB_DAYS=14    # retention for db backups
+BACKUP_RETENTION_FULL_DAYS=60  # retention for full backups
 ```
 
 > **Retention on restored hosts:** Backup retention age is calculated from the **timestamp embedded in the filename** (e.g., `vaultwarden-full-20260312-030000.tar.gz.age`), not from the file's `ctime`. This means backups restored to a new host are cleaned up correctly based on their original creation date, not the date they were copied.
@@ -710,7 +710,7 @@ curl -sX POST https://your-webhook-url/notify \
 
 - Edit `.example` templates — never generated files
 - Validate with `docker compose config` before applying
-- Run `sudo ./setup.sh --force ...` to regenerate
+- Run `sudo ./setup.sh install --force ...` to regenerate
 - Restart with `./startup.sh --force`
 - Verify with `./maintenance.sh health` or `make health`
 - Commit template changes to version control
