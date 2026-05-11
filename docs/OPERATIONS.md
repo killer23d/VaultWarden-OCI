@@ -288,11 +288,11 @@ make list-backups
 make backup-status
 
 # Interactive restore (recommended)
-./restore.sh
+./restore.sh interactive
 make restore
 
 # Restore specific file
-./restore.sh --file /path/to/backup.age
+./restore.sh interactive --file /path/to/backup.age
 
 # Restore latest DB backup (interactive confirmation + key prompt)
 make restore-db
@@ -510,7 +510,7 @@ make breakglass-create
 make breakglass-status
 
 # Generate new password
-./create-breakglass-admin.sh --password
+./create-breakglass-admin.sh reset-password
 
 # Remove when no longer needed
 ./create-breakglass-admin.sh remove

@@ -228,7 +228,7 @@ test-secrets: ## Test secrets decryption
 
 test-email: ## Send a test email notification
 	@echo "$(BLUE)Sending test email...$(NC)"
-	@./backup.sh test-email
+	@./maintenance.sh test-email
 
 # ===========================================================================
 ##@ Service Management
@@ -397,11 +397,11 @@ health: ## Run health checks (set AUTO_RECOVER=true to auto-recover)
 
 health-quick: ## Quick health check (essential services only)
 	@echo "$(BLUE)Running quick health check...$(NC)"
-	@sudo ./maintenance.sh health --quick
+	@sudo ./maintenance.sh health --comprehensive
 
 health-email: ## Test email health
-	@echo "$(BLUE)Testing email health...$(NC)"
-	@sudo ./maintenance.sh health --email
+	@echo "$(BLUE)Testing email health and sending notification...$(NC)"
+	@sudo ./maintenance.sh health --report
 
 watch: ## Watch service logs in real-time (Ctrl+C to stop)
 	$(call check-docker)
@@ -509,12 +509,12 @@ backup-status: ## Show backup health summary
 restore: ## Interactive restore (guided)
 	$(call require-root)
 	@echo "$(BLUE)Starting interactive restore...$(NC)"
-	@./restore.sh $(if $(BACKUP_FILE),--file $(BACKUP_FILE),)
+	@./restore.sh interactive $(if $(BACKUP_FILE),--file $(BACKUP_FILE),)
 
-restore-preflight: ## Verify restore prerequisites without executing
+restore-preflight: ## Preview restore prerequisites without executing
 	$(call require-root)
-	@echo "$(BLUE)Running restore preflight check...$(NC)"
-	@./restore.sh --preflight $(if $(BACKUP_FILE),--file $(BACKUP_FILE),)
+	@echo "$(BLUE)Running restore preflight (dry-run)...$(NC)"
+	@./restore.sh interactive --dry-run $(if $(BACKUP_FILE),--file $(BACKUP_FILE),)
 
 restore-db: ## Restore database only from latest backup
 	$(call require-root)
@@ -524,7 +524,7 @@ restore-db: ## Restore database only from latest backup
 restore-remote: ## Restore from remote storage (rclone)
 	$(call require-root)
 	@echo "$(BLUE)Restoring from remote storage...$(NC)"
-	@./restore.sh --remote
+	@./restore.sh interactive --remote
 
 # ===========================================================================
 ##@ Key Management
@@ -736,22 +736,22 @@ update-dns: ## Update Cloudflare DNS records
 maintenance: ## Run routine maintenance tasks
 	$(call require-root)
 	@echo "$(BLUE)Running maintenance...$(NC)"
-	@./maintenance.sh
+	@./maintenance.sh run
 
 maintenance-full: ## Run full maintenance with all checks
 	$(call require-root)
 	@echo "$(BLUE)Running full maintenance...$(NC)"
-	@./maintenance.sh --full
+	@./maintenance.sh run --comprehensive
 
 db-maint: ## Run database maintenance (VACUUM, integrity check)
 	$(call require-root)
 	@echo "$(BLUE)Running database maintenance...$(NC)"
 	@./maintenance.sh db-maint
 
-db-backup: ## Quick database backup via maintenance script
+db-backup: ## Quick database backup
 	$(call require-root)
 	@echo "$(BLUE)Running quick database backup...$(NC)"
-	@./maintenance.sh --backup
+	@./backup.sh run db
 
 # ===========================================================================
 ##@ Systemd Integration
@@ -951,9 +951,7 @@ prune: ## Remove unused Docker resources (containers, networks, images)
 uninstall: ## Uninstall VaultWarden-OCI (interactive)
 	$(call require-root)
 	@echo "$(RED)WARNING: This will remove VaultWarden-OCI from this system.$(NC)"
-	@./uninstall-vaultwarden.sh
+	@./uninstall-vaultwarden.sh run
 
-uninstall-dry-run: ## Preview what uninstall would remove
-	$(call require-root)
-	@echo "$(BLUE)Uninstall dry run...$(NC)"
-	@./uninstall-vaultwarden.sh --dry-run
+uninstall-dry-run: ## Show uninstall help (no dry-run mode available)
+	@./uninstall-vaultwarden.sh --help

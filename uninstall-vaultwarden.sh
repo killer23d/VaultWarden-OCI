@@ -15,6 +15,40 @@ success() { echo -e "${GREEN}[OK]${RESET}    $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${RESET}  $*"; }
 die()     { echo -e "${RED}[ERROR]${RESET} $*" >&2; exit 1; }
 
+# ─── Help ─────────────────────────────────────────────────────────────────────
+show_help() {
+    echo "Usage: sudo bash $0 run [--i-have-saved-my-recovery-kit] [--force]"
+    echo ""
+    echo "SUBCOMMANDS:"
+    echo "  run    Perform the full idempotent uninstall (interactive confirmation required)"
+    echo ""
+    echo "OPTIONS (used after 'run'):"
+    echo "  --i-have-saved-my-recovery-kit"
+    echo "      Pre-confirm that you have saved secrets/keys/age-key.txt"
+    echo "      to a location OUTSIDE this host before running."
+    echo "      Without this flag the script refuses to continue when"
+    echo "      the age key is present on disk."
+    echo ""
+    echo "  --force"
+    echo "      Skip ALL AGE key checks (both the CLI flag pre-check"
+    echo "      and the interactive fingerprint confirmation)."
+    echo "      WARNING: destructive — implies --i-have-saved-my-recovery-kit"
+    echo "      and bypasses the fingerprint gate. Use only in automated/CI"
+    echo "      pipelines where the key is confirmed saved by external means."
+    echo ""
+    echo "  Two-prompt safety model for age key destruction:"
+    echo "    1. CLI flag  --i-have-saved-my-recovery-kit  (pre-check)."
+    echo "    2. Interactive fingerprint confirmation immediately before"
+    echo "       the project directory (and key) is deleted.  You must"
+    echo "       type the exact Age public key shown on screen."
+    echo "       This second prompt is unconditional — it cannot be"
+    echo "       skipped or scripted away without the actual key value."
+    echo ""
+    echo "  Without the age key ALL encrypted backups are permanently"
+    echo "  unrecoverable.  Export a recovery kit first:"
+    echo "    sudo bash edit-secrets.sh export-recovery-kit"
+}
+
 # ─── Argument parsing ─────────────────────────────────────────────────────────
 # --i-have-saved-my-recovery-kit  Satisfy the first-pass age-key guard
 #                                  (CLI pre-check). A second interactive
@@ -25,42 +59,37 @@ die()     { echo -e "${RED}[ERROR]${RESET} $*" >&2; exit 1; }
 #                                  the key is confirmed saved externally.
 I_HAVE_SAVED_RECOVERY_KIT=false
 FORCE=false
-for _arg in "$@"; do
-    case "$_arg" in
-        --i-have-saved-my-recovery-kit) I_HAVE_SAVED_RECOVERY_KIT=true ;;
-        --force) FORCE=true ;;
-        --help)
-            echo "Usage: sudo bash $0 [--i-have-saved-my-recovery-kit] [--force]"
-            echo ""
-            echo "  --i-have-saved-my-recovery-kit"
-            echo "      Pre-confirm that you have saved secrets/keys/age-key.txt"
-            echo "      to a location OUTSIDE this host before running."
-            echo "      Without this flag the script refuses to continue when"
-            echo "      the age key is present on disk."
-            echo ""
-            echo "  --force"
-            echo "      Skip ALL AGE key checks (both the CLI flag pre-check"
-            echo "      and the interactive fingerprint confirmation)."
-            echo "      WARNING: destructive — implies --i-have-saved-my-recovery-kit"
-            echo "      and bypasses the fingerprint gate. Use only in automated/CI"
-            echo "      pipelines where the key is confirmed saved by external means."
-            echo ""
-            echo "  Two-prompt safety model for age key destruction:"
-            echo "    1. CLI flag  --i-have-saved-my-recovery-kit  (pre-check)."
-            echo "    2. Interactive fingerprint confirmation immediately before"
-            echo "       the project directory (and key) is deleted.  You must"
-            echo "       type the exact Age public key shown on screen."
-            echo "       This second prompt is unconditional — it cannot be"
-            echo "       skipped or scripted away without the actual key value."
-            echo ""
-            echo "  Without the age key ALL encrypted backups are permanently"
-            echo "  unrecoverable.  Export a recovery kit first:"
-            echo "    sudo bash edit-secrets.sh export-recovery-kit"
-            exit 0
-            ;;
-        *) ;;
-    esac
-done
+
+# Zero arguments → show help and exit 1 (uninstall is destructive)
+if [[ $# -eq 0 ]]; then
+    show_help
+    exit 1
+fi
+
+case "$1" in
+    run)
+        shift
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --i-have-saved-my-recovery-kit) I_HAVE_SAVED_RECOVERY_KIT=true; shift ;;
+                --force)                        FORCE=true;                      shift ;;
+                *)
+                    echo "${RED}[ERROR]${RESET} Unknown option: '$1'" >&2
+                    show_help
+                    exit 1
+                    ;;
+            esac
+        done
+        ;;
+    help|--help|-h)
+        show_help; exit 0
+        ;;
+    *)
+        echo "${RED}[ERROR]${RESET} Unknown subcommand: '$1'" >&2
+        show_help
+        exit 1
+        ;;
+esac
 
 # ─── Root check ───────────────────────────────────────────────────────────────
 [[ $EUID -eq 0 ]] || die "Run as root: sudo bash $0"

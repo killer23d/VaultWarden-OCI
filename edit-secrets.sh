@@ -326,8 +326,17 @@ if [[ $# -gt 0 ]]; then
         export-recovery-kit)
             EXPORT_RECOVERY_KIT=true; shift
             ;;
-        --help|-h)
+        help|--help|-h)
             show_help; exit 0
+            ;;
+        --*)
+            # Falls through to the options while-loop below
+            ;;
+        *)
+            log_error "Unknown subcommand: '$1'"
+            log_error "Valid subcommands: view | list | rotate FIELD | export-recovery-kit"
+            log_error "Run './edit-secrets.sh --help' for usage."
+            show_help; exit 1
             ;;
     esac
 fi

@@ -179,7 +179,7 @@ Once healthy, switch Cloudflare to **Proxied (Orange Cloud)** and set SSL/TLS to
 sudo ./setup.sh systemd install
 
 # Create break-glass emergency admin for OCI serial console
-./create-breakglass-admin.sh
+./create-breakglass-admin.sh create
 # or: make breakglass-create
 
 # Create initial backups
@@ -234,7 +234,7 @@ sudo ./setup.sh systemd install
   rclone ls your_remote_name:vaultwarden_backups/
   ```
   See [BACKUP-RESTORE.md](BACKUP-RESTORE.md#️-offsite-storage-rclone) for the full offsite storage reference, including supported remote types and systemd timer integration.
-- ✅ Test `./restore.sh --dry-run`
+- ✅ Test `./restore.sh interactive --dry-run`
 - ✅ Review `docker compose logs fail2ban` for blocking activity
 - ✅ If push notifications enabled, verify `PUSH_ENABLED` and `internal: true` settings are compatible
 

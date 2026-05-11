@@ -143,7 +143,7 @@ mkdir -p secrets/keys
 mv ../age-key.txt secrets/keys/
 chmod 600 secrets/keys/age-key.txt
 # Supply the key non-interactively with --key-file, or omit to be prompted
-./restore.sh --file ../emergency_backup_YYYYMMDD_HHMMSS.tar.zst.age \
+./restore.sh interactive --file ../emergency_backup_YYYYMMDD_HHMMSS.tar.zst.age \
              --key-file secrets/keys/age-key.txt --force
 
 # 7. Verify

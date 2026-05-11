@@ -260,7 +260,7 @@ sudo ./restore.sh
 make restore
 
 # Restore from a remote (rclone) backup:
-sudo ./restore.sh --remote
+sudo ./restore.sh interactive --remote
 make restore-remote
 ```
 
@@ -279,8 +279,8 @@ RESTORE_AGE_KEY_FILE=/root/keys/age-key-old.txt \
   sudo ./restore.sh latest db --force
 
 # Restore a specific file
-sudo ./restore.sh --file /path/to/backup.age
-sudo ./restore.sh --file /path/to/backup.age --force
+sudo ./restore.sh interactive --file /path/to/backup.age
+sudo ./restore.sh interactive --file /path/to/backup.age --force
 
 # Restore the latest backup, skip confirmation and skip pre-restore backup
 # (used internally by maintenance.sh update rollback)
@@ -377,7 +377,7 @@ sudo ./setup.sh --domain vault.yourdomain.com --email admin@yourdomain.com
 #    restore.sh will prompt for the age key that encrypted this backup.
 #    Use the key from INSIDE the emergency kit (extracted separately), or
 #    pass it directly with --key-file.
-sudo ./restore.sh --file ./backups/emergency/emergency_backup-TIMESTAMP.tar.zst.age \
+sudo ./restore.sh interactive --file ./backups/emergency/emergency_backup-TIMESTAMP.tar.zst.age \
   --key-file /path/to/age-key-from-emergency-kit.txt
 
 # 6. A new age key is generated automatically after the restore.
@@ -466,7 +466,7 @@ sha256sum -c backup.age.sha256
 make restore    # select an older backup from the list
 
 # 4. If you have a matching key file, pass it directly:
-sudo ./restore.sh --file /path/to/backup.age --key-file /path/to/matching-age-key.txt
+sudo ./restore.sh interactive --file /path/to/backup.age --key-file /path/to/matching-age-key.txt
 ```
 
 **"rclone sync failed"**

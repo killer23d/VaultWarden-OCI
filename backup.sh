@@ -73,30 +73,25 @@ EOF
 # ---------------------------------------------------------------------------
 
 _SUBCMD=""
-if [[ $# -gt 0 ]]; then
-    case "$1" in
-        run|list|verify|rotate)
-            _SUBCMD="$1"
-            shift
-            ;;
-        --help|-h)
-            show_help; exit 0
-            ;;
-        *)
-            log_error "Unknown subcommand: '$1'"
-            log_error "Valid subcommands: run [TYPE] | list | verify | rotate"
-            log_error "Run './backup.sh --help' for usage."
-            exit 2
-            ;;
-    esac
+if [[ $# -eq 0 ]]; then
+    show_help; exit 0
 fi
 
-if [[ -z "$_SUBCMD" ]]; then
-    log_error "No subcommand given."
-    log_error "Valid subcommands: run [TYPE] | list | verify | rotate"
-    log_error "Run './backup.sh --help' for usage."
-    exit 2
-fi
+case "$1" in
+    run|list|verify|rotate)
+        _SUBCMD="$1"
+        shift
+        ;;
+    help|--help|-h)
+        show_help; exit 0
+        ;;
+    *)
+        log_error "Unknown subcommand: '$1'"
+        log_error "Valid subcommands: run [TYPE] | list | verify | rotate"
+        log_error "Run './backup.sh --help' for usage."
+        exit 1
+        ;;
+esac
 
 case "$_SUBCMD" in
     run)
@@ -146,9 +141,8 @@ case "$_SUBCMD" in
         done
         ;;
     "")
-        log_error "No subcommand given."
-        log_error "Valid subcommands: run [TYPE] | list | verify | rotate"
-        exit 2
+        # unreachable — handled above by the top-level guard
+        show_help; exit 0
         ;;
 esac
 

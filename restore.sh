@@ -48,7 +48,7 @@ _require_env_for_live_restore() {
     local arg
     for arg in "$@"; do
         case "$arg" in
-            --help|-h|list) return 0 ;;
+            help|--help|-h|list) return 0 ;;
         esac
     done
 
@@ -62,10 +62,10 @@ _require_env_for_live_restore() {
         echo "    nano .env   # set DOMAIN, CLOUDFLARE_*, PUID, PGID, etc." >&2
         echo "" >&2
         echo "  For a bare-metal disaster-recovery restore (no .env yet)," >&2
-        echo "  use --remote so restore.sh can download and restore your" >&2
-        echo "  .env from the encrypted remote backup:" >&2
+        echo "  use the interactive subcommand with --remote so restore.sh can" >&2
+        echo "  download and restore your .env from the encrypted remote backup:" >&2
         echo "" >&2
-        echo "    sudo ./restore.sh --remote" >&2
+        echo "    sudo ./restore.sh interactive --remote" >&2
         echo "" >&2
         exit 1
     fi
@@ -133,16 +133,15 @@ show_help() {
 VaultWarden-OCI Restore Script
 
 USAGE:
-    sudo ./restore.sh [subcommand] [options]
+    sudo ./restore.sh <subcommand> [options]
 
 SUBCOMMANDS:
     latest [TYPE]     Restore the newest local backup (TYPE: db | full | emergency)
     list              List available local backups (no root required)
     list --remote     List available remote backups (no root required)
-
-    When no subcommand is given, an interactive numbered menu is presented.
-    If rclone is configured, you are first asked whether to restore from
-    a LOCAL or REMOTE backup.
+    interactive       Interactive guided restore — shows a numbered backup menu.
+                      If rclone is configured, you are first asked whether to
+                      restore from a LOCAL or REMOTE backup.
 
     After the backup is selected you will be prompted for the age private
     key that was used to encrypt that backup.  Press Enter to use the key
@@ -152,7 +151,7 @@ SUBCOMMANDS:
     installed to all configured locations, and displayed prominently.
     Save it before pressing Enter to start the services.
 
-OPTIONS (used after a subcommand or without a subcommand for interactive mode):
+OPTIONS (used after a subcommand):
     --file FILE             Restore a specific backup file (.age)
     --remote                Skip the local/remote menu; restore from rclone remote
     --key-file FILE         Path to the age private key for decrypting this backup
@@ -186,42 +185,66 @@ EXAMPLES:
     ./restore.sh list                    # List local backups (no sudo)
     ./restore.sh list --remote           # List remote backups (no sudo)
 
-    # ── TARGETED RESTORE ───────────────────────────────────────────
-    sudo ./restore.sh --remote                          # Interactive remote restore
-    sudo ./restore.sh --file "/var/lib/vaultwarden/backups/full/full_20260101.tar.zst.age"
-    sudo ./restore.sh --key-file /tmp/old-age-key.txt  # Supply key non-interactively
+    # ── INTERACTIVE MENU ─────────────────────────────────────────
+    sudo ./restore.sh interactive                    # Select from local backups
+    sudo ./restore.sh interactive --remote           # Select from remote backups
 
-    # ── BARE-METAL DISASTER RECOVERY ───────────────────────────────
+    # ── TARGETED RESTORE ──────────────────────────────────────────
+    sudo ./restore.sh interactive --file "/var/lib/vaultwarden/backups/full/full_20260101.tar.zst.age"
+    sudo ./restore.sh interactive --key-file /tmp/old-age-key.txt  # Supply key non-interactively
+
+    # ── BARE-METAL DISASTER RECOVERY ──────────────────────────────
     sudo ./restore.sh latest --from-recovery-kit /mnt/usb/recovery-kit.txt --force
 EOF
 }
 
 # ---------------------------------------------------------------------------
 # Argument Parsing — subcommand-first, then options.
-# 'latest' and 'list' are positional subcommands.
-# All other behaviors are driven by --file / --remote / --key-file etc.
+# 'latest', 'list', and 'interactive' are positional subcommands.
 # ---------------------------------------------------------------------------
+
+# Handle --help / -h / help before the .env check so they always work.
 if [[ $# -gt 0 ]]; then
     case "$1" in
-        latest)
-            shift
-            USE_LATEST=true
-            # Optional positional TYPE (db|full|emergency) before any --flags
-            if [[ $# -gt 0 && "$1" != --* ]]; then
-                RESTORE_TYPE="$1"; shift
-            fi
-            ;;
-        list)
-            shift
-            LIST_ONLY=true
-            # Allow 'list --remote' as a positional form
-            [[ "${1:-}" == "--remote" ]] && { USE_REMOTE=true; shift; }
-            ;;
-        --help|-h)
-            show_help; exit 0
-            ;;
+        help|--help|-h) show_help; exit 0 ;;
     esac
 fi
+
+# Zero arguments → show help and exit 1 (restore is a destructive operation)
+if [[ $# -eq 0 ]]; then
+    show_help
+    exit 1
+fi
+
+_require_env_for_live_restore "$@"
+
+case "$1" in
+    latest)
+        shift
+        USE_LATEST=true
+        # Optional positional TYPE (db|full|emergency) before any --flags
+        if [[ $# -gt 0 && "$1" != --* ]]; then
+            RESTORE_TYPE="$1"; shift
+        fi
+        ;;
+    list)
+        shift
+        LIST_ONLY=true
+        # Allow 'list --remote' as a positional form
+        [[ "${1:-}" == "--remote" ]] && { USE_REMOTE=true; shift; }
+        ;;
+    interactive)
+        shift
+        # All options parsed in the while loop below
+        ;;
+    *)
+        log_error "Unknown subcommand: '$1'"
+        log_error "Valid subcommands: latest [TYPE] | list [--remote] | interactive"
+        log_error "Run './restore.sh --help' for usage."
+        show_help
+        exit 1
+        ;;
+esac
 
 # Parse remaining options (apply to interactive mode, 'latest', or 'list')
 while [[ $# -gt 0 ]]; do

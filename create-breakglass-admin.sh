@@ -231,7 +231,7 @@ case "$1" in
     reset-password)    RESET_PASSWORD=true; shift ;;
     status)                    SHOW_STATUS=true;    shift ;;
     validate)                VALIDATE_ONLY=true;  shift ;;
-    --help|-h)                          show_help; exit 0 ;;
+    help|--help|-h)                          show_help; exit 0 ;;
     *)
         log_error "Unknown subcommand: $1  (expected: create | remove | reset-password | status | validate)"
         show_help; exit 1

@@ -203,17 +203,23 @@ if [[ $# -gt 0 ]]; then
         systemd)
             PHASE="systemd"
             shift
-            # 'systemd install' vs 'systemd --install' — normalise positional
-            if [[ $# -gt 0 && "$1" != --* ]]; then
-                PHASE_ARGS=("--${1}"); shift
-                PHASE_ARGS+=("$@")
-            else
-                PHASE_ARGS=("$@")
-            fi
+            # Pass all remaining args positionally — run_phase_systemd
+            # accepts install|remove|validate|status as positional sub-actions.
+            PHASE_ARGS=("$@")
             set --
             ;;
-        --help|-h)
+        help|--help|-h)
             show_help; exit 0
+            ;;
+        --domain|--email|--auto|--use-latest|--skip-deps|--force|--dry-run|--data-device|--data-mount)
+            # Full-setup flag — fall through to the while loop below
+            ;;
+        *)
+            log_error "Unknown subcommand: '$1'"
+            log_error "Valid subcommands: secrets | systemd"
+            log_error "For full setup use: sudo ./setup.sh --domain DOMAIN --email EMAIL [OPTIONS]"
+            log_error "Run './setup.sh --help' for usage."
+            show_help; exit 1
             ;;
     esac
 fi
@@ -2548,13 +2554,13 @@ EOF
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --install)   INSTALL=true;   shift ;;
-        --remove)    REMOVE=true;    shift ;;
-        --validate)  VALIDATE=true;  shift ;;
-        --status)    STATUS=true;    shift ;;
-        --dry-run)   DRY_RUN=true;   shift ;;
-        --help)      _sd_show_help; exit 0 ;;
-        *) log_error "Unknown option: $1"; _sd_show_help; exit 1 ;;
+        install)   INSTALL=true;   shift ;;
+        remove)    REMOVE=true;    shift ;;
+        validate)  VALIDATE=true;  shift ;;
+        status)    STATUS=true;    shift ;;
+        --dry-run) DRY_RUN=true;   shift ;;
+        help|--help) _sd_show_help; exit 0 ;;
+        *) log_error "Unknown sub-action: $1"; _sd_show_help; exit 1 ;;
     esac
 done
 
