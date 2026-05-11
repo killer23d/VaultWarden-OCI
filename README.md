@@ -67,7 +67,7 @@ chmod +x *.sh
 # VaultWarden admin password, Caddy admin password, and backup passphrase.
 # External credentials (CF tokens, SMTP, push keys) are left as
 # CHANGE_ME placeholders — the post-install summary lists the exact
-# ./edit-secrets.sh --rotate commands to fill them in.
+# ./edit-secrets.sh rotate commands to fill them in.
 sudo ./setup.sh --domain vault.yourdomain.com --email admin@yourdomain.com --auto
 
 # Re-login so your user picks up the docker group
@@ -101,19 +101,19 @@ Then supply the external credentials that `--auto` cannot generate for you:
 
 ```bash
 # Cloudflare tokens (required — Caddy TLS + Fail2ban edge blocking)
-./edit-secrets.sh --rotate caddy_cloudflare_dns_token
-./edit-secrets.sh --rotate fail2ban_cloudflare_firewall_token
+./edit-secrets.sh rotate caddy_cloudflare_dns_token
+./edit-secrets.sh rotate fail2ban_cloudflare_firewall_token
 
 ## Email API token (required for Tier 1)
-./edit-secrets.sh --rotate email_api_token
+./edit-secrets.sh rotate email_api_token
 # Single canonical key used for all providers (selected by EMAIL_PROVIDER)
 
 # SMTP password (required for Tier 2 relay and Postfix sidecar)
-./edit-secrets.sh --rotate smtp_password
+./edit-secrets.sh rotate smtp_password
 
 # Push notification keys (optional — mobile app push alerts)
-./edit-secrets.sh --rotate push_installation_id
-./edit-secrets.sh --rotate push_installation_key
+./edit-secrets.sh rotate push_installation_id
+./edit-secrets.sh rotate push_installation_key
 ```
 
 **Interactive install (no `--auto`):** `setup.sh` creates the skeleton and displays a next-steps screen. Follow the steps printed on screen — edit `.env` first, then run `./setup.sh secrets` to be prompted for all credentials at once.
@@ -145,7 +145,7 @@ sudo ./setup.sh systemd install
 
 # Export a plaintext recovery kit to your password manager
 # Run this AFTER all secrets are configured so everything is included
-./edit-secrets.sh --export-recovery-kit
+./edit-secrets.sh export-recovery-kit
 
 # Create emergency admin for OCI serial console recovery
 ./create-breakglass-admin.sh    # or: make breakglass-create
@@ -264,8 +264,8 @@ VW_SMTP_EXPLICIT_TLS=false
 
 ```bash
 # Secrets
-./edit-secrets.sh --rotate email_api_token
-./edit-secrets.sh --rotate smtp_password
+./edit-secrets.sh rotate email_api_token
+./edit-secrets.sh rotate smtp_password
 ```
 
 ```bash
@@ -367,7 +367,7 @@ sudo ./backup.sh run full --keep 30
 
 The restore flow now includes an interactive Age decryption key prompt, a pre-restore key round-trip validation, and automatic post-restore key rotation. Pass `--key-file <path>` or set `RESTORE_AGE_KEY_FILE` for non-interactive/CI restores. See [docs/BACKUP-RESTORE.md](docs/BACKUP-RESTORE.md) for the full 12-step restore procedure.
 
-> **⚠️ Keep a separate copy of `secrets/keys/age-key.txt`** — it is required to decrypt all backups on a new server. Run `./edit-secrets.sh --export-recovery-kit` after setup to store it in your password manager alongside all other credentials.
+> **⚠️ Keep a separate copy of `secrets/keys/age-key.txt`** — it is required to decrypt all backups on a new server. Run `./edit-secrets.sh export-recovery-kit` after setup to store it in your password manager alongside all other credentials.
 
 Full procedures: [docs/BACKUP-RESTORE.md](docs/BACKUP-RESTORE.md)
 

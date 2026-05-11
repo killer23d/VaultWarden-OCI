@@ -21,7 +21,7 @@ QUIET=false
 FORCE=false
 
 EMAIL_NOTIFY=false   # set by --email; send_notification_email() called on completion
-LIST_ONLY=false      # set by --list; print existing backups and exit (no root needed)
+LIST_ONLY=false      # set by list subcommand; print existing backups and exit (no root needed)
 RCLONE_SYNC=false    # set by --rclone; sync encrypted backup to rclone remote after creation
 FULL_VERIFY=false    # set by --full-verification; decrypt + integrity check before sync
 
@@ -58,21 +58,10 @@ EXAMPLES:
     sudo ./backup.sh run                # Auto-mode backup (db or full based on schedule)
     sudo ./backup.sh run db             # Database-only backup
     sudo ./backup.sh run full           # Full state backup
-    sudo ./backup.sh run db --email     # DB backup with email notification
-    sudo ./backup.sh run db --rclone --email          # DB backup + offsite + notify
-    sudo ./backup.sh run full --full-verification --rclone --email
-    ./backup.sh list                    # List existing backups (no sudo)
-    sudo ./backup.sh verify             # Verify the latest backup
-    sudo ./backup.sh rotate --keep 30   # Prune backups older than 30 days
-
-NOTE: Legacy flags (--type, --list, etc.) are still accepted for backward
-      compatibility with existing automation and systemd timer units.
-
-      Backups are written to BACKUP_DIR (set in .env).  When BACKUP_DIR is not
-      explicitly configured, it defaults to \$PROJECT_STATE_DIR/backups — which
-      keeps backups on the same volume as your VaultWarden data (correct for
-      both boot-volume and separate-volume storage modes).  If you override
-      BACKUP_DIR, ensure the path lives on the data volume, not the boot volume.
+    sudo ./backup.sh run db --keep 30             # Keep 30 days of backups
+    ./backup.sh list                              # List existing backups (no sudo)
+    sudo ./backup.sh verify                       # Verify the latest backup
+    sudo ./backup.sh rotate --keep 30             # Prune backups older than 30 days
 EOF
 }
 
@@ -93,7 +82,20 @@ if [[ $# -gt 0 ]]; then
         --help|-h)
             show_help; exit 0
             ;;
+        *)
+            log_error "Unknown subcommand: '$1'"
+            log_error "Valid subcommands: run [TYPE] | list | verify | rotate"
+            log_error "Run './backup.sh --help' for usage."
+            exit 2
+            ;;
     esac
+fi
+
+if [[ -z "$_SUBCMD" ]]; then
+    log_error "No subcommand given."
+    log_error "Valid subcommands: run [TYPE] | list | verify | rotate"
+    log_error "Run './backup.sh --help' for usage."
+    exit 2
 fi
 
 case "$_SUBCMD" in
@@ -144,23 +146,9 @@ case "$_SUBCMD" in
         done
         ;;
     "")
-        # No recognized subcommand — legacy flag-only mode for backward compat
-        while [[ $# -gt 0 ]]; do
-            case $1 in
-                --type)                   BACKUP_TYPE="$2"; shift 2 ;;
-                --dry-run)                DRY_RUN=true;     shift ;;
-                --keep)                   KEEP_DAYS="$2";   shift 2 ;;
-                --quiet)                  QUIET=true;       shift ;;
-                --force)                  FORCE=true;       shift ;;
-                --email)                  EMAIL_NOTIFY=true; shift ;;
-                --list)                   LIST_ONLY=true;   shift ;;
-                --rclone)                 RCLONE_SYNC=true; shift ;;
-                --full-verification)      FULL_VERIFY=true; shift ;;
-                --skip-full-verification) FULL_VERIFY=false; shift ;;
-                --help)                   show_help; exit 0 ;;
-                *)                        log_error "Unknown option: $1"; show_help; exit 2 ;;
-            esac
-        done
+        log_error "No subcommand given."
+        log_error "Valid subcommands: run [TYPE] | list | verify | rotate"
+        exit 2
         ;;
 esac
 
@@ -1123,7 +1111,7 @@ main() {
     if [[ "$DRY_RUN" != "true" ]]; then
         SOPS_AGE_KEY_FILE="$age_key_file" check_age_key_health || {
             log_error "Age key health check failed — aborting backup to avoid encrypting with a bad key."
-            log_error "Run './maintenance.sh --health --comprehensive' for diagnostics."
+            log_error "Run './maintenance.sh health --comprehensive' for diagnostics."
             exit 1
         }
     fi

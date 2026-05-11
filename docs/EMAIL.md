@@ -81,7 +81,7 @@ Store the token in the canonical `email_api_token` key (used for all providers):
 
 ```bash
 # Any provider selected by EMAIL_PROVIDER uses this same secrets key
-./edit-secrets.sh --rotate email_api_token
+./edit-secrets.sh rotate email_api_token
 ```
 
 In `.env`, uncomment **only** the line matching your `EMAIL_PROVIDER` and leave
@@ -136,7 +136,7 @@ SMTP_TIMEOUT=30
 Store the SMTP password in secrets (never in `.env`):
 
 ```bash
-./edit-secrets.sh --rotate smtp_password
+./edit-secrets.sh rotate smtp_password
 ```
 
 ### VaultWarden container SMTP
@@ -220,7 +220,7 @@ POSTFIX_MESSAGE_SIZE_LIMIT=10240000
 The SMTP password is injected via Docker secret — store it with:
 
 ```bash
-./edit-secrets.sh --rotate smtp_password
+./edit-secrets.sh rotate smtp_password
 ```
 
 ### Postfix container versions
@@ -450,7 +450,7 @@ docker exec vaultwarden_fail2ban fail2ban-client get vaultwarden-web-auth action
 | Fail2Ban notifications not arriving | Postfix container not running | `docker compose up -d postfix` |
 | Fail2Ban notifications not arriving | `F2B_DEST_MAIL` contains `${ADMIN_EMAIL}` literal | Replace with the actual address in `.env` |
 | Postfix `Relay access denied` | `ALLOWED_SENDER_DOMAINS` not set | Set `ALLOWED_SENDER_DOMAINS=vault.yourdomain.com` in `.env` |
-| Postfix `SASL authentication failed` | Wrong SMTP password in secrets | `./edit-secrets.sh --rotate smtp_password` |
+| Postfix `SASL authentication failed` | Wrong SMTP password in secrets | `./edit-secrets.sh rotate smtp_password` |
 | Mailgun HTTP 404 `Domain not found` | Wrong API region | Set `MAILGUN_REGION=eu` in `.env` for EU accounts |
 | All tiers fail silently on `EMAIL_MODE=auto` | `EMAIL_MODE` typo or not set | `grep EMAIL_MODE .env` — must be `auto`, `api`, `smtp`, or `host` |
 

@@ -733,8 +733,8 @@ auto_generate_secret_field() {
 
         email_api_token)
             # Placeholder for the email provider API token.
-            # Must be set via: ./edit-secrets.sh --rotate email_api_token
-            log_warn "Auto mode: Using placeholder for email API token - configure via --rotate email_api_token" >&2
+            # Must be set via: ./edit-secrets.sh rotate email_api_token
+            log_warn "Auto mode: Using placeholder for email API token - configure via rotate email_api_token" >&2
             printf '%s' "CHANGE_ME_EMAIL_API_TOKEN"
             ;;
 
@@ -976,18 +976,18 @@ EOF
    [ ] Download latest backup:
        rclone copy remote:bucket/backup.tar.gz.age ./backups/
    [ ] Run Restore:
-       ./restore.sh --type emergency
+       ./restore.sh latest emergency
 
    OPTION B: From Secrets Above (Manual Rebuild)
    [ ] Run secrets setup:
-       ./setup.sh --phase=secrets
+       ./setup.sh secrets
    [ ] Manually enter the values from [SECTION 2] when prompted.
 
 4. FINALIZATION
    [ ] Start services:
        make up
    [ ] Check health:
-       ./maintenance.sh --health
+       ./maintenance.sh health
 
 ════════════════════════════════════════════════════════════════════════
 END OF RECOVERY KIT

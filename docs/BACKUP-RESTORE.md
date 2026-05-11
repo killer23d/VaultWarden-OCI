@@ -142,7 +142,7 @@ Exports a formatted plain-text document containing the Age private key, public k
 
 ```bash
 # Export the Age key escrow document via edit-secrets.sh:
-./edit-secrets.sh --export-recovery-kit
+./edit-secrets.sh export-recovery-kit
 
 # ⚠️ Copy contents to your password manager NOW, then securely delete:
 shred -fuz ~/vaultwarden-age-key-escrow.txt
@@ -318,7 +318,7 @@ The operator must type `SAVED` (all caps) to confirm they have saved the key bef
 **After restore, re-run the Tier 2 escrow** to update your password manager with the new key:
 
 ```bash
-./edit-secrets.sh --export-recovery-kit
+./edit-secrets.sh export-recovery-kit
 # Copy to password manager, then:
 shred -fuz ~/vaultwarden-age-key-escrow.txt
 ```

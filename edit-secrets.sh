@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # edit-secrets.sh - VaultWarden secrets editor
-# Modes: edit (default) | view (--view) | list keys (--list) | rotate field (--rotate FIELD) | export kit (--export-recovery-kit)
+# Modes: edit (default) | view | list | rotate FIELD | export-recovery-kit
 # Safe to re-run multiple times.  Uses your $EDITOR or falls back to nano.
 #
 # Canonical standalone recovery-kit export:
-#   ./edit-secrets.sh --export-recovery-kit
+#   ./edit-secrets.sh export-recovery-kit
 #
-# See also: ./setup.sh --phase=secrets  (first-time creation and full reconfiguration)
+# See also: ./setup.sh secrets  (first-time creation and full reconfiguration)
 #
 # ---------------------------------------------------------------------------
 # SCOPE AND STORAGE GUARD — READ BEFORE MODIFYING
@@ -91,7 +91,7 @@ EDITOR_CMD="${EDITOR:-nano}"
 SKIP_BACKUP=false
 VIEW_ONLY=false
 LIST_KEYS=false
-ROTATE_FIELD=""   # non-empty triggers --rotate mode
+ROTATE_FIELD=""   # non-empty triggers rotate subcommand
 EXPORT_RECOVERY_KIT=false
 DRY_RUN=false
 # Maximum recursive edit attempts before aborting
@@ -153,7 +153,7 @@ trap perform_cleanup EXIT
 #
 # Require at least one whitespace character before #
 # to distinguish inline comments from embedded # in values (e.g. p@ss#1).
-# Synced to the safe pattern already present in setup.sh --phase=secrets.
+# Synced to the safe pattern already present in setup.sh secrets.
 # ---------------------------------------------------------------------------
 _read_dotenv_value() {
     local key="$1"
@@ -229,12 +229,12 @@ show_help() {
 VaultWarden Secrets Editor
 
 USAGE:
-    ./edit-secrets.sh [OPTIONS]
+    ./edit-secrets.sh [subcommand] [options]
 
-MODES (mutually exclusive; default is interactive edit):
-    --view                  View decrypted secrets read-only (no changes saved)
-    --list                  List secret key names only (no values shown)
-    --rotate FIELD          Re-collect and re-hash a single named field, then
+SUBCOMMANDS (mutually exclusive; default is interactive edit):
+    view                    View decrypted secrets read-only (no changes saved)
+    list                    List secret key names only (no values shown)
+    rotate FIELD            Re-collect and re-hash a single named field, then
                             re-encrypt.  Supported fields:
                                 admin_token              (Argon2id re-hash)
                                 admin_basic_auth_hash    (bcrypt re-hash)
@@ -262,60 +262,84 @@ MODES (mutually exclusive; default is interactive edit):
             → selects which HTTP driver is used at runtime;
               the token is always stored as "email_api_token" in secrets.yaml.
 
-    --export-recovery-kit   Generate a recovery document with unencrypted
+    export-recovery-kit     Generate a recovery document with unencrypted
                             secrets. This is the canonical standalone entry
-                            point for recovery kit export. setup.sh --phase=secrets
+                            point for recovery kit export. setup.sh secrets
                             delegates its post-setup prompt here.
 
-EDIT OPTIONS:
+OPTIONS:
     --editor EDITOR         Use specific editor (default: $EDITOR or nano)
     --no-backup             Skip creating backup before edit
-    --dry-run               Preview what --rotate would change without writing
-    --help                  Show this help
+    --dry-run               Preview what 'rotate' would change without writing
+    --help, -h              Show this help
 
 FEATURES:
     ✅ Automatic backup before every edit
     ✅ Change detection (no-op if nothing changed)
     ✅ YAML validation after editing with rollback offer
-    ✅ --rotate calls collect_secret_field() from lib/secrets.sh (single
+    ✅ 'rotate' calls collect_secret_field() from lib/secrets.sh (single
        source of truth for hashing — no duplicate Argon2id/bcrypt logic)
-    ✅ --rotate uses atomic write (temp file → mv) to prevent partial writes
-    ✅ --list shows key names without decrypting values
+    ✅ 'rotate' uses atomic write (temp file → mv) to prevent partial writes
+    ✅ 'list' shows key names without decrypting values
     ✅ Prompts to export recovery kit upon any modification
     ✅ Recovery kit export validates no PLACEHOLDER values remain
-    ✅ --rotate --dry-run previews which values would change
+    ✅ 'rotate --dry-run' previews which values would change
 
 EXAMPLES:
     ./edit-secrets.sh                              # Interactive edit
     ./edit-secrets.sh --editor vim                 # Edit with vim
-    ./edit-secrets.sh --view                       # View only
-    ./edit-secrets.sh --list                       # Show key names
-    ./edit-secrets.sh --rotate admin_token         # Re-hash VW admin password
-    ./edit-secrets.sh --rotate admin_token --dry-run  # Preview rotation
-    ./edit-secrets.sh --rotate email_api_token     # Replace email provider API key
-    ./edit-secrets.sh --rotate smtp_password       # Replace SMTP relay password
-    ./edit-secrets.sh --rotate caddy_cloudflare_dns_token  # Replace CF token
-    ./edit-secrets.sh --export-recovery-kit        # Export a recovery document
+    ./edit-secrets.sh view                         # View only
+    ./edit-secrets.sh list                         # Show key names
+    ./edit-secrets.sh rotate admin_token           # Re-hash VW admin password
+    ./edit-secrets.sh rotate admin_token --dry-run # Preview rotation
+    ./edit-secrets.sh rotate email_api_token       # Replace email provider API key
+    ./edit-secrets.sh rotate smtp_password         # Replace SMTP relay password
+    ./edit-secrets.sh rotate caddy_cloudflare_dns_token  # Replace CF token
+    ./edit-secrets.sh export-recovery-kit          # Export a recovery document
 
 SEE ALSO:
-    ./setup.sh --phase=secrets  - First-time creation or full reconfiguration
+    ./setup.sh secrets  - First-time creation or full reconfiguration
 HELP
 }
 
 # ---------------------------------------------------------------------------
-# Argument parsing
+# Argument parsing — subcommand-first, then options.
 # ---------------------------------------------------------------------------
+# Pre-scan for recognized subcommands: view | list | rotate | export-recovery-kit
+if [[ $# -gt 0 ]]; then
+    case "$1" in
+        view)
+            VIEW_ONLY=true; shift
+            ;;
+        list)
+            LIST_KEYS=true; shift
+            ;;
+        rotate)
+            shift
+            if [[ $# -eq 0 || "$1" == --* ]]; then
+                log_error "'rotate' requires a FIELD argument."
+                log_error "Example: ./edit-secrets.sh rotate admin_token"
+                exit 1
+            fi
+            ROTATE_FIELD="$1"; shift
+            ;;
+        export-recovery-kit)
+            EXPORT_RECOVERY_KIT=true; shift
+            ;;
+        --help|-h)
+            show_help; exit 0
+            ;;
+    esac
+fi
+
+# Parse remaining options
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --editor)              EDITOR_CMD="$2"; shift 2 ;;
-        --no-backup)           SKIP_BACKUP=true; shift ;;
-        --view)                VIEW_ONLY=true; shift ;;
-        --list)                LIST_KEYS=true; shift ;;
-        --rotate)              ROTATE_FIELD="$2"; shift 2 ;;
-        --export-recovery-kit) EXPORT_RECOVERY_KIT=true; shift ;;
-        --dry-run)             DRY_RUN=true; shift ;;
-        --help)                show_help; exit 0 ;;
-        *)                     log_error "Unknown option: $1"; show_help; exit 1 ;;
+        --editor)  EDITOR_CMD="$2"; shift 2 ;;
+        --no-backup) SKIP_BACKUP=true; shift ;;
+        --dry-run) DRY_RUN=true; shift ;;
+        --help|-h) show_help; exit 0 ;;
+        *)         log_error "Unknown option: '$1'"; show_help; exit 1 ;;
     esac
 done
 
@@ -326,12 +350,12 @@ _mode_count=0
 [[ "$VIEW_ONLY" == "true"           ]] && _mode_count=$(( _mode_count + 1 ))
 [[ "$LIST_KEYS" == "true"           ]] && _mode_count=$(( _mode_count + 1 ))
 [[ -n "$ROTATE_FIELD"               ]] && _mode_count=$(( _mode_count + 1 ))
-# --export-recovery-kit is a standalone mode when it is the only flag;
-# it can also trail --rotate / do_edit (offer after modification).
+# export-recovery-kit is a standalone mode when it is the only subcommand;
+# it can also trail rotate / do_edit (offer after modification).
 # Standalone evaluation is handled in main().
 
 if [[ $_mode_count -gt 1 ]]; then
-    log_error "--view, --list, and --rotate are mutually exclusive"
+    log_error "'view', 'list', and 'rotate' are mutually exclusive subcommands"
     exit 1
 fi
 
@@ -371,7 +395,7 @@ check_prerequisites() {
                 log_warn "For local/dev: set SOPS_AGE_KEY_FILE=${repo_local_key} in .env."
             fi
         fi
-        log_info "To create secrets, run: ./setup.sh --phase=secrets"
+        log_info "To create secrets, run: ./setup.sh secrets"
         return 1
     fi
 
@@ -433,7 +457,7 @@ create_backup() {
 }
 
 # ---------------------------------------------------------------------------
-# --list mode: show key names only, no values
+# list subcommand: show key names only, no values
 #
 # EMAIL_PROVIDER fallback covers both the error case and the empty-value case.
 # The `|| echo smtp` pattern only fires on non-zero exit code from
@@ -465,21 +489,21 @@ do_list_keys() {
     echo ""
     log_warn "⚠  Hashed fields: admin_token and admin_basic_auth_hash are one-way Argon2id/bcrypt hashes."
     log_warn "   Decrypting the secrets file will show the hash, not the original password."
-    log_warn "   To change them: ./edit-secrets.sh --rotate admin_token"
+    log_warn "   To change them: ./edit-secrets.sh rotate admin_token"
     echo ""
     log_info "Canonical production key path: /etc/vaultwarden/age-key.txt (installed by setup.sh)"
-    log_info "Run './edit-secrets.sh --rotate email_api_token' to set or rotate the provider API key."
-    log_info "Run './edit-secrets.sh --rotate <field>' to update any other specific key."
+    log_info "Run './edit-secrets.sh rotate email_api_token' to set or rotate the provider API key."
+    log_info "Run './edit-secrets.sh rotate <field>' to update any other specific key."
     return 0
 }
 
 # ---------------------------------------------------------------------------
-# --view mode
+# view subcommand
 # ---------------------------------------------------------------------------
 do_view() {
     log_info "Opening secrets in view-only mode..."
     log_warn "⚠  Hashed fields (admin_token, admin_basic_auth_hash) are stored as one-way hashes."
-    log_warn "   The displayed hash is NOT the password. Use '--rotate <field>' to change them."
+    log_warn "   The displayed hash is NOT the password. Use 'rotate <field>' to change them."
 
     # Re-establish SOPS env — cleanup_secrets_environment() called
     # inside validate_secrets_decryption/yaml has already unset SOPS_AGE_KEY_FILE.
@@ -639,7 +663,7 @@ PYEOF
         while IFS= read -r key; do
             log_error "  - $key"
         done <<< "$offending"
-        log_error "Run './setup.sh --phase=secrets' or './edit-secrets.sh --rotate <field>' to configure these fields first."
+        log_error "Run './setup.sh secrets' or './edit-secrets.sh rotate <field>' to configure these fields first."
         return 1
     fi
 
@@ -647,7 +671,7 @@ PYEOF
 }
 
 # ---------------------------------------------------------------------------
-# --rotate FIELD mode
+# rotate FIELD subcommand
 #
 # email_api_token is a fixed canonical key. do_rotate() stores
 # the token directly under "email_api_token" in secrets.yaml — no provider-
@@ -747,7 +771,7 @@ PY
             (( deployed++ ))
         else
             # Warn so the admin knows which files were not written.
-            log_warn "Docker secret '$field_name' skipped (still placeholder — rotate with: ./edit-secrets.sh --rotate $field_name)"
+            log_warn "Docker secret '$field_name' skipped (still placeholder — rotate with: ./edit-secrets.sh rotate $field_name)"
         fi
     done
     umask "$old_umask"
@@ -765,7 +789,7 @@ do_rotate() {
     # actual_field == field for all cases including email_api_token.
     local actual_field="$field"
 
-    # LOW FIX: --dry-run support for --rotate
+    # --dry-run support for rotate subcommand
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would rotate secret: $actual_field"
         local _svc="${_FIELD_SERVICES[$field]:-<service>}"
@@ -852,7 +876,7 @@ do_rotate() {
 
     # Replace yaml.safe_load + yaml.dump round-trip
     # with a line-by-line regex substitution so YAML comments (inline field
-    # documentation added by setup.sh --phase=secrets write_secrets()) are preserved
+    # documentation added by setup.sh secrets write_secrets()) are preserved
     # on every rotation.  yaml.dump() strips all comments on first write.
     local _patch_rc=0
     python3 - "$temp_plain" "$actual_field" "$new_value" "$temp_patched" << 'PYEOF' || _patch_rc=$?
@@ -938,7 +962,7 @@ PYEOF
     if _deploy_docker_secrets 2>/dev/null; then
         log_success "Docker secret files updated"
     else
-        log_warn "Could not auto-redeploy Docker secret files. Run: ./startup.sh or ./setup.sh --phase=secrets"
+        log_warn "Could not auto-redeploy Docker secret files. Run: ./startup.sh or ./setup.sh secrets"
     fi
 
     offer_recovery_kit_export "$EXPORT_RECOVERY_KIT"
@@ -999,12 +1023,12 @@ do_edit() {
     # subsequent edits (idempotent across re-opens).
     if ! grep -q "^# HASHED (Argon2id)" "$temp_file"; then
         sed -i \
-            -e 's|^admin_token:|# HASHED (Argon2id) — do NOT type plaintext here. Use: ./edit-secrets.sh --rotate admin_token\nadmin_token:|' \
+            -e 's|^admin_token:|# HASHED (Argon2id) — do NOT type plaintext here. Use: ./edit-secrets.sh rotate admin_token\nadmin_token:|' \
             "$temp_file"
     fi
     if ! grep -q "^# HASHED (bcrypt)" "$temp_file"; then
         sed -i \
-            -e 's|^admin_basic_auth_hash:|# HASHED (bcrypt) — do NOT type plaintext here. Use: ./edit-secrets.sh --rotate admin_basic_auth_hash\nadmin_basic_auth_hash:|' \
+            -e 's|^admin_basic_auth_hash:|# HASHED (bcrypt) — do NOT type plaintext here. Use: ./edit-secrets.sh rotate admin_basic_auth_hash\nadmin_basic_auth_hash:|' \
             "$temp_file"
     fi
 
@@ -1157,7 +1181,7 @@ main() {
     # STORAGE GUARD section at the top of this file for the full rationale.
     _warn_if_stack_unavailable
 
-    # Standalone export: --export-recovery-kit with no other mode flag.
+    # Standalone export: export-recovery-kit subcommand with no other mode.
     # This is the canonical single entry point for recovery kit export (Fix #1).
     if [[ "$EXPORT_RECOVERY_KIT" == "true" && "$_mode_count" -eq 0 ]]; then
         log_info "Running standalone recovery kit export..."

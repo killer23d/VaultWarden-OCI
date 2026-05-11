@@ -169,7 +169,7 @@ SMTP_HOST=smtp.mailersend.net
 SMTP_PORT=587
 SMTP_SECURITY=starttls              # starttls or on (SSL/TLS)
 SMTP_USERNAME=your-smtp-username
-# SMTP_PASSWORD stored in secrets via ./edit-secrets.sh --rotate smtp_password
+# SMTP_PASSWORD stored in secrets via ./edit-secrets.sh rotate smtp_password
 SMTP_FROM=noreply@vault.yourdomain.com
 SMTP_FROM_NAME=VaultWarden
 SMTP_TIMEOUT=30

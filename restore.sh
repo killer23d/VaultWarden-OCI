@@ -41,14 +41,14 @@ unset -f _source_lib
 #
 # Exemptions:
 #   --help           show usage without a live config
-#   --list           list local backups without requiring .env
-#   --list --remote  list remote backups; operator may be prompted for remote
+#   list             list local backups without requiring .env
+#   list --remote    list remote backups; operator may be prompted for remote
 #   --remote         bare-metal DR path; .env will be restored from backup
 _require_env_for_live_restore() {
     local arg
     for arg in "$@"; do
         case "$arg" in
-            --help|--list|--remote) return 0 ;;
+            --help|-h|list) return 0 ;;
         esac
     done
 
@@ -152,13 +152,9 @@ SUBCOMMANDS:
     installed to all configured locations, and displayed prominently.
     Save it before pressing Enter to start the services.
 
-OPTIONS:
-    --list                  List available local backups and exit (no root required)
-    --list --remote         List available remote backups and exit (no root required)
+OPTIONS (used after a subcommand or without a subcommand for interactive mode):
     --file FILE             Restore a specific backup file (.age)
-    --type TYPE             db | full | emergency (helps resolve --latest)
-    --latest                Use newest local backup (optionally filtered by --type)
-    --remote                Skip the local/remote menu and list remote backups
+    --remote                Skip the local/remote menu; restore from rclone remote
     --key-file FILE         Path to the age private key for decrypting this backup
                             (alternative to the interactive prompt)
     --from-recovery-kit FILE
@@ -172,27 +168,15 @@ OPTIONS:
     --skip-env              Do not restore archived .env over current .env
     --dry-run               Show what would happen without making changes
     --force                 Skip confirmation prompts
-    --help                  Show this help
+    --help, -h              Show this help
 
 ENVIRONMENT:
     BACKUP_DIR=<path>                  Override backup storage root
-                                       (default: $PROJECT_STATE_DIR/backups, where
-                                       PROJECT_STATE_DIR defaults to /var/lib/vaultwarden
-                                       in boot-only mode; set to DATA_VOLUME_MOUNT in
-                                       separate-volume mode — must match backup.sh).
+                                       (default: $PROJECT_STATE_DIR/backups)
     RESTORE_SNAPSHOT_HARD_FAIL=false   Demote snapshot failure to a warning
-                                       (default: true = hard-fail)
     RESTORE_AGE_KEY_FILE=<path>        Non-interactive equivalent of --key-file
     RESTORE_RECOVERY_KIT_FILE=<path>   Non-interactive equivalent of --from-recovery-kit
-
-    RCLONE_REMOTE_NAME is read from .env when available.  On a fresh server
-    where .env does not yet exist, restore.sh will interactively prompt for
-    the remote name (and optionally the remote path) when --remote is used.
-
-    NOTE: On a fresh bare-metal server, 'rclone config' must already be
-    configured before using --remote.  The rclone remote credentials are
-    NOT stored in the backup archive.  Run 'rclone config' to add the
-    remote, verify with 'rclone listremotes', then re-run restore.sh.
+    RCLONE_REMOTE_NAME                 Read from .env when available
 
 EXAMPLES:
     # ── QUICK START (most common) ────────────────────────────────
@@ -204,8 +188,7 @@ EXAMPLES:
 
     # ── TARGETED RESTORE ───────────────────────────────────────────
     sudo ./restore.sh --remote                          # Interactive remote restore
-    sudo ./restore.sh --latest --type db --force
-    sudo ./restore.sh --file "/var/lib/vaultwarden/backups/full/full_backup_20260101_120000.tar.zst.age"
+    sudo ./restore.sh --file "/var/lib/vaultwarden/backups/full/full_20260101.tar.zst.age"
     sudo ./restore.sh --key-file /tmp/old-age-key.txt  # Supply key non-interactively
 
     # ── BARE-METAL DISASTER RECOVERY ───────────────────────────────
@@ -214,24 +197,24 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# Handle 'latest' and 'list' subcommands before the legacy flag parser runs.
-# This keeps the dispatch tight without touching the existing flag logic.
+# Argument Parsing — subcommand-first, then options.
+# 'latest' and 'list' are positional subcommands.
+# All other behaviors are driven by --file / --remote / --key-file etc.
 # ---------------------------------------------------------------------------
 if [[ $# -gt 0 ]]; then
     case "$1" in
         latest)
             shift
             USE_LATEST=true
-            # Optional positional TYPE before any --flags
+            # Optional positional TYPE (db|full|emergency) before any --flags
             if [[ $# -gt 0 && "$1" != --* ]]; then
                 RESTORE_TYPE="$1"; shift
             fi
-            # Pass remaining --flags to the legacy parser below
             ;;
         list)
             shift
             LIST_ONLY=true
-            # Allow 'list --remote' as a subcommand form
+            # Allow 'list --remote' as a positional form
             [[ "${1:-}" == "--remote" ]] && { USE_REMOTE=true; shift; }
             ;;
         --help|-h)
@@ -240,26 +223,24 @@ if [[ $# -gt 0 ]]; then
     esac
 fi
 
+# Parse remaining options (apply to interactive mode, 'latest', or 'list')
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --list)                LIST_ONLY=true;                shift ;;
-        --file)                BACKUP_FILE="$2";              shift 2 ;;
-        --type)                RESTORE_TYPE="$2";             shift 2 ;;
-        --latest)              USE_LATEST=true;               shift ;;
-        --remote)              USE_REMOTE=true;               shift ;;
-        --key-file)            KEY_FILE_ARG="$2";             shift 2 ;;
-        --from-recovery-kit)   RECOVERY_KIT_FILE="$2";        shift 2 ;;
-        --no-backup)           NO_PRE_BACKUP=true;            shift ;;
-        --skip-verification)   SKIP_VERIFICATION=true;        shift ;;
-        --skip-env)            RESTORE_ENV=false;             shift ;;
-        --dry-run)             DRY_RUN=true;                  shift ;;
-        --force)               FORCE=true;                    shift ;;
-        --help)                show_help; exit 0 ;;
-        *)                     log_error "Unknown option: $1"; show_help; exit 1 ;;
+        --file)                BACKUP_FILE="$2";        shift 2 ;;
+        --remote)              USE_REMOTE=true;          shift ;;
+        --key-file)            KEY_FILE_ARG="$2";        shift 2 ;;
+        --from-recovery-kit)   RECOVERY_KIT_FILE="$2";   shift 2 ;;
+        --no-backup)           NO_PRE_BACKUP=true;       shift ;;
+        --skip-verification)   SKIP_VERIFICATION=true;   shift ;;
+        --skip-env)            RESTORE_ENV=false;        shift ;;
+        --dry-run)             DRY_RUN=true;             shift ;;
+        --force)               FORCE=true;               shift ;;
+        --help|-h)             show_help; exit 0 ;;
+        *)                     log_error "Unknown option: '$1'"; show_help; exit 1 ;;
     esac
 done
 
-# --list --remote combination
+# list + --remote combination
 [[ "$LIST_ONLY" == "true" && "$USE_REMOTE" == "true" ]] && LIST_REMOTE=true
 
 TMPDIR_RESTORE=""
@@ -797,7 +778,7 @@ resolve_backup_file() {
             fi
         fi
         [[ -n "$RESTORE_TYPE" ]] || {
-            log_error "Cannot determine backup type — specify --type db|full|emergency"; return 1
+            log_error "Cannot determine backup type — use: restore.sh latest db|full|emergency"; return 1
         }
         return 0
     fi
@@ -1380,7 +1361,7 @@ purge_wal_shm() { local db="$1"; rm -f "${db}-wal" "${db}-shm" 2>/dev/null || tr
 
 create_pre_restore_snapshot() {
     [[ "$NO_PRE_BACKUP" == "true" ]] && { log_info "Skipping pre-restore snapshot (--no-backup)"; return 0; }
-    [[ "$DRY_RUN"       == "true" ]] && { log_info "[DRY RUN] Would run: ./backup.sh --type emergency"; return 0; }
+    [[ "$DRY_RUN"       == "true" ]] && { log_info "[DRY RUN] Would run: ./backup.sh run emergency"; return 0; }
     local state_dir; state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
     local db_path="$state_dir/data/db.sqlite3"
     # Best-effort WAL checkpoint; swallow all failures intentionally.
@@ -1389,8 +1370,8 @@ create_pre_restore_snapshot() {
         sqlite3 "$db_path" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1 || true
     if [[ -x "./backup.sh" ]]; then
         log_info "Creating pre-restore emergency snapshot..."
-        log_info "Invoking: $SCRIPT_DIR/backup.sh --type emergency --quiet"
-        if ! ./backup.sh --type emergency --quiet; then
+        log_info "Invoking: $SCRIPT_DIR/backup.sh run emergency --quiet"
+        if ! ./backup.sh run emergency --quiet; then
             if [[ "${RESTORE_SNAPSHOT_HARD_FAIL}" == "true" ]]; then
                 log_error "Pre-restore snapshot FAILED (hard-fail)."
                 log_error "Use --no-backup or set RESTORE_SNAPSHOT_HARD_FAIL=false to skip."
@@ -1650,7 +1631,7 @@ main() {
     log_header "VaultWarden-OCI Restore Utility"
 
     # Load .env unconditionally and early so every code path — including
-    # --list and the rclone availability checks — can read config values
+    # list subcommand and the rclone availability checks — can read config values
     # such as RCLONE_REMOTE_NAME and RCLONE_CONFIG.
     load_env_file 2>/dev/null || true   # best-effort; hard error below if root required
 
@@ -1956,7 +1937,7 @@ main() {
         log_error "The data restore itself succeeded, but the stack may not be able"
         log_error "to create new encrypted backups until the key is fixed."
         log_error "Run: age-keygen -o $PROJECT_ROOT/secrets/keys/age-key.txt"
-        log_error "Then: sudo ./setup.sh --phase=systemd --install  (to sync /etc/vaultwarden/)"
+        log_error "Then: sudo ./setup.sh systemd install  (to sync /etc/vaultwarden/)"
         # Non-fatal: continue to start services so VaultWarden is available.
     fi
 
@@ -2002,7 +1983,7 @@ main() {
     log_success "Restore complete."
     if [[ -n "$ROTATED_KEY_FILE" && "$DRY_RUN" != "true" ]]; then
         log_info  "New age key is live at: $ROTATED_KEY_FILE"
-        log_info  "Run: sudo ./setup.sh --phase=systemd --install  (to sync /etc/vaultwarden/)"
+        log_info  "Run: sudo ./setup.sh systemd install  (to sync /etc/vaultwarden/)"
     fi
 }
 

@@ -76,7 +76,7 @@ sudo ./maintenance.sh db-maint
 make db-maint
 
 # If database is corrupt, restore from backup
-./restore.sh --type db
+./restore.sh latest db
 # or restore latest DB backup non-interactively:
 make restore-db
 
@@ -215,19 +215,19 @@ make up
 
 **Diagnosis**:
 ```bash
-./edit-secrets.sh --list
+./edit-secrets.sh list
 ./maintenance.sh health
 ```
 
 **Solutions**:
 ```bash
 # Rotate each placeholder secret with real values
-./edit-secrets.sh --rotate caddy_cloudflare_dns_token
-./edit-secrets.sh --rotate fail2ban_cloudflare_firewall_token
-./edit-secrets.sh --rotate smtp_password
+./edit-secrets.sh rotate caddy_cloudflare_dns_token
+./edit-secrets.sh rotate fail2ban_cloudflare_firewall_token
+./edit-secrets.sh rotate smtp_password
 
 # provider-specific token example
-./edit-secrets.sh --rotate email_api_token
+./edit-secrets.sh rotate email_api_token
 
 make restart
 make health
@@ -735,7 +735,7 @@ cat backup.age.meta
 ./restore.sh
 
 # Restore latest DB backup directly
-./restore.sh --type db
+./restore.sh latest db
 make restore-db
 
 # Try older backup if current is corrupt

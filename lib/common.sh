@@ -1196,7 +1196,7 @@ _smtp_send() {
 #
 # Token resolution for HTTP API providers:
 #   The canonical secrets key is 'email_api_token'. This matches what
-#   ./edit-secrets.sh --rotate email_api_token writes into secrets.yaml.
+#   ./edit-secrets.sh rotate email_api_token writes into secrets.yaml.
 #   Resolution order:
 #     1. EMAIL_API_TOKEN env var (direct override, e.g. set in shell)
 #     2. decrypt_secret email_api_token  (from secrets.yaml via SOPS/age)
@@ -1274,10 +1274,10 @@ send_email() {
 
             if [[ -z "$_api_token" ]]; then
                 if [[ "$mode" == "api" ]]; then
-                    log_error "EMAIL_MODE=api but EMAIL_API_TOKEN is empty — cannot send. Run: ./edit-secrets.sh --rotate email_api_token"
+                    log_error "EMAIL_MODE=api but EMAIL_API_TOKEN is empty — cannot send. Run: ./edit-secrets.sh rotate email_api_token"
                     return 1
                 fi
-                log_warn "EMAIL_PROVIDER=${provider} set but EMAIL_API_TOKEN is empty — falling back to SMTP. Run: ./edit-secrets.sh --rotate email_api_token"
+                log_warn "EMAIL_PROVIDER=${provider} set but EMAIL_API_TOKEN is empty — falling back to SMTP. Run: ./edit-secrets.sh rotate email_api_token"
             elif EMAIL_API_TOKEN="$_api_token" "$driver_fn" "$subject" "$api_body"; then
                 log_success "Email sent via ${provider} API: ${subject}"
                 date +%s > "$stamp_file" 2>/dev/null || true
@@ -1360,7 +1360,7 @@ send_email() {
         fi
         log_error "Emergency API bypass failed via ${provider}"
     elif [[ "$mode" == "auto" && "$host_mta_failed" == "true" ]]; then
-        log_error "Emergency API bypass skipped: EMAIL_API_TOKEN not resolved for provider '${provider}' — run: ./edit-secrets.sh --rotate email_api_token"
+        log_error "Emergency API bypass skipped: EMAIL_API_TOKEN not resolved for provider '${provider}' — run: ./edit-secrets.sh rotate email_api_token"
     fi
 
     log_error "All email delivery methods failed (mode=${mode}, provider=${provider}, subject=${subject})"

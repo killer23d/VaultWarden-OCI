@@ -155,9 +155,6 @@ EXAMPLES:
     ./maintenance.sh test-email --recipient admin@example.com
     ./maintenance.sh update-dns                   # DNS update only
     ./maintenance.sh update-firewall              # Firewall update only
-
-NOTE: Legacy double-dash flags (--health, --update, --db-maint, etc.) are
-      still accepted for backward compatibility with existing scripts.
 EOF
 }
 
@@ -369,7 +366,7 @@ optimize_database() {
     # making the safety net unreachable if VaultWarden fails to restart and the
     # host reboots (e.g. a kernel panic immediately after package updates).
     log_info "Creating encrypted pre-optimization backup via backup.sh..."
-    if ! "${SCRIPT_DIR}/backup.sh" --type db; then
+    if ! "${SCRIPT_DIR}/backup.sh" run db; then
         log_error "Pre-optimization backup FAILED — aborting to avoid an unsafe rollback point"
         [[ "$was_running" == "true" ]] && docker compose up -d vaultwarden
         return 1
@@ -476,8 +473,8 @@ run_deep_db_maintenance() {
     log_info "Step 0/5: Creating pre-maintenance safety backup..."
     local backup_ts_marker
     backup_ts_marker=$(mktemp) && touch "$backup_ts_marker"
-    log_info "Invoking: $SCRIPT_DIR/backup.sh --type db"
-    if ! "$SCRIPT_DIR/backup.sh" --type db; then
+    log_info "Invoking: $SCRIPT_DIR/backup.sh run db"
+    if ! "$SCRIPT_DIR/backup.sh" run db; then
         rm -f "$backup_ts_marker"
         log_error "Pre-maintenance safety backup failed — aborting deep maintenance"
         if [[ "$DB_DEEP_FORCE" == "false" ]]; then
@@ -1027,7 +1024,7 @@ DNS record updated automatically."; then
 validate_system_health() {
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would validate system health"; return 0; fi
     log_info "Validating system health after maintenance..."
-    log_info "Invoking: $SCRIPT_DIR/maintenance.sh --health --quiet"
+    log_info "Invoking: $SCRIPT_DIR/maintenance.sh" health --quiet"
     if "$SCRIPT_DIR/maintenance.sh" --health --quiet; then
         log_success "System health validation passed"
         return 0
@@ -1162,7 +1159,7 @@ ENV_FILE="$(_resolve_env_file || true)"
 
 if [[ -n "${ENV_FILE}" ]]; then
     if [[ ! -r "${ENV_FILE}" ]]; then
-        log_error "maintenance.sh --health: '${ENV_FILE}' is not readable by $(id -un) — config variables will be unset."
+        log_error "maintenance.sh health: '${ENV_FILE}' is not readable by $(id -un) — config variables will be unset."
         log_error "Fix ownership: sudo chown $(id -un):$(id -gn) '${ENV_FILE}'"
     else
         load_env_file "${ENV_FILE}" || true
@@ -1171,7 +1168,7 @@ else
     # Neither candidate path exists; the script may still work if the
     # caller (e.g., systemd EnvironmentFile=) has already exported the
     # required variables into the process environment.
-    log_warn "maintenance.sh --health: no .env file found at '${SCRIPT_DIR}/.env' or '/etc/vaultwarden/vaultwarden.env' — relying on inherited environment"
+    log_warn "maintenance.sh health: no .env file found at '${SCRIPT_DIR}/.env' or '/etc/vaultwarden/vaultwarden.env' — relying on inherited environment"
     ENV_FILE="/etc/vaultwarden/vaultwarden.env"  # canonical path for error messages
 fi
 
@@ -1349,7 +1346,7 @@ _health_parse_args() {
 
 _show_help() {
     cat <<'EOF'
-Usage: ./maintenance.sh --health [OPTIONS]
+Usage: ./maintenance.sh health [OPTIONS]
 
 Options:
   --comprehensive, -c  Run all checks including extended diagnostics
@@ -2203,7 +2200,7 @@ _notify_failures() {
 
         subject="VaultWarden Health [${status^^}]: ${name} on $(hostname)"
         printf -v body \
-            'Health check alert at %s\n\nCheck : %s\nStatus: %s\nDetail: %s\n\nThis alert will not repeat for %ss (%s min).\nRun '\''./maintenance.sh --health --report'\'' for full status.' \
+            'Health check alert at %s\n\nCheck : %s\nStatus: %s\nDetail: %s\n\nThis alert will not repeat for %ss (%s min).\nRun '\''./maintenance.sh health --report'\'' for full status.' \
             "$alert_date" "$name" "${status^^}" "$message" \
             "$ALERT_COOLDOWN_SECONDS" "$(( ALERT_COOLDOWN_SECONDS / 60 ))"
 
@@ -2406,7 +2403,7 @@ _update_show_help() {
 VaultWarden-OCI Update Script
 
 USAGE:
-    sudo ./maintenance.sh --update [OPTIONS]
+    sudo ./maintenance.sh update [OPTIONS]
 
 OPTIONS:
     --system         Update system packages (apt upgrade)
@@ -2419,10 +2416,10 @@ OPTIONS:
     --help           Show this help
 
 EXAMPLES:
-    sudo ./maintenance.sh --update --system        # Update system packages only
-    sudo ./maintenance.sh --update --images        # Update Docker images only
-    sudo ./maintenance.sh --update --all           # Full system + image update
-    sudo ./maintenance.sh --update --all --email   # Full update with email notification
+    sudo ./maintenance.sh update --system        # Update system packages only
+    sudo ./maintenance.sh update --images        # Update Docker images only
+    sudo ./maintenance.sh update --all           # Full system + image update
+    sudo ./maintenance.sh update --all --email   # Full update with email notification
 EOF
 }
 
@@ -2501,7 +2498,7 @@ check_age_key_health_for_update() {
         log_warn "  2. Wrong permissions (must be 600): chmod 600 \"\$SOPS_AGE_KEY_FILE\""
         log_warn "  3. Key file corrupt — restore from recovery kit"
         log_warn "  4. After systemd install, key must be at /etc/vaultwarden/age-key.txt"
-        log_warn "     Run: sudo ./setup.sh --phase=systemd --install"
+        log_warn "     Run: sudo ./setup.sh systemd install"
         log_warn "Continuing with update — fix the key before the next backup timer fires."
         # Non-fatal for update: the update itself does not use the key,
         # but we want the operator to know about the problem.
@@ -2656,7 +2653,7 @@ rollback_image_digests() {
     if (( rollback_failed > 0 )); then
         log_error "Rollback incomplete: $rollback_failed image(s) could not be restored."
         log_error "Do NOT run 'docker compose up -d' until all images are at consistent versions."
-        log_error "Pull again from a stable network: sudo ./maintenance.sh --update --images"
+        log_error "Pull again from a stable network: sudo ./maintenance.sh update --images"
         return 1
     fi
 
@@ -2805,7 +2802,7 @@ run_pre_update_backup() {
     fi
     # Use '--type db' — 'pre-update' is not a valid backup type and hits the *)
     # branch in backup.sh's case statement, causing exit 1 every time.
-    log_info "Creating pre-update safety backup via ./backup.sh --type db..."
+    log_info "Creating pre-update safety backup via ./backup.sh run db..."
     if "${SCRIPT_DIR}/backup.sh" --type db; then
         log_success "Pre-update backup created"
         return 0
@@ -2846,7 +2843,7 @@ _update_main() {
             if [[ "$EMAIL_NOTIFY" == "true" ]]; then
                 local subject="[VaultWarden] Update ABORTED: partial image pull"
                 local body
-                body="$(printf 'A partial docker image pull was detected on host: %s\nTime: %s\n\nSome images were updated and some failed. The pulled images have been\nrolled back to their pre-pull digests to prevent a split-version stack.\n\nResolve the network or registry issue, then retry:\n  sudo ./maintenance.sh --update --images\n' \
+                body="$(printf 'A partial docker image pull was detected on host: %s\nTime: %s\n\nSome images were updated and some failed. The pulled images have been\nrolled back to their pre-pull digests to prevent a split-version stack.\n\nResolve the network or registry issue, then retry:\n  sudo ./maintenance.sh update --images\n' \
                     "$(hostname -f 2>/dev/null || hostname)" "$(date)")"
                 send_notification_email "$subject" "$body" 2>/dev/null || true
             fi
@@ -2857,7 +2854,7 @@ _update_main() {
             if [[ "$EMAIL_NOTIFY" == "true" ]]; then
                 local subject="[VaultWarden] Update WARNING: image pull failed"
                 local body
-                body="$(printf 'All docker image pulls failed on host: %s\nTime: %s\n\nNo images were updated. Services remain on their current versions.\n\nResolve the network or registry issue, then retry:\n  sudo ./maintenance.sh --update --images\n' \
+                body="$(printf 'All docker image pulls failed on host: %s\nTime: %s\n\nNo images were updated. Services remain on their current versions.\n\nResolve the network or registry issue, then retry:\n  sudo ./maintenance.sh update --images\n' \
                     "$(hostname -f 2>/dev/null || hostname)" "$(date)")"
                 send_notification_email "$subject" "$body" 2>/dev/null || true
             fi
@@ -3012,6 +3009,7 @@ main() {
 
 # ---------------------------------------------------------------------------
 # Argument Parsing & Execution
+# Subcommand-only dispatch — no --flag aliases.
 # ---------------------------------------------------------------------------
 
 [[ $# -eq 0 ]] && { show_help; exit 0; }
@@ -3019,31 +3017,31 @@ main() {
 _TASK="${1:-}"
 
 case "$_TASK" in
-    # ── Named subcommands (dispatched to existing functions) ───────────────
-    health|--health)
+    # ── Named subcommands ──────────────────────────────────────────────────
+    health)
         shift
         run_health_check "$@"
         exit $?
         ;;
-    update|--update)
+    update)
         shift
         run_update "$@"
         exit $?
         ;;
-    db-maint|--db-maint)
+    db-maint)
         DB_DEEP_MAINT=true
         shift
         while [[ $# -gt 0 ]]; do
             case $1 in
                 --force)   DB_DEEP_FORCE=true; shift ;;
                 --dry-run) DRY_RUN=true;       shift ;;
-                *) log_error "Unknown option for db-maint: $1"; show_help; exit 1 ;;
+                *) log_error "Unknown option for 'db-maint': $1"; show_help; exit 1 ;;
             esac
         done
         main
         exit $?
         ;;
-    test-email|--test-email)
+    test-email)
         TEST_EMAIL=true
         shift
         while [[ $# -gt 0 ]]; do
@@ -3051,16 +3049,14 @@ case "$_TASK" in
                 --recipient) TEST_RECIPIENT="$2"; shift 2 ;;
                 --verbose)   VERBOSE=true;        shift   ;;
                 --dry-run)   DRY_RUN=true;        shift   ;;
-                *) log_error "Unknown option for test-email: $1"; show_help; exit 1 ;;
+                *) log_error "Unknown option for 'test-email': $1"; show_help; exit 1 ;;
             esac
         done
         main
         exit $?
         ;;
     # ── Routine maintenance entry point ────────────────────────────────────
-    run|--comprehensive)
-        # 'run' = full routine maintenance; '--comprehensive' kept for compat.
-        [[ "$_TASK" == "--comprehensive" ]] && { COMPREHENSIVE=true; UPDATE_FIREWALL=true; UPDATE_DNS=true; }
+    run)
         shift
         while [[ $# -gt 0 ]]; do
             case $1 in
@@ -3073,14 +3069,14 @@ case "$_TASK" in
                 --update-firewall) UPDATE_FIREWALL=true;  shift ;;
                 --dry-run)       DRY_RUN=true;            shift ;;
                 --email)         EMAIL_NOTIFY=true;       shift ;;
-                *) log_error "Unknown option for run: $1"; show_help; exit 1 ;;
+                *) log_error "Unknown option for 'run': $1"; show_help; exit 1 ;;
             esac
         done
         main
         exit $?
         ;;
     # ── Targeted single-task subcommands ───────────────────────────────────
-    update-dns|--update-dns)
+    update-dns)
         UPDATE_DNS=true
         TARGETED_MODE=true
         CLEAN_LOGS=false; CLEAN_BACKUPS=false; CLEAN_DOCKER=false; OPTIMIZE_DATABASE=false
@@ -3089,13 +3085,13 @@ case "$_TASK" in
             case $1 in
                 --email)   EMAIL_NOTIFY=true; shift ;;
                 --dry-run) DRY_RUN=true;      shift ;;
-                *) log_error "Unknown option for update-dns: $1"; show_help; exit 1 ;;
+                *) log_error "Unknown option for 'update-dns': $1"; show_help; exit 1 ;;
             esac
         done
         main
         exit $?
         ;;
-    update-firewall|--update-firewall)
+    update-firewall)
         UPDATE_FIREWALL=true
         TARGETED_MODE=true
         CLEAN_LOGS=false; CLEAN_BACKUPS=false; CLEAN_DOCKER=false; OPTIMIZE_DATABASE=false
@@ -3103,7 +3099,7 @@ case "$_TASK" in
         while [[ $# -gt 0 ]]; do
             case $1 in
                 --dry-run) DRY_RUN=true; shift ;;
-                *) log_error "Unknown option for update-firewall: $1"; show_help; exit 1 ;;
+                *) log_error "Unknown option for 'update-firewall': $1"; show_help; exit 1 ;;
             esac
         done
         main
@@ -3113,8 +3109,8 @@ case "$_TASK" in
         show_help; exit 0
         ;;
     *)
-        log_error "Unknown subcommand: $_TASK"
-        show_help
+        log_error "Unknown subcommand: '$_TASK'"
+        log_error "Run './maintenance.sh --help' for usage."
         exit 1
         ;;
 esac

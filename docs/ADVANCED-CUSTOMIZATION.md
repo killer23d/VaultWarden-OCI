@@ -413,7 +413,7 @@ Change `EMAIL_PROVIDER` in `.env` and rotate the matching token in secrets:
 EMAIL_PROVIDER=sendgrid
 
 # In secrets (rotate the matching key):
-./edit-secrets.sh --rotate email_api_token
+./edit-secrets.sh rotate email_api_token
 ```
 
 Supported providers and their secret key names:
@@ -443,7 +443,7 @@ SMTP_TIMEOUT=30
 Set the SMTP password via secrets (shared with the Postfix sidecar):
 
 ```bash
-./edit-secrets.sh --rotate smtp_password
+./edit-secrets.sh rotate smtp_password
 ```
 
 > **Do not point VaultWarden directly at the external relay.** Keep `VW_SMTP_HOST=postfix`, `VW_SMTP_SECURITY=off`, `VW_SMTP_AUTH_MECHANISM=none`, and `VW_SMTP_EXPLICIT_TLS=false`; only the `SMTP_*` block above changes when you switch upstream relay providers.
