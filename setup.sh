@@ -128,17 +128,20 @@ show_help() {
 VaultWarden-OCI Setup Tool — Security Hardened Edition
 
 USAGE:
-    sudo ./setup.sh --domain DOMAIN --email EMAIL [OPTIONS]   # Full setup
-    sudo ./setup.sh secrets [OPTIONS]                         # Secrets phase only
+    sudo ./setup.sh install --domain DOMAIN --email EMAIL [OPTIONS]  # Full setup
+    sudo ./setup.sh --domain DOMAIN --email EMAIL [OPTIONS]          # Full setup (legacy)
+    sudo ./setup.sh secrets [OPTIONS]                                # Secrets phase only
     sudo ./setup.sh systemd <install|remove|validate|status> [OPTIONS]  # Systemd phase
 
 SUBCOMMANDS:
+    install    Run the full setup workflow. This is the recommended explicit
+               entry point; legacy top-level --domain/--email flags still work.
     secrets    Configure encrypted secrets (admin password, API tokens, SMTP, etc.)
                Run this after editing .env with your Cloudflare zone / email settings.
     systemd    Install, validate, or remove VaultWarden systemd timers.
                Sub-actions: install | remove | validate | status
 
-FULL SETUP OPTIONS (used after --domain / --email):
+FULL SETUP OPTIONS (used after install or with top-level --domain / --email):
   --auto              Non-interactive install. Auto-generates passwords/passphrases;
                       external credentials (CF tokens, SMTP) remain as CHANGE_ME
                       placeholders — the post-install summary lists exact commands
@@ -167,8 +170,8 @@ GLOBAL OPTIONS:
 
 EXAMPLES:
     # ── First-time setup ──────────────────────────────────────────
-    sudo ./setup.sh --domain vault.example.com --email admin@example.com
-    sudo ./setup.sh --domain vault.example.com --email admin@example.com --auto
+    sudo ./setup.sh install --domain vault.example.com --email admin@example.com
+    sudo ./setup.sh install --domain vault.example.com --email admin@example.com --auto
 
     # ── Secrets configuration ─────────────────────────────────────
     ./setup.sh secrets                   # Interactive credential setup
@@ -190,9 +193,23 @@ EOF
 # ---------------------------------------------------------------------------
 # Argument Parsing — subcommand-first dispatch
 # Pre-scan for positional subcommands before consuming regular --flags.
+# The explicit `install` subcommand intentionally falls through to the same
+# full-setup option parser used by the legacy top-level --domain/--email form.
 # ---------------------------------------------------------------------------
+_require_cli_value() {
+    local opt="$1" value="${2-}"
+    if [[ -z "$value" || "$value" == --* ]]; then
+        log_error "Option '$opt' requires a value."
+        show_help
+        exit 1
+    fi
+}
+
 if [[ $# -gt 0 ]]; then
     case "$1" in
+        install)
+            shift
+            ;;
         secrets)
             PHASE="secrets"
             shift
@@ -212,12 +229,12 @@ if [[ $# -gt 0 ]]; then
             show_help; exit 0
             ;;
         --domain|--email|--auto|--use-latest|--skip-deps|--force|--dry-run|--data-device|--data-mount)
-            # Full-setup flag — fall through to the while loop below
+            # Legacy full-setup flag — fall through to the while loop below
             ;;
         *)
             log_error "Unknown subcommand: '$1'"
-            log_error "Valid subcommands: secrets | systemd"
-            log_error "For full setup use: sudo ./setup.sh --domain DOMAIN --email EMAIL [OPTIONS]"
+            log_error "Valid subcommands: install | secrets | systemd"
+            log_error "For full setup use: sudo ./setup.sh install --domain DOMAIN --email EMAIL [OPTIONS]"
             log_error "Run './setup.sh --help' for usage."
             show_help; exit 1
             ;;
@@ -226,15 +243,15 @@ fi
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --domain)       DOMAIN="$2";              shift 2 ;;
-        --email)        ADMIN_EMAIL="$2";         shift 2 ;;
+        --domain)       _require_cli_value "$1" "${2-}"; DOMAIN="$2";              shift 2 ;;
+        --email)        _require_cli_value "$1" "${2-}"; ADMIN_EMAIL="$2";         shift 2 ;;
         --auto)         AUTO_MODE=true;            shift ;;
         --use-latest)   USE_LATEST=true;           shift ;;
         --skip-deps)    SKIP_DEPS=true;            shift ;;
         --force)        FORCE=true;                shift ;;
         --dry-run)      DRY_RUN=true;              shift ;;
-        --data-device)  DATA_VOLUME_DEVICE="$2";   shift 2 ;;
-        --data-mount)   DATA_VOLUME_MOUNT="$2";    shift 2 ;;
+        --data-device)  _require_cli_value "$1" "${2-}"; DATA_VOLUME_DEVICE="$2";   shift 2 ;;
+        --data-mount)   _require_cli_value "$1" "${2-}"; DATA_VOLUME_MOUNT="$2";    shift 2 ;;
         --help|-h)      show_help; exit 0 ;;
         *) log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
