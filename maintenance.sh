@@ -1024,7 +1024,7 @@ DNS record updated automatically."; then
 validate_system_health() {
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would validate system health"; return 0; fi
     log_info "Validating system health after maintenance..."
-    log_info "Invoking: $SCRIPT_DIR/maintenance.sh health --quiet"
+    log_info "Invoking: $SCRIPT_DIR/maintenance.sh" health --quiet"
     if "$SCRIPT_DIR/maintenance.sh" --health --quiet; then
         log_success "System health validation passed"
         return 0
