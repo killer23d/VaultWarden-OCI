@@ -39,7 +39,8 @@ source "${PROJECT_ROOT}/lib/backup-utils.sh"
 # ── Environment ───────────────────────────────────────────────────────────────
 [[ -f "${PROJECT_ROOT}/.env" ]] && load_env_file "${PROJECT_ROOT}/.env"  # provided by lib/common.sh
 export DRY_RUN=false                      # set immediately; overridden by arg parsing
-                                          # exported so lib functions honour it
+                                          # intentionally unprefixed: exported to lib functions
+                                          # (lib/storage.sh, lib/docker.sh) which read DRY_RUN directly
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 readonly _MV_VERSION="1.0.0"
@@ -717,7 +718,7 @@ _mv_step_verify() {
         return 0
     fi
 
-    local src_bytes tgt_bytes delta pct
+    local src_bytes tgt_bytes delta pct_x100
 
     src_bytes="$(du -sb "${_MV_SOURCE}/" | awk '{print $1}')"
     tgt_bytes="$(du -sb "${_MV_TARGET}/" | awk '{print $1}')"
@@ -730,19 +731,21 @@ _mv_step_verify() {
         return 0
     fi
 
-    # Compute absolute delta as percentage of source
+    # Compute absolute delta as a percentage of source, scaled by 100 for precision.
+    # Using pct_x100 (basis points) avoids integer truncation that would make a
+    # 0.5% delta appear as 0% and silently pass the 1% tolerance check.
     delta=$(( tgt_bytes > src_bytes ? tgt_bytes - src_bytes : src_bytes - tgt_bytes ))
-    pct=$(( delta * 100 / src_bytes ))
+    pct_x100=$(( delta * 10000 / src_bytes ))
 
-    _mv_log info "Delta: $(numfmt --to=iec-i --suffix=B "${delta}") (${pct}%)"
+    _mv_log info "Delta: $(numfmt --to=iec-i --suffix=B "${delta}") ($(( pct_x100 / 100 )).$(( pct_x100 % 100 ))%)"
 
-    if (( pct > _MV_VERIFY_TOLERANCE_PCT )); then
-        _mv_log error "Byte-count delta (${pct}%) exceeds tolerance (${_MV_VERIFY_TOLERANCE_PCT}%)."
+    if (( pct_x100 > _MV_VERIFY_TOLERANCE_PCT * 100 )); then
+        _mv_log error "Byte-count delta exceeds tolerance (${_MV_VERIFY_TOLERANCE_PCT}%)."
         _mv_log error "Investigate before proceeding. Resume with: sudo utilities/migrate-volume.sh resume"
         return 1
     fi
 
-    _mv_log success "Verification passed (delta: ${pct}% ≤ ${_MV_VERIFY_TOLERANCE_PCT}%)."
+    _mv_log success "Verification passed (delta ≤ ${_MV_VERIFY_TOLERANCE_PCT}%)."
 }
 
 # ── Pipeline step 6: Rename source ───────────────────────────────────────────
@@ -771,7 +774,17 @@ _mv_step_delete_source() {
     _mv_log info "── delete_source ─────────────────────────────────────────────────"
 
     local renamed
-    renamed="$(ls -td "${_MV_SOURCE}.pre-migration."* 2>/dev/null | head -1)"
+    # Use a glob array and find the most recently modified matching directory.
+    local candidate newest_ts=0 candidate_ts cand_renamed=""
+    for candidate in "${_MV_SOURCE}.pre-migration."*/; do
+        [[ -d "${candidate}" ]] || continue
+        candidate_ts="$(stat -c '%Y' "${candidate}" 2>/dev/null || echo 0)"
+        if (( candidate_ts > newest_ts )); then
+            newest_ts="${candidate_ts}"
+            cand_renamed="${candidate%/}"
+        fi
+    done
+    renamed="${cand_renamed}"
 
     if [[ -z "${renamed}" || ! -d "${renamed}" ]]; then
         _mv_log warn "Renamed source not found — nothing to delete."
@@ -851,7 +864,16 @@ _mv_step_update_dropin() {
         fi
 
         tmp="$(mktemp "${drop_in}.XXXXXX")"
-        sed "s|${old_path}|${new_path}|g" "${drop_in}" > "${tmp}"
+        # Escape characters that are special in sed's pattern and replacement fields.
+        # Delimiter is |, so | must be escaped; & means "matched text" in replacement.
+        local escaped_old escaped_new
+        escaped_old="${old_path//\\/\\\\}"
+        escaped_old="${escaped_old//|/\\|}"
+        escaped_old="${escaped_old//./\\.}"
+        escaped_new="${new_path//\\/\\\\}"
+        escaped_new="${escaped_new//|/\\|}"
+        escaped_new="${escaped_new//&/\\&}"
+        sed "s|${escaped_old}|${escaped_new}|g" "${drop_in}" > "${tmp}"
         chmod 644 "${tmp}"
         mv -f "${tmp}" "${drop_in}"
         _mv_log info "Updated drop-in: ${drop_in}"
@@ -1068,9 +1090,16 @@ _mv_do_abort() {
 
     # ── Step 8 reverse: restore .env from backup ──────────────────────────────
     if _mv_state_has STEP_ENV_UPDATED_DONE; then
-        local env_backup
-        # Find the most recent .env backup by glob
-        env_backup="$(ls -t "${PROJECT_ROOT}"/.env.pre-migration.* 2>/dev/null | head -1)"
+        local env_backup env_cand env_newest_ts=0 env_cand_ts
+        env_backup=""
+        for env_cand in "${PROJECT_ROOT}"/.env.pre-migration.*; do
+            [[ -f "${env_cand}" ]] || continue
+            env_cand_ts="$(stat -c '%Y' "${env_cand}" 2>/dev/null || echo 0)"
+            if (( env_cand_ts > env_newest_ts )); then
+                env_newest_ts="${env_cand_ts}"
+                env_backup="${env_cand}"
+            fi
+        done
         if [[ -n "${env_backup}" && -f "${env_backup}" ]]; then
             cp "${env_backup}" "${PROJECT_ROOT}/.env"
             chmod 0600 "${PROJECT_ROOT}/.env"
@@ -1083,8 +1112,16 @@ _mv_do_abort() {
 
     # ── Step 6 reverse: restore renamed source ────────────────────────────────
     if _mv_state_has STEP_SOURCE_RENAMED_DONE; then
-        local renamed
-        renamed="$(ls -td "${src}.pre-migration."* 2>/dev/null | head -1)"
+        local renamed src_cand src_newest_ts=0 src_cand_ts
+        renamed=""
+        for src_cand in "${src}.pre-migration."*/; do
+            [[ -d "${src_cand}" ]] || continue
+            src_cand_ts="$(stat -c '%Y' "${src_cand}" 2>/dev/null || echo 0)"
+            if (( src_cand_ts > src_newest_ts )); then
+                src_newest_ts="${src_cand_ts}"
+                renamed="${src_cand%/}"
+            fi
+        done
         if [[ -n "${renamed}" && -d "${renamed}" ]]; then
             if [[ ! -e "${src}" ]]; then
                 mv "${renamed}" "${src}"
