@@ -1031,6 +1031,7 @@ _mv_print_status() {
         "STEP_VALIDATE_DONE:Validate pre-flight"
         "STEP_BACKUP_DONE:Backup confirmation"
         "STEP_STOP_DONE:Stop stack"
+        "STEP_MOUNT_GUARD_DONE:Docker mount guard"
         "STEP_FORMAT_DONE:Format/mount volume"
         "STEP_RSYNC_DONE:rsync transfer"
         "STEP_VERIFY_DONE:Verify byte count"
@@ -1070,9 +1071,8 @@ _mv_do_abort() {
         return 0
     fi
 
-    local src tgt complete
+    local src complete
     src="$(_mv_state_read MV_SOURCE)"
-    tgt="$(_mv_state_read MV_TARGET)"
     complete="$(_mv_state_read MIGRATION_COMPLETE)"
 
     if [[ "${complete}" == "true" ]]; then

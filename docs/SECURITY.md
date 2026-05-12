@@ -939,13 +939,13 @@ A dedicated emergency admin account for OCI serial console access:
 
 ```bash
 # Create emergency admin
-sudo ./create-breakglass-admin.sh create
+sudo utilities/create-breakglass-admin.sh create
 
 # Or use Makefile
 make breakglass-create
 
 # Check status
-sudo ./create-breakglass-admin.sh list
+sudo utilities/create-breakglass-admin.sh list
 make breakglass-status
 ```
 

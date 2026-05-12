@@ -32,7 +32,7 @@ else
     readonly COLOR_GREEN=""
     readonly COLOR_YELLOW=""
     readonly COLOR_BLUE=""
-    # shellcheck disable=SC2034  # COLOR_CYAN is used by sourcing scripts (setup.sh, create-breakglass-admin.sh)
+    # shellcheck disable=SC2034  # COLOR_CYAN is used by sourcing scripts (setup.sh, utilities/create-breakglass-admin.sh)
     readonly COLOR_CYAN=""
     readonly COLOR_RESET=""
     readonly COLOR_BOLD=""

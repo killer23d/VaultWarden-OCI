@@ -4,7 +4,7 @@
 #
 # WHY THIS EXISTS
 # ---------------
-# setup-iptables.sh is also called by startup.sh, but if the host reboots
+# utilities/setup-iptables.sh is also called by startup.sh, but if the host reboots
 # and Docker recreates the DOCKER-USER chain on its own startup, any rules
 # previously inserted into that chain are wiped. netfilter-persistent cannot
 # protect DOCKER-USER entries because Docker owns and rebuilds that chain.
@@ -33,8 +33,9 @@ Type=oneshot
 RemainAfterExit=yes
 
 # Resolve the project root relative to this unit's installed location.
-# setup-iptables.sh uses SCRIPT_DIR to locate docker-compose.yml, so
-# WorkingDirectory must point to the repo root.
+# utilities/setup-iptables.sh uses SCRIPT_DIR to locate docker-compose.yml,
+# so WorkingDirectory must point to the repo root. The script is installed
+# flat to /opt/vaultwarden-scripts/ by 'sudo ./setup.sh systemd install'.
 WorkingDirectory=/opt/vaultwarden-scripts
 ExecStart=/opt/vaultwarden-scripts/setup-iptables.sh
 ExecStop=/bin/true

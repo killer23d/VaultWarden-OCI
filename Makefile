@@ -157,10 +157,10 @@ fix-permissions: ## Fix file ownership after sudo operations leave root-owned fi
 	echo ""; \
 	for item in \
 	    CHANGELOG.md Makefile README.md VERSION \
-	    backup.sh create-breakglass-admin.sh edit-secrets.sh \
+	    backup.sh edit-secrets.sh \
 	    maintenance.sh restore.sh \
-	    setup.sh startup.sh uninstall-vaultwarden.sh \
-	    backups caddy docs fail2ban lib logs ssl systemd \
+	    setup.sh startup.sh \
+	    backups caddy docs fail2ban lib logs ssl systemd utilities \
 	    docker-compose.yml.example docker-compose.override.yml.example .env.example .sops.yaml \
 	    .gitattributes .gitignore; do \
 	    [ -e "$$item" ] && chown -R "$$REAL_USER:$$REAL_GROUP" "$$item" 2>/dev/null && \
@@ -799,17 +799,17 @@ timers: ## Show scheduled systemd timer status
 breakglass-create: ## Create emergency break-glass admin account
 	$(call require-root)
 	@echo "$(BLUE)Creating break-glass admin account...$(NC)"
-	@./create-breakglass-admin.sh create
+	@sudo utilities/create-breakglass-admin.sh create
 
 breakglass-status: ## Check break-glass admin account status
 	$(call require-root)
 	@echo "$(BLUE)Break-glass admin status:$(NC)"
-	@./create-breakglass-admin.sh status
+	@sudo utilities/create-breakglass-admin.sh status
 
 breakglass-remove: ## Remove break-glass admin account
 	$(call require-root)
 	@echo "$(BLUE)Removing break-glass admin account...$(NC)"
-	@./create-breakglass-admin.sh remove --force
+	@sudo utilities/create-breakglass-admin.sh remove --force
 
 # ===========================================================================
 ##@ Testing & Development
@@ -951,7 +951,7 @@ prune: ## Remove unused Docker resources (containers, networks, images)
 uninstall: ## Uninstall VaultWarden-OCI (interactive)
 	$(call require-root)
 	@echo "$(RED)WARNING: This will remove VaultWarden-OCI from this system.$(NC)"
-	@./uninstall-vaultwarden.sh run
+	@sudo utilities/uninstall-vaultwarden.sh run
 
 uninstall-dry-run: ## Show uninstall help (no dry-run mode available)
-	@./uninstall-vaultwarden.sh --help
+	@utilities/uninstall-vaultwarden.sh --help

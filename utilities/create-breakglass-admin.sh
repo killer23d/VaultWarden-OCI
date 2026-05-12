@@ -20,8 +20,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$SCRIPT_DIR"
-cd "$PROJECT_ROOT"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+cd "${PROJECT_ROOT}"
 
 source "lib/common.sh"
 init_common_lib "$0"
@@ -70,7 +70,7 @@ show_help() {
 VaultWarden-OCI Break-Glass Admin Manager — Emergency Access
 
 USAGE:
-    sudo ./create-breakglass-admin.sh <subcommand> [options]
+    sudo utilities/create-breakglass-admin.sh <subcommand> [options]
 
 SUBCOMMANDS:
     create          Create break-glass admin account (targeted sudo)
@@ -96,12 +96,12 @@ ENVIRONMENT:
                                  Set to 0 to disable auto-expiry entirely.
 
 EXAMPLES:
-    sudo ./create-breakglass-admin.sh create         # Create emergency admin
-    sudo ./create-breakglass-admin.sh status         # Check status
-    sudo ./create-breakglass-admin.sh validate       # Validate script security
-    sudo ./create-breakglass-admin.sh reset-password # Reset password
-    sudo ./create-breakglass-admin.sh remove         # Remove account
-    sudo ./create-breakglass-admin.sh remove --force # Remove without confirmation
+    sudo utilities/create-breakglass-admin.sh create         # Create emergency admin
+    sudo utilities/create-breakglass-admin.sh status         # Check status
+    sudo utilities/create-breakglass-admin.sh validate       # Validate script security
+    sudo utilities/create-breakglass-admin.sh reset-password # Reset password
+    sudo utilities/create-breakglass-admin.sh remove         # Remove account
+    sudo utilities/create-breakglass-admin.sh remove --force # Remove without confirmation
 
 BREAK-GLASS ADMIN PURPOSE:
     Emergency access when SSH is broken or firewall blocks access.
@@ -542,7 +542,7 @@ SECURITY NOTES:
 - This account does NOT have unrestricted root access
 - Use only for genuine emergencies
 - Account auto-expires after ${BREAKGLASS_AUTO_EXPIRY_HOURS} hour(s)
-- Remove manually if needed: sudo ./create-breakglass-admin.sh remove
+- Remove manually if needed: sudo utilities/create-breakglass-admin.sh remove
 - Password is 32+ characters for maximum security
 
 Created: $(date)
@@ -852,7 +852,7 @@ _restart_after_disable() {
     log_error "  1. Investigate: docker compose logs $service"
     log_error "  2. Fix the underlying issue (port conflict, OOM, config error)"
     log_error "  3. Re-run: docker compose restart $service"
-    log_error "  4. Confirm: ./create-breakglass-admin.sh status"
+    log_error "  4. Confirm: utilities/create-breakglass-admin.sh status"
 
     _notify_breakglass_event \
         "DISABLE_FAILED" \
@@ -941,8 +941,8 @@ main() {
             log_info "🎯 Next Steps:"
             echo "  1. Store the credentials securely"
             echo "  2. Test OCI Console Connection access"
-            echo "  3. Validate script security: sudo ./create-breakglass-admin.sh validate"
-            echo "  4. Account will auto-expire in ${BREAKGLASS_AUTO_EXPIRY_HOURS}h; remove sooner if done: sudo ./create-breakglass-admin.sh remove"
+            echo "  3. Validate script security: sudo utilities/create-breakglass-admin.sh validate"
+            echo "  4. Account will auto-expire in ${BREAKGLASS_AUTO_EXPIRY_HOURS}h; remove sooner if done: sudo utilities/create-breakglass-admin.sh remove"
 
             exit 0
         else

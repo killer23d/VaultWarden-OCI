@@ -502,18 +502,18 @@ sudo make key-rotate
 
 ```bash
 # Create emergency admin account
-./create-breakglass-admin.sh create
+utilities/create-breakglass-admin.sh create
 make breakglass-create
 
 # Check status
-./create-breakglass-admin.sh list
+utilities/create-breakglass-admin.sh list
 make breakglass-status
 
 # Generate new password
-./create-breakglass-admin.sh create --force
+utilities/create-breakglass-admin.sh create --force
 
 # Remove when no longer needed
-./create-breakglass-admin.sh revoke
+utilities/create-breakglass-admin.sh revoke
 make breakglass-remove
 ```
 

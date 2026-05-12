@@ -25,8 +25,8 @@ Complete reference for all management scripts and utility libraries in VaultWard
 | 4 | `restore.sh` | Backup | — |
 | 5 | `edit-secrets.sh` | Secrets | — |
 | 6 | `maintenance.sh` | Maintenance + health + update (merged) | `db-maint` only |
-| 7 | `create-breakglass-admin.sh` | Emergency | ✅ |
-| 8 | `uninstall-vaultwarden.sh` | Uninstall | ✅ |
+| 7 | `utilities/create-breakglass-admin.sh` | Emergency | ✅ |
+| 8 | `utilities/uninstall-vaultwarden.sh` | Uninstall | ✅ |
 
 **Utility libraries (5):** `lib/common.sh` *(includes email)*, `lib/docker.sh`, `lib/crypto.sh` *(includes key resilience + security)*, `lib/backup-utils.sh`, `lib/secrets.sh`
 
@@ -507,11 +507,11 @@ make update
 
 ---
 
-### 9. `create-breakglass-admin.sh`
+### 9. `utilities/create-breakglass-admin.sh`
 **Purpose:** Emergency OS admin account for OCI Serial Console access
 
 ```bash
-./create-breakglass-admin.sh <subcommand>
+utilities/create-breakglass-admin.sh <subcommand>
 ```
 
 **Key features:**
@@ -531,7 +531,7 @@ make update
 | `revoke` | Remove the emergency admin account |
 
 ```bash
-./create-breakglass-admin.sh create
+utilities/create-breakglass-admin.sh create
 
 make breakglass-create
 make breakglass-status
@@ -647,14 +647,14 @@ docker compose logs postfix --tail=30
 
 ---
 
-### 10. `uninstall-vaultwarden.sh`
+### 10. `utilities/uninstall-vaultwarden.sh`
 **Purpose:** Full idempotent removal of all VaultWarden-OCI components, data, and system configuration installed by `setup.sh`
 
 > ⚠️ **This operation is irreversible.** All data, encrypted secrets, the Age key, Docker volumes, and the project directory are permanently deleted. Create an emergency backup first: `sudo ./backup.sh run emergency`
 
 ```bash
 # Run from any directory — the script locates the project via SUDO_USER
-sudo bash ~/uninstall-vaultwarden.sh run
+sudo bash ~/VaultWarden-OCI/utilities/uninstall-vaultwarden.sh run
 ```
 
 **What it removes (14 steps, in order):**
@@ -688,7 +688,7 @@ The script requires typing `UNINSTALL` (all caps) at an interactive prompt befor
 
 ```bash
 # Safe — aborts if not run as root
-sudo bash ~/VaultWarden-OCI/uninstall-vaultwarden.sh run
+sudo bash ~/VaultWarden-OCI/utilities/uninstall-vaultwarden.sh run
 
 # The script will print a summary of what it will remove, then prompt:
 # Type 'UNINSTALL' to confirm, or anything else to abort:
@@ -749,16 +749,16 @@ All common operations have Makefile shortcuts. Run `make help` to see the full t
 | `make key-rotate` | `lib/crypto.sh rotate_age_key` | Rotate the Age encryption key (generates new key, updates all locations) |
 | `make key-show` | — | Show current Age public key and key file path/status |
 | `make key-health` | `lib/crypto.sh check_age_key_health` | Check Age key health (permissions, decodability) |
-| `make breakglass-create` | `sudo ./create-breakglass-admin.sh create` | Create emergency OS admin account |
-| `make breakglass-status` | `sudo ./create-breakglass-admin.sh list` | Show break-glass admin status |
-| `make breakglass-remove` | `sudo ./create-breakglass-admin.sh revoke` | Remove break-glass admin account |
+| `make breakglass-create` | `sudo utilities/create-breakglass-admin.sh create` | Create emergency OS admin account |
+| `make breakglass-status` | `sudo utilities/create-breakglass-admin.sh list` | Show break-glass admin status |
+| `make breakglass-remove` | `sudo utilities/create-breakglass-admin.sh revoke` | Remove break-glass admin account |
 | `make install-systemd` | `sudo ./setup.sh systemd install` | Install systemd units and sync scripts to `/opt` |
 | `make systemd-remove` | `sudo ./setup.sh systemd remove` | Remove all vaultwarden systemd timer units |
 | `make systemd-status` | `sudo ./setup.sh systemd status` | Show status of all vaultwarden systemd units |
 | `make systemd-validate` | `sudo ./setup.sh systemd validate` | Validate installed units match current repo scripts |
 | `make timers` | `systemctl list-timers` | Show all vaultwarden timers (next trigger + last run + `.env` schedule) |
-| `make uninstall-dry-run` | `sudo ./uninstall-vaultwarden.sh run --dry-run` | Preview what uninstall would remove (no changes) |
-| `make uninstall` | `sudo ./uninstall-vaultwarden.sh run` | Full uninstall — removes containers, data, systemd units (DESTRUCTIVE) |
+| `make uninstall-dry-run` | `sudo utilities/uninstall-vaultwarden.sh run --dry-run` | Preview what uninstall would remove (no changes) |
+| `make uninstall` | `sudo utilities/uninstall-vaultwarden.sh run` | Full uninstall — removes containers, data, systemd units (DESTRUCTIVE) |
 | `make dev-setup` | Copy `.env.example` and override template | Prepare local development environment |
 | `make test` | `test-secrets` + `test-email` + `docker compose config` | Run all tests |
 | `make test-config` | `docker compose config > /dev/null` | Validate merged Docker Compose config (exits non-zero on error) |
@@ -949,7 +949,7 @@ automatically on any process exit, including SIGKILL and OOM kill.
 
 ### Script Execution
 1. **Run from project root** — all scripts resolve paths relative to `SCRIPT_DIR`
-2. **Use `sudo` where required** — `setup.sh`, `create-breakglass-admin.sh`, `maintenance.sh db-maint`, and direct `backup.sh` calls in production
+2. **Use `sudo` where required** — `setup.sh`, `utilities/create-breakglass-admin.sh`, `maintenance.sh db-maint`, and direct `backup.sh` calls in production
 3. **Check `--help` first** — every script supports `--help`
 4. **Use `--dry-run`** — preview any operation before applying
 

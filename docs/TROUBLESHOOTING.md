@@ -907,7 +907,7 @@ curl -u "admin:your_password" https://vault.example.com/admin
 **Diagnosis**:
 ```bash
 # Check break-glass admin status
-sudo ./create-breakglass-admin.sh list
+sudo utilities/create-breakglass-admin.sh list
 make breakglass-status
 
 # Verify user exists
@@ -920,8 +920,8 @@ sudo cat /home/vw-breakglass/.ssh/authorized_keys
 **Solutions**:
 ```bash
 # Remove and recreate break-glass admin
-sudo ./create-breakglass-admin.sh revoke
-sudo ./create-breakglass-admin.sh create
+sudo utilities/create-breakglass-admin.sh revoke
+sudo utilities/create-breakglass-admin.sh create
 # or:
 make breakglass-remove
 make breakglass-create

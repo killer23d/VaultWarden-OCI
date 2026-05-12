@@ -61,6 +61,7 @@ cd VaultWarden-OCI
 
 # Make top-level scripts executable — do NOT use -R here.
 # lib/*.sh are sourced libraries, not standalone executables.
+# utilities/*.sh are set +x automatically by setup.sh.
 chmod +x *.sh
 
 # Automated setup — installs deps, generates config files, auto-generates
@@ -158,7 +159,7 @@ sudo ./setup.sh systemd install
 ./edit-secrets.sh export-recovery-kit
 
 # Create emergency admin for OCI serial console recovery
-./create-breakglass-admin.sh create    # or: make breakglass-create
+sudo utilities/create-breakglass-admin.sh create    # or: make breakglass-create
 ```
 
 > **`setup.sh systemd` improvement:** `setup.sh systemd install` now validates all `OnCalendar=` expressions via `systemd-analyze calendar` before enabling timers and warns on invalid expressions. All generated service units now include an `[Install]` section (`WantedBy=multi-user.target`) so `systemctl enable` is no longer a no-op. See [docs/ADVANCED-CUSTOMIZATION.md](docs/ADVANCED-CUSTOMIZATION.md) for timer details.
@@ -310,8 +311,8 @@ Full details, provider setup, Postfix MTA configuration, and troubleshooting: **
 | `restore.sh` | Interactive or automated restore with a reworked flow: interactive Age decryption key prompt; `--key-file` flag and `RESTORE_AGE_KEY_FILE` env var for scripted/CI use; pre-restore key round-trip validation; post-restore automatic Age key generation and rotation. Uses host `sqlite3` for archive integrity verification — no Docker required. |
 | `maintenance.sh` | System cleanup, DNS update, DB maintenance, email test, health monitoring (`health` subcommand), and container updates (`update` subcommand). |
 | `edit-secrets.sh` | Secure secrets editor (Age + SOPS) — rotate individual fields, list keys, export recovery kit |
-| `create-breakglass-admin.sh` | Emergency OCI serial console admin. |
-| `uninstall-vaultwarden.sh` | Full stack removal |
+| `utilities/create-breakglass-admin.sh` | Emergency OCI serial console admin. |
+| `utilities/uninstall-vaultwarden.sh` | Full stack removal |
 
 Full reference: [docs/SCRIPTS.md](docs/SCRIPTS.md)
 

@@ -1188,8 +1188,6 @@ set_script_permissions() {
         "restore.sh"
         "startup.sh"
         "maintenance.sh"
-        "create-breakglass-admin.sh"
-        "uninstall-vaultwarden.sh"
     )
     for script in "${root_scripts[@]}"; do
         if [[ -f "$script" ]]; then
@@ -1200,7 +1198,18 @@ set_script_permissions() {
     done
 
     # ------------------------------------------------------------------
-    # 2. caddy/entrypoint.sh — must be executable before 'make up';
+    # 2. utilities/*.sh — executable admin helpers (moved from root)
+    # ------------------------------------------------------------------
+    if [[ -d "utilities" ]]; then
+        while IFS= read -r script; do
+            chmod +x "$script"
+            chown "$real_user:$real_group" "$script" 2>/dev/null || true
+            log_success "Set +x: $script"
+        done < <(find "utilities" -maxdepth 1 -name "*.sh")
+    fi
+
+    # ------------------------------------------------------------------
+    # 3. caddy/entrypoint.sh — must be executable before 'make up';
     #    Docker copies it into the image with its host permissions, so a
     #    missing +x bit causes 'permission denied' at container start.
     #    Use process substitution to avoid a pipe-subshell so log_success
@@ -1215,7 +1224,7 @@ set_script_permissions() {
     fi
 
     # ------------------------------------------------------------------
-    # 3. fail2ban/*.sh — same rationale as caddy/entrypoint.sh
+    # 4. fail2ban/*.sh — same rationale as caddy/entrypoint.sh
     # ------------------------------------------------------------------
     if [[ -d "fail2ban" ]]; then
         while IFS= read -r script; do
@@ -1226,7 +1235,7 @@ set_script_permissions() {
     fi
 
     # ------------------------------------------------------------------
-    # 4. lib/*.sh — sourced (not executed), keep 644 read-only for non-root
+    # 5. lib/*.sh — sourced (not executed), keep 644 read-only for non-root
     # ------------------------------------------------------------------
     if [[ -d "lib" ]]; then
         find "lib" -name "*.sh" -exec chown "$real_user:$real_group" {} + 2>/dev/null || true
@@ -2765,19 +2774,20 @@ install_units() {
         return 1
     fi
 
-    local scripts_to_install=(maintenance.sh backup.sh setup-iptables.sh)
+    local scripts_to_install=(maintenance.sh backup.sh utilities/setup-iptables.sh)
     for script in "${scripts_to_install[@]}"; do
         local src="$PROJECT_ROOT/$script"
+        local dest_name; dest_name=$(basename "$script")
         if [[ ! -f "$src" ]]; then
             log_warn "Script not found, skipping: $src"
             continue
         fi
         if [[ "$DRY_RUN" == "true" ]]; then
-            log_info "[DRY RUN] Would install: $OPT_SCRIPTS_DIR/$script"
+            log_info "[DRY RUN] Would install: $OPT_SCRIPTS_DIR/$dest_name"
             continue
         fi
-        install -m 700 -o root -g root "$src" "$OPT_SCRIPTS_DIR/$script"
-        log_success "Installed: $OPT_SCRIPTS_DIR/$script"
+        install -m 700 -o root -g root "$src" "$OPT_SCRIPTS_DIR/$dest_name"
+        log_success "Installed: $OPT_SCRIPTS_DIR/$dest_name"
     done
     if [[ "$DRY_RUN" == "false" ]]; then chown root:root "$OPT_SCRIPTS_DIR"; fi
 
@@ -3502,16 +3512,16 @@ main() {
         log_warn "Review the output above for details. These phases can be re-run manually."
     fi
 
-    if [[ -x "${SCRIPT_DIR}/setup-iptables.sh" ]]; then
+    if [[ -x "${SCRIPT_DIR}/utilities/setup-iptables.sh" ]]; then
         echo "INFO: Applying VaultWarden iptables rules..."
-        if "${SCRIPT_DIR}/setup-iptables.sh"; then
+        if "${SCRIPT_DIR}/utilities/setup-iptables.sh"; then
             echo "OK: VaultWarden iptables rules applied"
         else
-            echo "WARN: setup-iptables.sh did not complete successfully" >&2
+            echo "WARN: utilities/setup-iptables.sh did not complete successfully" >&2
             echo "WARN: Run it manually after setup, or enable systemd/vaultwarden-iptables.service" >&2
         fi
     else
-        echo "WARN: setup-iptables.sh not found or not executable" >&2
+        echo "WARN: utilities/setup-iptables.sh not found or not executable" >&2
         echo "WARN: Run it manually after setup, or enable systemd/vaultwarden-iptables.service" >&2
     fi
 

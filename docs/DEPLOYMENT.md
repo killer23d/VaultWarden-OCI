@@ -179,7 +179,7 @@ Once healthy, switch Cloudflare to **Proxied (Orange Cloud)** and set SSL/TLS to
 sudo ./setup.sh systemd install
 
 # Create break-glass emergency admin for OCI serial console
-./create-breakglass-admin.sh create
+utilities/create-breakglass-admin.sh create
 # or: make breakglass-create
 
 # Create initial backups

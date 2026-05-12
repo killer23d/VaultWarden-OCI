@@ -701,13 +701,13 @@ ensure_vaultwarden_egress_nat() {
 
   # Preferred path: use repo-managed setup helper so NAT + DOCKER-USER
   # remediation stays in one place and can also be reused outside startup.
-  if [[ -x "./setup-iptables.sh" ]]; then
-    log_info "Invoking: $SCRIPT_DIR/setup-iptables.sh"
-    if _maybe_sudo ./setup-iptables.sh; then
-      log_success "Egress firewall remediation completed via setup-iptables.sh"
+  if [[ -x "./utilities/setup-iptables.sh" ]]; then
+    log_info "Invoking: $SCRIPT_DIR/utilities/setup-iptables.sh"
+    if _maybe_sudo ./utilities/setup-iptables.sh; then
+      log_success "Egress firewall remediation completed via utilities/setup-iptables.sh"
       return 0
     fi
-    log_warn "setup-iptables.sh failed; falling back to inline NAT remediation"
+    log_warn "utilities/setup-iptables.sh failed; falling back to inline NAT remediation"
   fi
 
   local container_id
