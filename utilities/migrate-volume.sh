@@ -282,7 +282,8 @@ _mv_select_device() {
     root_dev="$(lsblk -no PKNAME "${root_source}" 2>/dev/null \
         || lsblk -no NAME "${root_source}" 2>/dev/null \
         || true)"
-    root_dev="/dev/${root_dev}"
+    # Only prefix /dev/ if detection succeeded; otherwise leave empty
+    [[ -n "${root_dev}" ]] && root_dev="/dev/${root_dev}"
 
     local i mount_label mount_display
     for (( i=0; i<${#dev_names[@]}; i++ )); do
@@ -310,8 +311,9 @@ _mv_select_device() {
         if [[ "${choice}" =~ ^[0-9]+$ ]] \
                 && (( choice >= 1 && choice <= ${#dev_names[@]} )); then
             _MV_DEVICE="${dev_names[$(( choice - 1 ))]}"
-            # Guard against boot device selection
-            if [[ "${dev_mounts[$(( choice - 1 ))]}" == "/" ]]; then
+            # Guard against boot device selection (by mountpoint or by root device identity)
+            if [[ "${dev_mounts[$(( choice - 1 ))]}" == "/" ]] \
+                    || [[ -n "${root_dev}" && "${root_dev}" == "${_MV_DEVICE}" ]]; then
                 log_error "You selected the boot device. Aborting to prevent data loss."
                 exit 1
             fi
