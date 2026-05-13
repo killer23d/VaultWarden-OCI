@@ -1043,7 +1043,10 @@ _mv_step_verify() {
     if (( _chk_count > 0 )); then
         _mv_log error "Content integrity check FAILED: ${_chk_count} file(s) have checksum mismatches."
         _mv_log error "Files with content discrepancies:"
-        printf '%s\n' "${_chk_out}" | grep '^>f' | awk '{print $2}' | \
+        # rsync --itemize-changes format: 11-char flag field + space + filename.
+        # Use cut -d' ' -f2- to get everything after the first space, correctly
+        # handling filenames that contain spaces.
+        printf '%s\n' "${_chk_out}" | grep '^>f' | cut -d' ' -f2- | \
             while IFS= read -r _f; do _mv_log error "  ${_f}"; done
         _mv_log error "Investigate before proceeding. Resume with: sudo utilities/migrate-volume.sh resume"
         return 1
@@ -1128,18 +1131,21 @@ _mv_step_update_env() {
         # Prune older .env.pre-migration.* backups — keep only the one just created.
         # Each backup contains secrets; accumulating them across retried runs is a
         # hygiene risk even on a root-owned 0600 file.
+        # Single-pass: collect all candidates into an array, then delete all except
+        # the newest (determined by mtime).
         local _env_cand _env_newest _env_newest_ts=0 _env_cand_ts
+        local -a _env_all_cands=()
         _env_newest="${env_file}.pre-migration.${_MV_TIMESTAMP}"
         for _env_cand in "${PROJECT_ROOT}"/.env.pre-migration.*; do
             [[ -f "${_env_cand}" ]] || continue
+            _env_all_cands+=( "${_env_cand}" )
             _env_cand_ts="$(stat -c '%Y' "${_env_cand}" 2>/dev/null || echo 0)"
             if (( _env_cand_ts > _env_newest_ts )); then
                 _env_newest_ts="${_env_cand_ts}"
                 _env_newest="${_env_cand}"
             fi
         done
-        for _env_cand in "${PROJECT_ROOT}"/.env.pre-migration.*; do
-            [[ -f "${_env_cand}" ]] || continue
+        for _env_cand in "${_env_all_cands[@]+"${_env_all_cands[@]}"}"; do
             [[ "${_env_cand}" == "${_env_newest}" ]] && continue
             rm -f "${_env_cand}"
             _mv_log info "Removed stale .env backup: ${_env_cand}"
@@ -1562,6 +1568,9 @@ _mv_do_abort() {
             log_warn "  To unmount: sudo umount ${_abort_tgt}"
             log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             local _umount_reply
+            # Use a direct read here rather than _mv_confirm: _mv_confirm exits on
+            # decline, but this prompt is a non-fatal offer — declining is valid and
+            # should not abort the rest of the abort/rollback logic.
             read -r -p "  Unmount ${_abort_tgt} now? [y/N] " _umount_reply
             if [[ "${_umount_reply}" =~ ^[Yy]$ ]]; then
                 umount "${_abort_tgt}" \
