@@ -235,6 +235,35 @@ _mv_confirm_by_typing() {
     }
 }
 
+# ── Private helper: fstab stale-entry warning ─────────────────────────────────
+_mv_warn_fstab_entries() {
+    # Scans /etc/fstab for any entry whose device or mount point references
+    # _MV_SOURCE or _MV_TARGET, and emits a prominent, actionable warning.
+    # Stale fstab lines can auto-mount old volumes at boot and shadow the new path.
+    [[ -f /etc/fstab ]] || return 0
+
+    local line found=false
+    while IFS= read -r line; do
+        # Skip comments and blank lines
+        [[ "${line}" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${line//[[:space:]]/}" ]]  && continue
+        if [[ "${line}" == *"${_MV_SOURCE}"* || "${line}" == *"${_MV_TARGET}"* ]]; then
+            if [[ "${found}" == "false" ]]; then
+                _mv_log warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                _mv_log warn "  ⚠  FSTAB WARNING: /etc/fstab references migration paths"
+                found=true
+            fi
+            _mv_log warn "    ${line}"
+        fi
+    done < /etc/fstab
+
+    if [[ "${found}" == "true" ]]; then
+        _mv_log warn "  These entries could auto-mount old volumes at boot and shadow ${_MV_TARGET}."
+        _mv_log warn "  Review and remove stale lines: sudo nano /etc/fstab"
+        _mv_log warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    fi
+}
+
 # ── Private helper: expand ~ in path ─────────────────────────────────────────
 _mv_expand_path() {
     local p="$1"
@@ -246,10 +275,17 @@ _mv_expand_path() {
     printf '%s' "$p"
 }
 
+# ── Block device type helpers ─────────────────────────────────────────────────
+_mv_lsblk_is_partition() {
+    # Usage: _mv_lsblk_is_partition <lsblk_TYPE_field>
+    # Returns 0 when the TYPE field from lsblk indicates a partition entry.
+    [[ "$1" == "part" ]]
+}
+
 # ── Interactive block device selector ────────────────────────────────────────
 _mv_select_device() {
-    # Presents a numbered list of block devices using lsblk.
-    # Marks the boot/root device with [boot].
+    # Presents a numbered list of block devices and partitions using lsblk.
+    # Marks the boot/root device with [boot] and partition entries with [part].
     # Populates _MV_DEVICE with the selected device path.
     # Skips if --device was already provided, subcommand is not 'run',
     # or --target was already provided (dir-to-dir migration needs no device).
@@ -261,17 +297,18 @@ _mv_select_device() {
     log_info "Detecting block devices using lsblk..."
     printf '\n'
 
-    # Build device list: name, size, mountpoint
-    # Output: NAME SIZE MOUNTPOINT  (tab-separated, no header)
-    local -a dev_names dev_sizes dev_mounts
-    local name size mount _rest
+    # Build device list: name, size, mountpoint, type
+    # -rn: raw output, no header; no -d so partitions appear alongside whole disks
+    local -a dev_names dev_sizes dev_mounts dev_types
+    local name size mount type
 
-    while IFS=$'\t' read -r name size mount _rest; do
+    while IFS=$'\t' read -r name size mount type; do
         [[ -z "${name}" ]] && continue
         dev_names+=( "/dev/${name}" )
         dev_sizes+=( "${size}" )
         dev_mounts+=( "${mount}" )
-    done < <(lsblk -o NAME,SIZE,MOUNTPOINT -rn -d 2>/dev/null)
+        dev_types+=( "${type}" )
+    done < <(lsblk -o NAME,SIZE,MOUNTPOINT,TYPE -rn 2>/dev/null)
 
     if (( ${#dev_names[@]} == 0 )); then
         log_error "No block devices found via lsblk. Ensure the target disk is attached."
@@ -287,23 +324,33 @@ _mv_select_device() {
     # Only prefix /dev/ if detection succeeded; otherwise leave empty
     [[ -n "${root_dev}" ]] && root_dev="/dev/${root_dev}"
 
-    local i mount_label mount_display
+    local i tags mount_display
     for (( i=0; i<${#dev_names[@]}; i++ )); do
-        mount_label=""
+        tags=""
+        # Boot tag: device is the root disk or directly mounts /
         if [[ "${dev_mounts[$i]}" == "/" ]] \
-                || [[ "${root_dev}" == "${dev_names[$i]}" ]]; then
-            mount_label=" [boot]"
+                || [[ -n "${root_dev}" && "${root_dev}" == "${dev_names[$i]}" ]] \
+                || [[ -n "${root_source}" && "${root_source}" == "${dev_names[$i]}" ]]; then
+            tags="${tags} [boot]"
+        fi
+        # Partition tag: lsblk reports TYPE == "part"
+        if _mv_lsblk_is_partition "${dev_types[$i]}"; then
+            tags="${tags} [part]"
         fi
 
         mount_display="${dev_mounts[$i]:-  -}"
-        printf '  %d) %-12s  size: %-8s  mount: %-20s%s\n' \
+        printf '  %d) %-14s  size: %-8s  mount: %-20s%s\n' \
             $(( i + 1 )) \
             "${dev_names[$i]}" \
             "${dev_sizes[$i]}" \
             "${mount_display}" \
-            "${mount_label}"
+            "${tags}"
     done
 
+    printf '\n'
+    printf '  Note: Cloud providers often attach volumes as a partition (e.g. /dev/sdb1)\n'
+    printf '  rather than the whole disk (/dev/sdb). Both are listed above — select\n'
+    printf '  whichever device path your cloud provider assigned to the new volume.\n'
     printf '\n'
     log_warn "Select TARGET block device for migration (DO NOT choose [boot]):"
 
@@ -313,9 +360,10 @@ _mv_select_device() {
         if [[ "${choice}" =~ ^[0-9]+$ ]] \
                 && (( choice >= 1 && choice <= ${#dev_names[@]} )); then
             _MV_DEVICE="${dev_names[$(( choice - 1 ))]}"
-            # Guard against boot device selection (by mountpoint or by root device identity)
+            # Guard against boot device selection using the same helper logic as display
             if [[ "${dev_mounts[$(( choice - 1 ))]}" == "/" ]] \
-                    || [[ -n "${root_dev}" && "${root_dev}" == "${_MV_DEVICE}" ]]; then
+                    || [[ -n "${root_dev}" && "${root_dev}" == "${_MV_DEVICE}" ]] \
+                    || [[ -n "${root_source}" && "${root_source}" == "${_MV_DEVICE}" ]]; then
                 log_error "You selected the boot device. Aborting to prevent data loss."
                 exit 1
             fi
@@ -727,8 +775,8 @@ _mv_step_validate() {
     # 10. --skip-stack-stop with live containers: require explicit confirmation
     if [[ "${_MV_SKIP_STACK_STOP}" == "true" ]]; then
         local running_containers
-        running_containers="$(docker compose ps --format json 2>/dev/null \
-            | grep -c '"State":"running"' || true)"
+        running_containers="$(docker compose ps --status running --quiet 2>/dev/null \
+            | wc -l | tr -d ' ' || true)"
         if (( running_containers > 0 )); then
             _mv_log warn "WARNING: ${running_containers} VaultWarden container(s) are currently running."
             _mv_log warn "Migrating a live stack risks SQLite WAL corruption."
@@ -963,9 +1011,15 @@ _mv_step_delete_source() {
         return 0
     fi
 
+    # Require only the basename to type — eliminates copy-paste errors on long paths.
+    # Display the full path separately so the operator can verify what will be deleted.
+    local confirm_token
+    confirm_token="$(basename "${renamed}")"
+    _mv_log warn "You are about to permanently delete:"
+    _mv_log warn "  ${renamed}"
     _mv_confirm_by_typing \
-        "You are about to permanently delete: ${renamed}" \
-        "${renamed}"
+        "To confirm deletion, type the directory name shown above." \
+        "${confirm_token}"
 
     if [[ "${DRY_RUN}" == "true" ]]; then
         _mv_log info "[DRY RUN] would: rm -rf ${renamed}"
@@ -1000,18 +1054,32 @@ _mv_step_update_env() {
         _mv_set_env_var DATA_VOLUME_DEVICE "${_MV_DEVICE}"
     fi
 
-    # Update BACKUP_DIR only if it was set to the default under the old state dir
+    # Update BACKUP_DIR: three explicit cases based on its current value.
     local current_backup_dir
     current_backup_dir="$(grep "^BACKUP_DIR=" "${env_file}" 2>/dev/null | cut -d= -f2- || true)"
+
     if [[ "${current_backup_dir}" == "${old_state_dir}/backups" ]]; then
+        # Case (a): matches old default → auto-update to new default.
         _mv_set_env_var BACKUP_DIR "${_MV_TARGET}/backups"
+    elif [[ -z "${current_backup_dir}" ]]; then
+        # Case (c): unset / empty → the runtime default resolves via PROJECT_STATE_DIR,
+        # which has already been updated above. Warn the operator to verify behaviour.
+        _mv_log warn "BACKUP_DIR is not set in .env."
+        _mv_log warn "The runtime default will resolve via PROJECT_STATE_DIR, which has been updated to: ${_MV_TARGET}"
+        _mv_log warn "Verify backup.sh behaviour post-migration to confirm backups land in the expected location."
+    elif [[ "${current_backup_dir}" == "${_MV_TARGET}/backups" ]]; then
+        # Already pointing to the new target — nothing to do.
+        _mv_log info "BACKUP_DIR already points to the new target — no update needed."
     else
-        # FIX #5: Warn when BACKUP_DIR is a custom path that was not auto-updated.
-        # The operator must verify it manually — it may still reference the old volume.
-        if [[ -n "${current_backup_dir}" && "${current_backup_dir}" != "${_MV_TARGET}/backups" ]]; then
-            _mv_log warn "BACKUP_DIR is set to a custom path and was NOT auto-updated: ${current_backup_dir}"
-            _mv_log warn "Verify BACKUP_DIR in .env points to the correct location on the new volume."
-            _mv_log warn "Update manually if needed: nano ${env_file}"
+        # Case (b): custom / non-empty path → warn and require explicit acknowledgement.
+        # The operator must confirm before the pipeline continues.
+        _mv_log warn "BACKUP_DIR is set to a custom path: ${current_backup_dir}"
+        _mv_log warn "This path was NOT auto-updated. Verify it points to the correct location on the new volume."
+        _mv_log warn "Update manually if needed: nano ${env_file}"
+        if [[ "${_MV_YES:-false}" == "true" ]]; then
+            _mv_log warn "Non-interactive mode (--yes): BACKUP_DIR confirmation bypassed. Verify manually post-migration."
+        else
+            _mv_confirm "Acknowledge: BACKUP_DIR (${current_backup_dir}) was not updated and requires manual verification."
         fi
     fi
 
@@ -1115,7 +1183,7 @@ _mv_step_healthcheck() {
     _mv_log info "── healthcheck ───────────────────────────────────────────────────"
 
     if [[ "${DRY_RUN}" == "true" ]]; then
-        _mv_log info "[DRY RUN] would: poll docker compose ps for healthy state (up to 120s)"
+        _mv_log info "[DRY RUN] would: poll 'docker compose ps --status running --quiet' for healthy state (up to 120s)"
         _mv_state_write MIGRATION_COMPLETE "true"
         _mv_print_checklist
         return 0
@@ -1127,12 +1195,9 @@ _mv_step_healthcheck() {
     local healthy=false
 
     while (( elapsed < max_wait )); do
-        local ps_out running_count
-        ps_out="$(docker compose ps --format json 2>/dev/null || true)"
-        # Count containers with State == running
-        running_count="$(printf '%s' "${ps_out}" | grep -c '"State":"running"' || true)"
-        local total_count
-        total_count="$(printf '%s' "${ps_out}" | grep -c '"State":' || true)"
+        local running_count total_count
+        running_count="$(docker compose ps --status running --quiet 2>/dev/null | wc -l | tr -d ' ' || true)"
+        total_count="$(docker compose ps --quiet 2>/dev/null | wc -l | tr -d ' ' || true)"
 
         if (( total_count > 0 && running_count == total_count )); then
             healthy=true
@@ -1147,6 +1212,8 @@ _mv_step_healthcheck() {
     if [[ "${healthy}" == "true" ]]; then
         _mv_state_write MIGRATION_COMPLETE "true"
         _mv_log success "All containers are running. Migration complete."
+        # Warn if any fstab entries still reference the old source path.
+        _mv_warn_fstab_entries
         _mv_print_checklist
     else
         _mv_log error "Health check timed out after ${max_wait}s."
@@ -1331,6 +1398,9 @@ _mv_do_abort() {
     log_info "Rollback: attempting to start stack from restored source..."
     load_env_file "${PROJECT_ROOT}/.env"
     start_services || log_warn "start_services failed — check manually: docker compose up -d"
+
+    # ── Fstab check: warn about stale entries that could shadow the restored path ─
+    _mv_warn_fstab_entries
 
     # ── Clear state file ──────────────────────────────────────────────────────
     _mv_state_clear
