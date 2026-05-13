@@ -246,7 +246,7 @@ _mv_expand_path() {
     printf '%s' "$p"
 }
 
-# ── FIX #1: lsblk partition classifier ───────────────────────────────────────
+# ── FIX #1: lsblk partition helper ───────────────────────────────────────────
 # Returns 0 (true) if the given device path is a partition rather than a whole
 # disk. A partition has a non-empty PKNAME (parent kernel name) in lsblk output.
 _mv_lsblk_is_partition() {
@@ -325,7 +325,7 @@ _mv_select_device() {
     done
 
     printf '\n'
-    printf '  NOTE: Cloud providers often attach volumes as partitions (e.g. /dev/sdb1,\n'
+    printf '  NOTE: Cloud providers often attach volumes as partitions (e.g. /dev/sdb1\n'
     printf '        tagged [part]) rather than whole disks. Both are listed above.\n'
     printf '        Select the partition your data volume will occupy, not the raw disk.\n'
     printf '\n'
@@ -496,22 +496,21 @@ _mv_set_env_var() {
 }
 
 # ── FIX #3: fstab warning helper ─────────────────────────────────────────────
-# Scans /etc/fstab for non-comment lines referencing a given path and emits a
-# prominent, bordered warning block for each match found.
-# Called from _mv_do_abort() after rollback so the operator is reminded to
-# verify any stale fstab entries that could auto-mount the old volume at boot.
-# Also referenced in the post-migration checklist for forward migrations.
+# Scans /etc/fstab for entries referencing either the old source path or the new
+# target path and emits a prominent warning for each match found.
+# Called after abort rollback so the operator is reminded to verify/clean up
+# any stale fstab entries that could auto-mount the old volume at boot.
 _mv_warn_fstab_entries() {
-    # Usage: _mv_warn_fstab_entries <search_path> <label>
     local search_path="$1" label="$2"
     [[ -f /etc/fstab ]] || return 0
 
     local -a matches
-    local line
     while IFS= read -r line; do
         # Skip blank lines and comments
         [[ -z "${line}" || "${line}" == '#'* ]] && continue
-        [[ "${line}" == *"${search_path}"* ]] && matches+=( "${line}" )
+        if [[ "${line}" == *"${search_path}"* ]]; then
+            matches+=( "${line}" )
+        fi
     done < /etc/fstab
 
     if (( ${#matches[@]} > 0 )); then
@@ -521,9 +520,9 @@ _mv_warn_fstab_entries() {
         for m in "${matches[@]}"; do
             _mv_log warn "    ${m}"
         done
-        _mv_log warn "  These entries may auto-mount the volume at boot and shadow the"
-        _mv_log warn "  restored path. Verify /etc/fstab and remove or update any stale"
-        _mv_log warn "  entries before rebooting:"
+        _mv_log warn "  These entries may auto-mount the old volume at boot and shadow"
+        _mv_log warn "  the restored path. Verify /etc/fstab manually and remove or"
+        _mv_log warn "  update any stale entries:"
         _mv_log warn "    sudo nano /etc/fstab"
         _mv_log warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     fi
@@ -787,7 +786,6 @@ _mv_step_validate() {
         local running_containers
         # FIX #6: use --status / --quiet flags instead of JSON grep so the count
         # is format-agnostic across all Docker Compose v2 releases.
-        # --quiet emits one container ID per line regardless of output format version.
         running_containers="$(docker compose ps --status running --quiet 2>/dev/null \
             | wc -l | tr -d ' ' || echo 0)"
         if (( running_containers > 0 )); then
@@ -826,6 +824,8 @@ _mv_step_validate() {
         _mv_state_write MV_SKIP_STACK_STOP "${_MV_SKIP_STACK_STOP}"
         _mv_state_write MV_DELETE_SOURCE   "${_MV_DELETE_SOURCE}"
     fi
+
+    _mv_warn_fstab_entries "${_MV_SOURCE}" "source path (${_MV_SOURCE})"
 
     _mv_log success "Pre-flight validation passed."
 }
@@ -1024,15 +1024,16 @@ _mv_step_delete_source() {
     fi
 
     # FIX #4: require only the basename as the confirmation token, not the full
-    # path. The full path is displayed for verification, but a long absolute path
-    # is error-prone to transcribe accurately. The basename alone is unique,
-    # unambiguous, and short enough to type correctly without copy-paste.
+    # path. The full path is displayed for verification, but typing a long
+    # /var/lib/… string character-perfect is error-prone and discourages the use
+    # of this safety gate. The basename (e.g. "vaultwarden.pre-migration.20260512_210134")
+    # is unique, unambiguous, and short enough to transcribe accurately.
     local confirm_token
     confirm_token="$(basename "${renamed}")"
 
     _mv_log warn "About to permanently delete:"
     _mv_log warn "  Full path : ${renamed}"
-    _mv_log warn "  Confirm by typing the directory name shown below."
+    _mv_log warn "  To confirm, type the directory name shown below."
 
     _mv_confirm_by_typing \
         "Permanently delete '${renamed}'." \
@@ -1074,14 +1075,12 @@ _mv_step_update_env() {
     # FIX #5: Handle all three BACKUP_DIR cases explicitly.
     #
     # Case A — default path under old state dir → auto-update to new default.
-    # Case B — non-empty custom path that differs from both old and new defaults
-    #           → warn prominently with a bordered block and require the operator
-    #           to acknowledge via _mv_confirm before the pipeline continues.
-    #           The path may still reference the old volume; only the operator
-    #           can determine whether it needs changing.
-    # Case C — key is absent or empty → the runtime default will resolve relative
-    #           to the updated PROJECT_STATE_DIR, but the operator should verify
-    #           that backup.sh writes to the expected location on the new volume.
+    # Case B — custom / non-empty path that differs from both old and new defaults
+    #           → warn and require explicit confirmation before continuing.
+    #           The operator must verify the path is valid on the new volume.
+    # Case C — key is absent or empty → runtime default resolves via the updated
+    #           PROJECT_STATE_DIR, but the operator should verify backup.sh
+    #           behaviour to ensure backups land on the new volume.
     local current_backup_dir
     current_backup_dir="$(grep "^BACKUP_DIR=" "${env_file}" 2>/dev/null | cut -d= -f2- || true)"
 
@@ -1210,4 +1209,114 @@ _mv_step_healthcheck() {
     _mv_log info "── healthcheck ───────────────────────────────────────────────────"
 
     if [[ "${DRY_RUN}" == "true" ]]; then
-        _mv_log info "[DRY RUN] would:
+        _mv_log info "[DRY RUN] would: poll 'docker compose ps --status running' for healthy state (up to 120s)"
+        _mv_state_write MIGRATION_COMPLETE "true"
+        _mv_print_checklist
+        return 0
+    fi
+
+    local max_wait=120
+    local poll_interval=10
+    local elapsed=0
+    local healthy=false
+
+    while (( elapsed < max_wait )); do
+        # FIX #6: use --status / --quiet instead of JSON grep so the count is
+        # format-agnostic across all Docker Compose v2 releases.
+        # --quiet emits one container ID per line regardless of output format.
+        local running_count total_count
+        running_count="$(docker compose ps --status running --quiet 2>/dev/null \
+            | wc -l | tr -d ' ' || echo 0)"
+        total_count="$(docker compose ps --quiet 2>/dev/null \
+            | wc -l | tr -d ' ' || echo 0)"
+
+        if (( total_count > 0 && running_count == total_count )); then
+            healthy=true
+            break
+        fi
+
+        _mv_log info "Waiting for containers to become healthy (${elapsed}s / ${max_wait}s)..."
+        sleep "${poll_interval}"
+        elapsed=$(( elapsed + poll_interval ))
+    done
+
+    if [[ "${healthy}" == "true" ]]; then
+        _mv_state_write MIGRATION_COMPLETE "true"
+        _mv_log success "All containers are running. Migration complete."
+        _mv_print_checklist
+    else
+        _mv_log error "Health check timed out after ${max_wait}s."
+        _mv_log error "Current container state:"
+        docker compose ps 2>/dev/null || true
+        _mv_log error "Recent logs:"
+        docker compose logs --tail=50 2>/dev/null || true
+        _mv_log error "MIGRATION_COMPLETE not written. Investigate and resume or abort."
+        return 1
+    fi
+}
+
+# ── Post-migration checklist ──────────────────────────────────────────────────
+_mv_print_checklist() {
+    local renamed_src="${_MV_SOURCE}.pre-migration.${_MV_TIMESTAMP}"
+    printf '\n'
+    printf '═══════════════════════════════════════════════════════════════\n'
+    printf '  Post-Migration Checklist\n'
+    printf '═══════════════════════════════════════════════════════════════\n'
+    printf '  1. Log in to VaultWarden and verify your vault data is intact.\n'
+    printf '  2. Run: docker compose ps  — confirm all services are '\''healthy'\''.\n'
+    printf '  3. Run: systemctl status vaultwarden-startup  — confirm unit loads cleanly.\n'
+    printf '  4. Test a scheduled backup: sudo ./backup.sh full\n'
+    printf '  5. Verify backup path uses new volume: check BACKUP_DIR in .env\n'
+    printf '     If BACKUP_DIR was a custom path it was NOT auto-updated — verify manually.\n'
+    printf '  6. After a satisfying reboot test, remove the renamed source:\n'
+    printf '       sudo rm -rf '\''%s'\''\n' "${renamed_src}"
+    printf '  7. (If you added custom services to docker-compose.yml with hardcoded\n'
+    printf '     paths) Verify: docker compose config | grep '\''%s'\''\n' "${_MV_SOURCE}"
+    printf '     Any remaining references must be updated manually.\n'
+    printf '  8. Check /etc/fstab for any stale entries referencing the old path:\n'
+    printf '       grep -n '\''%s'\'' /etc/fstab\n' "${_MV_SOURCE}"
+    printf '     Remove or update any entries that no longer apply.\n'
+    printf '═══════════════════════════════════════════════════════════════\n'
+    printf '  Migration log: %s\n' "${_MV_LOG_FILE}"
+    printf '  .env backup:   %s.pre-migration.%s\n' "${PROJECT_ROOT}/.env" "${_MV_TIMESTAMP}"
+    printf '═══════════════════════════════════════════════════════════════\n'
+    printf '\n'
+}
+
+# ── Status subcommand ─────────────────────────────────────────────────────────
+_mv_print_status() {
+    if [[ ! -f "${_MV_STATE_FILE}" ]]; then
+        log_info "No migration in progress or previously recorded."
+        return 0
+    fi
+
+    local src tgt device start_ts complete
+
+    src="$(_mv_state_read MV_SOURCE)"
+    tgt="$(_mv_state_read MV_TARGET)"
+    device="$(_mv_state_read MV_DEVICE)"
+    start_ts="$(_mv_state_read MV_START_TS)"
+    complete="$(_mv_state_read MIGRATION_COMPLETE)"
+
+    printf '\n'
+    printf '  Migration State\n'
+    printf '  ───────────────────────────────────────────────\n'
+    printf '  %-20s %s\n' "Source:"   "${src:-unknown}"
+    printf '  %-20s %s\n' "Target:"   "${tgt:-unknown}"
+    printf '  %-20s %s\n' "Device:"   "${device:-none}"
+    printf '  %-20s %s\n' "Started:"  \
+        "$(date -d "@${start_ts}" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || printf '%s' "${start_ts}")"
+    printf '  %-20s %s\n' "Complete:" "${complete:-no}"
+    printf '  ───────────────────────────────────────────────\n'
+    printf '\n'
+
+    # Step-by-step status table
+    local -a steps=(
+        "STEP_VALIDATE_DONE:Validate pre-flight"
+        "STEP_BACKUP_DONE:Backup confirmation"
+        "STEP_STOP_DONE:Stop stack"
+        "STEP_FORMAT_DONE:Format/mount volume"
+        "STEP_RSYNC_DONE:rsync transfer"
+        "STEP_VERIFY_DONE:Verify byte count"
+        "STEP_SOURCE_RENAMED_DONE:Rename source"
+        "STEP_SOURCE_DELET
