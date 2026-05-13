@@ -826,6 +826,7 @@ _mv_step_validate() {
     fi
 
     _mv_warn_fstab_entries "${_MV_SOURCE}" "source path (${_MV_SOURCE})"
+    _mv_warn_fstab_entries "${_MV_TARGET}" "target path (${_MV_TARGET})"
 
     _mv_log success "Pre-flight validation passed."
 }
