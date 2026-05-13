@@ -95,7 +95,7 @@ _mv_fmt_bytes() {
     # Prints a human-readable IEC byte count (e.g. "1.5 GiB").
     # Pure awk — no numfmt dependency; portable to GNU coreutils and BusyBox.
     awk -v n="$1" 'BEGIN {
-        split("B KiB MiB GiB TiB", u)
+        split("B KiB MiB GiB TiB", u, " ")
         v = n; i = 1
         while (v >= 1024 && i < 5) { v /= 1024; i++ }
         printf "%.1f %s", v, u[i]
@@ -284,11 +284,15 @@ _mv_warn_fstab_entries() {
         _mv_log warn "  These entries could auto-mount old volumes at boot and shadow ${_MV_TARGET}."
         _mv_log warn "  Review and remove stale lines. To delete each matching line, run:"
         if [[ -n "${_MV_SOURCE}" ]]; then
-            local _esc_src="${_MV_SOURCE//|/\\|}"
+            local _esc_src="${_MV_SOURCE//\\/\\\\}"
+            _esc_src="${_esc_src//./\\.}"
+            _esc_src="${_esc_src//|/\\|}"
             _mv_log warn "    sed -i '\\|${_esc_src}|d' /etc/fstab"
         fi
         if [[ -n "${_MV_TARGET}" ]]; then
-            local _esc_tgt="${_MV_TARGET//|/\\|}"
+            local _esc_tgt="${_MV_TARGET//\\/\\\\}"
+            _esc_tgt="${_esc_tgt//./\\.}"
+            _esc_tgt="${_esc_tgt//|/\\|}"
             _mv_log warn "    sed -i '\\|${_esc_tgt}|d' /etc/fstab"
         fi
         _mv_log warn "  (Verify the resulting fstab is correct before rebooting.)"
