@@ -43,7 +43,7 @@ export DRY_RUN=false                      # set immediately; overridden by arg p
                                           # (lib/storage.sh, lib/docker.sh) which read DRY_RUN directly
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-readonly _MV_VERSION="1.0.0"
+readonly _MV_VERSION="1.1.0"
 _MV_SCRIPT_NAME="$(basename "$0")"
 readonly _MV_SCRIPT_NAME
 _MV_TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
@@ -148,10 +148,12 @@ _mv_on_err() {
 
 _mv_open_log() {
     # Determine log file path (--log-file overrides default).
+    # FIX #1: Log directory is always PROJECT_ROOT/logs — never PROJECT_STATE_DIR/logs.
+    # PROJECT_STATE_DIR is the migration source and may be renamed or deleted mid-run
+    # (step 6 rename_source / step 6a delete_source). Using PROJECT_ROOT keeps the log
+    # file alive for the full duration of the migration, including --delete-source runs.
     if [[ -z "${_MV_LOG_FILE:-}" ]]; then
-        local log_dir
-        # Use current PROJECT_STATE_DIR (pre-migration value) for the log directory.
-        log_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs"
+        local log_dir="${PROJECT_ROOT}/logs"
         mkdir -p "${log_dir}" 2>/dev/null || log_dir="/tmp"
         _MV_LOG_FILE="${log_dir}/migrate-volume-${_MV_TIMESTAMP}.log"
     fi
@@ -346,6 +348,42 @@ _mv_prompt_target() {
     printf '\n'
 }
 
+# ── FIX #6: Pre-flight summary box ───────────────────────────────────────────
+# Printed in main() after interactive prompts but before _mv_run_pipeline.
+# Gives the operator one final chance to review what the pipeline will do
+# and confirm — critical since the very next step stops Docker and may format a disk.
+_mv_print_preflight_summary() {
+    local mode
+    if [[ -n "${_MV_DEVICE}" ]]; then
+        mode="block-device (format + rsync)"
+    else
+        mode="directory-to-directory (rsync only, no format)"
+    fi
+
+    printf '\n'
+    printf '╔═══════════════════════════════════════════════════════════════╗\n'
+    printf '║  Migration Pre-flight Summary                                 ║\n'
+    printf '╠═══════════════════════════════════════════════════════════════╣\n'
+    printf '  %-20s %s\n'  "Mode:"          "${mode}"
+    printf '  %-20s %s\n'  "Source:"        "${_MV_SOURCE}"
+    printf '  %-20s %s\n'  "Target:"        "${_MV_TARGET}"
+    printf '  %-20s %s\n'  "Device:"        "${_MV_DEVICE:-(none — dir-to-dir)}"
+    printf '  %-20s %s\n'  "Stack stop:"    "$( [[ "${_MV_SKIP_STACK_STOP}" == 'true' ]] && echo 'SKIPPED (--skip-stack-stop)' || echo 'yes' )"
+    printf '  %-20s %s\n'  "Delete source:" "$( [[ "${_MV_DELETE_SOURCE}" == 'true' ]] && echo 'yes (will prompt)' || echo 'no' )"
+    printf '  %-20s %s\n'  "Dry run:"       "${DRY_RUN}"
+    printf '  %-20s %s\n'  "Log file:"      "${_MV_LOG_FILE}"
+    printf '╚═══════════════════════════════════════════════════════════════╝\n'
+    printf '\n'
+
+    # In --yes mode do not prompt; log the summary and continue.
+    if [[ "${_MV_YES:-false}" == "true" ]]; then
+        _mv_log info "Non-interactive mode (--yes): proceeding without confirmation."
+        return 0
+    fi
+
+    _mv_confirm "Confirm the above and start migration."
+}
+
 # ── Private helper: disk space check ─────────────────────────────────────────
 _mv_check_disk_space() {
     # Usage: _mv_check_disk_space <source_path> <target_path>
@@ -456,12 +494,14 @@ OPTIONS (run / resume):
                      Omit entirely for directory-to-directory migration.
   --skip-stack-stop  Do not stop the Docker stack before migrating.
                      Requires explicit runtime confirmation. Use with caution.
+                     Cannot be combined with --yes (non-interactive mode).
   --delete-source    Delete renamed source after successful verification.
                      Always requires typing the path to confirm.
   --dry-run          Print all actions without executing them.
   --force            Skip the pre-migration backup confirmation prompt.
   --yes              Answer yes to all confirmations (except --delete-source).
                      Requires --target when used (non-interactive mode).
+                     Cannot be combined with --skip-stack-stop.
   --log-file <path>  Override default log file path.
   --help             Show this help and exit.
 
@@ -582,6 +622,17 @@ _mv_parse_args() {
                 log_error "--target is required when using --yes (non-interactive mode)."
                 exit 1
             fi
+            # FIX #7: --skip-stack-stop in --yes mode is ambiguous and unsafe.
+            # The live-container guard in _mv_step_validate uses _mv_confirm_by_typing,
+            # which is always interactive — but only fires if containers happen to be
+            # running at check time. In --yes mode there is no operator present to catch
+            # a race where containers start between the check and rsync, making the guard
+            # ineffective. Require interactive mode whenever --skip-stack-stop is used.
+            if [[ "${_MV_YES:-false}" == "true" && "${_MV_SKIP_STACK_STOP}" == "true" ]]; then
+                log_error "--skip-stack-stop cannot be combined with --yes."
+                log_error "Migrating a live stack requires an interactive operator to confirm."
+                exit 1
+            fi
             ;;
         resume|status|abort|verify)
             # No required args
@@ -629,7 +680,18 @@ _mv_step_validate() {
         return 1
     }
 
-    # 5. Source is not being written to by a running rsync
+    # 5. FIX #4: Guard against --target being accidentally set to a raw device path.
+    # dir-to-dir mode skips _mv_select_device when --target is provided, so passing
+    # --target /dev/sdb (without --device) would hand a block device path to rsync
+    # and silently overwrite it. Catch this early.
+    if [[ "${_MV_TARGET}" == /dev/* && -z "${_MV_DEVICE}" ]]; then
+        _mv_log error "--target looks like a block device path: ${_MV_TARGET}"
+        _mv_log error "To migrate to a block device use --device ${_MV_TARGET} with a directory --target."
+        _mv_log error "Example: --device ${_MV_TARGET} --target /mnt/vw-data"
+        return 1
+    fi
+
+    # 6. Source is not being written to by a running rsync
     if find /proc/*/fd -lname "${_MV_SOURCE}/*" -print0 2>/dev/null \
             | xargs -r -0 ls -l 2>/dev/null \
             | grep -q rsync; then
@@ -638,7 +700,7 @@ _mv_step_validate() {
         return 1
     fi
 
-    # 6. If --device given: validate device node
+    # 7. If --device given: validate device node
     if [[ -n "${_MV_DEVICE}" ]]; then
         [[ -b "${_MV_DEVICE}" ]] || {
             _mv_log error "Device is not a block device: ${_MV_DEVICE}"
@@ -654,15 +716,15 @@ _mv_step_validate() {
         fi
     fi
 
-    # 7. Disk space check
+    # 8. Disk space check
     # Ensure target directory exists for df to work
     mkdir -p "${_MV_TARGET}" 2>/dev/null || true
     _mv_check_disk_space "${_MV_SOURCE}" "${_MV_TARGET}"
 
-    # 8. Stale backup warning (non-blocking)
+    # 9. Stale backup warning (non-blocking)
     _mv_check_stale_backup
 
-    # 9. --skip-stack-stop with live containers: require explicit confirmation
+    # 10. --skip-stack-stop with live containers: require explicit confirmation
     if [[ "${_MV_SKIP_STACK_STOP}" == "true" ]]; then
         local running_containers
         running_containers="$(docker compose ps --format json 2>/dev/null \
@@ -677,7 +739,7 @@ _mv_step_validate() {
         fi
     fi
 
-    # 10. Confirm .env is readable and PROJECT_STATE_DIR key is present
+    # 11. Confirm .env is readable and PROJECT_STATE_DIR key is present
     [[ -f "${PROJECT_ROOT}/.env" ]] || {
         _mv_log error ".env not found at: ${PROJECT_ROOT}/.env"
         return 1
@@ -687,7 +749,7 @@ _mv_step_validate() {
         return 1
     }
 
-    # 11. Confirm docker-compose.yml exists in PROJECT_ROOT
+    # 12. Confirm docker-compose.yml exists in PROJECT_ROOT
     [[ -f "${PROJECT_ROOT}/docker-compose.yml" ]] || {
         _mv_log error "docker-compose.yml not found at: ${PROJECT_ROOT}/docker-compose.yml"
         return 1
@@ -943,6 +1005,14 @@ _mv_step_update_env() {
     current_backup_dir="$(grep "^BACKUP_DIR=" "${env_file}" 2>/dev/null | cut -d= -f2- || true)"
     if [[ "${current_backup_dir}" == "${old_state_dir}/backups" ]]; then
         _mv_set_env_var BACKUP_DIR "${_MV_TARGET}/backups"
+    else
+        # FIX #5: Warn when BACKUP_DIR is a custom path that was not auto-updated.
+        # The operator must verify it manually — it may still reference the old volume.
+        if [[ -n "${current_backup_dir}" && "${current_backup_dir}" != "${_MV_TARGET}/backups" ]]; then
+            _mv_log warn "BACKUP_DIR is set to a custom path and was NOT auto-updated: ${current_backup_dir}"
+            _mv_log warn "Verify BACKUP_DIR in .env points to the correct location on the new volume."
+            _mv_log warn "Update manually if needed: nano ${env_file}"
+        fi
     fi
 
     _mv_log success ".env updated for new state directory: ${_MV_TARGET}"
@@ -998,6 +1068,10 @@ _mv_step_update_dropin() {
 }
 
 # ── Pipeline step 8a: Install Docker mount guard ──────────────────────────────
+# FIX #3: mount_guard is now step 8a, executed BEFORE step 9 (start).
+# Previously it ran after start_services, meaning the guard was not in place
+# for the very first Docker startup post-migration. On a cold boot after
+# migration the volume would not be guaranteed mounted before Docker started.
 _mv_step_mount_guard() {
     _mv_log info "── mount_guard ───────────────────────────────────────────────────"
 
@@ -1097,6 +1171,7 @@ _mv_print_checklist() {
     printf '  3. Run: systemctl status vaultwarden-startup  — confirm unit loads cleanly.\n'
     printf '  4. Test a scheduled backup: sudo ./backup.sh full\n'
     printf '  5. Verify backup path uses new volume: check BACKUP_DIR in .env\n'
+    printf '     If BACKUP_DIR was a custom path it was NOT auto-updated — verify manually.\n'
     printf '  6. After a satisfying reboot test, remove the renamed source:\n'
     printf '       sudo rm -rf '\''%s'\''\n' "${renamed_src}"
     printf '  7. (If you added custom services to docker-compose.yml with hardcoded\n'
@@ -1141,7 +1216,6 @@ _mv_print_status() {
         "STEP_VALIDATE_DONE:Validate pre-flight"
         "STEP_BACKUP_DONE:Backup confirmation"
         "STEP_STOP_DONE:Stop stack"
-        "STEP_MOUNT_GUARD_DONE:Docker mount guard"
         "STEP_FORMAT_DONE:Format/mount volume"
         "STEP_RSYNC_DONE:rsync transfer"
         "STEP_VERIFY_DONE:Verify byte count"
@@ -1149,6 +1223,7 @@ _mv_print_status() {
         "STEP_SOURCE_DELETED_DONE:Delete source"
         "STEP_ENV_UPDATED_DONE:Update .env"
         "STEP_DROPIN_UPDATED_DONE:Update systemd drop-ins"
+        "STEP_MOUNT_GUARD_DONE:Docker mount guard"
         "STEP_START_DONE:Start stack"
         "STEP_HEALTHCHECK_DONE:Health check"
     )
@@ -1296,6 +1371,9 @@ _mv_run_pipeline() {
     fi
 
     # ── Execute pipeline steps in order ───────────────────────────────────────
+    # FIX #3: STEP_MOUNT_GUARD_DONE moved before STEP_START_DONE so the systemd
+    # unit that ensures the block volume is mounted before Docker starts is
+    # installed prior to the first post-migration stack startup.
     _mv_run_step STEP_VALIDATE_DONE       _mv_step_validate
     _mv_run_step STEP_BACKUP_DONE         _mv_step_backup_prompt
     _mv_run_step STEP_STOP_DONE           _mv_step_stop
@@ -1308,7 +1386,7 @@ _mv_run_pipeline() {
     fi
     _mv_run_step STEP_ENV_UPDATED_DONE    _mv_step_update_env
     _mv_run_step STEP_DROPIN_UPDATED_DONE _mv_step_update_dropin
-    _mv_run_step STEP_MOUNT_GUARD_DONE    _mv_step_mount_guard
+    _mv_run_step STEP_MOUNT_GUARD_DONE    _mv_step_mount_guard   # before start
     _mv_run_step STEP_START_DONE          _mv_step_start
     _mv_run_step STEP_HEALTHCHECK_DONE    _mv_step_healthcheck
 }
@@ -1326,15 +1404,31 @@ main() {
 
     case "${_MV_SUBCOMMAND}" in
         run)
-            _mv_select_device    # interactive lsblk device picker (skips if --device set)
-            _mv_prompt_target    # interactive mount point prompt (skips if --target set)
+            _mv_select_device         # interactive lsblk device picker (skips if --device set)
+            _mv_prompt_target         # interactive mount point prompt (skips if --target set)
+            _mv_print_preflight_summary  # FIX #6: confirm before pipeline starts
             _mv_run_pipeline
             ;;
         resume)  _mv_run_pipeline --resume ;;
         status)  _mv_print_status ;;
         abort)   _mv_do_abort ;;
-        verify)  _mv_step_verify ;;
-        *)       _mv_usage; exit 1 ;;
+        # FIX #2: verify subcommand restores source/target from the state file so
+        # it compares the correct pre/post-migration paths even after .env has been
+        # updated by step 7 (which changes PROJECT_STATE_DIR to the new target).
+        verify)
+            if [[ -f "${_MV_STATE_FILE}" ]]; then
+                local _sv _tv
+                _sv="$(_mv_state_read MV_SOURCE)"
+                _tv="$(_mv_state_read MV_TARGET)"
+                if [[ -n "${_sv}" && -n "${_tv}" ]]; then
+                    _MV_SOURCE="${_sv}"
+                    _MV_TARGET="${_tv}"
+                    log_info "verify: using paths from state file — source=${_MV_SOURCE} target=${_MV_TARGET}"
+                fi
+            fi
+            _mv_step_verify
+            ;;
+        *)  _mv_usage; exit 1 ;;
     esac
 }
 
