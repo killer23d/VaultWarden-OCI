@@ -23,10 +23,11 @@ Before running the script:
 
 - ✅ **Backup first** — run `./backup.sh run full` and verify the archive is readable
 - ✅ **Attach the target volume** — add the block device via your cloud provider console before running the script; the device must appear in `lsblk`
-- ✅ **Confirm free space** — the target must have at least as much free space as the source data directory consumes
+- ✅ **Confirm free space** — the target must have at least as much free space as the source data directory consumes (checked automatically after format for block-device migrations)
 - ✅ **Note your mount point** — know where the volume should be mounted (default: `/mnt/vw-data`, from `DATA_VOLUME_MOUNT` in `.env`)
 - ✅ **Verify `sudo` access** — the script requires root privileges
 - ✅ **Plan a maintenance window** — the script stops the Docker stack; budget 5–15 minutes depending on data size
+- ✅ **SQLite WAL** — the script checks for non-empty WAL files after the stack stops and warns if found; if you see this warning, run `sudo ./maintenance.sh db-maint` to checkpoint the database before proceeding
 
 ---
 
@@ -87,13 +88,14 @@ sudo utilities/migrate-volume.sh run \
 ```
 
 The script will:
-1. Stop the Docker stack
-2. Format `/dev/sdb` (ext4 by default)
+1. Stop the Docker stack (and check for non-empty SQLite WAL files — a non-empty WAL after a clean stop is warned prominently)
+2. Format `/dev/sdb` (ext4 by default) and run a disk space check against the newly mounted volume
 3. Mount it at `/mnt/vw-data`
-4. `rsync` all data from source to target
-5. Verify byte counts match
-6. Optionally rename / delete the source directory (`--delete-source`)
-7. Restart the stack
+4. `rsync` all data from source to target (WAL and SHM files are excluded from the transfer)
+5. Verify: byte-count delta ≤ 1% **and** full rsync checksum pass
+6. Optionally rename / delete the source directory (`--delete-source` — requires typing the full absolute path)
+7. Update `.env` (PROJECT_STATE_DIR, DATA_VOLUME_MOUNT, DATA_VOLUME_DEVICE, BACKUP_DIR) and prune old `.env` backups
+8. Restart the stack and confirm all containers are running and `/alive` responds
 
 ### Block Volume → Another Block Volume
 
@@ -167,10 +169,10 @@ Update `DATA_VOLUME_MOUNT` in `.env` (or remove it) to reflect the reverted path
 | Subcommand | Description |
 | :-- | :-- |
 | `run` | Start a new migration (interactive or non-interactive). |
-| `resume` | Resume a previously interrupted migration from the last completed step. |
+| `resume` | Resume a previously interrupted migration from the last completed step. Re-validates that the source still exists, the target is mounted (block-device migrations), and `docker-compose.yml` is present before continuing. |
 | `status` | Show the current migration state (steps completed, source, target). |
-| `abort` | Abort an in-progress or interrupted migration and clean up lock files. |
-| `verify` | Re-run byte-count verification only (non-destructive, safe to repeat). |
+| `abort` | Abort an in-progress or interrupted migration and roll back: restores `.env`, renames source back, and offers to unmount the new volume if it was formatted. |
+| `verify` | Re-run byte-count **and checksum** verification only (non-destructive, safe to repeat). |
 
 ---
 
@@ -178,9 +180,9 @@ Update `DATA_VOLUME_MOUNT` in `.env` (or remove it) to reflect the reverted path
 
 Be aware of the following edge cases before running a migration.
 
-### 1. Interactive picker only lists whole disks
+### 1. Interactive picker lists whole disks and partitions
 
-The interactive device picker uses `lsblk -d` (no children), so only **whole disk devices** (e.g., `/dev/sdb`) appear in the numbered list — partitions (e.g., `/dev/sdb1`) are excluded. If your target block volume is partition-based, skip the interactive picker and pass `--device /dev/sdb1` explicitly on the CLI:
+The interactive device picker uses `lsblk` (without `-d`) so both **whole-disk** devices (e.g., `/dev/sdb`) and their **partitions** (e.g., `/dev/sdb1`) appear in the numbered list. Devices that belong to the boot disk are tagged `[boot]` — this includes the root disk itself **and any of its partitions** (the guard uses a prefix match, so `/dev/nvme0n1p2` is blocked when `/dev/nvme0n1` is the boot disk). If your target block volume is partition-based, select it directly from the interactive list or pass `--device /dev/sdb1` explicitly on the CLI:
 
 ```bash
 sudo utilities/migrate-volume.sh run \
@@ -201,9 +203,17 @@ The migration pipeline (`_mv_run_pipeline`) is responsible for creating the moun
 ls -la /mnt
 ```
 
-### 4. No data wipe on reversal / dir-to-dir
+### 4. Non-empty target warns in dir-to-dir mode
 
-In directory-to-directory mode (no `--device` flag), the format step is skipped entirely. This means any **existing files at the destination are not removed** before `rsync` runs. If the destination already contains data from a previous migration, you may end up with merged content. Use `--dry-run` first to inspect what will be synced:
+In directory-to-directory mode (no `--device` flag), the format step is skipped entirely. rsync always runs with `--delete`, which means any **existing files at the destination that are absent from the source are removed** before the transfer completes. The pre-flight summary will explicitly warn when the target is a non-empty directory:
+
+```
+  ⚠  WARNING: Target directory is non-empty (5 item(s)).
+     rsync --delete will REMOVE files in target that do not exist in source.
+     Run with --dry-run first to inspect changes before proceeding.
+```
+
+Use `--dry-run` first to inspect what will be synced and deleted:
 
 ```bash
 sudo utilities/migrate-volume.sh run \
@@ -218,24 +228,15 @@ If a clean destination is required, manually clear it before running the migrati
 sudo rm -rf /var/lib/vaultwarden/*
 ```
 
-### 5. `.env` must be updated after migration
+### 5. `.env` is updated automatically after migration
 
-The script moves data but does not modify `.env`. After a successful migration, update `DATA_VOLUME_MOUNT` to reflect the new path so that subsequent script calls and systemd services resolve the correct location:
+The script updates `.env` (PROJECT_STATE_DIR, DATA_VOLUME_MOUNT, DATA_VOLUME_DEVICE, BACKUP_DIR) as step 7 of the pipeline. A timestamped backup is created at `.env.pre-migration.<timestamp>` before any changes; only the most recent backup is retained (older ones from previous runs are pruned automatically). If the migration is aborted, `.env` is restored from the backup.
 
-```bash
-nano .env
-# Set: DATA_VOLUME_MOUNT=/mnt/vw-data
-```
+If `BACKUP_DIR` was a custom path (not the default `<STATE_DIR>/backups`), the script will warn and require explicit acknowledgement — it will not auto-update custom paths.
 
-Then restart the stack to pick up the change:
+### 6. Boot guard covers the root disk and all its partitions
 
-```bash
-./startup.sh --force
-```
-
-### 6. Boot guard covers partitions on the root disk
-
-The boot device guard checks both the mountpoint (`== /`) **and** the physical disk identity (`PKNAME` via `lsblk`). This means selecting `/dev/sda` (the underlying disk) is blocked even when `/` lives on `/dev/sda1`. The guard only activates if device detection succeeds — if `findmnt` or `lsblk` return empty, the guard is skipped and the `[boot]` label will not appear. In that case, rely on your cloud provider console to confirm which device is the boot disk before making a selection.
+The boot device guard checks the mountpoint (`== /`), the physical disk identity (`PKNAME` via `lsblk`), **and any partition of that disk** (prefix match). This means selecting `/dev/nvme0n1` or any of its partitions (e.g., `/dev/nvme0n1p1`, `/dev/nvme0n1p2`) is blocked when the root filesystem lives on `/dev/nvme0n1`. All such devices are tagged `[boot]` in the interactive picker. The guard only activates if device detection succeeds — if `findmnt` or `lsblk` return empty, the guard is skipped and the `[boot]` label will not appear. In that case, rely on your cloud provider console to confirm which device is the boot disk before making a selection.
 
 ---
 
@@ -251,7 +252,7 @@ sudo utilities/migrate-volume.sh run \
   --dry-run
 ```
 
-After a migration completes, re-run byte-count verification at any time without triggering another full migration:
+After a migration completes, re-run verification at any time without triggering another full migration. The verify subcommand performs both a byte-count delta check (≤ 1% tolerance) and a full content integrity check (`rsync --checksum --dry-run`), which catches silent block-level corruption that byte totals cannot detect:
 
 ```bash
 sudo utilities/migrate-volume.sh verify
@@ -301,8 +302,25 @@ sudo utilities/migrate-volume.sh resume
 # Inspect the migration log for rsync errors
 sudo utilities/migrate-volume.sh status
 
+# Re-run full verification (byte-count + checksum)
+sudo utilities/migrate-volume.sh verify
+
 # Re-run rsync manually to check for errors
 sudo rsync -av --checksum /var/lib/vaultwarden/ /mnt/vw-data/
+```
+
+### Non-empty WAL files after stack stop
+
+```bash
+# The script warns if SQLite WAL files are non-empty after stopping the stack.
+# Checkpoint the WAL before proceeding:
+sudo sqlite3 /var/lib/vaultwarden/data/db.sqlite3 'PRAGMA wal_checkpoint(FULL);'
+
+# Or use the built-in maintenance script:
+sudo ./maintenance.sh db-maint
+
+# Then re-run the migration (or resume if interrupted):
+sudo utilities/migrate-volume.sh resume
 ```
 
 ### Stack fails to start after migration
@@ -332,8 +350,8 @@ sudo chmod -R 750       /mnt/vw-data
 
 1. **Always back up before migrating** — run `./backup.sh run full` and verify the archive
 2. **Dry run first** — use `--dry-run` to preview actions on production systems
-3. **Verify after migration** — re-run `utilities/migrate-volume.sh verify` after any migration
-4. **Update `.env` immediately** — set `DATA_VOLUME_MOUNT` to the new path before restarting services
+3. **Verify after migration** — re-run `utilities/migrate-volume.sh verify` after any migration (byte-count + checksum)
+4. **Checkpoint the database** — if WAL files are found after stop, run `sudo ./maintenance.sh db-maint` before proceeding
 5. **Use dir-to-dir for reversal** — never pass `--device` when moving data back to the boot volume
 6. **Confirm boot device visually** — cross-check the `[boot]` label against your cloud provider's attached volume list
 7. **Test with dry run after volume resize** — re-validate the migration pipeline if the underlying block device has been resized

@@ -63,6 +63,8 @@ readonly -a _MV_RSYNC_EXCLUDES=(
     ".vw-data-volume"   # sentinel written by setup_data_volume(); never overwrite target's
     "*.sock"            # dead runtime sockets confuse service startup diagnostics
     "*.pid"             # PID files are always stale after stack stop
+    "*.sqlite3-wal"     # SQLite WAL — a non-empty WAL after stack stop indicates a hot DB
+    "*.sqlite3-shm"     # SQLite shared-memory file — always accompanies the WAL
 )
 
 # Systemd drop-in units whose ReadWritePaths= must be updated after migration.
@@ -327,9 +329,13 @@ _mv_select_device() {
     local i tags mount_display
     for (( i=0; i<${#dev_names[@]}; i++ )); do
         tags=""
-        # Boot tag: device is the root disk or directly mounts /
+        # Boot tag: device is the root disk, any partition of the root disk, or
+        # directly mounts /. The prefix check catches nvme partitions such as
+        # /dev/nvme0n1p2 when root_dev is /dev/nvme0n1.
         if [[ "${dev_mounts[$i]}" == "/" ]] \
-                || [[ -n "${root_dev}" && "${root_dev}" == "${dev_names[$i]}" ]] \
+                || { [[ -n "${root_dev}" ]] \
+                     && [[ "${#dev_names[$i]}" -ge "${#root_dev}" ]] \
+                     && [[ "${dev_names[$i]:0:${#root_dev}}" == "${root_dev}" ]]; } \
                 || [[ -n "${root_source}" && "${root_source}" == "${dev_names[$i]}" ]]; then
             tags="${tags} [boot]"
         fi
@@ -360,9 +366,13 @@ _mv_select_device() {
         if [[ "${choice}" =~ ^[0-9]+$ ]] \
                 && (( choice >= 1 && choice <= ${#dev_names[@]} )); then
             _MV_DEVICE="${dev_names[$(( choice - 1 ))]}"
-            # Guard against boot device selection using the same helper logic as display
+            # Guard against boot device selection: block the root disk itself, any
+            # partition of the root disk (prefix match catches /dev/nvme0n1p2 when
+            # root_dev is /dev/nvme0n1), and devices that directly mount /.
             if [[ "${dev_mounts[$(( choice - 1 ))]}" == "/" ]] \
-                    || [[ -n "${root_dev}" && "${root_dev}" == "${_MV_DEVICE}" ]] \
+                    || { [[ -n "${root_dev}" ]] \
+                         && [[ "${#_MV_DEVICE}" -ge "${#root_dev}" ]] \
+                         && [[ "${_MV_DEVICE:0:${#root_dev}}" == "${root_dev}" ]]; } \
                     || [[ -n "${root_source}" && "${root_source}" == "${_MV_DEVICE}" ]]; then
                 log_error "You selected the boot device. Aborting to prevent data loss."
                 exit 1
@@ -422,6 +432,19 @@ _mv_print_preflight_summary() {
     printf '  %-20s %s\n'  "Log file:"      "${_MV_LOG_FILE}"
     printf '╚═══════════════════════════════════════════════════════════════╝\n'
     printf '\n'
+
+    # Warn when dir-to-dir target already contains files: rsync --delete will remove
+    # any target files that are absent from source without further confirmation.
+    if [[ -z "${_MV_DEVICE}" && -d "${_MV_TARGET}" ]]; then
+        local _target_item_count
+        _target_item_count="$(find "${_MV_TARGET}" -maxdepth 1 -mindepth 1 2>/dev/null | wc -l | tr -d ' ')"
+        if (( _target_item_count > 0 )); then
+            printf '  ⚠  WARNING: Target directory is non-empty (%s item(s)).\n' "${_target_item_count}"
+            printf '     rsync --delete will REMOVE files in target that do not exist in source.\n'
+            printf '     Run with --dry-run first to inspect changes before proceeding.\n'
+            printf '\n'
+        fi
+    fi
 
     # In --yes mode do not prompt; log the summary and continue.
     if [[ "${_MV_YES:-false}" == "true" ]]; then
@@ -704,7 +727,11 @@ _mv_step_validate() {
     _mv_log info "── validate ──────────────────────────────────────────────────────"
 
     # 1. Required commands
-    require_commands rsync flock findmnt lsblk df du awk sed mktemp numfmt
+    require_commands rsync flock findmnt lsblk df du awk sed mktemp numfmt stat
+    # Block-device migrations also need blkid and mkfs.ext4 (called by setup_data_volume).
+    if [[ -n "${_MV_DEVICE}" ]]; then
+        require_commands blkid mkfs.ext4
+    fi
 
     # 2. Source exists and is a directory
     [[ -d "${_MV_SOURCE}" ]] || {
@@ -765,9 +792,16 @@ _mv_step_validate() {
     fi
 
     # 8. Disk space check
-    # Ensure target directory exists for df to work
-    mkdir -p "${_MV_TARGET}" 2>/dev/null || true
-    _mv_check_disk_space "${_MV_SOURCE}" "${_MV_TARGET}"
+    # For block-device migrations, the new volume is not yet formatted or mounted
+    # at validate time. Calling df on an empty mkdir would measure boot-volume free
+    # space, not the new device. Defer to _mv_step_format when it is actually mounted.
+    if [[ -z "${_MV_DEVICE}" ]]; then
+        # Dir-to-dir: target may not exist yet; create it so df has a reference point.
+        mkdir -p "${_MV_TARGET}" 2>/dev/null || true
+        _mv_check_disk_space "${_MV_SOURCE}" "${_MV_TARGET}"
+    else
+        _mv_log info "Block-device migration: disk space check deferred until after format and mount."
+    fi
 
     # 9. Stale backup warning (non-blocking)
     _mv_check_stale_backup
@@ -839,22 +873,46 @@ _mv_step_stop() {
 
     if [[ "${_MV_SKIP_STACK_STOP}" == "true" ]]; then
         _mv_log warn "Skipping stack stop (--skip-stack-stop). Proceeding with live stack."
-        return 0
+    else
+        _mv_log info "Container state before stop:"
+        docker compose ps --format json 2>/dev/null || true
+
+        if [[ "${DRY_RUN}" == "true" ]]; then
+            _mv_log info "[DRY RUN] would: stop VaultWarden stack (stop_services)"
+            return 0
+        fi
+
+        stop_services   # from lib/docker.sh
+
+        _mv_log info "Container state after stop:"
+        docker compose ps --format json 2>/dev/null || true
+        _mv_log success "Stack stopped."
     fi
 
-    _mv_log info "Container state before stop:"
-    docker compose ps --format json 2>/dev/null || true
-
-    if [[ "${DRY_RUN}" == "true" ]]; then
-        _mv_log info "[DRY RUN] would: stop VaultWarden stack (stop_services)"
-        return 0
+    # Scan source for non-empty SQLite WAL files. A non-empty WAL after a clean
+    # stop indicates the database was not checkpointed; copying it may produce an
+    # inconsistent database on the target. WAL/SHM files are excluded from rsync
+    # (_MV_RSYNC_EXCLUDES), so a hot WAL would leave the target without a WAL —
+    # which can cause corruption if the DB itself was written mid-transaction.
+    [[ "${DRY_RUN}" == "true" ]] && return 0
+    local wal_files
+    wal_files="$(find "${_MV_SOURCE}" -name "*.sqlite3-wal" -size +0c -type f 2>/dev/null || true)"
+    if [[ -n "${wal_files}" ]]; then
+        _mv_log warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        _mv_log warn "  ⚠  WAL WARNING: Non-empty SQLite WAL file(s) found after stack stop:"
+        local _wal
+        while IFS= read -r _wal; do
+            _mv_log warn "    ${_wal}"
+        done <<< "${wal_files}"
+        _mv_log warn "  A non-empty WAL indicates the database was not cleanly checkpointed."
+        _mv_log warn "  WAL/SHM files are excluded from rsync; copying without them may"
+        _mv_log warn "  leave the target database in an inconsistent state."
+        _mv_log warn "  Remediation before proceeding:"
+        _mv_log warn "    sudo sqlite3 <path/to/db.sqlite3> 'PRAGMA wal_checkpoint(FULL);'"
+        _mv_log warn "  Or run: sudo ./maintenance.sh db-maint"
+        _mv_log warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        _mv_confirm "Non-empty WAL file(s) detected. Proceeding risks an inconsistent database migration. Confirm to continue."
     fi
-
-    stop_services   # from lib/docker.sh
-
-    _mv_log info "Container state after stop:"
-    docker compose ps --format json 2>/dev/null || true
-    _mv_log success "Stack stopped."
 }
 
 # ── Pipeline step 3: Format and mount target volume ───────────────────────────
@@ -869,6 +927,8 @@ _mv_step_format() {
     # Check if already formatted and mounted at target
     if mountpoint -q "${_MV_TARGET}" 2>/dev/null; then
         _mv_log info "Target ${_MV_TARGET} is already a mounted filesystem — skipping format."
+        # Re-run disk space check now that the volume is confirmed mounted.
+        _mv_check_disk_space "${_MV_SOURCE}" "${_MV_TARGET}"
         return 0
     fi
 
@@ -884,6 +944,9 @@ _mv_step_format() {
 
     setup_data_volume   # from lib/storage.sh
     _mv_log success "Target volume formatted and mounted: ${_MV_DEVICE} → ${_MV_TARGET}"
+
+    # Disk space check now that the volume is formatted and df reports its capacity.
+    _mv_check_disk_space "${_MV_SOURCE}" "${_MV_TARGET}"
 }
 
 # ── Pipeline step 4: rsync data transfer ─────────────────────────────────────
@@ -965,7 +1028,31 @@ _mv_step_verify() {
         return 1
     fi
 
-    _mv_log success "Verification passed (delta ≤ ${_MV_VERIFY_TOLERANCE_PCT}%)."
+    _mv_log success "Byte-count verification passed (delta ≤ ${_MV_VERIFY_TOLERANCE_PCT}%)."
+
+    # Content integrity check: rsync --checksum --dry-run reports any files whose
+    # content (by checksum, not just size+time) differs between source and target.
+    # This catches silent block-level corruption that byte-count totals cannot detect.
+    _mv_log info "Running content integrity check (rsync --checksum --dry-run)..."
+    local _chk_out _chk_count
+    _chk_out="$(rsync --archive --checksum --dry-run --itemize-changes \
+        "${_MV_SOURCE%/}/" "${_MV_TARGET}" 2>/dev/null || true)"
+    # Count lines for regular files that would be sent (>f prefix = content differs).
+    _chk_count="$(printf '%s\n' "${_chk_out}" | grep -c '^>f' || true)"
+
+    if (( _chk_count > 0 )); then
+        _mv_log error "Content integrity check FAILED: ${_chk_count} file(s) have checksum mismatches."
+        _mv_log error "Files with content discrepancies:"
+        # rsync --itemize-changes format: 11-char flag field + space + filename.
+        # Use cut -d' ' -f2- to get everything after the first space, correctly
+        # handling filenames that contain spaces.
+        printf '%s\n' "${_chk_out}" | grep '^>f' | cut -d' ' -f2- | \
+            while IFS= read -r _f; do _mv_log error "  ${_f}"; done
+        _mv_log error "Investigate before proceeding. Resume with: sudo utilities/migrate-volume.sh resume"
+        return 1
+    fi
+
+    _mv_log success "Content integrity check passed (all file checksums match)."
 }
 
 # ── Pipeline step 6: Rename source ───────────────────────────────────────────
@@ -1011,15 +1098,14 @@ _mv_step_delete_source() {
         return 0
     fi
 
-    # Require only the basename to type — eliminates copy-paste errors on long paths.
-    # Display the full path separately so the operator can verify what will be deleted.
-    local confirm_token
-    confirm_token="$(basename "${renamed}")"
+    # Require the full absolute path to prevent accidental confirmation.
+    # Typing the complete path adds meaningful friction for an irreversible
+    # rm -rf on the only backup copy of the data.
     _mv_log warn "You are about to permanently delete:"
     _mv_log warn "  ${renamed}"
     _mv_confirm_by_typing \
-        "To confirm deletion, type the directory name shown above." \
-        "${confirm_token}"
+        "To confirm deletion, type the FULL PATH shown above." \
+        "${renamed}"
 
     if [[ "${DRY_RUN}" == "true" ]]; then
         _mv_log info "[DRY RUN] would: rm -rf ${renamed}"
@@ -1041,6 +1127,29 @@ _mv_step_update_env() {
         cp "${env_file}" "${env_file}.pre-migration.${_MV_TIMESTAMP}"
         chmod 0600 "${env_file}.pre-migration.${_MV_TIMESTAMP}"
         _mv_log info ".env backup created: ${env_file}.pre-migration.${_MV_TIMESTAMP}"
+
+        # Prune older .env.pre-migration.* backups — keep only the one just created.
+        # Each backup contains secrets; accumulating them across retried runs is a
+        # hygiene risk even on a root-owned 0600 file.
+        # Single-pass: collect all candidates into an array, then delete all except
+        # the newest (determined by mtime).
+        local _env_cand _env_newest _env_newest_ts=0 _env_cand_ts
+        local -a _env_all_cands=()
+        _env_newest="${env_file}.pre-migration.${_MV_TIMESTAMP}"
+        for _env_cand in "${PROJECT_ROOT}"/.env.pre-migration.*; do
+            [[ -f "${_env_cand}" ]] || continue
+            _env_all_cands+=( "${_env_cand}" )
+            _env_cand_ts="$(stat -c '%Y' "${_env_cand}" 2>/dev/null || echo 0)"
+            if (( _env_cand_ts > _env_newest_ts )); then
+                _env_newest_ts="${_env_cand_ts}"
+                _env_newest="${_env_cand}"
+            fi
+        done
+        for _env_cand in "${_env_all_cands[@]+"${_env_all_cands[@]}"}"; do
+            [[ "${_env_cand}" == "${_env_newest}" ]] && continue
+            rm -f "${_env_cand}"
+            _mv_log info "Removed stale .env backup: ${_env_cand}"
+        done
     else
         _mv_log info "[DRY RUN] would: cp ${env_file} ${env_file}.pre-migration.${_MV_TIMESTAMP}"
     fi
@@ -1210,6 +1319,32 @@ _mv_step_healthcheck() {
     done
 
     if [[ "${healthy}" == "true" ]]; then
+        # Application-level health probe: verify VaultWarden responds to HTTP.
+        # A container can be in 'running' state while the application is still
+        # starting, crash-looping, or serving errors. The /alive endpoint is
+        # unauthenticated and fast; curl failure here is a strong signal of
+        # post-migration trouble even when the container appears healthy.
+        local _rocket_port="${ROCKET_PORT:-8080}"
+        local _http_healthy=false _http_try=0 _http_max=6
+        _mv_log info "HTTP health probe: http://localhost:${_rocket_port}/alive (up to 60s)"
+        while (( _http_try < _http_max )); do
+            if curl -sf --max-time 5 "http://localhost:${_rocket_port}/alive" >/dev/null 2>&1; then
+                _http_healthy=true
+                break
+            fi
+            (( _http_try++ )) || true
+            _mv_log info "  Waiting for HTTP health... (attempt ${_http_try}/${_http_max})"
+            sleep 10
+        done
+        if [[ "${_http_healthy}" == "true" ]]; then
+            _mv_log success "HTTP health probe passed: /alive responded successfully."
+        else
+            _mv_log warn "HTTP health probe did not succeed after $(( _http_try * 10 ))s."
+            _mv_log warn "Containers are running but /alive did not respond on port ${_rocket_port}."
+            _mv_log warn "Verify manually: curl -v http://localhost:${_rocket_port}/alive"
+            _mv_log warn "Check logs:      docker compose logs vaultwarden"
+        fi
+
         _mv_state_write MIGRATION_COMPLETE "true"
         _mv_log success "All containers are running. Migration complete."
         # Warn if any fstab entries still reference the old source path.
@@ -1334,6 +1469,22 @@ _mv_do_abort() {
 
     log_warn "Aborting migration. Attempting rollback in reverse order..."
 
+    # ── P4: Warn when block device was formatted but rsync did not complete ───
+    # The new volume is formatted-but-empty; source data is intact. On retry,
+    # mountpoint will return true and format will be skipped — rsync restarts
+    # from the beginning, which is safe. Make this explicit so the operator
+    # is not confused by skipped format on the next run.
+    if _mv_state_has STEP_FORMAT_DONE && ! _mv_state_has STEP_RSYNC_DONE; then
+        log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        log_warn "  ⚠  DATA NOTICE: Block device was formatted but rsync did not complete."
+        log_warn "     Device : $(_mv_state_read MV_DEVICE)"
+        log_warn "     Mount  : $(_mv_state_read MV_TARGET)"
+        log_warn "  The new volume is formatted but empty. Source data is intact."
+        log_warn "  On retry, format will be skipped (mountpoint returns true)."
+        log_warn "  rsync will run from the beginning — this is safe."
+        log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    fi
+
     # ── Step 10 reverse: stop stack (started on new volume) ──────────────────
     if _mv_state_has STEP_START_DONE; then
         log_info "Rollback: stopping stack..."
@@ -1402,6 +1553,35 @@ _mv_do_abort() {
     # ── Fstab check: warn about stale entries that could shadow the restored path ─
     _mv_warn_fstab_entries
 
+    # ── N20: If format completed, warn that the new volume may still be mounted ─
+    # After abort the formatted volume could remain mounted at _MV_TARGET.
+    # If the operator retries, format is skipped (mountpoint returns true) — which
+    # is correct for a resume but may be unexpected on a true abort.
+    if _mv_state_has STEP_FORMAT_DONE; then
+        local _abort_tgt
+        _abort_tgt="$(_mv_state_read MV_TARGET)"
+        if [[ -n "${_abort_tgt}" ]] && mountpoint -q "${_abort_tgt}" 2>/dev/null; then
+            log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            log_warn "  ⚠  MOUNT: The new block volume remains mounted at: ${_abort_tgt}"
+            log_warn "  On a true abort this may be unexpected."
+            log_warn "  On retry, format will be skipped and rsync will run from scratch."
+            log_warn "  To unmount: sudo umount ${_abort_tgt}"
+            log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            local _umount_reply
+            # Use a direct read here rather than _mv_confirm: _mv_confirm exits on
+            # decline, but this prompt is a non-fatal offer — declining is valid and
+            # should not abort the rest of the abort/rollback logic.
+            read -r -p "  Unmount ${_abort_tgt} now? [y/N] " _umount_reply
+            if [[ "${_umount_reply}" =~ ^[Yy]$ ]]; then
+                umount "${_abort_tgt}" \
+                    && log_success "Unmounted ${_abort_tgt}." \
+                    || log_warn "umount failed — unmount manually: sudo umount ${_abort_tgt}"
+            else
+                log_info "Leaving ${_abort_tgt} mounted. Unmount manually when ready."
+            fi
+        fi
+    fi
+
     # ── Clear state file ──────────────────────────────────────────────────────
     _mv_state_clear
     log_success "State file cleared."
@@ -1438,6 +1618,30 @@ _mv_run_pipeline() {
         _MV_SKIP_STACK_STOP="$(_mv_state_read MV_SKIP_STACK_STOP)"
         _MV_DELETE_SOURCE="$(_mv_state_read MV_DELETE_SOURCE)"
         log_info "Resuming migration: ${_MV_SOURCE} → ${_MV_TARGET}"
+
+        # Lightweight re-validation: guard against source removal, unmounted target,
+        # or missing docker-compose.yml between runs (validate step is already marked
+        # done and will be skipped by _mv_run_step).
+        log_info "Re-validating prerequisites for resume..."
+        local _resume_ok=true
+        if [[ ! -d "${_MV_SOURCE}" ]]; then
+            log_error "Resume: source directory no longer exists: ${_MV_SOURCE}"
+            _resume_ok=false
+        fi
+        if [[ -n "${_MV_DEVICE}" ]] && ! mountpoint -q "${_MV_TARGET}" 2>/dev/null; then
+            log_error "Resume: target mount point is not mounted: ${_MV_TARGET}"
+            log_error "Remount it first, then re-run resume."
+            _resume_ok=false
+        fi
+        if [[ ! -f "${PROJECT_ROOT}/docker-compose.yml" ]]; then
+            log_error "Resume: docker-compose.yml not found: ${PROJECT_ROOT}/docker-compose.yml"
+            _resume_ok=false
+        fi
+        [[ "${_resume_ok}" == "true" ]] || {
+            log_error "Resume validation failed. Fix the above issues and retry."
+            return 1
+        }
+        log_info "Resume validation passed."
     fi
 
     # ── Execute pipeline steps in order ───────────────────────────────────────
