@@ -244,6 +244,108 @@ _mv_expand_path() {
     printf '%s' "$p"
 }
 
+# ── Interactive block device selector ────────────────────────────────────────
+_mv_select_device() {
+    # Presents a numbered list of block devices using lsblk.
+    # Marks the boot/root device with [boot].
+    # Populates _MV_DEVICE with the selected device path.
+    # Skips if --device was already provided, subcommand is not 'run',
+    # or --target was already provided (dir-to-dir migration needs no device).
+
+    [[ -n "${_MV_DEVICE:-}" ]] && return 0
+    [[ "${_MV_SUBCOMMAND}" == "run" ]] || return 0
+    [[ -n "${_MV_TARGET:-}" ]] && return 0   # dir-to-dir migration; no device needed
+
+    log_info "Detecting block devices using lsblk..."
+    printf '\n'
+
+    # Build device list: name, size, mountpoint
+    # Output: NAME SIZE MOUNTPOINT  (tab-separated, no header)
+    local -a dev_names dev_sizes dev_mounts
+    local name size mount _rest
+
+    while IFS=$'\t' read -r name size mount _rest; do
+        [[ -z "${name}" ]] && continue
+        dev_names+=( "/dev/${name}" )
+        dev_sizes+=( "${size}" )
+        dev_mounts+=( "${mount}" )
+    done < <(lsblk -o NAME,SIZE,MOUNTPOINT -rn -d 2>/dev/null)
+
+    if (( ${#dev_names[@]} == 0 )); then
+        log_error "No block devices found via lsblk. Ensure the target disk is attached."
+        return 1
+    fi
+
+    # Determine root device (the physical disk backing the / mountpoint)
+    local root_source root_dev
+    root_source="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
+    root_dev="$(lsblk -no PKNAME "${root_source}" 2>/dev/null \
+        || lsblk -no NAME "${root_source}" 2>/dev/null \
+        || true)"
+    # Only prefix /dev/ if detection succeeded; otherwise leave empty
+    [[ -n "${root_dev}" ]] && root_dev="/dev/${root_dev}"
+
+    local i mount_label mount_display
+    for (( i=0; i<${#dev_names[@]}; i++ )); do
+        mount_label=""
+        if [[ "${dev_mounts[$i]}" == "/" ]] \
+                || [[ "${root_dev}" == "${dev_names[$i]}" ]]; then
+            mount_label=" [boot]"
+        fi
+
+        mount_display="${dev_mounts[$i]:-  -}"
+        printf '  %d) %-12s  size: %-8s  mount: %-20s%s\n' \
+            $(( i + 1 )) \
+            "${dev_names[$i]}" \
+            "${dev_sizes[$i]}" \
+            "${mount_display}" \
+            "${mount_label}"
+    done
+
+    printf '\n'
+    log_warn "Select TARGET block device for migration (DO NOT choose [boot]):"
+
+    local choice
+    while true; do
+        read -r -p "  Device number [1-${#dev_names[@]}]: " choice
+        if [[ "${choice}" =~ ^[0-9]+$ ]] \
+                && (( choice >= 1 && choice <= ${#dev_names[@]} )); then
+            _MV_DEVICE="${dev_names[$(( choice - 1 ))]}"
+            # Guard against boot device selection (by mountpoint or by root device identity)
+            if [[ "${dev_mounts[$(( choice - 1 ))]}" == "/" ]] \
+                    || [[ -n "${root_dev}" && "${root_dev}" == "${_MV_DEVICE}" ]]; then
+                log_error "You selected the boot device. Aborting to prevent data loss."
+                exit 1
+            fi
+            break
+        fi
+        log_warn "Invalid selection. Enter a number between 1 and ${#dev_names[@]}."
+    done
+
+    printf '\n'
+    log_info "Selected target device: ${_MV_DEVICE}"
+}
+
+# ── Interactive mount point prompt ────────────────────────────────────────────
+_mv_prompt_target() {
+    # Prompts for the target mount point when --target is not provided.
+    # Uses /mnt/vw-data as the default (matching DATA_VOLUME_MOUNT in .env.example).
+    # Skips if _MV_TARGET is already set (--target was passed on CLI).
+
+    [[ -n "${_MV_TARGET:-}" ]] && return 0
+    [[ "${_MV_SUBCOMMAND}" == "run" ]] || return 0
+
+    local default_mount="${DATA_VOLUME_MOUNT:-/mnt/vw-data}"
+    local reply
+
+    printf '\n'
+    read -r -p "  Enter target mount point [${default_mount}]: " reply
+    _MV_TARGET="${reply:-${default_mount}}"
+    _MV_TARGET="$(realpath -m "${_MV_TARGET}")"
+    log_info "Using mount point: ${_MV_TARGET}"
+    printf '\n'
+}
+
 # ── Private helper: disk space check ─────────────────────────────────────────
 _mv_check_disk_space() {
     # Usage: _mv_check_disk_space <source_path> <target_path>
@@ -347,10 +449,11 @@ SUBCOMMANDS:
   verify   Re-run byte-count verification only (non-destructive)
 
 OPTIONS (run / resume):
-  --source  <path>   Source directory  (default: current PROJECT_STATE_DIR)
-  --target  <path>   Destination directory or mount point  [required for run]
+  --source  <path>   Source directory  (default: current PROJECT_STATE_DIR from .env)
+  --target  <path>   Destination mount point  (prompted interactively if omitted)
   --device  <dev>    Block device for new volume (e.g. /dev/sdb)
-                     Omit if target is already mounted.
+                     Prompted interactively via lsblk if omitted.
+                     Omit entirely for directory-to-directory migration.
   --skip-stack-stop  Do not stop the Docker stack before migrating.
                      Requires explicit runtime confirmation. Use with caution.
   --delete-source    Delete renamed source after successful verification.
@@ -358,19 +461,24 @@ OPTIONS (run / resume):
   --dry-run          Print all actions without executing them.
   --force            Skip the pre-migration backup confirmation prompt.
   --yes              Answer yes to all confirmations (except --delete-source).
+                     Requires --target when used (non-interactive mode).
   --log-file <path>  Override default log file path.
   --help             Show this help and exit.
 
 EXAMPLES:
-  # Boot volume → dedicated data volume
+  # Interactive (prompts for device and mount point)
+  sudo utilities/migrate-volume.sh run
+
+  # Non-interactive: boot volume → dedicated data volume
   sudo utilities/migrate-volume.sh run \
     --source /var/lib/vaultwarden \
     --target /mnt/vw-data \
-    --device /dev/sdb
+    --device /dev/sdb \
+    --yes
 
-  # One data volume → another (already mounted)
+  # Directory-to-directory (no device, no format step)
   sudo utilities/migrate-volume.sh run \
-    --source /mnt/vw-data \
+    --source /var/lib/vaultwarden \
     --target /mnt/vw-data2
 
   # Dry run first
@@ -468,10 +576,12 @@ _mv_parse_args() {
     # Validate required args per subcommand
     case "${_MV_SUBCOMMAND}" in
         run)
-            [[ -n "${_MV_TARGET}" ]] || {
-                log_error "--target is required for the 'run' subcommand."
+            # --target is required only in non-interactive (--yes) mode.
+            # If running interactively, _mv_prompt_target will collect it after arg parsing.
+            if [[ "${_MV_YES:-false}" == "true" && -z "${_MV_TARGET}" ]]; then
+                log_error "--target is required when using --yes (non-interactive mode)."
                 exit 1
-            }
+            fi
             ;;
         resume|status|abort|verify)
             # No required args
@@ -1215,7 +1325,11 @@ main() {
     _mv_acquire_lock
 
     case "${_MV_SUBCOMMAND}" in
-        run)     _mv_run_pipeline ;;
+        run)
+            _mv_select_device    # interactive lsblk device picker (skips if --device set)
+            _mv_prompt_target    # interactive mount point prompt (skips if --target set)
+            _mv_run_pipeline
+            ;;
         resume)  _mv_run_pipeline --resume ;;
         status)  _mv_print_status ;;
         abort)   _mv_do_abort ;;
