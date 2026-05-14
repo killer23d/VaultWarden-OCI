@@ -340,7 +340,6 @@ wait_for_container_stopped() {
 
     local status=""
     while (( elapsed < max_wait )); do
-        local status
         status=$(docker inspect --format '{{.State.Status}}' \
                      "$(docker compose ps -q "$service" 2>/dev/null || true)" 2>/dev/null \
                  || docker ps --filter "name=${service}" --format '{{.Status}}' 2>/dev/null \
@@ -1045,7 +1044,7 @@ main() {
 
         local age_key_file
         age_key_file=$(_resolve_age_key) || {
-            log_error "Age key file not found at: $age_key_file"
+            log_error "Age key file not found at: ${age_key_file:-/etc/vaultwarden/age-key.txt}"
             log_error "Set SOPS_AGE_KEY_FILE in .env, or place the key at /etc/vaultwarden/age-key.txt"
             exit 1
         }
@@ -1190,7 +1189,7 @@ main() {
 
     local age_key_file
     age_key_file=$(_resolve_age_key) || {
-        log_error "Age key file not found at: $age_key_file"
+        log_error "Age key file not found at: ${age_key_file:-/etc/vaultwarden/age-key.txt}"
         log_error "Set SOPS_AGE_KEY_FILE in .env, or place the key at /etc/vaultwarden/age-key.txt"
         exit 1
     }
