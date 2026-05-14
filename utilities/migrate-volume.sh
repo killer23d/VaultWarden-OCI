@@ -754,6 +754,20 @@ _mv_parse_args() {
     if [[ -n "${_MV_TARGET}" ]]; then
         _MV_TARGET="$(realpath -m "${_MV_TARGET}")"
     fi
+
+    # Safe-character validation: reject paths with characters that could break
+    # shell quoting, state-file parsing, or rsync invocations.
+    local _mv_unsafe_re=$'[^a-zA-Z0-9/._-]'
+    if [[ "${_MV_SOURCE}" =~ ${_mv_unsafe_re} ]]; then
+        log_error "Source path contains unsafe characters: ${_MV_SOURCE}"
+        log_error "Only alphanumeric characters and / . _ - are allowed."
+        exit 1
+    fi
+    if [[ -n "${_MV_TARGET}" && "${_MV_TARGET}" =~ ${_mv_unsafe_re} ]]; then
+        log_error "Target path contains unsafe characters: ${_MV_TARGET}"
+        log_error "Only alphanumeric characters and / . _ - are allowed."
+        exit 1
+    fi
 }
 
 # ── Pipeline step 0: Pre-flight validation ────────────────────────────────────
@@ -1335,7 +1349,7 @@ _mv_step_healthcheck() {
 
     if [[ "${DRY_RUN}" == "true" ]]; then
         _mv_log info "[DRY RUN] would: poll 'docker compose ps --status running --quiet' for healthy state (up to 120s)"
-        _mv_state_write MIGRATION_COMPLETE "true"
+        _mv_log info "[DRY RUN] would: write MIGRATION_COMPLETE=true to state file"
         _mv_print_checklist
         return 0
     fi
@@ -1393,18 +1407,19 @@ _mv_step_healthcheck() {
         done
         if [[ "${_http_healthy}" == "true" ]]; then
             _mv_log success "HTTP health probe passed: /alive responded successfully."
+            _mv_state_write MIGRATION_COMPLETE "true"
+            _mv_log success "All containers are running. Migration complete."
+            # Warn if any fstab entries still reference the old source path.
+            _mv_warn_fstab_entries
+            _mv_print_checklist
         else
-            _mv_log warn "HTTP health probe did not succeed after $(( _http_try * 10 ))s."
-            _mv_log warn "Containers are running but /alive did not respond on port ${_rocket_port}."
-            _mv_log warn "Verify manually: curl -v http://localhost:${_rocket_port}/alive"
-            _mv_log warn "Check logs:      docker compose logs vaultwarden"
+            _mv_log error "HTTP health probe failed after $(( _http_try * 10 ))s."
+            _mv_log error "Containers are running but /alive did not respond on port ${_rocket_port}."
+            _mv_log error "Verify manually: curl -v http://localhost:${_rocket_port}/alive"
+            _mv_log error "Check logs:      docker compose logs vaultwarden"
+            _mv_log error "MIGRATION_COMPLETE not written. Fix the issue then resume or abort."
+            return 1
         fi
-
-        _mv_state_write MIGRATION_COMPLETE "true"
-        _mv_log success "All containers are running. Migration complete."
-        # Warn if any fstab entries still reference the old source path.
-        _mv_warn_fstab_entries
-        _mv_print_checklist
     else
         _mv_log error "Health check timed out after ${max_wait}s."
         _mv_log error "Current container state:"
@@ -1703,8 +1718,14 @@ _mv_run_pipeline() {
         log_info "Re-validating prerequisites for resume..."
         local _resume_ok=true
         if [[ ! -d "${_MV_SOURCE}" ]]; then
-            log_error "Resume: source directory no longer exists: ${_MV_SOURCE}"
-            _resume_ok=false
+            # After step 6 (rename_source) the original directory is intentionally
+            # absent — its absence is expected and must not block resume.
+            if _mv_state_has STEP_SOURCE_RENAMED_DONE; then
+                log_info "Resume: source was renamed in step 6 — original path absence is expected."
+            else
+                log_error "Resume: source directory no longer exists: ${_MV_SOURCE}"
+                _resume_ok=false
+            fi
         fi
         if [[ -n "${_MV_DEVICE}" ]] && ! mountpoint -q "${_MV_TARGET}" 2>/dev/null; then
             log_error "Resume: target mount point is not mounted: ${_MV_TARGET}"
@@ -1776,6 +1797,28 @@ main() {
                     _MV_SOURCE="${_sv}"
                     _MV_TARGET="${_tv}"
                     log_info "verify: using paths from state file — source=${_MV_SOURCE} target=${_MV_TARGET}"
+                fi
+                # After step 6 (rename_source) the original source path no longer
+                # exists.  Discover the renamed directory and use it for the
+                # byte-count comparison so verify works after a complete migration.
+                if _mv_state_has STEP_SOURCE_RENAMED_DONE && [[ ! -d "${_MV_SOURCE}" ]]; then
+                    local _renamed_src="" _cand _cand_ts _newest_ts=0
+                    for _cand in "${_MV_SOURCE}.pre-migration."*/; do
+                        [[ -d "${_cand}" ]] || continue
+                        _cand_ts="$(stat -c '%Y' "${_cand}" 2>/dev/null || echo 0)"
+                        if (( _cand_ts > _newest_ts )); then
+                            _newest_ts="${_cand_ts}"
+                            _renamed_src="${_cand%/}"
+                        fi
+                    done
+                    if [[ -n "${_renamed_src}" ]]; then
+                        log_info "verify: source was renamed (step 6) — comparing renamed source: ${_renamed_src}"
+                        _MV_SOURCE="${_renamed_src}"
+                    else
+                        log_error "verify: STEP_SOURCE_RENAMED_DONE is set but no renamed source found matching '${_MV_SOURCE}.pre-migration.*'"
+                        log_error "The renamed source may have been deleted. Cannot run byte-count comparison."
+                        exit 1
+                    fi
                 fi
             fi
             _mv_step_verify

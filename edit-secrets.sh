@@ -87,7 +87,12 @@ _warn_if_stack_unavailable() {
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-EDITOR_CMD="${EDITOR:-nano}"
+# Parse EDITOR into an array to support flags (e.g. EDITOR='code --wait').
+# Word-splitting is intentional here so that EDITOR='code --wait' produces
+# the correct two-element array.  Use --editor 'code --wait' at runtime to
+# override with the same effect.
+# shellcheck disable=SC2206
+EDITOR_CMD=(${EDITOR:-nano})
 SKIP_BACKUP=false
 VIEW_ONLY=false
 LIST_KEYS=false
@@ -352,7 +357,15 @@ esac
 # Parse remaining options
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --editor)  EDITOR_CMD="$2"; shift 2 ;;
+        --editor)
+            if [[ $# -lt 2 || -z "${2:-}" || "${2:-}" == --* ]]; then
+                log_error "--editor requires an argument (e.g. --editor vim or --editor 'code --wait')"
+                exit 1
+            fi
+            # shellcheck disable=SC2206
+            EDITOR_CMD=($2)
+            shift 2
+            ;;
         --no-backup) SKIP_BACKUP=true; shift ;;
         --dry-run) DRY_RUN=true; shift ;;
         *)         log_error "Unknown option: '$1'"; show_help; exit 1 ;;
@@ -458,12 +471,12 @@ create_backup() {
     backup_file="$SECRETS_BACKUP_DIR/secrets.yaml.backup-$(date +%Y%m%d-%H%M%S)"
     log_info "Creating backup: $(basename "$backup_file")"
 
-    if ! cp "$SECRETS_FILE" "$backup_file"; then
+    # Create backup file with secure permissions before writing content,
+    # eliminating the window where the file exists with world-readable permissions.
+    if ! install -m 600 "$SECRETS_FILE" "$backup_file" 2>/dev/null; then
         log_error "Failed to create backup"
         return 1
     fi
-
-    chmod 600 "$backup_file"
     log_success "Backup created"
 
     # Keep last 5 secrets backups (count-based, NOT day-based)
@@ -530,6 +543,10 @@ do_view() {
 
     local temp_file
     temp_file=$(mktemp -p /dev/shm 2>/dev/null || mktemp)
+    if [[ -n "$temp_file" && "$temp_file" != /dev/shm/* ]]; then
+        log_warn "view: /dev/shm unavailable — plaintext temp file is disk-backed: $temp_file"
+        log_warn "      Ensure full-disk encryption is active on this host."
+    fi
     # Make chmod failure a hard abort — if we can't secure the
     # temp file, we must not proceed as secrets could be exposed to other users.
     if ! install -m 600 /dev/null "$temp_file" 2>/dev/null; then
@@ -541,7 +558,7 @@ do_view() {
     register_cleanup "_secure_shred" "$temp_file"
 
     local sops_rc=0
-    sops -d "$SECRETS_FILE" > "$temp_file" 2>&1 || sops_rc=$?
+    sops -d "$SECRETS_FILE" > "$temp_file" || sops_rc=$?
     cleanup_secrets_environment
     if [[ $sops_rc -ne 0 ]]; then
         log_error "Failed to decrypt secrets"
@@ -551,7 +568,7 @@ do_view() {
     if command -v less >/dev/null 2>&1; then
         less "$temp_file"
     else
-        "$EDITOR_CMD" -R "$temp_file" 2>/dev/null || cat "$temp_file"
+        "${EDITOR_CMD[@]}" -R "$temp_file" 2>/dev/null || cat "$temp_file"
     fi
 
     return 0
@@ -566,12 +583,13 @@ do_view() {
 # ---------------------------------------------------------------------------
 _check_editor_forks() {
     # If the user already added a wait/nofork flag, skip the warning entirely.
-    case "$EDITOR_CMD" in
+    local _editor_str="${EDITOR_CMD[*]}"
+    case "$_editor_str" in
         *--wait*|*--nofork*|-f|*\ -f\ *|*\ -f) return 0 ;;
     esac
 
     local editor_bin
-    editor_bin="$(basename "${EDITOR_CMD%% *}")"
+    editor_bin="$(basename "${EDITOR_CMD[0]}")"
 
     for forking in "${_FORKING_EDITORS[@]}"; do
         if [[ "$editor_bin" == "$forking" ]]; then
@@ -735,6 +753,10 @@ _deploy_docker_secrets() {
     local docker_dir="$PROJECT_ROOT/secrets/.docker_secrets"
     local temp_plain
     temp_plain=$(mktemp -p /dev/shm --suffix=.yaml 2>/dev/null || mktemp --suffix=.yaml)
+    if [[ -n "$temp_plain" && "$temp_plain" != /dev/shm/* ]]; then
+        log_warn "deploy-secrets: /dev/shm unavailable — plaintext temp file is disk-backed: $temp_plain"
+        log_warn "                Ensure full-disk encryption is active on this host."
+    fi
     # Make chmod failure a hard abort — if we can't secure the
     # temp file, we must not proceed as secrets could be exposed to other users.
     if ! install -m 600 /dev/null "$temp_plain" 2>/dev/null; then
@@ -839,7 +861,7 @@ do_rotate() {
         return 1
     fi
     local sops_rc=0
-    sops -d "$SECRETS_FILE" > "$temp_plain" 2>&1 || sops_rc=$?
+    sops -d "$SECRETS_FILE" > "$temp_plain" || sops_rc=$?
     cleanup_secrets_environment
     if [[ $sops_rc -ne 0 ]]; then
         log_error "Failed to decrypt secrets for rotation"
@@ -898,22 +920,44 @@ do_rotate() {
     python3 - "$temp_plain" "$actual_field" "$new_value" "$temp_patched" << 'PYEOF' || _patch_rc=$?
 import sys, re
 
+try:
+    import yaml as _yaml
+    def yaml_scalar(value):
+        # yaml.dump produces a properly-quoted YAML scalar (adds quoting for
+        # values containing ':', '#', leading spaces, newlines, etc.).
+        return _yaml.dump(value, default_flow_style=True, allow_unicode=True).rstrip('\n')
+except ImportError:
+    def yaml_scalar(value):
+        # Fallback: minimal quoting when PyYAML is not available.
+        # Wrap in single quotes and escape embedded single quotes.
+        special = (':', '#', '[', ']', '{', '}', ',', '&', '*', '?', '|',
+                   '-', '<', '>', '=', '!', '%', '@', '`', '\n')
+        if any(c in value for c in special) or value != value.strip() or not value:
+            return "'" + value.replace("'", "''") + "'"
+        return value
+
 src_file, field, new_value, dst_file = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 
 with open(src_file, 'r', encoding='utf-8') as f:
     content = f.read()
+
+# Produce a YAML-safe scalar for the replacement value.  yaml_scalar() adds
+# quoting (single or double quotes) when the value contains YAML-special
+# characters such as ':', '#', leading/trailing spaces, or newlines,
+# preventing broken YAML when new_value contains those characters.
+yaml_value = yaml_scalar(new_value)
 
 # Replace the value for the given key while preserving all comments and
 # surrounding whitespace.  The pattern matches the key at the start of a
 # line followed by optional spaces/colon-space and the rest of the line.
 # Both bare values and YAML single-quoted scalars are replaced.
 pattern = r'^(' + re.escape(field) + r':\s*).*$'
-replacement = lambda m: m.group(1) + new_value
+replacement = lambda m: m.group(1) + yaml_value
 new_content, n = re.subn(pattern, replacement, content, flags=re.MULTILINE)
 
 if n == 0:
     # Key not yet present (e.g. first-time email_api_token insert) — append it.
-    new_content = content.rstrip('\n') + '\n' + field + ': ' + new_value + '\n'
+    new_content = content.rstrip('\n') + '\n' + field + ': ' + yaml_value + '\n'
 
 with open(dst_file, 'w', encoding='utf-8') as f:
     f.write(new_content)
@@ -1000,13 +1044,17 @@ do_edit() {
         log_error "Too many failed edit attempts (max ${MAX_EDIT_ATTEMPTS}). Aborting."
         return 1
     fi
-    log_info "Opening secrets with: $EDITOR_CMD"
+    log_info "Opening secrets with: ${EDITOR_CMD[*]}"
 
     # MEDIUM FIX: Warn user if their editor is known to fork (return before save).
     _check_editor_forks
 
     local temp_file
     temp_file=$(mktemp -p /dev/shm --suffix=.yaml 2>/dev/null || mktemp --suffix=.yaml)
+    if [[ -n "$temp_file" && "$temp_file" != /dev/shm/* ]]; then
+        log_warn "edit: /dev/shm unavailable — plaintext temp file is disk-backed: $temp_file"
+        log_warn "      Ensure full-disk encryption is active on this host."
+    fi
     # Make chmod failure a hard abort — if we can't secure the
     # temp file, we must not proceed as secrets could be exposed to other users.
     if ! install -m 600 /dev/null "$temp_file" 2>/dev/null; then
@@ -1025,7 +1073,7 @@ do_edit() {
         return 1
     fi
     local sops_rc=0
-    sops -d "$SECRETS_FILE" > "$temp_file" 2>&1 || sops_rc=$?
+    sops -d "$SECRETS_FILE" > "$temp_file" || sops_rc=$?
     cleanup_secrets_environment
     if [[ $sops_rc -ne 0 ]]; then
         log_error "Failed to decrypt secrets"
@@ -1053,7 +1101,7 @@ do_edit() {
     local before_checksum
     before_checksum=$(calculate_sha256 "$temp_file")
 
-    if ! "$EDITOR_CMD" "$temp_file"; then
+    if ! "${EDITOR_CMD[@]}" "$temp_file"; then
         log_error "Editor exited with error"
         return 1
     fi
@@ -1145,6 +1193,10 @@ _export_recovery_kit_safe() {
 
     local temp_plain
     temp_plain=$(mktemp -p /dev/shm --suffix=.yaml 2>/dev/null || mktemp --suffix=.yaml)
+    if [[ -n "$temp_plain" && "$temp_plain" != /dev/shm/* ]]; then
+        log_warn "export-recovery-kit: /dev/shm unavailable — plaintext temp file is disk-backed: $temp_plain"
+        log_warn "                     Ensure full-disk encryption is active on this host."
+    fi
     # Make chmod failure a hard abort — if we can't secure the
     # temp file, we must not proceed as secrets could be exposed to other users.
     if ! install -m 600 /dev/null "$temp_plain" 2>/dev/null; then
@@ -1160,7 +1212,7 @@ _export_recovery_kit_safe() {
         return 1
     fi
     local sops_rc=0
-    sops -d "$SECRETS_FILE" > "$temp_plain" 2>&1 || sops_rc=$?
+    sops -d "$SECRETS_FILE" > "$temp_plain" || sops_rc=$?
     cleanup_secrets_environment
     if [[ $sops_rc -ne 0 ]]; then
         log_error "Cannot decrypt secrets — aborting recovery kit export"
@@ -1209,7 +1261,11 @@ main() {
 
     # Backup before any write operation
     if [[ "$VIEW_ONLY" != "true" && "$LIST_KEYS" != "true" ]]; then
-        create_backup || log_warn "Backup failed - continuing anyway"
+        if ! create_backup; then
+            log_error "Backup failed — aborting to protect against data loss."
+            log_error "Use --no-backup to skip backup creation (not recommended)."
+            exit 1
+        fi
     fi
 
     if   [[ "$LIST_KEYS" == "true" ]]; then do_list_keys             || exit 1
