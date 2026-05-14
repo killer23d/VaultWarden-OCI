@@ -1649,7 +1649,9 @@ restore_full() {
                     local _ts_env; _ts_env=$(date +%Y%m%d-%H%M%S)
                     local _old_umask_env; _old_umask_env=$(umask)
                     umask 077
-                    cp -f "$PROJECT_ROOT/.env" "$PROJECT_ROOT/.env.pre-restore-${_ts_env}" 2>/dev/null || true
+                    if ! cp -f "$PROJECT_ROOT/.env" "$PROJECT_ROOT/.env.pre-restore-${_ts_env}" 2>/dev/null; then
+                        log_warn "Could not create .env pre-restore backup — proceeding without it"
+                    fi
                     umask "$_old_umask_env"
                 fi
                 cp -f "$src" "$PROJECT_ROOT/$f"

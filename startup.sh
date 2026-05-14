@@ -550,9 +550,9 @@ prepare_docker_secrets() {
     trap '_prepare_secrets_cleanup' EXIT
     _prepare_secrets_trap_registered=true
   fi
-  # umask 177: new files are created as 0600 (no group/world bits).
+  # umask 077: new files are created as 0600 (no group/world bits).
   # This is consistent with lib/secrets.sh::write_secret_file() (chmod 600).
-  umask 177
+  umask 077
 
   local cache_file
   cache_file=$(mktemp)

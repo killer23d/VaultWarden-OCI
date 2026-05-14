@@ -212,7 +212,10 @@ load_env_file() {
         if [[ "$file_perms" != "unknown" ]]; then
             local perm_int=$(( 8#${file_perms} ))
             if (( perm_int & 0044 )); then
-                log_warn "load_env_file: '$env_file' is readable by group or world (${file_perms})." \
+                local _perm_detail=""
+                (( perm_int & 0040 )) && _perm_detail+="group-readable "
+                (( perm_int & 0004 )) && _perm_detail+="world-readable "
+                log_warn "load_env_file: '$env_file' is ${_perm_detail}(${file_perms})." \
                          " Fix: chmod 600 '$env_file'"
             fi
         fi
@@ -1146,7 +1149,10 @@ _smtp_send() {
             printf '%s\r\n' "$line"
         done <<< "$body"
         printf '\r\n'
-    } > "$_msg_file"
+    } > "$_msg_file" || {
+        log_error "_smtp_send: failed to write SMTP message to temp file"
+        return 1
+    }
 
     # ── Path A: SMTP_PASSWORD present → direct external relay ─────────────────
     # This branch must stay in sync with _resolve_smtp_method returning
