@@ -847,9 +847,12 @@ update_firewall_ranges() {
         # UFW status format: "80/tcp  ALLOW IN  <range>  # comment"
         # Match port in the To-column followed by ALLOW and the range to avoid
         # false positives from comment text that contains the range and a number.
+        # Escape dots in the CIDR range so they match literally, not as regex wildcards.
+        local escaped_range
+        escaped_range=$(printf '%s' "$range" | sed 's/\./\\./g')
         local has_80=false has_443=false
-        echo "$ufw_status" | grep -qE "^80(/tcp)?[[:space:]]+(ALLOW|ALLOW IN)[[:space:]].*${range}" && has_80=true
-        echo "$ufw_status" | grep -qE "^443(/tcp)?[[:space:]]+(ALLOW|ALLOW IN)[[:space:]].*${range}" && has_443=true
+        echo "$ufw_status" | grep -qE "^80(/tcp)?[[:space:]]+(ALLOW|ALLOW IN)[[:space:]].*${escaped_range}" && has_80=true
+        echo "$ufw_status" | grep -qE "^443(/tcp)?[[:space:]]+(ALLOW|ALLOW IN)[[:space:]].*${escaped_range}" && has_443=true
         if [[ "$has_80" == "true" && "$has_443" == "true" ]]; then
             return 0  # both rules already present
         fi

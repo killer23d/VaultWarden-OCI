@@ -471,7 +471,8 @@ create_backup() {
 
     # Create backup file with secure permissions before writing content,
     # eliminating the window where the file exists with world-readable permissions.
-    if ! install -m 600 "$SECRETS_FILE" "$backup_file" 2>/dev/null; then
+    # -p preserves the source file's timestamps for accurate backup dating.
+    if ! install -m 600 -p "$SECRETS_FILE" "$backup_file" 2>/dev/null; then
         log_error "Failed to create backup"
         return 1
     fi
