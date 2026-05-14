@@ -5,7 +5,10 @@
 [[ -n "${VAULTWARDEN_COMMON_LIB_LOADED:-}" ]] && return 0
 readonly VAULTWARDEN_COMMON_LIB_LOADED=1
 
-set -euo pipefail
+# Do NOT set -euo pipefail in a sourced library — callers own their shell options.
+# Entry-point scripts apply these options directly; init_common_lib() re-applies
+# them so callers that invoke it get consistent behaviour without the library
+# imposing options on scripts that source it without calling init_common_lib.
 
 # --- Library Configuration ---
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,7 +41,10 @@ else
     readonly COLOR_BOLD=""
 fi
 
-# Log level filtering for production environments
+# Log level filtering for production environments.
+# When LOG_LEVEL is not a recognised value, warn once and fall back to INFO
+# so output is not silently suppressed or unexpectedly flooded.
+_LOG_LEVEL_WARNED=false
 _should_log() {
     local level="$1"
     local levels=("DEBUG" "INFO" "WARN" "ERROR")
@@ -49,6 +55,15 @@ _should_log() {
         [[ "${levels[i]}" == "$LOG_LEVEL" ]] && current_index=$i
         [[ "${levels[i]}" == "$level" ]] && target_index=$i
     done
+
+    if [[ $current_index -eq -1 ]]; then
+        if [[ "$_LOG_LEVEL_WARNED" != "true" ]]; then
+            printf '[WARN] LOG_LEVEL="%s" is not recognised (valid: DEBUG INFO WARN ERROR) — defaulting to INFO\n' \
+                "$LOG_LEVEL" >&2
+            _LOG_LEVEL_WARNED=true
+        fi
+        current_index=1  # default to INFO
+    fi
 
     (( target_index >= current_index ))
 }
@@ -150,7 +165,7 @@ log_header() {
 # --- Configuration Management ---
 
 _ENV_FILE_SEARCH_PATHS=(
-    ".env"
+    "${PROJECT_ROOT}/.env"
     "/etc/vaultwarden/vaultwarden.env"
 )
 
@@ -196,9 +211,12 @@ load_env_file() {
 
         if [[ "$file_perms" != "unknown" ]]; then
             local perm_int=$(( 8#${file_perms} ))
-            if (( perm_int & 0004 )); then
-                log_warn "load_env_file: '$env_file' is world-readable (${file_perms})." \
-                         " Consider: chmod 640 '$env_file'"
+            if (( perm_int & 0044 )); then
+                local _perm_detail=""
+                (( perm_int & 0040 )) && _perm_detail+="group-readable "
+                (( perm_int & 0004 )) && _perm_detail+="world-readable "
+                log_warn "load_env_file: '$env_file' is ${_perm_detail}(${file_perms})." \
+                         " Fix: chmod 600 '$env_file'"
             fi
         fi
     fi
@@ -371,7 +389,7 @@ is_root() {
 require_root() {
     if ! is_root; then
         log_error "This script must be run as root."
-        log_error "Re-run with: sudo $0 ${*:-}"
+        log_error "Re-run with: sudo ${BASH_SOURCE[1]:-$0} ${*:-}"
         exit 1
     fi
 }
@@ -459,7 +477,7 @@ perform_cleanup() {
 
 ensure_dir() {
     local dir="$1"
-    local mode="${2:-755}"
+    local mode="${2:-750}"
     local owner="${3:-}"
 
     if [[ ! -d "$dir" ]]; then
@@ -468,11 +486,6 @@ ensure_dir() {
             log_error "Failed to create directory: $dir"
             return 1
         fi
-    fi
-
-    if ! chmod "$mode" "$dir"; then
-        log_error "Failed to set permissions on directory: $dir"
-        return 1
     fi
 
     if [[ -n "$owner" ]]; then
@@ -545,6 +558,7 @@ download_file() {
         log_success "Downloaded: $url -> $output_file"
         return 0
     else
+        rm -f "$output_file" 2>/dev/null || true
         log_error "Failed to download: $url"
         return 1
     fi
@@ -888,7 +902,7 @@ EOF
 # in .env. sendmail must be on PATH (standard in the postfix sidecar image).
 _email_driver_postfix() {
     local subject="$1" body="$2"
-    local _from_email="${SMTP_FROM:-${SMTP_FROM_EMAIL:-}}"
+    local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
     local from_name="${SMTP_FROM_NAME:-VaultWarden}"
     local to_addr="${ADMIN_EMAIL:-}"
 
@@ -963,6 +977,15 @@ _rate_limit_check() {
     local subject="$1"
     local rate_limit_dir="$2"
     local last_email_file
+
+    # sha256sum is required to construct the stamp file path.  If it is absent
+    # (minimal Alpine/OCI base images), skip rate-limiting rather than aborting.
+    if ! command -v sha256sum >/dev/null 2>&1; then
+        log_debug "_rate_limit_check: sha256sum not found — rate-limiting disabled"
+        printf '/dev/null\n'
+        return 0
+    fi
+
     last_email_file="$rate_limit_dir/.vw_last_email_$(printf '%s' "$subject" | sha256sum | cut -c1-16)"
 
     if [[ "$subject" != *"CRITICAL"* ]] && [[ -f "$last_email_file" ]]; then
@@ -1011,8 +1034,12 @@ clear_email_rate_limit() {
     }
 
     local stamp_file
+    # sha256sum required for stamp path construction; skip silently if absent.
+    if ! command -v sha256sum >/dev/null 2>&1; then
+        log_debug "clear_email_rate_limit: sha256sum not found — rate-limiting disabled, nothing to clear"
+        return 0
+    fi
     stamp_file="$rate_limit_dir/.vw_last_email_$(printf '%s' "$subject" | sha256sum | cut -c1-16)"
-
     if [[ -f "$stamp_file" ]]; then
         rm -f "$stamp_file" 2>/dev/null || true
         log_debug "clear_email_rate_limit: cleared stamp for '${subject}'"
@@ -1096,8 +1123,20 @@ _smtp_send() {
     local date_str
     date_str=$(date -u '+%a, %d %b %Y %H:%M:%S +0000')
 
-    local _msg
-    _msg=$(
+    # Write the RFC-5322 message to a temp file rather than capturing in $()
+    # so that the terminating \r\n blank line is preserved — command substitution
+    # strips trailing newlines, which corrupts the MIME body boundary.
+    local _msg_file
+    _msg_file=$(mktemp -t vw_smtp.XXXXXXXXXX) || {
+        log_error "_smtp_send: failed to create SMTP message temp file"
+        return 1
+    }
+    chmod 600 "$_msg_file"
+    # Ensure the file is removed when _smtp_send returns (any path).
+    # shellcheck disable=SC2064  # intentional: expand _msg_file now to capture the value
+    trap "rm -f '${_msg_file}' 2>/dev/null; trap - RETURN" RETURN
+
+    {
         printf 'From: "%s" <%s>\r\n' "$_smtp_from_name" "$_smtp_from_addr"
         printf 'To: %s\r\n'          "$to"
         printf 'Subject: %s\r\n'     "$subject"
@@ -1110,7 +1149,10 @@ _smtp_send() {
             printf '%s\r\n' "$line"
         done <<< "$body"
         printf '\r\n'
-    )
+    } > "$_msg_file" || {
+        log_error "_smtp_send: failed to write SMTP message to temp file"
+        return 1
+    }
 
     # ── Path A: SMTP_PASSWORD present → direct external relay ─────────────────
     # This branch must stay in sync with _resolve_smtp_method returning
@@ -1136,7 +1178,7 @@ _smtp_send() {
                 ;;
         esac
 
-        printf '%s' "$_msg" | curl -s \
+        curl -s \
             --connect-timeout 15 \
             --max-time 30 \
             --retry 2 \
@@ -1146,7 +1188,7 @@ _smtp_send() {
             --mail-from "$_smtp_from_addr" \
             --mail-rcpt "$to" \
             --user "${SMTP_USERNAME}:${SMTP_PASSWORD}" \
-            --upload-file -
+            --upload-file "$_msg_file"
         return $?
     fi
 
@@ -1172,7 +1214,7 @@ _smtp_send() {
         return 1
     fi
 
-    printf '%s' "$_msg" | curl -s \
+    curl -s \
         --connect-timeout 5 \
         --max-time 15 \
         --retry 1 \
@@ -1180,7 +1222,7 @@ _smtp_send() {
         --url "smtp://${_sidecar_host}:${_sidecar_port}" \
         --mail-from "$_smtp_from_addr" \
         --mail-rcpt "$to" \
-        --upload-file -
+        --upload-file "$_msg_file"
     local _rc=$?
     if [[ $_rc -ne 0 ]]; then
         log_warn "_smtp_send: Postfix sidecar at ${_sidecar_addr} returned curl exit ${_rc}. Is the container running and port 127.0.0.1:587 bound?"
@@ -1233,7 +1275,10 @@ send_email() {
     subject=$(_normalise_email_subject "$subject")
 
     local rate_limit_dir
-    rate_limit_dir=$(_resolve_rate_limit_dir)
+    rate_limit_dir=$(_resolve_rate_limit_dir) || {
+        log_debug "send_email: rate-limit dir unavailable — rate-limiting disabled"
+        rate_limit_dir=""
+    }
 
     local stamp_file
     if ! stamp_file=$(_rate_limit_check "$subject" "$rate_limit_dir"); then
@@ -1441,6 +1486,10 @@ init_common_lib() {
 
     set_log_prefix "$(basename -- "$script_name" .sh)"
 
+    # Change to PROJECT_ROOT so all subsequent relative-path operations in
+    # callers resolve against the project root, not the shell's current
+    # working directory.  Callers that have already changed directory will
+    # see a no-op; callers that have not will be normalised here.
     cd "$PROJECT_ROOT"
 
     log_debug "Common library initialized for: $script_name"

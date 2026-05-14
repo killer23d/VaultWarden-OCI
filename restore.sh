@@ -44,12 +44,21 @@ unset -f _source_lib
 #   list             list local backups without requiring .env
 #   list --remote    list remote backups; operator may be prompted for remote
 _require_env_for_live_restore() {
+    # Exempt subcommands that do not need .env
     local arg
     for arg in "$@"; do
         case "$arg" in
             help|list) return 0 ;;
         esac
     done
+
+    # Also exempt: interactive --remote (bare-metal DR restore without .env)
+    local has_interactive=false has_remote=false
+    for arg in "$@"; do
+        [[ "$arg" == "interactive" ]] && has_interactive=true
+        [[ "$arg" == "--remote"    ]] && has_remote=true
+    done
+    [[ "$has_interactive" == "true" && "$has_remote" == "true" ]] && return 0
 
     if [[ ! -f "${PROJECT_ROOT}/.env" ]]; then
         echo "" >&2
@@ -75,7 +84,7 @@ _require_env_for_live_restore() {
 # ---------------------------------------------------------------------------
 check_dependencies() {
     local -a hard=(docker age age-keygen sqlite3 sha256sum tar)
-    local -a soft=(sops zstd rclone)
+    local -a soft=(sops zstd rclone rsync)  # rsync required for separate-volume (OCI block volume) restores
     local missing_hard=() missing_soft=()
     for c in "${hard[@]}"; do command -v "$c" >/dev/null 2>&1 || missing_hard+=("$c"); done
     for c in "${soft[@]}"; do command -v "$c" >/dev/null 2>&1 || missing_soft+=("$c"); done
@@ -1270,6 +1279,9 @@ _display_new_key() {
     [[ -z "$ROTATED_KEY_FILE" ]] && return 0
 
     local priv_key_line
+    # Suppress xtrace BEFORE reading the private key so that debug mode
+    # does not leak the key material to the terminal or systemd journal.
+    { set +x; } 2>/dev/null
     priv_key_line=$(grep -m1 '^AGE-SECRET-KEY-1' "$ROTATED_KEY_FILE" 2>/dev/null || true)
 
     echo ""
@@ -1284,8 +1296,8 @@ _display_new_key() {
     echo ""
     log_info  "  Private key (keep secret; required for decryption):"
     echo      ""
-    { set +x; } 2>/dev/null
     echo      "  ${priv_key_line:-<could not read key — check $ROTATED_KEY_FILE>}"
+    unset priv_key_line
     echo      ""
     log_info  "  Public key (safe to share; used for encryption):"
     echo      ""
@@ -1453,38 +1465,37 @@ restore_db() {
     mkdir -p "$db_dir"
 
     local ts; ts="$(date +%Y%m%d-%H%M%S)"
-    local rollback_path=""
+    local pre_restore_copy=""
     if [[ -f "$db_path" ]]; then
-        rollback_path="${db_path}.rollback-${ts}"
-        log_info "Creating rollback copy: $(basename "$rollback_path")..."
-        cp -a "$db_path" "$rollback_path" || {
-            log_error "Failed to create rollback copy — aborting restore."; return 1
+        pre_restore_copy="${db_path}.pre-restore-${ts}"
+        log_info "Creating pre-restore copy: $(basename "$pre_restore_copy")..."
+        cp -a "$db_path" "$pre_restore_copy" || {
+            log_error "Failed to create pre-restore copy — aborting restore."; return 1
         }
-        cp -a "$db_path" "${db_path}.pre-restore-${ts}"
     fi
 
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would overwrite $db_path with decrypted database"
         # shellcheck disable=SC2015  # intentional cleanup: swallow rm failure
-        [[ -n "$rollback_path" ]] && rm -f "$rollback_path" 2>/dev/null || true
+        [[ -n "$pre_restore_copy" ]] && rm -f "$pre_restore_copy" 2>/dev/null || true
         return 0
     fi
 
     log_info "Restoring database..."
     if ! cp -f "$dec_db" "$db_path"; then
         log_error "cp to live DB failed — rolling back..."
-        if [[ -n "$rollback_path" && -f "$rollback_path" ]]; then
-            if cp -a "$rollback_path" "$db_path"; then
+        if [[ -n "$pre_restore_copy" && -f "$pre_restore_copy" ]]; then
+            if cp -a "$pre_restore_copy" "$db_path"; then
                 log_warn "Rollback successful."
             else
                 log_error "CRITICAL: Rollback failed. Manual recovery:"
-                log_error "  cp '${rollback_path}' '${db_path}'"
+                log_error "  cp '${pre_restore_copy}' '${db_path}'"
             fi
         fi
         return 1
     fi
     # shellcheck disable=SC2015  # intentional cleanup: swallow rm failure
-    [[ -n "$rollback_path" ]] && rm -f "$rollback_path" 2>/dev/null || true
+    [[ -n "$pre_restore_copy" ]] && rm -f "$pre_restore_copy" 2>/dev/null || true
 
     purge_wal_shm "$db_path"
     chown "${puid}:${pgid}" "$db_path" 2>/dev/null || log_warn "Could not set ownership on $db_path"
@@ -1618,6 +1629,15 @@ restore_full() {
     purge_wal_shm "$state_dir/data/db.sqlite3" || true
 
     local rel_project="${PROJECT_ROOT#/}"
+
+    # Predictive warning: if the archive does not contain project config files
+    # (e.g. the user selected a 'db'-type backup expecting a 'full' restore),
+    # warn before the config loop runs so the operator knows immediately.
+    if [[ ! -d "$staging/$rel_project" ]]; then
+        log_warn "Project config directory not found in archive ($rel_project) — .env and docker-compose.yml will NOT be restored from this archive."
+        log_warn "If you expected config files, verify the archive type is 'full', not 'db'."
+    fi
+
     if [[ -d "$staging/$rel_project" ]]; then
         log_info "Restoring project config files from archive..."
         local config_files=(docker-compose.yml docker-compose.override.yml .env.example)
@@ -1626,7 +1646,13 @@ restore_full() {
             local src="$staging/$rel_project/$f"
             if [[ -f "$src" ]]; then
                 if [[ "$f" == ".env" && -f "$PROJECT_ROOT/.env" ]]; then
-                    cp -f "$PROJECT_ROOT/.env" "$PROJECT_ROOT/.env.pre-restore-$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+                    local _ts_env; _ts_env=$(date +%Y%m%d-%H%M%S)
+                    local _old_umask_env; _old_umask_env=$(umask)
+                    umask 077
+                    if ! cp -f "$PROJECT_ROOT/.env" "$PROJECT_ROOT/.env.pre-restore-${_ts_env}" 2>/dev/null; then
+                        log_warn "Could not create .env pre-restore backup — proceeding without it"
+                    fi
+                    umask "$_old_umask_env"
                 fi
                 cp -f "$src" "$PROJECT_ROOT/$f"
                 log_info "  Restored: $f"
@@ -1878,6 +1904,9 @@ main() {
     # the final `docker compose up -d` fails, services are automatically
     # restarted. Without this, set -euo pipefail would leave services
     # permanently stopped, requiring manual intervention.
+    # IMPORTANT: The trap is installed AFTER docker compose stop so that
+    # failures in earlier validation steps (checksum, decryption, meta-parse)
+    # do NOT trigger a spurious restart of services that were never stopped.
     _restore_safety_net() {
         local rc=$?
         if [[ $rc -ne 0 ]]; then
@@ -1886,7 +1915,6 @@ main() {
                 log_error "CRITICAL: Failed to restart services after restore error. Manual intervention required: docker compose up -d"
         fi
     }
-    trap _restore_safety_net ERR
 
     if [[ "$DRY_RUN" != "true" ]]; then
         if docker compose ps --status running --services 2>/dev/null | grep -q .; then
@@ -1894,6 +1922,7 @@ main() {
             docker compose stop
         fi
     fi
+    trap _restore_safety_net ERR
 
     # ------------------------------------------------------------------
     # Step 8: Perform restore

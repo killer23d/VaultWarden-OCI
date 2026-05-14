@@ -2,18 +2,19 @@
 # startup.sh - VaultWarden startup script with secure secrets handling
 
 set -euo pipefail
+# shellcheck disable=SC2154  # rc is assigned via rc=$? inside the trap body
 trap 'rc=$?; log_error "${BASH_SOURCE[0]}: STARTUP FAILED at line ${LINENO} (exit ${rc}) — check journalctl -u vaultwarden-startup"; exit "$rc"' ERR
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR"
 cd "$PROJECT_ROOT"
 
-source "lib/common.sh"
+source "${SCRIPT_DIR}/lib/common.sh"
 init_common_lib "$0"
-source "lib/docker.sh"
-source "lib/crypto.sh"
-source "lib/secrets.sh"   # provides cleanup_secrets_environment()
-source "lib/storage.sh"  # provides require_project_state_ready()
+source "${SCRIPT_DIR}/lib/docker.sh"
+source "${SCRIPT_DIR}/lib/crypto.sh"
+source "${SCRIPT_DIR}/lib/secrets.sh"   # provides cleanup_secrets_environment()
+source "${SCRIPT_DIR}/lib/storage.sh"  # provides require_project_state_ready()
 
 # Configuration
 FORCE_RESTART=false
@@ -25,6 +26,8 @@ DO_DOWN=false
 # use maintenance.sh update or ./startup.sh (without the flag) to refresh images.
 SKIP_PULL=false
 SKIP_EGRESS_FIX=false
+
+DOCKER_SECRETS_DIR="${PROJECT_ROOT}/secrets/.docker_secrets"
 
 show_help() {
 cat << 'EOF'
@@ -154,7 +157,7 @@ _startup_secure_wipe() {
 # ---------------------------------------------------------------------------
 _prepare_secrets_cleanup_umask=""
 _prepare_secrets_cleanup_cache=""
-_prepare_secrets_prev_exit_trap=""
+_prepare_secrets_trap_registered=false
 
 _prepare_secrets_cleanup() {
   if [[ -n "$_prepare_secrets_cleanup_umask" ]]; then
@@ -202,7 +205,7 @@ warn_plaintext_secret_overrides() {
 # ---------------------------------------------------------------------------
 check_email_config_consistency() {
   local email_mode="${EMAIL_MODE:-auto}"
-  local secrets_dir="${PROJECT_ROOT}/secrets/.docker_secrets"
+  local secrets_dir="$DOCKER_SECRETS_DIR"
 
   case "$email_mode" in
     api)
@@ -262,7 +265,7 @@ load_environment() {
     local env_owner
     env_owner=$(stat -c '%U' ".env" 2>/dev/null || echo "unknown")
     local real_user
-    real_user=$(id -un)
+    real_user=$(get_real_user)
     if [[ "$env_owner" == "root" && "$real_user" != "root" ]]; then
       local real_group
       real_group=$(id -gn "${real_user}" 2>/dev/null || echo "${real_user}")
@@ -284,7 +287,7 @@ validate_prerequisites() {
   log_info "Validating prerequisites..."
 
   # Check required commands
-  local required_commands=(docker openssl)
+  local required_commands=(docker openssl sops python3)
   local missing_commands=()
 
   for cmd in "${required_commands[@]}"; do
@@ -295,6 +298,13 @@ validate_prerequisites() {
 
   if [ ${#missing_commands[@]} -gt 0 ]; then
     log_error "Missing required commands: ${missing_commands[*]}"
+    return 1
+  fi
+
+  # Verify python3-yaml is available — required for secrets parsing in prepare_docker_secrets
+  if ! python3 -c "import yaml" 2>/dev/null; then
+    log_error "python3-yaml (PyYAML) is not installed — required for secrets parsing"
+    log_error "Install hint: pip install pyyaml  or  sudo apt install python3-yaml"
     return 1
   fi
 
@@ -526,18 +536,23 @@ prepare_docker_secrets() {
     return 0
   fi
 
-  local secrets_dir="secrets/.docker_secrets"
+  local secrets_dir="$DOCKER_SECRETS_DIR"
   mkdir -p "$secrets_dir"
   chmod 700 "$secrets_dir"
 
   local old_umask
   old_umask=$(umask)
   _prepare_secrets_cleanup_umask="$old_umask"
-  # Compose with any existing EXIT trap so we don't silently discard it.
-  _prepare_secrets_prev_exit_trap="$(trap -p EXIT 2>/dev/null | sed "s/^trap -- '//;s/' EXIT$//")"
-  # shellcheck disable=SC2064  # intentional: expand _prepare_secrets_prev_exit_trap now to compose traps
-  trap "_prepare_secrets_cleanup; ${_prepare_secrets_prev_exit_trap:-:}" EXIT
-  umask 333
+  # Register the cleanup EXIT trap exactly once using a boolean flag so that
+  # we do not need to compose/decompose existing trap bodies via sed (which
+  # breaks silently when the body contains single quotes).
+  if [[ "$_prepare_secrets_trap_registered" != "true" ]]; then
+    trap '_prepare_secrets_cleanup' EXIT
+    _prepare_secrets_trap_registered=true
+  fi
+  # umask 077: new files are created as 0600 (no group/world bits).
+  # This is consistent with lib/secrets.sh::write_secret_file() (chmod 600).
+  umask 077
 
   local cache_file
   cache_file=$(mktemp)
@@ -555,12 +570,6 @@ prepare_docker_secrets() {
     [[ -z "$key" ]] && continue
     local target_file="${secrets_dir}/${key}"
     printf '%s' "$value" > "$target_file"
-
-    local perms
-    perms=$(_stat_octal_perms "$target_file")
-    if [[ "$perms" != "444" ]]; then
-      chmod 444 "$target_file"
-    fi
   done < <(
     python3 - "$cache_file" <<'PY'
 import sys, yaml
@@ -597,14 +606,8 @@ PY
 
   cleanup_secrets_environment || true
   _prepare_secrets_cleanup
-  # Restore any previously registered EXIT trap instead of clearing all handlers.
-  if [[ -n "$_prepare_secrets_prev_exit_trap" ]]; then
-    # shellcheck disable=SC2064  # intentional: expand variable now to restore original trap
-    trap "${_prepare_secrets_prev_exit_trap}" EXIT 2>/dev/null || trap - EXIT
-  else
-    trap - EXIT
-  fi
-  _prepare_secrets_prev_exit_trap=""
+  # The EXIT trap remains active for the lifetime of the process so that any
+  # unexpected exit after this point still cleans up any residual temp files.
 
   log_success "Docker secrets prepared"
   return 0
@@ -623,7 +626,11 @@ cleanup_orphaned_resources() {
 
   docker container prune -f >/dev/null 2>&1 || true
   docker network prune -f >/dev/null 2>&1 || true
-  docker image prune -f >/dev/null 2>&1 || true
+  # Scope image prune to this project's images only to avoid removing dangling
+  # layers belonging to unrelated services on shared Docker hosts.
+  docker image prune -f \
+    --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME:-vaultwarden}" \
+    >/dev/null 2>&1 || true
 
   log_success "Orphaned resources cleaned up"
   return 0
@@ -737,6 +744,8 @@ ensure_vaultwarden_egress_nat() {
 
     if _maybe_sudo iptables -t nat -A POSTROUTING -s "$subnet" ! -o docker0 -j MASQUERADE >/dev/null 2>&1; then
       log_info "Added MASQUERADE fallback for network ${network_name} (${subnet})"
+      log_warn "Inline iptables MASQUERADE rule is ephemeral — it will not survive a reboot."
+      log_warn "For persistence, run: sudo ./utilities/setup-iptables.sh"
       fixed_any=true
     else
       log_warn "Could not add MASQUERADE fallback for network ${network_name} (${subnet})"
@@ -817,8 +826,8 @@ wait_for_services() {
     elapsed=$(( elapsed + interval ))
   done
 
-  log_warn "Service readiness check timed out after ${timeout}s"
-  return 0
+  log_error "Service readiness check timed out after ${timeout}s — stack may not be fully ready"
+  return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -882,7 +891,7 @@ main() {
   require_project_state_ready || exit 1
   validate_prerequisites || exit 1
   prepare_directories || exit 1
-  prepare_log_directories || log_warn "Log directory preparation had issues"
+  prepare_log_directories || exit 1
   prepare_docker_secrets || exit 1
   check_email_config_consistency || true   # warn only, never block startup
   warn_plaintext_secret_overrides || true
