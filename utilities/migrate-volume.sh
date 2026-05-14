@@ -6,6 +6,11 @@
 #
 # USAGE: sudo utilities/migrate-volume.sh <subcommand> [OPTIONS]
 # Run with --help for full usage.
+#
+# DEPENDENCIES: rsync flock findmnt lsblk df du awk sed mktemp stat curl
+#   All are standard on Debian/Ubuntu/RHEL/Alpine (GNU or BusyBox).
+#   stat -c (GNU/BusyBox format flag) is not supported on macOS — this script
+#   targets Linux hosts only.  df -Pk and awk are POSIX-portable.
 
 set -euo pipefail
 
@@ -84,6 +89,19 @@ _mv_elapsed() {
     printf '%dm%02ds' $(( elapsed / 60 )) $(( elapsed % 60 ))
 }
 
+# ── Human-readable byte formatter (replaces numfmt — works on GNU/BusyBox) ───
+_mv_fmt_bytes() {
+    # Usage: _mv_fmt_bytes <bytes>
+    # Prints a human-readable IEC byte count (e.g. "1.5 GiB").
+    # Pure awk — no numfmt dependency; portable to GNU coreutils and BusyBox.
+    awk -v n="$1" 'BEGIN {
+        split("B KiB MiB GiB TiB", u, " ")
+        v = n; i = 1
+        while (v >= 1024 && i < 5) { v /= 1024; i++ }
+        printf "%.1f %s", v, u[i]
+    }'
+}
+
 # ── Lock helpers ──────────────────────────────────────────────────────────────
 _MV_LOCK_FD=""
 
@@ -125,6 +143,9 @@ _mv_require_root() {
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 _MV_LOG_FILE=""
+# Set to the custom BACKUP_DIR value when --yes bypasses its confirmation prompt
+# so _mv_print_checklist can surface it prominently even in non-interactive runs.
+_MV_BACKUP_DIR_CUSTOM_WARNING=""
 
 _mv_log() {
     # Passthrough to lib/common.sh log functions AND write to log file.
@@ -261,7 +282,20 @@ _mv_warn_fstab_entries() {
 
     if [[ "${found}" == "true" ]]; then
         _mv_log warn "  These entries could auto-mount old volumes at boot and shadow ${_MV_TARGET}."
-        _mv_log warn "  Review and remove stale lines: sudo nano /etc/fstab"
+        _mv_log warn "  Review and remove stale lines. To delete each matching line, run:"
+        if [[ -n "${_MV_SOURCE}" ]]; then
+            local _esc_src="${_MV_SOURCE//\\/\\\\}"
+            _esc_src="${_esc_src//./\\.}"
+            _esc_src="${_esc_src//|/\\|}"
+            _mv_log warn "    sed -i '\\|${_esc_src}|d' /etc/fstab"
+        fi
+        if [[ -n "${_MV_TARGET}" ]]; then
+            local _esc_tgt="${_MV_TARGET//\\/\\\\}"
+            _esc_tgt="${_esc_tgt//./\\.}"
+            _esc_tgt="${_esc_tgt//|/\\|}"
+            _mv_log warn "    sed -i '\\|${_esc_tgt}|d' /etc/fstab"
+        fi
+        _mv_log warn "  (Verify the resulting fstab is correct before rebooting.)"
         _mv_log warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     fi
 }
@@ -463,18 +497,18 @@ _mv_check_disk_space() {
     local src_bytes avail_bytes required_bytes
 
     src_bytes="$(du -sb "${source}/" | awk '{print $1}')"
-    avail_bytes="$(df -B1 --output=avail "${target}" | tail -1 | tr -d ' ')"
+    avail_bytes="$(df -Pk "${target}" | awk 'NR==2 {print $4 * 1024}')"
     required_bytes=$(( src_bytes + src_bytes / 10 ))   # source + 10% headroom
 
     _mv_log info "Disk space check:"
-    _mv_log info "  Source size  : $(numfmt --to=iec-i --suffix=B "${src_bytes}")"
-    _mv_log info "  Required     : $(numfmt --to=iec-i --suffix=B "${required_bytes}") (source + 10%)"
-    _mv_log info "  Target avail : $(numfmt --to=iec-i --suffix=B "${avail_bytes}")"
+    _mv_log info "  Source size  : $(_mv_fmt_bytes "${src_bytes}")"
+    _mv_log info "  Required     : $(_mv_fmt_bytes "${required_bytes}") (source + 10%)"
+    _mv_log info "  Target avail : $(_mv_fmt_bytes "${avail_bytes}")"
 
     if (( avail_bytes < required_bytes )); then
         _mv_log error "Insufficient space on target."
-        _mv_log error "  Need : $(numfmt --to=iec-i --suffix=B "${required_bytes}")"
-        _mv_log error "  Have : $(numfmt --to=iec-i --suffix=B "${avail_bytes}")"
+        _mv_log error "  Need : $(_mv_fmt_bytes "${required_bytes}")"
+        _mv_log error "  Have : $(_mv_fmt_bytes "${avail_bytes}")"
         return 1
     fi
 
@@ -727,7 +761,7 @@ _mv_step_validate() {
     _mv_log info "── validate ──────────────────────────────────────────────────────"
 
     # 1. Required commands
-    require_commands rsync flock findmnt lsblk df du awk sed mktemp numfmt stat
+    require_commands rsync flock findmnt lsblk df du awk sed mktemp stat
     # Block-device migrations also need blkid and mkfs.ext4 (called by setup_data_volume).
     if [[ -n "${_MV_DEVICE}" ]]; then
         require_commands blkid mkfs.ext4
@@ -1006,8 +1040,8 @@ _mv_step_verify() {
     src_bytes="$(du -sb "${_MV_SOURCE}/" | awk '{print $1}')"
     tgt_bytes="$(du -sb "${_MV_TARGET}/" | awk '{print $1}')"
 
-    _mv_log info "Source size : $(numfmt --to=iec-i --suffix=B "${src_bytes}")"
-    _mv_log info "Target size : $(numfmt --to=iec-i --suffix=B "${tgt_bytes}")"
+    _mv_log info "Source size : $(_mv_fmt_bytes "${src_bytes}")"
+    _mv_log info "Target size : $(_mv_fmt_bytes "${tgt_bytes}")"
 
     if (( src_bytes == 0 )); then
         _mv_log warn "Source reports 0 bytes — skipping percentage check."
@@ -1020,7 +1054,7 @@ _mv_step_verify() {
     delta=$(( tgt_bytes > src_bytes ? tgt_bytes - src_bytes : src_bytes - tgt_bytes ))
     pct_x100=$(( delta * 10000 / src_bytes ))
 
-    _mv_log info "Delta: $(numfmt --to=iec-i --suffix=B "${delta}") ($(( pct_x100 / 100 )).$(( pct_x100 % 100 ))%)"
+    _mv_log info "Delta: $(_mv_fmt_bytes "${delta}") ($(( pct_x100 / 100 )).$(( pct_x100 % 100 ))%)"
 
     if (( pct_x100 > _MV_VERIFY_TOLERANCE_PCT * 100 )); then
         _mv_log error "Byte-count delta exceeds tolerance (${_MV_VERIFY_TOLERANCE_PCT}%)."
@@ -1187,6 +1221,7 @@ _mv_step_update_env() {
         _mv_log warn "Update manually if needed: nano ${env_file}"
         if [[ "${_MV_YES:-false}" == "true" ]]; then
             _mv_log warn "Non-interactive mode (--yes): BACKUP_DIR confirmation bypassed. Verify manually post-migration."
+            _MV_BACKUP_DIR_CUSTOM_WARNING="${current_backup_dir}"
         else
             _mv_confirm "Acknowledge: BACKUP_DIR (${current_backup_dir}) was not updated and requires manual verification."
         fi
@@ -1196,11 +1231,13 @@ _mv_step_update_env() {
 }
 
 # ── Pipeline step 8: Update systemd drop-in paths ────────────────────────────
-_mv_step_update_dropin() {
-    _mv_log info "── update_dropin ─────────────────────────────────────────────────"
 
-    local old_path="${_MV_SOURCE}"
-    local new_path="${_MV_TARGET}"
+# Private helper: apply a path substitution to all known systemd drop-in files.
+# Used by the forward migration step (source → target) and the abort path
+# (target → source, with arguments swapped) so both share identical sed logic.
+_mv_apply_dropin_paths() {
+    # Usage: _mv_apply_dropin_paths <old_path> <new_path>
+    local old_path="$1" new_path="$2"
     local unit drop_in tmp updated_any=false
 
     for unit in "${_MV_DROPIN_UNITS[@]}"; do
@@ -1242,6 +1279,11 @@ _mv_step_update_dropin() {
             || _mv_log warn "systemctl daemon-reload failed — a reboot may be required."
         _mv_log success "Systemd drop-ins updated and daemon reloaded."
     fi
+}
+
+_mv_step_update_dropin() {
+    _mv_log info "── update_dropin ─────────────────────────────────────────────────"
+    _mv_apply_dropin_paths "${_MV_SOURCE}" "${_MV_TARGET}"
 }
 
 # ── Pipeline step 8a: Install Docker mount guard ──────────────────────────────
@@ -1319,6 +1361,19 @@ _mv_step_healthcheck() {
     done
 
     if [[ "${healthy}" == "true" ]]; then
+        # Check for crash-looping containers: Docker reports a container as "running"
+        # during the brief window between crash-loop restarts.  A non-zero RestartCount
+        # after the running-count check passes is a strong signal of a crash loop.
+        local _cid _rcount
+        while IFS= read -r _cid; do
+            [[ -z "${_cid}" ]] && continue
+            _rcount="$(docker inspect --format '{{.RestartCount}}' "${_cid}" 2>/dev/null || echo 0)"
+            if (( _rcount > 0 )); then
+                _mv_log warn "Container ${_cid} has RestartCount=${_rcount} — may be crash-looping."
+                _mv_log warn "  Check logs: docker logs ${_cid}"
+            fi
+        done < <(docker compose ps --quiet 2>/dev/null)
+
         # Application-level health probe: verify VaultWarden responds to HTTP.
         # A container can be in 'running' state while the application is still
         # starting, crash-looping, or serving errors. The /alive endpoint is
@@ -1379,6 +1434,14 @@ _mv_print_checklist() {
     printf '  7. (If you added custom services to docker-compose.yml with hardcoded\n'
     printf '     paths) Verify: docker compose config | grep '\''%s'\''\n' "${_MV_SOURCE}"
     printf '     Any remaining references must be updated manually.\n'
+    if [[ -n "${_MV_BACKUP_DIR_CUSTOM_WARNING:-}" ]]; then
+        printf '  ─────────────────────────────────────────────────────────────────\n'
+        printf '  ⚠  ACTION REQUIRED: --yes mode bypassed the BACKUP_DIR confirmation.\n'
+        printf '     Custom BACKUP_DIR: %s\n' "${_MV_BACKUP_DIR_CUSTOM_WARNING}"
+        printf '     This path was NOT auto-updated. Verify it points to the correct\n'
+        printf '     location on the new volume and update .env if needed:\n'
+        printf '       nano %s/.env\n' "${PROJECT_ROOT}"
+    fi
     printf '═══════════════════════════════════════════════════════════════\n'
     printf '  Migration log: %s\n' "${_MV_LOG_FILE}"
     printf '  .env backup:   %s.pre-migration.%s\n' "${PROJECT_ROOT}/.env" "${_MV_TIMESTAMP}"
@@ -1507,6 +1570,10 @@ _mv_do_abort() {
             cp "${env_backup}" "${PROJECT_ROOT}/.env"
             chmod 0600 "${PROJECT_ROOT}/.env"
             log_success ".env restored from: ${env_backup}"
+            # Reload the restored .env into the current shell immediately so all
+            # subsequent docker compose and start_services calls use the original
+            # PROJECT_STATE_DIR (source path), not the updated target path.
+            load_env_file "${PROJECT_ROOT}/.env"
         else
             log_warn ".env backup not found — manual restoration required."
             log_warn "Keys changed: PROJECT_STATE_DIR, DATA_VOLUME_MOUNT, DATA_VOLUME_DEVICE, BACKUP_DIR"
@@ -1538,16 +1605,27 @@ _mv_do_abort() {
         fi
     fi
 
-    # ── Step 8 reverse: reload systemd after .env is back ─────────────────────
+    # ── Step 8 reverse: reverse systemd drop-in paths ─────────────────────────
+    # Apply the inverse substitution (target → source) so the drop-in files
+    # reference the restored source path after abort. Without this, .env points
+    # at the old source but the drop-ins still point at the new target, causing
+    # a path mismatch that is invisible until the systemd unit fails on reboot.
     if _mv_state_has STEP_DROPIN_UPDATED_DONE; then
-        log_warn "systemd drop-ins were updated. To restore them, re-run:"
-        log_warn "  sudo ./setup.sh systemd"
-        systemctl daemon-reload || true
+        local _abort_src _abort_tgt
+        _abort_src="$(_mv_state_read MV_SOURCE)"
+        _abort_tgt="$(_mv_state_read MV_TARGET)"
+        if [[ -n "${_abort_src}" && -n "${_abort_tgt}" ]]; then
+            log_info "Rollback: reversing systemd drop-in paths (${_abort_tgt} → ${_abort_src})..."
+            _mv_apply_dropin_paths "${_abort_tgt}" "${_abort_src}"
+        else
+            log_warn "State file missing MV_SOURCE/MV_TARGET — drop-ins not reversed."
+            log_warn "To restore them manually, re-run: sudo ./setup.sh systemd"
+            systemctl daemon-reload || true
+        fi
     fi
 
     # ── Step 9 reverse: restart stack from restored source ────────────────────
     log_info "Rollback: attempting to start stack from restored source..."
-    load_env_file "${PROJECT_ROOT}/.env"
     start_services || log_warn "start_services failed — check manually: docker compose up -d"
 
     # ── Fstab check: warn about stale entries that could shadow the restored path ─
