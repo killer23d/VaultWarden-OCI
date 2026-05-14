@@ -1098,6 +1098,7 @@ creation_rules:
   - path_regex: .*\.yaml$
     age: $age_public_key
 EOF
+    chmod 640 "$sops_config"
     chown "$(get_real_user):$(id -g -n "$(get_real_user)")" "$sops_config" || return 1
     return 0
 }
@@ -1461,6 +1462,10 @@ EOF
 # run_phase_secrets
 # ---------------------------------------------------------------------------
 run_phase_secrets() {
+# Require root: this phase writes into secrets/ and system key paths.
+# The root check in main() runs AFTER the phase dispatch, so subcommand
+# invocations (./setup.sh secrets) must guard themselves.
+_require_root
 local CLEANUP_ACTIONS=()
 _ss_register_cleanup() { CLEANUP_ACTIONS+=("$1"); }
 
@@ -1710,6 +1715,8 @@ creation_rules:
   - path_regex: .*\.yaml$
     age: $age_public_key
 SOPS_EOF
+                chmod 640 .sops.yaml
+                chown "$(get_real_user):$(id -g -n "$(get_real_user)")" .sops.yaml 2>/dev/null || true
                 log_success "SOPS configuration created: .sops.yaml"
                 ;;
             directories)
@@ -3460,7 +3467,12 @@ main() {
         log_error "If the lock is stale, remove: ${SETUP_LOCK_FILE}"
         exit 1
     fi
-    _setup_cleanup() { rm -f "$SETUP_LOCK_FILE" 2>/dev/null || true; }
+    _setup_cleanup() {
+        rm -f "$SETUP_LOCK_FILE" 2>/dev/null || true
+        # TMP_WORKDIR was created at script start (line 27); the trap set there
+        # is replaced by this one, so we must clean it up here.
+        rm -rf "$TMP_WORKDIR" 2>/dev/null || true
+    }
     trap _setup_cleanup EXIT HUP INT TERM
 
     if [[ -n "${SOPS_VERSION:-}" ]]; then

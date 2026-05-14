@@ -143,14 +143,21 @@ case "$_SUBCMD" in
         ;;
 esac
 
-if ! [[  "$KEEP_DAYS" =~ ^[0-9]+$ ]] || ! (( KEEP_DAYS >= 1 )); then
-    log_error "Invalid --keep value: '${KEEP_DAYS}' — must be a positive integer (e.g. 14)"
-    exit 2
+# Validate KEEP_DAYS only for subcommands that actually use it.
+if [[ "$_SUBCMD" == "run" || "$_SUBCMD" == "rotate" ]]; then
+    if ! [[ "$KEEP_DAYS" =~ ^[0-9]+$ ]] || ! (( KEEP_DAYS >= 1 )); then
+        log_error "Invalid --keep value: '${KEEP_DAYS}' — must be a positive integer (e.g. 14)"
+        exit 2
+    fi
 fi
 
 backup_log_info()    { [[ "$QUIET" == "true" ]] || log_info "$*" >&2;    }
 backup_log_success() { [[ "$QUIET" == "true" ]] || log_success "$*" >&2; }
 backup_log_warn()    { [[ "$QUIET" == "true" ]] || log_warn "$*" >&2;    }
+
+# Portable SHA-256 helper: prefer sha256sum (GNU coreutils / Linux), fall back
+# to shasum -a 256 (macOS / BSD).  Output format matches sha256sum: "<hash>  <file>".
+_sha256sum() { sha256sum "$1" 2>/dev/null || shasum -a 256 "$1"; }
 
 TMPDIR_BACKUP=""
 LOCK_FILE=""   # Promoted to script level so cleanup() can remove it on EXIT
@@ -221,7 +228,12 @@ _resolve_rclone_config() {
     # single-user hosts; multi-user hosts should set RCLONE_CONFIG in .env)
     local found_cfg
     for found_cfg in /home/*/.config/rclone/rclone.conf; do
-        [[ -f "$found_cfg" ]] && echo "$found_cfg" && return 0
+        if [[ -f "$found_cfg" ]]; then
+            log_warn "Auto-discovered rclone config via glob: $found_cfg"
+            log_warn "On multi-user hosts, set RCLONE_CONFIG=$found_cfg in .env to avoid credential mix-ups."
+            echo "$found_cfg"
+            return 0
+        fi
     done
 
     return 1
@@ -252,39 +264,6 @@ get_backup_dir() {
     echo "$dir"
 }
 
-list_backups() {
-    local base_dir
-    base_dir="$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")"
-    log_header "Existing Backups — $(date)"
-    if [[ ! -d "$base_dir" ]]; then
-        log_warn "Backup directory not found: $base_dir"
-        return 0
-    fi
-    local found=0
-    for type_dir in "$base_dir"/*/; do
-        [[ -d "$type_dir" ]] || continue
-        local type_name
-        type_name="$(basename "$type_dir")"
-        local files=()
-        while IFS= read -r -d '' f; do
-            files+=("$f")
-        done < <(find "$type_dir" -maxdepth 1 -name "*.age" -type f -print0 2>/dev/null | sort -z)
-        if (( ${#files[@]} > 0 )); then
-            log_info "  [$type_name]"
-            for f in "${files[@]}"; do
-                local size mtime mtime_epoch
-                size=$(du -sh "$f" 2>/dev/null | cut -f1 || echo "?")
-                mtime_epoch=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || echo 0)
-                mtime=$(date -d "@${mtime_epoch}" "+%Y-%m-%d %H:%M:%S" 2>/dev/null \
-                     || date -r "${mtime_epoch}" "+%Y-%m-%d %H:%M:%S" 2>/dev/null \
-                     || echo "?")
-                log_info "    $(basename "$f")  ($size  $mtime)"
-                (( ++found )) || true
-            done
-        fi
-    done
-    (( found > 0 )) || log_info "  No backups found."
-}
 
 
 auto_determine_backup_type() {
@@ -303,7 +282,12 @@ auto_determine_backup_type() {
     age_hours=$(( (current_time - db_mtime) / 3600 ))
 
     local full_backup_dir last_full full_age_days=999
-    full_backup_dir=$(get_backup_dir "full")
+    # Compute the full-backup directory path directly — do NOT call get_backup_dir
+    # here because that function calls ensure_dir(), creating the directory as a
+    # side effect before the age key has been validated.
+    local auto_base_dir
+    auto_base_dir="$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")"
+    full_backup_dir="$auto_base_dir/full"
     last_full=$(find "$full_backup_dir" -name "*.age" -type f -printf '%T@ %p\n' 2>/dev/null \
                 | sort -n | tail -1 | cut -d' ' -f2- || true)
     if [[ -n "$last_full" ]]; then
@@ -354,6 +338,7 @@ wait_for_container_stopped() {
 
     backup_log_info "Waiting for container '$service' to reach stopped state (max ${max_wait}s)..."
 
+    local status=""
     while (( elapsed < max_wait )); do
         local status
         status=$(docker inspect --format '{{.State.Status}}' \
@@ -462,7 +447,7 @@ verify_backup_quick() {
     if [[ -f "$sha256_file" ]]; then
         local stored_hash actual_hash
         stored_hash=$(cat "$sha256_file")
-        actual_hash=$(sha256sum "$enc_file" | awk '{print $1}')
+        actual_hash=$(_sha256sum "$enc_file" | awk '{print $1}')
         if [[ "$stored_hash" != "$actual_hash" ]]; then
             log_error "Quick verify FAILED: SHA256 mismatch for $(basename "$enc_file")" >&2
             log_error "  stored:  $stored_hash" >&2
@@ -677,35 +662,8 @@ sync_to_rclone() {
 
 }
 
-cleanup_old_backups() {
-    local backup_dir="$1"
-    local backup_type="$2"
-    local keep_days="$3"
-
-    if [[ -z "$backup_dir" || ! -d "$backup_dir" ]]; then
-        log_error "cleanup_old_backups: invalid backup directory: '${backup_dir}'" >&2
-        return 1
-    fi
-
-    backup_log_info "Pruning ${backup_type} backups older than ${keep_days} days..."
-
-    local deleted=0
-
-    while IFS= read -r -d '' old_file; do
-        backup_log_info "  Removing old backup: $(basename "$old_file")"
-        rm -f "$old_file" "${old_file}.sha256" "${old_file}.meta" 2>/dev/null || true
-        (( ++deleted )) || true
-    done < <(find "$backup_dir" -maxdepth 1 -type f -name "*.age" \
-                 \( -mtime +"$keep_days" -o -ctime +"$keep_days" \) \
-                 -print0 2>/dev/null)
-
-    if (( deleted > 0 )); then
-        backup_log_info "Pruned $deleted old backup(s)"
-    else
-        backup_log_info "No old backups to prune"
-    fi
-    return 0
-}
+# cleanup_old_backups is provided by lib/backup-utils.sh (filename-timestamp
+# logic + orphaned-sidecar sweep).  No local override — the lib version is used.
 
 perform_db_backup() {
     local target_dir="$1"
@@ -805,18 +763,26 @@ perform_db_backup() {
     mv "$enc_tmp" "$enc"
     secure_file "$enc" 600
 
-    sha256sum "$enc" | awk '{print $1}' > "${enc}.sha256"
+    # Remove the plaintext DB snapshot immediately after successful encryption.
+    rm -f "$snap" 2>/dev/null || true
+
+    _sha256sum "$enc" | awk '{print $1}' > "${enc}.sha256"
     chmod 600 "${enc}.sha256"
 
     [[ -s "$enc" ]] || { log_error "Encrypted output is empty" >&2; rm -f "$enc" "${enc}.sha256"; return 1; }
 
-    cat > "${enc}.meta" <<MEOF
+    if ! cat > "${enc}.meta" <<MEOF
 type=db
 timestamp=$timestamp
 original_size=$(stat -c%s "$db_file" 2>/dev/null || stat -f%z "$db_file" 2>/dev/null || echo 0)
 archive_format=relative
 version=2
 MEOF
+    then
+        log_error "Failed to write backup metadata: ${enc}.meta" >&2
+        return 1
+    fi
+    chmod 600 "${enc}.meta"
 
     backup_log_info "DB backup: $(basename "$enc")"
     echo "$enc"
@@ -994,17 +960,22 @@ fi
     mv "$enc_tmp" "$enc"
     secure_file "$enc" 600
 
-    sha256sum "$enc" | awk '{print $1}' > "${enc}.sha256"
+    _sha256sum "$enc" | awk '{print $1}' > "${enc}.sha256"
     chmod 600 "${enc}.sha256"
 
     [[ -s "$enc" ]] || { log_error "Encrypted output is empty" >&2; rm -f "$enc" "${enc}.sha256"; return 1; }
 
-    cat > "${enc}.meta" <<MEOF
+    if ! cat > "${enc}.meta" <<MEOF
 type=${backup_label}
 timestamp=$timestamp
 archive_format=relative
 version=2
 MEOF
+    then
+        log_error "Failed to write backup metadata: ${enc}.meta" >&2
+        return 1
+    fi
+    chmod 600 "${enc}.meta"
 
     backup_log_info "${backup_label_title} backup: $(basename "$enc")"
     echo "$enc"
@@ -1014,11 +985,15 @@ MEOF
 # _check_backup_deps
 # ---------------------------------------------------------------------------
 _check_backup_deps() {
-    local -a hard=(age tar sha256sum)
+    local -a hard=(age tar)
     local -a soft=(age-keygen sqlite3 zstd rclone)
     local missing_hard=() missing_soft=()
     for c in "${hard[@]}"; do command -v "$c" >/dev/null 2>&1 || missing_hard+=("$c"); done
     for c in "${soft[@]}"; do command -v "$c" >/dev/null 2>&1 || missing_soft+=("$c"); done
+    # Require sha256sum OR shasum (macOS/BSD).
+    if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
+        missing_hard+=(sha256sum)
+    fi
     if [[ ${#missing_hard[@]} -gt 0 ]]; then
         log_error "backup.sh: required tools missing: ${missing_hard[*]}"
         log_error "  Install with: apt-get install -y age coreutils tar"
@@ -1040,9 +1015,129 @@ _check_backup_deps() {
 main() {
     if [[ "$LIST_ONLY" == "true" ]]; then
         load_env_file 2>/dev/null || true
-        list_backups
+        local list_base_dir
+        list_base_dir="$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")"
+        list_backups "$list_base_dir" || true
         exit 0
     fi
+
+    # ---------------------------------------------------------------------------
+    # verify subcommand — full integrity check on the most recent backup
+    # ---------------------------------------------------------------------------
+    if [[ "$_SUBCMD" == "verify" ]]; then
+        require_root "$@"
+        _check_backup_deps
+
+        trap cleanup EXIT HUP INT TERM
+
+        local old_umask
+        old_umask=$(umask)
+        umask 077
+        TMPDIR_BACKUP="$(mktemp -d -p /dev/shm 2>/dev/null || mktemp -d -t vw_verify.XXXXXXXXXX)" || {
+            log_error "Failed to create secure temporary directory"
+            exit 1
+        }
+        umask "$old_umask"
+
+        log_header "VaultWarden-OCI Backup Verify"
+        load_env_file || { log_error "Failed to load .env"; exit 1; }
+        require_project_state_ready || exit 1
+
+        local age_key_file
+        age_key_file=$(_resolve_age_key) || {
+            log_error "Age key file not found at: $age_key_file"
+            log_error "Set SOPS_AGE_KEY_FILE in .env, or place the key at /etc/vaultwarden/age-key.txt"
+            exit 1
+        }
+
+        local base_dir
+        base_dir="$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")"
+
+        # Discover the most recent .age backup across the requested type(s).
+        local search_types=()
+        if [[ "$BACKUP_TYPE" != "auto" ]]; then
+            search_types=("$BACKUP_TYPE")
+        else
+            search_types=(db full emergency)
+        fi
+
+        local latest_file="" latest_mtime=0
+        for t in "${search_types[@]}"; do
+            local type_dir="$base_dir/$t"
+            [[ -d "$type_dir" ]] || continue
+            while IFS= read -r -d '' f; do
+                local f_mtime
+                f_mtime=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || echo 0)
+                if (( f_mtime > latest_mtime )); then
+                    latest_mtime=$f_mtime
+                    latest_file="$f"
+                fi
+            done < <(find "$type_dir" -maxdepth 1 -name "*.age" -type f -print0 2>/dev/null)
+        done
+
+        if [[ -z "$latest_file" ]]; then
+            log_error "No backups found to verify."
+            exit 1
+        fi
+
+        local enc_type
+        enc_type="$(basename "$(dirname "$latest_file")")"
+
+        backup_log_info "Target: $(basename "$latest_file")  [type: $enc_type]"
+
+        if ! verify_backup_full "$latest_file" "$enc_type" "$TMPDIR_BACKUP"; then
+            log_error "Verification FAILED: $(basename "$latest_file")"
+            exit 1
+        fi
+
+        backup_log_success "Verification passed: $(basename "$latest_file")"
+        exit 0
+    fi
+
+    # ---------------------------------------------------------------------------
+    # rotate subcommand — prune old backups without creating a new one
+    # ---------------------------------------------------------------------------
+    if [[ "$_SUBCMD" == "rotate" ]]; then
+        require_root "$@"
+
+        log_header "VaultWarden-OCI Backup Rotation${DRY_RUN:+ [DRY RUN]}"
+        load_env_file || { log_error "Failed to load .env"; exit 1; }
+
+        local base_dir
+        base_dir="$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")"
+
+        local rotate_failed=false
+        for t in db full emergency; do
+            local type_dir="$base_dir/$t"
+            [[ -d "$type_dir" ]] || continue
+
+            if [[ "$DRY_RUN" == "true" ]]; then
+                local would_prune=0
+                while IFS= read -r -d '' f; do
+                    backup_log_info "[DRY RUN] Would remove: $(basename "$f") (and sidecars)"
+                    (( ++would_prune )) || true
+                done < <(find "$type_dir" -maxdepth 1 -name "*.age" -type f \
+                             -mtime +"$KEEP_DAYS" -print0 2>/dev/null)
+                if (( would_prune == 0 )); then
+                    backup_log_info "[DRY RUN] No $t backups older than $KEEP_DAYS days — nothing to prune."
+                fi
+            else
+                cleanup_old_backups "$type_dir" "$t" "$KEEP_DAYS" || rotate_failed=true
+            fi
+        done
+
+        if [[ "$rotate_failed" == "true" ]]; then
+            log_error "One or more rotation steps encountered errors — check above for details."
+            exit 1
+        fi
+
+        backup_log_success "Rotation complete${DRY_RUN:+ (dry run)}."
+        exit 0
+    fi
+
+    # ---------------------------------------------------------------------------
+    # run subcommand
+    # ---------------------------------------------------------------------------
 
     require_root "$@"
     _check_backup_deps
@@ -1095,7 +1190,8 @@ main() {
 
     local age_key_file
     age_key_file=$(_resolve_age_key) || {
-        log_error "Age key file not found: $age_key_file"
+        log_error "Age key file not found at: $age_key_file"
+        log_error "Set SOPS_AGE_KEY_FILE in .env, or place the key at /etc/vaultwarden/age-key.txt"
         exit 1
     }
 
