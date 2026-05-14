@@ -757,6 +757,8 @@ _mv_parse_args() {
 
     # Safe-character validation: reject paths with characters that could break
     # shell quoting, state-file parsing, or rsync invocations.
+    # Forward slashes are intentionally allowed because source and target are
+    # absolute Linux paths (e.g. /var/lib/vaultwarden or /mnt/vw-data).
     local _mv_unsafe_re=$'[^a-zA-Z0-9/._-]'
     if [[ "${_MV_SOURCE}" =~ ${_mv_unsafe_re} ]]; then
         log_error "Source path contains unsafe characters: ${_MV_SOURCE}"
@@ -1803,6 +1805,8 @@ main() {
                 # byte-count comparison so verify works after a complete migration.
                 if _mv_state_has STEP_SOURCE_RENAMED_DONE && [[ ! -d "${_MV_SOURCE}" ]]; then
                     local _renamed_src="" _cand _cand_ts _newest_ts=0
+                    # _MV_SOURCE has passed safe-character validation (alphanumeric,
+                    # / . _ -), so no glob metacharacters can appear in the prefix.
                     for _cand in "${_MV_SOURCE}.pre-migration."*/; do
                         [[ -d "${_cand}" ]] || continue
                         _cand_ts="$(stat -c '%Y' "${_cand}" 2>/dev/null || echo 0)"

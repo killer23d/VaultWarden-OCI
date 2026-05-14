@@ -841,11 +841,13 @@ update_firewall_ranges() {
         _ufw_result=false
         local ufw_status
         ufw_status=$(ufw status 2>/dev/null)
-        # Check that BOTH port 80 and port 443 rules exist for this range;
-        # a single matching line would suppress creation of the missing rule.
+        # Check that BOTH port 80 and port 443 rules exist for this range.
+        # UFW status format: "80/tcp  ALLOW IN  <range>  # comment"
+        # Match port in the To-column followed by ALLOW and the range to avoid
+        # false positives from comment text that contains the range and a number.
         local has_80=false has_443=false
-        echo "$ufw_status" | grep -qE "${range}.*80"  && has_80=true
-        echo "$ufw_status" | grep -qE "${range}.*443" && has_443=true
+        echo "$ufw_status" | grep -qE "^80(/tcp)?[[:space:]]+(ALLOW|ALLOW IN)[[:space:]].*${range}" && has_80=true
+        echo "$ufw_status" | grep -qE "^443(/tcp)?[[:space:]]+(ALLOW|ALLOW IN)[[:space:]].*${range}" && has_443=true
         if [[ "$has_80" == "true" && "$has_443" == "true" ]]; then
             return 0  # both rules already present
         fi

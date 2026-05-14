@@ -88,11 +88,10 @@ _warn_if_stack_unavailable() {
 # Configuration
 # ---------------------------------------------------------------------------
 # Parse EDITOR into an array to support flags (e.g. EDITOR='code --wait').
-# Word-splitting is intentional here so that EDITOR='code --wait' produces
-# the correct two-element array.  Use --editor 'code --wait' at runtime to
+# read -ra splits on IFS whitespace without glob expansion, which is safer
+# than unquoted array assignment.  Use --editor 'code --wait' at runtime to
 # override with the same effect.
-# shellcheck disable=SC2206
-EDITOR_CMD=(${EDITOR:-nano})
+read -ra EDITOR_CMD <<< "${EDITOR:-nano}"
 SKIP_BACKUP=false
 VIEW_ONLY=false
 LIST_KEYS=false
@@ -362,8 +361,7 @@ while [[ $# -gt 0 ]]; do
                 log_error "--editor requires an argument (e.g. --editor vim or --editor 'code --wait')"
                 exit 1
             fi
-            # shellcheck disable=SC2206
-            EDITOR_CMD=($2)
+            read -ra EDITOR_CMD <<< "$2"
             shift 2
             ;;
         --no-backup) SKIP_BACKUP=true; shift ;;
@@ -923,9 +921,11 @@ import sys, re
 try:
     import yaml as _yaml
     def yaml_scalar(value):
-        # yaml.dump produces a properly-quoted YAML scalar (adds quoting for
-        # values containing ':', '#', leading spaces, newlines, etc.).
-        return _yaml.dump(value, default_flow_style=True, allow_unicode=True).rstrip('\n')
+        # yaml.safe_dump with default_style='"' forces double-quoted output for
+        # every scalar, which prevents multi-line block-style emission for values
+        # that contain newlines and avoids ambiguity for values with ':', '#',
+        # leading/trailing spaces, or YAML-like literals.
+        return _yaml.safe_dump(value, default_flow_style=True, allow_unicode=True, default_style='"').rstrip('\n')
 except ImportError:
     def yaml_scalar(value):
         # Fallback: minimal quoting when PyYAML is not available.
