@@ -918,23 +918,20 @@ do_rotate() {
     python3 - "$temp_plain" "$actual_field" "$new_value" "$temp_patched" << 'PYEOF' || _patch_rc=$?
 import sys, re
 
-try:
-    import yaml as _yaml
-    def yaml_scalar(value):
-        # yaml.safe_dump with default_style='"' forces double-quoted output for
-        # every scalar, which prevents multi-line block-style emission for values
-        # that contain newlines and avoids ambiguity for values with ':', '#',
-        # leading/trailing spaces, or YAML-like literals.
-        return _yaml.safe_dump(value, default_flow_style=True, allow_unicode=True, default_style='"').rstrip('\n')
-except ImportError:
-    def yaml_scalar(value):
-        # Fallback: minimal quoting when PyYAML is not available.
-        # Wrap in single quotes and escape embedded single quotes.
-        special = (':', '#', '[', ']', '{', '}', ',', '&', '*', '?', '|',
-                   '-', '<', '>', '=', '!', '%', '@', '`', '\n')
-        if any(c in value for c in special) or value != value.strip() or not value:
-            return "'" + value.replace("'", "''") + "'"
-        return value
+def yaml_scalar(value):
+    # Produce a YAML double-quoted scalar with proper escape sequences.
+    # Double-quoted scalars are always single-line, version-independent, and
+    # handle all YAML-special characters (: # [ ] { } & * leading/trailing
+    # spaces, newlines, etc.) without relying on PyYAML's output format.
+    # Using manual escaping avoids PyYAML's block-style emission for multi-line
+    # strings, which would break the regex-based line substitution below.
+    escaped = (value
+        .replace('\\', '\\\\')
+        .replace('"',  '\\"')
+        .replace('\n', '\\n')
+        .replace('\r', '\\r')
+        .replace('\t', '\\t'))
+    return '"' + escaped + '"'
 
 src_file, field, new_value, dst_file = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 

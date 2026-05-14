@@ -267,7 +267,9 @@ cleanup_docker_system() {
     if [[ "$CLEAN_DOCKER" != "true" ]]; then log_info "Skipping Docker cleanup"; return 0; fi
     if [[ "$DRY_RUN"      == "true" ]]; then log_info "[DRY RUN] Would clean up Docker system resources"; return 0; fi
     log_info "Cleaning up Docker system resources..."
-    if ! require_docker; then log_error "Docker not available for cleanup"; return 1; fi
+    # Return 2 (hard failure) when Docker itself is unavailable; return 1 for
+    # partial cleanup issues so the summary can distinguish warnings from failures.
+    if ! require_docker; then log_error "Docker not available for cleanup"; return 2; fi
     local cleanup_success=true
     cleanup_containers || { log_warn "Container cleanup had issues"; cleanup_success=false; }
     cleanup_images     || { log_warn "Image cleanup had issues";     cleanup_success=false; }
@@ -1104,7 +1106,8 @@ generate_maintenance_summary() {
     local critical_failures=0
     [[ "$CLEAN_LOGS"        == "true"  && "$log_cleanup"      != "0" ]] && ((critical_failures++))
     [[ "$CLEAN_BACKUPS"     == "true"  && "$backup_cleanup"   != "0" ]] && ((critical_failures++))
-    [[ "$CLEAN_DOCKER"      == "true"  && "$docker_cleanup"   != "0" ]] && ((critical_failures++))
+    # Docker cleanup exit 1 = partial issues (warning); only exit 2 (hard failure) is critical.
+    [[ "$CLEAN_DOCKER"      == "true"  && "$docker_cleanup"   == "2" ]] && ((critical_failures++))
     [[ "$OPTIMIZE_DATABASE" == "true"  && "$db_optimization"  != "0" ]] && ((critical_failures++))
     [[ "$UPDATE_FIREWALL"   == "true"  && "$firewall_update"  != "0" ]] && ((critical_failures++))
     [[ "$UPDATE_DNS"        == "true"  && "$dns_update"       != "0" ]] && ((critical_failures++))
@@ -3008,7 +3011,8 @@ main() {
     local critical_failures=0
     [[ "$CLEAN_LOGS"        == "true"  && "$log_cleanup_result"       != "0" ]] && ((critical_failures++))
     [[ "$CLEAN_BACKUPS"     == "true"  && "$backup_cleanup_result"    != "0" ]] && ((critical_failures++))
-    [[ "$CLEAN_DOCKER"      == "true"  && "$docker_cleanup_result"    != "0" ]] && ((critical_failures++))
+    # Docker cleanup exit 1 = partial issues (warning); only exit 2 (hard failure) is critical.
+    [[ "$CLEAN_DOCKER"      == "true"  && "$docker_cleanup_result"    == "2" ]] && ((critical_failures++))
     [[ "$OPTIMIZE_DATABASE" == "true"  && "$db_optimization_result"   != "0" ]] && ((critical_failures++))
     [[ "$UPDATE_FIREWALL"   == "true"  && "$firewall_update_result"   != "0" ]] && ((critical_failures++))
     [[ "$UPDATE_DNS"        == "true"  && "$dns_update_result"        != "0" ]] && ((critical_failures++))
