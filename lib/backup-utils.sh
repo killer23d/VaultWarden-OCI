@@ -5,7 +5,15 @@
 [[ -n "${VAULTWARDEN_BACKUP_UTILS_LIB_LOADED:-}" ]] && return 0
 readonly VAULTWARDEN_BACKUP_UTILS_LIB_LOADED=1
 
-set -euo pipefail
+# Dependency assertions — fail loudly at source time, not inside functions
+for _fn in log_error log_info log_success log_debug log_warn; do
+    declare -f "$_fn" >/dev/null 2>&1 || {
+        printf 'backup-utils.sh: required function %s not found (source lib/common.sh first)\n' \
+            "$_fn" >&2
+        return 1
+    }
+done
+unset _fn
 
 # ---------------------------------------------------------------------------
 # _format_bytes_human BYTES
@@ -75,10 +83,15 @@ list_backups() {
 
                         # stat -c '%y' is Linux (GNU coreutils);
                         # fall back to BSD stat -f '%Sm' for macOS compatibility.
-                        age_info=$(stat -c '%y' "$backup_file" 2>/dev/null \
-                            | cut -c1-16 \
+                        # Separate the stat from the cut so that cut receiving
+                        # empty stdin (from a failing stat on BSD) does not mask
+                        # the stat failure via a zero-exit from cut.
+                        local stat_raw
+                        stat_raw=$(stat -c '%y' "$backup_file" 2>/dev/null \
                             || stat -f '%Sm' -t '%Y-%m-%d %H:%M' "$backup_file" 2>/dev/null \
-                            || echo "unknown")
+                            || echo "")
+                        age_info="${stat_raw:0:16}"
+                        [[ -z "$age_info" ]] && age_info="unknown"
 
                         printf "  %-40s %10s  %s\n" "$basename_file" "$size_info" "$age_info"
 
@@ -158,7 +171,7 @@ list_backups() {
 # ---------------------------------------------------------------------------
 validate_backup_integrity() {
     local backup_file="$1"
-    local age_key_file="${2:-secrets/keys/age-key.txt}"
+    local age_key_file="${2:-${SOPS_AGE_KEY_FILE:-secrets/keys/age-key.txt}}"
 
     if [[ ! -f "$backup_file" ]]; then
         log_error "Backup file not found: $backup_file"
@@ -167,6 +180,12 @@ validate_backup_integrity() {
 
     if [[ ! -f "$age_key_file" ]]; then
         log_error "Age key file not found: $age_key_file"
+        return 1
+    fi
+
+    # Preflight check: tar must be available to validate the inner stream.
+    if ! command -v tar >/dev/null 2>&1; then
+        log_error "validate_backup_integrity: 'tar' not found — cannot validate inner archive stream"
         return 1
     fi
 
@@ -259,7 +278,7 @@ validate_backup_integrity() {
 # ---------------------------------------------------------------------------
 verify_backup_integrity() {
     local db_path="$1"
-    local age_key_file="${2:-secrets/keys/age-key.txt}"
+    local age_key_file="${2:-${SOPS_AGE_KEY_FILE:-secrets/keys/age-key.txt}}"
 
     if [[ ! -f "$db_path" ]]; then
         log_error "Database file not found: $db_path"
@@ -362,11 +381,9 @@ check_backup_disk_space() {
     local required_space_mb="${2:-1000}"  # Default 1GB
 
     if [[ ! -d "$target_dir" ]]; then
-        # Return 0 (skip check) when directory does not yet exist.
-        # On the first run the backup destination has not been created yet; returning
-        # 1 (error) would block valid first-run backups. Log at debug level only —
-        # this is expected during initial setup.
-        log_debug "check_backup_disk_space: backup_dir does not exist yet: $target_dir"
+        # Warn when directory does not yet exist — this may indicate a
+        # misconfigured BACKUP_DIR rather than a first-run situation.
+        log_warn "check_backup_disk_space: target directory does not exist yet — disk space check skipped: $target_dir"
         return 0
     fi
 
@@ -494,13 +511,16 @@ cleanup_old_backups() {
             local age_days
             age_days=$(_backup_filename_age_days "$backup_file")
             if [[ -z "$age_days" ]]; then
-                # No timestamp in filename — fall back to ctime.
-                age_days=$(_backup_ctime_age_days "$backup_file")
-                log_debug "Retention: no filename timestamp for $(basename "$backup_file") — using ctime (${age_days}d)"
+                # No timestamp in filename — skip deletion to avoid relying on
+                # unreliable ctime semantics (ctime resets on chmod/chown).
+                # Operator must rename the file to include YYYYMMDD-HHMMSS.
+                log_warn "Retention: $(basename "$backup_file") has no filename timestamp — skipping deletion." \
+                         " Rename the file to include YYYYMMDD-HHMMSS to enable automatic cleanup."
+                continue
             fi
             if (( age_days > retention_days )); then
                 log_debug "Removing old backup (${age_days}d > ${retention_days}d): $(basename "$backup_file")"
-                rm -f "$backup_file" "$backup_file.sha256" "$backup_file.meta" 2>/dev/null
+                rm -f "$backup_file" "$backup_file.sha256" "$backup_file.sha256.hmac" "$backup_file.meta" 2>/dev/null
                 (( deleted_count++ )) || true
             fi
         fi
@@ -521,7 +541,7 @@ cleanup_old_backups() {
                 (( orphan_count++ )) || true
             fi
         fi
-    done < <(find "$backup_dir" \( -name "*.meta" -o -name "*.sha256" \) -type f 2>/dev/null)
+    done < <(find "$backup_dir" \( -name "*.meta" -o -name "*.sha256" -o -name "*.sha256.hmac" \) -type f 2>/dev/null)
 
     if (( deleted_count > 0 )); then
         log_success "Cleaned up $deleted_count old $backup_type backups"
@@ -557,8 +577,8 @@ get_backup_statistics() {
     local total_backups=0
     local total_size_bytes=0
 
-    echo "Backup Statistics:"
-    echo "=================="
+    log_info "Backup Statistics:"
+    log_info "=================="
 
     for backup_type in "${backup_types[@]}"; do
         local type_dir="$backup_base_dir/$backup_type"
@@ -569,8 +589,14 @@ get_backup_statistics() {
 
             # portable size accumulation via _stat_file_size()
             while IFS= read -r f; do
-                local fsz
-                fsz=$(_stat_file_size "$f" 2>/dev/null || echo 0)
+                local fsz=0
+                # Guard: _stat_file_size is exported by lib/crypto.sh;
+                # fall back to inline stat when crypto.sh was not sourced.
+                if declare -f _stat_file_size &>/dev/null; then
+                    fsz=$(_stat_file_size "$f" 2>/dev/null || echo 0)
+                else
+                    fsz=$(stat -c%s "$f" 2>/dev/null || stat -f%z "$f" 2>/dev/null || echo 0)
+                fi
                 [[ -z "$fsz" || ! "$fsz" =~ ^[0-9]+$ ]] && fsz=0
                 size_bytes=$(( size_bytes + fsz ))
                 (( count++ )) || true
@@ -578,18 +604,18 @@ get_backup_statistics() {
 
             local size_mb=$(( size_bytes / 1024 / 1024 ))
 
-            printf "%-10s: %3d backups, %6d MB\n" "$backup_type" "$count" "$size_mb"
+            log_info "$(printf '%-10s: %3d backups, %6d MB' "$backup_type" "$count" "$size_mb")"
 
             total_backups=$(( total_backups + count ))
             total_size_bytes=$(( total_size_bytes + size_bytes ))
         else
-            printf "%-10s: %3d backups, %6d MB\n" "$backup_type" 0 0
+            log_info "$(printf '%-10s: %3d backups, %6d MB' "$backup_type" 0 0)"
         fi
     done
 
     local total_size_mb=$(( total_size_bytes / 1024 / 1024 ))
-    echo "=================="
-    printf "%-10s: %3d backups, %6d MB\n" "TOTAL" "$total_backups" "$total_size_mb"
+    log_info "=================="
+    log_info "$(printf '%-10s: %3d backups, %6d MB' "TOTAL" "$total_backups" "$total_size_mb")"
 
     return 0
 }
@@ -628,6 +654,20 @@ create_backup_metadata() {
     if require_docker >/dev/null 2>&1; then
         vw_version=$(docker compose exec -T vaultwarden /vaultwarden --version 2>/dev/null | head -1 || echo "unknown")
     fi
+
+    # Sanitise additional_info: strip embedded newlines to protect the
+    # key=value per-line format parsed by downstream consumers (grep|cut).
+    if [[ "$additional_info" == *$'\n'* ]]; then
+        log_warn "create_backup_metadata: additional_info contains newlines — stripping"
+        additional_info="${additional_info//$'\n'/ }"
+    fi
+
+    # Create the metadata file with secure permissions before writing so
+    # that the file is never briefly world-readable at umask 022 (mode 644).
+    install -m 600 /dev/null "$metadata_file" || {
+        log_error "Failed to secure metadata file: $metadata_file"
+        return 1
+    }
 
     # test the cat heredoc directly instead of checking $?
     # after the fact, which is an anti-pattern ($? may be stale or from
