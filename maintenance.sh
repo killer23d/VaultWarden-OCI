@@ -267,7 +267,9 @@ cleanup_docker_system() {
     if [[ "$CLEAN_DOCKER" != "true" ]]; then log_info "Skipping Docker cleanup"; return 0; fi
     if [[ "$DRY_RUN"      == "true" ]]; then log_info "[DRY RUN] Would clean up Docker system resources"; return 0; fi
     log_info "Cleaning up Docker system resources..."
-    if ! require_docker; then log_error "Docker not available for cleanup"; return 1; fi
+    # Return 2 (hard failure) when Docker itself is unavailable; return 1 for
+    # partial cleanup issues so the summary can distinguish warnings from failures.
+    if ! require_docker; then log_error "Docker not available for cleanup"; return 2; fi
     local cleanup_success=true
     cleanup_containers || { log_warn "Container cleanup had issues"; cleanup_success=false; }
     cleanup_images     || { log_warn "Image cleanup had issues";     cleanup_success=false; }
@@ -838,15 +840,27 @@ update_firewall_ranges() {
 
     _ufw_allow_range() {
         local range="$1" label="$2"
-        # shellcheck disable=SC2034  # _ufw_result used via nameref by caller
         _ufw_result=false
-        if ! ufw status | grep -q "$range"; then
-            if ufw allow proto tcp from "$range" to any port 80  comment "${label}" >/dev/null 2>&1 && \
-               ufw allow proto tcp from "$range" to any port 443 comment "${label}" >/dev/null 2>&1; then
-                _ufw_result=true
-            else
-                log_warn "ufw allow failed for range: $range"
-            fi
+        local ufw_status
+        ufw_status=$(ufw status 2>/dev/null)
+        # Check that BOTH port 80 and port 443 rules exist for this range.
+        # UFW status format: "80/tcp  ALLOW IN  <range>  # comment"
+        # Match port in the To-column followed by ALLOW and the range to avoid
+        # false positives from comment text that contains the range and a number.
+        # Escape dots in the CIDR range so they match literally, not as regex wildcards.
+        local escaped_range
+        escaped_range=$(printf '%s' "$range" | sed 's/\./\\./g')
+        local has_80=false has_443=false
+        echo "$ufw_status" | grep -qE "^80(/tcp)?[[:space:]]+(ALLOW|ALLOW IN)[[:space:]].*${escaped_range}" && has_80=true
+        echo "$ufw_status" | grep -qE "^443(/tcp)?[[:space:]]+(ALLOW|ALLOW IN)[[:space:]].*${escaped_range}" && has_443=true
+        if [[ "$has_80" == "true" && "$has_443" == "true" ]]; then
+            return 0  # both rules already present
+        fi
+        if ufw allow proto tcp from "$range" to any port 80  comment "${label}" >/dev/null 2>&1 && \
+           ufw allow proto tcp from "$range" to any port 443 comment "${label}" >/dev/null 2>&1; then
+            _ufw_result=true
+        else
+            log_warn "ufw allow failed for range: $range"
         fi
     }
 
@@ -857,7 +871,6 @@ update_firewall_ranges() {
         log_info "Adding new Cloudflare IPv4 ranges..."
         while IFS= read -r range; do
             if [[ -n "$range" && "$range" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]; then
-                local -n _ufw_result_ref=_ufw_result
                 _ufw_allow_range "$range" "CF-IPv4-NEW"
                 if [[ "$_ufw_result" == "true" ]]; then
                     ranges_added=true
@@ -871,7 +884,6 @@ update_firewall_ranges() {
         log_info "Adding new Cloudflare IPv6 ranges..."
         while IFS= read -r range; do
             if [[ -n "$range" && "$range" =~ ^[0-9a-fA-F:]+/[0-9]{1,3}$ ]]; then
-                local -n _ufw_result_ref=_ufw_result
                 _ufw_allow_range "$range" "CF-IPv6-NEW"
                 if [[ "$_ufw_result" == "true" ]]; then
                     ranges_added=true
@@ -883,24 +895,28 @@ update_firewall_ranges() {
 
     if [[ "$ranges_added" == "true" ]]; then
         log_success "New Cloudflare IP ranges added successfully"
-        log_info "Removing outdated Cloudflare IP ranges..."
-        local removed_count=0
-        local -a old_rule_nums=()
-        mapfile -t old_rule_nums < <(
-            ufw status numbered \
-            | grep -E "CF-IPv[46]" \
-            | grep -v "CF-IPv[46]-NEW" \
-            | sed -n 's/^\[\s*\([0-9]\+\)\].*/\1/p' \
-            | sort -rn
-        )
-        for rule_num in "${old_rule_nums[@]}"; do
-            [[ -n "$rule_num" ]] && echo "y" | ufw delete "$rule_num" >/dev/null 2>&1 && ((removed_count++))
-        done
-        [[ $removed_count -gt 0 ]] && log_success "Removed $removed_count outdated firewall rules"
-        log_success "Firewall IP ranges updated safely"
     else
         log_info "No new IP ranges needed to be added"
     fi
+
+    # Remove stale rules regardless of whether new ranges were added — rules
+    # may have been added in a previous run whose corresponding IP ranges were
+    # subsequently retired by Cloudflare.
+    log_info "Removing outdated Cloudflare IP ranges..."
+    local removed_count=0
+    local -a old_rule_nums=()
+    mapfile -t old_rule_nums < <(
+        ufw status numbered \
+        | grep -E "CF-IPv[46]" \
+        | grep -v "CF-IPv[46]-NEW" \
+        | sed -n 's/^\[\s*\([0-9]\+\)\].*/\1/p' \
+        | sort -rn
+    )
+    for rule_num in "${old_rule_nums[@]}"; do
+        [[ -n "$rule_num" ]] && echo "y" | ufw delete "$rule_num" >/dev/null 2>&1 && ((removed_count++))
+    done
+    [[ $removed_count -gt 0 ]] && log_success "Removed $removed_count outdated firewall rules"
+    log_success "Firewall IP ranges updated safely"
     return 0
 }
 
@@ -1091,9 +1107,14 @@ generate_maintenance_summary() {
     fi
 
     local critical_failures=0
-    [[ "$CLEAN_LOGS"    == "true" && "$log_cleanup"    != "0" ]] && ((critical_failures++))
-    [[ "$CLEAN_BACKUPS" == "true" && "$backup_cleanup" != "0" ]] && ((critical_failures++))
-    [[ "$CLEAN_DOCKER"  == "true" && "$docker_cleanup" == "2" ]] && ((critical_failures++))
+    [[ "$CLEAN_LOGS"        == "true"  && "$log_cleanup"      != "0" ]] && ((critical_failures++))
+    [[ "$CLEAN_BACKUPS"     == "true"  && "$backup_cleanup"   != "0" ]] && ((critical_failures++))
+    # Docker cleanup exit 1 = partial issues (warning); only exit 2 (hard failure) is critical.
+    [[ "$CLEAN_DOCKER"      == "true"  && "$docker_cleanup"   == "2" ]] && ((critical_failures++))
+    [[ "$OPTIMIZE_DATABASE" == "true"  && "$db_optimization"  != "0" ]] && ((critical_failures++))
+    [[ "$UPDATE_FIREWALL"   == "true"  && "$firewall_update"  != "0" ]] && ((critical_failures++))
+    [[ "$UPDATE_DNS"        == "true"  && "$dns_update"       != "0" ]] && ((critical_failures++))
+    [[ "$TARGETED_MODE"     == "false" && "$health_validation" != "0" ]] && ((critical_failures++))
     if [[ $critical_failures -eq 0 ]]; then
         summary+="\n🎉 Overall Status: SUCCESS\n"
     else
@@ -1515,7 +1536,7 @@ _fix_unhealthy_containers() {
 
         if (( count >= max_restarts )); then
             log_warn "Fix mode: ${container} suppressed — already auto-restarted ${count}x in the last ${window_hours}h. Investigate manually."
-            _warn "fix:restart-limit" \
+            _warn "fix:restart-limit:${container}" \
                 "${container} auto-restart suppressed after ${count} attempts in ${window_hours}h — manual intervention required"
             continue
         fi
@@ -2097,8 +2118,10 @@ _check_config() {
         fi
     done
     if [[ ${#root_owned_issues[@]} -gt 0 ]]; then
+        local _pi=0
         for issue in "${root_owned_issues[@]}"; do
-            _warn "permissions:project-files" "$issue"
+            _warn "permissions:project-files:${_pi}" "$issue"
+            (( _pi++ )) || true
         done
     elif [[ -f "${SCRIPT_DIR}/.env" || -f "${SCRIPT_DIR}/Makefile" ]]; then
         _pass "permissions:project-files" "Project file ownership is correct"
@@ -2107,8 +2130,10 @@ _check_config() {
     if [[ ${#config_issues[@]} -eq 0 ]]; then
         _pass "config:validation" "Configuration validation passed"
     else
+        local _ci=0
         for issue in "${config_issues[@]}"; do
-            _fail "config:validation" "$issue"
+            _fail "config:validation:${_ci}" "$issue"
+            (( _ci++ )) || true
         done
     fi
 }
@@ -2129,7 +2154,7 @@ _check_notify_failures() {
 
     for marker in "${markers[@]}"; do
         local unit="${marker##*/NOTIFY_FAILED_}"
-        _fail "notify:dead-letter" \
+        _fail "notify:dead-letter:${unit}" \
             "SMTP was down when ${unit} failed — notification lost. Investigate and remove: ${marker}"
     done
 }
@@ -2894,14 +2919,13 @@ _update_main() {
 main() {
     log_header "VaultWarden-OCI Maintenance Manager"
 
-    CLEANUP_ACTIONS=()
     trap 'perform_cleanup' EXIT HUP INT TERM
 
     local OPS_LOCK="/run/lock/vaultwarden-operations.lock"
 
     # ---- Deep DB maintenance: self-contained sub-command ----
     if [[ "$DB_DEEP_MAINT" == "true" ]]; then
-        require_root "$@"
+        require_root
         # Use automatic FD allocation instead of hardcoded FD.
         local _OPS_LOCK_FD
         exec {_OPS_LOCK_FD}>"$OPS_LOCK"
@@ -2924,7 +2948,7 @@ main() {
     fi
 
     # ---- Routine or targeted maintenance ----
-    require_root "$@"
+    require_root
     # Use automatic FD allocation instead of hardcoded FD.
     local _OPS_LOCK_FD
     exec {_OPS_LOCK_FD}>"$OPS_LOCK"
@@ -2988,16 +3012,21 @@ main() {
         "$health_validation_result"
 
     local critical_failures=0
-    [[ "$CLEAN_LOGS"    == "true" && "$log_cleanup_result"    != "0" ]] && ((critical_failures++))
-    [[ "$CLEAN_BACKUPS" == "true" && "$backup_cleanup_result" != "0" ]] && ((critical_failures++))
-    [[ "$CLEAN_DOCKER"  == "true" && "$docker_cleanup_result" == "2" ]] && ((critical_failures++))
+    [[ "$CLEAN_LOGS"        == "true"  && "$log_cleanup_result"       != "0" ]] && ((critical_failures++))
+    [[ "$CLEAN_BACKUPS"     == "true"  && "$backup_cleanup_result"    != "0" ]] && ((critical_failures++))
+    # Docker cleanup exit 1 = partial issues (warning); only exit 2 (hard failure) is critical.
+    [[ "$CLEAN_DOCKER"      == "true"  && "$docker_cleanup_result"    == "2" ]] && ((critical_failures++))
+    [[ "$OPTIMIZE_DATABASE" == "true"  && "$db_optimization_result"   != "0" ]] && ((critical_failures++))
+    [[ "$UPDATE_FIREWALL"   == "true"  && "$firewall_update_result"   != "0" ]] && ((critical_failures++))
+    [[ "$UPDATE_DNS"        == "true"  && "$dns_update_result"        != "0" ]] && ((critical_failures++))
+    [[ "$TARGETED_MODE"     == "false" && "$health_validation_result" != "0" ]] && ((critical_failures++))
 
     if [[ $critical_failures -eq 0 ]]; then
         log_success "Maintenance completed successfully"; exit 0
-    elif [[ $critical_failures -le 1 ]]; then
-        log_warn "Maintenance completed with minor issues"; exit 2
+    elif [[ $critical_failures -eq 1 ]]; then
+        log_warn "Maintenance completed with minor issues"; exit 1
     else
-        log_error "Maintenance completed with critical failures"; exit 1
+        log_error "Maintenance completed with critical failures"; exit 2
     fi
 }
 
