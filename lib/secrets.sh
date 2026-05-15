@@ -168,10 +168,15 @@ list_secrets() {
     # Suppress xtrace before sops to prevent the key file path
     # from appearing in trace output (bash -x / set -x logs).
     { set +x; } 2>/dev/null
-    # Capture sops stderr for actionable diagnostics on failure.
-    sops_stderr=$(sops -d "$secrets_file" 2>&1 >/dev/null) || rc=$?
-    if [[ $rc -eq 0 ]]; then
-        keys=$(sops -d "$secrets_file" 2>/dev/null \
+    # W1-M3 FIX: Decrypt once into a variable; parse from that in-memory copy
+    # rather than calling sops -d a second time (avoids double I/O and TOCTOU).
+    local yaml_content _sops_err_file
+    _sops_err_file=$(mktemp)
+    yaml_content=$(sops -d "$secrets_file" 2>"$_sops_err_file") || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        sops_stderr=$(cat "$_sops_err_file" 2>/dev/null || true)
+    else
+        keys=$(printf '%s\n' "$yaml_content" \
             | python3 -c "
 import yaml, sys
 data = yaml.safe_load(sys.stdin)
@@ -180,6 +185,7 @@ if isinstance(data, dict):
         print(k)
 " 2>/dev/null) || rc=$?
     fi
+    rm -f "$_sops_err_file"
 
     cleanup_secrets_environment
 
@@ -343,12 +349,18 @@ list_secret_keys() {
     local keys
     local sops_stderr
     local rc=0
-    # Capture sops stderr for actionable diagnostics on failure.
-    sops_stderr=$(sops -d "$secrets_file" 2>&1 >/dev/null) || rc=$?
-    if [[ $rc -eq 0 ]]; then
-        keys=$(sops -d "$secrets_file" 2>/dev/null \
+    # W1-M3 FIX: Decrypt once into a variable; parse from that in-memory copy
+    # rather than calling sops -d a second time (avoids double I/O and TOCTOU).
+    local yaml_content _sops_err_file
+    _sops_err_file=$(mktemp)
+    yaml_content=$(sops -d "$secrets_file" 2>"$_sops_err_file") || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        sops_stderr=$(cat "$_sops_err_file" 2>/dev/null || true)
+    else
+        keys=$(printf '%s\n' "$yaml_content" \
             | python3 -c "import yaml, sys; [print(k) for k in yaml.safe_load(sys.stdin).keys()]" 2>/dev/null) || rc=$?
     fi
+    rm -f "$_sops_err_file"
     cleanup_secrets_environment
     if [[ $rc -ne 0 || -z "$keys" ]]; then
         log_error "list_secret_keys: decryption or parse failure for $secrets_file (sops exit $rc)"

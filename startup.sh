@@ -554,8 +554,11 @@ prepare_docker_secrets() {
   # This is consistent with lib/secrets.sh::write_secret_file() (chmod 600).
   umask 077
 
+  # W3-M8 FIX: Create the cache file inside the already-restricted secrets_dir
+  # (mode 700) rather than the world-listable /tmp, eliminating the TOCTOU
+  # window between mktemp and the subsequent chmod on a shared host.
   local cache_file
-  cache_file=$(mktemp)
+  cache_file=$(mktemp --tmpdir="$secrets_dir" .sops-cache.XXXXXXXXXX)
   _prepare_secrets_cleanup_cache="$cache_file"
 
   if ! sops -d "$secrets_file" > "$cache_file"; then

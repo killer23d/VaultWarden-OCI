@@ -1370,17 +1370,22 @@ EOF
         log_warn "          shred -fuz '$output_html'"
         log_info  "Open in browser and print to PDF manually."
 
-        # Schedule an auto-delete reminder 30 minutes from now.
-        local remind_cmd="echo 'SECURITY REMINDER: Delete plaintext Age key backup: shred -fuz \"${output_html}\"' | logger -t vaultwarden-key-reminder 2>/dev/null; wall 'SECURITY REMINDER: VaultWarden plaintext key backup still exists at ${output_html} — delete it now with: shred -fuz ${output_html}' 2>/dev/null || true"
+        # W1-C3 FIX: Schedule actual auto-DELETION (not just a reminder) in 30
+        # minutes so the plaintext HTML is not left on disk indefinitely.
+        # The delete_cmd uses shred for overwrite-capable filesystems, then rm
+        # as a fallback.
+        local delete_cmd="shred -fuz '${output_html}' 2>/dev/null || rm -f '${output_html}'; echo 'vaultwarden-key-backup: plaintext HTML auto-deleted' | logger -t vaultwarden-key-reminder 2>/dev/null"
         if command -v at >/dev/null 2>&1; then
-            if echo "$remind_cmd" | at "now + 30 minutes" 2>/dev/null; then
-                log_info "Scheduled security reminder in 30 minutes via at(1)."
+            if echo "$delete_cmd" | at "now + 30 minutes" 2>/dev/null; then
+                log_warn "SECURITY: HTML file will be AUTO-DELETED in 30 minutes via at(1)."
+                log_warn "          Open, print to PDF, and store the PDF before then."
             else
-                log_warn "Could not schedule at(1) reminder; set a manual reminder to delete $output_html"
+                log_warn "Could not schedule at(1) auto-delete."
+                log_warn "SECURITY: Manually run: shred -fuz '$output_html'"
             fi
         else
-            log_warn "at(1) not available — cannot schedule auto-reminder."
-            log_warn "SECURITY: Manually delete the plaintext key file within 30 minutes:"
+            log_warn "at(1) not available — cannot schedule auto-deletion."
+            log_warn "SECURITY: Manually delete the plaintext key file immediately after printing:"
             log_warn "          shred -fuz '$output_html'"
         fi
     fi

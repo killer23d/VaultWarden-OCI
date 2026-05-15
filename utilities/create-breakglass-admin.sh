@@ -341,6 +341,12 @@ _notify_breakglass_event() {
     if ! send_notification_email "$subject" "$body" 2>/dev/null; then
         log_warn "Breakglass event notification delivery failed (non-fatal)"
     fi
+    # W4-M5 FIX: Persist a durable syslog record regardless of email delivery
+    # outcome.  logger(1) writes to the local syslog (journald on Ubuntu), which
+    # survives email failures and provides an append-only audit trail.
+    logger -t vaultwarden-breakglass \
+        "EVENT=${event} USER=${BREAKGLASS_USER} HOST=$(hostname -f 2>/dev/null || hostname) TIME=$(date -uIs)" \
+        2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------
