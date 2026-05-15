@@ -30,9 +30,7 @@ _source_lib "lib/crypto.sh"
 _source_lib "lib/storage.sh"
 unset -f _source_lib
 
-# ---------------------------------------------------------------------------
 # DR pre-flight: .env guard
-# ---------------------------------------------------------------------------
 # On a fresh (disaster-recovery) host the operator will not yet have a .env.
 # Sourcing .env.example — which contains REPLACE_ME placeholders — or running
 # with completely unset variables would silently corrupt the restore.  Catch
@@ -79,9 +77,7 @@ _require_env_for_live_restore() {
     fi
 }
 
-# ---------------------------------------------------------------------------
 # Dependency pre-flight
-# ---------------------------------------------------------------------------
 check_dependencies() {
     local -a hard=(docker age age-keygen sqlite3 sha256sum tar)
     local -a soft=(sops zstd rclone rsync)  # rsync required for separate-volume (OCI block volume) restores
@@ -103,9 +99,7 @@ case "${1:-}" in
     latest|list|interactive) check_dependencies ;;
 esac
 
-# ---------------------------------------------------------------------------
 # Configuration
-# ---------------------------------------------------------------------------
 BACKUP_FILE=""
 RESTORE_TYPE=""
 USE_LATEST=false
@@ -210,10 +204,8 @@ EXAMPLES:
 EOF
 }
 
-# ---------------------------------------------------------------------------
 # Argument Parsing — subcommand-first, then options.
 # 'latest', 'list', and 'interactive' are positional subcommands.
-# ---------------------------------------------------------------------------
 
 # Handle help before the .env check so it always works.
 if [[ $# -gt 0 ]]; then
@@ -285,10 +277,7 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM ERR
 
-# ---------------------------------------------------------------------------
-# _resolve_rclone_config
 # Mirrors backup.sh: auto-discovers rclone.conf across 5 priority locations.
-# ---------------------------------------------------------------------------
 _resolve_rclone_config() {
     local cfg_from_env
     cfg_from_env="$(get_config_value "RCLONE_CONFIG" "")"
@@ -347,8 +336,6 @@ _build_rclone_config_arg() {
     return 1
 }
 
-# ---------------------------------------------------------------------------
-# _rclone_is_available
 # Returns 0 if rclone + remote name + config are all present and valid.
 # Sets RCLONE_UNAVAIL_REASON (global) with a human-readable explanation
 # whenever it returns 1, so callers can surface a useful message.
@@ -358,7 +345,6 @@ _build_rclone_config_arg() {
 # This distinguishes "prompt needed" from "rclone not installed" so that
 # select_backup_source() can trigger _prompt_rclone_remote_name() instead
 # of hiding the REMOTE option when --remote was explicitly requested.
-# ---------------------------------------------------------------------------
 RCLONE_UNAVAIL_REASON=""
 _rclone_is_available() {
     RCLONE_UNAVAIL_REASON=""
@@ -386,20 +372,15 @@ _rclone_is_available() {
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# _rclone_diagnose
 # Emits a single log_warn line explaining why remote is unavailable.
 # Call this whenever _rclone_is_available returns 1 and you want to tell
 # the operator why the remote option is missing from the menu.
-# ---------------------------------------------------------------------------
 _rclone_diagnose() {
     if [[ -n "$RCLONE_UNAVAIL_REASON" ]]; then
         log_warn "Remote backups unavailable: $RCLONE_UNAVAIL_REASON"
     fi
 }
 
-# ---------------------------------------------------------------------------
-# _prompt_rclone_remote_name
 #
 # Interactively prompts the operator for the rclone remote name
 # (and optionally the remote path) when RCLONE_REMOTE_NAME is not set in
@@ -412,7 +393,6 @@ _rclone_diagnose() {
 #
 # Returns 0 on success, 1 if the user quits or input is invalid on a
 # non-interactive (pipe/CI) terminal.
-# ---------------------------------------------------------------------------
 _prompt_rclone_remote_name() {
     # Non-interactive guard: stdin must be a TTY for prompts to work.
     if [[ ! -t 0 ]]; then
@@ -485,9 +465,7 @@ _prompt_rclone_remote_name() {
 }
 
 
-# ---------------------------------------------------------------------------
 # Backup listing helpers
-# ---------------------------------------------------------------------------
 
 _find_latest_backup() {
     local dir="$1"
@@ -528,7 +506,6 @@ list_backups() {
         return 0
     fi
 
-    # Local section
     log_info "── LOCAL backups (${BACKUP_BASE_DIR}/) ──"
     local types=("db" "full" "emergency")
     for t in "${types[@]}"; do
@@ -542,7 +519,6 @@ list_backups() {
         fi
     done
 
-    # Remote section
     echo ""
     if _rclone_is_available; then
         log_info "── REMOTE backups ──"
@@ -677,7 +653,6 @@ select_backup_source() {
         _select_remote_backup; return $?
     fi
     if ! _rclone_is_available; then
-        # Tell the operator WHY remote is not in the menu.
         _rclone_diagnose
         log_info "No backup specified — listing available local backups:"
         select_backup_interactive; return $?
@@ -783,9 +758,6 @@ select_backup_interactive() {
     log_info "Selected: $(basename "$BACKUP_FILE") (type: $RESTORE_TYPE)"
 }
 
-# ---------------------------------------------------------------------------
-# resolve_backup_file
-# ---------------------------------------------------------------------------
 resolve_backup_file() {
     if [[ "$USE_LATEST" == "true" ]]; then
         if [[ -n "$RESTORE_TYPE" ]]; then
@@ -824,8 +796,6 @@ resolve_backup_file() {
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# _load_recovery_kit
 #
 # Reads a plaintext recovery-kit file, extracts the Age private key line
 # (AGE-SECRET-KEY-1...), writes it to a chmod-600 temp file inside
@@ -841,7 +811,6 @@ resolve_backup_file() {
 # Must be called after TMPDIR_RESTORE is initialised (i.e. inside main()).
 #
 # Returns 0 on success, 1 on any validation failure.
-# ---------------------------------------------------------------------------
 _load_recovery_kit() {
     # Resolve the kit file path: CLI flag takes priority over env var.
     local kit_path="${RECOVERY_KIT_FILE:-${RESTORE_RECOVERY_KIT_FILE:-}}"
@@ -888,7 +857,6 @@ _load_recovery_kit() {
     age_key_line="${age_key_line%"${age_key_line##*[![:space:]]}"}"
     age_key_line="${age_key_line//$'\r'/}"
 
-    # Basic format sanity check.
     if [[ "$age_key_line" != AGE-SECRET-KEY-1* ]]; then
         log_error "Extracted key does not match expected AGE-SECRET-KEY-1 format."
         return 1
@@ -926,8 +894,6 @@ _load_recovery_kit() {
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# _prompt_age_key
 #
 # Resolves the age private key to use for decrypting this specific backup.
 # Priority order (best-practice: restoring a backup may require an OLD key):
@@ -951,13 +917,10 @@ _load_recovery_kit() {
 # Validation is delegated to simple_verify_age_key() from
 # lib/crypto.sh, which performs permissions + ownership +
 # crypto roundtrip checks and honours the full _resolve_age_key() chain.
-# ---------------------------------------------------------------------------
 _prompt_age_key() {
     local configured_key="$1"  # the key currently in .env (fallback)
 
-    # -----------------------------------------------------------------
     # Priority 1 & 2: non-interactive supply
-    # -----------------------------------------------------------------
     local supplied_path=""
     if [[ -n "$KEY_FILE_ARG" ]]; then
         supplied_path="$KEY_FILE_ARG"
@@ -1014,7 +977,6 @@ _prompt_age_key() {
         fi
         echo ""   # newline after silent input
     else
-        # Non-interactive pipe: read normally
         IFS= read -r key_input || true
     fi
 
@@ -1026,11 +988,9 @@ _prompt_age_key() {
         return 0
     fi
 
-    # Trim leading/trailing whitespace from pasted input
     key_input="${key_input#"${key_input%%[![:space:]]*}"}"
     key_input="${key_input%"${key_input##*[![:space:]]}"}"
 
-    # Validate format before writing to disk
     if [[ "$key_input" != AGE-SECRET-KEY-1* ]]; then
         log_error "Input does not look like an age private key (must start with AGE-SECRET-KEY-1)."
         log_error "Tip: paste the full private key line from your saved age-key.txt."
@@ -1044,14 +1004,9 @@ _prompt_age_key() {
 
     local staged_key_file="$key_staging_dir/restore-age-key.txt"
 
-    # age-keygen -y requires the comment line format; build the minimal
-    # valid age key file: comment + public key comment + private key line.
-    # We derive the public key by generating a temporary file and using age.
-    # Simpler: write just the private key line — age -d -i accepts bare keys.
     printf '%s\n' "$key_input" > "$staged_key_file"
     chmod 600 "$staged_key_file"
 
-    # Validate via simple_verify_age_key() (permissions + roundtrip)
     if ! SOPS_AGE_KEY_FILE="$staged_key_file" simple_verify_age_key; then
         rm -f "$staged_key_file"
         log_error "Age key validation failed — wrong key or corrupted input."
@@ -1064,23 +1019,18 @@ _prompt_age_key() {
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# _prune_old_age_keys <keys_dir>
 #
 # Prune old Age private key backups — keep only 2 most recent.
 # Old key material has no operational value once a new key is active and
 # backed up; retaining it indefinitely increases exposure if the secrets/keys/
 # directory is ever compromised.
-# ---------------------------------------------------------------------------
 _prune_old_age_keys() {
     local keys_dir="$1"
     [[ -d "$keys_dir" ]] || return 0
     local -a old_keys
-    # Find all age-key backup files (timestamped), sorted oldest-first
     mapfile -t old_keys < <(find "$keys_dir" -maxdepth 1 -name "age-key.txt.pre-rotate-*" -type f \
         | sort)
     local count=${#old_keys[@]}
-    # Keep 2 most recent; delete the rest
     if (( count > 2 )); then
         local delete_count=$(( count - 2 ))
         for (( i=0; i<delete_count; i++ )); do
@@ -1090,8 +1040,6 @@ _prune_old_age_keys() {
     fi
 }
 
-# ---------------------------------------------------------------------------
-# _rotate_age_key
 #
 # Generates a fresh age key pair and installs it to every configured location
 # so the stack is immediately usable with the new key after the restore.
@@ -1105,7 +1053,6 @@ _prune_old_age_keys() {
 # Writes atomically: generates to a temp file, validates, then moves.
 # Returns 0 on success, 1 on any failure.
 # Sets ROTATED_KEY_FILE and ROTATED_PUB_KEY for display.
-# ---------------------------------------------------------------------------
 ROTATED_KEY_FILE=""
 ROTATED_PUB_KEY=""
 ROTATED_KIT_FILE=""
@@ -1126,7 +1073,6 @@ _rotate_age_key() {
 
     # ------------------------------------------------------------------
     # 1. Generate new key to a temp file inside TMPDIR_RESTORE (secure)
-    # ------------------------------------------------------------------
     local new_key_tmp="$TMPDIR_RESTORE/new-age-key.txt"
 
     local _saved_umask; _saved_umask=$(umask)
@@ -1150,9 +1096,7 @@ _rotate_age_key() {
         return 1
     fi
 
-    # ------------------------------------------------------------------
     # 2. Install to secrets/keys/age-key.txt (atomic)
-    # ------------------------------------------------------------------
     local local_key_dir="$PROJECT_ROOT/secrets/keys"
     local local_key_file="$local_key_dir/age-key.txt"
 
@@ -1183,10 +1127,8 @@ _rotate_age_key() {
 
     ROTATED_KEY_FILE="$local_key_file"
 
-    # ------------------------------------------------------------------
     # 2b. Write a local recovery-kit file so the operator has a copy
     #     that survives independently of secrets/keys/
-    # ------------------------------------------------------------------
     local kit_ts; kit_ts=$(date +%Y%m%d-%H%M%S)
     local kit_file="/root/vaultwarden-recovery-kit-${kit_ts}.txt"
     {
@@ -1209,9 +1151,7 @@ _rotate_age_key() {
         ROTATED_KIT_FILE=""
     fi
 
-    # ------------------------------------------------------------------
     # 3. Install to systemd location /etc/vaultwarden/age-key.txt
-    # ------------------------------------------------------------------
     local systemd_key="/etc/vaultwarden/age-key.txt"
     local canonical_key="$local_key_file"
 
@@ -1224,9 +1164,7 @@ _rotate_age_key() {
         log_success "  New key installed (systemd): $systemd_key"
     fi
 
-    # ------------------------------------------------------------------
     # 4. Update SOPS_AGE_KEY_FILE in .env
-    # ------------------------------------------------------------------
     local env_file="$PROJECT_ROOT/.env"
     if [[ -f "$env_file" ]]; then
         if grep -q '^SOPS_AGE_KEY_FILE=' "$env_file"; then
@@ -1237,9 +1175,7 @@ _rotate_age_key() {
         log_success "  SOPS_AGE_KEY_FILE=${canonical_key} written to .env"
     fi
 
-    # ------------------------------------------------------------------
     # 5. Update SOPS_AGE_KEY_FILE in /etc/vaultwarden/vaultwarden.env (systemd)
-    # ------------------------------------------------------------------
     local systemd_env="/etc/vaultwarden/vaultwarden.env"
     if [[ -f "$systemd_env" ]]; then
         if grep -q '^SOPS_AGE_KEY_FILE=' "$systemd_env"; then
@@ -1250,9 +1186,7 @@ _rotate_age_key() {
         log_success "  SOPS_AGE_KEY_FILE=${canonical_key} written to $systemd_env"
     fi
 
-    # ------------------------------------------------------------------
     # 6. Derive public key for display
-    # ------------------------------------------------------------------
     ROTATED_PUB_KEY=$(grep -m1 '^# public key:' "$local_key_file" | sed 's/^# public key: //' || true)
     if [[ -z "$ROTATED_PUB_KEY" ]]; then
         ROTATED_PUB_KEY=$(age-keygen -y "$local_key_file" 2>/dev/null || true)
@@ -1260,21 +1194,15 @@ _rotate_age_key() {
 
     log_success "Key rotation complete."
 
-    # ------------------------------------------------------------------
     # 7. Prune old Age private key backups — keep only 2 most recent
-    # ------------------------------------------------------------------
     _prune_old_age_keys "$local_key_dir"
 
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# _display_new_key
-#
 # Prints the new age key in a prominent banner identical to what setup.sh
 # would show on first install.  Requires the operator to press Enter to
 # acknowledge before services start (unless --force is passed).
-# ---------------------------------------------------------------------------
 _display_new_key() {
     [[ "$DRY_RUN" == "true" ]] && return 0
     [[ -z "$ROTATED_KEY_FILE" ]] && return 0
@@ -1448,9 +1376,7 @@ cleanup_pre_restore_artefacts() {
     done
 }
 
-# ---------------------------------------------------------------------------
 # DB restore
-# ---------------------------------------------------------------------------
 restore_db() {
     local backup_file="$1" age_key_file="$2" state_dir="$3" puid="$4" pgid="$5" tmpdir="$6"
     local dec_db="$tmpdir/db.sqlite3"

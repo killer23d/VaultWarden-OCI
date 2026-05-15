@@ -11,9 +11,7 @@ source "$SCRIPT_DIR/lib/backup-utils.sh"
 source "$SCRIPT_DIR/lib/crypto.sh"
 source "$SCRIPT_DIR/lib/storage.sh"  # provides require_project_state_ready()
 
-# ---------------------------------------------------------------------------
 # Configuration
-# ---------------------------------------------------------------------------
 BACKUP_TYPE="auto"   # auto | db | full | emergency
 DRY_RUN=false
 KEEP_DAYS=14
@@ -65,9 +63,7 @@ EXAMPLES:
 EOF
 }
 
-# ---------------------------------------------------------------------------
 # Argument Parsing & Execution
-# ---------------------------------------------------------------------------
 
 _SUBCMD=""
 if [[ $# -eq 0 ]]; then
@@ -239,12 +235,8 @@ _resolve_rclone_config() {
     return 1
 }
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
 
-# _default_backup_dir
-# ---------------------------------------------------------------------------
 # Returns the default base directory for backups, derived from
 # PROJECT_STATE_DIR.  This keeps backups co-located with VaultWarden data
 # regardless of whether the install uses boot-volume or separate-volume
@@ -252,7 +244,6 @@ _resolve_rclone_config() {
 #
 # Callers use this value only when BACKUP_DIR is absent from .env; an
 # explicit BACKUP_DIR always takes precedence.
-# ---------------------------------------------------------------------------
 _default_backup_dir() { vw_default_backup_dir; }
 
 get_backup_dir() {
@@ -288,9 +279,7 @@ auto_determine_backup_type() {
     local auto_base_dir
     auto_base_dir="$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")"
     full_backup_dir="$auto_base_dir/full"
-    # W2-M5 FIX: Replace GNU find -printf (not available on BSD/macOS) with
-    # a portable `stat` approach. We list .age files with find, then pass each
-    # through stat to get the mtime, then sort to find the newest.
+    # Use `stat` for portability — `find -printf` is not available on BSD/macOS.
     local _stat_mtime_fmt _stat_find_output
     if stat --version 2>/dev/null | grep -q GNU; then
         _stat_mtime_fmt='-c %Y'
@@ -427,9 +416,9 @@ verify_backup_full() {
             ;;
         full|emergency)
             backup_log_info "Verifying archive structure..."
-            # W2-M2 FIX: Detect compression format from filename extension rather than
-            # hardcoding zstd. This allows verify_backup_full to handle backups created
-            # with different compression settings or future format changes.
+            # Detect compression format from filename extension rather than hardcoding
+            # zstd, to handle backups created with different compression settings or
+            # future format changes.
             local _decomp_prog
             case "$dec_out" in
                 *.tar.zst|*.zst)  _decomp_prog='zstd -d -T0' ;;
@@ -881,10 +870,10 @@ perform_full_backup() {
         tar_sources+=("${state_dir#/}")
     fi
 
-    # W2-C1 FIX: Include the DB snapshot in the initial tar pass using a second
-    # -C argument to change into snap_dir and add db.sqlite3 at its relative path.
-    # This replaces the previous non-atomic decompress+tar-rf+recompress approach
-    # with a single-pass tar that is safe from partial-write corruption.
+    # Include the DB snapshot in the initial tar pass using a second -C argument
+    # to change into snap_dir and add db.sqlite3 at its relative path. This
+    # single-pass approach avoids the non-atomic decompress+tar-rf+recompress
+    # risk of partial-write corruption.
     local -a tar_cmd_args=(
         --use-compress-program='zstd --no-progress -T0 -3'
         -cf "$temp_tar"
@@ -909,8 +898,6 @@ perform_full_backup() {
     # live). This is tolerated here because the atomic DB snapshot is included
     # in the initial pass; any WAL noise on other files is benign. Exit >1 aborts.
     if (( tar_exit == 1 )); then
-        # W2-M1 FIX: Make tar exit 1 (file-changed-during-archival) visible to
-        # the operator so it is not silently swallowed. Not fatal — see above.
         log_warn "perform_full_backup: tar reported exit 1 (file changed during archival)." \
                  "This is normally benign — DB snapshot was used instead of live db.sqlite3."
     elif (( tar_exit > 1 )); then
@@ -956,9 +943,6 @@ MEOF
     echo "$enc"
 }
 
-# ---------------------------------------------------------------------------
-# _check_backup_deps
-# ---------------------------------------------------------------------------
 _check_backup_deps() {
     local -a hard=(age tar)
     local -a soft=(age-keygen sqlite3 zstd rclone)
@@ -984,14 +968,10 @@ _check_backup_deps() {
     fi
 }
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 main() {
-    # W2-C4 FIX: Register cleanup trap unconditionally at the top of main()
-    # so it fires for ALL subcommands (run, verify, rotate), not just run/verify.
-    # This ensures TMPDIR_BACKUP and LOCK_FILE are always cleaned up on exit,
-    # signal, or error — even if a future subcommand creates these resources.
+    # Trap registered unconditionally at the top of main() so it fires for ALL
+    # subcommands (run, verify, rotate), ensuring TMPDIR_BACKUP and LOCK_FILE
+    # are always cleaned up on exit, signal, or error.
     trap cleanup EXIT HUP INT TERM ERR
 
     if [[ "$LIST_ONLY" == "true" ]]; then
@@ -1002,9 +982,7 @@ main() {
         exit 0
     fi
 
-    # ---------------------------------------------------------------------------
     # verify subcommand — full integrity check on the most recent backup
-    # ---------------------------------------------------------------------------
     if [[ "$_SUBCMD" == "verify" ]]; then
         require_root "$@"
         _check_backup_deps
@@ -1032,7 +1010,6 @@ main() {
         local base_dir
         base_dir="$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")"
 
-        # Discover the most recent .age backup across the requested type(s).
         local search_types=()
         if [[ "$BACKUP_TYPE" != "auto" ]]; then
             search_types=("$BACKUP_TYPE")
@@ -1073,9 +1050,7 @@ main() {
         exit 0
     fi
 
-    # ---------------------------------------------------------------------------
     # rotate subcommand — prune old backups without creating a new one
-    # ---------------------------------------------------------------------------
     if [[ "$_SUBCMD" == "rotate" ]]; then
         require_root "$@"
 
@@ -1114,20 +1089,17 @@ main() {
         exit 0
     fi
 
-    # ---------------------------------------------------------------------------
     # run subcommand
-    # ---------------------------------------------------------------------------
 
     require_root "$@"
     _check_backup_deps
 
-    # W2-C4: Trap already registered at top of main() — not duplicated here.
+    # Cleanup trap already registered at top of main() — not duplicated here.
 
     LOCK_FILE="/run/lock/vaultwarden-backup.lock"
 
     if [[ "$FORCE" != "true" && "$DRY_RUN" != "true" ]]; then
         exec {LOCK_FD}>"$LOCK_FILE"
-        # bash 4.1+ sets FD_CLOEXEC automatically on {var} file descriptor allocation.
         if ! flock -n "$LOCK_FD"; then
             log_error "Another backup is already running (could not acquire lock)."
             log_info  "Wait for it to finish or use --force if you are certain it is stuck."
