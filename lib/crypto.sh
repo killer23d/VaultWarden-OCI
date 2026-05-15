@@ -259,8 +259,11 @@ encrypt_sops_file() {
     local rt_rc=0
     { set +x; } 2>/dev/null
     # Capture stderr first (2>&1), then discard stdout (>/dev/null).
-    # Order matters: 2>&1 must come before >/dev/null so that stderr is
-    # redirected to the $() pipe before stdout is changed to /dev/null.
+    # Redirect stderr to the $() pipe before changing stdout to /dev/null:
+    #   2>&1     → fd 2 = current fd 1 = $() pipe  (stderr is captured)
+    #   >/dev/null → fd 1 = /dev/null               (stdout is discarded)
+    # Order matters: if reversed (>/dev/null 2>&1) both streams go to /dev/null
+    # and rt_stderr is always empty.
     rt_stderr=$(SOPS_AGE_KEY_FILE="$age_key_file" \
                 sops --decrypt \
                 --input-type yaml \
@@ -1246,7 +1249,7 @@ create_printable_key_backup() {
     # MIME type when the file is opened. This also eliminates the mktemp→mv
     # TOCTOU window that existed when we created a bare temp file and renamed it.
     local temp_html
-    temp_html=$(mktemp /tmp/vw-key-backup.XXXXXX.html)
+    temp_html=$(mktemp "${TMPDIR:-/tmp}/vw-key-backup.XXXXXX.html")
     umask "$old_umask"
 
     # Scope the temp file cleanup to RETURN, not EXIT, so that callers that

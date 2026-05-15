@@ -33,7 +33,7 @@ if [[ -z "${DOCKER_PROJECT_LABEL:-}" ]]; then
         DOCKER_PROJECT_LABEL="label=com.docker.compose.project=vaultwarden-oci"
         # log_warn may not be available yet if common.sh hasn't been sourced;
         # use a plain echo to stderr so the warning is never silently swallowed.
-        echo "docker.sh: could not auto-detect Compose project name; using default label. Set DOCKER_PROJECT_LABEL to override." >&2 2>/dev/null || true
+        echo "docker.sh: could not auto-detect Compose project name; using default label. Set DOCKER_PROJECT_LABEL to override." >&2 || true
     fi
     unset _COMPOSE_PROJECT_NAME
 fi
@@ -564,6 +564,8 @@ cleanup_volumes() {
         local _prune_args=()
         mapfile -t _prune_args < <(_docker_prune_filter)
         local docker_err
+        # Redirect order: 2>&1 first (stderr → $() pipe), then 1>/dev/null (stdout → /dev/null).
+        # This captures only stderr in $docker_err while suppressing normal output.
         if ! docker_err=$(docker volume prune -f "${_prune_args[@]}" 2>&1 1>/dev/null); then
             log_debug "cleanup_volumes: docker volume prune failed (non-fatal): $docker_err"
         fi

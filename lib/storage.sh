@@ -294,6 +294,7 @@ setup_data_volume() {
         local fstab_tmp
         fstab_tmp=$(mktemp /etc/fstab.vw-XXXXXX) \
             || { log_error "Cannot create fstab temp file"; return 1; }
+        chmod 644 "$fstab_tmp"
         if ! cp /etc/fstab "$fstab_tmp"; then
             rm -f "$fstab_tmp"
             log_error "Cannot copy /etc/fstab to temp file"
@@ -332,7 +333,7 @@ setup_data_volume() {
         # Write to a temp file first so a crash mid-write never leaves a
         # zero-byte or partial sentinel that would silently pass the guard check.
         local sentinel_tmp
-        sentinel_tmp=$(mktemp "$mount_point/.vw-data-volume.XXXXXX") \
+        sentinel_tmp=$(mktemp "$mount_point/vw-data-volume-tmp.XXXXXX") \
             || { log_error "Failed to create temp file for sentinel: $mount_point"; return 1; }
         printf 'VaultWarden-OCI data volume\nDevice: %s\nMounted: %s\nCreated: %s\n' \
             "$device" "$mount_point" "$(date -Iseconds)" > "$sentinel_tmp" \
