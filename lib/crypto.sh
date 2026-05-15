@@ -6,13 +6,19 @@
 [[ -n "${VAULTWARDEN_CRYPTO_LIB_LOADED:-}" ]] && return 0
 readonly VAULTWARDEN_CRYPTO_LIB_LOADED=1
 
-set -euo pipefail
+# Do NOT set -euo pipefail here — callers own their shell options.
+# Entry-point scripts apply these options via init_common_lib(); this library
+# is always sourced after that call.
 
 # --- Configuration ---
 DEFAULT_AGE_KEY_FILE="secrets/keys/age-key.txt"
+readonly DEFAULT_AGE_KEY_FILE
 
 # Security configuration (also used by security functions merged from lib/security.sh)
 readonly SECURITY_MIN_PASSWORD_LENGTH=12
+# TODO: SECURITY_MAX_FAILED_ATTEMPTS and SECURITY_LOCKOUT_DURATION are reserved for
+# the lockout mechanism in lib/security.sh (not yet merged). Keep them here so that
+# lib/security.sh can rely on these values without re-declaring them.
 readonly SECURITY_MAX_FAILED_ATTEMPTS=3
 readonly SECURITY_LOCKOUT_DURATION=300  # 5 minutes
 
@@ -234,12 +240,17 @@ encrypt_sops_file() {
         fi
         return 0
     }
+    # Register a RETURN trap immediately so the plaintext backup is always
+    # cleaned up even if the process is killed between the mktemp and the
+    # final rm -f at the success path.
+    # shellcheck disable=SC2064  # intentional: expand $pre_write_backup now
+    trap "rm -f '$pre_write_backup'" RETURN
     install -m 600 /dev/null "$pre_write_backup"
     cp -- "$file" "$pre_write_backup"
 
     # Atomic replace — original is only overwritten after successful encryption.
     if ! mv -- "$tmp_file" "$file"; then
-        rm -f "$tmp_file" "$pre_write_backup"
+        rm -f "$tmp_file"
         log_error "Failed to atomically replace file after SOPS encryption: $file"
         return 1
     fi
@@ -247,11 +258,14 @@ encrypt_sops_file() {
     local rt_stderr
     local rt_rc=0
     { set +x; } 2>/dev/null
+    # Capture stderr first (2>&1), then discard stdout (>/dev/null).
+    # Order matters: 2>&1 must come before >/dev/null so that stderr is
+    # redirected to the $() pipe before stdout is changed to /dev/null.
     rt_stderr=$(SOPS_AGE_KEY_FILE="$age_key_file" \
                 sops --decrypt \
                 --input-type yaml \
                 --output-type yaml \
-                "$file" > /dev/null 2>&1) || rt_rc=$?
+                "$file" 2>&1 >/dev/null) || rt_rc=$?
 
     if [[ $rt_rc -ne 0 ]]; then
         # Round-trip failed: restore the original plaintext file so the
@@ -272,19 +286,34 @@ encrypt_sops_file() {
             log_error "  CRITICAL: failed to restore original file from backup: $pre_write_backup"
             log_error "  Manual recovery required. Backup is at: $pre_write_backup"
             # Do NOT remove the backup if restore failed — it is the only copy.
+            # Clear the RETURN trap so the trap doesn't delete the last copy.
+            trap - RETURN
             return 1
         fi
-        rm -f "$pre_write_backup"
         return 1
     fi
 
     # Round-trip passed: clean up backup and return success.
     rm -f "$pre_write_backup"
+    trap - RETURN
     log_debug "encrypt_sops_file: round-trip validation passed for: $file"
     return 0
 }
 
 # --- Age Operations ---
+
+# ---------------------------------------------------------------------------
+# ensure_secret_dir DIR
+#
+# Wrapper around ensure_dir() that enforces mode 700 (no group access) for
+# any directory that holds secrets or key material. Callers should use this
+# instead of `ensure_dir DIR 700` so the secure mode is the zero-friction
+# default — no mode argument to remember or accidentally omit.
+# ---------------------------------------------------------------------------
+ensure_secret_dir() {
+    local dir="$1"
+    ensure_dir "$dir" 700
+}
 
 # Generate Age key pair - STANDARDIZED: Returns exit code
 #
@@ -315,7 +344,7 @@ generate_age_key() {
 
     local key_dir
     key_dir=$(dirname "$output_file")
-    if ! ensure_dir "$key_dir" 700; then
+    if ! ensure_secret_dir "$key_dir"; then
         return 1
     fi
 
@@ -381,7 +410,10 @@ check_age_key() {
     fi
 
     if has_command age; then
-        local test_plaintext="vaultwarden-age-key-check"
+        # Use an unpredictable nonce so a stub or broken age binary that always
+        # returns a fixed string cannot fool the round-trip check.
+        local test_plaintext
+        test_plaintext="vaultwarden-age-key-check-$(date +%s)-$$"
         local tmp_enc
         tmp_enc=$(mktemp) || {
             log_error "check_age_key: cannot create temp file for round-trip test — key NOT verified"
@@ -589,7 +621,10 @@ generate_bcrypt_hash() {
     [[ -z "$password" ]] && return 1
 
     if ! has_command htpasswd; then
-        log_error "htpasswd not available — install apache2-utils: sudo apt install apache2-utils"
+        log_error "htpasswd not available. Install the appropriate package for your distribution:"
+        log_error "  Debian/Ubuntu : sudo apt install apache2-utils"
+        log_error "  Oracle/RHEL/CentOS: sudo dnf install httpd-tools"
+        log_error "  Arch          : sudo pacman -S apache"
         return 1
     fi
 
@@ -688,6 +723,12 @@ write_file_integrity() {
         return 1
     fi
 
+    # Install the sidecar file with mode 600 before writing to prevent the
+    # file being born world-readable at the process umask (typically 022 → 644).
+    if ! install -m 600 /dev/null "${file}.sha256" 2>/dev/null; then
+        log_error "write_file_integrity: failed to create ${file}.sha256 with restricted permissions"
+        return 1
+    fi
     printf '%s\n' "$checksum" > "${file}.sha256" || {
         log_error "write_file_integrity: failed to write ${file}.sha256"
         return 1
@@ -702,6 +743,10 @@ write_file_integrity() {
         hmac=$(printf '%s' "$checksum" \
                | openssl dgst -sha256 -hmac "${FILE_INTEGRITY_HMAC_KEY}" \
                | sed 's/^.* //')
+        if ! install -m 600 /dev/null "${file}.sha256.hmac" 2>/dev/null; then
+            log_warn "write_file_integrity: failed to create ${file}.sha256.hmac with restricted permissions; skipping HMAC sidecar"
+            return 0
+        fi
         printf '%s\n' "$hmac" > "${file}.sha256.hmac" || {
             log_error "write_file_integrity: failed to write ${file}.sha256.hmac"
             return 1
@@ -797,6 +842,12 @@ verify_file_integrity() {
 # --- Secure File Operations ---
 
 # Securely wipe file before deletion
+#
+# Delegates to _secure_remove_file() which implements the canonical
+# shred → dd → rm fallback chain. Exports this as the public API for
+# callers outside crypto.sh.
+#   _secure_remove_file() — private, used by internal cleanup traps
+#   secure_delete()       — public, exported for use by other scripts
 secure_delete() {
     local file="$1"
 
@@ -805,28 +856,8 @@ secure_delete() {
         return 1
     fi
 
-    if has_command shred; then
-        if shred -vfz -n 3 "$file" 2>/dev/null; then
-            log_debug "File securely deleted with shred: $file"
-            return 0
-        fi
-    fi
-
-    # Fallback: overwrite with random data then delete
-    if has_command dd && [[ -c /dev/urandom ]]; then
-        local file_size
-        file_size=$(_stat_file_size "$file" 2>/dev/null || printf '4096')
-        # Guard against empty/zero size to prevent dd bs=0 error
-        [[ -z "$file_size" || "$file_size" -eq 0 ]] && file_size=4096
-        if dd if=/dev/urandom of="$file" bs="$file_size" count=1 2>/dev/null; then
-            rm -f "$file"
-            log_debug "File securely deleted with dd: $file"
-            return 0
-        fi
-    fi
-
-    rm -f "$file"
-    log_warn "File deleted but not securely wiped: $file"
+    _secure_remove_file "$file"
+    log_debug "File securely deleted: $file"
     return 0
 }
 
@@ -896,10 +927,13 @@ simple_verify_age_key() {
     local real_user real_group
     real_user=$(get_real_user 2>/dev/null || echo "root")
     real_group=$(id -gn "$real_user" 2>/dev/null || echo "$real_user")
-    local current_owner
-    current_owner=$(stat -c '%U:%G' "$age_key" 2>/dev/null || stat -f '%Su:%Sg' "$age_key" 2>/dev/null || echo "")
-    if [[ -n "$current_owner" && "$current_owner" != "${real_user}:${real_group}" ]]; then
-        log_warn "Age key ownership was '${current_owner}' (expected '${real_user}:${real_group}') — auto-correcting"
+    local current_owner current_group current_owner_group
+    # _stat_owner/_stat_group from this file handle GNU vs. BSD stat portably.
+    current_owner=$(_stat_owner "$age_key" 2>/dev/null || echo "")
+    current_group=$(_stat_group "$age_key" 2>/dev/null || echo "")
+    current_owner_group="${current_owner}:${current_group}"
+    if [[ -n "$current_owner" && "$current_owner_group" != "${real_user}:${real_group}" ]]; then
+        log_warn "Age key ownership was '${current_owner_group}' (expected '${real_user}:${real_group}') — auto-correcting"
         if [[ "$(id -u)" -eq 0 ]]; then
             chown "${real_user}:${real_group}" "$age_key" 2>/dev/null || \
                 log_warn "Could not restore ownership of $age_key to ${real_user}:${real_group}"
@@ -1208,18 +1242,18 @@ create_printable_key_backup() {
     local old_umask
     old_umask=$(umask)
     umask 077
+    # Use a .html suffix in the mktemp template so the OS registers the correct
+    # MIME type when the file is opened. This also eliminates the mktemp→mv
+    # TOCTOU window that existed when we created a bare temp file and renamed it.
     local temp_html
-    # mktemp without --suffix: use POSIX-portable template (XXXXXX at the end),
-    # then rename to .html so the OS registers the correct MIME type when opened.
-    local _tmp_base
-    _tmp_base=$(mktemp /tmp/vw-key-backup.XXXXXX)
-    temp_html="${_tmp_base}.html"
-    mv -- "$_tmp_base" "$temp_html"
-    unset _tmp_base
+    temp_html=$(mktemp /tmp/vw-key-backup.XXXXXX.html)
     umask "$old_umask"
 
+    # Scope the temp file cleanup to RETURN, not EXIT, so that callers that
+    # have their own EXIT trap (e.g. via setup_cleanup_trap in common.sh) are
+    # not silently overwritten.
     # shellcheck disable=SC2064  # intentional: expand $temp_html now
-    trap "_secure_remove_file '$temp_html'" EXIT
+    trap "_secure_remove_file '$temp_html'" RETURN
 
     local pub_key
     pub_key=$(_derive_age_public_key "$age_key")
@@ -1300,19 +1334,21 @@ EOF
 
     # Unset key_content immediately after the heredoc write so the
     # plaintext Age key is removed from the process environment as early as
-    # possible. key_content_escaped is also cleared for the same reason.
+    # possible. key_content_escaped and qr_base64 are also cleared for the
+    # same reason (qr_base64 holds a base64-encoded copy of the private key).
     unset key_content
     unset key_content_escaped
+    unset qr_base64
 
     if command -v wkhtmltopdf >/dev/null 2>&1; then
         wkhtmltopdf -q "$temp_html" "$output_pdf"
         _secure_remove_file "$temp_html"
-        trap - EXIT
+        trap - RETURN
         log_success "Printable PDF backup created: $output_pdf"
     else
         local output_html="${output_pdf%.pdf}.html"
         mv "$temp_html" "$output_html"
-        trap - EXIT
+        trap - RETURN
 
         log_warn "wkhtmltopdf not found. Created HTML instead: $output_html"
         log_warn "SECURITY: The HTML file contains your plaintext Age key."
@@ -1727,7 +1763,7 @@ generate_secure_random() {
         (( accepted++ )) || true
     done
 
-    echo "$random_string"
+    printf '%s\n' "$random_string"
 }
 
 # Named wrapper for breakglass password generation.
@@ -1777,12 +1813,13 @@ secure_cleanup() {
     fi
 
     # Warn when the caller has not confirmed that the data has been
-    # persisted to an encrypted destination. This is a soft reminder only;
-    # deletion proceeds regardless so that existing callers are not broken.
+    # persisted to an encrypted destination. This is a log_warn (not log_debug)
+    # so operators running with non-debug log levels are not silently misled
+    # into believing multi-pass overwrite is happening.
     if [[ "$encrypted_confirmed" != "encrypted" ]]; then
-        log_debug "secure_cleanup: caller has not confirmed encrypted destination for '$target'." \
+        log_warn "secure_cleanup: '$target' was not confirmed as residing on an encrypted volume." \
                  "Pass 'encrypted' as \$3 after verifying data is on an encrypted volume." \
-                 "Plaintext residue may survive on un-encrypted storage."
+                 "Plaintext residue may survive on un-encrypted storage until blocks are reused."
     fi
 
     if [[ -f "$target" ]]; then
@@ -1803,7 +1840,7 @@ secure_cleanup() {
 export -f _stat_octal_perms _stat_file_size
 export -f _derive_age_public_key
 export -f is_sops_encrypted decrypt_sops_file encrypt_sops_file
-export -f generate_age_key get_age_public_key check_age_key encrypt_data decrypt_data
+export -f ensure_secret_dir generate_age_key get_age_public_key check_age_key encrypt_data decrypt_data
 export -f generate_secure_string generate_secure_password check_argon2_support generate_argon2_hash generate_bcrypt_hash
 export -f calculate_sha256 verify_sha256 write_file_integrity verify_file_integrity secure_delete validate_crypto_environment
 export -f simple_verify_age_key create_password_manager_escrow _secure_remove_file

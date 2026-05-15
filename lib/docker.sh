@@ -7,18 +7,36 @@
 [[ -n "${VAULTWARDEN_DOCKER_LIB_LOADED:-}" ]] && return 0
 readonly VAULTWARDEN_DOCKER_LIB_LOADED=1
 
-set -euo pipefail
+# Do NOT set -euo pipefail here — callers own their shell options.
+# Entry-point scripts apply these options via init_common_lib(); this library
+# is always sourced after that call.
 
 # ---------------------------------------------------------------------------
-# DOCKER_PROJECT_LABEL — default guard
+# DOCKER_PROJECT_LABEL — project-scoped prune filter
 #
 # The cleanup_*() functions pass this value as a --filter argument to
-# `docker prune`. If the caller has not set the variable, the empty string
-# would produce `--filter ''` which causes docker to error OR, worse, to
-# match every object on the host. Default to the Compose project label so
-# only this project's resources are pruned.
+# `docker prune`. An empty or wrong value would match every object on the
+# host. We auto-detect the Compose project name at load time so that an
+# operator who renames the project (via the `name:` key in docker-compose.yml
+# or a different project directory) gets correct pruning automatically.
+# DOCKER_PROJECT_LABEL can be overridden in .env to bypass auto-detection.
 # ---------------------------------------------------------------------------
-DOCKER_PROJECT_LABEL="${DOCKER_PROJECT_LABEL:-label=com.docker.compose.project=vaultwarden-oci}"
+if [[ -z "${DOCKER_PROJECT_LABEL:-}" ]]; then
+    _COMPOSE_PROJECT_NAME=""
+    if command -v jq >/dev/null 2>&1; then
+        _COMPOSE_PROJECT_NAME=$(docker compose config --format json 2>/dev/null \
+            | jq -r '.name // empty' 2>/dev/null || true)
+    fi
+    if [[ -n "${_COMPOSE_PROJECT_NAME:-}" ]]; then
+        DOCKER_PROJECT_LABEL="label=com.docker.compose.project=${_COMPOSE_PROJECT_NAME}"
+    else
+        DOCKER_PROJECT_LABEL="label=com.docker.compose.project=vaultwarden-oci"
+        # log_warn may not be available yet if common.sh hasn't been sourced;
+        # use a plain echo to stderr so the warning is never silently swallowed.
+        echo "docker.sh: could not auto-detect Compose project name; using default label. Set DOCKER_PROJECT_LABEL to override." >&2 2>/dev/null || true
+    fi
+    unset _COMPOSE_PROJECT_NAME
+fi
 export DOCKER_PROJECT_LABEL
 
 # --- Docker Availability Checks ---
@@ -177,7 +195,7 @@ start_services() {
             return 1
         fi
     else
-        if ! docker compose up -d "${services[@]}"; then
+        if ! docker compose up -d --remove-orphans "${services[@]}"; then
             log_error "Failed to start services: ${services[*]}"
             return 1
         fi
@@ -228,7 +246,7 @@ recreate_services() {
             return 1
         fi
     else
-        if ! docker compose up -d --force-recreate "${services[@]}"; then
+        if ! docker compose up -d --force-recreate --remove-orphans "${services[@]}"; then
             log_error "Failed to recreate services: ${services[*]}"
             return 1
         fi
@@ -255,16 +273,17 @@ recreate_services() {
 pull_images() {
     local services=("$@")
     if ! require_docker; then return 1; fi
+    local pull_output pull_rc
     if [[ ${#services[@]} -eq 0 ]]; then
-        if ! docker compose pull --quiet 2>&1 | tail -5; then
-            log_error "Failed to pull all images"
-            return 1
-        fi
+        pull_output=$(docker compose pull --quiet 2>&1); pull_rc=$?
     else
-        if ! docker compose pull --quiet "${services[@]}" 2>&1 | tail -5; then
-            log_error "Failed to pull images for services: ${services[*]}"
-            return 1
-        fi
+        pull_output=$(docker compose pull --quiet "${services[@]}" 2>&1); pull_rc=$?
+    fi
+    # Print the last 5 lines of output (summary / error) for the journal.
+    printf '%s\n' "$pull_output" | tail -5
+    if [[ $pull_rc -ne 0 ]]; then
+        log_error "Failed to pull images"
+        return 1
     fi
     return 0
 }
@@ -454,8 +473,8 @@ run_in_service_full_env() {
 # message for any script that accidentally calls the old API.
 # NOTE: removed from export -f so subshells cannot inherit it silently.
 run_in_service() {
-    log_error "run_in_service() has been removed. "\
-              "Use exec_oneshot_in_service() or run_in_service_full_env() instead."
+    log_error "run_in_service() called from ${BASH_SOURCE[1]:-unknown}:${BASH_LINENO[0]:-?} — "\
+              "use exec_oneshot_in_service() or run_in_service_full_env() instead."
     return 1
 }
 
@@ -545,17 +564,19 @@ cleanup_volumes() {
         local _prune_args=()
         mapfile -t _prune_args < <(_docker_prune_filter)
         local docker_err
-        if ! docker_err=$(docker volume prune -f "${_prune_args[@]}" 2>&1 >/dev/null); then
+        if ! docker_err=$(docker volume prune -f "${_prune_args[@]}" 2>&1 1>/dev/null); then
             log_debug "cleanup_volumes: docker volume prune failed (non-fatal): $docker_err"
         fi
     else
-        # Older engine: fall back to compose-scoped volume removal
-        log_debug "cleanup_volumes: Docker Engine ${docker_version_str} < 25.0; "\
-                  "falling back to 'docker compose down -v' for safe scoped volume cleanup"
-        local docker_err
-        if ! docker_err=$(docker compose down -v 2>&1 >/dev/null); then
-            log_debug "cleanup_volumes: docker compose down -v failed (non-fatal): $docker_err"
-        fi
+        # Docker Engine < 25 does not support label filters on volume prune.
+        # `docker volume prune` without a label filter would erase anonymous
+        # volumes from ALL projects on the host. `docker compose down -v`
+        # would stop the running stack and delete its named volumes — a full
+        # outage plus potential data loss of the VaultWarden SQLite DB and
+        # Caddy TLS certs. Skip volume pruning entirely and warn instead.
+        log_warn "cleanup_volumes: Docker Engine ${docker_version_str} < 25 detected."
+        log_warn "Volume pruning requires Docker Engine 25+. Skipping to avoid data loss."
+        log_warn "Upgrade: https://docs.docker.com/engine/install/"
     fi
     return 0
 }
@@ -622,6 +643,8 @@ wait_for_service_ready() {
     local dot_interval=5
     local dots_printed=false   # tracks whether any dots were emitted
 
+    if ! require_jq; then return 1; fi
+
     log_info "Waiting for service '$service' to become ready (timeout: ${timeout}s)..."
 
     while [[ $count -lt $timeout ]]; do
@@ -686,12 +709,13 @@ validate_compose_file() {
 
 # Export functions for use by scripts
 # NOTE: run_in_service is intentionally NOT exported (DOC-L1: hard deprecation)
+# NOTE: _docker_prune_filter and _service_has_no_healthcheck are internal
+#       helpers; they are NOT exported to avoid misleading callers and prevent
+#       hidden coupling through subshell inheritance.
 export -f check_docker_available check_compose_available require_docker require_jq
 export -f get_service_status is_service_running get_service_health is_service_healthy
-export -f _service_has_no_healthcheck
 export -f start_services stop_services restart_services recreate_services
 export -f pull_images pull_image_with_retry exec_in_service exec_oneshot_in_service run_in_service_full_env
-export -f _docker_prune_filter
 export -f cleanup_containers cleanup_images cleanup_volumes cleanup_networks cleanup_docker_system
 export -f get_service_logs follow_service_logs wait_for_service_ready validate_compose_file
 
