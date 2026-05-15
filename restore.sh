@@ -283,7 +283,7 @@ TMPDIR_RESTORE=""
 cleanup() {
     if [[ -n "$TMPDIR_RESTORE" ]]; then rm -rf "$TMPDIR_RESTORE" 2>/dev/null; fi
 }
-trap cleanup EXIT HUP INT TERM
+trap cleanup EXIT HUP INT TERM ERR
 
 # ---------------------------------------------------------------------------
 # _resolve_rclone_config
@@ -492,12 +492,13 @@ _prompt_rclone_remote_name() {
 _find_latest_backup() {
     local dir="$1"
     [[ -d "$dir" ]] || return 1
-    local best_mtime=0 best_file="" f mtime
+    local best_ts="" best_file="" f ts
     while IFS= read -r f; do
         [[ -f "$f" ]] || continue
-        mtime=$(stat -c%Y "$f" 2>/dev/null || stat -f%m "$f" 2>/dev/null || echo 0)
-        [[ "$mtime" =~ ^[0-9]+$ ]] || mtime=0
-        (( mtime > best_mtime )) && { best_mtime=$mtime; best_file="$f"; }
+        # Extract YYYYMMDD_HHMMSS from the filename; skip files without it.
+        ts=$(basename "$f" | grep -o '[0-9]\{8\}_[0-9]\{6\}' | head -1)
+        [[ -n "$ts" ]] || continue
+        [[ "$ts" > "$best_ts" ]] && { best_ts="$ts"; best_file="$f"; }
     done < <(find "$dir" -name "*.age" -type f 2>/dev/null)
     [[ -n "$best_file" ]] && { echo "$best_file"; return 0; }
     return 1
@@ -792,13 +793,13 @@ resolve_backup_file() {
             [[ -n "$BACKUP_FILE" ]] || { log_error "No backups found for type: $RESTORE_TYPE (looked in $BACKUP_BASE_DIR/$RESTORE_TYPE)"; return 1; }
             return 0
         fi
-        local best="" best_mtime=0 candidate mtime
+        local best="" best_ts="" candidate ts
         for t in db full emergency; do
             candidate="$(_find_latest_backup "$BACKUP_BASE_DIR/$t" || true)"
             if [[ -n "$candidate" ]]; then
-                mtime=$(stat -c%Y "$candidate" 2>/dev/null || stat -f%m "$candidate" 2>/dev/null || echo 0)
-                [[ "$mtime" =~ ^[0-9]+$ ]] || mtime=0
-                if (( mtime > best_mtime )); then best_mtime="$mtime"; best="$candidate"; RESTORE_TYPE="$t"; fi
+                ts=$(basename "$candidate" | grep -o '[0-9]\{8\}_[0-9]\{6\}' | head -1)
+                [[ -n "$ts" ]] || continue
+                if [[ "$ts" > "$best_ts" ]]; then best_ts="$ts"; best="$candidate"; RESTORE_TYPE="$t"; fi
             fi
         done
         [[ -n "$best" ]] || { log_error "No backups found in any backup directory under $BACKUP_BASE_DIR/"; return 1; }

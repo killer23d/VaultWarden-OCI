@@ -992,7 +992,7 @@ main() {
     # so it fires for ALL subcommands (run, verify, rotate), not just run/verify.
     # This ensures TMPDIR_BACKUP and LOCK_FILE are always cleaned up on exit,
     # signal, or error — even if a future subcommand creates these resources.
-    trap cleanup EXIT HUP INT TERM
+    trap cleanup EXIT HUP INT TERM ERR
 
     if [[ "$LIST_ONLY" == "true" ]]; then
         load_env_file 2>/dev/null || true
@@ -1156,13 +1156,9 @@ main() {
     # Fail closed if the expected data volume is not mounted.
     require_project_state_ready || exit 1
 
-    local backup_encryption_enabled
-    backup_encryption_enabled="$(get_config_value "BACKUP_ENCRYPTION_ENABLED" "true")"
-    if [[ "${backup_encryption_enabled}" == "false" ]]; then
-        log_warn "[backup] WARNING: BACKUP_ENCRYPTION_ENABLED=false — backup archive will be stored" \
-                 "in PLAINTEXT on remote storage. Set BACKUP_ENCRYPTION_ENABLED=true in .env" \
-                 "unless you have an independent encryption layer on the remote."
-    fi
+    # Encryption with age is always enforced — it is a security requirement for
+    # a password-manager backup. BACKUP_ENCRYPTION_ENABLED is not a supported
+    # toggle; every archive is encrypted before it leaves this host.
 
     local state_dir
     state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
