@@ -34,6 +34,7 @@
 # if the data volume appears unavailable without halting execution.
 # ---------------------------------------------------------------------------
 
+HISTFILE=/dev/null
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -47,7 +47,7 @@ def _get_whois_info(ip: str) -> str:
         result = subprocess.check_output(
             ["whois", ip],
             text=True,
-            timeout=1,  # P7-33 fix: subprocess timeout must be < executor timeout (3s); set to 3-2=1
+            timeout=5,  # 5s subprocess timeout; executor hard-deadline is 8s (see future.result call)
             stderr=subprocess.DEVNULL,
         )
         keywords = {
@@ -171,7 +171,7 @@ def action_ban(args: argparse.Namespace) -> None:
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(_get_whois_info, ip)
         try:
-            whois_info = future.result(timeout=3)
+            whois_info = future.result(timeout=8)
         except FuturesTimeoutError:
             whois_info = "Whois lookup skipped (deadline exceeded)"
         except Exception as exc:  # pylint: disable=broad-except

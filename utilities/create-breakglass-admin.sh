@@ -526,7 +526,7 @@ ACCESS VIA OCI CONSOLE:
 3. Click "Console Connection"
 4. Login with these credentials:
    Username: $BREAKGLASS_USER
-   Password: [stored securely in your password manager]
+   Password: [write in your emergency physical vault or password manager — shown once at creation]
 
 ALLOWED OPERATIONS:
 - sudo /usr/bin/docker
