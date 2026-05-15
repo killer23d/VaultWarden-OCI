@@ -105,7 +105,7 @@ require_project_state_ready() {
     local data_device="${DATA_VOLUME_DEVICE:-}"
     local data_mount="${DATA_VOLUME_MOUNT:-/mnt/vw-data}"
 
-    # ── Boot-only mode ────────────────────────────────────────────────────
+    # Boot-only mode
     if [[ -z "$data_device" ]]; then
         # Creating PROJECT_STATE_DIR may require root (e.g. under /var/lib).
         is_root || { log_error "require_project_state_ready: must be run as root"; return 1; }
@@ -118,7 +118,7 @@ require_project_state_ready() {
         return 0
     fi
 
-    # ── Separate-volume mode ──────────────────────────────────────────────
+    # Separate-volume mode
 
     # 1. Path safety.
     _storage_validate_paths "$data_device" "$data_mount" || return 1
@@ -161,7 +161,6 @@ require_project_state_ready() {
         return 1
     fi
 
-    # Ensure PROJECT_STATE_DIR exists (idempotent).
     is_root || { log_error "require_project_state_ready: must be run as root"; return 1; }
     install -d -m 750 "$state_dir" 2>/dev/null || {
         log_error "require_project_state_ready: cannot create PROJECT_STATE_DIR: $state_dir"
@@ -193,7 +192,6 @@ setup_data_volume() {
     local mount_point="${DATA_VOLUME_MOUNT:-/mnt/vw-data}"
     local dry_run="${DRY_RUN:-false}"
 
-    # Normalize DRY_RUN: accept true/1/yes (case-insensitive) as canonical "true".
     case "${dry_run,,}" in
         true|1|yes)  dry_run="true" ;;
         false|0|no|"") dry_run="false" ;;
@@ -263,7 +261,6 @@ setup_data_volume() {
         }
         log_success "Formatted $device as ext4 (label: vw-data)"
     elif [[ "$fs_type" == "ext4" || "$fs_type" == "xfs" ]]; then
-        # W2-M7 FIX: Accept xfs as a supported filesystem alongside ext4.
         log_info "Existing $fs_type filesystem on $device — skipping format (idempotent)"
     else
         log_error "Unexpected filesystem '$fs_type' on $device. Refusing to overwrite."
@@ -377,7 +374,6 @@ install_docker_mount_guard() {
     local drop_in_file="$drop_in_dir/10-vaultwarden-data-volume.conf"
     local dry_run="${DRY_RUN:-false}"
 
-    # Normalize DRY_RUN (same convention as setup_data_volume).
     case "${dry_run,,}" in
         true|1|yes)  dry_run="true" ;;
         false|0|no|"") dry_run="false" ;;
@@ -387,7 +383,7 @@ install_docker_mount_guard() {
             ;;
     esac
 
-    # ── Cleanup path (reverting to boot-only mode) ────────────────────────
+    # Cleanup path (reverting to boot-only mode)
     if [[ -z "${DATA_VOLUME_DEVICE:-}" ]]; then
         if [[ -f "$drop_in_file" ]]; then
             log_info "DATA_VOLUME_DEVICE cleared — removing stale Docker mount guard"
@@ -405,7 +401,7 @@ install_docker_mount_guard() {
         return 0
     fi
 
-    # ── Install path ──────────────────────────────────────────────────────
+    # Install path
     local mount_point="${DATA_VOLUME_MOUNT:-/mnt/vw-data}"
     _storage_validate_paths "" "$mount_point" || return 1
 
@@ -432,7 +428,6 @@ install_docker_mount_guard() {
         return 0
     fi
 
-    # Write drop-in (overwrites stale entry if mount point changed).
     {
         printf '# Managed by VaultWarden-OCI setup.sh — do not edit by hand.\n'
         printf '# Ensures Docker never starts before the data volume is mounted.\n'

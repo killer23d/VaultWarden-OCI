@@ -10,17 +10,14 @@ readonly VAULTWARDEN_COMMON_LIB_LOADED=1
 # them so callers that invoke it get consistent behaviour without the library
 # imposing options on scripts that source it without calling init_common_lib.
 
-# --- Library Configuration ---
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$LIB_DIR/.." && pwd)"
 
-# --- Enhanced Logging System ---
 LOG_PREFIX=""
 LOG_TIMESTAMP=true
 LOG_COLORS=true
 LOG_LEVEL="${LOG_LEVEL:-INFO}"
 
-# Colors for output (if supported)
 if [[ -t 1 ]] && command -v tput >/dev/null 2>&1; then
     COLOR_RED=$(tput setaf 1 2>/dev/null)     || COLOR_RED=""
     COLOR_GREEN=$(tput setaf 2 2>/dev/null)   || COLOR_GREEN=""
@@ -162,7 +159,6 @@ log_header() {
     printf '\n'
 }
 
-# --- Configuration Management ---
 
 _ENV_FILE_SEARCH_PATHS=(
     "${PROJECT_ROOT}/.env"
@@ -260,7 +256,7 @@ load_env_file() {
                       "— aborting load of '${env_file}'. Quote or escape the value."
             return 1
         fi
-        # W1-M2 FIX: Refuse to overwrite security-sensitive shell internals.
+        # Refuse to overwrite security-sensitive shell internals.
         # PATH, LD_PRELOAD, LD_LIBRARY_PATH, and IFS can be weaponised by a
         # malicious or misconfigured .env to hijack the shell's execution
         # environment. These variables must never come from an untrusted file.
@@ -271,8 +267,7 @@ load_env_file() {
                 return 1
                 ;;
         esac
-        # Warn (non-fatal) for chars that are unusual in config but legal
-        if [[ "$value" == *';'* || "$value" == *'&'* ]]; then
+            if [[ "$value" == *';'* || "$value" == *'&'* ]]; then
             log_warn "load_env_file: line ${lineno}: value for '${key}' contains" \
                      "';' or '&' — loaded as literal. If unintended, check '${env_file}'."
         fi
@@ -316,7 +311,6 @@ require_config() {
     return 0
 }
 
-# --- Command Availability ---
 has_command() {
     local cmd="$1"
     command -v "$cmd" >/dev/null 2>&1
@@ -433,7 +427,6 @@ get_real_user() {
     printf '%s\n' "$effective_user"
 }
 
-# --- Cleanup Registration ---
 
 CLEANUP_ACTIONS_MAX_SIZE="${CLEANUP_ACTIONS_MAX_SIZE:-64}"
 declare -a CLEANUP_ACTIONS=()
@@ -484,7 +477,6 @@ perform_cleanup() {
     CLEANUP_ACTIONS=()
 }
 
-# --- File Operations ---
 
 ensure_dir() {
     local dir="$1"
@@ -535,7 +527,6 @@ secure_file() {
     return 0
 }
 
-# --- Network Helpers ---
 
 test_connectivity() {
     local host="${1:-1.1.1.1}"
@@ -575,7 +566,6 @@ download_file() {
     fi
 }
 
-# --- Email Helpers ---
 
 # _email_driver_lookup PROVIDER
 # Prints the driver function suffix for PROVIDER, or returns 1 if unknown.
@@ -599,7 +589,6 @@ _email_driver_lookup() {
     esac
 }
 
-# -- HELPER: JSON string escape -----------------------------------------------
 # Strips raw control chars U+0000-U+001F (EM-M2) then encodes the five
 # characters that MUST be escaped in a JSON string value.
 _email_json_escape() {
@@ -614,7 +603,6 @@ _email_json_escape() {
     printf '%s' "$str"
 }
 
-# -- HELPER: shared Bearer-token POST -----------------------------------------
 _email_bearer_post() {
     local url="$1" payload="$2"
     local tmp cfg code
@@ -655,7 +643,6 @@ _email_bearer_post() {
     [[ "$code" =~ ^2 ]] && return 0 || return 1
 }
 
-# -- DRIVER: MailerSend -------------------------------------------------------
 _email_driver_mailersend() {
     local subject="$1" body="$2"
     local s b fn fe ae
@@ -686,7 +673,6 @@ EOF
     return 1
 }
 
-# -- DRIVER: SendGrid ---------------------------------------------------------
 _email_driver_sendgrid() {
     local subject="$1" body="$2"
     local s b fn fe ae
@@ -718,7 +704,6 @@ EOF
     return 1
 }
 
-# -- DRIVER: Mailgun ----------------------------------------------------------
 _email_driver_mailgun() {
     local subject="$1" body="$2"
     subject="${subject//$'\r'/}"
@@ -784,7 +769,6 @@ _email_driver_mailgun() {
     return 1
 }
 
-# -- DRIVER: Postmark ---------------------------------------------------------
 _email_driver_postmark() {
     local subject="$1" body="$2"
     local s b fn fe ae
@@ -845,7 +829,6 @@ EOF
     return 1
 }
 
-# -- DRIVER: Resend -----------------------------------------------------------
 _email_driver_resend() {
     local subject="$1" body="$2"
     local s b fn fe ae
@@ -872,7 +855,6 @@ EOF
     return 1
 }
 
-# -- DRIVER: CyberPersons -----------------------------------------------------
 _email_driver_cyberpersons() {
     local subject="$1" body="$2"
     local s b fn fe ae
@@ -904,7 +886,7 @@ EOF
     return 1
 }
 
-# -- DRIVER: host/postfix (EMAIL_MODE=host, postfix sidecar) ------------------
+# DRIVER: host/postfix (EMAIL_MODE=host, postfix sidecar)
 # Implements the EMAIL_MODE=host driver. Pipes a minimal RFC-2822 message to
 # sendmail -t which is provided by the postfix sidecar container. No API token
 # is required or read.
@@ -936,7 +918,6 @@ _email_driver_postfix() {
         | sendmail -t -oi
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
 # _normalise_email_subject SUBJECT
 #
 # Single source of truth for the [VaultWarden] subject prefix used by every
@@ -946,21 +927,18 @@ _email_driver_postfix() {
 # Both send_email() and clear_email_rate_limit() call this helper so that the
 # two functions always hash the same string when computing the rate-limit stamp
 # file path.  If the prefix is ever changed it only needs updating here.
-# ─────────────────────────────────────────────────────────────────────────────
 _normalise_email_subject() {
     local subject="$1"
     [[ "$subject" != "[VaultWarden]"* ]] && subject="[VaultWarden] ${subject}"
     printf '%s\n' "$subject"
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Tries candidate directories in priority order and returns the first one
 # that is (or can be) created AND is writable by the current user:
 #   1. PROJECT_ROOT/.rate-limit   — preferred
 #   2. XDG_CACHE_HOME/vaultwarden/rate-limit
 #   3. HOME/.cache/vaultwarden/rate-limit
 #   4. /tmp/vaultwarden-rate-limit-<euid>  (last resort)
-# ─────────────────────────────────────────────────────────────────────────────
 _resolve_rate_limit_dir() {
     local candidates=(
         "${PROJECT_ROOT}/.rate-limit"
@@ -1013,7 +991,6 @@ _rate_limit_check() {
     return 0
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
 # clear_email_rate_limit SUBJECT
 #
 # Removes the rate-limit stamp file for SUBJECT so that the *next* call to
@@ -1031,7 +1008,6 @@ _rate_limit_check() {
 # The subject is normalised via _normalise_email_subject() — the same helper
 # used by send_email() — so callers may pass the bare subject or the prefixed
 # form interchangeably and the stamp file path always matches.
-# ─────────────────────────────────────────────────────────────────────────────
 clear_email_rate_limit() {
     local subject="${1:-}"
     [[ -z "$subject" ]] && { log_warn "clear_email_rate_limit: subject is empty — nothing to clear"; return 0; }
@@ -1061,7 +1037,6 @@ clear_email_rate_limit() {
     return 0
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
 # _resolve_smtp_method
 #
 # Single source of truth for the SMTP transport label used in delivery
@@ -1076,7 +1051,6 @@ clear_email_rate_limit() {
 # Both send_email() and _smtp_send() derive their label from this function
 # so that the metadata footer and the actual transport path always agree,
 # regardless of future changes to either caller.
-# ─────────────────────────────────────────────────────────────────────────────
 _resolve_smtp_method() {
     if [[ -n "${SMTP_PASSWORD:-}" ]]; then
         printf 'smtp (direct relay)\n'
@@ -1085,7 +1059,6 @@ _resolve_smtp_method() {
     fi
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
 # _build_email_metadata_body BASE_BODY HOST_FQDN TIMESTAMP MODE PROVIDER METHOD
 #
 # Single source of truth for the "Email delivery metadata" footer appended to
@@ -1093,7 +1066,6 @@ _resolve_smtp_method() {
 # controls what appears in each label without duplicating the template.
 #
 # Output is printed to stdout so callers capture it with $(...) or printf -v.
-# ─────────────────────────────────────────────────────────────────────────────
 _build_email_metadata_body() {
     local base_body="$1"
     local host_fqdn="$2"
@@ -1111,8 +1083,7 @@ _build_email_metadata_body() {
         "$method"
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# _smtp_send <to> <subject> <body>  (BUG-EM6 FIX)
+# _smtp_send <to> <subject> <body>
 #
 # Path A: SMTP_PASSWORD present → direct external relay (dev/test override)
 # Path B: no SMTP_PASSWORD → route through Postfix sidecar at 127.0.0.1:587
@@ -1120,7 +1091,6 @@ _build_email_metadata_body() {
 # The transport path selected here must always match the label returned by
 # _resolve_smtp_method().  If a new transport path is ever added, update
 # both functions together.
-# ─────────────────────────────────────────────────────────────────────────────
 _smtp_send() {
     local to="$1"
     local subject="$2"
@@ -1143,7 +1113,6 @@ _smtp_send() {
         return 1
     }
     chmod 600 "$_msg_file"
-    # Ensure the file is removed when _smtp_send returns (any path).
     # shellcheck disable=SC2064  # intentional: expand _msg_file now to capture the value
     trap "rm -f '${_msg_file}' 2>/dev/null; trap - RETURN" RETURN
 
@@ -1165,7 +1134,7 @@ _smtp_send() {
         return 1
     }
 
-    # ── Path A: SMTP_PASSWORD present → direct external relay ─────────────────
+    # Path A: SMTP_PASSWORD present → direct external relay
     # This branch must stay in sync with _resolve_smtp_method returning
     # "smtp (direct relay)".
     if [[ -n "${SMTP_PASSWORD:-}" ]]; then
@@ -1203,7 +1172,7 @@ _smtp_send() {
         return $?
     fi
 
-    # ── Path B: No SMTP_PASSWORD → Postfix sidecar (normal production path) ───
+    # Path B: No SMTP_PASSWORD → Postfix sidecar (normal production path)
     # This branch must stay in sync with _resolve_smtp_method returning
     # "smtp (postfix sidecar)".
     local _sidecar_addr="${VW_SMTP_HOST_PORT:-127.0.0.1:587}"
@@ -1241,7 +1210,6 @@ _smtp_send() {
     return $_rc
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
 # send_email [TO] SUBJECT BODY
 #
 # TO is optional; defaults to ${ADMIN_EMAIL}.
@@ -1253,7 +1221,6 @@ _smtp_send() {
 #   Resolution order:
 #     1. EMAIL_API_TOKEN env var (direct override, e.g. set in shell)
 #     2. decrypt_secret email_api_token  (from secrets.yaml via SOPS/age)
-# ─────────────────────────────────────────────────────────────────────────────
 send_email() {
     local to subject body
     if [[ $# -ge 3 ]]; then
@@ -1307,7 +1274,7 @@ send_email() {
     local api_token=""
     local api_driver_fn=""
 
-    # ── Stage 1: HTTP API ─────────────────────────────────────────────────────
+    # Stage 1: HTTP API
     if [[ "$mode" == "auto" || "$mode" == "api" ]]; then
         local driver_suffix
         if ! driver_suffix=$(_email_driver_lookup "$provider" 2>/dev/null); then
@@ -1348,12 +1315,8 @@ send_email() {
         fi
     fi
 
-    # ── Stage 2: SMTP relay (Postfix sidecar or direct relay) ─────────────────
+    # Stage 2: SMTP relay (Postfix sidecar or direct relay)
     if [[ "$mode" == "auto" || "$mode" == "smtp" ]]; then
-        # _resolve_smtp_method() is the single source of truth for the transport
-        # label.  _smtp_send() selects its actual path using the same condition
-        # (SMTP_PASSWORD presence), so the metadata footer always matches what
-        # was actually used.
         local smtp_method smtp_body
         smtp_method="$(_resolve_smtp_method)"
         smtp_body="$(_build_email_metadata_body \
@@ -1373,7 +1336,7 @@ send_email() {
     fi
 
     local host_mta_failed=false
-    # ── Stage 3: Host MTA ─────────────────────────────────────────────────────
+    # Stage 3: Host MTA
     if [[ "$mode" == "auto" || "$mode" == "host" ]]; then
         local host_body
         host_body="$(_build_email_metadata_body \
@@ -1396,7 +1359,7 @@ send_email() {
         fi
     fi
 
-    # ── Stage 4 (auto): Emergency direct API bypass ────────────────────────────
+    # Stage 4 (auto): Emergency direct API bypass
     if [[ "$mode" == "auto" && "$host_mta_failed" == "true" && -n "$api_token" && -n "$api_driver_fn" ]]; then
         log_error "SMTP/host MTA delivery unavailable — attempting emergency API bypass (${provider})"
 
@@ -1404,7 +1367,6 @@ send_email() {
         emergency_body="$(_build_email_metadata_body \
             "$base_body" "$host_fqdn" "$ts" "$mode" "$provider" \
             "api emergency bypass (${provider})")"
-        # Append the delivery warning note specific to this bypass path.
         emergency_body="${emergency_body}
 
 ⚠ Delivery note: Sent via emergency API bypass after SMTP/host MTA failure."
@@ -1427,7 +1389,6 @@ send_notification_email() {
     send_email "$1" "$2"
 }
 
-# --- Validation Helpers ---
 
 validate_email() {
     local email="$1"
@@ -1461,7 +1422,6 @@ validate_url() {
     [[ "$url" =~ ^https?://[a-zA-Z0-9.-]+(:[0-9]+)?(/.*)?$ ]]
 }
 
-# --- Enhanced Error Handling ---
 
 setup_error_trap() {
     trap 'log_error "Script failed at line $LINENO in $(basename -- "${BASH_SOURCE[0]}") with exit code $?"; exit 1' ERR
@@ -1469,7 +1429,7 @@ setup_error_trap() {
 
 setup_cleanup_trap() {
     local cleanup_function="$1"
-    # W1-M6 FIX: Also register for ERR so cleanup runs when the script fails
+    # Also register for ERR so cleanup runs when the script fails
     # with a non-zero exit code, not only on normal exit or signal termination.
     # shellcheck disable=SC2064  # intentional: $cleanup_function expands at registration to capture the function name
     trap "$cleanup_function" EXIT HUP INT TERM ERR
@@ -1490,7 +1450,6 @@ safe_execute() {
     fi
 }
 
-# --- Library Initialization ---
 
 init_common_lib() {
     local script_name="$1"
@@ -1510,7 +1469,6 @@ init_common_lib() {
     log_debug "Log level: $LOG_LEVEL"
 }
 
-# --- Export Functions ---
 export -f log_info log_success log_warn log_error log_debug log_header set_log_prefix _should_log
 export -f load_env_file get_config_value require_config
 export -f has_command require_commands retry_with_backoff is_root require_root get_real_user
