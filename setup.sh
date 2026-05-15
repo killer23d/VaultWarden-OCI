@@ -522,6 +522,10 @@ install_dependencies() {
     fi
 
     local basic_packages=("age" "make" "nano" "rclone" "sqlite3" "jq" "ufw" "curl" "wget" "unzip" "git" "gpg" "coreutils" "haveged" "dnsutils" "rsync" "python3" "python3-argon2" "apache2-utils" "cron")
+    # NOTE: haveged is a userspace entropy daemon included for compatibility with
+    # kernels < 5.6 where /dev/random could block.  On Ubuntu 22.04/24.04 LTS
+    # (kernel 5.15/6.8) it is a no-op overhead but harmless.  Kept to support
+    # any operator who runs on an older kernel variant.
     local missing_packages=()
     for pkg in "${basic_packages[@]}"; do
         ! dpkg -s "$pkg" >/dev/null 2>&1 && missing_packages+=("$pkg")

@@ -3,6 +3,10 @@ Description=VaultWarden Daily DB Backup
 Documentation=https://github.com/killer23d/VaultWarden-OCI
 After=docker.service network-online.target
 Requires=docker.service
+# W3-M4 FIX: Wait until the VaultWarden health service has confirmed the stack
+# is up before running a DB backup. This prevents the backup from racing with
+# a fresh container startup where the DB may still be in WAL replay.
+After=vaultwarden-health.service
 ConditionPathExists=/opt/vaultwarden-scripts/backup.sh
 OnFailure=vaultwarden-notify-failure.service
 

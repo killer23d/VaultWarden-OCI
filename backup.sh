@@ -288,7 +288,19 @@ auto_determine_backup_type() {
     local auto_base_dir
     auto_base_dir="$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")"
     full_backup_dir="$auto_base_dir/full"
-    last_full=$(find "$full_backup_dir" -name "*.age" -type f -printf '%T@ %p\n' 2>/dev/null \
+    # W2-M5 FIX: Replace GNU find -printf (not available on BSD/macOS) with
+    # a portable `stat` approach. We list .age files with find, then pass each
+    # through stat to get the mtime, then sort to find the newest.
+    local _stat_mtime_fmt _stat_find_output
+    if stat --version 2>/dev/null | grep -q GNU; then
+        _stat_mtime_fmt='-c %Y'
+    else
+        _stat_mtime_fmt='-f %m'
+    fi
+    last_full=$(find "$full_backup_dir" -name "*.age" -type f 2>/dev/null \
+                | while IFS= read -r _f; do
+                    printf '%s %s\n' "$(stat $_stat_mtime_fmt "$_f" 2>/dev/null || echo 0)" "$_f"
+                  done \
                 | sort -n | tail -1 | cut -d' ' -f2- || true)
     if [[ -n "$last_full" ]]; then
         local full_mtime
@@ -415,7 +427,19 @@ verify_backup_full() {
             ;;
         full|emergency)
             backup_log_info "Verifying archive structure..."
-            if ! tar --use-compress-program='zstd -d -T0' -tf "$dec_out" >/dev/null 2>&1; then
+            # W2-M2 FIX: Detect compression format from filename extension rather than
+            # hardcoding zstd. This allows verify_backup_full to handle backups created
+            # with different compression settings or future format changes.
+            local _decomp_prog
+            case "$dec_out" in
+                *.tar.zst|*.zst)  _decomp_prog='zstd -d -T0' ;;
+                *.tar.bz2|*.bz2)  _decomp_prog='bzip2 -d' ;;
+                *.tar.xz|*.xz)    _decomp_prog='xz -d' ;;
+                *.tar.gz|*.tgz)   _decomp_prog='gzip -d' ;;
+                *.tar.lz4|*.lz4)  _decomp_prog='lz4 -d' ;;
+                *)                 _decomp_prog='zstd -d -T0' ;;  # default to zstd
+            esac
+            if ! tar --use-compress-program="$_decomp_prog" -tf "$dec_out" >/dev/null 2>&1; then
                 log_error "Full verification FAILED: archive is corrupt or unreadable" >&2
                 return 1
             fi
@@ -857,17 +881,39 @@ perform_full_backup() {
         tar_sources+=("${state_dir#/}")
     fi
 
+    # W2-C1 FIX: Include the DB snapshot in the initial tar pass using a second
+    # -C argument to change into snap_dir and add db.sqlite3 at its relative path.
+    # This replaces the previous non-atomic decompress+tar-rf+recompress approach
+    # with a single-pass tar that is safe from partial-write corruption.
+    local -a tar_cmd_args=(
+        --use-compress-program='zstd --no-progress -T0 -3'
+        -cf "$temp_tar"
+        -C /
+        "${tar_excludes[@]}"
+        "${tar_sources[@]}"
+    )
+    if [[ "$db_snapshot_ok" == "true" ]]; then
+        if [[ ! -f "$snap_db" ]]; then
+            backup_log_warn "DB snapshot not found at: $snap_db — falling back to live DB"
+            db_snapshot_ok=false
+        else
+            backup_log_info "Including clean DB snapshot in initial archive pass..."
+            tar_cmd_args+=(-C "$snap_dir" "${state_dir#/}/data/db.sqlite3")
+        fi
+    fi
+
     local tar_exit=0
-    tar --use-compress-program='zstd --no-progress -T0 -3' -cf "$temp_tar" \
-        -C / \
-        "${tar_excludes[@]}" \
-        "${tar_sources[@]}" 2>/dev/null || tar_exit=$?
+    tar "${tar_cmd_args[@]}" 2>/dev/null || tar_exit=$?
 
     # tar exits 1 when files change during archival (e.g. SQLite WAL pages written
-    # live). This is tolerated here because the atomic DB snapshot injected above
-    # replaces the live db.sqlite3 in the archive; any WAL noise on other files is
-    # benign for a VaultWarden state snapshot. Hard errors (exit > 1) still abort.
-    if (( tar_exit > 1 )); then
+    # live). This is tolerated here because the atomic DB snapshot is included
+    # in the initial pass; any WAL noise on other files is benign. Exit >1 aborts.
+    if (( tar_exit == 1 )); then
+        # W2-M1 FIX: Make tar exit 1 (file-changed-during-archival) visible to
+        # the operator so it is not silently swallowed. Not fatal — see above.
+        log_warn "perform_full_backup: tar reported exit 1 (file changed during archival)." \
+                 "This is normally benign — DB snapshot was used instead of live db.sqlite3."
+    elif (( tar_exit > 1 )); then
         log_error "tar failed with exit code $tar_exit" >&2
         return 1
     fi
@@ -875,76 +921,6 @@ perform_full_backup() {
     if [[ ! -s "$temp_tar" ]]; then
         log_error "tar produced an empty archive — aborting backup" >&2
         return 1
-    fi
-
-    if [[ "$db_snapshot_ok" == "true" ]]; then
-        local compressed_size snap_size available_kb required_kb
-        compressed_size=$(stat -c%s "$temp_tar" 2>/dev/null || echo 0)
-        snap_size=$(stat -c%s "$snap_db" 2>/dev/null || echo 0)
-        available_kb=$(df -k "$(dirname "$temp_tar")" | awk 'END{print $4}')
-        if [[ -z "$available_kb" || "$available_kb" == "0" ]]; then
-            backup_log_warn "Could not determine available disk space — proceeding with caution"
-            available_kb=0
-        fi
-        required_kb=$(( (compressed_size * 9 + snap_size) / 1024 + 1048576 ))
-
-        if (( available_kb < required_kb )); then
-            log_error "Insufficient space for safe DB snapshot injection in $(dirname "$temp_tar")" >&2
-            log_error "  Need: ~$((required_kb / 1024)) MB" >&2
-            log_error "  Free: $((available_kb / 1024)) MB" >&2
-            log_error "Aborting full/emergency backup to avoid fallback to a live DB copy." >&2
-            log_error "Free space or move TMPDIR to a larger filesystem, then retry." >&2
-            return 1
-        fi
-    fi
-
-    if [[ "$db_snapshot_ok" == "true" ]]; then
-    # Pre-check: snap_db is staged at the expected relative path. If not,
-    # log the exact path that was missing rather than silently falling through.
-    if [[ ! -f "$snap_db" ]]; then
-        backup_log_warn "DB snapshot injection skipped: staged file not found: $snap_db"
-        backup_log_warn "Falling back to live DB in archive."
-        db_snapshot_ok=false
-    fi
-fi
-
-    if [[ "$db_snapshot_ok" == "true" ]]; then
-    backup_log_info "Injecting clean DB snapshot into archive..."
-    local temp_tar_raw="$shared_tmpdir/${backup_label}_backup_$timestamp.tar"
-    local _tar_inject_err
-
-    if zstd --no-progress -d -T0 -c "$temp_tar" 2>/dev/null > "$temp_tar_raw" \
-        && _tar_inject_err=$(tar -rf "$temp_tar_raw" -C "$snap_dir" "${state_dir#/}/data/db.sqlite3" 2>&1) \
-        && zstd --no-progress -T0 -3 "$temp_tar_raw" -o "${temp_tar}.new" 2>/dev/null
-    then
-        mv "${temp_tar}.new" "$temp_tar"
-        rm -f "$temp_tar_raw"
-        backup_log_info "Clean DB snapshot injected"
-    else
-        [[ -n "${_tar_inject_err:-}" ]] && backup_log_warn "DB snapshot injection tar error: ${_tar_inject_err}"
-        backup_log_warn "DB snapshot injection failed — archive will use live DB copy"
-        rm -f "$temp_tar_raw" "${temp_tar}.new" 2>/dev/null || true
-            tar_excludes=(
-                "--exclude=${SCRIPT_DIR#/}/.git"
-                "--exclude=${SCRIPT_DIR#/}/backups"
-                "--exclude=${SCRIPT_DIR#/}/logs"
-                "--exclude=${SCRIPT_DIR#/}/.rate-limit"
-                "--exclude=${state_dir#/}/backups"
-                "--exclude=${state_dir#/}/logs"
-                "--exclude=*.sock"
-                "--exclude=*.lock"
-                "--exclude=*.tmp"
-                "--exclude=*.age.tmp"
-            )
-            tar_exit=0
-            tar --use-compress-program='zstd --no-progress -T0 -3' -cf "$temp_tar" -C / \
-                "${tar_excludes[@]}" "${tar_sources[@]}" 2>/dev/null || tar_exit=$?
-            (( tar_exit <= 1 )) || { log_error "Rebuild tar failed" >&2; return 1; }
-            if [[ ! -s "$temp_tar" ]]; then
-                log_error "Fallback tar also produced an empty archive — aborting" >&2
-                return 1
-            fi
-        fi
     fi
 
     backup_log_info "Encrypting ${backup_label} archive..."
@@ -1012,6 +988,12 @@ _check_backup_deps() {
 # Main
 # ---------------------------------------------------------------------------
 main() {
+    # W2-C4 FIX: Register cleanup trap unconditionally at the top of main()
+    # so it fires for ALL subcommands (run, verify, rotate), not just run/verify.
+    # This ensures TMPDIR_BACKUP and LOCK_FILE are always cleaned up on exit,
+    # signal, or error — even if a future subcommand creates these resources.
+    trap cleanup EXIT HUP INT TERM
+
     if [[ "$LIST_ONLY" == "true" ]]; then
         load_env_file 2>/dev/null || true
         local list_base_dir
@@ -1026,8 +1008,6 @@ main() {
     if [[ "$_SUBCMD" == "verify" ]]; then
         require_root "$@"
         _check_backup_deps
-
-        trap cleanup EXIT HUP INT TERM
 
         local old_umask
         old_umask=$(umask)
@@ -1141,7 +1121,7 @@ main() {
     require_root "$@"
     _check_backup_deps
 
-    trap cleanup EXIT HUP INT TERM
+    # W2-C4: Trap already registered at top of main() — not duplicated here.
 
     LOCK_FILE="/run/lock/vaultwarden-backup.lock"
 

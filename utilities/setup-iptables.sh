@@ -21,6 +21,12 @@ if ! command -v iptables >/dev/null 2>&1; then
   exit 1
 fi
 
+# W4-M2 FIX: Verify python3 is available before using it for subnet discovery.
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "ERROR: python3 command not found — required for subnet discovery from compose config" >&2
+  exit 1
+fi
+
 if [[ "${EUID}" -ne 0 ]]; then
   if command -v sudo >/dev/null 2>&1; then
     exec sudo -n "$0" "$@"
@@ -28,6 +34,67 @@ if [[ "${EUID}" -ne 0 ]]; then
   echo "ERROR: run as root (or install/configure sudo)" >&2
   exit 1
 fi
+
+# W4-C2 FIX: Warn if nftables is active alongside iptables. Running both
+# can cause conflicting firewall policies where nft rules override iptables.
+if command -v nft >/dev/null 2>&1; then
+  if nft list ruleset 2>/dev/null | grep -q .; then
+    echo "WARN: nftables ruleset is active on this host." >&2
+    echo "WARN: Running iptables alongside nftables may cause conflicting firewall policies." >&2
+    echo "WARN: Verify that nftables is not shadowing these iptables rules." >&2
+    echo "WARN: Consider using only one firewall framework." >&2
+  fi
+fi
+
+# W4-M1 FIX: Verify an SSH ACCEPT rule exists in the INPUT chain before making
+# any changes. Adding MASQUERADE or FORWARD rules while accidentally blocking
+# SSH could lock out the operator from the host.
+_ssh_port="${SSH_PORT:-22}"
+_ssh_ok=false
+if iptables -L INPUT -n 2>/dev/null | grep -qE "ACCEPT.*(tcp dpt:${_ssh_port}|state.*ESTABLISHED|multiport.*${_ssh_port})"; then
+  _ssh_ok=true
+elif iptables -L INPUT -n 2>/dev/null | grep -q "ACCEPT.*all.*0\.0\.0\.0"; then
+  # Default open INPUT (typical in OCI before REJECT rule) — SSH is accessible.
+  _ssh_ok=true
+fi
+if [[ "$_ssh_ok" != "true" ]]; then
+  echo "WARN: Could not confirm an SSH ACCEPT rule in the INPUT chain." >&2
+  echo "WARN: Proceeding, but verify SSH port ${_ssh_port} remains accessible after this script." >&2
+fi
+
+# W4-C1 FIX: Save current iptables rules before any modifications.
+# On ERR, INT, or TERM, automatically restore the saved rules so the host
+# is not left with a partial/broken iptables configuration.
+_ipt_backup_v4=""
+_ipt_backup_v6=""
+_ipt_cleanup() {
+  local _rc=$?
+  if [[ -n "$_ipt_backup_v4" && -f "$_ipt_backup_v4" ]]; then
+    echo "ROLLBACK: Restoring iptables rules from: $_ipt_backup_v4" >&2
+    iptables-restore < "$_ipt_backup_v4" 2>/dev/null || true
+    rm -f "$_ipt_backup_v4"
+  fi
+  if [[ -n "$_ipt_backup_v6" && -f "$_ipt_backup_v6" ]]; then
+    echo "ROLLBACK: Restoring ip6tables rules from: $_ipt_backup_v6" >&2
+    ip6tables-restore < "$_ipt_backup_v6" 2>/dev/null || true
+    rm -f "$_ipt_backup_v6"
+  fi
+  return $_rc
+}
+_ipt_backup_v4="$(mktemp -p "${PROJECT_ROOT}" .iptables-backup.XXXXXX)"
+iptables-save > "$_ipt_backup_v4" 2>/dev/null || {
+  echo "WARN: Could not save current iptables state — rollback on failure will not be available." >&2
+  rm -f "$_ipt_backup_v4"; _ipt_backup_v4=""
+}
+if command -v ip6tables-save >/dev/null 2>&1; then
+  _ipt_backup_v6="$(mktemp -p "${PROJECT_ROOT}" .ip6tables-backup.XXXXXX)"
+  ip6tables-save > "$_ipt_backup_v6" 2>/dev/null || {
+    rm -f "$_ipt_backup_v6"; _ipt_backup_v6=""
+  }
+fi
+trap '_ipt_cleanup' ERR INT TERM
+# On success: clean up backup files without rollback.
+trap 'rm -f "${_ipt_backup_v4:-}" "${_ipt_backup_v6:-}"' EXIT
 
 NETWORK_NAMES=()
 set +e
@@ -96,13 +163,36 @@ mapfile -t UNIQUE_SUBNETS < <(printf '%s\n' "${SUBNETS[@]}" | awk 'NF && !seen[$
 
 for subnet in "${UNIQUE_SUBNETS[@]}"; do
   if iptables -t nat -C POSTROUTING -s "$subnet" ! -o docker0 -j MASQUERADE >/dev/null 2>&1; then
-    echo "OK: MASQUERADE already present for $subnet"
+    echo "OK: MASQUERADE already present for $subnet (IPv4)"
     continue
   fi
 
   iptables -t nat -A POSTROUTING -s "$subnet" ! -o docker0 -j MASQUERADE
-  echo "ADDED: MASQUERADE for $subnet"
+  echo "ADDED: MASQUERADE for $subnet (IPv4)"
 done
+
+# W4-C5 FIX: Add ip6tables MASQUERADE rules mirroring the IPv4 rules above.
+# Docker assigns IPv6 ULA subnets (fd00::/8) when IPv6 is enabled in daemon.json.
+# Without ip6tables MASQUERADE, IPv6 container traffic cannot reach the internet.
+# Note: This is a best-effort mirror — if ip6tables is absent (some kernels
+# compile without ip6tables support), we emit a clear WARNING and continue.
+if command -v ip6tables >/dev/null 2>&1; then
+  for subnet in "${UNIQUE_SUBNETS[@]}"; do
+    # Skip IPv4-only CIDR notation — ip6tables only handles IPv6 prefixes.
+    if [[ "$subnet" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/ ]]; then
+      continue
+    fi
+    if ip6tables -t nat -C POSTROUTING -s "$subnet" ! -o docker0 -j MASQUERADE >/dev/null 2>&1; then
+      echo "OK: MASQUERADE already present for $subnet (IPv6)"
+      continue
+    fi
+    ip6tables -t nat -A POSTROUTING -s "$subnet" ! -o docker0 -j MASQUERADE
+    echo "ADDED: MASQUERADE for $subnet (IPv6)"
+  done
+else
+  echo "WARN: ip6tables not found — IPv6 MASQUERADE rules not applied." >&2
+  echo "WARN: Container IPv6 traffic may not reach the internet." >&2
+fi
 
 # Remove OCI's default FORWARD REJECT rule if present (safe to run repeatedly).
 # On a fresh Oracle Cloud instance, OCI injects:
@@ -139,7 +229,15 @@ else
   echo "WARN: DOCKER-USER chain not available; skipping forward-policy remediation"
 fi
 
+# W4-C3 FIX: Fail loudly if netfilter-persistent is absent, rather than
+# silently continuing. Without persistence the rules are lost on reboot.
 if command -v netfilter-persistent >/dev/null 2>&1; then
-  netfilter-persistent save >/dev/null 2>&1 || true
+  if ! netfilter-persistent save >/dev/null 2>&1; then
+    echo "ERROR: netfilter-persistent save failed — rules may not survive reboot." >&2
+    exit 1
+  fi
   echo "INFO: persisted iptables rules with netfilter-persistent"
+else
+  echo "WARN: netfilter-persistent not installed — rules will be lost on reboot." >&2
+  echo "WARN: Install with: apt-get install -y netfilter-persistent iptables-persistent" >&2
 fi

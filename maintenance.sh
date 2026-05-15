@@ -823,6 +823,13 @@ run_email_diagnostics() {
 update_firewall_ranges() {
     if [[ "$UPDATE_FIREWALL" != "true" ]]; then log_info "Skipping firewall update"; return 0; fi
     if [[ "$DRY_RUN"         == "true" ]]; then log_info "[DRY RUN] Would safely update Cloudflare IP ranges in firewall"; return 0; fi
+    # W5-C8 FIX: Only update Cloudflare IP ranges when the proxy is actually
+    # in use. Running this when CLOUDFLARE_PROXY_ENABLED != "true" would add
+    # Cloudflare's CIDRs to UFW unnecessarily, widening the attack surface.
+    if [[ "${CLOUDFLARE_PROXY_ENABLED:-false}" != "true" ]]; then
+        log_info "Skipping Cloudflare IP range firewall update (CLOUDFLARE_PROXY_ENABLED is not 'true')"
+        return 0
+    fi
 
     require_root "$@"
 
@@ -913,7 +920,10 @@ update_firewall_ranges() {
         | sort -rn
     )
     for rule_num in "${old_rule_nums[@]}"; do
-        [[ -n "$rule_num" ]] && echo "y" | ufw delete "$rule_num" >/dev/null 2>&1 && ((removed_count++))
+        # W5-M4 FIX: Use ufw --force delete instead of piping "y" to ufw delete.
+        # The pipe approach is fragile and triggers SC2095. --force suppresses
+        # the interactive confirmation cleanly.
+        [[ -n "$rule_num" ]] && ufw --force delete "$rule_num" >/dev/null 2>&1 && ((removed_count++))
     done
     [[ $removed_count -gt 0 ]] && log_success "Removed $removed_count outdated firewall rules"
     log_success "Firewall IP ranges updated safely"
@@ -952,7 +962,10 @@ update_dns_record() {
     }
 
     # ── Step 2: read Cloudflare API token (unchanged from original) ───────
-    local token_file="${SCRIPT_DIR}/secrets/.docker_secrets/caddy_cloudflare_dns_token"
+    # W5-C7 FIX: Check CF_TOKEN_FILE env var first before falling back to the
+    # hardcoded path. This allows operators to store the token at a custom location.
+    local token_file
+    token_file="${CF_TOKEN_FILE:-${SCRIPT_DIR}/secrets/.docker_secrets/caddy_cloudflare_dns_token}"
     local cf_token
     if [[ -f "$token_file" ]]; then
         local token_perms

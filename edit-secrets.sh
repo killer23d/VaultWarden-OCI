@@ -1099,7 +1099,23 @@ do_edit() {
     local before_checksum
     before_checksum=$(calculate_sha256 "$temp_file")
 
-    if ! "${EDITOR_CMD[@]}" "$temp_file"; then
+    # W4-M9 FIX: Suppress vim/nvim swap files so plaintext secrets are not
+    # written to a .swp file alongside the temp file. vim/nvim accept -i NONE
+    # to disable viminfo, and --noswapfile to disable swap. We detect these
+    # editors by binary name and prepend the flags if not already present.
+    local _editor_bin
+    _editor_bin="$(basename "${EDITOR_CMD[0]}")"
+    local -a _effective_editor_cmd=("${EDITOR_CMD[@]}")
+    case "$_editor_bin" in
+        vim|vi|nvim|view|gvim|rvim|rview)
+            # Only prepend flags if not already supplied by the user.
+            if [[ "${EDITOR_CMD[*]}" != *"--noswapfile"* ]]; then
+                _effective_editor_cmd=("${EDITOR_CMD[0]}" "-i" "NONE" "--noswapfile" "${EDITOR_CMD[@]:1}")
+            fi
+            ;;
+    esac
+
+    if ! "${_effective_editor_cmd[@]}" "$temp_file"; then
         log_error "Editor exited with error"
         return 1
     fi

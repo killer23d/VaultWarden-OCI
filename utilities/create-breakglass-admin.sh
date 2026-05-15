@@ -341,6 +341,12 @@ _notify_breakglass_event() {
     if ! send_notification_email "$subject" "$body" 2>/dev/null; then
         log_warn "Breakglass event notification delivery failed (non-fatal)"
     fi
+    # W4-M5 FIX: Persist a durable syslog record regardless of email delivery
+    # outcome.  logger(1) writes to the local syslog (journald on Ubuntu), which
+    # survives email failures and provides an append-only audit trail.
+    logger -t vaultwarden-breakglass \
+        "EVENT=${event} USER=${BREAKGLASS_USER} HOST=$(hostname -f 2>/dev/null || hostname) TIME=$(date -uIs)" \
+        2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------
@@ -433,18 +439,19 @@ schedule_auto_cleanup() {
         fi
     fi
 
-    # ------------------------------------------------------------------
-    # Tier 4: last-resort background sleep subshell.
-    # SECURITY RISK: This is a detached root process with no tracked PID.
-    # It will NOT survive a reboot. Treat it as a best-effort reminder ONLY —
-    # not a security control. Manual 'remove' subcommand is the only reliable cleanup path.
+    # W4-M4 FIX: Abort rather than silently proceeding with a non-reboot-safe
+    # background process.  The operator must pass --force to acknowledge the risk.
     # ------------------------------------------------------------------
     local sleep_seconds=$(( expiry_hours * 3600 ))
     log_error "WARNING: All reliable schedulers (at, systemd-run) are unavailable."
-    log_error "  Auto-cleanup will use a background root subshell — this is NOT reboot-safe"
-    log_error "  and runs as an untracked detached process. If this host reboots before"
-    log_error "  ${expiry_human}, the breakglass account will NOT be auto-removed."
+    log_error "  Auto-expiry cannot be guaranteed across a reboot on this system."
+    log_error "  The breakglass account would persist indefinitely if the host reboots."
+    log_warn  "  To proceed anyway (NOT reboot-safe), re-run with --force."
     log_warn  "  Mandatory: run 'sudo $0 remove' manually when done."
+    if [[ "${FORCE:-false}" != "true" ]]; then
+        log_error "Aborting: pass --force to use the unreliable background-subshell fallback."
+        return 1
+    fi
     setsid bash -c "sleep ${sleep_seconds} && ${cleanup_cmd}" \
         </dev/null >/dev/null 2>&1 &
     disown
@@ -593,7 +600,11 @@ EOF
     printf '3. Press ENTER to see login prompt\n'
     printf '4. Login with the credentials above\n'
 
-    printf '%b\n' "\n${COLOR_RED}Press ENTER to clear screen and finish...${COLOR_RESET}"
+    printf '%b\n' "\n${COLOR_RED}SECURITY NOTE: 'clear' does not erase terminal scrollback history.${COLOR_RESET}"
+    printf 'If this session is recorded (tmux, script, SSH audit log, cloud serial\n'
+    printf 'console), the credentials above may be visible in the scrollback buffer.\n'
+    printf 'Close the terminal or disconnect the session after noting them.\n'
+    printf '%b\n' "\n${COLOR_RED}Press ENTER to clear visible screen and finish...${COLOR_RESET}"
     read -r
     clear
 

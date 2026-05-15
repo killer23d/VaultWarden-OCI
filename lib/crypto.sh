@@ -598,9 +598,13 @@ print(ph.hash(password))
 ")
             ;;
         cli)
-            local salt
-            salt=$(generate_secure_string 16)
-            hash=$(printf '%s' "$password" | argon2 "$salt" -id -t 3 -m 16 -p 4 -l 32 -e 2>/dev/null)
+            # W1-C5 FIX: The argon2 CLI requires the salt as a positional argument,
+            # which exposes it in `ps aux`. Refuse the CLI path and require Python.
+            # This prevents salt exposure via process listing.
+            log_error "W1-C5: argon2 CLI path disabled — salt would be visible in 'ps aux'."
+            log_error "Install the Python argon2-cffi library: pip install argon2-cffi"
+            log_error "  or: apt install python3-argon2"
+            return 1
             ;;
     esac
 
@@ -936,19 +940,26 @@ simple_verify_age_key() {
     current_group=$(_stat_group "$age_key" 2>/dev/null || echo "")
     current_owner_group="${current_owner}:${current_group}"
     if [[ -n "$current_owner" && "$current_owner_group" != "${real_user}:${real_group}" ]]; then
-        log_warn "Age key ownership was '${current_owner_group}' (expected '${real_user}:${real_group}') — auto-correcting"
-        if [[ "$(id -u)" -eq 0 ]]; then
-            chown "${real_user}:${real_group}" "$age_key" 2>/dev/null || \
-                log_warn "Could not restore ownership of $age_key to ${real_user}:${real_group}"
+        # W1-M4 FIX: If real_user resolved to "root" (fallback), skip chown to
+        # avoid locking out the service user by setting ownership to root:root.
+        if [[ "$real_user" == "root" ]]; then
+            log_warn "W1-M4: real user resolved to 'root' — skipping chown to avoid locking out the service account."
+            log_warn "       Re-run as the service user or with SUDO_USER set to fix ownership manually."
         else
-            log_warn "Cannot correct ownership of $age_key — re-run with sudo (sudo make key-health)"
+            log_warn "Age key ownership was '${current_owner_group}' (expected '${real_user}:${real_group}') — auto-correcting"
+            if [[ "$(id -u)" -eq 0 ]]; then
+                chown "${real_user}:${real_group}" "$age_key" 2>/dev/null || \
+                    log_warn "Could not restore ownership of $age_key to ${real_user}:${real_group}"
+            else
+                log_warn "Cannot correct ownership of $age_key — re-run with sudo (sudo make key-health)"
+            fi
         fi
     elif [[ -n "$current_owner" ]]; then
         # Ownership is already correct — no action needed.
         :
     else
-        # Could not read ownership at all — attempt chown only if root.
-        if [[ "$(id -u)" -eq 0 ]]; then
+        # Could not read ownership at all — attempt chown only if root and real_user is not root.
+        if [[ "$(id -u)" -eq 0 && "$real_user" != "root" ]]; then
             chown "${real_user}:${real_group}" "$age_key" 2>/dev/null || \
                 log_warn "Could not restore ownership of $age_key to ${real_user}:${real_group}"
         else
@@ -1359,17 +1370,22 @@ EOF
         log_warn "          shred -fuz '$output_html'"
         log_info  "Open in browser and print to PDF manually."
 
-        # Schedule an auto-delete reminder 30 minutes from now.
-        local remind_cmd="echo 'SECURITY REMINDER: Delete plaintext Age key backup: shred -fuz \"${output_html}\"' | logger -t vaultwarden-key-reminder 2>/dev/null; wall 'SECURITY REMINDER: VaultWarden plaintext key backup still exists at ${output_html} — delete it now with: shred -fuz ${output_html}' 2>/dev/null || true"
+        # W1-C3 FIX: Schedule actual auto-DELETION (not just a reminder) in 30
+        # minutes so the plaintext HTML is not left on disk indefinitely.
+        # The delete_cmd uses shred for overwrite-capable filesystems, then rm
+        # as a fallback.
+        local delete_cmd="shred -fuz '${output_html}' 2>/dev/null || rm -f '${output_html}'; echo 'vaultwarden-key-backup: plaintext HTML auto-deleted' | logger -t vaultwarden-key-reminder 2>/dev/null"
         if command -v at >/dev/null 2>&1; then
-            if echo "$remind_cmd" | at "now + 30 minutes" 2>/dev/null; then
-                log_info "Scheduled security reminder in 30 minutes via at(1)."
+            if echo "$delete_cmd" | at "now + 30 minutes" 2>/dev/null; then
+                log_warn "SECURITY: HTML file will be AUTO-DELETED in 30 minutes via at(1)."
+                log_warn "          Open, print to PDF, and store the PDF before then."
             else
-                log_warn "Could not schedule at(1) reminder; set a manual reminder to delete $output_html"
+                log_warn "Could not schedule at(1) auto-delete."
+                log_warn "SECURITY: Manually run: shred -fuz '$output_html'"
             fi
         else
-            log_warn "at(1) not available — cannot schedule auto-reminder."
-            log_warn "SECURITY: Manually delete the plaintext key file within 30 minutes:"
+            log_warn "at(1) not available — cannot schedule auto-deletion."
+            log_warn "SECURITY: Manually delete the plaintext key file immediately after printing:"
             log_warn "          shred -fuz '$output_html'"
         fi
     fi
