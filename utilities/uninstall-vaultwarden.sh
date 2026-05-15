@@ -17,7 +17,7 @@ die()     { echo -e "${RED}[ERROR]${RESET} $*" >&2; exit 1; }
 
 # ─── Help ─────────────────────────────────────────────────────────────────────
 show_help() {
-    echo "Usage: sudo bash $0 run [--i-have-saved-my-recovery-kit] [--force]"
+    echo "Usage: sudo bash $0 run [--i-have-saved-my-recovery-kit] [--force] [--dry-run]"
     echo ""
     echo "SUBCOMMANDS:"
     echo "  run    Perform the full idempotent uninstall (interactive confirmation required)"
@@ -28,6 +28,10 @@ show_help() {
     echo "      to a location OUTSIDE this host before running."
     echo "      Without this flag the script refuses to continue when"
     echo "      the age key is present on disk."
+    echo ""
+    echo "  --dry-run"
+    echo "      W5-C4: Show what would be removed without deleting anything."
+    echo "      Prints each step that would execute and exits without changes."
     echo ""
     echo "  --force"
     echo "      Skip ALL AGE key checks (both the CLI flag pre-check"
@@ -59,6 +63,7 @@ show_help() {
 #                                  the key is confirmed saved externally.
 I_HAVE_SAVED_RECOVERY_KIT=false
 FORCE=false
+DRY_RUN=false
 
 # Zero arguments → show help and exit 1 (uninstall is destructive)
 if [[ $# -eq 0 ]]; then
@@ -73,6 +78,7 @@ case "$1" in
             case "$1" in
                 --i-have-saved-my-recovery-kit) I_HAVE_SAVED_RECOVERY_KIT=true; shift ;;
                 --force)                        FORCE=true;                      shift ;;
+                --dry-run)                      DRY_RUN=true;                    shift ;;
                 *)
                     echo "${RED}[ERROR]${RESET} Unknown option: '$1'" >&2
                     show_help
@@ -148,14 +154,62 @@ echo "   VaultWarden-OCI Full Uninstaller"
 echo "   Project dir       : ${PROJECT_DIR}"
 echo "   Project state dir : ${PROJECT_STATE_DIR}"
 echo "   Running as        : $(whoami)  (real user: ${REAL_USER})"
+if [[ "$DRY_RUN" == "true" ]]; then
+echo "   Mode              : DRY RUN — no changes will be made"
+fi
 echo "════════════════════════════════════════════════════════════"
 echo ""
+
+# W5-C4: In dry-run mode, show what would be removed and exit cleanly.
+if [[ "$DRY_RUN" == "true" ]]; then
+    warn "DRY RUN MODE — showing what would be removed:"
+    echo "  [1] Docker compose stack: ${PROJECT_DIR}/docker-compose.yml (down --volumes --remove-orphans)"
+    echo "  [2] Containers matching: vaultwarden caddy fail2ban postfix"
+    echo "  [3] Docker volumes with prefix: $(basename "${PROJECT_DIR}" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')_ or vaultwarden*"
+    echo "  [4] Docker networks matching: vaultwarden*"
+    echo "  [5] Systemd units: vaultwarden-*.service vaultwarden-*.timer"
+    echo "  [6] Env file: /etc/vaultwarden/vaultwarden.env"
+    echo "  [7] Age key: ${AGE_KEY_FILE} (if --i-have-saved-my-recovery-kit or --force)"
+    echo "  [8] Project directory: ${PROJECT_DIR}"
+    echo "  [9] State directory: ${PROJECT_STATE_DIR}"
+    echo ""
+    info "DRY RUN complete — no changes made. Remove --dry-run to perform the actual uninstall."
+    exit 0
+fi
+
 warn "This will PERMANENTLY DELETE all data, secrets, containers,"
 warn "volumes, and configuration created by VaultWarden-OCI."
 echo ""
 read -r -p "Type 'UNINSTALL' to confirm, or anything else to abort: " CONFIRM
 [[ "$CONFIRM" == "UNINSTALL" ]] || { info "Aborted — nothing changed."; exit 0; }
 echo ""
+
+# W5-C5 FIX: Offer a final encrypted backup before any destructive steps.
+# This ensures the operator has a chance to preserve data even if they forgot
+# to run a backup manually before uninstalling.
+if [[ -f "${PROJECT_DIR}/backup.sh" ]]; then
+    echo ""
+    echo "════════════════════════════════════════════════════════════"
+    warn "  PRE-DESTRUCTION BACKUP OFFER"
+    warn "  It is strongly recommended to take a final encrypted backup"
+    warn "  of your VaultWarden data before uninstalling."
+    echo "════════════════════════════════════════════════════════════"
+    echo ""
+    read -r -p "Run a final encrypted backup now? (yes/no): " _run_backup
+    if [[ "$_run_backup" == "yes" ]]; then
+        info "Running final full backup..."
+        if bash "${PROJECT_DIR}/backup.sh" run full 2>&1; then
+            success "Final backup completed. Check backup output above for the file location."
+        else
+            warn "Backup exited with errors. Review the output above."
+            read -r -p "Continue with uninstall despite backup failure? (yes/no): " _continue_anyway
+            [[ "$_continue_anyway" == "yes" ]] || { info "Aborted — nothing changed."; exit 0; }
+        fi
+    else
+        warn "Skipping final backup. Proceeding with uninstall..."
+    fi
+    echo ""
+fi
 
 # ═══════════════════════════════════════════════════════════════
 # UN-KEY1 / UN-KEY2 — Age encryption-key destruction guard

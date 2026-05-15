@@ -598,9 +598,13 @@ print(ph.hash(password))
 ")
             ;;
         cli)
-            local salt
-            salt=$(generate_secure_string 16)
-            hash=$(printf '%s' "$password" | argon2 "$salt" -id -t 3 -m 16 -p 4 -l 32 -e 2>/dev/null)
+            # W1-C5 FIX: The argon2 CLI requires the salt as a positional argument,
+            # which exposes it in `ps aux`. Refuse the CLI path and require Python.
+            # This prevents salt exposure via process listing.
+            log_error "W1-C5: argon2 CLI path disabled — salt would be visible in 'ps aux'."
+            log_error "Install the Python argon2-cffi library: pip install argon2-cffi"
+            log_error "  or: apt install python3-argon2"
+            return 1
             ;;
     esac
 
@@ -936,19 +940,26 @@ simple_verify_age_key() {
     current_group=$(_stat_group "$age_key" 2>/dev/null || echo "")
     current_owner_group="${current_owner}:${current_group}"
     if [[ -n "$current_owner" && "$current_owner_group" != "${real_user}:${real_group}" ]]; then
-        log_warn "Age key ownership was '${current_owner_group}' (expected '${real_user}:${real_group}') — auto-correcting"
-        if [[ "$(id -u)" -eq 0 ]]; then
-            chown "${real_user}:${real_group}" "$age_key" 2>/dev/null || \
-                log_warn "Could not restore ownership of $age_key to ${real_user}:${real_group}"
+        # W1-M4 FIX: If real_user resolved to "root" (fallback), skip chown to
+        # avoid locking out the service user by setting ownership to root:root.
+        if [[ "$real_user" == "root" ]]; then
+            log_warn "W1-M4: real user resolved to 'root' — skipping chown to avoid locking out the service account."
+            log_warn "       Re-run as the service user or with SUDO_USER set to fix ownership manually."
         else
-            log_warn "Cannot correct ownership of $age_key — re-run with sudo (sudo make key-health)"
+            log_warn "Age key ownership was '${current_owner_group}' (expected '${real_user}:${real_group}') — auto-correcting"
+            if [[ "$(id -u)" -eq 0 ]]; then
+                chown "${real_user}:${real_group}" "$age_key" 2>/dev/null || \
+                    log_warn "Could not restore ownership of $age_key to ${real_user}:${real_group}"
+            else
+                log_warn "Cannot correct ownership of $age_key — re-run with sudo (sudo make key-health)"
+            fi
         fi
     elif [[ -n "$current_owner" ]]; then
         # Ownership is already correct — no action needed.
         :
     else
-        # Could not read ownership at all — attempt chown only if root.
-        if [[ "$(id -u)" -eq 0 ]]; then
+        # Could not read ownership at all — attempt chown only if root and real_user is not root.
+        if [[ "$(id -u)" -eq 0 && "$real_user" != "root" ]]; then
             chown "${real_user}:${real_group}" "$age_key" 2>/dev/null || \
                 log_warn "Could not restore ownership of $age_key to ${real_user}:${real_group}"
         else

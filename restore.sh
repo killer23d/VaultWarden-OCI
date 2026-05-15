@@ -1482,8 +1482,16 @@ restore_db() {
     fi
 
     log_info "Restoring database..."
-    if ! cp -f "$dec_db" "$db_path"; then
-        log_error "cp to live DB failed — rolling back..."
+    # W2-C3 FIX: Write to a temp file on the same filesystem as db_path, then
+    # atomically rename. This avoids leaving db_path in a partial-write state
+    # if the process is interrupted mid-copy.
+    local db_tmp
+    db_tmp="${db_path}.restore_$$_$(date +%s).tmp"
+    if cp -f "$dec_db" "$db_tmp" && mv "$db_tmp" "$db_path"; then
+        :
+    else
+        rm -f "$db_tmp" 2>/dev/null || true
+        log_error "atomic write to live DB failed — rolling back..."
         if [[ -n "$pre_restore_copy" && -f "$pre_restore_copy" ]]; then
             if cp -a "$pre_restore_copy" "$db_path"; then
                 log_warn "Rollback successful."
@@ -1531,12 +1539,11 @@ restore_full() {
 
     if [[ "$archive_format" == "absolute" ]]; then
         log_warn "Legacy archive format detected (version=1, absolute paths)."
-        if [[ "$SKIP_VERIFICATION" != "true" ]]; then
-            check_traversal_only "$dec_tar" || return 1
-            log_success "Archive traversal check passed (legacy format)."
-        else
-            log_warn "--skip-verification set: path traversal check BYPASSED on legacy archive."
-        fi
+        # W2-M4 FIX: Always run traversal check regardless of SKIP_VERIFICATION.
+        # Path traversal can lead to arbitrary file overwrite — this check must
+        # never be skipped, even with --skip-verification.
+        check_traversal_only "$dec_tar" || return 1
+        log_success "Archive traversal check passed (legacy format)."
         [[ "$DRY_RUN" == "true" ]] && { log_info "[DRY RUN] Would tar -xf to /"; return 0; }
         # shellcheck disable=SC2086
         tar $tar_filter -xf "$dec_tar" -C / --no-same-owner --no-same-permissions --no-overwrite-dir --no-unlink --delay-directory-restore
@@ -1595,8 +1602,18 @@ restore_full() {
         log_info "Promoting staged restore to live volume..."
         rsync -a --no-owner --no-group "$staging/$rel_state/" "$state_dir/" || {
             log_error "rsync of staged content to $state_dir failed."
-            log_error "Previous data snapshot at: $_snap_dir"
-            log_error "Manual recovery: rsync -a '${_snap_dir}/' '$state_dir/'"
+            log_error "Attempting automatic rollback from snapshot: $_snap_dir"
+            # W2-C6 FIX: Attempt to restore files from the pre-restore snapshot on
+            # rsync failure. This is best-effort — if rsync of the rollback also
+            # fails, detailed manual recovery instructions are provided.
+            if rsync -a --no-owner --no-group "${_snap_dir}/" "$state_dir/" 2>/dev/null; then
+                log_warn "Automatic rollback completed. Previous data restored from: $_snap_dir"
+                log_warn "Review logs and retry the restore when the issue is resolved."
+            else
+                log_error "CRITICAL: Automatic rollback ALSO failed."
+                log_error "Manual recovery:"
+                log_error "  rsync -a '${_snap_dir}/' '$state_dir/'"
+            fi
             return 1
         }
     else

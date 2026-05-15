@@ -262,8 +262,9 @@ setup_data_volume() {
             return 1
         }
         log_success "Formatted $device as ext4 (label: vw-data)"
-    elif [[ "$fs_type" == "ext4" ]]; then
-        log_info "Existing ext4 filesystem on $device — skipping format (idempotent)"
+    elif [[ "$fs_type" == "ext4" || "$fs_type" == "xfs" ]]; then
+        # W2-M7 FIX: Accept xfs as a supported filesystem alongside ext4.
+        log_info "Existing $fs_type filesystem on $device — skipping format (idempotent)"
     else
         log_error "Unexpected filesystem '$fs_type' on $device. Refusing to overwrite."
         log_error "To use a different device, update DATA_VOLUME_DEVICE in .env and re-run setup."

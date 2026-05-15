@@ -799,10 +799,24 @@ wait_for_services() {
         continue
       fi
 
-      if [[ "$health" != "healthy" && "$health" != "none" ]]; then
-        all_ready=false
-        status_parts+=("${service}:${health}")
-        continue
+      # W3-C2 FIX: VaultWarden must report health==healthy before it is
+      # considered ready. Accepting health==none for VaultWarden means the
+      # container starts without a healthcheck — which is a configuration error
+      # that would cause startup to proceed with an unhealthy service silently.
+      # Other services (caddy, fail2ban) are allowed to report health==none
+      # if they don't define a HEALTHCHECK in their Dockerfile.
+      if [[ "$service" == "vaultwarden" ]]; then
+        if [[ "$health" != "healthy" ]]; then
+          all_ready=false
+          status_parts+=("${service}:${health}")
+          continue
+        fi
+      else
+        if [[ "$health" != "healthy" && "$health" != "none" ]]; then
+          all_ready=false
+          status_parts+=("${service}:${health}")
+          continue
+        fi
       fi
 
       status_parts+=("${service}:ready")
@@ -886,6 +900,11 @@ show_status() {
 # ---------------------------------------------------------------------------
 main() {
   log_info "Starting VaultWarden-OCI startup workflow..."
+
+  # W3-M2 FIX: Add INT/TERM signal traps so that secrets are cleaned up and
+  # the exit code correctly reflects termination (130 for INT, 143 for TERM).
+  trap '_prepare_secrets_cleanup; exit 130' INT
+  trap '_prepare_secrets_cleanup; exit 143' TERM
 
   load_environment || exit 1
   require_project_state_ready || exit 1

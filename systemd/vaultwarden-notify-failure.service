@@ -9,9 +9,12 @@ ConditionPathExists=/etc/vaultwarden/vaultwarden.env
 Type=oneshot
 WorkingDirectory=/opt/vaultwarden-scripts
 EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
+# W3-C4 FIX: Pass the failed unit name via the systemd specifier %n (unit name).
+# %N gives the unescaped unit name. The inline script reads $FAILED_UNIT.
+# Previously hardcoded to "unknown-unit"; now set by systemd at trigger time.
+Environment=FAILED_UNIT=%N
 ExecStart=/bin/bash -c '\
   set -euo pipefail; \
-  FAILED_UNIT="unknown-unit"; \
   STATE_DIR="${PROJECT_STATE_DIR:?PROJECT_STATE_DIR not set — check /etc/vaultwarden/vaultwarden.env}"; \
   COOLDOWN_DIR="${STATE_DIR}/.vw-health-alert"; \
   mkdir -p "$COOLDOWN_DIR" 2>/dev/null || true; \

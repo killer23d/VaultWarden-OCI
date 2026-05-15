@@ -260,6 +260,17 @@ load_env_file() {
                       "— aborting load of '${env_file}'. Quote or escape the value."
             return 1
         fi
+        # W1-M2 FIX: Refuse to overwrite security-sensitive shell internals.
+        # PATH, LD_PRELOAD, LD_LIBRARY_PATH, and IFS can be weaponised by a
+        # malicious or misconfigured .env to hijack the shell's execution
+        # environment. These variables must never come from an untrusted file.
+        case "$key" in
+            PATH|LD_PRELOAD|LD_LIBRARY_PATH|IFS|BASH_ENV|ENV|CDPATH|PS4)
+                log_error "load_env_file: line ${lineno}: refusing to overwrite dangerous variable '${key}'" \
+                          "from ${env_file} — set it in the system environment instead."
+                return 1
+                ;;
+        esac
         # Warn (non-fatal) for chars that are unusual in config but legal
         if [[ "$value" == *';'* || "$value" == *'&'* ]]; then
             log_warn "load_env_file: line ${lineno}: value for '${key}' contains" \
@@ -1458,8 +1469,10 @@ setup_error_trap() {
 
 setup_cleanup_trap() {
     local cleanup_function="$1"
+    # W1-M6 FIX: Also register for ERR so cleanup runs when the script fails
+    # with a non-zero exit code, not only on normal exit or signal termination.
     # shellcheck disable=SC2064  # intentional: $cleanup_function expands at registration to capture the function name
-    trap "$cleanup_function" EXIT HUP INT TERM
+    trap "$cleanup_function" EXIT HUP INT TERM ERR
 }
 
 safe_execute() {

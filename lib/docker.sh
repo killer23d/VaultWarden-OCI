@@ -175,6 +175,18 @@ is_service_healthy() {
     [[ "$status" == "running" ]] && [[ "$health" =~ ^(healthy|none)$ ]]
 }
 
+# W3-C6 FIX: Strict health check — requires health==healthy, not just running.
+# Use this for services that MUST have a passing HEALTHCHECK (e.g. vaultwarden).
+# is_service_healthy() also accepts health==none (no healthcheck defined), which
+# is too permissive for critical services.
+is_service_strictly_healthy() {
+    local service="$1"
+    local status health
+    status=$(get_service_status "$service")
+    health=$(get_service_health "$service")
+    [[ "$status" == "running" ]] && [[ "$health" == "healthy" ]]
+}
+
 # Helper — returns 0 when a service has no HEALTHCHECK defined.
 # Used by wait_for_service_ready() to short-circuit the polling loop.
 _service_has_no_healthcheck() {

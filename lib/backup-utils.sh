@@ -216,44 +216,36 @@ validate_backup_integrity() {
     fi
 
     # ---------------------------------------------------------------------------
-    # Pass 1: age envelope + key check.
-    # Decrypt to /dev/null. Confirms the age header is intact and the
-    # supplied key can open the file. Does NOT validate the tar payload.
+    # W2-M6 FIX: Decrypt once to a temp file, then use it for both checks.
+    # The previous two-pass approach (decrypt to /dev/null + decrypt|tar)
+    # creates a TOCTOU window: the file on disk could change between the passes,
+    # making pass 2 fail even though pass 1 succeeded. A single decrypt also
+    # halves the CPU/IO cost for large backups.
     # ---------------------------------------------------------------------------
-    if ! age -d -i "$age_key_file" "$backup_file" > /dev/null 2>&1; then
-        log_error "Backup file decryption test failed (wrong key or corrupt age envelope)"
+    local _bku_tmpdir _dec_payload
+    _bku_tmpdir=$(mktemp -d -p /dev/shm 2>/dev/null || mktemp -d)
+    _dec_payload="$_bku_tmpdir/decrypted_payload"
+
+    local _age_rc=0
+    if ! age -d -i "$age_key_file" -o "$_dec_payload" "$backup_file" 2>/dev/null; then
+        _age_rc=$?
+        rm -rf "$_bku_tmpdir"
+        log_error "Backup file decryption failed (wrong key or corrupt age envelope, exit ${_age_rc})"
         return 1
     fi
 
-    # ---------------------------------------------------------------------------
-    # Pass 2: inner tar stream check.
-    # Pipe the decrypted bytes directly into `tar -tz` (list only, no
-    # extraction). This exercises the complete decrypt->untar path without
-    # writing any files or mutating any state.
-    #
-    # Capture both PIPESTATUS values in a subshell so that set -e in the
-    # outer script does not abort on the inner pipe failure before we can
-    # read the statuses and emit a specific error message.
-    # ---------------------------------------------------------------------------
-    local pipe_statuses
-    pipe_statuses=$(set +e; age -d -i "$age_key_file" "$backup_file" 2>/dev/null | tar -tz >/dev/null 2>&1; echo "${PIPESTATUS[*]}")
+    log_success "Decryption succeeded (age envelope intact)"
 
-    local age_status tar_status
-    read -r age_status tar_status <<< "$pipe_statuses"
-
-    if (( age_status != 0 )); then
-        # Should not happen: pass 1 already succeeded. Treat as a transient
-        # I/O error (e.g. the file was modified between the two reads).
-        log_error "Backup tar-stream check: age decryption failed on second read (file may have changed)"
-        return 1
-    fi
-
-    if (( tar_status != 0 )); then
+    # Inner tar stream check — list only, no extraction.
+    if ! tar -tz -f "$_dec_payload" >/dev/null 2>&1; then
+        rm -rf "$_bku_tmpdir"
         log_error "Backup tar-stream check failed: inner tar payload is corrupt or truncated"
-        log_error "  age decryption: OK  |  tar -tz: FAILED (exit ${tar_status})"
+        log_error "  age decryption: OK  |  tar -tz: FAILED"
         log_error "  The .age envelope is valid but the archive will not restore correctly."
         return 1
     fi
+
+    rm -rf "$_bku_tmpdir"
 
     log_success "Backup integrity validation passed (age envelope OK, tar stream OK)"
     return 0
@@ -501,6 +493,17 @@ cleanup_old_backups() {
     fi
 
     log_info "Cleaning up $backup_type backups older than $retention_days days"
+
+    # W2-C5 FIX: Before deleting any backups, count total .age files in the
+    # directory. If there is only one (or zero), abort deletion — otherwise the
+    # last good backup could be removed, leaving no recovery point.
+    local _total_age_files
+    _total_age_files=$(find "$backup_dir" -name "*.age" -type f 2>/dev/null | wc -l)
+    if (( _total_age_files <= 1 )); then
+        log_warn "cleanup_old_backups: only ${_total_age_files} backup file(s) found in $backup_dir —" \
+                 "skipping deletion to preserve the last available backup."
+        return 0
+    fi
 
     local deleted_count=0
 

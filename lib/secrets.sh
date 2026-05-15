@@ -295,10 +295,15 @@ check_placeholder_values() {
     local unreadable_secrets=()
     for secret in "${secrets_to_check[@]}"; do
         local value sops_stderr rc=0
+        # W1-C2 FIX: Decrypt once and reuse the value for both checks.
         # Suppress xtrace to prevent plaintext secret appearing in debug logs.
         { set +x; } 2>/dev/null
-        sops_stderr=$(sops -d --extract "[\"$secret\"]" "$secrets_file" 2>&1 >/dev/null) || rc=$?
+        local _tmp_sops_err
+        _tmp_sops_err=$(mktemp)
+        value=$(sops -d --extract "[\"$secret\"]" "$secrets_file" 2>"$_tmp_sops_err") || rc=$?
         if [[ $rc -ne 0 ]]; then
+            sops_stderr=$(cat "$_tmp_sops_err" 2>/dev/null || true)
+            rm -f "$_tmp_sops_err"
             log_error "check_placeholder_values: failed to read secret '$secret' from $secrets_file (sops exit $rc)"
             if [[ -n "${sops_stderr:-}" ]]; then
                 log_error "  sops error: $sops_stderr"
@@ -306,11 +311,7 @@ check_placeholder_values() {
             unreadable_secrets+=("$secret")
             continue
         fi
-        value=$(sops -d --extract "[\"$secret\"]" "$secrets_file" 2>/dev/null) || {
-            log_error "check_placeholder_values: internal error re-reading secret '$secret' after successful validation"
-            unreadable_secrets+=("$secret")
-            continue
-        }
+        rm -f "$_tmp_sops_err"
         if [[ "$value" =~ ^(CHANGE_ME|PLACEHOLDER_NOT_CONFIGURED) ]] || [[ -z "$value" ]]; then
             # One clear log_warn per placeholder key so the admin
             # sees an individual actionable line for each stale value.
@@ -829,6 +830,9 @@ generate_recovery_kit() {
 
     if [[ -f "$secrets_file" ]]; then
         if ! ensure_sops_env; then return 1; fi
+        # W1-C4 FIX: Guarantee cleanup_secrets_environment is called when this
+        # function returns, even if an error occurs mid-way through extraction.
+        trap 'cleanup_secrets_environment' RETURN
 
         vw_admin_hash=$(_grk_sops_extract admin_token              "$secrets_file")
         caddy_hash=$(_grk_sops_extract    admin_basic_auth_hash    "$secrets_file")
@@ -1071,7 +1075,23 @@ offer_recovery_kit_export() {
         log_warn "  RECOVERY KIT SAVED TO: $recovery_file"
         log_warn "  SAVE THIS FILE SECURELY AND DELETE IT WHEN DONE."
         log_warn "  It contains your Age private key and all credentials."
+        log_warn "  Auto-delete scheduled in 30 minutes via at(1) (if available)."
+        log_warn "  Manual delete: shred -fuz '$recovery_file'"
         log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        # W1-C1 FIX: Schedule auto-delete of the on-disk plaintext recovery kit
+        # so it does not persist indefinitely if the operator forgets to delete it.
+        local _rk_abs
+        _rk_abs="$(realpath "$recovery_file" 2>/dev/null || echo "$recovery_file")"
+        if command -v at >/dev/null 2>&1; then
+            if printf 'shred -fuz "%s" 2>/dev/null; rm -f "%s"\n' "$_rk_abs" "$_rk_abs" \
+                    | at "now + 30 minutes" 2>/dev/null; then
+                log_info "Auto-delete scheduled in 30 minutes for: $recovery_file"
+            else
+                log_warn "Could not schedule at(1) auto-delete — delete manually: shred -fuz '$recovery_file'"
+            fi
+        else
+            log_warn "at(1) not available — delete manually within 30 minutes: shred -fuz '$recovery_file'"
+        fi
     else
         log_error "Failed to write recovery kit to disk"
         return 1

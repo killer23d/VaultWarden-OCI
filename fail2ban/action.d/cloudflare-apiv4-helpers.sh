@@ -3,6 +3,13 @@
 # Shared helper functions sourced by actionban and actionunban in
 # cloudflare-apiv4.conf.  Never executed directly.
 #
+# W4-M7 FIX: This file is sourced by the fail2ban action shell. Adding
+# set -euo pipefail here guards against unbound variable or command failures
+# in the helpers going unnoticed. The caller (fail2ban action) runs under
+# its own shell; sourcing this file inherits these flags into that context,
+# which is the desired behaviour for defensive scripting.
+set -euo pipefail
+#
 # Callers MUST have set:
 #   CF_TOKEN   – Cloudflare API bearer token
 #
@@ -20,7 +27,10 @@ _CF_TMPDIR="/run/fail2ban/curl-cfg"
 # ---------------------------------------------------------------------------
 _cf_ensure_tmpdir() {
   if [ ! -d "$_CF_TMPDIR" ]; then
-    mkdir -p -m 0700 "$_CF_TMPDIR" 2>/dev/null || {
+    # SC2174 FIX: mkdir -p -m 0700 applies 0700 only to the final component;
+    # intermediate directories may be created with a less restrictive mode.
+    # Use mkdir -p without -m, then chmod to enforce 0700 on $_CF_TMPDIR itself.
+    mkdir -p "$_CF_TMPDIR" 2>/dev/null && chmod 0700 "$_CF_TMPDIR" 2>/dev/null || {
       echo "[cloudflare-apiv4] ERROR: cannot create secured tmpdir $_CF_TMPDIR" >&2
       return 1
     }
