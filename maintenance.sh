@@ -141,6 +141,7 @@ GLOBAL SUBCOMMAND:
     help                    Show this help
 
 EXAMPLES:
+    ./maintenance.sh help                         # Show this help
     ./maintenance.sh run                          # Full routine maintenance
     ./maintenance.sh run --comprehensive          # Full + firewall + DNS
     ./maintenance.sh run --comprehensive --email  # Full + notify on completion
@@ -472,7 +473,7 @@ run_deep_db_maintenance() {
     }
     trap '_deep_db_cleanup' RETURN
 
-    log_info "Step 0/5: Creating pre-maintenance safety backup..."
+    log_info "Step 1/6: Creating pre-maintenance safety backup..."
     local backup_ts_marker
     backup_ts_marker=$(mktemp) && touch "$backup_ts_marker"
     log_info "Invoking: $SCRIPT_DIR/backup.sh run db"
@@ -502,35 +503,35 @@ run_deep_db_maintenance() {
     log_info "Waiting for WAL to quiesce before maintenance..."
     _wait_wal_quiesce "$db_file" 30
 
-    log_info "Step 1/5: Checking database integrity..."
+    log_info "Step 2/6: Checking database integrity..."
     if ! sqlite3 "$db_file" "PRAGMA integrity_check;" | grep -q "ok"; then
         log_error "Integrity check FAILED. Aborting. Restarting services..."
         docker compose up -d vaultwarden; return 1
     fi
     log_success "Database integrity check passed"
 
-    log_info "Step 2/5: Committing WAL file (PRAGMA wal_checkpoint(TRUNCATE))..."
+    log_info "Step 3/6: Committing WAL file (PRAGMA wal_checkpoint(TRUNCATE))..."
     if sqlite3 "$db_file" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1; then
         log_success "WAL checkpointed"
     else
         log_warn "Could not checkpoint WAL. Proceeding."
     fi
 
-    log_info "Step 3/5: Optimizing database stats (PRAGMA optimize)..."
+    log_info "Step 4/6: Optimizing database stats (PRAGMA optimize)..."
     if sqlite3 "$db_file" "PRAGMA optimize;" >/dev/null 2>&1; then
         log_success "Optimization complete"
     else
         log_warn "Could not optimize. Proceeding."
     fi
 
-    log_info "Step 4/5: Reclaiming free space (VACUUM)... This may take a moment."
+    log_info "Step 5/6: Reclaiming free space (VACUUM)... This may take a moment."
     if ! sqlite3 "$db_file" "VACUUM;" >/dev/null 2>&1; then
         log_error "VACUUM FAILED. Aborting. Restarting services..."
         docker compose up -d vaultwarden; return 1
     fi
     log_success "Database VACUUM completed"
 
-    log_info "Step 5/5: Gathering statistics..."
+    log_info "Step 6/6: Gathering statistics..."
     local new_size new_bytes
     new_size=$(du -h "$db_file" | cut -f1)
     new_bytes=$(stat -c%s "$db_file" 2>/dev/null || echo "0")
@@ -955,7 +956,14 @@ update_dns_record() {
 
     # ── Step 1: get origin server's real public IP ────────────────────────
     local current_ip
-    current_ip=$(curl -s --max-time 10 https://checkip.amazonaws.com 2>/dev/null | tr -d '\n\r ') || true
+    # Try provider-neutral services first, fall back to checkip.amazonaws.com
+    current_ip=$(curl -s --max-time 10 https://api.ipify.org 2>/dev/null | tr -d '\n\r ') || true
+    if [[ -z "$current_ip" ]] || [[ ! "$current_ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        current_ip=$(curl -s --max-time 10 https://ifconfig.me 2>/dev/null | tr -d '\n\r ') || true
+    fi
+    if [[ -z "$current_ip" ]] || [[ ! "$current_ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        current_ip=$(curl -s --max-time 10 https://checkip.amazonaws.com 2>/dev/null | tr -d '\n\r ') || true
+    fi
     [[ -z "$current_ip" ]] && { log_error "Cannot determine current external IP"; return 1; }
     [[ ! "$current_ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] && {
         log_error "Invalid IP format: $current_ip"; return 1

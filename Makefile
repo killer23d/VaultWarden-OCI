@@ -48,7 +48,7 @@ DATA_DEVICE ?=
         update check-updates update-system update-dns \
         maintenance maintenance-full \
         db-maint db-backup \
-        install-systemd remove-systemd systemd-status systemd-validate timers \
+        install-systemd remove-systemd systemd-status systemd-validate timers schedule \
         breakglass-create breakglass-status breakglass-remove \
         dev-setup fix-permissions test test-config dry-run fmt lint shellcheck \
         info version shell config diagnose \
@@ -791,6 +791,17 @@ systemd-validate: ## Validate systemd unit files
 timers: ## Show scheduled systemd timer status
 	@echo "$(BLUE)Scheduled Timers:$(NC)"
 	@systemctl list-timers --all 2>/dev/null | grep -E "vaultwarden|ACTIVATES" || echo "  No vaultwarden timers found"
+
+schedule: ## Show vaultwarden timer schedules (next/last run times)
+	@echo "$(BLUE)VaultWarden Timer Schedules:$(NC)"
+	@if systemctl list-timers 'vaultwarden-*' --no-pager 2>/dev/null | grep -q vaultwarden; then \
+		systemctl list-timers 'vaultwarden-*' --no-pager 2>/dev/null; \
+	elif systemctl list-timers --all --no-pager 2>/dev/null | grep -q vaultwarden; then \
+		systemctl list-timers --all --no-pager 2>/dev/null | grep -E "vaultwarden|NEXT|LEFT|LAST|PASSED|UNIT|ACTIVATES"; \
+	else \
+		echo "  $(YELLOW)No vaultwarden timers found (systemd may not be running or units not installed)$(NC)"; \
+		echo "  Run 'sudo make install-systemd' to install timer units."; \
+	fi
 
 # ===========================================================================
 ##@ Break-Glass Admin
