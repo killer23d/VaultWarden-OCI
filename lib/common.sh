@@ -389,7 +389,7 @@ retry_with_backoff() {
         fi
     done
 
-    log_error "All $max_attempts attempts failed for command: $*"
+    log_error "All $max_attempts attempts failed for command: $1"
     return 1
 }
 
@@ -1525,6 +1525,7 @@ export -f _email_json_escape _email_bearer_post _email_driver_lookup
 export -f _email_driver_mailersend _email_driver_sendgrid _email_driver_mailgun
 export -f _email_driver_postmark _email_driver_resend _email_driver_postfix
 export -f _email_driver_cyberpersons
+export COLOR_RED COLOR_GREEN COLOR_YELLOW COLOR_BLUE COLOR_CYAN COLOR_RESET COLOR_BOLD
 export -f validate_email validate_domain validate_port validate_ip validate_url
 export -f setup_error_trap setup_cleanup_trap safe_execute
 export -f init_common_lib

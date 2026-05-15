@@ -567,6 +567,7 @@ check_argon2_support() {
         return 0
     fi
 
+    log_error "check_argon2_support: neither python3 argon2 module nor argon2 CLI is available"
     return 1
 }
 
@@ -886,6 +887,10 @@ validate_crypto_environment() {
 
     if ! has_command sops; then
         issues+=("sops command not available")
+    fi
+
+    if ! has_command openssl; then
+        issues+=("openssl command not available")
     fi
 
     if [[ -f "$DEFAULT_AGE_KEY_FILE" ]]; then
