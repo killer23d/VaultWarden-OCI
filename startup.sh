@@ -243,7 +243,7 @@ check_email_config_consistency() {
 load_environment() {
   log_info "Loading environment configuration..."
 
-  if [ -f ".env" ]; then
+  if [[ -f ".env" ]]; then
     # Permission check: if .env is not readable by the current user, fail early
     # with a clear, actionable error. This happens when setup.sh was run as root
     # without SUDO_USER set (e.g. sudo make setup) and get_real_user() fell back
@@ -857,8 +857,10 @@ run_health_check() {
   fi
 
   if [[ ! -x "./maintenance.sh" ]]; then
-    log_warn "maintenance.sh not executable or missing; skipping health check"
-    return 0
+    log_error "maintenance.sh not executable or missing; cannot run health check"
+    log_error "Ensure setup.sh has been run and scripts are correctly installed"
+    log_error "To skip this gate during recovery: ./startup.sh --skip-health"
+    return 1
   fi
 
   log_info "Running post-start health check..."

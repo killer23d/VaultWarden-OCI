@@ -483,7 +483,7 @@ run_in_service_full_env() {
 # run_in_service_full_env() for commands that require the full service
 # environment. This stub is retained only to produce an actionable error
 # message for any script that accidentally calls the old API.
-# NOTE: removed from export -f so subshells cannot inherit it silently.
+# NOTE: not exported via export -f so subshells cannot inherit it silently.
 run_in_service() {
     log_error "run_in_service() called from ${BASH_SOURCE[1]:-unknown}:${BASH_LINENO[0]:-?} — "\
               "use exec_oneshot_in_service() or run_in_service_full_env() instead."

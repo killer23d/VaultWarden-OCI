@@ -30,6 +30,8 @@ TMP_WORKDIR=$(mktemp -d -t vw_setup.XXXXXXXXXX) || {
 }
 umask "$old_umask"
 trap 'rm -rf "$TMP_WORKDIR"' EXIT
+trap 'rm -rf "${TMP_WORKDIR:-}"; exit 130' INT
+trap 'rm -rf "${TMP_WORKDIR:-}"; exit 143' TERM
 
 REQUIRED_LIBS=("lib/common.sh" "lib/crypto.sh" "lib/docker.sh" "lib/backup-utils.sh" "lib/secrets.sh" "lib/storage.sh")
 for lib in "${REQUIRED_LIBS[@]}"; do
@@ -285,6 +287,8 @@ fi
 validate_domain_secure() {
     local domain="$1"
     if [[ ${#domain} -gt 253 ]]; then return 1; fi
+    # Bare IPv4 addresses are rejected: production deployments require a proper
+    # domain name so that Caddy can obtain a TLS certificate via ACME/HTTPS.
     if [[ "$domain" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then return 1; fi
     if [[ ! "$domain" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then return 1; fi
     return 0
