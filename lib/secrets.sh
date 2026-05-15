@@ -17,7 +17,9 @@ _SECRETS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${_SECRETS_LIB_DIR}/crypto.sh"
 unset _SECRETS_LIB_DIR
 
-set -euo pipefail
+# Do NOT set -euo pipefail here — callers own their shell options.
+# Entry-point scripts apply these options via init_common_lib(); this library
+# is always sourced after that call.
 
 # Configuration
 SECRETS_FILE="${SECRETS_FILE:-secrets/secrets.yaml}"

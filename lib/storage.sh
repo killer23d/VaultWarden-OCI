@@ -18,8 +18,11 @@
 #                                  derived from PROJECT_STATE_DIR.
 
 [[ -n "${VAULTWARDEN_STORAGE_LIB_LOADED:-}" ]] && return 0
-set -euo pipefail
 readonly VAULTWARDEN_STORAGE_LIB_LOADED=1
+
+# Do NOT set -euo pipefail here — callers own their shell options.
+# Entry-point scripts apply these options via init_common_lib(); this library
+# is always sourced after that call.
 
 # ---------------------------------------------------------------------------
 # _storage_validate_paths
@@ -104,7 +107,11 @@ require_project_state_ready() {
 
     # ── Boot-only mode ────────────────────────────────────────────────────
     if [[ -z "$data_device" ]]; then
-        mkdir -p "$state_dir" 2>/dev/null || {
+        # Creating PROJECT_STATE_DIR may require root (e.g. under /var/lib).
+        is_root || { log_error "require_project_state_ready: must be run as root"; return 1; }
+        # install -d -m applies the mode atomically, bypassing umask and
+        # avoiding the chmod-after-mkdir race window.
+        install -d -m 750 "$state_dir" 2>/dev/null || {
             log_error "require_project_state_ready: cannot create PROJECT_STATE_DIR: $state_dir"
             return 1
         }
@@ -155,7 +162,8 @@ require_project_state_ready() {
     fi
 
     # Ensure PROJECT_STATE_DIR exists (idempotent).
-    mkdir -p "$state_dir" 2>/dev/null || {
+    is_root || { log_error "require_project_state_ready: must be run as root"; return 1; }
+    install -d -m 750 "$state_dir" 2>/dev/null || {
         log_error "require_project_state_ready: cannot create PROJECT_STATE_DIR: $state_dir"
         return 1
     }
@@ -185,6 +193,16 @@ setup_data_volume() {
     local mount_point="${DATA_VOLUME_MOUNT:-/mnt/vw-data}"
     local dry_run="${DRY_RUN:-false}"
 
+    # Normalize DRY_RUN: accept true/1/yes (case-insensitive) as canonical "true".
+    case "${dry_run,,}" in
+        true|1|yes)  dry_run="true" ;;
+        false|0|no|"") dry_run="false" ;;
+        *)
+            log_warn "DRY_RUN='${DRY_RUN:-}' is not recognised (valid: true/false) — treating as false (live run)"
+            dry_run="false"
+            ;;
+    esac
+
     if [[ -z "$device" ]]; then
         log_info "DATA_VOLUME_DEVICE not set — skipping data volume provisioning (boot-only mode)"
         return 0
@@ -209,8 +227,11 @@ setup_data_volume() {
 
     if [[ -z "$fs_type" ]]; then
         # Refuse to format a device that is currently mounted under any path.
+        # Use awk to extract the first field (device column) so that a device
+        # path that is a prefix of another (e.g. /dev/sdb vs /dev/sdba) does
+        # not produce a false match.
         if mountpoint -q "$mount_point" 2>/dev/null \
-            || grep -qF "$device" /proc/mounts 2>/dev/null; then
+            || awk '{print $1}' /proc/mounts 2>/dev/null | grep -qxF "$device"; then
             log_error "Refusing to format $device — it is currently mounted."
             log_error "Unmount it first, then re-run setup: sudo umount $mount_point"
             return 1
@@ -267,9 +288,26 @@ setup_data_volume() {
         || { log_error "Cannot determine UUID for $device — cannot write a safe fstab entry"; return 1; }
 
     if ! grep -qF "UUID=$dev_uuid" /etc/fstab 2>/dev/null; then
+        # Write to a temp file on the same filesystem, validate it has content,
+        # then atomically replace /etc/fstab. This avoids leaving a truncated
+        # fstab behind if the process is killed mid-write.
+        local fstab_tmp
+        fstab_tmp=$(mktemp /etc/fstab.vw-XXXXXX) \
+            || { log_error "Cannot create fstab temp file"; return 1; }
+        chmod 644 "$fstab_tmp"
+        if ! cp /etc/fstab "$fstab_tmp"; then
+            rm -f "$fstab_tmp"
+            log_error "Cannot copy /etc/fstab to temp file"
+            return 1
+        fi
         printf 'UUID=%s\t%s\text4\tnoatime,nofail,x-systemd.device-timeout=30s\t0\t2\n' \
-            "$dev_uuid" "$mount_point" >> /etc/fstab \
-            || { log_error "Failed to append to /etc/fstab"; return 1; }
+            "$dev_uuid" "$mount_point" >> "$fstab_tmp" \
+            || { rm -f "$fstab_tmp"; log_error "Failed to append new entry to fstab temp file"; return 1; }
+        if ! mv -- "$fstab_tmp" /etc/fstab; then
+            rm -f "$fstab_tmp"
+            log_error "Failed to atomically replace /etc/fstab"
+            return 1
+        fi
         log_success "fstab entry added (UUID=$dev_uuid, mount: $mount_point)"
         _storage_daemon_reload
     else
@@ -292,10 +330,20 @@ setup_data_volume() {
     #    require_project_state_ready. The uninstaller runs chattr -i before wipe.
     local sentinel="$mount_point/.vw-data-volume"
     if [[ ! -f "$sentinel" ]]; then
+        # Write to a temp file first so a crash mid-write never leaves a
+        # zero-byte or partial sentinel that would silently pass the guard check.
+        local sentinel_tmp
+        sentinel_tmp=$(mktemp "$mount_point/vw-data-volume-tmp.XXXXXX") \
+            || { log_error "Failed to create temp file for sentinel: $mount_point"; return 1; }
         printf 'VaultWarden-OCI data volume\nDevice: %s\nMounted: %s\nCreated: %s\n' \
-            "$device" "$mount_point" "$(date -Iseconds)" > "$sentinel" \
-            || { log_error "Failed to write sentinel: $sentinel"; return 1; }
-        chmod 444 "$sentinel"
+            "$device" "$mount_point" "$(date -Iseconds)" > "$sentinel_tmp" \
+            || { rm -f "$sentinel_tmp"; log_error "Failed to write sentinel temp file"; return 1; }
+        chmod 444 "$sentinel_tmp"
+        if ! mv -- "$sentinel_tmp" "$sentinel"; then
+            rm -f "$sentinel_tmp"
+            log_error "Failed to move sentinel into place: $sentinel"
+            return 1
+        fi
         if command -v chattr >/dev/null 2>&1; then
             chattr +i "$sentinel" 2>/dev/null \
                 || log_warn "chattr +i failed on sentinel — immutability not set (non-fatal; sentinel is still 444)"
@@ -328,6 +376,16 @@ install_docker_mount_guard() {
     local drop_in_file="$drop_in_dir/10-vaultwarden-data-volume.conf"
     local dry_run="${DRY_RUN:-false}"
 
+    # Normalize DRY_RUN (same convention as setup_data_volume).
+    case "${dry_run,,}" in
+        true|1|yes)  dry_run="true" ;;
+        false|0|no|"") dry_run="false" ;;
+        *)
+            log_warn "DRY_RUN='${DRY_RUN:-}' is not recognised (valid: true/false) — treating as false (live run)"
+            dry_run="false"
+            ;;
+    esac
+
     # ── Cleanup path (reverting to boot-only mode) ────────────────────────
     if [[ -z "${DATA_VOLUME_DEVICE:-}" ]]; then
         if [[ -f "$drop_in_file" ]]; then
@@ -353,15 +411,6 @@ install_docker_mount_guard() {
     mkdir -p "$drop_in_dir" \
         || { log_error "Cannot create systemd drop-in dir: $drop_in_dir"; return 1; }
 
-    # Idempotency: skip only when BOTH directives encode the current mount point.
-    # A file missing After= (written by an older version) must be overwritten.
-    if [[ -f "$drop_in_file" ]] \
-        && grep -qF "RequiresMountsFor=$mount_point" "$drop_in_file" 2>/dev/null \
-        && grep -qF "After="                         "$drop_in_file" 2>/dev/null; then
-        log_info "Docker mount guard already up to date for $mount_point (idempotent)"
-        return 0
-    fi
-
     # Derive the systemd mount unit name from the mount path.
     # systemd-escape --path --suffix=mount converts e.g. /mnt/vw-data
     # to mnt-vw\x2ddata.mount — the canonical unit name systemd tracks.
@@ -371,6 +420,16 @@ install_docker_mount_guard() {
         log_error "Ensure systemd-escape is available (package: systemd)"
         return 1
     }
+
+    # Idempotency: skip only when BOTH directives encode the CURRENT mount unit.
+    # A file that references an old mount unit (e.g. after the operator renamed
+    # DATA_VOLUME_MOUNT) must be regenerated, so we match the exact unit name.
+    if [[ -f "$drop_in_file" ]] \
+        && grep -qF "RequiresMountsFor=$mount_point" "$drop_in_file" 2>/dev/null \
+        && grep -qF "After=$mount_unit"              "$drop_in_file" 2>/dev/null; then
+        log_info "Docker mount guard already up to date for $mount_point (idempotent)"
+        return 0
+    fi
 
     # Write drop-in (overwrites stale entry if mount point changed).
     {
@@ -402,6 +461,13 @@ install_docker_mount_guard() {
 # ---------------------------------------------------------------------------
 vw_default_backup_dir() {
     local state_dir
-    state_dir="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
+    # get_config_value is provided by lib/common.sh. Fall back to the
+    # compile-time default if the function is not yet available (e.g. when
+    # storage.sh is sourced in isolation during unit tests).
+    if declare -f get_config_value >/dev/null 2>&1; then
+        state_dir="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
+    else
+        state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
+    fi
     printf '%s/backups' "$state_dir"
 }
