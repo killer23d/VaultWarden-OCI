@@ -16,16 +16,13 @@ services:
       # Development overrides
       LOG_LEVEL: debug
       EXTENDED_LOGGING: true
-      # FIX [OV-M1]: SHOW_PASSWORD_HINT and SIGNUPS_ALLOWED are development-only
-      # settings. A startup assertion guards against accidental use in production.
-      # If ENVIRONMENT=production is set, the container will refuse to start.
+      # Development-only settings; entrypoint aborts if ENVIRONMENT=production.
       SHOW_PASSWORD_HINT: true
       # Allow signups for testing
       SIGNUPS_ALLOWED: true
       # Reduce security for testing
       PASSWORD_ITERATIONS: 100000
-    # FIX [OV-M1]: Entrypoint wrapper aborts startup when ENVIRONMENT=production
-    # to prevent this override from silently activating in a prod compose chain.
+    # Entrypoint wrapper aborts when ENVIRONMENT=production.
     entrypoint:
       - sh
       - -c

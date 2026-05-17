@@ -58,7 +58,7 @@ VALIDATE_ONLY=false
 DRY_RUN=false
 FORCE=false
 
-# BG-L1: Configurable threshold (hours) after which the status subcommand warns the account is still active.
+# Threshold (hours) after which the status subcommand warns the account is still active.
 BREAKGLASS_MAX_AGE_HOURS="${BREAKGLASS_MAX_AGE_HOURS:-72}"
 
 # Auto-expiry: hours after creation before the account is automatically removed.
@@ -121,7 +121,7 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# BG-M1 FIX: validate_script_security()
+# validate_script_security()
 #
 # Two-tier enforcement:
 #   strict=true  → hard-fail on ANY permission/ownership deviation (validate subcommand)
@@ -143,7 +143,7 @@ validate_script_security() {
     fi
 
     # ------------------------------------------------------------------
-    # BG-M1: Always hard-fail if the script file is world-writable (o+w).
+    # Always hard-fail if the script file is world- or group-writable.
     # This check runs in every mode so an attacker cannot inject code by
     # making the file group- or world-writable between invocations.
     # ------------------------------------------------------------------
@@ -318,7 +318,7 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# LOW FIX: _notify_breakglass_event()
+# _notify_breakglass_event()
 #
 # Emits a notification via the same send_notification_email() / send_email()
 # path used by maintenance.sh health so breakglass activity is
@@ -615,7 +615,7 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# BG-M2 FIX: remove_breakglass_user()
+# remove_breakglass_user()
 # ---------------------------------------------------------------------------
 remove_breakglass_user() {
     if [[ "$DRY_RUN" == "true" ]]; then
@@ -732,7 +732,7 @@ reset_breakglass_password() {
 }
 
 # ---------------------------------------------------------------------------
-# BG-L1 FIX: _check_breakglass_account_age()
+# _check_breakglass_account_age()
 # ---------------------------------------------------------------------------
 _check_breakglass_account_age() {
     local home_dir="$1"
@@ -845,7 +845,7 @@ show_breakglass_status() {
 }
 
 # ---------------------------------------------------------------------------
-# MEDIUM FIX: _restart_after_disable()
+# _restart_after_disable()
 # ---------------------------------------------------------------------------
 _restart_after_disable() {
     local service="${1:-vaultwarden}"
@@ -873,7 +873,7 @@ _restart_after_disable() {
     return $_rc
 }
 
-# ENHANCED: Main function with proper error handling, exit strategy, and security validation
+# Main function with error handling and security validation
 main() {
     log_header "VaultWarden-OCI Break-Glass Admin Manager (Simple Mode)"
 

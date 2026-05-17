@@ -238,10 +238,7 @@ load_environment() {
   log_info "Loading environment configuration..."
 
   if [[ -f ".env" ]]; then
-    # Permission check: if .env is not readable by the current user, fail early
-    # with a clear, actionable error. This happens when setup.sh was run as root
-    # without SUDO_USER set (e.g. sudo make setup) and get_real_user() fell back
-    # to 'root', causing .env to be chowned root:root 600.
+    # Fail early when .env is unreadable so non-root tooling does not break later.
     if [[ ! -r ".env" ]]; then
       log_error ".env is not readable by the current user ($(id -un))."
       log_error "Fix ownership: sudo chown $(id -un):$(id -gn) .env"

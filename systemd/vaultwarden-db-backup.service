@@ -3,9 +3,7 @@ Description=VaultWarden Daily DB Backup
 Documentation=https://github.com/killer23d/VaultWarden-OCI
 After=docker.service network-online.target
 Requires=docker.service
-# W3-M4 FIX: Wait until the VaultWarden health service has confirmed the stack
-# is up before running a DB backup. This prevents the backup from racing with
-# a fresh container startup where the DB may still be in WAL replay.
+# Wait for the health service so DB backups do not race container startup.
 After=vaultwarden-health.service
 ConditionPathExists=/opt/vaultwarden-scripts/backup.sh
 OnFailure=vaultwarden-notify-failure.service
@@ -15,18 +13,15 @@ Type=oneshot
 WorkingDirectory=/opt/vaultwarden-scripts
 # Leading dash makes the file optional: the service starts even if
 # /etc/vaultwarden/vaultwarden.env does not yet exist (e.g. before
-# setup.sh --phase=systemd --install has run). Missing required vars are caught
+# setup.sh systemd install has run). Missing required vars are caught
 # and reported by the script itself.
 EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
 # If maintenance is running, skip this invocation and let the next timer tick
 # execute normally. This prevents backup/maintenance overlap without stopping
 # or deactivating the timer itself.
 ExecCondition=/bin/bash -c '! test -f /tmp/.vw_maintenance.lock'
-# NOTE: ExecStartPre lock removal removed. Unconditionally deleting the lock
-# before every run races with a manual 'backup.sh' invocation running
-# concurrently: the timer's ExecStartPre would delete the flock held by the
-# manual process, allowing both to proceed simultaneously.
-# The flock in backup.sh main() is the authoritative exclusive guard.
+# Keep locking in backup.sh only. Removing lock files from systemd would race
+# with manual backup.sh invocations and bypass flock protection.
 # NOTE: --email is intentionally omitted. Add it back once EMAIL_PROVIDER
 # credentials are configured:  sudo systemctl edit vaultwarden-db-backup.service
 # Failures are still reported via OnFailure=vaultwarden-notify-failure.service.

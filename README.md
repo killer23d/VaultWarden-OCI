@@ -171,7 +171,7 @@ The installed systemd timer schedule:
 | `vaultwarden-maintenance.timer` | 2 AM Sunday (weekly comprehensive) | `flock` — skips + logs if already running |
 | `vaultwarden-full-backup.timer` | 3 AM Sunday | Internal lock in `backup.sh`; email on failure via `OnFailure=` |
 | `vaultwarden-db-backup.timer` | 4 AM Mon–Sat | Internal lock in `backup.sh`; email on failure via `OnFailure=` |
-| `vaultwarden-health.timer` | Every 30 min | `--auto-recover --email`; self-heals and alerts |
+| `vaultwarden-health.timer` | Every 30 min | `maintenance.sh health --fix`; self-heals, failures notify via `OnFailure=` |
 | `vaultwarden-dns-update.timer` | Every hour | `flock` — skips + logs if already running |
 | `vaultwarden-firewall-update.timer` | Saturday 4 AM | `flock` — skips + logs if already running |
 

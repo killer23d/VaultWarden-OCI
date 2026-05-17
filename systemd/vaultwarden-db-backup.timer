@@ -10,10 +10,8 @@ OnFailure=vaultwarden-notify-failure.service
 
 
 [Timer]
-# "daily *-*-* 04:00:00" was invalid — two calendar expressions on one
-# directive. "daily" is a shorthand for "*-*-* 00:00:00"; combining it with
-# an explicit timestamp is rejected by systemd as a bad unit file setting.
-# Use a single explicit timestamp expression.
+# Use a single explicit timestamp expression; do not combine shorthand
+# calendar aliases with an explicit time in the same OnCalendar directive.
 OnCalendar=*-*-* 04:00:00
 Persistent=true
 # Ensure Docker is healthy before any boot-triggered catch-up fires.

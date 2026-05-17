@@ -171,7 +171,7 @@ _mv_on_err() {
 
 _mv_open_log() {
     # Determine log file path (--log-file overrides default).
-    # FIX #1: Log directory is always PROJECT_ROOT/logs — never PROJECT_STATE_DIR/logs.
+    # Keep logs under PROJECT_ROOT/logs, never PROJECT_STATE_DIR/logs.
     # PROJECT_STATE_DIR is the migration source and may be renamed or deleted mid-run
     # (step 6 rename_source / step 6a delete_source). Using PROJECT_ROOT keeps the log
     # file alive for the full duration of the migration, including --delete-source runs.
@@ -440,7 +440,7 @@ _mv_prompt_target() {
     printf '\n'
 }
 
-# ── FIX #6: Pre-flight summary box ───────────────────────────────────────────
+# ── Pre-flight summary box ───────────────────────────────────────────────────
 # Printed in main() after interactive prompts but before _mv_run_pipeline.
 # Gives the operator one final chance to review what the pipeline will do
 # and confirm — critical since the very next step stops Docker and may format a disk.
@@ -727,7 +727,7 @@ _mv_parse_args() {
                 log_error "--target is required when using --yes (non-interactive mode)."
                 exit 1
             fi
-            # FIX #7: --skip-stack-stop in --yes mode is ambiguous and unsafe.
+            # --skip-stack-stop with --yes is unsafe and is blocked.
             # The live-container guard in _mv_step_validate uses _mv_confirm_by_typing,
             # which is always interactive — but only fires if containers happen to be
             # running at check time. In --yes mode there is no operator present to catch
@@ -805,7 +805,7 @@ _mv_step_validate() {
         return 1
     }
 
-    # 5. FIX #4: Guard against --target being accidentally set to a raw device path.
+    # 5. Guard against --target being set to a raw device path.
     # dir-to-dir mode skips _mv_select_device when --target is provided, so passing
     # --target /dev/sdb (without --device) would hand a block device path to rsync
     # and silently overwrite it. Catch this early.
@@ -1303,10 +1303,8 @@ _mv_step_update_dropin() {
 }
 
 # ── Pipeline step 8a: Install Docker mount guard ──────────────────────────────
-# FIX #3: mount_guard is now step 8a, executed BEFORE step 9 (start).
-# Previously it ran after start_services, meaning the guard was not in place
-# for the very first Docker startup post-migration. On a cold boot after
-# migration the volume would not be guaranteed mounted before Docker started.
+# Run mount_guard before the first post-migration start so Docker always has
+# the data-volume mount guard in place.
 _mv_step_mount_guard() {
     _mv_log info "── mount_guard ───────────────────────────────────────────────────"
 
@@ -1549,7 +1547,7 @@ _mv_do_abort() {
 
     log_warn "Aborting migration. Attempting rollback in reverse order..."
 
-    # ── P4: Warn when block device was formatted but rsync did not complete ───
+    # ── Warn when block device was formatted but rsync did not complete ────────
     # The new volume is formatted-but-empty; source data is intact. On retry,
     # mountpoint will return true and format will be skipped — rsync restarts
     # from the beginning, which is safe. Make this explicit so the operator
@@ -1746,9 +1744,8 @@ _mv_run_pipeline() {
     fi
 
     # ── Execute pipeline steps in order ───────────────────────────────────────
-    # FIX #3: STEP_MOUNT_GUARD_DONE moved before STEP_START_DONE so the systemd
-    # unit that ensures the block volume is mounted before Docker starts is
-    # installed prior to the first post-migration stack startup.
+    # Keep STEP_MOUNT_GUARD_DONE before STEP_START_DONE so Docker gets the mount
+    # guard before the first post-migration startup.
     _mv_run_step STEP_VALIDATE_DONE       _mv_step_validate
     _mv_run_step STEP_BACKUP_DONE         _mv_step_backup_prompt
     _mv_run_step STEP_STOP_DONE           _mv_step_stop
@@ -1781,15 +1778,14 @@ main() {
         run)
             _mv_select_device         # interactive lsblk device picker (skips if --device set)
             _mv_prompt_target         # interactive mount point prompt (skips if --target set)
-            _mv_print_preflight_summary  # FIX #6: confirm before pipeline starts
+            _mv_print_preflight_summary  # Final confirmation before pipeline starts
             _mv_run_pipeline
             ;;
         resume)  _mv_run_pipeline --resume ;;
         status)  _mv_print_status ;;
         abort)   _mv_do_abort ;;
-        # FIX #2: verify subcommand restores source/target from the state file so
-        # it compares the correct pre/post-migration paths even after .env has been
-        # updated by step 7 (which changes PROJECT_STATE_DIR to the new target).
+        # verify restores source/target from state so comparisons stay correct after
+        # .env is updated to the new PROJECT_STATE_DIR.
         verify)
             if [[ -f "${_MV_STATE_FILE}" ]]; then
                 local _sv _tv

@@ -15,7 +15,7 @@ Type=oneshot
 WorkingDirectory=/opt/vaultwarden-scripts
 # Leading dash makes the file optional: the service starts even if
 # /etc/vaultwarden/vaultwarden.env does not yet exist (e.g. before
-# setup.sh --phase=systemd --install has run). Missing required vars are caught
+# setup.sh systemd install has run). Missing required vars are caught
 # and reported by the script itself.
 EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
 # If maintenance is running, skip this invocation and let the next timer tick

@@ -626,8 +626,8 @@ setup_user_permissions() {
     # Ensure the docker group exists before attempting usermod.
     # On OCI instances where Docker binaries are pre-installed but the daemon
     # has never been started, the package postinst may not have created the
-    # group yet (or it was stripped from the base image). This is the
-    # post-install step recommended by https://docs.docker.com/engine/install/linux-postinstall/
+    # group yet on some OCI images. This matches Docker's post-install guidance:
+    # https://docs.docker.com/engine/install/linux-postinstall/
     if ! getent group docker >/dev/null 2>&1; then
         log_info "'docker' group not found — creating it now"
         groupadd --system docker || return 1
@@ -1860,8 +1860,7 @@ _read_dotenv_value() {
 # SECRET_* env vars must NOT be exported during the collection
 # phase because they are visible in /proc/$$/environ to all subprocesses.
 # All secret values are stored exclusively in the local SECRETS associative
-# array.  The export loop that previously ran at the end of collect_secrets()
-# has been removed.  write_secrets() reads directly from SECRETS[key].
+# array. write_secrets() reads directly from SECRETS[key].
 #
 # Both AUTO_MODE and interactive paths delegate to lib/secrets.sh:
 #   - interactive  → collect_secret_field()        (prompts, hashes, validates)
@@ -3402,8 +3401,7 @@ main() {
     fi
     _setup_cleanup() {
         rm -f "$SETUP_LOCK_FILE" 2>/dev/null || true
-        # TMP_WORKDIR was created at script start (line 27); the trap set there
-        # is replaced by this one, so we must clean it up here.
+        # Clean TMP_WORKDIR here because this trap overrides the startup trap.
         rm -rf "$TMP_WORKDIR" 2>/dev/null || true
     }
     trap _setup_cleanup EXIT HUP INT TERM

@@ -16,7 +16,7 @@
 #   on the boot volume, bypassing the sentinel check in startup.sh.
 #
 #   Always use the systemd unit or 'make start' / 'sudo ./startup.sh' rather
-#   than 'docker compose up' directly.  setup.sh --phase=systemd --install
+#   than 'docker compose up' directly.  setup.sh systemd install
 #   writes a per-unit drop-in (After=<mount.unit>, RequiresMountsFor=<mount>)
 #   that enforces correct ordering when the service is managed by systemd.
 # ──────────────────────────────────────────────────────────────────────────────
@@ -165,9 +165,8 @@ services:
       SMTP_TIMEOUT: ${SMTP_TIMEOUT:-15}
       PUSH_RELAY_URI: ${PUSH_RELAY_URI:-https://push.bitwarden.com}
       PUSH_IDENTITY_URI: ${PUSH_IDENTITY_URI:-https://identity.bitwarden.com}
-      # CHANGED: _FILE vars are always set; files always exist (init creates placeholders).
-      # When PUSH_ENABLED=false, vaultwarden ignores these files entirely.
-      # To enable push: set PUSH_ENABLED=true and populate both secret files.
+      # _FILE vars are always set; init-permissions creates placeholder files.
+      # VaultWarden ignores them until PUSH_ENABLED=true and both secrets are populated.
       PUSH_INSTALLATION_ID_FILE: /run/secrets/push_installation_id
       PUSH_INSTALLATION_KEY_FILE: /run/secrets/push_installation_key
       DATABASE_MAX_CONNS: ${DATABASE_MAX_CONNS:-10}
@@ -249,8 +248,7 @@ services:
       DOMAIN: ${DOMAIN}
       TZ: ${TZ:-UTC}
       TLS_PROVIDER: ${TLS_PROVIDER:-cloudflare}
-      # CHANGED: Default to localhost-only if unset, preventing a silent deny-all
-      # that causes 403 on /admin with no obvious error message.
+      # Default to localhost-only when unset to avoid a silent deny-all on /admin.
       ADMIN_ALLOW_CIDR: ${ADMIN_ALLOW_CIDR:-127.0.0.1/32}
       PUSH_ENABLED: ${PUSH_ENABLED:-false}
 
