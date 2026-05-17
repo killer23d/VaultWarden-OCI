@@ -3,19 +3,9 @@
 # SECURITY DESIGN: Creates a targeted-privilege account with least-privilege sudoers.
 # Grants only the specific commands needed for emergency VaultWarden recovery.
 #
-# STORAGE GUARD: Intentionally NOT sourced here (lib/storage.sh /
-# require_project_state_ready() are deliberately absent).
-#
-# Rationale: This is a host-level recovery tool.  Its primary use case is
-# precisely the situation where something is wrong with the VaultWarden
-# deployment — including a missing or unmounted data volume.  Blocking on
-# storage state would make the tool unavailable during the failures it is
-# designed to recover from.
-#
-# Operational note: Actions that contact the running Docker stack
-# (e.g. _restart_after_disable) will fail gracefully if the stack is down
-# because the data volume is not mounted.  The failure message tells the
-# operator to investigate and re-run when the volume is available.
+# lib/storage.sh is intentionally not sourced here.
+# This is a host-level recovery tool, so it must stay usable even when the data
+# volume is missing and the VaultWarden stack cannot start.
 
 set -euo pipefail
 

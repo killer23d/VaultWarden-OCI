@@ -1,14 +1,11 @@
 #!/usr/bin/env bash
 # lib/common.sh - Core shared functions for VaultWarden-OCI-NG
 
-# Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_COMMON_LIB_LOADED:-}" ]] && return 0
 readonly VAULTWARDEN_COMMON_LIB_LOADED=1
 
-# Do NOT set -euo pipefail in a sourced library — callers own their shell options.
-# Entry-point scripts apply these options directly; init_common_lib() re-applies
-# them so callers that invoke it get consistent behaviour without the library
-# imposing options on scripts that source it without calling init_common_lib.
+# Sourced libraries do not change shell options; entry-point scripts own them.
+# Call init_common_lib() after sourcing when you want the standard script setup.
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$LIB_DIR/.." && pwd)"

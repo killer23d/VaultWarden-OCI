@@ -15,16 +15,7 @@ for _fn in log_error log_info log_success log_debug log_warn; do
 done
 unset _fn
 
-# ---------------------------------------------------------------------------
-# _format_bytes_human BYTES
-#
-# Formats a raw byte count as a human-readable MB string with one
-# decimal place, e.g. 1234567 → "1.2 MB". Pure bash integer arithmetic —
-# no numfmt (GNU-only), no awk floating-point, no bc dependency.
-#
-# Outputs to stdout. Returns 0. Input must be a non-negative integer; any
-# non-integer input is treated as 0.
-# ---------------------------------------------------------------------------
+# Format a byte count as a human-readable MB string without extra dependencies.
 _format_bytes_human() {
     local bytes="${1:-0}"
     [[ "$bytes" =~ ^[0-9]+$ ]] || bytes=0

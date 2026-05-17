@@ -3,7 +3,7 @@ Description=VaultWarden Daily DB Backup
 Documentation=https://github.com/killer23d/VaultWarden-OCI
 After=docker.service network-online.target
 Requires=docker.service
-# Wait for the health service so DB backups do not race container startup.
+# Wait for the health service so backups never race container startup.
 After=vaultwarden-health.service
 ConditionPathExists=/opt/vaultwarden-scripts/backup.sh
 OnFailure=vaultwarden-notify-failure.service
@@ -11,22 +11,13 @@ OnFailure=vaultwarden-notify-failure.service
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/vaultwarden-scripts
-# Leading dash makes the file optional: the service starts even if
-# /etc/vaultwarden/vaultwarden.env does not yet exist (e.g. before
-# setup.sh systemd install has run). Missing required vars are caught
-# and reported by the script itself.
+# Start even if /etc/vaultwarden/vaultwarden.env is not installed yet; backup.sh
+# reports missing required values itself.
 EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
-# If maintenance is running, skip this invocation and let the next timer tick
-# execute normally. This prevents backup/maintenance overlap without stopping
-# or deactivating the timer itself.
+# Skip this run if maintenance is active so backup and maintenance never overlap.
 ExecCondition=/bin/bash -c '! test -f /tmp/.vw_maintenance.lock'
-# Keep locking in backup.sh only. Removing lock files from systemd would race
-# with manual backup.sh invocations and bypass flock protection.
-# NOTE: --email is intentionally omitted. Add it back once EMAIL_PROVIDER
-# credentials are configured:  sudo systemctl edit vaultwarden-db-backup.service
-# Failures are still reported via OnFailure=vaultwarden-notify-failure.service.
-# --full-verification decrypts the archive and runs a structural integrity check
-# (SQLite PRAGMA or tar -tz) before the offsite rclone sync.
+# Keep locking in backup.sh so manual and timer-driven backups share one guard.
+# --email stays disabled until the admin configures alert delivery.
 ExecStart=/opt/vaultwarden-scripts/backup.sh run db --rclone --full-verification
 User=root
 StandardOutput=journal

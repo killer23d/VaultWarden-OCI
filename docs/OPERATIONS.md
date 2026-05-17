@@ -217,8 +217,7 @@ du -sh /var/lib/vaultwarden/logs/*
 
 ```bash
 ./backup.sh run db
-make backup        # defaults to TYPE=db if omitted
-make backup TYPE=db
+make backup        # database backup
 make db-backup     # alias
 
 # Features:
@@ -235,7 +234,6 @@ make db-backup     # alias
 ```bash
 ./backup.sh run full
 make backup-full
-make backup TYPE=full
 
 # Includes: database, config files, Caddy certificates, logs
 # Excludes: secrets (use backup.sh run emergency for those)
@@ -257,7 +255,6 @@ make backup TYPE=full
 ```bash
 ./backup.sh run emergency
 make backup-emergency
-make backup TYPE=emergency
 
 # Includes everything, including secrets — full disaster recovery
 # Retention: 90 days
@@ -506,14 +503,14 @@ utilities/create-breakglass-admin.sh create
 make breakglass-create
 
 # Check status
-utilities/create-breakglass-admin.sh list
+utilities/create-breakglass-admin.sh status
 make breakglass-status
 
 # Generate new password
 utilities/create-breakglass-admin.sh create --force
 
 # Remove when no longer needed
-utilities/create-breakglass-admin.sh revoke
+utilities/create-breakglass-admin.sh remove
 make breakglass-remove
 ```
 
@@ -532,14 +529,14 @@ make install-systemd
 
 | Schedule | Job |
 | :-- | :-- |
-| Mon–Sat 02:05 (+ 0–30 s jitter) | Comprehensive maintenance (Sunday skipped to avoid overlap with full backup) |
-| Daily 04:00 (+ 0–30 s jitter) | Database backup with fast verification + rclone sync |
+| Daily 02:05 (+ 0–30 s jitter) | Comprehensive maintenance |
+| Daily 04:00 (+ 0–60 s jitter) | Database backup with full verification + rclone sync |
 | Every 30 minutes | Health check with auto-recovery + email on failure |
 | Saturday 4 AM | Cloudflare firewall IP range update |
-| Sunday 3 AM | Weekly full backup with comprehensive verification + rclone sync |
+| Sunday 3 AM (+ 0–300 s jitter) | Weekly full backup with comprehensive verification + rclone sync |
 | Every hour | DNS A record update via `maintenance.sh update-dns` |
 
-> **Note:** Maintenance is intentionally skipped on Sunday to prevent overlap with the 3 AM full backup. `RandomizedDelaySec=30` on the database backup and maintenance timers spreads post-reboot catch-up bursts.
+> **Note:** Maintenance now runs every day and completes before the Sunday full-backup window. `RandomizedDelaySec` spreads catch-up work after a reboot so the timers do not stampede at once.
 
 ```bash
 # View installed timers (next trigger + last run)
@@ -552,7 +549,7 @@ make systemd-validate
 
 # Remove timers
 sudo ./setup.sh systemd remove
-make systemd-remove
+make remove-systemd
 
 # Re-run after pulling repo updates to keep /opt/ in sync
 sudo ./setup.sh systemd install
@@ -818,7 +815,7 @@ make status             # Show service status
 make health                        # Basic health check
 make health-quick                  # Fast sanity check (port + container only)
 make health AUTO_RECOVER=true      # With auto-recovery
-make health COMPREHENSIVE=true     # Comprehensive check
+make health-quick                 # Comprehensive check
 make health-email                  # Comprehensive + email
 make logs                          # All service logs (last 100 lines)
 make logs FOLLOW=true              # Follow / tail all service logs
@@ -833,12 +830,10 @@ make watch                         # Live status + quick health every 5 s
 make diagnose                      # Full diagnostic dump (versions, key, disk, containers, logs)
 
 # Backups
-make backup              # Database backup (TYPE=db default)
-make backup TYPE=full    # Full system backup
-make backup TYPE=emergency # Emergency recovery kit
-make backup-full         # Alias for TYPE=full
-make backup-emergency    # Alias for TYPE=emergency
-make db-backup           # Alias for TYPE=db
+make backup              # Database backup
+make backup-full         # Full system backup
+make backup-emergency    # Emergency recovery kit
+make db-backup           # Alias for make backup
 make backup-status       # Backup health summary (last run, size, retention, count)
 make list-backups        # List available backups
 make restore             # Interactive restore
@@ -872,7 +867,7 @@ make breakglass-remove   # Remove emergency admin
 make install-systemd     # Install systemd timer units
 make systemd-status      # Show status of all vaultwarden systemd units
 make systemd-validate    # Validate installed units match current repo scripts
-make systemd-remove      # Remove all vaultwarden systemd timer units
+make remove-systemd      # Remove all vaultwarden systemd timer units
 make timers              # List timers (next trigger + last run + .env schedule)
 
 # Uninstall

@@ -1,25 +1,6 @@
-# vaultwarden-iptables.service
-#
-# Applies VaultWarden NAT/DOCKER-USER iptables rules after Docker starts.
-#
-# WHY THIS EXISTS
-# ---------------
-# utilities/setup-iptables.sh is also called by startup.sh, but if the host reboots
-# and Docker recreates the DOCKER-USER chain on its own startup, any rules in
-# that chain are wiped. netfilter-persistent cannot
-# protect DOCKER-USER entries because Docker owns and rebuilds that chain.
-#
-# This unit runs AFTER docker.service so the DOCKER-USER chain already exists
-# when setup-iptables.sh inserts its ACCEPT rules, making the configuration
-# survive every host reboot deterministically.
-#
-# INSTALL
-# -------
-#   sudo cp systemd/vaultwarden-iptables.service /etc/systemd/system/
-#   sudo systemctl daemon-reload
-#   sudo systemctl enable --now vaultwarden-iptables.service
-#
-# Or use setup.sh systemd install, which handles this automatically.
+# Re-apply VaultWarden NAT and DOCKER-USER rules after Docker starts.
+# Docker rebuilds DOCKER-USER on boot, so this unit keeps the firewall policy
+# in place. Use `sudo ./setup.sh systemd install` to install it.
 
 [Unit]
 Description=VaultWarden iptables NAT and DOCKER-USER rules

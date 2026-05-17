@@ -1,8 +1,8 @@
 # Email Setup — VaultWarden-OCI
 
 This document covers the complete email delivery system: how it works, how to
-configure each tier, and how to set up the Postfix MTA sidecar for last-resort
-delivery.
+configure each delivery path, and how to keep the Postfix sidecar aligned with
+the SMTP settings.
 
 Related docs: [CONFIGURATION.md](CONFIGURATION.md) · [ADVANCED-CUSTOMIZATION.md](ADVANCED-CUSTOMIZATION.md) · [TROUBLESHOOTING.md](TROUBLESHOOTING.md)
 
@@ -11,23 +11,23 @@ Related docs: [CONFIGURATION.md](CONFIGURATION.md) · [ADVANCED-CUSTOMIZATION.md
 ## Architecture Overview
 
 Email is handled by **`lib/common.sh` (email functions)** — a pure bash + curl multi-provider
-chain. No mail daemon is required on the host. The delivery chain has three
-tiers attempted in order when `EMAIL_MODE=auto`:
+chain. No mail daemon is required for the normal API or SMTP paths. The
+delivery chain has three stages when `EMAIL_MODE=auto`:
 
 ```
                 ┌─────────────────────────────────────┐
                 │         lib/common.sh                │
                 │                                     │
-  EMAIL_MODE    │  Tier 1 ── HTTP API                 │  MailerSend, SendGrid,
+  EMAIL_MODE    │  Stage 1 ── HTTP API                │  MailerSend, SendGrid,
      =auto  ──► │           (curl + JSON)             │  Mailgun, Postmark,
                 │              │ fail                 │  Resend
                 │              ▼                      │
-                │  Tier 2 ── SMTP relay               │  Any SMTP relay
-                │           (curl smtps/starttls)     │  (no local daemon)
+                │  Stage 2 ── SMTP                    │  Direct relay or the
+                │           (curl smtps/starttls)     │  Postfix sidecar
                 │              │ fail                 │
                 │              ▼                      │
-                │  Tier 3 ── Host MTA                 │  Postfix sidecar
-                │           (mail binary / sendmail)  │  (boky/docker-postfix)
+                │  Stage 3 ── Host MTA                │  Local mail/sendmail
+                │           (mail binary / sendmail)  │  binary
                 └─────────────────────────────────────┘
 ```
 
@@ -115,7 +115,7 @@ SMTP_FROM_NAME=VaultWarden
 
 ---
 
-## Tier 2 — SMTP Relay (curl, no daemon)
+## Stage 2 — SMTP (direct relay or Postfix sidecar)
 
 Used automatically when `EMAIL_MODE=auto` and the API tier fails, or explicitly
 with `EMAIL_MODE=smtp`. This path uses `curl --url smtps://` or
@@ -166,12 +166,13 @@ the Postfix sidecar.
 
 ---
 
-## Tier 3 — Host MTA (Postfix sidecar)
+## Postfix Sidecar and Host-MTA Fallback
 
-The Postfix sidecar (`boky/docker-postfix`) acts as a last-resort MTA when
-both the API and SMTP relay tiers are unavailable, or when you explicitly set
-`EMAIL_MODE=host`. It also serves as the **only** email path for Fail2Ban,
-which calls the host `mail` binary targeting `127.0.0.1:587`.
+The Postfix sidecar (`boky/docker-postfix`) is the SMTP sidecar used when
+`SMTP_PASSWORD` is blank. It also remains the only SMTP path for the
+VaultWarden container and for Fail2Ban, which targets `127.0.0.1:587`.
+`EMAIL_MODE=host` is separate: it tries a local mail/sendmail binary on the
+host.
 
 ### How Fail2Ban uses Postfix
 
@@ -294,7 +295,7 @@ F2B_LOG_LEVEL=INFO
 F2B_DB_PURGE_AGE=1d
 F2B_MAX_RETRY=3
 F2B_DEST_MAIL=admin@yourdomain.com        # ← literal, not ${ADMIN_EMAIL}
-F2B_SENDER=fail2ban@vault.yourdomain.com  # ← literal, not fail2ban@${DOMAIN_NAME}
+F2B_SENDER=fail2ban@vault.yourdomain.com  # ← literal value, not another variable reference
 F2B_ACTION="%(action_mwl)s"               # email + Cloudflare ban
 ```
 
@@ -331,8 +332,8 @@ MAILGUN_DOMAIN=mg.yourdomain.com  # optional — set only if different from SMTP
 | :-- | :-- | :-- |
 | `auto` | Try API → SMTP → host MTA in order | Recommended for all deployments |
 | `api` | HTTP API only; error if token not set | API-only, no SMTP fallback desired |
-| `smtp` | SMTP relay only (curl) | No API provider; reliable SMTP relay |
-| `host` | Host MTA (Postfix) only | Postfix-only; legacy integration |
+| `smtp` | SMTP only (direct relay when `SMTP_PASSWORD` is set, otherwise the Postfix sidecar) | No API provider; reliable SMTP relay |
+| `host` | Host mail/sendmail only | Only when the host already has a working local MTA |
 
 ---
 
@@ -464,15 +465,15 @@ Use this to choose the right setup for your deployment:
 Do you want operational alert emails (backups, health, failures)?
   └─ Yes ──► Do you have a transactional email provider account?
                └─ Yes ──► Set EMAIL_MODE=auto, EMAIL_PROVIDER=<name>,
-               │           store <PROVIDER>_API_TOKEN in secrets.  ← RECOMMENDED
+               │           store `email_api_token` in secrets.  ← RECOMMENDED
                └─ No  ──► Do you have an SMTP relay (e.g., Gmail, Outlook)?
                             └─ Yes ──► Set EMAIL_MODE=smtp, fill SMTP_* in .env,
                             │          store smtp_password in secrets.
-                            └─ No  ──► Set EMAIL_MODE=host. Postfix sidecar
-                                        relays directly (requires open outbound
-                                        port 25 — blocked by OCI by default).
-                                        Consider requesting OCI port 25 unblock
-                                        or use an SMTP relay instead.
+                            └─ No  ──► Set EMAIL_MODE=host only if the host has
+                                        a working local mail/sendmail binary.
+                                        OCI blocks direct port 25 egress by
+                                        default, so an SMTP relay is usually the
+                                        safer choice.
 
 Do you need Fail2Ban ban notifications?
   └─ Yes ──► Postfix sidecar MUST be running regardless of EMAIL_MODE.

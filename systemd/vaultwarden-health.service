@@ -8,22 +8,15 @@ OnFailure=vaultwarden-notify-failure.service
 
 [Service]
 Type=oneshot
-# NOTE: The working directory and ExecStart path must match your actual install
-# directory. If you installed to a different location, update both
-# WorkingDirectory and ExecStart (and ConditionPathExists in [Unit]) to match.
-# Default install path used by setup.sh is /opt/vaultwarden-scripts.
+# Update these paths if you install the repo somewhere other than
+# /opt/vaultwarden-scripts.
 WorkingDirectory=/opt/vaultwarden-scripts
-# Leading dash makes the file optional: the service starts even if
-# /etc/vaultwarden/vaultwarden.env does not yet exist (e.g. before
-# setup.sh systemd install has run). Missing required vars are caught
-# and reported by the script itself.
+# Start even if /etc/vaultwarden/vaultwarden.env is not installed yet;
+# maintenance.sh reports missing required values itself.
 EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
-# If maintenance is running, skip this invocation and let the next timer tick
-# execute normally. This avoids false-negative health alerts during deep
-# maintenance windows without disabling the timer.
+# Skip health checks during maintenance so the timer does not raise false failures.
 ExecCondition=/bin/bash -c '! test -f /tmp/.vw_maintenance.lock'
-# --email is intentionally omitted here. Add it once EMAIL_API_TOKEN or
-# SMTP credentials are set in /etc/vaultwarden/vaultwarden.env.
+# Add --email only after alert delivery is configured.
 ExecStart=/opt/vaultwarden-scripts/maintenance.sh health --fix
 User=root
 StandardOutput=journal

@@ -9,16 +9,8 @@ readonly VAULTWARDEN_DOCKER_LIB_LOADED=1
 # Entry-point scripts apply these options via init_common_lib(); this library
 # is always sourced after that call.
 
-# ---------------------------------------------------------------------------
-# DOCKER_PROJECT_LABEL — project-scoped prune filter
-#
-# The cleanup_*() functions pass this value as a --filter argument to
-# `docker prune`. An empty or wrong value would match every object on the
-# host. We auto-detect the Compose project name at load time so that an
-# operator who renames the project (via the `name:` key in docker-compose.yml
-# or a different project directory) gets correct pruning automatically.
-# DOCKER_PROJECT_LABEL can be overridden in .env to bypass auto-detection.
-# ---------------------------------------------------------------------------
+# Prune only VaultWarden-OCI Docker objects.
+# Override DOCKER_PROJECT_LABEL in .env if this host uses a non-default Compose project name.
 if [[ -z "${DOCKER_PROJECT_LABEL:-}" ]]; then
     _COMPOSE_PROJECT_NAME=""
     if command -v jq >/dev/null 2>&1; then

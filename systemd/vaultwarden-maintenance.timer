@@ -1,24 +1,15 @@
 [Unit]
 Description=VaultWarden Maintenance Timer Daily 02:05
-# Prevent this timer firing mid-shutdown.
+# Do not start maintenance during shutdown.
 After=
 Conflicts=shutdown.target
-# OnFailure on the timer unit catches calendar parse errors or
-# systemd activation failures that would otherwise go unnotified.
+# Notify on timer activation failures too, not just service failures.
 OnFailure=vaultwarden-notify-failure.service
 
 [Timer]
-# Offset from :00 to prevent lock collision with vaultwarden-dns-update.timer.
-# Both services acquire the operations lock; the 5-minute offset ensures the
-# dns-update run completes before maintenance attempts to acquire it.
-#
-# Changed from Mon-Sat to daily (*-*-*) so that SQLite WAL vacuum and Docker
-# image prune run every day, including Sunday — the day the weekly full backup
-# fires at 03:00. Without daily maintenance, WAL files and unused images
-# accumulate an extra day every week before that backup.
-# Overlap with db-backup (04:00) is prevented by Conflicts= in the
-# maintenance *service* unit (not here — a Conflicts= on a timer unit
-# deactivates the timer itself, which is incorrect).
+# Run after the hourly boundary so DNS updates can finish first.
+# Daily maintenance is safe because the service unit still blocks overlap with
+# backup jobs.
 OnCalendar=*-*-* 02:05:00
 # Set to false: maintenance is not critical to catch-up on reboot. When
 # Persistent=true, a reboot after extended downtime causes all timers with

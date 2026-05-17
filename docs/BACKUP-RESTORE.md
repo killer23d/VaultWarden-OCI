@@ -56,7 +56,7 @@ Orphaned sidecar files (`.meta`, `.sha256`) whose corresponding `.age` primary i
 ./backup.sh run db                        # default
 ./backup.sh run db --rclone               # with offsite sync
 ./backup.sh run db --email                # with email notification
-make backup TYPE=db                          # silent (no email)
+make backup                             # database backup via Makefile
 ```
 
 ### Full System Backup (Weekly)
@@ -65,7 +65,7 @@ make backup TYPE=db                          # silent (no email)
 ./backup.sh run full                      # fast checksum + decrypt probe
 ./backup.sh run full --full-verification  # end-to-end decrypt + integrity test
 ./backup.sh run full --full-verification --rclone --email
-make backup-full                             # full backup with email
+make backup-full                        # full backup via Makefile
 ```
 
 **Included:** Docker Compose config, `.env`, Caddy config, Fail2ban config, VaultWarden data directory, database snapshot.
@@ -76,7 +76,7 @@ make backup-full                             # full backup with email
 ```bash
 ./backup.sh run emergency                  # includes secrets + Age key
 ./backup.sh run emergency --full-verification --rclone --email
-make backup-emergency                         # emergency kit with email
+make backup-emergency                   # emergency kit via Makefile
 ```
 
 > ⚠️ Emergency kits contain your encryption keys. Store them securely offline.
@@ -202,8 +202,8 @@ rclone ls your_remote_name:vaultwarden_backups/
 
 | Timer | Schedule | Command |
 | :-- | :-- | :-- |
-| `vaultwarden-db-backup.timer` | Daily (Mon–Sat) | `backup.sh run db --rclone --email` |
-| `vaultwarden-full-backup.timer` | Weekly (Sunday) | `backup.sh run full --full-verification --rclone --email` |
+| `vaultwarden-db-backup.timer` | Daily 04:00 (+ 0–60 s jitter) | `backup.sh run db --rclone --full-verification` |
+| `vaultwarden-full-backup.timer` | Sunday 03:00 (+ 0–300 s jitter) | `backup.sh run full --rclone --full-verification` |
 
 Check timer status:
 
@@ -345,7 +345,7 @@ make key-rotate  # standalone key rotation (outside of restore)
 
 ```bash
 docker compose stop vaultwarden
-make restore-db    # prompts for backup and age key interactively
+make restore-db    # restores the latest DB backup and prompts for the age key
 make health
 ```
 

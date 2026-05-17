@@ -1,26 +1,22 @@
 # =============================================================================
 # DEVELOPMENT ONLY — DO NOT USE IN PRODUCTION
 # =============================================================================
-# This file is only for local testing/debugging.
-# It reduces security defaults and exposes extra localhost ports.
-# Production should run docker-compose.yml only.
-#
-# Usage:
-#   cp docker-compose.override.dev.yml.example docker-compose.override.yml
-#   docker compose --profile development up -d
+# Local development override only.
+# It weakens security defaults and exposes loopback-only ports.
+# Copy it to docker-compose.override.yml only on a workstation or test VM.
 # =============================================================================
 
 services:
   vaultwarden:
     environment:
-      # Development overrides
+      # Development-only logging and lower-cost settings
       LOG_LEVEL: debug
       EXTENDED_LOGGING: true
       # Development-only settings; entrypoint aborts if ENVIRONMENT=production.
       SHOW_PASSWORD_HINT: true
-      # Allow signups for testing
+      # Allow test signups
       SIGNUPS_ALLOWED: true
-      # Reduce security for testing
+      # Lower password cost for development only
       PASSWORD_ITERATIONS: 100000
     # Entrypoint wrapper aborts when ENVIRONMENT=production.
     entrypoint:
@@ -32,14 +28,14 @@ services:
           exit 1
         fi
         exec /start.sh
-    # Expose VaultWarden directly for testing (loopback only)
+    # Loopback-only test port
     ports:
       - "127.0.0.1:8082:80"
-    # Development volume mounts
+    # Development bind mounts
     volumes:
-      # Allow live editing of web vault for development
+      # Mount a local web vault build for UI testing
       - ./web-vault-dev:/web-vault:ro
-    # Remove resource limits for development
+    # Remove production resource limits
     deploy:
       resources: {}
     # LOG CAP: Larger than prod (debug verbosity). 50m x 5 = 250MB max.
@@ -70,21 +66,21 @@ services:
 
   postfix:
     environment:
-      # Development SMTP settings - relaxed TLS
+      # Relax SMTP TLS checks for development only
       - POSTFIX_smtp_tls_security_level=may  # Allow fallback for dev
       - POSTFIX_smtpd_tls_security_level=may
       - POSTFIX_debug_peer_level=2  # Enhanced debugging
       - POSTFIX_smtp_sasl_auth_enable=yes
-    # Expose SMTP port for testing (loopback only)
+    # Loopback-only SMTP test port
     ports:
       - "127.0.0.1:1025:587"  # Submission port — loopback only
-    # Development volume mounts
+    # Development bind mounts
     volumes:
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/postfix:/var/log/postfix
     # Remove resource limits for development
     deploy:
       resources: {}
-    # Override health check for development
+    # Faster health checks for local testing
     healthcheck:
       test: ["CMD", "nc", "-z", "localhost", "587"]
       interval: 10s
@@ -100,10 +96,10 @@ services:
 
   fail2ban:
     environment:
-      # Enhanced development logging
+      # Debug logging for local troubleshooting
       F2B_LOG_LEVEL: DEBUG
       F2B_LOG_TARGET: STDOUT
-    # Allow access to fail2ban logs
+    # Mount logs and config for local inspection
     volumes:
       - ${PWD}/fail2ban:/data/fail2ban:ro
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/fail2ban:/data/db
@@ -111,7 +107,7 @@ services:
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/vaultwarden:/var/log/vaultwarden:ro
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy:/var/log/caddy:ro
       - ${SSH_LOG_PATH:-/var/log/secure}:/var/log/ssh-auth.log:ro
-      # Development: Mount current directory for live config editing
+      # Mount the repo read-only for live config inspection
       - ${PWD}:/workspace:ro
     # Remove resource limits for development
     deploy:
@@ -249,7 +245,7 @@ services:
         max-size: "10m"
         max-file: "3"
 
-# Quick usage:
+# Quick start:
 #   docker compose --profile development up -d
 #   docker compose logs -f vaultwarden caddy postfix
-#   http://localhost:8025 for Mailpit (email-capture profile)
+#   http://localhost:8025 when the email-capture profile is enabled

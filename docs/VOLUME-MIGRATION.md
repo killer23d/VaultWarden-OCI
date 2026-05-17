@@ -266,7 +266,7 @@ If a migration fails or produces unexpected results:
 
 1. **Check status** — `sudo utilities/migrate-volume.sh status`
 2. **Abort if stuck** — `sudo utilities/migrate-volume.sh abort`
-3. **Restore from backup** — `./backup.sh restore <archive>` (see [BACKUP-RESTORE.md](BACKUP-RESTORE.md))
+3. **Restore from backup** — run `sudo ./restore.sh interactive --file <archive>` (see [BACKUP-RESTORE.md](BACKUP-RESTORE.md))
 4. **Reverse via dir-to-dir** — if the rsync completed but you want to revert, use the [block volume → boot volume reversal](#block-volume--boot-volume-reversal) flow described above
 5. **Update `.env`** — revert `DATA_VOLUME_MOUNT` to the original path and restart: `./startup.sh --force`
 

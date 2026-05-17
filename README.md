@@ -89,8 +89,6 @@ cd VaultWarden-OCI
 
 > **`--auto` vs `--use-latest`:** `setup.sh install --auto` is fully non-interactive and does not change container version pins. Pass `--use-latest` separately if you want all container image tags set to `latest` instead of the pinned versions in `.env`.
 
-> **`setup.sh` display fix:** The post-install checklist now correctly displays the bare domain name (`DOMAIN_NAME`) rather than the value of the `DOMAIN` variable, which may include the `https://` prefix.
-
 > **Separate data volume:** If you have a dedicated OCI block storage volume, pass `--data-device /dev/sdb` to provision it automatically. See [Separate Data Volume (Optional)](#separate-data-volume-optional) below.
 
 ---
@@ -144,8 +142,6 @@ Once healthy, switch the Cloudflare record to **Proxied (Orange Cloud)** and set
 
 > **`startup.sh` diagnostic improvement:** If the post-startup quiet health check exits non-zero, `startup.sh` now automatically re-runs `./maintenance.sh health` in verbose mode so full diagnostics are always visible to the operator.
 
-> **Health check fix:** Configuration validation now correctly checks for `DOMAIN_NAME` (the canonical env var) instead of `DOMAIN`.
-
 ---
 
 ### Step 5 — Finish Up (Recommended)
@@ -168,9 +164,9 @@ The installed systemd timer schedule:
 
 | Timer | Schedule | Protection |
 | :-- | :-- | :-- |
-| `vaultwarden-maintenance.timer` | 2 AM Sunday (weekly comprehensive) | `flock` — skips + logs if already running |
+| `vaultwarden-maintenance.timer` | 2:05 AM daily | `flock` — skips + logs if already running |
 | `vaultwarden-full-backup.timer` | 3 AM Sunday | Internal lock in `backup.sh`; email on failure via `OnFailure=` |
-| `vaultwarden-db-backup.timer` | 4 AM Mon–Sat | Internal lock in `backup.sh`; email on failure via `OnFailure=` |
+| `vaultwarden-db-backup.timer` | 4 AM daily | Internal lock in `backup.sh`; email on failure via `OnFailure=` |
 | `vaultwarden-health.timer` | Every 30 min | `maintenance.sh health --fix`; self-heals, failures notify via `OnFailure=` |
 | `vaultwarden-dns-update.timer` | Every hour | `flock` — skips + logs if already running |
 | `vaultwarden-firewall-update.timer` | Saturday 4 AM | `flock` — skips + logs if already running |
@@ -239,16 +235,16 @@ Email is handled by **`lib/common.sh`** (email functions) — a pure bash + curl
 Tier 1 ─ HTTP API       →  MailerSend, SendGrid, Mailgun, Postmark, Resend
            │ fail
            ▼
-Tier 2 ─ SMTP relay     →  curl smtps/starttls (no local daemon)
+Tier 2 ─ SMTP           →  direct relay or the Postfix sidecar on 127.0.0.1:587
            │ fail
            ▼
-Tier 3 ─ Host MTA       →  Postfix sidecar (boky/docker-postfix) on 127.0.0.1:587
+Tier 3 ─ Host MTA       →  local mail/sendmail binary
 ```
 
-Fail2Ban uses the Postfix sidecar (Tier 3) for ban notifications via the
-host-loopback `127.0.0.1:587` listener. The VaultWarden container also has its
-own SMTP client; its `VW_SMTP_*` values must point at the internal `postfix`
-service, not directly at the external relay.
+Fail2Ban uses the Postfix sidecar over host-loopback `127.0.0.1:587` for ban
+notifications. The VaultWarden container also talks to the internal `postfix`
+service via `VW_SMTP_*`; only the `SMTP_*` block changes when you switch
+upstream relays.
 
 **Minimum setup for operational alerts (all three tiers):**
 
@@ -263,7 +259,7 @@ SMTP_USERNAME=your-smtp-username
 SMTP_FROM=noreply@vault.yourdomain.com
 ALLOWED_SENDER_DOMAINS=vault.yourdomain.com
 F2B_DEST_MAIL=admin@yourdomain.com  # literal value — NOT ${ADMIN_EMAIL}
-F2B_SENDER=fail2ban@vault.yourdomain.com  # literal value — NOT fail2ban@${DOMAIN_NAME}
+F2B_SENDER=fail2ban@vault.yourdomain.com  # literal value — do not reference another .env variable
 
 # VaultWarden -> Postfix sidecar (internal Docker network; no auth/TLS here):
 VW_SMTP_HOST=postfix
@@ -367,9 +363,9 @@ Three backup tiers with encrypted output (Age key required to restore):
 
 | Tier | Schedule | Default retention |
 | :-- | :-- | :-- |
-| **Database snapshot** | Daily 4 AM (Mon–Sat) | 14 days |
-| **Full system archive** | Sunday 3 AM | 14 days |
-| **On-demand emergency** | Manual | 14 days |
+| **Database snapshot** | Daily 4 AM | 14 days |
+| **Full system archive** | Sunday 3 AM | 30 days |
+| **On-demand emergency** | Manual | 90 days |
 
 Retention is configurable: pass `--keep N` to `backup.sh` (N must be a positive integer), or edit `KEEP_DAYS` in `.env`. Example — keep 30 days of weekly full backups:
 ```bash
