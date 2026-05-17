@@ -437,7 +437,7 @@ exec_oneshot_in_service() {
 }
 
 # ---------------------------------------------------------------------------
-# run_in_service_full_env  (DOC-M1: new helper — full service environment)
+# run_in_service_full_env  — full service environment
 #
 # Unlike exec_oneshot_in_service(), this function uses `docker compose run
 # --rm` which inherits ALL service settings from docker-compose.yml:
@@ -465,7 +465,7 @@ run_in_service_full_env() {
     return 0
 }
 
-# run_in_service — DEPRECATED (DOC-L1): calling this function is now a hard
+# run_in_service — DEPRECATED: calling this function is now a hard
 # error. Use exec_oneshot_in_service() for image-only one-shots, or
 # run_in_service_full_env() for commands that require the full service
 # environment. This stub is retained only to produce an actionable error
@@ -502,7 +502,7 @@ cleanup_containers() {
 }
 
 # ---------------------------------------------------------------------------
-# cleanup_images  (IMG-R1 FIX)
+# cleanup_images
 #
 # Removes dangling (untagged) image layers that are older than 48 hours.
 #
@@ -533,7 +533,7 @@ cleanup_images() {
 }
 
 # ---------------------------------------------------------------------------
-# cleanup_volumes  (DOC-M2 FIX)
+# cleanup_volumes
 #
 # `docker volume prune --filter label=` was added in Docker Engine 25.0.
 # On older engines (Docker 20.x common on OCI free-tier) the flag is silently

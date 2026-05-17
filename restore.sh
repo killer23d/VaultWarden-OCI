@@ -1409,7 +1409,7 @@ restore_db() {
     fi
 
     log_info "Restoring database..."
-    # W2-C3 FIX: Write to a temp file on the same filesystem as db_path, then
+    # Write to a temp file on the same filesystem as db_path, then
     # atomically rename. This avoids leaving db_path in a partial-write state
     # if the process is interrupted mid-copy.
     local db_tmp
@@ -1466,7 +1466,7 @@ restore_full() {
 
     if [[ "$archive_format" == "absolute" ]]; then
         log_warn "Legacy archive format detected (version=1, absolute paths)."
-        # W2-M4 FIX: Always run traversal check regardless of SKIP_VERIFICATION.
+        # Always run traversal check regardless of SKIP_VERIFICATION.
         # Path traversal can lead to arbitrary file overwrite — this check must
         # never be skipped, even with --skip-verification.
         check_traversal_only "$dec_tar" || return 1
@@ -1530,7 +1530,7 @@ restore_full() {
         rsync -a --no-owner --no-group "$staging/$rel_state/" "$state_dir/" || {
             log_error "rsync of staged content to $state_dir failed."
             log_error "Attempting automatic rollback from snapshot: $_snap_dir"
-            # W2-C6 FIX: Attempt to restore files from the pre-restore snapshot on
+            # Attempt to restore files from the pre-restore snapshot on
             # rsync failure. This is best-effort — if rsync of the rollback also
             # fails, detailed manual recovery instructions are provided.
             if rsync -a --no-owner --no-group "${_snap_dir}/" "$state_dir/" 2>/dev/null; then

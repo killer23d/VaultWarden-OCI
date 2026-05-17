@@ -540,7 +540,7 @@ prepare_docker_secrets() {
   # This is consistent with lib/secrets.sh::write_secret_file() (chmod 600).
   umask 077
 
-  # W3-M8 FIX: Create the cache file inside the already-restricted secrets_dir
+  # Create the cache file inside the already-restricted secrets_dir
   # (mode 700) rather than the world-listable /tmp, eliminating the TOCTOU
   # window between mktemp and the subsequent chmod on a shared host.
   local cache_file
@@ -788,7 +788,7 @@ wait_for_services() {
         continue
       fi
 
-      # W3-C2 FIX: VaultWarden must report health==healthy before it is
+      # VaultWarden must report health==healthy before it is
       # considered ready. Accepting health==none for VaultWarden means the
       # container starts without a healthcheck — which is a configuration error
       # that would cause startup to proceed with an unhealthy service silently.
@@ -892,7 +892,7 @@ show_status() {
 main() {
   log_info "Starting VaultWarden-OCI startup workflow..."
 
-  # W3-M2 FIX: Add INT/TERM signal traps so that secrets are cleaned up and
+  # Add INT/TERM signal traps so that secrets are cleaned up and
   # the exit code correctly reflects termination (130 for INT, 143 for TERM).
   trap '_prepare_secrets_cleanup; exit 130' INT
   trap '_prepare_secrets_cleanup; exit 143' TERM

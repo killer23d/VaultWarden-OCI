@@ -255,12 +255,12 @@ if [[ "$CREATE_USER" == "true" && "$REMOVE_USER" == "true" ]]; then
     exit 1
 fi
 
-# STANDARDIZED: Check if user exists - returns exit code
+# Check if user exists — returns exit code
 check_user_exists() {
     id "$BREAKGLASS_USER" >/dev/null 2>&1
 }
 
-# STANDARDIZED: Generate secure password - returns exit code
+# Generate secure password — returns exit code
 generate_breakglass_password() {
     local password
     if password=$(generate_secure_password 32); then
@@ -341,7 +341,7 @@ _notify_breakglass_event() {
     if ! send_notification_email "$subject" "$body" 2>/dev/null; then
         log_warn "Breakglass event notification delivery failed (non-fatal)"
     fi
-    # W4-M5 FIX: Persist a durable syslog record regardless of email delivery
+    # Persist a durable syslog record regardless of email delivery
     # outcome.  logger(1) writes to the local syslog (journald on Ubuntu), which
     # survives email failures and provides an append-only audit trail.
     logger -t vaultwarden-breakglass \
@@ -439,7 +439,7 @@ schedule_auto_cleanup() {
         fi
     fi
 
-    # W4-M4 FIX: Abort rather than silently proceeding with a non-reboot-safe
+    # Abort rather than silently proceeding with a non-reboot-safe
     # background process.  The operator must pass --force to acknowledge the risk.
     # ------------------------------------------------------------------
     local sleep_seconds=$(( expiry_hours * 3600 ))
@@ -459,7 +459,7 @@ schedule_auto_cleanup() {
     return 0
 }
 
-# STANDARDIZED: Create break-glass user - returns exit code
+# Create break-glass user — returns exit code
 create_breakglass_user() {
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would create break-glass admin user: $BREAKGLASS_USER"
@@ -689,7 +689,7 @@ remove_breakglass_user() {
     return 0
 }
 
-# STANDARDIZED: Reset break-glass password - returns exit code
+# Reset break-glass password — returns exit code
 reset_breakglass_password() {
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would reset password for: $BREAKGLASS_USER"

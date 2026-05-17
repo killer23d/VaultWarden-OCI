@@ -584,7 +584,7 @@ print(ph.hash(password))
             # The argon2 CLI requires the salt as a positional argument,
             # which exposes it in `ps aux`. Refuse the CLI path and require Python.
             # This prevents salt exposure via process listing.
-            log_error "W1-C5: argon2 CLI path disabled — salt would be visible in 'ps aux'."
+            log_error "argon2 CLI path disabled — salt would be visible in 'ps aux'."
             log_error "Install the Python argon2-cffi library: pip install argon2-cffi"
             log_error "  or: apt install python3-argon2"
             return 1
@@ -921,7 +921,7 @@ simple_verify_age_key() {
         # If real_user resolved to "root" (fallback), skip chown to
         # avoid locking out the service user by setting ownership to root:root.
         if [[ "$real_user" == "root" ]]; then
-            log_warn "W1-M4: real user resolved to 'root' — skipping chown to avoid locking out the service account."
+            log_warn "Real user resolved to 'root' — skipping chown to avoid locking out the service account."
             log_warn "       Re-run as the service user or with SUDO_USER set to fix ownership manually."
         else
             log_warn "Age key ownership was '${current_owner_group}' (expected '${real_user}:${real_group}') — auto-correcting"

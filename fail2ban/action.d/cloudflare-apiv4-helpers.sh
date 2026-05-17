@@ -3,7 +3,7 @@
 # Shared helper functions sourced by actionban and actionunban in
 # cloudflare-apiv4.conf.  Never executed directly.
 #
-# W4-M7 FIX: This file is sourced by the fail2ban action shell. Adding
+# This file is sourced by the fail2ban action shell. Adding
 # set -euo pipefail here guards against unbound variable or command failures
 # in the helpers going unnoticed. The caller (fail2ban action) runs under
 # its own shell; sourcing this file inherits these flags into that context,
