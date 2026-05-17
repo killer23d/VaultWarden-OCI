@@ -9,9 +9,7 @@ ConditionPathExists=/etc/vaultwarden/vaultwarden.env
 Type=oneshot
 WorkingDirectory=/opt/vaultwarden-scripts
 EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
-# W3-C4 FIX: Pass the failed unit name via the systemd specifier %n (unit name).
-# %N gives the unescaped unit name. The inline script reads $FAILED_UNIT.
-# Previously hardcoded to "unknown-unit"; now set by systemd at trigger time.
+# Pass the failed unit name from systemd to the inline notifier script.
 Environment=FAILED_UNIT=%N
 ExecStart=/bin/bash -c '\
   set -euo pipefail; \

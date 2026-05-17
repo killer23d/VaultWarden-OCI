@@ -11,14 +11,11 @@ Type=oneshot
 WorkingDirectory=/opt/vaultwarden-scripts
 # Leading dash makes the file optional: the service starts even if
 # /etc/vaultwarden/vaultwarden.env does not yet exist (e.g. before
-# setup.sh --phase=systemd --install has run). Missing required vars are caught
+# setup.sh systemd install has run). Missing required vars are caught
 # and reported by the script itself.
 EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
-# W3-M5 FIX: Removed ExecStartPre that unconditionally deleted the backup lock.
-# That created a race condition with concurrent manual backup.sh invocations.
-# The flock in backup.sh main() is the authoritative exclusive guard.
-# W3-M6 FIX: Add ExecCondition to skip this unit when maintenance is active,
-# matching the same guard that vaultwarden-db-backup.service already has.
+# backup.sh flock is the exclusive backup guard.
+# Skip this run when maintenance is active to avoid overlap.
 ExecCondition=/bin/bash -c '! test -f /tmp/.vw_maintenance.lock'
 # NOTE: --email is intentionally omitted. Add it back once EMAIL_PROVIDER
 # credentials are configured:  sudo systemctl edit vaultwarden-full-backup.service

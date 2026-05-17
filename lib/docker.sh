@@ -370,17 +370,8 @@ exec_in_service() {
 # environment (env vars, volumes, networks) against a stopped service,
 # use run_in_service_full_env() instead.
 #
-# 'docker container start --attach' was replaced with a
-# start→wait→logs→rm sequence. Benefits:
-#   1. Decouples output capture from execution — no missed output on
-#      very fast-exiting containers.
-#   2. Container's stderr no longer mixes inline with host log_error output.
-#   3. Exit code is captured cleanly via 'docker container wait'.
-#
-# docker container start exit code is now checked explicitly.
-# If start fails (OOM, volume mount error, etc.) the orphaned container is
-# removed and the function returns 1 immediately instead of hanging forever
-# on docker container wait.
+# Uses start→wait→logs→rm so output and exit status are captured reliably.
+# If container start fails, the temporary container is removed immediately.
 # ---------------------------------------------------------------------------
 exec_oneshot_in_service() {
     local service="$1"

@@ -212,7 +212,7 @@ if [[ -f "${PROJECT_DIR}/backup.sh" ]]; then
 fi
 
 # ═══════════════════════════════════════════════════════════════
-# UN-KEY1 / UN-KEY2 — Age encryption-key destruction guard
+# Age encryption-key destruction guard
 #
 # secrets/keys/age-key.txt is the master decryption key for ALL
 # Age-encrypted backups.  Deleting it without a confirmed off-system
@@ -384,8 +384,7 @@ done
 # volume is mounted.  After a full uninstall this constraint is no longer valid
 # and must be removed so Docker can start normally.
 #
-# BUG FIX: this file was never removed by the uninstaller, leaving Docker in a
-# permanently broken state on separate-volume hosts after uninstall.
+# Remove this drop-in so Docker can start normally after uninstall.
 _DOCKER_DROP_IN="/etc/systemd/system/docker.service.d/10-vaultwarden-data-volume.conf"
 if [[ -f "$_DOCKER_DROP_IN" ]]; then
     rm -f "$_DOCKER_DROP_IN" && success "Removed Docker mount-guard drop-in: $_DOCKER_DROP_IN"
@@ -542,7 +541,7 @@ fi
 # ═══════════════════════════════════════════════════════════════
 # STEP 6 — Remove the cloned project directory (secrets, keys, config)
 #
-# UN-KEY2 FIX: second interactive confirmation gate.
+# Second interactive confirmation gate.
 #
 # If the age key was present, require the operator to type back the exact
 # Age public key fingerprint shown on screen before proceeding.  This is
@@ -646,11 +645,8 @@ fi
 # GPG key / runtime-data cleanup is likewise skipped because those artefacts
 # were not created by this project.
 #
-# BUG FIX: DOCKER_SENTINEL path is now derived from PROJECT_STATE_DIR
-# (see top of file).  The previous hardcoded path
-# /var/lib/vaultwarden/.docker_installed_by_setup was never found in
-# separate-volume mode, so Docker was silently left installed after every
-# full uninstall on those hosts.
+# Resolve DOCKER_SENTINEL from PROJECT_STATE_DIR so detection works in both
+# boot-volume and separate-volume installs.
 # ═══════════════════════════════════════════════════════════════
 info "Step 9: Removing Docker CE packages..."
 

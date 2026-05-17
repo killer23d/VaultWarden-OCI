@@ -575,7 +575,7 @@ do_view() {
 }
 
 # ---------------------------------------------------------------------------
-# MEDIUM FIX: _check_editor_forks()
+# _check_editor_forks()
 #
 # Detects known GUI/forking editors and warns the operator they must pass
 # a "wait" flag (e.g. --wait for VS Code) so the script does not re-encrypt
@@ -609,7 +609,7 @@ _check_editor_forks() {
 }
 
 # ---------------------------------------------------------------------------
-# MEDIUM FIX: _validate_editor_saved()
+# _validate_editor_saved()
 #
 # After the editor process exits, verifies the temp file is non-empty and
 # was actually modified (mtime changed). This catches the case where a
@@ -637,7 +637,7 @@ _validate_editor_saved() {
 }
 
 # ---------------------------------------------------------------------------
-# MEDIUM FIX: _validate_no_placeholders()
+# _validate_no_placeholders()
 #
 # Scans a decrypted YAML file for any values that start with PLACEHOLDER_
 # or equal PLACEHOLDER_NOT_CONFIGURED. Returns 1 (with a list of offending
@@ -1035,8 +1035,7 @@ PYEOF
 # _depth parameter prevents unbounded recursion when the
 # user repeatedly saves invalid YAML and chooses not to discard changes.
 #
-# MEDIUM FIX: Editor fork detection + post-edit file-size check added.
-# HIGH FIX: Encrypted output written atomically via temp file + mv.
+# Guards against forking editors and writes encrypted output atomically.
 do_edit() {
     local _depth="${1:-0}"
     if (( _depth > MAX_EDIT_ATTEMPTS )); then
@@ -1045,7 +1044,7 @@ do_edit() {
     fi
     log_info "Opening secrets with: ${EDITOR_CMD[*]}"
 
-    # MEDIUM FIX: Warn user if their editor is known to fork (return before save).
+    # Warn when the selected editor is known to fork before save.
     _check_editor_forks
 
     local temp_file
@@ -1121,7 +1120,7 @@ do_edit() {
         return 1
     fi
 
-    # MEDIUM FIX: Verify the file is non-empty and get the after-checksum.
+    # Verify the file is non-empty and capture the post-edit checksum.
     local after_checksum
     if ! after_checksum=$(_validate_editor_saved "$temp_file" "$before_checksum"); then
         return 1
@@ -1197,11 +1196,8 @@ do_edit() {
 # ---------------------------------------------------------------------------
 # Recovery kit export wrapper with placeholder validation
 #
-# MEDIUM FIX: Decrypt the file first; abort if any value is still a
-# PLACEHOLDER_* string — the kit would otherwise capture unconfigured values.
-#
-# HIGH FIX: tar archive created with --mode=0600 so the archive file is
-# always 0600 regardless of the calling process's umask.
+# Decrypt first and block export when placeholder values remain.
+# Recovery kit archive creation enforces mode 0600.
 # ---------------------------------------------------------------------------
 _export_recovery_kit_safe() {
     log_info "Validating secrets before recovery kit export..."
@@ -1234,7 +1230,7 @@ _export_recovery_kit_safe() {
         return 1
     fi
 
-    # MEDIUM FIX: Block export if any placeholder values remain.
+    # Block export if any placeholder values remain.
     if ! _validate_no_placeholders "$temp_plain"; then
         log_error "Aborting recovery kit export due to unconfigured secrets."
         return 1

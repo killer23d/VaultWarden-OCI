@@ -2034,9 +2034,8 @@ _check_backups() {
         return
     fi
 
-    # Check each backup type independently so that stale full backups are not
-    # masked by a recent db backup.  A daily db backup passing the 26 h check
-    # would previously hide a full backup that hadn't run in 45+ days.
+    # Check each backup type independently so stale full backups are not
+    # masked by a recent db backup from another backup type.
     local -A max_age_hours=([db]=26 [full]=168)  # db: 26 h; full: 7 days
 
     local any_found=false

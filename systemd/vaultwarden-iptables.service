@@ -5,8 +5,8 @@
 # WHY THIS EXISTS
 # ---------------
 # utilities/setup-iptables.sh is also called by startup.sh, but if the host reboots
-# and Docker recreates the DOCKER-USER chain on its own startup, any rules
-# previously inserted into that chain are wiped. netfilter-persistent cannot
+# and Docker recreates the DOCKER-USER chain on its own startup, any rules in
+# that chain are wiped. netfilter-persistent cannot
 # protect DOCKER-USER entries because Docker owns and rebuilds that chain.
 #
 # This unit runs AFTER docker.service so the DOCKER-USER chain already exists
@@ -19,7 +19,7 @@
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now vaultwarden-iptables.service
 #
-# Or use the provided setup.sh --phase=systemd which handles this automatically.
+# Or use setup.sh systemd install, which handles this automatically.
 
 [Unit]
 Description=VaultWarden iptables NAT and DOCKER-USER rules
