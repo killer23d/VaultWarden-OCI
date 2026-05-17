@@ -16,7 +16,6 @@ source "${SCRIPT_DIR}/lib/crypto.sh"
 source "${SCRIPT_DIR}/lib/secrets.sh"   # provides cleanup_secrets_environment()
 source "${SCRIPT_DIR}/lib/storage.sh"  # provides require_project_state_ready()
 
-# Configuration
 FORCE_RESTART=false
 SKIP_HEALTH_CHECK=false
 BACKGROUND=false
@@ -63,7 +62,6 @@ EOF
 }
 
 # Argument parsing — subcommand-first, then options.
-# 'stop' is the only positional subcommand.
 if [[ $# -gt 0 ]]; then
   case "$1" in
     stop)
@@ -97,7 +95,6 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# stop subcommand: stop all services and exit immediately
 if [[ "$DO_DOWN" == "true" ]]; then
   log_info "Stopping VaultWarden services..."
   docker compose down
@@ -237,13 +234,10 @@ check_email_config_consistency() {
   return 0
 }
 
-# ---------------------------------------------------------------------------
-# load_environment
-# ---------------------------------------------------------------------------
 load_environment() {
   log_info "Loading environment configuration..."
 
-  if [ -f ".env" ]; then
+  if [[ -f ".env" ]]; then
     # Permission check: if .env is not readable by the current user, fail early
     # with a clear, actionable error. This happens when setup.sh was run as root
     # without SUDO_USER set (e.g. sudo make setup) and get_real_user() fell back
@@ -280,13 +274,9 @@ load_environment() {
   fi
 }
 
-# ---------------------------------------------------------------------------
-# validate_prerequisites
-# ---------------------------------------------------------------------------
 validate_prerequisites() {
   log_info "Validating prerequisites..."
 
-  # Check required commands
   local required_commands=(docker openssl sops python3)
   local missing_commands=()
 
@@ -308,13 +298,11 @@ validate_prerequisites() {
     return 1
   fi
 
-  # Check docker daemon
   if ! docker info >/dev/null 2>&1; then
     log_error "Docker daemon is not running or not accessible"
     return 1
   fi
 
-  # Check compose file
   if [ ! -f "docker-compose.yml" ]; then
     log_error "docker-compose.yml not found"
     return 1
@@ -374,13 +362,11 @@ prepare_log_directories() {
     return 0
   fi
 
-  # Create base project state directory
   if ! _maybe_sudo mkdir -p "$project_state_dir"; then
     log_error "Failed to create base state directory: $project_state_dir"
     return 1
   fi
 
-  # Create log subdirectories with correct ownership
   log_info "Creating log subdirectories with correct permissions..."
   if ! _maybe_sudo mkdir -p "${project_state_dir}/logs"/{vaultwarden,caddy,fail2ban,postfix}; then
     log_warn "Failed to create log subdirectories (init container will try)"
@@ -554,7 +540,7 @@ prepare_docker_secrets() {
   # This is consistent with lib/secrets.sh::write_secret_file() (chmod 600).
   umask 077
 
-  # W3-M8 FIX: Create the cache file inside the already-restricted secrets_dir
+  # Create the cache file inside the already-restricted secrets_dir
   # (mode 700) rather than the world-listable /tmp, eliminating the TOCTOU
   # window between mktemp and the subsequent chmod on a shared host.
   local cache_file
@@ -802,7 +788,7 @@ wait_for_services() {
         continue
       fi
 
-      # W3-C2 FIX: VaultWarden must report health==healthy before it is
+      # VaultWarden must report health==healthy before it is
       # considered ready. Accepting health==none for VaultWarden means the
       # container starts without a healthcheck — which is a configuration error
       # that would cause startup to proceed with an unhealthy service silently.
@@ -857,8 +843,10 @@ run_health_check() {
   fi
 
   if [[ ! -x "./maintenance.sh" ]]; then
-    log_warn "maintenance.sh not executable or missing; skipping health check"
-    return 0
+    log_error "maintenance.sh not executable or missing; cannot run health check"
+    log_error "Ensure setup.sh has been run and scripts are correctly installed"
+    log_error "To skip this gate during recovery: ./startup.sh --skip-health"
+    return 1
   fi
 
   log_info "Running post-start health check..."
@@ -904,7 +892,7 @@ show_status() {
 main() {
   log_info "Starting VaultWarden-OCI startup workflow..."
 
-  # W3-M2 FIX: Add INT/TERM signal traps so that secrets are cleaned up and
+  # Add INT/TERM signal traps so that secrets are cleaned up and
   # the exit code correctly reflects termination (130 for INT, 143 for TERM).
   trap '_prepare_secrets_cleanup; exit 130' INT
   trap '_prepare_secrets_cleanup; exit 143' TERM

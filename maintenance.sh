@@ -141,6 +141,7 @@ GLOBAL SUBCOMMAND:
     help                    Show this help
 
 EXAMPLES:
+    ./maintenance.sh help                         # Show this help
     ./maintenance.sh run                          # Full routine maintenance
     ./maintenance.sh run --comprehensive          # Full + firewall + DNS
     ./maintenance.sh run --comprehensive --email  # Full + notify on completion
@@ -308,7 +309,6 @@ _wait_wal_quiesce() {
     while (( waited < max_seconds )); do
         local busy_count
         busy_count=$(sqlite3 "$db_file" "PRAGMA wal_checkpoint(PASSIVE);" 2>/dev/null | awk -F'|' 'NR==1{print $2}' || echo "0")
-        # busy_count == 0 means no writer is blocking the checkpoint
         if [[ "$busy_count" == "0" ]]; then
             log_debug "WAL quiesced after ${waited}s (busy_count=0)"
             return 0
@@ -472,7 +472,7 @@ run_deep_db_maintenance() {
     }
     trap '_deep_db_cleanup' RETURN
 
-    log_info "Step 0/5: Creating pre-maintenance safety backup..."
+    log_info "Step 1/6: Creating pre-maintenance safety backup..."
     local backup_ts_marker
     backup_ts_marker=$(mktemp) && touch "$backup_ts_marker"
     log_info "Invoking: $SCRIPT_DIR/backup.sh run db"
@@ -502,35 +502,35 @@ run_deep_db_maintenance() {
     log_info "Waiting for WAL to quiesce before maintenance..."
     _wait_wal_quiesce "$db_file" 30
 
-    log_info "Step 1/5: Checking database integrity..."
+    log_info "Step 2/6: Checking database integrity..."
     if ! sqlite3 "$db_file" "PRAGMA integrity_check;" | grep -q "ok"; then
         log_error "Integrity check FAILED. Aborting. Restarting services..."
         docker compose up -d vaultwarden; return 1
     fi
     log_success "Database integrity check passed"
 
-    log_info "Step 2/5: Committing WAL file (PRAGMA wal_checkpoint(TRUNCATE))..."
+    log_info "Step 3/6: Committing WAL file (PRAGMA wal_checkpoint(TRUNCATE))..."
     if sqlite3 "$db_file" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1; then
         log_success "WAL checkpointed"
     else
         log_warn "Could not checkpoint WAL. Proceeding."
     fi
 
-    log_info "Step 3/5: Optimizing database stats (PRAGMA optimize)..."
+    log_info "Step 4/6: Optimizing database stats (PRAGMA optimize)..."
     if sqlite3 "$db_file" "PRAGMA optimize;" >/dev/null 2>&1; then
         log_success "Optimization complete"
     else
         log_warn "Could not optimize. Proceeding."
     fi
 
-    log_info "Step 4/5: Reclaiming free space (VACUUM)... This may take a moment."
+    log_info "Step 5/6: Reclaiming free space (VACUUM)... This may take a moment."
     if ! sqlite3 "$db_file" "VACUUM;" >/dev/null 2>&1; then
         log_error "VACUUM FAILED. Aborting. Restarting services..."
         docker compose up -d vaultwarden; return 1
     fi
     log_success "Database VACUUM completed"
 
-    log_info "Step 5/5: Gathering statistics..."
+    log_info "Step 6/6: Gathering statistics..."
     local new_size new_bytes
     new_size=$(du -h "$db_file" | cut -f1)
     new_bytes=$(stat -c%s "$db_file" 2>/dev/null || echo "0")
@@ -823,8 +823,8 @@ run_email_diagnostics() {
 update_firewall_ranges() {
     if [[ "$UPDATE_FIREWALL" != "true" ]]; then log_info "Skipping firewall update"; return 0; fi
     if [[ "$DRY_RUN"         == "true" ]]; then log_info "[DRY RUN] Would safely update Cloudflare IP ranges in firewall"; return 0; fi
-    # W5-C8 FIX: Only update Cloudflare IP ranges when the proxy is actually
-    # in use. Running this when CLOUDFLARE_PROXY_ENABLED != "true" would add
+    # Only update Cloudflare IP ranges when the proxy is actually in use.
+    # Running this when CLOUDFLARE_PROXY_ENABLED != "true" would add
     # Cloudflare's CIDRs to UFW unnecessarily, widening the attack surface.
     if [[ "${CLOUDFLARE_PROXY_ENABLED:-false}" != "true" ]]; then
         log_info "Skipping Cloudflare IP range firewall update (CLOUDFLARE_PROXY_ENABLED is not 'true')"
@@ -861,7 +861,7 @@ update_firewall_ranges() {
         echo "$ufw_status" | grep -qE "^80(/tcp)?[[:space:]]+(ALLOW|ALLOW IN)[[:space:]].*${escaped_range}" && has_80=true
         echo "$ufw_status" | grep -qE "^443(/tcp)?[[:space:]]+(ALLOW|ALLOW IN)[[:space:]].*${escaped_range}" && has_443=true
         if [[ "$has_80" == "true" && "$has_443" == "true" ]]; then
-            return 0  # both rules already present
+            return 0
         fi
         if ufw allow proto tcp from "$range" to any port 80  comment "${label}" >/dev/null 2>&1 && \
            ufw allow proto tcp from "$range" to any port 443 comment "${label}" >/dev/null 2>&1; then
@@ -920,7 +920,7 @@ update_firewall_ranges() {
         | sort -rn
     )
     for rule_num in "${old_rule_nums[@]}"; do
-        # W5-M4 FIX: Use ufw --force delete instead of piping "y" to ufw delete.
+        # Use ufw --force delete instead of piping "y" to ufw delete.
         # The pipe approach is fragile and triggers SC2095. --force suppresses
         # the interactive confirmation cleanly.
         [[ -n "$rule_num" ]] && ufw --force delete "$rule_num" >/dev/null 2>&1 && ((removed_count++))
@@ -955,14 +955,21 @@ update_dns_record() {
 
     # ── Step 1: get origin server's real public IP ────────────────────────
     local current_ip
-    current_ip=$(curl -s --max-time 10 https://checkip.amazonaws.com 2>/dev/null | tr -d '\n\r ') || true
+    # Try provider-neutral services first, fall back to checkip.amazonaws.com
+    current_ip=$(curl -s --max-time 10 https://api.ipify.org 2>/dev/null | tr -d '\n\r ') || true
+    if [[ -z "$current_ip" ]] || [[ ! "$current_ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        current_ip=$(curl -s --max-time 10 https://ifconfig.me 2>/dev/null | tr -d '\n\r ') || true
+    fi
+    if [[ -z "$current_ip" ]] || [[ ! "$current_ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        current_ip=$(curl -s --max-time 10 https://checkip.amazonaws.com 2>/dev/null | tr -d '\n\r ') || true
+    fi
     [[ -z "$current_ip" ]] && { log_error "Cannot determine current external IP"; return 1; }
     [[ ! "$current_ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] && {
         log_error "Invalid IP format: $current_ip"; return 1
     }
 
-    # ── Step 2: read Cloudflare API token (unchanged from original) ───────
-    # W5-C7 FIX: Check CF_TOKEN_FILE env var first before falling back to the
+    # ── Step 2: read Cloudflare API token ──────────────────────────────────
+    # Check CF_TOKEN_FILE env var first before falling back to the
     # hardcoded path. This allows operators to store the token at a custom location.
     local token_file
     token_file="${CF_TOKEN_FILE:-${SCRIPT_DIR}/secrets/.docker_secrets/caddy_cloudflare_dns_token}"
@@ -1171,8 +1178,6 @@ _load_env() {
 # run_health_check
 # ---------------------------------------------------------------------------
 run_health_check() {
-# Load environment.
-#
 _resolve_env_file() {
     local candidates=(
         "${SCRIPT_DIR}/.env"
@@ -1953,7 +1958,6 @@ _check_smtp() {
     local sidecar_host="${sidecar_addr%:*}"
     local sidecar_port="${sidecar_addr##*:}"
 
-    # Port probe
     local port_open=false
     if command -v nc >/dev/null 2>&1; then
         nc -z -w 3 "$sidecar_host" "$sidecar_port" >/dev/null 2>&1 && port_open=true
@@ -2217,7 +2221,7 @@ _send_notification() {
     return 0
 }
 
-# _notify_failures — fixed version
+# _notify_failures
 _notify_failures() {
     local alerted_any=false
 
@@ -2240,7 +2244,7 @@ _notify_failures() {
             "$alert_date" "$name" "${status^^}" "$message" \
             "$ALERT_COOLDOWN_SECONDS" "$(( ALERT_COOLDOWN_SECONDS / 60 ))"
 
-        # NOTE: clear_email_rate_limit removed from here.
+        # clear_email_rate_limit removed from here.
         # The flock/timestamp cooldown (above) is the deduplication layer.
         # Clearing the rate-limit stamp before sending defeated both guards
         # simultaneously on delivery failure, causing alert storms.
@@ -2264,7 +2268,7 @@ _notify_failures() {
     fi
 }
 
-# _notify_recovery — updated to use ALERT_RECOVERY_TTL via _acquire_alert_lock
+# _notify_recovery
 _notify_recovery() {
     [[ $failed -eq 0 && $warnings -eq 0 ]] || return 0
 
@@ -2661,7 +2665,6 @@ rollback_image_digests() {
         cur_id=$(docker inspect --format='{{.Id}}' "$image" 2>/dev/null || echo "")
 
         if [[ -z "$pre_id" ]]; then
-            # Image was not present before the pull; nothing to roll back to.
             log_info "  Skipping rollback for $image (was not present before pull)"
             continue
         fi
@@ -2671,7 +2674,6 @@ rollback_image_digests() {
             continue
         fi
 
-        # Image was updated during this run — restore the pre-pull tag.
         log_warn "  Restoring: $image → ${pre_id:7:12}..."
         if docker tag "$pre_id" "$image" 2>/dev/null; then
             log_warn "  Restored:  $image"
@@ -2763,13 +2765,11 @@ check_image_updates() {
         return 0
     fi
 
-    # from partial failure (some updated, some failed, return 2 — split risk).
     if (( updated > 0 )); then
         log_error "$failed image pull(s) FAILED after $updated succeeded — stack would be in a split-version state."
         return 2
     fi
 
-    # All pulls failed — nothing changed on disk.
     log_error "All $failed image pull(s) failed — no images were updated."
     return 1
 }
@@ -2792,7 +2792,6 @@ verify_image_digests() {
         digest=$(docker inspect --format='{{index .RepoDigests 0}}' "$image" 2>/dev/null | awk -F'@' '{print $2}' || echo "")
         if [[ -z "$digest" ]]; then
             log_warn "  No digest available for $image (local-only image?)"
-            # Count missing digests as failures so caller is notified.
             (( failed++ )) || true
         else
             log_info "  Digest integrity OK for $image (${digest:0:18}...)"
@@ -2849,8 +2848,6 @@ _update_main() {
 
     log_header "VaultWarden-OCI Update"
 
-    # (e.g. wrong permissions after git pull) is surfaced here rather than
-    # silently causing backup/maintenance failures later.
     check_age_key_health_for_update
 
     run_pre_update_backup || exit 1

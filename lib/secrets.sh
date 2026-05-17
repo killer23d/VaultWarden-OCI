@@ -1,7 +1,4 @@
 #!/usr/bin/env bash
-# P4 merge SKIPPED: combining backup-utils.sh (744 lines) + secrets.sh (~1098 lines)
-# would produce an ~1842-line file exceeding the maintainability threshold.
-# These libraries remain separate.
 # lib/secrets.sh - Shared secrets management functions
 # Used by edit-secrets.sh and setup.sh (--phase=secrets)
 #
@@ -11,7 +8,6 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     exit 1
 fi
 
-# Source crypto library for hash functions.
 # Use a private variable so we do not clobber the caller's SCRIPT_DIR.
 _SECRETS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${_SECRETS_LIB_DIR}/crypto.sh"
@@ -21,14 +17,10 @@ unset _SECRETS_LIB_DIR
 # Entry-point scripts apply these options via init_common_lib(); this library
 # is always sourced after that call.
 
-# Configuration
 SECRETS_FILE="${SECRETS_FILE:-secrets/secrets.yaml}"
 AGE_KEY_FILE="${AGE_KEY_FILE:-secrets/keys/age-key.txt}"
 SECRETS_BACKUP_DIR="${SECRETS_BACKUP_DIR:-secrets}"
 
-# ---------------------------------------------------------------------------
-# ensure_sops_env
-# ---------------------------------------------------------------------------
 ensure_sops_env() {
     local age_key="$AGE_KEY_FILE"
 
@@ -116,11 +108,8 @@ decrypt_secret() {
 
     if ! ensure_sops_env; then return 1; fi
 
-    # Use a single sops invocation. stderr goes to a mktemp file
-    # (cleaned up unconditionally via trap); stdout is captured as the value.
     local _tmp_err
     _tmp_err=$(mktemp) || { log_error "decrypt_secret: mktemp failed"; return 1; }
-    # Unconditional cleanup: remove the temp file whether we succeed or fail.
     # shellcheck disable=SC2064
     trap "rm -f '$_tmp_err'" RETURN
 
@@ -128,8 +117,6 @@ decrypt_secret() {
     # Suppress xtrace around secret decryption to prevent value
     # appearing in debug logs or core dumps via set -x output.
     { set +x; } 2>/dev/null
-    # Single sops call — stdout → value, stderr → temp file.
-    # The key file path is included in error output to aid disaster recovery.
     value=$(sops -d --extract "[\"$key\"]" "$secrets_file" 2>"$_tmp_err") || rc=$?
 
     # Unset key file path from environment so child processes do not inherit it.
@@ -147,7 +134,6 @@ decrypt_secret() {
     fi
 
     printf '%s' "$value"
-    # Unset plaintext value immediately after use.
     unset value
     return 0
 }
@@ -168,7 +154,7 @@ list_secrets() {
     # Suppress xtrace before sops to prevent the key file path
     # from appearing in trace output (bash -x / set -x logs).
     { set +x; } 2>/dev/null
-    # W1-M3 FIX: Decrypt once into a variable; parse from that in-memory copy
+    # Decrypt once into a variable; parse from that in-memory copy
     # rather than calling sops -d a second time (avoids double I/O and TOCTOU).
     local yaml_content _sops_err_file
     _sops_err_file=$(mktemp)
@@ -238,7 +224,6 @@ validate_secrets_yaml() {
     if ! ensure_sops_env; then return 1; fi
     local rc=0
     local sops_stderr
-    # Capture sops stderr for actionable diagnostics.
     sops_stderr=$(sops -d --output-type json "$secrets_file" 2>&1 >/dev/null) || rc=$?
     cleanup_secrets_environment
     if [[ $rc -ne 0 ]]; then
@@ -269,8 +254,6 @@ validate_required_secrets() {
         # secrets produce distinct diagnostic messages.
         sops_stderr=$(sops -d --extract "[\"$secret\"]" "$secrets_file" 2>&1 >/dev/null) || rc=$?
         if [[ $rc -ne 0 ]]; then
-            # One clear log_error per missing key so the admin sees
-            # an individual actionable line for each absent secret.
             log_error "validate_required_secrets: required secret '$secret' is missing or unreadable"
             missing_secrets+=("$secret")
             if [[ -n "${sops_stderr:-}" ]]; then
@@ -301,7 +284,7 @@ check_placeholder_values() {
     local unreadable_secrets=()
     for secret in "${secrets_to_check[@]}"; do
         local value sops_stderr rc=0
-        # W1-C2 FIX: Decrypt once and reuse the value for both checks.
+        # Decrypt once and reuse the value for both checks.
         # Suppress xtrace to prevent plaintext secret appearing in debug logs.
         { set +x; } 2>/dev/null
         local _tmp_sops_err
@@ -319,14 +302,11 @@ check_placeholder_values() {
         fi
         rm -f "$_tmp_sops_err"
         if [[ "$value" =~ ^(CHANGE_ME|PLACEHOLDER_NOT_CONFIGURED) ]] || [[ -z "$value" ]]; then
-            # One clear log_warn per placeholder key so the admin
-            # sees an individual actionable line for each stale value.
             log_warn "check_placeholder_values: secret '$secret' is set to a placeholder or is empty"
             placeholder_secrets+=("$secret")
         fi
         unset value
     done
-    # LS-9 FIX: clean up SOPS env before returning
     cleanup_secrets_environment
     if [[ ${#unreadable_secrets[@]} -gt 0 ]]; then
         log_error "Unreadable secrets during placeholder check (${#unreadable_secrets[@]}): ${unreadable_secrets[*]}"
@@ -349,7 +329,7 @@ list_secret_keys() {
     local keys
     local sops_stderr
     local rc=0
-    # W1-M3 FIX: Decrypt once into a variable; parse from that in-memory copy
+    # Decrypt once into a variable; parse from that in-memory copy
     # rather than calling sops -d a second time (avoids double I/O and TOCTOU).
     local yaml_content _sops_err_file
     _sops_err_file=$(mktemp)
@@ -383,7 +363,7 @@ create_secrets_backup() {
     local backup_file
     backup_file="$backup_dir/secrets.yaml.backup-$(date +%Y%m%d-%H%M%S)"
     log_info "Creating backup: $(basename "$backup_file")"
-    # LS-4 FIX: pre-create at 600 so the file is never world-readable.
+    # Pre-create at 600 so the file is never world-readable.
     if ! install -m 600 /dev/null "$backup_file"; then
         log_error "Failed to pre-create backup file with secure permissions: $backup_file"
         return 1
@@ -400,7 +380,7 @@ create_secrets_backup() {
 cleanup_old_secret_backups() {
     local backup_dir="${1:-$SECRETS_BACKUP_DIR}"
     local keep_count="${2:-5}"
-    # LS-5 FIX: NUL-delimited pipeline — safe for paths containing spaces.
+    # NUL-delimited pipeline — safe for paths containing spaces.
     find "$backup_dir" -name "secrets.yaml.backup-*" -type f -print0 2>/dev/null \
         | sort -rz \
         | tail -z -n +$(( keep_count + 1 )) \
@@ -415,7 +395,6 @@ _secure_shred() {
     if command -v shred >/dev/null 2>&1; then
         shred -fuz "$target" 2>/dev/null && return 0
     fi
-    # dd fallback: overwrite with random bytes then unlink
     # Portable stat (GNU -c%s || BSD -f%z), with safe default
     local file_size
     file_size=$(stat -c%s "$target" 2>/dev/null || stat -f%z "$target" 2>/dev/null || echo "4096")
@@ -842,7 +821,7 @@ generate_recovery_kit() {
 
     if [[ -f "$secrets_file" ]]; then
         if ! ensure_sops_env; then return 1; fi
-        # W1-C4 FIX: Guarantee cleanup_secrets_environment is called when this
+        # Guarantee cleanup_secrets_environment is called when this
         # function returns, even if an error occurs mid-way through extraction.
         trap 'cleanup_secrets_environment' RETURN
 
@@ -1075,7 +1054,7 @@ _ork_generate_and_secure() {
 offer_recovery_kit_export() {
     local auto_export="${1:-false}"
 
-    # SS-RK1 FIX: Always persist a secure on-disk copy in the current working
+    # Always persist a secure on-disk copy in the current working
     # directory before any /dev/tty-dependent display flow. This prevents the
     # recovery kit from being lost when setup runs through an SSH jumphost,
     # nohup, or other detached TTY environment.
@@ -1090,7 +1069,7 @@ offer_recovery_kit_export() {
         log_warn "  Auto-delete scheduled in 30 minutes via at(1) (if available)."
         log_warn "  Manual delete: shred -fuz '$recovery_file'"
         log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        # W1-C1 FIX: Schedule auto-delete of the on-disk plaintext recovery kit
+        # Schedule auto-delete of the on-disk plaintext recovery kit
         # so it does not persist indefinitely if the operator forgets to delete it.
         local _rk_abs
         _rk_abs="$(realpath "$recovery_file" 2>/dev/null || echo "$recovery_file")"

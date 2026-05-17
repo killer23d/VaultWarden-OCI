@@ -30,7 +30,7 @@ show_help() {
     echo "      the age key is present on disk."
     echo ""
     echo "  --dry-run"
-    echo "      W5-C4: Show what would be removed without deleting anything."
+    echo "      Show what would be removed without deleting anything."
     echo "      Prints each step that would execute and exits without changes."
     echo ""
     echo "  --force"
@@ -160,7 +160,7 @@ fi
 echo "════════════════════════════════════════════════════════════"
 echo ""
 
-# W5-C4: In dry-run mode, show what would be removed and exit cleanly.
+# In dry-run mode, show what would be removed and exit cleanly.
 if [[ "$DRY_RUN" == "true" ]]; then
     warn "DRY RUN MODE — showing what would be removed:"
     echo "  [1] Docker compose stack: ${PROJECT_DIR}/docker-compose.yml (down --volumes --remove-orphans)"
@@ -184,7 +184,7 @@ read -r -p "Type 'UNINSTALL' to confirm, or anything else to abort: " CONFIRM
 [[ "$CONFIRM" == "UNINSTALL" ]] || { info "Aborted — nothing changed."; exit 0; }
 echo ""
 
-# W5-C5 FIX: Offer a final encrypted backup before any destructive steps.
+# Offer a final encrypted backup before any destructive steps.
 # This ensures the operator has a chance to preserve data even if they forgot
 # to run a backup manually before uninstalling.
 if [[ -f "${PROJECT_DIR}/backup.sh" ]]; then

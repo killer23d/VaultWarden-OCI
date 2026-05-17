@@ -34,6 +34,7 @@
 # if the data volume appears unavailable without halting execution.
 # ---------------------------------------------------------------------------
 
+HISTFILE=/dev/null
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -1099,7 +1100,7 @@ do_edit() {
     local before_checksum
     before_checksum=$(calculate_sha256 "$temp_file")
 
-    # W4-M9 FIX: Suppress vim/nvim swap files so plaintext secrets are not
+    # Suppress vim/nvim swap files so plaintext secrets are not
     # written to a .swp file alongside the temp file. vim/nvim accept -i NONE
     # to disable viminfo, and --noswapfile to disable swap. We detect these
     # editors by binary name and prepend the flags if not already present.

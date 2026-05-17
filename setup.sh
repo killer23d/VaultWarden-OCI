@@ -30,6 +30,8 @@ TMP_WORKDIR=$(mktemp -d -t vw_setup.XXXXXXXXXX) || {
 }
 umask "$old_umask"
 trap 'rm -rf "$TMP_WORKDIR"' EXIT
+trap 'rm -rf "${TMP_WORKDIR:-}"; exit 130' INT
+trap 'rm -rf "${TMP_WORKDIR:-}"; exit 143' TERM
 
 REQUIRED_LIBS=("lib/common.sh" "lib/crypto.sh" "lib/docker.sh" "lib/backup-utils.sh" "lib/secrets.sh" "lib/storage.sh")
 for lib in "${REQUIRED_LIBS[@]}"; do
@@ -79,8 +81,6 @@ _set_env_var() {
 _read_env_value() {
     local key="$1" file="$2"
     [[ -f "$file" ]] || return 0
-    # tail -1 keeps the last occurrence; cut -d= -f2- preserves '=' in values;
-    # tr strips both single and double quotes from the raw value.
     grep -E "^${key}=" "$file" 2>/dev/null \
         | tail -1 | cut -d= -f2- | tr -d "\"'" || true
 }
@@ -285,6 +285,8 @@ fi
 validate_domain_secure() {
     local domain="$1"
     if [[ ${#domain} -gt 253 ]]; then return 1; fi
+    # Bare IPv4 addresses are rejected: production deployments require a proper
+    # domain name so that Caddy can obtain a TLS certificate via ACME/HTTPS.
     if [[ "$domain" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then return 1; fi
     if [[ ! "$domain" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then return 1; fi
     return 0
@@ -329,7 +331,6 @@ resolve_github_latest() {
 }
 
 install_docker() {
-    # Skip if Docker is already functional
     if command -v docker &>/dev/null && docker info &>/dev/null; then
         log_info "setup" "Docker already installed: $(docker --version)"
         return 0
@@ -676,7 +677,6 @@ create_env_file() {
         grep -qF "ADMIN_EMAIL=$ADMIN_EMAIL" "$env_file" && email_matches=true
 
         if [[ "$USE_LATEST" == "true" ]]; then
-            # Latest mode: ALL version fields must already be 'latest'
             if grep -qE '^VAULTWARDEN_VERSION=latest' "$env_file" && \
                grep -qE '^CADDY_VERSION=latest'       "$env_file" && \
                grep -qE '^FAIL2BAN_VERSION=latest'    "$env_file" && \
@@ -1183,9 +1183,7 @@ set_script_permissions() {
     local real_user; real_user=$(get_real_user)
     local real_group; real_group=$(id -g -n "$real_user")
 
-    # ------------------------------------------------------------------
     # 1. Root-level operator scripts — chmod +x
-    # ------------------------------------------------------------------
     local root_scripts=(
         "setup.sh"
         "edit-secrets.sh"
@@ -1202,9 +1200,7 @@ set_script_permissions() {
         fi
     done
 
-    # ------------------------------------------------------------------
     # 2. utilities/*.sh — executable admin helpers (moved from root)
-    # ------------------------------------------------------------------
     if [[ -d "utilities" ]]; then
         while IFS= read -r script; do
             chmod +x "$script"
@@ -1213,13 +1209,11 @@ set_script_permissions() {
         done < <(find "utilities" -maxdepth 1 -name "*.sh")
     fi
 
-    # ------------------------------------------------------------------
     # 3. caddy/entrypoint.sh — must be executable before 'make up';
     #    Docker copies it into the image with its host permissions, so a
     #    missing +x bit causes 'permission denied' at container start.
     #    Use process substitution to avoid a pipe-subshell so log_success
     #    calls take effect in the current shell.
-    # ------------------------------------------------------------------
     if [[ -d "caddy" ]]; then
         while IFS= read -r script; do
             chmod +x "$script"
@@ -1228,9 +1222,7 @@ set_script_permissions() {
         done < <(find "caddy" -maxdepth 1 -name "*.sh")
     fi
 
-    # ------------------------------------------------------------------
     # 4. fail2ban/*.sh — same rationale as caddy/entrypoint.sh
-    # ------------------------------------------------------------------
     if [[ -d "fail2ban" ]]; then
         while IFS= read -r script; do
             chmod +x "$script"
@@ -1239,9 +1231,7 @@ set_script_permissions() {
         done < <(find "fail2ban" -maxdepth 1 -name "*.sh")
     fi
 
-    # ------------------------------------------------------------------
     # 5. lib/*.sh — sourced (not executed), keep 644 read-only for non-root
-    # ------------------------------------------------------------------
     if [[ -d "lib" ]]; then
         find "lib" -name "*.sh" -exec chown "$real_user:$real_group" {} + 2>/dev/null || true
         find "lib" -name "*.sh" -exec chmod 644 {} + 2>/dev/null || true
@@ -1293,7 +1283,6 @@ setup_firewall() {
         log_warn "  See: https://www.cloudflare.com/ips-v4 and https://www.cloudflare.com/ips-v6"
     fi
 
-    # Check firewall state once and reuse the result.
     local ufw_active=false
     ufw status | grep -q "Status: active" && ufw_active=true
 
@@ -1494,8 +1483,6 @@ _ss_run_cleanup_action() {
         rm\ -f\ *)
             # Only allow "rm -f <single-path>" entries written by this script.
             local target="${action#rm -f }"
-            # Strip surrounding single-quotes added by _ss_register_cleanup callers.
-            target="${target//\'/}"
             if [[ -z "$target" || "$target" == *$'\n'* ]]; then
                 return 0
             fi
@@ -1515,7 +1502,6 @@ _ss_run_cleanup_action() {
             rm -f "$target" 2>/dev/null || true
             ;;
         *)
-            # Unknown action: log and skip rather than eval.
             log_warn "_ss_perform_cleanup: skipping unknown action: $action"
             ;;
     esac
@@ -1535,9 +1521,6 @@ _ss_perform_cleanup() {
 }
 trap '_ss_perform_cleanup' RETURN
 
-# ---------------------------------------------------------------------------
-# Help
-# ---------------------------------------------------------------------------
 _ss_show_help() {
     cat << 'HELP'
 VaultWarden Interactive Secrets Setup (Idempotent - Security Hardened)
@@ -1606,9 +1589,6 @@ SEE ALSO:
 HELP
 }
 
-# ---------------------------------------------------------------------------
-# Argument parsing
-# ---------------------------------------------------------------------------
 # shellcheck disable=SC2034  # SKIP_VALIDATION is a documented option; validation-skip logic is a future placeholder
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -1634,9 +1614,6 @@ if [[ "$AGE_KEY_FILE" != /* ]]; then
     AGE_KEY_FILE="$PROJECT_ROOT/$AGE_KEY_FILE"
 fi
 
-# ---------------------------------------------------------------------------
-# Prerequisites
-# ---------------------------------------------------------------------------
 ensure_prerequisites() {
     log_info "Checking prerequisites..."
 
@@ -1735,9 +1712,6 @@ SOPS_EOF
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# Idempotency guard
-# ---------------------------------------------------------------------------
 secrets_are_configured() {
     if ! secrets_file_exists; then return 1; fi
     if ! ensure_sops_env;      then return 1; fi
@@ -1747,14 +1721,10 @@ secrets_are_configured() {
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# SS-L2: Helper — write timeout warnings to /dev/tty when available so that
+# _warn_tty: Writes timeout warnings to /dev/tty when available so that
 # automated pipelines capturing stdout are not silently confused by the
-# default-to-'no' decision.
-#
-# Suppress /dev/tty output when --quiet-summary is active to
-# prevent unexpected terminal output during silent sub-invocations.
-# ---------------------------------------------------------------------------
+# default-to-'no' decision. Suppresses output when --quiet-summary is active
+# to prevent unexpected terminal output during silent sub-invocations.
 _warn_tty() {
     local msg="$1"
     # When QUIET_SUMMARY is true this script is being called by setup.sh in a
@@ -1810,9 +1780,6 @@ check_reconfiguration() {
     return 1
 }
 
-# ---------------------------------------------------------------------------
-# Argon2 check
-# ---------------------------------------------------------------------------
 ensure_argon2_available() {
     if check_argon2_support >/dev/null 2>&1; then return 0; fi
 
@@ -1921,10 +1888,6 @@ _read_dotenv_value() {
 #   the token value in secrets.yaml does not need re-keying.
 # ---------------------------------------------------------------------------
 collect_secrets() {
-    # _COLLECTED_SECRETS is declared at script top-level (see top of file).
-    # Populate it here; write_secrets() reads and zeroes it.
-
-    # Helper: call the right lib function based on AUTO_MODE
     _get_field() {
         local field="$1"
         if [[ "$AUTO_MODE" == "true" ]]; then
@@ -2178,7 +2141,6 @@ export_docker_secrets() {
 
     log_info "Exporting decrypted secrets to Docker secrets directory..."
 
-    # Ensure the directory exists with tight permissions.
     if ! mkdir -p "$docker_secrets_dir"; then
         log_error "export_docker_secrets: failed to create $docker_secrets_dir"
         return 1
@@ -2208,7 +2170,6 @@ export_docker_secrets() {
     local _key _value
 
     for _key in "${_keys[@]}"; do
-        # decrypt_secret() takes optional SECRETS_FILE as $2; pass the global here.
         # shellcheck disable=SC2153  # SECRETS_FILE is a global env var, not a typo of secrets_file
         _value=$(decrypt_secret "$_key" "$SECRETS_FILE") || {
             log_error "export_docker_secrets: failed to decrypt '$_key'"
@@ -2337,7 +2298,6 @@ write_secrets() {
 
     log_success "Secrets encrypted and written to: $SECRETS_FILE"
 
-    # Ensure the Docker secrets directory exists (may not yet exist on first run).
     local docker_secrets_dir="$PROJECT_ROOT/secrets/.docker_secrets"
     if [[ ! -d "$docker_secrets_dir" ]]; then
         mkdir -p "$docker_secrets_dir"
@@ -2356,9 +2316,6 @@ write_secrets() {
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 _ss_main() {
     log_header "VaultWarden Secrets Setup (Security Hardened)"
 
@@ -2427,7 +2384,7 @@ _ss_main() {
     done
     unset _cleanup_key
 
-    # Phase 1-B: Gate the entire completion output on QUIET_SUMMARY.
+    # Gate the entire completion output on QUIET_SUMMARY.
     #
     # When called from setup.sh --auto with --quiet-summary:
     #   - The auto-generated plaintext passwords emitted by log_warn inside
@@ -2450,7 +2407,7 @@ _ss_main() {
         log_success "✅ All secrets protected with Age encryption"
         log_success "✅ Docker secret files written to: secrets/.docker_secrets/"
         echo ""
-        # Phase 2-C: Updated next-steps to reflect the new install order.
+        # Updated next-steps to reflect the new install order.
         # The user has already edited .env before running this script, so
         # step 1 is "Verify" not "Review/create".
         echo "📋 Next Steps:"
@@ -2500,8 +2457,6 @@ local UNIT_DEST_DIR="/etc/systemd/system"
 local OPT_SCRIPTS_DIR="/opt/vaultwarden-scripts"
 local ENV_DIR="/etc/vaultwarden"
 local ENV_FILE="$ENV_DIR/vaultwarden.env"
-# running with ProtectHome=yes can reach it.  /home/ubuntu/ is invisible to
-# those processes regardless of symlinks.
 local AGE_KEY_DEST="$ENV_DIR/age-key.txt"
 
 local -a TIMERS=(
@@ -2558,11 +2513,11 @@ WHAT install DOES:
        This is required because systemd units run with ProtectHome=yes, which makes
        /home/ubuntu/ (and any symlinks into it) inaccessible to the service process.
        If the source file is absent but the key already exists at the destination,
-       SOPS_AGE_KEY_FILE is still corrected to the absolute path (BUG-AK5).
+       SOPS_AGE_KEY_FILE is still corrected to the absolute path.
     5. Copies systemd/*.{service,timer} -> /etc/systemd/system/
     6. systemctl daemon-reload
     7. systemctl enable --now for all 6 timers
-    8. Verifies all managed timers are active and have a next trigger (TIMER-CHECK)
+    8. Verifies all managed timers are active and have a next trigger
     9. systemctl reset-failed for all managed services (clears stale failed status)
 
 WHAT validate CHECKS:
@@ -2746,9 +2701,7 @@ install_units() {
         return 1
     fi
 
-    # ------------------------------------------------------------------
     # 1. Install scripts to /opt/vaultwarden-scripts/
-    # ------------------------------------------------------------------
     log_info "Installing scripts to $OPT_SCRIPTS_DIR ..."
     _run mkdir -p "$OPT_SCRIPTS_DIR"
 
@@ -2802,9 +2755,7 @@ install_units() {
     done
     if [[ "$DRY_RUN" == "false" ]]; then chown root:root "$OPT_SCRIPTS_DIR"; fi
 
-    # ------------------------------------------------------------------
     # 2. Create EnvironmentFile at /etc/vaultwarden/vaultwarden.env
-    # ------------------------------------------------------------------
     log_info "Setting up EnvironmentFile at $ENV_FILE ..."
     if [[ "$DRY_RUN" == "false" ]]; then
         # Use install -d to create the directory with the correct
@@ -2828,9 +2779,8 @@ install_units() {
                 chown root:root "$ENV_FILE"
             fi
         else
-            # ----------------------------------------------------------------
-            # ENV-MERGE: On re-install, perform a safe additive merge instead
-            # of a full overwrite.
+            # On re-install, perform a safe additive merge instead of a full
+            # overwrite.
             #
             # Strategy:
             #   - Lines already present in the installed file are NEVER touched
@@ -2843,7 +2793,6 @@ install_units() {
             #
             # This eliminates the persistent DRIFT DETECTED warning on every
             # --install while keeping the installed file safe from blind overwrites.
-            # ----------------------------------------------------------------
             log_info "$ENV_FILE already exists -- checking for drift ..."
             if [[ -f "$PROJECT_ROOT/.env" ]]; then
                 local repo_sum installed_sum
@@ -2899,8 +2848,7 @@ install_units() {
 
     # ------------------------------------------------------------------
     # 3. Install age key to /etc/vaultwarden/age-key.txt
-    #    (BUG-AK1 FIX: ProtectHome=yes makes /home/ubuntu/ inaccessible)
-    # ------------------------------------------------------------------
+    #    (ProtectHome=yes makes /home/ubuntu/ inaccessible to service processes)
     log_info "Installing age key to $AGE_KEY_DEST ..."
     local age_key_src="$PROJECT_ROOT/secrets/keys/age-key.txt"
     if [[ "$DRY_RUN" == "true" ]]; then
@@ -2924,16 +2872,14 @@ install_units() {
             log_success "SOPS_AGE_KEY_FILE=$AGE_KEY_DEST set in $ENV_FILE"
         else
             log_warn "Age key source not found: $age_key_src"
-            # from a prior --install), always correct SOPS_AGE_KEY_FILE to the
-            # canonical absolute path if the key exists at $AGE_KEY_DEST.
-            # A stale relative SOPS_AGE_KEY_FILE=secrets/keys/age-key.txt in the
-            # env file (written before BUG-AK1 was fixed) would otherwise persist
-            # across subsequent --install runs, causing backup.sh to
-            # look for the key in the wrong location and fail with "Age key file
-            # not found: /opt/vaultwarden-scripts/secrets/keys/age-key.txt".
+            # If the key already exists at the destination, correct SOPS_AGE_KEY_FILE to
+            # the canonical absolute path. A stale relative
+            # SOPS_AGE_KEY_FILE=secrets/keys/age-key.txt in the env file would otherwise
+            # persist across subsequent --install runs, causing backup.sh to fail with
+            # "Age key file not found: /opt/vaultwarden-scripts/secrets/keys/age-key.txt".
             if [[ -f "$AGE_KEY_DEST" ]]; then
                 _set_env_var "SOPS_AGE_KEY_FILE" "$AGE_KEY_DEST" "$ENV_FILE"
-                log_success "SOPS_AGE_KEY_FILE=$AGE_KEY_DEST corrected in $ENV_FILE (BUG-AK5)"
+                log_success "SOPS_AGE_KEY_FILE=$AGE_KEY_DEST corrected in $ENV_FILE"
                 log_info "  Key already present at $AGE_KEY_DEST -- no copy needed."
             else
                 log_warn "Backup and health services require SOPS_AGE_KEY_FILE to be set."
@@ -2944,9 +2890,7 @@ install_units() {
         fi
     fi
 
-    # ------------------------------------------------------------------
     # 3b. Copy rclone config to /etc/vaultwarden/rclone.conf
-    # ------------------------------------------------------------------
     local rclone_dest="$ENV_DIR/rclone.conf"
     log_info "Setting up rclone config at $rclone_dest ..."
 
@@ -3004,9 +2948,7 @@ install_units() {
         fi
     fi
 
-    # ------------------------------------------------------------------
     # 4. Install systemd unit files
-    # ------------------------------------------------------------------
     log_info "Installing systemd unit files to $UNIT_DEST_DIR ..."
     local unit_ok=true
     for unit in "${SERVICES[@]}" "${TIMERS[@]}"; do
@@ -3024,15 +2966,12 @@ install_units() {
         log_warn "Some unit files were missing -- check the systemd/ directory."
     fi
 
-    # ------------------------------------------------------------------
     # 4b. Write per-unit ReadWritePaths drop-ins (separate-volume mode)
-    # ------------------------------------------------------------------
     _install_rwpaths_dropin
 
     log_info "Reloading systemd daemon ..."
     _run systemctl daemon-reload
 
-    # ------------------------------------------------------------------
     # Validate OnCalendar expressions before enabling timers.
     # An invalid expression causes systemctl enable --now to fail with a
     # cryptic 'Failed to start' error; surfacing it here with a clear
@@ -3041,7 +2980,6 @@ install_units() {
     # '^OnCalendar=' anchors the grep pattern so only directive lines are
     # matched (not comment lines), preventing systemd-analyze from
     # validating comment text and emitting false-positive warnings.
-    # ------------------------------------------------------------------
     if command -v systemd-analyze >/dev/null 2>&1; then
         for unit in "${UNIT_DEST_DIR}"/vaultwarden-*.timer; do
             [[ -f "$unit" ]] || continue
@@ -3061,12 +2999,10 @@ install_units() {
         log_success "Enabled: $timer"
     done
 
-    # ------------------------------------------------------------------
     # Verify managed timers are healthy after enablement.
     # list-timers output can lag briefly right after daemon-reload/enable.
     # Check each managed timer state directly and allow a short settle period.
     # Healthy = timer unit is active AND has a next trigger scheduled.
-    # ------------------------------------------------------------------
     if [[ "$DRY_RUN" == "false" ]]; then
         log_info "Verifying timers are scheduled ..."
         local expected_count="${#TIMERS[@]}"
@@ -3149,13 +3085,11 @@ remove_units() {
         fi
     done
 
-    # ------------------------------------------------------------------
     # Clean up per-unit ReadWritePaths drop-in directories written by
     # _install_rwpaths_dropin (separate-volume mode). Leaving stale .d/
     # directories behind causes spurious ReadWritePaths entries on
     # reinstall and makes 'systemctl cat <unit>' output misleading.
     # Safe in boot-only mode: the directories simply won't exist.
-    # ------------------------------------------------------------------
     local -a _DROPIN_UNITS=("${_VW_DROPIN_UNITS[@]}")
     for unit in "${_DROPIN_UNITS[@]}"; do
         local dropin_dir="$UNIT_DEST_DIR/${unit}.d"
@@ -3214,12 +3148,10 @@ validate_installation() {
         fi
     done
 
-    # ------------------------------------------------------------------
     # Check lib/ presence AND file permissions.
     # lib/*.sh files must be at least world-readable (644) so that a
     # non-root service user (User= in the unit) can source them. Warn on
     # 600 or 640 modes.
-    # ------------------------------------------------------------------
     log_info "[2/8] Checking installed lib/ and file permissions ..."
     if [[ ! -d "$OPT_SCRIPTS_DIR/lib" ]]; then
         log_error "  MISSING: $OPT_SCRIPTS_DIR/lib/"
@@ -3297,7 +3229,7 @@ validate_installation() {
         fi
     fi
 
-    log_info "[6/8] Checking age key installation (BUG-AK1) ..."
+    log_info "[6/8] Checking age key installation ..."
     if [[ ! -f "$AGE_KEY_DEST" ]]; then
         log_error "  MISSING: $AGE_KEY_DEST"
         log_error "  Backup/health services cannot encrypt/decrypt without this key."
@@ -3354,12 +3286,10 @@ validate_installation() {
         fi
     done
 
-    # ------------------------------------------------------------------
     # Verify timers are healthy.
     # 'systemctl is-enabled' only checks the symlink; it does NOT confirm
     # the timer unit is currently active in systemd nor that it has a future
     # trigger time.
-    # ------------------------------------------------------------------
     log_info "[8/8] Checking timers are scheduled (systemctl list-timers) ..."
     local expected_count="${#TIMERS[@]}"
     local healthy_count
@@ -3442,7 +3372,6 @@ _sd_main() {
 main() {
     log_header "VaultWarden-OCI Setup - Security Hardened Edition"
 
-    # Phase dispatch: secrets or systemd subcommand
     if [[ -n "$PHASE" ]]; then
         case "$PHASE" in
             secrets)

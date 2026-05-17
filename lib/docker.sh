@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
 # lib/docker.sh - Docker operations library for VaultWarden-OCI-NG
-# ENHANCED: Reinforced standardized error handling patterns
-# All functions return exit codes, callers decide exit strategy
 
 # Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_DOCKER_LIB_LOADED:-}" ]] && return 0
@@ -39,7 +37,6 @@ if [[ -z "${DOCKER_PROJECT_LABEL:-}" ]]; then
 fi
 export DOCKER_PROJECT_LABEL
 
-# --- Docker Availability Checks ---
 
 check_docker_available() {
     if ! command -v docker >/dev/null 2>&1; then
@@ -81,10 +78,7 @@ require_jq() {
     return 0
 }
 
-# --- Container Status Operations ---
 
-# Get container status for a service
-#
 # docker compose ps --format json returns a JSON array when multiple replicas
 # are running. The jq filter handles both scalar and array.
 # Validates raw output is valid JSON before piping to jq; returns "not_found"
@@ -127,8 +121,6 @@ is_service_running() {
     [[ "$status" == "running" ]]
 }
 
-# Get service health status
-#
 # docker compose ps --format json returns a JSON array when multiple replicas
 # are running. The jq filter handles both scalar and array.
 # An empty Health field (no HEALTHCHECK defined) is explicitly mapped to
@@ -175,7 +167,7 @@ is_service_healthy() {
     [[ "$status" == "running" ]] && [[ "$health" =~ ^(healthy|none)$ ]]
 }
 
-# W3-C6 FIX: Strict health check — requires health==healthy, not just running.
+# Strict health check — requires health==healthy, not just running.
 # Use this for services that MUST have a passing HEALTHCHECK (e.g. vaultwarden).
 # is_service_healthy() also accepts health==none (no healthcheck defined), which
 # is too permissive for critical services.
@@ -196,7 +188,6 @@ _service_has_no_healthcheck() {
     [[ "$health" == "none" ]]
 }
 
-# --- Service Management Operations ---
 
 start_services() {
     local services=("$@")
@@ -266,7 +257,6 @@ recreate_services() {
     return 0
 }
 
-# --- Image Management ---
 
 # ---------------------------------------------------------------------------
 # pull_images
@@ -291,7 +281,6 @@ pull_images() {
     else
         pull_output=$(docker compose pull --quiet "${services[@]}" 2>&1); pull_rc=$?
     fi
-    # Print the last 5 lines of output (summary / error) for the journal.
     printf '%s\n' "$pull_output" | tail -5
     if [[ $pull_rc -ne 0 ]]; then
         log_error "Failed to pull images"
@@ -344,7 +333,7 @@ pull_image_with_retry() {
 
         if [[ $attempt -lt $max_retries ]]; then
             sleep "$sleep_secs"
-            sleep_secs=$(( sleep_secs * 2 ))  # exponential backoff
+            sleep_secs=$(( sleep_secs * 2 ))
         fi
 
         attempt=$(( attempt + 1 ))
@@ -354,7 +343,6 @@ pull_image_with_retry() {
     return 1
 }
 
-# --- Container Execution ---
 
 exec_in_service() {
     local service="$1"
@@ -421,7 +409,7 @@ exec_oneshot_in_service() {
         return 1
     }
 
-    # DOC-H1 FIX: capture start exit code explicitly; do NOT use || true.
+    # Capture start exit code explicitly; do NOT use || true.
     # If start fails, clean up the orphaned container and return 1 immediately
     # rather than hanging forever on 'docker container wait'.
     local start_rc=0
@@ -438,7 +426,6 @@ exec_oneshot_in_service() {
     local exit_code=0
     exit_code=$(docker container wait "$container_id" 2>/dev/null) || exit_code=1
 
-    # Replay container output (stdout+stderr) through our logger.
     docker container logs "$container_id" 2>&1 || true
 
     local docker_err
@@ -450,7 +437,7 @@ exec_oneshot_in_service() {
 }
 
 # ---------------------------------------------------------------------------
-# run_in_service_full_env  (DOC-M1: new helper — full service environment)
+# run_in_service_full_env  — full service environment
 #
 # Unlike exec_oneshot_in_service(), this function uses `docker compose run
 # --rm` which inherits ALL service settings from docker-compose.yml:
@@ -478,19 +465,18 @@ run_in_service_full_env() {
     return 0
 }
 
-# run_in_service — DEPRECATED (DOC-L1): calling this function is now a hard
+# run_in_service — DEPRECATED: calling this function is now a hard
 # error. Use exec_oneshot_in_service() for image-only one-shots, or
 # run_in_service_full_env() for commands that require the full service
 # environment. This stub is retained only to produce an actionable error
 # message for any script that accidentally calls the old API.
-# NOTE: removed from export -f so subshells cannot inherit it silently.
+# NOTE: not exported via export -f so subshells cannot inherit it silently.
 run_in_service() {
     log_error "run_in_service() called from ${BASH_SOURCE[1]:-unknown}:${BASH_LINENO[0]:-?} — "\
               "use exec_oneshot_in_service() or run_in_service_full_env() instead."
     return 1
 }
 
-# --- Cleanup Operations ---
 
 # _docker_prune_filter  — emit --filter args as separate newline-delimited tokens
 #
@@ -504,7 +490,6 @@ _docker_prune_filter() {
     fi
 }
 
-# Clean up stopped containers
 cleanup_containers() {
     if ! require_docker; then return 1; fi
     local _prune_args=()
@@ -517,7 +502,7 @@ cleanup_containers() {
 }
 
 # ---------------------------------------------------------------------------
-# cleanup_images  (IMG-R1 FIX)
+# cleanup_images
 #
 # Removes dangling (untagged) image layers that are older than 48 hours.
 #
@@ -541,8 +526,6 @@ cleanup_images() {
     local _prune_args=()
     mapfile -t _prune_args < <(_docker_prune_filter)
     local docker_err
-    # IMG-R1 FIX: --filter "until=48h" retains the last 48 hours of dangling
-    # image layers as a rollback buffer; see function header for rationale.
     if ! docker_err=$(docker image prune -f --filter "until=48h" "${_prune_args[@]}" 2>&1 >/dev/null); then
         log_debug "cleanup_images: docker image prune failed (non-fatal): $docker_err"
     fi
@@ -550,7 +533,7 @@ cleanup_images() {
 }
 
 # ---------------------------------------------------------------------------
-# cleanup_volumes  (DOC-M2 FIX)
+# cleanup_volumes
 #
 # `docker volume prune --filter label=` was added in Docker Engine 25.0.
 # On older engines (Docker 20.x common on OCI free-tier) the flag is silently
@@ -565,14 +548,12 @@ cleanup_images() {
 cleanup_volumes() {
     if ! require_docker; then return 1; fi
 
-    # Parse major version from "Docker version XX.Y.Z, build ..." output.
     local docker_version_str docker_major
     docker_version_str=$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo "0.0.0")
     docker_major=$(printf '%s' "$docker_version_str" | cut -d. -f1)
     docker_major=$(( docker_major + 0 ))   # coerce to integer
 
     if [[ $docker_major -ge 25 ]]; then
-        # label filter supported — safe to use volume prune
         local _prune_args=()
         mapfile -t _prune_args < <(_docker_prune_filter)
         local docker_err
@@ -595,7 +576,6 @@ cleanup_volumes() {
     return 0
 }
 
-# Clean up unused networks
 cleanup_networks() {
     if ! require_docker; then return 1; fi
     local _prune_args=()
@@ -607,7 +587,6 @@ cleanup_networks() {
     return 0
 }
 
-# Complete Docker cleanup
 cleanup_docker_system() {
     local cleanup_failed=false
     if ! cleanup_containers; then cleanup_failed=true; fi
@@ -621,7 +600,6 @@ cleanup_docker_system() {
     return 0
 }
 
-# --- Logging Operations ---
 
 get_service_logs() {
     local service="$1"
@@ -644,10 +622,7 @@ follow_service_logs() {
     return 0
 }
 
-# --- Validation Helpers ---
 
-# Wait for service to be ready
-#
 # A dots_printed flag tracks whether any progress dots were emitted; the
 # trailing newline is only printed if at least one dot was output.
 wait_for_service_ready() {
@@ -722,7 +697,7 @@ validate_compose_file() {
 }
 
 # Export functions for use by scripts
-# NOTE: run_in_service is intentionally NOT exported (DOC-L1: hard deprecation)
+# NOTE: run_in_service is intentionally NOT exported (hard deprecation)
 # NOTE: _docker_prune_filter and _service_has_no_healthcheck are internal
 #       helpers; they are NOT exported to avoid misleading callers and prevent
 #       hidden coupling through subshell inheritance.

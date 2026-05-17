@@ -21,7 +21,7 @@ if ! command -v iptables >/dev/null 2>&1; then
   exit 1
 fi
 
-# W4-M2 FIX: Verify python3 is available before using it for subnet discovery.
+# Verify python3 is available before using it for subnet discovery.
 if ! command -v python3 >/dev/null 2>&1; then
   echo "ERROR: python3 command not found — required for subnet discovery from compose config" >&2
   exit 1
@@ -35,7 +35,7 @@ if [[ "${EUID}" -ne 0 ]]; then
   exit 1
 fi
 
-# W4-C2 FIX: Warn if nftables is active alongside iptables. Running both
+# Warn if nftables is active alongside iptables. Running both
 # can cause conflicting firewall policies where nft rules override iptables.
 if command -v nft >/dev/null 2>&1; then
   if nft list ruleset 2>/dev/null | grep -q .; then
@@ -46,7 +46,7 @@ if command -v nft >/dev/null 2>&1; then
   fi
 fi
 
-# W4-M1 FIX: Verify an SSH ACCEPT rule exists in the INPUT chain before making
+# Verify an SSH ACCEPT rule exists in the INPUT chain before making
 # any changes. Adding MASQUERADE or FORWARD rules while accidentally blocking
 # SSH could lock out the operator from the host.
 _ssh_port="${SSH_PORT:-22}"
@@ -62,7 +62,7 @@ if [[ "$_ssh_ok" != "true" ]]; then
   echo "WARN: Proceeding, but verify SSH port ${_ssh_port} remains accessible after this script." >&2
 fi
 
-# W4-C1 FIX: Save current iptables rules before any modifications.
+# Save current iptables rules before any modifications.
 # On ERR, INT, or TERM, automatically restore the saved rules so the host
 # is not left with a partial/broken iptables configuration.
 _ipt_backup_v4=""
@@ -171,7 +171,7 @@ for subnet in "${UNIQUE_SUBNETS[@]}"; do
   echo "ADDED: MASQUERADE for $subnet (IPv4)"
 done
 
-# W4-C5 FIX: Add ip6tables MASQUERADE rules mirroring the IPv4 rules above.
+# Add ip6tables MASQUERADE rules mirroring the IPv4 rules above.
 # Docker assigns IPv6 ULA subnets (fd00::/8) when IPv6 is enabled in daemon.json.
 # Without ip6tables MASQUERADE, IPv6 container traffic cannot reach the internet.
 # Note: This is a best-effort mirror — if ip6tables is absent (some kernels
@@ -229,7 +229,7 @@ else
   echo "WARN: DOCKER-USER chain not available; skipping forward-policy remediation"
 fi
 
-# W4-C3 FIX: Fail loudly if netfilter-persistent is absent, rather than
+# Fail loudly if netfilter-persistent is absent, rather than
 # silently continuing. Without persistence the rules are lost on reboot.
 if command -v netfilter-persistent >/dev/null 2>&1; then
   if ! netfilter-persistent save >/dev/null 2>&1; then

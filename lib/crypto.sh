@@ -10,15 +10,11 @@ readonly VAULTWARDEN_CRYPTO_LIB_LOADED=1
 # Entry-point scripts apply these options via init_common_lib(); this library
 # is always sourced after that call.
 
-# --- Configuration ---
 DEFAULT_AGE_KEY_FILE="secrets/keys/age-key.txt"
 readonly DEFAULT_AGE_KEY_FILE
 
 # Security configuration (also used by security functions merged from lib/security.sh)
 readonly SECURITY_MIN_PASSWORD_LENGTH=12
-# TODO: SECURITY_MAX_FAILED_ATTEMPTS and SECURITY_LOCKOUT_DURATION are reserved for
-# the lockout mechanism in lib/security.sh (not yet merged). Keep them here so that
-# lib/security.sh can rely on these values without re-declaring them.
 readonly SECURITY_MAX_FAILED_ATTEMPTS=3
 readonly SECURITY_LOCKOUT_DURATION=300  # 5 minutes
 
@@ -90,7 +86,6 @@ _derive_age_public_key() {
         return 1
     fi
 
-    # Sanity-check: all age public keys start with 'age1'
     if [[ "$pub_key" != age1* ]]; then
         log_error "Derived Age public key has unexpected format in: $key_file (got: ${pub_key:0:20}...)"
         return 1
@@ -100,9 +95,8 @@ _derive_age_public_key() {
     return 0
 }
 
-# --- SOPS Operations ---
 
-# Check if a file is SOPS encrypted - STANDARDIZED: Returns exit code
+# Check if a file is SOPS encrypted
 # Requires top-level 'sops:' key AND nested 'mac:' field to avoid
 # false positives on any YAML file that happens to contain a 'sops:' key.
 is_sops_encrypted() {
@@ -113,11 +107,10 @@ is_sops_encrypted() {
         return 1
     fi
 
-    # A SOPS-encrypted file always has a top-level 'sops:' map AND a 'mac:' field within it
-    grep -q '^sops:' "$file" && grep -q '^\s*mac:' "$file"
+        grep -q '^sops:' "$file" && grep -q '^\s*mac:' "$file"
 }
 
-# Decrypt SOPS file to stdout - STANDARDIZED: Returns exit code
+# Decrypt SOPS file to stdout
 decrypt_sops_file() {
     local file="$1"
     local age_key_file="${2:-$DEFAULT_AGE_KEY_FILE}"
@@ -140,7 +133,7 @@ decrypt_sops_file() {
     SOPS_AGE_KEY_FILE="$age_key_file" sops --decrypt "$file" 2>/dev/null
 }
 
-# Encrypt file with SOPS - STANDARDIZED: Returns exit code
+# Encrypt file with SOPS
 #
 # Encrypts to a mktemp staging file and atomically renames it over the
 # original only on success, preventing truncation/destruction of the target
@@ -248,7 +241,6 @@ encrypt_sops_file() {
     install -m 600 /dev/null "$pre_write_backup"
     cp -- "$file" "$pre_write_backup"
 
-    # Atomic replace — original is only overwritten after successful encryption.
     if ! mv -- "$tmp_file" "$file"; then
         rm -f "$tmp_file"
         log_error "Failed to atomically replace file after SOPS encryption: $file"
@@ -271,8 +263,6 @@ encrypt_sops_file() {
                 "$file" 2>&1 >/dev/null) || rt_rc=$?
 
     if [[ $rt_rc -ne 0 ]]; then
-        # Round-trip failed: restore the original plaintext file so the
-        # caller can retry after fixing the key / .sops.yaml, then abort.
         log_error "encrypt_sops_file: SOPS round-trip validation FAILED for: $file"
         log_error "  The ciphertext was written successfully but cannot be decrypted."
         log_error "  This typically means the Age public key in .sops.yaml is stale,"
@@ -296,14 +286,12 @@ encrypt_sops_file() {
         return 1
     fi
 
-    # Round-trip passed: clean up backup and return success.
     rm -f "$pre_write_backup"
     trap - RETURN
     log_debug "encrypt_sops_file: round-trip validation passed for: $file"
     return 0
 }
 
-# --- Age Operations ---
 
 # ---------------------------------------------------------------------------
 # ensure_secret_dir DIR
@@ -318,7 +306,7 @@ ensure_secret_dir() {
     ensure_dir "$dir" 700
 }
 
-# Generate Age key pair - STANDARDIZED: Returns exit code
+# Generate Age key pair
 #
 # Sets umask 077 before calling age-keygen so the file is born mode 600
 # (owner r/w only), then restores the original umask. chmod 600 is kept
@@ -356,7 +344,7 @@ generate_age_key() {
     umask 077
     local _keygen_rc=0
     age-keygen -o "$output_file" 2>/dev/null || _keygen_rc=$?
-    umask "$_saved_umask"  # always restore
+    umask "$_saved_umask"
 
     if [[ $_keygen_rc -ne 0 ]]; then
         log_error "Failed to generate Age key: $output_file"
@@ -373,13 +361,12 @@ generate_age_key() {
     return 0
 }
 
-# Get Age public key from private key file - delegates to _derive_age_public_key()
 get_age_public_key() {
     local age_key_file="$1"
     _derive_age_public_key "$age_key_file"
 }
 
-# Check Age key validity - STANDARDIZED: Returns exit code
+# Check Age key validity
 #
 # Validates permissions (must be 600), AGE-SECRET-KEY-1 prefix, and
 # performs a full encrypt/decrypt round-trip to verify key material integrity.
@@ -450,7 +437,6 @@ check_age_key() {
     return 0
 }
 
-# Encrypt data with Age (reads from stdin, writes to stdout)
 encrypt_data() {
     local age_key_file="${1:-$DEFAULT_AGE_KEY_FILE}"
 
@@ -477,7 +463,6 @@ encrypt_data() {
     return 0
 }
 
-# Decrypt data with Age (reads from stdin, writes to stdout)
 decrypt_data() {
     local age_key_file="${1:-$DEFAULT_AGE_KEY_FILE}"
 
@@ -499,7 +484,6 @@ decrypt_data() {
     return 0
 }
 
-# --- Secure Random Generation ---
 
 # Generates a cryptographically strong random string of N characters (safe charset)
 #
@@ -552,7 +536,6 @@ generate_secure_password() {
     return 0
 }
 
-# --- Argon2 Support Detection ---
 
 check_argon2_support() {
     if command -v python3 >/dev/null 2>&1; then
@@ -567,10 +550,10 @@ check_argon2_support() {
         return 0
     fi
 
+    log_error "check_argon2_support: neither python3 argon2 module nor argon2 CLI is available"
     return 1
 }
 
-# --- Hash Operations ---
 
 # Generate Argon2id hash (for VaultWarden admin token)
 #
@@ -598,10 +581,10 @@ print(ph.hash(password))
 ")
             ;;
         cli)
-            # W1-C5 FIX: The argon2 CLI requires the salt as a positional argument,
+            # The argon2 CLI requires the salt as a positional argument,
             # which exposes it in `ps aux`. Refuse the CLI path and require Python.
             # This prevents salt exposure via process listing.
-            log_error "W1-C5: argon2 CLI path disabled — salt would be visible in 'ps aux'."
+            log_error "argon2 CLI path disabled — salt would be visible in 'ps aux'."
             log_error "Install the Python argon2-cffi library: pip install argon2-cffi"
             log_error "  or: apt install python3-argon2"
             return 1
@@ -649,9 +632,7 @@ generate_bcrypt_hash() {
     return 0
 }
 
-# --- File Integrity Operations ---
 
-# Calculate SHA256 checksum
 calculate_sha256() {
     local file="$1"
 
@@ -680,7 +661,6 @@ calculate_sha256() {
     return 0
 }
 
-# Verify SHA256 checksum
 verify_sha256() {
     local file="$1"
     local expected_checksum="$2"
@@ -846,9 +826,7 @@ verify_file_integrity() {
     fi
 }
 
-# --- Secure File Operations ---
 
-# Securely wipe file before deletion
 #
 # Delegates to _secure_remove_file() which implements the canonical
 # shred → dd → rm fallback chain. Exports this as the public API for
@@ -868,9 +846,7 @@ secure_delete() {
     return 0
 }
 
-# --- Enhanced Security Validation ---
 
-# Comprehensive cryptographic environment check
 validate_crypto_environment() {
     log_debug "Validating cryptographic environment..."
 
@@ -886,6 +862,10 @@ validate_crypto_environment() {
 
     if ! has_command sops; then
         issues+=("sops command not available")
+    fi
+
+    if ! has_command openssl; then
+        issues+=("openssl command not available")
     fi
 
     if [[ -f "$DEFAULT_AGE_KEY_FILE" ]]; then
@@ -916,14 +896,12 @@ validate_crypto_environment() {
 simple_verify_age_key() {
     local age_key="${SOPS_AGE_KEY_FILE:-secrets/keys/age-key.txt}"
 
-    # Check 1: File exists
     if [[ ! -f "$age_key" ]]; then
         log_error "Age key missing: $age_key"
         log_error "If you are restoring a backup, see BACKUP-RESTORE.md for key recovery steps."
         return 1
     fi
 
-    # Check 2: Permissions (auto-fix if needed)
     local perms
     perms=$(_stat_octal_perms "$age_key" 2>/dev/null || echo "")
     if [[ "$perms" != "600" ]]; then
@@ -940,10 +918,10 @@ simple_verify_age_key() {
     current_group=$(_stat_group "$age_key" 2>/dev/null || echo "")
     current_owner_group="${current_owner}:${current_group}"
     if [[ -n "$current_owner" && "$current_owner_group" != "${real_user}:${real_group}" ]]; then
-        # W1-M4 FIX: If real_user resolved to "root" (fallback), skip chown to
+        # If real_user resolved to "root" (fallback), skip chown to
         # avoid locking out the service user by setting ownership to root:root.
         if [[ "$real_user" == "root" ]]; then
-            log_warn "W1-M4: real user resolved to 'root' — skipping chown to avoid locking out the service account."
+            log_warn "Real user resolved to 'root' — skipping chown to avoid locking out the service account."
             log_warn "       Re-run as the service user or with SUDO_USER set to fix ownership manually."
         else
             log_warn "Age key ownership was '${current_owner_group}' (expected '${real_user}:${real_group}') — auto-correcting"
@@ -955,7 +933,6 @@ simple_verify_age_key() {
             fi
         fi
     elif [[ -n "$current_owner" ]]; then
-        # Ownership is already correct — no action needed.
         :
     else
         # Could not read ownership at all — attempt chown only if root and real_user is not root.
@@ -967,7 +944,6 @@ simple_verify_age_key() {
         fi
     fi
 
-    # Check 3: Validity — Encrypt/Decrypt roundtrip
     local test_data
     test_data="vw-key-check-$(date +%s)"
     local result
@@ -1072,7 +1048,6 @@ _secure_remove_file() {
         shred -fuz -n 3 "$target" 2>/dev/null && return 0
     fi
 
-    # dd fallback — overwrite then unlink
     local file_size
     file_size=$(_stat_file_size "$target" 2>/dev/null || echo "4096")
     [[ -z "$file_size" || "$file_size" -eq 0 ]] && file_size=4096
@@ -1149,8 +1124,7 @@ verify_key_replica() {
             continue
         fi
 
-        # Step 1: hash comparison (quick byte-level check)
-        local replica_hash
+            local replica_hash
         replica_hash=$(calculate_sha256 "$replica" 2>/dev/null)
         if [[ "$replica_hash" != "$primary_hash" ]]; then
             log_warn "verify_key_replica: replica hash mismatch: $replica"
@@ -1158,8 +1132,7 @@ verify_key_replica() {
             continue
         fi
 
-        # Step 2: functional roundtrip test against the replica key
-        local replica_result
+            local replica_result
         if ! replica_result=$(printf '%s' "$test_data" | age -r "$primary_pub" 2>/dev/null | age -d -i "$replica" 2>/dev/null) \
             || [[ "$replica_result" != "$test_data" ]]; then
             log_warn "verify_key_replica: replica failed functional roundtrip test (corrupt): $replica"
@@ -1201,7 +1174,6 @@ restore_key_from_replica() {
     primary_dir=$(dirname "$primary_key")
     local tmp_key="${primary_key}.tmp.$$"
 
-    # Ensure the target directory exists
     if [[ ! -d "$primary_dir" ]]; then
         if ! mkdir -p "$primary_dir"; then
             log_error "restore_key_from_replica: cannot create directory: $primary_dir"
@@ -1236,9 +1208,7 @@ restore_key_from_replica() {
 # create_printable_key_backup
 #
 # Creates a printable PDF (or HTML fallback) of the age key with QR code.
-# Uses double-quoted trap command so the temp file path expands at registration.
 # Feeds key via stdin to qrencode to prevent cmdline exposure.
-# Unsets key_content immediately after use.
 # ---------------------------------------------------------------------------
 create_printable_key_backup() {
     local age_key="${SOPS_AGE_KEY_FILE:-secrets/keys/age-key.txt}"
@@ -1370,8 +1340,8 @@ EOF
         log_warn "          shred -fuz '$output_html'"
         log_info  "Open in browser and print to PDF manually."
 
-        # W1-C3 FIX: Schedule actual auto-DELETION (not just a reminder) in 30
-        # minutes so the plaintext HTML is not left on disk indefinitely.
+        # Schedule actual auto-DELETION in 30 minutes so the plaintext HTML
+        # is not left on disk indefinitely.
         # The delete_cmd uses shred for overwrite-capable filesystems, then rm
         # as a fallback.
         local delete_cmd="shred -fuz '${output_html}' 2>/dev/null || rm -f '${output_html}'; echo 'vaultwarden-key-backup: plaintext HTML auto-deleted' | logger -t vaultwarden-key-reminder 2>/dev/null"
@@ -1420,10 +1390,8 @@ _sops_yaml_age_recipients() {
 # A mismatch means a new age key was restored while .sops.yaml still references the old key.
 # ---------------------------------------------------------------------------
 check_age_key_health() {
-    # Step 1: standard file / permission / roundtrip checks
     simple_verify_age_key || return 1
 
-    # Step 2: cross-check on-disk public key against .sops.yaml recipient list
     local age_key="${SOPS_AGE_KEY_FILE:-secrets/keys/age-key.txt}"
     local sops_yaml="${SOPS_CONFIG_FILE:-.sops.yaml}"
 
@@ -1487,7 +1455,6 @@ validate_file_permissions() {
     current_owner=$(_stat_owner "$file_path")
     current_group=$(_stat_group "$file_path")
 
-    # Validate permissions
     if [[ "$current_perms" != "$expected_perms" ]]; then
         log_error "File permissions mismatch: $file_path"
         log_error "  Current: $current_perms, Expected: $expected_perms"
@@ -1498,7 +1465,6 @@ validate_file_permissions() {
     # rather than a hard mismatch so files owned by deleted users do not cause
     # spurious permission-check failures.
 
-    # Validate owner if specified
     if [[ -n "$expected_owner" ]]; then
         if [[ "$current_owner" == "UNKNOWN" ]]; then
             log_warn "File owner is UNKNOWN (unmapped UID) for: $file_path — skipping owner check"
@@ -1509,7 +1475,6 @@ validate_file_permissions() {
         fi
     fi
 
-    # Validate group if specified
     if [[ -n "$expected_group" ]]; then
         if [[ "$current_group" == "UNKNOWN" ]]; then
             log_warn "File group is UNKNOWN (unmapped GID) for: $file_path — skipping group check"
@@ -1556,12 +1521,10 @@ validate_directory_permissions() {
         return 1
     fi
 
-    # Validate directory itself
     if ! validate_file_permissions "$dir_path" "$expected_perms" "$expected_owner" "$expected_group"; then
         return 1
     fi
 
-    # Recursive validation if requested
     if [[ "$recursive" == "true" ]]; then
         local validation_failed=false
 
@@ -1600,13 +1563,11 @@ create_secure_file() {
     local owner="${4:-}"
     local group="${5:-}"
 
-    # Validate input parameters
     if [[ -z "$file_path" ]] || [[ -z "$content" ]]; then
         log_error "create_secure_file: file_path and content are required"
         return 1
     fi
 
-    # Validate permissions format
     if [[ ! "$permissions" =~ ^[0-7]{3}$ ]]; then
         log_error "create_secure_file: invalid permissions format: $permissions"
         return 1
@@ -1624,10 +1585,8 @@ create_secure_file() {
     umask 077
 
     if printf '%s\n' "$content" > "$temp_file"; then
-        # Set permissions before moving to final location
-        if chmod "$permissions" "$temp_file"; then
-            # Set ownership if specified
-            if [[ -n "$owner" ]]; then
+            if chmod "$permissions" "$temp_file"; then
+                    if [[ -n "$owner" ]]; then
                 local chown_target="$owner"
                 if [[ -n "$group" ]]; then
                     chown_target="$owner:$group"
@@ -1640,8 +1599,7 @@ create_secure_file() {
                 fi
             fi
 
-            # Atomic move to final location
-            if mv "$temp_file" "$file_path"; then
+                    if mv "$temp_file" "$file_path"; then
                 log_debug "Secure file created: $file_path ($permissions)"
                 return 0
             else
@@ -1684,7 +1642,6 @@ validate_password_strength() {
     has_digit=false
     has_special=false
 
-    # Check character types
     if [[ "$password" =~ [a-z] ]]; then has_lower=true; fi
     if [[ "$password" =~ [A-Z] ]]; then has_upper=true; fi
     if [[ "$password" =~ [0-9] ]]; then has_digit=true; fi
@@ -1705,7 +1662,6 @@ validate_password_strength() {
         return 1
     fi
 
-    # Check for common patterns
     if [[ "$password" =~ (012|123|234|345|456|567|678|789|890|abc|bcd|cde|def) ]]; then
         log_warn "Password contains common sequential patterns"
     fi
@@ -1785,7 +1741,6 @@ generate_secure_random() {
     printf '%s\n' "$random_string"
 }
 
-# Named wrapper for breakglass password generation.
 generate_breakglass_password() {
     local length="${1:-48}"
     generate_secure_random "$length" "alphanumeric"

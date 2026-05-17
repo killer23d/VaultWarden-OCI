@@ -18,7 +18,7 @@ unset _fn
 # ---------------------------------------------------------------------------
 # _format_bytes_human BYTES
 #
-# ITEM-10: Formats a raw byte count as a human-readable MB string with one
+# Formats a raw byte count as a human-readable MB string with one
 # decimal place, e.g. 1234567 → "1.2 MB". Pure bash integer arithmetic —
 # no numfmt (GNU-only), no awk floating-point, no bc dependency.
 #
@@ -39,10 +39,9 @@ _format_bytes_human() {
     printf '%d.%d MB' "$mb_int" "$mb_dec"
 }
 
-# --- Backup Validation Functions ---
 
-# List available backups in a directory - STANDARDIZED: Returns exit code
-# ITEM-10: Print per-type file count + total size after each type block, plus
+# List available backups in a directory
+# Print per-type file count + total size after each type block, plus
 #          a grand-total line at the end of all output.
 list_backups() {
     local backup_base_dir="${1:-backups}"
@@ -58,7 +57,6 @@ list_backups() {
     local backup_types=("db" "full" "emergency")
     local found_backups=false
 
-    # Grand-total accumulators
     local grand_total_files=0
     local grand_total_bytes=0
     local grand_total_types=0
@@ -72,8 +70,7 @@ list_backups() {
                 if [[ -n "$backups" ]]; then
                     echo "=== $backup_type backups ==="
 
-                    # Per-type accumulators
-                    local type_count=0
+                                    local type_count=0
                     local type_bytes=0
 
                     while IFS= read -r backup_file; do
@@ -95,14 +92,13 @@ list_backups() {
 
                         printf "  %-40s %10s  %s\n" "$basename_file" "$size_info" "$age_info"
 
-                        # Show metadata if available
-                        if [[ -f "$backup_file.meta" ]]; then
+                                        if [[ -f "$backup_file.meta" ]]; then
                             local vw_version
                             vw_version=$(grep "vaultwarden_version=" "$backup_file.meta" 2>/dev/null | cut -d= -f2 || echo "unknown")
                             printf "    └─ VaultWarden: %s\n" "$vw_version"
                         fi
 
-                        # ITEM-10: accumulate raw bytes for the summary line.
+                        # Accumulate raw bytes for the summary line.
                         # _stat_file_size() is exported by lib/crypto.sh and
                         # chooses GNU (-c%s) or BSD (-f%z) stat automatically.
                         local raw_bytes=0
@@ -116,8 +112,7 @@ list_backups() {
                         found_backups=true
                     done <<< "$backups"
 
-                    # ITEM-10: per-type summary line
-                    printf "[%s: %d file(s), %s]\n" \
+                                    printf "[%s: %d file(s), %s]\n" \
                         "$backup_type" "$type_count" "$(_format_bytes_human "$type_bytes")"
                     echo ""
 
@@ -134,7 +129,7 @@ list_backups() {
         return 1
     fi
 
-    # ITEM-10: grand-total line — only shown when there is more than one
+    # Grand-total line — only shown when there is more than one
     # active type, so a single-type install doesn't get a redundant line.
     if (( grand_total_types > 1 )); then
         printf "Total: %d file(s), %s  (%d type(s) with backups)\n" \
@@ -183,7 +178,6 @@ validate_backup_integrity() {
         return 1
     fi
 
-    # Preflight check: tar must be available to validate the inner stream.
     if ! command -v tar >/dev/null 2>&1; then
         log_error "validate_backup_integrity: 'tar' not found — cannot validate inner archive stream"
         return 1
@@ -191,7 +185,6 @@ validate_backup_integrity() {
 
     log_info "Validating backup integrity: $(basename "$backup_file")"
 
-    # Check file size (basic corruption detection)
     # Use inline GNU||BSD fallback for portability.
     local file_size
     file_size=$(stat -c%s "$backup_file" 2>/dev/null || stat -f%z "$backup_file" 2>/dev/null || echo "0")
@@ -201,7 +194,6 @@ validate_backup_integrity() {
         return 1
     fi
 
-    # Check SHA256 if available
     if [[ -f "$backup_file.sha256" ]]; then
         local expected_checksum
         expected_checksum=$(cat "$backup_file.sha256" 2>/dev/null)
@@ -215,13 +207,11 @@ validate_backup_integrity() {
         fi
     fi
 
-    # ---------------------------------------------------------------------------
-    # W2-M6 FIX: Decrypt once to a temp file, then use it for both checks.
+    # Decrypt once to a temp file, then use it for both checks.
     # The previous two-pass approach (decrypt to /dev/null + decrypt|tar)
     # creates a TOCTOU window: the file on disk could change between the passes,
     # making pass 2 fail even though pass 1 succeeded. A single decrypt also
     # halves the CPU/IO cost for large backups.
-    # ---------------------------------------------------------------------------
     local _bku_tmpdir _dec_payload
     _bku_tmpdir=$(mktemp -d -p /dev/shm 2>/dev/null || mktemp -d)
     _dec_payload="$_bku_tmpdir/decrypted_payload"
@@ -236,7 +226,6 @@ validate_backup_integrity() {
 
     log_success "Decryption succeeded (age envelope intact)"
 
-    # Inner tar stream check — list only, no extraction.
     if ! tar -tz -f "$_dec_payload" >/dev/null 2>&1; then
         rm -rf "$_bku_tmpdir"
         log_error "Backup tar-stream check failed: inner tar payload is corrupt or truncated"
@@ -254,13 +243,7 @@ validate_backup_integrity() {
 # ---------------------------------------------------------------------------
 # verify_backup_integrity DB_PATH [AGE_KEY_FILE]
 #
-# The previous implementation copied the live .db,
-# -wal, and -shm files with three sequential cp calls. VaultWarden can commit
-# a transaction between the first and second cp, producing an inconsistent
-# snapshot. SQLite's PRAGMA integrity_check on such a pair can return a false
-# "ok".
-#
-# Fix: use sqlite3 "$db_path" ".backup '$db_copy'" (SQLite Online Backup API)
+# Uses sqlite3 "$db_path" ".backup '$db_copy'" (SQLite Online Backup API)
 # which holds the necessary shared read lock across the entire copy, producing
 # a fully consistent snapshot regardless of concurrent WAL activity.
 # The WAL and SHM sidecars are NOT manually copied — the Online Backup API
@@ -282,7 +265,6 @@ verify_backup_integrity() {
         return 1
     fi
 
-    # Create a private, restricted working directory for the DB copy.
     local work_dir
     if ! work_dir=$(mktemp -d); then
         log_error "verify_backup_integrity: failed to create temporary directory"
@@ -290,7 +272,6 @@ verify_backup_integrity() {
     fi
     chmod 700 "$work_dir"
 
-    # Ensure cleanup on every exit path from this function.
     # shellcheck disable=SC2064  # intentional: expand $work_dir now
     trap "rm -rf '$work_dir'" RETURN
 
@@ -328,10 +309,7 @@ verify_backup_integrity() {
 # ---------------------------------------------------------------------------
 # get_backup_size BACKUP_FILE
 #
-# The previous implementation used 'du -sh' which returns
-# a human-readable string (e.g. "4.2M"). Any caller attempting arithmetic on
-# that value would silently get 0 (in (( )) context) or an error. Changed to
-# return the raw byte count via portable stat (GNU: -c%s, BSD/macOS: -f%z) so
+# Returns the raw byte count via portable stat (GNU: -c%s, BSD/macOS: -f%z) so
 # callers can safely perform numeric comparisons. Outputs bytes as a plain
 # integer on stdout. Returns 1 if the file does not exist or size cannot be
 # determined.
@@ -358,16 +336,10 @@ get_backup_size() {
     return 0
 }
 
-# Check available disk space for backup operations - STANDARDIZED: Returns exit code
+# Check available disk space for backup operations
 #
-# df --output=avail is GNU coreutils-only. BSD/macOS df does not
-# support the --output= long option and the function always reported
-# 'Cannot determine available disk space' on macOS.
-#
-# Replaced with a portable awk approach that reads the last column of the
-# last row of `df` output.  POSIX df guarantees the available-blocks value
-# is in column 4 (1 KiB blocks on both GNU and BSD), so the awk expression
-# is identical on Linux and macOS.
+# Uses a portable awk approach (POSIX df guarantees available-blocks
+# in column 4, identical on GNU and BSD).
 check_backup_disk_space() {
     local target_dir="$1"
     local required_space_mb="${2:-1000}"  # Default 1GB
@@ -379,8 +351,6 @@ check_backup_disk_space() {
         return 0
     fi
 
-    # portable df — column 4 is Available (1 KiB blocks) on
-    # both GNU df and BSD/macOS df.
     local available_space_kb
     # Use awk 'END' (last line) instead of 'NR==2' to handle long
     # filesystem paths that cause df to wrap output across two lines.
@@ -418,18 +388,15 @@ _backup_filename_age_days() {
     local basename_file
     basename_file=$(basename "$file")
 
-    # Match YYYYMMDD-HHMMSS anywhere in the filename.
     local ts_date ts_time
     if [[ "$basename_file" =~ ([0-9]{8})-([0-9]{6}) ]]; then
         ts_date="${BASH_REMATCH[1]}"   # e.g. 20240315
         ts_time="${BASH_REMATCH[2]}"   # e.g. 143022
     else
-        # No timestamp in filename — signal fallback needed.
-        echo ""
+            echo ""
         return
     fi
 
-    # Reformat for date(1): YYYY-MM-DD HH:MM:SS
     local ts_str
     ts_str="${ts_date:0:4}-${ts_date:4:2}-${ts_date:6:2} ${ts_time:0:2}:${ts_time:2:2}:${ts_time:4:2}"
 
@@ -469,7 +436,7 @@ _backup_ctime_age_days() {
     echo $(( (now_epoch - ctime_epoch) / 86400 ))
 }
 
-# Clean up old backups based on retention policy - STANDARDIZED: Returns exit code
+# Clean up old backups based on retention policy
 #
 # Removes .age backup files older than $retention_days. A second sweep removes
 # orphaned .meta and .sha256 sidecar files whose corresponding .age primary no
@@ -494,7 +461,7 @@ cleanup_old_backups() {
 
     log_info "Cleaning up $backup_type backups older than $retention_days days"
 
-    # W2-C5 FIX: Before deleting any backups, count total .age files in the
+    # Before deleting any backups, count total .age files in the
     # directory. If there is only one (or zero), abort deletion — otherwise the
     # last good backup could be removed, leaving no recovery point.
     local _total_age_files
@@ -561,7 +528,7 @@ cleanup_old_backups() {
     return 0
 }
 
-# Get backup statistics - STANDARDIZED: Returns exit code
+# Get backup statistics
 #
 # find -exec stat -c%s {} + is GNU-only. On macOS stat -c%s
 # errors and awk sums to 0, reporting all backup sizes as 0 MB.
@@ -590,8 +557,7 @@ get_backup_statistics() {
             local count=0
             local size_bytes=0
 
-            # portable size accumulation via _stat_file_size()
-            while IFS= read -r f; do
+                    while IFS= read -r f; do
                 local fsz=0
                 # Guard: _stat_file_size is exported by lib/crypto.sh;
                 # fall back to inline stat when crypto.sh was not sourced.
@@ -623,12 +589,8 @@ get_backup_statistics() {
     return 0
 }
 
-# Create backup metadata file - STANDARDIZED: Returns exit code
+# Create backup metadata file
 #
-# stat -c%s is GNU-only. Replaced with _stat_file_size() from
-# lib/crypto.sh for consistent portable behaviour.
-# replaced '$? -eq 0' anti-pattern after heredoc with a direct
-# 'if ! cat > file <<EOF' guard.
 create_backup_metadata() {
     local backup_file="$1"
     local backup_type="$2"
@@ -643,7 +605,6 @@ create_backup_metadata() {
     local timestamp file_size checksum hostname
 
     timestamp=$(date -Iseconds)
-    # use portable _stat_file_size() wrapper
     file_size=$(_stat_file_size "$backup_file" 2>/dev/null || echo "0")
     [[ -z "$file_size" || ! "$file_size" =~ ^[0-9]+$ ]] && file_size=0
     hostname=$(hostname -f 2>/dev/null || hostname)
@@ -672,9 +633,6 @@ create_backup_metadata() {
         return 1
     }
 
-    # test the cat heredoc directly instead of checking $?
-    # after the fact, which is an anti-pattern ($? may be stale or from
-    # a different command in complex pipelines).
     if ! cat > "$metadata_file" <<EOF
 # VaultWarden Backup Metadata
 backup_type=$backup_type
@@ -695,7 +653,6 @@ EOF
     return 0
 }
 
-# Export functions for use by scripts
 export -f list_backups validate_backup_integrity check_backup_disk_space
 export -f cleanup_old_backups get_backup_statistics create_backup_metadata
 export -f verify_backup_integrity get_backup_size _backup_ctime_age_days
