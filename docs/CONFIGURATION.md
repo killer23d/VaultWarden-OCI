@@ -34,9 +34,6 @@ sudo ./setup.sh install --domain vault.yourdomain.com --email admin@yourdomain.c
 # Your VaultWarden URL — MUST include https://
 DOMAIN=https://vault.yourdomain.com
 
-# Bare domain (no protocol) — used by Caddy, Fail2Ban, and email
-DOMAIN_NAME=vault.yourdomain.com
-
 # Admin contact for notifications and Fail2Ban emails
 ADMIN_EMAIL=admin@yourdomain.com
 
@@ -44,7 +41,7 @@ ADMIN_EMAIL=admin@yourdomain.com
 CLOUDFLARE_ZONE_ID=your_zone_id_here
 ```
 
-> **⚠️** `DOMAIN` requires `https://`. `DOMAIN_NAME` is the bare hostname without protocol. Both are required and used by different services.
+> **⚠️** `DOMAIN` must include `https://`. The Caddy entrypoint derives the bare hostname internally, so `.env` only needs `DOMAIN`.
 
 ---
 
@@ -76,10 +73,10 @@ CADDY_VERSION=2.11.2          # CaddyBuilds/caddy-cloudflare build
                               # bundled by default, rewrites remote_ip to real client
                               # IP in access logs (required for Fail2Ban accuracy)
 FAIL2BAN_VERSION=1.1.0-r3     # iptables-legacy fix included; do not downgrade to 1.1.0
-POSTFIX_VERSION=4.3.0         # boky/postfix — used when EMAIL_MODE=host or as MTA fallback
+POSTFIX_VERSION=4.3.0         # boky/postfix — SMTP sidecar for VaultWarden, Fail2Ban, and SMTP fallback
 ```
 
-> **Note on Postfix:** the Postfix sidecar (`boky/postfix`) is the **host MTA tier** — the last fallback in the `auto` delivery chain. It is not required for API or SMTP relay delivery. See the [Email Configuration](#-email-configuration) section below for the full chain.
+> **Note on Postfix:** the Postfix sidecar (`boky/postfix`) is the repo-managed SMTP sidecar. VaultWarden and Fail2Ban still use it even when script-driven alerts succeed through the API stage.
 
 To override versions at runtime without editing files:
 
@@ -108,7 +105,7 @@ Manage secrets with `./edit-secrets.sh edit`. They are encrypted with Age + SOPS
 | Secret | Purpose |
 | :-- | :-- |
 | `smtp_password` | SMTP relay password — used by `lib/common.sh` (email functions) SMTP path **and** the Postfix MTA sidecar |
-| `<PROVIDER>_API_TOKEN` | HTTP API token for the selected email provider (see Email section below) |
+| `email_api_token` | HTTP API token for the selected email provider (stored in secrets and selected by `EMAIL_PROVIDER`) |
 | `push_installation_id` | Bitwarden push notification installation ID |
 | `push_installation_key` | Bitwarden push notification installation key |
 
@@ -118,14 +115,14 @@ Manage secrets with `./edit-secrets.sh edit`. They are encrypted with Age + SOPS
 
 ## 📧 Email Configuration
 
-Email delivery is handled by **`lib/common.sh` (email functions)** — a pure bash + curl multi-provider chain with automatic fallback. The Postfix sidecar acts as the last-resort host MTA tier when both the API and SMTP relay paths are unavailable or disabled.
+Email delivery is handled by **`lib/common.sh` (email functions)** — a pure bash + curl multi-provider chain with automatic fallback. SMTP can go either to your external relay or to the Postfix sidecar, and `host` mode is the final local mail/sendmail fallback.
 
 ### Delivery Chain
 
 ```
 EMAIL_MODE=auto  →  1. HTTP API    (EMAIL_PROVIDER, curl)
-                    2. SMTP relay  (curl smtps/starttls — no local daemon)
-                    3. Host MTA    (Postfix sidecar container on 127.0.0.1:587)
+                    2. SMTP        (direct relay or Postfix sidecar)
+                    3. Host MTA    (local mail/sendmail binary)
 ```
 
 `EMAIL_MODE` controls which path(s) are attempted:
@@ -134,8 +131,8 @@ EMAIL_MODE=auto  →  1. HTTP API    (EMAIL_PROVIDER, curl)
 | :-- | :-- |
 | `auto` | Try API → SMTP → host MTA in order (recommended) |
 | `api` | HTTP API only; fail loudly if token not set |
-| `smtp` | SMTP relay only (curl, no local daemon) |
-| `host` | Host MTA only (Postfix sidecar / `mail` binary) |
+| `smtp` | SMTP only (direct relay when `SMTP_PASSWORD` is set, otherwise the Postfix sidecar) |
+| `host` | Host mail/sendmail only |
 
 ### Tier 1 — HTTP API Provider
 
@@ -175,13 +172,13 @@ SMTP_FROM_NAME=VaultWarden
 SMTP_TIMEOUT=30
 ```
 
-### Tier 3 — Host MTA (Postfix Sidecar)
+### Postfix Sidecar and Host-MTA Fallback
 
-The `postfix` service in `docker-compose.yml` runs `boky/postfix` as a containerised SMTP relay bound to `127.0.0.1:587`. It is the last-resort delivery path when both API and SMTP relay are unavailable, or when `EMAIL_MODE=host`.
+The `postfix` service in `docker-compose.yml` runs `boky/postfix` as a containerised SMTP relay bound to `127.0.0.1:587`. `EMAIL_MODE=smtp` uses it whenever `SMTP_PASSWORD` is blank, and VaultWarden / Fail2Ban rely on it for their own SMTP traffic.
 
 **How it works:**
 
-- `lib/common.sh` (email functions) connects to `127.0.0.1:587` (Fail2Ban uses host networking; VaultWarden uses the Docker bridge) when the host MTA path is selected.
+- `lib/common.sh` connects to `127.0.0.1:587` for the SMTP sidecar path when `SMTP_PASSWORD` is blank.
 - The Postfix container authenticates upstream using the same `smtp_password` secret as tier 2.
 - Postfix forwards mail through `RELAYHOST` (your upstream SMTP provider) — it is a relay, not a standalone mail server. It does **not** send mail directly to recipient MX records.
 
@@ -199,7 +196,7 @@ POSTFIX_SMTP_TLS_SECURITY_LEVEL=encrypt  # encrypt (recommended) or may (opportu
 POSTFIX_MESSAGE_SIZE_LIMIT=10240000  # Max message size in bytes (default: ~10 MB)
 ```
 
-> **`ALLOWED_SENDER_DOMAINS` is critical.** If left blank, Postfix will accept mail from any sender domain, making it an open relay accessible to any container on the Docker network. Always set it to your domain (e.g. `yourdomain.com`).
+> **`ALLOWED_SENDER_DOMAINS` is critical.** If left blank, Postfix becomes an open relay for other containers on the Docker network. Set it to your mail domain.
 
 **SMTP password note:** `boky/postfix` writes the relay password to `/etc/postfix/sasl_passwd` inside the container at startup — this is a Postfix SASL requirement and cannot be avoided at the protocol level. The file is not bind-mounted to the host, but is readable via `docker exec vaultwarden_postfix cat /etc/postfix/sasl_passwd`. Restrict Docker socket access to trusted operators.
 
@@ -271,7 +268,7 @@ VW_SMTP_EXPLICIT_TLS=false    # Do not attempt STARTTLS on the internal link
 
 ### Fail2Ban Email
 
-Fail2Ban notification addresses must also be **literal values** — `${ADMIN_EMAIL}` and `${DOMAIN_NAME}` are not expanded in `.env`:
+Fail2Ban notification addresses must also be **literal values** — `.env` does not expand references to other variables:
 
 ```bash
 F2B_LOG_TARGET=STDOUT
@@ -279,7 +276,7 @@ F2B_LOG_LEVEL=INFO
 F2B_DB_PURGE_AGE=1d
 F2B_MAX_RETRY=3
 F2B_DEST_MAIL=admin@yourdomain.com      # ← literal, not ${ADMIN_EMAIL}
-F2B_SENDER=fail2ban@vault.yourdomain.com # ← literal, not fail2ban@${DOMAIN_NAME}
+F2B_SENDER=fail2ban@vault.yourdomain.com # ← literal value, not another variable reference
 F2B_ACTION="%(action_mwl)s"             # Email + Cloudflare ban
 ```
 
@@ -394,8 +391,8 @@ SOPS_AGE_KEY_FILE=/etc/vaultwarden/age-key.txt
 RESTORE_AGE_KEY_FILE=
 
 # BACKUP_SCHEDULE is a reference value only — the actual automated schedule
-# is controlled by the systemd timer: vaultwarden-db-backup.timer (Mon–Sat 04:00)
-# and vaultwarden-full-backup.timer (Sunday 03:00).
+# is controlled by the systemd timers (daily DB backup at 04:00 and Sunday full
+# backup at 03:00).
 # To change the schedule: sudo systemctl edit vaultwarden-db-backup.timer
 BACKUP_SCHEDULE="0 4 * * *"
 ```
@@ -414,10 +411,10 @@ sudo ./setup.sh systemd install
 
 | Timer | Schedule | Script |
 | :-- | :-- | :-- |
-| `vaultwarden-db-backup.timer` | Mon–Sat 04:00 (+60 s jitter) | `backup.sh run db --rclone --email` |
-| `vaultwarden-full-backup.timer` | Sunday 03:00 | `backup.sh run full --full-verification --rclone --email` |
+| `vaultwarden-db-backup.timer` | Daily 04:00 (+60 s jitter) | `backup.sh run db --rclone --full-verification` |
+| `vaultwarden-full-backup.timer` | Sunday 03:00 (+300 s jitter) | `backup.sh run full --rclone --full-verification` |
 | `vaultwarden-health.timer` | Every 30 min | `maintenance.sh health --fix` |
-| `vaultwarden-maintenance.timer` | Sunday 02:00 | `maintenance.sh run --comprehensive` |
+| `vaultwarden-maintenance.timer` | Daily 02:05 (+30 s jitter) | `maintenance.sh run --comprehensive --email` |
 | `vaultwarden-dns-update.timer` | Every hour | `maintenance.sh update-dns` |
 | `vaultwarden-firewall-update.timer` | Saturday 04:00 | `maintenance.sh update-firewall` |
 

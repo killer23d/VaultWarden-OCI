@@ -235,7 +235,7 @@ Settings → Server URL → https://vault.example.com
 sudo ./setup.sh install --domain vault.example.com --email admin@example.com --auto
 
 # Create break-glass admin for emergency console access
-utilities/create-breakglass-admin.sh create
+sudo utilities/create-breakglass-admin.sh create
 ```
 
 ### Migrating from a Generic Docker Compose Deployment
@@ -335,7 +335,7 @@ sudo systemctl list-timers 'vaultwarden-*'
 ./maintenance.sh test-email --verbose
 ```
 
-> **Email migration note:** VaultWarden-OCI no longer requires a Postfix sidecar container for email. `lib/common.sh` (email functions) provides an API → SMTP → host MTA fallback chain. Set `EMAIL_PROVIDER` and the corresponding API token secret (`email_api_token`) via `./edit-secrets.sh edit`. See [CONFIGURATION.md](CONFIGURATION.md) for the full email configuration reference.
+> **Email migration note:** `lib/common.sh` (email functions) provides API → SMTP → host-MTA fallback for script-driven alerts. The Postfix sidecar still handles VaultWarden container mail and Fail2Ban mail, so keep the `postfix` service enabled unless you have deliberately removed those paths. Set `EMAIL_PROVIDER` in `.env`, store `email_api_token` with `./edit-secrets.sh rotate email_api_token`, and see [CONFIGURATION.md](CONFIGURATION.md) for the full reference.
 
 ### Update Client Applications
 
@@ -417,7 +417,7 @@ curl -I https://vault.example.com/admin
 grep -E 'EMAIL_MODE|EMAIL_PROVIDER|SMTP_HOST' .env
 
 # Verify API token is set in secrets
-./edit-secrets.sh edit  # Check email_api_token
+./edit-secrets.sh view  # Confirm email_api_token is present
 ```
 
 ### Systemd timers not running

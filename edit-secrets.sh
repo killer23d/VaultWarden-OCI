@@ -9,29 +9,10 @@
 # See also: ./setup.sh secrets  (first-time creation and full reconfiguration)
 #
 # ---------------------------------------------------------------------------
-# SCOPE AND STORAGE GUARD — READ BEFORE MODIFYING
-# ---------------------------------------------------------------------------
-# This script manages repo-managed encrypted configuration:
-#   secrets/secrets.yaml       — SOPS/Age-encrypted runtime secrets
-#   secrets/.docker_secrets/   — bind-mounted plaintext Docker secret files
-#   secrets/keys/              — Age key (local dev path)
-#   .env                       — project environment variables
-#   .sops.yaml                 — SOPS key-binding configuration
-#
-# It does NOT read from or write to PROJECT_STATE_DIR (the VaultWarden
-# runtime data directory, which in separate-volume mode lives on a dedicated
-# block device, e.g. /mnt/vw-data).
-#
-# Therefore this script intentionally does NOT call require_project_state_ready()
-# from lib/storage.sh.  Enforcing a storage guard here would prevent operators
-# from rotating credentials or exporting a recovery kit during the very
-# storage incidents where those actions are most needed.
-#
-# Post-rotation actions (Docker secret file sync, docker compose restart
-# guidance) may fail or be deferred when the stack is down — those failures
-# are already handled gracefully by _deploy_docker_secrets() and do_rotate().
-# A non-blocking preflight (_warn_if_stack_unavailable) informs the operator
-# if the data volume appears unavailable without halting execution.
+# This script manages repo files only: secrets/, .env, and .sops.yaml.
+# It intentionally skips require_project_state_ready() so you can rotate secrets
+# or export a recovery kit even when the data volume is unavailable.
+# Docker-dependent follow-up steps still warn if the stack or volume is down.
 # ---------------------------------------------------------------------------
 
 HISTFILE=/dev/null
@@ -47,17 +28,8 @@ source "lib/crypto.sh"
 source "lib/secrets.sh"
 
 # ---------------------------------------------------------------------------
-# _warn_if_stack_unavailable
-#
-# Non-blocking preflight: warns the operator when separate-volume mode is
-# configured (DATA_VOLUME_DEVICE set in .env) but the data volume is not
-# currently mounted.  Secret editing and rotation continue normally — this
-# script does not require the data volume.  However, Docker-dependent
-# post-rotation steps (secret file sync, service restart) may fail until
-# the volume is mounted and the stack is back up.
-#
-# Uses DATA_VOLUME_DEVICE (written by setup.sh) rather than STORAGE_MODE
-# (not written by setup.sh and absent from .env.example) as the gate.
+# Warn when separate-volume mode is configured but the data volume is not mounted.
+# Secret editing still works; only the Docker sync/restart follow-up may fail.
 # ---------------------------------------------------------------------------
 _warn_if_stack_unavailable() {
     [[ ! -f "${PROJECT_ROOT}/.env" ]] && return 0

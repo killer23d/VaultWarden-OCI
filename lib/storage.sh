@@ -1,21 +1,7 @@
 #!/usr/bin/env bash
-# lib/storage.sh — Storage-mode helpers for VaultWarden-OCI
-#
-# Supports two storage modes:
-#   Boot-only:       DATA_VOLUME_DEVICE= (blank)  — default, no extra action
-#   Separate-volume: DATA_VOLUME_DEVICE=/dev/sdX   — data volume must be mounted
-#
-# Source this library after lib/common.sh in every operational script:
-#   setup.sh  startup.sh  backup.sh  restore.sh  maintenance.sh
-#
-# Public API:
-#   require_project_state_ready  — guard called early in every script; fails
-#                                  closed if the expected data volume is absent.
-#   setup_data_volume            — provisions the volume (setup.sh only).
-#   install_docker_mount_guard   — installs/removes Docker systemd drop-in
-#                                  (setup.sh only).
-#   vw_default_backup_dir        — canonical default backup root directory,
-#                                  derived from PROJECT_STATE_DIR.
+# Storage helpers for boot-volume and separate-volume installs.
+# Source after lib/common.sh in operational scripts so writes fail closed when
+# the configured data volume is missing.
 
 [[ -n "${VAULTWARDEN_STORAGE_LIB_LOADED:-}" ]] && return 0
 readonly VAULTWARDEN_STORAGE_LIB_LOADED=1

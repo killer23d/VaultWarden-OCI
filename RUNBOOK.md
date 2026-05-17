@@ -9,7 +9,7 @@ the repository root on the server. Prefix with `sudo` where indicated.
 
 For first-time setup on a new host:
 1. Configure OCI Security List (ports `80`, `443`, and `22`).
-2. Copy `.env.example` to `.env` and set at minimum: `DOMAIN_NAME`, `ADMIN_EMAIL`, `CLOUDFLARE_ZONE_ID`, SMTP values.
+2. Copy `.env.example` to `.env` and set at minimum: `DOMAIN`, `ADMIN_EMAIL`, `CLOUDFLARE_ZONE_ID`, and your email settings.
 3. Run `sudo ./setup.sh install --domain <fqdn> --email <admin-email> --auto` (or `sudo make setup` if `.env` is already prepared).
 4. Re-login so your user picks up `docker` group membership.
 5. Start services with `make up` and verify with `make health`.

@@ -282,7 +282,7 @@ sudo ./setup.sh install --domain vault.example.com --email admin@example.com --f
 cat .env | grep -v "^#"
 
 # Verify critical variables are set
-grep -E "DOMAIN_NAME|CLOUDFLARE_ZONE_ID|SMTP_HOST|ADMIN_EMAIL" .env
+grep -E "DOMAIN|CLOUDFLARE_ZONE_ID|SMTP_HOST|ADMIN_EMAIL" .env
 
 # Check if services are using environment
 docker compose config | grep -A 5 environment
@@ -907,20 +907,20 @@ curl -u "admin:your_password" https://vault.example.com/admin
 **Diagnosis**:
 ```bash
 # Check break-glass admin status
-sudo utilities/create-breakglass-admin.sh list
+sudo utilities/create-breakglass-admin.sh status
 make breakglass-status
 
 # Verify user exists
-sudo id vw-breakglass
+sudo id vw-emergency
 
 # Check SSH configuration
-sudo cat /home/vw-breakglass/.ssh/authorized_keys
+sudo cat /home/vw-emergency/.ssh/authorized_keys
 ```
 
 **Solutions**:
 ```bash
 # Remove and recreate break-glass admin
-sudo utilities/create-breakglass-admin.sh revoke
+sudo utilities/create-breakglass-admin.sh remove
 sudo utilities/create-breakglass-admin.sh create
 # or:
 make breakglass-remove

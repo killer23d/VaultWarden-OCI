@@ -525,10 +525,10 @@ utilities/create-breakglass-admin.sh <subcommand>
 | Subcommand | Description |
 | :-- | :-- |
 | `create` | Create the emergency admin account |
-| `list` | Show current break-glass admin status |
+| `status` | Show current break-glass admin status |
 | `create --force` | Generate a new emergency password |
 | `validate` | Run security validation |
-| `revoke` | Remove the emergency admin account |
+| `remove` | Remove the emergency admin account |
 
 ```bash
 utilities/create-breakglass-admin.sh create
@@ -570,14 +570,14 @@ sudo ./setup.sh systemd <install|remove|validate|status> [--dry-run]
 
 | Schedule | Service unit | Job |
 | :-- | :-- | :-- |
-| Daily 2 AM (Mon–Sat) | `vaultwarden-maintenance` | `maintenance.sh run --comprehensive` |
-| Mon–Sat 4 AM + 0–60 s jitter | `vaultwarden-db-backup` | `backup.sh run db --rclone --email` |
+| Daily 02:05 + 0–30 s jitter | `vaultwarden-maintenance` | `maintenance.sh run --comprehensive --email` |
+| Daily 04:00 + 0–60 s jitter | `vaultwarden-db-backup` | `backup.sh run db --rclone --full-verification` |
 | Every 30 min | `vaultwarden-health` | `maintenance.sh health --fix` |
 | Saturday 4 AM | `vaultwarden-firewall-update` | `maintenance.sh update-firewall` |
-| Sunday 3 AM | `vaultwarden-full-backup` | `backup.sh run full --full-verification --rclone --email` |
+| Sunday 03:00 + 0–300 s jitter | `vaultwarden-full-backup` | `backup.sh run full --rclone --full-verification` |
 | Every hour | `vaultwarden-dns-update` | `maintenance.sh update-dns` |
 
-Sunday maintenance is intentionally absent — the 3 AM full backup fills that slot. `RandomizedDelaySec=60` on `vaultwarden-db-backup` spreads post-reboot catch-up bursts.
+`vaultwarden-maintenance.timer` now runs every day, including Sunday, and finishes before the full backup window. `RandomizedDelaySec` spreads boot-time catch-up work so the timers do not stampede after a reboot.
 
 **Failure notifications:** Every service unit sets `OnFailure=vaultwarden-notify-failure.service`. That unit sources `lib/common.sh`, calls `send_email()`, and is hardened with `NoNewPrivileges=yes` and `PrivateTmp=yes`.
 
@@ -590,7 +590,7 @@ sudo ./setup.sh systemd remove
 make install-systemd
 make systemd-status
 make systemd-validate
-make systemd-remove
+make remove-systemd
 make timers          # List all vaultwarden timers (next trigger + last run)
 ```
 
@@ -731,18 +731,18 @@ All common operations have Makefile shortcuts. Run `make help` to see the full t
 | `make logs-caddy` | `docker compose logs -f -t --tail=100 caddy` | Tail Caddy reverse-proxy logs |
 | `make logs-postfix` | `docker compose logs -f -t --tail=100 postfix` | Postfix email logs shortcut |
 | `make logs-fail2ban` | `docker compose logs -f -t --tail=100 fail2ban` | Tail Fail2ban intrusion-prevention logs |
-| `make backup` | `./backup.sh run db --email` | DB backup (pass `TYPE=full` or `TYPE=emergency`) |
-| `make backup-full` | `./backup.sh run full --email` | Full system backup |
-| `make backup-emergency` | `./backup.sh run emergency --email` | Emergency kit (includes secrets) |
+| `make backup` | `./backup.sh run db` | DB backup |
+| `make backup-full` | `./backup.sh run full` | Full system backup |
+| `make backup-emergency` | `./backup.sh run emergency` | Emergency kit (includes secrets) |
 | `make list-backups` | `./backup.sh list` | List all available backups with metadata |
 | `make backup-status` | — | Backup health summary: last run, size, retention, count per type |
 | `make restore` | `./restore.sh interactive` | Interactive restore (recommended) |
 | `make restore-db` | `./restore.sh latest db` | Restore latest database backup (runs key prompt + confirmation) |
 | `make restore-remote` | `./restore.sh interactive --remote` | Restore from a remote (rclone) backup — interactive selection |
 | `make update` | `./maintenance.sh update` | Pull latest container images |
-| `make update-system` | `./maintenance.sh update --system --email` | Update containers + apt + Docker engine |
-| `make maintenance` | `./maintenance.sh run --comprehensive` | Full maintenance run |
-| `make maintenance-full` | `./maintenance.sh run --comprehensive --email` | Full maintenance with email summary |
+| `make update-system` | `apt-get update && apt-get upgrade -y` | Update host OS packages |
+| `make maintenance` | `./maintenance.sh run` | Routine maintenance run |
+| `make maintenance-full` | `./maintenance.sh run --comprehensive` | Comprehensive maintenance run |
 | `make update-dns` | `./maintenance.sh update-dns` | Update Cloudflare DNS A record |
 | `make db-maint` | `sudo ./maintenance.sh db-maint` | Deep DB VACUUM (stops VaultWarden; confirms before running) |
 | `make db-backup` | `./backup.sh run db` | Quick database backup |
@@ -750,10 +750,10 @@ All common operations have Makefile shortcuts. Run `make help` to see the full t
 | `make key-show` | — | Show current Age public key and key file path/status |
 | `make key-health` | `lib/crypto.sh check_age_key_health` | Check Age key health (permissions, decodability) |
 | `make breakglass-create` | `sudo utilities/create-breakglass-admin.sh create` | Create emergency OS admin account |
-| `make breakglass-status` | `sudo utilities/create-breakglass-admin.sh list` | Show break-glass admin status |
-| `make breakglass-remove` | `sudo utilities/create-breakglass-admin.sh revoke` | Remove break-glass admin account |
+| `make breakglass-status` | `sudo utilities/create-breakglass-admin.sh status` | Show break-glass admin status |
+| `make breakglass-remove` | `sudo utilities/create-breakglass-admin.sh remove --force` | Remove break-glass admin account |
 | `make install-systemd` | `sudo ./setup.sh systemd install` | Install systemd units and sync scripts to `/opt` |
-| `make systemd-remove` | `sudo ./setup.sh systemd remove` | Remove all vaultwarden systemd timer units |
+| `make remove-systemd` | `sudo ./setup.sh systemd remove` | Remove all vaultwarden systemd timer units |
 | `make systemd-status` | `sudo ./setup.sh systemd status` | Show status of all vaultwarden systemd units |
 | `make systemd-validate` | `sudo ./setup.sh systemd validate` | Validate installed units match current repo scripts |
 | `make timers` | `systemctl list-timers` | Show all vaultwarden timers (next trigger + last run + `.env` schedule) |

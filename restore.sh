@@ -30,17 +30,8 @@ _source_lib "lib/crypto.sh"
 _source_lib "lib/storage.sh"
 unset -f _source_lib
 
-# DR pre-flight: .env guard
-# On a fresh (disaster-recovery) host the operator will not yet have a .env.
-# Sourcing .env.example — which contains REPLACE_ME placeholders — or running
-# with completely unset variables would silently corrupt the restore.  Catch
-# this early, before any config values are read, and give the operator a
-# single, actionable error message.
-#
-# Exemptions:
-#   help             show usage without a live config
-#   list             list local backups without requiring .env
-#   list --remote    list remote backups; operator may be prompted for remote
+# Require a real .env before any live restore so a fresh host never restores
+# with placeholder values from .env.example. Help and list modes stay exempt.
 _require_env_for_live_restore() {
     # Exempt subcommands that do not need .env
     local arg
@@ -127,9 +118,8 @@ BACKUP_BASE_DIR=""
 _SESSION_RCLONE_REMOTE_NAME=""
 _SESSION_RCLONE_REMOTE_PATH=""
 
-# Set by _rclone_is_available() when rclone binary + config are present but
-# RCLONE_REMOTE_NAME is missing — signals that an interactive prompt is
-# needed rather than a hard failure.
+# _rclone_is_available() sets this when rclone works but the remote name still
+# has to be collected interactively.
 RCLONE_NEEDS_INTERACTIVE_NAME=false
 
 show_help() {

@@ -945,7 +945,7 @@ sudo utilities/create-breakglass-admin.sh create
 make breakglass-create
 
 # Check status
-sudo utilities/create-breakglass-admin.sh list
+sudo utilities/create-breakglass-admin.sh status
 make breakglass-status
 ```
 

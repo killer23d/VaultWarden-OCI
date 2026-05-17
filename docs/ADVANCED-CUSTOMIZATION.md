@@ -148,14 +148,14 @@ sudo ./setup.sh systemd status     # show status of all units
 
 | Unit | Schedule | Job |
 | :-- | :-- | :-- |
-| `vaultwarden-maintenance.timer` | Sunday 2 AM | Comprehensive maintenance |
-| `vaultwarden-full-backup.timer` | Sunday 3 AM | Full backup + verify + rclone + email |
-| `vaultwarden-db-backup.timer` | Mon–Sat 4 AM | DB snapshot + rclone + email |
+| `vaultwarden-maintenance.timer` | Daily 2:05 AM | Comprehensive maintenance |
+| `vaultwarden-full-backup.timer` | Sunday 3 AM | Full backup + verify + rclone |
+| `vaultwarden-db-backup.timer` | Daily 4 AM | DB snapshot + rclone + full verification |
 | `vaultwarden-health.timer` | Every 30 min | Health check with auto-recover + email |
 | `vaultwarden-dns-update.timer` | Every hour | Dynamic DNS update |
 | `vaultwarden-firewall-update.timer` | Saturday 4 AM | Cloudflare firewall IP list refresh |
 
-> **Note on the Sunday DB backup gap:** `vaultwarden-db-backup.timer` runs Mon–Sat only. The Sunday 3 AM full backup covers the Sunday snapshot. If you want an additional DB-only run on Sunday after the full backup completes, add a supplemental timer entry with `OnCalendar=Sun *-*-* 05:00:00`.
+> **Note on timer overlap:** `vaultwarden-maintenance.timer` now runs every day at 02:05, leaving the Sunday 03:00 full backup window clear. If you customise the schedule, keep at least a one-hour gap before the backup timers.
 
 ### Timer Persistence
 
@@ -385,14 +385,14 @@ docker compose run --rm -e DEBUG_ENTRYPOINT=true caddy
 
 ## 📧 Email Customisation
 
-Email delivery is handled by **`lib/common.sh` (email functions)** — a pure bash + curl multi-provider chain. The Postfix sidecar container (`postfix` service, `boky/postfix`) provides the **last-resort host MTA tier** when both the HTTP API and SMTP relay paths fail or are disabled.
+Email delivery is handled by **`lib/common.sh` (email functions)** — a pure bash + curl multi-provider chain. SMTP can go straight to your relay or through the Postfix sidecar; `host` mode is the final local mail/sendmail fallback.
 
 ### Delivery Chain
 
 ```
 EMAIL_MODE=auto  →  1. HTTP API    (EMAIL_PROVIDER + API token via curl)
-                    2. SMTP relay  (curl smtps/starttls — no local daemon)
-                    3. Host MTA    (Postfix sidecar on 127.0.0.1:587)
+                    2. SMTP        (direct relay or Postfix sidecar)
+                    3. Host MTA    (local mail/sendmail binary)
 ```
 
 Set `EMAIL_MODE` in `.env` to control which paths are attempted:
@@ -401,8 +401,8 @@ Set `EMAIL_MODE` in `.env` to control which paths are attempted:
 | :-- | :-- |
 | `auto` | Try API → SMTP → host MTA in order (recommended) |
 | `api` | HTTP API only; fails loudly if token missing |
-| `smtp` | SMTP relay only (curl) |
-| `host` | Host MTA only (Postfix sidecar / `mail` binary) |
+| `smtp` | SMTP only (direct relay when `SMTP_PASSWORD` is set, otherwise the Postfix sidecar) |
+| `host` | Host mail/sendmail only |
 
 ### Tier 1 — Switching Email Provider
 
@@ -448,7 +448,7 @@ Set the SMTP password via secrets (shared with the Postfix sidecar):
 
 > **Do not point VaultWarden directly at the external relay.** Keep `VW_SMTP_HOST=postfix`, `VW_SMTP_SECURITY=off`, `VW_SMTP_AUTH_MECHANISM=none`, and `VW_SMTP_EXPLICIT_TLS=false`; only the `SMTP_*` block above changes when you switch upstream relay providers.
 
-### Tier 3 — Postfix MTA Sidecar
+### Postfix Sidecar
 
 The `postfix` service runs `boky/postfix` as a containerised SMTP relay. It is **not** a standalone MX mail server — it forwards all outbound mail through an upstream relay (`RELAYHOST`). This means it still requires a valid upstream SMTP provider and credentials.
 

@@ -9,19 +9,12 @@ OnFailure=vaultwarden-notify-failure.service
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/vaultwarden-scripts
-# Leading dash makes the file optional: the service starts even if
-# /etc/vaultwarden/vaultwarden.env does not yet exist (e.g. before
-# setup.sh systemd install has run). Missing required vars are caught
-# and reported by the script itself.
+# Start even if /etc/vaultwarden/vaultwarden.env is not installed yet; backup.sh
+# reports missing required values itself.
 EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
-# backup.sh flock is the exclusive backup guard.
-# Skip this run when maintenance is active to avoid overlap.
+# backup.sh owns the backup lock; skip this run if maintenance is active.
 ExecCondition=/bin/bash -c '! test -f /tmp/.vw_maintenance.lock'
-# NOTE: --email is intentionally omitted. Add it back once EMAIL_PROVIDER
-# credentials are configured:  sudo systemctl edit vaultwarden-full-backup.service
-# Failures are still reported via OnFailure=vaultwarden-notify-failure.service.
-# --full-verification decrypts the archive and performs a zstd+tar structural
-# integrity check before the offsite rclone sync.
+# --email stays disabled until the admin configures alert delivery.
 ExecStart=/opt/vaultwarden-scripts/backup.sh run full --rclone --full-verification
 User=root
 StandardOutput=journal
