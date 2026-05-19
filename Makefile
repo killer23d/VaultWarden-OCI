@@ -53,7 +53,7 @@ DATA_DEVICE ?=
         dev-setup fix-permissions test test-config dry-run fmt lint shellcheck \
         info version shell config diagnose \
         clean clean-all prune \
-        unban \
+        unban crowdsec-status crowdsec-alerts security-report \
         uninstall uninstall-dry-run
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -459,6 +459,27 @@ logs-postfix: ## Tail postfix logs
 
 logs-crowdsec: ## Tail CrowdSec logs
 	@sudo journalctl -u crowdsec -f --no-pager
+
+crowdsec-status: ## Show CrowdSec metrics and active bans
+	@sudo cscli metrics
+	@echo ""
+	@sudo cscli decisions list
+
+crowdsec-alerts: ## Show recent CrowdSec alerts (last 24h)
+	@sudo cscli alerts list --since 24h
+
+security-report: ## Single-command security event summary (last 1h)
+	@echo "=== Active Bans ==="
+	@sudo cscli decisions list
+	@echo ""
+	@echo "=== Recent Alerts (1h) ==="
+	@sudo cscli alerts list --since 1h
+	@echo ""
+	@echo "=== Caddy Auth Failures ==="
+	@docker logs vaultwarden_caddy 2>&1 | grep -i "401\|403\|rate" | tail -20
+	@echo ""
+	@echo "=== Vaultwarden Auth Failures ==="
+	@docker logs vaultwarden_app 2>&1 | grep -i "fail\|error\|unauthorized\|invalid" | tail -20
 
 # ===========================================================================
 ##@ Backup & Restore
