@@ -1178,6 +1178,14 @@ set_script_permissions() {
     local real_user; real_user=$(get_real_user)
     local real_group; real_group=$(id -g -n "$real_user")
 
+    # 0. Normalize directory permissions before touching executable bits.
+    #    Keep lib/ excluded because lib files are sourced and managed
+    #    separately below.
+    while IFS= read -r dir; do
+        chmod 755 "$dir" 2>/dev/null || true
+        chown "$real_user:$real_group" "$dir" 2>/dev/null || true
+    done < <(find . -path "./lib" -prune -o -type d -print)
+
     # 1. Root-level operator scripts — chmod +x
     local root_scripts=(
         "setup.sh"
@@ -1356,9 +1364,9 @@ EOF
         printf '\n%s════════════════════════════════════════════════════════════════════════════════%s\n' "${COLOR_RED}" "${COLOR_RESET}"
         printf '%s🚨  CRITICAL: AGE SECRET KEY (BACKUP THIS NOW)  🚨%s\n' "${COLOR_RED}" "${COLOR_RESET}"
         printf '%s════════════════════════════════════════════════════════════════════════════════%s\n' "${COLOR_RED}" "${COLOR_RESET}"
-        printf '%sSECRET KEY (production): %s/etc/vaultwarden/age-key.txt%s\n' "${COLOR_RED}" "${COLOR_GREEN}" "${COLOR_RESET}"
-        printf '%sSECRET KEY (repo-local): %ssecrets/keys/age-key.txt%s\n' "${COLOR_RED}" "${COLOR_GREEN}" "${COLOR_RESET}"
-        printf '%s%s%s\n' "${COLOR_GREEN}" "${age_key_content}" "${COLOR_RESET}"
+        printf '%sSECRET KEY (production): %s/etc/vaultwarden/age-key.txt%s\n' "${COLOR_YELLOW}" "${COLOR_GREEN}" "${COLOR_RESET}"
+        printf '%sSECRET KEY (repo-local): %ssecrets/keys/age-key.txt%s\n' "${COLOR_YELLOW}" "${COLOR_GREEN}" "${COLOR_RESET}"
+        printf '%s%s%s\n' "${COLOR_YELLOW}" "${age_key_content}" "${COLOR_RESET}"
         printf '%s════════════════════════════════════════════════════════════════════════════════%s\n' "${COLOR_RED}" "${COLOR_RESET}"
         printf '\n%sTo view again at any time:%s\n' "${COLOR_RED}" "${COLOR_RESET}"
         printf '  %ssudo cat /etc/vaultwarden/age-key.txt%s  %s(production — root-owned, mode 600)%s\n' \
@@ -1404,10 +1412,10 @@ EOF
         printf '   ► Verify: DOMAIN and ADMIN_EMAIL are correct\n'
         printf '2. Set external tokens: %s(use ./edit-secrets.sh rotate commands above)%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '3. Start services:      %smake up%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '4. Setup CrowdSec:      %ssudo ./utilities/setup-crowdsec.sh%s\n' \
+        printf '3. Setup CrowdSec:      %ssudo ./utilities/setup-crowdsec.sh%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '   ► This script prompts for crowdsec_cf_firewall_token and required bouncer values\n'
+        printf '   ► This script now prompts for CLOUDFLARE_ZONE_ID, optional CF_ACCOUNT_ID, and crowdsec_cf_firewall_token\n'
+        printf '4. Start services:      %smake up%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '5. Setup automation:    %ssudo ./setup.sh systemd install%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '6. Export recovery kit: %s./edit-secrets.sh export-recovery-kit%s\n' \
@@ -1425,10 +1433,10 @@ EOF
         printf '   ► Verify: DOMAIN and ADMIN_EMAIL are correct\n'
         printf '2. Configure secrets:   %s./setup.sh secrets%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '   ► You will be prompted for all credentials\n'
-        printf '3. Start services:      %smake up%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '4. Setup CrowdSec:      %ssudo ./utilities/setup-crowdsec.sh%s\n' \
+        printf '3. Setup CrowdSec:      %ssudo ./utilities/setup-crowdsec.sh%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '   ► You will be prompted for crowdsec_cf_firewall_token and required bouncer values\n'
+        printf '   ► You will be prompted for CLOUDFLARE_ZONE_ID, optional CF_ACCOUNT_ID, and crowdsec_cf_firewall_token\n'
+        printf '4. Start services:      %smake up%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '5. Setup automation:    %ssudo ./setup.sh systemd install%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '6. Export recovery kit: %s./edit-secrets.sh export-recovery-kit%s\n' \

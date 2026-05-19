@@ -5,11 +5,9 @@
 # Run automatically at the end of setup.sh, or standalone:
 #   sudo ./utilities/setup-crowdsec.sh [--auto] [--dry-run]
 #
-# Secrets (CF zone ID, CF API token, bouncer API key) are NOT
-# collected here. They are stored later by edit-secrets.sh.
-# This script writes CROWDSEC_CF_BOUNCER_API_KEY to .env so
-# edit-secrets.sh can consume it, and leaves CF token placeholders
-# that the operator fills via edit-secrets.sh.
+# This script collects required Cloudflare values interactively
+# (or writes placeholders in --auto mode), so CrowdSec can be fully
+# configured before the VaultWarden stack is started.
 
 set -euo pipefail
 
@@ -309,20 +307,31 @@ if [[ -f "$_CF_BOUNCER_CONFIG_SRC" ]]; then
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would write ${_CF_BOUNCER_CONFIG_DEST} from ${_CF_BOUNCER_CONFIG_SRC}"
     else
-        # ── Prompt for Cloudflare firewall API token ──────────────────────────
+        # ── Prompt for required Cloudflare values ─────────────────────────────
+        _cf_zone_id="${CLOUDFLARE_ZONE_ID:-}"
+        _cf_account_id="${CF_ACCOUNT_ID:-}"
         _CF_FIREWALL_TOKEN=""
         if [[ "$AUTO_MODE" == "true" ]]; then
+            _cf_zone_id="${_cf_zone_id:-CHANGE_ME_CF_ZONE_ID}"
+            _cf_account_id="${_cf_account_id:-CHANGE_ME_CF_ACCOUNT_ID}"
             _CF_FIREWALL_TOKEN="CHANGE_ME_CROWDSEC_CF_FIREWALL_TOKEN"
-            log_warn "Auto mode: Cloudflare firewall token left as placeholder."
-            log_warn "Set it later with: ./edit-secrets.sh rotate crowdsec_cf_firewall_token"
+            log_warn "Auto mode: Cloudflare values left as placeholders where missing."
+            log_warn "Set later in .env / edit-secrets.sh rotate crowdsec_cf_firewall_token"
         else
             log_info ""
             log_info "══════════════════════════════════════════════════════════"
-            log_info " Cloudflare Firewall API Token"
+            log_info " Cloudflare values required by CrowdSec bouncer"
             log_info "══════════════════════════════════════════════════════════"
             log_info " Required permissions: Zone:Firewall Services:Edit"
             log_info " Create at: https://dash.cloudflare.com/profile/api-tokens"
             log_info "══════════════════════════════════════════════════════════"
+            while [[ -z "$_cf_zone_id" ]]; do
+                read -r -p "Enter CLOUDFLARE_ZONE_ID: " _cf_zone_id
+                [[ -z "$_cf_zone_id" ]] && log_warn "CLOUDFLARE_ZONE_ID cannot be empty."
+            done
+            if [[ -z "$_cf_account_id" ]]; then
+                read -r -p "Enter CF_ACCOUNT_ID (optional, press Enter to skip): " _cf_account_id
+            fi
             while [[ -z "$_CF_FIREWALL_TOKEN" ]]; do
                 read -r -s -p "Enter Cloudflare Firewall API token (input hidden): " _CF_FIREWALL_TOKEN
                 echo ""
@@ -330,13 +339,15 @@ if [[ -f "$_CF_BOUNCER_CONFIG_SRC" ]]; then
                     log_warn "Token cannot be empty. Press Ctrl+C to skip and configure later."
                 fi
             done
+            _cs_set_env_var "CLOUDFLARE_ZONE_ID" "$_cf_zone_id"
+            [[ -n "$_cf_account_id" ]] && _cs_set_env_var "CF_ACCOUNT_ID" "$_cf_account_id"
             log_success "Cloudflare firewall token accepted."
         fi
 
         mkdir -p /etc/crowdsec/bouncers
         sed \
-            -e "s|TOKEN_CF_ZONE_ID|${CLOUDFLARE_ZONE_ID:-CHANGE_ME_CF_ZONE_ID}|g" \
-            -e "s|TOKEN_CF_ACCOUNT_ID|${CF_ACCOUNT_ID:-CHANGE_ME_CF_ACCOUNT_ID}|g" \
+            -e "s|TOKEN_CF_ZONE_ID|${_cf_zone_id}|g" \
+            -e "s|TOKEN_CF_ACCOUNT_ID|${_cf_account_id:-CHANGE_ME_CF_ACCOUNT_ID}|g" \
             -e "s|TOKEN_CROWDSEC_CF_FIREWALL_TOKEN|${_CF_FIREWALL_TOKEN}|g" \
             -e "s|CHANGE_ME_BOUNCER_KEY|${_CF_BOUNCER_KEY}|g" \
             "$_CF_BOUNCER_CONFIG_SRC" \
