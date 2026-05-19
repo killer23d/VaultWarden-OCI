@@ -172,7 +172,7 @@ make restart   # Force restart
 ```
 
 **Always-on checks:**
-- All 4 containers running (`vaultwarden`, `caddy`, `fail2ban`, `postfix`)
+- All 3 containers running (`vaultwarden`, `caddy`, `postfix`)
 - VaultWarden accessible on `localhost:8080`
 - External web access via Cloudflare
 - Disk space (warn >70%, critical >alert threshold [default 80%])
@@ -347,7 +347,7 @@ make restore-remote
 - Plaintext output (passwords, recovery kit) is routed exclusively to `/dev/tty`, never to stderr or the systemd journal
 
 **Managed secrets:**
-`admin_token`, `admin_basic_auth_hash`, `smtp_password`, `push_installation_id`, `push_installation_key`, `caddy_cloudflare_dns_token`, `fail2ban_cloudflare_firewall_token`, `backup_passphrase`
+`admin_token`, `admin_basic_auth_hash`, `smtp_password`, `push_installation_id`, `push_installation_key`, `caddy_cloudflare_dns_token`, `fail2ban_cloudflare_firewall_token` (used by CrowdSec cloudflare-bouncer), `backup_passphrase`
 
 **Subcommands:**
 
@@ -424,7 +424,7 @@ make update-system    # Containers + system packages (apt upgrade + Docker engin
 | `update-dns` | Update Cloudflare DNS A record (targeted) | ❌ |
 | `update-firewall` | Fetch latest Cloudflare IPs and update UFW rules (targeted) | ❌ |
 | `db-maint` | Full VACUUM cycle — stops VaultWarden; prompts for confirmation | ❌ |
-| `test-email` | Run Postfix + fail2ban + end-to-end email diagnostics | ❌ |
+| `test-email` | Run Postfix + end-to-end email diagnostics | ❌ |
 | `health` | System health monitoring | ❌ |
 | `update` | Update Docker images and optionally system packages | ❌ |
 
@@ -665,7 +665,7 @@ sudo bash ~/VaultWarden-OCI/utilities/uninstall-vaultwarden.sh run
 | 2 | systemd timer and service units (`/etc/systemd/system/vaultwarden-*.{timer,service}`) |
 | 3 | `/opt/vaultwarden-scripts/` (installed script copies) |
 | 4 | `/etc/vaultwarden/` (EnvironmentFile and directory) |
-| 5 | `/var/lib/vaultwarden/` (database, logs, Caddy/Fail2ban state) |
+| 5 | `/var/lib/vaultwarden/` (database, logs, Caddy state) |
 | 6 | Project clone directory (`~/VaultWarden-OCI/`, including secrets and Age key) |
 | 7 | `/var/lock/vaultwarden-setup.lock` |
 | 8 | `/usr/local/bin/sops` |
@@ -730,7 +730,7 @@ All common operations have Makefile shortcuts. Run `make help` to see the full t
 | `make logs-vaultwarden` | `docker compose logs -f -t --tail=100 vaultwarden` | Tail VaultWarden application logs |
 | `make logs-caddy` | `docker compose logs -f -t --tail=100 caddy` | Tail Caddy reverse-proxy logs |
 | `make logs-postfix` | `docker compose logs -f -t --tail=100 postfix` | Postfix email logs shortcut |
-| `make logs-fail2ban` | `docker compose logs -f -t --tail=100 fail2ban` | Tail Fail2ban intrusion-prevention logs |
+| `make logs-crowdsec` | `sudo journalctl -u crowdsec -f` | Tail CrowdSec threat detection logs |
 | `make backup` | `./backup.sh run db` | DB backup |
 | `make backup-full` | `./backup.sh run full` | Full system backup |
 | `make backup-emergency` | `./backup.sh run emergency` | Emergency kit (includes secrets) |

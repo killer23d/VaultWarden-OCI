@@ -146,7 +146,7 @@ Rate limits are enforced via **Cloudflare WAF rules** configured manually in the
 | Admin panel protection | `/admin*` | 5 req / 1 min per IP | Block (429) |
 | General API protection (optional) | `/api/*` | 100 req / 1 min per IP | Managed Challenge |
 
-Fail2ban adds a second layer — repeated auth failures trigger a **Cloudflare Edge WAF ban** (not a local iptables rule, since web traffic arrives via the Cloudflare proxy). Local `iptables` is strictly used for SSH protection.
+CrowdSec adds a second layer — repeated auth failures trigger a **Cloudflare Edge WAF ban** (not a local iptables rule, since web traffic arrives via the Cloudflare proxy). Local `iptables` is strictly used for SSH protection (managed by `crowdsec-firewall-bouncer`).
 
 ---
 

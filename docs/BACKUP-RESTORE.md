@@ -68,7 +68,7 @@ make backup                             # database backup via Makefile
 make backup-full                        # full backup via Makefile
 ```
 
-**Included:** Docker Compose config, `.env`, Caddy config, Fail2ban config, VaultWarden data directory, database snapshot.
+**Included:** Docker Compose config, `.env`, Caddy config, VaultWarden data directory, database snapshot.
 **Excluded:** `secrets/` directory, Age keys, SSH keys, `backups/`, `logs/`.
 
 ### Emergency Recovery Kit (As Needed)

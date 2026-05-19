@@ -8,6 +8,47 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ---
 ## [Unreleased]
 
+### Changed — Fail2Ban → CrowdSec Migration
+
+- **Security layer**: Replaced the `crazymax/fail2ban` Docker container with
+  CrowdSec running as a **host systemd service** (`crowdsec` + bouncers).
+- **Cloudflare bouncer**: Bans at the Cloudflare WAF edge are now handled by
+  `cs-cloudflare-bouncer`; reads the same `fail2ban_cloudflare_firewall_token`
+  secret path for backward compatibility.
+- **SSH/iptables bouncer**: Host iptables rules for SSH protection are now
+  managed by `crowdsec-firewall-bouncer` instead of Fail2Ban.
+- **Caddy image**: Replaced third-party `CaddyBuilds/caddy-cloudflare` with a
+  locally-built image (`caddy/Dockerfile`) that includes `mholt/caddy-ratelimit`
+  for in-process rate limiting (first layer of the three-layer defence).
+- **Docker stack**: Reduced from 4 containers (`vaultwarden`, `caddy`,
+  `fail2ban`, `postfix`) to 3 (`vaultwarden`, `caddy`, `postfix`).
+- **Three-layer defence**: Caddy `rate_limit` → CrowdSec detection →
+  Cloudflare WAF + iptables ban.
+- **Makefile**: `make logs-fail2ban` replaced by `make logs-crowdsec`
+  (targets `sudo journalctl -u crowdsec -f`).
+- **All documentation** updated to reflect the new architecture, CrowdSec CLI
+  commands (`cscli decisions list`, `cscli alerts list`), and host-service model.
+
+### Added
+
+- `crowdsec/` directory with CrowdSec configuration, custom parsers for
+  VaultWarden and Caddy logs, and scenario definitions.
+- `systemd/vaultwarden-iptables.service`: note that SSH/web bans are managed
+  by `crowdsec-firewall-bouncer`.
+- `RUNBOOK.md`: new `## 🛡️ CrowdSec Operations` section with management
+  commands, self-lockout prevention, and lockout recovery procedures.
+
+### Removed
+
+- `crazymax/fail2ban` Docker container and all Fail2Ban configuration files
+  (`fail2ban/jail.d/`, `fail2ban/filter.d/`, `fail2ban/action.d/`).
+- `F2B_DEST_MAIL` and `F2B_SENDER` environment variables (Fail2Ban email settings).
+- `FAIL2BAN_VERSION` from container version tracking.
+- `make logs-fail2ban` Makefile target.
+
+---
+## [Unreleased]
+
 ### ⚠️ BREAKING: Project-Wide CLI Refactor — Pure Subcommand Pattern
 
 **Every operator-facing script now uses a strict verb-first subcommand pattern.**

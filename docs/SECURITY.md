@@ -31,11 +31,11 @@ VaultWarden-OCI implements defense-in-depth with multiple security layers:
 └─────────────────────────────────────────┘
                   ↓
 ┌─────────────────────────────────────────┐
-│   Layer 4: Fail2Ban Monitoring         │
+│   Layer 4: CrowdSec Monitoring          │
 │   - Cloudflare-ONLY for Web Traffic    │
 │   - Local iptables ONLY for SSH         │
-│   - High-Fidelity Log Parsing           │
-│   - Email Alerts via Postfix            │
+│   - Behavioural Log Analysis            │
+│   - Three-Layer Defence                 │
 └─────────────────────────────────────────┘
                   ↓
 ┌─────────────────────────────────────────┐
@@ -69,29 +69,26 @@ VaultWarden-OCI implements defense-in-depth with multiple security layers:
 ### Current Blocking Strategy
 
 #### Web Traffic (Proxied through Cloudflare)
-```ini
-# All web-facing jails use Cloudflare API ONLY
-[vaultwarden-auth]
-action = smtp[...]
-         cloudflare-apiv4    # ✅ Blocks at Cloudflare edge
 
-[vaultwarden-admin]
-action = smtp[...]
-         cloudflare-apiv4    # ✅ Blocks at Cloudflare edge
+CrowdSec detects threats from logs and issues ban decisions. The
+`cs-cloudflare-bouncer` then blocks IPs at Cloudflare's edge via the WAF
+Custom Rules Rulesets API:
 
-[vaultwarden-web-*]
-action = smtp[...]
-         cloudflare-apiv4    # ✅ Blocks at Cloudflare edge
+```bash
+# Check active web bans
+sudo cscli decisions list --type ban
+
+# Check Cloudflare bouncer is applying bans
+sudo journalctl -u cs-cloudflare-bouncer | grep -i "add\|block"
 ```
 
 #### SSH Traffic (Direct, NOT Proxied)
-```ini
-# SSH jail uses local iptables (direct connection)
-# Fail2ban 1.1.0-r3 leverages iptables-legacy fallbacks to ensure compatibility
-# with modern OS networking stacks (like Oracle Linux and Debian).
-[sshd]
-action = smtp[...]
-         iptables-multiport  # ✅ Local blocking works for SSH
+
+```bash
+# SSH is NOT proxied, so iptables works correctly
+# crowdsec-firewall-bouncer inserts iptables rules on the host
+sudo systemctl status crowdsec-firewall-bouncer
+sudo iptables -L CROWDSEC_CHAIN -n
 ```
 
 ### Benefits of Cloudflare-Only Web Blocking
@@ -121,7 +118,7 @@ Zone Resources:
 - Automatic Let's Encrypt DNS challenge
 - Dynamic DNS updates for changing IPs
 
-#### Token 2: Firewall Management (Fail2Ban)
+#### Token 2: Firewall Management (CrowdSec)
 ```
 Name: VaultWarden Firewall Management
 Permissions:
@@ -138,12 +135,12 @@ Zone Resources:
 
 ### Cloudflare WAF Custom Rules (Rulesets API)
 
-Fail2Ban uses the current **WAF Custom Rules Rulesets API** — the legacy
+CrowdSec cloudflare-bouncer uses the current **WAF Custom Rules Rulesets API** — the legacy
 `/firewall/access_rules/rules` endpoint is deprecated and no longer used.
 
-Fail2Ban creates rules like:
+CrowdSec creates rules like:
 ```
-Rule: fail2ban-vaultwarden-auth
+Rule: crowdsec-ban
 Action: Block
 Expression: (ip.src in {1.2.3.4 5.6.7.8})
 ```
@@ -152,7 +149,7 @@ These rules:
 - Block at Cloudflare edge (never reach your server)
 - Apply globally across all Cloudflare edge locations
 - Use actual attacker IP from `CF-Connecting-IP` header
-- Expire automatically based on `bantime` configuration
+- Expire automatically based on CrowdSec decision duration
 
 #### Verify Cloudflare Firewall Token
 
@@ -187,7 +184,7 @@ Containers (Read-Only Access)
 admin_token: "48-char-alphanumeric-string"
 admin_basic_auth_hash: "admin $2b$14$bcrypt_hash"
 caddy_cloudflare_dns_token: "cloudflare_dns_token"
-fail2ban_cloudflare_firewall_token: "cloudflare_firewall_token"
+fail2ban_cloudflare_firewall_token: "cloudflare_firewall_token"  # used by cs-cloudflare-bouncer
 smtp_password: "smtp_password"
 push_installation_id: "optional"
 push_installation_key: "optional"
@@ -227,90 +224,43 @@ cp secrets/secrets.yaml secrets/secrets.yaml.backup-$(date +%Y%m%d-%H%M%S)
 chmod 600 secrets/secrets.yaml.backup-*
 ```
 
-## Fail2Ban Configuration
+## CrowdSec Detection Configuration
 
-### Cloudflare-Only Web Jails
+### Cloudflare-Only Web Bans
 
-All web-facing jails use Cloudflare API exclusively:
+CrowdSec detects threats from VaultWarden and Caddy logs. All web-facing ban
+decisions are executed via the Cloudflare WAF (`cs-cloudflare-bouncer`):
 
-```ini
-# iptables removed - ineffective for proxied traffic
-[vaultwarden-auth]
-action = smtp[name=vaultwarden-auth, ...]
-         cloudflare-apiv4
+```bash
+# Check active decisions
+sudo cscli decisions list
 
-[vaultwarden-admin]
-action = smtp[name=vaultwarden-admin, ...]
-         cloudflare-apiv4
-
-[vaultwarden-web-auth]
-action = smtp[name=vaultwarden-web-auth, ...]
-         cloudflare-apiv4
+# Check alerts from web-auth scenarios
+sudo cscli alerts list --scenario crowdsecurity/http-bf-wordpress_bf_xmlrpc
 ```
 
 ### Local iptables for SSH Only
 
-SSH protection uses local iptables (direct connection). Fail2Ban runs with
-`network_mode: host` to allow direct host iptables manipulation:
+SSH protection uses local iptables (direct connection, not proxied through
+Cloudflare). The `crowdsec-firewall-bouncer` inserts host iptables rules:
 
-```ini
+```bash
 # SSH is NOT proxied, so iptables works correctly
-[sshd]
-action = smtp[name=sshd, ...]
-         iptables-multiport[name=sshd, port="ssh", protocol=tcp]
+sudo systemctl status crowdsec-firewall-bouncer
+sudo iptables -L CROWDSEC_CHAIN -n
 ```
 
-### Enhanced Detection Capabilities
+### CrowdSec Collections
 
-#### High-Fidelity VaultWarden Log Parsing
-```ini
-# Direct application log monitoring
-[vaultwarden-auth]
-logpath  = /var/log/vaultwarden/vaultwarden.log
-filter   = vaultwarden-auth
-maxretry = 3
-bantime  = 2h
+CrowdSec uses collections of parsers and scenarios for detection:
+
+```bash
+# List installed collections
+sudo cscli collections list
+
+# Update hub (parsers, scenarios, collections)
+sudo cscli hub update && sudo cscli hub upgrade
 ```
-
-#### Fail2Ban Filter Notes
-
-- **`vaultwarden-admin.conf`**: `ignoreregex` does **not** suppress `[INFO]` lines — the
-  filter is scoped tightly to the exact `Invalid admin token` message only, preventing
-  a log-level change in VaultWarden from silently disabling admin brute-force protection.
-- **`vaultwarden-web-auth.conf`**: All JSON `failregex` patterns include a `\r?$` anchor
-  so detection works correctly on NFS-mounted log volumes (OCI File Storage) where lines
-  may end with `\r\n` rather than `\n`.
-
-#### Specialized Caddy Log Monitoring
-```ini
-# Enhanced forensic logs with long retention
-[vaultwarden-web-auth]
-logpath  = /var/log/caddy/auth_attempts.log  # 750MB retention
-filter   = vaultwarden-web-auth
-maxretry = 10
-
-[vaultwarden-web-admin]
-logpath  = /var/log/caddy/admin_access.log   # 750MB retention
-maxretry = 5
-```
-
-### Email Notifications via Postfix
-
-Email alerts are sent via the containerised Postfix relay (`bokysan/docker-postfix`,
-port 587). Fail2Ban uses `network_mode: host` and therefore reaches Postfix
-at `127.0.0.1:587`:
-
-```ini
-# All jails include email notifications
-action = smtp[name=jail_name, dest="admin@example.com", sender="fail2ban@domain.com"]
-         cloudflare-apiv4  # or iptables-multiport for SSH
-```
-
-Benefits:
-- ✅ No host dependencies (mailutils not required)
-- ✅ Consistent SMTP configuration via a single Postfix relay
-- ✅ Dedicated container logs for troubleshooting (`docker compose logs postfix`)
-- ✅ Resource-efficient (256MB memory limit, 0.1 CPU)
 
 ## Firewall Hardening (UFW)
 
@@ -372,7 +322,7 @@ services:
   caddy:
     user: "${PUID}:${PGID}"
 
-  # postfix uses container-default user; fail2ban uses host networking
+  # postfix uses container-default user; CrowdSec runs as a host systemd service
 ```
 
 ### Capability Restrictions
@@ -401,13 +351,9 @@ postfix:
     - NET_BIND_SERVICE   # Port 587
     - DAC_OVERRIDE       # Spool permission overrides (REQUIRED)
     - FOWNER             # Spool file ownership (REQUIRED)
-
-fail2ban:
-  # network_mode: host — no cap_drop (host network namespace)
-  cap_add:
-    - NET_ADMIN  # Required for iptables manipulation
-    - NET_RAW    # Required for network monitoring
 ```
+
+> **CrowdSec** runs as a host systemd service and manages its own capabilities via systemd unit configuration — it is not a Docker container.
 
 ### Resource Limits
 
@@ -434,16 +380,6 @@ caddy:
         memory: 128M
         cpus: '0.1'
 
-fail2ban:
-  deploy:
-    resources:
-      limits:
-        memory: 512M
-        cpus: '0.15'
-      reservations:
-        memory: 128M
-        cpus: '0.05'
-
 postfix:
   deploy:
     resources:
@@ -469,7 +405,7 @@ making outbound connections to the internet.
 
 **What `internal: true` allows**:
 - Container-to-container communication within the `vaultwarden` network (e.g.
-  Caddy → VaultWarden, Fail2Ban → Postfix)
+  Caddy → VaultWarden)
 - Inbound connections routed through Caddy (Caddy itself has a separate bridge
   network for host port binding)
 
@@ -523,7 +459,6 @@ logging:
     max-file: "5"
 # vaultwarden: 10m × 5 = 50MB
 # postfix:      5m × 3 = 15MB
-# fail2ban:     5m × 3 = 15MB
 ```
 
 ### Systemd Service Hardening
@@ -691,8 +626,8 @@ ${PROJECT_STATE_DIR}/logs/caddy/admin_access.log  # Admin panel traffic
 ${PROJECT_STATE_DIR}/logs/caddy/auth_attempts.log # Auth endpoints
 ${PROJECT_STATE_DIR}/logs/caddy/security.log      # Direct-IP / catch-all block
 
-# Fail2Ban logs
-${PROJECT_STATE_DIR}/logs/fail2ban/fail2ban.log
+# CrowdSec logs (host systemd service)
+sudo journalctl -u crowdsec
 
 # Postfix logs
 ${PROJECT_STATE_DIR}/logs/postfix/
@@ -778,16 +713,16 @@ make test-config
 
 ### Adjusting Rate Limiting
 
-Rate limiting for web traffic is enforced at the **Cloudflare WAF layer**, not
-inside the Caddyfile. To adjust limits:
+Rate limiting for web traffic is enforced at two layers:
+
+1. **Caddy `rate_limit`** — fast, in-process request throttling (module `mholt/caddy-ratelimit`)
+2. **Cloudflare WAF Rate Limiting** — edge-level enforcement
+
+To adjust Cloudflare WAF limits:
 
 1. Go to **Cloudflare Dashboard → Security → WAF → Rate limiting rules**
 2. Locate the relevant rule (auth endpoints, admin panel, general API)
 3. Update the threshold and period
-
-The Caddyfile itself does not contain `rate_limit` directives. The `[vaultwarden-rate-limit]`
-Fail2Ban jail provides a secondary, coarser rate guard (30 requests / 1 min) at the
-application layer for cases where Cloudflare WAF rules have not yet fired.
 
 ### Push Notifications and `internal: true`
 
@@ -801,124 +736,74 @@ attack surface for non-push deployments.
 
 ---
 
-## Fail2Ban Configuration Reference
+## CrowdSec Configuration Reference
 
-The Fail2Ban configuration lives entirely under `fail2ban/` and is bind-mounted
-into the `crazymax/fail2ban` container at startup.
+CrowdSec runs as a **host systemd service** (not a Docker container) and provides
+behavioural threat detection with automated response via bouncers.
 
-### Directory Layout
+### Three-Layer Defence
 
 ```
-fail2ban/
-├── jail.d/
-│   └── vaultwarden-oci.conf      # All jail definitions (single file)
-├── filter.d/
-│   ├── vaultwarden-auth.conf     # VaultWarden app log — login failures
-│   ├── vaultwarden-admin.conf    # VaultWarden app log — admin token failures
-│   ├── vaultwarden-web-auth.conf # Caddy JSON log — web auth/API failures
-│   ├── vaultwarden-web-admin.conf# Caddy JSON log — admin path access
-│   ├── vaultwarden-web-caddy.conf# Legacy combined filter (kept for reference; not used by active jails)
-│   └── vaultwarden-security.conf # Caddy JSON log — catch-all security events
-└── action.d/
-    ├── cloudflare-apiv4.conf     # Cloudflare WAF Rulesets API ban/unban action
-    ├── cloudflare-apiv4-helpers.sh # Shell helpers called by the action
-    ├── smtp.conf                 # Email notification action (Postfix on 127.0.0.1:587)
-    └── smtp_notify.py            # Python email helper used by smtp.conf
+Caddy rate_limit → CrowdSec detection → Cloudflare/iptables ban
 ```
 
-### Active Jails and What They Target
+| Layer | Mechanism | What it blocks |
+| :-- | :-- | :-- |
+| 1 — Caddy `rate_limit` | Module `mholt/caddy-ratelimit` | Burst/volume traffic before it reaches VaultWarden |
+| 2 — CrowdSec detection | Parses logs; runs LAPI scenarios | Identifies brute-force, scanning, and exploit attempts |
+| 3 — Cloudflare/iptables ban | `cs-cloudflare-bouncer` + `crowdsec-firewall-bouncer` | Blocks IPs at Cloudflare edge and host iptables |
 
-| Jail | Log source | Filter | `maxretry` / `bantime` | Ban method |
-| :-- | :-- | :-- | :-- | :-- |
-| `sshd` | `/var/log/ssh-auth.log` | `sshd` (built-in) | 3 / 24 h | local `iptables-multiport` |
-| `sshd-custom` | `/var/log/ssh-auth.log` | `sshd` (built-in) | 3 / 24 h | local `iptables-multiport` — **disabled by default** |
-| `vaultwarden-auth` | VaultWarden app log | `vaultwarden-auth` | 3 / 2 h | Cloudflare WAF |
-| `vaultwarden-admin` | VaultWarden app log | `vaultwarden-admin` | 2 / 24 h | Cloudflare WAF |
-| `vaultwarden-web-auth` | `caddy/access.log` | `vaultwarden-web-auth` | 10 / 1 h | Cloudflare WAF |
-| `vaultwarden-web-admin` | `caddy/access.log` | `vaultwarden-web-admin` | 5 / 24 h | Cloudflare WAF |
-| `vaultwarden-rate-limit` | `caddy/access.log` | `vaultwarden-web-auth` (reused) | 30 / 30 min | Cloudflare WAF |
-| `vaultwarden-security` | `caddy/access.log` | `vaultwarden-security` | 1 / 48 h | Cloudflare WAF |
-| `recidive` | Fail2Ban's own log | `recidive` (built-in) | 5 / 1 week | Cloudflare WAF |
-
-> **Dual-jail design for auth endpoints**: `vaultwarden-web-auth` (failure-based,
-> `maxretry=10/5m`) and `vaultwarden-rate-limit` (volume-based, `maxretry=30/1m`)
-> intentionally share the same filter and log file. Each enforces a distinct policy —
-> credential failures vs raw request volume — and both incrementing the same log line
-> is correct behaviour.
-
-### Dedicated Filters Prevent Double-Fire
-
-Each jail uses its **own dedicated filter** to prevent a single log line from
-incrementing multiple jails' counters simultaneously (double-fire). The legacy
-`vaultwarden-web-caddy.conf` filter was shared across both `web-auth` and `web-admin`
-and caused this problem; it is kept in `filter.d/` for reference only and is not
-referenced by any active jail.
-
-### Cloudflare WAF Ban Flow
-
-When a web jail threshold is reached:
-
-1. Fail2Ban calls `cloudflare-apiv4.conf` `actionban`
-2. `cloudflare-apiv4-helpers.sh` reads the API token from the Docker secret file
-   (`/run/secrets/fail2ban_cloudflare_firewall_token`) — never from an environment variable
-3. A WAF Custom Rule is created via the **Rulesets API**:
-   `PATCH /zones/{zone_id}/rulesets/phases/http_request_firewall_custom/entrypoint`
-4. The rule expression `(ip.src in {<banned_ip>})` blocks the IP at Cloudflare's edge
-5. On `actionunban`, the rule is removed (or the IP removed from the expression list)
-
-The `bantime` in each jail controls how long the rule persists. Fail2Ban manages
-removal automatically — no manual Cloudflare dashboard intervention is required.
-
-### Adding a Custom Jail
-
-1. **Create a filter** in `fail2ban/filter.d/my-custom.conf`:
-
-```ini
-[Definition]
-# Match lines from Caddy's JSON access log
-# {client_ip} field holds the real visitor IP (resolved by Caddy from CF-Connecting-IP)
-failregex = ^\{.*"client_ip":"<HOST>".*"uri":"/my-path.*"status":4\d\d.*\}$
-ignoreregex =
-```
-
-2. **Add a jail** in `fail2ban/jail.d/vaultwarden-oci.conf`:
-
-```ini
-[my-custom-jail]
-
-enabled  = true
-filter   = my-custom
-port     = 80,443
-logpath  = /var/log/caddy/access.log
-maxretry = 5
-bantime  = 1h
-findtime = 10m
-
-action = smtp[name=my-custom-jail, dest="%(destemail)s", sender="%(sender)s", host="127.0.0.1", port=587]
-         cloudflare-apiv4
-```
-
-3. **Reload Fail2Ban** inside the container:
+### Key Commands
 
 ```bash
-docker compose exec fail2ban fail2ban-client reload
+# List active bans
+sudo cscli decisions list
 
-# Verify the jail is active
-docker compose exec fail2ban fail2ban-client status my-custom-jail
+# List recent alerts
+sudo cscli alerts list
 
-# Test your filter regex against a live log sample
-docker compose exec fail2ban fail2ban-regex \
-  /var/log/caddy/access.log \
-  /data/fail2ban/filter.d/my-custom.conf
+# List registered bouncers
+sudo cscli bouncers list
+
+# Check CrowdSec service status
+sudo systemctl status crowdsec
+
+# View live logs
+sudo journalctl -u crowdsec -f
+
+# Manually ban an IP (expires after 4h by default)
+sudo cscli decisions add --ip 1.2.3.4 --duration 4h --reason "manual ban"
+
+# Unban an IP
+sudo cscli decisions delete --ip 1.2.3.4
 ```
 
-> **Custom jail checklist:**
-> - Use a **dedicated filter** — never reuse an existing filter for a new jail unless
->   you explicitly want both jails to increment on the same log line (as with `vaultwarden-rate-limit`).
-> - Include `\r?$` at the end of every `failregex` pattern to handle `\r\n` line endings
->   on NFS-mounted log volumes (OCI File Storage).
-> - For SSH jails on a non-standard port, disable `[sshd]` before enabling `[sshd-custom]`
->   to avoid both jails counting the same log lines and halving the effective `maxretry`.
+### Cloudflare Bouncer
+
+The `cs-cloudflare-bouncer` reads the Cloudflare API token from
+`${PROJECT_STATE_DIR}/secrets/.docker_secrets/fail2ban_cloudflare_firewall_token`
+and creates WAF Custom Rules via the Rulesets API when CrowdSec issues ban decisions.
+
+```bash
+# Check bouncer status
+sudo systemctl status cs-cloudflare-bouncer
+
+# View bouncer logs
+sudo journalctl -u cs-cloudflare-bouncer -f
+```
+
+### Firewall Bouncer (SSH / iptables)
+
+The `crowdsec-firewall-bouncer` enforces iptables bans on the host for SSH
+and any traffic CrowdSec flags at the network layer.
+
+```bash
+# Check bouncer status
+sudo systemctl status crowdsec-firewall-bouncer
+
+# View current iptables rules inserted by bouncer
+sudo iptables -L CROWDSEC_CHAIN -n
+```
 
 ---
 
@@ -1056,7 +941,7 @@ rclone config
 ```
 
 Checks performed:
-- All containers running and healthy (`vaultwarden`, `caddy`, `fail2ban`, `postfix`)
+- All containers running and healthy (`vaultwarden`, `caddy`, `postfix`)
 - Local service accessibility on port 8080
 - Disk space against configurable threshold (default 80%)
 - SSL certificate expiry (warn < 30 days, critical < 7 days)
@@ -1064,22 +949,20 @@ Checks performed:
 - Backup age and decryptability
 - Resource usage (comprehensive mode)
 - Configuration validity (comprehensive mode)
-- Security status: Fail2Ban, Age key, SOPS config (comprehensive mode)
+- Security status: CrowdSec, Age key, SOPS config (comprehensive mode)
 
-### Monitoring Fail2Ban
+### Monitoring CrowdSec
 
 ```bash
-# Check ban status across all jails
-docker compose exec fail2ban fail2ban-client status
+# Check active bans and recent alerts
+sudo cscli decisions list
+sudo cscli alerts list
 
-# View specific jail bans
-docker compose exec fail2ban fail2ban-client status vaultwarden-auth
+# Check Cloudflare bouncer integration
+sudo journalctl -u cs-cloudflare-bouncer | grep -i cloudflare
 
-# Check Cloudflare integration
-docker compose logs fail2ban | grep -i cloudflare
-
-# View banned IPs for a jail
-docker compose exec fail2ban fail2ban-client get vaultwarden-auth banip
+# View active bans for a specific IP
+sudo cscli decisions list --ip 1.2.3.4
 ```
 
 ### Log Analysis
@@ -1116,7 +999,7 @@ grep "ERROR" ${PROJECT_STATE_DIR}/logs/vaultwarden/vaultwarden.log
 - ✅ Confirm `internal: true` is active on the Docker network (unless push is enabled)
 
 ### Ongoing Operations
-- ✅ Monitor Fail2Ban logs weekly
+- ✅ Monitor CrowdSec alerts weekly
 - ✅ Review Cloudflare analytics monthly
 - ✅ Test backup restoration monthly
 - ✅ Rotate secrets annually
@@ -1134,11 +1017,11 @@ If you detect suspicious activity:
 
 1. **Immediate Actions**:
    ```bash
-   # Check Fail2Ban status
-   docker compose exec fail2ban fail2ban-client status
+   # Check CrowdSec ban status
+   sudo cscli decisions list
 
-   # Review recent bans
-   docker compose logs fail2ban --tail=100
+   # Review recent alerts
+   sudo cscli alerts list --limit 20
 
    # Check for unauthorized access
    grep "401\|403\|404" ${PROJECT_STATE_DIR}/logs/caddy/access.log
@@ -1198,27 +1081,23 @@ curl -X GET "https://api.cloudflare.com/client/v4/zones/${CLOUDFLARE_ZONE_ID}/ru
      -H "Content-Type: application/json"
 ```
 
-### Fail2Ban Not Blocking
+### CrowdSec Not Blocking
 
 ```bash
-# Check Cloudflare action is configured (uses Rulesets API — not legacy access_rules)
-docker compose exec fail2ban cat /data/fail2ban/action.d/cloudflare-apiv4.conf
+# Check CrowdSec service status
+sudo systemctl status crowdsec
 
-# Verify zone ID and token
-docker compose exec fail2ban env | grep CF_
+# Check Cloudflare bouncer status
+sudo systemctl status cs-cloudflare-bouncer
 
-# Test filter regex against live VaultWarden log
-docker compose exec fail2ban fail2ban-regex \
-  /var/log/vaultwarden/vaultwarden.log \
-  /data/fail2ban/filter.d/vaultwarden-auth.conf
+# Verify Cloudflare token is readable
+cat ${PROJECT_STATE_DIR}/secrets/.docker_secrets/fail2ban_cloudflare_firewall_token
 
-# Test filter regex against live Caddy JSON log
-docker compose exec fail2ban fail2ban-regex \
-  /var/log/caddy/auth_attempts.log \
-  /data/fail2ban/filter.d/vaultwarden-web-auth.conf
+# Check for errors in CrowdSec logs
+sudo journalctl -u crowdsec | grep -i error
 
-# Check for errors
-docker compose logs fail2ban | grep -i error
+# Check decisions are being issued
+sudo cscli decisions list
 ```
 
 ### Email Notifications Not Working
@@ -1280,4 +1159,4 @@ sudo dpkg-reconfigure --priority=low unattended-upgrades
 
 ---
 
-This security guide reflects the current architecture with Cloudflare-only blocking for web traffic, local iptables for SSH (Fail2Ban in host-network mode), containerised Postfix email relay, comprehensive resource management, enhanced forensic logging, systemd-hardened service units, and robust security practices optimised for small teams requiring enterprise-grade password management security.
+This security guide reflects the current architecture with Cloudflare-only blocking for web traffic, CrowdSec host service for threat detection and iptables SSH protection, containerised Postfix email relay, comprehensive resource management, enhanced forensic logging, systemd-hardened service units, and robust security practices optimised for small teams requiring enterprise-grade password management security.
