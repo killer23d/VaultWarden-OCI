@@ -405,53 +405,80 @@ EOF
     log_success "setup" "Docker installed: $(docker --version)"
 }
 
-install_crowdsec() {
-    _log_section "Installing CrowdSec (host service)"
+install_crowdsec() {    
+    log_info "setup" "=== Installing CrowdSec (host service) ==="
+    local _cs_state_dir
+    if [[ -n "${DATA_VOLUME_DEVICE:-}" ]]; then
+        _cs_state_dir="${DATA_VOLUME_MOUNT:-/mnt/vw-data}"
+    else
+        _cs_state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
+    fi
 
     if ! command -v cscli >/dev/null 2>&1; then
         curl -s https://packagecloud.io/install/repositories/crowdsec/crowdsec/script.deb.sh | sudo bash
-        sudo apt-get install -y crowdsec crowdsec-firewall-bouncer-iptables crowdsec-cloudflare-bouncer
+        sudo apt-get install -y crowdsec crowdsec-firewall-bouncer-iptables
     else
-        _log_info "CrowdSec already installed, skipping."
+        log_info "setup" "CrowdSec already installed, skipping base install."
     fi
 
-    sudo cscli collections install crowdsecurity/vaultwarden
-    sudo cscli collections install crowdsecurity/linux
-    sudo cscli collections install crowdsecurity/caddy
-    sudo cscli collections install crowdsecurity/http-cve
+    sudo systemctl enable --now crowdsec || true
 
+    if ! sudo cscli bouncers list 2>/dev/null | grep -q 'cloudflare'; then
+        sudo cscli hub update
+        sudo cscli bouncers install crowdsecurity/cloudflare-bouncer || \
+            log_warn "setup" "crowdsecurity/cloudflare-bouncer install failed — check 'sudo cscli hub list'"
+    else
+        log_info "setup" "CrowdSec Cloudflare bouncer already installed, skipping."
+    fi
+
+    sudo cscli collections install crowdsecurity/vaultwarden  || true
+    sudo cscli collections install crowdsecurity/linux        || true
+    sudo cscli collections install crowdsecurity/caddy        || true
+    sudo cscli collections install crowdsecurity/http-cve     || true
+    
     sudo mkdir -p /etc/crowdsec/acquis.d
-    sed "s|TOKEN_PROJECT_STATE_DIR|${PROJECT_STATE_DIR}|g" \
-        "${REPO_DIR}/crowdsec/acquis.yaml" \
-        | sudo tee /etc/crowdsec/acquis.d/vaultwarden.yaml >/dev/null
-
-    _cf_bouncer_key=$(sudo cscli bouncers add cloudflare-bouncer \
-        --key "$(openssl rand -hex 32)" 2>/dev/null || \
-        sudo cscli bouncers add cloudflare-bouncer 2>/dev/null \
-        | grep -oP '(?<=key: )\S+')
-
-    _cf_token=""
-    if [ -f "${PROJECT_STATE_DIR}/secrets/.docker_secrets/fail2ban_cloudflare_firewall_token" ]; then
-        _cf_token=$(cat "${PROJECT_STATE_DIR}/secrets/.docker_secrets/fail2ban_cloudflare_firewall_token")
+    if [[ -f "${SCRIPT_DIR}/crowdsec/acquis.yaml" ]]; then
+        sed "s|TOKEN_PROJECT_STATE_DIR|${_cs_state_dir}|g" \
+            "${SCRIPT_DIR}/crowdsec/acquis.yaml" \
+            | sudo tee /etc/crowdsec/acquis.d/vaultwarden.yaml >/dev/null
+    else
+        log_warn "setup" "crowdsec/acquis.yaml not found in ${SCRIPT_DIR} — skipping acquis config"
     fi
 
-    sed \
-        -e "s|TOKEN_CF_ZONE_ID|${CLOUDFLARE_ZONE_ID}|g" \
-        -e "s|TOKEN_CF_ACCOUNT_ID|${CF_ACCOUNT_ID:-CHANGE_ME_CF_ACCOUNT_ID}|g" \
-        -e "s|TOKEN_CF_FIREWALL_TOKEN|${_cf_token}|g" \
-        -e "s|CHANGE_ME_BOUNCER_KEY|${_cf_bouncer_key}|g" \
-        "${REPO_DIR}/crowdsec/crowdsec-cloudflare-bouncer.yaml.example" \
-        | sudo tee /etc/crowdsec/bouncers/crowdsec-cloudflare-bouncer.yaml >/dev/null
-    sudo chmod 600 /etc/crowdsec/bouncers/crowdsec-cloudflare-bouncer.yaml
+    local _cf_bouncer_key=""
+    _cf_bouncer_key=$(sudo cscli bouncers add cloudflare-bouncer \
+        --key "$(openssl rand -hex 32)" 2>/dev/null | grep -oP '(?<=key: )\S+' || \
+        sudo cscli bouncers list 2>/dev/null | grep cloudflare-bouncer | awk '{print $NF}' || true)
 
-    sudo cp "${REPO_DIR}/crowdsec/profiles.yaml" /etc/crowdsec/profiles.yaml
+    local _cf_token=""
+    local _cf_secret_path="${_cs_state_dir}/secrets/.docker_secrets/fail2ban_cloudflare_firewall_token"
+    if [[ -f "${_cf_secret_path}" ]]; then
+        _cf_token=$(cat "${_cf_secret_path}")
+    fi
+
+    if [[ -f "${SCRIPT_DIR}/crowdsec/crowdsec-cloudflare-bouncer.yaml.example" ]]; then
+        sed \
+            -e "s|TOKEN_CF_ZONE_ID|${CLOUDFLARE_ZONE_ID:-CHANGE_ME_CF_ZONE_ID}|g" \
+            -e "s|TOKEN_CF_ACCOUNT_ID|${CF_ACCOUNT_ID:-CHANGE_ME_CF_ACCOUNT_ID}|g" \
+            -e "s|TOKEN_CF_FIREWALL_TOKEN|${_cf_token}|g" \
+            -e "s|CHANGE_ME_BOUNCER_KEY|${_cf_bouncer_key}|g" \
+            "${SCRIPT_DIR}/crowdsec/crowdsec-cloudflare-bouncer.yaml.example" \
+            | sudo tee /etc/crowdsec/bouncers/crowdsec-cloudflare-bouncer.yaml >/dev/null
+        sudo chmod 600 /etc/crowdsec/bouncers/crowdsec-cloudflare-bouncer.yaml
+    else
+        log_warn "setup" "crowdsec-cloudflare-bouncer.yaml.example not found — skipping bouncer config write"
+    fi
+
+    if [[ -f "${SCRIPT_DIR}/crowdsec/profiles.yaml" ]]; then
+        sudo cp "${SCRIPT_DIR}/crowdsec/profiles.yaml" /etc/crowdsec/profiles.yaml
+    fi
 
     sudo systemctl enable --now crowdsec
-    sudo systemctl enable --now crowdsec-firewall-bouncer
-    sudo systemctl enable --now crowdsec-cloudflare-bouncer
+    sudo systemctl enable --now crowdsec-firewall-bouncer    || true
+    sudo systemctl enable --now crowdsec-cloudflare-bouncer  || true
 
-    _log_success "CrowdSec installed and running."
-    _log_info "Verify with: sudo cscli metrics"
+    log_success "setup" "CrowdSec installed and running."
+    log_info "setup" "Verify with: sudo cscli metrics"
 }
 
 check_disk_space() {
