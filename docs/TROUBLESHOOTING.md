@@ -780,7 +780,7 @@ sudo systemctl restart crowdsec
 
 # Verify Cloudflare firewall token
 ./edit-secrets.sh edit
-# Check: fail2ban_cloudflare_firewall_token (used by cs-cloudflare-bouncer)
+# Check: crowdsec_cf_firewall_token (used by cs-cloudflare-bouncer)
 
 # Test Cloudflare firewall token against the WAF Custom Rules endpoint
 curl -X GET "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/rulesets/phases/http_request_firewall_custom/entrypoint" \

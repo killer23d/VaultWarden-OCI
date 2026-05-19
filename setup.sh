@@ -405,82 +405,6 @@ EOF
     log_success "setup" "Docker installed: $(docker --version)"
 }
 
-install_crowdsec() {    
-    log_info "setup" "=== Installing CrowdSec (host service) ==="
-    local _cs_state_dir
-    if [[ -n "${DATA_VOLUME_DEVICE:-}" ]]; then
-        _cs_state_dir="${DATA_VOLUME_MOUNT:-/mnt/vw-data}"
-    else
-        _cs_state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
-    fi
-
-    if ! command -v cscli >/dev/null 2>&1; then
-        curl -s https://packagecloud.io/install/repositories/crowdsec/crowdsec/script.deb.sh | sudo bash
-        sudo apt-get install -y crowdsec crowdsec-firewall-bouncer-iptables
-    else
-        log_info "setup" "CrowdSec already installed, skipping base install."
-    fi
-
-    sudo systemctl enable --now crowdsec || true
-
-    if ! sudo cscli bouncers list 2>/dev/null | grep -q 'cloudflare'; then
-        sudo cscli hub update
-        sudo cscli bouncers install crowdsecurity/cloudflare-bouncer || \
-            log_warn "setup" "crowdsecurity/cloudflare-bouncer install failed — check 'sudo cscli hub list'"
-    else
-        log_info "setup" "CrowdSec Cloudflare bouncer already installed, skipping."
-    fi
-
-    sudo cscli collections install crowdsecurity/vaultwarden  || true
-    sudo cscli collections install crowdsecurity/linux        || true
-    sudo cscli collections install crowdsecurity/caddy        || true
-    sudo cscli collections install crowdsecurity/http-cve     || true
-    
-    sudo mkdir -p /etc/crowdsec/acquis.d
-    if [[ -f "${SCRIPT_DIR}/crowdsec/acquis.yaml" ]]; then
-        sed "s|TOKEN_PROJECT_STATE_DIR|${_cs_state_dir}|g" \
-            "${SCRIPT_DIR}/crowdsec/acquis.yaml" \
-            | sudo tee /etc/crowdsec/acquis.d/vaultwarden.yaml >/dev/null
-    else
-        log_warn "setup" "crowdsec/acquis.yaml not found in ${SCRIPT_DIR} — skipping acquis config"
-    fi
-
-    local _cf_bouncer_key=""
-    _cf_bouncer_key=$(sudo cscli bouncers add cloudflare-bouncer \
-        --key "$(openssl rand -hex 32)" 2>/dev/null | grep -oP '(?<=key: )\S+' || \
-        sudo cscli bouncers list 2>/dev/null | grep cloudflare-bouncer | awk '{print $NF}' || true)
-
-    local _cf_token=""
-    local _cf_secret_path="${_cs_state_dir}/secrets/.docker_secrets/fail2ban_cloudflare_firewall_token"
-    if [[ -f "${_cf_secret_path}" ]]; then
-        _cf_token=$(cat "${_cf_secret_path}")
-    fi
-
-    if [[ -f "${SCRIPT_DIR}/crowdsec/crowdsec-cloudflare-bouncer.yaml.example" ]]; then
-        sed \
-            -e "s|TOKEN_CF_ZONE_ID|${CLOUDFLARE_ZONE_ID:-CHANGE_ME_CF_ZONE_ID}|g" \
-            -e "s|TOKEN_CF_ACCOUNT_ID|${CF_ACCOUNT_ID:-CHANGE_ME_CF_ACCOUNT_ID}|g" \
-            -e "s|TOKEN_CF_FIREWALL_TOKEN|${_cf_token}|g" \
-            -e "s|CHANGE_ME_BOUNCER_KEY|${_cf_bouncer_key}|g" \
-            "${SCRIPT_DIR}/crowdsec/crowdsec-cloudflare-bouncer.yaml.example" \
-            | sudo tee /etc/crowdsec/bouncers/crowdsec-cloudflare-bouncer.yaml >/dev/null
-        sudo chmod 600 /etc/crowdsec/bouncers/crowdsec-cloudflare-bouncer.yaml
-    else
-        log_warn "setup" "crowdsec-cloudflare-bouncer.yaml.example not found — skipping bouncer config write"
-    fi
-
-    if [[ -f "${SCRIPT_DIR}/crowdsec/profiles.yaml" ]]; then
-        sudo cp "${SCRIPT_DIR}/crowdsec/profiles.yaml" /etc/crowdsec/profiles.yaml
-    fi
-
-    sudo systemctl enable --now crowdsec
-    sudo systemctl enable --now crowdsec-firewall-bouncer    || true
-    sudo systemctl enable --now crowdsec-cloudflare-bouncer  || true
-
-    log_success "setup" "CrowdSec installed and running."
-    log_info "setup" "Verify with: sudo cscli metrics"
-}
-
 check_disk_space() {
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would check disk space"; return 0; fi
 
@@ -622,7 +546,12 @@ install_dependencies() {
         install_docker || return 1
     fi
 
-    install_crowdsec || return 1
+    if [[ -x "${SCRIPT_DIR}/utilities/setup-crowdsec.sh" ]]; then
+        "${SCRIPT_DIR}/utilities/setup-crowdsec.sh" \
+            ${AUTO_MODE:+--auto} ${DRY_RUN:+--dry-run} || return 1
+    else
+        log_warn "setup" "utilities/setup-crowdsec.sh not found — skipping CrowdSec install"
+    fi
 
     if ! docker compose version >/dev/null 2>&1; then
         DEBIAN_FRONTEND=noninteractive apt-get install -y docker-compose-plugin || return 1
@@ -1513,7 +1442,11 @@ run_phase_secrets() {
 # Require root: this phase writes into secrets/ and system key paths.
 # The root check in main() runs AFTER the phase dispatch, so subcommand
 # invocations (./setup.sh secrets) must guard themselves.
-_require_root
+if [[ $EUID -ne 0 ]]; then
+    log_error "This script must be run as root."
+    log_error "Re-run with: sudo $0 ${*:-}"
+    exit 1
+fi
 local CLEANUP_ACTIONS=()
 _ss_register_cleanup() { CLEANUP_ACTIONS+=("$1"); }
 
@@ -1990,10 +1923,10 @@ collect_secrets() {
     cf_dns=$(_get_field "caddy_cloudflare_dns_token") || { log_error "Failed to collect caddy_cloudflare_dns_token"; return 1; }
     _COLLECTED_SECRETS["caddy_cloudflare_dns_token"]="$cf_dns"
 
-    if [ -f "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/secrets/.docker_secrets/fail2ban_cloudflare_firewall_token" ]; then
-        _log_info "Cloudflare firewall token file found on disk — will be used by CrowdSec bouncer."
+    if [ -f "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/secrets/.docker_secrets/crowdsec_cf_firewall_token" ]; then
+        log_info "Cloudflare firewall token file found on disk — will be used by CrowdSec bouncer."
     else
-        _log_warn "Cloudflare firewall token file not found — CrowdSec Cloudflare bouncer will need manual configuration."
+        log_warn "Cloudflare firewall token file not found — CrowdSec Cloudflare bouncer will need manual configuration."
     fi
 
     # --- Email credentials (API token + SMTP password) ----------------------
@@ -2277,7 +2210,7 @@ write_secrets() {
     umask "$_saved_umask"
 
     # shellcheck disable=SC2064  # intentional — $temp_file must expand NOW
-    _ss_register_cleanup "rm -f '$temp_file'"
+    _ss_register_cleanup "rm -f ${temp_file}"
 
     # All secret values are passed through yaml_escape() which
     # wraps them in YAML single-quoted scalars and escapes internal
@@ -2600,13 +2533,6 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-_require_root() {
-    if [[ $EUID -ne 0 ]]; then
-        log_error "This script must be run as root."
-        log_info  "Use: sudo $0 ${_ORIG_ARGS[*]}"
-        exit 1
-    fi
-}
 
 _run() {
     if [[ "$DRY_RUN" == "true" ]]; then
@@ -2736,7 +2662,7 @@ DROPIN
 # install_units
 # ---------------------------------------------------------------------------
 install_units() {
-    _require_root
+    if [[ $EUID -ne 0 ]]; then log_error "This script must be run as root."; exit 1; fi
     log_header "VaultWarden-OCI systemd Timer Installation"
 
     if [[ ! -d "$UNIT_SOURCE_DIR" ]]; then
@@ -3107,7 +3033,7 @@ install_units() {
 # remove_units
 # ---------------------------------------------------------------------------
 remove_units() {
-    _require_root
+    if [[ $EUID -ne 0 ]]; then log_error "This script must be run as root."; exit 1; fi
     log_header "VaultWarden-OCI systemd Timer Removal"
 
     for timer in "${TIMERS[@]}"; do
@@ -3172,7 +3098,7 @@ remove_units() {
 # validate_installation
 # ---------------------------------------------------------------------------
 validate_installation() {
-    _require_root
+    if [[ $EUID -ne 0 ]]; then log_error "This script must be run as root."; exit 1; fi
     log_header "VaultWarden-OCI Installation Validation"
     local errors=0
     local warnings=0
@@ -3511,6 +3437,28 @@ main() {
     else
         echo "WARN: utilities/setup-iptables.sh not found or not executable" >&2
         echo "WARN: Run it manually after setup, or enable systemd/vaultwarden-iptables.service" >&2
+    fi
+
+    if [[ "$AUTO_MODE" != "true" ]] && [[ -t 0 ]]; then
+        log_info ""
+        log_info "════════════════════════════════════════════════"
+        log_info " Next step: Configure CrowdSec Cloudflare bouncer"
+        log_info "════════════════════════════════════════════════"
+        log_info "CrowdSec has been installed. To activate the"
+        log_info "Cloudflare IP ban bouncer, run:"
+        log_info ""
+        log_info "  sudo ./utilities/setup-crowdsec.sh"
+        log_info ""
+        log_info "Then add your Cloudflare API token:"
+        log_info ""
+        log_info "  ./edit-secrets.sh"
+        log_info ""
+        printf 'Press ENTER to continue with the post-install summary, or Ctrl-C to exit now...'
+        read -r _cs_prompt_ack || true
+        unset _cs_prompt_ack
+    else
+        log_info "Next step: sudo ./utilities/setup-crowdsec.sh"
+        log_info "Then add your Cloudflare API token: ./edit-secrets.sh"
     fi
 
     if [[ "$AUTO_MODE" == "true" ]]; then

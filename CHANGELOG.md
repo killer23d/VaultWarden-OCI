@@ -13,7 +13,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Security layer**: Replaced the `crazymax/fail2ban` Docker container with
   CrowdSec running as a **host systemd service** (`crowdsec` + bouncers).
 - **Cloudflare bouncer**: Bans at the Cloudflare WAF edge are now handled by
-  `cs-cloudflare-bouncer`; reads the same `fail2ban_cloudflare_firewall_token`
+  `cs-cloudflare-bouncer`; reads the same `crowdsec_cf_firewall_token`
   secret path for backward compatibility.
 - **SSH/iptables bouncer**: Host iptables rules for SSH protection are now
   managed by `crowdsec-firewall-bouncer` instead of Fail2Ban.

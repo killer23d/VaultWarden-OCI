@@ -184,7 +184,7 @@ Containers (Read-Only Access)
 admin_token: "48-char-alphanumeric-string"
 admin_basic_auth_hash: "admin $2b$14$bcrypt_hash"
 caddy_cloudflare_dns_token: "cloudflare_dns_token"
-fail2ban_cloudflare_firewall_token: "cloudflare_firewall_token"  # used by cs-cloudflare-bouncer
+crowdsec_cf_firewall_token: "cloudflare_firewall_token"  # used by cs-cloudflare-bouncer
 smtp_password: "smtp_password"
 push_installation_id: "optional"
 push_installation_key: "optional"
@@ -781,7 +781,7 @@ sudo cscli decisions delete --ip 1.2.3.4
 ### Cloudflare Bouncer
 
 The `cs-cloudflare-bouncer` reads the Cloudflare API token from
-`${PROJECT_STATE_DIR}/secrets/.docker_secrets/fail2ban_cloudflare_firewall_token`
+`${PROJECT_STATE_DIR}/secrets/.docker_secrets/crowdsec_cf_firewall_token`
 and creates WAF Custom Rules via the Rulesets API when CrowdSec issues ban decisions.
 
 ```bash
@@ -1091,7 +1091,7 @@ sudo systemctl status crowdsec
 sudo systemctl status cs-cloudflare-bouncer
 
 # Verify Cloudflare token is readable
-cat ${PROJECT_STATE_DIR}/secrets/.docker_secrets/fail2ban_cloudflare_firewall_token
+cat ${PROJECT_STATE_DIR}/secrets/.docker_secrets/crowdsec_cf_firewall_token
 
 # Check for errors in CrowdSec logs
 sudo journalctl -u crowdsec | grep -i error
