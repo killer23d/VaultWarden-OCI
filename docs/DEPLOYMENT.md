@@ -108,7 +108,7 @@ Create two tokens at <https://dash.cloudflare.com/profile/api-tokens>:
 
 ```bash
 ./edit-secrets.sh rotate caddy_cloudflare_dns_token
-./edit-secrets.sh rotate fail2ban_cloudflare_firewall_token
+./edit-secrets.sh rotate crowdsec_cf_firewall_token
 ```
 
 Set at minimum:
@@ -117,7 +117,7 @@ Set at minimum:
   ./setup.sh secrets --hash-only
   ```
 - `caddy_cloudflare_dns_token`
-- `fail2ban_cloudflare_firewall_token` — used by CrowdSec cloudflare-bouncer (host service)
+- `crowdsec_cf_firewall_token` — used by CrowdSec cloudflare-bouncer (host service)
 - Email API token — name matches `email_api_token` (e.g. `email_api_token`)
 - `smtp_password` (SMTP relay fallback, if used)
 

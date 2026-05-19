@@ -110,7 +110,7 @@ Then supply the external credentials that `--auto` cannot generate for you:
 ```bash
 # Cloudflare tokens (required — Caddy TLS + CrowdSec edge blocking)
 ./edit-secrets.sh rotate caddy_cloudflare_dns_token
-./edit-secrets.sh rotate fail2ban_cloudflare_firewall_token  # used by CrowdSec cloudflare-bouncer
+./edit-secrets.sh rotate crowdsec_cf_firewall_token  # used by CrowdSec cloudflare-bouncer
 
 ## Email API token (required for Tier 1)
 ./edit-secrets.sh rotate email_api_token
