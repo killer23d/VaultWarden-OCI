@@ -1,5 +1,5 @@
 # VaultWarden-OCI production compose
-# Service order: init-permissions -> vaultwarden + caddy -> postfix -> fail2ban
+# Service order: init-permissions -> vaultwarden + caddy -> postfix
 # Finish .env and secrets setup before starting the stack.
 #
 # Storage note:
@@ -50,7 +50,7 @@ services:
           exit 0
         fi &&
 
-        mkdir -p /data /logs/vaultwarden /logs/caddy /logs/fail2ban /logs/postfix &&
+        mkdir -p /data /logs/vaultwarden /logs/caddy /logs/postfix &&
 
         touch /logs/caddy/access.log /logs/caddy/security.log &&
         chown 0:0 /logs/caddy/access.log /logs/caddy/security.log &&
@@ -75,10 +75,6 @@ services:
         chown -R 0:0 /data/caddy &&
         find /data/caddy -type d -exec chmod 755 {} + 2>/dev/null || true &&
 
-        mkdir -p /fail2ban_db &&
-        chown 0:0 /fail2ban_db &&
-        chmod 755 /fail2ban_db &&
-
         chmod 700 /secrets /secrets/.docker_secrets 2>/dev/null || true &&
         find /secrets/.docker_secrets -type f -exec chmod 444 {} + 2>/dev/null || true &&
 
@@ -95,7 +91,6 @@ services:
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs:/logs
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/data:/data/caddy
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/config:/config/caddy
-      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/fail2ban:/fail2ban_db
       - ./secrets:/secrets
 
   # -------------------- Core service: VaultWarden --------------------
@@ -221,7 +216,9 @@ services:
   # -------------------- Core service: Caddy reverse proxy --------------------
   caddy:
     container_name: vaultwarden_caddy
-    image: ghcr.io/caddybuilds/caddy-cloudflare:${CADDY_VERSION:-2.11.2}
+    build:
+      context: ./caddy
+      dockerfile: Dockerfile
     restart: unless-stopped
     user: root
 
@@ -376,75 +373,6 @@ services:
           memory: 64M
           cpus: '0.02'
 
-  # -------------------- Optional sidecar: Fail2Ban --------------------
-  fail2ban:
-    container_name: vaultwarden_fail2ban
-    image: crazymax/fail2ban:${FAIL2BAN_VERSION:-1.1.0-r3}
-    restart: unless-stopped
-    network_mode: host
-
-    depends_on:
-      init-permissions:
-        condition: service_completed_successfully
-
-    environment:
-      TZ: ${TZ:-UTC}
-      F2B_LOG_TARGET: ${F2B_LOG_TARGET:-STDOUT}
-      F2B_LOG_LEVEL: ${F2B_LOG_LEVEL:-INFO}
-      F2B_DB_PURGE_AGE: ${F2B_DB_PURGE_AGE:-1d}
-      F2B_MAX_RETRY: ${F2B_MAX_RETRY:-3}
-      PACKAGES: whois
-      F2B_DEST_MAIL: ${F2B_DEST_MAIL:-admin@example.com}
-      F2B_SENDER: ${F2B_SENDER:-fail2ban@example.com}
-      CF_API_TOKEN_FILE: /run/secrets/fail2ban_cloudflare_firewall_token
-      CF_ZONE_ID: ${CLOUDFLARE_ZONE_ID}
-
-    secrets:
-      - fail2ban_cloudflare_firewall_token
-
-    volumes:
-      - ./fail2ban:/data/fail2ban:ro
-      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/fail2ban:/data/db
-      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/fail2ban:/var/log/fail2ban
-      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/vaultwarden:/var/log/vaultwarden:ro
-      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy:/var/log/caddy:ro
-      - ${SSH_LOG_PATH:-/var/log/secure}:/var/log/ssh-auth.log:ro
-
-    cap_drop:
-      - ALL
-    cap_add:
-      - NET_ADMIN
-      - NET_RAW
-
-    healthcheck:
-      test: ["CMD-SHELL", "fail2ban-client ping 2>/dev/null | grep -q pong || exit 1"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 60s
-
-    security_opt:
-      - no-new-privileges:true
-
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "5m"
-        max-file: "3"
-
-    # NOTE: deploy.resources is evaluated only in Docker Swarm mode.
-    # In standalone 'docker compose', cpu and pid limits are silently ignored.
-    # Memory enforcement uses the top-level mem_limit / memswap_limit above.
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: '0.15'
-          pids: 100
-        reservations:
-          memory: 64M
-          cpus: '0.05'
-
 # =============================================================================
 # Docker Secrets
 # =============================================================================
@@ -461,8 +389,6 @@ secrets:
     file: ./secrets/.docker_secrets/push_installation_key
   caddy_cloudflare_dns_token:
     file: ./secrets/.docker_secrets/caddy_cloudflare_dns_token
-  fail2ban_cloudflare_firewall_token:
-    file: ./secrets/.docker_secrets/fail2ban_cloudflare_firewall_token
 
 # =============================================================================
 # Networks
@@ -502,7 +428,6 @@ networks:
         - subnet: 172.22.0.0/16
 
   # Dedicated non-internal bridge for postfix host port-binding.
-  # fail2ban (network_mode: host) reaches it via the host loopback.
   postfix_relay:
     name: postfix_relay_network
     driver: bridge

@@ -223,7 +223,6 @@ make up
 ```bash
 # Rotate each placeholder secret with real values
 ./edit-secrets.sh rotate caddy_cloudflare_dns_token
-./edit-secrets.sh rotate fail2ban_cloudflare_firewall_token
 ./edit-secrets.sh rotate smtp_password
 
 # provider-specific token example
@@ -571,37 +570,6 @@ nano .env
 docker compose restart postfix vaultwarden
 ```
 
-### Fail2Ban Cannot Send Email
-
-**Symptoms**:
-- Fail2Ban ban notifications not arriving
-- `fail2ban cannot reach postfix SMTP` error in `maintenance.sh test-email` output
-
-**Diagnosis**:
-```bash
-# Confirm Fail2Ban network mode (must be host)
-docker inspect $(docker compose ps -q fail2ban) --format '{{.HostConfig.NetworkMode}}'
-
-# Check Fail2Ban → Postfix connectivity
-# (in host-network mode, postfix is reachable at 127.0.0.1:587)
-docker compose exec fail2ban sh -c "nc -zv 127.0.0.1 587"
-
-# Check SMTP action config
-docker compose exec fail2ban cat /data/fail2ban/action.d/smtp.conf
-```
-
-**Solutions**:
-```bash
-# Ensure docker-compose.yml has network_mode: host for fail2ban
-# (already set in docker-compose.yml.example)
-
-# Restart fail2ban
-docker compose restart fail2ban
-
-# Re-run email diagnostic
-./maintenance.sh test-email --verbose
-```
-
 ## Backup and Restore Issues
 
 ### Backup Creation Fails
@@ -783,86 +751,76 @@ rclone cat your_remote_name:test.txt
 
 ## Security Issues
 
-### Fail2Ban Not Blocking
+### CrowdSec Not Blocking
 
 **Symptoms**:
 - Repeated failed login attempts
 - IPs not being banned
-- Fail2ban inactive
+- CrowdSec inactive
 
 **Diagnosis**:
 ```bash
-# Check fail2ban status
-docker compose exec fail2ban fail2ban-client status
+# Check CrowdSec status
+sudo systemctl status crowdsec
 
-# Check specific jail
-docker compose exec fail2ban fail2ban-client status vaultwarden-auth
+# View active decisions
+sudo cscli decisions list
 
-# View logs
-docker compose logs fail2ban | tail -100
+# View recent alerts
+sudo cscli alerts list --since 24h
 
-# Verify Cloudflare action is reachable
-docker compose logs fail2ban | grep -i cloudflare
+# Check bouncer connectivity
+sudo cscli bouncers list
 ```
 
 **Solutions**:
 ```bash
-# Restart fail2ban
-docker compose restart fail2ban
+# Restart CrowdSec
+sudo systemctl restart crowdsec
 
 # Verify Cloudflare firewall token
 ./edit-secrets.sh edit
-# Check: fail2ban_cloudflare_firewall_token
+# Check: fail2ban_cloudflare_firewall_token (used by cs-cloudflare-bouncer)
 
-# Test Cloudflare firewall token against the WAF Custom Rules endpoint (Rulesets API)
+# Test Cloudflare firewall token against the WAF Custom Rules endpoint
 curl -X GET "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/rulesets/phases/http_request_firewall_custom/entrypoint" \
      -H "Authorization: Bearer YOUR_FIREWALL_TOKEN"
 
-# Test VaultWarden filter regex against live log
-docker compose exec fail2ban fail2ban-regex \
-  /var/log/vaultwarden/vaultwarden.log \
-  /data/fail2ban/filter.d/vaultwarden-auth.conf
-
-# Test Caddy JSON log filter
-docker compose exec fail2ban fail2ban-regex \
-  /var/log/caddy/auth_attempts.log \
-  /data/fail2ban/filter.d/vaultwarden-web-auth.conf
+# Check acquis.yaml log paths
+sudo cat /etc/crowdsec/acquis.yaml
 ```
 
-### Fail2Ban Filter Not Detecting Attacks in Caddy Logs
+### CrowdSec Not Parsing Caddy Logs
 
 **Symptoms**:
-- VaultWarden auth failures are visible in Caddy JSON logs
-- `fail2ban-client status vaultwarden-web-auth` shows zero detections
-- No bans triggered for HTTP 401/403 patterns despite repeated failures
+- Auth failures visible in Caddy JSON logs
+- No alerts triggered despite repeated failures
 
 **Diagnosis**:
 ```bash
-# Confirm log line endings (OCI NFS/shared volumes may produce \r\n)
-cat -A ${PROJECT_STATE_DIR}/logs/caddy/auth_attempts.log | head -5 | grep -c '\\r'
+# Confirm log paths in acquis.yaml match actual file locations
+sudo cscli metrics
 
-# Test filter against the live log
-docker compose exec fail2ban fail2ban-regex \
-  /var/log/caddy/auth_attempts.log \
-  /data/fail2ban/filter.d/vaultwarden-web-auth.conf
-
-# Check filter file is current (all JSON failregex patterns must end with \r?$)
-docker compose exec fail2ban grep 'failregex' /data/fail2ban/filter.d/vaultwarden-web-auth.conf
+# Check for parsing errors
+sudo journalctl -u crowdsec -n 50
 ```
-
-**Explanation**: On NFS-mounted log volumes (common on OCI), line endings may be
-`\r\n`. A `$` anchor in the regex does not consume `\r`, causing all Caddy JSON
-log patterns to silently fail. The current filter files use `\r?$` anchors on
-every JSON `failregex` pattern to handle both `\n` and `\r\n` endings correctly.
 
 **Solutions**:
 ```bash
-# Ensure you are on the latest version of the filter files
-git pull
-docker compose restart fail2ban
+# Update acquis.yaml paths if needed
+sudo nano /etc/crowdsec/acquis.yaml
+sudo systemctl restart crowdsec
+```
 
-# Verify the fix is in place
-docker compose exec fail2ban grep 'r?\$' /data/fail2ban/filter.d/vaultwarden-web-auth.conf
+### Self-Lockout Recovery
+
+If your IP is banned and you cannot access the vault:
+```bash
+# SSH to the server (vault bans do not affect SSH), then:
+sudo cscli decisions delete --ip <your-ip>
+
+# Optionally whitelist to prevent future bans
+sudo cscli whitelists add myip <your-ip>
 ```
 
 ### Admin Panel Inaccessible
@@ -953,7 +911,7 @@ docker inspect $(docker compose ps -q vaultwarden) | grep -A 10 CPU
 
 **Solutions**:
 ```bash
-# Adjust CPU limits in template (defaults: VW 0.3, Caddy 0.25, Fail2Ban 0.15, Postfix 0.1)
+# Adjust CPU limits in template (defaults: VW 0.3, Caddy 0.25, Postfix 0.1)
 nano docker-compose.yml.example
 # Increase cpus value for affected container
 
@@ -987,7 +945,7 @@ docker inspect $(docker compose ps -q vaultwarden) | grep -A 10 Memory
 **Solutions**:
 ```bash
 # Adjust memory limits in template
-# Defaults: VaultWarden 512M, Caddy 512M, Fail2Ban 512M, Postfix 256M
+# Defaults: VaultWarden 512M, Caddy 512M, Postfix 256M
 nano docker-compose.yml.example
 
 # Regenerate and restart
@@ -1111,8 +1069,8 @@ make version > version-info.txt
 # Systemd timer status
 sudo ./setup.sh systemd status > timer-status.txt
 
-# Fail2Ban jail status
-docker compose exec fail2ban fail2ban-client status >> timer-status.txt
+# CrowdSec status
+sudo cscli decisions list >> timer-status.txt
 ```
 
 ### Emergency Recovery

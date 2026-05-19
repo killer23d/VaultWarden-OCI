@@ -67,7 +67,7 @@ make safe-restart
 make health
 
 # Basic checks (always run):
-#  ✓ All containers running (vaultwarden, caddy, fail2ban, postfix)
+#  ✓ All containers running (vaultwarden, caddy, postfix)
 #  ✓ VaultWarden accessible on localhost:8080
 #  ✓ External web access via Cloudflare (soft warning if down)
 #  ✓ Disk space (warn >70%, critical >80%)
@@ -92,7 +92,7 @@ make health-quick
 # Additional checks:
 #  ✓ CPU and memory usage vs alert threshold
 #  ✓ .env and secrets.yaml configuration validation
-#  ✓ Fail2ban responding, Age key valid, SOPS config present
+#  ✓ CrowdSec responding, Age key valid, SOPS config present
 ```
 
 #### Health Check with Auto-Recovery
@@ -146,7 +146,7 @@ make logs SERVICE=vaultwarden
 make logs-vaultwarden   # VaultWarden application logs
 make logs-caddy         # Caddy reverse-proxy logs
 make logs-postfix       # Postfix email relay logs
-make logs-fail2ban      # Fail2ban intrusion-prevention logs
+make logs-crowdsec      # CrowdSec threat detection logs
 
 # With timestamps
 docker compose logs --follow --timestamps
@@ -161,8 +161,8 @@ grep "401" /var/lib/vaultwarden/logs/caddy/auth_attempts.log | jq
 # Admin panel access
 cat /var/lib/vaultwarden/logs/caddy/admin_access.log | jq
 
-# Fail2ban bans
-grep "block\|ban" /var/lib/vaultwarden/logs/fail2ban/fail2ban.log
+# CrowdSec decisions
+sudo cscli decisions list
 
 # VaultWarden errors
 grep "ERROR" /var/lib/vaultwarden/logs/vaultwarden/vaultwarden.log
@@ -329,7 +329,6 @@ make update-system
 # .env (set by setup.sh install --auto)
 VAULTWARDEN_VERSION=1.35.4
 CADDY_VERSION=2.11.1
-FAIL2BAN_VERSION=1.1.0-r3
 POSTFIX_VERSION=4.3.0
 ```
 
@@ -432,7 +431,7 @@ make test-email
 
 # Tests performed:
 #  1. Postfix container running and port 587 responding
-#  2. Fail2ban can reach postfix SMTP
+#  2. Host script send_notification_email() available
 #  3. Host script send_notification_email() available
 #  4. End-to-end test email sent
 ```
@@ -441,21 +440,22 @@ make test-email
 
 ## 🔒 Security Operations
 
-### Fail2ban Management
+### CrowdSec Management
 
 ```bash
 # Overall status
-docker compose exec fail2ban fail2ban-client status
+sudo systemctl status crowdsec
 
-# Specific jail
-docker compose exec fail2ban fail2ban-client status vaultwarden-auth
+# View active bans
+sudo cscli decisions list
 
 # Manual ban / unban
-docker compose exec fail2ban fail2ban-client set vaultwarden-auth banip   1.2.3.4
-docker compose exec fail2ban fail2ban-client set vaultwarden-auth unbanip 1.2.3.4
+sudo cscli decisions add --ip 1.2.3.4 --duration 24h
+sudo cscli decisions delete --ip 1.2.3.4
 
-# Check Cloudflare ban actions
-docker compose logs fail2ban | grep "cloudflare-apiv4"
+# Check Cloudflare bouncer actions
+sudo cscli bouncers list
+sudo systemctl status crowdsec-cloudflare-bouncer
 ```
 
 ### Secrets Management
@@ -597,8 +597,8 @@ docker stats --no-stream
 # Configured resource limits:
 # VaultWarden: 512 MB memory, 30% CPU
 # Caddy:       512 MB memory, 25% CPU
-# Fail2ban:    512 MB memory, 15% CPU
 # Postfix:     256 MB memory, 10% CPU
+# CrowdSec:    host systemd service (no Docker resource limits)
 ```
 
 ### System Resource Usage
@@ -647,7 +647,6 @@ docker compose up
 # 4. Per-container logs
 docker compose logs vaultwarden
 docker compose logs caddy
-docker compose logs fail2ban
 docker compose logs postfix
 
 # 5. Force restart
@@ -686,25 +685,22 @@ grep SMTP .env
 ./edit-secrets.sh view    # View smtp_password and verify decryption
 ```
 
-### Fail2ban Not Blocking
+### CrowdSec Not Blocking
 
 ```bash
 # 1. Check status
-docker compose exec fail2ban fail2ban-client status
-docker compose exec fail2ban fail2ban-client status vaultwarden-auth
+sudo systemctl status crowdsec
+sudo cscli decisions list
 
-# 2. Test filter regex
-docker compose exec fail2ban fail2ban-regex \
-  /var/log/vaultwarden/vaultwarden.log \
-  /data/fail2ban/filter.d/vaultwarden-auth.conf
+# 2. Check acquis.yaml paths
+sudo cat /etc/crowdsec/acquis.yaml
 
 # 3. Verify Cloudflare API token
-docker compose exec fail2ban env | grep CF_
-docker compose logs fail2ban | grep -i cloudflare
+sudo cscli bouncers list
+sudo systemctl status crowdsec-cloudflare-bouncer
 
-# 4. Check for \r\n line endings in Caddy JSON log volume (OCI NFS mounts)
-file /var/lib/vaultwarden/logs/caddy/auth_attempts.log
-# If CRLF is reported, verify fail2ban filter.d failregex patterns end with \r?$
+# 4. Check CrowdSec logs
+sudo journalctl -u crowdsec -n 50
 ```
 
 ### Backup Issues
@@ -767,7 +763,7 @@ sudo ./setup.sh install --domain vault.example.com --email admin@example.com --f
 ### Daily
 - ✅ Check automated backup success (`journalctl -u vaultwarden-db-backup.service` or email notification)
 - ✅ Review health check results
-- ✅ Glance at fail2ban for unusual ban activity
+- ✅ Glance at CrowdSec for unusual ban activity (`sudo cscli alerts list --since 24h`)
 
 ### Weekly
 - ✅ Review full backup with verification results (`journalctl -u vaultwarden-full-backup.service`)
@@ -824,7 +820,7 @@ make logs-tail                     # Tail all services with timestamps
 make logs-vaultwarden              # Tail VaultWarden logs
 make logs-caddy                    # Tail Caddy logs
 make logs-postfix                  # Tail Postfix email logs
-make logs-fail2ban                 # Tail Fail2ban logs
+make logs-crowdsec                 # Tail CrowdSec logs
 make monitor                       # Real-time log stream
 make watch                         # Live status + quick health every 5 s
 make diagnose                      # Full diagnostic dump (versions, key, disk, containers, logs)

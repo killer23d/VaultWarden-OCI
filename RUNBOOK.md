@@ -33,7 +33,7 @@ For first-time setup on a new host:
 | View Vaultwarden logs | `make logs-vaultwarden` |
 | View Caddy logs | `make logs-caddy` |
 | View Postfix logs | `make logs-postfix` |
-| View Fail2Ban logs | `make logs-fail2ban` |
+| View CrowdSec logs | `make logs-crowdsec` |
 | Watch live logs | `make watch` |
 
 ---
@@ -149,6 +149,42 @@ make breakglass-create
 # 3. Remove the break-glass account after resolving the issue
 make breakglass-remove
 ```
+
+---
+
+## 🛡️ CrowdSec Operations
+
+CrowdSec runs as a host systemd service (not a Docker container). It reads Vaultwarden, Caddy, and SSH logs and bans attackers via the Cloudflare API and iptables.
+
+| Task | Command |
+|------|---------|
+| Check CrowdSec status | `sudo systemctl status crowdsec` |
+| View active bans | `sudo cscli decisions list` |
+| View recent alerts | `sudo cscli alerts list --since 24h` |
+| Unban an IP | `make unban IP=1.2.3.4` |
+| View metrics | `make crowdsec-status` |
+| Tail CrowdSec logs | `make logs-crowdsec` |
+| View security events (last 1h) | `make security-report` |
+| Manually ban an IP | `sudo cscli decisions add --ip 1.2.3.4 --duration 24h` |
+| Check bouncer status | `sudo systemctl status crowdsec-cloudflare-bouncer` |
+| Restart after config change | `sudo systemctl restart crowdsec` |
+
+### Self-Lockout Prevention
+
+Add your admin IP to the CrowdSec whitelist to prevent accidental bans:
+
+```bash
+sudo cscli whitelists add myip "$(curl -s https://ifconfig.me)"
+# Or for a CIDR range:
+sudo cscli whitelists add myvpn 203.0.113.0/24
+```
+
+### If You Are Locked Out
+
+If your IP is banned and you cannot access the vault:
+1. SSH to the server (vault bans do not affect SSH)
+2. Run: `sudo cscli decisions delete --ip <your-ip>`
+3. Optionally whitelist: `sudo cscli whitelists add myip <your-ip>`
 
 ---
 

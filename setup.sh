@@ -405,6 +405,55 @@ EOF
     log_success "setup" "Docker installed: $(docker --version)"
 }
 
+install_crowdsec() {
+    _log_section "Installing CrowdSec (host service)"
+
+    if ! command -v cscli >/dev/null 2>&1; then
+        curl -s https://packagecloud.io/install/repositories/crowdsec/crowdsec/script.deb.sh | sudo bash
+        sudo apt-get install -y crowdsec crowdsec-firewall-bouncer-iptables crowdsec-cloudflare-bouncer
+    else
+        _log_info "CrowdSec already installed, skipping."
+    fi
+
+    sudo cscli collections install crowdsecurity/vaultwarden
+    sudo cscli collections install crowdsecurity/linux
+    sudo cscli collections install crowdsecurity/caddy
+    sudo cscli collections install crowdsecurity/http-cve
+
+    sudo mkdir -p /etc/crowdsec/acquis.d
+    sed "s|TOKEN_PROJECT_STATE_DIR|${PROJECT_STATE_DIR}|g" \
+        "${REPO_DIR}/crowdsec/acquis.yaml" \
+        | sudo tee /etc/crowdsec/acquis.d/vaultwarden.yaml >/dev/null
+
+    _cf_bouncer_key=$(sudo cscli bouncers add cloudflare-bouncer \
+        --key "$(openssl rand -hex 32)" 2>/dev/null || \
+        sudo cscli bouncers add cloudflare-bouncer 2>/dev/null \
+        | grep -oP '(?<=key: )\S+')
+
+    _cf_token=""
+    if [ -f "${PROJECT_STATE_DIR}/secrets/.docker_secrets/fail2ban_cloudflare_firewall_token" ]; then
+        _cf_token=$(cat "${PROJECT_STATE_DIR}/secrets/.docker_secrets/fail2ban_cloudflare_firewall_token")
+    fi
+
+    sed \
+        -e "s|TOKEN_CF_ZONE_ID|${CLOUDFLARE_ZONE_ID}|g" \
+        -e "s|TOKEN_CF_ACCOUNT_ID|${CF_ACCOUNT_ID:-CHANGE_ME_CF_ACCOUNT_ID}|g" \
+        -e "s|TOKEN_CF_FIREWALL_TOKEN|${_cf_token}|g" \
+        -e "s|CHANGE_ME_BOUNCER_KEY|${_cf_bouncer_key}|g" \
+        "${REPO_DIR}/crowdsec/crowdsec-cloudflare-bouncer.yaml.example" \
+        | sudo tee /etc/crowdsec/bouncers/crowdsec-cloudflare-bouncer.yaml >/dev/null
+    sudo chmod 600 /etc/crowdsec/bouncers/crowdsec-cloudflare-bouncer.yaml
+
+    sudo cp "${REPO_DIR}/crowdsec/profiles.yaml" /etc/crowdsec/profiles.yaml
+
+    sudo systemctl enable --now crowdsec
+    sudo systemctl enable --now crowdsec-firewall-bouncer
+    sudo systemctl enable --now crowdsec-cloudflare-bouncer
+
+    _log_success "CrowdSec installed and running."
+    _log_info "Verify with: sudo cscli metrics"
+}
+
 check_disk_space() {
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would check disk space"; return 0; fi
 
@@ -546,6 +595,8 @@ install_dependencies() {
         install_docker || return 1
     fi
 
+    install_crowdsec || return 1
+
     if ! docker compose version >/dev/null 2>&1; then
         DEBIAN_FRONTEND=noninteractive apt-get install -y docker-compose-plugin || return 1
     fi
@@ -679,13 +730,12 @@ create_env_file() {
         if [[ "$USE_LATEST" == "true" ]]; then
             if grep -qE '^VAULTWARDEN_VERSION=latest' "$env_file" && \
                grep -qE '^CADDY_VERSION=latest'       "$env_file" && \
-               grep -qE '^FAIL2BAN_VERSION=latest'    "$env_file" && \
                grep -qE '^POSTFIX_VERSION=latest'     "$env_file" && \
                grep -qE '^BUSYBOX_VERSION=latest'     "$env_file"; then
                 latest_matches=true
             fi
         else
-            if ! grep -qE '^(VAULTWARDEN|CADDY|FAIL2BAN|POSTFIX|BUSYBOX)_VERSION=latest' "$env_file"; then
+            if ! grep -qE '^(VAULTWARDEN|CADDY|POSTFIX|BUSYBOX)_VERSION=latest' "$env_file"; then
                 latest_matches=true
             fi
         fi
@@ -730,8 +780,6 @@ create_env_file() {
     AWK_UID="$user_id" \
     AWK_GID="$group_id" \
     AWK_SMTP_FROM="noreply@$clean_domain" \
-    AWK_F2B_DEST_MAIL="$ADMIN_EMAIL" \
-    AWK_F2B_SENDER="fail2ban@$clean_domain" \
     AWK_ALLOWED_SENDER_DOMAINS="$clean_domain" \
     AWK_SSH_LOG="$detected_ssh_log_path" \
     AWK_DATA_DEVICE="${DATA_VOLUME_DEVICE:-}" \
@@ -744,8 +792,6 @@ create_env_file() {
             sub(/^PUID=.*/, "PUID=" ENVIRON["AWK_UID"]);
             sub(/^PGID=.*/, "PGID=" ENVIRON["AWK_GID"]);
             sub(/^SMTP_FROM=.*/, "SMTP_FROM=" ENVIRON["AWK_SMTP_FROM"]);
-            sub(/^F2B_DEST_MAIL=.*/, "F2B_DEST_MAIL=" ENVIRON["AWK_F2B_DEST_MAIL"]);
-            sub(/^F2B_SENDER=.*/, "F2B_SENDER=" ENVIRON["AWK_F2B_SENDER"]);
             sub(/^ALLOWED_SENDER_DOMAINS=.*/, "ALLOWED_SENDER_DOMAINS=" ENVIRON["AWK_ALLOWED_SENDER_DOMAINS"]);
             sub(/^SSH_LOG_PATH=.*/, "SSH_LOG_PATH=" ENVIRON["AWK_SSH_LOG"]);
             sub(/^DATA_VOLUME_DEVICE=.*/, "DATA_VOLUME_DEVICE=" ENVIRON["AWK_DATA_DEVICE"]);
@@ -761,7 +807,6 @@ create_env_file() {
         awk '{
             sub(/^VAULTWARDEN_VERSION=.*/, "VAULTWARDEN_VERSION=latest");
             sub(/^CADDY_VERSION=.*/, "CADDY_VERSION=latest");
-            sub(/^FAIL2BAN_VERSION=.*/, "FAIL2BAN_VERSION=latest");
             sub(/^POSTFIX_VERSION=.*/, "POSTFIX_VERSION=latest");
             sub(/^BUSYBOX_VERSION=.*/, "BUSYBOX_VERSION=latest");
             print;
@@ -840,11 +885,11 @@ setup_directories() {
     chown -R "${puid}:${pgid}" "${backup_base_dir}" || return 1
     log_info "Backup directories created: ${backup_base_dir}/{db,full,emergency}"
 
-    if ! mkdir -p "${project_state_dir}"/{data,logs/{vaultwarden,caddy,fail2ban,postfix},caddy/{data,config},fail2ban}; then
+    if ! mkdir -p "${project_state_dir}"/{data,logs/{vaultwarden,caddy,postfix},caddy/{data,config}}; then
         return 1
     fi
 
-    for _dir in data logs caddy fail2ban backups; do
+    for _dir in data logs caddy backups; do
     [[ -d "${project_state_dir}/${_dir}" ]] && \
         chown -R "${puid}:${pgid}" "${project_state_dir}/${_dir}" || return 1
     done
@@ -874,10 +919,6 @@ setup_directories() {
     # and rw- (6) on the log file itself. 755 grants r-x to 'other', and
     # Caddy creates access.log with mode 0644 (rw-r--r--), satisfying both.
     #
-    # fail2ban uses the same pattern (chown 0:0 + chmod 755 in the init
-    # container) because it also runs as root and needs a root-writable dir.
-    # Caddy's directory is owned by PUID:PGID (not root) so we cannot simply
-    # chown it; 755 on a PUID-owned dir gives Caddy write access via 'other'.
     chmod 755 "${project_state_dir}/logs/caddy" || return 1
     log_info "Set ${project_state_dir}/logs/caddy to 755 (Caddy runs as root in container)"
 
@@ -1135,7 +1176,6 @@ backup_passphrase: PLACEHOLDER_NOT_CONFIGURED
 push_installation_id: PLACEHOLDER_NOT_CONFIGURED
 push_installation_key: PLACEHOLDER_NOT_CONFIGURED
 caddy_cloudflare_dns_token: PLACEHOLDER_NOT_CONFIGURED
-fail2ban_cloudflare_firewall_token: PLACEHOLDER_NOT_CONFIGURED
 EOF
     chmod 600 "$temp_secrets"
 
@@ -1174,7 +1214,6 @@ create_docker_compose() {
 # Covers:
 #   - Root-level *.sh scripts (operator-facing)
 #   - caddy/entrypoint.sh  (run as container CMD; must be +x before 'make up')
-#   - fail2ban/*.sh        (any helper scripts present in that subdir)
 #   - lib/*.sh             (sourced, not executed directly — kept 644)
 # ---------------------------------------------------------------------------
 set_script_permissions() {
@@ -1222,16 +1261,7 @@ set_script_permissions() {
         done < <(find "caddy" -maxdepth 1 -name "*.sh")
     fi
 
-    # 4. fail2ban/*.sh — same rationale as caddy/entrypoint.sh
-    if [[ -d "fail2ban" ]]; then
-        while IFS= read -r script; do
-            chmod +x "$script"
-            chown "$real_user:$real_group" "$script" 2>/dev/null || true
-            log_success "Set +x: $script"
-        done < <(find "fail2ban" -maxdepth 1 -name "*.sh")
-    fi
-
-    # 5. lib/*.sh — sourced (not executed), keep 644 read-only for non-root
+    # 4. lib/*.sh — sourced (not executed), keep 644 read-only for non-root
     if [[ -d "lib" ]]; then
         find "lib" -name "*.sh" -exec chown "$real_user:$real_group" {} + 2>/dev/null || true
         find "lib" -name "*.sh" -exec chmod 644 {} + 2>/dev/null || true
@@ -1399,8 +1429,6 @@ EOF
         printf 'These fields still contain CHANGE_ME placeholders.\n'
         printf 'Set them BEFORE running %smake up%s:\n\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '  %s./edit-secrets.sh rotate caddy_cloudflare_dns_token%s\n' \
-            "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '  %s./edit-secrets.sh rotate fail2ban_cloudflare_firewall_token%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '  %s./edit-secrets.sh rotate smtp_password%s         (if using SMTP/email notifications)\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
@@ -1935,18 +1963,11 @@ collect_secrets() {
     cf_dns=$(_get_field "caddy_cloudflare_dns_token") || { log_error "Failed to collect caddy_cloudflare_dns_token"; return 1; }
     _COLLECTED_SECRETS["caddy_cloudflare_dns_token"]="$cf_dns"
 
-    # --- Cloudflare Firewall token ------------------------------------------
-    echo ""
-    log_info "═══════════════════════════════════════════════════════════"
-    log_info " Cloudflare Firewall API Token"
-    log_info "═══════════════════════════════════════════════════════════"
-    log_info "Required Permissions: Zone:Firewall Services:Edit"
-    log_info "Create at: https://dash.cloudflare.com/profile/api-tokens"
-    echo ""
-
-    local cf_fw
-    cf_fw=$(_get_field "fail2ban_cloudflare_firewall_token") || { log_error "Failed to collect fail2ban_cloudflare_firewall_token"; return 1; }
-    _COLLECTED_SECRETS["fail2ban_cloudflare_firewall_token"]="$cf_fw"
+    if [ -f "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/secrets/.docker_secrets/fail2ban_cloudflare_firewall_token" ]; then
+        _log_info "Cloudflare firewall token file found on disk — will be used by CrowdSec bouncer."
+    else
+        _log_warn "Cloudflare firewall token file not found — CrowdSec Cloudflare bouncer will need manual configuration."
+    fi
 
     # --- Email credentials (API token + SMTP password) ----------------------
     #
@@ -2157,7 +2178,6 @@ export_docker_secrets() {
         admin_token
         admin_basic_auth_hash
         caddy_cloudflare_dns_token
-        fail2ban_cloudflare_firewall_token
         email_api_token
         smtp_password
         backup_passphrase
@@ -2260,9 +2280,7 @@ write_secrets() {
         printf 'push_installation_id: %s\n'                "$(yaml_escape "${_COLLECTED_SECRETS[push_installation_id]}")"
         printf 'push_installation_key: %s\n\n'             "$(yaml_escape "${_COLLECTED_SECRETS[push_installation_key]}")"
         printf '# Cloudflare DNS API token (Zone:DNS:Edit + Zone:Zone:Read)\n'
-        printf 'caddy_cloudflare_dns_token: %s\n\n'        "$(yaml_escape "${_COLLECTED_SECRETS[caddy_cloudflare_dns_token]}")"
-        printf '# Cloudflare Firewall API token (Zone:Firewall Services:Edit)\n'
-        printf 'fail2ban_cloudflare_firewall_token: %s\n'  "$(yaml_escape "${_COLLECTED_SECRETS[fail2ban_cloudflare_firewall_token]}")"
+        printf 'caddy_cloudflare_dns_token: %s\n'        "$(yaml_escape "${_COLLECTED_SECRETS[caddy_cloudflare_dns_token]}")"
     } > "$temp_file"
 
     # Clear the in-memory associative array immediately after writing, to
@@ -2376,7 +2394,7 @@ _ss_main() {
     # or CI environments.
     for _cleanup_key in \
         admin_token admin_basic_auth_hash \
-        caddy_cloudflare_dns_token fail2ban_cloudflare_firewall_token \
+        caddy_cloudflare_dns_token \
         email_api_token smtp_password backup_passphrase \
         push_installation_id push_installation_key; do
         unset "SECRET_${_cleanup_key}" 2>/dev/null || true

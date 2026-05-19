@@ -1,0 +1,31 @@
+# CrowdSec Cloudflare Bouncer configuration — VaultWarden-OCI
+# Installed to /etc/crowdsec/bouncers/crowdsec-cloudflare-bouncer.yaml by setup.sh
+# crowdsec_lapi_key is populated automatically by setup.sh
+
+crowdsec_lapi_url: http://127.0.0.1:8080
+crowdsec_lapi_key: CHANGE_ME_BOUNCER_KEY
+
+cloudflare_config:
+  accounts:
+    - id: TOKEN_CF_ACCOUNT_ID
+      zones:
+        - zone_id: TOKEN_CF_ZONE_ID
+          token: TOKEN_CF_FIREWALL_TOKEN
+          actions:
+            - block
+          device_types:
+            - desktop
+            - mobile
+            - tablet
+  update_frequency: 10s
+  default_action: block
+
+daemon: true
+log_mode: file
+log_dir: /var/log/crowdsec/
+log_level: info
+log_max_size: 40
+log_max_age: 30
+log_max_backups: 3
+
+cache_path: /var/lib/crowdsec/data/cloudflare_cache.json

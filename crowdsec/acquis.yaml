@@ -1,0 +1,20 @@
+# CrowdSec log acquisition configuration — VaultWarden-OCI
+# Installed to /etc/crowdsec/acquis.d/vaultwarden.yaml by setup.sh
+
+- source: file
+  filenames:
+    - TOKEN_PROJECT_STATE_DIR/logs/vaultwarden/vaultwarden.log
+  labels:
+    type: vaultwarden
+
+- source: file
+  filenames:
+    - TOKEN_PROJECT_STATE_DIR/logs/caddy/access.log
+  labels:
+    type: caddy
+
+- source: journalctl
+  journalctl_filter:
+    - "_SYSTEMD_UNIT=ssh.service"
+  labels:
+    type: syslog

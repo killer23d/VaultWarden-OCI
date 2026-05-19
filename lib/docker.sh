@@ -254,7 +254,7 @@ recreate_services() {
 # pull_images
 #
 # Uses --quiet to suppress per-layer progress bars. Without it, a full pull
-# of the four project images (vaultwarden, caddy, fail2ban, postfix) produces
+# of the project images (vaultwarden, caddy, postfix) produces
 # several hundred KB of output per run that floods the systemd journal on
 # every update-timer invocation. On a VPS with a limited SystemMaxUse journal
 # cap this noise evicts genuinely useful log lines.

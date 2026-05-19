@@ -47,7 +47,6 @@ The override file modifies every core service for local development and testing:
 | `vaultwarden` | Enables `LOG_LEVEL=debug`, `SIGNUPS_ALLOWED=true`, removes resource limits, exposes port `127.0.0.1:8080:80` |
 | `caddy` | Binds admin API to loopback (`127.0.0.1:2019`), exposes ports `8081`/`8443`, removes resource limits |
 | `postfix` | Relaxes TLS to `may`, exposes submission port `127.0.0.1:1025:587`, adds SASL debug logging |
-| `fail2ban` | Sets `F2B_LOG_LEVEL=DEBUG`, mounts workspace read-only for live config editing |
 | `email-tester` | Alpine-based SMTP test container; activated by `--profile development` or `--profile email-testing` |
 | `mailpit` | Email capture UI (`axllent/mailpit`) replacing abandoned mailhog; activated by `--profile email-capture` |
 
@@ -60,7 +59,7 @@ Use `docker-compose.override.yml.example` when you need to:
 - Test email delivery locally without sending real messages (Mailpit capture)
 - Debug container startup issues (`LOG_LEVEL=debug`, Caddy admin API)
 - Develop against a live VaultWarden instance with signups enabled
-- Test Fail2Ban filter patterns against live log output
+- Test CrowdSec detection against live log output
 
 ### Activating the Override
 
@@ -219,7 +218,7 @@ SOPS_VERSION=v3.9.4 sudo ./setup.sh install --domain vault.yourdomain.com --emai
 
 ## 🖥️ Resource Limits
 
-Default limits are tightly tuned for a **6 GB OCI ARM instance** (512 MB for VaultWarden, Caddy, and Fail2ban; 256 MB for Postfix) to leave ample memory for the host OS. Edit `docker-compose.yml.example` to adjust if you need more resources.
+Default limits are tightly tuned for a **6 GB OCI ARM instance** (512 MB for VaultWarden and Caddy; 256 MB for Postfix) to leave ample memory for the host OS and CrowdSec. Edit `docker-compose.yml.example` to adjust if you need more resources.
 
 ### Larger Systems (12 GB+ RAM)
 
@@ -260,40 +259,52 @@ services:
 
 ## 🔒 Security Customisation
 
-### Fail2Ban — Tighter Thresholds
+### CrowdSec — Tighter Thresholds
 
-```ini
-# Edit fail2ban/jail.d/vaultwarden-oci.conf
-[vaultwarden-auth]
-maxretry = 2       # reduced from 3
-bantime  = 24h     # increased from 2h
-findtime = 10m     # tightened from 1h
+CrowdSec scenario thresholds are configured via YAML overrides:
+
+```yaml
+# /etc/crowdsec/hub/scenarios/crowdsecurity/http-bf.yaml override
+type: leaky
+name: crowdsecurity/http-bf
+description: "HTTP brute force — tighter thresholds"
+capacity: 2       # reduced from default
+leakspeed: "10m"  # tightened
+blackhole: "24h"  # extended ban duration
 ```
 
-> **Note:** All web-facing jails push bans to the **Cloudflare Edge WAF via API** — local `iptables` is not used for proxied services. Only the SSH jail uses local iptables (leveraging Fail2ban's `network_mode: host`).
+> **Note:** All web-facing bans push to **Cloudflare Edge WAF via API** — local `iptables` is not used for proxied services. Only the SSH scenario uses host iptables via `cs-firewall-bouncer`.
 
-### Fail2Ban — NFS Log Mounts
+### CrowdSec — Custom Scenarios
 
-If your Caddy log volume is on an NFS share (common in OCI with block storage), log lines end with `\r\n` instead of `\n`. The JSON `failregex` patterns in `fail2ban/filter.d/vaultwarden-web-auth.conf` must use `\r?$` line anchors to match correctly on NFS mounts:
-
-```ini
-# Correct pattern for NFS-mounted logs (\r?$ instead of $)
-failregex = ^{"ts":.+"status":40[13].+}\r?$
+```yaml
+# /etc/crowdsec/scenarios/vaultwarden-custom.yaml
+type: leaky
+name: local/vaultwarden-custom
+description: "Custom VaultWarden detection"
+filter: "evt.Meta.service == 'vaultwarden'"
+capacity: 3
+leakspeed: "1m"
+blackhole: "2h"
+labels:
+  type: bruteforce
 ```
 
-Verify whether your logs have carriage returns:
+### CrowdSec — Whitelist Configuration
+
+```yaml
+# /etc/crowdsec/whitelists/myip.yaml
+name: local/myip-whitelist
+description: "Admin IP whitelist"
+whitelist:
+  reason: "Admin IP"
+  ip:
+    - "YOUR_IP_HERE"
+```
+
+Or use `cscli` directly:
 ```bash
-cat -A /var/log/caddy/auth_attempts.log | head -5
-# A trailing ^M before $ means \r is present — use \r?$ anchors
-```
-
-### Custom Fail2Ban Filter
-
-```ini
-# Create fail2ban/filter.d/vaultwarden-custom.conf
-[Definition]
-failregex = ^.*<your-pattern>.*<HOST>.*$
-ignoreregex =
+sudo cscli whitelists add myip "$(curl -s https://ifconfig.me)"
 ```
 
 ### Caddy — 4-Tier Log Architecture
@@ -304,7 +315,7 @@ Caddy uses four named loggers to route traffic to independent log files with sep
 | :-- | :-- | :-- | :-- |
 | `access_log` | `/var/log/caddy/access.log` | 30 days / 50 MB rolls | All general traffic |
 | `admin_log` | `/var/log/caddy/admin_access.log` | 90 days / 25 MB rolls | `/admin` panel requests |
-| `auth_log` | `/var/log/caddy/auth_attempts.log` | 90 days / 25 MB rolls | Login and token endpoints (Fail2Ban source) |
+| `auth_log` | `/var/log/caddy/auth_attempts.log` | 90 days / 25 MB rolls | Login and token endpoints (CrowdSec source) |
 | `security_log` | `/var/log/caddy/security.log` | 180 days / 10 MB rolls | Catch-all and anomalous requests |
 
 To adjust retention, edit the `log` blocks in the global section of `caddy/Caddyfile`:
@@ -573,7 +584,7 @@ services:
       - /mnt/nfs/vaultwarden/attachments:/data/attachments
 ```
 
-> **If using NFS for Caddy logs:** see the Fail2Ban NFS note above — `\r?$` anchors are required in `failregex` patterns.
+> **If using NFS for Caddy logs:** ensure log line endings are consistent — `\r\n` line endings on OCI File Storage NFS mounts may require special handling in log parsers.
 
 ### Multi-Destination Backups
 
@@ -663,9 +674,6 @@ services:
       - DOMAIN=http://localhost:8080
     ports:
       - "8080:80"
-  fail2ban:
-    deploy:
-      replicas: 0
   caddy:
     deploy:
       replicas: 0

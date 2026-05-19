@@ -102,16 +102,15 @@ nano .env
 # ► Set: CLOUDFLARE_ZONE_ID, SMTP_HOST, SMTP_PORT, SMTP_USERNAME
 # ► Set: EMAIL_MODE=auto, EMAIL_PROVIDER=mailersend (or your provider)
 # ► Set: ALLOWED_SENDER_DOMAINS=vault.yourdomain.com  (for Postfix sidecar)
-# ► Set literal values: F2B_DEST_MAIL, F2B_SENDER, VW_SMTP_HOST, VW_SMTP_FROM
 # ► Verify: DOMAIN and ADMIN_EMAIL are correct
 ```
 
 Then supply the external credentials that `--auto` cannot generate for you:
 
 ```bash
-# Cloudflare tokens (required — Caddy TLS + Fail2ban edge blocking)
+# Cloudflare tokens (required — Caddy TLS + CrowdSec edge blocking)
 ./edit-secrets.sh rotate caddy_cloudflare_dns_token
-./edit-secrets.sh rotate fail2ban_cloudflare_firewall_token
+./edit-secrets.sh rotate fail2ban_cloudflare_firewall_token  # used by CrowdSec cloudflare-bouncer
 
 ## Email API token (required for Tier 1)
 ./edit-secrets.sh rotate email_api_token
@@ -241,8 +240,7 @@ Tier 2 ─ SMTP           →  direct relay or the Postfix sidecar on 127.0.0.1:
 Tier 3 ─ Host MTA       →  local mail/sendmail binary
 ```
 
-Fail2Ban uses the Postfix sidecar over host-loopback `127.0.0.1:587` for ban
-notifications. The VaultWarden container also talks to the internal `postfix`
+The VaultWarden container also talks to the internal `postfix`
 service via `VW_SMTP_*`; only the `SMTP_*` block changes when you switch
 upstream relays.
 
@@ -258,8 +256,6 @@ SMTP_SECURITY=starttls
 SMTP_USERNAME=your-smtp-username
 SMTP_FROM=noreply@vault.yourdomain.com
 ALLOWED_SENDER_DOMAINS=vault.yourdomain.com
-F2B_DEST_MAIL=admin@yourdomain.com  # literal value — NOT ${ADMIN_EMAIL}
-F2B_SENDER=fail2ban@vault.yourdomain.com  # literal value — do not reference another .env variable
 
 # VaultWarden -> Postfix sidecar (internal Docker network; no auth/TLS here):
 VW_SMTP_HOST=postfix
@@ -292,8 +288,8 @@ Full details, provider setup, Postfix MTA configuration, and troubleshooting: **
 | :-- | :-- |
 | **Caddy** | TLS termination, reverse proxy, security headers, 4-tier structured JSON logging (512 MB limit). Now requires **Caddy ≥ 2.11.2**; uses `encode zstd gzip`, `roll_compression zstd`, connection timeouts in the global `servers` block, `request_body` size limits on admin/auth handlers, and health-check log suppression. |
 | **VaultWarden** | Password manager application (512 MB limit) |
-| **Postfix** | Containerised SMTP relay — last-resort MTA for the email chain in `lib/common.sh` and sole email path for Fail2Ban; binds `127.0.0.1:587` (256 MB limit) |
-| **Fail2ban** | Brute-force detection → Cloudflare edge blocking; Host networking for SSH protection (512 MB limit) |
+| **Postfix** | Containerised SMTP relay — last-resort MTA for the email chain in `lib/common.sh`; binds `127.0.0.1:587` (256 MB limit) |
+| **CrowdSec** | Host systemd service — threat detection with Cloudflare edge banning and host iptables |
 
 > The `docker-compose.yml.example` template now enforces `read_only` filesystems, `tmpfs` mounts, `ulimits` (nofile), `no-new-privileges:true`, and tightened Caddy log rotation. See [docs/ADVANCED-CUSTOMIZATION.md](docs/ADVANCED-CUSTOMIZATION.md) for override details.
 
@@ -337,7 +333,7 @@ All live configuration is generated from `.example` templates by `setup.sh`. Edi
 
 ## 🔒 Security at a Glance
 
-- **Edge WAF & Host Protection** — Cloudflare proxy + Fail2ban pushes WAF bans to Cloudflare API. Fail2ban also runs in host network mode for direct iptables SSH protection.
+- **Edge WAF & Host Protection** — Cloudflare proxy + CrowdSec host service pushes WAF bans to Cloudflare API and enforces iptables bans for SSH protection.
 - **Host firewall** — UFW opens 80/443/22; Cloudflare IP restriction enforced at OCI Security List level
 - **Encrypted secrets** — Age + SOPS; no plaintext credentials at rest. `cleanup_secrets_environment()` unsets all SOPS environment variables after every operation.
 - **HTTPS** — Automatic Let's Encrypt via Caddy with HSTS, CSP, and security headers
@@ -407,7 +403,7 @@ make version                           # Stack version from VERSION file
 | :-- | :-- |
 | [DEPLOYMENT.md](docs/DEPLOYMENT.md) | Detailed deployment walkthrough |
 | [CONFIGURATION.md](docs/CONFIGURATION.md) | Every `.env` and secrets variable |
-| [EMAIL.md](docs/EMAIL.md) | Email setup: API providers, SMTP relay, Postfix MTA, Fail2Ban notifications |
+| [EMAIL.md](docs/EMAIL.md) | Email setup: API providers, SMTP relay, Postfix MTA |
 | [SECURITY.md](docs/SECURITY.md) | Security hardening deep-dive |
 | [OPERATIONS.md](docs/OPERATIONS.md) | Day-to-day ops, update/rollback phases |
 | [BACKUP-RESTORE.md](docs/BACKUP-RESTORE.md) | Backup strategy and restore procedures |

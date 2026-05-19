@@ -164,7 +164,7 @@ echo ""
 if [[ "$DRY_RUN" == "true" ]]; then
     warn "DRY RUN MODE — showing what would be removed:"
     echo "  [1] Docker compose stack: ${PROJECT_DIR}/docker-compose.yml (down --volumes --remove-orphans)"
-    echo "  [2] Containers matching: vaultwarden caddy fail2ban postfix"
+    echo "  [2] Containers matching: vaultwarden caddy postfix"
     echo "  [3] Docker volumes with prefix: $(basename "${PROJECT_DIR}" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')_ or vaultwarden*"
     echo "  [4] Docker networks matching: vaultwarden*"
     echo "  [5] Systemd units: vaultwarden-*.service vaultwarden-*.timer"
@@ -305,7 +305,7 @@ if command -v docker &>/dev/null; then
     fi
 
     # Also clean up any stray containers whose names match known service names
-    for svc in vaultwarden caddy fail2ban postfix; do
+    for svc in vaultwarden caddy postfix; do
         CID=$(docker ps -aq --filter "name=${svc}" 2>/dev/null)
         if [[ -n "$CID" ]]; then
             docker stop "$CID" 2>/dev/null || true
@@ -438,7 +438,7 @@ fi
 # Boot-only mode: PROJECT_STATE_DIR == /var/lib/vaultwarden — no mount
 # operations needed; rm -rf is sufficient.
 # ═══════════════════════════════════════════════════════════════
-info "Step 5: Removing runtime state directory (database, logs, Caddy/Fail2ban state)..."
+info "Step 5: Removing runtime state directory (database, logs, Caddy state)..."
 
 # ── 5a: Wipe the resolved state directory ──────────────────────────────────
 if [[ -d "${PROJECT_STATE_DIR}" ]]; then

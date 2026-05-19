@@ -26,7 +26,7 @@ COMPOSE_FILE         ?= docker-compose.yml
 COMPOSE_PROJECT_NAME ?= vaultwarden-oci
 DOCKER_COMP          ?= $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
 
-SERVICES          = vaultwarden caddy fail2ban postfix
+SERVICES          = vaultwarden caddy postfix
 CORE_SERVICES     = vaultwarden caddy
 
 # Override on the command line to target a specific archive, e.g.:
@@ -40,7 +40,7 @@ DATA_DEVICE ?=
         setup init-secrets edit-secrets test-secrets test-email \
         up down restart start stop safe-restart status \
         health health-quick health-email \
-        logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-fail2ban \
+        logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec \
         watch monitor \
         backup backup-full backup-emergency list-backups backup-status \
         restore restore-preflight restore-db restore-remote \
@@ -53,7 +53,7 @@ DATA_DEVICE ?=
         dev-setup fix-permissions test test-config dry-run fmt lint shellcheck \
         info version shell config diagnose \
         clean clean-all prune \
-        unban \
+        unban crowdsec-status crowdsec-alerts security-report \
         uninstall uninstall-dry-run
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -160,7 +160,7 @@ fix-permissions: ## Fix file ownership after sudo operations leave root-owned fi
 	    backup.sh edit-secrets.sh \
 	    maintenance.sh restore.sh \
 	    setup.sh startup.sh \
-	    backups caddy docs fail2ban lib logs ssl systemd utilities \
+	    backups caddy crowdsec docs lib logs ssl systemd utilities \
 	    docker-compose.yml.example docker-compose.override.yml.example .env.example .sops.yaml \
 	    .gitattributes .gitignore; do \
 	    [ -e "$$item" ] && chown -R "$$REAL_USER:$$REAL_GROUP" "$$item" 2>/dev/null && \
@@ -333,13 +333,13 @@ safe-restart: ## Restart with automatic rollback on failure
 		exit 1; \
 	fi
 
-status: ## Show service status, backup health, disk usage, and Fail2Ban summary
+status: ## Show service status, backup health, disk usage, and CrowdSec ban summary
 	$(call check-docker)
 	@echo "$(BLUE)VaultWarden Service Status:$(NC)"
 	@$(DOCKER_COMP) ps
 	@echo ""
 	@echo "$(CYAN)Resource usage:$(NC)"
-	@docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}" 2>/dev/null | grep -E "vaultwarden|caddy|fail2ban|postfix" || true
+	@docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}" 2>/dev/null | grep -E "vaultwarden|caddy|postfix" || true
 	@echo ""
 	@echo "$(CYAN)Backup status:$(NC)"
 	@STATE_DIR=$$(grep '^PROJECT_STATE_DIR=' .env 2>/dev/null | cut -d= -f2-); \
@@ -375,16 +375,12 @@ status: ## Show service status, backup health, disk usage, and Fail2Ban summary
 		fi; \
 	done
 	@echo ""
-	@echo "$(CYAN)Fail2Ban bans:$(NC)"
-	@if docker inspect vaultwarden_fail2ban --format '{{.State.Running}}' 2>/dev/null | grep -q true; then \
-		docker exec vaultwarden_fail2ban sh -c \
-		  'fail2ban-client status 2>/dev/null | grep "Jail list" | sed "s/.*Jail list://;s/,/ /g" | tr -s " " "\n" | grep -v "^$$"' \
-		  2>/dev/null | while read -r jail; do \
-		    COUNT=$$(docker exec vaultwarden_fail2ban sh -c "fail2ban-client status $$jail 2>/dev/null | grep 'Currently banned' | awk '{print \$$NF}'" 2>/dev/null || echo 0); \
-		    echo "  $$jail: $$COUNT banned IP(s)"; \
-		done || echo "  $(YELLOW)fail2ban-client not responding$(NC)"; \
+	@echo "$(CYAN)CrowdSec bans:$(NC)"
+	@if systemctl is-active crowdsec >/dev/null 2>&1; then \
+		COUNT=$$(sudo cscli decisions list -o raw 2>/dev/null | tail -n +2 | wc -l || echo 0); \
+		echo "  Active bans: $$COUNT"; \
 	else \
-		echo "  $(YELLOW)fail2ban container not running$(NC)"; \
+		echo "  $(YELLOW)CrowdSec is not running$(NC)"; \
 	fi
 
 # ===========================================================================
@@ -414,39 +410,26 @@ monitor: ## Continuous health monitoring (30s intervals, Ctrl+C to stop)
 		echo "$(CYAN)=== VaultWarden Monitor — $$(date) ===$(NC)"; \
 		$(DOCKER_COMP) ps; \
 		echo ""; \
-		docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}" 2>/dev/null | grep -E "vaultwarden|caddy|fail2ban|postfix" || true; \
+		docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}" 2>/dev/null | grep -E "vaultwarden|caddy|postfix" || true; \
 		sleep 30; \
 	done
 
-unban: ## Unban an IP from all fail2ban jails (IP=<address> required)
+unban: ## Unban an IP from CrowdSec (IP=<address> required)
 	$(call require-root)
 	@if [ -z "$(IP)" ]; then \
 		echo "$(RED)Error: IP address required. Usage: sudo make unban IP=<address>$(NC)"; \
 		echo "$(CYAN)Example: sudo make unban IP=203.0.113.42$(NC)"; \
 		exit 1; \
 	fi
-	@echo "$(BLUE)Unbanning $(IP) from all fail2ban jails...$(NC)"
-	@if ! docker inspect vaultwarden_fail2ban --format '{{.State.Running}}' 2>/dev/null | grep -q true; then \
-		echo "$(RED)Error: fail2ban container is not running.$(NC)"; \
-		echo "$(YELLOW)Start the stack first: make up$(NC)"; \
+	@echo "$(BLUE)Unbanning $(IP) from CrowdSec...$(NC)"
+	@if ! systemctl is-active crowdsec >/dev/null 2>&1; then \
+		echo "$(RED)Error: CrowdSec is not running.$(NC)"; \
+		echo "$(YELLOW)Start it first: sudo systemctl start crowdsec$(NC)"; \
 		exit 1; \
 	fi
-	@JAILS=$$(docker exec vaultwarden_fail2ban fail2ban-client status 2>/dev/null \
-		| grep 'Jail list' | sed 's/.*Jail list://;s/,/ /g' | tr -s ' ' '\n' | grep -v '^$$'); \
-	 FOUND=0; \
-	 for jail in $$JAILS; do \
-		if docker exec vaultwarden_fail2ban fail2ban-client status "$$jail" 2>/dev/null \
-			| grep -q '$(IP)'; then \
-			echo "  $(CYAN)Unbanning $(IP) from jail: $$jail$(NC)"; \
-			docker exec vaultwarden_fail2ban fail2ban-client set "$$jail" unbanip '$(IP)' \
-				&& echo "  $(GREEN)✓ Unbanned from $$jail$(NC)" \
-				|| echo "  $(YELLOW)⚠ Could not unban from $$jail (may have expired)$(NC)"; \
-			FOUND=1; \
-		fi; \
-	 done; \
-	 if [ "$$FOUND" -eq 0 ]; then \
-		echo "$(YELLOW)$(IP) is not currently banned in any jail.$(NC)"; \
-	 fi
+	@sudo cscli decisions delete --ip '$(IP)' \
+		&& echo "$(GREEN)✓ Unbanned $(IP) from CrowdSec$(NC)" \
+		|| echo "$(YELLOW)⚠ $(IP) was not found in CrowdSec ban list (may have already expired)$(NC)"
 
 # ===========================================================================
 ##@ Logs
@@ -474,9 +457,29 @@ logs-postfix: ## Tail postfix logs
 	$(call check-docker)
 	@$(DOCKER_COMP) logs -f postfix
 
-logs-fail2ban: ## Tail fail2ban logs
-	$(call check-docker)
-	@$(DOCKER_COMP) logs -f fail2ban
+logs-crowdsec: ## Tail CrowdSec logs
+	@sudo journalctl -u crowdsec -f --no-pager
+
+crowdsec-status: ## Show CrowdSec metrics and active bans
+	@sudo cscli metrics
+	@echo ""
+	@sudo cscli decisions list
+
+crowdsec-alerts: ## Show recent CrowdSec alerts (last 24h)
+	@sudo cscli alerts list --since 24h
+
+security-report: ## Single-command security event summary (last 1h)
+	@echo "=== Active Bans ==="
+	@sudo cscli decisions list
+	@echo ""
+	@echo "=== Recent Alerts (1h) ==="
+	@sudo cscli alerts list --since 1h
+	@echo ""
+	@echo "=== Caddy Auth Failures ==="
+	@docker logs vaultwarden_caddy 2>&1 | grep -i "401\|403\|rate" | tail -20
+	@echo ""
+	@echo "=== Vaultwarden Auth Failures ==="
+	@docker logs vaultwarden_app 2>&1 | grep -i "fail\|error\|unauthorized\|invalid" | tail -20
 
 # ===========================================================================
 ##@ Backup & Restore

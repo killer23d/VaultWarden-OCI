@@ -242,7 +242,6 @@ validate_required_secrets() {
         "admin_token"
         "admin_basic_auth_hash"
         "caddy_cloudflare_dns_token"
-        "fail2ban_cloudflare_firewall_token"
         "email_api_token"
         "backup_passphrase"
     )
@@ -275,7 +274,6 @@ check_placeholder_values() {
         "admin_token"
         "admin_basic_auth_hash"
         "caddy_cloudflare_dns_token"
-        "fail2ban_cloudflare_firewall_token"
         "email_api_token"
         "backup_passphrase"
     )
@@ -578,21 +576,6 @@ collect_secret_field() {
             printf '%s' "$token"
             ;;
 
-        fail2ban_cloudflare_firewall_token)
-            log_info "Required Permissions: Zone:Firewall Services:Edit" >&2
-            log_info "Create at: https://dash.cloudflare.com/profile/api-tokens" >&2
-            local token
-            read -r -p "Cloudflare Firewall API token: " token
-            if [[ -n "$token" && "$token" != CHANGE_ME* ]]; then
-                if validate_cloudflare_token "$token" "firewall" 2>/dev/null; then
-                    log_success "Firewall token validated successfully" >&2
-                else
-                    log_warn "Token validation failed or zone not configured - continuing anyway" >&2
-                fi
-            fi
-            printf '%s' "$token"
-            ;;
-
         email_api_token)
             # Canonical key for the email provider HTTP API token.
             # Stored as-is (no hashing). Works for any EMAIL_PROVIDER value.
@@ -720,11 +703,6 @@ auto_generate_secret_field() {
             printf '%s' "CHANGE_ME_DNS_TOKEN"
             ;;
 
-        fail2ban_cloudflare_firewall_token)
-            log_warn "Auto mode: Using placeholder for Cloudflare Firewall token - MUST be updated before deployment" >&2
-            printf '%s' "CHANGE_ME_FIREWALL_TOKEN"
-            ;;
-
         email_api_token)
             # Placeholder for the email provider API token.
             # Must be set via: ./edit-secrets.sh rotate email_api_token
@@ -816,7 +794,7 @@ generate_recovery_kit() {
     log_info "Decrypting secrets for export..."
 
     local vw_admin_hash="Not Set" caddy_hash="Not Set" smtp_pass="Not Set"
-    local backup_pass="Not Set" cf_dns="Not Set" cf_fw="Not Set"
+    local backup_pass="Not Set" cf_dns="Not Set"
     local push_id="Not Set" push_key="Not Set" email_api_tok="Not Set"
 
     if [[ -f "$secrets_file" ]]; then
@@ -830,7 +808,6 @@ generate_recovery_kit() {
         smtp_pass=$(_grk_sops_extract     smtp_password            "$secrets_file")
         backup_pass=$(_grk_sops_extract   backup_passphrase        "$secrets_file")
         cf_dns=$(_grk_sops_extract        caddy_cloudflare_dns_token           "$secrets_file")
-        cf_fw=$(_grk_sops_extract         fail2ban_cloudflare_firewall_token   "$secrets_file")
         push_id=$(_grk_sops_extract       push_installation_id     "$secrets_file")
         push_key=$(_grk_sops_extract      push_installation_key    "$secrets_file")
         email_api_tok=$(_grk_sops_extract email_api_token          "$secrets_file")
@@ -915,8 +892,6 @@ EOF
     printf '%s\n' "$email_api_tok" >> "$output_file"
     printf '\nCloudflare DNS Token:\n' >> "$output_file"
     printf '%s\n' "$cf_dns" >> "$output_file"
-    printf '\nCloudflare Firewall Token:\n' >> "$output_file"
-    printf '%s\n' "$cf_fw" >> "$output_file"
     printf '\n[PUSH NOTIFICATIONS]\n' >> "$output_file"
     printf 'Installation ID:  %s\n' "$push_id" >> "$output_file"
     printf 'Installation Key: %s\n' "$push_key" >> "$output_file"

@@ -36,7 +36,6 @@ Two additional consumers sit outside `lib/common.sh` (email functions) and use S
 | Consumer | How it sends email | Variables |
 | :-- | :-- | :-- |
 | **VaultWarden container** | Built-in SMTP client → Postfix sidecar | `VW_SMTP_*` in `.env` |
-| **Fail2Ban container** | `mail` binary → Postfix sidecar on `127.0.0.1:587` | `F2B_DEST_MAIL`, `F2B_SENDER` in `.env` |
 
 > **VaultWarden routes through Postfix, not the external relay directly.**
 > The `VW_SMTP_*` block points at the internal Postfix sidecar
@@ -169,22 +168,15 @@ the Postfix sidecar.
 ## Postfix Sidecar and Host-MTA Fallback
 
 The Postfix sidecar (`boky/docker-postfix`) is the SMTP sidecar used when
-`SMTP_PASSWORD` is blank. It also remains the only SMTP path for the
-VaultWarden container and for Fail2Ban, which targets `127.0.0.1:587`.
+`SMTP_PASSWORD` is blank. It remains the SMTP path for the VaultWarden container.
 `EMAIL_MODE=host` is separate: it tries a local mail/sendmail binary on the
 host.
 
-### How Fail2Ban uses Postfix
+### Postfix and CrowdSec
 
-Fail2Ban runs with `network_mode: host`, so it reaches the Postfix container
-at `127.0.0.1:587` (Postfix binds `127.0.0.1:587` on the host via its
-published port). Fail2Ban does not use `lib/common.sh` (email functions) — it calls the `mail`
-binary directly. If Postfix is not running, Fail2Ban ban notifications are
-silently dropped.
-
-```
-Fail2Ban (host network) ──► 127.0.0.1:587 ──► Postfix container ──► upstream SMTP relay
-```
+CrowdSec runs as a host systemd service and does not use the Postfix container
+for email notifications. CrowdSec notification settings are configured in the
+CrowdSec profile/notification YAML files on the host.
 
 ### Postfix container configuration
 
@@ -269,8 +261,7 @@ docker inspect vaultwarden_postfix | grep -A 20 CapAdd
 ### Disabling Postfix (API-only deployments)
 
 If you are confident your API and SMTP relay tiers will always be available and
-you do not need Fail2Ban email notifications, you can disable the Postfix
-container entirely. Edit `docker-compose.yml.example`:
+you do not need the Postfix container, you can disable it. Edit `docker-compose.yml.example`:
 
 ```yaml
 # Comment out or remove the postfix service block, then regenerate:
@@ -278,30 +269,9 @@ sudo ./setup.sh install --domain vault.yourdomain.com --email admin@yourdomain.c
 ./startup.sh --force
 ```
 
-> **Warning:** disabling Postfix means Fail2Ban ban notifications will not be
-> delivered. The ban actions themselves (Cloudflare WAF rules, iptables SSH
-> blocks) still fire — only the email notification is lost.
-
----
-
-## Fail2Ban Email Settings
-
-Fail2Ban notification addresses must be **literal values** in `.env`. Docker
-Compose does not expand `${VAR}` references in `.env` files:
-
-```bash
-F2B_LOG_TARGET=STDOUT
-F2B_LOG_LEVEL=INFO
-F2B_DB_PURGE_AGE=1d
-F2B_MAX_RETRY=3
-F2B_DEST_MAIL=admin@yourdomain.com        # ← literal, not ${ADMIN_EMAIL}
-F2B_SENDER=fail2ban@vault.yourdomain.com  # ← literal value, not another variable reference
-F2B_ACTION="%(action_mwl)s"               # email + Cloudflare ban
-```
-
-> Fail2Ban connects to `127.0.0.1:587` (the Postfix container's published
-> port). If you change Postfix's published port, update Fail2Ban's `mta`
-> setting in `fail2ban/jail.d/vaultwarden-oci.conf` accordingly.
+> **Warning:** disabling Postfix means VaultWarden's own notification emails will not be
+> delivered. The ban actions themselves (Cloudflare WAF rules, iptables blocks via CrowdSec)
+> still fire — only VaultWarden's email notifications are affected.
 
 ---
 
@@ -364,9 +334,6 @@ MAILGUN_DOMAIN=mg.yourdomain.com  # optional — set only if different from SMTP
 | `POSTFIX_SMTP_TLS_SECURITY_LEVEL` | `encrypt` | Postfix upstream TLS level |
 | `POSTFIX_MESSAGE_SIZE_LIMIT` | `10240000` | Postfix max message bytes (10 MB) |
 | `POSTFIX_VERSION` | *(uses compose default)* | Pin `boky/postfix` image tag |
-| `F2B_DEST_MAIL` | *(empty)* | Fail2Ban notification recipient (literal) |
-| `F2B_SENDER` | *(empty)* | Fail2Ban sender address (literal) |
-| `F2B_ACTION` | `%(action_mwl)s` | Fail2Ban action (email + CF ban) |
 
 > **Deprecated:** `SMTP_FROM_EMAIL` is the legacy sender variable. A
 > backward-compatibility shim maps it to `SMTP_FROM` at runtime. Migrate
@@ -430,16 +397,6 @@ docker compose logs vaultwarden | grep -i smtp
 # https://vault.yourdomain.com/admin → Diagnostics → Send test email
 ```
 
-### Test Fail2Ban email
-
-```bash
-# Verify Fail2Ban can reach Postfix on 127.0.0.1:587:
-docker exec vaultwarden_fail2ban nc -zv 127.0.0.1 587
-
-# Check Fail2Ban action config uses the correct MTA destination:
-docker exec vaultwarden_fail2ban fail2ban-client get vaultwarden-web-auth actions
-```
-
 ### Common issues
 
 | Symptom | Likely cause | Fix |
@@ -448,9 +405,6 @@ docker exec vaultwarden_fail2ban fail2ban-client get vaultwarden-web-auth action
 | SMTP tier `SSL handshake failed` | `SMTP_SECURITY` mismatch | `starttls` → port 587; `on` → port 465 |
 | VaultWarden email fails with "authentication required" | `VW_SMTP_AUTH_MECHANISM` not set to `none` | Set `VW_SMTP_AUTH_MECHANISM=none` and `VW_SMTP_EXPLICIT_TLS=false` in `.env` |
 | VaultWarden sends email but `lib/common.sh` (email functions) does not | `SMTP_*` misconfigured; Postfix not relaying | Check Postfix logs: `docker compose logs postfix` |
-| Fail2Ban notifications not arriving | Postfix container not running | `docker compose up -d postfix` |
-| Fail2Ban notifications not arriving | `F2B_DEST_MAIL` contains `${ADMIN_EMAIL}` literal | Replace with the actual address in `.env` |
-| Postfix `Relay access denied` | `ALLOWED_SENDER_DOMAINS` not set | Set `ALLOWED_SENDER_DOMAINS=vault.yourdomain.com` in `.env` |
 | Postfix `SASL authentication failed` | Wrong SMTP password in secrets | `./edit-secrets.sh rotate smtp_password` |
 | Mailgun HTTP 404 `Domain not found` | Wrong API region | Set `MAILGUN_REGION=eu` in `.env` for EU accounts |
 | All tiers fail silently on `EMAIL_MODE=auto` | `EMAIL_MODE` typo or not set | `grep EMAIL_MODE .env` — must be `auto`, `api`, `smtp`, or `host` |
@@ -474,10 +428,6 @@ Do you want operational alert emails (backups, health, failures)?
                                         OCI blocks direct port 25 egress by
                                         default, so an SMTP relay is usually the
                                         safer choice.
-
-Do you need Fail2Ban ban notifications?
-  └─ Yes ──► Postfix sidecar MUST be running regardless of EMAIL_MODE.
-              Set F2B_DEST_MAIL and F2B_SENDER to literal addresses in .env.
 ```
 
 > **OCI and port 25:** Oracle Cloud Infrastructure blocks outbound port 25
