@@ -309,11 +309,35 @@ if [[ -f "$_CF_BOUNCER_CONFIG_SRC" ]]; then
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would write ${_CF_BOUNCER_CONFIG_DEST} from ${_CF_BOUNCER_CONFIG_SRC}"
     else
+        # ── Prompt for Cloudflare firewall API token ──────────────────────────
+        _CF_FIREWALL_TOKEN=""
+        if [[ "$AUTO_MODE" == "true" ]]; then
+            _CF_FIREWALL_TOKEN="CHANGE_ME_CROWDSEC_CF_FIREWALL_TOKEN"
+            log_warn "Auto mode: Cloudflare firewall token left as placeholder."
+            log_warn "Set it later with: ./edit-secrets.sh rotate crowdsec_cf_firewall_token"
+        else
+            log_info ""
+            log_info "══════════════════════════════════════════════════════════"
+            log_info " Cloudflare Firewall API Token"
+            log_info "══════════════════════════════════════════════════════════"
+            log_info " Required permissions: Zone:Firewall Services:Edit"
+            log_info " Create at: https://dash.cloudflare.com/profile/api-tokens"
+            log_info "══════════════════════════════════════════════════════════"
+            while [[ -z "$_CF_FIREWALL_TOKEN" ]]; do
+                read -r -s -p "Enter Cloudflare Firewall API token (input hidden): " _CF_FIREWALL_TOKEN
+                echo ""
+                if [[ -z "$_CF_FIREWALL_TOKEN" ]]; then
+                    log_warn "Token cannot be empty. Press Ctrl+C to skip and configure later."
+                fi
+            done
+            log_success "Cloudflare firewall token accepted."
+        fi
+
         mkdir -p /etc/crowdsec/bouncers
         sed \
             -e "s|TOKEN_CF_ZONE_ID|${CLOUDFLARE_ZONE_ID:-CHANGE_ME_CF_ZONE_ID}|g" \
             -e "s|TOKEN_CF_ACCOUNT_ID|${CF_ACCOUNT_ID:-CHANGE_ME_CF_ACCOUNT_ID}|g" \
-            -e "s|TOKEN_CROWDSEC_CF_FIREWALL_TOKEN|CHANGE_ME_CROWDSEC_CF_FIREWALL_TOKEN|g" \
+            -e "s|TOKEN_CROWDSEC_CF_FIREWALL_TOKEN|${_CF_FIREWALL_TOKEN}|g" \
             -e "s|CHANGE_ME_BOUNCER_KEY|${_CF_BOUNCER_KEY}|g" \
             "$_CF_BOUNCER_CONFIG_SRC" \
             | tee "$_CF_BOUNCER_CONFIG_DEST" >/dev/null
