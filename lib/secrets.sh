@@ -794,7 +794,7 @@ generate_recovery_kit() {
     log_info "Decrypting secrets for export..."
 
     local vw_admin_hash="Not Set" caddy_hash="Not Set" smtp_pass="Not Set"
-    local backup_pass="Not Set" cf_dns="Not Set" cf_fw="Not Set"
+    local backup_pass="Not Set" cf_dns="Not Set"
     local push_id="Not Set" push_key="Not Set" email_api_tok="Not Set"
 
     if [[ -f "$secrets_file" ]]; then
