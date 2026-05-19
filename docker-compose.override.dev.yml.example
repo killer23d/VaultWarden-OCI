@@ -94,31 +94,6 @@ services:
         max-size: "10m"
         max-file: "5"
 
-  fail2ban:
-    environment:
-      # Debug logging for local troubleshooting
-      F2B_LOG_LEVEL: DEBUG
-      F2B_LOG_TARGET: STDOUT
-    # Mount logs and config for local inspection
-    volumes:
-      - ${PWD}/fail2ban:/data/fail2ban:ro
-      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/fail2ban:/data/db
-      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/fail2ban:/var/log/fail2ban
-      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/vaultwarden:/var/log/vaultwarden:ro
-      - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/caddy:/var/log/caddy:ro
-      - ${SSH_LOG_PATH:-/var/log/secure}:/var/log/ssh-auth.log:ro
-      # Mount the repo read-only for live config inspection
-      - ${PWD}:/workspace:ro
-    # Remove resource limits for development
-    deploy:
-      resources: {}
-    # LOG CAP: DEBUG level is very verbose. 50m x 5 = 250MB max.
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "50m"
-        max-file: "5"
-
   # =============================================================================
   # Email testing service (development only)
   # =============================================================================

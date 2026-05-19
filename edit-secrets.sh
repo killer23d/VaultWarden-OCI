@@ -217,7 +217,6 @@ SUBCOMMANDS (mutually exclusive):
                                 admin_token              (Argon2id re-hash)
                                 admin_basic_auth_hash    (bcrypt re-hash)
                                 caddy_cloudflare_dns_token
-                                fail2ban_cloudflare_firewall_token
                                 email_api_token          (HTTP API token for email
                                                           provider; always stored
                                                           under the fixed key
@@ -685,7 +684,7 @@ PYEOF
 # ---------------------------------------------------------------------------
 
 _ROTATE_FIELDS=("admin_token" "admin_basic_auth_hash"
-                "caddy_cloudflare_dns_token" "fail2ban_cloudflare_firewall_token"
+                "caddy_cloudflare_dns_token"
                 "email_api_token"
                 "smtp_password" "push_installation_id" "push_installation_key"
                 "backup_passphrase")
@@ -697,7 +696,6 @@ _FIELD_SERVICES=(
     [admin_token]="vaultwarden"
     [admin_basic_auth_hash]="vaultwarden"
     [caddy_cloudflare_dns_token]="caddy"
-    [fail2ban_cloudflare_firewall_token]="fail2ban"
     [email_api_token]="vaultwarden"
     [smtp_password]="vaultwarden"
     [push_installation_id]="vaultwarden"
@@ -763,7 +761,7 @@ _deploy_docker_secrets() {
     local secret_fields=(
         "admin_token" "admin_basic_auth_hash" "smtp_password"
         "backup_passphrase" "push_installation_id" "push_installation_key"
-        "caddy_cloudflare_dns_token" "fail2ban_cloudflare_firewall_token"
+        "caddy_cloudflare_dns_token"
         "email_api_token"
     )
     for field_name in "${secret_fields[@]}"; do

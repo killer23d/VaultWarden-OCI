@@ -327,7 +327,6 @@ prepare_directories() {
     "${project_state_dir}/data"
     "${project_state_dir}/caddy/data"
     "${project_state_dir}/caddy/config"
-    "${project_state_dir}/fail2ban"
   )
 
   if [[ "$DRY_RUN" == "true" ]]; then
@@ -365,7 +364,7 @@ prepare_log_directories() {
   fi
 
   log_info "Creating log subdirectories with correct permissions..."
-  if ! _maybe_sudo mkdir -p "${project_state_dir}/logs"/{vaultwarden,caddy,fail2ban,postfix}; then
+  if ! _maybe_sudo mkdir -p "${project_state_dir}/logs"/{vaultwarden,caddy,postfix}; then
     log_warn "Failed to create log subdirectories (init container will try)"
   else
     # Set ownership to PUID:PGID from .env configuration
@@ -753,7 +752,7 @@ ensure_vaultwarden_egress_nat() {
 wait_for_services() {
   log_info "Waiting for critical services to become ready..."
 
-  local services=(vaultwarden caddy fail2ban)
+  local services=(vaultwarden caddy)
   local timeout=90
   local interval=3
   local progress_interval=9   # emit a status line every 3rd poll
@@ -789,7 +788,7 @@ wait_for_services() {
       # considered ready. Accepting health==none for VaultWarden means the
       # container starts without a healthcheck — which is a configuration error
       # that would cause startup to proceed with an unhealthy service silently.
-      # Other services (caddy, fail2ban) are allowed to report health==none
+      # Other services (caddy) are allowed to report health==none
       # if they don't define a HEALTHCHECK in their Dockerfile.
       if [[ "$service" == "vaultwarden" ]]; then
         if [[ "$health" != "healthy" ]]; then
@@ -815,7 +814,7 @@ wait_for_services() {
 
     # Emit a progress line periodically so the operator can see the wait is
     # active and which container is still not ready — prevents the terminal
-    # from appearing frozen during slow-start containers (e.g. fail2ban).
+    # from appearing frozen during slow-start containers.
     if (( elapsed >= next_progress )); then
       local remaining=$(( timeout - elapsed ))
       log_info "Still waiting... ${elapsed}s elapsed, up to ${remaining}s remaining — $(IFS=', '; echo "${status_parts[*]}")"

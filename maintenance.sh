@@ -178,7 +178,6 @@ cleanup_logs() {
     local log_dirs=(
         "$state_dir/logs/vaultwarden"
         "$state_dir/logs/caddy"
-        "$state_dir/logs/fail2ban"
         "$SCRIPT_DIR/logs"
     )
     for log_dir in "${log_dirs[@]}"; do
@@ -647,62 +646,31 @@ test_postfix_container() {
     return 0
 }
 
-test_fail2ban_integration() {
-    log_info "Testing fail2ban integration..."
+test_crowdsec_integration() {
+    log_info "Testing CrowdSec integration..."
 
-    local f2b_running
-    f2b_running=$(docker inspect vaultwarden_fail2ban --format '{{.State.Running}}' 2>/dev/null || echo "false")
-    if [[ "$f2b_running" != "true" ]]; then
-        log_error "❌ fail2ban container is not running"
-        log_info "💡 Start it with: docker compose up -d fail2ban"
-        return 1
-    fi
-    log_success "✅ fail2ban container is running"
-
-    local f2b_status_output
-    if f2b_status_output=$(docker exec vaultwarden_fail2ban sh -c 'fail2ban-client status' 2>&1); then
-        log_success "✅ fail2ban is responding"
-        verbose_log "fail2ban status: $f2b_status_output"
+    if systemctl is-active crowdsec >/dev/null 2>&1; then
+        log_success "✅ CrowdSec is running"
     else
-        log_error "❌ fail2ban is not responding (fail2ban-client status failed)"
-        log_info "🔍 Debug: docker exec vaultwarden_fail2ban sh -c 'fail2ban-client status'"
-        log_info "🔍 Logs:  docker compose logs fail2ban"
+        log_error "❌ CrowdSec is not running"
+        log_info "💡 Start it with: sudo systemctl start crowdsec"
         return 1
     fi
 
-    local f2b_netmode smtp_host smtp_port
-    f2b_netmode=$(docker inspect vaultwarden_fail2ban --format '{{.HostConfig.NetworkMode}}' 2>/dev/null || echo "")
-    smtp_port="587"
-
-    if [[ "$f2b_netmode" == "host" ]]; then
-        smtp_host="127.0.0.1"
-        verbose_log "fail2ban network mode: host -> testing SMTP via ${smtp_host}:${smtp_port}"
+    if sudo cscli metrics >/dev/null 2>&1; then
+        log_success "✅ CrowdSec LAPI is responding"
     else
-        smtp_host="postfix"
-        verbose_log "fail2ban network mode: ${f2b_netmode:-unknown} -> testing SMTP via ${smtp_host}:${smtp_port}"
-    fi
-
-    if docker exec vaultwarden_fail2ban sh -c "nc -zv $smtp_host $smtp_port" >/dev/null 2>&1; then
-        log_success "✅ fail2ban can reach postfix SMTP (${smtp_host}:${smtp_port})"
-    else
-        log_error "❌ fail2ban cannot reach postfix SMTP (${smtp_host}:${smtp_port})"
-        log_info "🔍 Debug: docker exec vaultwarden_fail2ban sh -c 'nc -zv ${smtp_host} ${smtp_port}'"
+        log_error "❌ CrowdSec LAPI not responding"
+        log_info "🔍 Debug: sudo journalctl -u crowdsec -n 50 --no-pager"
         return 1
     fi
 
-    if docker exec vaultwarden_fail2ban sh -c 'test -f /data/fail2ban/action.d/smtp.conf'; then
-        log_success "✅ SMTP action configuration found"
-        if docker exec vaultwarden_fail2ban sh -c \
-            'grep -Eq "smtplib\.SMTP\(.(postfix|127\.0\.0\.1)., 587\)" /data/fail2ban/action.d/smtp.conf'; then
-            log_success "✅ SMTP action correctly configured (postfix or localhost)"
-        else
-            log_warn "⚠️  SMTP action may still reference old msmtpd configuration"
-        fi
+    if systemctl is-active crowdsec-cloudflare-bouncer >/dev/null 2>&1; then
+        log_success "✅ CrowdSec Cloudflare bouncer is running"
     else
-        log_error "❌ SMTP action configuration missing: /data/fail2ban/action.d/smtp.conf"
-        return 1
+        log_warn "⚠ CrowdSec Cloudflare bouncer is not running"
+        log_info "💡 Start it with: sudo systemctl start crowdsec-cloudflare-bouncer"
     fi
-    return 0
 }
 
 test_host_script_email() {
@@ -768,7 +736,7 @@ If you received this message, email delivery is working correctly."
         log_error "❌ Failed to send test email"
         log_info "🔍 Debug steps:"
         log_info "   1. Check postfix logs: docker compose logs postfix"
-        log_info "   2. Check fail2ban logs: docker compose logs fail2ban"
+        log_info "   2. Check CrowdSec logs: sudo journalctl -u crowdsec -n 50 --no-pager"
         log_info "   3. Verify SMTP credentials in secrets"
         log_info "   4. Verify ALLOWED_SENDER_DOMAINS in .env"
         log_info "   5. Check postfix relay configuration"
@@ -782,12 +750,12 @@ run_email_diagnostics() {
     log_header "VaultWarden Email Diagnostic"
 
     local test_results=()
-    local test_names=("postfix Container" "fail2ban Integration" "Host Script Email" "End-to-End Email")
+    local test_names=("postfix Container" "CrowdSec Integration" "Host Script Email" "End-to-End Email")
 
-    test_postfix_container    && test_results+=(0) || test_results+=(1)
-    test_fail2ban_integration && test_results+=(0) || test_results+=(1)
-    test_host_script_email    && test_results+=(0) || test_results+=(1)
-    test_end_to_end_email     && test_results+=(0) || test_results+=(1)
+    test_postfix_container      && test_results+=(0) || test_results+=(1)
+    test_crowdsec_integration   && test_results+=(0) || test_results+=(1)
+    test_host_script_email      && test_results+=(0) || test_results+=(1)
+    test_end_to_end_email       && test_results+=(0) || test_results+=(1)
 
     local total_tests=${#test_results[@]}
     local passed_tests=0
@@ -1239,13 +1207,6 @@ local MEM_CRIT_THRESHOLD=${MEM_CRIT_THRESHOLD:-90}
 local CERT_WARN_DAYS=${CERT_WARN_DAYS:-30}
 local CERT_CRIT_DAYS=${CERT_CRIT_DAYS:-7}
 
-# Fail2Ban daemon ping retry configuration.
-# The fail2ban daemon socket may not be ready immediately after container
-# start. Retry up to FAIL2BAN_PING_RETRIES times with FAIL2BAN_PING_DELAY
-# seconds between attempts before recording a result.
-local FAIL2BAN_PING_RETRIES=${FAIL2BAN_PING_RETRIES:-5}
-local FAIL2BAN_PING_DELAY=${FAIL2BAN_PING_DELAY:-6}
-
 # =============================================================================
 # SINGLETON LOCK — prevents overlapping health-check runs
 # =============================================================================
@@ -1397,7 +1358,7 @@ Checks performed:
   - SSL certificate validity and expiry
   - VaultWarden /alive liveness probe (internal + external HTTPS)
   - VaultWarden /api/config readiness probe (requires live DB connection)
-  - Fail2Ban status and jail activity
+  - CrowdSec integration check (systemd service + bouncer)
   - Disk space utilization
   - Memory utilization
   - Network connectivity
@@ -1410,13 +1371,10 @@ Comprehensive mode adds:
   - SSL certificate chain validation
   - Extended /api/config endpoint testing (explicit comprehensive result)
   - Backup integrity verification
-  - Fail2Ban rule validation
-  - Fail2Ban filter regex drift detection (vaultwarden-auth against live log)
+  - CrowdSec integration check
 
 Environment variables:
   HEALTH_API_STRICT=true          Promote /api/config non-200 from warning to failure
-  FAIL2BAN_PING_RETRIES=5         Ping attempts before recording fail2ban result (default: 5)
-  FAIL2BAN_PING_DELAY=6           Seconds between fail2ban ping retries (default: 6)
   ALERT_COOLDOWN_SECONDS=3600     Minimum seconds between repeat alerts for the same
                                   failure key (default: 3600 = 1 hour)
   ALERT_RECOVERY_TTL=86400        Minimum seconds between clear-state recovery emails
@@ -1480,7 +1438,7 @@ _get_domain() {
 _check_containers() {
     log_info "Checking container status..."
 
-    local containers=("vaultwarden_app" "vaultwarden_caddy" "vaultwarden_fail2ban" "vaultwarden_postfix")
+    local containers=("vaultwarden_app" "vaultwarden_caddy" "vaultwarden_postfix")
     local all_healthy=true
 
     for container in "${containers[@]}"; do
@@ -1735,103 +1693,35 @@ _check_vaultwarden_server_info() {
 }
 
 # =============================================================================
-# FAIL2BAN CHECKS
+# CROWDSEC CHECKS
 # =============================================================================
 
-_check_fail2ban() {
-    log_info "Checking Fail2Ban..."
+_check_crowdsec() {
+    log_info "Checking CrowdSec..."
 
-    local initial_container_health
-    initial_container_health=$(docker inspect \
-        --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' \
-        vaultwarden_fail2ban 2>/dev/null || echo "unknown")
-
-    local attempt ping_result
-    for (( attempt=1; attempt<=FAIL2BAN_PING_RETRIES; attempt++ )); do
-        if ping_result=$(docker exec vaultwarden_fail2ban fail2ban-client ping 2>/dev/null); then
-            if echo "$ping_result" | grep -q pong; then
-                _pass "fail2ban:daemon" "Fail2Ban daemon responding to ping"
-                break
-            else
-                _warn "fail2ban:daemon" "Fail2Ban ping response unexpected: $ping_result"
-                return
-            fi
-        fi
-
-        if [[ $attempt -lt $FAIL2BAN_PING_RETRIES ]]; then
-            log_info "Fail2Ban ping attempt ${attempt}/${FAIL2BAN_PING_RETRIES} failed — retrying in ${FAIL2BAN_PING_DELAY}s..."
-            sleep "$FAIL2BAN_PING_DELAY"
-        fi
-    done
-
-    if [[ -z "${check_results[fail2ban:daemon]:-}" ]]; then
-        local current_container_health
-        current_container_health=$(docker inspect \
-            --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}' \
-            vaultwarden_fail2ban 2>/dev/null || echo "unknown")
-
-        if [[ "$initial_container_health" == "starting" || "$current_container_health" == "starting" ]]; then
-            _warn "fail2ban:daemon" \
-                "Fail2Ban daemon not yet responding (container was starting when check began — retried ${FAIL2BAN_PING_RETRIES}x${FAIL2BAN_PING_DELAY}s; will resolve automatically)"
-        else
-            _fail "fail2ban:daemon" \
-                "Fail2Ban daemon not responding to ping after ${FAIL2BAN_PING_RETRIES} attempts (container health: ${current_container_health})"
-        fi
+    if systemctl is-active crowdsec >/dev/null 2>&1; then
+        _pass "crowdsec:service" "CrowdSec service is active"
+    else
+        _fail "crowdsec:service" "CrowdSec service is not running (start: sudo systemctl start crowdsec)"
         return
+    fi
+
+    if sudo cscli metrics >/dev/null 2>&1; then
+        _pass "crowdsec:lapi" "CrowdSec LAPI is responding"
+    else
+        _warn "crowdsec:lapi" "CrowdSec LAPI not responding (debug: sudo journalctl -u crowdsec -n 50 --no-pager)"
+    fi
+
+    if systemctl is-active crowdsec-cloudflare-bouncer >/dev/null 2>&1; then
+        _pass "crowdsec:bouncer" "CrowdSec Cloudflare bouncer is active"
+    else
+        _warn "crowdsec:bouncer" "CrowdSec Cloudflare bouncer is not running (start: sudo systemctl start crowdsec-cloudflare-bouncer)"
     fi
 
     if $COMPREHENSIVE; then
-        local jails_output
-        jails_output=$(docker exec vaultwarden_fail2ban fail2ban-client status 2>/dev/null || echo "")
-        if [[ -n "$jails_output" ]]; then
-            _pass "fail2ban:jails" "Fail2Ban jails status retrieved"
-        else
-            _warn "fail2ban:jails" "Cannot retrieve Fail2Ban jail status"
-        fi
-
-        _check_fail2ban_filter_drift
-    fi
-}
-
-_check_fail2ban_filter_drift() {
-    local log_file="/var/log/vaultwarden/vaultwarden.log"
-    local filter_conf="/etc/fail2ban/filter.d/vaultwarden-auth.conf"
-
-    log_info "Checking Fail2Ban filter regex drift (vaultwarden-auth)..."
-
-    if ! docker exec vaultwarden_fail2ban test -f "$log_file" 2>/dev/null; then
-        _warn "fail2ban:filter-drift" \
-            "Cannot run filter drift check — log file not found inside container: ${log_file}"
-        return
-    fi
-    if ! docker exec vaultwarden_fail2ban test -f "$filter_conf" 2>/dev/null; then
-        _warn "fail2ban:filter-drift" \
-            "Cannot run filter drift check — filter conf not found inside container: ${filter_conf}"
-        return
-    fi
-
-    local log_lines
-    log_lines=$(docker exec vaultwarden_fail2ban wc -l < "$log_file" 2>/dev/null || echo 0)
-    if [[ "$log_lines" -lt 10 ]]; then
-        _warn "fail2ban:filter-drift" \
-            "Skipping filter drift check — log file has fewer than 10 lines (${log_lines}); may be freshly rotated"
-        return
-    fi
-
-    local regex_output match_count
-    regex_output=$(docker exec vaultwarden_fail2ban \
-        fail2ban-regex "$log_file" "$filter_conf" 2>&1 || true)
-
-    match_count=$(echo "$regex_output" \
-        | grep -oP '(?<=,\s)\d+(?=\s+matched)' \
-        | head -1 || echo 0)
-
-    if [[ "$match_count" -eq 0 ]]; then
-        _warn "fail2ban:filter-drift" \
-            "vaultwarden-auth filter matched 0 lines in a ${log_lines}-line log — datepattern or failregex may have drifted. Run: docker exec vaultwarden_fail2ban fail2ban-regex ${log_file} ${filter_conf}"
-    else
-        _pass "fail2ban:filter-drift" \
-            "vaultwarden-auth filter matched ${match_count} lines — filter is aligned with log format"
+        local decision_count
+        decision_count=$(sudo cscli decisions list -o raw 2>/dev/null | tail -n +2 | wc -l || echo 0)
+        _pass "crowdsec:decisions" "CrowdSec has ${decision_count} active ban decision(s)"
     fi
 }
 
@@ -2094,7 +1984,7 @@ _check_config() {
 
     local secrets_dir="${SCRIPT_DIR}/secrets/.docker_secrets"
     if [[ -d "$secrets_dir" ]]; then
-        local required_secrets=("admin_token" "caddy_cloudflare_dns_token" "fail2ban_cloudflare_firewall_token")
+        local required_secrets=("admin_token" "caddy_cloudflare_dns_token")
         for secret in "${required_secrets[@]}"; do
             [[ -f "${secrets_dir}/${secret}" ]] || config_issues+=("Missing secret: $secret")
         done
@@ -2386,7 +2276,7 @@ _health_main() {
     _check_ssl
     _check_vaultwarden_alive
     _check_vaultwarden_server_info
-    _check_fail2ban
+    _check_crowdsec
     _check_disk
     _check_memory
     _check_network

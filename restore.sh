@@ -1592,7 +1592,7 @@ restore_full() {
                 log_info "  Restored: $f"
             fi
         done
-        for d in caddy fail2ban nginx; do
+        for d in caddy crowdsec nginx; do
             local src_dir="$staging/$rel_project/$d" dst_dir="$PROJECT_ROOT/$d"
             if [[ -d "$src_dir" ]]; then
                 [[ -d "$dst_dir" ]] && cp -a "$dst_dir" "${dst_dir}.pre-restore-${ts}" && \
