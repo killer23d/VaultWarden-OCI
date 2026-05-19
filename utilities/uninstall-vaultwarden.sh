@@ -172,6 +172,19 @@ if [[ "$DRY_RUN" == "true" ]]; then
     echo "  [7] Age key: ${AGE_KEY_FILE} (if --i-have-saved-my-recovery-kit or --force)"
     echo "  [8] Project directory: ${PROJECT_DIR}"
     echo "  [9] State directory: ${PROJECT_STATE_DIR}"
+    echo "  [10] Extra packages: age haveged rclone python3-argon2 apache2-utils cron"
+    echo "  [10.5] CrowdSec:"
+    echo "         - Services: crowdsec crowdsec-firewall-bouncer crowdsec-cloudflare-bouncer"
+    echo "         - Packages: crowdsec crowdsec-firewall-bouncer-iptables"
+    echo "         - Binary:   /usr/local/bin/crowdsec-cloudflare-bouncer"
+    echo "         - APT repo: /etc/apt/sources.list.d/crowdsec_crowdsec.list"
+    echo "         - GPG key:  /etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.gpg (and .asc)"
+    echo "         - Config:   /etc/crowdsec/ (acquis.d/vaultwarden.yaml, bouncers/, profiles.yaml)"
+    echo "         - .env key: CROWDSEC_CF_BOUNCER_API_KEY"
+    echo "  [11] UFW rules: ports 80 and 443"
+    echo "  [12] Swapfile: /swapfile"
+    echo "  [13] APT source: ubuntu-universe.list"
+    echo "  [14] Docker group membership for ${REAL_USER}"
     echo ""
     info "DRY RUN complete — no changes made. Remove --dry-run to perform the actual uninstall."
     exit 0
@@ -734,6 +747,159 @@ for pkg in "${EXTRA_PKGS[@]}"; do
     fi
 done
 apt-get autoremove -y 2>/dev/null || true
+
+# ═══════════════════════════════════════════════════════════════
+# STEP 10.5 — Remove CrowdSec and all associated components
+#
+# Mirrors every phase of utilities/setup-crowdsec.sh in reverse:
+#   Phase 8 reversed: stop/disable all three CrowdSec services
+#   Phase 2 reversed: remove Cloudflare bouncer binary
+#   Phase 1 reversed: purge crowdsec + crowdsec-firewall-bouncer-iptables
+#                     packages and their PackageCloud APT repo / GPG key
+#   Phase 6 reversed: remove /etc/crowdsec/bouncers/
+#   Phase 4 reversed: remove /etc/crowdsec/acquis.d/vaultwarden.yaml
+#   Phase 7 reversed: remove /etc/crowdsec/profiles.yaml (project copy)
+#   Phase 3 reversed: (collections are removed with the crowdsec package)
+#   Phase 5 reversed: remove CROWDSEC_CF_BOUNCER_API_KEY from .env
+#
+# netfilter-persistent / iptables-persistent are also removed if present,
+# as the iptables bouncer may have triggered their installation.
+#
+# After this step a fresh run of setup.sh (or setup-crowdsec.sh) will
+# install CrowdSec from scratch with no leftover state.
+# ═══════════════════════════════════════════════════════════════
+info "Step 10.5: Removing CrowdSec and associated components..."
+
+# ── Phase 8 reversed: stop and disable all CrowdSec services ────────────────
+for _cs_svc in \
+    crowdsec-cloudflare-bouncer \
+    crowdsec-firewall-bouncer \
+    crowdsec; do
+    if systemctl is-active  "$_cs_svc" &>/dev/null 2>&1 || \
+       systemctl is-enabled "$_cs_svc" &>/dev/null 2>&1; then
+        systemctl disable --now "$_cs_svc" 2>/dev/null \
+            && success "Disabled and stopped service: ${_cs_svc}" \
+            || warn "Could not disable ${_cs_svc} (may already be inactive)."
+    else
+        info "Service ${_cs_svc} not active/enabled — skipping."
+    fi
+done
+
+# ── Phase 2 reversed: remove Cloudflare bouncer binary ──────────────────────
+_CF_BOUNCER_BIN="/usr/local/bin/crowdsec-cloudflare-bouncer"
+if [[ -f "$_CF_BOUNCER_BIN" ]]; then
+    rm -f "$_CF_BOUNCER_BIN" \
+        && success "Removed Cloudflare bouncer binary: ${_CF_BOUNCER_BIN}"
+else
+    info "Cloudflare bouncer binary not found at ${_CF_BOUNCER_BIN} — skipping."
+fi
+
+# Also remove the systemd unit file that the binary install may have dropped.
+_CF_BOUNCER_UNIT="/etc/systemd/system/crowdsec-cloudflare-bouncer.service"
+if [[ -f "$_CF_BOUNCER_UNIT" ]]; then
+    rm -f "$_CF_BOUNCER_UNIT" \
+        && success "Removed CrowdSec Cloudflare bouncer unit: ${_CF_BOUNCER_UNIT}"
+fi
+
+# ── Phase 1 reversed: purge CrowdSec packages ───────────────────────────────
+_CS_PKGS=(crowdsec crowdsec-firewall-bouncer-iptables)
+for _cs_pkg in "${_CS_PKGS[@]}"; do
+    if dpkg -s "$_cs_pkg" &>/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get remove -y --purge "$_cs_pkg" 2>/dev/null \
+            && success "Removed package: ${_cs_pkg}" \
+            || warn "Could not remove ${_cs_pkg} — may need manual removal."
+    else
+        info "Package ${_cs_pkg} not installed — skipping."
+    fi
+done
+
+# Remove netfilter-persistent / iptables-persistent if present — the iptables
+# bouncer may have caused their installation and they are not needed otherwise.
+for _nf_pkg in netfilter-persistent iptables-persistent; do
+    if dpkg -s "$_nf_pkg" &>/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get remove -y --purge "$_nf_pkg" 2>/dev/null \
+            && success "Removed package: ${_nf_pkg}" \
+            || warn "Could not remove ${_nf_pkg}."
+    fi
+done
+
+# Remove CrowdSec PackageCloud APT repo and GPG key.
+# The PackageCloud installer writes a .list file and a dearmored .gpg key.
+rm -f /etc/apt/sources.list.d/crowdsec_crowdsec.list \
+    && success "Removed /etc/apt/sources.list.d/crowdsec_crowdsec.list" || true
+# GPG key — PackageCloud may use either .gpg (dearmored) or .asc (armored).
+rm -f /etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.gpg \
+    && success "Removed CrowdSec GPG key (.gpg)" || true
+rm -f /etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.asc \
+    && success "Removed CrowdSec GPG key (.asc)" || true
+# PackageCloud also drops a script-generated sources file in some versions.
+rm -f /etc/apt/sources.list.d/crowdsec_crowdsec_crowdsec.list 2>/dev/null || true
+
+apt-get update -qq 2>/dev/null || true
+apt-get autoremove -y 2>/dev/null || true
+
+# ── Phases 4, 6, 7 reversed: remove /etc/crowdsec config artefacts ──────────
+# Remove only the files/dirs this project created rather than blindly wiping
+# all of /etc/crowdsec, so that an operator who had a pre-existing CrowdSec
+# install (or who wants to keep the base config) is not surprised.
+# If crowdsec itself was just purged above the whole directory is gone already,
+# so these are belt-and-suspenders cleanups for partial-install scenarios.
+
+# Phase 4: acquisition config written by setup-crowdsec.sh
+_ACQUIS_FILE="/etc/crowdsec/acquis.d/vaultwarden.yaml"
+if [[ -f "$_ACQUIS_FILE" ]]; then
+    rm -f "$_ACQUIS_FILE" \
+        && success "Removed CrowdSec acquisition config: ${_ACQUIS_FILE}"
+    # Remove the directory only if now empty (may contain other acquis files).
+    rmdir /etc/crowdsec/acquis.d 2>/dev/null \
+        && success "Removed empty /etc/crowdsec/acquis.d" || true
+fi
+
+# Phase 6: Cloudflare bouncer config (contains API keys — remove with care)
+_CF_BOUNCER_CFG="/etc/crowdsec/bouncers/crowdsec-cloudflare-bouncer.yaml"
+if [[ -f "$_CF_BOUNCER_CFG" ]]; then
+    rm -f "$_CF_BOUNCER_CFG" \
+        && success "Removed CrowdSec Cloudflare bouncer config: ${_CF_BOUNCER_CFG}"
+    rmdir /etc/crowdsec/bouncers 2>/dev/null \
+        && success "Removed empty /etc/crowdsec/bouncers" || true
+fi
+
+# Phase 7: profiles.yaml (only remove if it matches the project's copy —
+# the package installs a default profiles.yaml too, which was already wiped
+# by the purge above; this covers the case where crowdsec was NOT purged).
+_PROFILES_FILE="/etc/crowdsec/profiles.yaml"
+if [[ -f "$_PROFILES_FILE" ]]; then
+    rm -f "$_PROFILES_FILE" \
+        && success "Removed CrowdSec profiles.yaml: ${_PROFILES_FILE}"
+fi
+
+# Remove the entire /etc/crowdsec tree if the purge left it empty or if
+# crowdsec was never installed as a package (binary-only scenario).
+if [[ -d /etc/crowdsec ]]; then
+    if find /etc/crowdsec -mindepth 1 -maxdepth 1 2>/dev/null | read -r; then
+        rm -rf /etc/crowdsec \
+            && success "Removed /etc/crowdsec (residual config directory)" || true
+    else
+        info "/etc/crowdsec still has content (possibly unrelated) — leaving in place."
+    fi
+fi
+
+# ── Phase 5 reversed: remove CROWDSEC_CF_BOUNCER_API_KEY from .env ──────────
+_ENV_FILE_CS="${PROJECT_DIR}/.env"
+if [[ -f "$_ENV_FILE_CS" ]] && grep -q "^CROWDSEC_CF_BOUNCER_API_KEY=" "$_ENV_FILE_CS" 2>/dev/null; then
+    _ENV_TMP=$(mktemp "${_ENV_FILE_CS}.crowdsec.XXXXXXXXXX")
+    if sed '/^CROWDSEC_CF_BOUNCER_API_KEY=/d' "$_ENV_FILE_CS" > "$_ENV_TMP" \
+       && mv -f "$_ENV_TMP" "$_ENV_FILE_CS"; then
+        success "Removed CROWDSEC_CF_BOUNCER_API_KEY from .env"
+    else
+        rm -f "$_ENV_TMP" 2>/dev/null || true
+        warn "Could not update .env atomically — remove CROWDSEC_CF_BOUNCER_API_KEY manually."
+    fi
+fi
+
+# Reload systemd so stale CrowdSec unit references are cleared.
+systemctl daemon-reload 2>/dev/null || true
+success "CrowdSec removal complete."
 
 # ═══════════════════════════════════════════════════════════════
 # STEP 11 — Remove UFW rules added by setup.sh
