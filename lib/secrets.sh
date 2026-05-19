@@ -635,24 +635,31 @@ collect_secret_field() {
 
 auto_generate_secret_field() {
     local field="$1"
+    local _banner_width=86
+    _print_secret_banner() {
+        local title="$1"
+        local value="$2"
+        local border
+        border=$(printf '%*s' "${_banner_width}" '' | tr ' ' '=')
+        {
+            printf '\n'
+            printf '\033[1;97;41m%s\033[0m\n' "$border"
+            printf '\033[1;97;41m  %-80s\033[0m\n' "🚨 SAVE THIS NOW — AUTO-GENERATED SECRET 🚨"
+            printf '\033[1;97;41m%s\033[0m\n' "$border"
+            printf '\033[1;33m%s\033[0m\n' "$title"
+            printf '\033[1;32m%s\033[0m\n' "$value"
+            printf '\033[1;97;41m  %-80s\033[0m\n' "This plaintext will not be shown again. Store it in your password manager."
+            printf '\033[1;97;41m%s\033[0m\n' "$border"
+            printf '\n'
+        } > /dev/tty 2>/dev/null
+    }
 
     case "$field" in
 
         admin_token)
             local vw_pass
             vw_pass=$(generate_secure_string 32)
-            {
-                printf '\n'
-                printf '\033[0;31m! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !\033[0m\n'
-                printf '\033[0;31m!\033[0m                                                             \033[0;31m!\033[0m\n'
-                printf '\033[0;31m AUTO-GENERATED VAULTWARDEN ADMIN PASSWORD:\033[0m\n'
-                printf '   \033[0;32m%s\033[0m\n' "$vw_pass"
-                printf '\n'
-                printf '\033[0;31m SAVE THIS PASSWORD SECURELY - It cannot be recovered!\033[0m\n'
-                printf '\033[0;31m!\033[0m                                                             \033[0;31m!\033[0m\n'
-                printf '\033[0;31m! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !\033[0m\n'
-                printf '\n'
-            } > /dev/tty 2>/dev/null || {
+            _print_secret_banner "VAULTWARDEN ADMIN PASSWORD" "$vw_pass" || {
                 log_warn "VaultWarden admin password auto-generated -- retrieve from recovery kit." >&2
             }
             log_info "Generating Argon2id hash..." >&2
@@ -669,18 +676,7 @@ auto_generate_secret_field() {
         admin_basic_auth_hash)
             local caddy_pass
             caddy_pass=$(generate_secure_string 32)
-            {
-                printf '\n'
-                printf '\033[0;31m! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !\033[0m\n'
-                printf '\033[0;31m!\033[0m                                                             \033[0;31m!\033[0m\n'
-                printf '\033[0;31m AUTO-GENERATED CADDY ADMIN PASSWORD:\033[0m\n'
-                printf '   \033[0;32m%s\033[0m\n' "$caddy_pass"
-                printf '\n'
-                printf '\033[0;31m SAVE THIS PASSWORD SECURELY - It cannot be recovered!\033[0m\n'
-                printf '\033[0;31m!\033[0m                                                             \033[0;31m!\033[0m\n'
-                printf '\033[0;31m! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !\033[0m\n'
-                printf '\n'
-            } > /dev/tty 2>/dev/null || {
+            _print_secret_banner "CADDY ADMIN PASSWORD" "$caddy_pass" || {
                 log_warn "Caddy admin password auto-generated -- retrieve from recovery kit." >&2
             }
             log_info "Generating bcrypt hash for Caddy basic auth..." >&2

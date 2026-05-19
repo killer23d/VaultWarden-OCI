@@ -1353,10 +1353,13 @@ EOF
         local age_key_content
         age_key_content=$(cat "secrets/keys/age-key.txt" 2>/dev/null || echo "ERROR: Could not read key file")
         printf 'SOPS Age Public Key:  %s%s%s\n' "${COLOR_GREEN}" "${age_pub_key}" "${COLOR_RESET}"
-        printf '\n%sSECRET KEY (BACKUP THIS FILE!):%s\n' "${COLOR_RED}" "${COLOR_RESET}"
+        printf '\n%s════════════════════════════════════════════════════════════════════════════════%s\n' "${COLOR_RED}" "${COLOR_RESET}"
+        printf '%s🚨  CRITICAL: AGE SECRET KEY (BACKUP THIS NOW)  🚨%s\n' "${COLOR_RED}" "${COLOR_RESET}"
+        printf '%s════════════════════════════════════════════════════════════════════════════════%s\n' "${COLOR_RED}" "${COLOR_RESET}"
         printf '%sSECRET KEY (production): %s/etc/vaultwarden/age-key.txt%s\n' "${COLOR_RED}" "${COLOR_GREEN}" "${COLOR_RESET}"
         printf '%sSECRET KEY (repo-local): %ssecrets/keys/age-key.txt%s\n' "${COLOR_RED}" "${COLOR_GREEN}" "${COLOR_RESET}"
         printf '%s%s%s\n' "${COLOR_GREEN}" "${age_key_content}" "${COLOR_RESET}"
+        printf '%s════════════════════════════════════════════════════════════════════════════════%s\n' "${COLOR_RED}" "${COLOR_RESET}"
         printf '\n%sTo view again at any time:%s\n' "${COLOR_RED}" "${COLOR_RESET}"
         printf '  %ssudo cat /etc/vaultwarden/age-key.txt%s  %s(production — root-owned, mode 600)%s\n' \
             "${COLOR_GREEN}" "${COLOR_RESET}" "${COLOR_RED}" "${COLOR_RESET}"
@@ -1371,7 +1374,7 @@ EOF
     [[ "$env_owner" == "root" ]] && env_edit_cmd="sudo nano .env"
 
     if [[ "$mode" == "auto" ]]; then
-        printf '\n%s--- AUTO-GENERATED CREDENTIALS (scroll up to save plaintext passwords) ---%s\n' \
+        printf '\n%s--- AUTO-GENERATED CREDENTIALS (scroll up and save plaintext passwords now) ---%s\n' \
             "${COLOR_CYAN}" "${COLOR_RESET}"
         printf '  %s✔%s VaultWarden admin token    : GENERATED (Argon2id hash stored in secrets)\n' \
             "${COLOR_GREEN}" "${COLOR_RESET}"
@@ -1402,9 +1405,12 @@ EOF
         printf '2. Set external tokens: %s(use ./edit-secrets.sh rotate commands above)%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '3. Start services:      %smake up%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '4. Setup automation:    %ssudo ./setup.sh systemd install%s\n' \
+        printf '4. Setup CrowdSec:      %ssudo ./utilities/setup-crowdsec.sh%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '5. Export recovery kit: %s./edit-secrets.sh export-recovery-kit%s\n' \
+        printf '   ► This script prompts for crowdsec_cf_firewall_token and required bouncer values\n'
+        printf '5. Setup automation:    %ssudo ./setup.sh systemd install%s\n' \
+            "${COLOR_YELLOW}" "${COLOR_RESET}"
+        printf '6. Export recovery kit: %s./edit-secrets.sh export-recovery-kit%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '   %s(Run AFTER step 2 so all secrets are included in the kit)%s\n' \
             "${COLOR_RED}" "${COLOR_RESET}"
@@ -1420,9 +1426,12 @@ EOF
         printf '2. Configure secrets:   %s./setup.sh secrets%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '   ► You will be prompted for all credentials\n'
         printf '3. Start services:      %smake up%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '4. Setup automation:    %ssudo ./setup.sh systemd install%s\n' \
+        printf '4. Setup CrowdSec:      %ssudo ./utilities/setup-crowdsec.sh%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '5. Export recovery kit: %s./edit-secrets.sh export-recovery-kit%s\n' \
+        printf '   ► You will be prompted for crowdsec_cf_firewall_token and required bouncer values\n'
+        printf '5. Setup automation:    %ssudo ./setup.sh systemd install%s\n' \
+            "${COLOR_YELLOW}" "${COLOR_RESET}"
+        printf '6. Export recovery kit: %s./edit-secrets.sh export-recovery-kit%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '   %s(Run AFTER step 2 so all secrets are included in the kit)%s\n' \
             "${COLOR_RED}" "${COLOR_RESET}"
@@ -1926,7 +1935,7 @@ collect_secrets() {
     if [ -f "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/secrets/.docker_secrets/crowdsec_cf_firewall_token" ]; then
         log_info "Cloudflare firewall token file found on disk — will be used by CrowdSec bouncer."
     else
-        log_warn "Cloudflare firewall token file not found — CrowdSec Cloudflare bouncer will need manual configuration."
+        log_warn "Cloudflare firewall token file not found yet — run sudo ./utilities/setup-crowdsec.sh (it prompts for the token)."
     fi
 
     # --- Email credentials (API token + SMTP password) ----------------------
