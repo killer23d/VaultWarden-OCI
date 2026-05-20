@@ -20,7 +20,7 @@ RemainAfterExit=yes
 # so WorkingDirectory must point to the repo root. The script is installed
 # flat to /opt/vaultwarden-scripts/ by 'sudo ./setup.sh systemd install'.
 WorkingDirectory=/opt/vaultwarden-scripts
-ExecStart=/opt/vaultwarden-scripts/setup-iptables.sh
+ExecStart=/opt/vaultwarden-scripts/setup-firewall.sh --phase iptables
 ExecStop=/bin/true
 
 # On failure wait 10 s then retry up to 3 times, in case Docker is still
