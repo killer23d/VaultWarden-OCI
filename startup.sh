@@ -16,6 +16,36 @@ source "${SCRIPT_DIR}/lib/crypto.sh"
 source "${SCRIPT_DIR}/lib/secrets.sh"   # provides cleanup_secrets_environment()
 source "${SCRIPT_DIR}/lib/storage.sh"  # provides require_project_state_ready()
 
+# ARCHITECTURE NOTE (Task 2d): startup.sh is intentionally not split into
+# utilities/startup-*.sh. All phases (pre-flight, secrets preparation,
+# iptables restore, service health gate, post-start verification) are:
+#   - Sequentially dependent on shared in-process state (trap, lock files,
+#     global vars)
+#   - Not meaningful standalone admin operations outside of systemd boot context
+#   - Already thin wrappers that delegate to lib/ functions
+# If a phase gains standalone utility value in future, extract it then.
+#
+# AUDIT (Task 2d): Every startup.sh function was compared against lib/docker.sh,
+# lib/storage.sh, lib/secrets.sh, lib/crypto.sh, and lib/common.sh on 2026-05-20.
+# No extractable duplicates were found:
+#   _maybe_sudo()                    — startup-specific root escalation helper (no lib equiv)
+#   _prepare_secrets_cleanup*()      — guards the in-process SOPS cache file for this run only
+#   warn_plaintext_secret_overrides()— startup-only split-brain advisory; not reused elsewhere
+#   check_email_config_consistency() — startup-only advisory; not reused elsewhere
+#   load_environment()               — sources .env; startup-scoped (reads relative .env)
+#   validate_prerequisites()         — startup-scoped; delegates to check_docker_available()
+#   prepare_directories()            — startup-scoped mkdir wrapper; not a lib candidate
+#   prepare_log_directories()        — startup-scoped; not a lib candidate
+#   check_age_key_health_preflight() — startup-specific key-path override logic
+#   prepare_docker_secrets()         — startup-specific SOPS decryption into docker secrets
+#   cleanup_orphaned_resources()     — delegates to cleanup_docker_system() in lib/docker.sh
+#   _startup_pull_images()           — startup-specific --skip-pull guard
+#   _startup_start_services()        — startup-specific --force-recreate guard
+#   ensure_vaultwarden_egress_nat()  — startup-specific NAT remediation
+#   wait_for_services()              — startup-specific health gate loop
+#   run_health_check()               — startup-specific; delegates to maintenance-health.sh
+#   show_status()                    — one-liner docker compose ps wrapper
+
 FORCE_RESTART=false
 SKIP_HEALTH_CHECK=false
 BACKGROUND=false

@@ -80,6 +80,27 @@ _ss_cleanup() {
 trap '_ss_cleanup' EXIT
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# AUDIT (Task 3b): All helper functions in this file were compared against
+# lib/storage.sh on 2026-05-20. No duplicates were found.
+#
+# lib/storage.sh provides: _storage_validate_paths, _storage_daemon_reload,
+#   require_project_state_ready, setup_data_volume, install_docker_mount_guard,
+#   vw_default_backup_dir.
+# All of these are called by this script where appropriate — there are no
+# inline reimplementations of any lib/storage.sh function here.
+#
+# Internal functions in this file:
+#   _ss_on_err, _ss_cleanup      — script-lifecycle hooks; setup-specific
+#   _mv_*  (80+ functions)       — migration state machine, pipeline, and steps;
+#                                  entirely migration-specific, not reusable
+#   setup_directories()          — provisions project directory tree; calls lib/ functions
+#   _mode_setup/verify/migrate() — mode dispatch handlers; setup-specific
+#   _parse_outer_args(), main()  — argument parsing and entry point
+#
+# No promotion to lib/storage.sh is needed.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # MIGRATE MODE — constants, helpers, and pipeline steps
 # (Adapted from the former standalone migration utility — all _mv_* functions)
 # ═══════════════════════════════════════════════════════════════════════════════
