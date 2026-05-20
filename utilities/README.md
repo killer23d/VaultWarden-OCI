@@ -51,12 +51,13 @@ Also invocable via `./utilities/secrets-list.sh`.
 ### `secrets-view.sh` — View decrypted secrets (read-only)
 
 Decrypts and displays `secrets/secrets.yaml` in a read-only pager. No changes
-are saved. Also invocable via `./utilities/secrets-view.sh`.
+are saved. The `view` keyword is accepted as an alias for backward compatibility
+but is not required.
 
 ```bash
-./utilities/secrets-view.sh view
-./utilities/secrets-view.sh view --editor vim
 ./utilities/secrets-view.sh
+./utilities/secrets-view.sh --editor vim
+./utilities/secrets-view.sh --editor less
 ```
 
 ---
@@ -80,12 +81,13 @@ Also invocable via `./utilities/secrets-edit.sh`.
 
 Re-collects and re-hashes one named credential, atomically re-encrypts
 `secrets/secrets.yaml`, and resyncs Docker secret bind-mount files.
-Also invocable via `./utilities/secrets-rotate.sh FIELD`.
+Pass the field name directly as the first argument. The leading `rotate`
+keyword is accepted as an alias for backward compatibility but is not required.
 
 ```bash
-./utilities/secrets-rotate.sh rotate admin_token
-./utilities/secrets-rotate.sh rotate email_api_token --dry-run
-./utilities/secrets-rotate.sh rotate smtp_password --no-backup
+./utilities/secrets-rotate.sh admin_token
+./utilities/secrets-rotate.sh email_api_token --dry-run
+./utilities/secrets-rotate.sh smtp_password --no-backup
 ./utilities/secrets-rotate.sh caddy_cloudflare_dns_token
 ./utilities/secrets-rotate.sh backup_passphrase
 ```

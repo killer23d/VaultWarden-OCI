@@ -4,7 +4,8 @@
 # Standalone admin tool. Also invocable via: ./edit-secrets.sh view
 #
 # USAGE:
-#   ./utilities/secrets-view.sh view [OPTIONS]
+#   ./utilities/secrets-view.sh [OPTIONS]
+#   ./utilities/secrets-view.sh view [OPTIONS]  # 'view' accepted as alias
 #   ./edit-secrets.sh view [OPTIONS]
 #
 # FLAGS:
@@ -30,7 +31,8 @@ show_help() {
 VaultWarden Secrets — view subcommand
 
 USAGE:
-    ./utilities/secrets-view.sh view [OPTIONS]
+    ./utilities/secrets-view.sh [OPTIONS]
+    ./utilities/secrets-view.sh view [OPTIONS]  # 'view' accepted as alias
     ./edit-secrets.sh view [OPTIONS]
 
 DESCRIPTION:
@@ -41,9 +43,9 @@ FLAGS:
     --help, -h         Show this help
 
 EXAMPLES:
-    ./utilities/secrets-view.sh view
+    ./utilities/secrets-view.sh
+    ./utilities/secrets-view.sh --editor vim
     ./edit-secrets.sh view
-    ./edit-secrets.sh view --editor vim
 EOF
 }
 

@@ -4,7 +4,8 @@
 # Standalone admin tool. Also invocable via: ./edit-secrets.sh rotate FIELD
 #
 # USAGE:
-#   ./utilities/secrets-rotate.sh rotate FIELD [OPTIONS]
+#   ./utilities/secrets-rotate.sh FIELD [OPTIONS]
+#   ./utilities/secrets-rotate.sh rotate FIELD [OPTIONS]  # 'rotate' accepted as alias
 #   ./edit-secrets.sh rotate FIELD [OPTIONS]
 #
 # SUPPORTED FIELDS:
@@ -41,7 +42,8 @@ show_help() {
 VaultWarden Secrets — rotate subcommand
 
 USAGE:
-    ./utilities/secrets-rotate.sh rotate FIELD [OPTIONS]
+    ./utilities/secrets-rotate.sh FIELD [OPTIONS]
+    ./utilities/secrets-rotate.sh rotate FIELD [OPTIONS]  # 'rotate' accepted as alias
     ./edit-secrets.sh rotate FIELD [OPTIONS]
 
 DESCRIPTION:
@@ -73,8 +75,8 @@ FLAGS:
     --help, -h   Show this help
 
 EXAMPLES:
-    ./utilities/secrets-rotate.sh rotate admin_token
-    ./utilities/secrets-rotate.sh rotate email_api_token --dry-run
+    ./utilities/secrets-rotate.sh admin_token
+    ./utilities/secrets-rotate.sh email_api_token --dry-run
     ./edit-secrets.sh rotate smtp_password
     ./edit-secrets.sh rotate backup_passphrase --no-backup
 EOF

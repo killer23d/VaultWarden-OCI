@@ -356,7 +356,7 @@ standalone scripts. Admins may invoke the dispatcher or the utilities directly.
 | `edit` | `utilities/secrets-edit.sh` | Open encrypted secrets in editor (interactive) |
 | `view` | `utilities/secrets-view.sh` | View decrypted secrets without editing |
 | `list` | `utilities/secrets-list.sh` | List all available secret key names |
-| `rotate FIELD` | `utilities/secrets-rotate.sh` | Rotate (regenerate) a single secret field |
+| `rotate FIELD` | `utilities/secrets-rotate.sh` | Rotate (regenerate) a single secret field. Pass FIELD directly (e.g. `admin_token`); leading `rotate` accepted as alias. |
 | `export-recovery-kit` | `utilities/secrets-export-recovery-kit.sh` | Export a plaintext recovery document (key + all secrets) |
 
 **Options (per subcommand):**
