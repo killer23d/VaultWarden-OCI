@@ -64,6 +64,20 @@ check_prerequisites() {
     return 0
 }
 
+validate_secrets() {
+    log_info "Validating secrets file..."
+    if ! ensure_sops_env; then return 1; fi
+    if ! validate_secrets_decryption; then
+        log_error "Cannot decrypt secrets file - Age key may be incorrect or file corrupted"
+        return 1
+    fi
+    if ! validate_secrets_yaml; then
+        log_warn "Secrets file has invalid YAML structure (continuing - you may be fixing it)"
+    fi
+    log_success "Secrets validation passed"
+    return 0
+}
+
 do_view() {
     log_info "Opening secrets in view-only mode..."
     log_warn "⚠  Hashed fields (admin_token, admin_basic_auth_hash) are stored as one-way hashes."
@@ -125,6 +139,7 @@ main() {
 
     if ! check_prerequisites; then exit 1; fi
     _warn_if_stack_unavailable
+    if ! validate_secrets; then exit 1; fi
 
     do_view || exit 1
 }

@@ -17,6 +17,10 @@ HISTFILE=/dev/null
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR" && pwd)"
+
+source "${PROJECT_ROOT}/lib/common.sh"
+init_common_lib "$0"
 
 _show_help() {
 cat << 'HELP'
@@ -78,9 +82,9 @@ case "$_TASK" in
         exit 0
         ;;
     *)
-        echo "ERROR: Unknown subcommand: '$_TASK'" >&2
-        echo "Valid subcommands: edit | view | list | rotate FIELD | export-recovery-kit | help" >&2
-        echo "Run './edit-secrets.sh help' for usage." >&2
+        log_error "Unknown subcommand: '$_TASK'"
+        log_error "Valid subcommands: edit | view | list | rotate FIELD | export-recovery-kit | help"
+        log_error "Run './edit-secrets.sh help' for usage."
         exit 1
         ;;
 esac

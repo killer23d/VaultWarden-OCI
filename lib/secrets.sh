@@ -1283,9 +1283,17 @@ export_docker_secrets() {
     local _failed=0
     local _key _value
 
+    # Guarantee SOPS_CONFIG is unset at function exit. decrypt_secret already
+    # unsets SOPS_AGE_KEY_FILE after each call, but SOPS_CONFIG (set by
+    # ensure_sops_env inside decrypt_secret) is not unset by decrypt_secret.
+    # cleanup_secrets_environment handles both variables.
+    # shellcheck disable=SC2064
+    trap "cleanup_secrets_environment" RETURN
+
     for _key in "${_eds_keys[@]}"; do
         # decrypt_secret calls ensure_sops_env internally and unsets
-        # SOPS_AGE_KEY_FILE after each call.
+        # SOPS_AGE_KEY_FILE after each call. SOPS_CONFIG is cleaned by
+        # the RETURN trap above.
         # shellcheck disable=SC2153  # SECRETS_FILE is a global env var from lib init
         _value=$(decrypt_secret "$_key" "$secrets_file") || {
             log_error "export_docker_secrets: failed to decrypt '$_key'"

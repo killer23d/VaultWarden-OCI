@@ -291,7 +291,7 @@ do_edit() {
     secure_secrets_file
     log_success "Secrets updated successfully"
 
-    offer_recovery_kit_export "false"
+    offer_recovery_kit_export "true"
 
     return 0
 }

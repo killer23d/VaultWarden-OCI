@@ -226,6 +226,15 @@ do_rotate() {
 
     # Patch the YAML value using regex substitution to preserve YAML comments.
     # Using yaml.dump() would strip all comments on first write.
+    #
+    # NOTE: yaml_scalar() below produces double-quoted YAML scalars, handling \, ",
+    # newline, carriage return, and tab escapes. This is intentionally different from
+    # yaml_escape() in utilities/setup-secrets.sh, which produces single-quoted scalars
+    # and only escapes embedded single quotes. yaml_scalar is required here because
+    # rotated values (e.g. Argon2id hashes, random tokens) may contain backslashes,
+    # double quotes, or non-printable characters that single-quote style cannot encode.
+    # yaml_escape in setup-secrets.sh writes a fresh YAML file where values are known
+    # ASCII with no special characters, so the simpler style is adequate there.
     local _patch_rc=0
     python3 - "$temp_plain" "$actual_field" "$new_value" "$temp_patched" << 'PYEOF' || _patch_rc=$?
 import sys, re

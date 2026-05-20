@@ -110,7 +110,7 @@ Also invocable via `./edit-secrets.sh export-recovery-kit`.
 
 ---
 
-
+### `setup-system.sh` — System preparation
 
 Installs OS dependencies (Docker, SOPS, age, etc.), configures swap, validates
 the toolchain, and sets file permissions. Safe to re-run.
