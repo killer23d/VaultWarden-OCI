@@ -274,7 +274,7 @@ validate_prerequisites() {
     return 1
   fi
 
-  if ! docker info >/dev/null 2>&1; then
+  if ! check_docker_available; then
     log_error "Docker daemon is not running or not accessible"
     return 1
   fi
@@ -588,26 +588,26 @@ cleanup_orphaned_resources() {
     return 0
   fi
 
-  docker container prune -f >/dev/null 2>&1 || true
-  docker network prune -f >/dev/null 2>&1 || true
-  # Scope image prune to this project's images only to avoid removing dangling
-  # layers belonging to unrelated services on shared Docker hosts.
-  docker image prune -f \
-    --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME:-vaultwarden}" \
-    >/dev/null 2>&1 || true
+  # cleanup_docker_system() from lib/docker.sh prunes containers, images
+  # (with --filter until=48h), volumes, and networks — all scoped to the
+  # project label to avoid affecting unrelated services on shared hosts.
+  cleanup_docker_system || true
 
   log_success "Orphaned resources cleaned up"
   return 0
 }
 
 # ---------------------------------------------------------------------------
-# pull_images
+# _startup_pull_images
 #
-# Guarded by --skip-pull so systemd ExecStart restarts are instant.
-# Image refreshes go through maintenance.sh update or a manual
-# ./startup.sh without --skip-pull.
+# Startup-specific wrapper: guarded by --skip-pull so systemd ExecStart
+# restarts are instant. Image refreshes go through maintenance.sh update or
+# a manual ./startup.sh without --skip-pull.
+#
+# Uses a direct `docker compose pull` (not lib/docker.sh's pull_images())
+# so pull output streams directly to the journal without buffering.
 # ---------------------------------------------------------------------------
-pull_images() {
+_startup_pull_images() {
   if [[ "$SKIP_PULL" == "true" ]]; then
     log_info "Skipping docker compose pull (--skip-pull)"
     return 0
@@ -626,9 +626,13 @@ pull_images() {
 }
 
 # ---------------------------------------------------------------------------
-# start_services
+# _startup_start_services
+#
+# Startup-specific wrapper: honours FORCE_RESTART and DRY_RUN globals.
+# Passes --force-recreate when FORCE_RESTART=true so containers are
+# re-created even if the image digest has not changed.
 # ---------------------------------------------------------------------------
-start_services() {
+_startup_start_services() {
   log_info "Starting VaultWarden services..."
 
   local compose_args=(up -d)
@@ -882,8 +886,8 @@ main() {
   warn_plaintext_secret_overrides || true
   cleanup_orphaned_resources || true
   ensure_vaultwarden_egress_nat || true
-  pull_images || exit 1
-  start_services || exit 1
+  _startup_pull_images || exit 1
+  _startup_start_services || exit 1
 
   if [[ "$BACKGROUND" != "true" ]]; then
     wait_for_services || true

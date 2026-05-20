@@ -1103,15 +1103,23 @@ _read_dotenv_value() {
 }
 
 # ---------------------------------------------------------------------------
-# _validate_yaml_no_duplicates FILE
+# _run_yaml_nodupcheck FILE MODE
 #
-# Uses a custom Python loader that raises ValueError on the first duplicate
-# mapping key found, matching SOPS's strict Go yaml.v3 behaviour.
-# Returns 0 on valid YAML with no duplicates, 1 otherwise.
+# Private helper shared by _validate_yaml_no_duplicates and
+# _validate_no_placeholders. Runs a single python3 invocation that defines
+# _NoDupLoader once and branches on MODE:
+#
+#   validate     — Exit 1 (with diagnostic on stderr) if any duplicate
+#                  mapping key is found; exit 0 otherwise.
+#   placeholders — Exit 1 and print offending key names to stdout if any
+#                  value starts with PLACEHOLDER. The duplicate check is
+#                  enforced first so a file with a dup key cannot silently
+#                  pass the placeholder scan.
 # ---------------------------------------------------------------------------
-_validate_yaml_no_duplicates() {
+_run_yaml_nodupcheck() {
     local yaml_file="$1"
-    python3 - "$yaml_file" <<'PYEOF'
+    local mode="$2"
+    python3 - "$yaml_file" "$mode" <<'PYEOF'
 import sys, yaml
 
 class _NoDupLoader(yaml.SafeLoader):
@@ -1135,55 +1143,19 @@ _NoDupLoader.add_constructor(
     _check_no_dup_mapping,
 )
 
+yaml_file, mode = sys.argv[1], sys.argv[2]
+
 try:
-    with open(sys.argv[1], 'r', encoding='utf-8') as f:
-        yaml.load(f, Loader=_NoDupLoader)
+    with open(yaml_file, 'r', encoding='utf-8') as f:
+        data = yaml.load(f, Loader=_NoDupLoader) or {}
 except (yaml.YAMLError, ValueError) as exc:
     print(str(exc), file=sys.stderr)
     sys.exit(1)
-PYEOF
-}
 
-# ---------------------------------------------------------------------------
-# _validate_no_placeholders FILE
-#
-# Scans a decrypted YAML file for any values that start with PLACEHOLDER_
-# or equal PLACEHOLDER_NOT_CONFIGURED. Returns 1 (with a list of offending
-# keys) if any are found. Uses _NoDupLoader so a file with a duplicate key
-# cannot silently pass the placeholder check.
-# ---------------------------------------------------------------------------
-_validate_no_placeholders() {
-    local plain_yaml="$1"
+if mode == 'validate':
+    sys.exit(0)
 
-    local offending
-    local _py_rc=0
-    offending=$(python3 - "$plain_yaml" <<'PYEOF' 2>/dev/null
-import sys, yaml
-
-class _NoDupLoader(yaml.SafeLoader):
-    pass
-
-def _check_no_dup_mapping(loader, node):
-    keys_seen = {}
-    for key_node, _ in node.value:
-        key = loader.construct_object(key_node)
-        if key in keys_seen:
-            raise ValueError(
-                "Duplicate mapping key '{}' "
-                "(first at line {}, again at line {})".format(
-                    key, keys_seen[key], key_node.start_mark.line + 1)
-            )
-        keys_seen[key] = key_node.start_mark.line + 1
-    return loader.construct_mapping(node, deep=True)
-
-_NoDupLoader.add_constructor(
-    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
-    _check_no_dup_mapping,
-)
-
-with open(sys.argv[1], 'r', encoding='utf-8') as f:
-    data = yaml.load(f, Loader=_NoDupLoader) or {}
-
+# mode == 'placeholders'
 bad = []
 for k, v in data.items():
     sv = str(v) if v is not None else ""
@@ -1194,7 +1166,34 @@ if bad:
     print("\n".join(bad))
     sys.exit(1)
 PYEOF
-    ) || _py_rc=$?
+}
+
+# ---------------------------------------------------------------------------
+# _validate_yaml_no_duplicates FILE
+#
+# Uses _run_yaml_nodupcheck (validate mode) which raises ValueError on the
+# first duplicate mapping key found, matching SOPS's strict Go yaml.v3
+# behaviour. Returns 0 on valid YAML with no duplicates, 1 otherwise.
+# ---------------------------------------------------------------------------
+_validate_yaml_no_duplicates() {
+    local yaml_file="$1"
+    _run_yaml_nodupcheck "$yaml_file" validate
+}
+
+# ---------------------------------------------------------------------------
+# _validate_no_placeholders FILE
+#
+# Scans a decrypted YAML file for any values that start with PLACEHOLDER_
+# or equal PLACEHOLDER_NOT_CONFIGURED. Returns 1 (with a list of offending
+# keys) if any are found. Uses _run_yaml_nodupcheck (placeholders mode) so
+# a file with a duplicate key cannot silently pass the placeholder check.
+# ---------------------------------------------------------------------------
+_validate_no_placeholders() {
+    local plain_yaml="$1"
+
+    local offending
+    local _py_rc=0
+    offending=$(_run_yaml_nodupcheck "$plain_yaml" placeholders 2>/dev/null) || _py_rc=$?
 
     if [[ $_py_rc -ne 0 ]]; then
         log_error "Recovery kit contains unconfigured placeholder values for:"

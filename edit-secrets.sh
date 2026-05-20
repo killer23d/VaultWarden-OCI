@@ -18,9 +18,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Zero arguments → show help
-if [[ $# -eq 0 ]]; then
-    cat << 'HELP'
+_show_help() {
+cat << 'HELP'
 VaultWarden Secrets Editor
 
 USAGE:
@@ -48,6 +47,11 @@ EXAMPLES:
 SEE ALSO:
     ./setup.sh secrets  - First-time creation or full reconfiguration
 HELP
+}
+
+# Zero arguments → show help
+if [[ $# -eq 0 ]]; then
+    _show_help
     exit 0
 fi
 
@@ -70,7 +74,8 @@ case "$_TASK" in
         exec "$SCRIPT_DIR/utilities/secrets-export-recovery-kit.sh" "$@"
         ;;
     help|--help|-h)
-        exec "$0"  # re-invoke with no args to show help
+        _show_help
+        exit 0
         ;;
     *)
         echo "ERROR: Unknown subcommand: '$_TASK'" >&2
