@@ -20,6 +20,11 @@ re-runnable (idempotent), and accepts `--help` for usage details.
 | `maintenance-update-firewall.sh` | `./maintenance.sh update-firewall` | Yes | Cloudflare IP → UFW sync |
 | `maintenance-update.sh` | `./maintenance.sh update` | Yes | System/package/docker updates |
 | `restore-run.sh` | `./restore.sh` (all subcommands) | Yes / No (`list`) | Full restore engine |
+| `secrets-edit.sh` | `./edit-secrets.sh edit` | No | Interactive encrypted secrets editor |
+| `secrets-export-recovery-kit.sh` | `./edit-secrets.sh export-recovery-kit` | No | Export plaintext recovery document |
+| `secrets-list.sh` | `./edit-secrets.sh list` | No | List secret key names (no values) |
+| `secrets-rotate.sh` | `./edit-secrets.sh rotate FIELD` | No | Rotate a single credential |
+| `secrets-view.sh` | `./edit-secrets.sh view` | No | View decrypted secrets read-only |
 | `setup-crowdsec.sh` | *(Standalone)* | Yes | CrowdSec installation |
 | `setup-env.sh` | *(Setup phase)* | Yes | Environment file generation |
 | `setup-firewall.sh` | *(Setup phase)* | Yes | Firewall configuration |
@@ -31,7 +36,81 @@ re-runnable (idempotent), and accepts `--help` for usage details.
 
 ---
 
-### `setup-system.sh` — System preparation
+### `secrets-list.sh` — List secret key names
+
+Lists all secret key names in `secrets/secrets.yaml` without decrypting any values.
+Also invocable via `./edit-secrets.sh list`.
+
+```bash
+./utilities/secrets-list.sh list
+./edit-secrets.sh list
+```
+
+---
+
+### `secrets-view.sh` — View decrypted secrets (read-only)
+
+Decrypts and displays `secrets/secrets.yaml` in a read-only pager. No changes
+are saved. Also invocable via `./edit-secrets.sh view`.
+
+```bash
+./utilities/secrets-view.sh view
+./utilities/secrets-view.sh view --editor vim
+./edit-secrets.sh view
+```
+
+---
+
+### `secrets-edit.sh` — Interactive encrypted secrets editor
+
+Decrypts, opens in `$EDITOR`, validates YAML, re-encrypts, and backs up on
+every save. Offers recovery kit export after modifications.
+Also invocable via `./edit-secrets.sh edit`.
+
+```bash
+./utilities/secrets-edit.sh edit
+./utilities/secrets-edit.sh edit --editor vim
+./utilities/secrets-edit.sh edit --no-backup
+./edit-secrets.sh edit --editor 'code --wait'
+```
+
+---
+
+### `secrets-rotate.sh` — Rotate a single credential
+
+Re-collects and re-hashes one named credential, atomically re-encrypts
+`secrets/secrets.yaml`, and resyncs Docker secret bind-mount files.
+Also invocable via `./edit-secrets.sh rotate FIELD`.
+
+```bash
+./utilities/secrets-rotate.sh rotate admin_token
+./utilities/secrets-rotate.sh rotate email_api_token --dry-run
+./utilities/secrets-rotate.sh rotate smtp_password --no-backup
+./edit-secrets.sh rotate caddy_cloudflare_dns_token
+./edit-secrets.sh rotate backup_passphrase
+```
+
+Supported fields: `admin_token`, `admin_basic_auth_hash`,
+`caddy_cloudflare_dns_token`, `email_api_token`, `smtp_password`,
+`push_installation_id`, `push_installation_key`, `backup_passphrase`.
+
+---
+
+### `secrets-export-recovery-kit.sh` — Export plaintext recovery document
+
+Decrypts secrets, validates no placeholder values remain, then exports a
+full recovery document (Age private key + all credentials) to a tmpfs-backed
+file (mode 0600) with a 30-minute auto-delete via `at(1)`.
+Also invocable via `./edit-secrets.sh export-recovery-kit`.
+
+```bash
+./utilities/secrets-export-recovery-kit.sh export-recovery-kit
+./edit-secrets.sh export-recovery-kit
+```
+
+---
+
+
 
 Installs OS dependencies (Docker, SOPS, age, etc.), configures swap, validates
 the toolchain, and sets file permissions. Safe to re-run.

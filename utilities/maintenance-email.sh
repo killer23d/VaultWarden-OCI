@@ -30,7 +30,9 @@ source "$PROJECT_ROOT/lib/maintenance-utils.sh"
 # ---------------------------------------------------------------------------
 # Configuration defaults
 # ---------------------------------------------------------------------------
-TEST_EMAIL=true
+# TEST_EMAIL is always true for this utility (it is the email test tool).
+# Exported so subprocesses or sourcing scripts can detect the test mode.
+export TEST_EMAIL=true
 TEST_RECIPIENT=""
 VERBOSE=false
 DRY_RUN=false

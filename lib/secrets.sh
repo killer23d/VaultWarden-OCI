@@ -1080,3 +1080,244 @@ offer_recovery_kit_export() {
         _ork_generate_and_secure "$output_file"
     fi
 }
+
+# ---------------------------------------------------------------------------
+# _read_dotenv_value KEY [FILE]
+#
+# Read a single KEY from .env (or FILE) without sourcing the whole file.
+# Returns the value to stdout, or an empty string if the key is not found.
+# Requires at least one whitespace character before # to distinguish inline
+# comments from embedded # in values (e.g. p@ss#1).
+# ---------------------------------------------------------------------------
+_read_dotenv_value() {
+    local key="$1"
+    local file="${2:-.env}"
+    [[ -f "$file" ]] || { printf ''; return 0; }
+    if [[ ! -r "$file" ]]; then
+        log_warn "_read_dotenv_value: '${file}' is not readable by $(id -un) — returning empty for key '${key}'"
+        printf ''; return 0
+    fi
+    local val
+    val=$(grep -E "^${key}=" "$file" | head -1 | sed "s/^${key}=//;s/[[:space:]]\+#.*\$//;s/[[:space:]]*\$//")
+    printf '%s' "$val"
+}
+
+# ---------------------------------------------------------------------------
+# _validate_yaml_no_duplicates FILE
+#
+# Uses a custom Python loader that raises ValueError on the first duplicate
+# mapping key found, matching SOPS's strict Go yaml.v3 behaviour.
+# Returns 0 on valid YAML with no duplicates, 1 otherwise.
+# ---------------------------------------------------------------------------
+_validate_yaml_no_duplicates() {
+    local yaml_file="$1"
+    python3 - "$yaml_file" <<'PYEOF'
+import sys, yaml
+
+class _NoDupLoader(yaml.SafeLoader):
+    pass
+
+def _check_no_dup_mapping(loader, node):
+    keys_seen = {}
+    for key_node, _ in node.value:
+        key = loader.construct_object(key_node)
+        if key in keys_seen:
+            raise ValueError(
+                "Duplicate mapping key '{}' "
+                "(first at line {}, again at line {})".format(
+                    key, keys_seen[key], key_node.start_mark.line + 1)
+            )
+        keys_seen[key] = key_node.start_mark.line + 1
+    return loader.construct_mapping(node, deep=True)
+
+_NoDupLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _check_no_dup_mapping,
+)
+
+try:
+    with open(sys.argv[1], 'r', encoding='utf-8') as f:
+        yaml.load(f, Loader=_NoDupLoader)
+except (yaml.YAMLError, ValueError) as exc:
+    print(str(exc), file=sys.stderr)
+    sys.exit(1)
+PYEOF
+}
+
+# ---------------------------------------------------------------------------
+# _validate_no_placeholders FILE
+#
+# Scans a decrypted YAML file for any values that start with PLACEHOLDER_
+# or equal PLACEHOLDER_NOT_CONFIGURED. Returns 1 (with a list of offending
+# keys) if any are found. Uses _NoDupLoader so a file with a duplicate key
+# cannot silently pass the placeholder check.
+# ---------------------------------------------------------------------------
+_validate_no_placeholders() {
+    local plain_yaml="$1"
+
+    local offending
+    local _py_rc=0
+    offending=$(python3 - "$plain_yaml" <<'PYEOF' 2>/dev/null
+import sys, yaml
+
+class _NoDupLoader(yaml.SafeLoader):
+    pass
+
+def _check_no_dup_mapping(loader, node):
+    keys_seen = {}
+    for key_node, _ in node.value:
+        key = loader.construct_object(key_node)
+        if key in keys_seen:
+            raise ValueError(
+                "Duplicate mapping key '{}' "
+                "(first at line {}, again at line {})".format(
+                    key, keys_seen[key], key_node.start_mark.line + 1)
+            )
+        keys_seen[key] = key_node.start_mark.line + 1
+    return loader.construct_mapping(node, deep=True)
+
+_NoDupLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _check_no_dup_mapping,
+)
+
+with open(sys.argv[1], 'r', encoding='utf-8') as f:
+    data = yaml.load(f, Loader=_NoDupLoader) or {}
+
+bad = []
+for k, v in data.items():
+    sv = str(v) if v is not None else ""
+    if sv.startswith("PLACEHOLDER") or sv == "PLACEHOLDER_NOT_CONFIGURED":
+        bad.append(k)
+
+if bad:
+    print("\n".join(bad))
+    sys.exit(1)
+PYEOF
+    ) || _py_rc=$?
+
+    if [[ $_py_rc -ne 0 ]]; then
+        log_error "Recovery kit contains unconfigured placeholder values for:"
+        while IFS= read -r key; do
+            log_error "  - $key"
+        done <<< "$offending"
+        log_error "Run './setup.sh secrets' or './edit-secrets.sh rotate <field>' to configure these fields first."
+        return 1
+    fi
+
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# _warn_if_stack_unavailable
+#
+# Warn when separate-volume mode is configured but the data volume is not
+# mounted. Secret editing still works; only Docker-dependent follow-up steps
+# may fail.
+# ---------------------------------------------------------------------------
+_warn_if_stack_unavailable() {
+    local env_file="${PROJECT_ROOT:-.}/.env"
+    [[ -f "$env_file" ]] || return 0
+
+    local data_volume_device data_volume_mount
+    data_volume_device=$(_read_dotenv_value "DATA_VOLUME_DEVICE" "$env_file")
+    data_volume_mount=$(_read_dotenv_value  "DATA_VOLUME_MOUNT"  "$env_file")
+
+    [[ -z "${data_volume_device}" ]] && return 0
+    [[ -z "${data_volume_mount}"  ]] && return 0
+
+    if ! mountpoint -q "${data_volume_mount}" 2>/dev/null; then
+        log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        log_warn "⚠  DATA VOLUME NOT MOUNTED: ${data_volume_mount}"
+        log_warn "   DATA_VOLUME_DEVICE=${data_volume_device} is configured but"
+        log_warn "   the mount point is absent or unmounted.  Secret editing"
+        log_warn "   and rotation will continue normally — this script does not"
+        log_warn "   require the data volume.  However, Docker-dependent"
+        log_warn "   post-rotation steps (secret file sync, service restart)"
+        log_warn "   may fail until the volume is mounted and the stack is up."
+        log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    fi
+
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# export_docker_secrets DOCKER_DIR [SECRETS_FILE]
+#
+# Decrypt SECRETS_FILE (defaults to $SECRETS_FILE / secrets/secrets.yaml) and
+# write one flat file per known secret key into DOCKER_DIR (mode 700).
+# Each output file is created mode 600 (via write_secret_file). Placeholder
+# values (CHANGE_ME*, NOT_USED*, null) are skipped with a warning so that
+# genuinely-empty optional secrets do not overwrite populated files.
+#
+# This is the canonical, single implementation shared by setup-secrets.sh and
+# secrets-rotate.sh. Both previously carried inline copies of this logic.
+# ---------------------------------------------------------------------------
+export_docker_secrets() {
+    local docker_dir="$1"
+    local secrets_file="${2:-${SECRETS_FILE:-secrets/secrets.yaml}}"
+
+    log_info "Exporting decrypted secrets to Docker secrets directory..."
+
+    if [[ ! -f "$secrets_file" ]]; then
+        log_warn "export_docker_secrets: secrets file not found: $secrets_file — skipping"
+        return 0
+    fi
+
+    if ! mkdir -p "$docker_dir"; then
+        log_error "export_docker_secrets: failed to create $docker_dir"
+        return 1
+    fi
+    chmod 700 "$docker_dir"
+
+    local _eds_keys=(
+        admin_token
+        admin_basic_auth_hash
+        caddy_cloudflare_dns_token
+        email_api_token
+        smtp_password
+        backup_passphrase
+        push_installation_id
+        push_installation_key
+    )
+
+    local _failed=0
+    local _key _value
+
+    for _key in "${_eds_keys[@]}"; do
+        # decrypt_secret calls ensure_sops_env internally and unsets
+        # SOPS_AGE_KEY_FILE after each call.
+        # shellcheck disable=SC2153  # SECRETS_FILE is a global env var from lib init
+        _value=$(decrypt_secret "$_key" "$secrets_file") || {
+            log_error "export_docker_secrets: failed to decrypt '$_key'"
+            _failed=$(( _failed + 1 ))
+            continue
+        }
+
+        # Skip placeholder or null values; warn so the admin can act.
+        if [[ -z "$_value" ]] \
+            || [[ "$_value" == "CHANGE_ME"* ]] \
+            || [[ "$_value" == "NOT_USED"* ]] \
+            || [[ "$_value" == "null" ]]; then
+            log_warn "export_docker_secrets: '$_key' skipped (placeholder/empty — rotate with: ./edit-secrets.sh rotate ${_key})"
+            unset _value
+            continue
+        fi
+
+        if ! write_secret_file "${docker_dir}/${_key}" "$_value"; then
+            log_error "export_docker_secrets: failed to write ${docker_dir}/${_key}"
+            _failed=$(( _failed + 1 ))
+        fi
+
+        unset _value
+    done
+    unset _key
+
+    if [[ $_failed -gt 0 ]]; then
+        log_error "export_docker_secrets: $_failed key(s) failed to export"
+        return 1
+    fi
+
+    log_success "Docker secrets exported to: $docker_dir"
+    return 0
+}

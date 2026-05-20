@@ -2,7 +2,7 @@
 
 Complete reference for all management scripts and utility libraries in VaultWarden-OCI.
 
-> **Architecture note (Dispatcher Pattern):** To improve maintainability, monolithic entry-points (`setup.sh`, `maintenance.sh`, `backup.sh`, `restore.sh`) have been refactored into thin **dispatchers**. The actual implementation logic is modularised into 17 standalone administrative and engine scripts located in the `utilities/` directory.
+> **Architecture note (Dispatcher Pattern):** To improve maintainability, monolithic entry-points (`setup.sh`, `maintenance.sh`, `backup.sh`, `restore.sh`, `edit-secrets.sh`) have been refactored into thin **dispatchers**. The actual implementation logic is modularised into 22 standalone administrative and engine scripts located in the `utilities/` directory.
 >
 > Library consolidation: `lib/security.sh` and `lib/simple_key_resilience.sh` were merged into `lib/crypto.sh`; `lib/email.sh` was inlined into `lib/common.sh`.
 >
@@ -18,11 +18,13 @@ Complete reference for all management scripts and utility libraries in VaultWard
 | 2 | `startup.sh` | Service management | — |
 | 3 | `backup.sh` | Dispatcher for backups | — |
 | 4 | `restore.sh` | Dispatcher for restores | — |
-| 5 | `edit-secrets.sh` | Secrets | — |
+| 5 | `edit-secrets.sh` | Dispatcher for secrets editing | — |
 | 6 | `maintenance.sh` | Dispatcher for maintenance/health/updates | `db-maint` only |
 | 7 | `utilities/*.sh` | 17 standalone admin/engine scripts (see `utilities/README.md`) | ✅ |
 
 **Utility libraries (5):** `lib/common.sh` *(includes email)*, `lib/docker.sh`, `lib/crypto.sh` *(includes key resilience + security)*, `lib/backup-utils.sh`, `lib/secrets.sh`
+
+> **Dispatcher count:** `edit-secrets.sh` was refactored into a thin dispatcher in this release, bringing the total dispatcher-pattern top-level scripts to 5: `setup.sh`, `maintenance.sh`, `backup.sh`, `restore.sh`, `edit-secrets.sh`.
 
 ---
 
@@ -327,7 +329,11 @@ make restore-remote
 ---
 
 ### 6. `edit-secrets.sh`
-**Purpose:** Securely edit SOPS-encrypted secrets
+**Purpose:** Thin dispatcher — routes subcommands to `utilities/secrets-*.sh`
+
+`edit-secrets.sh` is a ≤100-line dispatcher following the same pattern as
+`maintenance.sh`. All business logic lives in the `utilities/secrets-*.sh`
+standalone scripts. Admins may invoke the dispatcher or the utilities directly.
 
 ```bash
 ./edit-secrets.sh [subcommand] [OPTIONS]
@@ -345,25 +351,27 @@ make restore-remote
 
 **Subcommands:**
 
-| Subcommand | Description |
-| :-- | :-- |
-| *(none)* | Open encrypted secrets in editor (interactive) |
-| `view` | View decrypted secrets without editing |
-| `list` | List all available secret key names |
-| `rotate FIELD` | Rotate (regenerate) a single secret field |
-| `export-recovery-kit` | Export a plaintext recovery document (key + all secrets) — written to tmpfs, never to persistent disk |
+| Subcommand | Utility | Description |
+| :-- | :-- | :-- |
+| `edit` | `utilities/secrets-edit.sh` | Open encrypted secrets in editor (interactive) |
+| `view` | `utilities/secrets-view.sh` | View decrypted secrets without editing |
+| `list` | `utilities/secrets-list.sh` | List all available secret key names |
+| `rotate FIELD` | `utilities/secrets-rotate.sh` | Rotate (regenerate) a single secret field |
+| `export-recovery-kit` | `utilities/secrets-export-recovery-kit.sh` | Export a plaintext recovery document (key + all secrets) |
 
-**Options:**
+**Options (per subcommand):**
 
-| Option | Description |
-| :-- | :-- |
-| `--editor EDITOR` | Specify editor (default: nano) |
-| `--no-backup` | Skip automatic backup before editing |
+| Option | Subcommand(s) | Description |
+| :-- | :-- | :-- |
+| `--editor EDITOR` | `edit`, `view` | Specify editor (default: nano) |
+| `--no-backup` | `edit`, `rotate` | Skip automatic backup before editing |
+| `--dry-run` | `rotate` | Preview rotation without writing |
 
 ```bash
 ./edit-secrets.sh edit
 ./edit-secrets.sh edit --editor vim
 ./edit-secrets.sh rotate smtp_password
+./edit-secrets.sh rotate admin_token --dry-run
 ./edit-secrets.sh export-recovery-kit
 ./edit-secrets.sh view
 ./edit-secrets.sh list
@@ -371,7 +379,7 @@ make edit-secrets
 make test-secrets    # runs list internally
 ```
 
-> **Recovery kit security:** `--export-recovery-kit` writes the plaintext kit to a tmpfs path (`/dev/shm` → `/run/user/UID` → `/tmp` priority order) and prints a `WARNING` banner to the terminal before opening the file. Copy the kit to offline storage immediately and delete the file when done. The kit is **never** written to persistent disk.
+> **Recovery kit security:** `export-recovery-kit` writes the plaintext kit to a tmpfs path (`/dev/shm` → `/run/user/UID` → `/tmp` priority order) and prints a `WARNING` banner to the terminal before opening the file. Copy the kit to offline storage immediately and delete the file when done. The kit is **never** written to persistent disk.
 
 ---
 

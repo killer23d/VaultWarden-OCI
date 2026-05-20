@@ -623,65 +623,9 @@ SOPS_EOF
     }
 
     # ---------------------------------------------------------------------------
-    # export_docker_secrets — decrypt secrets.yaml and write flat files
+    # export_docker_secrets is provided by lib/secrets.sh (sourced above).
+    # Call it with the docker secrets directory as the first argument.
     # ---------------------------------------------------------------------------
-    export_docker_secrets() {
-        local docker_secrets_dir="$PROJECT_ROOT/secrets/.docker_secrets"
-
-        log_info "Exporting decrypted secrets to Docker secrets directory..."
-
-        if ! mkdir -p "$docker_secrets_dir"; then
-            log_error "export_docker_secrets: failed to create $docker_secrets_dir"
-            return 1
-        fi
-        chmod 700 "$docker_secrets_dir"
-
-        if ! ensure_sops_env; then
-            log_error "export_docker_secrets: failed to set up SOPS environment"
-            return 1
-        fi
-
-        local -a _keys=(
-            admin_token
-            admin_basic_auth_hash
-            caddy_cloudflare_dns_token
-            email_api_token
-            smtp_password
-            backup_passphrase
-            push_installation_id
-            push_installation_key
-        )
-
-        local _failed=0
-        local _key _value
-
-        for _key in "${_keys[@]}"; do
-            # shellcheck disable=SC2153  # SECRETS_FILE is a global env var, not a typo of secrets_file
-            _value=$(decrypt_secret "$_key" "$SECRETS_FILE") || {
-                log_error "export_docker_secrets: failed to decrypt '$_key'"
-                _failed=$(( _failed + 1 ))
-                continue
-            }
-
-            if ! write_secret_file "${docker_secrets_dir}/${_key}" "$_value"; then
-                log_error "export_docker_secrets: failed to write ${docker_secrets_dir}/${_key}"
-                _failed=$(( _failed + 1 ))
-            fi
-
-            unset _value
-        done
-        unset _key
-
-        cleanup_secrets_environment
-
-        if [[ $_failed -gt 0 ]]; then
-            log_error "export_docker_secrets: $_failed key(s) failed to export"
-            return 1
-        fi
-
-        log_success "Docker secrets exported to: $docker_secrets_dir"
-        return 0
-    }
 
     # ---------------------------------------------------------------------------
     # write_secrets — YAML assembly, SOPS encryption, atomic mv
@@ -777,7 +721,7 @@ SOPS_EOF
             log_info "Created Docker secrets directory: $docker_secrets_dir"
         fi
 
-        if ! export_docker_secrets; then
+        if ! export_docker_secrets "$PROJECT_ROOT/secrets/.docker_secrets"; then
             log_error "Failed to export Docker secret files — run sudo utilities/setup-secrets.sh configure again"
             return 1
         fi

@@ -122,30 +122,9 @@ _maybe_sudo() {
   fi
 }
 
-# ---------------------------------------------------------------------------
-# _startup_secure_wipe FILE
-#
-# Securely overwrite and remove a sensitive temp file.
-# Mirrors lib/secrets.sh::_secure_shred() to handle CoW filesystems
-# (btrfs, snapshotted ext4 on OCI block volumes) where shred(1) cannot
-# guarantee extent reuse and therefore cannot guarantee data erasure.
-# ---------------------------------------------------------------------------
-_startup_secure_wipe() {
-  local target="$1"
-  [[ -f "$target" ]] || return 0
-
-  if command -v shred >/dev/null 2>&1; then
-    shred -fuz "$target" 2>/dev/null && return 0
-  fi
-
-  # dd overwrite fallback: effective on CoW filesystems
-  local file_size
-  file_size=$(stat -c%s "$target" 2>/dev/null || stat -f%z "$target" 2>/dev/null || echo "4096")
-  [[ -z "$file_size" || ! "$file_size" =~ ^[0-9]+$ ]] && file_size=4096
-  (( file_size == 0 )) && file_size=4096
-  dd if=/dev/urandom of="$target" bs="$file_size" count=1 conv=notrunc 2>/dev/null || true
-  rm -f "$target"
-}
+# _startup_secure_wipe is no longer defined here.
+# Callers use _secure_shred() from lib/secrets.sh (sourced above), which
+# provides the same CoW-filesystem-safe overwrite-before-unlink behaviour.
 
 # ---------------------------------------------------------------------------
 # _prepare_secrets_cleanup
@@ -162,7 +141,7 @@ _prepare_secrets_cleanup() {
     _prepare_secrets_cleanup_umask=""
   fi
   if [[ -n "$_prepare_secrets_cleanup_cache" ]]; then
-    _startup_secure_wipe "$_prepare_secrets_cleanup_cache"
+    _secure_shred "$_prepare_secrets_cleanup_cache"
     _prepare_secrets_cleanup_cache=""
   fi
 }
@@ -693,9 +672,10 @@ ensure_vaultwarden_egress_nat() {
 
   # Preferred path: use repo-managed setup helper so NAT + DOCKER-USER
   # remediation stays in one place and can also be reused outside startup.
-  if [[ -x "./utilities/setup-firewall.sh" ]]; then
-    log_info "Invoking: $SCRIPT_DIR/utilities/setup-firewall.sh --phase iptables"
-    if _maybe_sudo ./utilities/setup-firewall.sh --phase iptables; then
+  local _fw_script="${PROJECT_ROOT}/utilities/setup-firewall.sh"
+  if [[ -x "$_fw_script" ]]; then
+    log_info "Invoking: ${_fw_script} --phase iptables"
+    if _maybe_sudo "$_fw_script" --phase iptables; then
       log_success "Egress firewall remediation completed via utilities/setup-firewall.sh"
       return 0
     fi
@@ -838,8 +818,9 @@ run_health_check() {
     return 0
   fi
 
-  if [[ ! -x "./maintenance.sh" ]]; then
-    log_error "maintenance.sh not executable or missing; cannot run health check"
+  local _health_script="${PROJECT_ROOT}/utilities/maintenance-health.sh"
+  if [[ ! -x "$_health_script" ]]; then
+    log_error "utilities/maintenance-health.sh not executable or missing; cannot run health check"
     log_error "Ensure setup.sh has been run and scripts are correctly installed"
     log_error "To skip this gate during recovery: ./startup.sh --skip-health"
     return 1
@@ -847,12 +828,10 @@ run_health_check() {
 
   log_info "Running post-start health check..."
 
-  # Disable errexit around maintenance.sh health so we can capture its exit code cleanly.
-  # The outer set -euo pipefail would abort the script before we could inspect
-  # the code if maintenance.sh health exits non-zero.
-  log_info "Invoking: $SCRIPT_DIR/maintenance.sh health"
+  # Disable errexit around the health check so we can capture its exit code cleanly.
+  log_info "Invoking: ${_health_script} health"
   local health_exit=0
-  ./maintenance.sh health || health_exit=$?
+  "$_health_script" health || health_exit=$?
 
   case "$health_exit" in
     0)

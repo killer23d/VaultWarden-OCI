@@ -342,7 +342,8 @@ install_units() {
     )
     for script in "${flat_scripts_to_install[@]}"; do
         local src="$PROJECT_ROOT/$script"
-        local dest="$OPT_SCRIPTS_DIR/$(basename "$script")"
+        local dest
+        dest="$OPT_SCRIPTS_DIR/$(basename "$script")"
         if [[ ! -f "$src" ]]; then
             log_warn "Script not found, skipping: $src"
             continue

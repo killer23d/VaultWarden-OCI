@@ -145,7 +145,7 @@ update_system_packages() {
     log_success "System packages updated"
 }
 
-local -A _PRE_PULL_IDS=()
+declare -A _PRE_PULL_IDS=()
 
 snapshot_image_digests() {
     if [[ "$DRY_RUN" == "true" ]]; then
