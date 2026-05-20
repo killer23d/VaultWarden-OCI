@@ -20,7 +20,7 @@ Complete reference for all management scripts and utility libraries in VaultWard
 | 4 | `restore.sh` | Dispatcher for restores | — |
 | 5 | `edit-secrets.sh` | Dispatcher for secrets editing | — |
 | 6 | `maintenance.sh` | Dispatcher for maintenance/health/updates | `db-maint` only |
-| 7 | `utilities/*.sh` | 17 standalone admin/engine scripts (see `utilities/README.md`) | ✅ |
+| 7 | `utilities/*.sh` | 22 standalone admin/engine scripts (see `utilities/README.md`) | ✅ |
 
 **Utility libraries (5):** `lib/common.sh` *(includes email)*, `lib/docker.sh`, `lib/crypto.sh` *(includes key resilience + security)*, `lib/backup-utils.sh`, `lib/secrets.sh`
 

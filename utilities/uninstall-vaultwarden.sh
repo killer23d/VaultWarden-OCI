@@ -76,7 +76,7 @@ show_help() {
     echo ""
     echo "  Without the age key ALL encrypted backups are permanently"
     echo "  unrecoverable.  Export a recovery kit first:"
-    echo "    sudo bash edit-secrets.sh export-recovery-kit"
+    echo "    ./edit-secrets.sh export-recovery-kit"
 }
 
 # ─── Argument parsing ─────────────────────────────────────────────────────────
@@ -312,7 +312,7 @@ if [[ -f "$AGE_KEY_FILE" ]] && [[ "$FORCE" == "false" ]]; then
         warn "  sudo bash $0 --i-have-saved-my-recovery-kit"
         warn ""
         warn "Or export a recovery kit first:"
-        warn "  sudo bash edit-secrets.sh export-recovery-kit"
+        warn "  ./edit-secrets.sh export-recovery-kit"
         echo "════════════════════════════════════════════════════════════"
         echo ""
         die "Uninstall aborted — age key not confirmed saved. No changes made."

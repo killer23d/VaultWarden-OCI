@@ -215,7 +215,7 @@ init-secrets: ## Initialize secrets file (interactive)
 
 edit-secrets: ## Edit encrypted secrets file
 	@echo "$(BLUE)Opening secrets editor...$(NC)"
-	@./edit-secrets.sh
+	@./edit-secrets.sh edit
 
 test-secrets: ## Test secrets decryption
 	@echo "$(BLUE)Testing secrets decryption...$(NC)"

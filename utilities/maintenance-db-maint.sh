@@ -107,8 +107,8 @@ run_deep_db_maintenance() {
     log_info "Step 1/6: Creating pre-maintenance safety backup..."
     local backup_ts_marker
     backup_ts_marker=$(mktemp) && touch "$backup_ts_marker"
-    log_info "Invoking: $SCRIPT_DIR/backup.sh run db"
-    if ! "$SCRIPT_DIR/backup.sh" run db; then
+    log_info "Invoking: ${PROJECT_ROOT}/utilities/backup-run.sh run db"
+    if ! "${PROJECT_ROOT}/utilities/backup-run.sh" run db; then
         rm -f "$backup_ts_marker"
         log_error "Pre-maintenance safety backup failed — aborting deep maintenance"
         if [[ "$DB_DEEP_FORCE" == "false" ]]; then

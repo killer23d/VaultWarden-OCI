@@ -509,14 +509,14 @@ main() {
         log_info ""
         log_info "Then add your Cloudflare API token:"
         log_info ""
-        log_info "  ./edit-secrets.sh"
+        log_info "  ./edit-secrets.sh rotate crowdsec_cf_firewall_token"
         log_info ""
         printf 'Press ENTER to continue with the post-install summary, or Ctrl-C to exit now...'
         read -r _cs_prompt_ack || true
         unset _cs_prompt_ack
     else
         log_info "Next step: sudo ./utilities/setup-crowdsec.sh"
-        log_info "Then add your Cloudflare API token: ./edit-secrets.sh"
+        log_info "Then add your Cloudflare API token: ./edit-secrets.sh rotate crowdsec_cf_firewall_token"
     fi
 
     # ── 6. Auto secrets (AUTO_MODE only) ────────────────────────────────────

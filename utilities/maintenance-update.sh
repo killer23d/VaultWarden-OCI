@@ -304,12 +304,12 @@ run_pre_update_backup() {
         log_info "[DRY RUN] Would create pre-update safety backup"
         return 0
     fi
-    if [[ ! -x "${SCRIPT_DIR}/backup.sh" ]]; then
-        log_error "backup.sh not found or not executable — aborting update"
+    if [[ ! -x "${PROJECT_ROOT}/utilities/backup-run.sh" ]]; then
+        log_error "backup-run.sh not found or not executable — aborting update"
         return 1
     fi
-    log_info "Creating pre-update safety backup via ./backup.sh run db..."
-    if "${SCRIPT_DIR}/backup.sh" run db; then
+    log_info "Creating pre-update safety backup via utilities/backup-run.sh run db..."
+    if "${PROJECT_ROOT}/utilities/backup-run.sh" run db; then
         log_success "Pre-update backup created"
         return 0
     fi
