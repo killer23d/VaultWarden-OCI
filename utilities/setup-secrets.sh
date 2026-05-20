@@ -908,7 +908,7 @@ _cmd_export_recovery_kit() {
 
 # ---------------------------------------------------------------------------
 # _cmd_breakglass — emergency break-glass admin account management
-# (merged from utilities/create-breakglass-admin.sh)
+# (merged from the former standalone break-glass utility)
 # ---------------------------------------------------------------------------
 _cmd_breakglass() {
     # Local state variables

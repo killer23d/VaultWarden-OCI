@@ -81,7 +81,7 @@ trap '_ss_cleanup' EXIT
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # MIGRATE MODE — constants, helpers, and pipeline steps
-# (Adapted from utilities/migrate-volume.sh — all _mv_* functions)
+# (Adapted from the former standalone migration utility — all _mv_* functions)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 readonly _MV_VERSION="1.1.0"
