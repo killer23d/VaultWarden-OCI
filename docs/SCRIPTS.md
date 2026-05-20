@@ -2,16 +2,11 @@
 
 Complete reference for all management scripts and utility libraries in VaultWarden-OCI.
 
-> **Architecture note:** Several scripts that previously existed as standalone files have been **merged** into consolidated entry-points:
-> - `db-maint.sh` → `./maintenance.sh db-maint`
-> - `update-dns.sh` → `./maintenance.sh update-dns`
-> - `test-email-simple.sh` → `./maintenance.sh test-email`
-> - `health.sh` and `update.sh` are now subcommands: `./maintenance.sh health` and `./maintenance.sh update`
-> - `setup-secrets.sh` and `setup-systemd.sh` are now phases: `./setup.sh secrets` and `./setup.sh systemd`
+> **Architecture note (Dispatcher Pattern):** To improve maintainability, monolithic entry-points (`setup.sh`, `maintenance.sh`, `backup.sh`, `restore.sh`) have been refactored into thin **dispatchers**. The actual implementation logic is modularised into 17 standalone administrative and engine scripts located in the `utilities/` directory.
 >
 > Library consolidation: `lib/security.sh` and `lib/simple_key_resilience.sh` were merged into `lib/crypto.sh`; `lib/email.sh` was inlined into `lib/common.sh`.
 >
-> This reduces the number of files to maintain while keeping each task fully self-contained.
+> This dispatcher pattern keeps the public CLI surface simple while making the codebase highly modular and easier to test.
 
 ---
 
@@ -19,14 +14,13 @@ Complete reference for all management scripts and utility libraries in VaultWard
 
 | # | Script | Category | sudo? |
 | :-- | :-- | :-- | :-- |
-| 1 | `setup.sh` | Initialisation + secrets + systemd phases | ✅ |
+| 1 | `setup.sh` | Dispatcher for setup phases | ✅ |
 | 2 | `startup.sh` | Service management | — |
-| 3 | `backup.sh` | Backup | — |
-| 4 | `restore.sh` | Backup | — |
+| 3 | `backup.sh` | Dispatcher for backups | — |
+| 4 | `restore.sh` | Dispatcher for restores | — |
 | 5 | `edit-secrets.sh` | Secrets | — |
-| 6 | `maintenance.sh` | Maintenance + health + update (merged) | `db-maint` only |
-| 7 | `utilities/setup-secrets.sh breakglass` | Emergency | ✅ |
-| 8 | `utilities/uninstall-vaultwarden.sh` | Uninstall | ✅ |
+| 6 | `maintenance.sh` | Dispatcher for maintenance/health/updates | `db-maint` only |
+| 7 | `utilities/*.sh` | 17 standalone admin/engine scripts (see `utilities/README.md`) | ✅ |
 
 **Utility libraries (5):** `lib/common.sh` *(includes email)*, `lib/docker.sh`, `lib/crypto.sh` *(includes key resilience + security)*, `lib/backup-utils.sh`, `lib/secrets.sh`
 
