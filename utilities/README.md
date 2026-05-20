@@ -1,103 +1,137 @@
 # utilities/
 
-Administrative utilities for VaultWarden-OCI. These scripts handle one-time,
-host-level, or emergency operations that are outside the normal application lifecycle.
+Administrative utilities for VaultWarden-OCI. Each script is focused,
+re-runnable (idempotent), and accepts `--help` for usage details.
 
-**All scripts require root**: `sudo utilities/<script>.sh`
+**All scripts require root**: `sudo utilities/<script>.sh [OPTIONS]`
 
 ---
 
 ## Scripts
 
-### `migrate-volume.sh` — Volume migration
+### `setup-system.sh` — System preparation
 
-Moves `PROJECT_STATE_DIR` between block devices or directories. Supports
-boot-volume-to-dedicated-volume and volume-to-volume migrations. Safe to interrupt;
-resumes from the last completed step.
+Installs OS dependencies (Docker, SOPS, age, etc.), configures swap, validates
+the toolchain, and sets file permissions. Safe to re-run.
 
 ```bash
-# Full usage
-sudo utilities/migrate-volume.sh --help
-
-# Typical: boot volume → dedicated data volume
-sudo utilities/migrate-volume.sh run \
-  --source /var/lib/vaultwarden \
-  --target /mnt/vw-data \
-  --device /dev/sdb
-
-# Dry run first
-sudo utilities/migrate-volume.sh run \
-  --source /var/lib/vaultwarden \
-  --target /mnt/vw-data \
-  --device /dev/sdb \
-  --dry-run
+sudo utilities/setup-system.sh --skip-deps        # re-verify toolchain only
+sudo utilities/setup-system.sh --sops-version v3.9.4
+sudo utilities/setup-system.sh --dry-run
 ```
 
 ---
 
-### `create-breakglass-admin.sh` — Emergency admin access
+### `setup-firewall.sh` — Firewall configuration
 
-Creates a temporary VaultWarden admin account for emergency access when normal
-credential paths are unavailable. Intentionally omits the storage guard so it
-can run during storage incidents.
-
-```bash
-sudo utilities/create-breakglass-admin.sh
-```
-
-> **Bootstrap note**: `PROJECT_ROOT` is `$(cd "$(dirname "$0")/.." && pwd)` — one
-> level up from `utilities/`.
-
----
-
-### `uninstall-vaultwarden.sh` — Full uninstall
-
-Removes all VaultWarden-OCI components: containers, images, systemd units, fstab
-entries, and optionally data. Irreversible. Prompts for confirmation at each stage.
+Configures UFW (Cloudflare IP allowlist) and iptables (DOCKER-USER chain,
+MASQUERADE, OCI default FORWARD-REJECT removal). Merged from the former
+`setup-iptables.sh`.
 
 ```bash
-sudo utilities/uninstall-vaultwarden.sh
+sudo utilities/setup-firewall.sh --phase all       # UFW + iptables (default)
+sudo utilities/setup-firewall.sh --phase iptables  # re-harden after Docker upgrade
+sudo utilities/setup-firewall.sh --phase ufw       # refresh Cloudflare CIDRs
+sudo utilities/setup-firewall.sh --dry-run
 ```
 
 ---
 
-### `setup-iptables.sh` — iptables / nftables rules
+### `setup-storage.sh` — Storage setup and volume migration
 
-Applies NAT and FORWARD rules required by the Docker network configuration.
-Idempotent. Run once at host setup or after a reboot that lost rules.
+Creates the project directory structure, re-checks permissions, or migrates
+from boot volume to a dedicated data volume. Merged from the former
+`migrate-volume.sh`.
 
 ```bash
-sudo utilities/setup-iptables.sh
+sudo utilities/setup-storage.sh --mode setup           # create layout (first run)
+sudo utilities/setup-storage.sh --mode verify          # re-check permissions only
+sudo utilities/setup-storage.sh --mode migrate         # interactive block-device migration
+sudo utilities/setup-storage.sh --mode migrate status  # migration status
 ```
 
 ---
 
-## Bootstrap Pattern
+### `setup-env.sh` — Environment file generation
 
-Every script in this directory must use the following `PROJECT_ROOT` resolution,
-which is one level up from `utilities/`:
+Creates or updates `.env` and `docker-compose.yml` from templates. Idempotent:
+files are not overwritten unless values have changed or `--force` is passed.
 
 ```bash
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-cd "${PROJECT_ROOT}"
+sudo utilities/setup-env.sh --domain vault.example.com --email admin@example.com
+sudo utilities/setup-env.sh --domain vault.example.com --email admin@example.com --force
 ```
-
-This is the only difference from the root-level script bootstrap pattern.
 
 ---
 
-## What Stays at Root
+### `setup-secrets.sh` — Secrets management
 
-The following scripts remain at the project root because they are referenced by
-systemd unit files, called as subprocesses by other scripts, or directly documented
-in `README.md` and `RUNBOOK.md`:
+Full secrets lifecycle: setup, rotation, recovery-kit export, and emergency
+break-glass admin. Merged from the former `create-breakglass-admin.sh`.
 
-| Script | Reason |
+```bash
+sudo utilities/setup-secrets.sh configure             # full interactive secrets setup
+sudo utilities/setup-secrets.sh configure --auto      # auto-generate passwords
+sudo utilities/setup-secrets.sh rotate admin_token    # rotate one credential
+sudo utilities/setup-secrets.sh rotate                # rotate all credentials
+sudo utilities/setup-secrets.sh export-recovery-kit
+
+# Emergency break-glass admin (OCI serial console recovery)
+sudo utilities/setup-secrets.sh breakglass create
+sudo utilities/setup-secrets.sh breakglass status
+sudo utilities/setup-secrets.sh breakglass remove --force
+```
+
+---
+
+### `setup-systemd.sh` — systemd timer management
+
+Installs, validates, and removes the VaultWarden systemd timer suite.
+
+```bash
+sudo utilities/setup-systemd.sh install    # install and enable all timers
+sudo utilities/setup-systemd.sh remove     # disable and remove all timers
+sudo utilities/setup-systemd.sh validate   # check installed state vs repo
+sudo utilities/setup-systemd.sh status     # show timer status
+sudo utilities/setup-systemd.sh install --dry-run
+```
+
+---
+
+### `setup-crowdsec.sh` — CrowdSec installation
+
+Installs or re-installs CrowdSec and the Cloudflare firewall bouncer.
+Do not modify — standalone and version-pinned.
+
+```bash
+sudo utilities/setup-crowdsec.sh
+```
+
+---
+
+### `uninstall-vaultwarden.sh` — Full project teardown
+
+Removes all VaultWarden-OCI components. After it completes, `setup.sh install`
+can run on the same host as if it were a fresh machine.
+
+Does **NOT** remove: Docker CE, system packages, user accounts, swap, or
+anything that pre-existed this project.
+
+```bash
+sudo utilities/uninstall-vaultwarden.sh run --dry-run
+sudo utilities/uninstall-vaultwarden.sh run --i-have-saved-my-recovery-kit
+sudo utilities/uninstall-vaultwarden.sh run --force   # CI/automation only
+```
+
+---
+
+## Design Principles
+
+| Principle | Enforcement |
 |---|---|
-| `setup.sh` | Primary installer; all documentation references it at root |
-| `backup.sh` | Called by systemd timers and by `restore.sh` |
-| `restore.sh` | Paired with `backup.sh`; documented in `RUNBOOK.md` |
-| `maintenance.sh` | Called by systemd timers |
-| `startup.sh` | Called by systemd `ExecStart=` |
-| `edit-secrets.sh` | Frequently used for credential rotation; documented in `README.md` |
+| **Idempotent** | Check-before-act everywhere (`grep -q`, `iptables -C`, `dpkg -s`) |
+| **Self-sufficient** | Each script has its own arg parser; runs standalone |
+| **No env-var IPC** | CLI flags only for inter-script state |
+| **Dry-run complete** | Every destructive action gated by `DRY_RUN` check |
+| **Root guard** | `(( EUID == 0 ))` checked after arg parsing |
+| **Colour-tagged output** | `[HH:MM:SS] [script-name.sh] LEVEL message` via `lib/common.sh` |

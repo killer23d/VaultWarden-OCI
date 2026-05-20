@@ -693,13 +693,13 @@ ensure_vaultwarden_egress_nat() {
 
   # Preferred path: use repo-managed setup helper so NAT + DOCKER-USER
   # remediation stays in one place and can also be reused outside startup.
-  if [[ -x "./utilities/setup-iptables.sh" ]]; then
-    log_info "Invoking: $SCRIPT_DIR/utilities/setup-iptables.sh"
-    if _maybe_sudo ./utilities/setup-iptables.sh; then
-      log_success "Egress firewall remediation completed via utilities/setup-iptables.sh"
+  if [[ -x "./utilities/setup-firewall.sh" ]]; then
+    log_info "Invoking: $SCRIPT_DIR/utilities/setup-firewall.sh --phase iptables"
+    if _maybe_sudo ./utilities/setup-firewall.sh --phase iptables; then
+      log_success "Egress firewall remediation completed via utilities/setup-firewall.sh"
       return 0
     fi
-    log_warn "utilities/setup-iptables.sh failed; falling back to inline NAT remediation"
+    log_warn "utilities/setup-firewall.sh failed; falling back to inline NAT remediation"
   fi
 
   local container_id
@@ -730,7 +730,7 @@ ensure_vaultwarden_egress_nat() {
     if _maybe_sudo iptables -t nat -A POSTROUTING -s "$subnet" ! -o docker0 -j MASQUERADE >/dev/null 2>&1; then
       log_info "Added MASQUERADE fallback for network ${network_name} (${subnet})"
       log_warn "Inline iptables MASQUERADE rule is ephemeral — it will not survive a reboot."
-      log_warn "For persistence, run: sudo ./utilities/setup-iptables.sh"
+      log_warn "For persistence, run: sudo ./utilities/setup-firewall.sh --phase iptables"
       fixed_any=true
     else
       log_warn "Could not add MASQUERADE fallback for network ${network_name} (${subnet})"

@@ -11,29 +11,28 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$LIB_DIR/.." && pwd)"
 
 LOG_PREFIX=""
+_VW_CALLING_SCRIPT=""
 LOG_TIMESTAMP=true
 LOG_COLORS=true
 LOG_LEVEL="${LOG_LEVEL:-INFO}"
 
-if [[ -t 1 ]] && command -v tput >/dev/null 2>&1; then
-    COLOR_RED=$(tput setaf 1 2>/dev/null)     || COLOR_RED=""
-    COLOR_GREEN=$(tput setaf 2 2>/dev/null)   || COLOR_GREEN=""
-    COLOR_YELLOW=$(tput setaf 3 2>/dev/null)  || COLOR_YELLOW=""
-    COLOR_BLUE=$(tput setaf 4 2>/dev/null)    || COLOR_BLUE=""
-    COLOR_CYAN=$(tput setaf 6 2>/dev/null)    || COLOR_CYAN=""
-    COLOR_RESET=$(tput sgr0 2>/dev/null)      || COLOR_RESET=""
-    COLOR_BOLD=$(tput bold 2>/dev/null)       || COLOR_BOLD=""
-    readonly COLOR_RED COLOR_GREEN COLOR_YELLOW COLOR_BLUE COLOR_CYAN COLOR_RESET COLOR_BOLD
+if [[ -t 1 ]]; then
+    COLOR_RED=$'\e[0;31m'
+    COLOR_BOLD_RED=$'\e[1;31m'
+    COLOR_GREEN=$'\e[0;32m'
+    COLOR_YELLOW=$'\e[0;33m'
+    COLOR_BLUE=$'\e[0;34m'
+    COLOR_MAGENTA=$'\e[0;35m'
+    # shellcheck disable=SC2034  # COLOR_CYAN is used by sourcing scripts
+    COLOR_CYAN=$'\e[0;36m'
+    COLOR_RESET=$'\e[0m'
+    COLOR_BOLD=$'\e[1m'
 else
-    readonly COLOR_RED=""
-    readonly COLOR_GREEN=""
-    readonly COLOR_YELLOW=""
-    readonly COLOR_BLUE=""
-    # shellcheck disable=SC2034  # COLOR_CYAN is used by sourcing scripts (setup.sh, utilities/create-breakglass-admin.sh)
-    readonly COLOR_CYAN=""
-    readonly COLOR_RESET=""
-    readonly COLOR_BOLD=""
+    COLOR_RED='' COLOR_BOLD_RED='' COLOR_GREEN='' COLOR_YELLOW=''
+    # shellcheck disable=SC2034  # COLOR_CYAN is used by sourcing scripts
+    COLOR_BLUE='' COLOR_MAGENTA='' COLOR_CYAN='' COLOR_RESET='' COLOR_BOLD=''
 fi
+readonly COLOR_RED COLOR_BOLD_RED COLOR_GREEN COLOR_YELLOW COLOR_BLUE COLOR_MAGENTA COLOR_CYAN COLOR_RESET COLOR_BOLD
 
 # Log level filtering for production environments.
 # When LOG_LEVEL is not a recognised value, warn once and fall back to INFO
@@ -70,68 +69,83 @@ _get_timestamp() {
     [[ "$LOG_TIMESTAMP" == "true" ]] && date '+%H:%M:%S' || printf ''
 }
 
+_get_script_tag() {
+    if [[ -n "$_VW_CALLING_SCRIPT" ]]; then
+        printf '%s' "$_VW_CALLING_SCRIPT"
+    else
+        basename "${BASH_SOURCE[-1]:-lib/common.sh}"
+    fi
+}
+
 log_info() {
     _should_log "INFO" || return 0
-    local timestamp prefix_part
-    timestamp=$(_get_timestamp)
-    prefix_part="${LOG_PREFIX:+[$LOG_PREFIX] }"
+    local ts tag
+    ts=$(_get_timestamp); tag=$(_get_script_tag)
     if [[ "$LOG_COLORS" == "true" ]]; then
-        printf '%s[%s] [INFO]%s %s%s\n' \
-            "${COLOR_BLUE}" "${timestamp}" "${COLOR_RESET}" \
-            "${prefix_part}" "$*"
+        printf '%s[%s] [%s] INFO%s %s\n' "${COLOR_CYAN}" "$ts" "$tag" "${COLOR_RESET}" "$*"
     else
-        printf '[%s] [INFO] %s%s\n' "${timestamp}" "${prefix_part}" "$*"
+        printf '[%s] [%s] INFO %s\n' "$ts" "$tag" "$*"
     fi
 }
 
 log_success() {
     _should_log "INFO" || return 0
-    local timestamp prefix_part
-    timestamp=$(_get_timestamp)
-    prefix_part="${LOG_PREFIX:+[$LOG_PREFIX] }"
+    local ts tag
+    ts=$(_get_timestamp); tag=$(_get_script_tag)
     if [[ "$LOG_COLORS" == "true" ]]; then
-        printf '%s[%s] [SUCCESS]%s %s%s\n' \
-            "${COLOR_GREEN}" "${timestamp}" "${COLOR_RESET}" \
-            "${prefix_part}" "$*"
+        printf '%s[%s] [%s] OK%s %s\n' "${COLOR_GREEN}" "$ts" "$tag" "${COLOR_RESET}" "$*"
     else
-        printf '[%s] [SUCCESS] %s%s\n' "${timestamp}" "${prefix_part}" "$*"
+        printf '[%s] [%s] OK %s\n' "$ts" "$tag" "$*"
     fi
 }
 
 log_warn() {
     _should_log "WARN" || return 0
-    local timestamp prefix_part
-    timestamp=$(_get_timestamp)
-    prefix_part="${LOG_PREFIX:+[$LOG_PREFIX] }"
+    local ts tag
+    ts=$(_get_timestamp); tag=$(_get_script_tag)
     if [[ "$LOG_COLORS" == "true" ]]; then
-        printf '%s[%s] [WARN]%s %s%s\n' \
-            "${COLOR_YELLOW}" "${timestamp}" "${COLOR_RESET}" \
-            "${prefix_part}" "$*" >&2
+        printf '%s[%s] [%s] WARN%s %s\n' "${COLOR_YELLOW}" "$ts" "$tag" "${COLOR_RESET}" "$*" >&2
     else
-        printf '[%s] [WARN] %s%s\n' "${timestamp}" "${prefix_part}" "$*" >&2
+        printf '[%s] [%s] WARN %s\n' "$ts" "$tag" "$*" >&2
     fi
 }
 
 log_error() {
     _should_log "ERROR" || return 0
-    local timestamp prefix_part
-    timestamp=$(_get_timestamp)
-    prefix_part="${LOG_PREFIX:+[$LOG_PREFIX] }"
+    local ts tag
+    ts=$(_get_timestamp); tag=$(_get_script_tag)
     if [[ "$LOG_COLORS" == "true" ]]; then
-        printf '%s[%s] [ERROR]%s %s%s\n' \
-            "${COLOR_RED}" "${timestamp}" "${COLOR_RESET}" \
-            "${prefix_part}" "$*" >&2
+        printf '%s[%s] [%s] ERROR%s %s\n' "${COLOR_BOLD_RED}" "$ts" "$tag" "${COLOR_RESET}" "$*" >&2
     else
-        printf '[%s] [ERROR] %s%s\n' "${timestamp}" "${prefix_part}" "$*" >&2
+        printf '[%s] [%s] ERROR %s\n' "$ts" "$tag" "$*" >&2
     fi
 }
 
 log_debug() {
     _should_log "DEBUG" || return 0
-    local timestamp prefix_part
-    timestamp=$(_get_timestamp)
-    prefix_part="${LOG_PREFIX:+[$LOG_PREFIX] }"
-    printf '[%s] [DEBUG] %s%s\n' "${timestamp}" "${prefix_part}" "$*" >&2
+    local ts tag
+    ts=$(_get_timestamp); tag=$(_get_script_tag)
+    printf '[%s] [%s] DEBUG %s\n' "$ts" "$tag" "$*" >&2
+}
+
+log_rollback() {
+    local ts tag
+    ts=$(_get_timestamp); tag=$(_get_script_tag)
+    if [[ "$LOG_COLORS" == "true" ]]; then
+        printf '%s[%s] [%s] ROLLBACK%s %s\n' "${COLOR_MAGENTA}" "$ts" "$tag" "${COLOR_RESET}" "$*" >&2
+    else
+        printf '[%s] [%s] ROLLBACK %s\n' "$ts" "$tag" "$*" >&2
+    fi
+}
+
+log_dry_run() {
+    local ts tag
+    ts=$(_get_timestamp); tag=$(_get_script_tag)
+    if [[ "$LOG_COLORS" == "true" ]]; then
+        printf '%s[%s] [%s] [DRY RUN]%s %s\n' "${COLOR_BLUE}" "$ts" "$tag" "${COLOR_RESET}" "$*"
+    else
+        printf '[%s] [%s] [DRY RUN] %s\n' "$ts" "$tag" "$*"
+    fi
 }
 
 log_header() {
@@ -1447,18 +1461,54 @@ safe_execute() {
     fi
 }
 
+# _require_script PATH
+# Verify a utility script exists and is executable.
+# Emits ERROR and exits 1 if missing; chmod +x if not executable.
+_require_script() {
+    local path="$1"
+    if [[ ! -f "$path" ]]; then
+        log_error "Required script not found: $path"
+        log_error "Ensure the repository was cloned completely."
+        exit 1
+    fi
+    [[ -x "$path" ]] || chmod +x "$path"
+}
+
+# _set_env_var KEY VALUE FILE
+# Add or replace a KEY=VALUE line in an env file.
+_set_env_var() {
+    local key="$1" value="$2" file="$3"
+    if grep -q "^${key}=" "$file" 2>/dev/null; then
+        local escaped_value
+        escaped_value="${value//\\/\\\\}"
+        escaped_value="${escaped_value//&/\\&}"
+        escaped_value="${escaped_value//|/\\|}"
+        sed -i "s|^${key}=.*|${key}=${escaped_value}|" "$file"
+    else
+        printf '%s=%s\n' "$key" "$value" >> "$file"
+    fi
+}
+
+# _read_env_value KEY FILE
+# Read a KEY=VALUE from an env file, stripping surrounding quotes.
+_read_env_value() {
+    local key="$1" file="$2"
+    [[ -f "$file" ]] || return 0
+    grep -E "^${key}=" "$file" 2>/dev/null \
+        | tail -1 | cut -d= -f2- | tr -d "\"'" || true
+}
 
 init_common_lib() {
     local script_name="$1"
 
     set -euo pipefail
 
-    set_log_prefix "$(basename -- "$script_name" .sh)"
+    # Store the calling script's basename (with extension) for log tagging.
+    _VW_CALLING_SCRIPT="$(basename -- "$script_name")"
+    # Keep LOG_PREFIX for backward compatibility with any code that reads it.
+    # shellcheck disable=SC2034  # exported for external backward compat
+    LOG_PREFIX="$(basename -- "$script_name" .sh)"
 
-    # Change to PROJECT_ROOT so all subsequent relative-path operations in
-    # callers resolve against the project root, not the shell's current
-    # working directory.  Callers that have already changed directory will
-    # see a no-op; callers that have not will be normalised here.
     cd "$PROJECT_ROOT"
 
     log_debug "Common library initialized for: $script_name"
@@ -1467,6 +1517,9 @@ init_common_lib() {
 }
 
 export -f log_info log_success log_warn log_error log_debug log_header set_log_prefix _should_log
+export -f log_rollback log_dry_run
+export -f _require_script _set_env_var _read_env_value
+export -f _get_script_tag _get_timestamp
 export -f load_env_file get_config_value require_config
 export -f has_command require_commands retry_with_backoff is_root require_root get_real_user
 export -f register_cleanup perform_cleanup
@@ -1480,7 +1533,7 @@ export -f _email_json_escape _email_bearer_post _email_driver_lookup
 export -f _email_driver_mailersend _email_driver_sendgrid _email_driver_mailgun
 export -f _email_driver_postmark _email_driver_resend _email_driver_postfix
 export -f _email_driver_cyberpersons
-export COLOR_RED COLOR_GREEN COLOR_YELLOW COLOR_BLUE COLOR_CYAN COLOR_RESET COLOR_BOLD
+export COLOR_RED COLOR_BOLD_RED COLOR_GREEN COLOR_YELLOW COLOR_BLUE COLOR_MAGENTA COLOR_CYAN COLOR_RESET COLOR_BOLD
 export -f validate_email validate_domain validate_port validate_ip validate_url
 export -f setup_error_trap setup_cleanup_trap safe_execute
 export -f init_common_lib

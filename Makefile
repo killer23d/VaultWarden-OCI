@@ -813,17 +813,17 @@ schedule: ## Show vaultwarden timer schedules (next/last run times)
 breakglass-create: ## Create emergency break-glass admin account
 	$(call require-root)
 	@echo "$(BLUE)Creating break-glass admin account...$(NC)"
-	@sudo utilities/create-breakglass-admin.sh create
+	@sudo utilities/setup-secrets.sh breakglass create
 
 breakglass-status: ## Check break-glass admin account status
 	$(call require-root)
 	@echo "$(BLUE)Break-glass admin status:$(NC)"
-	@sudo utilities/create-breakglass-admin.sh status
+	@sudo utilities/setup-secrets.sh breakglass status
 
 breakglass-remove: ## Remove break-glass admin account
 	$(call require-root)
 	@echo "$(BLUE)Removing break-glass admin account...$(NC)"
-	@sudo utilities/create-breakglass-admin.sh remove --force
+	@sudo utilities/setup-secrets.sh breakglass remove --force
 
 # ===========================================================================
 ##@ Testing & Development

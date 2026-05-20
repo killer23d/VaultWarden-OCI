@@ -1,19 +1,45 @@
 #!/usr/bin/env bash
-# uninstall-vaultwarden.sh
+# utilities/uninstall-vaultwarden.sh
 # Full idempotent uninstaller for killer23d/VaultWarden-OCI
-# Run from the user's home directory: bash ~/uninstall-vaultwarden.sh
+# Run from the project root: sudo utilities/uninstall-vaultwarden.sh run
 # Must be run as root (or via sudo).
+#
+# USAGE:
+#   sudo utilities/uninstall-vaultwarden.sh run [OPTIONS]
+#   sudo utilities/uninstall-vaultwarden.sh --help
+#
+# FLAGS:
+#   --i-have-saved-my-recovery-kit   Pre-confirm age key is saved off-host
+#   --force                          Skip all age key checks (CI/automation only)
+#   --dry-run                        Preview actions without making changes
+#   --help, -h                       Show this help
 #
 # shellcheck disable=SC2015  # cmd && log_success || log_warn is intentional cleanup idiom throughout
 
 set -euo pipefail
 
-# ─── Colour helpers ──────────────────────────────────────────────────────────
-RED=$'\033[0;31m'; YELLOW=$'\033[1;33m'; GREEN=$'\033[0;32m'; CYAN=$'\033[0;36m'; RESET=$'\033[0m'
-info()    { echo -e "${YELLOW}[INFO]${RESET}  $*"; }
-success() { echo -e "${GREEN}[OK]${RESET}    $*"; }
-warn()    { echo -e "${YELLOW}[WARN]${RESET}  $*"; }
-die()     { echo -e "${RED}[ERROR]${RESET} $*" >&2; exit 1; }
+# ─── Self-contained colour/log helpers (no lib/common.sh dependency) ─────────
+# This script deliberately does NOT source lib/common.sh so it remains safe
+# to run after a partial or broken installation.  The log format matches the
+# project standard: [HH:MM:SS] [script-name.sh] LEVEL message.
+_VW_SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
+if [[ -t 1 ]]; then
+    _C_CYAN=$'\e[36m'; _C_GREEN=$'\e[32m'; _C_YELLOW=$'\e[33m'
+    _C_RED=$'\e[1;31m'; _C_RESET=$'\e[0m'
+else
+    _C_CYAN=''; _C_GREEN=''; _C_YELLOW=''; _C_RED=''; _C_RESET=''
+fi
+_vw_ts() { date '+%H:%M:%S'; }
+log_info()    { printf '%s[%s] [%s] INFO%s %s\n'    "$_C_CYAN"   "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$*"; }
+log_success() { printf '%s[%s] [%s] OK%s %s\n'      "$_C_GREEN"  "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$*"; }
+log_warn()    { printf '%s[%s] [%s] WARN%s %s\n'    "$_C_YELLOW" "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$*" >&2; }
+log_error()   { printf '%s[%s] [%s] ERROR%s %s\n'   "$_C_RED"    "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$*" >&2; }
+die()         { log_error "$*"; exit 1; }
+
+# Legacy aliases used throughout the original script body
+info()    { log_info "$@"; }
+success() { log_success "$@"; }
+warn()    { log_warn "$@"; }
 
 # ─── Help ─────────────────────────────────────────────────────────────────────
 show_help() {
@@ -80,7 +106,7 @@ case "$1" in
                 --force)                        FORCE=true;                      shift ;;
                 --dry-run)                      DRY_RUN=true;                    shift ;;
                 *)
-                    echo "${RED}[ERROR]${RESET} Unknown option: '$1'" >&2
+                    log_error "Unknown option: '$1'"
                     show_help
                     exit 1
                     ;;
@@ -91,7 +117,7 @@ case "$1" in
         show_help; exit 0
         ;;
     *)
-        echo "${RED}[ERROR]${RESET} Unknown subcommand: '$1'" >&2
+        log_error "Unknown subcommand: '$1'"
         show_help
         exit 1
         ;;
@@ -265,7 +291,7 @@ if [[ -f "$AGE_KEY_FILE" ]] && [[ "$FORCE" == "false" ]]; then
     if [[ "$I_HAVE_SAVED_RECOVERY_KIT" == "false" ]] && [[ "$FORCE" == "false" ]]; then
         echo ""
         echo "════════════════════════════════════════════════════════════"
-        echo -e "${RED}  ⚠  ENCRYPTION KEY DESTRUCTION WARNING  ⚠${RESET}"
+        echo -e "$_C_RED  ⚠  ENCRYPTION KEY DESTRUCTION WARNING  ⚠$_C_RESET"
         echo "════════════════════════════════════════════════════════════"
         warn "The Age encryption key exists at:"
         warn "  ${AGE_KEY_FILE}"
@@ -278,7 +304,7 @@ if [[ -f "$AGE_KEY_FILE" ]] && [[ "$FORCE" == "false" ]]; then
         echo ""
         _AGE_PUBKEY=$(_extract_age_public_key "$AGE_KEY_FILE" 2>/dev/null \
             || echo "(Could not extract — inspect ${AGE_KEY_FILE} manually)")
-        echo -e "  ${CYAN}${_AGE_PUBKEY}${RESET}"
+        echo -e "  $_C_CYAN${_AGE_PUBKEY}$_C_RESET"
         echo ""
         warn "To proceed, re-run with the flag confirming you have saved"
         warn "the recovery kit to a location OUTSIDE this directory:"
@@ -577,7 +603,7 @@ if [[ -f "$AGE_KEY_FILE" ]] && [[ "$FORCE" == "false" ]]; then
 
     echo ""
     echo "════════════════════════════════════════════════════════════"
-    echo -e "${RED}  ⚠  FINAL CONFIRMATION — KEY WILL BE DESTROYED  ⚠${RESET}"
+    echo -e "$_C_RED  ⚠  FINAL CONFIRMATION — KEY WILL BE DESTROYED  ⚠$_C_RESET"
     echo "════════════════════════════════════════════════════════════"
     warn "You are about to permanently delete:"
     warn "  ${AGE_KEY_FILE}"
@@ -585,8 +611,8 @@ if [[ -f "$AGE_KEY_FILE" ]] && [[ "$FORCE" == "false" ]]; then
     warn "WITHOUT this key, ALL Age-encrypted backups are unrecoverable."
     warn ""
     if [[ -n "${_AGE_PUBKEY_NOW:-}" ]]; then
-        echo -e "${CYAN}  Age public key:${RESET}"
-        echo -e "  ${CYAN}${_AGE_PUBKEY_NOW}${RESET}"
+        echo -e "$_C_CYAN  Age public key:$_C_RESET"
+        echo -e "  $_C_CYAN${_AGE_PUBKEY_NOW}$_C_RESET"
         echo ""
         warn "Type the Age public key shown above to confirm you have it"
         warn "saved, then press Enter.  Type anything else to abort:"
