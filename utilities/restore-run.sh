@@ -25,6 +25,7 @@ _source_lib() {
     fi
 }
 _source_lib "lib/docker.sh"
+# _resolve_rclone_config and validate_rclone_config_path are provided by lib/backup-utils.sh
 _source_lib "lib/backup-utils.sh"
 _source_lib "lib/crypto.sh"
 _source_lib "lib/storage.sh"

@@ -9,6 +9,28 @@ re-runnable (idempotent), and accepts `--help` for usage details.
 
 ## Scripts
 
+| File | Dispatcher subcommand | sudo required | Description |
+|---|---|---|---|
+| `backup-run.sh` | `./backup.sh` (all subcommands) | Yes / No (`list`) | Full backup engine |
+| `maintenance-db-maint.sh` | `./maintenance.sh db-maint` | Yes | Deep database optimizations |
+| `maintenance-email.sh` | `./maintenance.sh test-email` | Yes | Email alert diagnostics |
+| `maintenance-health.sh` | `./maintenance.sh health` | Yes | System health probes |
+| `maintenance-run.sh` | `./maintenance.sh run` | Yes | Routine maintenance cycle |
+| `maintenance-update-dns.sh` | `./maintenance.sh update-dns` | Yes | Cloudflare A record updates |
+| `maintenance-update-firewall.sh` | `./maintenance.sh update-firewall` | Yes | Cloudflare IP → UFW sync |
+| `maintenance-update.sh` | `./maintenance.sh update` | Yes | System/package/docker updates |
+| `restore-run.sh` | `./restore.sh` (all subcommands) | Yes / No (`list`) | Full restore engine |
+| `setup-crowdsec.sh` | *(Standalone)* | Yes | CrowdSec installation |
+| `setup-env.sh` | *(Setup phase)* | Yes | Environment file generation |
+| `setup-firewall.sh` | *(Setup phase)* | Yes | Firewall configuration |
+| `setup-secrets.sh` | `./setup.sh secrets` | Yes | Secrets management |
+| `setup-storage.sh` | *(Setup phase)* | Yes | Storage setup and volume migration |
+| `setup-system.sh` | *(Setup phase)* | Yes | System preparation |
+| `setup-systemd.sh` | `./setup.sh systemd` | Yes | systemd timer management |
+| `uninstall-vaultwarden.sh` | *(Standalone)* | Yes | Full project teardown |
+
+---
+
 ### `setup-system.sh` — System preparation
 
 Installs OS dependencies (Docker, SOPS, age, etc.), configures swap, validates

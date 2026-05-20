@@ -214,7 +214,8 @@ optimize_database() {
         _wait_wal_quiesce "$host_db_path" 30
     fi
     log_info "Creating encrypted pre-optimization backup via backup.sh..."
-    if ! "${SCRIPT_DIR}/backup.sh" run db; then
+    # Use PROJECT_ROOT so this works correctly regardless of which script sources this lib
+    if ! "${PROJECT_ROOT:-$SCRIPT_DIR}/backup.sh" run db; then
         log_error "Pre-optimization backup FAILED — aborting to avoid an unsafe rollback point"
         [[ "$was_running" == "true" ]] && docker compose up -d vaultwarden
         return 1
@@ -271,8 +272,8 @@ optimize_database() {
 validate_system_health() {
     if [[ "${DRY_RUN:-false}" == "true" ]]; then log_info "[DRY RUN] Would validate system health"; return 0; fi
     log_info "Validating system health after maintenance..."
-    log_info "Invoking: $SCRIPT_DIR/maintenance.sh health --quiet"
-    if "$SCRIPT_DIR/maintenance.sh" health --quiet; then
+    log_info "Invoking: ${PROJECT_ROOT:-$SCRIPT_DIR}/utilities/maintenance-health.sh --quiet"
+    if "${PROJECT_ROOT:-$SCRIPT_DIR}/utilities/maintenance-health.sh" --quiet; then
         log_success "System health validation passed"
         return 0
     else
