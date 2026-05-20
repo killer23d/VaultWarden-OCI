@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # lib/secrets.sh - Shared secrets management functions
-# Used by edit-secrets.sh and setup.sh (--phase=secrets)
+# Used by utilities/secrets-edit.sh and setup.sh (--phase=secrets)
 #
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
@@ -701,7 +701,7 @@ auto_generate_secret_field() {
 
         email_api_token)
             # Placeholder for the email provider API token.
-            # Must be set via: ./edit-secrets.sh rotate email_api_token
+            # Must be set via: ./utilities/secrets-rotate.sh email_api_token
             log_warn "Auto mode: Using placeholder for email API token - configure via rotate email_api_token" >&2
             printf '%s' "CHANGE_ME_EMAIL_API_TOKEN"
             ;;
@@ -1200,7 +1200,7 @@ _validate_no_placeholders() {
         while IFS= read -r key; do
             log_error "  - $key"
         done <<< "$offending"
-        log_error "Run './setup.sh secrets' or './edit-secrets.sh rotate <field>' to configure these fields first."
+        log_error "Run './setup.sh secrets' or './utilities/secrets-rotate.sh <field>' to configure these fields first."
         return 1
     fi
 
@@ -1306,7 +1306,7 @@ export_docker_secrets() {
             || [[ "$_value" == "CHANGE_ME"* ]] \
             || [[ "$_value" == "NOT_USED"* ]] \
             || [[ "$_value" == "null" ]]; then
-            log_warn "export_docker_secrets: '$_key' skipped (placeholder/empty — rotate with: ./edit-secrets.sh rotate ${_key})"
+            log_warn "export_docker_secrets: '$_key' skipped (placeholder/empty — rotate with: ./utilities/secrets-rotate.sh ${_key})"
             unset _value
             continue
         fi

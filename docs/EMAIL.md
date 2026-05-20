@@ -80,7 +80,7 @@ Store the token in the canonical `email_api_token` key (used for all providers):
 
 ```bash
 # Any provider selected by EMAIL_PROVIDER uses this same secrets key
-./edit-secrets.sh rotate email_api_token
+./utilities/secrets-rotate.sh email_api_token
 ```
 
 In `.env`, uncomment **only** the line matching your `EMAIL_PROVIDER` and leave
@@ -135,7 +135,7 @@ SMTP_TIMEOUT=30
 Store the SMTP password in secrets (never in `.env`):
 
 ```bash
-./edit-secrets.sh rotate smtp_password
+./utilities/secrets-rotate.sh smtp_password
 ```
 
 ### VaultWarden container SMTP
@@ -213,7 +213,7 @@ POSTFIX_MESSAGE_SIZE_LIMIT=10240000
 The SMTP password is injected via Docker secret — store it with:
 
 ```bash
-./edit-secrets.sh rotate smtp_password
+./utilities/secrets-rotate.sh smtp_password
 ```
 
 ### Postfix container versions
@@ -339,7 +339,7 @@ MAILGUN_DOMAIN=mg.yourdomain.com  # optional — set only if different from SMTP
 > backward-compatibility shim maps it to `SMTP_FROM` at runtime. Migrate
 > to `SMTP_FROM=` — the shim will be removed in a future release.
 
-### Secrets (via `./edit-secrets.sh edit`)
+### Secrets (via `./utilities/secrets-edit.sh`)
 
 | Secret key | Used by | Description |
 | :-- | :-- | :-- |
@@ -401,11 +401,11 @@ docker compose logs vaultwarden | grep -i smtp
 
 | Symptom | Likely cause | Fix |
 | :-- | :-- | :-- |
-| API tier always fails | Token not set or wrong key name | Run `./edit-secrets.sh edit` and verify the matching `email_api_token` is set |
+| API tier always fails | Token not set or wrong key name | Run `./utilities/secrets-edit.sh` and verify the matching `email_api_token` is set |
 | SMTP tier `SSL handshake failed` | `SMTP_SECURITY` mismatch | `starttls` → port 587; `on` → port 465 |
 | VaultWarden email fails with "authentication required" | `VW_SMTP_AUTH_MECHANISM` not set to `none` | Set `VW_SMTP_AUTH_MECHANISM=none` and `VW_SMTP_EXPLICIT_TLS=false` in `.env` |
 | VaultWarden sends email but `lib/common.sh` (email functions) does not | `SMTP_*` misconfigured; Postfix not relaying | Check Postfix logs: `docker compose logs postfix` |
-| Postfix `SASL authentication failed` | Wrong SMTP password in secrets | `./edit-secrets.sh rotate smtp_password` |
+| Postfix `SASL authentication failed` | Wrong SMTP password in secrets | `./utilities/secrets-rotate.sh smtp_password` |
 | Mailgun HTTP 404 `Domain not found` | Wrong API region | Set `MAILGUN_REGION=eu` in `.env` for EU accounts |
 | All tiers fail silently on `EMAIL_MODE=auto` | `EMAIL_MODE` typo or not set | `grep EMAIL_MODE .env` — must be `auto`, `api`, `smtp`, or `host` |
 

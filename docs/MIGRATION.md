@@ -46,7 +46,7 @@ cd VaultWarden-OCI
 chmod +x *.sh
 
 sudo ./setup.sh install --domain vault.example.com --email admin@example.com
-./edit-secrets.sh edit
+./utilities/secrets-edit.sh
 nano .env
 ```
 
@@ -123,7 +123,7 @@ bw export --output vault-export.json --format json
 **2. Set up target:**
 ```bash
 sudo ./setup.sh install --domain vault.example.com --email admin@example.com
-./edit-secrets.sh edit
+./utilities/secrets-edit.sh
 nano .env
 ./startup.sh
 ```
@@ -157,7 +157,7 @@ bw export --output bitwarden-export.json --format json
 git clone https://github.com/killer23d/VaultWarden-OCI.git
 cd VaultWarden-OCI
 sudo ./setup.sh install --domain vault.example.com --email admin@example.com
-./edit-secrets.sh edit
+./utilities/secrets-edit.sh
 nano .env
 ./startup.sh
 ```
@@ -267,7 +267,7 @@ scp vaultwarden-backup.tar.gz user@new-server:/tmp/
 git clone https://github.com/killer23d/VaultWarden-OCI.git
 cd VaultWarden-OCI
 sudo ./setup.sh install --domain vault.example.com --email admin@example.com
-./edit-secrets.sh edit
+./utilities/secrets-edit.sh
 nano .env
 
 # 4. Migrate data
@@ -308,7 +308,7 @@ cd /path/to/VaultWarden-OCI
 ./setup.sh secrets --hash-only
 
 # Update secrets
-./edit-secrets.sh edit
+./utilities/secrets-edit.sh
 # Set: admin_basic_auth_hash (and admin_token if desired)
 
 # Restart services to apply
@@ -335,7 +335,7 @@ sudo systemctl list-timers 'vaultwarden-*'
 ./maintenance.sh test-email --verbose
 ```
 
-> **Email migration note:** `lib/common.sh` (email functions) provides API → SMTP → host-MTA fallback for script-driven alerts. The Postfix sidecar handles VaultWarden container mail, so keep the `postfix` service enabled unless you have deliberately removed those paths. Set `EMAIL_PROVIDER` in `.env`, store `email_api_token` with `./edit-secrets.sh rotate email_api_token`, and see [CONFIGURATION.md](CONFIGURATION.md) for the full reference.
+> **Email migration note:** `lib/common.sh` (email functions) provides API → SMTP → host-MTA fallback for script-driven alerts. The Postfix sidecar handles VaultWarden container mail, so keep the `postfix` service enabled unless you have deliberately removed those paths. Set `EMAIL_PROVIDER` in `.env`, store `email_api_token` with `./utilities/secrets-rotate.sh email_api_token`, and see [CONFIGURATION.md](CONFIGURATION.md) for the full reference.
 
 ### Update Client Applications
 
@@ -395,7 +395,7 @@ sudo chmod -R 755      /var/lib/vaultwarden/data/attachments
 
 ```bash
 # Check secrets are decryptable
-./edit-secrets.sh list
+./utilities/secrets-list.sh
 
 # Verify VaultWarden is running
 docker compose ps vaultwarden
@@ -417,7 +417,7 @@ curl -I https://vault.example.com/admin
 grep -E 'EMAIL_MODE|EMAIL_PROVIDER|SMTP_HOST' .env
 
 # Verify API token is set in secrets
-./edit-secrets.sh view  # Confirm email_api_token is present
+./utilities/secrets-view.sh  # Confirm email_api_token is present
 ```
 
 ### Systemd timers not running

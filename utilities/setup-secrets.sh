@@ -57,8 +57,8 @@ SUBCOMMANDS:
     bootstrap           Bootstrap Age key, SOPS config, and placeholder secrets
                         (called automatically by setup.sh install phase)
     configure           Full interactive/auto secrets setup (replaces setup.sh secrets)
-    rotate [KEY]        Rotate one or all credentials (delegates to edit-secrets.sh)
-    export-recovery-kit Export encrypted recovery kit (delegates to edit-secrets.sh)
+    rotate [KEY]        Rotate one or all credentials (delegates to utilities/secrets-edit.sh)
+    export-recovery-kit Export encrypted recovery kit (delegates to utilities/secrets-edit.sh)
     breakglass [FLAGS]  Emergency break-glass admin account management
 
 Run: setup-secrets.sh SUBCOMMAND --help  for subcommand-specific help.
@@ -395,6 +395,12 @@ SOPS_EOF
     # ---------------------------------------------------------------------------
     # yaml_escape VALUE
     # ---------------------------------------------------------------------------
+    # NOTE: Consolidation with yaml_scalar() in utilities/secrets-rotate.sh was
+    # intentionally rejected because they have genuinely different semantics.
+    # yaml_escape() produces single-quoted scalars and only escapes embedded single
+    # quotes. It is used here to write a fresh YAML file where values are known.
+    # By contrast, yaml_scalar() handles complex control characters requiring
+    # double-quoted escape sequences when replacing values in an existing file.
     yaml_escape() {
         local value="$1"
         local escaped="${value//\'/\'\'}"
@@ -828,11 +834,11 @@ SOPS_EOF
 }
 
 # ---------------------------------------------------------------------------
-# _cmd_rotate — thin wrapper to edit-secrets.sh rotate
+# _cmd_rotate — thin wrapper to utilities/secrets-rotate.sh
 # ---------------------------------------------------------------------------
 _cmd_rotate() {
     local key="${1:-}"
-    local edit_sh="${PROJECT_ROOT}/edit-secrets.sh"
+    local edit_sh="${PROJECT_ROOT}/utilities/secrets-edit.sh"
     _require_script "$edit_sh"
     if [[ -n "$key" ]]; then
         exec "$edit_sh" rotate "$key"
@@ -842,10 +848,10 @@ _cmd_rotate() {
 }
 
 # ---------------------------------------------------------------------------
-# _cmd_export_recovery_kit — thin wrapper to edit-secrets.sh export-recovery-kit
+# _cmd_export_recovery_kit — thin wrapper to utilities/secrets-export-recovery-kit.sh
 # ---------------------------------------------------------------------------
 _cmd_export_recovery_kit() {
-    local edit_sh="${PROJECT_ROOT}/edit-secrets.sh"
+    local edit_sh="${PROJECT_ROOT}/utilities/secrets-edit.sh"
     _require_script "$edit_sh"
     exec "$edit_sh" export-recovery-kit
 }

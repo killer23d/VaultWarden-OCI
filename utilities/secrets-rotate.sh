@@ -321,6 +321,8 @@ PYEOF
         log_warn "Could not auto-redeploy Docker secret files. Run: ./startup.sh or ./setup.sh secrets"
     fi
 
+    # Pass "false": rotate does not auto-export a recovery kit. Run
+    # utilities/secrets-export-recovery-kit.sh explicitly after rotation if needed.
     offer_recovery_kit_export "false"
 
     return 0

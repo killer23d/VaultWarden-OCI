@@ -533,7 +533,7 @@ set_script_permissions() {
     # 1. Root-level operator scripts — chmod +x
     local root_scripts=(
         "setup.sh"
-        "edit-secrets.sh"
+        "utilities/secrets-edit.sh"
         "backup.sh"
         "restore.sh"
         "startup.sh"

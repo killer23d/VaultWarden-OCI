@@ -220,7 +220,7 @@ check_email_config_consistency() {
       if [[ ! -f "$token_file" ]] || [[ ! -s "$token_file" ]]; then
         log_warn "EMAIL_MODE=api is set but '${token_file}' is absent or empty."
         log_warn "  All alert emails will fail silently until the token is populated."
-        log_warn "  Fix: ./edit-secrets.sh rotate email_api_token"
+        log_warn "  Fix: ./utilities/secrets-rotate.sh email_api_token"
       fi
       ;;
     smtp)
@@ -229,7 +229,7 @@ check_email_config_consistency() {
       if [[ ! -f "$pw_file" ]] || [[ ! -s "$pw_file" ]]; then
         log_warn "EMAIL_MODE=smtp is set but '${pw_file}' is absent or empty."
         log_warn "  SMTP relay authentication will fail on first send."
-        log_warn "  Fix: ./edit-secrets.sh rotate smtp_password"
+        log_warn "  Fix: ./utilities/secrets-rotate.sh smtp_password"
       fi
       ;;
     auto|host)
@@ -261,7 +261,7 @@ load_environment() {
 
     # Warn if .env is root-owned while startup is running as a non-root user.
     # startup.sh runs via `sudo ./startup.sh` so it CAN read root:root 600 .env,
-    # but non-root tools (edit-secrets.sh, etc.) will get Permission denied.
+    # but non-root tools (utilities/secrets-edit.sh, etc.) will get Permission denied.
     local env_owner
     env_owner=$(stat -c '%U' ".env" 2>/dev/null || echo "unknown")
     local real_user
@@ -270,7 +270,7 @@ load_environment() {
       local real_group
       real_group=$(id -gn "${real_user}" 2>/dev/null || echo "${real_user}")
       log_warn ".env is owned by root but startup is running as ${real_user}."
-      log_warn "Non-root tools (edit-secrets.sh, etc.) cannot read .env."
+      log_warn "Non-root tools (utilities/secrets-edit.sh, etc.) cannot read .env."
       log_warn "Fix: sudo chown ${real_user}:${real_group} .env && sudo chmod 600 .env"
     fi
   else

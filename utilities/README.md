@@ -20,11 +20,11 @@ re-runnable (idempotent), and accepts `--help` for usage details.
 | `maintenance-update-firewall.sh` | `./maintenance.sh update-firewall` | Yes | Cloudflare IP → UFW sync |
 | `maintenance-update.sh` | `./maintenance.sh update` | Yes | System/package/docker updates |
 | `restore-run.sh` | `./restore.sh` (all subcommands) | Yes / No (`list`) | Full restore engine |
-| `secrets-edit.sh` | `./edit-secrets.sh edit` | No | Interactive encrypted secrets editor |
-| `secrets-export-recovery-kit.sh` | `./edit-secrets.sh export-recovery-kit` | No | Export plaintext recovery document |
-| `secrets-list.sh` | `./edit-secrets.sh list` | No | List secret key names (no values) |
-| `secrets-rotate.sh` | `./edit-secrets.sh rotate FIELD` | No | Rotate a single credential |
-| `secrets-view.sh` | `./edit-secrets.sh view` | No | View decrypted secrets read-only |
+| `secrets-edit.sh` | `./utilities/secrets-edit.sh` | No | Interactive encrypted secrets editor |
+| `secrets-export-recovery-kit.sh` | `./utilities/secrets-export-recovery-kit.sh` | No | Export plaintext recovery document |
+| `secrets-list.sh` | `./utilities/secrets-list.sh` | No | List secret key names (no values) |
+| `secrets-rotate.sh` | `./utilities/secrets-rotate.sh FIELD` | No | Rotate a single credential |
+| `secrets-view.sh` | `./utilities/secrets-view.sh` | No | View decrypted secrets read-only |
 | `setup-crowdsec.sh` | *(Standalone)* | Yes | CrowdSec installation |
 | `setup-env.sh` | *(Setup phase)* | Yes | Environment file generation |
 | `setup-firewall.sh` | *(Setup phase)* | Yes | Firewall configuration |
@@ -39,11 +39,11 @@ re-runnable (idempotent), and accepts `--help` for usage details.
 ### `secrets-list.sh` — List secret key names
 
 Lists all secret key names in `secrets/secrets.yaml` without decrypting any values.
-Also invocable via `./edit-secrets.sh list`.
+Also invocable via `./utilities/secrets-list.sh`.
 
 ```bash
 ./utilities/secrets-list.sh list
-./edit-secrets.sh list
+./utilities/secrets-list.sh
 ```
 
 ---
@@ -51,12 +51,12 @@ Also invocable via `./edit-secrets.sh list`.
 ### `secrets-view.sh` — View decrypted secrets (read-only)
 
 Decrypts and displays `secrets/secrets.yaml` in a read-only pager. No changes
-are saved. Also invocable via `./edit-secrets.sh view`.
+are saved. Also invocable via `./utilities/secrets-view.sh`.
 
 ```bash
 ./utilities/secrets-view.sh view
 ./utilities/secrets-view.sh view --editor vim
-./edit-secrets.sh view
+./utilities/secrets-view.sh
 ```
 
 ---
@@ -65,13 +65,13 @@ are saved. Also invocable via `./edit-secrets.sh view`.
 
 Decrypts, opens in `$EDITOR`, validates YAML, re-encrypts, and backs up on
 every save. Offers recovery kit export after modifications.
-Also invocable via `./edit-secrets.sh edit`.
+Also invocable via `./utilities/secrets-edit.sh`.
 
 ```bash
 ./utilities/secrets-edit.sh edit
 ./utilities/secrets-edit.sh edit --editor vim
 ./utilities/secrets-edit.sh edit --no-backup
-./edit-secrets.sh edit --editor 'code --wait'
+./utilities/secrets-edit.sh --editor 'code --wait'
 ```
 
 ---
@@ -80,14 +80,14 @@ Also invocable via `./edit-secrets.sh edit`.
 
 Re-collects and re-hashes one named credential, atomically re-encrypts
 `secrets/secrets.yaml`, and resyncs Docker secret bind-mount files.
-Also invocable via `./edit-secrets.sh rotate FIELD`.
+Also invocable via `./utilities/secrets-rotate.sh FIELD`.
 
 ```bash
 ./utilities/secrets-rotate.sh rotate admin_token
 ./utilities/secrets-rotate.sh rotate email_api_token --dry-run
 ./utilities/secrets-rotate.sh rotate smtp_password --no-backup
-./edit-secrets.sh rotate caddy_cloudflare_dns_token
-./edit-secrets.sh rotate backup_passphrase
+./utilities/secrets-rotate.sh caddy_cloudflare_dns_token
+./utilities/secrets-rotate.sh backup_passphrase
 ```
 
 Supported fields: `admin_token`, `admin_basic_auth_hash`,
@@ -101,11 +101,11 @@ Supported fields: `admin_token`, `admin_basic_auth_hash`,
 Decrypts secrets, validates no placeholder values remain, then exports a
 full recovery document (Age private key + all credentials) to a tmpfs-backed
 file (mode 0600) with a 30-minute auto-delete via `at(1)`.
-Also invocable via `./edit-secrets.sh export-recovery-kit`.
+Also invocable via `./utilities/secrets-export-recovery-kit.sh`.
 
 ```bash
 ./utilities/secrets-export-recovery-kit.sh export-recovery-kit
-./edit-secrets.sh export-recovery-kit
+./utilities/secrets-export-recovery-kit.sh
 ```
 
 ---

@@ -97,7 +97,7 @@ FULL SETUP OPTIONS (used after install or with top-level --domain / --email):
                       WARNING: Also regenerates the Age encryption key. All
                       existing encrypted secrets become permanently unrecoverable
                       without a prior recovery kit export. Run
-                      './edit-secrets.sh export-recovery-kit' BEFORE using
+                      './utilities/secrets-export-recovery-kit.sh' BEFORE using
                       --force on a running installation. To confirm you understand,
                       set VW_FORCE_ACK=I_UNDERSTAND_LOSING_OLD_BACKUPS in the
                       environment (or answer 'yes' at the interactive prompt).
@@ -211,7 +211,7 @@ if [[ "$FORCE" == "true" ]] && [[ "$DRY_RUN" != "true" ]]; then
         log_error "--force regenerates the Age key and permanently orphans all existing"
         log_error "encrypted backups unless you have first exported a recovery kit."
         log_error ""
-        log_error "  Export your recovery kit FIRST: ./edit-secrets.sh export-recovery-kit"
+        log_error "  Export your recovery kit FIRST: ./utilities/secrets-export-recovery-kit.sh"
         log_error ""
         log_error "If you have already done that, re-run with:"
         log_error "  VW_FORCE_ACK=I_UNDERSTAND_LOSING_OLD_BACKUPS sudo ./setup.sh --force ..."
@@ -305,22 +305,22 @@ EOF
             "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf 'These fields still contain CHANGE_ME placeholders.\n'
         printf 'Set them BEFORE running %smake up%s:\n\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '  %s./edit-secrets.sh rotate caddy_cloudflare_dns_token%s\n' \
+        printf '  %s./utilities/secrets-rotate.sh caddy_cloudflare_dns_token%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '  %s./edit-secrets.sh rotate smtp_password%s         (if using SMTP/email notifications)\n' \
+        printf '  %s./utilities/secrets-rotate.sh smtp_password%s         (if using SMTP/email notifications)\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '  %s./edit-secrets.sh rotate email_api_token%s       (if using API-based email, e.g. MAILERSEND_API_TOKEN)\n' \
+        printf '  %s./utilities/secrets-rotate.sh email_api_token%s       (if using API-based email, e.g. MAILERSEND_API_TOKEN)\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '  %s./edit-secrets.sh rotate push_installation_id%s  (optional — mobile push)\n' \
+        printf '  %s./utilities/secrets-rotate.sh push_installation_id%s  (optional — mobile push)\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '  %s./edit-secrets.sh rotate push_installation_key%s (optional — mobile push)\n' \
+        printf '  %s./utilities/secrets-rotate.sh push_installation_key%s (optional — mobile push)\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
 
         printf '\n%s--- NEXT STEPS ---%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
         printf '1. Edit .env:           %s%s%s\n' "${COLOR_YELLOW}" "$env_edit_cmd" "${COLOR_RESET}"
         printf '   ► Set: CLOUDFLARE_ZONE_ID, SMTP_HOST, SMTP_PORT, SMTP_USERNAME\n'
         printf '   ► Verify: DOMAIN and ADMIN_EMAIL are correct\n'
-        printf '2. Set external tokens: %s(use ./edit-secrets.sh rotate commands above)%s\n' \
+        printf '2. Set external tokens: %s(use ./utilities/secrets-rotate.sh commands above)%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '3. Setup CrowdSec:      %ssudo ./utilities/setup-crowdsec.sh%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
@@ -328,7 +328,7 @@ EOF
         printf '4. Start services:      %smake up%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '5. Setup automation:    %ssudo ./setup.sh systemd install%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '6. Export recovery kit: %s./edit-secrets.sh export-recovery-kit%s\n' \
+        printf '6. Export recovery kit: %s./utilities/secrets-export-recovery-kit.sh%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '   %s(Run AFTER step 2 so all secrets are included in the kit)%s\n' \
             "${COLOR_RED}" "${COLOR_RESET}"
@@ -349,7 +349,7 @@ EOF
         printf '4. Start services:      %smake up%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '5. Setup automation:    %ssudo ./setup.sh systemd install%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '6. Export recovery kit: %s./edit-secrets.sh export-recovery-kit%s\n' \
+        printf '6. Export recovery kit: %s./utilities/secrets-export-recovery-kit.sh%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '   %s(Run AFTER step 2 so all secrets are included in the kit)%s\n' \
             "${COLOR_RED}" "${COLOR_RESET}"
@@ -509,14 +509,14 @@ main() {
         log_info ""
         log_info "Then add your Cloudflare API token:"
         log_info ""
-        log_info "  ./edit-secrets.sh rotate crowdsec_cf_firewall_token"
+        log_info "  ./utilities/secrets-rotate.sh crowdsec_cf_firewall_token"
         log_info ""
         printf 'Press ENTER to continue with the post-install summary, or Ctrl-C to exit now...'
         read -r _cs_prompt_ack || true
         unset _cs_prompt_ack
     else
         log_info "Next step: sudo ./utilities/setup-crowdsec.sh"
-        log_info "Then add your Cloudflare API token: ./edit-secrets.sh rotate crowdsec_cf_firewall_token"
+        log_info "Then add your Cloudflare API token: ./utilities/secrets-rotate.sh crowdsec_cf_firewall_token"
     fi
 
     # ── 6. Auto secrets (AUTO_MODE only) ────────────────────────────────────
