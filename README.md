@@ -154,7 +154,7 @@ sudo ./setup.sh systemd install
 ./edit-secrets.sh export-recovery-kit
 
 # Create emergency admin for OCI serial console recovery
-sudo utilities/create-breakglass-admin.sh create    # or: make breakglass-create
+sudo utilities/setup-secrets.sh breakglass create    # or: make breakglass-create
 ```
 
 > **`setup.sh systemd` improvement:** `setup.sh systemd install` now validates all `OnCalendar=` expressions via `systemd-analyze calendar` before enabling timers and warns on invalid expressions. All generated service units now include an `[Install]` section (`WantedBy=multi-user.target`) so `systemctl enable` is no longer a no-op. See [docs/ADVANCED-CUSTOMIZATION.md](docs/ADVANCED-CUSTOMIZATION.md) for timer details.
@@ -303,7 +303,7 @@ Full details, provider setup, Postfix MTA configuration, and troubleshooting: **
 | `restore.sh` | Interactive or automated restore with a reworked flow: interactive Age decryption key prompt; `--key-file` flag and `RESTORE_AGE_KEY_FILE` env var for scripted/CI use; pre-restore key round-trip validation; post-restore automatic Age key generation and rotation. Uses host `sqlite3` for archive integrity verification — no Docker required. |
 | `maintenance.sh` | System cleanup, DNS update, DB maintenance, email test, health monitoring (`health` subcommand), and container updates (`update` subcommand). |
 | `edit-secrets.sh` | Secure secrets editor (Age + SOPS) — rotate individual fields, list keys, export recovery kit |
-| `utilities/create-breakglass-admin.sh` | Emergency OCI serial console admin. |
+| `utilities/setup-secrets.sh breakglass` | Emergency OCI serial console admin. |
 | `utilities/uninstall-vaultwarden.sh` | Full stack removal |
 
 Full reference: [docs/SCRIPTS.md](docs/SCRIPTS.md)
