@@ -644,9 +644,104 @@ EOF
     return 0
 }
 
+_resolve_rclone_config() {
+    local cfg_from_env
+    cfg_from_env="$(get_config_value "RCLONE_CONFIG" "")"
+
+    # Priority 1: explicit value from .env / environment
+    if [[ -n "$cfg_from_env" ]]; then
+        echo "$cfg_from_env"
+        return 0
+    fi
+
+    # Priority 2: system-wide config (canonical location for root-run services)
+    if [[ -f "/etc/rclone/rclone.conf" ]]; then
+        echo "/etc/rclone/rclone.conf"
+        return 0
+    fi
+
+    # Priority 3: root's own config
+    if [[ -f "/root/.config/rclone/rclone.conf" ]]; then
+        echo "/root/.config/rclone/rclone.conf"
+        return 0
+    fi
+
+    # Priority 4: the user who called sudo (most common single-user case)
+    if [[ -n "${SUDO_USER:-}" ]]; then
+        local sudo_user_home
+        sudo_user_home="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6 || true)"
+        if [[ -n "$sudo_user_home" && -f "$sudo_user_home/.config/rclone/rclone.conf" ]]; then
+            echo "$sudo_user_home/.config/rclone/rclone.conf"
+            return 0
+        fi
+    fi
+
+    # Priority 5: single non-root user heuristic
+    local found_cfg
+    for found_cfg in /home/*/.config/rclone/rclone.conf; do
+        if [[ -f "$found_cfg" ]]; then
+            log_warn "Auto-discovered rclone config via glob: $found_cfg"
+            log_warn "On multi-user hosts, set RCLONE_CONFIG=$found_cfg in .env to avoid credential mix-ups."
+            echo "$found_cfg"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+validate_rclone_config_path() {
+    local cfg_path="$1"
+
+    if [[ -z "$cfg_path" ]]; then
+        log_error "RCLONE_CONFIG is empty" >&2
+        return 1
+    fi
+
+    if [[ "$cfg_path" =~ [^a-zA-Z0-9_./:~-] ]]; then
+        log_error "RCLONE_CONFIG path contains disallowed characters: $cfg_path" >&2
+        return 1
+    fi
+
+    local canonical
+    canonical=$(realpath -e "$cfg_path" 2>/dev/null) || {
+        log_error "RCLONE_CONFIG path does not exist or cannot be resolved: $cfg_path" >&2
+        return 1
+    }
+
+    local -a sensitive_prefixes=(
+        "/etc/passwd"
+        "/etc/shadow"
+        "/etc/sudoers"
+        "/etc/ssh"
+        "/root"
+        "/proc"
+        "/sys"
+    )
+    for prefix in "${sensitive_prefixes[@]}"; do
+        if [[ "$canonical" == "$prefix" || "$canonical" == "$prefix/"* ]]; then
+            log_error "RCLONE_CONFIG resolves to sensitive path: $canonical" >&2
+            return 1
+        fi
+    done
+
+    if [[ ! -f "$canonical" ]]; then
+        log_error "RCLONE_CONFIG is not a regular file: $canonical" >&2
+        return 1
+    fi
+    local file_perms
+    file_perms=$(stat -c "%a" "$canonical" 2>/dev/null || stat -f "%Lp" "$canonical" 2>/dev/null || echo "777")
+    if (( (8#$file_perms & 8#002) != 0 )); then
+        log_error "RCLONE_CONFIG is world-writable — refusing to use: $canonical" >&2
+        return 1
+    fi
+
+    return 0
+}
+
 export -f list_backups validate_backup_integrity check_backup_disk_space
 export -f cleanup_old_backups get_backup_statistics create_backup_metadata
 export -f verify_backup_integrity get_backup_size _backup_ctime_age_days
-export -f _backup_filename_age_days _format_bytes_human
+export -f _backup_filename_age_days _format_bytes_human _resolve_rclone_config validate_rclone_config_path
 
 log_debug "Backup utilities library loaded successfully - standardized error handling" 2>/dev/null || true
