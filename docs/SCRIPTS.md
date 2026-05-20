@@ -25,7 +25,7 @@ Complete reference for all management scripts and utility libraries in VaultWard
 | 4 | `restore.sh` | Backup | — |
 | 5 | `edit-secrets.sh` | Secrets | — |
 | 6 | `maintenance.sh` | Maintenance + health + update (merged) | `db-maint` only |
-| 7 | `utilities/create-breakglass-admin.sh` | Emergency | ✅ |
+| 7 | `utilities/setup-secrets.sh breakglass` | Emergency | ✅ |
 | 8 | `utilities/uninstall-vaultwarden.sh` | Uninstall | ✅ |
 
 **Utility libraries (5):** `lib/common.sh` *(includes email)*, `lib/docker.sh`, `lib/crypto.sh` *(includes key resilience + security)*, `lib/backup-utils.sh`, `lib/secrets.sh`
@@ -507,11 +507,11 @@ make update
 
 ---
 
-### 9. `utilities/create-breakglass-admin.sh`
+### 9. `utilities/setup-secrets.sh breakglass`
 **Purpose:** Emergency OS admin account for OCI Serial Console access
 
 ```bash
-utilities/create-breakglass-admin.sh <subcommand>
+utilities/setup-secrets.sh breakglass <subcommand>
 ```
 
 **Key features:**
@@ -531,7 +531,7 @@ utilities/create-breakglass-admin.sh <subcommand>
 | `remove` | Remove the emergency admin account |
 
 ```bash
-utilities/create-breakglass-admin.sh create
+utilities/setup-secrets.sh breakglass create
 
 make breakglass-create
 make breakglass-status
@@ -749,9 +749,9 @@ All common operations have Makefile shortcuts. Run `make help` to see the full t
 | `make key-rotate` | `lib/crypto.sh rotate_age_key` | Rotate the Age encryption key (generates new key, updates all locations) |
 | `make key-show` | — | Show current Age public key and key file path/status |
 | `make key-health` | `lib/crypto.sh check_age_key_health` | Check Age key health (permissions, decodability) |
-| `make breakglass-create` | `sudo utilities/create-breakglass-admin.sh create` | Create emergency OS admin account |
-| `make breakglass-status` | `sudo utilities/create-breakglass-admin.sh status` | Show break-glass admin status |
-| `make breakglass-remove` | `sudo utilities/create-breakglass-admin.sh remove --force` | Remove break-glass admin account |
+| `make breakglass-create` | `sudo utilities/setup-secrets.sh breakglass create` | Create emergency OS admin account |
+| `make breakglass-status` | `sudo utilities/setup-secrets.sh breakglass status` | Show break-glass admin status |
+| `make breakglass-remove` | `sudo utilities/setup-secrets.sh breakglass remove --force` | Remove break-glass admin account |
 | `make install-systemd` | `sudo ./setup.sh systemd install` | Install systemd units and sync scripts to `/opt` |
 | `make remove-systemd` | `sudo ./setup.sh systemd remove` | Remove all vaultwarden systemd timer units |
 | `make systemd-status` | `sudo ./setup.sh systemd status` | Show status of all vaultwarden systemd units |
@@ -949,7 +949,7 @@ automatically on any process exit, including SIGKILL and OOM kill.
 
 ### Script Execution
 1. **Run from project root** — all scripts resolve paths relative to `SCRIPT_DIR`
-2. **Use `sudo` where required** — `setup.sh`, `utilities/create-breakglass-admin.sh`, `maintenance.sh db-maint`, and direct `backup.sh` calls in production
+2. **Use `sudo` where required** — `setup.sh`, `utilities/setup-secrets.sh breakglass`, `maintenance.sh db-maint`, and direct `backup.sh` calls in production
 3. **Check `--help` first** — every script supports `--help`
 4. **Use `--dry-run`** — preview any operation before applying
 

@@ -25,8 +25,8 @@ sudo utilities/setup-system.sh --dry-run
 ### `setup-firewall.sh` — Firewall configuration
 
 Configures UFW (Cloudflare IP allowlist) and iptables (DOCKER-USER chain,
-MASQUERADE, OCI default FORWARD-REJECT removal). Merged from the former
-`setup-iptables.sh`.
+MASQUERADE, OCI default FORWARD-REJECT removal). Consolidates the former
+standalone iptables helper into a single firewall utility.
 
 ```bash
 sudo utilities/setup-firewall.sh --phase all       # UFW + iptables (default)
@@ -40,8 +40,8 @@ sudo utilities/setup-firewall.sh --dry-run
 ### `setup-storage.sh` — Storage setup and volume migration
 
 Creates the project directory structure, re-checks permissions, or migrates
-from boot volume to a dedicated data volume. Merged from the former
-`migrate-volume.sh`.
+from boot volume to a dedicated data volume. Consolidates the former
+standalone migration helper into this script.
 
 ```bash
 sudo utilities/setup-storage.sh --mode setup           # create layout (first run)
@@ -67,7 +67,7 @@ sudo utilities/setup-env.sh --domain vault.example.com --email admin@example.com
 ### `setup-secrets.sh` — Secrets management
 
 Full secrets lifecycle: setup, rotation, recovery-kit export, and emergency
-break-glass admin. Merged from the former `create-breakglass-admin.sh`.
+break-glass admin. Consolidates the former standalone break-glass helper.
 
 ```bash
 sudo utilities/setup-secrets.sh configure             # full interactive secrets setup

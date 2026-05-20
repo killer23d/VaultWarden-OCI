@@ -824,13 +824,13 @@ A dedicated emergency admin account for OCI serial console access:
 
 ```bash
 # Create emergency admin
-sudo utilities/create-breakglass-admin.sh create
+sudo utilities/setup-secrets.sh breakglass create
 
 # Or use Makefile
 make breakglass-create
 
 # Check status
-sudo utilities/create-breakglass-admin.sh status
+sudo utilities/setup-secrets.sh breakglass status
 make breakglass-status
 ```
 

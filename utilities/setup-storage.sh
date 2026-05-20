@@ -81,7 +81,7 @@ trap '_ss_cleanup' EXIT
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # MIGRATE MODE — constants, helpers, and pipeline steps
-# (Adapted from utilities/migrate-volume.sh — all _mv_* functions)
+# (Adapted from the former standalone migration utility — all _mv_* functions)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 readonly _MV_VERSION="1.1.0"
@@ -1750,6 +1750,9 @@ _mode_setup() {
     export DATA_VOLUME_MOUNT="${_SS_DATA_MOUNT}"
 
     setup_data_volume || return 1
+    # Install a Docker systemd drop-in that delays Docker start until the
+    # data volume is mounted. No-op when DATA_VOLUME_DEVICE is unset.
+    install_docker_mount_guard || log_warn "Docker mount guard setup had a non-fatal issue"
     setup_directories || return 1
 
     log_success "Storage setup complete."

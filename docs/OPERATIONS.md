@@ -499,18 +499,18 @@ sudo make key-rotate
 
 ```bash
 # Create emergency admin account
-utilities/create-breakglass-admin.sh create
+utilities/setup-secrets.sh breakglass create
 make breakglass-create
 
 # Check status
-utilities/create-breakglass-admin.sh status
+utilities/setup-secrets.sh breakglass status
 make breakglass-status
 
 # Generate new password
-utilities/create-breakglass-admin.sh create --force
+utilities/setup-secrets.sh breakglass create --force
 
 # Remove when no longer needed
-utilities/create-breakglass-admin.sh remove
+utilities/setup-secrets.sh breakglass remove
 make breakglass-remove
 ```
 

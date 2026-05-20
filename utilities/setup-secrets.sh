@@ -5,6 +5,7 @@
 #   sudo utilities/setup-secrets.sh SUBCOMMAND [OPTIONS]
 #
 # SUBCOMMANDS:
+#   bootstrap           Bootstrap Age key, SOPS config, and placeholder secrets
 #   configure           Full interactive/auto secrets setup
 #   rotate [KEY]        Rotate one or all credentials
 #   export-recovery-kit Export encrypted recovery kit
@@ -53,6 +54,8 @@ USAGE:
     sudo utilities/setup-secrets.sh SUBCOMMAND [OPTIONS]
 
 SUBCOMMANDS:
+    bootstrap           Bootstrap Age key, SOPS config, and placeholder secrets
+                        (called automatically by setup.sh install phase)
     configure           Full interactive/auto secrets setup (replaces setup.sh secrets)
     rotate [KEY]        Rotate one or all credentials (delegates to edit-secrets.sh)
     export-recovery-kit Export encrypted recovery kit (delegates to edit-secrets.sh)
@@ -61,6 +64,7 @@ SUBCOMMANDS:
 Run: setup-secrets.sh SUBCOMMAND --help  for subcommand-specific help.
 
 EXAMPLES:
+    sudo utilities/setup-secrets.sh bootstrap
     sudo utilities/setup-secrets.sh configure
     sudo utilities/setup-secrets.sh configure --auto
     sudo utilities/setup-secrets.sh rotate email_api_token
@@ -904,7 +908,7 @@ _cmd_export_recovery_kit() {
 
 # ---------------------------------------------------------------------------
 # _cmd_breakglass — emergency break-glass admin account management
-# (merged from utilities/create-breakglass-admin.sh)
+# (merged from the former standalone break-glass utility)
 # ---------------------------------------------------------------------------
 _cmd_breakglass() {
     # Local state variables
@@ -1728,6 +1732,184 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# _cmd_bootstrap — age key, SOPS config, and empty secrets structure
+# Called by setup.sh install phase (before credential collection).
+# Does NOT prompt for credentials. Run setup-secrets.sh configure to
+# fill in actual credentials after editing .env.
+# ---------------------------------------------------------------------------
+_cmd_bootstrap() {
+    local DRY_RUN=false
+    local FORCE=false
+
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --dry-run) DRY_RUN=true; shift ;;
+            --force)   FORCE=true;   shift ;;
+            --help|-h)
+                cat << 'EOF'
+utilities/setup-secrets.sh bootstrap — Secrets infrastructure bootstrap
+
+Creates the Age encryption key, SOPS configuration, and a placeholder
+encrypted secrets.yaml. Does NOT prompt for credentials.
+
+Run 'setup-secrets.sh configure' (or 'setup.sh secrets') to fill in
+actual credentials after editing .env.
+
+FLAGS:
+    --dry-run   Preview actions without executing
+    --force     Overwrite existing key/config (DANGEROUS: orphans existing secrets)
+    --help      Show this help
+EOF
+                return 0 ;;
+            *) log_error "Unknown option: $1"; return 1 ;;
+        esac
+    done
+
+    local age_key_file="${PROJECT_ROOT}/secrets/keys/age-key.txt"
+    local sops_config="${PROJECT_ROOT}/.sops.yaml"
+    local secrets_file="${PROJECT_ROOT}/secrets/secrets.yaml"
+    local canonical_key="/etc/vaultwarden/age-key.txt"
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would bootstrap: Age key, SOPS config, placeholder secrets"
+        return 0
+    fi
+
+    # ── 1. Directory structure ───────────────────────────────────────────────
+    mkdir -p "${PROJECT_ROOT}/secrets/keys" "${PROJECT_ROOT}/secrets/.docker_secrets" || return 1
+    chmod 700 "${PROJECT_ROOT}/secrets/keys" "${PROJECT_ROOT}/secrets/.docker_secrets" || return 1
+
+    # ── 2. Age key ────────────────────────────────────────────────────────────
+    if [[ -f "$age_key_file" ]] && [[ "$FORCE" != "true" ]]; then
+        if check_age_key "$age_key_file" 2>/dev/null; then
+            log_info "Age key already present and valid: $age_key_file (skipping)"
+        else
+            log_warn "Age key exists but is invalid — regenerating"
+            generate_age_key "$age_key_file" true || return 1
+        fi
+    else
+        [[ "$FORCE" == "true" && -f "$age_key_file" ]] && \
+            log_warn "bootstrap --force: regenerating Age key (existing encrypted data will be inaccessible)"
+        local real_user; real_user=$(get_real_user)
+        generate_age_key "$age_key_file" "$FORCE" || return 1
+        chown "${real_user}:$(id -g -n "$real_user")" "$age_key_file" || return 1
+        chmod 600 "$age_key_file" || return 1
+        log_success "Age key created: $age_key_file"
+    fi
+
+    # Verify the key immediately after generation/validation
+    if ! SOPS_AGE_KEY_FILE="$age_key_file" simple_verify_age_key; then
+        log_error "Age key verification failed — aborting bootstrap"
+        return 1
+    fi
+
+    # ── 3. Canonical install (/etc/vaultwarden/age-key.txt) ──────────────────
+    local do_install=true
+    if [[ -f "$canonical_key" ]] && [[ "$FORCE" != "true" ]]; then
+        if check_age_key "$canonical_key" 2>/dev/null; then
+            log_info "Canonical Age key already present and healthy: $canonical_key"
+            do_install=false
+        else
+            log_warn "Canonical Age key invalid — reinstalling: $canonical_key"
+        fi
+    fi
+    if [[ "$do_install" == "true" ]]; then
+        install -d -m 700 /etc/vaultwarden || return 1
+        install -m 600 "$age_key_file" "$canonical_key" || return 1
+        chown root:root /etc/vaultwarden "$canonical_key" || return 1
+        log_success "Age key installed: $canonical_key (mode 600, root:root)"
+    fi
+
+    # ── 4. Update .env to canonical key path ─────────────────────────────────
+    local env_file="${PROJECT_ROOT}/.env"
+    if [[ -f "$env_file" ]]; then
+        local temp_env
+        temp_env=$(mktemp -p "$(dirname "$env_file")" .env.tmp.XXXXXXXXXX) || return 1
+        awk '{
+            sub(/^SOPS_AGE_KEY_FILE=.*/, "SOPS_AGE_KEY_FILE=/etc/vaultwarden/age-key.txt");
+            print;
+        }' "$env_file" > "$temp_env"
+        mv "$temp_env" "$env_file" || { rm -f "$temp_env"; return 1; }
+        log_success "SOPS_AGE_KEY_FILE set to $canonical_key in .env"
+    fi
+
+    # ── 5. SOPS config (.sops.yaml) ──────────────────────────────────────────
+    local age_public_key
+    age_public_key=$(get_age_public_key "$age_key_file") || return 1
+    if [[ -z "$age_public_key" ]] || ! [[ "$age_public_key" =~ ^age1[a-z0-9]{58}$ ]]; then
+        log_error "Age public key has unexpected format: '${age_public_key}'"
+        return 1
+    fi
+    if [[ -f "$sops_config" ]] && [[ "$FORCE" != "true" ]]; then
+        if grep -qF "$age_public_key" "$sops_config" 2>/dev/null \
+           && grep -q "creation_rules:" "$sops_config" 2>/dev/null; then
+            log_info "SOPS config already up-to-date (skipping)"
+        else
+            log_warn "SOPS config exists but public key differs — rewriting"
+            _write_sops_config "$age_public_key" "$sops_config" || return 1
+        fi
+    else
+        _write_sops_config "$age_public_key" "$sops_config" || return 1
+    fi
+
+    # ── 6. Empty encrypted secrets structure ─────────────────────────────────
+    if [[ -f "$secrets_file" ]] && [[ "$FORCE" != "true" ]]; then
+        local decrypt_ok=false
+        ( export SOPS_AGE_KEY_FILE="$age_key_file"; \
+          sops -d "$secrets_file" >/dev/null 2>&1 ) && decrypt_ok=true
+        if [[ "$decrypt_ok" == "true" ]]; then
+            log_info "Placeholder secrets.yaml already present and decryptable (skipping)"
+            log_success "Bootstrap complete — run './setup.sh secrets' to configure credentials"
+            return 0
+        else
+            log_error "secrets.yaml unreadable with current key. Use --force to overwrite."
+            return 1
+        fi
+    fi
+
+    local tmp_secrets
+    tmp_secrets=$(mktemp "${PROJECT_ROOT}/secrets/vwsecrets.XXXXXXXXXX.yaml") || return 1
+    cat > "$tmp_secrets" << 'PLACEHOLDERS'
+admin_token: PLACEHOLDER_NOT_CONFIGURED
+admin_basic_auth_hash: PLACEHOLDER_NOT_CONFIGURED
+smtp_password: PLACEHOLDER_NOT_CONFIGURED
+email_api_token: PLACEHOLDER_NOT_CONFIGURED
+backup_passphrase: PLACEHOLDER_NOT_CONFIGURED
+push_installation_id: PLACEHOLDER_NOT_CONFIGURED
+push_installation_key: PLACEHOLDER_NOT_CONFIGURED
+caddy_cloudflare_dns_token: PLACEHOLDER_NOT_CONFIGURED
+PLACEHOLDERS
+    chmod 600 "$tmp_secrets"
+    ( export SOPS_AGE_KEY_FILE="$age_key_file"; \
+      sops --encrypt --output "$secrets_file" "$tmp_secrets" ) \
+        || { rm -f "$tmp_secrets"; return 1; }
+    rm -f "$tmp_secrets"
+    chmod 600 "$secrets_file" || return 1
+    local real_user; real_user=$(get_real_user)
+    chown "${real_user}:$(id -g -n "$real_user")" "$secrets_file" || return 1
+
+    log_success "Placeholder secrets.yaml created and encrypted"
+    log_success "Bootstrap complete — run './setup.sh secrets' to configure credentials"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# _write_sops_config — write .sops.yaml for a given Age public key
+# ---------------------------------------------------------------------------
+_write_sops_config() {
+    local age_pub="$1" dest="$2"
+    cat > "$dest" << SOPS_EOF
+creation_rules:
+  - path_regex: .*\.yaml$
+    age: $age_pub
+SOPS_EOF
+    chmod 640 "$dest"
+    local real_user; real_user=$(get_real_user)
+    chown "${real_user}:$(id -g -n "$real_user")" "$dest" 2>/dev/null || true
+    log_success "SOPS config written: $dest"
+}
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 main() {
@@ -1737,6 +1919,7 @@ main() {
     shift || true
 
     case "$subcmd" in
+        bootstrap)           _cmd_bootstrap "$@" ;;
         configure)           _cmd_configure "$@" ;;
         rotate)              _cmd_rotate "$@" ;;
         export-recovery-kit) _cmd_export_recovery_kit "$@" ;;
