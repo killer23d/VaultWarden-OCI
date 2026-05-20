@@ -321,7 +321,7 @@ install_units() {
         return 1
     fi
 
-    local scripts_to_install=(maintenance.sh backup.sh utilities/setup-iptables.sh)
+    local scripts_to_install=(maintenance.sh backup.sh utilities/setup-firewall.sh)
     for script in "${scripts_to_install[@]}"; do
         local src="$PROJECT_ROOT/$script"
         local dest_name; dest_name=$(basename "$script")

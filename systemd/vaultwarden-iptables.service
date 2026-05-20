@@ -16,7 +16,7 @@ RemainAfterExit=yes
 # NOTE: SSH and web brute-force iptables bans are managed by crowdsec-firewall-bouncer, not this service.
 
 # Resolve the project root relative to this unit's installed location.
-# utilities/setup-iptables.sh uses SCRIPT_DIR to locate docker-compose.yml,
+# utilities/setup-firewall.sh uses SCRIPT_DIR to locate docker-compose.yml,
 # so WorkingDirectory must point to the repo root. The script is installed
 # flat to /opt/vaultwarden-scripts/ by 'sudo ./setup.sh systemd install'.
 WorkingDirectory=/opt/vaultwarden-scripts

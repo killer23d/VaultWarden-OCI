@@ -235,7 +235,7 @@ Settings → Server URL → https://vault.example.com
 sudo ./setup.sh install --domain vault.example.com --email admin@example.com --auto
 
 # Create break-glass admin for emergency console access
-sudo utilities/create-breakglass-admin.sh create
+sudo utilities/setup-secrets.sh breakglass create
 ```
 
 ### Migrating from a Generic Docker Compose Deployment

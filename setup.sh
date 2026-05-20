@@ -2725,7 +2725,7 @@ install_units() {
         return 1
     fi
 
-    local scripts_to_install=(maintenance.sh backup.sh utilities/setup-iptables.sh)
+    local scripts_to_install=(maintenance.sh backup.sh utilities/setup-firewall.sh)
     for script in "${scripts_to_install[@]}"; do
         local src="$PROJECT_ROOT/$script"
         local dest_name; dest_name=$(basename "$script")
@@ -3443,16 +3443,16 @@ main() {
         log_warn "Review the output above for details. These phases can be re-run manually."
     fi
 
-    if [[ -x "${SCRIPT_DIR}/utilities/setup-iptables.sh" ]]; then
+    if [[ -x "${SCRIPT_DIR}/utilities/setup-firewall.sh" ]]; then
         echo "INFO: Applying VaultWarden iptables rules..."
-        if "${SCRIPT_DIR}/utilities/setup-iptables.sh"; then
+        if "${SCRIPT_DIR}/utilities/setup-firewall.sh" --phase iptables; then
             echo "OK: VaultWarden iptables rules applied"
         else
-            echo "WARN: utilities/setup-iptables.sh did not complete successfully" >&2
+            echo "WARN: utilities/setup-firewall.sh --phase iptables did not complete successfully" >&2
             echo "WARN: Run it manually after setup, or enable systemd/vaultwarden-iptables.service" >&2
         fi
     else
-        echo "WARN: utilities/setup-iptables.sh not found or not executable" >&2
+        echo "WARN: utilities/setup-firewall.sh not found or not executable" >&2
         echo "WARN: Run it manually after setup, or enable systemd/vaultwarden-iptables.service" >&2
     fi
 
