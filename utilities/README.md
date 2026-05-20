@@ -135,3 +135,102 @@ sudo utilities/uninstall-vaultwarden.sh run --force   # CI/automation only
 | **Dry-run complete** | Every destructive action gated by `DRY_RUN` check |
 | **Root guard** | `(( EUID == 0 ))` checked after arg parsing |
 | **Colour-tagged output** | `[HH:MM:SS] [script-name.sh] LEVEL message` via `lib/common.sh` |
+
+---
+
+## Maintenance utilities (dispatcher: `./maintenance.sh`)
+
+These scripts are the implementation layer for `maintenance.sh` subcommands.
+They can be invoked directly by an admin or a systemd unit.
+
+### `maintenance-run.sh` — Routine maintenance runner
+
+Full maintenance cycle: cleanup (logs, backups, Docker) → DB optimisation → health validation.
+
+```bash
+sudo utilities/maintenance-run.sh run
+sudo utilities/maintenance-run.sh run --comprehensive   # include DNS + firewall
+sudo utilities/maintenance-run.sh run --dry-run
+```
+
+### `maintenance-health.sh` — System health checks
+
+```bash
+sudo utilities/maintenance-health.sh health
+sudo utilities/maintenance-health.sh health --fix
+sudo utilities/maintenance-health.sh health --report
+```
+
+### `maintenance-update.sh` — System + Docker image updater
+
+```bash
+sudo utilities/maintenance-update.sh update --system
+sudo utilities/maintenance-update.sh update --images
+sudo utilities/maintenance-update.sh update --all --email
+```
+
+### `maintenance-db-maint.sh` — Deep offline DB maintenance
+
+Stops VaultWarden, creates a pre-maintenance encrypted backup, runs
+`VACUUM + wal_checkpoint(TRUNCATE) + ANALYZE`, verifies integrity, restarts.
+
+```bash
+sudo utilities/maintenance-db-maint.sh db-maint
+sudo utilities/maintenance-db-maint.sh db-maint --force    # no confirm prompt
+sudo utilities/maintenance-db-maint.sh db-maint --dry-run
+```
+
+### `maintenance-email.sh` — Email subsystem diagnostic
+
+```bash
+sudo utilities/maintenance-email.sh test-email
+sudo utilities/maintenance-email.sh test-email --recipient admin@example.com
+sudo utilities/maintenance-email.sh test-email --dry-run
+```
+
+### `maintenance-update-dns.sh` — Cloudflare DNS A record updater
+
+```bash
+sudo utilities/maintenance-update-dns.sh update-dns
+sudo utilities/maintenance-update-dns.sh update-dns --email --dry-run
+```
+
+### `maintenance-update-firewall.sh` — Cloudflare IP → UFW sync
+
+```bash
+sudo utilities/maintenance-update-firewall.sh update-firewall
+sudo utilities/maintenance-update-firewall.sh update-firewall --dry-run
+```
+
+---
+
+## Backup / Restore utilities (dispatchers: `./backup.sh`, `./restore.sh`)
+
+### `backup-run.sh` — Backup engine (all logic)
+
+Directly callable; identical to running `./backup.sh <subcommand>`.
+
+```bash
+sudo utilities/backup-run.sh run db --rclone
+sudo utilities/backup-run.sh run full --full-verification
+./utilities/backup-run.sh list
+```
+
+### `restore-run.sh` — Restore engine (all logic)
+
+Directly callable; identical to running `./restore.sh <subcommand>`.
+
+```bash
+sudo utilities/restore-run.sh latest db
+sudo utilities/restore-run.sh interactive --remote
+./utilities/restore-run.sh list
+```
+
+---
+
+## Shared library: `lib/maintenance-utils.sh`
+
+Sourced by `maintenance-run.sh`, `maintenance-db-maint.sh`, and
+`maintenance-email.sh`. Provides: cleanup helpers, `optimize_database`,
+`validate_system_health`, `generate_maintenance_summary`, and
+`_wait_wal_quiesce`. **NOT** executable — library only.

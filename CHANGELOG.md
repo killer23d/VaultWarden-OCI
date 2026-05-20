@@ -8,6 +8,72 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ---
 ## [Unreleased]
 
+### Changed — Dispatcher Refactor: maintenance.sh / backup.sh / restore.sh
+
+- **`maintenance.sh`** is now a thin dispatcher (< 60 lines). All logic has been
+  extracted into dedicated `utilities/maintenance-*.sh` standalone scripts.
+  The external CLI surface is **unchanged** — every subcommand still works
+  identically via the dispatcher.
+
+- **`backup.sh`** is now a thin 3-line `exec` forwarder to
+  `utilities/backup-run.sh`, which contains the complete backup engine verbatim.
+  All subcommands (`run`, `list`, `verify`, `rotate`) work identically.
+
+- **`restore.sh`** is now a thin 3-line `exec` forwarder to
+  `utilities/restore-run.sh`. All subcommands work identically.
+
+### Added — New utilities/ entry points (directly callable)
+
+| New file | Dispatcher subcommand |
+|---|---|
+| `utilities/maintenance-run.sh` | `./maintenance.sh run` |
+| `utilities/maintenance-health.sh` | `./maintenance.sh health` |
+| `utilities/maintenance-update.sh` | `./maintenance.sh update` |
+| `utilities/maintenance-db-maint.sh` | `./maintenance.sh db-maint` |
+| `utilities/maintenance-email.sh` | `./maintenance.sh test-email` |
+| `utilities/maintenance-update-dns.sh` | `./maintenance.sh update-dns` |
+| `utilities/maintenance-update-firewall.sh` | `./maintenance.sh update-firewall` |
+| `utilities/backup-run.sh` | `./backup.sh` (all subcommands) |
+| `utilities/restore-run.sh` | `./restore.sh` (all subcommands) |
+
+Each utility:
+- Has `#!/usr/bin/env bash` and its own `--help`
+- Sets `SCRIPT_DIR` / `PROJECT_ROOT` to the project root so all `lib/` and
+  `secrets/` paths resolve correctly
+- Has `main "$@"` at the bottom and an operations `flock` lock where relevant
+- Is independently shellcheck-clean (`bash -n` passes)
+
+### Added — `lib/maintenance-utils.sh`
+
+Shared library sourced by `maintenance-run.sh`, `maintenance-db-maint.sh`, and
+`maintenance-email.sh`. Contains: `cleanup_logs`, `cleanup_backups`,
+`cleanup_docker_system`, `optimize_database`, `validate_system_health`,
+`generate_maintenance_summary`, `_default_backup_dir`, `_default_alert_state_dir`,
+`_default_report_dir`, `_wait_wal_quiesce`, `verbose_log`.
+
+### Changed — `utilities/setup-systemd.sh` (four bug fixes)
+
+1. **`scripts_to_install` extended** with all new `utilities/` scripts and
+   `restore.sh` (which was previously missing — see below). The install loop
+   now uses `mkdir -p "$(dirname "$dest")"` + `install` to preserve the
+   `utilities/` subdirectory structure at `/opt/vaultwarden-scripts/`.
+   `setup-firewall.sh` retains its pre-existing flat-install path for
+   `vaultwarden-iptables.service` compatibility.
+
+2. **`scripts_to_check` extended** inside `validate_installation()` (the
+   sha256 split-brain check at step 7/8) to cover all new `utilities/` scripts.
+
+3. **`restore.sh` added to `scripts_to_install`** (intentional new behaviour;
+   `restore.sh` is now deployed to `/opt/vaultwarden-scripts/restore.sh` on
+   `setup-systemd.sh install`). This is new — `restore.sh` was never copied to
+   `/opt/` before this release.
+
+4. **`WHAT install DOES:` prose block** in `_sd_show_help()` updated to
+   accurately list all installed scripts and the `utilities/` subdirectory.
+
+---
+## [Unreleased]
+
 ### Changed — Fail2Ban → CrowdSec Migration
 
 - **Security layer**: Replaced the `crazymax/fail2ban` Docker container with

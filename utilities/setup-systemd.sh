@@ -94,8 +94,17 @@ OPTIONS:
     --help, -h    Show this help
 
 WHAT install DOES:
-    1. Copies maintenance.sh, backup.sh -> /opt/vaultwarden-scripts/
-       (root:root 700; scripts are self-locating via BASH_SOURCE[0])
+    1. Copies scripts to /opt/vaultwarden-scripts/ (root:root 700):
+         maintenance.sh  backup.sh  restore.sh
+         utilities/setup-firewall.sh
+         utilities/maintenance-run.sh      utilities/maintenance-health.sh
+         utilities/maintenance-update.sh   utilities/maintenance-db-maint.sh
+         utilities/maintenance-email.sh    utilities/maintenance-update-dns.sh
+         utilities/maintenance-update-firewall.sh
+         utilities/backup-run.sh           utilities/restore-run.sh
+       Scripts are self-locating via BASH_SOURCE[0]. The utilities/ subdirectory
+       structure is preserved at the destination.
+       NOTE: restore.sh is now installed to /opt/ (it was not installed previously).
     2. Copies lib/ -> /opt/vaultwarden-scripts/lib/ (root:root 644)
        lib files are 644 (world-readable) so a non-root service User= can
        still source lib/common.sh if the unit is ever changed from root.
@@ -321,20 +330,68 @@ install_units() {
         return 1
     fi
 
-    local scripts_to_install=(maintenance.sh backup.sh utilities/setup-firewall.sh)
-    for script in "${scripts_to_install[@]}"; do
+    # ---------------------------------------------------------------------------
+    # Flat-installed scripts (installed as basename only, NOT inside utilities/)
+    # These have pre-existing callers (e.g. systemd units) that reference the
+    # flat /opt/vaultwarden-scripts/<name> path.  Do NOT change their dest path.
+    # ---------------------------------------------------------------------------
+    local flat_scripts_to_install=(
+        maintenance.sh
+        backup.sh
+        restore.sh
+    )
+    for script in "${flat_scripts_to_install[@]}"; do
         local src="$PROJECT_ROOT/$script"
-        local dest_name; dest_name=$(basename "$script")
+        local dest="$OPT_SCRIPTS_DIR/$(basename "$script")"
         if [[ ! -f "$src" ]]; then
             log_warn "Script not found, skipping: $src"
             continue
         fi
         if [[ "$DRY_RUN" == "true" ]]; then
-            log_info "[DRY RUN] Would install: $OPT_SCRIPTS_DIR/$dest_name"
+            log_info "[DRY RUN] Would install: $dest (700 root:root)"
             continue
         fi
-        install -m 700 -o root -g root "$src" "$OPT_SCRIPTS_DIR/$dest_name"
-        log_success "Installed: $OPT_SCRIPTS_DIR/$dest_name"
+        install -m 700 -o root -g root "$src" "$dest"
+        log_success "Installed: $dest"
+    done
+
+    # ---------------------------------------------------------------------------
+    # Structured-installed scripts (installed preserving utilities/ subdir path).
+    # setup-firewall.sh keeps its pre-existing flat path because
+    # systemd/vaultwarden-iptables.service calls /opt/vaultwarden-scripts/setup-firewall.sh.
+    # ---------------------------------------------------------------------------
+    local structured_scripts_to_install=(
+        utilities/setup-firewall.sh   # ← flat-installed (basename only) for iptables.service compatibility
+        utilities/maintenance-run.sh
+        utilities/maintenance-health.sh
+        utilities/maintenance-update.sh
+        utilities/maintenance-db-maint.sh
+        utilities/maintenance-email.sh
+        utilities/maintenance-update-dns.sh
+        utilities/maintenance-update-firewall.sh
+        utilities/backup-run.sh
+        utilities/restore-run.sh
+    )
+    for script in "${structured_scripts_to_install[@]}"; do
+        local src="$PROJECT_ROOT/$script"
+        local dest
+        # setup-firewall.sh must remain at the flat path for iptables.service
+        if [[ "$script" == "utilities/setup-firewall.sh" ]]; then
+            dest="$OPT_SCRIPTS_DIR/$(basename "$script")"
+        else
+            dest="$OPT_SCRIPTS_DIR/$script"
+        fi
+        if [[ ! -f "$src" ]]; then
+            log_warn "Script not found, skipping: $src"
+            continue
+        fi
+        if [[ "$DRY_RUN" == "true" ]]; then
+            log_info "[DRY RUN] Would install: $dest (700 root:root)"
+            continue
+        fi
+        mkdir -p "$(dirname "$dest")"
+        install -m 700 -o root -g root "$src" "$dest"
+        log_success "Installed: $dest"
     done
     if [[ "$DRY_RUN" == "false" ]]; then chown root:root "$OPT_SCRIPTS_DIR"; fi
 
@@ -717,7 +774,20 @@ validate_installation() {
     local warnings=0
 
     log_info "[1/8] Checking installed scripts ..."
-    local scripts_to_check=(maintenance.sh backup.sh)
+    local scripts_to_check=(
+        maintenance.sh
+        backup.sh
+        restore.sh
+        utilities/maintenance-run.sh
+        utilities/maintenance-health.sh
+        utilities/maintenance-update.sh
+        utilities/maintenance-db-maint.sh
+        utilities/maintenance-email.sh
+        utilities/maintenance-update-dns.sh
+        utilities/maintenance-update-firewall.sh
+        utilities/backup-run.sh
+        utilities/restore-run.sh
+    )
     for script in "${scripts_to_check[@]}"; do
         local installed="$OPT_SCRIPTS_DIR/$script"
         if [[ ! -f "$installed" ]]; then
