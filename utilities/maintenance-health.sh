@@ -656,7 +656,7 @@ _check_config() {
             [[ -f "${secrets_dir}/${secret}" ]] || config_issues+=("Missing secret: $secret")
         done
     fi
-    local age_key_file="${SOPS_AGE_KEY_FILE:-${SCRIPT_DIR}/secrets/keys/age-key.txt}"
+    local age_key_file="${SOPS_AGE_KEY_FILE:-${PROJECT_ROOT}/secrets/keys/age-key.txt}"
     if [[ ! -f "$age_key_file" ]]; then
         config_issues+=("Age key not found: ${age_key_file} — backups cannot encrypt. Run: ./utilities/setup-secrets.sh configure")
     elif [[ ! -r "$age_key_file" ]]; then
