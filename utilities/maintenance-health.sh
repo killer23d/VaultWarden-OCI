@@ -52,7 +52,8 @@ _default_report_dir() {
 run_health_check() {
 _resolve_env_file() {
     local candidates=(
-        "${SCRIPT_DIR}/.env"
+        # PROJECT_ROOT is derived from BASH_SOURCE at the top of this file.
+        "${PROJECT_ROOT}/.env"
         "/etc/vaultwarden/vaultwarden.env"
     )
     for candidate in "${candidates[@]}"; do
@@ -76,7 +77,7 @@ if [[ -n "${ENV_FILE}" ]]; then
         load_env_file "${ENV_FILE}" || true
     fi
 else
-    log_warn "maintenance.sh health: no .env file found at '${SCRIPT_DIR}/.env' or '/etc/vaultwarden/vaultwarden.env' — relying on inherited environment"
+    log_warn "maintenance.sh health: no .env file found at '${PROJECT_ROOT}/.env' or '/etc/vaultwarden/vaultwarden.env' — relying on inherited environment"
     ENV_FILE="/etc/vaultwarden/vaultwarden.env"
 fi
 
@@ -676,7 +677,8 @@ _check_config() {
     fi
     local root_owned_issues=()
     for f in ".env" "Makefile" "startup.sh" "backup.sh" "utilities/secrets-edit.sh"; do
-        local fpath="${SCRIPT_DIR}/${f}"
+        # PROJECT_ROOT is derived from BASH_SOURCE at the top of this file.
+        local fpath="${PROJECT_ROOT}/${f}"
         if [[ -e "$fpath" ]]; then
             local owner; owner=$(stat -c '%U' "$fpath" 2>/dev/null || echo "unknown")
             if [[ "$owner" == "root" ]]; then
@@ -690,7 +692,7 @@ _check_config() {
             _warn "permissions:project-files:${_pi}" "$issue"
             (( _pi++ )) || true
         done
-    elif [[ -f "${SCRIPT_DIR}/.env" || -f "${SCRIPT_DIR}/Makefile" ]]; then
+    elif [[ -f "${PROJECT_ROOT}/.env" || -f "${PROJECT_ROOT}/Makefile" ]]; then
         _pass "permissions:project-files" "Project file ownership is correct"
     fi
     if [[ ${#config_issues[@]} -eq 0 ]]; then

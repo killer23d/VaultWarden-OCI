@@ -400,7 +400,7 @@ exec_oneshot_in_service() {
     if [[ $start_rc -ne 0 ]]; then
         log_error "exec_oneshot_in_service: 'docker container start' failed (rc=${start_rc}) for service '$service'"
         local docker_err
-        if ! docker_err=$(docker container rm -f "$container_id" >/dev/null 2>&1); then
+        if ! docker_err=$(docker container rm -f "$container_id" 2>&1); then
             log_debug "exec_oneshot_in_service: docker container rm failed (non-fatal): $docker_err"
         fi
         return 1
@@ -412,7 +412,7 @@ exec_oneshot_in_service() {
     docker container logs "$container_id" 2>&1 || true
 
     local docker_err
-    if ! docker_err=$(docker container rm -f "$container_id" >/dev/null 2>&1); then
+    if ! docker_err=$(docker container rm -f "$container_id" 2>&1); then
         log_debug "exec_oneshot_in_service: docker container rm failed (non-fatal): $docker_err"
     fi
 

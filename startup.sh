@@ -25,11 +25,11 @@ source "${SCRIPT_DIR}/lib/storage.sh"  # provides require_project_state_ready()
 #   - Already thin wrappers that delegate to lib/ functions
 # If a phase gains standalone utility value in future, extract it then.
 #
-# AUDIT (Task 2d): Every startup.sh function was compared against lib/docker.sh,
-# lib/storage.sh, lib/secrets.sh, lib/crypto.sh, and lib/common.sh on 2026-05-20.
-# No extractable duplicates were found:
+# AUDIT (Task 2d + Fix 4): Every startup.sh function was compared against
+# lib/docker.sh, lib/storage.sh, lib/secrets.sh, lib/crypto.sh, and
+# lib/common.sh on 2026-05-20 (updated Fix 4 2026-05-21).
+# No extractable duplicates remain:
 #   _maybe_sudo()                    — startup-specific root escalation helper (no lib equiv)
-#   _prepare_secrets_cleanup*()      — guards the in-process SOPS cache file for this run only
 #   warn_plaintext_secret_overrides()— startup-only split-brain advisory; not reused elsewhere
 #   check_email_config_consistency() — startup-only advisory; not reused elsewhere
 #   load_environment()               — sources .env; startup-scoped (reads relative .env)
@@ -37,7 +37,8 @@ source "${SCRIPT_DIR}/lib/storage.sh"  # provides require_project_state_ready()
 #   prepare_directories()            — startup-scoped mkdir wrapper; not a lib candidate
 #   prepare_log_directories()        — startup-scoped; not a lib candidate
 #   check_age_key_health_preflight() — startup-specific key-path override logic
-#   prepare_docker_secrets()         — startup-specific SOPS decryption into docker secrets
+#   prepare_docker_secrets()         — thin wrapper; delegates to export_docker_secrets()
+#                                      in lib/secrets.sh for all hardening logic
 #   cleanup_orphaned_resources()     — delegates to cleanup_docker_system() in lib/docker.sh
 #   _startup_pull_images()           — startup-specific --skip-pull guard
 #   _startup_start_services()        — startup-specific --force-recreate guard
@@ -156,25 +157,6 @@ _maybe_sudo() {
 # Callers use _secure_shred() from lib/secrets.sh (sourced above), which
 # provides the same CoW-filesystem-safe overwrite-before-unlink behaviour.
 
-# ---------------------------------------------------------------------------
-# _prepare_secrets_cleanup
-#
-# Cleans up temporary files and restores umask after prepare_docker_secrets().
-# ---------------------------------------------------------------------------
-_prepare_secrets_cleanup_umask=""
-_prepare_secrets_cleanup_cache=""
-_prepare_secrets_trap_registered=false
-
-_prepare_secrets_cleanup() {
-  if [[ -n "$_prepare_secrets_cleanup_umask" ]]; then
-    umask "$_prepare_secrets_cleanup_umask"
-    _prepare_secrets_cleanup_umask=""
-  fi
-  if [[ -n "$_prepare_secrets_cleanup_cache" ]]; then
-    _secure_shred "$_prepare_secrets_cleanup_cache"
-    _prepare_secrets_cleanup_cache=""
-  fi
-}
 
 # ---------------------------------------------------------------------------
 # warn_plaintext_secret_overrides
@@ -512,100 +494,20 @@ check_age_key_health_preflight() {
 
 # ---------------------------------------------------------------------------
 # prepare_docker_secrets
+#
+# Startup-specific wrapper: runs check_age_key_health_preflight() (which may
+# export SOPS_AGE_KEY_FILE for this process), then delegates all decryption,
+# per-key file writing, ENC[ sanity check, and cache cleanup to
+# lib/secrets.sh::export_docker_secrets().
 # ---------------------------------------------------------------------------
 prepare_docker_secrets() {
   log_info "Preparing Docker secrets from SOPS..."
-
   check_age_key_health_preflight || return 1
-
-  # Use SECRETS_FILE (from lib/secrets.sh, defaults to secrets/secrets.yaml)
-  # for consistency with all other secrets consumers in the codebase.
-  local secrets_file="${SECRETS_FILE:-secrets/secrets.yaml}"
-
-  if [[ ! -f "$secrets_file" ]]; then
-    log_warn "$secrets_file not found; skipping Docker secrets preparation"
-    return 0
-  fi
-
-  local secrets_dir="$DOCKER_SECRETS_DIR"
-  mkdir -p "$secrets_dir"
-  chmod 700 "$secrets_dir"
-
-  local old_umask
-  old_umask=$(umask)
-  _prepare_secrets_cleanup_umask="$old_umask"
-  # Register the cleanup EXIT trap exactly once using a boolean flag so that
-  # we do not need to compose/decompose existing trap bodies via sed (which
-  # breaks silently when the body contains single quotes).
-  if [[ "$_prepare_secrets_trap_registered" != "true" ]]; then
-    trap '_prepare_secrets_cleanup' EXIT
-    _prepare_secrets_trap_registered=true
-  fi
-  # umask 077: new files are created as 0600 (no group/world bits).
-  # This is consistent with lib/secrets.sh::write_secret_file() (chmod 600).
-  umask 077
-
-  # Create the cache file inside the already-restricted secrets_dir
-  # (mode 700) rather than the world-listable /tmp, eliminating the TOCTOU
-  # window between mktemp and the subsequent chmod on a shared host.
-  local cache_file
-  cache_file=$(mktemp --tmpdir="$secrets_dir" .sops-cache.XXXXXXXXXX)
-  _prepare_secrets_cleanup_cache="$cache_file"
-
-  if ! sops -d "$secrets_file" > "$cache_file"; then
-    log_error "Failed to decrypt $secrets_file"
-    return 1
-  fi
-
-  # Minimal parser for the known flat structure used by this project.
-  # We intentionally avoid yq/jq dependency here.
-  # Pass secrets file path as argument to avoid hardcoded relative paths.
-  while IFS='=' read -r key value; do
-    [[ -z "$key" ]] && continue
-    local target_file="${secrets_dir}/${key}"
-    printf '%s' "$value" > "$target_file"
-  done < <(
-    python3 - "$cache_file" <<'PY'
-import sys, yaml
-with open(sys.argv[1], 'r', encoding='utf-8') as f:
-    data = yaml.safe_load(f) or {}
-for k, v in data.items():
-    if isinstance(v, (str, int, float)):
-        print(f"{k}={v}")
-PY
-  )
-
-  # Sanity-check: if any secret file starts with "ENC[", SOPS decryption
-  # silently produced raw ciphertext — fail loudly before containers start.
-  local bad_secrets=()
-  local f _head
-  for f in "$secrets_dir"/*; do
-    [[ -f "$f" ]] || continue
-    if read -r -n 4 _head < "$f" 2>/dev/null && [[ "$_head" == "ENC[" ]]; then
-      bad_secrets+=("$(basename "$f")")
-    fi
-  done
-  if [[ ${#bad_secrets[@]} -gt 0 ]]; then
-    log_error "prepare_docker_secrets: secret file(s) contain raw SOPS ciphertext — decryption failed silently:"
-    local s
-    for s in "${bad_secrets[@]}"; do
-      log_error "  ${secrets_dir}/${s}"
-    done
-    log_error "Remediation:"
-    log_error "  1. Run: make key-health  (verify age key is present and readable)"
-    log_error "  2. Run: sudo rm -f ${secrets_dir}/*  (clear stale files)"
-    log_error "  3. Run: make up  (re-decrypt and restart)"
-    return 1
-  fi
-
-  cleanup_secrets_environment || true
-  _prepare_secrets_cleanup
-  # The EXIT trap remains active for the lifetime of the process so that any
-  # unexpected exit after this point still cleans up any residual temp files.
-
+  export_docker_secrets "$DOCKER_SECRETS_DIR" || return 1
   log_success "Docker secrets prepared"
   return 0
 }
+
 
 # ---------------------------------------------------------------------------
 # cleanup_orphaned_resources
@@ -903,8 +805,8 @@ main() {
 
   # Add INT/TERM signal traps so that secrets are cleaned up and
   # the exit code correctly reflects termination (130 for INT, 143 for TERM).
-  trap '_prepare_secrets_cleanup; exit 130' INT
-  trap '_prepare_secrets_cleanup; exit 143' TERM
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
 
   load_environment || exit 1
   require_project_state_ready || exit 1

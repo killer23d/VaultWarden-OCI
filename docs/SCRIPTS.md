@@ -114,7 +114,7 @@ sudo ./setup.sh systemd install
 ./utilities/secrets-view.sh
 ```
 
-> After the secrets phase runs, use `./utilities/secrets-edit.sh` for all subsequent edits — it safely decrypts, edits, re-encrypts, and backs up the secrets file.
+> After the secrets phase runs, use `./edit-secrets.sh edit` for all subsequent edits — it safely decrypts, edits, re-encrypts, and backs up the secrets file.
 
 ---
 

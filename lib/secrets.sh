@@ -1249,6 +1249,17 @@ _warn_if_stack_unavailable() {
 # values (CHANGE_ME*, NOT_USED*, null) are skipped with a warning so that
 # genuinely-empty optional secrets do not overwrite populated files.
 #
+# Hardening (consolidated from startup.sh::prepare_docker_secrets):
+#   1. SOPS decryption is written to a mktemp cache inside docker_dir (mode
+#      700, not world-listable /tmp) to eliminate the TOCTOU window on
+#      shared hosts.
+#   2. After distributing per-key files, every output file is scanned for a
+#      leading "ENC[" string. Any hit means SOPS silently produced ciphertext
+#      instead of plaintext; the bad files are shredded and the function
+#      returns 1 with an actionable remediation message.
+#   3. The cache file is shredded via a RETURN-scoped trap inside this
+#      function so it is always cleaned up, even on ERR paths.
+#
 # This is the canonical, single implementation shared by setup-secrets.sh and
 # secrets-rotate.sh. Both previously carried inline copies of this logic.
 # ---------------------------------------------------------------------------
@@ -1269,6 +1280,33 @@ export_docker_secrets() {
     fi
     chmod 700 "$docker_dir"
 
+    # Create the SOPS cache file inside the already-restricted docker_dir
+    # (mode 700) rather than the world-listable /tmp, eliminating the TOCTOU
+    # window between mktemp and the subsequent chmod on a shared host.
+    local _eds_cache
+    _eds_cache=$(mktemp --tmpdir="$docker_dir" .sops-cache.XXXXXXXXXX) || {
+        log_error "export_docker_secrets: failed to create secure temp file in $docker_dir"
+        return 1
+    }
+    install -m 600 /dev/null "$_eds_cache" 2>/dev/null || true
+
+    # Guarantee cache file cleanup and SOPS_CONFIG unset on any return path.
+    # shellcheck disable=SC2064  # intentional: $_eds_cache expands at registration
+    trap "{ _secure_shred '$_eds_cache' 2>/dev/null || true; cleanup_secrets_environment; }" RETURN
+
+    if ! ensure_sops_env; then
+        log_error "export_docker_secrets: failed to set up SOPS environment"
+        return 1
+    fi
+
+    local _sops_rc=0
+    sops -d "$secrets_file" > "$_eds_cache" || _sops_rc=$?
+    cleanup_secrets_environment
+    if [[ $_sops_rc -ne 0 ]]; then
+        log_error "export_docker_secrets: SOPS decryption failed (exit ${_sops_rc})"
+        return 1
+    fi
+
     local _eds_keys=(
         admin_token
         admin_basic_auth_hash
@@ -1283,23 +1321,15 @@ export_docker_secrets() {
     local _failed=0
     local _key _value
 
-    # Guarantee SOPS_CONFIG is unset at function exit. decrypt_secret already
-    # unsets SOPS_AGE_KEY_FILE after each call, but SOPS_CONFIG (set by
-    # ensure_sops_env inside decrypt_secret) is not unset by decrypt_secret.
-    # cleanup_secrets_environment handles both variables.
-    # shellcheck disable=SC2064
-    trap "cleanup_secrets_environment" RETURN
-
-    for _key in "${_eds_keys[@]}"; do
-        # decrypt_secret calls ensure_sops_env internally and unsets
-        # SOPS_AGE_KEY_FILE after each call. SOPS_CONFIG is cleaned by
-        # the RETURN trap above.
-        # shellcheck disable=SC2153  # SECRETS_FILE is a global env var from lib init
-        _value=$(decrypt_secret "$_key" "$secrets_file") || {
-            log_error "export_docker_secrets: failed to decrypt '$_key'"
-            _failed=$(( _failed + 1 ))
-            continue
-        }
+    while IFS='=' read -r _key _value; do
+        [[ -z "$_key" ]] && continue
+        # Only distribute keys that are in the known list.
+        local _known=false
+        local _k
+        for _k in "${_eds_keys[@]}"; do
+            [[ "$_k" == "$_key" ]] && { _known=true; break; }
+        done
+        [[ "$_known" == "true" ]] || continue
 
         # Skip placeholder or null values; warn so the admin can act.
         if [[ -z "$_value" ]] \
@@ -1315,10 +1345,43 @@ export_docker_secrets() {
             log_error "export_docker_secrets: failed to write ${docker_dir}/${_key}"
             _failed=$(( _failed + 1 ))
         fi
-
         unset _value
-    done
+    done < <(
+        python3 - "$_eds_cache" <<'PYEOF'
+import sys, yaml
+with open(sys.argv[1], 'r', encoding='utf-8') as f:
+    data = yaml.safe_load(f) or {}
+for k, v in data.items():
+    if isinstance(v, (str, int, float)):
+        print(f"{k}={v}")
+PYEOF
+    )
     unset _key
+
+    # Sanity-check: if any output file starts with "ENC[", SOPS produced
+    # raw ciphertext — fail loudly before containers start.
+    local _bad_secrets=()
+    local _f _head
+    for _f in "$docker_dir"/*; do
+        [[ -f "$_f" ]] || continue
+        [[ "$(basename "$_f")" == .sops-cache.* ]] && continue
+        if read -r -n 4 _head < "$_f" 2>/dev/null && [[ "$_head" == "ENC[" ]]; then
+            _bad_secrets+=("$(basename "$_f")")
+            _secure_shred "$_f" 2>/dev/null || rm -f "$_f"
+        fi
+    done
+    if [[ ${#_bad_secrets[@]} -gt 0 ]]; then
+        log_error "export_docker_secrets: secret file(s) contain raw SOPS ciphertext — decryption failed silently:"
+        local _s
+        for _s in "${_bad_secrets[@]}"; do
+            log_error "  ${docker_dir}/${_s}"
+        done
+        log_error "Remediation:"
+        log_error "  1. Run: make key-health  (verify age key is present and readable)"
+        log_error "  2. Run: sudo rm -f ${docker_dir}/*  (clear stale files)"
+        log_error "  3. Run: make up  (re-decrypt and restart)"
+        return 1
+    fi
 
     if [[ $_failed -gt 0 ]]; then
         log_error "export_docker_secrets: $_failed key(s) failed to export"
@@ -1328,3 +1391,4 @@ export_docker_secrets() {
     log_success "Docker secrets exported to: $docker_dir"
     return 0
 }
+
