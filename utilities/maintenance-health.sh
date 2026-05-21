@@ -649,7 +649,7 @@ _check_config() {
             [[ -n "${!var:-}" ]] || config_issues+=("${var} is not set — verify '${var}=' is present in ${ENV_FILE}")
         done
     fi
-    local secrets_dir="${SCRIPT_DIR}/secrets/.docker_secrets"
+    local secrets_dir="${PROJECT_ROOT}/secrets/.docker_secrets"
     if [[ -d "$secrets_dir" ]]; then
         local required_secrets=("admin_token" "caddy_cloudflare_dns_token")
         for secret in "${required_secrets[@]}"; do
