@@ -2,7 +2,7 @@
 
 Complete reference for all management scripts and utility libraries in VaultWarden-OCI.
 
-> **Architecture note (Dispatcher Pattern):** To improve maintainability, monolithic entry-points (`setup.sh`, `maintenance.sh`, `backup.sh`, `restore.sh`, `utilities/secrets-edit.sh`) have been refactored into thin **dispatchers**. The actual implementation logic is modularised into 22 standalone administrative and engine scripts located in the `utilities/` directory.
+> **Architecture note (Dispatcher Pattern):** To improve maintainability, monolithic entry-points (`setup.sh`, `maintenance.sh`, `backup.sh`, `restore.sh`, `edit-secrets.sh`) have been refactored into thin **dispatchers**. The actual implementation logic is modularised into 22 standalone administrative and engine scripts located in the `utilities/` directory.
 >
 > Library consolidation: `lib/security.sh` and `lib/simple_key_resilience.sh` were merged into `lib/crypto.sh`; `lib/email.sh` was inlined into `lib/common.sh`.
 >
@@ -18,13 +18,14 @@ Complete reference for all management scripts and utility libraries in VaultWard
 | 2 | `startup.sh` | Service management | — |
 | 3 | `backup.sh` | Dispatcher for backups | — |
 | 4 | `restore.sh` | Dispatcher for restores | — |
-| 5 | `utilities/secrets-edit.sh` | Dispatcher for secrets editing | — |
-| 6 | `maintenance.sh` | Dispatcher for maintenance/health/updates | `db-maint` only |
-| 7 | `utilities/*.sh` | 22 standalone admin/engine scripts (see `utilities/README.md`) | ✅ |
+| 5 | `edit-secrets.sh` | Dispatcher for secrets editing | — |
+| 6 | `utilities/secrets-edit.sh` | Interactive encrypted secrets editor (standalone) | — |
+| 7 | `maintenance.sh` | Dispatcher for maintenance/health/updates | `db-maint` only |
+| 8 | `utilities/*.sh` | 22 standalone admin/engine scripts (see `utilities/README.md`) | ✅ |
 
 **Utility libraries (5):** `lib/common.sh` *(includes email)*, `lib/docker.sh`, `lib/crypto.sh` *(includes key resilience + security)*, `lib/backup-utils.sh`, `lib/secrets.sh`
 
-> **Dispatcher count:** `utilities/secrets-edit.sh` was refactored into a thin dispatcher in this release, bringing the total dispatcher-pattern top-level scripts to 5: `setup.sh`, `maintenance.sh`, `backup.sh`, `restore.sh`, `utilities/secrets-edit.sh`.
+> **Dispatcher count:** `edit-secrets.sh` was refactored into a thin dispatcher in this release, bringing the total dispatcher-pattern top-level scripts to 5: `setup.sh`, `maintenance.sh`, `backup.sh`, `restore.sh`, `edit-secrets.sh`. `utilities/secrets-edit.sh` is the interactive editor utility invoked by the dispatcher.
 
 ---
 
@@ -328,15 +329,15 @@ make restore-remote
 
 ---
 
-### 6. `utilities/secrets-edit.sh`
-**Purpose:** Thin dispatcher — routes subcommands to `utilities/secrets-*.sh`
+### 6. `edit-secrets.sh`
+**Purpose:** Dispatcher — routes subcommands to `utilities/secrets-*.sh`
 
-`utilities/secrets-edit.sh` is a ≤100-line dispatcher following the same pattern as
+`edit-secrets.sh` is a ≤100-line dispatcher following the same pattern as
 `maintenance.sh`. All business logic lives in the `utilities/secrets-*.sh`
 standalone scripts. Admins may invoke the dispatcher or the utilities directly.
 
 ```bash
-./utilities/secrets-edit.sh [subcommand] [OPTIONS]
+./edit-secrets.sh [subcommand] [OPTIONS]
 ```
 
 **Key features:**
@@ -368,8 +369,8 @@ standalone scripts. Admins may invoke the dispatcher or the utilities directly.
 | `--dry-run` | `rotate` | Preview rotation without writing |
 
 ```bash
-./utilities/secrets-edit.sh
-./utilities/secrets-edit.sh --editor vim
+./edit-secrets.sh
+./edit-secrets.sh --editor vim
 ./utilities/secrets-rotate.sh smtp_password
 ./utilities/secrets-rotate.sh admin_token --dry-run
 ./utilities/secrets-export-recovery-kit.sh
@@ -716,7 +717,7 @@ All common operations have Makefile shortcuts. Run `make help` to see the full t
 | `make help` | — | Print all targets with descriptions |
 | `make setup` | `sudo ./setup.sh` | Requires `sudo make setup` |
 | `make init-secrets` | `./setup.sh secrets` | Interactive secrets initialisation |
-| `make edit-secrets` | `./utilities/secrets-edit.sh` | Open SOPS secrets editor |
+| `make edit-secrets` | `./edit-secrets.sh` | Open SOPS secrets editor (dispatcher) |
 | `make test-secrets` | `./utilities/secrets-list.sh` | Verify secrets decrypt correctly |
 | `make test-email` | `./maintenance.sh test-email` | Test full email delivery chain |
 | `make up` / `make start` | `sudo ./startup.sh` | Start all services |
@@ -961,7 +962,7 @@ automatically on any process exit, including SIGKILL and OOM kill.
 3. **Use `make test-config`** to validate docker-compose config before deployment
 
 ### Security
-1. **Never hardcode secrets in `.env`** — use `./utilities/secrets-edit.sh` for all sensitive values
+1. **Never hardcode secrets in `.env`** — use `./edit-secrets.sh` for all sensitive values
 2. **Review generated files** — inspect `docker-compose.yml` and `.env` after `setup.sh`
 3. **Scripts auto-clean temp files** — sensitive temp files are shredded on exit
 4. **All admin actions are logged** — check `journalctl -u vw-*` for systemd job output
