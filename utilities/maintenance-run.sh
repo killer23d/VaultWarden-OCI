@@ -143,15 +143,15 @@ main() {
     if [[ "$UPDATE_FIREWALL" == "true" || "$UPDATE_DNS" == "true" ]]; then
         log_info "=== Phase 3: SAFE Security & Network Maintenance ==="
         if [[ "$UPDATE_FIREWALL" == "true" ]]; then
-            "${SCRIPT_DIR}/utilities/maintenance-update-firewall.sh" update-firewall \
-                $( [[ "$DRY_RUN" == "true" ]] && echo "--dry-run" ) \
-                && firewall_update_result=0 || firewall_update_result=$?
+            local _fw_args=("${SCRIPT_DIR}/utilities/maintenance-update-firewall.sh" update-firewall)
+            [[ "$DRY_RUN" == "true" ]] && _fw_args+=("--dry-run")
+            "${_fw_args[@]}" && firewall_update_result=0 || firewall_update_result=$?
         fi
         if [[ "$UPDATE_DNS" == "true" ]]; then
-            "${SCRIPT_DIR}/utilities/maintenance-update-dns.sh" update-dns \
-                $( [[ "$EMAIL_NOTIFY" == "true" ]] && echo "--email" ) \
-                $( [[ "$DRY_RUN" == "true" ]] && echo "--dry-run" ) \
-                && dns_update_result=0 || dns_update_result=$?
+            local _dns_args=("${SCRIPT_DIR}/utilities/maintenance-update-dns.sh" update-dns)
+            [[ "$EMAIL_NOTIFY" == "true" ]] && _dns_args+=("--email")
+            [[ "$DRY_RUN" == "true" ]]     && _dns_args+=("--dry-run")
+            "${_dns_args[@]}" && dns_update_result=0 || dns_update_result=$?
         fi
     fi
 

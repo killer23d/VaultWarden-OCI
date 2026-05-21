@@ -20,6 +20,11 @@ re-runnable (idempotent), and accepts `--help` for usage details.
 | `maintenance-update-firewall.sh` | `./maintenance.sh update-firewall` | Yes | Cloudflare IP → UFW sync |
 | `maintenance-update.sh` | `./maintenance.sh update` | Yes | System/package/docker updates |
 | `restore-run.sh` | `./restore.sh` (all subcommands) | Yes / No (`list`) | Full restore engine |
+| `secrets-edit.sh` | `./utilities/secrets-edit.sh` | No | Interactive encrypted secrets editor |
+| `secrets-export-recovery-kit.sh` | `./utilities/secrets-export-recovery-kit.sh` | No | Export plaintext recovery document |
+| `secrets-list.sh` | `./utilities/secrets-list.sh` | No | List secret key names (no values) |
+| `secrets-rotate.sh` | `./utilities/secrets-rotate.sh FIELD` | No | Rotate a single credential |
+| `secrets-view.sh` | `./utilities/secrets-view.sh` | No | View decrypted secrets read-only |
 | `setup-crowdsec.sh` | *(Standalone)* | Yes | CrowdSec installation |
 | `setup-env.sh` | *(Setup phase)* | Yes | Environment file generation |
 | `setup-firewall.sh` | *(Setup phase)* | Yes | Firewall configuration |
@@ -28,6 +33,82 @@ re-runnable (idempotent), and accepts `--help` for usage details.
 | `setup-system.sh` | *(Setup phase)* | Yes | System preparation |
 | `setup-systemd.sh` | `./setup.sh systemd` | Yes | systemd timer management |
 | `uninstall-vaultwarden.sh` | *(Standalone)* | Yes | Full project teardown |
+
+---
+
+### `secrets-list.sh` — List secret key names
+
+Lists all secret key names in `secrets/secrets.yaml` without decrypting any values.
+Also invocable via `./utilities/secrets-list.sh`.
+
+```bash
+./utilities/secrets-list.sh list
+./utilities/secrets-list.sh
+```
+
+---
+
+### `secrets-view.sh` — View decrypted secrets (read-only)
+
+Decrypts and displays `secrets/secrets.yaml` in a read-only pager. No changes
+are saved. The `view` keyword is accepted as an alias for backward compatibility
+but is not required.
+
+```bash
+./utilities/secrets-view.sh
+./utilities/secrets-view.sh --editor vim
+./utilities/secrets-view.sh --editor less
+```
+
+---
+
+### `secrets-edit.sh` — Interactive encrypted secrets editor
+
+Decrypts, opens in `$EDITOR`, validates YAML, re-encrypts, and backs up on
+every save. Offers recovery kit export after modifications.
+Also invocable via `./utilities/secrets-edit.sh`.
+
+```bash
+./utilities/secrets-edit.sh edit
+./utilities/secrets-edit.sh edit --editor vim
+./utilities/secrets-edit.sh edit --no-backup
+./utilities/secrets-edit.sh --editor 'code --wait'
+```
+
+---
+
+### `secrets-rotate.sh` — Rotate a single credential
+
+Re-collects and re-hashes one named credential, atomically re-encrypts
+`secrets/secrets.yaml`, and resyncs Docker secret bind-mount files.
+Pass the field name directly as the first argument. The leading `rotate`
+keyword is accepted as an alias for backward compatibility but is not required.
+
+```bash
+./utilities/secrets-rotate.sh admin_token
+./utilities/secrets-rotate.sh email_api_token --dry-run
+./utilities/secrets-rotate.sh smtp_password --no-backup
+./utilities/secrets-rotate.sh caddy_cloudflare_dns_token
+./utilities/secrets-rotate.sh backup_passphrase
+```
+
+Supported fields: `admin_token`, `admin_basic_auth_hash`,
+`caddy_cloudflare_dns_token`, `email_api_token`, `smtp_password`,
+`push_installation_id`, `push_installation_key`, `backup_passphrase`.
+
+---
+
+### `secrets-export-recovery-kit.sh` — Export plaintext recovery document
+
+Decrypts secrets, validates no placeholder values remain, then exports a
+full recovery document (Age private key + all credentials) to a tmpfs-backed
+file (mode 0600) with a 30-minute auto-delete via `at(1)`.
+Also invocable via `./utilities/secrets-export-recovery-kit.sh`.
+
+```bash
+./utilities/secrets-export-recovery-kit.sh export-recovery-kit
+./utilities/secrets-export-recovery-kit.sh
+```
 
 ---
 

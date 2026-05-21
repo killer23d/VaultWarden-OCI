@@ -103,7 +103,7 @@ docker compose logs caddy | grep -i error
 make logs SERVICE=caddy
 
 # Verify Cloudflare API token
-./edit-secrets.sh list
+./utilities/secrets-list.sh
 
 # Check DNS resolution
 dig +short vault.example.com
@@ -116,7 +116,7 @@ curl -X GET "https://api.cloudflare.com/client/v4/zones" \
 **Solutions**:
 ```bash
 # Verify Cloudflare DNS token in secrets
-./edit-secrets.sh edit
+./utilities/secrets-edit.sh
 # Ensure caddy_cloudflare_dns_token is set
 
 # Restart Caddy to retry
@@ -140,8 +140,8 @@ docker compose logs caddy | tail -30
 
 # Verify the cost factor of your current hash (factor is between the second and third $)
 # Example hash: $2b$06$... means cost=6 (too low)
-grep admin_basic_auth_hash secrets/secrets.yaml   # encrypted; use edit-secrets.sh
-./edit-secrets.sh list
+grep admin_basic_auth_hash secrets/secrets.yaml   # encrypted; use utilities/secrets-edit.sh
+./utilities/secrets-list.sh
 ```
 
 **Solutions**:
@@ -151,7 +151,7 @@ grep admin_basic_auth_hash secrets/secrets.yaml   # encrypted; use edit-secrets.
 docker run --rm -it ghcr.io/caddybuilds/caddy-cloudflare:latest caddy hash-password --cost 14
 
 # Update the hash in secrets
-./edit-secrets.sh edit
+./utilities/secrets-edit.sh
 # Set admin_basic_auth_hash to the new hash string
 
 # Restart Caddy
@@ -215,18 +215,18 @@ make up
 
 **Diagnosis**:
 ```bash
-./edit-secrets.sh list
+./utilities/secrets-list.sh
 ./maintenance.sh health
 ```
 
 **Solutions**:
 ```bash
 # Rotate each placeholder secret with real values
-./edit-secrets.sh rotate caddy_cloudflare_dns_token
-./edit-secrets.sh rotate smtp_password
+./utilities/secrets-rotate.sh caddy_cloudflare_dns_token
+./utilities/secrets-rotate.sh smtp_password
 
 # provider-specific token example
-./edit-secrets.sh rotate email_api_token
+./utilities/secrets-rotate.sh email_api_token
 
 make restart
 make health
@@ -311,7 +311,7 @@ nano .env
 **Diagnosis**:
 ```bash
 # Test secrets decryption
-./edit-secrets.sh list
+./utilities/secrets-list.sh
 make test-secrets
 
 # Verify Age key exists
@@ -337,7 +337,7 @@ sops -d secrets/secrets.yaml
 ### Secrets Environment Leaking to Child Processes
 
 **Symptoms**:
-- `SOPS_AGE_KEY_FILE` remains set after running `./setup.sh`, `./edit-secrets.sh edit`, or `./setup.sh secrets`
+- `SOPS_AGE_KEY_FILE` remains set after running `./setup.sh`, `./utilities/secrets-edit.sh`, or `./setup.sh secrets`
 - Docker or rclone subprocesses inherit the Age key file path (visible via `ps aux`)
 
 **Diagnosis**:
@@ -361,7 +361,7 @@ unset SOPS_AGE_KEY_FILE
 unset SOPS_CONFIG
 
 # Re-run the affected script
-./edit-secrets.sh edit
+./utilities/secrets-edit.sh
 ```
 
 ## Network and Connectivity Issues
@@ -523,7 +523,7 @@ nano .env
 # Check: SMTP_HOST, SMTP_PORT, SMTP_USERNAME, ALLOWED_SENDER_DOMAINS
 
 # Verify SMTP password in secrets
-./edit-secrets.sh edit
+./utilities/secrets-edit.sh
 # Check: smtp_password
 
 # Restart postfix
@@ -543,7 +543,7 @@ docker compose restart postfix
 **Diagnosis**:
 ```bash
 # Check SMTP credentials
-./edit-secrets.sh list
+./utilities/secrets-list.sh
 
 # View postfix logs for auth errors
 docker compose logs postfix | grep -i "auth\|error\|fatal"
@@ -555,7 +555,7 @@ docker compose logs postfix | grep -i "auth\|error\|fatal"
 **Solutions**:
 ```bash
 # Update SMTP password
-./edit-secrets.sh edit
+./utilities/secrets-edit.sh
 # Set correct smtp_password
 
 # Verify SMTP settings
@@ -779,7 +779,7 @@ sudo cscli bouncers list
 sudo systemctl restart crowdsec
 
 # Verify Cloudflare firewall token
-./edit-secrets.sh edit
+./utilities/secrets-edit.sh
 # Check: crowdsec_cf_firewall_token (used by cs-cloudflare-bouncer)
 
 # Test Cloudflare firewall token against the WAF Custom Rules endpoint
@@ -836,7 +836,7 @@ sudo cscli whitelists add myip <your-ip>
 docker compose logs caddy | grep admin
 
 # Verify admin_basic_auth_hash in secrets
-./edit-secrets.sh list
+./utilities/secrets-list.sh
 ```
 
 **Solutions**:
@@ -845,7 +845,7 @@ docker compose logs caddy | grep admin
 docker run --rm -it ghcr.io/caddybuilds/caddy-cloudflare:latest caddy hash-password --cost 14
 
 # Update secrets with new hash
-./edit-secrets.sh edit
+./utilities/secrets-edit.sh
 # Set: admin_basic_auth_hash (paste bcrypt hash)
 
 # Restart Caddy to apply new hash

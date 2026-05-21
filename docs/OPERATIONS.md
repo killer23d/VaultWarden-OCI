@@ -462,16 +462,16 @@ sudo systemctl status crowdsec-cloudflare-bouncer
 
 ```bash
 # Edit secrets interactively
-./edit-secrets.sh edit
+./utilities/secrets-edit.sh
 make edit-secrets
 
 # View decrypted secrets without editing
-./edit-secrets.sh view
+./utilities/secrets-view.sh
 make test-secrets
 
 # Rotate secrets:
 # 1. Edit
-./edit-secrets.sh edit
+./utilities/secrets-edit.sh
 # 2. Update admin_token, admin_basic_auth_hash, smtp_password, etc.
 # 3. Restart to apply
 ./startup.sh --force
@@ -682,7 +682,7 @@ du -sh /var/lib/vaultwarden/logs/*
 docker compose ps postfix
 docker compose logs postfix
 grep SMTP .env
-./edit-secrets.sh view    # View smtp_password and verify decryption
+./utilities/secrets-view.sh    # View smtp_password and verify decryption
 ```
 
 ### CrowdSec Not Blocking

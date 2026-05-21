@@ -302,7 +302,7 @@ install_units() {
 
         # lib files are installed 644 root:root (not 640).
         #
-        # Rationale: these files are sourced by maintenance.sh and backup.sh
+        # Rationale: these files are used by maintenance.sh and backup.sh
         # at runtime. If the systemd unit's User= directive is
         # ever changed from root to a service account, a 640 root:root mode
         # causes every "source lib/common.sh" call to fail silently (bash
@@ -342,7 +342,8 @@ install_units() {
     )
     for script in "${flat_scripts_to_install[@]}"; do
         local src="$PROJECT_ROOT/$script"
-        local dest="$OPT_SCRIPTS_DIR/$(basename "$script")"
+        local dest
+        dest="$OPT_SCRIPTS_DIR/$(basename "$script")"
         if [[ ! -f "$src" ]]; then
             log_warn "Script not found, skipping: $src"
             continue

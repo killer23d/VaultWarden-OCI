@@ -2,7 +2,7 @@
 
 Complete reference for all management scripts and utility libraries in VaultWarden-OCI.
 
-> **Architecture note (Dispatcher Pattern):** To improve maintainability, monolithic entry-points (`setup.sh`, `maintenance.sh`, `backup.sh`, `restore.sh`) have been refactored into thin **dispatchers**. The actual implementation logic is modularised into 17 standalone administrative and engine scripts located in the `utilities/` directory.
+> **Architecture note (Dispatcher Pattern):** To improve maintainability, monolithic entry-points (`setup.sh`, `maintenance.sh`, `backup.sh`, `restore.sh`, `edit-secrets.sh`) have been refactored into thin **dispatchers**. The actual implementation logic is modularised into 22 standalone administrative and engine scripts located in the `utilities/` directory.
 >
 > Library consolidation: `lib/security.sh` and `lib/simple_key_resilience.sh` were merged into `lib/crypto.sh`; `lib/email.sh` was inlined into `lib/common.sh`.
 >
@@ -18,11 +18,14 @@ Complete reference for all management scripts and utility libraries in VaultWard
 | 2 | `startup.sh` | Service management | — |
 | 3 | `backup.sh` | Dispatcher for backups | — |
 | 4 | `restore.sh` | Dispatcher for restores | — |
-| 5 | `edit-secrets.sh` | Secrets | — |
-| 6 | `maintenance.sh` | Dispatcher for maintenance/health/updates | `db-maint` only |
-| 7 | `utilities/*.sh` | 17 standalone admin/engine scripts (see `utilities/README.md`) | ✅ |
+| 5 | `edit-secrets.sh` | Dispatcher for secrets editing | — |
+| 6 | `utilities/secrets-edit.sh` | Interactive encrypted secrets editor (standalone) | — |
+| 7 | `maintenance.sh` | Dispatcher for maintenance/health/updates | `db-maint` only |
+| 8 | `utilities/*.sh` | 22 standalone admin/engine scripts (see `utilities/README.md`) | ✅ |
 
 **Utility libraries (5):** `lib/common.sh` *(includes email)*, `lib/docker.sh`, `lib/crypto.sh` *(includes key resilience + security)*, `lib/backup-utils.sh`, `lib/secrets.sh`
+
+> **Dispatcher count:** `edit-secrets.sh` was refactored into a thin dispatcher in this release, bringing the total dispatcher-pattern top-level scripts to 5: `setup.sh`, `maintenance.sh`, `backup.sh`, `restore.sh`, `edit-secrets.sh`. `utilities/secrets-edit.sh` is the interactive editor utility invoked by the dispatcher.
 
 ---
 
@@ -108,7 +111,7 @@ sudo ./setup.sh systemd install
 ./setup.sh secrets --hash-only
 
 # Confirm the result
-./edit-secrets.sh view
+./utilities/secrets-view.sh
 ```
 
 > After the secrets phase runs, use `./edit-secrets.sh edit` for all subsequent edits — it safely decrypts, edits, re-encrypts, and backs up the secrets file.
@@ -327,7 +330,11 @@ make restore-remote
 ---
 
 ### 6. `edit-secrets.sh`
-**Purpose:** Securely edit SOPS-encrypted secrets
+**Purpose:** Dispatcher — routes subcommands to `utilities/secrets-*.sh`
+
+`edit-secrets.sh` is a ≤100-line dispatcher following the same pattern as
+`maintenance.sh`. All business logic lives in the `utilities/secrets-*.sh`
+standalone scripts. Admins may invoke the dispatcher or the utilities directly.
 
 ```bash
 ./edit-secrets.sh [subcommand] [OPTIONS]
@@ -345,33 +352,35 @@ make restore-remote
 
 **Subcommands:**
 
-| Subcommand | Description |
-| :-- | :-- |
-| *(none)* | Open encrypted secrets in editor (interactive) |
-| `view` | View decrypted secrets without editing |
-| `list` | List all available secret key names |
-| `rotate FIELD` | Rotate (regenerate) a single secret field |
-| `export-recovery-kit` | Export a plaintext recovery document (key + all secrets) — written to tmpfs, never to persistent disk |
+| Subcommand | Utility | Description |
+| :-- | :-- | :-- |
+| `edit` | `utilities/secrets-edit.sh` | Open encrypted secrets in editor (interactive) |
+| `view` | `utilities/secrets-view.sh` | View decrypted secrets without editing |
+| `list` | `utilities/secrets-list.sh` | List all available secret key names |
+| `rotate FIELD` | `utilities/secrets-rotate.sh` | Rotate (regenerate) a single secret field. Pass FIELD directly (e.g. `admin_token`); leading `rotate` accepted as alias. |
+| `export-recovery-kit` | `utilities/secrets-export-recovery-kit.sh` | Export a plaintext recovery document (key + all secrets) |
 
-**Options:**
+**Options (per subcommand):**
 
-| Option | Description |
-| :-- | :-- |
-| `--editor EDITOR` | Specify editor (default: nano) |
-| `--no-backup` | Skip automatic backup before editing |
+| Option | Subcommand(s) | Description |
+| :-- | :-- | :-- |
+| `--editor EDITOR` | `edit`, `view` | Specify editor (default: nano) |
+| `--no-backup` | `edit`, `rotate` | Skip automatic backup before editing |
+| `--dry-run` | `rotate` | Preview rotation without writing |
 
 ```bash
-./edit-secrets.sh edit
-./edit-secrets.sh edit --editor vim
-./edit-secrets.sh rotate smtp_password
-./edit-secrets.sh export-recovery-kit
-./edit-secrets.sh view
-./edit-secrets.sh list
+./edit-secrets.sh
+./edit-secrets.sh --editor vim
+./utilities/secrets-rotate.sh smtp_password
+./utilities/secrets-rotate.sh admin_token --dry-run
+./utilities/secrets-export-recovery-kit.sh
+./utilities/secrets-view.sh
+./utilities/secrets-list.sh
 make edit-secrets
 make test-secrets    # runs list internally
 ```
 
-> **Recovery kit security:** `--export-recovery-kit` writes the plaintext kit to a tmpfs path (`/dev/shm` → `/run/user/UID` → `/tmp` priority order) and prints a `WARNING` banner to the terminal before opening the file. Copy the kit to offline storage immediately and delete the file when done. The kit is **never** written to persistent disk.
+> **Recovery kit security:** `export-recovery-kit` writes the plaintext kit to a tmpfs path (`/dev/shm` → `/run/user/UID` → `/tmp` priority order) and prints a `WARNING` banner to the terminal before opening the file. Copy the kit to offline storage immediately and delete the file when done. The kit is **never** written to persistent disk.
 
 ---
 
@@ -708,8 +717,8 @@ All common operations have Makefile shortcuts. Run `make help` to see the full t
 | `make help` | — | Print all targets with descriptions |
 | `make setup` | `sudo ./setup.sh` | Requires `sudo make setup` |
 | `make init-secrets` | `./setup.sh secrets` | Interactive secrets initialisation |
-| `make edit-secrets` | `./edit-secrets.sh edit` | Open SOPS secrets editor |
-| `make test-secrets` | `./edit-secrets.sh list` | Verify secrets decrypt correctly |
+| `make edit-secrets` | `./edit-secrets.sh` | Open SOPS secrets editor (dispatcher) |
+| `make test-secrets` | `./utilities/secrets-list.sh` | Verify secrets decrypt correctly |
 | `make test-email` | `./maintenance.sh test-email` | Test full email delivery chain |
 | `make up` / `make start` | `sudo ./startup.sh` | Start all services |
 | `make down` / `make stop` | `docker compose down` | Graceful shutdown |
@@ -767,7 +776,7 @@ All common operations have Makefile shortcuts. Run `make help` to see the full t
 | `make version` | — | Show version info for all containers and Docker |
 | `make watch` | `watch -n 5 make status` | Auto-refresh service status every 5 s |
 | `make monitor` | `docker compose logs -f -t` | Follow all service logs in real-time |
-| `make fmt` | `docker compose config` + `edit-secrets.sh list` | Validate Compose files and secrets |
+| `make fmt` | `docker compose config` + `utilities/secrets-list.sh` | Validate Compose files and secrets |
 | `make config` | — | Show non-sensitive `.env` variables and service list |
 
 > **`make test-config`** is the quickest pre-deployment sanity check. It runs `docker compose config` against the merged Compose files and exits non-zero if the configuration is invalid — useful before `make up` or after editing any `.yml` file.
@@ -846,7 +855,7 @@ Backup-specific helpers.
 | `format_backup_size BYTES` | Human-readable size formatting |
 
 ### `lib/secrets.sh`
-Secrets collection, generation, hashing, validation, and recovery kit export. Used by `setup.sh secrets` and `edit-secrets.sh edit`.
+Secrets collection, generation, hashing, validation, and recovery kit export. Used by `setup.sh secrets` and `utilities/secrets-edit.sh`.
 
 | Function | Description |
 | :-- | :-- |
@@ -953,7 +962,7 @@ automatically on any process exit, including SIGKILL and OOM kill.
 3. **Use `make test-config`** to validate docker-compose config before deployment
 
 ### Security
-1. **Never hardcode secrets in `.env`** — use `./edit-secrets.sh edit` for all sensitive values
+1. **Never hardcode secrets in `.env`** — use `./edit-secrets.sh` for all sensitive values
 2. **Review generated files** — inspect `docker-compose.yml` and `.env` after `setup.sh`
 3. **Scripts auto-clean temp files** — sensitive temp files are shredded on exit
 4. **All admin actions are logged** — check `journalctl -u vw-*` for systemd job output

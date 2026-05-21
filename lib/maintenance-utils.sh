@@ -72,7 +72,7 @@ cleanup_logs() {
     local log_dirs=(
         "$state_dir/logs/vaultwarden"
         "$state_dir/logs/caddy"
-        "${SCRIPT_DIR}/logs"
+        "${PROJECT_ROOT}/logs"
     )
     for log_dir in "${log_dirs[@]}"; do
         if [[ -d "$log_dir" ]]; then
@@ -213,9 +213,11 @@ optimize_database() {
         log_success "VaultWarden stopped"
         _wait_wal_quiesce "$host_db_path" 30
     fi
-    log_info "Creating encrypted pre-optimization backup via backup.sh..."
-    # Use PROJECT_ROOT so this works correctly regardless of which script sources this lib
-    if ! "${PROJECT_ROOT:-$SCRIPT_DIR}/backup.sh" run db; then
+    log_info "Creating encrypted pre-optimization backup via backup-run.sh..."
+    # Call utilities/backup-run.sh directly (not the backup.sh dispatcher) so
+    # this lib function does not depend on the caller's working directory and
+    # cannot create a circular dispatcher loop.
+    if ! "${PROJECT_ROOT}/utilities/backup-run.sh" run db; then
         log_error "Pre-optimization backup FAILED — aborting to avoid an unsafe rollback point"
         [[ "$was_running" == "true" ]] && docker compose up -d vaultwarden
         return 1
@@ -272,8 +274,8 @@ optimize_database() {
 validate_system_health() {
     if [[ "${DRY_RUN:-false}" == "true" ]]; then log_info "[DRY RUN] Would validate system health"; return 0; fi
     log_info "Validating system health after maintenance..."
-    log_info "Invoking: ${PROJECT_ROOT:-$SCRIPT_DIR}/utilities/maintenance-health.sh --quiet"
-    if "${PROJECT_ROOT:-$SCRIPT_DIR}/utilities/maintenance-health.sh" --quiet; then
+    log_info "Invoking: ${PROJECT_ROOT}/utilities/maintenance-health.sh --quiet"
+    if "${PROJECT_ROOT}/utilities/maintenance-health.sh" --quiet; then
         log_success "System health validation passed"
         return 0
     else

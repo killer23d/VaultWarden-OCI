@@ -16,6 +16,37 @@ source "${SCRIPT_DIR}/lib/crypto.sh"
 source "${SCRIPT_DIR}/lib/secrets.sh"   # provides cleanup_secrets_environment()
 source "${SCRIPT_DIR}/lib/storage.sh"  # provides require_project_state_ready()
 
+# ARCHITECTURE NOTE (Task 2d): startup.sh is intentionally not split into
+# utilities/startup-*.sh. All phases (pre-flight, secrets preparation,
+# iptables restore, service health gate, post-start verification) are:
+#   - Sequentially dependent on shared in-process state (trap, lock files,
+#     global vars)
+#   - Not meaningful standalone admin operations outside of systemd boot context
+#   - Already thin wrappers that delegate to lib/ functions
+# If a phase gains standalone utility value in future, extract it then.
+#
+# AUDIT (Task 2d + Fix 4): Every startup.sh function was compared against
+# lib/docker.sh, lib/storage.sh, lib/secrets.sh, lib/crypto.sh, and
+# lib/common.sh on 2026-05-20 (updated Fix 4 2026-05-21).
+# No extractable duplicates remain:
+#   _maybe_sudo()                    — startup-specific root escalation helper (no lib equiv)
+#   warn_plaintext_secret_overrides()— startup-only split-brain advisory; not reused elsewhere
+#   check_email_config_consistency() — startup-only advisory; not reused elsewhere
+#   load_environment()               — sources .env; startup-scoped (reads relative .env)
+#   validate_prerequisites()         — startup-scoped; delegates to check_docker_available()
+#   prepare_directories()            — startup-scoped mkdir wrapper; not a lib candidate
+#   prepare_log_directories()        — startup-scoped; not a lib candidate
+#   check_age_key_health_preflight() — startup-specific key-path override logic
+#   prepare_docker_secrets()         — thin wrapper; delegates to export_docker_secrets()
+#                                      in lib/secrets.sh for all hardening logic
+#   cleanup_orphaned_resources()     — delegates to cleanup_docker_system() in lib/docker.sh
+#   _startup_pull_images()           — startup-specific --skip-pull guard
+#   _startup_start_services()        — startup-specific --force-recreate guard
+#   ensure_vaultwarden_egress_nat()  — startup-specific NAT remediation
+#   wait_for_services()              — startup-specific health gate loop
+#   run_health_check()               — startup-specific; delegates to maintenance-health.sh
+#   show_status()                    — one-liner docker compose ps wrapper
+
 FORCE_RESTART=false
 SKIP_HEALTH_CHECK=false
 BACKGROUND=false
@@ -122,50 +153,10 @@ _maybe_sudo() {
   fi
 }
 
-# ---------------------------------------------------------------------------
-# _startup_secure_wipe FILE
-#
-# Securely overwrite and remove a sensitive temp file.
-# Mirrors lib/secrets.sh::_secure_shred() to handle CoW filesystems
-# (btrfs, snapshotted ext4 on OCI block volumes) where shred(1) cannot
-# guarantee extent reuse and therefore cannot guarantee data erasure.
-# ---------------------------------------------------------------------------
-_startup_secure_wipe() {
-  local target="$1"
-  [[ -f "$target" ]] || return 0
+# _startup_secure_wipe is no longer defined here.
+# Callers use _secure_shred() from lib/secrets.sh (sourced above), which
+# provides the same CoW-filesystem-safe overwrite-before-unlink behaviour.
 
-  if command -v shred >/dev/null 2>&1; then
-    shred -fuz "$target" 2>/dev/null && return 0
-  fi
-
-  # dd overwrite fallback: effective on CoW filesystems
-  local file_size
-  file_size=$(stat -c%s "$target" 2>/dev/null || stat -f%z "$target" 2>/dev/null || echo "4096")
-  [[ -z "$file_size" || ! "$file_size" =~ ^[0-9]+$ ]] && file_size=4096
-  (( file_size == 0 )) && file_size=4096
-  dd if=/dev/urandom of="$target" bs="$file_size" count=1 conv=notrunc 2>/dev/null || true
-  rm -f "$target"
-}
-
-# ---------------------------------------------------------------------------
-# _prepare_secrets_cleanup
-#
-# Cleans up temporary files and restores umask after prepare_docker_secrets().
-# ---------------------------------------------------------------------------
-_prepare_secrets_cleanup_umask=""
-_prepare_secrets_cleanup_cache=""
-_prepare_secrets_trap_registered=false
-
-_prepare_secrets_cleanup() {
-  if [[ -n "$_prepare_secrets_cleanup_umask" ]]; then
-    umask "$_prepare_secrets_cleanup_umask"
-    _prepare_secrets_cleanup_umask=""
-  fi
-  if [[ -n "$_prepare_secrets_cleanup_cache" ]]; then
-    _startup_secure_wipe "$_prepare_secrets_cleanup_cache"
-    _prepare_secrets_cleanup_cache=""
-  fi
-}
 
 # ---------------------------------------------------------------------------
 # warn_plaintext_secret_overrides
@@ -211,7 +202,7 @@ check_email_config_consistency() {
       if [[ ! -f "$token_file" ]] || [[ ! -s "$token_file" ]]; then
         log_warn "EMAIL_MODE=api is set but '${token_file}' is absent or empty."
         log_warn "  All alert emails will fail silently until the token is populated."
-        log_warn "  Fix: ./edit-secrets.sh rotate email_api_token"
+        log_warn "  Fix: ./utilities/secrets-rotate.sh email_api_token"
       fi
       ;;
     smtp)
@@ -220,7 +211,7 @@ check_email_config_consistency() {
       if [[ ! -f "$pw_file" ]] || [[ ! -s "$pw_file" ]]; then
         log_warn "EMAIL_MODE=smtp is set but '${pw_file}' is absent or empty."
         log_warn "  SMTP relay authentication will fail on first send."
-        log_warn "  Fix: ./edit-secrets.sh rotate smtp_password"
+        log_warn "  Fix: ./utilities/secrets-rotate.sh smtp_password"
       fi
       ;;
     auto|host)
@@ -252,7 +243,7 @@ load_environment() {
 
     # Warn if .env is root-owned while startup is running as a non-root user.
     # startup.sh runs via `sudo ./startup.sh` so it CAN read root:root 600 .env,
-    # but non-root tools (edit-secrets.sh, etc.) will get Permission denied.
+    # but non-root tools (utilities/secrets-edit.sh, etc.) will get Permission denied.
     local env_owner
     env_owner=$(stat -c '%U' ".env" 2>/dev/null || echo "unknown")
     local real_user
@@ -261,7 +252,7 @@ load_environment() {
       local real_group
       real_group=$(id -gn "${real_user}" 2>/dev/null || echo "${real_user}")
       log_warn ".env is owned by root but startup is running as ${real_user}."
-      log_warn "Non-root tools (edit-secrets.sh, etc.) cannot read .env."
+      log_warn "Non-root tools (utilities/secrets-edit.sh, etc.) cannot read .env."
       log_warn "Fix: sudo chown ${real_user}:${real_group} .env && sudo chmod 600 .env"
     fi
   else
@@ -295,7 +286,7 @@ validate_prerequisites() {
     return 1
   fi
 
-  if ! docker info >/dev/null 2>&1; then
+  if ! check_docker_available; then
     log_error "Docker daemon is not running or not accessible"
     return 1
   fi
@@ -503,100 +494,20 @@ check_age_key_health_preflight() {
 
 # ---------------------------------------------------------------------------
 # prepare_docker_secrets
+#
+# Startup-specific wrapper: runs check_age_key_health_preflight() (which may
+# export SOPS_AGE_KEY_FILE for this process), then delegates all decryption,
+# per-key file writing, ENC[ sanity check, and cache cleanup to
+# lib/secrets.sh::export_docker_secrets().
 # ---------------------------------------------------------------------------
 prepare_docker_secrets() {
   log_info "Preparing Docker secrets from SOPS..."
-
   check_age_key_health_preflight || return 1
-
-  # Use SECRETS_FILE (from lib/secrets.sh, defaults to secrets/secrets.yaml)
-  # for consistency with all other secrets consumers in the codebase.
-  local secrets_file="${SECRETS_FILE:-secrets/secrets.yaml}"
-
-  if [[ ! -f "$secrets_file" ]]; then
-    log_warn "$secrets_file not found; skipping Docker secrets preparation"
-    return 0
-  fi
-
-  local secrets_dir="$DOCKER_SECRETS_DIR"
-  mkdir -p "$secrets_dir"
-  chmod 700 "$secrets_dir"
-
-  local old_umask
-  old_umask=$(umask)
-  _prepare_secrets_cleanup_umask="$old_umask"
-  # Register the cleanup EXIT trap exactly once using a boolean flag so that
-  # we do not need to compose/decompose existing trap bodies via sed (which
-  # breaks silently when the body contains single quotes).
-  if [[ "$_prepare_secrets_trap_registered" != "true" ]]; then
-    trap '_prepare_secrets_cleanup' EXIT
-    _prepare_secrets_trap_registered=true
-  fi
-  # umask 077: new files are created as 0600 (no group/world bits).
-  # This is consistent with lib/secrets.sh::write_secret_file() (chmod 600).
-  umask 077
-
-  # Create the cache file inside the already-restricted secrets_dir
-  # (mode 700) rather than the world-listable /tmp, eliminating the TOCTOU
-  # window between mktemp and the subsequent chmod on a shared host.
-  local cache_file
-  cache_file=$(mktemp --tmpdir="$secrets_dir" .sops-cache.XXXXXXXXXX)
-  _prepare_secrets_cleanup_cache="$cache_file"
-
-  if ! sops -d "$secrets_file" > "$cache_file"; then
-    log_error "Failed to decrypt $secrets_file"
-    return 1
-  fi
-
-  # Minimal parser for the known flat structure used by this project.
-  # We intentionally avoid yq/jq dependency here.
-  # Pass secrets file path as argument to avoid hardcoded relative paths.
-  while IFS='=' read -r key value; do
-    [[ -z "$key" ]] && continue
-    local target_file="${secrets_dir}/${key}"
-    printf '%s' "$value" > "$target_file"
-  done < <(
-    python3 - "$cache_file" <<'PY'
-import sys, yaml
-with open(sys.argv[1], 'r', encoding='utf-8') as f:
-    data = yaml.safe_load(f) or {}
-for k, v in data.items():
-    if isinstance(v, (str, int, float)):
-        print(f"{k}={v}")
-PY
-  )
-
-  # Sanity-check: if any secret file starts with "ENC[", SOPS decryption
-  # silently produced raw ciphertext — fail loudly before containers start.
-  local bad_secrets=()
-  local f _head
-  for f in "$secrets_dir"/*; do
-    [[ -f "$f" ]] || continue
-    if read -r -n 4 _head < "$f" 2>/dev/null && [[ "$_head" == "ENC[" ]]; then
-      bad_secrets+=("$(basename "$f")")
-    fi
-  done
-  if [[ ${#bad_secrets[@]} -gt 0 ]]; then
-    log_error "prepare_docker_secrets: secret file(s) contain raw SOPS ciphertext — decryption failed silently:"
-    local s
-    for s in "${bad_secrets[@]}"; do
-      log_error "  ${secrets_dir}/${s}"
-    done
-    log_error "Remediation:"
-    log_error "  1. Run: make key-health  (verify age key is present and readable)"
-    log_error "  2. Run: sudo rm -f ${secrets_dir}/*  (clear stale files)"
-    log_error "  3. Run: make up  (re-decrypt and restart)"
-    return 1
-  fi
-
-  cleanup_secrets_environment || true
-  _prepare_secrets_cleanup
-  # The EXIT trap remains active for the lifetime of the process so that any
-  # unexpected exit after this point still cleans up any residual temp files.
-
+  export_docker_secrets "$DOCKER_SECRETS_DIR" || return 1
   log_success "Docker secrets prepared"
   return 0
 }
+
 
 # ---------------------------------------------------------------------------
 # cleanup_orphaned_resources
@@ -609,26 +520,26 @@ cleanup_orphaned_resources() {
     return 0
   fi
 
-  docker container prune -f >/dev/null 2>&1 || true
-  docker network prune -f >/dev/null 2>&1 || true
-  # Scope image prune to this project's images only to avoid removing dangling
-  # layers belonging to unrelated services on shared Docker hosts.
-  docker image prune -f \
-    --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME:-vaultwarden}" \
-    >/dev/null 2>&1 || true
+  # cleanup_docker_system() from lib/docker.sh prunes containers, images
+  # (with --filter until=48h), volumes, and networks — all scoped to the
+  # project label to avoid affecting unrelated services on shared hosts.
+  cleanup_docker_system || true
 
   log_success "Orphaned resources cleaned up"
   return 0
 }
 
 # ---------------------------------------------------------------------------
-# pull_images
+# _startup_pull_images
 #
-# Guarded by --skip-pull so systemd ExecStart restarts are instant.
-# Image refreshes go through maintenance.sh update or a manual
-# ./startup.sh without --skip-pull.
+# Startup-specific wrapper: guarded by --skip-pull so systemd ExecStart
+# restarts are instant. Image refreshes go through maintenance.sh update or
+# a manual ./startup.sh without --skip-pull.
+#
+# Uses a direct `docker compose pull` (not lib/docker.sh's pull_images())
+# so pull output streams directly to the journal without buffering.
 # ---------------------------------------------------------------------------
-pull_images() {
+_startup_pull_images() {
   if [[ "$SKIP_PULL" == "true" ]]; then
     log_info "Skipping docker compose pull (--skip-pull)"
     return 0
@@ -647,9 +558,13 @@ pull_images() {
 }
 
 # ---------------------------------------------------------------------------
-# start_services
+# _startup_start_services
+#
+# Startup-specific wrapper: honours FORCE_RESTART and DRY_RUN globals.
+# Passes --force-recreate when FORCE_RESTART=true so containers are
+# re-created even if the image digest has not changed.
 # ---------------------------------------------------------------------------
-start_services() {
+_startup_start_services() {
   log_info "Starting VaultWarden services..."
 
   local compose_args=(up -d)
@@ -693,9 +608,10 @@ ensure_vaultwarden_egress_nat() {
 
   # Preferred path: use repo-managed setup helper so NAT + DOCKER-USER
   # remediation stays in one place and can also be reused outside startup.
-  if [[ -x "./utilities/setup-firewall.sh" ]]; then
-    log_info "Invoking: $SCRIPT_DIR/utilities/setup-firewall.sh --phase iptables"
-    if _maybe_sudo ./utilities/setup-firewall.sh --phase iptables; then
+  local _fw_script="${PROJECT_ROOT}/utilities/setup-firewall.sh"
+  if [[ -x "$_fw_script" ]]; then
+    log_info "Invoking: ${_fw_script} --phase iptables"
+    if _maybe_sudo "$_fw_script" --phase iptables; then
       log_success "Egress firewall remediation completed via utilities/setup-firewall.sh"
       return 0
     fi
@@ -838,8 +754,9 @@ run_health_check() {
     return 0
   fi
 
-  if [[ ! -x "./maintenance.sh" ]]; then
-    log_error "maintenance.sh not executable or missing; cannot run health check"
+  local _health_script="${PROJECT_ROOT}/utilities/maintenance-health.sh"
+  if [[ ! -x "$_health_script" ]]; then
+    log_error "utilities/maintenance-health.sh not executable or missing; cannot run health check"
     log_error "Ensure setup.sh has been run and scripts are correctly installed"
     log_error "To skip this gate during recovery: ./startup.sh --skip-health"
     return 1
@@ -847,12 +764,10 @@ run_health_check() {
 
   log_info "Running post-start health check..."
 
-  # Disable errexit around maintenance.sh health so we can capture its exit code cleanly.
-  # The outer set -euo pipefail would abort the script before we could inspect
-  # the code if maintenance.sh health exits non-zero.
-  log_info "Invoking: $SCRIPT_DIR/maintenance.sh health"
+  # Disable errexit around the health check so we can capture its exit code cleanly.
+  log_info "Invoking: ${_health_script} health"
   local health_exit=0
-  ./maintenance.sh health || health_exit=$?
+  "$_health_script" health || health_exit=$?
 
   case "$health_exit" in
     0)
@@ -890,8 +805,8 @@ main() {
 
   # Add INT/TERM signal traps so that secrets are cleaned up and
   # the exit code correctly reflects termination (130 for INT, 143 for TERM).
-  trap '_prepare_secrets_cleanup; exit 130' INT
-  trap '_prepare_secrets_cleanup; exit 143' TERM
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
 
   load_environment || exit 1
   require_project_state_ready || exit 1
@@ -903,8 +818,8 @@ main() {
   warn_plaintext_secret_overrides || true
   cleanup_orphaned_resources || true
   ensure_vaultwarden_egress_nat || true
-  pull_images || exit 1
-  start_services || exit 1
+  _startup_pull_images || exit 1
+  _startup_start_services || exit 1
 
   if [[ "$BACKGROUND" != "true" ]]; then
     wait_for_services || true

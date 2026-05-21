@@ -157,7 +157,7 @@ fix-permissions: ## Fix file ownership after sudo operations leave root-owned fi
 	echo ""; \
 	for item in \
 	    CHANGELOG.md Makefile README.md VERSION \
-	    backup.sh edit-secrets.sh \
+	    backup.sh utilities/secrets-edit.sh \
 	    maintenance.sh restore.sh \
 	    setup.sh startup.sh \
 	    backups caddy crowdsec docs lib logs ssl systemd utilities \
@@ -215,11 +215,11 @@ init-secrets: ## Initialize secrets file (interactive)
 
 edit-secrets: ## Edit encrypted secrets file
 	@echo "$(BLUE)Opening secrets editor...$(NC)"
-	@./edit-secrets.sh
+	@./utilities/secrets-edit.sh
 
 test-secrets: ## Test secrets decryption
 	@echo "$(BLUE)Testing secrets decryption...$(NC)"
-	@if ./edit-secrets.sh list > /dev/null 2>&1; then \
+	@if ./utilities/secrets-list.sh > /dev/null 2>&1; then \
 		echo "$(GREEN)Secrets decryption: OK$(NC)"; \
 	else \
 		echo "$(RED)Secrets decryption: FAILED$(NC)"; \

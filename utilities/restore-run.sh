@@ -7,7 +7,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$SCRIPT_DIR"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "$PROJECT_ROOT"
 
 VW_LOCK_DIR="${PROJECT_ROOT}/.locks"
@@ -1278,17 +1278,17 @@ purge_wal_shm() { local db="$1"; rm -f "${db}-wal" "${db}-shm" 2>/dev/null || tr
 
 create_pre_restore_snapshot() {
     [[ "$NO_PRE_BACKUP" == "true" ]] && { log_info "Skipping pre-restore snapshot (--no-backup)"; return 0; }
-    [[ "$DRY_RUN"       == "true" ]] && { log_info "[DRY RUN] Would run: ./backup.sh run emergency"; return 0; }
+    [[ "$DRY_RUN"       == "true" ]] && { log_info "[DRY RUN] Would run: utilities/backup-run.sh run emergency"; return 0; }
     local state_dir; state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
     local db_path="$state_dir/data/db.sqlite3"
     # Best-effort WAL checkpoint; swallow all failures intentionally.
     # shellcheck disable=SC2015
     [[ -f "$db_path" ]] && command -v sqlite3 >/dev/null 2>&1 && \
         sqlite3 "$db_path" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1 || true
-    if [[ -x "./backup.sh" ]]; then
+    if [[ -x "${PROJECT_ROOT}/utilities/backup-run.sh" ]]; then
         log_info "Creating pre-restore emergency snapshot..."
-        log_info "Invoking: $SCRIPT_DIR/backup.sh run emergency --quiet"
-        if ! ./backup.sh run emergency --quiet; then
+        log_info "Invoking: ${PROJECT_ROOT}/utilities/backup-run.sh run emergency --quiet"
+        if ! "${PROJECT_ROOT}/utilities/backup-run.sh" run emergency --quiet; then
             if [[ "${RESTORE_SNAPSHOT_HARD_FAIL}" == "true" ]]; then
                 log_error "Pre-restore snapshot FAILED (hard-fail)."
                 log_error "Use --no-backup or set RESTORE_SNAPSHOT_HARD_FAIL=false to skip."
@@ -1297,7 +1297,7 @@ create_pre_restore_snapshot() {
             log_warn "Pre-restore snapshot failed (continuing — RESTORE_SNAPSHOT_HARD_FAIL=false)"
         fi
     else
-        local msg="backup.sh not executable — cannot create pre-restore snapshot"
+        local msg="backup-run.sh not executable — cannot create pre-restore snapshot"
         if [[ "${RESTORE_SNAPSHOT_HARD_FAIL}" == "true" ]]; then
             log_error "$msg"
             log_error "Use --no-backup or set RESTORE_SNAPSHOT_HARD_FAIL=false to skip."
@@ -1918,10 +1918,10 @@ main() {
                 2>/dev/null | grep -qE $'running (healthy|$)' && break || true
         done
 
-        if [[ -x "./maintenance.sh" ]]; then
+        if [[ -x "${PROJECT_ROOT}/utilities/maintenance-health.sh" ]]; then
             log_info "Running post-restore health check..."
-            log_info "Invoking: $SCRIPT_DIR/maintenance.sh health"
-            ./maintenance.sh health || {
+            log_info "Invoking: ${PROJECT_ROOT}/utilities/maintenance-health.sh"
+            "${PROJECT_ROOT}/utilities/maintenance-health.sh" || {
                 log_warn "Health check reported issues after restore."
                 log_warn "Investigate with: docker compose logs --tail=50"
             }

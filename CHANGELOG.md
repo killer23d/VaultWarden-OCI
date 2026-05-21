@@ -152,7 +152,7 @@ scripts with the old flag syntax.
 - **`setup.sh`** — `*)` catch-all added to top-level dispatch; `systemd` arm no longer converts positional `install` → `--install`; `run_phase_systemd` now accepts `install|remove|validate|status` as positional sub-actions; `help` bare-word arm added
 - **`maintenance.sh`** — `help` bare-word arm added; `health` sub-parser now exits 1 on unknown options (was `log_warn` + continue)
 - **`startup.sh`** — `help` bare-word arm added; unknown first positional emits "Unknown subcommand" (was "Unknown option")
-- **`edit-secrets.sh`** — `help` bare-word arm added; `*)` catch-all added
+- **`utilities/secrets-edit.sh`** — `help` bare-word arm added; `*)` catch-all added
 - **`create-breakglass-admin.sh`** — `help` bare-word arm added
 - **`uninstall-vaultwarden.sh`** — full refactor: `show_help()` function extracted; `run` subcommand added; zero-arg guard exits 1; `for _arg` loop replaced with `case "$1"`; silent `*) ;;` fallthrough removed
 
@@ -380,7 +380,7 @@ scripts with the old flag syntax.
   key (`secrets/keys/age-key.txt`) was present and healthy. This blocked `make up` on
   hosts where `setup.sh` placed the key under `secrets/keys/` but `.env` still
   referenced the canonical system path — a common state after a fresh clone or
-  migration. `edit-secrets.sh` and `make test-secrets` succeeded on the same host
+  migration. `utilities/secrets-edit.sh` and `make test-secrets` succeeded on the same host
   because they locate the key differently. Fix: if the configured path is absent but
   the repo-local key passes `check_age_key_health()`, export
   `SOPS_AGE_KEY_FILE=secrets/keys/age-key.txt` for the lifetime of the current process
