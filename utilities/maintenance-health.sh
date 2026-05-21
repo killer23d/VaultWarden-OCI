@@ -22,6 +22,7 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # lib/secrets.sh recomputes SCRIPT_DIR at load time; save/restore PROJECT_ROOT's SCRIPT_DIR.
 _SAVE_SCRIPT_DIR="$PROJECT_ROOT"
 source "$PROJECT_ROOT/lib/common.sh"
+source "$PROJECT_ROOT/lib/email.sh"
 init_common_lib "$0"
 source "$PROJECT_ROOT/lib/docker.sh"
 source "$PROJECT_ROOT/lib/backup-utils.sh"

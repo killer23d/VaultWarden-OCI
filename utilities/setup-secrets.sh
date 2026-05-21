@@ -39,6 +39,7 @@ done
 unset _lib
 
 source "lib/common.sh"
+source "lib/email.sh"
 init_common_lib "$0"
 source "lib/crypto.sh"
 source "lib/secrets.sh"
