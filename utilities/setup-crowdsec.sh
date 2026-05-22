@@ -47,6 +47,17 @@ else
     log_error()   { printf '[ERROR]   crowdsec %s\n'    "$*" >&2; }
 fi
 
+# ── COLOR_* fallbacks for standalone runs (without lib/common.sh) ────────────
+if [[ "$_LIBS_LOADED" != "true" ]]; then
+    COLOR_RED=$'\033[0;31m'
+    COLOR_GREEN=$'\033[0;32m'
+    # shellcheck disable=SC2034  # COLOR_YELLOW/COLOR_CYAN may be used by sourcing scripts or future expansions
+    COLOR_YELLOW=$'\033[0;33m'
+    # shellcheck disable=SC2034
+    COLOR_CYAN=$'\033[0;36m'
+    COLOR_RESET=$'\033[0m'
+fi
+
 # ── Load .env ────────────────────────────────────────────────────────────────
 if [[ -f "${PROJECT_ROOT}/.env" ]]; then
     if declare -f load_env_file >/dev/null 2>&1; then
@@ -292,6 +303,25 @@ else
         _CF_BOUNCER_KEY="$_new_key"
         _cs_set_env_var "$_CF_BOUNCER_ENV_KEY" "$_CF_BOUNCER_KEY"
         log_success "Bouncer API key generated and registered. Written to .env as ${_CF_BOUNCER_ENV_KEY}."
+        # Change 6: Display newly generated key with red-banner credential screen
+        if [[ -t 0 ]]; then
+            clear
+            printf '%s' "${COLOR_RED}"
+            cat << 'BOUNCER_BANNER'
+  ╔══════════════════════════════════════════════════════════════════╗
+  ║   🔑  CROWDSEC CLOUDFLARE BOUNCER API KEY — SAVE THIS NOW      ║
+  ║   This key is stored in .env as CROWDSEC_CF_BOUNCER_API_KEY    ║
+  ║   and in /etc/crowdsec/bouncers/crowdsec-cloudflare-bouncer.yaml║
+  ╚══════════════════════════════════════════════════════════════════╝
+BOUNCER_BANNER
+            printf '%s' "${COLOR_RESET}"
+            printf '\n  Bouncer API key: %s%s%s\n\n' \
+                "${COLOR_RED}${COLOR_GREEN}" "${_CF_BOUNCER_KEY}" "${COLOR_RESET}"
+            printf '%s!!! PRESS ENTER AFTER SAVING THE BOUNCER API KEY !!!%s\n' \
+                "${COLOR_RED}" "${COLOR_RESET}"
+            read -r
+            clear
+        fi
     fi
 fi
 
@@ -316,7 +346,7 @@ if [[ -f "$_CF_BOUNCER_CONFIG_SRC" ]]; then
             _cf_account_id="${_cf_account_id:-CHANGE_ME_CF_ACCOUNT_ID}"
             _CF_FIREWALL_TOKEN="CHANGE_ME_CROWDSEC_CF_FIREWALL_TOKEN"
             log_warn "Auto mode: Cloudflare values left as placeholders where missing."
-            log_warn "Set later in .env / utilities/secrets-rotate.sh crowdsec_cf_firewall_token"
+            log_warn "Set later in .env / sudo utilities/setup-secrets.sh rotate crowdsec_cf_firewall_token"
         else
             log_info ""
             log_info "══════════════════════════════════════════════════════════"
@@ -332,16 +362,42 @@ if [[ -f "$_CF_BOUNCER_CONFIG_SRC" ]]; then
             if [[ -z "$_cf_account_id" ]]; then
                 read -r -p "Enter CF_ACCOUNT_ID (optional, press Enter to skip): " _cf_account_id
             fi
-            while [[ -z "$_CF_FIREWALL_TOKEN" ]]; do
-                read -r -s -p "Enter Cloudflare Firewall API token (input hidden): " _CF_FIREWALL_TOKEN
-                echo ""
-                if [[ -z "$_CF_FIREWALL_TOKEN" ]]; then
-                    log_warn "Token cannot be empty. Press Ctrl+C to skip and configure later."
+            # Change 5: Try to read the firewall token from SOPS-encrypted secrets
+            # or the docker secrets file before prompting the operator.
+            if [[ -f "${PROJECT_ROOT}/secrets/secrets.yaml" ]] && \
+               [[ -f "${SOPS_AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}" ]]; then
+                _CF_FIREWALL_TOKEN=$(
+                    SOPS_AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}" \
+                    sops -d --extract '["crowdsec_cf_firewall_token"]' \
+                         "${PROJECT_ROOT}/secrets/secrets.yaml" 2>/dev/null || true
+                )
+                if [[ "$_CF_FIREWALL_TOKEN" == CHANGE_ME* || \
+                      "$_CF_FIREWALL_TOKEN" == PLACEHOLDER* ]]; then
+                    _CF_FIREWALL_TOKEN=""
                 fi
-            done
+            fi
+            _docker_secret="${PROJECT_ROOT}/secrets/.docker_secrets/crowdsec_cf_firewall_token"
+            if [[ -z "$_CF_FIREWALL_TOKEN" ]] && [[ -f "$_docker_secret" ]]; then
+                _CF_FIREWALL_TOKEN=$(cat "$_docker_secret" 2>/dev/null || true)
+                if [[ "$_CF_FIREWALL_TOKEN" == CHANGE_ME* || \
+                      "$_CF_FIREWALL_TOKEN" == PLACEHOLDER* ]]; then
+                    _CF_FIREWALL_TOKEN=""
+                fi
+            fi
+            if [[ -n "$_CF_FIREWALL_TOKEN" ]]; then
+                log_success "crowdsec_cf_firewall_token found in secrets — skipping prompt."
+            else
+                while [[ -z "$_CF_FIREWALL_TOKEN" ]]; do
+                    read -r -s -p "Enter Cloudflare Firewall API token (input hidden): " _CF_FIREWALL_TOKEN
+                    echo ""
+                    if [[ -z "$_CF_FIREWALL_TOKEN" ]]; then
+                        log_warn "Token cannot be empty. Press Ctrl+C to skip and configure later."
+                    fi
+                done
+                log_success "Cloudflare firewall token accepted."
+            fi
             _cs_set_env_var "CLOUDFLARE_ZONE_ID" "$_cf_zone_id"
             [[ -n "$_cf_account_id" ]] && _cs_set_env_var "CF_ACCOUNT_ID" "$_cf_account_id"
-            log_success "Cloudflare firewall token accepted."
         fi
 
         mkdir -p /etc/crowdsec/bouncers
@@ -400,7 +456,7 @@ log_info " CrowdSec installation complete"
 log_info "════════════════════════════════════════════════════════"
 log_info "Next steps:"
 log_info "  1. Set CLOUDFLARE_ZONE_ID (and optionally CF_ACCOUNT_ID) in .env"
-log_info "  2. Run ./utilities/secrets-rotate.sh crowdsec_cf_firewall_token"
+log_info "  2. Run sudo ./utilities/setup-secrets.sh rotate crowdsec_cf_firewall_token"
 log_info "     to add the Cloudflare firewall API token"
 log_info "     (Permissions required: Zone:Firewall Services:Edit)"
 log_info "  3. Verify CrowdSec metrics:"
