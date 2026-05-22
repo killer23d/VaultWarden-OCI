@@ -88,6 +88,7 @@ _step_fail() {
 _step_skip() {
     log_info  "  — $1 (skipped${2:+: $2})"
     (( _STEPS_SKIPPED++ )) || true
+    (( _STEPS_TOTAL++   )) || true
 }
 
 _step_header() {
@@ -96,10 +97,6 @@ _step_header() {
 }
 
 DRILL_TMPDIR=""
-cleanup() {
-    [[ -n "$DRILL_TMPDIR" ]] && rm -rf "$DRILL_TMPDIR" 2>/dev/null || true
-}
-
 # ---------------------------------------------------------------------------
 # Drill steps
 # ---------------------------------------------------------------------------
@@ -311,7 +308,8 @@ drill_email() {
     fi
 
     log_info "  Sending drill notification to $admin_email ..."
-    local subject="[VaultWarden Drill] Pre-production test — $(date '+%Y-%m-%d %H:%M')"
+    local subject
+    subject="[VaultWarden Drill] Pre-production test — $(date '+%Y-%m-%d %H:%M')"
     local body
     body="$(printf 'This is an automated pre-production drill notification.\n\nHost: %s\nDomain: %s\nTimestamp: %s\n\nIf you received this, email delivery is working correctly.\n' \
         "$(hostname -f 2>/dev/null || hostname)" \

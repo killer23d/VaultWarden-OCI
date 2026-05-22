@@ -19,6 +19,7 @@ re-runnable (idempotent), and accepts `--help` for usage details.
 | `maintenance-update-dns.sh` | `./maintenance.sh update-dns` | Yes | Cloudflare A record updates |
 | `maintenance-update-firewall.sh` | `./maintenance.sh update-firewall` | Yes | Cloudflare IP → UFW sync |
 | `maintenance-update.sh` | `./maintenance.sh update` | Yes | System/package/docker updates |
+| `pre-production-drill.sh` | `make drill` | Yes | Non-destructive pre-production dry-run drill |
 | `restore-run.sh` | `./restore.sh` (all subcommands) | Yes / No (`list`) | Full restore engine |
 | `secrets-edit.sh` | `./utilities/secrets-edit.sh` | No | Interactive encrypted secrets editor |
 | `secrets-export-recovery-kit.sh` | `./utilities/secrets-export-recovery-kit.sh` | No | Export plaintext recovery document |
@@ -32,6 +33,7 @@ re-runnable (idempotent), and accepts `--help` for usage details.
 | `setup-storage.sh` | *(Setup phase)* | Yes | Storage setup and volume migration |
 | `setup-system.sh` | *(Setup phase)* | Yes | System preparation |
 | `setup-systemd.sh` | `./setup.sh systemd` | Yes | systemd timer management |
+| `smoke-test.sh` | `make smoke-test` | Yes | Pre-production smoke test against the live stack |
 | `uninstall-vaultwarden.sh` | *(Standalone)* | Yes | Full project teardown |
 
 ---
