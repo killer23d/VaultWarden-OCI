@@ -39,7 +39,7 @@ DATA_DEVICE ?=
 .PHONY: help \
         setup init-secrets edit-secrets test-secrets test-email \
         up down restart start stop safe-restart status \
-        health health-quick health-email \
+        health health-quick health-email smoke-test drill \
         logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec \
         watch monitor \
         backup backup-full backup-emergency list-backups backup-status \
@@ -398,6 +398,12 @@ health-quick: ## Quick health check (essential services only)
 health-email: ## Test email health
 	@echo "$(BLUE)Testing email health and sending notification...$(NC)"
 	@sudo ./maintenance.sh health --report
+
+smoke-test: ## Run pre-production smoke test against the live stack
+	@sudo utilities/smoke-test.sh
+
+drill: ## Run non-destructive pre-production dry-run drill
+	@sudo utilities/pre-production-drill.sh
 
 watch: ## Watch service logs in real-time (Ctrl+C to stop)
 	$(call check-docker)

@@ -35,30 +35,13 @@ fi
 readonly COLOR_RED COLOR_BOLD_RED COLOR_GREEN COLOR_YELLOW COLOR_BLUE COLOR_MAGENTA COLOR_CYAN COLOR_RESET COLOR_BOLD
 
 # Log level filtering for production environments.
-# When LOG_LEVEL is not a recognised value, warn once and fall back to INFO
-# so output is not silently suppressed or unexpectedly flooded.
-_LOG_LEVEL_WARNED=false
+# Static associative array maps level names to numeric weights;
+# _LOG_CURRENT_WEIGHT is set once in init_common_lib() for O(1) comparison.
+declare -gA _LOG_LEVEL_WEIGHT=([DEBUG]=0 [INFO]=1 [WARN]=2 [ERROR]=3)
+_LOG_CURRENT_WEIGHT=1  # default INFO
+
 _should_log() {
-    local level="$1"
-    local levels=("DEBUG" "INFO" "WARN" "ERROR")
-    local current_index=-1
-    local target_index=-1
-
-    for i in "${!levels[@]}"; do
-        [[ "${levels[i]}" == "$LOG_LEVEL" ]] && current_index=$i
-        [[ "${levels[i]}" == "$level" ]] && target_index=$i
-    done
-
-    if [[ $current_index -eq -1 ]]; then
-        if [[ "$_LOG_LEVEL_WARNED" != "true" ]]; then
-            printf '[WARN] LOG_LEVEL="%s" is not recognised (valid: DEBUG INFO WARN ERROR) — defaulting to INFO\n' \
-                "$LOG_LEVEL" >&2
-            _LOG_LEVEL_WARNED=true
-        fi
-        current_index=1  # default to INFO
-    fi
-
-    (( target_index >= current_index ))
+    (( ${_LOG_LEVEL_WEIGHT[$1]:-0} >= _LOG_CURRENT_WEIGHT ))
 }
 
 set_log_prefix() {
@@ -69,18 +52,10 @@ _get_timestamp() {
     [[ "$LOG_TIMESTAMP" == "true" ]] && date '+%H:%M:%S' || printf ''
 }
 
-_get_script_tag() {
-    if [[ -n "$_VW_CALLING_SCRIPT" ]]; then
-        printf '%s' "$_VW_CALLING_SCRIPT"
-    else
-        basename "${BASH_SOURCE[-1]:-lib/common.sh}"
-    fi
-}
-
 log_info() {
     _should_log "INFO" || return 0
     local ts tag
-    ts=$(_get_timestamp); tag=$(_get_script_tag)
+    ts=$(_get_timestamp); tag="${_VW_CALLING_SCRIPT:-common.sh}"
     if [[ "$LOG_COLORS" == "true" ]]; then
         printf '%s[%s] [%s] INFO%s %s\n' "${COLOR_CYAN}" "$ts" "$tag" "${COLOR_RESET}" "$*"
     else
@@ -91,7 +66,7 @@ log_info() {
 log_success() {
     _should_log "INFO" || return 0
     local ts tag
-    ts=$(_get_timestamp); tag=$(_get_script_tag)
+    ts=$(_get_timestamp); tag="${_VW_CALLING_SCRIPT:-common.sh}"
     if [[ "$LOG_COLORS" == "true" ]]; then
         printf '%s[%s] [%s] OK%s %s\n' "${COLOR_GREEN}" "$ts" "$tag" "${COLOR_RESET}" "$*"
     else
@@ -102,7 +77,7 @@ log_success() {
 log_warn() {
     _should_log "WARN" || return 0
     local ts tag
-    ts=$(_get_timestamp); tag=$(_get_script_tag)
+    ts=$(_get_timestamp); tag="${_VW_CALLING_SCRIPT:-common.sh}"
     if [[ "$LOG_COLORS" == "true" ]]; then
         printf '%s[%s] [%s] WARN%s %s\n' "${COLOR_YELLOW}" "$ts" "$tag" "${COLOR_RESET}" "$*" >&2
     else
@@ -113,7 +88,7 @@ log_warn() {
 log_error() {
     _should_log "ERROR" || return 0
     local ts tag
-    ts=$(_get_timestamp); tag=$(_get_script_tag)
+    ts=$(_get_timestamp); tag="${_VW_CALLING_SCRIPT:-common.sh}"
     if [[ "$LOG_COLORS" == "true" ]]; then
         printf '%s[%s] [%s] ERROR%s %s\n' "${COLOR_BOLD_RED}" "$ts" "$tag" "${COLOR_RESET}" "$*" >&2
     else
@@ -124,13 +99,13 @@ log_error() {
 log_debug() {
     _should_log "DEBUG" || return 0
     local ts tag
-    ts=$(_get_timestamp); tag=$(_get_script_tag)
+    ts=$(_get_timestamp); tag="${_VW_CALLING_SCRIPT:-common.sh}"
     printf '[%s] [%s] DEBUG %s\n' "$ts" "$tag" "$*" >&2
 }
 
 log_rollback() {
     local ts tag
-    ts=$(_get_timestamp); tag=$(_get_script_tag)
+    ts=$(_get_timestamp); tag="${_VW_CALLING_SCRIPT:-common.sh}"
     if [[ "$LOG_COLORS" == "true" ]]; then
         printf '%s[%s] [%s] ROLLBACK%s %s\n' "${COLOR_MAGENTA}" "$ts" "$tag" "${COLOR_RESET}" "$*" >&2
     else
@@ -140,7 +115,7 @@ log_rollback() {
 
 log_dry_run() {
     local ts tag
-    ts=$(_get_timestamp); tag=$(_get_script_tag)
+    ts=$(_get_timestamp); tag="${_VW_CALLING_SCRIPT:-common.sh}"
     if [[ "$LOG_COLORS" == "true" ]]; then
         printf '%s[%s] [%s] [DRY RUN]%s %s\n' "${COLOR_BLUE}" "$ts" "$tag" "${COLOR_RESET}" "$*"
     else
@@ -172,6 +147,13 @@ _ENV_FILE_SEARCH_PATHS=(
     "/etc/vaultwarden/vaultwarden.env"
 )
 
+# Return the octal permission string for a file, portable across GNU and BSD stat.
+_get_file_perms() {
+    stat -c '%a' "$1" 2>/dev/null \
+        || stat -f '%OLp' "$1" 2>/dev/null \
+        || printf 'unknown'
+}
+
 load_env_file() {
     local env_file="${1:-}"
 
@@ -191,11 +173,9 @@ load_env_file() {
     fi
 
     local file_perms
-    if [[ $EUID -eq 0 ]]; then
-        file_perms=$(stat -c '%a' "$env_file" 2>/dev/null \
-                     || stat -f '%OLp' "$env_file" 2>/dev/null \
-                     || printf 'unknown')
+    file_perms=$(_get_file_perms "$env_file")
 
+    if [[ $EUID -eq 0 ]]; then
         if [[ "$file_perms" == "unknown" ]]; then
             log_warn "load_env_file: cannot stat '$env_file' — skipping permission check"
         else
@@ -208,11 +188,6 @@ load_env_file() {
             fi
         fi
     else
-    
-        file_perms=$(stat -c '%a' "$env_file" 2>/dev/null \
-                     || stat -f '%OLp' "$env_file" 2>/dev/null \
-                     || printf 'unknown')
-
         if [[ "$file_perms" != "unknown" ]]; then
             local perm_int
             perm_int=$(( 8#${file_perms} ))
@@ -694,6 +669,15 @@ init_common_lib() {
 
     cd "$PROJECT_ROOT"
 
+    # Resolve _LOG_CURRENT_WEIGHT once now that LOG_LEVEL is known.
+    if [[ -n "${_LOG_LEVEL_WEIGHT[${LOG_LEVEL^^}]+_}" ]]; then
+        _LOG_CURRENT_WEIGHT=${_LOG_LEVEL_WEIGHT[${LOG_LEVEL^^}]}
+    else
+        printf '[WARN] LOG_LEVEL="%s" is not recognised (valid: DEBUG INFO WARN ERROR) — defaulting to INFO\n' \
+            "$LOG_LEVEL" >&2
+        _LOG_CURRENT_WEIGHT=1
+    fi
+
     log_debug "Common library initialized for: $script_name"
     log_debug "Project root: $PROJECT_ROOT"
     log_debug "Log level: $LOG_LEVEL"
@@ -702,7 +686,7 @@ init_common_lib() {
 export -f log_info log_success log_warn log_error log_debug log_header set_log_prefix _should_log
 export -f log_rollback log_dry_run
 export -f _require_script _set_env_var _read_env_value
-export -f _get_script_tag _get_timestamp
+export -f _get_timestamp _get_file_perms
 export -f load_env_file get_config_value require_config
 export -f has_command require_commands retry_with_backoff is_root require_root get_real_user
 export -f register_cleanup perform_cleanup

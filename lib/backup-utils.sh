@@ -15,13 +15,20 @@ for _fn in log_error log_info log_success log_debug log_warn; do
 done
 unset _fn
 
-# Format a byte count as a human-readable MB string without extra dependencies.
+# Format a byte count as a human-readable string without extra dependencies.
+# Displays KB for sub-MB files; MB (one decimal place) for larger files.
 _format_bytes_human() {
     local bytes="${1:-0}"
     [[ "$bytes" =~ ^[0-9]+$ ]] || bytes=0
 
     local kb=$(( bytes / 1024 ))
     local mb_int=$(( kb / 1024 ))
+
+    if (( mb_int == 0 )); then
+        printf '%d KB' "$kb"
+        return
+    fi
+
     # One decimal place: compute tenths from the remainder KB after removing
     # whole-MB portion, then scale to 0–9.
     local mb_rem_kb=$(( kb - mb_int * 1024 ))
@@ -56,62 +63,62 @@ list_backups() {
         local type_dir="$backup_base_dir/$backup_type"
 
         if [[ -d "$type_dir" ]]; then
-            local backups
-            if backups=$(find "$type_dir" -name "*.age" -type f 2>/dev/null | sort); then
-                if [[ -n "$backups" ]]; then
+            local has_files=false
+            local type_count=0
+            local type_bytes=0
+
+            while IFS= read -r backup_file; do
+                if [[ "$has_files" == false ]]; then
                     echo "=== $backup_type backups ==="
-
-                                    local type_count=0
-                    local type_bytes=0
-
-                    while IFS= read -r backup_file; do
-                        local basename_file size_info age_info
-                        basename_file=$(basename "$backup_file")
-                        size_info=$(du -h "$backup_file" 2>/dev/null | cut -f1 || echo "unknown")
-
-                        # stat -c '%y' is Linux (GNU coreutils);
-                        # fall back to BSD stat -f '%Sm' for macOS compatibility.
-                        # Separate the stat from the cut so that cut receiving
-                        # empty stdin (from a failing stat on BSD) does not mask
-                        # the stat failure via a zero-exit from cut.
-                        local stat_raw
-                        stat_raw=$(stat -c '%y' "$backup_file" 2>/dev/null \
-                            || stat -f '%Sm' -t '%Y-%m-%d %H:%M' "$backup_file" 2>/dev/null \
-                            || echo "")
-                        age_info="${stat_raw:0:16}"
-                        [[ -z "$age_info" ]] && age_info="unknown"
-
-                        printf "  %-40s %10s  %s\n" "$basename_file" "$size_info" "$age_info"
-
-                                        if [[ -f "$backup_file.meta" ]]; then
-                            local vw_version
-                            vw_version=$(grep "vaultwarden_version=" "$backup_file.meta" 2>/dev/null | cut -d= -f2 || echo "unknown")
-                            printf "    └─ VaultWarden: %s\n" "$vw_version"
-                        fi
-
-                        # Accumulate raw bytes for the summary line.
-                        # _stat_file_size() is exported by lib/crypto.sh and
-                        # chooses GNU (-c%s) or BSD (-f%z) stat automatically.
-                        local raw_bytes=0
-                        if declare -f _stat_file_size &>/dev/null; then
-                            raw_bytes=$(_stat_file_size "$backup_file" 2>/dev/null || echo 0)
-                            [[ "$raw_bytes" =~ ^[0-9]+$ ]] || raw_bytes=0
-                        fi
-                        type_bytes=$(( type_bytes + raw_bytes ))
-                        (( type_count++ )) || true
-
-                        found_backups=true
-                    done <<< "$backups"
-
-                                    printf "[%s: %d file(s), %s]\n" \
-                        "$backup_type" "$type_count" "$(_format_bytes_human "$type_bytes")"
-                    echo ""
-
-                    grand_total_files=$(( grand_total_files + type_count ))
-                    grand_total_bytes=$(( grand_total_bytes + type_bytes ))
-                    (( grand_total_types++ )) || true
                 fi
-            fi
+                has_files=true
+                local basename_file size_info age_info
+                basename_file=$(basename "$backup_file")
+                size_info=$(du -h "$backup_file" 2>/dev/null | cut -f1 || echo "unknown")
+
+                # stat -c '%y' is Linux (GNU coreutils);
+                # fall back to BSD stat -f '%Sm' for macOS compatibility.
+                # Separate the stat from the cut so that cut receiving
+                # empty stdin (from a failing stat on BSD) does not mask
+                # the stat failure via a zero-exit from cut.
+                local stat_raw
+                stat_raw=$(stat -c '%y' "$backup_file" 2>/dev/null \
+                    || stat -f '%Sm' -t '%Y-%m-%d %H:%M' "$backup_file" 2>/dev/null \
+                    || echo "")
+                age_info="${stat_raw:0:16}"
+                [[ -z "$age_info" ]] && age_info="unknown"
+
+                printf "  %-40s %10s  %s\n" "$basename_file" "$size_info" "$age_info"
+
+                        if [[ -f "$backup_file.meta" ]]; then
+                    local vw_version
+                    vw_version=$(grep "vaultwarden_version=" "$backup_file.meta" 2>/dev/null | cut -d= -f2 || echo "unknown")
+                    printf "    └─ VaultWarden: %s\n" "$vw_version"
+                fi
+
+                # Accumulate raw bytes for the summary line.
+                # _stat_file_size() is exported by lib/crypto.sh and
+                # chooses GNU (-c%s) or BSD (-f%z) stat automatically.
+                local raw_bytes=0
+                if declare -f _stat_file_size &>/dev/null; then
+                    raw_bytes=$(_stat_file_size "$backup_file" 2>/dev/null || echo 0)
+                    [[ "$raw_bytes" =~ ^[0-9]+$ ]] || raw_bytes=0
+                fi
+                type_bytes=$(( type_bytes + raw_bytes ))
+                (( type_count++ )) || true
+
+                found_backups=true
+            done < <(find "$type_dir" -name "*.age" -type f 2>/dev/null | sort)
+
+            if [[ "$has_files" == false ]]; then continue; fi
+
+                        printf "[%s: %d file(s), %s]\n" \
+                "$backup_type" "$type_count" "$(_format_bytes_human "$type_bytes")"
+            echo ""
+
+            grand_total_files=$(( grand_total_files + type_count ))
+            grand_total_bytes=$(( grand_total_bytes + type_bytes ))
+            (( grand_total_types++ )) || true
         fi
     done
 
@@ -610,13 +617,6 @@ create_backup_metadata() {
         vw_version=$(docker compose exec -T vaultwarden /vaultwarden --version 2>/dev/null | head -1 || echo "unknown")
     fi
 
-    # Sanitise additional_info: strip embedded newlines to protect the
-    # key=value per-line format parsed by downstream consumers (grep|cut).
-    if [[ "$additional_info" == *$'\n'* ]]; then
-        log_warn "create_backup_metadata: additional_info contains newlines — stripping"
-        additional_info="${additional_info//$'\n'/ }"
-    fi
-
     # Create the metadata file with secure permissions before writing so
     # that the file is never briefly world-readable at umask 022 (mode 644).
     install -m 600 /dev/null "$metadata_file" || {
@@ -695,11 +695,6 @@ validate_rclone_config_path() {
 
     if [[ -z "$cfg_path" ]]; then
         log_error "RCLONE_CONFIG is empty" >&2
-        return 1
-    fi
-
-    if [[ "$cfg_path" =~ [^a-zA-Z0-9_./:~-] ]]; then
-        log_error "RCLONE_CONFIG path contains disallowed characters: $cfg_path" >&2
         return 1
     fi
 

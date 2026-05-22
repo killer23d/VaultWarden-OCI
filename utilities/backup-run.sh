@@ -375,7 +375,11 @@ verify_backup_full() {
                 *.tar.xz|*.xz)    _decomp_prog='xz -d' ;;
                 *.tar.gz|*.tgz)   _decomp_prog='gzip -d' ;;
                 *.tar.lz4|*.lz4)  _decomp_prog='lz4 -d' ;;
-                *)                 _decomp_prog='zstd -d -T0' ;;
+                *)
+                    log_error "verify_backup_full: unrecognised archive extension for: $(basename "$dec_out")"
+                    log_error "Add the format to the decompressor case in verify_backup_full()."
+                    return 1
+                    ;;
             esac
             if ! tar --use-compress-program="$_decomp_prog" -tf "$dec_out" >/dev/null 2>&1; then
                 log_error "Full verification FAILED: archive is corrupt or unreadable" >&2
@@ -679,18 +683,13 @@ perform_db_backup() {
 
     [[ -s "$enc" ]] || { log_error "Encrypted output is empty" >&2; rm -f "$enc" "${enc}.sha256"; return 1; }
 
-    if ! cat > "${enc}.meta" <<MEOF
-type=db
-timestamp=$timestamp
-original_size=$(stat -c%s "$db_file" 2>/dev/null || stat -f%z "$db_file" 2>/dev/null || echo 0)
-archive_format=relative
-version=2
-MEOF
-    then
+    local orig_size
+    orig_size=$(stat -c%s "$db_file" 2>/dev/null || stat -f%z "$db_file" 2>/dev/null || echo 0)
+    if ! create_backup_metadata "$enc" "db" \
+            "$(printf 'original_size=%s\narchive_format=relative\nversion=2' "$orig_size")"; then
         log_error "Failed to write backup metadata: ${enc}.meta" >&2
         return 1
     fi
-    chmod 600 "${enc}.meta"
 
     backup_log_info "DB backup: $(basename "$enc")"
     echo "$enc"
@@ -816,17 +815,11 @@ perform_full_backup() {
 
     [[ -s "$enc" ]] || { log_error "Encrypted output is empty" >&2; rm -f "$enc" "${enc}.sha256"; return 1; }
 
-    if ! cat > "${enc}.meta" <<MEOF
-type=${backup_label}
-timestamp=$timestamp
-archive_format=relative
-version=2
-MEOF
-    then
+    if ! create_backup_metadata "$enc" "$backup_label" \
+            "$(printf 'archive_format=relative\nversion=2')"; then
         log_error "Failed to write backup metadata: ${enc}.meta" >&2
         return 1
     fi
-    chmod 600 "${enc}.meta"
 
     backup_log_info "${backup_label_title} backup: $(basename "$enc")"
     echo "$enc"
