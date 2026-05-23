@@ -574,31 +574,6 @@ if [[ -f "$_CF_BOUNCER_CONFIG_SRC" ]]; then
             fi
         fi
 
-        # Only attempt to start the bouncer service if the unit file exists.
-        # The binary (and its service unit) may be absent on architectures where
-        # no pre-built release is available (e.g. linux_arm64 on some releases).
-        if [[ -x "$_CF_BOUNCER_BIN" ]] && [[ "$_CF_BOUNCER_FROM_SOURCE" == "true" ]] && ! _cf_bouncer_service_exists; then
-            cat >/etc/systemd/system/crowdsec-cloudflare-bouncer.service <<EOF
-[Unit]
-Description=CrowdSec Cloudflare Bouncer
-After=network-online.target crowdsec.service
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/crowdsec-cloudflare-bouncer -c /etc/crowdsec/bouncers/crowdsec-cloudflare-bouncer.yaml
-Restart=on-failure
-RestartSec=5
-User=root
-Group=root
-
-[Install]
-WantedBy=multi-user.target
-EOF
-            systemctl daemon-reload || true
-            log_success "Installed crowdsec-cloudflare-bouncer systemd unit."
-        fi
-
         if _cf_bouncer_service_exists; then
             systemctl enable crowdsec-cloudflare-bouncer || true
             systemctl start crowdsec-cloudflare-bouncer || true
