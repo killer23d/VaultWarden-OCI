@@ -8,6 +8,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ---
 ## [Unreleased]
 
+### Changed — Shared-lib consolidation and startup deduplication
+
+- Moved `_maybe_sudo()` from `startup.sh` to `lib/common.sh` and exported it for shared callers.
+- Moved `ensure_caddy_log_permissions()` from `startup.sh` to `lib/storage.sh`.
+- Changed `lib/common.sh::validate_domain()` to enforce RFC 1035 domain-length ceiling (253 chars) and reject bare IPv4 input.
+- Changed `lib/common.sh::validate_email()` to enforce RFC 5321 email-length ceiling (254 chars) and apply a stricter character-class regex.
+- Removed `validate_domain_secure()` and `validate_email_secure()` from `setup.sh`; callers now use upgraded canonical validators in `lib/common.sh`.
+- Removed the inline NAT fallback loop from `startup.sh::ensure_vaultwarden_egress_nat()`; firewall remediation now remains canonical in `utilities/setup-firewall.sh`.
+- Removed the inline service wait loop from `startup.sh::wait_for_services()`; readiness now delegates to `lib/docker.sh::wait_for_service_ready()`.
+
+### Fixed
+
+- `utilities/uninstall-vaultwarden.sh`: added Step 11.5 cleanup for iptables rules managed by `utilities/setup-firewall.sh`.
+- `utilities/maintenance-health.sh`: fixed CrowdSec Cloudflare bouncer health check to treat a missing unit as an optional/not-installed pass state (no false warning).
+
 ### Changed — Dispatcher Refactor: maintenance.sh / backup.sh / restore.sh
 
 - **`maintenance.sh`** is now a thin dispatcher (< 60 lines). All logic has been

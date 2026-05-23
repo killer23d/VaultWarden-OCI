@@ -292,19 +292,29 @@ create_swapfile() {
     fi
 
     local swapfile="/swapfile"
-    log_info "No swap detected — creating 1 GiB swapfile at ${swapfile}..."
+    if [[ -f "$swapfile" ]]; then
+        # idempotent: skip creation when the swapfile already exists
+        log_info "Swapfile already exists at ${swapfile} — reusing existing file"
+    else
+        log_info "No swap detected — creating 1 GiB swapfile at ${swapfile}..."
+        fallocate -l 1G "$swapfile" || dd if=/dev/zero of="$swapfile" bs=1M count=1024 status=none || return 1
+    fi
 
-    fallocate -l 1G "$swapfile" || dd if=/dev/zero of="$swapfile" bs=1M count=1024 status=none || return 1
     chmod 600 "$swapfile"
-    mkswap "$swapfile" >/dev/null || return 1
+    if ! blkid -o value -s TYPE "$swapfile" 2>/dev/null | grep -q '^swap$'; then
+        # idempotent: initialise swap signature only when missing
+        mkswap "$swapfile" >/dev/null || return 1
+    fi
     swapon "$swapfile" || return 1
 
     if ! grep -q "^${swapfile}" /etc/fstab 2>/dev/null; then
+        # idempotent: append once
         echo "${swapfile} none swap sw 0 0" >> /etc/fstab
     fi
 
     sysctl -q vm.swappiness=10 || true
     if ! grep -q "^vm.swappiness" /etc/sysctl.conf 2>/dev/null; then
+        # idempotent: append once
         echo "vm.swappiness=10" >> /etc/sysctl.conf
     fi
 

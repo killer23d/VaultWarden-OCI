@@ -227,26 +227,9 @@ if [[ "$FORCE" == "true" ]] && [[ "$DRY_RUN" != "true" ]]; then
     fi
 fi
 
-validate_domain_secure() {
-    local domain="$1"
-    if [[ ${#domain} -gt 253 ]]; then return 1; fi
-    # Bare IPv4 addresses are rejected: production deployments require a proper
-    # domain name so that Caddy can obtain a TLS certificate via ACME/HTTPS.
-    if [[ "$domain" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then return 1; fi
-    if [[ ! "$domain" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then return 1; fi
-    return 0
-}
-
-validate_email_secure() {
-    local email="$1"
-    if [[ ${#email} -gt 254 ]]; then return 1; fi
-    if [[ ! "$email" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then return 1; fi
-    return 0
-}
-
 if [[ -z "$PHASE" ]] && { [[ -z "$DOMAIN" ]] || [[ -z "$ADMIN_EMAIL" ]]; }; then show_help; exit 1; fi
-if [[ -z "$PHASE" ]] && ! validate_domain_secure "$DOMAIN"; then log_error "Invalid domain format"; exit 1; fi
-if [[ -z "$PHASE" ]] && ! validate_email_secure "$ADMIN_EMAIL"; then log_error "Invalid email format"; exit 1; fi
+if [[ -z "$PHASE" ]] && ! validate_domain "$DOMAIN"; then log_error "Invalid domain format"; exit 1; fi
+if [[ -z "$PHASE" ]] && ! validate_email "$ADMIN_EMAIL"; then log_error "Invalid email format"; exit 1; fi
 
 # ---------------------------------------------------------------------------
 # show_post_install_summary
@@ -423,9 +406,10 @@ AGE_BANNER
 }
 
 # ---------------------------------------------------------------------------
-# _check_all_utilities — verify all required utility scripts are present
 # ---------------------------------------------------------------------------
-_check_all_utilities() {
+# Verify all required utility scripts are present and executable.
+# ---------------------------------------------------------------------------
+_verify_required_utilities() {
     local utils=(
         "${SCRIPT_DIR}/utilities/setup-system.sh"
         "${SCRIPT_DIR}/utilities/setup-storage.sh"
@@ -436,18 +420,8 @@ _check_all_utilities() {
         "${SCRIPT_DIR}/utilities/setup-crowdsec.sh"
         "${SCRIPT_DIR}/utilities/uninstall-vaultwarden.sh"
     )
-    local missing=()
     for u in "${utils[@]}"; do
-        [[ -f "$u" ]] || missing+=("$u")
-    done
-    if [[ ${#missing[@]} -gt 0 ]]; then
-        log_error "Missing utility scripts:"
-        for u in "${missing[@]}"; do log_error "  $u"; done
-        log_error "Ensure the repository was cloned completely."
-        exit 1
-    fi
-    for u in "${utils[@]}"; do
-        [[ -x "$u" ]] || chmod +x "$u"
+        _require_script "$u"
     done
 }
 
@@ -490,7 +464,7 @@ main() {
     }
     trap _setup_cleanup EXIT HUP INT TERM
 
-    _check_all_utilities
+    _verify_required_utilities
 
     if [[ -n "${SOPS_VERSION:-}" ]]; then
         log_info "SOPS version pinned: ${SOPS_VERSION}"

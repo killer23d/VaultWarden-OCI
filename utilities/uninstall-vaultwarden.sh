@@ -208,6 +208,9 @@ if [[ "$DRY_RUN" == "true" ]]; then
     echo "         - Config:   /etc/crowdsec/ (acquis.d/vaultwarden.yaml, bouncers/, profiles.yaml)"
     echo "         - .env key: CROWDSEC_CF_BOUNCER_API_KEY"
     echo "  [11] UFW rules: ports 80 and 443"
+    echo "  [11.5] iptables rules added by setup-firewall.sh:"
+    echo "         - nat POSTROUTING MASQUERADE for subnets 172.21.0.0/16 172.22.0.0/16 172.23.0.0/16"
+    echo "         - filter DOCKER-USER ACCEPT rules for the same subnets"
     echo "  [12] Swapfile: /swapfile"
     echo "  [13] APT source: ubuntu-universe.list"
     echo "  [14] Docker group membership for ${REAL_USER}"
@@ -962,6 +965,54 @@ if command -v ufw &>/dev/null; then
     success "UFW port 80/443 rules removed (SSH rules preserved)."
 else
     info "ufw not found — skipping firewall cleanup."
+fi
+
+# ═══════════════════════════════════════════════════════════════
+# STEP 11.5 — Remove iptables rules added by setup-firewall.sh
+#
+# setup-firewall.sh --phase iptables installs:
+#   1. nat POSTROUTING MASQUERADE rules for each VaultWarden bridge subnet.
+#   2. filter DOCKER-USER ACCEPT rules for the three pinned VaultWarden
+#      subnets (172.21.0.0/16, 172.22.0.0/16, 172.23.0.0/16).
+#
+# These rules are ephemeral (lost on reboot) unless netfilter-persistent
+# is present. The netfilter-persistent package was already removed in
+# Step 10.5, so its saved-rules file is gone. However the in-kernel rules
+# survive until reboot, so we clean them explicitly here.
+#
+# Failure is non-fatal: if Docker has already been removed the DOCKER-USER
+# chain may not exist; MASQUERADE rules for subnets that no longer carry
+# live traffic are harmless.
+# ═══════════════════════════════════════════════════════════════
+info "Step 11.5: Removing iptables rules added by setup-firewall.sh..."
+if command -v iptables >/dev/null 2>&1; then
+    _VW_SUBNETS=("172.21.0.0/16" "172.22.0.0/16" "172.23.0.0/16")
+
+    # Remove POSTROUTING MASQUERADE rules (nat table).
+    for _subnet in "${_VW_SUBNETS[@]}"; do
+        # Loop: a rule may have been inserted more than once (idempotency was
+        # not guaranteed on early versions); stop on first non-zero exit.
+        while iptables -t nat -D POSTROUTING -s "$_subnet" ! -o docker0 \
+              -j MASQUERADE 2>/dev/null; do
+            success "Removed nat POSTROUTING MASQUERADE for ${_subnet}"
+        done
+    done
+
+    # Remove DOCKER-USER ACCEPT rules (filter table) — only if the chain exists.
+    if iptables -t filter -S DOCKER-USER >/dev/null 2>&1; then
+        for _subnet in "${_VW_SUBNETS[@]}"; do
+            while iptables -t filter -D DOCKER-USER -s "$_subnet" \
+                  -j ACCEPT 2>/dev/null; do
+                success "Removed filter DOCKER-USER ACCEPT for ${_subnet}"
+            done
+        done
+    else
+        info "DOCKER-USER chain not present — skipping (Docker already removed or chain not created)."
+    fi
+
+    success "iptables cleanup complete."
+else
+    info "iptables not found — skipping."
 fi
 
 # ═══════════════════════════════════════════════════════════════

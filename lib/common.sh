@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 # lib/common.sh - Core shared functions for VaultWarden-OCI-NG
+#
+# Function inventory highlights:
+#   - _maybe_sudo()      — TTY-aware root escalation helper (moved from startup.sh)
+#   - validate_domain()  — RFC 1035 length guard (253) + bare-IPv4 rejection
+#   - validate_email()   — RFC 5321 length guard (254) + stricter regex
 
 [[ -n "${VAULTWARDEN_COMMON_LIB_LOADED:-}" ]] && return 0
 readonly VAULTWARDEN_COMMON_LIB_LOADED=1
@@ -411,6 +416,31 @@ get_real_user() {
     printf '%s\n' "$effective_user"
 }
 
+# _maybe_sudo COMMAND [ARGS...]
+# Run a command as root, with automatic privilege escalation when needed.
+# - Already root: executes directly.
+# - sudo available + interactive TTY: uses 'sudo' (may prompt for password).
+# - sudo available + non-interactive (cron/systemd): uses 'sudo -n' (never prompts).
+# - sudo not installed: falls back to direct execution and lets the OS
+#   reject it with EPERM when the caller truly requires root.
+_maybe_sudo() {
+    if is_root; then
+        "$@"
+        return $?
+    fi
+
+    if ! command -v sudo >/dev/null 2>&1; then
+        "$@"
+        return $?
+    fi
+
+    if [[ -t 0 ]]; then
+        sudo "$@"
+    else
+        sudo -n "$@"
+    fi
+}
+
 
 CLEANUP_ACTIONS_MAX_SIZE="${CLEANUP_ACTIONS_MAX_SIZE:-64}"
 declare -a CLEANUP_ACTIONS=()
@@ -555,13 +585,20 @@ download_file() {
 
 validate_email() {
     local email="$1"
-    [[ "$email" =~ ^[^@]+@[^@]+\.[^@]+$ ]]
+    # RFC 5321: maximum total length is 254 characters.
+    [[ ${#email} -le 254 ]] || return 1
+    [[ "$email" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]
 }
 
 validate_domain() {
     local domain="$1"
     domain=$(printf '%s' "$domain" | sed 's|https\?://||; s|/.*$||')
-    [[ "$domain" =~ ^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]
+    # RFC 1035: maximum total length is 253 characters.
+    [[ ${#domain} -le 253 ]] || return 1
+    # Bare IPv4 addresses are rejected: production deployments require a proper
+    # domain name so that Caddy can obtain a TLS certificate via ACME/HTTPS.
+    [[ "$domain" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && return 1
+    [[ "$domain" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]
 }
 
 validate_port() {
@@ -688,7 +725,7 @@ export -f log_rollback log_dry_run
 export -f _require_script _set_env_var _read_env_value
 export -f _get_timestamp _get_file_perms
 export -f load_env_file get_config_value require_config
-export -f has_command require_commands retry_with_backoff is_root require_root get_real_user
+export -f has_command require_commands retry_with_backoff is_root require_root get_real_user _maybe_sudo
 export -f register_cleanup perform_cleanup
 export -f ensure_dir secure_file test_connectivity test_http download_file
 export COLOR_RED COLOR_BOLD_RED COLOR_GREEN COLOR_YELLOW COLOR_BLUE COLOR_MAGENTA COLOR_CYAN COLOR_RESET COLOR_BOLD

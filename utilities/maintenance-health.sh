@@ -462,10 +462,18 @@ _check_crowdsec() {
     else
         _warn "crowdsec:lapi" "CrowdSec LAPI not responding (debug: sudo journalctl -u crowdsec -n 50 --no-pager)"
     fi
-    if systemctl is-active crowdsec-cloudflare-bouncer >/dev/null 2>&1; then
-        _pass "crowdsec:bouncer" "CrowdSec Cloudflare bouncer is active"
+    # Optional component: only warn when the unit exists but is inactive.
+    if systemctl list-unit-files crowdsec-cloudflare-bouncer.service \
+           2>/dev/null | grep -q 'crowdsec-cloudflare-bouncer.service'; then
+        if systemctl is-active crowdsec-cloudflare-bouncer >/dev/null 2>&1; then
+            _pass "crowdsec:bouncer" "CrowdSec Cloudflare bouncer is active"
+        else
+            _warn "crowdsec:bouncer" \
+                "CrowdSec Cloudflare bouncer is not running (start: sudo systemctl start crowdsec-cloudflare-bouncer)"
+        fi
     else
-        _warn "crowdsec:bouncer" "CrowdSec Cloudflare bouncer is not running (start: sudo systemctl start crowdsec-cloudflare-bouncer)"
+        _pass "crowdsec:bouncer" \
+            "CrowdSec Cloudflare bouncer not installed (optional — skipping)"
     fi
     if $COMPREHENSIVE; then
         local decision_count
