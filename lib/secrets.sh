@@ -71,7 +71,7 @@ write_secret_file() {
         return 1
     fi
 
-    chmod 600 "$dest"
+    chmod 444 "$dest"
     return 0
 }
 
@@ -1244,8 +1244,8 @@ _warn_if_stack_unavailable() {
 # export_docker_secrets DOCKER_DIR [SECRETS_FILE]
 #
 # Decrypt SECRETS_FILE (defaults to $SECRETS_FILE / secrets/secrets.yaml) and
-# write one flat file per known secret key into DOCKER_DIR (mode 700).
-# Each output file is created mode 600 (via write_secret_file). Placeholder
+# write one flat file per known secret key into DOCKER_DIR (mode 755).
+# Each output file is created mode 444 (via write_secret_file). Placeholder
 # values (CHANGE_ME*, NOT_USED*, null) are skipped with a warning so that
 # genuinely-empty optional secrets do not overwrite populated files.
 #
@@ -1278,10 +1278,10 @@ export_docker_secrets() {
         log_error "export_docker_secrets: failed to create $docker_dir"
         return 1
     fi
-    chmod 700 "$docker_dir"
+    chmod 755 "$docker_dir"
 
-    # Create the SOPS cache file inside the already-restricted docker_dir
-    # (mode 700) rather than the world-listable /tmp, eliminating the TOCTOU
+    # Create the SOPS cache file inside the docker_dir (mode 755, not
+    # world-listable /tmp), eliminating the TOCTOU
     # window between mktemp and the subsequent chmod on a shared host.
     local _eds_cache
     _eds_cache=$(mktemp --tmpdir="$docker_dir" .sops-cache.XXXXXXXXXX) || {
