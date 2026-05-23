@@ -4,7 +4,7 @@ Complete reference for all management scripts and utility libraries in VaultWard
 
 > **Architecture note (Dispatcher Pattern):** To improve maintainability, monolithic entry-points (`setup.sh`, `maintenance.sh`, `backup.sh`, `restore.sh`, `edit-secrets.sh`) have been refactored into thin **dispatchers**. The actual implementation logic is modularised into 22 standalone administrative and engine scripts located in the `utilities/` directory.
 >
-> Library consolidation: `lib/security.sh` and `lib/simple_key_resilience.sh` were merged into `lib/crypto.sh`; `lib/email.sh` was inlined into `lib/common.sh`.
+> Library consolidation: `lib/security.sh` and `lib/simple_key_resilience.sh` were merged into `lib/crypto.sh`.
 >
 > This dispatcher pattern keeps the public CLI surface simple while making the codebase highly modular and easier to test.
 
@@ -23,7 +23,7 @@ Complete reference for all management scripts and utility libraries in VaultWard
 | 7 | `maintenance.sh` | Dispatcher for maintenance/health/updates | `db-maint` only |
 | 8 | `utilities/*.sh` | 22 standalone admin/engine scripts (see `utilities/README.md`) | ✅ |
 
-**Utility libraries (5):** `lib/common.sh` *(includes email)*, `lib/docker.sh`, `lib/crypto.sh` *(includes key resilience + security)*, `lib/backup-utils.sh`, `lib/secrets.sh`
+**Utility libraries (8):** `lib/common.sh`, `lib/docker.sh`, `lib/crypto.sh` *(includes key resilience + security)*, `lib/backup-utils.sh`, `lib/secrets.sh`, `lib/storage.sh`, `lib/email.sh`, `lib/maintenance-utils.sh`
 
 > **Dispatcher count:** `edit-secrets.sh` was refactored into a thin dispatcher in this release, bringing the total dispatcher-pattern top-level scripts to 5: `setup.sh`, `maintenance.sh`, `backup.sh`, `restore.sh`, `edit-secrets.sh`. `utilities/secrets-edit.sh` is the interactive editor utility invoked by the dispatcher.
 
@@ -582,7 +582,7 @@ sudo ./setup.sh systemd <install|remove|validate|status> [--dry-run]
 
 `vaultwarden-maintenance.timer` now runs every day, including Sunday, and finishes before the full backup window. `RandomizedDelaySec` spreads boot-time catch-up work so the timers do not stampede after a reboot.
 
-**Failure notifications:** Every service unit sets `OnFailure=vaultwarden-notify-failure.service`. That unit sources `lib/common.sh`, calls `send_email()`, and is hardened with `NoNewPrivileges=yes` and `PrivateTmp=yes`.
+**Failure notifications:** Every service unit sets `OnFailure=vaultwarden-notify-failure.service`. That unit sources `lib/common.sh` and `lib/email.sh`, calls `send_email()`, and is hardened with `NoNewPrivileges=yes` and `PrivateTmp=yes`.
 
 ```bash
 sudo ./setup.sh systemd install
@@ -646,7 +646,7 @@ journalctl -u vaultwarden-notify-failure.service -n 30
 docker compose logs postfix --tail=30
 ```
 
-> **Email delivery prerequisite:** The notification unit calls `send_email()` from `lib/common.sh` (which includes the merged email functions), which uses the `EMAIL_MODE` and `EMAIL_PROVIDER` chain configured in `.env`. If email is not yet working, run `make test-email` first to diagnose the delivery path before testing failure notifications.
+> **Email delivery prerequisite:** The notification unit calls `send_email()` from `lib/email.sh` (sourced after `lib/common.sh`), which uses the `EMAIL_MODE` and `EMAIL_PROVIDER` chain configured in `.env`. If email is not yet working, run `make test-email` first to diagnose the delivery path before testing failure notifications.
 
 ---
 
@@ -790,7 +790,8 @@ All common operations have Makefile shortcuts. Run `make help` to see the full t
 All libraries live in `lib/` and are sourced at the top of every script. At install time, `setup.sh systemd` copies the entire `lib/` tree to `/opt/vaultwarden-scripts/lib/` and patches source paths.
 
 ### `lib/common.sh`
-Core functions used by every script. *(Also includes email delivery functions, merged from the former `lib/email.sh`.)*
+Core functions used by every script.
+Legacy `setup.sh`-private validators (`validate_domain_secure` / `validate_email_secure`) were removed; callers use these canonical validators directly.
 
 | Function | Description |
 | :-- | :-- |
@@ -800,10 +801,12 @@ Core functions used by every script. *(Also includes email delivery functions, m
 | `get_config_value KEY DEFAULT` | Read a variable from `.env` |
 | `load_env_file` | Source `.env` into the environment |
 | `get_real_user` | Resolve actual user even under `sudo` |
+| `_maybe_sudo` | TTY-aware privilege escalation helper for root-required commands |
 | `ensure_dir PATH MODE` | Create directory with permissions |
 | `retry_with_backoff N DELAY CMD` | Retry with exponential backoff |
-| `validate_domain/email/port` | Input validation helpers |
-| `send_notification_email SUBJ BODY` | Send via Postfix container |
+| `validate_domain DOMAIN` | Domain validator with RFC 1035 total-length cap (253) and bare-IPv4 rejection |
+| `validate_email EMAIL` | Email validator with RFC 5321 total-length cap (254) and stricter character-class regex |
+| `validate_port PORT` | Port range validator |
 
 ### `lib/docker.sh`
 Docker and Docker Compose helpers.
@@ -875,8 +878,19 @@ Secrets collection, generation, hashing, validation, and recovery kit export. Us
 | `generate_recovery_kit FILE` | Write a full plaintext recovery document — extracts secrets one key at a time via `sops --extract`, never materialises full plaintext JSON |
 | `offer_recovery_kit_export` | Interactive or auto prompt to export a recovery kit to tmpfs |
 
-### `lib/email.sh` *(merged into `lib/common.sh`)*
-Email delivery functions are now inlined directly into `lib/common.sh`. See the `lib/common.sh` section above for the full function list.
+### `lib/storage.sh`
+Storage and state-path lifecycle helpers (boot-volume + separate-volume) plus Caddy log permission enforcement.
+
+| Function | Description |
+| :-- | :-- |
+| `require_project_state_ready` | Fail-closed storage readiness gate before operational scripts run |
+| `setup_data_volume` | Provision, mount, and guard dedicated data volume in separate-volume mode |
+| `install_docker_mount_guard` | Install/remove docker.service mount dependency drop-in |
+| `vw_default_backup_dir` | Derive backup base path from `PROJECT_STATE_DIR` |
+| `ensure_caddy_log_permissions` | Enforce root:root 755/644 ownership/mode on Caddy log dir and files |
+
+### `lib/email.sh`
+Email delivery helpers (provider routing, SMTP/API sending, notifications, and alert rate limiting).
 
 ---
 

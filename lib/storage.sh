@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Storage helpers for boot-volume and separate-volume installs.
+# Also owns ensure_caddy_log_permissions() for Caddy log ownership/mode enforcement.
 # Source after lib/common.sh in operational scripts so writes fail closed when
 # the configured data volume is missing.
 
@@ -472,6 +473,11 @@ ensure_caddy_log_permissions() {
     local access_log="${caddy_log_dir}/access.log"
     local security_log="${caddy_log_dir}/security.log"
     local changed=false
+
+    command -v _maybe_sudo >/dev/null 2>&1 || {
+        log_error "ensure_caddy_log_permissions requires lib/common.sh to be sourced first"
+        return 1
+    }
 
     if [[ "${DRY_RUN:-false}" == "true" ]]; then
         log_info "[DRY RUN] Would enforce root:root 755/644 permissions for ${caddy_log_dir}"

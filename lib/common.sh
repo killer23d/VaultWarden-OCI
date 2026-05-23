@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 # lib/common.sh - Core shared functions for VaultWarden-OCI-NG
+#
+# Function inventory highlights:
+#   - _maybe_sudo()      — TTY-aware root escalation helper (moved from startup.sh)
+#   - validate_domain()  — RFC 1035 length guard (253) + bare-IPv4 rejection
+#   - validate_email()   — RFC 5321 length guard (254) + stricter regex
 
 [[ -n "${VAULTWARDEN_COMMON_LIB_LOADED:-}" ]] && return 0
 readonly VAULTWARDEN_COMMON_LIB_LOADED=1

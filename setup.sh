@@ -409,7 +409,7 @@ AGE_BANNER
 # ---------------------------------------------------------------------------
 # Verify all required utility scripts are present and executable.
 # ---------------------------------------------------------------------------
-_check_all_utilities() {
+_verify_required_utilities() {
     local utils=(
         "${SCRIPT_DIR}/utilities/setup-system.sh"
         "${SCRIPT_DIR}/utilities/setup-storage.sh"
@@ -464,7 +464,7 @@ main() {
     }
     trap _setup_cleanup EXIT HUP INT TERM
 
-    _check_all_utilities
+    _verify_required_utilities
 
     if [[ -n "${SOPS_VERSION:-}" ]]; then
         log_info "SOPS version pinned: ${SOPS_VERSION}"
