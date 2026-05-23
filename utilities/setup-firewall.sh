@@ -242,12 +242,17 @@ _phase_iptables() {
     if iptables -L INPUT -n 2>/dev/null | grep -qE "ACCEPT.*(tcp dpt:${_ssh_port}|state.*ESTABLISHED|multiport.*${_ssh_port})"; then
         # Check 1: explicit per-port or stateful ACCEPT rule present.
         _ssh_ok=true
-    elif iptables -L INPUT -n 2>/dev/null | grep -q "ACCEPT.*all.*0\.0\.0\.0"; then
-        # Check 2: blanket ACCEPT for all traffic (typical OCI INPUT before REJECT).
+    elif iptables -L INPUT -n 2>/dev/null | grep -qE "ACCEPT[[:space:]]+all[[:space:]]+--[[:space:]]+0\.0\.0\.0/0[[:space:]]+0\.0\.0\.0/0"; then
+        # Check 2: blanket ACCEPT for all traffic — matches exact numeric iptables -n output.
         _ssh_ok=true
-    elif iptables -L INPUT 2>/dev/null | awk 'NR==1 {print}' | grep -q "policy ACCEPT"; then
+    elif iptables -L INPUT 2>/dev/null | head -1 | grep -q "policy ACCEPT"; then
         # Check 3: INPUT chain default policy is ACCEPT — SSH is accessible via
         # network-level controls (e.g. OCI VCN security list, AWS security group).
+        _ssh_ok=true
+    elif ss -tlnp 2>/dev/null | grep -q ":${_ssh_port}" && \
+         ! iptables -L INPUT -n 2>/dev/null | grep -qE "^(DROP|REJECT)"; then
+        # Check 4: SSH daemon is listening and INPUT chain has no DROP/REJECT rules —
+        # covers OCI instances where VCN security lists gate access with no local iptables rules.
         _ssh_ok=true
     fi
     if [[ "$_ssh_ok" != "true" ]]; then
