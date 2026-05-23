@@ -93,7 +93,14 @@ test_postfix_container() {
         fi
     fi
     local health_status
-    health_status=$(docker compose exec -T postfix nc -z localhost 587 >/dev/null 2>&1 && echo "healthy" || echo "unhealthy")
+    if nc -z -w 5 127.0.0.1 587 >/dev/null 2>&1; then
+        health_status="healthy"
+    elif echo "QUIT" | timeout 5 bash -c 'cat < /dev/tcp/127.0.0.1/587' >/dev/null 2>&1; then
+        # Fallback: /dev/tcp works even when nc is not installed on the host
+        health_status="healthy"
+    else
+        health_status="unhealthy"
+    fi
     if [[ "$health_status" == "healthy" ]]; then
         log_success "✅ postfix health check passed (port 587 responding)"
     else
