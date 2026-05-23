@@ -28,24 +28,7 @@ source "${SCRIPT_DIR}/lib/storage.sh"  # provides require_project_state_ready()
 # AUDIT (Task 2d + Fix 4): Every startup.sh function was compared against
 # lib/docker.sh, lib/storage.sh, lib/secrets.sh, lib/crypto.sh, and
 # lib/common.sh on 2026-05-20 (updated Fix 4 2026-05-21).
-# No extractable duplicates remain:
-#   _maybe_sudo()                    — startup-specific root escalation helper (no lib equiv)
-#   warn_plaintext_secret_overrides()— startup-only split-brain advisory; not reused elsewhere
-#   check_email_config_consistency() — startup-only advisory; not reused elsewhere
-#   load_environment()               — sources .env; startup-scoped (reads relative .env)
-#   validate_prerequisites()         — startup-scoped; delegates to check_docker_available()
-#   prepare_directories()            — startup-scoped mkdir wrapper; not a lib candidate
-#   prepare_log_directories()        — startup-scoped; not a lib candidate
-#   check_age_key_health_preflight() — startup-specific key-path override logic
-#   prepare_docker_secrets()         — thin wrapper; delegates to export_docker_secrets()
-#                                      in lib/secrets.sh for all hardening logic
-#   cleanup_orphaned_resources()     — delegates to cleanup_docker_system() in lib/docker.sh
-#   _startup_pull_images()           — startup-specific --skip-pull guard
-#   _startup_start_services()        — startup-specific --force-recreate guard
-#   ensure_vaultwarden_egress_nat()  — startup-specific NAT remediation
-#   wait_for_services()              — startup-specific health gate loop
-#   run_health_check()               — startup-specific; delegates to maintenance-health.sh
-#   show_status()                    — one-liner docker compose ps wrapper
+# No extractable duplicates remain — see inline comments per function.
 
 FORCE_RESTART=false
 SKIP_HEALTH_CHECK=false
@@ -56,6 +39,7 @@ DO_DOWN=false
 # use maintenance.sh update or ./startup.sh (without the flag) to refresh images.
 SKIP_PULL=false
 SKIP_EGRESS_FIX=false
+SKIP_DNS_UPDATE=false
 
 DOCKER_SECRETS_DIR="${PROJECT_ROOT}/secrets/.docker_secrets"
 
@@ -78,6 +62,7 @@ STARTUP OPTIONS:
   --background     Start services in background (daemon mode)
   --skip-egress-fix  Skip automatic egress NAT remediation for
                      non-internal VaultWarden Docker bridge networks
+  --skip-dns-update  Skip Cloudflare DNS update on startup
   --dry-run        Show what would be done without executing
 
 GLOBAL OPTIONS:
@@ -88,6 +73,7 @@ EXAMPLES:
   ./startup.sh --skip-pull        # Restart without pulling (fast path)
   ./startup.sh --force            # Force restart all services
   ./startup.sh --background       # Start in daemon mode
+  ./startup.sh --skip-dns-update  # Skip DNS update (e.g. IP has not changed)
   ./startup.sh stop               # Stop all services
 EOF
 }
@@ -115,13 +101,14 @@ fi
 
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --force)           FORCE_RESTART=true;   shift ;;
-    --skip-health)     SKIP_HEALTH_CHECK=true; shift ;;
-    --skip-pull)       SKIP_PULL=true;        shift ;;
-    --background)      BACKGROUND=true;       shift ;;
-    --skip-egress-fix) SKIP_EGRESS_FIX=true;  shift ;;
-    --dry-run)         DRY_RUN=true;          shift ;;
-    --help|-h)         show_help; exit 0 ;;
+    --force)             FORCE_RESTART=true;    shift ;;
+    --skip-health)       SKIP_HEALTH_CHECK=true; shift ;;
+    --skip-pull)         SKIP_PULL=true;         shift ;;
+    --background)        BACKGROUND=true;        shift ;;
+    --skip-egress-fix)   SKIP_EGRESS_FIX=true;   shift ;;
+    --skip-dns-update)   SKIP_DNS_UPDATE=true;    shift ;;
+    --dry-run)           DRY_RUN=true;            shift ;;
+    --help|-h)           show_help; exit 0 ;;
     *) log_error "Unknown option: '$1'"; show_help; exit 1 ;;
   esac
 done
@@ -133,7 +120,13 @@ if [[ "$DO_DOWN" == "true" ]]; then
   exit 0
 fi
 
-# Run a command as root if needed (interactive -> sudo, non-interactive -> sudo -n)
+# ---------------------------------------------------------------------------
+# _maybe_sudo
+#
+# Run a command as root if needed.
+# Interactive sessions use sudo with a password prompt; non-interactive
+# (cron/systemd) use sudo -n to avoid hanging on a missing TTY.
+# ---------------------------------------------------------------------------
 _maybe_sudo() {
   if is_root; then
     "$@"
@@ -145,18 +138,12 @@ _maybe_sudo() {
     return $?
   fi
 
-  # If running without a TTY (cron/non-interactive), don't prompt for password.
   if [[ -t 0 ]]; then
     sudo "$@"
   else
     sudo -n "$@"
   fi
 }
-
-# _startup_secure_wipe is no longer defined here.
-# Callers use _secure_shred() from lib/secrets.sh (sourced above), which
-# provides the same CoW-filesystem-safe overwrite-before-unlink behaviour.
-
 
 # ---------------------------------------------------------------------------
 # warn_plaintext_secret_overrides
@@ -180,6 +167,7 @@ warn_plaintext_secret_overrides() {
   if [[ "$warned" == "true" ]]; then
     log_warn "Best practice: keep EMAIL_API_TOKEN and SMTP_PASSWORD out of .env and manage them only through secrets.yaml / SOPS."
   fi
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -197,7 +185,6 @@ check_email_config_consistency() {
 
   case "$email_mode" in
     api)
-      # EMAIL_MODE=api requires email_api_token to be present and non-empty.
       local token_file="${secrets_dir}/email_api_token"
       if [[ ! -f "$token_file" ]] || [[ ! -s "$token_file" ]]; then
         log_warn "EMAIL_MODE=api is set but '${token_file}' is absent or empty."
@@ -206,7 +193,6 @@ check_email_config_consistency() {
       fi
       ;;
     smtp)
-      # EMAIL_MODE=smtp requires smtp_password.
       local pw_file="${secrets_dir}/smtp_password"
       if [[ ! -f "$pw_file" ]] || [[ ! -s "$pw_file" ]]; then
         log_warn "EMAIL_MODE=smtp is set but '${pw_file}' is absent or empty."
@@ -225,6 +211,9 @@ check_email_config_consistency() {
   return 0
 }
 
+# ---------------------------------------------------------------------------
+# load_environment
+# ---------------------------------------------------------------------------
 load_environment() {
   log_info "Loading environment configuration..."
 
@@ -245,7 +234,6 @@ load_environment() {
       fi
     fi
 
-    # Fail early when .env is unreadable so non-root tooling does not break later.
     if [[ ! -r ".env" ]]; then
       log_error ".env is not readable by the current user ($(id -un))."
       log_error "Fix ownership: sudo chown $(id -un):$(id -gn) .env"
@@ -263,24 +251,27 @@ load_environment() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# validate_prerequisites
+# ---------------------------------------------------------------------------
 validate_prerequisites() {
   log_info "Validating prerequisites..."
 
   local required_commands=(docker openssl sops python3)
   local missing_commands=()
 
+  local cmd
   for cmd in "${required_commands[@]}"; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
       missing_commands+=("$cmd")
     fi
   done
 
-  if [ ${#missing_commands[@]} -gt 0 ]; then
+  if [[ ${#missing_commands[@]} -gt 0 ]]; then
     log_error "Missing required commands: ${missing_commands[*]}"
     return 1
   fi
 
-  # Verify python3-yaml is available — required for secrets parsing in prepare_docker_secrets
   if ! python3 -c "import yaml" 2>/dev/null; then
     log_error "python3-yaml (PyYAML) is not installed — required for secrets parsing"
     log_error "Install hint: pip install pyyaml  or  sudo apt install python3-yaml"
@@ -292,7 +283,7 @@ validate_prerequisites() {
     return 1
   fi
 
-  if [ ! -f "docker-compose.yml" ]; then
+  if [[ ! -f "docker-compose.yml" ]]; then
     log_error "docker-compose.yml not found"
     return 1
   fi
@@ -303,14 +294,11 @@ validate_prerequisites() {
 
 # ---------------------------------------------------------------------------
 # prepare_directories
-# ---------------------------------------------------------------------------
+#
 # Ensures all PROJECT_STATE_DIR subdirectories required by Docker bind mounts
 # exist on the host before `docker compose up`.  Uses absolute paths so that
 # separate-volume installs (PROJECT_STATE_DIR=/mnt/vw-data) create dirs on
 # the data volume, not under PROJECT_ROOT.
-#
-# prepare_log_directories() handles logs/ and backups/ with ownership logic;
-# this function covers the remaining non-log subtrees.
 # ---------------------------------------------------------------------------
 prepare_directories() {
   local project_state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
@@ -339,7 +327,9 @@ prepare_directories() {
   return 0
 }
 
-# Prepare log directories with correct ownership
+# ---------------------------------------------------------------------------
+# ensure_caddy_log_permissions
+# ---------------------------------------------------------------------------
 ensure_caddy_log_permissions() {
   local caddy_log_dir="$1"
   local access_log="${caddy_log_dir}/access.log"
@@ -385,8 +375,12 @@ ensure_caddy_log_permissions() {
   else
     log_success "Caddy log permissions already correct (${caddy_log_dir})"
   fi
+  return 0
 }
 
+# ---------------------------------------------------------------------------
+# prepare_log_directories
+# ---------------------------------------------------------------------------
 prepare_log_directories() {
   log_info "Ensuring base state directory exists..."
 
@@ -406,7 +400,6 @@ prepare_log_directories() {
   if ! _maybe_sudo mkdir -p "${project_state_dir}/logs"/{vaultwarden,caddy,postfix}; then
     log_warn "Failed to create log subdirectories (init container will try)"
   else
-    # Set ownership to PUID:PGID from .env configuration
     local puid pgid
     puid=$(get_config_value "PUID" "1001")
     pgid=$(get_config_value "PGID" "1001")
@@ -420,7 +413,6 @@ prepare_log_directories() {
     return 1
   fi
 
-  # Create backup directory
   local backup_dir
   backup_dir="$(get_config_value "BACKUP_DIR" "${project_state_dir}/backups")"
   if ! _maybe_sudo mkdir -p "$backup_dir" 2>/dev/null; then
@@ -429,8 +421,7 @@ prepare_log_directories() {
     log_info "Backup directory ready: $backup_dir"
   fi
 
-  # Ensure Caddy entrypoint is executable
-  if [ -f "${PROJECT_ROOT}/caddy/entrypoint.sh" ]; then
+  if [[ -f "${PROJECT_ROOT}/caddy/entrypoint.sh" ]]; then
     chmod +x "${PROJECT_ROOT}/caddy/entrypoint.sh" 2>/dev/null || true
     log_info "Ensured Caddy entrypoint is executable"
   fi
@@ -439,6 +430,9 @@ prepare_log_directories() {
   return 0
 }
 
+# ---------------------------------------------------------------------------
+# prepare_push_secret_placeholders
+# ---------------------------------------------------------------------------
 prepare_push_secret_placeholders() {
   local secrets_dir="$DOCKER_SECRETS_DIR"
   local puid pgid
@@ -490,6 +484,7 @@ prepare_push_secret_placeholders() {
   else
     log_success "Push secret placeholders already readable for VaultWarden"
   fi
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -498,27 +493,18 @@ prepare_push_secret_placeholders() {
 # Runs check_age_key_health() before any SOPS invocation so a corrupt,
 # missing, or wrong-permissions age key produces a clear actionable error
 # rather than an opaque decryption failure from SOPS.
-#
-# If the configured key path does not exist but the repo-local key is
-# present and healthy, the key path is overridden for this process only and
-# a prominent ACTION REQUIRED advisory is printed so the operator fixes
-# .env before the next restart.
 # ---------------------------------------------------------------------------
 check_age_key_health_preflight() {
-  # Resolve the configured key path from .env (already sourced by load_environment)
   local configured_key="${SOPS_AGE_KEY_FILE:-}"
 
-  # If SOPS_AGE_KEY_FILE is empty, fall back to the SOPS default
   if [[ -z "$configured_key" ]]; then
     configured_key="${HOME:-/root}/.config/sops/age/keys.txt"
   fi
 
-  # Fast path: configured key exists and is healthy — proceed
   if check_age_key_health "$configured_key" 2>/dev/null; then
     return 0
   fi
 
-  # Configured key is missing or unhealthy. Collect diagnostic context.
   local repo_local_key="${SCRIPT_DIR}/secrets/keys/age-key.txt"
   local canonical_key="/etc/vaultwarden/age-key.txt"
 
@@ -548,18 +534,15 @@ check_age_key_health_preflight() {
     log_warn "    sudo ./setup.sh --domain <your-domain> --email <your-email>"
     log_warn "=========================================================="
 
-    # Export the repo-local path for this process only
     export SOPS_AGE_KEY_FILE="$repo_local_key"
     return 0
   fi
 
-  # No usable key found anywhere — abort with full diagnostics.
   log_error "Age key health check FAILED for configured path: ${configured_key}"
   log_error ""
   log_error "SOPS cannot decrypt secrets without a valid Age private key."
   log_error ""
 
-  # Case 1: configured path IS the canonical path — just report it missing.
   if [[ "$configured_key" == "$canonical_key" ]]; then
     log_error "Remediation:"
     log_error "  The canonical key file does not exist or is not readable."
@@ -577,8 +560,6 @@ check_age_key_health_preflight() {
     return 1
   fi
 
-  # Case 2: configured path is NOT canonical — check whether the canonical path
-  # exists so the operator understands the full picture.
   log_error "  Configured key path (from .env):  ${configured_key}"
   log_error "  Canonical production path:         ${canonical_key}"
   log_error ""
@@ -614,7 +595,6 @@ prepare_docker_secrets() {
   return 0
 }
 
-
 # ---------------------------------------------------------------------------
 # cleanup_orphaned_resources
 # ---------------------------------------------------------------------------
@@ -626,9 +606,6 @@ cleanup_orphaned_resources() {
     return 0
   fi
 
-  # cleanup_docker_system() from lib/docker.sh prunes containers, images
-  # (with --filter until=48h), volumes, and networks — all scoped to the
-  # project label to avoid affecting unrelated services on shared hosts.
   cleanup_docker_system || true
 
   log_success "Orphaned resources cleaned up"
@@ -641,9 +618,6 @@ cleanup_orphaned_resources() {
 # Startup-specific wrapper: guarded by --skip-pull so systemd ExecStart
 # restarts are instant. Image refreshes go through maintenance.sh update or
 # a manual ./startup.sh without --skip-pull.
-#
-# Uses a direct `docker compose pull` (not lib/docker.sh's pull_images())
-# so pull output streams directly to the journal without buffering.
 # ---------------------------------------------------------------------------
 _startup_pull_images() {
   if [[ "$SKIP_PULL" == "true" ]]; then
@@ -690,11 +664,61 @@ _startup_start_services() {
 }
 
 # ---------------------------------------------------------------------------
+# _persist_iptables
+#
+# Save the current iptables ruleset so rules survive a reboot.
+# Tries three methods in order of preference:
+#   1. netfilter-persistent save  (Debian/Ubuntu iptables-persistent)
+#   2. service iptables save      (RHEL/Oracle Linux)
+#   3. iptables-save > /etc/iptables/rules.v4  (manual fallback)
+#
+# A failure here is WARN-only — the rules are still active for this boot.
+# ---------------------------------------------------------------------------
+_persist_iptables() {
+  if [[ "$DRY_RUN" == "true" ]]; then
+    log_info "[DRY RUN] Would persist iptables rules across reboots"
+    return 0
+  fi
+
+  if command -v netfilter-persistent >/dev/null 2>&1; then
+    if _maybe_sudo netfilter-persistent save >/dev/null 2>&1; then
+      log_success "iptables rules persisted via netfilter-persistent"
+      return 0
+    fi
+  fi
+
+  if _maybe_sudo service iptables save >/dev/null 2>&1; then
+    log_success "iptables rules persisted via 'service iptables save'"
+    return 0
+  fi
+
+  # Manual fallback: write to the canonical path that iptables-restore reads
+  # from on boot (used by both iptables-persistent and cloud-init on OCI).
+  local rules_dir="/etc/iptables"
+  local rules_file="${rules_dir}/rules.v4"
+  if _maybe_sudo mkdir -p "$rules_dir" 2>/dev/null \
+      && _maybe_sudo sh -c "iptables-save > '${rules_file}'" 2>/dev/null; then
+    log_success "iptables rules persisted to ${rules_file}"
+    log_info "  Ensure iptables-restore runs at boot:"
+    log_info "    sudo systemctl enable netfilter-persistent 2>/dev/null ||"
+    log_info "    sudo systemctl enable iptables 2>/dev/null"
+    return 0
+  fi
+
+  log_warn "Could not persist iptables rules — rules are active for this boot only."
+  log_warn "  To persist manually: sudo iptables-save | sudo tee /etc/iptables/rules.v4"
+  log_warn "  Then: sudo systemctl enable netfilter-persistent"
+  return 0  # warn-only; do not block startup
+}
+
+# ---------------------------------------------------------------------------
 # ensure_vaultwarden_egress_nat
 #
 # Admin-friendly, idempotent fallback for hardened VMs where Docker's normal
 # MASQUERADE behavior is missing/overridden. We only target non-internal
 # bridge networks attached to the vaultwarden container.
+#
+# Rules are persisted after being applied so they survive a reboot.
 # ---------------------------------------------------------------------------
 ensure_vaultwarden_egress_nat() {
   if [[ "$SKIP_EGRESS_FIX" == "true" ]]; then
@@ -719,6 +743,8 @@ ensure_vaultwarden_egress_nat() {
     log_info "Invoking: ${_fw_script} --phase iptables"
     if _maybe_sudo "$_fw_script" --phase iptables; then
       log_success "Egress firewall remediation completed via utilities/setup-firewall.sh"
+      # Persist after setup-firewall.sh in case it does not persist itself.
+      _persist_iptables
       return 0
     fi
     log_warn "utilities/setup-firewall.sh failed; falling back to inline NAT remediation"
@@ -751,8 +777,6 @@ ensure_vaultwarden_egress_nat() {
 
     if _maybe_sudo iptables -t nat -A POSTROUTING -s "$subnet" ! -o docker0 -j MASQUERADE >/dev/null 2>&1; then
       log_info "Added MASQUERADE fallback for network ${network_name} (${subnet})"
-      log_warn "Inline iptables MASQUERADE rule is ephemeral — it will not survive a reboot."
-      log_warn "For persistence, run: sudo ./utilities/setup-firewall.sh --phase iptables"
       fixed_any=true
     else
       log_warn "Could not add MASQUERADE fallback for network ${network_name} (${subnet})"
@@ -761,6 +785,8 @@ ensure_vaultwarden_egress_nat() {
 
   if [[ "$fixed_any" == "true" ]]; then
     log_success "Egress NAT remediation applied for VaultWarden network attachments"
+    # Persist the newly added rules so they survive a reboot.
+    _persist_iptables
   else
     log_info "Egress NAT remediation check complete (no changes needed)"
   fi
@@ -777,7 +803,7 @@ wait_for_services() {
   local services=(vaultwarden caddy)
   local timeout=90
   local interval=3
-  local progress_interval=9   # emit a status line every 3rd poll
+  local progress_interval=9
   local elapsed=0
   local next_progress=0
 
@@ -785,6 +811,7 @@ wait_for_services() {
     local all_ready=true
     local status_parts=()
 
+    local service
     for service in "${services[@]}"; do
       local container_id
       container_id=$(docker compose ps -q "$service" 2>/dev/null || true)
@@ -795,9 +822,8 @@ wait_for_services() {
         continue
       fi
 
-      local running
+      local running health
       running=$(docker inspect --format '{{.State.Running}}' "$container_id" 2>/dev/null || echo "false")
-      local health
       health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container_id" 2>/dev/null || echo "unknown")
 
       if [[ "$running" != "true" ]]; then
@@ -806,12 +832,6 @@ wait_for_services() {
         continue
       fi
 
-      # VaultWarden must report health==healthy before it is
-      # considered ready. Accepting health==none for VaultWarden means the
-      # container starts without a healthcheck — which is a configuration error
-      # that would cause startup to proceed with an unhealthy service silently.
-      # Other services (caddy) are allowed to report health==none
-      # if they don't define a HEALTHCHECK in their Dockerfile.
       if [[ "$service" == "vaultwarden" ]]; then
         if [[ "$health" != "healthy" ]]; then
           all_ready=false
@@ -834,9 +854,6 @@ wait_for_services() {
       return 0
     fi
 
-    # Emit a progress line periodically so the operator can see the wait is
-    # active and which container is still not ready — prevents the terminal
-    # from appearing frozen during slow-start containers.
     if (( elapsed >= next_progress )); then
       local remaining=$(( timeout - elapsed ))
       log_info "Still waiting... ${elapsed}s elapsed, up to ${remaining}s remaining — $(IFS=', '; echo "${status_parts[*]}")"
@@ -849,6 +866,50 @@ wait_for_services() {
 
   log_error "Service readiness check timed out after ${timeout}s — stack may not be fully ready"
   return 1
+}
+
+# ---------------------------------------------------------------------------
+# update_dns
+#
+# Calls utilities/maintenance-update-dns.sh to ensure the Cloudflare A-record
+# for this instance's domain always reflects the current public IP after every
+# boot or restart (critical for OCI instances which may receive a new ephemeral
+# IP after a reboot or instance stop/start).
+#
+# This runs AFTER services are healthy so a DNS failure never blocks VaultWarden
+# itself from starting. Failures are WARN-only for the same reason.
+# ---------------------------------------------------------------------------
+update_dns() {
+  if [[ "$SKIP_DNS_UPDATE" == "true" ]]; then
+    log_info "Skipping DNS update (--skip-dns-update)"
+    return 0
+  fi
+
+  local _dns_script="${PROJECT_ROOT}/utilities/maintenance-update-dns.sh"
+
+  if [[ ! -x "$_dns_script" ]]; then
+    log_warn "DNS update script not found or not executable: ${_dns_script}"
+    log_warn "  Skipping DNS update. Run: chmod +x ${_dns_script}"
+    return 0
+  fi
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    log_info "[DRY RUN] Would run: ${_dns_script}"
+    return 0
+  fi
+
+  log_info "Updating Cloudflare DNS to current public IP..."
+  local dns_exit=0
+  "$_dns_script" || dns_exit=$?
+
+  if [[ "$dns_exit" -eq 0 ]]; then
+    log_success "DNS update completed successfully"
+  else
+    log_warn "DNS update exited with code ${dns_exit} — check Cloudflare token and zone ID."
+    log_warn "  The stack is running. Retry manually: ${_dns_script}"
+    log_warn "  Or check: CLOUDFLARE_ZONE_ID and caddy_cloudflare_dns_token in secrets."
+  fi
+  return 0  # warn-only; never block startup
 }
 
 # ---------------------------------------------------------------------------
@@ -869,9 +930,8 @@ run_health_check() {
   fi
 
   log_info "Running post-start health check..."
-
-  # Disable errexit around the health check so we can capture its exit code cleanly.
   log_info "Invoking: ${_health_script} health"
+
   local health_exit=0
   "$_health_script" health || health_exit=$?
 
@@ -881,10 +941,8 @@ run_health_check() {
       ;;
     1)
       log_warn "Health check completed with warnings — review output above"
-      # Non-critical: startup continues, but operator should investigate
       ;;
     *)
-      # exit 2 = one or more critical failures; exit 3+ = maintenance.sh crash
       log_error "Health check reported CRITICAL failures (exit ${health_exit}) — stack is unhealthy"
       log_error "Startup aborted. Investigate the failures above, then re-run ./startup.sh"
       log_error "To skip this gate during recovery: ./startup.sh --skip-health"
@@ -909,27 +967,30 @@ show_status() {
 main() {
   log_info "Starting VaultWarden-OCI startup workflow..."
 
-  # Add INT/TERM signal traps so that secrets are cleaned up and
-  # the exit code correctly reflects termination (130 for INT, 143 for TERM).
+  # Register signal traps before the ERR trap so that Ctrl-C / SIGTERM
+  # produce clean exit codes (130/143) rather than triggering the ERR handler.
   trap 'exit 130' INT
   trap 'exit 143' TERM
 
-  load_environment || exit 1
-  require_project_state_ready || exit 1
-  validate_prerequisites || exit 1
-  prepare_directories || exit 1
-  prepare_log_directories || exit 1
-  prepare_docker_secrets || exit 1
+  load_environment             || exit 1
+  require_project_state_ready  || exit 1
+  validate_prerequisites       || exit 1
+  prepare_directories          || exit 1
+  prepare_log_directories      || exit 1
+  prepare_docker_secrets       || exit 1
   prepare_push_secret_placeholders || exit 1
-  check_email_config_consistency || true   # warn only, never block startup
-  warn_plaintext_secret_overrides || true
-  cleanup_orphaned_resources || true
-  ensure_vaultwarden_egress_nat || true
-  _startup_pull_images || exit 1
-  _startup_start_services || exit 1
+  check_email_config_consistency   || true   # warn only, never block startup
+  warn_plaintext_secret_overrides  || true
+  cleanup_orphaned_resources       || true
+  ensure_vaultwarden_egress_nat    || true
+  _startup_pull_images         || exit 1
+  _startup_start_services      || exit 1
 
   if [[ "$BACKGROUND" != "true" ]]; then
     wait_for_services || true
+    # DNS update runs after services are healthy — a transient API failure
+    # must not prevent the health gate from running.
+    update_dns || true
     run_health_check || {
       log_error "Startup tip: if the failure is key-related, run: make key-health"
       log_error "Canonical production key path: /etc/vaultwarden/age-key.txt"
