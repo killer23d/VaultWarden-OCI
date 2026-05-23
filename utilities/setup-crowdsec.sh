@@ -251,11 +251,6 @@ else
                 else
                     log_warn "Could not find a linux_${_arch} asset in the GitHub release — attempting source build fallback."
                     if [[ "$_arch" == "arm64" ]]; then
-                        if ! command -v go >/dev/null 2>&1; then
-                            log_info "Installing Go toolchain for arm64 source build fallback..."
-                            DEBIAN_FRONTEND=noninteractive apt-get update -y >/dev/null 2>&1 || true
-                            DEBIAN_FRONTEND=noninteractive apt-get install -y golang-go >/dev/null 2>&1 || true
-                        fi
                         if command -v go >/dev/null 2>&1; then
                             _tmpgobin="$(mktemp -d -p /tmp cs-cf-go.XXXXXX)"
                             if GOBIN="$_tmpgobin" go install github.com/crowdsecurity/cs-cloudflare-bouncer/cmd/crowdsec-cloudflare-bouncer@latest 2>/dev/null; then
