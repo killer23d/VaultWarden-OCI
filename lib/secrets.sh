@@ -844,10 +844,15 @@ EOF
 
     # Inject all dynamic values explicitly so that $ characters in secrets
     # (e.g. bcrypt hashes: $2y$12$...) are written verbatim.
+    #
+    # $'...' ANSI-C quoting is used for the border/emoji lines so the shell
+    # expands \uXXXX and \UXXXXXXXX into actual Unicode characters (═ and 🚨)
+    # before printf receives them. Plain printf '%s\n' does NOT interpret
+    # these escape sequences — it would write the literal backslash-u string.
     printf '%s\n' \
-        "\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550" \
-        "                            \U0001F6A8 CRITICAL SECURITY DOCUMENT \U0001F6A8" \
-        "\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550" \
+        $'═══════════════════════════════════════════════════════════════════════' \
+        $'                        \U0001F6A8 CRITICAL SECURITY DOCUMENT \U0001F6A8' \
+        $'═══════════════════════════════════════════════════════════════════════' \
         >> "$output_file"
     printf 'Created: %s\n' "$date_val"      >> "$output_file"
     printf 'Server:  %s\n' "$hostname_val" >> "$output_file"
@@ -974,16 +979,16 @@ _ork_generate_and_secure() {
 
     {
         printf '\n'
-        printf '\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\n'
+        printf $'═══════════════════════════════════════════════════════════════\n'
         printf ' SECURITY NOTICE -- PLAINTEXT FILE ABOUT TO BE WRITTEN\n'
-        printf '\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\n'
+        printf $'═══════════════════════════════════════════════════════════════\n'
         printf 'The recovery kit will be written to:\n'
         printf '  %s\n' "$output_file"
         printf '\n'
         printf 'Even on tmpfs, this file is visible to root and may appear\n'
         printf 'in OCI block-volume snapshots if /tmp falls back to disk.\n'
         printf 'The file will be securely deleted after you confirm.\n'
-        printf '\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\n'
+        printf $'═══════════════════════════════════════════════════════════════\n'
         printf '\n'
     } > /dev/tty 2>/dev/null || true
 
@@ -1406,4 +1411,3 @@ PYEOF
     log_success "Docker secrets exported to: $docker_dir"
     return 0
 }
-
