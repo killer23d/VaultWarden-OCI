@@ -453,3 +453,63 @@ vw_default_backup_dir() {
     fi
     printf '%s/backups' "$state_dir"
 }
+
+# ---------------------------------------------------------------------------
+# ensure_caddy_log_permissions
+#
+# Creates the Caddy log directory and its access.log / security.log files,
+# then enforces root:root 755/644 ownership. Uses a stat-check-then-fix
+# pattern to remain idempotent. Relies on _maybe_sudo() from lib/common.sh
+# for privilege escalation when the caller is not already root.
+#
+# Arguments:
+#   $1 — caddy_log_dir  (e.g. /var/lib/vaultwarden/logs/caddy)
+#
+# Returns 0 on success, 1 on any failure.
+# ---------------------------------------------------------------------------
+ensure_caddy_log_permissions() {
+    local caddy_log_dir="$1"
+    local access_log="${caddy_log_dir}/access.log"
+    local security_log="${caddy_log_dir}/security.log"
+    local changed=false
+
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        log_info "[DRY RUN] Would enforce root:root 755/644 permissions for ${caddy_log_dir}"
+        return 0
+    fi
+
+    _maybe_sudo mkdir -p "$caddy_log_dir" || return 1
+    _maybe_sudo touch "$access_log" "$security_log" || return 1
+
+    local dir_owner dir_mode
+    dir_owner=$(stat -c '%u:%g' "$caddy_log_dir" 2>/dev/null || echo "")
+    dir_mode=$(stat -c '%a' "$caddy_log_dir" 2>/dev/null || echo "")
+    if [[ "$dir_owner" != "0:0" ]]; then
+        _maybe_sudo chown root:root "$caddy_log_dir" || return 1
+        changed=true
+    fi
+    if [[ "$dir_mode" != "755" ]]; then
+        _maybe_sudo chmod 755 "$caddy_log_dir" || return 1
+        changed=true
+    fi
+
+    local log_file owner mode
+    for log_file in "$access_log" "$security_log"; do
+        owner=$(stat -c '%u:%g' "$log_file" 2>/dev/null || echo "")
+        mode=$(stat -c '%a' "$log_file" 2>/dev/null || echo "")
+        if [[ "$owner" != "0:0" ]]; then
+            _maybe_sudo chown root:root "$log_file" || return 1
+            changed=true
+        fi
+        if [[ "$mode" != "644" ]]; then
+            _maybe_sudo chmod 644 "$log_file" || return 1
+            changed=true
+        fi
+    done
+
+    if [[ "$changed" == "true" ]]; then
+        log_success "Caddy log permissions remediated (${caddy_log_dir})"
+    else
+        log_success "Caddy log permissions already correct (${caddy_log_dir})"
+    fi
+}

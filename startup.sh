@@ -29,13 +29,13 @@ source "${SCRIPT_DIR}/lib/storage.sh"  # provides require_project_state_ready()
 # lib/docker.sh, lib/storage.sh, lib/secrets.sh, lib/crypto.sh, and
 # lib/common.sh on 2026-05-20 (updated Fix 4 2026-05-21).
 # No extractable duplicates remain:
-#   _maybe_sudo()                    — startup-specific root escalation helper (no lib equiv)
 #   warn_plaintext_secret_overrides()— startup-only split-brain advisory; not reused elsewhere
 #   check_email_config_consistency() — startup-only advisory; not reused elsewhere
 #   load_environment()               — sources .env; startup-scoped (reads relative .env)
 #   validate_prerequisites()         — startup-scoped; delegates to check_docker_available()
 #   prepare_directories()            — startup-scoped mkdir wrapper; not a lib candidate
-#   prepare_log_directories()        — startup-scoped; not a lib candidate
+#   prepare_log_directories()        — startup-scoped; delegates to ensure_caddy_log_permissions()
+#                                      in lib/storage.sh
 #   check_age_key_health_preflight() — startup-specific key-path override logic
 #   prepare_docker_secrets()         — thin wrapper; delegates to export_docker_secrets()
 #                                      in lib/secrets.sh for all hardening logic
@@ -43,7 +43,7 @@ source "${SCRIPT_DIR}/lib/storage.sh"  # provides require_project_state_ready()
 #   _startup_pull_images()           — startup-specific --skip-pull guard
 #   _startup_start_services()        — startup-specific --force-recreate guard
 #   ensure_vaultwarden_egress_nat()  — startup-specific NAT remediation
-#   wait_for_services()              — startup-specific health gate loop
+#   wait_for_services()              — delegates to wait_for_service_ready() in lib/docker.sh
 #   run_health_check()               — startup-specific; delegates to maintenance-health.sh
 #   show_status()                    — one-liner docker compose ps wrapper
 
@@ -132,26 +132,6 @@ if [[ "$DO_DOWN" == "true" ]]; then
   log_success "Services stopped successfully"
   exit 0
 fi
-
-# Run a command as root if needed (interactive -> sudo, non-interactive -> sudo -n)
-_maybe_sudo() {
-  if is_root; then
-    "$@"
-    return $?
-  fi
-
-  if ! command -v sudo >/dev/null 2>&1; then
-    "$@"
-    return $?
-  fi
-
-  # If running without a TTY (cron/non-interactive), don't prompt for password.
-  if [[ -t 0 ]]; then
-    sudo "$@"
-  else
-    sudo -n "$@"
-  fi
-}
 
 # _startup_secure_wipe is no longer defined here.
 # Callers use _secure_shred() from lib/secrets.sh (sourced above), which
@@ -340,53 +320,6 @@ prepare_directories() {
 }
 
 # Prepare log directories with correct ownership
-ensure_caddy_log_permissions() {
-  local caddy_log_dir="$1"
-  local access_log="${caddy_log_dir}/access.log"
-  local security_log="${caddy_log_dir}/security.log"
-  local changed=false
-
-  if [[ "$DRY_RUN" == "true" ]]; then
-    log_info "[DRY RUN] Would enforce root:root 755/644 permissions for ${caddy_log_dir}"
-    return 0
-  fi
-
-  _maybe_sudo mkdir -p "$caddy_log_dir" || return 1
-  _maybe_sudo touch "$access_log" "$security_log" || return 1
-
-  local dir_owner dir_mode
-  dir_owner=$(stat -c '%u:%g' "$caddy_log_dir" 2>/dev/null || echo "")
-  dir_mode=$(stat -c '%a' "$caddy_log_dir" 2>/dev/null || echo "")
-  if [[ "$dir_owner" != "0:0" ]]; then
-    _maybe_sudo chown root:root "$caddy_log_dir" || return 1
-    changed=true
-  fi
-  if [[ "$dir_mode" != "755" ]]; then
-    _maybe_sudo chmod 755 "$caddy_log_dir" || return 1
-    changed=true
-  fi
-
-  local log_file owner mode
-  for log_file in "$access_log" "$security_log"; do
-    owner=$(stat -c '%u:%g' "$log_file" 2>/dev/null || echo "")
-    mode=$(stat -c '%a' "$log_file" 2>/dev/null || echo "")
-    if [[ "$owner" != "0:0" ]]; then
-      _maybe_sudo chown root:root "$log_file" || return 1
-      changed=true
-    fi
-    if [[ "$mode" != "644" ]]; then
-      _maybe_sudo chmod 644 "$log_file" || return 1
-      changed=true
-    fi
-  done
-
-  if [[ "$changed" == "true" ]]; then
-    log_success "Caddy log permissions remediated (${caddy_log_dir})"
-  else
-    log_success "Caddy log permissions already correct (${caddy_log_dir})"
-  fi
-}
-
 prepare_log_directories() {
   log_info "Ensuring base state directory exists..."
 
@@ -721,50 +654,13 @@ ensure_vaultwarden_egress_nat() {
       log_success "Egress firewall remediation completed via utilities/setup-firewall.sh"
       return 0
     fi
-    log_warn "utilities/setup-firewall.sh failed; falling back to inline NAT remediation"
-  fi
-
-  local container_id
-  container_id=$(docker compose ps -q vaultwarden 2>/dev/null || true)
-  if [[ -z "$container_id" ]]; then
-    log_warn "vaultwarden container not found; skipping egress NAT remediation"
+    log_warn "utilities/setup-firewall.sh failed — egress NAT not applied."
+    log_warn "Run manually to restore: sudo ./utilities/setup-firewall.sh --phase iptables"
     return 0
   fi
 
-  local network_name
-  local fixed_any=false
-  while IFS= read -r network_name; do
-    [[ -z "$network_name" ]] && continue
-
-    local driver internal subnet
-    driver=$(docker network inspect -f '{{.Driver}}' "$network_name" 2>/dev/null || echo "")
-    internal=$(docker network inspect -f '{{.Internal}}' "$network_name" 2>/dev/null || echo "")
-    subnet=$(docker network inspect -f '{{with index .IPAM.Config 0}}{{.Subnet}}{{end}}' "$network_name" 2>/dev/null || echo "")
-
-    [[ "$driver" == "bridge" ]] || continue
-    [[ "$internal" == "false" ]] || continue
-    [[ -n "$subnet" ]] || continue
-
-    if _maybe_sudo iptables -t nat -C POSTROUTING -s "$subnet" ! -o docker0 -j MASQUERADE >/dev/null 2>&1; then
-      continue
-    fi
-
-    if _maybe_sudo iptables -t nat -A POSTROUTING -s "$subnet" ! -o docker0 -j MASQUERADE >/dev/null 2>&1; then
-      log_info "Added MASQUERADE fallback for network ${network_name} (${subnet})"
-      log_warn "Inline iptables MASQUERADE rule is ephemeral — it will not survive a reboot."
-      log_warn "For persistence, run: sudo ./utilities/setup-firewall.sh --phase iptables"
-      fixed_any=true
-    else
-      log_warn "Could not add MASQUERADE fallback for network ${network_name} (${subnet})"
-    fi
-  done < <(docker inspect -f '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' "$container_id" 2>/dev/null || true)
-
-  if [[ "$fixed_any" == "true" ]]; then
-    log_success "Egress NAT remediation applied for VaultWarden network attachments"
-  else
-    log_info "Egress NAT remediation check complete (no changes needed)"
-  fi
-
+  log_warn "utilities/setup-firewall.sh not found or not executable; skipping egress NAT remediation."
+  log_warn "Run manually to configure: sudo ./utilities/setup-firewall.sh --phase iptables"
   return 0
 }
 
@@ -773,82 +669,12 @@ ensure_vaultwarden_egress_nat() {
 # ---------------------------------------------------------------------------
 wait_for_services() {
   log_info "Waiting for critical services to become ready..."
-
   local services=(vaultwarden caddy)
   local timeout=90
-  local interval=3
-  local progress_interval=9   # emit a status line every 3rd poll
-  local elapsed=0
-  local next_progress=0
-
-  while (( elapsed < timeout )); do
-    local all_ready=true
-    local status_parts=()
-
-    for service in "${services[@]}"; do
-      local container_id
-      container_id=$(docker compose ps -q "$service" 2>/dev/null || true)
-
-      if [[ -z "$container_id" ]]; then
-        all_ready=false
-        status_parts+=("${service}:not-found")
-        continue
-      fi
-
-      local running
-      running=$(docker inspect --format '{{.State.Running}}' "$container_id" 2>/dev/null || echo "false")
-      local health
-      health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container_id" 2>/dev/null || echo "unknown")
-
-      if [[ "$running" != "true" ]]; then
-        all_ready=false
-        status_parts+=("${service}:not-running")
-        continue
-      fi
-
-      # VaultWarden must report health==healthy before it is
-      # considered ready. Accepting health==none for VaultWarden means the
-      # container starts without a healthcheck — which is a configuration error
-      # that would cause startup to proceed with an unhealthy service silently.
-      # Other services (caddy) are allowed to report health==none
-      # if they don't define a HEALTHCHECK in their Dockerfile.
-      if [[ "$service" == "vaultwarden" ]]; then
-        if [[ "$health" != "healthy" ]]; then
-          all_ready=false
-          status_parts+=("${service}:${health}")
-          continue
-        fi
-      else
-        if [[ "$health" != "healthy" && "$health" != "none" ]]; then
-          all_ready=false
-          status_parts+=("${service}:${health}")
-          continue
-        fi
-      fi
-
-      status_parts+=("${service}:ready")
-    done
-
-    if [[ "$all_ready" == "true" ]]; then
-      log_success "Critical services are ready"
-      return 0
-    fi
-
-    # Emit a progress line periodically so the operator can see the wait is
-    # active and which container is still not ready — prevents the terminal
-    # from appearing frozen during slow-start containers.
-    if (( elapsed >= next_progress )); then
-      local remaining=$(( timeout - elapsed ))
-      log_info "Still waiting... ${elapsed}s elapsed, up to ${remaining}s remaining — $(IFS=', '; echo "${status_parts[*]}")"
-      next_progress=$(( elapsed + progress_interval ))
-    fi
-
-    sleep "$interval"
-    elapsed=$(( elapsed + interval ))
+  for service in "${services[@]}"; do
+    wait_for_service_ready "$service" "$timeout" || return 1
   done
-
-  log_error "Service readiness check timed out after ${timeout}s — stack may not be fully ready"
-  return 1
+  log_success "Critical services are ready"
 }
 
 # ---------------------------------------------------------------------------
