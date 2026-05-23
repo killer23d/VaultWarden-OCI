@@ -220,15 +220,34 @@ _phase_iptables() {
         fi
     fi
 
-    # Verify an SSH ACCEPT rule exists before making any changes. Adding
+    # ---------------------------------------------------------------------------
+    # SSH accessibility guard
+    #
+    # Verify SSH is reachable before touching any iptables rules. Adding
     # MASQUERADE or FORWARD rules while accidentally blocking SSH could lock
     # out the operator from the host.
+    #
+    # Three checks are attempted in order:
+    #   1. An explicit ACCEPT rule for the SSH port (dpt:, multiport, state)
+    #      — covers hosts where SSH is guarded by an iptables rule.
+    #   2. A blanket ACCEPT for all traffic (0.0.0.0/0) in the INPUT chain
+    #      — covers hosts with a default-open INPUT policy before a REJECT.
+    #   3. The INPUT chain's default policy is ACCEPT
+    #      — covers OCI and other cloud VMs where SSH access is enforced at
+    #        the VCN / security-group level; the local INPUT chain carries no
+    #        per-port rules at all.
+    # ---------------------------------------------------------------------------
     local _ssh_port="${SSH_PORT:-22}"
     local _ssh_ok=false
     if iptables -L INPUT -n 2>/dev/null | grep -qE "ACCEPT.*(tcp dpt:${_ssh_port}|state.*ESTABLISHED|multiport.*${_ssh_port})"; then
+        # Check 1: explicit per-port or stateful ACCEPT rule present.
         _ssh_ok=true
     elif iptables -L INPUT -n 2>/dev/null | grep -q "ACCEPT.*all.*0\.0\.0\.0"; then
-        # Default open INPUT (typical in OCI before REJECT rule) — SSH is accessible.
+        # Check 2: blanket ACCEPT for all traffic (typical OCI INPUT before REJECT).
+        _ssh_ok=true
+    elif iptables -L INPUT 2>/dev/null | awk 'NR==1 {print}' | grep -q "policy ACCEPT"; then
+        # Check 3: INPUT chain default policy is ACCEPT — SSH is accessible via
+        # network-level controls (e.g. OCI VCN security list, AWS security group).
         _ssh_ok=true
     fi
     if [[ "$_ssh_ok" != "true" ]]; then
