@@ -460,8 +460,8 @@ prepare_push_secret_placeholders() {
     _maybe_sudo chown root:"${pgid}" "$secrets_dir" || return 1
     changed=true
   fi
-  if [[ "$dir_mode" != "750" ]]; then
-    _maybe_sudo chmod 750 "$secrets_dir" || return 1
+  if [[ "$dir_mode" != "755" ]]; then
+    _maybe_sudo chmod 755 "$secrets_dir" || return 1
     changed=true
   fi
 
