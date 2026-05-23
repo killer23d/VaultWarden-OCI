@@ -746,6 +746,29 @@ _grk_sops_extract() {
     unset _val
 }
 
+# ---------------------------------------------------------------------------
+# _print_recovery_banner OUTPUT_FILE
+#
+# Write the CRITICAL SECURITY DOCUMENT banner to the recovery kit file using
+# printf + ANSI-C $'...' quoting. This guarantees the box-drawing character
+# (U+2550 ═) is always emitted as real UTF-8 bytes regardless of locale,
+# matching the bold-white-on-red style used by _print_secret_banner() in
+# auto_generate_secret_field().
+# ---------------------------------------------------------------------------
+_print_recovery_banner() {
+    local output_file="$1"
+    # U+2550 BOX DRAWINGS DOUBLE HORIZONTAL — emitted as a real UTF-8 byte
+    # via $'...' ANSI-C quoting so it is not locale-dependent.
+    local _dh=$'\u2550'
+    local border
+    border=$(printf '%0.s'"${_dh}" {1..72})
+    {
+        printf '\033[1;97;41m%s\033[0m\n' "$border"
+        printf '\033[1;97;41m  %-68s\033[0m\n' "🚨 CRITICAL SECURITY DOCUMENT 🚨"
+        printf '\033[1;97;41m%s\033[0m\n' "$border"
+    } >> "$output_file"
+}
+
 generate_recovery_kit() {
     local output_file="$1"
     local age_key="${SOPS_AGE_KEY_FILE:-secrets/keys/age-key.txt}"
@@ -817,13 +840,8 @@ generate_recovery_kit() {
         return 1
     fi
 
-    # Use a quoted delimiter (<< 'EOF') so that the shell does
-    # NOT expand any $ sequences inside the static body. Variables such as
-    # $caddy_hash contain bcrypt hashes of the form "admin $2y$12$..." where
-    # $2y would be silently dropped by shell expansion in an unquoted heredoc,
-    # producing a garbled hash that cannot be used for Caddy auth recovery.
-    # All dynamic values are injected after the static block with printf.
-    # The heredoc-interspersed structure prevents full { } >> grouping here.
+    # ASCII art header — plain ASCII only; no Unicode in heredoc to avoid
+    # encoding issues across locales and editors.
     # shellcheck disable=SC2129
     cat >> "$output_file" << 'EOF'
 ██████╗ ███████╗ ██████╗ ██████╗██╗   ██╗███████╗██████╗ ██╗   ██╗
@@ -840,10 +858,11 @@ generate_recovery_kit() {
 ██║  ██╗██║   ██║   
 ╚═╝  ╚═╝╚═╝   ╚═╝   
 
-══════════════════════════════════════════════════════════════════════════
-                        🚨 CRITICAL SECURITY DOCUMENT 🚨
-══════════════════════════════════════════════════════════════════════════
 EOF
+    # Banner: rendered via printf + $'\u2550' so the box-drawing char is
+    # always a real UTF-8 byte, never a literal \u2550 escape sequence.
+    _print_recovery_banner "$output_file"
+    printf '\n' >> "$output_file"
     printf 'Created: %s\n' "$date_val"      >> "$output_file"
     printf 'Server:  %s\n' "$hostname_val" >> "$output_file"
     printf 'Domain:  %s\n' "$domain"       >> "$output_file"
@@ -1157,3 +1176,5 @@ for k, v in data.items():
     if sv.startswith("PLACEHOLDER") or sv == "PLACEHOLDER_NOT_CONFIGURED":
         bad.append(k)
 
+PYEOF
+}
