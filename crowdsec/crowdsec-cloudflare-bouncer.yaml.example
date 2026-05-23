@@ -8,9 +8,10 @@ crowdsec_lapi_key: CHANGE_ME_BOUNCER_KEY
 cloudflare_config:
   accounts:
     - id: TOKEN_CF_ACCOUNT_ID
+      token: TOKEN_CROWDSEC_CF_FIREWALL_TOKEN
+      default_action: block
       zones:
         - zone_id: TOKEN_CF_ZONE_ID
-          token_file: TOKEN_CROWDSEC_CF_FIREWALL_TOKEN_FILE
           actions:
             - block
           device_types:
@@ -18,7 +19,6 @@ cloudflare_config:
             - mobile
             - tablet
   update_frequency: 10s
-  default_action: block
 
 daemon: true
 log_mode: file
