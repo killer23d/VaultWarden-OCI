@@ -410,6 +410,24 @@ if [[ -f "$_CF_BOUNCER_CONFIG_SRC" ]]; then
             | tee "$_CF_BOUNCER_CONFIG_DEST" >/dev/null
         chmod 600 "$_CF_BOUNCER_CONFIG_DEST"
         log_success "Cloudflare bouncer config written to ${_CF_BOUNCER_CONFIG_DEST} (mode 600)."
+
+        systemctl enable crowdsec-cloudflare-bouncer || true
+        systemctl start crowdsec-cloudflare-bouncer || true
+
+        _cf_bouncer_ready=false
+        for _i in {1..10}; do
+            if systemctl is-active --quiet crowdsec-cloudflare-bouncer; then
+                _cf_bouncer_ready=true
+                break
+            fi
+            sleep 1
+        done
+
+        if [[ "$_cf_bouncer_ready" == "true" ]]; then
+            log_success "crowdsec-cloudflare-bouncer is active."
+        else
+            log_warn "crowdsec-cloudflare-bouncer did not report active within 10s; continuing setup."
+        fi
     fi
 else
     log_warn "crowdsec-cloudflare-bouncer.yaml.example not found in ${PROJECT_ROOT}/crowdsec — skipping bouncer config write."

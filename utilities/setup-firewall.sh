@@ -436,8 +436,13 @@ print(n.get('name', '${net}_network'))
         if command -v netfilter-persistent >/dev/null 2>&1; then
             log_dry_run "Would run: netfilter-persistent save"
         else
-            log_warn "netfilter-persistent not installed — rules will be lost on reboot."
-            log_warn "Install with: apt-get install -y netfilter-persistent iptables-persistent"
+            if [[ "$PHASE" == "all" ]]; then
+                log_warn "netfilter-persistent not installed — rules will be lost on reboot."
+                log_warn "Install with: apt-get install -y netfilter-persistent iptables-persistent"
+            else
+                log_info "netfilter-persistent not installed — rules will be lost on reboot."
+                log_info "Install with: apt-get install -y netfilter-persistent iptables-persistent"
+            fi
         fi
         return 0
     fi
@@ -449,8 +454,13 @@ print(n.get('name', '${net}_network'))
         fi
         log_success "Persisted iptables rules with netfilter-persistent"
     else
-        log_warn "netfilter-persistent not installed — rules will be lost on reboot."
-        log_warn "Install with: apt-get install -y netfilter-persistent iptables-persistent"
+        if [[ "$PHASE" == "all" ]]; then
+            log_warn "netfilter-persistent not installed — rules will be lost on reboot."
+            log_warn "Install with: apt-get install -y netfilter-persistent iptables-persistent"
+        else
+            log_info "netfilter-persistent not installed — rules will be lost on reboot."
+            log_info "Install with: apt-get install -y netfilter-persistent iptables-persistent"
+        fi
     fi
 }
 

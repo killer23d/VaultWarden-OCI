@@ -658,7 +658,7 @@ _startup_pull_images() {
     return 0
   fi
 
-  docker compose pull
+  docker compose pull --quiet
   log_success "Images pulled successfully"
   return 0
 }
