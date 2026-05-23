@@ -84,6 +84,17 @@ _cs_set_env_var() {
     fi
 }
 
+# ── Helper: read a token from a flat secret file, reject placeholders ─────────
+_cs_read_secret_file() {
+    local path="$1"
+    [[ -f "$path" ]] || return 0
+    local val
+    val=$(cat "$path" 2>/dev/null | tr -d '[:space:]' || true)
+    if [[ -n "$val" && "$val" != CHANGE_ME* && "$val" != PLACEHOLDER* ]]; then
+        printf '%s' "$val"
+    fi
+}
+
 # ── Flags ────────────────────────────────────────────────────────────────────
 AUTO_MODE=false
 DRY_RUN=false
@@ -343,82 +354,72 @@ if [[ -f "$_CF_BOUNCER_CONFIG_SRC" ]]; then
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would write ${_CF_BOUNCER_CONFIG_DEST} from ${_CF_BOUNCER_CONFIG_SRC}"
     else
-        # ── Resolve Cloudflare firewall token ─────────────────────────────────
-        # Priority order (highest to lowest):
-        #   1. Already set in environment / loaded from .env
-        #   2. SOPS-encrypted secrets/secrets.yaml
-        #   3. Flat docker secret file (.docker_secrets/crowdsec_cf_firewall_token)
-        #   4. Interactive prompt (skipped in --auto mode)
         _cf_zone_id="${CLOUDFLARE_ZONE_ID:-}"
         _cf_account_id="${CF_ACCOUNT_ID:-}"
         _CF_FIREWALL_TOKEN=""
 
         if [[ "$AUTO_MODE" == "true" ]]; then
+            # ───────────────────────────────────────────────────────────────
+            # AUTO MODE: use env values or write placeholders; never prompt
+            # ───────────────────────────────────────────────────────────────
             _cf_zone_id="${_cf_zone_id:-CHANGE_ME_CF_ZONE_ID}"
             _cf_account_id="${_cf_account_id:-CHANGE_ME_CF_ACCOUNT_ID}"
             _CF_FIREWALL_TOKEN="CHANGE_ME_CROWDSEC_CF_FIREWALL_TOKEN"
             log_warn "Auto mode: Cloudflare values left as placeholders where missing."
             log_warn "Set later in .env / sudo utilities/setup-secrets.sh rotate crowdsec_cf_firewall_token"
         else
-            # ── 1. Check env / .env ───────────────────────────────────────────
+            # ───────────────────────────────────────────────────────────────
+            # INTERACTIVE MODE: resolve token from secrets before prompting
+            # Priority order (highest → lowest):
+            #   1. CROWDSEC_CF_FIREWALL_TOKEN set in environment / .env
+            #   2. PROJECT_STATE_DIR docker secret file  (written by setup-secrets.sh)
+            #   3. PROJECT_ROOT docker secret file       (legacy / dev path)
+            #   4. Interactive prompt
+            # ───────────────────────────────────────────────────────────────
+
+            # 1. Env / .env
             _env_token="${CROWDSEC_CF_FIREWALL_TOKEN:-}"
-            if [[ -n "$_env_token" ]] && \
-               [[ "$_env_token" != CHANGE_ME* ]] && \
-               [[ "$_env_token" != PLACEHOLDER* ]]; then
+            if [[ -n "$_env_token" && "$_env_token" != CHANGE_ME* && "$_env_token" != PLACEHOLDER* ]]; then
                 _CF_FIREWALL_TOKEN="$_env_token"
                 log_success "crowdsec_cf_firewall_token found in environment / .env — skipping prompt."
             fi
 
-            # ── 2. SOPS-encrypted secrets.yaml ───────────────────────────────
-            if [[ -z "$_CF_FIREWALL_TOKEN" ]] && \
-               [[ -f "${PROJECT_ROOT}/secrets/secrets.yaml" ]] && \
-               [[ -f "${SOPS_AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}" ]]; then
-                _CF_FIREWALL_TOKEN=$(
-                    SOPS_AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}" \
-                    sops -d --extract '["crowdsec_cf_firewall_token"]' \
-                         "${PROJECT_ROOT}/secrets/secrets.yaml" 2>/dev/null || true
-                )
-                if [[ "$_CF_FIREWALL_TOKEN" == CHANGE_ME* || \
-                      "$_CF_FIREWALL_TOKEN" == PLACEHOLDER* ]]; then
-                    _CF_FIREWALL_TOKEN=""
-                fi
-                if [[ -n "$_CF_FIREWALL_TOKEN" ]]; then
-                    log_success "crowdsec_cf_firewall_token found in SOPS secrets — skipping prompt."
-                fi
-            fi
-
-            # ── 3. Flat docker secret file ────────────────────────────────────
-            _docker_secret="${PROJECT_ROOT}/secrets/.docker_secrets/crowdsec_cf_firewall_token"
-            if [[ -z "$_CF_FIREWALL_TOKEN" ]] && [[ -f "$_docker_secret" ]]; then
-                _CF_FIREWALL_TOKEN=$(cat "$_docker_secret" 2>/dev/null || true)
-                if [[ "$_CF_FIREWALL_TOKEN" == CHANGE_ME* || \
-                      "$_CF_FIREWALL_TOKEN" == PLACEHOLDER* ]]; then
-                    _CF_FIREWALL_TOKEN=""
-                fi
-                if [[ -n "$_CF_FIREWALL_TOKEN" ]]; then
-                    log_success "crowdsec_cf_firewall_token found in docker secrets — skipping prompt."
-                fi
-            fi
-
-            # ── Prompt for Zone ID if not set ─────────────────────────────────
-            log_info ""
-            log_info "══════════════════════════════════════════════════════════"
-            log_info " Cloudflare values required by CrowdSec bouncer"
-            log_info "══════════════════════════════════════════════════════════"
-            log_info " Required permissions: Zone:Firewall Services:Edit"
-            log_info " Create at: https://dash.cloudflare.com/profile/api-tokens"
-            log_info "══════════════════════════════════════════════════════════"
-
-            while [[ -z "$_cf_zone_id" ]]; do
-                read -r -p "Enter CLOUDFLARE_ZONE_ID: " _cf_zone_id
-                [[ -z "$_cf_zone_id" ]] && log_warn "CLOUDFLARE_ZONE_ID cannot be empty."
-            done
-            if [[ -z "$_cf_account_id" ]]; then
-                read -r -p "Enter CF_ACCOUNT_ID (optional, press Enter to skip): " _cf_account_id
-            fi
-
-            # ── 4. Interactive prompt (only if token not resolved above) ──────
+            # 2. PROJECT_STATE_DIR docker secret (canonical path written by setup-secrets.sh)
             if [[ -z "$_CF_FIREWALL_TOKEN" ]]; then
+                _state_secret="${_project_state_dir}/secrets/.docker_secrets/crowdsec_cf_firewall_token"
+                _CF_FIREWALL_TOKEN="$(_cs_read_secret_file "$_state_secret")"
+                if [[ -n "$_CF_FIREWALL_TOKEN" ]]; then
+                    log_success "crowdsec_cf_firewall_token found at ${_state_secret} — skipping prompt."
+                fi
+            fi
+
+            # 3. PROJECT_ROOT docker secret (legacy / repo-local path)
+            if [[ -z "$_CF_FIREWALL_TOKEN" ]]; then
+                _repo_secret="${PROJECT_ROOT}/secrets/.docker_secrets/crowdsec_cf_firewall_token"
+                _CF_FIREWALL_TOKEN="$(_cs_read_secret_file "$_repo_secret")"
+                if [[ -n "$_CF_FIREWALL_TOKEN" ]]; then
+                    log_success "crowdsec_cf_firewall_token found at ${_repo_secret} — skipping prompt."
+                fi
+            fi
+
+            # 4. Interactive prompt — only when token was NOT resolved above
+            if [[ -z "$_CF_FIREWALL_TOKEN" ]]; then
+                log_info ""
+                log_info "══════════════════════════════════════════════════════════"
+                log_info " Cloudflare values required by CrowdSec bouncer"
+                log_info "══════════════════════════════════════════════════════════"
+                log_info " Required permissions: Zone:Firewall Services:Edit"
+                log_info " Create at: https://dash.cloudflare.com/profile/api-tokens"
+                log_info "══════════════════════════════════════════════════════════"
+
+                while [[ -z "$_cf_zone_id" ]]; do
+                    read -r -p "Enter CLOUDFLARE_ZONE_ID: " _cf_zone_id
+                    [[ -z "$_cf_zone_id" ]] && log_warn "CLOUDFLARE_ZONE_ID cannot be empty."
+                done
+                if [[ -z "$_cf_account_id" ]]; then
+                    read -r -p "Enter CF_ACCOUNT_ID (optional, press Enter to skip): " _cf_account_id
+                fi
+
                 while [[ -z "$_CF_FIREWALL_TOKEN" ]]; do
                     read -r -s -p "Enter Cloudflare Firewall API token (input hidden): " _CF_FIREWALL_TOKEN
                     echo ""
