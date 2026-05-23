@@ -229,6 +229,22 @@ load_environment() {
   log_info "Loading environment configuration..."
 
   if [[ -f ".env" ]]; then
+    local real_user real_group env_owner
+    real_user=$(get_real_user)
+    real_group=$(id -gn "${real_user}" 2>/dev/null || echo "${real_user}")
+    env_owner=$(stat -c '%U' ".env" 2>/dev/null || echo "unknown")
+
+    # Auto-remediate root-owned .env when startup is invoked by a non-root user
+    # (e.g. via sudo). This keeps non-root tooling functional.
+    if [[ "$env_owner" == "root" && "$real_user" != "root" ]]; then
+      if _maybe_sudo chown "${real_user}:${real_group}" ".env" \
+        && _maybe_sudo chmod 600 ".env"; then
+        log_success ".env ownership corrected to ${real_user}:${real_group} (mode 600)"
+      else
+        log_warn "Could not auto-correct .env ownership to ${real_user}:${real_group}"
+      fi
+    fi
+
     # Fail early when .env is unreadable so non-root tooling does not break later.
     if [[ ! -r ".env" ]]; then
       log_error ".env is not readable by the current user ($(id -un))."
@@ -240,21 +256,6 @@ load_environment() {
     source ".env"
     set +a
     log_success "Environment loaded from .env"
-
-    # Warn if .env is root-owned while startup is running as a non-root user.
-    # startup.sh runs via `sudo ./startup.sh` so it CAN read root:root 600 .env,
-    # but non-root tools (utilities/secrets-edit.sh, etc.) will get Permission denied.
-    local env_owner
-    env_owner=$(stat -c '%U' ".env" 2>/dev/null || echo "unknown")
-    local real_user
-    real_user=$(get_real_user)
-    if [[ "$env_owner" == "root" && "$real_user" != "root" ]]; then
-      local real_group
-      real_group=$(id -gn "${real_user}" 2>/dev/null || echo "${real_user}")
-      log_warn ".env is owned by root but startup is running as ${real_user}."
-      log_warn "Non-root tools (utilities/secrets-edit.sh, etc.) cannot read .env."
-      log_warn "Fix: sudo chown ${real_user}:${real_group} .env && sudo chmod 600 .env"
-    fi
   else
     log_error ".env file not found!"
     log_info "Copy .env.example to .env and configure it first"
@@ -339,6 +340,53 @@ prepare_directories() {
 }
 
 # Prepare log directories with correct ownership
+ensure_caddy_log_permissions() {
+  local caddy_log_dir="$1"
+  local access_log="${caddy_log_dir}/access.log"
+  local security_log="${caddy_log_dir}/security.log"
+  local changed=false
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    log_info "[DRY RUN] Would enforce root:root 755/644 permissions for ${caddy_log_dir}"
+    return 0
+  fi
+
+  _maybe_sudo mkdir -p "$caddy_log_dir" || return 1
+  _maybe_sudo touch "$access_log" "$security_log" || return 1
+
+  local dir_owner dir_mode
+  dir_owner=$(stat -c '%u:%g' "$caddy_log_dir" 2>/dev/null || echo "")
+  dir_mode=$(stat -c '%a' "$caddy_log_dir" 2>/dev/null || echo "")
+  if [[ "$dir_owner" != "0:0" ]]; then
+    _maybe_sudo chown root:root "$caddy_log_dir" || return 1
+    changed=true
+  fi
+  if [[ "$dir_mode" != "755" ]]; then
+    _maybe_sudo chmod 755 "$caddy_log_dir" || return 1
+    changed=true
+  fi
+
+  local log_file owner mode
+  for log_file in "$access_log" "$security_log"; do
+    owner=$(stat -c '%u:%g' "$log_file" 2>/dev/null || echo "")
+    mode=$(stat -c '%a' "$log_file" 2>/dev/null || echo "")
+    if [[ "$owner" != "0:0" ]]; then
+      _maybe_sudo chown root:root "$log_file" || return 1
+      changed=true
+    fi
+    if [[ "$mode" != "644" ]]; then
+      _maybe_sudo chmod 644 "$log_file" || return 1
+      changed=true
+    fi
+  done
+
+  if [[ "$changed" == "true" ]]; then
+    log_success "Caddy log permissions remediated (${caddy_log_dir})"
+  else
+    log_success "Caddy log permissions already correct (${caddy_log_dir})"
+  fi
+}
+
 prepare_log_directories() {
   log_info "Ensuring base state directory exists..."
 
@@ -367,6 +415,11 @@ prepare_log_directories() {
     log_success "Log subdirectories created with correct permissions"
   fi
 
+  if ! ensure_caddy_log_permissions "${project_state_dir}/logs/caddy"; then
+    log_error "Failed to enforce Caddy log directory and file permissions"
+    return 1
+  fi
+
   # Create backup directory
   local backup_dir
   backup_dir="$(get_config_value "BACKUP_DIR" "${project_state_dir}/backups")"
@@ -384,6 +437,59 @@ prepare_log_directories() {
 
   log_success "State directories prepared successfully"
   return 0
+}
+
+prepare_push_secret_placeholders() {
+  local secrets_dir="$DOCKER_SECRETS_DIR"
+  local puid pgid
+  puid=$(get_config_value "PUID" "1001")
+  pgid=$(get_config_value "PGID" "1001")
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    log_info "[DRY RUN] Would enforce push secret placeholder permissions in ${secrets_dir}"
+    return 0
+  fi
+
+  local changed=false
+  _maybe_sudo mkdir -p "$secrets_dir" || return 1
+
+  local dir_owner dir_mode
+  dir_owner=$(stat -c '%u:%g' "$secrets_dir" 2>/dev/null || echo "")
+  dir_mode=$(stat -c '%a' "$secrets_dir" 2>/dev/null || echo "")
+  if [[ "$dir_owner" != "0:${pgid}" ]]; then
+    _maybe_sudo chown root:"${pgid}" "$secrets_dir" || return 1
+    changed=true
+  fi
+  if [[ "$dir_mode" != "750" ]]; then
+    _maybe_sudo chmod 750 "$secrets_dir" || return 1
+    changed=true
+  fi
+
+  local key path owner mode
+  for key in push_installation_id push_installation_key; do
+    path="${secrets_dir}/${key}"
+    if [[ ! -f "$path" ]]; then
+      _maybe_sudo touch "$path" || return 1
+      changed=true
+    fi
+
+    owner=$(stat -c '%u:%g' "$path" 2>/dev/null || echo "")
+    mode=$(stat -c '%a' "$path" 2>/dev/null || echo "")
+    if [[ "$owner" != "${puid}:${pgid}" ]]; then
+      _maybe_sudo chown "${puid}:${pgid}" "$path" || return 1
+      changed=true
+    fi
+    if [[ "$mode" != "444" ]]; then
+      _maybe_sudo chmod 444 "$path" || return 1
+      changed=true
+    fi
+  done
+
+  if [[ "$changed" == "true" ]]; then
+    log_success "Push secret placeholders remediated for VaultWarden readability"
+  else
+    log_success "Push secret placeholders already readable for VaultWarden"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -814,6 +920,7 @@ main() {
   prepare_directories || exit 1
   prepare_log_directories || exit 1
   prepare_docker_secrets || exit 1
+  prepare_push_secret_placeholders || exit 1
   check_email_config_consistency || true   # warn only, never block startup
   warn_plaintext_secret_overrides || true
   cleanup_orphaned_resources || true
