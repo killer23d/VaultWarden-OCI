@@ -322,6 +322,8 @@ services:
       - POSTFIX_myhostname=${POSTFIX_MYHOSTNAME:-postfix}
       - POSTFIX_smtp_tls_security_level=${POSTFIX_SMTP_TLS_SECURITY_LEVEL:-encrypt}
       - POSTFIX_message_size_limit=${POSTFIX_MESSAGE_SIZE_LIMIT:-10240000}
+      - POSTFIX_alias_maps=
+      - POSTFIX_alias_database=
 
     secrets:
       - smtp_password
