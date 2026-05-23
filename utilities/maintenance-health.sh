@@ -462,19 +462,41 @@ _check_crowdsec() {
     else
         _warn "crowdsec:lapi" "CrowdSec LAPI not responding (debug: sudo journalctl -u crowdsec -n 50 --no-pager)"
     fi
-    # Optional component: only warn when the unit exists but is inactive.
-    if systemctl list-unit-files crowdsec-cloudflare-bouncer.service \
-           2>/dev/null | grep -q 'crowdsec-cloudflare-bouncer.service'; then
-        if systemctl is-active crowdsec-cloudflare-bouncer >/dev/null 2>&1; then
-            _pass "crowdsec:bouncer" "CrowdSec Cloudflare bouncer is active"
-        else
-            _warn "crowdsec:bouncer" \
-                "CrowdSec Cloudflare bouncer is not running (start: sudo systemctl start crowdsec-cloudflare-bouncer)"
-        fi
-    else
-        _pass "crowdsec:bouncer" \
-            "CrowdSec Cloudflare bouncer not installed (optional — skipping)"
+
+    # ---------------------------------------------------------------------------
+    # Bouncer check: prefer crowdsec-firewall-bouncer (standard on VPS/OCI),
+    # then crowdsec-cloudflare-bouncer, warn if a unit exists but is not running.
+    #
+    # Priority:
+    #   1. crowdsec-firewall-bouncer active    → [pass]
+    #   2. crowdsec-cloudflare-bouncer active  → [pass]
+    #   3. Either unit installed but stopped   → [warn]  (real problem — surface it)
+    #   4. Neither unit installed              → [pass] with optional install note
+    # ---------------------------------------------------------------------------
+    local _bouncer_active=false
+    local _bouncer_name=""
+
+    if systemctl is-active --quiet crowdsec-firewall-bouncer 2>/dev/null; then
+        _bouncer_active=true
+        _bouncer_name="crowdsec-firewall-bouncer"
+    elif systemctl is-active --quiet crowdsec-cloudflare-bouncer 2>/dev/null; then
+        _bouncer_active=true
+        _bouncer_name="crowdsec-cloudflare-bouncer"
     fi
+
+    if [[ "$_bouncer_active" == "true" ]]; then
+        _pass "crowdsec:bouncer" "CrowdSec ${_bouncer_name} is active"
+    elif systemctl list-unit-files 2>/dev/null \
+            | grep -qE 'crowdsec-(firewall|cloudflare)-bouncer\.service'; then
+        # A bouncer unit is installed but not running — flag it.
+        _warn "crowdsec:bouncer" \
+            "CrowdSec bouncer is installed but not active — check: sudo systemctl status crowdsec-firewall-bouncer"
+    else
+        # No bouncer installed at all — optional component, keep as pass.
+        _pass "crowdsec:bouncer" \
+            "No CrowdSec bouncer installed (optional — install crowdsec-firewall-bouncer or crowdsec-cloudflare-bouncer)"
+    fi
+
     if $COMPREHENSIVE; then
         local decision_count
         decision_count=$(sudo cscli decisions list -o raw 2>/dev/null | tail -n +2 | wc -l || echo 0)
