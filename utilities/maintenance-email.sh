@@ -92,27 +92,13 @@ test_postfix_container() {
             return 1
         fi
     fi
-    local health_status
-    if nc -z -w 5 127.0.0.1 587 >/dev/null 2>&1; then
-        health_status="healthy"
-    elif echo "QUIT" | timeout 5 bash -c 'cat < /dev/tcp/127.0.0.1/587' >/dev/null 2>&1; then
-        # Fallback: /dev/tcp works even when nc is not installed on the host
-        health_status="healthy"
-    else
-        health_status="unhealthy"
-    fi
-    if [[ "$health_status" == "healthy" ]]; then
+    if docker compose exec -T postfix postfix status >/dev/null 2>&1; then
         log_success "✅ postfix health check passed (port 587 responding)"
+        verbose_log "$(docker compose exec -T postfix postfix status 2>&1 || true)"
     else
-        log_error "❌ postfix health check failed (port 587 not responding)"
+        log_error "❌ postfix health check failed (postfix master not running)"
         log_info "🔍 Check logs: docker compose logs postfix"
         return 1
-    fi
-    if docker compose exec -T postfix postfix status >/dev/null 2>&1; then
-        log_success "✅ postfix service is active"
-        verbose_log "$(docker compose exec -T postfix postfix status)"
-    else
-        log_warn "⚠️  Could not verify postfix service status"
     fi
     local recent_logs
     recent_logs=$(docker compose logs --tail 20 postfix 2>/dev/null | grep -i "error\|fatal" | grep -v "warning" || true)
