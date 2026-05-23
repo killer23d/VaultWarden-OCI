@@ -10,7 +10,7 @@ cloudflare_config:
     - id: TOKEN_CF_ACCOUNT_ID
       zones:
         - zone_id: TOKEN_CF_ZONE_ID
-          token: TOKEN_CROWDSEC_CF_FIREWALL_TOKEN
+          token_file: TOKEN_CROWDSEC_CF_FIREWALL_TOKEN_FILE
           actions:
             - block
           device_types:

@@ -1383,6 +1383,21 @@ PYEOF
         return 1
     fi
 
+    # crowdsec_cf_firewall_token is intentionally not part of secrets.yaml.
+    # Canonical location is a flat file at:
+    #   ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/secrets/.docker_secrets/crowdsec_cf_firewall_token
+    # Mirror it into the active docker secret directory when present.
+    local _project_state_dir _cf_flat
+    _project_state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
+    _cf_flat="${_project_state_dir}/secrets/.docker_secrets/crowdsec_cf_firewall_token"
+    if [[ -f "$_cf_flat" ]]; then
+        local _cf_value
+        _cf_value=$(tr -d '[:space:]' < "$_cf_flat" 2>/dev/null || true)
+        if [[ -n "$_cf_value" && "$_cf_value" != CHANGE_ME* && "$_cf_value" != PLACEHOLDER* ]]; then
+            write_secret_file "${docker_dir}/crowdsec_cf_firewall_token" "$_cf_value" || return 1
+        fi
+    fi
+
     if [[ $_failed -gt 0 ]]; then
         log_error "export_docker_secrets: $_failed key(s) failed to export"
         return 1
