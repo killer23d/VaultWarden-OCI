@@ -177,6 +177,7 @@ log_info "=== PHASE 2: Cloudflare bouncer installation ==="
 
 _CF_BOUNCER_BIN="/usr/local/bin/crowdsec-cloudflare-bouncer"
 _CF_BOUNCER_NEEDS_INSTALL=false
+_CF_BOUNCER_FROM_SOURCE=false
 
 if [[ "$DRY_RUN" == "true" ]]; then
     log_info "[DRY RUN] Would install crowdsecurity/cloudflare-bouncer via cscli"
@@ -216,40 +217,53 @@ else
             if [[ -n "$_release_json" ]]; then
                 _download_url="$(printf '%s' "$_release_json" | \
                     grep -oP '"browser_download_url":\s*"\K[^"]+' | \
-                    grep "linux_${_arch}" | \
+                    grep "linux-${_arch}" | \
                     grep -v '\.sha256' | \
                     head -1 || true)"
                 _sha256_url="$(printf '%s' "$_release_json" | \
                     grep -oP '"browser_download_url":\s*"\K[^"]+' | \
-                    grep "linux_${_arch}\.sha256" | \
+                    grep "linux-${_arch}\.sha256" | \
                     head -1 || true)"
 
                 if [[ -n "$_download_url" ]]; then
-                    _tmpbin="$(mktemp -p /tmp cs-cf-bouncer.XXXXXX)"
+                    _tmptar="$(mktemp -p /tmp cs-cf-bouncer.XXXXXX.tgz)"
+                    _tmpdir="$(mktemp -d -p /tmp cs-cf-bouncer.XXXXXX)"
                     log_info "Downloading: $_download_url"
-                    if curl -fsSL "$_download_url" -o "$_tmpbin"; then
+                    if curl -fsSL "$_download_url" -o "$_tmptar"; then
+                        _sha_ok=true
                         if [[ -n "$_sha256_url" ]]; then
                             _expected_sha="$(curl -fsSL "$_sha256_url" 2>/dev/null | awk '{print $1}' || true)"
-                            _actual_sha="$(sha256sum "$_tmpbin" | awk '{print $1}')"
+                            _actual_sha="$(sha256sum "$_tmptar" | awk '{print $1}')"
                             if [[ -n "$_expected_sha" && "$_actual_sha" != "$_expected_sha" ]]; then
-                                log_error "SHA256 mismatch for cs-cloudflare-bouncer binary — aborting binary install."
-                                rm -f "$_tmpbin"
-                            else
-                                install -m 755 -o root -g root "$_tmpbin" "$_CF_BOUNCER_BIN"
-                                rm -f "$_tmpbin"
-                                log_success "Installed cs-cloudflare-bouncer binary to ${_CF_BOUNCER_BIN}"
+                                log_error "SHA256 mismatch for cs-cloudflare-bouncer tarball — aborting install."
+                                _sha_ok=false
                             fi
-                        else
-                            install -m 755 -o root -g root "$_tmpbin" "$_CF_BOUNCER_BIN"
-                            rm -f "$_tmpbin"
-                            log_success "Installed cs-cloudflare-bouncer binary to ${_CF_BOUNCER_BIN} (SHA256 not verified)"
+                        fi
+
+                        if [[ "$_sha_ok" == "true" ]]; then
+                            if tar xzf "$_tmptar" -C "$_tmpdir"; then
+                                _install_sh="$(find "$_tmpdir" -type f -name install.sh | head -1 || true)"
+                                if [[ -n "$_install_sh" ]]; then
+                                    log_info "Running bundled installer: $_install_sh"
+                                    if bash "$_install_sh"; then
+                                        log_success "Installed cs-cloudflare-bouncer via bundled install.sh"
+                                    else
+                                        log_warn "Bundled install.sh failed for cs-cloudflare-bouncer tarball."
+                                    fi
+                                else
+                                    log_warn "install.sh not found in cs-cloudflare-bouncer tarball."
+                                fi
+                            else
+                                log_warn "Failed to extract cs-cloudflare-bouncer tarball."
+                            fi
                         fi
                     else
-                        rm -f "$_tmpbin"
-                        log_warn "Failed to download cs-cloudflare-bouncer binary — Cloudflare bouncer service will need manual installation."
+                        log_warn "Failed to download cs-cloudflare-bouncer tarball — Cloudflare bouncer service will need manual installation."
                     fi
+                    rm -f "$_tmptar"
+                    rm -rf "$_tmpdir"
                 else
-                    log_warn "Could not find a linux_${_arch} asset in the GitHub release — attempting source build fallback."
+                    log_warn "Could not find a linux-${_arch} asset in the GitHub release — attempting source build fallback."
                     if [[ "$_arch" == "arm64" ]]; then
                         if command -v go >/dev/null 2>&1; then
                             _tmpgobin="$(mktemp -d -p /tmp cs-cf-go.XXXXXX)"
@@ -257,6 +271,7 @@ else
                                 if [[ -x "$_tmpgobin/crowdsec-cloudflare-bouncer" ]]; then
                                     install -m 755 -o root -g root "$_tmpgobin/crowdsec-cloudflare-bouncer" "$_CF_BOUNCER_BIN"
                                     log_success "Built and installed crowdsec-cloudflare-bouncer from source for arm64."
+                                    _CF_BOUNCER_FROM_SOURCE=true
                                 fi
                             else
                                 log_warn "go install fallback failed for crowdsec-cloudflare-bouncer."
@@ -480,7 +495,7 @@ if [[ -f "$_CF_BOUNCER_CONFIG_SRC" ]]; then
         # Only attempt to start the bouncer service if the unit file exists.
         # The binary (and its service unit) may be absent on architectures where
         # no pre-built release is available (e.g. linux_arm64 on some releases).
-        if [[ -x "$_CF_BOUNCER_BIN" ]] && ! _cf_bouncer_service_exists; then
+        if [[ -x "$_CF_BOUNCER_BIN" ]] && [[ "$_CF_BOUNCER_FROM_SOURCE" == "true" ]] && ! _cf_bouncer_service_exists; then
             cat >/etc/systemd/system/crowdsec-cloudflare-bouncer.service <<EOF
 [Unit]
 Description=CrowdSec Cloudflare Bouncer
