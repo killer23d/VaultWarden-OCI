@@ -124,6 +124,12 @@ _cs_run() {
     fi
 }
 
+# ── Helper: true if the crowdsec-cloudflare-bouncer service unit exists ───────
+_cf_bouncer_service_exists() {
+    systemctl list-unit-files crowdsec-cloudflare-bouncer.service 2>/dev/null \
+        | grep -q 'crowdsec-cloudflare-bouncer.service'
+}
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # PHASE 1 — Install CrowdSec base + iptables bouncer
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -337,10 +343,16 @@ if [[ -f "$_CF_BOUNCER_CONFIG_SRC" ]]; then
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would write ${_CF_BOUNCER_CONFIG_DEST} from ${_CF_BOUNCER_CONFIG_SRC}"
     else
-        # ── Prompt for required Cloudflare values ─────────────────────────────
+        # ── Resolve Cloudflare firewall token ─────────────────────────────────
+        # Priority order (highest to lowest):
+        #   1. Already set in environment / loaded from .env
+        #   2. SOPS-encrypted secrets/secrets.yaml
+        #   3. Flat docker secret file (.docker_secrets/crowdsec_cf_firewall_token)
+        #   4. Interactive prompt (skipped in --auto mode)
         _cf_zone_id="${CLOUDFLARE_ZONE_ID:-}"
         _cf_account_id="${CF_ACCOUNT_ID:-}"
         _CF_FIREWALL_TOKEN=""
+
         if [[ "$AUTO_MODE" == "true" ]]; then
             _cf_zone_id="${_cf_zone_id:-CHANGE_ME_CF_ZONE_ID}"
             _cf_account_id="${_cf_account_id:-CHANGE_ME_CF_ACCOUNT_ID}"
@@ -348,23 +360,18 @@ if [[ -f "$_CF_BOUNCER_CONFIG_SRC" ]]; then
             log_warn "Auto mode: Cloudflare values left as placeholders where missing."
             log_warn "Set later in .env / sudo utilities/setup-secrets.sh rotate crowdsec_cf_firewall_token"
         else
-            log_info ""
-            log_info "══════════════════════════════════════════════════════════"
-            log_info " Cloudflare values required by CrowdSec bouncer"
-            log_info "══════════════════════════════════════════════════════════"
-            log_info " Required permissions: Zone:Firewall Services:Edit"
-            log_info " Create at: https://dash.cloudflare.com/profile/api-tokens"
-            log_info "══════════════════════════════════════════════════════════"
-            while [[ -z "$_cf_zone_id" ]]; do
-                read -r -p "Enter CLOUDFLARE_ZONE_ID: " _cf_zone_id
-                [[ -z "$_cf_zone_id" ]] && log_warn "CLOUDFLARE_ZONE_ID cannot be empty."
-            done
-            if [[ -z "$_cf_account_id" ]]; then
-                read -r -p "Enter CF_ACCOUNT_ID (optional, press Enter to skip): " _cf_account_id
+            # ── 1. Check env / .env ───────────────────────────────────────────
+            _env_token="${CROWDSEC_CF_FIREWALL_TOKEN:-}"
+            if [[ -n "$_env_token" ]] && \
+               [[ "$_env_token" != CHANGE_ME* ]] && \
+               [[ "$_env_token" != PLACEHOLDER* ]]; then
+                _CF_FIREWALL_TOKEN="$_env_token"
+                log_success "crowdsec_cf_firewall_token found in environment / .env — skipping prompt."
             fi
-            # Change 5: Try to read the firewall token from SOPS-encrypted secrets
-            # or the docker secrets file before prompting the operator.
-            if [[ -f "${PROJECT_ROOT}/secrets/secrets.yaml" ]] && \
+
+            # ── 2. SOPS-encrypted secrets.yaml ───────────────────────────────
+            if [[ -z "$_CF_FIREWALL_TOKEN" ]] && \
+               [[ -f "${PROJECT_ROOT}/secrets/secrets.yaml" ]] && \
                [[ -f "${SOPS_AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}" ]]; then
                 _CF_FIREWALL_TOKEN=$(
                     SOPS_AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}" \
@@ -375,7 +382,12 @@ if [[ -f "$_CF_BOUNCER_CONFIG_SRC" ]]; then
                       "$_CF_FIREWALL_TOKEN" == PLACEHOLDER* ]]; then
                     _CF_FIREWALL_TOKEN=""
                 fi
+                if [[ -n "$_CF_FIREWALL_TOKEN" ]]; then
+                    log_success "crowdsec_cf_firewall_token found in SOPS secrets — skipping prompt."
+                fi
             fi
+
+            # ── 3. Flat docker secret file ────────────────────────────────────
             _docker_secret="${PROJECT_ROOT}/secrets/.docker_secrets/crowdsec_cf_firewall_token"
             if [[ -z "$_CF_FIREWALL_TOKEN" ]] && [[ -f "$_docker_secret" ]]; then
                 _CF_FIREWALL_TOKEN=$(cat "$_docker_secret" 2>/dev/null || true)
@@ -383,10 +395,30 @@ if [[ -f "$_CF_BOUNCER_CONFIG_SRC" ]]; then
                       "$_CF_FIREWALL_TOKEN" == PLACEHOLDER* ]]; then
                     _CF_FIREWALL_TOKEN=""
                 fi
+                if [[ -n "$_CF_FIREWALL_TOKEN" ]]; then
+                    log_success "crowdsec_cf_firewall_token found in docker secrets — skipping prompt."
+                fi
             fi
-            if [[ -n "$_CF_FIREWALL_TOKEN" ]]; then
-                log_success "crowdsec_cf_firewall_token found in secrets — skipping prompt."
-            else
+
+            # ── Prompt for Zone ID if not set ─────────────────────────────────
+            log_info ""
+            log_info "══════════════════════════════════════════════════════════"
+            log_info " Cloudflare values required by CrowdSec bouncer"
+            log_info "══════════════════════════════════════════════════════════"
+            log_info " Required permissions: Zone:Firewall Services:Edit"
+            log_info " Create at: https://dash.cloudflare.com/profile/api-tokens"
+            log_info "══════════════════════════════════════════════════════════"
+
+            while [[ -z "$_cf_zone_id" ]]; do
+                read -r -p "Enter CLOUDFLARE_ZONE_ID: " _cf_zone_id
+                [[ -z "$_cf_zone_id" ]] && log_warn "CLOUDFLARE_ZONE_ID cannot be empty."
+            done
+            if [[ -z "$_cf_account_id" ]]; then
+                read -r -p "Enter CF_ACCOUNT_ID (optional, press Enter to skip): " _cf_account_id
+            fi
+
+            # ── 4. Interactive prompt (only if token not resolved above) ──────
+            if [[ -z "$_CF_FIREWALL_TOKEN" ]]; then
                 while [[ -z "$_CF_FIREWALL_TOKEN" ]]; do
                     read -r -s -p "Enter Cloudflare Firewall API token (input hidden): " _CF_FIREWALL_TOKEN
                     echo ""
@@ -396,6 +428,7 @@ if [[ -f "$_CF_BOUNCER_CONFIG_SRC" ]]; then
                 done
                 log_success "Cloudflare firewall token accepted."
             fi
+
             _cs_set_env_var "CLOUDFLARE_ZONE_ID" "$_cf_zone_id"
             [[ -n "$_cf_account_id" ]] && _cs_set_env_var "CF_ACCOUNT_ID" "$_cf_account_id"
         fi
@@ -411,22 +444,30 @@ if [[ -f "$_CF_BOUNCER_CONFIG_SRC" ]]; then
         chmod 600 "$_CF_BOUNCER_CONFIG_DEST"
         log_success "Cloudflare bouncer config written to ${_CF_BOUNCER_CONFIG_DEST} (mode 600)."
 
-        systemctl enable crowdsec-cloudflare-bouncer || true
-        systemctl start crowdsec-cloudflare-bouncer || true
+        # Only attempt to start the bouncer service if the unit file exists.
+        # The binary (and its service unit) may be absent on architectures where
+        # no pre-built release is available (e.g. linux_arm64 on some releases).
+        if _cf_bouncer_service_exists; then
+            systemctl enable crowdsec-cloudflare-bouncer || true
+            systemctl start crowdsec-cloudflare-bouncer || true
 
-        _cf_bouncer_ready=false
-        for _i in {1..10}; do
-            if systemctl is-active --quiet crowdsec-cloudflare-bouncer; then
-                _cf_bouncer_ready=true
-                break
+            _cf_bouncer_ready=false
+            for _i in {1..10}; do
+                if systemctl is-active --quiet crowdsec-cloudflare-bouncer; then
+                    _cf_bouncer_ready=true
+                    break
+                fi
+                sleep 1
+            done
+
+            if [[ "$_cf_bouncer_ready" == "true" ]]; then
+                log_success "crowdsec-cloudflare-bouncer is active."
+            else
+                log_warn "crowdsec-cloudflare-bouncer did not report active within 10s; continuing setup."
             fi
-            sleep 1
-        done
-
-        if [[ "$_cf_bouncer_ready" == "true" ]]; then
-            log_success "crowdsec-cloudflare-bouncer is active."
         else
-            log_warn "crowdsec-cloudflare-bouncer did not report active within 10s; continuing setup."
+            log_warn "crowdsec-cloudflare-bouncer.service unit not found — binary may need manual installation."
+            log_warn "Once installed, run: sudo systemctl enable --now crowdsec-cloudflare-bouncer"
         fi
     fi
 else
@@ -459,9 +500,14 @@ log_info "=== PHASE 8: Enable and start services ==="
 if [[ "$DRY_RUN" == "true" ]]; then
     log_info "[DRY RUN] Would reload crowdsec and enable crowdsec-firewall-bouncer and crowdsec-cloudflare-bouncer"
 else
-    systemctl reload crowdsec                          || true
-    systemctl enable --now crowdsec-firewall-bouncer   || true
-    systemctl enable --now crowdsec-cloudflare-bouncer || true
+    systemctl reload crowdsec                        || true
+    systemctl enable --now crowdsec-firewall-bouncer || true
+    # Only enable the Cloudflare bouncer if its service unit is present.
+    if _cf_bouncer_service_exists; then
+        systemctl enable --now crowdsec-cloudflare-bouncer || true
+    else
+        log_warn "Skipping crowdsec-cloudflare-bouncer enable — service unit not installed yet."
+    fi
     log_success "Services enabled."
 fi
 
