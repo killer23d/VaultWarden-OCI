@@ -253,6 +253,57 @@ if [[ -z "$PHASE" ]] && ! validate_email_secure "$ADMIN_EMAIL"; then log_error "
 # ---------------------------------------------------------------------------
 show_post_install_summary() {
     local mode="${1:-interactive}"
+
+    # Read Age key upfront — used by both Change 4 consolidated screen and Change 2 banner
+    local age_pub_key="" age_key_content=""
+    if [[ -f "secrets/keys/age-key.txt" ]]; then
+        age_pub_key=$(get_age_public_key "secrets/keys/age-key.txt" 2>/dev/null || echo "MISSING")
+        age_key_content=$(cat "secrets/keys/age-key.txt" 2>/dev/null || echo "ERROR: Could not read key file")
+    fi
+
+    # ── Change 4: Consolidated credential screen (AUTO_MODE only, shown first) ──
+    if [[ "$mode" == "auto" ]]; then
+        local _na="(not available — run setup-secrets.sh configure --export-recovery-kit to retrieve)"
+        local vw_admin_plain="${_na}" caddy_admin_plain="${_na}" backup_pass_plain="${_na}"
+        [[ -f "${VW_ADMIN_PLAIN_FILE:-}" ]] && [[ -s "${VW_ADMIN_PLAIN_FILE:-}" ]] && \
+            vw_admin_plain=$(cat "${VW_ADMIN_PLAIN_FILE}")
+        [[ -f "${CADDY_PLAIN_FILE:-}" ]] && [[ -s "${CADDY_PLAIN_FILE:-}" ]] && \
+            caddy_admin_plain=$(cat "${CADDY_PLAIN_FILE}")
+        [[ -f "${BACKUP_PLAIN_FILE:-}" ]] && [[ -s "${BACKUP_PLAIN_FILE:-}" ]] && \
+            backup_pass_plain=$(cat "${BACKUP_PLAIN_FILE}")
+
+        clear
+        printf '%s' "${COLOR_RED}"
+        cat << 'CRED_BANNER'
+  ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !
+  !                                                                 !
+  !   CRITICAL: SAVE ALL OF THESE CREDENTIALS FOR DISASTER RECOVERY !
+  !   They will NOT be shown again unless you export a recovery kit  !
+  !                                                                 !
+  ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !
+CRED_BANNER
+        printf '%s' "${COLOR_RESET}"
+
+        printf '\n%s[1] SOPS AGE SECRET KEY%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
+        printf '%s%s%s\n' "${COLOR_RED}${COLOR_GREEN}" "${age_key_content}" "${COLOR_RESET}"
+
+        printf '\n%s[2] VAULTWARDEN ADMIN TOKEN (plaintext — hash stored in secrets)%s\n' \
+            "${COLOR_CYAN}" "${COLOR_RESET}"
+        printf '%s%s%s\n' "${COLOR_RED}${COLOR_GREEN}" "${vw_admin_plain}" "${COLOR_RESET}"
+
+        printf '\n%s[3] CADDY ADMIN PASSWORD (plaintext — bcrypt hash stored in secrets)%s\n' \
+            "${COLOR_CYAN}" "${COLOR_RESET}"
+        printf '%s%s%s\n' "${COLOR_RED}${COLOR_GREEN}" "${caddy_admin_plain}" "${COLOR_RESET}"
+
+        printf '\n%s[4] BACKUP PASSPHRASE%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
+        printf '%s%s%s\n' "${COLOR_RED}${COLOR_GREEN}" "${backup_pass_plain}" "${COLOR_RESET}"
+
+        printf '\n%s!!! PRESS ENTER ONLY AFTER SAVING ALL FOUR CREDENTIALS !!!%s\n' \
+            "${COLOR_RED}" "${COLOR_RESET}"
+        read -r
+        clear
+    fi
+
     [[ "$mode" == "interactive" ]] && clear
 
     printf '%s' "${COLOR_RED}"
@@ -265,24 +316,33 @@ show_post_install_summary() {
 EOF
     printf '%s' "${COLOR_RESET}"
 
+    # ── Change 2: Age key — red-banner credential screen ──────────────────────
     if [[ -f "secrets/keys/age-key.txt" ]]; then
-        local age_pub_key
-        age_pub_key=$(get_age_public_key "secrets/keys/age-key.txt" 2>/dev/null || echo "MISSING")
-        local age_key_content
-        age_key_content=$(cat "secrets/keys/age-key.txt" 2>/dev/null || echo "ERROR: Could not read key file")
+        clear
+        printf '%s' "${COLOR_RED}"
+        cat << 'AGE_BANNER'
+  ╔══════════════════════════════════════════════════════════════════╗
+  ║   🔑  CRITICAL: SOPS AGE SECRET KEY — SAVE THIS NOW            ║
+  ║   This key decrypts ALL backups. Loss = permanent data loss.    ║
+  ╚══════════════════════════════════════════════════════════════════╝
+AGE_BANNER
+        printf '%s' "${COLOR_RESET}"
         printf 'SOPS Age Public Key:  %s%s%s\n' "${COLOR_GREEN}" "${age_pub_key}" "${COLOR_RESET}"
-        printf '\n%s════════════════════════════════════════════════════════════════════════════════%s\n' "${COLOR_RED}" "${COLOR_RESET}"
-        printf '%s🚨  CRITICAL: AGE SECRET KEY (BACKUP THIS NOW)  🚨%s\n' "${COLOR_RED}" "${COLOR_RESET}"
-        printf '%s════════════════════════════════════════════════════════════════════════════════%s\n' "${COLOR_RED}" "${COLOR_RESET}"
-        printf '%sSECRET KEY (production): %s/etc/vaultwarden/age-key.txt%s\n' "${COLOR_YELLOW}" "${COLOR_GREEN}" "${COLOR_RESET}"
-        printf '%sSECRET KEY (repo-local): %ssecrets/keys/age-key.txt%s\n' "${COLOR_YELLOW}" "${COLOR_GREEN}" "${COLOR_RESET}"
-        printf '%s%s%s\n' "${COLOR_YELLOW}" "${age_key_content}" "${COLOR_RESET}"
-        printf '%s════════════════════════════════════════════════════════════════════════════════%s\n' "${COLOR_RED}" "${COLOR_RESET}"
+        printf '%sSECRET KEY (production): %s/etc/vaultwarden/age-key.txt%s\n' \
+            "${COLOR_YELLOW}" "${COLOR_GREEN}" "${COLOR_RESET}"
+        printf '%sSECRET KEY (repo-local): %ssecrets/keys/age-key.txt%s\n' \
+            "${COLOR_YELLOW}" "${COLOR_GREEN}" "${COLOR_RESET}"
+        printf '%s%s%s\n' "${COLOR_RED}${COLOR_GREEN}" "${age_key_content}" "${COLOR_RESET}"
         printf '\n%sTo view again at any time:%s\n' "${COLOR_RED}" "${COLOR_RESET}"
         printf '  %ssudo cat /etc/vaultwarden/age-key.txt%s  %s(production — root-owned, mode 600)%s\n' \
             "${COLOR_GREEN}" "${COLOR_RESET}" "${COLOR_RED}" "${COLOR_RESET}"
         printf '  %scat secrets/keys/age-key.txt%s  %s(repo-local copy — intentional for local dev only)%s\n' \
             "${COLOR_GREEN}" "${COLOR_RESET}" "${COLOR_RED}" "${COLOR_RESET}"
+        printf '\n%s!!! PRESS ENTER AFTER SAVING THE AGE KEY !!!%s\n' \
+            "${COLOR_RED}" "${COLOR_RESET}"
+        if [[ -t 0 ]] && [[ "$mode" != "auto" ]]; then
+            read -r
+        fi
     fi
 
     # Determine correct edit command based on actual .env ownership
@@ -305,22 +365,22 @@ EOF
             "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf 'These fields still contain CHANGE_ME placeholders.\n'
         printf 'Set them BEFORE running %smake up%s:\n\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '  %s./utilities/secrets-rotate.sh caddy_cloudflare_dns_token%s\n' \
+        printf '  %ssudo ./utilities/setup-secrets.sh rotate caddy_cloudflare_dns_token%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '  %s./utilities/secrets-rotate.sh smtp_password%s         (if using SMTP/email notifications)\n' \
+        printf '  %ssudo ./utilities/setup-secrets.sh rotate smtp_password%s         (if using SMTP)\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '  %s./utilities/secrets-rotate.sh email_api_token%s       (if using API-based email, e.g. MAILERSEND_API_TOKEN)\n' \
+        printf '  %ssudo ./utilities/setup-secrets.sh rotate email_api_token%s       (if using API-based email)\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '  %s./utilities/secrets-rotate.sh push_installation_id%s  (optional — mobile push)\n' \
+        printf '  %ssudo ./utilities/setup-secrets.sh rotate push_installation_id%s  (optional — mobile push)\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '  %s./utilities/secrets-rotate.sh push_installation_key%s (optional — mobile push)\n' \
+        printf '  %ssudo ./utilities/setup-secrets.sh rotate push_installation_key%s (optional — mobile push)\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
 
         printf '\n%s--- NEXT STEPS ---%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
         printf '1. Edit .env:           %s%s%s\n' "${COLOR_YELLOW}" "$env_edit_cmd" "${COLOR_RESET}"
         printf '   ► Set: CLOUDFLARE_ZONE_ID, SMTP_HOST, SMTP_PORT, SMTP_USERNAME\n'
         printf '   ► Verify: DOMAIN and ADMIN_EMAIL are correct\n'
-        printf '2. Set external tokens: %s(use ./utilities/secrets-rotate.sh commands above)%s\n' \
+        printf '2. Set external tokens: %s(use sudo ./utilities/setup-secrets.sh rotate commands above)%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '3. Setup CrowdSec:      %ssudo ./utilities/setup-crowdsec.sh%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
@@ -509,19 +569,28 @@ main() {
         log_info ""
         log_info "Then add your Cloudflare API token:"
         log_info ""
-        log_info "  ./utilities/secrets-rotate.sh crowdsec_cf_firewall_token"
+        log_info "  sudo ./utilities/setup-secrets.sh rotate crowdsec_cf_firewall_token"
         log_info ""
         printf 'Press ENTER to continue with the post-install summary, or Ctrl-C to exit now...'
         read -r _cs_prompt_ack || true
         unset _cs_prompt_ack
     else
         log_info "Next step: sudo ./utilities/setup-crowdsec.sh"
-        log_info "Then add your Cloudflare API token: ./utilities/secrets-rotate.sh crowdsec_cf_firewall_token"
+        log_info "Then add your Cloudflare API token: sudo ./utilities/setup-secrets.sh rotate crowdsec_cf_firewall_token"
     fi
 
     # ── 6. Auto secrets (AUTO_MODE only) ────────────────────────────────────
     if [[ "$AUTO_MODE" == "true" ]]; then
         log_info "=== Auto Mode: Configuring secrets ==="
+        # Export temp-file paths so setup-secrets.sh can write plaintext credentials
+        # for the consolidated summary screen (Change 4).  TMP_WORKDIR is mode 700
+        # (created with umask 077) so files written inside are root-only.
+        export VW_ADMIN_PLAIN_FILE="${TMP_WORKDIR}/vw_admin_plain"
+        export CADDY_PLAIN_FILE="${TMP_WORKDIR}/caddy_plain"
+        export BACKUP_PLAIN_FILE="${TMP_WORKDIR}/backup_plain"
+        if [[ "$DRY_RUN" == "true" ]]; then
+            log_info "[DRY RUN] Would create plaintext credential capture files in ${TMP_WORKDIR}"
+        fi
         local secrets_args=(--auto --skip-optional --quiet-summary)
         [[ "$FORCE" == "true" ]] && secrets_args+=(--force)
         if ! "${SCRIPT_DIR}/utilities/setup-secrets.sh" configure "${secrets_args[@]}"; then

@@ -447,7 +447,28 @@ SOPS_EOF
         echo ""
 
         local vw_hash
-        vw_hash=$(_get_field "admin_token") || { log_error "Failed to collect admin_token"; return 1; }
+        if [[ "$QUIET_SUMMARY" == "true" ]] && [[ "$AUTO_MODE" == "true" ]]; then
+            # Capture plaintext before hashing so setup.sh can display all four
+            # credentials together in the consolidated summary screen (Change 4).
+            # Using inline generation instead of auto_generate_secret_field to
+            # avoid the individual /dev/tty banners that QUIET_SUMMARY suppresses.
+            local vw_plain
+            vw_plain=$(generate_secure_string 32) || { log_error "Failed to generate admin_token"; return 1; }
+            vw_hash=$(generate_argon2_hash "$vw_plain") || { log_error "Failed to hash admin_token"; return 1; }
+            if [[ -n "${VW_ADMIN_PLAIN_FILE:-}" ]]; then
+                if [[ "$DRY_RUN" == "true" ]]; then
+                    log_info "[DRY RUN] Would write VaultWarden admin plaintext to ${VW_ADMIN_PLAIN_FILE}"
+                else
+                    local _umask_vw
+                    _umask_vw=$(umask)
+                    umask 077
+                    printf '%s' "$vw_plain" > "${VW_ADMIN_PLAIN_FILE}"
+                    umask "$_umask_vw"
+                fi
+            fi
+        else
+            vw_hash=$(_get_field "admin_token") || { log_error "Failed to collect admin_token"; return 1; }
+        fi
         _COLLECTED_SECRETS["admin_token"]="$vw_hash"
 
         echo ""
@@ -460,7 +481,31 @@ SOPS_EOF
         echo ""
 
         local caddy_hash
-        caddy_hash=$(_get_field "admin_basic_auth_hash") || { log_error "Failed to collect admin_basic_auth_hash"; return 1; }
+        if [[ "$QUIET_SUMMARY" == "true" ]] && [[ "$AUTO_MODE" == "true" ]]; then
+            # Capture plaintext before hashing for consolidated summary (Change 4).
+            local caddy_plain
+            caddy_plain=$(generate_secure_string 32) || { log_error "Failed to generate admin_basic_auth_hash"; return 1; }
+            local _raw_caddy_hash
+            _raw_caddy_hash=$(generate_bcrypt_hash "$caddy_plain") || { log_error "Failed to hash admin_basic_auth_hash"; return 1; }
+            if ! _bcrypt_format_ok "$_raw_caddy_hash"; then
+                log_error "Generated bcrypt hash has invalid format: $_raw_caddy_hash"
+                return 1
+            fi
+            caddy_hash="admin ${_raw_caddy_hash}"
+            if [[ -n "${CADDY_PLAIN_FILE:-}" ]]; then
+                if [[ "$DRY_RUN" == "true" ]]; then
+                    log_info "[DRY RUN] Would write Caddy admin plaintext to ${CADDY_PLAIN_FILE}"
+                else
+                    local _umask_caddy
+                    _umask_caddy=$(umask)
+                    umask 077
+                    printf '%s' "$caddy_plain" > "${CADDY_PLAIN_FILE}"
+                    umask "$_umask_caddy"
+                fi
+            fi
+        else
+            caddy_hash=$(_get_field "admin_basic_auth_hash") || { log_error "Failed to collect admin_basic_auth_hash"; return 1; }
+        fi
         _COLLECTED_SECRETS["admin_basic_auth_hash"]="$caddy_hash"
 
         echo ""
@@ -591,6 +636,38 @@ SOPS_EOF
         local backup_pass
         backup_pass=$(auto_generate_secret_field "backup_passphrase") || { log_error "Failed to generate backup_passphrase"; return 1; }
         _COLLECTED_SECRETS["backup_passphrase"]="$backup_pass"
+
+        # Write plaintext to temp file for consolidated summary screen (Change 4).
+        if [[ -n "${BACKUP_PLAIN_FILE:-}" ]]; then
+            if [[ "$DRY_RUN" == "true" ]]; then
+                log_info "[DRY RUN] Would write backup passphrase plaintext to ${BACKUP_PLAIN_FILE}"
+            else
+                local _umask_bp
+                _umask_bp=$(umask)
+                umask 077
+                printf '%s' "$backup_pass" > "${BACKUP_PLAIN_FILE}"
+                umask "$_umask_bp"
+            fi
+        fi
+
+        # Change 3: Show backup passphrase with red-banner credential screen when
+        # not suppressed (i.e., standalone interactive run without --quiet-summary).
+        if [[ "$QUIET_SUMMARY" != "true" ]] && [[ -t 0 ]]; then
+            clear
+            printf '%s' "${COLOR_RED}"
+            cat << 'BACKUP_BANNER'
+  ╔══════════════════════════════════════════════════════════════════╗
+  ║   🔑  BACKUP ENCRYPTION PASSPHRASE — SAVE THIS NOW             ║
+  ║   Required to decrypt all backups. Cannot be recovered.        ║
+  ╚══════════════════════════════════════════════════════════════════╝
+BACKUP_BANNER
+            printf '%s' "${COLOR_RESET}"
+            printf '\n  Passphrase: %s%s%s\n\n' \
+                "${COLOR_RED}${COLOR_GREEN}" "${backup_pass}" "${COLOR_RESET}"
+            printf '%s!!! PRESS ENTER AFTER SAVING THE BACKUP PASSPHRASE !!!%s\n' \
+                "${COLOR_RED}" "${COLOR_RESET}"
+            read -r
+        fi
 
         if [[ "$SKIP_OPTIONAL" != "true" ]]; then
             echo ""
