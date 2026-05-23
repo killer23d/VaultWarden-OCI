@@ -75,11 +75,14 @@ services:
         chown -R 0:0 /data/caddy &&
         find /data/caddy -type d -exec chmod 755 {} + 2>/dev/null || true &&
 
-        chmod 700 /secrets /secrets/.docker_secrets 2>/dev/null || true &&
+        chmod 700 /secrets 2>/dev/null || true &&
+        chown 0:${PGID} /secrets/.docker_secrets 2>/dev/null || true &&
+        chmod 750 /secrets/.docker_secrets 2>/dev/null || true &&
         find /secrets/.docker_secrets -type f -exec chmod 444 {} + 2>/dev/null || true &&
 
         touch /secrets/.docker_secrets/push_installation_id &&
         touch /secrets/.docker_secrets/push_installation_key &&
+        chown ${PUID}:${PGID} /secrets/.docker_secrets/push_installation_id /secrets/.docker_secrets/push_installation_key &&
         chmod 444 /secrets/.docker_secrets/push_installation_id &&
         chmod 444 /secrets/.docker_secrets/push_installation_key &&
 
