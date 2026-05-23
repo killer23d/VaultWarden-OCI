@@ -88,8 +88,12 @@ _cs_set_env_var() {
 _cs_read_secret_file() {
     local path="$1"
     [[ -f "$path" ]] || return 0
+    [[ -r "$path" ]] || return 0
     local val
-    val=$(cat "$path" 2>/dev/null | tr -d '[:space:]' || true)
+    # Read first line only; preserve token content except surrounding whitespace.
+    IFS= read -r val < "$path" || true
+    val="${val#${val%%[![:space:]]*}}"
+    val="${val%${val##*[![:space:]]}}"
     if [[ -n "$val" && "$val" != CHANGE_ME* && "$val" != PLACEHOLDER* ]]; then
         printf '%s' "$val"
     fi
@@ -571,9 +575,9 @@ log_info " CrowdSec installation complete"
 log_info "════════════════════════════════════════════════════════"
 log_info "Next steps:"
 log_info "  1. Set CLOUDFLARE_ZONE_ID (and optionally CF_ACCOUNT_ID) in .env"
-log_info "  2. Run sudo ./utilities/setup-secrets.sh rotate crowdsec_cf_firewall_token"
-log_info "     to add the Cloudflare firewall API token"
-log_info "     (Permissions required: Zone:Firewall Services:Edit)"
+log_info "  2. Cloudflare firewall token is stored at:"
+log_info "       ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/secrets/.docker_secrets/crowdsec_cf_firewall_token"
+log_info "     Rotate manually by re-running this script if needed."
 log_info "  3. Verify CrowdSec metrics:"
 log_info "       sudo cscli metrics"
 log_info "  4. After setting tokens, restart the Cloudflare bouncer:"
