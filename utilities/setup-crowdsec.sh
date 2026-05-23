@@ -88,8 +88,12 @@ _cs_set_env_var() {
 _cs_read_secret_file() {
     local path="$1"
     [[ -f "$path" ]] || return 0
+    [[ -r "$path" ]] || return 0
     local val
-    val=$(cat "$path" 2>/dev/null | tr -d '[:space:]' || true)
+    # Read first line only; preserve token content except surrounding whitespace.
+    IFS= read -r val < "$path" || true
+    val="${val#${val%%[![:space:]]*}}"
+    val="${val%${val##*[![:space:]]}}"
     if [[ -n "$val" && "$val" != CHANGE_ME* && "$val" != PLACEHOLDER* ]]; then
         printf '%s' "$val"
     fi
@@ -245,7 +249,29 @@ else
                         log_warn "Failed to download cs-cloudflare-bouncer binary — Cloudflare bouncer service will need manual installation."
                     fi
                 else
-                    log_warn "Could not find a linux_${_arch} asset in the GitHub release — skipping binary download."
+                    log_warn "Could not find a linux_${_arch} asset in the GitHub release — attempting source build fallback."
+                    if [[ "$_arch" == "arm64" ]]; then
+                        if ! command -v go >/dev/null 2>&1; then
+                            log_info "Installing Go toolchain for arm64 source build fallback..."
+                            DEBIAN_FRONTEND=noninteractive apt-get update -y >/dev/null 2>&1 || true
+                            DEBIAN_FRONTEND=noninteractive apt-get install -y golang-go >/dev/null 2>&1 || true
+                        fi
+                        if command -v go >/dev/null 2>&1; then
+                            _tmpgobin="$(mktemp -d -p /tmp cs-cf-go.XXXXXX)"
+                            if GOBIN="$_tmpgobin" go install github.com/crowdsecurity/cs-cloudflare-bouncer/cmd/crowdsec-cloudflare-bouncer@latest 2>/dev/null; then
+                                if [[ -x "$_tmpgobin/crowdsec-cloudflare-bouncer" ]]; then
+                                    install -m 755 -o root -g root "$_tmpgobin/crowdsec-cloudflare-bouncer" "$_CF_BOUNCER_BIN"
+                                    log_success "Built and installed crowdsec-cloudflare-bouncer from source for arm64."
+                                fi
+                            else
+                                log_warn "go install fallback failed for crowdsec-cloudflare-bouncer."
+                            fi
+                            rm -rf "$_tmpgobin"
+                        else
+                            log_warn "Go toolchain not installed; cannot build crowdsec-cloudflare-bouncer source fallback."
+                            log_warn "Install Go then run: GOBIN=/tmp/cs-cf-go go install github.com/crowdsecurity/cs-cloudflare-bouncer/cmd/crowdsec-cloudflare-bouncer@latest"
+                        fi
+                    fi
                 fi
             fi
         fi
@@ -438,16 +464,49 @@ if [[ -f "$_CF_BOUNCER_CONFIG_SRC" ]]; then
         sed \
             -e "s|TOKEN_CF_ZONE_ID|${_cf_zone_id}|g" \
             -e "s|TOKEN_CF_ACCOUNT_ID|${_cf_account_id:-CHANGE_ME_CF_ACCOUNT_ID}|g" \
-            -e "s|TOKEN_CROWDSEC_CF_FIREWALL_TOKEN|${_CF_FIREWALL_TOKEN}|g" \
+            -e "s|TOKEN_CROWDSEC_CF_FIREWALL_TOKEN_FILE|${_project_state_dir}/secrets/.docker_secrets/crowdsec_cf_firewall_token|g" \
             -e "s|CHANGE_ME_BOUNCER_KEY|${_CF_BOUNCER_KEY}|g" \
             "$_CF_BOUNCER_CONFIG_SRC" \
             | tee "$_CF_BOUNCER_CONFIG_DEST" >/dev/null
         chmod 600 "$_CF_BOUNCER_CONFIG_DEST"
         log_success "Cloudflare bouncer config written to ${_CF_BOUNCER_CONFIG_DEST} (mode 600)."
 
+        # Persist/update the canonical flat secret file so re-runs are prompt-free.
+        _cf_secret_dir="${_project_state_dir}/secrets/.docker_secrets"
+        mkdir -p "$_cf_secret_dir"
+        if [[ -n "$_CF_FIREWALL_TOKEN" && "$_CF_FIREWALL_TOKEN" != CHANGE_ME* && "$_CF_FIREWALL_TOKEN" != PLACEHOLDER* ]]; then
+            if [[ ! -f "${_cf_secret_dir}/crowdsec_cf_firewall_token" ]] || ! cmp -s <(printf "%s\n" "$_CF_FIREWALL_TOKEN") "${_cf_secret_dir}/crowdsec_cf_firewall_token"; then
+                printf "%s\n" "$_CF_FIREWALL_TOKEN" > "${_cf_secret_dir}/crowdsec_cf_firewall_token"
+                chmod 444 "${_cf_secret_dir}/crowdsec_cf_firewall_token"
+                log_success "Saved Cloudflare firewall token to ${_cf_secret_dir}/crowdsec_cf_firewall_token"
+            fi
+        fi
+
         # Only attempt to start the bouncer service if the unit file exists.
         # The binary (and its service unit) may be absent on architectures where
         # no pre-built release is available (e.g. linux_arm64 on some releases).
+        if [[ -x "$_CF_BOUNCER_BIN" ]] && ! _cf_bouncer_service_exists; then
+            cat >/etc/systemd/system/crowdsec-cloudflare-bouncer.service <<EOF
+[Unit]
+Description=CrowdSec Cloudflare Bouncer
+After=network-online.target crowdsec.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/crowdsec-cloudflare-bouncer -c /etc/crowdsec/bouncers/crowdsec-cloudflare-bouncer.yaml
+Restart=on-failure
+RestartSec=5
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+            systemctl daemon-reload || true
+            log_success "Installed crowdsec-cloudflare-bouncer systemd unit."
+        fi
+
         if _cf_bouncer_service_exists; then
             systemctl enable crowdsec-cloudflare-bouncer || true
             systemctl start crowdsec-cloudflare-bouncer || true
@@ -521,9 +580,9 @@ log_info " CrowdSec installation complete"
 log_info "════════════════════════════════════════════════════════"
 log_info "Next steps:"
 log_info "  1. Set CLOUDFLARE_ZONE_ID (and optionally CF_ACCOUNT_ID) in .env"
-log_info "  2. Run sudo ./utilities/setup-secrets.sh rotate crowdsec_cf_firewall_token"
-log_info "     to add the Cloudflare firewall API token"
-log_info "     (Permissions required: Zone:Firewall Services:Edit)"
+log_info "  2. Cloudflare firewall token is stored at:"
+log_info "       ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/secrets/.docker_secrets/crowdsec_cf_firewall_token"
+log_info "     Rotate manually by re-running this script if needed."
 log_info "  3. Verify CrowdSec metrics:"
 log_info "       sudo cscli metrics"
 log_info "  4. After setting tokens, restart the Cloudflare bouncer:"
