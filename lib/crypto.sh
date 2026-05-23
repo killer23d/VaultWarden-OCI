@@ -1372,11 +1372,9 @@ EOF
 _sops_yaml_age_recipients() {
     local sops_yaml="${1:-.sops.yaml}"
     [[ -f "$sops_yaml" ]] || return 1
-
-    # Match lines of the form:  - age1...  (with any leading whitespace/dash)
+    
     local keys
-    keys=$(grep -E '^[[:space:]]*-[[:space:]]*(age1[A-Za-z0-9]+)' "$sops_yaml" \
-           | sed -E 's/^[[:space:]]*-[[:space:]]*//')
+    keys=$(grep -oE 'age1[A-Za-z0-9]+' "$sops_yaml")
     [[ -n "$keys" ]] || return 1
     printf '%s\n' "$keys"
 }
