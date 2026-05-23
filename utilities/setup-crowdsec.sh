@@ -171,120 +171,202 @@ if [[ "$DRY_RUN" != "true" ]]; then
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# PHASE 2 — Install Cloudflare bouncer via cscli
+# PHASE 2 — Install Cloudflare bouncer binary + systemd unit
 # ═══════════════════════════════════════════════════════════════════════════════
 log_info "=== PHASE 2: Cloudflare bouncer installation ==="
 
 _CF_BOUNCER_BIN="/usr/local/bin/crowdsec-cloudflare-bouncer"
 _CF_BOUNCER_NEEDS_INSTALL=false
-_CF_BOUNCER_FROM_SOURCE=false
 
 if [[ "$DRY_RUN" == "true" ]]; then
-    log_info "[DRY RUN] Would install crowdsecurity/cloudflare-bouncer via cscli"
+    log_info "[DRY RUN] Would install crowdsec-cloudflare-bouncer (deb → tarball → go source fallback)"
 else
+    # ── Register bouncer API key in CrowdSec LAPI ──────────────────────────
     if ! cscli bouncers list 2>/dev/null | grep -q 'cloudflare-bouncer' || [[ "$FORCE" == "true" ]]; then
         log_info "Updating CrowdSec hub..."
         cscli hub update || true
         log_info "Registering Cloudflare bouncer in CrowdSec LAPI..."
-        # cscli bouncers add <name> registers the bouncer's API key in the LAPI;
-        # the actual binary is installed separately (apt or GitHub release fallback).
         cscli bouncers add crowdsecurity/cloudflare-bouncer 2>/dev/null || true
     else
         log_info "CrowdSec Cloudflare bouncer already registered — skipping."
     fi
 
-    # Check whether the service binary exists; fall back to GitHub release if not.
+    # ── Determine if binary install is needed ─────────────────────────────
     if [[ ! -x "$_CF_BOUNCER_BIN" ]] || [[ "$FORCE" == "true" ]]; then
         _CF_BOUNCER_NEEDS_INSTALL=true
     fi
 
     if [[ "$_CF_BOUNCER_NEEDS_INSTALL" == "true" ]]; then
-        log_info "Cloudflare bouncer binary not found — attempting GitHub release download..."
+        log_info "Cloudflare bouncer binary not found — attempting installation..."
+
+        # ── Normalise architecture ─────────────────────────────────────────
         _arch="$(dpkg --print-architecture 2>/dev/null || uname -m)"
         case "$_arch" in
             arm64|aarch64) _arch="arm64" ;;
             amd64|x86_64)  _arch="amd64" ;;
-            *)             log_warn "Unsupported architecture: $_arch — skipping CF bouncer binary download"; _arch="" ;;
+            *)
+                log_warn "Unsupported architecture: $_arch — skipping CF bouncer install"
+                _arch=""
+                ;;
         esac
 
+        _installed_via_deb=false
+
+        # ── Strategy 1: apt/deb from packagecloud (preferred) ─────────────
+        # The packagecloud repo is already added by PHASE 1 (crowdsec install).
+        # crowdsec-cloudflare-bouncer ships a proper arm64 deb that installs
+        # the binary AND registers the systemd unit in one step.
         if [[ -n "$_arch" ]]; then
+            log_info "Attempting apt install of crowdsec-cloudflare-bouncer..."
+            if DEBIAN_FRONTEND=noninteractive apt-get install -y crowdsec-cloudflare-bouncer 2>/dev/null; then
+                log_success "Installed crowdsec-cloudflare-bouncer via apt."
+                _installed_via_deb=true
+            else
+                log_warn "apt install failed — falling back to GitHub release tarball."
+            fi
+        fi
+
+        # ── Strategy 2: GitHub release tarball ────────────────────────────
+        # The tarball ships its own install.sh + scripts/_bouncer.sh.
+        # MUST be executed via (cd <dir> && bash install.sh) — install.sh
+        # uses relative paths and will fail if called from any other CWD.
+        if [[ "$_installed_via_deb" == "false" ]] && [[ -n "$_arch" ]]; then
             _gh_api="https://api.github.com/repos/crowdsecurity/cs-cloudflare-bouncer/releases/latest"
             _release_json="$(curl -fsSL "$_gh_api" 2>/dev/null)" || {
-                log_warn "Failed to query GitHub releases for cs-cloudflare-bouncer — skipping binary download."
+                log_warn "Failed to query GitHub releases for cs-cloudflare-bouncer."
                 _release_json=""
             }
 
             if [[ -n "$_release_json" ]]; then
+                # Asset filenames use hyphens: crowdsec-cloudflare-bouncer-linux-arm64.tgz
                 _download_url="$(printf '%s' "$_release_json" | \
                     grep -oP '"browser_download_url":\s*"\K[^"]+' | \
                     grep "linux-${_arch}" | \
+                    grep '\.tgz$' | \
                     grep -v '\.sha256' | \
                     head -1 || true)"
                 _sha256_url="$(printf '%s' "$_release_json" | \
                     grep -oP '"browser_download_url":\s*"\K[^"]+' | \
-                    grep "linux-${_arch}\.sha256" | \
+                    grep "linux-${_arch}" | \
+                    grep '\.tgz\.sha256$' | \
                     head -1 || true)"
 
                 if [[ -n "$_download_url" ]]; then
-                    _tmptar="$(mktemp -p /tmp cs-cf-bouncer.XXXXXX.tgz)"
                     _tmpdir="$(mktemp -d -p /tmp cs-cf-bouncer.XXXXXX)"
+                    _tmptar="${_tmpdir}/bouncer.tgz"
+
                     log_info "Downloading: $_download_url"
                     if curl -fsSL "$_download_url" -o "$_tmptar"; then
-                        _sha_ok=true
+
+                        # ── Optional SHA256 verification ──────────────────
                         if [[ -n "$_sha256_url" ]]; then
                             _expected_sha="$(curl -fsSL "$_sha256_url" 2>/dev/null | awk '{print $1}' || true)"
                             _actual_sha="$(sha256sum "$_tmptar" | awk '{print $1}')"
                             if [[ -n "$_expected_sha" && "$_actual_sha" != "$_expected_sha" ]]; then
-                                log_error "SHA256 mismatch for cs-cloudflare-bouncer tarball — aborting install."
-                                _sha_ok=false
+                                log_error "SHA256 mismatch — aborting tarball install."
+                                rm -rf "$_tmpdir"
+                                _tmpdir=""
                             fi
                         fi
 
-                        if [[ "$_sha_ok" == "true" ]]; then
-                            if tar xzf "$_tmptar" -C "$_tmpdir"; then
-                                _install_sh="$(find "$_tmpdir" -type f -name install.sh | head -1 || true)"
-                                if [[ -n "$_install_sh" ]]; then
-                                    log_info "Running bundled installer: $_install_sh"
-                                    if bash "$_install_sh"; then
-                                        log_success "Installed cs-cloudflare-bouncer via bundled install.sh"
-                                    else
-                                        log_warn "Bundled install.sh failed for cs-cloudflare-bouncer tarball."
-                                    fi
+                        if [[ -n "$_tmpdir" && -f "$_tmptar" ]]; then
+                            tar xzf "$_tmptar" -C "$_tmpdir"
+                            rm -f "$_tmptar"
+
+                            # Locate install.sh anywhere in the extracted tree
+                            _install_sh="$(find "$_tmpdir" -maxdepth 2 -name 'install.sh' | head -1 || true)"
+
+                            if [[ -n "$_install_sh" && -f "$_install_sh" ]]; then
+                                _install_dir="$(dirname "$_install_sh")"
+                                log_info "Running bundled installer from: $_install_dir"
+                                # CRITICAL: cd into the directory — install.sh uses
+                                # relative paths (./scripts/_bouncer.sh etc.)
+                                if (cd "$_install_dir" && bash install.sh); then
+                                    log_success "Installed cs-cloudflare-bouncer via tarball install.sh."
                                 else
-                                    log_warn "install.sh not found in cs-cloudflare-bouncer tarball."
+                                    log_warn "Bundled install.sh failed — will attempt manual binary extraction."
+                                    # Fallback: copy binary manually + write unit file
+                                    _bin_path="$(find "$_tmpdir" -maxdepth 3 -type f \
+                                        -name 'crowdsec-cloudflare-bouncer' \
+                                        ! -name '*.sh' | head -1 || true)"
+                                    if [[ -x "$_bin_path" ]]; then
+                                        install -m 755 -o root -g root "$_bin_path" "$_CF_BOUNCER_BIN"
+                                        log_success "Copied binary to ${_CF_BOUNCER_BIN} (manual fallback)."
+                                    fi
                                 fi
                             else
-                                log_warn "Failed to extract cs-cloudflare-bouncer tarball."
+                                log_warn "No install.sh found in tarball — extracting binary directly."
+                                _bin_path="$(find "$_tmpdir" -maxdepth 3 -type f \
+                                    -name 'crowdsec-cloudflare-bouncer' \
+                                    ! -name '*.sh' | head -1 || true)"
+                                if [[ -x "$_bin_path" ]]; then
+                                    install -m 755 -o root -g root "$_bin_path" "$_CF_BOUNCER_BIN"
+                                    log_success "Copied binary to ${_CF_BOUNCER_BIN}."
+                                fi
                             fi
                         fi
+
+                        [[ -n "${_tmpdir:-}" ]] && rm -rf "$_tmpdir"
                     else
-                        log_warn "Failed to download cs-cloudflare-bouncer tarball — Cloudflare bouncer service will need manual installation."
+                        log_warn "Failed to download tarball from GitHub."
+                        rm -rf "$_tmpdir"
                     fi
-                    rm -f "$_tmptar"
-                    rm -rf "$_tmpdir"
                 else
-                    log_warn "Could not find a linux-${_arch} asset in the GitHub release — attempting source build fallback."
-                    if [[ "$_arch" == "arm64" ]]; then
-                        if command -v go >/dev/null 2>&1; then
-                            _tmpgobin="$(mktemp -d -p /tmp cs-cf-go.XXXXXX)"
-                            if GOBIN="$_tmpgobin" go install github.com/crowdsecurity/cs-cloudflare-bouncer/cmd/crowdsec-cloudflare-bouncer@latest 2>/dev/null; then
-                                if [[ -x "$_tmpgobin/crowdsec-cloudflare-bouncer" ]]; then
-                                    install -m 755 -o root -g root "$_tmpgobin/crowdsec-cloudflare-bouncer" "$_CF_BOUNCER_BIN"
-                                    log_success "Built and installed crowdsec-cloudflare-bouncer from source for arm64."
-                                    _CF_BOUNCER_FROM_SOURCE=true
-                                fi
-                            else
-                                log_warn "go install fallback failed for crowdsec-cloudflare-bouncer."
-                            fi
-                            rm -rf "$_tmpgobin"
-                        else
-                            log_warn "Go toolchain not installed; cannot build crowdsec-cloudflare-bouncer source fallback."
-                            log_warn "Install Go then run: GOBIN=/tmp/cs-cf-go go install github.com/crowdsecurity/cs-cloudflare-bouncer/cmd/crowdsec-cloudflare-bouncer@latest"
-                        fi
-                    fi
+                    log_warn "No linux-${_arch} tarball asset found in latest GitHub release."
                 fi
             fi
         fi
+
+        # ── Strategy 3: Go source build (last resort) ─────────────────────
+        if [[ -n "$_arch" ]] && [[ ! -x "$_CF_BOUNCER_BIN" ]]; then
+            if command -v go >/dev/null 2>&1; then
+                log_info "Attempting Go source build for crowdsec-cloudflare-bouncer..."
+                _tmpgobin="$(mktemp -d -p /tmp cs-cf-go.XXXXXX)"
+                if GOBIN="$_tmpgobin" go install \
+                    github.com/crowdsecurity/cs-cloudflare-bouncer/cmd/crowdsec-cloudflare-bouncer@latest \
+                    2>/dev/null; then
+                    if [[ -x "$_tmpgobin/crowdsec-cloudflare-bouncer" ]]; then
+                        install -m 755 -o root -g root \
+                            "$_tmpgobin/crowdsec-cloudflare-bouncer" \
+                            "$_CF_BOUNCER_BIN"
+                        log_success "Built and installed crowdsec-cloudflare-bouncer from source."
+                    fi
+                else
+                    log_warn "Go source build failed for crowdsec-cloudflare-bouncer."
+                fi
+                rm -rf "$_tmpgobin"
+            else
+                log_warn "Go toolchain not installed; cannot build from source."
+                log_warn "Install Go, then run:"
+                log_warn "  GOBIN=/tmp/cs-cf-go go install github.com/crowdsecurity/cs-cloudflare-bouncer/cmd/crowdsec-cloudflare-bouncer@latest"
+            fi
+        fi
+
+        # ── Write systemd unit if binary exists but unit is missing ───────
+        # This covers the Go-build path and any tarball that skips install.sh.
+        if [[ -x "$_CF_BOUNCER_BIN" ]] && ! _cf_bouncer_service_exists; then
+            log_info "Writing crowdsec-cloudflare-bouncer systemd unit..."
+            cat >/etc/systemd/system/crowdsec-cloudflare-bouncer.service <<'UNIT'
+[Unit]
+Description=CrowdSec Cloudflare Bouncer
+After=network-online.target crowdsec.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/crowdsec-cloudflare-bouncer -c /etc/crowdsec/bouncers/crowdsec-cloudflare-bouncer.yaml
+Restart=on-failure
+RestartSec=5
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+            systemctl daemon-reload || true
+            log_success "Installed crowdsec-cloudflare-bouncer systemd unit."
+        fi
+
     else
         log_info "Cloudflare bouncer binary already present at ${_CF_BOUNCER_BIN}."
     fi
