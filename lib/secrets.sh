@@ -746,29 +746,6 @@ _grk_sops_extract() {
     unset _val
 }
 
-# ---------------------------------------------------------------------------
-# _print_recovery_banner OUTPUT_FILE
-#
-# Write the CRITICAL SECURITY DOCUMENT banner to the recovery kit file using
-# printf + ANSI-C $'...' quoting. This guarantees the box-drawing character
-# (U+2550 ═) is always emitted as real UTF-8 bytes regardless of locale,
-# matching the bold-white-on-red style used by _print_secret_banner() in
-# auto_generate_secret_field().
-# ---------------------------------------------------------------------------
-_print_recovery_banner() {
-    local output_file="$1"
-    # U+2550 BOX DRAWINGS DOUBLE HORIZONTAL — emitted as a real UTF-8 byte
-    # via $'...' ANSI-C quoting so it is not locale-dependent.
-    local _dh=$'\u2550'
-    local border
-    border=$(printf '%0.s'"${_dh}" {1..72})
-    {
-        printf '\033[1;97;41m%s\033[0m\n' "$border"
-        printf '\033[1;97;41m  %-68s\033[0m\n' "🚨 CRITICAL SECURITY DOCUMENT 🚨"
-        printf '\033[1;97;41m%s\033[0m\n' "$border"
-    } >> "$output_file"
-}
-
 generate_recovery_kit() {
     local output_file="$1"
     local age_key="${SOPS_AGE_KEY_FILE:-secrets/keys/age-key.txt}"
@@ -840,8 +817,13 @@ generate_recovery_kit() {
         return 1
     fi
 
-    # ASCII art header — plain ASCII only; no Unicode in heredoc to avoid
-    # encoding issues across locales and editors.
+    # Use a quoted delimiter (<< 'EOF') so that the shell does
+    # NOT expand any $ sequences inside the static body. Variables such as
+    # $caddy_hash contain bcrypt hashes of the form "admin $2y$12$..." where
+    # $2y would be silently dropped by shell expansion in an unquoted heredoc,
+    # producing a garbled hash that cannot be used for Caddy auth recovery.
+    # All dynamic values are injected after the static block with printf.
+    # The heredoc-interspersed structure prevents full { } >> grouping here.
     # shellcheck disable=SC2129
     cat >> "$output_file" << 'EOF'
 ██████╗ ███████╗ ██████╗ ██████╗██╗   ██╗███████╗██████╗ ██╗   ██╗
@@ -859,10 +841,19 @@ generate_recovery_kit() {
 ╚═╝  ╚═╝╚═╝   ╚═╝   
 
 EOF
-    # Banner: rendered via printf + $'\u2550' so the box-drawing char is
-    # always a real UTF-8 byte, never a literal \u2550 escape sequence.
-    _print_recovery_banner "$output_file"
-    printf '\n' >> "$output_file"
+
+    # Inject all dynamic values explicitly so that $ characters in secrets
+    # (e.g. bcrypt hashes: $2y$12$...) are written verbatim.
+    #
+    # $'...' ANSI-C quoting is used for the border/emoji lines so the shell
+    # expands \uXXXX and \UXXXXXXXX into actual Unicode characters (═ and 🚨)
+    # before printf receives them. Plain printf '%s\n' does NOT interpret
+    # these escape sequences — it would write the literal backslash-u string.
+    printf '%s\n' \
+        $'═══════════════════════════════════════════════════════════════════════' \
+        $'                        \U0001F6A8 CRITICAL SECURITY DOCUMENT \U0001F6A8' \
+        $'═══════════════════════════════════════════════════════════════════════' \
+        >> "$output_file"
     printf 'Created: %s\n' "$date_val"      >> "$output_file"
     printf 'Server:  %s\n' "$hostname_val" >> "$output_file"
     printf 'Domain:  %s\n' "$domain"       >> "$output_file"
@@ -988,16 +979,16 @@ _ork_generate_and_secure() {
 
     {
         printf '\n'
-        printf '═══════════════════════════════════════════════════════════════\n'
+        printf $'═══════════════════════════════════════════════════════════════\n'
         printf ' SECURITY NOTICE -- PLAINTEXT FILE ABOUT TO BE WRITTEN\n'
-        printf '═══════════════════════════════════════════════════════════════\n'
+        printf $'═══════════════════════════════════════════════════════════════\n'
         printf 'The recovery kit will be written to:\n'
         printf '  %s\n' "$output_file"
         printf '\n'
         printf 'Even on tmpfs, this file is visible to root and may appear\n'
         printf 'in OCI block-volume snapshots if /tmp falls back to disk.\n'
         printf 'The file will be securely deleted after you confirm.\n'
-        printf '═══════════════════════════════════════════════════════════════\n'
+        printf $'═══════════════════════════════════════════════════════════════\n'
         printf '\n'
     } > /dev/tty 2>/dev/null || true
 
@@ -1176,5 +1167,247 @@ for k, v in data.items():
     if sv.startswith("PLACEHOLDER") or sv == "PLACEHOLDER_NOT_CONFIGURED":
         bad.append(k)
 
+if bad:
+    print("\n".join(bad))
+    sys.exit(1)
 PYEOF
+}
+
+# ---------------------------------------------------------------------------
+# _validate_yaml_no_duplicates FILE
+#
+# Uses _run_yaml_nodupcheck (validate mode) which raises ValueError on the
+# first duplicate mapping key found, matching SOPS's strict Go yaml.v3
+# behaviour. Returns 0 on valid YAML with no duplicates, 1 otherwise.
+# ---------------------------------------------------------------------------
+_validate_yaml_no_duplicates() {
+    local yaml_file="$1"
+    _run_yaml_nodupcheck "$yaml_file" validate
+}
+
+# ---------------------------------------------------------------------------
+# _validate_no_placeholders FILE
+#
+# Scans a decrypted YAML file for any values that start with PLACEHOLDER_
+# or equal PLACEHOLDER_NOT_CONFIGURED. Returns 1 (with a list of offending
+# keys) if any are found. Uses _run_yaml_nodupcheck (placeholders mode) so
+# a file with a duplicate key cannot silently pass the placeholder check.
+# ---------------------------------------------------------------------------
+_validate_no_placeholders() {
+    local plain_yaml="$1"
+
+    local offending
+    local _py_rc=0
+    offending=$(_run_yaml_nodupcheck "$plain_yaml" placeholders 2>/dev/null) || _py_rc=$?
+
+    if [[ $_py_rc -ne 0 ]]; then
+        log_error "Recovery kit contains unconfigured placeholder values for:"
+        while IFS= read -r key; do
+            log_error "  - $key"
+        done <<< "$offending"
+        log_error "Run './setup.sh secrets' or './utilities/secrets-rotate.sh <field>' to configure these fields first."
+        return 1
+    fi
+
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# _warn_if_stack_unavailable
+#
+# Warn when separate-volume mode is configured but the data volume is not
+# mounted. Secret editing still works; only Docker-dependent follow-up steps
+# may fail.
+# ---------------------------------------------------------------------------
+_warn_if_stack_unavailable() {
+    local env_file="${PROJECT_ROOT:-.}/.env"
+    [[ -f "$env_file" ]] || return 0
+
+    local data_volume_device data_volume_mount
+    data_volume_device=$(_read_dotenv_value "DATA_VOLUME_DEVICE" "$env_file")
+    data_volume_mount=$(_read_dotenv_value  "DATA_VOLUME_MOUNT"  "$env_file")
+
+    [[ -z "${data_volume_device}" ]] && return 0
+    [[ -z "${data_volume_mount}"  ]] && return 0
+
+    if ! mountpoint -q "${data_volume_mount}" 2>/dev/null; then
+        log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        log_warn "⚠  DATA VOLUME NOT MOUNTED: ${data_volume_mount}"
+        log_warn "   DATA_VOLUME_DEVICE=${data_volume_device} is configured but"
+        log_warn "   the mount point is absent or unmounted.  Secret editing"
+        log_warn "   and rotation will continue normally — this script does not"
+        log_warn "   require the data volume.  However, Docker-dependent"
+        log_warn "   post-rotation steps (secret file sync, service restart)"
+        log_warn "   may fail until the volume is mounted and the stack is up."
+        log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    fi
+
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# export_docker_secrets DOCKER_DIR [SECRETS_FILE]
+#
+# Decrypt SECRETS_FILE (defaults to $SECRETS_FILE / secrets/secrets.yaml) and
+# write one flat file per known secret key into DOCKER_DIR (mode 755).
+# Each output file is created mode 444 (via write_secret_file). Placeholder
+# values (CHANGE_ME*, NOT_USED*, null) are skipped with a warning so that
+# genuinely-empty optional secrets do not overwrite populated files.
+#
+# Hardening (consolidated from startup.sh::prepare_docker_secrets):
+#   1. SOPS decryption is written to a mktemp cache inside docker_dir (mode
+#      700, not world-listable /tmp) to eliminate the TOCTOU window on
+#      shared hosts.
+#   2. After distributing per-key files, every output file is scanned for a
+#      leading "ENC[" string. Any hit means SOPS silently produced ciphertext
+#      instead of plaintext; the bad files are shredded and the function
+#      returns 1 with an actionable remediation message.
+#   3. The cache file is shredded via a RETURN-scoped trap inside this
+#      function so it is always cleaned up, even on ERR paths.
+#
+# This is the canonical, single implementation shared by setup-secrets.sh and
+# secrets-rotate.sh. Both previously carried inline copies of this logic.
+# ---------------------------------------------------------------------------
+export_docker_secrets() {
+    local docker_dir="$1"
+    local secrets_file="${2:-${SECRETS_FILE:-secrets/secrets.yaml}}"
+
+    log_info "Exporting decrypted secrets to Docker secrets directory..."
+
+    if [[ ! -f "$secrets_file" ]]; then
+        log_warn "export_docker_secrets: secrets file not found: $secrets_file — skipping"
+        return 0
+    fi
+
+    if ! mkdir -p "$docker_dir"; then
+        log_error "export_docker_secrets: failed to create $docker_dir"
+        return 1
+    fi
+    chmod 755 "$docker_dir"
+
+    # Create the SOPS cache file inside the docker_dir (mode 755, not
+    # world-listable /tmp), eliminating the TOCTOU
+    # window between mktemp and the subsequent chmod on a shared host.
+    local _eds_cache
+    _eds_cache=$(mktemp --tmpdir="$docker_dir" .sops-cache.XXXXXXXXXX) || {
+        log_error "export_docker_secrets: failed to create secure temp file in $docker_dir"
+        return 1
+    }
+    install -m 600 /dev/null "$_eds_cache" 2>/dev/null || true
+
+    # Guarantee cache file cleanup and SOPS_CONFIG unset on any return path.
+    # shellcheck disable=SC2064  # intentional: $_eds_cache expands at registration
+    trap "{ _secure_shred '$_eds_cache' 2>/dev/null || true; cleanup_secrets_environment; }" RETURN
+
+    if ! ensure_sops_env; then
+        log_error "export_docker_secrets: failed to set up SOPS environment"
+        return 1
+    fi
+
+    local _sops_rc=0
+    sops -d "$secrets_file" > "$_eds_cache" || _sops_rc=$?
+    cleanup_secrets_environment
+    if [[ $_sops_rc -ne 0 ]]; then
+        log_error "export_docker_secrets: SOPS decryption failed (exit ${_sops_rc})"
+        return 1
+    fi
+
+    local _eds_keys=(
+        admin_token
+        admin_basic_auth_hash
+        caddy_cloudflare_dns_token
+        email_api_token
+        smtp_password
+        backup_passphrase
+        push_installation_id
+        push_installation_key
+    )
+
+    local _failed=0
+    local _key _value
+
+    while IFS='=' read -r _key _value; do
+        [[ -z "$_key" ]] && continue
+        # Only distribute keys that are in the known list.
+        local _known=false
+        local _k
+        for _k in "${_eds_keys[@]}"; do
+            [[ "$_k" == "$_key" ]] && { _known=true; break; }
+        done
+        [[ "$_known" == "true" ]] || continue
+
+        # Skip placeholder or null values; warn so the admin can act.
+        if [[ -z "$_value" ]] \
+            || [[ "$_value" == "CHANGE_ME"* ]] \
+            || [[ "$_value" == "NOT_USED"* ]] \
+            || [[ "$_value" == "null" ]]; then
+            log_warn "export_docker_secrets: '$_key' skipped (placeholder/empty — rotate with: ./utilities/secrets-rotate.sh ${_key})"
+            unset _value
+            continue
+        fi
+
+        if ! write_secret_file "${docker_dir}/${_key}" "$_value"; then
+            log_error "export_docker_secrets: failed to write ${docker_dir}/${_key}"
+            _failed=$(( _failed + 1 ))
+        fi
+        unset _value
+    done < <(
+        python3 - "$_eds_cache" <<'PYEOF'
+import sys, yaml
+with open(sys.argv[1], 'r', encoding='utf-8') as f:
+    data = yaml.safe_load(f) or {}
+for k, v in data.items():
+    if isinstance(v, (str, int, float)):
+        print(f"{k}={v}")
+PYEOF
+    )
+    unset _key
+
+    # Sanity-check: if any output file starts with "ENC[", SOPS produced
+    # raw ciphertext — fail loudly before containers start.
+    local _bad_secrets=()
+    local _f _head
+    for _f in "$docker_dir"/*; do
+        [[ -f "$_f" ]] || continue
+        [[ "$(basename "$_f")" == .sops-cache.* ]] && continue
+        if read -r -n 4 _head < "$_f" 2>/dev/null && [[ "$_head" == "ENC[" ]]; then
+            _bad_secrets+=("$(basename "$_f")")
+            _secure_shred "$_f" 2>/dev/null || rm -f "$_f"
+        fi
+    done
+    if [[ ${#_bad_secrets[@]} -gt 0 ]]; then
+        log_error "export_docker_secrets: secret file(s) contain raw SOPS ciphertext — decryption failed silently:"
+        local _s
+        for _s in "${_bad_secrets[@]}"; do
+            log_error "  ${docker_dir}/${_s}"
+        done
+        log_error "Remediation:"
+        log_error "  1. Run: make key-health  (verify age key is present and readable)"
+        log_error "  2. Run: sudo rm -f ${docker_dir}/*  (clear stale files)"
+        log_error "  3. Run: make up  (re-decrypt and restart)"
+        return 1
+    fi
+
+    # crowdsec_cf_firewall_token is intentionally not part of secrets.yaml.
+    # Canonical location is a flat file at:
+    #   ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/secrets/.docker_secrets/crowdsec_cf_firewall_token
+    # Mirror it into the active docker secret directory when present.
+    local _project_state_dir _cf_flat
+    _project_state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
+    _cf_flat="${_project_state_dir}/secrets/.docker_secrets/crowdsec_cf_firewall_token"
+    if [[ -f "$_cf_flat" ]]; then
+        local _cf_value
+        _cf_value=$(tr -d '[:space:]' < "$_cf_flat" 2>/dev/null || true)
+        if [[ -n "$_cf_value" && "$_cf_value" != CHANGE_ME* && "$_cf_value" != PLACEHOLDER* ]]; then
+            write_secret_file "${docker_dir}/crowdsec_cf_firewall_token" "$_cf_value" || return 1
+        fi
+    fi
+
+    if [[ $_failed -gt 0 ]]; then
+        log_error "export_docker_secrets: $_failed key(s) failed to export"
+        return 1
+    fi
+
+    log_success "Docker secrets exported to: $docker_dir"
+    return 0
 }
