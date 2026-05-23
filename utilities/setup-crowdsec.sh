@@ -556,7 +556,7 @@ if [[ -f "$_CF_BOUNCER_CONFIG_SRC" ]]; then
         sed \
             -e "s|TOKEN_CF_ZONE_ID|${_cf_zone_id}|g" \
             -e "s|TOKEN_CF_ACCOUNT_ID|${_cf_account_id:-CHANGE_ME_CF_ACCOUNT_ID}|g" \
-            -e "s|TOKEN_CROWDSEC_CF_FIREWALL_TOKEN_FILE|${_project_state_dir}/secrets/.docker_secrets/crowdsec_cf_firewall_token|g" \
+            -e "s|TOKEN_CROWDSEC_CF_FIREWALL_TOKEN|${_CF_FIREWALL_TOKEN}|g" \
             -e "s|CHANGE_ME_BOUNCER_KEY|${_CF_BOUNCER_KEY}|g" \
             "$_CF_BOUNCER_CONFIG_SRC" \
             | tee "$_CF_BOUNCER_CONFIG_DEST" >/dev/null
