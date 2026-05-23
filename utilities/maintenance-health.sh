@@ -443,4 +443,500 @@ _check_vaultwarden_server_info() {
             -w "%{http_code}" \
             "https://${domain}/api/config" 2>/dev/null || echo "000")
         case "$comp_code" in
-            200) _pass "vaultwarden:api" "VaultWarden API endpoint r
+            200) _pass "vaultwarden:api" "VaultWarden API endpoint responding (HTTP $comp_code)" ;;
+            *)   _warn "vaultwarden:api" "VaultWarden API returned HTTP $comp_code" ;;
+        esac
+    fi
+}
+
+_check_crowdsec() {
+    log_info "Checking CrowdSec..."
+    if systemctl is-active crowdsec >/dev/null 2>&1; then
+        _pass "crowdsec:service" "CrowdSec service is active"
+    else
+        _fail "crowdsec:service" "CrowdSec service is not running (start: sudo systemctl start crowdsec)"
+        return
+    fi
+    if sudo cscli metrics >/dev/null 2>&1; then
+        _pass "crowdsec:lapi" "CrowdSec LAPI is responding"
+    else
+        _warn "crowdsec:lapi" "CrowdSec LAPI not responding (debug: sudo journalctl -u crowdsec -n 50 --no-pager)"
+    fi
+    # Optional component: only warn when the unit exists but is inactive.
+    if systemctl list-unit-files crowdsec-cloudflare-bouncer.service \
+           2>/dev/null | grep -q 'crowdsec-cloudflare-bouncer.service'; then
+        if systemctl is-active crowdsec-cloudflare-bouncer >/dev/null 2>&1; then
+            _pass "crowdsec:bouncer" "CrowdSec Cloudflare bouncer is active"
+        else
+            _warn "crowdsec:bouncer" \
+                "CrowdSec Cloudflare bouncer is not running (start: sudo systemctl start crowdsec-cloudflare-bouncer)"
+        fi
+    else
+        _pass "crowdsec:bouncer" \
+            "CrowdSec Cloudflare bouncer not installed (optional — skipping)"
+    fi
+    if $COMPREHENSIVE; then
+        local decision_count
+        decision_count=$(sudo cscli decisions list -o raw 2>/dev/null | tail -n +2 | wc -l || echo 0)
+        _pass "crowdsec:decisions" "CrowdSec has ${decision_count} active ban decision(s)"
+    fi
+}
+
+_check_disk() {
+    log_info "Checking disk space..."
+    local state_dir; state_dir="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
+    local state_mount root_mount
+    state_mount=$(df --output=target "$state_dir" 2>/dev/null | tail -1 || echo "")
+    root_mount=$(df --output=target / 2>/dev/null | tail -1 || echo "/")
+    local usage_pct
+    usage_pct=$(df "$state_dir" 2>/dev/null \
+        | awk 'NR==2 {gsub(/%/,"",$5); print $5}' || echo "0")
+    if (( usage_pct >= DISK_CRIT_THRESHOLD )); then
+        _fail "disk:state" "Disk usage critical: ${usage_pct}% on ${state_dir} (mount: ${state_mount}) — threshold: ${DISK_CRIT_THRESHOLD}%"
+    elif (( usage_pct >= DISK_WARN_THRESHOLD )); then
+        _warn "disk:state" "Disk usage warning: ${usage_pct}% on ${state_dir} (mount: ${state_mount}) — threshold: ${DISK_WARN_THRESHOLD}%"
+    else
+        _pass "disk:state" "Disk OK: ${usage_pct}% on ${state_dir} (mount: ${state_mount})"
+    fi
+    if [[ -n "$state_mount" && "$state_mount" != "$root_mount" ]]; then
+        local root_usage
+        root_usage=$(df / 2>/dev/null \
+            | awk 'NR==2 {gsub(/%/,"",$5); print $5}' || echo "0")
+        if (( root_usage >= DISK_CRIT_THRESHOLD )); then
+            _fail "disk:root" "Root partition critical: ${root_usage}% on / — threshold: ${DISK_CRIT_THRESHOLD}%"
+        elif (( root_usage >= DISK_WARN_THRESHOLD )); then
+            _warn "disk:root" "Root partition warning: ${root_usage}% on / — threshold: ${DISK_WARN_THRESHOLD}%"
+        else
+            _pass "disk:root" "Root partition OK: ${root_usage}% on /"
+        fi
+    fi
+}
+
+_check_memory() {
+    log_info "Checking memory..."
+    local mem_total mem_available mem_used_pct
+    mem_total=$(awk '/MemTotal/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
+    mem_available=$(awk '/MemAvailable/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
+    if [[ $mem_total -gt 0 ]]; then
+        mem_used_pct=$(( (mem_total - mem_available) * 100 / mem_total ))
+        if [[ $mem_used_pct -ge $MEM_CRIT_THRESHOLD ]]; then
+            _fail "memory:usage" "Memory critical: ${mem_used_pct}% used (threshold: ${MEM_CRIT_THRESHOLD}%)"
+        elif [[ $mem_used_pct -ge $MEM_WARN_THRESHOLD ]]; then
+            _warn "memory:usage" "Memory warning: ${mem_used_pct}% used (threshold: ${MEM_WARN_THRESHOLD}%)"
+        else
+            _pass "memory:usage" "Memory OK: ${mem_used_pct}% used"
+        fi
+    else
+        _warn "memory:usage" "Cannot read memory information from /proc/meminfo"
+    fi
+}
+
+_check_network() {
+    log_info "Checking network connectivity..."
+    if timeout "$HEALTH_TIMEOUT" curl -sf \
+        --connect-timeout "$HEALTH_CONNECT_TIMEOUT" \
+        --max-time "$HEALTH_TIMEOUT" \
+        "https://1.1.1.1" &>/dev/null || \
+       timeout "$HEALTH_TIMEOUT" curl -sf \
+        --connect-timeout "$HEALTH_CONNECT_TIMEOUT" \
+        --max-time "$HEALTH_TIMEOUT" \
+        "https://cloudflare.com" &>/dev/null; then
+        _pass "network:outbound" "Outbound internet connectivity OK"
+    else
+        _warn "network:outbound" "Outbound internet connectivity check failed (Cloudflare unreachable)"
+    fi
+    local cf_code
+    cf_code=$(timeout "$HEALTH_TIMEOUT" curl -so /dev/null \
+        --connect-timeout "$HEALTH_CONNECT_TIMEOUT" \
+        --max-time "$HEALTH_TIMEOUT" \
+        -w "%{http_code}" \
+        "https://api.cloudflare.com/" 2>/dev/null || echo "000")
+    case "$cf_code" in
+        200|301|302|400|401|403) _pass "network:cloudflare" "Cloudflare API reachable (HTTP $cf_code)" ;;
+        *)                       _warn "network:cloudflare" "Cloudflare API not reachable (HTTP $cf_code)" ;;
+    esac
+}
+
+_check_smtp() {
+    log_info "Checking Postfix SMTP sidecar on port 587..."
+    if [[ -n "${SMTP_PASSWORD:-}" && -z "${VW_SMTP_HOST_PORT:-}" ]]; then
+        _pass "smtp:sidecar" "Direct external SMTP relay configured — sidecar check skipped"
+        return
+    fi
+    local sidecar_addr="${VW_SMTP_HOST_PORT:-127.0.0.1:587}"
+    local sidecar_host="${sidecar_addr%:*}"
+    local sidecar_port="${sidecar_addr##*:}"
+    local port_open=false
+    if command -v nc >/dev/null 2>&1; then
+        nc -z -w 3 "$sidecar_host" "$sidecar_port" >/dev/null 2>&1 && port_open=true
+    elif (echo >/dev/tcp/"$sidecar_host"/"$sidecar_port") >/dev/null 2>&1; then
+        port_open=true
+    else
+        _warn "smtp:sidecar" "Cannot probe port ${sidecar_addr} — nc not available and /dev/tcp failed"
+        return
+    fi
+    if ! $port_open; then
+        _fail "smtp:sidecar" "Postfix sidecar not listening on ${sidecar_addr} — email delivery will fail silently"
+        return
+    fi
+    local banner=""
+    if command -v nc >/dev/null 2>&1; then
+        banner=$(printf 'QUIT\r\n' | nc -w 3 "$sidecar_host" "$sidecar_port" 2>/dev/null \
+            | head -1 | tr -d '\r' || true)
+    fi
+    if [[ "$banner" == "220"* ]]; then
+        _pass "smtp:sidecar" "Postfix sidecar healthy on ${sidecar_addr} (banner: ${banner:0:60})"
+    elif [[ -n "$banner" ]]; then
+        _warn "smtp:sidecar" "Postfix sidecar port open but unexpected banner: '${banner:0:60}'"
+    else
+        _pass "smtp:sidecar" "Postfix sidecar port ${sidecar_addr} open (banner unavailable)"
+    fi
+}
+
+_check_dns() {
+    local domain; domain="$(_get_domain)"
+    if [[ -z "$domain" ]]; then
+        _warn "dns:resolution" "Cannot check DNS — domain not configured"
+        return
+    fi
+    log_info "Checking DNS resolution for $domain..."
+    local resolved_ip
+    if resolved_ip=$(timeout "$HEALTH_TIMEOUT" dig +short "$domain" 2>/dev/null | grep -v '^;' | head -1) && [[ -n "$resolved_ip" ]]; then
+        _pass "dns:resolution" "DNS resolves $domain → $resolved_ip"
+    elif resolved_ip=$(timeout "$HEALTH_TIMEOUT" nslookup "$domain" 2>/dev/null | awk '/^Address/ && NR>1 {print $2}' | head -1) && [[ -n "$resolved_ip" ]]; then
+        _pass "dns:resolution" "DNS resolves $domain → $resolved_ip (via nslookup)"
+    else
+        _fail "dns:resolution" "DNS resolution failed for $domain"
+    fi
+}
+
+_check_backups() {
+    log_info "Checking backup status..."
+    local backup_dir; backup_dir="$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")"
+    local now_epoch; now_epoch=$(date +%s)
+    if [[ ! -d "$backup_dir" ]]; then
+        _warn "backup:dir" "Backup directory not found: $backup_dir"
+        return
+    fi
+    local -A max_age_hours=([db]=26 [full]=168)
+    local any_found=false
+    for btype in db full; do
+        local type_dir="$backup_dir/$btype"
+        if [[ ! -d "$type_dir" ]]; then
+            _warn "backup:${btype}" "No $btype backup directory found: $type_dir"
+            continue
+        fi
+        local latest_file
+        latest_file=$(find "$type_dir" -maxdepth 1 -name '*.age' -type f \
+            -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
+        if [[ -z "$latest_file" ]]; then
+            _warn "backup:${btype}" "No $btype backups found in $type_dir"
+            continue
+        fi
+        any_found=true
+        local mtime age_h
+        mtime=$(stat -c %Y "$latest_file" 2>/dev/null || stat -f %m "$latest_file" 2>/dev/null || echo 0)
+        age_h=$(( (now_epoch - mtime) / 3600 ))
+        if (( age_h > max_age_hours[$btype] )); then
+            _warn "backup:${btype}" "$btype backup is ${age_h}h old (threshold: ${max_age_hours[$btype]}h): $(basename "$latest_file")"
+        else
+            _pass "backup:${btype}" "$btype backup is ${age_h}h old: $(basename "$latest_file")"
+        fi
+    done
+    [[ "$any_found" == "false" ]] && _warn "backup:age" "No backup archives found in $backup_dir"
+}
+
+_check_config() {
+    log_info "Checking configuration..."
+    local config_issues=()
+    if [[ ! -f "$ENV_FILE" ]]; then
+        config_issues+=("Missing env file: $ENV_FILE")
+    elif [[ ! -r "$ENV_FILE" ]]; then
+        config_issues+=("$ENV_FILE is not readable by $(id -un) — run: sudo chown $(id -un):$(id -gn) $ENV_FILE")
+    else
+        local required_vars=("DOMAIN" "ADMIN_EMAIL" "CLOUDFLARE_ZONE_ID")
+        for var in "${required_vars[@]}"; do
+            [[ -n "${!var:-}" ]] || config_issues+=("${var} is not set — verify '${var}=' is present in ${ENV_FILE}")
+        done
+    fi
+    local secrets_dir="${PROJECT_ROOT}/secrets/.docker_secrets"
+    if [[ -d "$secrets_dir" ]]; then
+        local required_secrets=("admin_token" "caddy_cloudflare_dns_token")
+        for secret in "${required_secrets[@]}"; do
+            [[ -f "${secrets_dir}/${secret}" ]] || config_issues+=("Missing secret: $secret")
+        done
+    fi
+    local age_key_file="${SOPS_AGE_KEY_FILE:-${PROJECT_ROOT}/secrets/keys/age-key.txt}"
+    if [[ ! -f "$age_key_file" ]]; then
+        config_issues+=("Age key not found: ${age_key_file} — backups cannot encrypt. Run: ./utilities/setup-secrets.sh configure")
+    elif [[ ! -r "$age_key_file" ]]; then
+        config_issues+=("Age key not readable: ${age_key_file} — check file permissions")
+    else
+        if ! grep -q '^AGE-SECRET-KEY-' "$age_key_file" 2>/dev/null; then
+            config_issues+=("Age key malformed or empty: ${age_key_file} — missing AGE-SECRET-KEY line")
+        else
+            local age_key_perms
+            age_key_perms=$(stat -c '%a' "$age_key_file" 2>/dev/null || echo "unknown")
+            if [[ "$age_key_perms" != "600" && "$age_key_perms" != "400" ]]; then
+                _warn "config:age-key" "Age key has insecure permissions (${age_key_perms}): ${age_key_file} — run: chmod 600 '${age_key_file}'"
+            else
+                _pass "config:age-key" "Age key present and valid (${age_key_file}, perms: ${age_key_perms})"
+            fi
+        fi
+    fi
+    local root_owned_issues=()
+    for f in ".env" "Makefile" "startup.sh" "backup.sh" "utilities/secrets-edit.sh"; do
+        # PROJECT_ROOT is derived from BASH_SOURCE at the top of this file.
+        local fpath="${PROJECT_ROOT}/${f}"
+        if [[ -e "$fpath" ]]; then
+            local owner; owner=$(stat -c '%U' "$fpath" 2>/dev/null || echo "unknown")
+            if [[ "$owner" == "root" ]]; then
+                root_owned_issues+=("${f} is owned by root — run: sudo make fix-permissions")
+            fi
+        fi
+    done
+    if [[ ${#root_owned_issues[@]} -gt 0 ]]; then
+        local _pi=0
+        for issue in "${root_owned_issues[@]}"; do
+            _warn "permissions:project-files:${_pi}" "$issue"
+            (( _pi++ )) || true
+        done
+    elif [[ -f "${PROJECT_ROOT}/.env" || -f "${PROJECT_ROOT}/Makefile" ]]; then
+        _pass "permissions:project-files" "Project file ownership is correct"
+    fi
+    if [[ ${#config_issues[@]} -eq 0 ]]; then
+        _pass "config:validation" "Configuration validation passed"
+    else
+        local _ci=0
+        for issue in "${config_issues[@]}"; do
+            _fail "config:validation:${_ci}" "$issue"
+            (( _ci++ )) || true
+        done
+    fi
+}
+
+_check_notify_failures() {
+    local state_dir; state_dir="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
+    local -a markers=()
+    mapfile -t markers < <(find "$state_dir" -maxdepth 1 -name 'NOTIFY_FAILED_*' 2>/dev/null | sort)
+    if [[ ${#markers[@]} -eq 0 ]]; then
+        _pass "notify:dead-letter" "No lost failure notifications"
+        return
+    fi
+    for marker in "${markers[@]}"; do
+        local unit="${marker##*/NOTIFY_FAILED_}"
+        _fail "notify:dead-letter:${unit}" \
+            "SMTP was down when ${unit} failed — notification lost. Investigate and remove: ${marker}"
+    done
+}
+
+_check_container_resources() {
+    log_info "Checking container resource usage..."
+    local stats
+    stats=$(docker stats --no-stream --format \
+        'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}' \
+        2>/dev/null) || {
+        _warn "resources:stats" "Cannot retrieve container resource stats"
+        return
+    }
+    log_debug "Container resource stats:
+${stats}"
+    _pass "resources:stats" "Container resource stats retrieved"
+}
+
+_send_notification() {
+    local subject="$1" body="$2"
+    if [[ "${_email_available:-true}" == "false" ]]; then
+        log_warn "Email notifications not available"
+        return
+    fi
+    if [[ -z "${ADMIN_EMAIL:-}" ]]; then
+        log_warn "ADMIN_EMAIL not set — cannot send health notification"
+        return 1
+    fi
+    if ! send_email "$ADMIN_EMAIL" "$subject" "$body" 2>/dev/null; then
+        log_warn "Failed to send health notification email"
+        return 1
+    fi
+    return 0
+}
+
+_notify_failures() {
+    local alerted_any=false
+    for name in "${check_order[@]}"; do
+        local status="${check_results[$name]:-}"
+        [[ "$status" == "fail" || "$status" == "warn" ]] || continue
+        if ! _acquire_alert_lock "$name"; then
+            log_info "Alert cooldown active for '${name}' — suppressing repeat notification"
+            continue
+        fi
+        local message="${check_messages[$name]:-}"
+        local alert_date subject body
+        alert_date="$(date)"
+        subject="VaultWarden Health [${status^^}]: ${name} on $(hostname)"
+        printf -v body \
+            'Health check alert at %s\n\nCheck : %s\nStatus: %s\nDetail: %s\n\nThis alert will not repeat for %ss (%s min).\nRun '\''./maintenance.sh health --report'\'' for full status.' \
+            "$alert_date" "$name" "${status^^}" "$message" \
+            "$ALERT_COOLDOWN_SECONDS" "$(( ALERT_COOLDOWN_SECONDS / 60 ))"
+        if ! _send_notification "$subject" "$body"; then
+            log_warn "_notify_failures: delivery failed for '${name}' — releasing cooldown for retry next cycle"
+            _release_alert_lock "$name"
+            continue
+        fi
+        alerted_any=true
+        log_info "Alert sent for '${name}' (${status})"
+    done
+    if [[ "$alerted_any" == "true" ]]; then
+        log_debug "_notify_failures: at least one alert was sent this cycle"
+    fi
+    if [[ $failed -gt 0 || $warnings -gt 0 ]]; then
+        _release_recovery_lock
+    fi
+}
+
+_notify_recovery() {
+    [[ $failed -eq 0 && $warnings -eq 0 ]] || return 0
+    if ! _acquire_alert_lock "recovery" "${ALERT_RECOVERY_TTL}"; then
+        log_info "Recovery notification already sent within TTL — suppressing"
+        return 0
+    fi
+    local recovery_date subject body
+    recovery_date="$(date)"
+    subject="VaultWarden Health RECOVERED on $(hostname)"
+    printf -v body \
+        'All health checks passed at %s\n\nPassed : %s\nWarnings: 0\nFailed : 0\n\nNo further alerts will fire until the next failure.' \
+        "$recovery_date" "$passed"
+    _send_notification "$subject" "$body" || true
+    log_info "Recovery notification sent"
+}
+
+_generate_report() {
+    local timestamp; timestamp=$(date '+%Y%m%d_%H%M%S')
+    local report_file="${REPORT_DIR}/health_${timestamp}.txt"
+    mkdir -p "$REPORT_DIR" 2>/dev/null || true
+    {
+        echo "VaultWarden Health Report"
+        echo "Generated: $(date)"
+        echo "Host: $(hostname)"
+        echo "Mode: $( $COMPREHENSIVE && echo comprehensive || echo standard )"
+        echo "================================================================="
+        echo ""
+        echo "SUMMARY: $passed passed, $warnings warnings, $failed failed (total: $total)"
+        echo ""
+        for name in "${check_order[@]}"; do
+            local status="${check_results[$name]:-unknown}"
+            local message="${check_messages[$name]:-no message}"
+            printf '%-10s %-40s %s\n' "[$status]" "$name" "$message"
+        done
+        if $COMPREHENSIVE; then
+            echo ""
+            echo "CONTAINER RESOURCES:"
+            docker stats --no-stream 2>/dev/null || echo "  (unavailable)"
+        fi
+    } > "$report_file" 2>/dev/null
+    log_info "Report saved to: $report_file"
+    find "$REPORT_DIR" -name 'health_*.txt' \
+        -mtime +"$REPORT_RETENTION_DAYS" -delete 2>/dev/null || true
+}
+
+_print_results() {
+    if $QUIET && [[ $failed -eq 0 && $warnings -eq 0 ]]; then return; fi
+    echo ""
+    echo "================================================================="
+    echo " VaultWarden Health Check Results"
+    echo "================================================================="
+    local status_color
+    for name in "${check_order[@]}"; do
+        local status="${check_results[$name]:-unknown}"
+        local message="${check_messages[$name]:-}"
+        case "$status" in
+            pass) status_color="${COLOR_GREEN:-}" ;;
+            warn) status_color="${COLOR_YELLOW:-}" ;;
+            fail) status_color="${COLOR_RED:-}" ;;
+            *)    status_color="" ;;
+        esac
+        printf '%s[%-4s]%s %-40s %s\n' \
+            "$status_color" "$status" "${COLOR_RESET:-}" "$name" "$message"
+    done
+    echo "-----------------------------------------------------------------"
+    printf 'Total: %d | Passed: %s%d%s | Warnings: %s%d%s | Failed: %s%d%s\n' \
+        "$total" \
+        "${COLOR_GREEN:-}" "$passed"   "${COLOR_RESET:-}" \
+        "${COLOR_YELLOW:-}" "$warnings" "${COLOR_RESET:-}" \
+        "${COLOR_RED:-}"   "$failed"   "${COLOR_RESET:-}"
+    echo "================================================================="
+}
+
+_health_main() {
+    _acquire_run_lock
+    trap '_release_run_lock' EXIT HUP INT TERM
+    _health_parse_args "$@"
+    log_info "Starting VaultWarden health check..."
+    if $COMPREHENSIVE; then log_info "Mode: comprehensive"; else log_info "Mode: standard"; fi
+    _check_containers
+    _check_ssl
+    _check_vaultwarden_alive
+    _check_vaultwarden_server_info
+    _check_crowdsec
+    _check_disk
+    _check_memory
+    _check_network
+    _check_smtp
+    _check_dns
+    _check_backups
+    _check_config
+    _check_notify_failures
+    if $COMPREHENSIVE; then _check_container_resources; fi
+    if $FIX_MODE && [[ $failed -gt 0 ]]; then
+        log_info "Fix mode enabled — attempting recovery..."
+        _fix_unhealthy_containers
+    fi
+    _print_results
+    if $REPORT_MODE; then _generate_report; fi
+    _notify_failures
+    _notify_recovery
+    if [[ $failed -gt 0 ]]; then exit 2
+    elif [[ $warnings -gt 0 ]]; then exit 1
+    else exit 0
+    fi
+}
+
+    _health_main "$@"
+}
+
+# ---------------------------------------------------------------------------
+# Argument Parsing & main
+# ---------------------------------------------------------------------------
+show_help() {
+    cat << 'EOF'
+VaultWarden-OCI Health Check
+
+USAGE:
+    sudo utilities/maintenance-health.sh [OPTIONS]
+    ./maintenance.sh health [OPTIONS]
+
+OPTIONS:
+    --comprehensive     Run all checks including extended diagnostics
+    --fix, -f           Attempt automatic recovery for failed checks
+    --report, -r        Save health report to file
+    --quiet, -q         Suppress non-critical output
+    --help, -h          Show this help
+
+EXIT CODES:
+    0 — All checks passed
+    1 — One or more warnings
+    2 — One or more failures
+    3 — Critical failure (cannot run checks)
+EOF
+}
+
+[[ $# -gt 0 && ( "$1" == "--help" || "$1" == "-h" || "$1" == "help" ) ]] && { show_help; exit 0; }
+
+# Strip leading 'health' token if called via dispatcher with subcommand prepended
+[[ "${1:-}" == "health" ]] && shift
+
+main() {
+    run_health_check "$@"
+}
+
+main "$@"
