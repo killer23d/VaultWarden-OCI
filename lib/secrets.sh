@@ -844,16 +844,11 @@ EOF
 
     # Inject all dynamic values explicitly so that $ characters in secrets
     # (e.g. bcrypt hashes: $2y$12$...) are written verbatim.
-    #
-    # $'...' ANSI-C quoting is used for the border/emoji lines so the shell
-    # expands \uXXXX and \UXXXXXXXX into actual Unicode characters (═ and 🚨)
-    # before printf receives them. Plain printf '%s\n' does NOT interpret
-    # these escape sequences — it would write the literal backslash-u string.
-    printf '%s\n' \
-        $'═══════════════════════════════════════════════════════════════════════' \
-        $'                        \U0001F6A8 CRITICAL SECURITY DOCUMENT \U0001F6A8' \
-        $'═══════════════════════════════════════════════════════════════════════' \
-        >> "$output_file"
+    cat >> "$output_file" << 'EOF'
+═══════════════════════════════════════════════════════════════════════
+                        🚨 CRITICAL SECURITY DOCUMENT 🚨
+═══════════════════════════════════════════════════════════════════════
+EOF
     printf 'Created: %s\n' "$date_val"      >> "$output_file"
     printf 'Server:  %s\n' "$hostname_val" >> "$output_file"
     printf 'Domain:  %s\n' "$domain"       >> "$output_file"
