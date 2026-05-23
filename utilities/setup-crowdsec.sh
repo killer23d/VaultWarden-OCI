@@ -576,7 +576,8 @@ if [[ -f "$_CF_BOUNCER_CONFIG_SRC" ]]; then
 
         if _cf_bouncer_service_exists; then
             systemctl enable crowdsec-cloudflare-bouncer || true
-            systemctl start crowdsec-cloudflare-bouncer || true
+            systemctl reset-failed crowdsec-cloudflare-bouncer 2>/dev/null || true
+            systemctl restart crowdsec-cloudflare-bouncer || true
 
             _cf_bouncer_ready=false
             for _i in {1..10}; do
