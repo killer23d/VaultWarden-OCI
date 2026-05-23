@@ -387,11 +387,11 @@ _backup_filename_age_days() {
     basename_file=$(basename "$file")
 
     local ts_date ts_time
-    if [[ "$basename_file" =~ ([0-9]{8})-([0-9]{6}) ]]; then
+    if [[ "$basename_file" =~ ([0-9]{8})[_-]([0-9]{6}) ]]; then
         ts_date="${BASH_REMATCH[1]}"   # e.g. 20240315
         ts_time="${BASH_REMATCH[2]}"   # e.g. 143022
     else
-            echo ""
+        echo ""
         return
     fi
 
