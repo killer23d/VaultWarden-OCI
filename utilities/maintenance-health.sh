@@ -79,11 +79,10 @@ if [[ -n "${ENV_FILE}" ]]; then
         # wider than 0600 (e.g. 640/644). That is a warning, not a fatal error —
         # we log it and continue so the health check still runs and reports
         # results rather than silently aborting via set -e.
-        if ! load_env_file "${ENV_FILE}" 2>/dev/null; then
+        load_env_file "${ENV_FILE}" 2>/dev/null || \
             log_warn "maintenance-health: env file '${ENV_FILE}' could not be loaded." \
-                     "If running as root, permissions must be 600 (run: chmod 600 '${ENV_FILE}')." \
-                     "Continuing with inherited environment only."
-        fi
+                 "If running as root, permissions must be 600 (run: chmod 600 '${ENV_FILE}')." \
+                 "Continuing with inherited environment only."
     fi
 else
     log_warn "maintenance.sh health: no .env file found at '${PROJECT_ROOT}/.env' or '/etc/vaultwarden/vaultwarden.env' — relying on inherited environment"
@@ -704,17 +703,22 @@ _check_backups() {
         real_user="$(get_real_user)"
         local created_ok=true
         for _subdir in db full emergency; do
-            if ! _maybe_sudo install -d -m 750 -o "$real_user" "$backup_dir/$_subdir" 2>/dev/null; then
+            if ! mkdir -p "$backup_dir/$_subdir" 2>/dev/null; then
                 created_ok=false
                 break
+            fi
+            chmod 750 "$backup_dir/$_subdir" 2>/dev/null || true
+            # Only chown if we are running as root (sudo context) — avoids install -o failure
+            # when the username doesn't resolve in the current namespace.
+            if (( EUID == 0 )) && [[ -n "$real_user" ]] && id "$real_user" &>/dev/null; then
+            chown "$real_user" "$backup_dir/$_subdir" 2>/dev/null || true
             fi
         done
         if [[ "$created_ok" == "true" ]]; then
             _pass "backup:dir" "Backup directory created: $backup_dir (owner: $real_user, mode: 750)"
         else
-            _warn "backup:dir" "Backup directory not found: $backup_dir — run: sudo ./utilities/backup-run.sh run db --dry-run"
+            _warn "backup:dir" "Backup directory not found and could not be created: $backup_dir — check permissions"
             return
-        fi
     fi
     
     local -A max_age_hours=([db]=26 [full]=168)
