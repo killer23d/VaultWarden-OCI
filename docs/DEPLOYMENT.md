@@ -10,7 +10,7 @@ Related docs: [CONFIGURATION.md](CONFIGURATION.md) · [SECURITY.md](SECURITY.md)
 
 | Requirement | Details |
 | :-- | :-- |
-| **Server** | Ubuntu 24.04 LTS or Oracle Linux 8/9 (OCI A1 Flex recommended) |
+| **Server** | Ubuntu 24.04 LTS on arm64 or amd64/x86_64 (OCI A1 Flex arm64 recommended); Oracle Linux 8/9 is also supported |
 | **Resources** | 1 vCPU, 6 GB RAM, 50 GB storage (OCI Always Free tier) |
 | **Domain** | A domain you control with DNS on Cloudflare |
 | **Cloudflare account** | Free tier is sufficient |

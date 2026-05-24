@@ -3,6 +3,10 @@
 Quick reference for the most common operations. All commands assume you are in
 the repository root on the server. Prefix with `sudo` where indicated.
 
+Architecture support: Ubuntu arm64 (including OCI A1 Flex) and Ubuntu amd64/x86_64 are both supported.
+
+Library note: `lib/common.sh` is the facade entrypoint and now sources `lib/log.sh`, `lib/validate.sh`, and `lib/config.sh` automatically.
+
 ---
 
 ## First Time / Recovery

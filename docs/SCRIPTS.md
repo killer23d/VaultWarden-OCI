@@ -23,7 +23,7 @@ Complete reference for all management scripts and utility libraries in VaultWard
 | 7 | `maintenance.sh` | Dispatcher for maintenance/health/updates | `db-maint` only |
 | 8 | `utilities/*.sh` | 22 standalone admin/engine scripts (see `utilities/README.md`) | ✅ |
 
-**Utility libraries (8):** `lib/common.sh`, `lib/docker.sh`, `lib/crypto.sh` *(includes key resilience + security)*, `lib/backup-utils.sh`, `lib/secrets.sh`, `lib/storage.sh`, `lib/email.sh`, `lib/maintenance-utils.sh`
+**Utility libraries (11):** `lib/common.sh`, `lib/log.sh`, `lib/validate.sh`, `lib/config.sh`, `lib/docker.sh`, `lib/crypto.sh` *(includes key resilience + security)*, `lib/backup-utils.sh`, `lib/secrets.sh`, `lib/storage.sh`, `lib/email.sh`, `lib/maintenance-utils.sh`
 
 > **Dispatcher count:** `edit-secrets.sh` was refactored into a thin dispatcher in this release, bringing the total dispatcher-pattern top-level scripts to 5: `setup.sh`, `maintenance.sh`, `backup.sh`, `restore.sh`, `edit-secrets.sh`. `utilities/secrets-edit.sh` is the interactive editor utility invoked by the dispatcher.
 
@@ -790,23 +790,48 @@ All common operations have Makefile shortcuts. Run `make help` to see the full t
 All libraries live in `lib/` and are sourced at the top of every script. At install time, `setup.sh systemd` copies the entire `lib/` tree to `/opt/vaultwarden-scripts/lib/` and patches source paths.
 
 ### `lib/common.sh`
-Core functions used by every script.
-Legacy `setup.sh`-private validators (`validate_domain_secure` / `validate_email_secure`) were removed; callers use these canonical validators directly.
+Facade entrypoint sourced by scripts. It now loads `lib/log.sh`, `lib/validate.sh`, and `lib/config.sh`, while retaining core shared utilities.
 
 | Function | Description |
 | :-- | :-- |
 | `init_common_lib "$0"` | Initialise library with script context |
-| `log_info/success/warn/error` | Colour-coded logging |
 | `require_commands` | Assert required binaries are present |
-| `get_config_value KEY DEFAULT` | Read a variable from `.env` |
-| `load_env_file` | Source `.env` into the environment |
 | `get_real_user` | Resolve actual user even under `sudo` |
 | `_maybe_sudo` | TTY-aware privilege escalation helper for root-required commands |
 | `ensure_dir PATH MODE` | Create directory with permissions |
 | `retry_with_backoff N DELAY CMD` | Retry with exponential backoff |
-| `validate_domain DOMAIN` | Domain validator with RFC 1035 total-length cap (253) and bare-IPv4 rejection |
-| `validate_email EMAIL` | Email validator with RFC 5321 total-length cap (254) and stricter character-class regex |
-| `validate_port PORT` | Port range validator |
+| `HOST_ARCH / GITHUB_ARCH` | Architecture exports set by `init_common_lib()` for apt/Docker vs GitHub-release assets |
+
+### `lib/log.sh`
+Logging + colour constants + log-level filtering.
+
+| Function | Description |
+| :-- | :-- |
+| `log_info/success/warn/error/debug` | Standardized logging with timestamp/tag output |
+| `log_header` | Banner-style section output |
+| `log_rollback` / `log_dry_run` | Specialized rollback and dry-run tags |
+| `set_log_prefix` | Set script log prefix tag |
+
+### `lib/validate.sh`
+Pure input validation helpers.
+
+| Function | Description |
+| :-- | :-- |
+| `validate_email` | RFC 5321-aligned email validation |
+| `validate_domain` | RFC 1035-aligned domain validation + bare IPv4 rejection |
+| `validate_port` | Port range validator (1–65535) |
+| `validate_ip` | IPv4 octet-range validator |
+| `validate_url` | Basic HTTP/HTTPS URL validator |
+
+### `lib/config.sh`
+Secure `.env` loading and config state helpers.
+
+| Function | Description |
+| :-- | :-- |
+| `load_env_file` | Safe `.env` parser with injection and dangerous-variable guards |
+| `get_config_value KEY DEFAULT` | Read config value with optional default |
+| `require_config` | Assert required config keys are present |
+| `_set_env_var` / `_read_env_value` | Internal env-file read/write helpers |
 
 ### `lib/docker.sh`
 Docker and Docker Compose helpers.

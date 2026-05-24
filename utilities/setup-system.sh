@@ -165,7 +165,7 @@ install_docker() {
 
     local codename arch keyfile sources_file
     codename=$(. /etc/os-release && echo "$VERSION_CODENAME")
-    arch=$(dpkg --print-architecture)
+    arch="${HOST_ARCH}"
     keyfile="/etc/apt/keyrings/docker.asc"
     sources_file="/etc/apt/sources.list.d/docker.sources"
 
@@ -341,7 +341,7 @@ install_dependencies() {
         if command -v add-apt-repository >/dev/null 2>&1; then
             add-apt-repository -y universe 2>/dev/null || {
                 log_warn "add-apt-repository failed — adding universe source manually"
-                local arch; arch=$(dpkg --print-architecture)
+                local arch="${HOST_ARCH}"
                 local archive_url
                 local codename
                 codename=$(lsb_release -cs 2>/dev/null || echo "noble")
@@ -355,7 +355,7 @@ install_dependencies() {
                 apt-get update -qq || return 1
             }
         else
-            local arch; arch=$(dpkg --print-architecture)
+            local arch="${HOST_ARCH}"
             local archive_url
             local codename
             codename=$(lsb_release -cs 2>/dev/null || echo "noble")
@@ -411,8 +411,7 @@ install_dependencies() {
     fi
 
     if ! command -v sops >/dev/null 2>&1; then
-        local arch; arch=$(dpkg --print-architecture)
-        [[ "$arch" == "armhf" ]] && arch="arm"
+        local arch="${GITHUB_ARCH}"
 
         local sops_ver="${SOPS_VERSION:-}"
         if [[ -n "$sops_ver" ]]; then

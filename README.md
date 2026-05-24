@@ -14,6 +14,7 @@ This is a **template-based, hardened deployment** built for small teams who want
 - **Encrypted secrets** — Age + SOPS for industry-standard secrets management
 - **Emergency recovery** — break-glass admin access and automatic rollback on failed updates
 - **Simple day-to-day operations** — Makefile shortcuts covering the full lifecycle
+- **Architecture-agnostic Ubuntu support** — tested flow for both arm64 (OCI A1 Flex) and amd64/x86_64 hosts
 
 ---
 
@@ -230,7 +231,7 @@ PROJECT_STATE_DIR=/mnt/vw-data   # MUST equal DATA_VOLUME_MOUNT
 
 ## 📧 Email Delivery
 
-Email is handled by **`lib/common.sh`** (email functions) — a pure bash + curl multi-provider chain. No mail daemon is required on the host. Three tiers are attempted in order when `EMAIL_MODE=auto`:
+Email is handled by **`lib/email.sh`** — a pure bash + curl multi-provider chain. No mail daemon is required on the host. Three tiers are attempted in order when `EMAIL_MODE=auto`:
 
 ```
 Tier 1 ─ HTTP API       →  MailerSend, SendGrid, Mailgun, Postmark, Resend
@@ -290,7 +291,7 @@ Full details, provider setup, Postfix MTA configuration, and troubleshooting: **
 | :-- | :-- |
 | **Caddy** | TLS termination, reverse proxy, security headers, 4-tier structured JSON logging (512 MB limit). Now requires **Caddy ≥ 2.11.2**; uses `encode zstd gzip`, `roll_compression zstd`, connection timeouts in the global `servers` block, `request_body` size limits on admin/auth handlers, and health-check log suppression. |
 | **VaultWarden** | Password manager application (512 MB limit) |
-| **Postfix** | Containerised SMTP relay — last-resort MTA for the email chain in `lib/common.sh`; binds `127.0.0.1:587` (256 MB limit) |
+| **Postfix** | Containerised SMTP relay — last-resort MTA for the email chain in `lib/email.sh`; binds `127.0.0.1:587` (256 MB limit) |
 | **CrowdSec** | Host systemd service — threat detection with Cloudflare edge banning and host iptables |
 
 > The `docker-compose.yml.example` template now enforces `read_only` filesystems, `tmpfs` mounts, `ulimits` (nofile), `no-new-privileges:true`, and tightened Caddy log rotation. See [docs/ADVANCED-CUSTOMIZATION.md](docs/ADVANCED-CUSTOMIZATION.md) for override details.
@@ -313,12 +314,17 @@ Full reference: [docs/SCRIPTS.md](docs/SCRIPTS.md)
 
 | Library | Purpose |
 | :-- | :-- |
-| `common.sh` | Logging, validation, shared utilities, and multi-provider email delivery |
+| `common.sh` | Facade entrypoint that sources `log.sh`, `validate.sh`, and `config.sh`, plus shared core utilities |
+| `log.sh` | Logging, colour constants, and log-level filtering |
+| `validate.sh` | Pure input validators: email, domain, port, IP, URL |
+| `config.sh` | Secure `.env` parsing and configuration helpers (`load_env_file`, `get_config_value`, `require_config`) |
 | `crypto.sh` | Age / SOPS encryption & decryption, security validation, and Age key resilience (health check, escrow, paper backup). bcrypt cost factor is validated to a minimum of 10 on all hash operations. |
 | `docker.sh` | Docker lifecycle management |
 | `backup-utils.sh` | Backup-specific shared logic including SQLite Online Backup API integrity verification |
 | `secrets.sh` | Secrets collection, auto-generation, hashing (Argon2id + bcrypt), Cloudflare token validation, recovery kit generation |
 | `storage.sh` | Storage-mode guard library. `require_project_state_ready()` validates configuration consistency, block device availability, mount presence, and sentinel identity before any script writes to the state directory. No-op in boot-only mode (`DATA_VOLUME_DEVICE` blank). Sourced by `setup.sh`, `startup.sh`, `backup.sh`, `restore.sh`, and `maintenance.sh`. |
+| `email.sh` | Email delivery chain (provider API → SMTP relay → host MTA fallback) and notification helpers |
+| `maintenance-utils.sh` | Shared maintenance helpers used by utilities maintenance scripts |
 
 ### Configuration Templates
 

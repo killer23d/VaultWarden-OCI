@@ -8,6 +8,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ---
 ## [Unreleased]
 
+### Changed — lib/common.sh decomposition + multi-arch support
+
+- Decomposed `lib/common.sh` into focused domain libraries:
+  - `lib/log.sh` (logging, colour constants, log-level filtering)
+  - `lib/validate.sh` (pure input validation helpers)
+  - `lib/config.sh` (secure `.env` parsing and config state helpers)
+- Converted `lib/common.sh` into a facade loader that sources the three new libraries while preserving backward compatibility for existing callers.
+- Added architecture exports in `init_common_lib()`: `HOST_ARCH` (apt/Docker canonical arch names) and `GITHUB_ARCH` (GitHub release asset naming).
+- Consolidated inline architecture detection in `utilities/setup-system.sh` to use `HOST_ARCH`/`GITHUB_ARCH`, including automatic `armhf` → `arm` normalization for GitHub release assets.
+- Expanded documented Ubuntu support to both arm64 and amd64/x86_64 hosts without script-call changes.
+
 ### Changed — Shared-lib consolidation and startup deduplication
 
 - Moved `_maybe_sudo()` from `startup.sh` to `lib/common.sh` and exported it for shared callers.

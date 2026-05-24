@@ -10,13 +10,13 @@ Related docs: [CONFIGURATION.md](CONFIGURATION.md) · [ADVANCED-CUSTOMIZATION.md
 
 ## Architecture Overview
 
-Email is handled by **`lib/common.sh` (email functions)** — a pure bash + curl multi-provider
+Email is handled by **`lib/email.sh`** — a pure bash + curl multi-provider
 chain. No mail daemon is required for the normal API or SMTP paths. The
 delivery chain has three stages when `EMAIL_MODE=auto`:
 
 ```
                 ┌─────────────────────────────────────┐
-                │         lib/common.sh                │
+                │         lib/email.sh                 │
                 │                                     │
   EMAIL_MODE    │  Stage 1 ── HTTP API                │  MailerSend, SendGrid,
      =auto  ──► │           (curl + JSON)             │  Mailgun, Postmark,
@@ -31,7 +31,7 @@ delivery chain has three stages when `EMAIL_MODE=auto`:
                 └─────────────────────────────────────┘
 ```
 
-Two additional consumers sit outside `lib/common.sh` (email functions) and use SMTP directly:
+Two additional consumers sit outside `lib/email.sh` and use SMTP directly:
 
 | Consumer | How it sends email | Variables |
 | :-- | :-- | :-- |
@@ -74,7 +74,7 @@ EMAIL_PROVIDER=mailersend    # change to: sendgrid | mailgun | postmark | resend
 
 ### 3. Store the API token in secrets
 
-`lib/common.sh` (email functions) uses a single canonical secret key (`email_api_token`) and
+`lib/email.sh` uses a single canonical secret key (`email_api_token`) and
 resolves the correct provider token automatically based on `EMAIL_PROVIDER`.
 Store the token in the canonical `email_api_token` key (used for all providers):
 
@@ -319,7 +319,7 @@ MAILGUN_DOMAIN=mg.yourdomain.com  # optional — set only if different from SMTP
 | `SMTP_PORT` | `587` | SMTP relay port |
 | `SMTP_SECURITY` | `starttls` | `starttls` or `on` (SSL/TLS) |
 | `SMTP_USERNAME` | *(empty)* | SMTP relay username |
-| `SMTP_FROM` | *(empty)* | Sender address for `lib/common.sh` (email functions) and Postfix relay |
+| `SMTP_FROM` | *(empty)* | Sender address for `lib/email.sh` and Postfix relay |
 | `SMTP_FROM_NAME` | `VaultWarden` | Sender display name |
 | `SMTP_TIMEOUT` | `30` | Seconds before curl gives up |
 | `VW_SMTP_HOST` | `postfix` | VaultWarden SMTP host — Postfix sidecar service name |
@@ -343,8 +343,8 @@ MAILGUN_DOMAIN=mg.yourdomain.com  # optional — set only if different from SMTP
 
 | Secret key | Used by | Description |
 | :-- | :-- | :-- |
-| `email_api_token` | `lib/common.sh` (email functions) tier 1 | API token used by MailerSend / SendGrid / Mailgun / Postmark / Resend |
-| `smtp_password` | `lib/common.sh` (email functions) tier 2, Postfix | SMTP relay password |
+| `email_api_token` | `lib/email.sh` tier 1 | API token used by MailerSend / SendGrid / Mailgun / Postmark / Resend |
+| `smtp_password` | `lib/email.sh` tier 2, Postfix | SMTP relay password |
 
 ---
 
@@ -357,13 +357,13 @@ MAILGUN_DOMAIN=mg.yourdomain.com  # optional — set only if different from SMTP
 # or: make test-email
 ```
 
-This exercises the full `lib/common.sh` (email functions) chain from tier 1 through to tier 3 and
+This exercises the full `lib/email.sh` chain from tier 1 through to tier 3 and
 prints which tier succeeded or failed.
 
 ### Check which tier delivered
 
 ```bash
-# lib/common.sh logs to the maintenance log — look for tier labels:
+# lib/email.sh logs to the maintenance log — look for tier labels:
 grep -E 'EMAIL|SMTP|MTA|tier' /var/lib/vaultwarden/logs/maintenance.log | tail -30
 ```
 
@@ -404,7 +404,7 @@ docker compose logs vaultwarden | grep -i smtp
 | API tier always fails | Token not set or wrong key name | Run `./utilities/secrets-edit.sh` and verify the matching `email_api_token` is set |
 | SMTP tier `SSL handshake failed` | `SMTP_SECURITY` mismatch | `starttls` → port 587; `on` → port 465 |
 | VaultWarden email fails with "authentication required" | `VW_SMTP_AUTH_MECHANISM` not set to `none` | Set `VW_SMTP_AUTH_MECHANISM=none` and `VW_SMTP_EXPLICIT_TLS=false` in `.env` |
-| VaultWarden sends email but `lib/common.sh` (email functions) does not | `SMTP_*` misconfigured; Postfix not relaying | Check Postfix logs: `docker compose logs postfix` |
+| VaultWarden sends email but `lib/email.sh` does not | `SMTP_*` misconfigured; Postfix not relaying | Check Postfix logs: `docker compose logs postfix` |
 | Postfix `SASL authentication failed` | Wrong SMTP password in secrets | `./utilities/secrets-rotate.sh smtp_password` |
 | Mailgun HTTP 404 `Domain not found` | Wrong API region | Set `MAILGUN_REGION=eu` in `.env` for EU accounts |
 | All tiers fail silently on `EMAIL_MODE=auto` | `EMAIL_MODE` typo or not set | `grep EMAIL_MODE .env` — must be `auto`, `api`, `smtp`, or `host` |

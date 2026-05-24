@@ -101,7 +101,7 @@ Manage secrets with `./utilities/secrets-edit.sh`. They are encrypted with Age +
 
 | Secret | Purpose |
 | :-- | :-- |
-| `smtp_password` | SMTP relay password — used by `lib/common.sh` (email functions) SMTP path **and** the Postfix MTA sidecar |
+| `smtp_password` | SMTP relay password — used by `lib/email.sh` SMTP path **and** the Postfix MTA sidecar |
 | `email_api_token` | HTTP API token for the selected email provider (stored in secrets and selected by `EMAIL_PROVIDER`) |
 | `push_installation_id` | Bitwarden push notification installation ID |
 | `push_installation_key` | Bitwarden push notification installation key |
@@ -112,7 +112,7 @@ Manage secrets with `./utilities/secrets-edit.sh`. They are encrypted with Age +
 
 ## 📧 Email Configuration
 
-Email delivery is handled by **`lib/common.sh` (email functions)** — a pure bash + curl multi-provider chain with automatic fallback. SMTP can go either to your external relay or to the Postfix sidecar, and `host` mode is the final local mail/sendmail fallback.
+Email delivery is handled by **`lib/email.sh`** — a pure bash + curl multi-provider chain with automatic fallback. SMTP can go either to your external relay or to the Postfix sidecar, and `host` mode is the final local mail/sendmail fallback.
 
 ### Delivery Chain
 
@@ -138,7 +138,7 @@ EMAIL_MODE=auto
 EMAIL_PROVIDER=mailersend   # mailersend | sendgrid | mailgun | postmark | resend
 ```
 
-`lib/common.sh` (email functions) automatically resolves the API token from `email_api_token` in secrets — you do not need to set `EMAIL_API_TOKEN` separately:
+`lib/email.sh` automatically resolves the API token from `email_api_token` in secrets — you do not need to set `EMAIL_API_TOKEN` separately:
 
 | `EMAIL_PROVIDER` | Secret key to set via `./utilities/secrets-edit.sh` |
 | :-- | :-- |
@@ -175,7 +175,7 @@ The `postfix` service in `docker-compose.yml` runs `boky/postfix` as a container
 
 **How it works:**
 
-- `lib/common.sh` connects to `127.0.0.1:587` for the SMTP sidecar path when `SMTP_PASSWORD` is blank.
+- `lib/email.sh` connects to `127.0.0.1:587` for the SMTP sidecar path when `SMTP_PASSWORD` is blank.
 - The Postfix container authenticates upstream using the same `smtp_password` secret as tier 2.
 - Postfix forwards mail through `RELAYHOST` (your upstream SMTP provider) — it is a relay, not a standalone mail server. It does **not** send mail directly to recipient MX records.
 

@@ -30,6 +30,7 @@ _LIBS_LOADED=false
 if [[ -f "${PROJECT_ROOT}/lib/common.sh" ]]; then
     # shellcheck source=../lib/common.sh
     source "${PROJECT_ROOT}/lib/common.sh"
+    init_common_lib "$0"
     _LIBS_LOADED=true
 fi
 if [[ -f "${PROJECT_ROOT}/lib/storage.sh" ]]; then
@@ -204,15 +205,19 @@ else
         log_info "Cloudflare bouncer binary not found — attempting installation..."
 
         # ── Normalise architecture ─────────────────────────────────────────
-        _arch="$(dpkg --print-architecture 2>/dev/null || uname -m)"
-        case "$_arch" in
-            arm64|aarch64) _arch="arm64" ;;
-            amd64|x86_64)  _arch="amd64" ;;
-            *)
-                log_warn "Unsupported architecture: $_arch — skipping CF bouncer install"
-                _arch=""
-                ;;
-        esac
+        if [[ -n "${GITHUB_ARCH:-}" ]]; then
+            _arch="${GITHUB_ARCH}"
+        else
+            _arch="$(dpkg --print-architecture 2>/dev/null || uname -m)"
+            case "$_arch" in
+                arm64|aarch64) _arch="arm64" ;;
+                amd64|x86_64)  _arch="amd64" ;;
+                *)
+                    log_warn "Unsupported architecture: $_arch — skipping CF bouncer install"
+                    _arch=""
+                    ;;
+            esac
+        fi
 
         _installed_via_deb=false
 
