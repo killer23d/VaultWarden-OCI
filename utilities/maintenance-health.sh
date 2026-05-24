@@ -700,12 +700,23 @@ _check_backups() {
     local backup_dir; backup_dir="$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")"
     local now_epoch; now_epoch=$(date +%s)
     if [[ ! -d "$backup_dir" ]]; then
-        if mkdir -p "$backup_dir/db" "$backup_dir/full" 2>/dev/null; then
-        _pass "backup:dir" "Backup directory created: $backup_dir"
-    else
-        _warn "backup:dir" "Backup directory not found and could not be created: $backup_dir"
-        return
+        local real_user
+        real_user="$(get_real_user)"
+        local created_ok=true
+        for _subdir in db full emergency; do
+            if ! _maybe_sudo install -d -m 750 -o "$real_user" "$backup_dir/$_subdir" 2>/dev/null; then
+                created_ok=false
+                break
+            fi
+        done
+        if [[ "$created_ok" == "true" ]]; then
+            _pass "backup:dir" "Backup directory created: $backup_dir (owner: $real_user, mode: 750)"
+        else
+            _warn "backup:dir" "Backup directory not found: $backup_dir — run: sudo ./utilities/backup-run.sh run db --dry-run"
+            return
+        fi
     fi
+
     fi
     local -A max_age_hours=([db]=26 [full]=168)
     local any_found=false
@@ -764,13 +775,36 @@ _check_config() {
             [[ -f "${secrets_dir}/${secret}" ]] || config_issues+=("Missing secret: $secret")
         done
     fi
-    local age_key_file="${SOPS_AGE_KEY_FILE:-${PROJECT_ROOT}/secrets/keys/age-key.txt}"
-    local age_key_default="${PROJECT_ROOT}/secrets/keys/age-key.txt"
-    # If the env-specified path doesn't exist but the default project path does, use it
-    # and warn that SOPS_AGE_KEY_FILE is pointing to the wrong location.
-    if [[ ! -f "$age_key_file" && -f "$age_key_default" && "$age_key_file" != "$age_key_default" ]]; then
-        _warn "config:age-key-path" "SOPS_AGE_KEY_FILE points to missing path: ${age_key_file} — falling back to default: ${age_key_default}. Unset SOPS_AGE_KEY_FILE or copy the key there."
-        age_key_file="$age_key_default"
+    # Resolve age key using the same priority order as backup-run.sh _resolve_age_key()
+    local age_key_file=""
+    local _age_candidates=(
+        "${SOPS_AGE_KEY_FILE:-}"
+        "/etc/vaultwarden/age-key.txt"
+        "${PROJECT_ROOT}/secrets/keys/age-key.txt"
+    )
+    for _candidate in "${_age_candidates[@]}"; do
+        [[ -z "$_candidate" ]] && continue
+        if [[ -f "$_candidate" ]]; then
+            age_key_file="$_candidate"
+            break
+        fi
+    done
+
+    # Warn if SOPS_AGE_KEY_FILE is set but points nowhere — inform operator to fix .env
+    if [[ -n "${SOPS_AGE_KEY_FILE:-}" && ! -f "${SOPS_AGE_KEY_FILE}" ]]; then
+        if [[ -n "$age_key_file" ]]; then
+            _warn "config:age-key-path" \
+                "SOPS_AGE_KEY_FILE=${SOPS_AGE_KEY_FILE} not found — resolved via fallback to: ${age_key_file}. Remove or correct SOPS_AGE_KEY_FILE in .env"
+        fi
+    fi
+
+    # If no candidate found at all, fall back to the first non-empty candidate path for the error message
+    if [[ -z "$age_key_file" ]]; then
+        local _first_candidate=""
+        for _candidate in "${_age_candidates[@]}"; do
+            [[ -n "$_candidate" ]] && { _first_candidate="$_candidate"; break; }
+        done
+        config_issues+=("Age key not found in any expected location — run: ./utilities/setup-secrets.sh configure")
     fi
     if [[ ! -f "$age_key_file" ]]; then
         config_issues+=("Age key not found: ${age_key_file} — backups cannot encrypt. Run: ./utilities/setup-secrets.sh configure")
