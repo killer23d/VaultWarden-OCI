@@ -598,6 +598,27 @@ _startup_pull_images() {
   return 0
 }
 
+update_dns_on_startup() {
+  local dns_script="${PROJECT_ROOT}/utilities/maintenance-update-dns.sh"
+  if [[ ! -x "$dns_script" ]]; then
+    log_warn "DNS update script missing/not executable; skipping startup DNS check: $dns_script"
+    return 0
+  fi
+
+  log_info "Running startup DNS reconciliation check..."
+  if [[ "$DRY_RUN" == "true" ]]; then
+    log_info "[DRY RUN] Would run: ${dns_script} update-dns"
+    return 0
+  fi
+
+  if _maybe_sudo "$dns_script" update-dns; then
+    log_success "Startup DNS reconciliation completed"
+  else
+    log_warn "Startup DNS reconciliation failed; continuing startup"
+  fi
+  return 0
+}
+
 # ---------------------------------------------------------------------------
 # _startup_start_services
 #
@@ -753,6 +774,7 @@ main() {
   warn_plaintext_secret_overrides || true
   cleanup_orphaned_resources || true
   ensure_vaultwarden_egress_nat || true
+  update_dns_on_startup || true
   _startup_pull_images || exit 1
   _startup_start_services || exit 1
 

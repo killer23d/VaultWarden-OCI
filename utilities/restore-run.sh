@@ -1662,6 +1662,8 @@ main() {
     local AGE_KEY_FILE; AGE_KEY_FILE="$(get_config_value "SOPS_AGE_KEY_FILE" "secrets/keys/age-key.txt")"
     local PUID; PUID="$(get_config_value "PUID" "")"
     local PGID; PGID="$(get_config_value "PGID" "")"
+    PUID="${PUID//$'\r'/}"
+    PGID="${PGID//$'\r'/}"
 
     # If PUID/PGID are not in .env (bootstrap mode), prompt for them
     # interactively so a bare-metal emergency restore can proceed without a
