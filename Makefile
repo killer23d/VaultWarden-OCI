@@ -156,16 +156,26 @@ fix-permissions: ## Fix file ownership after sudo operations leave root-owned fi
 	echo "$(CYAN)  Target user : $$REAL_USER:$$REAL_GROUP$(NC)"; \
 	echo ""; \
 	for item in \
-	    CHANGELOG.md Makefile README.md VERSION \
-	    backup.sh utilities/secrets-edit.sh \
+	    CHANGELOG.md Makefile README.md RUNBOOK.md VERSION \
+	    backup.sh edit-secrets.sh \
 	    maintenance.sh restore.sh \
 	    setup.sh startup.sh \
 	    backups caddy crowdsec docs lib logs ssl systemd utilities \
 	    docker-compose.yml.example docker-compose.override.yml.example .env.example .sops.yaml \
-	    .gitattributes .gitignore; do \
+	    .gitattributes .gitignore .locks .rate-limit; \
+	do \
 	    [ -e "$$item" ] && chown -R "$$REAL_USER:$$REAL_GROUP" "$$item" 2>/dev/null && \
 	        echo "$(GREEN)  ✓ $$item$(NC)" || true; \
 	done; \
+	if [ -f "secrets/secrets.yaml" ]; then \
+	    chown "$$REAL_USER:$$REAL_GROUP" secrets/secrets.yaml; \
+	    chmod 600 secrets/secrets.yaml; \
+	    echo "$(GREEN)  ✓ secrets/secrets.yaml → $$REAL_USER:$$REAL_GROUP (mode 600)$(NC)"; \
+	fi; \
+	find . -maxdepth 1 -name "recovery-kit-*.txt" -exec chown "$$REAL_USER:$$REAL_GROUP" {} \; -exec chmod 600 {} \; 2>/dev/null; \
+	if ls recovery-kit-*.txt 1> /dev/null 2>&1; then \
+	    echo "$(GREEN)  ✓ recovery-kit files → $$REAL_USER:$$REAL_GROUP (mode 600)$(NC)"; \
+	fi; \
 	if [ -f ".env" ]; then \
 	    chown "$$REAL_USER:$$REAL_GROUP" .env; \
 	    chmod 600 .env; \
@@ -179,7 +189,7 @@ fix-permissions: ## Fix file ownership after sudo operations leave root-owned fi
 	    chown "$$REAL_USER:$$REAL_GROUP" docker-compose.override.yml; \
 	    echo "$(GREEN)  ✓ docker-compose.override.yml$(NC)"; \
 	fi; \
-		if [ -f "caddy/entrypoint.sh" ] && [ ! -x "caddy/entrypoint.sh" ]; then \
+	if [ -f "caddy/entrypoint.sh" ] && [ ! -x "caddy/entrypoint.sh" ]; then \
 	    chmod +x "caddy/entrypoint.sh"; \
 	    echo "$(GREEN)  ✓ caddy/entrypoint.sh → +x$(NC)"; \
 	fi; \
