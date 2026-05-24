@@ -75,7 +75,22 @@ if [[ -n "${ENV_FILE}" ]]; then
         log_error "maintenance.sh health: '${ENV_FILE}' is not readable by $(id -un) — config variables will be unset."
         log_error "Fix ownership: sudo chown $(id -un):$(id -gn) '${ENV_FILE}'"
     else
-        load_env_file "${ENV_FILE}" || true
+        # load_env_file returns 1 when run as root and the file has permissions
+        # wider than 0600 (e.g. 640/644). That is a warning, not a fatal error —
+        # we log it and continue so the health check still runs and reports
+        # results rather than silently aborting via set -e.
+        if ! load_env_file "${ENV_FILE}" 2>/dev/null; then
+            log_warn "maintenance-health: env file '${ENV_FILE}' could not be loaded" \
+                     "(permissions may be too open — run: chmod 600 '${ENV_FILE}')." \
+                     "Continuing with inherited environment."
+            # Re-try without the strict root permission guard by sourcing
+            # directly so existing exported vars (e.g. from the calling
+            # systemd unit's EnvironmentFile=) remain available.
+            set -o allexport
+            # shellcheck source=/dev/null
+            source "${ENV_FILE}" 2>/dev/null || true
+            set +o allexport
+        fi
     fi
 else
     log_warn "maintenance.sh health: no .env file found at '${PROJECT_ROOT}/.env' or '/etc/vaultwarden/vaultwarden.env' — relying on inherited environment"
@@ -103,15 +118,36 @@ local _HEALTH_RUN_LOCK_FILE="/run/lock/vaultwarden-health.lock"
 local _HEALTH_LOCK_FD=""
 
 _acquire_run_lock() {
-    # Pre-create the lock file with world-writable permissions so that a
-    # non-root run can open it after a previous root run created it as 0600.
+    # Ensure the lock file exists and is world-writable so that both root and
+    # non-root invocations can open it without permission errors.
+    # Strategy:
+    #   1. File absent  → create it with mode 0666 (works for any user).
+    #   2. File present, not writable by current user, and we are root
+    #      → fix perms so the next non-root run also succeeds.
+    #   3. File present, not writable by current user, non-root
+    #      → chmod requires root; emit a helpful one-time message and
+    #        proceed without the singleton guard (safe — health check is
+    #        not destructive).
     if [[ ! -e "$_HEALTH_RUN_LOCK_FILE" ]]; then
+        # Create with 0666 so any user can use it on the next run.
         touch "$_HEALTH_RUN_LOCK_FILE" 2>/dev/null \
             && chmod 0666 "$_HEALTH_RUN_LOCK_FILE" 2>/dev/null \
             || true
-    elif [[ ! -w "$_HEALTH_RUN_LOCK_FILE" ]] && (( EUID == 0 )); then
-        chmod 0666 "$_HEALTH_RUN_LOCK_FILE" 2>/dev/null || true
     fi
+
+    # If the file is still not writable, attempt a repair (root only) or warn.
+    if [[ ! -w "$_HEALTH_RUN_LOCK_FILE" ]]; then
+        if (( EUID == 0 )); then
+            chmod 0666 "$_HEALTH_RUN_LOCK_FILE" 2>/dev/null || true
+        else
+            log_warn "Cannot open run-lock ${_HEALTH_RUN_LOCK_FILE} — proceeding without singleton guard." \
+                     "Fix once with: sudo chmod 0666 ${_HEALTH_RUN_LOCK_FILE}"
+            _HEALTH_LOCK_FD=""
+            return 0
+        fi
+    fi
+
+    # Open the lock file for writing.
     exec {_HEALTH_LOCK_FD}>"$_HEALTH_RUN_LOCK_FILE" 2>/dev/null || {
         log_warn "Cannot open run-lock ${_HEALTH_RUN_LOCK_FILE} — proceeding without singleton guard"
         _HEALTH_LOCK_FD=""
@@ -133,11 +169,29 @@ local ALERT_LOCK_DIR="${ALERT_STATE_DIR:-$(_default_alert_state_dir)}"
 local ALERT_COOLDOWN_SECONDS=${ALERT_COOLDOWN_SECONDS:-3600}
 local ALERT_RECOVERY_TTL=${ALERT_RECOVERY_TTL:-86400}
 
+# ---------------------------------------------------------------------------
+# _ensure_alert_dir — create the cooldown state directory if missing.
+# Returns 0 on success, 1 if the directory cannot be created (caller skips
+# the alert for this cycle rather than producing confusing mktemp errors).
+# ---------------------------------------------------------------------------
+_ensure_alert_dir() {
+    [[ -d "${ALERT_LOCK_DIR}" ]] && return 0
+    if mkdir -p "${ALERT_LOCK_DIR}" 2>/dev/null; then
+        chmod 0750 "${ALERT_LOCK_DIR}" 2>/dev/null || true
+        return 0
+    fi
+    log_warn "_ensure_alert_dir: cannot create '${ALERT_LOCK_DIR}'" \
+             "— alert cooldown tracking disabled for this cycle." \
+             "Fix: sudo mkdir -p '${ALERT_LOCK_DIR}' && sudo chown $(id -un) '${ALERT_LOCK_DIR}'"
+    return 1
+}
+
 _acquire_alert_lock() {
     local key="$1"
     local safe_key
     safe_key=$(printf '%s' "$key" | tr -cs '[:alnum:]-' '_')
-    mkdir -p "${ALERT_LOCK_DIR}" 2>/dev/null || true
+    # Ensure the directory exists; if it can't be created, skip alert (no crash).
+    _ensure_alert_dir || return 1
     local state_file="${ALERT_LOCK_DIR}/${safe_key}.cooldown"
     local ttl="${2:-${ALERT_COOLDOWN_SECONDS}}"
     local now; now=$(date +%s)
@@ -145,7 +199,11 @@ _acquire_alert_lock() {
         local last_sent; last_sent=$(cat "$state_file" 2>/dev/null || printf '0')
         if (( now - last_sent < ttl )); then return 1; fi
     fi
-    local tmp_file; tmp_file=$(mktemp "${ALERT_LOCK_DIR}/.tmp.XXXXXXXXXX")
+    local tmp_file
+    tmp_file=$(mktemp "${ALERT_LOCK_DIR}/.tmp.XXXXXXXXXX") || {
+        log_warn "_acquire_alert_lock: mktemp failed in '${ALERT_LOCK_DIR}' — skipping alert for '${key}'"
+        return 1
+    }
     printf '%s\n' "$now" > "$tmp_file"
     mv -f "$tmp_file" "$state_file"
     return 0
@@ -770,8 +828,7 @@ _check_container_resources() {
         _warn "resources:stats" "Cannot retrieve container resource stats"
         return
     }
-    log_debug "Container resource stats:
-${stats}"
+    log_debug "Container resource stats:\n${stats}"
     _pass "resources:stats" "Container resource stats retrieved"
 }
 
