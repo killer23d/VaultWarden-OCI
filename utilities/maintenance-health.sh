@@ -780,9 +780,9 @@ _check_backups() {
         mtime=$(stat -c %Y "$latest_file" 2>/dev/null || stat -f %m "$latest_file" 2>/dev/null || echo 0)
         age_h=$(( (now_epoch - mtime) / 3600 ))
         if (( age_h > max_age_hours[$btype] )); then
-            _warn "backup:${btype}" "$btype backup is ${age_h}h old (threshold: ${max_age_hours[$btype]}h): $(basename "$latest_file")"
+            _warn "backup:${btype}" "$btype backup is ${age_h}h old (threshold: ${max_age_hours[$btype]}h): $(basename "$latest_file") (path: $type_dir)"
         else
-            _pass "backup:${btype}" "$btype backup is ${age_h}h old: $(basename "$latest_file")"
+            _pass "backup:${btype}" "$btype backup is ${age_h}h old: $(basename "$latest_file") (path: $type_dir)"
         fi
     done
     [[ "$any_found" == "false" ]] && _warn "backup:age" "No backup archives found in $backup_dir"
