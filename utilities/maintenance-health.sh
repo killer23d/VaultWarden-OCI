@@ -80,16 +80,9 @@ if [[ -n "${ENV_FILE}" ]]; then
         # we log it and continue so the health check still runs and reports
         # results rather than silently aborting via set -e.
         if ! load_env_file "${ENV_FILE}" 2>/dev/null; then
-            log_warn "maintenance-health: env file '${ENV_FILE}' could not be loaded" \
-                     "(permissions may be too open — run: chmod 600 '${ENV_FILE}')." \
-                     "Continuing with inherited environment."
-            # Re-try without the strict root permission guard by sourcing
-            # directly so existing exported vars (e.g. from the calling
-            # systemd unit's EnvironmentFile=) remain available.
-            set -o allexport
-            # shellcheck source=/dev/null
-            source "${ENV_FILE}" 2>/dev/null || true
-            set +o allexport
+            log_warn "maintenance-health: env file '${ENV_FILE}' could not be loaded." \
+                     "If running as root, permissions must be 600 (run: chmod 600 '${ENV_FILE}')." \
+                     "Continuing with inherited environment only."
         fi
     fi
 else
@@ -574,6 +567,9 @@ _check_crowdsec() {
 _check_disk() {
     log_info "Checking disk space..."
     local state_dir; state_dir="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
+    if [[ -z "$state_dir" ]]; then
+        state_dir="/var/lib/vaultwarden"
+    fi
     local state_mount root_mount
     state_mount=$(df --output=target "$state_dir" 2>/dev/null | tail -1 || echo "")
     root_mount=$(df --output=target / 2>/dev/null | tail -1 || echo "/")
@@ -743,6 +739,15 @@ _check_config() {
     elif [[ ! -r "$ENV_FILE" ]]; then
         config_issues+=("$ENV_FILE is not readable by $(id -un) — run: sudo chown $(id -un):$(id -gn) $ENV_FILE")
     else
+        local env_mode
+        env_mode=$(stat -c '%a' "$ENV_FILE" 2>/dev/null || echo "unknown")
+        if [[ "$env_mode" != "unknown" ]]; then
+            local env_mode_int
+            env_mode_int=$((8#$env_mode))
+            if (( (env_mode_int & 0177) != 0 )); then
+                config_issues+=("${ENV_FILE} permissions are ${env_mode}; must be 600 so root-mode health checks can read config safely")
+            fi
+        fi
         local required_vars=("DOMAIN" "ADMIN_EMAIL" "CLOUDFLARE_ZONE_ID")
         for var in "${required_vars[@]}"; do
             [[ -n "${!var:-}" ]] || config_issues+=("${var} is not set — verify '${var}=' is present in ${ENV_FILE}")
