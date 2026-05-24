@@ -851,7 +851,7 @@ _check_config() {
             local owner group
             owner=$(stat -c '%U' "$fpath" 2>/dev/null || echo "unknown")
             group=$(stat -c '%G' "$fpath" 2>/dev/null || echo "unknown")
-            if [[ "$owner" == "root" ]]; then
+            if [[ "$owner" == "root" && "$expected_owner" != "root" ]]; then
                 root_owned_issues+=("${f} is owned by root:${group} (expected non-root, e.g. ${expected_owner}:${expected_group}) — run: sudo make fix-permissions")
             fi
         fi
