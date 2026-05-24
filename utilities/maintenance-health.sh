@@ -47,6 +47,43 @@ _default_report_dir() {
     printf '%s/reports' "$state_dir"
 }
 
+_resolve_age_key() {
+    local candidates=(
+        "${SOPS_AGE_KEY_FILE:-}"
+        "/etc/vaultwarden/age-key.txt"
+        "${PROJECT_ROOT}/secrets/keys/age-key.txt"
+    )
+    local candidate
+    for candidate in "${candidates[@]}"; do
+        [[ -z "$candidate" ]] && continue
+        if [[ "$candidate" != /* ]]; then
+            if [[ -f "$PROJECT_ROOT/$candidate" ]]; then
+                echo "$PROJECT_ROOT/$candidate"
+                return 0
+            fi
+            [[ -f "$candidate" ]] && { echo "$candidate"; return 0; }
+            continue
+        fi
+        [[ -f "$candidate" ]] && { echo "$candidate"; return 0; }
+    done
+    # mirror backup-run fallback behavior for diagnostics
+    for candidate in "${candidates[@]}"; do
+        [[ -n "$candidate" && "$candidate" == /* ]] && { echo "$candidate"; return 1; }
+    done
+    echo "/etc/vaultwarden/age-key.txt"
+    return 1
+}
+
+_resolve_backup_base_dir() {
+    local configured
+    configured="$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")"
+    if [[ "$configured" != /* ]]; then
+        printf '%s/%s\n' "$PROJECT_ROOT" "$configured"
+    else
+        printf '%s\n' "$configured"
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # run_health_check — all logic verbatim from maintenance.sh
 # ---------------------------------------------------------------------------
@@ -696,7 +733,7 @@ _check_dns() {
 
 _check_backups() {
     log_info "Checking backup status..."
-    local backup_dir; backup_dir="$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")"
+    local backup_dir; backup_dir="$(_resolve_backup_base_dir)"
     local now_epoch; now_epoch=$(date +%s)
     if [[ ! -d "$backup_dir" ]]; then
         local real_user
@@ -779,35 +816,21 @@ _check_config() {
             [[ -f "${secrets_dir}/${secret}" ]] || config_issues+=("Missing secret: $secret")
         done
     fi
-    # Resolve age key using the same priority order as backup-run.sh _resolve_age_key()
+    # Resolve age key using backup-run compatible precedence and relative-path handling
     local age_key_file=""
-    local _age_candidates=(
-        "${SOPS_AGE_KEY_FILE:-}"
-        "/etc/vaultwarden/age-key.txt"
-        "${PROJECT_ROOT}/secrets/keys/age-key.txt"
-    )
-    for _candidate in "${_age_candidates[@]}"; do
-        [[ -z "$_candidate" ]] && continue
-        if [[ -f "$_candidate" ]]; then
-            age_key_file="$_candidate"
-            break
-        fi
-    done
+    age_key_file="$(_resolve_age_key || true)"
 
     # Warn if SOPS_AGE_KEY_FILE is set but points nowhere — inform operator to fix .env
-    if [[ -n "${SOPS_AGE_KEY_FILE:-}" && ! -f "${SOPS_AGE_KEY_FILE}" ]]; then
-        if [[ -n "$age_key_file" ]]; then
+    if [[ -n "${SOPS_AGE_KEY_FILE:-}" ]]; then
+        local _env_age_candidate="${SOPS_AGE_KEY_FILE}"
+        [[ "$_env_age_candidate" != /* ]] && _env_age_candidate="${PROJECT_ROOT}/${_env_age_candidate}"
+        if [[ ! -f "$_env_age_candidate" && -n "$age_key_file" ]]; then
             _warn "config:age-key-path" \
                 "SOPS_AGE_KEY_FILE=${SOPS_AGE_KEY_FILE} not found — resolved via fallback to: ${age_key_file}. Remove or correct SOPS_AGE_KEY_FILE in .env"
         fi
     fi
 
-    # If no candidate found at all, fall back to the first non-empty candidate path for the error message
     if [[ -z "$age_key_file" ]]; then
-        local _first_candidate=""
-        for _candidate in "${_age_candidates[@]}"; do
-            [[ -n "$_candidate" ]] && { _first_candidate="$_candidate"; break; }
-        done
         config_issues+=("Age key not found in any expected location — run: ./utilities/setup-secrets.sh configure")
     fi
     if [[ ! -f "$age_key_file" ]]; then
@@ -1078,6 +1101,7 @@ EOF
 [[ "${1:-}" == "health" ]] && shift
 
 main() {
+    require_root "$@"
     run_health_check "$@"
 }
 
