@@ -853,6 +853,7 @@ main() {
 
     if [[ "$LIST_ONLY" == "true" ]]; then
         load_env_file 2>/dev/null || true
+        auto_fix_critical_permissions "$PROJECT_ROOT"
         local list_base_dir
         list_base_dir="$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")"
         list_backups "$list_base_dir" || true
@@ -862,6 +863,7 @@ main() {
     # verify subcommand
     if [[ "$_SUBCMD" == "verify" ]]; then
         require_root "$@"
+        auto_fix_critical_permissions "$PROJECT_ROOT"
         _check_backup_deps
 
         local old_umask
@@ -875,6 +877,7 @@ main() {
 
         log_header "VaultWarden-OCI Backup Verify"
         load_env_file || { log_error "Failed to load .env"; exit 1; }
+        auto_fix_critical_permissions "$PROJECT_ROOT"
         require_project_state_ready || exit 1
 
         local age_key_file
@@ -930,9 +933,11 @@ main() {
     # rotate subcommand
     if [[ "$_SUBCMD" == "rotate" ]]; then
         require_root "$@"
+        auto_fix_critical_permissions "$PROJECT_ROOT"
 
         log_header "VaultWarden-OCI Backup Rotation${DRY_RUN:+ [DRY RUN]}"
         load_env_file || { log_error "Failed to load .env"; exit 1; }
+        auto_fix_critical_permissions "$PROJECT_ROOT"
 
         local base_dir
         base_dir="$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")"
@@ -1018,6 +1023,7 @@ main() {
     fi
 
     load_env_file || { log_error "Failed to load .env"; exit 1; }
+    auto_fix_critical_permissions "$PROJECT_ROOT"
     require_project_state_ready || exit 1
 
     local state_dir

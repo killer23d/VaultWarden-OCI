@@ -1580,6 +1580,7 @@ main() {
     # list subcommand and the rclone availability checks — can read config values
     # such as RCLONE_REMOTE_NAME and RCLONE_CONFIG.
     load_env_file 2>/dev/null || true   # best-effort; hard error below if root required
+    auto_fix_critical_permissions "$PROJECT_ROOT"
 
     # Resolve the backup storage root from .env using the same
     # key ("BACKUP_DIR") and default that backup.sh uses.  Every search path
@@ -1611,6 +1612,7 @@ main() {
     fi
 
     require_root "$@"
+    auto_fix_critical_permissions "$PROJECT_ROOT"
 
     ensure_dir "$VW_LOCK_DIR" 700 "$(get_real_user)" || {
         log_error "Failed to initialize operations lock directory: $VW_LOCK_DIR"; exit 1
@@ -1649,6 +1651,7 @@ main() {
             log_error "Failed to load .env"; exit 1
         fi
     fi
+    auto_fix_critical_permissions "$PROJECT_ROOT"
 
     # Fail closed if the expected data volume is not mounted.
     # In bootstrap/emergency-restore mode (--remote without .env), DATA_VOLUME_DEVICE
@@ -1662,6 +1665,8 @@ main() {
     local AGE_KEY_FILE; AGE_KEY_FILE="$(get_config_value "SOPS_AGE_KEY_FILE" "secrets/keys/age-key.txt")"
     local PUID; PUID="$(get_config_value "PUID" "")"
     local PGID; PGID="$(get_config_value "PGID" "")"
+    PUID="${PUID//$'\r'/}"
+    PGID="${PGID//$'\r'/}"
 
     # If PUID/PGID are not in .env (bootstrap mode), prompt for them
     # interactively so a bare-metal emergency restore can proceed without a

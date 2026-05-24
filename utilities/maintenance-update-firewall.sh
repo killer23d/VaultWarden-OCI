@@ -178,7 +178,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 main() {
+    require_root "$@"
     _load_env
+    auto_fix_critical_permissions "$PROJECT_ROOT"
     trap 'perform_cleanup' EXIT HUP INT TERM
     update_firewall_ranges
     exit $?

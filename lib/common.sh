@@ -388,6 +388,29 @@ require_root() {
     fi
 }
 
+# Best-effort remediation for common operational file permission drift.
+# This is intentionally non-fatal and safe to call repeatedly.
+auto_fix_critical_permissions() {
+    local project_root="${1:-$PROJECT_ROOT}"
+    local real_user real_group
+    real_user=$(get_real_user 2>/dev/null || id -un)
+    real_group=$(id -gn "$real_user" 2>/dev/null || id -gn)
+
+    local env_file="${project_root}/.env"
+    if [[ -f "$env_file" ]]; then
+        chmod 600 "$env_file" 2>/dev/null || true
+        chown "${real_user}:${real_group}" "$env_file" 2>/dev/null || true
+    fi
+
+    local age_key_file="${SOPS_AGE_KEY_FILE:-}"
+    if [[ -z "$age_key_file" ]]; then
+        age_key_file="/etc/vaultwarden/age-key.txt"
+    fi
+    if [[ -f "$age_key_file" ]]; then
+        chmod 600 "$age_key_file" 2>/dev/null || true
+    fi
+}
+
 get_real_user() {
     # Prefer SUDO_USER — set reliably by sudo regardless of shell nesting depth
     if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
