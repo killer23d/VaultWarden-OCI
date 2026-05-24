@@ -317,7 +317,7 @@ AGE_BANNER
             "${COLOR_YELLOW}" "${COLOR_GREEN}" "${COLOR_RESET}"
         printf '%s%s%s\n' "${COLOR_RED}${COLOR_GREEN}" "${age_key_content}" "${COLOR_RESET}"
         printf '\n%sTo view again at any time:%s\n' "${COLOR_RED}" "${COLOR_RESET}"
-        printf '  %ssudo cat /etc/vaultwarden/age-key.txt%s  %s(production — root-owned, mode 600)%s\n' \
+        printf '  %ssudo cat /etc/vaultwarden/age-key.txt%s  %s(production — service-owned, mode 600)%s\n' \
             "${COLOR_GREEN}" "${COLOR_RESET}" "${COLOR_RED}" "${COLOR_RESET}"
         printf '  %scat secrets/keys/age-key.txt%s  %s(repo-local copy — intentional for local dev only)%s\n' \
             "${COLOR_GREEN}" "${COLOR_RESET}" "${COLOR_RED}" "${COLOR_RESET}"

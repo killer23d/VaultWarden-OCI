@@ -78,20 +78,30 @@ update_dns_record() {
 
     local DNS_LOCK="/run/lock/vaultwarden-dns-update.lock"
     local _DNS_LOCK_FD=""
-    # Pre-create with world-writable permissions so a non-root run can open a
-    # file originally created by root (default umask would set it 0600).
-    if [[ ! -e "$DNS_LOCK" ]]; then
-        touch "$DNS_LOCK" 2>/dev/null \
-            && chmod 0666 "$DNS_LOCK" 2>/dev/null \
-            || true
-    elif [[ ! -w "$DNS_LOCK" ]] && (( EUID == 0 )); then
-        chmod 0666 "$DNS_LOCK" 2>/dev/null || true
+    local _lock_user _lock_group _lock_owner
+    _lock_user=$(id -un)
+    _lock_group=$(id -gn)
+    if [[ -f "$DNS_LOCK" ]]; then
+        _lock_owner=$(stat -c '%U' "$DNS_LOCK" 2>/dev/null || echo "")
+        if [[ -n "$_lock_owner" && "$_lock_owner" != "$_lock_user" ]]; then
+            chown "${_lock_user}:${_lock_group}" "$DNS_LOCK" 2>/dev/null || true
+            sudo chown "${_lock_user}:${_lock_group}" "$DNS_LOCK" 2>/dev/null || true
+        fi
+    else
+        install -m 0660 /dev/null "$DNS_LOCK" 2>/dev/null || true
+        chown "${_lock_user}:${_lock_group}" "$DNS_LOCK" 2>/dev/null || true
+    fi
+    chmod 0660 "$DNS_LOCK" 2>/dev/null || true
+    if [[ ! -w "$DNS_LOCK" ]]; then
+        log_error "Cannot write DNS run-lock: $DNS_LOCK"
+        log_error "Fix once with: sudo chown ${_lock_user}:${_lock_group} $DNS_LOCK && sudo chmod 0660 $DNS_LOCK"
+        return 1
     fi
     exec {_DNS_LOCK_FD}>"$DNS_LOCK" 2>/dev/null || {
-        log_warn "Cannot open run-lock ${DNS_LOCK} — proceeding without singleton guard"
-        _DNS_LOCK_FD=""
+        log_error "Cannot open DNS run-lock: ${DNS_LOCK}"
+        return 1
     }
-    if [[ -n "$_DNS_LOCK_FD" ]] && ! flock -n "$_DNS_LOCK_FD"; then
+    if ! flock -n "$_DNS_LOCK_FD"; then
         log_info "DNS update already in progress (lock: $DNS_LOCK). Skipping."
         return 0
     fi

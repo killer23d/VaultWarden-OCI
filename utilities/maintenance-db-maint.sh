@@ -216,6 +216,15 @@ main() {
     require_root
     local OPS_LOCK="/run/lock/vaultwarden-operations.lock"
     local _OPS_LOCK_FD
+    local lock_user lock_group
+    lock_user="${SERVICE_USER:-${BACKUP_USER:-ubuntu}}"
+    lock_group=$(id -gn "$lock_user" 2>/dev/null || echo "$lock_user")
+    if [[ -e "$OPS_LOCK" ]]; then
+        chown "${lock_user}:${lock_group}" "$OPS_LOCK" 2>/dev/null || true
+        chmod 0660 "$OPS_LOCK" 2>/dev/null || true
+    else
+        install -m 0660 -o "$lock_user" -g "$lock_group" /dev/null "$OPS_LOCK" 2>/dev/null || true
+    fi
     exec {_OPS_LOCK_FD}>"$OPS_LOCK"
     if ! flock -n "$_OPS_LOCK_FD"; then
         log_error "Another operation (update/restore/maintenance) is already running. Aborting."

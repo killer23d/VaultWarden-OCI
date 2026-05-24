@@ -147,40 +147,29 @@ local _HEALTH_RUN_LOCK_FILE="/run/lock/vaultwarden-health.lock"
 local _HEALTH_LOCK_FD=""
 
 _acquire_run_lock() {
-    # Ensure the lock file exists and is world-writable so that both root and
-    # non-root invocations can open it without permission errors.
-    # Strategy:
-    #   1. File absent  → create it with mode 0666 (works for any user).
-    #   2. File present, not writable by current user, and we are root
-    #      → fix perms so the next non-root run also succeeds.
-    #   3. File present, not writable by current user, non-root
-    #      → chmod requires root; emit a helpful one-time message and
-    #        proceed without the singleton guard (safe — health check is
-    #        not destructive).
-    if [[ ! -e "$_HEALTH_RUN_LOCK_FILE" ]]; then
-        # Create with 0666 so any user can use it on the next run.
-        touch "$_HEALTH_RUN_LOCK_FILE" 2>/dev/null \
-            && chmod 0666 "$_HEALTH_RUN_LOCK_FILE" 2>/dev/null \
-            || true
-    fi
-
-    # If the file is still not writable, attempt a repair (root only) or warn.
-    if [[ ! -w "$_HEALTH_RUN_LOCK_FILE" ]]; then
-        if (( EUID == 0 )); then
-            chmod 0666 "$_HEALTH_RUN_LOCK_FILE" 2>/dev/null || true
-        else
-            log_warn "Cannot open run-lock ${_HEALTH_RUN_LOCK_FILE} — proceeding without singleton guard." \
-                     "Fix once with: sudo chmod 0666 ${_HEALTH_RUN_LOCK_FILE}"
-            _HEALTH_LOCK_FD=""
-            return 0
+    local _lock_user _lock_group _lock_owner
+    _lock_user=$(id -un)
+    _lock_group=$(id -gn)
+    if [[ -f "$_HEALTH_RUN_LOCK_FILE" ]]; then
+        _lock_owner=$(stat -c '%U' "$_HEALTH_RUN_LOCK_FILE" 2>/dev/null || echo "")
+        if [[ -n "$_lock_owner" && "$_lock_owner" != "$_lock_user" ]]; then
+            chown "${_lock_user}:${_lock_group}" "$_HEALTH_RUN_LOCK_FILE" 2>/dev/null || true
+            sudo chown "${_lock_user}:${_lock_group}" "$_HEALTH_RUN_LOCK_FILE" 2>/dev/null || true
         fi
+    else
+        install -m 0660 /dev/null "$_HEALTH_RUN_LOCK_FILE" 2>/dev/null || true
+        chown "${_lock_user}:${_lock_group}" "$_HEALTH_RUN_LOCK_FILE" 2>/dev/null || true
+    fi
+    chmod 0660 "$_HEALTH_RUN_LOCK_FILE" 2>/dev/null || true
+    if [[ ! -w "$_HEALTH_RUN_LOCK_FILE" ]]; then
+        log_error "Cannot write health run-lock: ${_HEALTH_RUN_LOCK_FILE}"
+        log_error "Fix once with: sudo chown ${_lock_user}:${_lock_group} ${_HEALTH_RUN_LOCK_FILE} && sudo chmod 0660 ${_HEALTH_RUN_LOCK_FILE}"
+        return 1
     fi
 
-    # Open the lock file for writing.
     exec {_HEALTH_LOCK_FD}>"$_HEALTH_RUN_LOCK_FILE" 2>/dev/null || {
-        log_warn "Cannot open run-lock ${_HEALTH_RUN_LOCK_FILE} — proceeding without singleton guard"
-        _HEALTH_LOCK_FD=""
-        return 0
+        log_error "Cannot open health run-lock: ${_HEALTH_RUN_LOCK_FILE}"
+        return 1
     }
     if ! flock -n "$_HEALTH_LOCK_FD" 2>/dev/null; then
         log_info "Another health check is already running — exiting"
@@ -1035,7 +1024,7 @@ _print_results() {
 
 _health_main() {
     set +e   # Bash 5.2 aarch64: nested function set -e propagation bug
-    _acquire_run_lock
+    _acquire_run_lock || return 1
     trap '_release_run_lock' EXIT HUP INT TERM
     _health_parse_args "$@"
     log_info "Starting VaultWarden health check..."
@@ -1103,7 +1092,6 @@ EOF
 [[ "${1:-}" == "health" ]] && shift
 
 main() {
-    require_root "$@"
     run_health_check "$@"
 }
 

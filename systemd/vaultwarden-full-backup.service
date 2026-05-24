@@ -16,7 +16,8 @@ EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
 ExecCondition=/bin/bash -c '! test -f /tmp/.vw_maintenance.lock'
 # --email stays disabled until the admin configures alert delivery.
 ExecStart=/opt/vaultwarden-scripts/backup.sh run full --rclone --full-verification
-User=root
+User=ubuntu
+Group=ubuntu
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=vw-full-backup

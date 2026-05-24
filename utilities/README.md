@@ -3,7 +3,7 @@
 Administrative utilities for VaultWarden-OCI. Each script is focused,
 re-runnable (idempotent), and accepts `--help` for usage details.
 
-**All scripts require root**: `sudo utilities/<script>.sh [OPTIONS]`
+**Not all scripts require root.** Runtime backup/health/DNS jobs are designed to run as the service user (default `ubuntu`). Use `sudo` only for privileged setup/update/firewall/deep-maintenance operations.
 
 ---
 
@@ -11,12 +11,12 @@ re-runnable (idempotent), and accepts `--help` for usage details.
 
 | File | Dispatcher subcommand | sudo required | Description |
 |---|---|---|---|
-| `backup-run.sh` | `./backup.sh` (all subcommands) | Yes / No (`list`) | Full backup engine |
+| `backup-run.sh` | `./backup.sh` (all subcommands) | No (`run/list`), Yes (`verify/rotate`) | Full backup engine |
 | `maintenance-db-maint.sh` | `./maintenance.sh db-maint` | Yes | Deep database optimizations |
 | `maintenance-email.sh` | `./maintenance.sh test-email` | Yes | Email alert diagnostics |
-| `maintenance-health.sh` | `./maintenance.sh health` | Yes | System health probes |
+| `maintenance-health.sh` | `./maintenance.sh health` | No | System health probes |
 | `maintenance-run.sh` | `./maintenance.sh run` | Yes | Routine maintenance cycle |
-| `maintenance-update-dns.sh` | `./maintenance.sh update-dns` | Yes | Cloudflare A record updates |
+| `maintenance-update-dns.sh` | `./maintenance.sh update-dns` | No | Cloudflare A record updates |
 | `maintenance-update-firewall.sh` | `./maintenance.sh update-firewall` | Yes | Cloudflare IP → UFW sync |
 | `maintenance-update.sh` | `./maintenance.sh update` | Yes | System/package/docker updates |
 | `pre-production-drill.sh` | `make drill` | Yes | Non-destructive pre-production dry-run drill |
