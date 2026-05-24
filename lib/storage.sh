@@ -94,14 +94,19 @@ require_project_state_ready() {
 
     # Boot-only mode
     if [[ -z "$data_device" ]]; then
-        # Creating PROJECT_STATE_DIR may require root (e.g. under /var/lib).
         is_root || { log_error "require_project_state_ready: must be run as root"; return 1; }
-        # install -d -m applies the mode atomically, bypassing umask and
-        # avoiding the chmod-after-mkdir race window.
+        local _real_user
+        _real_user="$(get_real_user)"
         install -d -m 750 "$state_dir" 2>/dev/null || {
             log_error "require_project_state_ready: cannot create PROJECT_STATE_DIR: $state_dir"
             return 1
         }
+        # Set ownership to the real (non-root) user so non-root scripts can
+        # create subdirectories (e.g. backups/) without sudo escalation.
+        if [[ -n "$_real_user" && "$_real_user" != "root" ]]; then
+            chown "$_real_user" "$state_dir" 2>/dev/null || \
+                log_warn "require_project_state_ready: could not set owner of $state_dir to $_real_user"
+        fi
         return 0
     fi
 
@@ -149,10 +154,16 @@ require_project_state_ready() {
     fi
 
     is_root || { log_error "require_project_state_ready: must be run as root"; return 1; }
+    local _real_user
+    _real_user="$(get_real_user)"
     install -d -m 750 "$state_dir" 2>/dev/null || {
         log_error "require_project_state_ready: cannot create PROJECT_STATE_DIR: $state_dir"
         return 1
     }
+    if [[ -n "$_real_user" && "$_real_user" != "root" ]]; then
+        chown "$_real_user" "$state_dir" 2>/dev/null || \
+            log_warn "require_project_state_ready: could not set owner of $state_dir to $_real_user"
+    fi
 
     return 0
 }
