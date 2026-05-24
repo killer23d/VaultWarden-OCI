@@ -716,8 +716,7 @@ _check_backups() {
             return
         fi
     fi
-
-    fi
+    
     local -A max_age_hours=([db]=26 [full]=168)
     local any_found=false
     for btype in db full; do
