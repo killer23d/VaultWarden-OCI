@@ -700,8 +700,12 @@ _check_backups() {
     local backup_dir; backup_dir="$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")"
     local now_epoch; now_epoch=$(date +%s)
     if [[ ! -d "$backup_dir" ]]; then
-        _warn "backup:dir" "Backup directory not found: $backup_dir"
+        if mkdir -p "$backup_dir/db" "$backup_dir/full" 2>/dev/null; then
+        _pass "backup:dir" "Backup directory created: $backup_dir"
+    else
+        _warn "backup:dir" "Backup directory not found and could not be created: $backup_dir"
         return
+    fi
     fi
     local -A max_age_hours=([db]=26 [full]=168)
     local any_found=false
@@ -761,6 +765,13 @@ _check_config() {
         done
     fi
     local age_key_file="${SOPS_AGE_KEY_FILE:-${PROJECT_ROOT}/secrets/keys/age-key.txt}"
+    local age_key_default="${PROJECT_ROOT}/secrets/keys/age-key.txt"
+    # If the env-specified path doesn't exist but the default project path does, use it
+    # and warn that SOPS_AGE_KEY_FILE is pointing to the wrong location.
+    if [[ ! -f "$age_key_file" && -f "$age_key_default" && "$age_key_file" != "$age_key_default" ]]; then
+        _warn "config:age-key-path" "SOPS_AGE_KEY_FILE points to missing path: ${age_key_file} — falling back to default: ${age_key_default}. Unset SOPS_AGE_KEY_FILE or copy the key there."
+        age_key_file="$age_key_default"
+    fi
     if [[ ! -f "$age_key_file" ]]; then
         config_issues+=("Age key not found: ${age_key_file} — backups cannot encrypt. Run: ./utilities/setup-secrets.sh configure")
     elif [[ ! -r "$age_key_file" ]]; then
