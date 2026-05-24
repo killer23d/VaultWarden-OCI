@@ -5,11 +5,12 @@
 # rules for the VaultWarden compose project. Safe to re-run (idempotent).
 #
 # USAGE:
-#   sudo utilities/setup-firewall.sh [--phase ufw|iptables|all] [--auto] [--dry-run]
+#   sudo utilities/setup-firewall.sh [--phase ufw|iptables|all] [--auto] [--yes] [--dry-run]
 #
 # FLAGS:
 #   --phase ufw|iptables|all   Phase to run (default: all)
-#   --auto                     Non-interactive mode
+#   --auto                     Non-interactive mode (implies --yes)
+#   --yes                      Auto-confirm the netfilter-persistent install prompt
 #   --dry-run                  Preview actions without executing
 #   --force                    Skip confirmations
 #   --help, -h                 Show this help
@@ -41,11 +42,12 @@ Configures UFW (with Cloudflare CIDR restrictions) and iptables NAT/DOCKER-USER
 rules for the VaultWarden compose project. Safe to re-run (idempotent).
 
 USAGE:
-  sudo utilities/setup-firewall.sh [--phase ufw|iptables|all] [--auto] [--dry-run]
+  sudo utilities/setup-firewall.sh [--phase ufw|iptables|all] [--auto] [--yes] [--dry-run]
 
 FLAGS:
   --phase ufw|iptables|all   Phase to run (default: all)
-  --auto                     Non-interactive mode
+  --auto                     Non-interactive mode (implies --yes)
+  --yes                      Auto-confirm the netfilter-persistent install prompt
   --dry-run                  Preview actions without executing
   --force                    Skip confirmations
   --help, -h                 Show this help
@@ -93,11 +95,13 @@ PHASE="all"
 AUTO_MODE=false
 DRY_RUN=false
 FORCE=false
+YES=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --phase)    _require_cli_value "$1" "${2-}"; PHASE="$2"; shift 2 ;;
-        --auto)     AUTO_MODE=true; shift ;;
+        --auto)     AUTO_MODE=true; YES=true; shift ;;
+        --yes)      YES=true; shift ;;
         --dry-run)  DRY_RUN=true; shift ;;
         --force)    FORCE=true; shift ;;
         --help|-h)  _show_help; exit 0 ;;
@@ -454,38 +458,49 @@ print(n.get('name', '${net}_network'))
         log_warn "DOCKER-USER chain not available; skipping forward-policy remediation"
     fi
 
-    # Fail loudly if netfilter-persistent is absent, rather than silently
-    # continuing. Without persistence the rules are lost on reboot.
+    # Persist iptables rules across reboots via netfilter-persistent.
+    # Install it automatically (with confirmation or --yes / --auto) if absent.
     if [[ "$DRY_RUN" == "true" ]]; then
         if command -v netfilter-persistent >/dev/null 2>&1; then
             log_dry_run "Would run: netfilter-persistent save"
         else
-            if [[ "$PHASE" == "all" ]]; then
-                log_warn "netfilter-persistent not installed — rules will be lost on reboot."
-                log_warn "Install with: apt-get install -y netfilter-persistent iptables-persistent"
-            else
-                log_info "netfilter-persistent not installed — rules will be lost on reboot."
-                log_info "Install with: apt-get install -y netfilter-persistent iptables-persistent"
-            fi
+            log_dry_run "Would install netfilter-persistent iptables-persistent and run: netfilter-persistent save"
         fi
         return 0
     fi
 
-    if command -v netfilter-persistent >/dev/null 2>&1; then
-        if ! netfilter-persistent save >/dev/null 2>&1; then
-            log_error "netfilter-persistent save failed — rules may not survive reboot."
-            exit 1
-        fi
-        log_success "Persisted iptables rules with netfilter-persistent"
-    else
-        if [[ "$PHASE" == "all" ]]; then
-            log_warn "netfilter-persistent not installed — rules will be lost on reboot."
-            log_warn "Install with: apt-get install -y netfilter-persistent iptables-persistent"
+    if ! command -v netfilter-persistent >/dev/null 2>&1; then
+        log_warn "netfilter-persistent not installed — rules will be lost on reboot."
+
+        local _do_install=false
+        if [[ "$YES" == "true" ]]; then
+            _do_install=true
         else
-            log_info "netfilter-persistent not installed — rules will be lost on reboot."
-            log_info "Install with: apt-get install -y netfilter-persistent iptables-persistent"
+            local _reply
+            read -r -p "Install netfilter-persistent and iptables-persistent now? [y/N] " _reply
+            [[ "${_reply,,}" == "y" || "${_reply,,}" == "yes" ]] && _do_install=true
+        fi
+
+        if [[ "$_do_install" == "true" ]]; then
+            log_info "Installing netfilter-persistent iptables-persistent..."
+            DEBIAN_FRONTEND=noninteractive apt-get install -y \
+                netfilter-persistent iptables-persistent >/dev/null 2>&1 || {
+                log_warn "apt-get install netfilter-persistent failed — rules will not persist across reboots."
+                return 0
+            }
+            log_success "netfilter-persistent installed."
+        else
+            log_warn "Skipping netfilter-persistent install — iptables rules will NOT persist across reboots."
+            log_warn "Install with: apt-get install -y netfilter-persistent iptables-persistent"
+            return 0
         fi
     fi
+
+    if ! netfilter-persistent save >/dev/null 2>&1; then
+        log_error "netfilter-persistent save failed — rules may not survive reboot."
+        exit 1
+    fi
+    log_success "Persisted iptables rules with netfilter-persistent"
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -494,7 +509,8 @@ print(n.get('name', '${net}_network'))
 main() {
     (( EUID == 0 )) || { log_error "Must run as root."; exit 1; }
 
-    [[ "$AUTO_MODE" == "true" ]] && log_info "Running in non-interactive (auto) mode."
+    [[ "$AUTO_MODE" == "true" ]] && log_info "Running in non-interactive (auto) mode (--yes implied)."
+    [[ "$AUTO_MODE" != "true" && "$YES" == "true" ]] && log_info "Auto-confirm (--yes) enabled."
 
     case "$PHASE" in
         ufw)      _phase_ufw ;;

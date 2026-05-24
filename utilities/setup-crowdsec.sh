@@ -175,10 +175,14 @@ fi
 # ═══════════════════════════════════════════════════════════════════════════════
 log_info "=== PHASE 2: Cloudflare bouncer installation ==="
 
+_CF_PROXY_ENABLED="${CLOUDFLARE_PROXY_ENABLED:-false}"
 _CF_BOUNCER_BIN="/usr/local/bin/crowdsec-cloudflare-bouncer"
 _CF_BOUNCER_NEEDS_INSTALL=false
 
-if [[ "$DRY_RUN" == "true" ]]; then
+if [[ "$_CF_PROXY_ENABLED" != "true" ]]; then
+    log_warn "Skipping crowdsec-cloudflare-bouncer setup — CLOUDFLARE_PROXY_ENABLED is not 'true'."
+    log_warn "Set CLOUDFLARE_PROXY_ENABLED=true in .env and re-run this script to enable the Cloudflare bouncer."
+elif [[ "$DRY_RUN" == "true" ]]; then
     log_info "[DRY RUN] Would install crowdsec-cloudflare-bouncer (deb → tarball → go source fallback)"
 else
     # ── Register bouncer API key in CrowdSec LAPI ──────────────────────────
@@ -418,7 +422,9 @@ log_info "=== PHASE 5: Bouncer API key ==="
 _CF_BOUNCER_KEY=""
 _CF_BOUNCER_ENV_KEY="CROWDSEC_CF_BOUNCER_API_KEY"
 
-if [[ "$DRY_RUN" == "true" ]]; then
+if [[ "$_CF_PROXY_ENABLED" != "true" ]]; then
+    log_warn "Skipping bouncer API key generation — CLOUDFLARE_PROXY_ENABLED is not 'true'."
+elif [[ "$DRY_RUN" == "true" ]]; then
     log_info "[DRY RUN] Would generate and register a bouncer API key, write to .env as ${_CF_BOUNCER_ENV_KEY}"
     _CF_BOUNCER_KEY="DRY_RUN_PLACEHOLDER"
 else
@@ -469,7 +475,9 @@ _CF_BOUNCER_CONFIG_SRC="${PROJECT_ROOT}/crowdsec/crowdsec-cloudflare-bouncer.yam
 _CF_BOUNCER_CONFIG_DEST="/etc/crowdsec/bouncers/crowdsec-cloudflare-bouncer.yaml"
 
 if [[ -f "$_CF_BOUNCER_CONFIG_SRC" ]]; then
-    if [[ "$DRY_RUN" == "true" ]]; then
+    if [[ "$_CF_PROXY_ENABLED" != "true" ]]; then
+        log_warn "Skipping Cloudflare bouncer config write — CLOUDFLARE_PROXY_ENABLED is not 'true'."
+    elif [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would write ${_CF_BOUNCER_CONFIG_DEST} from ${_CF_BOUNCER_CONFIG_SRC}"
     else
         _cf_zone_id="${CLOUDFLARE_ZONE_ID:-}"
@@ -594,8 +602,8 @@ if [[ -f "$_CF_BOUNCER_CONFIG_SRC" ]]; then
                 log_warn "crowdsec-cloudflare-bouncer did not report active within 10s; continuing setup."
             fi
         else
-            log_warn "crowdsec-cloudflare-bouncer.service unit not found — binary may need manual installation."
-            log_warn "Once installed, run: sudo systemctl enable --now crowdsec-cloudflare-bouncer"
+            log_warn "crowdsec-cloudflare-bouncer.service unit not found after install attempt — check logs above."
+            log_warn "Once the binary is installed, run: sudo systemctl enable --now crowdsec-cloudflare-bouncer"
         fi
     fi
 else
@@ -630,9 +638,12 @@ if [[ "$DRY_RUN" == "true" ]]; then
 else
     systemctl reload crowdsec                        || true
     systemctl enable --now crowdsec-firewall-bouncer || true
-    # Only enable the Cloudflare bouncer if its service unit is present.
-    if _cf_bouncer_service_exists; then
+    # Only enable the Cloudflare bouncer if its service unit is present and CF proxy is enabled.
+    if [[ "$_CF_PROXY_ENABLED" != "true" ]]; then
+        log_warn "Skipping crowdsec-cloudflare-bouncer enable — CLOUDFLARE_PROXY_ENABLED is not 'true'."
+    elif _cf_bouncer_service_exists; then
         systemctl enable --now crowdsec-cloudflare-bouncer || true
+        log_success "crowdsec-cloudflare-bouncer enabled and started."
     else
         log_warn "Skipping crowdsec-cloudflare-bouncer enable — service unit not installed yet."
     fi

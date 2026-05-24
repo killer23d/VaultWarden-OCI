@@ -103,6 +103,15 @@ local _HEALTH_RUN_LOCK_FILE="/run/lock/vaultwarden-health.lock"
 local _HEALTH_LOCK_FD=""
 
 _acquire_run_lock() {
+    # Pre-create the lock file with world-writable permissions so that a
+    # non-root run can open it after a previous root run created it as 0600.
+    if [[ ! -e "$_HEALTH_RUN_LOCK_FILE" ]]; then
+        touch "$_HEALTH_RUN_LOCK_FILE" 2>/dev/null \
+            && chmod 0666 "$_HEALTH_RUN_LOCK_FILE" 2>/dev/null \
+            || true
+    elif [[ ! -w "$_HEALTH_RUN_LOCK_FILE" ]] && (( EUID == 0 )); then
+        chmod 0666 "$_HEALTH_RUN_LOCK_FILE" 2>/dev/null || true
+    fi
     exec {_HEALTH_LOCK_FD}>"$_HEALTH_RUN_LOCK_FILE" 2>/dev/null || {
         log_warn "Cannot open run-lock ${_HEALTH_RUN_LOCK_FILE} — proceeding without singleton guard"
         _HEALTH_LOCK_FD=""
