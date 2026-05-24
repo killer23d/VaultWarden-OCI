@@ -39,7 +39,7 @@ DATA_DEVICE ?=
 .PHONY: help \
         setup init-secrets edit-secrets test-secrets test-email \
         up down restart start stop safe-restart status \
-        health health-quick health-email smoke-test drill \
+        health health-quick health-report test-email smoke-test drill \
         logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec \
         watch monitor \
         backup backup-full backup-emergency list-backups backup-status \
@@ -228,9 +228,9 @@ test-secrets: ## Test secrets decryption
 		exit 1; \
 	fi
 
-test-email: ## Send a test email notification
-	@echo "$(BLUE)Sending test email...$(NC)"
-	@./maintenance.sh test-email
+test-email: ## Send a test operational alert email (health/backup notification channel)
+	@echo "$(BLUE)Sending a test operational alert email...$(NC)"
+	@./maintenance.sh test-email --verbose
 
 # ===========================================================================
 ##@ Service Management
@@ -393,13 +393,15 @@ health: ## Run health checks (set AUTO_RECOVER=true to auto-recover)
 	@echo "$(BLUE)Running health checks...$(NC)"
 	@sudo ./maintenance.sh health $(if $(filter true,$(AUTO_RECOVER)),--fix,)
 
-health-quick: ## Quick health check (essential services only)
+health-quick: ## Quick health check (concise output)
 	@echo "$(BLUE)Running quick health check...$(NC)"
-	@sudo ./maintenance.sh health --comprehensive
+	@sudo ./maintenance.sh health --quiet
 
-health-email: ## Test email health
-	@echo "$(BLUE)Testing email health and sending notification...$(NC)"
+health-report: ## Run health check and write a timestamped report file
+	@echo "$(BLUE)Running health checks with report output...$(NC)"
 	@sudo ./maintenance.sh health --report
+
+health-email: test-email ## Backward-compatible alias for test-email
 
 smoke-test: ## Run pre-production smoke test against the live stack
 	@sudo utilities/smoke-test.sh
