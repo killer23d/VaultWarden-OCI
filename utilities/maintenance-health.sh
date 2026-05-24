@@ -759,7 +759,8 @@ _check_backups() {
         fi
     fi
     
-    local -A max_age_hours=([db]=26 [full]=168)
+    local -A max_age_hours
+    max_age_hours=([db]=26 [full]=168)
     local any_found=false
     for btype in db full; do
         local type_dir="$backup_dir/$btype"
@@ -1033,6 +1034,7 @@ _print_results() {
 }
 
 _health_main() {
+    set +e   # Bash 5.2 aarch64: nested function set -e propagation bug
     _acquire_run_lock
     trap '_release_run_lock' EXIT HUP INT TERM
     _health_parse_args "$@"
