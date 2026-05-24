@@ -769,7 +769,7 @@ _check_backups() {
         fi
         local latest_file
         latest_file=$(find "$type_dir" -maxdepth 1 -name '*.age' -type f \
-            -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
+            -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2- || true)
         if [[ -z "$latest_file" ]]; then
             _warn "backup:${btype}" "No $btype backups found in $type_dir"
             continue
