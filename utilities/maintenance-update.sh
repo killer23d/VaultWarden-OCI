@@ -361,7 +361,9 @@ done
 
 main() {
     require_root
+    auto_fix_critical_permissions "$PROJECT_ROOT"
     load_env_file || { log_error "Failed to load .env"; exit 1; }
+    auto_fix_critical_permissions "$PROJECT_ROOT"
     if [[ "$UPDATE_SYSTEM" == "false" && "$UPDATE_IMAGES" == "false" ]]; then
         log_error "Specify at least one of: --system, --images, --all"
         show_help; exit 1

@@ -107,6 +107,7 @@ done
 
 main() {
     require_root
+    auto_fix_critical_permissions "$PROJECT_ROOT"
     local OPS_LOCK="/run/lock/vaultwarden-operations.lock"
     local _OPS_LOCK_FD
     local lock_user lock_group
@@ -132,6 +133,7 @@ main() {
     [[ "$COMPREHENSIVE" == "true" ]] && log_info "Running comprehensive maintenance..."
 
     _load_env
+    auto_fix_critical_permissions "$PROJECT_ROOT"
     require_project_state_ready || exit 1
 
     local log_cleanup_result=0 backup_cleanup_result=0 docker_cleanup_result=0

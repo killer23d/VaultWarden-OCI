@@ -215,7 +215,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 main() {
+    require_root "$@"
     _load_env
+    auto_fix_critical_permissions "$PROJECT_ROOT"
     update_dns_record
     exit $?
 }

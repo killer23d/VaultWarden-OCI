@@ -764,6 +764,7 @@ main() {
   trap 'exit 143' TERM
 
   load_environment || exit 1
+  auto_fix_critical_permissions "$PROJECT_ROOT"
   require_project_state_ready || exit 1
   validate_prerequisites || exit 1
   prepare_directories || exit 1
