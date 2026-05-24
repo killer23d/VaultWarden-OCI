@@ -719,6 +719,7 @@ _check_backups() {
         else
             _warn "backup:dir" "Backup directory not found and could not be created: $backup_dir — check permissions"
             return
+        fi
     fi
     
     local -A max_age_hours=([db]=26 [full]=168)
