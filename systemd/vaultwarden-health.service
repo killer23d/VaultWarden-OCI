@@ -18,7 +18,8 @@ EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
 ExecCondition=/bin/bash -c '! test -f /tmp/.vw_maintenance.lock'
 # Add --email only after alert delivery is configured.
 ExecStart=/opt/vaultwarden-scripts/maintenance.sh health --fix
-User=root
+User=ubuntu
+Group=ubuntu
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=vw-health

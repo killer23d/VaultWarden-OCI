@@ -1844,10 +1844,14 @@ EOF
         fi
     fi
     if [[ "$do_install" == "true" ]]; then
+        local service_user service_group
+        service_user="${SERVICE_USER:-${BACKUP_USER:-$(get_real_user)}}"
+        service_group=$(id -gn "$service_user" 2>/dev/null || echo "$service_user")
         install -d -m 700 /etc/vaultwarden || return 1
         install -m 600 "$age_key_file" "$canonical_key" || return 1
-        chown root:root /etc/vaultwarden "$canonical_key" || return 1
-        log_success "Age key installed: $canonical_key (mode 600, root:root)"
+        chown "${service_user}:${service_group}" "$canonical_key" || return 1
+        chmod 600 "$canonical_key" || return 1
+        log_success "Age key installed: $canonical_key (mode 600, ${service_user}:${service_group})"
     fi
 
     # ── 4. Update .env to canonical key path ─────────────────────────────────

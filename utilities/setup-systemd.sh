@@ -110,7 +110,8 @@ WHAT install DOES:
        still source lib/common.sh if the unit is ever changed from root.
     3. Copies .env -> /etc/vaultwarden/vaultwarden.env (root:root 600)
        (skipped if the EnvironmentFile already exists; warns if content differs)
-    4. Copies secrets/keys/age-key.txt -> /etc/vaultwarden/age-key.txt (root:root 600)
+    4. Copies secrets/keys/age-key.txt -> /etc/vaultwarden/age-key.txt
+       (SERVICE_USER ownership, mode 600; default ubuntu:ubuntu)
        and sets SOPS_AGE_KEY_FILE=/etc/vaultwarden/age-key.txt in the EnvironmentFile.
        This is required because systemd units run with ProtectHome=yes, which makes
        /home/ubuntu/ (and any symlinks into it) inaccessible to the service process.
@@ -202,6 +203,44 @@ _sha256() {
     else
         shasum -a 256 "$1" | awk '{print $1}'
     fi
+}
+
+_resolve_service_identity() {
+    local service_user="${SERVICE_USER:-${BACKUP_USER:-ubuntu}}"
+    local service_group="${SERVICE_GROUP:-}"
+
+    if ! id -u "$service_user" >/dev/null 2>&1; then
+        log_warn "Configured service user '$service_user' does not exist — falling back to ubuntu"
+        service_user="ubuntu"
+    fi
+    if [[ -z "$service_group" ]]; then
+        service_group=$(id -gn "$service_user" 2>/dev/null || echo "$service_user")
+    fi
+    printf '%s:%s\n' "$service_user" "$service_group"
+}
+
+_ensure_runtime_lock_files() {
+    local service_user="$1" service_group="$2"
+    local -a lock_files=(
+        "/run/lock/vaultwarden-backup.lock"
+        "/run/lock/vaultwarden-operations.lock"
+        "/run/lock/vaultwarden-dns-update.lock"
+        "/run/lock/vaultwarden-firewall-update.lock"
+        "/run/lock/vaultwarden-health.lock"
+    )
+    local lock_file
+    for lock_file in "${lock_files[@]}"; do
+        if [[ "$DRY_RUN" == "true" ]]; then
+            log_info "[DRY RUN] Would ensure lock file ownership: ${lock_file} -> ${service_user}:${service_group} (0660)"
+            continue
+        fi
+        if [[ -e "$lock_file" ]]; then
+            chown "${service_user}:${service_group}" "$lock_file" 2>/dev/null || true
+            chmod 0660 "$lock_file" 2>/dev/null || true
+        else
+            install -m 0660 -o "$service_user" -g "$service_group" /dev/null "$lock_file" 2>/dev/null || true
+        fi
+    done
 }
 
 # ---------------------------------------------------------------------------
@@ -396,6 +435,11 @@ install_units() {
     done
     if [[ "$DRY_RUN" == "false" ]]; then chown root:root "$OPT_SCRIPTS_DIR"; fi
 
+    local service_user service_group service_identity
+    service_identity=$(_resolve_service_identity)
+    service_user="${service_identity%%:*}"
+    service_group="${service_identity##*:}"
+
     # 2. Create EnvironmentFile at /etc/vaultwarden/vaultwarden.env
     log_info "Setting up EnvironmentFile at $ENV_FILE ..."
     if [[ "$DRY_RUN" == "false" ]]; then
@@ -405,7 +449,7 @@ install_units() {
         # non-root process could list $ENV_DIR before permissions were
         # restricted. install(1) creates the directory with the correct mode
         # and ownership in a single syscall, eliminating the window.
-        install -d -m 700 -o root -g root "$ENV_DIR"
+        install -d -m 750 -o root -g "$service_group" "$ENV_DIR"
         if [[ ! -f "$ENV_FILE" ]]; then
             if [[ -f "$PROJECT_ROOT/.env" ]]; then
                 cp "$PROJECT_ROOT/.env" "$ENV_FILE"
@@ -494,7 +538,7 @@ install_units() {
     local age_key_src="$PROJECT_ROOT/secrets/keys/age-key.txt"
     if [[ "$DRY_RUN" == "true" ]]; then
         if [[ -f "$age_key_src" ]]; then
-            log_info "[DRY RUN] Would copy $age_key_src -> $AGE_KEY_DEST (600 root:root)"
+            log_info "[DRY RUN] Would copy $age_key_src -> $AGE_KEY_DEST (600 ${service_user}:${service_group})"
             log_info "[DRY RUN] Would set SOPS_AGE_KEY_FILE=$AGE_KEY_DEST in $ENV_FILE"
         else
             log_warn "[DRY RUN] Age key source not found: $age_key_src"
@@ -506,8 +550,8 @@ install_units() {
         fi
     else
         if [[ -f "$age_key_src" ]]; then
-            install -m 600 -o root -g root "$age_key_src" "$AGE_KEY_DEST"
-            log_success "Installed age key: $AGE_KEY_DEST"
+            install -m 600 -o "$service_user" -g "$service_group" "$age_key_src" "$AGE_KEY_DEST"
+            log_success "Installed age key: $AGE_KEY_DEST (${service_user}:${service_group})"
             # Ensure SOPS_AGE_KEY_FILE is set correctly in the EnvironmentFile
             _set_env_var "SOPS_AGE_KEY_FILE" "$AGE_KEY_DEST" "$ENV_FILE"
             log_success "SOPS_AGE_KEY_FILE=$AGE_KEY_DEST set in $ENV_FILE"
@@ -519,13 +563,15 @@ install_units() {
             # persist across subsequent install runs, causing backup.sh to fail with
             # "Age key file not found: /opt/vaultwarden-scripts/secrets/keys/age-key.txt".
             if [[ -f "$AGE_KEY_DEST" ]]; then
+                chown "${service_user}:${service_group}" "$AGE_KEY_DEST" 2>/dev/null || true
+                chmod 600 "$AGE_KEY_DEST" 2>/dev/null || true
                 _set_env_var "SOPS_AGE_KEY_FILE" "$AGE_KEY_DEST" "$ENV_FILE"
                 log_success "SOPS_AGE_KEY_FILE=$AGE_KEY_DEST corrected in $ENV_FILE"
                 log_info "  Key already present at $AGE_KEY_DEST -- no copy needed."
             else
                 log_warn "Backup and health services require SOPS_AGE_KEY_FILE to be set."
                 log_warn "After placing your age-key.txt, run:"
-                log_warn "  sudo install -m 600 -o root -g root /path/to/age-key.txt $AGE_KEY_DEST"
+                log_warn "  sudo install -m 600 -o ${service_user} -g ${service_group} /path/to/age-key.txt $AGE_KEY_DEST"
                 log_warn "  sudo utilities/setup-systemd.sh install"
             fi
         fi
@@ -542,6 +588,10 @@ install_units() {
     fi
 
     if [[ -n "$existing_rclone_cfg" && "$existing_rclone_cfg" == "$rclone_dest" && -f "$rclone_dest" ]]; then
+        if [[ "$DRY_RUN" == "false" ]]; then
+            chown "${service_user}:${service_group}" "$rclone_dest" 2>/dev/null || true
+            chmod 600 "$rclone_dest" 2>/dev/null || true
+        fi
         log_success "rclone config already at $rclone_dest (RCLONE_CONFIG in env is correct)"
     else
         # Resolve source: repo-local → sudo user → root → heuristic
@@ -566,10 +616,10 @@ install_units() {
 
         if [[ -n "$rclone_src" ]]; then
             if [[ "$DRY_RUN" == "true" ]]; then
-                log_info "[DRY RUN] Would copy $rclone_src -> $rclone_dest (600 root:root)"
+                log_info "[DRY RUN] Would copy $rclone_src -> $rclone_dest (600 ${service_user}:${service_group})"
                 log_info "[DRY RUN] Would set RCLONE_CONFIG=$rclone_dest in $ENV_FILE"
             else
-                install -m 600 -o root -g root "$rclone_src" "$rclone_dest"
+                install -m 600 -o "$service_user" -g "$service_group" "$rclone_src" "$rclone_dest"
                 _set_env_var "RCLONE_CONFIG" "$rclone_dest" "$ENV_FILE"
                 log_success "Installed rclone config: $rclone_dest (source: $rclone_src)"
                 log_success "RCLONE_CONFIG=$rclone_dest set in $ENV_FILE"
@@ -584,7 +634,7 @@ install_units() {
             log_warn "  1. Run: rclone config   (configure your remote)"
             log_warn "  2. Run: sudo utilities/setup-systemd.sh install  (copies conf to $rclone_dest)"
             log_warn "  Or manually:"
-            log_warn "    sudo install -m 600 -o root -g root ~/.config/rclone/rclone.conf $rclone_dest"
+            log_warn "    sudo install -m 600 -o ${service_user} -g ${service_group} ~/.config/rclone/rclone.conf $rclone_dest"
             log_warn "    echo RCLONE_CONFIG=$rclone_dest | sudo tee -a $ENV_FILE"
         fi
     fi
@@ -606,6 +656,8 @@ install_units() {
     if [[ "$unit_ok" == "false" ]]; then
         log_warn "Some unit files were missing -- check the systemd/ directory."
     fi
+
+    _ensure_runtime_lock_files "$service_user" "$service_group"
 
     # 4b. Write per-unit ReadWritePaths drop-ins (separate-volume mode)
     _install_rwpaths_dropin

@@ -18,7 +18,8 @@ WorkingDirectory=/opt/vaultwarden-scripts
 # and reported by the script itself.
 EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
 ExecStart=/opt/vaultwarden-scripts/maintenance.sh update-dns
-User=root
+User=ubuntu
+Group=ubuntu
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=vw-dns-update

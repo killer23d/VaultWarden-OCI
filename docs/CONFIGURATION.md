@@ -352,9 +352,8 @@ BACKUP_RETENTION_FULL_DAYS=60          # Retention for full backups (overrides a
 # Rclone offsite backup
 RCLONE_REMOTE_NAME=CHANGE_ME_RCLONE_REMOTE  # rclone remote name (run: rclone config)
 RCLONE_CONFIG=                               # Absolute path to rclone.conf.
-                                              # Required when running as root / systemd —
-                                              # root resolves ~ to /root/.config/rclone/
-                                              # which does not exist for non-root users.
+                                              # Required for systemd jobs unless you copy
+                                              # rclone.conf to /etc/vaultwarden/rclone.conf.
                                               # Leave blank to let backup.sh auto-discover.
 RCLONE_REMOTE_PATH=BW-Backup                 # Subfolder inside remote; backup type
                                               # (db/full/emergency) is appended automatically.

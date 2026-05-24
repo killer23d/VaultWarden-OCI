@@ -207,7 +207,7 @@ make health-quick                  # Comprehensive check
 ./backup.sh <subcommand> [OPTIONS]
 ```
 
-> **`sudo` note:** Direct invocations require `sudo` in production deployments where `${PROJECT_STATE_DIR}` is root-owned (the default after `setup.sh`). The `list` subcommand does **not** require root (reads metadata only). Makefile targets (`make backup`, `make backup-full`, etc.) and systemd jobs run as root automatically.
+> **Runtime user note:** Scheduled backup/health/DNS jobs are designed to run as the service user (default `ubuntu`) under systemd. `sudo` is still required for privileged setup/update/firewall/deep-maintenance operations.
 
 **Subcommands:**
 
@@ -954,7 +954,7 @@ source "lib/crypto.sh"
 
 ### Flock-Based Mutual Exclusion
 
-All scripts use `flock -n` on a dedicated lock file per operation type.
+All scripts use `flock -n` on a dedicated lock file per operation type. If a lock file cannot be opened or written, scripts now fail fast with a clear remediation message (they do not continue unguarded).
 Lock file descriptors use **bash 4.1+ automatic FD allocation** (`exec {FD}>file`)
 so that no hardcoded FD number can silently clobber an open file descriptor
 inherited from the calling process or a library. The kernel releases the lock

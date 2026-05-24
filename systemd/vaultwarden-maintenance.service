@@ -14,8 +14,11 @@ WorkingDirectory=/opt/vaultwarden-scripts
 # setup.sh systemd install has run). Missing required vars are caught
 # and reported by the script itself.
 EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
+# Must run as root because --comprehensive includes update-firewall, and
+# utilities/maintenance-update-firewall.sh safely enforces root for UFW changes.
 ExecStart=/opt/vaultwarden-scripts/maintenance.sh run --comprehensive --email
 User=root
+Group=root
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=vw-maintenance

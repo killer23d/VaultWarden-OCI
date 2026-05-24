@@ -467,7 +467,9 @@ All VaultWarden systemd service units are hardened consistently:
 
 ```ini
 [Service]
-User=root
+# Runtime jobs run as the service user by default (ubuntu).
+# Root is reserved for explicitly privileged units (e.g. firewall updates).
+User=ubuntu
 NoNewPrivileges=yes
 PrivateTmp=yes          # Isolated /tmp per service (prevents name collisions)
 OnFailure=vaultwarden-notify-failure.service

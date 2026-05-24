@@ -172,6 +172,8 @@ The installed systemd timer schedule:
 
 > **Note on timer persistence:** All timers are installed with `Persistent=true`. If the system reboots while a timer was due to fire, systemd will run the missed job once on next boot — no manual intervention required. This replaces the flock lock-directory recreation step that cron required.
 
+> **Runtime user model:** Backup, health, and DNS automation run as the service user (`ubuntu` by default). Root execution is reserved for explicitly privileged jobs (for example firewall rule updates).
+
 > **Viewing timer status:** `systemctl list-timers --all | grep vaultwarden` shows next fire time and last run for every timer.
 
 > **Failure notifications:** Every service unit has `OnFailure=vaultwarden-notify-failure.service`. If any backup, health, or maintenance job fails, an email alert is sent automatically without requiring a separate monitoring tool.
