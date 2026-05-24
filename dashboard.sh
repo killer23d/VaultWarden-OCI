@@ -223,7 +223,8 @@ draw_live_stats() {
     # --- Email Queue ---
     local queue_count=0 queue_str
     if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "${CONTAINER_POSTFIX}"; then
-        queue_count="$(docker exec "${CONTAINER_POSTFIX}" mailq 2>/dev/null | grep -c '^[0-9A-F]' || echo 0)"
+        queue_count="$(docker exec "${CONTAINER_POSTFIX}" mailq 2>/dev/null | grep -c '^[0-9A-F]' || true)"
+        queue_count="${queue_count:-0}"
     fi
     if [[ "${queue_count}" -eq 0 ]]; then
         queue_str="${GRN}Healthy${NC}"
@@ -240,10 +241,12 @@ draw_live_stats() {
     since_ts="$(date -d '1 hour ago' '+%Y-%m-%dT%H:%M:%S' 2>/dev/null || date -v-1H '+%Y-%m-%dT%H:%M:%S' 2>/dev/null || true)"
     if docker ps --format '{{.Names}}' 2>/dev/null | grep -qE "${CONTAINER_VW}|${CONTAINER_CADDY}"; then
         auth_fails="$(docker logs "${CONTAINER_VW}" --since "${since_ts}" 2>&1 \
-            | grep -ciE 'invalid|fail' || echo 0)"
+            | grep -ciE 'invalid|fail' || true)"
+        auth_fails="${auth_fails:-0}"
         local caddy_fails
         caddy_fails="$(docker logs "${CONTAINER_CADDY}" --since "${since_ts}" 2>&1 \
-            | grep -ciE 'invalid|fail' || echo 0)"
+            | grep -ciE 'invalid|fail' || true)"
+        caddy_fails="${caddy_fails:-0}"
         auth_fails=$(( auth_fails + caddy_fails ))
     fi
     if (( auth_fails == 0 )); then
@@ -583,6 +586,13 @@ handle_identity_menu() {
 # Main event loop
 # ===========================================================================
 main() {
+    # Root guard: several operations require sudo; ensure we are running as root.
+    if [[ $EUID -ne 0 ]]; then
+        echo -e "${RED} Error:${NC} This script must be run as root." >&2
+        echo -e " Re-run with: ${BLD}sudo $0${NC}" >&2
+        exit 1
+    fi
+
     # Ensure we're running from the repo root so relative paths / make work.
     cd "${REPO_ROOT}"
 
