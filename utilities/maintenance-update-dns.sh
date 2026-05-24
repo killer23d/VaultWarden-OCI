@@ -77,9 +77,21 @@ update_dns_record() {
     [[ -z "$zone_id" ]] && { log_error "CLOUDFLARE_ZONE_ID not set in .env"; return 1; }
 
     local DNS_LOCK="/run/lock/vaultwarden-dns-update.lock"
-    local _DNS_LOCK_FD
-    exec {_DNS_LOCK_FD}>"$DNS_LOCK"
-    if ! flock -n "$_DNS_LOCK_FD"; then
+    local _DNS_LOCK_FD=""
+    # Pre-create with world-writable permissions so a non-root run can open a
+    # file originally created by root (default umask would set it 0600).
+    if [[ ! -e "$DNS_LOCK" ]]; then
+        touch "$DNS_LOCK" 2>/dev/null \
+            && chmod 0666 "$DNS_LOCK" 2>/dev/null \
+            || true
+    elif [[ ! -w "$DNS_LOCK" ]] && (( EUID == 0 )); then
+        chmod 0666 "$DNS_LOCK" 2>/dev/null || true
+    fi
+    exec {_DNS_LOCK_FD}>"$DNS_LOCK" 2>/dev/null || {
+        log_warn "Cannot open run-lock ${DNS_LOCK} — proceeding without singleton guard"
+        _DNS_LOCK_FD=""
+    }
+    if [[ -n "$_DNS_LOCK_FD" ]] && ! flock -n "$_DNS_LOCK_FD"; then
         log_info "DNS update already in progress (lock: $DNS_LOCK). Skipping."
         return 0
     fi
