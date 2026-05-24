@@ -841,13 +841,18 @@ _check_config() {
         fi
     fi
     local root_owned_issues=()
+    local expected_owner expected_group
+    expected_owner=$(stat -c '%U' "$PROJECT_ROOT" 2>/dev/null || id -un)
+    expected_group=$(stat -c '%G' "$PROJECT_ROOT" 2>/dev/null || id -gn)
     for f in ".env" "Makefile" "startup.sh" "backup.sh" "utilities/secrets-edit.sh"; do
         # PROJECT_ROOT is derived from BASH_SOURCE at the top of this file.
         local fpath="${PROJECT_ROOT}/${f}"
         if [[ -e "$fpath" ]]; then
-            local owner; owner=$(stat -c '%U' "$fpath" 2>/dev/null || echo "unknown")
+            local owner group
+            owner=$(stat -c '%U' "$fpath" 2>/dev/null || echo "unknown")
+            group=$(stat -c '%G' "$fpath" 2>/dev/null || echo "unknown")
             if [[ "$owner" == "root" ]]; then
-                root_owned_issues+=("${f} is owned by root — run: sudo make fix-permissions")
+                root_owned_issues+=("${f} is owned by root:${group} (expected non-root, e.g. ${expected_owner}:${expected_group}) — run: sudo make fix-permissions")
             fi
         fi
     done
@@ -930,7 +935,7 @@ _notify_failures() {
         alert_date="$(date)"
         subject="VaultWarden Health [${status^^}]: ${name} on $(hostname)"
         printf -v body \
-            'Health check alert at %s\n\nCheck : %s\nStatus: %s\nDetail: %s\n\nThis alert will not repeat for %ss (%s min).\nRun '\''./maintenance.sh health --report'\'' for full status.' \
+            'Health check alert at %s\n\nCheck: %s\nStatus: %s\nDetail: %s\n\nThis alert will not repeat for %ss (%s min).\nFor the full live status, run: ./maintenance.sh health\nTo also write a report file, run: ./maintenance.sh health --report' \
             "$alert_date" "$name" "${status^^}" "$message" \
             "$ALERT_COOLDOWN_SECONDS" "$(( ALERT_COOLDOWN_SECONDS / 60 ))"
         if ! _send_notification "$subject" "$body"; then
