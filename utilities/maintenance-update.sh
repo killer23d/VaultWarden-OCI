@@ -229,6 +229,28 @@ check_image_updates() {
     local updated=0
     local failed=0
     for image in "${images[@]}"; do
+        if [[ "$image" == "vaultwarden-oci-caddy" ]]; then
+            log_info "  Checking local custom build image: $image (docker compose build --pull caddy)"
+            if [[ "$DRY_RUN" == "true" ]]; then
+                log_info "  [DRY RUN] Would rebuild local image with updated base layers: caddy"
+                continue
+            fi
+            local old_id new_id
+            old_id=$(docker inspect --format='{{.Id}}' "$image" 2>/dev/null || echo "")
+            if ! docker compose build --pull caddy; then
+                log_error "  [FAILED] Could not rebuild local image: $image"
+                (( failed++ )) || true
+                continue
+            fi
+            new_id=$(docker inspect --format='{{.Id}}' "$image" 2>/dev/null || echo "")
+            if [[ -n "$old_id" && "$old_id" != "$new_id" ]]; then
+                log_info "  [UPDATED] $image rebuilt with newer upstream layers/plugins"
+                (( ++updated )) || true
+            else
+                log_info "  [CURRENT] $image build is unchanged"
+            fi
+            continue
+        fi
         log_info "  Pulling $image..."
         if [[ "$DRY_RUN" == "true" ]]; then
             log_info "  [DRY RUN] Would pull: $image"
