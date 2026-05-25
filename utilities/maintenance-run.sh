@@ -109,20 +109,30 @@ done
 
 main() {
     require_root
-    auto_fix_critical_permissions "$PROJECT_ROOT"
+
     local OPS_LOCK="/run/lock/vaultwarden-operations.lock"
     local _OPS_LOCK_FD
-# Ensure the lock file exists with correct ownership BEFORE opening it.
-# /run/lock is root:root 1775 — only root can create files there; we are
-# running as root (require_root is called above) so install always succeeds.
-    if [[ ! -e "$OPS_LOCK" ]]; then
-        install -m 0660 -o root -g root /dev/null "$OPS_LOCK"
-    fi
+
+    # Always enforce correct permissions on the lock file before opening it.
+    # We do this unconditionally (not just when the file is absent) because:
+    #   1. A previous run may have left it with wrong perms.
+    #   2. auto_fix_critical_permissions (called later) must not be allowed to
+    #      interfere with the lock file path before the fd is open.
+    # Running as root (require_root above) so touch/chmod/chown always succeed.
+    touch "$OPS_LOCK"
+    chmod 0660 "$OPS_LOCK"
+    chown root:root "$OPS_LOCK"
+
     exec {_OPS_LOCK_FD}>"$OPS_LOCK"
     if ! flock -n "$_OPS_LOCK_FD"; then
         log_error "Another operation (update/restore/maintenance) is already running. Aborting."
         exit 1
     fi
+
+    # Run permission fixes only AFTER the lock fd is open and held, so they
+    # cannot race with or modify the lock file before we own it.
+    auto_fix_critical_permissions "$PROJECT_ROOT"
+
     touch /tmp/.vw_maintenance.lock
     register_cleanup rm -f /tmp/.vw_maintenance.lock
     trap 'perform_cleanup' EXIT HUP INT TERM
