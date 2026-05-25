@@ -7,12 +7,19 @@
 #   - utilities/maintenance-db-maint.sh
 #   - utilities/maintenance-email.sh
 #
-# Requires: lib/common.sh, lib/docker.sh, lib/backup-utils.sh, lib/storage.sh
+# Requires: lib/log.sh, lib/config.sh, lib/common.sh, lib/docker.sh,
+#           lib/backup-utils.sh, lib/storage.sh
 # All callers must source those libraries BEFORE this file.
 
 # Guard against double-sourcing
 [[ "${_MAINTENANCE_UTILS_LOADED:-}" == "true" ]] && return 0
 _MAINTENANCE_UTILS_LOADED=true
+
+# Self-load log.sh if not already loaded — allows this lib to be sourced
+# directly without going through common.sh or a caller that pre-loads log.sh.
+_VW_MAINT_UTILS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[[ -n "${VW_LOG_LIB_LOADED:-}" ]] || source "${_VW_MAINT_UTILS_LIB_DIR}/log.sh"
+unset _VW_MAINT_UTILS_LIB_DIR
 
 # ---------------------------------------------------------------------------
 # _default_backup_dir / _default_alert_state_dir / _default_report_dir

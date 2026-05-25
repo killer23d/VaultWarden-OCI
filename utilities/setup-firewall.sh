@@ -28,6 +28,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+# shellcheck source=../lib/log.sh
+source "${PROJECT_ROOT}/lib/log.sh"
+# shellcheck source=../lib/config.sh
+source "${PROJECT_ROOT}/lib/config.sh"
 # shellcheck source=../lib/common.sh
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"

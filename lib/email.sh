@@ -5,11 +5,18 @@
 # SendGrid, Mailgun, Postmark, Resend, CyberPersons), SMTP relay,
 # Postfix sidecar, and host MTA fallback.
 #
-# Depends on: lib/common.sh (log_*, has_command, retry_with_backoff)
+# Depends on: lib/log.sh (auto-loaded if not already present),
+#             lib/common.sh (has_command, retry_with_backoff).
 # Must be sourced AFTER lib/common.sh.
 
 [[ -n "${VAULTWARDEN_EMAIL_LIB_LOADED:-}" ]] && return 0
 readonly VAULTWARDEN_EMAIL_LIB_LOADED=1
+
+# Self-load log.sh if not already loaded — allows this lib to be sourced
+# directly without going through common.sh or a caller that pre-loads log.sh.
+_VW_EMAIL_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[[ -n "${VW_LOG_LIB_LOADED:-}" ]] || source "${_VW_EMAIL_LIB_DIR}/log.sh"
+unset _VW_EMAIL_LIB_DIR
 
 _ECURL_CODE=""
 _ECURL_BODY=""

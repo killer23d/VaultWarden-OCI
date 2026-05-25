@@ -44,6 +44,10 @@ if [[ ! -f "${PROJECT_ROOT}/lib/common.sh" ]]; then
     echo "ERROR: Required library not found: ${PROJECT_ROOT}/lib/common.sh" >&2
     exit 1
 fi
+# shellcheck source=../lib/log.sh
+source "${PROJECT_ROOT}/lib/log.sh"
+# shellcheck source=../lib/config.sh
+source "${PROJECT_ROOT}/lib/config.sh"
 # shellcheck source=../lib/common.sh
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"

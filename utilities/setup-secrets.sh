@@ -30,7 +30,7 @@ trap 'rm -rf "${TMP_WORKDIR:-}"' EXIT
 trap 'rm -rf "${TMP_WORKDIR:-}"; exit 130' INT
 trap 'rm -rf "${TMP_WORKDIR:-}"; exit 143' TERM
 
-for _lib in "lib/common.sh" "lib/crypto.sh" "lib/secrets.sh"; do
+for _lib in "lib/log.sh" "lib/config.sh" "lib/common.sh" "lib/email.sh" "lib/crypto.sh" "lib/secrets.sh"; do
     if [[ ! -f "${PROJECT_ROOT}/${_lib}" ]]; then
         echo "ERROR: Required library not found: ${PROJECT_ROOT}/${_lib}" >&2
         exit 1
@@ -38,11 +38,13 @@ for _lib in "lib/common.sh" "lib/crypto.sh" "lib/secrets.sh"; do
 done
 unset _lib
 
-source "lib/common.sh"
-source "lib/email.sh"
+source "${PROJECT_ROOT}/lib/log.sh"
+source "${PROJECT_ROOT}/lib/config.sh"
+source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
-source "lib/crypto.sh"
-source "lib/secrets.sh"
+source "${PROJECT_ROOT}/lib/email.sh"
+source "${PROJECT_ROOT}/lib/crypto.sh"
+source "${PROJECT_ROOT}/lib/secrets.sh"
 
 # ---------------------------------------------------------------------------
 # _show_help — top-level usage

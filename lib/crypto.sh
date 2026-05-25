@@ -10,6 +10,12 @@ readonly VAULTWARDEN_CRYPTO_LIB_LOADED=1
 # Entry-point scripts apply these options via init_common_lib(); this library
 # is always sourced after that call.
 
+# Self-load log.sh if not already loaded — allows this lib to be sourced
+# directly without going through common.sh or a caller that pre-loads log.sh.
+_VW_CRYPTO_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[[ -n "${VW_LOG_LIB_LOADED:-}" ]] || source "${_VW_CRYPTO_LIB_DIR}/log.sh"
+unset _VW_CRYPTO_LIB_DIR
+
 DEFAULT_AGE_KEY_FILE="secrets/keys/age-key.txt"
 readonly DEFAULT_AGE_KEY_FILE
 

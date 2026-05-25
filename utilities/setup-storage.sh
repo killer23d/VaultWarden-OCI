@@ -41,13 +41,15 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"   # one level up from utilities/
 cd "${PROJECT_ROOT}"
 
 # ── Library bootstrap ─────────────────────────────────────────────────────────
-REQUIRED_LIBS=(lib/common.sh lib/storage.sh lib/docker.sh lib/backup-utils.sh)
+REQUIRED_LIBS=(lib/log.sh lib/config.sh lib/common.sh lib/storage.sh lib/docker.sh lib/backup-utils.sh)
 for _lib in "${REQUIRED_LIBS[@]}"; do
     [[ -f "${PROJECT_ROOT}/${_lib}" ]] || {
         echo "ERROR: Required library not found: ${PROJECT_ROOT}/${_lib}" >&2
         exit 1
     }
 done
+source "${PROJECT_ROOT}/lib/log.sh"
+source "${PROJECT_ROOT}/lib/config.sh"
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
 source "${PROJECT_ROOT}/lib/storage.sh"

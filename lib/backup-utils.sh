@@ -5,15 +5,11 @@
 [[ -n "${VAULTWARDEN_BACKUP_UTILS_LIB_LOADED:-}" ]] && return 0
 readonly VAULTWARDEN_BACKUP_UTILS_LIB_LOADED=1
 
-# Dependency assertions — fail loudly at source time, not inside functions
-for _fn in log_error log_info log_success log_debug log_warn; do
-    declare -f "$_fn" >/dev/null 2>&1 || {
-        printf 'backup-utils.sh: required function %s not found (source lib/common.sh first)\n' \
-            "$_fn" >&2
-        return 1
-    }
-done
-unset _fn
+# Self-load log.sh if not already loaded — allows this lib to be sourced
+# directly without going through common.sh or a caller that pre-loads log.sh.
+_VW_BACKUP_UTILS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[[ -n "${VW_LOG_LIB_LOADED:-}" ]] || source "${_VW_BACKUP_UTILS_LIB_DIR}/log.sh"
+unset _VW_BACKUP_UTILS_LIB_DIR
 
 # Format a byte count as a human-readable string without extra dependencies.
 # Displays KB for sub-MB files; MB (one decimal place) for larger files.
