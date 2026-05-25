@@ -530,6 +530,239 @@ Below are the Critical and Moderate issues tables from all five waves. Perform t
 
 ---
 
+## Wave 7 — Documentation Audit
+
+### Context
+
+This wave audits all documentation files in the repository for logical flow, completeness, accuracy against the actual code, and friction for a junior admin. Documentation is evaluated **as a reader, not as code** — the goal is to identify where a junior admin would get lost, receive wrong information, or be left without guidance for a real scenario.
+
+Connect to `killer23d/VaultWarden-OCI` on the **Beta** branch.
+
+> **Ground rule reversal for this wave only:** Unlike Waves 1–6, you **must read the documentation files directly** to evaluate them. You will then cross-reference their claims against the actual code to identify inconsistencies. Do not treat documentation as authoritative — treat it as a claim to be verified.
+
+### Scope — this wave only
+
+Before auditing, list the actual contents of `docs/` from the repository. If any `.md` files exist beyond the list below, include them.
+
+**Known files (verify all exist; flag any missing):**
+
+`docs/` directory:
+- `docs/ADVANCED-CUSTOMIZATION.md`
+- `docs/API.md`
+- `docs/BACKUP-RESTORE.md`
+- `docs/BOOTSTRAP_KEY_RECOVERY.md`
+- `docs/CONFIGURATION.md`
+- `docs/DEPLOYMENT.md`
+- `docs/EMAIL.md`
+- `docs/MIGRATION.md`
+- `docs/OPERATIONS.md`
+- `docs/SCRIPTS.md`
+- `docs/SECURITY.md`
+- `docs/TROUBLESHOOTING.md`
+- `docs/VOLUME-MIGRATION.md`
+
+Root-level documentation:
+- `README.md`
+- `RUNBOOK.md`
+- `CHANGELOG.md`
+
+In-directory documentation:
+- `utilities/README.md`
+
+### Evaluation Lens
+
+Every document must be evaluated through the eyes of the target user: **a junior admin who is not a bash expert, managing this system for 10 users, expected to operate it without hand-holding**. Ask yourself for every doc:
+
+1. Could they follow this without knowing what they don't know?
+2. Would they know when to stop and when to proceed?
+3. Would they know what to do if something goes wrong mid-procedure?
+4. Does this doc match what the code actually does today on the Beta branch?
+
+### 1. Structural Completeness — all docs
+
+For each document, answer:
+- Does it have a clear purpose statement at the top — does the admin know within the first paragraph what this doc is for and when to use it?
+- Does it have a table of contents if it is longer than 3 sections?
+- Are there any sections that are referenced from other docs but do not exist (broken cross-references or forward references that go nowhere)?
+- Are there any duplicate sections across docs that give conflicting guidance on the same topic?
+- Is the reading order between documents clear? Can a new admin determine which doc to read first, second, third?
+- Is there a single entry-point document that tells a new admin the full sequence: install → configure → verify → operate? Or must they infer the order?
+
+### 2. `README.md` — First Contact
+
+- Does the README give a junior admin a clear, accurate 3-step orientation: what this project is, who it is for, and where to start?
+- Does it link to `docs/DEPLOYMENT.md` or equivalent as the starting point for setup — not bury the setup link at the bottom?
+- Does it accurately reflect that the project is now on the **Beta** branch and that Beta has replaced fail2ban with CrowdSec?
+- Are there any references to Alpha-only files or features (e.g., old `edit-secrets.sh` at root, `fail2ban/`, `utilities/create-breakglass-admin.sh`, `utilities/migrate-volume.sh`) that no longer exist on Beta?
+- Does it describe `dashboard.sh` and how to use it?
+- Is there a "Quick Start" or "5-minute path to a running system" — or does it assume prior knowledge?
+
+### 3. `docs/DEPLOYMENT.md` — The Setup Journey
+
+This is the most critical document for a junior admin. Audit it as a complete end-to-end procedure:
+- Does the deployment procedure reference the correct Beta scripts — `utilities/setup-system.sh`, `utilities/setup-env.sh`, `utilities/setup-secrets.sh`, `utilities/setup-firewall.sh`, `utilities/setup-crowdsec.sh`, `utilities/setup-storage.sh`, `utilities/setup-systemd.sh` — in the correct order?
+- Is there a prerequisite checklist (OS, Docker version, ports, DNS configured) before the first step?
+- Does it explain what each setup script does in plain English before asking the admin to run it?
+- Does it include a verification step after each phase — how does the admin know phase 1 succeeded before moving to phase 2?
+- Does it cover the CrowdSec setup and explain that fail2ban is no longer used?
+- Does it explain `utilities/smoke-test.sh` and `utilities/pre-production-drill.sh` and when to run them?
+- Are there any steps that would cause data loss or lock-out if run in the wrong order — and are they warned?
+- Does it end with a "You are live" checklist — confirming VaultWarden is accessible, backup is running, monitoring is active?
+
+### 4. `docs/BACKUP-RESTORE.md` — The Safety Net
+
+This document covers the most operationally critical procedure. A wrong restore can destroy user data.
+- Does it accurately describe the Beta backup pipeline — `utilities/backup-run.sh` and `utilities/restore-run.sh` — rather than the old `backup.sh`/`restore.sh` direct invocation?
+- Does it describe all backup types (DB-only vs. full) and when each is appropriate?
+- Does the restore procedure include a step-by-step sequence with explicit stop-the-service-first instructions?
+- Does it explain checksum/signature verification before restore?
+- Is there a "restore drill" section — advising the admin to test restores before they need them in an emergency?
+- Does it cover what to do if a restore fails mid-way?
+- Does it explain retention policy and how to check it?
+- Does it describe all supported storage backends without assuming OCI Object Storage?
+
+### 5. `docs/SECURITY.md` — Threat Model & Controls
+
+- Does the document accurately describe the current security stack for Beta — CrowdSec (not fail2ban), the current firewall approach via `utilities/setup-firewall.sh`, and secrets management via the `utilities/secrets-*.sh` suite?
+- Does it explain the secrets encryption model in plain English — what is encrypted, what KDF is used, and where keys are stored?
+- Does it describe the break-glass / recovery procedure or reference `docs/BOOTSTRAP_KEY_RECOVERY.md` explicitly?
+- Does it explain when and how to rotate secrets — linking to `utilities/secrets-rotate.sh`?
+- Does it cover the Cloudflare dependency — and make clear it is optional with a fallback?
+- Does it accurately describe what CrowdSec protects against and what it does not?
+- Is there a section on what to do after a suspected breach?
+
+### 6. `docs/BOOTSTRAP_KEY_RECOVERY.md` — The Worst-Case Scenario
+
+This document is for the moment when everything else has failed. It must be unambiguous.
+- Does it have a **prominent warning at the top** that this procedure is irreversible or high-risk if done incorrectly?
+- Is the recovery procedure a numbered, step-by-step sequence — not a narrative?
+- Does it specify exactly which file to use, what command to run, and what output to expect at every step?
+- Does it describe what happens if you run it on an already-initialized system (would it destroy existing data)?
+- Does it explain how to verify the recovery succeeded before relying on it?
+- Is it consistent with what `utilities/setup-secrets.sh` and `lib/crypto.sh` actually do in the code?
+- Could a junior admin follow this at 2am under stress without making an irreversible mistake?
+
+### 7. `docs/OPERATIONS.md` — Day-to-Day Running
+
+- Does it describe a regular operations cadence — what the admin should check daily, weekly, monthly?
+- Does it explain all Makefile targets that an admin would use routinely — or does it just say "run make help"?
+- Does it describe `dashboard.sh` and how to interpret its output?
+- Does it cover how to read CrowdSec decision logs and understand active bans?
+- Does it explain how to verify that automated tasks (backup timers, health checks, maintenance) are actually running — not just installed?
+- Is there a "first 30 days" checklist for a new admin taking over a running system?
+- Does it cover log file locations and how to access them?
+
+### 8. `docs/TROUBLESHOOTING.md` — When Things Break
+
+- Is the document organized by symptom ("VaultWarden is not accessible"), not by component ("Caddy configuration")?
+- Does each troubleshooting entry have: symptom → likely causes → diagnostic commands → fix?
+- Are the diagnostic commands accurate for the Beta setup — e.g., checking CrowdSec not fail2ban, using the correct script paths?
+- Does it cover the most likely failure scenarios for a junior admin:
+  - VaultWarden container not starting
+  - Backup failing silently
+  - CrowdSec banning the admin themselves
+  - Caddy certificate renewal failing
+  - Restore leaving system in a broken state
+  - Admin locked out of the system entirely
+- Is there a "nothing works, what do I do" section for complete system failure?
+- Does it reference `utilities/smoke-test.sh` as a first-line diagnostic?
+
+### 9. `docs/CONFIGURATION.md` — The Settings Reference
+
+- Does every variable documented here match a variable that actually exists in `.env.example`?
+- Are there variables in `.env.example` that are **not** documented here? List them.
+- Does it explain which variables are required vs. optional with clear defaults shown?
+- Does it explain the consequences of misconfiguring high-impact variables (e.g., wrong `DOMAIN`, missing SMTP, wrong backup path)?
+- Is there an example of a complete, minimal valid configuration for a new deployment?
+
+### 10. `docs/EMAIL.md` — Notifications
+
+- Does it accurately reflect `lib/email.sh` as the email implementation on Beta?
+- Does it explain all notification events — which scripts send email and under what conditions?
+- Does it cover SMTP credential configuration without showing credentials in examples?
+- Does it explain how to test the email configuration without sending to real users?
+- Does it cover the case where SMTP is unavailable — does VaultWarden continue running or does it fail?
+
+### 11. `docs/SCRIPTS.md` — The Script Reference
+
+This is the most likely document to become stale as Beta adds new scripts.
+- Does it list every shell script that exists on the Beta branch? Cross-reference against the File Coverage Map in this PRR.
+- For each script, does it describe: purpose, when to use it, arguments/flags, and expected output?
+- Are there any Alpha-era scripts documented here that no longer exist on Beta?
+- Are the new Beta scripts documented:
+  - `dashboard.sh`
+  - `utilities/backup-run.sh`, `utilities/restore-run.sh`
+  - All `utilities/setup-*.sh`
+  - All `utilities/secrets-*.sh`
+  - All `utilities/maintenance-*.sh`
+  - `utilities/smoke-test.sh`, `utilities/pre-production-drill.sh`
+- Does it document the correct invocation path — e.g., run from repo root, not from `utilities/`?
+
+### 12. `docs/MIGRATION.md` and `docs/VOLUME-MIGRATION.md` — Moving Between Systems
+
+- Do the migration procedures reference the correct Beta scripts, or are they still written for Alpha?
+- Does `docs/MIGRATION.md` cover the Alpha → Beta migration path — i.e., what a current Alpha user must do to upgrade? If not, flag it as a missing critical document.
+- Does `docs/VOLUME-MIGRATION.md` reference `utilities/backup-run.sh` and `utilities/restore-run.sh` for the data transfer, or does it use old script paths?
+- Are there any destructive steps (data deletion, volume removal) that are not preceded by an explicit backup instruction?
+- Does each migration procedure have a rollback path if it fails midway?
+
+### 13. `docs/ADVANCED-CUSTOMIZATION.md` — Power User Guidance
+
+- Does it clearly state at the top that this document is for advanced users and that mistakes here can break the system?
+- Are customization procedures safe for the base deployment — i.e., do they avoid overwriting production secrets or volumes?
+- Does it accurately reflect Beta's architecture when describing customization points (e.g., CrowdSec profiles, Caddy plugins)?
+- Are there any customization options documented that conflict with the cloud-agnostic design goal?
+
+### 14. `docs/API.md` — Programmatic Access
+
+- Does it describe the actual API surface available on this deployment — not generic VaultWarden API docs?
+- Does it explain authentication for any exposed API endpoints?
+- Does it warn that API tokens are secrets and should be managed via `utilities/secrets-*.sh`?
+- Is there a clear statement of which ports and endpoints are externally accessible vs. internal-only?
+
+### 15. `RUNBOOK.md` — Incident Response
+
+- Is this distinct from `docs/TROUBLESHOOTING.md`? If they overlap significantly, flag the duplication.
+- Does it cover the specific incident types most likely for this system:
+  - Accidental mass-ban by CrowdSec
+  - Compromised admin credentials
+  - Failed backup discovery
+  - Container won't start after update
+  - Full disk causing backup failure
+- Does each runbook entry have: trigger condition, severity, immediate action, root cause investigation, resolution, and post-incident check?
+- Is there an escalation path — what to do if the runbook steps don't resolve the issue?
+
+### 16. Cross-Document Consistency Check
+
+Perform these specific cross-checks across all documents:
+
+- **Script name consistency:** Do all documents refer to scripts by their correct Beta path (e.g., `utilities/backup-run.sh` not `backup.sh`, `utilities/secrets-edit.sh` not `edit-secrets.sh`)? List every stale script reference found.
+- **CrowdSec vs. fail2ban:** Do any documents still refer to fail2ban as the intrusion detection system? List every occurrence.
+- **Storage backend:** Do any documents assume OCI Object Storage as the only or default backend?
+- **`CHANGELOG.md` currency:** Does `CHANGELOG.md` reflect Beta-branch changes — CrowdSec adoption, new utilities pipeline, new lib files? Or does it stop at Alpha?
+- **`utilities/README.md` vs. `docs/SCRIPTS.md`:** Do these two references give conflicting descriptions of the same utilities? Which should be considered authoritative?
+- **Broken internal links:** Are there any `[text](link)` references between docs that point to sections or files that do not exist?
+
+### Output Format
+
+**Document Health Summary** — table: `Document | Purpose Clear? | Beta-Accurate? | Junior Admin Can Follow? | Cross-References Valid? | Priority Issues`
+
+**Critical Gaps** — table: `Document | Issue | Why It Matters | Suggested Fix`
+> Critical = a junior admin would take an action that could cause data loss, lockout, or a security breach by following the documentation.
+
+**Accuracy Failures** — table: `Document | Claim | What the Code Actually Does | Suggested Fix`
+> Accuracy failure = the documentation describes a file, script, command, or behaviour that no longer matches the Beta branch code.
+
+**Flow & Friction Issues** — bulleted list
+> Flow issue = the admin would get confused, have to guess, or have to read multiple documents to answer a basic question.
+
+**Stale References Master List** — table: `Document | Reference Found | Correct Beta Equivalent`
+> List every occurrence of: old script names, `fail2ban`, `Alpha branch`, scripts that no longer exist on Beta.
+
+**Documentation Completeness Verdict** — 🔴 Incomplete / 🟡 Mostly Complete with Gaps / 🟢 Complete, with a 2-sentence explanation.
+
+---
+
 ## File Coverage Map (Beta Branch — as of authoring)
 
 Use this as a checklist. If files exist in the repo that are **not** listed here, they must be assigned to a wave.
@@ -549,9 +782,9 @@ Use this as a checklist. If files exist in the repo that are **not** listed here
 | `docker-compose.override.dev.yml.example` | 5 |
 | `Makefile` | 5 |
 | `VERSION` | N/A |
-| `CHANGELOG.md` | Excluded (docs) |
-| `README.md` | Excluded (docs) |
-| `RUNBOOK.md` | Excluded (docs) |
+| `CHANGELOG.md` | 7 |
+| `README.md` | 7 |
+| `RUNBOOK.md` | 7 |
 | `.gitignore` | N/A |
 | `.gitattributes` | N/A |
 
@@ -630,9 +863,24 @@ Use this as a checklist. If files exist in the repo that are **not** listed here
 | `utilities/maintenance-update-dns.sh` | 5 |
 | `utilities/maintenance-update-firewall.sh` | 5 |
 | `utilities/uninstall-vaultwarden.sh` | 5 |
+| `utilities/README.md` | 7 |
 
 ### `docs/`
-Excluded — contains only `.md` files. Do not audit.
+| File | Wave |
+|---|---|
+| `docs/ADVANCED-CUSTOMIZATION.md` | 7 |
+| `docs/API.md` | 7 |
+| `docs/BACKUP-RESTORE.md` | 7 |
+| `docs/BOOTSTRAP_KEY_RECOVERY.md` | 7 |
+| `docs/CONFIGURATION.md` | 7 |
+| `docs/DEPLOYMENT.md` | 7 |
+| `docs/EMAIL.md` | 7 |
+| `docs/MIGRATION.md` | 7 |
+| `docs/OPERATIONS.md` | 7 |
+| `docs/SCRIPTS.md` | 7 |
+| `docs/SECURITY.md` | 7 |
+| `docs/TROUBLESHOOTING.md` | 7 |
+| `docs/VOLUME-MIGRATION.md` | 7 |
 
 ---
 
