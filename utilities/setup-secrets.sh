@@ -30,7 +30,7 @@ trap 'rm -rf "${TMP_WORKDIR:-}"' EXIT
 trap 'rm -rf "${TMP_WORKDIR:-}"; exit 130' INT
 trap 'rm -rf "${TMP_WORKDIR:-}"; exit 143' TERM
 
-for _lib in "lib/common.sh" "lib/crypto.sh" "lib/secrets.sh"; do
+for _lib in "lib/log.sh" "lib/config.sh" "lib/common.sh" "lib/email.sh" "lib/crypto.sh" "lib/secrets.sh"; do
     if [[ ! -f "${PROJECT_ROOT}/${_lib}" ]]; then
         echo "ERROR: Required library not found: ${PROJECT_ROOT}/${_lib}" >&2
         exit 1
@@ -41,8 +41,8 @@ unset _lib
 source "lib/log.sh"
 source "lib/config.sh"
 source "lib/common.sh"
-source "lib/email.sh"
 init_common_lib "$0"
+source "lib/email.sh"
 source "lib/crypto.sh"
 source "lib/secrets.sh"
 
