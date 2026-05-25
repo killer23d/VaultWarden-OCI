@@ -176,6 +176,7 @@ _MV_LOCK_FD=""
 
 _mv_acquire_lock() {
     local lock_fd
+    install -m 0660 -o root -g root /dev/null "${_MV_LOCK_FILE}"
     exec {lock_fd}>"${_MV_LOCK_FILE}"
     flock -n "${lock_fd}" || {
         log_error "Another migration is already running (lock held: ${_MV_LOCK_FILE})."
@@ -1371,7 +1372,10 @@ _mv_step_healthcheck() {
 
 # ── Post-migration checklist ──────────────────────────────────────────────────
 _mv_print_checklist() {
-    local renamed_src="${_MV_SOURCE}.pre-migration.${_MV_TIMESTAMP}"
+    local renamed_src="${_MV_SOURCE}.pre-migration.<timestamp>"
+    if [[ "${DRY_RUN}" != "true" ]]; then
+        renamed_src="${_MV_SOURCE}.pre-migration.${_MV_TIMESTAMP}"
+    fi
     printf '\n'
     printf '═══════════════════════════════════════════════════════════════\n'
     printf '  Post-Migration Checklist\n'
@@ -1713,8 +1717,10 @@ setup_directories() {
     fi
 
     for _dir in data logs caddy backups; do
-    [[ -d "${project_state_dir}/${_dir}" ]] && \
-        chown -R "${puid}:${pgid}" "${project_state_dir}/${_dir}" || return 1
+        {
+            [[ -d "${project_state_dir}/${_dir}" ]] && \
+                chown -R "${puid}:${pgid}" "${project_state_dir}/${_dir}"
+        } || return 1
     done
 
     find "${project_state_dir}" -type d -exec chmod 750 {} + 2>/dev/null || return 1
@@ -2008,11 +2014,6 @@ _parse_outer_args() {
 # ═══════════════════════════════════════════════════════════════════════════════
 
 main() {
-    if [[ $# -eq 0 ]]; then
-        _ss_usage
-        exit 0
-    fi
-
     _parse_outer_args "$@"
 
     (( EUID == 0 )) || {

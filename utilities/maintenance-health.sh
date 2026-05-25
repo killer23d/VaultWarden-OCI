@@ -149,25 +149,7 @@ local _HEALTH_RUN_LOCK_FILE="/run/lock/vaultwarden-health.lock"
 local _HEALTH_LOCK_FD=""
 
 _acquire_run_lock() {
-    local _lock_user _lock_group _lock_owner
-    _lock_user=$(id -un)
-    _lock_group=$(id -gn)
-    if [[ -f "$_HEALTH_RUN_LOCK_FILE" ]]; then
-        _lock_owner=$(stat -c '%U' "$_HEALTH_RUN_LOCK_FILE" 2>/dev/null || echo "")
-        if [[ -n "$_lock_owner" && "$_lock_owner" != "$_lock_user" ]]; then
-            chown "${_lock_user}:${_lock_group}" "$_HEALTH_RUN_LOCK_FILE" 2>/dev/null || true
-            sudo chown "${_lock_user}:${_lock_group}" "$_HEALTH_RUN_LOCK_FILE" 2>/dev/null || true
-        fi
-    else
-        install -m 0660 /dev/null "$_HEALTH_RUN_LOCK_FILE" 2>/dev/null || true
-        chown "${_lock_user}:${_lock_group}" "$_HEALTH_RUN_LOCK_FILE" 2>/dev/null || true
-    fi
-    chmod 0660 "$_HEALTH_RUN_LOCK_FILE" 2>/dev/null || true
-    if [[ ! -w "$_HEALTH_RUN_LOCK_FILE" ]]; then
-        log_error "Cannot write health run-lock: ${_HEALTH_RUN_LOCK_FILE}"
-        log_error "Fix once with: sudo chown ${_lock_user}:${_lock_group} ${_HEALTH_RUN_LOCK_FILE} && sudo chmod 0660 ${_HEALTH_RUN_LOCK_FILE}"
-        return 1
-    fi
+    install -m 0660 -o root -g root /dev/null "$_HEALTH_RUN_LOCK_FILE"
 
     exec {_HEALTH_LOCK_FD}>"$_HEALTH_RUN_LOCK_FILE" 2>/dev/null || {
         log_error "Cannot open health run-lock: ${_HEALTH_RUN_LOCK_FILE}"
