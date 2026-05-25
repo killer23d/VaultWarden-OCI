@@ -6,6 +6,24 @@ Related docs: [BACKUP-RESTORE.md](BACKUP-RESTORE.md) · [SECURITY.md](SECURITY.m
 
 > **💡 Built-in alternatives:** Before using the manual GPG workflow below, consider the native three-tier protection in `lib/crypto.sh`: **Tier 1** (`simple_verify_age_key`) runs automatically on every `backup.sh` invocation — checking permissions, ownership, and performing an encrypt/decrypt roundtrip; **Tier 2** (`create_password_manager_escrow`) exports a password-manager-ready plaintext escrow; **Tier 3** (`create_printable_key_backup`) generates a printable PDF paper backup (HTML fallback if `wkhtmltopdf` is unavailable, with a 30-minute auto-delete reminder). `./utilities/secrets-export-recovery-kit.sh` also creates a full recovery document including the Age key and all secrets. See [BACKUP-RESTORE.md](BACKUP-RESTORE.md) for details on each tier. See [SCRIPTS.md](SCRIPTS.md) for the full `lib/crypto.sh` function reference. The GPG-based approach below is a supplementary option for those wanting an additional passphrase-protected layer independent of the project tooling.
 
+## Key Path Resolution Order
+
+Every script in this project resolves the age key from the **first readable
+location found**, in this order:
+
+| Priority | Path | When it applies |
+| :-- | :-- | :-- |
+| 1 | `$AGE_KEY_FILE` env var | Explicit operator override; always wins when set |
+| 2 | `/etc/vaultwarden/age-key.txt` | Runtime/production path — installed by `setup.sh`, owned by the service user |
+| 3 | `secrets/keys/age-key.txt` | Repo-local fallback — used during initial setup and on dev machines |
+
+**You never need to track which path is active.** Run `make key-path` to
+see which path is currently resolving, or `make key-health` to validate it.
+
+> **After first install**, `/etc/vaultwarden/age-key.txt` is the live key.
+> The repo-local path is only valid before `setup.sh` has run, or on a
+> dev laptop clone without `/etc/vaultwarden/` present.
+
 ---
 
 ## 📍 The Circular Dependency Problem
@@ -95,10 +113,19 @@ age -d -i age-key.txt db_backup_YYYYMMDD_HHMMSS.sqlite3.age > db.sqlite3
 #    Full/emergency backups (.tar.zst.age): zstd-compressed tar
 age -d -i age-key.txt full_backup_YYYYMMDD_HHMMSS.tar.zst.age | zstd -d -T0 -c | tar -xf -
 
-# 3. Place the Age key in the project
+# 3. Place the Age key — use the path matching your target environment
+
+# Production / post-install (preferred):
+sudo install -m 600 -o <service-user> -g <service-user> \
+    age-key.txt /etc/vaultwarden/age-key.txt
+
+# OR — dev machine / pre-install (repo-local fallback):
 mkdir -p VaultWarden-OCI/secrets/keys
-mv age-key.txt VaultWarden-OCI/secrets/keys/
+mv age-key.txt VaultWarden-OCI/secrets/keys/age-key.txt
 chmod 600 VaultWarden-OCI/secrets/keys/age-key.txt
+
+# Verify whichever path you used:
+cd VaultWarden-OCI && make key-path
 
 # 4. Start services
 cd VaultWarden-OCI
