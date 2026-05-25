@@ -44,7 +44,7 @@ DATA_DEVICE ?=
         watch monitor \
         backup backup-full backup-emergency list-backups backup-status \
         restore restore-preflight restore-db restore-remote \
-        key-health key-backup key-escrow key-rotate key-show key-install \
+        key-path key-health key-backup key-escrow key-rotate key-show key-install \
         update check-updates update-system update-dns \
         maintenance maintenance-full \
         db-maint db-backup \
@@ -552,6 +552,16 @@ restore-remote: ## Restore from remote storage (rclone)
 # ===========================================================================
 ##@ Key Management
 # ===========================================================================
+
+.PHONY: key-path
+key-path: ## Show which age key path is currently active
+	@bash -c ' \
+	  source lib/log.sh 2>/dev/null || true; \
+	  source lib/common.sh 2>/dev/null || true; \
+	  source lib/crypto.sh; \
+	  p=$$(resolve_age_key_path 2>/dev/null) \
+	    && printf "Active age key: %s\n" "$$p" \
+	    || printf "ERROR: No readable age key found.\nSet AGE_KEY_FILE or run setup.sh to place key at /etc/vaultwarden/age-key.txt\n"'
 
 key-health: ## Check age key health (permissions, decodability, SOPS_AGE_KEY_FILE)
 	$(call check-env-readable)
