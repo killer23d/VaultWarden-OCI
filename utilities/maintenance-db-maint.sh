@@ -216,22 +216,27 @@ done
 
 main() {
     require_root
+
     local OPS_LOCK="/run/lock/vaultwarden-operations.lock"
     local _OPS_LOCK_FD
-    local lock_user lock_group
-    lock_user="${SERVICE_USER:-${BACKUP_USER:-ubuntu}}"
-    lock_group=$(id -gn "$lock_user" 2>/dev/null || echo "$lock_user")
-    if [[ -e "$OPS_LOCK" ]]; then
-        chown "${lock_user}:${lock_group}" "$OPS_LOCK" 2>/dev/null || true
-        chmod 0660 "$OPS_LOCK" 2>/dev/null || true
-    else
-        install -m 0660 -o "$lock_user" -g "$lock_group" /dev/null "$OPS_LOCK" 2>/dev/null || true
-    fi
+
+    # Atomically create-or-replace the lock file with correct perms.
+    # install(1) sets mode + ownership at create time in a single syscall —
+    # no chmod/chown race window, and no [[ -e ]] guard that silently skips
+    # remediation when the file already exists with bad permissions (TOCTOU).
+    # Root ownership is correct: /run/lock is root:root 1775; this script
+    # always runs as root (require_root above). Service-user ownership is
+    # unnecessary for a process-coordination lock and was the root cause of
+    # the Permission denied error when SERVICE_USER/BACKUP_USER resolved to
+    # a non-root user before _load_env() had run.
+    install -m 0660 -o root -g root /dev/null "$OPS_LOCK"
+
     exec {_OPS_LOCK_FD}>"$OPS_LOCK"
     if ! flock -n "$_OPS_LOCK_FD"; then
         log_error "Another operation (update/restore/maintenance) is already running. Aborting."
         exit 1
     fi
+
     touch /tmp/.vw_maintenance.lock
     register_cleanup rm -f /tmp/.vw_maintenance.lock
     _load_env
