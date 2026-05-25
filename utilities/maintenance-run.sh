@@ -112,14 +112,11 @@ main() {
     auto_fix_critical_permissions "$PROJECT_ROOT"
     local OPS_LOCK="/run/lock/vaultwarden-operations.lock"
     local _OPS_LOCK_FD
-    local lock_user lock_group
-    lock_user="${SERVICE_USER:-${BACKUP_USER:-ubuntu}}"
-    lock_group=$(id -gn "$lock_user" 2>/dev/null || echo "$lock_user")
-    if [[ -e "$OPS_LOCK" ]]; then
-        chown "${lock_user}:${lock_group}" "$OPS_LOCK" 2>/dev/null || true
-        chmod 0660 "$OPS_LOCK" 2>/dev/null || true
-    else
-        install -m 0660 -o "$lock_user" -g "$lock_group" /dev/null "$OPS_LOCK" 2>/dev/null || true
+# Ensure the lock file exists with correct ownership BEFORE opening it.
+# /run/lock is root:root 1775 — only root can create files there; we are
+# running as root (require_root is called above) so install always succeeds.
+    if [[ ! -e "$OPS_LOCK" ]]; then
+        install -m 0660 -o root -g root /dev/null "$OPS_LOCK"
     fi
     exec {_OPS_LOCK_FD}>"$OPS_LOCK"
     if ! flock -n "$_OPS_LOCK_FD"; then
