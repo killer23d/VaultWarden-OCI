@@ -408,6 +408,7 @@ make version                           # Stack version from VERSION file
 | [SECURITY.md](docs/SECURITY.md) | Security hardening deep-dive |
 | [OPERATIONS.md](docs/OPERATIONS.md) | Day-to-day ops, update/rollback phases |
 | [BACKUP-RESTORE.md](docs/BACKUP-RESTORE.md) | Backup strategy and restore procedures |
+| [DISASTER-RECOVERY.md](docs/DISASTER-RECOVERY.md) | Bare-metal disaster recovery procedure |
 | [SCRIPTS.md](docs/SCRIPTS.md) | Full script reference |
 | [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common issues and fixes |
 | [MIGRATION.md](docs/MIGRATION.md) | Migrating from other setups |

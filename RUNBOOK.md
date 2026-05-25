@@ -75,6 +75,7 @@ For first-time setup on a new host:
 | Restore from remote storage | `make restore-remote` |
 | Restore database only | `make restore-db` |
 | Verify restore prerequisites | `make restore-preflight` |
+| Disaster Recovery | Complete bare-metal restore from remote backup. See [docs/DISASTER-RECOVERY.md](docs/DISASTER-RECOVERY.md) |
 
 ---
 

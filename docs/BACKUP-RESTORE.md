@@ -6,6 +6,12 @@ Related docs: [OPERATIONS.md](OPERATIONS.md) · [SCRIPTS.md](SCRIPTS.md) · [ADV
 
 ---
 
+> **Bare-Metal Disaster Recovery**
+> If you are recovering from total server loss, see the dedicated
+> [Disaster Recovery guide](./DISASTER-RECOVERY.md) for the minimal-touchpoint
+> procedure that covers dependency installation, repo checkout, and single-command
+> restore from a remote backup.
+
 ## 💾 Backup Tiers
 
 | Type | Contents | Retention | Age Key Required |
@@ -69,7 +75,7 @@ make backup-full                        # full backup via Makefile
 ```
 
 **Included:** Docker Compose config, `.env`, Caddy config, VaultWarden data directory, database snapshot.
-**Excluded:** `secrets/` directory, Age keys, SSH keys, `backups/`, `logs/`.
+**Excluded:** `secrets/` directory, Age keys, SSH keys, `backups/`, `logs/`. (See the [Disaster Recovery guide](./DISASTER-RECOVERY.md) for why secrets are intentionally excluded.)
 
 ### Emergency Recovery Kit (As Needed)
 
