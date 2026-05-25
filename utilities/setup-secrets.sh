@@ -38,13 +38,13 @@ for _lib in "lib/log.sh" "lib/config.sh" "lib/common.sh" "lib/email.sh" "lib/cry
 done
 unset _lib
 
-source "lib/log.sh"
-source "lib/config.sh"
-source "lib/common.sh"
+source "${PROJECT_ROOT}/lib/log.sh"
+source "${PROJECT_ROOT}/lib/config.sh"
+source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
-source "lib/email.sh"
-source "lib/crypto.sh"
-source "lib/secrets.sh"
+source "${PROJECT_ROOT}/lib/email.sh"
+source "${PROJECT_ROOT}/lib/crypto.sh"
+source "${PROJECT_ROOT}/lib/secrets.sh"
 
 # ---------------------------------------------------------------------------
 # _show_help — top-level usage
