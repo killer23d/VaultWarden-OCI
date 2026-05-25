@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# maintenance-update-firewall.sh — Updates UFW rules for Cloudflare IP ranges.
+# utilities/maintenance-update-firewall.sh — Updates UFW rules for Cloudflare IP ranges.
 
 set -euo pipefail
 

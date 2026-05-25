@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# smoke-test.sh — Verifies the VaultWarden-OCI stack before production go-live.
+# utilities/smoke-test.sh — Verifies the VaultWarden-OCI stack before production go-live.
 
 set -euo pipefail
 

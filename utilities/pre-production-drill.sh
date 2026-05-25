@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# pre-production-drill.sh — Runs a non-destructive pre-production rehearsal for VaultWarden-OCI.
+# utilities/pre-production-drill.sh — Runs a non-destructive pre-production rehearsal for VaultWarden-OCI.
 
 set -euo pipefail
 

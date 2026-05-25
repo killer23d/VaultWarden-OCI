@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# setup-firewall.sh — Configures VaultWarden-OCI UFW and iptables rules.
+# utilities/setup-firewall.sh — Configures VaultWarden-OCI UFW and iptables rules.
 
 set -euo pipefail
 

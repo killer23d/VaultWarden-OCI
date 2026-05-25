@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# setup-system.sh — Prepares the host system for VaultWarden-OCI.
+# utilities/setup-system.sh — Prepares the host system for VaultWarden-OCI.
 
 set -euo pipefail
 

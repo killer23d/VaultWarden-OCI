@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# uninstall-vaultwarden.sh — Uninstalls VaultWarden-OCI and removes its managed data.
+# utilities/uninstall-vaultwarden.sh — Uninstalls VaultWarden-OCI and removes its managed data.
 
 set -euo pipefail
 

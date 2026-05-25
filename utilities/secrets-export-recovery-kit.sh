@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# secrets-export-recovery-kit.sh — Exports the VaultWarden recovery kit.
+# utilities/secrets-export-recovery-kit.sh — Exports the VaultWarden recovery kit.
 
 HISTFILE=/dev/null
 set -euo pipefail

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# restore-run.sh — Restores VaultWarden data from local or remote encrypted backups.
+# utilities/restore-run.sh — Restores VaultWarden data from local or remote encrypted backups.
 
 set -euo pipefail
 

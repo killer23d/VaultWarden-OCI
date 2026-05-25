@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# setup-env.sh — Creates or updates VaultWarden-OCI environment files from project templates.
+# utilities/setup-env.sh — Creates or updates VaultWarden-OCI environment files from project templates.
 
 set -euo pipefail
 
