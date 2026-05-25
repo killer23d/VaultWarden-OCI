@@ -424,7 +424,8 @@ handle_security_menu() {
             run_cmd "make logs-crowdsec" make -C "${REPO_ROOT}" logs-crowdsec
             ;;
         5)
-            run_sudo_cmd "sudo cscli metrics" cscli metrics
+            run_sudo_cmd "sudo cscli metrics" \
+                "${REPO_ROOT}/sudo cscli metrics"
             ;;
         b) ACTIVE_MENU="main" ;;
         *)
