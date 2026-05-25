@@ -223,10 +223,12 @@ validate_secrets_decryption() {
     # Capture sops stderr so the operator knows whether failure is a
     # wrong key, missing key file, corrupt MAC, or other sops-level error.
     sops_stderr=$(sops -d "$secrets_file" 2>&1 >/dev/null) || rc=$?
+    # Capture key path before cleanup_secrets_environment() unsets SOPS_AGE_KEY_FILE.
+    local _age_key_path="$SOPS_AGE_KEY_FILE"
     cleanup_secrets_environment
     if [[ $rc -ne 0 ]]; then
         log_error "Cannot decrypt secrets file: $secrets_file (sops exit $rc)"
-        log_error "  Check AGE key at: ${SOPS_AGE_KEY_FILE:-<unset>}"
+        log_error "  Check AGE key at: ${_age_key_path:-<not set by ensure_sops_env>}"
         if [[ -n "${sops_stderr:-}" ]]; then
             log_error "  sops error: $sops_stderr"
         fi
@@ -768,7 +770,8 @@ _grk_sops_extract() {
 
 generate_recovery_kit() {
     local output_file="$1"
-    local age_key="${SOPS_AGE_KEY_FILE:-secrets/keys/age-key.txt}"
+    local age_key
+    age_key=$(resolve_age_key_path) || return 1
     local secrets_file="${SECRETS_FILE:-secrets/secrets.yaml}"
     local env_file="${PROJECT_ROOT:-.}/.env"
 
