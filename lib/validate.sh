@@ -13,6 +13,14 @@
 [[ -n "${VW_VALIDATE_LIB_LOADED:-}" ]] && return 0
 readonly VW_VALIDATE_LIB_LOADED=1
 
+# Self-load log.sh if not already loaded — validate functions are pure
+# boolean exit-code validators and do not call log_* themselves. This
+# guard exists only so validate.sh can be sourced in isolation (tests,
+# tooling) without a caller that pre-loads log.sh.
+_VW_VALIDATE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[[ -n "${VW_LOG_LIB_LOADED:-}" ]] || source "${_VW_VALIDATE_LIB_DIR}/log.sh"
+unset _VW_VALIDATE_LIB_DIR
+
 validate_email() {
     local email="$1"
     # RFC 5321: maximum total length is 254 characters.
