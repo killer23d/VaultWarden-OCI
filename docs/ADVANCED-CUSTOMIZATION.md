@@ -150,7 +150,7 @@ sudo ./setup.sh systemd status     # show status of all units
 | `vaultwarden-maintenance.timer` | Daily 2:05 AM | Comprehensive maintenance |
 | `vaultwarden-full-backup.timer` | Sunday 3 AM | Full backup + verify + rclone |
 | `vaultwarden-db-backup.timer` | Daily 4 AM | DB snapshot + rclone + full verification |
-| `vaultwarden-health.timer` | Every 30 min | Health check with auto-recover + email |
+| `vaultwarden-health.timer` | Every 5 min | Health check with auto-recover + email |
 | `vaultwarden-dns-update.timer` | Every hour | Dynamic DNS update |
 | `vaultwarden-firewall-update.timer` | Saturday 4 AM | Cloudflare firewall IP list refresh |
 
@@ -158,7 +158,7 @@ sudo ./setup.sh systemd status     # show status of all units
 
 ### Timer Persistence
 
-All timers use `Persistent=true`. If the system reboots while a timer was due to fire, systemd runs the missed job once on next boot — no manual intervention or lock-directory recreation required.
+The health, DNS, DB-backup, and firewall-update timers use `Persistent=true` — if the system reboots while one was due to fire, systemd runs the missed job once on next boot. The full-backup and maintenance timers use `Persistent=false` to avoid a catch-up I/O storm after extended downtime.
 
 ### Failure Notifications
 
