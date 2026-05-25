@@ -2,6 +2,8 @@
 
 This guide provides a complete, minimal-touchpoint, bare-metal disaster recovery (DR) procedure for restoring VaultWarden from an encrypted remote backup. It covers dependency installation, repository checkout, and single-command restore. Note that **secrets are explicitly out of scope**; they are excluded to limit blast radius in case of exfiltration, and because the age encryption key rotates after every restore, rendering archived keys immediately stale.
 
+> **See also:** [README.md](../README.md) — project overview, quick-start, and links to all other docs.
+
 ## Prerequisites
 
 - Fresh hardware or VM provisioned and OS installed.
@@ -41,14 +43,34 @@ sudo dnf install git docker docker-compose-plugin age sqlite3 zstd rclone
 
 ## Step 2 — Clone the Repository
 
-Clone the VaultWarden-OCI repository.
+Clone the VaultWarden-OCI repository, then check out the **exact branch or tag that was running when the backup was taken**.
 
 ```bash
 git clone https://github.com/killer23d/VaultWarden-OCI.git
 cd VaultWarden-OCI
 ```
 
-> **IMPORTANT:** You must check out the exact branch or tag that was running when the backup was taken to ensure full script compatibility.
+> **IMPORTANT:** You must check out the exact branch or tag that was running when the backup was taken to ensure full script compatibility. Using a different revision can cause silent behavioural differences in `restore.sh`, `backup.sh`, and the shared libraries.
+
+**How to find what was running:**
+
+1. **Check the backup `.meta` sidecar file** — every backup archive ships a `*.meta` file that records the `git_ref` (branch/tag) and `git_sha` at the time the backup was created. Inspect it with:
+   ```bash
+   cat full_backup_YYYYMMDD_HHMMSS.meta
+   # Look for: git_ref, git_sha, version fields
+   ```
+2. **Check your systemd unit or cron job** — the working directory is the cloned repo; `git -C /path/to/VaultWarden-OCI describe --tags --exact-match 2>/dev/null || git -C /path/to/VaultWarden-OCI rev-parse --abbrev-ref HEAD` shows the active ref.
+3. **Fall back to the VERSION file** — if the meta sidecar is unavailable, inspect `VERSION` in the repo root to match the version tag closest to your backup date.
+
+Once you have the ref, check it out:
+
+```bash
+# By tag (recommended for production):
+git checkout v1.2.3
+
+# By branch:
+git checkout Beta
+```
 
 ## Step 3 — Configure rclone (if not pre-configured)
 
@@ -59,33 +81,6 @@ rclone config
 ```
 
 > Reference: If `RCLONE_REMOTE_NAME` is absent from your environment, `restore.sh interactive --remote` will gracefully prompt you for the remote name interactively.
-
-## Archive Format Reference
-
-Full backups use the `.tar.zst.age` extension: a **zstd-compressed tar archive encrypted with Age**. Each backup also ships two sidecar files:
-
-| File | Purpose |
-| :-- | :-- |
-| `*.age` | Encrypted backup archive |
-| `*.sha256` | Post-encryption SHA-256 checksum |
-| `*.meta` | Metadata: type, timestamp, archive format, version |
-
-### Manual decompression pipeline
-
-```bash
-# Full / emergency backup (.tar.zst.age)
-age -d -i /path/to/age-key.txt full_backup_YYYYMMDD_HHMMSS.tar.zst.age \
-  | zstd -d -T0 -c \
-  | tar -xf -
-
-# Database-only backup (.sqlite3.age) — no tar wrapper
-age -d -i /path/to/age-key.txt db_backup_YYYYMMDD_HHMMSS.sqlite3.age \
-  > db.sqlite3
-```
-
-> **Legacy format:** Backups created before the zstd migration use `.tar.gz.age`. Replace `zstd -d -T0 -c` with `gunzip -c` for those files.
-
----
 
 ## Step 4 — Run the DR Restore
 
@@ -131,6 +126,33 @@ sudo ./maintenance.sh health --comprehensive
 ```
 
 Expected output indicators should show that services are running, the database is intact, and backups can be successfully created.
+
+---
+
+## Archive Format Reference
+
+Full backups use the `.tar.zst.age` extension: a **zstd-compressed tar archive encrypted with Age**. Each backup also ships two sidecar files:
+
+| File | Purpose |
+| :-- | :-- |
+| `*.age` | Encrypted backup archive |
+| `*.sha256` | Post-encryption SHA-256 checksum |
+| `*.meta` | Metadata: type, timestamp, archive format, version, git_ref |
+
+### Manual decompression pipeline
+
+```bash
+# Full / emergency backup (.tar.zst.age)
+age -d -i /path/to/age-key.txt full_backup_YYYYMMDD_HHMMSS.tar.zst.age \
+  | zstd -d -T0 -c \
+  | tar -xf -
+
+# Database-only backup (.sqlite3.age) — no tar wrapper
+age -d -i /path/to/age-key.txt db_backup_YYYYMMDD_HHMMSS.sqlite3.age \
+  > db.sqlite3
+```
+
+> **Legacy format:** Backups created before the zstd migration use `.tar.gz.age`. Replace `zstd -d -T0 -c` with `gunzip -c` for those files.
 
 ---
 
@@ -184,13 +206,15 @@ Run through these items after every bare-metal restore to confirm the stack is f
 
 ## Backup Type Reference
 
+Both **Full** and **Emergency** backups call `perform_full_backup()` identically. The only difference is when and why they are triggered — their archive contents are the same. Neither type includes the `secrets/` directory or the Age key.
+
 | Type | Contents | Purpose | Valid DR Artifact? | When Created |
 | :-- | :-- | :-- | :-- | :-- |
 | **Full** | Project root (config) + State dir (DB, attachments) | Scheduled DR artifact | **Yes** | Weekly (via systemd timer) |
-| **Emergency** | Full + `secrets/` directory + Age key | Pre-restore safety snapshot | **No** | Automatically before running `restore.sh` |
+| **Emergency** | Project root (config) + State dir (DB, attachments) | Pre-restore safety snapshot | **No*** | Automatically before running `restore.sh` |
 | **Database** | `db.sqlite3` only | Quick rollback of vault state | **No** | Daily (via systemd timer) |
 
-> **Note:** Emergency backups are pre-restore safety snapshots taken automatically by `restore.sh` before any restore begins. They are **NOT** a DR artifact. Full backups are your scheduled DR artifact.
+> \* Emergency backups are **not** a DR artifact because they are taken mid-restore on the *old* system state — they exist solely as a rollback safety net. They have the same archive format and contents as a full backup (`secrets/` excluded from both). Use a **scheduled full backup** as your primary DR source.
 
 ## Non-Obvious Pitfalls
 
@@ -199,8 +223,8 @@ Run through these items after every bare-metal restore to confirm the stack is f
 - **rclone remote name not configured and `.env` absent:** The interactive prompt handles this seamlessly.
 - **Recovery kit has wrong permissions:** Ensure the file has strict permissions (chmod `600`).
 - **Forgetting `setup.sh systemd install`:** Failing to run this after a restore leaves the old key in systemd, breaking automated tasks.
-- **Age key mismatch after fresh `setup.sh` before restore:** Running `setup.sh install --force` before restoring creates a new age key that doesn't match the one that encrypted your backup. Always supply the key from inside the emergency kit (`RESTORE_AGE_KEY_FILE`) or let `restore.sh` prompt you.
-- **Emergency kit key vs full-backup key:** Emergency kits include their own age key inside the archive. Full backups do not — you must supply the key separately from your bootstrap escrow.
+- **Age key mismatch after fresh `setup.sh` before restore:** Running `setup.sh install --force` before restoring creates a new age key that doesn't match the one that encrypted your backup. Always supply the key from your bootstrap escrow (`RESTORE_AGE_KEY_FILE`) or let `restore.sh` prompt you.
+- **Emergency kit key vs full-backup key:** Emergency and full backups use the same `perform_full_backup()` code path and exclude `secrets/` identically. Neither embeds an age key inside the archive. You must always supply the age key separately from your bootstrap escrow — regardless of backup type.
 - **`make key-path` shows wrong path after restore:** Confirm `setup.sh systemd install` has been run; the systemd service environment may still reference the old repo-local path.
 
 ## Troubleshooting
@@ -230,3 +254,15 @@ The recovery kit contains your offline credential. Treat it with extreme care.
 - Do NOT store it on the same server.
 - Do NOT store it in the same cloud storage bucket as the backups.
 - Do NOT send it via unencrypted email or messaging apps.
+
+---
+
+## Related Documentation
+
+| Doc | Contents |
+| :-- | :-- |
+| [README.md](../README.md) | Project overview, quick-start, and full documentation index |
+| [BACKUP-RESTORE.md](BACKUP-RESTORE.md) | Full backup strategy, retention policy, and the 12-step restore procedure |
+| [BOOTSTRAP_KEY_RECOVERY.md](BOOTSTRAP_KEY_RECOVERY.md) | Age key recovery procedures when the bootstrap key is lost |
+| [OPERATIONS.md](OPERATIONS.md) | Day-to-day ops, update/rollback phases |
+| [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | Common issues and fixes |
