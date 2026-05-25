@@ -113,15 +113,12 @@ main() {
     local OPS_LOCK="/run/lock/vaultwarden-operations.lock"
     local _OPS_LOCK_FD
 
-    # Always enforce correct permissions on the lock file before opening it.
-    # We do this unconditionally (not just when the file is absent) because:
-    #   1. A previous run may have left it with wrong perms.
-    #   2. auto_fix_critical_permissions (called later) must not be allowed to
-    #      interfere with the lock file path before the fd is open.
-    # Running as root (require_root above) so touch/chmod/chown always succeed.
-    touch "$OPS_LOCK"
-    chmod 0660 "$OPS_LOCK"
-    chown root:root "$OPS_LOCK"
+    # Atomically create-or-replace the lock file with correct perms.
+    # install(1) sets mode + ownership at create time in a single syscall —
+    # no chmod/chown race window. Works unconditionally whether the file
+    # exists or not, so stale files from previous runs are always remediated.
+    # This is the project-standard idiom (mirrors restore-run.sh / ensure_dir).
+    install -m 0660 -o root -g root /dev/null "$OPS_LOCK"
 
     exec {_OPS_LOCK_FD}>"$OPS_LOCK"
     if ! flock -n "$_OPS_LOCK_FD"; then
