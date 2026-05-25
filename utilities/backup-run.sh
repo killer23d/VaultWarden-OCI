@@ -1,22 +1,10 @@
 #!/usr/bin/env bash
-# utilities/backup-run.sh — VaultWarden-OCI backup engine
-#
-# STANDALONE entry point — all backup logic lives here.
-# Invoked by:
-#   - backup.sh (thin dispatcher, exec-forwards "$@")
-#   - systemd/vaultwarden-db-backup.service   → exec backup-run.sh run db
-#   - systemd/vaultwarden-full-backup.service → exec backup-run.sh run full
-#   - Admin directly:  sudo utilities/backup-run.sh run db --rclone
-#
-# EXIT CODES:
-#   0 — backup completed successfully
-#   1 — backup failed
-#   2 — offsite sync failed (local backup intact)
+# backup-run.sh — Creates, verifies, and optionally syncs VaultWarden backups.
 
 set -euo pipefail
 
-# SCRIPT_DIR must resolve to PROJECT_ROOT so all internal $SCRIPT_DIR/lib/,
-# $SCRIPT_DIR/secrets/ references (inherited from backup.sh verbatim) work.
+# SCRIPT_DIR must resolve to PROJECT_ROOT so inherited $SCRIPT_DIR/lib/ and
+# $SCRIPT_DIR/secrets/ references from backup.sh still work.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 source "$SCRIPT_DIR/lib/log.sh"
@@ -29,19 +17,19 @@ source "$SCRIPT_DIR/lib/backup-utils.sh"
 source "$SCRIPT_DIR/lib/crypto.sh"
 source "$SCRIPT_DIR/lib/storage.sh"  # provides require_project_state_ready()
 
-# Configuration
-BACKUP_TYPE="auto"   # auto | db | full | emergency
+# Configuration defaults.
+BACKUP_TYPE="auto"   # Backup mode: auto, db, full, or emergency.
 DRY_RUN=false
 KEEP_DAYS=14
 QUIET=false
 FORCE=false
 
-EMAIL_NOTIFY=false   # set by --email; send_notification_email() called on completion
-LIST_ONLY=false      # set by list subcommand; print existing backups and exit (no root needed)
-RCLONE_SYNC=false    # set by --rclone; sync encrypted backup to rclone remote after creation
-FULL_VERIFY=false    # set by --full-verification; decrypt + integrity check before sync
+EMAIL_NOTIFY=false   # Set by --email; send_notification_email() runs on completion.
+LIST_ONLY=false      # Set by the list subcommand; prints backups and exits without root.
+RCLONE_SYNC=false    # Set by --rclone; syncs the encrypted backup after creation.
+FULL_VERIFY=false    # Set by --full-verification; decrypts and integrity-checks before sync.
 
-LOCK_FD=""   # Assigned by exec {LOCK_FD}>file (bash 4.1+ automatic FD allocation)
+LOCK_FD=""   # Assigned by exec {LOCK_FD}>file (Bash 4.1+ automatic FD allocation).
 
 show_help() {
     cat << 'EOF'
@@ -81,8 +69,6 @@ EXAMPLES:
 EOF
 }
 
-# Argument Parsing & Execution
-
 _SUBCMD=""
 if [[ $# -eq 0 ]]; then
     show_help; exit 0
@@ -106,7 +92,7 @@ esac
 
 case "$_SUBCMD" in
     run)
-        # Optional positional TYPE (db|full|emergency|auto) before any --flags
+        # Optional positional TYPE (db|full|emergency|auto) before any --flags.
         if [[ $# -gt 0 && "$1" != --* ]]; then
             BACKUP_TYPE="$1"; shift
         fi
@@ -125,11 +111,11 @@ case "$_SUBCMD" in
         done
         ;;
     list)
-        # 'list' subcommand — no root required
+        # The 'list' subcommand does not require root.
         LIST_ONLY=true
         ;;
     verify)
-        # 'verify' subcommand — full integrity check on the latest backup
+        # The 'verify' subcommand runs a full integrity check on the latest backup.
         FULL_VERIFY=true
         while [[ $# -gt 0 ]]; do
             case $1 in
@@ -140,7 +126,7 @@ case "$_SUBCMD" in
         done
         ;;
     rotate)
-        # 'rotate' subcommand — prune old backups without creating a new one
+        # The 'rotate' subcommand prunes old backups without creating a new one.
         LIST_ONLY=false
         while [[ $# -gt 0 ]]; do
             case $1 in
@@ -152,7 +138,7 @@ case "$_SUBCMD" in
         done
         ;;
     "")
-        # unreachable — handled above by the top-level guard
+        # Unreachable: handled above by the top-level guard.
         show_help; exit 0
         ;;
 esac
@@ -169,8 +155,8 @@ backup_log_info()    { [[ "$QUIET" == "true" ]] || log_info "$*" >&2;    }
 backup_log_success() { [[ "$QUIET" == "true" ]] || log_success "$*" >&2; }
 backup_log_warn()    { [[ "$QUIET" == "true" ]] || log_warn "$*" >&2;    }
 
-# Portable SHA-256 helper: prefer sha256sum (GNU coreutils / Linux), fall back
-# to shasum -a 256 (macOS / BSD).  Output format matches sha256sum: "<hash>  <file>".
+# Portable SHA-256 helper: prefer sha256sum (GNU coreutils / Linux), then fall back
+# to shasum -a 256 (macOS / BSD). Output format matches sha256sum: "<hash>  <file>".
 _sha256sum() { sha256sum "$1" 2>/dev/null || shasum -a 256 "$1"; }
 
 TMPDIR_BACKUP=""
@@ -206,7 +192,7 @@ _resolve_age_key() {
     return 1
 }
 
-# Returns the default base directory for backups, derived from PROJECT_STATE_DIR.
+# Returns the default base directory for backups derived from PROJECT_STATE_DIR.
 _default_backup_dir() { vw_default_backup_dir; }
 
 get_backup_dir() {
@@ -580,8 +566,6 @@ sync_to_rclone() {
 
 }
 
-# cleanup_old_backups is provided by lib/backup-utils.sh
-
 perform_db_backup() {
     local target_dir="$1"
     local timestamp="$2"
@@ -862,7 +846,6 @@ main() {
         exit 0
     fi
 
-    # verify subcommand
     if [[ "$_SUBCMD" == "verify" ]]; then
         require_root "$@"
         auto_fix_critical_permissions "$PROJECT_ROOT"
@@ -932,7 +915,6 @@ main() {
         exit 0
     fi
 
-    # rotate subcommand
     if [[ "$_SUBCMD" == "rotate" ]]; then
         require_root "$@"
         auto_fix_critical_permissions "$PROJECT_ROOT"
@@ -973,7 +955,6 @@ main() {
         exit 0
     fi
 
-    # run subcommand
 
     _check_backup_deps
 

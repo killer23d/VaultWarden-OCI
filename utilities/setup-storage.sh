@@ -1,38 +1,5 @@
 #!/usr/bin/env bash
-# utilities/setup-storage.sh — VaultWarden-OCI storage setup and migration
-#
-# USAGE:
-#   sudo utilities/setup-storage.sh [--mode setup|migrate|verify] [OPTIONS]
-#
-# MODES:
-#   setup    Create and configure storage directories (default)
-#   migrate  Migrate from boot volume to data volume (interactive)
-#   verify   Re-check layout and permissions only (no changes)
-#
-# FLAGS:
-#   --mode MODE           Mode to run: setup|migrate|verify (default: setup)
-#   --data-device DEV     Block device for data volume
-#   --data-mount PATH     Mount point (default: /mnt/vw-data)
-#   --auto                Non-interactive mode
-#   --dry-run             Preview actions without executing
-#   --force               Skip confirmations
-#   --help, -h            Show this help
-#
-# MIGRATE MODE ADDITIONAL FLAGS (pass to --mode migrate):
-#   <subcommand>          run|resume|abort|status|verify
-#   --source  PATH        Source directory
-#   --target  PATH        Destination mount point
-#   --device  DEV         Block device for new volume
-#   --skip-stack-stop     Do not stop the Docker stack before migrating
-#   --delete-source       Delete renamed source after successful verification
-#   --yes                 Answer yes to all confirmations (except --delete-source)
-#   --log-file PATH       Override default log file path
-#   --backup-dir PATH     Backup directory (checked for stale backups)
-#
-# DEPENDENCIES: rsync flock findmnt lsblk df du awk sed mktemp stat curl
-#   All are standard on Debian/Ubuntu/RHEL/Alpine (GNU or BusyBox).
-#   stat -c (GNU/BusyBox format flag) is not supported on macOS — this script
-#   targets Linux hosts only.  df -Pk and awk are POSIX-portable.
+# setup-storage.sh — Configures and migrates VaultWarden-OCI storage.
 
 set -euo pipefail
 
@@ -40,7 +7,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"   # one level up from utilities/
 cd "${PROJECT_ROOT}"
 
-# ── Library bootstrap ─────────────────────────────────────────────────────────
 REQUIRED_LIBS=(lib/log.sh lib/config.sh lib/common.sh lib/storage.sh lib/docker.sh lib/backup-utils.sh)
 for _lib in "${REQUIRED_LIBS[@]}"; do
     [[ -f "${PROJECT_ROOT}/${_lib}" ]] || {
@@ -56,11 +22,9 @@ source "${PROJECT_ROOT}/lib/storage.sh"
 source "${PROJECT_ROOT}/lib/docker.sh"
 source "${PROJECT_ROOT}/lib/backup-utils.sh"
 
-# ── Environment ───────────────────────────────────────────────────────────────
 [[ -f "${PROJECT_ROOT}/.env" ]] && load_env_file "${PROJECT_ROOT}/.env"
 export DRY_RUN=false   # overridden by arg parsing; exported for lib functions
 
-# ── Script-level variables ────────────────────────────────────────────────────
 _SS_MODE="setup"
 _SS_DATA_DEVICE=""
 _SS_DATA_MOUNT="/mnt/vw-data"
@@ -69,43 +33,15 @@ _SS_FORCE=false
 TMP_WORKDIR=""
 declare -a _SS_MIGRATE_ARGS=()
 
-# ── ERR handler (setup/verify modes) ─────────────────────────────────────────
 _ss_on_err() {
     log_error "Unexpected error at line ${2:-?} (exit ${1:-?})."
 }
 trap '_ss_on_err $? $LINENO' ERR
 
-# ── Cleanup trap ──────────────────────────────────────────────────────────────
 _ss_cleanup() {
     rm -rf "${TMP_WORKDIR:-}"
 }
 trap '_ss_cleanup' EXIT
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# AUDIT (Task 3b): All helper functions in this file were compared against
-# lib/storage.sh on 2026-05-20. No duplicates were found.
-#
-# lib/storage.sh provides: _storage_validate_paths, _storage_daemon_reload,
-#   require_project_state_ready, setup_data_volume, install_docker_mount_guard,
-#   vw_default_backup_dir.
-# All of these are called by this script where appropriate — there are no
-# inline reimplementations of any lib/storage.sh function here.
-#
-# Internal functions in this file:
-#   _ss_on_err, _ss_cleanup      — script-lifecycle hooks; setup-specific
-#   _mv_*  (80+ functions)       — migration state machine, pipeline, and steps;
-#                                  entirely migration-specific, not reusable
-#   setup_directories()          — provisions project directory tree; calls lib/ functions
-#   _mode_setup/verify/migrate() — mode dispatch handlers; setup-specific
-#   _parse_outer_args(), main()  — argument parsing and entry point
-#
-# No promotion to lib/storage.sh is needed.
-# ═══════════════════════════════════════════════════════════════════════════════
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# MIGRATE MODE — constants, helpers, and pipeline steps
-# (Adapted from the former standalone migration utility — all _mv_* functions)
-# ═══════════════════════════════════════════════════════════════════════════════
 
 readonly _MV_VERSION="1.1.0"
 _MV_SCRIPT_NAME="utilities/setup-storage.sh"
@@ -116,10 +52,10 @@ readonly _MV_LOCK_FILE="/run/lock/vaultwarden-migrate.lock"
 readonly _MV_LOG_MAX_BYTES=$(( 10 * 1024 * 1024 ))   # 10 MiB — rotate beyond this
 readonly _MV_VERIFY_TOLERANCE_PCT=1                    # allow ≤1% size delta post-rsync
 
-# State file lives in PROJECT_ROOT (not PROJECT_STATE_DIR — state dir may change)
+# Keep the state file in PROJECT_ROOT because PROJECT_STATE_DIR may change during migration.
 readonly _MV_STATE_FILE="${PROJECT_ROOT}/.migrate-volume.state"
 
-# rsync exclude list — paths that must not be copied to the target
+# Exclude paths that must not be copied to the target.
 readonly -a _MV_RSYNC_EXCLUDES=(
     "lost+found/"       # ext4 fsck directory — permission errors on some kernels
     ".vw-data-volume"   # sentinel written by setup_data_volume(); never overwrite target's
@@ -130,7 +66,7 @@ readonly -a _MV_RSYNC_EXCLUDES=(
 )
 
 # Systemd drop-in units whose ReadWritePaths= must be updated after migration.
-# KEEP IN SYNC with _VW_DROPIN_UNITS in setup.sh.
+# Keep this list in sync with _VW_DROPIN_UNITS in setup.sh.
 readonly -a _MV_DROPIN_UNITS=(
     "vaultwarden-startup.service"
     "vaultwarden-backup.service"
@@ -138,7 +74,6 @@ readonly -a _MV_DROPIN_UNITS=(
     "vaultwarden-restore.service"
 )
 
-# ── Migrate mode runtime state (set by _mv_parse_args) ───────────────────────
 _MV_SUBCOMMAND="run"
 _MV_SOURCE=""
 _MV_TARGET=""
@@ -150,7 +85,6 @@ _MV_YES=false
 _MV_LOG_FILE=""
 _MV_BACKUP_DIR_CUSTOM_WARNING=""
 
-# Elapsed-time helper
 _MV_START_TIME="${SECONDS}"   # bash built-in — seconds since shell started
 
 _mv_elapsed() {
@@ -171,7 +105,6 @@ _mv_fmt_bytes() {
     }'
 }
 
-# ── Lock helpers ──────────────────────────────────────────────────────────────
 _MV_LOCK_FD=""
 
 _mv_acquire_lock() {
@@ -194,13 +127,11 @@ _mv_release_lock() {
     }
 }
 
-# ── Migrate cleanup (registered as EXIT trap inside _mode_migrate) ────────────
 _mv_cleanup() {
     _mv_release_lock
     _mv_log info "Elapsed: $(_mv_elapsed)"
 }
 
-# ── Root check ────────────────────────────────────────────────────────────────
 _mv_require_root() {
     [[ "${EUID}" -eq 0 ]] || {
         log_error "This script must be run as root: sudo utilities/setup-storage.sh --mode migrate $*"
@@ -208,7 +139,6 @@ _mv_require_root() {
     }
 }
 
-# ── Logging ───────────────────────────────────────────────────────────────────
 _mv_log() {
     # Passthrough to lib/common.sh log functions AND write to log file.
     # Usage: _mv_log <level> <message>
@@ -222,7 +152,6 @@ _mv_log() {
         "${msg}" >> "${_MV_LOG_FILE:-${PROJECT_ROOT}/logs/migrate-volume.log}"
 }
 
-# ── Full ERR handler for migrate mode ────────────────────────────────────────
 _mv_on_err() {
     local rc="$1" lineno="$2"
     _mv_log error "Unexpected error at line ${lineno} (exit ${rc}). Migration halted."
@@ -264,7 +193,6 @@ _mv_open_log() {
     _mv_log info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 }
 
-# ── State file helpers ────────────────────────────────────────────────────────
 _mv_state_write() {
     # Usage: _mv_state_write KEY [VALUE]
     local key="$1" value="${2:-true}"
@@ -295,7 +223,6 @@ _mv_state_clear() {
     rm -f "${_MV_STATE_FILE}"
 }
 
-# ── Interactive confirmation helpers ──────────────────────────────────────────
 _mv_confirm() {
     # Usage: _mv_confirm "Prompt text"
     # Returns 0 if confirmed, exits 1 if declined.
@@ -317,7 +244,6 @@ _mv_confirm_by_typing() {
     }
 }
 
-# ── Private helper: fstab stale-entry warning ─────────────────────────────────
 _mv_warn_fstab_entries() {
     # Scans /etc/fstab for any entry whose device or mount point references
     # _MV_SOURCE or _MV_TARGET, and emits a prominent, actionable warning.
@@ -357,7 +283,6 @@ _mv_warn_fstab_entries() {
     fi
 }
 
-# ── Private helper: expand ~ in path ─────────────────────────────────────────
 _mv_expand_path() {
     local p="$1"
     if [[ "$p" == ~/* ]]; then
@@ -368,7 +293,6 @@ _mv_expand_path() {
     printf '%s' "$p"
 }
 
-# ── Block device type helpers ─────────────────────────────────────────────────
 _mv_lsblk_is_partition() {
     [[ "$1" == "part" ]]
 }
@@ -447,7 +371,6 @@ _mv_select_device() {
         if [[ "${choice}" =~ ^[0-9]+$ ]] \
                 && (( choice >= 1 && choice <= ${#dev_names[@]} )); then
             _MV_DEVICE="${dev_names[$(( choice - 1 ))]}"
-            # Guard against boot device selection
             if [[ "${dev_mounts[$(( choice - 1 ))]}" == "/" ]] \
                     || { [[ -n "${root_dev}" ]] \
                          && [[ "${#_MV_DEVICE}" -ge "${#root_dev}" ]] \
@@ -465,7 +388,6 @@ _mv_select_device() {
     log_info "Selected target device: ${_MV_DEVICE}"
 }
 
-# ── Interactive mount point prompt ────────────────────────────────────────────
 _mv_prompt_target() {
     [[ -n "${_MV_TARGET:-}" ]] && return 0
     [[ "${_MV_SUBCOMMAND}" == "run" ]] || return 0
@@ -481,7 +403,6 @@ _mv_prompt_target() {
     printf '\n'
 }
 
-# ── Pre-flight summary box ────────────────────────────────────────────────────
 _mv_print_preflight_summary() {
     local mode
     if [[ -n "${_MV_DEVICE}" ]]; then
@@ -525,7 +446,6 @@ _mv_print_preflight_summary() {
     _mv_confirm "Confirm the above and start migration."
 }
 
-# ── Private helper: disk space check ─────────────────────────────────────────
 _mv_check_disk_space() {
     local source="$1" target="$2"
     local src_bytes avail_bytes required_bytes
@@ -549,7 +469,6 @@ _mv_check_disk_space() {
     _mv_log success "Disk space OK."
 }
 
-# ── Private helper: stale backup check ───────────────────────────────────────
 _mv_check_stale_backup() {
     local backup_base_dir newest newest_ts now_ts age_hours
 
@@ -578,7 +497,6 @@ _mv_check_stale_backup() {
     fi
 }
 
-# ── Private helper: atomic .env key update ───────────────────────────────────
 _mv_set_env_var() {
     local key="$1" value="$2"
     local env_file="${PROJECT_ROOT}/.env"
@@ -606,7 +524,6 @@ _mv_set_env_var() {
     _mv_log info ".env updated: ${key}=${value}"
 }
 
-# ── Migrate usage / help ──────────────────────────────────────────────────────
 _mv_usage() {
 cat << 'EOF'
 VaultWarden-OCI Volume Migration (via setup-storage.sh --mode migrate)
@@ -674,7 +591,6 @@ EXAMPLES:
 EOF
 }
 
-# ── Migrate argument parser ───────────────────────────────────────────────────
 _mv_parse_args() {
     _MV_SUBCOMMAND="run"
     _MV_SOURCE=""
@@ -686,7 +602,6 @@ _mv_parse_args() {
     _MV_YES=false
     _MV_LOG_FILE=""
 
-    # First positional arg is subcommand if it does not start with '--'
     if [[ $# -gt 0 && "${1}" != --* ]]; then
         _MV_SUBCOMMAND="$1"
         shift
@@ -742,12 +657,10 @@ _mv_parse_args() {
         esac
     done
 
-    # Default source to current PROJECT_STATE_DIR
     if [[ -z "${_MV_SOURCE}" ]]; then
         _MV_SOURCE="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
     fi
 
-    # Validate required args per subcommand
     case "${_MV_SUBCOMMAND}" in
         run)
             if [[ "${_MV_YES:-false}" == "true" && -z "${_MV_TARGET}" ]]; then
@@ -761,7 +674,6 @@ _mv_parse_args() {
             fi
             ;;
         resume|status|abort|verify)
-            # No required args
             ;;
         *)
             log_error "Unknown subcommand: ${_MV_SUBCOMMAND}"
@@ -770,7 +682,6 @@ _mv_parse_args() {
             ;;
     esac
 
-    # Canonicalise paths
     _MV_SOURCE="$(realpath -m "${_MV_SOURCE}")"
     if [[ -n "${_MV_TARGET}" ]]; then
         _MV_TARGET="$(realpath -m "${_MV_TARGET}")"
@@ -791,7 +702,6 @@ _mv_parse_args() {
     fi
 }
 
-# ── Pipeline step 0: Pre-flight validation ────────────────────────────────────
 _mv_step_validate() {
     _mv_log info "── validate ──────────────────────────────────────────────────────"
 
@@ -898,7 +808,6 @@ _mv_step_validate() {
     _mv_log success "Pre-flight validation passed."
 }
 
-# ── Pipeline step 1: Pre-migration backup prompt ──────────────────────────────
 _mv_step_backup_prompt() {
     _mv_log info "── backup_prompt ─────────────────────────────────────────────────"
 
@@ -914,7 +823,6 @@ _mv_step_backup_prompt() {
     _mv_confirm "Confirm you have a recent backup and wish to proceed."
 }
 
-# ── Pipeline step 2: Stop the stack ──────────────────────────────────────────
 _mv_step_stop() {
     _mv_log info "── stop ──────────────────────────────────────────────────────────"
 
@@ -957,7 +865,6 @@ _mv_step_stop() {
     fi
 }
 
-# ── Pipeline step 3: Format and mount target volume ───────────────────────────
 _mv_step_format() {
     _mv_log info "── format ────────────────────────────────────────────────────────"
 
@@ -987,7 +894,6 @@ _mv_step_format() {
     _mv_check_disk_space "${_MV_SOURCE}" "${_MV_TARGET}"
 }
 
-# ── Pipeline step 4: rsync data transfer ─────────────────────────────────────
 _mv_step_rsync() {
     _mv_log info "── rsync ─────────────────────────────────────────────────────────"
 
@@ -1025,7 +931,6 @@ _mv_step_rsync() {
     _mv_log success "rsync transfer complete."
 }
 
-# ── Pipeline step 5: Verify transfer ─────────────────────────────────────────
 _mv_step_verify() {
     _mv_log info "── verify ────────────────────────────────────────────────────────"
 
@@ -1082,7 +987,6 @@ _mv_step_verify() {
     _mv_log success "Content integrity check passed (all file checksums match)."
 }
 
-# ── Pipeline step 6: Rename source ───────────────────────────────────────────
 _mv_step_rename_source() {
     _mv_log info "── rename_source ─────────────────────────────────────────────────"
 
@@ -1102,7 +1006,6 @@ _mv_step_rename_source() {
     fi
 }
 
-# ── Pipeline step 6a: Delete source (optional) ───────────────────────────────
 _mv_step_delete_source() {
     _mv_log info "── delete_source ─────────────────────────────────────────────────"
 
@@ -1136,7 +1039,6 @@ _mv_step_delete_source() {
     fi
 }
 
-# ── Pipeline step 7: Update .env ─────────────────────────────────────────────
 _mv_step_update_env() {
     _mv_log info "── update_env ────────────────────────────────────────────────────"
 
@@ -1203,7 +1105,6 @@ _mv_step_update_env() {
     _mv_log success ".env updated for new state directory: ${_MV_TARGET}"
 }
 
-# ── Pipeline step 8: Update systemd drop-in paths ────────────────────────────
 _mv_apply_dropin_paths() {
     # Usage: _mv_apply_dropin_paths <old_path> <new_path>
     local old_path="$1" new_path="$2"
@@ -1253,7 +1154,6 @@ _mv_step_update_dropin() {
     _mv_apply_dropin_paths "${_MV_SOURCE}" "${_MV_TARGET}"
 }
 
-# ── Pipeline step 8a: Install Docker mount guard ──────────────────────────────
 _mv_step_mount_guard() {
     _mv_log info "── mount_guard ───────────────────────────────────────────────────"
 
@@ -1275,7 +1175,6 @@ _mv_step_mount_guard() {
     _mv_log success "Docker mount guard installed."
 }
 
-# ── Pipeline step 9: Restart the stack ───────────────────────────────────────
 _mv_step_start() {
     _mv_log info "── start ─────────────────────────────────────────────────────────"
 
@@ -1370,7 +1269,6 @@ _mv_step_healthcheck() {
     fi
 }
 
-# ── Post-migration checklist ──────────────────────────────────────────────────
 _mv_print_checklist() {
     local renamed_src="${_MV_SOURCE}.pre-migration.<timestamp>"
     if [[ "${DRY_RUN}" != "true" ]]; then
@@ -1406,7 +1304,6 @@ _mv_print_checklist() {
     printf '\n'
 }
 
-# ── Status subcommand ─────────────────────────────────────────────────────────
 _mv_print_status() {
     if [[ ! -f "${_MV_STATE_FILE}" ]]; then
         log_info "No migration in progress or previously recorded."
@@ -1470,7 +1367,6 @@ _mv_print_status() {
     fi
 }
 
-# ── Abort subcommand ──────────────────────────────────────────────────────────
 _mv_do_abort() {
     if [[ ! -f "${_MV_STATE_FILE}" ]]; then
         log_info "No migration state found. Nothing to abort."
@@ -1597,7 +1493,6 @@ _mv_do_abort() {
     log_warn "Check: docker compose ps"
 }
 
-# ── Pipeline orchestrator ─────────────────────────────────────────────────────
 _mv_run_step() {
     local token="$1" fn="$2"
     if _mv_state_has "${token}"; then
@@ -1667,10 +1562,6 @@ _mv_run_pipeline() {
     _mv_run_step STEP_START_DONE          _mv_step_start
     _mv_run_step STEP_HEALTHCHECK_DONE    _mv_step_healthcheck
 }
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# SETUP MODE — setup_directories (from setup.sh:800-923)
-# ═══════════════════════════════════════════════════════════════════════════════
 
 setup_directories() {
     if [[ "${DRY_RUN}" == "true" ]]; then log_info "[DRY RUN] Would setup directories"; return 0; fi
@@ -1767,14 +1658,9 @@ setup_directories() {
     return 0
 }
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# MODE HANDLERS
-# ═══════════════════════════════════════════════════════════════════════════════
-
 _mode_setup() {
     log_info "Mode: setup — provisioning data volume and directories"
 
-    # Propagate common flags into env vars that lib functions read
     export DATA_VOLUME_DEVICE="${_SS_DATA_DEVICE}"
     export DATA_VOLUME_MOUNT="${_SS_DATA_MOUNT}"
 
@@ -1807,14 +1693,12 @@ _mode_verify() {
 }
 
 _mode_migrate() {
-    # Reset start time to when migrate mode actually begins
     _MV_START_TIME="${SECONDS}"
 
     _mv_require_root "${_SS_MIGRATE_ARGS[@]+"${_SS_MIGRATE_ARGS[@]}"}"
     _mv_parse_args "${_SS_MIGRATE_ARGS[@]+"${_SS_MIGRATE_ARGS[@]}"}"
     _mv_open_log
 
-    # Override ERR and EXIT traps for migrate mode
     trap '_mv_on_err $? $LINENO' ERR
     trap '_ss_cleanup; _mv_cleanup' EXIT
 
@@ -1878,10 +1762,6 @@ _mode_migrate() {
     esac
 }
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# USAGE
-# ═══════════════════════════════════════════════════════════════════════════════
-
 _ss_usage() {
 cat << 'EOF'
 VaultWarden-OCI Storage Setup and Migration
@@ -1937,12 +1817,7 @@ EXAMPLES:
 EOF
 }
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# ARGUMENT PARSER
-# ═══════════════════════════════════════════════════════════════════════════════
-
 _parse_outer_args() {
-    # First pass: extract --mode and --help
     local -a remaining=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -1970,13 +1845,11 @@ _parse_outer_args() {
             ;;
     esac
 
-    # For migrate mode: forward all remaining args to _mode_migrate
     if [[ "${_SS_MODE}" == "migrate" ]]; then
         _SS_MIGRATE_ARGS=("${remaining[@]+"${remaining[@]}"}")
         return 0
     fi
 
-    # For setup / verify modes: parse remaining flags
     set -- "${remaining[@]+"${remaining[@]}"}"
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -2008,10 +1881,6 @@ _parse_outer_args() {
         esac
     done
 }
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# MAIN
-# ═══════════════════════════════════════════════════════════════════════════════
 
 main() {
     _parse_outer_args "$@"

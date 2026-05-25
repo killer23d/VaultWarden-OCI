@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# lib/config.sh — Environment/configuration loader for VaultWarden-OCI.
+# lib/config.sh — Environment and configuration loading helpers for VaultWarden-OCI.
 #
 # Provides:
-#   Load     : load_env_file — parse, validate, and export a .env file
-#   Query    : get_config_value, require_config
-#   Helpers  : _get_file_perms, _set_env_var, _read_env_value
+#   Load    : load_env_file
+#   Query   : get_config_value, require_config
+#   Helpers : _get_file_perms, _set_env_var, _read_env_value
 #
-# Depends on: lib/log.sh (auto-loaded if not already present).
-# Canonical load order:
+# Depends on / Load order:
+#   lib/log.sh is auto-loaded if it has not already been sourced.
+#
+# Canonical caller source block:
 #   source "${LIB_DIR}/log.sh"
 #   source "${LIB_DIR}/config.sh"
 #   source "${LIB_DIR}/common.sh"
@@ -25,7 +27,6 @@ _ENV_FILE_SEARCH_PATHS=(
 )
 unset _VW_CONFIG_LIB_DIR
 
-# Return the octal permission string for a file, portable across GNU and BSD stat.
 _get_file_perms() {
     stat -c '%a' "$1" 2>/dev/null \
         || stat -f '%OLp' "$1" 2>/dev/null \

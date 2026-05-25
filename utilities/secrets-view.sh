@@ -1,16 +1,5 @@
 #!/usr/bin/env bash
-# utilities/secrets-view.sh — View decrypted VaultWarden secrets (read-only)
-#
-# Standalone admin tool. Also invocable via: ./edit-secrets.sh view
-#
-# USAGE:
-#   ./utilities/secrets-view.sh [OPTIONS]
-#   ./utilities/secrets-view.sh view [OPTIONS]  # 'view' accepted as alias
-#   ./edit-secrets.sh view [OPTIONS]
-#
-# FLAGS:
-#   --editor EDITOR    Use specific pager/viewer (default: less, then $EDITOR -R)
-#   --help, -h         Show this help
+# secrets-view.sh — Views decrypted VaultWarden secrets in read-only mode.
 
 HISTFILE=/dev/null
 set -euo pipefail
@@ -51,7 +40,7 @@ EXAMPLES:
 EOF
 }
 
-# Parse EDITOR into an array to support flags (e.g. EDITOR='code --wait').
+# Parse EDITOR into an array so values like 'code --wait' keep their flags.
 read -ra EDITOR_CMD <<< "${EDITOR:-nano}"
 
 check_prerequisites() {
@@ -123,7 +112,6 @@ do_view() {
 }
 
 main() {
-    # Strip the leading "view" token if called as: secrets-view.sh view
     if [[ "${1:-}" == "view" ]]; then shift; fi
 
     while [[ $# -gt 0 ]]; do

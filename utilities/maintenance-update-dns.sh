@@ -1,14 +1,5 @@
 #!/usr/bin/env bash
-# utilities/maintenance-update-dns.sh — VaultWarden Cloudflare DNS updater
-#
-# Standalone entry point for the 'update-dns' subcommand.
-# Invoked directly by:
-#   - maintenance.sh update-dns [OPTIONS]  (thin dispatcher)
-#   - systemd/vaultwarden-dns-update.service
-#
-# EXIT CODES:
-#   0 — DNS record is up to date or was updated successfully
-#   1 — DNS update failed
+# maintenance-update-dns.sh — Updates the VaultWarden Cloudflare DNS record.
 
 set -euo pipefail
 
@@ -30,9 +21,7 @@ SCRIPT_DIR="$_MAINT_SCRIPT_DIR"
 unset _MAINT_SCRIPT_DIR
 source "$PROJECT_ROOT/lib/storage.sh"
 
-# ---------------------------------------------------------------------------
-# Configuration defaults
-# ---------------------------------------------------------------------------
+# Configuration defaults.
 UPDATE_DNS=true
 DRY_RUN=false
 EMAIL_NOTIFY=false
@@ -56,18 +45,12 @@ EXIT CODES:
 EOF
 }
 
-# ---------------------------------------------------------------------------
-# _load_env
-# ---------------------------------------------------------------------------
 _load_env() {
     if load_env_file 2>/dev/null; then return 0; fi
     log_warn "No .env file found — relying on environment already set (e.g. systemd EnvironmentFile)"
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# update_dns_record — verbatim from maintenance.sh
-# ---------------------------------------------------------------------------
 update_dns_record() {
     if [[ "$UPDATE_DNS" != "true" ]]; then log_info "Skipping DNS update"; return 0; fi
     if [[ "$DRY_RUN"    == "true" ]]; then log_info "[DRY RUN] Would check and update Cloudflare DNS A record"; return 0; fi
@@ -183,10 +166,6 @@ DNS record updated automatically."; then
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# Argument parsing & main
-# ---------------------------------------------------------------------------
-# Strip leading 'update-dns' token if passed through from dispatcher
 [[ "${1:-}" == "update-dns" ]] && shift
 
 while [[ $# -gt 0 ]]; do

@@ -1,18 +1,5 @@
 #!/usr/bin/env bash
-# utilities/smoke-test.sh — VaultWarden-OCI pre-production smoke test
-#
-# Verifies the running stack end-to-end before production go-live.
-# Tests: TLS, HTTP endpoints, container health, secrets, email, backup,
-#        CrowdSec, systemd timers, and age key integrity.
-#
-# USAGE:
-#   sudo ./utilities/smoke-test.sh [--quiet] [--json] [--fail-fast]
-#
-# EXIT CODES:
-#   0 — all checks passed
-#   1 — one or more checks failed
-#
-# No changes are made to the running stack.
+# smoke-test.sh — Verifies the VaultWarden-OCI stack before production go-live.
 
 set -euo pipefail
 
@@ -27,9 +14,6 @@ source "$SCRIPT_DIR/lib/backup-utils.sh"
 source "$SCRIPT_DIR/lib/crypto.sh"
 source "$SCRIPT_DIR/lib/storage.sh"
 
-# ---------------------------------------------------------------------------
-# Options
-# ---------------------------------------------------------------------------
 QUIET=false
 JSON_OUTPUT=false
 FAIL_FAST=false
@@ -64,11 +48,8 @@ done
 
 [[ "$JSON_OUTPUT" == true ]] && QUIET=true
 
-# ---------------------------------------------------------------------------
-# Check registry
-# ---------------------------------------------------------------------------
 declare -a _CHECK_NAMES=()
-declare -a _CHECK_RESULTS=()   # PASS | FAIL | SKIP
+declare -a _CHECK_RESULTS=() # PASS | FAIL | SKIP
 declare -a _CHECK_DETAILS=()
 
 _PASS=0
@@ -97,9 +78,6 @@ _check_fail() { local name="$1" detail="${2:-}"; _record "$name" FAIL "$detail"
 _check_skip() { local name="$1" detail="${2:-}"; _record "$name" SKIP "$detail"
     [[ "$QUIET" == false ]] && log_info   "  [SKIP] $name${detail:+: $detail}"; }
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 _http_status() {
     curl -sk --max-time 10 -o /dev/null -w '%{http_code}' "$1" 2>/dev/null || echo "000"
 }
@@ -107,10 +85,6 @@ _http_status() {
 _container_running() {
     docker compose ps --services --filter status=running 2>/dev/null | grep -qx "$1"
 }
-
-# ---------------------------------------------------------------------------
-# Checks
-# ---------------------------------------------------------------------------
 
 check_env_file() {
     [[ "$QUIET" == false ]] && log_info "Checking environment file..."
@@ -206,7 +180,7 @@ check_http_endpoints() {
         _check_fail "http-api-alive" "unexpected HTTP ${status} from /api/alive"
     fi
 
-    # /admin should be protected — 401 or 403 is correct, 200 means unprotected
+    # /admin should be protected: 401 or 403 is correct, and 200 means it is unprotected.
     status=$(_http_status "${base}/admin")
     case "$status" in
         401|403) _check_pass  "http-admin-protected" "admin panel protected (HTTP ${status})" ;;
@@ -342,9 +316,6 @@ check_disk_space() {
     fi
 }
 
-# ---------------------------------------------------------------------------
-# Summary + JSON output
-# ---------------------------------------------------------------------------
 _print_summary() {
     if [[ "$JSON_OUTPUT" == true ]]; then
         printf '[\n'
@@ -373,9 +344,6 @@ _print_summary() {
     fi
 }
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 main() {
     require_root
     trap '_print_summary' EXIT

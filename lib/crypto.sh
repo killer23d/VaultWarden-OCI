@@ -1,6 +1,26 @@
 #!/usr/bin/env bash
-# lib/crypto.sh - Cryptographic operations library for VaultWarden-OCI-NG
-# All functions use 'return' with exit codes, never 'exit'
+# lib/crypto.sh — Cryptographic and secret-handling helpers for VaultWarden-OCI.
+#
+# Provides:
+#   SOPS       : is_sops_encrypted, decrypt_sops_file, encrypt_sops_file
+#   Age keys   : ensure_secret_dir, generate_age_key, get_age_public_key,
+#                check_age_key, simple_verify_age_key, check_age_key_health
+#   Integrity  : calculate_sha256, verify_sha256, write_file_integrity,
+#                verify_file_integrity
+#   Generators : generate_secure_string, generate_secure_password,
+#                generate_secure_random, generate_breakglass_password,
+#                generate_argon2_hash, generate_bcrypt_hash
+#   Security   : secure_delete, validate_password_strength, secure_cleanup
+#
+# Depends on / Load order:
+#   lib/log.sh is auto-loaded if it has not already been sourced.
+#   lib/common.sh should be sourced before callers use helpers that rely on
+#   has_command, ensure_dir, or get_real_user.
+#
+# Canonical caller source block:
+#   source "${LIB_DIR}/log.sh"
+#   source "${LIB_DIR}/common.sh"
+#   source "${LIB_DIR}/crypto.sh"
 
 [[ -n "${VAULTWARDEN_CRYPTO_LIB_LOADED:-}" ]] && return 0
 readonly VAULTWARDEN_CRYPTO_LIB_LOADED=1
@@ -18,7 +38,6 @@ unset _VW_CRYPTO_LIB_DIR
 DEFAULT_AGE_KEY_FILE="secrets/keys/age-key.txt"
 readonly DEFAULT_AGE_KEY_FILE
 
-# Security configuration (also used by security functions merged from lib/security.sh)
 readonly SECURITY_MIN_PASSWORD_LENGTH=12
 readonly SECURITY_MAX_FAILED_ATTEMPTS=3
 readonly SECURITY_LOCKOUT_DURATION=300  # 5 minutes
@@ -92,9 +111,8 @@ _derive_age_public_key() {
 }
 
 
-# Check if a file is SOPS encrypted
-# Requires top-level 'sops:' key AND nested 'mac:' field to avoid
-# false positives on any YAML file that happens to contain a 'sops:' key.
+# Requires a top-level 'sops:' key and nested 'mac:' field to avoid false
+# positives on YAML files that happen to contain only a 'sops:' key.
 is_sops_encrypted() {
     local file="$1"
 
@@ -128,8 +146,6 @@ decrypt_sops_file() {
     SOPS_AGE_KEY_FILE="$age_key_file" sops --decrypt "$file" 2>/dev/null
 }
 
-# Encrypt file with SOPS
-#
 # Encrypts to a mktemp staging file and atomically renames it over the
 # original only on success, preventing truncation/destruction of the target
 # file on any error (malformed YAML, missing .sops.yaml rule, etc.).
@@ -301,8 +317,6 @@ ensure_secret_dir() {
     ensure_dir "$dir" 700
 }
 
-# Generate Age key pair
-#
 # Sets umask 077 before calling age-keygen so the file is born mode 600
 # (owner r/w only), then restores the original umask. chmod 600 is kept
 # as belt-and-braces.
@@ -361,8 +375,6 @@ get_age_public_key() {
     _derive_age_public_key "$age_key_file"
 }
 
-# Check Age key validity
-#
 # Validates permissions (must be 600), AGE-SECRET-KEY-1 prefix, and
 # performs a full encrypt/decrypt round-trip to verify key material integrity.
 check_age_key() {
@@ -515,8 +527,6 @@ generate_secure_string() {
     return 1
 }
 
-# Generate secure random password
-#
 # NOTE: charset includes shell-special characters ($, !, etc.).
 # Callers MUST use `printf '%s' "$password"` (not `echo`) when passing the
 # result to external commands.
@@ -550,8 +560,6 @@ check_argon2_support() {
 }
 
 
-# Generate Argon2id hash (for VaultWarden admin token)
-#
 # Uses printf '%s' (not echo -n) for POSIX compatibility.
 # Python path caps stdin at 1024 bytes to prevent runaway memory on corrupt input.
 generate_argon2_hash() {
@@ -595,8 +603,6 @@ print(ph.hash(password))
     return 0
 }
 
-# Generate bcrypt hash (for Caddy basic auth)
-#
 # Default cost: 12 (OWASP recommended minimum).
 # Cost factor must be in [10, 31]; values outside this range are rejected.
 generate_bcrypt_hash() {
@@ -1770,7 +1776,6 @@ secure_cleanup() {
     return 0
 }
 
-# Export functions for use by scripts
 export -f _stat_octal_perms _stat_file_size
 export -f _derive_age_public_key
 export -f is_sops_encrypted decrypt_sops_file encrypt_sops_file

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# startup.sh - VaultWarden startup script with secure secrets handling
+# startup.sh — Start VaultWarden-OCI with secrets preparation and health checks.
 
 set -euo pipefail
-# shellcheck disable=SC2154  # rc is assigned via rc=$? inside the trap body
+# shellcheck disable=SC2154 # rc is assigned via rc=$? inside the trap body
 trap 'rc=$?; log_error "${BASH_SOURCE[0]}: STARTUP FAILED at line ${LINENO} (exit ${rc}) — check journalctl -u vaultwarden-startup"; exit "$rc"' ERR
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,47 +15,22 @@ source "${SCRIPT_DIR}/lib/common.sh"
 init_common_lib "$0"
 source "${SCRIPT_DIR}/lib/docker.sh"
 source "${SCRIPT_DIR}/lib/crypto.sh"
-source "${SCRIPT_DIR}/lib/secrets.sh"   # provides cleanup_secrets_environment()
-source "${SCRIPT_DIR}/lib/storage.sh"  # provides require_project_state_ready()
+source "${SCRIPT_DIR}/lib/secrets.sh"
+source "${SCRIPT_DIR}/lib/storage.sh"
 
-# ARCHITECTURE NOTE (Task 2d): startup.sh is intentionally not split into
-# utilities/startup-*.sh. All phases (pre-flight, secrets preparation,
-# iptables restore, service health gate, post-start verification) are:
-#   - Sequentially dependent on shared in-process state (trap, lock files,
-#     global vars)
-#   - Not meaningful standalone admin operations outside of systemd boot context
-#   - Already thin wrappers that delegate to lib/ functions
-# If a phase gains standalone utility value in future, extract it then.
-#
-# AUDIT (Task 2d + Fix 4): Every startup.sh function was compared against
-# lib/docker.sh, lib/storage.sh, lib/secrets.sh, lib/crypto.sh, and
-# lib/common.sh on 2026-05-20 (updated Fix 4 2026-05-21).
-# No extractable duplicates remain:
-#   warn_plaintext_secret_overrides()— startup-only split-brain advisory; not reused elsewhere
-#   check_email_config_consistency() — startup-only advisory; not reused elsewhere
-#   load_environment()               — sources .env; startup-scoped (reads relative .env)
-#   validate_prerequisites()         — startup-scoped; delegates to check_docker_available()
-#   prepare_directories()            — startup-scoped mkdir wrapper; not a lib candidate
-#   prepare_log_directories()        — startup-scoped; delegates to ensure_caddy_log_permissions()
-#                                      in lib/storage.sh
-#   check_age_key_health_preflight() — startup-specific key-path override logic
-#   prepare_docker_secrets()         — thin wrapper; delegates to export_docker_secrets()
-#                                      in lib/secrets.sh for all hardening logic
-#   cleanup_orphaned_resources()     — delegates to cleanup_docker_system() in lib/docker.sh
-#   _startup_pull_images()           — startup-specific --skip-pull guard
-#   _startup_start_services()        — startup-specific --force-recreate guard
-#   ensure_vaultwarden_egress_nat()  — startup-specific NAT remediation
-#   wait_for_services()              — delegates to wait_for_service_ready() in lib/docker.sh
-#   run_health_check()               — startup-specific; delegates to maintenance-health.sh
-#   show_status()                    — one-liner docker compose ps wrapper
+# startup.sh remains a single entry point because its phases depend on shared
+# in-process state, are not meaningful as standalone admin operations outside
+# the startup context, and already delegate most reusable logic to lib/
+# helpers. Extract a phase only if it becomes independently useful.
 
 FORCE_RESTART=false
 SKIP_HEALTH_CHECK=false
 BACKGROUND=false
 DRY_RUN=false
 DO_DOWN=false
-# Pass --skip-pull in the unit file to avoid image pulls on routine service restarts;
-# use maintenance.sh update or ./startup.sh (without the flag) to refresh images.
+# Pass --skip-pull in the unit file to avoid image pulls on routine service
+# restarts. Use maintenance.sh update or ./startup.sh without the flag to
+# refresh images.
 SKIP_PULL=false
 SKIP_EGRESS_FIX=false
 
@@ -135,13 +110,9 @@ if [[ "$DO_DOWN" == "true" ]]; then
   exit 0
 fi
 
-# _startup_secure_wipe is no longer defined here.
-# Callers use _secure_shred() from lib/secrets.sh (sourced above), which
-# provides the same CoW-filesystem-safe overwrite-before-unlink behaviour.
 
-
-# Detects split-brain secret configuration where plaintext EMAIL_API_TOKEN or
-# SMTP_PASSWORD values in .env override SOPS-managed secrets. Emits warnings only.
+# Warn about split-brain secret configuration when plaintext EMAIL_API_TOKEN or
+# SMTP_PASSWORD values override SOPS-managed secrets. This is advisory only.
 warn_plaintext_secret_overrides() {
   local warned=false
 
@@ -160,18 +131,16 @@ warn_plaintext_secret_overrides() {
   fi
 }
 
-# Cross-checks EMAIL_MODE against the presence of the required secret so the
-# operator gets an actionable warning at startup rather than a silent failure
-# on first email send.
-#
-# This is a WARN, not an error — email is not required for the stack to start.
+# Cross-check EMAIL_MODE against the required secret so operators get an
+# actionable warning at startup instead of a silent failure on first email
+# send. This remains a warning because email is not required for the stack to
+# start.
 check_email_config_consistency() {
   local email_mode="${EMAIL_MODE:-auto}"
   local secrets_dir="$DOCKER_SECRETS_DIR"
 
   case "$email_mode" in
     api)
-      # EMAIL_MODE=api requires email_api_token to be present and non-empty.
       local token_file="${secrets_dir}/email_api_token"
       if [[ ! -f "$token_file" ]] || [[ ! -s "$token_file" ]]; then
         log_warn "EMAIL_MODE=api is set but '${token_file}' is absent or empty."
@@ -180,7 +149,6 @@ check_email_config_consistency() {
       fi
       ;;
     smtp)
-      # EMAIL_MODE=smtp requires smtp_password.
       local pw_file="${secrets_dir}/smtp_password"
       if [[ ! -f "$pw_file" ]] || [[ ! -s "$pw_file" ]]; then
         log_warn "EMAIL_MODE=smtp is set but '${pw_file}' is absent or empty."
@@ -189,7 +157,6 @@ check_email_config_consistency() {
       fi
       ;;
     auto|host)
-      # auto and host do not require a specific secret — skip.
       ;;
     *)
       log_warn "EMAIL_MODE='${email_mode}' is not a recognised value (auto|api|smtp|host)."
@@ -208,8 +175,8 @@ load_environment() {
     real_group=$(id -gn "${real_user}" 2>/dev/null || echo "${real_user}")
     env_owner=$(stat -c '%U' ".env" 2>/dev/null || echo "unknown")
 
-    # Auto-remediate root-owned .env when startup is invoked by a non-root user
-    # (e.g. via sudo). This keeps non-root tooling functional.
+    # Auto-remediate a root-owned .env when startup is invoked by a non-root
+    # user, such as via sudo. This keeps non-root tooling functional.
     if [[ "$env_owner" == "root" && "$real_user" != "root" ]]; then
       if _maybe_sudo chown "${real_user}:${real_group}" ".env" \
         && _maybe_sudo chmod 600 ".env"; then
@@ -254,7 +221,8 @@ validate_prerequisites() {
     return 1
   fi
 
-  # Verify python3-yaml is available — required for secrets parsing in prepare_docker_secrets
+  # Verify that python3-yaml is available; prepare_docker_secrets needs it to
+  # parse secrets.
   if ! python3 -c "import yaml" 2>/dev/null; then
     log_error "python3-yaml (PyYAML) is not installed — required for secrets parsing"
     log_error "Install hint: pip install pyyaml  or  sudo apt install python3-yaml"
@@ -276,10 +244,10 @@ validate_prerequisites() {
 }
 
 
-# Ensures all PROJECT_STATE_DIR subdirectories required by Docker bind mounts
-# exist on the host before `docker compose up`.  Uses absolute paths so that
-# separate-volume installs (PROJECT_STATE_DIR=/mnt/vw-data) create dirs on
-# the data volume, not under PROJECT_ROOT.
+# Ensure all PROJECT_STATE_DIR subdirectories required by Docker bind mounts
+# exist on the host before `docker compose up`. Use absolute paths so
+# separate-volume installs create directories on the data volume rather than
+# under PROJECT_ROOT.
 #
 # prepare_log_directories() handles logs/ and backups/ with ownership logic;
 # this function covers the remaining non-log subtrees.
@@ -310,7 +278,6 @@ prepare_directories() {
   return 0
 }
 
-# Prepare log directories with correct ownership
 prepare_log_directories() {
   log_info "Ensuring base state directory exists..."
 
@@ -330,7 +297,6 @@ prepare_log_directories() {
   if ! _maybe_sudo mkdir -p "${project_state_dir}/logs"/{vaultwarden,caddy,postfix}; then
     log_warn "Failed to create log subdirectories (init container will try)"
   else
-    # Set ownership to PUID:PGID from .env configuration
     local puid pgid
     puid=$(get_config_value "PUID" "1001")
     pgid=$(get_config_value "PGID" "1001")
@@ -416,29 +382,24 @@ prepare_push_secret_placeholders() {
   fi
 }
 
-# Runs check_age_key_health() before any SOPS invocation so a corrupt,
-# missing, or wrong-permissions age key produces a clear actionable error
-# rather than an opaque decryption failure from SOPS.
+# Run check_age_key_health() before any SOPS invocation so a corrupt,
+# missing, or wrong-permissions Age key produces a clear actionable error
+# instead of an opaque decryption failure.
 #
-# If the configured key path does not exist but the repo-local key is
-# present and healthy, the key path is overridden for this process only and
-# a prominent ACTION REQUIRED advisory is printed so the operator fixes
-# .env before the next restart.
+# If the configured key path does not exist but the repo-local key is present
+# and healthy, override the key path for this process only and print a
+# prominent advisory so the operator fixes .env before the next restart.
 check_age_key_health_preflight() {
-  # Resolve the configured key path from .env (already sourced by load_environment)
   local configured_key="${SOPS_AGE_KEY_FILE:-}"
 
-  # If SOPS_AGE_KEY_FILE is empty, fall back to the SOPS default
   if [[ -z "$configured_key" ]]; then
     configured_key="${HOME:-/root}/.config/sops/age/keys.txt"
   fi
 
-  # Fast path: configured key exists and is healthy — proceed
   if check_age_key_health "$configured_key" 2>/dev/null; then
     return 0
   fi
 
-  # Configured key is missing or unhealthy. Collect diagnostic context.
   local repo_local_key="${SCRIPT_DIR}/secrets/keys/age-key.txt"
   local canonical_key="/etc/vaultwarden/age-key.txt"
 
@@ -469,18 +430,15 @@ check_age_key_health_preflight() {
     log_warn "    sudo ./setup.sh --domain <your-domain> --email <your-email>"
     log_warn "=========================================================="
 
-    # Export the repo-local path for this process only
     export SOPS_AGE_KEY_FILE="$repo_local_key"
     return 0
   fi
 
-  # No usable key found anywhere — abort with full diagnostics.
   log_error "Age key health check FAILED for configured path: ${configured_key}"
   log_error ""
   log_error "SOPS cannot decrypt secrets without a valid Age private key."
   log_error ""
 
-  # Case 1: configured path IS the canonical path — just report it missing.
   if [[ "$configured_key" == "$canonical_key" ]]; then
     log_error "Remediation:"
     log_error "  The canonical key file does not exist or is not readable."
@@ -499,8 +457,6 @@ check_age_key_health_preflight() {
     return 1
   fi
 
-  # Case 2: configured path is NOT canonical — check whether the canonical path
-  # exists so the operator understands the full picture.
   log_error "  Configured key path (from .env):  ${configured_key}"
   log_error "  Canonical production path:         ${canonical_key}"
   log_error ""
@@ -520,10 +476,9 @@ check_age_key_health_preflight() {
   return 1
 }
 
-# Startup-specific wrapper: runs check_age_key_health_preflight() (which may
-# export SOPS_AGE_KEY_FILE for this process), then delegates all decryption,
-# per-key file writing, ENC[ sanity check, and cache cleanup to
-# lib/secrets.sh::export_docker_secrets().
+# Run check_age_key_health_preflight(), which may export SOPS_AGE_KEY_FILE for
+# this process, then delegate decryption, per-key file writing, ENC[ checks,
+# and cache cleanup to export_docker_secrets().
 prepare_docker_secrets() {
   log_info "Preparing Docker secrets from SOPS..."
   check_age_key_health_preflight || return 1
@@ -542,21 +497,21 @@ cleanup_orphaned_resources() {
     return 0
   fi
 
-  # cleanup_docker_system() from lib/docker.sh prunes containers, images
-  # (with --filter until=48h), volumes, and networks — all scoped to the
-  # project label to avoid affecting unrelated services on shared hosts.
+  # cleanup_docker_system() prunes containers, images, volumes, and networks
+  # scoped to the project label so shared hosts do not lose unrelated
+  # services.
   cleanup_docker_system || true
 
   log_success "Orphaned resources cleaned up"
   return 0
 }
 
-# Startup-specific wrapper: guarded by --skip-pull so systemd ExecStart
-# restarts are instant. Image refreshes go through maintenance.sh update or
-# a manual ./startup.sh without --skip-pull.
+# Guard this wrapper with --skip-pull so systemd ExecStart restarts stay fast.
+# Refresh images through maintenance.sh update or a manual ./startup.sh run
+# without --skip-pull.
 #
-# Uses a direct `docker compose pull` (not lib/docker.sh's pull_images())
-# so pull output streams directly to the journal without buffering.
+# Use direct `docker compose pull` so output streams to the journal without
+# buffering.
 _startup_pull_images() {
   if [[ "$SKIP_PULL" == "true" ]]; then
     log_info "Skipping docker compose pull (--skip-pull)"
@@ -596,9 +551,9 @@ update_dns_on_startup() {
   return 0
 }
 
-# Startup-specific wrapper: honours FORCE_RESTART and DRY_RUN globals.
-# Passes --force-recreate when FORCE_RESTART=true so containers are
-# re-created even if the image digest has not changed.
+# Honour FORCE_RESTART and DRY_RUN here.
+# Pass --force-recreate when FORCE_RESTART=true so containers are re-created
+# even if the image digest has not changed.
 _startup_start_services() {
   log_info "Starting VaultWarden services..."
 
@@ -618,9 +573,9 @@ _startup_start_services() {
   return 0
 }
 
-# Admin-friendly, idempotent fallback for hardened VMs where Docker's normal
-# MASQUERADE behavior is missing/overridden. We only target non-internal
-# bridge networks attached to the vaultwarden container.
+# Provide an idempotent fallback for hardened VMs where Docker's normal
+# MASQUERADE behavior is missing or overridden. Only non-internal bridge
+# networks attached to the vaultwarden container are targeted.
 ensure_vaultwarden_egress_nat() {
   if [[ "$SKIP_EGRESS_FIX" == "true" ]]; then
     log_info "Skipping automatic egress NAT remediation (--skip-egress-fix)"
@@ -637,8 +592,8 @@ ensure_vaultwarden_egress_nat() {
     return 0
   fi
 
-  # Preferred path: use repo-managed setup helper so NAT + DOCKER-USER
-  # remediation stays in one place and can also be reused outside startup.
+  # Prefer the repo-managed setup helper so NAT and DOCKER-USER remediation
+  # stay in one place and remain reusable outside startup.
   local _fw_script="${PROJECT_ROOT}/utilities/setup-firewall.sh"
   if [[ -x "$_fw_script" ]]; then
     log_info "Invoking: ${_fw_script} --phase iptables"
@@ -684,7 +639,8 @@ run_health_check() {
 
   log_info "Running post-start health check..."
 
-  # Disable errexit around the health check so we can capture its exit code cleanly.
+  # Disable errexit around the health check so its exit code can be captured
+  # cleanly.
   log_info "Invoking: ${_health_script} health"
   local health_exit=0
   "$_health_script" health || health_exit=$?
@@ -695,10 +651,10 @@ run_health_check() {
       ;;
     1)
       log_warn "Health check completed with warnings — review output above"
-      # Non-critical: startup continues, but operator should investigate
       ;;
     *)
-      # exit 2 = one or more critical failures; exit 3+ = maintenance.sh crash
+      # Exit 2 means one or more critical failures; exit 3+ means the health
+      # script crashed.
       log_error "Health check reported CRITICAL failures (exit ${health_exit}) — stack is unhealthy"
       log_error "Startup aborted. Investigate the failures above, then re-run ./startup.sh"
       log_error "To skip this gate during recovery: ./startup.sh --skip-health"
@@ -719,8 +675,8 @@ show_status() {
 main() {
   log_info "Starting VaultWarden-OCI startup workflow..."
 
-  # Add INT/TERM signal traps so that secrets are cleaned up and
-  # the exit code correctly reflects termination (130 for INT, 143 for TERM).
+  # Add INT/TERM traps so cleanup still runs and the exit code correctly
+  # reflects termination (130 for INT, 143 for TERM).
   trap 'exit 130' INT
   trap 'exit 143' TERM
 
@@ -732,7 +688,7 @@ main() {
   prepare_log_directories || exit 1
   prepare_docker_secrets || exit 1
   prepare_push_secret_placeholders || exit 1
-  check_email_config_consistency || true   # warn only, never block startup
+  check_email_config_consistency || true # Warn only; never block startup.
   warn_plaintext_secret_overrides || true
   cleanup_orphaned_resources || true
   ensure_vaultwarden_egress_nat || true
@@ -750,7 +706,7 @@ main() {
     show_status || true
   fi
 
-  # Re-emit the key-path advisory at end of startup so it is not missed.
+  # Re-emit the key-path advisory at the end of startup so it is not missed.
   if [[ "${SOPS_AGE_KEY_FILE:-}" == "${SCRIPT_DIR}/secrets/keys/age-key.txt" ]]; then
     local cfg_key
     cfg_key=$(grep '^SOPS_AGE_KEY_FILE=' .env 2>/dev/null | cut -d= -f2- || echo "(unknown)")

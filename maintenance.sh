@@ -1,17 +1,8 @@
 #!/usr/bin/env bash
-# maintenance.sh — VaultWarden-OCI maintenance dispatcher
-#
+# maintenance.sh — Dispatch VaultWarden-OCI maintenance subcommands.
+
 # Thin dispatcher. All logic lives in utilities/maintenance-*.sh.
 # An admin or systemd unit may also call those utilities directly.
-#
-# SUBCOMMANDS:
-#   run [OPTIONS]           Full routine maintenance (cleanup + optimize + health)
-#   health [OPTIONS]        System health checks
-#   update [OPTIONS]        Update system packages and/or Docker images
-#   db-maint [OPTIONS]      Deep offline database maintenance (VACUUM + checkpoint)
-#   test-email [OPTIONS]    Email subsystem diagnostic
-#   update-dns [OPTIONS]    Update Cloudflare DNS A record
-#   update-firewall [OPTIONS]  Sync Cloudflare IP ranges into UFW
 
 set -euo pipefail
 

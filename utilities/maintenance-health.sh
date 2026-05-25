@@ -1,25 +1,12 @@
 #!/usr/bin/env bash
-# utilities/maintenance-health.sh — VaultWarden health check utility
-#
-# Standalone entry point for the 'health' subcommand.
-# Invoked directly by:
-#   - maintenance.sh health [OPTIONS]  (thin dispatcher)
-#   - systemd/vaultwarden-health.service
-#   - startup.sh post-startup check
-#   - restore-run.sh post-restore check
-#
-# EXIT CODES:
-#   0 — all checks passed
-#   1 — one or more warnings
-#   2 — one or more failures
-#   3 — critical failure (cannot run checks)
+# maintenance-health.sh — Runs VaultWarden health checks and diagnostics.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-# lib/secrets.sh recomputes SCRIPT_DIR at load time; save/restore PROJECT_ROOT's SCRIPT_DIR.
+# lib/secrets.sh recomputes SCRIPT_DIR at load time, so save and restore PROJECT_ROOT's value.
 _SAVE_SCRIPT_DIR="$PROJECT_ROOT"
 source "$PROJECT_ROOT/lib/log.sh"
 source "$PROJECT_ROOT/lib/config.sh"
@@ -33,10 +20,7 @@ source "$PROJECT_ROOT/lib/storage.sh"
 SCRIPT_DIR="$_SAVE_SCRIPT_DIR"
 unset _SAVE_SCRIPT_DIR
 
-# ---------------------------------------------------------------------------
-# _default_backup_dir / _default_alert_state_dir / _default_report_dir
-# (mirrors maintenance.sh helpers; storage.sh provides vw_default_backup_dir)
-# ---------------------------------------------------------------------------
+# Default path helpers mirror maintenance.sh, and storage.sh provides vw_default_backup_dir.
 _default_backup_dir()     { vw_default_backup_dir; }
 _default_alert_state_dir() {
     local state_dir
@@ -68,7 +52,7 @@ _resolve_age_key() {
         fi
         [[ -f "$candidate" ]] && { echo "$candidate"; return 0; }
     done
-    # mirror backup-run fallback behavior for diagnostics
+    # Mirror backup-run fallback behavior for diagnostics.
     for candidate in "${candidates[@]}"; do
         [[ -n "$candidate" && "$candidate" == /* ]] && { echo "$candidate"; return 1; }
     done
@@ -86,13 +70,9 @@ _resolve_backup_base_dir() {
     fi
 }
 
-# ---------------------------------------------------------------------------
-# run_health_check — all logic verbatim from maintenance.sh
-# ---------------------------------------------------------------------------
 run_health_check() {
 _resolve_env_file() {
     local candidates=(
-        # PROJECT_ROOT is derived from BASH_SOURCE at the top of this file.
         "${PROJECT_ROOT}/.env"
         "/etc/vaultwarden/vaultwarden.env"
     )
@@ -115,9 +95,8 @@ if [[ -n "${ENV_FILE}" ]]; then
         log_error "Fix ownership: sudo chown $(id -un):$(id -gn) '${ENV_FILE}'"
     else
         # load_env_file returns 1 when run as root and the file has permissions
-        # wider than 0600 (e.g. 640/644). That is a warning, not a fatal error —
-        # we log it and continue so the health check still runs and reports
-        # results rather than silently aborting via set -e.
+        # wider than 0600, such as 640 or 644. That is a warning, not a fatal
+        # error, so log it and continue to avoid silently aborting via set -e.
         load_env_file "${ENV_FILE}" 2>/dev/null || \
             log_warn "maintenance-health: env file '${ENV_FILE}' could not be loaded." \
                  "If running as root, permissions must be 600 (run: chmod 600 '${ENV_FILE}')." \
@@ -171,11 +150,9 @@ local ALERT_LOCK_DIR="${ALERT_STATE_DIR:-$(_default_alert_state_dir)}"
 local ALERT_COOLDOWN_SECONDS=${ALERT_COOLDOWN_SECONDS:-3600}
 local ALERT_RECOVERY_TTL=${ALERT_RECOVERY_TTL:-86400}
 
-# ---------------------------------------------------------------------------
-# _ensure_alert_dir — create the cooldown state directory if missing.
-# Returns 0 on success, 1 if the directory cannot be created (caller skips
-# the alert for this cycle rather than producing confusing mktemp errors).
-# ---------------------------------------------------------------------------
+# Create the cooldown state directory if it is missing.
+# Returns 0 on success or 1 if the directory cannot be created, so callers can
+# skip the alert for this cycle instead of producing confusing mktemp errors.
 _ensure_alert_dir() {
     [[ -d "${ALERT_LOCK_DIR}" ]] && return 0
     if mkdir -p "${ALERT_LOCK_DIR}" 2>/dev/null; then
@@ -192,7 +169,7 @@ _acquire_alert_lock() {
     local key="$1"
     local safe_key
     safe_key=$(printf '%s' "$key" | tr -cs '[:alnum:]-' '_')
-    # Ensure the directory exists; if it can't be created, skip alert (no crash).
+    # Ensure the directory exists; if it cannot be created, skip the alert.
     _ensure_alert_dir || return 1
     local state_file="${ALERT_LOCK_DIR}/${safe_key}.cooldown"
     local ttl="${2:-${ALERT_COOLDOWN_SECONDS}}"
@@ -532,16 +509,9 @@ _check_crowdsec() {
         _warn "crowdsec:lapi" "CrowdSec LAPI not responding (debug: sudo journalctl -u crowdsec -n 50 --no-pager)"
     fi
 
-    # ---------------------------------------------------------------------------
-    # Bouncer check: prefer crowdsec-firewall-bouncer (standard on VPS/OCI),
-    # then crowdsec-cloudflare-bouncer, warn if a unit exists but is not running.
-    #
-    # Priority:
-    #   1. crowdsec-firewall-bouncer active    → [pass]
-    #   2. crowdsec-cloudflare-bouncer active  → [pass]
-    #   3. Either unit installed but stopped   → [warn]  (real problem — surface it)
-    #   4. Neither unit installed              → [pass] with optional install note
-    # ---------------------------------------------------------------------------
+    # Bouncer check priority: prefer crowdsec-firewall-bouncer, then
+    # crowdsec-cloudflare-bouncer. Warn when a bouncer unit is installed but not
+    # running, and pass with an install note when no bouncer is installed.
     local _bouncer_active=false
     local _bouncer_name=""
 
@@ -557,11 +527,11 @@ _check_crowdsec() {
         _pass "crowdsec:bouncer" "CrowdSec ${_bouncer_name} is active"
     elif systemctl list-unit-files 2>/dev/null \
             | grep -qE 'crowdsec-(firewall|cloudflare)-bouncer\.service'; then
-        # A bouncer unit is installed but not running — flag it.
+        # A bouncer unit is installed but not running, so flag it.
         _warn "crowdsec:bouncer" \
             "CrowdSec bouncer is installed but not active — check: sudo systemctl status crowdsec-firewall-bouncer"
     else
-        # No bouncer installed at all — optional component, keep as pass.
+        # No bouncer is installed, which is optional, so keep this as pass.
         _pass "crowdsec:bouncer" \
             "No CrowdSec bouncer installed (optional — install crowdsec-firewall-bouncer or crowdsec-cloudflare-bouncer)"
     fi
@@ -718,8 +688,8 @@ _check_backups() {
                 break
             fi
             chmod 750 "$backup_dir/$_subdir" 2>/dev/null || true
-            # Only chown if we are running as root (sudo context) — avoids install -o failure
-            # when the username doesn't resolve in the current namespace.
+            # Only chown when running as root to avoid install -o style
+            # failures when the username does not resolve in this namespace.
             if (( EUID == 0 )) && [[ -n "$real_user" ]] && id "$real_user" &>/dev/null; then
             chown "$real_user" "$backup_dir/$_subdir" 2>/dev/null || true
             fi
@@ -790,11 +760,11 @@ _check_config() {
             [[ -f "${secrets_dir}/${secret}" ]] || config_issues+=("Missing secret: $secret")
         done
     fi
-    # Resolve age key using backup-run compatible precedence and relative-path handling
+    # Resolve the age key using backup-run compatible precedence and relative-path handling.
     local age_key_file=""
     age_key_file="$(_resolve_age_key || true)"
 
-    # Warn if SOPS_AGE_KEY_FILE is set but points nowhere — inform operator to fix .env
+    # Warn if SOPS_AGE_KEY_FILE is set but points nowhere so the operator can fix .env.
     if [[ -n "${SOPS_AGE_KEY_FILE:-}" ]]; then
         local _env_age_candidate="${SOPS_AGE_KEY_FILE}"
         [[ "$_env_age_candidate" != /* ]] && _env_age_candidate="${PROJECT_ROOT}/${_env_age_candidate}"
@@ -829,7 +799,6 @@ _check_config() {
     expected_owner=$(stat -c '%U' "$PROJECT_ROOT" 2>/dev/null || id -un)
     expected_group=$(stat -c '%G' "$PROJECT_ROOT" 2>/dev/null || id -gn)
     for f in ".env" "Makefile" "startup.sh" "backup.sh" "utilities/secrets-edit.sh"; do
-        # PROJECT_ROOT is derived from BASH_SOURCE at the top of this file.
         local fpath="${PROJECT_ROOT}/${f}"
         if [[ -e "$fpath" ]]; then
             local owner group
@@ -1049,9 +1018,6 @@ _health_main() {
     _health_main "$@"
 }
 
-# ---------------------------------------------------------------------------
-# Argument Parsing & main
-# ---------------------------------------------------------------------------
 show_help() {
     cat << 'EOF'
 VaultWarden-OCI Health Check
@@ -1077,7 +1043,7 @@ EOF
 
 [[ $# -gt 0 && ( "$1" == "--help" || "$1" == "-h" || "$1" == "help" ) ]] && { show_help; exit 0; }
 
-# Strip leading 'health' token if called via dispatcher with subcommand prepended
+# Strip the leading 'health' token when the dispatcher prepends the subcommand.
 [[ "${1:-}" == "health" ]] && shift
 
 main() {

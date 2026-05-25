@@ -1,13 +1,5 @@
 #!/usr/bin/env bash
-# utilities/maintenance-email.sh — VaultWarden email diagnostics
-#
-# Standalone entry point for the 'test-email' subcommand.
-# Invoked directly by:
-#   - maintenance.sh test-email [OPTIONS]  (thin dispatcher)
-#
-# EXIT CODES:
-#   0 — all email tests passed
-#   1 — one or more email tests failed
+# maintenance-email.sh — Runs VaultWarden email diagnostics.
 
 set -euo pipefail
 
@@ -30,9 +22,7 @@ unset _MAINT_SCRIPT_DIR
 source "$PROJECT_ROOT/lib/storage.sh"
 source "$PROJECT_ROOT/lib/maintenance-utils.sh"
 
-# ---------------------------------------------------------------------------
-# Configuration defaults
-# ---------------------------------------------------------------------------
+# Configuration defaults.
 # TEST_EMAIL is always true for this utility (it is the email test tool).
 # Exported so subprocesses or sourcing scripts can detect the test mode.
 export TEST_EMAIL=true
@@ -60,18 +50,12 @@ EXIT CODES:
 EOF
 }
 
-# ---------------------------------------------------------------------------
-# _load_env
-# ---------------------------------------------------------------------------
 _load_env() {
     if load_env_file 2>/dev/null; then return 0; fi
     log_warn "No .env file found — relying on environment already set"
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# Email diagnostic functions — verbatim from maintenance.sh
-# ---------------------------------------------------------------------------
 test_postfix_container() {
     log_info "Testing postfix container status..."
     local postfix_running
@@ -230,9 +214,6 @@ run_email_diagnostics() {
     fi
 }
 
-# ---------------------------------------------------------------------------
-# Argument parsing & main
-# ---------------------------------------------------------------------------
 [[ "${1:-}" == "test-email" ]] && shift
 
 while [[ $# -gt 0 ]]; do

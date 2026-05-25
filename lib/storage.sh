@@ -1,7 +1,20 @@
 #!/usr/bin/env bash
-# Storage helpers for boot-volume and separate-volume installs.
-# Source after lib/common.sh in operational scripts so writes fail closed when
-# the configured data volume is missing.
+# lib/storage.sh — Storage and mount-guard helpers for VaultWarden-OCI.
+#
+# Provides:
+#   Validation : require_project_state_ready
+#   Provision  : setup_data_volume, install_docker_mount_guard
+#   Paths      : vw_default_backup_dir, ensure_caddy_log_permissions
+#
+# Depends on / Load order:
+#   lib/log.sh is auto-loaded if it has not already been sourced.
+#   lib/common.sh should be sourced before this file for is_root,
+#   get_real_user, _maybe_sudo, and get_config_value.
+#
+# Canonical caller source block:
+#   source "${LIB_DIR}/log.sh"
+#   source "${LIB_DIR}/common.sh"
+#   source "${LIB_DIR}/storage.sh"
 
 [[ -n "${VAULTWARDEN_STORAGE_LIB_LOADED:-}" ]] && return 0
 readonly VAULTWARDEN_STORAGE_LIB_LOADED=1

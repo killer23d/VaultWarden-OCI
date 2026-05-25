@@ -1,13 +1,26 @@
 #!/usr/bin/env bash
-# lib/email.sh — Email delivery subsystem for VaultWarden-OCI
+# lib/email.sh — Email delivery helpers for VaultWarden-OCI.
 #
-# Provides multi-provider outbound email: HTTP API drivers (MailerSend,
-# SendGrid, Mailgun, Postmark, Resend, CyberPersons), SMTP relay,
-# Postfix sidecar, and host MTA fallback.
+# Provides:
+#   Drivers   : _email_driver_mailersend, _email_driver_sendgrid,
+#               _email_driver_mailgun, _email_driver_postmark,
+#               _email_driver_resend, _email_driver_cyberpersons,
+#               _email_driver_postfix
+#   Transport : _email_bearer_post, _smtp_send
+#   Helpers   : _email_json_escape, _email_driver_lookup,
+#               _normalise_email_subject, _resolve_rate_limit_dir,
+#               _rate_limit_check, _resolve_smtp_method,
+#               _build_email_metadata_body
+#   Public    : send_email, send_notification_email, clear_email_rate_limit
 #
-# Depends on: lib/log.sh (auto-loaded if not already present),
-#             lib/common.sh (has_command, retry_with_backoff).
-# Must be sourced AFTER lib/common.sh.
+# Depends on / Load order:
+#   lib/log.sh is auto-loaded if it has not already been sourced.
+#   lib/common.sh should be sourced before this file for shared utility helpers.
+#
+# Canonical caller source block:
+#   source "${LIB_DIR}/log.sh"
+#   source "${LIB_DIR}/common.sh"
+#   source "${LIB_DIR}/email.sh"
 
 [[ -n "${VAULTWARDEN_EMAIL_LIB_LOADED:-}" ]] && return 0
 readonly VAULTWARDEN_EMAIL_LIB_LOADED=1

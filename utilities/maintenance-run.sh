@@ -1,15 +1,5 @@
 #!/usr/bin/env bash
-# utilities/maintenance-run.sh — VaultWarden routine maintenance runner
-#
-# Standalone entry point for the 'run' subcommand.
-# Invoked directly by:
-#   - maintenance.sh run [OPTIONS]  (thin dispatcher)
-#   - systemd/vaultwarden-maintenance.service
-#
-# EXIT CODES:
-#   0 — maintenance completed successfully
-#   1 — maintenance completed with minor issues
-#   2 — maintenance completed with critical failures
+# maintenance-run.sh — Runs routine VaultWarden maintenance tasks.
 
 set -euo pipefail
 
@@ -32,7 +22,7 @@ unset _MAINT_SCRIPT_DIR
 source "$PROJECT_ROOT/lib/storage.sh"
 source "$PROJECT_ROOT/lib/maintenance-utils.sh"
 
-# Configuration defaults (mirrors maintenance.sh)
+# Configuration defaults mirror maintenance.sh.
 CLEAN_LOGS=true
 CLEAN_BACKUPS=true
 CLEAN_DOCKER=true

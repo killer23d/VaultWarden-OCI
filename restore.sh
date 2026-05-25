@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# restore.sh — VaultWarden-OCI restore dispatcher
-#
+# restore.sh — Dispatch VaultWarden-OCI restore operations.
+
 # Thin dispatcher. All logic lives in utilities/restore-run.sh.
 # An admin may also call utilities/restore-run.sh directly.
-#
-# USAGE:
+
+# Usage:
 #   sudo ./restore.sh latest [TYPE] [OPTIONS]
 #   ./restore.sh list [--remote]
 #   sudo ./restore.sh interactive [OPTIONS]

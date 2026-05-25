@@ -9,7 +9,6 @@ Conflicts=shutdown.target
 OnFailure=vaultwarden-notify-failure.service
 
 [Timer]
-# Weekly full backup every Sunday at 03:00.
 # Weekday-prefixed form: "Sun *-*-* 03:00:00" is valid systemd calendar syntax.
 OnCalendar=Sun *-*-* 03:00:00
 # Set to false: a missed weekly full backup is not worth triggering a

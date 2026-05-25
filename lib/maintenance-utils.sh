@@ -1,17 +1,25 @@
 #!/usr/bin/env bash
-# lib/maintenance-utils.sh — Shared helpers for maintenance utilities
+# lib/maintenance-utils.sh — Shared maintenance helpers for VaultWarden-OCI.
 #
-# SOURCED LIBRARY — do NOT add unconditional execution or main() here.
-# This file is sourced by:
-#   - utilities/maintenance-run.sh
-#   - utilities/maintenance-db-maint.sh
-#   - utilities/maintenance-email.sh
+# Provides:
+#   Maintenance : cleanup_logs, cleanup_backups, cleanup_docker_system,
+#                 optimize_database, validate_system_health,
+#                 generate_maintenance_summary
+#   Helpers     : _wait_wal_quiesce, verbose_log
 #
-# Requires: lib/log.sh, lib/config.sh, lib/common.sh, lib/docker.sh,
-#           lib/backup-utils.sh, lib/storage.sh
-# All callers must source those libraries BEFORE this file.
+# Depends on / Load order:
+#   lib/log.sh, lib/config.sh, lib/common.sh, lib/docker.sh,
+#   lib/backup-utils.sh, and lib/storage.sh must be sourced before this file.
+#
+# Canonical caller source block:
+#   source "${LIB_DIR}/log.sh"
+#   source "${LIB_DIR}/config.sh"
+#   source "${LIB_DIR}/common.sh"
+#   source "${LIB_DIR}/docker.sh"
+#   source "${LIB_DIR}/backup-utils.sh"
+#   source "${LIB_DIR}/storage.sh"
+#   source "${LIB_DIR}/maintenance-utils.sh"
 
-# Guard against double-sourcing
 [[ "${_MAINTENANCE_UTILS_LOADED:-}" == "true" ]] && return 0
 _MAINTENANCE_UTILS_LOADED=true
 

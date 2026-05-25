@@ -1,27 +1,10 @@
 #!/usr/bin/env bash
-# utilities/uninstall-vaultwarden.sh
-# Full idempotent uninstaller for killer23d/VaultWarden-OCI
-# Run from the project root: sudo utilities/uninstall-vaultwarden.sh run
-# Must be run as root (or via sudo).
-#
-# USAGE:
-#   sudo utilities/uninstall-vaultwarden.sh run [OPTIONS]
-#   sudo utilities/uninstall-vaultwarden.sh --help
-#
-# FLAGS:
-#   --i-have-saved-my-recovery-kit   Pre-confirm age key is saved off-host
-#   --force                          Skip all age key checks (CI/automation only)
-#   --dry-run                        Preview actions without making changes
-#   --help, -h                       Show this help
-#
-# shellcheck disable=SC2015  # cmd && log_success || log_warn is intentional cleanup idiom throughout
+# uninstall-vaultwarden.sh — Uninstalls VaultWarden-OCI and removes its managed data.
 
 set -euo pipefail
 
-# ─── Self-contained colour/log helpers (no lib/common.sh dependency) ─────────
-# This script deliberately does NOT source lib/common.sh so it remains safe
-# to run after a partial or broken installation.  The log format matches the
-# project standard: [HH:MM:SS] [script-name.sh] LEVEL message.
+# Keep logging self-contained so uninstall remains safe after a partial or broken installation.
+# The log format matches the rest of the project.
 _VW_SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
 if [[ -t 1 ]]; then
     _C_CYAN=$'\e[36m'; _C_GREEN=$'\e[32m'; _C_YELLOW=$'\e[33m'
@@ -36,12 +19,10 @@ log_warn()    { printf '%s[%s] [%s] WARN%s %s\n'    "$_C_YELLOW" "$(_vw_ts)" "$_
 log_error()   { printf '%s[%s] [%s] ERROR%s %s\n'   "$_C_RED"    "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$*" >&2; }
 die()         { log_error "$*"; exit 1; }
 
-# Legacy aliases used throughout the original script body
 info()    { log_info "$@"; }
 success() { log_success "$@"; }
 warn()    { log_warn "$@"; }
 
-# ─── Help ─────────────────────────────────────────────────────────────────────
 show_help() {
     echo "Usage: sudo bash $0 run [--i-have-saved-my-recovery-kit] [--force] [--dry-run]"
     echo ""
@@ -123,11 +104,9 @@ case "$1" in
         ;;
 esac
 
-# ─── Root check ───────────────────────────────────────────────────────────────
 [[ $EUID -eq 0 ]] || die "Run as root: sudo bash $0"
 
-# ─── Locate project directory ─────────────────────────────────────────────────
-# Support running from home dir regardless of which user owns the clone.
+# Support running from the home directory regardless of which user owns the clone.
 REAL_USER="${SUDO_USER:-${USER:-ubuntu}}"
 REAL_HOME=$(getent passwd "$REAL_USER" 2>/dev/null | cut -d: -f6 || echo "/home/$REAL_USER")
 PROJECT_DIR="${REAL_HOME}/VaultWarden-OCI"
@@ -290,7 +269,6 @@ _extract_age_public_key() {
 
 if [[ -f "$AGE_KEY_FILE" ]] && [[ "$FORCE" == "false" ]]; then
 
-    # ── Prompt 1: CLI flag pre-check ─────────────────────────────────────
     if [[ "$I_HAVE_SAVED_RECOVERY_KIT" == "false" ]] && [[ "$FORCE" == "false" ]]; then
         echo ""
         echo "════════════════════════════════════════════════════════════"
@@ -338,7 +316,6 @@ fi
 info "Step 1: Stopping Docker Compose stack..."
 
 if command -v docker &>/dev/null; then
-    # Try docker compose down from the project directory first
     if [[ -f "${PROJECT_DIR}/docker-compose.yml" ]]; then
         docker compose -f "${PROJECT_DIR}/docker-compose.yml" down \
             --volumes --remove-orphans --timeout 30 2>/dev/null \
@@ -346,7 +323,6 @@ if command -v docker &>/dev/null; then
             || warn "docker compose down had errors (containers may already be gone)."
     fi
 
-    # Also clean up any stray containers whose names match known service names
     for svc in vaultwarden caddy postfix; do
         CID=$(docker ps -aq --filter "name=${svc}" 2>/dev/null)
         if [[ -n "$CID" ]]; then
@@ -356,7 +332,6 @@ if command -v docker &>/dev/null; then
         fi
     done
 
-    # Remove named volumes (project prefix is the directory basename)
     PROJECT_NAME=$(basename "${PROJECT_DIR}" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')
     for vol in $(docker volume ls -q 2>/dev/null | grep -E "^(${PROJECT_NAME}_|vaultwarden)" || true); do
         if docker volume rm "$vol" 2>/dev/null; then
@@ -366,7 +341,6 @@ if command -v docker &>/dev/null; then
         fi
     done
 
-    # Remove custom bridge networks created by this project
     for net in $(docker network ls --format '{{.Name}}' 2>/dev/null | grep -E "vaultwarden|${PROJECT_NAME}" || true); do
         docker network rm "$net" 2>/dev/null && success "Removed Docker network: ${net}" || true
     done
@@ -482,7 +456,6 @@ fi
 # ═══════════════════════════════════════════════════════════════
 info "Step 5: Removing runtime state directory (database, logs, Caddy state)..."
 
-# ── 5a: Wipe the resolved state directory ──────────────────────────────────
 if [[ -d "${PROJECT_STATE_DIR}" ]]; then
     # Clear immutability from the data-volume sentinel before wiping.
     # setup_data_volume writes chattr +i on .vw-data-volume so that accidental
@@ -799,7 +772,7 @@ apt-get autoremove -y 2>/dev/null || true
 # ═══════════════════════════════════════════════════════════════
 info "Step 10.5: Removing CrowdSec and associated components..."
 
-# ── Phase 8 reversed: stop and disable all CrowdSec services ────────────────
+# Reverse CrowdSec phase 8 by stopping and disabling all services.
 for _cs_svc in \
     crowdsec-cloudflare-bouncer \
     crowdsec-firewall-bouncer \
@@ -814,7 +787,7 @@ for _cs_svc in \
     fi
 done
 
-# ── Phase 2 reversed: remove Cloudflare bouncer binary ──────────────────────
+# Reverse CrowdSec phase 2 by removing the Cloudflare bouncer binary.
 _CF_BOUNCER_BIN="/usr/local/bin/crowdsec-cloudflare-bouncer"
 if [[ -f "$_CF_BOUNCER_BIN" ]]; then
     rm -f "$_CF_BOUNCER_BIN" \
@@ -830,7 +803,7 @@ if [[ -f "$_CF_BOUNCER_UNIT" ]]; then
         && success "Removed CrowdSec Cloudflare bouncer unit: ${_CF_BOUNCER_UNIT}"
 fi
 
-# ── Phase 1 reversed: purge CrowdSec packages ───────────────────────────────
+# Reverse CrowdSec phase 1 by purging the CrowdSec packages.
 _CS_PKGS=(crowdsec crowdsec-firewall-bouncer-iptables)
 for _cs_pkg in "${_CS_PKGS[@]}"; do
     if dpkg -s "$_cs_pkg" &>/dev/null 2>&1; then
@@ -856,7 +829,7 @@ done
 # The PackageCloud installer writes a .list file and a dearmored .gpg key.
 rm -f /etc/apt/sources.list.d/crowdsec_crowdsec.list \
     && success "Removed /etc/apt/sources.list.d/crowdsec_crowdsec.list" || true
-# GPG key — PackageCloud may use either .gpg (dearmored) or .asc (armored).
+# PackageCloud may use either a dearmored .gpg key or an armored .asc key.
 rm -f /etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.gpg \
     && success "Removed CrowdSec GPG key (.gpg)" || true
 rm -f /etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.asc \
@@ -874,7 +847,7 @@ apt-get autoremove -y 2>/dev/null || true
 # If crowdsec itself was just purged above the whole directory is gone already,
 # so these are belt-and-suspenders cleanups for partial-install scenarios.
 
-# Phase 4: acquisition config written by setup-crowdsec.sh
+# Reverse CrowdSec phase 4 by removing the acquisition config written by setup-crowdsec.sh.
 _ACQUIS_FILE="/etc/crowdsec/acquis.d/vaultwarden.yaml"
 if [[ -f "$_ACQUIS_FILE" ]]; then
     rm -f "$_ACQUIS_FILE" \
@@ -884,7 +857,7 @@ if [[ -f "$_ACQUIS_FILE" ]]; then
         && success "Removed empty /etc/crowdsec/acquis.d" || true
 fi
 
-# Phase 6: Cloudflare bouncer config (contains API keys — remove with care)
+# Reverse CrowdSec phase 6 by removing the Cloudflare bouncer config with care.
 _CF_BOUNCER_CFG="/etc/crowdsec/bouncers/crowdsec-cloudflare-bouncer.yaml"
 if [[ -f "$_CF_BOUNCER_CFG" ]]; then
     rm -f "$_CF_BOUNCER_CFG" \
@@ -893,9 +866,8 @@ if [[ -f "$_CF_BOUNCER_CFG" ]]; then
         && success "Removed empty /etc/crowdsec/bouncers" || true
 fi
 
-# Phase 7: profiles.yaml (only remove if it matches the project's copy —
-# the package installs a default profiles.yaml too, which was already wiped
-# by the purge above; this covers the case where crowdsec was NOT purged).
+# Reverse CrowdSec phase 7 by removing profiles.yaml only when it matches the project's copy.
+# The package also installs a default profiles.yaml, and the purge above already removes that copy.
 _PROFILES_FILE="/etc/crowdsec/profiles.yaml"
 if [[ -f "$_PROFILES_FILE" ]]; then
     rm -f "$_PROFILES_FILE" \
@@ -913,7 +885,7 @@ if [[ -d /etc/crowdsec ]]; then
     fi
 fi
 
-# ── Phase 5 reversed: remove CROWDSEC_CF_BOUNCER_API_KEY from .env ──────────
+# Reverse CrowdSec phase 5 by removing CROWDSEC_CF_BOUNCER_API_KEY from .env.
 _ENV_FILE_CS="${PROJECT_DIR}/.env"
 if [[ -f "$_ENV_FILE_CS" ]] && grep -q "^CROWDSEC_CF_BOUNCER_API_KEY=" "$_ENV_FILE_CS" 2>/dev/null; then
     _ENV_TMP=$(mktemp "${_ENV_FILE_CS}.crowdsec.XXXXXXXXXX")
@@ -945,7 +917,6 @@ success "CrowdSec removal complete."
 # ═══════════════════════════════════════════════════════════════
 info "Step 11: Removing UFW rules for ports 80 and 443..."
 if command -v ufw &>/dev/null; then
-    # Delete simple allow rules first (covers the common case in one pass)
     ufw delete allow 80/tcp  2>/dev/null || true
     ufw delete allow 443/tcp 2>/dev/null || true
 
@@ -953,7 +924,6 @@ if command -v ufw &>/dev/null; then
     # (e.g. Cloudflare-CIDR rules added during setup).
     # Capped at 20 iterations — normal cleanup finishes in ≤2 passes.
     for _ufw_i in {1..20}; do
-        # Re-query each iteration; rule numbers shift after each deletion.
         RULE_NUM=$(ufw status numbered 2>/dev/null \
             | grep -E "(80|443)/tcp" \
             | awk -F'[][]' '{print $2}' \
@@ -988,7 +958,6 @@ info "Step 11.5: Removing iptables rules added by setup-firewall.sh..."
 if command -v iptables >/dev/null 2>&1; then
     _VW_SUBNETS=("172.21.0.0/16" "172.22.0.0/16" "172.23.0.0/16")
 
-    # Remove POSTROUTING MASQUERADE rules (nat table).
     for _subnet in "${_VW_SUBNETS[@]}"; do
         # Loop: a rule may have been inserted more than once (idempotency was
         # not guaranteed on early versions); stop on first non-zero exit.
@@ -998,7 +967,6 @@ if command -v iptables >/dev/null 2>&1; then
         done
     done
 
-    # Remove DOCKER-USER ACCEPT rules (filter table) — only if the chain exists.
     if iptables -t filter -S DOCKER-USER >/dev/null 2>&1; then
         for _subnet in "${_VW_SUBNETS[@]}"; do
             while iptables -t filter -D DOCKER-USER -s "$_subnet" \
@@ -1041,7 +1009,6 @@ if grep -q '^/swapfile' /etc/fstab 2>/dev/null; then
     fi
 fi
 
-# Remove vm.swappiness entry added by setup.sh
 if grep -q '^vm.swappiness' /etc/sysctl.conf 2>/dev/null; then
     sed -i '/^vm\.swappiness/d' /etc/sysctl.conf \
         && success "Removed vm.swappiness from /etc/sysctl.conf."
@@ -1076,9 +1043,6 @@ if getent group docker &>/dev/null; then
     fi
 fi
 
-# ═══════════════════════════════════════════════════════════════
-# Done
-# ═══════════════════════════════════════════════════════════════
 echo ""
 echo "════════════════════════════════════════════════════════════"
 success "Uninstall complete."

@@ -1,31 +1,12 @@
 #!/usr/bin/env bash
-# utilities/setup-system.sh — VaultWarden-OCI system preparation
-#
-# Installs dependencies (Docker, SOPS, age, etc.), configures swap,
-# validates the toolchain, and sets file permissions. Safe to re-run.
-#
-# USAGE:
-#   sudo utilities/setup-system.sh [OPTIONS]
-#
-# FLAGS:
-#   --skip-deps           Skip package installation (assume already installed)
-#   --auto                Non-interactive mode
-#   --use-latest          Override pinned versions with 'latest'
-#   --sops-version VER    Pin SOPS to a specific version (e.g. v3.9.4)
-#   --dry-run             Preview actions without executing
-#   --force               Skip confirmations
-#   --data-device DEV     Data volume device path
-#   --data-mount PATH     Data volume mount point (default: /mnt/vw-data)
-#   --help, -h            Show this help
+# setup-system.sh — Prepares the host system for VaultWarden-OCI.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-# ---------------------------------------------------------------------------
-# Secure temporary workspace — cleaned up on exit/interrupt/terminate
-# ---------------------------------------------------------------------------
+# Use a secure project-local temporary workspace that is cleaned up on exit.
 old_umask=$(umask)
 umask 077
 TMP_WORKDIR=$(mktemp -d -p "${PROJECT_ROOT}" vw_sys_tmp.XXXXXXXXXX) || {
@@ -37,9 +18,6 @@ trap 'rm -rf "$TMP_WORKDIR"' EXIT
 trap 'rm -rf "${TMP_WORKDIR:-}"; exit 130' INT
 trap 'rm -rf "${TMP_WORKDIR:-}"; exit 143' TERM
 
-# ---------------------------------------------------------------------------
-# Bootstrap common library
-# ---------------------------------------------------------------------------
 for _lib in "lib/log.sh" "lib/config.sh" "lib/common.sh"; do
     if [[ ! -f "${PROJECT_ROOT}/${_lib}" ]]; then
         echo "ERROR: Required library not found: ${PROJECT_ROOT}/${_lib}" >&2
@@ -55,9 +33,6 @@ source "${PROJECT_ROOT}/lib/config.sh"
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
 
-# ---------------------------------------------------------------------------
-# Variable defaults
-# ---------------------------------------------------------------------------
 SOPS_VERSION="${SOPS_VERSION:-}"
 SKIP_DEPS=false
 AUTO_MODE=false
@@ -70,9 +45,6 @@ DATA_VOLUME_MOUNT="${DATA_VOLUME_MOUNT:-/mnt/vw-data}"
 # Exported so that any sub-scripts invoked later can inherit these flags.
 export USE_LATEST FORCE
 
-# ---------------------------------------------------------------------------
-# show_help
-# ---------------------------------------------------------------------------
 show_help() {
     cat <<'EOF'
 utilities/setup-system.sh — VaultWarden-OCI system preparation
@@ -93,9 +65,6 @@ FLAGS:
 EOF
 }
 
-# ---------------------------------------------------------------------------
-# _parse_args
-# ---------------------------------------------------------------------------
 _parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -130,10 +99,7 @@ _parse_args() {
     done
 }
 
-# ---------------------------------------------------------------------------
-# resolve_github_latest REPO
-# Resolves the latest release tag from the GitHub API.
-# ---------------------------------------------------------------------------
+# Resolve the latest release tag from the GitHub API.
 resolve_github_latest() {
     local repo="$1"
     local tag
@@ -160,10 +126,7 @@ resolve_github_latest() {
     echo "$tag"
 }
 
-# ---------------------------------------------------------------------------
-# install_docker
-# Installs Docker CE via the official apt repository with GPG key verification.
-# ---------------------------------------------------------------------------
+# Install Docker CE from the official apt repository with GPG key verification.
 install_docker() {
     if command -v docker &>/dev/null && docker info &>/dev/null; then
         log_info "setup" "Docker already installed: $(docker --version)"
@@ -239,11 +202,7 @@ EOF
     log_success "setup" "Docker installed: $(docker --version)"
 }
 
-# ---------------------------------------------------------------------------
-# check_disk_space
-# Verifies minimum free space on the project root, Docker data root, and
-# (when already mounted) the dedicated data volume.
-# ---------------------------------------------------------------------------
+# Verify minimum free space on the project root, Docker data root, and an existing data mount.
 check_disk_space() {
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would check disk space"; return 0; fi
 
@@ -286,10 +245,7 @@ check_disk_space() {
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# create_swapfile
-# Creates and activates a 1 GiB swapfile when no swap is currently active.
-# ---------------------------------------------------------------------------
+# Create and activate a 1 GiB swapfile when no swap is active.
 create_swapfile() {
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would create swapfile if needed"; return 0; fi
 
@@ -300,7 +256,7 @@ create_swapfile() {
 
     local swapfile="/swapfile"
     if [[ -f "$swapfile" ]]; then
-        # idempotent: skip creation when the swapfile already exists
+        # Reuse an existing swapfile on idempotent re-runs.
         log_info "Swapfile already exists at ${swapfile} — reusing existing file"
     else
         log_info "No swap detected — creating 1 GiB swapfile at ${swapfile}..."
@@ -309,19 +265,19 @@ create_swapfile() {
 
     chmod 600 "$swapfile"
     if ! blkid -o value -s TYPE "$swapfile" 2>/dev/null | grep -q '^swap$'; then
-        # idempotent: initialise swap signature only when missing
+        # Initialise the swap signature only when it is missing.
         mkswap "$swapfile" >/dev/null || return 1
     fi
     swapon "$swapfile" || return 1
 
     if ! grep -q "^${swapfile}" /etc/fstab 2>/dev/null; then
-        # idempotent: append once
+        # Append the fstab entry only once.
         echo "${swapfile} none swap sw 0 0" >> /etc/fstab
     fi
 
     sysctl -q vm.swappiness=10 || true
     if ! grep -q "^vm.swappiness" /etc/sysctl.conf 2>/dev/null; then
-        # idempotent: append once
+        # Append the sysctl setting only once.
         echo "vm.swappiness=10" >> /etc/sysctl.conf
     fi
 
@@ -329,10 +285,7 @@ create_swapfile() {
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# install_dependencies
-# Installs all required system packages, Docker, CrowdSec, and SOPS.
-# ---------------------------------------------------------------------------
+# Install the required system packages, Docker, CrowdSec, and SOPS.
 install_dependencies() {
     if [[ "$SKIP_DEPS" == "true" ]]; then return 0; fi
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would install dependencies"; return 0; fi
@@ -475,10 +428,7 @@ install_dependencies() {
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# verify_dependencies
-# Confirms all required commands and Python modules are present.
-# ---------------------------------------------------------------------------
+# Confirm that all required commands and Python modules are present.
 verify_dependencies() {
     hash -r
     local required_commands=("age" "sops" "docker" "jq" "sqlite3" "ufw" "curl" "python3" "htpasswd")
@@ -488,10 +438,7 @@ verify_dependencies() {
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# setup_user_permissions
-# Adds the invoking user to the docker group and sets project file ownership.
-# ---------------------------------------------------------------------------
+# Add the invoking user to the docker group and set project file ownership.
 setup_user_permissions() {
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would configure user permissions"; return 0; fi
 
@@ -523,31 +470,26 @@ setup_user_permissions() {
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# set_script_permissions
 # Ensures all operator-facing scripts are executable. Git does not always
-# preserve execute bits across clones on all systems/clients.
+# preserve execute bits across clones on all systems or clients.
 #
 # Covers:
-#   - Root-level *.sh scripts (operator-facing)
-#   - caddy/entrypoint.sh  (run as container CMD; must be +x before 'make up')
-#   - lib/*.sh             (sourced, not executed directly — kept 644)
-# ---------------------------------------------------------------------------
+#   - Root-level *.sh scripts (operator-facing).
+#   - caddy/entrypoint.sh (run as container CMD; must be +x before 'make up').
+#   - lib/*.sh (sourced, not executed directly, so kept 644).
 set_script_permissions() {
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would set script permissions"; return 0; fi
 
     local real_user; real_user=$(get_real_user)
     local real_group; real_group=$(id -g -n "$real_user")
 
-    # 0. Normalize directory permissions before touching executable bits.
-    #    Keep lib/ excluded because lib files are sourced and managed
-    #    separately below.
+    # Normalize directory permissions before touching executable bits. Keep
+    # lib/ excluded because those files are sourced and managed separately below.
     while IFS= read -r dir; do
         chmod 755 "$dir" 2>/dev/null || true
         chown "$real_user:$real_group" "$dir" 2>/dev/null || true
     done < <(find . -path "./lib" -prune -o -type d -print)
 
-    # 1. Root-level operator scripts — chmod +x
     local root_scripts=(
         "setup.sh"
         "utilities/secrets-edit.sh"
@@ -564,7 +506,6 @@ set_script_permissions() {
         fi
     done
 
-    # 2. utilities/*.sh — executable admin helpers (moved from root)
     if [[ -d "utilities" ]]; then
         while IFS= read -r script; do
             chmod +x "$script"
@@ -573,11 +514,10 @@ set_script_permissions() {
         done < <(find "utilities" -maxdepth 1 -name "*.sh")
     fi
 
-    # 3. caddy/entrypoint.sh — must be executable before 'make up';
-    #    Docker copies it into the image with its host permissions, so a
-    #    missing +x bit causes 'permission denied' at container start.
-    #    Use process substitution to avoid a pipe-subshell so log_success
-    #    calls take effect in the current shell.
+    # caddy/entrypoint.sh must be executable before 'make up'. Docker copies
+    # it into the image with its host permissions, so a missing +x bit causes
+    # 'permission denied' at container start. Use process substitution so
+    # log_success runs in the current shell.
     if [[ -d "caddy" ]]; then
         while IFS= read -r script; do
             chmod +x "$script"
@@ -586,7 +526,7 @@ set_script_permissions() {
         done < <(find "caddy" -maxdepth 1 -name "*.sh")
     fi
 
-    # 4. lib/*.sh — sourced (not executed), keep 644 read-only for non-root
+    # Keep lib/*.sh at 644 because those files are sourced, not executed.
     if [[ -d "lib" ]]; then
         find "lib" -name "*.sh" -exec chown "$real_user:$real_group" {} + 2>/dev/null || true
         find "lib" -name "*.sh" -exec chmod 644 {} + 2>/dev/null || true
@@ -595,10 +535,7 @@ set_script_permissions() {
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# validate_ssh_config
-# Warns when root SSH login is enabled.
-# ---------------------------------------------------------------------------
+# Warn when root SSH login is enabled.
 validate_ssh_config() {
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would validate SSH config"; return 0; fi
 
@@ -608,10 +545,7 @@ validate_ssh_config() {
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# cleanup_setup_deps
-# Removes orphaned packages installed as transitive setup dependencies.
-# ---------------------------------------------------------------------------
+# Remove orphaned packages installed as transitive setup dependencies.
 cleanup_setup_deps() {
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would cleanup dependencies"; return 0; fi
 
@@ -619,9 +553,6 @@ cleanup_setup_deps() {
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# main
-# ---------------------------------------------------------------------------
 main() {
     _parse_args "$@"
 

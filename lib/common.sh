@@ -12,7 +12,7 @@
 #                  setup_cleanup_trap, safe_execute, init_common_lib
 #   Architecture : HOST_ARCH, GITHUB_ARCH (exported by init_common_lib)
 #
-# Load order requirement:
+# Depends on / Load order:
 #   lib/log.sh must be sourced before this file. Functions in this lib
 #   call log_debug, log_warn, log_error internally. Sourcing common.sh
 #   before log.sh will cause "command not found" errors at runtime.
@@ -387,7 +387,6 @@ init_common_lib() {
 
     set -euo pipefail
 
-    # Store the calling script's basename (with extension) for log tagging.
     _VW_CALLING_SCRIPT="$(basename -- "$script_name")"
     # Keep LOG_PREFIX for backward compatibility with any code that reads it.
     # shellcheck disable=SC2034  # exported for external backward compat

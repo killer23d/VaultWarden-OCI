@@ -1,27 +1,5 @@
 #!/usr/bin/env bash
-# utilities/secrets-rotate.sh — Rotate a single VaultWarden credential
-#
-# Standalone admin tool. Also invocable via: ./edit-secrets.sh rotate FIELD
-#
-# USAGE:
-#   ./utilities/secrets-rotate.sh FIELD [OPTIONS]
-#   ./utilities/secrets-rotate.sh rotate FIELD [OPTIONS]  # 'rotate' accepted as alias
-#   ./edit-secrets.sh rotate FIELD [OPTIONS]
-#
-# SUPPORTED FIELDS:
-#   admin_token              (Argon2id re-hash)
-#   admin_basic_auth_hash    (bcrypt re-hash)
-#   caddy_cloudflare_dns_token
-#   email_api_token          (HTTP API token; stored under fixed key regardless of EMAIL_PROVIDER)
-#   smtp_password            (SMTP relay password)
-#   push_installation_id
-#   push_installation_key
-#   backup_passphrase        (auto-generated)
-#
-# FLAGS:
-#   --dry-run    Preview what would change without writing
-#   --no-backup  Skip creating backup before rotation
-#   --help, -h   Show this help
+# secrets-rotate.sh — Rotates a VaultWarden credential and resyncs dependent secret files.
 
 HISTFILE=/dev/null
 set -euo pipefail
@@ -93,7 +71,7 @@ _ROTATE_FIELDS=("admin_token" "admin_basic_auth_hash"
                 "smtp_password" "push_installation_id" "push_installation_key"
                 "backup_passphrase")
 
-# Map each rotatable field to the Docker service(s) that consume it.
+# Map each rotatable field to the Docker service or services that consume it.
 declare -A _FIELD_SERVICES
 _FIELD_SERVICES=(
     [admin_token]="vaultwarden"
@@ -191,8 +169,8 @@ do_rotate() {
         return 1
     fi
 
-    # For email_api_token, prompt directly (plain token, no hashing).
-    # For all other fields, delegate to the canonical collect_secret_field().
+    # Prompt for email_api_token directly because it is stored as a plain token.
+    # Delegate all other fields to the canonical collect_secret_field() helper.
     local new_value
     if [[ "$field" == "email_api_token" ]]; then
         local _ep
@@ -228,16 +206,16 @@ do_rotate() {
     fi
     register_cleanup "_secure_shred" "$temp_patched"
 
-    # Patch the YAML value using regex substitution to preserve YAML comments.
-    # Using yaml.dump() would strip all comments on first write.
+    # Patch the YAML value with regex substitution to preserve existing YAML comments.
+    # Using yaml.dump() would strip comments on the first write.
     #
     # NOTE: yaml_scalar() below produces double-quoted YAML scalars, handling \, ",
-    # newline, carriage return, and tab escapes. This is intentionally different from
+    # newline, carriage return, and tab escapes. This intentionally differs from
     # yaml_escape() in utilities/setup-secrets.sh, which produces single-quoted scalars
-    # and only escapes embedded single quotes. yaml_scalar is required here because
-    # rotated values (e.g. Argon2id hashes, random tokens) may contain backslashes,
+    # and only escapes embedded single quotes. yaml_scalar() is required here because
+    # rotated values such as Argon2id hashes and random tokens may contain backslashes,
     # double quotes, or non-printable characters that single-quote style cannot encode.
-    # yaml_escape in setup-secrets.sh writes a fresh YAML file where values are known
+    # yaml_escape() in setup-secrets.sh writes a fresh YAML file where values are known
     # ASCII with no special characters, so the simpler style is adequate there.
     local _patch_rc=0
     python3 - "$temp_plain" "$actual_field" "$new_value" "$temp_patched" << 'PYEOF' || _patch_rc=$?
@@ -315,7 +293,6 @@ PYEOF
         log_warn "Run 'docker compose restart <service>' for the new secret to take effect"
     fi
 
-    # Redeploy Docker secret files via the canonical lib function.
     log_info "Redeploying Docker secret files..."
     local docker_dir="${PROJECT_ROOT}/secrets/.docker_secrets"
     if export_docker_secrets "$docker_dir" "$SECRETS_FILE" 2>/dev/null; then
@@ -324,20 +301,18 @@ PYEOF
         log_warn "Could not auto-redeploy Docker secret files. Run: ./startup.sh or ./setup.sh secrets"
     fi
 
-    # Pass "false": rotate does not auto-export a recovery kit. Run
-    # utilities/secrets-export-recovery-kit.sh explicitly after rotation if needed.
+    # Pass "false" because rotate does not auto-export a recovery kit.
+    # Run utilities/secrets-export-recovery-kit.sh explicitly after rotation if needed.
     offer_recovery_kit_export "false"
 
     return 0
 }
 
 main() {
-    # Strip the leading "rotate" token if called as: secrets-rotate.sh rotate FIELD
     if [[ "${1:-}" == "rotate" ]]; then shift; fi
 
     local rotate_field=""
 
-    # First positional arg is the field name (unless it's a flag)
     if [[ $# -gt 0 && "${1}" != --* ]]; then
         rotate_field="$1"
         shift

@@ -1,22 +1,18 @@
 #!/usr/bin/env bash
-# setup.sh - VaultWarden-OCI Setup Script
+# setup.sh — Install and configure VaultWarden-OCI.
 
 set -euo pipefail
 
-# =============================================================================
-# DEPENDENCY VERSION PINS
-# To pin a specific version, set the variable. Leave blank ("") to auto-resolve
-# the latest release at runtime via the GitHub API.
+# Dependency version pins.
+# Set SOPS_VERSION to pin a specific release, or leave it blank to resolve the
+# latest release from the GitHub API at runtime.
 #
 # Examples:
-#   SOPS_VERSION="v3.9.4"   <- pinned
-#   SOPS_VERSION=""         <- auto-resolve latest (default)
+#   SOPS_VERSION="v3.9.4"
+#   SOPS_VERSION=""
 #
-# You may also override any of these from the environment before running:
-#   SOPS_VERSION=v3.9.4 sudo ./setup.sh --domain ...
-# =============================================================================
-SOPS_VERSION="${SOPS_VERSION:-}"   # e.g. "v3.9.4" — leave blank for latest
-# =============================================================================
+# You may also override it from the environment before running setup.
+SOPS_VERSION="${SOPS_VERSION:-}"  # For example, "v3.9.4"; leave blank to use the latest release.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR"
@@ -64,9 +60,8 @@ PHASE_ARGS=()
 export ENTROPY_THRESHOLD=200
 export ENTROPY_MAX_WAIT=60
 CLEAN_DOMAIN=""
-# Storage mode variables (defaults; overridden by --data-device/--data-mount
-# CLI flags or by DATA_VOLUME_DEVICE/DATA_VOLUME_MOUNT already set in the
-# calling environment).
+# Storage mode variables. Defaults are overridden by --data-device/--data-mount
+# or by DATA_VOLUME_DEVICE/DATA_VOLUME_MOUNT already set in the environment.
 DATA_VOLUME_DEVICE="${DATA_VOLUME_DEVICE:-}"
 DATA_VOLUME_MOUNT="${DATA_VOLUME_MOUNT:-/mnt/vw-data}"
 SETUP_LOCK_FILE=""
@@ -138,12 +133,9 @@ EXAMPLES:
 EOF
 }
 
-# ---------------------------------------------------------------------------
-# Argument Parsing — subcommand-first dispatch
-# Pre-scan for positional subcommands before consuming regular --flags.
+# Argument parsing uses subcommand-first dispatch.
 # The explicit `install` subcommand intentionally falls through to the same
 # full-setup option parser used by the legacy top-level --domain/--email form.
-# ---------------------------------------------------------------------------
 _require_cli_value() {
     local opt="$1" value="${2-}"
     if [[ -z "$value" || "$value" == --* ]]; then
@@ -162,14 +154,15 @@ if [[ $# -gt 0 ]]; then
             PHASE="secrets"
             shift
             PHASE_ARGS=("$@")
-            # Skip remaining flag parsing — PHASE_ARGS carries everything
-            set --   # clear $@ so the while loop below is a no-op
+            # Skip remaining flag parsing; PHASE_ARGS carries everything.
+            set -- # Clear $@ so the while loop below is a no-op.
             ;;
         systemd)
             PHASE="systemd"
             shift
-            # Pass all remaining args positionally — setup-systemd.sh
-            # accepts install|remove|validate|status as positional sub-actions.
+            # Pass all remaining arguments positionally because
+            # setup-systemd.sh accepts install|remove|validate|status as
+            # positional sub-actions.
             PHASE_ARGS=("$@")
             set --
             ;;
@@ -177,7 +170,7 @@ if [[ $# -gt 0 ]]; then
             show_help; exit 0
             ;;
         --domain|--email|--auto|--use-latest|--skip-deps|--force|--dry-run|--data-device|--data-mount)
-            # Legacy full-setup flag — fall through to the while loop below
+            # Legacy full-setup flag; fall through to the while loop below.
             ;;
         *)
             log_error "Unknown subcommand: '$1'"
@@ -205,10 +198,9 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# ---------------------------------------------------------------------------
-# FORCE safety gate — must run before any validation so --dry-run --force
-# can still preview without triggering the prompt.
-# ---------------------------------------------------------------------------
+# FORCE safety gate.
+# This must run before any validation so --dry-run --force can still preview
+# without triggering the prompt.
 if [[ "$FORCE" == "true" ]] && [[ "$DRY_RUN" != "true" ]]; then
     if [[ "${VW_FORCE_ACK:-}" != "I_UNDERSTAND_LOSING_OLD_BACKUPS" ]]; then
         log_error "--force regenerates the Age key and permanently orphans all existing"
@@ -238,14 +230,12 @@ if [[ -z "$PHASE" ]] && ! validate_email "$ADMIN_EMAIL"; then log_error "Invalid
 show_post_install_summary() {
     local mode="${1:-interactive}"
 
-    # Read Age key upfront — used by both Change 4 consolidated screen and Change 2 banner
     local age_pub_key="" age_key_content=""
     if [[ -f "secrets/keys/age-key.txt" ]]; then
         age_pub_key=$(get_age_public_key "secrets/keys/age-key.txt" 2>/dev/null || echo "MISSING")
         age_key_content=$(cat "secrets/keys/age-key.txt" 2>/dev/null || echo "ERROR: Could not read key file")
     fi
 
-    # ── Change 4: Consolidated credential screen (AUTO_MODE only, shown first) ──
     if [[ "$mode" == "auto" ]]; then
         local _na="(not available — run setup-secrets.sh configure --export-recovery-kit to retrieve)"
         local vw_admin_plain="${_na}" caddy_admin_plain="${_na}" backup_pass_plain="${_na}"
@@ -300,7 +290,6 @@ CRED_BANNER
 EOF
     printf '%s' "${COLOR_RESET}"
 
-    # ── Change 2: Age key — red-banner credential screen ──────────────────────
     if [[ -f "secrets/keys/age-key.txt" ]]; then
         clear
         printf '%s' "${COLOR_RED}"
@@ -329,7 +318,6 @@ AGE_BANNER
         fi
     fi
 
-    # Determine correct edit command based on actual .env ownership
     local env_owner
     env_owner=$(stat -c '%U' "$PROJECT_ROOT/.env" 2>/dev/null || echo "root")
     local env_edit_cmd="nano .env"
@@ -441,9 +429,9 @@ main() {
     if ! is_root; then log_error "Must run as root."; exit 1; fi
 
     SETUP_LOCK_FILE="/run/lock/vaultwarden-setup.lock"
-    # Use automatic FD allocation instead of hardcoded FD for the lock.
-    # /run/lock is the FHS-correct transient lock location; /var/lock
-    #   is a legacy symlink that ProtectSystem=strict makes read-only in systemd units.
+    # Use automatic FD allocation instead of a hardcoded descriptor.
+    # /run/lock is the FHS-correct transient lock location; /var/lock is a
+    # legacy symlink that ProtectSystem=strict makes read-only in systemd units.
     # A trap removes the lock file on EXIT so a crash does not leave a stale lock.
     local SETUP_LOCK_FD
     exec {SETUP_LOCK_FD}>"$SETUP_LOCK_FILE"
@@ -455,7 +443,7 @@ main() {
     fi
     _setup_cleanup() {
         rm -f "$SETUP_LOCK_FILE" 2>/dev/null || true
-        # Clean TMP_WORKDIR here because this trap overrides the startup trap.
+        # Clean TMP_WORKDIR here because this trap overrides the earlier trap.
         rm -rf "$TMP_WORKDIR" 2>/dev/null || true
     }
     trap _setup_cleanup EXIT HUP INT TERM
@@ -483,39 +471,34 @@ main() {
     local _sops_flags=()
     [[ -n "${SOPS_VERSION:-}" ]] && _sops_flags=(--sops-version "$SOPS_VERSION")
 
-    # ── 1. System dependencies, swap, disk checks ───────────────────────────
     log_info "=== Phase 1: System setup ==="
     "${SCRIPT_DIR}/utilities/setup-system.sh" \
         "${_auto[@]}" "${_skip_deps[@]}" "${_dry[@]}" "${_force[@]}" \
         "${_dev_flags[@]}" "${_sops_flags[@]}" \
         || { log_error "System setup failed"; exit 1; }
 
-    # ── 2. Storage: data volume + directories ───────────────────────────────
     log_info "=== Phase 2: Storage setup ==="
     "${SCRIPT_DIR}/utilities/setup-storage.sh" --mode setup \
         "${_dry[@]}" "${_force[@]}" "${_dev_flags[@]}" \
         || { log_error "Storage setup failed"; exit 1; }
 
-    # ── 3. Environment file (.env, docker-compose) ──────────────────────────
     log_info "=== Phase 3: Environment configuration ==="
     "${SCRIPT_DIR}/utilities/setup-env.sh" \
         --domain "$DOMAIN" --email "$ADMIN_EMAIL" \
         "${_use_latest[@]}" "${_dry[@]}" "${_force[@]}" "${_dev_flags[@]}" \
         || { log_error "Environment setup failed"; exit 1; }
 
-    # ── 4. Secrets bootstrap (Age key + SOPS config + placeholder secrets) ──
     log_info "=== Phase 4: Secrets bootstrap ==="
     "${SCRIPT_DIR}/utilities/setup-secrets.sh" bootstrap \
         "${_dry[@]}" "${_force[@]}" \
         || { log_error "Secrets bootstrap failed"; exit 1; }
 
-    # ── 5. Firewall (UFW rules) ──────────────────────────────────────────────
     log_info "=== Phase 5: Firewall (UFW) ==="
     "${SCRIPT_DIR}/utilities/setup-firewall.sh" --phase ufw \
         "${_auto[@]}" "${_dry[@]}" "${_force[@]}" \
         || log_warn "UFW firewall setup had a non-fatal issue — review output above"
 
-    # ── iptables rules (best-effort, non-fatal) ──────────────────────────────
+    # Apply iptables rules on a best-effort basis.
     if [[ -x "${SCRIPT_DIR}/utilities/setup-firewall.sh" ]]; then
         echo "INFO: Applying VaultWarden iptables rules..."
         if "${SCRIPT_DIR}/utilities/setup-firewall.sh" --phase iptables; then
@@ -526,7 +509,6 @@ main() {
         fi
     fi
 
-    # ── CrowdSec prompt ─────────────────────────────────────────────────────
     if [[ "$AUTO_MODE" != "true" ]] && [[ -t 0 ]]; then
         log_info ""
         log_info "════════════════════════════════════════════════"
@@ -549,12 +531,11 @@ main() {
         log_info "Then add your Cloudflare API token: sudo ./utilities/setup-secrets.sh rotate crowdsec_cf_firewall_token"
     fi
 
-    # ── 6. Auto secrets (AUTO_MODE only) ────────────────────────────────────
     if [[ "$AUTO_MODE" == "true" ]]; then
         log_info "=== Auto Mode: Configuring secrets ==="
-        # Export temp-file paths so setup-secrets.sh can write plaintext credentials
-        # for the consolidated summary screen (Change 4).  TMP_WORKDIR is mode 700
-        # (created with umask 077) so files written inside are root-only.
+        # Export temp-file paths so setup-secrets.sh can write plaintext
+        # credentials for the summary screen. TMP_WORKDIR is mode 700
+        # (created with umask 077), so files written inside are root-only.
         export VW_ADMIN_PLAIN_FILE="${TMP_WORKDIR}/vw_admin_plain"
         export CADDY_PLAIN_FILE="${TMP_WORKDIR}/caddy_plain"
         export BACKUP_PLAIN_FILE="${TMP_WORKDIR}/backup_plain"

@@ -1,17 +1,8 @@
 #!/usr/bin/env bash
-# edit-secrets.sh — VaultWarden secrets dispatcher
-#
+# edit-secrets.sh — Dispatch VaultWarden secrets operations.
+
 # Thin dispatcher. All logic lives in utilities/secrets-*.sh.
 # An admin may also call those utilities directly.
-#
-# SUBCOMMANDS:
-#   edit                    Interactively edit decrypted secrets, then re-encrypt
-#   view                    View decrypted secrets read-only (no changes saved)
-#   list                    List secret key names only (no values shown)
-#   rotate FIELD            Re-collect and re-hash a single named field
-#   export-recovery-kit     Generate a recovery document with unencrypted secrets
-#
-# Run './edit-secrets.sh <subcommand> --help' for subcommand-specific options.
 
 HISTFILE=/dev/null
 set -euo pipefail

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# backup.sh — VaultWarden-OCI backup dispatcher
-#
+# backup.sh — Dispatch VaultWarden-OCI backup operations.
+
 # Thin dispatcher. All logic lives in utilities/backup-run.sh.
 # An admin or systemd unit may also call utilities/backup-run.sh directly.
-#
-# USAGE:
+
+# Usage:
 #   sudo ./backup.sh run [TYPE] [OPTIONS]
 #   ./backup.sh list
 #   sudo ./backup.sh verify
