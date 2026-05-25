@@ -62,9 +62,12 @@ init_common_lib" without specifying existing implementation.
 
 **Reason:** The header for `lib/common.sh` explicitly lists
 `HOST_ARCH, GITHUB_ARCH (exported by init_common_lib)`. Added a simple
-`uname -m` → Docker platform string mapping (x86_64→linux/amd64,
-aarch64→linux/arm64) to init_common_lib(). This is cleaner than adding a
-new function and is the canonical location per the header spec.
+`uname -m` → GitHub release asset arch string mapping (x86_64→amd64,
+aarch64→arm64, armv7l→arm) to init_common_lib(). GITHUB_ARCH intentionally
+uses bare arch names (`amd64`, `arm64`, `arm`) that match GitHub release
+asset filenames, not Docker platform strings (`linux/amd64`). If a Docker
+platform string is ever needed separately, derive it at call site as
+`"linux/${GITHUB_ARCH}"`.
 
 ### Decision 2: lib/secrets.sh keeps explicit log.sh self-load
 
@@ -72,6 +75,13 @@ new function and is the canonical location per the header spec.
 self-load in secrets.sh is technically redundant. However, explicit is
 better than implicit. If crypto.sh's loading pattern ever changes, secrets.sh
 will still be self-sufficient without a silent regression.
+
+**Structural note:** `_SECRETS_LIB_DIR` is intentionally **not** unset
+immediately after the `log.sh` self-load — it is reused on the very next
+line to source `crypto.sh`, then unset after that call. This is a deliberate
+deviation from other domain libs (which unset their `_VW_*_LIB_DIR` right
+after the self-load) because secrets.sh needs the directory for two source
+calls, not one.
 
 ### Decision 3: lib/validate.sh is standalone (no log dependency)
 

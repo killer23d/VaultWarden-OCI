@@ -13,6 +13,8 @@ _SECRETS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Self-load log.sh if not already loaded — allows this lib to be sourced
 # directly without going through common.sh or a caller that pre-loads log.sh.
+# NOTE: _SECRETS_LIB_DIR is intentionally NOT unset here; it is reused two
+# lines below to source crypto.sh, then unset after that call.
 [[ -n "${VW_LOG_LIB_LOADED:-}" ]] || source "${_SECRETS_LIB_DIR}/log.sh"
 
 source "${_SECRETS_LIB_DIR}/crypto.sh"

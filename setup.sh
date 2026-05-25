@@ -33,24 +33,24 @@ trap 'rm -rf "$TMP_WORKDIR"' EXIT
 trap 'rm -rf "${TMP_WORKDIR:-}"; exit 130' INT
 trap 'rm -rf "${TMP_WORKDIR:-}"; exit 143' TERM
 
-REQUIRED_LIBS=("lib/common.sh" "lib/crypto.sh" "lib/docker.sh" "lib/backup-utils.sh" "lib/secrets.sh" "lib/storage.sh")
+REQUIRED_LIBS=("lib/log.sh" "lib/validate.sh" "lib/config.sh" "lib/common.sh" "lib/crypto.sh" "lib/docker.sh" "lib/backup-utils.sh" "lib/secrets.sh" "lib/storage.sh")
 for lib in "${REQUIRED_LIBS[@]}"; do
-    if [[ ! -f "$lib" ]]; then
-        echo "ERROR: Required library not found: $lib" >&2
+    if [[ ! -f "${SCRIPT_DIR}/${lib}" ]]; then
+        echo "ERROR: Required library not found: ${SCRIPT_DIR}/${lib}" >&2
         exit 1
     fi
 done
 
-source "lib/log.sh"
-source "lib/validate.sh"
-source "lib/config.sh"
-source "lib/common.sh"
+source "${SCRIPT_DIR}/lib/log.sh"
+source "${SCRIPT_DIR}/lib/validate.sh"
+source "${SCRIPT_DIR}/lib/config.sh"
+source "${SCRIPT_DIR}/lib/common.sh"
 init_common_lib "$0"
-source "lib/crypto.sh"
-source "lib/docker.sh"
-source "lib/backup-utils.sh"
-source "lib/secrets.sh"
-source "lib/storage.sh"
+source "${SCRIPT_DIR}/lib/crypto.sh"
+source "${SCRIPT_DIR}/lib/docker.sh"
+source "${SCRIPT_DIR}/lib/backup-utils.sh"
+source "${SCRIPT_DIR}/lib/secrets.sh"
+source "${SCRIPT_DIR}/lib/storage.sh"
 
 DOMAIN=""
 ADMIN_EMAIL=""

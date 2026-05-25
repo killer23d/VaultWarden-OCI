@@ -407,12 +407,13 @@ init_common_lib() {
         _LOG_CURRENT_WEIGHT=1
     fi
 
-    # Detect host architecture and map to Docker/GitHub platform strings.
+    # Detect host architecture and map to GitHub release asset naming strings.
     HOST_ARCH="$(uname -m)"
     case "$HOST_ARCH" in
-        x86_64)        GITHUB_ARCH="linux/amd64" ;;
-        aarch64|arm64) GITHUB_ARCH="linux/arm64" ;;
-        *)             GITHUB_ARCH="linux/${HOST_ARCH}" ;;
+        x86_64)        GITHUB_ARCH="amd64" ;;
+        aarch64|arm64) GITHUB_ARCH="arm64" ;;
+        armv7l|armhf)  GITHUB_ARCH="arm"   ;;
+        *)             GITHUB_ARCH="${HOST_ARCH}" ;;
     esac
     export HOST_ARCH GITHUB_ARCH
 
