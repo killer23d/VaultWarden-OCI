@@ -27,6 +27,14 @@ cd "${PROJECT_ROOT}"
 
 # ── Source libs (guard — standalone safety) ──────────────────────────────────
 _LIBS_LOADED=false
+if [[ -f "${PROJECT_ROOT}/lib/log.sh" ]]; then
+    # shellcheck source=../lib/log.sh
+    source "${PROJECT_ROOT}/lib/log.sh"
+fi
+if [[ -f "${PROJECT_ROOT}/lib/config.sh" ]]; then
+    # shellcheck source=../lib/config.sh
+    source "${PROJECT_ROOT}/lib/config.sh"
+fi
 if [[ -f "${PROJECT_ROOT}/lib/common.sh" ]]; then
     # shellcheck source=../lib/common.sh
     source "${PROJECT_ROOT}/lib/common.sh"

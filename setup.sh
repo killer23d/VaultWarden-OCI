@@ -41,6 +41,9 @@ for lib in "${REQUIRED_LIBS[@]}"; do
     fi
 done
 
+source "lib/log.sh"
+source "lib/validate.sh"
+source "lib/config.sh"
 source "lib/common.sh"
 init_common_lib "$0"
 source "lib/crypto.sh"

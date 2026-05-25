@@ -11,6 +11,12 @@ readonly VAULTWARDEN_STORAGE_LIB_LOADED=1
 # Entry-point scripts apply these options via init_common_lib(); this library
 # is always sourced after that call.
 
+# Self-load log.sh if not already loaded — allows this lib to be sourced
+# directly without going through common.sh or a caller that pre-loads log.sh.
+_VW_STORAGE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[[ -n "${VW_LOG_LIB_LOADED:-}" ]] || source "${_VW_STORAGE_LIB_DIR}/log.sh"
+unset _VW_STORAGE_LIB_DIR
+
 # ---------------------------------------------------------------------------
 # _storage_validate_paths
 #

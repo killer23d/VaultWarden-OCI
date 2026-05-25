@@ -13,6 +13,8 @@ cd "$PROJECT_ROOT"
 VW_LOCK_DIR="${PROJECT_ROOT}/.locks"
 VW_OPERATIONS_LOCK="${VW_LOCK_DIR}/operations.lock"
 
+source "lib/log.sh"
+source "lib/config.sh"
 source "lib/common.sh"
 init_common_lib "$0"
 _source_lib() {

@@ -38,6 +38,8 @@ for _lib in "lib/common.sh" "lib/crypto.sh" "lib/secrets.sh"; do
 done
 unset _lib
 
+source "lib/log.sh"
+source "lib/config.sh"
 source "lib/common.sh"
 source "lib/email.sh"
 init_common_lib "$0"

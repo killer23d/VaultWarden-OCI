@@ -9,6 +9,12 @@ readonly VAULTWARDEN_DOCKER_LIB_LOADED=1
 # Entry-point scripts apply these options via init_common_lib(); this library
 # is always sourced after that call.
 
+# Self-load log.sh if not already loaded — allows this lib to be sourced
+# directly without going through common.sh or a caller that pre-loads log.sh.
+_VW_DOCKER_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[[ -n "${VW_LOG_LIB_LOADED:-}" ]] || source "${_VW_DOCKER_LIB_DIR}/log.sh"
+unset _VW_DOCKER_LIB_DIR
+
 # Prune only VaultWarden-OCI Docker objects.
 # Override DOCKER_PROJECT_LABEL in .env if this host uses a non-default Compose project name.
 if [[ -z "${DOCKER_PROJECT_LABEL:-}" ]]; then
