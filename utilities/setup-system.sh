@@ -40,10 +40,13 @@ trap 'rm -rf "${TMP_WORKDIR:-}"; exit 143' TERM
 # ---------------------------------------------------------------------------
 # Bootstrap common library
 # ---------------------------------------------------------------------------
-if [[ ! -f "${PROJECT_ROOT}/lib/common.sh" ]]; then
-    echo "ERROR: Required library not found: ${PROJECT_ROOT}/lib/common.sh" >&2
-    exit 1
-fi
+for _lib in "lib/log.sh" "lib/config.sh" "lib/common.sh"; do
+    if [[ ! -f "${PROJECT_ROOT}/${_lib}" ]]; then
+        echo "ERROR: Required library not found: ${PROJECT_ROOT}/${_lib}" >&2
+        exit 1
+    fi
+done
+unset _lib
 # shellcheck source=../lib/log.sh
 source "${PROJECT_ROOT}/lib/log.sh"
 # shellcheck source=../lib/config.sh
