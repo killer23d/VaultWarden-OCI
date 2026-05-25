@@ -65,7 +65,7 @@ if [[ -f "${PROJECT_ROOT}/.env" ]]; then
     fi
 fi
 
-# Write or update a KEY=VALUE line in .env.
+# Write or update a KEY=VALUE line in .env using an atomic temp-file + mv.
 _cs_set_env_var() {
     local key="$1" value="$2"
     local env_file="${PROJECT_ROOT}/.env"
@@ -74,11 +74,18 @@ _cs_set_env_var() {
     escaped_value="${value//\\/\\\\}"
     escaped_value="${escaped_value//&/\\&}"
     escaped_value="${escaped_value//|/\\|}"
+    local tmp_file
+    tmp_file="$(dirname "$env_file")/.env.tmp.$$"
+    # shellcheck disable=SC2064
+    trap "rm -f '$tmp_file'" RETURN
     if grep -q "^${key}=" "$env_file" 2>/dev/null; then
-        sed -i "s|^${key}=.*|${key}=${escaped_value}|" "$env_file"
+        sed "s|^${key}=.*|${key}=${escaped_value}|" "$env_file" > "$tmp_file"
     else
-        printf '%s=%s\n' "$key" "$value" >> "$env_file"
+        cp "$env_file" "$tmp_file"
+        printf '%s=%s\n' "$key" "$value" >> "$tmp_file"
     fi
+    chmod --reference="$env_file" "$tmp_file" 2>/dev/null || true
+    mv "$tmp_file" "$env_file"
 }
 
 # Read a token from a flat secret file and reject placeholder values.
@@ -99,19 +106,41 @@ _cs_read_secret_file() {
 AUTO_MODE=false
 DRY_RUN=false
 FORCE=false
+# When USE_LATEST=true the script queries live upstream for the current latest
+# release of each component. By default (USE_LATEST=false) the pinned versions
+# below are used, which is safer for a "set-and-forget" deployment.
+USE_LATEST=false
+
+# ---------------------------------------------------------------------------
+# Dependency version pins.
+# Set a version string (e.g. "1.6.3") to install that exact release.
+# Leave blank ("") to let the package manager / GitHub API select the latest
+# stable.  When USE_LATEST=true these pins are ignored entirely.
+#
+# Examples:
+#   CROWDSEC_VERSION="1.6.3"
+#   CF_BOUNCER_VERSION="v0.0.14"
+# ---------------------------------------------------------------------------
+CROWDSEC_VERSION="${CROWDSEC_VERSION:-}"
+CF_BOUNCER_VERSION="${CF_BOUNCER_VERSION:-}"
 
 for _arg in "$@"; do
     case "$_arg" in
-        --auto)     AUTO_MODE=true ;;
-        --dry-run)  DRY_RUN=true ;;
-        --force)    FORCE=true ;;
+        --auto)        AUTO_MODE=true ;;
+        --dry-run)     DRY_RUN=true ;;
+        --force)       FORCE=true ;;
+        --use-latest)  USE_LATEST=true ;;
         --help|-h)
             cat <<'HELP'
-usage: sudo ./utilities/setup-crowdsec.sh [--auto] [--dry-run] [--force]
+usage: sudo ./utilities/setup-crowdsec.sh [--auto] [--dry-run] [--force] [--use-latest]
 
-  --auto      Non-interactive: never prompt.
-  --dry-run   Print what would happen; make no changes.
-  --force     Re-run all phases even if already applied.
+  --auto        Non-interactive: never prompt.
+  --dry-run     Print what would happen; make no changes.
+  --force       Re-run all phases even if already applied.
+  --use-latest  Override version pins and use the current live upstream release
+                of each component (crowdsec, cloudflare-bouncer).  By default
+                the pinned versions in CROWDSEC_VERSION / CF_BOUNCER_VERSION are
+                used for reproducibility.
 HELP
             exit 0
             ;;
@@ -150,8 +179,16 @@ else
         log_info "Adding CrowdSec repository..."
         curl -s https://packagecloud.io/install/repositories/crowdsec/crowdsec/script.deb.sh | bash
         log_info "Installing CrowdSec packages..."
+        # Use the pinned version when one is configured and --use-latest is not set.
+        _cs_pkg="crowdsec"
+        if [[ "$USE_LATEST" != "true" && -n "$CROWDSEC_VERSION" ]]; then
+            _cs_pkg="crowdsec=${CROWDSEC_VERSION}"
+            log_info "CrowdSec version pinned: ${CROWDSEC_VERSION}"
+        else
+            log_info "CrowdSec version: installing latest from packagecloud repository"
+        fi
         DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            crowdsec \
+            "$_cs_pkg" \
             crowdsec-firewall-bouncer-iptables
     fi
 fi
@@ -221,7 +258,15 @@ else
         # The tarball ships install.sh and helper scripts that must run from the
         # extracted directory because they rely on relative paths.
         if [[ "$_installed_via_deb" == "false" ]] && [[ -n "$_arch" ]]; then
-            _gh_api="https://api.github.com/repos/crowdsecurity/cs-cloudflare-bouncer/releases/latest"
+            # Resolve the GitHub API URL: use a pinned tag when configured and
+            # --use-latest is not active; otherwise query releases/latest.
+            if [[ "$USE_LATEST" != "true" && -n "$CF_BOUNCER_VERSION" ]]; then
+                _gh_api="https://api.github.com/repos/crowdsecurity/cs-cloudflare-bouncer/releases/tags/${CF_BOUNCER_VERSION}"
+                log_info "CF bouncer version pinned: ${CF_BOUNCER_VERSION}"
+            else
+                _gh_api="https://api.github.com/repos/crowdsecurity/cs-cloudflare-bouncer/releases/latest"
+                log_info "CF bouncer version: resolving latest from GitHub"
+            fi
             _release_json="$(curl -fsSL "$_gh_api" 2>/dev/null)" || {
                 log_warn "Failed to query GitHub releases for cs-cloudflare-bouncer."
                 _release_json=""
@@ -311,10 +356,15 @@ else
         if [[ -n "$_arch" ]] && [[ ! -x "$_CF_BOUNCER_BIN" ]]; then
             if command -v go >/dev/null 2>&1; then
                 log_info "Attempting Go source build for crowdsec-cloudflare-bouncer..."
+                # Respect the version pin: use a specific tag when set and
+                # --use-latest is not active, otherwise fall back to @latest.
+                if [[ "$USE_LATEST" != "true" && -n "$CF_BOUNCER_VERSION" ]]; then
+                    _go_pkg_ref="github.com/crowdsecurity/cs-cloudflare-bouncer/cmd/crowdsec-cloudflare-bouncer@${CF_BOUNCER_VERSION}"
+                else
+                    _go_pkg_ref="github.com/crowdsecurity/cs-cloudflare-bouncer/cmd/crowdsec-cloudflare-bouncer@latest"
+                fi
                 _tmpgobin="$(mktemp -d -p /tmp cs-cf-go.XXXXXX)"
-                if GOBIN="$_tmpgobin" go install \
-                    github.com/crowdsecurity/cs-cloudflare-bouncer/cmd/crowdsec-cloudflare-bouncer@latest \
-                    2>/dev/null; then
+                if GOBIN="$_tmpgobin" go install "$_go_pkg_ref" 2>/dev/null; then
                     if [[ -x "$_tmpgobin/crowdsec-cloudflare-bouncer" ]]; then
                         install -m 755 -o root -g root \
                             "$_tmpgobin/crowdsec-cloudflare-bouncer" \

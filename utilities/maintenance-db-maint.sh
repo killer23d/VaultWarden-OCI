@@ -218,8 +218,8 @@ main() {
         exit 1
     fi
 
-    touch /tmp/.vw_maintenance.lock
-    register_cleanup rm -f /tmp/.vw_maintenance.lock
+    touch /run/lock/vaultwarden-maintenance.lock
+    register_cleanup rm -f /run/lock/vaultwarden-maintenance.lock
     _load_env
     run_deep_db_maintenance
     exit $?

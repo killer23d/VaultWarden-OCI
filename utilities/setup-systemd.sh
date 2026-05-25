@@ -225,7 +225,52 @@ _ensure_runtime_lock_files() {
     done
 }
 
-# In separate-volume mode every managed unit needs a ReadWritePaths drop-in
+# Services that run as the service user (not root). These get a User=/Group=
+# identity drop-in so that a non-ubuntu service account is honoured even
+# though the base unit files ship with User=ubuntu for documentation clarity.
+_IDENTITY_DROPIN_UNITS=(
+    vaultwarden-health.service
+    vaultwarden-db-backup.service
+    vaultwarden-full-backup.service
+    vaultwarden-dns-update.service
+)
+
+# _install_service_identity_dropin SERVICE_USER SERVICE_GROUP
+#
+# Writes a 20-identity.conf drop-in for every service that runs as the service
+# user, overriding the User= / Group= values baked into the base unit files.
+# This ensures that non-standard Ubuntu installs (or custom service accounts)
+# work correctly without editing the shipped unit files.
+#
+# Dry-run mode: logs what would be written without touching the filesystem.
+_install_service_identity_dropin() {
+    local service_user="$1" service_group="$2"
+    local unit dropin_dir dropin_file
+    log_info "Installing service identity drop-ins (User=${service_user} Group=${service_group}) ..."
+    for unit in "${_IDENTITY_DROPIN_UNITS[@]}"; do
+        dropin_dir="${UNIT_DEST_DIR}/${unit}.d"
+        dropin_file="${dropin_dir}/20-identity.conf"
+        if [[ "$DRY_RUN" == "true" ]]; then
+            log_info "[DRY RUN] Would write identity drop-in: $dropin_file"
+            continue
+        fi
+        mkdir -p "$dropin_dir" || { log_error "Cannot create drop-in dir: $dropin_dir"; return 1; }
+        cat > "$dropin_file" << DROPIN
+# Written by setup-systemd.sh install — do not edit by hand.
+# Regenerate: sudo utilities/setup-systemd.sh install
+#
+# Overrides User= / Group= so that a non-ubuntu service account is used when
+# the resolved service identity differs from the default in the base unit file.
+[Service]
+User=${service_user}
+Group=${service_group}
+DROPIN
+        chmod 644 "$dropin_file"
+        log_success "Installed identity drop-in: $dropin_file (${service_user}:${service_group})"
+    done
+}
+
+
 # so that ProtectSystem=strict allows writes to DATA_VOLUME_MOUNT. Without
 # this drop-in, any write to DATA_VOLUME_MOUNT (backup files, health cooldown
 # stamps, DB operations) is silently blocked by the kernel, causing runtime
@@ -615,6 +660,8 @@ install_units() {
     fi
 
     _ensure_runtime_lock_files "$service_user" "$service_group"
+
+    _install_service_identity_dropin "$service_user" "$service_group"
 
     _install_rwpaths_dropin
 

@@ -13,7 +13,8 @@ WorkingDirectory=/opt/vaultwarden-scripts
 # reports missing required values itself.
 EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
 # backup.sh owns the backup lock; skip this run if maintenance is active.
-ExecCondition=/bin/bash -c '! test -f /tmp/.vw_maintenance.lock'
+# Uses /run/lock (not /tmp) so the file is visible across PrivateTmp= namespaces.
+ExecCondition=/bin/bash -c '! test -f /run/lock/vaultwarden-maintenance.lock'
 # --email stays disabled until the admin configures alert delivery.
 ExecStart=/opt/vaultwarden-scripts/backup.sh run full --rclone --full-verification
 User=ubuntu

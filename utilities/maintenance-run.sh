@@ -114,8 +114,12 @@ main() {
     # cannot race with or modify the lock file before we own it.
     auto_fix_critical_permissions "$PROJECT_ROOT"
 
-    touch /tmp/.vw_maintenance.lock
-    register_cleanup rm -f /tmp/.vw_maintenance.lock
+    # Use /run/lock so the file is visible to all systemd units even those that
+    # have PrivateTmp=yes (each unit gets its own /tmp namespace, making
+    # /tmp-based lock files invisible across service boundaries).
+    local _MAINT_LOCK="/run/lock/vaultwarden-maintenance.lock"
+    touch "$_MAINT_LOCK"
+    register_cleanup rm -f "$_MAINT_LOCK"
     trap 'perform_cleanup' EXIT HUP INT TERM
 
     log_header "VaultWarden-OCI Maintenance Manager"

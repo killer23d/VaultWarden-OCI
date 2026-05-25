@@ -15,7 +15,8 @@ WorkingDirectory=/opt/vaultwarden-scripts
 # maintenance.sh reports missing required values itself.
 EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
 # Skip health checks during maintenance so the timer does not raise false failures.
-ExecCondition=/bin/bash -c '! test -f /tmp/.vw_maintenance.lock'
+# Uses /run/lock (not /tmp) so the file is visible across PrivateTmp= namespaces.
+ExecCondition=/bin/bash -c '! test -f /run/lock/vaultwarden-maintenance.lock'
 # Add --email only after alert delivery is configured.
 ExecStart=/opt/vaultwarden-scripts/maintenance.sh health --fix
 User=ubuntu

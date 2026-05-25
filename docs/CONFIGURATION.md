@@ -312,6 +312,12 @@ EVENTS_DAYS_RETAIN=365
 
 # Maintenance
 TRASH_AUTO_DELETE_DAYS=30
+# INCOMPLETE_2FA_TIME_LIMIT — VaultWarden-native setting (seconds).
+# How long a login session that has passed password authentication but has
+# NOT yet completed the 2FA step is kept alive before it is discarded.
+# The default of 3 (seconds) is intentionally short to close the window
+# between password verification and OTP entry. Raise it (e.g. to 10–30)
+# only if users are experiencing 2FA timeouts on slow connections.
 INCOMPLETE_2FA_TIME_LIMIT=3
 
 # Database
