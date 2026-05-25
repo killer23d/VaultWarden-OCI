@@ -35,6 +35,38 @@ _VW_CRYPTO_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -n "${VW_LOG_LIB_LOADED:-}" ]] || source "${_VW_CRYPTO_LIB_DIR}/log.sh"
 unset _VW_CRYPTO_LIB_DIR
 
+# resolve_age_key_path — single authoritative resolver for the age key path.
+# Priority:
+#   1. $AGE_KEY_FILE env var      (explicit override, highest priority)
+#   2. /etc/vaultwarden/age-key.txt  (runtime/production system path)
+#   3. ${PROJECT_ROOT:-$(pwd)}/secrets/keys/age-key.txt  (repo-local dev fallback)
+# Prints the resolved absolute path to stdout. Returns 1 on failure.
+resolve_age_key_path() {
+    local _p _abs
+    local _candidates=(
+        "${AGE_KEY_FILE:-}"
+        "/etc/vaultwarden/age-key.txt"
+        "${PROJECT_ROOT:-$(pwd)}/secrets/keys/age-key.txt"
+    )
+    for _p in "${_candidates[@]}"; do
+        [[ -z "$_p" ]] && continue
+        # Absolutify relative paths
+        if [[ "$_p" != /* ]]; then
+            _abs="${PROJECT_ROOT:-$(pwd)}/$_p"
+        else
+            _abs="$_p"
+        fi
+        if [[ -f "$_abs" && -r "$_abs" ]]; then
+            printf '%s' "$_abs"
+            return 0
+        fi
+    done
+    log_error "resolve_age_key_path: age key not found in any expected location."
+    log_error "  Searched: ${_candidates[*]}"
+    log_error "  Fix: set AGE_KEY_FILE or place key at /etc/vaultwarden/age-key.txt"
+    return 1
+}
+
 DEFAULT_AGE_KEY_FILE="secrets/keys/age-key.txt"
 readonly DEFAULT_AGE_KEY_FILE
 
@@ -126,7 +158,12 @@ is_sops_encrypted() {
 
 decrypt_sops_file() {
     local file="$1"
-    local age_key_file="${2:-$DEFAULT_AGE_KEY_FILE}"
+    local age_key_file
+    if [[ -n "${2:-}" ]]; then
+        age_key_file="$2"
+    else
+        age_key_file=$(resolve_age_key_path) || return 1
+    fi
 
     if [[ ! -f "$file" ]]; then
         log_error "SOPS file not found: $file"
@@ -174,7 +211,12 @@ decrypt_sops_file() {
 #      .sops.yaml location, return 1.
 encrypt_sops_file() {
     local file="$1"
-    local age_key_file="${2:-$DEFAULT_AGE_KEY_FILE}"
+    local age_key_file
+    if [[ -n "${2:-}" ]]; then
+        age_key_file="$2"
+    else
+        age_key_file=$(resolve_age_key_path) || return 1
+    fi
 
     if [[ ! -f "$file" ]]; then
         log_error "File to encrypt not found: $file"
@@ -378,7 +420,12 @@ get_age_public_key() {
 # Validates permissions (must be 600), AGE-SECRET-KEY-1 prefix, and
 # performs a full encrypt/decrypt round-trip to verify key material integrity.
 check_age_key() {
-    local age_key_file="${1:-$DEFAULT_AGE_KEY_FILE}"
+    local age_key_file
+    if [[ -n "${1:-}" ]]; then
+        age_key_file="$1"
+    else
+        age_key_file=$(resolve_age_key_path) || return 1
+    fi
 
     if [[ ! -f "$age_key_file" ]]; then
         log_error "Age key file not found: $age_key_file"
@@ -445,7 +492,12 @@ check_age_key() {
 }
 
 encrypt_data() {
-    local age_key_file="${1:-$DEFAULT_AGE_KEY_FILE}"
+    local age_key_file
+    if [[ -n "${1:-}" ]]; then
+        age_key_file="$1"
+    else
+        age_key_file=$(resolve_age_key_path) || return 1
+    fi
 
     if [[ ! -f "$age_key_file" ]]; then
         log_error "Age key file not found: $age_key_file"
@@ -471,7 +523,12 @@ encrypt_data() {
 }
 
 decrypt_data() {
-    local age_key_file="${1:-$DEFAULT_AGE_KEY_FILE}"
+    local age_key_file
+    if [[ -n "${1:-}" ]]; then
+        age_key_file="$1"
+    else
+        age_key_file=$(resolve_age_key_path) || return 1
+    fi
 
     if [[ ! -f "$age_key_file" ]]; then
         log_error "Age key file not found: $age_key_file"
@@ -863,10 +920,13 @@ validate_crypto_environment() {
         issues+=("openssl command not available")
     fi
 
-    if [[ -f "$DEFAULT_AGE_KEY_FILE" ]]; then
-        if ! check_age_key "$DEFAULT_AGE_KEY_FILE"; then
-            issues+=("Default Age key validation failed")
+    local _resolved_key
+    if _resolved_key=$(resolve_age_key_path 2>/dev/null); then
+        if ! check_age_key "$_resolved_key"; then
+            issues+=("Age key validation failed: $_resolved_key")
         fi
+    else
+        issues+=("Age key not found in any expected location (AGE_KEY_FILE, /etc/vaultwarden/, secrets/keys/)")
     fi
 
     if [[ ${#issues[@]} -gt 0 ]]; then
@@ -883,7 +943,8 @@ validate_crypto_environment() {
 
 
 simple_verify_age_key() {
-    local age_key="${SOPS_AGE_KEY_FILE:-secrets/keys/age-key.txt}"
+    local age_key
+    age_key=$(resolve_age_key_path) || return 1
 
     if [[ ! -f "$age_key" ]]; then
         log_error "Age key missing: $age_key"
@@ -958,7 +1019,8 @@ simple_verify_age_key() {
 }
 
 create_password_manager_escrow() {
-    local age_key="${SOPS_AGE_KEY_FILE:-secrets/keys/age-key.txt}"
+    local age_key
+    age_key=$(resolve_age_key_path) || return 1
     local output_file="$1"
 
     if [[ -z "$output_file" ]]; then
@@ -1062,7 +1124,12 @@ _html_escape() {
 }
 
 verify_key_replica() {
-    local primary_key="${1:-${SOPS_AGE_KEY_FILE:-secrets/keys/age-key.txt}}"
+    local primary_key
+    if [[ -n "${1:-}" ]]; then
+        primary_key="$1"
+    else
+        primary_key=$(resolve_age_key_path) || return 1
+    fi
     shift
     local replicas=("$@")
 
@@ -1140,7 +1207,12 @@ verify_key_replica() {
 # ---------------------------------------------------------------------------
 restore_key_from_replica() {
     local replica_key="$1"
-    local primary_key="${2:-${SOPS_AGE_KEY_FILE:-secrets/keys/age-key.txt}}"
+    local primary_key
+    if [[ -n "${2:-}" ]]; then
+        primary_key="$2"
+    else
+        primary_key=$(resolve_age_key_path) || return 1
+    fi
 
     if [[ -z "$replica_key" ]]; then
         log_error "restore_key_from_replica: replica key path required"
@@ -1193,7 +1265,8 @@ restore_key_from_replica() {
 # Feeds key via stdin to qrencode to prevent cmdline exposure.
 # ---------------------------------------------------------------------------
 create_printable_key_backup() {
-    local age_key="${SOPS_AGE_KEY_FILE:-secrets/keys/age-key.txt}"
+    local age_key
+    age_key=$(resolve_age_key_path) || return 1
     local real_user_home
     real_user_home=$(getent passwd "$(get_real_user)" 2>/dev/null | cut -d: -f6) || real_user_home="${HOME}"
     local output_pdf="${1:-${real_user_home}/vaultwarden-key-backup.pdf}"
@@ -1366,7 +1439,8 @@ _sops_yaml_age_recipients() {
 check_age_key_health() {
     simple_verify_age_key || return 1
 
-    local age_key="${SOPS_AGE_KEY_FILE:-secrets/keys/age-key.txt}"
+    local age_key
+    age_key=$(resolve_age_key_path) || return 1
     local sops_yaml="${SOPS_CONFIG_FILE:-.sops.yaml}"
 
     if [[ ! -f "$sops_yaml" ]]; then
@@ -1778,6 +1852,7 @@ secure_cleanup() {
 
 export -f _stat_octal_perms _stat_file_size
 export -f _derive_age_public_key
+export -f resolve_age_key_path
 export -f is_sops_encrypted decrypt_sops_file encrypt_sops_file
 export -f ensure_secret_dir generate_age_key get_age_public_key check_age_key encrypt_data decrypt_data
 export -f generate_secure_string generate_secure_password check_argon2_support generate_argon2_hash generate_bcrypt_hash
