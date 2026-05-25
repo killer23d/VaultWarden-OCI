@@ -563,8 +563,8 @@ key-health: ## Check age key health (permissions, decodability, SOPS_AGE_KEY_FIL
 	echo "$(CYAN)  Canonical production path:                /etc/vaultwarden/age-key.txt$(NC)"
 	@CONFIGURED_KEY=$$(grep '^SOPS_AGE_KEY_FILE=' .env 2>/dev/null | cut -d= -f2); \
 	CONFIGURED_KEY=$${CONFIGURED_KEY:-secrets/keys/age-key.txt}; \
-	bash -c "source lib/common.sh; init_common_lib startup.sh; \
-	         source lib/crypto.sh; \
+	bash -c "source lib/log.sh; source lib/config.sh; source lib/common.sh; init_common_lib startup.sh; \
+                 source lib/crypto.sh; \
 	         if check_age_key_health \"$$CONFIGURED_KEY\"; then \
 	           echo \"$(GREEN)  ✓ Age key is healthy$(NC)\"; \
 	         else \
@@ -696,11 +696,11 @@ key-backup: ## Backup age key to a secure offline location (interactive)
 key-escrow: ## Generate encrypted escrow package (requires GPG or another age key)
 	$(call require-root)
 	@echo "$(BLUE)Age Key Escrow$(NC)"
-	@bash -c "source lib/common.sh; init_common_lib startup.sh; \
-	          source lib/crypto.sh; \
-	          KEY_FILE=$$(grep '^SOPS_AGE_KEY_FILE=' .env 2>/dev/null | cut -d= -f2); \
-	          KEY_FILE=$${KEY_FILE:-secrets/keys/age-key.txt}; \
-	          create_key_escrow \"$$KEY_FILE\""
+	@bash -c "source lib/log.sh; source lib/config.sh; source lib/common.sh; init_common_lib startup.sh; \
+        	source lib/crypto.sh; \
+	        KEY_FILE=$$(grep '^SOPS_AGE_KEY_FILE=' .env 2>/dev/null | cut -d= -f2); \
+	        KEY_FILE=$${KEY_FILE:-secrets/keys/age-key.txt}; \
+	        create_key_escrow \"$$KEY_FILE\""
 
 key-rotate: ## Rotate age encryption key (re-encrypts all secrets)
 	$(call require-root)
@@ -721,9 +721,9 @@ key-rotate: ## Rotate age encryption key (re-encrypts all secrets)
 		echo "$(YELLOW)Key rotation cancelled.$(NC)"; \
 		exit 0; \
 	fi
-	@bash -c "source lib/common.sh; init_common_lib startup.sh; \
-	          source lib/secrets.sh; \
-	          rotate_age_key"
+	@bash -c "source lib/log.sh; source lib/config.sh; source lib/common.sh; init_common_lib startup.sh; \
+        	source lib/secrets.sh; \
+	    	rotate_age_key"
 
 # ===========================================================================
 ##@ Updates
