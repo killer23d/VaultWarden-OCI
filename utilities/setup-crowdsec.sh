@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# setup-crowdsec.sh — Installs and configures CrowdSec and its bouncers for VaultWarden-OCI.
+# utilities/setup-crowdsec.sh — Installs and configures CrowdSec and its bouncers for VaultWarden-OCI.
 
 set -euo pipefail
 

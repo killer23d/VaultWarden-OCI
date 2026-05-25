@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# maintenance-update-dns.sh — Updates the VaultWarden Cloudflare DNS record.
+# utilities/maintenance-update-dns.sh — Updates the VaultWarden Cloudflare DNS record.
 
 set -euo pipefail
 

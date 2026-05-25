@@ -194,12 +194,6 @@ draw_live_stats() {
     else
         ban_count="N/A (CrowdSec inactive)"
     fi
-    local cs_metrics_line
-    if systemctl is-active crowdsec >/dev/null 2>&1; then
-        cs_metrics_line="$(sudo cscli metrics 2>/dev/null | awk '/Processed in last 5 mins/ {print; found=1; exit} END {if(!found) print "(metrics available via sudo cscli metrics)"}')"
-    else
-        cs_metrics_line="(CrowdSec inactive)"
-    fi
 
     if [[ "${ban_count}" =~ ^[0-9]+$ ]]; then
         if (( ban_count == 0 )); then
@@ -213,7 +207,7 @@ draw_live_stats() {
     else
         echo -e " ${BLD}CrowdSec bans:${NC}  ${YLW}${ban_count}${NC}"
     fi
-    echo -e " ${BLD}CrowdSec metrics:${NC}  ${cs_metrics_line}"
+    echo -e " ${BLD}CrowdSec metrics:${NC}  (open Security menu and select CrowdSec Metrics)"
 
     # --- Last Backup ---
     local last_backup_str
@@ -382,6 +376,7 @@ draw_security_menu() {
     echo -e "  [ ${GRN}2${NC} ] Unban an IP"
     echo -e "  [ ${GRN}3${NC} ] View Security Report"
     echo -e "  [ ${GRN}4${NC} ] Tail CrowdSec Logs"
+    echo -e "  [ ${GRN}5${NC} ] CrowdSec Metrics"
     draw_divider
     echo -e "  [ ${GRN}b${NC} ] Back to Main Menu"
     echo ""
@@ -427,6 +422,9 @@ handle_security_menu() {
             ;;
         4)
             run_cmd "make logs-crowdsec" make -C "${REPO_ROOT}" logs-crowdsec
+            ;;
+        5)
+            run_sudo_cmd "sudo cscli metrics" cscli metrics
             ;;
         b) ACTIVE_MENU="main" ;;
         *)

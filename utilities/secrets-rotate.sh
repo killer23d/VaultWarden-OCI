@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# secrets-rotate.sh — Rotates a VaultWarden credential and resyncs dependent secret files.
+# utilities/secrets-rotate.sh — Rotates a VaultWarden credential and resyncs dependent secret files.
 
 HISTFILE=/dev/null
 set -euo pipefail

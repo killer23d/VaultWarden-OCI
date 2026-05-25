@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# setup-systemd.sh — Installs and validates VaultWarden-OCI systemd timers.
+# utilities/setup-systemd.sh — Installs and validates VaultWarden-OCI systemd timers.
 
 set -euo pipefail
 

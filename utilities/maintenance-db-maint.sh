@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# maintenance-db-maint.sh — Runs deep offline VaultWarden database maintenance.
+# utilities/maintenance-db-maint.sh — Runs deep offline VaultWarden database maintenance.
 
 set -euo pipefail
 

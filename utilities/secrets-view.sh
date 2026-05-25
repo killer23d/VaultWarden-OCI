@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# secrets-view.sh — Views decrypted VaultWarden secrets in read-only mode.
+# utilities/secrets-view.sh — Views decrypted VaultWarden secrets in read-only mode.
 
 HISTFILE=/dev/null
 set -euo pipefail

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# secrets-edit.sh — Interactively edits VaultWarden encrypted secrets.
+# utilities/secrets-edit.sh — Interactively edits VaultWarden encrypted secrets.
 
 HISTFILE=/dev/null
 set -euo pipefail

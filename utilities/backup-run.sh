@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# backup-run.sh — Creates, verifies, and optionally syncs VaultWarden backups.
+# utilities/backup-run.sh — Creates, verifies, and optionally syncs VaultWarden backups.
 
 set -euo pipefail
 

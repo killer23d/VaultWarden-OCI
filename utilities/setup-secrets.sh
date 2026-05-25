@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# setup-secrets.sh — Manages VaultWarden-OCI secrets.
+# utilities/setup-secrets.sh — Manages VaultWarden-OCI secrets.
 
 set -euo pipefail
 

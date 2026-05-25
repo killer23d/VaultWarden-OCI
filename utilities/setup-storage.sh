@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# setup-storage.sh — Configures and migrates VaultWarden-OCI storage.
+# utilities/setup-storage.sh — Configures and migrates VaultWarden-OCI storage.
 
 set -euo pipefail
 

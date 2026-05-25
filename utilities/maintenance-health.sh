@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# maintenance-health.sh — Runs VaultWarden health checks and diagnostics.
+# utilities/maintenance-health.sh — Runs VaultWarden health checks and diagnostics.
 
 set -euo pipefail
 

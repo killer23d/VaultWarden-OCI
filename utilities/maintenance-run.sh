@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# maintenance-run.sh — Runs routine VaultWarden maintenance tasks.
+# utilities/maintenance-run.sh — Runs routine VaultWarden maintenance tasks.
 
 set -euo pipefail
 

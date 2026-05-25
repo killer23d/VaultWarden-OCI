@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# secrets-list.sh — Lists VaultWarden secret key names without showing secret values.
+# utilities/secrets-list.sh — Lists VaultWarden secret key names without showing secret values.
 
 HISTFILE=/dev/null
 set -euo pipefail

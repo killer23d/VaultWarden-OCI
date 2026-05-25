@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# maintenance-update.sh — Updates VaultWarden system packages and Docker images.
+# utilities/maintenance-update.sh — Updates VaultWarden system packages and Docker images.
 
 set -euo pipefail
 

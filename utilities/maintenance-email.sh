@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# maintenance-email.sh — Runs VaultWarden email diagnostics.
+# utilities/maintenance-email.sh — Runs VaultWarden email diagnostics.
 
 set -euo pipefail
 
