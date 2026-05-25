@@ -732,7 +732,7 @@ key-rotate: ## Rotate age encryption key (re-encrypts all secrets)
 update: ## Update all container images and restart
 	$(call require-root)
 	@echo "$(BLUE)Updating VaultWarden-OCI...$(NC)"
-	@./maintenance.sh update
+	@./maintenance.sh update --all
 
 check-updates: ## Check for available container image updates (no restart)
 	$(call check-docker)
