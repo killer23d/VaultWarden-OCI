@@ -97,7 +97,6 @@ sudo ./setup.sh systemd install
 | :-- | :-- |
 | `--auto` | Non-interactive — auto-generate required secrets; set `CHANGE_ME` for optional fields |
 | `--quiet-summary` | Suppress verbose output (used internally by `setup.sh install --auto`) |
-| `--hash-only` | Generate and print a bcrypt hash for the supplied password without modifying secrets |
 | `--dry-run` | Show what would be generated without writing secrets |
 
 ```bash
@@ -106,9 +105,6 @@ sudo ./setup.sh systemd install
 
 # Non-interactive — same as what setup.sh install --auto calls internally
 ./setup.sh secrets --auto
-
-# Generate a bcrypt hash for manual insertion
-./setup.sh secrets --hash-only
 
 # Confirm the result
 ./utilities/secrets-view.sh
@@ -146,10 +142,11 @@ sudo ./setup.sh systemd install
 
 | Option | Description |
 | :-- | :-- |
-| `--force` | Force restart (preferred flag) — stops containers then restarts |
-| `--force-restart` | Legacy alias for `--force` (kept for compatibility) |
+| `--force` | Force restart — stops containers then restarts |
 | `--skip-health` | Skip post-startup health check |
+| `--skip-pull` | Skip `docker compose pull` (fast path for systemd restarts) |
 | `--background` | Start in daemon mode |
+| `--skip-egress-fix` | Skip automatic egress NAT remediation |
 | `--dry-run` | Preview operations without executing |
 
 **Makefile shortcuts:**
@@ -395,14 +392,18 @@ make test-secrets    # runs list internally
 
 | Option | Description |
 | :-- | :-- |
-| `--system` | Also update system packages (apt) and Docker engine |
+| `--images` | Update Docker images only |
+| `--system` | Update system packages (apt) and Docker engine only |
+| `--all` | Update system packages + Docker images |
+| `--force` | Force update even if images are already up to date |
+| `--skip-backup` | Skip pre-update emergency backup |
 | `--email` | Send email notification on completion |
-| `--no-backup` | Skip pre-update emergency backup |
 | `--dry-run` | Preview operations |
 
 ```bash
-./maintenance.sh update
-./maintenance.sh update --system --email
+./maintenance.sh update --images          # Docker images only
+./maintenance.sh update --system          # System packages only
+./maintenance.sh update --all --email     # Full update with email notification
 
 make update           # Containers only
 make update-system    # Containers + system packages (apt upgrade + Docker engine)
@@ -469,9 +470,12 @@ make update-system    # Containers + system packages (apt upgrade + Docker engin
 
 | Option | Description |
 | :-- | :-- |
-| `--system` | Also update system packages (apt) and Docker engine |
+| `--images` | Update Docker images only |
+| `--system` | Update system packages (apt) and Docker engine only |
+| `--all` | Update system packages + Docker images |
+| `--force` | Force update even if images are already up to date |
+| `--skip-backup` | Skip pre-update emergency backup |
 | `--email` | Send email notification on completion |
-| `--no-backup` | Skip pre-update emergency backup |
 | `--dry-run` | Preview operations |
 
 ```bash
@@ -575,7 +579,7 @@ sudo ./setup.sh systemd <install|remove|validate|status> [--dry-run]
 | :-- | :-- | :-- |
 | Daily 02:05 + 0–30 s jitter | `vaultwarden-maintenance` | `maintenance.sh run --comprehensive --email` |
 | Daily 04:00 + 0–60 s jitter | `vaultwarden-db-backup` | `backup.sh run db --rclone --full-verification` |
-| Every 30 min | `vaultwarden-health` | `maintenance.sh health --fix` |
+| Every 5 min | `vaultwarden-health` | `maintenance.sh health --fix` |
 | Saturday 4 AM | `vaultwarden-firewall-update` | `maintenance.sh update-firewall` |
 | Sunday 03:00 + 0–300 s jitter | `vaultwarden-full-backup` | `backup.sh run full --rclone --full-verification` |
 | Every hour | `vaultwarden-dns-update` | `maintenance.sh update-dns` |
@@ -984,6 +988,6 @@ automatically on any process exit, including SIGKILL and OOM kill.
 
 ### Operational Excellence
 1. **Install systemd timers** — `sudo ./setup.sh systemd install` for hands-off operation
-2. **Monitor regularly** — `make health` or rely on the every-30-min timer check
+2. **Monitor regularly** — `make health` or rely on the every-5-min timer check
 3. **Test backups** — periodically run `./restore.sh interactive` to verify recoverability
 4. **Validate after updates** — `sudo ./setup.sh systemd validate` detects split-brain between `/opt/` and the repo

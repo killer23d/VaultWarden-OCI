@@ -328,7 +328,7 @@ make update-system
 ```bash
 # .env (set by setup.sh install --auto)
 VAULTWARDEN_VERSION=1.35.4
-CADDY_VERSION=2.11.1
+CADDY_VERSION=2.11.2
 POSTFIX_VERSION=4.3.0
 ```
 
@@ -531,7 +531,7 @@ make install-systemd
 | :-- | :-- |
 | Daily 02:05 (+ 0–30 s jitter) | Comprehensive maintenance |
 | Daily 04:00 (+ 0–60 s jitter) | Database backup with full verification + rclone sync |
-| Every 30 minutes | Health check with auto-recovery + email on failure |
+| Every 5 minutes | Health check with auto-recovery + email on failure |
 | Saturday 4 AM | Cloudflare firewall IP range update |
 | Sunday 3 AM (+ 0–300 s jitter) | Weekly full backup with comprehensive verification + rclone sync |
 | Every hour | DNS A record update via `maintenance.sh update-dns` |

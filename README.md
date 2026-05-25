@@ -166,11 +166,11 @@ The installed systemd timer schedule:
 | `vaultwarden-maintenance.timer` | 2:05 AM daily | `flock` — skips + logs if already running |
 | `vaultwarden-full-backup.timer` | 3 AM Sunday | Internal lock in `backup.sh`; email on failure via `OnFailure=` |
 | `vaultwarden-db-backup.timer` | 4 AM daily | Internal lock in `backup.sh`; email on failure via `OnFailure=` |
-| `vaultwarden-health.timer` | Every 30 min | `maintenance.sh health --fix`; self-heals, failures notify via `OnFailure=` |
+| `vaultwarden-health.timer` | Every 5 min | `maintenance.sh health --fix`; self-heals, failures notify via `OnFailure=` |
 | `vaultwarden-dns-update.timer` | Every hour | `flock` — skips + logs if already running |
 | `vaultwarden-firewall-update.timer` | Saturday 4 AM | `flock` — skips + logs if already running |
 
-> **Note on timer persistence:** All timers are installed with `Persistent=true`. If the system reboots while a timer was due to fire, systemd will run the missed job once on next boot — no manual intervention required. This replaces the flock lock-directory recreation step that cron required.
+> **Note on timer persistence:** The health, DNS, firewall-update, and DB-backup timers are installed with `Persistent=true` — if the system reboots while one was due to fire, systemd will run the missed job once on next boot. The full-backup and maintenance timers use `Persistent=false` to avoid a catch-up I/O storm after extended downtime. This replaces the flock lock-directory recreation step that cron required.
 
 > **Runtime user model:** Backup, health, and DNS automation run as the service user (`ubuntu` by default). Root execution is reserved for explicitly privileged jobs (for example firewall rule updates).
 

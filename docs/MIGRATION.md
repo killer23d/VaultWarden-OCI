@@ -304,8 +304,8 @@ cd /path/to/VaultWarden-OCI
 ### Security Hardening After Migration
 
 ```bash
-# Regenerate bcrypt hash for admin basic auth using the built-in tool
-./setup.sh secrets --hash-only
+# Rotate the bcrypt hash for admin basic auth
+./utilities/secrets-rotate.sh admin_basic_auth_hash
 
 # Update secrets
 ./utilities/secrets-edit.sh
