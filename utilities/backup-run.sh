@@ -980,25 +980,7 @@ main() {
     LOCK_FILE="/run/lock/vaultwarden-backup.lock"
 
     if [[ "$FORCE" != "true" && "$DRY_RUN" != "true" ]]; then
-        local _lock_user _lock_group _lock_owner
-        _lock_user=$(id -un)
-        _lock_group=$(id -gn)
-        if [[ -f "$LOCK_FILE" ]]; then
-            _lock_owner=$(stat -c '%U' "$LOCK_FILE" 2>/dev/null || echo "")
-            if [[ -n "$_lock_owner" && "$_lock_owner" != "$_lock_user" ]]; then
-                chown "${_lock_user}:${_lock_group}" "$LOCK_FILE" 2>/dev/null || true
-                sudo chown "${_lock_user}:${_lock_group}" "$LOCK_FILE" 2>/dev/null || true
-            fi
-        else
-            install -m 0660 /dev/null "$LOCK_FILE" 2>/dev/null || true
-            chown "${_lock_user}:${_lock_group}" "$LOCK_FILE" 2>/dev/null || true
-        fi
-        chmod 0660 "$LOCK_FILE" 2>/dev/null || true
-        if [[ ! -w "$LOCK_FILE" ]]; then
-            log_error "Cannot write lock file: $LOCK_FILE"
-            log_error "Fix once with: sudo chown ${_lock_user}:${_lock_group} $LOCK_FILE && sudo chmod 0660 $LOCK_FILE"
-            exit 1
-        fi
+        install -m 0660 -o root -g root /dev/null "$LOCK_FILE"
 
         exec {LOCK_FD}>"$LOCK_FILE"
         if ! flock -n "$LOCK_FD"; then

@@ -80,25 +80,7 @@ update_dns_record() {
 
     local DNS_LOCK="/run/lock/vaultwarden-dns-update.lock"
     local _DNS_LOCK_FD=""
-    local _lock_user _lock_group _lock_owner
-    _lock_user=$(id -un)
-    _lock_group=$(id -gn)
-    if [[ -f "$DNS_LOCK" ]]; then
-        _lock_owner=$(stat -c '%U' "$DNS_LOCK" 2>/dev/null || echo "")
-        if [[ -n "$_lock_owner" && "$_lock_owner" != "$_lock_user" ]]; then
-            chown "${_lock_user}:${_lock_group}" "$DNS_LOCK" 2>/dev/null || true
-            sudo chown "${_lock_user}:${_lock_group}" "$DNS_LOCK" 2>/dev/null || true
-        fi
-    else
-        install -m 0660 /dev/null "$DNS_LOCK" 2>/dev/null || true
-        chown "${_lock_user}:${_lock_group}" "$DNS_LOCK" 2>/dev/null || true
-    fi
-    chmod 0660 "$DNS_LOCK" 2>/dev/null || true
-    if [[ ! -w "$DNS_LOCK" ]]; then
-        log_error "Cannot write DNS run-lock: $DNS_LOCK"
-        log_error "Fix once with: sudo chown ${_lock_user}:${_lock_group} $DNS_LOCK && sudo chmod 0660 $DNS_LOCK"
-        return 1
-    fi
+    install -m 0660 -o root -g root /dev/null "$DNS_LOCK"
     exec {_DNS_LOCK_FD}>"$DNS_LOCK" 2>/dev/null || {
         log_error "Cannot open DNS run-lock: ${DNS_LOCK}"
         return 1

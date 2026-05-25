@@ -194,6 +194,13 @@ draw_live_stats() {
     else
         ban_count="N/A (CrowdSec inactive)"
     fi
+    local cs_metrics_line
+    if systemctl is-active crowdsec >/dev/null 2>&1; then
+        cs_metrics_line="$(sudo cscli metrics 2>/dev/null | awk '/Processed in last 5 mins/ {print; found=1; exit} END {if(!found) print "(metrics available via sudo cscli metrics)"}')"
+    else
+        cs_metrics_line="(CrowdSec inactive)"
+    fi
+
     if [[ "${ban_count}" =~ ^[0-9]+$ ]]; then
         if (( ban_count == 0 )); then
             ban_color="${GRN}"
@@ -206,6 +213,7 @@ draw_live_stats() {
     else
         echo -e " ${BLD}CrowdSec bans:${NC}  ${YLW}${ban_count}${NC}"
     fi
+    echo -e " ${BLD}CrowdSec metrics:${NC}  ${cs_metrics_line}"
 
     # --- Last Backup ---
     local last_backup_str
