@@ -21,9 +21,7 @@ _VW_MAINT_UTILS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -n "${VW_LOG_LIB_LOADED:-}" ]] || source "${_VW_MAINT_UTILS_LIB_DIR}/log.sh"
 unset _VW_MAINT_UTILS_LIB_DIR
 
-# ---------------------------------------------------------------------------
-# _default_backup_dir / _default_alert_state_dir / _default_report_dir
-# ---------------------------------------------------------------------------
+
 _default_backup_dir()      { vw_default_backup_dir; }
 _default_alert_state_dir() {
     local state_dir
@@ -36,13 +34,9 @@ _default_report_dir() {
     printf '%s/reports' "$state_dir"
 }
 
-# ---------------------------------------------------------------------------
-# _wait_wal_quiesce DB_FILE [MAX_SECONDS]
-#
 # Poll until SQLite's WAL busy_count reaches 0, indicating no writer holds
 # a WAL frame lock and it is safe to run wal_checkpoint(TRUNCATE)/VACUUM.
 # Falls back to a plain sleep if sqlite3 is unavailable.
-# ---------------------------------------------------------------------------
 _wait_wal_quiesce() {
     local db_file="$1"
     local max_seconds="${2:-30}"
@@ -64,9 +58,7 @@ _wait_wal_quiesce() {
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# cleanup_logs — Log rotation and removal of old log files
-# ---------------------------------------------------------------------------
+
 cleanup_logs() {
     if [[ "${CLEAN_LOGS:-true}" != "true" ]]; then log_info "Skipping log cleanup"; return 0; fi
     if [[ "${DRY_RUN:-false}" == "true" ]]; then
@@ -128,9 +120,7 @@ cleanup_logs() {
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# cleanup_backups — Backup retention management
-# ---------------------------------------------------------------------------
+
 cleanup_backups() {
     if [[ "${CLEAN_BACKUPS:-true}" != "true" ]]; then log_info "Skipping backup cleanup"; return 0; fi
     if [[ "${DRY_RUN:-false}" == "true" ]]; then log_info "[DRY RUN] Would clean up old backups based on retention policy"; return 0; fi
@@ -161,9 +151,7 @@ cleanup_backups() {
     [[ "$had_real_error" == "true" ]] && return 1 || return 0
 }
 
-# ---------------------------------------------------------------------------
-# cleanup_docker_system — Docker resource cleanup
-# ---------------------------------------------------------------------------
+
 cleanup_docker_system() {
     if [[ "${CLEAN_DOCKER:-true}" != "true" ]]; then log_info "Skipping Docker cleanup"; return 0; fi
     if [[ "${DRY_RUN:-false}" == "true" ]]; then log_info "[DRY RUN] Would clean up Docker system resources"; return 0; fi
@@ -185,9 +173,7 @@ cleanup_docker_system() {
     fi
 }
 
-# ---------------------------------------------------------------------------
-# optimize_database — Scheduled lightweight database optimization
-# ---------------------------------------------------------------------------
+
 optimize_database() {
     if [[ "${OPTIMIZE_DATABASE:-true}" != "true" ]]; then log_info "Skipping database optimization"; return 0; fi
     if [[ "${DRY_RUN:-false}" == "true" ]]; then log_info "[DRY RUN] Would safely optimize VaultWarden database"; return 0; fi
@@ -275,9 +261,7 @@ optimize_database() {
     [[ "$optimization_success" == "true" ]]
 }
 
-# ---------------------------------------------------------------------------
-# validate_system_health — Post-maintenance health gate
-# ---------------------------------------------------------------------------
+
 validate_system_health() {
     if [[ "${DRY_RUN:-false}" == "true" ]]; then log_info "[DRY RUN] Would validate system health"; return 0; fi
     log_info "Validating system health after maintenance..."
@@ -291,9 +275,7 @@ validate_system_health() {
     fi
 }
 
-# ---------------------------------------------------------------------------
-# generate_maintenance_summary — Print + optionally email a run summary
-# ---------------------------------------------------------------------------
+
 generate_maintenance_summary() {
     local log_cleanup="$1" backup_cleanup="$2" docker_cleanup="$3"
     local db_optimization="$4" firewall_update="$5" dns_update="$6" health_validation="$7"
@@ -369,9 +351,7 @@ generate_maintenance_summary() {
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# verbose_log — emit only when VERBOSE=true (used by test-email subcommand)
-# ---------------------------------------------------------------------------
+
 verbose_log() {
     [[ "${VERBOSE:-false}" == "true" ]] && log_info "$1"
 }

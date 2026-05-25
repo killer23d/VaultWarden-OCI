@@ -88,7 +88,6 @@ _email_driver_lookup() {
             printf '%s' "$provider"
             return 0
             ;;
-        # host/postfix driver for EMAIL_MODE=host (postfix sidecar)
         host|postfix)
             printf '%s' "postfix"
             return 0
@@ -698,7 +697,6 @@ send_email() {
     local api_token=""
     local api_driver_fn=""
 
-    # Stage 1: HTTP API
     if [[ "$mode" == "auto" || "$mode" == "api" ]]; then
         local driver_suffix
         if ! driver_suffix=$(_email_driver_lookup "$provider" 2>/dev/null); then
@@ -739,7 +737,6 @@ send_email() {
         fi
     fi
 
-    # Stage 2: SMTP relay (Postfix sidecar or direct relay)
     if [[ "$mode" == "auto" || "$mode" == "smtp" ]]; then
         local smtp_method smtp_body
         smtp_method="$(_resolve_smtp_method)"
@@ -760,7 +757,6 @@ send_email() {
     fi
 
     local host_mta_failed=false
-    # Stage 3: Host MTA
     if [[ "$mode" == "auto" || "$mode" == "host" ]]; then
         local host_body
         host_body="$(_build_email_metadata_body \
@@ -783,7 +779,6 @@ send_email() {
         fi
     fi
 
-    # Stage 4 (auto): Emergency direct API bypass
     if [[ "$mode" == "auto" && "$host_mta_failed" == "true" && -n "$api_token" && -n "$api_driver_fn" ]]; then
         log_error "SMTP/host MTA delivery unavailable — attempting emergency API bypass (${provider})"
 

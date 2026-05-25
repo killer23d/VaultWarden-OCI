@@ -115,9 +115,7 @@ create_backup() {
     return 0
 }
 
-# ---------------------------------------------------------------------------
 # _check_editor_forks — warn when the selected editor is known to fork
-# ---------------------------------------------------------------------------
 _check_editor_forks() {
     local _editor_str="${EDITOR_CMD[*]}"
     case "$_editor_str" in
@@ -145,11 +143,7 @@ _check_editor_forks() {
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# _validate_editor_saved TEMP_FILE BEFORE_CHECKSUM
-#
 # Prints the post-edit checksum to stdout on success, exits non-zero on error.
-# ---------------------------------------------------------------------------
 _validate_editor_saved() {
     local temp_file="$1"
     local before_checksum="$2"
@@ -168,9 +162,7 @@ _validate_editor_saved() {
     return 0
 }
 
-# ---------------------------------------------------------------------------
 # do_edit — interactive edit with YAML validation and atomic re-encrypt
-# ---------------------------------------------------------------------------
 do_edit() {
     local _depth="${1:-0}"
     if (( _depth > MAX_EDIT_ATTEMPTS )); then

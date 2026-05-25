@@ -2,7 +2,6 @@
 # lib/crypto.sh - Cryptographic operations library for VaultWarden-OCI-NG
 # All functions use 'return' with exit codes, never 'exit'
 
-# Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_CRYPTO_LIB_LOADED:-}" ]] && return 0
 readonly VAULTWARDEN_CRYPTO_LIB_LOADED=1
 
@@ -31,7 +30,6 @@ readonly SECURITY_LOCKOUT_DURATION=300  # 5 minutes
 # We detect which is present at call time rather than relying on a global flag.
 # ---------------------------------------------------------------------------
 _stat_octal_perms() {
-    # Returns the octal permission string (e.g. "600") for the given path.
     local path="$1"
     if stat --version >/dev/null 2>&1; then
         stat -c '%a' "$path" 2>/dev/null   # GNU coreutils (Linux)
@@ -41,7 +39,6 @@ _stat_octal_perms() {
 }
 
 _stat_file_size() {
-    # Returns the size in bytes of the given regular file.
     local path="$1"
     if stat --version >/dev/null 2>&1; then
         stat -c '%s' "$path" 2>/dev/null   # GNU
@@ -68,13 +65,6 @@ _stat_group() {
     fi
 }
 
-# ---------------------------------------------------------------------------
-# _derive_age_public_key  KEY_FILE
-#
-# Extract the bare age1... public key from an age private key file.
-# grep for the canonical comment prefix '^# public key:' then strip the
-# prefix with sed so only the bare age1... key is returned.
-# ---------------------------------------------------------------------------
 _derive_age_public_key() {
     local key_file="$1"
 
@@ -116,7 +106,6 @@ is_sops_encrypted() {
         grep -q '^sops:' "$file" && grep -q '^\s*mac:' "$file"
 }
 
-# Decrypt SOPS file to stdout
 decrypt_sops_file() {
     local file="$1"
     local age_key_file="${2:-$DEFAULT_AGE_KEY_FILE}"
@@ -833,12 +822,6 @@ verify_file_integrity() {
 }
 
 
-#
-# Delegates to _secure_remove_file() which implements the canonical
-# shred → dd → rm fallback chain. Exports this as the public API for
-# callers outside crypto.sh.
-#   _secure_remove_file() — private, used by internal cleanup traps
-#   secure_delete()       — public, exported for use by other scripts
 secure_delete() {
     local file="$1"
 
@@ -893,12 +876,6 @@ validate_crypto_environment() {
 }
 
 
-# ---------------------------------------------------------------------------
-# simple_verify_age_key
-#
-# Verifies age key existence, permissions (auto-corrects if needed),
-# and performs a full encrypt/decrypt roundtrip.
-# ---------------------------------------------------------------------------
 simple_verify_age_key() {
     local age_key="${SOPS_AGE_KEY_FILE:-secrets/keys/age-key.txt}"
 
@@ -1078,13 +1055,6 @@ _html_escape() {
     printf '%s' "$raw"
 }
 
-# ---------------------------------------------------------------------------
-# verify_key_replica [PRIMARY_KEY] [REPLICA_KEY...]
-#
-# Compares replicas by SHA-256 hash AND performs a functional age
-# encrypt/decrypt roundtrip against each replica key file to verify
-# operational validity. An empty replica list returns 1.
-# ---------------------------------------------------------------------------
 verify_key_replica() {
     local primary_key="${1:-${SOPS_AGE_KEY_FILE:-secrets/keys/age-key.txt}}"
     shift
@@ -1369,12 +1339,6 @@ EOF
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# _sops_yaml_age_recipients [SOPS_YAML]
-#
-# Extract all age: recipient public keys from the given .sops.yaml file.
-# Prints one key per line. Returns 1 if no age recipients found.
-# ---------------------------------------------------------------------------
 _sops_yaml_age_recipients() {
     local sops_yaml="${1:-.sops.yaml}"
     [[ -f "$sops_yaml" ]] || return 1
@@ -1436,11 +1400,6 @@ check_age_key_health() {
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# validate_file_permissions FILE EXPECTED_PERMS [OWNER] [GROUP]
-#
-# Validates permissions (and optionally owner/group) of a file or directory.
-# ---------------------------------------------------------------------------
 validate_file_permissions() {
     local file_path="$1"
     local expected_perms="$2"
@@ -1623,9 +1582,6 @@ create_secure_file() {
     fi
 }
 
-# ---------------------------------------------------------------------------
-# validate_password_strength PASSWORD [MIN_LENGTH]
-# ---------------------------------------------------------------------------
 validate_password_strength() {
     local password="$1"
     local min_length="${2:-$SECURITY_MIN_PASSWORD_LENGTH}"

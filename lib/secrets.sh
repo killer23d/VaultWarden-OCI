@@ -925,7 +925,6 @@ TO RESTORE THIS SERVER ON NEW HARDWARE:
    [ ] Clone the repository:
 EOF
     printf '       git clone %s\n' "$repo_clone_url" >> "$output_file"
-    # repo_basename: strip trailing .git if present
     local repo_basename
     repo_basename=$(basename "$repo_clone_url" .git)
     {
@@ -1088,14 +1087,6 @@ offer_recovery_kit_export() {
     fi
 }
 
-# ---------------------------------------------------------------------------
-# _read_dotenv_value KEY [FILE]
-#
-# Read a single KEY from .env (or FILE) without sourcing the whole file.
-# Returns the value to stdout, or an empty string if the key is not found.
-# Requires at least one whitespace character before # to distinguish inline
-# comments from embedded # in values (e.g. p@ss#1).
-# ---------------------------------------------------------------------------
 _read_dotenv_value() {
     local key="$1"
     local file="${2:-.env}"
@@ -1175,26 +1166,11 @@ if bad:
 PYEOF
 }
 
-# ---------------------------------------------------------------------------
-# _validate_yaml_no_duplicates FILE
-#
-# Uses _run_yaml_nodupcheck (validate mode) which raises ValueError on the
-# first duplicate mapping key found, matching SOPS's strict Go yaml.v3
-# behaviour. Returns 0 on valid YAML with no duplicates, 1 otherwise.
-# ---------------------------------------------------------------------------
 _validate_yaml_no_duplicates() {
     local yaml_file="$1"
     _run_yaml_nodupcheck "$yaml_file" validate
 }
 
-# ---------------------------------------------------------------------------
-# _validate_no_placeholders FILE
-#
-# Scans a decrypted YAML file for any values that start with PLACEHOLDER_
-# or equal PLACEHOLDER_NOT_CONFIGURED. Returns 1 (with a list of offending
-# keys) if any are found. Uses _run_yaml_nodupcheck (placeholders mode) so
-# a file with a duplicate key cannot silently pass the placeholder check.
-# ---------------------------------------------------------------------------
 _validate_no_placeholders() {
     local plain_yaml="$1"
 
@@ -1330,7 +1306,6 @@ export_docker_secrets() {
 
     while IFS='=' read -r _key _value; do
         [[ -z "$_key" ]] && continue
-        # Only distribute keys that are in the known list.
         local _known=false
         local _k
         for _k in "${_eds_keys[@]}"; do

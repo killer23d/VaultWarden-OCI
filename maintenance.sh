@@ -17,7 +17,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Zero arguments → show help
 if [[ $# -eq 0 ]]; then
     cat << 'EOF'
 VaultWarden-OCI Maintenance Script
@@ -66,7 +65,7 @@ case "$_TASK" in
         exec "$SCRIPT_DIR/utilities/maintenance-run.sh" "$@"
         ;;
     help|--help|-h)
-        exec "$0"  # re-invoke with no args to show help
+        exec "$0"
         ;;
     *)
         echo "ERROR: Unknown subcommand: '$_TASK'" >&2

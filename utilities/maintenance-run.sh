@@ -32,9 +32,7 @@ unset _MAINT_SCRIPT_DIR
 source "$PROJECT_ROOT/lib/storage.sh"
 source "$PROJECT_ROOT/lib/maintenance-utils.sh"
 
-# ---------------------------------------------------------------------------
 # Configuration defaults (mirrors maintenance.sh)
-# ---------------------------------------------------------------------------
 CLEAN_LOGS=true
 CLEAN_BACKUPS=true
 CLEAN_DOCKER=true
@@ -77,18 +75,14 @@ EXIT CODES:
 EOF
 }
 
-# ---------------------------------------------------------------------------
-# _load_env
-# ---------------------------------------------------------------------------
+
 _load_env() {
     if load_env_file 2>/dev/null; then return 0; fi
     log_warn "No .env file found — relying on environment already set (e.g. systemd EnvironmentFile)"
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# Argument parsing & main
-# ---------------------------------------------------------------------------
+
 [[ "${1:-}" == "run" ]] && shift
 
 while [[ $# -gt 0 ]]; do

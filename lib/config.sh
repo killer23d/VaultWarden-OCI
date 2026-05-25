@@ -173,8 +173,6 @@ require_config() {
     return 0
 }
 
-# _set_env_var KEY VALUE FILE
-# Add or replace a KEY=VALUE line in an env file.
 _set_env_var() {
     local key="$1" value="$2" file="$3"
     local escaped_key
@@ -190,8 +188,6 @@ _set_env_var() {
     fi
 }
 
-# _read_env_value KEY FILE
-# Read a KEY=VALUE from an env file, stripping surrounding quotes.
 _read_env_value() {
     local key="$1" file="$2"
     [[ -f "$file" ]] || return 0

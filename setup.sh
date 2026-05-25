@@ -234,9 +234,7 @@ if [[ -z "$PHASE" ]] && { [[ -z "$DOMAIN" ]] || [[ -z "$ADMIN_EMAIL" ]]; }; then
 if [[ -z "$PHASE" ]] && ! validate_domain "$DOMAIN"; then log_error "Invalid domain format"; exit 1; fi
 if [[ -z "$PHASE" ]] && ! validate_email "$ADMIN_EMAIL"; then log_error "Invalid email format"; exit 1; fi
 
-# ---------------------------------------------------------------------------
-# show_post_install_summary
-# ---------------------------------------------------------------------------
+
 show_post_install_summary() {
     local mode="${1:-interactive}"
 
@@ -408,10 +406,7 @@ AGE_BANNER
     fi
 }
 
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
-# Verify all required utility scripts are present and executable.
-# ---------------------------------------------------------------------------
+
 _verify_required_utilities() {
     local utils=(
         "${SCRIPT_DIR}/utilities/setup-system.sh"
@@ -428,9 +423,7 @@ _verify_required_utilities() {
     done
 }
 
-# ---------------------------------------------------------------------------
-# main
-# ---------------------------------------------------------------------------
+
 main() {
     log_header "VaultWarden-OCI Setup - Security Hardened Edition"
 
@@ -475,7 +468,7 @@ main() {
         log_info "SOPS version: will resolve latest from GitHub at install time"
     fi
 
-    # ── Build common flag arrays ────────────────────────────────────────────
+
     local _dry=() _force=() _auto=() _skip_deps=() _use_latest=()
     [[ "$DRY_RUN"   == "true" ]] && _dry=(--dry-run)
     [[ "$FORCE"     == "true" ]] && _force=(--force)

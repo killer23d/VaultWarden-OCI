@@ -94,7 +94,7 @@ EXAMPLES:
 EOF
 }
 
-# Argument parsing — subcommand-first, then options.
+
 if [[ $# -gt 0 ]]; then
   case "$1" in
     stop)
@@ -104,7 +104,7 @@ if [[ $# -gt 0 ]]; then
       show_help; exit 0
       ;;
     --*)
-      # Falls through to the options while-loop below
+
       ;;
     *)
       log_error "Unknown subcommand: '$1'"
@@ -140,12 +140,8 @@ fi
 # provides the same CoW-filesystem-safe overwrite-before-unlink behaviour.
 
 
-# ---------------------------------------------------------------------------
-# warn_plaintext_secret_overrides
-#
 # Detects split-brain secret configuration where plaintext EMAIL_API_TOKEN or
 # SMTP_PASSWORD values in .env override SOPS-managed secrets. Emits warnings only.
-# ---------------------------------------------------------------------------
 warn_plaintext_secret_overrides() {
   local warned=false
 
@@ -164,15 +160,11 @@ warn_plaintext_secret_overrides() {
   fi
 }
 
-# ---------------------------------------------------------------------------
-# check_email_config_consistency
-#
 # Cross-checks EMAIL_MODE against the presence of the required secret so the
 # operator gets an actionable warning at startup rather than a silent failure
 # on first email send.
 #
 # This is a WARN, not an error — email is not required for the stack to start.
-# ---------------------------------------------------------------------------
 check_email_config_consistency() {
   local email_mode="${EMAIL_MODE:-auto}"
   local secrets_dir="$DOCKER_SECRETS_DIR"
@@ -283,9 +275,7 @@ validate_prerequisites() {
   return 0
 }
 
-# ---------------------------------------------------------------------------
-# prepare_directories
-# ---------------------------------------------------------------------------
+
 # Ensures all PROJECT_STATE_DIR subdirectories required by Docker bind mounts
 # exist on the host before `docker compose up`.  Uses absolute paths so that
 # separate-volume installs (PROJECT_STATE_DIR=/mnt/vw-data) create dirs on
@@ -293,7 +283,6 @@ validate_prerequisites() {
 #
 # prepare_log_directories() handles logs/ and backups/ with ownership logic;
 # this function covers the remaining non-log subtrees.
-# ---------------------------------------------------------------------------
 prepare_directories() {
   local project_state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
 
@@ -355,7 +344,7 @@ prepare_log_directories() {
     return 1
   fi
 
-  # Create backup directory
+
   local backup_dir
   backup_dir="$(get_config_value "BACKUP_DIR" "${project_state_dir}/backups")"
   if ! _maybe_sudo mkdir -p "$backup_dir" 2>/dev/null; then
@@ -364,7 +353,7 @@ prepare_log_directories() {
     log_info "Backup directory ready: $backup_dir"
   fi
 
-  # Ensure Caddy entrypoint is executable
+
   if [ -f "${PROJECT_ROOT}/caddy/entrypoint.sh" ]; then
     chmod +x "${PROJECT_ROOT}/caddy/entrypoint.sh" 2>/dev/null || true
     log_info "Ensured Caddy entrypoint is executable"
@@ -427,9 +416,6 @@ prepare_push_secret_placeholders() {
   fi
 }
 
-# ---------------------------------------------------------------------------
-# check_age_key_health_preflight
-#
 # Runs check_age_key_health() before any SOPS invocation so a corrupt,
 # missing, or wrong-permissions age key produces a clear actionable error
 # rather than an opaque decryption failure from SOPS.
@@ -438,7 +424,6 @@ prepare_push_secret_placeholders() {
 # present and healthy, the key path is overridden for this process only and
 # a prominent ACTION REQUIRED advisory is printed so the operator fixes
 # .env before the next restart.
-# ---------------------------------------------------------------------------
 check_age_key_health_preflight() {
   # Resolve the configured key path from .env (already sourced by load_environment)
   local configured_key="${SOPS_AGE_KEY_FILE:-}"
@@ -535,14 +520,10 @@ check_age_key_health_preflight() {
   return 1
 }
 
-# ---------------------------------------------------------------------------
-# prepare_docker_secrets
-#
 # Startup-specific wrapper: runs check_age_key_health_preflight() (which may
 # export SOPS_AGE_KEY_FILE for this process), then delegates all decryption,
 # per-key file writing, ENC[ sanity check, and cache cleanup to
 # lib/secrets.sh::export_docker_secrets().
-# ---------------------------------------------------------------------------
 prepare_docker_secrets() {
   log_info "Preparing Docker secrets from SOPS..."
   check_age_key_health_preflight || return 1
@@ -552,9 +533,7 @@ prepare_docker_secrets() {
 }
 
 
-# ---------------------------------------------------------------------------
-# cleanup_orphaned_resources
-# ---------------------------------------------------------------------------
+
 cleanup_orphaned_resources() {
   log_info "Cleaning up orphaned resources..."
 
@@ -572,16 +551,12 @@ cleanup_orphaned_resources() {
   return 0
 }
 
-# ---------------------------------------------------------------------------
-# _startup_pull_images
-#
 # Startup-specific wrapper: guarded by --skip-pull so systemd ExecStart
 # restarts are instant. Image refreshes go through maintenance.sh update or
 # a manual ./startup.sh without --skip-pull.
 #
 # Uses a direct `docker compose pull` (not lib/docker.sh's pull_images())
 # so pull output streams directly to the journal without buffering.
-# ---------------------------------------------------------------------------
 _startup_pull_images() {
   if [[ "$SKIP_PULL" == "true" ]]; then
     log_info "Skipping docker compose pull (--skip-pull)"
@@ -621,13 +596,9 @@ update_dns_on_startup() {
   return 0
 }
 
-# ---------------------------------------------------------------------------
-# _startup_start_services
-#
 # Startup-specific wrapper: honours FORCE_RESTART and DRY_RUN globals.
 # Passes --force-recreate when FORCE_RESTART=true so containers are
 # re-created even if the image digest has not changed.
-# ---------------------------------------------------------------------------
 _startup_start_services() {
   log_info "Starting VaultWarden services..."
 
@@ -647,13 +618,9 @@ _startup_start_services() {
   return 0
 }
 
-# ---------------------------------------------------------------------------
-# ensure_vaultwarden_egress_nat
-#
 # Admin-friendly, idempotent fallback for hardened VMs where Docker's normal
 # MASQUERADE behavior is missing/overridden. We only target non-internal
 # bridge networks attached to the vaultwarden container.
-# ---------------------------------------------------------------------------
 ensure_vaultwarden_egress_nat() {
   if [[ "$SKIP_EGRESS_FIX" == "true" ]]; then
     log_info "Skipping automatic egress NAT remediation (--skip-egress-fix)"
@@ -689,9 +656,7 @@ ensure_vaultwarden_egress_nat() {
   return 0
 }
 
-# ---------------------------------------------------------------------------
-# wait_for_services
-# ---------------------------------------------------------------------------
+
 wait_for_services() {
   log_info "Waiting for critical services to become ready..."
   local services=(vaultwarden caddy)
@@ -702,9 +667,7 @@ wait_for_services() {
   log_success "Critical services are ready"
 }
 
-# ---------------------------------------------------------------------------
-# run_health_check
-# ---------------------------------------------------------------------------
+
 run_health_check() {
   if [[ "$SKIP_HEALTH_CHECK" == "true" ]]; then
     log_info "Skipping post-start health check (--skip-health)"
@@ -746,17 +709,13 @@ run_health_check() {
   return 0
 }
 
-# ---------------------------------------------------------------------------
-# show_status
-# ---------------------------------------------------------------------------
+
 show_status() {
   log_info "Current service status:"
   docker compose ps || true
 }
 
-# ---------------------------------------------------------------------------
-# main
-# ---------------------------------------------------------------------------
+
 main() {
   log_info "Starting VaultWarden-OCI startup workflow..."
 

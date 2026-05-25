@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # Storage helpers for boot-volume and separate-volume installs.
-# Also owns ensure_caddy_log_permissions() for Caddy log ownership/mode enforcement.
 # Source after lib/common.sh in operational scripts so writes fail closed when
 # the configured data volume is missing.
 
@@ -10,6 +9,7 @@ readonly VAULTWARDEN_STORAGE_LIB_LOADED=1
 # Do NOT set -euo pipefail here — callers own their shell options.
 # Entry-point scripts apply these options via init_common_lib(); this library
 # is always sourced after that call.
+
 
 # Self-load log.sh if not already loaded — allows this lib to be sourced
 # directly without going through common.sh or a caller that pre-loads log.sh.
@@ -98,7 +98,6 @@ require_project_state_ready() {
     local data_device="${DATA_VOLUME_DEVICE:-}"
     local data_mount="${DATA_VOLUME_MOUNT:-/mnt/vw-data}"
 
-    # Boot-only mode
     if [[ -z "$data_device" ]]; then
         is_root || { log_error "require_project_state_ready: must be run as root"; return 1; }
         local _real_user
@@ -116,12 +115,8 @@ require_project_state_ready() {
         return 0
     fi
 
-    # Separate-volume mode
-
-    # 1. Path safety.
     _storage_validate_paths "$data_device" "$data_mount" || return 1
 
-    # 2. Configuration consistency: PROJECT_STATE_DIR must equal DATA_VOLUME_MOUNT.
     if [[ "$state_dir" != "$data_mount" ]]; then
         log_error "Storage configuration mismatch:"
         log_error "  PROJECT_STATE_DIR='$state_dir'"
@@ -131,14 +126,12 @@ require_project_state_ready() {
         return 1
     fi
 
-    # 3. DATA_VOLUME_DEVICE must be a block device.
     if [[ ! -b "$data_device" ]]; then
         log_error "DATA_VOLUME_DEVICE is not a block device: $data_device"
         log_error "Check .env or verify that the data disk is attached to this instance."
         return 1
     fi
 
-    # 4. DATA_VOLUME_MOUNT must currently be mounted.
     if ! mountpoint -q "$data_mount" 2>/dev/null; then
         log_error "Expected data volume is NOT mounted: $data_mount"
         log_error "Refusing to continue — writing VaultWarden data onto the boot volume"
@@ -149,7 +142,6 @@ require_project_state_ready() {
         return 1
     fi
 
-    # 5. Sentinel file confirms mount identity (written by setup_data_volume).
     if [[ ! -f "$data_mount/.vw-data-volume" ]]; then
         log_error "Data volume sentinel missing: $data_mount/.vw-data-volume"
         log_error "The filesystem at $data_mount cannot be positively identified"
@@ -215,7 +207,6 @@ setup_data_volume() {
         return 0
     fi
 
-    # 1. Path safety and block-device check.
     _storage_validate_paths "$device" "$mount_point" || return 1
 
     if [[ ! -b "$device" ]]; then
@@ -223,7 +214,6 @@ setup_data_volume() {
         return 1
     fi
 
-    # 2. Format only if blank (idempotent).
     local fs_type
     fs_type=$(blkid -o value -s TYPE "$device" 2>/dev/null || true)
 
@@ -272,7 +262,6 @@ setup_data_volume() {
         return 1
     fi
 
-    # 3. Create mount point (idempotent).
     [[ -d "$mount_point" ]] || mkdir -p "$mount_point" \
         || { log_error "Cannot create mount point: $mount_point"; return 1; }
     chmod 755 "$mount_point"
@@ -316,7 +305,6 @@ setup_data_volume() {
         log_info "fstab entry already present for UUID=$dev_uuid (idempotent)"
     fi
 
-    # 5. Mount (idempotent).
     if mountpoint -q "$mount_point" 2>/dev/null; then
         log_info "$mount_point already mounted (idempotent)"
     else
@@ -387,7 +375,6 @@ install_docker_mount_guard() {
             ;;
     esac
 
-    # Cleanup path (reverting to boot-only mode)
     if [[ -z "${DATA_VOLUME_DEVICE:-}" ]]; then
         if [[ -f "$drop_in_file" ]]; then
             log_info "DATA_VOLUME_DEVICE cleared — removing stale Docker mount guard"
@@ -405,7 +392,6 @@ install_docker_mount_guard() {
         return 0
     fi
 
-    # Install path
     local mount_point="${DATA_VOLUME_MOUNT:-/mnt/vw-data}"
     _storage_validate_paths "" "$mount_point" || return 1
 

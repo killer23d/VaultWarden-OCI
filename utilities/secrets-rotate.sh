@@ -267,7 +267,6 @@ replacement = lambda m: m.group(1) + yaml_value
 new_content, n = re.subn(pattern, replacement, content, flags=re.MULTILINE)
 
 if n == 0:
-    # Key not yet present — append it.
     new_content = content.rstrip('\n') + '\n' + field + ': ' + yaml_value + '\n'
 
 with open(dst_file, 'w', encoding='utf-8') as f:

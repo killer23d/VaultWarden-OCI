@@ -71,12 +71,8 @@ check_prerequisites() {
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# _export_recovery_kit_safe
-#
 # Decrypt first and block export when placeholder values remain.
 # Recovery kit archive creation enforces mode 0600.
-# ---------------------------------------------------------------------------
 _export_recovery_kit_safe() {
     log_info "Validating secrets before recovery kit export..."
 

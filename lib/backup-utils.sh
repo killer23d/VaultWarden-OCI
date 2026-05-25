@@ -25,8 +25,6 @@ _format_bytes_human() {
         return
     fi
 
-    # One decimal place: compute tenths from the remainder KB after removing
-    # whole-MB portion, then scale to 0–9.
     local mb_rem_kb=$(( kb - mb_int * 1024 ))
     local mb_dec=$(( mb_rem_kb * 10 / 1024 ))
 
@@ -34,9 +32,6 @@ _format_bytes_human() {
 }
 
 
-# List available backups in a directory
-# Print per-type file count + total size after each type block, plus
-#          a grand-total line at the end of all output.
 list_backups() {
     local backup_base_dir="${1:-backups}"
 
@@ -92,9 +87,6 @@ list_backups() {
                     printf "    └─ VaultWarden: %s\n" "$vw_version"
                 fi
 
-                # Accumulate raw bytes for the summary line.
-                # _stat_file_size() is exported by lib/crypto.sh and
-                # chooses GNU (-c%s) or BSD (-f%z) stat automatically.
                 local raw_bytes=0
                 if declare -f _stat_file_size &>/dev/null; then
                     raw_bytes=$(_stat_file_size "$backup_file" 2>/dev/null || echo 0)
@@ -179,7 +171,6 @@ validate_backup_integrity() {
 
     log_info "Validating backup integrity: $(basename "$backup_file")"
 
-    # Use inline GNU||BSD fallback for portability.
     local file_size
     file_size=$(stat -c%s "$backup_file" 2>/dev/null || stat -f%z "$backup_file" 2>/dev/null || echo "0")
 
@@ -300,14 +291,6 @@ verify_backup_integrity() {
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# get_backup_size BACKUP_FILE
-#
-# Returns the raw byte count via portable stat (GNU: -c%s, BSD/macOS: -f%z) so
-# callers can safely perform numeric comparisons. Outputs bytes as a plain
-# integer on stdout. Returns 1 if the file does not exist or size cannot be
-# determined.
-# ---------------------------------------------------------------------------
 get_backup_size() {
     local backup_file="$1"
 
@@ -395,9 +378,7 @@ _backup_filename_age_days() {
     ts_str="${ts_date:0:4}-${ts_date:4:2}-${ts_date:6:2} ${ts_time:0:2}:${ts_time:2:2}:${ts_time:4:2}"
 
     local ts_epoch
-    # GNU date
     ts_epoch=$(date -d "$ts_str" +%s 2>/dev/null) || \
-    # BSD/macOS date
     ts_epoch=$(date -j -f '%Y-%m-%d %H:%M:%S' "$ts_str" +%s 2>/dev/null) || true
 
     if [[ -z "$ts_epoch" || ! "$ts_epoch" =~ ^[0-9]+$ ]]; then
@@ -410,13 +391,6 @@ _backup_filename_age_days() {
     echo $(( (now_epoch - ts_epoch) / 86400 ))
 }
 
-# ---------------------------------------------------------------------------
-# _backup_ctime_age_days FILE
-#
-# Returns the age of FILE in whole days based on ctime (inode change time),
-# using portable stat (GNU|BSD). Kept as a fallback for files that predate
-# the YYYYMMDD-HHMMSS naming convention.
-# ---------------------------------------------------------------------------
 _backup_ctime_age_days() {
     local file="$1"
     local ctime_epoch now_epoch
@@ -468,8 +442,6 @@ cleanup_old_backups() {
 
     local deleted_count=0
 
-    # Prefer filename-embedded timestamp for age calculation;
-    # fall back to ctime only for files without a recognisable timestamp.
     while IFS= read -r backup_file; do
         if [[ -n "$backup_file" ]]; then
             local age_days
@@ -490,13 +462,9 @@ cleanup_old_backups() {
         fi
     done < <(find "$backup_dir" -name "*.age" -type f 2>/dev/null)
 
-    # Sweep for orphaned sidecars (.meta and .sha256) whose
-    # corresponding .age primary no longer exists. Every orphan
-    # is removed unconditionally.
     local orphan_count=0
     while IFS= read -r sidecar; do
         if [[ -n "$sidecar" ]]; then
-            # Derive the expected .age path: strip the trailing .meta or .sha256
             local primary="${sidecar%.meta}"
             primary="${primary%.sha256}"
             if [[ ! -f "$primary" ]]; then
@@ -583,8 +551,6 @@ get_backup_statistics() {
     return 0
 }
 
-# Create backup metadata file
-#
 create_backup_metadata() {
     local backup_file="$1"
     local backup_type="$2"

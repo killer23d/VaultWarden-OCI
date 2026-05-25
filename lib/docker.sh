@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # lib/docker.sh - Docker operations library for VaultWarden-OCI-NG
 
-# Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_DOCKER_LIB_LOADED:-}" ]] && return 0
 readonly VAULTWARDEN_DOCKER_LIB_LOADED=1
 
@@ -15,7 +14,6 @@ _VW_DOCKER_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -n "${VW_LOG_LIB_LOADED:-}" ]] || source "${_VW_DOCKER_LIB_DIR}/log.sh"
 unset _VW_DOCKER_LIB_DIR
 
-# Prune only VaultWarden-OCI Docker objects.
 # Override DOCKER_PROJECT_LABEL in .env if this host uses a non-default Compose project name.
 if [[ -z "${DOCKER_PROJECT_LABEL:-}" ]]; then
     _COMPOSE_PROJECT_NAME=""
@@ -64,9 +62,6 @@ require_docker() {
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# require_jq
-# ---------------------------------------------------------------------------
 require_jq() {
     if ! command -v jq >/dev/null 2>&1; then
         log_error "jq is required but not installed."
@@ -148,11 +143,9 @@ get_service_health() {
     fi
 
     local health
-    # Empty string and null both map to "none" via // "none"
     health=$(printf '%s' "$raw_json" \
         | jq -r 'if type == "array" then (.[0].Health // "none") else (.Health // "none") end' 2>/dev/null)
 
-    # Extra guard: if jq somehow emits an empty string, normalise to "none"
     echo "${health:-none}"
     return 0
 }
@@ -256,9 +249,6 @@ recreate_services() {
 }
 
 
-# ---------------------------------------------------------------------------
-# pull_images
-#
 # Uses --quiet to suppress per-layer progress bars. Without it, a full pull
 # of the project images (vaultwarden, caddy, postfix) produces
 # several hundred KB of output per run that floods the systemd journal on
@@ -269,7 +259,6 @@ recreate_services() {
 # (summary digests or any error message) reach the journal. Pull errors are
 # still surfaced: docker compose pull --quiet exits non-zero on failure and
 # the error text appears in the final tail output.
-# ---------------------------------------------------------------------------
 pull_images() {
     local services=("$@")
     if ! require_docker; then return 1; fi
@@ -287,9 +276,6 @@ pull_images() {
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# pull_image_with_retry
-#
 # Retries a `docker pull` up to MAX_RETRIES times with exponential backoff.
 # Permanent errors (image not found, auth failure, etc.) cause an immediate
 # bail-out rather than exhausting all retries.
@@ -297,7 +283,6 @@ pull_images() {
 # Usage: pull_image_with_retry <image> [max_retries] [initial_sleep_seconds]
 #   max_retries:        default 3
 #   initial_sleep_secs: default 5  (doubles each attempt: 5→10→20)
-# ---------------------------------------------------------------------------
 pull_image_with_retry() {
     local image="$1"
     local max_retries="${2:-3}"
@@ -358,7 +343,6 @@ exec_in_service() {
     return 0
 }
 
-# ---------------------------------------------------------------------------
 # exec_oneshot_in_service  (replacement for run_in_service --rm)
 #
 # CAVEAT: This function resolves the image from the Compose config but does
@@ -370,7 +354,6 @@ exec_in_service() {
 #
 # Uses start→wait→logs→rm so output and exit status are captured reliably.
 # If container start fails, the temporary container is removed immediately.
-# ---------------------------------------------------------------------------
 exec_oneshot_in_service() {
     local service="$1"
     shift
@@ -425,7 +408,6 @@ exec_oneshot_in_service() {
     return "${exit_code:-1}"
 }
 
-# ---------------------------------------------------------------------------
 # run_in_service_full_env  — full service environment
 #
 # Unlike exec_oneshot_in_service(), this function uses `docker compose run
@@ -439,7 +421,6 @@ exec_oneshot_in_service() {
 # NOTE: `docker compose run --rm` will start the service's depends_on
 # containers if they are not already running. If the depends_on containers
 # have health conditions, this may block until they are healthy.
-# ---------------------------------------------------------------------------
 run_in_service_full_env() {
     local service="$1"
     shift
@@ -470,9 +451,6 @@ run_in_service() {
 # _docker_prune_filter  — emit --filter args as separate newline-delimited tokens
 #
 # Emits '--filter VALUE' as separate tokens using printf '%s\n'.
-# Callers should use:
-#   mapfile -t _prune_args < <(_docker_prune_filter)
-#   docker prune -f "${_prune_args[@]}"
 _docker_prune_filter() {
     if [[ -n "${DOCKER_PROJECT_LABEL:-}" ]]; then
         printf -- '--filter\n%s\n' "${DOCKER_PROJECT_LABEL}"
@@ -490,9 +468,6 @@ cleanup_containers() {
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# cleanup_images
-#
 # Removes dangling (untagged) image layers that are older than 48 hours.
 #
 # The --filter "until=48h" guard preserves the most recent two days of
@@ -509,7 +484,6 @@ cleanup_containers() {
 #   the time filter. Adding --all would also remove unused-but-tagged
 #   images (e.g. a previous version still tagged locally), which is
 #   outside the intended scope of routine maintenance cleanup.
-# ---------------------------------------------------------------------------
 cleanup_images() {
     if ! require_docker; then return 1; fi
     local _prune_args=()
@@ -521,9 +495,6 @@ cleanup_images() {
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# cleanup_volumes
-#
 # `docker volume prune --filter label=` was added in Docker Engine 25.0.
 # On older engines (Docker 20.x common on OCI free-tier) the flag is silently
 # ignored and ALL anonymous volumes on the host are pruned — including those
@@ -533,7 +504,6 @@ cleanup_images() {
 #   >= 25 → use docker volume prune -f with label filter (original behaviour)
 #   <  25 → fall back to `docker compose down -v` which is correctly scoped
 #            to this project on all Engine versions.
-# ---------------------------------------------------------------------------
 cleanup_volumes() {
     if ! require_docker; then return 1; fi
 

@@ -372,9 +372,6 @@ safe_execute() {
     fi
 }
 
-# _require_script PATH
-# Verify a utility script exists and is executable.
-# Emits ERROR and exits 1 if missing; chmod +x if not executable.
 _require_script() {
     local path="$1"
     if [[ ! -f "$path" ]]; then

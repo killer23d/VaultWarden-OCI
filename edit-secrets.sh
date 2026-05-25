@@ -55,7 +55,6 @@ SEE ALSO:
 HELP
 }
 
-# Zero arguments → show help
 if [[ $# -eq 0 ]]; then
     _show_help
     exit 0

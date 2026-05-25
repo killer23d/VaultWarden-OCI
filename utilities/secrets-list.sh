@@ -44,9 +44,7 @@ EXAMPLES:
 EOF
 }
 
-# ---------------------------------------------------------------------------
-# do_list_keys — show key names without decrypting values
-# ---------------------------------------------------------------------------
+
 do_list_keys() {
     log_info "Secret key names in: $SECRETS_FILE"
     echo ""
