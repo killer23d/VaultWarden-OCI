@@ -1,13 +1,5 @@
 #!/usr/bin/env bash
-# utilities/maintenance-db-maint.sh — VaultWarden deep database maintenance
-#
-# Standalone entry point for the 'db-maint' subcommand.
-# Invoked directly by:
-#   - maintenance.sh db-maint [OPTIONS]  (thin dispatcher)
-#
-# EXIT CODES:
-#   0 — deep DB maintenance completed successfully
-#   1 — maintenance failed or was cancelled
+# maintenance-db-maint.sh — Runs deep offline VaultWarden database maintenance.
 
 set -euo pipefail
 
@@ -30,9 +22,7 @@ unset _MAINT_SCRIPT_DIR
 source "$PROJECT_ROOT/lib/storage.sh"
 source "$PROJECT_ROOT/lib/maintenance-utils.sh"
 
-# ---------------------------------------------------------------------------
-# Configuration defaults
-# ---------------------------------------------------------------------------
+# Configuration defaults.
 DB_DEEP_FORCE=false
 DRY_RUN=false
 
@@ -60,18 +50,12 @@ EXIT CODES:
 EOF
 }
 
-# ---------------------------------------------------------------------------
-# _load_env
-# ---------------------------------------------------------------------------
 _load_env() {
     if load_env_file 2>/dev/null; then return 0; fi
     log_warn "No .env file found — relying on environment already set (e.g. systemd EnvironmentFile)"
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# run_deep_db_maintenance — verbatim from maintenance.sh
-# ---------------------------------------------------------------------------
 run_deep_db_maintenance() {
     log_info "VaultWarden Deep Database Maintenance"
     local state_dir; state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
@@ -200,9 +184,6 @@ run_deep_db_maintenance() {
     [[ "$maintenance_successful" == "true" ]]
 }
 
-# ---------------------------------------------------------------------------
-# Argument parsing & main
-# ---------------------------------------------------------------------------
 [[ "${1:-}" == "db-maint" ]] && shift
 
 while [[ $# -gt 0 ]]; do

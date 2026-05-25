@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
-# restore.sh - VaultWarden-OCI safe restore
-# Supports local and rclone remote backup selection.
-# After restore: prompts for the decryption key, restores data, then
-# generates/rotates a fresh age key and displays it like a new setup.
+# restore-run.sh — Restores VaultWarden data from local or remote encrypted backups.
 
 set -euo pipefail
 
@@ -27,7 +24,6 @@ _source_lib() {
     fi
 }
 _source_lib "lib/docker.sh"
-# _resolve_rclone_config and validate_rclone_config_path are provided by lib/backup-utils.sh
 _source_lib "lib/backup-utils.sh"
 _source_lib "lib/crypto.sh"
 _source_lib "lib/storage.sh"
@@ -36,7 +32,7 @@ unset -f _source_lib
 # Require a real .env before any live restore so a fresh host never restores
 # with placeholder values from .env.example. Help and list modes stay exempt.
 _require_env_for_live_restore() {
-    # Exempt subcommands that do not need .env
+    # Exempt subcommands that do not need .env.
     local arg
     for arg in "$@"; do
         case "$arg" in
@@ -44,7 +40,7 @@ _require_env_for_live_restore() {
         esac
     done
 
-    # Also exempt: interactive --remote (bare-metal DR restore without .env)
+    # Also exempt interactive --remote for bare-metal DR restores without .env.
     local has_interactive=false has_remote=false
     for arg in "$@"; do
         [[ "$arg" == "interactive" ]] && has_interactive=true
@@ -71,7 +67,7 @@ _require_env_for_live_restore() {
     fi
 }
 
-# Dependency pre-flight
+# Dependency preflight.
 check_dependencies() {
     local -a hard=(docker age age-keygen sqlite3 sha256sum tar)
     local -a soft=(sops zstd rclone rsync)  # rsync required for separate-volume (OCI block volume) restores
@@ -88,12 +84,12 @@ check_dependencies() {
         echo "WARN: restore.sh: optional tools missing (some features will be disabled): ${missing_soft[*]}" >&2
     fi
 }
-# Skip heavy dependency checks until a live restore/list subcommand is known.
+# Skip heavy dependency checks until a live restore or list subcommand is known.
 case "${1:-}" in
     latest|list|interactive) check_dependencies ;;
 esac
 
-# Configuration
+# Configuration defaults.
 BACKUP_FILE=""
 RESTORE_TYPE=""
 USE_LATEST=false
@@ -109,20 +105,19 @@ USE_REMOTE=false
 KEY_FILE_ARG=""         # set by --key-file; path to age private key for this restore
 RECOVERY_KIT_FILE=""    # set by --from-recovery-kit; path to plaintext recovery-kit file
 
-# declared here (empty) so set -u never fires before main()
-# initialises it via get_config_value().  Every function that references
-# BACKUP_BASE_DIR is only called after main() has set it.
+# Declare this here so set -u never fires before main() initialises it via
+# get_config_value(). Every function that references BACKUP_BASE_DIR is called
+# only after main() has set it.
 BACKUP_BASE_DIR=""
 
-# Issue: session-scoped rclone remote name / path for emergency restores.
-# When .env is absent (fresh server), _prompt_rclone_remote_name() fills
-# these; they are used in place of the .env values for this run only and
-# are never written back to disk.
+# Session-scoped rclone remote name and path for emergency restores.
+# When .env is absent on a fresh server, _prompt_rclone_remote_name() fills
+# these values for this run only, and they are never written back to disk.
 _SESSION_RCLONE_REMOTE_NAME=""
 _SESSION_RCLONE_REMOTE_PATH=""
 
 # _rclone_is_available() sets this when rclone works but the remote name still
-# has to be collected interactively.
+# must be collected interactively.
 RCLONE_NEEDS_INTERACTIVE_NAME=false
 
 show_help() {
@@ -219,7 +214,7 @@ case "$1" in
     latest)
         shift
         USE_LATEST=true
-        # Optional positional TYPE (db|full|emergency) before any --flags
+        # Optional positional TYPE (db|full|emergency) before any --flags.
         if [[ $# -gt 0 && "$1" != --* ]]; then
             RESTORE_TYPE="$1"; shift
         fi
@@ -227,12 +222,12 @@ case "$1" in
     list)
         shift
         LIST_ONLY=true
-        # Allow 'list --remote' as a positional form
+        # Allow 'list --remote' as a positional form.
         [[ "${1:-}" == "--remote" ]] && { USE_REMOTE=true; shift; }
         ;;
     interactive)
         shift
-        # All options parsed in the while loop below
+        # All options are parsed in the while loop below.
         ;;
     *)
         log_error "Unknown subcommand: '$1'"
@@ -261,7 +256,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# list + --remote combination
+# Handle the list + --remote combination.
 [[ "$LIST_ONLY" == "true" && "$USE_REMOTE" == "true" ]] && LIST_REMOTE=true
 
 TMPDIR_RESTORE=""
@@ -270,8 +265,7 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM ERR
 
-# Mirrors backup.sh: auto-discovers rclone.conf across 5 priority locations.
-
+# Mirrors backup.sh by auto-discovering rclone.conf across five priority locations.
 
 RCLONE_CONFIG_ARG=()
 _build_rclone_config_arg() {
@@ -415,8 +409,6 @@ _prompt_rclone_remote_name() {
     return 0
 }
 
-
-# Backup listing helpers
 
 _find_latest_backup() {
     local dir="$1"
@@ -1212,10 +1204,6 @@ _display_new_key() {
     echo ""
 }
 
-# ---------------------------------------------------------------------------
-# Misc restore helpers
-# ---------------------------------------------------------------------------
-
 read_meta_field() {
     local meta_file="$1" field="$2" default="${3:-}"
     if [[ -f "$meta_file" ]]; then
@@ -1327,7 +1315,6 @@ cleanup_pre_restore_artefacts() {
     done
 }
 
-# DB restore
 restore_db() {
     local backup_file="$1" age_key_file="$2" state_dir="$3" puid="$4" pgid="$5" tmpdir="$6"
     local dec_db="$tmpdir/db.sqlite3"
@@ -1389,9 +1376,6 @@ restore_db() {
     log_success "Database restored successfully."
 }
 
-# ---------------------------------------------------------------------------
-# Full / emergency restore
-# ---------------------------------------------------------------------------
 restore_full() {
     local backup_file="$1" age_key_file="$2" state_dir="$3" puid="$4" pgid="$5" tmpdir="$6" archive_format="$7"
 
@@ -1572,9 +1556,6 @@ restore_full() {
     log_success "Full restore completed (staged, atomic)."
 }
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 main() {
     log_header "VaultWarden-OCI Restore Utility"
 
@@ -1719,20 +1700,11 @@ main() {
     # Load Age key from recovery kit if supplied (must be after TMPDIR_RESTORE is set).
     _load_recovery_kit || exit 1
 
-    # ------------------------------------------------------------------
-    # Step 1: Select backup (interactive or flags)
-    # ------------------------------------------------------------------
     resolve_backup_file || exit 1
     [[ -f "$BACKUP_FILE" ]] || { log_error "Backup file not found: $BACKUP_FILE"; exit 1; }
 
-    # ------------------------------------------------------------------
-    # Step 2: Prompt for / resolve the decryption key
-    # ------------------------------------------------------------------
     _prompt_age_key "$AGE_KEY_FILE" || exit 1
 
-    # ------------------------------------------------------------------
-    # Step 3: Verify backup checksum
-    # ------------------------------------------------------------------
     local sha256_sidecar="${BACKUP_FILE}.sha256"
     if [[ -f "$sha256_sidecar" && "$SKIP_VERIFICATION" != "true" ]]; then
         log_info "Verifying backup checksum before decryption..."
@@ -1752,9 +1724,6 @@ main() {
         log_warn "No .sha256 sidecar found — skipping pre-decryption checksum check."
     fi
 
-    # ------------------------------------------------------------------
-    # Step 4: Parse archive metadata
-    # ------------------------------------------------------------------
     local meta_file="${BACKUP_FILE}.meta"
     local archive_version; archive_version="$(read_meta_field "$meta_file" "version" "")"
     local archive_format;  archive_format="$(read_meta_field  "$meta_file" "archive_format" "")"
@@ -1779,9 +1748,6 @@ main() {
     log_info "  State dir:   $STATE_DIR"
     log_info "  Decrypt key: $AGE_KEY_FILE"
 
-    # ------------------------------------------------------------------
-    # Step 5: Final confirmation
-    # ------------------------------------------------------------------
     if [[ "$FORCE" != "true" && "$DRY_RUN" != "true" ]]; then
         echo ""
         log_warn "WARNING: This will overwrite current data."
@@ -1792,21 +1758,13 @@ main() {
         [[ "$confirm" == "yes" ]] || { log_info "Restore cancelled."; exit 0; }
     fi
 
-    # ------------------------------------------------------------------
-    # Step 6: Pre-restore snapshot
-    # ------------------------------------------------------------------
     create_pre_restore_snapshot || exit 1
 
-    # ------------------------------------------------------------------
-    # Step 7: Stop services
-    # ------------------------------------------------------------------
-    # Install a safety-net ERR trap so that if any step between here and
-    # the final `docker compose up -d` fails, services are automatically
-    # restarted. Without this, set -euo pipefail would leave services
-    # permanently stopped, requiring manual intervention.
-    # IMPORTANT: The trap is installed AFTER docker compose stop so that
-    # failures in earlier validation steps (checksum, decryption, meta-parse)
-    # do NOT trigger a spurious restart of services that were never stopped.
+    # Install a safety-net ERR trap so that any failure after services stop
+    # triggers an automatic restart attempt. Without this, set -euo pipefail
+    # could leave services permanently stopped and require manual intervention.
+    # Install the trap only after docker compose stop so earlier validation
+    # failures do not trigger a spurious restart of services that never stopped.
     _restore_safety_net() {
         local rc=$?
         if [[ $rc -ne 0 ]]; then
@@ -1824,9 +1782,6 @@ main() {
     fi
     trap _restore_safety_net ERR
 
-    # ------------------------------------------------------------------
-    # Step 8: Perform restore
-    # ------------------------------------------------------------------
     case "$RESTORE_TYPE" in
         db)
             restore_db "$BACKUP_FILE" "$AGE_KEY_FILE" "$STATE_DIR" "$PUID" "$PGID" "$TMPDIR_RESTORE"
@@ -1838,9 +1793,6 @@ main() {
             log_error "Unknown restore type: $RESTORE_TYPE"; exit 1 ;;
     esac
 
-    # ------------------------------------------------------------------
-    # Step 9: Prune old pre-restore artefacts
-    # ------------------------------------------------------------------
     if [[ "$DRY_RUN" != "true" ]]; then
         # Number of pre-restore artefacts to keep — shared by both code paths
         # so the retention policy stays consistent regardless of storage mode.
@@ -1885,9 +1837,6 @@ main() {
         esac
     fi
 
-    # ------------------------------------------------------------------
-    # Step 10: Rotate age key (new key generated, installed, validated)
-    # ------------------------------------------------------------------
     if ! _rotate_age_key; then
         log_error "Age key rotation FAILED."
         log_error "The data restore itself succeeded, but the stack may not be able"
@@ -1897,14 +1846,8 @@ main() {
         # Non-fatal: continue to start services so VaultWarden is available.
     fi
 
-    # ------------------------------------------------------------------
-    # Step 11: Display the new key prominently (operator must acknowledge)
-    # ------------------------------------------------------------------
     _display_new_key
 
-    # ------------------------------------------------------------------
-    # Step 12: Start services
-    # ------------------------------------------------------------------
     if [[ "$DRY_RUN" != "true" ]]; then
         log_info "Starting services..."
         if ! docker compose up -d --remove-orphans; then

@@ -48,7 +48,7 @@ readonly COLOR_RED COLOR_BOLD_RED COLOR_GREEN COLOR_YELLOW COLOR_BLUE COLOR_MAGE
 # Static associative array maps level names to numeric weights;
 # _LOG_CURRENT_WEIGHT is set once in init_common_lib() for O(1) comparison.
 declare -gA _LOG_LEVEL_WEIGHT=([DEBUG]=0 [INFO]=1 [WARN]=2 [ERROR]=3)
-_LOG_CURRENT_WEIGHT=1  # default INFO
+_LOG_CURRENT_WEIGHT=1
 
 _should_log() {
     (( ${_LOG_LEVEL_WEIGHT[$1]:-0} >= _LOG_CURRENT_WEIGHT ))

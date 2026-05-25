@@ -1,5 +1,25 @@
 #!/usr/bin/env bash
-# lib/docker.sh - Docker operations library for VaultWarden-OCI-NG
+# lib/docker.sh — Docker service and maintenance helpers for VaultWarden-OCI.
+#
+# Provides:
+#   Service   : get_service_status, get_service_health, is_service_running,
+#               is_service_healthy, is_service_strictly_healthy,
+#               wait_for_service_ready
+#   Lifecycle : start_services, stop_services, restart_services,
+#               recreate_services, exec_in_service, exec_oneshot_in_service,
+#               run_in_service_full_env
+#   Cleanup   : cleanup_containers, cleanup_images, cleanup_volumes,
+#               cleanup_networks, cleanup_docker_system
+#   Support   : require_docker, require_jq, pull_images, pull_image_with_retry,
+#               get_service_logs, follow_service_logs, validate_compose_file
+#
+# Depends on / Load order:
+#   lib/log.sh is auto-loaded if it has not already been sourced.
+#
+# Canonical caller source block:
+#   source "${LIB_DIR}/log.sh"
+#   source "${LIB_DIR}/common.sh"
+#   source "${LIB_DIR}/docker.sh"
 
 [[ -n "${VAULTWARDEN_DOCKER_LIB_LOADED:-}" ]] && return 0
 readonly VAULTWARDEN_DOCKER_LIB_LOADED=1

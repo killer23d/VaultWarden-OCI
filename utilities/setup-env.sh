@@ -1,31 +1,11 @@
 #!/usr/bin/env bash
-# utilities/setup-env.sh — VaultWarden-OCI environment file configuration
-#
-# Creates or updates .env and docker-compose.yml from templates.
-# Safe to re-run (idempotent): existing files are not overwritten unless
-# --force is passed or key values (domain/email) have changed.
-#
-# USAGE:
-#   sudo utilities/setup-env.sh --domain DOMAIN --email EMAIL [OPTIONS]
-#
-# FLAGS:
-#   --domain DOMAIN       Your domain name (required)
-#   --email EMAIL         Admin email address (required)
-#   --use-latest          Set all container versions to 'latest'
-#   --data-device DEV     Data volume block device path
-#   --data-mount PATH     Data volume mount point (default: /mnt/vw-data)
-#   --force               Overwrite existing .env/docker-compose.yml
-#   --dry-run             Preview actions without executing
-#   --help, -h            Show this help
+# setup-env.sh — Creates or updates VaultWarden-OCI environment files from project templates.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-# ---------------------------------------------------------------------------
-# Bootstrap common library
-# ---------------------------------------------------------------------------
 for _lib in "lib/log.sh" "lib/config.sh" "lib/common.sh"; do
     if [[ ! -f "${PROJECT_ROOT}/${_lib}" ]]; then
         echo "ERROR: Required library not found: ${PROJECT_ROOT}/${_lib}" >&2
@@ -44,9 +24,6 @@ init_common_lib "$0"
 # shellcheck source=../lib/crypto.sh
 source "${PROJECT_ROOT}/lib/crypto.sh"
 
-# ---------------------------------------------------------------------------
-# Variable defaults
-# ---------------------------------------------------------------------------
 DOMAIN=""
 ADMIN_EMAIL=""
 USE_LATEST=false
@@ -55,9 +32,6 @@ DATA_VOLUME_MOUNT="${DATA_VOLUME_MOUNT:-/mnt/vw-data}"
 FORCE=false
 DRY_RUN=false
 
-# ---------------------------------------------------------------------------
-# show_help
-# ---------------------------------------------------------------------------
 show_help() {
     cat <<'EOF'
 utilities/setup-env.sh — VaultWarden-OCI environment file configuration
@@ -86,9 +60,6 @@ EXAMPLES:
 EOF
 }
 
-# ---------------------------------------------------------------------------
-# _parse_args
-# ---------------------------------------------------------------------------
 _parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -126,9 +97,6 @@ _parse_args() {
     done
 }
 
-# ---------------------------------------------------------------------------
-# detect_ssh_log_path
-# ---------------------------------------------------------------------------
 detect_ssh_log_path() {
     local ssh_log_path="/var/log/secure"
 
@@ -150,12 +118,8 @@ detect_ssh_log_path() {
     printf '%s\n' "$ssh_log_path"
 }
 
-# ---------------------------------------------------------------------------
-# _make_owned_temp DIR OWNER GROUP
-#
 # Create a mode-600 temp file in DIR pre-owned by OWNER:GROUP.
-# Prints the temp file path to stdout. Returns 1 on any failure.
-# ---------------------------------------------------------------------------
+# Print the temp file path to stdout and return 1 on failure.
 _make_owned_temp() {
     local dir="$1" owner="$2" group="$3"
     local tmp
@@ -165,9 +129,6 @@ _make_owned_temp() {
     printf '%s' "$tmp"
 }
 
-# ---------------------------------------------------------------------------
-# create_env_file
-# ---------------------------------------------------------------------------
 create_env_file() {
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would create .env file"
@@ -235,13 +196,10 @@ create_env_file() {
     local env_dir
     env_dir="$(dirname "$env_file")"
 
-    # ---------------------------------------------------------------------------
-    # Pass 1 — substitute all primary variables in a single awk run.
-    #
-    # The temp file is pre-owned by real_user:real_group (mode 600) before any
+    # Pass 1 substitutes all primary variables in a single awk run.
+    # The temp file is pre-owned by real_user:real_group with mode 600 before any
     # data is written, so .env is never visible on disk as root-owned at any
-    # point — not even transiently.
-    # ---------------------------------------------------------------------------
+    # point, even transiently.
     local temp_env
     temp_env=$(_make_owned_temp "$env_dir" "$real_user" "$real_group") || return 1
 
@@ -272,12 +230,9 @@ create_env_file() {
         }
     ' "$env_template" > "$temp_env" || { rm -f "$temp_env"; return 1; }
 
-    # ---------------------------------------------------------------------------
-    # Pass 2 (optional) — pin all image versions to 'latest'.
-    #
-    # Uses a second pre-owned temp file; replaces temp_env on success so the
+    # Pass 2 optionally pins all image versions to 'latest'.
+    # Use a second pre-owned temp file, then replace temp_env on success so the
     # remainder of the function always works against a single variable.
-    # ---------------------------------------------------------------------------
     if [[ "$USE_LATEST" == "true" ]]; then
         local temp2
         temp2=$(_make_owned_temp "$env_dir" "$real_user" "$real_group") \
@@ -295,12 +250,9 @@ create_env_file() {
         temp_env="$temp2"
     fi
 
-    # ---------------------------------------------------------------------------
-    # Pass 3 (optional) — auto-populate BACKUP_DIR in separate-volume mode.
-    #
-    # _set_env_var uses sed -i which edits in-place; ownership is preserved
-    # because temp_env is already correctly owned before this call.
-    # ---------------------------------------------------------------------------
+    # Pass 3 optionally auto-populates BACKUP_DIR in separate-volume mode.
+    # _set_env_var uses sed -i, so ownership stays correct because temp_env is
+    # already owned correctly before this call.
     if [[ -n "${DATA_VOLUME_DEVICE:-}" ]]; then
         local current_backup_dir
         current_backup_dir=$(_read_env_value "BACKUP_DIR" "$temp_env")
@@ -310,19 +262,14 @@ create_env_file() {
         fi
     fi
 
-    # ---------------------------------------------------------------------------
-    # Atomic promotion: swap temp_env → .env in one rename.
-    # Because temp_env is already mode 600, real_user:real_group, the final .env
-    # is never visible on disk with incorrect ownership or permissions.
-    # ---------------------------------------------------------------------------
+    # Atomically promote temp_env to .env with a single rename.
+    # Because temp_env is already mode 600 and owned by real_user:real_group,
+    # the final .env is never visible on disk with incorrect ownership or permissions.
     mv "$temp_env" "$env_file" || { rm -f "$temp_env"; return 1; }
     log_success ".env written: $env_file (owner: $real_user:$real_group, mode: 600)"
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# create_docker_compose
-# ---------------------------------------------------------------------------
 create_docker_compose() {
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would create docker-compose.yml"
@@ -341,7 +288,6 @@ create_docker_compose() {
         docker compose -f "$compose_file" config >/dev/null 2>&1 && return 0
     fi
 
-    # Resolve real user once to avoid double subshell in chown argument.
     local real_user real_group
     real_user=$(get_real_user)
     real_group=$(id -gn "$real_user")
@@ -359,9 +305,6 @@ create_docker_compose() {
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# main
-# ---------------------------------------------------------------------------
 main() {
     (( EUID == 0 )) || { log_error "Must run as root (use: sudo $0 $*)"; exit 1; }
 

@@ -1,18 +1,5 @@
 #!/usr/bin/env bash
-# utilities/setup-systemd.sh — VaultWarden-OCI systemd timer management
-#
-# USAGE:
-#   sudo utilities/setup-systemd.sh <action> [--dry-run]
-#
-# ACTIONS:
-#   install   Install and enable all systemd timer units
-#   remove    Disable and remove all systemd timer units
-#   validate  Verify installed state matches repo
-#   status    Show timer and service status
-#
-# FLAGS:
-#   --dry-run     Preview actions without executing
-#   --help, -h    Show this help
+# setup-systemd.sh — Installs and validates VaultWarden-OCI systemd timers.
 
 set -euo pipefail
 
@@ -171,10 +158,7 @@ _run() {
     fi
 }
 
-# ---------------------------------------------------------------------------
-# _timer_has_next_trigger TIMER
-# Returns success when TIMER has a next scheduled trigger.
-# ---------------------------------------------------------------------------
+# Return success when a timer has a next scheduled trigger.
 _timer_has_next_trigger() {
     local timer="$1"
     local next_elapse
@@ -182,10 +166,7 @@ _timer_has_next_trigger() {
     [[ -n "$next_elapse" && "$next_elapse" != "n/a" ]]
 }
 
-# ---------------------------------------------------------------------------
-# _count_healthy_managed_timers
-# Returns the number of managed timers that are active and have a next trigger.
-# ---------------------------------------------------------------------------
+# Return the number of managed timers that are active and scheduled.
 _count_healthy_managed_timers() {
     local healthy_count=0
     local timer
@@ -197,10 +178,7 @@ _count_healthy_managed_timers() {
     printf '%s\n' "$healthy_count"
 }
 
-# ---------------------------------------------------------------------------
-# _sha256 FILE
-# Portable sha256 hash of a single file; prints only the hex digest.
-# ---------------------------------------------------------------------------
+# Print the sha256 digest of a file.
 _sha256() {
     if command -v sha256sum &>/dev/null; then
         sha256sum "$1" | awk '{print $1}'
@@ -247,18 +225,14 @@ _ensure_runtime_lock_files() {
     done
 }
 
-# ---------------------------------------------------------------------------
-# _install_rwpaths_dropin
-# ---------------------------------------------------------------------------
 # In separate-volume mode every managed unit needs a ReadWritePaths drop-in
-# so that ProtectSystem=strict allows writes to DATA_VOLUME_MOUNT.  Without
+# so that ProtectSystem=strict allows writes to DATA_VOLUME_MOUNT. Without
 # this drop-in, any write to DATA_VOLUME_MOUNT (backup files, health cooldown
 # stamps, DB operations) is silently blocked by the kernel, causing runtime
 # Permission denied errors that are hard to diagnose from the unit file alone.
 #
 # Boot-only mode (DATA_VOLUME_DEVICE empty): no-op.
 # Dry-run mode: logs what would be written without touching the filesystem.
-# ---------------------------------------------------------------------------
 _install_rwpaths_dropin() {
     local data_device data_mount
     # Read from the installed EnvironmentFile when available so that
@@ -268,7 +242,7 @@ _install_rwpaths_dropin() {
         data_device=$(_read_env_value "DATA_VOLUME_DEVICE" "$ENV_FILE")
         data_mount=$(_read_env_value "DATA_VOLUME_MOUNT"  "$ENV_FILE")
     fi
-    # Fall back to environment variables
+    # Fall back to environment variables.
     [[ -z "${data_device:-}" ]] && data_device="${DATA_VOLUME_DEVICE:-}"
     [[ -z "${data_mount:-}"  ]] && data_mount="${DATA_VOLUME_MOUNT:-}"
 
@@ -323,9 +297,6 @@ DROPIN
     done
 }
 
-# ---------------------------------------------------------------------------
-# install_units
-# ---------------------------------------------------------------------------
 install_units() {
     if [[ $EUID -ne 0 ]]; then log_error "This script must be run as root."; exit 1; fi
     log_header "VaultWarden-OCI systemd Timer Installation"
@@ -336,7 +307,6 @@ install_units() {
         return 1
     fi
 
-    # 1. Install scripts to /opt/vaultwarden-scripts/
     log_info "Installing scripts to $OPT_SCRIPTS_DIR ..."
     _run mkdir -p "$OPT_SCRIPTS_DIR"
 
@@ -373,11 +343,8 @@ install_units() {
         return 1
     fi
 
-    # ---------------------------------------------------------------------------
-    # Flat-installed scripts (installed as basename only, NOT inside utilities/)
-    # These have pre-existing callers (e.g. systemd units) that reference the
-    # flat /opt/vaultwarden-scripts/<name> path.  Do NOT change their dest path.
-    # ---------------------------------------------------------------------------
+    # Keep these scripts flat-installed because existing callers reference
+    # /opt/vaultwarden-scripts/<name> directly.
     local flat_scripts_to_install=(
         maintenance.sh
         backup.sh
@@ -399,11 +366,8 @@ install_units() {
         log_success "Installed: $dest"
     done
 
-    # ---------------------------------------------------------------------------
-    # Structured-installed scripts (installed preserving utilities/ subdir path).
-    # setup-firewall.sh keeps its pre-existing flat path because
-    # systemd/vaultwarden-iptables.service calls /opt/vaultwarden-scripts/setup-firewall.sh.
-    # ---------------------------------------------------------------------------
+    # Preserve the utilities/ subdirectory for these scripts, except for
+    # setup-firewall.sh, which must stay flat for iptables.service.
     local structured_scripts_to_install=(
         utilities/setup-firewall.sh   # ← flat-installed (basename only) for iptables.service compatibility
         utilities/maintenance-run.sh
@@ -444,7 +408,6 @@ install_units() {
     service_user="${service_identity%%:*}"
     service_group="${service_identity##*:}"
 
-    # 2. Create EnvironmentFile at /etc/vaultwarden/vaultwarden.env
     log_info "Setting up EnvironmentFile at $ENV_FILE ..."
     if [[ "$DRY_RUN" == "false" ]]; then
         # Use install -d to create the directory with the correct
@@ -490,10 +453,8 @@ install_units() {
                 if [[ "$repo_sum" == "$installed_sum" ]]; then
                     log_success "$ENV_FILE is identical to repo .env (checksums match)"
                 else
-                    # Collect keys from repo .env that are absent in the installed file.
                     local missing_keys=()
                     while IFS= read -r line; do
-                        # Skip blanks and comments
                         [[ -z "$line" || "$line" == '#'* ]] && continue
                         local key="${line%%=*}"
                         [[ -z "$key" ]] && continue
@@ -515,9 +476,6 @@ install_units() {
                         done
                         log_info "Edit: sudo nano $ENV_FILE"
                     else
-                        # Files differ in VALUE only (not in which keys are present).
-                        # This is expected if the operator has customised values.
-                        # Inform without alarming; show a diff command for review.
                         log_info "────────────────────────────────────────────────────────────────"
                         log_info "NOTE: $ENV_FILE has the same keys as repo .env but values differ."
                         log_info "  repo .env  sha256: $repo_sum"
@@ -535,9 +493,8 @@ install_units() {
         log_info "[DRY RUN] Would create/check $ENV_FILE from .env"
     fi
 
-    # ------------------------------------------------------------------
-    # 3. Install age key to /etc/vaultwarden/age-key.txt
-    #    (ProtectHome=yes makes /home/ubuntu/ inaccessible to service processes)
+    # Install the age key into /etc/vaultwarden/age-key.txt because
+    # ProtectHome=yes makes /home/ubuntu/ inaccessible to service processes.
     log_info "Installing age key to $AGE_KEY_DEST ..."
     local age_key_src="$PROJECT_ROOT/secrets/keys/age-key.txt"
     if [[ "$DRY_RUN" == "true" ]]; then
@@ -556,7 +513,6 @@ install_units() {
         if [[ -f "$age_key_src" ]]; then
             install -m 600 -o "$service_user" -g "$service_group" "$age_key_src" "$AGE_KEY_DEST"
             log_success "Installed age key: $AGE_KEY_DEST (${service_user}:${service_group})"
-            # Ensure SOPS_AGE_KEY_FILE is set correctly in the EnvironmentFile
             _set_env_var "SOPS_AGE_KEY_FILE" "$AGE_KEY_DEST" "$ENV_FILE"
             log_success "SOPS_AGE_KEY_FILE=$AGE_KEY_DEST set in $ENV_FILE"
         else
@@ -581,11 +537,9 @@ install_units() {
         fi
     fi
 
-    # 3b. Copy rclone config to /etc/vaultwarden/rclone.conf
     local rclone_dest="$ENV_DIR/rclone.conf"
     log_info "Setting up rclone config at $rclone_dest ..."
 
-    # Check if RCLONE_CONFIG is already correctly set in the env file
     local existing_rclone_cfg=""
     if [[ -f "$ENV_FILE" ]]; then
         existing_rclone_cfg=$(grep "^RCLONE_CONFIG=" "$ENV_FILE" | head -1 | cut -d= -f2- || true)
@@ -643,7 +597,6 @@ install_units() {
         fi
     fi
 
-    # 4. Install systemd unit files
     log_info "Installing systemd unit files to $UNIT_DEST_DIR ..."
     local unit_ok=true
     for unit in "${SERVICES[@]}" "${TIMERS[@]}"; do
@@ -663,7 +616,6 @@ install_units() {
 
     _ensure_runtime_lock_files "$service_user" "$service_group"
 
-    # 4b. Write per-unit ReadWritePaths drop-ins (separate-volume mode)
     _install_rwpaths_dropin
 
     log_info "Reloading systemd daemon ..."
@@ -680,7 +632,6 @@ install_units() {
     if command -v systemd-analyze >/dev/null 2>&1; then
         for unit in "${UNIT_DEST_DIR}"/vaultwarden-*.timer; do
             [[ -f "$unit" ]] || continue
-            # '^OnCalendar=' anchors to directive lines only.
             local cal_expr; cal_expr=$(grep -m1 '^OnCalendar=' "$unit" | cut -d= -f2-)
             if [[ -n "$cal_expr" ]]; then
                 if ! systemd-analyze calendar "$cal_expr" >/dev/null 2>&1; then
@@ -736,9 +687,6 @@ install_units() {
         log_info "[DRY RUN] Would check: systemctl is-active + NextElapseUSecRealtime for all managed timers"
     fi
 
-    # ------------------------------------------------------------------
-    # 5. Clear stale failed status from previous runs
-    # ------------------------------------------------------------------
     log_info "Clearing stale failed status from all managed services ..."
     for svc in "${SERVICES[@]}"; do
         [[ "$svc" == *"@"* ]] && continue  # skip template unit
@@ -756,9 +704,6 @@ install_units() {
     log_info "  Age key:   $AGE_KEY_DEST  (copied from secrets/keys/age-key.txt)"
 }
 
-# ---------------------------------------------------------------------------
-# remove_units
-# ---------------------------------------------------------------------------
 remove_units() {
     if [[ $EUID -ne 0 ]]; then log_error "This script must be run as root."; exit 1; fi
     log_header "VaultWarden-OCI systemd Timer Removal"
@@ -821,9 +766,6 @@ remove_units() {
     fi
 }
 
-# ---------------------------------------------------------------------------
-# validate_installation
-# ---------------------------------------------------------------------------
 validate_installation() {
     if [[ $EUID -ne 0 ]]; then log_error "This script must be run as root."; exit 1; fi
     log_header "VaultWarden-OCI Installation Validation"
@@ -868,12 +810,10 @@ validate_installation() {
         (( errors++ )) || true
     else
         log_success "  OK: $OPT_SCRIPTS_DIR/lib/"
-        # Check that every *.sh lib file is readable by others (mode ends in 4 or higher)
         local bad_perm_files=()
         while IFS= read -r -d '' libfile; do
             local fmode
             fmode=$(stat -c '%a' "$libfile" 2>/dev/null || stat -f '%Lp' "$libfile" 2>/dev/null || echo "000")
-            # Extract the 'other' permission digit (last character of octal mode)
             local other_bit="${fmode: -1}"
             if (( other_bit < 4 )); then
                 bad_perm_files+=("$libfile ($fmode)")
@@ -1030,16 +970,12 @@ validate_installation() {
     fi
 }
 
-# ---------------------------------------------------------------------------
-# show_status
-# ---------------------------------------------------------------------------
 show_status() {
     log_header "VaultWarden-OCI systemd Timer Status"
     echo ""
     systemctl list-timers --all 2>/dev/null | grep vaultwarden || log_info "No vaultwarden timers active."
     echo ""
     for svc in "${SERVICES[@]}"; do
-        # Skip the template unit -- it has no standalone status
         [[ "$svc" == *"@"* ]] && continue
         log_info "--- $svc ---"
         { systemctl status "$svc" --no-pager -l 2>/dev/null | head -20; } || true

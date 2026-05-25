@@ -1,18 +1,5 @@
 #!/usr/bin/env bash
-# utilities/secrets-export-recovery-kit.sh — Export VaultWarden recovery kit
-#
-# Standalone admin tool. Also invocable via: ./edit-secrets.sh export-recovery-kit
-#
-# Decrypts secrets.yaml, validates no placeholder values remain, then exports
-# a plaintext recovery document (Age key + all credentials) to a tmpfs-backed
-# file with mode 0600.
-#
-# USAGE:
-#   ./utilities/secrets-export-recovery-kit.sh export-recovery-kit [OPTIONS]
-#   ./edit-secrets.sh export-recovery-kit [OPTIONS]
-#
-# FLAGS:
-#   --help, -h    Show this help
+# secrets-export-recovery-kit.sh — Exports the VaultWarden recovery kit.
 
 HISTFILE=/dev/null
 set -euo pipefail
@@ -72,7 +59,7 @@ check_prerequisites() {
 }
 
 # Decrypt first and block export when placeholder values remain.
-# Recovery kit archive creation enforces mode 0600.
+# Recovery kit export enforces mode 0600.
 _export_recovery_kit_safe() {
     log_info "Validating secrets before recovery kit export..."
 
@@ -117,7 +104,6 @@ _export_recovery_kit_safe() {
 }
 
 main() {
-    # Strip the leading "export-recovery-kit" token if called as a subcommand.
     if [[ "${1:-}" == "export-recovery-kit" ]]; then shift; fi
 
     case "${1:-}" in

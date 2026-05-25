@@ -48,6 +48,7 @@ validate_ip() {
     local ip="$1"
     local -i octet
     [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+    # Limit the IFS change to this read so the caller's shell state is preserved.
     IFS='.' read -ra octets <<< "$ip"
     for octet in "${octets[@]}"; do
         (( octet >= 0 && octet <= 255 )) || return 1

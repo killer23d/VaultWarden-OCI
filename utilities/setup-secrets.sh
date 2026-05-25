@@ -1,17 +1,5 @@
 #!/usr/bin/env bash
-# utilities/setup-secrets.sh — VaultWarden-OCI secrets management
-#
-# USAGE:
-#   sudo utilities/setup-secrets.sh SUBCOMMAND [OPTIONS]
-#
-# SUBCOMMANDS:
-#   bootstrap           Bootstrap Age key, SOPS config, and placeholder secrets
-#   configure           Full interactive/auto secrets setup
-#   rotate [KEY]        Rotate one or all credentials
-#   export-recovery-kit Export encrypted recovery kit
-#   breakglass [FLAGS]  Emergency break-glass admin account management
-#
-# Run: setup-secrets.sh SUBCOMMAND --help  for subcommand-specific help.
+# setup-secrets.sh — Manages VaultWarden-OCI secrets.
 
 set -euo pipefail
 
@@ -46,9 +34,6 @@ source "${PROJECT_ROOT}/lib/email.sh"
 source "${PROJECT_ROOT}/lib/crypto.sh"
 source "${PROJECT_ROOT}/lib/secrets.sh"
 
-# ---------------------------------------------------------------------------
-# _show_help — top-level usage
-# ---------------------------------------------------------------------------
 _show_help() {
     cat << 'EOF'
 VaultWarden-OCI Secrets Management
@@ -77,10 +62,7 @@ EXAMPLES:
 EOF
 }
 
-# ---------------------------------------------------------------------------
-# _cmd_configure — full interactive/auto secrets setup
-# (was run_phase_secrets in setup.sh)
-# ---------------------------------------------------------------------------
+# Run interactive or automated secrets setup.
 _cmd_configure() {
     local CLEANUP_ACTIONS=()
     _ss_register_cleanup() { CLEANUP_ACTIONS+=("$1"); }
@@ -450,10 +432,9 @@ SOPS_EOF
 
         local vw_hash
         if [[ "$QUIET_SUMMARY" == "true" ]] && [[ "$AUTO_MODE" == "true" ]]; then
-            # Capture plaintext before hashing so setup.sh can display all four
-            # credentials together in the consolidated summary screen (Change 4).
-            # Using inline generation instead of auto_generate_secret_field to
-            # avoid the individual /dev/tty banners that QUIET_SUMMARY suppresses.
+            # Capture the plaintext before hashing so setup.sh can display all
+            # generated credentials together without the per-secret /dev/tty
+            # banners that QUIET_SUMMARY suppresses.
             local vw_plain
             vw_plain=$(generate_secure_string 32) || { log_error "Failed to generate admin_token"; return 1; }
             vw_hash=$(generate_argon2_hash "$vw_plain") || { log_error "Failed to hash admin_token"; return 1; }
@@ -484,7 +465,7 @@ SOPS_EOF
 
         local caddy_hash
         if [[ "$QUIET_SUMMARY" == "true" ]] && [[ "$AUTO_MODE" == "true" ]]; then
-            # Capture plaintext before hashing for consolidated summary (Change 4).
+            # Capture the plaintext before hashing so setup.sh can include it in the consolidated summary.
             local caddy_plain
             caddy_plain=$(generate_secure_string 32) || { log_error "Failed to generate admin_basic_auth_hash"; return 1; }
             local _raw_caddy_hash
@@ -639,7 +620,7 @@ SOPS_EOF
         backup_pass=$(auto_generate_secret_field "backup_passphrase") || { log_error "Failed to generate backup_passphrase"; return 1; }
         _COLLECTED_SECRETS["backup_passphrase"]="$backup_pass"
 
-        # Write plaintext to temp file for consolidated summary screen (Change 4).
+        # Write the plaintext to a temp file so setup.sh can display the consolidated summary.
         if [[ -n "${BACKUP_PLAIN_FILE:-}" ]]; then
             if [[ "$DRY_RUN" == "true" ]]; then
                 log_info "[DRY RUN] Would write backup passphrase plaintext to ${BACKUP_PLAIN_FILE}"
@@ -652,8 +633,8 @@ SOPS_EOF
             fi
         fi
 
-        # Change 3: Show backup passphrase with red-banner credential screen when
-        # not suppressed (i.e., standalone interactive run without --quiet-summary).
+        # Show the backup passphrase on the red-banner credential screen during
+        # standalone interactive runs that do not use --quiet-summary.
         if [[ "$QUIET_SUMMARY" != "true" ]] && [[ -t 0 ]]; then
             clear
             printf '%s' "${COLOR_RED}"
@@ -708,14 +689,7 @@ BACKUP_BANNER
         return 0
     }
 
-    # ---------------------------------------------------------------------------
-    # export_docker_secrets is provided by lib/secrets.sh (sourced above).
-    # Call it with the docker secrets directory as the first argument.
-    # ---------------------------------------------------------------------------
-
-    # ---------------------------------------------------------------------------
-    # write_secrets — YAML assembly, SOPS encryption, atomic mv
-    # ---------------------------------------------------------------------------
+    # Assemble the secrets YAML, encrypt it with SOPS, and install it atomically.
     write_secrets() {
         if [[ "$DRY_RUN" == "true" ]]; then
             log_info "[DRY RUN] Would write secrets to encrypted file"
@@ -915,9 +889,7 @@ BACKUP_BANNER
     _ss_main "$@"
 }
 
-# ---------------------------------------------------------------------------
-# _cmd_rotate — thin wrapper to utilities/secrets-rotate.sh
-# ---------------------------------------------------------------------------
+# Delegate rotate subcommands to utilities/secrets-edit.sh.
 _cmd_rotate() {
     local key="${1:-}"
     local edit_sh="${PROJECT_ROOT}/utilities/secrets-edit.sh"
@@ -929,21 +901,15 @@ _cmd_rotate() {
     fi
 }
 
-# ---------------------------------------------------------------------------
-# _cmd_export_recovery_kit — thin wrapper to utilities/secrets-export-recovery-kit.sh
-# ---------------------------------------------------------------------------
+# Delegate recovery-kit export to utilities/secrets-edit.sh.
 _cmd_export_recovery_kit() {
     local edit_sh="${PROJECT_ROOT}/utilities/secrets-edit.sh"
     _require_script "$edit_sh"
     exec "$edit_sh" export-recovery-kit
 }
 
-# ---------------------------------------------------------------------------
-# _cmd_breakglass — emergency break-glass admin account management
-# (merged from the former standalone break-glass utility)
-# ---------------------------------------------------------------------------
+# Manage the emergency break-glass admin account.
 _cmd_breakglass() {
-    # Local state variables
     local BREAKGLASS_USER="vw-emergency"
     local CREATE_USER=false
     local REMOVE_USER=false
@@ -956,7 +922,6 @@ _cmd_breakglass() {
     local BREAKGLASS_MAX_AGE_HOURS="${BREAKGLASS_MAX_AGE_HOURS:-72}"
     local BREAKGLASS_AUTO_EXPIRY_HOURS="${BREAKGLASS_AUTO_EXPIRY_HOURS:-2}"
 
-    # Read SSH_PORT from environment, then fall back to .env.
     local SSH_PORT="${SSH_PORT:-}"
     if [[ -z "$SSH_PORT" ]] && [[ -f "${PROJECT_ROOT}/.env" ]]; then
         SSH_PORT=$(grep -m1 -E '^[[:space:]]*SSH_PORT[[:space:]]*=' "${PROJECT_ROOT}/.env" \
@@ -1019,9 +984,6 @@ SECURITY NOTES:
 EOF
     }
 
-    # ---------------------------------------------------------------------------
-    # validate_script_security()
-    # ---------------------------------------------------------------------------
     validate_script_security() {
         local strict="${1:-false}"
         local script_path="$0"
@@ -1099,9 +1061,6 @@ EOF
         id "$BREAKGLASS_USER" >/dev/null 2>&1
     }
 
-    # ---------------------------------------------------------------------------
-    # create_sudoers_config()
-    # ---------------------------------------------------------------------------
     create_sudoers_config() {
         local sudoers_file="/etc/sudoers.d/vw-emergency"
 
@@ -1135,9 +1094,6 @@ EOF
         return 0
     }
 
-    # ---------------------------------------------------------------------------
-    # _notify_breakglass_event()
-    # ---------------------------------------------------------------------------
     _notify_breakglass_event() {
         local event="$1"
         local detail="${2:-}"
@@ -1159,9 +1115,6 @@ EOF
             2>/dev/null || true
     }
 
-    # ---------------------------------------------------------------------------
-    # schedule_auto_cleanup()
-    # ---------------------------------------------------------------------------
     schedule_auto_cleanup() {
         local expiry_hours="$BREAKGLASS_AUTO_EXPIRY_HOURS"
         local bg_user="$BREAKGLASS_USER"
@@ -1232,9 +1185,6 @@ EOF
         return 0
     }
 
-    # ---------------------------------------------------------------------------
-    # create_breakglass_user()
-    # ---------------------------------------------------------------------------
     create_breakglass_user() {
         if [[ "$DRY_RUN" == "true" ]]; then
             log_info "[DRY RUN] Would create break-glass admin user: $BREAKGLASS_USER"
@@ -1381,9 +1331,6 @@ EOF
         return 0
     }
 
-    # ---------------------------------------------------------------------------
-    # remove_breakglass_user()
-    # ---------------------------------------------------------------------------
     remove_breakglass_user() {
         if [[ "$DRY_RUN" == "true" ]]; then
             log_info "[DRY RUN] Would remove break-glass user: $BREAKGLASS_USER"
@@ -1453,9 +1400,6 @@ EOF
         return 0
     }
 
-    # ---------------------------------------------------------------------------
-    # reset_breakglass_password()
-    # ---------------------------------------------------------------------------
     reset_breakglass_password() {
         if [[ "$DRY_RUN" == "true" ]]; then
             log_info "[DRY RUN] Would reset password for: $BREAKGLASS_USER"
@@ -1497,9 +1441,6 @@ EOF
         return 0
     }
 
-    # ---------------------------------------------------------------------------
-    # _check_breakglass_account_age()
-    # ---------------------------------------------------------------------------
     _check_breakglass_account_age() {
         local home_dir="$1"
         local instructions_file="$home_dir/EMERGENCY_ACCESS_INSTRUCTIONS.txt"
@@ -1533,9 +1474,6 @@ EOF
         fi
     }
 
-    # ---------------------------------------------------------------------------
-    # show_breakglass_status()
-    # ---------------------------------------------------------------------------
     show_breakglass_status() {
         log_info "Break-glass admin status:"
         echo ""
@@ -1611,9 +1549,6 @@ EOF
         return 0
     }
 
-    # ---------------------------------------------------------------------------
-    # _restart_after_disable()
-    # ---------------------------------------------------------------------------
     _restart_after_disable() {
         local service="${1:-vaultwarden}"
 
@@ -1640,9 +1575,6 @@ EOF
         return $_rc
     }
 
-    # ---------------------------------------------------------------------------
-    # Argument Parsing — subcommand-first dispatch
-    # ---------------------------------------------------------------------------
     if [[ $# -eq 0 ]]; then
         _bg_show_help
         return 0
@@ -1676,9 +1608,6 @@ EOF
         return 1
     fi
 
-    # ---------------------------------------------------------------------------
-    # Main breakglass logic
-    # ---------------------------------------------------------------------------
     log_header "VaultWarden-OCI Break-Glass Admin Manager"
 
     if [[ "$DRY_RUN" == "true" ]]; then
@@ -1763,12 +1692,8 @@ EOF
     return 1
 }
 
-# ---------------------------------------------------------------------------
-# _cmd_bootstrap — age key, SOPS config, and empty secrets structure
-# Called by setup.sh install phase (before credential collection).
-# Does NOT prompt for credentials. Run setup-secrets.sh configure to
-# fill in actual credentials after editing .env.
-# ---------------------------------------------------------------------------
+# Bootstrap the Age key, SOPS config, and placeholder secrets file.
+# Run setup-secrets.sh configure after editing .env to add real credentials.
 _cmd_bootstrap() {
     local DRY_RUN=false
     local FORCE=false
@@ -1807,11 +1732,11 @@ EOF
         return 0
     fi
 
-    # ── 1. Directory structure ───────────────────────────────────────────────
+    # Create the directory structure.
     mkdir -p "${PROJECT_ROOT}/secrets/keys" "${PROJECT_ROOT}/secrets/.docker_secrets" || return 1
     chmod 700 "${PROJECT_ROOT}/secrets/keys" "${PROJECT_ROOT}/secrets/.docker_secrets" || return 1
 
-    # ── 2. Age key ────────────────────────────────────────────────────────────
+    # Create or validate the repository Age key.
     if [[ -f "$age_key_file" ]] && [[ "$FORCE" != "true" ]]; then
         if check_age_key "$age_key_file" 2>/dev/null; then
             log_info "Age key already present and valid: $age_key_file (skipping)"
@@ -1829,13 +1754,13 @@ EOF
         log_success "Age key created: $age_key_file"
     fi
 
-    # Verify the key immediately after generation/validation
+    # Verify the key immediately after generation or validation.
     if ! SOPS_AGE_KEY_FILE="$age_key_file" simple_verify_age_key; then
         log_error "Age key verification failed — aborting bootstrap"
         return 1
     fi
 
-    # ── 3. Canonical install (/etc/vaultwarden/age-key.txt) ──────────────────
+    # Install the canonical /etc/vaultwarden/age-key.txt copy.
     local do_install=true
     if [[ -f "$canonical_key" ]] && [[ "$FORCE" != "true" ]]; then
         if check_age_key "$canonical_key" 2>/dev/null; then
@@ -1856,7 +1781,7 @@ EOF
         log_success "Age key installed: $canonical_key (mode 600, ${service_user}:${service_group})"
     fi
 
-    # ── 4. Update .env to canonical key path ─────────────────────────────────
+    # Update .env to use the canonical key path.
     local env_file="${PROJECT_ROOT}/.env"
     if [[ -f "$env_file" ]]; then
         local temp_env
@@ -1869,7 +1794,7 @@ EOF
         log_success "SOPS_AGE_KEY_FILE set to $canonical_key in .env"
     fi
 
-    # ── 5. SOPS config (.sops.yaml) ──────────────────────────────────────────
+    # Write .sops.yaml.
     local age_public_key
     age_public_key=$(get_age_public_key "$age_key_file") || return 1
     if [[ -z "$age_public_key" ]] || ! [[ "$age_public_key" =~ ^age1[a-z0-9]{58}$ ]]; then
@@ -1888,7 +1813,7 @@ EOF
         _write_sops_config "$age_public_key" "$sops_config" || return 1
     fi
 
-    # ── 6. Empty encrypted secrets structure ─────────────────────────────────
+    # Create the placeholder encrypted secrets structure.
     if [[ -f "$secrets_file" ]] && [[ "$FORCE" != "true" ]]; then
         local decrypt_ok=false
         ( export SOPS_AGE_KEY_FILE="$age_key_file"; \
@@ -1929,9 +1854,6 @@ PLACEHOLDERS
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# _write_sops_config — write .sops.yaml for a given Age public key
-# ---------------------------------------------------------------------------
 _write_sops_config() {
     local age_pub="$1" dest="$2"
     cat > "$dest" << SOPS_EOF
@@ -1945,9 +1867,6 @@ SOPS_EOF
     log_success "SOPS config written: $dest"
 }
 
-# ---------------------------------------------------------------------------
-# main
-# ---------------------------------------------------------------------------
 main() {
     (( EUID == 0 )) || { log_error "Must run as root."; exit 1; }
 

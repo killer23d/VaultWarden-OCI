@@ -1,20 +1,5 @@
 #!/usr/bin/env bash
-# utilities/pre-production-drill.sh — VaultWarden-OCI pre-production dry-run drill
-#
-# A non-destructive end-to-end rehearsal for the admin to run before go-live.
-# Exercises: backup creation (dry-run), backup verification, restore path
-# (decryption + integrity only, no data written), email delivery, secrets
-# reload, and stack restart sequence.
-#
-# NOTHING is written to production state. All backup operations use --dry-run
-# or operate on copies in a temporary directory on /dev/shm.
-#
-# USAGE:
-#   sudo ./utilities/pre-production-drill.sh [--skip-email] [--skip-restore]
-#
-# EXIT CODES:
-#   0 — all drill steps passed
-#   1 — one or more steps failed
+# pre-production-drill.sh — Runs a non-destructive pre-production rehearsal for VaultWarden-OCI.
 
 set -euo pipefail
 
@@ -30,9 +15,6 @@ source "$SCRIPT_DIR/lib/backup-utils.sh"
 source "$SCRIPT_DIR/lib/crypto.sh"
 source "$SCRIPT_DIR/lib/storage.sh"
 
-# ---------------------------------------------------------------------------
-# Options
-# ---------------------------------------------------------------------------
 SKIP_EMAIL=false
 SKIP_RESTORE=false
 
@@ -65,9 +47,6 @@ EOF
     esac
 done
 
-# ---------------------------------------------------------------------------
-# Step registry
-# ---------------------------------------------------------------------------
 _STEPS_TOTAL=0
 _STEPS_PASSED=0
 _STEPS_FAILED=0
@@ -99,9 +78,7 @@ _step_header() {
 }
 
 DRILL_TMPDIR=""
-# ---------------------------------------------------------------------------
-# Drill steps
-# ---------------------------------------------------------------------------
+
 
 drill_environment() {
     _step_header "Environment"
@@ -350,9 +327,6 @@ drill_stack_restart_sequence() {
     done
 }
 
-# ---------------------------------------------------------------------------
-# Summary
-# ---------------------------------------------------------------------------
 _print_drill_summary() {
     printf '\n'
     log_header "Pre-Production Drill Summary"
@@ -376,9 +350,6 @@ _print_drill_summary() {
     fi
 }
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 main() {
     require_root
     trap 'perform_cleanup' EXIT HUP INT TERM

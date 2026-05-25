@@ -1,13 +1,5 @@
 #!/usr/bin/env bash
-# utilities/maintenance-update.sh — VaultWarden system + Docker image updater
-#
-# Standalone entry point for the 'update' subcommand.
-# Invoked directly by:
-#   - maintenance.sh update [OPTIONS]  (thin dispatcher)
-#
-# EXIT CODES:
-#   0 — update completed successfully
-#   1 — update failed
+# maintenance-update.sh — Updates VaultWarden system packages and Docker images.
 
 set -euo pipefail
 
@@ -29,9 +21,6 @@ SCRIPT_DIR="$_MAINT_SCRIPT_DIR"
 unset _MAINT_SCRIPT_DIR
 source "$PROJECT_ROOT/lib/storage.sh"
 
-# ---------------------------------------------------------------------------
-# Configuration defaults
-# ---------------------------------------------------------------------------
 UPDATE_SYSTEM=false
 UPDATE_IMAGES=false
 FORCE=false
@@ -65,9 +54,6 @@ EXAMPLES:
 EOF
 }
 
-# ---------------------------------------------------------------------------
-# Update functions — verbatim from maintenance.sh run_update() body
-# ---------------------------------------------------------------------------
 ensure_caddy_entrypoint_executable() {
     local ep="${SCRIPT_DIR}/caddy/entrypoint.sh"
     if [[ ! -f "$ep" ]]; then
@@ -342,9 +328,6 @@ run_pre_update_backup() {
     return 1
 }
 
-# ---------------------------------------------------------------------------
-# Argument parsing & main
-# ---------------------------------------------------------------------------
 [[ "${1:-}" == "update" ]] && shift
 
 while [[ $# -gt 0 ]]; do

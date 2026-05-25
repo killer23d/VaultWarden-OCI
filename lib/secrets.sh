@@ -1,14 +1,33 @@
 #!/usr/bin/env bash
-# lib/secrets.sh - Shared secrets management functions
-# Used by utilities/secrets-edit.sh and setup.sh (--phase=secrets)
+# lib/secrets.sh — Secret management and recovery helpers for VaultWarden-OCI.
 #
+# Provides:
+#   SOPS       : ensure_sops_env, cleanup_secrets_environment, decrypt_secret,
+#                list_secrets, list_secret_keys, validate_secrets_decryption,
+#                validate_secrets_yaml, validate_required_secrets
+#   Secrets    : write_secret_file, generate_admin_token, collect_secret_field,
+#                auto_generate_secret_field, export_docker_secrets
+#   Backups    : create_secrets_backup, cleanup_old_secret_backups,
+#                generate_recovery_kit, offer_recovery_kit_export
+#   Validation : check_placeholder_values, validate_cloudflare_token,
+#                secure_secrets_file
+#
+# Depends on / Load order:
+#   lib/log.sh is auto-loaded if it has not already been sourced.
+#   lib/crypto.sh is sourced by this file and should remain available.
+#
+# Canonical caller source block:
+#   source "${LIB_DIR}/log.sh"
+#   source "${LIB_DIR}/common.sh"
+#   source "${LIB_DIR}/crypto.sh"
+#   source "${LIB_DIR}/secrets.sh"
+
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     echo "Error: This library should be sourced, not executed directly"
     exit 1
 fi
 
-# Use a private variable so we do not clobber the caller's SCRIPT_DIR.
 _SECRETS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Self-load log.sh if not already loaded — allows this lib to be sourced

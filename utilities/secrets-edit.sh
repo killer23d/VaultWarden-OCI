@@ -1,16 +1,5 @@
 #!/usr/bin/env bash
-# utilities/secrets-edit.sh — Interactively edit VaultWarden encrypted secrets
-#
-# Standalone admin tool. Also invocable via: ./edit-secrets.sh edit
-#
-# USAGE:
-#   ./utilities/secrets-edit.sh edit [OPTIONS]
-#   ./edit-secrets.sh edit [OPTIONS]
-#
-# FLAGS:
-#   --editor EDITOR    Use specific editor (default: $EDITOR or nano)
-#   --no-backup        Skip creating backup before edit
-#   --help, -h         Show this help
+# secrets-edit.sh — Interactively edits VaultWarden encrypted secrets.
 
 HISTFILE=/dev/null
 set -euo pipefail
@@ -62,7 +51,7 @@ EXAMPLES:
 EOF
 }
 
-# Parse EDITOR into an array to support flags (e.g. EDITOR='code --wait').
+# Parse EDITOR into an array so flag-bearing values such as EDITOR='code --wait' work.
 read -ra EDITOR_CMD <<< "${EDITOR:-nano}"
 SKIP_BACKUP=false
 readonly MAX_EDIT_ATTEMPTS=5
@@ -115,7 +104,7 @@ create_backup() {
     return 0
 }
 
-# _check_editor_forks — warn when the selected editor is known to fork
+# Warn when the selected editor is known to fork.
 _check_editor_forks() {
     local _editor_str="${EDITOR_CMD[*]}"
     case "$_editor_str" in
@@ -162,7 +151,7 @@ _validate_editor_saved() {
     return 0
 }
 
-# do_edit — interactive edit with YAML validation and atomic re-encrypt
+# Interactively edit secrets with YAML validation and atomic re-encryption.
 do_edit() {
     local _depth="${1:-0}"
     if (( _depth > MAX_EDIT_ATTEMPTS )); then
@@ -198,7 +187,7 @@ do_edit() {
         return 1
     fi
 
-    # Inject inline YAML hints for hashed fields (idempotent — only once).
+    # Inject inline YAML hints for hashed fields only once.
     if ! grep -q "^# HASHED (Argon2id)" "$temp_file"; then
         sed -i \
             -e 's|^admin_token:|# HASHED (Argon2id) — do NOT type plaintext here. Use: ./edit-secrets.sh rotate admin_token\nadmin_token:|' \
@@ -291,7 +280,6 @@ do_edit() {
 }
 
 main() {
-    # Strip the leading "edit" token if called as: secrets-edit.sh edit
     if [[ "${1:-}" == "edit" ]]; then shift; fi
 
     while [[ $# -gt 0 ]]; do

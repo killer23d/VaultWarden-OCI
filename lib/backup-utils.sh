@@ -1,7 +1,27 @@
 #!/usr/bin/env bash
-# backup-utils.sh — Shared backup/restore utilities
+# lib/backup-utils.sh — Backup and restore helpers for VaultWarden-OCI.
+#
+# Provides:
+#   Listing    : list_backups, get_backup_statistics, get_backup_size
+#   Validation : validate_backup_integrity, verify_backup_integrity,
+#                check_backup_disk_space
+#   Retention  : cleanup_old_backups, _backup_filename_age_days,
+#                _backup_ctime_age_days
+#   Metadata   : create_backup_metadata, _resolve_rclone_config,
+#                validate_rclone_config_path
+#
+# Depends on / Load order:
+#   lib/log.sh is auto-loaded if it has not already been sourced.
+#   lib/crypto.sh, lib/common.sh, and lib/docker.sh should be sourced before
+#   callers use helpers that rely on their exported functions.
+#
+# Canonical caller source block:
+#   source "${LIB_DIR}/log.sh"
+#   source "${LIB_DIR}/common.sh"
+#   source "${LIB_DIR}/crypto.sh"
+#   source "${LIB_DIR}/docker.sh"
+#   source "${LIB_DIR}/backup-utils.sh"
 
-# Ensure this library is only loaded once
 [[ -n "${VAULTWARDEN_BACKUP_UTILS_LIB_LOADED:-}" ]] && return 0
 readonly VAULTWARDEN_BACKUP_UTILS_LIB_LOADED=1
 
@@ -11,8 +31,6 @@ _VW_BACKUP_UTILS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -n "${VW_LOG_LIB_LOADED:-}" ]] || source "${_VW_BACKUP_UTILS_LIB_DIR}/log.sh"
 unset _VW_BACKUP_UTILS_LIB_DIR
 
-# Format a byte count as a human-readable string without extra dependencies.
-# Displays KB for sub-MB files; MB (one decimal place) for larger files.
 _format_bytes_human() {
     local bytes="${1:-0}"
     [[ "$bytes" =~ ^[0-9]+$ ]] || bytes=0
@@ -115,8 +133,6 @@ list_backups() {
         return 1
     fi
 
-    # Grand-total line — only shown when there is more than one
-    # active type, so a single-type install doesn't get a redundant line.
     if (( grand_total_types > 1 )); then
         printf "Total: %d file(s), %s  (%d type(s) with backups)\n" \
             "$grand_total_files" \
@@ -313,13 +329,11 @@ get_backup_size() {
     return 0
 }
 
-# Check available disk space for backup operations
-#
-# Uses a portable awk approach (POSIX df guarantees available-blocks
-# in column 4, identical on GNU and BSD).
+# Uses a portable awk approach because POSIX df guarantees available blocks
+# in column 4 on both GNU and BSD implementations.
 check_backup_disk_space() {
     local target_dir="$1"
-    local required_space_mb="${2:-1000}"  # Default 1GB
+    local required_space_mb="${2:-1000}"
 
     if [[ ! -d "$target_dir" ]]; then
         # Warn when directory does not yet exist — this may indicate a
@@ -404,8 +418,6 @@ _backup_ctime_age_days() {
     echo $(( (now_epoch - ctime_epoch) / 86400 ))
 }
 
-# Clean up old backups based on retention policy
-#
 # Removes .age backup files older than $retention_days. A second sweep removes
 # orphaned .meta and .sha256 sidecar files whose corresponding .age primary no
 # longer exists (e.g. after a partial cleanup or manual deletion).
@@ -490,8 +502,6 @@ cleanup_old_backups() {
     return 0
 }
 
-# Get backup statistics
-#
 # find -exec stat -c%s {} + is GNU-only. On macOS stat -c%s
 # errors and awk sums to 0, reporting all backup sizes as 0 MB.
 #
@@ -610,25 +620,21 @@ _resolve_rclone_config() {
     local cfg_from_env
     cfg_from_env="$(get_config_value "RCLONE_CONFIG" "")"
 
-    # Priority 1: explicit value from .env / environment
     if [[ -n "$cfg_from_env" ]]; then
         echo "$cfg_from_env"
         return 0
     fi
 
-    # Priority 2: system-wide config (canonical location for root-run services)
     if [[ -f "/etc/rclone/rclone.conf" ]]; then
         echo "/etc/rclone/rclone.conf"
         return 0
     fi
 
-    # Priority 3: root's own config
     if [[ -f "/root/.config/rclone/rclone.conf" ]]; then
         echo "/root/.config/rclone/rclone.conf"
         return 0
     fi
 
-    # Priority 4: the user who called sudo (most common single-user case)
     if [[ -n "${SUDO_USER:-}" ]]; then
         local sudo_user_home
         sudo_user_home="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6 || true)"
@@ -638,7 +644,6 @@ _resolve_rclone_config() {
         fi
     fi
 
-    # Priority 5: single non-root user heuristic
     local found_cfg
     for found_cfg in /home/*/.config/rclone/rclone.conf; do
         if [[ -f "$found_cfg" ]]; then

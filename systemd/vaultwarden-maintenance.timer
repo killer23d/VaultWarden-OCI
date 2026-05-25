@@ -3,7 +3,8 @@ Description=VaultWarden Maintenance Timer Daily 02:05
 # Do not start maintenance during shutdown.
 After=
 Conflicts=shutdown.target
-# Notify on timer activation failures too, not just service failures.
+# OnFailure on the timer unit catches calendar parse errors or
+# systemd activation failures that would otherwise go unnotified.
 OnFailure=vaultwarden-notify-failure.service
 
 [Timer]

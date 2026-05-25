@@ -1,27 +1,5 @@
 #!/usr/bin/env bash
-# utilities/setup-firewall.sh — VaultWarden-OCI firewall configuration
-#
-# Configures UFW (with Cloudflare CIDR restrictions) and iptables NAT/DOCKER-USER
-# rules for the VaultWarden compose project. Safe to re-run (idempotent).
-#
-# USAGE:
-#   sudo utilities/setup-firewall.sh [--phase ufw|iptables|all] [--auto] [--yes] [--dry-run]
-#
-# FLAGS:
-#   --phase ufw|iptables|all   Phase to run (default: all)
-#   --auto                     Non-interactive mode (implies --yes)
-#   --yes                      Auto-confirm the netfilter-persistent install prompt
-#   --dry-run                  Preview actions without executing
-#   --force                    Skip confirmations
-#   --help, -h                 Show this help
-#
-# NOTES:
-#   UFW rules must be applied AFTER Docker installation. Docker rewrites iptables
-#   chains during installation; rules set before Docker is installed are silently
-#   bypassed by Docker's DOCKER-USER chain.
-#
-#   The systemd unit vaultwarden-iptables.service calls this script with
-#   --phase iptables to re-apply NAT rules after a Docker upgrade resets chains.
+# setup-firewall.sh — Configures VaultWarden-OCI UFW and iptables rules.
 
 set -euo pipefail
 
@@ -35,8 +13,6 @@ source "${PROJECT_ROOT}/lib/config.sh"
 # shellcheck source=../lib/common.sh
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
-
-# ── Helpers ──────────────────────────────────────────────────────────────────
 
 _show_help() {
     cat <<'EOF'
@@ -75,7 +51,7 @@ _require_cli_value() {
     fi
 }
 
-# ── iptables rollback state (populated by _phase_iptables) ───────────────────
+# Store iptables rollback state populated by _phase_iptables().
 _ipt_backup_v4=""
 _ipt_backup_v6=""
 
@@ -94,7 +70,6 @@ _ipt_cleanup() {
     return $_rc
 }
 
-# ── Flags ────────────────────────────────────────────────────────────────────
 PHASE="all"
 AUTO_MODE=false
 DRY_RUN=false
@@ -118,9 +93,6 @@ case "$PHASE" in
     *) log_error "--phase must be ufw|iptables|all (got: '$PHASE')"; exit 1 ;;
 esac
 
-# ══════════════════════════════════════════════════════════════════════════════
-# UFW phase — configure UFW with Cloudflare CIDR restrictions
-# ══════════════════════════════════════════════════════════════════════════════
 _phase_ufw() {
     if [[ "$DRY_RUN" == "true" ]]; then
         log_dry_run "Would configure UFW firewall with Cloudflare CIDR restrictions"
@@ -170,8 +142,8 @@ _phase_ufw() {
     local ufw_active=false
     ufw status | grep -q "Status: active" && ufw_active=true
 
-    # Skip full reconfiguration if UFW is already active and has all required rules,
-    # unless --force was passed to override the idempotency check.
+    # Skip full reconfiguration when UFW is already active with the required rules,
+    # unless --force overrides the idempotency check.
     if [[ "$FORCE" != "true" ]] && \
        [[ "$ufw_active" == "true" ]] && \
        ufw status | grep -q "80/tcp" && \
@@ -191,7 +163,7 @@ _phase_ufw() {
         done
         log_success "Firewall: ports 80/443 restricted to ${#cf_cidrs[@]} Cloudflare CIDRs"
     else
-        # Fallback: unrestricted (already warned above)
+        # Fall back to unrestricted rules as already warned above.
         ufw allow 80/tcp
         ufw allow 443/tcp
     fi
@@ -200,9 +172,6 @@ _phase_ufw() {
     log_success "UFW firewall configured"
 }
 
-# ══════════════════════════════════════════════════════════════════════════════
-# iptables phase — NAT/MASQUERADE, DOCKER-USER, OCI FORWARD REJECT removal
-# ══════════════════════════════════════════════════════════════════════════════
 _phase_iptables() {
     if ! command -v docker >/dev/null 2>&1; then
         log_error "docker command not found"
@@ -217,8 +186,8 @@ _phase_iptables() {
         exit 1
     fi
 
-    # Warn if nftables is active alongside iptables. Running both can cause
-    # conflicting firewall policies where nft rules override iptables.
+    # Warn when nftables is active alongside iptables because nft rules can
+    # override these iptables policies.
     if command -v nft >/dev/null 2>&1; then
         if nft list ruleset 2>/dev/null | grep -q .; then
             log_warn "nftables ruleset is active on this host."
@@ -228,39 +197,25 @@ _phase_iptables() {
         fi
     fi
 
-    # ---------------------------------------------------------------------------
-    # SSH accessibility guard
+    # Verify SSH is reachable before touching iptables rules.
+    # Adding MASQUERADE or FORWARD rules while accidentally blocking SSH could
+    # lock the operator out of the host.
     #
-    # Verify SSH is reachable before touching any iptables rules. Adding
-    # MASQUERADE or FORWARD rules while accidentally blocking SSH could lock
-    # out the operator from the host.
-    #
-    # Three checks are attempted in order:
-    #   1. An explicit ACCEPT rule for the SSH port (dpt:, multiport, state)
-    #      — covers hosts where SSH is guarded by an iptables rule.
-    #   2. A blanket ACCEPT for all traffic (0.0.0.0/0) in the INPUT chain
-    #      — covers hosts with a default-open INPUT policy before a REJECT.
-    #   3. The INPUT chain's default policy is ACCEPT
-    #      — covers OCI and other cloud VMs where SSH access is enforced at
-    #        the VCN / security-group level; the local INPUT chain carries no
-    #        per-port rules at all.
-    # ---------------------------------------------------------------------------
+    # Checks are attempted in order:
+    #   1. An explicit ACCEPT rule for the SSH port.
+    #   2. A blanket ACCEPT for all INPUT traffic.
+    #   3. An INPUT chain default policy of ACCEPT.
+    #   4. A listening SSH daemon with no INPUT DROP or REJECT rules.
     local _ssh_port="${SSH_PORT:-22}"
     local _ssh_ok=false
     if iptables -L INPUT -n 2>/dev/null | grep -qE "ACCEPT.*(tcp dpt:${_ssh_port}|state.*ESTABLISHED|multiport.*${_ssh_port})"; then
-        # Check 1: explicit per-port or stateful ACCEPT rule present.
         _ssh_ok=true
     elif iptables -L INPUT -n 2>/dev/null | grep -qE "ACCEPT[[:space:]]+all[[:space:]]+--[[:space:]]+0\.0\.0\.0/0[[:space:]]+0\.0\.0\.0/0"; then
-        # Check 2: blanket ACCEPT for all traffic — matches exact numeric iptables -n output.
         _ssh_ok=true
     elif iptables -L INPUT 2>/dev/null | head -1 | grep -q "policy ACCEPT"; then
-        # Check 3: INPUT chain default policy is ACCEPT — SSH is accessible via
-        # network-level controls (e.g. OCI VCN security list, AWS security group).
         _ssh_ok=true
     elif ss -tlnp 2>/dev/null | grep -q ":${_ssh_port}" && \
          ! iptables -L INPUT -n 2>/dev/null | grep -qE "^(DROP|REJECT)"; then
-        # Check 4: SSH daemon is listening and INPUT chain has no DROP/REJECT rules —
-        # covers OCI instances where VCN security lists gate access with no local iptables rules.
         _ssh_ok=true
     fi
     if [[ "$_ssh_ok" != "true" ]]; then
@@ -268,9 +223,9 @@ _phase_iptables() {
         log_warn "Proceeding, but verify SSH port ${_ssh_port} remains accessible after this script."
     fi
 
-    # Save current iptables rules before any modifications.
+    # Save the current iptables rules before any modifications.
     # On ERR, INT, or TERM, automatically restore the saved rules so the host
-    # is not left with a partial/broken iptables configuration.
+    # is not left with a partial or broken iptables configuration.
     if [[ "$DRY_RUN" != "true" ]]; then
         _ipt_backup_v4="$(mktemp -p "${PROJECT_ROOT}" .iptables-backup.XXXXXX)"
         iptables-save > "$_ipt_backup_v4" 2>/dev/null || {
@@ -284,7 +239,7 @@ _phase_iptables() {
             }
         fi
         trap '_ipt_cleanup' ERR INT TERM
-        # On success: clean up backup files without rollback.
+        # On success, clean up backup files without performing a rollback.
         trap 'rm -f "${_ipt_backup_v4:-}" "${_ipt_backup_v6:-}"' EXIT
     fi
 
@@ -293,7 +248,7 @@ _phase_iptables() {
         compose_file="docker-compose.yml.example"
     fi
 
-    # Discover bridge network names from docker compose JSON config.
+    # Discover bridge network names from the Docker Compose JSON config.
     local -a NETWORK_NAMES=()
     set +e
     mapfile -t NETWORK_NAMES < <(
@@ -315,7 +270,7 @@ for name, cfg in nets.items():
     )
     set -e
 
-    # Fallback when JSON config discovery is unavailable or returns nothing.
+    # Fall back when JSON config discovery is unavailable or returns nothing.
     if [[ ${#NETWORK_NAMES[@]} -eq 0 ]]; then
         NETWORK_NAMES=(vaultwarden_egress caddy_external)
     fi
@@ -323,7 +278,7 @@ for name, cfg in nets.items():
     local -a SUBNETS=()
     local net subnet full_name
     for net in "${NETWORK_NAMES[@]}"; do
-        # Resolve subnet directly from the JSON config — avoids fragile YAML awk parsing.
+        # Resolve the subnet directly from JSON to avoid fragile YAML awk parsing.
         subnet=$(docker compose -f "${PROJECT_ROOT}/${compose_file}" config --format json 2>/dev/null | \
             python3 -c "
 import json, sys
@@ -334,7 +289,7 @@ cfgs = n.get('ipam', {}).get('config', [])
 print(cfgs[0]['subnet'] if cfgs else '')
 " 2>/dev/null || true)
 
-        # Fallback: inspect the running network by constructed name when no static subnet is pinned.
+        # Fall back to inspecting the running network when no static subnet is pinned.
         if [[ -z "${subnet:-}" ]]; then
             full_name=$(docker compose -f "${PROJECT_ROOT}/${compose_file}" config --format json 2>/dev/null | \
                 python3 -c "
@@ -354,14 +309,12 @@ print(n.get('name', '${net}_network'))
         fi
     done
 
-    # Always include pinned egress subnet as a deterministic baseline.
+    # Always include the pinned egress subnet as a deterministic baseline.
     SUBNETS+=("172.21.0.0/16")
 
-    # Deduplicate
     local -a UNIQUE_SUBNETS=()
     mapfile -t UNIQUE_SUBNETS < <(printf '%s\n' "${SUBNETS[@]}" | awk 'NF && !seen[$0]++')
 
-    # IPv4 MASQUERADE
     for subnet in "${UNIQUE_SUBNETS[@]}"; do
         if [[ "$DRY_RUN" == "true" ]]; then
             if iptables -t nat -C POSTROUTING -s "$subnet" ! -o docker0 -j MASQUERADE >/dev/null 2>&1; then
@@ -379,14 +332,13 @@ print(n.get('name', '${net}_network'))
         log_success "ADDED: MASQUERADE for $subnet (IPv4)"
     done
 
-    # Add ip6tables MASQUERADE rules mirroring the IPv4 rules above.
-    # Docker assigns IPv6 ULA subnets (fd00::/8) when IPv6 is enabled in daemon.json.
-    # Without ip6tables MASQUERADE, IPv6 container traffic cannot reach the internet.
-    # Note: This is a best-effort mirror — if ip6tables is absent (some kernels
-    # compile without ip6tables support), we emit a clear WARNING and continue.
+    # Mirror the IPv4 MASQUERADE rules in ip6tables when IPv6 is enabled.
+    # Docker assigns IPv6 ULA subnets such as fd00::/8, and without ip6tables
+    # MASQUERADE, IPv6 container traffic cannot reach the internet.
+    # This is best-effort because some kernels do not provide ip6tables support.
     if command -v ip6tables >/dev/null 2>&1; then
         for subnet in "${UNIQUE_SUBNETS[@]}"; do
-            # Skip IPv4-only CIDR notation — ip6tables only handles IPv6 prefixes.
+            # Skip IPv4-only CIDR notation because ip6tables only handles IPv6 prefixes.
             if [[ "$subnet" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/ ]]; then
                 continue
             fi
@@ -410,12 +362,11 @@ print(n.get('name', '${net}_network'))
         log_warn "Container IPv6 traffic may not reach the internet."
     fi
 
-    # Remove OCI's default FORWARD REJECT rule if present (safe to run repeatedly).
-    # On a fresh Oracle Cloud instance, OCI injects:
+    # Remove OCI's default FORWARD REJECT rule if it is present.
+    # Fresh Oracle Cloud instances inject:
     #   -A FORWARD -j REJECT --reject-with icmp-host-prohibited
-    # into the FORWARD chain. This blocks all container-to-container and
-    # container-to-internet forwarding until removed, making a fresh deploy fail
-    # silently. The while loop handles the case where the rule appears more than once.
+    # This blocks container forwarding until removed, and the while loop handles
+    # the case where the rule appears more than once.
     if [[ "$DRY_RUN" == "true" ]]; then
         if iptables -C FORWARD -j REJECT --reject-with icmp-host-prohibited 2>/dev/null; then
             log_dry_run "Would remove: OCI default FORWARD REJECT rule"
@@ -434,12 +385,12 @@ print(n.get('name', '${net}_network'))
         fi
     fi
 
-    # Accept only the three pinned VaultWarden compose subnets in DOCKER-USER.
-    # Using pinned subnets (not all RFC1918) prevents any future Docker project
-    # on this host from inheriting unrestricted forwarding between all networks.
+    # Accept only the three pinned VaultWarden Compose subnets in DOCKER-USER.
+    # Using pinned subnets instead of all RFC1918 ranges prevents future Docker
+    # projects on this host from inheriting unrestricted forwarding.
     # Subnets: 172.21.0.0/16 (vaultwarden_egress), 172.22.0.0/16 (caddy_external),
-    #          172.23.0.0/16 (postfix_relay) — pinned in docker-compose.yml.example.
-    # Keep this idempotent and append-only so repeated runs remain predictable.
+    #          172.23.0.0/16 (postfix_relay), all pinned in docker-compose.yml.example.
+    # Keep this append-only and idempotent so repeated runs stay predictable.
     if iptables -t filter -S DOCKER-USER >/dev/null 2>&1; then
         local cidr
         for cidr in "172.21.0.0/16" "172.22.0.0/16" "172.23.0.0/16"; do
@@ -462,8 +413,8 @@ print(n.get('name', '${net}_network'))
         log_warn "DOCKER-USER chain not available; skipping forward-policy remediation"
     fi
 
-    # Persist iptables rules across reboots via netfilter-persistent.
-    # Install it automatically (with confirmation or --yes / --auto) if absent.
+    # Persist iptables rules across reboots with netfilter-persistent.
+    # Install it automatically with confirmation or --yes / --auto when absent.
     if [[ "$DRY_RUN" == "true" ]]; then
         if command -v netfilter-persistent >/dev/null 2>&1; then
             log_dry_run "Would run: netfilter-persistent save"
@@ -507,9 +458,6 @@ print(n.get('name', '${net}_network'))
     log_success "Persisted iptables rules with netfilter-persistent"
 }
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Entry point
-# ══════════════════════════════════════════════════════════════════════════════
 main() {
     (( EUID == 0 )) || { log_error "Must run as root."; exit 1; }
 

@@ -1,14 +1,5 @@
 #!/usr/bin/env bash
-# utilities/maintenance-update-firewall.sh — VaultWarden Cloudflare firewall range updater
-#
-# Standalone entry point for the 'update-firewall' subcommand.
-# Invoked directly by:
-#   - maintenance.sh update-firewall [OPTIONS]  (thin dispatcher)
-#   - systemd/vaultwarden-firewall-update.service
-#
-# EXIT CODES:
-#   0 — Firewall IP ranges updated successfully (or skipped as appropriate)
-#   1 — Firewall update failed
+# maintenance-update-firewall.sh — Updates UFW rules for Cloudflare IP ranges.
 
 set -euo pipefail
 
@@ -29,9 +20,6 @@ SCRIPT_DIR="$_MAINT_SCRIPT_DIR"
 unset _MAINT_SCRIPT_DIR
 source "$PROJECT_ROOT/lib/storage.sh"
 
-# ---------------------------------------------------------------------------
-# Configuration defaults
-# ---------------------------------------------------------------------------
 UPDATE_FIREWALL=true
 DRY_RUN=false
 
@@ -60,18 +48,12 @@ EXIT CODES:
 EOF
 }
 
-# ---------------------------------------------------------------------------
-# _load_env
-# ---------------------------------------------------------------------------
 _load_env() {
     if load_env_file 2>/dev/null; then return 0; fi
     log_warn "No .env file found — relying on environment already set (e.g. systemd EnvironmentFile)"
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# update_firewall_ranges — verbatim from maintenance.sh
-# ---------------------------------------------------------------------------
 # shellcheck disable=SC2120  # $@ is forwarded to require_root; callers pass no args intentionally
 update_firewall_ranges() {
     if [[ "$UPDATE_FIREWALL" != "true" ]]; then log_info "Skipping firewall update"; return 0; fi
@@ -165,10 +147,6 @@ update_firewall_ranges() {
     return 0
 }
 
-# ---------------------------------------------------------------------------
-# Argument parsing & main
-# ---------------------------------------------------------------------------
-# Strip leading 'update-firewall' token if passed through from dispatcher
 [[ "${1:-}" == "update-firewall" ]] && shift
 
 while [[ $# -gt 0 ]]; do

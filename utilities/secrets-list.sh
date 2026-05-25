@@ -1,14 +1,5 @@
 #!/usr/bin/env bash
-# utilities/secrets-list.sh — List VaultWarden secret key names (no values)
-#
-# Standalone admin tool. Also invocable via: ./edit-secrets.sh list
-#
-# USAGE:
-#   ./utilities/secrets-list.sh list [OPTIONS]
-#   ./edit-secrets.sh list [OPTIONS]
-#
-# FLAGS:
-#   --help, -h    Show this help
+# secrets-list.sh — Lists VaultWarden secret key names without showing secret values.
 
 HISTFILE=/dev/null
 set -euo pipefail
@@ -93,7 +84,6 @@ check_prerequisites() {
 }
 
 main() {
-    # Strip the leading "list" token if called as: secrets-list.sh list
     if [[ "${1:-}" == "list" ]]; then shift; fi
 
     case "${1:-}" in
