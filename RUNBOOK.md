@@ -8,11 +8,22 @@ the repository root on the server. Prefix with `sudo` where indicated.
 ## First Time / Recovery
 
 For first-time setup on a new host:
+
 1. Configure OCI Security List (ports `80`, `443`, and `22`).
-2. Copy `.env.example` to `.env` and set at minimum: `DOMAIN`, `ADMIN_EMAIL`, `CLOUDFLARE_ZONE_ID`, and your email settings.
-3. Run `sudo ./setup.sh install --domain <fqdn> --email <admin-email> --auto` (or `sudo make setup` if `.env` is already prepared).
-4. Re-login so your user picks up `docker` group membership.
-5. Start services with `make up` and verify with `make health`.
+2. Copy `.env.example` to `.env` and set at minimum: `DOMAIN`, `ADMIN_EMAIL`,
+   `CLOUDFLARE_ZONE_ID`, `CF_ACCOUNT_ID`, and your email settings.
+3. Store the Cloudflare Workers bouncer token:
+   `./edit-secrets.sh rotate cf_worker_bouncer_token`
+4. Run `sudo ./setup.sh install --domain <fqdn> --email <admin-email> --auto`
+   (or `sudo make setup` if `.env` is already prepared).
+5. Re-login so your user picks up `docker` group membership.
+6. Start services with `make up` and verify with `make health`.
+7. **After CrowdSec is installed**, set the Cloudflare Worker route to
+   **Fail Open**: Cloudflare dashboard → your domain → Workers Routes → Edit
+   → Request limit failure mode → Fail open.
+
+See [docs/CROWDSEC.md](docs/CROWDSEC.md) for the full CrowdSec + Cloudflare
+Workers bouncer setup guide.
 
 | Task | Command |
 |------|---------|
@@ -155,37 +166,67 @@ make breakglass-remove
 
 ## 🛡️ CrowdSec Operations
 
-CrowdSec runs as a host systemd service (not a Docker container). It reads Vaultwarden, Caddy, and SSH logs and bans attackers via the Cloudflare API and iptables.
+CrowdSec runs as a host systemd service (not a Docker container). It reads
+Vaultwarden, Caddy, and SSH logs and bans attackers via Cloudflare Workers KV
+(edge enforcement) and iptables (host-level enforcement).
+
+For full setup, Cloudflare dashboard configuration, and troubleshooting see
+[docs/CROWDSEC.md](docs/CROWDSEC.md).
+
+### Service management
 
 | Task | Command |
 |------|---------|
-| Check CrowdSec status | `sudo systemctl status crowdsec` |
+| Check CrowdSec engine status | `sudo systemctl status crowdsec` |
+| Check Workers bouncer status | `sudo systemctl status crowdsec-cloudflare-worker-bouncer` |
+| Restart bouncer after config change | `sudo systemctl restart crowdsec-cloudflare-worker-bouncer` |
+| View bouncer logs (live) | `sudo journalctl -u crowdsec-cloudflare-worker-bouncer -f` |
+| Restart CrowdSec engine | `sudo systemctl restart crowdsec` |
+
+### Decision management
+
+| Task | Command |
+|------|---------|
 | View active bans | `sudo cscli decisions list` |
 | View recent alerts | `sudo cscli alerts list --since 24h` |
-| Unban an IP | `make unban IP=1.2.3.4` |
+| Manually ban an IP (24 h) | `sudo cscli decisions add --ip 1.2.3.4 --duration 24h` |
+| Unban an IP | `sudo cscli decisions delete --ip 1.2.3.4` |
 | View metrics | `make crowdsec-status` |
 | Tail CrowdSec logs | `make logs-crowdsec` |
 | View security events (last 1h) | `make security-report` |
-| Manually ban an IP | `sudo cscli decisions add --ip 1.2.3.4 --duration 24h` |
-| Check bouncer status | `sudo systemctl status crowdsec-cloudflare-bouncer` |
-| Restart after config change | `sudo systemctl restart crowdsec` |
+| Check bouncer registration | `sudo cscli bouncers list` |
 
-### Self-Lockout Prevention
+### Self-lockout prevention
 
-Add your admin IP to the CrowdSec whitelist to prevent accidental bans:
+Add your admin IP to the persistent CrowdSec allowlist using the setup script
+(writes a YAML parser file that survives hub updates):
 
 ```bash
-sudo cscli whitelists add myip "$(curl -s https://ifconfig.me)"
-# Or for a CIDR range:
-sudo cscli whitelists add myvpn 203.0.113.0/24
+# Single IP
+sudo ./utilities/setup-crowdsec.sh --admin-ip "$(curl -s https://ifconfig.me)"
+
+# CIDR range
+sudo ./utilities/setup-crowdsec.sh --admin-ip 203.0.113.0/24
 ```
 
-### If You Are Locked Out
+### If you are locked out
 
 If your IP is banned and you cannot access the vault:
-1. SSH to the server (vault bans do not affect SSH)
-2. Run: `sudo cscli decisions delete --ip <your-ip>`
-3. Optionally whitelist: `sudo cscli whitelists add myip <your-ip>`
+
+```bash
+# 1. SSH to the server (vault bans do not affect SSH)
+# 2. Delete the ban immediately
+sudo cscli decisions delete --ip <your-ip>
+# 3. Add a persistent allowlist entry so it cannot recur
+sudo ./utilities/setup-crowdsec.sh --admin-ip <your-ip>
+```
+
+### Re-run CrowdSec setup (e.g. after rotating the CF token)
+
+```bash
+./edit-secrets.sh rotate cf_worker_bouncer_token
+sudo ./utilities/setup-crowdsec.sh --force
+```
 
 ---
 
