@@ -179,9 +179,9 @@ if [[ "$DRY_RUN" == "true" ]]; then
     echo "  [9] State directory: ${PROJECT_STATE_DIR}"
     echo "  [10] Extra packages: age haveged rclone python3-argon2 apache2-utils cron"
     echo "  [10.5] CrowdSec:"
-    echo "         - Services: crowdsec crowdsec-firewall-bouncer crowdsec-cloudflare-bouncer"
+    echo "         - Services: crowdsec crowdsec-firewall-bouncer crowdsec-cloudflare-worker-bouncer"
     echo "         - Packages: crowdsec crowdsec-firewall-bouncer-iptables"
-    echo "         - Binary:   /usr/local/bin/crowdsec-cloudflare-bouncer"
+    echo "         - Binary:   /usr/local/bin/crowdsec-cloudflare-worker-bouncer"
     echo "         - APT repo: /etc/apt/sources.list.d/crowdsec_crowdsec.list"
     echo "         - GPG key:  /etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.gpg (and .asc)"
     echo "         - Config:   /etc/crowdsec/ (acquis.d/vaultwarden.yaml, bouncers/, profiles.yaml)"
@@ -774,7 +774,7 @@ info "Step 10.5: Removing CrowdSec and associated components..."
 
 # Reverse CrowdSec phase 8 by stopping and disabling all services.
 for _cs_svc in \
-    crowdsec-cloudflare-bouncer \
+    crowdsec-cloudflare-worker-bouncer \
     crowdsec-firewall-bouncer \
     crowdsec; do
     if systemctl is-active  "$_cs_svc" &>/dev/null 2>&1 || \
@@ -788,7 +788,7 @@ for _cs_svc in \
 done
 
 # Reverse CrowdSec phase 2 by removing the Cloudflare bouncer binary.
-_CF_BOUNCER_BIN="/usr/local/bin/crowdsec-cloudflare-bouncer"
+_CF_BOUNCER_BIN="/usr/local/bin/crowdsec-cloudflare-worker-bouncer"
 if [[ -f "$_CF_BOUNCER_BIN" ]]; then
     rm -f "$_CF_BOUNCER_BIN" \
         && success "Removed Cloudflare bouncer binary: ${_CF_BOUNCER_BIN}"
@@ -797,7 +797,7 @@ else
 fi
 
 # Also remove the systemd unit file that the binary install may have dropped.
-_CF_BOUNCER_UNIT="/etc/systemd/system/crowdsec-cloudflare-bouncer.service"
+_CF_BOUNCER_UNIT="/etc/systemd/system/crowdsec-cloudflare-worker-bouncer.service"
 if [[ -f "$_CF_BOUNCER_UNIT" ]]; then
     rm -f "$_CF_BOUNCER_UNIT" \
         && success "Removed CrowdSec Cloudflare bouncer unit: ${_CF_BOUNCER_UNIT}"
@@ -858,7 +858,7 @@ if [[ -f "$_ACQUIS_FILE" ]]; then
 fi
 
 # Reverse CrowdSec phase 6 by removing the Cloudflare bouncer config with care.
-_CF_BOUNCER_CFG="/etc/crowdsec/bouncers/crowdsec-cloudflare-bouncer.yaml"
+_CF_BOUNCER_CFG="/etc/crowdsec/bouncers/crowdsec-cloudflare-worker-bouncer.yaml"
 if [[ -f "$_CF_BOUNCER_CFG" ]]; then
     rm -f "$_CF_BOUNCER_CFG" \
         && success "Removed CrowdSec Cloudflare bouncer config: ${_CF_BOUNCER_CFG}"

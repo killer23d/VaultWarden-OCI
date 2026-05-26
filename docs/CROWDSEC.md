@@ -444,12 +444,12 @@ sudo cscli bouncers list
 
 ## Part 8 — Migration from Legacy Bouncer
 
-If you previously had `crowdsec-cloudflare-bouncer` installed:
+If you previously had `crowdsec-cloudflare-worker-bouncer` installed:
 
 ```bash
 # 1. Stop and disable the old service
-sudo systemctl stop crowdsec-cloudflare-bouncer || true
-sudo systemctl disable crowdsec-cloudflare-bouncer || true
+sudo systemctl stop crowdsec-cloudflare-worker-bouncer || true
+sudo systemctl disable crowdsec-cloudflare-worker-bouncer || true
 
 # 2. Deregister the old bouncer
 sudo cscli bouncers delete cloudflare-bouncer || true
@@ -460,13 +460,13 @@ sudo ./utilities/setup-crowdsec.sh --force
 # 4. Set Worker route to Fail Open in Cloudflare dashboard (section 1.3)
 ```
 
-The old binary at `/usr/local/bin/crowdsec-cloudflare-bouncer` and the old
-config at `/etc/crowdsec/bouncers/crowdsec-cloudflare-bouncer.yaml` can be
+The old binary at `/usr/local/bin/crowdsec-cloudflare-worker-bouncer` and the old
+config at `/etc/crowdsec/bouncers/crowdsec-cloudflare-worker-bouncer.yaml` can be
 removed after confirming the new bouncer is healthy:
 
 ```bash
-sudo rm -f /usr/local/bin/crowdsec-cloudflare-bouncer
-sudo rm -f /etc/crowdsec/bouncers/crowdsec-cloudflare-bouncer.yaml
-sudo rm -f /etc/systemd/system/crowdsec-cloudflare-bouncer.service
+sudo rm -f /usr/local/bin/crowdsec-cloudflare-worker-bouncer
+sudo rm -f /etc/crowdsec/bouncers/crowdsec-cloudflare-worker-bouncer.yaml
+sudo rm -f /etc/systemd/system/crowdsec-cloudflare-worker-bouncer.service
 sudo systemctl daemon-reload
 ```

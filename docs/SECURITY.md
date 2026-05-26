@@ -71,7 +71,7 @@ VaultWarden-OCI implements defense-in-depth with multiple security layers:
 #### Web Traffic (Proxied through Cloudflare)
 
 CrowdSec detects threats from logs and issues ban decisions. The
-`cs-cloudflare-bouncer` then blocks IPs at Cloudflare's edge via the WAF
+`crowdsec-cloudflare-worker-bouncer` then blocks IPs at Cloudflare's edge via the WAF
 Custom Rules Rulesets API:
 
 ```bash
@@ -79,7 +79,7 @@ Custom Rules Rulesets API:
 sudo cscli decisions list --type ban
 
 # Check Cloudflare bouncer is applying bans
-sudo journalctl -u cs-cloudflare-bouncer | grep -i "add\|block"
+sudo journalctl -u crowdsec-cloudflare-worker-bouncer | grep -i "add\|block"
 ```
 
 #### SSH Traffic (Direct, NOT Proxied)
@@ -184,7 +184,7 @@ Containers (Read-Only Access)
 admin_token: "48-char-alphanumeric-string"
 admin_basic_auth_hash: "admin $2b$14$bcrypt_hash"
 caddy_cloudflare_dns_token: "cloudflare_dns_token"
-crowdsec_cf_firewall_token: "cloudflare_firewall_token"  # used by cs-cloudflare-bouncer
+cf_worker_bouncer_token: "cloudflare_firewall_token"  # used by crowdsec-cloudflare-worker-bouncer
 smtp_password: "smtp_password"
 push_installation_id: "optional"
 push_installation_key: "optional"
@@ -229,7 +229,7 @@ chmod 600 secrets/secrets.yaml.backup-*
 ### Cloudflare-Only Web Bans
 
 CrowdSec detects threats from VaultWarden and Caddy logs. All web-facing ban
-decisions are executed via the Cloudflare WAF (`cs-cloudflare-bouncer`):
+decisions are executed via the Cloudflare WAF (`crowdsec-cloudflare-worker-bouncer`):
 
 ```bash
 # Check active decisions
@@ -753,7 +753,7 @@ Caddy rate_limit → CrowdSec detection → Cloudflare/iptables ban
 | :-- | :-- | :-- |
 | 1 — Caddy `rate_limit` | Module `mholt/caddy-ratelimit` | Burst/volume traffic before it reaches VaultWarden |
 | 2 — CrowdSec detection | Parses logs; runs LAPI scenarios | Identifies brute-force, scanning, and exploit attempts |
-| 3 — Cloudflare/iptables ban | `cs-cloudflare-bouncer` + `crowdsec-firewall-bouncer` | Blocks IPs at Cloudflare edge and host iptables |
+| 3 — Cloudflare/iptables ban | `crowdsec-cloudflare-worker-bouncer` + `crowdsec-firewall-bouncer` | Blocks IPs at Cloudflare edge and host iptables |
 
 ### Key Commands
 
@@ -782,16 +782,16 @@ sudo cscli decisions delete --ip 1.2.3.4
 
 ### Cloudflare Bouncer
 
-The `cs-cloudflare-bouncer` reads the Cloudflare API token from
-`${PROJECT_STATE_DIR}/secrets/.docker_secrets/crowdsec_cf_firewall_token`
+The `crowdsec-cloudflare-worker-bouncer` reads the Cloudflare API token from
+`${PROJECT_STATE_DIR}/secrets/.docker_secrets/cf_worker_bouncer_token`
 and creates WAF Custom Rules via the Rulesets API when CrowdSec issues ban decisions.
 
 ```bash
 # Check bouncer status
-sudo systemctl status cs-cloudflare-bouncer
+sudo systemctl status crowdsec-cloudflare-worker-bouncer
 
 # View bouncer logs
-sudo journalctl -u cs-cloudflare-bouncer -f
+sudo journalctl -u crowdsec-cloudflare-worker-bouncer -f
 ```
 
 ### Firewall Bouncer (SSH / iptables)
@@ -961,7 +961,7 @@ sudo cscli decisions list
 sudo cscli alerts list
 
 # Check Cloudflare bouncer integration
-sudo journalctl -u cs-cloudflare-bouncer | grep -i cloudflare
+sudo journalctl -u crowdsec-cloudflare-worker-bouncer | grep -i cloudflare
 
 # View active bans for a specific IP
 sudo cscli decisions list --ip 1.2.3.4
@@ -1090,10 +1090,10 @@ curl -X GET "https://api.cloudflare.com/client/v4/zones/${CLOUDFLARE_ZONE_ID}/ru
 sudo systemctl status crowdsec
 
 # Check Cloudflare bouncer status
-sudo systemctl status cs-cloudflare-bouncer
+sudo systemctl status crowdsec-cloudflare-worker-bouncer
 
 # Verify Cloudflare token is readable
-cat ${PROJECT_STATE_DIR}/secrets/.docker_secrets/crowdsec_cf_firewall_token
+cat ${PROJECT_STATE_DIR}/secrets/.docker_secrets/cf_worker_bouncer_token
 
 # Check for errors in CrowdSec logs
 sudo journalctl -u crowdsec | grep -i error

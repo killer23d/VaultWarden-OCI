@@ -3,7 +3,7 @@
 # Cloudflare *Workers* bouncer (crowdsec-cloudflare-worker-bouncer) for
 # VaultWarden-OCI.
 #
-# The legacy crowdsec-cloudflare-bouncer is no longer actively supported by
+# The legacy crowdsec-cloudflare-worker-bouncer is no longer actively supported by
 # CrowdSec due to Cloudflare API rate-limit changes.  This script uses the
 # recommended replacement: crowdsec-cloudflare-worker-bouncer, which leverages
 # Cloudflare Workers + Workers KV storage for decision enforcement.
@@ -246,7 +246,7 @@ else
         log_info "CrowdSec version: installing latest from packagecloud repository"
     fi
 
-    log_info "Installing CrowdSec packages..."
+    log_info "Installing CrowdSec engine package first..."
     _fw_pkg="crowdsec-firewall-bouncer-iptables"
     if iptables -V 2>/dev/null | grep -q 'nf_tables'; then
         _fw_pkg="crowdsec-firewall-bouncer-nftables"
@@ -254,9 +254,9 @@ else
     else
         log_info "iptables detected — installing crowdsec-firewall-bouncer-iptables."
     fi
-    DEBIAN_FRONTEND=noninteractive apt-get install -y \
-        "$_cs_pkg" \
-        "$_fw_pkg"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "$_cs_pkg"
+    log_info "Installing CrowdSec firewall bouncer package..."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "$_fw_pkg"
 fi
 
 if [[ "$DRY_RUN" != "true" ]]; then

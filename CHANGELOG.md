@@ -94,7 +94,7 @@ Shared library sourced by `maintenance-run.sh`, `maintenance-db-maint.sh`, and
 - **Security layer**: Replaced the `crazymax/fail2ban` Docker container with
   CrowdSec running as a **host systemd service** (`crowdsec` + bouncers).
 - **Cloudflare bouncer**: Bans at the Cloudflare WAF edge are now handled by
-  `cs-cloudflare-bouncer`; reads the same `crowdsec_cf_firewall_token`
+  `crowdsec-cloudflare-worker-bouncer`; reads the same `cf_worker_bouncer_token`
   secret path for backward compatibility.
 - **SSH/iptables bouncer**: Host iptables rules for SSH protection are now
   managed by `crowdsec-firewall-bouncer` instead of Fail2Ban.
