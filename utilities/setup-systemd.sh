@@ -187,17 +187,67 @@ _sha256() {
     fi
 }
 
-_resolve_service_identity() {
-    local service_user="${SERVICE_USER:-${BACKUP_USER:-ubuntu}}"
-    local service_group="${SERVICE_GROUP:-}"
 
-    if ! id -u "$service_user" >/dev/null 2>&1; then
-        log_warn "Configured service user '$service_user' does not exist — falling back to ubuntu"
-        service_user="ubuntu"
+# _resolve_service_user
+#
+# Determines the non-root user that the backup/health/DNS systemd services
+# should run as. Detection order (first match wins):
+#   1. SERVICE_USER env var (explicit operator override)
+#   2. SUDO_USER env var   (the human who invoked sudo — most common case)
+#   3. First UID≥1000 account with a real login shell from getent passwd
+#      (Ubuntu default: ubuntu; other distros will find their primary user)
+#   4. Hard fail — never silently default to root or a phantom user.
+#
+# Echoes the resolved username on stdout; returns 0 on success, 1 on failure.
+# Callers must handle the failure return and abort installation.
+_resolve_service_user() {
+    # 1. Explicit operator override always wins.
+    if [[ -n "${SERVICE_USER:-}" ]]; then
+        if id "$SERVICE_USER" &>/dev/null; then
+            echo "$SERVICE_USER"
+            return 0
+        fi
+        # Log a warning but continue to try the remaining heuristics.
+        log_warn "SERVICE_USER='${SERVICE_USER}' does not exist on this system — trying detection."
     fi
+
+    # 2. The human who invoked sudo is the most reliable signal on Ubuntu cloud
+    #    images and developer workstations alike (sudo always sets SUDO_USER).
+    if [[ -n "${SUDO_USER:-}" ]] && id "$SUDO_USER" &>/dev/null; then
+        echo "$SUDO_USER"
+        return 0
+    fi
+
+    # 3. Fall back to the first UID≥1000 account with a real login shell.
+    #    On Ubuntu this resolves to 'ubuntu'; on other distros it resolves to
+    #    whatever the primary non-root user account is.
+    local candidate
+    candidate=$(getent passwd | awk -F: '$3>=1000 && $7!~/false|nologin/{print $1; exit}')
+    if [[ -n "$candidate" ]]; then
+        echo "$candidate"
+        return 0
+    fi
+
+    # 4. Hard fail — returning empty/root would cause subtler failures later.
+    echo ""
+    return 1
+}
+
+_resolve_service_identity() {
+    local service_user service_group
+
+    service_user=$(_resolve_service_user) || {
+        log_error "Cannot determine the service user for systemd unit drop-ins."
+        log_error "Set SERVICE_USER=<username> in the environment and re-run:"
+        log_error "  sudo SERVICE_USER=myuser utilities/setup-systemd.sh install"
+        return 1
+    }
+
+    service_group="${SERVICE_GROUP:-}"
     if [[ -z "$service_group" ]]; then
-        service_group=$(id -gn "$service_user" 2>/dev/null || echo "$service_user")
+        service_group=$(id -gn "$service_user" 2>/dev/null) || service_group="$service_user"
     fi
+
     printf '%s:%s\n' "$service_user" "$service_group"
 }
 
@@ -225,9 +275,11 @@ _ensure_runtime_lock_files() {
     done
 }
 
-# Services that run as the service user (not root). These get a User=/Group=
-# identity drop-in so that a non-ubuntu service account is honoured even
-# though the base unit files ship with User=ubuntu for documentation clarity.
+# Services that run as the detected service user (not root). These get a
+# User=/Group= drop-in so that the identity resolved at install time is written
+# into the unit rather than being baked into the base unit files.
+# Base unit files deliberately omit User= / Group= and carry a comment
+# instructing operators to run setup-systemd.sh install.
 _IDENTITY_DROPIN_UNITS=(
     vaultwarden-health.service
     vaultwarden-db-backup.service
@@ -259,8 +311,10 @@ _install_service_identity_dropin() {
 # Written by setup-systemd.sh install — do not edit by hand.
 # Regenerate: sudo utilities/setup-systemd.sh install
 #
-# Overrides User= / Group= so that a non-ubuntu service account is used when
-# the resolved service identity differs from the default in the base unit file.
+# Sets the service identity detected at install time (SERVICE_USER env var,
+# SUDO_USER, or first UID≥1000 account). Base unit files deliberately omit
+# User= / Group= so that running without this drop-in fails visibly rather
+# than silently executing as root.
 [Service]
 User=${service_user}
 Group=${service_group}

@@ -218,8 +218,20 @@ main() {
         exit 1
     fi
 
-    touch /run/lock/vaultwarden-maintenance.lock
-    register_cleanup rm -f /run/lock/vaultwarden-maintenance.lock
+    # Maintenance presence lock — same flock pattern as maintenance-run.sh.
+    # Also adds the missing `trap 'perform_cleanup'` so the file is actually
+    # removed on all exit paths (previously the register_cleanup was registered
+    # but no trap wired it to EXIT/signals, so the file was never cleaned up).
+    local _MAINT_LOCK="/run/lock/vaultwarden-maintenance.lock"
+    local _MAINT_LOCK_FD
+    install -m 0660 -o root -g root /dev/null "$_MAINT_LOCK"
+    exec {_MAINT_LOCK_FD}>"$_MAINT_LOCK"
+    if ! flock -n "$_MAINT_LOCK_FD"; then
+        log_error "Another maintenance operation is already running. Exiting."
+        exit 1
+    fi
+    register_cleanup rm -f "$_MAINT_LOCK"
+    trap 'perform_cleanup' EXIT HUP INT TERM
     _load_env
     run_deep_db_maintenance
     exit $?

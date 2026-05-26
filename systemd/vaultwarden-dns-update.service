@@ -18,8 +18,10 @@ WorkingDirectory=/opt/vaultwarden-scripts
 # and reported by the script itself.
 EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
 ExecStart=/opt/vaultwarden-scripts/maintenance.sh update-dns
-User=ubuntu
-Group=ubuntu
+# User/Group are NOT set here. They are injected at install time via
+# a systemd drop-in written by: sudo utilities/setup-systemd.sh install
+# Running units without the drop-in will cause them to execute as root,
+# which is intentionally unsafe. Always run setup-systemd.sh install.
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=vw-dns-update
