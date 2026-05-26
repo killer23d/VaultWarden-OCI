@@ -190,7 +190,7 @@ make restart   # Force restart
 
 make health                        # Basic
 make health AUTO_RECOVER=true      # With auto-recovery (passes --fix)
-make health-quick                  # Comprehensive check
+make health-quick                  # Quick check — concise output
 ```
 
 > **Systemd note:** The `vaultwarden-health.service` unit runs `maintenance.sh health --fix` by default.

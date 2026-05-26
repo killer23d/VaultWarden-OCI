@@ -523,13 +523,32 @@ sync_to_rclone() {
     fi
 
     local meta_file="${enc_file}.meta"
+    local _sidecar_warn=false
     if [[ -f "$meta_file" ]]; then
-        rclone copy "${rclone_config_arg[@]}" "$meta_file" "$remote_path/" --checksum 2>&1 || true
+        local _meta_exit=0
+        rclone copy "${rclone_config_arg[@]}" "$meta_file" "$remote_path/" --checksum \
+            2>"${rclone_stderr_tmp}" || _meta_exit=$?
+        if (( _meta_exit != 0 )); then
+            log_warn "[backup] Sidecar upload FAILED: $(basename "$meta_file") (exit ${_meta_exit}) — integrity metadata missing from remote." >&2
+            _sidecar_warn=true
+        fi
     fi
 
     local sha256_file="${enc_file}.sha256"
     if [[ -f "$sha256_file" ]]; then
-        rclone copy "${rclone_config_arg[@]}" "$sha256_file" "$remote_path/" --checksum 2>&1 || true
+        local _sha256_exit=0
+        rclone copy "${rclone_config_arg[@]}" "$sha256_file" "$remote_path/" --checksum \
+            2>"${rclone_stderr_tmp}" || _sha256_exit=$?
+        if (( _sha256_exit != 0 )); then
+            log_warn "[backup] Sidecar upload FAILED: $(basename "$sha256_file") (exit ${_sha256_exit}) — checksum file missing from remote." >&2
+            _sidecar_warn=true
+        fi
+    fi
+
+    if [[ "$_sidecar_warn" == "true" ]]; then
+        log_warn "[backup] One or more sidecar files could not be uploaded to ${remote_path}/." >&2
+        log_warn "[backup] The primary backup archive was delivered. Remote integrity checks will" >&2
+        log_warn "[backup] fall back to size-only verification until sidecars are re-uploaded." >&2
     fi
 
     local remote_file_path
@@ -564,6 +583,132 @@ sync_to_rclone() {
     backup_log_info "Remote size verified: ${remote_file_path} — ${remote_size_bytes} bytes ${remote_size_human}"
     backup_log_info "Offsite sync complete → ${remote_file_path}"
 
+}
+
+# _prune_remote_backups BASE_DIR RETENTION_DAYS
+#
+# Prunes backup files older than RETENTION_DAYS from the configured rclone
+# remote. Mirrors the local cleanup_old_backups() retention policy so that
+# remote and local storage stay in sync after each rotation run.
+#
+# Silently skips when rclone is not installed or not configured.
+# Non-fatal: logs a warning and returns 1 on partial failures so the rotate
+# subcommand can report degraded state without aborting.
+_prune_remote_backups() {
+    local retention_days="$1"
+
+    if ! command -v rclone >/dev/null 2>&1; then
+        backup_log_info "rclone not installed — skipping remote retention pruning."
+        return 0
+    fi
+
+    local remote_name
+    remote_name="$(get_config_value "RCLONE_REMOTE_NAME" "")"
+    if [[ -z "$remote_name" || "$remote_name" == "CHANGE_ME_RCLONE_REMOTE" ]]; then
+        backup_log_info "RCLONE_REMOTE_NAME not configured — skipping remote retention pruning."
+        return 0
+    fi
+
+    local rclone_config_arg=()
+    local rclone_config_path
+    rclone_config_path="$(get_config_value "RCLONE_CONFIG" "")"
+    if [[ -n "$rclone_config_path" ]]; then
+        if ! validate_rclone_config_path "$rclone_config_path"; then
+            log_warn "[rotate] Remote prune skipped: invalid RCLONE_CONFIG path." >&2
+            return 0
+        fi
+        local _canonical_cfg
+        _canonical_cfg=$(realpath -e "$rclone_config_path")
+        rclone_config_arg=(--config "$_canonical_cfg")
+    else
+        local _discovered_cfg
+        if _discovered_cfg=$(_resolve_rclone_config 2>/dev/null); then
+            if validate_rclone_config_path "$_discovered_cfg" 2>/dev/null; then
+                local _canonical_disc
+                _canonical_disc=$(realpath -e "$_discovered_cfg")
+                rclone_config_arg=(--config "$_canonical_disc")
+            fi
+        fi
+        if [[ ${#rclone_config_arg[@]} -eq 0 ]]; then
+            backup_log_info "No rclone config found — skipping remote retention pruning."
+            return 0
+        fi
+    fi
+
+    local remote_base_path
+    remote_base_path="$(get_config_value "RCLONE_REMOTE_PATH" "vaultwarden_backups")"
+    remote_base_path="${remote_base_path#/}"
+    remote_base_path="${remote_base_path%/}"
+
+    local _prune_failed=false
+
+    for t in db full emergency; do
+        local remote_path="${remote_name}:${remote_base_path}/${t}"
+
+        local -a remote_files=()
+        mapfile -t remote_files < <(
+            rclone lsf "${rclone_config_arg[@]}" "${remote_path}/" \
+                --files-only --include "*.age" \
+                --contimeout 15s --timeout 60s 2>/dev/null || true
+        )
+
+        if [[ ${#remote_files[@]} -eq 0 ]]; then
+            backup_log_info "[remote] No ${t} backup archives found on remote — nothing to prune."
+            continue
+        fi
+
+        # Always preserve at least the most recent backup, regardless of age.
+        if [[ ${#remote_files[@]} -le 1 ]]; then
+            backup_log_info "[remote] Only 1 ${t} backup on remote — preserving it regardless of age."
+            continue
+        fi
+
+        local _deleted_remote=0
+        local _file
+        for _file in "${remote_files[@]}"; do
+            local _age_days
+            _age_days=$(_backup_filename_age_days "$_file")
+            if [[ -z "$_age_days" ]]; then
+                backup_log_warn "[remote] $(basename "$_file") has no filename timestamp — skipping remote deletion."
+                continue
+            fi
+            if (( _age_days > retention_days )); then
+                if [[ "$DRY_RUN" == "true" ]]; then
+                    backup_log_info "[DRY RUN] Would delete remote: ${remote_path}/${_file} (${_age_days}d > ${retention_days}d)"
+                    continue
+                fi
+                local _del_exit=0
+                rclone deletefile "${rclone_config_arg[@]}" "${remote_path}/${_file}" \
+                    --contimeout 15s --timeout 60s 2>/dev/null || _del_exit=$?
+                if (( _del_exit != 0 )); then
+                    log_warn "[rotate] Failed to delete remote file: ${remote_path}/${_file}" >&2
+                    _prune_failed=true
+                else
+                    backup_log_info "[remote] Deleted: ${_file} (${_age_days}d > ${retention_days}d)"
+                    (( ++_deleted_remote )) || true
+                    # Remove associated sidecar files; ignore errors (may not exist).
+                    local _ext
+                    for _ext in .sha256 .meta; do
+                        rclone deletefile "${rclone_config_arg[@]}" \
+                            "${remote_path}/${_file}${_ext}" \
+                            --contimeout 15s --timeout 60s 2>/dev/null || true
+                    done
+                fi
+            fi
+        done
+
+        if (( _deleted_remote > 0 )); then
+            backup_log_success "[remote] Pruned ${_deleted_remote} old ${t} backup(s) from ${remote_path}/"
+        else
+            backup_log_info "[remote] No old ${t} backups to prune on remote."
+        fi
+    done
+
+    if [[ "$_prune_failed" == "true" ]]; then
+        log_warn "[rotate] Some remote pruning steps encountered errors — check above for details." >&2
+        return 1
+    fi
+    return 0
 }
 
 perform_db_backup() {
@@ -950,6 +1095,11 @@ main() {
             log_error "One or more rotation steps encountered errors — check above for details."
             exit 1
         fi
+
+        # Prune remote backups to match the local retention policy.
+        _prune_remote_backups "$KEEP_DAYS" || {
+            log_warn "[rotate] Remote retention pruning reported errors — local rotation was successful."
+        }
 
         backup_log_success "Rotation complete${DRY_RUN:+ (dry run)}."
         exit 0

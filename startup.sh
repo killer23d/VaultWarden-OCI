@@ -34,6 +34,10 @@ DO_DOWN=false
 SKIP_PULL=false
 SKIP_EGRESS_FIX=false
 
+# Accumulates non-fatal startup issues for display in the post-startup banner.
+# Functions append descriptive strings here rather than failing silently.
+_STARTUP_WARNINGS=()
+
 DOCKER_SECRETS_DIR="${PROJECT_ROOT}/secrets/.docker_secrets"
 
 show_help() {
@@ -547,6 +551,8 @@ update_dns_on_startup() {
     log_success "Startup DNS reconciliation completed"
   else
     log_warn "Startup DNS reconciliation failed; continuing startup"
+    _STARTUP_WARNINGS+=("DNS reconciliation failed — your domain may still point to a stale IP address.")
+    _STARTUP_WARNINGS+=("  Fix: sudo ./utilities/maintenance-update-dns.sh update-dns")
   fi
   return 0
 }
@@ -603,11 +609,15 @@ ensure_vaultwarden_egress_nat() {
     fi
     log_warn "utilities/setup-firewall.sh failed — egress NAT not applied."
     log_warn "Run manually to restore: sudo ./utilities/setup-firewall.sh --phase iptables"
+    _STARTUP_WARNINGS+=("Egress NAT not applied — Docker containers may have no outbound internet access.")
+    _STARTUP_WARNINGS+=("  Fix: sudo ./utilities/setup-firewall.sh --phase iptables")
     return 0
   fi
 
   log_warn "utilities/setup-firewall.sh not found or not executable; skipping egress NAT remediation."
   log_warn "Run manually to configure: sudo ./utilities/setup-firewall.sh --phase iptables"
+  _STARTUP_WARNINGS+=("Egress NAT not verified — utilities/setup-firewall.sh not found or not executable.")
+  _STARTUP_WARNINGS+=("  Fix: sudo ./utilities/setup-firewall.sh --phase iptables")
   return 0
 }
 
@@ -720,6 +730,15 @@ main() {
   fi
 
   log_success "VaultWarden-OCI startup completed"
+
+  if [[ ${#_STARTUP_WARNINGS[@]} -gt 0 ]]; then
+    log_warn "============================================================"
+    log_warn "STARTUP COMPLETED WITH WARNINGS — action may be required:"
+    for _wmsg in "${_STARTUP_WARNINGS[@]}"; do
+      log_warn "  $_wmsg"
+    done
+    log_warn "============================================================"
+  fi
 }
 
 main "$@"

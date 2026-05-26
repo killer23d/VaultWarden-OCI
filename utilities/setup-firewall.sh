@@ -30,6 +30,9 @@ FLAGS:
   --yes                      Auto-confirm the netfilter-persistent install prompt
   --dry-run                  Preview actions without executing
   --force                    Skip confirmations
+  --force-iptables           Continue iptables setup even when an active nftables
+                             ruleset is detected. Use only when you have verified
+                             that nftables will not override these iptables rules.
   --help, -h                 Show this help
 
 NOTES:
@@ -74,17 +77,19 @@ PHASE="all"
 AUTO_MODE=false
 DRY_RUN=false
 FORCE=false
+FORCE_IPTABLES=false
 YES=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --phase)    _require_cli_value "$1" "${2-}"; PHASE="$2"; shift 2 ;;
-        --auto)     AUTO_MODE=true; YES=true; shift ;;
-        --yes)      YES=true; shift ;;
-        --dry-run)  DRY_RUN=true; shift ;;
-        --force)    FORCE=true; shift ;;
-        --help|-h)  _show_help; exit 0 ;;
-        *)          log_error "Unknown option: $1"; _show_help; exit 1 ;;
+        --phase)           _require_cli_value "$1" "${2-}"; PHASE="$2"; shift 2 ;;
+        --auto)            AUTO_MODE=true; YES=true; shift ;;
+        --yes)             YES=true; shift ;;
+        --dry-run)         DRY_RUN=true; shift ;;
+        --force)           FORCE=true; shift ;;
+        --force-iptables)  FORCE_IPTABLES=true; shift ;;
+        --help|-h)         _show_help; exit 0 ;;
+        *)                 log_error "Unknown option: $1"; _show_help; exit 1 ;;
     esac
 done
 
@@ -200,14 +205,28 @@ _phase_iptables() {
         exit 1
     fi
 
-    # Warn when nftables is active alongside iptables because nft rules can
-    # override these iptables policies.
+    # Refuse to run alongside an active nftables ruleset unless the operator
+    # has explicitly acknowledged the risk with --force-iptables.
+    #
+    # On systems using iptables-nft, nftables rules take precedence and can
+    # silently override what iptables writes, leaving the host in an undefined
+    # firewall state. Running both frameworks simultaneously is unsupported and
+    # may cause container traffic to be blocked or the host to be inaccessible.
     if command -v nft >/dev/null 2>&1; then
         if nft list ruleset 2>/dev/null | grep -q .; then
-            log_warn "nftables ruleset is active on this host."
-            log_warn "Running iptables alongside nftables may cause conflicting firewall policies."
+            if [[ "$FORCE_IPTABLES" != "true" ]]; then
+                log_error "nftables ruleset is active on this host."
+                log_error "Running iptables alongside nftables may cause conflicting firewall"
+                log_error "policies. nftables rules can silently override these iptables rules,"
+                log_error "leaving container traffic blocked or SSH inaccessible."
+                log_error "Options:"
+                log_error "  1. Disable nftables first:  sudo systemctl stop nftables"
+                log_error "  2. Use nftables for all rules (see docs/OPERATIONS.md)."
+                log_error "  3. Override this check (RISK):  --force-iptables"
+                exit 1
+            fi
+            log_warn "nftables ruleset is active on this host (--force-iptables acknowledged)."
             log_warn "Verify that nftables is not shadowing these iptables rules."
-            log_warn "Consider using only one firewall framework."
         fi
     fi
 
