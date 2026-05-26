@@ -356,7 +356,7 @@ AGE_BANNER
             "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '3. Setup CrowdSec:      %ssudo ./utilities/setup-crowdsec.sh%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '   ► This script now prompts for CLOUDFLARE_ZONE_ID, optional CF_ACCOUNT_ID, and crowdsec_cf_firewall_token\n'
+        printf '   ► This script now prompts for CLOUDFLARE_ZONE_ID, optional CF_ACCOUNT_ID, and cf_worker_bouncer_token\n'
         printf '4. Start services:      %smake up%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '5. Setup automation:    %ssudo ./setup.sh systemd install%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
@@ -377,7 +377,7 @@ AGE_BANNER
         printf '   ► You will be prompted for all credentials\n'
         printf '3. Setup CrowdSec:      %ssudo ./utilities/setup-crowdsec.sh%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '   ► You will be prompted for CLOUDFLARE_ZONE_ID, optional CF_ACCOUNT_ID, and crowdsec_cf_firewall_token\n'
+        printf '   ► You will be prompted for CLOUDFLARE_ZONE_ID, optional CF_ACCOUNT_ID, and cf_worker_bouncer_token\n'
         printf '4. Start services:      %smake up%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '5. Setup automation:    %ssudo ./setup.sh systemd install%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
@@ -521,14 +521,14 @@ main() {
         log_info ""
         log_info "Then add your Cloudflare API token:"
         log_info ""
-        log_info "  sudo ./utilities/setup-secrets.sh rotate crowdsec_cf_firewall_token"
+        log_info "  sudo ./utilities/setup-secrets.sh rotate cf_worker_bouncer_token"
         log_info ""
         printf 'Press ENTER to continue with the post-install summary, or Ctrl-C to exit now...'
         read -r _cs_prompt_ack || true
         unset _cs_prompt_ack
     else
         log_info "Next step: sudo ./utilities/setup-crowdsec.sh"
-        log_info "Then add your Cloudflare API token: sudo ./utilities/setup-secrets.sh rotate crowdsec_cf_firewall_token"
+        log_info "Then add your Cloudflare API token: sudo ./utilities/setup-secrets.sh rotate cf_worker_bouncer_token"
     fi
 
     if [[ "$AUTO_MODE" == "true" ]]; then

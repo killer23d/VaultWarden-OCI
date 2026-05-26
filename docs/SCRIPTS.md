@@ -345,7 +345,7 @@ standalone scripts. Admins may invoke the dispatcher or the utilities directly.
 - Plaintext output (passwords, recovery kit) is routed exclusively to `/dev/tty`, never to stderr or the systemd journal
 
 **Managed secrets:**
-`admin_token`, `admin_basic_auth_hash`, `smtp_password`, `push_installation_id`, `push_installation_key`, `caddy_cloudflare_dns_token`, `crowdsec_cf_firewall_token` (used by CrowdSec cloudflare-bouncer), `backup_passphrase`
+`admin_token`, `admin_basic_auth_hash`, `smtp_password`, `push_installation_id`, `push_installation_key`, `caddy_cloudflare_dns_token`, `cf_worker_bouncer_token` (used by CrowdSec cloudflare-bouncer), `backup_passphrase`
 
 **Subcommands:**
 

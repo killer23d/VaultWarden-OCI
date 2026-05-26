@@ -702,7 +702,11 @@ validate_rclone_config_path() {
 }
 
 export -f list_backups validate_backup_integrity check_backup_disk_space
-export -f cleanup_old_backups get_backup_statistics create_backup_metadata
+export -f cleanup_old_backups get_backup_statistics
+# NOTE: create_backup_metadata uses a heredoc; exporting this function can
+# produce malformed imported function definitions in child bash processes.
+# Keep it local to the current shell to avoid "error importing function
+# definition for create_backup_metadata" during apt/dpkg subprocess execution.
 export -f verify_backup_integrity get_backup_size _backup_ctime_age_days
 export -f _backup_filename_age_days _format_bytes_human _resolve_rclone_config validate_rclone_config_path
 

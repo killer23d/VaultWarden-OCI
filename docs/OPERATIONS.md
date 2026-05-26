@@ -454,7 +454,7 @@ sudo cscli decisions delete --ip 1.2.3.4
 
 # Check Cloudflare bouncer actions
 sudo cscli bouncers list
-sudo systemctl status crowdsec-cloudflare-bouncer
+sudo systemctl status crowdsec-cloudflare-worker-bouncer
 ```
 
 ### Secrets Management
@@ -696,7 +696,7 @@ sudo cat /etc/crowdsec/acquis.yaml
 
 # 3. Verify Cloudflare API token
 sudo cscli bouncers list
-sudo systemctl status crowdsec-cloudflare-bouncer
+sudo systemctl status crowdsec-cloudflare-worker-bouncer
 
 # 4. Check CrowdSec logs
 sudo journalctl -u crowdsec -n 50
