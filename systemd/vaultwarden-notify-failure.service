@@ -28,8 +28,7 @@ ExecStart=/bin/bash -c '\
     LIB_DIR=/opt/vaultwarden-scripts/lib; \
     source "${LIB_DIR}/common.sh"; \
     init_common_lib notify-failure; \
-    body=$(printf "A VaultWarden systemd unit failed at %%s.\nReview failed units with:\n  systemctl --failed\n" \
-      "$(date)"); \
+    body="A VaultWarden systemd unit failed at $(date).\nRun: systemctl --failed"; \
     send_email "FAILURE: ${FAILED_UNIT} on %H" "${body}" \
       || { touch "${STATE_DIR}/NOTIFY_FAILED_${FAILED_UNIT}" 2>/dev/null || true; }; \
   ) 9>"$LOCK_FILE" \

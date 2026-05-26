@@ -503,10 +503,10 @@ SOPS_EOF
         cf_dns=$(_get_field "caddy_cloudflare_dns_token") || { log_error "Failed to collect caddy_cloudflare_dns_token"; return 1; }
         _COLLECTED_SECRETS["caddy_cloudflare_dns_token"]="$cf_dns"
 
-        if [ -f "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/secrets/.docker_secrets/crowdsec_cf_firewall_token" ]; then
-            log_info "Cloudflare firewall token file found on disk — will be used by CrowdSec bouncer."
+        if [ -f "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/secrets/.docker_secrets/cf_worker_bouncer_token" ]; then
+            log_info "Cloudflare Workers bouncer token file found on disk — will be used by CrowdSec bouncer."
         else
-            log_warn "Cloudflare firewall token file not found yet — run sudo ./utilities/setup-crowdsec.sh (it prompts for the token)."
+            log_warn "Cloudflare Workers bouncer token file not found yet — run sudo ./utilities/setup-crowdsec.sh (it prompts for the token)."
         fi
 
         local _email_mode _email_provider
@@ -781,7 +781,7 @@ BACKUP_BANNER
             log_info "Created Docker secrets directory: $docker_secrets_dir"
         fi
 
-        # crowdsec_cf_firewall_token intentionally remains a flat file only (not in SOPS YAML)
+        # cf_worker_bouncer_token intentionally remains a flat file only (not in SOPS YAML)
         # because it is rotated independently and consumed directly by CrowdSec tooling.
         if ! export_docker_secrets "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/secrets/.docker_secrets"; then
             log_error "Failed to export Docker secret files — run sudo utilities/setup-secrets.sh configure again"

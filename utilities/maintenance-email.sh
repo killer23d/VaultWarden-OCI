@@ -113,11 +113,11 @@ test_crowdsec_integration() {
         log_info "🔍 Debug: sudo journalctl -u crowdsec -n 50 --no-pager"
         return 1
     fi
-    if systemctl is-active crowdsec-cloudflare-bouncer >/dev/null 2>&1; then
+    if systemctl is-active crowdsec-cloudflare-worker-bouncer >/dev/null 2>&1; then
         log_success "✅ CrowdSec Cloudflare bouncer is running"
     else
         log_warn "⚠ CrowdSec Cloudflare bouncer is not running"
-        log_info "💡 Start it with: sudo systemctl start crowdsec-cloudflare-bouncer"
+        log_info "💡 Start it with: sudo systemctl start crowdsec-cloudflare-worker-bouncer"
     fi
 }
 

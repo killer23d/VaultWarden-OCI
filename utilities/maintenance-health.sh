@@ -510,7 +510,7 @@ _check_crowdsec() {
     fi
 
     # Bouncer check priority: prefer crowdsec-firewall-bouncer, then
-    # crowdsec-cloudflare-bouncer. Warn when a bouncer unit is installed but not
+    # crowdsec-cloudflare-worker-bouncer. Warn when a bouncer unit is installed but not
     # running, and pass with an install note when no bouncer is installed.
     local _bouncer_active=false
     local _bouncer_name=""
@@ -518,9 +518,9 @@ _check_crowdsec() {
     if systemctl is-active --quiet crowdsec-firewall-bouncer 2>/dev/null; then
         _bouncer_active=true
         _bouncer_name="crowdsec-firewall-bouncer"
-    elif systemctl is-active --quiet crowdsec-cloudflare-bouncer 2>/dev/null; then
+    elif systemctl is-active --quiet crowdsec-cloudflare-worker-bouncer 2>/dev/null; then
         _bouncer_active=true
-        _bouncer_name="crowdsec-cloudflare-bouncer"
+        _bouncer_name="crowdsec-cloudflare-worker-bouncer"
     fi
 
     if [[ "$_bouncer_active" == "true" ]]; then
@@ -533,7 +533,7 @@ _check_crowdsec() {
     else
         # No bouncer is installed, which is optional, so keep this as pass.
         _pass "crowdsec:bouncer" \
-            "No CrowdSec bouncer installed (optional — install crowdsec-firewall-bouncer or crowdsec-cloudflare-bouncer)"
+            "No CrowdSec bouncer installed (optional — install crowdsec-firewall-bouncer or crowdsec-cloudflare-worker-bouncer)"
     fi
 
     if $COMPREHENSIVE; then
