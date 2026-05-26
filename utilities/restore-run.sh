@@ -1703,8 +1703,20 @@ main() {
     resolve_backup_file || exit 1
     [[ -f "$BACKUP_FILE" ]] || { log_error "Backup file not found: $BACKUP_FILE"; exit 1; }
 
-    _prompt_age_key "$AGE_KEY_FILE" || exit 1
+    echo ""
+    log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    log_info "  Selected backup file:"
+    log_info "    $(basename "$BACKUP_FILE")"
+    log_info "    Path: $BACKUP_FILE"
+    log_info "    Type: $RESTORE_TYPE"
+    local _bkp_size
+    _bkp_size=$(du -sh "$BACKUP_FILE" 2>/dev/null | cut -f1 || echo "unknown")
+    log_info "    Size: $_bkp_size"
+    log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
 
+    _prompt_age_key "$AGE_KEY_FILE" || exit 1
+    
     local sha256_sidecar="${BACKUP_FILE}.sha256"
     if [[ -f "$sha256_sidecar" && "$SKIP_VERIFICATION" != "true" ]]; then
         log_info "Verifying backup checksum before decryption..."
