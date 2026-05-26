@@ -110,6 +110,9 @@ FORCE=false
 # release of each component. By default (USE_LATEST=false) the pinned versions
 # below are used, which is safer for a "set-and-forget" deployment.
 USE_LATEST=false
+# IP or CIDR to add to the CrowdSec admin allowlist.
+# Auto-detected from the SSH session when not provided via --admin-ip.
+ADMIN_IP=""
 
 # ---------------------------------------------------------------------------
 # Dependency version pins.
@@ -124,30 +127,39 @@ USE_LATEST=false
 CROWDSEC_VERSION="${CROWDSEC_VERSION:-}"
 CF_BOUNCER_VERSION="${CF_BOUNCER_VERSION:-}"
 
-for _arg in "$@"; do
-    case "$_arg" in
-        --auto)        AUTO_MODE=true ;;
-        --dry-run)     DRY_RUN=true ;;
-        --force)       FORCE=true ;;
-        --use-latest)  USE_LATEST=true ;;
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --auto)        AUTO_MODE=true; shift ;;
+        --dry-run)     DRY_RUN=true; shift ;;
+        --force)       FORCE=true; shift ;;
+        --use-latest)  USE_LATEST=true; shift ;;
+        --admin-ip)
+            if [[ -z "${2-}" || "${2}" == --* ]]; then
+                log_error "--admin-ip requires a value (e.g. --admin-ip 203.0.113.42 or --admin-ip 203.0.113.0/24)"
+                exit 1
+            fi
+            ADMIN_IP="$2"; shift 2 ;;
         --help|-h)
             cat <<'HELP'
-usage: sudo ./utilities/setup-crowdsec.sh [--auto] [--dry-run] [--force] [--use-latest]
+usage: sudo ./utilities/setup-crowdsec.sh [OPTIONS]
 
-  --auto        Non-interactive: never prompt.
-  --dry-run     Print what would happen; make no changes.
-  --force       Re-run all phases even if already applied.
-  --use-latest  Override version pins and use the current live upstream release
-                of each component (crowdsec, cloudflare-bouncer).  By default
-                the pinned versions in CROWDSEC_VERSION / CF_BOUNCER_VERSION are
-                used for reproducibility.
+  --auto               Non-interactive: never prompt.
+  --dry-run            Print what would happen; make no changes.
+  --force              Re-run all phases even if already applied.
+  --use-latest         Override version pins and use the current live upstream
+                       release of each component (crowdsec, cloudflare-bouncer).
+                       By default the pinned versions in CROWDSEC_VERSION /
+                       CF_BOUNCER_VERSION are used for reproducibility.
+  --admin-ip IP|CIDR   Add this IP address or CIDR to the CrowdSec admin
+                       allowlist (e.g. 203.0.113.42 or 203.0.113.0/24).
+                       When omitted, the script auto-detects your SSH client IP
+                       from the environment (SSH_CLIENT) and prompts for
+                       confirmation in interactive mode.
 HELP
-            exit 0
-            ;;
+            exit 0 ;;
         *)
-            log_error "Unknown flag: $_arg"
-            exit 1
-            ;;
+            log_error "Unknown flag: $1"
+            exit 1 ;;
     esac
 done
 
@@ -658,6 +670,91 @@ else
         log_warn "Skipping crowdsec-cloudflare-bouncer enable — service unit not installed yet."
     fi
     log_success "Services enabled."
+fi
+
+log_info "=== PHASE 9: Admin IP allowlist ==="
+
+# The CrowdSec allowlist YAML parser file persists across hub updates and
+# CrowdSec reinstalls, making it more durable than cscli decisions entries
+# (which can be flushed). A separate file under s02-enrich ensures the admin
+# IP is never blocked regardless of which detection rules are active.
+_cs_whitelist_dir="/etc/crowdsec/parsers/s02-enrich"
+_cs_whitelist_file="${_cs_whitelist_dir}/vaultwarden-admin-allowlist.yaml"
+_cs_resolved_ip="$ADMIN_IP"
+
+if [[ -z "$_cs_resolved_ip" ]]; then
+    # SSH_CLIENT is injected by sshd as "client_ip client_port server_port".
+    # It may not survive sudo depending on the env_keep configuration.
+    _cs_ssh_src="${SSH_CLIENT:-}"
+    if [[ -n "$_cs_ssh_src" ]]; then
+        _cs_ssh_ip="${_cs_ssh_src%% *}"
+        if [[ "$AUTO_MODE" == "true" ]]; then
+            log_info "Auto-detected admin IP from SSH session: ${_cs_ssh_ip}"
+            _cs_resolved_ip="$_cs_ssh_ip"
+        else
+            _cs_prompt_reply=""
+            read -r -p "Add SSH client IP (${_cs_ssh_ip}) to CrowdSec allowlist? [Enter=yes, type CIDR to use instead, 'skip' to skip]: " \
+                _cs_prompt_reply || true
+            case "${_cs_prompt_reply,,}" in
+                ""|yes)  _cs_resolved_ip="$_cs_ssh_ip" ;;
+                skip|no) _cs_resolved_ip="" ;;
+                *)       _cs_resolved_ip="$_cs_prompt_reply" ;;
+            esac
+        fi
+    elif [[ "$AUTO_MODE" != "true" ]]; then
+        _cs_prompt_reply=""
+        read -r -p "Enter admin IP or CIDR to allowlist in CrowdSec (or press Enter to skip): " \
+            _cs_prompt_reply || true
+        _cs_resolved_ip="$_cs_prompt_reply"
+    fi
+fi
+
+if [[ -z "$_cs_resolved_ip" ]]; then
+    log_warn "No admin IP provided — CrowdSec admin allowlist not configured."
+    log_warn "Re-run with --admin-ip YOUR_IP to add an allowlist entry at any time."
+else
+    # Validate: accept only characters valid in an IPv4/IPv6 address or CIDR.
+    if [[ ! "$_cs_resolved_ip" =~ ^[0-9a-fA-F:./]+$ ]]; then
+        log_warn "Ignoring admin IP '${_cs_resolved_ip}': unexpected characters detected."
+        log_warn "Provide a plain IPv4/IPv6 address or CIDR (e.g. 203.0.113.42 or 203.0.113.0/24)."
+    else
+        # Choose the YAML key based on whether the value includes a prefix length.
+        if [[ "$_cs_resolved_ip" == */* ]]; then
+            _cs_yaml_field="cidr"
+        else
+            _cs_yaml_field="ip"
+        fi
+
+        if [[ "$DRY_RUN" == "true" ]]; then
+            log_info "[DRY RUN] Would write CrowdSec allowlist to ${_cs_whitelist_file}"
+            log_info "[DRY RUN] Would allowlist (${_cs_yaml_field}): ${_cs_resolved_ip}"
+        else
+            mkdir -p "$_cs_whitelist_dir"
+            # The parser name must match a known CrowdSec hub whitelist entry so
+            # the engine recognises it; crowdsecurity/whitelists is the standard one.
+            cat > "$_cs_whitelist_file" <<CSYAML
+name: crowdsecurity/whitelists
+description: "Admin ${_cs_yaml_field} allowlisted by VaultWarden setup-crowdsec.sh"
+whitelist:
+  reason: "VaultWarden admin allowlist"
+  ${_cs_yaml_field}:
+    - "${_cs_resolved_ip}"
+CSYAML
+            chmod 640 "$_cs_whitelist_file"
+            log_success "CrowdSec allowlist written: ${_cs_whitelist_file}"
+            log_success "Allowlisted (${_cs_yaml_field}): ${_cs_resolved_ip}"
+
+            # Reload CrowdSec so the new parser whitelist takes effect immediately.
+            if systemctl is-active crowdsec >/dev/null 2>&1; then
+                systemctl reload crowdsec 2>/dev/null \
+                    || systemctl restart crowdsec 2>/dev/null \
+                    || log_warn "CrowdSec reload failed — restart manually: sudo systemctl restart crowdsec"
+                log_success "CrowdSec reloaded — allowlist is active."
+            else
+                log_info "CrowdSec is not running — allowlist will take effect on next start."
+            fi
+        fi
+    fi
 fi
 
 log_info ""
