@@ -1646,8 +1646,8 @@ main() {
     local STATE_DIR; STATE_DIR="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
     BACKUP_BASE_DIR="$(get_config_value "BACKUP_DIR" "${STATE_DIR}/backups")"
     local AGE_KEY_FILE; AGE_KEY_FILE="$(get_config_value "SOPS_AGE_KEY_FILE" "secrets/keys/age-key.txt")"
-    local PUID; PUID="$(get_config_value "PUID" "")"
-    local PGID; PGID="$(get_config_value "PGID" "")"
+    local PUID="$(get_config_value "PUID" "")"
+    local PGID="$(get_config_value "PGID" "")"
     PUID="${PUID//$'\r'/}"
     PGID="${PGID//$'\r'/}"
 
