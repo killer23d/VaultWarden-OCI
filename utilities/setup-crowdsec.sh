@@ -1,5 +1,25 @@
 #!/usr/bin/env bash
-# utilities/setup-crowdsec.sh — Installs and configures CrowdSec and its bouncers for VaultWarden-OCI.
+# utilities/setup-crowdsec.sh — Installs and configures CrowdSec and the
+# Cloudflare *Workers* bouncer (crowdsec-cloudflare-worker-bouncer) for
+# VaultWarden-OCI.
+#
+# The legacy crowdsec-cloudflare-bouncer is no longer actively supported by
+# CrowdSec due to Cloudflare API rate-limit changes.  This script uses the
+# recommended replacement: crowdsec-cloudflare-worker-bouncer, which leverages
+# Cloudflare Workers + Workers KV storage for decision enforcement.
+#
+# Free-plan note:
+#   KV writes are capped at 1 K/day on the Cloudflare free plan, so the
+#   initial blocklist population is truncated.  Subsequent incremental syncs
+#   continue normally.  This script automatically restricts decisions to
+#   locally generated ones (cscli + crowdsec engine) so the KV budget is not
+#   wasted on community blocklist churn.  Set CF_FREE_PLAN=false in .env to
+#   disable this guard.
+#
+# Usage:
+#   sudo ./utilities/setup-crowdsec.sh [OPTIONS]
+#
+# See --help for all options.
 
 set -euo pipefail
 
@@ -16,29 +36,23 @@ fi
 
 cd "${PROJECT_ROOT}"
 
+# ---------------------------------------------------------------------------
+# Library loading
+# ---------------------------------------------------------------------------
 _LIBS_LOADED=false
-if [[ -f "${PROJECT_ROOT}/lib/log.sh" ]]; then
-    # shellcheck source=../lib/log.sh
-    source "${PROJECT_ROOT}/lib/log.sh"
-fi
-if [[ -f "${PROJECT_ROOT}/lib/config.sh" ]]; then
-    # shellcheck source=../lib/config.sh
-    source "${PROJECT_ROOT}/lib/config.sh"
-fi
-if [[ -f "${PROJECT_ROOT}/lib/common.sh" ]]; then
-    # shellcheck source=../lib/common.sh
-    source "${PROJECT_ROOT}/lib/common.sh"
-    _LIBS_LOADED=true
-fi
-if [[ -f "${PROJECT_ROOT}/lib/storage.sh" ]]; then
-    # shellcheck source=../lib/storage.sh
-    source "${PROJECT_ROOT}/lib/storage.sh"
-fi
+for _lib in log.sh config.sh common.sh storage.sh; do
+    _lib_path="${PROJECT_ROOT}/lib/${_lib}"
+    if [[ -f "$_lib_path" ]]; then
+        # shellcheck disable=SC1090
+        source "$_lib_path"
+        [[ "$_lib" == "common.sh" ]] && _LIBS_LOADED=true
+    fi
+done
+unset _lib _lib_path
 
 if [[ "$_LIBS_LOADED" == "true" ]]; then
     set_log_prefix "crowdsec"
 else
-    # Fall back to minimal logging when lib/common.sh is unavailable.
     log_info()    { printf '[INFO]    crowdsec %s\n'    "$*"; }
     log_success() { printf '[SUCCESS] crowdsec %s\n'    "$*"; }
     log_warn()    { printf '[WARN]    crowdsec %s\n'    "$*" >&2; }
@@ -49,13 +63,16 @@ fi
 if [[ "$_LIBS_LOADED" != "true" ]]; then
     COLOR_RED=$'\033[0;31m'
     COLOR_GREEN=$'\033[0;32m'
-    # shellcheck disable=SC2034  # COLOR_YELLOW/COLOR_CYAN may be used by sourcing scripts or future expansions
+    # shellcheck disable=SC2034
     COLOR_YELLOW=$'\033[0;33m'
     # shellcheck disable=SC2034
     COLOR_CYAN=$'\033[0;36m'
     COLOR_RESET=$'\033[0m'
 fi
 
+# ---------------------------------------------------------------------------
+# Load .env
+# ---------------------------------------------------------------------------
 if [[ -f "${PROJECT_ROOT}/.env" ]]; then
     if declare -f load_env_file >/dev/null 2>&1; then
         load_env_file "${PROJECT_ROOT}/.env" || true
@@ -64,6 +81,10 @@ if [[ -f "${PROJECT_ROOT}/.env" ]]; then
         source "${PROJECT_ROOT}/.env" 2>/dev/null || true
     fi
 fi
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 # Write or update a KEY=VALUE line in .env using an atomic temp-file + mv.
 _cs_set_env_var() {
@@ -88,13 +109,11 @@ _cs_set_env_var() {
     mv "$tmp_file" "$env_file"
 }
 
-# Read a token from a flat secret file and reject placeholder values.
+# Read a token from a flat secret file, rejecting placeholder values.
 _cs_read_secret_file() {
     local path="$1"
-    [[ -f "$path" ]] || return 0
-    [[ -r "$path" ]] || return 0
+    [[ -f "$path" && -r "$path" ]] || return 0
     local val
-    # Read only the first line and preserve the token except for surrounding whitespace.
     IFS= read -r val < "$path" || true
     val="${val#${val%%[![:space:]]*}}"
     val="${val%${val##*[![:space:]]}}"
@@ -103,29 +122,21 @@ _cs_read_secret_file() {
     fi
 }
 
+# ---------------------------------------------------------------------------
+# CLI flags
+# ---------------------------------------------------------------------------
 AUTO_MODE=false
 DRY_RUN=false
 FORCE=false
+AUTONOMOUS_MODE=false  # use Cloudflare Workers autonomous mode (-S flag)
 # When USE_LATEST=true the script queries live upstream for the current latest
-# release of each component. By default (USE_LATEST=false) the pinned versions
-# below are used, which is safer for a "set-and-forget" deployment.
+# release.  By default the pinned versions below are used for reproducibility.
 USE_LATEST=false
-# IP or CIDR to add to the CrowdSec admin allowlist.
-# Auto-detected from the SSH session when not provided via --admin-ip.
 ADMIN_IP=""
 
-# ---------------------------------------------------------------------------
-# Dependency version pins.
-# Set a version string (e.g. "1.6.3") to install that exact release.
-# Leave blank ("") to let the package manager / GitHub API select the latest
-# stable.  When USE_LATEST=true these pins are ignored entirely.
-#
-# Examples:
-#   CROWDSEC_VERSION="1.6.3"
-#   CF_BOUNCER_VERSION="v0.0.14"
-# ---------------------------------------------------------------------------
+# Dependency version pins — leave blank to resolve latest at runtime.
 CROWDSEC_VERSION="${CROWDSEC_VERSION:-}"
-CF_BOUNCER_VERSION="${CF_BOUNCER_VERSION:-}"
+CF_WORKER_BOUNCER_VERSION="${CF_WORKER_BOUNCER_VERSION:-}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -133,6 +144,7 @@ while [[ $# -gt 0 ]]; do
         --dry-run)     DRY_RUN=true; shift ;;
         --force)       FORCE=true; shift ;;
         --use-latest)  USE_LATEST=true; shift ;;
+        --autonomous)  AUTONOMOUS_MODE=true; shift ;;
         --admin-ip)
             if [[ -z "${2-}" || "${2}" == --* ]]; then
                 log_error "--admin-ip requires a value (e.g. --admin-ip 203.0.113.42 or --admin-ip 203.0.113.0/24)"
@@ -147,14 +159,41 @@ usage: sudo ./utilities/setup-crowdsec.sh [OPTIONS]
   --dry-run            Print what would happen; make no changes.
   --force              Re-run all phases even if already applied.
   --use-latest         Override version pins and use the current live upstream
-                       release of each component (crowdsec, cloudflare-bouncer).
-                       By default the pinned versions in CROWDSEC_VERSION /
-                       CF_BOUNCER_VERSION are used for reproducibility.
+                       release of each component.  By default the pinned
+                       versions in CROWDSEC_VERSION / CF_WORKER_BOUNCER_VERSION
+                       are used for reproducibility.
+  --autonomous         Deploy the Workers bouncer in autonomous mode (-S flag).
+                       The Go process runs once to deploy Workers + KV into
+                       Cloudflare, then exits — no persistent systemd daemon is
+                       needed.  Decisions are synced by a Cloudflare scheduled
+                       Worker every 5 minutes.
+                       Default: daemon mode (systemd service runs continuously).
   --admin-ip IP|CIDR   Add this IP address or CIDR to the CrowdSec admin
                        allowlist (e.g. 203.0.113.42 or 203.0.113.0/24).
                        When omitted, the script auto-detects your SSH client IP
-                       from the environment (SSH_CLIENT) and prompts for
-                       confirmation in interactive mode.
+                       from SSH_CLIENT and prompts for confirmation in
+                       interactive mode.
+
+Environment variables (set in .env or exported before running):
+  CLOUDFLARE_PROXY_ENABLED   Set to 'true' to enable the Cloudflare bouncer.
+  CLOUDFLARE_ZONE_ID         Your Cloudflare Zone ID.
+  CF_ACCOUNT_ID              Your Cloudflare Account ID.
+  CF_WORKER_BOUNCER_TOKEN    Cloudflare API token for the Workers bouncer.
+                             Required permissions:
+                               Account › Workers KV Storage : Edit
+                               Account › Workers Scripts    : Edit
+                               Account › Account Settings   : Read
+                               Account › Turnstile          : Edit
+                               Account › D1                 : Edit
+                               User    › User Details       : Read
+                               Zone    › DNS                : Read
+                               Zone    › Workers Routes     : Edit
+                               Zone    › Zone               : Read
+  CF_FREE_PLAN               Set to 'false' to disable the free-plan KV write
+                             guard (only_include_decisions_from restriction).
+                             Default: 'true' (guard enabled).
+  CROWDSEC_VERSION           Pin a specific CrowdSec version (e.g. "1.6.3").
+  CF_WORKER_BOUNCER_VERSION  Pin a specific Workers bouncer version (e.g. "v0.1.0").
 HELP
             exit 0 ;;
         *)
@@ -167,6 +206,9 @@ if [[ "$AUTO_MODE" == "true" ]]; then
     log_info "Running in non-interactive (auto) mode."
 fi
 
+# ---------------------------------------------------------------------------
+# Execution wrapper
+# ---------------------------------------------------------------------------
 _cs_run() {
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] $*"
@@ -175,34 +217,39 @@ _cs_run() {
     fi
 }
 
-_cf_bouncer_service_exists() {
-    systemctl list-unit-files crowdsec-cloudflare-bouncer.service 2>/dev/null \
-        | grep -q 'crowdsec-cloudflare-bouncer.service'
+# ---------------------------------------------------------------------------
+# Service-existence guards
+# ---------------------------------------------------------------------------
+_cf_worker_bouncer_service_exists() {
+    systemctl list-unit-files crowdsec-cloudflare-worker-bouncer.service 2>/dev/null \
+        | grep -q 'crowdsec-cloudflare-worker-bouncer.service'
 }
 
+# ---------------------------------------------------------------------------
+# PHASE 1: CrowdSec base installation
+# ---------------------------------------------------------------------------
 log_info "=== PHASE 1: CrowdSec base installation ==="
 
 if command -v cscli >/dev/null 2>&1 && [[ "$FORCE" != "true" ]]; then
     log_info "CrowdSec already installed — skipping base install."
+elif [[ "$DRY_RUN" == "true" ]]; then
+    log_info "[DRY RUN] Would install crowdsec and crowdsec-firewall-bouncer-iptables"
 else
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would install crowdsec and crowdsec-firewall-bouncer-iptables"
+    log_info "Adding CrowdSec repository..."
+    curl -s https://packagecloud.io/install/repositories/crowdsec/crowdsec/script.deb.sh | bash
+
+    _cs_pkg="crowdsec"
+    if [[ "$USE_LATEST" != "true" && -n "$CROWDSEC_VERSION" ]]; then
+        _cs_pkg="crowdsec=${CROWDSEC_VERSION}"
+        log_info "CrowdSec version pinned: ${CROWDSEC_VERSION}"
     else
-        log_info "Adding CrowdSec repository..."
-        curl -s https://packagecloud.io/install/repositories/crowdsec/crowdsec/script.deb.sh | bash
-        log_info "Installing CrowdSec packages..."
-        # Use the pinned version when one is configured and --use-latest is not set.
-        _cs_pkg="crowdsec"
-        if [[ "$USE_LATEST" != "true" && -n "$CROWDSEC_VERSION" ]]; then
-            _cs_pkg="crowdsec=${CROWDSEC_VERSION}"
-            log_info "CrowdSec version pinned: ${CROWDSEC_VERSION}"
-        else
-            log_info "CrowdSec version: installing latest from packagecloud repository"
-        fi
-        DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            "$_cs_pkg" \
-            crowdsec-firewall-bouncer-iptables
+        log_info "CrowdSec version: installing latest from packagecloud repository"
     fi
+
+    log_info "Installing CrowdSec packages..."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        "$_cs_pkg" \
+        crowdsec-firewall-bouncer-iptables
 fi
 
 if [[ "$DRY_RUN" != "true" ]]; then
@@ -210,82 +257,75 @@ if [[ "$DRY_RUN" != "true" ]]; then
     log_success "CrowdSec service enabled and started."
 fi
 
-log_info "=== PHASE 2: Cloudflare bouncer installation ==="
+# ---------------------------------------------------------------------------
+# PHASE 2: Cloudflare Workers bouncer installation
+# ---------------------------------------------------------------------------
+log_info "=== PHASE 2: Cloudflare Workers bouncer installation ==="
 
 _CF_PROXY_ENABLED="${CLOUDFLARE_PROXY_ENABLED:-false}"
-_CF_BOUNCER_BIN="/usr/local/bin/crowdsec-cloudflare-bouncer"
-_CF_BOUNCER_NEEDS_INSTALL=false
+_CF_WORKER_BOUNCER_BIN="/usr/local/bin/crowdsec-cloudflare-worker-bouncer"
+_CF_WORKER_BOUNCER_NEEDS_INSTALL=false
 
 if [[ "$_CF_PROXY_ENABLED" != "true" ]]; then
-    log_warn "Skipping crowdsec-cloudflare-bouncer setup — CLOUDFLARE_PROXY_ENABLED is not 'true'."
-    log_warn "Set CLOUDFLARE_PROXY_ENABLED=true in .env and re-run this script to enable the Cloudflare bouncer."
+    log_warn "Skipping crowdsec-cloudflare-worker-bouncer setup — CLOUDFLARE_PROXY_ENABLED is not 'true'."
+    log_warn "Set CLOUDFLARE_PROXY_ENABLED=true in .env and re-run this script to enable the Cloudflare Workers bouncer."
 elif [[ "$DRY_RUN" == "true" ]]; then
-    log_info "[DRY RUN] Would install crowdsec-cloudflare-bouncer (deb → tarball → go source fallback)"
+    log_info "[DRY RUN] Would install crowdsec-cloudflare-worker-bouncer (apt → tarball → go source fallback)"
 else
     # Register the bouncer API key in CrowdSec LAPI.
-    if ! cscli bouncers list 2>/dev/null | grep -q 'cloudflare-bouncer' || [[ "$FORCE" == "true" ]]; then
+    if ! cscli bouncers list 2>/dev/null | grep -q 'cloudflare-worker-bouncer' || [[ "$FORCE" == "true" ]]; then
         log_info "Updating CrowdSec hub..."
         cscli hub update || true
-        log_info "Registering Cloudflare bouncer in CrowdSec LAPI..."
-        cscli bouncers add crowdsecurity/cloudflare-bouncer 2>/dev/null || true
+        log_info "Registering Cloudflare Workers bouncer in CrowdSec LAPI..."
+        cscli bouncers add crowdsecurity/cloudflare-worker-bouncer 2>/dev/null || true
     else
-        log_info "CrowdSec Cloudflare bouncer already registered — skipping."
+        log_info "CrowdSec Cloudflare Workers bouncer already registered — skipping."
     fi
 
-    # Determine whether the binary must be installed.
-    if [[ ! -x "$_CF_BOUNCER_BIN" ]] || [[ "$FORCE" == "true" ]]; then
-        _CF_BOUNCER_NEEDS_INSTALL=true
+    if [[ ! -x "$_CF_WORKER_BOUNCER_BIN" ]] || [[ "$FORCE" == "true" ]]; then
+        _CF_WORKER_BOUNCER_NEEDS_INSTALL=true
     fi
 
-    if [[ "$_CF_BOUNCER_NEEDS_INSTALL" == "true" ]]; then
-        log_info "Cloudflare bouncer binary not found — attempting installation..."
+    if [[ "$_CF_WORKER_BOUNCER_NEEDS_INSTALL" == "true" ]]; then
+        log_info "Cloudflare Workers bouncer binary not found — attempting installation..."
 
-        # Normalize the architecture name used by package assets.
         _arch="$(dpkg --print-architecture 2>/dev/null || uname -m)"
         case "$_arch" in
             arm64|aarch64) _arch="arm64" ;;
             amd64|x86_64)  _arch="amd64" ;;
             *)
-                log_warn "Unsupported architecture: $_arch — skipping CF bouncer install"
+                log_warn "Unsupported architecture: $_arch — skipping Workers bouncer install"
                 _arch=""
                 ;;
         esac
 
         _installed_via_deb=false
 
-        # Try packagecloud apt/deb first.
-        # The CrowdSec repo is already added earlier, and the package installs
-        # both the binary and the systemd unit in one step.
         if [[ -n "$_arch" ]]; then
-            log_info "Attempting apt install of crowdsec-cloudflare-bouncer..."
-            if DEBIAN_FRONTEND=noninteractive apt-get install -y crowdsec-cloudflare-bouncer 2>/dev/null; then
-                log_success "Installed crowdsec-cloudflare-bouncer via apt."
+            log_info "Attempting apt install of crowdsec-cloudflare-worker-bouncer..."
+            if DEBIAN_FRONTEND=noninteractive apt-get install -y crowdsec-cloudflare-worker-bouncer 2>/dev/null; then
+                log_success "Installed crowdsec-cloudflare-worker-bouncer via apt."
                 _installed_via_deb=true
             else
                 log_warn "apt install failed — falling back to GitHub release tarball."
             fi
         fi
 
-        # Fall back to the latest GitHub release tarball.
-        # The tarball ships install.sh and helper scripts that must run from the
-        # extracted directory because they rely on relative paths.
-        if [[ "$_installed_via_deb" == "false" ]] && [[ -n "$_arch" ]]; then
-            # Resolve the GitHub API URL: use a pinned tag when configured and
-            # --use-latest is not active; otherwise query releases/latest.
-            if [[ "$USE_LATEST" != "true" && -n "$CF_BOUNCER_VERSION" ]]; then
-                _gh_api="https://api.github.com/repos/crowdsecurity/cs-cloudflare-bouncer/releases/tags/${CF_BOUNCER_VERSION}"
-                log_info "CF bouncer version pinned: ${CF_BOUNCER_VERSION}"
+        if [[ "$_installed_via_deb" == "false" && -n "$_arch" ]]; then
+            if [[ "$USE_LATEST" != "true" && -n "$CF_WORKER_BOUNCER_VERSION" ]]; then
+                _gh_api="https://api.github.com/repos/crowdsecurity/cs-cloudflare-worker-bouncer/releases/tags/${CF_WORKER_BOUNCER_VERSION}"
+                log_info "CF Workers bouncer version pinned: ${CF_WORKER_BOUNCER_VERSION}"
             else
-                _gh_api="https://api.github.com/repos/crowdsecurity/cs-cloudflare-bouncer/releases/latest"
-                log_info "CF bouncer version: resolving latest from GitHub"
+                _gh_api="https://api.github.com/repos/crowdsecurity/cs-cloudflare-worker-bouncer/releases/latest"
+                log_info "CF Workers bouncer version: resolving latest from GitHub"
             fi
+
             _release_json="$(curl -fsSL "$_gh_api" 2>/dev/null)" || {
-                log_warn "Failed to query GitHub releases for cs-cloudflare-bouncer."
+                log_warn "Failed to query GitHub releases for cs-cloudflare-worker-bouncer."
                 _release_json=""
             }
 
             if [[ -n "$_release_json" ]]; then
-                # Asset filenames use hyphens, such as crowdsec-cloudflare-bouncer-linux-arm64.tgz.
                 _download_url="$(printf '%s' "$_release_json" | \
                     grep -oP '"browser_download_url":\s*"\K[^"]+' | \
                     grep "linux-${_arch}" | \
@@ -299,13 +339,11 @@ else
                     head -1 || true)"
 
                 if [[ -n "$_download_url" ]]; then
-                    _tmpdir="$(mktemp -d -p /tmp cs-cf-bouncer.XXXXXX)"
+                    _tmpdir="$(mktemp -d -p /tmp cs-cf-worker.XXXXXX)"
                     _tmptar="${_tmpdir}/bouncer.tgz"
 
                     log_info "Downloading: $_download_url"
                     if curl -fsSL "$_download_url" -o "$_tmptar"; then
-
-                        # Verify the tarball when a SHA256 asset is available.
                         if [[ -n "$_sha256_url" ]]; then
                             _expected_sha="$(curl -fsSL "$_sha256_url" 2>/dev/null | awk '{print $1}' || true)"
                             _actual_sha="$(sha256sum "$_tmptar" | awk '{print $1}')"
@@ -320,35 +358,31 @@ else
                             tar xzf "$_tmptar" -C "$_tmpdir"
                             rm -f "$_tmptar"
 
-                            # Locate install.sh anywhere in the extracted tree.
                             _install_sh="$(find "$_tmpdir" -maxdepth 2 -name 'install.sh' | head -1 || true)"
 
                             if [[ -n "$_install_sh" && -f "$_install_sh" ]]; then
                                 _install_dir="$(dirname "$_install_sh")"
                                 log_info "Running bundled installer from: $_install_dir"
-                                # cd into the extracted directory because install.sh uses
-                                # relative paths such as ./scripts/_bouncer.sh.
                                 if (cd "$_install_dir" && bash install.sh); then
-                                    log_success "Installed cs-cloudflare-bouncer via tarball install.sh."
+                                    log_success "Installed cs-cloudflare-worker-bouncer via tarball install.sh."
                                 else
-                                    log_warn "Bundled install.sh failed — will attempt manual binary extraction."
-                                    # Fall back to copying the binary manually and writing a unit file.
+                                    log_warn "Bundled install.sh failed — attempting manual binary extraction."
                                     _bin_path="$(find "$_tmpdir" -maxdepth 3 -type f \
-                                        -name 'crowdsec-cloudflare-bouncer' \
+                                        -name 'crowdsec-cloudflare-worker-bouncer' \
                                         ! -name '*.sh' | head -1 || true)"
                                     if [[ -x "$_bin_path" ]]; then
-                                        install -m 755 -o root -g root "$_bin_path" "$_CF_BOUNCER_BIN"
-                                        log_success "Copied binary to ${_CF_BOUNCER_BIN} (manual fallback)."
+                                        install -m 755 -o root -g root "$_bin_path" "$_CF_WORKER_BOUNCER_BIN"
+                                        log_success "Copied binary to ${_CF_WORKER_BOUNCER_BIN} (manual fallback)."
                                     fi
                                 fi
                             else
                                 log_warn "No install.sh found in tarball — extracting binary directly."
                                 _bin_path="$(find "$_tmpdir" -maxdepth 3 -type f \
-                                    -name 'crowdsec-cloudflare-bouncer' \
+                                    -name 'crowdsec-cloudflare-worker-bouncer' \
                                     ! -name '*.sh' | head -1 || true)"
                                 if [[ -x "$_bin_path" ]]; then
-                                    install -m 755 -o root -g root "$_bin_path" "$_CF_BOUNCER_BIN"
-                                    log_success "Copied binary to ${_CF_BOUNCER_BIN}."
+                                    install -m 755 -o root -g root "$_bin_path" "$_CF_WORKER_BOUNCER_BIN"
+                                    log_success "Copied binary to ${_CF_WORKER_BOUNCER_BIN}."
                                 fi
                             fi
                         fi
@@ -364,49 +398,47 @@ else
             fi
         fi
 
-        # Use a Go source build as the last resort.
-        if [[ -n "$_arch" ]] && [[ ! -x "$_CF_BOUNCER_BIN" ]]; then
+        # Last resort: Go source build.
+        if [[ -n "$_arch" && ! -x "$_CF_WORKER_BOUNCER_BIN" ]]; then
             if command -v go >/dev/null 2>&1; then
-                log_info "Attempting Go source build for crowdsec-cloudflare-bouncer..."
-                # Respect the version pin: use a specific tag when set and
-                # --use-latest is not active, otherwise fall back to @latest.
-                if [[ "$USE_LATEST" != "true" && -n "$CF_BOUNCER_VERSION" ]]; then
-                    _go_pkg_ref="github.com/crowdsecurity/cs-cloudflare-bouncer/cmd/crowdsec-cloudflare-bouncer@${CF_BOUNCER_VERSION}"
+                log_info "Attempting Go source build for crowdsec-cloudflare-worker-bouncer..."
+                if [[ "$USE_LATEST" != "true" && -n "$CF_WORKER_BOUNCER_VERSION" ]]; then
+                    _go_pkg_ref="github.com/crowdsecurity/cs-cloudflare-worker-bouncer/cmd/crowdsec-cloudflare-worker-bouncer@${CF_WORKER_BOUNCER_VERSION}"
                 else
-                    _go_pkg_ref="github.com/crowdsecurity/cs-cloudflare-bouncer/cmd/crowdsec-cloudflare-bouncer@latest"
+                    _go_pkg_ref="github.com/crowdsecurity/cs-cloudflare-worker-bouncer/cmd/crowdsec-cloudflare-worker-bouncer@latest"
                 fi
-                _tmpgobin="$(mktemp -d -p /tmp cs-cf-go.XXXXXX)"
+                _tmpgobin="$(mktemp -d -p /tmp cs-cf-worker-go.XXXXXX)"
                 if GOBIN="$_tmpgobin" go install "$_go_pkg_ref" 2>/dev/null; then
-                    if [[ -x "$_tmpgobin/crowdsec-cloudflare-bouncer" ]]; then
+                    if [[ -x "$_tmpgobin/crowdsec-cloudflare-worker-bouncer" ]]; then
                         install -m 755 -o root -g root \
-                            "$_tmpgobin/crowdsec-cloudflare-bouncer" \
-                            "$_CF_BOUNCER_BIN"
-                        log_success "Built and installed crowdsec-cloudflare-bouncer from source."
+                            "$_tmpgobin/crowdsec-cloudflare-worker-bouncer" \
+                            "$_CF_WORKER_BOUNCER_BIN"
+                        log_success "Built and installed crowdsec-cloudflare-worker-bouncer from source."
                     fi
                 else
-                    log_warn "Go source build failed for crowdsec-cloudflare-bouncer."
+                    log_warn "Go source build failed for crowdsec-cloudflare-worker-bouncer."
                 fi
                 rm -rf "$_tmpgobin"
             else
                 log_warn "Go toolchain not installed; cannot build from source."
                 log_warn "Install Go, then run:"
-                log_warn "  GOBIN=/tmp/cs-cf-go go install github.com/crowdsecurity/cs-cloudflare-bouncer/cmd/crowdsec-cloudflare-bouncer@latest"
+                log_warn "  GOBIN=/tmp/cs-cf-go go install github.com/crowdsecurity/cs-cloudflare-worker-bouncer/cmd/crowdsec-cloudflare-worker-bouncer@latest"
             fi
         fi
 
-        # Write the systemd unit when a binary exists but no unit was installed.
-        # This covers the Go-build path and tarballs that skip install.sh.
-        if [[ -x "$_CF_BOUNCER_BIN" ]] && ! _cf_bouncer_service_exists; then
-            log_info "Writing crowdsec-cloudflare-bouncer systemd unit..."
-            cat >/etc/systemd/system/crowdsec-cloudflare-bouncer.service <<'UNIT'
+        # Write the systemd unit when daemon mode is in use and no unit was
+        # installed by the package / tarball helper.
+        if [[ -x "$_CF_WORKER_BOUNCER_BIN" ]] && ! _cf_worker_bouncer_service_exists && [[ "$AUTONOMOUS_MODE" != "true" ]]; then
+            log_info "Writing crowdsec-cloudflare-worker-bouncer systemd unit..."
+            cat >/etc/systemd/system/crowdsec-cloudflare-worker-bouncer.service <<'UNIT'
 [Unit]
-Description=CrowdSec Cloudflare Bouncer
+Description=CrowdSec Cloudflare Workers Bouncer
 After=network-online.target crowdsec.service
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/crowdsec-cloudflare-bouncer -c /etc/crowdsec/bouncers/crowdsec-cloudflare-bouncer.yaml
+ExecStart=/usr/local/bin/crowdsec-cloudflare-worker-bouncer -c /etc/crowdsec/bouncers/crowdsec-cloudflare-worker-bouncer.yaml
 Restart=on-failure
 RestartSec=5
 User=root
@@ -416,26 +448,32 @@ Group=root
 WantedBy=multi-user.target
 UNIT
             systemctl daemon-reload || true
-            log_success "Installed crowdsec-cloudflare-bouncer systemd unit."
+            log_success "Installed crowdsec-cloudflare-worker-bouncer systemd unit."
         fi
 
     else
-        log_info "Cloudflare bouncer binary already present at ${_CF_BOUNCER_BIN}."
+        log_info "Cloudflare Workers bouncer binary already present at ${_CF_WORKER_BOUNCER_BIN}."
     fi
 fi
 
+# ---------------------------------------------------------------------------
+# PHASE 3: CrowdSec hub collections
+# ---------------------------------------------------------------------------
 log_info "=== PHASE 3: CrowdSec hub collections ==="
 
 if [[ "$DRY_RUN" == "true" ]]; then
     log_info "[DRY RUN] Would install hub collections: crowdsecurity/linux, crowdsecurity/caddy, crowdsecurity/http-cve, Dominic-Wagner/vaultwarden"
 else
-    cscli collections install crowdsecurity/linux     || true
-    cscli collections install crowdsecurity/caddy     || true
-    cscli collections install crowdsecurity/http-cve  || true
-    cscli collections install Dominic-Wagner/vaultwarden || true
+    cscli collections install crowdsecurity/linux          || true
+    cscli collections install crowdsecurity/caddy          || true
+    cscli collections install crowdsecurity/http-cve       || true
+    cscli collections install Dominic-Wagner/vaultwarden   || true
     log_success "Hub collections installed."
 fi
 
+# ---------------------------------------------------------------------------
+# PHASE 4: Acquisition config
+# ---------------------------------------------------------------------------
 log_info "=== PHASE 4: Acquisition config ==="
 
 _project_state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
@@ -456,6 +494,9 @@ else
     log_warn "crowdsec/acquis.yaml not found in ${PROJECT_ROOT} — skipping acquis config."
 fi
 
+# ---------------------------------------------------------------------------
+# PHASE 5: Bouncer API key
+# ---------------------------------------------------------------------------
 log_info "=== PHASE 5: Bouncer API key ==="
 
 _CF_BOUNCER_KEY=""
@@ -467,31 +508,28 @@ elif [[ "$DRY_RUN" == "true" ]]; then
     log_info "[DRY RUN] Would generate and register a bouncer API key, write to .env as ${_CF_BOUNCER_ENV_KEY}"
     _CF_BOUNCER_KEY="DRY_RUN_PLACEHOLDER"
 else
-    # Reuse the key from .env when it is already present and registered.
     _existing_key="${CROWDSEC_CF_BOUNCER_API_KEY:-}"
-    if [[ -n "$_existing_key" ]] && cscli bouncers list 2>/dev/null | grep -q 'cloudflare-bouncer' && [[ "$FORCE" != "true" ]]; then
+    if [[ -n "$_existing_key" ]] && cscli bouncers list 2>/dev/null | grep -q 'cloudflare-worker-bouncer' && [[ "$FORCE" != "true" ]]; then
         log_info "Bouncer API key already present in .env — skipping key generation."
         _CF_BOUNCER_KEY="$_existing_key"
     else
         log_info "Generating new bouncer API key..."
         _new_key="$(openssl rand -hex 32)"
-        # Remove any stale registration first so the re-add stays idempotent.
-        cscli bouncers delete cloudflare-bouncer 2>/dev/null || true
-        cscli bouncers add cloudflare-bouncer --key "$_new_key" 2>/dev/null || {
+        cscli bouncers delete cloudflare-worker-bouncer 2>/dev/null || true
+        cscli bouncers add cloudflare-worker-bouncer --key "$_new_key" 2>/dev/null || {
             log_warn "cscli bouncers add failed — CrowdSec LAPI may not be running yet. Key stored in .env for later."
         }
         _CF_BOUNCER_KEY="$_new_key"
         _cs_set_env_var "$_CF_BOUNCER_ENV_KEY" "$_CF_BOUNCER_KEY"
         log_success "Bouncer API key generated and registered. Written to .env as ${_CF_BOUNCER_ENV_KEY}."
-        # Display the newly generated key in a high-visibility credential banner.
+
         if [[ -t 0 ]]; then
             clear
             printf '%s' "${COLOR_RED}"
             cat << 'BOUNCER_BANNER'
   ╔══════════════════════════════════════════════════════════════════╗
-  ║   🔑  CROWDSEC CLOUDFLARE BOUNCER API KEY — SAVE THIS NOW      ║
+  ║   🔑  CROWDSEC CLOUDFLARE WORKERS BOUNCER API KEY — SAVE THIS  ║
   ║   This key is stored in .env as CROWDSEC_CF_BOUNCER_API_KEY    ║
-  ║   and in /etc/crowdsec/bouncers/crowdsec-cloudflare-bouncer.yaml║
   ╚══════════════════════════════════════════════════════════════════╝
 BOUNCER_BANNER
             printf '%s' "${COLOR_RESET}"
@@ -505,65 +543,71 @@ BOUNCER_BANNER
     fi
 fi
 
-log_info "=== PHASE 6: Cloudflare bouncer config ==="
+# ---------------------------------------------------------------------------
+# PHASE 6: Cloudflare Workers bouncer config
+# ---------------------------------------------------------------------------
+log_info "=== PHASE 6: Cloudflare Workers bouncer config ==="
 
-_CF_BOUNCER_CONFIG_SRC="${PROJECT_ROOT}/crowdsec/crowdsec-cloudflare-bouncer.yaml.example"
-_CF_BOUNCER_CONFIG_DEST="/etc/crowdsec/bouncers/crowdsec-cloudflare-bouncer.yaml"
+_CF_WORKER_BOUNCER_CONFIG_SRC="${PROJECT_ROOT}/crowdsec/crowdsec-cloudflare-worker-bouncer.yaml.example"
+_CF_WORKER_BOUNCER_CONFIG_DEST="/etc/crowdsec/bouncers/crowdsec-cloudflare-worker-bouncer.yaml"
 
-if [[ -f "$_CF_BOUNCER_CONFIG_SRC" ]]; then
+if [[ -f "$_CF_WORKER_BOUNCER_CONFIG_SRC" ]]; then
     if [[ "$_CF_PROXY_ENABLED" != "true" ]]; then
-        log_warn "Skipping Cloudflare bouncer config write — CLOUDFLARE_PROXY_ENABLED is not 'true'."
+        log_warn "Skipping Cloudflare Workers bouncer config write — CLOUDFLARE_PROXY_ENABLED is not 'true'."
     elif [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would write ${_CF_BOUNCER_CONFIG_DEST} from ${_CF_BOUNCER_CONFIG_SRC}"
+        log_info "[DRY RUN] Would write ${_CF_WORKER_BOUNCER_CONFIG_DEST} from ${_CF_WORKER_BOUNCER_CONFIG_SRC}"
     else
         _cf_zone_id="${CLOUDFLARE_ZONE_ID:-}"
         _cf_account_id="${CF_ACCOUNT_ID:-}"
-        _CF_FIREWALL_TOKEN=""
+        _CF_WORKER_TOKEN=""
 
         if [[ "$AUTO_MODE" == "true" ]]; then
-            # In auto mode, use available values or write placeholders and never prompt.
             _cf_zone_id="${_cf_zone_id:-CHANGE_ME_CF_ZONE_ID}"
             _cf_account_id="${_cf_account_id:-CHANGE_ME_CF_ACCOUNT_ID}"
-            _CF_FIREWALL_TOKEN="CHANGE_ME_CROWDSEC_CF_FIREWALL_TOKEN"
+            _CF_WORKER_TOKEN="CHANGE_ME_CF_WORKER_BOUNCER_TOKEN"
             log_warn "Auto mode: Cloudflare values left as placeholders where missing."
-            log_warn "Set later in .env / sudo utilities/setup-secrets.sh rotate crowdsec_cf_firewall_token"
+            log_warn "Set later in .env / sudo utilities/setup-secrets.sh rotate cf_worker_bouncer_token"
         else
-            # In interactive mode, resolve the token before prompting.
-            # Priority order, highest to lowest:
-            #   1. CROWDSEC_CF_FIREWALL_TOKEN in the environment or .env.
-            #   2. The PROJECT_STATE_DIR Docker secret file written by setup-secrets.sh.
-            #   3. The PROJECT_ROOT Docker secret file for legacy or repo-local use.
-            #   4. An interactive prompt.
-
-            _env_token="${CROWDSEC_CF_FIREWALL_TOKEN:-}"
+            # Resolve the Worker API token from env, secret files, or prompt.
+            _env_token="${CF_WORKER_BOUNCER_TOKEN:-}"
             if [[ -n "$_env_token" && "$_env_token" != CHANGE_ME* && "$_env_token" != PLACEHOLDER* ]]; then
-                _CF_FIREWALL_TOKEN="$_env_token"
-                log_success "crowdsec_cf_firewall_token found in environment / .env — skipping prompt."
+                _CF_WORKER_TOKEN="$_env_token"
+                log_success "CF_WORKER_BOUNCER_TOKEN found in environment / .env — skipping prompt."
             fi
 
-            if [[ -z "$_CF_FIREWALL_TOKEN" ]]; then
-                _state_secret="${_project_state_dir}/secrets/.docker_secrets/crowdsec_cf_firewall_token"
-                _CF_FIREWALL_TOKEN="$(_cs_read_secret_file "$_state_secret")"
-                if [[ -n "$_CF_FIREWALL_TOKEN" ]]; then
-                    log_success "crowdsec_cf_firewall_token found at ${_state_secret} — skipping prompt."
+            if [[ -z "$_CF_WORKER_TOKEN" ]]; then
+                _state_secret="${_project_state_dir}/secrets/.docker_secrets/cf_worker_bouncer_token"
+                _CF_WORKER_TOKEN="$(_cs_read_secret_file "$_state_secret")"
+                if [[ -n "$_CF_WORKER_TOKEN" ]]; then
+                    log_success "cf_worker_bouncer_token found at ${_state_secret} — skipping prompt."
                 fi
             fi
 
-            if [[ -z "$_CF_FIREWALL_TOKEN" ]]; then
-                _repo_secret="${PROJECT_ROOT}/secrets/.docker_secrets/crowdsec_cf_firewall_token"
-                _CF_FIREWALL_TOKEN="$(_cs_read_secret_file "$_repo_secret")"
-                if [[ -n "$_CF_FIREWALL_TOKEN" ]]; then
-                    log_success "crowdsec_cf_firewall_token found at ${_repo_secret} — skipping prompt."
+            if [[ -z "$_CF_WORKER_TOKEN" ]]; then
+                _repo_secret="${PROJECT_ROOT}/secrets/.docker_secrets/cf_worker_bouncer_token"
+                _CF_WORKER_TOKEN="$(_cs_read_secret_file "$_repo_secret")"
+                if [[ -n "$_CF_WORKER_TOKEN" ]]; then
+                    log_success "cf_worker_bouncer_token found at ${_repo_secret} — skipping prompt."
                 fi
             fi
 
-            if [[ -z "$_CF_FIREWALL_TOKEN" ]]; then
+            if [[ -z "$_CF_WORKER_TOKEN" ]]; then
                 log_info ""
                 log_info "══════════════════════════════════════════════════════════"
-                log_info " Cloudflare values required by CrowdSec bouncer"
+                log_info " Cloudflare API token required by CrowdSec Workers bouncer"
                 log_info "══════════════════════════════════════════════════════════"
-                log_info " Required permissions: Zone:Firewall Services:Edit"
+                log_info " Required permissions:"
+                log_info "   Account › Workers KV Storage : Edit"
+                log_info "   Account › Workers Scripts    : Edit"
+                log_info "   Account › Account Settings   : Read"
+                log_info "   Account › Turnstile          : Edit"
+                log_info "   Account › D1                 : Edit"
+                log_info "   User    › User Details       : Read"
+                log_info "   Zone    › DNS                : Read"
+                log_info "   Zone    › Workers Routes     : Edit"
+                log_info "   Zone    › Zone               : Read"
                 log_info " Create at: https://dash.cloudflare.com/profile/api-tokens"
+                log_info " (Use 'My Profile' → API Tokens, NOT Account API Tokens)"
                 log_info "══════════════════════════════════════════════════════════"
 
                 while [[ -z "$_cf_zone_id" ]]; do
@@ -574,70 +618,111 @@ if [[ -f "$_CF_BOUNCER_CONFIG_SRC" ]]; then
                     read -r -p "Enter CF_ACCOUNT_ID (optional, press Enter to skip): " _cf_account_id
                 fi
 
-                while [[ -z "$_CF_FIREWALL_TOKEN" ]]; do
-                    read -r -s -p "Enter Cloudflare Firewall API token (input hidden): " _CF_FIREWALL_TOKEN
+                while [[ -z "$_CF_WORKER_TOKEN" ]]; do
+                    read -r -s -p "Enter Cloudflare Workers API token (input hidden): " _CF_WORKER_TOKEN
                     echo ""
-                    if [[ -z "$_CF_FIREWALL_TOKEN" ]]; then
+                    if [[ -z "$_CF_WORKER_TOKEN" ]]; then
                         log_warn "Token cannot be empty. Press Ctrl+C to skip and configure later."
                     fi
                 done
-                log_success "Cloudflare firewall token accepted."
+                log_success "Cloudflare Workers API token accepted."
             fi
 
             _cs_set_env_var "CLOUDFLARE_ZONE_ID" "$_cf_zone_id"
             [[ -n "$_cf_account_id" ]] && _cs_set_env_var "CF_ACCOUNT_ID" "$_cf_account_id"
         fi
 
+        # Determine free-plan KV write guard setting.
+        _cf_free_plan="${CF_FREE_PLAN:-true}"
+        if [[ "$_cf_free_plan" == "true" ]]; then
+            _only_from_line="  only_include_decisions_from: [\"cscli\", \"crowdsec\"]"
+            log_info "Free-plan KV guard enabled: restricting decisions to cscli + crowdsec engine."
+            log_info "Set CF_FREE_PLAN=false in .env to disable this restriction."
+        else
+            _only_from_line="  only_include_decisions_from: []"
+        fi
+
         mkdir -p /etc/crowdsec/bouncers
         sed \
             -e "s|TOKEN_CF_ZONE_ID|${_cf_zone_id}|g" \
             -e "s|TOKEN_CF_ACCOUNT_ID|${_cf_account_id:-CHANGE_ME_CF_ACCOUNT_ID}|g" \
-            -e "s|TOKEN_CROWDSEC_CF_FIREWALL_TOKEN|${_CF_FIREWALL_TOKEN}|g" \
+            -e "s|TOKEN_CF_WORKER_BOUNCER_TOKEN|${_CF_WORKER_TOKEN}|g" \
             -e "s|CHANGE_ME_BOUNCER_KEY|${_CF_BOUNCER_KEY}|g" \
-            "$_CF_BOUNCER_CONFIG_SRC" \
-            | tee "$_CF_BOUNCER_CONFIG_DEST" >/dev/null
-        chmod 600 "$_CF_BOUNCER_CONFIG_DEST"
-        log_success "Cloudflare bouncer config written to ${_CF_BOUNCER_CONFIG_DEST} (mode 600)."
+            -e "s|.*only_include_decisions_from:.*|${_only_from_line}|g" \
+            "$_CF_WORKER_BOUNCER_CONFIG_SRC" \
+            | tee "$_CF_WORKER_BOUNCER_CONFIG_DEST" >/dev/null
+        chmod 600 "$_CF_WORKER_BOUNCER_CONFIG_DEST"
+        log_success "Cloudflare Workers bouncer config written to ${_CF_WORKER_BOUNCER_CONFIG_DEST} (mode 600)."
 
         # Persist the canonical flat secret file so later runs stay prompt-free.
         _cf_secret_dir="${_project_state_dir}/secrets/.docker_secrets"
         mkdir -p "$_cf_secret_dir"
-        if [[ -n "$_CF_FIREWALL_TOKEN" && "$_CF_FIREWALL_TOKEN" != CHANGE_ME* && "$_CF_FIREWALL_TOKEN" != PLACEHOLDER* ]]; then
-            if [[ ! -f "${_cf_secret_dir}/crowdsec_cf_firewall_token" ]] || ! cmp -s <(printf "%s\n" "$_CF_FIREWALL_TOKEN") "${_cf_secret_dir}/crowdsec_cf_firewall_token"; then
-                printf "%s\n" "$_CF_FIREWALL_TOKEN" > "${_cf_secret_dir}/crowdsec_cf_firewall_token"
-                chmod 444 "${_cf_secret_dir}/crowdsec_cf_firewall_token"
-                log_success "Saved Cloudflare firewall token to ${_cf_secret_dir}/crowdsec_cf_firewall_token"
+        if [[ -n "$_CF_WORKER_TOKEN" && "$_CF_WORKER_TOKEN" != CHANGE_ME* && "$_CF_WORKER_TOKEN" != PLACEHOLDER* ]]; then
+            if [[ ! -f "${_cf_secret_dir}/cf_worker_bouncer_token" ]] || \
+               ! cmp -s <(printf "%s\n" "$_CF_WORKER_TOKEN") "${_cf_secret_dir}/cf_worker_bouncer_token"; then
+                printf "%s\n" "$_CF_WORKER_TOKEN" > "${_cf_secret_dir}/cf_worker_bouncer_token"
+                chmod 444 "${_cf_secret_dir}/cf_worker_bouncer_token"
+                log_success "Saved Cloudflare Workers token to ${_cf_secret_dir}/cf_worker_bouncer_token"
             fi
         fi
 
-        if _cf_bouncer_service_exists; then
-            systemctl enable crowdsec-cloudflare-bouncer || true
-            systemctl reset-failed crowdsec-cloudflare-bouncer 2>/dev/null || true
-            systemctl restart crowdsec-cloudflare-bouncer || true
+        # Auto-generate the full Cloudflare config section from the token.
+        if [[ -x "$_CF_WORKER_BOUNCER_BIN" && -n "$_CF_WORKER_TOKEN" && "$_CF_WORKER_TOKEN" != CHANGE_ME* ]]; then
+            log_info "Auto-generating Cloudflare account/zone config from token..."
+            "$_CF_WORKER_BOUNCER_BIN" \
+                -g "$_CF_WORKER_TOKEN" \
+                -o "$_CF_WORKER_BOUNCER_CONFIG_DEST" 2>/dev/null || \
+                log_warn "Auto-config generation failed — review ${_CF_WORKER_BOUNCER_CONFIG_DEST} manually."
+            # Re-apply the lapi_key which the -g helper may overwrite.
+            if [[ -n "$_CF_BOUNCER_KEY" ]]; then
+                sed -i "s|lapi_key:.*|lapi_key: ${_CF_BOUNCER_KEY}|" "$_CF_WORKER_BOUNCER_CONFIG_DEST" || true
+            fi
+            chmod 600 "$_CF_WORKER_BOUNCER_CONFIG_DEST"
+        fi
 
-            _cf_bouncer_ready=false
+        if [[ "$AUTONOMOUS_MODE" == "true" ]]; then
+            log_info "Deploying Workers + KV to Cloudflare in autonomous mode (-S)..."
+            if "$_CF_WORKER_BOUNCER_BIN" \
+                    -S \
+                    -c "$_CF_WORKER_BOUNCER_CONFIG_DEST"; then
+                log_success "Autonomous mode deployment complete."
+                log_info "Worker route fail mode: manually set to 'Fail Open' in the Cloudflare dashboard"
+                log_info "  Dashboard → Website → Worker Routes → Edit → Request limit failure mode → Fail open"
+            else
+                log_warn "Autonomous mode deployment reported an error — check config and token permissions."
+            fi
+        elif _cf_worker_bouncer_service_exists; then
+            systemctl enable crowdsec-cloudflare-worker-bouncer || true
+            systemctl reset-failed crowdsec-cloudflare-worker-bouncer 2>/dev/null || true
+            systemctl restart crowdsec-cloudflare-worker-bouncer || true
+
+            _cf_worker_bouncer_ready=false
             for _i in {1..10}; do
-                if systemctl is-active --quiet crowdsec-cloudflare-bouncer; then
-                    _cf_bouncer_ready=true
+                if systemctl is-active --quiet crowdsec-cloudflare-worker-bouncer; then
+                    _cf_worker_bouncer_ready=true
                     break
                 fi
                 sleep 1
             done
 
-            if [[ "$_cf_bouncer_ready" == "true" ]]; then
-                log_success "crowdsec-cloudflare-bouncer is active."
+            if [[ "$_cf_worker_bouncer_ready" == "true" ]]; then
+                log_success "crowdsec-cloudflare-worker-bouncer is active."
             else
-                log_warn "crowdsec-cloudflare-bouncer did not report active within 10s; continuing setup."
+                log_warn "crowdsec-cloudflare-worker-bouncer did not report active within 10s; continuing setup."
             fi
         else
-            log_warn "crowdsec-cloudflare-bouncer.service unit not found after install attempt — check logs above."
-            log_warn "Once the binary is installed, run: sudo systemctl enable --now crowdsec-cloudflare-bouncer"
+            log_warn "crowdsec-cloudflare-worker-bouncer.service unit not found after install attempt — check logs above."
+            log_warn "Once the binary is installed, run: sudo systemctl enable --now crowdsec-cloudflare-worker-bouncer"
         fi
     fi
 else
-    log_warn "crowdsec-cloudflare-bouncer.yaml.example not found in ${PROJECT_ROOT}/crowdsec — skipping bouncer config write."
+    log_warn "crowdsec-cloudflare-worker-bouncer.yaml.example not found in ${PROJECT_ROOT}/crowdsec — skipping bouncer config write."
+    log_warn "Expected: ${_CF_WORKER_BOUNCER_CONFIG_SRC}"
 fi
 
+# ---------------------------------------------------------------------------
+# PHASE 7: CrowdSec profiles
+# ---------------------------------------------------------------------------
 log_info "=== PHASE 7: CrowdSec profiles ==="
 
 _PROFILES_SRC="${PROJECT_ROOT}/crowdsec/profiles.yaml"
@@ -653,38 +738,45 @@ else
     log_info "No custom crowdsec/profiles.yaml found — using CrowdSec defaults."
 fi
 
+# ---------------------------------------------------------------------------
+# PHASE 8: Enable and start services
+# ---------------------------------------------------------------------------
 log_info "=== PHASE 8: Enable and start services ==="
 
 if [[ "$DRY_RUN" == "true" ]]; then
-    log_info "[DRY RUN] Would reload crowdsec and enable crowdsec-firewall-bouncer and crowdsec-cloudflare-bouncer"
+    log_info "[DRY RUN] Would reload crowdsec and enable crowdsec-firewall-bouncer"
+    if [[ "$AUTONOMOUS_MODE" != "true" ]]; then
+        log_info "[DRY RUN] Would enable crowdsec-cloudflare-worker-bouncer (daemon mode)"
+    else
+        log_info "[DRY RUN] Autonomous mode — no persistent service to enable"
+    fi
 else
     systemctl reload crowdsec                        || true
     systemctl enable --now crowdsec-firewall-bouncer || true
-    # Only enable the Cloudflare bouncer when its unit exists and CF proxying is enabled.
+
     if [[ "$_CF_PROXY_ENABLED" != "true" ]]; then
-        log_warn "Skipping crowdsec-cloudflare-bouncer enable — CLOUDFLARE_PROXY_ENABLED is not 'true'."
-    elif _cf_bouncer_service_exists; then
-        systemctl enable --now crowdsec-cloudflare-bouncer || true
-        log_success "crowdsec-cloudflare-bouncer enabled and started."
+        log_warn "Skipping crowdsec-cloudflare-worker-bouncer enable — CLOUDFLARE_PROXY_ENABLED is not 'true'."
+    elif [[ "$AUTONOMOUS_MODE" == "true" ]]; then
+        log_info "Autonomous mode active — Cloudflare Workers handle syncing; no persistent daemon needed."
+    elif _cf_worker_bouncer_service_exists; then
+        systemctl enable --now crowdsec-cloudflare-worker-bouncer || true
+        log_success "crowdsec-cloudflare-worker-bouncer enabled and started."
     else
-        log_warn "Skipping crowdsec-cloudflare-bouncer enable — service unit not installed yet."
+        log_warn "Skipping crowdsec-cloudflare-worker-bouncer enable — service unit not installed yet."
     fi
     log_success "Services enabled."
 fi
 
+# ---------------------------------------------------------------------------
+# PHASE 9: Admin IP allowlist
+# ---------------------------------------------------------------------------
 log_info "=== PHASE 9: Admin IP allowlist ==="
 
-# The CrowdSec allowlist YAML parser file persists across hub updates and
-# CrowdSec reinstalls, making it more durable than cscli decisions entries
-# (which can be flushed). A separate file under s02-enrich ensures the admin
-# IP is never blocked regardless of which detection rules are active.
 _cs_whitelist_dir="/etc/crowdsec/parsers/s02-enrich"
 _cs_whitelist_file="${_cs_whitelist_dir}/vaultwarden-admin-allowlist.yaml"
 _cs_resolved_ip="$ADMIN_IP"
 
 if [[ -z "$_cs_resolved_ip" ]]; then
-    # SSH_CLIENT is injected by sshd as "client_ip client_port server_port".
-    # It may not survive sudo depending on the env_keep configuration.
     _cs_ssh_src="${SSH_CLIENT:-}"
     if [[ -n "$_cs_ssh_src" ]]; then
         _cs_ssh_ip="${_cs_ssh_src%% *}"
@@ -713,12 +805,10 @@ if [[ -z "$_cs_resolved_ip" ]]; then
     log_warn "No admin IP provided — CrowdSec admin allowlist not configured."
     log_warn "Re-run with --admin-ip YOUR_IP to add an allowlist entry at any time."
 else
-    # Validate: accept only characters valid in an IPv4/IPv6 address or CIDR.
     if [[ ! "$_cs_resolved_ip" =~ ^[0-9a-fA-F:./]+$ ]]; then
         log_warn "Ignoring admin IP '${_cs_resolved_ip}': unexpected characters detected."
         log_warn "Provide a plain IPv4/IPv6 address or CIDR (e.g. 203.0.113.42 or 203.0.113.0/24)."
     else
-        # Choose the YAML key based on whether the value includes a prefix length.
         if [[ "$_cs_resolved_ip" == */* ]]; then
             _cs_yaml_field="cidr"
         else
@@ -730,8 +820,6 @@ else
             log_info "[DRY RUN] Would allowlist (${_cs_yaml_field}): ${_cs_resolved_ip}"
         else
             mkdir -p "$_cs_whitelist_dir"
-            # The parser name must match a known CrowdSec hub whitelist entry so
-            # the engine recognises it; crowdsecurity/whitelists is the standard one.
             cat > "$_cs_whitelist_file" <<CSYAML
 name: crowdsecurity/whitelists
 description: "Admin ${_cs_yaml_field} allowlisted by VaultWarden setup-crowdsec.sh"
@@ -744,7 +832,6 @@ CSYAML
             log_success "CrowdSec allowlist written: ${_cs_whitelist_file}"
             log_success "Allowlisted (${_cs_yaml_field}): ${_cs_resolved_ip}"
 
-            # Reload CrowdSec so the new parser whitelist takes effect immediately.
             if systemctl is-active crowdsec >/dev/null 2>&1; then
                 systemctl reload crowdsec 2>/dev/null \
                     || systemctl restart crowdsec 2>/dev/null \
@@ -757,17 +844,29 @@ CSYAML
     fi
 fi
 
+# ---------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------
 log_info ""
 log_info "════════════════════════════════════════════════════════"
 log_info " CrowdSec installation complete"
 log_info "════════════════════════════════════════════════════════"
 log_info "Next steps:"
-log_info "  1. Set CLOUDFLARE_ZONE_ID (and optionally CF_ACCOUNT_ID) in .env"
-log_info "  2. Cloudflare firewall token is stored at:"
-log_info "       ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/secrets/.docker_secrets/crowdsec_cf_firewall_token"
+log_info "  1. Ensure CLOUDFLARE_ZONE_ID and CF_ACCOUNT_ID are set in .env"
+log_info "  2. Cloudflare Workers API token is stored at:"
+log_info "       ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/secrets/.docker_secrets/cf_worker_bouncer_token"
 log_info "     Rotate manually by re-running this script if needed."
-log_info "  3. Verify CrowdSec metrics:"
-log_info "       sudo cscli metrics"
-log_info "  4. After setting tokens, restart the Cloudflare bouncer:"
-log_info "       sudo systemctl restart crowdsec-cloudflare-bouncer"
+if [[ "$AUTONOMOUS_MODE" == "true" ]]; then
+    log_info "  3. Set worker route fail mode to 'Fail Open' in Cloudflare dashboard:"
+    log_info "       Dashboard → Website → Worker Routes → Edit → Fail open"
+    log_info "  4. Verify decisions are reaching Cloudflare KV (free plan: up to 1K/day):"
+    log_info "       sudo cscli decisions list"
+else
+    log_info "  3. Set worker route fail mode to 'Fail Open' in Cloudflare dashboard:"
+    log_info "       Dashboard → Website → Worker Routes → Edit → Fail open"
+    log_info "  4. Verify CrowdSec metrics:"
+    log_info "       sudo cscli metrics"
+    log_info "  5. After setting tokens, restart the Workers bouncer:"
+    log_info "       sudo systemctl restart crowdsec-cloudflare-worker-bouncer"
+fi
 log_info "════════════════════════════════════════════════════════"
