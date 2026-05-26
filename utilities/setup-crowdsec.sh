@@ -247,14 +247,86 @@ else
     fi
 
     log_info "Installing CrowdSec packages..."
+    _fw_pkg="crowdsec-firewall-bouncer-iptables"
+    if iptables -V 2>/dev/null | grep -q 'nf_tables'; then
+        _fw_pkg="crowdsec-firewall-bouncer-nftables"
+        log_info "nftables detected — installing crowdsec-firewall-bouncer-nftables."
+    else
+        log_info "iptables detected — installing crowdsec-firewall-bouncer-iptables."
+    fi
     DEBIAN_FRONTEND=noninteractive apt-get install -y \
         "$_cs_pkg" \
-        crowdsec-firewall-bouncer-iptables
+        "$_fw_pkg"
 fi
 
 if [[ "$DRY_RUN" != "true" ]]; then
     systemctl enable --now crowdsec || true
     log_success "CrowdSec service enabled and started."
+fi
+
+# ---------------------------------------------------------------------------
+# PHASE 1b: Firewall bouncer config (DOCKER-USER chain)
+# ---------------------------------------------------------------------------
+log_info "=== PHASE 1b: Firewall bouncer config ==="
+
+_FW_BOUNCER_CONFIG="/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml"
+
+if [[ -f "$_FW_BOUNCER_CONFIG" ]] && [[ "$FORCE" != "true" ]]; then
+    log_info "Firewall bouncer config already present — checking DOCKER-USER chain."
+    # Ensure DOCKER-USER is in the chain list even if config pre-existed
+    if ! grep -q 'DOCKER-USER' "$_FW_BOUNCER_CONFIG"; then
+        log_info "Adding DOCKER-USER chain to existing firewall bouncer config..."
+        sed -i '/iptables_chains:/,/^[^ ]/{/- INPUT/a\  - DOCKER-USER
+}' "$_FW_BOUNCER_CONFIG" 2>/dev/null || true
+        systemctl restart crowdsec-firewall-bouncer 2>/dev/null || true
+        log_success "DOCKER-USER chain added to firewall bouncer config."
+    else
+        log_info "DOCKER-USER chain already present in firewall bouncer config."
+    fi
+elif [[ "$DRY_RUN" == "true" ]]; then
+    log_info "[DRY RUN] Would write firewall bouncer config with DOCKER-USER chain"
+else
+    # Register the firewall bouncer key in CrowdSec LAPI
+    if ! cscli bouncers list 2>/dev/null | grep -q 'firewall-bouncer'; then
+        log_info "Registering firewall bouncer in CrowdSec LAPI..."
+        _fw_key="$(openssl rand -hex 32)"
+        cscli bouncers add crowdsecurity/firewall-bouncer --key "$_fw_key" 2>/dev/null || true
+    else
+        _fw_key="$(grep 'api_key:' "$_FW_BOUNCER_CONFIG" 2>/dev/null | awk '{print $2}' | head -1 || true)"
+    fi
+
+    # Write config with DOCKER-USER chain included per official docs
+    # Ref: https://docs.crowdsec.net/u/bouncers/firewall
+    # "If you are using a dockerized application and allow remote connections
+    #  to the exposed port, you need to add the DOCKER-USER chain."
+    cat > "$_FW_BOUNCER_CONFIG" <<FWCONFIG
+mode: iptables
+update_frequency: 10s
+log_mode: stdout
+log_level: info
+api_url: http://127.0.0.1:8080/
+api_key: ${_fw_key:-CHANGE_ME_FW_BOUNCER_KEY}
+
+# Block community list + local decisions at the OS level (no quota cost).
+# origins is intentionally empty — accept ALL decision sources including
+# the CrowdSec community blocklist (CAPI).  The Workers bouncer separately
+# uses only_include_decisions_from: ["cscli","crowdsec"] to stay within
+# the Cloudflare free-plan KV write quota.
+origins: []
+
+# iptables chains: INPUT for host-level traffic; DOCKER-USER for traffic
+# destined to Docker containers (Caddy/Vaultwarden).  Without DOCKER-USER,
+# Docker bypasses INPUT and community-list bans do not reach containers.
+# Ref: https://docs.crowdsec.net/u/bouncers/firewall#iptables_chains
+iptables_chains:
+  - INPUT
+  - DOCKER-USER
+
+deny_action: DROP
+disable_ipv6: false
+FWCONFIG
+    chmod 600 "$_FW_BOUNCER_CONFIG"
+    log_success "Firewall bouncer config written: ${_FW_BOUNCER_CONFIG}"
 fi
 
 # ---------------------------------------------------------------------------
@@ -754,6 +826,19 @@ else
     systemctl reload crowdsec                        || true
     systemctl enable --now crowdsec-firewall-bouncer || true
 
+    _fw_ready=false
+    for _i in {1..10}; do
+        if systemctl is-active --quiet crowdsec-firewall-bouncer; then
+            _fw_ready=true; break
+        fi
+        sleep 1
+    done
+    if [[ "$_fw_ready" == "true" ]]; then
+        log_success "crowdsec-firewall-bouncer is active."
+    else
+        log_warn "crowdsec-firewall-bouncer did not report active within 10s — check: sudo journalctl -u crowdsec-firewall-bouncer"
+    fi
+
     if [[ "$_CF_PROXY_ENABLED" != "true" ]]; then
         log_warn "Skipping crowdsec-cloudflare-worker-bouncer enable — CLOUDFLARE_PROXY_ENABLED is not 'true'."
     elif [[ "$AUTONOMOUS_MODE" == "true" ]]; then
@@ -853,6 +938,11 @@ log_info " CrowdSec installation complete"
 log_info "════════════════════════════════════════════════════════"
 log_info "Next steps:"
 log_info "  1. Ensure CLOUDFLARE_ZONE_ID and CF_ACCOUNT_ID are set in .env"
+log_info "  Verify dual-bouncer setup:"
+log_info "    sudo cscli bouncers list          # both bouncers registered"
+log_info "    sudo iptables -L CROWDSEC_CHAIN -n | head  # host-level blocks"
+log_info "    sudo iptables -L DOCKER-USER -n | head     # container blocks"
+log_info "    sudo cscli decisions list --origin lists   # community list active"
 log_info "  2. Cloudflare Workers API token is stored at:"
 log_info "       ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/secrets/.docker_secrets/cf_worker_bouncer_token"
 log_info "     Rotate manually by re-running this script if needed."
