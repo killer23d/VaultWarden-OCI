@@ -230,6 +230,17 @@ _cf_worker_bouncer_service_exists() {
 # ---------------------------------------------------------------------------
 log_info "=== PHASE 1: CrowdSec base installation ==="
 
+# CrowdSec post-install currently invokes `cscli setup unattended`, which calls
+# `systemctl show ...` and can fail on legacy multiline ExecStart payloads.
+# Normalize older deployed vaultwarden-notify-failure units in-place before any
+# apt/dpkg action so upgrades recover cleanly on already-deployed hosts.
+_legacy_notify_unit="/etc/systemd/system/vaultwarden-notify-failure.service"
+if [[ -f "$_legacy_notify_unit" ]] && grep -q "Review failed units with:" "$_legacy_notify_unit" 2>/dev/null; then
+    log_warn "Detected legacy vaultwarden-notify-failure.service payload; normalizing for CrowdSec compatibility."
+    sed -i 's/Review failed units with:\\n  systemctl --failed\\n/Run: systemctl --failed/g' "$_legacy_notify_unit" 2>/dev/null || true
+    systemctl daemon-reload 2>/dev/null || true
+fi
+
 if command -v cscli >/dev/null 2>&1 && [[ "$FORCE" != "true" ]]; then
     log_info "CrowdSec already installed — skipping base install."
 elif [[ "$DRY_RUN" == "true" ]]; then
@@ -260,8 +271,17 @@ else
 fi
 
 if [[ "$DRY_RUN" != "true" ]]; then
-    systemctl enable --now crowdsec || true
-    log_success "CrowdSec service enabled and started."
+    if systemctl enable --now crowdsec; then
+        if systemctl is-active --quiet crowdsec; then
+            log_success "CrowdSec service enabled and started."
+        else
+            log_error "CrowdSec service enable/start command returned success but service is not active."
+            log_error "Check: sudo systemctl status crowdsec && sudo journalctl -xeu crowdsec"
+        fi
+    else
+        log_error "Failed to enable/start CrowdSec service."
+        log_error "Check: sudo systemctl status crowdsec && sudo journalctl -xeu crowdsec"
+    fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -349,7 +369,7 @@ else
         log_info "Updating CrowdSec hub..."
         cscli hub update || true
         log_info "Registering Cloudflare Workers bouncer in CrowdSec LAPI..."
-        cscli bouncers add crowdsecurity/cloudflare-worker-bouncer 2>/dev/null || true
+        cscli bouncers add crowdsecurity/cloudflare-worker-bouncer >/dev/null 2>&1 || true
     else
         log_info "CrowdSec Cloudflare Workers bouncer already registered — skipping."
     fi
