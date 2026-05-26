@@ -730,8 +730,9 @@ All common operations have Makefile shortcuts. Run `make help` to see the full t
 | `make safe-restart` | `sudo ./startup.sh --force` + health check | Restarts with automatic rollback on failure |
 | `make status` | `docker compose ps` | Show service status table |
 | `make health` | `./maintenance.sh health` | Basic health check (`AUTO_RECOVER=true` passes `--fix`) |
-| `make health-quick` | `./maintenance.sh health --comprehensive` | Comprehensive health check |
-| `make health-email` | `./maintenance.sh health --report` | Health check with report output |
+| `make health-quick` | `./maintenance.sh health --quiet` | Quick health check — concise output, non-zero exit on failure |
+| `make health-report` | `./maintenance.sh health --report` | Health check that writes a timestamped report file |
+| `make health-email` | alias for `make test-email` | Send a test operational alert email |
 | `make logs` | `docker compose logs --tail=100 [SERVICE]` | Recent logs; pass `SERVICE=caddy` to filter, `FOLLOW=true` to tail |
 | `make logs-tail` | `docker compose logs -f -t --tail=100 [SERVICE]` | Follow logs with timestamps |
 | `make logs-vaultwarden` | `docker compose logs -f -t --tail=100 vaultwarden` | Tail VaultWarden application logs |

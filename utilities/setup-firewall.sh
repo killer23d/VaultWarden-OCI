@@ -113,6 +113,7 @@ _phase_ufw() {
 
     local cf_ipv4_url="https://www.cloudflare.com/ips-v4"
     local cf_ipv6_url="https://www.cloudflare.com/ips-v6"
+    local cf_cidr_cache="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/cf-cidrs.cache"
     local -a cf_cidrs=()
     local cf_fetch_failed=false
 
@@ -133,10 +134,26 @@ _phase_ufw() {
             cf_cidrs+=("$cidr")
         done <<< "$ipv6_list"
         log_info "Fetched ${#cf_cidrs[@]} Cloudflare CIDRs"
+        # Persist a fresh cache so future fetch failures fall back to known-good data.
+        mkdir -p "$(dirname "$cf_cidr_cache")" 2>/dev/null || true
+        printf '%s\n' "${cf_cidrs[@]}" > "$cf_cidr_cache" 2>/dev/null || true
     else
-        log_warn "Could not fetch Cloudflare CIDR lists — falling back to unrestricted allow rules."
-        log_warn "SECURITY: Ports 80/443 will be open to all IPs. Restrict manually after setup:"
-        log_warn "  See: https://www.cloudflare.com/ips-v4 and https://www.cloudflare.com/ips-v6"
+        # Fetch failed — try the last-known-good cache before failing open.
+        if [[ -s "$cf_cidr_cache" ]]; then
+            log_warn "Could not fetch Cloudflare CIDR lists — using cached copy: $cf_cidr_cache"
+            while IFS= read -r cidr; do
+                [[ -z "$cidr" || "$cidr" == \#* ]] && continue
+                cf_cidrs+=("$cidr")
+            done < "$cf_cidr_cache"
+            log_warn "SECURITY: Rules are based on cached CIDRs, which may be stale."
+            log_warn "  Re-run this script when network access is restored to refresh the cache."
+        else
+            log_error "Could not fetch Cloudflare CIDR lists and no cache is available."
+            log_error "SECURITY: Refusing to configure ports 80/443 without valid CIDR data."
+            log_error "  Check internet connectivity, then re-run: sudo utilities/setup-firewall.sh"
+            log_error "  To allow all IPs explicitly: ufw allow 80/tcp && ufw allow 443/tcp"
+            return 1
+        fi
     fi
 
     local ufw_active=false
@@ -155,18 +172,15 @@ _phase_ufw() {
 
     ufw allow "${ssh_port}/tcp"
 
-    if [[ ${#cf_cidrs[@]} -gt 0 ]]; then
-        local cidr
-        for cidr in "${cf_cidrs[@]}"; do
-            ufw allow from "$cidr" to any port 80 proto tcp  2>/dev/null || true
-            ufw allow from "$cidr" to any port 443 proto tcp 2>/dev/null || true
-        done
-        log_success "Firewall: ports 80/443 restricted to ${#cf_cidrs[@]} Cloudflare CIDRs"
-    else
-        # Fall back to unrestricted rules as already warned above.
-        ufw allow 80/tcp
-        ufw allow 443/tcp
-    fi
+    # cf_cidrs is guaranteed non-empty here (the fetch+cache logic above
+    # returns 1 if no CIDRs are available, preventing us from reaching this
+    # point with an empty list).
+    local cidr
+    for cidr in "${cf_cidrs[@]}"; do
+        ufw allow from "$cidr" to any port 80 proto tcp  2>/dev/null || true
+        ufw allow from "$cidr" to any port 443 proto tcp 2>/dev/null || true
+    done
+    log_success "Firewall: ports 80/443 restricted to ${#cf_cidrs[@]} Cloudflare CIDRs"
 
     [[ "$ufw_active" == "false" ]] && ufw --force enable
     log_success "UFW firewall configured"

@@ -80,7 +80,7 @@ make health
 #### Quick Health Check
 
 ```bash
-# Fast sanity check — port up + container running (no deep tests)
+# Concise output — suppresses non-error output; non-zero exit on failure
 make health-quick
 ```
 
@@ -106,7 +106,6 @@ make health-quick
 
 # Or via Makefile
 make health AUTO_RECOVER=true
-make health-quick   # comprehensive check
 ```
 
 > **Note:** Supported flags: `--comprehensive` (runs additional checks), `--fix` (restarts unhealthy containers), `--report` (save report to file), and `--quiet` (suppresses non-error console output).
@@ -809,10 +808,10 @@ make status             # Show service status
 
 # Monitoring
 make health                        # Basic health check
-make health-quick                  # Fast sanity check (port + container only)
-make health AUTO_RECOVER=true      # With auto-recovery
-make health-quick                 # Comprehensive check
-make health-email                  # Comprehensive + email
+make health-quick                  # Quick check — concise/quiet output
+make health AUTO_RECOVER=true      # With auto-recovery (restarts unhealthy containers)
+make health-report                 # Health check that writes a timestamped report file
+make health-email                  # Send a test operational alert email
 make logs                          # All service logs (last 100 lines)
 make logs FOLLOW=true              # Follow / tail all service logs
 make logs SERVICE=vaultwarden      # Specific service

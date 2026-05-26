@@ -1057,10 +1057,19 @@ VaultWarden Age Key Backup - $date_val
 🔐 CRITICAL: Store this entire file in your password manager
    (1Password, Bitwarden, etc.) as a secure note.
 
-📝 Recovery Instructions:
-   1. Save the key content below to: secrets/keys/age-key.txt
-   2. Run: chmod 600 secrets/keys/age-key.txt
-   3. Decrypt backups: age -d -i secrets/keys/age-key.txt backup.age
+📝 Recovery Instructions (choose one path):
+
+   Production server:
+   1. sudo install -m 600 -o \$(logname) age-key.txt /etc/vaultwarden/age-key.txt
+   2. Verify: make key-path
+
+   Dev / fresh clone:
+   1. mkdir -p secrets/keys
+   2. cp age-key.txt secrets/keys/age-key.txt && chmod 600 secrets/keys/age-key.txt
+   3. Verify: make key-path
+
+   Both paths are checked automatically (run: make key-path to confirm).
+   Decrypt backups: age -d -i <resolved-key-path> backup.age
 
 ⚠️  If you lose this key, ALL backups are unrecoverable!
 
@@ -1356,8 +1365,11 @@ create_printable_key_backup() {
 
     <div class="box">
         <h3>Recovery</h3>
-        1. Save key to: <code>secrets/keys/age-key.txt</code><br>
-        2. Set permissions: <code>chmod 600 secrets/keys/age-key.txt</code>
+        <strong>Production server:</strong><br>
+        <code>sudo install -m 600 -o &lt;service-user&gt; age-key.txt /etc/vaultwarden/age-key.txt</code><br><br>
+        <strong>Dev / fresh clone:</strong><br>
+        <code>mkdir -p secrets/keys &amp;&amp; cp age-key.txt secrets/keys/age-key.txt &amp;&amp; chmod 600 secrets/keys/age-key.txt</code><br><br>
+        Verify active path: <code>make key-path</code>
     </div>
 
     <div class="delete-reminder">

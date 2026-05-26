@@ -425,7 +425,7 @@ handle_security_menu() {
             ;;
         5)
             run_sudo_cmd "sudo cscli metrics" \
-                "${REPO_ROOT}/sudo cscli metrics"
+                cscli metrics
             ;;
         b) ACTIVE_MENU="main" ;;
         *)

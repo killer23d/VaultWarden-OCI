@@ -305,7 +305,7 @@ Full details, provider setup, Postfix MTA configuration, and troubleshooting: **
 | `restore.sh` | Interactive or automated restore with a reworked flow: interactive Age decryption key prompt; `--key-file` flag and `RESTORE_AGE_KEY_FILE` env var for scripted/CI use; pre-restore key round-trip validation; post-restore automatic Age key generation and rotation. Uses host `sqlite3` for archive integrity verification — no Docker required. |
 | `maintenance.sh` | System cleanup, DNS update, DB maintenance, email test, health monitoring (`health` subcommand), and container updates (`update` subcommand). |
 | `utilities/secrets-edit.sh` | Secure secrets editor (Age + SOPS) — rotate individual fields, list keys, export recovery kit |
-| `utilities/*.sh` | 17 standalone administrative and engine scripts. See [utilities/README.md](utilities/README.md) for full list. |
+| `utilities/*.sh` | 24 standalone administrative and engine scripts. See [utilities/README.md](utilities/README.md) for full list. |
 
 Full reference: [docs/SCRIPTS.md](docs/SCRIPTS.md)
 

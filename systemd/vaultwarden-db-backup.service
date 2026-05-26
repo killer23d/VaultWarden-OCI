@@ -15,12 +15,15 @@ WorkingDirectory=/opt/vaultwarden-scripts
 # reports missing required values itself.
 EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
 # Skip this run if maintenance is active so backup and maintenance never overlap.
-ExecCondition=/bin/bash -c '! test -f /tmp/.vw_maintenance.lock'
+# Uses /run/lock (not /tmp) so the file is visible across PrivateTmp= namespaces.
+ExecCondition=/bin/bash -c '! test -f /run/lock/vaultwarden-maintenance.lock'
 # Keep locking in backup.sh so manual and timer-driven backups share one guard.
 # --email stays disabled until the admin configures alert delivery.
 ExecStart=/opt/vaultwarden-scripts/backup.sh run db --rclone --full-verification
-User=ubuntu
-Group=ubuntu
+# User/Group are NOT set here. They are injected at install time via
+# a systemd drop-in written by: sudo utilities/setup-systemd.sh install
+# Running units without the drop-in will cause them to execute as root,
+# which is intentionally unsafe. Always run setup-systemd.sh install.
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=vw-db-backup

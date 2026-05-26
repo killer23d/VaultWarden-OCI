@@ -178,15 +178,29 @@ _set_env_var() {
     local key="$1" value="$2" file="$3"
     local escaped_key
     escaped_key=$(printf '%s' "$key" | sed 's/[]\/$*.^[]/\\&/g')
+
+    # Write via a same-directory temp file so an interrupted write never leaves
+    # the env file in a partially-updated or corrupted state.
+    local tmp_file
+    tmp_file="$(dirname "$file")/.env.tmp.$$"
+    # Ensure the temp file is removed on any unexpected exit.
+    # shellcheck disable=SC2064
+    trap "rm -f '$tmp_file'" RETURN
+
     if grep -q "^${escaped_key}=" "$file" 2>/dev/null; then
         local escaped_value
         escaped_value="${value//\\/\\\\}"
         escaped_value="${escaped_value//&/\\&}"
         escaped_value="${escaped_value//|/\\|}"
-        sed -i "s|^${escaped_key}=.*|${key}=${escaped_value}|" "$file"
+        sed "s|^${escaped_key}=.*|${key}=${escaped_value}|" "$file" > "$tmp_file"
     else
-        printf '%s=%s\n' "$key" "$value" >> "$file"
+        cp "$file" "$tmp_file"
+        printf '%s=%s\n' "$key" "$value" >> "$tmp_file"
     fi
+
+    # Preserve the original file mode on the replacement.
+    chmod --reference="$file" "$tmp_file" 2>/dev/null || true
+    mv "$tmp_file" "$file"
 }
 
 _read_env_value() {

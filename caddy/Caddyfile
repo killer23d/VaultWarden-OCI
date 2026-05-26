@@ -80,6 +80,7 @@
 (tls_cloudflare) {
 	tls {
 		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+		min_version tls1.2
 	}
 }
 
@@ -89,6 +90,7 @@
 			dir https://acme-v02.api.letsencrypt.org/directory
 			disable_http_challenge false
 		}
+		min_version tls1.2
 	}
 }
 

@@ -114,8 +114,22 @@ main() {
     # cannot race with or modify the lock file before we own it.
     auto_fix_critical_permissions "$PROJECT_ROOT"
 
-    touch /tmp/.vw_maintenance.lock
-    register_cleanup rm -f /tmp/.vw_maintenance.lock
+    # Maintenance presence lock — signals to backup/health ExecCondition lines
+    # that maintenance is in progress so they skip the run instead of racing.
+    # Uses /run/lock (not /tmp) so the file is visible across PrivateTmp= namespaces.
+    # flock -n provides atomic acquire + TOCTOU-free mutual exclusion: two
+    # concurrent maintenance invocations both see the file, but only one wins
+    # the flock and proceeds.  The winner holds fd 9 open; the loser exits.
+    # The file is removed by perform_cleanup on any exit path (EXIT HUP INT TERM).
+    local _MAINT_LOCK="/run/lock/vaultwarden-maintenance.lock"
+    local _MAINT_LOCK_FD
+    install -m 0660 -o root -g root /dev/null "$_MAINT_LOCK"
+    exec {_MAINT_LOCK_FD}>"$_MAINT_LOCK"
+    if ! flock -n "$_MAINT_LOCK_FD"; then
+        log_error "Another maintenance operation is already running. Exiting."
+        exit 1
+    fi
+    register_cleanup rm -f "$_MAINT_LOCK"
     trap 'perform_cleanup' EXIT HUP INT TERM
 
     log_header "VaultWarden-OCI Maintenance Manager"
