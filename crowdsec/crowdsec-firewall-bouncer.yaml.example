@@ -1,0 +1,40 @@
+# crowdsec/crowdsec-firewall-bouncer.yaml.example
+#
+# Template config for crowdsec-firewall-bouncer (iptables mode).
+# This file is rendered into:
+#   /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml
+# by utilities/setup-crowdsec.sh (Phase 1b).
+#
+# Dual-bouncer architecture (official CrowdSec recommendation):
+#   crowdsec-firewall-bouncer  → iptables OS-level enforcement
+#     origins: []              → receives ALL decisions incl. community list
+#     no quota cost            → unlimited writes (local kernel)
+#
+#   crowdsec-cloudflare-worker-bouncer → Cloudflare edge enforcement
+#     only_include_decisions_from: ["cscli","crowdsec"]
+#     → local decisions only (free-plan KV write guard, 1K/day)
+#
+# Ref: https://docs.crowdsec.net/u/bouncers/firewall
+
+mode: iptables
+update_frequency: 10s
+log_mode: stdout
+log_level: info
+api_url: http://127.0.0.1:8080/
+api_key: CHANGE_ME_FW_BOUNCER_KEY
+
+# origins: [] means accept ALL decision sources.
+# This is intentional — the firewall bouncer enforces the full community
+# blocklist (CAPI) and all subscribed lists at the OS level at no quota cost.
+origins: []
+
+# DOCKER-USER is required for Docker deployments.
+# Without it, Docker's FORWARD chain bypasses INPUT and community-list bans
+# do not reach Caddy or Vaultwarden containers.
+# Ref: https://docs.crowdsec.net/u/bouncers/firewall#iptables_chains
+iptables_chains:
+  - INPUT
+  - DOCKER-USER
+
+deny_action: DROP
+disable_ipv6: false
