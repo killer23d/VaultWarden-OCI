@@ -123,6 +123,84 @@ _cs_read_secret_file() {
 }
 
 # ---------------------------------------------------------------------------
+# Read the currently configured LAPI port from config.yaml.
+# Prints the port number; defaults to 8080 if not found.
+# ---------------------------------------------------------------------------
+_cs_resolve_lapi_port() {
+    grep -oP '(?<=listen_uri:\s{0,10}127\.0\.0\.1:)\d+' \
+        /etc/crowdsec/config.yaml 2>/dev/null \
+        | head -1 \
+        || echo "8080"
+}
+
+# ---------------------------------------------------------------------------
+# Find the lowest unused TCP port >= base_port on 127.0.0.1.
+# Prints the free port number.
+# ---------------------------------------------------------------------------
+_cs_find_free_port() {
+    local base_port="${1:-8090}"
+    local port="$base_port"
+    while ss -tlnp 2>/dev/null | grep -q ":${port}[[:space:]]"; do
+        (( port++ ))
+        if (( port > 65000 )); then
+            echo "8090"   # safety fallback — should never happen
+            return
+        fi
+    done
+    echo "$port"
+}
+
+# ---------------------------------------------------------------------------
+# Rewrite all CrowdSec config files from old_port → new_port atomically.
+# Files updated:
+#   /etc/crowdsec/config.yaml
+#   /etc/crowdsec/local_api_credentials.yaml
+#   /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml   (if present)
+#   /etc/crowdsec/bouncers/crowdsec-cloudflare-worker-bouncer.yaml (if present)
+# ---------------------------------------------------------------------------
+_cs_fix_port_conflict() {
+    local old_port="$1"
+    local new_port="$2"
+
+    log_info "Auto-fixing LAPI port conflict: ${old_port} → ${new_port}"
+
+    local _f
+    # config.yaml
+    _f="/etc/crowdsec/config.yaml"
+    if [[ -f "$_f" ]]; then
+        sed -i "s|listen_uri: 127.0.0.1:${old_port}|listen_uri: 127.0.0.1:${new_port}|g" "$_f"
+        log_info "  Updated ${_f}"
+    fi
+
+    # local_api_credentials.yaml
+    _f="/etc/crowdsec/local_api_credentials.yaml"
+    if [[ -f "$_f" ]]; then
+        sed -i "s|url: http://127.0.0.1:${old_port}|url: http://127.0.0.1:${new_port}|g" "$_f"
+        log_info "  Updated ${_f}"
+    fi
+
+    # firewall bouncer
+    _f="/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml"
+    if [[ -f "$_f" ]]; then
+        sed -i "s|api_url: http://127.0.0.1:${old_port}/|api_url: http://127.0.0.1:${new_port}/|g" "$_f"
+        log_info "  Updated ${_f}"
+    fi
+
+    # cloudflare worker bouncer
+    _f="/etc/crowdsec/bouncers/crowdsec-cloudflare-worker-bouncer.yaml"
+    if [[ -f "$_f" ]]; then
+        sed -i \
+            -e "s|lapi_url: http://127.0.0.1:${old_port}|lapi_url: http://127.0.0.1:${new_port}|g" \
+            -e "s|api_url: http://127.0.0.1:${old_port}/|api_url: http://127.0.0.1:${new_port}/|g" \
+            "$_f"
+        log_info "  Updated ${_f}"
+    fi
+
+    systemctl daemon-reload 2>/dev/null || true
+    log_success "LAPI port rewritten to ${new_port} across all config files."
+}
+
+# ---------------------------------------------------------------------------
 # Port-conflict diagnostic helper
 # Emits actionable ERROR lines identifying what process owns a given port.
 # Usage: _cs_diagnose_port 8080
@@ -146,25 +224,21 @@ _cs_diagnose_port() {
         while IFS= read -r line; do
             log_error "  ${line}"
         done <<< "$info"
-        log_error "Stop or reconfigure that process, then re-run this script."
-        log_error "Alternatively, change CrowdSec's listen port in /etc/crowdsec/config.yaml"
-        log_error "  api.server.listen_uri: 127.0.0.1:<new_port>"
-        log_error "and update /etc/crowdsec/local_api_credentials.yaml + all bouncer configs."
     else
         log_error "Could not identify what holds port ${port} — run: sudo ss -tlnp | grep ${port}"
     fi
 }
 
 # ---------------------------------------------------------------------------
-# Attempt to start CrowdSec, with port-conflict diagnosis on failure.
-# Returns 0 if the service becomes active, 1 otherwise.
+# Attempt to start CrowdSec, with automatic port-conflict resolution.
+# On port conflict: finds a free port, rewrites all configs, retries once.
+# Returns 0 if the service becomes active, 1 if irrecoverably failed.
 # ---------------------------------------------------------------------------
 _cs_start_service() {
     # Reset any previous failed state so systemctl start has a clean slate.
     systemctl reset-failed crowdsec 2>/dev/null || true
 
     if systemctl enable --now crowdsec 2>/dev/null; then
-        # Give the process up to 5 s to fully transition to active.
         local _i
         for _i in {1..5}; do
             if systemctl is-active --quiet crowdsec; then
@@ -174,22 +248,42 @@ _cs_start_service() {
         done
     fi
 
-    # Service did not come up — emit diagnostics.
-    log_error "CrowdSec service failed to start."
+    # Service did not come up — check whether the configured LAPI port is taken.
+    local _lapi_port
+    _lapi_port="$(_cs_resolve_lapi_port)"
+
+    if ss -tlnp 2>/dev/null | grep -q ":${_lapi_port}[[:space:]]"; then
+        log_warn "Port ${_lapi_port} is occupied — attempting automatic port reassignment."
+        _cs_diagnose_port "${_lapi_port}"
+
+        local _new_port
+        _new_port="$(_cs_find_free_port 8090)"
+        _cs_fix_port_conflict "${_lapi_port}" "${_new_port}"
+
+        # Retry the service after the port rewrite.
+        systemctl reset-failed crowdsec 2>/dev/null || true
+        if systemctl enable --now crowdsec 2>/dev/null; then
+            local _j
+            for _j in {1..8}; do
+                if systemctl is-active --quiet crowdsec; then
+                    log_success "CrowdSec started successfully on port ${_new_port}."
+                    return 0
+                fi
+                sleep 1
+            done
+        fi
+
+        # Still not up after port fix — emit full diagnostics and give up.
+        log_error "CrowdSec service failed to start even after port reassignment to ${_new_port}."
+    else
+        log_error "CrowdSec service failed to start."
+    fi
+
+    # Emit systemctl status for all failure paths.
     log_error "systemctl status crowdsec:"
     systemctl status crowdsec --no-pager -l 2>&1 | head -30 | while IFS= read -r _l; do
         log_error "  ${_l}"
     done
-
-    # Check whether the LAPI port is already taken.
-    local _lapi_port
-    _lapi_port="$(grep -oP '(?<=listen_uri: 127\.0\.0\.1:)\d+' \
-        /etc/crowdsec/config.yaml 2>/dev/null || echo '8080')"
-    if ss -tlnp 2>/dev/null | grep -q ":${_lapi_port}[[:space:]]"; then
-        log_error "Port ${_lapi_port} is already in use — this is the most likely cause."
-        _cs_diagnose_port "${_lapi_port}"
-    fi
-
     log_error "Full journal: sudo journalctl -xeu crowdsec --no-pager | tail -50"
     return 1
 }
@@ -343,8 +437,8 @@ else
 fi
 
 # Start/restart CrowdSec regardless of whether it was freshly installed or
-# already present.  Uses _cs_start_service which emits port-conflict
-# diagnostics on failure rather than silently continuing.
+# already present.  _cs_start_service auto-resolves port conflicts and retries
+# before giving up.
 if [[ "$DRY_RUN" != "true" ]]; then
     if systemctl is-active --quiet crowdsec; then
         log_info "CrowdSec service already active — reloading configuration."
@@ -363,6 +457,8 @@ fi
 log_info "=== PHASE 1b: Firewall bouncer config ==="
 
 _FW_BOUNCER_CONFIG="/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml"
+# Resolve the current LAPI port so generated configs stay in sync.
+_LAPI_PORT="$(_cs_resolve_lapi_port)"
 
 if [[ -f "$_FW_BOUNCER_CONFIG" ]] && [[ "$FORCE" != "true" ]]; then
     log_info "Firewall bouncer config already present — checking DOCKER-USER chain."
@@ -397,7 +493,7 @@ mode: iptables
 update_frequency: 10s
 log_mode: stdout
 log_level: info
-api_url: http://127.0.0.1:8080/
+api_url: http://127.0.0.1:${_LAPI_PORT}/
 api_key: ${_fw_key:-CHANGE_ME_FW_BOUNCER_KEY}
 
 # Block community list + local decisions at the OS level (no quota cost).
