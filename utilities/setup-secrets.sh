@@ -503,10 +503,10 @@ SOPS_EOF
         cf_dns=$(_get_field "caddy_cloudflare_dns_token") || { log_error "Failed to collect caddy_cloudflare_dns_token"; return 1; }
         _COLLECTED_SECRETS["caddy_cloudflare_dns_token"]="$cf_dns"
 
-        if [ -f "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/secrets/.docker_secrets/cf_worker_bouncer_token" ]; then
-            log_info "Cloudflare Workers bouncer token file found on disk — will be used by CrowdSec bouncer."
+        if grep -q "^CF_WORKER_BOUNCER_TOKEN=[^[:space:]]" "${PROJECT_ROOT}/.env" 2>/dev/null; then
+            log_info "CF_WORKER_BOUNCER_TOKEN is set in .env — will be used by the CrowdSec Cloudflare bouncer."
         else
-            log_warn "Cloudflare Workers bouncer token file not found yet — run sudo ./utilities/setup-crowdsec.sh (it prompts for the token)."
+            log_warn "CF_WORKER_BOUNCER_TOKEN not set in .env yet — run sudo ./utilities/setup-crowdsec.sh (it prompts for the token and saves it to .env)."
         fi
 
         local _email_mode _email_provider

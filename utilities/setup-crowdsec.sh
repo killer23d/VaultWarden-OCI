@@ -109,6 +109,21 @@ _cs_set_env_var() {
     mv "$tmp_file" "$env_file"
 }
 
+# Remove a KEY= line from .env using an atomic temp-file + mv.
+# Used by _cs_reset_components to clear auto-generated keys before a --force run.
+_cs_clear_env_var() {
+    local key="$1"
+    local env_file="${PROJECT_ROOT}/.env"
+    [[ -f "$env_file" ]] || return 0
+    local tmp_file
+    tmp_file="$(dirname "$env_file")/.env.tmp.$$"
+    # shellcheck disable=SC2064
+    trap "rm -f '$tmp_file'" RETURN
+    sed "/^${key}=/d" "$env_file" > "$tmp_file"
+    chmod --reference="$env_file" "$tmp_file" 2>/dev/null || true
+    mv "$tmp_file" "$env_file"
+}
+
 # Read a token from a flat secret file, rejecting placeholder values.
 _cs_read_secret_file() {
     local path="$1"
@@ -289,6 +304,49 @@ _cs_start_service() {
 }
 
 # ---------------------------------------------------------------------------
+# Reset all CrowdSec components installed by a previous run.
+# Called unconditionally when --force is active so every subsequent phase
+# executes as on a first install.
+#   1. Deletes LAPI bouncer registrations (best-effort, while LAPI may still be up).
+#   2. Stops and disables all CrowdSec-related systemd services.
+#   3. Removes bouncer config files that the upcoming phases will regenerate.
+#   4. Clears the auto-generated LAPI key from .env so Phase 5 issues a fresh one.
+#      User-supplied values (CF_WORKER_BOUNCER_TOKEN, CLOUDFLARE_ZONE_ID,
+#      CF_ACCOUNT_ID) are left intact to avoid unnecessary re-prompting.
+# ---------------------------------------------------------------------------
+_cs_reset_components() {
+    log_info "=== PHASE 0: Resetting installed CrowdSec components (--force) ==="
+
+    # Delete LAPI bouncer registrations while CrowdSec may still be running.
+    # These calls are best-effort; apt reinstall (Phase 1) resets the DB anyway.
+    if command -v cscli >/dev/null 2>&1; then
+        cscli bouncers delete cloudflare-worker-bouncer 2>/dev/null || true
+        cscli bouncers delete firewall-bouncer          2>/dev/null || true
+        log_info "Cleared existing LAPI bouncer registrations (best-effort)."
+    fi
+
+    # Stop and disable services.  Order: bouncers first, then the engine.
+    local _svc
+    for _svc in crowdsec-cloudflare-worker-bouncer crowdsec-firewall-bouncer crowdsec; do
+        if systemctl is-active  --quiet "$_svc" 2>/dev/null || \
+           systemctl is-enabled --quiet "$_svc" 2>/dev/null; then
+            systemctl disable --now "$_svc" 2>/dev/null || true
+            log_info "Stopped and disabled: ${_svc}"
+        fi
+    done
+
+    # Remove bouncer config files that each phase will regenerate.
+    rm -f /etc/crowdsec/bouncers/crowdsec-cloudflare-worker-bouncer.yaml 2>/dev/null || true
+    rm -f /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml            2>/dev/null || true
+
+    # Clear the auto-generated LAPI bouncer key so Phase 5 issues a fresh one.
+    _cs_clear_env_var "CROWDSEC_CF_BOUNCER_API_KEY"
+    log_info "Cleared auto-generated LAPI key from .env (will be regenerated in Phase 5)."
+
+    log_success "Phase 0 complete — all components reset for fresh installation."
+}
+
+# ---------------------------------------------------------------------------
 # CLI flags
 # ---------------------------------------------------------------------------
 AUTO_MODE=false
@@ -423,6 +481,13 @@ UNIT
         log_success "Installed crowdsec-cloudflare-worker-bouncer systemd unit."
     fi
 }
+
+# ---------------------------------------------------------------------------
+# PHASE 0: Reset installed components when --force is active.
+# ---------------------------------------------------------------------------
+if [[ "$FORCE" == "true" ]]; then
+    _cs_reset_components
+fi
 
 # ---------------------------------------------------------------------------
 # PHASE 1: CrowdSec base installation
@@ -842,31 +907,39 @@ if [[ -f "$_CF_WORKER_BOUNCER_CONFIG_SRC" ]]; then
             _cf_account_id="${_cf_account_id:-CHANGE_ME_CF_ACCOUNT_ID}"
             _CF_WORKER_TOKEN="CHANGE_ME_CF_WORKER_BOUNCER_TOKEN"
             log_warn "Auto mode: Cloudflare values left as placeholders where missing."
-            log_warn "Set later in .env / sudo utilities/setup-secrets.sh rotate cf_worker_bouncer_token"
+            log_warn "Set CF_WORKER_BOUNCER_TOKEN in .env then re-run: sudo ./utilities/setup-crowdsec.sh --force"
         else
             # ------------------------------------------------------------------
-            # Resolve the Worker API token from env, secret files, or prompt.
+            # Resolve the Worker API token.
+            # Primary source: CF_WORKER_BOUNCER_TOKEN in .env.
+            # One-time migration: if the token was stored as a flat secret file
+            # from a previous install, read it and persist it to .env so this
+            # and all future runs use a single source of truth.
             # ------------------------------------------------------------------
             _env_token="${CF_WORKER_BOUNCER_TOKEN:-}"
             if [[ -n "$_env_token" && "$_env_token" != CHANGE_ME* && "$_env_token" != PLACEHOLDER* ]]; then
                 _CF_WORKER_TOKEN="$_env_token"
-                log_success "CF_WORKER_BOUNCER_TOKEN found in environment / .env — skipping prompt."
+                log_success "CF_WORKER_BOUNCER_TOKEN already set in .env — skipping prompt."
             fi
 
             if [[ -z "$_CF_WORKER_TOKEN" ]]; then
-                _state_secret="${_project_state_dir}/secrets/.docker_secrets/cf_worker_bouncer_token"
-                _CF_WORKER_TOKEN="$(_cs_read_secret_file "$_state_secret")"
-                if [[ -n "$_CF_WORKER_TOKEN" ]]; then
-                    log_success "cf_worker_bouncer_token found at ${_state_secret} — skipping prompt."
+                _mig_token=""
+                _mig_src=""
+                for _mig_path in \
+                    "${_project_state_dir}/secrets/.docker_secrets/cf_worker_bouncer_token" \
+                    "${PROJECT_ROOT}/secrets/.docker_secrets/cf_worker_bouncer_token"; do
+                    _mig_token="$(_cs_read_secret_file "$_mig_path")"
+                    if [[ -n "$_mig_token" ]]; then
+                        _mig_src="$_mig_path"
+                        break
+                    fi
+                done
+                if [[ -n "$_mig_token" ]]; then
+                    _CF_WORKER_TOKEN="$_mig_token"
+                    _cs_set_env_var "CF_WORKER_BOUNCER_TOKEN" "$_CF_WORKER_TOKEN"
+                    log_success "Migrated CF_WORKER_BOUNCER_TOKEN from ${_mig_src} to .env."
                 fi
-            fi
-
-            if [[ -z "$_CF_WORKER_TOKEN" ]]; then
-                _repo_secret="${PROJECT_ROOT}/secrets/.docker_secrets/cf_worker_bouncer_token"
-                _CF_WORKER_TOKEN="$(_cs_read_secret_file "$_repo_secret")"
-                if [[ -n "$_CF_WORKER_TOKEN" ]]; then
-                    log_success "cf_worker_bouncer_token found at ${_repo_secret} — skipping prompt."
-                fi
+                unset _mig_token _mig_src _mig_path
             fi
 
             # ------------------------------------------------------------------
@@ -918,6 +991,9 @@ if [[ -f "$_CF_WORKER_BOUNCER_CONFIG_SRC" ]]; then
                     fi
                 done
                 log_success "Cloudflare Workers API token accepted."
+                # Persist to .env so subsequent runs skip the prompt entirely.
+                _cs_set_env_var "CF_WORKER_BOUNCER_TOKEN" "$_CF_WORKER_TOKEN"
+                log_success "CF_WORKER_BOUNCER_TOKEN saved to .env."
             else
                 # Token already resolved — still log if Zone/Account IDs are set.
                 if [[ -n "$_cf_zone_id" ]]; then
@@ -953,18 +1029,6 @@ if [[ -f "$_CF_WORKER_BOUNCER_CONFIG_SRC" ]]; then
             | tee "$_CF_WORKER_BOUNCER_CONFIG_DEST" >/dev/null
         chmod 600 "$_CF_WORKER_BOUNCER_CONFIG_DEST"
         log_success "Cloudflare Workers bouncer config written to ${_CF_WORKER_BOUNCER_CONFIG_DEST} (mode 600)."
-
-        # Persist the canonical flat secret file so later runs stay prompt-free.
-        _cf_secret_dir="${_project_state_dir}/secrets/.docker_secrets"
-        mkdir -p "$_cf_secret_dir"
-        if [[ -n "$_CF_WORKER_TOKEN" && "$_CF_WORKER_TOKEN" != CHANGE_ME* && "$_CF_WORKER_TOKEN" != PLACEHOLDER* ]]; then
-            if [[ ! -f "${_cf_secret_dir}/cf_worker_bouncer_token" ]] || \
-               ! cmp -s <(printf "%s\n" "$_CF_WORKER_TOKEN") "${_cf_secret_dir}/cf_worker_bouncer_token"; then
-                printf "%s\n" "$_CF_WORKER_TOKEN" > "${_cf_secret_dir}/cf_worker_bouncer_token"
-                chmod 444 "${_cf_secret_dir}/cf_worker_bouncer_token"
-                log_success "Saved Cloudflare Workers token to ${_cf_secret_dir}/cf_worker_bouncer_token"
-            fi
-        fi
 
         # FIX: Auto-generate the full Cloudflare config section from the token.
         # Capture stderr so failures produce actionable diagnostics instead of
@@ -1189,26 +1253,26 @@ log_info "═══════════════════════�
 log_info " CrowdSec installation complete"
 log_info "════════════════════════════════════════════════════════"
 log_info "Next steps:"
-log_info "  1. Ensure CLOUDFLARE_ZONE_ID and CF_ACCOUNT_ID are set in .env"
+log_info "  1. All Cloudflare credentials are stored in .env:"
+log_info "       CLOUDFLARE_ZONE_ID, CF_ACCOUNT_ID, CF_WORKER_BOUNCER_TOKEN"
+log_info "     To update any value, edit .env then re-run:"
+log_info "       sudo ./utilities/setup-crowdsec.sh --force"
 log_info "  Verify dual-bouncer setup:"
 log_info "    sudo cscli bouncers list          # both bouncers registered"
 log_info "    sudo iptables -L CROWDSEC_CHAIN -n | head  # host-level blocks"
 log_info "    sudo iptables -L DOCKER-USER -n | head     # container blocks"
 log_info "    sudo cscli decisions list --origin lists   # community list active"
-log_info "  2. Cloudflare Workers API token is stored at:"
-log_info "       ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/secrets/.docker_secrets/cf_worker_bouncer_token"
-log_info "     Rotate manually by re-running this script if needed."
 if [[ "$AUTONOMOUS_MODE" == "true" ]]; then
-    log_info "  3. Set worker route fail mode to 'Fail Open' in Cloudflare dashboard:"
+    log_info "  2. Set worker route fail mode to 'Fail Open' in Cloudflare dashboard:"
     log_info "       Dashboard → Website → Worker Routes → Edit → Fail open"
-    log_info "  4. Verify decisions are reaching Cloudflare KV (free plan: up to 1K/day):"
+    log_info "  3. Verify decisions are reaching Cloudflare KV (free plan: up to 1K/day):"
     log_info "       sudo cscli decisions list"
 else
-    log_info "  3. Set worker route fail mode to 'Fail Open' in Cloudflare dashboard:"
+    log_info "  2. Set worker route fail mode to 'Fail Open' in Cloudflare dashboard:"
     log_info "       Dashboard → Website → Worker Routes → Edit → Fail open"
-    log_info "  4. Verify CrowdSec metrics:"
+    log_info "  3. Verify CrowdSec metrics:"
     log_info "       sudo cscli metrics"
-    log_info "  5. After setting tokens, restart the Workers bouncer:"
-    log_info "       sudo systemctl restart crowdsec-cloudflare-worker-bouncer"
+    log_info "  4. After updating the token in .env, restart the Workers bouncer:"
+    log_info "       sudo ./utilities/setup-crowdsec.sh --force"
 fi
 log_info "════════════════════════════════════════════════════════"
