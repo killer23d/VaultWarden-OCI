@@ -445,8 +445,10 @@ _cs_run() {
 # Service-existence guards
 # ---------------------------------------------------------------------------
 _cf_worker_bouncer_service_exists() {
-    systemctl list-unit-files crowdsec-cloudflare-worker-bouncer.service 2>/dev/null \
-        | grep -q 'crowdsec-cloudflare-worker-bouncer.service'
+    # Prefer a direct file check: systemctl list-unit-files can miss a unit file
+    # that was just written + daemon-reloaded on some systemd versions.
+    [[ -f "/etc/systemd/system/crowdsec-cloudflare-worker-bouncer.service" ]] || \
+    [[ -f "/lib/systemd/system/crowdsec-cloudflare-worker-bouncer.service" ]]
 }
 
 # ---------------------------------------------------------------------------
@@ -569,6 +571,21 @@ if [[ -f "$_FW_BOUNCER_CONFIG" ]] && [[ "$FORCE" != "true" ]]; then
         log_success "DOCKER-USER chain added to firewall bouncer config."
     else
         log_info "DOCKER-USER chain already present in firewall bouncer config."
+    fi
+
+    # If the bouncer is no longer registered in LAPI (e.g. CrowdSec was reset),
+    # re-register using the key already stored in the existing config file so
+    # the bouncer can authenticate on the next start.
+    if ! cscli bouncers list 2>/dev/null | grep -q 'firewall-bouncer'; then
+        _fw_existing_key="$(grep 'api_key:' "$_FW_BOUNCER_CONFIG" 2>/dev/null | awk '{print $2}' | head -1 || true)"
+        if [[ -n "$_fw_existing_key" && "$_fw_existing_key" != "CHANGE_ME"* ]]; then
+            log_info "Firewall bouncer not found in LAPI — re-registering with existing config key..."
+            cscli bouncers add crowdsecurity/firewall-bouncer --key "$_fw_existing_key" 2>/dev/null || true
+            log_success "Firewall bouncer re-registered in LAPI."
+        else
+            log_warn "Firewall bouncer not in LAPI and config key is missing/placeholder."
+            log_warn "Run: sudo ./utilities/setup-crowdsec.sh --force  to regenerate a valid key."
+        fi
     fi
 elif [[ "$DRY_RUN" == "true" ]]; then
     log_info "[DRY RUN] Would write firewall bouncer config with DOCKER-USER chain"
@@ -1140,6 +1157,10 @@ else
     if systemctl is-active --quiet crowdsec; then
         systemctl reload crowdsec 2>/dev/null || true
     fi
+    # Reset any previous failed state before attempting to start the bouncer.
+    # Without this, a prior failed start leaves the unit in 'failed' state and
+    # the next `systemctl enable --now` exits non-zero immediately.
+    systemctl reset-failed crowdsec-firewall-bouncer 2>/dev/null || true
     systemctl enable --now crowdsec-firewall-bouncer || true
 
     _fw_ready=false
@@ -1153,6 +1174,14 @@ else
         log_success "crowdsec-firewall-bouncer is active."
     else
         log_warn "crowdsec-firewall-bouncer did not report active within 10s — check: sudo journalctl -u crowdsec-firewall-bouncer"
+        # Surface the last journal entries so the failure is actionable.
+        _fw_journal="$(journalctl -u crowdsec-firewall-bouncer --no-pager -n 15 2>/dev/null || true)"
+        if [[ -n "$_fw_journal" ]]; then
+            log_warn "Last crowdsec-firewall-bouncer journal entries:"
+            while IFS= read -r _fw_line; do
+                log_warn "  ${_fw_line}"
+            done <<< "$_fw_journal"
+        fi
     fi
 
     if [[ "$_CF_PROXY_ENABLED" != "true" ]]; then
