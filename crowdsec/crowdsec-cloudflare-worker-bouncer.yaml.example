@@ -55,7 +55,7 @@
 crowdsec_config:
   lapi_key: CHANGE_ME_BOUNCER_KEY
   # URL of the local CrowdSec LAPI.  Default is correct for a host-only install.
-  lapi_url: http://127.0.0.1:8080/
+  lapi_url: http://127.0.0.1:8090/
   # Only sync decisions generated locally (free-plan KV write guard).
   # setup-crowdsec.sh injects the correct list based on CF_FREE_PLAN in .env.
   only_include_decisions_from: ["cscli", "crowdsec"]
