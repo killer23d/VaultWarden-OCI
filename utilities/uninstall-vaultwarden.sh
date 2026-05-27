@@ -185,7 +185,7 @@ if [[ "$DRY_RUN" == "true" ]]; then
     echo "         - APT repo: /etc/apt/sources.list.d/crowdsec_crowdsec.list"
     echo "         - GPG key:  /etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.gpg (and .asc)"
     echo "         - Config:   /etc/crowdsec/ (acquis.d/vaultwarden.yaml, bouncers/, profiles.yaml)"
-    echo "         - .env key: CROWDSEC_CF_BOUNCER_API_KEY"
+    echo "         - .env keys: CROWDSEC_CF_BOUNCER_API_KEY, CF_WORKER_BOUNCER_TOKEN"
     echo "  [11] UFW rules: ports 80 and 443"
     echo "  [11.5] iptables rules added by setup-firewall.sh:"
     echo "         - nat POSTROUTING MASQUERADE for subnets 172.21.0.0/16 172.22.0.0/16 172.23.0.0/16"
@@ -762,7 +762,7 @@ apt-get autoremove -y 2>/dev/null || true
 #   Phase 4 reversed: remove /etc/crowdsec/acquis.d/vaultwarden.yaml
 #   Phase 7 reversed: remove /etc/crowdsec/profiles.yaml (project copy)
 #   Phase 3 reversed: (collections are removed with the crowdsec package)
-#   Phase 5 reversed: remove CROWDSEC_CF_BOUNCER_API_KEY from .env
+#   Phase 5 reversed: remove CROWDSEC_CF_BOUNCER_API_KEY and CF_WORKER_BOUNCER_TOKEN from .env
 #
 # netfilter-persistent / iptables-persistent are also removed if present,
 # as the iptables bouncer may have triggered their installation.
@@ -885,16 +885,19 @@ if [[ -d /etc/crowdsec ]]; then
     fi
 fi
 
-# Reverse CrowdSec phase 5 by removing CROWDSEC_CF_BOUNCER_API_KEY from .env.
+# Reverse CrowdSec phases 5 and 6: remove auto-generated and user-supplied
+# Cloudflare credentials from .env in a single atomic pass.
 _ENV_FILE_CS="${PROJECT_DIR}/.env"
-if [[ -f "$_ENV_FILE_CS" ]] && grep -q "^CROWDSEC_CF_BOUNCER_API_KEY=" "$_ENV_FILE_CS" 2>/dev/null; then
+if [[ -f "$_ENV_FILE_CS" ]] && \
+   grep -qE "^(CROWDSEC_CF_BOUNCER_API_KEY|CF_WORKER_BOUNCER_TOKEN)=" "$_ENV_FILE_CS" 2>/dev/null; then
     _ENV_TMP=$(mktemp "${_ENV_FILE_CS}.crowdsec.XXXXXXXXXX")
-    if sed '/^CROWDSEC_CF_BOUNCER_API_KEY=/d' "$_ENV_FILE_CS" > "$_ENV_TMP" \
+    if sed '/^CROWDSEC_CF_BOUNCER_API_KEY=/d;/^CF_WORKER_BOUNCER_TOKEN=/d' \
+           "$_ENV_FILE_CS" > "$_ENV_TMP" \
        && mv -f "$_ENV_TMP" "$_ENV_FILE_CS"; then
-        success "Removed CROWDSEC_CF_BOUNCER_API_KEY from .env"
+        success "Removed CrowdSec credentials (CROWDSEC_CF_BOUNCER_API_KEY, CF_WORKER_BOUNCER_TOKEN) from .env"
     else
         rm -f "$_ENV_TMP" 2>/dev/null || true
-        warn "Could not update .env atomically — remove CROWDSEC_CF_BOUNCER_API_KEY manually."
+        warn "Could not update .env atomically — remove CROWDSEC_CF_BOUNCER_API_KEY and CF_WORKER_BOUNCER_TOKEN manually."
     fi
 fi
 
