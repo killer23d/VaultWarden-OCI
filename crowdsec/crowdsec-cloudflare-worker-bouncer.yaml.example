@@ -50,7 +50,7 @@
 # -- CrowdSec LAPI connection ----------------------------------------------
 crowdsec_config:
   lapi_key: CHANGE_ME_BOUNCER_KEY
-  lapi_url: http://127.0.0.1:8090/
+  lapi_url: http://127.0.0.1:8080/
   update_frequency: 10s
   include_scenarios_containing: []
   exclude_scenarios_containing: []
