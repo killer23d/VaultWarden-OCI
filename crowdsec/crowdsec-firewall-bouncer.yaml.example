@@ -20,7 +20,7 @@ mode: iptables
 update_frequency: 10s
 log_mode: stdout
 log_level: info
-api_url: http://127.0.0.1:8080/
+api_url: http://127.0.0.1:8090/
 api_key: CHANGE_ME_FW_BOUNCER_KEY
 
 # origins: [] means accept ALL decision sources.
