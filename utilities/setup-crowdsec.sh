@@ -943,6 +943,7 @@ if [[ -f "$_CF_WORKER_BOUNCER_CONFIG_SRC" ]]; then
             -e "s|TOKEN_CF_ACCOUNT_EMAIL|${_cf_account_email}|g" \
             -e "s|CHANGE_ME_BOUNCER_KEY|${_CF_BOUNCER_KEY}|g" \
             -e "s|.*only_include_decisions_from:.*|${_only_from_line}|g" \
+            -e "s|lapi_url: http://127\.0\.0\.1:[0-9]*/|lapi_url: http://127.0.0.1:${_LAPI_PORT}/|g" \
             "$_CF_WORKER_BOUNCER_CONFIG_SRC" \
             | tee "$_CF_WORKER_BOUNCER_CONFIG_DEST" >/dev/null
         chmod 600 "$_CF_WORKER_BOUNCER_CONFIG_DEST"
