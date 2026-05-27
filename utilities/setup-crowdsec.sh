@@ -123,6 +123,78 @@ _cs_read_secret_file() {
 }
 
 # ---------------------------------------------------------------------------
+# Port-conflict diagnostic helper
+# Emits actionable ERROR lines identifying what process owns a given port.
+# Usage: _cs_diagnose_port 8080
+# ---------------------------------------------------------------------------
+_cs_diagnose_port() {
+    local port="$1"
+    local info=""
+
+    # Try ss first (iproute2, always present on Ubuntu 20.04+)
+    if command -v ss >/dev/null 2>&1; then
+        info="$(ss -tlnp "sport = :${port}" 2>/dev/null | grep -v '^Netid' || true)"
+    fi
+
+    # Fall back to lsof if ss gave nothing useful
+    if [[ -z "$info" ]] && command -v lsof >/dev/null 2>&1; then
+        info="$(lsof -i :"${port}" -sTCP:LISTEN -n -P 2>/dev/null || true)"
+    fi
+
+    if [[ -n "$info" ]]; then
+        log_error "Port ${port} is held by:"
+        while IFS= read -r line; do
+            log_error "  ${line}"
+        done <<< "$info"
+        log_error "Stop or reconfigure that process, then re-run this script."
+        log_error "Alternatively, change CrowdSec's listen port in /etc/crowdsec/config.yaml"
+        log_error "  api.server.listen_uri: 127.0.0.1:<new_port>"
+        log_error "and update /etc/crowdsec/local_api_credentials.yaml + all bouncer configs."
+    else
+        log_error "Could not identify what holds port ${port} — run: sudo ss -tlnp | grep ${port}"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Attempt to start CrowdSec, with port-conflict diagnosis on failure.
+# Returns 0 if the service becomes active, 1 otherwise.
+# ---------------------------------------------------------------------------
+_cs_start_service() {
+    # Reset any previous failed state so systemctl start has a clean slate.
+    systemctl reset-failed crowdsec 2>/dev/null || true
+
+    if systemctl enable --now crowdsec 2>/dev/null; then
+        # Give the process up to 5 s to fully transition to active.
+        local _i
+        for _i in {1..5}; do
+            if systemctl is-active --quiet crowdsec; then
+                return 0
+            fi
+            sleep 1
+        done
+    fi
+
+    # Service did not come up — emit diagnostics.
+    log_error "CrowdSec service failed to start."
+    log_error "systemctl status crowdsec:"
+    systemctl status crowdsec --no-pager -l 2>&1 | head -30 | while IFS= read -r _l; do
+        log_error "  ${_l}"
+    done
+
+    # Check whether the LAPI port is already taken.
+    local _lapi_port
+    _lapi_port="$(grep -oP '(?<=listen_uri: 127\.0\.0\.1:)\d+' \
+        /etc/crowdsec/config.yaml 2>/dev/null || echo '8080')"
+    if ss -tlnp 2>/dev/null | grep -q ":${_lapi_port}[[:space:]]"; then
+        log_error "Port ${_lapi_port} is already in use — this is the most likely cause."
+        _cs_diagnose_port "${_lapi_port}"
+    fi
+
+    log_error "Full journal: sudo journalctl -xeu crowdsec --no-pager | tail -50"
+    return 1
+}
+
+# ---------------------------------------------------------------------------
 # CLI flags
 # ---------------------------------------------------------------------------
 AUTO_MODE=false
@@ -270,18 +342,19 @@ else
     DEBIAN_FRONTEND=noninteractive apt-get install -y "$_fw_pkg"
 fi
 
+# Start/restart CrowdSec regardless of whether it was freshly installed or
+# already present.  Uses _cs_start_service which emits port-conflict
+# diagnostics on failure rather than silently continuing.
 if [[ "$DRY_RUN" != "true" ]]; then
-    if systemctl enable --now crowdsec; then
-        if systemctl is-active --quiet crowdsec; then
-            log_success "CrowdSec service enabled and started."
-        else
-            log_error "CrowdSec service enable/start command returned success but service is not active."
-            log_error "Check: sudo systemctl status crowdsec && sudo journalctl -xeu crowdsec"
-        fi
-    else
-        log_error "Failed to enable/start CrowdSec service."
-        log_error "Check: sudo systemctl status crowdsec && sudo journalctl -xeu crowdsec"
+    if systemctl is-active --quiet crowdsec; then
+        log_info "CrowdSec service already active — reloading configuration."
+        systemctl reload crowdsec 2>/dev/null || systemctl restart crowdsec 2>/dev/null || true
+    elif ! _cs_start_service; then
+        log_error "Cannot continue with a stopped CrowdSec service."
+        log_error "Resolve the issue above, then re-run: sudo ./utilities/setup-crowdsec.sh"
+        exit 1
     fi
+    log_success "CrowdSec service enabled and running."
 fi
 
 # ---------------------------------------------------------------------------
@@ -660,7 +733,9 @@ if [[ -f "$_CF_WORKER_BOUNCER_CONFIG_SRC" ]]; then
             log_warn "Auto mode: Cloudflare values left as placeholders where missing."
             log_warn "Set later in .env / sudo utilities/setup-secrets.sh rotate cf_worker_bouncer_token"
         else
+            # ------------------------------------------------------------------
             # Resolve the Worker API token from env, secret files, or prompt.
+            # ------------------------------------------------------------------
             _env_token="${CF_WORKER_BOUNCER_TOKEN:-}"
             if [[ -n "$_env_token" && "$_env_token" != CHANGE_ME* && "$_env_token" != PLACEHOLDER* ]]; then
                 _CF_WORKER_TOKEN="$_env_token"
@@ -683,6 +758,11 @@ if [[ -f "$_CF_WORKER_BOUNCER_CONFIG_SRC" ]]; then
                 fi
             fi
 
+            # ------------------------------------------------------------------
+            # Only prompt for values that are genuinely missing.
+            # Values already set in .env / environment are accepted as-is and
+            # the corresponding prompts are skipped entirely.
+            # ------------------------------------------------------------------
             if [[ -z "$_CF_WORKER_TOKEN" ]]; then
                 log_info ""
                 log_info "══════════════════════════════════════════════════════════"
@@ -702,12 +782,21 @@ if [[ -f "$_CF_WORKER_BOUNCER_CONFIG_SRC" ]]; then
                 log_info " (Use 'My Profile' → API Tokens, NOT Account API Tokens)"
                 log_info "══════════════════════════════════════════════════════════"
 
-                while [[ -z "$_cf_zone_id" ]]; do
-                    read -r -p "Enter CLOUDFLARE_ZONE_ID: " _cf_zone_id
-                    [[ -z "$_cf_zone_id" ]] && log_warn "CLOUDFLARE_ZONE_ID cannot be empty."
-                done
+                # Prompt for Zone ID only when not already set.
+                if [[ -z "$_cf_zone_id" ]]; then
+                    while [[ -z "$_cf_zone_id" ]]; do
+                        read -r -p "Enter CLOUDFLARE_ZONE_ID: " _cf_zone_id
+                        [[ -z "$_cf_zone_id" ]] && log_warn "CLOUDFLARE_ZONE_ID cannot be empty."
+                    done
+                else
+                    log_info "CLOUDFLARE_ZONE_ID already set — skipping prompt."
+                fi
+
+                # Prompt for Account ID only when not already set.
                 if [[ -z "$_cf_account_id" ]]; then
                     read -r -p "Enter CF_ACCOUNT_ID (optional, press Enter to skip): " _cf_account_id
+                else
+                    log_info "CF_ACCOUNT_ID already set — skipping prompt."
                 fi
 
                 while [[ -z "$_CF_WORKER_TOKEN" ]]; do
@@ -718,6 +807,14 @@ if [[ -f "$_CF_WORKER_BOUNCER_CONFIG_SRC" ]]; then
                     fi
                 done
                 log_success "Cloudflare Workers API token accepted."
+            else
+                # Token already resolved — still log if Zone/Account IDs are set.
+                if [[ -n "$_cf_zone_id" ]]; then
+                    log_info "CLOUDFLARE_ZONE_ID already set — skipping prompt."
+                fi
+                if [[ -n "$_cf_account_id" ]]; then
+                    log_info "CF_ACCOUNT_ID already set — skipping prompt."
+                fi
             fi
 
             _cs_set_env_var "CLOUDFLARE_ZONE_ID" "$_cf_zone_id"
@@ -843,7 +940,11 @@ if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Autonomous mode — no persistent service to enable"
     fi
 else
-    systemctl reload crowdsec                        || true
+    # CrowdSec was already started (or failed with an error) in Phase 1.
+    # Only reload here if it is currently active.
+    if systemctl is-active --quiet crowdsec; then
+        systemctl reload crowdsec 2>/dev/null || true
+    fi
     systemctl enable --now crowdsec-firewall-bouncer || true
 
     _fw_ready=false
