@@ -1,27 +1,22 @@
 # crowdsec/crowdsec-cloudflare-worker-bouncer.yaml.example
 #
 # Template config for the CrowdSec Cloudflare Workers bouncer
-# (crowdsec-cloudflare-worker-bouncer).  This file is read by
-# utilities/setup-crowdsec.sh and rendered into:
+# (crowdsec-cloudflare-worker-bouncer) v0.0.17+.
+# This file is read by utilities/setup-crowdsec.sh and rendered into:
 #   /etc/crowdsec/bouncers/crowdsec-cloudflare-worker-bouncer.yaml
 #
 # Placeholders replaced by the setup script:
-#   TOKEN_CF_ZONE_ID            ← CLOUDFLARE_ZONE_ID from .env
-#   TOKEN_CF_ACCOUNT_ID         ← CF_ACCOUNT_ID from .env
-#   TOKEN_CF_WORKER_BOUNCER_TOKEN ← CF_WORKER_BOUNCER_TOKEN secret
-#   CHANGE_ME_BOUNCER_KEY       ← auto-generated CrowdSec LAPI key
+#   TOKEN_CF_ZONE_ID              <- CLOUDFLARE_ZONE_ID from .env
+#   TOKEN_CF_ACCOUNT_ID           <- CF_ACCOUNT_ID from .env
+#   TOKEN_CF_WORKER_BOUNCER_TOKEN <- CF_WORKER_BOUNCER_TOKEN secret
+#   CHANGE_ME_BOUNCER_KEY         <- auto-generated CrowdSec LAPI key
 #
-# You can also run the bouncer in auto-configure mode to let it discover
-# your account/zone structure automatically:
-#   crowdsec-cloudflare-worker-bouncer -g <CF_API_TOKEN> -o /etc/crowdsec/bouncers/crowdsec-cloudflare-worker-bouncer.yaml
-# Then manually paste the lapi_key returned by `cscli bouncers add`.
-#
-# ─────────────────────────────────────────────────────────────────────────
+# -------------------------------------------------------------------------
 # CLOUDFLARE FREE PLAN NOTES
-# ─────────────────────────────────────────────────────────────────────────
+# -------------------------------------------------------------------------
 # KV write quota: 1,000 writes/day (free plan)
-# Community blocklists can easily contain 10 K–100 K IPs, which would
-# exhaust your daily quota on the first sync.  The `only_include_decisions_from`
+# Community blocklists can easily contain 10K-100K IPs, which would
+# exhaust your daily quota on the first sync.  The only_include_decisions_from
 # guard below restricts synced decisions to those generated locally by
 # your CrowdSec engine and cscli.  This keeps KV writes well within the
 # free-plan limit while still blocking real attackers targeting your host.
@@ -33,109 +28,54 @@
 # A typical self-hosted Vaultwarden instance is orders of magnitude below
 # this limit.
 #
-# ─────────────────────────────────────────────────────────────────────────
-# DEPLOYMENT MODES
-# ─────────────────────────────────────────────────────────────────────────
-# Daemon mode (default):
-#   The Go binary runs as a persistent systemd service.  It pushes new
-#   CrowdSec decisions to Cloudflare Workers KV as they arrive.  This
-#   gives near-real-time blocking.  Restart the service after config changes:
-#     sudo systemctl restart crowdsec-cloudflare-worker-bouncer
+# -------------------------------------------------------------------------
+# REQUIRED TOKEN PERMISSIONS
+# -------------------------------------------------------------------------
+# Use 'My Profile -> API Tokens', NOT the legacy Global API Key.
+# Scope the token to the specific zone (not All zones) to avoid
+# the bouncer -g flag iterating over unrelated zones in your account.
 #
-# Autonomous mode (--autonomous flag to setup-crowdsec.sh):
-#   The binary runs once, deploys the Worker script and KV namespace to
-#   Cloudflare, then exits.  A Cloudflare Scheduled Worker (cron trigger)
-#   pulls decisions from your CrowdSec LAPI every 5 minutes.  No persistent
-#   daemon is needed.  Suitable when you do not want an always-on process.
-#   Note: the LAPI must be reachable from the internet for scheduled pulls.
+#   Account: Workers KV Storage : Edit
+#   Account: Workers Scripts    : Edit
+#   Account: Account Settings   : Read
+#   Account: Turnstile          : Edit
+#   Account: D1                 : Edit
+#   User:    User Details       : Read
+#   Zone:    DNS                : Read  (scope to specific zone)
+#   Zone:    Workers Routes     : Edit  (scope to specific zone)
+#   Zone:    Zone               : Read  (scope to specific zone)
 #
-# ─────────────────────────────────────────────────────────────────────────
+# -------------------------------------------------------------------------
 
-# ── CrowdSec LAPI connection ───────────────────────────────────────────────
+# -- CrowdSec LAPI connection ----------------------------------------------
 crowdsec_config:
   lapi_key: CHANGE_ME_BOUNCER_KEY
-  # URL of the local CrowdSec LAPI.  Default is correct for a host-only install.
   lapi_url: http://127.0.0.1:8090/
-  # Only sync decisions generated locally (free-plan KV write guard).
-  # setup-crowdsec.sh injects the correct list based on CF_FREE_PLAN in .env.
-  only_include_decisions_from: ["cscli", "crowdsec"]
-  # How often (in seconds) the daemon polls LAPI for new decisions.
-  # Lower values give faster blocking; higher values reduce LAPI load.
-  update_frequency: 10
-  # Set to true to include deletions (un-bans) in each LAPI pull.
+  update_frequency: 10s
   include_scenarios_containing: []
   exclude_scenarios_containing: []
+  only_include_decisions_from: ["cscli", "crowdsec"]
+  insecure_skip_verify: false
 
-# ── Cloudflare account/zone structure ─────────────────────────────────────
-# This section mirrors the structure auto-generated by:
-#   crowdsec-cloudflare-worker-bouncer -g <CF_API_TOKEN>
-# If you ran auto-configure, the block below is already filled in.
-# Otherwise, fill in the TOKEN_* placeholders manually or let
-# setup-crowdsec.sh substitute them from .env.
+# -- Cloudflare account/zone structure -------------------------------------
+# Schema for crowdsec-cloudflare-worker-bouncer v0.0.17+.
+# The token field is required at the account level.
+# actions must be a list; supported values: ban, captcha
 cloudflare_config:
-  # Cloudflare API token.  Required permissions (use 'My Profile → API Tokens',
-  # NOT the legacy Global API Key):
-  #   Account › Workers KV Storage : Edit
-  #   Account › Workers Scripts    : Edit
-  #   Account › Account Settings   : Read
-  #   Account › Turnstile           : Edit
-  #   Account › D1                  : Edit
-  #   User    › User Details        : Read
-  #   Zone    › DNS                 : Read
-  #   Zone    › Workers Routes      : Edit
-  #   Zone    › Zone                : Read
-  api_token: TOKEN_CF_WORKER_BOUNCER_TOKEN
-
   accounts:
     - id: TOKEN_CF_ACCOUNT_ID
+      token: TOKEN_CF_WORKER_BOUNCER_TOKEN
+      account_name: TOKEN_CF_ACCOUNT_EMAIL
       zones:
         - zone_id: TOKEN_CF_ZONE_ID
-          # Human-readable label for this zone (informational only).
-          # Replace with your actual domain, e.g. vault.example.com
-          zone_name: CHANGE_ME_YOUR_DOMAIN
+          # actions: list of enforcement actions. Supported: ban, captcha
+          # Use 'ban' for hard block (HTTP 403).
+          # Use 'captcha' if you have Turnstile configured.
+          actions:
+            - ban
+          default_action: ban
+          # routes_to_protect: leave empty to protect all routes in the zone.
+          routes_to_protect: []
 
-          # action controls what the Worker does when a blocked IP is detected.
-          # Options:
-          #   managed_challenge  — Cloudflare's adaptive CAPTCHA/challenge (recommended)
-          #   js_challenge       — lightweight JS proof-of-work challenge
-          #   block              — hard HTTP 403 with no challenge
-          #   captcha            — Turnstile captcha (requires Turnstile configured)
-          #
-          # Recommendation for Vaultwarden:
-          #   Use 'managed_challenge' — it silently passes trusted browsers/bots
-          #   and only challenges suspicious clients, minimising false positives
-          #   for your password manager users while blocking bots and scanners.
-          action: managed_challenge
-
-          # Worker routing: match ALL traffic to your zone.
-          # Adjust the pattern if you want to restrict enforcement to specific paths.
-          worker_routes:
-            - "*TOKEN_CF_ZONE_ID/*"  # setup-crowdsec.sh replaces with real zone-based pattern
-
-          # Turnstile site/secret keys — only needed when action=captcha.
-          # Create at: Cloudflare Dashboard → Turnstile
-          # turnstile_site_key: CHANGE_ME_TURNSTILE_SITE_KEY
-          # turnstile_secret_key: CHANGE_ME_TURNSTILE_SECRET_KEY
-
-      # Workers KV namespace — created automatically by the bouncer on first run.
-      # The name here is used to identify the namespace; the bouncer will create
-      # it if it does not already exist under your account.
-      worker_kv_namespace_name: crowdsec-worker-bouncer-kv
-
-# ── Bouncer behaviour ─────────────────────────────────────────────────────
-# How the Worker handles requests when the bouncer process is down or KV is
-# unavailable.  'allow' (fail open) is recommended to prevent false lockouts
-# on your own password manager.  This must ALSO be set in the Cloudflare
-# dashboard (Website → Worker Routes → Edit → Request limit failure mode → Fail open)
-# since the dashboard setting takes precedence over this value for rate-limit
-# failures specifically.
-route_not_found_action: allow
-
-# Log level: trace, debug, info, warn, error
 log_level: info
-
-# Log mode: stdout (for journald/systemd), file, stderr
-log_mode: stdout
-
-# Path to write PID file (daemon mode only).  Set to empty string to disable.
-pid_file: /var/run/crowdsec-cloudflare-worker-bouncer.pid
+log_media: stdout
