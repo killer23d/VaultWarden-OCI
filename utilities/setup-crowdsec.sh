@@ -510,7 +510,7 @@ fi
 if command -v cscli >/dev/null 2>&1 && [[ "$FORCE" != "true" ]]; then
     log_info "CrowdSec already installed — skipping base install."
 elif [[ "$DRY_RUN" == "true" ]]; then
-    log_info "[DRY RUN] Would install crowdsec and crowdsec-firewall-bouncer-iptables"
+    log_info "[DRY RUN] Would install crowdsec, crowdsec-firewall-bouncer-iptables, and ipset"
 else
     log_info "Adding CrowdSec repository..."
     curl -s https://packagecloud.io/install/repositories/crowdsec/crowdsec/script.deb.sh | bash
@@ -534,6 +534,11 @@ else
     DEBIAN_FRONTEND=noninteractive apt-get install -y "$_cs_pkg"
     log_info "Installing CrowdSec firewall bouncer package..."
     DEBIAN_FRONTEND=noninteractive apt-get install -y "$_fw_pkg"
+    # ipset is required by the iptables bouncer to manage ban sets but is not
+    # pulled in as a package dependency on Ubuntu/OCI ARM64.  Install it here
+    # so the bouncer can start without a "unable to find ipset" fatal error.
+    log_info "Installing ipset (required by crowdsec-firewall-bouncer iptables backend)..."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y ipset
 fi
 
 # Start/restart CrowdSec regardless of whether it was freshly installed or
@@ -559,6 +564,21 @@ log_info "=== PHASE 1b: Firewall bouncer config ==="
 _FW_BOUNCER_CONFIG="/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml"
 # Resolve the current LAPI port so generated configs stay in sync.
 _LAPI_PORT="$(_cs_resolve_lapi_port)"
+
+# ---------------------------------------------------------------------------
+# Pre-flight: ensure ipset is present before the bouncer is started or
+# restarted.  This self-heals existing deployments (already-installed path)
+# without requiring --force.  The fresh-install path above already installs
+# ipset via apt, so this check is a no-op there.
+# ---------------------------------------------------------------------------
+if [[ "$DRY_RUN" != "true" ]]; then
+    if ! command -v ipset >/dev/null 2>&1; then
+        log_warn "ipset not found — installing now (required by crowdsec-firewall-bouncer iptables backend)."
+        DEBIAN_FRONTEND=noninteractive apt-get install -y ipset \
+            && log_success "ipset installed successfully." \
+            || log_error "Failed to install ipset — crowdsec-firewall-bouncer may not start."
+    fi
+fi
 
 if [[ -f "$_FW_BOUNCER_CONFIG" ]] && [[ "$FORCE" != "true" ]]; then
     log_info "Firewall bouncer config already present — checking DOCKER-USER chain."
