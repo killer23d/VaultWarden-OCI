@@ -392,6 +392,39 @@ _cf_worker_bouncer_service_exists() {
 }
 
 # ---------------------------------------------------------------------------
+# Write the crowdsec-cloudflare-worker-bouncer systemd unit if:
+#   - The binary exists at _CF_WORKER_BOUNCER_BIN
+#   - The unit file is not already installed
+#   - Daemon mode is in use (AUTONOMOUS_MODE != true)
+# Safe to call on every run; idempotent.
+# ---------------------------------------------------------------------------
+_cs_ensure_cf_worker_unit() {
+    local bin_path="${1:-/usr/local/bin/crowdsec-cloudflare-worker-bouncer}"
+    if [[ -x "$bin_path" ]] && ! _cf_worker_bouncer_service_exists && [[ "$AUTONOMOUS_MODE" != "true" ]]; then
+        log_info "Writing crowdsec-cloudflare-worker-bouncer systemd unit..."
+        cat >/etc/systemd/system/crowdsec-cloudflare-worker-bouncer.service <<'UNIT'
+[Unit]
+Description=CrowdSec Cloudflare Workers Bouncer
+After=network-online.target crowdsec.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/crowdsec-cloudflare-worker-bouncer -c /etc/crowdsec/bouncers/crowdsec-cloudflare-worker-bouncer.yaml
+Restart=on-failure
+RestartSec=5
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+        systemctl daemon-reload || true
+        log_success "Installed crowdsec-cloudflare-worker-bouncer systemd unit."
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # PHASE 1: CrowdSec base installation
 # ---------------------------------------------------------------------------
 log_info "=== PHASE 1: CrowdSec base installation ==="
@@ -687,34 +720,16 @@ else
             fi
         fi
 
-        # Write the systemd unit when daemon mode is in use and no unit was
-        # installed by the package / tarball helper.
-        if [[ -x "$_CF_WORKER_BOUNCER_BIN" ]] && ! _cf_worker_bouncer_service_exists && [[ "$AUTONOMOUS_MODE" != "true" ]]; then
-            log_info "Writing crowdsec-cloudflare-worker-bouncer systemd unit..."
-            cat >/etc/systemd/system/crowdsec-cloudflare-worker-bouncer.service <<'UNIT'
-[Unit]
-Description=CrowdSec Cloudflare Workers Bouncer
-After=network-online.target crowdsec.service
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/crowdsec-cloudflare-worker-bouncer -c /etc/crowdsec/bouncers/crowdsec-cloudflare-worker-bouncer.yaml
-Restart=on-failure
-RestartSec=5
-User=root
-Group=root
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-            systemctl daemon-reload || true
-            log_success "Installed crowdsec-cloudflare-worker-bouncer systemd unit."
-        fi
-
     else
         log_info "Cloudflare Workers bouncer binary already present at ${_CF_WORKER_BOUNCER_BIN}."
     fi
+
+    # FIX: Ensure the systemd unit is written unconditionally after any install
+    # path — including re-runs where the binary was installed in a prior
+    # invocation (_CF_WORKER_BOUNCER_NEEDS_INSTALL=false).  Previously the unit
+    # was only written inside the NEEDS_INSTALL block, causing Phase 8 to emit
+    # "service unit not installed yet" on every subsequent run.
+    _cs_ensure_cf_worker_unit "$_CF_WORKER_BOUNCER_BIN"
 fi
 
 # ---------------------------------------------------------------------------
@@ -951,18 +966,38 @@ if [[ -f "$_CF_WORKER_BOUNCER_CONFIG_SRC" ]]; then
             fi
         fi
 
-        # Auto-generate the full Cloudflare config section from the token.
+        # FIX: Auto-generate the full Cloudflare config section from the token.
+        # Capture stderr so failures produce actionable diagnostics instead of
+        # silently swallowing the error.  Only rewrite lapi_key / chmod when the
+        # -g call actually succeeds (exit code 0).
         if [[ -x "$_CF_WORKER_BOUNCER_BIN" && -n "$_CF_WORKER_TOKEN" && "$_CF_WORKER_TOKEN" != CHANGE_ME* ]]; then
             log_info "Auto-generating Cloudflare account/zone config from token..."
-            "$_CF_WORKER_BOUNCER_BIN" \
-                -g "$_CF_WORKER_TOKEN" \
-                -o "$_CF_WORKER_BOUNCER_CONFIG_DEST" 2>/dev/null || \
-                log_warn "Auto-config generation failed — review ${_CF_WORKER_BOUNCER_CONFIG_DEST} manually."
-            # Re-apply the lapi_key which the -g helper may overwrite.
-            if [[ -n "$_CF_BOUNCER_KEY" ]]; then
-                sed -i "s|lapi_key:.*|lapi_key: ${_CF_BOUNCER_KEY}|" "$_CF_WORKER_BOUNCER_CONFIG_DEST" || true
+            _autocfg_err="$(
+                "$_CF_WORKER_BOUNCER_BIN" \
+                    -g "$_CF_WORKER_TOKEN" \
+                    -o "$_CF_WORKER_BOUNCER_CONFIG_DEST" 2>&1 >/dev/null
+            )" && _autocfg_ok=true || _autocfg_ok=false
+
+            if [[ "$_autocfg_ok" == "true" ]]; then
+                log_success "Auto-config generation succeeded."
+                # Re-apply the lapi_key which the -g helper may overwrite.
+                if [[ -n "$_CF_BOUNCER_KEY" ]]; then
+                    sed -i "s|lapi_key:.*|lapi_key: ${_CF_BOUNCER_KEY}|" "$_CF_WORKER_BOUNCER_CONFIG_DEST" || true
+                fi
+                chmod 600 "$_CF_WORKER_BOUNCER_CONFIG_DEST"
+            else
+                log_warn "Auto-config generation failed — the config written in Phase 6 remains active."
+                log_warn "Common causes: token lacks required permissions, or the binary does not support -g."
+                if [[ -n "$_autocfg_err" ]]; then
+                    log_warn "Error output from bouncer -g:"
+                    while IFS= read -r _err_line; do
+                        log_warn "  ${_err_line}"
+                    done <<< "$_autocfg_err"
+                fi
+                log_warn "Review and correct: ${_CF_WORKER_BOUNCER_CONFIG_DEST}"
+                log_warn "Required token permissions: Account › Workers KV Storage:Edit, Workers Scripts:Edit,"
+                log_warn "  Account Settings:Read, Turnstile:Edit, D1:Edit; Zone › DNS:Read, Workers Routes:Edit, Zone:Read"
             fi
-            chmod 600 "$_CF_WORKER_BOUNCER_CONFIG_DEST"
         fi
 
         if [[ "$AUTONOMOUS_MODE" == "true" ]]; then
