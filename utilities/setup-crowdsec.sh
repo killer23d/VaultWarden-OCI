@@ -826,11 +826,7 @@ if [[ -f "$_CF_WORKER_BOUNCER_CONFIG_SRC" ]]; then
             log_warn "Auto mode: Cloudflare values left as placeholders where missing."
             log_warn "Set CrowdSec Cloudflare secrets with: sudo utilities/setup-secrets.sh rotate <field>"
         else
-            if ! ensure_sops_env; then
-                log_error "Failed to initialize SOPS environment for Cloudflare secret reads."
-                exit 1
-            fi
-            cf_worker_bouncer_token=$(sops -d --extract '["cf_worker_bouncer_token"]' "$SECRETS_FILE") || {
+            cf_worker_bouncer_token=$(decrypt_secret "cf_worker_bouncer_token") || {
                 log_error "Failed to read cf_worker_bouncer_token from secrets. Run: sudo utilities/setup-secrets.sh rotate cf_worker_bouncer_token"
                 cleanup_secrets_environment
                 exit 1
@@ -840,7 +836,7 @@ if [[ -f "$_CF_WORKER_BOUNCER_CONFIG_SRC" ]]; then
                 cleanup_secrets_environment
                 exit 1
             fi
-            cloudflare_zone_id=$(sops -d --extract '["cloudflare_zone_id"]' "$SECRETS_FILE") || {
+            cloudflare_zone_id=$(decrypt_secret "cloudflare_zone_id") || {
                 log_error "Failed to read cloudflare_zone_id from secrets. Run: sudo utilities/setup-secrets.sh rotate cloudflare_zone_id"
                 cleanup_secrets_environment
                 exit 1
@@ -850,7 +846,7 @@ if [[ -f "$_CF_WORKER_BOUNCER_CONFIG_SRC" ]]; then
                 cleanup_secrets_environment
                 exit 1
             fi
-            cf_account_id=$(sops -d --extract '["cf_account_id"]' "$SECRETS_FILE") || {
+            cf_account_id=$(decrypt_secret "cf_account_id") || {
                 log_error "Failed to read cf_account_id from secrets. Run: sudo utilities/setup-secrets.sh rotate cf_account_id"
                 cleanup_secrets_environment
                 exit 1
