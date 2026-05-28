@@ -507,9 +507,9 @@ SOPS_EOF
         log_info "═══════════════════════════════════════════════════════════"
         log_info " Cloudflare CrowdSec Bouncer Credentials"
         log_info "═══════════════════════════════════════════════════════════"
-        log_info "CF_WORKER_BOUNCER_TOKEN: Cloudflare dashboard → My Profile → API Tokens"
-        log_info "CLOUDFLARE_ZONE_ID: Cloudflare dashboard → Zone overview page"
-        log_info "CF_ACCOUNT_ID: Cloudflare dashboard → any Zone overview page"
+        log_info "cf_worker_bouncer_token: Cloudflare dashboard → My Profile → API Tokens"
+        log_info "cloudflare_zone_id: Cloudflare dashboard → Zone overview page"
+        log_info "cf_account_id: Cloudflare dashboard → any Zone overview page"
         echo ""
 
         local cf_worker_bouncer_token cloudflare_zone_id cf_account_id

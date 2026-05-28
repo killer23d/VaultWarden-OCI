@@ -15,13 +15,11 @@ For first-time setup on a new host:
    Set CrowdSec Cloudflare secrets via `sudo utilities/setup-secrets.sh rotate cf_worker_bouncer_token`,
    `sudo utilities/setup-secrets.sh rotate cloudflare_zone_id`, and
    `sudo utilities/setup-secrets.sh rotate cf_account_id`.
-3. Store the Cloudflare Workers bouncer token:
-   `./edit-secrets.sh rotate cf_worker_bouncer_token`
-4. Run `sudo ./setup.sh install --domain <fqdn> --email <admin-email> --auto`
+3. Run `sudo ./setup.sh install --domain <fqdn> --email <admin-email> --auto`
    (or `sudo make setup` if `.env` is already prepared).
-5. Re-login so your user picks up `docker` group membership.
-6. Start services with `make up` and verify with `make health`.
-7. **After CrowdSec is installed**, set the Cloudflare Worker route to
+4. Re-login so your user picks up `docker` group membership.
+5. Start services with `make up` and verify with `make health`.
+6. **After CrowdSec is installed**, set the Cloudflare Worker route to
    **Fail Open**: Cloudflare dashboard → your domain → Workers Routes → Edit
    → Request limit failure mode → Fail open.
 

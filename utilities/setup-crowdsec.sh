@@ -830,9 +830,36 @@ if [[ -f "$_CF_WORKER_BOUNCER_CONFIG_SRC" ]]; then
                 log_error "Failed to initialize SOPS environment for Cloudflare secret reads."
                 exit 1
             fi
-            cf_worker_bouncer_token=$(sops -d --extract '["cf_worker_bouncer_token"]' "$SECRETS_FILE" 2>/dev/null || true)
-            cloudflare_zone_id=$(sops -d --extract '["cloudflare_zone_id"]' "$SECRETS_FILE" 2>/dev/null || true)
-            cf_account_id=$(sops -d --extract '["cf_account_id"]' "$SECRETS_FILE" 2>/dev/null || true)
+            cf_worker_bouncer_token=$(sops -d --extract '["cf_worker_bouncer_token"]' "$SECRETS_FILE") || {
+                log_error "Failed to read cf_worker_bouncer_token from secrets. Run: sudo utilities/setup-secrets.sh rotate cf_worker_bouncer_token"
+                cleanup_secrets_environment
+                exit 1
+            }
+            if [[ -z "$cf_worker_bouncer_token" || "$cf_worker_bouncer_token" == PLACEHOLDER* || "$cf_worker_bouncer_token" == CHANGE_ME* ]]; then
+                log_error "cf_worker_bouncer_token is not configured. Run: sudo utilities/setup-secrets.sh rotate cf_worker_bouncer_token"
+                cleanup_secrets_environment
+                exit 1
+            fi
+            cloudflare_zone_id=$(sops -d --extract '["cloudflare_zone_id"]' "$SECRETS_FILE") || {
+                log_error "Failed to read cloudflare_zone_id from secrets. Run: sudo utilities/setup-secrets.sh rotate cloudflare_zone_id"
+                cleanup_secrets_environment
+                exit 1
+            }
+            if [[ -z "$cloudflare_zone_id" || "$cloudflare_zone_id" == PLACEHOLDER* || "$cloudflare_zone_id" == CHANGE_ME* ]]; then
+                log_error "cloudflare_zone_id is not configured. Run: sudo utilities/setup-secrets.sh rotate cloudflare_zone_id"
+                cleanup_secrets_environment
+                exit 1
+            fi
+            cf_account_id=$(sops -d --extract '["cf_account_id"]' "$SECRETS_FILE") || {
+                log_error "Failed to read cf_account_id from secrets. Run: sudo utilities/setup-secrets.sh rotate cf_account_id"
+                cleanup_secrets_environment
+                exit 1
+            }
+            if [[ -z "$cf_account_id" || "$cf_account_id" == PLACEHOLDER* || "$cf_account_id" == CHANGE_ME* ]]; then
+                log_error "cf_account_id is not configured. Run: sudo utilities/setup-secrets.sh rotate cf_account_id"
+                cleanup_secrets_environment
+                exit 1
+            fi
             cleanup_secrets_environment
         fi
 
@@ -847,7 +874,7 @@ if [[ -f "$_CF_WORKER_BOUNCER_CONFIG_SRC" ]]; then
 
         # Resolve the account email for the account_name field.
         # Falls back to a placeholder if not set in .env.
-        _cf_account_email="${CF_ACCOUNT_EMAIL:-${cf_account_id:-CHANGE_ME_CF_ACCOUNT_EMAIL}}"
+        _cf_account_email="${CF_ACCOUNT_EMAIL:-CHANGE_ME_CF_ACCOUNT_EMAIL}"
 
         mkdir -p /etc/crowdsec/bouncers
         sed \
