@@ -130,15 +130,14 @@ docker inspect $(docker compose ps -q vaultwarden) | jq '.[0].State.Health'
 #### Viewing Logs
 
 ```bash
-# All services — last 100 lines (default)
+# Follow logs for one service (default: vaultwarden)
 make logs
 
-# Tail / follow all services
-make logs FOLLOW=true
+# Show last 100 lines of all services (non-following)
 make logs-tail
 
 # Specific service
-docker compose logs vaultwarden --follow --tail=50
+docker compose logs vaultwarden --follow
 make logs SERVICE=vaultwarden
 
 # Per-service shortcuts
@@ -304,19 +303,19 @@ make restore-remote
 ### Updating Containers
 
 ```bash
-# Update container images (respects version pins in .env)
-./maintenance.sh update
+# Update container images only (respects version pins in .env)
+./maintenance.sh update --images
 make update
 
-# Update containers + system packages
+# Update OS packages only
 ./maintenance.sh update --system
 make update-system
+
+# Update containers + system packages
+./maintenance.sh update --all
 ```
 
-> **`--system` scope:** `./maintenance.sh update --system` (alias `make update-system`) does three things in order:
-> 1. Runs `apt-get upgrade` to update OS packages
-> 2. Updates the Docker engine via apt
-> 3. Pulls new container images and restarts affected services
+> **`make update-system` scope:** Updates OS packages only. For a full update (containers + system), use `make update`.
 >
 > **Rollback scope:** `restore.sh` covers data and configuration only. OS packages and the Docker engine are **not** rolled back automatically — ensure you have an OCI instance snapshot or are prepared to re-run the upgrade if the system update causes issues.
 
@@ -718,8 +717,9 @@ make key-health
 # 4. Check systemd job output
 journalctl -u vaultwarden-db-backup.service --no-pager
 
-# 5. Manually test Age key round-trip
-simple_verify_age_key
+# 5. Verify the Age key
+make key-health
+# or use the dashboard key-verify menu option
 ```
 
 ---
@@ -812,10 +812,9 @@ make health-quick                  # Quick check — concise/quiet output
 make health AUTO_RECOVER=true      # With auto-recovery (restarts unhealthy containers)
 make health-report                 # Health check that writes a timestamped report file
 make health-email                  # Send a test operational alert email
-make logs                          # All service logs (last 100 lines)
-make logs FOLLOW=true              # Follow / tail all service logs
+make logs                          # Follow one service log (default: vaultwarden)
 make logs SERVICE=vaultwarden      # Specific service
-make logs-tail                     # Tail all services with timestamps
+make logs-tail                     # Last 100 lines for all services (non-following)
 make logs-vaultwarden              # Tail VaultWarden logs
 make logs-caddy                    # Tail Caddy logs
 make logs-postfix                  # Tail Postfix email logs
@@ -836,8 +835,8 @@ make restore-db          # Restore latest DB backup
 make restore-remote      # Restore from rclone remote (interactive)
 
 # Updates & Maintenance
-make update              # Update container images
-make update-system       # Update system + containers
+make update              # Full update (containers + system packages)
+make update-system       # Update OS packages only
 make maintenance         # Comprehensive maintenance
 make maintenance-full    # Comprehensive + email notification
 make db-maint            # Deep database maintenance (sudo)
@@ -883,3 +882,7 @@ make version             # Container version info
 make shell               # Shell in vaultwarden container
 make shell SERVICE=caddy # Shell in specific container
 ```
+
+---
+
+> **Next step →** [Backup & Restore](BACKUP-RESTORE.md)

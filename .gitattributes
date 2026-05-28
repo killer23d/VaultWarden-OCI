@@ -66,6 +66,9 @@ Caddyfile       text eol=lf
 *.md            text eol=lf
 *.txt           text eol=lf
 
+# Generated command reference is rewritten from scratch; hide noisy diffs from stale NUL bytes.
+docs/COMMAND-REFERENCE.md -diff
+
 # ---------------------------
 # Binary files - never modify line endings
 # ---------------------------

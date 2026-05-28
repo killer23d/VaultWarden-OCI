@@ -97,12 +97,10 @@ main() {
     local OPS_LOCK="/run/lock/vaultwarden-operations.lock"
     local _OPS_LOCK_FD
 
-    # Atomically create-or-replace the lock file with correct perms.
-    # install(1) sets mode + ownership at create time in a single syscall —
-    # no chmod/chown race window. Works unconditionally whether the file
-    # exists or not, so stale files from previous runs are always remediated.
-    # This is the project-standard idiom (mirrors restore-run.sh / ensure_dir).
-    install -m 0660 -o root -g root /dev/null "$OPS_LOCK"
+    # Atomically create-or-replace the lock file with relaxed perms so
+    # non-root service users (injected by setup-systemd.sh) can acquire it.
+    touch "$OPS_LOCK"
+    chmod 0660 "$OPS_LOCK"
 
     exec {_OPS_LOCK_FD}>"$OPS_LOCK"
     if ! flock -n "$_OPS_LOCK_FD"; then
@@ -123,14 +121,17 @@ main() {
     # The file is removed by perform_cleanup on any exit path (EXIT HUP INT TERM).
     local _MAINT_LOCK="/run/lock/vaultwarden-maintenance.lock"
     local _MAINT_LOCK_FD
-    install -m 0660 -o root -g root /dev/null "$_MAINT_LOCK"
+    touch "$_MAINT_LOCK"
+    chmod 0660 "$_MAINT_LOCK"
     exec {_MAINT_LOCK_FD}>"$_MAINT_LOCK"
     if ! flock -n "$_MAINT_LOCK_FD"; then
         log_error "Another maintenance operation is already running. Exiting."
         exit 1
     fi
     register_cleanup rm -f "$_MAINT_LOCK"
-    trap 'perform_cleanup' EXIT HUP INT TERM
+    # Explicitly close lock FDs on exit for clean resource release
+    # shellcheck disable=SC2064
+    trap "exec ${_MAINT_LOCK_FD}>&- 2>/dev/null; exec ${_OPS_LOCK_FD}>&- 2>/dev/null; perform_cleanup" EXIT HUP INT TERM
 
     log_header "VaultWarden-OCI Maintenance Manager"
     [[ "$DRY_RUN"      == "true" ]] && log_warn "DRY RUN MODE - No changes will be made"

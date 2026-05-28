@@ -10,4 +10,4 @@
 #   sudo ./restore.sh interactive [OPTIONS]
 
 set -euo pipefail
-exec "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/utilities/restore-run.sh" "$@"
+exec bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/utilities/restore-run.sh" "$@"

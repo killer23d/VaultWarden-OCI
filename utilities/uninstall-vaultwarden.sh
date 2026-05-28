@@ -18,6 +18,7 @@ log_success() { printf '%s[%s] [%s] OK%s %s\n'      "$_C_GREEN"  "$(_vw_ts)" "$_
 log_warn()    { printf '%s[%s] [%s] WARN%s %s\n'    "$_C_YELLOW" "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$*" >&2; }
 log_error()   { printf '%s[%s] [%s] ERROR%s %s\n'   "$_C_RED"    "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$*" >&2; }
 die()         { log_error "$*"; exit 1; }
+trap 'log_error "${BASH_SOURCE[0]}: failed at line ${LINENO} (exit $?)"; exit 1' ERR
 
 info()    { log_info "$@"; }
 success() { log_success "$@"; }
@@ -333,7 +334,10 @@ if command -v docker &>/dev/null; then
     done
 
     PROJECT_NAME=$(basename "${PROJECT_DIR}" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')
-    for vol in $(docker volume ls -q 2>/dev/null | grep -E "^(${PROJECT_NAME}_|vaultwarden)" || true); do
+    _vols=()
+    mapfile -t _vols < <(docker volume ls -q 2>/dev/null | grep -E "^(${PROJECT_NAME}_|vaultwarden)" || true)
+    for vol in "${_vols[@]}"; do
+        [[ -z "$vol" ]] && continue
         if docker volume rm "$vol" 2>/dev/null; then
             success "Removed Docker volume: ${vol}"
         else
@@ -341,7 +345,10 @@ if command -v docker &>/dev/null; then
         fi
     done
 
-    for net in $(docker network ls --format '{{.Name}}' 2>/dev/null | grep -E "vaultwarden|${PROJECT_NAME}" || true); do
+    _nets=()
+    mapfile -t _nets < <(docker network ls --format '{{.Name}}' 2>/dev/null | grep -E "vaultwarden|${PROJECT_NAME}" || true)
+    for net in "${_nets[@]}"; do
+        [[ -z "$net" ]] && continue
         docker network rm "$net" 2>/dev/null && success "Removed Docker network: ${net}" || true
     done
 else
@@ -874,12 +881,23 @@ if [[ -f "$_PROFILES_FILE" ]]; then
         && success "Removed CrowdSec profiles.yaml: ${_PROFILES_FILE}"
 fi
 
-# Remove the entire /etc/crowdsec tree if the purge left it empty or if
-# crowdsec was never installed as a package (binary-only scenario).
+# Remove only the specific subdirectories/files created by setup-crowdsec.sh,
+# rather than the entire /etc/crowdsec tree (which may contain unrelated config).
 if [[ -d /etc/crowdsec ]]; then
-    if find /etc/crowdsec -mindepth 1 -maxdepth 1 2>/dev/null | read -r; then
-        rm -rf /etc/crowdsec \
-            && success "Removed /etc/crowdsec (residual config directory)" || true
+    _cs_managed_paths=(
+        "/etc/crowdsec/parsers/s02-enrich/vaultwarden-admin-allowlist.yaml"
+        "/etc/crowdsec/notifications"
+    )
+    for _cs_path in "${_cs_managed_paths[@]}"; do
+        if [[ -e "$_cs_path" ]]; then
+            rm -rf "$_cs_path" \
+                && success "Removed managed CrowdSec path: ${_cs_path}" || true
+        fi
+    done
+    # Remove the directory only if the purge left it completely empty.
+    if ! find /etc/crowdsec -mindepth 1 -maxdepth 1 2>/dev/null | read -r; then
+        rmdir /etc/crowdsec 2>/dev/null \
+            && success "Removed empty /etc/crowdsec directory" || true
     else
         info "/etc/crowdsec still has content (possibly unrelated) — leaving in place."
     fi

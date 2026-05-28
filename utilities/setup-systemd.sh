@@ -14,6 +14,8 @@ source "${PROJECT_ROOT}/lib/config.sh"
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
 
+trap 'log_error "${BASH_SOURCE[0]}: failed at line ${LINENO} (exit $?)"; exit 1' ERR
+
 INSTALL=false
 REMOVE=false
 STATUS=false

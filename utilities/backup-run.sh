@@ -79,7 +79,7 @@ case "$1" in
         _SUBCMD="$1"
         shift
         ;;
-    help)
+    help|--help|-h)
         show_help; exit 0
         ;;
     *)
@@ -271,7 +271,7 @@ create_db_snapshot_host() {
     local db_file="${state_dir}/data/db.sqlite3"
     [[ -f "$db_file" ]] || { log_error "Database not found: $db_file" >&2; return 1; }
     sqlite3 "$db_file" "$(printf '.backup %s' "$dest")" || {
-        log_error "sqlite3 .backup failed for: $db_file" >&2
+        log_error "sqlite3 .backup failed for: $db_file (check disk space: df -h $(dirname "$dest"); check DB lock: fuser $db_file)" >&2
         return 1
     }
     return 0
@@ -524,6 +524,7 @@ sync_to_rclone() {
 
     local meta_file="${enc_file}.meta"
     local _sidecar_warn=false
+    local _sidecar_fail=0
     if [[ -f "$meta_file" ]]; then
         local _meta_exit=0
         rclone copy "${rclone_config_arg[@]}" "$meta_file" "$remote_path/" --checksum \
@@ -531,6 +532,7 @@ sync_to_rclone() {
         if (( _meta_exit != 0 )); then
             log_warn "[backup] Sidecar upload FAILED: $(basename "$meta_file") (exit ${_meta_exit}) — integrity metadata missing from remote." >&2
             _sidecar_warn=true
+            (( _sidecar_fail++ )) || true
         fi
     fi
 
@@ -542,6 +544,7 @@ sync_to_rclone() {
         if (( _sha256_exit != 0 )); then
             log_warn "[backup] Sidecar upload FAILED: $(basename "$sha256_file") (exit ${_sha256_exit}) — checksum file missing from remote." >&2
             _sidecar_warn=true
+            (( _sidecar_fail++ )) || true
         fi
     fi
 
@@ -581,6 +584,12 @@ sync_to_rclone() {
     fi
 
     backup_log_info "Remote size verified: ${remote_file_path} — ${remote_size_bytes} bytes ${remote_size_human}"
+
+    if [[ "$_sidecar_warn" == "true" ]]; then
+        log_warn "[backup] Offsite sync completed with partial sidecar failures (${_sidecar_fail} file(s))"
+        return 2
+    fi
+
     backup_log_info "Offsite sync complete → ${remote_file_path}"
 
 }
@@ -800,7 +809,7 @@ perform_db_backup() {
     local enc="$target_dir/db_backup_$timestamp.sqlite3.age"
     local enc_tmp="${enc}.tmp"
     if ! age -r "$age_pub_key" -o "$enc_tmp" "$snap" 2>/dev/null; then
-        log_error "Encryption failed" >&2
+        log_error "Encryption failed (check disk space: df -h $(dirname "$enc"); verify Age key: make key-health)" >&2
         rm -f "$enc_tmp"
         return 1
     fi
@@ -868,18 +877,34 @@ perform_full_backup() {
 
     backup_log_info "Archiving state (relative paths, safe for staged restore)..."
 
-    local tar_excludes=(
-        "--exclude=${SCRIPT_DIR#/}/.git"
-        "--exclude=${SCRIPT_DIR#/}/backups"
-        "--exclude=${SCRIPT_DIR#/}/logs"
-        "--exclude=${SCRIPT_DIR#/}/.rate-limit"
-        "--exclude=${state_dir#/}/backups"
-        "--exclude=${state_dir#/}/logs"
-        "--exclude=*.sock"
-        "--exclude=*.lock"
-        "--exclude=*.tmp"
-        "--exclude=*.age.tmp"
+    # Canonical backup exclusion list — single source of truth.
+    # Keep in sync with print_backup_manifest() below and docs/BACKUP-RESTORE.md.
+    local -a _BACKUP_EXCLUDES=(
+        ".git"
+        "backups"
+        "logs"
+        ".rate-limit"
+        "secrets"
+        "*.sock"
+        "*.lock"
+        "*.tmp"
+        "*.age.tmp"
     )
+    local -a tar_excludes=()
+    local excl
+    for excl in "${_BACKUP_EXCLUDES[@]}"; do
+        case "$excl" in
+            \*.*)
+                tar_excludes+=("--exclude=${excl}")
+                ;;
+            *)
+                tar_excludes+=("--exclude=${SCRIPT_DIR#/}/${excl}")
+                # Also exclude the same paths under state_dir where applicable
+                [[ "$excl" == "backups" || "$excl" == "logs" ]] && \
+                    tar_excludes+=("--exclude=${state_dir#/}/${excl}")
+                ;;
+        esac
+    done
 
     local tar_sources=()
 
@@ -934,7 +959,7 @@ perform_full_backup() {
     local enc_tmp="${enc}.tmp"
 
     if ! age -r "$age_pub_key" -o "$enc_tmp" "$temp_tar" 2>/dev/null; then
-        log_error "Encryption failed" >&2
+        log_error "Encryption failed (check disk space: df -h $(dirname "$enc"); verify Age key: make key-health)" >&2
         rm -f "$enc_tmp"
         return 1
     fi
@@ -954,6 +979,29 @@ perform_full_backup() {
 
     backup_log_info "${backup_label_title} backup: $(basename "$enc")"
     echo "$enc"
+}
+
+# print_backup_manifest — Show what is included/excluded in a full/emergency backup.
+# Called by `make backup-manifest`.
+print_backup_manifest() {
+    local -a _BACKUP_EXCLUDES=(
+        ".git"
+        "backups"
+        "logs"
+        ".rate-limit"
+        "secrets"
+        "*.sock"
+        "*.lock"
+        "*.tmp"
+        "*.age.tmp"
+    )
+    echo "=== Full Backup Contents ==="
+    echo "Included: Project root + state directory"
+    echo "Excluded:"
+    local excl
+    for excl in "${_BACKUP_EXCLUDES[@]}"; do
+        echo "  - $excl"
+    done
 }
 
 _check_backup_deps() {
@@ -1109,9 +1157,21 @@ main() {
     _check_backup_deps
 
     LOCK_FILE="/run/lock/vaultwarden-backup.lock"
+    local OPS_LOCK="/run/lock/vaultwarden-operations.lock"
 
     if [[ "$FORCE" != "true" && "$DRY_RUN" != "true" ]]; then
-        install -m 0660 -o root -g root /dev/null "$LOCK_FILE"
+        # Acquire shared operations lock to prevent concurrent backup + maintenance
+        touch "$OPS_LOCK"
+        chmod 0660 "$OPS_LOCK"
+        exec {OPS_LOCK_FD}>"$OPS_LOCK"
+        if ! flock -n "$OPS_LOCK_FD"; then
+            log_error "Another operation (maintenance/restore) is already running. Aborting."
+            log_info  "Wait for it to finish or use --force to override."
+            exit 1
+        fi
+
+        touch "$LOCK_FILE"
+        chmod 0660 "$LOCK_FILE"
 
         exec {LOCK_FD}>"$LOCK_FILE"
         if ! flock -n "$LOCK_FD"; then
@@ -1228,7 +1288,11 @@ main() {
         fi
 
         if [[ "$RCLONE_SYNC" == "true" ]]; then
-            if ! sync_to_rclone "$backup_file" "$actual_type"; then
+            local _sync_rc=0
+            sync_to_rclone "$backup_file" "$actual_type" || _sync_rc=$?
+            if (( _sync_rc == 2 )); then
+                log_warn "Offsite sync completed with partial sidecar failures — primary backup was delivered."
+            elif (( _sync_rc != 0 )); then
                 rclone_failed=true
                 if [[ "$EMAIL_NOTIFY" == "true" ]]; then
                     local subj="[VaultWarden] Offsite sync FAILED: $actual_type ($timestamp)"
@@ -1247,6 +1311,12 @@ main() {
         backup_log_info "Cleaning up old backups (retention: $KEEP_DAYS days)..."
         cleanup_old_backups "$backup_dir" "$actual_type" "$KEEP_DAYS" || \
             backup_log_warn "Failed to clean up some old backups"
+
+        # Prune remote backups to mirror local retention policy
+        if [[ "$RCLONE_SYNC" == "true" && "$rclone_failed" == "false" ]]; then
+            _prune_remote_backups "$KEEP_DAYS" || \
+                backup_log_warn "Failed to prune some remote backups"
+        fi
 
         if [[ "$EMAIL_NOTIFY" == "true" ]]; then
             local rclone_status="skipped"

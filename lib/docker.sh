@@ -675,6 +675,48 @@ validate_compose_file() {
     return 0
 }
 
+# docker_wait_healthy CONTAINER [TIMEOUT_SEC] [INTERVAL_SEC]
+# Polls until the container reports 'healthy', times out, or exits.
+# Returns 0 on healthy, 1 on timeout, 2 if container exits/is absent.
+#
+# This is the canonical health-polling function. Prefer it over inline loops
+# in setup-storage.sh, restore-run.sh, etc.
+docker_wait_healthy() {
+    local container="${1:?docker_wait_healthy: container name required}"
+    local timeout="${2:-60}"
+    local interval="${3:-5}"
+    local elapsed=0
+
+    while (( elapsed < timeout )); do
+        local raw_status
+        raw_status=$(docker inspect --format '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+            "$container" 2>/dev/null) || {
+            # Container does not exist or cannot be inspected
+            return 2
+        }
+
+        local state health
+        state="${raw_status%% *}"
+        health="${raw_status#* }"
+
+        case "$state" in
+            running)
+                # No healthcheck defined: treat running as healthy
+                [[ "$health" == "none" ]] && return 0
+                [[ "$health" == "healthy" ]] && return 0
+                ;;
+            exited|dead|removing)
+                return 2
+                ;;
+        esac
+
+        sleep "$interval"
+        elapsed=$(( elapsed + interval ))
+    done
+
+    return 1
+}
+
 # Export functions for use by scripts
 # NOTE: run_in_service is intentionally NOT exported (hard deprecation)
 # NOTE: _docker_prune_filter and _service_has_no_healthcheck are internal
@@ -686,5 +728,6 @@ export -f start_services stop_services restart_services recreate_services
 export -f pull_images pull_image_with_retry exec_in_service exec_oneshot_in_service run_in_service_full_env
 export -f cleanup_containers cleanup_images cleanup_volumes cleanup_networks cleanup_docker_system
 export -f get_service_logs follow_service_logs wait_for_service_ready validate_compose_file
+export -f docker_wait_healthy
 
 log_debug "Enhanced Docker library loaded successfully - standardized error handling" 2>/dev/null || true

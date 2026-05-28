@@ -4,6 +4,7 @@ Documentation=https://github.com/killer23d/VaultWarden-OCI
 After=docker.service network-online.target
 Requires=docker.service
 # Wait for the health service so backups never race container startup.
+Wants=vaultwarden-health.service
 After=vaultwarden-health.service
 ConditionPathExists=/opt/vaultwarden-scripts/backup.sh
 OnFailure=vaultwarden-notify-failure.service

@@ -11,4 +11,4 @@
 #   sudo ./backup.sh rotate [OPTIONS]
 
 set -euo pipefail
-exec "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/utilities/backup-run.sh" "$@"
+exec bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/utilities/backup-run.sh" "$@"

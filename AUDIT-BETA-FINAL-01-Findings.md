@@ -417,3 +417,37 @@ Verified correct:
 | 30 | **Minor** | 9 | Multiple | `PROJECT_STATE_DIR` / `DATA_VOLUME_MOUNT` default fallbacks scattered across 10+ files | Low |
 | 31 | **Minor** | 10 | `utilities/uninstall-vaultwarden.sh` | CrowdSec uninstall `rm -rf /etc/crowdsec` can over-delete unrelated config | Low |
 | 32 | **Minor** | 10 | `dashboard.sh` | Missing last backup result and timer schedule summary in dashboard overview | Low |
+
+---
+
+## Resolution Status
+
+| Finding | Severity | Resolved In | Status |
+|---------|----------|-------------|--------|
+| C-1 CrowdSec bootstrap | Critical | PR #163 | ✅ Resolved |
+| C-2 Sidecar partial-failure | Critical | PR #163 | ✅ Resolved |
+| C-3 Secrets in backup | Critical | PR #163 | ✅ Resolved |
+| C-4 SMTP argv exposure | Critical | PR #163 | ✅ Resolved |
+| M-5/M-6 Lock infra | Moderate | This PR | ✅ Resolved (0660 with service group) |
+| M-7 Systemd deps | Moderate | PR #163 | ✅ Resolved |
+| M-8 Rotation atomicity | Moderate | N/A | ✅ Not applicable — secrets-rotate.sh (126 lines) contains no restart loop; the mapping exists but restart logic was never implemented |
+| M-9 CIDR cache | Moderate | PR #163 | ✅ Resolved |
+| M-14 dry-run target | Moderate | PR #163 | ✅ Resolved |
+| M-15 Remote prune | Moderate | PR #163 | ✅ Resolved |
+| M-16 Drill restore test | Moderate | This PR | ✅ Resolved (Phase A-4) |
+| M-17 Error messages | Moderate | PR #163 | ✅ Resolved |
+| M-18 ERR traps | Moderate | This PR | ✅ Resolved (moved after source calls) |
+| M-19 DefaultDependencies | Moderate | PR #163 | ✅ Resolved |
+| M-20 Bouncer enable | Moderate | PR #163 | ✅ Resolved |
+| M-21 Makefile danger zone | Moderate | PR #163 | ✅ Resolved |
+| m-25 Lock FD close | Minor | PR #163 | ✅ Resolved |
+| m-26 Unquoted subshell | Minor | PR #163 | ✅ Resolved |
+| m-27 Docker before prereq | Minor | PR #163 | ✅ Resolved |
+| m-28 Health poll dedup | Minor | This PR | ✅ Resolved (Phase A-1) |
+| m-29 Scattered defaults | Minor | This PR | ⚠️ Partial (3 high-risk files migrated; remaining deferred to follow-up) |
+| m-30 CrowdSec over-delete | Minor | PR #163 | ✅ Resolved |
+| m-31/m-32 Dashboard | Minor | This PR | ✅ Resolved (Phase A-3) |
+| Docs (all 26 items) | Various | PR #163 | ✅ Resolved |
+| COMMAND-REFERENCE.md | Infra | This PR | ✅ Resolved (Phase A-5) |
+| Backup manifest array | Infra | This PR | ✅ Resolved (Phase A-6) |
+| CHANGELOG.md | Infra | Manual | ⏳ Pending owner update |

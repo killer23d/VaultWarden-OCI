@@ -142,9 +142,18 @@ _phase_ufw() {
         # Persist a fresh cache so future fetch failures fall back to known-good data.
         mkdir -p "$(dirname "$cf_cidr_cache")" 2>/dev/null || true
         printf '%s\n' "${cf_cidrs[@]}" > "$cf_cidr_cache" 2>/dev/null || true
+        chmod 640 "$cf_cidr_cache" 2>/dev/null || true
     else
         # Fetch failed — try the last-known-good cache before failing open.
         if [[ -s "$cf_cidr_cache" ]]; then
+            # TTL check: reject cache older than 7 days
+            if [[ -n "$(find "$cf_cidr_cache" -mtime +7 2>/dev/null)" ]]; then
+                log_warn "Cloudflare CIDR cache is older than 7 days — treating as stale."
+                log_error "Could not fetch fresh Cloudflare CIDR lists and cache is expired."
+                log_error "SECURITY: Refusing to configure ports 80/443 with stale CIDR data."
+                log_error "  Check internet connectivity, then re-run: sudo utilities/setup-firewall.sh"
+                return 1
+            fi
             log_warn "Could not fetch Cloudflare CIDR lists — using cached copy: $cf_cidr_cache"
             while IFS= read -r cidr; do
                 [[ -z "$cidr" || "$cidr" == \#* ]] && continue
@@ -177,15 +186,27 @@ _phase_ufw() {
 
     ufw allow "${ssh_port}/tcp"
 
-    # cf_cidrs is guaranteed non-empty here (the fetch+cache logic above
-    # returns 1 if no CIDRs are available, preventing us from reaching this
-    # point with an empty list).
+    # Validate CIDR format before inserting into firewall rules
+    local -a validated_cidrs=()
     local cidr
     for cidr in "${cf_cidrs[@]}"; do
+        if [[ "$cidr" =~ ^[0-9a-fA-F.:]+/[0-9]+$ ]]; then
+            validated_cidrs+=("$cidr")
+        else
+            log_warn "Skipping invalid CIDR entry: ${cidr}"
+        fi
+    done
+    if (( ${#validated_cidrs[@]} == 0 )); then
+        log_error "No valid CIDRs found after format validation — aborting firewall configuration."
+        return 1
+    fi
+    log_info "Validated ${#validated_cidrs[@]} of ${#cf_cidrs[@]} CIDRs"
+
+    for cidr in "${validated_cidrs[@]}"; do
         ufw allow from "$cidr" to any port 80 proto tcp  2>/dev/null || true
         ufw allow from "$cidr" to any port 443 proto tcp 2>/dev/null || true
     done
-    log_success "Firewall: ports 80/443 restricted to ${#cf_cidrs[@]} Cloudflare CIDRs"
+    log_success "Firewall: ports 80/443 restricted to ${#validated_cidrs[@]} Cloudflare CIDRs"
 
     [[ "$ufw_active" == "false" ]] && ufw --force enable
     log_success "UFW firewall configured"

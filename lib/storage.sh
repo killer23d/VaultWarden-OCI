@@ -28,6 +28,7 @@ readonly VAULTWARDEN_STORAGE_LIB_LOADED=1
 # directly without going through common.sh or a caller that pre-loads log.sh.
 _VW_STORAGE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -n "${VW_LOG_LIB_LOADED:-}" ]] || source "${_VW_STORAGE_LIB_DIR}/log.sh"
+[[ -n "${VAULTWARDEN_DEFAULTS_LOADED:-}" ]] || source "${_VW_STORAGE_LIB_DIR}/defaults.sh"
 unset _VW_STORAGE_LIB_DIR
 
 # ---------------------------------------------------------------------------
@@ -107,9 +108,9 @@ _storage_daemon_reload() {
 # Returns 0 on success, 1 on any failure. Callers should treat 1 as fatal.
 # ---------------------------------------------------------------------------
 require_project_state_ready() {
-    local state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
+    local state_dir="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}"
     local data_device="${DATA_VOLUME_DEVICE:-}"
-    local data_mount="${DATA_VOLUME_MOUNT:-/mnt/vw-data}"
+    local data_mount="${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}"
 
     if [[ -z "$data_device" ]]; then
         is_root || { log_error "require_project_state_ready: must be run as root"; return 1; }
@@ -466,6 +467,7 @@ vw_default_backup_dir() {
     if declare -f get_config_value >/dev/null 2>&1; then
         state_dir="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
     else
+        # TODO: replace with _VW_DEFAULT_STATE_DIR from lib/defaults.sh
         state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
     fi
     printf '%s/backups' "$state_dir"

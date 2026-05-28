@@ -311,8 +311,8 @@ AUTONOMOUS_MODE=false
 USE_LATEST=false
 ADMIN_IP=""
 
-CROWDSEC_VERSION="${CROWDSEC_VERSION:-}"
-CF_WORKER_BOUNCER_VERSION="${CF_WORKER_BOUNCER_VERSION:-}"
+CROWDSEC_VERSION="${CROWDSEC_VERSION:-1.6.8}"
+CF_WORKER_BOUNCER_VERSION="${CF_WORKER_BOUNCER_VERSION:-0.9.0}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -332,7 +332,7 @@ while [[ $# -gt 0 ]]; do
 usage: sudo ./utilities/setup-crowdsec.sh [OPTIONS]
 
   --auto               Non-interactive: never prompt.
-  --dry-run            Print what would happen; make no changes.
+  --dry-run            Print what would happen without changing files.
   --force              Re-run all phases even if already applied.
   --use-latest         Override version pins and use the current live upstream
                        release of each component.
@@ -435,7 +435,24 @@ elif [[ "$DRY_RUN" == "true" ]]; then
     log_info "[DRY RUN] Would install crowdsec, crowdsec-firewall-bouncer-iptables, and ipset"
 else
     log_info "Adding CrowdSec repository..."
-    curl -s https://packagecloud.io/install/repositories/crowdsec/crowdsec/script.deb.sh | bash
+    _repo_script="$(mktemp -p /tmp cs-repo-setup.XXXXXX.sh)"
+    # shellcheck disable=SC2064
+    trap "rm -f '$_repo_script'" RETURN
+    if ! curl -fsSL --connect-timeout 15 --max-time 30 \
+            https://packagecloud.io/install/repositories/crowdsec/crowdsec/script.deb.sh \
+            -o "$_repo_script"; then
+        log_error "Failed to download CrowdSec repository setup script."
+        rm -f "$_repo_script"
+        return 1
+    fi
+    # Verify the script came from the expected source and is a shell script
+    if ! head -1 "$_repo_script" | grep -qE '^#!/(usr/)?bin/(env )?bash'; then
+        log_error "Downloaded repository script does not appear to be a valid shell script — aborting."
+        rm -f "$_repo_script"
+        return 1
+    fi
+    bash "$_repo_script"
+    rm -f "$_repo_script"
 
     _cs_pkg="crowdsec"
     if [[ "$USE_LATEST" != "true" && -n "$CROWDSEC_VERSION" ]]; then
@@ -602,8 +619,8 @@ else
                 _gh_api="https://api.github.com/repos/crowdsecurity/cs-cloudflare-worker-bouncer/releases/tags/${CF_WORKER_BOUNCER_VERSION}"
                 log_info "CF Workers bouncer version pinned: ${CF_WORKER_BOUNCER_VERSION}"
             else
-                _gh_api="https://api.github.com/repos/crowdsecurity/cs-cloudflare-worker-bouncer/releases/latest"
-                log_info "CF Workers bouncer version: resolving latest from GitHub"
+                _gh_api="https://api.github.com/repos/crowdsecurity/cs-cloudflare-worker-bouncer/releases/tags/v${CF_WORKER_BOUNCER_VERSION}"
+                log_info "CF Workers bouncer version: using pinned v${CF_WORKER_BOUNCER_VERSION}"
             fi
 
             _release_json="$(curl -fsSL "$_gh_api" 2>/dev/null)" || {
@@ -690,7 +707,7 @@ else
                 if [[ "$USE_LATEST" != "true" && -n "$CF_WORKER_BOUNCER_VERSION" ]]; then
                     _go_pkg_ref="github.com/crowdsecurity/cs-cloudflare-worker-bouncer/cmd/crowdsec-cloudflare-worker-bouncer@${CF_WORKER_BOUNCER_VERSION}"
                 else
-                    _go_pkg_ref="github.com/crowdsecurity/cs-cloudflare-worker-bouncer/cmd/crowdsec-cloudflare-worker-bouncer@latest"
+                    _go_pkg_ref="github.com/crowdsecurity/cs-cloudflare-worker-bouncer/cmd/crowdsec-cloudflare-worker-bouncer@v${CF_WORKER_BOUNCER_VERSION}"
                 fi
                 _tmpgobin="$(mktemp -d -p /tmp cs-cf-worker-go.XXXXXX)"
                 if GOBIN="$_tmpgobin" go install "$_go_pkg_ref" 2>/dev/null; then
@@ -736,7 +753,7 @@ fi
 # ---------------------------------------------------------------------------
 log_info "=== PHASE 4: Acquisition config ==="
 
-_project_state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
+_project_state_dir="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}"
 _acquis_dest="/etc/crowdsec/acquis.d/vaultwarden.yaml"
 _acquis_src="${PROJECT_ROOT}/crowdsec/acquis.yaml"
 
@@ -984,7 +1001,8 @@ else
     elif [[ "$AUTONOMOUS_MODE" == "true" ]]; then
         log_info "Autonomous mode active — Cloudflare Workers handle syncing; no persistent daemon needed."
     elif _cf_worker_bouncer_service_exists; then
-        systemctl enable --now crowdsec-cloudflare-worker-bouncer || true
+        systemctl enable --now crowdsec-cloudflare-worker-bouncer \
+            || log_error "crowdsec-cloudflare-worker-bouncer failed to start — enforcement is INACTIVE. Run: journalctl -u crowdsec-cloudflare-worker-bouncer -n 30"
         log_success "crowdsec-cloudflare-worker-bouncer enabled and started."
     else
         log_warn "Skipping crowdsec-cloudflare-worker-bouncer enable — service unit not installed yet."

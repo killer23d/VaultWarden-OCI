@@ -22,6 +22,8 @@ unset _MAINT_SCRIPT_DIR
 source "$PROJECT_ROOT/lib/storage.sh"
 source "$PROJECT_ROOT/lib/maintenance-utils.sh"
 
+trap 'log_error "${BASH_SOURCE[0]}: failed at line ${LINENO} (exit $?)"; exit 1' ERR
+
 # Configuration defaults.
 # TEST_EMAIL is always true for this utility (it is the email test tool).
 # Exported so subprocesses or sourcing scripts can detect the test mode.

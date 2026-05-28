@@ -21,6 +21,8 @@ Related docs: [CONFIGURATION.md](CONFIGURATION.md) · [SECURITY.md](SECURITY.md)
 ## 📌 Phase 0 — OCI Security List (Do This First)
 
 > **⚠️ CRITICAL:** OCI blocks all inbound traffic by default at the hypervisor level. You must open ports 80 and 443 **before** running setup — Caddy cannot provision its TLS certificate otherwise.
+>
+> Note: Caddy uses the DNS-01 challenge via your Cloudflare API token — inbound HTTP is not required for certificate issuance. However, ports 80/443 are still needed for serving web traffic.
 
 1. OCI Console → **Compute → Instances → your instance**
 2. Under "Primary VNIC" click **Subnet → Default Security List**
@@ -252,6 +254,8 @@ nano docker-compose.yml.example   # container / service changes
 nano .env.example                  # new environment variables
 
 # Regenerate and apply
+# ⚠️ --force regenerates the Age key, orphaning all existing encrypted backups.
+# To re-apply config changes without key rotation, omit --force.
 sudo ./setup.sh install --domain vault.yourdomain.com --email admin@yourdomain.com --force
 ./startup.sh --force
 # or: make restart
@@ -341,3 +345,7 @@ sudo systemctl status vaultwarden-health.timer      # check a specific timer
 - `SSH_LOG_PATH` is auto-detected (`/var/log/auth.log` on Debian/Ubuntu)
 - All other steps are identical
 - Adjust Security Group / Firewall rules to match the OCI Security List instructions above
+
+---
+
+> **Next step →** [Operations](OPERATIONS.md)

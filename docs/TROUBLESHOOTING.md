@@ -613,7 +613,7 @@ make list-backups
 ### Backup Verification Fails with Missing Age Key
 
 **Symptoms**:
-- Backup is created successfully but `--quick-verify` reports failure
+- Backup is created successfully but quick verification reports failure
 - Error: `Age key not found — refusing to report verification success`
 - Backup was previously silently marked verified despite missing key
 

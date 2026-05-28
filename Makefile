@@ -54,7 +54,8 @@ DATA_DEVICE ?=
         info version shell config diagnose \
         clean clean-all prune \
         unban crowdsec-status crowdsec-alerts security-report \
-        uninstall uninstall-dry-run
+        uninstall uninstall-dry-run \
+        docs backup-manifest
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 # require-root: used for targets that genuinely need elevated privileges
@@ -974,7 +975,7 @@ clean: ## Remove generated files (logs, temp files)
 	@rm -f setup.log
 	@echo "$(GREEN)Clean complete.$(NC)"
 
-clean-all: ## Remove all generated files including secrets cache
+clean-all: ## [DESTRUCTIVE] Remove all generated files including secrets cache
 	@echo "$(YELLOW)WARNING: This will remove secrets cache. Re-run make up to regenerate.$(NC)"
 	@read -p "Continue? [y/N] " confirm; \
 	if [ "$$confirm" = "y" ] || [ "$$confirm" = "Y" ]; then \
@@ -985,7 +986,7 @@ clean-all: ## Remove all generated files including secrets cache
 		echo "Cancelled."; \
 	fi
 
-prune: ## Remove unused Docker resources (containers, networks, images)
+prune: ## [DESTRUCTIVE] Remove unused Docker resources (containers, networks, images)
 	$(call check-docker)
 	@echo "$(BLUE)Pruning unused Docker resources...$(NC)"
 	@docker system prune -f
@@ -1004,5 +1005,16 @@ uninstall: ## Uninstall VaultWarden-OCI (interactive)
 	@echo "$(RED)WARNING: This will remove VaultWarden-OCI from this system.$(NC)"
 	@sudo utilities/uninstall-vaultwarden.sh run
 
-uninstall-dry-run: ## Show uninstall help (no dry-run mode available)
-	@utilities/uninstall-vaultwarden.sh --help
+uninstall-dry-run: ## Simulate uninstall without deleting anything (--dry-run mode)
+	@utilities/uninstall-vaultwarden.sh run --dry-run
+
+# ===========================================================================
+
+##@ Documentation
+# ===========================================================================
+
+docs: ## Regenerate docs/COMMAND-REFERENCE.md from live script --help and Makefile targets
+	@bash utilities/generate-command-ref.sh
+
+backup-manifest: ## Show what is included and excluded in a full/emergency backup
+	@bash -c 'source utilities/backup-run.sh 2>/dev/null; print_backup_manifest'

@@ -1,5 +1,6 @@
 [Unit]
 Description=VaultWarden Failure Notification
+DefaultDependencies=no
 # Shared notifier unit triggered by OnFailure=vaultwarden-notify-failure.service.
 # Guard: if the env file is absent systemd logs a clear condition-not-met
 # message rather than a cryptic EnvironmentFile load failure.

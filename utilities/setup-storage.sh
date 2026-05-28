@@ -1201,27 +1201,11 @@ _mv_step_healthcheck() {
         return 0
     fi
 
-    local max_wait=120
-    local poll_interval=10
-    local elapsed=0
-    local healthy=false
+    _mv_log info "Waiting for vaultwarden container to become healthy (up to 120s)..."
+    local _dw_rc=0
+    docker_wait_healthy vaultwarden_app 120 10 || _dw_rc=$?
 
-    while (( elapsed < max_wait )); do
-        local running_count total_count
-        running_count="$(docker compose ps --status running --quiet 2>/dev/null | wc -l | tr -d ' ' || true)"
-        total_count="$(docker compose ps --quiet 2>/dev/null | wc -l | tr -d ' ' || true)"
-
-        if (( total_count > 0 && running_count == total_count )); then
-            healthy=true
-            break
-        fi
-
-        _mv_log info "Waiting for containers to become healthy (${elapsed}s / ${max_wait}s)..."
-        sleep "${poll_interval}"
-        elapsed=$(( elapsed + poll_interval ))
-    done
-
-    if [[ "${healthy}" == "true" ]]; then
+    if (( _dw_rc == 0 )); then
         local _cid _rcount
         while IFS= read -r _cid; do
             [[ -z "${_cid}" ]] && continue
@@ -1259,7 +1243,7 @@ _mv_step_healthcheck() {
             return 1
         fi
     else
-        _mv_log error "Health check timed out after ${max_wait}s."
+        _mv_log error "Health check timed out or container exited (docker_wait_healthy returned ${_dw_rc})."
         _mv_log error "Current container state:"
         docker compose ps 2>/dev/null || true
         _mv_log error "Recent logs:"

@@ -198,7 +198,7 @@ EOF
 # Handle help before the .env check so it always works.
 if [[ $# -gt 0 ]]; then
     case "$1" in
-        help) show_help; exit 0 ;;
+        help|--help|-h) show_help; exit 0 ;;
     esac
 fi
 
@@ -1727,6 +1727,7 @@ main() {
             log_error "Checksum MISMATCH — backup file may be corrupted or tampered."
             log_error "  Expected: $expected_sum"
             log_error "  Actual:   $actual_sum"
+            log_error "  Try an older backup from the backup directory, or re-download from offsite storage."
             exit 1
         fi
         log_success "Backup checksum verified: $(basename "$BACKUP_FILE")"
@@ -1872,13 +1873,11 @@ main() {
         trap - ERR
 
         log_info "Waiting for services to initialize (up to 60s)..."
-        local max_wait=60 waited=0
-        while (( waited < max_wait )); do
-            sleep 5; (( waited += 5 ))
-            # shellcheck disable=SC2015  # intentional: break on healthy match, continue on no-match
-            docker inspect vaultwarden_app --format '{{.State.Status}} {{.State.Health.Status}}' \
-                2>/dev/null | grep -qE $'running (healthy|$)' && break || true
-        done
+        if docker_wait_healthy vaultwarden_app 60 5; then
+            log_success "Service is healthy."
+        else
+            log_warn "Service did not reach healthy state within 60s — check logs."
+        fi
 
         if [[ -x "${PROJECT_ROOT}/utilities/maintenance-health.sh" ]]; then
             log_info "Running post-restore health check..."

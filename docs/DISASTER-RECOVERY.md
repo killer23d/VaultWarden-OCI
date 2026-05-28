@@ -1,6 +1,6 @@
 # Disaster Recovery
 
-This guide provides a complete, minimal-touchpoint, bare-metal disaster recovery (DR) procedure for restoring VaultWarden from an encrypted remote backup. It covers dependency installation, repository checkout, and single-command restore. Note that **secrets are explicitly out of scope**; they are excluded to limit blast radius in case of exfiltration, and because the age encryption key rotates after every restore, rendering archived keys immediately stale.
+This guide provides a complete, minimal-touchpoint, bare-metal disaster recovery (DR) procedure for restoring VaultWarden from an encrypted remote backup. It covers dependency installation, repository checkout, and single-command restore. The `secrets/` directory is excluded from backup archives. The Age key must be backed up separately.
 
 > **See also:** [README.md](../README.md) — project overview, quick-start, and links to all other docs.
 
@@ -17,10 +17,10 @@ Full backups are your scheduled DR artifact. They contain exactly what is needed
 
 | Included in Full Backup | Excluded from Full Backup |
 | :-- | :-- |
-| Project root files (`docker-compose.yml`, `.env`, etc.) | `secrets/` directory (Age keys, SSH keys, passwords) |
-| Caddy configuration (`caddy/`) | `*.sh` scripts (pulled fresh via `git clone`) |
+| Project root files (`docker-compose.yml`, `.env`, scripts, docs, `lib/`, systemd files, etc.) | `secrets/` directory |
+| Caddy configuration (`caddy/`) | Age key |
 | Crowdsec configuration (`crowdsec/`) | `backups/` and `logs/` directories |
-| State directory (`db.sqlite3` and attachments) | |
+| State directory (including `db.sqlite3` and attachments) | `.git`, `.rate-limit`, `*.sock`, `*.lock`, `*.tmp`, `*.age.tmp` |
 
 > **Why are secrets excluded?** Keeping secrets out of the archive limits the blast radius if a backup file is ever exfiltrated. Furthermore, the `restore.sh` process generates a *new* Age encryption key upon success. If the old key was included in the backup, it would be stale the moment the restore completes.
 
@@ -210,8 +210,8 @@ Both **Full** and **Emergency** backups call `perform_full_backup()` identically
 
 | Type | Contents | Purpose | Valid DR Artifact? | When Created |
 | :-- | :-- | :-- | :-- | :-- |
-| **Full** | Project root (config) + State dir (DB, attachments) | Scheduled DR artifact | **Yes** | Weekly (via systemd timer) |
-| **Emergency** | Project root (config) + State dir (DB, attachments) | Pre-restore safety snapshot | **No*** | Automatically before running `restore.sh` |
+| **Full** | Project root (including scripts, docs, `lib/`, and systemd files) + state dir, excluding `secrets/` and the Age key | Scheduled DR artifact | **Yes** | Weekly (via systemd timer) |
+| **Emergency** | Same contents as full backup; also excludes `secrets/` and the Age key | Pre-restore safety snapshot | **No*** | Automatically before running `restore.sh` |
 | **Database** | `db.sqlite3` only | Quick rollback of vault state | **No** | Daily (via systemd timer) |
 
 > \* Emergency backups are **not** a DR artifact because they are taken mid-restore on the *old* system state — they exist solely as a rollback safety net. They have the same archive format and contents as a full backup (`secrets/` excluded from both). Use a **scheduled full backup** as your primary DR source.
@@ -219,7 +219,7 @@ Both **Full** and **Emergency** backups call `perform_full_backup()` identically
 ## Non-Obvious Pitfalls
 
 - **Cloning a different branch/tag:** Cloning a different branch/tag than the original install can lead to script incompatibilities.
-- **Using `--force` when PUID/PGID are wrong:** This skips the interactive prompt for these values, which could break permissions.
+- **Re-running setup after a restore:** Use `sudo ./setup.sh install --domain DOMAIN --email EMAIL` if you need to regenerate config on the recovered host.
 - **rclone remote name not configured and `.env` absent:** The interactive prompt handles this seamlessly.
 - **Recovery kit has wrong permissions:** Ensure the file has strict permissions (chmod `600`).
 - **Forgetting `setup.sh systemd install`:** Failing to run this after a restore leaves the old key in systemd, breaking automated tasks.
@@ -238,7 +238,7 @@ Both **Full** and **Emergency** backups call `perform_full_backup()` identically
 | `make key-path` prints `ERROR: No readable age key found` | Key absent at all three resolution locations | Place key via `sudo install -m 600 age-key.txt /etc/vaultwarden/age-key.txt` |
 | Services start but backups fail | Systemd unit still uses old key path | Re-run `sudo ./setup.sh systemd install` to resync the key reference |
 | `zstd: error 70` or `tar: unexpected EOF` | Wrong decompressor or truncated download | Confirm extension is `.tar.zst.age` and re-download; use `zstd -d`, not `gunzip` |
-| `PUID/PGID permission errors` | UID mismatch between old and new host | Re-run `setup.sh` with correct `--puid` / `--pgid` values |
+| Permission/ownership errors after restore | UID/GID differences or stale generated config on the new host | Re-run `sudo ./setup.sh install --domain DOMAIN --email EMAIL` |
 | `db.sqlite3: disk I/O error` | SQLite WAL not fully checkpointed in backup | Use a full or emergency backup instead of a db-only backup for this restore |
 
 ## Recovery Kit Best Practices
