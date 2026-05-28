@@ -846,7 +846,7 @@ Encryption, decryption, key management, security validation, and key resilience.
 | `secure_cleanup PATH` | Multi-pass secure deletion *(from security.sh)* |
 | `validate_password_strength PASSWORD` | Password strength check *(from security.sh)* |
 | `generate_secure_random N` | Cryptographically secure random bytes *(from security.sh)* |
-| `simple_verify_age_key` | Health check: asserts file exists, auto-fixes permissions, validates structure, performs full encrypt/decrypt roundtrip *(internal function in `lib/crypto.sh`; use via `make key-health` or dashboard)* |
+| `check_age_key_health` | Public entry-point for Age key health checks (called by `startup.sh`, `maintenance.sh`, and `make key-health`). Validates file existence, auto-fixes permissions, performs an encrypt/decrypt roundtrip, and verifies `.sops.yaml` recipient alignment *(from `lib/crypto.sh`)* |
 | `create_password_manager_escrow OUTPUT_FILE` | Writes formatted plain-text escrow document for password manager storage *(from `lib/crypto.sh`)* |
 | `create_printable_key_backup [OUTPUT_PDF]` | Generates printable PDF or HTML paper backup with Age key + optional QR code *(from `lib/crypto.sh`)* |
 
