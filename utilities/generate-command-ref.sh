@@ -33,19 +33,27 @@ generate_script_help() {
     echo "### ${name}"
     echo ""
     echo '```'
-    # Extract first 60 lines of --help output; some scripts require root
-    # so we use a timeout and ignore failures gracefully.
-    # Strip embedded log timestamps (e.g. [14:32:01]) so output is stable.
-    # Strip ANSI escape codes so the file stays plain text across environments.
-    local output
-    output="$(timeout 5 bash "$script" --help 2>&1 \
-        | head -60 \
+    # Try --help first; if that fails (non-zero exit or empty output) fall back
+    # to the 'help' subcommand used by subcommand-driven scripts (e.g. backup-run,
+    # restore-run).  Strip log timestamps and ANSI codes so output stays stable
+    # across environments and is safe to commit as plain text.
+    set +e
+    local help_out rc
+    help_out="$(timeout 5 bash "$script" --help 2>&1 | head -60 \
         | sed \
             -e 's/\[[0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}\]/[HH:MM:SS]/g' \
-            -e 's/\x1b\[[0-9;]*[mKHF]//g' \
-        || true)"
-    if [[ -n "$output" ]]; then
-        echo "$output"
+            -e 's/\x1b\[[0-9;]*[mKHF]//g')"
+    rc=${PIPESTATUS[0]}
+    if [[ $rc -ne 0 || -z "$help_out" ]]; then
+        help_out="$(timeout 5 bash "$script" help 2>&1 | head -60 \
+            | sed \
+                -e 's/\[[0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}\]/[HH:MM:SS]/g' \
+                -e 's/\x1b\[[0-9;]*[mKHF]//g')"
+        rc=${PIPESTATUS[0]}
+    fi
+    set -e
+    if [[ -n "$help_out" ]]; then
+        echo "$help_out"
     else
         echo '(--help not available or requires root)'
     fi
