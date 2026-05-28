@@ -108,7 +108,7 @@ jobs:
           DOCKER_PROJECT_LABEL: ci
         run: |
           cp docs/COMMAND-REFERENCE.md /tmp/COMMAND-REFERENCE.committed.md
-          bash utilities/generate-command-ref.sh
+          bash utilities/write-command-reference.sh
           if ! diff -q docs/COMMAND-REFERENCE.md /tmp/COMMAND-REFERENCE.committed.md > /dev/null 2>&1; then
             echo "COMMAND-REFERENCE.md is stale. Run: make docs"
             diff docs/COMMAND-REFERENCE.md /tmp/COMMAND-REFERENCE.committed.md || true
