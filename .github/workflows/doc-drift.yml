@@ -9,6 +9,9 @@ on:
       - 'Makefile'
       - 'systemd/**'
 
+permissions:
+  contents: read
+
 jobs:
   doc-drift:
     runs-on: ubuntu-latest
