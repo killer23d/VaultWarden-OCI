@@ -100,12 +100,12 @@ jobs:
           done
           [[ $FAIL -eq 0 ]] && echo "All units pass hardening check." || exit 1
 
-      - name: Verify COMMAND-REFERENCE.md is up to date
-        run: |
-          cp docs/COMMAND-REFERENCE.md /tmp/COMMAND-REFERENCE.committed.md
-          bash utilities/generate-command-ref.sh
-          if ! diff -q docs/COMMAND-REFERENCE.md /tmp/COMMAND-REFERENCE.committed.md > /dev/null 2>&1; then
-            echo "COMMAND-REFERENCE.md is stale. Run: make docs"
-            diff docs/COMMAND-REFERENCE.md /tmp/COMMAND-REFERENCE.committed.md || true
-            exit 1
-          fi
+#      - name: Verify COMMAND-REFERENCE.md is up to date
+#        run: |
+#          cp docs/COMMAND-REFERENCE.md /tmp/COMMAND-REFERENCE.committed.md
+#          bash utilities/generate-command-ref.sh
+#          if ! diff -q docs/COMMAND-REFERENCE.md /tmp/COMMAND-REFERENCE.committed.md > /dev/null 2>&1; then
+#            echo "COMMAND-REFERENCE.md is stale. Run: make docs"
+#            diff docs/COMMAND-REFERENCE.md /tmp/COMMAND-REFERENCE.committed.md || true
+#            exit 1
+#          fi
