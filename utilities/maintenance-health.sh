@@ -343,7 +343,7 @@ _check_containers() {
         case "$health" in
             healthy|no-healthcheck) _pass "container:${container}" "$container is running (health: $health)" ;;
             starting)               _warn "container:${container}" "$container is starting up (health: starting)" ;;
-            unhealthy)              _fail "container:${container}" "$container is unhealthy"; all_healthy=false ;;
+            unhealthy)              _fail "container:${container}" "$container is unhealthy (run: docker logs $container --tail=50)"; all_healthy=false ;;
             *)                      _warn "container:${container}" "$container health status unknown: $health" ;;
         esac
     done

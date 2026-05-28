@@ -108,6 +108,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ "$DO_DOWN" == "true" ]]; then
+  if ! command -v docker >/dev/null 2>&1; then
+    log_error "docker not found — cannot stop services."
+    exit 1
+  fi
   log_info "Stopping VaultWarden services..."
   docker compose down
   log_success "Services stopped successfully"

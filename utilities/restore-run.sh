@@ -1727,6 +1727,7 @@ main() {
             log_error "Checksum MISMATCH — backup file may be corrupted or tampered."
             log_error "  Expected: $expected_sum"
             log_error "  Actual:   $actual_sum"
+            log_error "  Try an older backup from the backup directory, or re-download from offsite storage."
             exit 1
         fi
         log_success "Backup checksum verified: $(basename "$BACKUP_FILE")"

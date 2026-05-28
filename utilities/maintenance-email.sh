@@ -2,6 +2,7 @@
 # utilities/maintenance-email.sh — Runs VaultWarden email diagnostics.
 
 set -euo pipefail
+trap 'log_error "${BASH_SOURCE[0]}: failed at line ${LINENO} (exit $?)"; exit 1' ERR
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"

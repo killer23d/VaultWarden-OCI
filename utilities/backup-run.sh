@@ -271,7 +271,7 @@ create_db_snapshot_host() {
     local db_file="${state_dir}/data/db.sqlite3"
     [[ -f "$db_file" ]] || { log_error "Database not found: $db_file" >&2; return 1; }
     sqlite3 "$db_file" "$(printf '.backup %s' "$dest")" || {
-        log_error "sqlite3 .backup failed for: $db_file" >&2
+        log_error "sqlite3 .backup failed for: $db_file (check disk space: df -h $(dirname "$dest"); check DB lock: fuser $db_file)" >&2
         return 1
     }
     return 0
@@ -809,7 +809,7 @@ perform_db_backup() {
     local enc="$target_dir/db_backup_$timestamp.sqlite3.age"
     local enc_tmp="${enc}.tmp"
     if ! age -r "$age_pub_key" -o "$enc_tmp" "$snap" 2>/dev/null; then
-        log_error "Encryption failed" >&2
+        log_error "Encryption failed (check disk space: df -h $(dirname "$enc"); verify Age key: make key-health)" >&2
         rm -f "$enc_tmp"
         return 1
     fi
@@ -944,7 +944,7 @@ perform_full_backup() {
     local enc_tmp="${enc}.tmp"
 
     if ! age -r "$age_pub_key" -o "$enc_tmp" "$temp_tar" 2>/dev/null; then
-        log_error "Encryption failed" >&2
+        log_error "Encryption failed (check disk space: df -h $(dirname "$enc"); verify Age key: make key-health)" >&2
         rm -f "$enc_tmp"
         return 1
     fi

@@ -974,7 +974,7 @@ clean: ## Remove generated files (logs, temp files)
 	@rm -f setup.log
 	@echo "$(GREEN)Clean complete.$(NC)"
 
-clean-all: ## Remove all generated files including secrets cache
+clean-all: ## [DESTRUCTIVE] Remove all generated files including secrets cache
 	@echo "$(YELLOW)WARNING: This will remove secrets cache. Re-run make up to regenerate.$(NC)"
 	@read -p "Continue? [y/N] " confirm; \
 	if [ "$$confirm" = "y" ] || [ "$$confirm" = "Y" ]; then \
@@ -985,7 +985,7 @@ clean-all: ## Remove all generated files including secrets cache
 		echo "Cancelled."; \
 	fi
 
-prune: ## Remove unused Docker resources (containers, networks, images)
+prune: ## [DESTRUCTIVE] Remove unused Docker resources (containers, networks, images)
 	$(call check-docker)
 	@echo "$(BLUE)Pruning unused Docker resources...$(NC)"
 	@docker system prune -f
@@ -1004,5 +1004,5 @@ uninstall: ## Uninstall VaultWarden-OCI (interactive)
 	@echo "$(RED)WARNING: This will remove VaultWarden-OCI from this system.$(NC)"
 	@sudo utilities/uninstall-vaultwarden.sh run
 
-uninstall-dry-run: ## Show uninstall help (no dry-run mode available)
-	@utilities/uninstall-vaultwarden.sh --help
+uninstall-dry-run: ## Simulate uninstall without deleting anything (--dry-run mode)
+	@utilities/uninstall-vaultwarden.sh run --dry-run
