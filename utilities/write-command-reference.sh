@@ -5,6 +5,13 @@
 # The script writes the generated Markdown through a temporary file and then
 # atomically replaces docs/COMMAND-REFERENCE.md. This avoids hand-patching the
 # generated file and keeps CI doc-drift checks deterministic.
+#
+# Root / sudo safety
+# ------------------
+# When run as root (e.g. `sudo make docs`) the output file would end up owned
+# by root:root, causing "Permission denied" on the next non-root invocation.
+# After the atomic mv we detect the real invoking user via SUDO_USER (set by
+# sudo) and chown the file back.  When not running under sudo this is a no-op.
 
 set -euo pipefail
 
@@ -56,12 +63,35 @@ generate_makefile_targets() {
 
 # ── Script help output ──────────────────────────────────────────────────────
 sanitize_help_output() {
-    # Keep generated docs deterministic: cap help text length, normalize
-    # timestamps, strip ANSI escape sequences, and remove NUL bytes using a
-    # textual escape pattern so this source file never contains literal NULs.
+    # Keep generated docs deterministic across runs and environments:
+    #
+    # 1. docker.sh diagnostic — scripts that source lib/docker.sh emit a
+    #    "docker.sh: could not auto-detect Compose project name" line to
+    #    stderr (captured via 2>&1).  Strip the whole line so it never
+    #    appears in the generated reference.
+    #
+    # 2. Bracketed wall-clock timestamps  [HH:MM:SS]  →  [HH:MM:SS] literal
+    #    (already normalised by the placeholder substitution below).
+    #
+    # 3. ISO-8601 datetime stamps  2026-05-28T14:32:01Z  →  TIMESTAMP
+    #
+    # 4. Bare date stamps  2026-05-28  that may appear in log sample lines.
+    #    Only replaced when surrounded by word boundaries to avoid mangling
+    #    version strings like "1.32.0".
+    #
+    # 5. ANSI escape sequences (colour / cursor codes).
+    #
+    # 6. NUL bytes — written as the \x00 escape so this source file never
+    #    contains literal NUL characters.
+    #
+    # Cap at 60 lines so no single script can inflate the reference file.
     head -60 \
         | sed \
+            -e '/^docker\.sh:.*auto-detect/d' \
+            -e '/^lib\/docker\.sh:.*auto-detect/d' \
             -e 's/\[[0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}\]/[HH:MM:SS]/g' \
+            -e 's/[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}T[0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}Z/TIMESTAMP/g' \
+            -e 's/\b[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\b/DATE/g' \
             -e 's/\x1b\[[0-9;]*[mKHF]//g' \
         | perl -pe 's/\x00//g'
 }
@@ -160,5 +190,16 @@ perl -0pi -e 's/\n+\z/\n/' "$tmp_file"
 
 mv "$tmp_file" "$OUTPUT_FILE"
 trap - EXIT
+
+# ── Root / sudo ownership fix ────────────────────────────────────────────────
+# If this script was invoked via sudo, the output file is now owned by root.
+# Chown it back to the real invoking user so the next non-root `make docs`
+# run (and git operations) are not blocked by a permission error.
+if [[ -n "${SUDO_USER:-}" ]]; then
+    real_uid="$(id -u "${SUDO_USER}")"
+    real_gid="$(id -g "${SUDO_USER}")"
+    chown "${real_uid}:${real_gid}" "${OUTPUT_FILE}"
+    echo "Ownership restored to ${SUDO_USER} (uid=${real_uid} gid=${real_gid})"
+fi
 
 echo "Generated: $OUTPUT_FILE"
