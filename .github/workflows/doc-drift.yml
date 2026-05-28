@@ -1,0 +1,95 @@
+name: Doc Drift Check
+on:
+  pull_request:
+    paths:
+      - 'docs/**'
+      - 'utilities/**'
+      - 'lib/**'
+      - '*.sh'
+      - 'Makefile'
+      - 'systemd/**'
+
+jobs:
+  doc-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for known stale terms
+        run: |
+          STALE_TERMS=(
+            "simple_key_resilience.sh"
+            "--quick-verify"
+            "cs-cloudflare-bouncer"
+            "make logs FOLLOW=true"
+            "--puid"
+            "--pgid"
+          )
+          FAIL=0
+          for term in "${STALE_TERMS[@]}"; do
+            matches=$(grep -rn "$term" docs/ README.md 2>/dev/null || true)
+            if [[ -n "$matches" ]]; then
+              echo "STALE TERM FOUND: $term"
+              echo "$matches"
+              FAIL=1
+            fi
+          done
+          [[ $FAIL -eq 0 ]] || exit 1
+
+      - name: Verify Makefile targets referenced in docs exist
+        run: |
+          FAIL=0
+          while IFS= read -r target; do
+            if ! grep -q "^${target}:" Makefile; then
+              echo "MISSING MAKEFILE TARGET referenced in docs: make $target"
+              FAIL=1
+            fi
+          done < <(grep -roh 'make [a-z_-]\+' docs/ README.md | sed 's/make //' | sort -u)
+          [[ $FAIL -eq 0 ]] || exit 1
+
+      - name: Verify script flags referenced in docs exist
+        run: |
+          check_flag() {
+            local script="$1" flag="$2"
+            if ! grep -q -- "$flag" "$script" 2>/dev/null; then
+              echo "FLAG NOT FOUND: $flag in $script (referenced in docs)"
+              return 1
+            fi
+          }
+          FAIL=0
+          check_flag utilities/backup-run.sh "--full-verification" || FAIL=1
+          check_flag utilities/maintenance-update.sh "--images"     || FAIL=1
+          check_flag utilities/maintenance-update.sh "--system"     || FAIL=1
+          check_flag utilities/maintenance-update.sh "--all"        || FAIL=1
+          check_flag setup.sh "--force"                             || FAIL=1
+          check_flag utilities/uninstall-vaultwarden.sh "--dry-run" || FAIL=1
+          [[ $FAIL -eq 0 ]] || exit 1
+
+      - name: Check for unpinned version references
+        run: |
+          FAIL=0
+          if grep -rn '@latest' utilities/ lib/ --include='*.sh'; then
+            echo "UNPINNED: @latest Go reference found"
+            FAIL=1
+          fi
+          # Only check setup-crowdsec.sh for /releases/latest (other scripts may legitimately resolve latest)
+          if grep -rn '/releases/latest' utilities/setup-crowdsec.sh 2>/dev/null; then
+            echo "UNPINNED: /releases/latest GitHub API call found in setup-crowdsec.sh"
+            FAIL=1
+          fi
+          [[ $FAIL -eq 0 ]] || exit 1
+
+      - name: Systemd unit hardening check
+        run: |
+          REQUIRED_DIRECTIVES=(PrivateTmp ProtectSystem ProtectHome)
+          FAIL=0
+          for unit in systemd/vaultwarden-*.service; do
+            [[ "$unit" == *template* ]] && continue
+            for directive in "${REQUIRED_DIRECTIVES[@]}"; do
+              if ! grep -q "^${directive}=" "$unit"; then
+                echo "MISSING $directive in $unit"
+                FAIL=1
+              fi
+            done
+          done
+          [[ $FAIL -eq 0 ]] && echo "All units pass hardening check." || exit 1

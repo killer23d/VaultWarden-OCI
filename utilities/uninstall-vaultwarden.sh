@@ -334,7 +334,7 @@ if command -v docker &>/dev/null; then
     done
 
     PROJECT_NAME=$(basename "${PROJECT_DIR}" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')
-    local -a _vols=()
+    _vols=()
     mapfile -t _vols < <(docker volume ls -q 2>/dev/null | grep -E "^(${PROJECT_NAME}_|vaultwarden)" || true)
     for vol in "${_vols[@]}"; do
         [[ -z "$vol" ]] && continue
@@ -345,7 +345,7 @@ if command -v docker &>/dev/null; then
         fi
     done
 
-    local -a _nets=()
+    _nets=()
     mapfile -t _nets < <(docker network ls --format '{{.Name}}' 2>/dev/null | grep -E "vaultwarden|${PROJECT_NAME}" || true)
     for net in "${_nets[@]}"; do
         [[ -z "$net" ]] && continue
@@ -884,7 +884,7 @@ fi
 # Remove only the specific subdirectories/files created by setup-crowdsec.sh,
 # rather than the entire /etc/crowdsec tree (which may contain unrelated config).
 if [[ -d /etc/crowdsec ]]; then
-    local -a _cs_managed_paths=(
+    _cs_managed_paths=(
         "/etc/crowdsec/parsers/s02-enrich/vaultwarden-admin-allowlist.yaml"
         "/etc/crowdsec/notifications"
     )

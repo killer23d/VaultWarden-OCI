@@ -4,7 +4,7 @@ Complete reference for all management scripts and utility libraries in VaultWard
 
 > **Architecture note (Dispatcher Pattern):** To improve maintainability, monolithic entry-points (`setup.sh`, `maintenance.sh`, `backup.sh`, `restore.sh`, `edit-secrets.sh`) have been refactored into thin **dispatchers**. The actual implementation logic is modularised into 22 standalone administrative and engine scripts located in the `utilities/` directory.
 >
-> Library consolidation: `lib/security.sh` and `lib/simple_key_resilience.sh` were merged into `lib/crypto.sh`.
+> Library consolidation: `lib/security.sh` was merged into `lib/crypto.sh`.
 >
 > This dispatcher pattern keeps the public CLI surface simple while making the codebase highly modular and easier to test.
 
@@ -405,8 +405,8 @@ make test-secrets    # runs list internally
 ./maintenance.sh update --system          # System packages only
 ./maintenance.sh update --all --email     # Full update with email notification
 
-make update           # Containers only
-make update-system    # Containers + system packages (apt upgrade + Docker engine)
+make update           # Runs `./maintenance.sh update --all` (containers + system packages)
+make update-system    # Runs `./maintenance.sh update --system` (OS packages only)
 ```
 
 > **`--system` scope:** When passed, the update command runs `apt-get upgrade` and updates the Docker engine in addition to pulling new container images. Rollback via `restore.sh` covers data and configuration, but not the Docker engine or OS packages — ensure you have a snapshot or can re-run the upgrade if needed.
@@ -724,7 +724,7 @@ All common operations have Makefile shortcuts. Run `make help` to see the full t
 | `make edit-secrets` | `./edit-secrets.sh` | Open SOPS secrets editor (dispatcher) |
 | `make test-secrets` | `./utilities/secrets-list.sh` | Verify secrets decrypt correctly |
 | `make test-email` | `./maintenance.sh test-email` | Test full email delivery chain |
-| `make up` / `make start` | `sudo ./startup.sh` | Start all services |
+| `make up` / `make start` | `./startup.sh` | Start all services |
 | `make down` / `make stop` | `docker compose down` | Graceful shutdown |
 | `make restart` | `sudo ./startup.sh --force` | Force restart all services |
 | `make safe-restart` | `sudo ./startup.sh --force` + health check | Restarts with automatic rollback on failure |
@@ -733,22 +733,22 @@ All common operations have Makefile shortcuts. Run `make help` to see the full t
 | `make health-quick` | `./maintenance.sh health --quiet` | Quick health check — concise output, non-zero exit on failure |
 | `make health-report` | `./maintenance.sh health --report` | Health check that writes a timestamped report file |
 | `make health-email` | alias for `make test-email` | Send a test operational alert email |
-| `make logs` | `docker compose logs --tail=100 [SERVICE]` | Recent logs; pass `SERVICE=caddy` to filter, `FOLLOW=true` to tail |
-| `make logs-tail` | `docker compose logs -f -t --tail=100 [SERVICE]` | Follow logs with timestamps |
+| `make logs` | `docker compose logs -f $(SERVICE)` | follows logs for one service |
+| `make logs-tail` | `docker compose logs --tail=100` | last 100 lines, non-following |
 | `make logs-vaultwarden` | `docker compose logs -f -t --tail=100 vaultwarden` | Tail VaultWarden application logs |
 | `make logs-caddy` | `docker compose logs -f -t --tail=100 caddy` | Tail Caddy reverse-proxy logs |
 | `make logs-postfix` | `docker compose logs -f -t --tail=100 postfix` | Postfix email logs shortcut |
 | `make logs-crowdsec` | `sudo journalctl -u crowdsec -f` | Tail CrowdSec threat detection logs |
 | `make backup` | `./backup.sh run db` | DB backup |
 | `make backup-full` | `./backup.sh run full` | Full system backup |
-| `make backup-emergency` | `./backup.sh run emergency` | Emergency kit (includes secrets) |
+| `make backup-emergency` | `./backup.sh run emergency` | Emergency backup (same archive contents as full; excludes `secrets/` and Age key) |
 | `make list-backups` | `./backup.sh list` | List all available backups with metadata |
 | `make backup-status` | — | Backup health summary: last run, size, retention, count per type |
 | `make restore` | `./restore.sh interactive` | Interactive restore (recommended) |
 | `make restore-db` | `./restore.sh latest db` | Restore latest database backup (runs key prompt + confirmation) |
 | `make restore-remote` | `./restore.sh interactive --remote` | Restore from a remote (rclone) backup — interactive selection |
-| `make update` | `./maintenance.sh update` | Pull latest container images |
-| `make update-system` | `apt-get update && apt-get upgrade -y` | Update host OS packages |
+| `make update` | `./maintenance.sh update --all` | Full update (containers + system packages) |
+| `make update-system` | `./maintenance.sh update --system` | Update host OS packages only |
 | `make maintenance` | `./maintenance.sh run` | Routine maintenance run |
 | `make maintenance-full` | `./maintenance.sh run --comprehensive` | Comprehensive maintenance run |
 | `make update-dns` | `./maintenance.sh update-dns` | Update Cloudflare DNS A record |
@@ -786,7 +786,7 @@ All common operations have Makefile shortcuts. Run `make help` to see the full t
 
 > **`make test-config`** is the quickest pre-deployment sanity check. It runs `docker compose config` against the merged Compose files and exits non-zero if the configuration is invalid — useful before `make up` or after editing any `.yml` file.
 
-> **`make logs SERVICE=name`** filters output to a single service. Example: `make logs SERVICE=postfix FOLLOW=true` follows Postfix logs in real-time.
+> **`make logs SERVICE=name`** filters output to a single service. Example: `make logs SERVICE=postfix` follows Postfix logs in real-time.
 
 ---
 
@@ -826,7 +826,7 @@ Docker and Docker Compose helpers.
 | `docker_cleanup` | Remove unused containers, images, volumes |
 
 ### `lib/crypto.sh`
-Encryption, decryption, key management, security validation, and key resilience. *(Merged from the former `lib/security.sh` and `lib/simple_key_resilience.sh`.)*
+Encryption, decryption, key management, security validation, and key resilience. *(Merged from the former `lib/security.sh`.)*
 
 | Function | Description |
 | :-- | :-- |
@@ -846,9 +846,9 @@ Encryption, decryption, key management, security validation, and key resilience.
 | `secure_cleanup PATH` | Multi-pass secure deletion *(from security.sh)* |
 | `validate_password_strength PASSWORD` | Password strength check *(from security.sh)* |
 | `generate_secure_random N` | Cryptographically secure random bytes *(from security.sh)* |
-| `simple_verify_age_key` | Health check: asserts file exists, auto-fixes permissions, validates structure, performs full encrypt/decrypt roundtrip *(from simple_key_resilience.sh)* |
-| `create_password_manager_escrow OUTPUT_FILE` | Writes formatted plain-text escrow document for password manager storage *(from simple_key_resilience.sh)* |
-| `create_printable_key_backup [OUTPUT_PDF]` | Generates printable PDF or HTML paper backup with Age key + optional QR code *(from simple_key_resilience.sh)* |
+| `simple_verify_age_key` | Health check: asserts file exists, auto-fixes permissions, validates structure, performs full encrypt/decrypt roundtrip *(internal function in `lib/crypto.sh`; use via `make key-health` or dashboard)* |
+| `create_password_manager_escrow OUTPUT_FILE` | Writes formatted plain-text escrow document for password manager storage *(from `lib/crypto.sh`)* |
+| `create_printable_key_backup [OUTPUT_PDF]` | Generates printable PDF or HTML paper backup with Age key + optional QR code *(from `lib/crypto.sh`)* |
 
 ### `lib/backup-utils.sh`
 Backup-specific helpers.

@@ -4,6 +4,8 @@
 
 A streamlined, secure, and operationally excellent VaultWarden deployment optimised for teams of 10 or fewer users. Designed for Oracle Cloud Infrastructure (OCI) with dynamic IPs, it emphasises template-based configuration, automated operations, and robust multi-layer security.
 
+> **📖 New here? Start with [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for step-by-step setup instructions.**
+
 ## 🎯 What Makes This Different
 
 This is a **template-based, hardened deployment** built for small teams who want:
@@ -49,7 +51,7 @@ Verify the current list at <https://www.cloudflare.com/ips-v4>.
 
 ### Step 1 — Cloudflare DNS Staging (Grey Cloud First)
 
-In your Cloudflare dashboard set your DNS record to **DNS Only (Grey Cloud)** before running setup. Caddy must reach Let's Encrypt directly to provision its TLS certificate on first boot. You can enable the orange proxy cloud after the stack is running.
+In your Cloudflare dashboard set your DNS record to **DNS Only (Grey Cloud)** before running setup. Caddy uses the **DNS-01 challenge** via your Cloudflare API token — it does **not** require direct HTTP access from Let's Encrypt for certificate issuance. You can enable the orange proxy cloud after the stack is running.
 
 ---
 
@@ -232,7 +234,7 @@ PROJECT_STATE_DIR=/mnt/vw-data   # MUST equal DATA_VOLUME_MOUNT
 
 ## 📧 Email Delivery
 
-Email is handled by **`lib/common.sh`** (email functions) — a pure bash + curl multi-provider chain. No mail daemon is required on the host. Three tiers are attempted in order when `EMAIL_MODE=auto`:
+Email is handled by **`lib/email.sh`** (email functions) — a pure bash + curl multi-provider chain. No mail daemon is required on the host. Three tiers are attempted in order when `EMAIL_MODE=auto`:
 
 ```
 Tier 1 ─ HTTP API       →  MailerSend, SendGrid, Mailgun, Postmark, Resend
@@ -292,7 +294,7 @@ Full details, provider setup, Postfix MTA configuration, and troubleshooting: **
 | :-- | :-- |
 | **Caddy** | TLS termination, reverse proxy, security headers, 4-tier structured JSON logging (512 MB limit). Now requires **Caddy ≥ 2.11.2**; uses `encode zstd gzip`, `roll_compression zstd`, connection timeouts in the global `servers` block, `request_body` size limits on admin/auth handlers, and health-check log suppression. |
 | **VaultWarden** | Password manager application (512 MB limit) |
-| **Postfix** | Containerised SMTP relay — last-resort MTA for the email chain in `lib/common.sh`; binds `127.0.0.1:587` (256 MB limit) |
+| **Postfix** | Containerised SMTP relay — last-resort MTA for the email chain in `lib/email.sh`; binds `127.0.0.1:587` (256 MB limit) |
 | **CrowdSec** | Host systemd service — threat detection with Cloudflare edge banning and host iptables |
 
 > The `docker-compose.yml.example` template now enforces `read_only` filesystems, `tmpfs` mounts, `ulimits` (nofile), `no-new-privileges:true`, and tightened Caddy log rotation. See [docs/ADVANCED-CUSTOMIZATION.md](docs/ADVANCED-CUSTOMIZATION.md) for override details.
@@ -352,7 +354,7 @@ Full details: [docs/SECURITY.md](docs/SECURITY.md)
 
 ## 🔄 Update & Rollback
 
-`maintenance.sh update` runs a fully phased cycle: pre-update health check → backup → pull → restart → post-update health check. If the post-update health check fails, it **automatically rolls back** via `restore.sh latest`. Age key health is now validated before any update operation begins. See [docs/OPERATIONS.md](docs/OPERATIONS.md) for the full phase diagram.
+`maintenance.sh update --images|--system|--all` runs a fully phased cycle: pre-update health check → backup → pull → restart → post-update health check. If the post-update health check fails, it **automatically rolls back** via `restore.sh latest`. Age key health is now validated before any update operation begins. See [docs/OPERATIONS.md](docs/OPERATIONS.md) for the full phase diagram.
 
 ---
 
@@ -389,7 +391,7 @@ make update / update-system            # Updates
 make maintenance                       # Full maintenance run
 make breakglass-create / status        # Emergency admin
 make test-email / test-secrets         # Diagnostics
-make logs [SERVICE=name]               # Container logs (defaults to --tail=100)
+make logs [SERVICE=name]               # Container logs (follows single service, default: vaultwarden)
 make diagnose                          # One-command debug dump: versions, key status, disk, containers, logs
 make backup-status                     # Last backup times, directory size, retention window
 make lint                              # shellcheck all *.sh scripts

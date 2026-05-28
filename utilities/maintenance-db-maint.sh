@@ -225,7 +225,8 @@ main() {
         exit 1
     fi
     register_cleanup rm -f "$_MAINT_LOCK"
-    trap 'perform_cleanup' EXIT HUP INT TERM
+    # shellcheck disable=SC2064
+    trap "exec ${_MAINT_LOCK_FD}>&- 2>/dev/null; exec ${_OPS_LOCK_FD}>&- 2>/dev/null; perform_cleanup" EXIT HUP INT TERM
     _load_env
     run_deep_db_maintenance
     exit $?

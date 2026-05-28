@@ -129,7 +129,9 @@ main() {
         exit 1
     fi
     register_cleanup rm -f "$_MAINT_LOCK"
-    trap 'perform_cleanup' EXIT HUP INT TERM
+    # Explicitly close lock FDs on exit for clean resource release
+    # shellcheck disable=SC2064
+    trap "exec ${_MAINT_LOCK_FD}>&- 2>/dev/null; exec ${_OPS_LOCK_FD}>&- 2>/dev/null; perform_cleanup" EXIT HUP INT TERM
 
     log_header "VaultWarden-OCI Maintenance Manager"
     [[ "$DRY_RUN"      == "true" ]] && log_warn "DRY RUN MODE - No changes will be made"
