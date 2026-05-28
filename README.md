@@ -95,11 +95,11 @@ cd VaultWarden-OCI
 
 ### Step 3 — Configure Environment & External Credentials
 
-**Edit `.env` first** — `CLOUDFLARE_ZONE_ID` must be set before secrets are configured so that Cloudflare token validation works correctly.
+**Edit `.env` first** — set non-secret email/runtime values, then configure Cloudflare CrowdSec secrets in `secrets/secrets.yaml`.
 
 ```bash
 nano .env
-# ► Set: CLOUDFLARE_ZONE_ID, SMTP_HOST, SMTP_PORT, SMTP_USERNAME
+# ► Set: SMTP_HOST, SMTP_PORT, SMTP_USERNAME
 # ► Set: EMAIL_MODE=auto, EMAIL_PROVIDER=mailersend (or your provider)
 # ► Set: ALLOWED_SENDER_DOMAINS=vault.yourdomain.com  (for Postfix sidecar)
 # ► Verify: DOMAIN and ADMIN_EMAIL are correct
@@ -109,15 +109,17 @@ Then supply the external credentials that `--auto` cannot generate for you:
 
 ```bash
 # Cloudflare tokens (required — Caddy TLS + CrowdSec edge blocking)
-./utilities/secrets-rotate.sh caddy_cloudflare_dns_token
-./utilities/secrets-rotate.sh crowdsec_cf_firewall_token  # used by CrowdSec cloudflare-bouncer
+sudo utilities/setup-secrets.sh rotate caddy_cloudflare_dns_token
+sudo utilities/setup-secrets.sh rotate cf_worker_bouncer_token
+sudo utilities/setup-secrets.sh rotate cloudflare_zone_id
+sudo utilities/setup-secrets.sh rotate cf_account_id
 
 ## Email API token (required for Tier 1)
-./utilities/secrets-rotate.sh email_api_token
+sudo utilities/setup-secrets.sh rotate email_api_token
 # Single canonical key used for all providers (selected by EMAIL_PROVIDER)
 
 # SMTP password (required for Tier 2 relay and Postfix sidecar)
-./utilities/secrets-rotate.sh smtp_password
+sudo utilities/setup-secrets.sh rotate smtp_password
 
 # Push notification keys (optional — mobile app push alerts)
 ./utilities/secrets-rotate.sh push_installation_id

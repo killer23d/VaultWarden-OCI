@@ -147,7 +147,7 @@ NOTES:
 
     The intended standalone order is:
         1. sudo ./setup.sh --domain DOMAIN --email EMAIL
-        2. nano .env           (set CLOUDFLARE_ZONE_ID, EMAIL_MODE, EMAIL_PROVIDER,
+        2. nano .env           (set EMAIL_MODE, EMAIL_PROVIDER,
                                 SMTP_HOST, etc.)
         3. sudo utilities/setup-secrets.sh configure
         4. make up
@@ -503,11 +503,30 @@ SOPS_EOF
         cf_dns=$(_get_field "caddy_cloudflare_dns_token") || { log_error "Failed to collect caddy_cloudflare_dns_token"; return 1; }
         _COLLECTED_SECRETS["caddy_cloudflare_dns_token"]="$cf_dns"
 
-        if grep -q "^CF_WORKER_BOUNCER_TOKEN=[^[:space:]]" "${PROJECT_ROOT}/.env" 2>/dev/null; then
-            log_info "CF_WORKER_BOUNCER_TOKEN is set in .env — will be used by the CrowdSec Cloudflare bouncer."
+        echo ""
+        log_info "═══════════════════════════════════════════════════════════"
+        log_info " Cloudflare CrowdSec Bouncer Credentials"
+        log_info "═══════════════════════════════════════════════════════════"
+        log_info "cf_worker_bouncer_token: Cloudflare dashboard → My Profile → API Tokens"
+        log_info "cloudflare_zone_id: Cloudflare dashboard → Zone overview page"
+        log_info "cf_account_id: Cloudflare dashboard → any Zone overview page"
+        echo ""
+
+        local cf_worker_bouncer_token cloudflare_zone_id cf_account_id
+        if [[ "$AUTO_MODE" == "true" ]]; then
+            cf_worker_bouncer_token="CHANGE_ME_CF_WORKER_BOUNCER_TOKEN"
+            cloudflare_zone_id="CHANGE_ME_CLOUDFLARE_ZONE_ID"
+            cf_account_id="CHANGE_ME_CF_ACCOUNT_ID"
+            log_warn "[AUTO] Cloudflare CrowdSec bouncer credentials set to placeholders."
+            log_warn "Rotate after setup with: sudo utilities/setup-secrets.sh rotate cf_worker_bouncer_token"
         else
-            log_warn "CF_WORKER_BOUNCER_TOKEN not set in .env yet — run sudo ./utilities/setup-crowdsec.sh (it prompts for the token and saves it to .env)."
+            cf_worker_bouncer_token=$(_get_field "cf_worker_bouncer_token") || { log_error "Failed to collect cf_worker_bouncer_token"; return 1; }
+            cloudflare_zone_id=$(_get_field "cloudflare_zone_id") || { log_error "Failed to collect cloudflare_zone_id"; return 1; }
+            cf_account_id=$(_get_field "cf_account_id") || { log_error "Failed to collect cf_account_id"; return 1; }
         fi
+        _COLLECTED_SECRETS["cf_worker_bouncer_token"]="$cf_worker_bouncer_token"
+        _COLLECTED_SECRETS["cloudflare_zone_id"]="$cloudflare_zone_id"
+        _COLLECTED_SECRETS["cf_account_id"]="$cf_account_id"
 
         local _email_mode _email_provider
         _email_mode=$(    _read_dotenv_value "EMAIL_MODE"     .env)
@@ -743,6 +762,13 @@ BACKUP_BANNER
             printf 'push_installation_key: %s\n\n'             "$(yaml_escape "${_COLLECTED_SECRETS[push_installation_key]}")"
             printf '# Cloudflare DNS API token (Zone:DNS:Edit + Zone:Zone:Read)\n'
             printf 'caddy_cloudflare_dns_token: %s\n'          "$(yaml_escape "${_COLLECTED_SECRETS[caddy_cloudflare_dns_token]}")"
+            printf '# Cloudflare CrowdSec bouncer token (Zone:Edit permission)\n'
+            printf '# Rotate: sudo utilities/setup-secrets.sh rotate cf_worker_bouncer_token\n'
+            printf 'cf_worker_bouncer_token: %s\n'             "$(yaml_escape "${_COLLECTED_SECRETS[cf_worker_bouncer_token]}")"
+            printf '# Cloudflare Zone ID (from zone overview page)\n'
+            printf 'cloudflare_zone_id: %s\n'                  "$(yaml_escape "${_COLLECTED_SECRETS[cloudflare_zone_id]}")"
+            printf '# Cloudflare Account ID (from any zone overview page)\n'
+            printf 'cf_account_id: %s\n'                       "$(yaml_escape "${_COLLECTED_SECRETS[cf_account_id]}")"
         } > "$temp_file"
 
         for key in "${!_COLLECTED_SECRETS[@]}"; do
@@ -781,8 +807,6 @@ BACKUP_BANNER
             log_info "Created Docker secrets directory: $docker_secrets_dir"
         fi
 
-        # cf_worker_bouncer_token intentionally remains a flat file only (not in SOPS YAML)
-        # because it is rotated independently and consumed directly by CrowdSec tooling.
         if ! export_docker_secrets "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/secrets/.docker_secrets"; then
             log_error "Failed to export Docker secret files — run sudo utilities/setup-secrets.sh configure again"
             return 1
@@ -842,7 +866,7 @@ BACKUP_BANNER
 
         for _cleanup_key in \
             admin_token admin_basic_auth_hash \
-            caddy_cloudflare_dns_token \
+            caddy_cloudflare_dns_token cf_account_id cf_worker_bouncer_token cloudflare_zone_id \
             email_api_token smtp_password backup_passphrase \
             push_installation_id push_installation_key; do
             unset "SECRET_${_cleanup_key}" 2>/dev/null || true
@@ -861,7 +885,7 @@ BACKUP_BANNER
             echo ""
             echo "📋 Next Steps:"
             echo "   1. Verify .env settings:      nano .env"
-            echo "      ► Confirm: CLOUDFLARE_ZONE_ID, EMAIL_MODE, EMAIL_PROVIDER,"
+            echo "      ► Confirm: EMAIL_MODE, EMAIL_PROVIDER,"
             echo "                 SMTP_HOST, SMTP_PORT, SMTP_USERNAME"
             echo "   2. Start services:            make up"
             echo "   3. Setup automation:          sudo ./setup.sh systemd install"
@@ -1839,6 +1863,9 @@ backup_passphrase: PLACEHOLDER_NOT_CONFIGURED
 push_installation_id: PLACEHOLDER_NOT_CONFIGURED
 push_installation_key: PLACEHOLDER_NOT_CONFIGURED
 caddy_cloudflare_dns_token: PLACEHOLDER_NOT_CONFIGURED
+cf_worker_bouncer_token: PLACEHOLDER_NOT_CONFIGURED
+cloudflare_zone_id: PLACEHOLDER_NOT_CONFIGURED
+cf_account_id: PLACEHOLDER_NOT_CONFIGURED
 PLACEHOLDERS
     chmod 600 "$tmp_secrets"
     ( export SOPS_AGE_KEY_FILE="$age_key_file"; \
