@@ -84,6 +84,8 @@ _MV_FORCE=false
 _MV_YES=false
 _MV_LOG_FILE=""
 _MV_BACKUP_DIR_CUSTOM_WARNING=""
+# Mutable copy of the original run timestamp; updated from state on resume.
+_MV_RUN_TIMESTAMP="${_MV_TIMESTAMP}"
 
 _MV_START_TIME="${SECONDS}"   # bash built-in — seconds since shell started
 
@@ -109,7 +111,9 @@ _MV_LOCK_FD=""
 
 _mv_acquire_lock() {
     local lock_fd
-    install -m 0660 -o root -g root /dev/null "${_MV_LOCK_FILE}"
+    mkdir -p "$(dirname "${_MV_LOCK_FILE}")"
+    : >> "${_MV_LOCK_FILE}"
+    chmod 0600 "${_MV_LOCK_FILE}"
     exec {lock_fd}>"${_MV_LOCK_FILE}"
     flock -n "${lock_fd}" || {
         log_error "Another migration is already running (lock held: ${_MV_LOCK_FILE})."
@@ -503,7 +507,7 @@ _mv_set_env_var() {
     local tmp escaped_value
 
     if [[ "${DRY_RUN}" == "true" ]]; then
-        _mv_log info "[DRY RUN] would set: ${key}=${value}"
+        _mv_log info "[DRY RUN] would: set: ${key}=${value}"
         return 0
     fi
 
@@ -772,12 +776,16 @@ _mv_step_validate() {
         running_containers="$(docker compose ps --status running --quiet 2>/dev/null \
             | wc -l | tr -d ' ' || true)"
         if (( running_containers > 0 )); then
-            _mv_log warn "WARNING: ${running_containers} VaultWarden container(s) are currently running."
-            _mv_log warn "Migrating a live stack risks SQLite WAL corruption."
-            _mv_log warn "Data integrity cannot be guaranteed if the database is actively written."
-            _mv_confirm_by_typing \
-                "You are about to migrate a LIVE stack." \
-                "LIVE"
+            if [[ "${DRY_RUN}" == "true" ]]; then
+                _mv_log info "[DRY RUN] would: require interactive 'LIVE' confirmation (live stack detected)"
+            else
+                _mv_log warn "WARNING: ${running_containers} VaultWarden container(s) are currently running."
+                _mv_log warn "Migrating a live stack risks SQLite WAL corruption."
+                _mv_log warn "Data integrity cannot be guaranteed if the database is actively written."
+                _mv_confirm_by_typing \
+                    "You are about to migrate a LIVE stack." \
+                    "LIVE"
+            fi
         fi
     fi
 
@@ -971,7 +979,14 @@ _mv_step_verify() {
     # content differs between source and target.
     _mv_log info "Running content integrity check (rsync --checksum --dry-run)..."
     local _chk_out _chk_count
-    _chk_out="$(rsync --archive --checksum --dry-run --itemize-changes \
+    # Pass the same excludes used during transfer so intentionally excluded
+    # files (WAL, PID, sock) do not generate false-positive >f mismatches.
+    local -a _chk_flags=(--archive --checksum --dry-run --itemize-changes)
+    local _chk_excl
+    for _chk_excl in "${_MV_RSYNC_EXCLUDES[@]}"; do
+        _chk_flags+=("--exclude=${_chk_excl}")
+    done
+    _chk_out="$(rsync "${_chk_flags[@]}" \
         "${_MV_SOURCE%/}/" "${_MV_TARGET}" 2>/dev/null || true)"
     _chk_count="$(printf '%s\n' "${_chk_out}" | grep -c '^>f' || true)"
 
@@ -990,7 +1005,7 @@ _mv_step_verify() {
 _mv_step_rename_source() {
     _mv_log info "── rename_source ─────────────────────────────────────────────────"
 
-    local renamed="${_MV_SOURCE}.pre-migration.${_MV_TIMESTAMP}"
+    local renamed="${_MV_SOURCE}.pre-migration.${_MV_RUN_TIMESTAMP}"
 
     if mountpoint -q "${_MV_SOURCE}" 2>/dev/null; then
         _mv_log warn "Source ${_MV_SOURCE} is a mount point — rename not meaningful."
@@ -1009,6 +1024,10 @@ _mv_step_rename_source() {
 _mv_step_delete_source() {
     _mv_log info "── delete_source ─────────────────────────────────────────────────"
 
+    local _nullglob_was_off=false
+    shopt -q nullglob || _nullglob_was_off=true
+    shopt -s nullglob
+
     local candidate newest_ts=0 candidate_ts cand_renamed=""
     for candidate in "${_MV_SOURCE}.pre-migration."*/; do
         [[ -d "${candidate}" ]] || continue
@@ -1018,6 +1037,9 @@ _mv_step_delete_source() {
             cand_renamed="${candidate%/}"
         fi
     done
+
+    [[ "${_nullglob_was_off}" == "true" ]] && shopt -u nullglob
+
     local renamed="${cand_renamed}"
 
     if [[ -z "${renamed}" || ! -d "${renamed}" ]]; then
@@ -1046,14 +1068,14 @@ _mv_step_update_env() {
     local old_state_dir="${_MV_SOURCE}"
 
     if [[ "${DRY_RUN}" != "true" ]]; then
-        cp "${env_file}" "${env_file}.pre-migration.${_MV_TIMESTAMP}"
-        chmod 0600 "${env_file}.pre-migration.${_MV_TIMESTAMP}"
-        _mv_log info ".env backup created: ${env_file}.pre-migration.${_MV_TIMESTAMP}"
+        cp "${env_file}" "${env_file}.pre-migration.${_MV_RUN_TIMESTAMP}"
+        chmod 0600 "${env_file}.pre-migration.${_MV_RUN_TIMESTAMP}"
+        _mv_log info ".env backup created: ${env_file}.pre-migration.${_MV_RUN_TIMESTAMP}"
 
         # Prune older .env.pre-migration.* backups — keep only the one just created.
         local _env_cand _env_newest _env_newest_ts=0 _env_cand_ts
         local -a _env_all_cands=()
-        _env_newest="${env_file}.pre-migration.${_MV_TIMESTAMP}"
+        _env_newest="${env_file}.pre-migration.${_MV_RUN_TIMESTAMP}"
         for _env_cand in "${PROJECT_ROOT}"/.env.pre-migration.*; do
             [[ -f "${_env_cand}" ]] || continue
             _env_all_cands+=( "${_env_cand}" )
@@ -1069,7 +1091,7 @@ _mv_step_update_env() {
             _mv_log info "Removed stale .env backup: ${_env_cand}"
         done
     else
-        _mv_log info "[DRY RUN] would: cp ${env_file} ${env_file}.pre-migration.${_MV_TIMESTAMP}"
+        _mv_log info "[DRY RUN] would: cp ${env_file} ${env_file}.pre-migration.${_MV_RUN_TIMESTAMP}"
     fi
 
     _mv_set_env_var PROJECT_STATE_DIR "${_MV_TARGET}"
@@ -1254,9 +1276,9 @@ _mv_step_healthcheck() {
 }
 
 _mv_print_checklist() {
-    local renamed_src="${_MV_SOURCE}.pre-migration.<timestamp>"
+    local renamed_src="${_MV_SOURCE}.pre-migration.<original-run-timestamp>"
     if [[ "${DRY_RUN}" != "true" ]]; then
-        renamed_src="${_MV_SOURCE}.pre-migration.${_MV_TIMESTAMP}"
+        renamed_src="${_MV_SOURCE}.pre-migration.${_MV_RUN_TIMESTAMP}"
     fi
     printf '\n'
     printf '═══════════════════════════════════════════════════════════════\n'
@@ -1283,7 +1305,7 @@ _mv_print_checklist() {
     fi
     printf '═══════════════════════════════════════════════════════════════\n'
     printf '  Migration log: %s\n' "${_MV_LOG_FILE}"
-    printf '  .env backup:   %s.pre-migration.%s\n' "${PROJECT_ROOT}/.env" "${_MV_TIMESTAMP}"
+    printf '  .env backup:   %s.pre-migration.%s\n' "${PROJECT_ROOT}/.env" "${_MV_RUN_TIMESTAMP}"
     printf '═══════════════════════════════════════════════════════════════\n'
     printf '\n'
 }
@@ -1409,6 +1431,11 @@ _mv_do_abort() {
     if _mv_state_has STEP_SOURCE_RENAMED_DONE; then
         local renamed src_cand src_newest_ts=0 src_cand_ts
         renamed=""
+
+        local _abort_nullglob_off=false
+        shopt -q nullglob || _abort_nullglob_off=true
+        shopt -s nullglob
+
         for src_cand in "${src}.pre-migration."*/; do
             [[ -d "${src_cand}" ]] || continue
             src_cand_ts="$(stat -c '%Y' "${src_cand}" 2>/dev/null || echo 0)"
@@ -1417,6 +1444,9 @@ _mv_do_abort() {
                 renamed="${src_cand%/}"
             fi
         done
+
+        [[ "${_abort_nullglob_off}" == "true" ]] && shopt -u nullglob
+
         if [[ -n "${renamed}" && -d "${renamed}" ]]; then
             if [[ ! -e "${src}" ]]; then
                 mv "${renamed}" "${src}"
@@ -1565,7 +1595,7 @@ setup_directories() {
     require_project_state_ready || return 1
 
     local real_user; real_user=$(get_real_user)
-    local real_group; real_group=$(id -g -n "$real_user")
+    local real_group; real_group=$(id -gn "$real_user")
 
     local secrets_dirs=("secrets" "secrets/keys" "secrets/.docker_secrets")
     for dir in "${secrets_dirs[@]}"; do
@@ -1681,6 +1711,18 @@ _mode_migrate() {
 
     _mv_require_root "${_SS_MIGRATE_ARGS[@]+"${_SS_MIGRATE_ARGS[@]}"}"
     _mv_parse_args "${_SS_MIGRATE_ARGS[@]+"${_SS_MIGRATE_ARGS[@]}"}"
+
+    # On resume, restore the original run's log file path and run timestamp
+    # from state before opening the log, so resume output appends to the same
+    # log file and .env backup filenames match the original run.
+    if [[ "${_MV_SUBCOMMAND}" == "resume" && -f "${_MV_STATE_FILE}" ]]; then
+        local _saved_log _saved_ts
+        _saved_log="$(_mv_state_read MV_LOG_FILE)"
+        _saved_ts="$(_mv_state_read MV_START_TS)"
+        [[ -n "${_saved_log}" ]] && _MV_LOG_FILE="${_saved_log}"
+        [[ -n "${_saved_ts}" ]] && _MV_RUN_TIMESTAMP="$(date -d "@${_saved_ts}" +%Y%m%d_%H%M%S 2>/dev/null || echo "${_MV_RUN_TIMESTAMP}")"
+    fi
+
     _mv_open_log
 
     trap '_mv_on_err $? $LINENO' ERR
@@ -1810,8 +1852,15 @@ _parse_outer_args() {
                 shift 2
                 ;;
             --help|-h)
-                _ss_usage
-                exit 0
+                # When --mode migrate has already been parsed, forward --help
+                # to the migrate sub-parser so _mv_usage is shown, not _ss_usage.
+                if [[ "${_SS_MODE}" == "migrate" ]]; then
+                    remaining+=("$1")
+                else
+                    _ss_usage
+                    exit 0
+                fi
+                shift
                 ;;
             *)
                 remaining+=("$1")
