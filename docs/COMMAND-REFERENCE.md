@@ -169,37 +169,73 @@ EXAMPLES:
 ### startup.sh
 
 ```
-docker.sh: could not auto-detect Compose project name; using default label. Set DOCKER_PROJECT_LABEL to override.
-VaultWarden-OCI Startup Script
-
-USAGE:
-  ./startup.sh [OPTIONS]         # Start all services (normal path)
-  ./startup.sh stop              # Stop all services
-
-SUBCOMMANDS:
-  stop             Stop all services (delegates to docker compose down)
-
-STARTUP OPTIONS:
-  --force          Force restart of all services
-  --skip-health    Skip post-startup health check
-  --skip-pull      Skip docker compose pull (use for systemd restarts
-                   or when images are already current)
-  --background     Start services in background (daemon mode)
-  --skip-egress-fix  Skip automatic egress NAT remediation for
-                     non-internal VaultWarden Docker bridge networks
-  --dry-run        Show what would be done without executing
-
-GLOBAL OPTIONS:
-  --help, -h       Show this help
-
-EXAMPLES:
-  ./startup.sh                    # Normal startup (pulls latest images)
-  ./startup.sh --skip-pull        # Restart without pulling (fast path)
-  ./startup.sh --force            # Force restart all services
-  ./startup.sh --background       # Start in daemon mode
-  ./startup.sh stop               # Stop all services
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              docker.sh: could not auto-detect Compose project name; using default label. Set DOCKER_PROJECT_LABEL to override.
+[HH:MM:SS] [backup-run.sh] ERROR Unknown subcommand: '--help'
+[HH:MM:SS] [backup-run.sh] ERROR Valid subcommands: run [TYPE] | list | verify | rotate
+[HH:MM:SS] [backup-run.sh] ERROR Run './backup.sh help' for usage.
 ```
 
-### backup.sh
+                    [HH:MM:SS] [restore-run.sh] ERROR Unknown subcommand: '--help'
+[HH:MM:SS] [restore-run.sh] ERROR Valid subcommands: latest [TYPE] | list [--remote] | interactive
+[HH:MM:SS] [restore-run.sh] ERROR Run './restore.sh help' for usage.
+VaultWarden-OCI Restore Script
+
+USAGE:
+    sudo ./restore.sh <subcommand> [options]
+
+SUBCOMMANDS:
+    latest [TYPE]     Restore the newest local backup (TYPE: db | full | emergency)
+    list              List available local backups (no root required)
+    list --remote     List available remote backups (no root required)
+    interactive       Interactive guided restore — shows a numbered backup menu.
+                      If rclone is configured, you are first asked whether to
+                      restore from a LOCAL or REMOTE backup.
+
+    After the backup is selected you will be prompted for the age private
+    key that was used to encrypt that backup.  Press Enter to use the key
+    already configured in .env (SOPS_AGE_KEY_FILE).
+
+    Once the restore lands, a NEW age key is automatically generated,
+    installed to all configured locations, and displayed prominently.
+    Save it before pressing Enter to start the services.
+
+OPTIONS (used after a subcommand):
+    --file FILE             Restore a specific backup file (.age)
+    --remote                Skip the local/remote menu; restore from rclone remote
+    --key-file FILE         Path to the age private key for decrypting this backup
+                            (alternative to the interactive prompt)
+    --from-recovery-kit FILE
+                            Path to a plaintext recovery-kit file.  The Age
+                            private key (AGE-SECRET-KEY-1...) is extracted
+                            automatically and used for decryption — no manual
+                            key entry required.  Intended for bare-metal DR
+                            where the kit file is the only credential available.
+    --no-backup             Skip pre-restore emergency snapshot
+    --skip-verification     Skip integrity check (not recommended)
+    --skip-env              Do not restore archived .env over current .env
+    --dry-run               Show what would happen without making changes
+    --force                 Skip confirmation prompts
+
+GLOBAL SUBCOMMAND:
+    help                    Show this help
+
+ENVIRONMENT:
+    BACKUP_DIR=<path>                  Override backup storage root
+                                       (default: $PROJECT_STATE_DIR/backups)
+    RESTORE_SNAPSHOT_HARD_FAIL=false   Demote snapshot failure to a warning
+    RESTORE_AGE_KEY_FILE=<path>        Non-interactive equivalent of --key-file
+    RESTORE_RECOVERY_KIT_FILE=<path>   Non-interactive equivalent of --from-recovery-kit
+    RCLONE_REMOTE_NAME                 Read from .env when available
+
+EXAMPLES:
+    # ── QUICK START (most common) ────────────────────────────────
+    sudo ./restore.sh latest             # Restore newest backup (interactive confirm)
+    sudo ./restore.sh latest db          # Restore newest DB backup
+    sudo ./restore.sh latest --force     # Restore newest backup, no confirm prompts
+    ./restore.sh list                    # List local backups (no sudo)
+    ./restore.sh list --remote           # List remote backups (no sudo)
+```
+
+### maintenance.sh
 
 ```

@@ -35,8 +35,17 @@ generate_script_help() {
     echo '```'
     # Extract first 60 lines of --help output; some scripts require root
     # so we use a timeout and ignore failures gracefully.
-    if timeout 5 bash "$script" --help 2>&1 | head -60; then
-        :
+    # Strip embedded log timestamps (e.g. [14:32:01]) so output is stable.
+    # Strip ANSI escape codes so the file stays plain text across environments.
+    local output
+    output="$(timeout 5 bash "$script" --help 2>&1 \
+        | head -60 \
+        | sed \
+            -e 's/\[[0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}\]/[HH:MM:SS]/g' \
+            -e 's/\x1b\[[0-9;]*[mKHF]//g' \
+        || true)"
+    if [[ -n "$output" ]]; then
+        echo "$output"
     else
         echo '(--help not available or requires root)'
     fi
