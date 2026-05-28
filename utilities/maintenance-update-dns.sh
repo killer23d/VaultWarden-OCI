@@ -2,7 +2,6 @@
 # utilities/maintenance-update-dns.sh — Updates the VaultWarden Cloudflare DNS record.
 
 set -euo pipefail
-trap 'log_error "${BASH_SOURCE[0]}: failed at line ${LINENO} (exit $?)"; exit 1' ERR
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -21,6 +20,8 @@ source "$PROJECT_ROOT/lib/secrets.sh"
 SCRIPT_DIR="$_MAINT_SCRIPT_DIR"
 unset _MAINT_SCRIPT_DIR
 source "$PROJECT_ROOT/lib/storage.sh"
+
+trap 'log_error "${BASH_SOURCE[0]}: failed at line ${LINENO} (exit $?)"; exit 1' ERR
 
 # Configuration defaults.
 UPDATE_DNS=true

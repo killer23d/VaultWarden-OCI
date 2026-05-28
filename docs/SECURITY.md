@@ -1161,4 +1161,33 @@ sudo dpkg-reconfigure --priority=low unattended-upgrades
 
 ---
 
+---
+
+### Known Residual Risk: CrowdSec Bootstrap Script Validation
+
+`utilities/setup-crowdsec.sh` downloads the CrowdSec repository bootstrap
+script from packagecloud.io and validates it with a shebang check before
+execution. This check verifies that the downloaded file begins with a valid
+bash shebang (`#!/bin/bash` or `#!/usr/bin/env bash`) but does **not** perform
+content-hash verification (e.g., SHA-256 checksum).
+
+**Why not pin a hash?** The packagecloud bootstrap script is updated by the
+vendor without versioning; a pinned hash would break on every upstream update,
+requiring manual maintenance. The current approach is strictly better than
+`curl | bash` (rejects non-script responses such as HTML error pages or binary
+payloads) but does not protect against a compromised packagecloud CDN serving a
+malicious bash script.
+
+**Mitigations in place:**
+- Download goes to a temporary file; execution only proceeds after validation.
+- The script runs under `set -euo pipefail` — unexpected errors abort.
+- CrowdSec installation is a one-time setup step, not a recurring operation.
+
+**Recommended additional hardening (optional):**
+- Review the downloaded script manually before first install: `cat /tmp/cs-setup-*.sh`.
+- Pin CrowdSec's APT repository key and source list manually instead of using
+  the bootstrap script (see CrowdSec docs for manual APT setup).
+
+---
+
 This security guide reflects the current architecture with Cloudflare-only blocking for web traffic, CrowdSec host service for threat detection and iptables SSH protection, containerised Postfix email relay, comprehensive resource management, enhanced forensic logging, systemd-hardened service units, and robust security practices optimised for small teams requiring enterprise-grade password management security.

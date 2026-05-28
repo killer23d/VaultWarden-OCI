@@ -132,7 +132,7 @@ local _HEALTH_OPS_LOCK_FD=""
 _acquire_run_lock() {
     # Acquire shared operations lock to prevent concurrent health + maintenance
     touch "$_HEALTH_OPS_LOCK"
-    chmod 0666 "$_HEALTH_OPS_LOCK"
+    chmod 0660 "$_HEALTH_OPS_LOCK"
     exec {_HEALTH_OPS_LOCK_FD}>"$_HEALTH_OPS_LOCK" 2>/dev/null || {
         log_error "Cannot open operations lock: ${_HEALTH_OPS_LOCK}"
         return 1
@@ -143,7 +143,7 @@ _acquire_run_lock() {
     fi
 
     touch "$_HEALTH_RUN_LOCK_FILE"
-    chmod 0666 "$_HEALTH_RUN_LOCK_FILE"
+    chmod 0660 "$_HEALTH_RUN_LOCK_FILE"
 
     exec {_HEALTH_LOCK_FD}>"$_HEALTH_RUN_LOCK_FILE" 2>/dev/null || {
         log_error "Cannot open health run-lock: ${_HEALTH_RUN_LOCK_FILE}"

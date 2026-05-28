@@ -1873,13 +1873,11 @@ main() {
         trap - ERR
 
         log_info "Waiting for services to initialize (up to 60s)..."
-        local max_wait=60 waited=0
-        while (( waited < max_wait )); do
-            sleep 5; (( waited += 5 ))
-            # shellcheck disable=SC2015  # intentional: break on healthy match, continue on no-match
-            docker inspect vaultwarden_app --format '{{.State.Status}} {{.State.Health.Status}}' \
-                2>/dev/null | grep -qE $'running (healthy|$)' && break || true
-        done
+        if docker_wait_healthy vaultwarden_app 60 5; then
+            log_success "Service is healthy."
+        else
+            log_warn "Service did not reach healthy state within 60s — check logs."
+        fi
 
         if [[ -x "${PROJECT_ROOT}/utilities/maintenance-health.sh" ]]; then
             log_info "Running post-restore health check..."

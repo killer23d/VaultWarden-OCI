@@ -2,7 +2,6 @@
 # utilities/setup-systemd.sh — Installs and validates VaultWarden-OCI systemd timers.
 
 set -euo pipefail
-trap 'log_error "${BASH_SOURCE[0]}: failed at line ${LINENO} (exit $?)"; exit 1' ERR
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -14,6 +13,8 @@ source "${PROJECT_ROOT}/lib/config.sh"
 # shellcheck source=../lib/common.sh
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
+
+trap 'log_error "${BASH_SOURCE[0]}: failed at line ${LINENO} (exit $?)"; exit 1' ERR
 
 INSTALL=false
 REMOVE=false
