@@ -835,30 +835,32 @@ if [[ -f "$_CF_WORKER_BOUNCER_CONFIG_SRC" ]]; then
                 cleanup_secrets_environment
                 exit 1
             }
+            if [[ -z "$cf_worker_bouncer_token" || "$cf_worker_bouncer_token" == PLACEHOLDER* || "$cf_worker_bouncer_token" == CHANGE_ME* ]]; then
+                log_error "cf_worker_bouncer_token is not configured. Run: sudo utilities/setup-secrets.sh rotate cf_worker_bouncer_token"
+                cleanup_secrets_environment
+                exit 1
+            fi
             cloudflare_zone_id=$(sops -d --extract '["cloudflare_zone_id"]' "$SECRETS_FILE") || {
                 log_error "Failed to read cloudflare_zone_id from secrets. Run: sudo utilities/setup-secrets.sh rotate cloudflare_zone_id"
                 cleanup_secrets_environment
                 exit 1
             }
+            if [[ -z "$cloudflare_zone_id" || "$cloudflare_zone_id" == PLACEHOLDER* || "$cloudflare_zone_id" == CHANGE_ME* ]]; then
+                log_error "cloudflare_zone_id is not configured. Run: sudo utilities/setup-secrets.sh rotate cloudflare_zone_id"
+                cleanup_secrets_environment
+                exit 1
+            fi
             cf_account_id=$(sops -d --extract '["cf_account_id"]' "$SECRETS_FILE") || {
                 log_error "Failed to read cf_account_id from secrets. Run: sudo utilities/setup-secrets.sh rotate cf_account_id"
                 cleanup_secrets_environment
                 exit 1
             }
-            cleanup_secrets_environment
-
-            if [[ -z "$cf_worker_bouncer_token" || "$cf_worker_bouncer_token" == PLACEHOLDER* || "$cf_worker_bouncer_token" == CHANGE_ME* ]]; then
-                log_error "cf_worker_bouncer_token is not configured. Run: sudo utilities/setup-secrets.sh rotate cf_worker_bouncer_token"
-                exit 1
-            fi
-            if [[ -z "$cloudflare_zone_id" || "$cloudflare_zone_id" == PLACEHOLDER* || "$cloudflare_zone_id" == CHANGE_ME* ]]; then
-                log_error "cloudflare_zone_id is not configured. Run: sudo utilities/setup-secrets.sh rotate cloudflare_zone_id"
-                exit 1
-            fi
             if [[ -z "$cf_account_id" || "$cf_account_id" == PLACEHOLDER* || "$cf_account_id" == CHANGE_ME* ]]; then
                 log_error "cf_account_id is not configured. Run: sudo utilities/setup-secrets.sh rotate cf_account_id"
+                cleanup_secrets_environment
                 exit 1
             fi
+            cleanup_secrets_environment
         fi
 
         _cf_free_plan="${CF_FREE_PLAN:-true}"
