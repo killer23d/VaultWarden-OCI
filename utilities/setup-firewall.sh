@@ -13,6 +13,8 @@ source "${PROJECT_ROOT}/lib/config.sh"
 # shellcheck source=../lib/common.sh
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
+# shellcheck source=../lib/defaults.sh
+source "${PROJECT_ROOT}/lib/defaults.sh"
 
 _show_help() {
     cat <<'EOF'
@@ -118,7 +120,7 @@ _phase_ufw() {
 
     local cf_ipv4_url="https://www.cloudflare.com/ips-v4"
     local cf_ipv6_url="https://www.cloudflare.com/ips-v6"
-    local cf_cidr_cache="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/cf-cidrs.cache"
+    local cf_cidr_cache="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}/cf-cidrs.cache"
     local -a cf_cidrs=()
     local cf_fetch_failed=false
 

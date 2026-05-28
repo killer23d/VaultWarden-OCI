@@ -243,7 +243,7 @@ check_docker_secrets_materialized() {
 check_backup_exists() {
     [[ "$QUIET" == false ]] && log_info "Checking recent backup exists..."
     local base_dir
-    base_dir="$(get_config_value "BACKUP_DIR" "$(vw_default_backup_dir 2>/dev/null || echo "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/backups")")"
+    base_dir="$(get_config_value "BACKUP_DIR" "$(vw_default_backup_dir 2>/dev/null || echo "${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}/backups")")"
 
     local newest_backup newest_age_days=999
     for type_dir in "$base_dir"/db "$base_dir"/full; do
@@ -301,7 +301,7 @@ check_crowdsec() {
 
 check_disk_space() {
     [[ "$QUIET" == false ]] && log_info "Checking disk space..."
-    local state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
+    local state_dir="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}"
     local avail_kb
     avail_kb=$(df "$state_dir" 2>/dev/null | awk 'END {print $4}')
     if [[ -z "$avail_kb" || ! "$avail_kb" =~ ^[0-9]+$ ]]; then

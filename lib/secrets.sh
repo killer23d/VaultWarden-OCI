@@ -35,6 +35,7 @@ _SECRETS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # NOTE: _SECRETS_LIB_DIR is intentionally NOT unset here; it is reused two
 # lines below to source crypto.sh, then unset after that call.
 [[ -n "${VW_LOG_LIB_LOADED:-}" ]] || source "${_SECRETS_LIB_DIR}/log.sh"
+[[ -n "${VAULTWARDEN_DEFAULTS_LOADED:-}" ]] || source "${_SECRETS_LIB_DIR}/defaults.sh"
 
 source "${_SECRETS_LIB_DIR}/crypto.sh"
 unset _SECRETS_LIB_DIR
@@ -1386,7 +1387,7 @@ PYEOF
     #   ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/secrets/.docker_secrets/crowdsec_cf_firewall_token
     # Mirror it into the active docker secret directory when present.
     local _project_state_dir _cf_flat
-    _project_state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
+    _project_state_dir="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}"
     _cf_flat="${_project_state_dir}/secrets/.docker_secrets/crowdsec_cf_firewall_token"
     if [[ -f "$_cf_flat" ]]; then
         local _cf_value

@@ -32,6 +32,8 @@ source "${PROJECT_ROOT}/lib/config.sh"
 # shellcheck source=../lib/common.sh
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
+# shellcheck source=../lib/defaults.sh
+source "${PROJECT_ROOT}/lib/defaults.sh"
 
 SOPS_VERSION="${SOPS_VERSION:-}"
 SKIP_DEPS=false
@@ -40,7 +42,7 @@ USE_LATEST=false
 DRY_RUN=false
 FORCE=false
 DATA_VOLUME_DEVICE="${DATA_VOLUME_DEVICE:-}"
-DATA_VOLUME_MOUNT="${DATA_VOLUME_MOUNT:-/mnt/vw-data}"
+DATA_VOLUME_MOUNT="${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}"
 
 # Exported so that any sub-scripts invoked later can inherit these flags.
 export USE_LATEST FORCE

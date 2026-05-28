@@ -23,12 +23,14 @@ init_common_lib "$0"
 
 # shellcheck source=../lib/crypto.sh
 source "${PROJECT_ROOT}/lib/crypto.sh"
+# shellcheck source=../lib/defaults.sh
+source "${PROJECT_ROOT}/lib/defaults.sh"
 
 DOMAIN=""
 ADMIN_EMAIL=""
 USE_LATEST=false
 DATA_VOLUME_DEVICE="${DATA_VOLUME_DEVICE:-}"
-DATA_VOLUME_MOUNT="${DATA_VOLUME_MOUNT:-/mnt/vw-data}"
+DATA_VOLUME_MOUNT="${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}"
 FORCE=false
 DRY_RUN=false
 
@@ -188,7 +190,7 @@ create_env_file() {
 
     local awk_state_dir
     if [[ -n "${DATA_VOLUME_DEVICE:-}" ]]; then
-        awk_state_dir="${DATA_VOLUME_MOUNT:-/mnt/vw-data}"
+        awk_state_dir="${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}"
     else
         awk_state_dir="/var/lib/vaultwarden"
     fi
@@ -211,7 +213,7 @@ create_env_file() {
     AWK_ALLOWED_SENDER_DOMAINS="$clean_domain"        \
     AWK_SSH_LOG="$detected_ssh_log_path"              \
     AWK_DATA_DEVICE="${DATA_VOLUME_DEVICE:-}"         \
-    AWK_DATA_MOUNT="${DATA_VOLUME_MOUNT:-/mnt/vw-data}" \
+    AWK_DATA_MOUNT="${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}" \
     AWK_STATE_DIR="$awk_state_dir"                    \
     awk '
         {
@@ -257,8 +259,8 @@ create_env_file() {
         local current_backup_dir
         current_backup_dir=$(_read_env_value "BACKUP_DIR" "$temp_env")
         if [[ -z "$current_backup_dir" ]]; then
-            _set_env_var "BACKUP_DIR" "${DATA_VOLUME_MOUNT:-/mnt/vw-data}/backups" "$temp_env"
-            log_info "Auto-set BACKUP_DIR=${DATA_VOLUME_MOUNT:-/mnt/vw-data}/backups in .env (separate-volume mode)"
+            _set_env_var "BACKUP_DIR" "${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}/backups" "$temp_env"
+            log_info "Auto-set BACKUP_DIR=${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}/backups in .env (separate-volume mode)"
         fi
     fi
 

@@ -225,7 +225,7 @@ draw_live_stats() {
     # --- Last Backup Result ---
     local _last_backup_line
     _last_backup_line=$(grep -E '(PASS|FAIL|ERROR|SUCCESS)' \
-        "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/backup.log" \
+        "${STATE_DIR}/logs/backup.log" \
         2>/dev/null | tail -1 || echo "No backup log found")
     printf '  Last result:  %s\n' "$_last_backup_line"
 

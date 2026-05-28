@@ -199,7 +199,7 @@ require_project_state_ready() {
 # ---------------------------------------------------------------------------
 setup_data_volume() {
     local device="${DATA_VOLUME_DEVICE:-}"
-    local mount_point="${DATA_VOLUME_MOUNT:-/mnt/vw-data}"
+    local mount_point="${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}"
     local dry_run="${DRY_RUN:-false}"
 
     case "${dry_run,,}" in
@@ -402,11 +402,11 @@ install_docker_mount_guard() {
     fi
 
     if [[ "$dry_run" == "true" ]]; then
-        log_info "[DRY RUN] Would install Docker mount guard for: ${DATA_VOLUME_MOUNT:-/mnt/vw-data}"
+        log_info "[DRY RUN] Would install Docker mount guard for: ${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}"
         return 0
     fi
 
-    local mount_point="${DATA_VOLUME_MOUNT:-/mnt/vw-data}"
+    local mount_point="${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}"
     _storage_validate_paths "" "$mount_point" || return 1
 
     mkdir -p "$drop_in_dir" \
@@ -467,8 +467,7 @@ vw_default_backup_dir() {
     if declare -f get_config_value >/dev/null 2>&1; then
         state_dir="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
     else
-        # TODO: replace with _VW_DEFAULT_STATE_DIR from lib/defaults.sh
-        state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
+        state_dir="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}"
     fi
     printf '%s/backups' "$state_dir"
 }

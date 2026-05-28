@@ -47,6 +47,7 @@ source "${SCRIPT_DIR}/lib/docker.sh"
 source "${SCRIPT_DIR}/lib/backup-utils.sh"
 source "${SCRIPT_DIR}/lib/secrets.sh"
 source "${SCRIPT_DIR}/lib/storage.sh"
+source "${SCRIPT_DIR}/lib/defaults.sh"
 
 DOMAIN=""
 ADMIN_EMAIL=""
@@ -63,7 +64,7 @@ CLEAN_DOMAIN=""
 # Storage mode variables. Defaults are overridden by --data-device/--data-mount
 # or by DATA_VOLUME_DEVICE/DATA_VOLUME_MOUNT already set in the environment.
 DATA_VOLUME_DEVICE="${DATA_VOLUME_DEVICE:-}"
-DATA_VOLUME_MOUNT="${DATA_VOLUME_MOUNT:-/mnt/vw-data}"
+DATA_VOLUME_MOUNT="${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}"
 SETUP_LOCK_FILE=""
 
 show_help() {

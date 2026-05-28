@@ -8,6 +8,31 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ---
 ## [Unreleased]
 
+### Changed — Inline path-fallback migration (m-29)
+
+- Replaced every inline `${PROJECT_STATE_DIR:-/var/lib/vaultwarden}` and
+  `${DATA_VOLUME_MOUNT:-/mnt/vw-data}` occurrence in executed shell code
+  with the canonical `${_VW_DEFAULT_STATE_DIR}` and `${_VW_DEFAULT_DATA_MOUNT}`
+  constants defined in `lib/defaults.sh`. `lib/defaults.sh` is now the
+  single source of truth for default path values; no inline literals remain.
+- Affected files: `setup.sh`, `lib/storage.sh`, `lib/secrets.sh`,
+  `dashboard.sh`, `utilities/setup-secrets.sh`, `utilities/setup-storage.sh`,
+  `utilities/setup-env.sh`, `utilities/setup-system.sh`,
+  `utilities/smoke-test.sh`, `utilities/pre-production-drill.sh`,
+  `utilities/setup-firewall.sh`.
+- `lib/secrets.sh`: auto-loads `lib/defaults.sh` (idempotent guard added
+  alongside the existing `lib/log.sh` guard).
+- `utilities/setup-env.sh`, `utilities/setup-system.sh`,
+  `utilities/setup-firewall.sh`: each now explicitly `source lib/defaults.sh`
+  after their existing library imports.
+- `setup.sh`: now explicitly `source lib/defaults.sh` after `lib/storage.sh`
+  for belt-and-suspenders clarity.
+- `dashboard.sh`: the single fallback in `draw_live_stats()` replaced with
+  `${STATE_DIR}`, which is the variable already computed at the top of that
+  script via `_read_env_var` with the identical `/var/lib/vaultwarden` default.
+- Removed the `# TODO: replace with _VW_DEFAULT_STATE_DIR` comment in
+  `lib/storage.sh::vw_default_backup_dir()`.
+
 ### Changed — Shared-lib consolidation and startup deduplication
 
 - Moved `_maybe_sudo()` from `startup.sh` to `lib/common.sh` and exported it for shared callers.

@@ -180,7 +180,7 @@ drill_backup_verify() {
 
     local base_dir
     base_dir="$(get_config_value "BACKUP_DIR" \
-        "$(vw_default_backup_dir 2>/dev/null || echo "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/backups")")"
+        "$(vw_default_backup_dir 2>/dev/null || echo "${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}/backups")")"
 
     local newest="" newest_age=999 newest_type=""
     for type in db full emergency; do
@@ -222,7 +222,7 @@ drill_restore_path() {
 
     local base_dir
     base_dir="$(get_config_value "BACKUP_DIR" \
-        "$(vw_default_backup_dir 2>/dev/null || echo "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/backups")")"
+        "$(vw_default_backup_dir 2>/dev/null || echo "${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}/backups")")"
 
     local db_backup=""
     local db_dir="$base_dir/db"
@@ -332,7 +332,7 @@ drill_full_backup_restore_smoketest() {
 
     local base_dir
     base_dir="$(get_config_value "BACKUP_DIR" \
-        "$(vw_default_backup_dir 2>/dev/null || echo "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/backups")")"
+        "$(vw_default_backup_dir 2>/dev/null || echo "${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}/backups")")"
 
     local full_dir="$base_dir/full"
     if [[ ! -d "$full_dir" ]]; then

@@ -800,14 +800,14 @@ BACKUP_BANNER
 
         log_success "Secrets encrypted and written to: $SECRETS_FILE"
 
-        local docker_secrets_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/secrets/.docker_secrets"
+        local docker_secrets_dir="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}/secrets/.docker_secrets"
         if [[ ! -d "$docker_secrets_dir" ]]; then
             mkdir -p "$docker_secrets_dir"
             chmod 700 "$docker_secrets_dir"
             log_info "Created Docker secrets directory: $docker_secrets_dir"
         fi
 
-        if ! export_docker_secrets "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/secrets/.docker_secrets"; then
+        if ! export_docker_secrets "${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}/secrets/.docker_secrets"; then
             log_error "Failed to export Docker secret files — run sudo utilities/setup-secrets.sh configure again"
             return 1
         fi

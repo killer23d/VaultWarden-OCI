@@ -392,7 +392,7 @@ _mv_prompt_target() {
     [[ -n "${_MV_TARGET:-}" ]] && return 0
     [[ "${_MV_SUBCOMMAND}" == "run" ]] || return 0
 
-    local default_mount="${DATA_VOLUME_MOUNT:-/mnt/vw-data}"
+    local default_mount="${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}"
     local reply
 
     printf '\n'
@@ -472,7 +472,7 @@ _mv_check_disk_space() {
 _mv_check_stale_backup() {
     local backup_base_dir newest newest_ts now_ts age_hours
 
-    backup_base_dir="${BACKUP_DIR:-${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/backups}"
+    backup_base_dir="${BACKUP_DIR:-${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}/backups}"
 
     newest="$(find "${backup_base_dir}" -name "*.age" -type f -print0 2>/dev/null \
         | xargs -r -0 stat -c '%Y %n' 2>/dev/null \
@@ -658,7 +658,7 @@ _mv_parse_args() {
     done
 
     if [[ -z "${_MV_SOURCE}" ]]; then
-        _MV_SOURCE="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
+        _MV_SOURCE="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}"
     fi
 
     case "${_MV_SUBCOMMAND}" in
@@ -1554,13 +1554,13 @@ setup_directories() {
     # before we create any subdirectories inside it. This prevents accidentally
     # writing the directory skeleton onto the boot volume if the mount failed.
     export DATA_VOLUME_DEVICE="${DATA_VOLUME_DEVICE:-}"
-    export DATA_VOLUME_MOUNT="${DATA_VOLUME_MOUNT:-/mnt/vw-data}"
+    export DATA_VOLUME_MOUNT="${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}"
     # Align PROJECT_STATE_DIR with the storage mode so the consistency check
     # inside require_project_state_ready passes. In boot-only mode this is a no-op.
     if [[ -n "${DATA_VOLUME_DEVICE:-}" ]]; then
         export PROJECT_STATE_DIR="${DATA_VOLUME_MOUNT}"
     else
-        export PROJECT_STATE_DIR="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
+        export PROJECT_STATE_DIR="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}"
     fi
     require_project_state_ready || return 1
 
@@ -1575,7 +1575,7 @@ setup_directories() {
 
     local puid; puid=$(id -u "$real_user")
     local pgid; pgid=$(id -g "$real_user")
-    local project_state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
+    local project_state_dir="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}"
 
     # Create the backup directory tree that backup.sh and restore.sh require.
     local backup_base_dir="${BACKUP_DIR:-${project_state_dir}/backups}"
@@ -1661,7 +1661,7 @@ _mode_verify() {
     log_info "Verifying storage layout and permissions..."
     require_project_state_ready || return 1
 
-    local project_state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
+    local project_state_dir="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}"
     local errors=0
     for dir in data logs caddy backups; do
         if [[ ! -d "${project_state_dir}/${dir}" ]]; then
