@@ -332,7 +332,7 @@ while [[ $# -gt 0 ]]; do
 usage: sudo ./utilities/setup-crowdsec.sh [OPTIONS]
 
   --auto               Non-interactive: never prompt.
-  --dry-run            Print what would happen; make no changes.
+  --dry-run            Print what would happen without changing files.
   --force              Re-run all phases even if already applied.
   --use-latest         Override version pins and use the current live upstream
                        release of each component.

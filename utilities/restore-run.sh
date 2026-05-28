@@ -198,7 +198,7 @@ EOF
 # Handle help before the .env check so it always works.
 if [[ $# -gt 0 ]]; then
     case "$1" in
-        help) show_help; exit 0 ;;
+        help|--help|-h) show_help; exit 0 ;;
     esac
 fi
 

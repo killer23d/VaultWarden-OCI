@@ -14,6 +14,37 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUTPUT_FILE="${SCRIPT_DIR}/docs/COMMAND-REFERENCE.md"
 
+show_help() {
+    cat <<'EOF'
+VaultWarden-OCI Command Reference Generator
+
+USAGE:
+    bash utilities/generate-command-ref.sh [--help|-h]
+    make docs
+
+DESCRIPTION:
+    Regenerates docs/COMMAND-REFERENCE.md from Makefile targets and script
+    help output. Output is deterministic for CI doc-drift checks.
+
+OPTIONS:
+    --help, -h      Show this help without regenerating docs
+EOF
+}
+
+if [[ $# -gt 0 ]]; then
+    case "$1" in
+        --help|-h|help)
+            show_help
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            show_help >&2
+            exit 2
+            ;;
+    esac
+fi
+
 # ── Makefile targets ─────────────────────────────────────────────────────────
 generate_makefile_targets() {
     printf '## Makefile Targets\n\n'
@@ -25,6 +56,30 @@ generate_makefile_targets() {
 }
 
 # ── Script help output ──────────────────────────────────────────────────────
+sanitize_help_output() {
+    # Keep generated docs deterministic: cap help text length, normalize timestamps,
+    # strip ANSI escape sequences, and drop NUL bytes that can make diffs noisy.
+    head -60 \
+        | sed \
+            -e 's/\[[0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}\]/[HH:MM:SS]/g' \
+            -e 's/\x1b\[[0-9;]*[mKHF]//g' \
+        | tr -d '\000'
+}
+
+run_help_command() {
+    local script="$1"
+    shift
+
+    local raw_out rc
+    set +e
+    raw_out="$(timeout 5 bash "$script" "$@" 2>&1)"
+    rc=$?
+    set -e
+
+    HELP_COMMAND_OUTPUT="$(printf '%s\n' "$raw_out" | sanitize_help_output)"
+    return "$rc"
+}
+
 generate_script_help() {
     local script="$1"
     local name
@@ -33,27 +88,19 @@ generate_script_help() {
     echo "### ${name}"
     echo ""
     echo '```'
-    # Try --help first; if that fails (non-zero exit or empty output) fall back
-    # to the 'help' subcommand used by subcommand-driven scripts (e.g. backup-run,
-    # restore-run).  Strip log timestamps and ANSI codes so output stays stable
-    # across environments and is safe to commit as plain text.
-    set +e
-    local help_out rc
-    help_out="$(timeout 5 bash "$script" --help 2>&1 | head -60 \
-        | sed \
-            -e 's/\[[0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}\]/[HH:MM:SS]/g' \
-            -e 's/\x1b\[[0-9;]*[mKHF]//g')"
-    rc=${PIPESTATUS[0]}
-    if [[ $rc -ne 0 || -z "$help_out" ]]; then
-        help_out="$(timeout 5 bash "$script" help 2>&1 | head -60 \
-            | sed \
-                -e 's/\[[0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}\]/[HH:MM:SS]/g' \
-                -e 's/\x1b\[[0-9;]*[mKHF]//g')"
-        rc=${PIPESTATUS[0]}
+    # Try --help first; if that fails (non-zero exit or empty output), fall back
+    # to the 'help' subcommand used by subcommand-driven scripts. Capture the
+    # command status before truncating output so a successful help page longer
+    # than 60 lines is not mistaken for a failure due to SIGPIPE.
+    local help_out=""
+    if run_help_command "$script" --help && [[ -n "$HELP_COMMAND_OUTPUT" ]]; then
+        help_out="$HELP_COMMAND_OUTPUT"
+    elif run_help_command "$script" help && [[ -n "$HELP_COMMAND_OUTPUT" ]]; then
+        help_out="$HELP_COMMAND_OUTPUT"
     fi
-    set -e
+
     if [[ -n "$help_out" ]]; then
-        echo "$help_out"
+        printf '%s\n' "$help_out"
     else
         echo '(--help not available or requires root)'
     fi
@@ -104,5 +151,8 @@ HEADER
     done < <(find "${SCRIPT_DIR}/utilities" -maxdepth 1 -name '*.sh' -type f | sort)
 
 } > "$OUTPUT_FILE"
+
+# Keep the generated Markdown clean for git diff --check.
+perl -0pi -e 's/\n+\z/\n/' "$OUTPUT_FILE"
 
 echo "Generated: $OUTPUT_FILE"

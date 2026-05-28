@@ -79,7 +79,7 @@ case "$1" in
         _SUBCMD="$1"
         shift
         ;;
-    help)
+    help|--help|-h)
         show_help; exit 0
         ;;
     *)
