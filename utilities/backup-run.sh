@@ -79,7 +79,7 @@ case "$1" in
         _SUBCMD="$1"
         shift
         ;;
-    help|--help|-h)
+    help)
         show_help; exit 0
         ;;
     *)
@@ -1011,4 +1011,355 @@ _check_backup_deps() {
     for c in "${hard[@]}"; do command -v "$c" >/dev/null 2>&1 || missing_hard+=("$c"); done
     for c in "${soft[@]}"; do command -v "$c" >/dev/null 2>&1 || missing_soft+=("$c"); done
     if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
-        missin
+        missing_hard+=(sha256sum)
+    fi
+    if [[ ${#missing_hard[@]} -gt 0 ]]; then
+        log_error "backup.sh: required tools missing: ${missing_hard[*]}"
+        log_error "  Install with: apt-get install -y age coreutils tar"
+        exit 1
+    fi
+    if [[ ${#missing_soft[@]} -gt 0 ]]; then
+        log_warn "backup.sh: optional tools missing (some features disabled): ${missing_soft[*]}"
+        if [[ " ${missing_soft[*]} " =~ " age-keygen " ]]; then
+            log_warn "  age-keygen is missing — post-restore key rotation in restore.sh will fail."
+            log_warn "  It is part of the 'age' package: apt-get install -y age"
+        fi
+    fi
+}
+
+main() {
+    trap cleanup EXIT HUP INT TERM ERR
+
+    if [[ "$LIST_ONLY" == "true" ]]; then
+        load_env_file 2>/dev/null || true
+        auto_fix_critical_permissions "$PROJECT_ROOT"
+        local list_base_dir
+        list_base_dir="$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")"
+        list_backups "$list_base_dir" || true
+        exit 0
+    fi
+
+    if [[ "$_SUBCMD" == "verify" ]]; then
+        require_root "$@"
+        auto_fix_critical_permissions "$PROJECT_ROOT"
+        _check_backup_deps
+
+        local old_umask
+        old_umask=$(umask)
+        umask 077
+        TMPDIR_BACKUP="$(mktemp -d -p /dev/shm 2>/dev/null || mktemp -d -t vw_verify.XXXXXXXXXX)" || {
+            log_error "Failed to create secure temporary directory"
+            exit 1
+        }
+        umask "$old_umask"
+
+        log_header "VaultWarden-OCI Backup Verify"
+        load_env_file || { log_error "Failed to load .env"; exit 1; }
+        auto_fix_critical_permissions "$PROJECT_ROOT"
+        require_project_state_ready || exit 1
+
+        local age_key_file
+        age_key_file=$(_resolve_age_key) || {
+            log_error "Age key file not found at: ${age_key_file:-/etc/vaultwarden/age-key.txt}"
+            log_error "Set SOPS_AGE_KEY_FILE in .env, or place the key at /etc/vaultwarden/age-key.txt"
+            exit 1
+        }
+
+        local base_dir
+        base_dir="$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")"
+
+        local search_types=()
+        if [[ "$BACKUP_TYPE" != "auto" ]]; then
+            search_types=("$BACKUP_TYPE")
+        else
+            search_types=(db full emergency)
+        fi
+
+        local latest_file="" latest_mtime=0
+        for t in "${search_types[@]}"; do
+            local type_dir="$base_dir/$t"
+            [[ -d "$type_dir" ]] || continue
+            while IFS= read -r -d '' f; do
+                local f_mtime
+                f_mtime=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || echo 0)
+                if (( f_mtime > latest_mtime )); then
+                    latest_mtime=$f_mtime
+                    latest_file="$f"
+                fi
+            done < <(find "$type_dir" -maxdepth 1 -name "*.age" -type f -print0 2>/dev/null)
+        done
+
+        if [[ -z "$latest_file" ]]; then
+            log_error "No backups found to verify."
+            exit 1
+        fi
+
+        local enc_type
+        enc_type="$(basename "$(dirname "$latest_file")")"
+
+        backup_log_info "Target: $(basename "$latest_file")  [type: $enc_type]"
+
+        if ! verify_backup_full "$latest_file" "$enc_type" "$TMPDIR_BACKUP"; then
+            log_error "Verification FAILED: $(basename "$latest_file")"
+            exit 1
+        fi
+
+        backup_log_success "Verification passed: $(basename "$latest_file")"
+        exit 0
+    fi
+
+    if [[ "$_SUBCMD" == "rotate" ]]; then
+        require_root "$@"
+        auto_fix_critical_permissions "$PROJECT_ROOT"
+
+        log_header "VaultWarden-OCI Backup Rotation${DRY_RUN:+ [DRY RUN]}"
+        load_env_file || { log_error "Failed to load .env"; exit 1; }
+        auto_fix_critical_permissions "$PROJECT_ROOT"
+
+        local base_dir
+        base_dir="$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")"
+
+        local rotate_failed=false
+        for t in db full emergency; do
+            local type_dir="$base_dir/$t"
+            [[ -d "$type_dir" ]] || continue
+
+            if [[ "$DRY_RUN" == "true" ]]; then
+                local would_prune=0
+                while IFS= read -r -d '' f; do
+                    backup_log_info "[DRY RUN] Would remove: $(basename "$f") (and sidecars)"
+                    (( ++would_prune )) || true
+                done < <(find "$type_dir" -maxdepth 1 -name "*.age" -type f \
+                             -mtime +"$KEEP_DAYS" -print0 2>/dev/null)
+                if (( would_prune == 0 )); then
+                    backup_log_info "[DRY RUN] No $t backups older than $KEEP_DAYS days — nothing to prune."
+                fi
+            else
+                cleanup_old_backups "$type_dir" "$t" "$KEEP_DAYS" || rotate_failed=true
+            fi
+        done
+
+        if [[ "$rotate_failed" == "true" ]]; then
+            log_error "One or more rotation steps encountered errors — check above for details."
+            exit 1
+        fi
+
+        # Prune remote backups to match the local retention policy.
+        _prune_remote_backups "$KEEP_DAYS" || {
+            log_warn "[rotate] Remote retention pruning reported errors — local rotation was successful."
+        }
+
+        backup_log_success "Rotation complete${DRY_RUN:+ (dry run)}."
+        exit 0
+    fi
+
+
+    _check_backup_deps
+
+    LOCK_FILE="/run/lock/vaultwarden-backup.lock"
+    local OPS_LOCK="/run/lock/vaultwarden-operations.lock"
+
+    if [[ "$FORCE" != "true" && "$DRY_RUN" != "true" ]]; then
+        # Acquire shared operations lock to prevent concurrent backup + maintenance
+        touch "$OPS_LOCK"
+        chmod 0660 "$OPS_LOCK"
+        exec {OPS_LOCK_FD}>"$OPS_LOCK"
+        if ! flock -n "$OPS_LOCK_FD"; then
+            log_error "Another operation (maintenance/restore) is already running. Aborting."
+            log_info  "Wait for it to finish or use --force to override."
+            exit 1
+        fi
+
+        touch "$LOCK_FILE"
+        chmod 0660 "$LOCK_FILE"
+
+        exec {LOCK_FD}>"$LOCK_FILE"
+        if ! flock -n "$LOCK_FD"; then
+            log_error "Another backup is already running (could not acquire lock)."
+            log_info  "Wait for it to finish or use --force if you are certain it is stuck."
+            log_error "If the lock is stale, remove: ${LOCK_FILE}"
+            exit 1
+        fi
+    fi
+
+    local old_umask
+    old_umask=$(umask)
+    umask 077
+    TMPDIR_BACKUP="$(mktemp -d -p /dev/shm 2>/dev/null || mktemp -d -t vw_backup.XXXXXXXXXX)" || {
+        log_error "Failed to create secure temporary directory"
+        exit 1
+    }
+    umask "$old_umask"
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_header "VaultWarden-OCI Backup [DRY RUN]"
+    else
+        log_header "VaultWarden-OCI Backup"
+    fi
+
+    load_env_file || { log_error "Failed to load .env"; exit 1; }
+    auto_fix_critical_permissions "$PROJECT_ROOT"
+    require_project_state_ready || exit 1
+
+    local state_dir
+    state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
+
+    local age_key_file
+    age_key_file=$(_resolve_age_key) || {
+        log_error "Age key file not found at: ${age_key_file:-/etc/vaultwarden/age-key.txt}"
+        log_error "Set SOPS_AGE_KEY_FILE in .env, or place the key at /etc/vaultwarden/age-key.txt"
+        exit 1
+    }
+
+    if [[ "$DRY_RUN" != "true" ]]; then
+        SOPS_AGE_KEY_FILE="$age_key_file" check_age_key_health || {
+            log_error "Age key health check failed — aborting backup to avoid encrypting with a bad key."
+            log_error "Run './maintenance.sh health --comprehensive' for diagnostics."
+            exit 1
+        }
+    fi
+
+    local age_pub_key
+    age_pub_key=$(get_age_public_key "$age_key_file") || {
+        log_error "Could not read Age public key from $age_key_file"
+        exit 1
+    }
+
+    local actual_type="$BACKUP_TYPE"
+    if [[ "$BACKUP_TYPE" == "auto" ]]; then
+        actual_type=$(auto_determine_backup_type)
+        backup_log_info "Auto-selected backup type: $actual_type"
+    fi
+
+    local timestamp
+    timestamp=$(date +%Y%m%d_%H%M%S)
+    local backup_dir
+    backup_dir=$(get_backup_dir "$actual_type")
+
+    local backup_file=""
+    local backup_success=false
+    case "$actual_type" in
+        db)
+            backup_file=$(perform_db_backup "$backup_dir" "$timestamp" "$age_pub_key" "$TMPDIR_BACKUP") \
+                && backup_success=true
+            ;;
+        full|emergency)
+            backup_file=$(perform_full_backup "$backup_dir" "$timestamp" "$age_pub_key" "$actual_type" "$TMPDIR_BACKUP") \
+                && backup_success=true
+            ;;
+        *)
+            log_error "Invalid backup type: $actual_type"; exit 1 ;;
+    esac
+
+    if [[ "$backup_success" == "true" ]]; then
+        [[ "$backup_file" == *.age && -f "$backup_file" ]] || {
+            log_error "backup_file is invalid or missing: ${backup_file:-empty}"
+            exit 1
+        }
+    fi
+
+    if [[ "$backup_success" == "true" && "$DRY_RUN" == "false" ]]; then
+
+        local verify_failed=false
+        local rclone_failed=false
+
+        if [[ "$FULL_VERIFY" == "true" ]]; then
+            if ! verify_backup_full "$backup_file" "$actual_type" "$TMPDIR_BACKUP"; then
+                log_error "Backup verification failed — discarding corrupt archive."
+                rm -f "$backup_file" "${backup_file}.meta" "${backup_file}.sha256"
+                exit 1
+            fi
+        else
+            if ! verify_backup_quick "$backup_file" "$age_key_file"; then
+                verify_failed=true
+                log_error "Quick verification failed — backup may be corrupt."
+                if [[ "$EMAIL_NOTIFY" == "true" ]]; then
+                    local warn_subj="[VaultWarden] WARNING: Backup verify FAILED: $actual_type ($timestamp)"
+                    local warn_body
+                    warn_body="$(printf 'Backup type:  %s\nTimestamp:    %s\nFile:         %s\nHost:         %s\n\nQuick verification (SHA256 + decrypt probe) FAILED.\nThe encrypted archive may be corrupt. Manual inspection required.\n' \
+                        "$actual_type" "$timestamp" \
+                        "$(basename "${backup_file:-unknown}")" \
+                        "$(hostname -f 2>/dev/null || hostname)")"
+                    send_notification_email "$warn_subj" "$warn_body" 2>/dev/null || true
+                fi
+                log_error "Skipping offsite sync due to verification failure."
+                RCLONE_SYNC=false
+            fi
+        fi
+
+        if [[ "$RCLONE_SYNC" == "true" ]]; then
+            local _sync_rc=0
+            sync_to_rclone "$backup_file" "$actual_type" || _sync_rc=$?
+            if (( _sync_rc == 2 )); then
+                log_warn "Offsite sync completed with partial sidecar failures — primary backup was delivered."
+            elif (( _sync_rc != 0 )); then
+                rclone_failed=true
+                if [[ "$EMAIL_NOTIFY" == "true" ]]; then
+                    local subj="[VaultWarden] Offsite sync FAILED: $actual_type ($timestamp)"
+                    local bdy
+                    bdy="$(printf 'Backup type:  %s\nTimestamp:    %s\nFile:         %s\nHost:         %s\n\nOffsite rclone sync failed. Local backup is intact.\n' \
+                        "$actual_type" "$timestamp" \
+                        "$(basename "${backup_file:-unknown}")" \
+                        "$(hostname -f 2>/dev/null || hostname)")"
+                    send_notification_email "$subj" "$bdy" 2>/dev/null || true
+                fi
+                log_error "Offsite sync failed — see above. Local backup is safe."
+                exit 2
+            fi
+        fi
+
+        backup_log_info "Cleaning up old backups (retention: $KEEP_DAYS days)..."
+        cleanup_old_backups "$backup_dir" "$actual_type" "$KEEP_DAYS" || \
+            backup_log_warn "Failed to clean up some old backups"
+
+        # Prune remote backups to mirror local retention policy
+        if [[ "$RCLONE_SYNC" == "true" && "$rclone_failed" == "false" ]]; then
+            _prune_remote_backups "$KEEP_DAYS" || \
+                backup_log_warn "Failed to prune some remote backups"
+        fi
+
+        if [[ "$EMAIL_NOTIFY" == "true" ]]; then
+            local rclone_status="skipped"
+            [[ "$RCLONE_SYNC" == "true" && "$rclone_failed" == "false" ]] && rclone_status="synced"
+
+            local verify_status
+            if [[ "$FULL_VERIFY" == "true" ]]; then
+                verify_status="full (passed)"
+            elif [[ "$verify_failed" == "true" ]]; then
+                verify_status="quick (FAILED — see warning email)"
+            else
+                verify_status="quick (passed)"
+            fi
+
+            local subject="[VaultWarden] Backup completed: $actual_type ($timestamp)"
+            local body
+            body="$(printf 'Backup type:  %s\nTimestamp:    %s\nFile:         %s\nVerification: %s\nOffsite sync: %s\nHost:         %s\n' \
+                "$actual_type" "$timestamp" \
+                "$(basename "${backup_file:-unknown}")" \
+                "$verify_status" \
+                "$rclone_status" \
+                "$(hostname -f 2>/dev/null || hostname)")"
+            send_notification_email "$subject" "$body" 2>/dev/null || \
+                backup_log_warn "Email notification failed (backup still succeeded)"
+        fi
+
+        backup_log_success "Backup completed successfully"
+        exit 0
+    elif [[ "$DRY_RUN" == "true" ]]; then
+        backup_log_success "Dry run completed"
+        exit 0
+    else
+        if [[ "$EMAIL_NOTIFY" == "true" ]]; then
+            local subject="[VaultWarden] Backup FAILED: $actual_type ($timestamp)"
+            local body
+            body="$(printf 'Backup type:  %s\nTimestamp:    %s\nHost:         %s\n\nCheck logs for details.\n' \
+                "$actual_type" "$timestamp" \
+                "$(hostname -f 2>/dev/null || hostname)")"
+            send_notification_email "$subject" "$body" 2>/dev/null || true
+        fi
+        log_error "Backup failed"
+        exit 1
+    fi
+}
+
+main "$@"
