@@ -740,10 +740,10 @@ _mv_step_validate() {
         return 1
     fi
 
-    if find /proc/*/fd -lname "${_MV_SOURCE}/*" -print0 2>/dev/null \
-            | xargs -r -0 ls -l 2>/dev/null \
-            | grep -q rsync; then
-        _mv_log error "rsync appears to be actively writing to ${_MV_SOURCE}."
+    if pgrep -x rsync >/dev/null 2>&1 \
+            && find /proc/*/fd -lname "${_MV_SOURCE}/*" -print0 2>/dev/null \
+               | grep -qzl ''; then
+        _mv_log error "An rsync process has open file descriptors in ${_MV_SOURCE}."
         _mv_log error "Wait for it to finish before migrating."
         return 1
     fi
