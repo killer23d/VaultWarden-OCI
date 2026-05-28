@@ -201,16 +201,9 @@ main() {
     local OPS_LOCK="/run/lock/vaultwarden-operations.lock"
     local _OPS_LOCK_FD
 
-    # Atomically create-or-replace the lock file with correct perms.
-    # install(1) sets mode + ownership at create time in a single syscall —
-    # no chmod/chown race window, and no [[ -e ]] guard that silently skips
-    # remediation when the file already exists with bad permissions (TOCTOU).
-    # Root ownership is correct: /run/lock is root:root 1775; this script
-    # always runs as root (require_root above). Service-user ownership is
-    # unnecessary for a process-coordination lock and was the root cause of
-    # the Permission denied error when SERVICE_USER/BACKUP_USER resolved to
-    # a non-root user before _load_env() had run.
-    install -m 0660 -o root -g root /dev/null "$OPS_LOCK"
+    # Create lock file with relaxed perms so non-root service users can acquire it.
+    touch "$OPS_LOCK"
+    chmod 0666 "$OPS_LOCK"
 
     exec {_OPS_LOCK_FD}>"$OPS_LOCK"
     if ! flock -n "$_OPS_LOCK_FD"; then
@@ -224,7 +217,8 @@ main() {
     # but no trap wired it to EXIT/signals, so the file was never cleaned up).
     local _MAINT_LOCK="/run/lock/vaultwarden-maintenance.lock"
     local _MAINT_LOCK_FD
-    install -m 0660 -o root -g root /dev/null "$_MAINT_LOCK"
+    touch "$_MAINT_LOCK"
+    chmod 0666 "$_MAINT_LOCK"
     exec {_MAINT_LOCK_FD}>"$_MAINT_LOCK"
     if ! flock -n "$_MAINT_LOCK_FD"; then
         log_error "Another maintenance operation is already running. Exiting."

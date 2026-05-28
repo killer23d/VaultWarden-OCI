@@ -593,6 +593,15 @@ _smtp_send() {
                 ;;
         esac
 
+        # Use --netrc-file to avoid exposing SMTP password in process argv
+        local _netrc_file
+        _netrc_file="$(mktemp -p /dev/shm vw-smtp-netrc.XXXXXX)"
+        chmod 600 "$_netrc_file"
+        # shellcheck disable=SC2064
+        trap "rm -f '$_netrc_file'" RETURN
+        printf 'machine %s\nlogin %s\npassword %s\n' \
+            "$SMTP_HOST" "$SMTP_USERNAME" "$SMTP_PASSWORD" > "$_netrc_file"
+
         curl -s \
             --connect-timeout 15 \
             --max-time 30 \
@@ -602,9 +611,11 @@ _smtp_send() {
             --url "$smtp_url" \
             --mail-from "$_smtp_from_addr" \
             --mail-rcpt "$to" \
-            --user "${SMTP_USERNAME}:${SMTP_PASSWORD}" \
+            --netrc-file "$_netrc_file" \
             --upload-file "$_msg_file"
-        return $?
+        local _smtp_rc=$?
+        rm -f "$_netrc_file"
+        return $_smtp_rc
     fi
 
     # Path B: No SMTP_PASSWORD → Postfix sidecar (normal production path)

@@ -126,9 +126,24 @@ local CERT_CRIT_DAYS=${CERT_CRIT_DAYS:-7}
 
 local _HEALTH_RUN_LOCK_FILE="/run/lock/vaultwarden-health.lock"
 local _HEALTH_LOCK_FD=""
+local _HEALTH_OPS_LOCK="/run/lock/vaultwarden-operations.lock"
+local _HEALTH_OPS_LOCK_FD=""
 
 _acquire_run_lock() {
-    install -m 0660 -o root -g root /dev/null "$_HEALTH_RUN_LOCK_FILE"
+    # Acquire shared operations lock to prevent concurrent health + maintenance
+    touch "$_HEALTH_OPS_LOCK"
+    chmod 0666 "$_HEALTH_OPS_LOCK"
+    exec {_HEALTH_OPS_LOCK_FD}>"$_HEALTH_OPS_LOCK" 2>/dev/null || {
+        log_error "Cannot open operations lock: ${_HEALTH_OPS_LOCK}"
+        return 1
+    }
+    if ! flock -n "$_HEALTH_OPS_LOCK_FD" 2>/dev/null; then
+        log_info "Another operation (maintenance/backup) is already running — skipping health check"
+        exit 0
+    fi
+
+    touch "$_HEALTH_RUN_LOCK_FILE"
+    chmod 0666 "$_HEALTH_RUN_LOCK_FILE"
 
     exec {_HEALTH_LOCK_FD}>"$_HEALTH_RUN_LOCK_FILE" 2>/dev/null || {
         log_error "Cannot open health run-lock: ${_HEALTH_RUN_LOCK_FILE}"
@@ -144,6 +159,10 @@ _release_run_lock() {
     [[ -n "${_HEALTH_LOCK_FD:-}" ]] || return 0
     flock -u "$_HEALTH_LOCK_FD" 2>/dev/null || true
     eval "exec ${_HEALTH_LOCK_FD}>&-" 2>/dev/null || true
+    if [[ -n "${_HEALTH_OPS_LOCK_FD:-}" ]]; then
+        flock -u "$_HEALTH_OPS_LOCK_FD" 2>/dev/null || true
+        eval "exec ${_HEALTH_OPS_LOCK_FD}>&-" 2>/dev/null || true
+    fi
 }
 
 local ALERT_LOCK_DIR="${ALERT_STATE_DIR:-$(_default_alert_state_dir)}"
