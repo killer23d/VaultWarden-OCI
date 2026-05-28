@@ -40,7 +40,7 @@ cd "${PROJECT_ROOT}"
 # Library loading
 # ---------------------------------------------------------------------------
 _LIBS_LOADED=false
-for _lib in log.sh config.sh common.sh storage.sh; do
+for _lib in log.sh config.sh common.sh storage.sh secrets.sh; do
     _lib_path="${PROJECT_ROOT}/lib/${_lib}"
     if [[ -f "$_lib_path" ]]; then
         # shellcheck disable=SC1090
@@ -124,18 +124,6 @@ _cs_clear_env_var() {
     mv "$tmp_file" "$env_file"
 }
 
-# Read a token from a flat secret file, rejecting placeholder values.
-_cs_read_secret_file() {
-    local path="$1"
-    [[ -f "$path" && -r "$path" ]] || return 0
-    local val
-    IFS= read -r val < "$path" || true
-    val="${val#${val%%[![:space:]]*}}"
-    val="${val%${val##*[![:space:]]}}"
-    if [[ -n "$val" && "$val" != CHANGE_ME* && "$val" != PLACEHOLDER* ]]; then
-        printf '%s' "$val"
-    fi
-}
 
 # ---------------------------------------------------------------------------
 # Read the currently configured LAPI port from config.yaml.
@@ -828,98 +816,24 @@ if [[ -f "$_CF_WORKER_BOUNCER_CONFIG_SRC" ]]; then
     elif [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] Would write ${_CF_WORKER_BOUNCER_CONFIG_DEST} from ${_CF_WORKER_BOUNCER_CONFIG_SRC}"
     else
-        _cf_zone_id="${CLOUDFLARE_ZONE_ID:-}"
-        _cf_account_id="${CF_ACCOUNT_ID:-}"
-        _CF_WORKER_TOKEN=""
-
+        cf_worker_bouncer_token=""
+        cloudflare_zone_id=""
+        cf_account_id=""
         if [[ "$AUTO_MODE" == "true" ]]; then
-            _cf_zone_id="${_cf_zone_id:-CHANGE_ME_CF_ZONE_ID}"
-            _cf_account_id="${_cf_account_id:-CHANGE_ME_CF_ACCOUNT_ID}"
-            _CF_WORKER_TOKEN="CHANGE_ME_CF_WORKER_BOUNCER_TOKEN"
+            cf_worker_bouncer_token="CHANGE_ME_CF_WORKER_BOUNCER_TOKEN"
+            cloudflare_zone_id="CHANGE_ME_CLOUDFLARE_ZONE_ID"
+            cf_account_id="CHANGE_ME_CF_ACCOUNT_ID"
             log_warn "Auto mode: Cloudflare values left as placeholders where missing."
-            log_warn "Set CF_WORKER_BOUNCER_TOKEN in .env then re-run: sudo ./utilities/setup-crowdsec.sh --force"
+            log_warn "Set CrowdSec Cloudflare secrets with: sudo utilities/setup-secrets.sh rotate <field>"
         else
-            _env_token="${CF_WORKER_BOUNCER_TOKEN:-}"
-            if [[ -n "$_env_token" && "$_env_token" != CHANGE_ME* && "$_env_token" != PLACEHOLDER* ]]; then
-                _CF_WORKER_TOKEN="$_env_token"
-                log_success "CF_WORKER_BOUNCER_TOKEN already set in .env — skipping prompt."
+            if ! ensure_sops_env; then
+                log_error "Failed to initialize SOPS environment for Cloudflare secret reads."
+                exit 1
             fi
-
-            if [[ -z "$_CF_WORKER_TOKEN" ]]; then
-                _mig_token=""
-                _mig_src=""
-                for _mig_path in \
-                    "${_project_state_dir}/secrets/.docker_secrets/cf_worker_bouncer_token" \
-                    "${PROJECT_ROOT}/secrets/.docker_secrets/cf_worker_bouncer_token"; do
-                    _mig_token="$(_cs_read_secret_file "$_mig_path")"
-                    if [[ -n "$_mig_token" ]]; then
-                        _mig_src="$_mig_path"
-                        break
-                    fi
-                done
-                if [[ -n "$_mig_token" ]]; then
-                    _CF_WORKER_TOKEN="$_mig_token"
-                    _cs_set_env_var "CF_WORKER_BOUNCER_TOKEN" "$_CF_WORKER_TOKEN"
-                    log_success "Migrated CF_WORKER_BOUNCER_TOKEN from ${_mig_src} to .env."
-                fi
-                unset _mig_token _mig_src _mig_path
-            fi
-
-            if [[ -z "$_CF_WORKER_TOKEN" ]]; then
-                log_info ""
-                log_info "══════════════════════════════════════════════════════════"
-                log_info " Cloudflare API token required by CrowdSec Workers bouncer"
-                log_info "══════════════════════════════════════════════════════════"
-                log_info " Required permissions:"
-                log_info "   Account: Workers KV Storage : Edit"
-                log_info "   Account: Workers Scripts    : Edit"
-                log_info "   Account: Account Settings   : Read"
-                log_info "   Account: Turnstile          : Edit"
-                log_info "   Account: D1                 : Edit"
-                log_info "   User:    User Details       : Read"
-                log_info "   Zone:    DNS                : Read  (scope to specific zone)"
-                log_info "   Zone:    Workers Routes     : Edit  (scope to specific zone)"
-                log_info "   Zone:    Zone               : Read  (scope to specific zone)"
-                log_info " Create at: https://dash.cloudflare.com/profile/api-tokens"
-                log_info " IMPORTANT: Scope the token to a specific zone, not All zones."
-                log_info "══════════════════════════════════════════════════════════"
-
-                if [[ -z "$_cf_zone_id" ]]; then
-                    while [[ -z "$_cf_zone_id" ]]; do
-                        read -r -p "Enter CLOUDFLARE_ZONE_ID: " _cf_zone_id
-                        [[ -z "$_cf_zone_id" ]] && log_warn "CLOUDFLARE_ZONE_ID cannot be empty."
-                    done
-                else
-                    log_info "CLOUDFLARE_ZONE_ID already set — skipping prompt."
-                fi
-
-                if [[ -z "$_cf_account_id" ]]; then
-                    read -r -p "Enter CF_ACCOUNT_ID (optional, press Enter to skip): " _cf_account_id
-                else
-                    log_info "CF_ACCOUNT_ID already set — skipping prompt."
-                fi
-
-                while [[ -z "$_CF_WORKER_TOKEN" ]]; do
-                    read -r -s -p "Enter Cloudflare Workers API token (input hidden): " _CF_WORKER_TOKEN
-                    echo ""
-                    if [[ -z "$_CF_WORKER_TOKEN" ]]; then
-                        log_warn "Token cannot be empty. Press Ctrl+C to skip and configure later."
-                    fi
-                done
-                log_success "Cloudflare Workers API token accepted."
-                _cs_set_env_var "CF_WORKER_BOUNCER_TOKEN" "$_CF_WORKER_TOKEN"
-                log_success "CF_WORKER_BOUNCER_TOKEN saved to .env."
-            else
-                if [[ -n "$_cf_zone_id" ]]; then
-                    log_info "CLOUDFLARE_ZONE_ID already set — skipping prompt."
-                fi
-                if [[ -n "$_cf_account_id" ]]; then
-                    log_info "CF_ACCOUNT_ID already set — skipping prompt."
-                fi
-            fi
-
-            _cs_set_env_var "CLOUDFLARE_ZONE_ID" "$_cf_zone_id"
-            [[ -n "$_cf_account_id" ]] && _cs_set_env_var "CF_ACCOUNT_ID" "$_cf_account_id"
+            cf_worker_bouncer_token=$(sops -d --extract '["cf_worker_bouncer_token"]' "$SECRETS_FILE" 2>/dev/null || true)
+            cloudflare_zone_id=$(sops -d --extract '["cloudflare_zone_id"]' "$SECRETS_FILE" 2>/dev/null || true)
+            cf_account_id=$(sops -d --extract '["cf_account_id"]' "$SECRETS_FILE" 2>/dev/null || true)
+            cleanup_secrets_environment
         fi
 
         _cf_free_plan="${CF_FREE_PLAN:-true}"
@@ -933,13 +847,13 @@ if [[ -f "$_CF_WORKER_BOUNCER_CONFIG_SRC" ]]; then
 
         # Resolve the account email for the account_name field.
         # Falls back to a placeholder if not set in .env.
-        _cf_account_email="${CF_ACCOUNT_EMAIL:-${CF_ACCOUNT_ID:-CHANGE_ME_CF_ACCOUNT_EMAIL}}"
+        _cf_account_email="${CF_ACCOUNT_EMAIL:-${cf_account_id:-CHANGE_ME_CF_ACCOUNT_EMAIL}}"
 
         mkdir -p /etc/crowdsec/bouncers
         sed \
-            -e "s|TOKEN_CF_ZONE_ID|${_cf_zone_id}|g" \
-            -e "s|TOKEN_CF_ACCOUNT_ID|${_cf_account_id:-CHANGE_ME_CF_ACCOUNT_ID}|g" \
-            -e "s|TOKEN_CF_WORKER_BOUNCER_TOKEN|${_CF_WORKER_TOKEN}|g" \
+            -e "s|TOKEN_CF_ZONE_ID|${cloudflare_zone_id}|g" \
+            -e "s|TOKEN_CF_ACCOUNT_ID|${cf_account_id:-CHANGE_ME_CF_ACCOUNT_ID}|g" \
+            -e "s|TOKEN_CF_WORKER_BOUNCER_TOKEN|${cf_worker_bouncer_token}|g" \
             -e "s|TOKEN_CF_ACCOUNT_EMAIL|${_cf_account_email}|g" \
             -e "s|CHANGE_ME_BOUNCER_KEY|${_CF_BOUNCER_KEY}|g" \
             -e "s|.*only_include_decisions_from:.*|${_only_from_line}|g" \
@@ -949,7 +863,7 @@ if [[ -f "$_CF_WORKER_BOUNCER_CONFIG_SRC" ]]; then
         chmod 600 "$_CF_WORKER_BOUNCER_CONFIG_DEST"
         log_success "Cloudflare Workers bouncer config written to ${_CF_WORKER_BOUNCER_CONFIG_DEST} (mode 600)."
         log_info "NOTE: The -g auto-config flag is not used — it fails on multi-zone accounts."
-        log_info "Config is fully built from .env values (zone_id, account_id, token)."
+        log_info "Config is fully built from secrets.yaml values (zone_id, account_id, token)."
 
         if [[ "$AUTONOMOUS_MODE" == "true" ]]; then
             log_info "Deploying Workers + KV to Cloudflare in autonomous mode (-S)..."

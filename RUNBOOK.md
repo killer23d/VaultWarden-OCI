@@ -11,7 +11,10 @@ For first-time setup on a new host:
 
 1. Configure OCI Security List (ports `80`, `443`, and `22`).
 2. Copy `.env.example` to `.env` and set at minimum: `DOMAIN`, `ADMIN_EMAIL`,
-   `CLOUDFLARE_ZONE_ID`, `CF_ACCOUNT_ID`, and your email settings.
+   your email settings.
+   Set CrowdSec Cloudflare secrets via `sudo utilities/setup-secrets.sh rotate cf_worker_bouncer_token`,
+   `sudo utilities/setup-secrets.sh rotate cloudflare_zone_id`, and
+   `sudo utilities/setup-secrets.sh rotate cf_account_id`.
 3. Store the Cloudflare Workers bouncer token:
    `./edit-secrets.sh rotate cf_worker_bouncer_token`
 4. Run `sudo ./setup.sh install --domain <fqdn> --email <admin-email> --auto`
