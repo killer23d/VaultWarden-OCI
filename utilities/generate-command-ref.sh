@@ -1,111 +1,11 @@
 #!/usr/bin/env bash
-# utilities/generate-command-ref.sh — Generates docs/COMMAND-REFERENCE.md
-# from live Makefile targets and script --help output.
-#
-# This script is idempotent and safe to run multiple times. Output is
-# deterministic for the same input so CI can detect drift.
-#
-# Usage:
-#   bash utilities/generate-command-ref.sh
-#   make docs
+# utilities/generate-command-ref.sh — compatibility wrapper for the command
+# reference writer used by CI and `make docs`.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUTPUT_FILE="${SCRIPT_DIR}/docs/COMMAND-REFERENCE.md"
-
-show_help() {
-    cat <<'EOF'
-VaultWarden-OCI Command Reference Generator
-
-USAGE:
-    bash utilities/generate-command-ref.sh [--help|-h]
-    make docs
-
-DESCRIPTION:
-    Regenerates docs/COMMAND-REFERENCE.md from Makefile targets and script
-    help output. Output is deterministic for CI doc-drift checks.
-
-OPTIONS:
-    --help, -h      Show this help without regenerating docs
-EOF
-}
-
-if [[ $# -gt 0 ]]; then
-    case "$1" in
-        --help|-h|help)
-            show_help
-            exit 0
-            ;;
-        *)
-            echo "Unknown option: $1" >&2
-            show_help >&2
-            exit 2
-            ;;
-    esac
-fi
-
-# ── Makefile targets ─────────────────────────────────────────────────────────
-generate_makefile_targets() {
-    printf '## Makefile Targets\n\n'
-    printf '| Target | Description |\n'
-    printf '|--------|-------------|\n'
-    awk -F ':.*##' '/^[a-zA-Z_-]+:.*##/ { printf "| `make %s` | %s |\n", $1, $2 }' \
-        "${SCRIPT_DIR}/Makefile"
-    printf '\n'
-}
-
-# ── Script help output ──────────────────────────────────────────────────────
-sanitize_help_output() {
-    # Keep generated docs deterministic: cap help text length, normalize timestamps,
-    # strip ANSI escape sequences, and drop NUL bytes that can make diffs noisy.
-    head -60 \
-        | sed \
-            -e 's/\[[0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}\]/[HH:MM:SS]/g' \
-            -e 's/\x1b\[[0-9;]*[mKHF]//g' \
-        | tr -d '\000'
-}
-
-run_help_command() {
-    local script="$1"
-    shift
-
-    local raw_out rc
-    set +e
-    raw_out="$(timeout 5 bash "$script" "$@" 2>&1)"
-    rc=$?
-    set -e
-
-    HELP_COMMAND_OUTPUT="$(printf '%s\n' "$raw_out" | sanitize_help_output)"
-    return "$rc"
-}
-
-generate_script_help() {
-    local script="$1"
-    local name
-    name="$(basename "$script")"
-
-    echo "### ${name}"
-    echo ""
-    echo '```'
-    # Try --help first; if that fails (non-zero exit or empty output), fall back
-    # to the 'help' subcommand used by subcommand-driven scripts. Capture the
-    # command status before truncating output so a successful help page longer
-    # than 60 lines is not mistaken for a failure due to SIGPIPE.
-    local help_out=""
-    if run_help_command "$script" --help && [[ -n "$HELP_COMMAND_OUTPUT" ]]; then
-        help_out="$HELP_COMMAND_OUTPUT"
-    elif run_help_command "$script" help && [[ -n "$HELP_COMMAND_OUTPUT" ]]; then
-        help_out="$HELP_COMMAND_OUTPUT"
-    fi
-
-    if [[ -n "$help_out" ]]; then
-        printf '%s\n' "$help_out"
-    else
-        echo '(--help not available or requires root)'
-    fi
-    echo '```'
-    echo ""
+exec bash "${SCRIPT_DIR}/utilities/write-command-reference.sh" "$@"
 }
 
 # ── Main ─────────────────────────────────────────────────────────────────────
