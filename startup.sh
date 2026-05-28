@@ -260,7 +260,7 @@ validate_prerequisites() {
 # prepare_log_directories() handles logs/ and backups/ with ownership logic;
 # this function covers the remaining non-log subtrees.
 prepare_directories() {
-  local project_state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
+  local project_state_dir="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}"
 
   local required_dirs=(
     "${project_state_dir}/data"
@@ -289,7 +289,7 @@ prepare_directories() {
 prepare_log_directories() {
   log_info "Ensuring base state directory exists..."
 
-  local project_state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
+  local project_state_dir="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}"
 
   if [[ "$DRY_RUN" == "true" ]]; then
     log_info "[DRY RUN] Would create base state directory: $project_state_dir"

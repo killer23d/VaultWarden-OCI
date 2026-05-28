@@ -54,7 +54,8 @@ DATA_DEVICE ?=
         info version shell config diagnose \
         clean clean-all prune \
         unban crowdsec-status crowdsec-alerts security-report \
-        uninstall uninstall-dry-run
+        uninstall uninstall-dry-run \
+        docs backup-manifest
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 # require-root: used for targets that genuinely need elevated privileges
@@ -1006,3 +1007,14 @@ uninstall: ## Uninstall VaultWarden-OCI (interactive)
 
 uninstall-dry-run: ## Simulate uninstall without deleting anything (--dry-run mode)
 	@utilities/uninstall-vaultwarden.sh run --dry-run
+
+# ===========================================================================
+
+##@ Documentation
+# ===========================================================================
+
+docs: ## Regenerate docs/COMMAND-REFERENCE.md from live script --help and Makefile targets
+	@bash utilities/generate-command-ref.sh
+
+backup-manifest: ## Show what is included and excluded in a full/emergency backup
+	@bash -c 'source utilities/backup-run.sh 2>/dev/null; print_backup_manifest'

@@ -877,19 +877,34 @@ perform_full_backup() {
 
     backup_log_info "Archiving state (relative paths, safe for staged restore)..."
 
-    local tar_excludes=(
-        "--exclude=${SCRIPT_DIR#/}/.git"
-        "--exclude=${SCRIPT_DIR#/}/backups"
-        "--exclude=${SCRIPT_DIR#/}/logs"
-        "--exclude=${SCRIPT_DIR#/}/.rate-limit"
-        "--exclude=${SCRIPT_DIR#/}/secrets"
-        "--exclude=${state_dir#/}/backups"
-        "--exclude=${state_dir#/}/logs"
-        "--exclude=*.sock"
-        "--exclude=*.lock"
-        "--exclude=*.tmp"
-        "--exclude=*.age.tmp"
+    # Canonical backup exclusion list — single source of truth.
+    # Keep in sync with print_backup_manifest() below and docs/BACKUP-RESTORE.md.
+    local -a _BACKUP_EXCLUDES=(
+        ".git"
+        "backups"
+        "logs"
+        ".rate-limit"
+        "secrets"
+        "*.sock"
+        "*.lock"
+        "*.tmp"
+        "*.age.tmp"
     )
+    local -a tar_excludes=()
+    local excl
+    for excl in "${_BACKUP_EXCLUDES[@]}"; do
+        case "$excl" in
+            \*.*)
+                tar_excludes+=("--exclude=${excl}")
+                ;;
+            *)
+                tar_excludes+=("--exclude=${SCRIPT_DIR#/}/${excl}")
+                # Also exclude the same paths under state_dir where applicable
+                [[ "$excl" == "backups" || "$excl" == "logs" ]] && \
+                    tar_excludes+=("--exclude=${state_dir#/}/${excl}")
+                ;;
+        esac
+    done
 
     local tar_sources=()
 
@@ -964,6 +979,29 @@ perform_full_backup() {
 
     backup_log_info "${backup_label_title} backup: $(basename "$enc")"
     echo "$enc"
+}
+
+# print_backup_manifest — Show what is included/excluded in a full/emergency backup.
+# Called by `make backup-manifest`.
+print_backup_manifest() {
+    local -a _BACKUP_EXCLUDES=(
+        ".git"
+        "backups"
+        "logs"
+        ".rate-limit"
+        "secrets"
+        "*.sock"
+        "*.lock"
+        "*.tmp"
+        "*.age.tmp"
+    )
+    echo "=== Full Backup Contents ==="
+    echo "Included: Project root + state directory"
+    echo "Excluded:"
+    local excl
+    for excl in "${_BACKUP_EXCLUDES[@]}"; do
+        echo "  - $excl"
+    done
 }
 
 _check_backup_deps() {

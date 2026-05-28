@@ -27,6 +27,7 @@ jobs:
             "make logs FOLLOW=true"
             "--puid"
             "--pgid"
+            "simple_verify_age_key"
           )
           FAIL=0
           for term in "${STALE_TERMS[@]}"; do
@@ -84,11 +85,13 @@ jobs:
 
       - name: Systemd unit hardening check
         run: |
-          REQUIRED_DIRECTIVES=(PrivateTmp ProtectSystem ProtectHome)
+          REQUIRED_DIRECTIVES=(PrivateTmp ProtectSystem ProtectHome NoNewPrivileges)
           FAIL=0
           for unit in systemd/vaultwarden-*.service; do
             [[ "$unit" == *template* ]] && continue
             for directive in "${REQUIRED_DIRECTIVES[@]}"; do
+              # iptables service legitimately omits NoNewPrivileges (needs elevated caps)
+              [[ "$unit" == *iptables* ]] && [[ "$directive" == "NoNewPrivileges" ]] && continue
               if ! grep -q "^${directive}=" "$unit"; then
                 echo "MISSING $directive in $unit"
                 FAIL=1
@@ -96,3 +99,13 @@ jobs:
             done
           done
           [[ $FAIL -eq 0 ]] && echo "All units pass hardening check." || exit 1
+
+      - name: Verify COMMAND-REFERENCE.md is up to date
+        run: |
+          cp docs/COMMAND-REFERENCE.md /tmp/COMMAND-REFERENCE.committed.md
+          bash utilities/generate-command-ref.sh
+          if ! diff -q docs/COMMAND-REFERENCE.md /tmp/COMMAND-REFERENCE.committed.md > /dev/null 2>&1; then
+            echo "COMMAND-REFERENCE.md is stale. Run: make docs"
+            diff docs/COMMAND-REFERENCE.md /tmp/COMMAND-REFERENCE.committed.md || true
+            exit 1
+          fi

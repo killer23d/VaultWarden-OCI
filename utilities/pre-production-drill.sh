@@ -327,6 +327,66 @@ drill_stack_restart_sequence() {
     done
 }
 
+drill_full_backup_restore_smoketest() {
+    _step_header "Full Backup Restore Smoke-Test (decrypt + manifest, non-destructive)"
+
+    local base_dir
+    base_dir="$(get_config_value "BACKUP_DIR" \
+        "$(vw_default_backup_dir 2>/dev/null || echo "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/backups")")"
+
+    local full_dir="$base_dir/full"
+    if [[ ! -d "$full_dir" ]]; then
+        _step_skip "restore-smoketest" "no full backup directory found at $full_dir"
+        return
+    fi
+
+    local backup_file
+    backup_file=$(find "$full_dir" -name "*.age" -type f 2>/dev/null \
+        | sort | tail -1 || true)
+
+    if [[ -z "${backup_file:-}" ]]; then
+        _step_skip "restore-smoketest" "no .age files found in $full_dir"
+        return
+    fi
+    _step_pass "restore-smoketest-found: $(basename "$backup_file")"
+
+    local key_file="${SOPS_AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}"
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    register_cleanup rm -rf "$tmpdir"
+
+    log_info "  Decrypting + listing manifest (no actual restore)..."
+    if age -d -i "$key_file" "$backup_file" 2>/dev/null \
+        | tar -tz -I zstd > "$tmpdir/manifest.txt" 2>&1; then
+        _step_pass "restore-smoketest-decrypt: archive decrypted and manifest extracted"
+    else
+        _step_fail "restore-smoketest-decrypt" "failed to decrypt or list archive contents"
+        rm -rf "$tmpdir"
+        return
+    fi
+
+    local missing_files=()
+    if ! grep -q 'docker-compose.yml' "$tmpdir/manifest.txt" 2>/dev/null; then
+        missing_files+=("docker-compose.yml")
+    fi
+    if ! grep -q '.env.example' "$tmpdir/manifest.txt" 2>/dev/null; then
+        missing_files+=(".env.example")
+    fi
+
+    if (( ${#missing_files[@]} == 0 )); then
+        local file_count
+        file_count=$(wc -l < "$tmpdir/manifest.txt")
+        _step_pass "restore-smoketest-manifest: ${file_count} files; docker-compose.yml and .env.example present"
+    else
+        _step_fail "restore-smoketest-manifest" "missing expected files: ${missing_files[*]}"
+    fi
+
+    rm -rf "$tmpdir"
+
+    log_info "  NOTE: Full restore was NOT performed — this is a decrypt + manifest"
+    log_info "  check only. For a full restore test, use: ./restore.sh latest --dry-run"
+}
+
 _print_drill_summary() {
     printf '\n'
     log_header "Pre-Production Drill Summary"
@@ -367,6 +427,7 @@ main() {
     drill_backup_dryrun      || true
     drill_backup_verify      || true
     drill_restore_path       || true
+    drill_full_backup_restore_smoketest || true
     drill_email              || true
     drill_stack_restart_sequence || true
 

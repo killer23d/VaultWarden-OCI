@@ -753,7 +753,7 @@ fi
 # ---------------------------------------------------------------------------
 log_info "=== PHASE 4: Acquisition config ==="
 
-_project_state_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
+_project_state_dir="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}"
 _acquis_dest="/etc/crowdsec/acquis.d/vaultwarden.yaml"
 _acquis_src="${PROJECT_ROOT}/crowdsec/acquis.yaml"
 

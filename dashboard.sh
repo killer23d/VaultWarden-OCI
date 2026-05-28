@@ -222,6 +222,25 @@ draw_live_stats() {
     fi
     echo -e " ${BLD}Last backup:${NC}  ${last_backup_str}"
 
+    # --- Last Backup Result ---
+    local _last_backup_line
+    _last_backup_line=$(grep -E '(PASS|FAIL|ERROR|SUCCESS)' \
+        "${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs/backup.log" \
+        2>/dev/null | tail -1 || echo "No backup log found")
+    printf '  Last result:  %s\n' "$_last_backup_line"
+
+    # --- Systemd Timers ---
+    local _timer_output
+    _timer_output=$(systemctl list-timers --no-pager 2>/dev/null \
+        | grep vaultwarden || true)
+    if [[ -n "$_timer_output" ]]; then
+        echo -e " ${BLD}Timers:${NC}"
+        printf '%s\n' "$_timer_output" \
+            | awk '{printf "    %-40s → %s %s\n", $NF, $1, $2}'
+    else
+        echo -e " ${BLD}Timers:${NC}  ${YLW}(systemd not available)${NC}"
+    fi
+
     # --- Email Queue ---
     local queue_count=0 queue_str
     if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "${CONTAINER_POSTFIX}"; then
