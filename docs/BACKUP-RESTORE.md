@@ -136,7 +136,7 @@ Your Age key (`secrets/keys/age-key.txt`) is the single point of failure for all
 
 ### Tier 1 — Automatic Health Check (runs on every backup)
 
-`backup.sh` validates the Age key before every backup run. It checks that the key file exists, auto-corrects permissions to 600 if needed, validates the key structure (including the `AGE-SECRET-KEY-1` prefix on the private key body), and performs a live encrypt/decrypt roundtrip using `printf '%s'` for deterministic byte handling. If the check fails, the backup is aborted. Call `make verify-key` or use the dashboard key-verify menu option.
+`backup.sh` validates the Age key before every backup run. It checks that the key file exists, auto-corrects permissions to 600 if needed, validates the key structure (including the `AGE-SECRET-KEY-1` prefix on the private key body), and performs a live encrypt/decrypt roundtrip using `printf '%s'` for deterministic byte handling. If the check fails, the backup is aborted. Call `make key-health` or use the dashboard key-verify menu option.
 
 No action required — this runs automatically.
 
@@ -446,7 +446,7 @@ docker compose start vaultwarden
 make key-show   # check path, permissions, public key
 
 # Verify the Age key
-make verify-key
+make key-health
 # or use the dashboard key-verify menu option
 
 # If missing, restore from your password manager escrow (Tier 2)

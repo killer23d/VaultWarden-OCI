@@ -718,7 +718,7 @@ make key-health
 journalctl -u vaultwarden-db-backup.service --no-pager
 
 # 5. Verify the Age key
-make verify-key
+make key-health
 # or use the dashboard key-verify menu option
 ```
 
