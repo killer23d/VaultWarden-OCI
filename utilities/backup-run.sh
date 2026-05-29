@@ -1160,18 +1160,20 @@ main() {
     local OPS_LOCK="/run/lock/vaultwarden-operations.lock"
 
     if [[ "$FORCE" != "true" && "$DRY_RUN" != "true" ]]; then
-        # Acquire shared operations lock to prevent concurrent backup + maintenance
-        _ensure_lock_file "$OPS_LOCK"
+        # Open lock files BEFORE _ensure_lock_file chowns them away from root.
+        # touch ensures the file exists so exec can open it, then we fix ownership.
+        touch "$OPS_LOCK"
         exec {OPS_LOCK_FD}>"$OPS_LOCK"
-        if ! flock -n "$OPS_LOCK_FD"; then
-            log_error "Another operation (maintenance/restore) is already running. Aborting."
-            log_info  "Wait for it to finish or use --force to override."
-            exit 1
-        fi
+        _ensure_lock_file "$OPS_LOCK"
+    if ! flock -n "$OPS_LOCK_FD"; then
+        log_error "Another operation (maintenance/restore) is already running. Aborting."
+        log_info  "Wait for it to finish or use --force to override."
+        exit 1
+    fi
 
-        _ensure_lock_file "$LOCK_FILE"
-
+        touch "$LOCK_FILE"
         exec {LOCK_FD}>"$LOCK_FILE"
+        _ensure_lock_file "$LOCK_FILE"
         if ! flock -n "$LOCK_FD"; then
             log_error "Another backup is already running (could not acquire lock)."
             log_info  "Wait for it to finish or use --force if you are certain it is stuck."
