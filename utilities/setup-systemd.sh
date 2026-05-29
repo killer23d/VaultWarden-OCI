@@ -253,8 +253,72 @@ _resolve_service_identity() {
     printf '%s:%s\n' "$service_user" "$service_group"
 }
 
+# _ensure_lock_group SERVICE_USER
+#
+# Creates the 'vaultwarden' system group and adds SERVICE_USER + root to it.
+# This group is the shared identity for lock files: mode 0660 root:vaultwarden
+# allows both the systemd service user (ubuntu) and root (sudo callers) to
+# open the same flock fd without AppArmor interference.
+#
+# Idempotent — safe to run on every install.
+# Dry-run aware.
+_ensure_lock_group() {
+    local service_user="$1"
+    local lock_group="vaultwarden"
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would ensure system group '${lock_group}' exists"
+        log_info "[DRY RUN] Would add '${service_user}' and 'root' to group '${lock_group}'"
+        return 0
+    fi
+
+    # Create the group if it does not exist.
+    if ! getent group "$lock_group" >/dev/null 2>&1; then
+        groupadd --system "$lock_group" || {
+            log_error "_ensure_lock_group: failed to create group '${lock_group}'"
+            log_error "  Fix: sudo groupadd --system ${lock_group}"
+            return 1
+        }
+        log_success "Created system group: ${lock_group}"
+    else
+        log_info "Group '${lock_group}' already exists — skipping creation."
+    fi
+
+    # Add service user to the lock group (idempotent).
+    if ! id -nG "$service_user" 2>/dev/null | grep -qw "$lock_group"; then
+        usermod -aG "$lock_group" "$service_user" || {
+            log_error "_ensure_lock_group: failed to add '${service_user}' to '${lock_group}'"
+            return 1
+        }
+        log_success "Added '${service_user}' to group '${lock_group}'"
+    else
+        log_info "'${service_user}' is already a member of '${lock_group}'"
+    fi
+
+    # Add root to the lock group (idempotent).
+    if ! id -nG root 2>/dev/null | grep -qw "$lock_group"; then
+        usermod -aG "$lock_group" root || {
+            log_error "_ensure_lock_group: failed to add 'root' to '${lock_group}'"
+            return 1
+        }
+        log_success "Added 'root' to group '${lock_group}'"
+    else
+        log_info "'root' is already a member of '${lock_group}'"
+    fi
+
+    log_info "NOTE: New group membership takes effect in the NEXT login session."
+    log_info "  systemd services pick it up immediately (new process per run)."
+    log_info "  Interactive sudo sessions need: exec sudo -i  (or re-login)"
+}
+
 _ensure_runtime_lock_files() {
-    local service_user="$1" service_group="$2"
+    local service_user="$1"
+    # service_group ($2) is intentionally unused: lock files are always
+    # root:vaultwarden regardless of the service user's primary group.
+    # This allows both the systemd service user (ubuntu) and root (sudo
+    # callers) to open the same flock fd. See _ensure_lock_group.
+    local lock_owner="root"
+    local lock_group="vaultwarden"
     local -a lock_files=(
         "/run/lock/vaultwarden-backup.lock"
         "/run/lock/vaultwarden-operations.lock"
@@ -265,15 +329,28 @@ _ensure_runtime_lock_files() {
     local lock_file
     for lock_file in "${lock_files[@]}"; do
         if [[ "$DRY_RUN" == "true" ]]; then
-            log_info "[DRY RUN] Would ensure lock file ownership: ${lock_file} -> ${service_user}:${service_group} (0660)"
+            log_info "[DRY RUN] Would ensure lock file: ${lock_file} -> ${lock_owner}:${lock_group} 0660"
             continue
         fi
+        # Self-heal: remove stale locks not actively held before recreating.
         if [[ -e "$lock_file" ]]; then
-            chown "${service_user}:${service_group}" "$lock_file" 2>/dev/null || true
-            chmod 0660 "$lock_file" 2>/dev/null || true
-        else
-            install -m 0660 -o "$service_user" -g "$service_group" /dev/null "$lock_file" 2>/dev/null || true
+            if flock -n "$lock_file" true 2>/dev/null; then
+                rm -f "$lock_file" 2>/dev/null || true
+            fi
         fi
+        if [[ ! -e "$lock_file" ]]; then
+            install -m 0660 -o "$lock_owner" -g "$lock_group" /dev/null "$lock_file" 2>/dev/null || {
+                log_warn "_ensure_runtime_lock_files: could not create ${lock_file}"
+                log_warn "  Possible cause: group '${lock_group}' does not exist yet."
+                log_warn "  This resolves itself after _ensure_lock_group completes."
+                continue
+            }
+        else
+            # File is actively held — correct permissions in place without removing.
+            chown "${lock_owner}:${lock_group}" "$lock_file" 2>/dev/null || true
+            chmod 0660 "$lock_file" 2>/dev/null || true
+        fi
+        log_success "Lock file ready: ${lock_file} (${lock_owner}:${lock_group} 0660)"
     done
 }
 
@@ -715,10 +792,9 @@ install_units() {
         log_warn "Some unit files were missing -- check the systemd/ directory."
     fi
 
+    _ensure_lock_group "$service_user"
     _ensure_runtime_lock_files "$service_user" "$service_group"
-
     _install_service_identity_dropin "$service_user" "$service_group"
-
     _install_rwpaths_dropin
 
     log_info "Reloading systemd daemon ..."
