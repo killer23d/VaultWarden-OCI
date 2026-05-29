@@ -16,6 +16,7 @@ source "$PROJECT_ROOT/lib/email.sh"
 source "$PROJECT_ROOT/lib/docker.sh"
 source "$PROJECT_ROOT/lib/backup-utils.sh"
 source "$PROJECT_ROOT/lib/crypto.sh"
+source "$PROJECT_ROOT/lib/secrets.sh"
 source "$PROJECT_ROOT/lib/storage.sh"
 SCRIPT_DIR="$_SAVE_SCRIPT_DIR"
 unset _SAVE_SCRIPT_DIR
