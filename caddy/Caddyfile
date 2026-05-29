@@ -22,6 +22,7 @@
 	servers {
 		trusted_proxies cloudflare
 		client_ip_headers Cf-Connecting-Ip
+		protocols tls1.2
 		timeouts {
 			read_body   10s
 			read_header 10s
