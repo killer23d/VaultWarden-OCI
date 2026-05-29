@@ -6,20 +6,17 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+# lib/secrets.sh recomputes SCRIPT_DIR at load time, so save and restore PROJECT_ROOT's value.
 _SAVE_SCRIPT_DIR="$PROJECT_ROOT"
 source "$PROJECT_ROOT/lib/log.sh"
 source "$PROJECT_ROOT/lib/config.sh"
 source "$PROJECT_ROOT/lib/common.sh"
 init_common_lib "$0"
 source "$PROJECT_ROOT/lib/email.sh"
-source "$PROJECT_ROOT/lib/docker.sh"
-source "$PROJECT_ROOT/lib/backup-utils.sh"
 source "$PROJECT_ROOT/lib/crypto.sh"
-_MAINT_SCRIPT_DIR="$PROJECT_ROOT"
 source "$PROJECT_ROOT/lib/secrets.sh"
-SCRIPT_DIR="$_MAINT_SCRIPT_DIR"
-unset _MAINT_SCRIPT_DIR
-source "$PROJECT_ROOT/lib/storage.sh"
+SCRIPT_DIR="$_SAVE_SCRIPT_DIR"
+unset _SAVE_SCRIPT_DIR
 
 trap 'log_error "${BASH_SOURCE[0]}: failed at line ${LINENO} (exit $?)"; exit 1' ERR
 
@@ -41,6 +38,16 @@ OPTIONS:
     --dry-run     Preview what would be done without making changes
     --help, -h    Show this help
 
+SECRET SOURCE PRIORITY:
+    caddy_cloudflare_dns_token — resolved in order:
+        1. decrypt_secret() from encrypted secrets/secrets.yaml
+        2. Host file: $CF_TOKEN_FILE or secrets/.docker_secrets/caddy_cloudflare_dns_token
+        3. Caddy container: /run/secrets/caddy_cloudflare_dns_token
+
+    cloudflare_zone_id — resolved in order:
+        1. decrypt_secret() from encrypted secrets/secrets.yaml
+        2. CLOUDFLARE_ZONE_ID environment variable / .env
+
 EXIT CODES:
     0 — DNS record up to date or updated successfully
     1 — DNS update failed
@@ -53,15 +60,86 @@ _load_env() {
     return 0
 }
 
+# _resolve_cf_token
+# Priority: decrypt_secret → host secret file → Caddy container secret.
+_resolve_cf_token() {
+    local token
+
+    # 1. Encrypted secrets file (preferred — no plaintext on disk).
+    if token=$(decrypt_secret "caddy_cloudflare_dns_token" 2>/dev/null) && [[ -n "$token" ]]; then
+        log_debug "Cloudflare token loaded via decrypt_secret"
+        printf '%s' "$token"
+        return 0
+    fi
+
+    # 2. Host-side Docker secret file.
+    local token_file
+    token_file="${CF_TOKEN_FILE:-${SCRIPT_DIR}/secrets/.docker_secrets/caddy_cloudflare_dns_token}"
+    if [[ -f "$token_file" ]]; then
+        local token_perms
+        token_perms=$(stat -c%a "$token_file" 2>/dev/null \
+                   || stat -f%Lp "$token_file" 2>/dev/null \
+                   || echo "")
+        case "$token_perms" in
+            444|400|600|640)
+                log_debug "Cloudflare token file permissions OK ($token_perms)"
+                ;;
+            "")
+                log_warn "Cannot determine permissions on $token_file — proceeding with caution"
+                ;;
+            *)
+                log_error "Cloudflare token file has insecure permissions ($token_perms): $token_file"
+                log_error "Expected 444 (docker secret) or 400/600. Fix with: chmod 444 '$token_file'"
+                return 1
+                ;;
+        esac
+        token=$(cat "$token_file") \
+            || { log_error "Cannot read Cloudflare API token from host secret file"; return 1; }
+        log_debug "Cloudflare token loaded from host secret file: $token_file"
+        printf '%s' "$token"
+        return 0
+    fi
+
+    # 3. Caddy container secret (fallback when host file is absent).
+    token=$(docker compose exec -T caddy \
+        cat /run/secrets/caddy_cloudflare_dns_token 2>/dev/null) \
+        || { log_error "Cannot read Cloudflare API token (host file: $token_file not found, Caddy container may be stopped)"; return 1; }
+    log_debug "Cloudflare token loaded from Caddy container secret"
+    printf '%s' "$token"
+    return 0
+}
+
+# _resolve_zone_id
+# Priority: decrypt_secret → CLOUDFLARE_ZONE_ID env / .env.
+_resolve_zone_id() {
+    local zone_id
+
+    # 1. Encrypted secrets file (preferred).
+    if zone_id=$(decrypt_secret "cloudflare_zone_id" 2>/dev/null) && [[ -n "$zone_id" ]]; then
+        log_debug "Cloudflare zone_id loaded via decrypt_secret"
+        printf '%s' "$zone_id"
+        return 0
+    fi
+
+    # 2. Environment variable (set by .env or systemd EnvironmentFile).
+    if [[ -n "${CLOUDFLARE_ZONE_ID:-}" ]]; then
+        log_debug "Cloudflare zone_id loaded from CLOUDFLARE_ZONE_ID environment variable"
+        printf '%s' "${CLOUDFLARE_ZONE_ID}"
+        return 0
+    fi
+
+    log_error "cloudflare_zone_id not found in encrypted secrets or CLOUDFLARE_ZONE_ID env var"
+    log_error "Fix: sudo utilities/setup-secrets.sh rotate cloudflare_zone_id"
+    return 1
+}
+
 update_dns_record() {
     if [[ "$UPDATE_DNS" != "true" ]]; then log_info "Skipping DNS update"; return 0; fi
     if [[ "$DRY_RUN"    == "true" ]]; then log_info "[DRY RUN] Would check and update Cloudflare DNS A record"; return 0; fi
 
     local domain="${DOMAIN:-}"
     domain=$(echo "$domain" | sed 's|https\?://||; s|/.*$||')
-    local zone_id="${CLOUDFLARE_ZONE_ID:-}"
-    [[ -z "$domain"  ]] && { log_error "DOMAIN not set in .env"; return 1; }
-    [[ -z "$zone_id" ]] && { log_error "CLOUDFLARE_ZONE_ID not set in .env"; return 1; }
+    [[ -z "$domain" ]] && { log_error "DOMAIN not set in .env"; return 1; }
 
     local DNS_LOCK="/run/lock/vaultwarden-dns-update.lock"
     local _DNS_LOCK_FD=""
@@ -90,34 +168,9 @@ update_dns_record() {
         log_error "Invalid IP format: $current_ip"; return 1
     }
 
-    local token_file
-    token_file="${CF_TOKEN_FILE:-${SCRIPT_DIR}/secrets/.docker_secrets/caddy_cloudflare_dns_token}"
-    local cf_token
-    if [[ -f "$token_file" ]]; then
-        local token_perms
-        token_perms=$(stat -c%a "$token_file" 2>/dev/null \
-                   || stat -f%Lp "$token_file" 2>/dev/null \
-                   || echo "")
-        case "$token_perms" in
-            444|400|600|640)
-                log_debug "Cloudflare token file permissions OK ($token_perms)"
-                ;;
-            "")
-                log_warn "Cannot determine permissions on $token_file — proceeding with caution"
-                ;;
-            *)
-                log_error "Cloudflare token file has insecure permissions ($token_perms): $token_file"
-                log_error "Expected 444 (docker secret) or 400/600. Fix with: chmod 444 '$token_file'"
-                return 1
-                ;;
-        esac
-        cf_token=$(cat "$token_file") \
-            || { log_error "Cannot read Cloudflare API token from host secret file"; return 1; }
-    else
-        cf_token=$(docker compose exec -T caddy \
-            cat /run/secrets/caddy_cloudflare_dns_token 2>/dev/null) \
-            || { log_error "Cannot read Cloudflare API token (host file: $token_file not found, Caddy container may be stopped)"; return 1; }
-    fi
+    local zone_id cf_token
+    zone_id=$(_resolve_zone_id)   || return 1
+    cf_token=$(_resolve_cf_token) || return 1
     [[ -z "$cf_token" ]] && { log_error "Cloudflare API token is empty"; return 1; }
 
     local cf_response record_id stored_ip
