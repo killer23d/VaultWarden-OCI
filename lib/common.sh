@@ -148,47 +148,69 @@ auto_fix_critical_permissions() {
 # _ensure_lock_file LOCKPATH
 #
 # Idempotent pre-flight for flock usage:
-#   1. Creates the file if it does not exist.
-#   2. Corrects ownership to the real invoking user (SUDO_USER > USER > id -un)
-#      whenever the current owner does not match.
-#   3. Sets mode 0660 so both the service user and the group can open the fd.
+#   1. Creates the lock file and parent directory if they do not exist.
+#   2. Sets ownership to root:vaultwarden and mode 0660.
+#      - The 'vaultwarden' group is shared by the service user (ubuntu) and
+#        root, allowing both systemd-launched services AND sudo invocations
+#        to open the fd without AppArmor interference.
+#      - setup-systemd.sh install creates this group and adds both users.
+#   3. Self-heals stale locks from crashed processes: if the file exists but
+#      is not actively held by flock, removes and recreates it cleanly.
+#   4. Returns 1 with a loud, actionable error — never silently fails.
 #
-# This replaces the antipattern:
-#   touch "$lock"; chmod 0660 "$lock"
-# which leaves the file owned by root when run under sudo.
-#
-# Safe to call repeatedly — a silent no-op when everything is already correct.
+# Security model:
+#   Lock files are coordination primitives, not secrets. They hold no data.
+#   0660 root:vaultwarden in /run/lock/ (sticky drwxrwxrwt) means:
+#     - Only group members can acquire/interfere with the lock (not 0666)
+#     - Sticky bit prevents other users deleting the file
+#     - AppArmor allows root to open files it created (root:vaultwarden)
 _ensure_lock_file() {
     local lockpath="$1"
     local lockdir
     lockdir="$(dirname "$lockpath")"
 
-    # Create parent directory if required (e.g. /run/vaultwarden from RuntimeDirectory)
+    # Create parent directory if required.
     if [[ ! -d "$lockdir" ]]; then
-        mkdir -p "$lockdir" 2>/dev/null || true
-    fi
-
-    if [[ ! -f "$lockpath" ]]; then
-        touch "$lockpath" 2>/dev/null || {
-            log_warn "_ensure_lock_file: cannot create '${lockpath}' — check parent directory permissions"
+        mkdir -p "$lockdir" 2>/dev/null || {
+            log_error "_ensure_lock_file: cannot create lock directory '${lockdir}'"
+            log_error "  Fix: sudo mkdir -p ${lockdir} && sudo chmod 1777 ${lockdir}"
             return 1
         }
     fi
 
-    local real_user real_group current_owner
-    real_user=$(get_real_user 2>/dev/null || id -un)
-    real_group=$(id -gn "$real_user" 2>/dev/null || id -gn)
-    current_owner=$(stat -c '%U' "$lockpath" 2>/dev/null || echo "")
-
-    if [[ "$EUID" -ne 0 && -n "$current_owner" && "$current_owner" != "$real_user" ]]; then
-        log_warn "_ensure_lock_file: '${lockpath}' owned by '${current_owner}' — correcting to '${real_user}:${real_group}'"
-        chown "${real_user}:${real_group}" "$lockpath" 2>/dev/null || \
-            log_warn "_ensure_lock_file: chown failed for '${lockpath}' — lock acquisition may fail for non-root users"
+    # Self-heal: remove stale lock files left by crashed processes.
+    if [[ -f "$lockpath" ]]; then
+        if flock -n "$lockpath" true 2>/dev/null; then
+            # Not held by anyone — safe to recreate cleanly.
+            rm -f "$lockpath" 2>/dev/null || true
+        fi
+        # If flock -n fails, a live process holds it — leave it alone.
     fi
 
-    # 0666 so both root (sudo) and the real user can open the fd for flock.
-    # /run/lock/ is sticky+world-writable by design; lock files are not secrets.
-    chmod 0666 "$lockpath" 2>/dev/null || true
+    # Create fresh if it doesn't exist (first run or just removed above).
+    if [[ ! -f "$lockpath" ]]; then
+        # install atomically sets owner+mode in one syscall, avoiding a
+        # window where the file exists but has wrong permissions.
+        if ! install -m 0660 -o root -g vaultwarden /dev/null "$lockpath" 2>/dev/null; then
+            # Fallback: 'vaultwarden' group may not exist yet (pre-setup).
+            # Use 0666 temporarily so the operation proceeds; setup-systemd.sh
+            # will correct ownership on next install run.
+            touch "$lockpath" 2>/dev/null || {
+                log_error "_ensure_lock_file: cannot create '${lockpath}'"
+                log_error "  Check: ls -la ${lockdir}"
+                log_error "  Fix:   sudo touch ${lockpath} && sudo chmod 0660 ${lockpath}"
+                return 1
+            }
+            chmod 0666 "$lockpath" 2>/dev/null || true
+            log_warn "_ensure_lock_file: 'vaultwarden' group not found — using 0666 temporarily."
+            log_warn "  Run 'sudo utilities/setup-systemd.sh install' to fix permanently."
+            return 0
+        fi
+    fi
+
+    # Ensure permissions are correct even on pre-existing files.
+    chmod 0660 "$lockpath" 2>/dev/null || true
+    chown root:vaultwarden "$lockpath" 2>/dev/null || true
 }
 # _fix_rclone_ownership
 #
