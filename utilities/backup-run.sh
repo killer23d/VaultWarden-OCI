@@ -23,13 +23,12 @@ DRY_RUN=false
 KEEP_DAYS=14
 QUIET=false
 FORCE=false
-
 EMAIL_NOTIFY=false   # Set by --email; send_notification_email() runs on completion.
 LIST_ONLY=false      # Set by the list subcommand; prints backups and exits without root.
 RCLONE_SYNC=false    # Set by --rclone; syncs the encrypted backup after creation.
 FULL_VERIFY=false    # Set by --full-verification; decrypts and integrity-checks before sync.
-
 LOCK_FD=""   # Assigned by exec {LOCK_FD}>file (Bash 4.1+ automatic FD allocation).
+SKIP_OPS_LOCK=false  # Set by --skip-ops-lock; caller (maintenance-run) already holds OPS_LOCK.
 
 show_help() {
     cat << 'EOF'
@@ -106,6 +105,7 @@ case "$_SUBCMD" in
                 --full-verification)      FULL_VERIFY=true;  shift ;;
                 --skip-full-verification) FULL_VERIFY=false; shift ;;
                 --dry-run)                DRY_RUN=true;      shift ;;
+                --skip-ops-lock)          SKIP_OPS_LOCK=true; shift ;;
                 *) log_error "Unknown option for run: $1"; show_help; exit 2 ;;
             esac
         done
@@ -1160,20 +1160,18 @@ main() {
     local OPS_LOCK="/run/lock/vaultwarden-operations.lock"
 
     if [[ "$FORCE" != "true" && "$DRY_RUN" != "true" ]]; then
-        # Open lock files BEFORE _ensure_lock_file chowns them away from root.
-        # touch ensures the file exists so exec can open it, then we fix ownership.
-        touch "$OPS_LOCK"
-        exec {OPS_LOCK_FD}>"$OPS_LOCK"
-        _ensure_lock_file "$OPS_LOCK"
-    if ! flock -n "$OPS_LOCK_FD"; then
-        log_error "Another operation (maintenance/restore) is already running. Aborting."
-        log_info  "Wait for it to finish or use --force to override."
-        exit 1
-    fi
+        if [[ "$SKIP_OPS_LOCK" != "true" ]]; then
+            _ensure_lock_file "$OPS_LOCK"
+            exec {OPS_LOCK_FD}>"$OPS_LOCK"
+            if ! flock -n "$OPS_LOCK_FD"; then
+                log_error "Another operation (maintenance/restore) is already running. Aborting."
+                log_info  "Wait for it to finish or use --force to override."
+                exit 1
+            fi
+        fi
 
-        touch "$LOCK_FILE"
-        exec {LOCK_FD}>"$LOCK_FILE"
         _ensure_lock_file "$LOCK_FILE"
+        exec {LOCK_FD}>"$LOCK_FILE"
         if ! flock -n "$LOCK_FD"; then
             log_error "Another backup is already running (could not acquire lock)."
             log_info  "Wait for it to finish or use --force if you are certain it is stuck."
