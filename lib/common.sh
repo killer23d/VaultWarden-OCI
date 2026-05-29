@@ -186,9 +186,8 @@ _ensure_lock_file() {
             log_warn "_ensure_lock_file: chown failed for '${lockpath}' — lock acquisition may fail for non-root users"
     fi
 
-    chmod 0660 "$lockpath" 2>/dev/null || true
+    chmod 0666 "$lockpath" 2>/dev/null || true
 }
-
 # _fix_rclone_ownership
 #
 # When rclone is called under sudo, the rclone config file can become owned
