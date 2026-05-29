@@ -766,22 +766,24 @@ _check_config() {
             fi
         fi
         local required_vars=("DOMAIN" "ADMIN_EMAIL")
-        local zone_id
-        if ! zone_id=$(decrypt_secret "cloudflare_zone_id" 2>/dev/null) \
-            || [[ -z "$zone_id" ]] \
-            || [[ "$zone_id" == CHANGE_ME* ]] \
-            || [[ "$zone_id" == PLACEHOLDER* ]]; then
-        _record "config:cloudflare_zone_id" "WARN" \
-            "cloudflare_zone_id not set or is a placeholder in secrets.yaml — run: sudo utilities/setup-secrets.sh rotate cloudflare_zone_id"
-        else
-        _record "config:cloudflare_zone_id" "PASS" \
-            "cloudflare_zone_id is configured in secrets.yaml"
-        fi
-        unset zone_id
         for var in "${required_vars[@]}"; do
             [[ -n "${!var:-}" ]] || config_issues+=("${var} is not set — verify '${var}=' is present in ${ENV_FILE}")
         done
     fi
+    # cloudflare_zone_id lives in encrypted secrets.yaml — not in .env.
+    # Check it is present and decryptable rather than testing an env var.
+    local _cf_zone_id
+    if _cf_zone_id=$(decrypt_secret "cloudflare_zone_id" 2>/dev/null) \
+        && [[ -n "$_cf_zone_id" ]] \
+        && [[ "$_cf_zone_id" != CHANGE_ME* ]] \
+        && [[ "$_cf_zone_id" != PLACEHOLDER* ]]; then
+        _pass "config:cloudflare_zone_id" \
+            "cloudflare_zone_id is configured in secrets.yaml"
+    else
+        _warn "config:cloudflare_zone_id" \
+            "cloudflare_zone_id not set or is a placeholder — run: sudo utilities/setup-secrets.sh rotate cloudflare_zone_id"
+    fi
+    unset _cf_zone_id
     local secrets_dir="${PROJECT_ROOT}/secrets/.docker_secrets"
     if [[ -d "$secrets_dir" ]]; then
         local required_secrets=("admin_token" "caddy_cloudflare_dns_token")
