@@ -765,7 +765,19 @@ _check_config() {
                 config_issues+=("${ENV_FILE} permissions are ${env_mode}; must be 600 so root-mode health checks can read config safely")
             fi
         fi
-        local required_vars=("DOMAIN" "ADMIN_EMAIL" "CLOUDFLARE_ZONE_ID")
+        local required_vars=("DOMAIN" "ADMIN_EMAIL")
+        local zone_id
+        if ! zone_id=$(decrypt_secret "cloudflare_zone_id" 2>/dev/null) \
+            || [[ -z "$zone_id" ]] \
+            || [[ "$zone_id" == CHANGE_ME* ]] \
+            || [[ "$zone_id" == PLACEHOLDER* ]]; then
+        _record "config:cloudflare_zone_id" "WARN" \
+            "cloudflare_zone_id not set or is a placeholder in secrets.yaml — run: sudo utilities/setup-secrets.sh rotate cloudflare_zone_id"
+        else
+        _record "config:cloudflare_zone_id" "PASS" \
+            "cloudflare_zone_id is configured in secrets.yaml"
+        fi
+        unset zone_id
         for var in "${required_vars[@]}"; do
             [[ -n "${!var:-}" ]] || config_issues+=("${var} is not set — verify '${var}=' is present in ${ENV_FILE}")
         done
