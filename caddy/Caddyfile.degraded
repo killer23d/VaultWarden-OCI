@@ -28,7 +28,6 @@
 	servers {
 		trusted_proxies cloudflare
 		client_ip_headers Cf-Connecting-Ip
-		protocols tls1.2
 		timeouts {
 			read_body   10s
 			read_header 10s
@@ -77,6 +76,7 @@
 (tls_cloudflare) {
 	tls {
 		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+	protocols tls1.2
 	}
 }
 
@@ -86,6 +86,7 @@
 			dir https://acme-v02.api.letsencrypt.org/directory
 			disable_http_challenge false
 		}
+	protocols tls1.2
 	}
 }
 
