@@ -96,6 +96,8 @@ main() {
 
     local OPS_LOCK="/run/lock/vaultwarden-operations.lock"
     local _OPS_LOCK_FD
+    local _MAINT_LOCK="/run/lock/vaultwarden-maintenance-run.lock"
+    local _MAINT_LOCK_FD
 
     # Idempotently create lock file with correct ownership and relaxed perms so
     # non-root service users (injected by setup-systemd.sh) can acquire it.
