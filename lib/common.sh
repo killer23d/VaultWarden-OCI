@@ -180,12 +180,14 @@ _ensure_lock_file() {
     real_group=$(id -gn "$real_user" 2>/dev/null || id -gn)
     current_owner=$(stat -c '%U' "$lockpath" 2>/dev/null || echo "")
 
-    if [[ -n "$current_owner" && "$current_owner" != "$real_user" ]]; then
+    if [[ "$EUID" -ne 0 && -n "$current_owner" && "$current_owner" != "$real_user" ]]; then
         log_warn "_ensure_lock_file: '${lockpath}' owned by '${current_owner}' — correcting to '${real_user}:${real_group}'"
         chown "${real_user}:${real_group}" "$lockpath" 2>/dev/null || \
             log_warn "_ensure_lock_file: chown failed for '${lockpath}' — lock acquisition may fail for non-root users"
     fi
 
+    # 0666 so both root (sudo) and the real user can open the fd for flock.
+    # /run/lock/ is sticky+world-writable by design; lock files are not secrets.
     chmod 0666 "$lockpath" 2>/dev/null || true
 }
 # _fix_rclone_ownership
