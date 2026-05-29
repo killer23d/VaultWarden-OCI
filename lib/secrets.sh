@@ -453,18 +453,24 @@ _tmpfs_dir() {
 }
 
 validate_cloudflare_token() {
+    
     local token="$1"
     local token_type="$2"
     local zone_id="${3:-}"
+
     if [[ -z "$zone_id" ]]; then
-        zone_id=$(get_config_value "CLOUDFLARE_ZONE_ID" "")
+        zone_id=$(decrypt_secret "cloudflare_zone_id" 2>/dev/null) || zone_id=""
+    fi
+    if [[ -z "$zone_id" ]]; then
+        zone_id="${CLOUDFLARE_ZONE_ID:-}"
     fi
 
     if [[ -z "$zone_id" ]] \
         || [[ "$zone_id" == "your_cloudflare_zone_id_here" ]] \
         || [[ "$zone_id" == CHANGE_ME* ]] \
+        || [[ "$zone_id" == PLACEHOLDER* ]] \
         || [[ "$zone_id" =~ ^[[:space:]]*$ ]]; then
-        log_warn "validate_cloudflare_token: CLOUDFLARE_ZONE_ID is not configured -- validation skipped (token NOT verified)"
+        log_warn "validate_cloudflare_token: cloudflare_zone_id is not configured -- validation skipped (token NOT verified)"
         return 1
     fi
 
