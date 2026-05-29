@@ -351,13 +351,15 @@ AGE_BANNER
 
         printf '\n%s--- NEXT STEPS ---%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
         printf '1. Edit .env:           %s%s%s\n' "${COLOR_YELLOW}" "$env_edit_cmd" "${COLOR_RESET}"
-        printf '   ► Set: CLOUDFLARE_ZONE_ID, SMTP_HOST, SMTP_PORT, SMTP_USERNAME\n'
+        printf '   ► Set: SMTP_HOST, SMTP_PORT, SMTP_USERNAME in .env\n'
         printf '   ► Verify: DOMAIN and ADMIN_EMAIL are correct\n'
+        printf '   ► Set Cloudflare secrets: sudo utilities/setup-secrets.sh rotate cloudflare_zone_id\n'
         printf '2. Set external tokens: %s(use sudo ./utilities/setup-secrets.sh rotate commands above)%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '3. Setup CrowdSec:      %ssudo ./utilities/setup-crowdsec.sh%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '   ► This script now prompts for CLOUDFLARE_ZONE_ID, optional CF_ACCOUNT_ID, and cf_worker_bouncer_token\n'
+        printf '   ► Cloudflare secrets (zone_id, account_id, bouncer_token) are stored in encrypted secrets.yaml\n'
+        printf '   ► Rotate with: sudo utilities/setup-secrets.sh rotate cloudflare_zone_id\n'
         printf '4. Start services:      %smake up%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '5. Setup automation:    %ssudo ./setup.sh systemd install%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
@@ -372,10 +374,12 @@ AGE_BANNER
 
         printf '\n%s--- NEXT STEPS ---%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
         printf '1. Edit .env:           %s%s%s\n' "${COLOR_YELLOW}" "$env_edit_cmd" "${COLOR_RESET}"
-        printf '   ► Set: CLOUDFLARE_ZONE_ID, SMTP_HOST, SMTP_PORT, SMTP_USERNAME\n'
+        printf '   ► Set: SMTP_HOST, SMTP_PORT, SMTP_USERNAME in .env\n'
         printf '   ► Verify: DOMAIN and ADMIN_EMAIL are correct\n'
+        printf '   ► Set Cloudflare secrets: sudo utilities/setup-secrets.sh rotate cloudflare_zone_id\n'
         printf '2. Configure secrets:   %s./setup.sh secrets%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '   ► You will be prompted for all credentials\n'
+        printf '   ► Cloudflare secrets (zone_id, account_id, bouncer_token) are stored in encrypted secrets.yaml\n'
+        printf '   ► Rotate with: sudo utilities/setup-secrets.sh rotate cloudflare_zone_id\n'
         printf '3. Setup CrowdSec:      %ssudo ./utilities/setup-crowdsec.sh%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '   ► You will be prompted for CLOUDFLARE_ZONE_ID, optional CF_ACCOUNT_ID, and cf_worker_bouncer_token\n'
