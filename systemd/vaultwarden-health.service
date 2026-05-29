@@ -46,7 +46,15 @@ ProtectHome=read-only
 # /opt/vaultwarden-scripts is intentionally excluded: scripts are read+executed
 # only and must not be writable at runtime (defence-in-depth against a
 # compromised script overwriting its siblings).
-ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock
+ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock /run/vaultwarden
+# RuntimeDirectory instructs systemd to pre-create /run/vaultwarden/ with the
+# correct service user ownership before ExecStart runs. Scripts detect
+# RUNTIME_DIRECTORY (set automatically by systemd) and prefer lock files under
+# /run/vaultwarden/ over /run/lock/ for timer-driven invocations, avoiding the
+# /run/lock permission problem when running as a non-root service user.
+RuntimeDirectory=vaultwarden
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
 TimeoutStartSec=120
 TimeoutStopSec=30
 # Exit code contract:

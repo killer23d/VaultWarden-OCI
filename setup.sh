@@ -435,6 +435,7 @@ main() {
     # legacy symlink that ProtectSystem=strict makes read-only in systemd units.
     # A trap removes the lock file on EXIT so a crash does not leave a stale lock.
     local SETUP_LOCK_FD
+    _ensure_lock_file "$SETUP_LOCK_FILE"
     exec {SETUP_LOCK_FD}>"$SETUP_LOCK_FILE"
     if ! flock -n "$SETUP_LOCK_FD"; then
         log_error "Another setup instance is already running (could not acquire lock)."

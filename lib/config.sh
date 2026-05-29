@@ -213,4 +213,24 @@ _read_env_value() {
 export -f load_env_file get_config_value require_config
 export -f _get_file_perms _set_env_var _read_env_value
 
+# ---------------------------------------------------------------------------
+# Canonical compile-time fallbacks — sourced once here so every script that
+# sources config.sh gets safe defaults under `set -u` even when .env is absent
+# or these variables are not present in the loaded file.
+#
+# Rules:
+#  • Use ${VAR:-default}: set only when unset or empty, never override a value
+#    already exported (e.g. by the .env loader above or the calling environment).
+#  • PROJECT_ROOT is resolved lazily via BASH_SOURCE so this block is safe to
+#    source from any working directory.
+# ---------------------------------------------------------------------------
+_VW_CONFIG_PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+
+AGE_KEY_FILE="${AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}"
+SECRETS_FILE="${SECRETS_FILE:-${_VW_CONFIG_PROJECT_ROOT}/secrets.yaml}"
+SOPS_AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-${AGE_KEY_FILE}}"
+
+export AGE_KEY_FILE SECRETS_FILE SOPS_AGE_KEY_FILE
+unset _VW_CONFIG_PROJECT_ROOT
+
 log_debug "Config library loaded"

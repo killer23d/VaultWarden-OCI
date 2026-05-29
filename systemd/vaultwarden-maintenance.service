@@ -33,7 +33,12 @@ ProtectHome=read-only
 # that appends the DATA_VOLUME_MOUNT path to ReadWritePaths.
 # The base unit file is never modified. To inspect the merged result:
 #   systemctl cat <unit>
-ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock
+ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock /run/vaultwarden
+# RuntimeDirectory instructs systemd to pre-create /run/vaultwarden/ with the
+# correct service user ownership before ExecStart runs.
+RuntimeDirectory=vaultwarden
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
 TimeoutStartSec=1800
 TimeoutStopSec=60
 

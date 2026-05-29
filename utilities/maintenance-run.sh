@@ -97,10 +97,9 @@ main() {
     local OPS_LOCK="/run/lock/vaultwarden-operations.lock"
     local _OPS_LOCK_FD
 
-    # Atomically create-or-replace the lock file with relaxed perms so
+    # Idempotently create lock file with correct ownership and relaxed perms so
     # non-root service users (injected by setup-systemd.sh) can acquire it.
-    touch "$OPS_LOCK"
-    chmod 0660 "$OPS_LOCK"
+    _ensure_lock_file "$OPS_LOCK"
 
     exec {_OPS_LOCK_FD}>"$OPS_LOCK"
     if ! flock -n "$_OPS_LOCK_FD"; then
@@ -121,8 +120,7 @@ main() {
     # The file is removed by perform_cleanup on any exit path (EXIT HUP INT TERM).
     local _MAINT_LOCK="/run/lock/vaultwarden-maintenance.lock"
     local _MAINT_LOCK_FD
-    touch "$_MAINT_LOCK"
-    chmod 0660 "$_MAINT_LOCK"
+    _ensure_lock_file "$_MAINT_LOCK"
     exec {_MAINT_LOCK_FD}>"$_MAINT_LOCK"
     if ! flock -n "$_MAINT_LOCK_FD"; then
         log_error "Another maintenance operation is already running. Exiting."

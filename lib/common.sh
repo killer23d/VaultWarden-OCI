@@ -145,6 +145,124 @@ auto_fix_critical_permissions() {
     fi
 }
 
+# _ensure_lock_file LOCKPATH
+#
+# Idempotent pre-flight for flock usage:
+#   1. Creates the file if it does not exist.
+#   2. Corrects ownership to the real invoking user (SUDO_USER > USER > id -un)
+#      whenever the current owner does not match.
+#   3. Sets mode 0660 so both the service user and the group can open the fd.
+#
+# This replaces the antipattern:
+#   touch "$lock"; chmod 0660 "$lock"
+# which leaves the file owned by root when run under sudo.
+#
+# Safe to call repeatedly — a silent no-op when everything is already correct.
+_ensure_lock_file() {
+    local lockpath="$1"
+    local lockdir
+    lockdir="$(dirname "$lockpath")"
+
+    # Create parent directory if required (e.g. /run/vaultwarden from RuntimeDirectory)
+    if [[ ! -d "$lockdir" ]]; then
+        mkdir -p "$lockdir" 2>/dev/null || true
+    fi
+
+    if [[ ! -f "$lockpath" ]]; then
+        touch "$lockpath" 2>/dev/null || {
+            log_warn "_ensure_lock_file: cannot create '${lockpath}' — check parent directory permissions"
+            return 1
+        }
+    fi
+
+    local real_user real_group current_owner
+    real_user=$(get_real_user 2>/dev/null || id -un)
+    real_group=$(id -gn "$real_user" 2>/dev/null || id -gn)
+    current_owner=$(stat -c '%U' "$lockpath" 2>/dev/null || echo "")
+
+    if [[ -n "$current_owner" && "$current_owner" != "$real_user" ]]; then
+        log_warn "_ensure_lock_file: '${lockpath}' owned by '${current_owner}' — correcting to '${real_user}:${real_group}'"
+        chown "${real_user}:${real_group}" "$lockpath" 2>/dev/null || \
+            log_warn "_ensure_lock_file: chown failed for '${lockpath}' — lock acquisition may fail for non-root users"
+    fi
+
+    chmod 0660 "$lockpath" 2>/dev/null || true
+}
+
+# _fix_rclone_ownership
+#
+# When rclone is called under sudo, the rclone config file can become owned
+# by root, making it unreadable by the real service user on subsequent runs.
+# This function detects and silently corrects that ownership drift.
+#
+# Resolves the real user home path even when HOME=/root (sudo context).
+# Silent no-op when ownership is already correct or the file does not exist.
+_fix_rclone_ownership() {
+    local real_user
+    real_user=$(get_real_user 2>/dev/null || id -un)
+
+    local rclone_conf
+    if [[ -n "${SUDO_USER:-}" ]]; then
+        # Under sudo, HOME is /root; resolve the actual user's home directory.
+        rclone_conf=$(eval echo "~${SUDO_USER}/.config/rclone/rclone.conf")
+    else
+        rclone_conf="${HOME}/.config/rclone/rclone.conf"
+    fi
+
+    if [[ ! -f "$rclone_conf" ]]; then
+        return 0
+    fi
+
+    local owner
+    owner=$(stat -c '%U' "$rclone_conf" 2>/dev/null || echo "")
+    if [[ -n "$owner" && "$owner" != "$real_user" ]]; then
+        log_warn "_fix_rclone_ownership: '${rclone_conf}' owned by '${owner}' — correcting to '${real_user}'"
+        chown "${real_user}:$(id -gn "$real_user" 2>/dev/null || id -gn)" "$rclone_conf" 2>/dev/null && \
+            log_info "_fix_rclone_ownership: ownership corrected → ${rclone_conf}" || \
+            log_warn "_fix_rclone_ownership: chown failed — rclone.conf may still be root-owned"
+    fi
+}
+
+# _run_rclone [ARGS...]
+#
+# Wrapper around rclone that drops privileges when running as root via sudo.
+# Prevents the rclone config file from becoming root-owned after invocation.
+# When not running under sudo, executes rclone directly (no overhead).
+_run_rclone() {
+    if [[ "$EUID" -eq 0 && -n "${SUDO_USER:-}" ]]; then
+        log_warn "_run_rclone: called as root under sudo — dropping to '${SUDO_USER}' to preserve rclone.conf ownership"
+        sudo -u "${SUDO_USER}" rclone "$@"
+    else
+        rclone "$@"
+    fi
+}
+
+# _check_sudo_requirement CMD
+#
+# For read-only subcommands that do not need elevated privileges, emit a
+# human-readable advisory when the script is invoked with sudo.  Does NOT
+# abort — callers that legitimately need root are unaffected.
+#
+# Usage:
+#   _check_sudo_requirement "${1:-}"   # at top of main(), before arg dispatch
+#
+# The advisory is suppressed for write/install subcommands (no-op).
+_check_sudo_requirement() {
+    local cmd="${1:-}"
+    local readonly_cmds=("list" "help" "--help" "-h" "verify" "status")
+    local ro
+    for ro in "${readonly_cmds[@]}"; do
+        if [[ "$cmd" == "$ro" ]]; then
+            if [[ "$EUID" -eq 0 ]]; then
+                log_warn "_check_sudo_requirement: subcommand '${cmd}' does not require root."
+                log_warn "  Re-run without sudo: ./${0##*/} ${cmd}"
+                log_warn "  Continuing — but file ownership may be affected."
+            fi
+            return 0
+        fi
+    done
+}
+
 get_real_user() {
     # Prefer SUDO_USER — set reliably by sudo regardless of shell nesting depth
     if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
@@ -421,6 +539,7 @@ init_common_lib() {
 export -f _require_script
 export -f has_command require_commands retry_with_backoff is_root require_root get_real_user _maybe_sudo
 export -f auto_fix_critical_permissions
+export -f _ensure_lock_file _fix_rclone_ownership _run_rclone _check_sudo_requirement
 export -f register_cleanup perform_cleanup
 export -f ensure_dir secure_file test_connectivity test_http download_file
 export -f setup_error_trap setup_cleanup_trap safe_execute

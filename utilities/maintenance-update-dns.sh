@@ -65,7 +65,7 @@ update_dns_record() {
 
     local DNS_LOCK="/run/lock/vaultwarden-dns-update.lock"
     local _DNS_LOCK_FD=""
-    install -m 0660 -o root -g root /dev/null "$DNS_LOCK"
+    _ensure_lock_file "$DNS_LOCK"
     exec {_DNS_LOCK_FD}>"$DNS_LOCK" 2>/dev/null || {
         log_error "Cannot open DNS run-lock: ${DNS_LOCK}"
         return 1

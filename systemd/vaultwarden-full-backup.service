@@ -47,7 +47,12 @@ ProtectHome=read-only
 # /opt/vaultwarden-scripts is intentionally excluded: scripts are read+executed
 # only and must not be writable at runtime (defence-in-depth against a
 # compromised script overwriting its siblings).
-ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock
+ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock /run/vaultwarden
+# RuntimeDirectory instructs systemd to pre-create /run/vaultwarden/ with the
+# correct service user ownership before ExecStart runs.
+RuntimeDirectory=vaultwarden
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
 TimeoutStartSec=7200
 TimeoutStopSec=60
 # Exit code contract (matches backup.sh):

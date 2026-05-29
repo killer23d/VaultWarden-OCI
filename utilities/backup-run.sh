@@ -1161,8 +1161,7 @@ main() {
 
     if [[ "$FORCE" != "true" && "$DRY_RUN" != "true" ]]; then
         # Acquire shared operations lock to prevent concurrent backup + maintenance
-        touch "$OPS_LOCK"
-        chmod 0660 "$OPS_LOCK"
+        _ensure_lock_file "$OPS_LOCK"
         exec {OPS_LOCK_FD}>"$OPS_LOCK"
         if ! flock -n "$OPS_LOCK_FD"; then
             log_error "Another operation (maintenance/restore) is already running. Aborting."
@@ -1170,8 +1169,7 @@ main() {
             exit 1
         fi
 
-        touch "$LOCK_FILE"
-        chmod 0660 "$LOCK_FILE"
+        _ensure_lock_file "$LOCK_FILE"
 
         exec {LOCK_FD}>"$LOCK_FILE"
         if ! flock -n "$LOCK_FD"; then
