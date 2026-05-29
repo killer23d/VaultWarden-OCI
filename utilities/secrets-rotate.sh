@@ -74,7 +74,6 @@ _ROTATE_FIELDS=("admin_token" "admin_basic_auth_hash"
                 "smtp_password" "push_installation_id" "push_installation_key"
                 "backup_passphrase")
 
-# Map each rotatable field to the Docker service or services that consume it.
 declare -A _FIELD_SERVICES
 _FIELD_SERVICES=(
     [admin_token]="vaultwarden"
@@ -90,11 +89,9 @@ _FIELD_SERVICES=(
 
 check_prerequisites() {
     local missing=()
-    # FIX: resolve_age_key_path() instead of bare $AGE_KEY_FILE which is never
-    # exported to the environment, causing 'unbound variable' at set -u.
     local _resolved_key
     if ! _resolved_key=$(resolve_age_key_path 2>/dev/null); then
-        missing+=("Age encryption key (not found at \$AGE_KEY_FILE, /etc/vaultwarden/age-key.txt, or secrets/keys/age-key.txt)")
+        missing+=("Age encryption key (not found at /etc/vaultwarden/age-key.txt or secrets/keys/age-key.txt)")
     fi
     [[ ! -f ".sops.yaml" ]]    && missing+=("SOPS configuration: .sops.yaml")
     [[ ! -f "$SECRETS_FILE" ]] && missing+=("Secrets file: $SECRETS_FILE")
@@ -124,4 +121,223 @@ create_backup() {
         return 0
     fi
     local backup_file
-    backup_f
+    backup_file="$SECRETS_BACKUP_DIR/secrets.yaml.backup-$(date +%Y%m%d-%H%M%S)"
+    log_info "Creating backup: $(basename "$backup_file")"
+    if ! install -m 600 -p "$SECRETS_FILE" "$backup_file" 2>/dev/null; then
+        log_error "Failed to create backup"
+        return 1
+    fi
+    log_success "Backup created"
+    cleanup_old_secret_backups "$SECRETS_BACKUP_DIR" 5
+    return 0
+}
+
+do_rotate() {
+    local field="$1"
+
+    if ! _validate_rotate_field "$field"; then return 1; fi
+
+    local actual_field="$field"
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would rotate secret: $actual_field"
+        local _svc="${_FIELD_SERVICES[$field]:-<service>}"
+        log_info "[DRY RUN] After rotation, you would need to restart: $_svc"
+        log_info "[DRY RUN] No changes written."
+        return 0
+    fi
+
+    log_info "Rotating secret: $actual_field"
+    echo ""
+
+    local temp_plain
+    temp_plain=$(mktemp -p /dev/shm --suffix=.yaml 2>/dev/null || mktemp --suffix=.yaml)
+    if ! install -m 600 /dev/null "$temp_plain" 2>/dev/null; then
+        rm -f "$temp_plain"
+        log_error "Failed to secure temp file: $temp_plain"
+        return 1
+    fi
+    if [[ -n "$temp_plain" && "$temp_plain" != /dev/shm/* ]]; then
+        log_warn "rotate: /dev/shm unavailable — plaintext temp file is disk-backed: $temp_plain"
+        log_warn "        Ensure full-disk encryption is active on this host."
+    fi
+    register_cleanup "_secure_shred" "$temp_plain"
+
+    if ! ensure_sops_env; then
+        log_error "Failed to setup SOPS environment"
+        return 1
+    fi
+    local sops_rc=0
+    sops -d "$SECRETS_FILE" > "$temp_plain" || sops_rc=$?
+    cleanup_secrets_environment
+    if [[ $sops_rc -ne 0 ]]; then
+        log_error "Failed to decrypt secrets for rotation"
+        return 1
+    fi
+
+    local new_value
+    if [[ "$field" == "email_api_token" ]]; then
+        local _ep
+        _ep=$(_read_dotenv_value EMAIL_PROVIDER "${PROJECT_ROOT}/.env")
+        _ep="${_ep:-email}"
+        local _raw_token
+        if ! read -r -s -t 120 -p "email_api_token (${_ep} API key): " _raw_token; then
+            log_error "No input received (120s timeout). Aborting."
+            return 1
+        fi
+        echo ""
+        if [[ -z "$_raw_token" ]]; then
+            log_error "No token entered. Aborting."
+            return 1
+        fi
+        new_value="$_raw_token"
+    else
+        if ! new_value=$(collect_secret_field "$field"); then
+            return 1
+        fi
+    fi
+
+    local temp_patched
+    temp_patched=$(mktemp -p /dev/shm --suffix=.yaml 2>/dev/null || mktemp --suffix=.yaml)
+    if ! install -m 600 /dev/null "$temp_patched" 2>/dev/null; then
+        rm -f "$temp_patched"
+        log_error "Failed to secure temp file: $temp_patched"
+        return 1
+    fi
+    if [[ -n "$temp_patched" && "$temp_patched" != /dev/shm/* ]]; then
+        log_warn "rotate: /dev/shm unavailable — patched temp file is disk-backed: $temp_patched"
+        log_warn "        Ensure full-disk encryption is active on this host."
+    fi
+    register_cleanup "_secure_shred" "$temp_patched"
+
+    local _patch_rc=0
+    python3 - "$temp_plain" "$actual_field" "$new_value" "$temp_patched" << 'PYEOF' || _patch_rc=$?
+import sys, re
+
+def yaml_scalar(value):
+    escaped = (value
+        .replace('\\', '\\\\')
+        .replace('"',  '\\"')
+        .replace('\n', '\\n')
+        .replace('\r', '\\r')
+        .replace('\t', '\\t'))
+    return '"' + escaped + '"'
+
+src_file, field, new_value, dst_file = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+
+with open(src_file, 'r', encoding='utf-8') as f:
+    content = f.read()
+
+yaml_value = yaml_scalar(new_value)
+
+pattern = r'^(' + re.escape(field) + r':\s*).*$'
+replacement = lambda m: m.group(1) + yaml_value
+new_content, n = re.subn(pattern, replacement, content, flags=re.MULTILINE)
+
+if n == 0:
+    new_content = content.rstrip('\n') + '\n' + field + ': ' + yaml_value + '\n'
+
+with open(dst_file, 'w', encoding='utf-8') as f:
+    f.write(new_content)
+PYEOF
+
+    if [[ $_patch_rc -ne 0 ]]; then
+        log_error "Failed to patch YAML for field: $actual_field"
+        return 1
+    fi
+
+    if ! _validate_yaml_no_duplicates "$temp_patched" 2>&1; then
+        log_error "Patched YAML is invalid - aborting"
+        return 1
+    fi
+
+    log_info "Re-encrypting secrets (atomic write)..."
+    local temp_enc
+    temp_enc=$(mktemp --suffix=.yaml --tmpdir="$(dirname "$SECRETS_FILE")")
+    if ! install -m 600 /dev/null "$temp_enc" 2>/dev/null; then
+        rm -f "$temp_enc"
+        log_error "Failed to secure temp file: $temp_enc"
+        return 1
+    fi
+    cp "$temp_patched" "$temp_enc"
+
+    local _age_key_path
+    if ! _age_key_path=$(resolve_age_key_path 2>/dev/null); then
+        log_error "Cannot resolve Age key path for re-encryption"
+        rm -f "$temp_enc"
+        return 1
+    fi
+    if ! encrypt_sops_file "$temp_enc" "$_age_key_path"; then
+        log_error "Failed to re-encrypt secrets"
+        rm -f "$temp_enc"
+        return 1
+    fi
+
+    if ! mv "$temp_enc" "$SECRETS_FILE"; then
+        log_error "Atomic mv failed — encrypted output in: $temp_enc"
+        return 1
+    fi
+
+    secure_secrets_file
+    log_success "Secret '${actual_field}' rotated successfully"
+
+    local _affected_service="${_FIELD_SERVICES[$field]:-}"
+    if [[ -n "$_affected_service" ]]; then
+        log_warn "Restart the following Docker service for the new secret to take effect:"
+        log_warn "  docker compose restart $_affected_service"
+    else
+        log_warn "Run 'docker compose restart <service>' for the new secret to take effect"
+    fi
+
+    log_info "Redeploying Docker secret files..."
+    local docker_dir="${PROJECT_ROOT}/secrets/.docker_secrets"
+    if export_docker_secrets "$docker_dir" "$SECRETS_FILE" 2>/dev/null; then
+        log_success "Docker secret files updated"
+    else
+        log_warn "Could not auto-redeploy Docker secret files. Run: ./startup.sh or ./setup.sh secrets"
+    fi
+
+    offer_recovery_kit_export "false"
+
+    return 0
+}
+
+main() {
+    if [[ "${1:-}" == "rotate" ]]; then shift; fi
+
+    local rotate_field=""
+
+    if [[ $# -gt 0 && "${1}" != --* ]]; then
+        rotate_field="$1"
+        shift
+    fi
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dry-run)   DRY_RUN=true;     shift ;;
+            --no-backup) SKIP_BACKUP=true; shift ;;
+            --help|-h)   show_help; exit 0 ;;
+            *) log_error "Unknown option: '$1'"; show_help; exit 1 ;;
+        esac
+    done
+
+    if [[ -z "$rotate_field" ]]; then
+        log_error "'rotate' requires a FIELD argument."
+        log_error "Example: ./edit-secrets.sh rotate admin_token"
+        log_error "Supported fields: ${_ROTATE_FIELDS[*]}"
+        exit 1
+    fi
+
+    if ! check_prerequisites; then exit 1; fi
+    _warn_if_stack_unavailable
+
+    if ! create_backup; then
+        log_error "Backup failed — aborting to protect against data loss."
+        log_error "Use --no-backup to skip backup creation (not recommended)."
+        exit 1
+    fi
+
+    do_rotate "$rotate_field" || exit 1
+}
+
+main "$@"
