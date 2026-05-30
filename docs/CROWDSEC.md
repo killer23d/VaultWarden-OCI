@@ -1,12 +1,15 @@
 # CrowdSec + Cloudflare Workers Bouncer
 
 This document covers everything needed to install, configure, and operate
-CrowdSec with the Cloudflare Workers bouncer (`crowdsec-cloudflare-worker-bouncer`)
-in VaultWarden-OCI.
+CrowdSec with the dual-bouncer setup in VaultWarden-OCI:
 
-> **Bouncer used:** `cs-cloudflare-worker-bouncer`  
-> **Docs:** <https://docs.crowdsec.net/u/bouncers/cloudflare-workers>  
-> **Repo:** <https://github.com/crowdsecurity/cs-cloudflare-worker-bouncer>
+- **`crowdsec-firewall-bouncer`** — enforces ALL decisions (including community
+  lists) at the OS/iptables level. No Cloudflare quota involved.
+- **`crowdsec-cloudflare-worker-bouncer`** — pushes locally-generated decisions
+  to Cloudflare Workers KV for edge-level blocking.
+
+> **CF bouncer docs:** <https://docs.crowdsec.net/u/bouncers/cloudflare-workers>  
+> **CF bouncer repo:** <https://github.com/crowdsecurity/cs-cloudflare-worker-bouncer>
 
 ---
 
@@ -18,25 +21,29 @@ VaultWarden / Caddy / SSH logs
         ▼
   CrowdSec engine          ← detects attacks from log streams
         │  (LAPI port 8080)
-        ▼
-  crowdsec-cloudflare-worker-bouncer   ← daemon or autonomous mode
-        │  (Cloudflare API)
-        ▼
-  Cloudflare Workers KV    ← blocked IP list synced to CF edge
-        │
-        ▼
-  Cloudflare Worker script ← runs on every inbound request to your zone
-        │
-        ▼
-  managed_challenge / block / js_challenge for blocked IPs
-  pass-through for clean traffic
+        ├─────────────────────────────────────────────────────┐
+        ▼                                                     ▼
+  crowdsec-firewall-bouncer          crowdsec-cloudflare-worker-bouncer
+  (iptables / nftables)              (Cloudflare API)
+  blocks ALL decisions               blocks locally-generated decisions
+  including community lists          at the CF edge (free-plan guard)
+                                             │
+                                             ▼
+                                     Cloudflare Workers KV
+                                             │
+                                             ▼
+                                     Cloudflare Worker script
+                                     (runs on every inbound request)
+                                             │
+                                             ▼
+                                     block / challenge matched IPs
+                                     pass-through for clean traffic
 ```
 
 Decision flow: CrowdSec detects a threat → writes a decision to its local
-database → bouncer reads the decision via LAPI → pushes the blocked IP into
-Cloudflare Workers KV → the Worker script checks KV on every request and
-challenges or blocks the matching IP at the Cloudflare edge, before the
-request ever reaches your server.
+database → firewall bouncer blocks at OS level immediately → CF bouncer
+pushes the decision to Workers KV → the Worker script checks KV on every
+request and blocks/challenges the IP at the Cloudflare edge.
 
 ---
 
@@ -88,7 +95,7 @@ CF_ACCOUNT_ID=def456...        # 32-char hex
 Store the token in the project secrets store (never in `.env` directly):
 
 ```bash
-./edit-secrets.sh rotate cf_worker_bouncer_token
+sudo utilities/setup-secrets.sh rotate cf_worker_bouncer_token
 # Paste the token when prompted.
 ```
 
@@ -103,7 +110,7 @@ After the setup script has deployed the Worker, you **must** set the route
 fail mode to **Fail Open** to prevent false lockouts:
 
 1. Cloudflare dashboard → your domain → **Workers Routes**.
-2. Find the route created by the bouncer (e.g. `*yourdomain.com/*`).
+2. Find the route created by the bouncer (e.g. `yourdomain.com/*`).
 3. Click **Edit** → set **Request limit failure mode** to **Fail open**.
 4. Save.
 
@@ -132,7 +139,7 @@ cp .env.example .env
 ### Step 2 — Store the Workers bouncer token
 
 ```bash
-./edit-secrets.sh rotate cf_worker_bouncer_token
+sudo utilities/setup-secrets.sh rotate cf_worker_bouncer_token
 # Paste the token you created in section 1.2.
 ```
 
@@ -159,9 +166,9 @@ The script runs 9 phases:
 | 3 | Installs hub collections (linux, caddy, http-cve, vaultwarden) |
 | 4 | Writes the acquisition config (tells CrowdSec which log files to watch) |
 | 5 | Generates and registers the CrowdSec LAPI key for the bouncer |
-| 6 | Renders and writes the bouncer config, runs auto-configure, starts service |
+| 6 | Renders and writes the bouncer config, starts service |
 | 7 | Applies custom `profiles.yaml` (if present) |
-| 8 | Enables and starts all services |
+| 8 | Enables and starts all services (firewall bouncer + CF bouncer) |
 | 9 | Writes your admin IP to the CrowdSec allowlist |
 
 ### Step 4 — Set Worker route to Fail Open
@@ -174,17 +181,25 @@ Complete step 1.3 in the Cloudflare dashboard now.
 # CrowdSec engine running?
 sudo systemctl status crowdsec
 
-# Bouncer running?
+# Both bouncers running?
+sudo systemctl status crowdsec-firewall-bouncer
 sudo systemctl status crowdsec-cloudflare-worker-bouncer
 
-# Bouncer registered with LAPI?
+# Both bouncers registered with LAPI?
 sudo cscli bouncers list
 
 # Collections installed?
 sudo cscli collections list
 
+# Host-level blocks active (firewall bouncer)?
+sudo iptables -L CROWDSEC_CHAIN -n | head
+sudo iptables -L DOCKER-USER -n | head
+
 # Any decisions already taken?
 sudo cscli decisions list
+
+# Community list decisions active?
+sudo cscli decisions list --origin lists
 
 # Metrics (shows events processed per parser/scenario):
 sudo cscli metrics
@@ -233,7 +248,7 @@ sudo ./utilities/setup-crowdsec.sh --autonomous
 
 ### Free-plan KV write guard
 
-The `CF_FREE_PLAN=true` default in `.env` restricts the bouncer to syncing only
+The `CF_FREE_PLAN=true` default in `.env` restricts the CF bouncer to syncing only
 decisions generated **locally** by your CrowdSec engine and `cscli` via the
 `only_include_decisions_from: ["cscli", "crowdsec"]` setting in the bouncer
 config. CrowdSec community blocklists can contain 10K–100K IPs and would
@@ -241,7 +256,10 @@ exhaust the 1,000-write daily budget on the very first sync. Locally-generated
 decisions for a self-hosted Vaultwarden instance are typically in the range of
 0–50 per day, well within budget.
 
-To disable the guard (paid plan only):
+The **firewall bouncer** enforces community list decisions at the OS level
+regardless of this setting — no KV quota is involved.
+
+To disable the CF bouncer guard (paid plan only):
 ```dotenv
 # .env
 CF_FREE_PLAN=false
@@ -257,6 +275,7 @@ Then re-run: `sudo ./utilities/setup-crowdsec.sh --force`
 ```bash
 # Status
 sudo systemctl status crowdsec-cloudflare-worker-bouncer
+sudo systemctl status crowdsec-firewall-bouncer
 
 # Restart after config change
 sudo systemctl restart crowdsec-cloudflare-worker-bouncer
@@ -319,8 +338,8 @@ sudo ./utilities/setup-crowdsec.sh --admin-ip <your-ip>
 
 ```bash
 # 1. Create a new token in Cloudflare dashboard (same permissions as section 1.2)
-# 2. Store it
-./edit-secrets.sh rotate cf_worker_bouncer_token
+# 2. Store it in secrets
+sudo utilities/setup-secrets.sh rotate cf_worker_bouncer_token
 # 3. Re-run setup to apply
 sudo ./utilities/setup-crowdsec.sh --force
 ```
@@ -351,9 +370,16 @@ sudo systemctl restart crowdsec
 | `crowdsec_config.lapi_url` | `http://127.0.0.1:8080/` | Correct for host-only CrowdSec install |
 | `crowdsec_config.only_include_decisions_from` | `["cscli", "crowdsec"]` | Free-plan guard; empty list = all sources |
 | `crowdsec_config.update_frequency` | `10` | Seconds between LAPI polls |
-| `cloudflare_config.accounts[].zones[].action` | `managed_challenge` | `block`, `js_challenge`, or `captcha` also valid |
-| `route_not_found_action` | `allow` | Fail-open; keeps your vault accessible if bouncer is down |
+| `cloudflare_config.accounts[].zones[].actions` | `["ban"]` | `captcha` also supported if Turnstile is configured |
+| `cloudflare_config.accounts[].zones[].routes_to_protect` | `["yourdomain.com/*"]` | Must be explicit — see note below |
 | `log_level` | `info` | `debug` for troubleshooting |
+
+> **`routes_to_protect` must not be empty.** Since bouncer v0.9.0,
+> `routes_to_protect: []` is interpreted literally as "bind to no routes"
+> rather than "bind to all routes in the zone". The Worker will deploy
+> successfully but no route will be created, so requests will not be
+> inspected. `setup-crowdsec.sh` always substitutes an explicit
+> `DOMAIN_NAME/*` route at render time.
 
 ### `.env` variables
 
@@ -365,13 +391,49 @@ sudo systemctl restart crowdsec
 | `CF_FREE_PLAN` | `true` | Enables `only_include_decisions_from` KV write guard |
 | `CF_AUTONOMOUS_MODE` | `false` | `true` = autonomous mode (no persistent daemon) |
 | `CROWDSEC_VERSION` | _(blank = latest)_ | Pin CrowdSec engine version |
-| `CF_WORKER_BOUNCER_VERSION` | _(blank = latest)_ | Pin bouncer version |
+| `CF_WORKER_BOUNCER_VERSION` | _(blank = latest)_ | Pin CF bouncer version |
+| `FIREWALL_BOUNCER_VERSION` | _(blank = latest)_ | Pin firewall bouncer version |
 
 ---
 
 ## Part 7 — Troubleshooting
 
-### Bouncer fails to start
+### Bouncer fails with YAML parse error
+
+Symptom in `journalctl`:
+```
+level=fatal msg="unable to read config file: [...]: [103:13] value is not allowed in this context"
+```
+
+This means the rendered config has malformed YAML — most likely the
+`routes_to_protect` block has both `[]` and a list item on the same key:
+
+```yaml
+# BAD — parser rejects this
+routes_to_protect: []
+  - "bw.example.com/*"
+
+# GOOD
+routes_to_protect:
+  - "bw.example.com/*"
+```
+
+Fix: re-render from the fixed template:
+```bash
+sudo ./utilities/setup-crowdsec.sh --force
+```
+
+### "failed to send metrics: 200 OK" warning
+
+The bouncer emits this warning every 15 minutes:
+```
+level=warning msg="failed to send metrics: 200 OK"
+```
+This is a **known cosmetic bug** in the upstream bouncer — the metrics sender
+misclassifies HTTP 200 (success) as a failure. IP blocking is not affected.
+The warning can be safely ignored.
+
+### Bouncer fails to start (other causes)
 
 ```bash
 sudo journalctl -u crowdsec-cloudflare-worker-bouncer -n 100 --no-pager
@@ -381,7 +443,7 @@ Common causes:
 - **`lapi_key` rejected** — the key in the bouncer config doesn't match the one
   registered in CrowdSec. Re-run: `sudo ./utilities/setup-crowdsec.sh --force`
 - **`api_token` error** — the Cloudflare token has wrong permissions or was
-  revoked. Rotate: `./edit-secrets.sh rotate cf_worker_bouncer_token`
+  revoked. Rotate: `sudo utilities/setup-secrets.sh rotate cf_worker_bouncer_token`
 - **`account_id` not found** — ensure `CF_ACCOUNT_ID` in `.env` matches your
   Cloudflare account exactly (32-char hex, no spaces).
 
@@ -403,10 +465,10 @@ sudo ./utilities/setup-crowdsec.sh --force
 ### Worker not enforcing decisions
 
 1. Check the Worker is deployed: Cloudflare dashboard → your domain → Workers.
-2. Check the Worker route covers your domain: Workers Routes → confirm `*yourdomain.com/*` exists.
+2. Check the Worker route covers your domain: Workers Routes → confirm `yourdomain.com/*` exists.
 3. Confirm fail mode is **Fail Open**: Workers Routes → Edit → Request limit failure mode.
 4. Check KV namespace exists and has entries:
-   Cloudflare dashboard → Workers → KV → `crowdsec-worker-bouncer-kv`.
+   Cloudflare dashboard → Workers → KV → `CROWDSECCFBOUNCERNS`.
 5. Test manually:
    ```bash
    # Add a test ban for a harmless IP
@@ -437,7 +499,9 @@ sudo cscli scenarios list
 
 ```bash
 sudo cscli bouncers list
-# Should show: cloudflare-worker-bouncer  with a recent Last Pull timestamp
+# Should show both:
+#   cloudflare-worker-bouncer   ✔
+#   crowdsecurity/firewall-bouncer  ✔
 ```
 
 ---
