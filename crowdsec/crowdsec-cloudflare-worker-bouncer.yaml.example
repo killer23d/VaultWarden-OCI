@@ -1,18 +1,20 @@
 # crowdsec/crowdsec-cloudflare-worker-bouncer.yaml.example
 #
-# Template config for the CrowdSec Cloudflare Workers bouncer
-# (crowdsec-cloudflare-worker-bouncer) v0.0.17+.
-# This file is read by utilities/setup-crowdsec.sh and rendered into:
-#   /etc/crowdsec/bouncers/crowdsec-cloudflare-worker-bouncer.yaml
+# Template for the CrowdSec Cloudflare Workers bouncer
+# (crowdsec-cloudflare-worker-bouncer) v0.9.0+.
 #
-# Placeholders replaced by the setup script:
-#   TOKEN_CF_ZONE_ID              <- CLOUDFLARE_ZONE_ID from .env
-#   TOKEN_CF_ACCOUNT_ID           <- CF_ACCOUNT_ID from .env
-#   TOKEN_CF_WORKER_BOUNCER_TOKEN <- CF_WORKER_BOUNCER_TOKEN secret
-#   CHANGE_ME_BOUNCER_KEY         <- auto-generated CrowdSec LAPI key
-#   TOKEN_CF_ROUTES_PATTERN       <- wildcard route derived from DOMAIN (.env)
-#                                    e.g. DOMAIN=https://vault.example.com
-#                                    → *example.com/*
+# DO NOT EDIT the live config at
+#   /etc/crowdsec/bouncers/crowdsec-cloudflare-worker-bouncer.yaml
+# directly after first setup. Regenerate it with:
+#   sudo ./utilities/setup-crowdsec.sh
+#
+# Placeholders substituted by utilities/setup-crowdsec.sh at render time:
+#   %%CLOUDFLARE_ZONE_ID%%   <- CLOUDFLARE_ZONE_ID from .env
+#   %%CF_ACCOUNT_ID%%        <- CF_ACCOUNT_ID from .env
+#   %%CF_WORKER_BOUNCER_TOKEN%% <- CF_WORKER_BOUNCER_TOKEN from secrets
+#   %%CROWDSEC_LAPI_KEY%%    <- auto-generated CrowdSec LAPI key
+#   %%CF_ACCOUNT_NAME%%      <- CF_ACCOUNT_NAME from .env (e.g. you@example.com)
+#   %%WORKER_ROUTE%%         <- derived as *DOMAIN_NAME/* from .env
 #
 # -------------------------------------------------------------------------
 # CLOUDFLARE FREE PLAN NOTES
@@ -30,6 +32,24 @@
 # Each inbound HTTP request to your zone triggers one Worker invocation.
 # A typical self-hosted Vaultwarden instance is orders of magnitude below
 # this limit.
+#
+# -------------------------------------------------------------------------
+# ROUTES_TO_PROTECT — WHY THIS CANNOT BE EMPTY
+# -------------------------------------------------------------------------
+# Since bouncer v0.9.0, routes_to_protect: [] is interpreted literally as
+# "bind to no routes" rather than "bind to all routes in the zone".
+# setup-crowdsec.sh substitutes the %%WORKER_ROUTE%% placeholder with
+# *DOMAIN_NAME/* so the Worker is always bound to the correct zone route.
+# The template preserves [] here so it is idempotent; the script handles
+# the substitution at render time.
+#
+# -------------------------------------------------------------------------
+# METRICS WARNING: 'failed to send metrics: 200 OK'
+# -------------------------------------------------------------------------
+# The bouncer emits this warning every 15 minutes. It is a known upstream
+# cosmetic bug: the metrics sender misclassifies HTTP 200 (success) as an
+# error. IP blocking is not affected. Track the fix at:
+#   https://github.com/crowdsecurity/cs-cloudflare-worker-bouncer/issues
 #
 # -------------------------------------------------------------------------
 # REQUIRED TOKEN PERMISSIONS
@@ -52,7 +72,7 @@
 
 # -- CrowdSec LAPI connection ----------------------------------------------
 crowdsec_config:
-  lapi_key: CHANGE_ME_BOUNCER_KEY
+  lapi_key: %%CROWDSEC_LAPI_KEY%%
   lapi_url: http://127.0.0.1:8080/
   update_frequency: 10s
   include_scenarios_containing: []
@@ -61,29 +81,25 @@ crowdsec_config:
   insecure_skip_verify: false
 
 # -- Cloudflare account/zone structure -------------------------------------
-# Schema for crowdsec-cloudflare-worker-bouncer v0.0.17+.
+# Schema for crowdsec-cloudflare-worker-bouncer v0.9.0+.
 # The token field is required at the account level.
 # actions must be a list; supported values: ban, captcha
 cloudflare_config:
   accounts:
-    - id: TOKEN_CF_ACCOUNT_ID
-      token: TOKEN_CF_WORKER_BOUNCER_TOKEN
-      account_name: TOKEN_CF_ACCOUNT_EMAIL
+    - id: %%CF_ACCOUNT_ID%%
+      token: %%CF_WORKER_BOUNCER_TOKEN%%
+      account_name: %%CF_ACCOUNT_NAME%%
       zones:
-        - zone_id: TOKEN_CF_ZONE_ID
+        - zone_id: %%CLOUDFLARE_ZONE_ID%%
           # actions: list of enforcement actions. Supported: ban, captcha
           # Use 'ban' for hard block (HTTP 403).
           # Use 'captcha' if you have Turnstile configured.
           actions:
             - ban
           default_action: ban
-          # routes_to_protect: wildcard pattern derived from DOMAIN in .env.
-          # An empty list [] is treated as "protect no routes" by the bouncer
-          # binary — NOT "protect all routes" — so an explicit pattern is
-          # required. setup-crowdsec.sh substitutes TOKEN_CF_ROUTES_PATTERN
-          # with *<bare-domain>/* at render time (e.g. *example.com/*).
-          routes_to_protect:
-            - "TOKEN_CF_ROUTES_PATTERN"
+          # routes_to_protect: populated by setup-crowdsec.sh from DOMAIN_NAME.
+          # Bouncer v0.9.0+ requires at least one explicit route; [] = no routes bound.
+          routes_to_protect: []
 
 log_level: info
 log_media: stdout
