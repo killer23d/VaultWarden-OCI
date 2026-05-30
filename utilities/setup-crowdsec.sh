@@ -898,8 +898,14 @@ if [[ -f "$_CF_WORKER_BOUNCER_CONFIG_SRC" ]]; then
         mkdir -p /etc/crowdsec/bouncers
 
         _domain_name="${DOMAIN_NAME:-}"
+        if [[ -z "$_domain_name" && -n "${DOMAIN:-}" ]]; then
+            _domain_name="${DOMAIN#https://}"
+            _domain_name="${_domain_name#http://}"
+            _domain_name="${_domain_name%%/*}"
+            log_info "DOMAIN_NAME not set — derived from DOMAIN: ${_domain_name}"
+        fi
         if [[ -z "$_domain_name" ]]; then
-            log_error "DOMAIN_NAME is not set in .env — cannot derive routes_to_protect."
+            log_error "Neither DOMAIN_NAME nor DOMAIN is set in .env — cannot derive routes_to_protect."
             log_error "Set DOMAIN_NAME=yourdomain.com in .env and re-run."
             exit 1
         fi
