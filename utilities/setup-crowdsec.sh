@@ -885,12 +885,22 @@ if [[ -f "$_CF_WORKER_BOUNCER_CONFIG_SRC" ]]; then
         _cf_account_email="${CF_ACCOUNT_EMAIL:-CHANGE_ME_CF_ACCOUNT_EMAIL}"
 
         mkdir -p /etc/crowdsec/bouncers
+
+        _domain_name="${DOMAIN_NAME:-}"
+        if [[ -z "$_domain_name" ]]; then
+            log_error "DOMAIN_NAME is not set in .env — cannot derive routes_to_protect."
+            log_error "Set DOMAIN_NAME=yourdomain.com in .env and re-run."
+            exit 1
+        fi
+        _worker_route="${_domain_name}/*"
+        
         sed \
-            -e "s|TOKEN_CF_ZONE_ID|${cloudflare_zone_id}|g" \
-            -e "s|TOKEN_CF_ACCOUNT_ID|${cf_account_id:-CHANGE_ME_CF_ACCOUNT_ID}|g" \
-            -e "s|TOKEN_CF_WORKER_BOUNCER_TOKEN|${cf_worker_bouncer_token}|g" \
-            -e "s|TOKEN_CF_ACCOUNT_EMAIL|${_cf_account_email}|g" \
-            -e "s|CHANGE_ME_BOUNCER_KEY|${_CF_BOUNCER_KEY}|g" \
+            -e "s|%%CLOUDFLARE_ZONE_ID%%|${cloudflare_zone_id}|g" \
+            -e "s|%%CF_ACCOUNT_ID%%|${cf_account_id:-CHANGE_ME_CF_ACCOUNT_ID}|g" \
+            -e "s|%%CF_WORKER_BOUNCER_TOKEN%%|${cf_worker_bouncer_token}|g" \
+            -e "s|%%CF_ACCOUNT_NAME%%|${_cf_account_email}|g" \
+            -e "s|%%CROWDSEC_LAPI_KEY%%|${_CF_BOUNCER_KEY}|g" \
+            -e "s|%%WORKER_ROUTE%%|${_worker_route}|g" \
             -e "s|.*only_include_decisions_from:.*|${_only_from_line}|g" \
             -e "s|lapi_url: http://127\.0\.0\.1:[0-9]*/|lapi_url: http://127.0.0.1:${_LAPI_PORT}/|g" \
             "$_CF_WORKER_BOUNCER_CONFIG_SRC" \
