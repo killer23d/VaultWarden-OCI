@@ -100,6 +100,7 @@ cloudflare_config:
           # routes_to_protect: populated by setup-crowdsec.sh from DOMAIN_NAME.
           # Bouncer v0.9.0+ requires at least one explicit route; [] = no routes bound.
           routes_to_protect: []
+            - "%%WORKER_ROUTE%%"
 
 log_level: info
 log_media: stdout
