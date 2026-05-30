@@ -1144,7 +1144,8 @@ else
     log_info "       Dashboard -> Website -> Worker Routes -> Edit -> Fail open"
     log_info "  3. Verify CrowdSec metrics:"
     log_info "       sudo cscli metrics"
-    log_info "  4. After updating the token in .env, restart the Workers bouncer:"
+    log_info "  4. After rotating any Cloudflare credential:"
+    log_info "       sudo utilities/setup-secrets.sh rotate cf_worker_bouncer_token"
     log_info "       sudo ./utilities/setup-crowdsec.sh --force"
 fi
 log_info "════════════════════════════════════════════════════════"
