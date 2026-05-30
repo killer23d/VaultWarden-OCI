@@ -540,8 +540,21 @@ else
         _fw_key="$(grep 'api_key:' "$_FW_BOUNCER_CONFIG" 2>/dev/null | awk '{print $2}' | head -1 || true)"
     fi
 
+    # Detect whether iptables is using the nf_tables backend (Ubuntu 22.04+/Noble)
+    if iptables -V 2>/dev/null | grep -q 'nf_tables'; then
+        _fw_mode="nftables"
+        _fw_chains_block="nftables_hooks:
+  - input
+  - forward"
+    else
+        _fw_mode="iptables"
+        _fw_chains_block="iptables_chains:
+  - INPUT
+  - DOCKER-USER"
+    fi
+
     cat > "$_FW_BOUNCER_CONFIG" <<FWCONFIG
-mode: iptables
+mode: ${_fw_mode}
 update_frequency: 10s
 log_mode: stdout
 log_level: info
@@ -550,9 +563,7 @@ api_key: ${_fw_key:-CHANGE_ME_FW_BOUNCER_KEY}
 
 origins: []
 
-iptables_chains:
-  - INPUT
-  - DOCKER-USER
+${_fw_chains_block}
 
 deny_action: DROP
 disable_ipv6: false
