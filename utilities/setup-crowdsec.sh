@@ -904,6 +904,7 @@ if [[ -f "$_CF_WORKER_BOUNCER_CONFIG_SRC" ]]; then
             -e "s|.*only_include_decisions_from:.*|${_only_from_line}|g" \
             -e "s|lapi_url: http://127\.0\.0\.1:[0-9]*/|lapi_url: http://127.0.0.1:${_LAPI_PORT}/|g" \
             "$_CF_WORKER_BOUNCER_CONFIG_SRC" \
+            | grep -v '%%[A-Z_]*%%' \
             | tee "$_CF_WORKER_BOUNCER_CONFIG_DEST" >/dev/null
         chmod 600 "$_CF_WORKER_BOUNCER_CONFIG_DEST"
         log_success "Cloudflare Workers bouncer config written to ${_CF_WORKER_BOUNCER_CONFIG_DEST} (mode 600)."
