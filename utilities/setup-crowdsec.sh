@@ -302,6 +302,49 @@ _cs_reset_components() {
 }
 
 # ---------------------------------------------------------------------------
+# Derive the Cloudflare Worker route pattern from DOMAIN (.env).
+# DOMAIN is expected to be a full URL, e.g. https://vault.example.com
+# Strips the scheme and any path, extracts the registered domain
+# (last two dot-separated labels), and returns *example.com/*
+# ---------------------------------------------------------------------------
+_cs_derive_route_pattern() {
+    local domain_url="${DOMAIN:-}"
+
+    # Strip scheme (https:// or http://)
+    local bare="${domain_url#https://}"
+    bare="${bare#http://}"
+    # Strip any path or trailing slash
+    bare="${bare%%/*}"
+    # Strip any port
+    bare="${bare%%:*}"
+
+    if [[ -z "$bare" ]]; then
+        log_warn "DOMAIN is not set in .env — cannot auto-derive Worker route pattern."
+        log_warn "Falling back to a placeholder route pattern. Edit the bouncer config"
+        log_warn "at /etc/crowdsec/bouncers/crowdsec-cloudflare-worker-bouncer.yaml and"
+        log_warn "update routes_to_protect with your actual domain wildcard, then restart:"
+        log_warn "  sudo systemctl restart crowdsec-cloudflare-worker-bouncer"
+        echo "*CHANGE_ME_DOMAIN/*"
+        return
+    fi
+
+    # Extract the registered domain: last two dot-separated labels.
+    # For vault.example.com this produces example.com.
+    # For a bare apex (example.com) it is returned unchanged.
+    local registered_domain
+    local IFS='.'
+    read -ra _parts <<< "$bare"
+    local num_parts=${#_parts[@]}
+    if (( num_parts >= 2 )); then
+        registered_domain="${_parts[$(( num_parts - 2 ))]}.${_parts[$(( num_parts - 1 ))]}"
+    else
+        registered_domain="$bare"
+    fi
+
+    echo "*${registered_domain}/*"
+}
+
+# ---------------------------------------------------------------------------
 # CLI flags
 # ---------------------------------------------------------------------------
 AUTO_MODE=false
@@ -884,12 +927,26 @@ if [[ -f "$_CF_WORKER_BOUNCER_CONFIG_SRC" ]]; then
         # Falls back to a placeholder if not set in .env.
         _cf_account_email="${CF_ACCOUNT_EMAIL:-CHANGE_ME_CF_ACCOUNT_EMAIL}"
 
+        # Derive the Cloudflare Worker Route wildcard pattern from the DOMAIN
+        # variable in .env.  DOMAIN is the full public URL, e.g.
+        # https://vault.example.com.  We strip the scheme and any subdomain to
+        # produce the registered domain (example.com) and wrap it as
+        # *example.com/* — the pattern the bouncer needs to bind the Worker
+        # to the zone's routes.
+        #
+        # An empty routes_to_protect list [] is treated by the bouncer binary
+        # as "protect no routes", NOT "protect all routes", so an explicit
+        # wildcard is always required.
+        _cf_routes_pattern="$(_cs_derive_route_pattern)"
+        log_info "Worker Route pattern derived from DOMAIN: ${_cf_routes_pattern}"
+
         mkdir -p /etc/crowdsec/bouncers
         sed \
             -e "s|TOKEN_CF_ZONE_ID|${cloudflare_zone_id}|g" \
             -e "s|TOKEN_CF_ACCOUNT_ID|${cf_account_id:-CHANGE_ME_CF_ACCOUNT_ID}|g" \
             -e "s|TOKEN_CF_WORKER_BOUNCER_TOKEN|${cf_worker_bouncer_token}|g" \
             -e "s|TOKEN_CF_ACCOUNT_EMAIL|${_cf_account_email}|g" \
+            -e "s|TOKEN_CF_ROUTES_PATTERN|${_cf_routes_pattern}|g" \
             -e "s|CHANGE_ME_BOUNCER_KEY|${_CF_BOUNCER_KEY}|g" \
             -e "s|.*only_include_decisions_from:.*|${_only_from_line}|g" \
             -e "s|lapi_url: http://127\.0\.0\.1:[0-9]*/|lapi_url: http://127.0.0.1:${_LAPI_PORT}/|g" \
@@ -897,6 +954,7 @@ if [[ -f "$_CF_WORKER_BOUNCER_CONFIG_SRC" ]]; then
             | tee "$_CF_WORKER_BOUNCER_CONFIG_DEST" >/dev/null
         chmod 600 "$_CF_WORKER_BOUNCER_CONFIG_DEST"
         log_success "Cloudflare Workers bouncer config written to ${_CF_WORKER_BOUNCER_CONFIG_DEST} (mode 600)."
+        log_info "Worker Route pattern: ${_cf_routes_pattern} (derived from DOMAIN in .env)"
         log_info "NOTE: The -g auto-config flag is not used — it fails on multi-zone accounts."
         log_info "Config is fully built from secrets.yaml values (zone_id, account_id, token)."
 
@@ -1112,11 +1170,4 @@ if [[ "$AUTONOMOUS_MODE" == "true" ]]; then
     log_info "  3. Verify decisions are reaching Cloudflare KV (free plan: up to 1K/day):"
     log_info "       sudo cscli decisions list"
 else
-    log_info "  2. Set worker route fail mode to 'Fail Open' in Cloudflare dashboard:"
-    log_info "       Dashboard -> Website -> Worker Routes -> Edit -> Fail open"
-    log_info "  3. Verify CrowdSec metrics:"
-    log_info "       sudo cscli metrics"
-    log_info "  4. After updating the token in .env, restart the Workers bouncer:"
-    log_info "       sudo ./utilities/setup-crowdsec.sh --force"
-fi
-log_info "════════════════════════════════════════════════════════"
+    log_info "  2. Se

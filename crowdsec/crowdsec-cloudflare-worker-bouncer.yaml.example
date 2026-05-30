@@ -10,6 +10,9 @@
 #   TOKEN_CF_ACCOUNT_ID           <- CF_ACCOUNT_ID from .env
 #   TOKEN_CF_WORKER_BOUNCER_TOKEN <- CF_WORKER_BOUNCER_TOKEN secret
 #   CHANGE_ME_BOUNCER_KEY         <- auto-generated CrowdSec LAPI key
+#   TOKEN_CF_ROUTES_PATTERN       <- wildcard route derived from DOMAIN (.env)
+#                                    e.g. DOMAIN=https://vault.example.com
+#                                    → *example.com/*
 #
 # -------------------------------------------------------------------------
 # CLOUDFLARE FREE PLAN NOTES
@@ -74,8 +77,13 @@ cloudflare_config:
           actions:
             - ban
           default_action: ban
-          # routes_to_protect: leave empty to protect all routes in the zone.
-          routes_to_protect: []
+          # routes_to_protect: wildcard pattern derived from DOMAIN in .env.
+          # An empty list [] is treated as "protect no routes" by the bouncer
+          # binary — NOT "protect all routes" — so an explicit pattern is
+          # required. setup-crowdsec.sh substitutes TOKEN_CF_ROUTES_PATTERN
+          # with *<bare-domain>/* at render time (e.g. *example.com/*).
+          routes_to_protect:
+            - "TOKEN_CF_ROUTES_PATTERN"
 
 log_level: info
 log_media: stdout
