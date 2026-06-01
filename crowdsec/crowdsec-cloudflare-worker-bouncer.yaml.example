@@ -86,10 +86,7 @@ crowdsec_config:
   update_frequency: 10s
   include_scenarios_containing: []
   exclude_scenarios_containing: []
-  # only_include_decisions_from: controls which decision sources are synced
-  # to Cloudflare Workers KV.  On the free plan this MUST remain as shown
-  # to stay within the 1,000 KV writes/day quota.  The firewall bouncer
-  # (OS-level) enforces ALL sources including the community blocklist.
+  # __ONLY_INCLUDE_DECISIONS_FROM__ (sed anchor — do not remove this comment)
   only_include_decisions_from: ["cscli", "crowdsec"]
   insecure_skip_verify: false
 
