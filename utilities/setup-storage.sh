@@ -249,18 +249,22 @@ _mv_confirm_by_typing() {
 }
 
 _mv_warn_fstab_entries() {
-    # Scans /etc/fstab for any entry whose device or mount point references
-    # _MV_SOURCE or _MV_TARGET, and emits a prominent, actionable warning.
+    # Scans /etc/fstab for entries that reference _MV_SOURCE (the old data
+    # path). These could auto-mount the old location at boot and shadow the
+    # new mount point. Entries for _MV_TARGET are intentionally excluded: the
+    # target's fstab entry is the correct, required entry after a block-device
+    # migration and must NOT be removed.
     [[ -f /etc/fstab ]] || return 0
+    [[ -n "${_MV_SOURCE:-}" ]] || return 0
 
     local line found=false
     while IFS= read -r line; do
         [[ "${line}" =~ ^[[:space:]]*# ]] && continue
         [[ -z "${line//[[:space:]]/}" ]]  && continue
-        if [[ "${line}" == *"${_MV_SOURCE}"* || "${line}" == *"${_MV_TARGET}"* ]]; then
+        if [[ "${line}" == *"${_MV_SOURCE}"* ]]; then
             if [[ "${found}" == "false" ]]; then
                 _mv_log warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                _mv_log warn "  ⚠  FSTAB WARNING: /etc/fstab references migration paths"
+                _mv_log warn "  ⚠  FSTAB WARNING: /etc/fstab still references the old source path"
                 found=true
             fi
             _mv_log warn "    ${line}"
@@ -268,20 +272,12 @@ _mv_warn_fstab_entries() {
     done < /etc/fstab
 
     if [[ "${found}" == "true" ]]; then
-        _mv_log warn "  These entries could auto-mount old volumes at boot and shadow ${_MV_TARGET}."
-        _mv_log warn "  Review and remove stale lines. To delete each matching line, run:"
-        if [[ -n "${_MV_SOURCE}" ]]; then
-            local _esc_src="${_MV_SOURCE//\\/\\\\}"
-            _esc_src="${_esc_src//./\\.}"
-            _esc_src="${_esc_src//|/\\|}"
-            _mv_log warn "    sed -i '\\|${_esc_src}|d' /etc/fstab"
-        fi
-        if [[ -n "${_MV_TARGET}" ]]; then
-            local _esc_tgt="${_MV_TARGET//\\/\\\\}"
-            _esc_tgt="${_esc_tgt//./\\.}"
-            _esc_tgt="${_esc_tgt//|/\\|}"
-            _mv_log warn "    sed -i '\\|${_esc_tgt}|d' /etc/fstab"
-        fi
+        _mv_log warn "  These entries may auto-mount the old source location at boot."
+        _mv_log warn "  Review them and remove any that are no longer needed. Example:"
+        local _esc_src="${_MV_SOURCE//\\/\\\\}"
+        _esc_src="${_esc_src//./\\.}"
+        _esc_src="${_esc_src//|/\\|}"
+        _mv_log warn "    sed -i '\\|${_esc_src}|d' /etc/fstab"
         _mv_log warn "  (Verify the resulting fstab is correct before rebooting.)"
         _mv_log warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     fi
@@ -935,7 +931,23 @@ _mv_step_rsync() {
     _mv_log info "Running rsync: ${_MV_SOURCE%/}/ → ${_MV_TARGET}"
     _mv_log info "Flags: ${rsync_flags[*]}"
 
-    rsync "${rsync_flags[@]}" "${_MV_SOURCE%/}/" "${_MV_TARGET}"
+    local rsync_rc=0
+    rsync "${rsync_flags[@]}" "${_MV_SOURCE%/}/" "${_MV_TARGET}" || rsync_rc=$?
+
+    if (( rsync_rc == 23 )); then
+        # Exit code 23 means "some files/attrs were not transferred" (partial
+        # transfer). This is expected when --delete-excluded tries to remove the
+        # immutable .vw-data-volume sentinel on the target: the kernel returns
+        # EPERM and rsync records the failure. The sentinel is intentionally
+        # left in place — this is safe and the transfer is otherwise complete.
+        _mv_log warn "rsync exited with code 23 (partial transfer). The immutable" \
+            "sentinel .vw-data-volume could not be removed — this is expected and safe. Continuing."
+    elif (( rsync_rc != 0 )); then
+        _mv_log error "rsync failed with exit code ${rsync_rc}. Investigate the output above."
+        _mv_log error "Resume the migration once resolved: sudo utilities/setup-storage.sh --mode migrate resume"
+        return 1
+    fi
+
     _mv_log success "rsync transfer complete."
 }
 
@@ -1129,13 +1141,18 @@ _mv_step_update_env() {
 
 _mv_apply_dropin_paths() {
     # Usage: _mv_apply_dropin_paths <old_path> <new_path>
+    # Updates the ReadWritePaths= path in each unit's 10-state-dir.conf drop-in.
+    # Returns the count of drop-ins that were missing (caller can decide whether
+    # to auto-install).
     local old_path="$1" new_path="$2"
     local unit drop_in tmp updated_any=false
+    local missing_count=0
 
     for unit in "${_MV_DROPIN_UNITS[@]}"; do
-        drop_in="/etc/systemd/system/${unit}.d/vaultwarden-paths.conf"
+        drop_in="/etc/systemd/system/${unit}.d/10-state-dir.conf"
         if [[ ! -f "${drop_in}" ]]; then
-            _mv_log warn "Drop-in not found (skipping): ${drop_in}"
+            _mv_log info "Drop-in not yet installed (will be created by installer): ${drop_in}"
+            (( missing_count++ )) || true
             continue
         fi
 
@@ -1169,11 +1186,32 @@ _mv_apply_dropin_paths() {
             || _mv_log warn "systemctl daemon-reload failed — a reboot may be required."
         _mv_log success "Systemd drop-ins updated and daemon reloaded."
     fi
+
+    return "${missing_count}"
 }
 
 _mv_step_update_dropin() {
     _mv_log info "── update_dropin ─────────────────────────────────────────────────"
-    _mv_apply_dropin_paths "${_MV_SOURCE}" "${_MV_TARGET}"
+
+    local _missing_count=0
+    _mv_apply_dropin_paths "${_MV_SOURCE}" "${_MV_TARGET}" || _missing_count=$?
+
+    if (( _missing_count > 0 )); then
+        # Some or all drop-ins were absent — they have not been installed yet.
+        # Run setup-systemd.sh install to create them for the new target path.
+        if [[ "${DRY_RUN}" == "true" ]]; then
+            _mv_log info "[DRY RUN] would: run utilities/setup-systemd.sh install to create missing drop-ins"
+        else
+            _mv_log info "${_missing_count} drop-in(s) were missing — running" \
+                "utilities/setup-systemd.sh install to create them..."
+            if "${PROJECT_ROOT}/utilities/setup-systemd.sh" install; then
+                _mv_log success "Systemd drop-ins installed for new data path: ${_MV_TARGET}"
+            else
+                _mv_log warn "utilities/setup-systemd.sh install did not complete successfully."
+                _mv_log warn "Run manually after migration: sudo ./setup.sh systemd install"
+            fi
+        fi
+    fi
 }
 
 _mv_step_mount_guard() {
@@ -1287,12 +1325,16 @@ _mv_print_checklist() {
     printf '  1. Log in to VaultWarden and verify your vault data is intact.\n'
     printf '  2. Run: docker compose ps  — confirm all services are '\''healthy'\''.\n'
     printf '  3. Run: systemctl status vaultwarden-startup  — confirm unit loads cleanly.\n'
-    printf '  4. Test a scheduled backup: sudo ./backup.sh run full\n'
-    printf '  5. Verify backup path uses new volume: check BACKUP_DIR in .env\n'
+    printf '  4. Run: sudo ./setup.sh systemd install\n'
+    printf '     This installs systemd service drop-ins for the new data path\n'
+    printf '     so automated backups, health checks, and maintenance can write\n'
+    printf '     to the new volume under ProtectSystem=strict.\n'
+    printf '  5. Test a scheduled backup: sudo ./backup.sh run full\n'
+    printf '  6. Verify backup path uses new volume: check BACKUP_DIR in .env\n'
     printf '     If BACKUP_DIR was a custom path it was NOT auto-updated — verify manually.\n'
-    printf '  6. After a satisfying reboot test, remove the renamed source:\n'
+    printf '  7. After a satisfying reboot test, remove the renamed source:\n'
     printf '       sudo rm -rf '\''%s'\''\n' "${renamed_src}"
-    printf '  7. (If you added custom services to docker-compose.yml with hardcoded\n'
+    printf '  8. (If you added custom services to docker-compose.yml with hardcoded\n'
     printf '     paths) Verify: docker compose config | grep '\''%s'\''\n' "${_MV_SOURCE}"
     printf '     Any remaining references must be updated manually.\n'
     if [[ -n "${_MV_BACKUP_DIR_CUSTOM_WARNING:-}" ]]; then

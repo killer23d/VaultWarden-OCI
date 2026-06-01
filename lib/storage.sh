@@ -292,11 +292,22 @@ setup_data_volume() {
     [[ -n "$dev_uuid" ]] \
         || { log_error "Cannot determine UUID for $device — cannot write a safe fstab entry"; return 1; }
 
-    if ! grep -qF "UUID=$dev_uuid" /etc/fstab 2>/dev/null \
-        || ! grep "UUID=$dev_uuid" /etc/fstab | grep -qF "$mount_point"; then
-        # Write to a temp file on the same filesystem, validate it has content,
-        # then atomically replace /etc/fstab. This avoids leaving a truncated
-        # fstab behind if the process is killed mid-write.
+    local _uuid_in_fstab=false _mp_matches=false _old_mp=""
+    if grep -qF "UUID=$dev_uuid" /etc/fstab 2>/dev/null; then
+        _uuid_in_fstab=true
+        if grep "UUID=$dev_uuid" /etc/fstab | grep -qF "$mount_point"; then
+            _mp_matches=true
+        else
+            _old_mp=$(grep "UUID=$dev_uuid" /etc/fstab | awk '{print $2}' | head -1 || true)
+        fi
+    fi
+
+    if [[ "$_uuid_in_fstab" == "true" && "$_mp_matches" == "true" ]]; then
+        log_info "fstab entry already present for UUID=$dev_uuid at $mount_point (idempotent)"
+    else
+        # Write to a temp file on the same filesystem, then atomically replace
+        # /etc/fstab. This avoids leaving a truncated fstab behind if the
+        # process is killed mid-write.
         local fstab_tmp
         fstab_tmp=$(mktemp /etc/fstab.vw-XXXXXX) \
             || { log_error "Cannot create fstab temp file"; return 1; }
@@ -306,6 +317,20 @@ setup_data_volume() {
             log_error "Cannot copy /etc/fstab to temp file"
             return 1
         fi
+        if [[ "$_uuid_in_fstab" == "true" ]]; then
+            # UUID exists but points to the wrong mount point — remove the stale
+            # entry before appending the corrected one. grep -v writes all lines
+            # that do NOT match; the result is the old fstab minus the stale line.
+            local fstab_tmp2
+            fstab_tmp2=$(mktemp /etc/fstab.vw-XXXXXX) \
+                || { rm -f "$fstab_tmp"; log_error "Cannot create second fstab temp file"; return 1; }
+            chmod 644 "$fstab_tmp2"
+            grep -vF "UUID=$dev_uuid" "$fstab_tmp" > "$fstab_tmp2" \
+                || { rm -f "$fstab_tmp" "$fstab_tmp2"; log_error "Failed to filter stale fstab entry"; return 1; }
+            mv -- "$fstab_tmp2" "$fstab_tmp" \
+                || { rm -f "$fstab_tmp" "$fstab_tmp2"; log_error "Failed to stage filtered fstab"; return 1; }
+            log_warn "fstab: stale entry for UUID=$dev_uuid pointed to '${_old_mp}' — replacing with '$mount_point'."
+        fi
         printf 'UUID=%s\t%s\text4\tnoatime,nofail,x-systemd.device-timeout=30s\t0\t2\n' \
             "$dev_uuid" "$mount_point" >> "$fstab_tmp" \
             || { rm -f "$fstab_tmp"; log_error "Failed to append new entry to fstab temp file"; return 1; }
@@ -314,10 +339,12 @@ setup_data_volume() {
             log_error "Failed to atomically replace /etc/fstab"
             return 1
         fi
-        log_success "fstab entry added (UUID=$dev_uuid, mount: $mount_point)"
+        if [[ "$_uuid_in_fstab" == "true" ]]; then
+            log_success "fstab entry updated (UUID=$dev_uuid, mount: $mount_point)"
+        else
+            log_success "fstab entry added (UUID=$dev_uuid, mount: $mount_point)"
+        fi
         _storage_daemon_reload
-    else
-        log_info "fstab entry already present for UUID=$dev_uuid (idempotent)"
     fi
 
     if mountpoint -q "$mount_point" 2>/dev/null; then
