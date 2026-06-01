@@ -208,7 +208,7 @@ EOF
 check_disk_space() {
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would check disk space"; return 0; fi
 
-    local min_free_kb=$((2 * 1024 * 1024))   # 2 GiB in KiB
+    local min_free_kb=$(( 2 * 1024 * 1024 ))   # 2 GiB in KiB
     local available_kb
     available_kb=$(df -k "$PROJECT_ROOT" | awk 'NR==2 {print $4}')
 
@@ -287,7 +287,11 @@ create_swapfile() {
     return 0
 }
 
-# Install the required system packages, Docker, CrowdSec, and SOPS.
+# Install the required system packages, Docker, and SOPS.
+# NOTE: CrowdSec is intentionally NOT installed here. It is an optional
+# post-install step that requires Cloudflare secrets to be injected first.
+# Run it after completing the main setup:
+#   sudo ./utilities/setup-crowdsec.sh
 install_dependencies() {
     if [[ "$SKIP_DEPS" == "true" ]]; then return 0; fi
     if [[ "$DRY_RUN" == "true" ]]; then log_info "[DRY RUN] Would install dependencies"; return 0; fi
@@ -355,17 +359,6 @@ install_dependencies() {
 
     if ! command -v docker >/dev/null 2>&1; then
         install_docker || return 1
-    fi
-
-    local crowdsec_script="${PROJECT_ROOT}/utilities/setup-crowdsec.sh"
-    if [[ -f "$crowdsec_script" ]]; then
-        _require_script "$crowdsec_script"
-        local _cs_args=()
-        [[ "$AUTO_MODE" == "true" ]] && _cs_args+=(--auto)
-        [[ "$DRY_RUN" == "true" ]] && _cs_args+=(--dry-run)
-        "$crowdsec_script" "${_cs_args[@]}" || return 1
-    else
-        log_warn "utilities/setup-crowdsec.sh not found — skipping CrowdSec install"
     fi
 
     if ! docker compose version >/dev/null 2>&1; then
