@@ -185,7 +185,7 @@ _crowdsec_status() {
 # is active. Pure systemctl check: zero latency, no network call.
 # ---------------------------------------------------------------------------
 _cf_worker_status() {
-    if systemctl is-active --quiet crowdsec-cloudflare-bouncer 2>/dev/null; then
+    if systemctl is-active --quiet crowdsec-cloudflare-worker-bouncer.service 2>/dev/null; then
         printf "${GRN}Running${NC}"
     else
         printf "${RED}Stopped${NC}"
