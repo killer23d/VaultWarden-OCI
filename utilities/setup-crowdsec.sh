@@ -3,11 +3,6 @@
 # Cloudflare *Workers* bouncer (crowdsec-cloudflare-worker-bouncer) for
 # VaultWarden-OCI.
 #
-# The legacy crowdsec-cloudflare-worker-bouncer is no longer actively supported by
-# CrowdSec due to Cloudflare API rate-limit changes.  This script uses the
-# recommended replacement: crowdsec-cloudflare-worker-bouncer, which leverages
-# Cloudflare Workers + Workers KV storage for decision enforcement.
-#
 # Free-plan note:
 #   KV writes are capped at 1 K/day on the Cloudflare free plan, so the
 #   initial blocklist population is truncated.  Subsequent incremental syncs
@@ -311,8 +306,8 @@ AUTONOMOUS_MODE=false
 USE_LATEST=false
 ADMIN_IP=""
 
-CROWDSEC_VERSION="${CROWDSEC_VERSION:-1.6.8}"
-CF_WORKER_BOUNCER_VERSION="${CF_WORKER_BOUNCER_VERSION:-0.9.0}"
+CROWDSEC_VERSION="${CROWDSEC_VERSION:-}"
+CF_WORKER_BOUNCER_VERSION="${CF_WORKER_BOUNCER_VERSION:-}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -455,7 +450,7 @@ else
     rm -f "$_repo_script"
 
     _cs_pkg="crowdsec"
-    if [[ "$USE_LATEST" != "true" && -n "$CROWDSEC_VERSION" ]]; then
+    if [[ -n "$CROWDSEC_VERSION" ]]; then
         _cs_pkg="crowdsec=${CROWDSEC_VERSION}"
         log_info "CrowdSec version pinned: ${CROWDSEC_VERSION}"
     else
@@ -463,13 +458,23 @@ else
     fi
 
     log_info "Installing CrowdSec engine package first..."
-    _fw_pkg="crowdsec-firewall-bouncer-iptables"
+    _fw_base="crowdsec-firewall-bouncer"
     if iptables -V 2>/dev/null | grep -q 'nf_tables'; then
-        _fw_pkg="crowdsec-firewall-bouncer-nftables"
+        _fw_suffix="nftables"
         log_info "nftables detected — installing crowdsec-firewall-bouncer-nftables."
     else
+        _fw_suffix="iptables"
         log_info "iptables detected — installing crowdsec-firewall-bouncer-iptables."
     fi
+
+    if [[ -n "${FIREWALL_BOUNCER_VERSION:-}" ]]; then
+        _fw_pkg="${_fw_base}-${_fw_suffix}=${FIREWALL_BOUNCER_VERSION}"
+        log_info "Firewall bouncer version pinned: ${FIREWALL_BOUNCER_VERSION}"
+    else
+        _fw_pkg="${_fw_base}-${_fw_suffix}"
+        log_info "Firewall bouncer version: installing latest from packagecloud repository"
+    fi
+
     DEBIAN_FRONTEND=noninteractive apt-get install -y "$_cs_pkg"
     log_info "Installing CrowdSec firewall bouncer package..."
     DEBIAN_FRONTEND=noninteractive apt-get install -y "$_fw_pkg"
@@ -752,10 +757,15 @@ log_info "=== PHASE 3: CrowdSec hub collections ==="
 if [[ "$DRY_RUN" == "true" ]]; then
     log_info "[DRY RUN] Would install hub collections: crowdsecurity/linux, crowdsecurity/caddy, crowdsecurity/http-cve, Dominic-Wagner/vaultwarden"
 else
-    cscli collections install crowdsecurity/linux          || true
-    cscli collections install crowdsecurity/caddy          || true
-    cscli collections install crowdsecurity/http-cve       || true
-    cscli collections install Dominic-Wagner/vaultwarden   || true
+    cscli collections install crowdsecurity/linux                   || true
+    cscli collections install crowdsecurity/caddy                   || true
+    cscli collections install crowdsecurity/http-cve                || true
+    cscli collections install crowdsecurity/base-http-scenarios     || true
+    cscli collections install crowdsecurity/appsec-generic-rules    || true
+    cscli collections install crowdsecurity/appsec-virtual-patching || true
+    cscli collections install crowdsecurity/whitelist-good-actors   || true
+    cscli collections install crowdsecurity/iptables                || true
+    cscli collections install Dominic-Wagner/vaultwarden            || true
     log_success "Hub collections installed."
 fi
 
