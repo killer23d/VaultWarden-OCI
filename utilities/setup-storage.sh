@@ -319,7 +319,7 @@ _mv_select_device() {
     local -a dev_names dev_sizes dev_mounts dev_types
     local name size mount type
 
-    while IFS=$'\t' read -r name size mount type; do
+    while IFS=' ' read -r name size mount type; do
         [[ -z "${name}" ]] && continue
         dev_names+=( "/dev/${name}" )
         dev_sizes+=( "${size}" )
