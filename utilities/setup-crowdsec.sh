@@ -822,7 +822,6 @@ else
         log_success "Bouncer API key generated and registered. Written to .env as ${_CF_BOUNCER_ENV_KEY}."
 
         if [[ -t 0 ]]; then
-            clear
             printf '%s' "${COLOR_RED}"
             cat << 'BOUNCER_BANNER'
   ╔══════════════════════════════════════════════════════════════════╗
