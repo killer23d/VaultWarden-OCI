@@ -1,12 +1,17 @@
 # crowdsec/crowdsec-firewall-bouncer.yaml.example
 #
-# Template config for crowdsec-firewall-bouncer (iptables mode).
+# Template config for crowdsec-firewall-bouncer.
 # This file is rendered into:
 #   /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml
 # by utilities/setup-crowdsec.sh (Phase 1b).
 #
+# setup-crowdsec.sh auto-detects whether the host uses iptables (legacy) or
+# nftables (Ubuntu 22.04+ / Oracle Linux 9+) and writes the correct mode
+# and chains block.  This example file documents BOTH variants for reference;
+# the rendered live file will contain only the applicable section.
+#
 # Dual-bouncer architecture (official CrowdSec recommendation):
-#   crowdsec-firewall-bouncer  → iptables OS-level enforcement
+#   crowdsec-firewall-bouncer  → OS-level enforcement (iptables/nftables)
 #     origins: []              → receives ALL decisions incl. community list
 #     no quota cost            → unlimited writes (local kernel)
 #
@@ -16,10 +21,20 @@
 #
 # Ref: https://docs.crowdsec.net/u/bouncers/firewall
 
+# ── Common settings (both modes) ─────────────────────────────────────────────
+
+# mode: set to 'iptables' or 'nftables' by setup-crowdsec.sh based on
+# the iptables binary backend detected at install time.
 mode: iptables
+
 update_frequency: 10s
 log_mode: stdout
 log_level: info
+
+# api_url: setup-crowdsec.sh resolves the live LAPI port from
+# /etc/crowdsec/config.yaml at install time and substitutes it here.
+# Default LAPI port is 8080; if that port is in use the script auto-assigns
+# the next free port (see _cs_find_free_port in setup-crowdsec.sh).
 api_url: http://127.0.0.1:8080/
 api_key: CHANGE_ME_FW_BOUNCER_KEY
 
@@ -28,6 +43,12 @@ api_key: CHANGE_ME_FW_BOUNCER_KEY
 # blocklist (CAPI) and all subscribed lists at the OS level at no quota cost.
 origins: []
 
+deny_action: DROP
+disable_ipv6: false
+
+# ── iptables mode chains ──────────────────────────────────────────────────────
+# Used when mode: iptables (legacy iptables backend, Ubuntu ≤22.04 / OCI default).
+#
 # DOCKER-USER is required for Docker deployments.
 # Without it, Docker's FORWARD chain bypasses INPUT and community-list bans
 # do not reach Caddy or Vaultwarden containers.
@@ -36,5 +57,12 @@ iptables_chains:
   - INPUT
   - DOCKER-USER
 
-deny_action: DROP
-disable_ipv6: false
+# ── nftables mode hooks ───────────────────────────────────────────────────────
+# Used when mode: nftables (nf_tables backend, Ubuntu 22.04+ nft compat mode
+# or Oracle Linux 9+ native nftables).
+# setup-crowdsec.sh writes this block instead of iptables_chains when
+# `iptables -V` reports the nf_tables backend.
+#
+# nftables_hooks:
+#   - input
+#   - forward

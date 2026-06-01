@@ -1,6 +1,10 @@
 # CrowdSec log acquisition configuration — VaultWarden-OCI
 # Installed to /etc/crowdsec/acquis.d/vaultwarden.yaml by setup-crowdsec.sh
+#
+# TOKEN_PROJECT_STATE_DIR is substituted at install time by setup-crowdsec.sh
+# with the value of PROJECT_STATE_DIR from .env.
 
+# ── Vaultwarden application logs ─────────────────────────────────────────────
 source: file
 filenames:
   - TOKEN_PROJECT_STATE_DIR/logs/vaultwarden/vaultwarden.log
@@ -9,6 +13,9 @@ labels:
 
 ---
 
+# ── Caddy access logs (JSON format) ──────────────────────────────────────────
+# Caddy writes structured JSON by default. The caddy collection parser handles
+# both plain-text and JSON formats; no extra label is needed.
 source: file
 filenames:
   - TOKEN_PROJECT_STATE_DIR/logs/caddy/access.log
@@ -17,8 +24,29 @@ labels:
 
 ---
 
+# ── SSH brute-force detection via journald ────────────────────────────────────
+# Debian/Ubuntu: ssh.service
+# RHEL/Oracle Linux (OCI default): sshd.service
+# Both are listed so this config works on either platform without modification.
+# CrowdSec deduplicates entries that match multiple filters.
 source: journalctl
-journalctl_filter:
+journal_filters:
   - "_SYSTEMD_UNIT=ssh.service"
+  - "_SYSTEMD_UNIT=sshd.service"
 labels:
   type: syslog
+
+---
+
+# ── iptables kernel firewall logs ────────────────────────────────────────────
+# Required by crowdsecurity/iptables collection.
+# iptables must be configured to log DROP/REJECT packets with a prefix, e.g.:
+#   sudo iptables -I INPUT -j LOG --log-prefix "[IPTABLES] " --log-level 4
+# On OCI free-tier the default security list already drops port-scans;
+# this source captures those drops so CrowdSec can correlate scanning activity.
+source: file
+filenames:
+  - /var/log/kern.log
+  - /var/log/messages
+labels:
+  type: iptables

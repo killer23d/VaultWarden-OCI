@@ -1,8 +1,21 @@
 # CrowdSec profiles — VaultWarden-OCI
 #
-# Profiles are evaluated in order; on_success: break stops further evaluation.
-# repeat_offender MUST come first so high-event bursts get the longer ban before
-# the catch-all default_ip_remediation matches and breaks.
+# Profiles are evaluated top-to-bottom; on_success: break stops further
+# evaluation once a matching profile has issued its decision.
+#
+# Order matters:
+#   1. repeat_offender   — escalated ban for high-frequency sources
+#   2. captcha_eligible  — Turnstile challenge for moderate offenders
+#                          (only active when Turnstile is configured)
+#   3. range_remediation — ban the /24 when multiple IPs in the same
+#                          range are flagged within the window
+#   4. default_ip_remediation — catch-all 4-hour ban
+#
+# Ref: https://docs.crowdsec.net/u/getting_started/post_installation/profiles/
+
+# ── 1. Repeat offender: escalated 7-day ban ──────────────────────────────────
+# Triggers when a single IP fires ≥5 events in a single alert window.
+# This catches persistent scanners and credential-stuffing campaigns.
 name: repeat_offender
 filters:
   - Alert.Remediation == true && Alert.GetScope() == "Ip" && Alert.GetEventsCount() >= 5
@@ -10,7 +23,49 @@ decisions:
   - type: ban
     duration: 168h
 on_success: break
+on_failure: continue
+
 ---
+
+# ── 2. Captcha challenge (requires Cloudflare Turnstile) ─────────────────────
+# Issues a Turnstile CAPTCHA challenge rather than a hard ban for IPs that
+# triggered a moderate-severity scenario (e.g. slow brute-force, recon).
+#
+# Prerequisites:
+#   - Turnstile site key + secret key configured in Cloudflare dashboard
+#   - crowdsec-cloudflare-worker-bouncer actions list includes 'captcha'
+#   - CF_FREE_PLAN=false OR captcha traffic is well within KV quota
+#
+# To disable this profile (hard-ban-only mode), comment it out.
+name: captcha_eligible
+filters:
+  - Alert.Remediation == true && Alert.GetScope() == "Ip" && Alert.GetEventsCount() < 5
+  - Alert.Remediation == true && Alert.GetScope() == "Ip" && Alert.GetSeverity() == "warning"
+decisions:
+  - type: captcha
+    duration: 4h
+on_success: break
+on_failure: continue
+
+---
+
+# ── 3. Range remediation ─────────────────────────────────────────────────────
+# Bans the source /24 when CrowdSec's range aggregation marks the
+# range itself as malicious (requires crowdsecurity/base-http-scenarios
+# or similar range-scope scenarios).
+name: range_remediation
+filters:
+  - Alert.Remediation == true && Alert.GetScope() == "Range"
+decisions:
+  - type: ban
+    duration: 24h
+on_success: break
+on_failure: continue
+
+---
+
+# ── 4. Default IP remediation: 4-hour ban ────────────────────────────────────
+# Catch-all for any IP-scoped alert not matched above.
 name: default_ip_remediation
 filters:
   - Alert.Remediation == true && Alert.GetScope() == "Ip"
@@ -18,3 +73,4 @@ decisions:
   - type: ban
     duration: 4h
 on_success: break
+on_failure: continue
