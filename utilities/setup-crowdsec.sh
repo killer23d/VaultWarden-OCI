@@ -645,6 +645,11 @@ else
             if DEBIAN_FRONTEND=noninteractive apt-get install -y crowdsec-cloudflare-worker-bouncer 2>/dev/null; then
                 log_success "Installed crowdsec-cloudflare-worker-bouncer via apt."
                 _installed_via_deb=true
+                _apt_bin="$(command -v crowdsec-cloudflare-worker-bouncer 2>/dev/null || true)"
+                if [[ -n "$_apt_bin" && "$_apt_bin" != "$_CF_WORKER_BOUNCER_BIN" ]]; then
+                    ln -sf "$_apt_bin" "$_CF_WORKER_BOUNCER_BIN"
+                    log_info "Symlinked ${_apt_bin} -> ${_CF_WORKER_BOUNCER_BIN} for path consistency."
+                fi
             else
                 log_warn "apt install failed — falling back to GitHub release tarball."
             fi
@@ -737,7 +742,7 @@ else
             fi
         fi
 
-        if [[ -n "$_arch" && ! -x "$_CF_WORKER_BOUNCER_BIN" ]]; then
+        if [[ "$_installed_via_deb" == "false" && -n "$_arch" && ! -x "$_CF_WORKER_BOUNCER_BIN" ]]; then
             if command -v go >/dev/null 2>&1; then
                 log_info "Attempting Go source build for crowdsec-cloudflare-worker-bouncer..."
                 if [[ "$USE_LATEST" != "true" && -n "$CF_WORKER_BOUNCER_VERSION" ]]; then
