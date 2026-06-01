@@ -808,9 +808,9 @@ usage: sudo ./utilities/setup-crowdsec.sh [OPTIONS]
 Environment variables (set in .env or exported before running):
   CLOUDFLARE_PROXY_ENABLED   Set to 'true' to enable the Cloudflare bouncer.
   # Cloudflare credentials (now in secrets, not .env):
-  #   sudo utilities/setup-secrets.sh rotate cf_worker_bouncer_token
-  #   sudo utilities/setup-secrets.sh rotate cloudflare_zone_id
-  #   sudo utilities/setup-secrets.sh rotate cf_account_id
+  #   sudo ./edit-secrets.sh rotate cf_worker_bouncer_token
+  #   sudo ./edit-secrets.sh rotate cloudflare_zone_id
+  #   sudo ./edit-secrets.sh rotate cf_account_id
   CF_FREE_PLAN               Set to 'false' to disable the free-plan KV write
                              guard. Default: 'true'.
   CROWDSEC_VERSION           Pin a specific CrowdSec version.

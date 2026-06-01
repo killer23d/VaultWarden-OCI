@@ -111,17 +111,17 @@ Then supply the external credentials that `--auto` cannot generate for you:
 
 ```bash
 # Cloudflare tokens (required — Caddy TLS + CrowdSec edge blocking)
-sudo utilities/setup-secrets.sh rotate caddy_cloudflare_dns_token
-sudo utilities/setup-secrets.sh rotate cf_worker_bouncer_token
-sudo utilities/setup-secrets.sh rotate cloudflare_zone_id
-sudo utilities/setup-secrets.sh rotate cf_account_id
+sudo ./edit-secrets.sh rotate caddy_cloudflare_dns_token
+sudo ./edit-secrets.sh rotate cf_worker_bouncer_token
+sudo ./edit-secrets.sh rotate cloudflare_zone_id
+sudo ./edit-secrets.sh rotate cf_account_id
 
 ## Email API token (required for Tier 1)
-sudo utilities/setup-secrets.sh rotate email_api_token
+sudo ./edit-secrets.sh rotate email_api_token
 # Single canonical key used for all providers (selected by EMAIL_PROVIDER)
 
 # SMTP password (required for Tier 2 relay and Postfix sidecar)
-sudo utilities/setup-secrets.sh rotate smtp_password
+sudo ./edit-secrets.sh rotate smtp_password
 
 # Push notification keys (optional — mobile app push alerts)
 ./utilities/secrets-rotate.sh push_installation_id

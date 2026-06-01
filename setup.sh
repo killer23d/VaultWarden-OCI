@@ -299,34 +299,40 @@ CRED_BANNER
             "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf 'These fields still contain CHANGE_ME placeholders.\n'
         printf 'Set them BEFORE running %smake up%s:\n\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '  %ssudo ./utilities/setup-secrets.sh rotate caddy_cloudflare_dns_token%s\n' \
+        printf '  %ssudo ./edit-secrets.sh rotate caddy_cloudflare_dns_token%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '  %ssudo ./utilities/setup-secrets.sh rotate smtp_password%s         (if using SMTP)\n' \
+        printf '  %ssudo ./edit-secrets.sh rotate smtp_password%s         (if using SMTP)\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '  %ssudo ./utilities/setup-secrets.sh rotate email_api_token%s       (if using API-based email)\n' \
+        printf '  %ssudo ./edit-secrets.sh rotate email_api_token%s       (if using API-based email)\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '  %ssudo ./utilities/setup-secrets.sh rotate push_installation_id%s  (optional — mobile push)\n' \
+        printf '  %ssudo ./edit-secrets.sh rotate push_installation_id%s  (optional — mobile push)\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '  %ssudo ./utilities/setup-secrets.sh rotate push_installation_key%s (optional — mobile push)\n' \
+        printf '  %ssudo ./edit-secrets.sh rotate push_installation_key%s (optional — mobile push)\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
 
         printf '\n%s--- NEXT STEPS ---%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
         printf '1. Edit .env:           %s%s%s\n' "${COLOR_YELLOW}" "$env_edit_cmd" "${COLOR_RESET}"
         printf '   ► Set: SMTP_HOST, SMTP_PORT, SMTP_USERNAME in .env\n'
         printf '   ► Verify: DOMAIN and ADMIN_EMAIL are correct\n'
-        printf '   ► Set Cloudflare secrets: sudo utilities/setup-secrets.sh rotate cloudflare_zone_id\n'
-        printf '2. Set external tokens: %s(use sudo ./utilities/setup-secrets.sh rotate commands above)%s\n' \
+        printf '2. Set external tokens: %s(use sudo ./edit-secrets.sh rotate <field> commands above)%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '3. Setup CrowdSec:      %ssudo ./utilities/setup-crowdsec.sh%s\n' \
+        printf '3. Inject CrowdSec CF secrets (BEFORE running setup-crowdsec.sh):\n'
+        printf '   %ssudo ./edit-secrets.sh rotate cloudflare_zone_id%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '   ► Cloudflare secrets (zone_id, account_id, bouncer_token) are stored in encrypted secrets.yaml\n'
-        printf '   ► Rotate with: sudo utilities/setup-secrets.sh rotate cloudflare_zone_id\n'
-        printf '4. Start services:      %smake up%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '5. Setup automation:    %ssudo ./setup.sh systemd install%s\n' \
+        printf '   %ssudo ./edit-secrets.sh rotate cf_account_id%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '6. Export recovery kit: %s./utilities/secrets-export-recovery-kit.sh%s\n' \
+        printf '   %ssudo ./edit-secrets.sh rotate cf_worker_bouncer_token%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '   %s(Run AFTER step 2 so all secrets are included in the kit)%s\n' \
+        printf '4. Setup CrowdSec:      %ssudo ./utilities/setup-crowdsec.sh%s\n' \
+            "${COLOR_YELLOW}" "${COLOR_RESET}"
+        printf '   ► CrowdSec reads cloudflare_zone_id, cf_account_id, cf_worker_bouncer_token\n'
+        printf '     from secrets.yaml — those three must be set (step 3) before running this.\n'
+        printf '5. Start services:      %smake up%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
+        printf '6. Setup automation:    %ssudo ./setup.sh systemd install%s\n' \
+            "${COLOR_YELLOW}" "${COLOR_RESET}"
+        printf '7. Export recovery kit: %s./edit-secrets.sh export-recovery-kit%s\n' \
+            "${COLOR_YELLOW}" "${COLOR_RESET}"
+        printf '   %s(Run AFTER steps 2-3 so all secrets are included in the kit)%s\n' \
             "${COLOR_RED}" "${COLOR_RESET}"
     else
         printf '\n%s--- EXTERNAL CONFIGURATION CHECKLIST ---%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
@@ -337,19 +343,24 @@ CRED_BANNER
         printf '1. Edit .env:           %s%s%s\n' "${COLOR_YELLOW}" "$env_edit_cmd" "${COLOR_RESET}"
         printf '   ► Set: SMTP_HOST, SMTP_PORT, SMTP_USERNAME in .env\n'
         printf '   ► Verify: DOMAIN and ADMIN_EMAIL are correct\n'
-        printf '   ► Set Cloudflare secrets: sudo utilities/setup-secrets.sh rotate cloudflare_zone_id\n'
         printf '2. Configure secrets:   %s./setup.sh secrets%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '   ► Cloudflare secrets (zone_id, account_id, bouncer_token) are stored in encrypted secrets.yaml\n'
-        printf '   ► Rotate with: sudo utilities/setup-secrets.sh rotate cloudflare_zone_id\n'
-        printf '3. Setup CrowdSec:      %ssudo ./utilities/setup-crowdsec.sh%s\n' \
+        printf '3. Inject CrowdSec CF secrets (BEFORE running setup-crowdsec.sh):\n'
+        printf '   %ssudo ./edit-secrets.sh rotate cloudflare_zone_id%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '   ► You will be prompted for CLOUDFLARE_ZONE_ID, optional CF_ACCOUNT_ID, and cf_worker_bouncer_token\n'
-        printf '4. Start services:      %smake up%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '5. Setup automation:    %ssudo ./setup.sh systemd install%s\n' \
+        printf '   %ssudo ./edit-secrets.sh rotate cf_account_id%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '6. Export recovery kit: %s./utilities/secrets-export-recovery-kit.sh%s\n' \
+        printf '   %ssudo ./edit-secrets.sh rotate cf_worker_bouncer_token%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '   %s(Run AFTER step 2 so all secrets are included in the kit)%s\n' \
+        printf '4. Setup CrowdSec:      %ssudo ./utilities/setup-crowdsec.sh%s\n' \
+            "${COLOR_YELLOW}" "${COLOR_RESET}"
+        printf '   ► CrowdSec reads cloudflare_zone_id, cf_account_id, cf_worker_bouncer_token\n'
+        printf '     from secrets.yaml — those three must be set (step 3) before running this.\n'
+        printf '5. Start services:      %smake up%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
+        printf '6. Setup automation:    %ssudo ./setup.sh systemd install%s\n' \
+            "${COLOR_YELLOW}" "${COLOR_RESET}"
+        printf '7. Export recovery kit: %s./edit-secrets.sh export-recovery-kit%s\n' \
+            "${COLOR_YELLOW}" "${COLOR_RESET}"
+        printf '   %s(Run AFTER steps 2-3 so all secrets are included in the kit)%s\n' \
             "${COLOR_RED}" "${COLOR_RESET}"
     fi
 
@@ -481,21 +492,25 @@ main() {
         log_info "════════════════════════════════════════════════"
         log_info " Next step: Configure CrowdSec Cloudflare bouncer"
         log_info "════════════════════════════════════════════════"
-        log_info "CrowdSec has been installed. To activate the"
-        log_info "Cloudflare IP ban bouncer, run:"
+        log_info "Before running setup-crowdsec.sh, inject the CF secrets:"
+        log_info ""
+        log_info "  sudo ./edit-secrets.sh rotate cloudflare_zone_id"
+        log_info "  sudo ./edit-secrets.sh rotate cf_account_id"
+        log_info "  sudo ./edit-secrets.sh rotate cf_worker_bouncer_token"
+        log_info ""
+        log_info "Then run the CrowdSec setup:"
         log_info ""
         log_info "  sudo ./utilities/setup-crowdsec.sh"
-        log_info ""
-        log_info "Then add your Cloudflare API token:"
-        log_info ""
-        log_info "  sudo ./utilities/setup-secrets.sh rotate cf_worker_bouncer_token"
         log_info ""
         printf 'Press ENTER to continue with the post-install summary, or Ctrl-C to exit now...'
         read -r _cs_prompt_ack || true
         unset _cs_prompt_ack
     else
-        log_info "Next step: sudo ./utilities/setup-crowdsec.sh"
-        log_info "Then add your Cloudflare API token: sudo ./utilities/setup-secrets.sh rotate cf_worker_bouncer_token"
+        log_info "Next step: inject CF secrets first, then run sudo ./utilities/setup-crowdsec.sh"
+        log_info "  sudo ./edit-secrets.sh rotate cloudflare_zone_id"
+        log_info "  sudo ./edit-secrets.sh rotate cf_account_id"
+        log_info "  sudo ./edit-secrets.sh rotate cf_worker_bouncer_token"
+        log_info "  sudo ./utilities/setup-crowdsec.sh"
     fi
 
     # Export temp-file paths unconditionally so setup-secrets.sh (in both auto
