@@ -237,7 +237,6 @@ show_post_install_summary() {
         age_key_content=$(cat "secrets/keys/age-key.txt" 2>/dev/null || echo "ERROR: Could not read key file")
     fi
     
-    clear
     printf '%s' "${COLOR_RED}"
     cat << 'CRED_BANNER'
   ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !
