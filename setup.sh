@@ -231,20 +231,21 @@ if [[ -z "$PHASE" ]] && ! validate_email "$ADMIN_EMAIL"; then log_error "Invalid
 show_post_install_summary() {
     local mode="${1:-interactive}"
 
-    local age_key_content=""
+    local age_pub_key="" age_key_content=""
     if [[ -f "secrets/keys/age-key.txt" ]]; then
+        age_pub_key=$(get_age_public_key "secrets/keys/age-key.txt" 2>/dev/null || echo "MISSING")
         age_key_content=$(cat "secrets/keys/age-key.txt" 2>/dev/null || echo "ERROR: Could not read key file")
     fi
-
+    
     clear
     printf '%s' "${COLOR_RED}"
     cat << 'CRED_BANNER'
-  ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !
-  !                                                                 !
-  !   CRITICAL: SAVE ALL OF THESE CREDENTIALS FOR DISASTER RECOVERY !
-  !   They will NOT be shown again unless you export a recovery kit  !
-  !                                                                 !
-  ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !
+  ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !
+  !                                                                       !
+  !   🚨 CRITICAL: SAVE ALL OF THESE CREDENTIALS FOR DISASTER RECOVERY 🚨  !
+  !     They will NOT be shown again unless you export a recovery kit     !
+  !                                                                       !
+  ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !
 CRED_BANNER
     printf '%s' "${COLOR_RESET}"
 
@@ -258,7 +259,8 @@ CRED_BANNER
         backup_pass_plain=$(cat "${BACKUP_PLAIN_FILE}")
 
     printf '\n%s[1] SOPS AGE SECRET KEY%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
-    printf '%s%s%s\n' "${COLOR_RED}${COLOR_GREEN}" "${age_key_content}" "${COLOR_RESET}"
+    printf '    Public key:  %s%s%s\n' "${COLOR_GREEN}" "${age_pub_key}" "${COLOR_RESET}"
+    printf '%s%s%s\n' "${COLOR_GREEN}" "${age_key_content}" "${COLOR_RESET}"
 
     printf '\n%s[2] VAULTWARDEN ADMIN TOKEN (plaintext — hash stored in secrets)%s\n' \
         "${COLOR_CYAN}" "${COLOR_RESET}"
@@ -353,7 +355,7 @@ CRED_BANNER
 
     if [[ "$mode" == "interactive" ]]; then
         printf '\n%s!!! PRESS ENTER TO CLEAR THIS SCREEN AND FINISH !!!%s\n' "${COLOR_RED}" "${COLOR_RESET}"
-        read -r
+        [[ -t 0 ]] && read -r
         clear
     fi
 }
@@ -513,7 +515,7 @@ main() {
         if ! "${SCRIPT_DIR}/utilities/setup-secrets.sh" configure "${secrets_args[@]}"; then
             log_warn "Secrets auto-configuration encountered issues — run './setup.sh secrets' after editing .env"
         fi
-    elif [[ -t 0 ]]; then
+    elif [[ -t 0 ]] && [[ "$DRY_RUN" != "true" ]]; then
         # Interactive TTY: offer to run secrets configuration now so all four
         # credentials are captured and shown in the final summary.
         log_info ""
