@@ -128,7 +128,7 @@ _cs_resolve_lapi_port() {
     grep -oP '(?<=listen_uri:\s{0,10}127\.0\.0\.1:)\d+' \
         /etc/crowdsec/config.yaml 2>/dev/null \
         | head -1 \
-        || echo "8080"
+        || echo "8090"
 }
 
 # ---------------------------------------------------------------------------
@@ -220,6 +220,20 @@ _cs_diagnose_port() {
 _cs_start_service() {
     systemctl reset-failed crowdsec 2>/dev/null || true
 
+    local _lapi_port
+    _lapi_port="$(_cs_resolve_lapi_port)"
+
+    if ss -tlnp 2>/dev/null | grep -q ":${_lapi_port}[[:space:]]"; then
+        log_warn "Pre-flight: port ${_lapi_port} is already in use before CrowdSec start."
+        _cs_diagnose_port "${_lapi_port}"
+        local _new_port
+        _new_port="$(_cs_find_free_port 8090)"
+        _cs_fix_port_conflict "${_lapi_port}" "${_new_port}"
+        _lapi_port="$_new_port"
+        log_info "Pre-flight port reassignment complete: LAPI will use ${_lapi_port}."
+    fi
+    # --- END PRE-FLIGHT -------------------------------------------------------
+
     if systemctl enable --now crowdsec 2>/dev/null; then
         local _i
         for _i in {1..5}; do
@@ -230,11 +244,8 @@ _cs_start_service() {
         done
     fi
 
-    local _lapi_port
-    _lapi_port="$(_cs_resolve_lapi_port)"
-
     if ss -tlnp 2>/dev/null | grep -q ":${_lapi_port}[[:space:]]"; then
-        log_warn "Port ${_lapi_port} is occupied — attempting automatic port reassignment."
+        log_warn "Post-start: port ${_lapi_port} is occupied — attempting reassignment."
         _cs_diagnose_port "${_lapi_port}"
 
         local _new_port
@@ -255,7 +266,7 @@ _cs_start_service() {
 
         log_error "CrowdSec service failed to start even after port reassignment to ${_new_port}."
     else
-        log_error "CrowdSec service failed to start."
+        log_error "CrowdSec service failed to start (no port conflict detected — check journalctl)."
     fi
 
     log_error "systemctl status crowdsec:"
@@ -480,6 +491,15 @@ else
     DEBIAN_FRONTEND=noninteractive apt-get install -y "$_fw_pkg"
     log_info "Installing ipset (required by crowdsec-firewall-bouncer iptables backend)..."
     DEBIAN_FRONTEND=noninteractive apt-get install -y ipset
+
+    # --- CRITICAL: rewrite upstream default port (8080) to 8090 immediately
+    # after package install, before the service is ever started. This prevents
+    # CrowdSec from racing Caddy for port 8080 on first boot.
+    if grep -q 'listen_uri: 127.0.0.1:8080' /etc/crowdsec/config.yaml 2>/dev/null; then
+        log_info "Rewriting upstream default LAPI port 8080 -> 8090 in config.yaml..."
+        _cs_fix_port_conflict "8080" "8090"
+        log_success "LAPI port pre-assigned to 8090 — Caddy owns 8080."
+    fi
 fi
 
 if [[ "$DRY_RUN" != "true" ]]; then
