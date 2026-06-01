@@ -166,6 +166,47 @@ _container_status() {
 }
 
 # ---------------------------------------------------------------------------
+# _crowdsec_status  — print Running (green) or Stopped (red)
+# Mirrors _container_status() but checks the host systemd service.
+# ---------------------------------------------------------------------------
+_crowdsec_status() {
+    if systemctl is-active --quiet crowdsec 2>/dev/null; then
+        printf "${GRN}Running${NC}"
+    else
+        printf "${RED}Stopped${NC}"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# _cf_worker_status  — print Running (green), Unreachable (red), or
+#                      Not configured (yellow).
+# Reads CF_WORKER_URL from .env; performs a lightweight HEAD/GET check
+# with a short timeout so the dashboard never hangs.
+# ---------------------------------------------------------------------------
+_cf_worker_status() {
+    local worker_url
+    worker_url="$(_read_env_var CF_WORKER_URL "")"
+
+    if [[ -z "${worker_url}" ]]; then
+        printf "${YLW}Not configured${NC}"
+        return
+    fi
+
+    # curl: silent, follow redirects, 5 s connect+max timeout, output to /dev/null
+    local http_code
+    http_code="$(curl -sSL -o /dev/null -w '%{http_code}' \
+        --connect-timeout 5 --max-time 5 \
+        "${worker_url}" 2>/dev/null || echo "000")"
+
+    # Treat any 2xx or 3xx response as healthy
+    if [[ "${http_code}" =~ ^[23][0-9]{2}$ ]]; then
+        printf "${GRN}Running${NC} (HTTP ${http_code})"
+    else
+        printf "${RED}Unreachable${NC} (HTTP ${http_code})"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # draw_live_stats
 # ---------------------------------------------------------------------------
 draw_live_stats() {
@@ -189,7 +230,7 @@ draw_live_stats() {
 
     # --- CrowdSec bans ---
     local ban_count ban_color
-    if systemctl is-active crowdsec >/dev/null 2>&1; then
+    if systemctl is-active --quiet crowdsec 2>/dev/null; then
         ban_count="$(sudo cscli decisions list -o raw 2>/dev/null | tail -n +2 | wc -l || echo 0)"
     else
         ban_count="N/A (CrowdSec inactive)"
@@ -207,7 +248,16 @@ draw_live_stats() {
     else
         echo -e " ${BLD}CrowdSec bans:${NC}  ${YLW}${ban_count}${NC}"
     fi
-    echo -e " ${BLD}CrowdSec metrics:${NC}  (open Security menu and select CrowdSec Metrics)"
+
+    # --- CrowdSec Status ---
+    local cs_stat
+    cs_stat="$(_crowdsec_status)"
+    echo -e " ${BLD}CrowdSec status:${NC}  ${cs_stat}"
+
+    # --- CF Worker Status ---
+    local cf_stat
+    cf_stat="$(_cf_worker_status)"
+    echo -e " ${BLD}CF Worker status:${NC}  ${cf_stat}"
 
     # --- Last Backup ---
     local last_backup_str
