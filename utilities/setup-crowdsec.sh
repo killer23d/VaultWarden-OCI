@@ -343,9 +343,9 @@ usage: sudo ./utilities/setup-crowdsec.sh [OPTIONS]
 Environment variables (set in .env or exported before running):
   CLOUDFLARE_PROXY_ENABLED   Set to 'true' to enable the Cloudflare bouncer.
   # Cloudflare credentials (now in secrets, not .env):
-  #   sudo utilities/setup-secrets.sh rotate cf_worker_bouncer_token
-  #   sudo utilities/setup-secrets.sh rotate cloudflare_zone_id
-  #   sudo utilities/setup-secrets.sh rotate cf_account_id
+  #   sudo ./edit-secrets.sh rotate cf_worker_bouncer_token
+  #   sudo ./edit-secrets.sh rotate cloudflare_zone_id
+  #   sudo ./edit-secrets.sh rotate cf_account_id
   CF_FREE_PLAN               Set to 'false' to disable the free-plan KV write
                              guard. Default: 'true'.
   CROWDSEC_VERSION           Pin a specific CrowdSec version.
@@ -853,30 +853,37 @@ if [[ -f "$_CF_WORKER_BOUNCER_CONFIG_SRC" ]]; then
             cloudflare_zone_id="CHANGE_ME_CLOUDFLARE_ZONE_ID"
             cf_account_id="CHANGE_ME_CF_ACCOUNT_ID"
             log_warn "Auto mode: Cloudflare values left as placeholders where missing."
-            log_warn "Set CrowdSec Cloudflare secrets with: sudo utilities/setup-secrets.sh rotate <field>"
+            log_warn "Set CrowdSec Cloudflare secrets with: sudo ./edit-secrets.sh rotate <field>"
         else
+            log_debug "setup-crowdsec Phase 6: SECRETS_FILE resolved to: ${SECRETS_FILE:-<unset>}"
             cf_worker_bouncer_token=$(decrypt_secret "cf_worker_bouncer_token") || {
-                log_error "Failed to read cf_worker_bouncer_token from secrets. Run: sudo utilities/setup-secrets.sh rotate cf_worker_bouncer_token"
+                log_error "Failed to read cf_worker_bouncer_token from secrets."
+                log_error "Run: sudo ./edit-secrets.sh rotate cf_worker_bouncer_token"
                 exit 1
             }
             if [[ -z "$cf_worker_bouncer_token" || "$cf_worker_bouncer_token" == PLACEHOLDER* || "$cf_worker_bouncer_token" == CHANGE_ME* ]]; then
-                log_error "cf_worker_bouncer_token is not configured. Run: sudo utilities/setup-secrets.sh rotate cf_worker_bouncer_token"
+                log_error "cf_worker_bouncer_token is not configured."
+                log_error "Run: sudo ./edit-secrets.sh rotate cf_worker_bouncer_token"
                 exit 1
             fi
             cloudflare_zone_id=$(decrypt_secret "cloudflare_zone_id") || {
-                log_error "Failed to read cloudflare_zone_id from secrets. Run: sudo utilities/setup-secrets.sh rotate cloudflare_zone_id"
+                log_error "Failed to read cloudflare_zone_id from secrets."
+                log_error "Run: sudo ./edit-secrets.sh rotate cloudflare_zone_id"
                 exit 1
             }
             if [[ -z "$cloudflare_zone_id" || "$cloudflare_zone_id" == PLACEHOLDER* || "$cloudflare_zone_id" == CHANGE_ME* ]]; then
-                log_error "cloudflare_zone_id is not configured. Run: sudo utilities/setup-secrets.sh rotate cloudflare_zone_id"
+                log_error "cloudflare_zone_id is not configured."
+                log_error "Run: sudo ./edit-secrets.sh rotate cloudflare_zone_id"
                 exit 1
             fi
             cf_account_id=$(decrypt_secret "cf_account_id") || {
-                log_error "Failed to read cf_account_id from secrets. Run: sudo utilities/setup-secrets.sh rotate cf_account_id"
+                log_error "Failed to read cf_account_id from secrets."
+                log_error "Run: sudo ./edit-secrets.sh rotate cf_account_id"
                 exit 1
             }
             if [[ -z "$cf_account_id" || "$cf_account_id" == PLACEHOLDER* || "$cf_account_id" == CHANGE_ME* ]]; then
-                log_error "cf_account_id is not configured. Run: sudo utilities/setup-secrets.sh rotate cf_account_id"
+                log_error "cf_account_id is not configured."
+                log_error "Run: sudo ./edit-secrets.sh rotate cf_account_id"
                 exit 1
             fi
             cleanup_secrets_environment
@@ -1125,9 +1132,9 @@ log_info "═══════════════════════�
 log_info "Next steps:"
 log_info "  1. Cloudflare credentials are stored in secrets (not .env):"
 log_info "     To update any value:"
-log_info "       sudo utilities/setup-secrets.sh rotate cf_worker_bouncer_token"
-log_info "       sudo utilities/setup-secrets.sh rotate cloudflare_zone_id"
-log_info "       sudo utilities/setup-secrets.sh rotate cf_account_id"
+log_info "       sudo ./edit-secrets.sh rotate cf_worker_bouncer_token"
+log_info "       sudo ./edit-secrets.sh rotate cloudflare_zone_id"
+log_info "       sudo ./edit-secrets.sh rotate cf_account_id"
 log_info "     Then re-run: sudo ./utilities/setup-crowdsec.sh --force"
 log_info "  Verify dual-bouncer setup:"
 log_info "    sudo cscli bouncers list          # both bouncers registered"
@@ -1145,7 +1152,7 @@ else
     log_info "  3. Verify CrowdSec metrics:"
     log_info "       sudo cscli metrics"
     log_info "  4. After rotating any Cloudflare credential:"
-    log_info "       sudo utilities/setup-secrets.sh rotate cf_worker_bouncer_token"
+    log_info "       sudo ./edit-secrets.sh rotate cf_worker_bouncer_token"
     log_info "       sudo ./utilities/setup-crowdsec.sh --force"
 fi
 log_info "════════════════════════════════════════════════════════"

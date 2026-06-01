@@ -12,9 +12,10 @@ For first-time setup on a new host:
 1. Configure OCI Security List (ports `80`, `443`, and `22`).
 2. Copy `.env.example` to `.env` and set at minimum: `DOMAIN`, `ADMIN_EMAIL`,
    your email settings.
-   Set CrowdSec Cloudflare secrets via `sudo utilities/setup-secrets.sh rotate cf_worker_bouncer_token`,
-   `sudo utilities/setup-secrets.sh rotate cloudflare_zone_id`, and
-   `sudo utilities/setup-secrets.sh rotate cf_account_id`.
+   Before running CrowdSec setup, inject the Cloudflare credentials into secrets:
+   `sudo ./edit-secrets.sh rotate cloudflare_zone_id`,
+   `sudo ./edit-secrets.sh rotate cf_account_id`, and
+   `sudo ./edit-secrets.sh rotate cf_worker_bouncer_token`.
 3. Run `sudo ./setup.sh install --domain <fqdn> --email <admin-email> --auto`
    (or `sudo make setup` if `.env` is already prepared).
 4. Re-login so your user picks up `docker` group membership.

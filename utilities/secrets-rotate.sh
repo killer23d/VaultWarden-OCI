@@ -15,6 +15,8 @@ init_common_lib "$0"
 source "${PROJECT_ROOT}/lib/crypto.sh"
 source "${PROJECT_ROOT}/lib/secrets.sh"
 
+log_debug "secrets-rotate: SECRETS_FILE resolved to: ${SECRETS_FILE}"
+
 trap perform_cleanup EXIT
 
 show_help() {
@@ -35,6 +37,8 @@ SUPPORTED FIELDS:
     admin_basic_auth_hash    (bcrypt re-hash)
     caddy_cloudflare_dns_token
     cf_worker_bouncer_token  (CrowdSec Cloudflare Workers bouncer API token)
+    cloudflare_zone_id       (Cloudflare Zone ID — required by CrowdSec CF bouncer)
+    cf_account_id            (Cloudflare Account ID — required by CrowdSec CF bouncer)
     email_api_token          (HTTP API token for email provider)
     smtp_password            (SMTP relay password)
     push_installation_id
@@ -70,6 +74,7 @@ SKIP_BACKUP=false
 _ROTATE_FIELDS=("admin_token" "admin_basic_auth_hash"
                 "caddy_cloudflare_dns_token"
                 "cf_worker_bouncer_token"
+                "cloudflare_zone_id" "cf_account_id"
                 "email_api_token"
                 "smtp_password" "push_installation_id" "push_installation_key"
                 "backup_passphrase")
@@ -80,6 +85,8 @@ _FIELD_SERVICES=(
     [admin_basic_auth_hash]="vaultwarden"
     [caddy_cloudflare_dns_token]="caddy"
     [cf_worker_bouncer_token]="crowdsec-cloudflare-worker-bouncer"
+    [cloudflare_zone_id]="caddy crowdsec-cloudflare-worker-bouncer"
+    [cf_account_id]="crowdsec-cloudflare-worker-bouncer"
     [email_api_token]="vaultwarden"
     [smtp_password]="vaultwarden"
     [push_installation_id]="vaultwarden"

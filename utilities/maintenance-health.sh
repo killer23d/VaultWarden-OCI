@@ -782,7 +782,7 @@ _check_config() {
             "cloudflare_zone_id is configured in secrets.yaml"
     else
         _warn "config:cloudflare_zone_id" \
-            "cloudflare_zone_id not set or is a placeholder — run: sudo utilities/setup-secrets.sh rotate cloudflare_zone_id"
+            "cloudflare_zone_id not set or is a placeholder — run: sudo ./edit-secrets.sh rotate cloudflare_zone_id"
     fi
     unset _cf_zone_id
     local secrets_dir="${PROJECT_ROOT}/secrets/.docker_secrets"

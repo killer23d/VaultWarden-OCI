@@ -44,7 +44,11 @@ unset _SECRETS_LIB_DIR
 # Entry-point scripts apply these options via init_common_lib(); this library
 # is always sourced after that call.
 
-SECRETS_FILE="${SECRETS_FILE:-secrets/secrets.yaml}"
+# SECRETS_FILE is exported by lib/config.sh (canonical source of truth).
+# lib/secrets.sh intentionally does NOT define a fallback here so that the
+# two libraries always agree on the path. If you are sourcing this file
+# standalone (without config.sh loaded first), export SECRETS_FILE before
+# sourcing.
 SECRETS_BACKUP_DIR="${SECRETS_BACKUP_DIR:-secrets}"
 
 ensure_sops_env() {
@@ -268,6 +272,10 @@ validate_required_secrets() {
         "email_api_token"
         "backup_passphrase"
     )
+    # CrowdSec Cloudflare keys are conditionally required when CF proxy is enabled.
+    if [[ "${CLOUDFLARE_PROXY_ENABLED:-false}" == "true" ]]; then
+        required_secrets+=("cloudflare_zone_id" "cf_account_id" "cf_worker_bouncer_token")
+    fi
     if ! ensure_sops_env; then return 1; fi
     local missing_secrets=()
     for secret in "${required_secrets[@]}"; do
@@ -300,6 +308,10 @@ check_placeholder_values() {
         "email_api_token"
         "backup_passphrase"
     )
+    # CrowdSec Cloudflare keys are conditionally checked when CF proxy is enabled.
+    if [[ "${CLOUDFLARE_PROXY_ENABLED:-false}" == "true" ]]; then
+        secrets_to_check+=("cloudflare_zone_id" "cf_account_id" "cf_worker_bouncer_token")
+    fi
     if ! ensure_sops_env; then return 1; fi
     local placeholder_secrets=()
     local unreadable_secrets=()
@@ -605,6 +617,28 @@ collect_secret_field() {
             printf '%s' "$token"
             ;;
 
+        cloudflare_zone_id)
+            log_info "Find your Zone ID at: Cloudflare dashboard → your domain → Overview → API section" >&2
+            local val
+            read -r -p "Cloudflare Zone ID: " val
+            if [[ -z "$val" ]]; then
+                log_error "No value entered. Aborting." >&2
+                return 1
+            fi
+            printf '%s' "$val"
+            ;;
+
+        cf_account_id)
+            log_info "Find your Account ID at: Cloudflare dashboard → any domain → Overview → API section" >&2
+            local val
+            read -r -p "Cloudflare Account ID: " val
+            if [[ -z "$val" ]]; then
+                log_error "No value entered. Aborting." >&2
+                return 1
+            fi
+            printf '%s' "$val"
+            ;;
+
         email_api_token)
             # Canonical key for the email provider HTTP API token.
             # Stored as-is (no hashing). Works for any EMAIL_PROVIDER value.
@@ -779,7 +813,7 @@ generate_recovery_kit() {
     local output_file="$1"
     local age_key
     age_key=$(resolve_age_key_path) || return 1
-    local secrets_file="${SECRETS_FILE:-secrets/secrets.yaml}"
+    local secrets_file="${SECRETS_FILE}"
     local env_file="${PROJECT_ROOT:-.}/.env"
 
     if [[ ! -f "$age_key" ]]; then
@@ -1271,7 +1305,7 @@ _warn_if_stack_unavailable() {
 # ---------------------------------------------------------------------------
 export_docker_secrets() {
     local docker_dir="$1"
-    local secrets_file="${2:-${SECRETS_FILE:-secrets/secrets.yaml}}"
+    local secrets_file="${2:-${SECRETS_FILE}}"
 
     log_info "Exporting decrypted secrets to Docker secrets directory..."
 

@@ -59,11 +59,11 @@ Cloudflare: an API token and two IDs.
 | **Zone ID** | Cloudflare dashboard → your domain → Overview → right sidebar → Zone ID |
 | **Account ID** | Cloudflare dashboard → any domain → Overview → right sidebar → Account ID |
 
-Copy both into `.env`:
+Store both in the project secrets (never in `.env`):
 
-```dotenv
-CLOUDFLARE_ZONE_ID=abc123...   # 32-char hex
-CF_ACCOUNT_ID=def456...        # 32-char hex
+```bash
+sudo ./edit-secrets.sh rotate cloudflare_zone_id   # 32-char hex
+sudo ./edit-secrets.sh rotate cf_account_id        # 32-char hex
 ```
 
 ### 1.2 Create the Workers bouncer API token
@@ -95,7 +95,7 @@ CF_ACCOUNT_ID=def456...        # 32-char hex
 Store the token in the project secrets store (never in `.env` directly):
 
 ```bash
-sudo utilities/setup-secrets.sh rotate cf_worker_bouncer_token
+sudo ./edit-secrets.sh rotate cf_worker_bouncer_token
 # Paste the token when prompted.
 ```
 
@@ -139,7 +139,7 @@ cp .env.example .env
 ### Step 2 — Store the Workers bouncer token
 
 ```bash
-sudo utilities/setup-secrets.sh rotate cf_worker_bouncer_token
+sudo ./edit-secrets.sh rotate cf_worker_bouncer_token
 # Paste the token you created in section 1.2.
 ```
 
@@ -339,7 +339,7 @@ sudo ./utilities/setup-crowdsec.sh --admin-ip <your-ip>
 ```bash
 # 1. Create a new token in Cloudflare dashboard (same permissions as section 1.2)
 # 2. Store it in secrets
-sudo utilities/setup-secrets.sh rotate cf_worker_bouncer_token
+sudo ./edit-secrets.sh rotate cf_worker_bouncer_token
 # 3. Re-run setup to apply
 sudo ./utilities/setup-crowdsec.sh --force
 ```
@@ -443,7 +443,7 @@ Common causes:
 - **`lapi_key` rejected** — the key in the bouncer config doesn't match the one
   registered in CrowdSec. Re-run: `sudo ./utilities/setup-crowdsec.sh --force`
 - **`api_token` error** — the Cloudflare token has wrong permissions or was
-  revoked. Rotate: `sudo utilities/setup-secrets.sh rotate cf_worker_bouncer_token`
+  revoked. Rotate: `sudo ./edit-secrets.sh rotate cf_worker_bouncer_token`
 - **`account_id` not found** — ensure `CF_ACCOUNT_ID` in `.env` matches your
   Cloudflare account exactly (32-char hex, no spaces).
 

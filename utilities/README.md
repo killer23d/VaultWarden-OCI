@@ -91,11 +91,16 @@ keyword is accepted as an alias for backward compatibility but is not required.
 ./utilities/secrets-rotate.sh email_api_token --dry-run
 ./utilities/secrets-rotate.sh smtp_password --no-backup
 ./utilities/secrets-rotate.sh caddy_cloudflare_dns_token
+./utilities/secrets-rotate.sh cloudflare_zone_id
+./utilities/secrets-rotate.sh cf_account_id
+./utilities/secrets-rotate.sh cf_worker_bouncer_token
 ./utilities/secrets-rotate.sh backup_passphrase
 ```
 
 Supported fields: `admin_token`, `admin_basic_auth_hash`,
-`caddy_cloudflare_dns_token`, `email_api_token`, `smtp_password`,
+`caddy_cloudflare_dns_token`, `cf_worker_bouncer_token`,
+`cloudflare_zone_id`, `cf_account_id`,
+`email_api_token`, `smtp_password`,
 `push_installation_id`, `push_installation_key`, `backup_passphrase`.
 
 ---

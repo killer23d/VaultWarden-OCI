@@ -53,6 +53,24 @@ fi
 
 _TASK="${1}"
 
+# Pre-flight: verify the secrets file exists before dispatching to any
+# subcommand that reads or writes it. 'help' variants are exempt.
+case "$_TASK" in
+    help|--help|-h) ;;
+    *)
+        if [[ ! -f "${SECRETS_FILE:-}" ]]; then
+            log_error "SECRETS_FILE not found: ${SECRETS_FILE:-<unset>}"
+            log_error "This usually means the secrets file was created at a different path."
+            log_error "Expected location (from lib/config.sh): ${PROJECT_ROOT}/secrets.yaml"
+            log_error "Diagnostic:"
+            log_error "  ls -la '${PROJECT_ROOT}/secrets/' 2>/dev/null || echo '  (secrets/ dir absent)'"
+            log_error "  ls -la '${PROJECT_ROOT}/secrets.yaml' 2>/dev/null || echo '  (project-root secrets.yaml absent)'"
+            log_error "If secrets have not been created yet, run: ./setup.sh secrets"
+            exit 1
+        fi
+        ;;
+esac
+
 case "$_TASK" in
     edit)
         exec "$SCRIPT_DIR/utilities/secrets-edit.sh" "$@"
