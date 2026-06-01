@@ -1287,7 +1287,7 @@ _mv_print_checklist() {
     printf '  1. Log in to VaultWarden and verify your vault data is intact.\n'
     printf '  2. Run: docker compose ps  — confirm all services are '\''healthy'\''.\n'
     printf '  3. Run: systemctl status vaultwarden-startup  — confirm unit loads cleanly.\n'
-    printf '  4. Test a scheduled backup: sudo ./backup.sh full\n'
+    printf '  4. Test a scheduled backup: sudo ./backup.sh run full\n'
     printf '  5. Verify backup path uses new volume: check BACKUP_DIR in .env\n'
     printf '     If BACKUP_DIR was a custom path it was NOT auto-updated — verify manually.\n'
     printf '  6. After a satisfying reboot test, remove the renamed source:\n'
