@@ -12,6 +12,14 @@
 #   4. default_ip_remediation — catch-all 4-hour ban
 #
 # Ref: https://docs.crowdsec.net/u/getting_started/post_installation/profiles/
+#
+# NOTE on available Alert methods in expr filters (CrowdSec 1.7.x):
+#   Alert.Remediation        (bool)
+#   Alert.GetScope()         → "Ip", "Range", "Country", "As"
+#   Alert.GetEventsCount()   → int
+#   Alert.GetScenario()      → string
+#   Alert.GetValue()         → string (the IP / range / country)
+#   Alert.GetSeverity()      does NOT exist — do not use.
 
 # ── 1. Repeat offender: escalated 7-day ban ──────────────────────────────────
 # Triggers when a single IP fires ≥5 events in a single alert window.
@@ -29,7 +37,7 @@ on_failure: continue
 
 # ── 2. Captcha challenge (requires Cloudflare Turnstile) ─────────────────────
 # Issues a Turnstile CAPTCHA challenge rather than a hard ban for IPs that
-# triggered a moderate-severity scenario (e.g. slow brute-force, recon).
+# triggered a moderate-severity scenario (1–4 events in the alert window).
 #
 # Prerequisites:
 #   - Turnstile site key + secret key configured in Cloudflare dashboard
@@ -40,7 +48,6 @@ on_failure: continue
 name: captcha_eligible
 filters:
   - Alert.Remediation == true && Alert.GetScope() == "Ip" && Alert.GetEventsCount() < 5
-  - Alert.Remediation == true && Alert.GetScope() == "Ip" && Alert.GetSeverity() == "warning"
 decisions:
   - type: captcha
     duration: 4h
