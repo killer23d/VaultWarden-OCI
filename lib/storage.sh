@@ -292,7 +292,8 @@ setup_data_volume() {
     [[ -n "$dev_uuid" ]] \
         || { log_error "Cannot determine UUID for $device — cannot write a safe fstab entry"; return 1; }
 
-    if ! grep -qF "UUID=$dev_uuid" /etc/fstab 2>/dev/null; then
+    if ! grep -qF "UUID=$dev_uuid" /etc/fstab 2>/dev/null \
+        || ! grep "UUID=$dev_uuid" /etc/fstab | grep -qF "$mount_point"; then
         # Write to a temp file on the same filesystem, validate it has content,
         # then atomically replace /etc/fstab. This avoids leaving a truncated
         # fstab behind if the process is killed mid-write.
