@@ -3,6 +3,11 @@
 #
 # TOKEN_PROJECT_STATE_DIR is substituted at install time by setup-crowdsec.sh
 # with the value of PROJECT_STATE_DIR from .env.
+#
+# FIELD NAME REFERENCE (journald source):
+#   Correct : journalctl_filter  (list)   ← mandatory, single unit per document
+#   Wrong   : journal_filters             ← does not exist, causes FATAL on start
+# Ref: https://docs.crowdsec.net/docs/next/log_processor/data_sources/journald/
 
 # ── Vaultwarden application logs ─────────────────────────────────────────────
 source: file
@@ -24,14 +29,21 @@ labels:
 
 ---
 
-# ── SSH brute-force detection via journald ────────────────────────────────────
-# Debian/Ubuntu: ssh.service
-# RHEL/Oracle Linux (OCI default): sshd.service
-# Both are listed so this config works on either platform without modification.
-# CrowdSec deduplicates entries that match multiple filters.
+# ── SSH brute-force detection via journald (Debian/Ubuntu: ssh.service) ───────
+# Ubuntu names the SSH unit 'ssh.service'.
 source: journalctl
-journal_filters:
+journalctl_filter:
   - "_SYSTEMD_UNIT=ssh.service"
+labels:
+  type: syslog
+
+---
+
+# ── SSH brute-force detection via journald (RHEL/Oracle Linux: sshd.service) ──
+# Oracle Linux (OCI default compute image) names the SSH unit 'sshd.service'.
+# CrowdSec will simply find no events from whichever unit is absent on the host.
+source: journalctl
+journalctl_filter:
   - "_SYSTEMD_UNIT=sshd.service"
 labels:
   type: syslog
