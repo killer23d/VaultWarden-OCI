@@ -63,7 +63,7 @@ ensure_caddy_entrypoint_executable() {
         return 0
     fi
     if [[ ! -x "$ep" ]]; then
-        log_warn "caddy/entrypoint.sh is not executable — fixing (BUG-EP1)"
+        log_warn "caddy/entrypoint.sh is not executable — fixing"
         chmod +x "$ep"
     fi
     if [[ ! -x "$ep" ]]; then
