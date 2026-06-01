@@ -951,7 +951,13 @@ if [[ -f "$_CF_WORKER_BOUNCER_CONFIG_SRC" ]]; then
             exit 1
         fi
         _worker_route="${_domain_name}/*"
-        
+
+        # NOTE on the only_include_decisions_from sed pattern:
+        # We match only lines where the YAML key itself starts the line
+        # (optional leading whitespace, then the key name).  This prevents
+        # comment lines that merely *mention* the key from being replaced,
+        # which previously produced a duplicate YAML key that broke the
+        # bouncer config parser and the dpkg post-install script.
         sed \
             -e "s|%%CLOUDFLARE_ZONE_ID%%|${cloudflare_zone_id}|g" \
             -e "s|%%CF_ACCOUNT_ID%%|${cf_account_id:-CHANGE_ME_CF_ACCOUNT_ID}|g" \
@@ -959,7 +965,7 @@ if [[ -f "$_CF_WORKER_BOUNCER_CONFIG_SRC" ]]; then
             -e "s|%%CF_ACCOUNT_NAME%%|${_cf_account_email}|g" \
             -e "s|%%CROWDSEC_LAPI_KEY%%|${_CF_BOUNCER_KEY}|g" \
             -e "s|%%WORKER_ROUTE%%|${_worker_route}|g" \
-            -e "s|.*only_include_decisions_from:.*|${_only_from_line}|g" \
+            -e "s|^[[:space:]]*only_include_decisions_from:.*|${_only_from_line}|g" \
             -e "s|lapi_url: http://127\.0\.0\.1:[0-9]*/|lapi_url: http://127.0.0.1:${_LAPI_PORT}/|g" \
             "$_CF_WORKER_BOUNCER_CONFIG_SRC" \
             | grep -v '%%[A-Z_]*%%' \
