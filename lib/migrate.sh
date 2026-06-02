@@ -1716,41 +1716,55 @@ _mv_run_pipeline() {
             fi
         fi
         if [[ -n "${_MV_DEVICE}" ]] && ! mountpoint -q "${_MV_TARGET}" 2>/dev/null; then
-            # Target mount is absent. Check whether there is a sentinel-bearing volume
-            # that could be the correct (or corrected) target.
-            local _sentinel_mount
-            _sentinel_mount="$(_mv_find_sentinel_mount)"
-            if [[ -n "${_sentinel_mount}" && "${_sentinel_mount}" != "${_MV_TARGET}" \
-                    && "${_MV_DIRECTION}" == "boot-to-block" ]]; then
-                log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                log_warn "  The target path recorded in the state file (${_MV_TARGET})"
-                log_warn "  is not mounted, but a VaultWarden data volume was found at:"
-                log_warn "    ${_sentinel_mount}"
-                log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                local _fix_reply
-                read -r -p "  Update the state file to use '${_sentinel_mount}' and continue? [y/N] " _fix_reply
-                if [[ "${_fix_reply}" =~ ^[Yy]$ ]]; then
-                    local _old_target="${_MV_TARGET}"
-                    _MV_TARGET="${_sentinel_mount}"
-                    _mv_state_write MV_TARGET "${_MV_TARGET}"
-                    log_info "State file updated: MV_TARGET=${_MV_TARGET} (was: ${_old_target})"
-                    log_info "Continuing resume with corrected target path."
+            if [[ "${_MV_DIRECTION}" == "boot-to-block" ]]; then
+                # Target mount is absent. Check whether there is a sentinel-bearing volume
+                # that could be the correct (or corrected) target.
+                local _sentinel_mount
+                _sentinel_mount="$(_mv_find_sentinel_mount)"
+                if [[ -n "${_sentinel_mount}" && "${_sentinel_mount}" != "${_MV_TARGET}" ]]; then
+                    log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    log_warn "  The target path recorded in the state file (${_MV_TARGET})"
+                    log_warn "  is not mounted, but a VaultWarden data volume was found at:"
+                    log_warn "    ${_sentinel_mount}"
+                    log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    local _fix_reply
+                    read -r -p "  Update the state file to use '${_sentinel_mount}' and continue? [y/N] " _fix_reply
+                    if [[ "${_fix_reply}" =~ ^[Yy]$ ]]; then
+                        local _old_target="${_MV_TARGET}"
+                        _MV_TARGET="${_sentinel_mount}"
+                        _mv_state_write MV_TARGET "${_MV_TARGET}"
+                        log_info "State file updated: MV_TARGET=${_MV_TARGET} (was: ${_old_target})"
+                        log_info "Continuing resume with corrected target path."
+                    else
+                        log_error "Resume aborted. To fix the target path manually:"
+                        log_error "  sudo sed -i 's|MV_TARGET=${_MV_TARGET}|MV_TARGET=/correct/path|' \\"
+                        log_error "    ${_MV_STATE_FILE}"
+                        log_error "  sudo utilities/setup-storage.sh --mode migrate resume"
+                        _resume_ok=false
+                    fi
                 else
-                    log_error "Resume aborted. To fix the target path manually:"
+                    log_error "Resume: target mount point is not mounted: ${_MV_TARGET}"
+                    log_error "Remount it first, then re-run resume:"
+                    log_error "  sudo mount ${_MV_TARGET}"
+                    log_error "To fix a stale path in the state file manually:"
                     log_error "  sudo sed -i 's|MV_TARGET=${_MV_TARGET}|MV_TARGET=/correct/path|' \\"
                     log_error "    ${_MV_STATE_FILE}"
                     log_error "  sudo utilities/setup-storage.sh --mode migrate resume"
                     _resume_ok=false
                 fi
-            else
-                log_error "Resume: target mount point is not mounted: ${_MV_TARGET}"
-                log_error "Remount it first, then re-run resume:"
-                log_error "  sudo mount ${_MV_TARGET}"
-                log_error "To fix a stale path in the state file manually:"
-                log_error "  sudo sed -i 's|MV_TARGET=${_MV_TARGET}|MV_TARGET=/correct/path|' \\"
-                log_error "    ${_MV_STATE_FILE}"
-                log_error "  sudo utilities/setup-storage.sh --mode migrate resume"
-                _resume_ok=false
+            elif [[ "${_MV_DIRECTION}" == "block-to-boot" ]]; then
+                # block-to-boot: target is a directory on the boot disk, not a mountpoint.
+                # A missing or empty target directory at resume time means rsync never
+                # completed — this is recoverable. A non-empty target means rsync ran
+                # at least partially and we can safely continue.
+                if [[ ! -d "${_MV_TARGET}" ]]; then
+                    log_warn "Resume (block-to-boot): target directory does not exist: ${_MV_TARGET}"
+                    log_warn "It will be created when rsync runs. This is safe to continue."
+                else
+                    local _tgt_count
+                    _tgt_count="$(find "${_MV_TARGET}" -maxdepth 1 -mindepth 1 2>/dev/null | wc -l | tr -d ' ')"
+                    log_info "Resume (block-to-boot): target directory exists with ${_tgt_count} item(s) — continuing."
+                fi
             fi
         fi
         if [[ ! -f "${PROJECT_ROOT}/docker-compose.yml" ]]; then
