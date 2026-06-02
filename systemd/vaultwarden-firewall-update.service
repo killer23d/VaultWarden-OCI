@@ -3,19 +3,12 @@ Description=VaultWarden Firewall Rule Update
 Documentation=https://github.com/killer23d/VaultWarden-OCI
 After=network-online.target
 Wants=network-online.target
-# firewall-update.sh does not exist as a standalone script. Firewall updates
-# are implemented in maintenance.sh via --update-firewall. ConditionPathExists
-# guards against running if maintenance.sh has not been installed yet.
 ConditionPathExists=/opt/vaultwarden-scripts/maintenance.sh
 OnFailure=vaultwarden-notify-failure.service
 
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/vaultwarden-scripts
-# Leading dash makes the file optional: the service starts even if
-# /etc/vaultwarden/vaultwarden.env does not yet exist (e.g. before
-# setup.sh systemd install has run). Missing required vars are caught
-# and reported by the script itself.
 EnvironmentFile=-/etc/vaultwarden/vaultwarden.env
 ExecStart=/opt/vaultwarden-scripts/maintenance.sh update-firewall
 # Must run as root because UFW rule management requires elevated privileges.
@@ -36,9 +29,12 @@ ProtectHome=read-only
 # that appends the DATA_VOLUME_MOUNT path to ReadWritePaths.
 # The base unit file is never modified. To inspect the merged result:
 #   systemctl cat <unit>
-ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock
 TimeoutStartSec=60
 TimeoutStopSec=30
+ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock /run/vaultwarden
+RuntimeDirectory=vaultwarden
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
 
 [Install]
 WantedBy=multi-user.target
