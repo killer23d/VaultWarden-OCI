@@ -44,7 +44,6 @@ _ss_cleanup() {
 }
 trap '_ss_cleanup' EXIT
 
-readonly _MV_VERSION="1.1.0"
 _MV_SCRIPT_NAME="utilities/setup-storage.sh"
 readonly _MV_SCRIPT_NAME
 
