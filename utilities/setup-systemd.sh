@@ -1075,7 +1075,7 @@ validate_installation() {
         done
     fi
 
-    log_info "[5/9] Checking timer enablement ..."
+    log_info "[5/9] Checking EnvironmentFile ..."
     if [[ ! -f "$ENV_FILE" ]]; then
         log_error "  MISSING: $ENV_FILE"
         log_error "  Run: sudo utilities/setup-systemd.sh install  (or create it manually)"
@@ -1126,6 +1126,16 @@ validate_installation() {
             (( errors++ )) || true
         fi
     fi
+
+    log_info "[7/9] Checking timer enablement ..."
+    for timer in "${TIMERS[@]}"; do
+        if systemctl is-enabled "$timer" &>/dev/null; then
+            log_success "  ENABLED:     $timer"
+        else
+            log_error   "  NOT ENABLED: $timer"
+            (( errors++ )) || true
+        fi
+    done
 
     log_info "[8/9] Checking for split-brain (sha256 repo vs installed) ..."
     for script in "${scripts_to_check[@]}"; do
