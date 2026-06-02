@@ -25,7 +25,7 @@
 		timeouts {
 			read_body 10s
 			read_header 10s
-			write 30s
+			#write 30s
 			idle 120s
 		}
 	}
@@ -233,7 +233,7 @@ http://127.0.0.1:8080 {
 			header_up X-Real-IP {client_ip}
 			header_up X-Forwarded-For {client_ip}
 			header_up X-Request-ID {uuid}
-			header_up X-Auth-Endpoint "true"
+			#header_up X-Auth-Endpoint "true"
 			header_down -X-Frame-Options
 			header_down -Content-Security-Policy
 		}
