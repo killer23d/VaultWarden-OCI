@@ -56,7 +56,7 @@ RestrictAddressFamilies=AF_INET AF_INET6
 # that appends the DATA_VOLUME_MOUNT path to ReadWritePaths.
 # The base unit file is never modified. To inspect the merged result:
 #   systemctl cat vaultwarden-notify-failure.service
-ReadWritePaths=/var/lib/vaultwarden /run/lock
+ReadWritePaths=/var/lib/vaultwarden /etc/vaultwarden /run/lock
 
 [Install]
 WantedBy=multi-user.target
