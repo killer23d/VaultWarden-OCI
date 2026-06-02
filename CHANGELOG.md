@@ -8,6 +8,28 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ---
 ## [Unreleased]
 
+### Changed
+- Extracted ~1,800-line migration pipeline from `utilities/setup-storage.sh`
+  into new sourced library `lib/migrate.sh`; `setup-storage.sh` trimmed from
+  ~2,000 to ~330 lines.
+- Added `block-to-boot` reverse migration direction (`--direction block-to-boot`)
+  to move data from a dedicated block volume back to the boot disk.
+- `_mv_select_device()` now filters the device list by direction: boot-to-block
+  shows all devices; block-to-boot shows only volumes bearing the VaultWarden
+  sentinel (`.vw-data-volume`).
+- Added `_mv_find_sentinel_mount()` to auto-detect mounted VaultWarden data
+  volumes during resume and block-to-boot flows.
+- Resume stale-target fix: if the recorded target mount is absent but a
+  sentinel-bearing volume is found at a different path, the operator is
+  prompted to accept the corrected path before continuing.
+- `_mv_on_err()` now includes active pipeline step context in error output.
+- `_mv_acquire_lock()` includes a `sudo rm -f <lock>` hint in the error message.
+- `lib/storage.sh`: mount failure error now includes UUID-based fstab grep hint.
+- Code reductions: deleted `_mv_expand_path()` (replaced with `realpath -m`
+  inline); deleted `_mv_lsblk_is_partition()` (inlined); replaced 13 explicit
+  `_mv_run_step` calls with a `_pipeline_steps` loop; extracted
+  `_mv_prune_env_backups()` from `_mv_step_update_env()`.
+
 ### Changed — Inline path-fallback migration (m-29)
 
 - Replaced every inline `${PROJECT_STATE_DIR:-/var/lib/vaultwarden}` and

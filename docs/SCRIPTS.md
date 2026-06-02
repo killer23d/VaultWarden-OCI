@@ -710,6 +710,37 @@ make uninstall           # Full uninstall (requires interactive TTY + 'yes' conf
 
 ---
 
+### 11. `utilities/setup-storage.sh` — migrate mode
+**Purpose:** Interactive pipeline that migrates VaultWarden data between the boot disk and a dedicated OCI block volume (and back).
+
+```bash
+sudo bash ~/VaultWarden-OCI/utilities/setup-storage.sh --mode migrate [OPTIONS]
+```
+
+#### `--direction` flag
+
+| Value | Description |
+| :-- | :-- |
+| `boot-to-block` | **(default)** Move data from the boot disk to a dedicated block volume. The block volume is formatted, mounted, and data is rsync'd. Source data on the boot disk is deleted after confirmation. |
+| `block-to-boot` | Reverse migration — move data from a dedicated block volume back to the boot disk. Only volumes bearing the VaultWarden sentinel file (`.vw-data-volume`) are shown in the device picker. |
+
+#### Examples
+
+```bash
+# Forward migration (boot → block volume) — direction defaults to boot-to-block
+sudo bash ~/VaultWarden-OCI/utilities/setup-storage.sh --mode migrate
+
+# Explicit forward migration
+sudo bash ~/VaultWarden-OCI/utilities/setup-storage.sh --mode migrate --direction boot-to-block
+
+# Reverse migration (block volume → boot disk)
+sudo bash ~/VaultWarden-OCI/utilities/setup-storage.sh --mode migrate --direction block-to-boot
+```
+
+> See `docs/VOLUME-MIGRATION.md` for the complete migration runbook, including resume instructions.
+
+---
+
 ## 🏗️ Makefile Reference
 
 All common operations have Makefile shortcuts. Run `make help` to see the full target list.
