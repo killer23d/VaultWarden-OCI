@@ -350,8 +350,21 @@ setup_data_volume() {
     if mountpoint -q "$mount_point" 2>/dev/null; then
         log_info "$mount_point already mounted (idempotent)"
     else
-        mount "$mount_point" \
-            || { log_error "mount failed for $mount_point — check /etc/fstab"; return 1; }
+        mount "$mount_point" || {
+            local _fstab_hint
+            _fstab_hint="$(blkid -o value -s UUID "$device" 2>/dev/null || true)"
+            log_error "Could not mount $mount_point. This usually means /etc/fstab is"
+            log_error "missing an entry for this device or uses a different mount point."
+            log_error "To diagnose:"
+            if [[ -n "${_fstab_hint}" ]]; then
+                log_error "  grep '${_fstab_hint}' /etc/fstab"
+            else
+                log_error "  grep '$device' /etc/fstab"
+            fi
+            log_error "Verify the second column (mount point) matches '$mount_point'."
+            log_error "If the entry is missing, run: sudo utilities/setup-storage.sh --mode setup"
+            return 1
+        }
         log_success "Mounted $device at $mount_point"
     fi
 
