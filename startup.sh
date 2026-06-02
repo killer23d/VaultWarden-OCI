@@ -327,12 +327,6 @@ prepare_log_directories() {
     log_info "Backup directory ready: $backup_dir"
   fi
 
-
-  if [ -f "${PROJECT_ROOT}/caddy/entrypoint.sh" ]; then
-    chmod +x "${PROJECT_ROOT}/caddy/entrypoint.sh" 2>/dev/null || true
-    log_info "Ensured Caddy entrypoint is executable"
-  fi
-
   log_success "State directories prepared successfully"
   return 0
 }
