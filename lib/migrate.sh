@@ -159,7 +159,7 @@ _mv_open_log() {
     [[ "${DRY_RUN}" == "true" ]] || touch "${_MV_LOG_FILE}"
 
     _mv_log info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    _mv_log info "  setup-storage.sh v${_MV_VERSION} (migrate mode) — $(date '+%Y-%m-%d %H:%M:%S %Z')"
+    _mv_log info "  migrate mode — $(date '+%Y-%m-%d %H:%M:%S %Z')"
     _mv_log info "  Log file: ${_MV_LOG_FILE}"
     _mv_log info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 }
