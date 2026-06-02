@@ -1788,9 +1788,6 @@ _mv_run_pipeline() {
             STEP_SOURCE_DELETED_DONE)
                 [[ "${_MV_DELETE_SOURCE}" == "true" ]] || continue
                 ;;
-            STEP_SOURCE_WIPED_DONE)
-                [[ "${_MV_WIPE_SOURCE_VOLUME:-false}" == "true" ]] || continue
-                ;;
         esac
         _mv_run_step "${_token}" "${_fn}"
     done
