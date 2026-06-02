@@ -35,6 +35,8 @@ StartLimitBurst=3
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
+RuntimeDirectory=vaultwarden-iptables
+Environment=TMPDIR=/run/vaultwarden-iptables
 ReadWritePaths=/run/xtables.lock
 
 StandardOutput=journal
