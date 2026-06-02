@@ -143,6 +143,12 @@ auto_fix_critical_permissions() {
     if [[ -f "$age_key_file" ]]; then
         chmod 600 "$age_key_file" 2>/dev/null || true
     fi
+
+    local caddy_ep="${project_root}/caddy/entrypoint.sh"
+    if [[ -f "$caddy_ep" && ! -x "$caddy_ep" ]]; then
+        chmod +x "$caddy_ep" 2>/dev/null || true
+        log_warn "auto_fix_critical_permissions: caddy/entrypoint.sh was not executable — corrected"
+    fi
 }
 
 # _ensure_lock_file LOCKPATH
