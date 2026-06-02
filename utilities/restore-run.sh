@@ -1436,6 +1436,13 @@ restore_full() {
     local ts; ts="$(date +%Y%m%d-%H%M%S)"
 
     if mountpoint -q "$state_dir" 2>/dev/null; then
+        # Separate-volume mode: rsync is required — fail early before touching data.
+        if ! command -v rsync >/dev/null 2>&1; then
+            log_error "rsync is required for block-volume restores but is not installed."
+            log_error "Install it first:  sudo apt-get install -y rsync"
+            log_error "Then re-run the restore — no data has been moved."
+            return 1
+        fi
         # Separate-volume mode: state_dir is a live mountpoint — mv would fail
         # with "Device or resource busy".  Instead, move each data subdirectory
         # into an in-volume snapshot directory, then rsync the staged content
@@ -1612,13 +1619,14 @@ main() {
     }
 
     local RESTORE_LOCK_FILE="/run/lock/vaultwarden-restore.lock"
-    # Use bash 4.1+ automatic FD allocation instead of hardcoded
-    # FD 203, which could silently clobber an already-open file descriptor.
+    _ensure_lock_file "$RESTORE_LOCK_FILE" || exit 1
     local RESTORE_LOCK_FD
     exec {RESTORE_LOCK_FD}>"$RESTORE_LOCK_FILE"
     flock -n "$RESTORE_LOCK_FD" || {
         log_error "Another restore is already running."
-        log_error "If the lock is stale, remove: ${RESTORE_LOCK_FILE}"
+        log_error "Lock file: ${RESTORE_LOCK_FILE}"
+        log_error "If you are certain no restore is active, remove it and retry:"
+        log_error "  sudo rm -f ${RESTORE_LOCK_FILE}"
         exit 1
     }
 
@@ -1637,9 +1645,18 @@ main() {
     auto_fix_critical_permissions "$PROJECT_ROOT"
 
     # Fail closed if the expected data volume is not mounted.
-    # In bootstrap/emergency-restore mode (--remote without .env), DATA_VOLUME_DEVICE
-    # will be unset, so the guard is a no-op and restore can proceed.
-    require_project_state_ready || exit 1
+    # Exceptions:
+    #   1. Bootstrap/emergency-restore mode (--remote without .env): DATA_VOLUME_DEVICE
+    #      will be unset, so the guard is already a no-op.
+    #   2. --force with a remote source: operator is explicitly driving a DR restore
+    #      and may be targeting an unmounted block volume that will be populated by
+    #      this very restore run. Blocking here defeats the DR flow.
+    if [[ "$FORCE" == "true" && "$USE_REMOTE" == "true" ]]; then
+        log_warn "Skipping project-state-ready check (--force --remote DR mode)."
+        log_warn "Ensure the target volume is mounted before restore writes begin."
+    else
+        require_project_state_ready || exit 1
+    fi
 
     # Derive the fallback from PROJECT_STATE_DIR so separate-volume installs
     # that have not explicitly set BACKUP_DIR still resolve to the correct volume.
@@ -1773,11 +1790,6 @@ main() {
 
     create_pre_restore_snapshot || exit 1
 
-    # Install a safety-net ERR trap so that any failure after services stop
-    # triggers an automatic restart attempt. Without this, set -euo pipefail
-    # could leave services permanently stopped and require manual intervention.
-    # Install the trap only after docker compose stop so earlier validation
-    # failures do not trigger a spurious restart of services that never stopped.
     _restore_safety_net() {
         local rc=$?
         if [[ $rc -ne 0 ]]; then
@@ -1785,15 +1797,15 @@ main() {
             docker compose up -d --remove-orphans 2>/dev/null || \
                 log_error "CRITICAL: Failed to restart services after restore error. Manual intervention required: docker compose up -d"
         fi
+        # Preserve the cleanup contract: remove decrypted temp material.
+        cleanup
     }
 
     if [[ "$DRY_RUN" != "true" ]]; then
-        if docker compose ps --status running --services 2>/dev/null | grep -q .; then
-            log_info "Stopping services..."
-            docker compose stop
-        fi
+        ...
+        docker compose stop
     fi
-    trap _restore_safety_net ERR
+    trap _restore_safety_net ERR HUP INT TERM
 
     case "$RESTORE_TYPE" in
         db)
