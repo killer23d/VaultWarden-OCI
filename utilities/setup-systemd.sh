@@ -951,11 +951,12 @@ validate_installation() {
     local errors=0
     local warnings=0
 
-    log_info "[1/8] Checking installed scripts ..."
+    log_info "[1/9] Checking installed scripts ..."
     local scripts_to_check=(
         maintenance.sh
         backup.sh
         restore.sh
+        utilities/setup-firewall.sh   # flat-installed for iptables.service compatibility
         utilities/maintenance-run.sh
         utilities/maintenance-health.sh
         utilities/maintenance-update.sh
@@ -967,7 +968,12 @@ validate_installation() {
         utilities/restore-run.sh
     )
     for script in "${scripts_to_check[@]}"; do
-        local installed="$OPT_SCRIPTS_DIR/$script"
+        local installed
+        if [[ "$script" == "utilities/setup-firewall.sh" ]]; then
+            installed="$OPT_SCRIPTS_DIR/$(basename "$script")"
+        else
+            installed="$OPT_SCRIPTS_DIR/$script"
+        fi
         if [[ ! -f "$installed" ]]; then
             log_error "  MISSING:        $installed"
             (( errors++ )) || true
