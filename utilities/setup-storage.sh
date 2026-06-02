@@ -304,6 +304,10 @@ _parse_outer_args() {
 }
 
 main() {
+    if [[ $# -eq 0 ]]; then
+        _ss_usage
+        exit 0
+    fi
     _parse_outer_args "$@"
 
     (( EUID == 0 )) || {
