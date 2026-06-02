@@ -120,11 +120,13 @@ WHAT validate CHECKS:
     1. Scripts present and executable in /opt/vaultwarden-scripts/
     2. lib/ present; lib/*.sh files are readable (mode 644 recommended)
     3. All unit files present in /etc/systemd/system/
-    4. All 6 timers enabled (systemctl is-enabled)
-    5. EnvironmentFile /etc/vaultwarden/vaultwarden.env exists (mode 600)
-    6. Age key /etc/vaultwarden/age-key.txt exists (mode 600)
-    7. SOPS_AGE_KEY_FILE is set in the EnvironmentFile
-    8. Installed scripts match repo source checksum (sha256 split-brain detection)
+    4. systemd drop-ins present: 20-identity.conf (service user) and
+       10-state-dir.conf (ReadWritePaths for data volume, if applicable)
+    5. All 6 timers enabled (systemctl is-enabled)
+    6. EnvironmentFile /etc/vaultwarden/vaultwarden.env exists (mode 600)
+    7. Age key /etc/vaultwarden/age-key.txt exists (mode 600)
+    8. SOPS_AGE_KEY_FILE is set in the EnvironmentFile
+    9. Installed scripts match repo source checksum (sha256 split-brain detection)
        Re-run install after any git pull to keep /opt/ in sync.
 
 VIEWING LOGS:
@@ -989,7 +991,7 @@ validate_installation() {
     # lib/*.sh files must be at least world-readable (644) so that a
     # non-root service user (User= in the unit) can source them. Warn on
     # 600 or 640 modes.
-    log_info "[2/8] Checking installed lib/ and file permissions ..."
+    log_info "[2/9] Checking installed lib/ and file permissions ..."
     if [[ ! -d "$OPT_SCRIPTS_DIR/lib" ]]; then
         log_error "  MISSING: $OPT_SCRIPTS_DIR/lib/"
         (( errors++ )) || true
@@ -1026,7 +1028,7 @@ validate_installation() {
         log_success "  OK: $critical_lib"
     fi
 
-    log_info "[3/8] Checking installed unit files ..."
+    log_info "[3/9] Checking installed unit files ..."
     for unit in "${SERVICES[@]}" "${TIMERS[@]}"; do
         local dest="$UNIT_DEST_DIR/$unit"
         if [[ ! -f "$dest" ]]; then
@@ -1037,17 +1039,43 @@ validate_installation() {
         fi
     done
 
-    log_info "[4/8] Checking timer enablement ..."
-    for timer in "${TIMERS[@]}"; do
-        if systemctl is-enabled "$timer" &>/dev/null; then
-            log_success "  ENABLED:     $timer"
+    log_info "[4/9] Checking systemd drop-in files ..."
+    for unit in "${_IDENTITY_DROPIN_UNITS[@]}"; do
+        local dropin="$UNIT_DEST_DIR/${unit}.d/20-identity.conf"
+        if [[ ! -f "$dropin" ]]; then
+            log_warn "  MISSING: $dropin"
+            log_warn "  Services will execute as root instead of the designated service user."
+            log_warn "  Fix: sudo utilities/setup-systemd.sh install"
+            (( warnings++ )) || true
         else
-            log_error   "  NOT ENABLED: $timer"
-            (( errors++ )) || true
+            log_success "  OK: $dropin"
         fi
     done
 
-    log_info "[5/8] Checking EnvironmentFile ..."
+    # Validate ReadWritePaths drop-ins only if a separate data volume is in use.
+    # Mirrors the guard in _install_rwpaths_dropin so boot-only installs are not
+    # incorrectly flagged as broken.
+    local _val_data_device=""
+    if [[ -f "$ENV_FILE" ]]; then
+        _val_data_device=$(_read_env_value "DATA_VOLUME_DEVICE" "$ENV_FILE" 2>/dev/null || true)
+    fi
+    [[ -z "$_val_data_device" ]] && _val_data_device="${DATA_VOLUME_DEVICE:-}"
+
+    if [[ -n "$_val_data_device" ]]; then
+        for unit in "${_VW_DROPIN_UNITS[@]}"; do
+            local dropin="$UNIT_DEST_DIR/${unit}.d/10-state-dir.conf"
+            if [[ ! -f "$dropin" ]]; then
+                log_warn "  MISSING: $dropin"
+                log_warn "  Writes to the data volume will be blocked by ProtectSystem=strict."
+                log_warn "  Fix: sudo utilities/setup-systemd.sh install"
+                (( warnings++ )) || true
+            else
+                log_success "  OK: $dropin"
+            fi
+        done
+    fi
+
+    log_info "[5/9] Checking timer enablement ..."
     if [[ ! -f "$ENV_FILE" ]]; then
         log_error "  MISSING: $ENV_FILE"
         log_error "  Run: sudo utilities/setup-systemd.sh install  (or create it manually)"
@@ -1064,7 +1092,7 @@ validate_installation() {
         fi
     fi
 
-    log_info "[6/8] Checking age key installation ..."
+    log_info "[6/9] Checking age key installation ..."
     if [[ ! -f "$AGE_KEY_DEST" ]]; then
         log_error "  MISSING: $AGE_KEY_DEST"
         log_error "  Backup/health services cannot encrypt/decrypt without this key."
@@ -1099,10 +1127,15 @@ validate_installation() {
         fi
     fi
 
-    log_info "[7/8] Checking for split-brain (sha256 repo vs installed) ..."
+    log_info "[8/9] Checking for split-brain (sha256 repo vs installed) ..."
     for script in "${scripts_to_check[@]}"; do
         local repo_src="$PROJECT_ROOT/$script"
-        local installed="$OPT_SCRIPTS_DIR/$script"
+        local installed
+        if [[ "$script" == "utilities/setup-firewall.sh" ]]; then
+            installed="$OPT_SCRIPTS_DIR/$(basename "$script")"
+        else
+            installed="$OPT_SCRIPTS_DIR/$script"
+        fi
         if [[ ! -f "$repo_src" || ! -f "$installed" ]]; then
             continue
         fi
@@ -1125,7 +1158,7 @@ validate_installation() {
     # 'systemctl is-enabled' only checks the symlink; it does NOT confirm
     # the timer unit is currently active in systemd nor that it has a future
     # trigger time.
-    log_info "[8/8] Checking timers are scheduled (systemctl list-timers) ..."
+    log_info "[9/9] Checking timers are scheduled (systemctl list-timers) ..."
     local expected_count="${#TIMERS[@]}"
     local healthy_count
     healthy_count=$(_count_healthy_managed_timers)
