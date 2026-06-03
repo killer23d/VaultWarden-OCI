@@ -898,12 +898,13 @@ Secrets collection, generation, hashing, validation, and recovery kit export. Us
 
 | Function | Description |
 | :-- | :-- |
+| `get_secret KEY [FILE]` | **Public API** — decrypt and return a single secret value by key name. Canonical call pattern for all consuming scripts: `local val; val=$(get_secret smtp_password) \|\| return 1`. Never pass the result directly as a positional argument to an external command (value appears in `/proc/$$/cmdline`). Thin wrapper over `decrypt_secret` with identical security guarantees. |
+| `decrypt_secret KEY [FILE]` | Low-level single-key decrypt via `sops --extract`. Unsets `SOPS_AGE_KEY_FILE` immediately after the sops call. Prefer `get_secret` in new call sites — `decrypt_secret` remains available for internal library use. |
 | `collect_secret_field FIELD` | Interactive prompt, hash, and validate a single secret field — plaintext displayed via `/dev/tty` only, never stderr |
 | `auto_generate_secret_field FIELD` | Non-interactive generation or CHANGE_ME placeholder per field — plaintext routed to `/dev/tty` only |
 | `ensure_sops_env` | Set `SOPS_AGE_KEY_FILE` and `SOPS_CONFIG` for sops calls |
 | `cleanup_secrets_environment` | Unset `SOPS_AGE_KEY_FILE` and `SOPS_CONFIG` — call after all sops operations complete |
 | `write_secret_file DEST VALUE` | Write secret to file with umask 077 guard — file is born at mode 600, no world-readable window |
-| `decrypt_secret KEY [FILE]` | Decrypt a single key via `sops --extract`; unsets `SOPS_AGE_KEY_FILE` immediately after the sops call |
 | `secrets_file_exists` | Check whether `secrets/secrets.yaml` is present |
 | `validate_secrets_decryption` | Assert the secrets file can be decrypted |
 | `validate_required_secrets` | Assert all required keys are present and non-empty |
@@ -913,6 +914,7 @@ Secrets collection, generation, hashing, validation, and recovery kit export. Us
 | `create_secrets_backup` | Timestamped backup of the encrypted secrets file — created atomically at mode 600 via `install -m 600` |
 | `generate_recovery_kit FILE` | Write a full plaintext recovery document — extracts secrets one key at a time via `sops --extract`, never materialises full plaintext JSON |
 | `offer_recovery_kit_export` | Interactive or auto prompt to export a recovery kit to tmpfs |
+| `export_docker_secrets DOCKER_DIR [SECRETS_FILE]` | Decrypt all known secrets and write one flat file per key into DOCKER_DIR (mode 444). Skips placeholder/empty values with a warning. Sanity-checks output files for raw `ENC[` ciphertext and fails loudly if detected. Canonical shared implementation used by `setup-secrets.sh` and `secrets-rotate.sh`. |
 
 ### `lib/storage.sh`
 Storage and state-path lifecycle helpers (boot-volume + separate-volume) plus Caddy log permission enforcement.
