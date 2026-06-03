@@ -48,6 +48,14 @@ _schema_check_prerequisites() {
         log_error "schema.sh: Expected at: ${SECRETS_SCHEMA_FILE}"
         return 1
     fi
+
+    local _schema_ver
+    _schema_ver=$(yq '.schema_version' "${schema_file}" 2>/dev/null) || true
+    if [[ "${_schema_ver}" != "1" ]]; then
+        log_error "schema.sh: unsupported schema_version '${_schema_ver}' in ${schema_file}"
+        log_error "schema.sh: expected schema_version: 1"
+        return 1
+    fi
     return 0
 }
 
