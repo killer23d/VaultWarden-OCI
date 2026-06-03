@@ -26,13 +26,41 @@ readonly _VW_DEFAULT_DATA_MOUNT="${_VW_DEFAULT_DATA_MOUNT:-/opt/vaultwarden/data
 # Used as the fallback when PUID / PGID are absent from .env.
 # Change here and the correct UID:GID is applied everywhere in one edit.
 # ---------------------------------------------------------------------------
+# lib/defaults.sh (excerpt — add the three new arrays immediately after the existing block)
+
 readonly _VW_DEFAULT_PUID="${_VW_DEFAULT_PUID:-1001}"
 readonly _VW_DEFAULT_PGID="${_VW_DEFAULT_PGID:-1001}"
 
-# ---------------------------------------------------------------------------
-# Log subdirectory names
-# Drives mkdir in prepare_log_directories() and any future log-rotation
-# helpers. Add a new service name here when a new container is introduced.
-# ---------------------------------------------------------------------------
-_VW_DEFAULT_LOG_SERVICES=(vaultwarden caddy postfix)
+# Service log subdirectories created under PROJECT_STATE_DIR/logs/
+# startup.sh iterates this array — add new sidecars here only.
+readonly -a _VW_DEFAULT_LOG_SERVICES=(
+    vaultwarden
+    caddy
+    postfix
+)
+
+# Critical services that startup.sh waits on after `docker compose up`.
+# Add a new sidecar here when the compose stack grows.
+readonly -a _VW_DEFAULT_CRITICAL_SERVICES=(
+    vaultwarden
+    caddy
+)
+
+# Valid values for the EMAIL_MODE .env variable.
+# startup.sh derives the catch-all advisory string from this array at runtime.
+readonly -a _VW_DEFAULT_EMAIL_MODES=(
+    auto
+    api
+    smtp
+    host
+)
+
+# System commands required before startup.sh can proceed.
+# Add a new tool dependency here — no edit to startup.sh needed.
+readonly -a _VW_DEFAULT_REQUIRED_COMMANDS=(
+    docker
+    openssl
+    sops
+    python3
+)
 readonly _VW_DEFAULT_LOG_SERVICES
