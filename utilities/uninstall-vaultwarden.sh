@@ -176,9 +176,11 @@ if [[ "$DRY_RUN" == "true" ]]; then
     echo "  [5] Systemd units: vaultwarden-*.service vaultwarden-*.timer"
     echo "  [6] Env file: /etc/vaultwarden/vaultwarden.env"
     echo "  [7] Age key: ${AGE_KEY_FILE} (if --i-have-saved-my-recovery-kit or --force)"
+    echo "  [7.5] Lock files: /run/lock/vaultwarden-{backup,operations,dns-update,firewall-update,health}.lock"
+    echo "        System group: vaultwarden (created by setup-systemd.sh)"
     echo "  [8] Project directory: ${PROJECT_DIR}"
     echo "  [9] State directory: ${PROJECT_STATE_DIR}"
-    echo "  [10] Extra packages: age haveged rclone python3-argon2 apache2-utils cron"
+    echo "  [10] Extra packages: age haveged rclone python3-argon2 apache2-utils cron yq"
     echo "  [10.5] CrowdSec:"
     echo "         - Services: crowdsec crowdsec-firewall-bouncer crowdsec-cloudflare-worker-bouncer"
     echo "         - Packages: crowdsec crowdsec-firewall-bouncer-iptables"
@@ -635,15 +637,46 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════
-# STEP 7 — Remove setup lock file
+# STEP 7 — Remove lock files and vaultwarden system group
 # ═══════════════════════════════════════════════════════════════
-info "Step 7: Removing setup lock files..."
-# Remove both legacy (/var/lock) and current (/run/lock) paths for
-# forward/backward compatibility.
+info "Step 7: Removing lock files and vaultwarden system group..."
+
+# Setup lock — remove both legacy (/var/lock) and current (/run/lock) paths
+# for forward/backward compatibility.
 rm -f /var/lock/vaultwarden-setup.lock 2>/dev/null && \
     success "Removed /var/lock/vaultwarden-setup.lock (legacy)" || true
 rm -f /run/lock/vaultwarden-setup.lock 2>/dev/null && \
     success "Removed /run/lock/vaultwarden-setup.lock" || true
+
+# Runtime operation lock files created by setup-systemd.sh _ensure_runtime_lock_files().
+# These are mode 0660 root:vaultwarden files used by systemd services for flock
+# coordination. They live in /run/lock/ (ephemeral) but are pre-created at install
+# time so services can acquire them without a race against first-run creation.
+_VW_LOCK_FILES=(
+    "/run/lock/vaultwarden-backup.lock"
+    "/run/lock/vaultwarden-operations.lock"
+    "/run/lock/vaultwarden-dns-update.lock"
+    "/run/lock/vaultwarden-firewall-update.lock"
+    "/run/lock/vaultwarden-health.lock"
+)
+for _lock_file in "${_VW_LOCK_FILES[@]}"; do
+    if [[ -e "$_lock_file" ]]; then
+        rm -f "$_lock_file" 2>/dev/null && \
+            success "Removed lock file: ${_lock_file}" || \
+            warn "Could not remove ${_lock_file} (may be actively held — will vanish on reboot)."
+    fi
+done
+
+# Remove the vaultwarden system group created by setup-systemd.sh _ensure_lock_group().
+# This group owns the lock files (mode 0660 root:vaultwarden) and includes the
+# service user and root. Leaving it orphaned after uninstall is harmless but untidy.
+if getent group vaultwarden &>/dev/null; then
+    groupdel vaultwarden 2>/dev/null \
+        && success "Removed system group 'vaultwarden'." \
+        || warn "Could not remove system group 'vaultwarden' — remove manually: sudo groupdel vaultwarden"
+else
+    info "System group 'vaultwarden' not found — skipping."
+fi
 
 # ═══════════════════════════════════════════════════════════════
 # STEP 8 — Remove SOPS binary
@@ -739,7 +772,7 @@ info "Step 10: Removing packages installed by setup.sh..."
 # haveged is a systemd service that setup.sh enables; explicitly
 #   disable and stop it before purging so its enabled symlink is cleaned up
 #   before the package is removed, avoiding a stale unit warning.
-EXTRA_PKGS=(age haveged rclone python3-argon2 apache2-utils cron)
+EXTRA_PKGS=(age haveged rclone python3-argon2 apache2-utils cron yq)
 
 # Disable haveged first so its enabled symlink is removed cleanly before purge.
 if systemctl is-enabled haveged &>/dev/null 2>&1; then
