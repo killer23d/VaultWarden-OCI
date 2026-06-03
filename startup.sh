@@ -144,6 +144,9 @@ warn_plaintext_secret_overrides() {
 # actionable warning at startup instead of a silent failure on first email
 # send. This remains a warning because email is not required for the stack to
 # start.
+#
+# Valid modes are declared in _VW_DEFAULT_EMAIL_MODES (lib/defaults.sh).
+# Add a new mode there; no edit to this function is needed.
 check_email_config_consistency() {
   local email_mode="${EMAIL_MODE:-auto}"
   local secrets_dir="$DOCKER_SECRETS_DIR"
@@ -168,7 +171,11 @@ check_email_config_consistency() {
     auto|host)
       ;;
     *)
-      log_warn "EMAIL_MODE='${email_mode}' is not a recognised value (auto|api|smtp|host)."
+      # Derive the human-readable valid-modes string from the canonical array
+      # in lib/defaults.sh so this message never drifts from the real list.
+      local _valid_modes_str
+      _valid_modes_str=$(IFS='|'; echo "${_VW_DEFAULT_EMAIL_MODES[*]}")
+      log_warn "EMAIL_MODE='${email_mode}' is not a recognised value (${_valid_modes_str})."
       log_warn "  Email delivery may fail. Check EMAIL_MODE in .env."
       ;;
   esac
@@ -213,13 +220,14 @@ load_environment() {
   fi
 }
 
+# Required commands are declared in _VW_DEFAULT_REQUIRED_COMMANDS (lib/defaults.sh).
+# Add a new dependency there; no edit to this function is needed.
 validate_prerequisites() {
   log_info "Validating prerequisites..."
 
-  local required_commands=(docker openssl sops python3)
   local missing_commands=()
 
-  for cmd in "${required_commands[@]}"; do
+  for cmd in "${_VW_DEFAULT_REQUIRED_COMMANDS[@]}"; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
       missing_commands+=("$cmd")
     fi
@@ -646,11 +654,13 @@ ensure_vaultwarden_egress_nat() {
 }
 
 
+# Critical services to health-wait are declared in _VW_DEFAULT_CRITICAL_SERVICES
+# (lib/defaults.sh). Add a new sidecar there — not here — when the stack grows.
 wait_for_services() {
   log_info "Waiting for critical services to become ready..."
-  local services=(vaultwarden caddy)
   local timeout=90
-  for service in "${services[@]}"; do
+  local service
+  for service in "${_VW_DEFAULT_CRITICAL_SERVICES[@]}"; do
     wait_for_service_ready "$service" "$timeout" || return 1
   done
   log_success "Critical services are ready"
