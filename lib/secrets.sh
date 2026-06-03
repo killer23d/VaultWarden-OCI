@@ -121,11 +121,30 @@ generate_admin_token() {
     return 0
 }
 
-# SECURITY: Decrypted value is returned via printf to stdout (command substitution).
-# Callers MUST capture via local variable assignment only:
-#   local value; value=$(decrypt_secret "key") || return 1
-# NEVER pass the result directly as a positional argument to an external command:
-#   some_cmd "$(decrypt_secret "key")"  # WRONG: appears in /proc/$$/cmdline
+# ---------------------------------------------------------------------------
+# get_secret KEY [FILE]
+#
+# Public API — decrypt and return a single secret value by key name.
+# This is the canonical call pattern for all consuming scripts.
+#
+# Usage:
+#   local val
+#   val=$(get_secret smtp_password) || return 1
+#   # Use $val — never pass directly as a positional arg to an external
+#   # command; the value would appear in /proc/$$/cmdline.
+#
+# Arguments:
+#   KEY   — YAML key name (e.g. smtp_password, admin_token)
+#   FILE  — optional path to secrets file (defaults to SECRETS_FILE)
+#
+# Returns:
+#   0 and prints the plaintext value on success
+#   1 on any decryption or validation error
+# ---------------------------------------------------------------------------
+get_secret() {
+    decrypt_secret "$@"
+}
+
 decrypt_secret() {
     local key="$1"
     local secrets_file="${2:-$SECRETS_FILE}"
