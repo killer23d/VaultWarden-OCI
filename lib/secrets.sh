@@ -1019,17 +1019,7 @@ EOF
 
     unset _grk_values
 
-VaultWarden Admin Password Hash (Argon2id):
-EOF
-    printf '%s\n' "$vw_admin_hash" >> "$output_file"
     cat >> "$output_file" << 'EOF'
-(Note: Original password cannot be recovered from hash. Reset if lost.)
-
-Caddy Basic Auth Hash (Bcrypt):
-EOF
-    printf '%s\n' "$caddy_hash" >> "$output_file"
-    cat >> "$output_file" << 'EOF'
-(Note: Original password cannot be recovered from hash. Reset if lost.)
 
 ════════════════════════════════════════════════════════════════════════
 SECTION 3: DISASTER RECOVERY & MIGRATION CHECKLIST
