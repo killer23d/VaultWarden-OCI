@@ -7,6 +7,7 @@
 # Depends on:
 #   lib/log.sh   — must be sourced before this file
 #   yq (v4+)     — YAML processor; installed by setup.sh as a prerequisite
+#                  via: sudo apt-get install yq
 #
 # Canonical caller source block:
 #   source "${LIB_DIR}/log.sh"
@@ -38,8 +39,10 @@ _schema_check_prerequisites() {
     local schema_file="${1:-${SECRETS_SCHEMA_FILE}}"
 
     if ! command -v yq > /dev/null 2>&1; then
-        log_error "schema.sh: 'yq' is not installed. Install it with: sudo snap install yq"
-        log_error "schema.sh: yq is required to read secrets-schema.yaml"
+        log_error "schema.sh: 'yq' is not installed."
+        log_error "schema.sh: Install it with: sudo apt-get install yq"
+        log_error "schema.sh: yq (v4+, mikefarah) is required to read secrets-schema.yaml"
+        log_error "schema.sh: It is installed automatically by setup.sh — re-run: sudo ./setup.sh"
         return 1
     fi
 
