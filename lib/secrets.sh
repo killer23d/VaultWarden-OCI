@@ -285,23 +285,44 @@ validate_secrets_yaml() {
 
 validate_required_secrets() {
     local secrets_file="${1:-$SECRETS_FILE}"
-    local required_secrets=(
-        "admin_token"
-        "admin_basic_auth_hash"
-        "caddy_cloudflare_dns_token"
-        "email_api_token"
-        "backup_passphrase"
-    )
-    # CrowdSec Cloudflare keys are conditionally required when CF proxy is enabled.
-    if [[ "${CLOUDFLARE_PROXY_ENABLED:-false}" == "true" ]]; then
-        required_secrets+=("cloudflare_zone_id" "cf_account_id" "cf_worker_bouncer_token")
+
+    # Derive the required-key list from secrets-schema.yaml so that adding or
+    # removing a required secret only requires editing the schema; no script
+    # changes are needed here.
+    local _required_keys
+    if ! _required_keys=$(schema_required_keys 2>/dev/null); then
+        log_error "validate_required_secrets: failed to read required keys from secrets-schema.yaml"
+        return 1
     fi
+
+    # CrowdSec Cloudflare keys carry required=false in the schema because they
+    # are only mandatory when CLOUDFLARE_PROXY_ENABLED=true. Append them here
+    # when that flag is set so the startup guard is complete without hardcoding
+    # the key names in two places.
+    local _cf_keys=()
+    if [[ "${CLOUDFLARE_PROXY_ENABLED:-false}" == "true" ]]; then
+        while IFS= read -r _ck; do
+            [[ -z "$_ck" ]] && continue
+            _cf_keys+=("$_ck")
+        done < <(yq '.secrets[] | select(.conditional_group == "cloudflare_proxy") | .key' \
+                    "${SECRETS_SCHEMA_FILE:-${PROJECT_ROOT}/secrets-schema.yaml}" 2>/dev/null)
+        if [[ ${#_cf_keys[@]} -eq 0 ]]; then
+            # Fallback: static list guards against yq unavailability at this stage.
+            _cf_keys=("cloudflare_zone_id" "cf_account_id" "cf_worker_bouncer_token")
+            log_warn "validate_required_secrets: schema_field unavailable for CF keys — using static fallback"
+        fi
+    fi
+
     if ! ensure_sops_env; then return 1; fi
+
     local missing_secrets=()
-    for secret in "${required_secrets[@]}"; do
+
+    # Check schema-required keys.
+    while IFS= read -r secret; do
+        [[ -z "$secret" ]] && continue
         local sops_stderr rc=0
-        # Capture sops stderr per-key so missing vs. undecryptable
-        # secrets produce distinct diagnostic messages.
+        # Capture sops stderr per-key so missing vs. undecryptable secrets
+        # produce distinct diagnostic messages.
         sops_stderr=$(sops -d --extract "[\"$secret\"]" "$secrets_file" 2>&1 >/dev/null) || rc=$?
         if [[ $rc -ne 0 ]]; then
             log_error "validate_required_secrets: required secret '$secret' is missing or unreadable"
@@ -310,8 +331,23 @@ validate_required_secrets() {
                 log_debug "validate_required_secrets: sops error for '$secret': $sops_stderr"
             fi
         fi
+    done <<< "$_required_keys"
+
+    # Check conditional Cloudflare keys (not required in schema, required at runtime).
+    for secret in "${_cf_keys[@]}"; do
+        local sops_stderr rc=0
+        sops_stderr=$(sops -d --extract "[\"$secret\"]" "$secrets_file" 2>&1 >/dev/null) || rc=$?
+        if [[ $rc -ne 0 ]]; then
+            log_error "validate_required_secrets: required CF secret '$secret' is missing or unreadable"
+            missing_secrets+=("$secret")
+            if [[ -n "${sops_stderr:-}" ]]; then
+                log_debug "validate_required_secrets: sops error for '$secret': $sops_stderr"
+            fi
+        fi
     done
+
     cleanup_secrets_environment
+
     if [[ ${#missing_secrets[@]} -gt 0 ]]; then
         log_warn "Missing required secrets (${#missing_secrets[@]}): ${missing_secrets[*]}"
         return 1
@@ -875,25 +911,23 @@ generate_recovery_kit() {
 
     log_info "Decrypting secrets for export..."
 
-    local vw_admin_hash="Not Set" caddy_hash="Not Set" smtp_pass="Not Set"
-    local backup_pass="Not Set" cf_dns="Not Set"
-    local push_id="Not Set" push_key="Not Set" email_api_tok="Not Set"
+    declare -A _grk_values=()
 
     if [[ -f "$secrets_file" ]]; then
         if ! ensure_sops_env; then return 1; fi
-        # Guarantee cleanup_secrets_environment is called when this
-        # function returns, even if an error occurs mid-way through extraction.
         trap 'cleanup_secrets_environment' RETURN
 
-        vw_admin_hash=$(_grk_sops_extract admin_token              "$secrets_file")
-        caddy_hash=$(_grk_sops_extract    admin_basic_auth_hash    "$secrets_file")
-        smtp_pass=$(_grk_sops_extract     smtp_password            "$secrets_file")
-        backup_pass=$(_grk_sops_extract   backup_passphrase        "$secrets_file")
-        cf_dns=$(_grk_sops_extract        caddy_cloudflare_dns_token           "$secrets_file")
-        push_id=$(_grk_sops_extract       push_installation_id     "$secrets_file")
-        push_key=$(_grk_sops_extract      push_installation_key    "$secrets_file")
-        email_api_tok=$(_grk_sops_extract email_api_token          "$secrets_file")
+        local _schema_key_list
+        if ! _schema_key_list=$(schema_keys 2>/dev/null); then
+            log_warn "generate_recovery_kit: schema_keys unavailable — recovery kit may be incomplete"
+            # Degrade gracefully: continue with an empty map rather than aborting.
+            _schema_key_list=""
+        fi
 
+        while IFS= read -r _rk_key; do
+            [[ -z "$_rk_key" ]] && continue
+            _grk_values["$_rk_key"]=$(_grk_sops_extract "$_rk_key" "$secrets_file")
+        done <<< "$_schema_key_list"
     else
         log_warn "secrets.yaml not found"
     fi
@@ -964,22 +998,26 @@ EOF
 SECTION 2: SERVER SECRETS (DECRYPTED)
 ════════════════════════════════════════════════════════════════════════
 
-[SYSTEM CREDENTIALS]
-Backup Encryption Passphrase:
 EOF
-    printf '%s\n' "$backup_pass" >> "$output_file"
-    printf '\nSMTP Password (Email):\n' >> "$output_file"
-    printf '%s\n' "$smtp_pass" >> "$output_file"
-    printf '\nEmail API Token (email_api_token):\n' >> "$output_file"
-    printf '%s\n' "$email_api_tok" >> "$output_file"
-    printf '\nCloudflare DNS Token:\n' >> "$output_file"
-    printf '%s\n' "$cf_dns" >> "$output_file"
-    printf '\n[PUSH NOTIFICATIONS]\n' >> "$output_file"
-    printf 'Installation ID:  %s\n' "$push_id" >> "$output_file"
-    printf 'Installation Key: %s\n' "$push_key" >> "$output_file"
-    printf '\n[ADMIN ACCESS]\n' >> "$output_file"
-    printf 'Admin Email: %s\n' "$admin_email" >> "$output_file"
-    cat >> "$output_file" << 'EOF'
+
+    # Emit each secret with its human-readable label from the schema.
+    # New keys appear automatically without editing this function.
+    local _schema_keys_for_kit
+    _schema_keys_for_kit=$(schema_keys 2>/dev/null) || _schema_keys_for_kit=""
+
+    while IFS= read -r _kit_key; do
+        [[ -z "$_kit_key" ]] && continue
+        local _kit_label
+        _kit_label=$(schema_field_safe "$_kit_key" "label") || _kit_label="$_kit_key"
+        [[ -z "$_kit_label" ]] && _kit_label="$_kit_key"
+
+        local _kit_value="${_grk_values[$_kit_key]:-Not Set}"
+
+        printf '[%s]\n' "$_kit_label"       >> "$output_file"
+        printf '%s\n\n' "$_kit_value"       >> "$output_file"
+    done <<< "$_schema_keys_for_kit"
+
+    unset _grk_values
 
 VaultWarden Admin Password Hash (Argon2id):
 EOF
@@ -1369,28 +1407,29 @@ export_docker_secrets() {
         return 1
     fi
 
-    local _eds_keys=(
-        admin_token
-        admin_basic_auth_hash
-        caddy_cloudflare_dns_token
-        email_api_token
-        smtp_password
-        backup_passphrase
-        push_installation_id
-        push_installation_key
-    )
+    local _schema_keys_str
+    if ! _schema_keys_str=$(schema_keys 2>/dev/null); then
+        log_error "export_docker_secrets: failed to read key list from secrets-schema.yaml"
+        return 1
+    fi
+
+    # Load schema keys into an associative array for O(1) lookup during
+    # the parse loop — avoids a nested for-loop per secret key.
+    declare -A _eds_allowed_keys=()
+    while IFS= read -r _sk; do
+        [[ -z "$_sk" ]] && continue
+        _eds_allowed_keys["$_sk"]=1
+    done <<< "$_schema_keys_str"
 
     local _failed=0
     local _key _value
 
     while IFS='=' read -r _key _value; do
         [[ -z "$_key" ]] && continue
-        local _known=false
-        local _k
-        for _k in "${_eds_keys[@]}"; do
-            [[ "$_k" == "$_key" ]] && { _known=true; break; }
-        done
-        [[ "$_known" == "true" ]] || continue
+
+        # Only export keys that are defined in the schema; ignore any stale or
+        # unexpected YAML keys that may exist in older secrets.yaml files.
+        [[ -n "${_eds_allowed_keys[$_key]+set}" ]] || continue
 
         # Skip placeholder or null values; warn so the admin can act.
         if [[ -z "$_value" ]] \
@@ -1418,6 +1457,7 @@ for k, v in data.items():
 PYEOF
     )
     unset _key
+    unset _eds_allowed_keys
 
     # Sanity-check: if any output file starts with "ENC[", SOPS produced
     # raw ciphertext — fail loudly before containers start.
