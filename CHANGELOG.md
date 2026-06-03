@@ -8,6 +8,39 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ---
 ## [Unreleased]
 
+### Added u2014 Schema-Driven Secrets Management
+
+- **`secrets-schema.yaml`** u2014 new project-root YAML (NOT encrypted) that is the
+  single source of truth for every secret key: name, human-readable label, hash
+  algorithm (argon2id / bcrypt / plain), bootstrap placeholder, collection mode
+  (interactive / auto / conditional), Docker service(s), required flag, editor hint.
+  Adding or renaming a secret now requires editing only this file.
+
+- **`lib/schema.sh`** u2014 new shared library: schema_keys, schema_field,
+  schema_field_safe, schema_required_keys, schema_hinted_keys,
+  schema_services_for_key, schema_placeholder_for_key, schema_key_exists,
+  schema_collect_type.  Sourced by lib/secrets.sh; available to all callers.
+
+### Changed u2014 Hardcoded key lists replaced by schema reads
+
+- **`lib/secrets.sh`** u2014 check_placeholder_values() reads schema_required_keys().
+- **`utilities/setup-secrets.sh`** u2014 bootstrap heredoc, write_secrets() printf
+  block, and collect_secrets() per-key blocks replaced by schema-driven loops.
+- **`utilities/secrets-rotate.sh`** u2014 _ROTATE_FIELDS, _FIELD_SERVICES, help text,
+  and _validate_rotate_field() driven by schema functions.
+- **`utilities/secrets-edit.sh`** u2014 hint injection loop replaces hardcoded sed.
+- **`utilities/secrets-list.sh`** u2014 hashed-field warning derived from schema.
+
+### Notes
+
+- push_installation_id/key: collect:conditional forward-declares 3-way logic;
+  no dispatch code reads this yet. FUTURE: condition_fn field.
+- NOT_USED_EMAIL_MODE=<mode> sentinels preserved verbatim.
+- secrets/secrets.yaml on disk is NOT touched by this change.
+- Public CLI interfaces are UNCHANGED.
+
+## [Unreleased]
+
 ### Changed
 - Extracted ~1,800-line migration pipeline from `utilities/setup-storage.sh`
   into new sourced library `lib/migrate.sh`; `setup-storage.sh` trimmed from

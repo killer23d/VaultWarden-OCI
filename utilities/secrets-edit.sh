@@ -192,17 +192,24 @@ do_edit() {
         return 1
     fi
 
-    # Inject inline YAML hints for hashed fields only once.
-    if ! grep -q "^# HASHED (Argon2id)" "$temp_file"; then
-        sed -i \
-            -e 's|^admin_token:|# HASHED (Argon2id) — do NOT type plaintext here. Use: ./edit-secrets.sh rotate admin_token\nadmin_token:|' \
-            "$temp_file"
-    fi
-    if ! grep -q "^# HASHED (bcrypt)" "$temp_file"; then
-        sed -i \
-            -e 's|^admin_basic_auth_hash:|# HASHED (bcrypt) — do NOT type plaintext here. Use: ./edit-secrets.sh rotate admin_basic_auth_hash\nadmin_basic_auth_hash:|' \
-            "$temp_file"
-    fi
+    # Inject inline YAML hint comments for any key that defines a non-empty
+    # 'hint' field in secrets-schema.yaml.  This loop replaces the previous
+    # hardcoded sed expressions for admin_token and admin_basic_auth_hash.
+    while IFS= read -r _hint_key; do
+        [[ -z "$_hint_key" ]] && continue
+        local _hint_text
+        _hint_text=$(schema_field_safe "$_hint_key" hint 2>/dev/null)
+        [[ -z "$_hint_text" ]] && continue
+        # Only inject if the hint comment is not already present.
+        if ! grep -qF "# ${_hint_text%%—*}" "$temp_file" 2>/dev/null; then
+            local _escaped_hint
+            _escaped_hint="${_hint_text//\\/\\\\}"
+            _escaped_hint="${_escaped_hint//|/\\|}"
+            sed -i \
+                -e "s|^${_hint_key}:|# ${_escaped_hint}\\n${_hint_key}:|" \
+                "$temp_file"
+        fi
+    done < <(schema_hinted_keys 2>/dev/null)
 
     local before_checksum
     before_checksum=$(calculate_sha256 "$temp_file")

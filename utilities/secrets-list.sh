@@ -59,9 +59,25 @@ do_list_keys() {
     done <<< "$raw_keys"
 
     echo ""
-    log_warn "⚠  Hashed fields: admin_token and admin_basic_auth_hash are one-way Argon2id/bcrypt hashes."
-    log_warn "   Decrypting the secrets file will show the hash, not the original password."
-    log_warn "   To change them: ./edit-secrets.sh rotate admin_token"
+
+    # Derive the list of hashed fields from the schema so the warning stays in
+    # sync with secrets-schema.yaml without manual updates here.
+    local -a _hashed_keys=()
+    while IFS= read -r _lkey; do
+        [[ -z "$_lkey" ]] && continue
+        local _lhash
+        _lhash=$(schema_field_safe "$_lkey" hash 2>/dev/null)
+        if [[ "$_lhash" == "argon2id" || "$_lhash" == "bcrypt" ]]; then
+            _hashed_keys+=("$_lkey")
+        fi
+    done < <(schema_keys 2>/dev/null)
+
+    if [[ ${#_hashed_keys[@]} -gt 0 ]]; then
+        log_warn "⚠  Hashed fields: ${_hashed_keys[*]} are one-way hashes."
+        log_warn "   Decrypting the secrets file will show the hash, not the original password."
+        log_warn "   To change them: ./edit-secrets.sh rotate ${_hashed_keys[0]}"
+    fi
+
     echo ""
     log_info "Canonical production key path: /etc/vaultwarden/age-key.txt (installed by setup.sh)"
     log_info "Run './edit-secrets.sh rotate email_api_token' to set or rotate the provider API key."

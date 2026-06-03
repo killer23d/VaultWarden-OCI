@@ -38,6 +38,7 @@ _SECRETS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -n "${VAULTWARDEN_DEFAULTS_LOADED:-}" ]] || source "${_SECRETS_LIB_DIR}/defaults.sh"
 
 source "${_SECRETS_LIB_DIR}/crypto.sh"
+source "${_SECRETS_LIB_DIR}/schema.sh"
 unset _SECRETS_LIB_DIR
 
 # Do NOT set -euo pipefail here — callers own their shell options.
@@ -301,22 +302,22 @@ validate_required_secrets() {
 
 check_placeholder_values() {
     local secrets_file="${1:-$SECRETS_FILE}"
-    local secrets_to_check=(
-        "admin_token"
-        "admin_basic_auth_hash"
-        "caddy_cloudflare_dns_token"
-        "email_api_token"
-        "backup_passphrase"
-    )
-    # CrowdSec Cloudflare keys are conditionally checked when CF proxy is enabled.
-    if [[ "${CLOUDFLARE_PROXY_ENABLED:-false}" == "true" ]]; then
-        secrets_to_check+=("cloudflare_zone_id" "cf_account_id" "cf_worker_bouncer_token")
+
+    # Derive the required-key list from secrets-schema.yaml so no key names are
+    # hardcoded here.  Adding or removing a key only requires updating the schema.
+    local _required_keys
+    if ! _required_keys=$(schema_required_keys 2>/dev/null); then
+        log_error "check_placeholder_values: failed to read required keys from secrets-schema.yaml"
+        return 1
     fi
+
     if ! ensure_sops_env; then return 1; fi
     local placeholder_secrets=()
     local unreadable_secrets=()
-    for secret in "${secrets_to_check[@]}"; do
-        local value sops_stderr rc=0
+
+    while IFS= read -r secret; do
+        [[ -z "$secret" ]] && continue
+        local value rc=0
         # Decrypt once and reuse the value for both checks.
         # Suppress xtrace to prevent plaintext secret appearing in debug logs.
         { set +x; } 2>/dev/null
@@ -324,6 +325,7 @@ check_placeholder_values() {
         _tmp_sops_err=$(mktemp)
         value=$(sops -d --extract "[\"$secret\"]" "$secrets_file" 2>"$_tmp_sops_err") || rc=$?
         if [[ $rc -ne 0 ]]; then
+            local sops_stderr
             sops_stderr=$(cat "$_tmp_sops_err" 2>/dev/null || true)
             rm -f "$_tmp_sops_err"
             log_error "check_placeholder_values: failed to read secret '$secret' from $secrets_file (sops exit $rc)"
@@ -339,7 +341,8 @@ check_placeholder_values() {
             placeholder_secrets+=("$secret")
         fi
         unset value
-    done
+    done <<< "$_required_keys"
+
     cleanup_secrets_environment
     if [[ ${#unreadable_secrets[@]} -gt 0 ]]; then
         log_error "Unreadable secrets during placeholder check (${#unreadable_secrets[@]}): ${unreadable_secrets[*]}"

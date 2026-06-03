@@ -20,7 +20,7 @@ log_debug "secrets-rotate: SECRETS_FILE resolved to: ${SECRETS_FILE}"
 trap perform_cleanup EXIT
 
 show_help() {
-    cat << 'EOF'
+    cat << 'HELP_HEADER'
 VaultWarden Secrets — rotate subcommand
 
 USAGE:
@@ -33,17 +33,24 @@ DESCRIPTION:
     re-encrypts secrets.yaml and resyncs Docker secret bind-mount files.
 
 SUPPORTED FIELDS:
-    admin_token              (Argon2id re-hash)
-    admin_basic_auth_hash    (bcrypt re-hash)
-    caddy_cloudflare_dns_token
-    cf_worker_bouncer_token  (CrowdSec Cloudflare Workers bouncer API token)
-    cloudflare_zone_id       (Cloudflare Zone ID — required by CrowdSec CF bouncer)
-    cf_account_id            (Cloudflare Account ID — required by CrowdSec CF bouncer)
-    email_api_token          (HTTP API token for email provider)
-    smtp_password            (SMTP relay password)
-    push_installation_id
-    push_installation_key
-    backup_passphrase        (auto-generated)
+HELP_HEADER
+    # Print the dynamic field list from the schema so this help text is always
+    # in sync with secrets-schema.yaml without manual maintenance.
+    if command -v yq > /dev/null 2>&1 \
+            && [[ -f "${PROJECT_ROOT}/secrets-schema.yaml" ]]; then
+        while IFS= read -r _hkey; do
+            local _hlabel
+            _hlabel=$(schema_field_safe "$_hkey" label 2>/dev/null)
+            if [[ -n "$_hlabel" ]]; then
+                printf '    %-35s (%s)\n' "$_hkey" "$_hlabel"
+            else
+                printf '    %s\n' "$_hkey"
+            fi
+        done < <(schema_keys)
+    else
+        printf '    (schema not available — run after setup.sh install)\n'
+    fi
+    cat << 'HELP_FOOTER'
 
 EMAIL_MODE / EMAIL_PROVIDER quick reference (.env):
     EMAIL_MODE=auto   — tries API → SMTP → Postfix in order
@@ -65,34 +72,30 @@ EXAMPLES:
     ./utilities/secrets-rotate.sh email_api_token --dry-run
     ./edit-secrets.sh rotate smtp_password
     ./edit-secrets.sh rotate backup_passphrase --no-backup
-EOF
+HELP_FOOTER
 }
 
 DRY_RUN=false
 SKIP_BACKUP=false
 
-_ROTATE_FIELDS=("admin_token" "admin_basic_auth_hash"
-                "caddy_cloudflare_dns_token"
-                "cf_worker_bouncer_token"
-                "cloudflare_zone_id" "cf_account_id"
-                "email_api_token"
-                "smtp_password" "push_installation_id" "push_installation_key"
-                "backup_passphrase")
+# Populate _ROTATE_FIELDS from the schema so every key defined in
+# secrets-schema.yaml is automatically rotatable — no manual list maintenance.
+mapfile -t _ROTATE_FIELDS < <(schema_keys 2>/dev/null)
 
-declare -A _FIELD_SERVICES
-_FIELD_SERVICES=(
-    [admin_token]="vaultwarden"
-    [admin_basic_auth_hash]="vaultwarden"
-    [caddy_cloudflare_dns_token]="caddy"
-    [cf_worker_bouncer_token]="crowdsec-cloudflare-worker-bouncer"
-    [cloudflare_zone_id]="caddy crowdsec-cloudflare-worker-bouncer"
-    [cf_account_id]="crowdsec-cloudflare-worker-bouncer"
-    [email_api_token]="vaultwarden"
-    [smtp_password]="vaultwarden"
-    [push_installation_id]="vaultwarden"
-    [push_installation_key]="vaultwarden"
-    [backup_passphrase]="vaultwarden"
-)
+# Build _FIELD_SERVICES from the schema so restart hints stay in sync with
+# the schema's 'services' field without a parallel associative array here.
+declare -A _FIELD_SERVICES=()
+_populate_field_services() {
+    local _pk
+    while IFS= read -r _pk; do
+        [[ -z "$_pk" ]] && continue
+        local _svcs
+        _svcs=$(schema_services_for_key "$_pk" 2>/dev/null) || _svcs=""
+        _FIELD_SERVICES["$_pk"]="$_svcs"
+    done < <(schema_keys 2>/dev/null)
+}
+_populate_field_services
+unset -f _populate_field_services
 
 check_prerequisites() {
     local missing=()
@@ -113,10 +116,10 @@ check_prerequisites() {
 
 _validate_rotate_field() {
     local field="$1"
-    local f
-    for f in "${_ROTATE_FIELDS[@]}"; do
-        [[ "$f" == "$field" ]] && return 0
-    done
+    # Use schema_key_exists for an O(1) lookup rather than iterating the array.
+    if schema_key_exists "$field" 2>/dev/null; then
+        return 0
+    fi
     log_error "Unknown field: $field"
     log_info  "Supported fields: ${_ROTATE_FIELDS[*]}"
     return 1

@@ -414,6 +414,8 @@ SOPS_EOF
     # collect_secrets
     # ---------------------------------------------------------------------------
     collect_secrets() {
+        # Internal helper: collect one field either by auto-generation or by
+        # interactive prompt, depending on the --auto flag.
         _get_field() {
             local field="$1"
             if [[ "$AUTO_MODE" == "true" ]]; then
@@ -423,111 +425,14 @@ SOPS_EOF
             fi
         }
 
-        echo ""
-        log_info "═══════════════════════════════════════════════════════════"
-        log_info " VaultWarden Admin Password"
-        log_info "═══════════════════════════════════════════════════════════"
-        log_info "This password will be hashed with Argon2id for VaultWarden"
-        echo ""
-
-        local vw_hash
-        if [[ "$QUIET_SUMMARY" == "true" ]] && [[ "$AUTO_MODE" == "true" ]]; then
-            # Capture the plaintext before hashing so setup.sh can display all
-            # generated credentials together without the per-secret /dev/tty
-            # banners that QUIET_SUMMARY suppresses.
-            local vw_plain
-            vw_plain=$(generate_secure_string 32) || { log_error "Failed to generate admin_token"; return 1; }
-            vw_hash=$(generate_argon2_hash "$vw_plain") || { log_error "Failed to hash admin_token"; return 1; }
-            if [[ -n "${VW_ADMIN_PLAIN_FILE:-}" ]]; then
-                if [[ "$DRY_RUN" == "true" ]]; then
-                    log_info "[DRY RUN] Would write VaultWarden admin plaintext to ${VW_ADMIN_PLAIN_FILE}"
-                else
-                    local _umask_vw
-                    _umask_vw=$(umask)
-                    umask 077
-                    printf '%s' "$vw_plain" > "${VW_ADMIN_PLAIN_FILE}"
-                    umask "$_umask_vw"
-                fi
-            fi
-        else
-            vw_hash=$(_get_field "admin_token") || { log_error "Failed to collect admin_token"; return 1; }
+        # Read all key names from the schema once so we don't call yq in a loop.
+        local _schema_keys
+        if ! _schema_keys=$(schema_keys); then
+            log_error "collect_secrets: failed to read keys from secrets-schema.yaml"
+            return 1
         fi
-        _COLLECTED_SECRETS["admin_token"]="$vw_hash"
 
-        echo ""
-        log_info "═══════════════════════════════════════════════════════════"
-        log_info " Caddy Admin Panel Password"
-        log_info "═══════════════════════════════════════════════════════════"
-        log_info "This password will be hashed with bcrypt for Caddy basic auth"
-        # shellcheck disable=SC2016  # single quotes intentional: showing literal bcrypt format
-        log_info 'Format: htpasswd (admin:$2y$14$...)'
-        echo ""
-
-        local caddy_hash
-        if [[ "$QUIET_SUMMARY" == "true" ]] && [[ "$AUTO_MODE" == "true" ]]; then
-            # Capture the plaintext before hashing so setup.sh can include it in the consolidated summary.
-            local caddy_plain
-            caddy_plain=$(generate_secure_string 32) || { log_error "Failed to generate admin_basic_auth_hash"; return 1; }
-            local _raw_caddy_hash
-            _raw_caddy_hash=$(generate_bcrypt_hash "$caddy_plain") || { log_error "Failed to hash admin_basic_auth_hash"; return 1; }
-            if ! _bcrypt_format_ok "$_raw_caddy_hash"; then
-                log_error "Generated bcrypt hash has invalid format: $_raw_caddy_hash"
-                return 1
-            fi
-            caddy_hash="admin ${_raw_caddy_hash}"
-            if [[ -n "${CADDY_PLAIN_FILE:-}" ]]; then
-                if [[ "$DRY_RUN" == "true" ]]; then
-                    log_info "[DRY RUN] Would write Caddy admin plaintext to ${CADDY_PLAIN_FILE}"
-                else
-                    local _umask_caddy
-                    _umask_caddy=$(umask)
-                    umask 077
-                    printf '%s' "$caddy_plain" > "${CADDY_PLAIN_FILE}"
-                    umask "$_umask_caddy"
-                fi
-            fi
-        else
-            caddy_hash=$(_get_field "admin_basic_auth_hash") || { log_error "Failed to collect admin_basic_auth_hash"; return 1; }
-        fi
-        _COLLECTED_SECRETS["admin_basic_auth_hash"]="$caddy_hash"
-
-        echo ""
-        log_info "═══════════════════════════════════════════════════════════"
-        log_info " Cloudflare DNS API Token"
-        log_info "═══════════════════════════════════════════════════════════"
-        log_info "Required Permissions: Zone:DNS:Edit + Zone:Zone:Read"
-        log_info "Create at: https://dash.cloudflare.com/profile/api-tokens"
-        echo ""
-
-        local cf_dns
-        cf_dns=$(_get_field "caddy_cloudflare_dns_token") || { log_error "Failed to collect caddy_cloudflare_dns_token"; return 1; }
-        _COLLECTED_SECRETS["caddy_cloudflare_dns_token"]="$cf_dns"
-
-        echo ""
-        log_info "═══════════════════════════════════════════════════════════"
-        log_info " Cloudflare CrowdSec Bouncer Credentials"
-        log_info "═══════════════════════════════════════════════════════════"
-        log_info "cf_worker_bouncer_token: Cloudflare dashboard → My Profile → API Tokens"
-        log_info "cloudflare_zone_id: Cloudflare dashboard → Zone overview page"
-        log_info "cf_account_id: Cloudflare dashboard → any Zone overview page"
-        echo ""
-
-        local cf_worker_bouncer_token cloudflare_zone_id cf_account_id
-        if [[ "$AUTO_MODE" == "true" ]]; then
-            cf_worker_bouncer_token="CHANGE_ME_CF_WORKER_BOUNCER_TOKEN"
-            cloudflare_zone_id="CHANGE_ME_CLOUDFLARE_ZONE_ID"
-            cf_account_id="CHANGE_ME_CF_ACCOUNT_ID"
-            log_warn "[AUTO] Cloudflare CrowdSec bouncer credentials set to placeholders."
-            log_warn "Rotate after setup with: sudo utilities/setup-secrets.sh rotate cf_worker_bouncer_token"
-        else
-            cf_worker_bouncer_token=$(_get_field "cf_worker_bouncer_token") || { log_error "Failed to collect cf_worker_bouncer_token"; return 1; }
-            cloudflare_zone_id=$(_get_field "cloudflare_zone_id") || { log_error "Failed to collect cloudflare_zone_id"; return 1; }
-            cf_account_id=$(_get_field "cf_account_id") || { log_error "Failed to collect cf_account_id"; return 1; }
-        fi
-        _COLLECTED_SECRETS["cf_worker_bouncer_token"]="$cf_worker_bouncer_token"
-        _COLLECTED_SECRETS["cloudflare_zone_id"]="$cloudflare_zone_id"
-        _COLLECTED_SECRETS["cf_account_id"]="$cf_account_id"
-
+        # ── Resolve email mode once (used by two keys below) ──────────────────
         local _email_mode _email_provider
         _email_mode=$(    _read_dotenv_value "EMAIL_MODE"     .env)
         _email_provider=$(   _read_dotenv_value "EMAIL_PROVIDER" .env)
@@ -538,170 +443,345 @@ SOPS_EOF
         _email_mode="${_email_mode:-auto}"
         _email_provider="${_email_provider:-mailersend}"
 
-        echo ""
-        log_info "═══════════════════════════════════════════════════════════"
-        log_info " Email Notifications"
-        log_info "═══════════════════════════════════════════════════════════"
-        log_info "Current .env settings:"
-        log_info "  EMAIL_MODE     = $_email_mode"
-        log_info "  EMAIL_PROVIDER = $_email_provider"
-        echo ""
-        log_info "Delivery tiers (controlled by EMAIL_MODE in .env):"
-        log_info "  auto  — try API → SMTP → Postfix sidecar in order (recommended)"
-        log_info "  api   — HTTP API only   (requires email_api_token in secrets)"
-        log_info "  smtp  — SMTP relay only (requires smtp_password in secrets)"
-        log_info "  host  — Postfix sidecar only (no token or SMTP password needed)"
-        echo ""
-        log_info "One token key (email_api_token) works for ALL providers."
-        log_info "To switch providers: change EMAIL_PROVIDER in .env only."
-        log_info "To rotate the token: sudo utilities/setup-secrets.sh rotate email_api_token"
-        echo ""
+        # ── Schema-driven dispatch loop ───────────────────────────────────────
+        #
+        # For each key in schema order:
+        #   interactive  → prompt user (hash as required by the key's 'hash' field)
+        #   auto         → call the function named in 'auto_fn'
+        #   conditional  → fall through to a verbatim key-specific block below
+        #   skip         → omit this key entirely
+        #
+        # Business logic that is too context-dependent to express in the schema
+        # (email-mode gating, push-notification 3-way conditional) is handled
+        # verbatim inside the matching branch.  The schema drives ordering and
+        # the set of keys; it does not try to replace application logic.
 
-        if [[ "$_email_mode" == "api" || "$_email_mode" == "auto" ]]; then
-            log_info " Tier 1 — Email API Token (all providers)"
-            log_info "  Secrets key  : email_api_token"
-            log_info "  Active provider: $_email_provider (set EMAIL_PROVIDER in .env to change)"
-            log_info "  Get token at : provider dashboard (MailerSend / SendGrid / Mailgun etc.)"
-            echo ""
+        while IFS= read -r _key; do
+            [[ -z "$_key" ]] && continue
+            local _collect_type
+            _collect_type=$(schema_collect_type "$_key")
 
-            local email_api_token
-            if [[ "$AUTO_MODE" == "true" ]]; then
-                email_api_token="CHANGE_ME_EMAIL_API_TOKEN"
-                log_warn "[AUTO] email_api_token → placeholder; rotate with:"
-                log_warn "  sudo utilities/setup-secrets.sh rotate email_api_token"
-            else
-                local skip_api
-                if ! read -r -t 30 -p "Enter email_api_token now? (yes/no): " skip_api; then
-                    _warn_tty "WARNING: No input received (30s timeout). Treating as 'no'."
-                    skip_api="no"
-                fi
-                if [[ "$skip_api" == "yes" ]]; then
-                    local _raw_token
-                    if ! read -r -s -t 120 -p "email_api_token: " _raw_token; then
-                        _warn_tty "WARNING: No input received (120s timeout). Using placeholder."
-                        _raw_token=""
+            case "$_key" in
+
+            # ── admin_token ────────────────────────────────────────────────────
+            admin_token)
+                echo ""
+                log_info "═══════════════════════════════════════════════════════════"
+                log_info " VaultWarden Admin Password"
+                log_info "═══════════════════════════════════════════════════════════"
+                log_info "This password will be hashed with Argon2id for VaultWarden"
+                echo ""
+
+                local vw_hash
+                if [[ "$QUIET_SUMMARY" == "true" ]] && [[ "$AUTO_MODE" == "true" ]]; then
+                    local vw_plain
+                    vw_plain=$(generate_secure_string 32) || { log_error "Failed to generate admin_token"; return 1; }
+                    vw_hash=$(generate_argon2_hash "$vw_plain") || { log_error "Failed to hash admin_token"; return 1; }
+                    if [[ -n "${VW_ADMIN_PLAIN_FILE:-}" ]]; then
+                        if [[ "$DRY_RUN" == "true" ]]; then
+                            log_info "[DRY RUN] Would write VaultWarden admin plaintext to ${VW_ADMIN_PLAIN_FILE}"
+                        else
+                            local _umask_vw
+                            _umask_vw=$(umask)
+                            umask 077
+                            printf '%s' "$vw_plain" > "${VW_ADMIN_PLAIN_FILE}"
+                            umask "$_umask_vw"
+                        fi
                     fi
+                else
+                    vw_hash=$(_get_field "admin_token") || { log_error "Failed to collect admin_token"; return 1; }
+                fi
+                _COLLECTED_SECRETS["admin_token"]="$vw_hash"
+                ;;
+
+            # ── admin_basic_auth_hash ──────────────────────────────────────────
+            admin_basic_auth_hash)
+                echo ""
+                log_info "═══════════════════════════════════════════════════════════"
+                log_info " Caddy Admin Panel Password"
+                log_info "═══════════════════════════════════════════════════════════"
+                log_info "This password will be hashed with bcrypt for Caddy basic auth"
+                # shellcheck disable=SC2016  # single quotes intentional: showing literal bcrypt format
+                log_info 'Format: htpasswd (admin:$2y$14$...)'
+                echo ""
+
+                local caddy_hash
+                if [[ "$QUIET_SUMMARY" == "true" ]] && [[ "$AUTO_MODE" == "true" ]]; then
+                    local caddy_plain
+                    caddy_plain=$(generate_secure_string 32) || { log_error "Failed to generate admin_basic_auth_hash"; return 1; }
+                    local _raw_caddy_hash
+                    _raw_caddy_hash=$(generate_bcrypt_hash "$caddy_plain") || { log_error "Failed to hash admin_basic_auth_hash"; return 1; }
+                    if ! _bcrypt_format_ok "$_raw_caddy_hash"; then
+                        log_error "Generated bcrypt hash has invalid format: $_raw_caddy_hash"
+                        return 1
+                    fi
+                    caddy_hash="admin ${_raw_caddy_hash}"
+                    if [[ -n "${CADDY_PLAIN_FILE:-}" ]]; then
+                        if [[ "$DRY_RUN" == "true" ]]; then
+                            log_info "[DRY RUN] Would write Caddy admin plaintext to ${CADDY_PLAIN_FILE}"
+                        else
+                            local _umask_caddy
+                            _umask_caddy=$(umask)
+                            umask 077
+                            printf '%s' "$caddy_plain" > "${CADDY_PLAIN_FILE}"
+                            umask "$_umask_caddy"
+                        fi
+                    fi
+                else
+                    caddy_hash=$(_get_field "admin_basic_auth_hash") || { log_error "Failed to collect admin_basic_auth_hash"; return 1; }
+                fi
+                _COLLECTED_SECRETS["admin_basic_auth_hash"]="$caddy_hash"
+                ;;
+
+            # ── smtp_password ──────────────────────────────────────────────────
+            # Q2: email-mode sentinel — when EMAIL_MODE gates this key out,
+            # write the NOT_USED_EMAIL_MODE=<mode> sentinel (not the schema
+            # placeholder and not empty) so downstream consumers can distinguish
+            # "not applicable" from "not configured".
+            smtp_password)
+                if [[ "$_email_mode" == "smtp" || "$_email_mode" == "auto" ]]; then
                     echo ""
-                    if [[ -n "$_raw_token" ]]; then
-                        email_api_token="$_raw_token"
-                        log_success "email_api_token stored"
+                    log_info " Tier 2 — SMTP Relay Password"
+                    log_info "  Secrets key: smtp_password"
+                    log_info "  .env keys  : SMTP_HOST / SMTP_PORT / SMTP_USERNAME  (non-secret)"
+                    echo ""
+
+                    local smtp_pass
+                    if [[ "$AUTO_MODE" == "true" ]]; then
+                        smtp_pass=$(auto_generate_secret_field "smtp_password") || { log_error "Failed to generate smtp_password"; return 1; }
                     else
-                        email_api_token="CHANGE_ME_EMAIL_API_TOKEN"
-                        log_info "No value entered — using placeholder"
+                        local enable_smtp
+                        if ! read -r -t 30 -p "Enter smtp_password now? (yes/no): " enable_smtp; then
+                            _warn_tty "WARNING: No input received (30s timeout). Treating as 'no'."
+                            enable_smtp="no"
+                        fi
+                        if [[ "$enable_smtp" == "yes" ]]; then
+                            smtp_pass=$(collect_secret_field "smtp_password") || { log_error "Failed to collect smtp_password"; return 1; }
+                            log_success "smtp_password configured"
+                        else
+                            smtp_pass="CHANGE_ME_SMTP_PASSWORD"
+                            log_info "SMTP password skipped — rotate later with:"
+                            log_info "  sudo utilities/setup-secrets.sh rotate smtp_password"
+                        fi
                     fi
+                    _COLLECTED_SECRETS["smtp_password"]="$smtp_pass"
+                elif [[ "$_email_mode" == "host" ]]; then
+                    _COLLECTED_SECRETS["smtp_password"]="NOT_USED_EMAIL_MODE=host"
+                    log_info "EMAIL_MODE=host: smtp_password not needed (Postfix sidecar handles delivery)"
                 else
-                    email_api_token="CHANGE_ME_EMAIL_API_TOKEN"
-                    log_info "API token skipped — rotate later with:"
-                    log_info "  sudo utilities/setup-secrets.sh rotate email_api_token"
+                    _COLLECTED_SECRETS["smtp_password"]="NOT_USED_EMAIL_MODE=${_email_mode}"
                 fi
-            fi
-            _COLLECTED_SECRETS["email_api_token"]="$email_api_token"
-        else
-            _COLLECTED_SECRETS["email_api_token"]="NOT_USED_EMAIL_MODE=${_email_mode}"
-        fi
+                ;;
 
-        if [[ "$_email_mode" == "smtp" || "$_email_mode" == "auto" ]]; then
-            echo ""
-            log_info " Tier 2 — SMTP Relay Password"
-            log_info "  Secrets key: smtp_password"
-            log_info "  .env keys  : SMTP_HOST / SMTP_PORT / SMTP_USERNAME  (non-secret)"
-            echo ""
+            # ── email_api_token ────────────────────────────────────────────────
+            # Q2: same sentinel logic — inactive mode writes NOT_USED_EMAIL_MODE=<mode>.
+            email_api_token)
+                echo ""
+                log_info "═══════════════════════════════════════════════════════════"
+                log_info " Email Notifications"
+                log_info "═══════════════════════════════════════════════════════════"
+                log_info "Current .env settings:"
+                log_info "  EMAIL_MODE     = $_email_mode"
+                log_info "  EMAIL_PROVIDER = $_email_provider"
+                echo ""
+                log_info "Delivery tiers (controlled by EMAIL_MODE in .env):"
+                log_info "  auto  — try API → SMTP → Postfix sidecar in order (recommended)"
+                log_info "  api   — HTTP API only   (requires email_api_token in secrets)"
+                log_info "  smtp  — SMTP relay only (requires smtp_password in secrets)"
+                log_info "  host  — Postfix sidecar only (no token or SMTP password needed)"
+                echo ""
+                log_info "One token key (email_api_token) works for ALL providers."
+                log_info "To switch providers: change EMAIL_PROVIDER in .env only."
+                log_info "To rotate the token: sudo utilities/setup-secrets.sh rotate email_api_token"
+                echo ""
 
-            local smtp_pass
-            if [[ "$AUTO_MODE" == "true" ]]; then
-                smtp_pass=$(auto_generate_secret_field "smtp_password") || { log_error "Failed to generate smtp_password"; return 1; }
-            else
-                local enable_smtp
-                if ! read -r -t 30 -p "Enter smtp_password now? (yes/no): " enable_smtp; then
-                    _warn_tty "WARNING: No input received (30s timeout). Treating as 'no'."
-                    enable_smtp="no"
-                fi
-                if [[ "$enable_smtp" == "yes" ]]; then
-                    smtp_pass=$(collect_secret_field "smtp_password") || { log_error "Failed to collect smtp_password"; return 1; }
-                    log_success "smtp_password configured"
+                if [[ "$_email_mode" == "api" || "$_email_mode" == "auto" ]]; then
+                    log_info " Tier 1 — Email API Token (all providers)"
+                    log_info "  Secrets key  : email_api_token"
+                    log_info "  Active provider: $_email_provider (set EMAIL_PROVIDER in .env to change)"
+                    log_info "  Get token at : provider dashboard (MailerSend / SendGrid / Mailgun etc.)"
+                    echo ""
+
+                    local email_api_token
+                    if [[ "$AUTO_MODE" == "true" ]]; then
+                        email_api_token="CHANGE_ME_EMAIL_API_TOKEN"
+                        log_warn "[AUTO] email_api_token → placeholder; rotate with:"
+                        log_warn "  sudo utilities/setup-secrets.sh rotate email_api_token"
+                    else
+                        local skip_api
+                        if ! read -r -t 30 -p "Enter email_api_token now? (yes/no): " skip_api; then
+                            _warn_tty "WARNING: No input received (30s timeout). Treating as 'no'."
+                            skip_api="no"
+                        fi
+                        if [[ "$skip_api" == "yes" ]]; then
+                            local _raw_token
+                            if ! read -r -s -t 120 -p "email_api_token: " _raw_token; then
+                                _warn_tty "WARNING: No input received (120s timeout). Using placeholder."
+                                _raw_token=""
+                            fi
+                            echo ""
+                            if [[ -n "$_raw_token" ]]; then
+                                email_api_token="$_raw_token"
+                                log_success "email_api_token stored"
+                            else
+                                email_api_token="CHANGE_ME_EMAIL_API_TOKEN"
+                                log_info "No value entered — using placeholder"
+                            fi
+                        else
+                            email_api_token="CHANGE_ME_EMAIL_API_TOKEN"
+                            log_info "API token skipped — rotate later with:"
+                            log_info "  sudo utilities/setup-secrets.sh rotate email_api_token"
+                        fi
+                    fi
+                    _COLLECTED_SECRETS["email_api_token"]="$email_api_token"
                 else
-                    smtp_pass="CHANGE_ME_SMTP_PASSWORD"
-                    log_info "SMTP password skipped — rotate later with:"
-                    log_info "  sudo utilities/setup-secrets.sh rotate smtp_password"
+                    _COLLECTED_SECRETS["email_api_token"]="NOT_USED_EMAIL_MODE=${_email_mode}"
                 fi
-            fi
-            _COLLECTED_SECRETS["smtp_password"]="$smtp_pass"
-        elif [[ "$_email_mode" == "host" ]]; then
-            _COLLECTED_SECRETS["smtp_password"]="NOT_USED_EMAIL_MODE=host"
-            log_info "EMAIL_MODE=host: smtp_password not needed (Postfix sidecar handles delivery)"
-        else
-            _COLLECTED_SECRETS["smtp_password"]="NOT_USED_EMAIL_MODE=${_email_mode}"
-        fi
+                ;;
 
-        echo ""
-        log_info "Generating backup encryption passphrase..."
-        local backup_pass
-        backup_pass=$(auto_generate_secret_field "backup_passphrase") || { log_error "Failed to generate backup_passphrase"; return 1; }
-        _COLLECTED_SECRETS["backup_passphrase"]="$backup_pass"
+            # ── backup_passphrase ──────────────────────────────────────────────
+            backup_passphrase)
+                echo ""
+                log_info "Generating backup encryption passphrase..."
+                local backup_pass
+                backup_pass=$(auto_generate_secret_field "backup_passphrase") || { log_error "Failed to generate backup_passphrase"; return 1; }
+                _COLLECTED_SECRETS["backup_passphrase"]="$backup_pass"
 
-        # Write the plaintext to a temp file so setup.sh can display the consolidated summary.
-        if [[ -n "${BACKUP_PLAIN_FILE:-}" ]]; then
-            if [[ "$DRY_RUN" == "true" ]]; then
-                log_info "[DRY RUN] Would write backup passphrase plaintext to ${BACKUP_PLAIN_FILE}"
-            else
-                local _umask_bp
-                _umask_bp=$(umask)
-                umask 077
-                printf '%s' "$backup_pass" > "${BACKUP_PLAIN_FILE}"
-                umask "$_umask_bp"
-            fi
-        fi
+                if [[ -n "${BACKUP_PLAIN_FILE:-}" ]]; then
+                    if [[ "$DRY_RUN" == "true" ]]; then
+                        log_info "[DRY RUN] Would write backup passphrase plaintext to ${BACKUP_PLAIN_FILE}"
+                    else
+                        local _umask_bp
+                        _umask_bp=$(umask)
+                        umask 077
+                        printf '%s' "$backup_pass" > "${BACKUP_PLAIN_FILE}"
+                        umask "$_umask_bp"
+                    fi
+                fi
 
-        # Show the backup passphrase on the red-banner credential screen during
-        # standalone interactive runs that do not use --quiet-summary.
-        if [[ "$QUIET_SUMMARY" != "true" ]] && [[ -t 0 ]]; then
-            clear
-            printf '%s' "${COLOR_RED}"
-            cat << 'BACKUP_BANNER'
+                if [[ "$QUIET_SUMMARY" != "true" ]] && [[ -t 0 ]]; then
+                    clear
+                    printf '%s' "${COLOR_RED}"
+                    cat << 'BACKUP_BANNER'
   ╔══════════════════════════════════════════════════════════════════╗
   ║   🔑  BACKUP ENCRYPTION PASSPHRASE — SAVE THIS NOW             ║
   ║   Required to decrypt all backups. Cannot be recovered.        ║
   ╚══════════════════════════════════════════════════════════════════╝
 BACKUP_BANNER
-            printf '%s' "${COLOR_RESET}"
-            printf '\n  Passphrase: %s%s%s\n\n' \
-                "${COLOR_RED}${COLOR_GREEN}" "${backup_pass}" "${COLOR_RESET}"
-            printf '%s!!! PRESS ENTER AFTER SAVING THE BACKUP PASSPHRASE !!!%s\n' \
-                "${COLOR_RED}" "${COLOR_RESET}"
-            read -r
-        fi
-
-        if [[ "$SKIP_OPTIONAL" != "true" ]]; then
-            echo ""
-            log_info "═══════════════════════════════════════════════════════════"
-            log_info " Push Notifications (Optional)"
-            log_info "═══════════════════════════════════════════════════════════"
-            log_info "Get credentials from: https://bitwarden.com/host"
-            echo ""
-
-            if [[ "$AUTO_MODE" == "true" ]]; then
-                _COLLECTED_SECRETS["push_installation_id"]=$(auto_generate_secret_field "push_installation_id")
-                _COLLECTED_SECRETS["push_installation_key"]=$(auto_generate_secret_field "push_installation_key")
-            else
-                local do_push
-                if ! read -r -t 30 -p "Configure push notifications? (yes/no): " do_push; then
-                    _warn_tty "WARNING: No input received (30s timeout). Treating as 'no'."
-                    do_push="no"
+                    printf '%s' "${COLOR_RESET}"
+                    printf '\n  Passphrase: %s%s%s\n\n' \
+                        "${COLOR_RED}${COLOR_GREEN}" "${backup_pass}" "${COLOR_RESET}"
+                    printf '%s!!! PRESS ENTER AFTER SAVING THE BACKUP PASSPHRASE !!!%s\n' \
+                        "${COLOR_RED}" "${COLOR_RESET}"
+                    read -r
                 fi
-                if [[ "$do_push" == "yes" ]]; then
-                    _COLLECTED_SECRETS["push_installation_id"]=$(collect_secret_field "push_installation_id") || return 1
-                    _COLLECTED_SECRETS["push_installation_key"]=$(collect_secret_field "push_installation_key") || return 1
-                    log_success "Push notifications configured"
+                ;;
+
+            # ── push_installation_id / push_installation_key ───────────────────
+            # Q1 (conditional collection): PUSH_ENABLED in .env gates collection.
+            #   - AUTO_MODE or PUSH_ENABLED=true  → auto-generate
+            #   - Interactive + user confirms       → collect_secret_field
+            #   - SKIP_OPTIONAL or user declines   → CHANGE_ME_OR_LEAVE_EMPTY
+            # Schema marks these as collect:conditional (forward-declaration only).
+            # FUTURE: extract into condition_fn schema field when a second
+            # conditional key is added. Currently only push keys use this path.
+            push_installation_id)
+                if [[ "$SKIP_OPTIONAL" != "true" ]]; then
+                    echo ""
+                    log_info "═══════════════════════════════════════════════════════════"
+                    log_info " Push Notifications (Optional)"
+                    log_info "═══════════════════════════════════════════════════════════"
+                    log_info "Get credentials from: https://bitwarden.com/host"
+                    echo ""
+
+                    if [[ "$AUTO_MODE" == "true" ]]; then
+                        _COLLECTED_SECRETS["push_installation_id"]=$(auto_generate_secret_field "push_installation_id")
+                        _COLLECTED_SECRETS["push_installation_key"]=$(auto_generate_secret_field "push_installation_key")
+                    else
+                        local do_push
+                        if ! read -r -t 30 -p "Configure push notifications? (yes/no): " do_push; then
+                            _warn_tty "WARNING: No input received (30s timeout). Treating as 'no'."
+                            do_push="no"
+                        fi
+                        if [[ "$do_push" == "yes" ]]; then
+                            _COLLECTED_SECRETS["push_installation_id"]=$(collect_secret_field "push_installation_id") || return 1
+                            _COLLECTED_SECRETS["push_installation_key"]=$(collect_secret_field "push_installation_key") || return 1
+                            log_success "Push notifications configured"
+                        else
+                            _COLLECTED_SECRETS["push_installation_id"]="CHANGE_ME_OR_LEAVE_EMPTY"
+                            _COLLECTED_SECRETS["push_installation_key"]="CHANGE_ME_OR_LEAVE_EMPTY"
+                            log_info "Push notifications skipped - configure later with: sudo utilities/setup-secrets.sh rotate push_installation_id"
+                        fi
+                    fi
                 else
                     _COLLECTED_SECRETS["push_installation_id"]="CHANGE_ME_OR_LEAVE_EMPTY"
                     _COLLECTED_SECRETS["push_installation_key"]="CHANGE_ME_OR_LEAVE_EMPTY"
-                    log_info "Push notifications skipped - configure later with: sudo utilities/setup-secrets.sh rotate push_installation_id"
                 fi
-            fi
-        else
-            _COLLECTED_SECRETS["push_installation_id"]="CHANGE_ME_OR_LEAVE_EMPTY"
-            _COLLECTED_SECRETS["push_installation_key"]="CHANGE_ME_OR_LEAVE_EMPTY"
-        fi
+                ;;
+
+            # push_installation_key is collected alongside push_installation_id
+            # in the block above; skip it when the loop reaches it directly.
+            push_installation_key)
+                [[ -n "${_COLLECTED_SECRETS[push_installation_key]+x}" ]] || \
+                    _COLLECTED_SECRETS["push_installation_key"]="CHANGE_ME_OR_LEAVE_EMPTY"
+                ;;
+
+            # ── caddy_cloudflare_dns_token ─────────────────────────────────────
+            caddy_cloudflare_dns_token)
+                echo ""
+                log_info "═══════════════════════════════════════════════════════════"
+                log_info " Cloudflare DNS API Token"
+                log_info "═══════════════════════════════════════════════════════════"
+                log_info "Required Permissions: Zone:DNS:Edit + Zone:Zone:Read"
+                log_info "Create at: https://dash.cloudflare.com/profile/api-tokens"
+                echo ""
+
+                local cf_dns
+                cf_dns=$(_get_field "caddy_cloudflare_dns_token") || { log_error "Failed to collect caddy_cloudflare_dns_token"; return 1; }
+                _COLLECTED_SECRETS["caddy_cloudflare_dns_token"]="$cf_dns"
+                ;;
+
+            # ── cf_worker_bouncer_token / cloudflare_zone_id / cf_account_id ───
+            cf_worker_bouncer_token)
+                echo ""
+                log_info "═══════════════════════════════════════════════════════════"
+                log_info " Cloudflare CrowdSec Bouncer Credentials"
+                log_info "═══════════════════════════════════════════════════════════"
+                log_info "cf_worker_bouncer_token: Cloudflare dashboard → My Profile → API Tokens"
+                log_info "cloudflare_zone_id: Cloudflare dashboard → Zone overview page"
+                log_info "cf_account_id: Cloudflare dashboard → any Zone overview page"
+                echo ""
+
+                local cf_worker_bouncer_token cloudflare_zone_id cf_account_id
+                if [[ "$AUTO_MODE" == "true" ]]; then
+                    cf_worker_bouncer_token="CHANGE_ME_CF_WORKER_BOUNCER_TOKEN"
+                    cloudflare_zone_id="CHANGE_ME_CLOUDFLARE_ZONE_ID"
+                    cf_account_id="CHANGE_ME_CF_ACCOUNT_ID"
+                    log_warn "[AUTO] Cloudflare CrowdSec bouncer credentials set to placeholders."
+                    log_warn "Rotate after setup with: sudo utilities/setup-secrets.sh rotate cf_worker_bouncer_token"
+                else
+                    cf_worker_bouncer_token=$(_get_field "cf_worker_bouncer_token") || { log_error "Failed to collect cf_worker_bouncer_token"; return 1; }
+                    cloudflare_zone_id=$(_get_field "cloudflare_zone_id") || { log_error "Failed to collect cloudflare_zone_id"; return 1; }
+                    cf_account_id=$(_get_field "cf_account_id") || { log_error "Failed to collect cf_account_id"; return 1; }
+                fi
+                _COLLECTED_SECRETS["cf_worker_bouncer_token"]="$cf_worker_bouncer_token"
+                _COLLECTED_SECRETS["cloudflare_zone_id"]="$cloudflare_zone_id"
+                _COLLECTED_SECRETS["cf_account_id"]="$cf_account_id"
+                ;;
+
+            # cloudflare_zone_id and cf_account_id are collected together in the
+            # cf_worker_bouncer_token block above; skip when loop reaches them.
+            cloudflare_zone_id|cf_account_id)
+                :  # already populated by cf_worker_bouncer_token block
+                ;;
+
+            # ── Unknown key (future-proofing) ──────────────────────────────────
+            *)
+                log_warn "collect_secrets: no collection handler for schema key '${_key}' (collect=${_collect_type}) — skipping"
+                ;;
+
+            esac
+        done <<< "$_schema_keys"
 
         echo ""
         log_success "All secrets collected successfully"
@@ -737,38 +817,28 @@ BACKUP_BANNER
         # shellcheck disable=SC2064  # intentional — $temp_file must expand NOW
         _ss_register_cleanup "rm -f ${temp_file}"
 
+        # Build the YAML body from the schema-defined key list so that adding or
+        # renaming a key in secrets-schema.yaml is sufficient — no printf lines
+        # here need to change.
         {
             printf '# VaultWarden Secrets Configuration\n'
             printf '# Generated: %s\n' "$(date -Iseconds)"
             printf '# Encrypted with: SOPS + Age\n\n'
-            printf '# VaultWarden admin password (Argon2id hash)\n'
-            printf 'admin_token: %s\n\n'                       "$(yaml_escape "${_COLLECTED_SECRETS[admin_token]}")"
-            # shellcheck disable=SC2016  # single quotes intentional: showing literal bcrypt format example
-            printf '# Caddy admin password (htpasswd format: admin:$2y$14$...)\n'
-            printf 'admin_basic_auth_hash: %s\n\n'             "$(yaml_escape "${_COLLECTED_SECRETS[admin_basic_auth_hash]}")"
-            printf '# Email — Tier 1: HTTP API token (all providers)\n'
-            printf '# Single key regardless of EMAIL_PROVIDER. Change EMAIL_PROVIDER in .env\n'
-            printf '# to switch providers; no re-keying of this secret is required.\n'
-            printf '# To rotate: sudo utilities/setup-secrets.sh rotate email_api_token\n'
-            printf 'email_api_token: %s\n\n'                   "$(yaml_escape "${_COLLECTED_SECRETS[email_api_token]:-}")"
-            printf '# Email — Tier 2: SMTP relay password\n'
-            printf '# Used when EMAIL_MODE=smtp or EMAIL_MODE=auto (fallback from API).\n'
-            printf '# To rotate: sudo utilities/setup-secrets.sh rotate smtp_password\n'
-            printf 'smtp_password: %s\n\n'                     "$(yaml_escape "${_COLLECTED_SECRETS[smtp_password]}")"
-            printf '# Backup encryption passphrase\n'
-            printf 'backup_passphrase: %s\n\n'                 "$(yaml_escape "${_COLLECTED_SECRETS[backup_passphrase]}")"
-            printf '# Push notifications (optional)\n'
-            printf 'push_installation_id: %s\n'                "$(yaml_escape "${_COLLECTED_SECRETS[push_installation_id]}")"
-            printf 'push_installation_key: %s\n\n'             "$(yaml_escape "${_COLLECTED_SECRETS[push_installation_key]}")"
-            printf '# Cloudflare DNS API token (Zone:DNS:Edit + Zone:Zone:Read)\n'
-            printf 'caddy_cloudflare_dns_token: %s\n'          "$(yaml_escape "${_COLLECTED_SECRETS[caddy_cloudflare_dns_token]}")"
-            printf '# Cloudflare CrowdSec bouncer token (Zone:Edit permission)\n'
-            printf '# Rotate: sudo utilities/setup-secrets.sh rotate cf_worker_bouncer_token\n'
-            printf 'cf_worker_bouncer_token: %s\n'             "$(yaml_escape "${_COLLECTED_SECRETS[cf_worker_bouncer_token]}")"
-            printf '# Cloudflare Zone ID (from zone overview page)\n'
-            printf 'cloudflare_zone_id: %s\n'                  "$(yaml_escape "${_COLLECTED_SECRETS[cloudflare_zone_id]}")"
-            printf '# Cloudflare Account ID (from any zone overview page)\n'
-            printf 'cf_account_id: %s\n'                       "$(yaml_escape "${_COLLECTED_SECRETS[cf_account_id]}")"
+
+            local _wkeys
+            _wkeys=$(schema_keys) || {
+                log_error "write_secrets: failed to read key list from secrets-schema.yaml"
+                return 1
+            }
+            while IFS= read -r _wkey; do
+                [[ -z "$_wkey" ]] && continue
+                local _label
+                _label=$(schema_field_safe "$_wkey" label)
+                [[ -n "$_label" ]] && printf '# %s\n' "$_label"
+                printf '%s: %s\n\n' \
+                    "$_wkey" \
+                    "$(yaml_escape "${_COLLECTED_SECRETS[$_wkey]:-}")"
+            done <<< "$_wkeys"
         } > "$temp_file"
 
         for key in "${!_COLLECTED_SECRETS[@]}"; do
@@ -1854,19 +1924,21 @@ EOF
 
     local tmp_secrets
     tmp_secrets=$(mktemp "${PROJECT_ROOT}/secrets/vwsecrets.XXXXXXXXXX.yaml") || return 1
-    cat > "$tmp_secrets" << 'PLACEHOLDERS'
-admin_token: PLACEHOLDER_NOT_CONFIGURED
-admin_basic_auth_hash: PLACEHOLDER_NOT_CONFIGURED
-smtp_password: PLACEHOLDER_NOT_CONFIGURED
-email_api_token: PLACEHOLDER_NOT_CONFIGURED
-backup_passphrase: PLACEHOLDER_NOT_CONFIGURED
-push_installation_id: PLACEHOLDER_NOT_CONFIGURED
-push_installation_key: PLACEHOLDER_NOT_CONFIGURED
-caddy_cloudflare_dns_token: PLACEHOLDER_NOT_CONFIGURED
-cf_worker_bouncer_token: PLACEHOLDER_NOT_CONFIGURED
-cloudflare_zone_id: PLACEHOLDER_NOT_CONFIGURED
-cf_account_id: PLACEHOLDER_NOT_CONFIGURED
-PLACEHOLDERS
+    # Build placeholder YAML body from secrets-schema.yaml so that every key
+    # defined in the schema is bootstrapped automatically — no lines here need
+    # to change when a key is added or renamed.
+    {
+        local _bkeys _bkey _bph
+        _bkeys=$(schema_keys) || {
+            log_error "_cmd_bootstrap: failed to read keys from secrets-schema.yaml"
+            return 1
+        }
+        while IFS= read -r _bkey; do
+            [[ -z "$_bkey" ]] && continue
+            _bph=$(schema_placeholder_for_key "$_bkey") || _bph="PLACEHOLDER_NOT_CONFIGURED"
+            printf '%s: %s\n' "$_bkey" "$_bph"
+        done <<< "$_bkeys"
+    } > "$tmp_secrets"
     chmod 600 "$tmp_secrets"
     ( export SOPS_AGE_KEY_FILE="$age_key_file"; \
       sops --encrypt --output "$secrets_file" "$tmp_secrets" ) \
