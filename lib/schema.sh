@@ -15,6 +15,14 @@
 #
 # All functions accept an optional trailing SCHEMA_FILE argument.
 # When omitted, SECRETS_SCHEMA_FILE is used (default: PROJECT_ROOT/secrets-schema.yaml).
+#
+# NOTE — yq raw output (-r flag):
+#   mikefarah yq v4 wraps scalar string values in double-quotes by default,
+#   e.g.  yq '.secrets[].key'  →  "admin_token"
+#   The -r (--raw-output) flag suppresses the surrounding quotes and emits
+#   bare strings, matching the behaviour of jq -r.  Every yq call in this
+#   file uses -r so that callers receive unquoted values they can use
+#   directly in shell case-statements, variable assignments, and jq filters.
 
 [[ -n "${_VW_SCHEMA_LIB_LOADED:-}" ]] && return 0
 readonly _VW_SCHEMA_LIB_LOADED=1
@@ -52,8 +60,10 @@ _schema_check_prerequisites() {
         return 1
     fi
 
+    # -r strips surrounding quotes so the string comparison works correctly
+    # regardless of the yq output style configured on the system.
     local _schema_ver
-    _schema_ver=$(yq '.schema_version' "${schema_file}" 2>/dev/null) || true
+    _schema_ver=$(yq -r '.schema_version' "${schema_file}" 2>/dev/null) || true
     if [[ "${_schema_ver}" != "1" ]]; then
         log_error "schema.sh: unsupported schema_version '${_schema_ver}' in ${schema_file}"
         log_error "schema.sh: expected schema_version: 1"
@@ -66,6 +76,7 @@ _schema_check_prerequisites() {
 # schema_keys [SCHEMA_FILE]
 #
 # Prints all secret key names to stdout, one per line, in schema order.
+# -r ensures each key is emitted as a bare string without surrounding quotes.
 #
 # Example:
 #   while IFS= read -r key; do ...; done < <(schema_keys)
@@ -73,7 +84,7 @@ _schema_check_prerequisites() {
 schema_keys() {
     local schema_file="${1:-${SECRETS_SCHEMA_FILE}}"
     _schema_check_prerequisites "$schema_file" || return 1
-    yq '.secrets[].key' "$schema_file"
+    yq -r '.secrets[].key' "$schema_file"
 }
 
 # ---------------------------------------------------------------------------
@@ -81,6 +92,7 @@ schema_keys() {
 #
 # Prints the value of FIELD for the given KEY.
 # Returns 1 and emits an error if the key does not exist in the schema.
+# -r ensures the returned value is a bare string without surrounding quotes.
 #
 # Example:
 #   hint=$(schema_field admin_token hint)
@@ -93,8 +105,9 @@ schema_field() {
     _schema_check_prerequisites "$schema_file" || return 1
 
     local value
-    # Use yq select to locate the entry with the matching key, then read the field.
-    value=$(yq ".secrets[] | select(.key == \"${key}\") | .${field}" "$schema_file") || {
+    # -r strips surrounding quotes so the returned value can be used directly
+    # in shell comparisons, variable assignments, and jq filter strings.
+    value=$(yq -r ".secrets[] | select(.key == \"${key}\") | .${field}" "$schema_file") || {
         log_error "schema_field: failed to read field '${field}' for key '${key}'"
         return 1
     }
@@ -114,6 +127,7 @@ schema_field() {
 # Like schema_field but returns an empty string (instead of an error) when
 # the field value is null or the key is not present.  Use for optional fields
 # such as `hint` and `auto_fn` where absence is expected.
+# -r ensures the returned value is a bare string without surrounding quotes.
 # ---------------------------------------------------------------------------
 schema_field_safe() {
     local key="$1"
@@ -122,7 +136,7 @@ schema_field_safe() {
     _schema_check_prerequisites "$schema_file" || return 1
 
     local value
-    value=$(yq ".secrets[] | select(.key == \"${key}\") | .${field}" "$schema_file" 2>/dev/null) || true
+    value=$(yq -r ".secrets[] | select(.key == \"${key}\") | .${field}" "$schema_file" 2>/dev/null) || true
     [[ "$value" == "null" ]] && value=""
     printf '%s' "$value"
 }
@@ -131,30 +145,33 @@ schema_field_safe() {
 # schema_required_keys [SCHEMA_FILE]
 #
 # Prints keys where required=true, one per line, in schema order.
+# -r ensures each key is emitted as a bare string without surrounding quotes.
 # Used by check_placeholder_values() in lib/secrets.sh.
 # ---------------------------------------------------------------------------
 schema_required_keys() {
     local schema_file="${1:-${SECRETS_SCHEMA_FILE}}"
     _schema_check_prerequisites "$schema_file" || return 1
-    yq '.secrets[] | select(.required == true) | .key' "$schema_file"
+    yq -r '.secrets[] | select(.required == true) | .key' "$schema_file"
 }
 
 # ---------------------------------------------------------------------------
 # schema_hinted_keys [SCHEMA_FILE]
 #
 # Prints keys where hint is a non-empty string, one per line, in schema order.
+# -r ensures each key is emitted as a bare string without surrounding quotes.
 # Used by secrets-edit.sh to inject inline YAML comments.
 # ---------------------------------------------------------------------------
 schema_hinted_keys() {
     local schema_file="${1:-${SECRETS_SCHEMA_FILE}}"
     _schema_check_prerequisites "$schema_file" || return 1
-    yq '.secrets[] | select(.hint != "" and .hint != null) | .key' "$schema_file"
+    yq -r '.secrets[] | select(.hint != "" and .hint != null) | .key' "$schema_file"
 }
 
 # ---------------------------------------------------------------------------
 # schema_services_for_key KEY [SCHEMA_FILE]
 #
 # Prints the space-separated list of Docker Compose service names for KEY.
+# -r ensures each service name is emitted as a bare string without quotes.
 # Used by secrets-rotate.sh to build the restart hint.
 #
 # Example:
@@ -166,14 +183,15 @@ schema_services_for_key() {
     local schema_file="${2:-${SECRETS_SCHEMA_FILE}}"
     _schema_check_prerequisites "$schema_file" || return 1
 
-    # Read the services list as a newline-separated sequence, then join with spaces.
+    # -r strips quotes; read the services list as a newline-separated sequence,
+    # then join with spaces for the existing restart-hint code.
     local services_nl
-    services_nl=$(yq ".secrets[] | select(.key == \"${key}\") | .services[]" "$schema_file" 2>/dev/null) || true
+    services_nl=$(yq -r ".secrets[] | select(.key == \"${key}\") | .services[]" "$schema_file" 2>/dev/null) || true
     if [[ -z "$services_nl" || "$services_nl" == "null" ]]; then
         printf ''
         return 0
     fi
-    # Convert newlines to spaces for the existing restart-hint code.
+    # Convert newlines to spaces.
     printf '%s' "${services_nl//$'\n'/ }"
 }
 
@@ -194,6 +212,7 @@ schema_placeholder_for_key() {
 # schema_key_exists KEY [SCHEMA_FILE]
 #
 # Returns 0 if KEY is defined in the schema, 1 otherwise.
+# -r ensures the returned value is a bare string for the non-empty check.
 # Used by secrets-rotate.sh to validate the field argument.
 # ---------------------------------------------------------------------------
 schema_key_exists() {
@@ -202,7 +221,7 @@ schema_key_exists() {
     _schema_check_prerequisites "$schema_file" || return 1
 
     local found
-    found=$(yq ".secrets[] | select(.key == \"${key}\") | .key" "$schema_file" 2>/dev/null) || true
+    found=$(yq -r ".secrets[] | select(.key == \"${key}\") | .key" "$schema_file" 2>/dev/null) || true
     [[ -n "$found" && "$found" != "null" ]]
 }
 
