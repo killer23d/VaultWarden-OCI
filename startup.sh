@@ -10,6 +10,7 @@ PROJECT_ROOT="$SCRIPT_DIR"
 cd "$PROJECT_ROOT"
 
 source "${SCRIPT_DIR}/lib/log.sh"
+source "${SCRIPT_DIR}/lib/defaults.sh"
 source "${SCRIPT_DIR}/lib/config.sh"
 source "${SCRIPT_DIR}/lib/common.sh"
 init_common_lib "$0"
@@ -302,12 +303,22 @@ prepare_log_directories() {
   fi
 
   log_info "Creating log subdirectories with correct permissions..."
-  if ! _maybe_sudo mkdir -p "${project_state_dir}/logs"/{vaultwarden,caddy,postfix}; then
+
+  # Service names are driven by _VW_DEFAULT_LOG_SERVICES (lib/defaults.sh).
+  # Add a new container there — not here — when the compose stack grows.
+  local svc log_dirs=();
+  for svc in "${_VW_DEFAULT_LOG_SERVICES[@]}"; do
+    log_dirs+=("${project_state_dir}/logs/${svc}")
+  done
+
+  if ! _maybe_sudo mkdir -p "${log_dirs[@]}"; then
     log_warn "Failed to create log subdirectories (init container will try)"
   else
+    # PUID/PGID: .env values take precedence; _VW_DEFAULT_P{U,G}ID are the
+    # fallback so the magic number 1001 lives in exactly one place.
     local puid pgid
-    puid=$(get_config_value "PUID" "1001")
-    pgid=$(get_config_value "PGID" "1001")
+    puid=$(get_config_value "PUID" "${_VW_DEFAULT_PUID}")
+    pgid=$(get_config_value "PGID" "${_VW_DEFAULT_PGID}")
     _maybe_sudo chown -R "${puid}:${pgid}" "${project_state_dir}/logs" 2>/dev/null || true
     _maybe_sudo chmod -R 755 "${project_state_dir}/logs" 2>/dev/null || true
     log_success "Log subdirectories created with correct permissions"
@@ -317,7 +328,6 @@ prepare_log_directories() {
     log_error "Failed to enforce Caddy log directory and file permissions"
     return 1
   fi
-
 
   local backup_dir
   backup_dir="$(get_config_value "BACKUP_DIR" "${project_state_dir}/backups")"
@@ -333,9 +343,12 @@ prepare_log_directories() {
 
 prepare_push_secret_placeholders() {
   local secrets_dir="$DOCKER_SECRETS_DIR"
+
+  # PUID/PGID: .env values take precedence; _VW_DEFAULT_P{U,G}ID are the
+  # fallback so the magic number 1001 lives in exactly one place.
   local puid pgid
-  puid=$(get_config_value "PUID" "1001")
-  pgid=$(get_config_value "PGID" "1001")
+  puid=$(get_config_value "PUID" "${_VW_DEFAULT_PUID}")
+  pgid=$(get_config_value "PGID" "${_VW_DEFAULT_PGID}")
 
   if [[ "$DRY_RUN" == "true" ]]; then
     log_info "[DRY RUN] Would enforce push secret placeholder permissions in ${secrets_dir}"
@@ -403,9 +416,19 @@ check_age_key_health_preflight() {
   fi
 
   local repo_local_key="${SCRIPT_DIR}/secrets/keys/age-key.txt"
-  local canonical_key="/etc/vaultwarden/age-key.txt"
+
+  # canonical_key resolves from AGE_KEY_FILE (set by lib/config.sh compile-time
+  # defaults). Changing AGE_KEY_FILE in .env therefore propagates to every
+  # advisory message below automatically — no script edit required.
+  local canonical_key="${AGE_KEY_FILE}"
 
   if [[ -f "$repo_local_key" ]] && check_age_key_health "$repo_local_key" 2>/dev/null; then
+    # Resolve the real user once so advisory chown/chgrp commands are correct
+    # on any distro or username (not hard-coded to 'ubuntu').
+    local _vw_real_user _vw_real_group
+    _vw_real_user=$(get_real_user)
+    _vw_real_group=$(id -gn "${_vw_real_user}" 2>/dev/null || echo "${_vw_real_user}")
+
     log_warn "=========================================================="
     log_warn "ACTION REQUIRED — Age key path mismatch detected"
     log_warn "=========================================================="
@@ -420,8 +443,8 @@ check_age_key_health_preflight() {
     log_warn "  Option A — Install key to canonical system path (recommended for production):"
     log_warn "    sudo install -d -m 750 /etc/vaultwarden"
     log_warn "    sudo install -m 600 ${repo_local_key} ${canonical_key}"
-    log_warn "    sudo chown ubuntu:ubuntu ${canonical_key}"
-    log_warn "    sudo chgrp ubuntu /etc/vaultwarden && sudo chmod 750 /etc/vaultwarden"
+    log_warn "    sudo chown ${_vw_real_user}:${_vw_real_group} ${canonical_key}"
+    log_warn "    sudo chgrp ${_vw_real_group} /etc/vaultwarden && sudo chmod 750 /etc/vaultwarden"
     log_warn "    # Verify: make key-health"
     log_warn ""
     log_warn "  Option B — Update .env to point at the repo-local key (local/dev only):"
@@ -447,13 +470,16 @@ check_age_key_health_preflight() {
     log_error "  Re-run setup to install it:"
     log_error "    sudo ./setup.sh --domain <your-domain> --email <your-email>"
     if [[ -f "$repo_local_key" ]]; then
+      local _vw_real_user _vw_real_group
+      _vw_real_user=$(get_real_user)
+      _vw_real_group=$(id -gn "${_vw_real_user}" 2>/dev/null || echo "${_vw_real_user}")
       log_error ""
       log_warn "  A repo-local key was detected at: ${repo_local_key}"
       log_warn "  If this is the correct production key, install it with:"
       log_warn "    sudo install -d -m 750 /etc/vaultwarden"
-      log_warn "    sudo install -m 600 ${repo_local_key} /etc/vaultwarden/age-key.txt"
-      log_warn "    sudo chown ubuntu:ubuntu /etc/vaultwarden/age-key.txt"
-      log_warn "    sudo chgrp ubuntu /etc/vaultwarden && sudo chmod 750 /etc/vaultwarden"
+      log_warn "    sudo install -m 600 ${repo_local_key} ${canonical_key}"
+      log_warn "    sudo chown ${_vw_real_user}:${_vw_real_group} ${canonical_key}"
+      log_warn "    sudo chgrp ${_vw_real_group} /etc/vaultwarden && sudo chmod 750 /etc/vaultwarden"
       log_warn "  Then run: make key-health to verify before retrying startup."
     fi
     return 1
@@ -708,7 +734,7 @@ main() {
     wait_for_services || true
     run_health_check || {
       log_error "Startup tip: if the failure is key-related, run: make key-health"
-      log_error "Canonical production key path: /etc/vaultwarden/age-key.txt"
+      log_error "Canonical production key path: ${AGE_KEY_FILE}"
       exit 1
     }
     show_status || true
@@ -722,7 +748,7 @@ main() {
       log_warn "=========================================================="
       log_warn "REMINDER: SOPS_AGE_KEY_FILE in .env (${cfg_key}) was overridden"
       log_warn "at runtime by the repo-local key. Update .env or install"
-      log_warn "the key to /etc/vaultwarden/age-key.txt before next restart."
+      log_warn "the key to ${AGE_KEY_FILE} before next restart."
       log_warn "=========================================================="
     fi
   fi
