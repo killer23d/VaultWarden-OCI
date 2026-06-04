@@ -1042,6 +1042,23 @@ else
     log_info "No custom crowdsec/profiles.yaml found — using CrowdSec defaults."
 fi
 
+_cs_wait_for_lapi() {
+    local port="${1:-8090}"
+    local max_wait=30
+    local i=0
+    log_info "Waiting for CrowdSec LAPI to be ready on port ${port}..."
+    while (( i < max_wait )); do
+        if curl -sf --max-time 2 "http://127.0.0.1:${port}/health" >/dev/null 2>&1; then
+            log_success "LAPI is ready on port ${port}."
+            return 0
+        fi
+        sleep 1
+        (( i++ ))
+    done
+    log_warn "LAPI did not respond within ${max_wait}s on port ${port} — bouncer may fail to start."
+    return 1
+}
+
 # ---------------------------------------------------------------------------
 # PHASE 8: Enable and start services
 # ---------------------------------------------------------------------------
@@ -1058,11 +1075,18 @@ else
     if systemctl is-active --quiet crowdsec; then
         systemctl reload crowdsec 2>/dev/null || true
     fi
+
+    # Wait for LAPI to accept connections before starting the bouncer.
+    # The bouncer exits immediately (and systemd marks it failed) if LAPI
+    # isn't ready when it first tries to authenticate.
+    _lapi_port_phase8="$(_cs_resolve_lapi_port)"
+    _cs_wait_for_lapi "$_lapi_port_phase8" || true
+
     systemctl reset-failed crowdsec-firewall-bouncer 2>/dev/null || true
     systemctl enable --now crowdsec-firewall-bouncer || true
 
     _fw_ready=false
-    for _i in {1..10}; do
+    for _i in {1..15}; do
         if systemctl is-active --quiet crowdsec-firewall-bouncer; then
             _fw_ready=true; break
         fi
@@ -1071,7 +1095,7 @@ else
     if [[ "$_fw_ready" == "true" ]]; then
         log_success "crowdsec-firewall-bouncer is active."
     else
-        log_warn "crowdsec-firewall-bouncer did not report active within 10s — check: sudo journalctl -u crowdsec-firewall-bouncer"
+        log_warn "crowdsec-firewall-bouncer did not report active within 15s — check: sudo journalctl -u crowdsec-firewall-bouncer"
         _fw_journal="$(journalctl -u crowdsec-firewall-bouncer --no-pager -n 15 2>/dev/null || true)"
         if [[ -n "$_fw_journal" ]]; then
             log_warn "Last crowdsec-firewall-bouncer journal entries:"
