@@ -112,7 +112,9 @@ drill_environment() {
 drill_secrets() {
     _step_header "Secrets & Encryption Keys"
 
-    local key_file="${SOPS_AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}"
+    # resolve_age_key_path() inside check_age_key_health reads AGE_KEY_FILE, not
+    # SOPS_AGE_KEY_FILE — use AGE_KEY_FILE so the env prefix is honoured.
+    local key_file="${AGE_KEY_FILE:-${SOPS_AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}}"
 
     if [[ ! -f "$key_file" ]]; then
         _step_fail "age-key-exists" "not found at $key_file"
@@ -128,7 +130,7 @@ drill_secrets() {
         _step_fail "age-key-perms" "mode is ${perms}, expected 600 — run: chmod 600 $key_file"
     fi
 
-    if SOPS_AGE_KEY_FILE="$key_file" check_age_key_health 2>/dev/null; then
+    if AGE_KEY_FILE="$key_file" check_age_key_health 2>/dev/null; then
         _step_pass "age-key-health: key is valid and readable"
     else
         _step_fail "age-key-health" "key health check failed — run: make key-health"
@@ -316,7 +318,10 @@ drill_stack_restart_sequence() {
     fi
 
     log_info "  Checking all expected services are defined in compose file..."
-    local expected_services=(vaultwarden caddy postfix)
+    # init-permissions has restart:"no" so it won't be running, but it must be
+    # defined. The 'docker compose config --services' output lists all defined
+    # services regardless of restart policy.
+    local expected_services=(vaultwarden caddy postfix init-permissions)
     local defined_services
     defined_services=$(docker compose config --services 2>/dev/null || true)
     for svc in "${expected_services[@]}"; do
@@ -357,8 +362,10 @@ drill_full_backup_restore_smoketest() {
     register_cleanup rm -rf "$tmpdir"
 
     log_info "  Decrypting + listing manifest (no actual restore)..."
+    # Use --use-compress-program to match verify_backup_full() exactly; -I flag
+    # is GNU-only and conflicts with -z (gzip). zstd -d -T0 decompresses multi-threaded.
     if age -d -i "$key_file" "$backup_file" 2>/dev/null \
-        | tar -tz -I zstd > "$tmpdir/manifest.txt" 2>&1; then
+        | tar --use-compress-program='zstd -d -T0' -t > "$tmpdir/manifest.txt" 2>&1; then
         _step_pass "restore-smoketest-decrypt: archive decrypted and manifest extracted"
     else
         _step_fail "restore-smoketest-decrypt" "failed to decrypt or list archive contents"
@@ -367,10 +374,11 @@ drill_full_backup_restore_smoketest() {
     fi
 
     local missing_files=()
-    if ! grep -q 'docker-compose.yml' "$tmpdir/manifest.txt" 2>/dev/null; then
+    # Use -F (fixed-string) so the dot in filenames is not treated as a regex wildcard.
+    if ! grep -qF 'docker-compose.yml' "$tmpdir/manifest.txt" 2>/dev/null; then
         missing_files+=("docker-compose.yml")
     fi
-    if ! grep -q '.env.example' "$tmpdir/manifest.txt" 2>/dev/null; then
+    if ! grep -qF '.env.example' "$tmpdir/manifest.txt" 2>/dev/null; then
         missing_files+=(".env.example")
     fi
 

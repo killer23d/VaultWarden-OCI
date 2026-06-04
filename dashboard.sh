@@ -48,8 +48,9 @@ CONTAINER_VW="vaultwarden_app"
 CONTAINER_CADDY="vaultwarden_caddy"
 CONTAINER_POSTFIX="vaultwarden_postfix"
 
-# Dashboard timestamps use the project-wide TZ setting from .env/.env.example.
-TZ_DISPLAY="$(_read_env_var TZ "UTC")"
+# Dashboard timestamps: prefer DASHBOARD_TZ from .env (ux.md #4);
+# fall back to TZ (general project timezone), then UTC.
+TZ_DISPLAY="$(_read_env_var DASHBOARD_TZ "$(_read_env_var TZ "UTC")")"
 
 # Divider line length
 DIVIDER="--------------------------------------------------"
@@ -172,9 +173,10 @@ _check_script() {
 # draw_header
 # ---------------------------------------------------------------------------
 draw_header() {
-    local now_pt
+    local now_pt version
     now_pt="$(TZ="${TZ_DISPLAY}" date '+%Y-%m-%d %H:%M %Z' 2>/dev/null || date '+%Y-%m-%d %H:%M')"
-    echo -e "${INV} VaultWarden-OCI - Operations Dashboard              ${now_pt} ${NC}"
+    version="$(cat "${REPO_ROOT}/VERSION" 2>/dev/null | tr -d '[:space:]' || echo '?')"
+    echo -e "${INV} VaultWarden-OCI v${version} — Operations Dashboard   ${now_pt} ${NC}"
 }
 
 # ---------------------------------------------------------------------------
@@ -760,7 +762,12 @@ main() {
         esac
 
         local opt
-        read -r -p " Enter option  : " opt
+        # Timeout after 60s and redraw — keeps live stats fresh (ux.md #20).
+        # On non-interactive stdin (piped input) read returns immediately.
+        if ! read -r -t 60 -p " Enter option  : " opt 2>/dev/null; then
+            # Timeout — loop back and redraw live stats without processing input
+            continue
+        fi
         # Normalize: trim whitespace, convert to lowercase
         opt="${opt//[[:space:]]/}"
         opt="${opt,,}"

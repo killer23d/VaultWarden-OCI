@@ -73,7 +73,8 @@ _check_pass() { local name="$1" detail="${2:-}"; _record "$name" PASS "$detail"
 
 _check_fail() { local name="$1" detail="${2:-}"; _record "$name" FAIL "$detail"
     log_warn   "  [FAIL] $name${detail:+: $detail}"
-    [[ "$FAIL_FAST" == true ]] && { log_error "Stopping on first failure (--fail-fast)."; _print_summary; exit 1; }; }
+    # Clear the EXIT trap before printing so the summary appears exactly once.
+    [[ "$FAIL_FAST" == true ]] && { trap - EXIT; log_error "Stopping on first failure (--fail-fast)."; _print_summary; exit 1; }; }
 
 _check_skip() { local name="$1" detail="${2:-}"; _record "$name" SKIP "$detail"
     [[ "$QUIET" == false ]] && log_info   "  [SKIP] $name${detail:+: $detail}"; }
@@ -134,19 +135,20 @@ check_tls_certificate() {
     local host="${domain#https://}"
     host="${host%/*}"
 
-    local expiry_seconds
-    expiry_seconds=$(echo | openssl s_client -connect "${host}:443" -servername "$host" \
+    # expiry_date_str holds the raw notAfter date string (e.g. "Jun 15 12:00:00 2026 GMT")
+    local expiry_date_str
+    expiry_date_str=$(echo | openssl s_client -connect "${host}:443" -servername "$host" \
         2>/dev/null | openssl x509 -noout -enddate 2>/dev/null \
         | sed 's/notAfter=//' || true)
 
-    if [[ -z "$expiry_seconds" ]]; then
+    if [[ -z "$expiry_date_str" ]]; then
         _check_fail "tls-cert" "could not retrieve certificate from ${host}:443"
         return
     fi
 
     local expiry_epoch days_left
-    expiry_epoch=$(date -d "$expiry_seconds" +%s 2>/dev/null \
-        || date -j -f '%b %d %T %Y %Z' "$expiry_seconds" +%s 2>/dev/null || echo 0)
+    expiry_epoch=$(date -d "$expiry_date_str" +%s 2>/dev/null \
+        || date -j -f '%b %d %T %Y %Z' "$expiry_date_str" +%s 2>/dev/null || echo 0)
     days_left=$(( (expiry_epoch - $(date +%s)) / 86400 ))
 
     if (( days_left < 14 )); then
@@ -191,7 +193,9 @@ check_http_endpoints() {
 
 check_age_key() {
     [[ "$QUIET" == false ]] && log_info "Checking age key health..."
-    local key_file="${SOPS_AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}"
+    # resolve_age_key_path() inside check_age_key_health reads AGE_KEY_FILE, not
+    # SOPS_AGE_KEY_FILE — pass the correct variable name as the env prefix.
+    local key_file="${AGE_KEY_FILE:-${SOPS_AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}}"
     if [[ ! -f "$key_file" ]]; then
         _check_fail "age-key" "key file not found: $key_file"
         return
@@ -204,7 +208,7 @@ check_age_key() {
         _check_pass "age-key-perms" "$key_file (mode 600)"
     fi
 
-    if SOPS_AGE_KEY_FILE="$key_file" check_age_key_health 2>/dev/null; then
+    if AGE_KEY_FILE="$key_file" check_age_key_health 2>/dev/null; then
         _check_pass "age-key-valid" "key is readable and valid"
     else
         _check_fail "age-key-valid" "age key health check failed — run: make key-health"
@@ -218,7 +222,7 @@ check_secrets_decryptable() {
         _check_fail "secrets-file" "secrets/secrets.yaml not found"
         return
     fi
-    local key_file="${SOPS_AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}"
+    local key_file="${AGE_KEY_FILE:-${SOPS_AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}}"
     if SOPS_AGE_KEY_FILE="$key_file" sops -d "$secrets_file" >/dev/null 2>&1; then
         _check_pass "secrets-decryptable" "SOPS decryption succeeded"
     else
@@ -229,13 +233,26 @@ check_secrets_decryptable() {
 check_docker_secrets_materialized() {
     [[ "$QUIET" == false ]] && log_info "Checking Docker secrets materialized..."
     local secrets_dir="$SCRIPT_DIR/secrets/.docker_secrets"
-    local required_secrets=(admin_token)
+    # All secrets defined in the compose 'secrets:' top-level block.
+    local required_secrets=(
+        admin_token
+        admin_basic_auth_hash
+        smtp_password
+        caddy_cloudflare_dns_token
+        push_installation_id
+        push_installation_key
+    )
     for secret in "${required_secrets[@]}"; do
         local secret_file="$secrets_dir/$secret"
-        if [[ -f "$secret_file" && -s "$secret_file" ]]; then
-            _check_pass "secret-$secret" "materialized"
-        else
+        if [[ ! -f "$secret_file" || ! -s "$secret_file" ]]; then
             _check_fail "secret-$secret" "missing or empty: $secret_file"
+            continue
+        fi
+        # Detect CHANGE_ME placeholder values left in materialized secret files.
+        if grep -qF 'CHANGE_ME' "$secret_file" 2>/dev/null; then
+            _check_fail "secret-$secret" "contains CHANGE_ME placeholder — rotate with: sudo ./edit-secrets.sh rotate $secret"
+        else
+            _check_pass "secret-$secret" "materialized"
         fi
     done
 }
