@@ -1144,6 +1144,7 @@ offer_recovery_kit_export() {
     # nohup, or other detached TTY environment.
     local recovery_file
     recovery_file="./recovery-kit-$(date +%s).txt"
+
     if generate_recovery_kit "$recovery_file"; then
         chmod 600 "$recovery_file"
         log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -1153,8 +1154,16 @@ offer_recovery_kit_export() {
         log_warn "  Auto-delete scheduled in 30 minutes via at(1) (if available)."
         log_warn "  Manual delete: shred -fuz '$recovery_file'"
         log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        # Schedule auto-delete of the on-disk plaintext recovery kit
-        # so it does not persist indefinitely if the operator forgets to delete it.
+
+        # Register an EXIT-trap cleanup so the file is shredded even if the
+        # process is killed or exits abnormally before the interactive flow
+        # below has a chance to delete it.
+        # shellcheck disable=SC2064  # intentional: $recovery_file expands now to capture the path
+        register_cleanup "_secure_shred" "$recovery_file"
+
+        # Schedule at(1) auto-delete as an additional belt-and-suspenders
+        # safeguard for non-interactive invocations where the interactive
+        # TTY flow is never reached.
         local _rk_abs
         _rk_abs="$(realpath "$recovery_file" 2>/dev/null || echo "$recovery_file")"
         if command -v at >/dev/null 2>&1; then
@@ -1184,13 +1193,24 @@ offer_recovery_kit_export() {
     if [[ "$auto_export" == "true" ]]; then
         log_info "Exporting recovery kit (--export-recovery-kit specified)..."
         _ork_generate_and_secure "$output_file"
-        return $?
+        local _rc=$?
+        # Shred the persistent on-disk copy now that the user has confirmed
+        # they have saved the kit via the interactive TTY flow.
+        log_info "Securely deleting persistent on-disk recovery kit..."
+        _secure_shred "$recovery_file"
+        log_success "On-disk recovery kit deleted: $recovery_file"
+        return $_rc
     fi
 
     echo ""
     read -r -p "Export a plaintext Recovery Kit? (yes/no): " export_kit
     if [[ "$export_kit" == "yes" ]]; then
         _ork_generate_and_secure "$output_file"
+        # Shred the persistent on-disk copy now that the user has confirmed
+        # they have saved the kit via the interactive TTY flow.
+        log_info "Securely deleting persistent on-disk recovery kit..."
+        _secure_shred "$recovery_file"
+        log_success "On-disk recovery kit deleted: $recovery_file"
     fi
 }
 
