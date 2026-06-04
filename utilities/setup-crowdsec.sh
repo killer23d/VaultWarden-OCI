@@ -541,7 +541,7 @@ if [[ "$DRY_RUN" != "true" ]]; then
     fi
 fi
 
-if [[ -f "$_FW_BOUNCER_CONFIG" ]] && [[ "$FORCE" != "true" ]]; then
+if [[ -f "$_FW_BOUNCER_CONFIG" ]]; then
     log_info "Firewall bouncer config already present — checking DOCKER-USER chain."
     if ! grep -q 'DOCKER-USER' "$_FW_BOUNCER_CONFIG"; then
         log_info "Adding DOCKER-USER chain to existing firewall bouncer config..."
@@ -551,6 +551,17 @@ if [[ -f "$_FW_BOUNCER_CONFIG" ]] && [[ "$FORCE" != "true" ]]; then
         log_success "DOCKER-USER chain added to firewall bouncer config."
     else
         log_info "DOCKER-USER chain already present in firewall bouncer config."
+
+    # --force wiped the LAPI in Phase 0 so the existing key is now stale.
+    # Regenerate unconditionally when --force is active.
+    if [[ "$FORCE" == "true" ]]; then
+        log_info "Force mode: regenerating firewall bouncer API key..."
+        _fw_fresh_key="$(openssl rand -hex 32)"
+        cscli bouncers delete crowdsecurity/firewall-bouncer 2>/dev/null || true
+        cscli bouncers add crowdsecurity/firewall-bouncer --key "$_fw_fresh_key" 2>/dev/null || true
+        sed -i "s|^api_key:.*|api_key: ${_fw_fresh_key}|" "$_FW_BOUNCER_CONFIG"
+        log_success "Firewall bouncer key regenerated and written to config."
+    fi
     fi
 
     if ! cscli bouncers list 2>/dev/null | grep -q 'firewall-bouncer'; then
@@ -573,7 +584,7 @@ if [[ -f "$_FW_BOUNCER_CONFIG" ]] && [[ "$FORCE" != "true" ]]; then
             log_warn "Run: sudo ./utilities/setup-crowdsec.sh --force  to regenerate a valid key."
         fi
     fi
-elif [[ "$DRY_RUN" == "true" ]]; then
+elif [[ ! -f "$_FW_BOUNCER_CONFIG" ]] && [[ "$DRY_RUN" == "true" ]]; then
     log_info "[DRY RUN] Would write firewall bouncer config with DOCKER-USER chain"
 else
     if ! cscli bouncers list 2>/dev/null | grep -q 'firewall-bouncer'; then
