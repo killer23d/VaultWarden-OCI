@@ -283,6 +283,15 @@ _cs_start_service() {
 _cs_reset_components() {
     log_info "=== PHASE 0: Resetting installed CrowdSec components (--force) ==="
 
+    # If the CF bouncer package is in a broken dpkg half-configured state,
+    # purge it now so apt doesn't abort on the next install attempt.
+    if dpkg -l crowdsec-cloudflare-worker-bouncer 2>/dev/null | grep -qE '^(iF|iU|hF)'; then
+        log_info "Detected broken dpkg state for crowdsec-cloudflare-worker-bouncer — purging."
+        DEBIAN_FRONTEND=noninteractive dpkg --purge --force-remove-reinstreq \
+            crowdsec-cloudflare-worker-bouncer 2>/dev/null || true
+        log_info "Purge complete — package will be re-installed cleanly."
+    fi
+
     if command -v cscli >/dev/null 2>&1; then
         cscli bouncers delete cloudflare-worker-bouncer 2>/dev/null || true
         cscli bouncers delete firewall-bouncer          2>/dev/null || true
@@ -651,6 +660,21 @@ else
         _installed_via_deb=false
 
         if [[ -n "$_arch" ]]; then
+            # Pre-create a minimal stub config so the package postinst script
+            # does not abort trying to open a non-existent config file.
+            # Phase 6 will overwrite this with the real values.
+            if [[ ! -f /etc/crowdsec/bouncers/crowdsec-cloudflare-worker-bouncer.yaml ]]; then
+                mkdir -p /etc/crowdsec/bouncers
+                cat > /etc/crowdsec/bouncers/crowdsec-cloudflare-worker-bouncer.yaml <<'STUB'
+crowdsec_config:
+  lapi_url: "http://127.0.0.1:8090/"
+  lapi_key: "STUB_KEY"
+update_frequency: "10s"
+log_mode: "stdout"
+STUB
+                chmod 600 /etc/crowdsec/bouncers/crowdsec-cloudflare-worker-bouncer.yaml
+                log_info "Wrote stub CF bouncer config to satisfy dpkg postinst."
+            fi
             log_info "Attempting apt install of crowdsec-cloudflare-worker-bouncer..."
             if DEBIAN_FRONTEND=noninteractive apt-get install -y crowdsec-cloudflare-worker-bouncer 2>/dev/null; then
                 log_success "Installed crowdsec-cloudflare-worker-bouncer via apt."
