@@ -1035,9 +1035,9 @@ EOF
     local repo_basename
     repo_basename=$(basename "$repo_clone_url" .git)
     {
-        printf '   [ ] Run setup:\n'
+        printf '   [ ] Run setup (installs Docker, SOPS, and configures environment):\n'
         printf '       cd %s\n' "$repo_basename"
-        printf '       ./setup.sh --domain %s --email %s\n' "$domain" "$admin_email"
+        printf '       sudo ./setup.sh install --domain %s --email %s\n' "$domain" "$admin_email"
     } >> "$output_file"
     cat >> "$output_file" << 'EOF'
 
@@ -1056,19 +1056,20 @@ EOF
        rclone config
    [ ] Download latest backup:
        rclone copy remote:bucket/backup.tar.gz.age ./backups/
-   [ ] Run Restore:
-       ./restore.sh latest emergency
+   [ ] Run Restore (full restore from latest backup):
+       sudo ./restore.sh latest
 
    OPTION B: From Secrets Above (Manual Rebuild)
-   [ ] Run secrets setup:
+   [ ] Run secrets setup (interactive — enter values from SECTION 2 when prompted):
        ./setup.sh secrets
-   [ ] Manually enter the values from [SECTION 2] when prompted.
+   [ ] Rotate any CHANGE_ME placeholders:
+       sudo ./edit-secrets.sh rotate <field>
 
 4. FINALIZATION
    [ ] Start services:
        make up
-   [ ] Check health:
-       ./maintenance.sh health
+   [ ] Wait for containers to initialise, then check health:
+       sleep 10 && ./maintenance.sh health
 
 ════════════════════════════════════════════════════════════════════════
 END OF RECOVERY KIT
