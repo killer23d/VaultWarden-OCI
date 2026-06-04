@@ -299,7 +299,8 @@ _cs_reset_components() {
     done
 
     rm -f /etc/crowdsec/bouncers/crowdsec-cloudflare-worker-bouncer.yaml 2>/dev/null || true
-    rm -f /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml            2>/dev/null || true
+    rm -f /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml           2>/dev/null || true
+    log_info "Removed bouncer config files — Phase 1b will generate fresh API keys."
 
     _cs_clear_env_var "CROWDSEC_CF_BOUNCER_API_KEY"
     log_info "Cleared auto-generated LAPI key from .env (will be regenerated in Phase 5)."
@@ -547,8 +548,17 @@ if [[ -f "$_FW_BOUNCER_CONFIG" ]] && [[ "$FORCE" != "true" ]]; then
         _fw_existing_key="$(grep 'api_key:' "$_FW_BOUNCER_CONFIG" 2>/dev/null | awk '{print $2}' | head -1 || true)"
         if [[ -n "$_fw_existing_key" && "$_fw_existing_key" != "CHANGE_ME"* ]]; then
             log_info "Firewall bouncer not found in LAPI — re-registering with existing config key..."
-            cscli bouncers add crowdsecurity/firewall-bouncer --key "$_fw_existing_key" 2>/dev/null || true
-            log_success "Firewall bouncer re-registered in LAPI."
+            # Attempt re-register; if it fails the key is revoked — generate a fresh one.
+            if ! cscli bouncers add crowdsecurity/firewall-bouncer --key "$_fw_existing_key" 2>/dev/null; then
+                log_warn "Existing key rejected by LAPI (likely revoked) — generating a fresh key..."
+                _fw_existing_key="$(openssl rand -hex 32)"
+                cscli bouncers delete crowdsecurity/firewall-bouncer 2>/dev/null || true
+                cscli bouncers add crowdsecurity/firewall-bouncer --key "$_fw_existing_key" 2>/dev/null || true
+                sed -i "s|^api_key:.*|api_key: ${_fw_existing_key}|" "$_FW_BOUNCER_CONFIG"
+                log_success "Fresh firewall bouncer key generated and written to config."
+            else
+                log_success "Firewall bouncer re-registered in LAPI."
+            fi
         else
             log_warn "Firewall bouncer not in LAPI and config key is missing/placeholder."
             log_warn "Run: sudo ./utilities/setup-crowdsec.sh --force  to regenerate a valid key."
