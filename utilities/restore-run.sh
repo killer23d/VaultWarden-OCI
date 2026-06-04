@@ -1321,7 +1321,10 @@ restore_db() {
 
     log_info "Decrypting database backup..."
     age -d -i "$age_key_file" -o "$dec_db" "$backup_file" || {
-        log_error "Decryption failed — verify the age key is correct."; return 1
+        log_error "Decryption failed — verify the age key is correct."
+        log_hint "Use --key-file /path/to/the/old-age-key.txt for the key that encrypted this backup."
+        log_hint "If you exported a recovery kit, retry with --from-recovery-kit /path/to/recovery-kit.txt."
+        return 1
     }
     [[ "$SKIP_VERIFICATION" != "true" ]] && { verify_sqlite "$dec_db" || return 1; }
 
@@ -1390,7 +1393,10 @@ restore_full() {
 
     log_info "Decrypting archive..."
     age -d -i "$age_key_file" -o "$dec_tar" "$backup_file" || {
-        log_error "Decryption failed — verify the age key is correct."; return 1
+        log_error "Decryption failed — verify the age key is correct."
+        log_hint "Use --key-file /path/to/the/old-age-key.txt for the key that encrypted this backup."
+        log_hint "If you exported a recovery kit, retry with --from-recovery-kit /path/to/recovery-kit.txt."
+        return 1
     }
 
     if [[ "$SKIP_VERIFICATION" != "true" ]]; then

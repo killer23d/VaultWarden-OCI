@@ -92,7 +92,7 @@ retry_with_backoff() {
     local initial_delay="$2"
     shift 2
     local delay="$initial_delay"
-    local i
+    local i remaining
 
     for ((i=1; i<=max_attempts; i++)); do
         if "$@"; then
@@ -100,8 +100,16 @@ retry_with_backoff() {
         fi
 
         if [[ $i -lt $max_attempts ]]; then
-            log_warn "Attempt $i failed, retrying in ${delay}s..."
-            sleep "$delay"
+            log_warn "Attempt $i/${max_attempts} failed; retrying in ${delay}s..."
+            if [[ -t 1 ]]; then
+                for ((remaining=delay; remaining>0; remaining--)); do
+                    printf '\r%sRetrying in %2ss...%s' "${COLOR_YELLOW:-}" "$remaining" "${COLOR_RESET:-}"
+                    sleep 1
+                done
+                printf '\r%*s\r' 32 ''
+            else
+                sleep "$delay"
+            fi
             delay=$(( delay * 2 ))
         fi
     done
@@ -116,10 +124,23 @@ is_root() {
 
 require_root() {
     if ! is_root; then
+        local caller="${BASH_SOURCE[1]:-$0}"
         log_error "This script must be run as root."
-        log_error "Re-run with: sudo ${BASH_SOURCE[1]:-$0} ${*:-}"
+        log_hint "Re-run with: sudo ${caller} ${*:-}"
         exit 1
     fi
+}
+
+press_enter_to_continue() {
+    local msg="${1:- Press [Enter] to continue...}"
+    local _dummy
+    printf '\n'
+    if [[ -t 1 ]]; then
+        printf '\e[7m%s\e[0m\n' "$msg"
+    else
+        printf '%s\n' "$msg"
+    fi
+    [[ -t 0 ]] && read -r _dummy || true
 }
 
 # Best-effort remediation for common operational file permission drift.
@@ -471,15 +492,21 @@ download_file() {
     local output_file="$2"
     local max_attempts="${3:-3}"
 
+    spinner_start "Downloading $(basename "$output_file") with curl..."
     if retry_with_backoff "$max_attempts" 2 curl -fsSL "$url" -o "$output_file"; then
+        spinner_stop true
         log_success "Downloaded: $url -> $output_file"
         return 0
     fi
+    spinner_stop false
     rm -f "$output_file" 2>/dev/null || true
+    spinner_start "Downloading $(basename "$output_file") with wget..."
     if retry_with_backoff "$max_attempts" 2 wget -q "$url" -O "$output_file"; then
+        spinner_stop true
         log_success "Downloaded: $url -> $output_file"
         return 0
     else
+        spinner_stop false
         rm -f "$output_file" 2>/dev/null || true
         log_error "Failed to download: $url"
         return 1
@@ -566,7 +593,7 @@ init_common_lib() {
 }
 
 export -f _require_script
-export -f has_command require_commands retry_with_backoff is_root require_root get_real_user _maybe_sudo
+export -f has_command require_commands retry_with_backoff is_root require_root press_enter_to_continue get_real_user _maybe_sudo
 export -f auto_fix_critical_permissions
 export -f _ensure_lock_file _fix_rclone_ownership _run_rclone _check_sudo_requirement
 export -f register_cleanup perform_cleanup

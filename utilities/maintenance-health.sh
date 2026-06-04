@@ -227,6 +227,7 @@ local COMPREHENSIVE=false
 local FIX_MODE=false
 local REPORT_MODE=false
 local QUIET=false
+local JSON_OUTPUT=false
 
 _health_parse_args() {
     while [[ $# -gt 0 ]]; do
@@ -235,6 +236,7 @@ _health_parse_args() {
             --fix|-f)            FIX_MODE=true;       shift ;;
             --report|-r)         REPORT_MODE=true;    shift ;;
             --quiet|-q)          QUIET=true;          shift ;;
+            --json)              JSON_OUTPUT=true;    QUIET=true; shift ;;
             *)                   log_error "Unknown option for 'health': $1"; _show_help; exit 1 ;;
         esac
     done
@@ -249,6 +251,7 @@ Options:
   --fix, -f            Attempt automatic recovery for failed checks
   --report, -r         Save health report to file
   --quiet, -q          Suppress non-critical output
+  --json               Emit machine-readable JSON summary
 
 Checks performed:
   - Docker container status and health
@@ -984,6 +987,30 @@ _generate_report() {
         -mtime +"$REPORT_RETENTION_DAYS" -delete 2>/dev/null || true
 }
 
+
+_health_json_escape() {
+    local str="$1"
+    str=${str//\\/\\\\}; str=${str//\"/\\\"}; str=${str//$'\n'/\\n}; str=${str//$'\r'/}
+    printf '%s' "$str"
+}
+
+_print_results_json() {
+    local overall="pass"
+    (( warnings > 0 )) && overall="warn"
+    (( failed > 0 )) && overall="fail"
+    printf '{"overall":"%s","total":%d,"passed":%d,"warnings":%d,"failed":%d,"checks":[' \
+        "$overall" "$total" "$passed" "$warnings" "$failed"
+    local first=true name status message
+    for name in "${check_order[@]}"; do
+        status="${check_results[$name]:-unknown}"
+        message="${check_messages[$name]:-}"
+        [[ "$first" == "true" ]] && first=false || printf ','
+        printf '{"name":"%s","status":"%s","message":"%s"}' \
+            "$(_health_json_escape "$name")" "$(_health_json_escape "$status")" "$(_health_json_escape "$message")"
+    done
+    printf ']}\n'
+}
+
 _print_results() {
     if $QUIET && [[ $failed -eq 0 && $warnings -eq 0 ]]; then return; fi
     echo ""
@@ -1037,7 +1064,7 @@ _health_main() {
         log_info "Fix mode enabled — attempting recovery..."
         _fix_unhealthy_containers
     fi
-    _print_results
+    if $JSON_OUTPUT; then _print_results_json; else _print_results; fi
     if $REPORT_MODE; then _generate_report; fi
     _notify_failures
     _notify_recovery
@@ -1063,6 +1090,7 @@ OPTIONS:
     --fix, -f           Attempt automatic recovery for failed checks
     --report, -r        Save health report to file
     --quiet, -q         Suppress non-critical output
+    --json              Emit machine-readable JSON summary
     --help, -h          Show this help
 
 EXIT CODES:
@@ -1079,6 +1107,13 @@ EOF
 [[ "${1:-}" == "health" ]] && shift
 
 main() {
+    local arg
+    for arg in "$@"; do
+        if [[ "$arg" == "--json" ]]; then
+            _LOG_CURRENT_WEIGHT=3
+            break
+        fi
+    done
     run_health_check "$@"
 }
 

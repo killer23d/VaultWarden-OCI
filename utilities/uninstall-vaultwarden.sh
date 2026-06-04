@@ -3,21 +3,28 @@
 
 set -euo pipefail
 
-# Keep logging self-contained so uninstall remains safe after a partial or broken installation.
-# The log format matches the rest of the project.
-_VW_SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
-if [[ -t 1 ]]; then
-    _C_CYAN=$'\e[36m'; _C_GREEN=$'\e[32m'; _C_YELLOW=$'\e[33m'
-    _C_RED=$'\e[1;31m'; _C_RESET=$'\e[0m'
+# Prefer the shared logging library when this checkout is intact, but keep a
+# minimal fallback so uninstall remains safe after a partial/broken install.
+PROJECT_ROOT_FALLBACK="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -f "${PROJECT_ROOT_FALLBACK}/lib/log.sh" ]]; then
+    # shellcheck source=../lib/log.sh
+    source "${PROJECT_ROOT_FALLBACK}/lib/log.sh"
+    _VW_CALLING_SCRIPT="$(basename "${BASH_SOURCE[0]}")"
 else
-    _C_CYAN=''; _C_GREEN=''; _C_YELLOW=''; _C_RED=''; _C_RESET=''
+    _VW_SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
+    if [[ -t 1 ]]; then
+        _C_CYAN=$'\e[36m'; _C_GREEN=$'\e[32m'; _C_YELLOW=$'\e[33m'
+        _C_RED=$'\e[1;31m'; _C_RESET=$'\e[0m'
+    else
+        _C_CYAN=''; _C_GREEN=''; _C_YELLOW=''; _C_RED=''; _C_RESET=''
+    fi
+    _vw_ts() { date '+%H:%M:%S'; }
+    log_info()    { printf '%s[%s] [%s] INFO%s %s\n'  "$_C_CYAN"   "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$*"; }
+    log_success() { printf '%s[%s] [%s] OK%s %s\n'    "$_C_GREEN"  "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$*"; }
+    log_warn()    { printf '%s[%s] [%s] WARN%s %s\n'  "$_C_YELLOW" "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$*" >&2; }
+    log_error()   { printf '%s[%s] [%s] ERROR%s %s\n' "$_C_RED"    "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$*" >&2; }
 fi
-_vw_ts() { date '+%H:%M:%S'; }
-log_info()    { printf '%s[%s] [%s] INFO%s %s\n'    "$_C_CYAN"   "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$*"; }
-log_success() { printf '%s[%s] [%s] OK%s %s\n'      "$_C_GREEN"  "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$*"; }
-log_warn()    { printf '%s[%s] [%s] WARN%s %s\n'    "$_C_YELLOW" "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$*" >&2; }
-log_error()   { printf '%s[%s] [%s] ERROR%s %s\n'   "$_C_RED"    "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$*" >&2; }
-die()         { log_error "$*"; exit 1; }
+die() { log_error "$*"; exit 1; }
 trap 'log_error "${BASH_SOURCE[0]}: failed at line ${LINENO} (exit $?)"; exit 1' ERR
 
 info()    { log_info "$@"; }

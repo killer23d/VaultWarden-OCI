@@ -50,18 +50,55 @@ _format_bytes_human() {
 }
 
 
+_json_escape() {
+    local str="$1"
+    str=${str//\\/\\\\}
+    str=${str//\"/\\\"}
+    str=${str//$'\n'/\\n}
+    str=${str//$'\r'/}
+    printf '%s' "$str"
+}
 list_backups() {
     local backup_base_dir="${1:-backups}"
+    local json_output="${2:-false}"
 
     if [[ ! -d "$backup_base_dir" ]]; then
+        if [[ "${json_output}" == "true" ]]; then
+            printf '{"backups":[]}
+'
+            return 0
+        fi
         log_error "Backup directory not found: $backup_base_dir"
         return 1
+    fi
+
+    local backup_types=("db" "full" "emergency")
+
+    if [[ "$json_output" == "true" ]]; then
+        printf '{"backups":['
+        local first=true
+        local backup_type type_dir backup_file fname size_bytes age_days mtime
+        for backup_type in "${backup_types[@]}"; do
+            type_dir="$backup_base_dir/$backup_type"
+            [[ -d "$type_dir" ]] || continue
+            while IFS= read -r -d '' backup_file; do
+                fname=$(basename "$backup_file")
+                size_bytes=$(stat -c '%s' "$backup_file" 2>/dev/null || stat -f '%z' "$backup_file" 2>/dev/null || echo 0)
+                age_days=$(_backup_filename_age_days "$backup_file" 2>/dev/null || echo "")
+                [[ "$age_days" =~ ^[0-9]+$ ]] || age_days=-1
+                mtime=$(stat -c '%Y' "$backup_file" 2>/dev/null || stat -f '%m' "$backup_file" 2>/dev/null || echo 0)
+                [[ "$first" == "true" ]] && first=false || printf ','
+                printf '{"type":"%s","file":"%s","path":"%s","size_bytes":%s,"age_days":%s,"mtime_epoch":%s}'                     "$backup_type" "$(_json_escape "$fname")" "$(_json_escape "$backup_file")"                     "$size_bytes" "$age_days" "$mtime"
+            done < <(find "$type_dir" -name "*.age" -type f -print0 2>/dev/null | sort -z)
+        done
+        printf ']}\n'
+        return 0
     fi
 
     log_info "Available backups:"
     echo ""
 
-    local backup_types=("db" "full" "emergency")
+
     local found_backups=false
 
     local grand_total_files=0
@@ -78,7 +115,8 @@ list_backups() {
 
             while IFS= read -r backup_file; do
                 if [[ "$has_files" == false ]]; then
-                    echo "=== $backup_type backups ==="
+                    printf '%-11s  %-44s  %10s  %s\n' "TYPE" "FILE" "SIZE" "MODIFIED"
+                    printf '%-11s  %-44s  %10s  %s\n' "-----------" "--------------------------------------------" "----------" "----------------"
                 fi
                 has_files=true
                 local basename_file size_info age_info
@@ -97,7 +135,7 @@ list_backups() {
                 age_info="${stat_raw:0:16}"
                 [[ -z "$age_info" ]] && age_info="unknown"
 
-                printf "  %-40s %10s  %s\n" "$basename_file" "$size_info" "$age_info"
+                printf "  %-11s  %-44s  %10s  %s\n" "$backup_type" "$basename_file" "$size_info" "$age_info"
 
                         if [[ -f "$backup_file.meta" ]]; then
                     local vw_version
@@ -511,6 +549,11 @@ get_backup_statistics() {
     local backup_base_dir="${1:-backups}"
 
     if [[ ! -d "$backup_base_dir" ]]; then
+        if [[ "${json_output}" == "true" ]]; then
+            printf '{"backups":[]}
+'
+            return 0
+        fi
         log_error "Backup directory not found: $backup_base_dir"
         return 1
     fi
@@ -708,6 +751,6 @@ export -f cleanup_old_backups get_backup_statistics
 # Keep it local to the current shell to avoid "error importing function
 # definition for create_backup_metadata" during apt/dpkg subprocess execution.
 export -f verify_backup_integrity get_backup_size _backup_ctime_age_days
-export -f _backup_filename_age_days _format_bytes_human _resolve_rclone_config validate_rclone_config_path
+export -f _backup_filename_age_days _format_bytes_human _json_escape _resolve_rclone_config validate_rclone_config_path
 
 log_debug "Backup utilities library loaded successfully - standardized error handling" 2>/dev/null || true

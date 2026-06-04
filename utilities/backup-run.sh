@@ -29,6 +29,7 @@ RCLONE_SYNC=false    # Set by --rclone; syncs the encrypted backup after creatio
 FULL_VERIFY=false    # Set by --full-verification; decrypts and integrity-checks before sync.
 LOCK_FD=""   # Assigned by exec {LOCK_FD}>file (Bash 4.1+ automatic FD allocation).
 SKIP_OPS_LOCK=false  # Set by --skip-ops-lock; caller (maintenance-run) already holds OPS_LOCK.
+JSON_OUTPUT=false
 
 show_help() {
     cat << 'EOF'
@@ -40,7 +41,7 @@ USAGE:
 
 SUBCOMMANDS:
     run [TYPE]        Create a backup  (TYPE: auto | db | full | emergency)
-    list              List existing backups (no root required)
+    list [--json]     List existing backups (no root required; JSON optional)
     verify            Verify the most recent backup's integrity
     rotate            Apply retention policy and prune old backups
 
@@ -63,6 +64,7 @@ EXAMPLES:
     sudo ./backup.sh run full           # Full state backup
     sudo ./backup.sh run db --keep 30             # Keep 30 days of backups
     ./backup.sh list                              # List existing backups (no sudo)
+    ./backup.sh list --json                       # Machine-readable backup inventory
     sudo ./backup.sh verify                       # Verify the latest backup
     sudo ./backup.sh rotate --keep 30             # Prune backups older than 30 days
 EOF
@@ -113,6 +115,12 @@ case "$_SUBCMD" in
     list)
         # The 'list' subcommand does not require root.
         LIST_ONLY=true
+        while [[ $# -gt 0 ]]; do
+            case $1 in
+                --json) JSON_OUTPUT=true; shift ;;
+                *) log_error "Unknown option for list: $1"; show_help; exit 2 ;;
+            esac
+        done
         ;;
     verify)
         # The 'verify' subcommand runs a full integrity check on the latest backup.
@@ -1027,6 +1035,22 @@ _check_backup_deps() {
     fi
 }
 
+
+_log_backup_size() {
+    local backup_file="$1"
+    if [[ ! -f "$backup_file" ]]; then
+        backup_log_warn "Backup file not found for size check: $backup_file"
+        return 0
+    fi
+    local size_bytes size_human
+    size_bytes=$(stat -c '%s' "$backup_file" 2>/dev/null || stat -f '%z' "$backup_file" 2>/dev/null || echo 0)
+    size_human="$(_format_bytes_human "$size_bytes")"
+    backup_log_success "Backup created: $(basename "$backup_file") (${size_human})"
+    if [[ "$size_bytes" =~ ^[0-9]+$ ]] && (( size_bytes < 4096 )); then
+        backup_log_warn "Backup file is unusually small (${size_human}) — verify integrity: sudo ./backup.sh verify"
+    fi
+}
+
 main() {
     trap cleanup EXIT HUP INT TERM ERR
 
@@ -1035,7 +1059,7 @@ main() {
         auto_fix_critical_permissions "$PROJECT_ROOT"
         local list_base_dir
         list_base_dir="$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")"
-        list_backups "$list_base_dir" || true
+        list_backups "$list_base_dir" "$JSON_OUTPUT" || true
         exit 0
     fi
 
@@ -1305,6 +1329,8 @@ main() {
                 exit 2
             fi
         fi
+
+        _log_backup_size "$backup_file"
 
         backup_log_info "Cleaning up old backups (retention: $KEEP_DAYS days)..."
         cleanup_old_backups "$backup_dir" "$actual_type" "$KEEP_DAYS" || \

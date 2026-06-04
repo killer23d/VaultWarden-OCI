@@ -107,6 +107,10 @@ help: ## Show this help message
 	     /^[a-zA-Z_-]+:.*?##/ { printf "  $(GREEN)%-24s$(NC) %s\n", $$1, $$2 }' \
 	    $(MAKEFILE_LIST)
 	@echo ""
+	@echo "$(RED)Dangerous / state-changing targets:$(NC)"
+	@echo "  $(YELLOW)down restart safe-restart restore db-maint prune clean-all uninstall$(NC)"
+	@echo "  $(YELLOW)Review each target's help text and keep recovery credentials available.$(NC)"
+	@echo ""
 	@echo "$(CYAN)Examples:$(NC)"
 	@echo "  $(GREEN)make up$(NC)                          Start with secrets initialization"
 	@echo "  $(GREEN)make logs SERVICE=caddy$(NC)          View caddy logs"

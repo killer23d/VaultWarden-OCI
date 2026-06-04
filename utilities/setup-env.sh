@@ -6,7 +6,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-for _lib in "lib/log.sh" "lib/config.sh" "lib/common.sh"; do
+for _lib in "lib/log.sh" "lib/validate.sh" "lib/config.sh" "lib/common.sh"; do
     if [[ ! -f "${PROJECT_ROOT}/${_lib}" ]]; then
         echo "ERROR: Required library not found: ${PROJECT_ROOT}/${_lib}" >&2
         exit 1
@@ -15,6 +15,8 @@ done
 unset _lib
 # shellcheck source=../lib/log.sh
 source "${PROJECT_ROOT}/lib/log.sh"
+# shellcheck source=../lib/validate.sh
+source "${PROJECT_ROOT}/lib/validate.sh"
 # shellcheck source=../lib/config.sh
 source "${PROJECT_ROOT}/lib/config.sh"
 # shellcheck source=../lib/common.sh
@@ -312,6 +314,11 @@ main() {
 
     [[ -n "$DOMAIN" ]]      || { log_error "--domain is required"; show_help; exit 1; }
     [[ -n "$ADMIN_EMAIL" ]] || { log_error "--email is required";  show_help; exit 1; }
+    if ! validate_domain "$DOMAIN"; then
+        log_error "Invalid --domain value: $DOMAIN"
+        log_hint "Use a real DNS name such as vault.example.com; bare IP addresses and placeholders are not valid for ACME TLS."
+        exit 1
+    fi
 
     [[ "$DRY_RUN" == "true" ]] && log_info "DRY RUN mode — no changes will be made"
 

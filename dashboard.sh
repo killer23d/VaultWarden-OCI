@@ -9,19 +9,24 @@ IFS=$'\n\t'
 # ---------------------------------------------------------------------------
 # ANSI color / style variables
 # ---------------------------------------------------------------------------
-INV="\033[7m"    # Reverse video  — header bar and Enter-anchor only
-BLD="\033[1m"    # Bold           — section headers, important labels
-CYN="\033[1;36m" # Cyan           — dividers and sub-headers
-GRN="\033[1;32m" # Green          — healthy status, menu shortcut key
-RED="\033[1;31m" # Red            — errors, destructive option keys
-YLW="\033[1;33m" # Yellow         — warnings, non-fatal errors, prompts
-NC="\033[0m"     # Reset
+if [[ -t 1 ]]; then
+    INV="\033[7m"
+    BLD="\033[1m"
+    CYN="\033[1;36m"
+    GRN="\033[1;32m"
+    RED="\033[1;31m"
+    YLW="\033[1;33m"
+    NC="\033[0m"
+else
+    INV="" BLD="" CYN="" GRN="" RED="" YLW="" NC=""
+fi
 
 # ---------------------------------------------------------------------------
 # Repository / environment constants
 # ---------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${SCRIPT_DIR}"
+[[ -f "${REPO_ROOT}/lib/validate.sh" ]] && source "${REPO_ROOT}/lib/validate.sh"
 
 # Read PROJECT_STATE_DIR from .env if present; fall back to default.
 _read_env_var() {
@@ -43,8 +48,8 @@ CONTAINER_VW="vaultwarden_app"
 CONTAINER_CADDY="vaultwarden_caddy"
 CONTAINER_POSTFIX="vaultwarden_postfix"
 
-# Pacific Time zone for all human-readable timestamps
-TZ_DISPLAY="America/Vancouver"
+# Dashboard timestamps use the project-wide TZ setting from .env/.env.example.
+TZ_DISPLAY="$(_read_env_var TZ "UTC")"
 
 # Divider line length
 DIVIDER="--------------------------------------------------"
@@ -70,8 +75,8 @@ trap '_cleanup' INT TERM
 # ---------------------------------------------------------------------------
 _epoch_to_pt() {
     local epoch="$1"
-    TZ="${TZ_DISPLAY}" date -d "@${epoch}" '+%Y-%m-%d %H:%M PT' 2>/dev/null \
-        || date -r "${epoch}" '+%Y-%m-%d %H:%M PT' 2>/dev/null \
+    TZ="${TZ_DISPLAY}" date -d "@${epoch}" '+%Y-%m-%d %H:%M %Z' 2>/dev/null \
+        || date -r "${epoch}" '+%Y-%m-%d %H:%M %Z' 2>/dev/null \
         || echo "(unknown)"
 }
 
@@ -124,6 +129,32 @@ _press_enter() {
     read -r _dummy
 }
 
+_confirm_destructive() {
+    local action="$1"
+    local answer
+    echo ""
+    echo -e "${RED}${BLD}Caution:${NC} ${YLW}${action}${NC}"
+    printf " Are you sure? [y/N]: "
+    read -r answer
+    [[ "${answer,,}" == "y" || "${answer,,}" == "yes" ]]
+}
+
+show_help() {
+    cat <<'EOF'
+VaultWarden-OCI Operations Dashboard
+
+USAGE:
+    sudo ./dashboard.sh [OPTIONS]
+
+OPTIONS:
+    --help, -h    Show this help and exit
+
+KEYBOARD SHORTCUTS:
+    e/q           Exit dashboard
+    b/s/k/a/i     Open Backup, Security, Secrets, Advanced, or Identity menus
+EOF
+}
+
 # ---------------------------------------------------------------------------
 # Utility: warn on missing script
 # ---------------------------------------------------------------------------
@@ -142,7 +173,7 @@ _check_script() {
 # ---------------------------------------------------------------------------
 draw_header() {
     local now_pt
-    now_pt="$(TZ="${TZ_DISPLAY}" date '+%Y-%m-%d %H:%M PT' 2>/dev/null || date '+%Y-%m-%d %H:%M')"
+    now_pt="$(TZ="${TZ_DISPLAY}" date '+%Y-%m-%d %H:%M %Z' 2>/dev/null || date '+%Y-%m-%d %H:%M')"
     echo -e "${INV} VaultWarden-OCI - Operations Dashboard              ${now_pt} ${NC}"
 }
 
@@ -156,13 +187,37 @@ draw_divider() {
 # ---------------------------------------------------------------------------
 # _container_status  — print Running (green) or Stopped (red)
 # ---------------------------------------------------------------------------
-_container_status() {
+_container_status_plain() {
     local name="$1"
     if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "${name}"; then
+        printf 'Running'
+    else
+        printf 'Stopped'
+    fi
+}
+
+_container_status() {
+    local status
+    status="$(_container_status_plain "$1")"
+    if [[ "$status" == "Running" ]]; then
         printf "${GRN}Running${NC}"
     else
         printf "${RED}Stopped${NC}"
     fi
+}
+
+_container_uptime() {
+    local container="$1" started_at start_epoch now_epoch delta days hours mins
+    started_at=$(docker inspect --format '{{.State.StartedAt}}' "$container" 2>/dev/null) || { printf 'unknown'; return; }
+    start_epoch=$(date -d "$started_at" +%s 2>/dev/null         || date -j -f "%Y-%m-%dT%H:%M:%S" "${started_at%%.*}" +%s 2>/dev/null         || echo 0)
+    [[ "$start_epoch" =~ ^[0-9]+$ && "$start_epoch" -gt 0 ]] || { printf 'unknown'; return; }
+    now_epoch=$(date +%s)
+    delta=$(( now_epoch - start_epoch ))
+    (( delta < 0 )) && delta=0
+    days=$(( delta / 86400 )); hours=$(( (delta % 86400) / 3600 )); mins=$(( (delta % 3600) / 60 ))
+    if (( days > 0 )); then printf '%dd %dh' "$days" "$hours"
+    elif (( hours > 0 )); then printf '%dh %dm' "$hours" "$mins"
+    else printf '%dm' "$mins"; fi
 }
 
 # ---------------------------------------------------------------------------
@@ -203,7 +258,10 @@ draw_live_stats() {
     vw_stat="$(_container_status "${CONTAINER_VW}")"
     caddy_stat="$(_container_status "${CONTAINER_CADDY}")"
     pf_stat="$(_container_status "${CONTAINER_POSTFIX}")"
-    echo -e " ${BLD}Stack:${NC}  VaultWarden ${vw_stat}  |  Caddy ${caddy_stat}  |  Postfix ${pf_stat}"
+    local vw_plain vw_uptime=""
+    vw_plain="$(_container_status_plain "${CONTAINER_VW}")"
+    [[ "$vw_plain" == "Running" ]] && vw_uptime=" (up $(_container_uptime "${CONTAINER_VW}"))"
+    echo -e " ${BLD}Stack:${NC}  VaultWarden ${vw_stat}${vw_uptime}  |  Caddy ${caddy_stat}  |  Postfix ${pf_stat}"
 
     # --- Disk Space ---
     local disk_info
@@ -259,11 +317,15 @@ draw_live_stats() {
     echo -e " ${BLD}Last backup:${NC}  ${last_backup_str}"
 
     # --- Last Backup Result ---
-    local _last_backup_line
-    _last_backup_line=$(grep -E '(PASS|FAIL|ERROR|SUCCESS)' \
-        "${STATE_DIR}/logs/backup.log" \
-        2>/dev/null | tail -1 || echo "No backup log found")
-    printf '  Last result:  %s\n' "$_last_backup_line"
+    local _last_result _result_color
+    _last_result=$(grep -oE '(PASS|FAIL|ERROR|SUCCESS)'         "${STATE_DIR}/logs/backup.log" 2>/dev/null | tail -1 || true)
+    _last_result="${_last_result:-UNKNOWN}"
+    case "$_last_result" in
+        PASS|SUCCESS) _result_color="${GRN}" ;;
+        FAIL|ERROR)   _result_color="${RED}" ;;
+        *)            _result_color="${YLW}" ;;
+    esac
+    echo -e " ${BLD}Last backup result:${NC}  ${_result_color}${_last_result}${NC}"
 
     # --- Systemd Timers ---
     local _timer_output
@@ -324,19 +386,21 @@ draw_live_stats() {
 draw_main_menu() {
     echo -e " ${BLD}Main Menu${NC}"
     echo ""
-    echo -e "  [ ${GRN}1${NC} ] Start/Restart Stack"
-    echo -e "  [ ${GRN}2${NC} ] Stop Stack"
-    echo -e "  [ ${GRN}3${NC} ] Quick Health Check"
-    echo -e "  [ ${GRN}4${NC} ] View App Logs"
-    echo -e "  [ ${GRN}d${NC} ] Full Diagnostic Dump"
+    echo -e "  [ ${GRN}1${NC} ] Start/Restart Stack     (safe)"
+    echo -e "  [ ${RED}2${NC} ] Stop Stack              (destructive)"
+    echo -e "  [ ${GRN}3${NC} ] Quick Health Check      (status)"
+    echo -e "  [ ${GRN}4${NC} ] View App Logs           (tail)"
+    echo -e "  [ ${GRN}d${NC} ] Full Diagnostic Dump    (report)"
     draw_divider
-    echo -e "  [ ${GRN}b${NC} ] Backup & Restore Menu"
-    echo -e "  [ ${GRN}s${NC} ] Security & CrowdSec Menu"
-    echo -e "  [ ${GRN}k${NC} ] Secrets & Key Management Menu"
-    echo -e "  [ ${GRN}a${NC} ] Advanced & Maintenance Menu"
-    echo -e "  [ ${GRN}i${NC} ] Identity, Email & Admin Menu"
+    echo -e "  [ ${GRN}b${NC} ] Backup & Restore Menu       (4 options)"
+    echo -e "  [ ${GRN}s${NC} ] Security & CrowdSec Menu    (5 options)"
+    echo -e "  [ ${GRN}k${NC} ] Secrets & Key Management    (4 options)"
+    echo -e "  [ ${GRN}a${NC} ] Advanced & Maintenance      (7 options)"
+    echo -e "  [ ${GRN}i${NC} ] Identity, Email & Admin     (4 options)"
     draw_divider
-    echo -e "  [ ${RED}e${NC} ] Exit Dashboard"
+    echo -e "  [ ${RED}e/q${NC} ] Exit Dashboard"
+    echo ""
+    echo -e " ${CYN}Tip:${NC} Use e/q to exit, b/s/k/a/i for submenus, Ctrl-C anytime."
     echo ""
 }
 
@@ -349,7 +413,12 @@ handle_main_menu() {
                 "${REPO_ROOT}/startup.sh" --force
             ;;
         2)
-            run_cmd "make down" make -C "${REPO_ROOT}" down
+            if _confirm_destructive "Stop all VaultWarden services"; then
+                run_cmd "make down" make -C "${REPO_ROOT}" down
+            else
+                echo -e "${YLW} Operation cancelled.${NC}"
+                sleep 1
+            fi
             ;;
         3)
             _check_script "${REPO_ROOT}/maintenance.sh" || return
@@ -367,7 +436,7 @@ handle_main_menu() {
         k) ACTIVE_MENU="secrets"  ;;
         a) ACTIVE_MENU="advanced" ;;
         i) ACTIVE_MENU="identity" ;;
-        e)
+        e|q)
             _cleanup
             ;;
         *)
@@ -462,6 +531,12 @@ handle_security_menu() {
                 _press_enter
                 return
             fi
+            if ! validate_ip "${ip_to_unban}" 2>/dev/null; then
+                echo -e "${RED} Invalid IP address format: '${ip_to_unban}'${NC}"
+                echo -e "${YLW} Expected dotted-quad IPv4, for example 192.0.2.10${NC}"
+                _press_enter
+                return
+            fi
             echo ""
             echo -e "${BLD} Running: sudo cscli decisions delete --ip ${ip_to_unban}${NC}"
             draw_divider
@@ -541,7 +616,7 @@ draw_advanced_menu() {
     echo -e "  [ ${GRN}3${NC} ] Database Maintenance / Vacuum"
     echo -e "  [ ${GRN}4${NC} ] Fix File Permissions"
     echo -e "  [ ${GRN}5${NC} ] Systemd Timer Status"
-    echo -e "  [ ${GRN}6${NC} ] Prune Docker Resources"
+    echo -e "  [ ${YLW}6${NC} ] Prune Docker Resources"
     echo -e "  [ ${RED}7${NC} ] Uninstall VaultWarden-OCI"
     draw_divider
     echo -e "  [ ${GRN}b${NC} ] Back to Main Menu"
@@ -569,7 +644,12 @@ handle_advanced_menu() {
             run_cmd "make systemd-status" make -C "${REPO_ROOT}" systemd-status
             ;;
         6)
-            run_cmd "make prune" make -C "${REPO_ROOT}" prune
+            if _confirm_destructive "Prune Docker resources used by the stack"; then
+                run_cmd "make prune" make -C "${REPO_ROOT}" prune
+            else
+                echo -e "${YLW} Prune cancelled.${NC}"
+                _press_enter
+            fi
             ;;
         7)
             # Destructive — require explicit confirmation
@@ -648,6 +728,9 @@ handle_identity_menu() {
 # Main event loop
 # ===========================================================================
 main() {
+    case "${1:-}" in
+        --help|-h|help) show_help; exit 0 ;;
+    esac
     # Root guard: several operations require sudo; ensure we are running as root.
     if [[ $EUID -ne 0 ]]; then
         echo -e "${RED} Error:${NC} This script must be run as root." >&2

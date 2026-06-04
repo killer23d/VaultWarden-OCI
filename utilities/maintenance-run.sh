@@ -131,7 +131,7 @@ main() {
     local db_optimization_result=0 firewall_update_result=1 dns_update_result=1
     local health_validation_result=0
 
-    log_info "=== Phase 1: System Cleanup ==="
+    log_phase 1 4 "System cleanup"
     cleanup_logs    || log_cleanup_result=$?
     cleanup_backups || backup_cleanup_result=$?
     if cleanup_docker_system; then
@@ -140,11 +140,11 @@ main() {
         docker_cleanup_result=$?
     fi
 
-    log_info "=== Phase 2: SAFE System Optimization ==="
+    log_phase 2 4 "Database optimization"
     optimize_database || db_optimization_result=$?
 
     if [[ "$UPDATE_FIREWALL" == "true" || "$UPDATE_DNS" == "true" ]]; then
-        log_info "=== Phase 3: SAFE Security & Network Maintenance ==="
+        log_phase 3 4 "Security and network maintenance"
         if [[ "$UPDATE_FIREWALL" == "true" ]]; then
             local _fw_args=("${SCRIPT_DIR}/utilities/maintenance-update-firewall.sh" update-firewall)
             [[ "$DRY_RUN" == "true" ]] && _fw_args+=("--dry-run")
@@ -158,10 +158,10 @@ main() {
         fi
     fi
 
-    log_info "=== Phase 4: Health Validation ==="
+    log_phase 4 4 "Health validation"
     validate_system_health || health_validation_result=$?
 
-    log_info "=== Summary ==="
+    log_header "Maintenance Summary"
     generate_maintenance_summary \
         "$log_cleanup_result" "$backup_cleanup_result" "$docker_cleanup_result" \
         "$db_optimization_result" "$firewall_update_result" "$dns_update_result" \

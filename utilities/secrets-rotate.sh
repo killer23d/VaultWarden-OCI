@@ -48,7 +48,18 @@ HELP_HEADER
             fi
         done < <(schema_keys)
     else
-        printf '    (schema not available — run after setup.sh install)\n'
+        if ! command -v yq > /dev/null 2>&1; then
+            printf '    %s(yq not installed — install with: sudo apt install yq  or  snap install yq)%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
+        elif [[ ! -f "${PROJECT_ROOT}/secrets-schema.yaml" ]]; then
+            printf '    %s(secrets-schema.yaml not found — run setup.sh install first)%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
+        fi
+        printf '    %-35s (auto-generated admin token)\n' "admin_token"
+        printf '    %-35s (bcrypt hash for Caddy)\n' "caddy_admin_password"
+        printf '    %-35s (backup encryption passphrase)\n' "backup_passphrase"
+        printf '    %-35s (Cloudflare DNS API token)\n' "caddy_cloudflare_dns_token"
+        printf '    %-35s (SMTP relay password)\n' "smtp_password"
+        printf '    %-35s (email API key)\n' "email_api_token"
+        printf '    ... run after setup.sh install for the full schema list\n'
     fi
     cat << 'HELP_FOOTER'
 
@@ -185,6 +196,22 @@ do_rotate() {
         return 1
     fi
 
+    local old_fingerprint
+    old_fingerprint=$(python3 - "$temp_plain" "$actual_field" <<'PYEOF' 2>/dev/null || true
+import sys, hashlib, re
+path, field = sys.argv[1], sys.argv[2]
+val = ''
+pat = re.compile(r'^' + re.escape(field) + r':\s*(.*)$')
+for line in open(path, encoding='utf-8'):
+    m = pat.match(line.rstrip('
+'))
+    if m:
+        val = m.group(1).strip().strip('"'')
+        break
+print(hashlib.sha256(val.encode()).hexdigest()[:12] if val else 'unset')
+PYEOF
+)
+
     local new_value
     if [[ "$field" == "email_api_token" ]]; then
         local _ep
@@ -259,6 +286,20 @@ PYEOF
     if ! _validate_yaml_no_duplicates "$temp_patched" 2>&1; then
         log_error "Patched YAML is invalid - aborting"
         return 1
+    fi
+
+    local new_fingerprint
+    new_fingerprint=$(printf '%s' "$new_value" | sha256sum | awk '{print substr($1,1,12)}')
+    log_info "Rotation preview for '${actual_field}':"
+    printf '  %-10s %s\n' "before:" "$old_fingerprint"
+    printf '  %-10s %s\n' "after:"  "$new_fingerprint"
+    if [[ -t 0 ]]; then
+        local confirm_rotate
+        read -r -p "Apply this rotation? [y/N] " confirm_rotate
+        if [[ ! "${confirm_rotate,,}" =~ ^y(es)?$ ]]; then
+            log_info "Rotation cancelled by operator."
+            return 0
+        fi
     fi
 
     log_info "Re-encrypting secrets (atomic write)..."

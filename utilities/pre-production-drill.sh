@@ -78,6 +78,7 @@ _step_header() {
 }
 
 DRILL_TMPDIR=""
+_DRILL_START=$(date +%s)
 
 
 drill_environment() {
@@ -388,29 +389,44 @@ drill_full_backup_restore_smoketest() {
 }
 
 _print_drill_summary() {
+    local end_epoch elapsed mins secs duration
+    end_epoch=$(date +%s)
+    elapsed=$(( end_epoch - _DRILL_START ))
+    mins=$(( elapsed / 60 ))
+    secs=$(( elapsed % 60 ))
+    if (( mins > 0 )); then
+        duration="${mins}m ${secs}s"
+    else
+        duration="${secs}s"
+    fi
+
     printf '\n'
     log_header "Pre-Production Drill Summary"
-    printf '  Total steps:  %d\n' "$_STEPS_TOTAL"
-    printf '  Passed:       %d\n' "$_STEPS_PASSED"
-    printf '  Failed:       %d\n' "$_STEPS_FAILED"
-    printf '  Skipped:      %d\n' "$_STEPS_SKIPPED"
-    printf '\n'
+    printf '  %s%-10s%s %d / %d steps (%s elapsed)\n' \
+        "${COLOR_GREEN}" "Passed:" "${COLOR_RESET}" "$_STEPS_PASSED" "$_STEPS_TOTAL" "$duration"
+    if (( _STEPS_SKIPPED > 0 )); then
+        printf '  %s%-10s%s %d\n' "${COLOR_YELLOW}" "Skipped:" "${COLOR_RESET}" "$_STEPS_SKIPPED"
+    fi
 
     if (( _STEPS_FAILED > 0 )); then
-        log_error "Drill FAILED. Resolve these steps before production:"
+        printf '\n  %s%-10s%s %d\n\n' "${COLOR_BOLD_RED}" "FAILED:" "${COLOR_RESET}" "$_STEPS_FAILED"
+        printf '  %sFailed steps:%s\n' "${COLOR_BOLD_RED}" "${COLOR_RESET}"
         local step
         for step in "${_FAILED_STEPS[@]}"; do
-            log_error "  • $step"
+            printf '    %s• %s%s\n' "${COLOR_RED}" "$step" "${COLOR_RESET}"
         done
         printf '\n'
+        log_error "Drill FAILED — resolve the issues above before go-live."
         log_info  "Re-run after fixing: sudo ./utilities/pre-production-drill.sh"
     else
+        printf '\n'
         log_success "Drill PASSED — all rehearsed paths are operational."
         log_info    "Next step: sudo ./utilities/smoke-test.sh (live stack check)"
     fi
 }
 
 main() {
+    _DRILL_START=$(date +%s)
     require_root
     trap 'perform_cleanup' EXIT HUP INT TERM
 
