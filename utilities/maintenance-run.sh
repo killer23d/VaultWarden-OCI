@@ -121,7 +121,6 @@ main() {
     _ensure_lock_file "$_MAINT_LOCK"
     exec {_MAINT_LOCK_FD}>"$_MAINT_LOCK"
     if ! flock -n "$_MAINT_LOCK_FD"; then
-
         log_error "Another maintenance operation is already running. Exiting."
         exit 1
     fi
@@ -133,6 +132,10 @@ main() {
     log_header "VaultWarden-OCI Maintenance Manager"
     [[ "$DRY_RUN"      == "true" ]] && log_warn "DRY RUN MODE - No changes will be made"
     [[ "$COMPREHENSIVE" == "true" ]] && log_info "Running comprehensive maintenance..."
+
+    # Record start time so the summary can report elapsed duration (issue #37).
+    local _MAINT_START_EPOCH
+    _MAINT_START_EPOCH=$(date +%s)
 
     _load_env
     auto_fix_critical_permissions "$PROJECT_ROOT"
@@ -172,11 +175,14 @@ main() {
     log_phase 4 4 "Health validation"
     validate_system_health || health_validation_result=$?
 
+    # Compute elapsed wall-clock time for the summary footer.
+    local _maint_duration_seconds=$(( $(date +%s) - _MAINT_START_EPOCH ))
+
     log_header "Maintenance Summary"
     generate_maintenance_summary \
         "$log_cleanup_result" "$backup_cleanup_result" "$docker_cleanup_result" \
         "$db_optimization_result" "$firewall_update_result" "$dns_update_result" \
-        "$health_validation_result"
+        "$health_validation_result" "$_maint_duration_seconds"
 
     local critical_failures=0
     [[ "$CLEAN_LOGS"        == "true"  && "$log_cleanup_result"       != "0" ]] && ((critical_failures++))

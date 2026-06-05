@@ -530,6 +530,8 @@ draw_backup_menu() {
     draw_divider
     echo -e "  [ ${GRN}b${NC} ] Back to Main Menu"
     echo ""
+    echo -e " ${CYN}Tip:${NC} Use b to return to Main Menu, e/q to exit, Ctrl-C anytime."
+    echo ""
 }
 
 handle_backup_menu() {
@@ -554,6 +556,7 @@ handle_backup_menu() {
             run_cmd "make backup-status" make -C "${REPO_ROOT}" backup-status
             ;;
         b) ACTIVE_MENU="main" ;;
+        e|q) _cleanup ;;
         *)
             echo -e "${YLW} Invalid option. Please try again.${NC}"
             sleep 1
@@ -574,6 +577,8 @@ draw_security_menu() {
     echo -e "  [ ${GRN}5${NC} ] CrowdSec Metrics"
     draw_divider
     echo -e "  [ ${GRN}b${NC} ] Back to Main Menu"
+    echo ""
+    echo -e " ${CYN}Tip:${NC} Use b to return to Main Menu, e/q to exit, Ctrl-C anytime."
     echo ""
 }
 
@@ -629,6 +634,7 @@ handle_security_menu() {
                 cscli metrics
             ;;
         b) ACTIVE_MENU="main" ;;
+        e|q) _cleanup ;;
         *)
             echo -e "${YLW} Invalid option. Please try again.${NC}"
             sleep 1
@@ -648,6 +654,8 @@ draw_secrets_menu() {
     echo -e "  [ ${GRN}4${NC} ] Breakglass Admin Status"
     draw_divider
     echo -e "  [ ${GRN}b${NC} ] Back to Main Menu"
+    echo ""
+    echo -e " ${CYN}Tip:${NC} Use b to return to Main Menu, e/q to exit, Ctrl-C anytime."
     echo ""
 }
 
@@ -669,6 +677,7 @@ handle_secrets_menu() {
             run_cmd "make breakglass-status" make -C "${REPO_ROOT}" breakglass-status
             ;;
         b) ACTIVE_MENU="main" ;;
+        e|q) _cleanup ;;
         *)
             echo -e "${YLW} Invalid option. Please try again.${NC}"
             sleep 1
@@ -691,6 +700,8 @@ draw_advanced_menu() {
     echo -e "  [ ${RED}7${NC} ] Uninstall VaultWarden-OCI"
     draw_divider
     echo -e "  [ ${GRN}b${NC} ] Back to Main Menu"
+    echo ""
+    echo -e " ${CYN}Tip:${NC} Use b to return to Main Menu, e/q to exit, Ctrl-C anytime."
     echo ""
 }
 
@@ -740,6 +751,7 @@ handle_advanced_menu() {
             fi
             ;;
         b) ACTIVE_MENU="main" ;;
+        e|q) _cleanup ;;
         *)
             echo -e "${YLW} Invalid option. Please try again.${NC}"
             sleep 1
@@ -759,6 +771,8 @@ draw_identity_menu() {
     echo -e "  [ ${GRN}4${NC} ] View Breakglass Status"
     draw_divider
     echo -e "  [ ${GRN}b${NC} ] Back to Main Menu"
+    echo ""
+    echo -e " ${CYN}Tip:${NC} Use b to return to Main Menu, e/q to exit, Ctrl-C anytime."
     echo ""
 }
 
@@ -788,6 +802,7 @@ handle_identity_menu() {
             run_cmd "make breakglass-status" make -C "${REPO_ROOT}" breakglass-status
             ;;
         b) ACTIVE_MENU="main" ;;
+        e|q) _cleanup ;;
         *)
             echo -e "${YLW} Invalid option. Please try again.${NC}"
             sleep 1
