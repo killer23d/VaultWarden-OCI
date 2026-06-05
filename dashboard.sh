@@ -259,6 +259,48 @@ _cf_worker_status() {
 }
 
 # ---------------------------------------------------------------------------
+# _secrets_health — ux.md #23
+#
+# Scans .env for any remaining CHANGE_ME / CHANGEME placeholder values.
+# Outputs a single color-coded status string:
+#   GREEN  "All secrets configured"         — no placeholders found
+#   YELLOW "N secret(s) need attention: X Y" — one or more CHANGE_ME remain
+#   RED    "Secrets file missing (.env)"     — .env absent or unreadable
+# ---------------------------------------------------------------------------
+_secrets_health() {
+    local env_file="${REPO_ROOT}/.env"
+
+    if [[ ! -f "${env_file}" || ! -r "${env_file}" ]]; then
+        printf "${RED}Secrets file missing (.env)${NC}"
+        return
+    fi
+
+    # Collect keys whose value contains CHANGE_ME or CHANGEME (case-insensitive).
+    # Ignore comment lines and blank lines.
+    local -a unset_keys=()
+    local key val
+    while IFS='=' read -r key val; do
+        # Skip comment and blank lines
+        [[ "${key}" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${key// /}" ]] && continue
+        if [[ "${val^^}" == *CHANGE_ME* || "${val^^}" == *CHANGEME* ]]; then
+            unset_keys+=("${key}") 
+        fi
+    done < <(grep -v '^[[:space:]]*#' "${env_file}" | grep '=')
+
+    local count=${#unset_keys[@]}
+    if (( count == 0 )); then
+        printf "${GRN}All secrets configured${NC}"
+    elif (( count == 1 )); then
+        printf "${YLW}1 secret needs attention: %s${NC}" "${unset_keys[0]}"
+    elif (( count <= 4 )); then
+        printf "${YLW}%d secrets need attention: %s${NC}" "${count}" "${unset_keys[*]}"
+    else
+        printf "${YLW}%d secrets need attention — run: grep CHANGE_ME .env${NC}" "${count}"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # draw_live_stats
 # ---------------------------------------------------------------------------
 draw_live_stats() {
@@ -313,6 +355,11 @@ draw_live_stats() {
     local cf_stat
     cf_stat="$(_cf_worker_status)"
     echo -e " ${BLD}CF Worker status:${NC}  ${cf_stat}"
+
+    # --- Secrets Health (ux.md #23) ---
+    local secrets_stat
+    secrets_stat="$(_secrets_health)"
+    echo -e " ${BLD}Secrets health:${NC}   ${secrets_stat}"
 
     # --- Last Backup ---
     local last_backup_str

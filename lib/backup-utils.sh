@@ -58,14 +58,60 @@ _json_escape() {
     str=${str//$'\r'/}
     printf '%s' "$str"
 }
+
+# ---------------------------------------------------------------------------
+# _backup_age_color MTIME_EPOCH — ux.md #36
+#
+# Maps a file's mtime epoch to a color string based on how old it is:
+#   < 24 h  → green  (fresh, backup is current)
+#   1 – 7 d → yellow (aging, backup getting old)
+#   > 7 d   → red    (stale, backup overdue for rotation)
+#
+# Outputs the ANSI escape for the appropriate color, or empty string when
+# stdout is not a TTY (so piped/logged output stays clean).
+# ---------------------------------------------------------------------------
+_backup_age_color() {
+    local mtime_epoch="$1"
+
+    # Resolve color variables: respect a pre-existing TTY check from the
+    # calling context (dashboard.sh sets GRN/YLW/RED/NC to "" for non-TTY);
+    # otherwise fall back to safe defaults.
+    local _c_grn _c_ylw _c_red _c_nc
+    if [[ -t 1 ]]; then
+        _c_grn="\033[1;32m"
+        _c_ylw="\033[1;33m"
+        _c_red="\033[1;31m"
+        _c_nc="\033[0m"
+    else
+        _c_grn="" _c_ylw="" _c_red="" _c_nc=""
+    fi
+
+    if [[ ! "${mtime_epoch}" =~ ^[0-9]+$ || "${mtime_epoch}" -eq 0 ]]; then
+        printf '%s' "${_c_ylw}"
+        return
+    fi
+
+    local now_epoch age_seconds
+    now_epoch=$(date +%s)
+    age_seconds=$(( now_epoch - mtime_epoch ))
+    (( age_seconds < 0 )) && age_seconds=0
+
+    if (( age_seconds < 86400 )); then
+        printf '%s' "${_c_grn}"
+    elif (( age_seconds < 604800 )); then
+        printf '%s' "${_c_ylw}"
+    else
+        printf '%s' "${_c_red}"
+    fi
+}
+
 list_backups() {
     local backup_base_dir="${1:-backups}"
     local json_output="${2:-false}"
 
     if [[ ! -d "$backup_base_dir" ]]; then
         if [[ "${json_output}" == "true" ]]; then
-            printf '{"backups":[]}
-'
+            printf '{"backups":[]}\n'
             return 0
         fi
         log_error "Backup directory not found: $backup_base_dir"
@@ -88,7 +134,9 @@ list_backups() {
                 [[ "$age_days" =~ ^[0-9]+$ ]] || age_days=-1
                 mtime=$(stat -c '%Y' "$backup_file" 2>/dev/null || stat -f '%m' "$backup_file" 2>/dev/null || echo 0)
                 [[ "$first" == "true" ]] && first=false || printf ','
-                printf '{"type":"%s","file":"%s","path":"%s","size_bytes":%s,"age_days":%s,"mtime_epoch":%s}'                     "$backup_type" "$(_json_escape "$fname")" "$(_json_escape "$backup_file")"                     "$size_bytes" "$age_days" "$mtime"
+                printf '{"type":"%s","file":"%s","path":"%s","size_bytes":%s,"age_days":%s,"mtime_epoch":%s}' \
+                    "$backup_type" "$(_json_escape "$fname")" "$(_json_escape "$backup_file")" \
+                    "$size_bytes" "$age_days" "$mtime"
             done < <(find "$type_dir" -name "*.age" -type f -print0 2>/dev/null | sort -z)
         done
         printf ']}\n'
@@ -98,6 +146,9 @@ list_backups() {
     log_info "Available backups:"
     echo ""
 
+    # Resolve reset sequence once — empty string when not a TTY.
+    local _nc
+    [[ -t 1 ]] && _nc="\033[0m" || _nc=""
 
     local found_backups=false
 
@@ -123,21 +174,32 @@ list_backups() {
                 basename_file=$(basename "$backup_file")
                 size_info=$(du -h "$backup_file" 2>/dev/null | cut -f1 || echo "unknown")
 
+                # Retrieve the mtime epoch for color-coding (ux.md #36) and
+                # the human-readable timestamp for display.
+                local mtime_epoch stat_raw
+                mtime_epoch=$(stat -c '%Y' "$backup_file" 2>/dev/null \
+                    || stat -f '%m'       "$backup_file" 2>/dev/null \
+                    || echo 0)
+
                 # stat -c '%y' is Linux (GNU coreutils);
                 # fall back to BSD stat -f '%Sm' for macOS compatibility.
                 # Separate the stat from the cut so that cut receiving
                 # empty stdin (from a failing stat on BSD) does not mask
                 # the stat failure via a zero-exit from cut.
-                local stat_raw
                 stat_raw=$(stat -c '%y' "$backup_file" 2>/dev/null \
                     || stat -f '%Sm' -t '%Y-%m-%d %H:%M' "$backup_file" 2>/dev/null \
                     || echo "")
                 age_info="${stat_raw:0:16}"
                 [[ -z "$age_info" ]] && age_info="unknown"
 
-                printf "  %-11s  %-44s  %10s  %s\n" "$backup_type" "$basename_file" "$size_info" "$age_info"
+                # Color-code the MODIFIED column by age (ux.md #36).
+                local age_color
+                age_color="$(_backup_age_color "${mtime_epoch}")"
 
-                        if [[ -f "$backup_file.meta" ]]; then
+                printf "  %-11s  %-44s  %10s  ${age_color}%s${_nc}\n" \
+                    "$backup_type" "$basename_file" "$size_info" "$age_info"
+
+                if [[ -f "$backup_file.meta" ]]; then
                     local vw_version
                     vw_version=$(grep "vaultwarden_version=" "$backup_file.meta" 2>/dev/null | cut -d= -f2 || echo "unknown")
                     printf "    └─ VaultWarden: %s\n" "$vw_version"
@@ -156,7 +218,7 @@ list_backups() {
 
             if [[ "$has_files" == false ]]; then continue; fi
 
-                        printf "[%s: %d file(s), %s]\n" \
+            printf "[%s: %d file(s), %s]\n" \
                 "$backup_type" "$type_count" "$(_format_bytes_human "$type_bytes")"
             echo ""
 
@@ -550,8 +612,7 @@ get_backup_statistics() {
 
     if [[ ! -d "$backup_base_dir" ]]; then
         if [[ "${json_output}" == "true" ]]; then
-            printf '{"backups":[]}
-'
+            printf '{"backups":[]}\n'
             return 0
         fi
         log_error "Backup directory not found: $backup_base_dir"
@@ -572,7 +633,7 @@ get_backup_statistics() {
             local count=0
             local size_bytes=0
 
-                    while IFS= read -r f; do
+            while IFS= read -r f; do
                 local fsz=0
                 # Guard: _stat_file_size is exported by lib/crypto.sh;
                 # fall back to inline stat when crypto.sh was not sourced.
@@ -752,5 +813,6 @@ export -f cleanup_old_backups get_backup_statistics
 # definition for create_backup_metadata" during apt/dpkg subprocess execution.
 export -f verify_backup_integrity get_backup_size _backup_ctime_age_days
 export -f _backup_filename_age_days _format_bytes_human _json_escape _resolve_rclone_config validate_rclone_config_path
+export -f _backup_age_color
 
 log_debug "Backup utilities library loaded successfully - standardized error handling" 2>/dev/null || true
