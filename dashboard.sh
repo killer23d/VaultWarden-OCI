@@ -422,10 +422,14 @@ handle_main_menu() {
             _check_script "${REPO_ROOT}/startup.sh" || return
             run_sudo_cmd "sudo ./startup.sh --force" \
                 "${REPO_ROOT}/startup.sh" --force
+            # Force immediate live-stats redraw so container state is fresh (ux.md #3).
+            ACTIVE_MENU="main"
             ;;
         2)
             if _confirm_destructive "Stop all VaultWarden services"; then
                 run_cmd "make down" make -C "${REPO_ROOT}" down
+                # Force immediate live-stats redraw so container state is fresh (ux.md #3).
+                ACTIVE_MENU="main"
             else
                 echo -e "${YLW} Operation cancelled.${NC}"
                 sleep 1
@@ -437,7 +441,16 @@ handle_main_menu() {
                 "${REPO_ROOT}/maintenance.sh" health
             ;;
         4)
-            run_cmd "make logs-tail" make -C "${REPO_ROOT}" logs-tail
+            # Wrap in a subshell with a local INT trap so Ctrl+C stops only the
+            # log tail and returns to the dashboard instead of exiting it (ux.md #33).
+            local _log_container="${CONTAINER_VW}"
+            local _log_lines=100
+            echo ""
+            echo -e "${BLD} Tailing logs for ${_log_container} (Ctrl+C to return to menu)${NC}"
+            echo -e "${CYN}${DIVIDER}${NC}"
+            ( trap 'exit 0' INT; docker logs --tail "${_log_lines}" --follow "${_log_container}" 2>&1; ) || true
+            echo -e "${CYN}${DIVIDER}${NC}"
+            _press_enter
             ;;
         d)
             run_cmd "make diagnose" make -C "${REPO_ROOT}" diagnose

@@ -309,6 +309,13 @@ CRED_BANNER
     local env_edit_cmd="nano .env"
     [[ "$env_owner" == "root" ]] && env_edit_cmd="sudo nano .env"
 
+    # CF secrets commands shared between auto and interactive blocks (ux.md #21).
+    local _cf_cmds
+    _cf_cmds="$(printf '   %ssudo ./edit-secrets.sh rotate cloudflare_zone_id%s\n   %ssudo ./edit-secrets.sh rotate cf_account_id%s\n   %ssudo ./edit-secrets.sh rotate cf_worker_bouncer_token%s' \
+        "${COLOR_YELLOW}" "${COLOR_RESET}" \
+        "${COLOR_YELLOW}" "${COLOR_RESET}" \
+        "${COLOR_YELLOW}" "${COLOR_RESET}")"
+
     if [[ "$mode" == "auto" ]]; then
         printf '\n%s--- AUTO-GENERATED CREDENTIALS (scroll up and save plaintext passwords now) ---%s\n' \
             "${COLOR_CYAN}" "${COLOR_RESET}"
@@ -341,12 +348,7 @@ CRED_BANNER
         printf '2. Set external tokens: %s(use sudo ./edit-secrets.sh rotate <field> commands above)%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '3. Inject CrowdSec CF secrets (BEFORE running setup-crowdsec.sh):\n'
-        printf '   %ssudo ./edit-secrets.sh rotate cloudflare_zone_id%s\n' \
-            "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '   %ssudo ./edit-secrets.sh rotate cf_account_id%s\n' \
-            "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '   %ssudo ./edit-secrets.sh rotate cf_worker_bouncer_token%s\n' \
-            "${COLOR_YELLOW}" "${COLOR_RESET}"
+        printf '%s\n' "$_cf_cmds"
         printf '4. Setup CrowdSec:      %ssudo ./utilities/setup-crowdsec.sh%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '   ► CrowdSec reads cloudflare_zone_id, cf_account_id, cf_worker_bouncer_token\n'
@@ -369,12 +371,7 @@ CRED_BANNER
         printf '   ► Verify: DOMAIN and ADMIN_EMAIL are correct\n'
         printf '2. Configure secrets:   %s./setup.sh secrets%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '3. Inject CrowdSec CF secrets (BEFORE running setup-crowdsec.sh):\n'
-        printf '   %ssudo ./edit-secrets.sh rotate cloudflare_zone_id%s\n' \
-            "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '   %ssudo ./edit-secrets.sh rotate cf_account_id%s\n' \
-            "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '   %ssudo ./edit-secrets.sh rotate cf_worker_bouncer_token%s\n' \
-            "${COLOR_YELLOW}" "${COLOR_RESET}"
+        printf '%s\n' "$_cf_cmds"
         printf '4. Setup CrowdSec:      %ssudo ./utilities/setup-crowdsec.sh%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '   ► CrowdSec reads cloudflare_zone_id, cf_account_id, cf_worker_bouncer_token\n'
@@ -491,9 +488,13 @@ main() {
         || _phase_failed 3 "Environment configuration"             "Verify domain/email values and .env permissions."             "Re-run this phase: sudo ./utilities/setup-env.sh --domain ${DOMAIN} --email ${ADMIN_EMAIL}"
 
     log_phase 4 6 "Secrets bootstrap"
+    # Wait for sufficient kernel entropy before generating cryptographic keys (ux.md #34).
+    wait_for_entropy "${ENTROPY_THRESHOLD:-200}" "${ENTROPY_MAX_WAIT:-60}" || true
     "${SCRIPT_DIR}/utilities/setup-secrets.sh" bootstrap \
         "${_dry[@]}" "${_force[@]}" \
-        || _phase_failed 4 "Secrets bootstrap"             "Check the Age key and SOPS config: make key-health"             "Re-run this phase: sudo ./utilities/setup-secrets.sh bootstrap"
+        || _phase_failed 4 "Secrets bootstrap" \
+            "Check the Age key and SOPS config: make key-health" \
+            "Re-run this phase: sudo ./utilities/setup-secrets.sh bootstrap"
 
     log_phase 5 6 "Firewall setup"
     "${SCRIPT_DIR}/utilities/setup-firewall.sh" --phase ufw \

@@ -592,6 +592,64 @@ init_common_lib() {
     log_debug "Log level: $LOG_LEVEL"
 }
 
+
+# wait_for_entropy [THRESHOLD [MAX_WAIT]]
+#
+# Wait until /proc/sys/kernel/random/entropy_avail reaches THRESHOLD bits.
+# Prints a visible countdown every 5 seconds so the operator knows setup is not
+# stuck. Non-fatal: after MAX_WAIT seconds it prints a warning and continues.
+#
+# Default THRESHOLD: ${ENTROPY_THRESHOLD:-200} (overridable in environment)
+# Default MAX_WAIT:  ${ENTROPY_MAX_WAIT:-60}  (overridable in environment)
+#
+# Called from setup.sh before the secrets phase.  Also usable standalone.
+wait_for_entropy() {
+    local threshold="${1:-${ENTROPY_THRESHOLD:-200}}"
+    local max_wait="${2:-${ENTROPY_MAX_WAIT:-60}}"
+    local entropy_file="/proc/sys/kernel/random/entropy_avail"
+
+    if [[ ! -f "$entropy_file" ]]; then
+        log_warn "wait_for_entropy: $entropy_file not found — skipping entropy check (non-Linux?)"
+        return 0
+    fi
+
+    local elapsed=0 interval=5 current
+    current=$(cat "$entropy_file" 2>/dev/null || echo 9999)
+
+    if (( current >= threshold )); then
+        printf '\r\xe2\x9c\x94 Entropy ready: %d bits\n' "$current"
+        return 0
+    fi
+
+    log_info "Waiting for sufficient kernel entropy (need ${threshold} bits, have ${current})..."
+
+    while (( elapsed < max_wait )); do
+        current=$(cat "$entropy_file" 2>/dev/null || echo 9999)
+        if (( current >= threshold )); then
+            printf '\r\xe2\x9c\x94 Entropy ready: %d bits                           \n' "$current"
+            return 0
+        fi
+        printf '\r\xe2\x8f\xb3 Entropy: %d/%d bits \xe2\x80\x94 %ds elapsed...' \
+            "$current" "$threshold" "$elapsed"
+        sleep "$interval"
+        (( elapsed += interval ))
+    done
+
+    # Final check after loop
+    current=$(cat "$entropy_file" 2>/dev/null || echo 0)
+    if (( current >= threshold )); then
+        printf '\r\xe2\x9c\x94 Entropy ready: %d bits                           \n' "$current"
+        return 0
+    fi
+
+    printf '\n'
+    log_warn "wait_for_entropy: entropy still low after ${max_wait}s (have ${current}/${threshold} bits)."
+    log_warn "  Key generation may be slower. Install haveged or rng-tools to speed up: sudo apt install haveged"
+    return 0   # Non-fatal — let setup continue.
+}
+
+export -f wait_for_entropy
+
 export -f _require_script
 export -f has_command require_commands retry_with_backoff is_root require_root press_enter_to_continue get_real_user _maybe_sudo
 export -f auto_fix_critical_permissions

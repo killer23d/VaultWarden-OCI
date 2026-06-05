@@ -23,9 +23,37 @@ unset _VW_VALIDATE_LIB_DIR
 
 validate_email() {
     local email="$1"
-    # RFC 5321: maximum total length is 254 characters.
+
+    # RFC 5321 §4.5.3.1: maximum total length is 254 characters.
     [[ ${#email} -le 254 ]] || return 1
-    [[ "$email" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]
+
+    # Must contain exactly one '@'.
+    local local_part domain
+    case "$email" in
+        *@*@*) return 1 ;;   # multiple '@' — invalid
+        *@*)   ;;            # exactly one '@' — proceed
+        *)     return 1 ;;   # no '@' — invalid
+    esac
+    local_part="${email%%@*}"
+    domain="${email#*@}"
+
+    # RFC 5321 §4.5.3.1: local-part ≤ 64 octets.
+    [[ ${#local_part} -le 64 ]] || return 1
+
+    # RFC 5321 §4.5.3.1: domain ≤ 253 octets.
+    [[ ${#domain} -le 253 ]] || return 1
+
+    # Local-part: reject leading or trailing dots; allow a-z A-Z 0-9 . _ % + -
+    [[ "$local_part" =~ ^\. ]] && return 1   # leading dot
+    [[ "$local_part" =~ \.$ ]] && return 1   # trailing dot
+    [[ "$local_part" =~ ^[a-zA-Z0-9._%+-]+$ ]] || return 1
+
+    # Domain: must have at least one dot; accept subdomains (mail.sub.example.com);
+    # accept long modern TLDs (e.g. .museum, .photography, .cloud).
+    # Reject bare hostnames and leading/trailing hyphens per RFC 1035.
+    [[ "$domain" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]] || return 1
+
+    return 0
 }
 
 validate_domain() {

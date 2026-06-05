@@ -78,10 +78,27 @@ check_dependencies() {
         echo "ERROR: restore.sh: the following required tools are not installed: ${missing_hard[*]}" >&2
         echo "       Install with: apt-get install -y age sqlite3 coreutils tar" >&2
         echo "       age-keygen is part of the 'age' package on most distributions." >&2
+        # Per-tool install hints (ux.md #46)
+        local _cmd
+        for _cmd in "${missing_hard[@]}"; do
+            case "$_cmd" in
+                docker)    echo "  Hint [docker]:    apt install docker.io  OR  snap install docker" >&2 ;;
+                age)       echo "  Hint [age]:       apt install age  OR  snap install age" >&2 ;;
+                age-keygen) echo "  Hint [age-keygen]: installed with 'age' — apt install age" >&2 ;;
+                sqlite3)   echo "  Hint [sqlite3]:   apt install sqlite3" >&2 ;;
+                sha256sum) echo "  Hint [sha256sum]: apt install coreutils  (should be pre-installed)" >&2 ;;
+            esac
+        done
         exit 1
     fi
     if [[ ${#missing_soft[@]} -gt 0 ]]; then
         echo "WARN: restore.sh: optional tools missing (some features will be disabled): ${missing_soft[*]}" >&2
+        local _cmd
+        for _cmd in "${missing_soft[@]}"; do
+            case "$_cmd" in
+                rclone) echo "  Hint [rclone]: curl https://rclone.org/install.sh | sudo bash" >&2 ;;
+            esac
+        done
     fi
 }
 # Skip heavy dependency checks until a live restore or list subcommand is known.
@@ -686,6 +703,11 @@ _LOCAL_TYPES=()
 select_backup_interactive() {
     _LOCAL_FILES=()
     _LOCAL_TYPES=()
+    # Print available backup listing before the selection prompt (ux.md #31).
+    log_info "Available local backups:"
+    if ! list_backups 2>/dev/null; then
+        log_warn "No local backups found in ${BACKUP_BASE_DIR} — you may still enter a path manually."
+    fi
     list_all_backups_interactive || return 1
     local total="${#_LOCAL_FILES[@]}" choice
     echo ""
