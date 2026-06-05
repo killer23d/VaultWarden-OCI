@@ -137,14 +137,15 @@ setup: ## Run initial setup (requires sudo)
 		exit 1; \
 	fi
 	@if [ ! -f ".env" ]; then echo "$(RED)Error: .env missing. Usage: sudo ./setup.sh --domain <domain> --email <email>$(NC)"; exit 1; fi
-	@if grep -qE '^DOMAIN=(https?://)?vault\.example\.com/?$$' .env 2>/dev/null; then \
-		echo "$(RED)Error: DOMAIN is still the placeholder 'vault.example.com' in .env$(NC)"; \
+	@# ux.md #15: catch all placeholder DOMAIN variants — scheme-prefixed, bare, and CHANGE_ME.
+	@if grep -qE '^DOMAIN=((https?://)?(vault\.example\.com/?|CHANGE_ME)|)$$' .env 2>/dev/null; then \
+		echo "$(RED)Error: DOMAIN is still a placeholder in .env$(NC)"; \
 		echo "$(YELLOW)Run setup directly with your real domain:$(NC)"; \
 		echo "$(GREEN)  sudo ./setup.sh install --domain your.real.domain --email you@example.com$(NC)"; \
 		exit 1; \
 	fi
-	@if grep -qE '^ADMIN_EMAIL=admin@example\.com$$' .env 2>/dev/null; then \
-		echo "$(RED)Error: ADMIN_EMAIL is still the placeholder 'admin@example.com' in .env$(NC)"; \
+	@if grep -qE '^ADMIN_EMAIL=(admin@example\.com|CHANGE_ME)$$' .env 2>/dev/null; then \
+		echo "$(RED)Error: ADMIN_EMAIL is still a placeholder in .env$(NC)"; \
 		echo "$(YELLOW)Run setup directly with your real email:$(NC)"; \
 		echo "$(GREEN)  sudo ./setup.sh install --domain your.real.domain --email you@example.com$(NC)"; \
 		exit 1; \
