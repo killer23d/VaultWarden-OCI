@@ -84,7 +84,8 @@ if [[ $# -gt 0 ]]; then
       show_help; exit 0
       ;;
     --*)
-
+      # Flag-first invocation (e.g. ./startup.sh --dry-run): fall through to
+      # the while loop below for parsing.
       ;;
     *)
       log_error "Unknown subcommand: '$1'"
@@ -512,17 +513,29 @@ check_age_key_health_preflight() {
   return 1
 }
 
-# Run check_age_key_health_preflight(), which may export SOPS_AGE_KEY_FILE for
-# this process, then delegate decryption, per-key file writing, ENC[ checks,
-# and cache cleanup to export_docker_secrets().
+# #38 — prepare_docker_secrets() skips all SOPS/filesystem operations under
+# --dry-run. Previously only _startup_pull_images and _startup_start_services
+# were gated; this function still ran full SOPS decryption and secret-file
+# writes even in dry-run mode, which could fail on machines without a
+# configured Age key and misrepresented what "dry-run" means.
+#
+# Under --dry-run we log the two operations that would occur so the operator
+# sees the full plan, then return 0 without touching the filesystem or
+# invoking SOPS/age.
 prepare_docker_secrets() {
   log_info "Preparing Docker secrets from SOPS..."
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    log_info "[DRY RUN] Would run: check_age_key_health_preflight (verify/locate Age key)"
+    log_info "[DRY RUN] Would run: export_docker_secrets ${DOCKER_SECRETS_DIR} (SOPS decrypt → secret files)"
+    return 0
+  fi
+
   check_age_key_health_preflight || return 1
   export_docker_secrets "$DOCKER_SECRETS_DIR" || return 1
   log_success "Docker secrets prepared"
   return 0
 }
-
 
 
 cleanup_orphaned_resources() {
@@ -715,6 +728,26 @@ show_status() {
   docker compose ps || true
 }
 
+# #26 — Emit the accumulated warnings banner unconditionally so it is always
+# the last thing printed, regardless of --background or --dry-run mode.
+# Previously the banner lived inside the `BACKGROUND != true` gate and was
+# silently swallowed on background-mode startups.
+#
+# Called as the very last statement in main() so every upstream function has
+# had the opportunity to append to _STARTUP_WARNINGS before we display them.
+_show_startup_warnings() {
+  if [[ ${#_STARTUP_WARNINGS[@]} -eq 0 ]]; then
+    return 0
+  fi
+  log_warn "============================================================"
+  log_warn "STARTUP COMPLETED WITH WARNINGS — action may be required:"
+  local _wmsg
+  for _wmsg in "${_STARTUP_WARNINGS[@]}"; do
+    log_warn "  ${_wmsg}"
+  done
+  log_warn "============================================================"
+}
+
 
 main() {
   log_info "Starting VaultWarden-OCI startup workflow..."
@@ -740,17 +773,22 @@ main() {
   _startup_pull_images || exit 1
   _startup_start_services || exit 1
 
-  if [[ "$BACKGROUND" != "true" ]]; then
+  # Post-start: service readiness poll + health check.
+  # Skipped in --background mode because the caller manages orchestration.
+  if [[ "$BACKGROUND" != "true" && "$DRY_RUN" != "true" ]]; then
     wait_for_services || true
     run_health_check || {
       log_error "Startup tip: if the failure is key-related, run: make key-health"
       log_error "Canonical production key path: ${AGE_KEY_FILE}"
+      # Emit warnings before exiting so operators see them even on failure.
+      _show_startup_warnings
       exit 1
     }
     show_status || true
   fi
 
-  # Re-emit the key-path advisory at the end of startup so it is not missed.
+  # Re-emit the key-path advisory immediately before the final success line
+  # so it is not missed in the log stream.
   if [[ "${SOPS_AGE_KEY_FILE:-}" == "${SCRIPT_DIR}/secrets/keys/age-key.txt" ]]; then
     local cfg_key
     cfg_key=$(grep '^SOPS_AGE_KEY_FILE=' .env 2>/dev/null | cut -d= -f2- || echo "(unknown)")
@@ -765,14 +803,9 @@ main() {
 
   log_success "VaultWarden-OCI startup completed"
 
-  if [[ ${#_STARTUP_WARNINGS[@]} -gt 0 ]]; then
-    log_warn "============================================================"
-    log_warn "STARTUP COMPLETED WITH WARNINGS — action may be required:"
-    for _wmsg in "${_STARTUP_WARNINGS[@]}"; do
-      log_warn "  $_wmsg"
-    done
-    log_warn "============================================================"
-  fi
+  # #26 — Always the absolute last output, regardless of --background or
+  # --dry-run, so accumulated warnings are never silently swallowed.
+  _show_startup_warnings
 }
 
 main "$@"
