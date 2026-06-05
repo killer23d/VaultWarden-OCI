@@ -18,32 +18,41 @@ source "$SCRIPT_DIR/lib/storage.sh"
 SKIP_EMAIL=false
 SKIP_RESTORE=false
 
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --skip-email)   SKIP_EMAIL=true;   shift ;;
-        --skip-restore) SKIP_RESTORE=true; shift ;;
-        --help|-h)
-            cat <<'EOF'
+show_help() {
+    cat <<'EOF'
 VaultWarden-OCI Pre-Production Drill
 
-A non-destructive rehearsal of all critical operational paths.
-No production state is modified.
-
 USAGE:
-    sudo ./utilities/pre-production-drill.sh [options]
+    sudo ./utilities/pre-production-drill.sh [OPTIONS]
+
+DESCRIPTION:
+    Non-destructive rehearsal of all critical operational paths.
+    No production state is modified. Validates secrets, backups, email
+    delivery, and stack restart sequence before go-live.
 
 OPTIONS:
     --skip-email    Skip email delivery test (if MTA not configured yet)
     --skip-restore  Skip restore path drill (decrypt + integrity check)
-    --help          Show this help
+    --help, -h      Show this help
 
 EXIT CODES:
     0  All steps passed
     1  One or more steps failed
+
+EXAMPLES:
+    sudo ./utilities/pre-production-drill.sh
+    sudo ./utilities/pre-production-drill.sh --skip-email
+    sudo ./utilities/pre-production-drill.sh --skip-email --skip-restore
 EOF
-            exit 0
-            ;;
-        *) log_error "Unknown option: $1"; exit 1 ;;
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --skip-email)   SKIP_EMAIL=true;   shift ;;
+        --skip-restore) SKIP_RESTORE=true; shift ;;
+        --help|-h) show_help; exit 0 ;;
+        help)      show_help; exit 0 ;;
+        *) log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done
 

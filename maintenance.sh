@@ -8,12 +8,17 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-if [[ $# -eq 0 ]]; then
-    cat << 'EOF'
+show_help() {
+    cat <<'EOF'
 VaultWarden-OCI Maintenance Script
 
 USAGE:
     ./maintenance.sh <subcommand> [options]
+
+DESCRIPTION:
+    Thin dispatcher that routes maintenance subcommands to their dedicated
+    utility scripts. Each subcommand can be called directly via
+    utilities/maintenance-<name>.sh. Run with --help for subcommand options.
 
 SUBCOMMANDS:
     run               Full routine maintenance (cleanup + optimize + health)
@@ -26,8 +31,21 @@ SUBCOMMANDS:
     update-firewall   Sync Cloudflare IP ranges into UFW
     help              Show this help
 
+OPTIONS:
+    --help, -h        Show this help
+
+EXAMPLES:
+    ./maintenance.sh run
+    ./maintenance.sh health
+    ./maintenance.sh run --comprehensive
+    ./maintenance.sh health --help
+
 Run './maintenance.sh <subcommand> --help' for subcommand-specific options.
 EOF
+}
+
+if [[ $# -eq 0 ]]; then
+    show_help
     exit 0
 fi
 
@@ -56,7 +74,8 @@ case "$_TASK" in
         exec "$SCRIPT_DIR/utilities/maintenance-run.sh" "$@"
         ;;
     help|--help|-h)
-        exec "$0"
+        show_help
+        exit 0
         ;;
     *)
         echo "ERROR: Unknown subcommand: '$_TASK'" >&2

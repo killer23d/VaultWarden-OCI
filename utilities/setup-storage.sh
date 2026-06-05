@@ -176,58 +176,49 @@ _mode_verify() {
     return 0
 }
 
-_ss_usage() {
+show_help() {
 cat << 'EOF'
 VaultWarden-OCI Storage Setup and Migration
 
 USAGE:
-  sudo utilities/setup-storage.sh [--mode setup|migrate|verify] [OPTIONS]
+    sudo utilities/setup-storage.sh [--mode setup|migrate|verify] [OPTIONS]
+
+DESCRIPTION:
+    Configures persistent storage directories, optional data-volume
+    provisioning, and interactive data migration. Called automatically by
+    setup.sh phase 4. Safe to re-run (idempotent) in setup and verify modes.
 
 MODES:
-  setup    Create and configure storage directories (default)
-  migrate  Migrate from boot volume to data volume (interactive)
-  verify   Re-check layout and permissions only (no changes, safe for cron)
+    setup    Create and configure storage directories (default)
+    migrate  Migrate from boot volume to data volume (interactive)
+    verify   Re-check layout and permissions only (no changes, safe for cron)
 
-FLAGS (setup / verify):
-  --mode MODE           Mode to run: setup|migrate|verify (default: setup)
-  --data-device DEV     Block device for data volume (e.g. /dev/sdb)
-  --data-mount PATH     Mount point for data volume (default: /mnt/vw-data)
-  --auto                Non-interactive mode
-  --dry-run             Preview actions without executing
-  --force               Skip confirmations
-  --help, -h            Show this help
-
-MIGRATE MODE:
-  sudo utilities/setup-storage.sh --mode migrate [subcommand] [OPTIONS]
-  Run with --mode migrate --help for full migrate usage.
+OPTIONS:
+    --mode MODE           Mode to run: setup|migrate|verify (default: setup)
+    --data-device DEV     Block device for data volume (e.g. /dev/sdb)
+    --data-mount PATH     Mount point for data volume (default: /mnt/vw-data)
+    --auto                Non-interactive mode
+    --dry-run             Preview actions without executing
+    --force               Skip confirmations
+    --help, -h            Show this help
 
 EXAMPLES:
-  # Boot-only setup (no separate data volume)
-  sudo utilities/setup-storage.sh
+    # Boot-only setup (no separate data volume)
+    sudo utilities/setup-storage.sh
 
-  # Setup with a dedicated data volume
-  sudo utilities/setup-storage.sh \
-    --data-device /dev/sdb \
-    --data-mount /mnt/vw-data
+    # Setup with a dedicated data volume
+    sudo utilities/setup-storage.sh \
+      --data-device /dev/sdb \
+      --data-mount /mnt/vw-data
 
-  # Dry run setup
-  sudo utilities/setup-storage.sh --dry-run
+    # Dry run setup
+    sudo utilities/setup-storage.sh --dry-run
 
-  # Verify current layout (safe for cron)
-  sudo utilities/setup-storage.sh --mode verify
+    # Verify current layout (safe for cron)
+    sudo utilities/setup-storage.sh --mode verify
 
-  # Interactive migration (prompts for device and mount point)
-  sudo utilities/setup-storage.sh --mode migrate run
-
-  # Non-interactive migration
-  sudo utilities/setup-storage.sh --mode migrate run \
-    --source /var/lib/vaultwarden \
-    --target /mnt/vw-data \
-    --device /dev/sdb \
-    --yes
-
-  # Check migration status
-  sudo utilities/setup-storage.sh --mode migrate status
+    # Interactive migration
+    sudo utilities/setup-storage.sh --mode migrate run
 EOF
 }
 
@@ -241,14 +232,18 @@ _parse_outer_args() {
                 ;;
             --help|-h)
                 # When --mode migrate has already been parsed, forward --help
-                # to the migrate sub-parser so _mv_usage is shown, not _ss_usage.
+                # to the migrate sub-parser so _mv_usage is shown, not show_help.
                 if [[ "${_SS_MODE}" == "migrate" ]]; then
                     remaining+=("$1")
                 else
-                    _ss_usage
+                    show_help
                     exit 0
                 fi
                 shift
+                ;;
+            help)
+                show_help
+                exit 0
                 ;;
             *)
                 remaining+=("$1")
@@ -261,7 +256,7 @@ _parse_outer_args() {
         setup|verify|migrate) ;;
         *)
             log_error "Unknown mode: ${_SS_MODE}. Valid modes: setup|migrate|verify"
-            _ss_usage
+            show_help
             exit 1
             ;;
     esac
@@ -296,7 +291,7 @@ _parse_outer_args() {
                 ;;
             *)
                 log_error "Unknown option: $1"
-                _ss_usage
+                show_help
                 exit 1
                 ;;
         esac
@@ -305,7 +300,7 @@ _parse_outer_args() {
 
 main() {
     if [[ $# -eq 0 ]]; then
-        _ss_usage
+        show_help
         exit 0
     fi
     _parse_outer_args "$@"
@@ -323,7 +318,7 @@ main() {
         migrate) migrate_mode_main "${_SS_MIGRATE_ARGS[@]+"${_SS_MIGRATE_ARGS[@]}"}" ;;
         *)
             log_error "Unknown mode: ${_SS_MODE}"
-            _ss_usage
+            show_help
             exit 1
             ;;
     esac

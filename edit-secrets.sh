@@ -15,12 +15,17 @@ source "${PROJECT_ROOT}/lib/config.sh"
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
 
-_show_help() {
-cat << 'HELP'
-VaultWarden Secrets Editor
+show_help() {
+cat <<'HELP'
+VaultWarden-OCI Secrets Editor
 
 USAGE:
     ./edit-secrets.sh <subcommand> [options]
+
+DESCRIPTION:
+    Thin dispatcher for VaultWarden secrets management operations. Delegates
+    to utilities/secrets-*.sh subcommands. Manage credentials using SOPS
+    Age encryption — secrets are never stored in plaintext on disk.
 
 SUBCOMMANDS:
     edit                    Interactively edit decrypted secrets, then re-encrypt
@@ -30,7 +35,8 @@ SUBCOMMANDS:
     export-recovery-kit     Generate a recovery document with unencrypted secrets
     help                    Show this help
 
-Run './edit-secrets.sh <subcommand> --help' for subcommand-specific options.
+OPTIONS:
+    --help, -h              Show this help
 
 EXAMPLES:
     ./edit-secrets.sh edit
@@ -41,13 +47,12 @@ EXAMPLES:
     ./edit-secrets.sh rotate email_api_token --dry-run
     ./edit-secrets.sh export-recovery-kit
 
-SEE ALSO:
-    ./setup.sh secrets  - First-time creation or full reconfiguration
+Run './edit-secrets.sh <subcommand> --help' for subcommand-specific options.
 HELP
 }
 
 if [[ $# -eq 0 ]]; then
-    _show_help
+    show_help
     exit 0
 fi
 
@@ -88,7 +93,7 @@ case "$_TASK" in
         exec "$SCRIPT_DIR/utilities/secrets-export-recovery-kit.sh" "$@"
         ;;
     help|--help|-h)
-        _show_help
+        show_help
         exit 0
         ;;
     *)

@@ -330,6 +330,48 @@ ADMIN_IP=""
 CROWDSEC_VERSION="${CROWDSEC_VERSION:-}"
 CF_WORKER_BOUNCER_VERSION="${CF_WORKER_BOUNCER_VERSION:-}"
 
+show_help() {
+    cat <<'HELP'
+VaultWarden-OCI CrowdSec Setup
+
+USAGE:
+    sudo utilities/setup-crowdsec.sh [OPTIONS]
+
+DESCRIPTION:
+    Installs and configures CrowdSec with the Cloudflare Workers bouncer
+    for VaultWarden-OCI intrusion detection and edge-level banning.
+    Requires CLOUDFLARE_PROXY_ENABLED=true for the Cloudflare bouncer phase.
+
+OPTIONS:
+    --auto               Non-interactive: never prompt.
+    --dry-run            Print what would happen without changing files.
+    --force              Re-run all phases even if already applied.
+    --use-latest         Override version pins and use the current live upstream
+                         release of each component.
+    --autonomous         Deploy the Workers bouncer in autonomous mode (-S flag).
+    --admin-ip IP|CIDR   Add this IP address or CIDR to the CrowdSec admin
+                         allowlist.
+    --help, -h           Show this help.
+
+ENVIRONMENT:
+    CLOUDFLARE_PROXY_ENABLED   Set to 'true' to enable the Cloudflare bouncer.
+    CF_FREE_PLAN               Set to 'false' to disable the free-plan KV write
+                               guard. Default: 'true'.
+    CROWDSEC_VERSION           Pin a specific CrowdSec version.
+    CF_WORKER_BOUNCER_VERSION  Pin a specific Workers bouncer version.
+
+    Cloudflare credentials (in encrypted secrets, not .env):
+        sudo ./edit-secrets.sh rotate cf_worker_bouncer_token
+        sudo ./edit-secrets.sh rotate cloudflare_zone_id
+        sudo ./edit-secrets.sh rotate cf_account_id
+
+EXAMPLES:
+    sudo utilities/setup-crowdsec.sh
+    sudo utilities/setup-crowdsec.sh --dry-run
+    sudo utilities/setup-crowdsec.sh --force
+HELP
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --auto)        AUTO_MODE=true; shift ;;
@@ -344,29 +386,10 @@ while [[ $# -gt 0 ]]; do
             fi
             ADMIN_IP="$2"; shift 2 ;;
         --help|-h)
-            cat <<'HELP'
-usage: sudo ./utilities/setup-crowdsec.sh [OPTIONS]
-
-  --auto               Non-interactive: never prompt.
-  --dry-run            Print what would happen without changing files.
-  --force              Re-run all phases even if already applied.
-  --use-latest         Override version pins and use the current live upstream
-                       release of each component.
-  --autonomous         Deploy the Workers bouncer in autonomous mode (-S flag).
-  --admin-ip IP|CIDR   Add this IP address or CIDR to the CrowdSec admin
-                       allowlist.
-
-Environment variables (set in .env or exported before running):
-  CLOUDFLARE_PROXY_ENABLED   Set to 'true' to enable the Cloudflare bouncer.
-  # Cloudflare credentials (now in secrets, not .env):
-  #   sudo ./edit-secrets.sh rotate cf_worker_bouncer_token
-  #   sudo ./edit-secrets.sh rotate cloudflare_zone_id
-  #   sudo ./edit-secrets.sh rotate cf_account_id
-  CF_FREE_PLAN               Set to 'false' to disable the free-plan KV write
-                             guard. Default: 'true'.
-  CROWDSEC_VERSION           Pin a specific CrowdSec version.
-  CF_WORKER_BOUNCER_VERSION  Pin a specific Workers bouncer version.
-HELP
+            show_help
+            exit 0 ;;
+        help)
+            show_help
             exit 0 ;;
         *)
             log_error "Unknown flag: $1"

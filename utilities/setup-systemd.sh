@@ -65,8 +65,8 @@ _VW_DROPIN_UNITS=(
     vaultwarden-firewall-update.timer
 )
 
-_sd_show_help() {
-    cat << 'EOF'
+show_help() {
+    cat <<'EOF'
 VaultWarden-OCI systemd Timer Installer
 
 USAGE:
@@ -75,6 +75,10 @@ USAGE:
     sudo utilities/setup-systemd.sh remove     # Disable and remove all timers
     sudo utilities/setup-systemd.sh validate   # Verify installed state vs repo
     sudo utilities/setup-systemd.sh status     # Show timer and service status
+
+DESCRIPTION:
+    Installs, removes, validates, or shows the status of VaultWarden-OCI
+    systemd timers. Run after every 'git pull' to keep /opt/ in sync.
 
 ACTIONS:
     install   Install and enable all systemd timer units
@@ -97,48 +101,19 @@ WHAT install DOES:
          utilities/backup-run.sh           utilities/restore-run.sh
        Scripts are self-locating via BASH_SOURCE[0]. The utilities/ subdirectory
        structure is preserved at the destination.
-       NOTE: restore.sh is now installed to /opt/ (it was not installed previously).
     2. Copies lib/ -> /opt/vaultwarden-scripts/lib/ (root:root 644)
-       lib files are 644 (world-readable) so a non-root service User= can
-       still source lib/common.sh if the unit is ever changed from root.
     3. Copies .env -> /etc/vaultwarden/vaultwarden.env (root:root 600)
-       (skipped if the EnvironmentFile already exists; warns if content differs)
     4. Copies secrets/keys/age-key.txt -> /etc/vaultwarden/age-key.txt
-       (SERVICE_USER ownership, mode 600; default ubuntu:ubuntu)
-       and sets SOPS_AGE_KEY_FILE=/etc/vaultwarden/age-key.txt in the EnvironmentFile.
-       This is required because systemd units run with ProtectHome=yes, which makes
-       /home/ubuntu/ (and any symlinks into it) inaccessible to the service process.
-       If the source file is absent but the key already exists at the destination,
-       SOPS_AGE_KEY_FILE is still corrected to the absolute path.
     5. Copies systemd/*.{service,timer} -> /etc/systemd/system/
     6. systemctl daemon-reload
     7. systemctl enable --now for all 6 timers
     8. Verifies all managed timers are active and have a next trigger
-    9. systemctl reset-failed for all managed services (clears stale failed status)
 
-WHAT validate CHECKS:
-    1. Scripts present and executable in /opt/vaultwarden-scripts/
-    2. lib/ present; lib/*.sh files are readable (mode 644 recommended)
-    3. All unit files present in /etc/systemd/system/
-    4. systemd drop-ins present: 20-identity.conf (service user) and
-       10-state-dir.conf (ReadWritePaths for data volume, if applicable)
-    5. All 6 timers enabled (systemctl is-enabled)
-    6. EnvironmentFile /etc/vaultwarden/vaultwarden.env exists (mode 600)
-    7. Age key /etc/vaultwarden/age-key.txt exists (mode 600)
-    8. SOPS_AGE_KEY_FILE is set in the EnvironmentFile
-    9. Installed scripts match repo source checksum (sha256 split-brain detection)
-       Re-run install after any git pull to keep /opt/ in sync.
-
-VIEWING LOGS:
-    journalctl -u vaultwarden-health.service -n 50
-    journalctl -u vaultwarden-db-backup.service -n 100
-    systemctl list-timers --all | grep vaultwarden
-
-MIGRATING FROM CRON:
-    cron-setup.sh has been removed. To migrate:
-    1. sudo utilities/setup-systemd.sh install
-    2. Remove old crontab entries: sudo crontab -e
-    3. Verify timers: systemctl list-timers --all | grep vaultwarden
+EXAMPLES:
+    sudo utilities/setup-systemd.sh install
+    sudo utilities/setup-systemd.sh install --dry-run
+    sudo utilities/setup-systemd.sh validate
+    sudo utilities/setup-systemd.sh status
 EOF
 }
 
@@ -149,8 +124,8 @@ while [[ $# -gt 0 ]]; do
         validate)     VALIDATE=true;  shift ;;
         status)       STATUS=true;    shift ;;
         --dry-run)    DRY_RUN=true;   shift ;;
-        help|--help|-h) _sd_show_help; exit 0 ;;
-        *) log_error "Unknown sub-action: $1"; _sd_show_help; exit 1 ;;
+        help|--help|-h) show_help; exit 0 ;;
+        *) log_error "Unknown sub-action: $1"; show_help; exit 1 ;;
     esac
 done
 
@@ -1235,7 +1210,7 @@ main() {
     fi
 
     log_error "No action specified. Use --help for options."
-    _sd_show_help
+    show_help
     exit 1
 }
 

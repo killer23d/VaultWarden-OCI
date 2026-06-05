@@ -16,34 +16,41 @@ init_common_lib "$0"
 # shellcheck source=../lib/defaults.sh
 source "${PROJECT_ROOT}/lib/defaults.sh"
 
-_show_help() {
+show_help() {
     cat <<'EOF'
-utilities/setup-firewall.sh — VaultWarden-OCI firewall configuration
-
-Configures UFW (with Cloudflare CIDR restrictions) and iptables NAT/DOCKER-USER
-rules for the VaultWarden compose project. Safe to re-run (idempotent).
+VaultWarden-OCI Firewall Configuration
 
 USAGE:
-  sudo utilities/setup-firewall.sh [--phase ufw|iptables|all] [--auto] [--yes] [--dry-run]
+    sudo utilities/setup-firewall.sh [--phase ufw|iptables|all] [OPTIONS]
 
-FLAGS:
-  --phase ufw|iptables|all   Phase to run (default: all)
-  --auto                     Non-interactive mode (implies --yes)
-  --yes                      Auto-confirm the netfilter-persistent install prompt
-  --dry-run                  Preview actions without executing
-  --force                    Skip confirmations
-  --force-iptables           Continue iptables setup even when an active nftables
-                             ruleset is detected. Use only when you have verified
-                             that nftables will not override these iptables rules.
-  --help, -h                 Show this help
+DESCRIPTION:
+    Configures UFW (with Cloudflare CIDR restrictions) and iptables NAT /
+    DOCKER-USER rules for the VaultWarden compose project. Safe to re-run
+    (idempotent). Called automatically by setup.sh during phase 6.
+
+OPTIONS:
+    --phase ufw|iptables|all   Phase to run (default: all)
+    --auto                     Non-interactive mode (implies --yes)
+    --yes                      Auto-confirm the netfilter-persistent install prompt
+    --dry-run                  Preview actions without executing
+    --force                    Skip confirmations
+    --force-iptables           Continue iptables setup even when an active nftables
+                               ruleset is detected. Use only when you have verified
+                               that nftables will not override these iptables rules.
+    --help, -h                 Show this help
 
 NOTES:
-  UFW rules must be applied AFTER Docker installation. Docker rewrites iptables
-  chains during installation; rules set before Docker is installed are silently
-  bypassed by Docker's DOCKER-USER chain.
+    UFW rules must be applied AFTER Docker installation. Docker rewrites iptables
+    chains during installation; rules set before Docker is installed are silently
+    bypassed by Docker's DOCKER-USER chain.
 
-  The systemd unit vaultwarden-iptables.service calls this script with
-  --phase iptables to re-apply NAT rules after a Docker upgrade resets chains.
+    The systemd unit vaultwarden-iptables.service calls this script with
+    --phase iptables to re-apply NAT rules after a Docker upgrade resets chains.
+
+EXAMPLES:
+    sudo utilities/setup-firewall.sh
+    sudo utilities/setup-firewall.sh --dry-run
+    sudo utilities/setup-firewall.sh --phase ufw
 EOF
 }
 
@@ -51,7 +58,7 @@ _require_cli_value() {
     local opt="$1" value="${2-}"
     if [[ -z "$value" || "$value" == --* ]]; then
         log_error "Option '$opt' requires a value."
-        _show_help
+        show_help
         exit 1
     fi
 }
@@ -90,8 +97,9 @@ while [[ $# -gt 0 ]]; do
         --dry-run)         DRY_RUN=true; shift ;;
         --force)           FORCE=true; shift ;;
         --force-iptables)  FORCE_IPTABLES=true; shift ;;
-        --help|-h)         _show_help; exit 0 ;;
-        *)                 log_error "Unknown option: $1"; _show_help; exit 1 ;;
+        --help|-h)         show_help; exit 0 ;;
+        help)              show_help; exit 0 ;;
+        *)                 log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done
 

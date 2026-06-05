@@ -38,16 +38,17 @@ DRY_RUN=false
 
 show_help() {
     cat <<'EOF'
-utilities/setup-env.sh — VaultWarden-OCI environment file configuration
-
-Creates or updates .env and docker-compose.yml from templates.
-Safe to re-run (idempotent): existing files are not overwritten unless
---force is passed or key values (domain/email) have changed.
+VaultWarden-OCI Environment Setup
 
 USAGE:
     sudo utilities/setup-env.sh --domain DOMAIN --email EMAIL [OPTIONS]
 
-FLAGS:
+DESCRIPTION:
+    Creates or updates .env and docker-compose.yml from project templates.
+    Safe to re-run (idempotent) — existing files are not overwritten unless
+    --force is passed. Called automatically by setup.sh during phase 3.
+
+OPTIONS:
     --domain DOMAIN       Your domain name (required)
     --email EMAIL         Admin email address (required)
     --use-latest          Set all container versions to 'latest'

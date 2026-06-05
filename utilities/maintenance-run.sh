@@ -39,12 +39,17 @@ FULL_BACKUP_RETENTION_DAYS=30
 EMERGENCY_BACKUP_RETENTION_DAYS=90
 
 show_help() {
-    cat << 'EOF'
+    cat <<'EOF'
 VaultWarden-OCI Routine Maintenance Runner
 
 USAGE:
     sudo utilities/maintenance-run.sh [OPTIONS]
     sudo ./maintenance.sh run [OPTIONS]
+
+DESCRIPTION:
+    Performs routine maintenance: log cleanup, old backup pruning, Docker
+    system cleanup, and scheduled database optimization. Run automatically
+    by the vaultwarden-maintenance systemd timer, or manually on demand.
 
 OPTIONS:
     --comprehensive         Run everything: routine + firewall + DNS
@@ -62,6 +67,12 @@ EXIT CODES:
     0 — completed successfully
     1 — completed with minor issues
     2 — completed with critical failures
+
+EXAMPLES:
+    sudo ./maintenance.sh run
+    sudo ./maintenance.sh run --comprehensive
+    sudo ./maintenance.sh run --dry-run
+    sudo ./maintenance.sh run --email
 EOF
 }
 

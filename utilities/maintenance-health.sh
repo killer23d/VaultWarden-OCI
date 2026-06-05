@@ -237,61 +237,56 @@ _health_parse_args() {
             --report|-r)         REPORT_MODE=true;    shift ;;
             --quiet|-q)          QUIET=true;          shift ;;
             --json)              JSON_OUTPUT=true;    QUIET=true; shift ;;
-            *)                   log_error "Unknown option for 'health': $1"; _show_help; exit 1 ;;
+            --help|-h|help)      _health_show_help;   exit 0 ;;
+            *)                   log_error "Unknown option for 'health': $1"; _health_show_help; exit 1 ;;
         esac
     done
 }
 
-_show_help() {
+_health_show_help() {
     cat <<'EOF'
-Usage: ./maintenance.sh health [OPTIONS]
+VaultWarden-OCI Health Check (subcommand)
 
-Options:
-  --comprehensive     Run all checks including extended diagnostics
-  --fix, -f            Attempt automatic recovery for failed checks
-  --report, -r         Save health report to file
-  --quiet, -q          Suppress non-critical output
-  --json               Emit machine-readable JSON summary
+USAGE:
+    sudo utilities/maintenance-health.sh [OPTIONS]
+    ./maintenance.sh health [OPTIONS]
 
-Checks performed:
-  - Docker container status and health
-  - SSL certificate validity and expiry
-  - VaultWarden /alive liveness probe (internal + external HTTPS)
-  - VaultWarden /api/config readiness probe (requires live DB connection)
-  - CrowdSec integration check (systemd service + bouncer)
-  - Disk space utilization
-  - Memory utilization
-  - Network connectivity
-  - Backup status and age
-  - DNS resolution
-  - Configuration validation
+DESCRIPTION:
+    Runs all health checks and optionally sends alert emails when thresholds
+    are breached. Called automatically by the vaultwarden-health systemd
+    timer, or manually on demand.
 
-Comprehensive mode adds:
-  - Detailed container resource usage
-  - SSL certificate chain validation
-  - Extended /api/config endpoint testing (explicit comprehensive result)
-  - Backup integrity verification
-  - CrowdSec integration check
+OPTIONS:
+    --comprehensive     Run all checks including extended diagnostics
+    --fix, -f           Attempt automatic recovery for failed checks
+    --report, -r        Save health report to file
+    --quiet, -q         Suppress non-critical output
+    --json              Emit machine-readable JSON summary
+    --help, -h          Show this help
 
-Environment variables:
-  HEALTH_API_STRICT=true          Promote /api/config non-200 from warning to failure
-  ALERT_COOLDOWN_SECONDS=3600     Minimum seconds between repeat alerts for the same
-                                  failure key (default: 3600 = 1 hour)
-  ALERT_RECOVERY_TTL=86400        Minimum seconds between clear-state recovery emails
-                                  (default: 86400 = 24 hours)
+CHECKS PERFORMED:
+    - Docker container status and health
+    - SSL certificate validity and expiry
+    - VaultWarden /alive liveness probe (internal + external HTTPS)
+    - VaultWarden /api/config readiness probe (requires live DB connection)
+    - CrowdSec integration check (systemd service + bouncer)
+    - Disk space utilization
+    - Memory utilization
+    - Network connectivity
+    - Backup status and age
+    - DNS resolution
+    - Configuration validation
 
-Alert cooldown:
-  Alerts are rate-limited per failure key using timestamp files under
-  $PROJECT_STATE_DIR/.vw-health-alert/. At most one alert fires per failure
-  key per ALERT_COOLDOWN_SECONDS window. A single clear-state recovery email
-  fires once when all checks pass, then is suppressed for ALERT_RECOVERY_TTL
-  seconds. State survives reboots and container restarts.
+EXIT CODES:
+    0 — All checks passed
+    1 — One or more warnings
+    2 — One or more failures
+    3 — Critical failure (cannot run checks)
 
-Exit codes:
-  0 - All checks passed
-  1 - One or more warnings
-  2 - One or more failures
-  3 - Critical failure (cannot run checks)
+EXAMPLES:
+    sudo ./maintenance.sh health
+    sudo ./maintenance.sh health --comprehensive
+    sudo ./maintenance.sh health --json
 EOF
 }
 

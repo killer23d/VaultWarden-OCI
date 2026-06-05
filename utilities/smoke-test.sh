@@ -18,31 +18,43 @@ QUIET=false
 JSON_OUTPUT=false
 FAIL_FAST=false
 
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --quiet)    QUIET=true;    shift ;;
-        --json)     JSON_OUTPUT=true; shift ;;
-        --fail-fast) FAIL_FAST=true; shift ;;
-        --help|-h)
-            cat <<'EOF'
+show_help() {
+    cat <<'EOF'
 VaultWarden-OCI Smoke Test
 
 USAGE:
-    sudo ./utilities/smoke-test.sh [options]
+    sudo ./utilities/smoke-test.sh [OPTIONS]
+
+DESCRIPTION:
+    Verifies the VaultWarden-OCI stack is healthy before or after production
+    go-live. Checks containers, TLS, HTTP endpoints, secrets, backups, and
+    CrowdSec. Safe to run at any time on a live stack.
 
 OPTIONS:
     --quiet       Suppress per-check output; only show summary
     --fail-fast   Stop on first failure
     --json        Emit a JSON result array (implies --quiet)
-    --help        Show this help
+    --help, -h    Show this help
 
 EXIT CODES:
     0  All checks passed
     1  One or more checks failed
+
+EXAMPLES:
+    sudo ./utilities/smoke-test.sh
+    sudo ./utilities/smoke-test.sh --quiet
+    sudo ./utilities/smoke-test.sh --json
 EOF
-            exit 0
-            ;;
-        *) log_error "Unknown option: $1"; exit 1 ;;
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --quiet)    QUIET=true;    shift ;;
+        --json)     JSON_OUTPUT=true; shift ;;
+        --fail-fast) FAIL_FAST=true; shift ;;
+        --help|-h)  show_help; exit 0 ;;
+        help)       show_help; exit 0 ;;
+        *) log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done
 

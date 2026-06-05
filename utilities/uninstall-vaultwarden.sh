@@ -32,40 +32,54 @@ success() { log_success "$@"; }
 warn()    { log_warn "$@"; }
 
 show_help() {
-    echo "Usage: sudo bash $0 run [--i-have-saved-my-recovery-kit] [--force] [--dry-run]"
-    echo ""
-    echo "SUBCOMMANDS:"
-    echo "  run    Perform the full idempotent uninstall (interactive confirmation required)"
-    echo ""
-    echo "OPTIONS (used after 'run'):"
-    echo "  --i-have-saved-my-recovery-kit"
-    echo "      Pre-confirm that you have saved secrets/keys/age-key.txt"
-    echo "      to a location OUTSIDE this host before running."
-    echo "      Without this flag the script refuses to continue when"
-    echo "      the age key is present on disk."
-    echo ""
-    echo "  --dry-run"
-    echo "      Show what would be removed without deleting anything."
-    echo "      Prints each step that would execute and exits without changes."
-    echo ""
-    echo "  --force"
-    echo "      Skip ALL AGE key checks (both the CLI flag pre-check"
-    echo "      and the interactive fingerprint confirmation)."
-    echo "      WARNING: destructive — implies --i-have-saved-my-recovery-kit"
-    echo "      and bypasses the fingerprint gate. Use only in automated/CI"
-    echo "      pipelines where the key is confirmed saved by external means."
-    echo ""
-    echo "  Two-prompt safety model for age key destruction:"
-    echo "    1. CLI flag  --i-have-saved-my-recovery-kit  (pre-check)."
-    echo "    2. Interactive fingerprint confirmation immediately before"
-    echo "       the project directory (and key) is deleted.  You must"
-    echo "       type the exact Age public key shown on screen."
-    echo "       This second prompt is unconditional — it cannot be"
-    echo "       skipped or scripted away without the actual key value."
-    echo ""
-    echo "  Without the age key ALL encrypted backups are permanently"
-    echo "  unrecoverable.  Export a recovery kit first:"
-    echo "    ./utilities/secrets-export-recovery-kit.sh"
+    cat <<'EOF'
+VaultWarden-OCI Uninstall
+
+USAGE:
+    sudo bash ./utilities/uninstall-vaultwarden.sh run [OPTIONS]
+
+DESCRIPTION:
+    Performs a full idempotent uninstall of VaultWarden-OCI: stops and removes
+    containers, Docker secrets, systemd units, and the project directory.
+    Requires interactive confirmation at each critical step.
+
+SUBCOMMANDS:
+    run    Perform the full idempotent uninstall (interactive confirmation required)
+    help   Show this help
+
+OPTIONS (used after 'run'):
+    --i-have-saved-my-recovery-kit
+        Pre-confirm that you have saved secrets/keys/age-key.txt
+        to a location OUTSIDE this host before running.
+        Without this flag the script refuses to continue when
+        the age key is present on disk.
+
+    --dry-run
+        Show what would be removed without deleting anything.
+        Prints each step that would execute and exits without changes.
+
+    --force
+        Skip ALL AGE key checks (both the CLI flag pre-check and the
+        interactive fingerprint confirmation). Use only in automated/CI
+        pipelines where the key is confirmed saved by external means.
+        WARNING: destructive — implies --i-have-saved-my-recovery-kit.
+
+SAFETY MODEL:
+    Two-prompt model for age key destruction:
+      1. CLI flag  --i-have-saved-my-recovery-kit  (pre-check).
+      2. Interactive fingerprint confirmation immediately before
+         the project directory (and key) is deleted. You must type
+         the exact Age public key shown on screen.
+         This second prompt cannot be skipped without --force.
+
+    Without the age key ALL encrypted backups are permanently
+    unrecoverable. Export a recovery kit first:
+        ./utilities/secrets-export-recovery-kit.sh
+
+EXAMPLES:
+    sudo bash ./utilities/uninstall-vaultwarden.sh run --dry-run
+    sudo bash ./utilities/uninstall-vaultwarden.sh run --i-have-saved-my-recovery-kit
+EOF
 }
 
 # ─── Argument parsing ─────────────────────────────────────────────────────────

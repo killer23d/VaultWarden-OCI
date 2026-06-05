@@ -34,12 +34,17 @@ source "${PROJECT_ROOT}/lib/email.sh"
 source "${PROJECT_ROOT}/lib/crypto.sh"
 source "${PROJECT_ROOT}/lib/secrets.sh"
 
-_show_help() {
+show_help() {
     cat << 'EOF'
 VaultWarden-OCI Secrets Management
 
 USAGE:
     sudo utilities/setup-secrets.sh SUBCOMMAND [OPTIONS]
+
+DESCRIPTION:
+    Manages VaultWarden-OCI secrets: bootstrap Age encryption, configure
+    credentials interactively or automatically, rotate fields, and export
+    recovery kits. Delegates to specialized scripts.
 
 SUBCOMMANDS:
     bootstrap           Bootstrap Age key, SOPS config, and placeholder secrets
@@ -48,6 +53,10 @@ SUBCOMMANDS:
     rotate [KEY]        Rotate one or all credentials (delegates to utilities/secrets-edit.sh)
     export-recovery-kit Export encrypted recovery kit (delegates to utilities/secrets-edit.sh)
     breakglass [FLAGS]  Emergency break-glass admin account management
+    help, --help, -h    Show this help
+
+OPTIONS:
+    --help, -h          Show this help
 
 Run: setup-secrets.sh SUBCOMMAND --help  for subcommand-specific help.
 
@@ -1978,9 +1987,9 @@ main() {
         rotate)              _cmd_rotate "$@" ;;
         export-recovery-kit) _cmd_export_recovery_kit "$@" ;;
         breakglass)          _cmd_breakglass "$@" ;;
-        --help|-h)           _show_help; exit 0 ;;
-        "")  log_error "Subcommand required. Use --help for usage."; _show_help; exit 1 ;;
-        *)   log_error "Unknown subcommand: ${subcmd}"; _show_help; exit 1 ;;
+        help|--help|-h)      show_help; exit 0 ;;
+        "")  log_error "Subcommand required. Use --help for usage."; show_help; exit 1 ;;
+        *)   log_error "Unknown subcommand: ${subcmd}"; show_help; exit 1 ;;
     esac
 }
 
