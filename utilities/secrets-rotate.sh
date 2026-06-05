@@ -6,6 +6,34 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+show_help() {
+    cat <<'EOF'
+VaultWarden Secrets — rotate subcommand
+
+USAGE:
+    ./utilities/secrets-rotate.sh FIELD [OPTIONS]
+    ./utilities/secrets-rotate.sh rotate FIELD [OPTIONS]
+    ./edit-secrets.sh rotate FIELD [OPTIONS]
+
+DESCRIPTION:
+    Re-collects and re-hashes one credential, re-encrypts secrets.yaml, and
+    resyncs Docker secret bind-mount files. Run list to see all fields.
+
+OPTIONS:
+    --dry-run    Preview what would change without writing
+    --no-backup  Skip creating backup before rotation
+    --help, -h   Show this help
+
+EXAMPLES:
+    ./utilities/secrets-rotate.sh admin_token
+    ./utilities/secrets-rotate.sh email_api_token --dry-run
+    ./edit-secrets.sh rotate smtp_password
+    ./edit-secrets.sh rotate backup_passphrase --no-backup
+EOF
+}
+
+case "${1:-}" in --help|-h|help) show_help; exit 0 ;; esac
 cd "$PROJECT_ROOT"
 
 source "${PROJECT_ROOT}/lib/log.sh"
@@ -18,73 +46,6 @@ source "${PROJECT_ROOT}/lib/secrets.sh"
 log_debug "secrets-rotate: SECRETS_FILE resolved to: ${SECRETS_FILE}"
 
 trap perform_cleanup EXIT
-
-show_help() {
-    cat << 'HELP_HEADER'
-VaultWarden Secrets — rotate subcommand
-
-USAGE:
-    ./utilities/secrets-rotate.sh FIELD [OPTIONS]
-    ./utilities/secrets-rotate.sh rotate FIELD [OPTIONS]  # 'rotate' accepted as alias
-    ./edit-secrets.sh rotate FIELD [OPTIONS]
-
-DESCRIPTION:
-    Re-collects and re-hashes a single named credential, then atomically
-    re-encrypts secrets.yaml and resyncs Docker secret bind-mount files.
-
-SUPPORTED FIELDS:
-HELP_HEADER
-    # Print the dynamic field list from the schema so this help text is always
-    # in sync with secrets-schema.yaml without manual maintenance.
-    if command -v yq > /dev/null 2>&1 \
-            && [[ -f "${PROJECT_ROOT}/secrets-schema.yaml" ]]; then
-        while IFS= read -r _hkey; do
-            local _hlabel
-            _hlabel=$(schema_field_safe "$_hkey" label 2>/dev/null)
-            if [[ -n "$_hlabel" ]]; then
-                printf '    %-35s (%s)\n' "$_hkey" "$_hlabel"
-            else
-                printf '    %s\n' "$_hkey"
-            fi
-        done < <(schema_keys)
-    else
-        if ! command -v yq > /dev/null 2>&1; then
-            printf '    %s(yq not installed — install with: sudo apt install yq  or  snap install yq)%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
-        elif [[ ! -f "${PROJECT_ROOT}/secrets-schema.yaml" ]]; then
-            printf '    %s(secrets-schema.yaml not found — run setup.sh install first)%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
-        fi
-        printf '    %-35s (auto-generated admin token)\n' "admin_token"
-        printf '    %-35s (bcrypt hash for Caddy)\n' "caddy_admin_password"
-        printf '    %-35s (backup encryption passphrase)\n' "backup_passphrase"
-        printf '    %-35s (Cloudflare DNS API token)\n' "caddy_cloudflare_dns_token"
-        printf '    %-35s (SMTP relay password)\n' "smtp_password"
-        printf '    %-35s (email API key)\n' "email_api_token"
-        printf '    ... run after setup.sh install for the full schema list\n'
-    fi
-    cat << 'HELP_FOOTER'
-
-EMAIL_MODE / EMAIL_PROVIDER quick reference (.env):
-    EMAIL_MODE=auto   — tries API → SMTP → Postfix in order
-    EMAIL_MODE=api    — HTTP API only   (rotate: email_api_token)
-    EMAIL_MODE=smtp   — SMTP relay only (rotate: smtp_password)
-    EMAIL_MODE=host   — Postfix sidecar (no token or password needed)
-    EMAIL_PROVIDER=mailersend|sendgrid|mailgun|postmark|resend
-        → selects which HTTP driver is used at runtime;
-          the token is always stored as "email_api_token" in secrets.yaml.
-
-FLAGS:
-    --dry-run    Preview what would change without writing
-    --no-backup  Skip creating backup before rotation
-    --help, -h   Show this help
-
-EXAMPLES:
-    ./utilities/secrets-rotate.sh admin_token
-    ./utilities/secrets-rotate.sh cf_worker_bouncer_token
-    ./utilities/secrets-rotate.sh email_api_token --dry-run
-    ./edit-secrets.sh rotate smtp_password
-    ./edit-secrets.sh rotate backup_passphrase --no-backup
-HELP_FOOTER
-}
 
 DRY_RUN=false
 SKIP_BACKUP=false
@@ -354,6 +315,7 @@ PYEOF
 }
 
 main() {
+    case "${1:-}" in --help|-h|help) show_help; exit 0 ;; esac
     if [[ "${1:-}" == "rotate" ]]; then shift; fi
 
     local rotate_field=""
@@ -367,7 +329,7 @@ main() {
         case "$1" in
             --dry-run)   DRY_RUN=true;     shift ;;
             --no-backup) SKIP_BACKUP=true; shift ;;
-            --help|-h)   show_help; exit 0 ;;
+            --help|-h|help) show_help; exit 0 ;;
             *) log_error "Unknown option: '$1'"; show_help; exit 1 ;;
         esac
     done

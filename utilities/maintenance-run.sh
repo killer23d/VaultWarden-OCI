@@ -6,6 +6,39 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+show_help() {
+    cat <<'EOF'
+VaultWarden-OCI Routine Maintenance Runner
+
+USAGE:
+    sudo ./utilities/maintenance-run.sh [OPTIONS]
+    sudo ./maintenance.sh run [OPTIONS]
+
+DESCRIPTION:
+    Runs routine cleanup, backup retention, Docker cleanup, database
+    optimization, and optional DNS/firewall maintenance tasks.
+
+OPTIONS:
+    --comprehensive    Run routine maintenance plus firewall and DNS updates
+    --no-logs          Skip log rotation and cleanup
+    --no-backups       Skip backup cleanup
+    --no-docker        Skip Docker cleanup
+    --no-database      Skip scheduled database optimization
+    --update-dns       Include DNS update in this run
+    --update-firewall  Include firewall update in this run
+    --dry-run          Show what would be done without executing
+    --email            Send email notification on completion
+    --help, -h         Show this help
+
+EXAMPLES:
+    sudo ./utilities/maintenance-run.sh
+    sudo ./maintenance.sh run --comprehensive
+    sudo ./maintenance.sh run --dry-run
+EOF
+}
+
+case "${1:-}" in --help|-h|help) show_help; exit 0 ;; esac
+
 _SAVE_SCRIPT_DIR="$PROJECT_ROOT"
 source "$PROJECT_ROOT/lib/log.sh"
 source "$PROJECT_ROOT/lib/config.sh"
@@ -38,32 +71,7 @@ DB_BACKUP_RETENTION_DAYS=14
 FULL_BACKUP_RETENTION_DAYS=30
 EMERGENCY_BACKUP_RETENTION_DAYS=90
 
-show_help() {
-    cat << 'EOF'
-VaultWarden-OCI Routine Maintenance Runner
 
-USAGE:
-    sudo utilities/maintenance-run.sh [OPTIONS]
-    sudo ./maintenance.sh run [OPTIONS]
-
-OPTIONS:
-    --comprehensive         Run everything: routine + firewall + DNS
-    --no-logs               Skip log rotation and cleanup
-    --no-backups            Skip backup cleanup
-    --no-docker             Skip Docker cleanup
-    --no-database           Skip scheduled database optimization
-    --update-dns            Include DNS update in this run
-    --update-firewall       Include firewall update in this run
-    --dry-run               Show what would be done without executing
-    --email                 Send email notification on completion
-    --help, -h              Show this help
-
-EXIT CODES:
-    0 — completed successfully
-    1 — completed with minor issues
-    2 — completed with critical failures
-EOF
-}
 
 
 _load_env() {
@@ -92,7 +100,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 main() {
-    require_root
+    require_root "$@"
 
     local OPS_LOCK="/run/lock/vaultwarden-operations.lock"
     local _OPS_LOCK_FD

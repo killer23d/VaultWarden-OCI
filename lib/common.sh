@@ -126,7 +126,7 @@ require_root() {
     if ! is_root; then
         local caller="${BASH_SOURCE[1]:-$0}"
         log_error "This script must be run as root."
-        log_hint "Re-run with: sudo ${caller} ${*:-}"
+        log_hint "Re-run with: sudo ${caller} $*"
         exit 1
     fi
 }

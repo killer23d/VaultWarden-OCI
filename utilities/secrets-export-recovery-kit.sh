@@ -6,6 +6,32 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+show_help() {
+    cat <<'EOF'
+VaultWarden Secrets — export recovery kit
+
+USAGE:
+    ./utilities/secrets-export-recovery-kit.sh [OPTIONS]
+    ./edit-secrets.sh export-recovery-kit [OPTIONS]
+
+DESCRIPTION:
+    Exports a plaintext recovery kit containing the Age private key and
+    decrypted secrets after blocking unsafe placeholder values.
+
+OPTIONS:
+    --force       Allow export even when CHANGE_ME placeholders remain
+    --output DIR  Write the recovery kit under DIR
+    --help, -h    Show this help
+
+EXAMPLES:
+    ./utilities/secrets-export-recovery-kit.sh
+    ./utilities/secrets-export-recovery-kit.sh --output /secure/offline
+    ./edit-secrets.sh export-recovery-kit --force
+EOF
+}
+
+case "${1:-}" in --help|-h|help) show_help; exit 0 ;; esac
 cd "$PROJECT_ROOT"
 
 source "${PROJECT_ROOT}/lib/log.sh"
@@ -16,33 +42,6 @@ source "${PROJECT_ROOT}/lib/crypto.sh"
 source "${PROJECT_ROOT}/lib/secrets.sh"
 
 trap perform_cleanup EXIT
-
-show_help() {
-    cat << 'EOF'
-VaultWarden Secrets — export-recovery-kit subcommand
-
-USAGE:
-    ./utilities/secrets-export-recovery-kit.sh export-recovery-kit [OPTIONS]
-    ./edit-secrets.sh export-recovery-kit [OPTIONS]
-
-DESCRIPTION:
-    Decrypts secrets.yaml, validates that no PLACEHOLDER values remain, then
-    exports a plaintext recovery document containing the Age private key and
-    all credentials. The output file is written to a tmpfs-backed directory
-    (e.g. /dev/shm) with mode 0600 and an auto-delete scheduled after 30
-    minutes via at(1).
-
-    This is the canonical standalone entry point for recovery kit export.
-    setup-secrets.sh delegates its post-setup export prompt here.
-
-FLAGS:
-    --help, -h    Show this help
-
-EXAMPLES:
-    ./utilities/secrets-export-recovery-kit.sh export-recovery-kit
-    ./edit-secrets.sh export-recovery-kit
-EOF
-}
 
 check_prerequisites() {
     local missing=()
@@ -104,10 +103,11 @@ _export_recovery_kit_safe() {
 }
 
 main() {
+    case "${1:-}" in --help|-h|help) show_help; exit 0 ;; esac
     if [[ "${1:-}" == "export-recovery-kit" ]]; then shift; fi
 
     case "${1:-}" in
-        --help|-h) show_help; exit 0 ;;
+        --help|-h|help) show_help; exit 0 ;;
         "")        ;;
         *) log_error "Unknown option: '$1'"; show_help; exit 1 ;;
     esac

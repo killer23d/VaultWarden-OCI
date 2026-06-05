@@ -78,10 +78,25 @@ check_dependencies() {
         echo "ERROR: restore.sh: the following required tools are not installed: ${missing_hard[*]}" >&2
         echo "       Install with: apt-get install -y age sqlite3 coreutils tar" >&2
         echo "       age-keygen is part of the 'age' package on most distributions." >&2
+        local tool
+        for tool in "${missing_hard[@]}"; do
+            case "$tool" in
+                age|age-keygen) log_hint "Install: sudo apt-get install -y age" ;;
+                sqlite3)        log_hint "Install: sudo apt-get install -y sqlite3" ;;
+                tar)            log_hint "Install: sudo apt-get install -y tar" ;;
+            esac
+        done
         exit 1
     fi
     if [[ ${#missing_soft[@]} -gt 0 ]]; then
         echo "WARN: restore.sh: optional tools missing (some features will be disabled): ${missing_soft[*]}" >&2
+        local tool
+        for tool in "${missing_soft[@]}"; do
+            case "$tool" in
+                sops) log_hint "Install: see https://github.com/getsops/sops/releases" ;;
+                zstd) log_hint "Install: sudo apt-get install -y zstd" ;;
+            esac
+        done
     fi
 }
 # Skip heavy dependency checks until a live restore or list subcommand is known.
@@ -121,74 +136,39 @@ _SESSION_RCLONE_REMOTE_PATH=""
 RCLONE_NEEDS_INTERACTIVE_NAME=false
 
 show_help() {
-    cat << 'EOF'
+    cat <<'EOF'
 VaultWarden-OCI Restore Script
 
 USAGE:
-    sudo ./restore.sh <subcommand> [options]
+    sudo ./restore.sh <subcommand> [OPTIONS]
+
+DESCRIPTION:
+    Restores encrypted local or remote backups, prompts for the matching Age
+    key when needed, and regenerates the active Age key after restore.
 
 SUBCOMMANDS:
-    latest [TYPE]     Restore the newest local backup (TYPE: db | full | emergency)
-    list              List available local backups (no root required)
-    list --remote     List available remote backups (no root required)
-    interactive       Interactive guided restore — shows a numbered backup menu.
-                      If rclone is configured, you are first asked whether to
-                      restore from a LOCAL or REMOTE backup.
+    latest [TYPE]  Restore newest local backup (TYPE: db, full, emergency)
+    list           List available local backups
+    list --remote  List available remote backups
+    interactive    Guided restore with backup selection prompts
+    help           Show this help
 
-    After the backup is selected you will be prompted for the age private
-    key that was used to encrypt that backup.  Press Enter to use the key
-    already configured in .env (SOPS_AGE_KEY_FILE).
-
-    Once the restore lands, a NEW age key is automatically generated,
-    installed to all configured locations, and displayed prominently.
-    Save it before pressing Enter to start the services.
-
-OPTIONS (used after a subcommand):
-    --file FILE             Restore a specific backup file (.age)
-    --remote                Skip the local/remote menu; restore from rclone remote
-    --key-file FILE         Path to the age private key for decrypting this backup
-                            (alternative to the interactive prompt)
-    --from-recovery-kit FILE
-                            Path to a plaintext recovery-kit file.  The Age
-                            private key (AGE-SECRET-KEY-1...) is extracted
-                            automatically and used for decryption — no manual
-                            key entry required.  Intended for bare-metal DR
-                            where the kit file is the only credential available.
-    --no-backup             Skip pre-restore emergency snapshot
-    --skip-verification     Skip integrity check (not recommended)
-    --skip-env              Do not restore archived .env over current .env
-    --dry-run               Show what would happen without making changes
-    --force                 Skip confirmation prompts
-
-GLOBAL SUBCOMMAND:
-    help                    Show this help
-
-ENVIRONMENT:
-    BACKUP_DIR=<path>                  Override backup storage root
-                                       (default: $PROJECT_STATE_DIR/backups)
-    RESTORE_SNAPSHOT_HARD_FAIL=false   Demote snapshot failure to a warning
-    RESTORE_AGE_KEY_FILE=<path>        Non-interactive equivalent of --key-file
-    RESTORE_RECOVERY_KIT_FILE=<path>   Non-interactive equivalent of --from-recovery-kit
-    RCLONE_REMOTE_NAME                 Read from .env when available
+OPTIONS:
+    --file FILE              Restore a specific .age backup file
+    --remote                 Restore from configured rclone remote
+    --key-file FILE          Age private key for decrypting this backup
+    --from-recovery-kit FILE Extract Age key from a plaintext recovery kit
+    --no-backup              Skip pre-restore emergency snapshot
+    --skip-verification      Skip integrity checks
+    --skip-env               Do not restore archived .env over current .env
+    --dry-run                Show what would happen without making changes
+    --force                  Skip confirmation prompts
 
 EXAMPLES:
-    # ── QUICK START (most common) ────────────────────────────────
-    sudo ./restore.sh latest             # Restore newest backup (interactive confirm)
-    sudo ./restore.sh latest db          # Restore newest DB backup
-    sudo ./restore.sh latest --force     # Restore newest backup, no confirm prompts
-    ./restore.sh list                    # List local backups (no sudo)
-    ./restore.sh list --remote           # List remote backups (no sudo)
-
-    # ── INTERACTIVE MENU ─────────────────────────────────────────
-    sudo ./restore.sh interactive                    # Select from local backups
-    sudo ./restore.sh interactive --remote           # Select from remote backups
-
-    # ── TARGETED RESTORE ──────────────────────────────────────────
-    sudo ./restore.sh interactive --file "/var/lib/vaultwarden/backups/full/full_20260101.tar.zst.age"
-    sudo ./restore.sh interactive --key-file /tmp/old-age-key.txt  # Supply key non-interactively
-
-    # ── BARE-METAL DISASTER RECOVERY ──────────────────────────────
-    sudo ./restore.sh latest --from-recovery-kit /mnt/usb/recovery-kit.txt --force
+    sudo ./restore.sh interactive
+    sudo ./restore.sh latest full
+    ./restore.sh list
+    ./restore.sh list --remote
 EOF
 }
 
@@ -198,7 +178,7 @@ EOF
 # Handle help before the .env check so it always works.
 if [[ $# -gt 0 ]]; then
     case "$1" in
-        help|--help|-h) show_help; exit 0 ;;
+        --help|-h|help) show_help; exit 0 ;;
     esac
 fi
 
@@ -687,8 +667,9 @@ select_backup_interactive() {
     _LOCAL_FILES=()
     _LOCAL_TYPES=()
     list_all_backups_interactive || return 1
-    local total="${#_LOCAL_FILES[@]}" choice
+    list_backups "${BACKUP_BASE_DIR}" false
     echo ""
+    local total="${#_LOCAL_FILES[@]}" choice
     while true; do
         read -r -p "  Enter number to restore (1-${total}), or q to quit: " choice
         [[ "$choice" == "q" || "$choice" == "Q" ]] && { log_info "Restore cancelled."; exit 0; }

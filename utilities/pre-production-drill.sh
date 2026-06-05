@@ -5,6 +5,31 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+show_help() {
+    cat <<'EOF'
+VaultWarden-OCI Pre-Production Drill
+
+USAGE:
+    sudo ./utilities/pre-production-drill.sh [OPTIONS]
+
+DESCRIPTION:
+    Runs a non-destructive rehearsal of critical operational paths including
+    secret validation, backup/decrypt checks, restore drill, and email checks.
+
+OPTIONS:
+    --skip-email    Skip email delivery test
+    --skip-restore  Skip restore path drill
+    --help, -h      Show this help
+
+EXAMPLES:
+    sudo ./utilities/pre-production-drill.sh
+    sudo ./utilities/pre-production-drill.sh --skip-email
+    sudo ./utilities/pre-production-drill.sh --skip-restore
+EOF
+}
+
+case "${1:-}" in --help|-h|help) show_help; exit 0 ;; esac
+
 source "$SCRIPT_DIR/lib/log.sh"
 source "$SCRIPT_DIR/lib/config.sh"
 source "$SCRIPT_DIR/lib/common.sh"
@@ -18,31 +43,13 @@ source "$SCRIPT_DIR/lib/storage.sh"
 SKIP_EMAIL=false
 SKIP_RESTORE=false
 
+
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --skip-email)   SKIP_EMAIL=true;   shift ;;
         --skip-restore) SKIP_RESTORE=true; shift ;;
-        --help|-h)
-            cat <<'EOF'
-VaultWarden-OCI Pre-Production Drill
-
-A non-destructive rehearsal of all critical operational paths.
-No production state is modified.
-
-USAGE:
-    sudo ./utilities/pre-production-drill.sh [options]
-
-OPTIONS:
-    --skip-email    Skip email delivery test (if MTA not configured yet)
-    --skip-restore  Skip restore path drill (decrypt + integrity check)
-    --help          Show this help
-
-EXIT CODES:
-    0  All steps passed
-    1  One or more steps failed
-EOF
-            exit 0
-            ;;
+        --help|-h|help) show_help; exit 0 ;;
         *) log_error "Unknown option: $1"; exit 1 ;;
     esac
 done
@@ -435,7 +442,7 @@ _print_drill_summary() {
 
 main() {
     _DRILL_START=$(date +%s)
-    require_root
+    require_root "$@"
     trap 'perform_cleanup' EXIT HUP INT TERM
 
     DRILL_TMPDIR=$(mktemp -d -p /dev/shm 2>/dev/null || mktemp -d -t vw_drill_main.XXXXXXXXXX)

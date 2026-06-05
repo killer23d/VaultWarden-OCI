@@ -765,13 +765,9 @@ main() {
 
   log_success "VaultWarden-OCI startup completed"
 
-  if [[ ${#_STARTUP_WARNINGS[@]} -gt 0 ]]; then
-    log_warn "============================================================"
-    log_warn "STARTUP COMPLETED WITH WARNINGS — action may be required:"
-    for _wmsg in "${_STARTUP_WARNINGS[@]}"; do
-      log_warn "  $_wmsg"
-    done
-    log_warn "============================================================"
+  if (( ${#_STARTUP_WARNINGS[@]} > 0 )); then
+    log_warn "Startup completed with ${#_STARTUP_WARNINGS[@]} warning(s):"
+    for _w in "${_STARTUP_WARNINGS[@]}"; do log_warn "  • $_w"; done
   fi
 }
 

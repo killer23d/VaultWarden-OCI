@@ -21,6 +21,65 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+show_help() {
+    cat <<'EOF'
+VaultWarden-OCI CrowdSec Setup
+
+USAGE:
+    sudo ./utilities/setup-crowdsec.sh [OPTIONS]
+
+DESCRIPTION:
+    Installs and configures CrowdSec, firewall bouncer, optional Cloudflare
+    Worker bouncer, service units, and VaultWarden integration.
+
+OPTIONS:
+    --auto             Run non-interactively
+    --dry-run          Print actions without changing files
+    --force            Re-run phases even if already applied
+    --use-latest       Use current upstream releases instead of pinned versions
+    --autonomous       Deploy the Workers bouncer in autonomous mode
+    --admin-ip IP|CIDR Add an admin allowlist entry
+    --help-full        Show detailed phase and environment guidance
+    --help, -h         Show this help
+
+EXAMPLES:
+    sudo ./utilities/setup-crowdsec.sh
+    sudo ./utilities/setup-crowdsec.sh --auto --admin-ip 203.0.113.10
+    sudo ./utilities/setup-crowdsec.sh --dry-run
+EOF
+}
+
+show_help_full() {
+    cat <<'EOF'
+VaultWarden-OCI CrowdSec Setup — Full Help
+
+USAGE:
+    sudo ./utilities/setup-crowdsec.sh [OPTIONS]
+
+DESCRIPTION:
+    Installs CrowdSec packages, registers bouncers, configures firewall
+    enforcement, optionally deploys Cloudflare Worker resources, writes
+    systemd units, and prints verification commands.
+
+OPTIONS:
+    --auto             Non-interactive mode
+    --dry-run          Preview actions only
+    --force            Re-run all setup phases
+    --use-latest       Override version pins with live upstream releases
+    --autonomous       Deploy Workers bouncer in autonomous mode
+    --admin-ip IP|CIDR Add this IP/CIDR to the admin allowlist
+    --help-full        Show this detailed help
+    --help, -h         Show concise help
+
+EXAMPLES:
+    sudo ./utilities/setup-crowdsec.sh --force
+    sudo ./utilities/setup-crowdsec.sh --autonomous
+    sudo ./utilities/setup-crowdsec.sh --auto --use-latest
+EOF
+}
+
+case "${1:-}" in --help|-h|help) show_help; exit 0 ;; --help-full) show_help_full; exit 0 ;; esac
+
 if [[ "${EUID}" -ne 0 ]]; then
     if command -v sudo >/dev/null 2>&1; then
         exec sudo -n "$0" "$@"
@@ -343,31 +402,8 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             ADMIN_IP="$2"; shift 2 ;;
-        --help|-h)
-            cat <<'HELP'
-usage: sudo ./utilities/setup-crowdsec.sh [OPTIONS]
-
-  --auto               Non-interactive: never prompt.
-  --dry-run            Print what would happen without changing files.
-  --force              Re-run all phases even if already applied.
-  --use-latest         Override version pins and use the current live upstream
-                       release of each component.
-  --autonomous         Deploy the Workers bouncer in autonomous mode (-S flag).
-  --admin-ip IP|CIDR   Add this IP address or CIDR to the CrowdSec admin
-                       allowlist.
-
-Environment variables (set in .env or exported before running):
-  CLOUDFLARE_PROXY_ENABLED   Set to 'true' to enable the Cloudflare bouncer.
-  # Cloudflare credentials (now in secrets, not .env):
-  #   sudo ./edit-secrets.sh rotate cf_worker_bouncer_token
-  #   sudo ./edit-secrets.sh rotate cloudflare_zone_id
-  #   sudo ./edit-secrets.sh rotate cf_account_id
-  CF_FREE_PLAN               Set to 'false' to disable the free-plan KV write
-                             guard. Default: 'true'.
-  CROWDSEC_VERSION           Pin a specific CrowdSec version.
-  CF_WORKER_BOUNCER_VERSION  Pin a specific Workers bouncer version.
-HELP
-            exit 0 ;;
+        --help|-h|help) show_help; exit 0 ;;
+        --help-full) show_help_full; exit 0 ;;
         *)
             log_error "Unknown flag: $1"
             exit 1 ;;

@@ -32,29 +32,16 @@ EOF
 fi
 
 _TASK="${1}"
+subscript=""
 
 case "$_TASK" in
-    health)
-        exec "$SCRIPT_DIR/utilities/maintenance-health.sh" "$@"
-        ;;
-    update)
-        exec "$SCRIPT_DIR/utilities/maintenance-update.sh" "$@"
-        ;;
-    db-maint)
-        exec "$SCRIPT_DIR/utilities/maintenance-db-maint.sh" "$@"
-        ;;
-    test-email)
-        exec "$SCRIPT_DIR/utilities/maintenance-email.sh" "$@"
-        ;;
-    update-dns)
-        exec "$SCRIPT_DIR/utilities/maintenance-update-dns.sh" "$@"
-        ;;
-    update-firewall)
-        exec "$SCRIPT_DIR/utilities/maintenance-update-firewall.sh" "$@"
-        ;;
-    run)
-        exec "$SCRIPT_DIR/utilities/maintenance-run.sh" "$@"
-        ;;
+    health)          subscript="$SCRIPT_DIR/utilities/maintenance-health.sh" ;;
+    update)          subscript="$SCRIPT_DIR/utilities/maintenance-update.sh" ;;
+    db-maint)        subscript="$SCRIPT_DIR/utilities/maintenance-db-maint.sh" ;;
+    test-email)      subscript="$SCRIPT_DIR/utilities/maintenance-email.sh" ;;
+    update-dns)      subscript="$SCRIPT_DIR/utilities/maintenance-update-dns.sh" ;;
+    update-firewall) subscript="$SCRIPT_DIR/utilities/maintenance-update-firewall.sh" ;;
+    run)             subscript="$SCRIPT_DIR/utilities/maintenance-run.sh" ;;
     help|--help|-h)
         exec "$0"
         ;;
@@ -64,3 +51,6 @@ case "$_TASK" in
         exit 1
         ;;
 esac
+
+[[ "${2:-}" == "--help" || "${2:-}" == "-h" ]] && exec "$subscript" --help
+exec "$subscript" "$@"

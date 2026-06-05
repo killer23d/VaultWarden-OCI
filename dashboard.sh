@@ -48,9 +48,7 @@ CONTAINER_VW="vaultwarden_app"
 CONTAINER_CADDY="vaultwarden_caddy"
 CONTAINER_POSTFIX="vaultwarden_postfix"
 
-# Dashboard timestamps: prefer DASHBOARD_TZ from .env (ux.md #4);
-# fall back to TZ (general project timezone), then UTC.
-TZ_DISPLAY="$(_read_env_var DASHBOARD_TZ "$(_read_env_var TZ "UTC")")"
+TZ_DISPLAY="$(_read_env_var TZ "UTC")"
 
 # Divider line length
 DIVIDER="--------------------------------------------------"
@@ -147,12 +145,16 @@ VaultWarden-OCI Operations Dashboard
 USAGE:
     sudo ./dashboard.sh [OPTIONS]
 
+DESCRIPTION:
+    Opens the interactive operations dashboard for stack status, backups,
+    security checks, secrets, identity, logs, and maintenance shortcuts.
+
 OPTIONS:
     --help, -h    Show this help and exit
 
-KEYBOARD SHORTCUTS:
-    e/q           Exit dashboard
-    b/s/k/a/i     Open Backup, Security, Secrets, Advanced, or Identity menus
+EXAMPLES:
+    sudo ./dashboard.sh
+    sudo ./dashboard.sh --help
 EOF
 }
 
@@ -264,6 +266,9 @@ draw_live_stats() {
     vw_plain="$(_container_status_plain "${CONTAINER_VW}")"
     [[ "$vw_plain" == "Running" ]] && vw_uptime=" (up $(_container_uptime "${CONTAINER_VW}"))"
     echo -e " ${BLD}Stack:${NC}  VaultWarden ${vw_stat}${vw_uptime}  |  Caddy ${caddy_stat}  |  Postfix ${pf_stat}"
+    if grep -rlF 'CHANGE_ME' "${REPO_ROOT}/secrets/.docker_secrets/" 2>/dev/null | grep -q .; then
+        echo -e " ${RED}${BLD}⚠ WARNING:${NC} Docker secrets contain CHANGE_ME placeholders — run: sudo ./edit-secrets.sh"
+    fi
 
     # --- Disk Space ---
     local disk_info
@@ -428,7 +433,13 @@ handle_main_menu() {
                 "${REPO_ROOT}/maintenance.sh" health
             ;;
         4)
-            run_cmd "make logs-tail" make -C "${REPO_ROOT}" logs-tail
+            echo ""
+            echo -e "${BLD}Recent Vaultwarden Logs (Ctrl+C to stop)${NC}"
+            draw_divider
+            trap '' INT
+            docker logs --follow --tail 100 "${CONTAINER_VW}" 2>&1 || true
+            trap - INT
+            _press_enter
             ;;
         d)
             run_cmd "make diagnose" make -C "${REPO_ROOT}" diagnose

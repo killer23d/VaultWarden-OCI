@@ -335,6 +335,7 @@ CRED_BANNER
             "${COLOR_YELLOW}" "${COLOR_RESET}"
 
         printf '\n%s--- NEXT STEPS ---%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
+        log_hint "Release notes: cat ${SCRIPT_DIR}/CHANGELOG.md"
         printf '1. Edit .env:           %s%s%s\n' "${COLOR_YELLOW}" "$env_edit_cmd" "${COLOR_RESET}"
         printf '   ► Set: SMTP_HOST, SMTP_PORT, SMTP_USERNAME in .env\n'
         printf '   ► Verify: DOMAIN and ADMIN_EMAIL are correct\n'
@@ -364,6 +365,7 @@ CRED_BANNER
         printf '2. [ ] Admin Email:   %s%s%s\n' "${COLOR_GREEN}" "${ADMIN_EMAIL:-Not Set}" "${COLOR_RESET}"
 
         printf '\n%s--- NEXT STEPS ---%s\n' "${COLOR_CYAN}" "${COLOR_RESET}"
+        log_hint "Release notes: cat ${SCRIPT_DIR}/CHANGELOG.md"
         printf '1. Edit .env:           %s%s%s\n' "${COLOR_YELLOW}" "$env_edit_cmd" "${COLOR_RESET}"
         printf '   ► Set: SMTP_HOST, SMTP_PORT, SMTP_USERNAME in .env\n'
         printf '   ► Verify: DOMAIN and ADMIN_EMAIL are correct\n'

@@ -5,6 +5,32 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+show_help() {
+    cat <<'EOF'
+VaultWarden-OCI Smoke Test
+
+USAGE:
+    sudo ./utilities/smoke-test.sh [OPTIONS]
+
+DESCRIPTION:
+    Runs production readiness checks for environment, containers, TLS, HTTP,
+    Age/SOPS secrets, backups, timers, CrowdSec, and disk space.
+
+OPTIONS:
+    --quiet       Suppress per-check output; only show summary
+    --fail-fast   Stop on first failure
+    --json        Emit a JSON result array (implies --quiet)
+    --help, -h    Show this help
+
+EXAMPLES:
+    sudo ./utilities/smoke-test.sh
+    sudo ./utilities/smoke-test.sh --fail-fast
+    sudo ./utilities/smoke-test.sh --json
+EOF
+}
+
+case "${1:-}" in --help|-h|help) show_help; exit 0 ;; esac
+
 source "$SCRIPT_DIR/lib/log.sh"
 source "$SCRIPT_DIR/lib/config.sh"
 source "$SCRIPT_DIR/lib/common.sh"
@@ -18,30 +44,14 @@ QUIET=false
 JSON_OUTPUT=false
 FAIL_FAST=false
 
+
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --quiet)    QUIET=true;    shift ;;
         --json)     JSON_OUTPUT=true; shift ;;
         --fail-fast) FAIL_FAST=true; shift ;;
-        --help|-h)
-            cat <<'EOF'
-VaultWarden-OCI Smoke Test
-
-USAGE:
-    sudo ./utilities/smoke-test.sh [options]
-
-OPTIONS:
-    --quiet       Suppress per-check output; only show summary
-    --fail-fast   Stop on first failure
-    --json        Emit a JSON result array (implies --quiet)
-    --help        Show this help
-
-EXIT CODES:
-    0  All checks passed
-    1  One or more checks failed
-EOF
-            exit 0
-            ;;
+        --help|-h|help) show_help; exit 0 ;;
         *) log_error "Unknown option: $1"; exit 1 ;;
     esac
 done
@@ -66,6 +76,16 @@ _record() {
         FAIL) (( _FAIL++ )) || true ;;
         SKIP) (( _SKIP++ )) || true ;;
     esac
+}
+
+_timed_check() {
+    local name="$1"; shift
+    local t0 t1 elapsed
+    t0=$(date +%s%3N 2>/dev/null || date +%s)
+    "$@"
+    t1=$(date +%s%3N 2>/dev/null || date +%s)
+    elapsed=$(( t1 - t0 ))
+    (( elapsed > 5000 )) && log_warn "  [SLOW] $name took ${elapsed}ms"
 }
 
 _check_pass() { local name="$1" detail="${2:-}"; _record "$name" PASS "$detail"
@@ -362,7 +382,7 @@ _print_summary() {
 }
 
 main() {
-    require_root
+    require_root "$@"
     trap '_print_summary' EXIT
 
     [[ "$QUIET" == false ]] && log_header "VaultWarden-OCI Smoke Test"
@@ -372,10 +392,10 @@ main() {
     check_env_file
     check_domain_configured
     check_containers_running
-    check_tls_certificate
-    check_http_endpoints
+    _timed_check "check_tls_certificate" check_tls_certificate
+    _timed_check "check_http_endpoints" check_http_endpoints
     check_age_key
-    check_secrets_decryptable
+    _timed_check "check_secrets_decryptable" check_secrets_decryptable
     check_docker_secrets_materialized
     check_backup_exists
     check_systemd_timers

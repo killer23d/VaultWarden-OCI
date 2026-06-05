@@ -6,6 +6,31 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+show_help() {
+    cat <<'EOF'
+VaultWarden Secrets — list subcommand
+
+USAGE:
+    ./utilities/secrets-list.sh [OPTIONS]
+    ./utilities/secrets-list.sh list [OPTIONS]
+    ./edit-secrets.sh list [OPTIONS]
+
+DESCRIPTION:
+    Lists available secret field names from the encrypted secrets file without
+    printing secret values.
+
+OPTIONS:
+    --help, -h    Show this help
+
+EXAMPLES:
+    ./utilities/secrets-list.sh
+    ./utilities/secrets-list.sh list
+    ./edit-secrets.sh list
+EOF
+}
+
+case "${1:-}" in --help|-h|help) show_help; exit 0 ;; esac
 cd "$PROJECT_ROOT"
 
 source "${PROJECT_ROOT}/lib/log.sh"
@@ -14,26 +39,6 @@ source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
 source "${PROJECT_ROOT}/lib/crypto.sh"
 source "${PROJECT_ROOT}/lib/secrets.sh"
-
-show_help() {
-    cat << 'EOF'
-VaultWarden Secrets — list subcommand
-
-USAGE:
-    ./utilities/secrets-list.sh list [OPTIONS]
-    ./edit-secrets.sh list
-
-DESCRIPTION:
-    Lists secret key names only — no values are decrypted or displayed.
-
-FLAGS:
-    --help, -h    Show this help
-
-EXAMPLES:
-    ./utilities/secrets-list.sh list
-    ./edit-secrets.sh list
-EOF
-}
 
 
 do_list_keys() {
@@ -100,10 +105,11 @@ check_prerequisites() {
 }
 
 main() {
+    case "${1:-}" in --help|-h|help) show_help; exit 0 ;; esac
     if [[ "${1:-}" == "list" ]]; then shift; fi
 
     case "${1:-}" in
-        --help|-h) show_help; exit 0 ;;
+        --help|-h|help) show_help; exit 0 ;;
         "")        ;;
         *) log_error "Unknown option: '$1'"; show_help; exit 1 ;;
     esac

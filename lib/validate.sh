@@ -25,7 +25,7 @@ validate_email() {
     local email="$1"
     # RFC 5321: maximum total length is 254 characters.
     [[ ${#email} -le 254 ]] || return 1
-    [[ "$email" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]
+    [[ "$email" =~ ^[a-zA-Z0-9._%+-]+@[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]]
 }
 
 validate_domain() {

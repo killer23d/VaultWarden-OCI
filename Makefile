@@ -107,10 +107,6 @@ help: ## Show this help message
 	     /^[a-zA-Z_-]+:.*?##/ { printf "  $(GREEN)%-24s$(NC) %s\n", $$1, $$2 }' \
 	    $(MAKEFILE_LIST)
 	@echo ""
-	@echo "$(RED)Dangerous / state-changing targets:$(NC)"
-	@echo "  $(YELLOW)down restart safe-restart restore db-maint prune clean-all uninstall$(NC)"
-	@echo "  $(YELLOW)Review each target's help text and keep recovery credentials available.$(NC)"
-	@echo ""
 	@echo "$(CYAN)Examples:$(NC)"
 	@echo "  $(GREEN)make up$(NC)                          Start with secrets initialization"
 	@echo "  $(GREEN)make logs SERVICE=caddy$(NC)          View caddy logs"
@@ -136,7 +132,7 @@ setup: ## Run initial setup (requires sudo)
 		echo "$(RED)Error: Run with sudo: sudo make setup$(NC)"; \
 		exit 1; \
 	fi
-	@if [ ! -f ".env" ]; then echo "$(RED)Error: .env missing. Usage: sudo ./setup.sh --domain <domain> --email <email>$(NC)"; exit 1; fi
+	@if [ ! -f ".env" ]; then echo "$(RED)Error: .env missing. Run: sudo ./setup.sh install --domain your.domain --email you@example.com$(NC)"; exit 1; fi
 	@if grep -qE '^DOMAIN=(https?://)?vault\.example\.com/?$$' .env 2>/dev/null; then \
 		echo "$(RED)Error: DOMAIN is still the placeholder 'vault.example.com' in .env$(NC)"; \
 		echo "$(YELLOW)Run setup directly with your real domain:$(NC)"; \
@@ -325,6 +321,10 @@ up: ## Start all services (runs startup.sh for health checks)
 	@echo "$(GREEN)Services started successfully!$(NC)"
 
 start: up ## Alias for up
+
+# ===========================================================================
+##@ ⚠ Destructive Operations
+# ===========================================================================
 
 down: ## Stop all services gracefully
 	$(call check-docker)
@@ -545,6 +545,10 @@ list-backups: ## List available backups with sizes
 backup-status: ## Show backup health summary
 	$(call require-root)
 	@./backup.sh list
+
+# ===========================================================================
+##@ ⚠ Destructive Operations
+# ===========================================================================
 
 restore: ## Interactive restore (guided)
 	$(call require-root)
@@ -796,6 +800,10 @@ maintenance-full: ## Run full maintenance with all checks
 	@echo "$(BLUE)Running full maintenance...$(NC)"
 	@./maintenance.sh run --comprehensive
 
+# ===========================================================================
+##@ ⚠ Destructive Operations
+# ===========================================================================
+
 db-maint: ## Run database maintenance (VACUUM, integrity check)
 	$(call require-root)
 	@echo "$(BLUE)Running database maintenance...$(NC)"
@@ -991,6 +999,10 @@ clean: ## Remove generated files (logs, temp files)
 	@rm -f setup.log
 	@echo "$(GREEN)Clean complete.$(NC)"
 
+# ===========================================================================
+##@ ⚠ Destructive Operations
+# ===========================================================================
+
 clean-all: ## [DESTRUCTIVE] Remove all generated files including secrets cache
 	@echo "$(YELLOW)WARNING: This will remove secrets cache. Re-run make up to regenerate.$(NC)"
 	@read -p "Continue? [y/N] " confirm; \
@@ -1002,6 +1014,10 @@ clean-all: ## [DESTRUCTIVE] Remove all generated files including secrets cache
 		echo "Cancelled."; \
 	fi
 
+# ===========================================================================
+##@ ⚠ Destructive Operations
+# ===========================================================================
+
 prune: ## [DESTRUCTIVE] Remove unused Docker resources (containers, networks, images)
 	$(call check-docker)
 	@echo "$(BLUE)Pruning unused Docker resources...$(NC)"
@@ -1010,10 +1026,11 @@ prune: ## [DESTRUCTIVE] Remove unused Docker resources (containers, networks, im
 
 # ===========================================================================
 # ===========================================================================
-##@ ⚠  DANGER ZONE — Destructive Operations
+##@ Uninstall
 # ===========================================================================
 
-##@ Uninstall
+# ===========================================================================
+##@ ⚠ Destructive Operations
 # ===========================================================================
 
 uninstall: ## Uninstall VaultWarden-OCI (interactive)

@@ -6,6 +6,31 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+show_help() {
+    cat <<'EOF'
+VaultWarden Secrets — view subcommand
+
+USAGE:
+    ./utilities/secrets-view.sh [OPTIONS]
+    ./utilities/secrets-view.sh view [OPTIONS]
+    ./edit-secrets.sh view [OPTIONS]
+
+DESCRIPTION:
+    Decrypts and displays secrets in read-only mode. No changes are saved.
+
+OPTIONS:
+    --editor EDITOR  Override pager/viewer (default: less, then $EDITOR -R)
+    --help, -h       Show this help
+
+EXAMPLES:
+    ./utilities/secrets-view.sh
+    ./utilities/secrets-view.sh --editor vim
+    ./edit-secrets.sh view
+EOF
+}
+
+case "${1:-}" in --help|-h|help) show_help; exit 0 ;; esac
 cd "$PROJECT_ROOT"
 
 source "${PROJECT_ROOT}/lib/log.sh"
@@ -16,29 +41,6 @@ source "${PROJECT_ROOT}/lib/crypto.sh"
 source "${PROJECT_ROOT}/lib/secrets.sh"
 
 trap perform_cleanup EXIT
-
-show_help() {
-    cat << 'EOF'
-VaultWarden Secrets — view subcommand
-
-USAGE:
-    ./utilities/secrets-view.sh [OPTIONS]
-    ./utilities/secrets-view.sh view [OPTIONS]  # 'view' accepted as alias
-    ./edit-secrets.sh view [OPTIONS]
-
-DESCRIPTION:
-    Decrypts and displays secrets in read-only mode. No changes are saved.
-
-FLAGS:
-    --editor EDITOR    Override pager/viewer (default: less, then $EDITOR -R)
-    --help, -h         Show this help
-
-EXAMPLES:
-    ./utilities/secrets-view.sh
-    ./utilities/secrets-view.sh --editor vim
-    ./edit-secrets.sh view
-EOF
-}
 
 # Parse EDITOR into an array so values like 'code --wait' keep their flags.
 read -ra EDITOR_CMD <<< "${EDITOR:-nano}"
@@ -112,6 +114,7 @@ do_view() {
 }
 
 main() {
+    case "${1:-}" in --help|-h|help) show_help; exit 0 ;; esac
     if [[ "${1:-}" == "view" ]]; then shift; fi
 
     while [[ $# -gt 0 ]]; do
@@ -124,7 +127,7 @@ main() {
                 read -ra EDITOR_CMD <<< "$2"
                 shift 2
                 ;;
-            --help|-h) show_help; exit 0 ;;
+            --help|-h|help) show_help; exit 0 ;;
             *) log_error "Unknown option: '$1'"; show_help; exit 1 ;;
         esac
     done
