@@ -48,9 +48,8 @@ CONTAINER_VW="vaultwarden_app"
 CONTAINER_CADDY="vaultwarden_caddy"
 CONTAINER_POSTFIX="vaultwarden_postfix"
 
-# Dashboard timestamps: prefer DASHBOARD_TZ from .env (ux.md #4);
-# fall back to TZ (general project timezone), then UTC.
-TZ_DISPLAY="$(_read_env_var DASHBOARD_TZ "$(_read_env_var TZ "UTC")")"
+# Dashboard timestamps: read TZ from .env (ux.md #4 revision), default UTC.
+TZ_DISPLAY="$(_read_env_var TZ "UTC")"
 
 # Divider line length
 DIVIDER="--------------------------------------------------"
@@ -147,12 +146,22 @@ VaultWarden-OCI Operations Dashboard
 USAGE:
     sudo ./dashboard.sh [OPTIONS]
 
+DESCRIPTION:
+    AMTM-style interactive terminal dashboard for VaultWarden-OCI. Displays
+    live stack health, disk usage, CrowdSec bans, backup status, and email
+    queue at a glance. Provides submenus for backup, security, secrets, and
+    advanced operations. Auto-refreshes every 60 seconds.
+
 OPTIONS:
     --help, -h    Show this help and exit
 
 KEYBOARD SHORTCUTS:
     e/q           Exit dashboard
     b/s/k/a/i     Open Backup, Security, Secrets, Advanced, or Identity menus
+
+EXAMPLES:
+    sudo ./dashboard.sh          # Launch dashboard
+    ./dashboard.sh --help        # Show this help
 EOF
 }
 
