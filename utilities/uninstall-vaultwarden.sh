@@ -11,25 +11,57 @@ if [[ -f "${PROJECT_ROOT_FALLBACK}/lib/log.sh" ]]; then
     source "${PROJECT_ROOT_FALLBACK}/lib/log.sh"
     _VW_CALLING_SCRIPT="$(basename "${BASH_SOURCE[0]}")"
 else
+    # ── Minimal inline stubs matching lib/log.sh format exactly ──────────────
+    # Format: COLOR[HH:MM:SS] [SCRIPT] LEVEL RESET message
+    # Labels must match lib/log.sh verbatim: INFO, OK, WARN, ERROR, DEBUG,
+    # HINT, ROLLBACK, DRY RUN — so log output is consistent regardless of
+    # whether the library was loaded.
     _VW_SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
     if [[ -t 1 ]]; then
-        _C_CYAN=$'\e[36m'; _C_GREEN=$'\e[32m'; _C_YELLOW=$'\e[33m'
-        _C_RED=$'\e[1;31m'; _C_RESET=$'\e[0m'
+        _C_CYAN=$'\e[0;36m'
+        _C_GREEN=$'\e[0;32m'
+        _C_YELLOW=$'\e[0;33m'
+        _C_RED=$'\e[1;31m'
+        _C_BLUE=$'\e[0;34m'
+        _C_MAGENTA=$'\e[0;35m'
+        _C_BOLD=$'\e[1m'
+        _C_RESET=$'\e[0m'
     else
-        _C_CYAN=''; _C_GREEN=''; _C_YELLOW=''; _C_RED=''; _C_RESET=''
+        _C_CYAN='' _C_GREEN='' _C_YELLOW='' _C_RED=''
+        _C_BLUE='' _C_MAGENTA='' _C_BOLD='' _C_RESET=''
     fi
-    _vw_ts() { date '+%H:%M:%S'; }
-    log_info()    { printf '%s[%s] [%s] INFO%s %s\n'  "$_C_CYAN"   "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$*"; }
-    log_success() { printf '%s[%s] [%s] OK%s %s\n'    "$_C_GREEN"  "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$*"; }
-    log_warn()    { printf '%s[%s] [%s] WARN%s %s\n'  "$_C_YELLOW" "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$*" >&2; }
-    log_error()   { printf '%s[%s] [%s] ERROR%s %s\n' "$_C_RED"    "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$*" >&2; }
+
+    _vw_ts() {
+        if [[ -t 1 ]]; then
+            date '+%H:%M:%S'
+        else
+            date '+%Y-%m-%dT%H:%M:%S%z'
+        fi
+    }
+
+    # DRY_RUN prefix — mirrors _log_dry_prefix() in lib/log.sh.
+    _vw_dry_prefix() {
+        [[ "${DRY_RUN:-false}" == "true" ]] \
+            && printf '%s[DRY RUN]%s ' "$_C_BLUE" "$_C_RESET" \
+            || true
+    }
+
+    log_info()     { printf '%s[%s] [%s] INFO%s %s%s\n'     "$_C_CYAN"    "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$(_vw_dry_prefix)" "$*"; }
+    log_success()  { printf '%s[%s] [%s] OK%s %s%s\n'       "$_C_GREEN"   "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$(_vw_dry_prefix)" "$*"; }
+    log_warn()     { printf '%s[%s] [%s] WARN%s %s%s\n'     "$_C_YELLOW"  "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$(_vw_dry_prefix)" "$*" >&2; }
+    log_error()    { printf '%s[%s] [%s] ERROR%s %s\n'      "$_C_RED"     "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$*" >&2; }
+    log_debug()    { printf '%s[%s] [%s] DEBUG%s %s\n'      "$_C_MAGENTA" "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$*"; }
+    log_hint()     { printf '%s[%s] [%s] HINT%s %s\n'       "$_C_CYAN"    "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$*"; }
+    log_rollback() { printf '%s[%s] [%s] ROLLBACK%s %s\n'   "$_C_YELLOW"  "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$*" >&2; }
+    log_dry_run()  { printf '%s[%s] [%s] DRY RUN%s %s\n'   "$_C_BLUE"    "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$*"; }
 fi
 die() { log_error "$*"; exit 1; }
 trap 'log_error "${BASH_SOURCE[0]}: failed at line ${LINENO} (exit $?)"; exit 1' ERR
 
-info()    { log_info "$@"; }
+# Convenience aliases — keep consistent with callers throughout this file.
+info()    { log_info    "$@"; }
 success() { log_success "$@"; }
-warn()    { log_warn "$@"; }
+warn()    { log_warn    "$@"; }
 
 show_help() {
     cat <<'EOF'
