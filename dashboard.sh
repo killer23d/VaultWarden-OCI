@@ -28,12 +28,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${SCRIPT_DIR}"
 [[ -f "${REPO_ROOT}/lib/validate.sh" ]] && source "${REPO_ROOT}/lib/validate.sh"
 
-# Read PROJECT_STATE_DIR from .env if present; fall back to default.
+# Read a single variable from .env without sourcing the whole file.
 _read_env_var() {
     local var="$1" default="$2"
     if [[ -f "${REPO_ROOT}/.env" && -r "${REPO_ROOT}/.env" ]]; then
         local val
-        val="$(grep -E "^${var}=" "${REPO_ROOT}/.env" 2>/dev/null | cut -d= -f2- | head -1 || true)"
+        val="$(grep -E "^${var}=" "${REPO_ROOT}/.env" 2>/dev/null \
+            | cut -d= -f2- | head -1 || true)"
         printf '%s' "${val:-${default}}"
     else
         printf '%s' "${default}"
@@ -48,10 +49,10 @@ CONTAINER_VW="vaultwarden_app"
 CONTAINER_CADDY="vaultwarden_caddy"
 CONTAINER_POSTFIX="vaultwarden_postfix"
 
-# Dashboard timestamps: read TZ from .env (ux.md #4 revision), default UTC.
+# Dashboard timestamps: read TZ from .env (ux.md #4), default UTC.
 TZ_DISPLAY="$(_read_env_var TZ "UTC")"
 
-# Divider line length
+# Divider line
 DIVIDER="--------------------------------------------------"
 
 # ---------------------------------------------------------------------------
@@ -71,7 +72,7 @@ _cleanup() {
 trap '_cleanup' INT TERM
 
 # ---------------------------------------------------------------------------
-# Utility: convert epoch seconds to Pacific Time string
+# Utility: convert epoch seconds to a timezone-aware timestamp string
 # ---------------------------------------------------------------------------
 _epoch_to_pt() {
     local epoch="$1"
@@ -81,14 +82,13 @@ _epoch_to_pt() {
 }
 
 # ---------------------------------------------------------------------------
-# Utility: run a command, stream output, keep exit status, show anchor prompt
+# Utility: run a command, stream output, show result, prompt to continue
 # ---------------------------------------------------------------------------
 run_cmd() {
     local label="$1"; shift
     echo ""
     echo -e "${BLD} Running: ${label}${NC}"
     echo -e "${CYN}${DIVIDER}${NC}"
-    # Run with restored default IFS so child commands behave normally
     if (IFS=" "; "$@"); then
         echo -e "${CYN}${DIVIDER}${NC}"
         echo -e "${GRN} Command completed successfully.${NC}"
@@ -120,7 +120,7 @@ run_sudo_cmd() {
 }
 
 # ---------------------------------------------------------------------------
-# Utility: "Press Enter to return to the menu" anchor
+# Utility: reverse-video "Press Enter" anchor
 # ---------------------------------------------------------------------------
 _press_enter() {
     local _dummy
@@ -129,6 +129,9 @@ _press_enter() {
     read -r _dummy
 }
 
+# ---------------------------------------------------------------------------
+# Utility: confirm before a destructive action
+# ---------------------------------------------------------------------------
 _confirm_destructive() {
     local action="$1"
     local answer
@@ -139,6 +142,9 @@ _confirm_destructive() {
     [[ "${answer,,}" == "y" || "${answer,,}" == "yes" ]]
 }
 
+# ---------------------------------------------------------------------------
+# show_help — printed when --help / -h is passed
+# ---------------------------------------------------------------------------
 show_help() {
     cat <<'EOF'
 VaultWarden-OCI Operations Dashboard
@@ -166,6 +172,85 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# _show_changelog  (ux.md #44)
+#
+# Reads CHANGELOG.md and pretty-prints every line under the first
+# "## [Unreleased]" heading until the next "## [" heading.
+# Category headers (### Added / ### Changed / ### Fixed) are coloured.
+# Exits cleanly when CHANGELOG.md is absent.
+# ---------------------------------------------------------------------------
+_show_changelog() {
+    local changelog="${REPO_ROOT}/CHANGELOG.md"
+
+    if [[ ! -f "${changelog}" ]]; then
+        echo -e "${YLW} CHANGELOG.md not found in ${REPO_ROOT}${NC}"
+        return 0
+    fi
+
+    # Extract lines between first "## [Unreleased]" and the next "## [" block.
+    local in_section=false
+    local printed=false
+    local line
+
+    echo ""
+    echo -e "${INV} CHANGELOG — What's New ${NC}"
+    echo -e "${CYN}${DIVIDER}${NC}"
+
+    while IFS= read -r line; do
+        # Detect start of Unreleased section
+        if [[ "${line}" =~ ^##[[:space:]]\[Unreleased\] ]]; then
+            in_section=true
+            continue
+        fi
+
+        # Detect start of the next versioned section — stop
+        if [[ "${in_section}" == true && "${line}" =~ ^##[[:space:]]\[ ]]; then
+            break
+        fi
+
+        [[ "${in_section}" != true ]] && continue
+
+        # Colour-code category headers
+        if [[ "${line}" =~ ^###[[:space:]]Added ]]; then
+            echo -e "${GRN}${line}${NC}"
+            printed=true
+        elif [[ "${line}" =~ ^###[[:space:]]Changed ]]; then
+            echo -e "${YLW}${line}${NC}"
+            printed=true
+        elif [[ "${line}" =~ ^###[[:space:]]Fixed ]]; then
+            echo -e "${CYN}${line}${NC}"
+            printed=true
+        elif [[ "${line}" =~ ^###[[:space:]] ]]; then
+            # Any other ### heading — bold white
+            echo -e "${BLD}${line}${NC}"
+            printed=true
+        else
+            echo "${line}"
+            [[ -n "${line// /}" ]] && printed=true
+        fi
+    done < "${changelog}"
+
+    if [[ "${printed}" != true ]]; then
+        echo -e "${YLW} (No unreleased changes documented yet)${NC}"
+    fi
+
+    echo -e "${CYN}${DIVIDER}${NC}"
+}
+
+# ---------------------------------------------------------------------------
+# _show_changelog_on_update  (ux.md #44)
+#
+# Called automatically after a successful stack update (Advanced menu
+# option 2).  Shows the changelog and pauses so the operator can read it.
+# ---------------------------------------------------------------------------
+_show_changelog_on_update() {
+    echo ""
+    echo -e "${GRN}${BLD} Update complete.${NC} Here is what changed in this release:"
+    _show_changelog
+    _press_enter
+}
+
+# ---------------------------------------------------------------------------
 # Utility: warn on missing script
 # ---------------------------------------------------------------------------
 _check_script() {
@@ -183,8 +268,10 @@ _check_script() {
 # ---------------------------------------------------------------------------
 draw_header() {
     local now_pt version
-    now_pt="$(TZ="${TZ_DISPLAY}" date '+%Y-%m-%d %H:%M %Z' 2>/dev/null || date '+%Y-%m-%d %H:%M')"
-    version="$(cat "${REPO_ROOT}/VERSION" 2>/dev/null | tr -d '[:space:]' || echo '?')"
+    now_pt="$(TZ="${TZ_DISPLAY}" date '+%Y-%m-%d %H:%M %Z' 2>/dev/null \
+        || date '+%Y-%m-%d %H:%M')"
+    version="$(cat "${REPO_ROOT}/VERSION" 2>/dev/null | tr -d '[:space:]' \
+        || echo '?')"
     echo -e "${INV} VaultWarden-OCI v${version} — Operations Dashboard   ${now_pt} ${NC}"
 }
 
@@ -196,7 +283,8 @@ draw_divider() {
 }
 
 # ---------------------------------------------------------------------------
-# _container_status  — print Running (green) or Stopped (red)
+# _container_status_plain  — plain text Running / Stopped (no color codes)
+# _container_status        — color-coded Running / Stopped
 # ---------------------------------------------------------------------------
 _container_status_plain() {
     local name="$1"
@@ -210,30 +298,46 @@ _container_status_plain() {
 _container_status() {
     local status
     status="$(_container_status_plain "$1")"
-    if [[ "$status" == "Running" ]]; then
+    if [[ "${status}" == "Running" ]]; then
         printf "${GRN}Running${NC}"
     else
         printf "${RED}Stopped${NC}"
     fi
 }
 
+# ---------------------------------------------------------------------------
+# _container_uptime  — "Xd Yh" / "Xh Ym" / "Xm" uptime string (ux.md #47)
+# ---------------------------------------------------------------------------
 _container_uptime() {
-    local container="$1" started_at start_epoch now_epoch delta days hours mins
-    started_at=$(docker inspect --format '{{.State.StartedAt}}' "$container" 2>/dev/null) || { printf 'unknown'; return; }
-    start_epoch=$(date -d "$started_at" +%s 2>/dev/null         || date -j -f "%Y-%m-%dT%H:%M:%S" "${started_at%%.*}" +%s 2>/dev/null         || echo 0)
-    [[ "$start_epoch" =~ ^[0-9]+$ && "$start_epoch" -gt 0 ]] || { printf 'unknown'; return; }
+    local container="$1"
+    local started_at start_epoch now_epoch delta days hours mins
+
+    started_at=$(docker inspect --format '{{.State.StartedAt}}' \
+        "${container}" 2>/dev/null) || { printf 'unknown'; return; }
+
+    start_epoch=$(date -d "${started_at}" +%s 2>/dev/null \
+        || date -j -f "%Y-%m-%dT%H:%M:%S" "${started_at%%.*}" +%s 2>/dev/null \
+        || echo 0)
+
+    [[ "${start_epoch}" =~ ^[0-9]+$ && "${start_epoch}" -gt 0 ]] \
+        || { printf 'unknown'; return; }
+
     now_epoch=$(date +%s)
     delta=$(( now_epoch - start_epoch ))
     (( delta < 0 )) && delta=0
-    days=$(( delta / 86400 )); hours=$(( (delta % 86400) / 3600 )); mins=$(( (delta % 3600) / 60 ))
-    if (( days > 0 )); then printf '%dd %dh' "$days" "$hours"
-    elif (( hours > 0 )); then printf '%dh %dm' "$hours" "$mins"
-    else printf '%dm' "$mins"; fi
+
+    days=$(( delta / 86400 ))
+    hours=$(( (delta % 86400) / 3600 ))
+    mins=$(( (delta % 3600) / 60 ))
+
+    if   (( days  > 0 )); then printf '%dd %dh' "${days}"  "${hours}"
+    elif (( hours > 0 )); then printf '%dh %dm' "${hours}" "${mins}"
+    else                       printf '%dm'     "${mins}"
+    fi
 }
 
 # ---------------------------------------------------------------------------
-# _crowdsec_status  — print Running (green) or Stopped (red)
-# Checks the host systemd crowdsec service.
+# _crowdsec_status  — Running (green) / Stopped (red) via systemd
 # ---------------------------------------------------------------------------
 _crowdsec_status() {
     if systemctl is-active --quiet crowdsec 2>/dev/null; then
@@ -244,14 +348,11 @@ _crowdsec_status() {
 }
 
 # ---------------------------------------------------------------------------
-# _cf_worker_status  — print Running (green) or Stopped (red)
-# Checks the crowdsec-cloudflare-bouncer systemd service on the host.
-# This daemon syncs CrowdSec decisions to Cloudflare KV, which the
-# edge Worker uses to enforce bans — if the daemon is up, enforcement
-# is active. Pure systemctl check: zero latency, no network call.
+# _cf_worker_status  — Running (green) / Stopped (red) via systemd
 # ---------------------------------------------------------------------------
 _cf_worker_status() {
-    if systemctl is-active --quiet crowdsec-cloudflare-worker-bouncer.service 2>/dev/null; then
+    if systemctl is-active --quiet \
+            crowdsec-cloudflare-worker-bouncer.service 2>/dev/null; then
         printf "${GRN}Running${NC}"
     else
         printf "${RED}Stopped${NC}"
@@ -259,13 +360,10 @@ _cf_worker_status() {
 }
 
 # ---------------------------------------------------------------------------
-# _secrets_health — ux.md #23
+# _secrets_health  (ux.md #23)
 #
-# Scans .env for any remaining CHANGE_ME / CHANGEME placeholder values.
-# Outputs a single color-coded status string:
-#   GREEN  "All secrets configured"         — no placeholders found
-#   YELLOW "N secret(s) need attention: X Y" — one or more CHANGE_ME remain
-#   RED    "Secrets file missing (.env)"     — .env absent or unreadable
+# Scans .env for CHANGE_ME / CHANGEME placeholder values and returns a
+# single color-coded status string.
 # ---------------------------------------------------------------------------
 _secrets_health() {
     local env_file="${REPO_ROOT}/.env"
@@ -275,28 +373,27 @@ _secrets_health() {
         return
     fi
 
-    # Collect keys whose value contains CHANGE_ME or CHANGEME (case-insensitive).
-    # Ignore comment lines and blank lines.
     local -a unset_keys=()
     local key val
     while IFS='=' read -r key val; do
-        # Skip comment and blank lines
         [[ "${key}" =~ ^[[:space:]]*# ]] && continue
         [[ -z "${key// /}" ]] && continue
         if [[ "${val^^}" == *CHANGE_ME* || "${val^^}" == *CHANGEME* ]]; then
-            unset_keys+=("${key}") 
+            unset_keys+=("${key}")
         fi
     done < <(grep -v '^[[:space:]]*#' "${env_file}" | grep '=')
 
     local count=${#unset_keys[@]}
-    if (( count == 0 )); then
+    if   (( count == 0 )); then
         printf "${GRN}All secrets configured${NC}"
     elif (( count == 1 )); then
         printf "${YLW}1 secret needs attention: %s${NC}" "${unset_keys[0]}"
     elif (( count <= 4 )); then
-        printf "${YLW}%d secrets need attention: %s${NC}" "${count}" "${unset_keys[*]}"
+        printf "${YLW}%d secrets need attention: %s${NC}" \
+            "${count}" "${unset_keys[*]}"
     else
-        printf "${YLW}%d secrets need attention — run: grep CHANGE_ME .env${NC}" "${count}"
+        printf "${YLW}%d secrets need attention — run: grep CHANGE_ME .env${NC}" \
+            "${count}"
     fi
 }
 
@@ -307,19 +404,20 @@ draw_live_stats() {
     draw_divider
 
     # --- Stack Health ---
-    local vw_stat caddy_stat pf_stat
+    local vw_stat caddy_stat pf_stat vw_plain vw_uptime=""
     vw_stat="$(_container_status "${CONTAINER_VW}")"
     caddy_stat="$(_container_status "${CONTAINER_CADDY}")"
     pf_stat="$(_container_status "${CONTAINER_POSTFIX}")"
-    local vw_plain vw_uptime=""
     vw_plain="$(_container_status_plain "${CONTAINER_VW}")"
-    [[ "$vw_plain" == "Running" ]] && vw_uptime=" (up $(_container_uptime "${CONTAINER_VW}"))"
+    [[ "${vw_plain}" == "Running" ]] \
+        && vw_uptime=" (up $(_container_uptime "${CONTAINER_VW}"))"
     echo -e " ${BLD}Stack:${NC}  VaultWarden ${vw_stat}${vw_uptime}  |  Caddy ${caddy_stat}  |  Postfix ${pf_stat}"
 
     # --- Disk Space ---
     local disk_info
     if [[ -d "${STATE_DIR}" ]]; then
-        disk_info="$(df -h "${STATE_DIR}" 2>/dev/null | awk 'NR==2 {printf "%s free of %s on %s", $4, $2, $6}')"
+        disk_info="$(df -h "${STATE_DIR}" 2>/dev/null \
+            | awk 'NR==2 {printf "%s free of %s on %s", $4, $2, $6}')"
     else
         disk_info="(${STATE_DIR} not mounted)"
     fi
@@ -328,32 +426,27 @@ draw_live_stats() {
     # --- CrowdSec bans ---
     local ban_count ban_color
     if systemctl is-active --quiet crowdsec 2>/dev/null; then
-        ban_count="$(sudo cscli decisions list -o raw 2>/dev/null | tail -n +2 | wc -l || echo 0)"
+        ban_count="$(sudo cscli decisions list -o raw 2>/dev/null \
+            | tail -n +2 | wc -l || echo 0)"
     else
         ban_count="N/A (CrowdSec inactive)"
     fi
 
     if [[ "${ban_count}" =~ ^[0-9]+$ ]]; then
-        if (( ban_count == 0 )); then
-            ban_color="${GRN}"
-        elif (( ban_count < 20 )); then
-            ban_color="${YLW}"
-        else
-            ban_color="${RED}"
+        if   (( ban_count == 0 )); then ban_color="${GRN}"
+        elif (( ban_count <  20 )); then ban_color="${YLW}"
+        else                            ban_color="${RED}"
         fi
         echo -e " ${BLD}CrowdSec bans:${NC}  ${ban_color}${ban_count}${NC}"
     else
         echo -e " ${BLD}CrowdSec bans:${NC}  ${YLW}${ban_count}${NC}"
     fi
 
-    # --- CrowdSec Status ---
-    local cs_stat
+    # --- CrowdSec + CF Worker status ---
+    local cs_stat cf_stat
     cs_stat="$(_crowdsec_status)"
-    echo -e " ${BLD}CrowdSec status:${NC}  ${cs_stat}"
-
-    # --- CF Worker (Bouncer) Status ---
-    local cf_stat
     cf_stat="$(_cf_worker_status)"
+    echo -e " ${BLD}CrowdSec status:${NC}  ${cs_stat}"
     echo -e " ${BLD}CF Worker status:${NC}  ${cf_stat}"
 
     # --- Secrets Health (ux.md #23) ---
@@ -362,23 +455,25 @@ draw_live_stats() {
     echo -e " ${BLD}Secrets health:${NC}   ${secrets_stat}"
 
     # --- Last Backup ---
-    local last_backup_str
-    local newest_age
-    newest_age="$(find "${BACKUP_DIR}" -name "*.age" -type f 2>/dev/null | sort | tail -1 || true)"
+    local last_backup_str newest_age
+    newest_age="$(find "${BACKUP_DIR}" -name '*.age' -type f 2>/dev/null \
+        | sort | tail -1 || true)"
     if [[ -n "${newest_age}" ]]; then
         local mtime
-        mtime="$(stat -c '%Y' "${newest_age}" 2>/dev/null || stat -f '%m' "${newest_age}" 2>/dev/null || echo 0)"
+        mtime="$(stat -c '%Y' "${newest_age}" 2>/dev/null \
+            || stat -f '%m' "${newest_age}" 2>/dev/null || echo 0)"
         last_backup_str="$(_epoch_to_pt "${mtime}")"
     else
         last_backup_str="${YLW}No backups found${NC}"
     fi
     echo -e " ${BLD}Last backup:${NC}  ${last_backup_str}"
 
-    # --- Last Backup Result ---
+    # --- Last Backup Result (ux.md #12) ---
     local _last_result _result_color
-    _last_result=$(grep -oE '(PASS|FAIL|ERROR|SUCCESS)'         "${STATE_DIR}/logs/backup.log" 2>/dev/null | tail -1 || true)
+    _last_result=$(grep -oE '(PASS|FAIL|ERROR|SUCCESS)' \
+        "${STATE_DIR}/logs/backup.log" 2>/dev/null | tail -1 || true)
     _last_result="${_last_result:-UNKNOWN}"
-    case "$_last_result" in
+    case "${_last_result}" in
         PASS|SUCCESS) _result_color="${GRN}" ;;
         FAIL|ERROR)   _result_color="${RED}" ;;
         *)            _result_color="${YLW}" ;;
@@ -389,9 +484,9 @@ draw_live_stats() {
     local _timer_output
     _timer_output=$(systemctl list-timers --no-pager 2>/dev/null \
         | grep vaultwarden || true)
-    if [[ -n "$_timer_output" ]]; then
+    if [[ -n "${_timer_output}" ]]; then
         echo -e " ${BLD}Timers:${NC}"
-        printf '%s\n' "$_timer_output" \
+        printf '%s\n' "${_timer_output}" \
             | awk '{printf "    %-40s → %s %s\n", $NF, $1, $2}'
     else
         echo -e " ${BLD}Timers:${NC}  ${YLW}(systemd not available)${NC}"
@@ -399,11 +494,13 @@ draw_live_stats() {
 
     # --- Email Queue ---
     local queue_count=0 queue_str
-    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "${CONTAINER_POSTFIX}"; then
-        queue_count="$(docker exec "${CONTAINER_POSTFIX}" mailq 2>/dev/null | grep -c '^[0-9A-F]' || true)"
+    if docker ps --format '{{.Names}}' 2>/dev/null \
+            | grep -qx "${CONTAINER_POSTFIX}"; then
+        queue_count="$(docker exec "${CONTAINER_POSTFIX}" mailq 2>/dev/null \
+            | grep -c '^[0-9A-F]' || true)"
         queue_count="${queue_count:-0}"
     fi
-    if [[ "${queue_count}" -eq 0 ]]; then
+    if   [[ "${queue_count}" -eq 0 ]]; then
         queue_str="${GRN}Healthy${NC}"
     elif [[ "${queue_count}" -lt 5 ]]; then
         queue_str="${YLW}${queue_count} message(s) queued${NC}"
@@ -413,25 +510,23 @@ draw_live_stats() {
     echo -e " ${BLD}Email Queue:${NC}  ${queue_str}"
 
     # --- Recent Auth Failures (last 1h) ---
-    local auth_fails=0 auth_color
-    local since_ts
-    since_ts="$(date -d '1 hour ago' '+%Y-%m-%dT%H:%M:%S' 2>/dev/null || date -v-1H '+%Y-%m-%dT%H:%M:%S' 2>/dev/null || true)"
-    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qE "${CONTAINER_VW}|${CONTAINER_CADDY}"; then
-        auth_fails="$(docker logs "${CONTAINER_VW}" --since "${since_ts}" 2>&1 \
-            | grep -ciE 'invalid|fail' || true)"
+    local auth_fails=0 auth_color since_ts
+    since_ts="$(date -d '1 hour ago' '+%Y-%m-%dT%H:%M:%S' 2>/dev/null \
+        || date -v-1H '+%Y-%m-%dT%H:%M:%S' 2>/dev/null || true)"
+    if docker ps --format '{{.Names}}' 2>/dev/null \
+            | grep -qE "${CONTAINER_VW}|${CONTAINER_CADDY}"; then
+        auth_fails="$(docker logs "${CONTAINER_VW}" --since "${since_ts}" \
+            2>&1 | grep -ciE 'invalid|fail' || true)"
         auth_fails="${auth_fails:-0}"
         local caddy_fails
-        caddy_fails="$(docker logs "${CONTAINER_CADDY}" --since "${since_ts}" 2>&1 \
-            | grep -ciE 'invalid|fail' || true)"
+        caddy_fails="$(docker logs "${CONTAINER_CADDY}" --since "${since_ts}" \
+            2>&1 | grep -ciE 'invalid|fail' || true)"
         caddy_fails="${caddy_fails:-0}"
         auth_fails=$(( auth_fails + caddy_fails ))
     fi
-    if (( auth_fails == 0 )); then
-        auth_color="${GRN}"
-    elif (( auth_fails < 10 )); then
-        auth_color="${YLW}"
-    else
-        auth_color="${RED}"
+    if   (( auth_fails ==  0 )); then auth_color="${GRN}"
+    elif (( auth_fails <  10 )); then auth_color="${YLW}"
+    else                              auth_color="${RED}"
     fi
     echo -e " ${BLD}Recent Auth Fails (1h):${NC}  ${auth_color}${auth_fails}${NC}"
 
@@ -453,7 +548,7 @@ draw_main_menu() {
     echo -e "  [ ${GRN}b${NC} ] Backup & Restore Menu       (4 options)"
     echo -e "  [ ${GRN}s${NC} ] Security & CrowdSec Menu    (5 options)"
     echo -e "  [ ${GRN}k${NC} ] Secrets & Key Management    (4 options)"
-    echo -e "  [ ${GRN}a${NC} ] Advanced & Maintenance      (7 options)"
+    echo -e "  [ ${GRN}a${NC} ] Advanced & Maintenance      (8 options)"
     echo -e "  [ ${GRN}i${NC} ] Identity, Email & Admin     (4 options)"
     draw_divider
     echo -e "  [ ${RED}e/q${NC} ] Exit Dashboard"
@@ -469,13 +564,13 @@ handle_main_menu() {
             _check_script "${REPO_ROOT}/startup.sh" || return
             run_sudo_cmd "sudo ./startup.sh --force" \
                 "${REPO_ROOT}/startup.sh" --force
-            # Force immediate live-stats redraw so container state is fresh (ux.md #3).
+            # Force live-stats redraw so container state is fresh (ux.md #3).
             ACTIVE_MENU="main"
             ;;
         2)
             if _confirm_destructive "Stop all VaultWarden services"; then
                 run_cmd "make down" make -C "${REPO_ROOT}" down
-                # Force immediate live-stats redraw so container state is fresh (ux.md #3).
+                # Force live-stats redraw so container state is fresh (ux.md #3).
                 ACTIVE_MENU="main"
             else
                 echo -e "${YLW} Operation cancelled.${NC}"
@@ -488,14 +583,15 @@ handle_main_menu() {
                 "${REPO_ROOT}/maintenance.sh" health
             ;;
         4)
-            # Wrap in a subshell with a local INT trap so Ctrl+C stops only the
-            # log tail and returns to the dashboard instead of exiting it (ux.md #33).
+            # Subshell + INT trap: Ctrl-C stops the tail, returns to menu (ux.md #33).
             local _log_container="${CONTAINER_VW}"
             local _log_lines=100
             echo ""
             echo -e "${BLD} Tailing logs for ${_log_container} (Ctrl+C to return to menu)${NC}"
             echo -e "${CYN}${DIVIDER}${NC}"
-            ( trap 'exit 0' INT; docker logs --tail "${_log_lines}" --follow "${_log_container}" 2>&1; ) || true
+            ( trap 'exit 0' INT
+              docker logs --tail "${_log_lines}" --follow \
+                  "${_log_container}" 2>&1 ) || true
             echo -e "${CYN}${DIVIDER}${NC}"
             _press_enter
             ;;
@@ -507,9 +603,7 @@ handle_main_menu() {
         k) ACTIVE_MENU="secrets"  ;;
         a) ACTIVE_MENU="advanced" ;;
         i) ACTIVE_MENU="identity" ;;
-        e|q)
-            _cleanup
-            ;;
+        e|q) _cleanup ;;
         *)
             echo -e "${YLW} Invalid option. Please try again.${NC}"
             sleep 1
@@ -630,8 +724,7 @@ handle_security_menu() {
             run_cmd "make logs-crowdsec" make -C "${REPO_ROOT}" logs-crowdsec
             ;;
         5)
-            run_sudo_cmd "sudo cscli metrics" \
-                cscli metrics
+            run_sudo_cmd "sudo cscli metrics" cscli metrics
             ;;
         b) ACTIVE_MENU="main" ;;
         e|q) _cleanup ;;
@@ -696,8 +789,9 @@ draw_advanced_menu() {
     echo -e "  [ ${GRN}3${NC} ] Database Maintenance / Vacuum"
     echo -e "  [ ${GRN}4${NC} ] Fix File Permissions"
     echo -e "  [ ${GRN}5${NC} ] Systemd Timer Status"
-    echo -e "  [ ${YLW}6${NC} ] Prune Docker Resources"
-    echo -e "  [ ${RED}7${NC} ] Uninstall VaultWarden-OCI"
+    echo -e "  [ ${YLW}6${NC} ] Prune Docker Resources      (caution)"
+    echo -e "  [ ${RED}7${NC} ] Uninstall VaultWarden-OCI  (destructive)"
+    echo -e "  [ ${GRN}c${NC} ] View Changelog"
     draw_divider
     echo -e "  [ ${GRN}b${NC} ] Back to Main Menu"
     echo ""
@@ -714,7 +808,9 @@ handle_advanced_menu() {
             run_cmd "./utilities/secrets-export-recovery-kit.sh" "${kit_sh}"
             ;;
         2)
+            # Run update, then automatically show the changelog (ux.md #44).
             run_cmd "make update" make -C "${REPO_ROOT}" update
+            _show_changelog_on_update
             ;;
         3)
             run_cmd "make db-maint" make -C "${REPO_ROOT}" db-maint
@@ -726,7 +822,8 @@ handle_advanced_menu() {
             run_cmd "make systemd-status" make -C "${REPO_ROOT}" systemd-status
             ;;
         6)
-            if _confirm_destructive "Prune Docker resources used by the stack"; then
+            if _confirm_destructive \
+                    "Prune Docker resources used by the stack"; then
                 run_cmd "make prune" make -C "${REPO_ROOT}" prune
             else
                 echo -e "${YLW} Prune cancelled.${NC}"
@@ -734,7 +831,6 @@ handle_advanced_menu() {
             fi
             ;;
         7)
-            # Destructive — require explicit confirmation
             echo ""
             echo -e "${RED}${BLD} !! DESTRUCTIVE OPERATION !!${NC}"
             echo -e "${YLW} This will UNINSTALL VaultWarden-OCI from this host.${NC}"
@@ -749,6 +845,11 @@ handle_advanced_menu() {
                 echo -e "${YLW} Uninstall cancelled.${NC}"
                 _press_enter
             fi
+            ;;
+        c)
+            # Stand-alone changelog viewer (ux.md #44).
+            _show_changelog
+            _press_enter
             ;;
         b) ACTIVE_MENU="main" ;;
         e|q) _cleanup ;;
@@ -787,7 +888,7 @@ handle_identity_menu() {
             echo -e "${BLD} Running: docker logs ${CONTAINER_CADDY} | grep 401|403|rate (last 20)${NC}"
             draw_divider
             docker logs "${CONTAINER_CADDY}" 2>&1 \
-                | grep -iE "401|403|rate" \
+                | grep -iE '401|403|rate' \
                 | tail -20 \
                 || true
             _press_enter
@@ -817,6 +918,7 @@ main() {
     case "${1:-}" in
         --help|-h|help) show_help; exit 0 ;;
     esac
+
     # Root guard: several operations require sudo; ensure we are running as root.
     if [[ $EUID -ne 0 ]]; then
         echo -e "${RED} Error:${NC} This script must be run as root." >&2
@@ -824,7 +926,7 @@ main() {
         exit 1
     fi
 
-    # Ensure we're running from the repo root so relative paths / make work.
+    # Ensure we are running from the repo root so relative paths and make work.
     cd "${REPO_ROOT}"
 
     while true; do
@@ -846,13 +948,14 @@ main() {
         esac
 
         local opt
-        # Timeout after 60s and redraw — keeps live stats fresh (ux.md #20).
+        # Timeout after 60 s and redraw — keeps live stats fresh (ux.md #20).
         # On non-interactive stdin (piped input) read returns immediately.
         if ! read -r -t 60 -p " Enter option  : " opt 2>/dev/null; then
-            # Timeout — loop back and redraw live stats without processing input
+            # Timeout — loop back and redraw without processing input.
             continue
         fi
-        # Normalize: trim whitespace, convert to lowercase
+
+        # Normalize: trim whitespace, convert to lowercase.
         opt="${opt//[[:space:]]/}"
         opt="${opt,,}"
 
