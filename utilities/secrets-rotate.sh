@@ -125,6 +125,55 @@ check_prerequisites() {
     return 0
 }
 
+_print_rotation_receipt() {
+    local field="$1"
+    local old_fp="$2"
+    local new_fp="$3"
+    local docker_synced="$4"
+    local services_list="$5"
+    local rotated_at
+    rotated_at=$(date '+%Y-%m-%d %H:%M:%S %Z')
+
+    printf '\n'
+    log_header "Rotation Receipt"
+
+    printf '  %-22s %s\n'  "Field:"      "$field"
+    printf '  %-22s %s\n'  "Rotated at:" "$rotated_at"
+    printf '\n'
+    printf '  %-22s %s\n'  "Old fingerprint:"  "${old_fp:-unset} (SHA-256 prefix, first 12 chars)"
+    printf '  %-22s %s\n'  "New fingerprint:"  "${new_fp}        (SHA-256 prefix, first 12 chars)"
+    printf '\n'
+
+    # Docker secrets sync status
+    if [[ "$docker_synced" == "true" ]]; then
+        printf '  %-22s %s\n' "Docker secrets:" \
+            "$(printf '%s✔ Resynced%s' "${COLOR_GREEN}" "${COLOR_RESET}")"
+    else
+        printf '  %-22s %s\n' "Docker secrets:" \
+            "$(printf '%s✖ Not synced — run: ./startup.sh or ./setup.sh secrets%s' \
+                "${COLOR_YELLOW}" "${COLOR_RESET}")"
+    fi
+
+    # Services restart reminder
+    printf '\n'
+    if [[ -n "$services_list" ]]; then
+        printf '  %sServices requiring restart:%s\n' "${COLOR_BOLD}" "${COLOR_RESET}"
+        local svc
+        for svc in $services_list; do
+            printf '    %s→%s docker compose restart %s\n' \
+                "${COLOR_CYAN}" "${COLOR_RESET}" "$svc"
+        done
+    else
+        printf '  %sServices requiring restart:%s\n' "${COLOR_BOLD}" "${COLOR_RESET}"
+        printf '    %s→%s docker compose restart <service>\n' \
+            "${COLOR_CYAN}" "${COLOR_RESET}"
+    fi
+
+    printf '\n'
+    log_hint "Fingerprints are non-reversible — use them only to confirm the value changed."
+    printf '\n'
+}
+
 _validate_rotate_field() {
     local field="$1"
     # Use schema_key_exists for an O(1) lookup rather than iterating the array.
@@ -333,20 +382,23 @@ PYEOF
     log_success "Secret '${actual_field}' rotated successfully"
 
     local _affected_service="${_FIELD_SERVICES[$field]:-}"
-    if [[ -n "$_affected_service" ]]; then
-        log_warn "Restart the following Docker service for the new secret to take effect:"
-        log_warn "  docker compose restart $_affected_service"
-    else
-        log_warn "Run 'docker compose restart <service>' for the new secret to take effect"
-    fi
 
     log_info "Redeploying Docker secret files..."
     local docker_dir="${PROJECT_ROOT}/secrets/.docker_secrets"
+    local _docker_synced="false"
     if export_docker_secrets "$docker_dir" "$SECRETS_FILE" 2>/dev/null; then
         log_success "Docker secret files updated"
+        _docker_synced="true"
     else
         log_warn "Could not auto-redeploy Docker secret files. Run: ./startup.sh or ./setup.sh secrets"
     fi
+
+    _print_rotation_receipt \
+        "$actual_field"           \
+        "$old_fingerprint"        \
+        "$new_fingerprint"        \
+        "$_docker_synced"         \
+        "${_affected_service}"
 
     offer_recovery_kit_export "false"
 
