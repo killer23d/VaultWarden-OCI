@@ -107,10 +107,6 @@ help: ## Show this help message
 	     /^[a-zA-Z_-]+:.*?##/ { printf "  $(GREEN)%-24s$(NC) %s\n", $$1, $$2 }' \
 	    $(MAKEFILE_LIST)
 	@echo ""
-	@echo "$(RED)Dangerous / state-changing targets:$(NC)"
-	@echo "  $(YELLOW)down restart safe-restart restore db-maint prune clean-all uninstall$(NC)"
-	@echo "  $(YELLOW)Review each target's help text and keep recovery credentials available.$(NC)"
-	@echo ""
 	@echo "$(CYAN)Examples:$(NC)"
 	@echo "  $(GREEN)make up$(NC)                          Start with secrets initialization"
 	@echo "  $(GREEN)make logs SERVICE=caddy$(NC)          View caddy logs"
@@ -992,9 +988,15 @@ clean: ## Remove generated files (logs, temp files)
 	@rm -f setup.log
 	@echo "$(GREEN)Clean complete.$(NC)"
 
-clean-all: ## [DESTRUCTIVE] Remove all generated files including secrets cache
-	@echo "$(YELLOW)WARNING: This will remove secrets cache. Re-run make up to regenerate.$(NC)"
-	@read -p "Continue? [y/N] " confirm; \
+# ===========================================================================
+##@ ⚠ Destructive Operations
+# ===========================================================================
+
+clean-all: ## Remove secrets cache and log files — services will re-init secrets on next start
+	@echo "$(YELLOW)WARNING: This will remove the decoded secrets cache.$(NC)"
+	@echo "$(YELLOW)         Run 'make up' afterwards to regenerate it from secrets.yaml.$(NC)"
+	@printf "Continue? [y/N] "; \
+	read -r confirm; \
 	if [ "$$confirm" = "y" ] || [ "$$confirm" = "Y" ]; then \
 		rm -f setup.log; \
 		rm -rf secrets/.docker_secrets; \
@@ -1003,26 +1005,25 @@ clean-all: ## [DESTRUCTIVE] Remove all generated files including secrets cache
 		echo "Cancelled."; \
 	fi
 
-prune: ## [DESTRUCTIVE] Remove unused Docker resources (containers, networks, images)
+prune: ## Remove unused Docker resources (images, containers, networks) — cannot be undone
 	$(call check-docker)
-	@echo "$(BLUE)Pruning unused Docker resources...$(NC)"
-	@docker system prune -f
-	@echo "$(GREEN)Prune complete.$(NC)"
+	@echo "$(YELLOW)WARNING: This will permanently remove unused Docker resources.$(NC)"
+	@printf "Continue? [y/N] "; \
+	read -r confirm; \
+	if [ "$$confirm" = "y" ] || [ "$$confirm" = "Y" ]; then \
+		docker system prune -f; \
+		echo "$(GREEN)Prune complete.$(NC)"; \
+	else \
+		echo "Cancelled."; \
+	fi
 
-# ===========================================================================
-# ===========================================================================
-##@ ⚠  DANGER ZONE — Destructive Operations
-# ===========================================================================
-
-##@ Uninstall
-# ===========================================================================
-
-uninstall: ## Uninstall VaultWarden-OCI (interactive)
+uninstall: ## Remove VaultWarden-OCI, all data, secrets, and containers from this host
 	$(call require-root)
-	@echo "$(RED)WARNING: This will remove VaultWarden-OCI from this system.$(NC)"
+	@echo "$(RED)WARNING: This will permanently remove VaultWarden-OCI from this system.$(NC)"
+	@echo "$(RED)         All data, secrets, and containers will be deleted.$(NC)"
 	@sudo utilities/uninstall-vaultwarden.sh run
 
-uninstall-dry-run: ## Simulate uninstall without deleting anything (--dry-run mode)
+uninstall-dry-run: ## Preview what uninstall would remove without making any changes
 	@utilities/uninstall-vaultwarden.sh run --dry-run
 
 # ===========================================================================
