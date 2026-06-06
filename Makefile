@@ -740,7 +740,8 @@ key-rotate: ## Rotate age encryption key (re-encrypts all secrets)
 		exit 1; \
 	}
 	@echo ""
-	@read -p "Continue with key rotation? [y/N] " confirm; \
+	@printf "Continue with key rotation? [y/N] "; \
+	read -r confirm; \
 	if [ "$$confirm" != "y" ] && [ "$$confirm" != "Y" ]; then \
 		echo "$(YELLOW)Key rotation cancelled.$(NC)"; \
 		exit 0; \
@@ -1027,7 +1028,6 @@ uninstall-dry-run: ## Preview what uninstall would remove without making any cha
 	@utilities/uninstall-vaultwarden.sh run --dry-run
 
 # ===========================================================================
-
 ##@ Documentation
 # ===========================================================================
 
