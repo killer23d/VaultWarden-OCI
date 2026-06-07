@@ -131,15 +131,19 @@ _press_enter() {
 
 # ---------------------------------------------------------------------------
 # Utility: confirm before a destructive action
+#
+# Uses tr '[:upper:]' '[:lower:]' for case-folding instead of ${answer,,}
+# to remain POSIX-portable across all bash versions and OCI image locales.
 # ---------------------------------------------------------------------------
 _confirm_destructive() {
     local action="$1"
-    local answer
+    local answer answer_lc
     echo ""
     echo -e "${RED}${BLD}Caution:${NC} ${YLW}${action}${NC}"
     printf " Are you sure? [y/N]: "
     read -r answer
-    [[ "${answer,,}" == "y" || "${answer,,}" == "yes" ]]
+    answer_lc="$(printf '%s' "${answer}" | tr '[:upper:]' '[:lower:]')"
+    [[ "${answer_lc}" == "y" || "${answer_lc}" == "yes" ]]
 }
 
 # ---------------------------------------------------------------------------
@@ -956,8 +960,10 @@ main() {
         fi
 
         # Normalize: trim whitespace, convert to lowercase.
+        # Use tr instead of ${opt,,} for POSIX portability across all bash
+        # versions and OCI image locales (avoids Bash 4.0+ dependency).
         opt="${opt//[[:space:]]/}"
-        opt="${opt,,}"
+        opt="$(printf '%s' "${opt}" | tr '[:upper:]' '[:lower:]')"
 
         case "${ACTIVE_MENU}" in
             main)     handle_main_menu     "${opt}" ;;

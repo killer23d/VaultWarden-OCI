@@ -121,7 +121,12 @@ spinner_start() {
         while true; do
             printf '\r%s %s %s%s' "${COLOR_CYAN}" "${frames[$((i % 10))]}" "$msg" "${COLOR_RESET}"
             sleep 0.1
-            (( i++ )) || true
+            # Use i=$(( i + 1 )) rather than (( i++ )) to avoid the
+            # arithmetic exit-code trap under set -e: (( expr )) exits 1
+            # when the expression evaluates to 0 (i.e. the very first
+            # iteration), which can kill the background subshell even with
+            # || true appended.
+            i=$(( i + 1 ))
         done
     ) &
     _spinner_pid=$!
