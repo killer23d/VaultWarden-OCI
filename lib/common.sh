@@ -93,6 +93,12 @@ retry_with_backoff() {
     shift 2
     local delay="$initial_delay"
     local i remaining
+    local total_max_wait=0 projected_delay="$initial_delay"
+
+    for ((i=1; i<max_attempts; i++)); do
+        total_max_wait=$(( total_max_wait + projected_delay ))
+        projected_delay=$(( projected_delay * 2 ))
+    done
 
     for ((i=1; i<=max_attempts; i++)); do
         if "$@"; then
@@ -100,7 +106,16 @@ retry_with_backoff() {
         fi
 
         if [[ $i -lt $max_attempts ]]; then
-            log_warn "Attempt $i/${max_attempts} failed; retrying in ${delay}s..."
+            local attempts_left remaining_wait next_delay
+            attempts_left=$(( max_attempts - i ))
+            remaining_wait=0
+            next_delay="$delay"
+            for ((remaining=i; remaining<max_attempts; remaining++)); do
+                remaining_wait=$(( remaining_wait + next_delay ))
+                next_delay=$(( next_delay * 2 ))
+            done
+
+            log_warn "Attempt $i/${max_attempts} failed; ${attempts_left} retry(ies) left; sleeping ${delay}s (remaining max wait ${remaining_wait}s / total ${total_max_wait}s)."
             if [[ -t 1 ]]; then
                 for ((remaining=delay; remaining>0; remaining--)); do
                     printf '\r%sRetrying in %2ss...%s' "${COLOR_YELLOW:-}" "$remaining" "${COLOR_RESET:-}"
@@ -136,7 +151,7 @@ press_enter_to_continue() {
     local _dummy
     printf '\n'
     if [[ -t 1 ]]; then
-        printf '\e[7m%s\e[0m\n' "$msg"
+        printf '%s%s%s\n' "${COLOR_INVERT:-}" "$msg" "${COLOR_RESET:-}"
     else
         printf '%s\n' "$msg"
     fi
@@ -311,6 +326,19 @@ _check_sudo_requirement() {
             return 0
         fi
     done
+}
+
+project_version() {
+    local project_root="${1:-$PROJECT_ROOT}"
+    local version
+    version=$(tr -d '[:space:]' < "${project_root}/VERSION" 2>/dev/null || echo "unknown")
+    printf '%s\n' "${version:-unknown}"
+}
+
+print_project_version() {
+    local label="${1:-VaultWarden-OCI}"
+    local project_root="${2:-$PROJECT_ROOT}"
+    printf '%s %s\n' "$label" "$(project_version "$project_root")"
 }
 
 get_real_user() {
@@ -661,7 +689,7 @@ wait_for_entropy() {
 export -f wait_for_entropy
 
 export -f _require_script
-export -f has_command require_commands retry_with_backoff is_root require_root press_enter_to_continue get_real_user _maybe_sudo
+export -f has_command require_commands retry_with_backoff is_root require_root press_enter_to_continue project_version print_project_version get_real_user _maybe_sudo
 export -f auto_fix_critical_permissions
 export -f _ensure_lock_file _fix_rclone_ownership _run_rclone _check_sudo_requirement
 export -f register_cleanup perform_cleanup

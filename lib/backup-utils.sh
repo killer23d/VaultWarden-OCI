@@ -71,37 +71,24 @@ _json_escape() {
 # stdout is not a TTY (so piped/logged output stays clean).
 # ---------------------------------------------------------------------------
 _backup_age_color() {
-    local mtime_epoch="$1"
+    local age_days="$1"
 
-    # Resolve color variables: respect a pre-existing TTY check from the
-    # calling context (dashboard.sh sets GRN/YLW/RED/NC to "" for non-TTY);
-    # otherwise fall back to safe defaults.
-    local _c_grn _c_ylw _c_red _c_nc
-    if [[ -t 1 ]]; then
-        _c_grn="\033[1;32m"
-        _c_ylw="\033[1;33m"
-        _c_red="\033[1;31m"
-        _c_nc="\033[0m"
-    else
-        _c_grn="" _c_ylw="" _c_red="" _c_nc=""
-    fi
-
-    if [[ ! "${mtime_epoch}" =~ ^[0-9]+$ || "${mtime_epoch}" -eq 0 ]]; then
-        printf '%s' "${_c_ylw}"
+    if [[ ! -t 1 ]]; then
+        printf ''
         return
     fi
 
-    local now_epoch age_seconds
-    now_epoch=$(date +%s)
-    age_seconds=$(( now_epoch - mtime_epoch ))
-    (( age_seconds < 0 )) && age_seconds=0
+    if [[ ! "${age_days}" =~ ^[0-9]+$ ]]; then
+        printf '%s' "${COLOR_YELLOW}"
+        return
+    fi
 
-    if (( age_seconds < 86400 )); then
-        printf '%s' "${_c_grn}"
-    elif (( age_seconds < 604800 )); then
-        printf '%s' "${_c_ylw}"
+    if (( age_days < 3 )); then
+        printf '%s' "${COLOR_GREEN}"
+    elif (( age_days < 14 )); then
+        printf '%s' "${COLOR_YELLOW}"
     else
-        printf '%s' "${_c_red}"
+        printf '%s' "${COLOR_RED}"
     fi
 }
 
@@ -148,7 +135,7 @@ list_backups() {
 
     # Resolve reset sequence once — empty string when not a TTY.
     local _nc
-    [[ -t 1 ]] && _nc="\033[0m" || _nc=""
+    [[ -t 1 ]] && _nc="${COLOR_RESET}" || _nc=""
 
     local found_backups=false
 
@@ -170,8 +157,8 @@ list_backups() {
 
     # Print the column header once, before iterating over backup types.
     if [[ "${_has_any_files}" == "true" ]]; then
-        printf '%-11s  %-44s  %10s  %s\n' "TYPE" "FILE" "SIZE" "MODIFIED"
-        printf '%-11s  %-44s  %10s  %s\n' "-----------" "--------------------------------------------" "----------" "----------------"
+        printf '%-11s  %-44s  %10s  %s\n' "TYPE" "FILE" "SIZE" "AGE"
+        printf '%-11s  %-44s  %10s  %s\n' "-----------" "--------------------------------------------" "----------" "--------"
     fi
 
     for backup_type in "${backup_types[@]}"; do
@@ -184,34 +171,21 @@ list_backups() {
 
             while IFS= read -r backup_file; do
                 has_files=true
-                local basename_file size_info age_info
+                local basename_file size_info age_days age_display age_color
                 basename_file=$(basename "$backup_file")
                 size_info=$(du -h "$backup_file" 2>/dev/null | cut -f1 || echo "unknown")
+                age_days=$(_backup_filename_age_days "$backup_file" 2>/dev/null || echo "")
+                [[ -z "$age_days" ]] && age_days=$(_backup_ctime_age_days "$backup_file" 2>/dev/null || echo "")
+                if [[ "$age_days" =~ ^[0-9]+$ ]]; then
+                    age_display="${age_days}d"
+                else
+                    age_display="unknown"
+                fi
 
-                # Retrieve the mtime epoch for color-coding (ux.md #36) and
-                # the human-readable timestamp for display.
-                local mtime_epoch stat_raw
-                mtime_epoch=$(stat -c '%Y' "$backup_file" 2>/dev/null \
-                    || stat -f '%m'       "$backup_file" 2>/dev/null \
-                    || echo 0)
-
-                # stat -c '%y' is Linux (GNU coreutils);
-                # fall back to BSD stat -f '%Sm' for macOS compatibility.
-                # Separate the stat from the cut so that cut receiving
-                # empty stdin (from a failing stat on BSD) does not mask
-                # the stat failure via a zero-exit from cut.
-                stat_raw=$(stat -c '%y' "$backup_file" 2>/dev/null \
-                    || stat -f '%Sm' -t '%Y-%m-%d %H:%M' "$backup_file" 2>/dev/null \
-                    || echo "")
-                age_info="${stat_raw:0:16}"
-                [[ -z "$age_info" ]] && age_info="unknown"
-
-                # Color-code the MODIFIED column by age (ux.md #36).
-                local age_color
-                age_color="$(_backup_age_color "${mtime_epoch}")"
+                age_color="$(_backup_age_color "${age_days}")"
 
                 printf "  %-11s  %-44s  %10s  ${age_color}%s${_nc}\n" \
-                    "$backup_type" "$basename_file" "$size_info" "$age_info"
+                    "$backup_type" "$basename_file" "$size_info" "$age_display"
 
                 if [[ -f "$backup_file.meta" ]]; then
                     local vw_version
@@ -636,7 +610,7 @@ get_backup_statistics() {
 
     if [[ ! -d "$backup_base_dir" ]]; then
         if [[ "${json_output}" == "true" ]]; then
-            printf '{"backups":[]}\n'
+            printf '{"backup_types":{},"total":{"count":0,"size_bytes":0}}\n'
             return 0
         fi
         log_error "Backup directory not found: $backup_base_dir"
@@ -646,21 +620,22 @@ get_backup_statistics() {
     local backup_types=("db" "full" "emergency")
     local total_backups=0
     local total_size_bytes=0
+    local json_rows=""
+    local json_sep=""
 
-    log_info "Backup Statistics:"
-    log_info "=================="
+    if [[ "${json_output}" != "true" ]]; then
+        log_info "Backup Statistics:"
+        log_info "=================="
+    fi
 
     for backup_type in "${backup_types[@]}"; do
         local type_dir="$backup_base_dir/$backup_type"
+        local count=0
+        local size_bytes=0
 
         if [[ -d "$type_dir" ]]; then
-            local count=0
-            local size_bytes=0
-
             while IFS= read -r f; do
                 local fsz=0
-                # Guard: _stat_file_size is exported by lib/crypto.sh;
-                # fall back to inline stat when crypto.sh was not sourced.
                 if declare -f _stat_file_size &>/dev/null; then
                     fsz=$(_stat_file_size "$f" 2>/dev/null || echo 0)
                 else
@@ -670,21 +645,27 @@ get_backup_statistics() {
                 size_bytes=$(( size_bytes + fsz ))
                 (( count++ )) || true
             done < <(find "$type_dir" -name "*.age" -type f 2>/dev/null)
-
-            local size_mb=$(( size_bytes / 1024 / 1024 ))
-
-            log_info "$(printf '%-10s: %3d backups, %6d MB' "$backup_type" "$count" "$size_mb")"
-
-            total_backups=$(( total_backups + count ))
-            total_size_bytes=$(( total_size_bytes + size_bytes ))
-        else
-            log_info "$(printf '%-10s: %3d backups, %6d MB' "$backup_type" 0 0)"
         fi
+
+        if [[ "${json_output}" == "true" ]]; then
+            json_rows+="${json_sep}\"${backup_type}\":{\"count\":${count},\"size_bytes\":${size_bytes}}"
+            json_sep=","
+        else
+            log_info "$(printf '%-10s: %3d backups, %6d MB' "$backup_type" "$count" $(( size_bytes / 1024 / 1024 )))"
+        fi
+
+        total_backups=$(( total_backups + count ))
+        total_size_bytes=$(( total_size_bytes + size_bytes ))
     done
 
-    local total_size_mb=$(( total_size_bytes / 1024 / 1024 ))
+    if [[ "${json_output}" == "true" ]]; then
+        printf '{"backup_types":{%s},"total":{"count":%d,"size_bytes":%d}}\n' \
+            "$json_rows" "$total_backups" "$total_size_bytes"
+        return 0
+    fi
+
     log_info "=================="
-    log_info "$(printf '%-10s: %3d backups, %6d MB' "TOTAL" "$total_backups" "$total_size_mb")"
+    log_info "$(printf '%-10s: %3d backups, %6d MB' "TOTAL" "$total_backups" $(( total_size_bytes / 1024 / 1024 )))"
 
     return 0
 }

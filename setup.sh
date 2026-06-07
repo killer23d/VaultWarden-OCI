@@ -420,8 +420,7 @@ CRED_BANNER
     fi
 
     if [[ "$mode" == "interactive" ]]; then
-        printf '\n%s!!! PRESS ENTER TO CLEAR THIS SCREEN AND FINISH !!!%s\n' "${COLOR_RED}" "${COLOR_RESET}"
-        [[ -t 0 ]] && read -r
+        press_enter_to_continue " Press [Enter] to clear this screen and finish..."
         clear
     fi
 }

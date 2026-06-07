@@ -12,6 +12,7 @@ source "$SCRIPT_DIR/lib/config.sh"
 source "$SCRIPT_DIR/lib/common.sh"
 init_common_lib "$0"
 source "$SCRIPT_DIR/lib/email.sh"
+DOCKER_PROJECT_LABEL="${DOCKER_PROJECT_LABEL:-label=com.docker.compose.project=vaultwarden-oci}"
 source "$SCRIPT_DIR/lib/docker.sh"
 source "$SCRIPT_DIR/lib/backup-utils.sh"
 source "$SCRIPT_DIR/lib/crypto.sh"
@@ -58,6 +59,9 @@ RUN OPTIONS (used after 'run'):
 GLOBAL SUBCOMMAND:
     help                     Show this help
 
+GLOBAL OPTIONS:
+    --version, -V            Print the VaultWarden-OCI version and exit
+
 EXAMPLES:
     sudo ./backup.sh run                # Auto-mode backup (db or full based on schedule)
     sudo ./backup.sh run db             # Database-only backup
@@ -82,6 +86,9 @@ case "$1" in
         ;;
     help|--help|-h)
         show_help; exit 0
+        ;;
+    --version|-V)
+        print_project_version "VaultWarden-OCI" "$SCRIPT_DIR"; exit 0
         ;;
     *)
         log_error "Unknown subcommand: '$1'"
@@ -233,15 +240,15 @@ auto_determine_backup_type() {
     local auto_base_dir
     auto_base_dir="$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")"
     full_backup_dir="$auto_base_dir/full"
-    local _stat_mtime_fmt _stat_find_output
+    local _stat_cmd=()
     if stat --version 2>/dev/null | grep -q GNU; then
-        _stat_mtime_fmt='-c %Y'
+        _stat_cmd=(stat -c '%Y')
     else
-        _stat_mtime_fmt='-f %m'
+        _stat_cmd=(stat -f '%m')
     fi
     last_full=$(find "$full_backup_dir" -name "*.age" -type f 2>/dev/null \
                 | while IFS= read -r _f; do
-                    printf '%s %s\n' "$(stat $_stat_mtime_fmt "$_f" 2>/dev/null || echo 0)" "$_f"
+                    printf '%s %s\n' "$("${_stat_cmd[@]}" "$_f" 2>/dev/null || echo 0)" "$_f"
                   done \
                 | sort -n | tail -1 | cut -d' ' -f2- || true)
     if [[ -n "$last_full" ]]; then

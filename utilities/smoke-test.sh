@@ -9,6 +9,7 @@ source "$SCRIPT_DIR/lib/log.sh"
 source "$SCRIPT_DIR/lib/config.sh"
 source "$SCRIPT_DIR/lib/common.sh"
 init_common_lib "$0"
+DOCKER_PROJECT_LABEL="${DOCKER_PROJECT_LABEL:-label=com.docker.compose.project=vaultwarden-oci}"
 source "$SCRIPT_DIR/lib/docker.sh"
 source "$SCRIPT_DIR/lib/backup-utils.sh"
 source "$SCRIPT_DIR/lib/crypto.sh"
@@ -35,6 +36,7 @@ OPTIONS:
     --fail-fast   Stop on first failure
     --json        Emit a JSON result array (implies --quiet)
     --help, -h    Show this help
+    --version, -V Print the VaultWarden-OCI version and exit
 
 EXIT CODES:
     0  All checks passed
@@ -53,6 +55,7 @@ while [[ $# -gt 0 ]]; do
         --json)     JSON_OUTPUT=true; shift ;;
         --fail-fast) FAIL_FAST=true; shift ;;
         --help|-h)  show_help; exit 0 ;;
+        --version|-V) print_project_version "VaultWarden-OCI" "$SCRIPT_DIR"; exit 0 ;;
         help)       show_help; exit 0 ;;
         *) log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac

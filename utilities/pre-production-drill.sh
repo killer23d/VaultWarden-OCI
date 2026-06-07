@@ -10,6 +10,7 @@ source "$SCRIPT_DIR/lib/config.sh"
 source "$SCRIPT_DIR/lib/common.sh"
 init_common_lib "$0"
 source "$SCRIPT_DIR/lib/email.sh"
+DOCKER_PROJECT_LABEL="${DOCKER_PROJECT_LABEL:-label=com.docker.compose.project=vaultwarden-oci}"
 source "$SCRIPT_DIR/lib/docker.sh"
 source "$SCRIPT_DIR/lib/backup-utils.sh"
 source "$SCRIPT_DIR/lib/crypto.sh"
@@ -34,6 +35,7 @@ OPTIONS:
     --skip-email    Skip email delivery test (if MTA not configured yet)
     --skip-restore  Skip restore path drill (decrypt + integrity check)
     --help, -h      Show this help
+    --version, -V   Print the VaultWarden-OCI version and exit
 
 EXIT CODES:
     0  All steps passed
@@ -51,6 +53,7 @@ while [[ $# -gt 0 ]]; do
         --skip-email)   SKIP_EMAIL=true;   shift ;;
         --skip-restore) SKIP_RESTORE=true; shift ;;
         --help|-h) show_help; exit 0 ;;
+        --version|-V) print_project_version "VaultWarden-OCI" "$SCRIPT_DIR"; exit 0 ;;
         help)      show_help; exit 0 ;;
         *) log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac

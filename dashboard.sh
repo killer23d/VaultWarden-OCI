@@ -7,26 +7,25 @@ set -euo pipefail
 IFS=$'\n\t'
 
 # ---------------------------------------------------------------------------
-# ANSI color / style variables
-# ---------------------------------------------------------------------------
-if [[ -t 1 ]]; then
-    INV="\033[7m"
-    BLD="\033[1m"
-    CYN="\033[1;36m"
-    GRN="\033[1;32m"
-    RED="\033[1;31m"
-    YLW="\033[1;33m"
-    NC="\033[0m"
-else
-    INV="" BLD="" CYN="" GRN="" RED="" YLW="" NC=""
-fi
-
-# ---------------------------------------------------------------------------
 # Repository / environment constants
 # ---------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${SCRIPT_DIR}"
+source "${REPO_ROOT}/lib/log.sh"
+source "${REPO_ROOT}/lib/common.sh"
+init_common_lib "$0"
 [[ -f "${REPO_ROOT}/lib/validate.sh" ]] && source "${REPO_ROOT}/lib/validate.sh"
+
+# ---------------------------------------------------------------------------
+# Color / style aliases
+# ---------------------------------------------------------------------------
+INV="${COLOR_INVERT}"
+BLD="${COLOR_BOLD}"
+CYN="${COLOR_CYAN}"
+GRN="${COLOR_GREEN}"
+RED="${COLOR_RED}"
+YLW="${COLOR_YELLOW}"
+NC="${COLOR_RESET}"
 
 # Read a single variable from .env without sourcing the whole file.
 _read_env_var() {
@@ -64,7 +63,7 @@ ACTIVE_MENU="main"
 # Signal / cleanup trap
 # ---------------------------------------------------------------------------
 _cleanup() {
-    printf "${NC}"
+    printf '%s' "${NC}"
     echo ""
     echo -e "${GRN} Goodbye!${NC}"
     exit 0
@@ -77,7 +76,7 @@ trap '_cleanup' INT TERM
 _epoch_to_pt() {
     local epoch="$1"
     TZ="${TZ_DISPLAY}" date -d "@${epoch}" '+%Y-%m-%d %H:%M %Z' 2>/dev/null \
-        || date -r "${epoch}" '+%Y-%m-%d %H:%M %Z' 2>/dev/null \
+        || TZ="${TZ_DISPLAY}" date -r "${epoch}" '+%Y-%m-%d %H:%M %Z' 2>/dev/null \
         || echo "(unknown)"
 }
 
@@ -123,10 +122,8 @@ run_sudo_cmd() {
 # Utility: reverse-video "Press Enter" anchor
 # ---------------------------------------------------------------------------
 _press_enter() {
-    local _dummy
     echo ""
-    echo -e "${INV} Press [Enter] to return to the menu... ${NC}"
-    read -r _dummy
+    press_enter_to_continue " Press [Enter] to return to the menu..."
 }
 
 # ---------------------------------------------------------------------------
@@ -164,6 +161,7 @@ DESCRIPTION:
 
 OPTIONS:
     --help, -h    Show this help and exit
+    --version, -V Print the VaultWarden-OCI version and exit
 
 KEYBOARD SHORTCUTS:
     e/q           Exit dashboard
@@ -921,7 +919,14 @@ handle_identity_menu() {
 main() {
     case "${1:-}" in
         --help|-h|help) show_help; exit 0 ;;
+        --version|-V) print_project_version "VaultWarden-OCI" "${REPO_ROOT}"; exit 0 ;;
     esac
+
+    if [[ ! -t 0 || ! -t 1 ]]; then
+        log_error "dashboard.sh requires an interactive terminal."
+        log_hint "Re-run in a local terminal or SSH session with a TTY: sudo ./dashboard.sh"
+        exit 1
+    fi
 
     # Root guard: several operations require sudo; ensure we are running as root.
     if [[ $EUID -ne 0 ]]; then

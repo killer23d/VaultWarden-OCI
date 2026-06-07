@@ -76,6 +76,7 @@ FLAGS:
     --dry-run    Preview what would change without writing
     --no-backup  Skip creating backup before rotation
     --help, -h   Show this help
+    --version, -V Print the VaultWarden-OCI version and exit
 
 EXAMPLES:
     ./utilities/secrets-rotate.sh admin_token
@@ -420,6 +421,7 @@ main() {
             --dry-run)   DRY_RUN=true;     shift ;;
             --no-backup) SKIP_BACKUP=true; shift ;;
             --help|-h)   show_help; exit 0 ;;
+            --version|-V) print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"; exit 0 ;;
             *) log_error "Unknown option: '$1'"; show_help; exit 1 ;;
         esac
     done

@@ -37,6 +37,7 @@ SUBCOMMANDS:
 
 OPTIONS:
     --help, -h              Show this help
+    --version, -V           Print the VaultWarden-OCI version and exit
 
 EXAMPLES:
     ./edit-secrets.sh edit
@@ -61,7 +62,7 @@ _TASK="${1}"
 # Pre-flight: verify the secrets file exists before dispatching to any
 # subcommand that reads or writes it. 'help' variants are exempt.
 case "$_TASK" in
-    help|--help|-h) ;;
+    help|--help|-h|--version|-V) ;;
     *)
         if [[ ! -f "${SECRETS_FILE:-}" ]]; then
             log_error "SECRETS_FILE not found: ${SECRETS_FILE:-<unset>}"
@@ -94,6 +95,10 @@ case "$_TASK" in
         ;;
     help|--help|-h)
         show_help
+        exit 0
+        ;;
+    --version|-V)
+        print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"
         exit 0
         ;;
     *)

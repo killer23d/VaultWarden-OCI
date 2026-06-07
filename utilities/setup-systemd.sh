@@ -89,6 +89,7 @@ ACTIONS:
 OPTIONS:
     --dry-run     Print actions without executing
     --help, -h    Show this help
+    --version, -V Print the VaultWarden-OCI version and exit
 
 WHAT install DOES:
     1. Copies scripts to /opt/vaultwarden-scripts/ (root:root 700):
@@ -125,6 +126,7 @@ while [[ $# -gt 0 ]]; do
         status)       STATUS=true;    shift ;;
         --dry-run)    DRY_RUN=true;   shift ;;
         help|--help|-h) show_help; exit 0 ;;
+        --version|-V) print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"; exit 0 ;;
         *) log_error "Unknown sub-action: $1"; show_help; exit 1 ;;
     esac
 done

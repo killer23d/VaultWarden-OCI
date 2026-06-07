@@ -18,14 +18,14 @@ else
     # whether the library was loaded.
     _VW_SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
     if [[ -t 1 ]]; then
-        _C_CYAN=$'\e[0;36m'
-        _C_GREEN=$'\e[0;32m'
-        _C_YELLOW=$'\e[0;33m'
-        _C_RED=$'\e[1;31m'
-        _C_BLUE=$'\e[0;34m'
-        _C_MAGENTA=$'\e[0;35m'
-        _C_BOLD=$'\e[1m'
-        _C_RESET=$'\e[0m'
+        _C_CYAN=''
+        _C_GREEN=''
+        _C_YELLOW=''
+        _C_RED=''
+        _C_BLUE=''
+        _C_MAGENTA=''
+        _C_BOLD=''
+        _C_RESET=''
     else
         _C_CYAN='' _C_GREEN='' _C_YELLOW='' _C_RED=''
         _C_BLUE='' _C_MAGENTA='' _C_BOLD='' _C_RESET=''
@@ -51,9 +51,9 @@ else
     log_warn()     { printf '%s[%s] [%s] WARN%s %s%s\n'     "$_C_YELLOW"  "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$(_vw_dry_prefix)" "$*" >&2; }
     log_error()    { printf '%s[%s] [%s] ERROR%s %s\n'      "$_C_RED"     "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$*" >&2; }
     log_debug()    { printf '%s[%s] [%s] DEBUG%s %s\n'      "$_C_MAGENTA" "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$*"; }
-    log_hint()     { printf '%s[%s] [%s] HINT%s %s\n'       "$_C_CYAN"    "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$*"; }
+    log_hint()     { printf '%s[%s] [%s] HINT →%s %s%s\n'   "$_C_CYAN"    "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$(_vw_dry_prefix)" "$*"; }
     log_rollback() { printf '%s[%s] [%s] ROLLBACK%s %s\n'   "$_C_YELLOW"  "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$*" >&2; }
-    log_dry_run()  { printf '%s[%s] [%s] DRY RUN%s %s\n'   "$_C_BLUE"    "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$*"; }
+    log_dry_run()  { printf '%s[%s] [%s] [DRY RUN]%s %s\n'  "$_C_BLUE"    "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$*"; }
 fi
 die() { log_error "$*"; exit 1; }
 trap 'log_error "${BASH_SOURCE[0]}: failed at line ${LINENO} (exit $?)"; exit 1' ERR
@@ -80,6 +80,9 @@ SUBCOMMANDS:
     help   Show this help
 
 OPTIONS (used after 'run'):
+    --version, -V
+        Print the VaultWarden-OCI version and exit.
+
     --i-have-saved-my-recovery-kit
         Pre-confirm that you have saved secrets/keys/age-key.txt
         to a location OUTSIDE this host before running.
@@ -140,6 +143,14 @@ case "$1" in
                 --i-have-saved-my-recovery-kit) I_HAVE_SAVED_RECOVERY_KIT=true; shift ;;
                 --force)                        FORCE=true;                      shift ;;
                 --dry-run)                      DRY_RUN=true;                    shift ;;
+                --version|-V)
+                    if command -v print_project_version >/dev/null 2>&1; then
+                        print_project_version "VaultWarden-OCI" "${PROJECT_ROOT_FALLBACK}"
+                    else
+                        printf 'VaultWarden-OCI %s\n' "$(tr -d '[:space:]' < "${PROJECT_ROOT_FALLBACK}/VERSION" 2>/dev/null || echo unknown)"
+                    fi
+                    exit 0
+                    ;;
                 *)
                     log_error "Unknown option: '$1'"
                     show_help
@@ -150,6 +161,14 @@ case "$1" in
         ;;
     help|--help|-h)
         show_help; exit 0
+        ;;
+    --version|-V)
+        if command -v print_project_version >/dev/null 2>&1; then
+            print_project_version "VaultWarden-OCI" "${PROJECT_ROOT_FALLBACK}"
+        else
+            printf 'VaultWarden-OCI %s\n' "$(tr -d '[:space:]' < "${PROJECT_ROOT_FALLBACK}/VERSION" 2>/dev/null || echo unknown)"
+        fi
+        exit 0
         ;;
     *)
         log_error "Unknown subcommand: '$1'"
