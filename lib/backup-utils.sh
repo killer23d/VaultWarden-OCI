@@ -607,8 +607,18 @@ cleanup_old_backups() {
 #
 # Replaced with a find | while loop using _stat_file_size() (exported by
 # lib/crypto.sh) which selects the correct stat format per platform.
+#
+# get_backup_statistics BACKUP_BASE_DIR [JSON_OUTPUT]
+#
+# $1 backup_base_dir  — root directory containing db/, full/, emergency/ subdirs.
+#                       Defaults to "backups" when omitted.
+# $2 json_output      — pass "true" to emit a JSON object instead of log lines.
+#                       Mirrors the $2 parameter of list_backups so callers can
+#                       use either function interchangeably for --json output
+#                       (ux.md #50).
 get_backup_statistics() {
     local backup_base_dir="${1:-backups}"
+    local json_output="${2:-false}"
 
     if [[ ! -d "$backup_base_dir" ]]; then
         if [[ "${json_output}" == "true" ]]; then

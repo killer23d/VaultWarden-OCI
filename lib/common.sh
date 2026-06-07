@@ -487,30 +487,40 @@ test_http() {
     fi
 }
 
+# download_file URL OUTPUT_FILE [MAX_ATTEMPTS]
+#
+# Downloads URL to OUTPUT_FILE, wrapping the transfer in a spinner when
+# spinner_start/spinner_stop are available (lib/log.sh loaded). Degrades
+# gracefully — all download logic is unchanged when log.sh has not been
+# sourced (e.g. unit-test contexts that source common.sh standalone).
+#
+# Try order: curl first, then wget.
 download_file() {
     local url="$1"
     local output_file="$2"
     local max_attempts="${3:-3}"
+    local _has_spinner=false
+    declare -f spinner_start &>/dev/null && _has_spinner=true
 
-    spinner_start "Downloading $(basename "$output_file") with curl..."
+    [[ "${_has_spinner}" == true ]] && spinner_start "Downloading $(basename "$output_file") with curl..."
     if retry_with_backoff "$max_attempts" 2 curl -fsSL "$url" -o "$output_file"; then
-        spinner_stop true
+        [[ "${_has_spinner}" == true ]] && spinner_stop true
         log_success "Downloaded: $url -> $output_file"
         return 0
     fi
-    spinner_stop false
+    [[ "${_has_spinner}" == true ]] && spinner_stop false
     rm -f "$output_file" 2>/dev/null || true
-    spinner_start "Downloading $(basename "$output_file") with wget..."
+
+    [[ "${_has_spinner}" == true ]] && spinner_start "Downloading $(basename "$output_file") with wget..."
     if retry_with_backoff "$max_attempts" 2 wget -q "$url" -O "$output_file"; then
-        spinner_stop true
+        [[ "${_has_spinner}" == true ]] && spinner_stop true
         log_success "Downloaded: $url -> $output_file"
         return 0
-    else
-        spinner_stop false
-        rm -f "$output_file" 2>/dev/null || true
-        log_error "Failed to download: $url"
-        return 1
     fi
+    [[ "${_has_spinner}" == true ]] && spinner_stop false
+    rm -f "$output_file" 2>/dev/null || true
+    log_error "Failed to download: $url"
+    return 1
 }
 
 
