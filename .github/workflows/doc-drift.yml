@@ -9,6 +9,7 @@ on:
       - 'Makefile'
       - 'systemd/**'
 
+# Global permissions
 permissions:
   contents: read
 
@@ -76,7 +77,6 @@ jobs:
             echo "UNPINNED: @latest Go reference found"
             FAIL=1
           fi
-          # Only check setup-crowdsec.sh for /releases/latest (other scripts may legitimately resolve latest)
           if grep -rn '/releases/latest' utilities/setup-crowdsec.sh 2>/dev/null; then
             echo "UNPINNED: /releases/latest GitHub API call found in setup-crowdsec.sh"
             FAIL=1
@@ -90,7 +90,6 @@ jobs:
           for unit in systemd/vaultwarden-*.service; do
             [[ "$unit" == *template* ]] && continue
             for directive in "${REQUIRED_DIRECTIVES[@]}"; do
-              # iptables service legitimately omits NoNewPrivileges (needs elevated caps)
               [[ "$unit" == *iptables* ]] && [[ "$directive" == "NoNewPrivileges" ]] && continue
               if ! grep -q "^${directive}=" "$unit"; then
                 echo "MISSING $directive in $unit"
@@ -102,9 +101,6 @@ jobs:
 
       - name: Verify COMMAND-REFERENCE.md is up to date
         env:
-          # Suppress the docker.sh Compose-project-label diagnostic that
-          # scripts emit to stderr when DOCKER_PROJECT_LABEL is unset.
-          # Setting it to a fixed value makes --help output deterministic.
           DOCKER_PROJECT_LABEL: ci
         run: |
           cp docs/COMMAND-REFERENCE.md /tmp/COMMAND-REFERENCE.committed.md
@@ -115,3 +111,40 @@ jobs:
             exit 1
           fi
           echo "COMMAND-REFERENCE.md is up to date."
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    permissions:
+      # Required to push the auto-corrected commits back to the PR
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Check out the PR branch specifically so we can push back to it
+          ref: ${{ github.head_ref }}
+
+      - name: Attempt Shellcheck Auto-fixes
+        run: |
+          # Find all shell scripts and ask Shellcheck for a unified diff of safe fixes
+          find . -type f -name '*.sh' | xargs shellcheck -f diff > shellcheck-fixes.patch || true
+          
+          # If the patch file has contents, apply it
+          if [ -s shellcheck-fixes.patch ]; then
+            echo "Applying Shellcheck auto-fixes..."
+            patch -p1 < shellcheck-fixes.patch
+          else
+            echo "No safe auto-fixes available or scripts are clean."
+          fi
+          rm -f shellcheck-fixes.patch
+
+      - name: Commit and Push Auto-fixes
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: apply safe shellcheck auto-fixes"
+          file_pattern: "*.sh utilities/**/*.sh lib/**/*.sh"
+
+      - name: Run Strict Shellcheck
+        run: |
+          # Run shellcheck normally to point out any remaining errors in the GitHub Actions log.
+          # If there are unfixable errors, this step will intentionally fail the build.
+          find . -type f -name '*.sh' | xargs shellcheck
