@@ -156,6 +156,24 @@ list_backups() {
     local grand_total_bytes=0
     local grand_total_types=0
 
+    # Pre-scan: check whether any .age files exist across all types so we
+    # can print the column header exactly once before the first data row.
+    local _has_any_files=false
+    local _pre_type
+    for _pre_type in "${backup_types[@]}"; do
+        if [[ -d "$backup_base_dir/$_pre_type" ]] && \
+           [[ -n "$(find "$backup_base_dir/$_pre_type" -name '*.age' -type f -print -quit 2>/dev/null)" ]]; then
+            _has_any_files=true
+            break
+        fi
+    done
+
+    # Print the column header once, before iterating over backup types.
+    if [[ "${_has_any_files}" == "true" ]]; then
+        printf '%-11s  %-44s  %10s  %s\n' "TYPE" "FILE" "SIZE" "MODIFIED"
+        printf '%-11s  %-44s  %10s  %s\n' "-----------" "--------------------------------------------" "----------" "----------------"
+    fi
+
     for backup_type in "${backup_types[@]}"; do
         local type_dir="$backup_base_dir/$backup_type"
 
@@ -165,10 +183,6 @@ list_backups() {
             local type_bytes=0
 
             while IFS= read -r backup_file; do
-                if [[ "$has_files" == false ]]; then
-                    printf '%-11s  %-44s  %10s  %s\n' "TYPE" "FILE" "SIZE" "MODIFIED"
-                    printf '%-11s  %-44s  %10s  %s\n' "-----------" "--------------------------------------------" "----------" "----------------"
-                fi
                 has_files=true
                 local basename_file size_info age_info
                 basename_file=$(basename "$backup_file")

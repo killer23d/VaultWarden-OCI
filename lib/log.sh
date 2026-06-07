@@ -117,9 +117,23 @@ spinner_start() {
     local msg="${1:-Working...}"
     local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
     (
+        # Re-evaluate TTY inside the subshell: the parent's COLOR_CYAN /
+        # COLOR_RESET are exported with escape sequences that were set at
+        # source-time.  If the subshell's stdout is redirected (e.g. the
+        # caller later pipes output to a log file) those inherited values
+        # would embed raw escape codes in the log.  Always derive colors
+        # from the subshell's own stdout file descriptor.
+        local _sp_cyan _sp_reset
+        if [[ -t 1 ]]; then
+            _sp_cyan=$'\e[0;36m'
+            _sp_reset=$'\e[0m'
+        else
+            _sp_cyan=''
+            _sp_reset=''
+        fi
         local i=0
         while true; do
-            printf '\r%s %s %s%s' "${COLOR_CYAN}" "${frames[$((i % 10))]}" "$msg" "${COLOR_RESET}"
+            printf '\r%s %s %s%s' "${_sp_cyan}" "${frames[$((i % 10))]}" "$msg" "${_sp_reset}"
             sleep 0.1
             # Use i=$(( i + 1 )) rather than (( i++ )) to avoid the
             # arithmetic exit-code trap under set -e: (( expr )) exits 1
