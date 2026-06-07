@@ -61,8 +61,7 @@ _FORKING_EDITORS=("gvim" "mvim" "code" "atom" "subl" "sublime_text" "gedit" "kat
 
 check_prerequisites() {
     local missing=()
-    local resolved_age_key
-    if ! resolved_age_key=$(resolve_age_key_path 2>/dev/null); then
+    if ! resolve_age_key_path 2>/dev/null; then
         missing+=("Age encryption key (not found at \$AGE_KEY_FILE, /etc/vaultwarden/age-key.txt, or secrets/keys/age-key.txt)")
     fi
 
