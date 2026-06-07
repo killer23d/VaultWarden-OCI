@@ -49,34 +49,33 @@ if [[ $# -eq 0 ]]; then
     exit 0
 fi
 
-# ux.md #19: consume the subcommand token, then pass remaining args (including
-# any --help/-h) straight through to the subcommand script via exec.  This
-# fixes the old 'help|--help|-h) exec "$0"' pattern which ignored the user's
-# subcommand context and always re-displayed top-level help.
+# Consume the subcommand token, then pass only the remaining flags/args
+# straight through to the utility via exec.  Do NOT re-inject the subcommand
+# name — each utility script owns its own argument parsing from $1 onward.
 _TASK="${1}"
 shift
 
 case "$_TASK" in
     health)
-        exec "$SCRIPT_DIR/utilities/maintenance-health.sh" health "$@"
+        exec "$SCRIPT_DIR/utilities/maintenance-health.sh" "$@"
         ;;
     update)
-        exec "$SCRIPT_DIR/utilities/maintenance-update.sh" update "$@"
+        exec "$SCRIPT_DIR/utilities/maintenance-update.sh" "$@"
         ;;
     db-maint)
-        exec "$SCRIPT_DIR/utilities/maintenance-db-maint.sh" db-maint "$@"
+        exec "$SCRIPT_DIR/utilities/maintenance-db-maint.sh" "$@"
         ;;
     test-email)
-        exec "$SCRIPT_DIR/utilities/maintenance-email.sh" test-email "$@"
+        exec "$SCRIPT_DIR/utilities/maintenance-email.sh" "$@"
         ;;
     update-dns)
-        exec "$SCRIPT_DIR/utilities/maintenance-update-dns.sh" update-dns "$@"
+        exec "$SCRIPT_DIR/utilities/maintenance-update-dns.sh" "$@"
         ;;
     update-firewall)
-        exec "$SCRIPT_DIR/utilities/maintenance-update-firewall.sh" update-firewall "$@"
+        exec "$SCRIPT_DIR/utilities/maintenance-update-firewall.sh" "$@"
         ;;
     run)
-        exec "$SCRIPT_DIR/utilities/maintenance-run.sh" run "$@"
+        exec "$SCRIPT_DIR/utilities/maintenance-run.sh" "$@"
         ;;
     help)
         # Bare 'help' keyword → top-level help only (no subcommand context).
