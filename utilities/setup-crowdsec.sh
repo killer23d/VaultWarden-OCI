@@ -21,7 +21,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-if [[ "${EUID}" -ne 0 ]]; then
+if [[ "${1:-}" == "--version" || "${1:-}" == "-V" ]]; then
+    printf 'VaultWarden-OCI %s\n' "$(tr -d '[:space:]' < "${PROJECT_ROOT}/VERSION" 2>/dev/null || echo unknown)"
+    exit 0
+fi
+
+if [[ "${1:-}" != "--help" && "${1:-}" != "-h" && "${1:-}" != "help" && "${EUID}" -ne 0 ]]; then
     if command -v sudo >/dev/null 2>&1; then
         exec sudo -n "$0" "$@"
     fi

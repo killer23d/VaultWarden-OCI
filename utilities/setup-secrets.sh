@@ -1974,9 +1974,12 @@ SOPS_EOF
 }
 
 main() {
-    (( EUID == 0 )) || { log_error "Must run as root."; exit 1; }
-
     local subcmd="${1:-}"
+    case "$subcmd" in
+        help|--help|-h|--version|-V) ;;
+        *) (( EUID == 0 )) || { log_error "Must run as root."; exit 1; } ;;
+    esac
+
     shift || true
 
     case "$subcmd" in
