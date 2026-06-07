@@ -111,6 +111,7 @@ FULL SETUP OPTIONS (used after install or with top-level --domain / --email):
 
 GLOBAL OPTIONS:
   --help, -h          Show this help and exit.
+  --version, -V       Print the VaultWarden-OCI version and exit.
 
 EXAMPLES:
     # ── First-time setup ──────────────────────────────────────────
@@ -199,24 +200,57 @@ while [[ $# -gt 0 ]]; do
         --data-device)  _require_cli_value "$1" "${2-}"; DATA_VOLUME_DEVICE="$2";   shift 2 ;;
         --data-mount)   _require_cli_value "$1" "${2-}"; DATA_VOLUME_MOUNT="$2";    shift 2 ;;
         --help|-h)      show_help; exit 0 ;;
-        --version|-V)
-            printf 'VaultWarden-OCI %s\n' "$(cat "${SCRIPT_DIR}/VERSION" 2>/dev/null || echo "unknown")"
-            exit 0
-            ;;
         *) log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done
 
 
+# ---------------------------------------------------------------------------
+# _warn_force_destructive
+#
+# Draws a prominent bordered warning box whose width adapts to the current
+# terminal width.  tput cols is queried at call time so the box looks correct
+# on both narrow OCI SSH sessions and wide local terminals.
+#
+# Layout:
+#   box_width  = terminal width clamped to [64, 100]
+#   inner_width = box_width - 4   (two border chars + two padding spaces)
+#
+# Falls back to 72 columns when tput is unavailable or reports 0/non-numeric.
+# ---------------------------------------------------------------------------
 _warn_force_destructive() {
-    local border
-    border=$(printf '═%.0s' {1..62})
-    printf '\n%s╔%s╗%s\n' "${COLOR_BOLD_RED}" "$border" "${COLOR_RESET}"
-    printf '%s║  %-60s  ║%s\n' "${COLOR_BOLD_RED}" "⚠  DESTRUCTIVE: --force WILL ROTATE YOUR AGE KEY" "${COLOR_RESET}"
-    printf '%s║  %-60s  ║%s\n' "${COLOR_BOLD_RED}" "All existing encrypted backups become unrecoverable" "${COLOR_RESET}"
-    printf '%s║  %-60s  ║%s\n' "${COLOR_BOLD_RED}" "unless you export a recovery kit FIRST." "${COLOR_RESET}"
-    printf '%s║  %-60s  ║%s\n' "${COLOR_BOLD_RED}" "Run first: ./utilities/secrets-export-recovery-kit.sh" "${COLOR_RESET}"
-    printf '%s╚%s╝%s\n\n' "${COLOR_BOLD_RED}" "$border" "${COLOR_RESET}"
+    local term_cols box_width inner_width border
+
+    # Resolve terminal width; fall back gracefully when tput is absent or
+    # when stdout is not a TTY (e.g., piped to a log file).
+    if [[ -t 1 ]] && command -v tput &>/dev/null; then
+        term_cols=$(tput cols 2>/dev/null || echo 0)
+    else
+        term_cols=0
+    fi
+
+    # Ensure term_cols is a positive integer before arithmetic.
+    [[ "${term_cols}" =~ ^[0-9]+$ && "${term_cols}" -gt 0 ]] || term_cols=72
+
+    # Clamp: never narrower than 64 cols (messages need room) or wider than 100.
+    (( term_cols < 64  )) && term_cols=64
+    (( term_cols > 100 )) && term_cols=100
+
+    box_width=$(( term_cols - 2 ))   # leave one space gutter on each side
+    inner_width=$(( box_width - 4 )) # ║<space><content><space>║
+
+    border=$(printf '═%.0s' $(seq 1 "${box_width}"))
+
+    printf '\n%s╔%s╗%s\n' "${COLOR_BOLD_RED}" "${border}" "${COLOR_RESET}"
+    printf "%s║  %-${inner_width}s  ║%s\n" \
+        "${COLOR_BOLD_RED}" "⚠  DESTRUCTIVE: --force WILL ROTATE YOUR AGE KEY" "${COLOR_RESET}"
+    printf "%s║  %-${inner_width}s  ║%s\n" \
+        "${COLOR_BOLD_RED}" "All existing encrypted backups become unrecoverable" "${COLOR_RESET}"
+    printf "%s║  %-${inner_width}s  ║%s\n" \
+        "${COLOR_BOLD_RED}" "unless you export a recovery kit FIRST." "${COLOR_RESET}"
+    printf "%s║  %-${inner_width}s  ║%s\n" \
+        "${COLOR_BOLD_RED}" "Run first: ./utilities/secrets-export-recovery-kit.sh" "${COLOR_RESET}"
+    printf '%s╚%s╝%s\n\n' "${COLOR_BOLD_RED}" "${border}" "${COLOR_RESET}"
 }
 
 _phase_failed() {
