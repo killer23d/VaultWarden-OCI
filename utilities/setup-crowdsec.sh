@@ -410,6 +410,12 @@ if [[ "$AUTO_MODE" == "true" ]]; then
     log_info "Running in non-interactive (auto) mode."
 fi
 
+if [[ "$USE_LATEST" == "true" ]]; then
+    CROWDSEC_VERSION=""
+    CF_WORKER_BOUNCER_VERSION=""
+    log_info "Version pins cleared by --use-latest; all components will use current upstream releases."
+fi
+
 # ---------------------------------------------------------------------------
 # Execution wrapper
 # ---------------------------------------------------------------------------
@@ -733,14 +739,14 @@ STUB
         fi
 
         if [[ "$_installed_via_deb" == "false" && -n "$_arch" ]]; then
-            if [[ "$USE_LATEST" == "true" || -z "$CF_WORKER_BOUNCER_VERSION" ]]; then
+            if [[ -z "$CF_WORKER_BOUNCER_VERSION" ]]; then
                 _gh_api="https://api.github.com/repos/crowdsecurity/cs-cloudflare-worker-bouncer/releases/latest"
                 log_info "CF Workers bouncer version: fetching latest from GitHub."
             else
                 _ver="${CF_WORKER_BOUNCER_VERSION#v}"   # strip leading 'v' if present
                 _gh_api="https://api.github.com/repos/crowdsecurity/cs-cloudflare-worker-bouncer/releases/tags/v${_ver}"
                 log_info "CF Workers bouncer version pinned: v${_ver}"
-        fi
+            fi
 
             _release_json="$(curl -fsSL "$_gh_api" 2>/dev/null)" || {
                 log_warn "Failed to query GitHub releases for cs-cloudflare-worker-bouncer."
@@ -823,7 +829,7 @@ STUB
         if [[ "$_installed_via_deb" == "false" && -n "$_arch" && ! -x "$_CF_WORKER_BOUNCER_BIN" ]]; then
             if command -v go >/dev/null 2>&1; then
                 log_info "Attempting Go source build for crowdsec-cloudflare-worker-bouncer..."
-                if [[ "$USE_LATEST" == "true" || -z "$CF_WORKER_BOUNCER_VERSION" ]]; then
+                if [[ -z "$CF_WORKER_BOUNCER_VERSION" ]]; then
                     _go_pkg_ref="github.com/crowdsecurity/cs-cloudflare-worker-bouncer/cmd/crowdsec-cloudflare-worker-bouncer@latest"
                 else
                     _ver="${CF_WORKER_BOUNCER_VERSION#v}"
