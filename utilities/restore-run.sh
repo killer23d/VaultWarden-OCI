@@ -391,7 +391,12 @@ _prompt_rclone_remote_name() {
         fi
         if command -v rclone >/dev/null 2>&1; then
             local configured_remotes
-            configured_remotes=$(rclone listremotes 2>/dev/null || true)
+            local _rcfg_arg=()
+            local _rcfg_path
+            if _rcfg_path=$(_resolve_rclone_config 2>/dev/null); then
+                _rcfg_arg=(--config "$_rcfg_path")
+            fi
+            configured_remotes=$(rclone "${_rcfg_arg[@]}" listremotes 2>/dev/null || true)
             if ! printf '%s\n' "$configured_remotes" | grep -qxF "${remote_name}:"; then
                 log_error "Remote '${remote_name}' not found in rclone config."
                 if [[ -n "$configured_remotes" ]]; then
