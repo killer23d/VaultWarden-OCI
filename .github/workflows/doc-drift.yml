@@ -34,11 +34,20 @@ jobs:
           curl -fsSL \
             "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/${YQ_BINARY}" \
             -o /tmp/yq
-          # Extract sha-256 from the YAML-format checksums file released by mikefarah/yq
-          # (format: "  <binary>:\n    - sha-256: <hash>")
-          EXPECTED_HASH=$(curl -fsSL \
+          # mikefarah/yq checksums file is a standard sha256sum-format file:
+          # "<hash>  <binary>"  — one entry per line.
+          curl -fsSL \
+            "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/checksums_hashes_order" \
+            -o /tmp/yq_checksums 2>/dev/null \
+          || curl -fsSL \
             "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/checksums" \
-            | awk "/^  ${YQ_BINARY}:/{found=1} found && /sha-256:/{print \$2; exit}")
+            -o /tmp/yq_checksums
+          EXPECTED_HASH=$(grep "^[a-f0-9]*  ${YQ_BINARY}$" /tmp/yq_checksums | awk '{print $1}')
+          if [[ -z "$EXPECTED_HASH" ]]; then
+            echo "ERROR: Could not extract checksum for ${YQ_BINARY} from checksums file" >&2
+            cat /tmp/yq_checksums >&2
+            exit 1
+          fi
           echo "${EXPECTED_HASH}  /tmp/yq" | sha256sum --check --strict
           sudo install -m 755 /tmp/yq /usr/local/bin/yq
           yq --version
