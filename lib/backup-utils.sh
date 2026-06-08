@@ -776,6 +776,15 @@ _resolve_rclone_config() {
         return 0
     fi
 
+    if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+        local sudo_user_home
+        sudo_user_home="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6 || true)"
+        if [[ -n "$sudo_user_home" && -f "$sudo_user_home/.config/rclone/rclone.conf" ]]; then
+            echo "$sudo_user_home/.config/rclone/rclone.conf"
+            return 0
+        fi
+    fi
+
     if [[ -f "/etc/rclone/rclone.conf" ]]; then
         echo "/etc/rclone/rclone.conf"
         return 0
@@ -784,15 +793,6 @@ _resolve_rclone_config() {
     if [[ -f "/root/.config/rclone/rclone.conf" ]]; then
         echo "/root/.config/rclone/rclone.conf"
         return 0
-    fi
-
-    if [[ -n "${SUDO_USER:-}" ]]; then
-        local sudo_user_home
-        sudo_user_home="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6 || true)"
-        if [[ -n "$sudo_user_home" && -f "$sudo_user_home/.config/rclone/rclone.conf" ]]; then
-            echo "$sudo_user_home/.config/rclone/rclone.conf"
-            return 0
-        fi
     fi
 
     local found_cfg
