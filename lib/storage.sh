@@ -23,11 +23,10 @@ readonly VAULTWARDEN_STORAGE_LIB_LOADED=1
 # Entry-point scripts apply these options via init_common_lib(); this library
 # is always sourced after that call.
 
-
 # Self-load log.sh if not already loaded — allows this lib to be sourced
 # directly without going through common.sh or a caller that pre-loads log.sh.
 _VW_STORAGE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-[[ -n "${VW_LOG_LIB_LOADED:-}" ]] || source "${_VW_STORAGE_LIB_DIR}/log.sh"
+[[ -n "${VW_LOG_LIB_LOADED:-}" ]]          || source "${_VW_STORAGE_LIB_DIR}/log.sh"
 [[ -n "${VAULTWARDEN_DEFAULTS_LOADED:-}" ]] || source "${_VW_STORAGE_LIB_DIR}/defaults.sh"
 unset _VW_STORAGE_LIB_DIR
 
@@ -115,6 +114,99 @@ _storage_device_has_data_signatures() {
     # --no-act: read-only scan; --all: include all offset types; --parsable:
     # machine-readable output for reliable empty-check via wc -l.
     wipefs --no-act --all --parsable "$device" 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# _storage_confirm_existing_fs
+#
+# Internal helper. Called when blkid reports an existing ext4/xfs filesystem
+# on the target device. Presents the operator with the device details and
+# requires explicit confirmation before setup proceeds to mount and use the
+# device as the VaultWarden data volume.
+#
+# Confirmation is accepted in two ways:
+#   Non-interactive / CI: DATA_VOLUME_EXISTING_FS_OK=true in the environment.
+#   Interactive (TTY):    Operator types the exact word YES at the prompt.
+#                         Anything else (including 'yes', 'y', Enter) aborts.
+#
+# If stdin is not a terminal and DATA_VOLUME_EXISTING_FS_OK is not set,
+# the function fails with a clear message so the caller can abort safely
+# rather than hanging indefinitely waiting for input.
+#
+# Arguments:
+#   $1 — device path (already validated)
+#   $2 — detected filesystem type (ext4 or xfs)
+#
+# Returns 0 if confirmation is obtained; 1 if the operator declines or the
+# environment does not permit safe confirmation.
+# ---------------------------------------------------------------------------
+_storage_confirm_existing_fs() {
+    local device="$1"
+    local fs_type="$2"
+    local existing_fs_ok
+
+    case "${DATA_VOLUME_EXISTING_FS_OK:-false,,}" in
+        true|1|yes) existing_fs_ok="true"  ;;
+        *)          existing_fs_ok="false" ;;
+    esac
+
+    # Gather device metadata for the warning message.
+    local dev_uuid dev_label dev_gib
+    dev_uuid=$(blkid  -o value -s UUID  "$device" 2>/dev/null || true)
+    dev_label=$(blkid -o value -s LABEL "$device" 2>/dev/null || true)
+    local _dev_bytes
+    _dev_bytes=$(lsblk --nodeps --noheadings --bytes --output SIZE "$device" 2>/dev/null \
+                 | tr -d '[:space:]') || true
+    if [[ "$_dev_bytes" =~ ^[0-9]+$ && "$_dev_bytes" -gt 0 ]]; then
+        dev_gib="$(( _dev_bytes / 1073741824 )) GiB"
+    else
+        dev_gib="(size unknown)"
+    fi
+
+    log_warn  "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    log_warn  "  EXISTING DATA DETECTED"
+    log_warn  "  Device   : $device"
+    log_warn  "  FS type  : $fs_type"
+    log_warn  "  UUID     : ${dev_uuid:-(none)}"
+    log_warn  "  Label    : ${dev_label:-(none)}"
+    log_warn  "  Size     : $dev_gib"
+    log_warn  "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    log_warn  "Setup will mount this device and use it as the VaultWarden data"
+    log_warn  "volume WITHOUT reformatting. Existing data will be preserved, but"
+    log_warn  "if this is the wrong device your data could be exposed or corrupted."
+    log_warn  "Verify this is the correct disk before continuing."
+    log_warn  "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    if [[ "$existing_fs_ok" == "true" ]]; then
+        log_warn "DATA_VOLUME_EXISTING_FS_OK=true — proceeding without interactive prompt."
+        return 0
+    fi
+
+    # Non-interactive path: stdin is not a terminal. Hanging here would be
+    # worse than failing, so abort with a clear remediation message.
+    if [[ ! -t 0 ]]; then
+        log_error "Stdin is not a terminal. Cannot prompt for confirmation."
+        log_error "To proceed non-interactively, set the following and re-run setup:"
+        log_error "  export DATA_VOLUME_EXISTING_FS_OK=true"
+        log_error "Only set this flag if you have verified $device is the correct disk."
+        return 1
+    fi
+
+    # Interactive prompt. Only the exact word YES (uppercase) is accepted.
+    local answer
+    printf '\n' >&2
+    printf 'Type YES (uppercase) to confirm this is the correct device and continue: ' >&2
+    read -r answer
+    printf '\n' >&2
+
+    if [[ "$answer" == "YES" ]]; then
+        log_info "Operator confirmed: proceeding with existing $fs_type filesystem on $device."
+        return 0
+    fi
+
+    log_error "Confirmation not received (got: '${answer}'). Aborting."
+    log_error "Re-run setup when you have verified the correct device is set in DATA_VOLUME_DEVICE."
+    return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -229,26 +321,37 @@ require_project_state_ready() {
 #   silent data loss when an operator accidentally points DATA_VOLUME_DEVICE
 #   at a device that was previously wiped or never formatted.
 #
+# EXISTING FILESYSTEM POLICY — adopting an already-formatted device:
+#   When blkid reports an existing ext4 or xfs filesystem the device is NOT
+#   reformatted. Instead the operator is shown the device details (UUID, label,
+#   size) and must explicitly confirm before setup proceeds. Confirmation is:
+#     Non-interactive / CI: DATA_VOLUME_EXISTING_FS_OK=true in the environment.
+#     Interactive (TTY):    Operator types the exact word YES at the prompt.
+#   This prevents silently adopting the wrong disk (e.g. the boot volume).
+#
 # Steps performed (each skipped if already complete):
 #   1. Validates device path safety and block-device existence.
 #   2. Detects filesystem type via blkid.
-#      a. Recognised ext4/xfs  → skip format (idempotent).
+#      a. Recognised ext4/xfs  → warn + confirm, then proceed without format.
 #      b. Other known type     → refuse; operator must intervene.
 #      c. No filesystem found  → run wipefs deep scan, then require
 #                                DATA_VOLUME_FORCE_FORMAT=true before
 #                                running mkfs.ext4 (without -F so mkfs
 #                                can apply its own safety checks).
 #   3. Creates the mount point directory.
-#   4. Adds a UUID-based fstab entry and runs daemon-reload.
+#   4. Adds a UUID-based fstab entry (fs-type matches detected filesystem)
+#      and runs daemon-reload.
 #   5. Mounts the volume if not already mounted.
 #   6. Writes a read-only sentinel file that identifies the volume.
 #
 # Environment variables consumed:
-#   DATA_VOLUME_DEVICE        — block device to provision (required)
-#   DATA_VOLUME_MOUNT         — mount point (default: _VW_DEFAULT_DATA_MOUNT)
-#   DRY_RUN                   — if true, preview every step without executing
-#   DATA_VOLUME_FORCE_FORMAT  — must be "true" to permit mkfs on an
-#                               unformatted/signature-free device
+#   DATA_VOLUME_DEVICE          — block device to provision (required)
+#   DATA_VOLUME_MOUNT           — mount point (default: _VW_DEFAULT_DATA_MOUNT)
+#   DRY_RUN                     — if true, preview every step without executing
+#   DATA_VOLUME_FORCE_FORMAT    — must be "true" to permit mkfs on an
+#                                 unformatted/signature-free device
+#   DATA_VOLUME_EXISTING_FS_OK  — set "true" to skip interactive confirmation
+#                                 when adopting an existing filesystem (CI/automation)
 # ---------------------------------------------------------------------------
 setup_data_volume() {
     local device="${DATA_VOLUME_DEVICE:-}"
@@ -257,7 +360,7 @@ setup_data_volume() {
     local force_format="${DATA_VOLUME_FORCE_FORMAT:-false}"
 
     case "${dry_run,,}" in
-        true|1|yes)   dry_run="true"  ;;
+        true|1|yes)    dry_run="true"  ;;
         false|0|no|"") dry_run="false" ;;
         *)
             log_warn "DRY_RUN='${DRY_RUN:-}' is not recognised (valid: true/false) — treating as false (live run)"
@@ -266,7 +369,7 @@ setup_data_volume() {
     esac
 
     case "${force_format,,}" in
-        true|1|yes)   force_format="true"  ;;
+        true|1|yes)    force_format="true"  ;;
         false|0|no|"") force_format="false" ;;
         *)
             log_warn "DATA_VOLUME_FORCE_FORMAT='${DATA_VOLUME_FORCE_FORMAT:-}' is not recognised — treating as false"
@@ -296,9 +399,13 @@ setup_data_volume() {
         # Device already carries a filesystem.
         if [[ "$fs_type" == "ext4" || "$fs_type" == "xfs" ]]; then
             if [[ "$dry_run" == "true" ]]; then
-                log_info "[DRY RUN] Existing $fs_type filesystem on $device — would skip format (idempotent)"
+                log_info "[DRY RUN] Existing $fs_type filesystem detected on $device."
+                log_info "[DRY RUN] Would require confirmation (DATA_VOLUME_EXISTING_FS_OK=true or interactive YES) before proceeding."
             else
-                log_info "Existing $fs_type filesystem on $device — skipping format (idempotent)"
+                # Require explicit operator confirmation before adopting an
+                # existing filesystem. This prevents silently mounting the
+                # wrong disk (e.g. the boot volume) as the data volume.
+                _storage_confirm_existing_fs "$device" "$fs_type" || return 1
             fi
         else
             log_error "Unexpected filesystem '$fs_type' on $device. Refusing to overwrite."
@@ -349,9 +456,13 @@ setup_data_volume() {
             log_info "Device size: $(( _dev_bytes / 1073741824 )) GiB."
 
             # Deep signature scan via wipefs.
+            # IMPORTANT: declare local first, then assign, so the exit code
+            # of the subshell is captured in wipefs_rc rather than always
+            # receiving the exit code of the 'local' builtin (which is always 0).
             local wipefs_out
+            local wipefs_rc
             wipefs_out=$(_storage_device_has_data_signatures "$device")
-            local wipefs_rc=$?
+            wipefs_rc=$?
 
             if (( wipefs_rc != 0 )); then
                 # wipefs is unavailable or failed. Treat as "unknown signatures"
@@ -368,9 +479,9 @@ setup_data_volume() {
                 log_warn "wipefs scan skipped (tool unavailable). Proceeding because DATA_VOLUME_FORCE_FORMAT=true."
             else
                 # wipefs ran successfully. Check whether it found any signatures.
-                local sig_count
                 # wipefs --parsable emits one header line plus one line per
                 # signature found. Strip the header, then count data lines.
+                local sig_count
                 sig_count=$(printf '%s\n' "$wipefs_out" \
                             | grep -v '^#' \
                             | grep -c '[^[:space:]]' 2>/dev/null || true)
@@ -395,7 +506,7 @@ setup_data_volume() {
                     log_warn "DATA_VOLUME_FORCE_FORMAT=true — proceeding despite detected signatures."
                     log_warn "ALL DATA ON $device WILL BE ERASED."
                 else
-                    # No signatures found. A --force-format flag is still required so
+                    # No signatures found. A force-format flag is still required so
                     # that the operator's intent to format is always explicit.
                     if [[ "$force_format" != "true" ]]; then
                         log_error "No filesystem or data signatures found on $device."
@@ -426,6 +537,8 @@ setup_data_volume() {
                 return 1
             }
             log_success "Formatted $device as ext4 (label: vw-data)"
+            # After a fresh format the detected type is always ext4.
+            fs_type="ext4"
         fi
     fi
 
@@ -450,11 +563,18 @@ setup_data_volume() {
     #   x-systemd.device-timeout=30s — bounds how long systemd waits for the block device;
     #                                  prevents indefinite boot stalls on OCI instances where
     #                                  the volume attachment may race the kernel.
+    #
+    # The fs-type written to fstab is derived from the detected filesystem so
+    # that an existing xfs volume is not incorrectly recorded as ext4.
     # ------------------------------------------------------------------
     local dev_uuid
     dev_uuid=$(blkid -o value -s UUID "$device" 2>/dev/null || true)
     [[ -n "$dev_uuid" ]] \
         || { log_error "Cannot determine UUID for $device — cannot write a safe fstab entry"; return 1; }
+
+    # fs_type is set either from the blkid detection above or from the fresh
+    # format path (always ext4). Guard against an unexpected empty value.
+    local fstab_fs_type="${fs_type:-ext4}"
 
     local _uuid_in_fstab=false _mp_matches=false _old_mp=""
     if grep -qF "UUID=$dev_uuid" /etc/fstab 2>/dev/null; then
@@ -477,7 +597,7 @@ setup_data_volume() {
             if [[ "$_uuid_in_fstab" == "true" ]]; then
                 log_info "[DRY RUN] Would replace stale fstab entry (UUID=$dev_uuid, old mount: '${_old_mp}') with $mount_point."
             else
-                log_info "[DRY RUN] Would add fstab entry: UUID=$dev_uuid  $mount_point  ext4  noatime,nofail,x-systemd.device-timeout=30s  0 2"
+                log_info "[DRY RUN] Would add fstab entry: UUID=$dev_uuid  $mount_point  $fstab_fs_type  noatime,nofail,x-systemd.device-timeout=30s  0 2"
             fi
         else
             # Write to a temp file on the same filesystem, then atomically replace
@@ -506,8 +626,8 @@ setup_data_volume() {
                     || { rm -f "$fstab_tmp" "$fstab_tmp2"; log_error "Failed to stage filtered fstab"; return 1; }
                 log_warn "fstab: stale entry for UUID=$dev_uuid pointed to '${_old_mp}' — replacing with '$mount_point'."
             fi
-            printf 'UUID=%s\t%s\text4\tnoatime,nofail,x-systemd.device-timeout=30s\t0\t2\n' \
-                "$dev_uuid" "$mount_point" >> "$fstab_tmp" \
+            printf 'UUID=%s\t%s\t%s\tnoatime,nofail,x-systemd.device-timeout=30s\t0\t2\n' \
+                "$dev_uuid" "$mount_point" "$fstab_fs_type" >> "$fstab_tmp" \
                 || { rm -f "$fstab_tmp"; log_error "Failed to append new entry to fstab temp file"; return 1; }
             if ! mv -- "$fstab_tmp" /etc/fstab; then
                 rm -f "$fstab_tmp"
@@ -515,9 +635,9 @@ setup_data_volume() {
                 return 1
             fi
             if [[ "$_uuid_in_fstab" == "true" ]]; then
-                log_success "fstab entry updated (UUID=$dev_uuid, mount: $mount_point)"
+                log_success "fstab entry updated (UUID=$dev_uuid, type=$fstab_fs_type, mount: $mount_point)"
             else
-                log_success "fstab entry added (UUID=$dev_uuid, mount: $mount_point)"
+                log_success "fstab entry added (UUID=$dev_uuid, type=$fstab_fs_type, mount: $mount_point)"
             fi
             _storage_daemon_reload
         fi
@@ -621,7 +741,7 @@ install_docker_mount_guard() {
     local dry_run="${DRY_RUN:-false}"
 
     case "${dry_run,,}" in
-        true|1|yes)   dry_run="true"  ;;
+        true|1|yes)    dry_run="true"  ;;
         false|0|no|"") dry_run="false" ;;
         *)
             log_warn "DRY_RUN='${DRY_RUN:-}' is not recognised (valid: true/false) — treating as false (live run)"
@@ -726,11 +846,27 @@ vw_default_backup_dir() {
 #
 # Arguments:
 #   $1 — caddy_log_dir  (e.g. /var/lib/vaultwarden/logs/caddy)
+#         Must be a non-empty absolute path. The function refuses to proceed
+#         if the argument is blank or not an absolute path to prevent
+#         accidental creation of files in the filesystem root when the
+#         caller passes an unset variable.
 #
 # Returns 0 on success, 1 on any failure.
 # ---------------------------------------------------------------------------
 ensure_caddy_log_permissions() {
     local caddy_log_dir="$1"
+
+    # Guard: reject blank or non-absolute paths before any filesystem operation.
+    if [[ -z "$caddy_log_dir" ]]; then
+        log_error "ensure_caddy_log_permissions: caddy_log_dir argument is empty."
+        log_error "Ensure CADDY_LOG_DIR (or the equivalent variable) is set before calling this function."
+        return 1
+    fi
+    if [[ "$caddy_log_dir" != /* ]]; then
+        log_error "ensure_caddy_log_permissions: caddy_log_dir must be an absolute path, got: '$caddy_log_dir'"
+        return 1
+    fi
+
     local access_log="${caddy_log_dir}/access.log"
     local security_log="${caddy_log_dir}/security.log"
     local changed=false
@@ -750,7 +886,7 @@ ensure_caddy_log_permissions() {
 
     local dir_owner dir_mode
     dir_owner=$(stat -c '%u:%g' "$caddy_log_dir" 2>/dev/null || echo "")
-    dir_mode=$(stat -c '%a' "$caddy_log_dir" 2>/dev/null || echo "")
+    dir_mode=$(stat  -c '%a'    "$caddy_log_dir" 2>/dev/null || echo "")
     if [[ "$dir_owner" != "0:0" ]]; then
         _maybe_sudo chown root:root "$caddy_log_dir" || return 1
         changed=true
@@ -763,7 +899,7 @@ ensure_caddy_log_permissions() {
     local log_file owner mode
     for log_file in "$access_log" "$security_log"; do
         owner=$(stat -c '%u:%g' "$log_file" 2>/dev/null || echo "")
-        mode=$(stat -c '%a' "$log_file" 2>/dev/null || echo "")
+        mode=$(stat  -c '%a'    "$log_file" 2>/dev/null || echo "")
         if [[ "$owner" != "0:0" ]]; then
             _maybe_sudo chown root:root "$log_file" || return 1
             changed=true
