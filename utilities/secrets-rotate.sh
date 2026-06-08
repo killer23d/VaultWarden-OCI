@@ -20,7 +20,7 @@ log_debug "secrets-rotate: SECRETS_FILE resolved to: ${SECRETS_FILE}"
 trap perform_cleanup EXIT
 
 show_help() {
-    cat << 'HELP'
+    cat << 'EOF'
 VaultWarden Secrets — rotate subcommand
 
 USAGE:
@@ -33,17 +33,9 @@ DESCRIPTION:
     re-encrypts secrets.yaml and resyncs Docker secret bind-mount files.
 
 SUPPORTED FIELDS:
-    admin_token                         (VaultWarden admin panel token)
-    admin_basic_auth_hash               (Caddy Basic-Auth hash (bcrypt))
-    smtp_password                       (SMTP relay password)
-    email_api_token                     (Email provider API token)
-    backup_passphrase                   (Backup encryption passphrase (auto-generated))
-    push_installation_id                (Push notification installation ID)
-    push_installation_key               (Push notification installation key)
-    caddy_cloudflare_dns_token          (Cloudflare DNS API token (Zone:DNS:Edit + Zone:Zone:Read — used by Caddy ACME DNS-01))
-    cf_worker_bouncer_token             (CrowdSec Cloudflare Workers bouncer token (Zone:Firewall Services:Edit))
-    cloudflare_zone_id                  (Cloudflare Zone ID (32-char hex — required by Caddy and CrowdSec CF bouncer))
-    cf_account_id                       (Cloudflare Account ID (32-char hex — required by CrowdSec CF bouncer))
+    Derived at runtime from secrets-schema.yaml.
+    Run after setup.sh install for the full schema list, or inspect:
+      secrets/secrets-schema.yaml
 
 EMAIL_MODE / EMAIL_PROVIDER quick reference (.env):
     EMAIL_MODE=auto   — tries API → SMTP → Postfix in order
@@ -55,10 +47,10 @@ EMAIL_MODE / EMAIL_PROVIDER quick reference (.env):
           the token is always stored as "email_api_token" in secrets.yaml.
 
 FLAGS:
-    --dry-run    Preview what would change without writing
-    --no-backup  Skip creating backup before rotation
-    --help, -h   Show this help
-    --version, -V Print the VaultWarden-OCI version and exit
+    --dry-run      Preview what would change without writing
+    --no-backup    Skip creating backup before rotation
+    --help, -h     Show this help
+    --version, -V  Print the VaultWarden-OCI version and exit
 
 EXAMPLES:
     ./utilities/secrets-rotate.sh admin_token
@@ -66,7 +58,7 @@ EXAMPLES:
     ./utilities/secrets-rotate.sh email_api_token --dry-run
     ./edit-secrets.sh rotate smtp_password
     ./edit-secrets.sh rotate backup_passphrase --no-backup
-HELP
+EOF
 }
 
 DRY_RUN=false
