@@ -4,6 +4,14 @@ All notable changes to VaultWarden-OCI are documented in this file.
 This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
+## [Unreleased]
+
+_(No unreleased changes yet — add entries here as work is merged.)_
+
+---
+## [1.0.0] — 2026-03-26
+
+---
 
 ## [Unreleased]
 
