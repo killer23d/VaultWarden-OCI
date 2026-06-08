@@ -31,11 +31,13 @@ jobs:
         run: |
           YQ_VERSION="v4.44.3"
           YQ_BINARY="yq_linux_amd64"
-          YQ_SHA256="a457b53b5fdb15c3f7b1c31b01284434f3ecd66eb4b16c8a6b88afd7de4ce5ef"
           curl -fsSL \
-            "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/${YQ_BINARY}" \
-            -o /tmp/yq
-          echo "${YQ_SHA256}  /tmp/yq" | sha256sum --check --strict
+          "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/${YQ_BINARY}" \
+          -o /tmp/yq
+          curl -fsSL \
+          "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/checksums" \
+          -o /tmp/yq_checksums
+          grep "${YQ_BINARY}" /tmp/yq_checksums | sha256sum --check --strict
           sudo install -m 755 /tmp/yq /usr/local/bin/yq
           yq --version
 
