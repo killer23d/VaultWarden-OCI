@@ -199,14 +199,17 @@ _show_changelog() {
     echo -e "${CYN}${DIVIDER}${NC}"
 
     while IFS= read -r line; do
-        # Detect start of Unreleased section
-        if [[ "${line}" =~ ^##[[:space:]]\[Unreleased\] ]]; then
+        # Detect start of Unreleased section.
+        # [[:space:]]* (zero-or-more) tolerates both "## [Unreleased]"
+        # and the rarer "##[Unreleased]" heading variant.
+        if [[ "${line}" =~ ^##[[:space:]]*\[Unreleased\] ]]; then
             in_section=true
             continue
         fi
 
-        # Detect start of the next versioned section — stop
-        if [[ "${in_section}" == true && "${line}" =~ ^##[[:space:]]\[ ]]; then
+        # Detect start of the next versioned section — stop.
+        # Same zero-or-more space tolerance applied here.
+        if [[ "${in_section}" == true && "${line}" =~ ^##[[:space:]]*\[ ]]; then
             break
         fi
 
@@ -239,7 +242,7 @@ _show_changelog() {
 }
 
 # ---------------------------------------------------------------------------
-# _show_changelog_on_update  (ux.md #44)
+# _show_changelog_on_update
 #
 # Called automatically after a successful stack update (Advanced menu
 # option 2).  Shows the changelog and pauses so the operator can read it.
@@ -369,15 +372,10 @@ _cf_worker_status() {
 }
 
 # ---------------------------------------------------------------------------
-# _secrets_health  (ux.md #23)
+# _secrets_health
 #
 # Scans .env for CHANGE_ME / CHANGEME placeholder values and returns a
 # single color-coded status string.
-#
-# Uses 'tr [:lower:] [:upper:]' for case-folding instead of ${val^^} to
-# remain portable across all bash versions (${^^} requires Bash 4.0+, which
-# is unavailable on macOS / some minimal OCI base images).  The rest of this
-# script already uses tr for the same reason (_confirm_destructive, main loop).
 # ---------------------------------------------------------------------------
 _secrets_health() {
     local env_file="${REPO_ROOT}/.env"
@@ -390,14 +388,15 @@ _secrets_health() {
     local -a unset_keys=()
     local key rest val val_upper
     while IFS='=' read -r key rest; do
-        [[ "${key}" =~ ^[[:space:]]*# ]] && continue
-        [[ -z "${key// /}" ]] && continue
+        [[ -z "${key// /}"            ]] && continue  # blank line
+        [[ "${key}" =~ ^[[:space:]]*# ]] && continue  # comment line
+        [[ "${rest}" != *=* && -z "${rest}" ]] && continue  # key with no value at all
         val="${rest}"
         val_upper="$(printf '%s' "${val}" | tr '[:lower:]' '[:upper:]')"
         if [[ "${val_upper}" == *CHANGE_ME* || "${val_upper}" == *CHANGEME* ]]; then
             unset_keys+=("${key}")
         fi
-    done < <(grep -v '^[[:space:]]*#' "${env_file}" | grep '=')
+    done < "${env_file}"
 
     local count=${#unset_keys[@]}
     if   (( count == 0 )); then
@@ -420,13 +419,16 @@ draw_live_stats() {
     draw_divider
 
     # --- Stack Health ---
-    local vw_stat caddy_stat pf_stat vw_plain vw_uptime=""
-    vw_stat="$(_container_status "${CONTAINER_VW}")"
+    local vw_plain vw_stat caddy_stat pf_stat vw_uptime=""
+    vw_plain="$(_container_status_plain "${CONTAINER_VW}")"
+    if [[ "${vw_plain}" == "Running" ]]; then
+        vw_stat="${GRN}Running${NC}"
+        vw_uptime=" (up $(_container_uptime "${CONTAINER_VW}"))"
+    else
+        vw_stat="${RED}Stopped${NC}"
+    fi
     caddy_stat="$(_container_status "${CONTAINER_CADDY}")"
     pf_stat="$(_container_status "${CONTAINER_POSTFIX}")"
-    vw_plain="$(_container_status_plain "${CONTAINER_VW}")"
-    [[ "${vw_plain}" == "Running" ]] \
-        && vw_uptime=" (up $(_container_uptime "${CONTAINER_VW}"))"
     echo -e " ${BLD}Stack:${NC}  VaultWarden ${vw_stat}${vw_uptime}  |  Caddy ${caddy_stat}  |  Postfix ${pf_stat}"
 
     # --- Disk Space ---
@@ -840,7 +842,8 @@ handle_advanced_menu() {
         6)
             if _confirm_destructive \
                     "Prune Docker resources used by the stack"; then
-                run_cmd "make prune" make -C "${REPO_ROOT}" prune
+                run_cmd "make prune" \
+                    env DASHBOARD_CONFIRMED=true make -C "${REPO_ROOT}" prune
             else
                 echo -e "${YLW} Prune cancelled.${NC}"
                 _press_enter

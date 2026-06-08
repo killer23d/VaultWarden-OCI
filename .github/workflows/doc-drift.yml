@@ -29,9 +29,17 @@ jobs:
       # (e.g. 'yq eval'), so we must install the correct binary directly.
       - name: Install yq
         run: |
+          # Pinned to v4.53.3 — do NOT change to /releases/latest (violates
+          # the unpinned-version check this same workflow enforces).
+          # To upgrade: update YQ_VERSION and YQ_SHA256 together.
+          # SHA-256 source: https://github.com/mikefarah/yq/releases/tag/v4.53.3
+          # (asset: yq_linux_amd64, digest field)
+          YQ_VERSION="v4.53.3"
+          YQ_SHA256="fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4"
           curl -fsSL \
-          "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64" \
-          -o /tmp/yq
+            "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64" \
+            -o /tmp/yq
+          echo "${YQ_SHA256}  /tmp/yq" | sha256sum --check --status
           sudo install -m 755 /tmp/yq /usr/local/bin/yq
           yq --version
           
@@ -143,23 +151,31 @@ jobs:
   shellcheck:
     runs-on: ubuntu-latest
     permissions:
-      # Required to push the auto-corrected commits back to the PR branch.
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Strict Shellcheck
+        run: |
+          # -x: follow source statements to avoid SC1091 false positives.
+          # --severity=warning: fail on warning or error; info/style are logged only.
+          find . -type f -name '*.sh' | xargs shellcheck -x --severity=warning
+
+  # ── Shellcheck auto-fix (contents: write, runs only on default branch) ──
+  # Separated from the PR check job so untrusted PR code never runs with
+  # write permission. Auto-fixes are committed only after code is merged.
+  shellcheck-autofix:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
-        with:
-          # Check out the PR branch specifically so we can push back to it.
-          ref: ${{ github.head_ref }}
 
-      - name: Attempt Shellcheck Auto-fixes
+      - name: Apply Shellcheck auto-fixes
         run: |
-          # Collect shellcheck safe-fix diffs for all shell scripts.
-          # -x: follow source statements to suppress SC1091 false positives.
-          # Use 'git apply' instead of 'patch -p1' so conflicting hunks are
-          # handled atomically (no silent .rej files left behind).
           find . -type f -name '*.sh' \
             | xargs shellcheck -x -f diff > shellcheck-fixes.patch 2>/dev/null || true
-
           if [ -s shellcheck-fixes.patch ]; then
             echo "Applying Shellcheck auto-fixes..."
             git apply --allow-empty shellcheck-fixes.patch
@@ -168,11 +184,7 @@ jobs:
           fi
           rm -f shellcheck-fixes.patch
 
-      # Pinned to commit SHA instead of mutable @v5 tag.
-      # This job has contents:write permission, so supply-chain safety matters.
-      # To update: bump the SHA to the new tag's commit (check releases page).
-      # Current tag mapping: v5 → b863ae1933cb653a53c021fe36dbb774e1fb9403
-      - name: Commit and Push Auto-fixes
+      - name: Commit and push auto-fixes
         uses: stefanzweifel/git-auto-commit-action@b863ae1933cb653a53c021fe36dbb774e1fb9403
         with:
           commit_message: "chore: apply safe shellcheck auto-fixes"
@@ -180,11 +192,3 @@ jobs:
             *.sh
             utilities/*.sh
             lib/*.sh
-
-      - name: Run Strict Shellcheck
-        run: |
-          # Run shellcheck on all scripts.
-          # -x: follow source statements to avoid SC1091 false positives.
-          # --severity=warning: only fail on 'warning' or 'error' findings;
-          #   'info' and 'style' findings are surfaced in the log but do NOT fail the build.
-          find . -type f -name '*.sh' | xargs shellcheck -x --severity=warning

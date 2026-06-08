@@ -1009,20 +1009,24 @@ clean-all: ## Remove secrets cache and log files — services will re-init secre
 
 prune: ## Remove unused Docker resources (images, containers, networks) — cannot be undone
 	$(call check-docker)
-	@if [ ! -t 0 ]; then \
-		echo "$(RED)Error: 'make prune' requires an interactive terminal.$(NC)"; \
-		echo "$(YELLOW)Re-run in a TTY: sudo make prune$(NC)"; \
-		exit 1; \
+	@# Allow dashboard.sh (which already confirmed) to bypass the interactive prompt.
+	@# Direct terminal invocations still require explicit confirmation.
+	@if [ "${DASHBOARD_CONFIRMED}" != "true" ]; then \
+		if [ ! -t 0 ]; then \
+			echo "$(RED)Error: 'make prune' requires an interactive terminal.$(NC)"; \
+			echo "$(YELLOW)Re-run in a TTY: sudo make prune$(NC)"; \
+			exit 1; \
+		fi; \
+		echo "$(YELLOW)WARNING: This will permanently remove unused Docker resources.$(NC)"; \
+		printf "Continue? [y/N] "; \
+		read -r confirm; \
+		if [ "$$confirm" != "y" ] && [ "$$confirm" != "Y" ]; then \
+			echo "Cancelled."; \
+			exit 0; \
+		fi; \
 	fi
-	@echo "$(YELLOW)WARNING: This will permanently remove unused Docker resources.$(NC)"
-	@printf "Continue? [y/N] "; \
-	read -r confirm; \
-	if [ "$$confirm" = "y" ] || [ "$$confirm" = "Y" ]; then \
-		docker system prune -f; \
-		echo "$(GREEN)Prune complete.$(NC)"; \
-	else \
-		echo "Cancelled."; \
-	fi
+	@docker system prune -f
+	@echo "$(GREEN)Prune complete.$(NC)"
 
 uninstall: ## Remove VaultWarden-OCI, all data, secrets, and containers from this host
 	$(call require-root)
