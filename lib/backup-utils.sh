@@ -74,34 +74,29 @@ _format_bytes_human() {
 # ---------------------------------------------------------------------------
 _json_escape() {
     printf '%s' "$1" | awk '
-    BEGIN { ORS="" }
+    BEGIN {
+        ORS = ""
+        # Build ordinal lookup table in pure awk — no shell subprocess per char.
+        for (i = 0; i <= 127; i++) {
+            ord_map[sprintf("%c", i)] = i
+        }
+    }
     {
         n = split($0, chars, "")
-        # split() does not include the record separator, so re-emit the
-        # newline that awk stripped when reading this line unless we are
-        # on the very last record — we handle multi-line input safely
-        # by processing NR > 1 lines with an explicit leading \n escape.
         if (NR > 1) printf "\\n"
         for (i = 1; i <= n; i++) {
             c = chars[i]
-            o = ord(c)
-            if      (c == "\\")     printf "\\\\"
-            else if (c == "\"")     printf "\\\""
-            else if (o == 8)        printf "\\b"
-            else if (o == 9)        printf "\\t"
-            else if (o == 10)       printf "\\n"
-            else if (o == 12)       printf "\\f"
-            else if (o == 13)       printf "\\r"
-            else if (o >= 0 && o <= 31) printf "\\u%04x", o
-            else                    printf "%s", c
+            o = (c in ord_map) ? ord_map[c] : -1
+            if      (c == "\\")          printf "\\\\"
+            else if (c == "\"")          printf "\\\""
+            else if (o == 8)             printf "\\b"
+            else if (o == 9)             printf "\\t"
+            else if (o == 10)            printf "\\n"
+            else if (o == 12)            printf "\\f"
+            else if (o == 13)            printf "\\r"
+            else if (o >= 0 && o <= 31)  printf "\\u%04x", o
+            else                         printf "%s", c
         }
-    }
-    function ord(ch,    cmd, result) {
-        # Portable ordinal via printf — avoids gawk-only ord() built-in.
-        cmd = "printf \'%d\' \"'" ch "\""
-        cmd | getline result
-        close(cmd)
-        return result + 0
     }
     '
 }
