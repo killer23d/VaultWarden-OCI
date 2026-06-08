@@ -1698,26 +1698,30 @@ main() {
     local PUID PGID
     PUID="$(get_config_value "PUID" "")"
     PGID="$(get_config_value "PGID" "")"
-    PUID="${PUID//$'\r'/}"
-    PGID="${PGID//$'\r'/}"
+    # Sanitise: strip carriage returns, surrounding whitespace, and inline
+    # comments (e.g. "1000 # set by setup.sh") before any emptiness check.
+    PUID="${PUID//$'\r'/}"; PUID="${PUID%%[[:space:]#]*}"; PUID="${PUID//[[:space:]]/}"
+    PGID="${PGID//$'\r'/}"; PGID="${PGID%%[[:space:]#]*}"; PGID="${PGID//[[:space:]]/}"
 
-    # If PUID/PGID are not in .env (bootstrap mode), prompt for them
-    # interactively so a bare-metal emergency restore can proceed without a
-    # pre-existing .env.
     if [[ -z "$PUID" || -z "$PGID" ]]; then
-        if [[ -t 0 ]]; then
-            log_warn "PUID and/or PGID are not set in .env."
-            if [[ -z "$PUID" ]]; then
-                read -r -p "  Enter PUID (numeric user ID, e.g. $(id -u)): " PUID
-            fi
-            if [[ -z "$PGID" ]]; then
-                read -r -p "  Enter PGID (numeric group ID, e.g. $(id -g)): " PGID
-            fi
+        # Tier 2: sudo injects the real caller's numeric UID/GID directly.
+        if [[ -n "${SUDO_UID:-}" && -n "${SUDO_GID:-}" \
+              && "${SUDO_UID}" =~ ^[0-9]+$ \
+              && "${SUDO_GID}" =~ ^[0-9]+$ ]]; then
+            [[ -z "$PUID" ]] && { PUID="$SUDO_UID"; log_warn "PUID not set in .env — auto-detected via SUDO_UID: $PUID (user: ${SUDO_USER:-unknown})"; }
+            [[ -z "$PGID" ]] && { PGID="$SUDO_GID"; log_warn "PGID not set in .env — auto-detected via SUDO_GID: $PGID (user: ${SUDO_USER:-unknown})"; }
         fi
-        if [[ -z "$PUID" || -z "$PGID" ]]; then
-            log_error "PUID and PGID must be set in .env (or entered interactively) before restoring."
-            log_error "Find values with: id <your-username>"
-            exit 1
+    fi
+
+    if [[ -z "$PUID" || -z "$PGID" ]]; then
+        # Tier 3: named service user (non-sudo / scripted / CI pipelines).
+        local _svc_user="${VAULTWARDEN_USER:-vaultwarden}"
+        local _svc_puid _svc_pgid
+        _svc_puid="$(id -u "$_svc_user" 2>/dev/null || true)"
+        _svc_pgid="$(id -g "$_svc_user" 2>/dev/null || true)"
+        if [[ "$_svc_puid" =~ ^[0-9]+$ && "$_svc_pgid" =~ ^[0-9]+$ ]]; then
+            [[ -z "$PUID" ]] && { PUID="$_svc_puid"; log_warn "PUID not set in .env — auto-detected from service user '${_svc_user}': $PUID"; }
+            [[ -z "$PGID" ]] && { PGID="$_svc_pgid"; log_warn "PGID not set in .env — auto-detected from service user '${_svc_user}': $PGID"; }
         fi
     fi
     # Validate that PUID and PGID are numeric and within valid UID/GID range.
