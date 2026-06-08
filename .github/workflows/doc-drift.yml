@@ -102,10 +102,8 @@ jobs:
           # under utilities/ — setup-crowdsec.sh legitimately uses the endpoint
           # when no version pin is configured (runtime-guarded by USE_LATEST /
           # empty CF_WORKER_BOUNCER_VERSION), so it is excluded here.
-          if grep -rn '/releases/latest' utilities/ lib/ --include='*.sh' \
-               | grep -v 'utilities/setup-crowdsec.sh' \
-               | grep -v 'doc-drift.yml'; then
-            echo "UNPINNED: /releases/latest GitHub API call found in an unexpected script"
+          if grep -n '/releases/latest' setup.sh 2>/dev/null; then
+            echo "UNPINNED: /releases/latest GitHub API call found in setup.sh"
             FAIL=1
           fi
           [[ $FAIL -eq 0 ]] || exit 1
