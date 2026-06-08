@@ -90,6 +90,23 @@ jobs:
           check_flag utilities/uninstall-vaultwarden.sh "--dry-run" || FAIL=1
           [[ $FAIL -eq 0 ]] || exit 1
 
+      - name: Check for unpinned version references
+        run: |
+          FAIL=0
+          # Guard against @latest Go module references in any script.
+          if grep -rn '@latest' utilities/ lib/ --include='*.sh'; then
+            echo "UNPINNED: @latest Go reference found"
+            FAIL=1
+          fi
+          # Only setup-crowdsec.sh should never resolve /releases/latest at
+          # runtime — other scripts (e.g. key-install, maintenance-update.sh)
+          # may legitimately call /releases/latest to auto-discover versions.
+          if grep -rn '/releases/latest' utilities/setup-crowdsec.sh 2>/dev/null; then
+            echo "UNPINNED: /releases/latest GitHub API call found in setup-crowdsec.sh"
+            FAIL=1
+          fi
+          [[ $FAIL -eq 0 ]] || exit 1
+
       - name: Systemd unit hardening check
         run: |
           REQUIRED_DIRECTIVES=(PrivateTmp ProtectSystem ProtectHome NoNewPrivileges)
