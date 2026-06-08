@@ -352,22 +352,18 @@ install_dependencies() {
         log_success "Universe repository enabled"
     fi
 
-    # yq (mikefarah/yq v4+) is required by lib/schema.sh for all schema-driven
-    # secrets operations: schema_keys, schema_field, schema_required_keys, etc.
-    # Without it, setup-secrets.sh configure and startup validation both fail at
-    # _schema_check_prerequisites(). Available in Ubuntu universe on 22.04+.
     local basic_packages=("age" "make" "nano" "rclone" "sqlite3" "jq" "yq" "ufw" "curl" "wget" "unzip" "git" "gpg" "coreutils" "haveged" "dnsutils" "rsync" "python3" "python3-argon2" "apache2-utils" "cron")
-    # NOTE: haveged is a userspace entropy daemon included for compatibility with
-    # kernels < 5.6 where /dev/random could block.  On Ubuntu 22.04/24.04 LTS
-    # (kernel 5.15/6.8) it is a no-op overhead but harmless.  Kept to support
-    # any operator who runs on an older kernel variant.
+
+    log_info "Refreshing apt package index..."
+    apt-get update -qq || return 1
+
     local missing_packages=()
     for pkg in "${basic_packages[@]}"; do
         ! dpkg -s "$pkg" >/dev/null 2>&1 && missing_packages+=("$pkg")
     done
 
     if [[ ${#missing_packages[@]} -gt 0 ]]; then
-        apt-get update -qq || return 1
+        log_info "Installing missing packages: ${missing_packages[*]}"
         DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing_packages[@]}" || return 1
     fi
 
@@ -446,6 +442,12 @@ install_dependencies() {
 verify_dependencies() {
     hash -r
     local required_commands=("age" "sops" "docker" "jq" "yq" "sqlite3" "ufw" "curl" "python3" "htpasswd")
+    if ! command -v ufw >/dev/null 2>&1; then
+        log_error "Missing required command: ufw"
+        log_info  "Install hint: sudo apt-get update && sudo apt-get install -y ufw"
+        return 1
+    fi
+
     require_commands "${required_commands[@]}" || return 1
     python3 -c "from argon2 import PasswordHasher" 2>/dev/null || return 1
     docker compose version >/dev/null 2>&1 || return 1
