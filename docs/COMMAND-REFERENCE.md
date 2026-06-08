@@ -732,40 +732,6 @@ EXAMPLES:
     ./restore.sh list --remote           # List remote backups (no sudo)
 ```
 
-### secrets-edit.sh
-
-```
-VaultWarden Secrets — edit subcommand
-
-USAGE:
-    ./utilities/secrets-edit.sh edit [OPTIONS]
-    ./edit-secrets.sh edit [OPTIONS]
-
-DESCRIPTION:
-    Interactively decrypts, opens in $EDITOR, validates, re-encrypts, and
-    backs up the secrets file. Offers recovery kit export on every save.
-
-FLAGS:
-    --editor EDITOR    Use specific editor (default: $EDITOR or nano).
-                       Pass flags in quotes: --editor 'code --wait'
-    --no-backup        Skip creating a timestamped backup before editing
-    --help, -h         Show this help
-
-FEATURES:
-    ✅ Automatic backup before every edit
-    ✅ Change detection (no-op if nothing changed)
-    ✅ YAML duplicate-key validation with rollback offer
-    ✅ vim/nvim swap-file suppression (--noswapfile -i NONE)
-    ✅ Forking-editor detection (code, gvim, atom, ...)
-    ✅ Prompts to export recovery kit after any modification
-
-EXAMPLES:
-    ./utilities/secrets-edit.sh edit
-    ./utilities/secrets-edit.sh edit --editor vim
-    ./edit-secrets.sh edit --editor 'code --wait'
-    ./edit-secrets.sh edit --no-backup
-```
-
 ### secrets-export-recovery-kit.sh
 
 ```
@@ -828,14 +794,9 @@ DESCRIPTION:
     re-encrypts secrets.yaml and resyncs Docker secret bind-mount files.
 
 SUPPORTED FIELDS:
-    (yq not installed — install with: sudo apt install yq  or  snap install yq)
-    admin_token                         (auto-generated admin token)
-    caddy_admin_password                (bcrypt hash for Caddy)
-    backup_passphrase                   (backup encryption passphrase)
-    caddy_cloudflare_dns_token          (Cloudflare DNS API token)
-    smtp_password                       (SMTP relay password)
-    email_api_token                     (email API key)
-    ... run after setup.sh install for the full schema list
+    Derived at runtime from secrets-schema.yaml.
+    Run after setup.sh install for the full schema list, or inspect:
+      secrets/secrets-schema.yaml
 
 EMAIL_MODE / EMAIL_PROVIDER quick reference (.env):
     EMAIL_MODE=auto   — tries API → SMTP → Postfix in order
@@ -847,9 +808,9 @@ EMAIL_MODE / EMAIL_PROVIDER quick reference (.env):
           the token is always stored as "email_api_token" in secrets.yaml.
 
 FLAGS:
-    --dry-run    Preview what would change without writing
-    --no-backup  Skip creating backup before rotation
-    --help, -h   Show this help
+    --dry-run     Preview what would change without writing
+    --no-backup   Skip creating backup before rotation
+    --help, -h    Show this help
     --version, -V Print the VaultWarden-OCI version and exit
 
 EXAMPLES:
