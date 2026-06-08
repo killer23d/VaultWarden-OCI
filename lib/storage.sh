@@ -86,6 +86,38 @@ _storage_daemon_reload() {
 }
 
 # ---------------------------------------------------------------------------
+# _storage_device_has_data_signatures
+#
+# Internal helper. Uses wipefs to detect any on-disk signatures that blkid
+# does not report as a named filesystem type (e.g. LVM PV, RAID superblocks,
+# swap areas, orphaned partition tables, previous MBR bootloaders).
+#
+# blkid only reports TYPE when it recognises a complete, valid filesystem
+# header. wipefs reports *any* magic-number match regardless of validity.
+# A device with wiped or corrupted filesystem headers can therefore appear
+# blank to blkid while still carrying data fingerprints visible to wipefs.
+#
+# Arguments:
+#   $1 — block device path (already validated)
+#
+# Outputs (stdout): one line per signature found, in wipefs --parsable format.
+# Returns 0 if wipefs is available and ran successfully; 1 otherwise.
+# Callers must treat a non-zero return as "unknown" and err on the side of
+# caution.
+# ---------------------------------------------------------------------------
+_storage_device_has_data_signatures() {
+    local device="$1"
+    if ! command -v wipefs >/dev/null 2>&1; then
+        log_warn "wipefs not found — cannot perform deep signature scan of $device."
+        log_warn "Install util-linux to enable this safety check."
+        return 1
+    fi
+    # --no-act: read-only scan; --all: include all offset types; --parsable:
+    # machine-readable output for reliable empty-check via wc -l.
+    wipefs --no-act --all --parsable "$device" 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
 # require_project_state_ready
 #
 # Gate function called near the top of every operational script. Ensures the
@@ -187,23 +219,45 @@ require_project_state_ready() {
 # Idempotent: every step checks current on-disk state before acting.
 # Called only by setup.sh. Requires root.
 #
+# DESTRUCTIVE OPERATION POLICY — formatting a block device:
+#   Formatting is permitted ONLY when ALL of the following are true:
+#     a) blkid reports no recognised filesystem on the device.
+#     b) wipefs reports no data signatures of any kind (LVM, RAID, swap, …).
+#     c) DATA_VOLUME_FORCE_FORMAT=true is set in the environment.
+#   If (a) and (b) are true but (c) is absent the function aborts with a
+#   clear error and the remediation command needed to proceed. This prevents
+#   silent data loss when an operator accidentally points DATA_VOLUME_DEVICE
+#   at a device that was previously wiped or never formatted.
+#
 # Steps performed (each skipped if already complete):
 #   1. Validates device path safety and block-device existence.
-#   2. Formats the device as ext4 only if no filesystem is present.
-#      Refuses to format if the device is currently mounted under any path.
-#      Refuses to overwrite any non-ext4 filesystem.
+#   2. Detects filesystem type via blkid.
+#      a. Recognised ext4/xfs  → skip format (idempotent).
+#      b. Other known type     → refuse; operator must intervene.
+#      c. No filesystem found  → run wipefs deep scan, then require
+#                                DATA_VOLUME_FORCE_FORMAT=true before
+#                                running mkfs.ext4 (without -F so mkfs
+#                                can apply its own safety checks).
 #   3. Creates the mount point directory.
 #   4. Adds a UUID-based fstab entry and runs daemon-reload.
 #   5. Mounts the volume if not already mounted.
 #   6. Writes a read-only sentinel file that identifies the volume.
+#
+# Environment variables consumed:
+#   DATA_VOLUME_DEVICE        — block device to provision (required)
+#   DATA_VOLUME_MOUNT         — mount point (default: _VW_DEFAULT_DATA_MOUNT)
+#   DRY_RUN                   — if true, preview every step without executing
+#   DATA_VOLUME_FORCE_FORMAT  — must be "true" to permit mkfs on an
+#                               unformatted/signature-free device
 # ---------------------------------------------------------------------------
 setup_data_volume() {
     local device="${DATA_VOLUME_DEVICE:-}"
     local mount_point="${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}"
     local dry_run="${DRY_RUN:-false}"
+    local force_format="${DATA_VOLUME_FORCE_FORMAT:-false}"
 
     case "${dry_run,,}" in
-        true|1|yes)  dry_run="true" ;;
+        true|1|yes)   dry_run="true"  ;;
         false|0|no|"") dry_run="false" ;;
         *)
             log_warn "DRY_RUN='${DRY_RUN:-}' is not recognised (valid: true/false) — treating as false (live run)"
@@ -211,13 +265,17 @@ setup_data_volume() {
             ;;
     esac
 
+    case "${force_format,,}" in
+        true|1|yes)   force_format="true"  ;;
+        false|0|no|"") force_format="false" ;;
+        *)
+            log_warn "DATA_VOLUME_FORCE_FORMAT='${DATA_VOLUME_FORCE_FORMAT:-}' is not recognised — treating as false"
+            force_format="false"
+            ;;
+    esac
+
     if [[ -z "$device" ]]; then
         log_info "DATA_VOLUME_DEVICE not set — skipping data volume provisioning (boot-only mode)"
-        return 0
-    fi
-
-    if [[ "$dry_run" == "true" ]]; then
-        log_info "[DRY RUN] Would provision data volume: $device → $mount_point"
         return 0
     fi
 
@@ -228,65 +286,171 @@ setup_data_volume() {
         return 1
     fi
 
+    # ------------------------------------------------------------------
+    # Step 2: Filesystem detection and format decision.
+    # ------------------------------------------------------------------
     local fs_type
     fs_type=$(blkid -o value -s TYPE "$device" 2>/dev/null || true)
 
-    if [[ -z "$fs_type" ]]; then
-        # Refuse to format a device that is currently mounted under any path.
-        # Use awk to extract the first field (device column) so that a device
-        # path that is a prefix of another (e.g. /dev/sdb vs /dev/sdba) does
-        # not produce a false match.
-        if mountpoint -q "$mount_point" 2>/dev/null \
-            || awk '{print $1}' /proc/mounts 2>/dev/null | grep -qxF "$device"; then
-            log_error "Refusing to format $device — it is currently mounted."
-            log_error "Unmount it first, then re-run setup: sudo umount $mount_point"
+    if [[ -n "$fs_type" ]]; then
+        # Device already carries a filesystem.
+        if [[ "$fs_type" == "ext4" || "$fs_type" == "xfs" ]]; then
+            if [[ "$dry_run" == "true" ]]; then
+                log_info "[DRY RUN] Existing $fs_type filesystem on $device — would skip format (idempotent)"
+            else
+                log_info "Existing $fs_type filesystem on $device — skipping format (idempotent)"
+            fi
+        else
+            log_error "Unexpected filesystem '$fs_type' on $device. Refusing to overwrite."
+            log_error "Only ext4 and xfs volumes are managed by this script."
+            log_error "To use a different device, update DATA_VOLUME_DEVICE in .env and re-run setup."
             return 1
         fi
-        # Sanity-check device size before formatting.
-        # Minimum: 1 GiB (1073741824 bytes). A smaller device almost certainly
-        # means the wrong block device was specified in DATA_VOLUME_DEVICE.
-        local _dev_bytes
-        _dev_bytes=$(lsblk --nodeps --noheadings --bytes --output SIZE "$device" 2>/dev/null \
-                     | tr -d '[:space:]') || true
-        if [[ -z "$_dev_bytes" || ! "$_dev_bytes" =~ ^[0-9]+$ ]]; then
-            log_error "Cannot determine size of $device (lsblk failed or returned non-numeric output)."
-            log_error "Verify the device is attached and DATA_VOLUME_DEVICE is correct."
-            return 1
-        fi
-        if (( _dev_bytes < 1073741824 )); then
-            log_error "Device $device is too small: ${_dev_bytes} bytes (< 1 GiB minimum)."
-            log_error "A device this small almost certainly means DATA_VOLUME_DEVICE is wrong."
-            log_error "Verify the correct block device with: lsblk"
-            return 1
-        fi
-        log_info "Device size: $(( _dev_bytes / 1073741824 )) GiB — proceeding with format."
-        log_info "No filesystem found on $device — formatting as ext4..."
-        log_warn "ALL DATA ON $device WILL BE ERASED. This is expected on first run."
-        local mkfs_out
-        mkfs_out=$(mkfs.ext4 -F -L vw-data "$device" 2>&1) || {
-            log_error "mkfs.ext4 failed for $device: $mkfs_out"
-            return 1
-        }
-        log_success "Formatted $device as ext4 (label: vw-data)"
-    elif [[ "$fs_type" == "ext4" || "$fs_type" == "xfs" ]]; then
-        log_info "Existing $fs_type filesystem on $device — skipping format (idempotent)"
     else
-        log_error "Unexpected filesystem '$fs_type' on $device. Refusing to overwrite."
-        log_error "To use a different device, update DATA_VOLUME_DEVICE in .env and re-run setup."
-        return 1
+        # No recognised filesystem. Perform a deep wipefs scan to detect
+        # any non-filesystem data signatures before deciding what to do.
+
+        if [[ "$dry_run" == "true" ]]; then
+            log_info "[DRY RUN] No filesystem detected on $device — would run wipefs deep scan."
+            if [[ "$force_format" == "true" ]]; then
+                log_info "[DRY RUN] DATA_VOLUME_FORCE_FORMAT=true — would format $device as ext4 if scan is clean."
+            else
+                log_info "[DRY RUN] DATA_VOLUME_FORCE_FORMAT is not set — would abort (set it to permit format)."
+            fi
+        else
+            # Refuse to format a device that is currently mounted under any path.
+            # Use awk to extract the first field (device column) so that a device
+            # path that is a prefix of another (e.g. /dev/sdb vs /dev/sdba) does
+            # not produce a false match.
+            if mountpoint -q "$mount_point" 2>/dev/null \
+                || awk '{print $1}' /proc/mounts 2>/dev/null | grep -qxF "$device"; then
+                log_error "Refusing to format $device — it is currently mounted."
+                log_error "Unmount it first, then re-run setup: sudo umount $mount_point"
+                return 1
+            fi
+
+            # Sanity-check device size before formatting.
+            # Minimum: 1 GiB (1073741824 bytes). A smaller device almost certainly
+            # means the wrong block device was specified in DATA_VOLUME_DEVICE.
+            local _dev_bytes
+            _dev_bytes=$(lsblk --nodeps --noheadings --bytes --output SIZE "$device" 2>/dev/null \
+                         | tr -d '[:space:]') || true
+            if [[ -z "$_dev_bytes" || ! "$_dev_bytes" =~ ^[0-9]+$ ]]; then
+                log_error "Cannot determine size of $device (lsblk failed or returned non-numeric output)."
+                log_error "Verify the device is attached and DATA_VOLUME_DEVICE is correct."
+                return 1
+            fi
+            if (( _dev_bytes < 1073741824 )); then
+                log_error "Device $device is too small: ${_dev_bytes} bytes (< 1 GiB minimum)."
+                log_error "A device this small almost certainly means DATA_VOLUME_DEVICE is wrong."
+                log_error "Verify the correct block device with: lsblk"
+                return 1
+            fi
+            log_info "Device size: $(( _dev_bytes / 1073741824 )) GiB."
+
+            # Deep signature scan via wipefs.
+            local wipefs_out
+            wipefs_out=$(_storage_device_has_data_signatures "$device")
+            local wipefs_rc=$?
+
+            if (( wipefs_rc != 0 )); then
+                # wipefs is unavailable or failed. Treat as "unknown signatures"
+                # and refuse unless the operator has explicitly forced the format.
+                if [[ "$force_format" != "true" ]]; then
+                    log_error "Cannot perform a deep signature scan of $device (wipefs unavailable or failed)."
+                    log_error "Refusing to format without confirmation to avoid accidental data loss."
+                    log_error "If you are certain $device is blank and safe to format, set:"
+                    log_error "  export DATA_VOLUME_FORCE_FORMAT=true"
+                    log_error "then re-run setup. This flag must be set explicitly — it is never"
+                    log_error "inferred from any other option."
+                    return 1
+                fi
+                log_warn "wipefs scan skipped (tool unavailable). Proceeding because DATA_VOLUME_FORCE_FORMAT=true."
+            else
+                # wipefs ran successfully. Check whether it found any signatures.
+                local sig_count
+                # wipefs --parsable emits one header line plus one line per
+                # signature found. Strip the header, then count data lines.
+                sig_count=$(printf '%s\n' "$wipefs_out" \
+                            | grep -v '^#' \
+                            | grep -c '[^[:space:]]' 2>/dev/null || true)
+
+                if (( sig_count > 0 )); then
+                    # Signatures were detected. Show them for the operator's benefit.
+                    log_warn "wipefs detected ${sig_count} data signature(s) on $device:"
+                    printf '%s\n' "$wipefs_out" | grep -v '^#' | while IFS= read -r _sig_line; do
+                        [[ -n "$_sig_line" ]] && log_warn "  $_sig_line"
+                    done
+                    if [[ "$force_format" != "true" ]]; then
+                        log_error "Refusing to format $device — existing data signatures were found."
+                        log_error "This device may contain data (LVM PV, RAID member, swap, prior filesystem, …)."
+                        log_error "Review the signatures above with:"
+                        log_error "  sudo wipefs --all $device"
+                        log_error "If you are certain the device is safe to erase, set:"
+                        log_error "  export DATA_VOLUME_FORCE_FORMAT=true"
+                        log_error "then re-run setup. This flag must be set explicitly — it is never"
+                        log_error "inferred from any other option."
+                        return 1
+                    fi
+                    log_warn "DATA_VOLUME_FORCE_FORMAT=true — proceeding despite detected signatures."
+                    log_warn "ALL DATA ON $device WILL BE ERASED."
+                else
+                    # No signatures found. A --force-format flag is still required so
+                    # that the operator's intent to format is always explicit.
+                    if [[ "$force_format" != "true" ]]; then
+                        log_error "No filesystem or data signatures found on $device."
+                        log_error "To format this device as ext4 and use it as the VaultWarden data volume,"
+                        log_error "set the following and re-run setup:"
+                        log_error "  export DATA_VOLUME_FORCE_FORMAT=true"
+                        log_error "This flag must be set explicitly — it is never inferred from any other option."
+                        log_error "This safeguard prevents accidental data loss when a device that was"
+                        log_error "previously wiped appears blank to blkid."
+                        return 1
+                    fi
+                    log_warn "No data signatures detected on $device. Proceeding with format (DATA_VOLUME_FORCE_FORMAT=true)."
+                    log_warn "ALL DATA ON $device WILL BE ERASED."
+                fi
+            fi
+
+            # All safety gates passed. Format the device.
+            # Note: -F (force) is intentionally omitted so that mkfs.ext4 can
+            # apply its own independent safety checks (e.g. refusing to format
+            # a device with an active partition table).
+            log_info "Formatting $device as ext4 (label: vw-data)..."
+            local mkfs_out
+            mkfs_out=$(mkfs.ext4 -L vw-data "$device" 2>&1) || {
+                log_error "mkfs.ext4 failed for $device:"
+                printf '%s\n' "$mkfs_out" | while IFS= read -r _line; do
+                    log_error "  $_line"
+                done
+                return 1
+            }
+            log_success "Formatted $device as ext4 (label: vw-data)"
+        fi
     fi
 
-    [[ -d "$mount_point" ]] || mkdir -p "$mount_point" \
-        || { log_error "Cannot create mount point: $mount_point"; return 1; }
-    chmod 755 "$mount_point"
+    # ------------------------------------------------------------------
+    # Step 3: Mount point directory.
+    # ------------------------------------------------------------------
+    if [[ "$dry_run" == "true" ]]; then
+        [[ -d "$mount_point" ]] \
+            && log_info "[DRY RUN] Mount point $mount_point already exists." \
+            || log_info "[DRY RUN] Would create mount point: $mount_point"
+    else
+        [[ -d "$mount_point" ]] || mkdir -p "$mount_point" \
+            || { log_error "Cannot create mount point: $mount_point"; return 1; }
+        chmod 755 "$mount_point"
+    fi
 
-    # 4. fstab entry (UUID-based, idempotent).
-    #    noatime                      — suppress atime writes; reduces I/O on SQLite data files.
-    #    nofail                       — boot proceeds if the volume is absent (avoids
-    #                                   emergency-mode boot on temporary disk detachment).
-    #    x-systemd.device-timeout=30s — bounds how long systemd waits for the block device;
-    #                                   prevents indefinite boot stalls on OCI instances where
-    #                                   the volume attachment may race the kernel.
+    # ------------------------------------------------------------------
+    # Step 4: fstab entry (UUID-based, idempotent).
+    #   noatime                      — suppress atime writes; reduces I/O on SQLite data files.
+    #   nofail                       — boot proceeds if the volume is absent (avoids
+    #                                  emergency-mode boot on temporary disk detachment).
+    #   x-systemd.device-timeout=30s — bounds how long systemd waits for the block device;
+    #                                  prevents indefinite boot stalls on OCI instances where
+    #                                  the volume attachment may race the kernel.
+    # ------------------------------------------------------------------
     local dev_uuid
     dev_uuid=$(blkid -o value -s UUID "$device" 2>/dev/null || true)
     [[ -n "$dev_uuid" ]] \
@@ -303,102 +467,137 @@ setup_data_volume() {
     fi
 
     if [[ "$_uuid_in_fstab" == "true" && "$_mp_matches" == "true" ]]; then
-        log_info "fstab entry already present for UUID=$dev_uuid at $mount_point (idempotent)"
-    else
-        # Write to a temp file on the same filesystem, then atomically replace
-        # /etc/fstab. This avoids leaving a truncated fstab behind if the
-        # process is killed mid-write.
-        local fstab_tmp
-        fstab_tmp=$(mktemp /etc/fstab.vw-XXXXXX) \
-            || { log_error "Cannot create fstab temp file"; return 1; }
-        chmod 644 "$fstab_tmp"
-        if ! cp /etc/fstab "$fstab_tmp"; then
-            rm -f "$fstab_tmp"
-            log_error "Cannot copy /etc/fstab to temp file"
-            return 1
-        fi
-        if [[ "$_uuid_in_fstab" == "true" ]]; then
-            # UUID exists but points to the wrong mount point — remove the stale
-            # entry before appending the corrected one. grep -v writes all lines
-            # that do NOT match; the result is the old fstab minus the stale line.
-            local fstab_tmp2
-            fstab_tmp2=$(mktemp /etc/fstab.vw-XXXXXX) \
-                || { rm -f "$fstab_tmp"; log_error "Cannot create second fstab temp file"; return 1; }
-            chmod 644 "$fstab_tmp2"
-            grep -vF "UUID=$dev_uuid" "$fstab_tmp" > "$fstab_tmp2" \
-                || { rm -f "$fstab_tmp" "$fstab_tmp2"; log_error "Failed to filter stale fstab entry"; return 1; }
-            mv -- "$fstab_tmp2" "$fstab_tmp" \
-                || { rm -f "$fstab_tmp" "$fstab_tmp2"; log_error "Failed to stage filtered fstab"; return 1; }
-            log_warn "fstab: stale entry for UUID=$dev_uuid pointed to '${_old_mp}' — replacing with '$mount_point'."
-        fi
-        printf 'UUID=%s\t%s\text4\tnoatime,nofail,x-systemd.device-timeout=30s\t0\t2\n' \
-            "$dev_uuid" "$mount_point" >> "$fstab_tmp" \
-            || { rm -f "$fstab_tmp"; log_error "Failed to append new entry to fstab temp file"; return 1; }
-        if ! mv -- "$fstab_tmp" /etc/fstab; then
-            rm -f "$fstab_tmp"
-            log_error "Failed to atomically replace /etc/fstab"
-            return 1
-        fi
-        if [[ "$_uuid_in_fstab" == "true" ]]; then
-            log_success "fstab entry updated (UUID=$dev_uuid, mount: $mount_point)"
+        if [[ "$dry_run" == "true" ]]; then
+            log_info "[DRY RUN] fstab entry for UUID=$dev_uuid at $mount_point already correct (idempotent)."
         else
-            log_success "fstab entry added (UUID=$dev_uuid, mount: $mount_point)"
+            log_info "fstab entry already present for UUID=$dev_uuid at $mount_point (idempotent)"
         fi
-        _storage_daemon_reload
-    fi
-
-    if mountpoint -q "$mount_point" 2>/dev/null; then
-        log_info "$mount_point already mounted (idempotent)"
     else
-        mount "$mount_point" || {
-            local _fstab_hint
-            _fstab_hint="$(blkid -o value -s UUID "$device" 2>/dev/null || true)"
-            log_error "Could not mount $mount_point. This usually means /etc/fstab is"
-            log_error "missing an entry for this device or uses a different mount point."
-            log_error "To diagnose:"
-            if [[ -n "${_fstab_hint}" ]]; then
-                log_error "  grep '${_fstab_hint}' /etc/fstab"
+        if [[ "$dry_run" == "true" ]]; then
+            if [[ "$_uuid_in_fstab" == "true" ]]; then
+                log_info "[DRY RUN] Would replace stale fstab entry (UUID=$dev_uuid, old mount: '${_old_mp}') with $mount_point."
             else
-                log_error "  grep '$device' /etc/fstab"
+                log_info "[DRY RUN] Would add fstab entry: UUID=$dev_uuid  $mount_point  ext4  noatime,nofail,x-systemd.device-timeout=30s  0 2"
             fi
-            log_error "Verify the second column (mount point) matches '$mount_point'."
-            log_error "If the entry is missing, run: sudo utilities/setup-storage.sh --mode setup"
-            return 1
-        }
-        log_success "Mounted $device at $mount_point"
+        else
+            # Write to a temp file on the same filesystem, then atomically replace
+            # /etc/fstab. This avoids leaving a truncated fstab behind if the
+            # process is killed mid-write.
+            local fstab_tmp
+            fstab_tmp=$(mktemp /etc/fstab.vw-XXXXXX) \
+                || { log_error "Cannot create fstab temp file"; return 1; }
+            chmod 644 "$fstab_tmp"
+            if ! cp /etc/fstab "$fstab_tmp"; then
+                rm -f "$fstab_tmp"
+                log_error "Cannot copy /etc/fstab to temp file"
+                return 1
+            fi
+            if [[ "$_uuid_in_fstab" == "true" ]]; then
+                # UUID exists but points to the wrong mount point — remove the stale
+                # entry before appending the corrected one. grep -v writes all lines
+                # that do NOT match; the result is the old fstab minus the stale line.
+                local fstab_tmp2
+                fstab_tmp2=$(mktemp /etc/fstab.vw-XXXXXX) \
+                    || { rm -f "$fstab_tmp"; log_error "Cannot create second fstab temp file"; return 1; }
+                chmod 644 "$fstab_tmp2"
+                grep -vF "UUID=$dev_uuid" "$fstab_tmp" > "$fstab_tmp2" \
+                    || { rm -f "$fstab_tmp" "$fstab_tmp2"; log_error "Failed to filter stale fstab entry"; return 1; }
+                mv -- "$fstab_tmp2" "$fstab_tmp" \
+                    || { rm -f "$fstab_tmp" "$fstab_tmp2"; log_error "Failed to stage filtered fstab"; return 1; }
+                log_warn "fstab: stale entry for UUID=$dev_uuid pointed to '${_old_mp}' — replacing with '$mount_point'."
+            fi
+            printf 'UUID=%s\t%s\text4\tnoatime,nofail,x-systemd.device-timeout=30s\t0\t2\n' \
+                "$dev_uuid" "$mount_point" >> "$fstab_tmp" \
+                || { rm -f "$fstab_tmp"; log_error "Failed to append new entry to fstab temp file"; return 1; }
+            if ! mv -- "$fstab_tmp" /etc/fstab; then
+                rm -f "$fstab_tmp"
+                log_error "Failed to atomically replace /etc/fstab"
+                return 1
+            fi
+            if [[ "$_uuid_in_fstab" == "true" ]]; then
+                log_success "fstab entry updated (UUID=$dev_uuid, mount: $mount_point)"
+            else
+                log_success "fstab entry added (UUID=$dev_uuid, mount: $mount_point)"
+            fi
+            _storage_daemon_reload
+        fi
     fi
 
-    # 6. Sentinel file (idempotent, read-only, immutable where supported).
-    #    The sentinel is the only positive proof that a given mountpoint IS the
-    #    VaultWarden data volume. Making it immutable with chattr +i protects it
-    #    from accidental rm -rf on the mount root while preserving the guard in
-    #    require_project_state_ready. The uninstaller runs chattr -i before wipe.
-    local sentinel="$mount_point/.vw-data-volume"
-    if [[ ! -f "$sentinel" ]]; then
-        # Write to a temp file first so a crash mid-write never leaves a
-        # zero-byte or partial sentinel that would silently pass the guard check.
-        local sentinel_tmp
-        sentinel_tmp=$(mktemp "$mount_point/vw-data-volume-tmp.XXXXXX") \
-            || { log_error "Failed to create temp file for sentinel: $mount_point"; return 1; }
-        printf 'VaultWarden-OCI data volume\nDevice: %s\nMounted: %s\nCreated: %s\n' \
-            "$device" "$mount_point" "$(date -Iseconds)" > "$sentinel_tmp" \
-            || { rm -f "$sentinel_tmp"; log_error "Failed to write sentinel temp file"; return 1; }
-        chmod 444 "$sentinel_tmp"
-        if ! mv -- "$sentinel_tmp" "$sentinel"; then
-            rm -f "$sentinel_tmp"
-            log_error "Failed to move sentinel into place: $sentinel"
-            return 1
+    # ------------------------------------------------------------------
+    # Step 5: Mount the volume if not already mounted.
+    # ------------------------------------------------------------------
+    if mountpoint -q "$mount_point" 2>/dev/null; then
+        if [[ "$dry_run" == "true" ]]; then
+            log_info "[DRY RUN] $mount_point is already mounted (idempotent)."
+        else
+            log_info "$mount_point already mounted (idempotent)"
         fi
-        if command -v chattr >/dev/null 2>&1; then
-            chattr +i "$sentinel" 2>/dev/null \
-                || log_warn "chattr +i failed on sentinel — immutability not set (non-fatal; sentinel is still 444)"
-        fi
-        log_success "Sentinel written and protected: $sentinel"
     else
-        log_info "Sentinel already present (idempotent): $sentinel"
+        if [[ "$dry_run" == "true" ]]; then
+            log_info "[DRY RUN] Would mount $device at $mount_point."
+        else
+            mount "$mount_point" || {
+                local _fstab_hint
+                _fstab_hint="$(blkid -o value -s UUID "$device" 2>/dev/null || true)"
+                log_error "Could not mount $mount_point. This usually means /etc/fstab is"
+                log_error "missing an entry for this device or uses a different mount point."
+                log_error "To diagnose:"
+                if [[ -n "${_fstab_hint}" ]]; then
+                    log_error "  grep '${_fstab_hint}' /etc/fstab"
+                else
+                    log_error "  grep '$device' /etc/fstab"
+                fi
+                log_error "Verify the second column (mount point) matches '$mount_point'."
+                log_error "If the entry is missing, run: sudo utilities/setup-storage.sh --mode setup"
+                return 1
+            }
+            log_success "Mounted $device at $mount_point"
+        fi
     fi
 
-    log_success "Data volume ready: $device → $mount_point"
+    # ------------------------------------------------------------------
+    # Step 6: Sentinel file (idempotent, read-only, immutable where supported).
+    #   The sentinel is the only positive proof that a given mountpoint IS the
+    #   VaultWarden data volume. Making it immutable with chattr +i protects it
+    #   from accidental rm -rf on the mount root while preserving the guard in
+    #   require_project_state_ready. The uninstaller runs chattr -i before wipe.
+    # ------------------------------------------------------------------
+    local sentinel="$mount_point/.vw-data-volume"
+    if [[ "$dry_run" == "true" ]]; then
+        [[ -f "$sentinel" ]] \
+            && log_info "[DRY RUN] Sentinel already present (idempotent): $sentinel" \
+            || log_info "[DRY RUN] Would write sentinel: $sentinel"
+    else
+        if [[ ! -f "$sentinel" ]]; then
+            # Write to a temp file first so a crash mid-write never leaves a
+            # zero-byte or partial sentinel that would silently pass the guard check.
+            local sentinel_tmp
+            sentinel_tmp=$(mktemp "$mount_point/vw-data-volume-tmp.XXXXXX") \
+                || { log_error "Failed to create temp file for sentinel: $mount_point"; return 1; }
+            printf 'VaultWarden-OCI data volume\nDevice: %s\nMounted: %s\nCreated: %s\n' \
+                "$device" "$mount_point" "$(date -Iseconds)" > "$sentinel_tmp" \
+                || { rm -f "$sentinel_tmp"; log_error "Failed to write sentinel temp file"; return 1; }
+            chmod 444 "$sentinel_tmp"
+            if ! mv -- "$sentinel_tmp" "$sentinel"; then
+                rm -f "$sentinel_tmp"
+                log_error "Failed to move sentinel into place: $sentinel"
+                return 1
+            fi
+            if command -v chattr >/dev/null 2>&1; then
+                chattr +i "$sentinel" 2>/dev/null \
+                    || log_warn "chattr +i failed on sentinel — immutability not set (non-fatal; sentinel is still 444)"
+            fi
+            log_success "Sentinel written and protected: $sentinel"
+        else
+            log_info "Sentinel already present (idempotent): $sentinel"
+        fi
+    fi
+
+    if [[ "$dry_run" == "true" ]]; then
+        log_info "[DRY RUN] Data volume provisioning preview complete: $device → $mount_point"
+    else
+        log_success "Data volume ready: $device → $mount_point"
+    fi
     return 0
 }
 
@@ -422,7 +621,7 @@ install_docker_mount_guard() {
     local dry_run="${DRY_RUN:-false}"
 
     case "${dry_run,,}" in
-        true|1|yes)  dry_run="true" ;;
+        true|1|yes)   dry_run="true"  ;;
         false|0|no|"") dry_run="false" ;;
         *)
             log_warn "DRY_RUN='${DRY_RUN:-}' is not recognised (valid: true/false) — treating as false (live run)"
@@ -432,23 +631,27 @@ install_docker_mount_guard() {
 
     if [[ -z "${DATA_VOLUME_DEVICE:-}" ]]; then
         if [[ -f "$drop_in_file" ]]; then
-            log_info "DATA_VOLUME_DEVICE cleared — removing stale Docker mount guard"
-            rm -f "$drop_in_file" \
-                || { log_error "Failed to remove Docker mount guard: $drop_in_file"; return 1; }
-            _storage_daemon_reload
+            if [[ "$dry_run" == "true" ]]; then
+                log_info "[DRY RUN] DATA_VOLUME_DEVICE cleared — would remove stale Docker mount guard: $drop_in_file"
+            else
+                log_info "DATA_VOLUME_DEVICE cleared — removing stale Docker mount guard"
+                rm -f "$drop_in_file" \
+                    || { log_error "Failed to remove Docker mount guard: $drop_in_file"; return 1; }
+                _storage_daemon_reload
+            fi
         else
             log_info "DATA_VOLUME_DEVICE not set — Docker mount guard not needed"
         fi
         return 0
     fi
 
-    if [[ "$dry_run" == "true" ]]; then
-        log_info "[DRY RUN] Would install Docker mount guard for: ${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}"
-        return 0
-    fi
-
     local mount_point="${DATA_VOLUME_MOUNT:-${_VW_DEFAULT_DATA_MOUNT}}"
     _storage_validate_paths "" "$mount_point" || return 1
+
+    if [[ "$dry_run" == "true" ]]; then
+        log_info "[DRY RUN] Would install Docker mount guard for: $mount_point"
+        return 0
+    fi
 
     mkdir -p "$drop_in_dir" \
         || { log_error "Cannot create systemd drop-in dir: $drop_in_dir"; return 1; }
