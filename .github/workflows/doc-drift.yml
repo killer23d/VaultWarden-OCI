@@ -19,6 +19,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # yq is required by lib/schema.sh (used by secrets-rotate.sh --help and
+      # write-command-reference.sh).  Installing it here ensures the generated
+      # COMMAND-REFERENCE.md is identical to what was committed (which was
+      # produced on a machine that had yq installed).
+      - name: Install yq
+        run: |
+          sudo apt-get install -y yq
+
       - name: Check for known stale terms
         run: |
           STALE_TERMS=(
@@ -70,7 +78,6 @@ jobs:
           check_flag utilities/uninstall-vaultwarden.sh "--dry-run" || FAIL=1
           [[ $FAIL -eq 0 ]] || exit 1
 
-
       - name: Systemd unit hardening check
         run: |
           REQUIRED_DIRECTIVES=(PrivateTmp ProtectSystem ProtectHome NoNewPrivileges)
@@ -89,6 +96,9 @@ jobs:
 
       - name: Verify COMMAND-REFERENCE.md is up to date
         env:
+          # Suppress the docker.sh Compose-project-label diagnostic that
+          # scripts emit to stderr when DOCKER_PROJECT_LABEL is unset.
+          # Setting it to a fixed value makes --help output deterministic.
           DOCKER_PROJECT_LABEL: ci
         run: |
           cp docs/COMMAND-REFERENCE.md /tmp/COMMAND-REFERENCE.committed.md
