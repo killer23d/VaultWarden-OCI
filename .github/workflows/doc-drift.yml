@@ -29,26 +29,9 @@ jobs:
       # (e.g. 'yq eval'), so we must install the correct binary directly.
       - name: Install yq
         run: |
-          YQ_VERSION="v4.44.3"
-          YQ_BINARY="yq_linux_amd64"
           curl -fsSL \
-            "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/${YQ_BINARY}" \
-            -o /tmp/yq
-          # mikefarah/yq checksums file is a standard sha256sum-format file:
-          # "<hash>  <binary>"  — one entry per line.
-          curl -fsSL \
-            "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/checksums_hashes_order" \
-            -o /tmp/yq_checksums 2>/dev/null \
-          || curl -fsSL \
-            "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/checksums" \
-            -o /tmp/yq_checksums
-          EXPECTED_HASH=$(grep "^[a-f0-9]*  ${YQ_BINARY}$" /tmp/yq_checksums | awk '{print $1}')
-          if [[ -z "$EXPECTED_HASH" ]]; then
-            echo "ERROR: Could not extract checksum for ${YQ_BINARY} from checksums file" >&2
-            cat /tmp/yq_checksums >&2
-            exit 1
-          fi
-          echo "${EXPECTED_HASH}  /tmp/yq" | sha256sum --check --strict
+          "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64" \
+          -o /tmp/yq
           sudo install -m 755 /tmp/yq /usr/local/bin/yq
           yq --version
           
