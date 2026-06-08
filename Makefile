@@ -1008,6 +1008,11 @@ clean-all: ## Remove secrets cache and log files — services will re-init secre
 
 prune: ## Remove unused Docker resources (images, containers, networks) — cannot be undone
 	$(call check-docker)
+	@if [ ! -t 0 ]; then \
+		echo "$(RED)Error: 'make prune' requires an interactive terminal.$(NC)"; \
+		echo "$(YELLOW)Re-run in a TTY: sudo make prune$(NC)"; \
+		exit 1; \
+	fi
 	@echo "$(YELLOW)WARNING: This will permanently remove unused Docker resources.$(NC)"
 	@printf "Continue? [y/N] "; \
 	read -r confirm; \
