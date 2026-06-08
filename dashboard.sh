@@ -413,6 +413,60 @@ _secrets_health() {
 }
 
 # ---------------------------------------------------------------------------
+# _last_backup_result
+#
+# Derives the result of the most recent backup run from the artefacts that
+# backup-run.sh always writes alongside each encrypted archive:
+#
+#   PASS       — .age + .sha256 + .meta all present  (successful, verified)
+#   WARN       — .age + .sha256 present, .meta absent (completed, no metadata)
+#   INCOMPLETE — .age present but no .sha256 sidecar  (may be a partial write)
+#   N/A        — no .age archives found anywhere under BACKUP_DIR
+#
+# Search covers all backup-type subdirectories (db/, full/, emergency/) so
+# it always reflects the single newest archive regardless of type.
+#
+# No external log file is required; this is entirely artefact-driven and will
+# update on every dashboard refresh after each backup run.
+# ---------------------------------------------------------------------------
+_last_backup_result() {
+    local newest_file="" newest_mtime=0
+
+    # Walk every type subdirectory that may exist under BACKUP_DIR.
+    local type_dir file file_mtime
+    for type_dir in "${BACKUP_DIR}/db" "${BACKUP_DIR}/full" "${BACKUP_DIR}/emergency"; do
+        [[ -d "${type_dir}" ]] || continue
+        while IFS= read -r -d '' file; do
+            file_mtime="$(stat -c '%Y' "${file}" 2>/dev/null \
+                || stat -f '%m' "${file}" 2>/dev/null \
+                || echo 0)"
+            if (( file_mtime > newest_mtime )); then
+                newest_mtime=${file_mtime}
+                newest_file=${file}
+            fi
+        done < <(find "${type_dir}" -maxdepth 1 -name '*.age' -type f -print0 2>/dev/null)
+    done
+
+    # No archives found at all.
+    if [[ -z "${newest_file}" ]]; then
+        printf '%s(N/A — no backups found)%s' "${YLW}" "${NC}"
+        return
+    fi
+
+    # Determine result from sidecar artefacts.
+    local sha256_file="${newest_file}.sha256"
+    local meta_file="${newest_file}.meta"
+
+    if [[ -f "${sha256_file}" && -f "${meta_file}" ]]; then
+        printf '%sPASS%s' "${GRN}" "${NC}"
+    elif [[ -f "${sha256_file}" ]]; then
+        printf '%sWARN (no .meta sidecar)%s' "${YLW}" "${NC}"
+    else
+        printf '%sINCOMPLETE (no .sha256 sidecar)%s' "${RED}" "${NC}"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # draw_live_stats
 # ---------------------------------------------------------------------------
 draw_live_stats() {
@@ -486,17 +540,12 @@ draw_live_stats() {
     fi
     echo -e " ${BLD}Last backup:${NC}  ${last_backup_str}"
 
-    # --- Last Backup Result (ux.md #12) ---
-    local _last_result _result_color
-    _last_result=$(grep -oE '(PASS|FAIL|ERROR|SUCCESS)' \
-        "${STATE_DIR}/logs/backup.log" 2>/dev/null | tail -1 || true)
-    _last_result="${_last_result:-UNKNOWN}"
-    case "${_last_result}" in
-        PASS|SUCCESS) _result_color="${GRN}" ;;
-        FAIL|ERROR)   _result_color="${RED}" ;;
-        *)            _result_color="${YLW}" ;;
-    esac
-    echo -e " ${BLD}Last backup result:${NC}  ${_result_color}${_last_result}${NC}"
+    # --- Last Backup Result ---
+    # Derived from .sha256 / .meta sidecar artefacts written by backup-run.sh.
+    # Does not rely on any external log file.
+    local last_result_str
+    last_result_str="$(_last_backup_result)"
+    echo -e " ${BLD}Last result:${NC}  ${last_result_str}"
 
     # --- Systemd Timers ---
     local _timer_output
