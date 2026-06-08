@@ -155,9 +155,9 @@ USAGE:
 
 DESCRIPTION:
     AMTM-style interactive terminal dashboard for VaultWarden-OCI. Displays
-    live stack health, disk usage, CrowdSec bans, backup status, and email
-    queue at a glance. Provides submenus for backup, security, secrets, and
-    advanced operations. Auto-refreshes every 60 seconds.
+    live stack health, disk usage, CrowdSec bans, backup status, rclone
+    remote status, and email queue at a glance. Provides submenus for backup,
+    security, secrets, and advanced operations. Auto-refreshes every 60 s.
 
 OPTIONS:
     --help, -h    Show this help and exit
@@ -171,87 +171,6 @@ EXAMPLES:
     sudo ./dashboard.sh          # Launch dashboard
     ./dashboard.sh --help        # Show this help
 EOF
-}
-
-# ---------------------------------------------------------------------------
-# _show_changelog  (ux.md #44)
-#
-# Reads CHANGELOG.md and pretty-prints every line under the first
-# "## [Unreleased]" heading until the next "## [" heading.
-# Category headers (### Added / ### Changed / ### Fixed) are coloured.
-# Exits cleanly when CHANGELOG.md is absent.
-# ---------------------------------------------------------------------------
-_show_changelog() {
-    local changelog="${REPO_ROOT}/CHANGELOG.md"
-
-    if [[ ! -f "${changelog}" ]]; then
-        echo -e "${YLW} CHANGELOG.md not found in ${REPO_ROOT}${NC}"
-        return 0
-    fi
-
-    # Extract lines between first "## [Unreleased]" and the next "## [" block.
-    local in_section=false
-    local printed=false
-    local line
-
-    echo ""
-    echo -e "${INV} CHANGELOG — What's New ${NC}"
-    echo -e "${CYN}${DIVIDER}${NC}"
-
-    while IFS= read -r line; do
-        # Detect start of Unreleased section.
-        # [[:space:]]* (zero-or-more) tolerates both "## [Unreleased]"
-        # and the rarer "##[Unreleased]" heading variant.
-        if [[ "${line}" =~ ^##[[:space:]]*\[Unreleased\] ]]; then
-            in_section=true
-            continue
-        fi
-
-        # Detect start of the next versioned section — stop.
-        # Same zero-or-more space tolerance applied here.
-        if [[ "${in_section}" == true && "${line}" =~ ^##[[:space:]]*\[ ]]; then
-            break
-        fi
-
-        [[ "${in_section}" != true ]] && continue
-
-        # Colour-code category headers
-        if [[ "${line}" =~ ^###[[:space:]]Added ]]; then
-            printf '%s%s%s\n' "${GRN}" "${line}" "${NC}"
-            printed=true
-        elif [[ "${line}" =~ ^###[[:space:]]Changed ]]; then
-            printf '%s%s%s\n' "${YLW}" "${line}" "${NC}"
-            printed=true
-        elif [[ "${line}" =~ ^###[[:space:]]Fixed ]]; then
-            printf '%s%s%s\n' "${CYN}" "${line}" "${NC}"
-            printed=true
-        elif [[ "${line}" =~ ^###[[:space:]] ]]; then
-            printf '%s%s%s\n' "${BLD}" "${line}" "${NC}"
-            printed=true
-        else
-            printf '%s\n' "${line}"
-            [[ -n "${line// /}" ]] && printed=true
-        fi
-    done < "${changelog}"
-
-    if [[ "${printed}" != true ]]; then
-        echo -e "${YLW} (No unreleased changes documented yet)${NC}"
-    fi
-
-    echo -e "${CYN}${DIVIDER}${NC}"
-}
-
-# ---------------------------------------------------------------------------
-# _show_changelog_on_update
-#
-# Called automatically after a successful stack update (Advanced menu
-# option 2).  Shows the changelog and pauses so the operator can read it.
-# ---------------------------------------------------------------------------
-_show_changelog_on_update() {
-    echo ""
-    echo -e "${GRN}${BLD} Update complete.${NC} Here is what changed in this release:"
-    _show_changelog
-    _press_enter
 }
 
 # ---------------------------------------------------------------------------
@@ -467,6 +386,45 @@ _last_backup_result() {
 }
 
 # ---------------------------------------------------------------------------
+# _rclone_status
+#
+# Returns a single color-coded status line describing rclone availability:
+#
+#   Ready      — binary present + RCLONE_REMOTE_NAME set in .env
+#   Not configured  — binary present but RCLONE_REMOTE_NAME is missing/placeholder
+#   Not installed   — rclone binary not found on PATH
+#
+# Intentionally does NOT perform a live network probe (rclone lsd …) because
+# the dashboard redraws every 60 s and a slow / failed network call would
+# stall the UI. The operator can trigger a live sync via the Backup menu.
+# ---------------------------------------------------------------------------
+_rclone_status() {
+    # Check binary availability first.
+    if ! command -v rclone &>/dev/null; then
+        printf '%sNot installed%s' "${YLW}" "${NC}"
+        return
+    fi
+
+    # Read the configured remote name from .env.
+    local remote_name
+    remote_name="$(_read_env_var RCLONE_REMOTE_NAME "")"
+
+    # Strip surrounding whitespace and treat placeholder values as unset.
+    remote_name="$(printf '%s' "${remote_name}" | tr -d '[:space:]')"
+    local upper_name
+    upper_name="$(printf '%s' "${remote_name}" | tr '[:lower:]' '[:upper:]')"
+
+    if [[ -z "${remote_name}" \
+        || "${upper_name}" == *CHANGE_ME* \
+        || "${upper_name}" == *CHANGEME* ]]; then
+        printf '%sNot configured (set RCLONE_REMOTE_NAME in .env)%s' "${YLW}" "${NC}"
+        return
+    fi
+
+    printf '%sReady%s  (remote: %s)' "${GRN}" "${NC}" "${remote_name}"
+}
+
+# ---------------------------------------------------------------------------
 # draw_live_stats
 # ---------------------------------------------------------------------------
 draw_live_stats() {
@@ -547,6 +505,11 @@ draw_live_stats() {
     last_result_str="$(_last_backup_result)"
     echo -e " ${BLD}Last result:${NC}  ${last_result_str}"
 
+    # --- Rclone Status ---
+    local rclone_stat
+    rclone_stat="$(_rclone_status)"
+    echo -e " ${BLD}Rclone:${NC}  ${rclone_stat}"
+
     # --- Systemd Timers ---
     local _timer_output
     _timer_output=$(systemctl list-timers --no-pager 2>/dev/null \
@@ -612,10 +575,10 @@ draw_main_menu() {
     echo -e "  [ ${GRN}4${NC} ] View App Logs           (tail)"
     echo -e "  [ ${GRN}d${NC} ] Full Diagnostic Dump    (report)"
     draw_divider
-    echo -e "  [ ${GRN}b${NC} ] Backup & Restore Menu       (4 options)"
+    echo -e "  [ ${GRN}b${NC} ] Backup & Restore Menu       (6 options)"
     echo -e "  [ ${GRN}s${NC} ] Security & CrowdSec Menu    (5 options)"
     echo -e "  [ ${GRN}k${NC} ] Secrets & Key Management    (4 options)"
-    echo -e "  [ ${GRN}a${NC} ] Advanced & Maintenance      (8 options)"
+    echo -e "  [ ${GRN}a${NC} ] Advanced & Maintenance      (7 options)"
     echo -e "  [ ${GRN}i${NC} ] Identity, Email & Admin     (4 options)"
     draw_divider
     echo -e "  [ ${RED}e/q${NC} ] Exit Dashboard"
@@ -689,8 +652,12 @@ draw_backup_menu() {
     echo -e "  [ ${GRN}3${NC} ] Interactive Restore"
     echo -e "  [ ${GRN}4${NC} ] Backup Status / Health"
     draw_divider
+    echo -e "  [ ${GRN}5${NC} ] Sync Latest Backup to Rclone Remote"
+    echo -e "  [ ${GRN}6${NC} ] Full Verify + Sync to Rclone Remote"
+    draw_divider
     echo -e "  [ ${GRN}b${NC} ] Back to Main Menu"
     echo ""
+    echo -e " ${CYN}Tip:${NC} Options 5 & 6 require RCLONE_REMOTE_NAME to be set in .env."
     echo -e " ${CYN}Tip:${NC} Use b to return to Main Menu, e/q to exit, Ctrl-C anytime."
     echo ""
 }
@@ -715,6 +682,39 @@ handle_backup_menu() {
             ;;
         4)
             run_cmd "make backup-status" make -C "${REPO_ROOT}" backup-status
+            ;;
+        5)
+            # Sync the most recent backup archive to the configured rclone remote.
+            # backup.sh --rclone is non-fatal on network failure by design, so the
+            # local archive is never at risk.
+            _check_script "${REPO_ROOT}/backup.sh" || return
+            local remote_name
+            remote_name="$(_read_env_var RCLONE_REMOTE_NAME "")"
+            remote_name="$(printf '%s' "${remote_name}" | tr -d '[:space:]')"
+            if [[ -z "${remote_name}" ]]; then
+                echo -e "${YLW} RCLONE_REMOTE_NAME is not set in .env — cannot sync.${NC}"
+                echo -e " Edit .env and add: RCLONE_REMOTE_NAME=<your-remote>"
+                _press_enter
+                return
+            fi
+            run_sudo_cmd "sudo ./backup.sh run db --rclone" \
+                "${REPO_ROOT}/backup.sh" run db --rclone
+            ;;
+        6)
+            # Full end-to-end verification (decrypt + integrity check) followed
+            # by an rclone sync. Fatal on verification failure before any upload.
+            _check_script "${REPO_ROOT}/backup.sh" || return
+            local remote_name
+            remote_name="$(_read_env_var RCLONE_REMOTE_NAME "")"
+            remote_name="$(printf '%s' "${remote_name}" | tr -d '[:space:]')"
+            if [[ -z "${remote_name}" ]]; then
+                echo -e "${YLW} RCLONE_REMOTE_NAME is not set in .env — cannot sync.${NC}"
+                echo -e " Edit .env and add: RCLONE_REMOTE_NAME=<your-remote>"
+                _press_enter
+                return
+            fi
+            run_sudo_cmd "sudo ./backup.sh run db --full-verification --rclone" \
+                "${REPO_ROOT}/backup.sh" run db --full-verification --rclone
             ;;
         b) ACTIVE_MENU="main" ;;
         e|q) _cleanup ;;
@@ -858,7 +858,6 @@ draw_advanced_menu() {
     echo -e "  [ ${GRN}5${NC} ] Systemd Timer Status"
     echo -e "  [ ${YLW}6${NC} ] Prune Docker Resources      (caution)"
     echo -e "  [ ${RED}7${NC} ] Uninstall VaultWarden-OCI  (destructive)"
-    echo -e "  [ ${GRN}c${NC} ] View Changelog"
     draw_divider
     echo -e "  [ ${GRN}b${NC} ] Back to Main Menu"
     echo ""
@@ -875,9 +874,7 @@ handle_advanced_menu() {
             run_cmd "./utilities/secrets-export-recovery-kit.sh" "${kit_sh}"
             ;;
         2)
-            # Run update, then automatically show the changelog (ux.md #44).
             run_cmd "make update" make -C "${REPO_ROOT}" update
-            _show_changelog_on_update
             ;;
         3)
             run_cmd "make db-maint" make -C "${REPO_ROOT}" db-maint
@@ -913,11 +910,6 @@ handle_advanced_menu() {
                 echo -e "${YLW} Uninstall cancelled.${NC}"
                 _press_enter
             fi
-            ;;
-        c)
-            # Stand-alone changelog viewer (ux.md #44).
-            _show_changelog
-            _press_enter
             ;;
         b) ACTIVE_MENU="main" ;;
         e|q) _cleanup ;;
