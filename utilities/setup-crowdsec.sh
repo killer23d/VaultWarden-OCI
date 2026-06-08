@@ -580,18 +580,24 @@ if [[ "$DRY_RUN" != "true" ]]; then
 fi
 
 if [[ -f "$_FW_BOUNCER_CONFIG" ]]; then
-    log_info "Firewall bouncer config already present — checking DOCKER-USER chain."
-    if ! grep -q 'DOCKER-USER' "$_FW_BOUNCER_CONFIG"; then
-        log_info "Adding DOCKER-USER chain to existing firewall bouncer config..."
-        sed -i '/iptables_chains:/,/^[^ ]/{/- INPUT/a\  - DOCKER-USER
-}' "$_FW_BOUNCER_CONFIG" 2>/dev/null || true
-        systemctl restart crowdsec-firewall-bouncer 2>/dev/null || true
-        log_success "DOCKER-USER chain added to firewall bouncer config."
-    else
-        log_info "DOCKER-USER chain already present in firewall bouncer config."
+    log_info "Firewall bouncer config already present — checking registration."
 
-    # --force wiped the LAPI in Phase 0 so the existing key is now stale.
-    # Regenerate unconditionally when --force is active.
+    # DOCKER-USER chain is only relevant for iptables mode; skip on nftables.
+    _fw_current_mode="$(grep '^mode:' "$_FW_BOUNCER_CONFIG" 2>/dev/null | awk '{print $2}' | head -1 || echo 'iptables')"
+    if [[ "$_fw_current_mode" == "iptables" ]]; then
+        if ! grep -q 'DOCKER-USER' "$_FW_BOUNCER_CONFIG"; then
+            log_info "Adding DOCKER-USER chain to existing iptables firewall bouncer config..."
+            sed -i '/iptables_chains:/,/^[^ ]/{/- INPUT/a\  - DOCKER-USER
+}' "$_FW_BOUNCER_CONFIG" 2>/dev/null || true
+            systemctl restart crowdsec-firewall-bouncer 2>/dev/null || true
+            log_success "DOCKER-USER chain added to firewall bouncer config."
+        else
+            log_info "DOCKER-USER chain already present in firewall bouncer config."
+        fi
+    else
+        log_info "nftables mode detected — DOCKER-USER chain not applicable, skipping."
+    fi
+
     if [[ "$FORCE" == "true" ]]; then
         log_info "Force mode: regenerating firewall bouncer API key..."
         _fw_fresh_key="$(openssl rand -hex 32)"
@@ -599,7 +605,6 @@ if [[ -f "$_FW_BOUNCER_CONFIG" ]]; then
         cscli bouncers add crowdsecurity/firewall-bouncer --key "$_fw_fresh_key" 2>/dev/null || true
         sed -i "s|^api_key:.*|api_key: ${_fw_fresh_key}|" "$_FW_BOUNCER_CONFIG"
         log_success "Firewall bouncer key regenerated and written to config."
-    fi
     fi
 
     if ! cscli bouncers list 2>/dev/null | grep -q 'firewall-bouncer'; then
