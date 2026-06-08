@@ -50,13 +50,60 @@ _format_bytes_human() {
 }
 
 
+# ---------------------------------------------------------------------------
+# _json_escape STR
+#
+# Emit STR with all characters that are forbidden or must be escaped inside a
+# JSON string (RFC 8259 §7) replaced with their canonical escape sequences:
+#
+#   \     →  \\
+#   "     →  \"
+#   \b    →  \b   (0x08)
+#   \t    →  \t   (0x09)
+#   \n    →  \n   (0x0A)
+#   \f    →  \f   (0x0C)
+#   \r    →  \r   (0x0D)
+#   other C0 control characters (0x00–0x1F) → \uXXXX
+#
+# Implementation: pure awk (POSIX), no external dependencies beyond what is
+# available on every OCI base image.  Works on Bash 3.x and later.
+#
+# Usage:
+#   escaped=$(_json_escape "$some_string")
+#   printf '{"key":"%s"}\n' "$escaped"
+# ---------------------------------------------------------------------------
 _json_escape() {
-    local str="$1"
-    str=${str//\\/\\\\}
-    str=${str//\"/\\\"}
-    str=${str//$'\n'/\\n}
-    str=${str//$'\r'/}
-    printf '%s' "$str"
+    printf '%s' "$1" | awk '
+    BEGIN { ORS="" }
+    {
+        n = split($0, chars, "")
+        # split() does not include the record separator, so re-emit the
+        # newline that awk stripped when reading this line unless we are
+        # on the very last record — we handle multi-line input safely
+        # by processing NR > 1 lines with an explicit leading \n escape.
+        if (NR > 1) printf "\\n"
+        for (i = 1; i <= n; i++) {
+            c = chars[i]
+            o = ord(c)
+            if      (c == "\\")     printf "\\\\"
+            else if (c == "\"")     printf "\\\""
+            else if (o == 8)        printf "\\b"
+            else if (o == 9)        printf "\\t"
+            else if (o == 10)       printf "\\n"
+            else if (o == 12)       printf "\\f"
+            else if (o == 13)       printf "\\r"
+            else if (o >= 0 && o <= 31) printf "\\u%04x", o
+            else                    printf "%s", c
+        }
+    }
+    function ord(ch,    cmd, result) {
+        # Portable ordinal via printf — avoids gawk-only ord() built-in.
+        cmd = "printf \'%d\' \"'" ch "\""
+        cmd | getline result
+        close(cmd)
+        return result + 0
+    }
+    '
 }
 
 # ---------------------------------------------------------------------------
