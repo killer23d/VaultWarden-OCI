@@ -47,10 +47,10 @@ EMAIL_MODE / EMAIL_PROVIDER quick reference (.env):
           the token is always stored as "email_api_token" in secrets.yaml.
 
 FLAGS:
-    --dry-run      Preview what would change without writing
-    --no-backup    Skip creating backup before rotation
-    --help, -h     Show this help
-    --version, -V  Print the VaultWarden-OCI version and exit
+    --dry-run     Preview what would change without writing
+    --no-backup   Skip creating backup before rotation
+    --help, -h    Show this help
+    --version, -V Print the VaultWarden-OCI version and exit
 
 EXAMPLES:
     ./utilities/secrets-rotate.sh admin_token
@@ -58,19 +58,16 @@ EXAMPLES:
     ./utilities/secrets-rotate.sh email_api_token --dry-run
     ./edit-secrets.sh rotate smtp_password
     ./edit-secrets.sh rotate backup_passphrase --no-backup
+
 EOF
 }
 
 DRY_RUN=false
 SKIP_BACKUP=false
 
-# Populate _ROTATE_FIELDS from the schema so every key defined in
-# secrets-schema.yaml is automatically rotatable — no manual list maintenance.
-mapfile -t _ROTATE_FIELDS < <(schema_keys 2>/dev/null)
-
-# Build _FIELD_SERVICES from the schema so restart hints stay in sync with
-# the schema's 'services' field without a parallel associative array here.
 declare -A _FIELD_SERVICES=()
+_ROTATE_FIELDS=()
+
 _populate_field_services() {
     local _pk
     while IFS= read -r _pk; do
@@ -80,8 +77,6 @@ _populate_field_services() {
         _FIELD_SERVICES["$_pk"]="$_svcs"
     done < <(schema_keys 2>/dev/null)
 }
-_populate_field_services
-unset -f _populate_field_services
 
 check_prerequisites() {
     local missing=()
@@ -398,6 +393,10 @@ main() {
             *) log_error "Unknown option: '$1'"; show_help; exit 1 ;;
         esac
     done
+
+    mapfile -t _ROTATE_FIELDS < <(schema_keys 2>/dev/null)
+    _populate_field_services
+    unset -f _populate_field_services
 
     if [[ -z "$rotate_field" ]]; then
         log_error "'rotate' requires a FIELD argument."
