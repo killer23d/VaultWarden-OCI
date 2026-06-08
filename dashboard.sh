@@ -309,16 +309,24 @@ _container_status() {
 
 # ---------------------------------------------------------------------------
 # _container_uptime  — "Xd Yh" / "Xh Ym" / "Xm" uptime string (ux.md #47)
+#
+# Docker's {{.State.StartedAt}} returns RFC 3339 with nanoseconds, e.g.
+#   2026-06-01T12:00:00.123456789Z
+# Both the GNU 'date -d' and BSD 'date -j' paths strip the fractional-second
+# component before parsing to avoid silent failures on older glibc/coreutils.
 # ---------------------------------------------------------------------------
 _container_uptime() {
     local container="$1"
-    local started_at start_epoch now_epoch delta days hours mins
+    local started_at started_at_clean start_epoch now_epoch delta days hours mins
 
     started_at=$(docker inspect --format '{{.State.StartedAt}}' \
         "${container}" 2>/dev/null) || { printf 'unknown'; return; }
 
-    start_epoch=$(date -d "${started_at}" +%s 2>/dev/null \
-        || date -j -f "%Y-%m-%dT%H:%M:%S" "${started_at%%.*}" +%s 2>/dev/null \
+    # Strip nanoseconds: "2026-06-01T12:00:00.123456789Z" -> "2026-06-01T12:00:00Z"
+    started_at_clean="${started_at%%.*}Z"
+
+    start_epoch=$(date -d "${started_at_clean}" +%s 2>/dev/null \
+        || date -j -f "%Y-%m-%dT%H:%M:%SZ" "${started_at_clean}" +%s 2>/dev/null \
         || echo 0)
 
     [[ "${start_epoch}" =~ ^[0-9]+$ && "${start_epoch}" -gt 0 ]] \
@@ -366,6 +374,11 @@ _cf_worker_status() {
 #
 # Scans .env for CHANGE_ME / CHANGEME placeholder values and returns a
 # single color-coded status string.
+#
+# Uses 'tr [:lower:] [:upper:]' for case-folding instead of ${val^^} to
+# remain portable across all bash versions (${^^} requires Bash 4.0+, which
+# is unavailable on macOS / some minimal OCI base images).  The rest of this
+# script already uses tr for the same reason (_confirm_destructive, main loop).
 # ---------------------------------------------------------------------------
 _secrets_health() {
     local env_file="${REPO_ROOT}/.env"
@@ -376,11 +389,12 @@ _secrets_health() {
     fi
 
     local -a unset_keys=()
-    local key val
+    local key val val_upper
     while IFS='=' read -r key val; do
         [[ "${key}" =~ ^[[:space:]]*# ]] && continue
         [[ -z "${key// /}" ]] && continue
-        if [[ "${val^^}" == *CHANGE_ME* || "${val^^}" == *CHANGEME* ]]; then
+        val_upper="$(printf '%s' "${val}" | tr '[:lower:]' '[:upper:]')"
+        if [[ "${val_upper}" == *CHANGE_ME* || "${val_upper}" == *CHANGEME* ]]; then
             unset_keys+=("${key}")
         fi
     done < <(grep -v '^[[:space:]]*#' "${env_file}" | grep '=')
