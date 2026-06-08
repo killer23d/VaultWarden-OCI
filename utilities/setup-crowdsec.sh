@@ -455,8 +455,13 @@ fi
 if [[ "$USE_LATEST" == "true" ]]; then
     CROWDSEC_VERSION=""
     CF_WORKER_BOUNCER_VERSION=""
+    FIREWALL_BOUNCER_VERSION=""
     log_info "Version pins cleared by --use-latest; all components will use current upstream releases."
 fi
+
+[[ "${CROWDSEC_VERSION:-}"          == "latest" ]] && CROWDSEC_VERSION=""
+[[ "${CF_WORKER_BOUNCER_VERSION:-}" == "latest" ]] && CF_WORKER_BOUNCER_VERSION=""
+[[ "${FIREWALL_BOUNCER_VERSION:-}"  == "latest" ]] && FIREWALL_BOUNCER_VERSION=""
 
 # ---------------------------------------------------------------------------
 # Execution wrapper
