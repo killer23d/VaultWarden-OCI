@@ -357,9 +357,38 @@ install_dependencies() {
     log_info "Refreshing apt package index..."
     apt-get update -qq || return 1
 
+    declare -A pkg_to_cmd=(
+        [age]=age
+        [make]=make
+        [nano]=nano
+        [rclone]=rclone
+        [sqlite3]=sqlite3
+        [jq]=jq
+        [yq]=yq
+        [ufw]=ufw
+        [curl]=curl
+        [wget]=wget
+        [unzip]=unzip
+        [git]=git
+        [gpg]=gpg
+        [coreutils]=sha256sum
+        [haveged]=haveged
+        [dnsutils]=dig
+        [rsync]=rsync
+        [python3]=python3
+        [python3-argon2]=""
+        [apache2-utils]=htpasswd
+        [cron]=cron
+    )
+
     local missing_packages=()
     for pkg in "${basic_packages[@]}"; do
-        ! dpkg -s "$pkg" >/dev/null 2>&1 && missing_packages+=("$pkg")
+        local cmd="${pkg_to_cmd[$pkg]:-}"
+        if [[ -n "$cmd" ]]; then
+            ! command -v "$cmd" >/dev/null 2>&1 && missing_packages+=("$pkg")
+        else
+            ! dpkg -s "$pkg" >/dev/null 2>&1 && missing_packages+=("$pkg")
+        fi
     done
 
     if [[ ${#missing_packages[@]} -gt 0 ]]; then
