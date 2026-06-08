@@ -8,12 +8,17 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-if [[ $# -eq 0 ]]; then
-    cat << 'EOF'
+show_help() {
+    cat <<'EOF'
 VaultWarden-OCI Maintenance Script
 
 USAGE:
     ./maintenance.sh <subcommand> [options]
+
+DESCRIPTION:
+    Thin dispatcher that routes maintenance subcommands to their dedicated
+    utility scripts. Each subcommand can be called directly via
+    utilities/maintenance-<name>.sh. Run with --help for subcommand options.
 
 SUBCOMMANDS:
     run               Full routine maintenance (cleanup + optimize + health)
@@ -26,12 +31,35 @@ SUBCOMMANDS:
     update-firewall   Sync Cloudflare IP ranges into UFW
     help              Show this help
 
+OPTIONS:
+    --help, -h        Show this help
+    --version, -V     Print the VaultWarden-OCI version and exit
+
+EXAMPLES:
+    ./maintenance.sh run
+    ./maintenance.sh health
+    ./maintenance.sh run --comprehensive
+    ./maintenance.sh health --help
+
 Run './maintenance.sh <subcommand> --help' for subcommand-specific options.
 EOF
+}
+
+if [[ $# -eq 0 ]]; then
+    show_help
     exit 0
 fi
 
+if [[ "${1:-}" == "--version" || "${1:-}" == "-V" ]]; then
+    printf 'VaultWarden-OCI %s\n' "$(tr -d '[:space:]' < "${SCRIPT_DIR}/VERSION" 2>/dev/null || echo unknown)"
+    exit 0
+fi
+
+# Consume the subcommand token, then pass only the remaining flags/args
+# straight through to the utility via exec.  Do NOT re-inject the subcommand
+# name — each utility script owns its own argument parsing from $1 onward.
 _TASK="${1}"
+shift
 
 case "$_TASK" in
     health)
@@ -55,8 +83,19 @@ case "$_TASK" in
     run)
         exec "$SCRIPT_DIR/utilities/maintenance-run.sh" "$@"
         ;;
-    help|--help|-h)
-        exec "$0"
+    help)
+        # Bare 'help' keyword → top-level help only (no subcommand context).
+        show_help
+        exit 0
+        ;;
+    --help|-h)
+        # --help/-h at the top level (no subcommand given before the flag).
+        show_help
+        exit 0
+        ;;
+    --version|-V)
+        printf 'VaultWarden-OCI %s\n' "$(tr -d '[:space:]' < "${SCRIPT_DIR}/VERSION" 2>/dev/null || echo unknown)"
+        exit 0
         ;;
     *)
         echo "ERROR: Unknown subcommand: '$_TASK'" >&2

@@ -83,13 +83,13 @@ load_env_file() {
     log_debug "Loading environment from: $env_file"
 
     local line key raw_value value lineno=0
+    local -a malformed_lines=()
     while IFS= read -r line || [[ -n "$line" ]]; do
         (( lineno++ )) || true
 
-        [[ -z "$line" || "$line" == \#* ]] && continue
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
 
         if [[ "$line" != *=* ]]; then
-            log_warn "load_env_file: line ${lineno}: not a key=value pair — skipped"
             continue
         fi
 
@@ -97,8 +97,8 @@ load_env_file() {
         raw_value="${line#*=}"
 
         if [[ ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
-            log_error "load_env_file: line ${lineno}: invalid variable name '${key}' — aborting"
-            return 1
+            malformed_lines+=("line ${lineno}: ${line}")
+            continue
         fi
 
         if [[ "$raw_value" == '"'*'"' ]]; then
@@ -140,6 +140,16 @@ load_env_file() {
         export "$key"
 
     done < "$env_file"
+
+    if (( ${#malformed_lines[@]} > 0 )); then
+        log_warn "load_env_file: ${#malformed_lines[@]} malformed .env line(s) skipped from ${env_file}:"
+        local malformed
+        for malformed in "${malformed_lines[@]}"; do
+            log_warn "  ${malformed}"
+        done
+        log_hint "Valid format: KEY=value or KEY="value with spaces""
+        log_hint "Common mistakes: spaces around '=', an 'export ' prefix, or invalid variable names."
+    fi
 
     log_debug "Environment loaded successfully from: $env_file"
     return 0

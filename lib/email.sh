@@ -440,6 +440,21 @@ _resolve_rate_limit_dir() {
 }
 
 
+_rate_limit_reset_message() {
+    local last_file="$1" window_seconds="${EMAIL_RATE_WINDOW_SECONDS:-3600}"
+    local last_time now reset_epoch remaining mins secs reset_at
+    last_time=$(cat "$last_file" 2>/dev/null || printf '0')
+    now=$(date +%s)
+    reset_epoch=$(( last_time + window_seconds ))
+    if (( reset_epoch > now )); then
+        remaining=$(( reset_epoch - now )); mins=$(( remaining / 60 )); secs=$(( remaining % 60 ))
+        reset_at=$(date -d "@${reset_epoch}" '+%H:%M:%S' 2>/dev/null || date -r "$reset_epoch" '+%H:%M:%S' 2>/dev/null || printf 'unknown time')
+        printf 'resets in %dm %02ds (at %s)' "$mins" "$secs" "$reset_at"
+    else
+        printf 'window may have already reset — try ./maintenance.sh test-email'
+    fi
+}
+
 _rate_limit_check() {
     local subject="$1"
     local rate_limit_dir="$2"
@@ -459,8 +474,10 @@ _rate_limit_check() {
         local last_time current_time
         last_time=$(cat "$last_email_file" 2>/dev/null || printf '0')
         current_time=$(date +%s)
-        if (( current_time - last_time < 3600 )); then
-            log_debug "Email rate limited for non-critical notification: $subject"
+        local window_seconds="${EMAIL_RATE_WINDOW_SECONDS:-3600}"
+        if (( current_time - last_time < window_seconds )); then
+            log_warn "Email rate limit reached for non-critical notification: ${subject} — $(_rate_limit_reset_message "$last_email_file")"
+            log_hint "To reset manually for this subject: clear_email_rate_limit \"${subject}\""
             return 1
         fi
     fi
@@ -885,6 +902,6 @@ export -f _email_json_escape _email_bearer_post _email_driver_lookup
 export -f _email_driver_mailersend _email_driver_sendgrid _email_driver_mailgun
 export -f _email_driver_postmark _email_driver_resend _email_driver_postfix
 export -f _email_driver_cyberpersons
-export -f _normalise_email_subject _resolve_rate_limit_dir _rate_limit_check
+export -f _normalise_email_subject _resolve_rate_limit_dir _rate_limit_reset_message _rate_limit_check
 export -f _resolve_smtp_method _build_email_metadata_body
 export -f _smtp_send send_email send_notification_email clear_email_rate_limit

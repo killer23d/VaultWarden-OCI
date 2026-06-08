@@ -284,11 +284,37 @@ validate_system_health() {
 }
 
 
+# _format_duration SECONDS
+# Converts an integer number of seconds into a human-readable "Xm Ys" string.
+# Examples: 75 → "1m 15s",  3 → "3s",  0 → "0s"
+_format_duration() {
+    local total_seconds="${1:-0}"
+    # Ensure we have a non-negative integer.
+    [[ "$total_seconds" =~ ^[0-9]+$ ]] || total_seconds=0
+    local minutes=$(( total_seconds / 60 ))
+    local seconds=$(( total_seconds % 60 ))
+    if (( minutes > 0 )); then
+        printf '%dm %ds' "$minutes" "$seconds"
+    else
+        printf '%ds' "$seconds"
+    fi
+}
+
+
+# generate_maintenance_summary LOG_RC BACKUP_RC DOCKER_RC DB_RC FW_RC DNS_RC HEALTH_RC [DURATION_SECONDS]
+#
+# Renders the post-run maintenance summary to stdout and optionally sends an
+# email notification.  The optional 8th argument (DURATION_SECONDS) appends a
+# human-readable "Duration: Xm Ys" line to the footer so every automated or
+# manual run is self-documenting.
 generate_maintenance_summary() {
-    local log_cleanup="$1" backup_cleanup="$2" docker_cleanup="$3"
+    local log_cleanup="$1"   backup_cleanup="$2" docker_cleanup="$3"
     local db_optimization="$4" firewall_update="$5" dns_update="$6" health_validation="$7"
+    local duration_seconds="${8:-}"
+
     local summary
     summary="VaultWarden Maintenance Summary - $(date)\n\nMaintenance Results:\n"
+
     if [[ "${CLEAN_LOGS:-true}" == "true" ]]; then
         [[ "$log_cleanup" == "0" ]] && summary+="  ✅ Log cleanup: OK\n" || summary+="  ❌ Log cleanup: Failed\n"
     else
@@ -328,6 +354,7 @@ generate_maintenance_summary() {
     if [[ "${TARGETED_MODE:-false}" == "false" ]]; then
         [[ "$health_validation" == "0" ]] && summary+="  ✅ Health validation: Passed\n" || summary+="  ⚠️  Health validation: Issues\n"
     fi
+
     local critical_failures=0
     [[ "${CLEAN_LOGS:-true}"        == "true"  && "$log_cleanup"      != "0" ]] && ((critical_failures++))
     [[ "${CLEAN_BACKUPS:-true}"     == "true"  && "$backup_cleanup"   != "0" ]] && ((critical_failures++))
@@ -336,12 +363,20 @@ generate_maintenance_summary() {
     [[ "${UPDATE_FIREWALL:-false}"  == "true"  && "$firewall_update"  != "0" ]] && ((critical_failures++))
     [[ "${UPDATE_DNS:-false}"       == "true"  && "$dns_update"       != "0" ]] && ((critical_failures++))
     [[ "${TARGETED_MODE:-false}"    == "false" && "$health_validation" != "0" ]] && ((critical_failures++))
-    if [[ $critical_failures -eq 0 ]]; then
-        summary+="\n🎉 Overall Status: SUCCESS\n"
-    else
-        summary+="\n⚠️  Overall Status: COMPLETED WITH ISSUES\n"
+
+    # Append duration line when the caller supplies it.
+    if [[ -n "$duration_seconds" && "$duration_seconds" =~ ^[0-9]+$ ]]; then
+        summary+="\nDuration: $(_format_duration "$duration_seconds")\n"
     fi
+
+    if [[ $critical_failures -eq 0 ]]; then
+        summary+="🎉 Overall Status: SUCCESS\n"
+    else
+        summary+="⚠️  Overall Status: COMPLETED WITH ISSUES\n"
+    fi
+
     printf '%b' "$summary"
+
     if [[ "${EMAIL_NOTIFY:-false}" == "true" ]]; then
         local subj
         if [[ $critical_failures -eq 0 ]]; then

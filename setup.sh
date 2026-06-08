@@ -43,6 +43,7 @@ source "${SCRIPT_DIR}/lib/config.sh"
 source "${SCRIPT_DIR}/lib/common.sh"
 init_common_lib "$0"
 source "${SCRIPT_DIR}/lib/crypto.sh"
+DOCKER_PROJECT_LABEL="${DOCKER_PROJECT_LABEL:-label=com.docker.compose.project=vaultwarden-oci}"
 source "${SCRIPT_DIR}/lib/docker.sh"
 source "${SCRIPT_DIR}/lib/backup-utils.sh"
 source "${SCRIPT_DIR}/lib/secrets.sh"
@@ -111,6 +112,7 @@ FULL SETUP OPTIONS (used after install or with top-level --domain / --email):
 
 GLOBAL OPTIONS:
   --help, -h          Show this help and exit.
+  --version, -V       Print the VaultWarden-OCI version and exit.
 
 EXAMPLES:
     # ── First-time setup ──────────────────────────────────────────
@@ -170,6 +172,10 @@ if [[ $# -gt 0 ]]; then
         help|--help|-h)
             show_help; exit 0
             ;;
+        --version|-V)
+            printf 'VaultWarden-OCI %s\n' "$(cat "${SCRIPT_DIR}/VERSION" 2>/dev/null || echo "unknown")"
+            exit 0
+            ;;
         --domain|--email|--auto|--use-latest|--skip-deps|--force|--dry-run|--data-device|--data-mount)
             # Legacy full-setup flag; fall through to the while loop below.
             ;;
@@ -199,23 +205,78 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+
+# ---------------------------------------------------------------------------
+# _warn_force_destructive
+#
+# Draws a prominent bordered warning box whose width adapts to the current
+# terminal width.  tput cols is queried at call time so the box looks correct
+# on both narrow OCI SSH sessions and wide local terminals.
+#
+# Layout:
+#   box_width  = terminal width clamped to [64, 100]
+#   inner_width = box_width - 4   (two border chars + two padding spaces)
+#
+# Falls back to 72 columns when tput is unavailable or reports 0/non-numeric.
+# ---------------------------------------------------------------------------
+_warn_force_destructive() {
+    local term_cols box_width inner_width border
+
+    # Resolve terminal width; fall back gracefully when tput is absent or
+    # when stdout is not a TTY (e.g., piped to a log file).
+    if [[ -t 1 ]] && command -v tput &>/dev/null; then
+        term_cols=$(tput cols 2>/dev/null || echo 0)
+    else
+        term_cols=0
+    fi
+
+    # Ensure term_cols is a positive integer before arithmetic.
+    [[ "${term_cols}" =~ ^[0-9]+$ && "${term_cols}" -gt 0 ]] || term_cols=72
+
+    # Clamp: never narrower than 64 cols (messages need room) or wider than 100.
+    (( term_cols < 64  )) && term_cols=64
+    (( term_cols > 100 )) && term_cols=100
+
+    box_width=$(( term_cols - 2 ))   # leave one space gutter on each side
+    inner_width=$(( box_width - 4 )) # ║<space><content><space>║
+
+    border=$(printf '═%.0s' $(seq 1 "${box_width}"))
+
+    printf '\n%s╔%s╗%s\n' "${COLOR_BOLD_RED}" "${border}" "${COLOR_RESET}"
+    printf "%s║  %-${inner_width}s  ║%s\n" \
+        "${COLOR_BOLD_RED}" "⚠  DESTRUCTIVE: --force WILL ROTATE YOUR AGE KEY" "${COLOR_RESET}"
+    printf "%s║  %-${inner_width}s  ║%s\n" \
+        "${COLOR_BOLD_RED}" "All existing encrypted backups become unrecoverable" "${COLOR_RESET}"
+    printf "%s║  %-${inner_width}s  ║%s\n" \
+        "${COLOR_BOLD_RED}" "unless you export a recovery kit FIRST." "${COLOR_RESET}"
+    printf "%s║  %-${inner_width}s  ║%s\n" \
+        "${COLOR_BOLD_RED}" "Run first: ./utilities/secrets-export-recovery-kit.sh" "${COLOR_RESET}"
+    printf '%s╚%s╝%s\n\n' "${COLOR_BOLD_RED}" "${border}" "${COLOR_RESET}"
+}
+
+_phase_failed() {
+    local num="$1" label="$2"; shift 2
+    log_error "Phase ${num} (${label}) failed"
+    local hint
+    for hint in "$@"; do
+        log_hint "$hint"
+    done
+    exit 1
+}
 # FORCE safety gate.
 # This must run before any validation so --dry-run --force can still preview
 # without triggering the prompt.
 if [[ "$FORCE" == "true" ]] && [[ "$DRY_RUN" != "true" ]]; then
     if [[ "${VW_FORCE_ACK:-}" != "I_UNDERSTAND_LOSING_OLD_BACKUPS" ]]; then
-        log_error "--force regenerates the Age key and permanently orphans all existing"
-        log_error "encrypted backups unless you have first exported a recovery kit."
-        log_error ""
-        log_error "  Export your recovery kit FIRST: ./utilities/secrets-export-recovery-kit.sh"
-        log_error ""
-        log_error "If you have already done that, re-run with:"
-        log_error "  VW_FORCE_ACK=I_UNDERSTAND_LOSING_OLD_BACKUPS sudo ./setup.sh --force ..."
+        _warn_force_destructive
+        log_hint "Export your recovery kit first: ./utilities/secrets-export-recovery-kit.sh"
+        log_hint "Then re-run with VW_FORCE_ACK=I_UNDERSTAND_LOSING_OLD_BACKUPS if automation is required."
         exit 2
     fi
     if [[ -t 0 ]]; then
-        read -r -p "WARNING: This will rotate the Age key and can orphan old backups. Continue? [yes/NO] " _force_answer
-        if [[ "$_force_answer" != "yes" ]]; then
+        _warn_force_destructive
+        read -r -p "Type YES to confirm you have exported a recovery kit: " _force_answer
+        if [[ "$_force_answer" != "YES" ]]; then
             log_info "Aborting setup --force at operator request."
             exit 1
         fi
@@ -231,6 +292,7 @@ if [[ -z "$PHASE" ]] && ! validate_email "$ADMIN_EMAIL"; then log_error "Invalid
 show_post_install_summary() {
     local mode="${1:-interactive}"
 
+    [[ -t 1 ]] && clear
     local age_pub_key="" age_key_content=""
     if [[ -f "secrets/keys/age-key.txt" ]]; then
         age_pub_key=$(get_age_public_key "secrets/keys/age-key.txt" 2>/dev/null || echo "MISSING")
@@ -274,15 +336,20 @@ CRED_BANNER
 
     printf '\n%s!!! PRESS ENTER ONLY AFTER SAVING ALL CREDENTIALS !!!%s\n' \
         "${COLOR_RED}" "${COLOR_RESET}"
-    if [[ -t 0 ]]; then
-        read -r
-    fi
+    press_enter_to_continue " Press [Enter] ONLY after saving all credentials above..."
     clear
 
     local env_owner
     env_owner=$(stat -c '%U' "$PROJECT_ROOT/.env" 2>/dev/null || echo "root")
     local env_edit_cmd="nano .env"
     [[ "$env_owner" == "root" ]] && env_edit_cmd="sudo nano .env"
+
+    # CF secrets commands shared between auto and interactive blocks (ux.md #21).
+    local _cf_cmds
+    _cf_cmds="$(printf '   %ssudo ./edit-secrets.sh rotate cloudflare_zone_id%s\n   %ssudo ./edit-secrets.sh rotate cf_account_id%s\n   %ssudo ./edit-secrets.sh rotate cf_worker_bouncer_token%s' \
+        "${COLOR_YELLOW}" "${COLOR_RESET}" \
+        "${COLOR_YELLOW}" "${COLOR_RESET}" \
+        "${COLOR_YELLOW}" "${COLOR_RESET}")"
 
     if [[ "$mode" == "auto" ]]; then
         printf '\n%s--- AUTO-GENERATED CREDENTIALS (scroll up and save plaintext passwords now) ---%s\n' \
@@ -316,12 +383,7 @@ CRED_BANNER
         printf '2. Set external tokens: %s(use sudo ./edit-secrets.sh rotate <field> commands above)%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '3. Inject CrowdSec CF secrets (BEFORE running setup-crowdsec.sh):\n'
-        printf '   %ssudo ./edit-secrets.sh rotate cloudflare_zone_id%s\n' \
-            "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '   %ssudo ./edit-secrets.sh rotate cf_account_id%s\n' \
-            "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '   %ssudo ./edit-secrets.sh rotate cf_worker_bouncer_token%s\n' \
-            "${COLOR_YELLOW}" "${COLOR_RESET}"
+        printf '%s\n' "$_cf_cmds"
         printf '4. Setup CrowdSec:      %ssudo ./utilities/setup-crowdsec.sh%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '   ► CrowdSec reads cloudflare_zone_id, cf_account_id, cf_worker_bouncer_token\n'
@@ -344,12 +406,7 @@ CRED_BANNER
         printf '   ► Verify: DOMAIN and ADMIN_EMAIL are correct\n'
         printf '2. Configure secrets:   %s./setup.sh secrets%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '3. Inject CrowdSec CF secrets (BEFORE running setup-crowdsec.sh):\n'
-        printf '   %ssudo ./edit-secrets.sh rotate cloudflare_zone_id%s\n' \
-            "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '   %ssudo ./edit-secrets.sh rotate cf_account_id%s\n' \
-            "${COLOR_YELLOW}" "${COLOR_RESET}"
-        printf '   %ssudo ./edit-secrets.sh rotate cf_worker_bouncer_token%s\n' \
-            "${COLOR_YELLOW}" "${COLOR_RESET}"
+        printf '%s\n' "$_cf_cmds"
         printf '4. Setup CrowdSec:      %ssudo ./utilities/setup-crowdsec.sh%s\n' \
             "${COLOR_YELLOW}" "${COLOR_RESET}"
         printf '   ► CrowdSec reads cloudflare_zone_id, cf_account_id, cf_worker_bouncer_token\n'
@@ -364,8 +421,7 @@ CRED_BANNER
     fi
 
     if [[ "$mode" == "interactive" ]]; then
-        printf '\n%s!!! PRESS ENTER TO CLEAR THIS SCREEN AND FINISH !!!%s\n' "${COLOR_RED}" "${COLOR_RESET}"
-        [[ -t 0 ]] && read -r
+        press_enter_to_continue " Press [Enter] to clear this screen and finish..."
         clear
     fi
 }
@@ -448,29 +504,33 @@ main() {
     local _sops_flags=()
     [[ -n "${SOPS_VERSION:-}" ]] && _sops_flags=(--sops-version "$SOPS_VERSION")
 
-    log_info "=== Phase 1: System setup ==="
+    log_phase 1 6 "System setup"
     "${SCRIPT_DIR}/utilities/setup-system.sh" \
         "${_auto[@]}" "${_skip_deps[@]}" "${_dry[@]}" "${_force[@]}" \
         "${_dev_flags[@]}" "${_sops_flags[@]}" \
-        || { log_error "System setup failed"; exit 1; }
+        || _phase_failed 1 "System setup"             "Check missing packages: sudo apt-get update && sudo apt-get install -y docker.io age sops"             "Re-run this phase: sudo ./utilities/setup-system.sh"             "If dependencies are already installed, re-run setup with --skip-deps"
 
-    log_info "=== Phase 2: Storage setup ==="
+    log_phase 2 6 "Storage setup"
     "${SCRIPT_DIR}/utilities/setup-storage.sh" --mode setup \
         "${_dry[@]}" "${_force[@]}" "${_dev_flags[@]}" \
-        || { log_error "Storage setup failed"; exit 1; }
+        || _phase_failed 2 "Storage setup"             "Verify data devices and mounts: lsblk && findmnt"             "Re-run this phase: sudo ./utilities/setup-storage.sh --mode setup"
 
-    log_info "=== Phase 3: Environment configuration ==="
+    log_phase 3 6 "Environment configuration"
     "${SCRIPT_DIR}/utilities/setup-env.sh" \
         --domain "$DOMAIN" --email "$ADMIN_EMAIL" \
         "${_use_latest[@]}" "${_dry[@]}" "${_force[@]}" "${_dev_flags[@]}" \
-        || { log_error "Environment setup failed"; exit 1; }
+        || _phase_failed 3 "Environment configuration"             "Verify domain/email values and .env permissions."             "Re-run this phase: sudo ./utilities/setup-env.sh --domain ${DOMAIN} --email ${ADMIN_EMAIL}"
 
-    log_info "=== Phase 4: Secrets bootstrap ==="
+    log_phase 4 6 "Secrets bootstrap"
+    # Wait for sufficient kernel entropy before generating cryptographic keys (ux.md #34).
+    wait_for_entropy "${ENTROPY_THRESHOLD:-200}" "${ENTROPY_MAX_WAIT:-60}" || true
     "${SCRIPT_DIR}/utilities/setup-secrets.sh" bootstrap \
         "${_dry[@]}" "${_force[@]}" \
-        || { log_error "Secrets bootstrap failed"; exit 1; }
+        || _phase_failed 4 "Secrets bootstrap" \
+            "Check the Age key and SOPS config: make key-health" \
+            "Re-run this phase: sudo ./utilities/setup-secrets.sh bootstrap"
 
-    log_info "=== Phase 5: Firewall (UFW) ==="
+    log_phase 5 6 "Firewall setup"
     "${SCRIPT_DIR}/utilities/setup-firewall.sh" --phase ufw \
         "${_auto[@]}" "${_dry[@]}" "${_force[@]}" \
         || log_warn "UFW firewall setup had a non-fatal issue — review output above"
@@ -501,8 +561,8 @@ main() {
         log_info ""
         log_info "  sudo ./utilities/setup-crowdsec.sh"
         log_info ""
-        printf 'Press ENTER to continue with the post-install summary, or Ctrl-C to exit now...'
-        read -r _cs_prompt_ack || true
+        press_enter_to_continue " Press [Enter] to continue with the post-install summary, or Ctrl-C to exit now..."
+        _cs_prompt_ack=""
         unset _cs_prompt_ack
     else
         log_info "Next step: inject CF secrets first, then run sudo ./utilities/setup-crowdsec.sh"
@@ -520,7 +580,7 @@ main() {
     export BACKUP_PLAIN_FILE="${TMP_WORKDIR}/backup_plain"
 
     if [[ "$AUTO_MODE" == "true" ]]; then
-        log_info "=== Auto Mode: Configuring secrets ==="
+        log_phase 6 6 "Secrets configuration"
         if [[ "$DRY_RUN" == "true" ]]; then
             log_info "[DRY RUN] Would create plaintext credential capture files in ${TMP_WORKDIR}"
         fi
@@ -549,6 +609,7 @@ main() {
     if [[ "$AUTO_MODE" == "true" ]]; then
         show_post_install_summary "auto"
     else
+        log_phase 6 6 "Secrets configuration"
         show_post_install_summary "interactive"
     fi
     return 0

@@ -133,6 +133,20 @@ setup: ## Run initial setup (requires sudo)
 		exit 1; \
 	fi
 	@if [ ! -f ".env" ]; then echo "$(RED)Error: .env missing. Usage: sudo ./setup.sh --domain <domain> --email <email>$(NC)"; exit 1; fi
+	@# ux.md #15: catch all placeholder DOMAIN variants — scheme-prefixed, bare, and CHANGE_ME.
+	@if grep -qE '^DOMAIN=((https?://)?(vault\.example\.com/?|CHANGE_ME))$$' .env 2>/dev/null || \
+   		grep -qE '^DOMAIN=[[:space:]]*$$' .env 2>/dev/null; then \
+		echo "$(RED)Error: DOMAIN is still a placeholder in .env$(NC)"; \
+		echo "$(YELLOW)Run setup directly with your real domain:$(NC)"; \
+		echo "$(GREEN)  sudo ./setup.sh install --domain your.real.domain --email you@example.com$(NC)"; \
+		exit 1; \
+	fi
+	@if grep -qE '^ADMIN_EMAIL=(admin@example\.com|CHANGE_ME)$$' .env 2>/dev/null; then \
+		echo "$(RED)Error: ADMIN_EMAIL is still a placeholder in .env$(NC)"; \
+		echo "$(YELLOW)Run setup directly with your real email:$(NC)"; \
+		echo "$(GREEN)  sudo ./setup.sh install --domain your.real.domain --email you@example.com$(NC)"; \
+		exit 1; \
+	fi
 	@echo "$(BLUE)==> Running setup.sh$(NC)" | tee -a setup.log
 	@SETUP_ARGS=""; \
 	[ -n "$(DATA_DEVICE)" ] && SETUP_ARGS="$$SETUP_ARGS --data-device $(DATA_DEVICE)"; \
@@ -727,7 +741,8 @@ key-rotate: ## Rotate age encryption key (re-encrypts all secrets)
 		exit 1; \
 	}
 	@echo ""
-	@read -p "Continue with key rotation? [y/N] " confirm; \
+	@printf "Continue with key rotation? [y/N] "; \
+	read -r confirm; \
 	if [ "$$confirm" != "y" ] && [ "$$confirm" != "Y" ]; then \
 		echo "$(YELLOW)Key rotation cancelled.$(NC)"; \
 		exit 0; \
@@ -975,9 +990,15 @@ clean: ## Remove generated files (logs, temp files)
 	@rm -f setup.log
 	@echo "$(GREEN)Clean complete.$(NC)"
 
-clean-all: ## [DESTRUCTIVE] Remove all generated files including secrets cache
-	@echo "$(YELLOW)WARNING: This will remove secrets cache. Re-run make up to regenerate.$(NC)"
-	@read -p "Continue? [y/N] " confirm; \
+# ===========================================================================
+##@ ⚠ Destructive Operations
+# ===========================================================================
+
+clean-all: ## Remove secrets cache and log files — services will re-init secrets on next start
+	@echo "$(YELLOW)WARNING: This will remove the decoded secrets cache.$(NC)"
+	@echo "$(YELLOW)         Run 'make up' afterwards to regenerate it from secrets.yaml.$(NC)"
+	@printf "Continue? [y/N] "; \
+	read -r confirm; \
 	if [ "$$confirm" = "y" ] || [ "$$confirm" = "Y" ]; then \
 		rm -f setup.log; \
 		rm -rf secrets/.docker_secrets; \
@@ -986,30 +1007,37 @@ clean-all: ## [DESTRUCTIVE] Remove all generated files including secrets cache
 		echo "Cancelled."; \
 	fi
 
-prune: ## [DESTRUCTIVE] Remove unused Docker resources (containers, networks, images)
+prune: ## Remove unused Docker resources (images, containers, networks) — cannot be undone
 	$(call check-docker)
-	@echo "$(BLUE)Pruning unused Docker resources...$(NC)"
+	@# Allow dashboard.sh (which already confirmed) to bypass the interactive prompt.
+	@# Direct terminal invocations still require explicit confirmation.
+	@if [ "${DASHBOARD_CONFIRMED}" != "true" ]; then \
+		if [ ! -t 0 ]; then \
+			echo "$(RED)Error: 'make prune' requires an interactive terminal.$(NC)"; \
+			echo "$(YELLOW)Re-run in a TTY: sudo make prune$(NC)"; \
+			exit 1; \
+		fi; \
+		echo "$(YELLOW)WARNING: This will permanently remove unused Docker resources.$(NC)"; \
+		printf "Continue? [y/N] "; \
+		read -r confirm; \
+		if [ "$$confirm" != "y" ] && [ "$$confirm" != "Y" ]; then \
+			echo "Cancelled."; \
+			exit 0; \
+		fi; \
+	fi
 	@docker system prune -f
 	@echo "$(GREEN)Prune complete.$(NC)"
 
-# ===========================================================================
-# ===========================================================================
-##@ ⚠  DANGER ZONE — Destructive Operations
-# ===========================================================================
-
-##@ Uninstall
-# ===========================================================================
-
-uninstall: ## Uninstall VaultWarden-OCI (interactive)
+uninstall: ## Remove VaultWarden-OCI, all data, secrets, and containers from this host
 	$(call require-root)
-	@echo "$(RED)WARNING: This will remove VaultWarden-OCI from this system.$(NC)"
+	@echo "$(RED)WARNING: This will permanently remove VaultWarden-OCI from this system.$(NC)"
+	@echo "$(RED)         All data, secrets, and containers will be deleted.$(NC)"
 	@sudo utilities/uninstall-vaultwarden.sh run
 
-uninstall-dry-run: ## Simulate uninstall without deleting anything (--dry-run mode)
+uninstall-dry-run: ## Preview what uninstall would remove without making any changes
 	@utilities/uninstall-vaultwarden.sh run --dry-run
 
 # ===========================================================================
-
 ##@ Documentation
 # ===========================================================================
 

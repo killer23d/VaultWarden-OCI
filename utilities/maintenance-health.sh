@@ -13,6 +13,7 @@ source "$PROJECT_ROOT/lib/config.sh"
 source "$PROJECT_ROOT/lib/common.sh"
 init_common_lib "$0"
 source "$PROJECT_ROOT/lib/email.sh"
+DOCKER_PROJECT_LABEL="${DOCKER_PROJECT_LABEL:-label=com.docker.compose.project=vaultwarden-oci}"
 source "$PROJECT_ROOT/lib/docker.sh"
 source "$PROJECT_ROOT/lib/backup-utils.sh"
 source "$PROJECT_ROOT/lib/crypto.sh"
@@ -227,6 +228,7 @@ local COMPREHENSIVE=false
 local FIX_MODE=false
 local REPORT_MODE=false
 local QUIET=false
+local JSON_OUTPUT=false
 
 _health_parse_args() {
     while [[ $# -gt 0 ]]; do
@@ -235,60 +237,58 @@ _health_parse_args() {
             --fix|-f)            FIX_MODE=true;       shift ;;
             --report|-r)         REPORT_MODE=true;    shift ;;
             --quiet|-q)          QUIET=true;          shift ;;
-            *)                   log_error "Unknown option for 'health': $1"; _show_help; exit 1 ;;
+            --json)              JSON_OUTPUT=true;    QUIET=true; shift ;;
+            --help|-h|help)      _health_show_help;   exit 0 ;;
+            *)                   log_error "Unknown option for 'health': $1"; _health_show_help; exit 1 ;;
         esac
     done
 }
 
-_show_help() {
+_health_show_help() {
     cat <<'EOF'
-Usage: ./maintenance.sh health [OPTIONS]
+VaultWarden-OCI Health Check (subcommand)
 
-Options:
-  --comprehensive     Run all checks including extended diagnostics
-  --fix, -f            Attempt automatic recovery for failed checks
-  --report, -r         Save health report to file
-  --quiet, -q          Suppress non-critical output
+USAGE:
+    sudo utilities/maintenance-health.sh [OPTIONS]
+    ./maintenance.sh health [OPTIONS]
 
-Checks performed:
-  - Docker container status and health
-  - SSL certificate validity and expiry
-  - VaultWarden /alive liveness probe (internal + external HTTPS)
-  - VaultWarden /api/config readiness probe (requires live DB connection)
-  - CrowdSec integration check (systemd service + bouncer)
-  - Disk space utilization
-  - Memory utilization
-  - Network connectivity
-  - Backup status and age
-  - DNS resolution
-  - Configuration validation
+DESCRIPTION:
+    Runs all health checks and optionally sends alert emails when thresholds
+    are breached. Called automatically by the vaultwarden-health systemd
+    timer, or manually on demand.
 
-Comprehensive mode adds:
-  - Detailed container resource usage
-  - SSL certificate chain validation
-  - Extended /api/config endpoint testing (explicit comprehensive result)
-  - Backup integrity verification
-  - CrowdSec integration check
+OPTIONS:
+    --comprehensive     Run all checks including extended diagnostics
+    --fix, -f           Attempt automatic recovery for failed checks
+    --report, -r        Save health report to file
+    --quiet, -q         Suppress non-critical output
+    --json              Emit machine-readable JSON summary
+    --help, -h          Show this help
+    --version, -V       Print the VaultWarden-OCI version and exit
 
-Environment variables:
-  HEALTH_API_STRICT=true          Promote /api/config non-200 from warning to failure
-  ALERT_COOLDOWN_SECONDS=3600     Minimum seconds between repeat alerts for the same
-                                  failure key (default: 3600 = 1 hour)
-  ALERT_RECOVERY_TTL=86400        Minimum seconds between clear-state recovery emails
-                                  (default: 86400 = 24 hours)
+CHECKS PERFORMED:
+    - Docker container status and health
+    - SSL certificate validity and expiry
+    - VaultWarden /alive liveness probe (internal + external HTTPS)
+    - VaultWarden /api/config readiness probe (requires live DB connection)
+    - CrowdSec integration check (systemd service + bouncer)
+    - Disk space utilization
+    - Memory utilization
+    - Network connectivity
+    - Backup status and age
+    - DNS resolution
+    - Configuration validation
 
-Alert cooldown:
-  Alerts are rate-limited per failure key using timestamp files under
-  $PROJECT_STATE_DIR/.vw-health-alert/. At most one alert fires per failure
-  key per ALERT_COOLDOWN_SECONDS window. A single clear-state recovery email
-  fires once when all checks pass, then is suppressed for ALERT_RECOVERY_TTL
-  seconds. State survives reboots and container restarts.
+EXIT CODES:
+    0 — All checks passed
+    1 — One or more warnings
+    2 — One or more failures
+    3 — Critical failure (cannot run checks)
 
-Exit codes:
-  0 - All checks passed
-  1 - One or more warnings
-  2 - One or more failures
-  3 - Critical failure (cannot run checks)
+EXAMPLES:
+    sudo ./maintenance.sh health
+    sudo ./maintenance.sh health --comprehensive
+    sudo ./maintenance.sh health --json
 EOF
 }
 
@@ -984,6 +984,30 @@ _generate_report() {
         -mtime +"$REPORT_RETENTION_DAYS" -delete 2>/dev/null || true
 }
 
+
+_health_json_escape() {
+    local str="$1"
+    str=${str//\\/\\\\}; str=${str//\"/\\\"}; str=${str//$'\n'/\\n}; str=${str//$'\r'/}
+    printf '%s' "$str"
+}
+
+_print_results_json() {
+    local overall="pass"
+    (( warnings > 0 )) && overall="warn"
+    (( failed > 0 )) && overall="fail"
+    printf '{"overall":"%s","total":%d,"passed":%d,"warnings":%d,"failed":%d,"checks":[' \
+        "$overall" "$total" "$passed" "$warnings" "$failed"
+    local first=true name status message
+    for name in "${check_order[@]}"; do
+        status="${check_results[$name]:-unknown}"
+        message="${check_messages[$name]:-}"
+        [[ "$first" == "true" ]] && first=false || printf ','
+        printf '{"name":"%s","status":"%s","message":"%s"}' \
+            "$(_health_json_escape "$name")" "$(_health_json_escape "$status")" "$(_health_json_escape "$message")"
+    done
+    printf ']}\n'
+}
+
 _print_results() {
     if $QUIET && [[ $failed -eq 0 && $warnings -eq 0 ]]; then return; fi
     echo ""
@@ -1037,7 +1061,7 @@ _health_main() {
         log_info "Fix mode enabled — attempting recovery..."
         _fix_unhealthy_containers
     fi
-    _print_results
+    if $JSON_OUTPUT; then _print_results_json; else _print_results; fi
     if $REPORT_MODE; then _generate_report; fi
     _notify_failures
     _notify_recovery
@@ -1063,7 +1087,9 @@ OPTIONS:
     --fix, -f           Attempt automatic recovery for failed checks
     --report, -r        Save health report to file
     --quiet, -q         Suppress non-critical output
+    --json              Emit machine-readable JSON summary
     --help, -h          Show this help
+    --version, -V       Print the VaultWarden-OCI version and exit
 
 EXIT CODES:
     0 — All checks passed
@@ -1074,11 +1100,19 @@ EOF
 }
 
 [[ $# -gt 0 && ( "$1" == "--help" || "$1" == "-h" || "$1" == "help" ) ]] && { show_help; exit 0; }
+[[ $# -gt 0 && ( "$1" == "--version" || "$1" == "-V" ) ]] && { print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"; exit 0; }
 
 # Strip the leading 'health' token when the dispatcher prepends the subcommand.
 [[ "${1:-}" == "health" ]] && shift
 
 main() {
+    local arg
+    for arg in "$@"; do
+        if [[ "$arg" == "--json" ]]; then
+            _LOG_CURRENT_WEIGHT=3
+            break
+        fi
+    done
     run_health_check "$@"
 }
 

@@ -6,7 +6,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-for _lib in "lib/log.sh" "lib/config.sh" "lib/common.sh"; do
+for _lib in "lib/log.sh" "lib/validate.sh" "lib/config.sh" "lib/common.sh"; do
     if [[ ! -f "${PROJECT_ROOT}/${_lib}" ]]; then
         echo "ERROR: Required library not found: ${PROJECT_ROOT}/${_lib}" >&2
         exit 1
@@ -15,6 +15,8 @@ done
 unset _lib
 # shellcheck source=../lib/log.sh
 source "${PROJECT_ROOT}/lib/log.sh"
+# shellcheck source=../lib/validate.sh
+source "${PROJECT_ROOT}/lib/validate.sh"
 # shellcheck source=../lib/config.sh
 source "${PROJECT_ROOT}/lib/config.sh"
 # shellcheck source=../lib/common.sh
@@ -36,17 +38,18 @@ DRY_RUN=false
 
 show_help() {
     cat <<'EOF'
-utilities/setup-env.sh — VaultWarden-OCI environment file configuration
-
-Creates or updates .env and docker-compose.yml from templates.
-Safe to re-run (idempotent): existing files are not overwritten unless
---force is passed or key values (domain/email) have changed.
+VaultWarden-OCI Environment Setup
 
 USAGE:
     sudo utilities/setup-env.sh --domain DOMAIN --email EMAIL [OPTIONS]
 
-FLAGS:
-    --domain DOMAIN       Your domain name (required)
+DESCRIPTION:
+    Creates or updates .env and docker-compose.yml from project templates.
+    Safe to re-run (idempotent) — existing files are not overwritten unless
+    --force is passed. Called automatically by setup.sh during phase 3.
+
+OPTIONS:
+    --domain DOMAIN       Your domain name (required, e.g. vault.example.com)
     --email EMAIL         Admin email address (required)
     --use-latest          Set all container versions to 'latest'
     --data-device DEV     Data volume block device path
@@ -54,6 +57,14 @@ FLAGS:
     --force               Overwrite existing .env/docker-compose.yml
     --dry-run             Preview actions without executing
     --help, -h            Show this help
+    --version, -V         Print the VaultWarden-OCI version and exit
+
+DOMAIN REQUIREMENTS:
+    - Must be a bare hostname with no scheme (not https://vault.example.com)
+    - Must be a fully-qualified domain name with at least one dot
+    - Must not include a port number or a path
+    - Must not be a placeholder (e.g. vault.example.com, CHANGE_ME)
+    - Must not be a bare IP address (Caddy ACME requires a DNS name)
 
 EXAMPLES:
     sudo utilities/setup-env.sh --domain vault.example.com --email admin@example.com
@@ -89,6 +100,7 @@ _parse_args() {
                 DATA_VOLUME_MOUNT="$1"
                 ;;
             --help|-h) show_help; exit 0 ;;
+            --version|-V) print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"; exit 0 ;;
             *)
                 log_error "Unknown option: $1"
                 show_help
@@ -307,11 +319,46 @@ create_docker_compose() {
     return 0
 }
 
+# ---------------------------------------------------------------------------
+# _check_domain — validate --domain and emit a precise, actionable error.
+#
+# Calls _validate_domain_reason() to get a human-readable rejection reason
+# and emits log_error + log_hint so the operator knows exactly what to fix.
+# Exits with status 1 on any failure.
+# ---------------------------------------------------------------------------
+_check_domain() {
+    local domain="$1"
+
+    if validate_domain "$domain"; then
+        return 0
+    fi
+
+    local reason
+    reason="$(_validate_domain_reason "$domain")"
+
+    log_error "Invalid --domain value: '${domain}'"
+
+    if [[ -n "$reason" ]]; then
+        log_hint "$reason"
+    fi
+
+    log_hint "Pass a bare registered hostname, e.g.: --domain vault.yourdomain.com"
+    exit 1
+}
+
 main() {
     (( EUID == 0 )) || { log_error "Must run as root (use: sudo $0 $*)"; exit 1; }
 
     [[ -n "$DOMAIN" ]]      || { log_error "--domain is required"; show_help; exit 1; }
     [[ -n "$ADMIN_EMAIL" ]] || { log_error "--email is required";  show_help; exit 1; }
+
+    _check_domain "$DOMAIN"
+
+    if ! validate_email "$ADMIN_EMAIL"; then
+        log_error "Invalid --email value: '${ADMIN_EMAIL}'"
+        log_hint  "Provide a valid email address, e.g.: --email you@yourdomain.com"
+        exit 1
+    fi
 
     [[ "$DRY_RUN" == "true" ]] && log_info "DRY RUN mode — no changes will be made"
 
@@ -322,4 +369,4 @@ main() {
 }
 
 _parse_args "$@"
-main
+main "$@"

@@ -10,6 +10,7 @@ source "$SCRIPT_DIR/lib/config.sh"
 source "$SCRIPT_DIR/lib/common.sh"
 init_common_lib "$0"
 source "$SCRIPT_DIR/lib/email.sh"
+DOCKER_PROJECT_LABEL="${DOCKER_PROJECT_LABEL:-label=com.docker.compose.project=vaultwarden-oci}"
 source "$SCRIPT_DIR/lib/docker.sh"
 source "$SCRIPT_DIR/lib/backup-utils.sh"
 source "$SCRIPT_DIR/lib/crypto.sh"
@@ -18,32 +19,43 @@ source "$SCRIPT_DIR/lib/storage.sh"
 SKIP_EMAIL=false
 SKIP_RESTORE=false
 
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --skip-email)   SKIP_EMAIL=true;   shift ;;
-        --skip-restore) SKIP_RESTORE=true; shift ;;
-        --help|-h)
-            cat <<'EOF'
+show_help() {
+    cat <<'EOF'
 VaultWarden-OCI Pre-Production Drill
 
-A non-destructive rehearsal of all critical operational paths.
-No production state is modified.
-
 USAGE:
-    sudo ./utilities/pre-production-drill.sh [options]
+    sudo ./utilities/pre-production-drill.sh [OPTIONS]
+
+DESCRIPTION:
+    Non-destructive rehearsal of all critical operational paths.
+    No production state is modified. Validates secrets, backups, email
+    delivery, and stack restart sequence before go-live.
 
 OPTIONS:
     --skip-email    Skip email delivery test (if MTA not configured yet)
     --skip-restore  Skip restore path drill (decrypt + integrity check)
-    --help          Show this help
+    --help, -h      Show this help
+    --version, -V   Print the VaultWarden-OCI version and exit
 
 EXIT CODES:
     0  All steps passed
     1  One or more steps failed
+
+EXAMPLES:
+    sudo ./utilities/pre-production-drill.sh
+    sudo ./utilities/pre-production-drill.sh --skip-email
+    sudo ./utilities/pre-production-drill.sh --skip-email --skip-restore
 EOF
-            exit 0
-            ;;
-        *) log_error "Unknown option: $1"; exit 1 ;;
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --skip-email)   SKIP_EMAIL=true;   shift ;;
+        --skip-restore) SKIP_RESTORE=true; shift ;;
+        --help|-h) show_help; exit 0 ;;
+        --version|-V) print_project_version "VaultWarden-OCI" "$SCRIPT_DIR"; exit 0 ;;
+        help)      show_help; exit 0 ;;
+        *) log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done
 
@@ -78,6 +90,7 @@ _step_header() {
 }
 
 DRILL_TMPDIR=""
+_DRILL_START=$(date +%s)
 
 
 drill_environment() {
@@ -111,7 +124,9 @@ drill_environment() {
 drill_secrets() {
     _step_header "Secrets & Encryption Keys"
 
-    local key_file="${SOPS_AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}"
+    # resolve_age_key_path() inside check_age_key_health reads AGE_KEY_FILE, not
+    # SOPS_AGE_KEY_FILE — use AGE_KEY_FILE so the env prefix is honoured.
+    local key_file="${AGE_KEY_FILE:-${SOPS_AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}}"
 
     if [[ ! -f "$key_file" ]]; then
         _step_fail "age-key-exists" "not found at $key_file"
@@ -127,7 +142,7 @@ drill_secrets() {
         _step_fail "age-key-perms" "mode is ${perms}, expected 600 — run: chmod 600 $key_file"
     fi
 
-    if SOPS_AGE_KEY_FILE="$key_file" check_age_key_health 2>/dev/null; then
+    if AGE_KEY_FILE="$key_file" check_age_key_health 2>/dev/null; then
         _step_pass "age-key-health: key is valid and readable"
     else
         _step_fail "age-key-health" "key health check failed — run: make key-health"
@@ -315,7 +330,10 @@ drill_stack_restart_sequence() {
     fi
 
     log_info "  Checking all expected services are defined in compose file..."
-    local expected_services=(vaultwarden caddy postfix)
+    # init-permissions has restart:"no" so it won't be running, but it must be
+    # defined. The 'docker compose config --services' output lists all defined
+    # services regardless of restart policy.
+    local expected_services=(vaultwarden caddy postfix init-permissions)
     local defined_services
     defined_services=$(docker compose config --services 2>/dev/null || true)
     for svc in "${expected_services[@]}"; do
@@ -356,8 +374,10 @@ drill_full_backup_restore_smoketest() {
     register_cleanup rm -rf "$tmpdir"
 
     log_info "  Decrypting + listing manifest (no actual restore)..."
+    # Use --use-compress-program to match verify_backup_full() exactly; -I flag
+    # is GNU-only and conflicts with -z (gzip). zstd -d -T0 decompresses multi-threaded.
     if age -d -i "$key_file" "$backup_file" 2>/dev/null \
-        | tar -tz -I zstd > "$tmpdir/manifest.txt" 2>&1; then
+        | tar --use-compress-program='zstd -d -T0' -t > "$tmpdir/manifest.txt" 2>&1; then
         _step_pass "restore-smoketest-decrypt: archive decrypted and manifest extracted"
     else
         _step_fail "restore-smoketest-decrypt" "failed to decrypt or list archive contents"
@@ -366,10 +386,11 @@ drill_full_backup_restore_smoketest() {
     fi
 
     local missing_files=()
-    if ! grep -q 'docker-compose.yml' "$tmpdir/manifest.txt" 2>/dev/null; then
+    # Use -F (fixed-string) so the dot in filenames is not treated as a regex wildcard.
+    if ! grep -qF 'docker-compose.yml' "$tmpdir/manifest.txt" 2>/dev/null; then
         missing_files+=("docker-compose.yml")
     fi
-    if ! grep -q '.env.example' "$tmpdir/manifest.txt" 2>/dev/null; then
+    if ! grep -qF '.env.example' "$tmpdir/manifest.txt" 2>/dev/null; then
         missing_files+=(".env.example")
     fi
 
@@ -388,29 +409,44 @@ drill_full_backup_restore_smoketest() {
 }
 
 _print_drill_summary() {
+    local end_epoch elapsed mins secs duration
+    end_epoch=$(date +%s)
+    elapsed=$(( end_epoch - _DRILL_START ))
+    mins=$(( elapsed / 60 ))
+    secs=$(( elapsed % 60 ))
+    if (( mins > 0 )); then
+        duration="${mins}m ${secs}s"
+    else
+        duration="${secs}s"
+    fi
+
     printf '\n'
     log_header "Pre-Production Drill Summary"
-    printf '  Total steps:  %d\n' "$_STEPS_TOTAL"
-    printf '  Passed:       %d\n' "$_STEPS_PASSED"
-    printf '  Failed:       %d\n' "$_STEPS_FAILED"
-    printf '  Skipped:      %d\n' "$_STEPS_SKIPPED"
-    printf '\n'
+    printf '  %s%-10s%s %d / %d steps (%s elapsed)\n' \
+        "${COLOR_GREEN}" "Passed:" "${COLOR_RESET}" "$_STEPS_PASSED" "$_STEPS_TOTAL" "$duration"
+    if (( _STEPS_SKIPPED > 0 )); then
+        printf '  %s%-10s%s %d\n' "${COLOR_YELLOW}" "Skipped:" "${COLOR_RESET}" "$_STEPS_SKIPPED"
+    fi
 
     if (( _STEPS_FAILED > 0 )); then
-        log_error "Drill FAILED. Resolve these steps before production:"
+        printf '\n  %s%-10s%s %d\n\n' "${COLOR_BOLD_RED}" "FAILED:" "${COLOR_RESET}" "$_STEPS_FAILED"
+        printf '  %sFailed steps:%s\n' "${COLOR_BOLD_RED}" "${COLOR_RESET}"
         local step
         for step in "${_FAILED_STEPS[@]}"; do
-            log_error "  • $step"
+            printf '    %s• %s%s\n' "${COLOR_RED}" "$step" "${COLOR_RESET}"
         done
         printf '\n'
+        log_error "Drill FAILED — resolve the issues above before go-live."
         log_info  "Re-run after fixing: sudo ./utilities/pre-production-drill.sh"
     else
+        printf '\n'
         log_success "Drill PASSED — all rehearsed paths are operational."
         log_info    "Next step: sudo ./utilities/smoke-test.sh (live stack check)"
     fi
 }
 
 main() {
+    _DRILL_START=$(date +%s)
     require_root
     trap 'perform_cleanup' EXIT HUP INT TERM
 

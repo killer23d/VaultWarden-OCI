@@ -20,7 +20,7 @@ log_debug "secrets-rotate: SECRETS_FILE resolved to: ${SECRETS_FILE}"
 trap perform_cleanup EXIT
 
 show_help() {
-    cat << 'HELP_HEADER'
+    cat << 'EOF'
 VaultWarden Secrets — rotate subcommand
 
 USAGE:
@@ -33,24 +33,9 @@ DESCRIPTION:
     re-encrypts secrets.yaml and resyncs Docker secret bind-mount files.
 
 SUPPORTED FIELDS:
-HELP_HEADER
-    # Print the dynamic field list from the schema so this help text is always
-    # in sync with secrets-schema.yaml without manual maintenance.
-    if command -v yq > /dev/null 2>&1 \
-            && [[ -f "${PROJECT_ROOT}/secrets-schema.yaml" ]]; then
-        while IFS= read -r _hkey; do
-            local _hlabel
-            _hlabel=$(schema_field_safe "$_hkey" label 2>/dev/null)
-            if [[ -n "$_hlabel" ]]; then
-                printf '    %-35s (%s)\n' "$_hkey" "$_hlabel"
-            else
-                printf '    %s\n' "$_hkey"
-            fi
-        done < <(schema_keys)
-    else
-        printf '    (schema not available — run after setup.sh install)\n'
-    fi
-    cat << 'HELP_FOOTER'
+    Derived at runtime from secrets-schema.yaml.
+    Run after setup.sh install for the full schema list, or inspect:
+      secrets/secrets-schema.yaml
 
 EMAIL_MODE / EMAIL_PROVIDER quick reference (.env):
     EMAIL_MODE=auto   — tries API → SMTP → Postfix in order
@@ -62,9 +47,10 @@ EMAIL_MODE / EMAIL_PROVIDER quick reference (.env):
           the token is always stored as "email_api_token" in secrets.yaml.
 
 FLAGS:
-    --dry-run    Preview what would change without writing
-    --no-backup  Skip creating backup before rotation
-    --help, -h   Show this help
+    --dry-run     Preview what would change without writing
+    --no-backup   Skip creating backup before rotation
+    --help, -h    Show this help
+    --version, -V Print the VaultWarden-OCI version and exit
 
 EXAMPLES:
     ./utilities/secrets-rotate.sh admin_token
@@ -72,19 +58,16 @@ EXAMPLES:
     ./utilities/secrets-rotate.sh email_api_token --dry-run
     ./edit-secrets.sh rotate smtp_password
     ./edit-secrets.sh rotate backup_passphrase --no-backup
-HELP_FOOTER
+
+EOF
 }
 
 DRY_RUN=false
 SKIP_BACKUP=false
 
-# Populate _ROTATE_FIELDS from the schema so every key defined in
-# secrets-schema.yaml is automatically rotatable — no manual list maintenance.
-mapfile -t _ROTATE_FIELDS < <(schema_keys 2>/dev/null)
-
-# Build _FIELD_SERVICES from the schema so restart hints stay in sync with
-# the schema's 'services' field without a parallel associative array here.
 declare -A _FIELD_SERVICES=()
+_ROTATE_FIELDS=()
+
 _populate_field_services() {
     local _pk
     while IFS= read -r _pk; do
@@ -94,8 +77,6 @@ _populate_field_services() {
         _FIELD_SERVICES["$_pk"]="$_svcs"
     done < <(schema_keys 2>/dev/null)
 }
-_populate_field_services
-unset -f _populate_field_services
 
 check_prerequisites() {
     local missing=()
@@ -112,6 +93,55 @@ check_prerequisites() {
         return 1
     fi
     return 0
+}
+
+_print_rotation_receipt() {
+    local field="$1"
+    local old_fp="$2"
+    local new_fp="$3"
+    local docker_synced="$4"
+    local services_list="$5"
+    local rotated_at
+    rotated_at=$(date '+%Y-%m-%d %H:%M:%S %Z')
+
+    printf '\n'
+    log_header "Rotation Receipt"
+
+    printf '  %-22s %s\n'  "Field:"      "$field"
+    printf '  %-22s %s\n'  "Rotated at:" "$rotated_at"
+    printf '\n'
+    printf '  %-22s %s\n'  "Old fingerprint:"  "${old_fp:-unset} (SHA-256 prefix, first 12 chars)"
+    printf '  %-22s %s\n'  "New fingerprint:"  "${new_fp}        (SHA-256 prefix, first 12 chars)"
+    printf '\n'
+
+    # Docker secrets sync status
+    if [[ "$docker_synced" == "true" ]]; then
+        printf '  %-22s %s\n' "Docker secrets:" \
+            "$(printf '%s✔ Resynced%s' "${COLOR_GREEN}" "${COLOR_RESET}")"
+    else
+        printf '  %-22s %s\n' "Docker secrets:" \
+            "$(printf '%s✖ Not synced — run: ./startup.sh or ./setup.sh secrets%s' \
+                "${COLOR_YELLOW}" "${COLOR_RESET}")"
+    fi
+
+    # Services restart reminder
+    printf '\n'
+    if [[ -n "$services_list" ]]; then
+        printf '  %sServices requiring restart:%s\n' "${COLOR_BOLD}" "${COLOR_RESET}"
+        local svc
+        for svc in $services_list; do
+            printf '    %s→%s docker compose restart %s\n' \
+                "${COLOR_CYAN}" "${COLOR_RESET}" "$svc"
+        done
+    else
+        printf '  %sServices requiring restart:%s\n' "${COLOR_BOLD}" "${COLOR_RESET}"
+        printf '    %s→%s docker compose restart <service>\n' \
+            "${COLOR_CYAN}" "${COLOR_RESET}"
+    fi
+
+    printf '\n'
+    log_hint "Fingerprints are non-reversible — use them only to confirm the value changed."
+    printf '\n'
 }
 
 _validate_rotate_field() {
@@ -184,6 +214,21 @@ do_rotate() {
         log_error "Failed to decrypt secrets for rotation"
         return 1
     fi
+
+    local old_fingerprint
+    old_fingerprint=$(python3 - "$temp_plain" "$actual_field" <<'PYEOF' 2>/dev/null || true
+import sys, hashlib, re
+path, field = sys.argv[1], sys.argv[2]
+val = ''
+pat = re.compile(r'^' + re.escape(field) + r':\s*(.*)$')
+for line in open(path, encoding='utf-8'):
+    m = pat.match(line.rstrip('\n'))
+    if m:
+        val = m.group(1).strip().strip('"\'')
+        break
+print(hashlib.sha256(val.encode()).hexdigest()[:12] if val else 'unset')
+PYEOF
+)
 
     local new_value
     if [[ "$field" == "email_api_token" ]]; then
@@ -261,6 +306,20 @@ PYEOF
         return 1
     fi
 
+    local new_fingerprint
+    new_fingerprint=$(printf '%s' "$new_value" | sha256sum | awk '{print substr($1,1,12)}')
+    log_info "Rotation preview for '${actual_field}':"
+    printf '  %-10s %s\n' "before:" "$old_fingerprint"
+    printf '  %-10s %s\n' "after:"  "$new_fingerprint"
+    if [[ -t 0 ]]; then
+        local confirm_rotate
+        read -r -p "Apply this rotation? [y/N] " confirm_rotate
+        if [[ ! "${confirm_rotate,,}" =~ ^y(es)?$ ]]; then
+            log_info "Rotation cancelled by operator."
+            return 0
+        fi
+    fi
+
     log_info "Re-encrypting secrets (atomic write)..."
     local temp_enc
     temp_enc=$(mktemp --suffix=.yaml --tmpdir="$(dirname "$SECRETS_FILE")")
@@ -292,20 +351,23 @@ PYEOF
     log_success "Secret '${actual_field}' rotated successfully"
 
     local _affected_service="${_FIELD_SERVICES[$field]:-}"
-    if [[ -n "$_affected_service" ]]; then
-        log_warn "Restart the following Docker service for the new secret to take effect:"
-        log_warn "  docker compose restart $_affected_service"
-    else
-        log_warn "Run 'docker compose restart <service>' for the new secret to take effect"
-    fi
 
     log_info "Redeploying Docker secret files..."
     local docker_dir="${PROJECT_ROOT}/secrets/.docker_secrets"
+    local _docker_synced="false"
     if export_docker_secrets "$docker_dir" "$SECRETS_FILE" 2>/dev/null; then
         log_success "Docker secret files updated"
+        _docker_synced="true"
     else
         log_warn "Could not auto-redeploy Docker secret files. Run: ./startup.sh or ./setup.sh secrets"
     fi
+
+    _print_rotation_receipt \
+        "$actual_field"           \
+        "$old_fingerprint"        \
+        "$new_fingerprint"        \
+        "$_docker_synced"         \
+        "${_affected_service}"
 
     offer_recovery_kit_export "false"
 
@@ -327,9 +389,14 @@ main() {
             --dry-run)   DRY_RUN=true;     shift ;;
             --no-backup) SKIP_BACKUP=true; shift ;;
             --help|-h)   show_help; exit 0 ;;
+            --version|-V) print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"; exit 0 ;;
             *) log_error "Unknown option: '$1'"; show_help; exit 1 ;;
         esac
     done
+
+    mapfile -t _ROTATE_FIELDS < <(schema_keys 2>/dev/null)
+    _populate_field_services
+    unset -f _populate_field_services
 
     if [[ -z "$rotate_field" ]]; then
         log_error "'rotate' requires a FIELD argument."

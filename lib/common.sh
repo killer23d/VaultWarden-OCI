@@ -92,7 +92,13 @@ retry_with_backoff() {
     local initial_delay="$2"
     shift 2
     local delay="$initial_delay"
-    local i
+    local i remaining
+    local total_max_wait=0 projected_delay="$initial_delay"
+
+    for ((i=1; i<max_attempts; i++)); do
+        total_max_wait=$(( total_max_wait + projected_delay ))
+        projected_delay=$(( projected_delay * 2 ))
+    done
 
     for ((i=1; i<=max_attempts; i++)); do
         if "$@"; then
@@ -100,8 +106,25 @@ retry_with_backoff() {
         fi
 
         if [[ $i -lt $max_attempts ]]; then
-            log_warn "Attempt $i failed, retrying in ${delay}s..."
-            sleep "$delay"
+            local attempts_left remaining_wait next_delay
+            attempts_left=$(( max_attempts - i ))
+            remaining_wait=0
+            next_delay="$delay"
+            for ((remaining=i; remaining<max_attempts; remaining++)); do
+                remaining_wait=$(( remaining_wait + next_delay ))
+                next_delay=$(( next_delay * 2 ))
+            done
+
+            log_warn "Attempt $i/${max_attempts} failed; ${attempts_left} retry(ies) left; sleeping ${delay}s (remaining max wait ${remaining_wait}s / total ${total_max_wait}s)."
+            if [[ -t 1 ]]; then
+                for ((remaining=delay; remaining>0; remaining--)); do
+                    printf '\r%sRetrying in %2ss...%s' "${COLOR_YELLOW:-}" "$remaining" "${COLOR_RESET:-}"
+                    sleep 1
+                done
+                printf '\r%*s\r' 32 ''
+            else
+                sleep "$delay"
+            fi
             delay=$(( delay * 2 ))
         fi
     done
@@ -116,10 +139,23 @@ is_root() {
 
 require_root() {
     if ! is_root; then
+        local caller="${BASH_SOURCE[1]:-$0}"
         log_error "This script must be run as root."
-        log_error "Re-run with: sudo ${BASH_SOURCE[1]:-$0} ${*:-}"
+        log_hint "Re-run with: sudo ${caller} ${*:-}"
         exit 1
     fi
+}
+
+press_enter_to_continue() {
+    local msg="${1:- Press [Enter] to continue...}"
+    local _dummy
+    printf '\n'
+    if [[ -t 1 ]]; then
+        printf '%s%s%s\n' "${COLOR_INVERT:-}" "$msg" "${COLOR_RESET:-}"
+    else
+        printf '%s\n' "$msg"
+    fi
+    [[ -t 0 ]] && read -r _dummy || true
 }
 
 # Best-effort remediation for common operational file permission drift.
@@ -290,6 +326,19 @@ _check_sudo_requirement() {
             return 0
         fi
     done
+}
+
+project_version() {
+    local project_root="${1:-$PROJECT_ROOT}"
+    local version
+    version=$(tr -d '[:space:]' < "${project_root}/VERSION" 2>/dev/null || echo "unknown")
+    printf '%s\n' "${version:-unknown}"
+}
+
+print_project_version() {
+    local label="${1:-VaultWarden-OCI}"
+    local project_root="${2:-$PROJECT_ROOT}"
+    printf '%s %s\n' "$label" "$(project_version "$project_root")"
 }
 
 get_real_user() {
@@ -466,24 +515,40 @@ test_http() {
     fi
 }
 
+# download_file URL OUTPUT_FILE [MAX_ATTEMPTS]
+#
+# Downloads URL to OUTPUT_FILE, wrapping the transfer in a spinner when
+# spinner_start/spinner_stop are available (lib/log.sh loaded). Degrades
+# gracefully — all download logic is unchanged when log.sh has not been
+# sourced (e.g. unit-test contexts that source common.sh standalone).
+#
+# Try order: curl first, then wget.
 download_file() {
     local url="$1"
     local output_file="$2"
     local max_attempts="${3:-3}"
+    local _has_spinner=false
+    declare -f spinner_start &>/dev/null && _has_spinner=true
 
+    [[ "${_has_spinner}" == true ]] && spinner_start "Downloading $(basename "$output_file") with curl..."
     if retry_with_backoff "$max_attempts" 2 curl -fsSL "$url" -o "$output_file"; then
+        [[ "${_has_spinner}" == true ]] && spinner_stop true
         log_success "Downloaded: $url -> $output_file"
         return 0
     fi
+    [[ "${_has_spinner}" == true ]] && spinner_stop false
     rm -f "$output_file" 2>/dev/null || true
+
+    [[ "${_has_spinner}" == true ]] && spinner_start "Downloading $(basename "$output_file") with wget..."
     if retry_with_backoff "$max_attempts" 2 wget -q "$url" -O "$output_file"; then
+        [[ "${_has_spinner}" == true ]] && spinner_stop true
         log_success "Downloaded: $url -> $output_file"
         return 0
-    else
-        rm -f "$output_file" 2>/dev/null || true
-        log_error "Failed to download: $url"
-        return 1
     fi
+    [[ "${_has_spinner}" == true ]] && spinner_stop false
+    rm -f "$output_file" 2>/dev/null || true
+    log_error "Failed to download: $url"
+    return 1
 }
 
 
@@ -565,8 +630,66 @@ init_common_lib() {
     log_debug "Log level: $LOG_LEVEL"
 }
 
+
+# wait_for_entropy [THRESHOLD [MAX_WAIT]]
+#
+# Wait until /proc/sys/kernel/random/entropy_avail reaches THRESHOLD bits.
+# Prints a visible countdown every 5 seconds so the operator knows setup is not
+# stuck. Non-fatal: after MAX_WAIT seconds it prints a warning and continues.
+#
+# Default THRESHOLD: ${ENTROPY_THRESHOLD:-200} (overridable in environment)
+# Default MAX_WAIT:  ${ENTROPY_MAX_WAIT:-60}  (overridable in environment)
+#
+# Called from setup.sh before the secrets phase.  Also usable standalone.
+wait_for_entropy() {
+    local threshold="${1:-${ENTROPY_THRESHOLD:-200}}"
+    local max_wait="${2:-${ENTROPY_MAX_WAIT:-60}}"
+    local entropy_file="/proc/sys/kernel/random/entropy_avail"
+
+    if [[ ! -f "$entropy_file" ]]; then
+        log_warn "wait_for_entropy: $entropy_file not found — skipping entropy check (non-Linux?)"
+        return 0
+    fi
+
+    local elapsed=0 interval=5 current
+    current=$(cat "$entropy_file" 2>/dev/null || echo 9999)
+
+    if (( current >= threshold )); then
+        printf '\r\xe2\x9c\x94 Entropy ready: %d bits\n' "$current"
+        return 0
+    fi
+
+    log_info "Waiting for sufficient kernel entropy (need ${threshold} bits, have ${current})..."
+
+    while (( elapsed < max_wait )); do
+        current=$(cat "$entropy_file" 2>/dev/null || echo 9999)
+        if (( current >= threshold )); then
+            printf '\r\xe2\x9c\x94 Entropy ready: %d bits                           \n' "$current"
+            return 0
+        fi
+        printf '\r\xe2\x8f\xb3 Entropy: %d/%d bits \xe2\x80\x94 %ds elapsed...' \
+            "$current" "$threshold" "$elapsed"
+        sleep "$interval"
+        (( elapsed += interval ))
+    done
+
+    # Final check after loop
+    current=$(cat "$entropy_file" 2>/dev/null || echo 0)
+    if (( current >= threshold )); then
+        printf '\r\xe2\x9c\x94 Entropy ready: %d bits                           \n' "$current"
+        return 0
+    fi
+
+    printf '\n'
+    log_warn "wait_for_entropy: entropy still low after ${max_wait}s (have ${current}/${threshold} bits)."
+    log_warn "  Key generation may be slower. Install haveged or rng-tools to speed up: sudo apt install haveged"
+    return 0   # Non-fatal — let setup continue.
+}
+
+export -f wait_for_entropy
+
 export -f _require_script
-export -f has_command require_commands retry_with_backoff is_root require_root get_real_user _maybe_sudo
+export -f has_command require_commands retry_with_backoff is_root require_root press_enter_to_continue project_version print_project_version get_real_user _maybe_sudo
 export -f auto_fix_critical_permissions
 export -f _ensure_lock_file _fix_rclone_ownership _run_rclone _check_sudo_requirement
 export -f register_cleanup perform_cleanup

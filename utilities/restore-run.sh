@@ -78,10 +78,27 @@ check_dependencies() {
         echo "ERROR: restore.sh: the following required tools are not installed: ${missing_hard[*]}" >&2
         echo "       Install with: apt-get install -y age sqlite3 coreutils tar" >&2
         echo "       age-keygen is part of the 'age' package on most distributions." >&2
+        # Per-tool install hints (ux.md #46)
+        local _cmd
+        for _cmd in "${missing_hard[@]}"; do
+            case "$_cmd" in
+                docker)    echo "  Hint [docker]:    apt install docker.io  OR  snap install docker" >&2 ;;
+                age)       echo "  Hint [age]:       apt install age  OR  snap install age" >&2 ;;
+                age-keygen) echo "  Hint [age-keygen]: installed with 'age' — apt install age" >&2 ;;
+                sqlite3)   echo "  Hint [sqlite3]:   apt install sqlite3" >&2 ;;
+                sha256sum) echo "  Hint [sha256sum]: apt install coreutils  (should be pre-installed)" >&2 ;;
+            esac
+        done
         exit 1
     fi
     if [[ ${#missing_soft[@]} -gt 0 ]]; then
         echo "WARN: restore.sh: optional tools missing (some features will be disabled): ${missing_soft[*]}" >&2
+        local _cmd
+        for _cmd in "${missing_soft[@]}"; do
+            case "$_cmd" in
+                rclone) echo "  Hint [rclone]: curl https://rclone.org/install.sh | sudo bash" >&2 ;;
+            esac
+        done
     fi
 }
 # Skip heavy dependency checks until a live restore or list subcommand is known.
@@ -163,6 +180,9 @@ OPTIONS (used after a subcommand):
 GLOBAL SUBCOMMAND:
     help                    Show this help
 
+GLOBAL OPTIONS:
+    --version, -V           Print the VaultWarden-OCI version and exit
+
 ENVIRONMENT:
     BACKUP_DIR=<path>                  Override backup storage root
                                        (default: $PROJECT_STATE_DIR/backups)
@@ -195,10 +215,11 @@ EOF
 # Argument Parsing — subcommand-first, then options.
 # 'latest', 'list', and 'interactive' are positional subcommands.
 
-# Handle help before the .env check so it always works.
+# Handle help/version before the .env check so it always works.
 if [[ $# -gt 0 ]]; then
     case "$1" in
         help|--help|-h) show_help; exit 0 ;;
+        --version|-V) print_project_version "VaultWarden-OCI" "${PROJECT_ROOT}"; exit 0 ;;
     esac
 fi
 
@@ -686,6 +707,11 @@ _LOCAL_TYPES=()
 select_backup_interactive() {
     _LOCAL_FILES=()
     _LOCAL_TYPES=()
+    # Print available backup listing before the selection prompt (ux.md #31).
+    log_info "Available local backups:"
+    if ! list_backups 2>/dev/null; then
+        log_warn "No local backups found in ${BACKUP_BASE_DIR} — you may still enter a path manually."
+    fi
     list_all_backups_interactive || return 1
     local total="${#_LOCAL_FILES[@]}" choice
     echo ""
@@ -1321,7 +1347,10 @@ restore_db() {
 
     log_info "Decrypting database backup..."
     age -d -i "$age_key_file" -o "$dec_db" "$backup_file" || {
-        log_error "Decryption failed — verify the age key is correct."; return 1
+        log_error "Decryption failed — verify the age key is correct."
+        log_hint "Use --key-file /path/to/the/old-age-key.txt for the key that encrypted this backup."
+        log_hint "If you exported a recovery kit, retry with --from-recovery-kit /path/to/recovery-kit.txt."
+        return 1
     }
     [[ "$SKIP_VERIFICATION" != "true" ]] && { verify_sqlite "$dec_db" || return 1; }
 
@@ -1390,7 +1419,10 @@ restore_full() {
 
     log_info "Decrypting archive..."
     age -d -i "$age_key_file" -o "$dec_tar" "$backup_file" || {
-        log_error "Decryption failed — verify the age key is correct."; return 1
+        log_error "Decryption failed — verify the age key is correct."
+        log_hint "Use --key-file /path/to/the/old-age-key.txt for the key that encrypted this backup."
+        log_hint "If you exported a recovery kit, retry with --from-recovery-kit /path/to/recovery-kit.txt."
+        return 1
     }
 
     if [[ "$SKIP_VERIFICATION" != "true" ]]; then
@@ -1663,8 +1695,9 @@ main() {
     local STATE_DIR; STATE_DIR="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
     BACKUP_BASE_DIR="$(get_config_value "BACKUP_DIR" "${STATE_DIR}/backups")"
     local AGE_KEY_FILE; AGE_KEY_FILE="$(get_config_value "SOPS_AGE_KEY_FILE" "secrets/keys/age-key.txt")"
-    local PUID="$(get_config_value "PUID" "")"
-    local PGID="$(get_config_value "PGID" "")"
+    local PUID PGID
+    PUID="$(get_config_value "PUID" "")"
+    PGID="$(get_config_value "PGID" "")"
     PUID="${PUID//$'\r'/}"
     PGID="${PGID//$'\r'/}"
 
@@ -1802,7 +1835,6 @@ main() {
     }
 
     if [[ "$DRY_RUN" != "true" ]]; then
-        ...
         docker compose stop
     fi
     trap _restore_safety_net ERR HUP INT TERM

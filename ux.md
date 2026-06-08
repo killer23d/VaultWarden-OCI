@@ -121,23 +121,6 @@ run_cmd() {
 
 ***
 
-## 4. `dashboard.sh` TZ Is Hardcoded to Pacific Time
-
-**Why:** `TZ_DISPLAY="America/Vancouver"` is hardcoded. Users deploying in EU, Asia, or any other timezone see timestamps in the wrong local time with no way to change it without editing the script.
-
-**Fix — Read timezone from `.env` with a fallback:**
-
-```bash
-# dashboard.sh — replace the hardcoded TZ_DISPLAY line:
-TZ_DISPLAY="$(_read_env_var DASHBOARD_TZ "America/Vancouver")"
-
-# And add to .env.example:
-# DASHBOARD_TZ=America/Vancouver   # Timezone for dashboard timestamps (e.g. UTC, Europe/Berlin)
-```
-
-
-***
-
 ## 5. `setup.sh` Post-Install Summary Scrolls Off Screen
 
 **Why:** The post-install summary dumps the Age key, admin token, Caddy password, and a 7-step next-steps checklist in one massive block. On terminals with small scroll buffers, the critical key section gets pushed off screen before the user can save it.

@@ -19,38 +19,51 @@ trap perform_cleanup EXIT
 
 show_help() {
     cat << 'EOF'
-VaultWarden Secrets — edit subcommand
+VaultWarden Secrets — rotate subcommand
 
 USAGE:
-    ./utilities/secrets-edit.sh edit [OPTIONS]
-    ./edit-secrets.sh edit [OPTIONS]
+    ./utilities/secrets-rotate.sh FIELD [OPTIONS]
+    ./utilities/secrets-rotate.sh rotate FIELD [OPTIONS]  # 'rotate' accepted as alias
+    ./edit-secrets.sh rotate FIELD [OPTIONS]
 
 DESCRIPTION:
-    Interactively decrypts, opens in $EDITOR, validates, re-encrypts, and
-    backs up the secrets file. Offers recovery kit export on every save.
+    Re-collects and re-hashes a single named credential, then atomically
+    re-encrypts secrets.yaml and resyncs Docker secret bind-mount files.
+
+SUPPORTED FIELDS:
+    (yq not installed — install with: sudo apt install yq  or  snap install yq)
+    admin_token                         (auto-generated admin token)
+    caddy_admin_password                (bcrypt hash for Caddy)
+    backup_passphrase                   (backup encryption passphrase)
+    caddy_cloudflare_dns_token          (Cloudflare DNS API token)
+    smtp_password                       (SMTP relay password)
+    email_api_token                     (email API key)
+    ... run after setup.sh install for the full schema list
+
+EMAIL_MODE / EMAIL_PROVIDER quick reference (.env):
+    EMAIL_MODE=auto   — tries API → SMTP → Postfix in order
+    EMAIL_MODE=api    — HTTP API only   (rotate: email_api_token)
+    EMAIL_MODE=smtp   — SMTP relay only (rotate: smtp_password)
+    EMAIL_MODE=host   — Postfix sidecar (no token or password needed)
+    EMAIL_PROVIDER=mailersend|sendgrid|mailgun|postmark|resend
+        → selects which HTTP driver is used at runtime;
+          the token is always stored as "email_api_token" in secrets.yaml.
 
 FLAGS:
-    --editor EDITOR    Use specific editor (default: $EDITOR or nano).
-                       Pass flags in quotes: --editor 'code --wait'
-    --no-backup        Skip creating a timestamped backup before editing
-    --help, -h         Show this help
-
-FEATURES:
-    ✅ Automatic backup before every edit
-    ✅ Change detection (no-op if nothing changed)
-    ✅ YAML duplicate-key validation with rollback offer
-    ✅ vim/nvim swap-file suppression (--noswapfile -i NONE)
-    ✅ Forking-editor detection (code, gvim, atom, ...)
-    ✅ Prompts to export recovery kit after any modification
+    --dry-run    Preview what would change without writing
+    --no-backup  Skip creating backup before rotation
+    --help, -h   Show this help
+    --version, -V Print the VaultWarden-OCI version and exit
 
 EXAMPLES:
-    ./utilities/secrets-edit.sh edit
-    ./utilities/secrets-edit.sh edit --editor vim
-    ./edit-secrets.sh edit --editor 'code --wait'
-    ./edit-secrets.sh edit --no-backup
+    ./utilities/secrets-rotate.sh admin_token
+    ./utilities/secrets-rotate.sh cf_worker_bouncer_token
+    ./utilities/secrets-rotate.sh email_api_token --dry-run
+    ./edit-secrets.sh rotate smtp_password
+    ./edit-secrets.sh rotate backup_passphrase --no-backup
+
 EOF
 }
-
 # Parse EDITOR into an array so flag-bearing values such as EDITOR='code --wait' work.
 read -ra EDITOR_CMD <<< "${EDITOR:-nano}"
 SKIP_BACKUP=false
@@ -61,8 +74,7 @@ _FORKING_EDITORS=("gvim" "mvim" "code" "atom" "subl" "sublime_text" "gedit" "kat
 
 check_prerequisites() {
     local missing=()
-    local resolved_age_key
-    if ! resolved_age_key=$(resolve_age_key_path 2>/dev/null); then
+    if ! resolve_age_key_path 2>/dev/null; then
         missing+=("Age encryption key (not found at \$AGE_KEY_FILE, /etc/vaultwarden/age-key.txt, or secrets/keys/age-key.txt)")
     fi
 

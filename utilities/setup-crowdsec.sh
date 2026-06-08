@@ -21,7 +21,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-if [[ "${EUID}" -ne 0 ]]; then
+if [[ "${1:-}" == "--version" || "${1:-}" == "-V" ]]; then
+    printf 'VaultWarden-OCI %s\n' "$(tr -d '[:space:]' < "${PROJECT_ROOT}/VERSION" 2>/dev/null || echo unknown)"
+    exit 0
+fi
+
+if [[ "${1:-}" != "--help" && "${1:-}" != "-h" && "${1:-}" != "help" && "${EUID}" -ne 0 ]]; then
     if command -v sudo >/dev/null 2>&1; then
         exec sudo -n "$0" "$@"
     fi
@@ -56,13 +61,13 @@ fi
 
 # Provide COLOR_* fallbacks for standalone runs without lib/common.sh.
 if [[ "$_LIBS_LOADED" != "true" ]]; then
-    COLOR_RED=$'\033[0;31m'
-    COLOR_GREEN=$'\033[0;32m'
+    COLOR_RED=''
+    COLOR_GREEN=''
     # shellcheck disable=SC2034
-    COLOR_YELLOW=$'\033[0;33m'
+    COLOR_YELLOW=''
     # shellcheck disable=SC2034
-    COLOR_CYAN=$'\033[0;36m'
-    COLOR_RESET=$'\033[0m'
+    COLOR_CYAN=''
+    COLOR_RESET=''
 fi
 
 # ---------------------------------------------------------------------------
@@ -330,6 +335,49 @@ ADMIN_IP=""
 CROWDSEC_VERSION="${CROWDSEC_VERSION:-}"
 CF_WORKER_BOUNCER_VERSION="${CF_WORKER_BOUNCER_VERSION:-}"
 
+show_help() {
+    cat <<'HELP'
+VaultWarden-OCI CrowdSec Setup
+
+USAGE:
+    sudo utilities/setup-crowdsec.sh [OPTIONS]
+
+DESCRIPTION:
+    Installs and configures CrowdSec with the Cloudflare Workers bouncer
+    for VaultWarden-OCI intrusion detection and edge-level banning.
+    Requires CLOUDFLARE_PROXY_ENABLED=true for the Cloudflare bouncer phase.
+
+OPTIONS:
+    --auto               Non-interactive: never prompt.
+    --dry-run            Print what would happen without changing files.
+    --force              Re-run all phases even if already applied.
+    --use-latest         Override version pins and use the current live upstream
+                         release of each component.
+    --autonomous         Deploy the Workers bouncer in autonomous mode (-S flag).
+    --admin-ip IP|CIDR   Add this IP address or CIDR to the CrowdSec admin
+                         allowlist.
+    --help, -h           Show this help.
+    --version, -V        Print the VaultWarden-OCI version and exit.
+
+ENVIRONMENT:
+    CLOUDFLARE_PROXY_ENABLED   Set to 'true' to enable the Cloudflare bouncer.
+    CF_FREE_PLAN               Set to 'false' to disable the free-plan KV write
+                               guard. Default: 'true'.
+    CROWDSEC_VERSION           Pin a specific CrowdSec version.
+    CF_WORKER_BOUNCER_VERSION  Pin a specific Workers bouncer version.
+
+    Cloudflare credentials (in encrypted secrets, not .env):
+        sudo ./edit-secrets.sh rotate cf_worker_bouncer_token
+        sudo ./edit-secrets.sh rotate cloudflare_zone_id
+        sudo ./edit-secrets.sh rotate cf_account_id
+
+EXAMPLES:
+    sudo utilities/setup-crowdsec.sh
+    sudo utilities/setup-crowdsec.sh --dry-run
+    sudo utilities/setup-crowdsec.sh --force
+HELP
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --auto)        AUTO_MODE=true; shift ;;
@@ -344,29 +392,13 @@ while [[ $# -gt 0 ]]; do
             fi
             ADMIN_IP="$2"; shift 2 ;;
         --help|-h)
-            cat <<'HELP'
-usage: sudo ./utilities/setup-crowdsec.sh [OPTIONS]
-
-  --auto               Non-interactive: never prompt.
-  --dry-run            Print what would happen without changing files.
-  --force              Re-run all phases even if already applied.
-  --use-latest         Override version pins and use the current live upstream
-                       release of each component.
-  --autonomous         Deploy the Workers bouncer in autonomous mode (-S flag).
-  --admin-ip IP|CIDR   Add this IP address or CIDR to the CrowdSec admin
-                       allowlist.
-
-Environment variables (set in .env or exported before running):
-  CLOUDFLARE_PROXY_ENABLED   Set to 'true' to enable the Cloudflare bouncer.
-  # Cloudflare credentials (now in secrets, not .env):
-  #   sudo ./edit-secrets.sh rotate cf_worker_bouncer_token
-  #   sudo ./edit-secrets.sh rotate cloudflare_zone_id
-  #   sudo ./edit-secrets.sh rotate cf_account_id
-  CF_FREE_PLAN               Set to 'false' to disable the free-plan KV write
-                             guard. Default: 'true'.
-  CROWDSEC_VERSION           Pin a specific CrowdSec version.
-  CF_WORKER_BOUNCER_VERSION  Pin a specific Workers bouncer version.
-HELP
+            show_help
+            exit 0 ;;
+        --version|-V)
+            print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"
+            exit 0 ;;
+        help)
+            show_help
             exit 0 ;;
         *)
             log_error "Unknown flag: $1"
@@ -376,6 +408,12 @@ done
 
 if [[ "$AUTO_MODE" == "true" ]]; then
     log_info "Running in non-interactive (auto) mode."
+fi
+
+if [[ "$USE_LATEST" == "true" ]]; then
+    CROWDSEC_VERSION=""
+    CF_WORKER_BOUNCER_VERSION=""
+    log_info "Version pins cleared by --use-latest; all components will use current upstream releases."
 fi
 
 # ---------------------------------------------------------------------------
@@ -701,14 +739,14 @@ STUB
         fi
 
         if [[ "$_installed_via_deb" == "false" && -n "$_arch" ]]; then
-            if [[ "$USE_LATEST" == "true" || -z "$CF_WORKER_BOUNCER_VERSION" ]]; then
+            if [[ -z "$CF_WORKER_BOUNCER_VERSION" ]]; then
                 _gh_api="https://api.github.com/repos/crowdsecurity/cs-cloudflare-worker-bouncer/releases/latest"
                 log_info "CF Workers bouncer version: fetching latest from GitHub."
             else
                 _ver="${CF_WORKER_BOUNCER_VERSION#v}"   # strip leading 'v' if present
                 _gh_api="https://api.github.com/repos/crowdsecurity/cs-cloudflare-worker-bouncer/releases/tags/v${_ver}"
                 log_info "CF Workers bouncer version pinned: v${_ver}"
-        fi
+            fi
 
             _release_json="$(curl -fsSL "$_gh_api" 2>/dev/null)" || {
                 log_warn "Failed to query GitHub releases for cs-cloudflare-worker-bouncer."
@@ -791,7 +829,7 @@ STUB
         if [[ "$_installed_via_deb" == "false" && -n "$_arch" && ! -x "$_CF_WORKER_BOUNCER_BIN" ]]; then
             if command -v go >/dev/null 2>&1; then
                 log_info "Attempting Go source build for crowdsec-cloudflare-worker-bouncer..."
-                if [[ "$USE_LATEST" == "true" || -z "$CF_WORKER_BOUNCER_VERSION" ]]; then
+                if [[ -z "$CF_WORKER_BOUNCER_VERSION" ]]; then
                     _go_pkg_ref="github.com/crowdsecurity/cs-cloudflare-worker-bouncer/cmd/crowdsec-cloudflare-worker-bouncer@latest"
                 else
                     _ver="${CF_WORKER_BOUNCER_VERSION#v}"
@@ -904,9 +942,7 @@ BOUNCER_BANNER
             printf '%s' "${COLOR_RESET}"
             printf '\n  Bouncer API key: %s%s%s\n\n' \
                 "${COLOR_RED}${COLOR_GREEN}" "${_CF_BOUNCER_KEY}" "${COLOR_RESET}"
-            printf '%s!!! PRESS ENTER AFTER SAVING THE BOUNCER API KEY !!!%s\n' \
-                "${COLOR_RED}" "${COLOR_RESET}"
-            read -r
+            press_enter_to_continue " Press [Enter] after saving the bouncer API key..."
             clear
         fi
     fi

@@ -3,62 +3,118 @@
 
 set -euo pipefail
 
-# Keep logging self-contained so uninstall remains safe after a partial or broken installation.
-# The log format matches the rest of the project.
-_VW_SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
-if [[ -t 1 ]]; then
-    _C_CYAN=$'\e[36m'; _C_GREEN=$'\e[32m'; _C_YELLOW=$'\e[33m'
-    _C_RED=$'\e[1;31m'; _C_RESET=$'\e[0m'
+# Prefer the shared logging library when this checkout is intact, but keep a
+# minimal fallback so uninstall remains safe after a partial/broken install.
+PROJECT_ROOT_FALLBACK="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -f "${PROJECT_ROOT_FALLBACK}/lib/log.sh" ]]; then
+    # shellcheck source=../lib/log.sh
+    source "${PROJECT_ROOT_FALLBACK}/lib/log.sh"
+    _VW_CALLING_SCRIPT="$(basename "${BASH_SOURCE[0]}")"
 else
-    _C_CYAN=''; _C_GREEN=''; _C_YELLOW=''; _C_RED=''; _C_RESET=''
+    # ── Minimal inline stubs matching lib/log.sh format exactly ──────────────
+    # Format: COLOR[HH:MM:SS] [SCRIPT] LEVEL RESET message
+    # Labels must match lib/log.sh verbatim: INFO, OK, WARN, ERROR, DEBUG,
+    # HINT, ROLLBACK, DRY RUN — so log output is consistent regardless of
+    # whether the library was loaded.
+    _VW_SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
+    if [[ -t 1 ]]; then
+        _C_CYAN=''
+        _C_GREEN=''
+        _C_YELLOW=''
+        _C_RED=''
+        _C_BLUE=''
+        _C_MAGENTA=''
+        _C_BOLD=''
+        _C_RESET=''
+    else
+        _C_CYAN='' _C_GREEN='' _C_YELLOW='' _C_RED=''
+        _C_BLUE='' _C_MAGENTA='' _C_BOLD='' _C_RESET=''
+    fi
+
+    _vw_ts() {
+        if [[ -t 1 ]]; then
+            date '+%H:%M:%S'
+        else
+            date '+%Y-%m-%dT%H:%M:%S%z'
+        fi
+    }
+
+    # DRY_RUN prefix — mirrors _log_dry_prefix() in lib/log.sh.
+    _vw_dry_prefix() {
+        [[ "${DRY_RUN:-false}" == "true" ]] \
+            && printf '%s[DRY RUN]%s ' "$_C_BLUE" "$_C_RESET" \
+            || true
+    }
+
+    log_info()     { printf '%s[%s] [%s] INFO%s %s%s\n'     "$_C_CYAN"    "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$(_vw_dry_prefix)" "$*"; }
+    log_success()  { printf '%s[%s] [%s] OK%s %s%s\n'       "$_C_GREEN"   "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$(_vw_dry_prefix)" "$*"; }
+    log_warn()     { printf '%s[%s] [%s] WARN%s %s%s\n'     "$_C_YELLOW"  "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$(_vw_dry_prefix)" "$*" >&2; }
+    log_error()    { printf '%s[%s] [%s] ERROR%s %s\n'      "$_C_RED"     "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$*" >&2; }
+    log_debug()    { printf '%s[%s] [%s] DEBUG%s %s\n'      "$_C_MAGENTA" "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$*"; }
+    log_hint()     { printf '%s[%s] [%s] HINT →%s %s%s\n'   "$_C_CYAN"    "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$(_vw_dry_prefix)" "$*"; }
+    log_rollback() { printf '%s[%s] [%s] ROLLBACK%s %s\n'   "$_C_YELLOW"  "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$*" >&2; }
+    log_dry_run()  { printf '%s[%s] [%s] [DRY RUN]%s %s\n'  "$_C_BLUE"    "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$*"; }
 fi
-_vw_ts() { date '+%H:%M:%S'; }
-log_info()    { printf '%s[%s] [%s] INFO%s %s\n'    "$_C_CYAN"   "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$*"; }
-log_success() { printf '%s[%s] [%s] OK%s %s\n'      "$_C_GREEN"  "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$*"; }
-log_warn()    { printf '%s[%s] [%s] WARN%s %s\n'    "$_C_YELLOW" "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$*" >&2; }
-log_error()   { printf '%s[%s] [%s] ERROR%s %s\n'   "$_C_RED"    "$(_vw_ts)" "$_VW_SCRIPT_NAME" "$_C_RESET" "$*" >&2; }
-die()         { log_error "$*"; exit 1; }
+die() { log_error "$*"; exit 1; }
 trap 'log_error "${BASH_SOURCE[0]}: failed at line ${LINENO} (exit $?)"; exit 1' ERR
 
-info()    { log_info "$@"; }
+# Convenience aliases — keep consistent with callers throughout this file.
+info()    { log_info    "$@"; }
 success() { log_success "$@"; }
-warn()    { log_warn "$@"; }
+warn()    { log_warn    "$@"; }
 
 show_help() {
-    echo "Usage: sudo bash $0 run [--i-have-saved-my-recovery-kit] [--force] [--dry-run]"
-    echo ""
-    echo "SUBCOMMANDS:"
-    echo "  run    Perform the full idempotent uninstall (interactive confirmation required)"
-    echo ""
-    echo "OPTIONS (used after 'run'):"
-    echo "  --i-have-saved-my-recovery-kit"
-    echo "      Pre-confirm that you have saved secrets/keys/age-key.txt"
-    echo "      to a location OUTSIDE this host before running."
-    echo "      Without this flag the script refuses to continue when"
-    echo "      the age key is present on disk."
-    echo ""
-    echo "  --dry-run"
-    echo "      Show what would be removed without deleting anything."
-    echo "      Prints each step that would execute and exits without changes."
-    echo ""
-    echo "  --force"
-    echo "      Skip ALL AGE key checks (both the CLI flag pre-check"
-    echo "      and the interactive fingerprint confirmation)."
-    echo "      WARNING: destructive — implies --i-have-saved-my-recovery-kit"
-    echo "      and bypasses the fingerprint gate. Use only in automated/CI"
-    echo "      pipelines where the key is confirmed saved by external means."
-    echo ""
-    echo "  Two-prompt safety model for age key destruction:"
-    echo "    1. CLI flag  --i-have-saved-my-recovery-kit  (pre-check)."
-    echo "    2. Interactive fingerprint confirmation immediately before"
-    echo "       the project directory (and key) is deleted.  You must"
-    echo "       type the exact Age public key shown on screen."
-    echo "       This second prompt is unconditional — it cannot be"
-    echo "       skipped or scripted away without the actual key value."
-    echo ""
-    echo "  Without the age key ALL encrypted backups are permanently"
-    echo "  unrecoverable.  Export a recovery kit first:"
-    echo "    ./utilities/secrets-export-recovery-kit.sh"
+    cat <<'EOF'
+VaultWarden-OCI Uninstall
+
+USAGE:
+    sudo bash ./utilities/uninstall-vaultwarden.sh run [OPTIONS]
+
+DESCRIPTION:
+    Performs a full idempotent uninstall of VaultWarden-OCI: stops and removes
+    containers, Docker secrets, systemd units, and the project directory.
+    Requires interactive confirmation at each critical step.
+
+SUBCOMMANDS:
+    run    Perform the full idempotent uninstall (interactive confirmation required)
+    help   Show this help
+
+OPTIONS (used after 'run'):
+    --version, -V
+        Print the VaultWarden-OCI version and exit.
+
+    --i-have-saved-my-recovery-kit
+        Pre-confirm that you have saved secrets/keys/age-key.txt
+        to a location OUTSIDE this host before running.
+        Without this flag the script refuses to continue when
+        the age key is present on disk.
+
+    --dry-run
+        Show what would be removed without deleting anything.
+        Prints each step that would execute and exits without changes.
+
+    --force
+        Skip ALL AGE key checks (both the CLI flag pre-check and the
+        interactive fingerprint confirmation). Use only in automated/CI
+        pipelines where the key is confirmed saved by external means.
+        WARNING: destructive — implies --i-have-saved-my-recovery-kit.
+
+SAFETY MODEL:
+    Two-prompt model for age key destruction:
+      1. CLI flag  --i-have-saved-my-recovery-kit  (pre-check).
+      2. Interactive fingerprint confirmation immediately before
+         the project directory (and key) is deleted. You must type
+         the exact Age public key shown on screen.
+         This second prompt cannot be skipped without --force.
+
+    Without the age key ALL encrypted backups are permanently
+    unrecoverable. Export a recovery kit first:
+        ./utilities/secrets-export-recovery-kit.sh
+
+EXAMPLES:
+    sudo bash ./utilities/uninstall-vaultwarden.sh run --dry-run
+    sudo bash ./utilities/uninstall-vaultwarden.sh run --i-have-saved-my-recovery-kit
+EOF
 }
 
 # ─── Argument parsing ─────────────────────────────────────────────────────────
@@ -87,6 +143,14 @@ case "$1" in
                 --i-have-saved-my-recovery-kit) I_HAVE_SAVED_RECOVERY_KIT=true; shift ;;
                 --force)                        FORCE=true;                      shift ;;
                 --dry-run)                      DRY_RUN=true;                    shift ;;
+                --version|-V)
+                    if command -v print_project_version >/dev/null 2>&1; then
+                        print_project_version "VaultWarden-OCI" "${PROJECT_ROOT_FALLBACK}"
+                    else
+                        printf 'VaultWarden-OCI %s\n' "$(tr -d '[:space:]' < "${PROJECT_ROOT_FALLBACK}/VERSION" 2>/dev/null || echo unknown)"
+                    fi
+                    exit 0
+                    ;;
                 *)
                     log_error "Unknown option: '$1'"
                     show_help
@@ -97,6 +161,14 @@ case "$1" in
         ;;
     help|--help|-h)
         show_help; exit 0
+        ;;
+    --version|-V)
+        if command -v print_project_version >/dev/null 2>&1; then
+            print_project_version "VaultWarden-OCI" "${PROJECT_ROOT_FALLBACK}"
+        else
+            printf 'VaultWarden-OCI %s\n' "$(tr -d '[:space:]' < "${PROJECT_ROOT_FALLBACK}/VERSION" 2>/dev/null || echo unknown)"
+        fi
+        exit 0
         ;;
     *)
         log_error "Unknown subcommand: '$1'"

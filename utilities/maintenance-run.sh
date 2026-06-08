@@ -12,6 +12,7 @@ source "$PROJECT_ROOT/lib/config.sh"
 source "$PROJECT_ROOT/lib/common.sh"
 init_common_lib "$0"
 source "$PROJECT_ROOT/lib/email.sh"
+DOCKER_PROJECT_LABEL="${DOCKER_PROJECT_LABEL:-label=com.docker.compose.project=vaultwarden-oci}"
 source "$PROJECT_ROOT/lib/docker.sh"
 source "$PROJECT_ROOT/lib/backup-utils.sh"
 source "$PROJECT_ROOT/lib/crypto.sh"
@@ -39,12 +40,17 @@ FULL_BACKUP_RETENTION_DAYS=30
 EMERGENCY_BACKUP_RETENTION_DAYS=90
 
 show_help() {
-    cat << 'EOF'
+    cat <<'EOF'
 VaultWarden-OCI Routine Maintenance Runner
 
 USAGE:
     sudo utilities/maintenance-run.sh [OPTIONS]
     sudo ./maintenance.sh run [OPTIONS]
+
+DESCRIPTION:
+    Performs routine maintenance: log cleanup, old backup pruning, Docker
+    system cleanup, and scheduled database optimization. Run automatically
+    by the vaultwarden-maintenance systemd timer, or manually on demand.
 
 OPTIONS:
     --comprehensive         Run everything: routine + firewall + DNS
@@ -57,11 +63,18 @@ OPTIONS:
     --dry-run               Show what would be done without executing
     --email                 Send email notification on completion
     --help, -h              Show this help
+    --version, -V           Print the VaultWarden-OCI version and exit
 
 EXIT CODES:
     0 — completed successfully
     1 — completed with minor issues
     2 — completed with critical failures
+
+EXAMPLES:
+    sudo ./maintenance.sh run
+    sudo ./maintenance.sh run --comprehensive
+    sudo ./maintenance.sh run --dry-run
+    sudo ./maintenance.sh run --email
 EOF
 }
 
@@ -87,6 +100,7 @@ while [[ $# -gt 0 ]]; do
         --dry-run)         DRY_RUN=true;            shift ;;
         --email)           EMAIL_NOTIFY=true;       shift ;;
         --help|-h|help)    show_help; exit 0 ;;
+        --version|-V)      print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"; exit 0 ;;
         *) log_error "Unknown option for 'run': $1"; show_help; exit 1 ;;
     esac
 done
@@ -110,7 +124,6 @@ main() {
     _ensure_lock_file "$_MAINT_LOCK"
     exec {_MAINT_LOCK_FD}>"$_MAINT_LOCK"
     if ! flock -n "$_MAINT_LOCK_FD"; then
-
         log_error "Another maintenance operation is already running. Exiting."
         exit 1
     fi
@@ -123,6 +136,10 @@ main() {
     [[ "$DRY_RUN"      == "true" ]] && log_warn "DRY RUN MODE - No changes will be made"
     [[ "$COMPREHENSIVE" == "true" ]] && log_info "Running comprehensive maintenance..."
 
+    # Record start time so the summary can report elapsed duration (issue #37).
+    local _MAINT_START_EPOCH
+    _MAINT_START_EPOCH=$(date +%s)
+
     _load_env
     auto_fix_critical_permissions "$PROJECT_ROOT"
     require_project_state_ready || exit 1
@@ -131,7 +148,7 @@ main() {
     local db_optimization_result=0 firewall_update_result=1 dns_update_result=1
     local health_validation_result=0
 
-    log_info "=== Phase 1: System Cleanup ==="
+    log_header "Phase 1/4 — System cleanup"
     cleanup_logs    || log_cleanup_result=$?
     cleanup_backups || backup_cleanup_result=$?
     if cleanup_docker_system; then
@@ -140,11 +157,11 @@ main() {
         docker_cleanup_result=$?
     fi
 
-    log_info "=== Phase 2: SAFE System Optimization ==="
+    log_header "Phase 2/4 — Database optimization"
     optimize_database || db_optimization_result=$?
 
     if [[ "$UPDATE_FIREWALL" == "true" || "$UPDATE_DNS" == "true" ]]; then
-        log_info "=== Phase 3: SAFE Security & Network Maintenance ==="
+        log_header "Phase 3/4 — Security and network maintenance"
         if [[ "$UPDATE_FIREWALL" == "true" ]]; then
             local _fw_args=("${SCRIPT_DIR}/utilities/maintenance-update-firewall.sh" update-firewall)
             [[ "$DRY_RUN" == "true" ]] && _fw_args+=("--dry-run")
@@ -158,14 +175,17 @@ main() {
         fi
     fi
 
-    log_info "=== Phase 4: Health Validation ==="
+    log_header "Phase 4/4 — Health validation"
     validate_system_health || health_validation_result=$?
 
-    log_info "=== Summary ==="
+    # Compute elapsed wall-clock time for the summary footer.
+    local _maint_duration_seconds=$(( $(date +%s) - _MAINT_START_EPOCH ))
+
+    log_header "Maintenance Summary"
     generate_maintenance_summary \
         "$log_cleanup_result" "$backup_cleanup_result" "$docker_cleanup_result" \
         "$db_optimization_result" "$firewall_update_result" "$dns_update_result" \
-        "$health_validation_result"
+        "$health_validation_result" "$_maint_duration_seconds"
 
     local critical_failures=0
     [[ "$CLEAN_LOGS"        == "true"  && "$log_cleanup_result"       != "0" ]] && ((critical_failures++))

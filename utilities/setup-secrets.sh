@@ -34,12 +34,17 @@ source "${PROJECT_ROOT}/lib/email.sh"
 source "${PROJECT_ROOT}/lib/crypto.sh"
 source "${PROJECT_ROOT}/lib/secrets.sh"
 
-_show_help() {
+show_help() {
     cat << 'EOF'
 VaultWarden-OCI Secrets Management
 
 USAGE:
     sudo utilities/setup-secrets.sh SUBCOMMAND [OPTIONS]
+
+DESCRIPTION:
+    Manages VaultWarden-OCI secrets: bootstrap Age encryption, configure
+    credentials interactively or automatically, rotate fields, and export
+    recovery kits. Delegates to specialized scripts.
 
 SUBCOMMANDS:
     bootstrap           Bootstrap Age key, SOPS config, and placeholder secrets
@@ -48,6 +53,11 @@ SUBCOMMANDS:
     rotate [KEY]        Rotate one or all credentials (delegates to utilities/secrets-edit.sh)
     export-recovery-kit Export encrypted recovery kit (delegates to utilities/secrets-edit.sh)
     breakglass [FLAGS]  Emergency break-glass admin account management
+    help, --help, -h    Show this help
+
+OPTIONS:
+    --help, -h          Show this help
+    --version, -V       Print the VaultWarden-OCI version and exit
 
 Run: setup-secrets.sh SUBCOMMAND --help  for subcommand-specific help.
 
@@ -671,9 +681,7 @@ BACKUP_BANNER
                     printf '%s' "${COLOR_RESET}"
                     printf '\n  Passphrase: %s%s%s\n\n' \
                         "${COLOR_RED}${COLOR_GREEN}" "${backup_pass}" "${COLOR_RESET}"
-                    printf '%s!!! PRESS ENTER AFTER SAVING THE BACKUP PASSPHRASE !!!%s\n' \
-                        "${COLOR_RED}" "${COLOR_RESET}"
-                    read -r
+                    press_enter_to_continue " Press [Enter] after saving the backup passphrase..."
                 fi
                 ;;
 
@@ -1416,8 +1424,7 @@ EOF
         printf 'If this session is recorded (tmux, script, SSH audit log, cloud serial\n'
         printf 'console), the credentials above may be visible in the scrollback buffer.\n'
         printf 'Close the terminal or disconnect the session after noting them.\n'
-        printf '%b\n' "\n${COLOR_RED}Press ENTER to clear visible screen and finish...${COLOR_RESET}"
-        read -r
+        press_enter_to_continue " Press [Enter] to clear the visible screen and finish..."
         clear
 
         schedule_auto_cleanup
@@ -1967,9 +1974,12 @@ SOPS_EOF
 }
 
 main() {
-    (( EUID == 0 )) || { log_error "Must run as root."; exit 1; }
-
     local subcmd="${1:-}"
+    case "$subcmd" in
+        help|--help|-h|--version|-V) ;;
+        *) (( EUID == 0 )) || { log_error "Must run as root."; exit 1; } ;;
+    esac
+
     shift || true
 
     case "$subcmd" in
@@ -1978,9 +1988,10 @@ main() {
         rotate)              _cmd_rotate "$@" ;;
         export-recovery-kit) _cmd_export_recovery_kit "$@" ;;
         breakglass)          _cmd_breakglass "$@" ;;
-        --help|-h)           _show_help; exit 0 ;;
-        "")  log_error "Subcommand required. Use --help for usage."; _show_help; exit 1 ;;
-        *)   log_error "Unknown subcommand: ${subcmd}"; _show_help; exit 1 ;;
+        help|--help|-h)      show_help; exit 0 ;;
+        --version|-V)        print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"; exit 0 ;;
+        "")  log_error "Subcommand required. Use --help for usage."; show_help; exit 1 ;;
+        *)   log_error "Unknown subcommand: ${subcmd}"; show_help; exit 1 ;;
     esac
 }
 

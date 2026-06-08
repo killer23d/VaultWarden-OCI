@@ -9,6 +9,7 @@ on:
       - 'Makefile'
       - 'systemd/**'
 
+# Global permissions
 permissions:
   contents: read
 
@@ -18,6 +19,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # yq is required by lib/schema.sh (used by secrets-rotate.sh --help and
+      # write-command-reference.sh).  Installing it here ensures the generated
+      # COMMAND-REFERENCE.md is identical to what was committed (which was
+      # produced on a machine that had yq installed).
+      #
+      # NOTE: 'apt-get install yq' installs python-yq (a jq wrapper), NOT the
+      # mikefarah/yq Go binary.  lib/schema.sh uses mikefarah yq syntax
+      # (e.g. 'yq eval'), so we must install the correct binary directly.
+      - name: Install yq
+        run: |
+          # Pinned to v4.53.3 — do NOT change to /releases/latest (violates
+          # the unpinned-version check this same workflow enforces).
+          # To upgrade: update YQ_VERSION and YQ_SHA256 together.
+          # SHA-256 source: https://github.com/mikefarah/yq/releases/tag/v4.53.3
+          # (asset: yq_linux_amd64, digest field)
+          YQ_VERSION="v4.53.3"
+          YQ_SHA256="fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4"
+          curl -fsSL \
+            "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64" \
+            -o /tmp/yq
+          echo "${YQ_SHA256}  /tmp/yq" | sha256sum --check --status
+          sudo install -m 755 /tmp/yq /usr/local/bin/yq
+          yq --version
+          
       - name: Check for known stale terms
         run: |
           STALE_TERMS=(
@@ -72,13 +97,21 @@ jobs:
       - name: Check for unpinned version references
         run: |
           FAIL=0
-          if grep -rn '@latest' utilities/ lib/ --include='*.sh'; then
-            echo "UNPINNED: @latest Go reference found"
+          # Guard against @latest Go module references in any script other than
+          # setup-crowdsec.sh. In setup-crowdsec.sh the @latest path is only
+          # reached at runtime when CF_WORKER_BOUNCER_VERSION is empty (i.e.
+          # --use-latest was passed or no pin is set), which is intentional.
+          if grep -rn '@latest' utilities/ lib/ --include='*.sh' \
+               | grep -v 'utilities/setup-crowdsec.sh'; then
+            echo "UNPINNED: @latest Go reference found outside setup-crowdsec.sh"
             FAIL=1
           fi
-          # Only check setup-crowdsec.sh for /releases/latest (other scripts may legitimately resolve latest)
-          if grep -rn '/releases/latest' utilities/setup-crowdsec.sh 2>/dev/null; then
-            echo "UNPINNED: /releases/latest GitHub API call found in setup-crowdsec.sh"
+          # Guard against unintended /releases/latest calls in any OTHER script
+          # under utilities/ — setup-crowdsec.sh legitimately uses the endpoint
+          # when no version pin is configured (runtime-guarded by USE_LATEST /
+          # empty CF_WORKER_BOUNCER_VERSION), so it is excluded here.
+          if grep -n '/releases/latest' setup.sh 2>/dev/null; then
+            echo "UNPINNED: /releases/latest GitHub API call found in setup.sh"
             FAIL=1
           fi
           [[ $FAIL -eq 0 ]] || exit 1
@@ -90,7 +123,6 @@ jobs:
           for unit in systemd/vaultwarden-*.service; do
             [[ "$unit" == *template* ]] && continue
             for directive in "${REQUIRED_DIRECTIVES[@]}"; do
-              # iptables service legitimately omits NoNewPrivileges (needs elevated caps)
               [[ "$unit" == *iptables* ]] && [[ "$directive" == "NoNewPrivileges" ]] && continue
               if ! grep -q "^${directive}=" "$unit"; then
                 echo "MISSING $directive in $unit"
@@ -115,3 +147,48 @@ jobs:
             exit 1
           fi
           echo "COMMAND-REFERENCE.md is up to date."
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Strict Shellcheck
+        run: |
+          # -x: follow source statements to avoid SC1091 false positives.
+          # --severity=warning: fail on warning or error; info/style are logged only.
+          find . -type f -name '*.sh' | xargs shellcheck -x --severity=warning
+
+  # ── Shellcheck auto-fix (contents: write, runs only on default branch) ──
+  # Separated from the PR check job so untrusted PR code never runs with
+  # write permission. Auto-fixes are committed only after code is merged.
+  shellcheck-autofix:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Apply Shellcheck auto-fixes
+        run: |
+          find . -type f -name '*.sh' \
+            | xargs shellcheck -x -f diff > shellcheck-fixes.patch 2>/dev/null || true
+          if [ -s shellcheck-fixes.patch ]; then
+            echo "Applying Shellcheck auto-fixes..."
+            git apply --allow-empty shellcheck-fixes.patch
+          else
+            echo "No safe auto-fixes available or scripts are clean."
+          fi
+          rm -f shellcheck-fixes.patch
+
+      - name: Commit and push auto-fixes
+        uses: stefanzweifel/git-auto-commit-action@b863ae1933cb653a53c021fe36dbb774e1fb9403
+        with:
+          commit_message: "chore: apply safe shellcheck auto-fixes"
+          file_pattern: >-
+            *.sh
+            utilities/*.sh
+            lib/*.sh

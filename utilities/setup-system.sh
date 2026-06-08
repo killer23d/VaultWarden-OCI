@@ -49,12 +49,17 @@ export USE_LATEST FORCE
 
 show_help() {
     cat <<'EOF'
-utilities/setup-system.sh — VaultWarden-OCI system preparation
+VaultWarden-OCI System Preparation
 
 USAGE:
     sudo utilities/setup-system.sh [OPTIONS]
 
-FLAGS:
+DESCRIPTION:
+    Prepares the host system for VaultWarden-OCI: installs dependencies
+    (Docker, Age, SOPS, rclone, sqlite3), configures user permissions, and
+    sets script execute bits. Called automatically by setup.sh phase 1.
+
+OPTIONS:
     --skip-deps           Skip package installation (assume already installed)
     --auto                Non-interactive mode
     --use-latest          Override pinned versions with 'latest'
@@ -64,6 +69,12 @@ FLAGS:
     --data-device DEV     Data volume device path
     --data-mount PATH     Data volume mount point (default: /mnt/vw-data)
     --help, -h            Show this help
+    --version, -V         Print the VaultWarden-OCI version and exit
+
+EXAMPLES:
+    sudo utilities/setup-system.sh
+    sudo utilities/setup-system.sh --dry-run
+    sudo utilities/setup-system.sh --skip-deps
 EOF
 }
 
@@ -75,6 +86,10 @@ _parse_args() {
             --use-latest)   USE_LATEST=true ;;
             --dry-run)      DRY_RUN=true ;;
             --force)        FORCE=true ;;
+            --version|-V)
+                print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"
+                exit 0
+                ;;
             --sops-version)
                 shift
                 [[ $# -gt 0 ]] || { log_error "--sops-version requires an argument"; exit 1; }
@@ -557,6 +572,7 @@ main() {
 
     (( EUID == 0 )) || { log_error "Must run as root."; exit 1; }
 
+    [[ "$AUTO_MODE" == "true" ]] && log_info "Auto mode enabled"
     [[ "$DRY_RUN" == "true" ]] && log_info "DRY RUN mode — no changes will be made"
 
     check_disk_space
