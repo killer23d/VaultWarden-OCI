@@ -144,7 +144,7 @@ _(No unreleased changes yet — add entries here as work is merged.)_
 
 ---
 
-## [1.0.0] — 2025-01-01
+## [1.0.0] — 2026-03-26
 
 ### Added
 - Initial public release of VaultWarden-OCI
@@ -159,3 +159,6 @@ _(No unreleased changes yet — add entries here as work is merged.)_
 - `pre-production-drill.sh` go-live readiness checker
 - `restore-run.sh` interactive disaster-recovery tool
 - `edit-secrets.sh` SOPS-backed secrets management CLI
+
+[1.0.0]: https://github.com/killer23d/VaultWarden-OCI/releases/tag/v1.0.0
+[Unreleased]: https://github.com/killer23d/VaultWarden-OCI/compare/v1.0.0...HEAD

@@ -214,20 +214,19 @@ _show_changelog() {
 
         # Colour-code category headers
         if [[ "${line}" =~ ^###[[:space:]]Added ]]; then
-            echo -e "${GRN}${line}${NC}"
+            printf '%s%s%s\n' "${GRN}" "${line}" "${NC}"
             printed=true
         elif [[ "${line}" =~ ^###[[:space:]]Changed ]]; then
-            echo -e "${YLW}${line}${NC}"
+            printf '%s%s%s\n' "${YLW}" "${line}" "${NC}"
             printed=true
         elif [[ "${line}" =~ ^###[[:space:]]Fixed ]]; then
-            echo -e "${CYN}${line}${NC}"
+            printf '%s%s%s\n' "${CYN}" "${line}" "${NC}"
             printed=true
         elif [[ "${line}" =~ ^###[[:space:]] ]]; then
-            # Any other ### heading — bold white
-            echo -e "${BLD}${line}${NC}"
+            printf '%s%s%s\n' "${BLD}" "${line}" "${NC}"
             printed=true
         else
-            echo "${line}"
+            printf '%s\n' "${line}"
             [[ -n "${line// /}" ]] && printed=true
         fi
     done < "${changelog}"
@@ -272,7 +271,7 @@ draw_header() {
     local now_pt version
     now_pt="$(TZ="${TZ_DISPLAY}" date '+%Y-%m-%d %H:%M %Z' 2>/dev/null \
         || date '+%Y-%m-%d %H:%M')"
-    version="$(cat "${REPO_ROOT}/VERSION" 2>/dev/null | tr -d '[:space:]' \
+    version="$(tr -d '[:space:]' < "${REPO_ROOT}/VERSION" 2>/dev/null \
         || echo '?')"
     echo -e "${INV} VaultWarden-OCI v${version} — Operations Dashboard   ${now_pt} ${NC}"
 }
@@ -389,10 +388,11 @@ _secrets_health() {
     fi
 
     local -a unset_keys=()
-    local key val val_upper
-    while IFS='=' read -r key val; do
+    local key rest val val_upper
+    while IFS='=' read -r key rest; do
         [[ "${key}" =~ ^[[:space:]]*# ]] && continue
         [[ -z "${key// /}" ]] && continue
+        val="${rest}"
         val_upper="$(printf '%s' "${val}" | tr '[:lower:]' '[:upper:]')"
         if [[ "${val_upper}" == *CHANGE_ME* || "${val_upper}" == *CHANGEME* ]]; then
             unset_keys+=("${key}")

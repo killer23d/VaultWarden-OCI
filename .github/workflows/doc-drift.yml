@@ -176,7 +176,10 @@ jobs:
         uses: stefanzweifel/git-auto-commit-action@b863ae1933cb653a53c021fe36dbb774e1fb9403
         with:
           commit_message: "chore: apply safe shellcheck auto-fixes"
-          file_pattern: "*.sh utilities/**/*.sh lib/**/*.sh"
+          file_pattern: >-
+            *.sh
+            utilities/*.sh
+            lib/*.sh
 
       - name: Run Strict Shellcheck
         run: |

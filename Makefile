@@ -134,7 +134,8 @@ setup: ## Run initial setup (requires sudo)
 	fi
 	@if [ ! -f ".env" ]; then echo "$(RED)Error: .env missing. Usage: sudo ./setup.sh --domain <domain> --email <email>$(NC)"; exit 1; fi
 	@# ux.md #15: catch all placeholder DOMAIN variants — scheme-prefixed, bare, and CHANGE_ME.
-	@if grep -qE '^DOMAIN=((https?://)?(vault\.example\.com/?|CHANGE_ME)|)$$' .env 2>/dev/null; then \
+	@if grep -qE '^DOMAIN=((https?://)?(vault\.example\.com/?|CHANGE_ME))$$' .env 2>/dev/null || \
+   		grep -qE '^DOMAIN=[[:space:]]*$$' .env 2>/dev/null; then \
 		echo "$(RED)Error: DOMAIN is still a placeholder in .env$(NC)"; \
 		echo "$(YELLOW)Run setup directly with your real domain:$(NC)"; \
 		echo "$(GREEN)  sudo ./setup.sh install --domain your.real.domain --email you@example.com$(NC)"; \
