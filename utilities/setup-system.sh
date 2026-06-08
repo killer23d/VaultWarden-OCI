@@ -69,6 +69,7 @@ OPTIONS:
     --data-device DEV     Data volume device path
     --data-mount PATH     Data volume mount point (default: /mnt/vw-data)
     --help, -h            Show this help
+    --version, -V         Print the VaultWarden-OCI version and exit
 
 EXAMPLES:
     sudo utilities/setup-system.sh
@@ -85,6 +86,10 @@ _parse_args() {
             --use-latest)   USE_LATEST=true ;;
             --dry-run)      DRY_RUN=true ;;
             --force)        FORCE=true ;;
+            --version|-V)
+                print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"
+                exit 0
+                ;;
             --sops-version)
                 shift
                 [[ $# -gt 0 ]] || { log_error "--sops-version requires an argument"; exit 1; }
@@ -567,6 +572,7 @@ main() {
 
     (( EUID == 0 )) || { log_error "Must run as root."; exit 1; }
 
+    [[ "$AUTO_MODE" == "true" ]] && log_info "Auto mode enabled"
     [[ "$DRY_RUN" == "true" ]] && log_info "DRY RUN mode — no changes will be made"
 
     check_disk_space

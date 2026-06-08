@@ -38,6 +38,7 @@ OPTIONS:
                                ruleset is detected. Use only when you have verified
                                that nftables will not override these iptables rules.
     --help, -h                 Show this help
+    --version, -V              Print the VaultWarden-OCI version and exit
 
 NOTES:
     UFW rules must be applied AFTER Docker installation. Docker rewrites iptables
@@ -98,6 +99,7 @@ while [[ $# -gt 0 ]]; do
         --force)           FORCE=true; shift ;;
         --force-iptables)  FORCE_IPTABLES=true; shift ;;
         --help|-h)         show_help; exit 0 ;;
+        --version|-V)      print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"; exit 0 ;;
         help)              show_help; exit 0 ;;
         *)                 log_error "Unknown option: $1"; show_help; exit 1 ;;
     esac

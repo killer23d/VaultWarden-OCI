@@ -12,6 +12,7 @@ source "$PROJECT_ROOT/lib/config.sh"
 source "$PROJECT_ROOT/lib/common.sh"
 init_common_lib "$0"
 source "$PROJECT_ROOT/lib/email.sh"
+DOCKER_PROJECT_LABEL="${DOCKER_PROJECT_LABEL:-label=com.docker.compose.project=vaultwarden-oci}"
 source "$PROJECT_ROOT/lib/docker.sh"
 source "$PROJECT_ROOT/lib/backup-utils.sh"
 source "$PROJECT_ROOT/lib/crypto.sh"
@@ -62,6 +63,7 @@ OPTIONS:
     --dry-run               Show what would be done without executing
     --email                 Send email notification on completion
     --help, -h              Show this help
+    --version, -V           Print the VaultWarden-OCI version and exit
 
 EXIT CODES:
     0 — completed successfully
@@ -98,6 +100,7 @@ while [[ $# -gt 0 ]]; do
         --dry-run)         DRY_RUN=true;            shift ;;
         --email)           EMAIL_NOTIFY=true;       shift ;;
         --help|-h|help)    show_help; exit 0 ;;
+        --version|-V)      print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"; exit 0 ;;
         *) log_error "Unknown option for 'run': $1"; show_help; exit 1 ;;
     esac
 done
@@ -145,7 +148,7 @@ main() {
     local db_optimization_result=0 firewall_update_result=1 dns_update_result=1
     local health_validation_result=0
 
-    log_phase 1 4 "System cleanup"
+    log_header "Phase 1/4 — System cleanup"
     cleanup_logs    || log_cleanup_result=$?
     cleanup_backups || backup_cleanup_result=$?
     if cleanup_docker_system; then
@@ -154,11 +157,11 @@ main() {
         docker_cleanup_result=$?
     fi
 
-    log_phase 2 4 "Database optimization"
+    log_header "Phase 2/4 — Database optimization"
     optimize_database || db_optimization_result=$?
 
     if [[ "$UPDATE_FIREWALL" == "true" || "$UPDATE_DNS" == "true" ]]; then
-        log_phase 3 4 "Security and network maintenance"
+        log_header "Phase 3/4 — Security and network maintenance"
         if [[ "$UPDATE_FIREWALL" == "true" ]]; then
             local _fw_args=("${SCRIPT_DIR}/utilities/maintenance-update-firewall.sh" update-firewall)
             [[ "$DRY_RUN" == "true" ]] && _fw_args+=("--dry-run")
@@ -172,7 +175,7 @@ main() {
         fi
     fi
 
-    log_phase 4 4 "Health validation"
+    log_header "Phase 4/4 — Health validation"
     validate_system_health || health_validation_result=$?
 
     # Compute elapsed wall-clock time for the summary footer.

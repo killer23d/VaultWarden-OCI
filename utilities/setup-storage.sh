@@ -19,6 +19,7 @@ source "${PROJECT_ROOT}/lib/config.sh"
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
 source "${PROJECT_ROOT}/lib/storage.sh"
+DOCKER_PROJECT_LABEL="${DOCKER_PROJECT_LABEL:-label=com.docker.compose.project=vaultwarden-oci}"
 source "${PROJECT_ROOT}/lib/docker.sh"
 source "${PROJECT_ROOT}/lib/backup-utils.sh"
 source "${PROJECT_ROOT}/lib/migrate.sh"
@@ -201,6 +202,7 @@ OPTIONS:
     --dry-run             Preview actions without executing
     --force               Skip confirmations
     --help, -h            Show this help
+    --version, -V         Print the VaultWarden-OCI version and exit
 
 EXAMPLES:
     # Boot-only setup (no separate data volume)
@@ -240,6 +242,10 @@ _parse_outer_args() {
                     exit 0
                 fi
                 shift
+                ;;
+            --version|-V)
+                print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"
+                exit 0
                 ;;
             help)
                 show_help
@@ -288,6 +294,10 @@ _parse_outer_args() {
             --force)
                 _SS_FORCE=true
                 shift
+                ;;
+            --version|-V)
+                print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"
+                exit 0
                 ;;
             *)
                 log_error "Unknown option: $1"

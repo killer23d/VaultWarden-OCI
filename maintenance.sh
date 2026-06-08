@@ -33,6 +33,7 @@ SUBCOMMANDS:
 
 OPTIONS:
     --help, -h        Show this help
+    --version, -V     Print the VaultWarden-OCI version and exit
 
 EXAMPLES:
     ./maintenance.sh run
@@ -46,6 +47,11 @@ EOF
 
 if [[ $# -eq 0 ]]; then
     show_help
+    exit 0
+fi
+
+if [[ "${1:-}" == "--version" || "${1:-}" == "-V" ]]; then
+    printf 'VaultWarden-OCI %s\n' "$(tr -d '[:space:]' < "${SCRIPT_DIR}/VERSION" 2>/dev/null || echo unknown)"
     exit 0
 fi
 
@@ -85,6 +91,10 @@ case "$_TASK" in
     --help|-h)
         # --help/-h at the top level (no subcommand given before the flag).
         show_help
+        exit 0
+        ;;
+    --version|-V)
+        printf 'VaultWarden-OCI %s\n' "$(tr -d '[:space:]' < "${SCRIPT_DIR}/VERSION" 2>/dev/null || echo unknown)"
         exit 0
         ;;
     *)

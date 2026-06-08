@@ -21,7 +21,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-if [[ "${EUID}" -ne 0 ]]; then
+if [[ "${1:-}" == "--version" || "${1:-}" == "-V" ]]; then
+    printf 'VaultWarden-OCI %s\n' "$(tr -d '[:space:]' < "${PROJECT_ROOT}/VERSION" 2>/dev/null || echo unknown)"
+    exit 0
+fi
+
+if [[ "${1:-}" != "--help" && "${1:-}" != "-h" && "${1:-}" != "help" && "${EUID}" -ne 0 ]]; then
     if command -v sudo >/dev/null 2>&1; then
         exec sudo -n "$0" "$@"
     fi
@@ -56,13 +61,13 @@ fi
 
 # Provide COLOR_* fallbacks for standalone runs without lib/common.sh.
 if [[ "$_LIBS_LOADED" != "true" ]]; then
-    COLOR_RED=$'\033[0;31m'
-    COLOR_GREEN=$'\033[0;32m'
+    COLOR_RED=''
+    COLOR_GREEN=''
     # shellcheck disable=SC2034
-    COLOR_YELLOW=$'\033[0;33m'
+    COLOR_YELLOW=''
     # shellcheck disable=SC2034
-    COLOR_CYAN=$'\033[0;36m'
-    COLOR_RESET=$'\033[0m'
+    COLOR_CYAN=''
+    COLOR_RESET=''
 fi
 
 # ---------------------------------------------------------------------------
@@ -352,6 +357,7 @@ OPTIONS:
     --admin-ip IP|CIDR   Add this IP address or CIDR to the CrowdSec admin
                          allowlist.
     --help, -h           Show this help.
+    --version, -V        Print the VaultWarden-OCI version and exit.
 
 ENVIRONMENT:
     CLOUDFLARE_PROXY_ENABLED   Set to 'true' to enable the Cloudflare bouncer.
@@ -387,6 +393,9 @@ while [[ $# -gt 0 ]]; do
             ADMIN_IP="$2"; shift 2 ;;
         --help|-h)
             show_help
+            exit 0 ;;
+        --version|-V)
+            print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"
             exit 0 ;;
         help)
             show_help
@@ -927,9 +936,7 @@ BOUNCER_BANNER
             printf '%s' "${COLOR_RESET}"
             printf '\n  Bouncer API key: %s%s%s\n\n' \
                 "${COLOR_RED}${COLOR_GREEN}" "${_CF_BOUNCER_KEY}" "${COLOR_RESET}"
-            printf '%s!!! PRESS ENTER AFTER SAVING THE BOUNCER API KEY !!!%s\n' \
-                "${COLOR_RED}" "${COLOR_RESET}"
-            read -r
+            press_enter_to_continue " Press [Enter] after saving the bouncer API key..."
             clear
         fi
     fi

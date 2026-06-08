@@ -180,6 +180,9 @@ OPTIONS (used after a subcommand):
 GLOBAL SUBCOMMAND:
     help                    Show this help
 
+GLOBAL OPTIONS:
+    --version, -V           Print the VaultWarden-OCI version and exit
+
 ENVIRONMENT:
     BACKUP_DIR=<path>                  Override backup storage root
                                        (default: $PROJECT_STATE_DIR/backups)
@@ -212,10 +215,11 @@ EOF
 # Argument Parsing — subcommand-first, then options.
 # 'latest', 'list', and 'interactive' are positional subcommands.
 
-# Handle help before the .env check so it always works.
+# Handle help/version before the .env check so it always works.
 if [[ $# -gt 0 ]]; then
     case "$1" in
         help|--help|-h) show_help; exit 0 ;;
+        --version|-V) print_project_version "VaultWarden-OCI" "${PROJECT_ROOT}"; exit 0 ;;
     esac
 fi
 
@@ -1691,8 +1695,9 @@ main() {
     local STATE_DIR; STATE_DIR="$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")"
     BACKUP_BASE_DIR="$(get_config_value "BACKUP_DIR" "${STATE_DIR}/backups")"
     local AGE_KEY_FILE; AGE_KEY_FILE="$(get_config_value "SOPS_AGE_KEY_FILE" "secrets/keys/age-key.txt")"
-    local PUID="$(get_config_value "PUID" "")"
-    local PGID="$(get_config_value "PGID" "")"
+    local PUID PGID
+    PUID="$(get_config_value "PUID" "")"
+    PGID="$(get_config_value "PGID" "")"
     PUID="${PUID//$'\r'/}"
     PGID="${PGID//$'\r'/}"
 
@@ -1830,7 +1835,6 @@ main() {
     }
 
     if [[ "$DRY_RUN" != "true" ]]; then
-        ...
         docker compose stop
     fi
     trap _restore_safety_net ERR HUP INT TERM

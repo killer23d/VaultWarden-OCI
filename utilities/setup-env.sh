@@ -57,6 +57,7 @@ OPTIONS:
     --force               Overwrite existing .env/docker-compose.yml
     --dry-run             Preview actions without executing
     --help, -h            Show this help
+    --version, -V         Print the VaultWarden-OCI version and exit
 
 DOMAIN REQUIREMENTS:
     - Must be a bare hostname with no scheme (not https://vault.example.com)
@@ -99,6 +100,7 @@ _parse_args() {
                 DATA_VOLUME_MOUNT="$1"
                 ;;
             --help|-h) show_help; exit 0 ;;
+            --version|-V) print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"; exit 0 ;;
             *)
                 log_error "Unknown option: $1"
                 show_help
@@ -367,4 +369,4 @@ main() {
 }
 
 _parse_args "$@"
-main
+main "$@"

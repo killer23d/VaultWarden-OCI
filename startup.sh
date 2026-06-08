@@ -14,6 +14,7 @@ source "${SCRIPT_DIR}/lib/defaults.sh"
 source "${SCRIPT_DIR}/lib/config.sh"
 source "${SCRIPT_DIR}/lib/common.sh"
 init_common_lib "$0"
+DOCKER_PROJECT_LABEL="${DOCKER_PROJECT_LABEL:-label=com.docker.compose.project=vaultwarden-oci}"
 source "${SCRIPT_DIR}/lib/docker.sh"
 source "${SCRIPT_DIR}/lib/crypto.sh"
 source "${SCRIPT_DIR}/lib/secrets.sh"
@@ -64,6 +65,7 @@ STARTUP OPTIONS:
 
 GLOBAL OPTIONS:
   --help, -h       Show this help
+  --version, -V    Print the VaultWarden-OCI version and exit
 
 EXAMPLES:
   ./startup.sh                    # Normal startup (pulls latest images)
@@ -82,6 +84,10 @@ if [[ $# -gt 0 ]]; then
       ;;
     help|--help|-h)
       show_help; exit 0
+      ;;
+    --version|-V)
+      print_project_version "VaultWarden-OCI" "${PROJECT_ROOT}"
+      exit 0
       ;;
     --*)
       # Flag-first invocation (e.g. ./startup.sh --dry-run): fall through to
@@ -105,6 +111,7 @@ while [[ $# -gt 0 ]]; do
     --skip-egress-fix) SKIP_EGRESS_FIX=true;  shift ;;
     --dry-run)         DRY_RUN=true;          shift ;;
     --help|-h)         show_help; exit 0 ;;
+    --version|-V)      print_project_version "VaultWarden-OCI" "${PROJECT_ROOT}"; exit 0 ;;
     *) log_error "Unknown option: '$1'"; show_help; exit 1 ;;
   esac
 done

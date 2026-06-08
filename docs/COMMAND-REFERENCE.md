@@ -90,10 +90,10 @@ output. Do not edit manually; run `make docs` to regenerate.
 | `make config` |  Show current docker-compose config (resolved) |
 | `make diagnose` |  Full diagnostic dump (versions, status, health, key, logs tail) |
 | `make clean` |  Remove generated files (logs, temp files) |
-| `make clean-all` |  [DESTRUCTIVE] Remove all generated files including secrets cache |
-| `make prune` |  [DESTRUCTIVE] Remove unused Docker resources (containers, networks, images) |
-| `make uninstall` |  Uninstall VaultWarden-OCI (interactive) |
-| `make uninstall-dry-run` |  Simulate uninstall without deleting anything (--dry-run mode) |
+| `make clean-all` |  Remove secrets cache and log files — services will re-init secrets on next start |
+| `make prune` |  Remove unused Docker resources (images, containers, networks) — cannot be undone |
+| `make uninstall` |  Remove VaultWarden-OCI, all data, secrets, and containers from this host |
+| `make uninstall-dry-run` |  Preview what uninstall would remove without making any changes |
 | `make docs` |  Regenerate docs/COMMAND-REFERENCE.md from live script --help and Makefile targets |
 | `make backup-manifest` |  Show what is included and excluded in a full/emergency backup |
 
@@ -104,7 +104,6 @@ output. Do not edit manually; run `make docs` to regenerate.
 ### setup.sh
 
 ```
-docker.sh: could not auto-detect Compose project name; using default label. Set DOCKER_PROJECT_LABEL to override.
 VaultWarden-OCI Setup Tool — Security Hardened Edition
 
 USAGE:
@@ -147,6 +146,7 @@ FULL SETUP OPTIONS (used after install or with top-level --domain / --email):
 
 GLOBAL OPTIONS:
   --help, -h          Show this help and exit.
+  --version, -V       Print the VaultWarden-OCI version and exit.
 
 EXAMPLES:
     # ── First-time setup ──────────────────────────────────────────
@@ -169,7 +169,6 @@ EXAMPLES:
 ### startup.sh
 
 ```
-docker.sh: could not auto-detect Compose project name; using default label. Set DOCKER_PROJECT_LABEL to override.
 VaultWarden-OCI Startup Script
 
 USAGE:
@@ -191,6 +190,7 @@ STARTUP OPTIONS:
 
 GLOBAL OPTIONS:
   --help, -h       Show this help
+  --version, -V    Print the VaultWarden-OCI version and exit
 
 EXAMPLES:
   ./startup.sh                    # Normal startup (pulls latest images)
@@ -203,7 +203,6 @@ EXAMPLES:
 ### backup.sh
 
 ```
-docker.sh: could not auto-detect Compose project name; using default label. Set DOCKER_PROJECT_LABEL to override.
 VaultWarden-OCI Backup Script
 
 USAGE:
@@ -212,7 +211,7 @@ USAGE:
 
 SUBCOMMANDS:
     run [TYPE]        Create a backup  (TYPE: auto | db | full | emergency)
-    list              List existing backups (no root required)
+    list [--json]     List existing backups (no root required; JSON optional)
     verify            Verify the most recent backup's integrity
     rotate            Apply retention policy and prune old backups
 
@@ -229,12 +228,16 @@ RUN OPTIONS (used after 'run'):
 GLOBAL SUBCOMMAND:
     help                     Show this help
 
+GLOBAL OPTIONS:
+    --version, -V            Print the VaultWarden-OCI version and exit
+
 EXAMPLES:
     sudo ./backup.sh run                # Auto-mode backup (db or full based on schedule)
     sudo ./backup.sh run db             # Database-only backup
     sudo ./backup.sh run full           # Full state backup
     sudo ./backup.sh run db --keep 30             # Keep 30 days of backups
     ./backup.sh list                              # List existing backups (no sudo)
+    ./backup.sh list --json                       # Machine-readable backup inventory
     sudo ./backup.sh verify                       # Verify the latest backup
     sudo ./backup.sh rotate --keep 30             # Prune backups older than 30 days
 ```
@@ -283,6 +286,9 @@ OPTIONS (used after a subcommand):
 GLOBAL SUBCOMMAND:
     help                    Show this help
 
+GLOBAL OPTIONS:
+    --version, -V           Print the VaultWarden-OCI version and exit
+
 ENVIRONMENT:
     BACKUP_DIR=<path>                  Override backup storage root
                                        (default: $PROJECT_STATE_DIR/backups)
@@ -298,10 +304,6 @@ EXAMPLES:
     sudo ./restore.sh latest --force     # Restore newest backup, no confirm prompts
     ./restore.sh list                    # List local backups (no sudo)
     ./restore.sh list --remote           # List remote backups (no sudo)
-
-    # ── INTERACTIVE MENU ─────────────────────────────────────────
-    sudo ./restore.sh interactive                    # Select from local backups
-    sudo ./restore.sh interactive --remote           # Select from remote backups
 ```
 
 ### maintenance.sh
@@ -311,6 +313,11 @@ VaultWarden-OCI Maintenance Script
 
 USAGE:
     ./maintenance.sh <subcommand> [options]
+
+DESCRIPTION:
+    Thin dispatcher that routes maintenance subcommands to their dedicated
+    utility scripts. Each subcommand can be called directly via
+    utilities/maintenance-<name>.sh. Run with --help for subcommand options.
 
 SUBCOMMANDS:
     run               Full routine maintenance (cleanup + optimize + health)
@@ -323,16 +330,31 @@ SUBCOMMANDS:
     update-firewall   Sync Cloudflare IP ranges into UFW
     help              Show this help
 
+OPTIONS:
+    --help, -h        Show this help
+    --version, -V     Print the VaultWarden-OCI version and exit
+
+EXAMPLES:
+    ./maintenance.sh run
+    ./maintenance.sh health
+    ./maintenance.sh run --comprehensive
+    ./maintenance.sh health --help
+
 Run './maintenance.sh <subcommand> --help' for subcommand-specific options.
 ```
 
 ### edit-secrets.sh
 
 ```
-VaultWarden Secrets Editor
+VaultWarden-OCI Secrets Editor
 
 USAGE:
     ./edit-secrets.sh <subcommand> [options]
+
+DESCRIPTION:
+    Thin dispatcher for VaultWarden secrets management operations. Delegates
+    to utilities/secrets-*.sh subcommands. Manage credentials using SOPS
+    Age encryption — secrets are never stored in plaintext on disk.
 
 SUBCOMMANDS:
     edit                    Interactively edit decrypted secrets, then re-encrypt
@@ -342,7 +364,9 @@ SUBCOMMANDS:
     export-recovery-kit     Generate a recovery document with unencrypted secrets
     help                    Show this help
 
-Run './edit-secrets.sh <subcommand> --help' for subcommand-specific options.
+OPTIONS:
+    --help, -h              Show this help
+    --version, -V           Print the VaultWarden-OCI version and exit
 
 EXAMPLES:
     ./edit-secrets.sh edit
@@ -353,14 +377,34 @@ EXAMPLES:
     ./edit-secrets.sh rotate email_api_token --dry-run
     ./edit-secrets.sh export-recovery-kit
 
-SEE ALSO:
-    ./setup.sh secrets  - First-time creation or full reconfiguration
+Run './edit-secrets.sh <subcommand> --help' for subcommand-specific options.
 ```
 
 ### dashboard.sh
 
 ```
-(--help not available or requires root)
+VaultWarden-OCI Operations Dashboard
+
+USAGE:
+    sudo ./dashboard.sh [OPTIONS]
+
+DESCRIPTION:
+    AMTM-style interactive terminal dashboard for VaultWarden-OCI. Displays
+    live stack health, disk usage, CrowdSec bans, backup status, and email
+    queue at a glance. Provides submenus for backup, security, secrets, and
+    advanced operations. Auto-refreshes every 60 seconds.
+
+OPTIONS:
+    --help, -h    Show this help and exit
+    --version, -V Print the VaultWarden-OCI version and exit
+
+KEYBOARD SHORTCUTS:
+    e/q           Exit dashboard
+    b/s/k/a/i     Open Backup, Security, Secrets, Advanced, or Identity menus
+
+EXAMPLES:
+    sudo ./dashboard.sh          # Launch dashboard
+    ./dashboard.sh --help        # Show this help
 ```
 
 ## Utility Scripts
@@ -368,7 +412,6 @@ SEE ALSO:
 ### backup-run.sh
 
 ```
-docker.sh: could not auto-detect Compose project name; using default label. Set DOCKER_PROJECT_LABEL to override.
 VaultWarden-OCI Backup Script
 
 USAGE:
@@ -377,7 +420,7 @@ USAGE:
 
 SUBCOMMANDS:
     run [TYPE]        Create a backup  (TYPE: auto | db | full | emergency)
-    list              List existing backups (no root required)
+    list [--json]     List existing backups (no root required; JSON optional)
     verify            Verify the most recent backup's integrity
     rotate            Apply retention policy and prune old backups
 
@@ -394,39 +437,23 @@ RUN OPTIONS (used after 'run'):
 GLOBAL SUBCOMMAND:
     help                     Show this help
 
+GLOBAL OPTIONS:
+    --version, -V            Print the VaultWarden-OCI version and exit
+
 EXAMPLES:
     sudo ./backup.sh run                # Auto-mode backup (db or full based on schedule)
     sudo ./backup.sh run db             # Database-only backup
     sudo ./backup.sh run full           # Full state backup
     sudo ./backup.sh run db --keep 30             # Keep 30 days of backups
     ./backup.sh list                              # List existing backups (no sudo)
+    ./backup.sh list --json                       # Machine-readable backup inventory
     sudo ./backup.sh verify                       # Verify the latest backup
     sudo ./backup.sh rotate --keep 30             # Prune backups older than 30 days
-```
-
-### generate-command-ref.sh
-
-```
-VaultWarden-OCI Command Reference Writer
-
-USAGE:
-    bash utilities/write-command-reference.sh [--help|-h]
-    bash utilities/generate-command-ref.sh
-    make docs
-
-DESCRIPTION:
-    Rebuilds docs/COMMAND-REFERENCE.md from Makefile targets and script help
-    output. The file is generated from scratch each time so CI can detect real
-    doc drift without carrying over stale or malformed content.
-
-OPTIONS:
-    --help, -h      Show this help without rewriting docs
 ```
 
 ### maintenance-db-maint.sh
 
 ```
-docker.sh: could not auto-detect Compose project name; using default label. Set DOCKER_PROJECT_LABEL to override.
 VaultWarden-OCI Deep Database Maintenance
 
 USAGE:
@@ -451,7 +478,6 @@ EXIT CODES:
 ### maintenance-email.sh
 
 ```
-docker.sh: could not auto-detect Compose project name; using default label. Set DOCKER_PROJECT_LABEL to override.
 VaultWarden-OCI Email Diagnostics
 
 USAGE:
@@ -472,7 +498,6 @@ EXIT CODES:
 ### maintenance-health.sh
 
 ```
-docker.sh: could not auto-detect Compose project name; using default label. Set DOCKER_PROJECT_LABEL to override.
 VaultWarden-OCI Health Check
 
 USAGE:
@@ -484,7 +509,9 @@ OPTIONS:
     --fix, -f           Attempt automatic recovery for failed checks
     --report, -r        Save health report to file
     --quiet, -q         Suppress non-critical output
+    --json              Emit machine-readable JSON summary
     --help, -h          Show this help
+    --version, -V       Print the VaultWarden-OCI version and exit
 
 EXIT CODES:
     0 — All checks passed
@@ -496,12 +523,16 @@ EXIT CODES:
 ### maintenance-run.sh
 
 ```
-docker.sh: could not auto-detect Compose project name; using default label. Set DOCKER_PROJECT_LABEL to override.
 VaultWarden-OCI Routine Maintenance Runner
 
 USAGE:
     sudo utilities/maintenance-run.sh [OPTIONS]
     sudo ./maintenance.sh run [OPTIONS]
+
+DESCRIPTION:
+    Performs routine maintenance: log cleanup, old backup pruning, Docker
+    system cleanup, and scheduled database optimization. Run automatically
+    by the vaultwarden-maintenance systemd timer, or manually on demand.
 
 OPTIONS:
     --comprehensive         Run everything: routine + firewall + DNS
@@ -514,17 +545,23 @@ OPTIONS:
     --dry-run               Show what would be done without executing
     --email                 Send email notification on completion
     --help, -h              Show this help
+    --version, -V           Print the VaultWarden-OCI version and exit
 
 EXIT CODES:
     0 — completed successfully
     1 — completed with minor issues
     2 — completed with critical failures
+
+EXAMPLES:
+    sudo ./maintenance.sh run
+    sudo ./maintenance.sh run --comprehensive
+    sudo ./maintenance.sh run --dry-run
+    sudo ./maintenance.sh run --email
 ```
 
 ### maintenance-update-dns.sh
 
 ```
-docker.sh: could not auto-detect Compose project name; using default label. Set DOCKER_PROJECT_LABEL to override.
 VaultWarden-OCI DNS Updater
 
 USAGE:
@@ -536,6 +573,16 @@ OPTIONS:
     --dry-run     Preview what would be done without making changes
     --help, -h    Show this help
 
+SECRET SOURCE PRIORITY:
+    caddy_cloudflare_dns_token — resolved in order:
+        1. decrypt_secret() from encrypted secrets/secrets.yaml
+        2. Host file: $CF_TOKEN_FILE or secrets/.docker_secrets/caddy_cloudflare_dns_token
+        3. Caddy container: /run/secrets/caddy_cloudflare_dns_token
+
+    cloudflare_zone_id — resolved in order:
+        1. decrypt_secret() from encrypted secrets/secrets.yaml
+        2. CLOUDFLARE_ZONE_ID environment variable / .env
+
 EXIT CODES:
     0 — DNS record up to date or updated successfully
     1 — DNS update failed
@@ -544,7 +591,6 @@ EXIT CODES:
 ### maintenance-update-firewall.sh
 
 ```
-docker.sh: could not auto-detect Compose project name; using default label. Set DOCKER_PROJECT_LABEL to override.
 VaultWarden-OCI Firewall Range Updater
 
 USAGE:
@@ -570,7 +616,6 @@ EXIT CODES:
 ### maintenance-update.sh
 
 ```
-docker.sh: could not auto-detect Compose project name; using default label. Set DOCKER_PROJECT_LABEL to override.
 VaultWarden-OCI Update Script
 
 USAGE:
@@ -597,23 +642,30 @@ EXAMPLES:
 ### pre-production-drill.sh
 
 ```
-docker.sh: could not auto-detect Compose project name; using default label. Set DOCKER_PROJECT_LABEL to override.
 VaultWarden-OCI Pre-Production Drill
 
-A non-destructive rehearsal of all critical operational paths.
-No production state is modified.
-
 USAGE:
-    sudo ./utilities/pre-production-drill.sh [options]
+    sudo ./utilities/pre-production-drill.sh [OPTIONS]
+
+DESCRIPTION:
+    Non-destructive rehearsal of all critical operational paths.
+    No production state is modified. Validates secrets, backups, email
+    delivery, and stack restart sequence before go-live.
 
 OPTIONS:
     --skip-email    Skip email delivery test (if MTA not configured yet)
     --skip-restore  Skip restore path drill (decrypt + integrity check)
-    --help          Show this help
+    --help, -h      Show this help
+    --version, -V   Print the VaultWarden-OCI version and exit
 
 EXIT CODES:
     0  All steps passed
     1  One or more steps failed
+
+EXAMPLES:
+    sudo ./utilities/pre-production-drill.sh
+    sudo ./utilities/pre-production-drill.sh --skip-email
+    sudo ./utilities/pre-production-drill.sh --skip-email --skip-restore
 ```
 
 ### restore-run.sh
@@ -660,6 +712,9 @@ OPTIONS (used after a subcommand):
 GLOBAL SUBCOMMAND:
     help                    Show this help
 
+GLOBAL OPTIONS:
+    --version, -V           Print the VaultWarden-OCI version and exit
+
 ENVIRONMENT:
     BACKUP_DIR=<path>                  Override backup storage root
                                        (default: $PROJECT_STATE_DIR/backups)
@@ -675,10 +730,6 @@ EXAMPLES:
     sudo ./restore.sh latest --force     # Restore newest backup, no confirm prompts
     ./restore.sh list                    # List local backups (no sudo)
     ./restore.sh list --remote           # List remote backups (no sudo)
-
-    # ── INTERACTIVE MENU ─────────────────────────────────────────
-    sudo ./restore.sh interactive                    # Select from local backups
-    sudo ./restore.sh interactive --remote           # Select from remote backups
 ```
 
 ### secrets-edit.sh
@@ -765,7 +816,48 @@ EXAMPLES:
 ### secrets-rotate.sh
 
 ```
-(--help not available or requires root)
+VaultWarden Secrets — rotate subcommand
+
+USAGE:
+    ./utilities/secrets-rotate.sh FIELD [OPTIONS]
+    ./utilities/secrets-rotate.sh rotate FIELD [OPTIONS]  # 'rotate' accepted as alias
+    ./edit-secrets.sh rotate FIELD [OPTIONS]
+
+DESCRIPTION:
+    Re-collects and re-hashes a single named credential, then atomically
+    re-encrypts secrets.yaml and resyncs Docker secret bind-mount files.
+
+SUPPORTED FIELDS:
+    (yq not installed — install with: sudo apt install yq  or  snap install yq)
+    admin_token                         (auto-generated admin token)
+    caddy_admin_password                (bcrypt hash for Caddy)
+    backup_passphrase                   (backup encryption passphrase)
+    caddy_cloudflare_dns_token          (Cloudflare DNS API token)
+    smtp_password                       (SMTP relay password)
+    email_api_token                     (email API key)
+    ... run after setup.sh install for the full schema list
+
+EMAIL_MODE / EMAIL_PROVIDER quick reference (.env):
+    EMAIL_MODE=auto   — tries API → SMTP → Postfix in order
+    EMAIL_MODE=api    — HTTP API only   (rotate: email_api_token)
+    EMAIL_MODE=smtp   — SMTP relay only (rotate: smtp_password)
+    EMAIL_MODE=host   — Postfix sidecar (no token or password needed)
+    EMAIL_PROVIDER=mailersend|sendgrid|mailgun|postmark|resend
+        → selects which HTTP driver is used at runtime;
+          the token is always stored as "email_api_token" in secrets.yaml.
+
+FLAGS:
+    --dry-run    Preview what would change without writing
+    --no-backup  Skip creating backup before rotation
+    --help, -h   Show this help
+    --version, -V Print the VaultWarden-OCI version and exit
+
+EXAMPLES:
+    ./utilities/secrets-rotate.sh admin_token
+    ./utilities/secrets-rotate.sh cf_worker_bouncer_token
+    ./utilities/secrets-rotate.sh email_api_token --dry-run
+    ./edit-secrets.sh rotate smtp_password
+    ./edit-secrets.sh rotate backup_passphrase --no-backup
 ```
 
 ### secrets-view.sh
@@ -794,43 +886,61 @@ EXAMPLES:
 ### setup-crowdsec.sh
 
 ```
-usage: sudo ./utilities/setup-crowdsec.sh [OPTIONS]
+VaultWarden-OCI CrowdSec Setup
 
-  --auto               Non-interactive: never prompt.
-  --dry-run            Print what would happen without changing files.
-  --force              Re-run all phases even if already applied.
-  --use-latest         Override version pins and use the current live upstream
-                       release of each component.
-  --autonomous         Deploy the Workers bouncer in autonomous mode (-S flag).
-  --admin-ip IP|CIDR   Add this IP address or CIDR to the CrowdSec admin
-                       allowlist.
+USAGE:
+    sudo utilities/setup-crowdsec.sh [OPTIONS]
 
-Environment variables (set in .env or exported before running):
-  CLOUDFLARE_PROXY_ENABLED   Set to 'true' to enable the Cloudflare bouncer.
-  # Cloudflare credentials (now in secrets, not .env):
-  #   sudo ./edit-secrets.sh rotate cf_worker_bouncer_token
-  #   sudo ./edit-secrets.sh rotate cloudflare_zone_id
-  #   sudo ./edit-secrets.sh rotate cf_account_id
-  CF_FREE_PLAN               Set to 'false' to disable the free-plan KV write
-                             guard. Default: 'true'.
-  CROWDSEC_VERSION           Pin a specific CrowdSec version.
-  CF_WORKER_BOUNCER_VERSION  Pin a specific Workers bouncer version.
+DESCRIPTION:
+    Installs and configures CrowdSec with the Cloudflare Workers bouncer
+    for VaultWarden-OCI intrusion detection and edge-level banning.
+    Requires CLOUDFLARE_PROXY_ENABLED=true for the Cloudflare bouncer phase.
+
+OPTIONS:
+    --auto               Non-interactive: never prompt.
+    --dry-run            Print what would happen without changing files.
+    --force              Re-run all phases even if already applied.
+    --use-latest         Override version pins and use the current live upstream
+                         release of each component.
+    --autonomous         Deploy the Workers bouncer in autonomous mode (-S flag).
+    --admin-ip IP|CIDR   Add this IP address or CIDR to the CrowdSec admin
+                         allowlist.
+    --help, -h           Show this help.
+    --version, -V        Print the VaultWarden-OCI version and exit.
+
+ENVIRONMENT:
+    CLOUDFLARE_PROXY_ENABLED   Set to 'true' to enable the Cloudflare bouncer.
+    CF_FREE_PLAN               Set to 'false' to disable the free-plan KV write
+                               guard. Default: 'true'.
+    CROWDSEC_VERSION           Pin a specific CrowdSec version.
+    CF_WORKER_BOUNCER_VERSION  Pin a specific Workers bouncer version.
+
+    Cloudflare credentials (in encrypted secrets, not .env):
+        sudo ./edit-secrets.sh rotate cf_worker_bouncer_token
+        sudo ./edit-secrets.sh rotate cloudflare_zone_id
+        sudo ./edit-secrets.sh rotate cf_account_id
+
+EXAMPLES:
+    sudo utilities/setup-crowdsec.sh
+    sudo utilities/setup-crowdsec.sh --dry-run
+    sudo utilities/setup-crowdsec.sh --force
 ```
 
 ### setup-env.sh
 
 ```
-utilities/setup-env.sh — VaultWarden-OCI environment file configuration
-
-Creates or updates .env and docker-compose.yml from templates.
-Safe to re-run (idempotent): existing files are not overwritten unless
---force is passed or key values (domain/email) have changed.
+VaultWarden-OCI Environment Setup
 
 USAGE:
     sudo utilities/setup-env.sh --domain DOMAIN --email EMAIL [OPTIONS]
 
-FLAGS:
-    --domain DOMAIN       Your domain name (required)
+DESCRIPTION:
+    Creates or updates .env and docker-compose.yml from project templates.
+    Safe to re-run (idempotent) — existing files are not overwritten unless
+    --force is passed. Called automatically by setup.sh during phase 3.
+
+OPTIONS:
+    --domain DOMAIN       Your domain name (required, e.g. vault.example.com)
     --email EMAIL         Admin email address (required)
     --use-latest          Set all container versions to 'latest'
     --data-device DEV     Data volume block device path
@@ -838,6 +948,14 @@ FLAGS:
     --force               Overwrite existing .env/docker-compose.yml
     --dry-run             Preview actions without executing
     --help, -h            Show this help
+    --version, -V         Print the VaultWarden-OCI version and exit
+
+DOMAIN REQUIREMENTS:
+    - Must be a bare hostname with no scheme (not https://vault.example.com)
+    - Must be a fully-qualified domain name with at least one dot
+    - Must not include a port number or a path
+    - Must not be a placeholder (e.g. vault.example.com, CHANGE_ME)
+    - Must not be a bare IP address (Caddy ACME requires a DNS name)
 
 EXAMPLES:
     sudo utilities/setup-env.sh --domain vault.example.com --email admin@example.com
@@ -848,32 +966,40 @@ EXAMPLES:
 ### setup-firewall.sh
 
 ```
-utilities/setup-firewall.sh — VaultWarden-OCI firewall configuration
-
-Configures UFW (with Cloudflare CIDR restrictions) and iptables NAT/DOCKER-USER
-rules for the VaultWarden compose project. Safe to re-run (idempotent).
+VaultWarden-OCI Firewall Configuration
 
 USAGE:
-  sudo utilities/setup-firewall.sh [--phase ufw|iptables|all] [--auto] [--yes] [--dry-run]
+    sudo utilities/setup-firewall.sh [--phase ufw|iptables|all] [OPTIONS]
 
-FLAGS:
-  --phase ufw|iptables|all   Phase to run (default: all)
-  --auto                     Non-interactive mode (implies --yes)
-  --yes                      Auto-confirm the netfilter-persistent install prompt
-  --dry-run                  Preview actions without executing
-  --force                    Skip confirmations
-  --force-iptables           Continue iptables setup even when an active nftables
-                             ruleset is detected. Use only when you have verified
-                             that nftables will not override these iptables rules.
-  --help, -h                 Show this help
+DESCRIPTION:
+    Configures UFW (with Cloudflare CIDR restrictions) and iptables NAT /
+    DOCKER-USER rules for the VaultWarden compose project. Safe to re-run
+    (idempotent). Called automatically by setup.sh during phase 6.
+
+OPTIONS:
+    --phase ufw|iptables|all   Phase to run (default: all)
+    --auto                     Non-interactive mode (implies --yes)
+    --yes                      Auto-confirm the netfilter-persistent install prompt
+    --dry-run                  Preview actions without executing
+    --force                    Skip confirmations
+    --force-iptables           Continue iptables setup even when an active nftables
+                               ruleset is detected. Use only when you have verified
+                               that nftables will not override these iptables rules.
+    --help, -h                 Show this help
+    --version, -V              Print the VaultWarden-OCI version and exit
 
 NOTES:
-  UFW rules must be applied AFTER Docker installation. Docker rewrites iptables
-  chains during installation; rules set before Docker is installed are silently
-  bypassed by Docker's DOCKER-USER chain.
+    UFW rules must be applied AFTER Docker installation. Docker rewrites iptables
+    chains during installation; rules set before Docker is installed are silently
+    bypassed by Docker's DOCKER-USER chain.
 
-  The systemd unit vaultwarden-iptables.service calls this script with
-  --phase iptables to re-apply NAT rules after a Docker upgrade resets chains.
+    The systemd unit vaultwarden-iptables.service calls this script with
+    --phase iptables to re-apply NAT rules after a Docker upgrade resets chains.
+
+EXAMPLES:
+    sudo utilities/setup-firewall.sh
+    sudo utilities/setup-firewall.sh --dry-run
+    sudo utilities/setup-firewall.sh --phase ufw
 ```
 
 ### setup-secrets.sh
@@ -884,6 +1010,11 @@ VaultWarden-OCI Secrets Management
 USAGE:
     sudo utilities/setup-secrets.sh SUBCOMMAND [OPTIONS]
 
+DESCRIPTION:
+    Manages VaultWarden-OCI secrets: bootstrap Age encryption, configure
+    credentials interactively or automatically, rotate fields, and export
+    recovery kits. Delegates to specialized scripts.
+
 SUBCOMMANDS:
     bootstrap           Bootstrap Age key, SOPS config, and placeholder secrets
                         (called automatically by setup.sh install phase)
@@ -891,6 +1022,11 @@ SUBCOMMANDS:
     rotate [KEY]        Rotate one or all credentials (delegates to utilities/secrets-edit.sh)
     export-recovery-kit Export encrypted recovery kit (delegates to utilities/secrets-edit.sh)
     breakglass [FLAGS]  Emergency break-glass admin account management
+    help, --help, -h    Show this help
+
+OPTIONS:
+    --help, -h          Show this help
+    --version, -V       Print the VaultWarden-OCI version and exit
 
 Run: setup-secrets.sh SUBCOMMAND --help  for subcommand-specific help.
 
@@ -907,68 +1043,64 @@ EXAMPLES:
 ### setup-storage.sh
 
 ```
-docker.sh: could not auto-detect Compose project name; using default label. Set DOCKER_PROJECT_LABEL to override.
 VaultWarden-OCI Storage Setup and Migration
 
 USAGE:
-  sudo utilities/setup-storage.sh [--mode setup|migrate|verify] [OPTIONS]
+    sudo utilities/setup-storage.sh [--mode setup|migrate|verify] [OPTIONS]
+
+DESCRIPTION:
+    Configures persistent storage directories, optional data-volume
+    provisioning, and interactive data migration. Called automatically by
+    setup.sh phase 4. Safe to re-run (idempotent) in setup and verify modes.
 
 MODES:
-  setup    Create and configure storage directories (default)
-  migrate  Migrate from boot volume to data volume (interactive)
-  verify   Re-check layout and permissions only (no changes, safe for cron)
+    setup    Create and configure storage directories (default)
+    migrate  Migrate from boot volume to data volume (interactive)
+    verify   Re-check layout and permissions only (no changes, safe for cron)
 
-FLAGS (setup / verify):
-  --mode MODE           Mode to run: setup|migrate|verify (default: setup)
-  --data-device DEV     Block device for data volume (e.g. /dev/sdb)
-  --data-mount PATH     Mount point for data volume (default: /mnt/vw-data)
-  --auto                Non-interactive mode
-  --dry-run             Preview actions without executing
-  --force               Skip confirmations
-  --help, -h            Show this help
-
-MIGRATE MODE:
-  sudo utilities/setup-storage.sh --mode migrate [subcommand] [OPTIONS]
-  Run with --mode migrate --help for full migrate usage.
+OPTIONS:
+    --mode MODE           Mode to run: setup|migrate|verify (default: setup)
+    --data-device DEV     Block device for data volume (e.g. /dev/sdb)
+    --data-mount PATH     Mount point for data volume (default: /mnt/vw-data)
+    --auto                Non-interactive mode
+    --dry-run             Preview actions without executing
+    --force               Skip confirmations
+    --help, -h            Show this help
+    --version, -V         Print the VaultWarden-OCI version and exit
 
 EXAMPLES:
-  # Boot-only setup (no separate data volume)
-  sudo utilities/setup-storage.sh
+    # Boot-only setup (no separate data volume)
+    sudo utilities/setup-storage.sh
 
-  # Setup with a dedicated data volume
-  sudo utilities/setup-storage.sh \
-    --data-device /dev/sdb \
-    --data-mount /mnt/vw-data
+    # Setup with a dedicated data volume
+    sudo utilities/setup-storage.sh \
+      --data-device /dev/sdb \
+      --data-mount /mnt/vw-data
 
-  # Dry run setup
-  sudo utilities/setup-storage.sh --dry-run
+    # Dry run setup
+    sudo utilities/setup-storage.sh --dry-run
 
-  # Verify current layout (safe for cron)
-  sudo utilities/setup-storage.sh --mode verify
+    # Verify current layout (safe for cron)
+    sudo utilities/setup-storage.sh --mode verify
 
-  # Interactive migration (prompts for device and mount point)
-  sudo utilities/setup-storage.sh --mode migrate run
-
-  # Non-interactive migration
-  sudo utilities/setup-storage.sh --mode migrate run \
-    --source /var/lib/vaultwarden \
-    --target /mnt/vw-data \
-    --device /dev/sdb \
-    --yes
-
-  # Check migration status
-  sudo utilities/setup-storage.sh --mode migrate status
+    # Interactive migration
+    sudo utilities/setup-storage.sh --mode migrate run
 ```
 
 ### setup-system.sh
 
 ```
-utilities/setup-system.sh — VaultWarden-OCI system preparation
+VaultWarden-OCI System Preparation
 
 USAGE:
     sudo utilities/setup-system.sh [OPTIONS]
 
-FLAGS:
+DESCRIPTION:
+    Prepares the host system for VaultWarden-OCI: installs dependencies
+    (Docker, Age, SOPS, rclone, sqlite3), configures user permissions, and
+    sets script execute bits. Called automatically by setup.sh phase 1.
+
+OPTIONS:
     --skip-deps           Skip package installation (assume already installed)
     --auto                Non-interactive mode
     --use-latest          Override pinned versions with 'latest'
@@ -978,6 +1110,12 @@ FLAGS:
     --data-device DEV     Data volume device path
     --data-mount PATH     Data volume mount point (default: /mnt/vw-data)
     --help, -h            Show this help
+    --version, -V         Print the VaultWarden-OCI version and exit
+
+EXAMPLES:
+    sudo utilities/setup-system.sh
+    sudo utilities/setup-system.sh --dry-run
+    sudo utilities/setup-system.sh --skip-deps
 ```
 
 ### setup-systemd.sh
@@ -992,6 +1130,10 @@ USAGE:
     sudo utilities/setup-systemd.sh validate   # Verify installed state vs repo
     sudo utilities/setup-systemd.sh status     # Show timer and service status
 
+DESCRIPTION:
+    Installs, removes, validates, or shows the status of VaultWarden-OCI
+    systemd timers. Run after every 'git pull' to keep /opt/ in sync.
+
 ACTIONS:
     install   Install and enable all systemd timer units
     remove    Disable and remove all systemd timer units
@@ -1001,6 +1143,7 @@ ACTIONS:
 OPTIONS:
     --dry-run     Print actions without executing
     --help, -h    Show this help
+    --version, -V Print the VaultWarden-OCI version and exit
 
 WHAT install DOES:
     1. Copies scripts to /opt/vaultwarden-scripts/ (root:root 700):
@@ -1013,94 +1156,103 @@ WHAT install DOES:
          utilities/backup-run.sh           utilities/restore-run.sh
        Scripts are self-locating via BASH_SOURCE[0]. The utilities/ subdirectory
        structure is preserved at the destination.
-       NOTE: restore.sh is now installed to /opt/ (it was not installed previously).
     2. Copies lib/ -> /opt/vaultwarden-scripts/lib/ (root:root 644)
-       lib files are 644 (world-readable) so a non-root service User= can
-       still source lib/common.sh if the unit is ever changed from root.
     3. Copies .env -> /etc/vaultwarden/vaultwarden.env (root:root 600)
-       (skipped if the EnvironmentFile already exists; warns if content differs)
     4. Copies secrets/keys/age-key.txt -> /etc/vaultwarden/age-key.txt
-       (SERVICE_USER ownership, mode 600; default ubuntu:ubuntu)
-       and sets SOPS_AGE_KEY_FILE=/etc/vaultwarden/age-key.txt in the EnvironmentFile.
-       This is required because systemd units run with ProtectHome=yes, which makes
-       /home/ubuntu/ (and any symlinks into it) inaccessible to the service process.
-       If the source file is absent but the key already exists at the destination,
-       SOPS_AGE_KEY_FILE is still corrected to the absolute path.
     5. Copies systemd/*.{service,timer} -> /etc/systemd/system/
     6. systemctl daemon-reload
     7. systemctl enable --now for all 6 timers
     8. Verifies all managed timers are active and have a next trigger
-    9. systemctl reset-failed for all managed services (clears stale failed status)
 
-WHAT validate CHECKS:
-    1. Scripts present and executable in /opt/vaultwarden-scripts/
-    2. lib/ present; lib/*.sh files are readable (mode 644 recommended)
-    3. All unit files present in /etc/systemd/system/
-    4. All 6 timers enabled (systemctl is-enabled)
-    5. EnvironmentFile /etc/vaultwarden/vaultwarden.env exists (mode 600)
-    6. Age key /etc/vaultwarden/age-key.txt exists (mode 600)
-    7. SOPS_AGE_KEY_FILE is set in the EnvironmentFile
-    8. Installed scripts match repo source checksum (sha256 split-brain detection)
-       Re-run install after any git pull to keep /opt/ in sync.
+EXAMPLES:
+    sudo utilities/setup-systemd.sh install
+    sudo utilities/setup-systemd.sh install --dry-run
+    sudo utilities/setup-systemd.sh validate
+    sudo utilities/setup-systemd.sh status
 ```
 
 ### smoke-test.sh
 
 ```
-docker.sh: could not auto-detect Compose project name; using default label. Set DOCKER_PROJECT_LABEL to override.
 VaultWarden-OCI Smoke Test
 
 USAGE:
-    sudo ./utilities/smoke-test.sh [options]
+    sudo ./utilities/smoke-test.sh [OPTIONS]
+
+DESCRIPTION:
+    Verifies the VaultWarden-OCI stack is healthy before or after production
+    go-live. Checks containers, TLS, HTTP endpoints, secrets, backups, and
+    CrowdSec. Safe to run at any time on a live stack.
 
 OPTIONS:
     --quiet       Suppress per-check output; only show summary
     --fail-fast   Stop on first failure
     --json        Emit a JSON result array (implies --quiet)
-    --help        Show this help
+    --help, -h    Show this help
+    --version, -V Print the VaultWarden-OCI version and exit
 
 EXIT CODES:
     0  All checks passed
     1  One or more checks failed
+
+EXAMPLES:
+    sudo ./utilities/smoke-test.sh
+    sudo ./utilities/smoke-test.sh --quiet
+    sudo ./utilities/smoke-test.sh --json
 ```
 
 ### uninstall-vaultwarden.sh
 
 ```
-Usage: sudo bash /workspaces/VaultWarden-OCI/utilities/uninstall-vaultwarden.sh run [--i-have-saved-my-recovery-kit] [--force] [--dry-run]
+VaultWarden-OCI Uninstall
+
+USAGE:
+    sudo bash ./utilities/uninstall-vaultwarden.sh run [OPTIONS]
+
+DESCRIPTION:
+    Performs a full idempotent uninstall of VaultWarden-OCI: stops and removes
+    containers, Docker secrets, systemd units, and the project directory.
+    Requires interactive confirmation at each critical step.
 
 SUBCOMMANDS:
-  run    Perform the full idempotent uninstall (interactive confirmation required)
+    run    Perform the full idempotent uninstall (interactive confirmation required)
+    help   Show this help
 
 OPTIONS (used after 'run'):
-  --i-have-saved-my-recovery-kit
-      Pre-confirm that you have saved secrets/keys/age-key.txt
-      to a location OUTSIDE this host before running.
-      Without this flag the script refuses to continue when
-      the age key is present on disk.
+    --version, -V
+        Print the VaultWarden-OCI version and exit.
 
-  --dry-run
-      Show what would be removed without deleting anything.
-      Prints each step that would execute and exits without changes.
+    --i-have-saved-my-recovery-kit
+        Pre-confirm that you have saved secrets/keys/age-key.txt
+        to a location OUTSIDE this host before running.
+        Without this flag the script refuses to continue when
+        the age key is present on disk.
 
-  --force
-      Skip ALL AGE key checks (both the CLI flag pre-check
-      and the interactive fingerprint confirmation).
-      WARNING: destructive — implies --i-have-saved-my-recovery-kit
-      and bypasses the fingerprint gate. Use only in automated/CI
-      pipelines where the key is confirmed saved by external means.
+    --dry-run
+        Show what would be removed without deleting anything.
+        Prints each step that would execute and exits without changes.
 
-  Two-prompt safety model for age key destruction:
-    1. CLI flag  --i-have-saved-my-recovery-kit  (pre-check).
-    2. Interactive fingerprint confirmation immediately before
-       the project directory (and key) is deleted.  You must
-       type the exact Age public key shown on screen.
-       This second prompt is unconditional — it cannot be
-       skipped or scripted away without the actual key value.
+    --force
+        Skip ALL AGE key checks (both the CLI flag pre-check and the
+        interactive fingerprint confirmation). Use only in automated/CI
+        pipelines where the key is confirmed saved by external means.
+        WARNING: destructive — implies --i-have-saved-my-recovery-kit.
 
-  Without the age key ALL encrypted backups are permanently
-  unrecoverable.  Export a recovery kit first:
-    ./utilities/secrets-export-recovery-kit.sh
+SAFETY MODEL:
+    Two-prompt model for age key destruction:
+      1. CLI flag  --i-have-saved-my-recovery-kit  (pre-check).
+      2. Interactive fingerprint confirmation immediately before
+         the project directory (and key) is deleted. You must type
+         the exact Age public key shown on screen.
+         This second prompt cannot be skipped without --force.
+
+    Without the age key ALL encrypted backups are permanently
+    unrecoverable. Export a recovery kit first:
+        ./utilities/secrets-export-recovery-kit.sh
+
+EXAMPLES:
+    sudo bash ./utilities/uninstall-vaultwarden.sh run --dry-run
+    sudo bash ./utilities/uninstall-vaultwarden.sh run --i-have-saved-my-recovery-kit
 ```
 
 ### write-command-reference.sh

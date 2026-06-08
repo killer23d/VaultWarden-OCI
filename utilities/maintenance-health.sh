@@ -13,6 +13,7 @@ source "$PROJECT_ROOT/lib/config.sh"
 source "$PROJECT_ROOT/lib/common.sh"
 init_common_lib "$0"
 source "$PROJECT_ROOT/lib/email.sh"
+DOCKER_PROJECT_LABEL="${DOCKER_PROJECT_LABEL:-label=com.docker.compose.project=vaultwarden-oci}"
 source "$PROJECT_ROOT/lib/docker.sh"
 source "$PROJECT_ROOT/lib/backup-utils.sh"
 source "$PROJECT_ROOT/lib/crypto.sh"
@@ -263,6 +264,7 @@ OPTIONS:
     --quiet, -q         Suppress non-critical output
     --json              Emit machine-readable JSON summary
     --help, -h          Show this help
+    --version, -V       Print the VaultWarden-OCI version and exit
 
 CHECKS PERFORMED:
     - Docker container status and health
@@ -1087,6 +1089,7 @@ OPTIONS:
     --quiet, -q         Suppress non-critical output
     --json              Emit machine-readable JSON summary
     --help, -h          Show this help
+    --version, -V       Print the VaultWarden-OCI version and exit
 
 EXIT CODES:
     0 — All checks passed
@@ -1097,6 +1100,7 @@ EOF
 }
 
 [[ $# -gt 0 && ( "$1" == "--help" || "$1" == "-h" || "$1" == "help" ) ]] && { show_help; exit 0; }
+[[ $# -gt 0 && ( "$1" == "--version" || "$1" == "-V" ) ]] && { print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"; exit 0; }
 
 # Strip the leading 'health' token when the dispatcher prepends the subcommand.
 [[ "${1:-}" == "health" ]] && shift

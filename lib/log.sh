@@ -37,12 +37,14 @@ if [[ -t 1 ]]; then
     COLOR_CYAN=$'\e[0;36m'
     COLOR_RESET=$'\e[0m'
     COLOR_BOLD=$'\e[1m'
+    COLOR_INVERT=$'\e[7m'
 else
     COLOR_RED='' COLOR_BOLD_RED='' COLOR_GREEN='' COLOR_YELLOW=''
     # shellcheck disable=SC2034  # COLOR_CYAN is used by sourcing scripts
     COLOR_BLUE='' COLOR_MAGENTA='' COLOR_CYAN='' COLOR_RESET='' COLOR_BOLD=''
+    COLOR_INVERT=''
 fi
-readonly COLOR_RED COLOR_BOLD_RED COLOR_GREEN COLOR_YELLOW COLOR_BLUE COLOR_MAGENTA COLOR_CYAN COLOR_RESET COLOR_BOLD
+readonly COLOR_RED COLOR_BOLD_RED COLOR_GREEN COLOR_YELLOW COLOR_BLUE COLOR_MAGENTA COLOR_CYAN COLOR_RESET COLOR_BOLD COLOR_INVERT
 
 # Log level filtering for production environments.
 # Static associative array maps level names to numeric weights;
@@ -255,6 +257,6 @@ log_header() {
 export -f log_info log_success log_warn log_error log_debug log_header log_hint log_phase spinner_start spinner_stop set_log_prefix _should_log
 export -f log_rollback log_dry_run
 export -f _get_timestamp
-export COLOR_RED COLOR_BOLD_RED COLOR_GREEN COLOR_YELLOW COLOR_BLUE COLOR_MAGENTA COLOR_CYAN COLOR_RESET COLOR_BOLD
+export COLOR_RED COLOR_BOLD_RED COLOR_GREEN COLOR_YELLOW COLOR_BLUE COLOR_MAGENTA COLOR_CYAN COLOR_RESET COLOR_BOLD COLOR_INVERT
 
 log_debug "Log library loaded"

@@ -20,7 +20,7 @@ log_debug "secrets-rotate: SECRETS_FILE resolved to: ${SECRETS_FILE}"
 trap perform_cleanup EXIT
 
 show_help() {
-    cat << 'HELP_HEADER'
+    cat << 'HELP'
 VaultWarden Secrets — rotate subcommand
 
 USAGE:
@@ -33,35 +33,17 @@ DESCRIPTION:
     re-encrypts secrets.yaml and resyncs Docker secret bind-mount files.
 
 SUPPORTED FIELDS:
-HELP_HEADER
-    # Print the dynamic field list from the schema so this help text is always
-    # in sync with secrets-schema.yaml without manual maintenance.
-    if command -v yq > /dev/null 2>&1 \
-            && [[ -f "${PROJECT_ROOT}/secrets-schema.yaml" ]]; then
-        while IFS= read -r _hkey; do
-            local _hlabel
-            _hlabel=$(schema_field_safe "$_hkey" label 2>/dev/null)
-            if [[ -n "$_hlabel" ]]; then
-                printf '    %-35s (%s)\n' "$_hkey" "$_hlabel"
-            else
-                printf '    %s\n' "$_hkey"
-            fi
-        done < <(schema_keys)
-    else
-        if ! command -v yq > /dev/null 2>&1; then
-            printf '    %s(yq not installed — install with: sudo apt install yq  or  snap install yq)%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
-        elif [[ ! -f "${PROJECT_ROOT}/secrets-schema.yaml" ]]; then
-            printf '    %s(secrets-schema.yaml not found — run setup.sh install first)%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
-        fi
-        printf '    %-35s (auto-generated admin token)\n' "admin_token"
-        printf '    %-35s (bcrypt hash for Caddy)\n' "caddy_admin_password"
-        printf '    %-35s (backup encryption passphrase)\n' "backup_passphrase"
-        printf '    %-35s (Cloudflare DNS API token)\n' "caddy_cloudflare_dns_token"
-        printf '    %-35s (SMTP relay password)\n' "smtp_password"
-        printf '    %-35s (email API key)\n' "email_api_token"
-        printf '    ... run after setup.sh install for the full schema list\n'
-    fi
-    cat << 'HELP_FOOTER'
+    admin_token                         (VaultWarden admin panel token)
+    admin_basic_auth_hash               (Caddy Basic-Auth hash (bcrypt))
+    smtp_password                       (SMTP relay password)
+    email_api_token                     (Email provider API token)
+    backup_passphrase                   (Backup encryption passphrase (auto-generated))
+    push_installation_id                (Push notification installation ID)
+    push_installation_key               (Push notification installation key)
+    caddy_cloudflare_dns_token          (Cloudflare DNS API token (Zone:DNS:Edit + Zone:Zone:Read — used by Caddy ACME DNS-01))
+    cf_worker_bouncer_token             (CrowdSec Cloudflare Workers bouncer token (Zone:Firewall Services:Edit))
+    cloudflare_zone_id                  (Cloudflare Zone ID (32-char hex — required by Caddy and CrowdSec CF bouncer))
+    cf_account_id                       (Cloudflare Account ID (32-char hex — required by CrowdSec CF bouncer))
 
 EMAIL_MODE / EMAIL_PROVIDER quick reference (.env):
     EMAIL_MODE=auto   — tries API → SMTP → Postfix in order
@@ -76,6 +58,7 @@ FLAGS:
     --dry-run    Preview what would change without writing
     --no-backup  Skip creating backup before rotation
     --help, -h   Show this help
+    --version, -V Print the VaultWarden-OCI version and exit
 
 EXAMPLES:
     ./utilities/secrets-rotate.sh admin_token
@@ -83,7 +66,7 @@ EXAMPLES:
     ./utilities/secrets-rotate.sh email_api_token --dry-run
     ./edit-secrets.sh rotate smtp_password
     ./edit-secrets.sh rotate backup_passphrase --no-backup
-HELP_FOOTER
+HELP
 }
 
 DRY_RUN=false
@@ -252,10 +235,9 @@ path, field = sys.argv[1], sys.argv[2]
 val = ''
 pat = re.compile(r'^' + re.escape(field) + r':\s*(.*)$')
 for line in open(path, encoding='utf-8'):
-    m = pat.match(line.rstrip('
-'))
+    m = pat.match(line.rstrip('\n'))
     if m:
-        val = m.group(1).strip().strip('"'')
+        val = m.group(1).strip().strip('"\'')
         break
 print(hashlib.sha256(val.encode()).hexdigest()[:12] if val else 'unset')
 PYEOF
@@ -420,6 +402,7 @@ main() {
             --dry-run)   DRY_RUN=true;     shift ;;
             --no-backup) SKIP_BACKUP=true; shift ;;
             --help|-h)   show_help; exit 0 ;;
+            --version|-V) print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"; exit 0 ;;
             *) log_error "Unknown option: '$1'"; show_help; exit 1 ;;
         esac
     done

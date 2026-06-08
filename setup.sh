@@ -43,6 +43,7 @@ source "${SCRIPT_DIR}/lib/config.sh"
 source "${SCRIPT_DIR}/lib/common.sh"
 init_common_lib "$0"
 source "${SCRIPT_DIR}/lib/crypto.sh"
+DOCKER_PROJECT_LABEL="${DOCKER_PROJECT_LABEL:-label=com.docker.compose.project=vaultwarden-oci}"
 source "${SCRIPT_DIR}/lib/docker.sh"
 source "${SCRIPT_DIR}/lib/backup-utils.sh"
 source "${SCRIPT_DIR}/lib/secrets.sh"
@@ -420,8 +421,7 @@ CRED_BANNER
     fi
 
     if [[ "$mode" == "interactive" ]]; then
-        printf '\n%s!!! PRESS ENTER TO CLEAR THIS SCREEN AND FINISH !!!%s\n' "${COLOR_RED}" "${COLOR_RESET}"
-        [[ -t 0 ]] && read -r
+        press_enter_to_continue " Press [Enter] to clear this screen and finish..."
         clear
     fi
 }
