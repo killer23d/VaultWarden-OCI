@@ -177,7 +177,9 @@ HEADER
     # Utility entry points (sorted for deterministic output)
     while IFS= read -r script; do
         [[ -f "$script" ]] && generate_script_help "$script"
-    done < <(find "${SCRIPT_DIR}/utilities" -maxdepth 1 -name '*.sh' -type f | sort)
+    done < <(find "${SCRIPT_DIR}/utilities" -maxdepth 1 -name '*.sh' -type f \
+        | grep -v 'secrets-edit\.sh' \
+        | sort)
 }
 
 tmp_file="$(mktemp "${OUTPUT_FILE}.tmp.XXXXXX")"
