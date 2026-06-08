@@ -330,8 +330,9 @@ _cs_ensure_fw_bouncer_key() {
         local _fresh_key
         _fresh_key="$(openssl rand -hex 32)"
         cscli bouncers delete crowdsecurity/firewall-bouncer 2>/dev/null || true
-        cscli bouncers add crowdsecurity/firewall-bouncer --key "$_fresh_key" 2>/dev/null || true
+        cscli bouncers add crowdsecurity/firewall-bouncer --key "$_fresh_key" >/dev/null 2>&1 || true
         sed -i "s|^api_key:.*|api_key: ${_fresh_key}|" "$_cfg"
+        _CS_FW_BOUNCER_KEY_GENERATED="$_fresh_key"
         log_success "Firewall bouncer key regenerated and written to config."
         return 0
     fi
@@ -341,24 +342,25 @@ _cs_ensure_fw_bouncer_key() {
         _existing_key="$(grep 'api_key:' "$_cfg" 2>/dev/null | awk '{print $2}' | head -1 || true)"
         if [[ -n "$_existing_key" && "$_existing_key" != "CHANGE_ME"* ]]; then
             log_info "Firewall bouncer not found in LAPI — re-registering with existing config key..."
-            if ! cscli bouncers add crowdsecurity/firewall-bouncer --key "$_existing_key" 2>/dev/null; then
+            if ! cscli bouncers add crowdsecurity/firewall-bouncer --key "$_existing_key" >/dev/null 2>&1; then
                 log_warn "Existing key rejected by LAPI (likely revoked) — generating a fresh key..."
                 _existing_key="$(openssl rand -hex 32)"
                 cscli bouncers delete crowdsecurity/firewall-bouncer 2>/dev/null || true
-                cscli bouncers add crowdsecurity/firewall-bouncer --key "$_existing_key" 2>/dev/null || true
+                cscli bouncers add crowdsecurity/firewall-bouncer --key "$_existing_key" >/dev/null 2>&1 || true
                 sed -i "s|^api_key:.*|api_key: ${_existing_key}|" "$_cfg"
+                _CS_FW_BOUNCER_KEY_GENERATED="$_existing_key"
                 log_success "Fresh firewall bouncer key generated and written to config."
             else
                 log_success "Firewall bouncer re-registered in LAPI."
             fi
         else
-            # Config has a placeholder — generate a brand-new key and write it.
             log_warn "Firewall bouncer not in LAPI and config key is missing/placeholder — generating fresh key."
             local _new_key
             _new_key="$(openssl rand -hex 32)"
             cscli bouncers delete crowdsecurity/firewall-bouncer 2>/dev/null || true
-            cscli bouncers add crowdsecurity/firewall-bouncer --key "$_new_key" 2>/dev/null || true
+            cscli bouncers add crowdsecurity/firewall-bouncer --key "$_new_key" >/dev/null 2>&1 || true
             sed -i "s|^api_key:.*|api_key: ${_new_key}|" "$_cfg"
+            _CS_FW_BOUNCER_KEY_GENERATED="$_new_key"
             log_success "Fresh firewall bouncer key generated and written to config."
         fi
     fi
@@ -373,7 +375,7 @@ FORCE=false
 AUTONOMOUS_MODE=false
 USE_LATEST=false
 ADMIN_IP=""
-
+_CS_FW_BOUNCER_KEY_GENERATED=""
 CROWDSEC_VERSION="${CROWDSEC_VERSION:-}"
 CF_WORKER_BOUNCER_VERSION="${CF_WORKER_BOUNCER_VERSION:-}"
 
@@ -971,15 +973,21 @@ else
         if [[ -t 0 ]]; then
             printf '%s' "${COLOR_RED}"
             cat << 'BOUNCER_BANNER'
-  ╔══════════════════════════════════════════════════════════════════╗
-  ║   🔑  CROWDSEC CLOUDFLARE WORKERS BOUNCER API KEY — SAVE THIS  ║
-  ║   This key is stored in .env as CROWDSEC_CF_BOUNCER_API_KEY    ║
-  ╚══════════════════════════════════════════════════════════════════╝
+  ╔══════════════════════════════════════════════════════════════════════╗
+  ║        🔑  CROWDSEC API KEYS GENERATED — SAVE THESE NOW           ║
+  ╚══════════════════════════════════════════════════════════════════════╝
 BOUNCER_BANNER
             printf '%s' "${COLOR_RESET}"
-            printf '\n  Bouncer API key: %s%s%s\n\n' \
-                "${COLOR_RED}${COLOR_GREEN}" "${_CF_BOUNCER_KEY}" "${COLOR_RESET}"
-            press_enter_to_continue " Press [Enter] after saving the bouncer API key..."
+            printf '\n'
+            if [[ -n "$_CS_FW_BOUNCER_KEY_GENERATED" ]]; then
+                printf '  Firewall bouncer key (written to crowdsec-firewall-bouncer.yaml):\n'
+                printf '  %s%s%s\n\n' \
+                    "${COLOR_RED}" "${_CS_FW_BOUNCER_KEY_GENERATED}" "${COLOR_RESET}"
+            fi
+            printf '  Cloudflare Workers bouncer key (stored in .env as CROWDSEC_CF_BOUNCER_API_KEY):\n'
+            printf '  %s%s%s\n\n' \
+                "${COLOR_RED}" "${_CF_BOUNCER_KEY}" "${COLOR_RESET}"
+            press_enter_to_continue " Press [Enter] after saving all keys above..."
             clear
         fi
     fi
