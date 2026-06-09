@@ -1,4 +1,8 @@
 #!/bin/sh
+# caddy/entrypoint.sh - Caddy Entrypoint Script - VaultWarden-OCI
+# Purpose: Securely load Docker secrets into environment variables
+# Security: Validates secrets before starting Caddy
+#
 # NOTE: This script runs inside the Alpine-based Caddy container which has
 # busybox ash, not bash. POSIX sh only — do NOT add bash constructs or pipes
 # that rely on pipefail (ash does not support set -o pipefail). Test all
