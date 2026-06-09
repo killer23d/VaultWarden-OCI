@@ -2,7 +2,6 @@
 # caddy/entrypoint.sh - Caddy Entrypoint Script - VaultWarden-OCI
 # Purpose: Securely load Docker secrets into environment variables
 # Security: Validates secrets before starting Caddy
-#
 # NOTE: This script runs inside the Alpine-based Caddy container which has
 # busybox ash, not bash. POSIX sh only — do NOT add bash constructs or pipes
 # that rely on pipefail (ash does not support set -o pipefail). Test all
@@ -18,6 +17,7 @@ if [ "$DEBUG_ENTRYPOINT" = "true" ]; then
     echo "WARNING: DEBUG_ENTRYPOINT enabled — credential names will be logged — DISABLE IN PRODUCTION" >&2
 fi
 
+# =============================================================================
 # read_secret <secret_path>
 #
 # Reads the content of a Docker secret file and writes it to stdout.
@@ -30,6 +30,7 @@ fi
 # stdout-returning function (POSIX sh has no namerefs). The second-arg
 # pattern silently leaves the variable unset and triggers an unbound-
 # variable abort under `set -eu`.
+# =============================================================================
 read_secret() {
     _rs_path="$1"
 
@@ -57,12 +58,17 @@ read_secret() {
     unset _rs_path _rs_out
 }
 
+# =============================================================================
+# log_warn <message>
+#
 # Writes a WARNING line to stderr with a consistent prefix so operators can
 # grep journalctl / docker logs for degraded-mode events.
+# =============================================================================
 log_warn() {
     echo "[WARN] caddy-entrypoint: $*" >&2
 }
 
+# =============================================================================
 # Ensure log directory AND log files exist and are
 # writable by this process before caddy run is called.
 #
@@ -71,6 +77,7 @@ log_warn() {
 #   is started with stdout-only logging when the log files cannot be written.
 #   CADDY_DEGRADED=true is exported so maintenance.sh health can surface the condition.
 #   The operator can fix file ownership on the host and then restart Caddy.
+# =============================================================================
 
 # Directory is created and chowned to UID 2000 by init-permissions before
 # this container starts. Just verify it is accessible.
@@ -108,6 +115,7 @@ if [ "$_log_touch_failed" = "true" ]; then
     export CADDY_DEGRADED=true
 fi
 
+# Final writability probe (only if touch succeeded)
 if [ "$CADDY_DEGRADED" = "false" ] && ! test -w /var/log/caddy/access.log; then
     log_warn "/var/log/caddy/access.log exists but is NOT writable — falling back to stdout-only logging."
     log_warn ""
@@ -152,8 +160,12 @@ case "$DOMAIN_NAME" in
 esac
 echo "DOMAIN_NAME validated: ${DOMAIN_NAME}"
 
+# =============================================================================
+# SECURITY: Load Cloudflare API Token
+#
 # Capture read_secret output via $(...) command substitution.
 # Skip when TLS_PROVIDER=acme_http (token not required).
+# =============================================================================
 TLS_PROVIDER=${TLS_PROVIDER:-cloudflare}
 
 # Validate TLS_PROVIDER early so an unsupported value produces a clear message
@@ -197,6 +209,9 @@ else
     export CLOUDFLARE_API_TOKEN=""
 fi
 
+# =============================================================================
+# SECURITY: Load Admin Basic Auth Hash
+# =============================================================================
 ADMIN_HASH_FULL=$(read_secret /run/secrets/admin_basic_auth_hash)
 
 if [ -z "$ADMIN_HASH_FULL" ]; then
