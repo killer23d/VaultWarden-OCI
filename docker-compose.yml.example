@@ -99,7 +99,7 @@ services:
   # -------------------- Core service: VaultWarden --------------------
   vaultwarden:
     container_name: vaultwarden_app
-    image: ghcr.io/dani-garcia/vaultwarden:${VAULTWARDEN_VERSION:-1.35.4}
+    image: ghcr.io/dani-garcia/vaultwarden:${VAULTWARDEN_VERSION:-1.36.0}
     restart: unless-stopped
     user: "${PUID}:${PGID}"
     # memswap_limit equal to mem_limit disables swap for this container, preventing
@@ -322,7 +322,7 @@ services:
   # -------------------- Optional sidecar: Postfix relay --------------------
   postfix:
     container_name: vaultwarden_postfix
-    image: boky/postfix:${POSTFIX_VERSION:-4.3.0}
+    image: boky/postfix:${POSTFIX_VERSION:-5.1.0}
     restart: unless-stopped
 
     depends_on:
