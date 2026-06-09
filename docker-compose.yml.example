@@ -218,12 +218,18 @@ services:
 
   # -------------------- Core service: Caddy reverse proxy --------------------
   caddy:
-    container_name: vaultwarden_caddy
+    ccontainer_name: vaultwarden_caddy
     build:
       context: ./caddy
       dockerfile: Dockerfile
+      args:
+        # Passes the pinned version from .env into the Dockerfile ARG.
+        # Run: docker compose build --pull --no-cache caddy
+        # after changing CADDY_VERSION in .env to rebuild both stages.
+        # Do NOT set CADDY_VERSION=latest — xcaddy builds must be pinned.
+        CADDY_VERSION: ${CADDY_VERSION:-2.11.4}
     restart: unless-stopped
-    user: root
+    user: "2000:2000"
 
     depends_on:
       init-permissions:

@@ -171,8 +171,8 @@ create_env_file() {
         grep -qF "ADMIN_EMAIL=$ADMIN_EMAIL"      "$env_file" && email_matches=true
 
         if [[ "$USE_LATEST" == "true" ]]; then
+            # CADDY_VERSION is excluded — it is never set to 'latest'.
             if grep -qE '^VAULTWARDEN_VERSION=latest' "$env_file" && \
-               grep -qE '^CADDY_VERSION=latest'       "$env_file" && \
                grep -qE '^POSTFIX_VERSION=latest'     "$env_file" && \
                grep -qE '^BUSYBOX_VERSION=latest'     "$env_file"; then
                 latest_matches=true
@@ -254,7 +254,6 @@ create_env_file() {
 
         awk '{
             sub(/^VAULTWARDEN_VERSION=.*/, "VAULTWARDEN_VERSION=latest");
-            sub(/^CADDY_VERSION=.*/,       "CADDY_VERSION=latest");
             sub(/^POSTFIX_VERSION=.*/,     "POSTFIX_VERSION=latest");
             sub(/^BUSYBOX_VERSION=.*/,     "BUSYBOX_VERSION=latest");
             print;
