@@ -244,8 +244,6 @@ require_project_state_ready() {
             log_error "require_project_state_ready: cannot create PROJECT_STATE_DIR: $state_dir"
             return 1
         }
-        # Set ownership to the real (non-root) user so non-root scripts can
-        # create subdirectories (e.g. backups/) without sudo escalation.
         if [[ -n "$_real_user" && "$_real_user" != "root" ]]; then
             chown "$_real_user" "$state_dir" 2>/dev/null || \
                 log_warn "require_project_state_ready: could not set owner of $state_dir to $_real_user"
@@ -389,14 +387,10 @@ setup_data_volume() {
         return 1
     fi
 
-    # ------------------------------------------------------------------
-    # Step 2: Filesystem detection and format decision.
-    # ------------------------------------------------------------------
     local fs_type
     fs_type=$(blkid -o value -s TYPE "$device" 2>/dev/null || true)
 
     if [[ -n "$fs_type" ]]; then
-        # Device already carries a filesystem.
         if [[ "$fs_type" == "ext4" || "$fs_type" == "xfs" ]]; then
             if [[ "$dry_run" == "true" ]]; then
                 log_info "[DRY RUN] Existing $fs_type filesystem detected on $device."
@@ -414,9 +408,6 @@ setup_data_volume() {
             return 1
         fi
     else
-        # No recognised filesystem. Perform a deep wipefs scan to detect
-        # any non-filesystem data signatures before deciding what to do.
-
         if [[ "$dry_run" == "true" ]]; then
             log_info "[DRY RUN] No filesystem detected on $device — would run wipefs deep scan."
             if [[ "$force_format" == "true" ]]; then
@@ -455,7 +446,6 @@ setup_data_volume() {
             fi
             log_info "Device size: $(( _dev_bytes / 1073741824 )) GiB."
 
-            # Deep signature scan via wipefs.
             # IMPORTANT: declare local first, then assign, so the exit code
             # of the subshell is captured in wipefs_rc rather than always
             # receiving the exit code of the 'local' builtin (which is always 0).
@@ -465,8 +455,6 @@ setup_data_volume() {
             wipefs_rc=$?
 
             if (( wipefs_rc != 0 )); then
-                # wipefs is unavailable or failed. Treat as "unknown signatures"
-                # and refuse unless the operator has explicitly forced the format.
                 if [[ "$force_format" != "true" ]]; then
                     log_error "Cannot perform a deep signature scan of $device (wipefs unavailable or failed)."
                     log_error "Refusing to format without confirmation to avoid accidental data loss."
@@ -478,16 +466,12 @@ setup_data_volume() {
                 fi
                 log_warn "wipefs scan skipped (tool unavailable). Proceeding because DATA_VOLUME_FORCE_FORMAT=true."
             else
-                # wipefs ran successfully. Check whether it found any signatures.
-                # wipefs --parsable emits one header line plus one line per
-                # signature found. Strip the header, then count data lines.
                 local sig_count
                 sig_count=$(printf '%s\n' "$wipefs_out" \
                             | grep -v '^#' \
                             | grep -c '[^[:space:]]' 2>/dev/null || true)
 
                 if (( sig_count > 0 )); then
-                    # Signatures were detected. Show them for the operator's benefit.
                     log_warn "wipefs detected ${sig_count} data signature(s) on $device:"
                     printf '%s\n' "$wipefs_out" | grep -v '^#' | while IFS= read -r _sig_line; do
                         [[ -n "$_sig_line" ]] && log_warn "  $_sig_line"
@@ -506,8 +490,6 @@ setup_data_volume() {
                     log_warn "DATA_VOLUME_FORCE_FORMAT=true — proceeding despite detected signatures."
                     log_warn "ALL DATA ON $device WILL BE ERASED."
                 else
-                    # No signatures found. A force-format flag is still required so
-                    # that the operator's intent to format is always explicit.
                     if [[ "$force_format" != "true" ]]; then
                         log_error "No filesystem or data signatures found on $device."
                         log_error "To format this device as ext4 and use it as the VaultWarden data volume,"
@@ -523,10 +505,6 @@ setup_data_volume() {
                 fi
             fi
 
-            # All safety gates passed. Format the device.
-            # Note: -F (force) is intentionally omitted so that mkfs.ext4 can
-            # apply its own independent safety checks (e.g. refusing to format
-            # a device with an active partition table).
             log_info "Formatting $device as ext4 (label: vw-data)..."
             local mkfs_out
             mkfs_out=$(mkfs.ext4 -L vw-data "$device" 2>&1) || {
@@ -537,14 +515,10 @@ setup_data_volume() {
                 return 1
             }
             log_success "Formatted $device as ext4 (label: vw-data)"
-            # After a fresh format the detected type is always ext4.
             fs_type="ext4"
         fi
     fi
 
-    # ------------------------------------------------------------------
-    # Step 3: Mount point directory.
-    # ------------------------------------------------------------------
     if [[ "$dry_run" == "true" ]]; then
         [[ -d "$mount_point" ]] \
             && log_info "[DRY RUN] Mount point $mount_point already exists." \
@@ -572,8 +546,6 @@ setup_data_volume() {
     [[ -n "$dev_uuid" ]] \
         || { log_error "Cannot determine UUID for $device — cannot write a safe fstab entry"; return 1; }
 
-    # fs_type is set either from the blkid detection above or from the fresh
-    # format path (always ext4). Guard against an unexpected empty value.
     local fstab_fs_type="${fs_type:-ext4}"
 
     local _uuid_in_fstab=false _mp_matches=false _old_mp=""

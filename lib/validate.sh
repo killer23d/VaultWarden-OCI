@@ -34,12 +34,11 @@ validate_email() {
     # RFC 5321 §4.5.3.1: maximum total length is 254 characters.
     [[ ${#email} -le 254 ]] || return 1
 
-    # Must contain exactly one '@'.
     local local_part domain
     case "$email" in
-        *@*@*) return 1 ;;   # multiple '@' — invalid
-        *@*)   ;;            # exactly one '@' — proceed
-        *)     return 1 ;;   # no '@' — invalid
+        *@*@*) return 1 ;;
+        *@*)   ;;
+        *)     return 1 ;;
     esac
     local_part="${email%%@*}"
     domain="${email#*@}"
@@ -50,9 +49,8 @@ validate_email() {
     # RFC 5321 §4.5.3.1: domain ≤ 253 octets.
     [[ ${#domain} -le 253 ]] || return 1
 
-    # Local-part: reject leading or trailing dots; allow a-z A-Z 0-9 . _ % + -
-    [[ "$local_part" =~ ^\. ]] && return 1   # leading dot
-    [[ "$local_part" =~ \.$ ]] && return 1   # trailing dot
+    [[ "$local_part" =~ ^\. ]] && return 1
+    [[ "$local_part" =~ \.$ ]] && return 1
     [[ "$local_part" =~ ^[a-zA-Z0-9._%+-]+$ ]] || return 1
 
     # Domain: must have at least one dot; accept subdomains (mail.sub.example.com);
@@ -84,14 +82,12 @@ _validate_domain_reason() {
         return 0
     fi
 
-    # 2. Reject embedded paths (anything after the first '/').
     if [[ "$raw" == */* ]]; then
         printf 'DOMAIN must not contain a path — '
         printf 'use "%s" instead of "%s".' "${raw%%/*}" "$raw"
         return 0
     fi
 
-    # 3. Reject embedded ports (colon followed by digits at the end).
     if [[ "$raw" =~ :[0-9]+$ ]]; then
         local host_only="${raw%:*}"
         printf 'DOMAIN must not include a port number — '
@@ -150,7 +146,6 @@ your-domain.com|yourdomain.com|hostname|change_me|changeme|\
     IFS='.'
     local label tld=''
     for label in $raw; do
-        # Track last label as TLD candidate.
         tld="$label"
         [[ -n "$label" ]] || {
             IFS="$IFS_SAVE"
@@ -179,7 +174,6 @@ your-domain.com|yourdomain.com|hostname|change_me|changeme|\
         return 0
     fi
 
-    # Valid — return empty string.
     printf ''
 }
 

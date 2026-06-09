@@ -76,7 +76,6 @@ _json_escape() {
     printf '%s' "$1" | awk '
     BEGIN {
         ORS = ""
-        # Build ordinal lookup table in pure awk — no shell subprocess per char.
         for (i = 0; i <= 127; i++) {
             ord_map[sprintf("%c", i)] = i
         }
@@ -175,7 +174,6 @@ list_backups() {
     log_info "Available backups:"
     echo ""
 
-    # Resolve reset sequence once — empty string when not a TTY.
     local _nc
     [[ -t 1 ]] && _nc="${COLOR_RESET}" || _nc=""
 
@@ -197,7 +195,6 @@ list_backups() {
         fi
     done
 
-    # Print the column header once, before iterating over backup types.
     if [[ "${_has_any_files}" == "true" ]]; then
         printf '%-11s  %-44s  %10s  %s\n' "TYPE" "FILE" "SIZE" "AGE"
         printf '%-11s  %-44s  %10s  %s\n' "-----------" "--------------------------------------------" "----------" "--------"
@@ -410,10 +407,6 @@ verify_backup_integrity() {
     db_base=$(basename "$db_path")
     local db_copy="$work_dir/$db_base"
 
-    # Use SQLite Online Backup API via the sqlite3 .backup dot-command.
-    # This acquires the correct shared read lock and integrates any pending WAL
-    # frames before writing the copy, guaranteeing a consistent snapshot even
-    # while VaultWarden is running in WAL mode.
     log_info "Creating consistent DB snapshot via SQLite Online Backup API: $db_base"
     if ! sqlite3 "$db_path" ".backup '${db_copy}'" 2>/dev/null; then
         log_error "verify_backup_integrity: sqlite3 .backup failed for: $db_path"
@@ -466,8 +459,6 @@ check_backup_disk_space() {
     local required_space_mb="${2:-1000}"
 
     if [[ ! -d "$target_dir" ]]; then
-        # Warn when directory does not yet exist — this may indicate a
-        # misconfigured BACKUP_DIR rather than a first-run situation.
         log_warn "check_backup_disk_space: target directory does not exist yet — disk space check skipped: $target_dir"
         return 0
     fi
@@ -589,9 +580,6 @@ cleanup_old_backups() {
             local age_days
             age_days=$(_backup_filename_age_days "$backup_file")
             if [[ -z "$age_days" ]]; then
-                # No timestamp in filename — skip deletion to avoid relying on
-                # unreliable ctime semantics (ctime resets on chmod/chown).
-                # Operator must rename the file to include YYYYMMDD-HHMMSS.
                 log_warn "Retention: $(basename "$backup_file") has no filename timestamp — skipping deletion." \
                          " Rename the file to include YYYYMMDD-HHMMSS to enable automatic cleanup."
                 continue
@@ -740,8 +728,6 @@ create_backup_metadata() {
         vw_version=$(docker compose exec -T vaultwarden /vaultwarden --version 2>/dev/null | head -1 || echo "unknown")
     fi
 
-    # Create the metadata file with secure permissions before writing so
-    # that the file is never briefly world-readable at umask 022 (mode 644).
     install -m 600 /dev/null "$metadata_file" || {
         log_error "Failed to secure metadata file: $metadata_file"
         return 1

@@ -50,7 +50,6 @@ resolve_age_key_path() {
     )
     for _p in "${_candidates[@]}"; do
         [[ -z "$_p" ]] && continue
-        # Absolutify relative paths
         if [[ "$_p" != /* ]]; then
             _abs="${PROJECT_ROOT:-$(pwd)}/$_p"
         else
@@ -239,8 +238,6 @@ encrypt_sops_file() {
         return 1
     fi
 
-    # Use a .yaml suffix so SOPS can always infer the format on this side too
-    # (belt-and-braces alongside the explicit --input-type flag below).
     local tmp_file
     tmp_file=$(mktemp "${file%.*}.sops.XXXXXX.yaml") || {
         log_error "Failed to create temp file for SOPS encryption: $file"
@@ -249,7 +246,6 @@ encrypt_sops_file() {
 
     install -m 600 /dev/null "$tmp_file"
 
-    # Copy original content into the temp file so SOPS can read its format
     if ! cp -- "$file" "$tmp_file"; then
         rm -f "$tmp_file"
         log_error "Failed to copy file for SOPS encryption: $file"
@@ -331,8 +327,6 @@ encrypt_sops_file() {
         else
             log_error "  CRITICAL: failed to restore original file from backup: $pre_write_backup"
             log_error "  Manual recovery required. Backup is at: $pre_write_backup"
-            # Do NOT remove the backup if restore failed — it is the only copy.
-            # Clear the RETURN trap so the trap doesn't delete the last copy.
             trap - RETURN
             return 1
         fi
@@ -403,7 +397,6 @@ generate_age_key() {
         return 1
     fi
 
-    # Belt-and-braces: enforce 600 even if umask was overridden externally
     if ! secure_file "$output_file" 600; then
         return 1
     fi
@@ -454,8 +447,6 @@ check_age_key() {
     fi
 
     if has_command age; then
-        # Use an unpredictable nonce so a stub or broken age binary that always
-        # returns a fixed string cannot fool the round-trip check.
         local test_plaintext
         test_plaintext="vaultwarden-age-key-check-$(date +%s)-$$"
         local tmp_enc
@@ -963,7 +954,6 @@ simple_verify_age_key() {
     real_user=$(get_real_user 2>/dev/null || echo "root")
     real_group=$(id -gn "$real_user" 2>/dev/null || echo "$real_user")
     local current_owner current_group current_owner_group
-    # _stat_owner/_stat_group from this file handle GNU vs. BSD stat portably.
     current_owner=$(_stat_owner "$age_key" 2>/dev/null || echo "")
     current_group=$(_stat_group "$age_key" 2>/dev/null || echo "")
     current_owner_group="${current_owner}:${current_group}"
@@ -1086,7 +1076,6 @@ EOF
 
     chmod 600 "$output_file"
 
-    # Clear the RETURN trap on success so the output file is kept.
     trap - RETURN
 
     log_success "Password manager backup created: $output_file"
@@ -1315,7 +1304,6 @@ create_printable_key_backup() {
     local key_content_escaped
     key_content_escaped=$(_html_escape "$key_content")
 
-    # Feed key via stdin to prevent cmdline exposure.
     local qr_img_tag=""
     if command -v qrencode >/dev/null 2>&1; then
         local qr_base64

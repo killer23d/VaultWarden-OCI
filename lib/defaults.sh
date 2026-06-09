@@ -26,8 +26,6 @@ readonly _VW_DEFAULT_DATA_MOUNT="${_VW_DEFAULT_DATA_MOUNT:-/opt/vaultwarden/data
 # Used as the fallback when PUID / PGID are absent from .env.
 # Change here and the correct UID:GID is applied everywhere in one edit.
 # ---------------------------------------------------------------------------
-# lib/defaults.sh (excerpt — add the three new arrays immediately after the existing block)
-
 readonly _VW_DEFAULT_PUID="${_VW_DEFAULT_PUID:-1001}"
 readonly _VW_DEFAULT_PGID="${_VW_DEFAULT_PGID:-1001}"
 

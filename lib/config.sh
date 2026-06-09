@@ -208,7 +208,6 @@ _set_env_var() {
         printf '%s=%s\n' "$key" "$value" >> "$tmp_file"
     fi
 
-    # Preserve the original file mode on the replacement.
     chmod --reference="$file" "$tmp_file" 2>/dev/null || true
     mv "$tmp_file" "$file"
 }
