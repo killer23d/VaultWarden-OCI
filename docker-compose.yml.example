@@ -53,8 +53,8 @@ services:
         mkdir -p /data /logs/vaultwarden /logs/caddy /logs/postfix &&
 
         touch /logs/caddy/access.log /logs/caddy/security.log &&
-        chown 0:0 /logs/caddy/access.log /logs/caddy/security.log &&
-        chmod 644 /logs/caddy/access.log /logs/caddy/security.log &&
+        chown 2000:2000 /logs/caddy/access.log /logs/caddy/security.log &&
+        chmod 640 /logs/caddy/access.log /logs/caddy/security.log &&
 
         chown -R ${PUID}:${PGID} /data /logs &&
         find /data -type d -exec chmod 750 {} + 2>/dev/null || true &&
@@ -62,18 +62,18 @@ services:
         find /logs -type d -exec chmod 750 {} + 2>/dev/null || true &&
         find /logs -path '*/caddy' -prune -o -type f -exec chmod 640 {} + 2>/dev/null || true &&
 
-        chmod 755 /logs/caddy &&
+        chown 2000:2000 /logs/caddy &&
+        chmod 750 /logs/caddy &&
 
-        chown 0:0 /logs/caddy/access.log /logs/caddy/security.log &&
-        chmod 644 /logs/caddy/access.log /logs/caddy/security.log &&
-
-        mkdir -p /data/caddy /config/caddy &&
-        chown 0:0 /data/caddy /config/caddy &&
-        chmod 755 /data/caddy /config/caddy &&
+        chown 2000:2000 /logs/caddy/access.log /logs/caddy/security.log &&
+        chmod 640 /logs/caddy/access.log /logs/caddy/security.log &&
 
         mkdir -p /data/caddy/certificates /data/caddy/locks /data/caddy/ocsp &&
-        chown -R 0:0 /data/caddy &&
-        find /data/caddy -type d -exec chmod 755 {} + 2>/dev/null || true &&
+        mkdir -p /config/caddy &&
+        chown -R 2000:2000 /data/caddy /config/caddy &&
+        find /data/caddy -type d -exec chmod 750 {} + 2>/dev/null || true &&
+        find /data/caddy -type f -exec chmod 640 {} + 2>/dev/null || true &&
+        chmod 750 /config/caddy &&
 
         chmod 700 /secrets 2>/dev/null || true &&
         chown 0:${PGID} /secrets/.docker_secrets 2>/dev/null || true &&
@@ -282,6 +282,16 @@ services:
     cap_add:
       - NET_BIND_SERVICE
 
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+      - /run:size=16m,mode=0755
+
+    mem_limit: 256M
+    memswap_limit: 256M
+    cpus: "0.25"
+    pids_limit: 200
+
     logging:
       driver: "json-file"
       options:
@@ -302,7 +312,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512M
+          memory: 256M
           cpus: '0.25'
           pids: 200
         reservations:
