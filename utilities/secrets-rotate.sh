@@ -219,14 +219,14 @@ do_rotate() {
     old_fingerprint=$(python3 - "$temp_plain" "$actual_field" <<'PYEOF' 2>/dev/null || true
 import sys, hashlib, re
 path, field = sys.argv[1], sys.argv[2]
-val = ''
-pat = re.compile(r'^' + re.escape(field) + r':\s*(.*)$')
-for line in open(path, encoding='utf-8'):
-    m = pat.match(line.rstrip('\n'))
+val = ""
+pat = re.compile("^" + re.escape(field) + r":\s*(.*)$")
+for line in open(path, encoding="utf-8"):
+    m = pat.match(line.rstrip("\n"))
     if m:
-        val = m.group(1).strip().strip('"\'')
+        val = m.group(1).strip().strip(chr(34) + chr(39))
         break
-print(hashlib.sha256(val.encode()).hexdigest()[:12] if val else 'unset')
+print(hashlib.sha256(val.encode()).hexdigest()[:12] if val else "unset")
 PYEOF
 )
 
