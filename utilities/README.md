@@ -150,11 +150,15 @@ sudo utilities/setup-firewall.sh --dry-run
 ### `setup-storage.sh` — Storage setup and volume migration
 
 Creates the project directory structure, re-checks permissions, or migrates
-from boot volume to a dedicated data volume. Consolidates the former
-standalone migration helper into this script.
+from boot volume to a dedicated data volume. Existing ext4/xfs filesystems are
+adopted only after confirmation; blank devices are formatted only when
+`DATA_VOLUME_FORCE_FORMAT=true` is set. Consolidates the former standalone
+migration helper into this script.
 
 ```bash
 sudo utilities/setup-storage.sh --mode setup           # create layout (first run)
+sudo DATA_VOLUME_FORCE_FORMAT=true utilities/setup-storage.sh \
+  --mode setup --data-device /dev/disk/by-id/your-volume
 sudo utilities/setup-storage.sh --mode verify          # re-check permissions only
 sudo utilities/setup-storage.sh --mode migrate         # interactive block-device migration
 sudo utilities/setup-storage.sh --mode migrate status  # migration status
@@ -186,7 +190,7 @@ sudo utilities/setup-secrets.sh rotate admin_token    # rotate one credential
 sudo utilities/setup-secrets.sh rotate                # rotate all credentials
 sudo utilities/setup-secrets.sh export-recovery-kit
 
-# Emergency break-glass admin (OCI serial console recovery)
+# Emergency break-glass admin (serial-console or local recovery)
 sudo utilities/setup-secrets.sh breakglass create
 sudo utilities/setup-secrets.sh breakglass status
 sudo utilities/setup-secrets.sh breakglass remove --force

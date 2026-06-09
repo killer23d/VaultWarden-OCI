@@ -53,10 +53,43 @@ PGID=1000                              # Container file ownership GID
 PROJECT_STATE_DIR=/var/lib/vaultwarden # Data, logs, and config root
 TZ=UTC                                 # Timezone (affects all container logs)
 SSH_PORT=22                            # SSH port (used by CrowdSec SSH scenario)
-SSH_LOG_PATH=/var/log/secure           # Auto-detected by setup.sh (OCI default)
+SSH_LOG_PATH=/var/log/auth.log         # Auto-detected by setup.sh on Ubuntu
 # Debian/Ubuntu: /var/log/auth.log
 # Oracle Linux / RHEL: /var/log/secure
 ```
+
+---
+
+## 💾 Storage Mode
+
+Boot-volume mode is the default: leave `DATA_VOLUME_DEVICE` blank and keep `PROJECT_STATE_DIR=/var/lib/vaultwarden`.
+
+```bash
+DATA_VOLUME_DEVICE=
+DATA_VOLUME_MOUNT=/mnt/vw-data
+PROJECT_STATE_DIR=/var/lib/vaultwarden
+```
+
+Separate-volume mode points all persistent state at a dedicated block device or mounted filesystem. Prefer a stable `/dev/disk/by-id/...` path when available, and make `PROJECT_STATE_DIR` match `DATA_VOLUME_MOUNT`.
+
+```bash
+DATA_VOLUME_DEVICE=/dev/disk/by-id/your-volume
+DATA_VOLUME_MOUNT=/mnt/vw-data
+PROJECT_STATE_DIR=/mnt/vw-data
+```
+
+`setup.sh` adopts existing ext4/xfs filesystems only after operator confirmation. In non-interactive automation, set `DATA_VOLUME_EXISTING_FS_OK=true` for that run if you intentionally want to adopt an existing filesystem. Blank devices are formatted as ext4 only when `DATA_VOLUME_FORCE_FORMAT=true` is set for that setup run.
+
+```bash
+sudo DATA_VOLUME_FORCE_FORMAT=true ./setup.sh install \
+  --domain vault.yourdomain.com \
+  --email admin@yourdomain.com \
+  --auto \
+  --data-device /dev/disk/by-id/your-volume \
+  --data-mount /mnt/vw-data
+```
+
+See [VOLUME-MIGRATION.md](VOLUME-MIGRATION.md) before moving existing production data.
 
 ---
 

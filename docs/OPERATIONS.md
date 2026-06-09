@@ -317,7 +317,7 @@ make update-system
 
 > **`make update-system` scope:** Updates OS packages only. For a full update (containers + system), use `make update`.
 >
-> **Rollback scope:** `restore.sh` covers data and configuration only. OS packages and the Docker engine are **not** rolled back automatically — ensure you have an OCI instance snapshot or are prepared to re-run the upgrade if the system update causes issues.
+> **Rollback scope:** `restore.sh` covers data and configuration only. OS packages and the Docker engine are **not** rolled back automatically — ensure you have a provider/VM snapshot or another host rollback plan before system updates.
 
 ### Version Management
 

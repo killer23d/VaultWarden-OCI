@@ -22,7 +22,8 @@ Typical use cases:
 Before running the script:
 
 - ✅ **Backup first** — run `./backup.sh run full` and verify the archive is readable
-- ✅ **Attach the target volume** — add the block device via your cloud provider console before running the script; the device must appear in `lsblk`
+- ✅ **Attach the target volume** — add the block device through your provider, VM manager, or physical host before running the script; the device must appear in `lsblk`
+- ✅ **Confirm device identity** — verify the target with `lsblk`, `findmnt`, `blkid`, and `wipefs --no-act`; do not assume `/dev/sdb` or any provider-specific path
 - ✅ **Confirm free space** — the target must have at least as much free space as the source data directory consumes (checked automatically after format for block-device migrations)
 - ✅ **Note your mount point** — know where the volume should be mounted (default: `/mnt/vw-data`, from `DATA_VOLUME_MOUNT` in `.env`)
 - ✅ **Verify `sudo` access** — the script requires root privileges
@@ -45,7 +46,7 @@ You will be shown a numbered device table (like the one below) and prompted to s
 
 ```
   1) /dev/sda    size: 50G      mount: /                      [boot]
-  2) /dev/sdb    size: 100G     mount: -
+  2) /dev/disk/by-id/your-volume    size: 100G     mount: -
 
   Select TARGET block device for migration (DO NOT choose [boot]):
   Device number [1-2]: 2
@@ -63,7 +64,7 @@ Pass all required flags explicitly. `--yes` is required for non-interactive mode
 sudo utilities/setup-storage.sh --mode migrate run \
   --source /var/lib/vaultwarden \
   --target /mnt/vw-data \
-  --device /dev/sdb \
+  --device /dev/disk/by-id/your-volume \
   --yes
 ```
 
@@ -83,13 +84,13 @@ sudo utilities/setup-storage.sh --mode migrate run
 sudo utilities/setup-storage.sh --mode migrate run \
   --source /var/lib/vaultwarden \
   --target /mnt/vw-data \
-  --device /dev/sdb \
+  --device /dev/disk/by-id/your-volume \
   --yes
 ```
 
 The script will:
 1. Stop the Docker stack (and check for non-empty SQLite WAL files — a non-empty WAL after a clean stop is warned prominently)
-2. Format `/dev/sdb` (ext4 by default) and run a disk space check against the newly mounted volume
+2. Format the selected block device (ext4 by default) and run a disk space check against the newly mounted volume
 3. Mount it at `/mnt/vw-data`
 4. `rsync` all data from source to target (WAL and SHM files are excluded from the transfer)
 5. Verify: byte-count delta ≤ 1% **and** full rsync checksum pass
@@ -105,7 +106,7 @@ Use the same interactive or non-interactive flow. Attach the new volume, run the
 sudo utilities/setup-storage.sh --mode migrate run \
   --source /mnt/vw-data \
   --target /mnt/vw-data2 \
-  --device /dev/sdc \
+  --device /dev/disk/by-id/your-new-volume \
   --yes
 ```
 
@@ -153,7 +154,7 @@ Update `DATA_VOLUME_MOUNT` in `.env` (or remove it) to reflect the reverted path
 | :-- | :-- | :-- |
 | `--source <path>` | Source directory (default: `PROJECT_STATE_DIR` from `.env`) | No |
 | `--target <path>` | Destination mount point (prompted interactively if omitted; required with `--yes`) | Conditional |
-| `--device <dev>` | Block device to format and mount (e.g. `/dev/sdb`). Prompted interactively via `lsblk` if omitted. Omit entirely for dir-to-dir migration. | No |
+| `--device <dev>` | Block device to format and mount (prefer a stable `/dev/disk/by-id/...` path). Prompted interactively via `lsblk` if omitted. Omit entirely for dir-to-dir migration. | No |
 | `--skip-stack-stop` | Do not stop the Docker stack before migrating. Requires explicit runtime confirmation. Use with caution. | No |
 | `--delete-source` | Delete the renamed source directory after successful verification. | No |
 | `--dry-run` | Print all actions without executing them. | No |
@@ -182,13 +183,13 @@ Be aware of the following edge cases before running a migration.
 
 ### 1. Interactive picker lists whole disks and partitions
 
-The interactive device picker uses `lsblk` (without `-d`) so both **whole-disk** devices (e.g., `/dev/sdb`) and their **partitions** (e.g., `/dev/sdb1`) appear in the numbered list. Devices that belong to the boot disk are tagged `[boot]` — this includes the root disk itself **and any of its partitions** (the guard uses a prefix match, so `/dev/nvme0n1p2` is blocked when `/dev/nvme0n1` is the boot disk). If your target block volume is partition-based, select it directly from the interactive list or pass `--device /dev/sdb1` explicitly on the CLI:
+The interactive device picker uses `lsblk` (without `-d`) so both **whole-disk** devices and their **partitions** appear in the numbered list. Devices that belong to the boot disk are tagged `[boot]` — this includes the root disk itself **and any of its partitions** (the guard uses a prefix match, so `/dev/nvme0n1p2` is blocked when `/dev/nvme0n1` is the boot disk). If your target block volume is partition-based, select it directly from the interactive list or pass that partition path explicitly on the CLI:
 
 ```bash
 sudo utilities/setup-storage.sh --mode migrate run \
   --source /var/lib/vaultwarden \
   --target /mnt/vw-data \
-  --device /dev/sdb1
+  --device /dev/disk/by-id/your-volume-part1
 ```
 
 ### 2. Mount point path resolution
@@ -248,7 +249,7 @@ Always run with `--dry-run` first on production systems to preview every action 
 sudo utilities/setup-storage.sh --mode migrate run \
   --source /var/lib/vaultwarden \
   --target /mnt/vw-data \
-  --device /dev/sdb \
+  --device /dev/disk/by-id/your-volume \
   --dry-run
 ```
 

@@ -813,12 +813,12 @@ sudo iptables -L CROWDSEC_CHAIN -n
 
 ### Break-Glass Admin Account
 
-A dedicated emergency admin account for OCI serial console access:
+A dedicated emergency admin account for serial-console or local recovery:
 
 #### Features
 - Separate non-root user with sudo privileges
 - SSH key authentication for normal access
-- Password authentication enabled ONLY for OCI console
+- Password authentication enabled only for emergency console access
 - Secure credential generation
 - Comprehensive audit logging
 
@@ -840,9 +840,9 @@ make breakglass-status
 
 **Scenario**: Locked out of SSH (firewall issue)
 
-1. Access OCI Console → Compute → Instance → Console Connection
-2. Create console connection if not exists
-3. Launch Cloud Shell connection
+1. Access your provider serial console, local console, or OCI Console Connection
+2. Create a console connection if your provider requires one
+3. Launch the console session
 4. Login with break-glass admin credentials
 5. Fix the issue (e.g., `sudo ufw allow 22/tcp`)
 6. Verify SSH access restored

@@ -103,10 +103,11 @@ FULL SETUP OPTIONS (used after install or with top-level --domain / --email):
                       environment (or answer 'yes' at the interactive prompt).
   --dry-run           Print what would happen without making any changes.
   --data-device DEV   Use DEV as the dedicated VaultWarden data volume.
-                      The device is formatted (ext4, first run only) and
-                      mounted at DATA_VOLUME_MOUNT. A Docker systemd drop-in
-                      ensures the stack never starts without this mount.
-                      Example: --data-device /dev/sdb
+                      Existing ext4/xfs filesystems require explicit operator
+                      confirmation. Blank devices are formatted only when
+                      DATA_VOLUME_FORCE_FORMAT=true is set. A Docker systemd
+                      drop-in ensures the stack never starts without this mount.
+                      Example: --data-device /dev/disk/by-id/your-volume
   --data-mount PATH   Mount point for the data volume (default: /mnt/vw-data).
                       Must match PROJECT_STATE_DIR when DATA_VOLUME_DEVICE is set.
 

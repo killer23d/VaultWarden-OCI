@@ -248,8 +248,8 @@ make health
 # Validate template
 docker compose -f docker-compose.yml.example config
 
-# Check for common issues
-cat docker-compose.yml.example | grep -n "platform:\|linux/arm64"
+# Validate compose template plus the example environment
+docker compose --env-file .env.example -f docker-compose.yml.example config --quiet
 
 # Validate current config
 docker compose config
@@ -646,7 +646,7 @@ sudo ./setup.sh install --domain vault.example.com --email admin@example.com --f
 
 **Symptoms**:
 - Old backups accumulate past the configured retention period
-- This is most common after restoring the project to a new OCI instance
+- This is most common after restoring the project to a new host
 - `./backup.sh list` shows backups with correct timestamps but `ctime = now`
 
 **Explanation**: Backup age is now determined from the **filename-embedded timestamp**
@@ -858,7 +858,7 @@ curl -u "admin:your_password" https://vault.example.com/admin
 ### Break-Glass Admin Not Working
 
 **Symptoms**:
-- Cannot login via OCI console
+- Cannot login via serial console, local console, or provider console
 - SSH key authentication fails
 - Emergency access unavailable
 
@@ -884,8 +884,7 @@ sudo utilities/setup-secrets.sh breakglass create
 make breakglass-remove
 make breakglass-create
 
-# Test via OCI Console
-# Navigate to: OCI Console → Instance → Console Connection
+# Test via your provider serial console, local console, or OCI Console Connection
 ```
 
 ## Performance Issues

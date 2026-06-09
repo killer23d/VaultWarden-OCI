@@ -196,7 +196,7 @@ MODES:
 
 OPTIONS:
     --mode MODE           Mode to run: setup|migrate|verify (default: setup)
-    --data-device DEV     Block device for data volume (e.g. /dev/sdb)
+    --data-device DEV     Block device for data volume (e.g. /dev/disk/by-id/...)
     --data-mount PATH     Mount point for data volume (default: /mnt/vw-data)
     --auto                Non-interactive mode
     --dry-run             Preview actions without executing
@@ -210,7 +210,7 @@ EXAMPLES:
 
     # Setup with a dedicated data volume
     sudo utilities/setup-storage.sh \
-      --data-device /dev/sdb \
+      --data-device /dev/disk/by-id/your-volume \
       --data-mount /mnt/vw-data
 
     # Dry run setup
