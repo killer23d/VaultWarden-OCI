@@ -18,7 +18,7 @@ source "$SCRIPT_DIR/lib/backup-utils.sh"
 source "$SCRIPT_DIR/lib/crypto.sh"
 source "$SCRIPT_DIR/lib/storage.sh"  # provides require_project_state_ready()
 
-BACKUP_TYPE="auto"
+BACKUP_TYPE="auto"    # Backup mode: auto, db, full, or emergency.
 DRY_RUN=false
 KEEP_DAYS=14
 QUIET=false
