@@ -218,7 +218,7 @@ services:
 
   # -------------------- Core service: Caddy reverse proxy --------------------
   caddy:
-    ccontainer_name: vaultwarden_caddy
+    container_name: vaultwarden_caddy
     build:
       context: ./caddy
       dockerfile: Dockerfile
