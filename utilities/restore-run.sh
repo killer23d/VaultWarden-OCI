@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# utilities/restore-run.sh — Restores VaultWarden data from local or remote encrypted backups.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -111,8 +112,8 @@ SKIP_VERIFICATION=false
 RESTORE_ENV=true
 RESTORE_SNAPSHOT_HARD_FAIL="${RESTORE_SNAPSHOT_HARD_FAIL:-true}"
 USE_REMOTE=false
-KEY_FILE_ARG=""
-RECOVERY_KIT_FILE=""
+KEY_FILE_ARG=""         # set by --key-file; path to age private key for this restore
+RECOVERY_KIT_FILE=""    # set by --from-recovery-kit; path to plaintext recovery-kit file
 
 # Declare this here so set -u never fires before main() initialises it via
 # get_config_value(). Every function that references BACKUP_BASE_DIR is called
