@@ -44,7 +44,8 @@ read_secret() {
         case "$_rs_out" in
             *"Permission denied"*)
                 echo "ERROR: Permission denied reading secret: $_rs_path" >&2
-                echo "       The Caddy container must run as root (user: root) to read Docker secrets." >&2
+                echo "       Secret files are mounted at 0444 (world-readable) by Docker." >&2
+                echo "       Check that the secret is declared in compose and the service restarted." >&2
                 ;;
             *)
                 echo "ERROR: Cannot read secret $_rs_path: $_rs_out" >&2
@@ -77,11 +78,11 @@ log_warn() {
 #   CADDY_DEGRADED=true is exported so maintenance.sh health can surface the condition.
 #   The operator can fix file ownership on the host and then restart Caddy.
 # =============================================================================
-mkdir -p /var/log/caddy
 
-# Check directory is reachable (can at minimum list it)
+# Directory is created and chowned to UID 2000 by init-permissions before
+# this container starts. Just verify it is accessible.
 if ! test -d /var/log/caddy; then
-    echo "ERROR: /var/log/caddy does not exist and could not be created." >&2
+    echo "ERROR: /var/log/caddy not found. Did init-permissions run successfully?" >&2
     exit 1
 fi
 
@@ -95,8 +96,7 @@ touch /var/log/caddy/security.log 2>/dev/null || _log_touch_failed=true
 if [ "$_log_touch_failed" = "true" ]; then
     log_warn "Cannot create log files in /var/log/caddy — falling back to stdout-only logging."
     log_warn ""
-    log_warn "Root cause: OCI Compute userns-remap maps container UID 0 to an unprivileged host"
-    log_warn "UID that does NOT own /var/lib/vaultwarden/logs/caddy."
+    log_warn "Root cause: the host log directory or files are not owned by Caddy UID 2000."
     log_warn ""
     log_warn "ONE-TIME HOST FIX (run on the server as ubuntu/root):"
     log_warn "  # Find your caddy log dir — it is the host path bound to /var/log/caddy"
@@ -104,9 +104,10 @@ if [ "$_log_touch_failed" = "true" ]; then
     log_warn "  LOG_DIR=\"\$(docker inspect --format '{{ range .Mounts }}{{ if eq .Destination \"/var/log/caddy\" }}{{ .Source }}{{ end }}{{ end }}' vaultwarden_caddy 2>/dev/null || echo '<check docker-compose volumes for /var/log/caddy>')\""
     log_warn "  sudo mkdir -p \"\$LOG_DIR\""
     log_warn "  sudo touch \"\$LOG_DIR/access.log\" \"\$LOG_DIR/security.log\""
-    log_warn "  sudo chown root:root \"\$LOG_DIR/access.log\" \"\$LOG_DIR/security.log\""
-    log_warn "  sudo chmod 644 \"\$LOG_DIR/access.log\" \"\$LOG_DIR/security.log\""
-    log_warn "  sudo chmod 755 \"\$LOG_DIR\""
+    log_warn "  sudo chown 2000:2000 \"\$LOG_DIR/access.log\" \"\$LOG_DIR/security.log\""
+    log_warn "  sudo chmod 640 \"\$LOG_DIR/access.log\" \"\$LOG_DIR/security.log\""
+    log_warn "  sudo chown 2000:2000 \"\$LOG_DIR\""
+    log_warn "  sudo chmod 750 \"\$LOG_DIR\""
     log_warn "  cd ~/VaultWarden-OCI && docker compose restart caddy"
     log_warn ""
     log_warn "setup.sh performs this automatically for new installs."
@@ -118,12 +119,13 @@ fi
 if [ "$CADDY_DEGRADED" = "false" ] && ! test -w /var/log/caddy/access.log; then
     log_warn "/var/log/caddy/access.log exists but is NOT writable — falling back to stdout-only logging."
     log_warn ""
-    log_warn "The file is likely owned by PUID:PGID from a previous run."
+    log_warn "The file is likely not owned by Caddy UID 2000."
     log_warn "Run the following on the host to fix ownership:"
     log_warn "  LOG_DIR=\"\$(docker inspect --format '{{ range .Mounts }}{{ if eq .Destination \"/var/log/caddy\" }}{{ .Source }}{{ end }}{{ end }}' vaultwarden_caddy 2>/dev/null || echo '<check docker-compose volumes for /var/log/caddy>')\""
-    log_warn "  sudo chown root:root \"\$LOG_DIR/access.log\" \"\$LOG_DIR/security.log\""
-    log_warn "  sudo chmod 644 \"\$LOG_DIR/access.log\" \"\$LOG_DIR/security.log\""
-    log_warn "  sudo chmod 755 \"\$LOG_DIR\""
+    log_warn "  sudo chown 2000:2000 \"\$LOG_DIR/access.log\" \"\$LOG_DIR/security.log\""
+    log_warn "  sudo chmod 640 \"\$LOG_DIR/access.log\" \"\$LOG_DIR/security.log\""
+    log_warn "  sudo chown 2000:2000 \"\$LOG_DIR\""
+    log_warn "  sudo chmod 750 \"\$LOG_DIR\""
     log_warn "  cd ~/VaultWarden-OCI && docker compose restart caddy"
     export CADDY_DEGRADED=true
 fi
