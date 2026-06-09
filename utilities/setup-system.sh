@@ -6,6 +6,57 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+_ubuntu_archive_url_for_arch() {
+    local arch="$1"
+    case "$arch" in
+        amd64|i386)
+            printf '%s\n' "http://archive.ubuntu.com/ubuntu"
+            ;;
+        arm64|armhf|armel|ppc64el|riscv64|s390x)
+            printf '%s\n' "http://ports.ubuntu.com/ubuntu-ports"
+            ;;
+        *)
+            if declare -f log_warn >/dev/null 2>&1; then
+                log_warn "Unrecognised Ubuntu architecture '${arch}' while enabling universe; using main Ubuntu archive."
+            else
+                printf '[WARN] Unrecognised Ubuntu architecture %s while enabling universe; using main Ubuntu archive.\n' "${arch}" >&2
+            fi
+            printf '%s\n' "http://archive.ubuntu.com/ubuntu"
+            ;;
+    esac
+}
+
+_sops_release_arch_for_dpkg() {
+    local arch="$1"
+    case "$arch" in
+        amd64|arm64)
+            printf '%s\n' "$arch"
+            ;;
+        armhf)
+            printf '%s\n' "arm"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+if [[ "${VAULTWARDEN_TEST_ARCH_HELPERS:-}" == "1" ]]; then
+    case "${1:-}" in
+        ubuntu-archive-url)
+            _ubuntu_archive_url_for_arch "${2:-}"
+            ;;
+        sops-release-arch)
+            _sops_release_arch_for_dpkg "${2:-}"
+            ;;
+        *)
+            printf 'usage: VAULTWARDEN_TEST_ARCH_HELPERS=1 %s {ubuntu-archive-url|sops-release-arch} ARCH\n' "$0" >&2
+            exit 2
+            ;;
+    esac
+    exit $?
+fi
+
 # Use a secure project-local temporary workspace that is cleaned up on exit.
 old_umask=$(umask)
 umask 077
@@ -326,11 +377,7 @@ install_dependencies() {
                 local archive_url
                 local codename
                 codename=$(lsb_release -cs 2>/dev/null || echo "noble")
-                if [[ "$arch" == "arm64" || "$arch" == "armhf" ]]; then
-                    archive_url="http://ports.ubuntu.com/ubuntu-ports"
-                else
-                    archive_url="http://archive.ubuntu.com/ubuntu"
-                fi
+                archive_url=$(_ubuntu_archive_url_for_arch "$arch")
                 echo "deb ${archive_url} ${codename} universe" \
                     > /etc/apt/sources.list.d/ubuntu-universe.list
                 apt-get update -qq || return 1
@@ -340,11 +387,7 @@ install_dependencies() {
             local archive_url
             local codename
             codename=$(lsb_release -cs 2>/dev/null || echo "noble")
-            if [[ "$arch" == "arm64" || "$arch" == "armhf" ]]; then
-                archive_url="http://ports.ubuntu.com/ubuntu-ports"
-            else
-                archive_url="http://archive.ubuntu.com/ubuntu"
-            fi
+            archive_url=$(_ubuntu_archive_url_for_arch "$arch")
             echo "deb ${archive_url} ${codename} universe" \
                 > /etc/apt/sources.list.d/ubuntu-universe.list
             apt-get update -qq || return 1
@@ -410,8 +453,14 @@ install_dependencies() {
     fi
 
     if ! command -v sops >/dev/null 2>&1; then
-        local arch; arch=$(dpkg --print-architecture)
-        [[ "$arch" == "armhf" ]] && arch="arm"
+        local dpkg_arch arch
+        dpkg_arch=$(dpkg --print-architecture)
+        if ! arch=$(_sops_release_arch_for_dpkg "$dpkg_arch"); then
+            log_error "Unsupported CPU architecture for automatic SOPS binary install: ${dpkg_arch}"
+            log_error "Supported automatic SOPS install architectures: amd64, arm64, armhf"
+            log_error "Install sops from an Ubuntu package or provide a supported SOPS release artifact, then re-run setup."
+            return 1
+        fi
 
         local sops_ver="${SOPS_VERSION:-}"
         if [[ -n "$sops_ver" ]]; then

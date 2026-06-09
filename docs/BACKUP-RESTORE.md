@@ -365,7 +365,8 @@ make start
 ### Scenario 3 — Complete Server Loss
 
 ```bash
-# 1. Provision new OCI instance, configure Security List (ports 80/443/22)
+# 1. Provision a replacement Ubuntu host, open required provider ingress (80/443/22),
+#    and attach any dedicated data volume before setup if you use separate-volume mode.
 # 2. Clone repo
 git clone https://github.com/killer23d/VaultWarden-OCI.git
 cd VaultWarden-OCI

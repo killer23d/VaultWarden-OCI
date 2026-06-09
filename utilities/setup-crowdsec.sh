@@ -21,6 +21,26 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+_cf_worker_bouncer_release_arch() {
+    local arch="$1"
+    case "$arch" in
+        amd64|x86_64)
+            printf '%s\n' "amd64"
+            ;;
+        arm64|aarch64)
+            printf '%s\n' "arm64"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+if [[ "${VAULTWARDEN_TEST_ARCH_HELPERS:-}" == "1" ]]; then
+    _cf_worker_bouncer_release_arch "${1:-}"
+    exit $?
+fi
+
 if [[ "${1:-}" == "--version" || "${1:-}" == "-V" ]]; then
     printf 'VaultWarden-OCI %s\n' "$(tr -d '[:space:]' < "${PROJECT_ROOT}/VERSION" 2>/dev/null || echo unknown)"
     exit 0
@@ -62,11 +82,6 @@ fi
 # Provide COLOR_* fallbacks for standalone runs without lib/common.sh.
 if [[ "$_LIBS_LOADED" != "true" ]]; then
     COLOR_RED=''
-    COLOR_GREEN=''
-    # shellcheck disable=SC2034
-    COLOR_YELLOW=''
-    # shellcheck disable=SC2034
-    COLOR_CYAN=''
     COLOR_RESET=''
 fi
 
@@ -735,49 +750,46 @@ else
     if [[ "$_CF_WORKER_BOUNCER_NEEDS_INSTALL" == "true" ]]; then
         log_info "Cloudflare Workers bouncer binary not found — attempting installation..."
 
-        _arch="$(dpkg --print-architecture 2>/dev/null || uname -m)"
-        case "$_arch" in
-            arm64|aarch64) _arch="arm64" ;;
-            amd64|x86_64)  _arch="amd64" ;;
-            *)
-                log_warn "Unsupported architecture: $_arch — skipping Workers bouncer install"
-                _arch=""
-                ;;
-        esac
-
         _installed_via_deb=false
 
-        if [[ -n "$_arch" ]]; then
-            # Pre-create a minimal stub config so the package postinst script
-            # does not abort trying to open a non-existent config file.
-            # Phase 6 will overwrite this with the real values.
-            if [[ ! -f /etc/crowdsec/bouncers/crowdsec-cloudflare-worker-bouncer.yaml ]]; then
-                mkdir -p /etc/crowdsec/bouncers
-                cat > /etc/crowdsec/bouncers/crowdsec-cloudflare-worker-bouncer.yaml <<'STUB'
+        # Pre-create a minimal stub config so the package postinst script does
+        # not abort trying to open a non-existent config file. Phase 6 overwrites
+        # this with the real values.
+        if [[ ! -f /etc/crowdsec/bouncers/crowdsec-cloudflare-worker-bouncer.yaml ]]; then
+            mkdir -p /etc/crowdsec/bouncers
+            cat > /etc/crowdsec/bouncers/crowdsec-cloudflare-worker-bouncer.yaml <<'STUB'
 crowdsec_config:
   lapi_url: "http://127.0.0.1:8090/"
   lapi_key: "STUB_KEY"
 update_frequency: "10s"
 log_mode: "stdout"
 STUB
-                chmod 600 /etc/crowdsec/bouncers/crowdsec-cloudflare-worker-bouncer.yaml
-                log_info "Wrote stub CF bouncer config to satisfy dpkg postinst."
+            chmod 600 /etc/crowdsec/bouncers/crowdsec-cloudflare-worker-bouncer.yaml
+            log_info "Wrote stub CF bouncer config to satisfy dpkg postinst."
+        fi
+
+        log_info "Attempting apt install of crowdsec-cloudflare-worker-bouncer..."
+        if DEBIAN_FRONTEND=noninteractive apt-get install -y crowdsec-cloudflare-worker-bouncer 2>/dev/null; then
+            log_success "Installed crowdsec-cloudflare-worker-bouncer via apt."
+            _installed_via_deb=true
+            _apt_bin="$(command -v crowdsec-cloudflare-worker-bouncer 2>/dev/null || true)"
+            if [[ -n "$_apt_bin" && "$_apt_bin" != "$_CF_WORKER_BOUNCER_BIN" ]]; then
+                ln -sf "$_apt_bin" "$_CF_WORKER_BOUNCER_BIN"
+                log_info "Symlinked ${_apt_bin} -> ${_CF_WORKER_BOUNCER_BIN} for path consistency."
             fi
-            log_info "Attempting apt install of crowdsec-cloudflare-worker-bouncer..."
-            if DEBIAN_FRONTEND=noninteractive apt-get install -y crowdsec-cloudflare-worker-bouncer 2>/dev/null; then
-                log_success "Installed crowdsec-cloudflare-worker-bouncer via apt."
-                _installed_via_deb=true
-                _apt_bin="$(command -v crowdsec-cloudflare-worker-bouncer 2>/dev/null || true)"
-                if [[ -n "$_apt_bin" && "$_apt_bin" != "$_CF_WORKER_BOUNCER_BIN" ]]; then
-                    ln -sf "$_apt_bin" "$_CF_WORKER_BOUNCER_BIN"
-                    log_info "Symlinked ${_apt_bin} -> ${_CF_WORKER_BOUNCER_BIN} for path consistency."
-                fi
-            else
-                log_warn "apt install failed — falling back to GitHub release tarball."
+        else
+            log_warn "apt install failed — falling back to GitHub release tarball."
+        fi
+
+        if [[ "$_installed_via_deb" == "false" && ! -x "$_CF_WORKER_BOUNCER_BIN" ]]; then
+            _host_arch="$(dpkg --print-architecture 2>/dev/null || uname -m)"
+            if ! _arch="$(_cf_worker_bouncer_release_arch "$_host_arch")"; then
+                log_warn "No GitHub release tarball mapping for architecture '${_host_arch}' — skipping tarball fallback."
+                _arch=""
             fi
         fi
 
-        if [[ "$_installed_via_deb" == "false" && -n "$_arch" ]]; then
+        if [[ "$_installed_via_deb" == "false" && -n "${_arch:-}" && ! -x "$_CF_WORKER_BOUNCER_BIN" ]]; then
             if [[ -z "$CF_WORKER_BOUNCER_VERSION" ]]; then
                 _gh_api="https://api.github.com/repos/crowdsecurity/cs-cloudflare-worker-bouncer/releases/latest"
                 log_info "CF Workers bouncer version: fetching latest from GitHub."
@@ -865,7 +877,7 @@ STUB
             fi
         fi
 
-        if [[ "$_installed_via_deb" == "false" && -n "$_arch" && ! -x "$_CF_WORKER_BOUNCER_BIN" ]]; then
+        if [[ "$_installed_via_deb" == "false" && ! -x "$_CF_WORKER_BOUNCER_BIN" ]]; then
             if command -v go >/dev/null 2>&1; then
                 log_info "Attempting Go source build for crowdsec-cloudflare-worker-bouncer..."
                 if [[ -z "$CF_WORKER_BOUNCER_VERSION" ]]; then

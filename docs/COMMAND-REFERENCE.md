@@ -137,10 +137,11 @@ FULL SETUP OPTIONS (used after install or with top-level --domain / --email):
                       environment (or answer 'yes' at the interactive prompt).
   --dry-run           Print what would happen without making any changes.
   --data-device DEV   Use DEV as the dedicated VaultWarden data volume.
-                      The device is formatted (ext4, first run only) and
-                      mounted at DATA_VOLUME_MOUNT. A Docker systemd drop-in
-                      ensures the stack never starts without this mount.
-                      Example: --data-device /dev/sdb
+                      Existing ext4/xfs filesystems require explicit operator
+                      confirmation. Blank devices are formatted only when
+                      DATA_VOLUME_FORCE_FORMAT=true is set. A Docker systemd
+                      drop-in ensures the stack never starts without this mount.
+                      Example: --data-device /dev/disk/by-id/your-volume
   --data-mount PATH   Mount point for the data volume (default: /mnt/vw-data).
                       Must match PROJECT_STATE_DIR when DATA_VOLUME_DEVICE is set.
 
@@ -163,7 +164,6 @@ EXAMPLES:
     # ── Systemd timer management ──────────────────────────────────
     sudo ./setup.sh systemd install      # Install and enable all timers
     sudo ./setup.sh systemd validate     # Detect split-brain vs /opt/
-    sudo ./setup.sh systemd status       # Show timer status
 ```
 
 ### startup.sh
@@ -390,9 +390,9 @@ USAGE:
 
 DESCRIPTION:
     AMTM-style interactive terminal dashboard for VaultWarden-OCI. Displays
-    live stack health, disk usage, CrowdSec bans, backup status, and email
-    queue at a glance. Provides submenus for backup, security, secrets, and
-    advanced operations. Auto-refreshes every 60 seconds.
+    live stack health, disk usage, CrowdSec bans, backup status, rclone
+    remote status, and email queue at a glance. Provides submenus for backup,
+    security, secrets, and advanced operations. Auto-refreshes every 60 s.
 
 OPTIONS:
     --help, -h    Show this help and exit
@@ -1021,7 +1021,7 @@ MODES:
 
 OPTIONS:
     --mode MODE           Mode to run: setup|migrate|verify (default: setup)
-    --data-device DEV     Block device for data volume (e.g. /dev/sdb)
+    --data-device DEV     Block device for data volume (e.g. /dev/disk/by-id/...)
     --data-mount PATH     Mount point for data volume (default: /mnt/vw-data)
     --auto                Non-interactive mode
     --dry-run             Preview actions without executing
@@ -1035,7 +1035,7 @@ EXAMPLES:
 
     # Setup with a dedicated data volume
     sudo utilities/setup-storage.sh \
-      --data-device /dev/sdb \
+      --data-device /dev/disk/by-id/your-volume \
       --data-mount /mnt/vw-data
 
     # Dry run setup

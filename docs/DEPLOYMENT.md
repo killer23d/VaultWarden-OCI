@@ -1,6 +1,6 @@
 # Deployment Guide — VaultWarden-OCI
 
-This guide walks through a complete deployment from a fresh OCI instance to a running vault. For a condensed version see the [README quickstart](../README.md).
+This guide walks through a complete deployment from a fresh Ubuntu host to a running vault. OCI-specific steps are optional and called out separately. For a condensed version see the [README quickstart](../README.md).
 
 Related docs: [CONFIGURATION.md](CONFIGURATION.md) · [SECURITY.md](SECURITY.md) · [OPERATIONS.md](OPERATIONS.md) · [MIGRATION.md](MIGRATION.md)
 
@@ -10,28 +10,27 @@ Related docs: [CONFIGURATION.md](CONFIGURATION.md) · [SECURITY.md](SECURITY.md)
 
 | Requirement | Details |
 | :-- | :-- |
-| **Server** | Ubuntu 24.04 LTS or Oracle Linux 8/9 (OCI A1 Flex recommended) |
-| **Resources** | 1 vCPU, 6 GB RAM, 50 GB storage (OCI Always Free tier) |
+| **Server** | Ubuntu 24.04 LTS on a VM, cloud instance, or physical host |
+| **CPU architecture** | `amd64` and `arm64` are the primary supported Ubuntu architectures; SOPS automatic binary install also supports Debian `armhf` |
+| **Resources** | 1 vCPU, 6 GB RAM, 50 GB storage recommended |
 | **Domain** | A domain you control with DNS on Cloudflare |
 | **Cloudflare account** | Free tier is sufficient |
 | **SMTP / API access** | Any SMTP relay or transactional email API (MailerSend, SendGrid, etc.) — optional but strongly recommended |
 
 ---
 
-## 📌 Phase 0 — OCI Security List (Do This First)
+## 📌 Phase 0 — Ingress and Network Access
 
-> **⚠️ CRITICAL:** OCI blocks all inbound traffic by default at the hypervisor level. You must open ports 80 and 443 **before** running setup — Caddy cannot provision its TLS certificate otherwise.
+> **⚠️ CRITICAL:** Your provider firewall, security group, router, or upstream ACL must allow required traffic before the host firewall can help. UFW rules installed by this project cannot receive packets that are dropped before they reach Ubuntu.
 >
-> Note: Caddy uses the DNS-01 challenge via your Cloudflare API token — inbound HTTP is not required for certificate issuance. However, ports 80/443 are still needed for serving web traffic.
+> Note: In Cloudflare DNS-01 mode, Caddy does not require inbound HTTP for certificate issuance, but port 443 is still required to serve the vault. In direct `acme_http` mode, port 80 must reach Caddy for HTTP-01 validation.
 
-1. OCI Console → **Compute → Instances → your instance**
-2. Under "Primary VNIC" click **Subnet → Default Security List**
-3. Add **Ingress Rules** (one per row):
+Open these paths before setup:
 
 | Rule | Source CIDR | Protocol | Port |
 | :-- | :-- | :-- | :-- |
-| Web (open) | `0.0.0.0/0` | TCP | 80, 443 |
-| Web (Cloudflare IPs only — recommended) | one per CF range | TCP | 80, 443 |
+| HTTPS | `0.0.0.0/0` or Cloudflare IP ranges | TCP | 443 |
+| HTTP | `0.0.0.0/0` or Cloudflare IP ranges | TCP | 80 |
 | SSH | `0.0.0.0/0` or your IP | TCP | 22 |
 
 Cloudflare IPv4 ranges (verify at <https://www.cloudflare.com/ips-v4>):
@@ -42,11 +41,17 @@ Cloudflare IPv4 ranges (verify at <https://www.cloudflare.com/ips-v4>):
 104.24.0.0/14     172.64.0.0/13     131.0.72.0/22
 ```
 
+### Optional OCI Security List Notes
+
+On OCI, open these rules under **Compute → Instances → Primary VNIC → Subnet → Default Security List**. OCI does not support comma-separated CIDRs, so add one Cloudflare range per rule if you restrict ingress to Cloudflare.
+
 ---
 
-## ☁️ Phase 1 — Cloudflare DNS Staging
+## ☁️ Phase 1 — TLS and DNS Mode
 
-In your Cloudflare dashboard, set your DNS record to **DNS Only (Grey Cloud)** before running setup. This ensures clean DNS propagation during initial TLS provisioning. Caddy uses the **DNS-01 challenge** via your Cloudflare API token — it does **not** require direct HTTP access from Let's Encrypt. Enable the orange proxy cloud after the stack is healthy.
+Default mode is `TLS_PROVIDER=cloudflare`. In your Cloudflare dashboard, set your DNS record to **DNS Only (Grey Cloud)** before running setup. This ensures clean DNS propagation during initial TLS provisioning. Caddy uses the **DNS-01 challenge** via your Cloudflare API token and does not require inbound HTTP from Let's Encrypt. Enable the orange proxy cloud after the stack is healthy.
+
+Direct mode is `TLS_PROVIDER=acme_http`. Use it only when the DNS record points directly at the host and inbound TCP `80` reaches Caddy during certificate issuance.
 
 ---
 
@@ -65,6 +70,41 @@ sudo timedatectl set-timezone UTC
 git clone https://github.com/killer23d/VaultWarden-OCI.git
 cd VaultWarden-OCI
 chmod +x *.sh
+```
+
+### Optional Dedicated Data Volume
+
+Attach or expose the target block storage through your provider, VM manager, or physical host before running setup. Then identify the device from Ubuntu:
+
+```bash
+lsblk -o NAME,PATH,SIZE,FSTYPE,MOUNTPOINTS,MODEL,SERIAL
+findmnt /
+sudo blkid /dev/disk/by-id/your-volume || true
+sudo wipefs --no-act --all /dev/disk/by-id/your-volume
+```
+
+Use a stable `/dev/disk/by-id/...` path when available. Do not assume `/dev/sdb`, `/dev/vdb`, or an OCI-specific path. Confirm the selected device is not the OS disk before continuing.
+
+For an existing ext4/xfs filesystem that should be adopted, pass the device to setup and confirm the prompt:
+
+```bash
+sudo ./setup.sh install \
+  --domain vault.yourdomain.com \
+  --email admin@yourdomain.com \
+  --auto \
+  --data-device /dev/disk/by-id/your-volume \
+  --data-mount /mnt/vw-data
+```
+
+> **⚠️ Formatting destroys existing data.** For a blank device that setup should format as ext4, set the explicit safeguard flag only after verifying the device identity:
+
+```bash
+sudo DATA_VOLUME_FORCE_FORMAT=true ./setup.sh install \
+  --domain vault.yourdomain.com \
+  --email admin@yourdomain.com \
+  --auto \
+  --data-device /dev/disk/by-id/your-volume \
+  --data-mount /mnt/vw-data
 ```
 
 ---
@@ -179,7 +219,7 @@ Once healthy, switch Cloudflare to **Proxied (Orange Cloud)** and set SSL/TLS to
 # Install automated backups, health checks, maintenance, and DNS/firewall updates
 sudo ./setup.sh systemd install
 
-# Create break-glass emergency admin for OCI serial console
+# Create break-glass emergency admin for serial-console or local recovery
 sudo utilities/setup-secrets.sh breakglass create
 # or: make breakglass-create
 
@@ -208,7 +248,7 @@ sudo utilities/setup-secrets.sh breakglass create
 - ✅ Access web vault and create your admin account
 - ✅ Log in to `/admin` with the bcrypt credentials you set
 - ✅ Test email notifications: `make test-email`
-- ✅ Test break-glass admin via OCI Console Connection
+- ✅ Test break-glass admin via serial console, local console, or OCI Console Connection if applicable
 - ✅ Create and test a backup: `make backup-emergency`
 - ✅ Validate systemd timer installation: `sudo ./setup.sh systemd validate`
 - ✅ Confirm timers are running: `sudo ./setup.sh systemd status`
@@ -334,6 +374,11 @@ sudo systemctl status vaultwarden-health.timer      # check a specific timer
 ---
 
 ## 🌍 Platform Notes
+
+### Generic Ubuntu Hosts
+- Core setup, startup, backup, restore, maintenance, secrets, and uninstall workflows do not require OCI metadata, OCI CLI, or OCI APIs.
+- Provider-side tasks such as attaching a disk, opening a security group, or assigning a public IP must be completed with that platform's tooling before the Ubuntu commands in this guide.
+- For dedicated storage, prefer stable `/dev/disk/by-id/...` paths when available and verify the selected block device with `lsblk`, `blkid`, `wipefs --no-act`, and `findmnt`.
 
 ### Oracle Cloud Infrastructure (OCI)
 - `setup.sh` auto-detects Oracle Linux and sets `SSH_LOG_PATH=/var/log/secure`

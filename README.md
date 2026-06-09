@@ -2,7 +2,7 @@
 
 **Production-Ready VaultWarden for Small Teams**
 
-A streamlined, secure, and operationally excellent VaultWarden deployment optimised for teams of 10 or fewer users. Designed for Oracle Cloud Infrastructure (OCI) with dynamic IPs, it emphasises template-based configuration, automated operations, and robust multi-layer security.
+A streamlined, secure, and operationally excellent VaultWarden deployment optimised for teams of 10 or fewer users on Ubuntu. It works on generic Ubuntu hosts and keeps optional OCI-specific guidance separate from core setup. It emphasises template-based configuration, automated operations, and robust multi-layer security.
 
 > **📖 New here? Start with [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for step-by-step setup instructions.**
 
@@ -21,20 +21,16 @@ This is a **template-based, hardened deployment** built for small teams who want
 
 ## ⚡ Quick Start (~15 Minutes)
 
-### Step 0 — Configure OCI Security List (Do This First)
+### Step 0 — Prepare Ingress Before Setup
 
-> **⚠️ CRITICAL:** OCI blocks all inbound traffic by default at the hypervisor level. You must open ports 80 and 443 in your VCN Security List **before** cloning — Caddy cannot provision its TLS certificate otherwise.
+Open the provider firewall, security group, router, or upstream network ACL before running setup. The host-level firewall rules installed by this project cannot receive traffic that your infrastructure provider has already dropped.
 
-1. In the OCI Console go to **Compute → Instances → your instance**.
-2. Under "Primary VNIC" click your **Subnet → Default Security List**.
-3. Add **Ingress Rules** for TCP ports `80` and `443`.
+1. Allow inbound TCP `443` to the Ubuntu host.
+2. Allow inbound TCP `80` if you use direct `acme_http` TLS or want HTTP-to-HTTPS redirects.
+3. Allow inbound TCP `22` only from your administrator IP range where practical.
+4. If you use Cloudflare proxying, restrict provider-side web ingress to current Cloudflare IP ranges after initial validation.
 
-**Option A — Open to all (simplest):**
-Set Source CIDR to `0.0.0.0/0`.
-
-**Option B — Restrict to Cloudflare IPs only (recommended):**
-Add one rule per CIDR below (OCI does not support comma-separated CIDRs).
-Verify the current list at <https://www.cloudflare.com/ips-v4>.
+Cloudflare IPv4 ranges (verify the current list at <https://www.cloudflare.com/ips-v4>):
 
 ```
 173.245.48.0/20   103.21.244.0/22   103.22.200.0/22   103.31.4.0/22
@@ -43,15 +39,15 @@ Verify the current list at <https://www.cloudflare.com/ips-v4>.
 104.24.0.0/14     172.64.0.0/13     131.0.72.0/22
 ```
 
-4. Also add an SSH rule: Source `0.0.0.0/0` (or your IP), Protocol TCP, Port `22`.
-
-> **Why not UFW?** OCI Security Lists drop packets at the hypervisor — before the VM's network stack — making them a harder control than host-level UFW.
+> **OCI note:** OCI Security Lists drop packets before the VM's network stack. On OCI, add ingress rules under **Compute → Instances → Primary VNIC → Subnet → Default Security List**. OCI does not support comma-separated CIDRs, so add one Cloudflare range per rule.
 
 ---
 
-### Step 1 — Cloudflare DNS Staging (Grey Cloud First)
+### Step 1 — Choose TLS and DNS Mode
 
-In your Cloudflare dashboard set your DNS record to **DNS Only (Grey Cloud)** before running setup. Caddy uses the **DNS-01 challenge** via your Cloudflare API token — it does **not** require direct HTTP access from Let's Encrypt for certificate issuance. You can enable the orange proxy cloud after the stack is running.
+Default mode is `TLS_PROVIDER=cloudflare`: set your Cloudflare DNS record to **DNS Only (Grey Cloud)** before running setup. Caddy uses the **DNS-01 challenge** via your Cloudflare API token, so Let's Encrypt does not need inbound HTTP access for certificate issuance. Enable the orange proxy cloud after the stack is healthy.
+
+Direct mode is `TLS_PROVIDER=acme_http`: Caddy uses HTTP-01 on port `80`, so your DNS record must point directly at the host and inbound TCP `80` must reach Caddy during certificate issuance.
 
 ---
 
@@ -75,7 +71,7 @@ chmod +x *.sh
 sudo ./setup.sh install --domain vault.yourdomain.com --email admin@yourdomain.com --auto
 
 # All setup.sh entry points:
-sudo ./setup.sh install --domain DOMAIN --email EMAIL [--auto] [--use-latest] [--skip-deps] [--force] [--dry-run]
+sudo ./setup.sh install --domain DOMAIN --email EMAIL [--auto] [--use-latest] [--skip-deps] [--force] [--dry-run] [--data-device DEV] [--data-mount PATH]
 sudo ./setup.sh secrets           # Configure/rotate secrets interactively
 sudo ./setup.sh systemd install   # Install and enable all systemd timers
 sudo ./setup.sh systemd status    # Show timer status
@@ -91,7 +87,7 @@ cd VaultWarden-OCI
 
 > **`--auto` vs `--use-latest`:** `setup.sh install --auto` is fully non-interactive and does not change container version pins. Pass `--use-latest` separately if you want all container image tags set to `latest` instead of the pinned versions in `.env`.
 
-> **Separate data volume:** If you have a dedicated OCI block storage volume, pass `--data-device /dev/sdb` to provision it automatically. See [Separate Data Volume (Optional)](#separate-data-volume-optional) below.
+> **Separate data volume:** If you have a dedicated block device or mounted filesystem for VaultWarden state, verify it first with `lsblk`, `findmnt`, and `blkid`. Then pass `--data-device DEV` and optionally `--data-mount PATH` to setup. See [Separate Data Volume (Optional)](#separate-data-volume-optional) below.
 
 ---
 
@@ -157,7 +153,7 @@ sudo ./setup.sh systemd install
 # Run this AFTER all secrets are configured so everything is included
 ./utilities/secrets-export-recovery-kit.sh
 
-# Create emergency admin for OCI serial console recovery
+# Create emergency admin for serial-console or local recovery
 sudo utilities/setup-secrets.sh breakglass create    # or: make breakglass-create
 ```
 
@@ -190,25 +186,65 @@ For day-2 operations and incident handling, keep [RUNBOOK.md](RUNBOOK.md) open i
 
 ### Separate Data Volume (Optional)
 
-OCI block storage volumes keep vault data independent of the boot volume, making snapshots, resizes, and instance replacements straightforward. Pass `--data-device` to `setup.sh` to enable this mode.
+Dedicated block storage keeps vault data independent of the boot volume, making snapshots, resizes, and host replacement safer. Provider-side provisioning and attachment happen outside this repository. Ubuntu must see the attached device before setup can use it.
 
-**Prerequisites:** Attach a block storage volume to your OCI instance **before** running setup. Confirm the device name with `lsblk` — it typically appears as `/dev/sdb` (or `/dev/nvme1n1` on some shapes).
+1. Provision and attach storage through your chosen provider or hypervisor.
+2. On Ubuntu, identify the new device and confirm it is not the OS disk:
+   ```bash
+   lsblk -o NAME,PATH,SIZE,FSTYPE,MOUNTPOINTS,MODEL,SERIAL
+   findmnt /
+   ```
+3. Inspect the selected device before any destructive step:
+   ```bash
+   sudo blkid /dev/disk/by-id/your-volume || true
+   sudo wipefs --no-act --all /dev/disk/by-id/your-volume
+   ```
+4. If the device already has an ext4 or xfs filesystem that you intend to adopt, setup will ask for explicit confirmation before mounting it.
+5. If the device is blank and you want setup to format it as ext4, set an explicit one-command environment flag:
+   ```bash
+   sudo DATA_VOLUME_FORCE_FORMAT=true ./setup.sh install \
+     --domain vault.yourdomain.com \
+     --email admin@yourdomain.com \
+     --auto \
+     --data-device /dev/disk/by-id/your-volume \
+     --data-mount /mnt/vw-data
+   ```
+
+> **⚠️ Formatting destroys existing data.** Use `DATA_VOLUME_FORCE_FORMAT=true` only after confirming the selected device is the intended empty data volume. The setup script never infers permission to format from `--auto` or `--data-device`.
+
+For a pre-formatted ext4/xfs volume:
 
 ```bash
-# Provision a dedicated data volume in one step
-# WARNING: the device is formatted as ext4 if it has no existing filesystem
-sudo ./setup.sh install --domain vault.yourdomain.com --email admin@yourdomain.com --auto \
-  --data-device /dev/sdb \
-  --data-mount /mnt/vw-data   # optional; /mnt/vw-data is the default
+sudo ./setup.sh install \
+  --domain vault.yourdomain.com \
+  --email admin@yourdomain.com \
+  --auto \
+  --data-device /dev/disk/by-id/your-volume \
+  --data-mount /mnt/vw-data
 ```
 
 `setup.sh` handles the full provisioning cycle:
 
-- Formats the device as ext4 (skipped idempotently if a filesystem already exists)
+- Validates that `DATA_VOLUME_DEVICE` is a real block device and not already mounted
+- Adopts existing ext4/xfs filesystems only after confirmation
+- Formats blank devices as ext4 only when `DATA_VOLUME_FORCE_FORMAT=true` is set
 - Adds a UUID-based entry to `/etc/fstab` with `nofail` (no duplicate entries on re-run)
 - Mounts the volume and writes a sentinel file (`.vw-data-volume`) to confirm identity
 - Writes `DATA_VOLUME_DEVICE`, `DATA_VOLUME_MOUNT`, and `PROJECT_STATE_DIR=/mnt/vw-data` into `.env` so all persistent state lands on the data volume
 - Installs a systemd drop-in (`/etc/systemd/system/docker.service.d/10-vaultwarden-data-volume.conf`) with `RequiresMountsFor=` to prevent Docker from starting until the volume is mounted — eliminating silent data writes to the boot volume on reboot
+
+After setup, verify the mount and available space:
+
+```bash
+findmnt /mnt/vw-data
+df -h /mnt/vw-data
+grep -E '^(DATA_VOLUME_DEVICE|DATA_VOLUME_MOUNT|PROJECT_STATE_DIR)=' .env
+```
+
+Provider examples:
+
+- **OCI:** attach a Block Volume in the OCI Console before setup, then identify its Ubuntu path with `lsblk`. It may appear as `/dev/sdb`, `/dev/nvme1n1`, a partition such as `/dev/sdb1`, or a stable `/dev/disk/by-id/...` symlink.
+- **Other providers / VMs / physical hosts:** attach or expose the disk using that platform's tooling, then use the same Ubuntu discovery and setup commands above.
 
 **Reverting to boot-only mode:** Re-run setup without `--data-device`. The drop-in is removed automatically and `PROJECT_STATE_DIR` reverts to `/var/lib/vaultwarden`.
 
@@ -225,10 +261,12 @@ DATA_VOLUME_MOUNT=/mnt/vw-data
 PROJECT_STATE_DIR=/var/lib/vaultwarden
 
 # Separate-volume mode
-DATA_VOLUME_DEVICE=/dev/sdb
+DATA_VOLUME_DEVICE=/dev/disk/by-id/your-volume
 DATA_VOLUME_MOUNT=/mnt/vw-data
 PROJECT_STATE_DIR=/mnt/vw-data   # MUST equal DATA_VOLUME_MOUNT
 ```
+
+Detailed storage migration and rollback guidance lives in [docs/VOLUME-MIGRATION.md](docs/VOLUME-MIGRATION.md). Backup, restore, and full host recovery guidance lives in [docs/BACKUP-RESTORE.md](docs/BACKUP-RESTORE.md) and [docs/DISASTER-RECOVERY.md](docs/DISASTER-RECOVERY.md).
 
 ---
 

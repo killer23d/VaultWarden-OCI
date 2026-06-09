@@ -56,6 +56,8 @@ sudo ./setup.sh install --domain vault.example.com --email admin@example.com [OP
 | `--skip-deps` | Skip dependency installation |
 | `--force` | Overwrite existing configuration files |
 | `--dry-run` | Show what would be done without executing |
+| `--data-device DEV` | Use a dedicated block storage data volume; prefer `/dev/disk/by-id/...` |
+| `--data-mount PATH` | Mount point for the data volume; must match `PROJECT_STATE_DIR` in separate-volume mode |
 | `secrets` | Run ONLY the secrets configuration phase |
 | `systemd <install|remove|validate|status>` | Manage systemd timer integration |
 
@@ -711,7 +713,7 @@ make uninstall           # Full uninstall (requires interactive TTY + 'yes' conf
 ---
 
 ### 11. `utilities/setup-storage.sh` — migrate mode
-**Purpose:** Interactive pipeline that migrates VaultWarden data between the boot disk and a dedicated OCI block volume (and back).
+**Purpose:** Interactive pipeline that migrates VaultWarden data between the boot disk and a dedicated block volume or directory target (and back).
 
 ```bash
 sudo bash ~/VaultWarden-OCI/utilities/setup-storage.sh --mode migrate [OPTIONS]
@@ -922,7 +924,7 @@ Storage and state-path lifecycle helpers (boot-volume + separate-volume) plus Ca
 | Function | Description |
 | :-- | :-- |
 | `require_project_state_ready` | Fail-closed storage readiness gate before operational scripts run |
-| `setup_data_volume` | Provision, mount, and guard dedicated data volume in separate-volume mode |
+| `setup_data_volume` | Provision, mount, and guard a dedicated data volume in separate-volume mode. Existing ext4/xfs filesystems require confirmation; blank devices require `DATA_VOLUME_FORCE_FORMAT=true`. |
 | `install_docker_mount_guard` | Install/remove docker.service mount dependency drop-in |
 | `vw_default_backup_dir` | Derive backup base path from `PROJECT_STATE_DIR` |
 | `ensure_caddy_log_permissions` | Enforce root:root 755/644 ownership/mode on Caddy log dir and files |

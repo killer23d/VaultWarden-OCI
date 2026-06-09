@@ -10,7 +10,6 @@
 #   Network/IO   : test_connectivity, test_http, download_file
 #   Lifecycle    : register_cleanup, perform_cleanup, setup_error_trap,
 #                  setup_cleanup_trap, safe_execute, init_common_lib
-#   Architecture : HOST_ARCH, GITHUB_ARCH (exported by init_common_lib)
 #
 # Depends on / Load order:
 #   lib/log.sh must be sourced before this file. Functions in this lib
@@ -614,16 +613,6 @@ init_common_lib() {
             "$LOG_LEVEL" >&2
         _LOG_CURRENT_WEIGHT=1
     fi
-
-    # Detect host architecture and map to GitHub release asset naming strings.
-    HOST_ARCH="$(uname -m)"
-    case "$HOST_ARCH" in
-        x86_64)        GITHUB_ARCH="amd64" ;;
-        aarch64|arm64) GITHUB_ARCH="arm64" ;;
-        armv7l|armhf)  GITHUB_ARCH="arm"   ;;
-        *)             GITHUB_ARCH="${HOST_ARCH}" ;;
-    esac
-    export HOST_ARCH GITHUB_ARCH
 
     log_debug "Common library initialized for: $script_name"
     log_debug "Project root: $PROJECT_ROOT"
