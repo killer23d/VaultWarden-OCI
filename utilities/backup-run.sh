@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# utilities/backup-run.sh — Creates, verifies, and optionally syncs VaultWarden backups.
-
 set -euo pipefail
 
 # SCRIPT_DIR must resolve to PROJECT_ROOT so inherited $SCRIPT_DIR/lib/ and
@@ -16,20 +14,19 @@ DOCKER_PROJECT_LABEL="${DOCKER_PROJECT_LABEL:-label=com.docker.compose.project=v
 source "$SCRIPT_DIR/lib/docker.sh"
 source "$SCRIPT_DIR/lib/backup-utils.sh"
 source "$SCRIPT_DIR/lib/crypto.sh"
-source "$SCRIPT_DIR/lib/storage.sh"  # provides require_project_state_ready()
+source "$SCRIPT_DIR/lib/storage.sh"
 
-# Configuration defaults.
-BACKUP_TYPE="auto"   # Backup mode: auto, db, full, or emergency.
+BACKUP_TYPE="auto"
 DRY_RUN=false
 KEEP_DAYS=14
 QUIET=false
 FORCE=false
-EMAIL_NOTIFY=false   # Set by --email; send_notification_email() runs on completion.
-LIST_ONLY=false      # Set by the list subcommand; prints backups and exits without root.
-RCLONE_SYNC=false    # Set by --rclone; syncs the encrypted backup after creation.
-FULL_VERIFY=false    # Set by --full-verification; decrypts and integrity-checks before sync.
-LOCK_FD=""   # Assigned by exec {LOCK_FD}>file (Bash 4.1+ automatic FD allocation).
-SKIP_OPS_LOCK=false  # Set by --skip-ops-lock; caller (maintenance-run) already holds OPS_LOCK.
+EMAIL_NOTIFY=false
+LIST_ONLY=false
+RCLONE_SYNC=false
+FULL_VERIFY=false
+LOCK_FD=""
+SKIP_OPS_LOCK=false
 JSON_OUTPUT=false
 
 show_help() {
@@ -100,7 +97,6 @@ esac
 
 case "$_SUBCMD" in
     run)
-        # Optional positional TYPE (db|full|emergency|auto) before any --flags.
         if [[ $# -gt 0 && "$1" != --* ]]; then
             BACKUP_TYPE="$1"; shift
         fi
@@ -120,7 +116,6 @@ case "$_SUBCMD" in
         done
         ;;
     list)
-        # The 'list' subcommand does not require root.
         LIST_ONLY=true
         while [[ $# -gt 0 ]]; do
             case $1 in
@@ -130,7 +125,6 @@ case "$_SUBCMD" in
         done
         ;;
     verify)
-        # The 'verify' subcommand runs a full integrity check on the latest backup.
         FULL_VERIFY=true
         while [[ $# -gt 0 ]]; do
             case $1 in
@@ -141,7 +135,6 @@ case "$_SUBCMD" in
         done
         ;;
     rotate)
-        # The 'rotate' subcommand prunes old backups without creating a new one.
         LIST_ONLY=false
         while [[ $# -gt 0 ]]; do
             case $1 in
@@ -153,12 +146,10 @@ case "$_SUBCMD" in
         done
         ;;
     "")
-        # Unreachable: handled above by the top-level guard.
         show_help; exit 0
         ;;
 esac
 
-# Validate KEEP_DAYS only for subcommands that actually use it.
 if [[ "$_SUBCMD" == "run" || "$_SUBCMD" == "rotate" ]]; then
     if ! [[ "$KEEP_DAYS" =~ ^[0-9]+$ ]] || ! (( KEEP_DAYS >= 1 )); then
         log_error "Invalid --keep value: '${KEEP_DAYS}' — must be a positive integer (e.g. 14)"
@@ -175,7 +166,7 @@ backup_log_warn()    { [[ "$QUIET" == "true" ]] || log_warn "$*" >&2;    }
 _sha256sum() { sha256sum "$1" 2>/dev/null || shasum -a 256 "$1"; }
 
 TMPDIR_BACKUP=""
-LOCK_FILE=""   # Promoted to script level so cleanup() can remove it on EXIT
+LOCK_FILE=""
 cleanup() {
     if [[ -n "$TMPDIR_BACKUP" ]]; then rm -rf "$TMPDIR_BACKUP" 2>/dev/null; fi
     if [[ -n "${LOCK_FILE:-}" ]]; then rm -f "$LOCK_FILE" 2>/dev/null; fi
@@ -207,7 +198,6 @@ _resolve_age_key() {
     return 1
 }
 
-# Returns the default base directory for backups derived from PROJECT_STATE_DIR.
 _default_backup_dir() { vw_default_backup_dir; }
 
 get_backup_dir() {

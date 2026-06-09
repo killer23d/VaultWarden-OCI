@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# utilities/setup-secrets.sh — Manages VaultWarden-OCI secrets.
-
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -72,7 +70,6 @@ EXAMPLES:
 EOF
 }
 
-# Run interactive or automated secrets setup.
 _cmd_configure() {
     local CLEANUP_ACTIONS=()
     _ss_register_cleanup() { CLEANUP_ACTIONS+=("$1"); }
@@ -387,9 +384,6 @@ SOPS_EOF
         return 1
     }
 
-    # ---------------------------------------------------------------------------
-    # yaml_escape VALUE
-    # ---------------------------------------------------------------------------
     # NOTE: Consolidation with yaml_scalar() in utilities/secrets-rotate.sh was
     # intentionally rejected because they have genuinely different semantics.
     # yaml_escape() produces single-quoted scalars and only escapes embedded single
@@ -402,11 +396,8 @@ SOPS_EOF
         printf "'%s'" "$escaped"
     }
 
-    # ---------------------------------------------------------------------------
-    # _read_dotenv_value KEY [FILE]
     # Strips inline comments (one-or-more whitespace then #) and trailing
     # whitespace. Different from lib/common.sh _read_env_value which is simpler.
-    # ---------------------------------------------------------------------------
     _read_dotenv_value() {
         local key="$1"
         local file="${2:-.env}"
@@ -420,12 +411,7 @@ SOPS_EOF
         echo "$val"
     }
 
-    # ---------------------------------------------------------------------------
-    # collect_secrets
-    # ---------------------------------------------------------------------------
     collect_secrets() {
-        # Internal helper: collect one field either by auto-generation or by
-        # interactive prompt, depending on the --auto flag.
         _get_field() {
             local field="$1"
             if [[ "$AUTO_MODE" == "true" ]]; then
@@ -435,14 +421,12 @@ SOPS_EOF
             fi
         }
 
-        # Read all key names from the schema once so we don't call yq in a loop.
         local _schema_keys
         if ! _schema_keys=$(schema_keys); then
             log_error "collect_secrets: failed to read keys from secrets-schema.yaml"
             return 1
         fi
 
-        # ── Resolve email mode once (used by two keys below) ──────────────────
         local _email_mode _email_provider
         _email_mode=$(    _read_dotenv_value "EMAIL_MODE"     .env)
         _email_provider=$(   _read_dotenv_value "EMAIL_PROVIDER" .env)
@@ -453,8 +437,6 @@ SOPS_EOF
         _email_mode="${_email_mode:-auto}"
         _email_provider="${_email_provider:-mailersend}"
 
-        # ── Schema-driven dispatch loop ───────────────────────────────────────
-        #
         # For each key in schema order:
         #   interactive  → prompt user (hash as required by the key's 'hash' field)
         #   auto         → call the function named in 'auto_fn'
@@ -472,8 +454,6 @@ SOPS_EOF
             _collect_type=$(schema_collect_type "$_key")
 
             case "$_key" in
-
-            # ── admin_token ────────────────────────────────────────────────────
             admin_token)
                 echo ""
                 log_info "═══════════════════════════════════════════════════════════"
@@ -503,8 +483,6 @@ SOPS_EOF
                 fi
                 _COLLECTED_SECRETS["admin_token"]="$vw_hash"
                 ;;
-
-            # ── admin_basic_auth_hash ──────────────────────────────────────────
             admin_basic_auth_hash)
                 echo ""
                 log_info "═══════════════════════════════════════════════════════════"
@@ -542,8 +520,6 @@ SOPS_EOF
                 fi
                 _COLLECTED_SECRETS["admin_basic_auth_hash"]="$caddy_hash"
                 ;;
-
-            # ── smtp_password ──────────────────────────────────────────────────
             # Q2: email-mode sentinel — when EMAIL_MODE gates this key out,
             # write the NOT_USED_EMAIL_MODE=<mode> sentinel (not the schema
             # placeholder and not empty) so downstream consumers can distinguish
@@ -582,8 +558,6 @@ SOPS_EOF
                     _COLLECTED_SECRETS["smtp_password"]="NOT_USED_EMAIL_MODE=${_email_mode}"
                 fi
                 ;;
-
-            # ── email_api_token ────────────────────────────────────────────────
             # Q2: same sentinel logic — inactive mode writes NOT_USED_EMAIL_MODE=<mode>.
             email_api_token)
                 echo ""
@@ -648,8 +622,6 @@ SOPS_EOF
                     _COLLECTED_SECRETS["email_api_token"]="NOT_USED_EMAIL_MODE=${_email_mode}"
                 fi
                 ;;
-
-            # ── backup_passphrase ──────────────────────────────────────────────
             backup_passphrase)
                 echo ""
                 log_info "Generating backup encryption passphrase..."
@@ -684,8 +656,6 @@ BACKUP_BANNER
                     press_enter_to_continue " Press [Enter] after saving the backup passphrase..."
                 fi
                 ;;
-
-            # ── push_installation_id / push_installation_key ───────────────────
             # Q1 (conditional collection): PUSH_ENABLED in .env gates collection.
             #   - AUTO_MODE or PUSH_ENABLED=true  → auto-generate
             #   - Interactive + user confirms       → collect_secret_field
@@ -733,8 +703,6 @@ BACKUP_BANNER
                 [[ -n "${_COLLECTED_SECRETS[push_installation_key]+x}" ]] || \
                     _COLLECTED_SECRETS["push_installation_key"]="CHANGE_ME_OR_LEAVE_EMPTY"
                 ;;
-
-            # ── caddy_cloudflare_dns_token ─────────────────────────────────────
             caddy_cloudflare_dns_token)
                 echo ""
                 log_info "═══════════════════════════════════════════════════════════"
@@ -748,8 +716,6 @@ BACKUP_BANNER
                 cf_dns=$(_get_field "caddy_cloudflare_dns_token") || { log_error "Failed to collect caddy_cloudflare_dns_token"; return 1; }
                 _COLLECTED_SECRETS["caddy_cloudflare_dns_token"]="$cf_dns"
                 ;;
-
-            # ── cf_worker_bouncer_token / cloudflare_zone_id / cf_account_id ───
             cf_worker_bouncer_token)
                 echo ""
                 log_info "═══════════════════════════════════════════════════════════"
@@ -782,8 +748,6 @@ BACKUP_BANNER
             cloudflare_zone_id|cf_account_id)
                 :  # already populated by cf_worker_bouncer_token block
                 ;;
-
-            # ── Unknown key (future-proofing) ──────────────────────────────────
             *)
                 log_warn "collect_secrets: no collection handler for schema key '${_key}' (collect=${_collect_type}) — skipping"
                 ;;
@@ -796,7 +760,6 @@ BACKUP_BANNER
         return 0
     }
 
-    # Assemble the secrets YAML, encrypt it with SOPS, and install it atomically.
     write_secrets() {
         if [[ "$DRY_RUN" == "true" ]]; then
             log_info "[DRY RUN] Would write secrets to encrypted file"
@@ -1003,14 +966,12 @@ _cmd_rotate() {
     fi
 }
 
-# Delegate recovery-kit export to utilities/secrets-edit.sh.
 _cmd_export_recovery_kit() {
     local edit_sh="${PROJECT_ROOT}/utilities/secrets-edit.sh"
     _require_script "$edit_sh"
     exec "$edit_sh" export-recovery-kit
 }
 
-# Manage the emergency break-glass admin account.
 _cmd_breakglass() {
     local BREAKGLASS_USER="vw-emergency"
     local CREATE_USER=false
@@ -1833,11 +1794,9 @@ EOF
         return 0
     fi
 
-    # Create the directory structure.
     mkdir -p "${PROJECT_ROOT}/secrets/keys" "${PROJECT_ROOT}/secrets/.docker_secrets" || return 1
     chmod 700 "${PROJECT_ROOT}/secrets/keys" "${PROJECT_ROOT}/secrets/.docker_secrets" || return 1
 
-    # Create or validate the repository Age key.
     if [[ -f "$age_key_file" ]] && [[ "$FORCE" != "true" ]]; then
         if check_age_key "$age_key_file" 2>/dev/null; then
             log_info "Age key already present and valid: $age_key_file (skipping)"
@@ -1855,13 +1814,11 @@ EOF
         log_success "Age key created: $age_key_file"
     fi
 
-    # Verify the key immediately after generation or validation.
     if ! SOPS_AGE_KEY_FILE="$age_key_file" simple_verify_age_key; then
         log_error "Age key verification failed — aborting bootstrap"
         return 1
     fi
 
-    # Install the canonical /etc/vaultwarden/age-key.txt copy.
     local do_install=true
     if [[ -f "$canonical_key" ]] && [[ "$FORCE" != "true" ]]; then
         if check_age_key "$canonical_key" 2>/dev/null; then
@@ -1882,7 +1839,6 @@ EOF
         log_success "Age key installed: $canonical_key (mode 600, ${service_user}:${service_group})"
     fi
 
-    # Update .env to use the canonical key path.
     local env_file="${PROJECT_ROOT}/.env"
     if [[ -f "$env_file" ]]; then
         local temp_env
@@ -1895,7 +1851,6 @@ EOF
         log_success "SOPS_AGE_KEY_FILE set to $canonical_key in .env"
     fi
 
-    # Write .sops.yaml.
     local age_public_key
     age_public_key=$(get_age_public_key "$age_key_file") || return 1
     if [[ -z "$age_public_key" ]] || ! [[ "$age_public_key" =~ ^age1[a-z0-9]{58}$ ]]; then
@@ -1914,7 +1869,6 @@ EOF
         _write_sops_config "$age_public_key" "$sops_config" || return 1
     fi
 
-    # Create the placeholder encrypted secrets structure.
     if [[ -f "$secrets_file" ]] && [[ "$FORCE" != "true" ]]; then
         local decrypt_ok=false
         ( export SOPS_AGE_KEY_FILE="$age_key_file"; \

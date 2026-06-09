@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# utilities/setup-systemd.sh — Installs and validates VaultWarden-OCI systemd timers.
-
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -139,7 +137,6 @@ _run() {
     fi
 }
 
-# Return success when a timer has a next scheduled trigger.
 _timer_has_next_trigger() {
     local timer="$1"
     local next_elapse
@@ -147,7 +144,6 @@ _timer_has_next_trigger() {
     [[ -n "$next_elapse" && "$next_elapse" != "n/a" ]]
 }
 
-# Return the number of managed timers that are active and scheduled.
 _count_healthy_managed_timers() {
     local healthy_count=0
     local timer
@@ -159,7 +155,6 @@ _count_healthy_managed_timers() {
     printf '%s\n' "$healthy_count"
 }
 
-# Print the sha256 digest of a file.
 _sha256() {
     if command -v sha256sum &>/dev/null; then
         sha256sum "$1" | awk '{print $1}'
@@ -168,9 +163,6 @@ _sha256() {
     fi
 }
 
-
-# _resolve_service_user
-#
 # Determines the non-root user that the backup/health/DNS systemd services
 # should run as. Detection order (first match wins):
 #   1. SERVICE_USER env var (explicit operator override)
@@ -182,26 +174,19 @@ _sha256() {
 # Echoes the resolved username on stdout; returns 0 on success, 1 on failure.
 # Callers must handle the failure return and abort installation.
 _resolve_service_user() {
-    # 1. Explicit operator override always wins.
     if [[ -n "${SERVICE_USER:-}" ]]; then
         if id "$SERVICE_USER" &>/dev/null; then
             echo "$SERVICE_USER"
             return 0
         fi
-        # Log a warning but continue to try the remaining heuristics.
         log_warn "SERVICE_USER='${SERVICE_USER}' does not exist on this system — trying detection."
     fi
 
-    # 2. The human who invoked sudo is the most reliable signal on Ubuntu cloud
-    #    images and developer workstations alike (sudo always sets SUDO_USER).
     if [[ -n "${SUDO_USER:-}" ]] && id "$SUDO_USER" &>/dev/null; then
         echo "$SUDO_USER"
         return 0
     fi
 
-    # 3. Fall back to the first UID≥1000 account with a real login shell.
-    #    On Ubuntu this resolves to 'ubuntu'; on other distros it resolves to
-    #    whatever the primary non-root user account is.
     local candidate
     candidate=$(getent passwd | awk -F: '$3>=1000 && $7!~/false|nologin/{print $1; exit}')
     if [[ -n "$candidate" ]]; then
@@ -209,7 +194,6 @@ _resolve_service_user() {
         return 0
     fi
 
-    # 4. Hard fail — returning empty/root would cause subtler failures later.
     echo ""
     return 1
 }

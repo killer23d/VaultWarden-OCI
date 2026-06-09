@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 # edit-secrets.sh — Dispatch VaultWarden secrets operations.
 
-# Thin dispatcher. All logic lives in utilities/secrets-*.sh.
-# An admin may also call those utilities directly.
-
 HISTFILE=/dev/null
 set -euo pipefail
 

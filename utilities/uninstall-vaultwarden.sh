@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# utilities/uninstall-vaultwarden.sh — Uninstalls VaultWarden-OCI and removes its managed data.
-
 set -euo pipefail
 
 # Prefer the shared logging library when this checkout is intact, but keep a
@@ -11,7 +9,6 @@ if [[ -f "${PROJECT_ROOT_FALLBACK}/lib/log.sh" ]]; then
     source "${PROJECT_ROOT_FALLBACK}/lib/log.sh"
     _VW_CALLING_SCRIPT="$(basename "${BASH_SOURCE[0]}")"
 else
-    # ── Minimal inline stubs matching lib/log.sh format exactly ──────────────
     # Format: COLOR[HH:MM:SS] [SCRIPT] LEVEL RESET message
     # Labels must match lib/log.sh verbatim: INFO, OK, WARN, ERROR, DEBUG,
     # HINT, ROLLBACK, DRY RUN — so log output is consistent regardless of
@@ -39,7 +36,6 @@ else
         fi
     }
 
-    # DRY_RUN prefix — mirrors _log_dry_prefix() in lib/log.sh.
     _vw_dry_prefix() {
         [[ "${DRY_RUN:-false}" == "true" ]] \
             && printf '%s[DRY RUN]%s ' "$_C_BLUE" "$_C_RESET" \
@@ -58,7 +54,6 @@ fi
 die() { log_error "$*"; exit 1; }
 trap 'log_error "${BASH_SOURCE[0]}: failed at line ${LINENO} (exit $?)"; exit 1' ERR
 
-# Convenience aliases — keep consistent with callers throughout this file.
 info()    { log_info    "$@"; }
 success() { log_success "$@"; }
 warn()    { log_warn    "$@"; }
@@ -117,7 +112,6 @@ EXAMPLES:
 EOF
 }
 
-# ─── Argument parsing ─────────────────────────────────────────────────────────
 # --i-have-saved-my-recovery-kit  Satisfy the first-pass age-key guard
 #                                  (CLI pre-check). A second interactive
 #                                  confirmation is still required at the point
@@ -129,7 +123,6 @@ I_HAVE_SAVED_RECOVERY_KIT=false
 FORCE=false
 DRY_RUN=false
 
-# Zero arguments → show help and exit 1 (uninstall is destructive)
 if [[ $# -eq 0 ]]; then
     show_help
     exit 1
@@ -179,12 +172,10 @@ esac
 
 [[ $EUID -eq 0 ]] || die "Run as root: sudo bash $0"
 
-# Support running from the home directory regardless of which user owns the clone.
 REAL_USER="${SUDO_USER:-${USER:-ubuntu}}"
 REAL_HOME=$(getent passwd "$REAL_USER" 2>/dev/null | cut -d: -f6 || echo "/home/$REAL_USER")
 PROJECT_DIR="${REAL_HOME}/VaultWarden-OCI"
 
-# ─── Resolve PROJECT_STATE_DIR from .env ─────────────────────────────────────
 # setup.sh writes PROJECT_STATE_DIR to .env:
 #   - boot-only mode:      PROJECT_STATE_DIR=/var/lib/vaultwarden  (default)
 #   - separate-volume mode: PROJECT_STATE_DIR=/mnt/vw-data  (or DATA_VOLUME_MOUNT)
@@ -199,8 +190,6 @@ PROJECT_DIR="${REAL_HOME}/VaultWarden-OCI"
 #      PROJECT_STATE_DIR when setup.sh ran in separate-volume mode)
 #   3. Hardcoded default /var/lib/vaultwarden (boot-only fallback)
 _read_env_value() {
-    # _read_env_value KEY FILE  -> prints value, empty string if not found
-    #
     # NOTE: This is an intentional self-contained copy of the helper that
     # appears in setup.sh.  uninstall-vaultwarden.sh does not source any
     # shared library so that it remains safe to run after a partial or broken
@@ -217,13 +206,8 @@ if [[ -z "$_state_dir_raw" ]]; then
 fi
 PROJECT_STATE_DIR="${_state_dir_raw:-/var/lib/vaultwarden}"
 
-# Always read DATA_VOLUME_MOUNT independently — used by the fstab cleanup in
-# Step 5.  It may differ from PROJECT_STATE_DIR if the operator set them
-# separately, and we need the raw mount-point value regardless of which path
-# PROJECT_STATE_DIR resolved to.
 DATA_VOLUME_MOUNT="$(_read_env_value "DATA_VOLUME_MOUNT" "$_ENV_FILE")"
 
-# Sentinel written by setup.sh to record that Docker was installed by this project.
 DOCKER_SENTINEL="${PROJECT_STATE_DIR}/.docker_installed_by_setup"
 
 echo ""
@@ -238,7 +222,6 @@ fi
 echo "════════════════════════════════════════════════════════════"
 echo ""
 
-# In dry-run mode, show what would be removed and exit cleanly.
 if [[ "$DRY_RUN" == "true" ]]; then
     warn "DRY RUN MODE — showing what would be removed:"
     echo "  [1] Docker compose stack: ${PROJECT_DIR}/docker-compose.yml (down --volumes --remove-orphans)"

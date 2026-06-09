@@ -20,11 +20,6 @@ source "${SCRIPT_DIR}/lib/crypto.sh"
 source "${SCRIPT_DIR}/lib/secrets.sh"
 source "${SCRIPT_DIR}/lib/storage.sh"
 
-# startup.sh remains a single entry point because its phases depend on shared
-# in-process state, are not meaningful as standalone admin operations outside
-# the startup context, and already delegate most reusable logic to lib/
-# helpers. Extract a phase only if it becomes independently useful.
-
 FORCE_RESTART=false
 SKIP_HEALTH_CHECK=false
 BACKGROUND=false
@@ -36,8 +31,6 @@ DO_DOWN=false
 SKIP_PULL=false
 SKIP_EGRESS_FIX=false
 
-# Accumulates non-fatal startup issues for display in the post-startup banner.
-# Functions append descriptive strings here rather than failing silently.
 _STARTUP_WARNINGS=()
 
 DOCKER_SECRETS_DIR="${PROJECT_ROOT}/secrets/.docker_secrets"
@@ -90,8 +83,6 @@ if [[ $# -gt 0 ]]; then
       exit 0
       ;;
     --*)
-      # Flag-first invocation (e.g. ./startup.sh --dry-run): fall through to
-      # the while loop below for parsing.
       ;;
     *)
       log_error "Unknown subcommand: '$1'"
@@ -179,8 +170,6 @@ check_email_config_consistency() {
     auto|host)
       ;;
     *)
-      # Derive the human-readable valid-modes string from the canonical array
-      # in lib/defaults.sh so this message never drifts from the real list.
       local _valid_modes_str
       _valid_modes_str=$(IFS='|'; echo "${_VW_DEFAULT_EMAIL_MODES[*]}")
       log_warn "EMAIL_MODE='${email_mode}' is not a recognised value (${_valid_modes_str})."
@@ -246,8 +235,6 @@ validate_prerequisites() {
     return 1
   fi
 
-  # Verify that python3-yaml is available; prepare_docker_secrets needs it to
-  # parse secrets.
   if ! python3 -c "import yaml" 2>/dev/null; then
     log_error "python3-yaml (PyYAML) is not installed — required for secrets parsing"
     log_error "Install hint: pip install pyyaml  or  sudo apt install python3-yaml"
@@ -320,8 +307,6 @@ prepare_log_directories() {
 
   log_info "Creating log subdirectories with correct permissions..."
 
-  # Service names are driven by _VW_DEFAULT_LOG_SERVICES (lib/defaults.sh).
-  # Add a new container there — not here — when the compose stack grows.
   local svc log_dirs=();
   for svc in "${_VW_DEFAULT_LOG_SERVICES[@]}"; do
     log_dirs+=("${project_state_dir}/logs/${svc}")
@@ -330,8 +315,6 @@ prepare_log_directories() {
   if ! _maybe_sudo mkdir -p "${log_dirs[@]}"; then
     log_warn "Failed to create log subdirectories (init container will try)"
   else
-    # PUID/PGID: .env values take precedence; _VW_DEFAULT_P{U,G}ID are the
-    # fallback so the magic number 1001 lives in exactly one place.
     local puid pgid
     puid=$(get_config_value "PUID" "${_VW_DEFAULT_PUID}")
     pgid=$(get_config_value "PGID" "${_VW_DEFAULT_PGID}")
@@ -360,8 +343,6 @@ prepare_log_directories() {
 prepare_push_secret_placeholders() {
   local secrets_dir="$DOCKER_SECRETS_DIR"
 
-  # PUID/PGID: .env values take precedence; _VW_DEFAULT_P{U,G}ID are the
-  # fallback so the magic number 1001 lives in exactly one place.
   local puid pgid
   puid=$(get_config_value "PUID" "${_VW_DEFAULT_PUID}")
   pgid=$(get_config_value "PGID" "${_VW_DEFAULT_PGID}")
@@ -439,8 +420,6 @@ check_age_key_health_preflight() {
   local canonical_key="${AGE_KEY_FILE}"
 
   if [[ -f "$repo_local_key" ]] && check_age_key_health "$repo_local_key" 2>/dev/null; then
-    # Resolve the real user once so advisory chown/chgrp commands are correct
-    # on any distro or username (not hard-coded to 'ubuntu').
     local _vw_real_user _vw_real_group
     _vw_real_user=$(get_real_user)
     _vw_real_group=$(id -gn "${_vw_real_user}" 2>/dev/null || echo "${_vw_real_user}")

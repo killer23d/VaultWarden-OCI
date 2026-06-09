@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
-# utilities/setup-crowdsec.sh — Installs and configures CrowdSec and the
-# Cloudflare *Workers* bouncer (crowdsec-cloudflare-worker-bouncer) for
-# VaultWarden-OCI.
-#
 # Free-plan note:
 #   KV writes are capped at 1 K/day on the Cloudflare free plan, so the
 #   initial blocklist population is truncated.  Subsequent incremental syncs
@@ -10,11 +6,6 @@
 #   locally generated ones (cscli + crowdsec engine) so the KV budget is not
 #   wasted on community blocklist churn.  Set CF_FREE_PLAN=false in .env to
 #   disable this guard.
-#
-# Usage:
-#   sudo ./utilities/setup-crowdsec.sh [OPTIONS]
-#
-# See --help for all options.
 
 set -euo pipefail
 
@@ -56,9 +47,6 @@ fi
 
 cd "${PROJECT_ROOT}"
 
-# ---------------------------------------------------------------------------
-# Library loading
-# ---------------------------------------------------------------------------
 _LIBS_LOADED=false
 for _lib in log.sh config.sh common.sh storage.sh secrets.sh; do
     _lib_path="${PROJECT_ROOT}/lib/${_lib}"
@@ -85,9 +73,6 @@ if [[ "$_LIBS_LOADED" != "true" ]]; then
     COLOR_RESET=''
 fi
 
-# ---------------------------------------------------------------------------
-# Load .env
-# ---------------------------------------------------------------------------
 if [[ -f "${PROJECT_ROOT}/.env" ]]; then
     if declare -f load_env_file >/dev/null 2>&1; then
         load_env_file "${PROJECT_ROOT}/.env" || true
@@ -96,10 +81,6 @@ if [[ -f "${PROJECT_ROOT}/.env" ]]; then
         source "${PROJECT_ROOT}/.env" 2>/dev/null || true
     fi
 fi
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 # Write or update a KEY=VALUE line in .env using an atomic temp-file + mv.
 _cs_set_env_var() {
@@ -140,10 +121,8 @@ _cs_clear_env_var() {
 }
 
 
-# ---------------------------------------------------------------------------
 # Read the currently configured LAPI port from config.yaml.
 # Prints the port number; defaults to 8080 if not found.
-# ---------------------------------------------------------------------------
 _cs_resolve_lapi_port() {
     grep -oP '(?<=listen_uri:\s{0,10}127\.0\.0\.1:)\d+' \
         /etc/crowdsec/config.yaml 2>/dev/null \
@@ -151,10 +130,8 @@ _cs_resolve_lapi_port() {
         || echo "8090"
 }
 
-# ---------------------------------------------------------------------------
 # Find the lowest unused TCP port >= base_port on 127.0.0.1.
 # Prints the free port number.
-# ---------------------------------------------------------------------------
 _cs_find_free_port() {
     local base_port="${1:-8090}"
     local port="$base_port"
@@ -168,9 +145,6 @@ _cs_find_free_port() {
     echo "$port"
 }
 
-# ---------------------------------------------------------------------------
-# Rewrite all CrowdSec config files from old_port -> new_port atomically.
-# ---------------------------------------------------------------------------
 _cs_fix_port_conflict() {
     local old_port="$1"
     local new_port="$2"
@@ -209,9 +183,6 @@ _cs_fix_port_conflict() {
     log_success "LAPI port rewritten to ${new_port} across all config files."
 }
 
-# ---------------------------------------------------------------------------
-# Port-conflict diagnostic helper
-# ---------------------------------------------------------------------------
 _cs_diagnose_port() {
     local port="$1"
     local info=""
@@ -234,9 +205,6 @@ _cs_diagnose_port() {
     fi
 }
 
-# ---------------------------------------------------------------------------
-# Attempt to start CrowdSec, with automatic port-conflict resolution.
-# ---------------------------------------------------------------------------
 _cs_start_service() {
     systemctl reset-failed crowdsec 2>/dev/null || true
 
@@ -252,8 +220,6 @@ _cs_start_service() {
         _lapi_port="$_new_port"
         log_info "Pre-flight port reassignment complete: LAPI will use ${_lapi_port}."
     fi
-    # --- END PRE-FLIGHT -------------------------------------------------------
-
     if systemctl enable --now crowdsec 2>/dev/null; then
         local _i
         for _i in {1..5}; do
@@ -297,9 +263,6 @@ _cs_start_service() {
     return 1
 }
 
-# ---------------------------------------------------------------------------
-# Reset all CrowdSec components installed by a previous run.
-# ---------------------------------------------------------------------------
 _cs_reset_components() {
     log_info "=== PHASE 0: Resetting installed CrowdSec components (--force) ==="
 
@@ -381,9 +344,6 @@ _cs_ensure_fw_bouncer_key() {
     fi
 }
 
-# ---------------------------------------------------------------------------
-# CLI flags
-# ---------------------------------------------------------------------------
 AUTO_MODE=false
 DRY_RUN=false
 FORCE=false
@@ -480,9 +440,6 @@ fi
 [[ "${CF_WORKER_BOUNCER_VERSION:-}" == "latest" ]] && CF_WORKER_BOUNCER_VERSION=""
 [[ "${FIREWALL_BOUNCER_VERSION:-}"  == "latest" ]] && FIREWALL_BOUNCER_VERSION=""
 
-# ---------------------------------------------------------------------------
-# Execution wrapper
-# ---------------------------------------------------------------------------
 _cs_run() {
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "[DRY RUN] $*"
@@ -491,17 +448,11 @@ _cs_run() {
     fi
 }
 
-# ---------------------------------------------------------------------------
-# Service-existence guards
-# ---------------------------------------------------------------------------
 _cf_worker_bouncer_service_exists() {
     [[ -f "/etc/systemd/system/crowdsec-cloudflare-worker-bouncer.service" ]] || \
     [[ -f "/lib/systemd/system/crowdsec-cloudflare-worker-bouncer.service" ]]
 }
 
-# ---------------------------------------------------------------------------
-# Write the crowdsec-cloudflare-worker-bouncer systemd unit if needed.
-# ---------------------------------------------------------------------------
 _cs_ensure_cf_worker_unit() {
     local bin_path="${1:-/usr/local/bin/crowdsec-cloudflare-worker-bouncer}"
     if [[ -x "$bin_path" ]] && ! _cf_worker_bouncer_service_exists && [[ "$AUTONOMOUS_MODE" != "true" ]]; then
@@ -528,16 +479,10 @@ UNIT
     fi
 }
 
-# ---------------------------------------------------------------------------
-# PHASE 0: Reset installed components when --force is active.
-# ---------------------------------------------------------------------------
 if [[ "$FORCE" == "true" ]]; then
     _cs_reset_components
 fi
 
-# ---------------------------------------------------------------------------
-# PHASE 1: CrowdSec base installation
-# ---------------------------------------------------------------------------
 log_info "=== PHASE 1: CrowdSec base installation ==="
 
 _legacy_notify_unit="/etc/systemd/system/vaultwarden-notify-failure.service"
@@ -626,9 +571,6 @@ if [[ "$DRY_RUN" != "true" ]]; then
     log_success "CrowdSec service enabled and running."
 fi
 
-# ---------------------------------------------------------------------------
-# PHASE 1b: Firewall bouncer config (DOCKER-USER chain + key registration)
-# ---------------------------------------------------------------------------
 log_info "=== PHASE 1b: Firewall bouncer config ==="
 
 _FW_BOUNCER_CONFIG="/etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml"
@@ -719,9 +661,6 @@ FWCONFIG
     fi
 fi
 
-# ---------------------------------------------------------------------------
-# PHASE 2: Cloudflare Workers bouncer installation
-# ---------------------------------------------------------------------------
 log_info "=== PHASE 2: Cloudflare Workers bouncer installation ==="
 
 _CF_PROXY_ENABLED="${CLOUDFLARE_PROXY_ENABLED:-false}"
@@ -910,9 +849,6 @@ STUB
     _cs_ensure_cf_worker_unit "$_CF_WORKER_BOUNCER_BIN"
 fi
 
-# ---------------------------------------------------------------------------
-# PHASE 3: CrowdSec hub collections
-# ---------------------------------------------------------------------------
 log_info "=== PHASE 3: CrowdSec hub collections ==="
 
 if [[ "$DRY_RUN" == "true" ]]; then
@@ -930,9 +866,6 @@ else
     log_success "Hub collections installed."
 fi
 
-# ---------------------------------------------------------------------------
-# PHASE 4: Acquisition config
-# ---------------------------------------------------------------------------
 log_info "=== PHASE 4: Acquisition config ==="
 
 _project_state_dir="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}"
@@ -953,9 +886,6 @@ else
     log_warn "crowdsec/acquis.yaml not found in ${PROJECT_ROOT} — skipping acquis config."
 fi
 
-# ---------------------------------------------------------------------------
-# PHASE 5: Bouncer API key
-# ---------------------------------------------------------------------------
 log_info "=== PHASE 5: Bouncer API key ==="
 
 _CF_BOUNCER_KEY=""
@@ -1005,9 +935,6 @@ BOUNCER_BANNER
     fi
 fi
 
-# ---------------------------------------------------------------------------
-# PHASE 6: Cloudflare Workers bouncer config
-# ---------------------------------------------------------------------------
 log_info "=== PHASE 6: Cloudflare Workers bouncer config ==="
 
 _CF_WORKER_BOUNCER_CONFIG_SRC="${PROJECT_ROOT}/crowdsec/crowdsec-cloudflare-worker-bouncer.yaml.example"
@@ -1154,9 +1081,6 @@ else
     log_warn "Expected: ${_CF_WORKER_BOUNCER_CONFIG_SRC}"
 fi
 
-# ---------------------------------------------------------------------------
-# PHASE 7: CrowdSec profiles
-# ---------------------------------------------------------------------------
 log_info "=== PHASE 7: CrowdSec profiles ==="
 
 _PROFILES_SRC="${PROJECT_ROOT}/crowdsec/profiles.yaml"
@@ -1189,9 +1113,6 @@ _cs_wait_for_lapi() {
     return 1
 }
 
-# ---------------------------------------------------------------------------
-# PHASE 8: Enable and start services
-# ---------------------------------------------------------------------------
 log_info "=== PHASE 8: Enable and start services ==="
 
 if [[ "$DRY_RUN" == "true" ]]; then
@@ -1249,9 +1170,6 @@ else
     log_success "Services enabled."
 fi
 
-# ---------------------------------------------------------------------------
-# PHASE 9: Admin IP allowlist
-# ---------------------------------------------------------------------------
 log_info "=== PHASE 9: Admin IP allowlist ==="
 
 _cs_whitelist_dir="/etc/crowdsec/parsers/s02-enrich"
@@ -1326,9 +1244,6 @@ CSYAML
     fi
 fi
 
-# ---------------------------------------------------------------------------
-# Summary
-# ---------------------------------------------------------------------------
 _lapi_port_summary="$(_cs_resolve_lapi_port)"
 log_info ""
 log_info "════════════════════════════════════════════════════════"
