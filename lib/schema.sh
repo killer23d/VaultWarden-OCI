@@ -60,8 +60,6 @@ _schema_check_prerequisites() {
         return 1
     fi
 
-    # -r strips surrounding quotes so the string comparison works correctly
-    # regardless of the yq output style configured on the system.
     local _schema_ver
     _schema_ver=$(yq -r '.schema_version' "${schema_file}" 2>/dev/null) || true
     if [[ "${_schema_ver}" != "1" ]]; then
@@ -105,14 +103,11 @@ schema_field() {
     _schema_check_prerequisites "$schema_file" || return 1
 
     local value
-    # -r strips surrounding quotes so the returned value can be used directly
-    # in shell comparisons, variable assignments, and jq filter strings.
     value=$(yq -r ".secrets[] | select(.key == \"${key}\") | .${field}" "$schema_file") || {
         log_error "schema_field: failed to read field '${field}' for key '${key}'"
         return 1
     }
 
-    # yq returns "null" for missing keys/fields.
     if [[ "$value" == "null" ]]; then
         log_error "schema_field: key '${key}' or field '${field}' not found in schema: ${schema_file}"
         return 1
@@ -183,15 +178,12 @@ schema_services_for_key() {
     local schema_file="${2:-${SECRETS_SCHEMA_FILE}}"
     _schema_check_prerequisites "$schema_file" || return 1
 
-    # -r strips quotes; read the services list as a newline-separated sequence,
-    # then join with spaces for the existing restart-hint code.
     local services_nl
     services_nl=$(yq -r ".secrets[] | select(.key == \"${key}\") | .services[]" "$schema_file" 2>/dev/null) || true
     if [[ -z "$services_nl" || "$services_nl" == "null" ]]; then
         printf ''
         return 0
     fi
-    # Convert newlines to spaces.
     printf '%s' "${services_nl//$'\n'/ }"
 }
 

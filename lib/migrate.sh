@@ -273,11 +273,8 @@ _mv_select_device() {
     # For block-to-boot: shows only volumes bearing the VaultWarden sentinel,
     #   labelled [vaultwarden-data]; auto-populates _MV_SOURCE after selection.
     # Skips if --device was already provided, or subcommand is not 'run'.
-    # For boot-to-block only: also skips when --target is set (dir-to-dir mode).
-
     [[ -n "${_MV_DEVICE:-}" ]] && return 0
     [[ "${_MV_SUBCOMMAND}" == "run" ]] || return 0
-    # dir-to-dir migration needs no device, but block-to-boot always needs one.
     [[ -n "${_MV_TARGET:-}" && "${_MV_DIRECTION}" == "boot-to-block" ]] && return 0
 
     log_info "Detecting block devices using lsblk..."
@@ -388,7 +385,6 @@ _mv_select_device() {
                 && (( choice >= 1 && choice <= ${#display_map[@]} )); then
             local _real_idx="${display_map[$(( choice - 1 ))]}"
             _MV_DEVICE="${dev_names[${_real_idx}]}"
-            # Guard: prevent selecting the boot device in boot-to-block mode.
             if [[ "${_MV_DIRECTION}" != "block-to-boot" ]]; then
                 if [[ "${dev_mounts[${_real_idx}]}" == "/" ]] \
                         || { [[ -n "${root_dev}" ]] \
@@ -399,7 +395,6 @@ _mv_select_device() {
                     exit 1
                 fi
             fi
-            # block-to-boot: auto-populate _MV_SOURCE from the device's current mount.
             if [[ "${_MV_DIRECTION}" == "block-to-boot" && -z "${_MV_SOURCE:-}" ]]; then
                 _MV_SOURCE="${dev_mounts[${_real_idx}]}"
                 log_info "Source (block volume mount): ${_MV_SOURCE}"
@@ -459,7 +454,6 @@ _mv_print_preflight_summary() {
     printf '╚═══════════════════════════════════════════════════════════════╝\n'
     printf '\n'
 
-    # Warn when dir-to-dir target already contains files
     if [[ -z "${_MV_DEVICE}" && -d "${_MV_TARGET}" ]]; then
         local _target_item_count
         _target_item_count="$(find "${_MV_TARGET}" -maxdepth 1 -mindepth 1 2>/dev/null | wc -l | tr -d ' ')"
@@ -717,14 +711,11 @@ _mv_parse_args() {
 
     if [[ -z "${_MV_SOURCE}" ]]; then
         if [[ "${_MV_DIRECTION}" == "block-to-boot" ]]; then
-            # For block-to-boot, source is the block volume mount point.
-            # If --device was supplied without --source, auto-detect the current mount.
             if [[ -n "${_MV_DEVICE}" ]]; then
                 local _detected_src
                 _detected_src="$(findmnt -n -o TARGET --source "${_MV_DEVICE}" 2>/dev/null || true)"
                 [[ -n "${_detected_src}" ]] && _MV_SOURCE="${_detected_src}"
             fi
-            # If still unresolved, _mv_select_device will populate _MV_SOURCE interactively.
         else
             _MV_SOURCE="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}"
         fi
@@ -756,8 +747,6 @@ _mv_parse_args() {
         _MV_TARGET="$(realpath -m "${_MV_TARGET}")"
     fi
 
-    # Safe-character validation: reject paths with characters that could break
-    # shell quoting, state-file parsing, or rsync invocations.
     local _mv_unsafe_re=$'[^a-zA-Z0-9/._-]'
     if [[ "${_MV_SOURCE}" =~ ${_mv_unsafe_re} ]]; then
         log_error "Source path contains unsafe characters: ${_MV_SOURCE}"

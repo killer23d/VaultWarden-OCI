@@ -3,7 +3,6 @@
 
 set -euo pipefail
 
-# Dependency version pins.
 # Set SOPS_VERSION to pin a specific release, or leave it blank to resolve the
 # latest release from the GitHub API at runtime.
 #
@@ -11,8 +10,7 @@ set -euo pipefail
 #   SOPS_VERSION="v3.9.4"
 #   SOPS_VERSION=""
 #
-# You may also override it from the environment before running setup.
-SOPS_VERSION="${SOPS_VERSION:-}"  # For example, "v3.9.4"; leave blank to use the latest release.
+SOPS_VERSION="${SOPS_VERSION:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR"
@@ -137,9 +135,7 @@ EXAMPLES:
 EOF
 }
 
-# Argument parsing uses subcommand-first dispatch.
-# The explicit `install` subcommand intentionally falls through to the same
-# full-setup option parser used by the legacy top-level --domain/--email form.
+# `install` and legacy top-level --domain/--email use the same setup parser.
 _require_cli_value() {
     local opt="$1" value="${2-}"
     if [[ -z "$value" || "$value" == --* ]]; then
@@ -158,15 +154,11 @@ if [[ $# -gt 0 ]]; then
             PHASE="secrets"
             shift
             PHASE_ARGS=("$@")
-            # Skip remaining flag parsing; PHASE_ARGS carries everything.
             set -- # Clear $@ so the while loop below is a no-op.
             ;;
         systemd)
             PHASE="systemd"
             shift
-            # Pass all remaining arguments positionally because
-            # setup-systemd.sh accepts install|remove|validate|status as
-            # positional sub-actions.
             PHASE_ARGS=("$@")
             set --
             ;;
@@ -178,7 +170,6 @@ if [[ $# -gt 0 ]]; then
             exit 0
             ;;
         --domain|--email|--auto|--use-latest|--skip-deps|--force|--dry-run|--data-device|--data-mount)
-            # Legacy full-setup flag; fall through to the while loop below.
             ;;
         *)
             log_error "Unknown subcommand: '$1'"
@@ -210,36 +201,25 @@ done
 # ---------------------------------------------------------------------------
 # _warn_force_destructive
 #
-# Draws a prominent bordered warning box whose width adapts to the current
-# terminal width.  tput cols is queried at call time so the box looks correct
-# on both narrow OCI SSH sessions and wide local terminals.
-#
-# Layout:
-#   box_width  = terminal width clamped to [64, 100]
-#   inner_width = box_width - 4   (two border chars + two padding spaces)
-#
-# Falls back to 72 columns when tput is unavailable or reports 0/non-numeric.
+# Prominent warning for `--force`, which rotates the Age key and makes old
+# encrypted backups unrecoverable without a prior recovery kit.
 # ---------------------------------------------------------------------------
 _warn_force_destructive() {
     local term_cols box_width inner_width border
 
-    # Resolve terminal width; fall back gracefully when tput is absent or
-    # when stdout is not a TTY (e.g., piped to a log file).
     if [[ -t 1 ]] && command -v tput &>/dev/null; then
         term_cols=$(tput cols 2>/dev/null || echo 0)
     else
         term_cols=0
     fi
 
-    # Ensure term_cols is a positive integer before arithmetic.
     [[ "${term_cols}" =~ ^[0-9]+$ && "${term_cols}" -gt 0 ]] || term_cols=72
 
-    # Clamp: never narrower than 64 cols (messages need room) or wider than 100.
     (( term_cols < 64  )) && term_cols=64
     (( term_cols > 100 )) && term_cols=100
 
-    box_width=$(( term_cols - 2 ))   # leave one space gutter on each side
-    inner_width=$(( box_width - 4 )) # ║<space><content><space>║
+    box_width=$(( term_cols - 2 ))
+    inner_width=$(( box_width - 4 ))
 
     border=$(printf '═%.0s' $(seq 1 "${box_width}"))
 
@@ -345,7 +325,6 @@ CRED_BANNER
     local env_edit_cmd="nano .env"
     [[ "$env_owner" == "root" ]] && env_edit_cmd="sudo nano .env"
 
-    # CF secrets commands shared between auto and interactive blocks (ux.md #21).
     local _cf_cmds
     _cf_cmds="$(printf '   %ssudo ./edit-secrets.sh rotate cloudflare_zone_id%s\n   %ssudo ./edit-secrets.sh rotate cf_account_id%s\n   %ssudo ./edit-secrets.sh rotate cf_worker_bouncer_token%s' \
         "${COLOR_YELLOW}" "${COLOR_RESET}" \

@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 # maintenance.sh — Dispatch VaultWarden-OCI maintenance subcommands.
 
-# Thin dispatcher. All logic lives in utilities/maintenance-*.sh.
-# An admin or systemd unit may also call those utilities directly.
-
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -55,9 +52,6 @@ if [[ "${1:-}" == "--version" || "${1:-}" == "-V" ]]; then
     exit 0
 fi
 
-# Consume the subcommand token, then pass only the remaining flags/args
-# straight through to the utility via exec.  Do NOT re-inject the subcommand
-# name — each utility script owns its own argument parsing from $1 onward.
 _TASK="${1}"
 shift
 
@@ -84,12 +78,10 @@ case "$_TASK" in
         exec "$SCRIPT_DIR/utilities/maintenance-run.sh" "$@"
         ;;
     help)
-        # Bare 'help' keyword → top-level help only (no subcommand context).
         show_help
         exit 0
         ;;
     --help|-h)
-        # --help/-h at the top level (no subcommand given before the flag).
         show_help
         exit 0
         ;;

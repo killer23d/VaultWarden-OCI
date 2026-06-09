@@ -86,9 +86,6 @@ write_secret_file() {
         return 1
     fi
 
-    # Verify the written file is non-empty when the source value
-    # was non-empty. A zero-byte file after a successful printf return indicates
-    # a disk-full or I/O error that printf did not propagate as a non-zero exit.
     if [[ -n "$value" && ! -s "$dest" ]]; then
         log_error "write_secret_file: file is empty after write — possible disk-full: $dest"
         rm -f "$dest"
@@ -333,7 +330,6 @@ validate_required_secrets() {
         fi
     done <<< "$_required_keys"
 
-    # Check conditional Cloudflare keys (not required in schema, required at runtime).
     for secret in "${_cf_keys[@]}"; do
         local sops_stderr rc=0
         sops_stderr=$(sops -d --extract "[\"$secret\"]" "$secrets_file" 2>&1 >/dev/null) || rc=$?
@@ -373,8 +369,6 @@ check_placeholder_values() {
     while IFS= read -r secret; do
         [[ -z "$secret" ]] && continue
         local value rc=0
-        # Decrypt once and reuse the value for both checks.
-        # Suppress xtrace to prevent plaintext secret appearing in debug logs.
         { set +x; } 2>/dev/null
         local _tmp_sops_err
         _tmp_sops_err=$(mktemp)
@@ -486,7 +480,6 @@ _secure_shred() {
     if command -v shred >/dev/null 2>&1; then
         shred -fuz "$target" 2>/dev/null && return 0
     fi
-    # Portable stat (GNU -c%s || BSD -f%z), with safe default
     local file_size
     file_size=$(stat -c%s "$target" 2>/dev/null || stat -f%z "$target" 2>/dev/null || echo "4096")
     [[ -z "$file_size" || ! "$file_size" =~ ^[0-9]+$ ]] && file_size=4096
@@ -698,8 +691,6 @@ collect_secret_field() {
             ;;
 
         email_api_token)
-            # Canonical key for the email provider HTTP API token.
-            # Stored as-is (no hashing). Works for any EMAIL_PROVIDER value.
             log_info "Enter your email provider API key (Mailgun, MailerSend, SendGrid, etc.)" >&2
             log_info "This is stored as 'email_api_token' and used by all HTTP email drivers." >&2
             local token

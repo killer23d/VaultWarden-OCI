@@ -341,13 +341,11 @@ print_project_version() {
 }
 
 get_real_user() {
-    # Prefer SUDO_USER — set reliably by sudo regardless of shell nesting depth
     if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
         printf '%s\n' "$SUDO_USER"
         return 0
     fi
 
-    # logname resolves the login user even through sudo/su chains
     local login_user
     if login_user=$(logname 2>/dev/null) \
         && [[ -n "$login_user" && "$login_user" != "root" ]]; then
@@ -355,13 +353,11 @@ get_real_user() {
         return 0
     fi
 
-    # $USER is often "root" in `sudo make` sub-shells — only trust it when non-root
     if [[ -n "${USER:-}" && "${USER}" != "root" ]]; then
         printf '%s\n' "$USER"
         return 0
     fi
 
-    # Genuine root context (direct root login, sudo su -, etc.)
     local effective_user
     effective_user=$(id -un 2>/dev/null) || effective_user="root"
     log_warn "get_real_user: could not resolve a non-root user; using '${effective_user}'. If unexpected, verify sudo invocation context (use: sudo ./setup.sh, not sudo make setup)."
@@ -662,7 +658,6 @@ wait_for_entropy() {
         (( elapsed += interval ))
     done
 
-    # Final check after loop
     current=$(cat "$entropy_file" 2>/dev/null || echo 0)
     if (( current >= threshold )); then
         printf '\r\xe2\x9c\x94 Entropy ready: %d bits                           \n' "$current"

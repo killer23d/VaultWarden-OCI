@@ -384,10 +384,6 @@ _email_driver_postfix() {
         return 1
     fi
 
-    # Pipe a minimal RFC-2822 message to sendmail -t.
-    # sendmail -t reads recipients from To:/Cc:/Bcc: headers so no separate
-    # envelope argument is needed. -oi prevents a line with a single '.' from
-    # prematurely ending the message body.
     printf 'From: %s <%s>\nTo: %s\nSubject: %s\n\n%s\n' \
         "$from_name" "$_from_email" "$to_addr" "$subject" "$body" \
         | sendmail -t -oi
@@ -460,8 +456,6 @@ _rate_limit_check() {
     local rate_limit_dir="$2"
     local last_email_file
 
-    # sha256sum is required to construct the stamp file path.  If it is absent
-    # (minimal Alpine/OCI base images), skip rate-limiting rather than aborting.
     if ! command -v sha256sum >/dev/null 2>&1; then
         log_debug "_rate_limit_check: sha256sum not found — rate-limiting disabled"
         printf '/dev/null\n'
@@ -727,8 +721,6 @@ send_email() {
         return 0
     fi
 
-    # Capture shared metadata values once — avoids repeated subshell forks
-    # and guarantees a consistent timestamp across all delivery-path bodies.
     local host_fqdn ts
     host_fqdn="$(hostname -f 2>/dev/null || hostname)"
     ts="$(date -uIs)"
@@ -881,7 +873,6 @@ clear_email_rate_limit() {
     }
 
     local stamp_file
-    # sha256sum required for stamp path construction; skip silently if absent.
     if ! command -v sha256sum >/dev/null 2>&1; then
         log_debug "clear_email_rate_limit: sha256sum not found — rate-limiting disabled, nothing to clear"
         return 0

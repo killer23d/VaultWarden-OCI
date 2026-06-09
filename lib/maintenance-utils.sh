@@ -284,12 +284,8 @@ validate_system_health() {
 }
 
 
-# _format_duration SECONDS
-# Converts an integer number of seconds into a human-readable "Xm Ys" string.
-# Examples: 75 → "1m 15s",  3 → "3s",  0 → "0s"
 _format_duration() {
     local total_seconds="${1:-0}"
-    # Ensure we have a non-negative integer.
     [[ "$total_seconds" =~ ^[0-9]+$ ]] || total_seconds=0
     local minutes=$(( total_seconds / 60 ))
     local seconds=$(( total_seconds % 60 ))
@@ -364,7 +360,6 @@ generate_maintenance_summary() {
     [[ "${UPDATE_DNS:-false}"       == "true"  && "$dns_update"       != "0" ]] && ((critical_failures++))
     [[ "${TARGETED_MODE:-false}"    == "false" && "$health_validation" != "0" ]] && ((critical_failures++))
 
-    # Append duration line when the caller supplies it.
     if [[ -n "$duration_seconds" && "$duration_seconds" =~ ^[0-9]+$ ]]; then
         summary+="\nDuration: $(_format_duration "$duration_seconds")\n"
     fi

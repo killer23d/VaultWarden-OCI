@@ -321,9 +321,6 @@ pull_image_with_retry() {
             return 0
         fi
 
-        # Detect permanent errors and bail immediately — these indicate
-        # the image reference itself is invalid or the credentials are wrong;
-        # retrying will not help.
         local lower_output
         lower_output=$(printf '%s' "$pull_output" | tr '[:upper:]' '[:lower:]')
         if printf '%s' "$lower_output" | grep -qE \
@@ -609,7 +606,7 @@ wait_for_service_ready() {
     local timeout="${2:-60}"
     local count=0
     local dot_interval=5
-    local dots_printed=false   # tracks whether any dots were emitted
+    local dots_printed=false
 
     if ! require_jq; then return 1; fi
 
@@ -633,8 +630,6 @@ wait_for_service_ready() {
             || echo "none")
         current_health="${current_health:-none}"
 
-        # No-healthcheck containers: running + health=="none" means healthy
-        # by definition; return immediately.
         if [[ "$current_status" == "running" && "$current_health" == "none" ]]; then
             [[ "$dots_printed" == "true" ]] && echo "" >&2
             log_success "Service '$service' is ready (no healthcheck; running after ${count}s)"
@@ -691,7 +686,6 @@ docker_wait_healthy() {
         local raw_status
         raw_status=$(docker inspect --format '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
             "$container" 2>/dev/null) || {
-            # Container does not exist or cannot be inspected
             return 2
         }
 
@@ -701,7 +695,6 @@ docker_wait_healthy() {
 
         case "$state" in
             running)
-                # No healthcheck defined: treat running as healthy
                 [[ "$health" == "none" ]] && return 0
                 [[ "$health" == "healthy" ]] && return 0
                 ;;

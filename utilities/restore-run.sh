@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # utilities/restore-run.sh — Restores VaultWarden data from local or remote encrypted backups.
-
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -32,7 +31,6 @@ unset -f _source_lib
 # Require a real .env before any live restore so a fresh host never restores
 # with placeholder values from .env.example. Help and list modes stay exempt.
 _require_env_for_live_restore() {
-    # Exempt subcommands that do not need .env.
     local arg
     for arg in "$@"; do
         case "$arg" in
@@ -40,7 +38,6 @@ _require_env_for_live_restore() {
         esac
     done
 
-    # Also exempt interactive --remote for bare-metal DR restores without .env.
     local has_interactive=false has_remote=false
     for arg in "$@"; do
         [[ "$arg" == "interactive" ]] && has_interactive=true
@@ -67,7 +64,6 @@ _require_env_for_live_restore() {
     fi
 }
 
-# Dependency preflight.
 check_dependencies() {
     local -a hard=(docker age age-keygen sqlite3 sha256sum tar)
     local -a soft=(sops zstd rclone rsync)  # rsync required for separate-volume (OCI block volume) restores
@@ -78,7 +74,6 @@ check_dependencies() {
         echo "ERROR: restore.sh: the following required tools are not installed: ${missing_hard[*]}" >&2
         echo "       Install with: apt-get install -y age sqlite3 coreutils tar" >&2
         echo "       age-keygen is part of the 'age' package on most distributions." >&2
-        # Per-tool install hints (ux.md #46)
         local _cmd
         for _cmd in "${missing_hard[@]}"; do
             case "$_cmd" in
@@ -101,12 +96,10 @@ check_dependencies() {
         done
     fi
 }
-# Skip heavy dependency checks until a live restore or list subcommand is known.
 case "${1:-}" in
     latest|list|interactive) check_dependencies ;;
 esac
 
-# Configuration defaults.
 BACKUP_FILE=""
 RESTORE_TYPE=""
 USE_LATEST=false
@@ -133,8 +126,6 @@ BACKUP_BASE_DIR=""
 _SESSION_RCLONE_REMOTE_NAME=""
 _SESSION_RCLONE_REMOTE_PATH=""
 
-# _rclone_is_available() sets this when rclone works but the remote name still
-# must be collected interactively.
 RCLONE_NEEDS_INTERACTIVE_NAME=false
 
 show_help() {
@@ -212,10 +203,6 @@ EXAMPLES:
 EOF
 }
 
-# Argument Parsing — subcommand-first, then options.
-# 'latest', 'list', and 'interactive' are positional subcommands.
-
-# Handle help/version before the .env check so it always works.
 if [[ $# -gt 0 ]]; then
     case "$1" in
         help|--help|-h) show_help; exit 0 ;;
@@ -225,7 +212,6 @@ fi
 
 _ORIGINAL_ARGS=("$@")
 
-# Zero arguments → show help and exit 1 (restore is a destructive operation)
 if [[ $# -eq 0 ]]; then
     show_help
     exit 1
@@ -235,7 +221,6 @@ case "$1" in
     latest)
         shift
         USE_LATEST=true
-        # Optional positional TYPE (db|full|emergency) before any --flags.
         if [[ $# -gt 0 && "$1" != --* ]]; then
             RESTORE_TYPE="$1"; shift
         fi
@@ -243,12 +228,10 @@ case "$1" in
     list)
         shift
         LIST_ONLY=true
-        # Allow 'list --remote' as a positional form.
         [[ "${1:-}" == "--remote" ]] && { USE_REMOTE=true; shift; }
         ;;
     interactive)
         shift
-        # All options are parsed in the while loop below.
         ;;
     *)
         log_error "Unknown subcommand: '$1'"
