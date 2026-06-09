@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
+# ===========================================================================
 # dashboard.sh — VaultWarden-OCI Operations Dashboard
+# AMTM-style interactive terminal menu for the VaultWarden-OCI deployment.
+# ===========================================================================
 set -euo pipefail
 IFS=$'\n\t'
 
+# ---------------------------------------------------------------------------
+# Repository / environment constants
+# ---------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${SCRIPT_DIR}"
 source "${REPO_ROOT}/lib/log.sh"
@@ -10,6 +16,9 @@ source "${REPO_ROOT}/lib/common.sh"
 init_common_lib "$0"
 [[ -f "${REPO_ROOT}/lib/validate.sh" ]] && source "${REPO_ROOT}/lib/validate.sh"
 
+# ---------------------------------------------------------------------------
+# Color / style aliases
+# ---------------------------------------------------------------------------
 INV="${COLOR_INVERT}"
 BLD="${COLOR_BOLD}"
 CYN="${COLOR_CYAN}"
@@ -34,15 +43,25 @@ _read_env_var() {
 STATE_DIR="$(_read_env_var PROJECT_STATE_DIR /var/lib/vaultwarden)"
 BACKUP_DIR="$(_read_env_var BACKUP_DIR "${STATE_DIR}/backups")"
 
+# Container names (must match docker-compose.yml)
 CONTAINER_VW="vaultwarden_app"
 CONTAINER_CADDY="vaultwarden_caddy"
 CONTAINER_POSTFIX="vaultwarden_postfix"
 
+# Dashboard timestamps: read TZ from .env (ux.md #4), default UTC.
 TZ_DISPLAY="$(_read_env_var TZ "UTC")"
+
+# Divider line
 DIVIDER="--------------------------------------------------"
 
+# ---------------------------------------------------------------------------
+# State: current active menu
+# ---------------------------------------------------------------------------
 ACTIVE_MENU="main"
 
+# ---------------------------------------------------------------------------
+# Signal / cleanup trap
+# ---------------------------------------------------------------------------
 _cleanup() {
     printf '%s' "${NC}"
     echo ""
@@ -51,6 +70,9 @@ _cleanup() {
 }
 trap '_cleanup' INT TERM
 
+# ---------------------------------------------------------------------------
+# Utility: convert epoch seconds to a timezone-aware timestamp string
+# ---------------------------------------------------------------------------
 _epoch_to_pt() {
     local epoch="$1"
     TZ="${TZ_DISPLAY}" date -d "@${epoch}" '+%Y-%m-%d %H:%M %Z' 2>/dev/null \
@@ -58,6 +80,9 @@ _epoch_to_pt() {
         || echo "(unknown)"
 }
 
+# ---------------------------------------------------------------------------
+# Utility: run a command, stream output, show result, prompt to continue
+# ---------------------------------------------------------------------------
 run_cmd() {
     local label="$1"; shift
     echo ""
@@ -74,6 +99,9 @@ run_cmd() {
     _press_enter
 }
 
+# ---------------------------------------------------------------------------
+# Utility: run via sudo preserving set -e behaviour outside subshell
+# ---------------------------------------------------------------------------
 run_sudo_cmd() {
     local label="$1"; shift
     echo ""
@@ -90,13 +118,20 @@ run_sudo_cmd() {
     _press_enter
 }
 
+# ---------------------------------------------------------------------------
+# Utility: reverse-video "Press Enter" anchor
+# ---------------------------------------------------------------------------
 _press_enter() {
     echo ""
     press_enter_to_continue " Press [Enter] to return to the menu..."
 }
 
+# ---------------------------------------------------------------------------
+# Utility: confirm before a destructive action
+#
 # Uses tr '[:upper:]' '[:lower:]' for case-folding instead of ${answer,,}
 # to remain POSIX-portable across all bash versions and OCI image locales.
+# ---------------------------------------------------------------------------
 _confirm_destructive() {
     local action="$1"
     local answer answer_lc
@@ -108,6 +143,9 @@ _confirm_destructive() {
     [[ "${answer_lc}" == "y" || "${answer_lc}" == "yes" ]]
 }
 
+# ---------------------------------------------------------------------------
+# show_help — printed when --help / -h is passed
+# ---------------------------------------------------------------------------
 show_help() {
     cat <<'EOF'
 VaultWarden-OCI Operations Dashboard
@@ -135,6 +173,9 @@ EXAMPLES:
 EOF
 }
 
+# ---------------------------------------------------------------------------
+# Utility: warn on missing script
+# ---------------------------------------------------------------------------
 _check_script() {
     local path="$1"
     if [[ ! -f "${path}" ]]; then
@@ -145,6 +186,9 @@ _check_script() {
     return 0
 }
 
+# ---------------------------------------------------------------------------
+# draw_header
+# ---------------------------------------------------------------------------
 draw_header() {
     local now_pt version
     now_pt="$(TZ="${TZ_DISPLAY}" date '+%Y-%m-%d %H:%M %Z' 2>/dev/null \
@@ -154,10 +198,17 @@ draw_header() {
     echo -e "${INV} VaultWarden-OCI v${version} — Operations Dashboard   ${now_pt} ${NC}"
 }
 
+# ---------------------------------------------------------------------------
+# draw_divider
+# ---------------------------------------------------------------------------
 draw_divider() {
     echo -e "${CYN}${DIVIDER}${NC}"
 }
 
+# ---------------------------------------------------------------------------
+# _container_status_plain  — plain text Running / Stopped (no color codes)
+# _container_status        — color-coded Running / Stopped
+# ---------------------------------------------------------------------------
 _container_status_plain() {
     local name="$1"
     if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "${name}"; then
@@ -177,12 +228,14 @@ _container_status() {
     fi
 }
 
+# ---------------------------------------------------------------------------
 # _container_uptime  — "Xd Yh" / "Xh Ym" / "Xm" uptime string (ux.md #47)
 #
 # Docker's {{.State.StartedAt}} returns RFC 3339 with nanoseconds, e.g.
 #   2026-06-01T12:00:00.123456789Z
 # Both the GNU 'date -d' and BSD 'date -j' paths strip the fractional-second
 # component before parsing to avoid silent failures on older glibc/coreutils.
+# ---------------------------------------------------------------------------
 _container_uptime() {
     local container="$1"
     local started_at started_at_clean start_epoch now_epoch delta days hours mins
@@ -214,6 +267,9 @@ _container_uptime() {
     fi
 }
 
+# ---------------------------------------------------------------------------
+# _crowdsec_status  — Running (green) / Stopped (red) via systemd
+# ---------------------------------------------------------------------------
 _crowdsec_status() {
     if systemctl is-active --quiet crowdsec 2>/dev/null; then
         printf "${GRN}Running${NC}"
@@ -222,6 +278,9 @@ _crowdsec_status() {
     fi
 }
 
+# ---------------------------------------------------------------------------
+# _cf_worker_status  — Running (green) / Stopped (red) via systemd
+# ---------------------------------------------------------------------------
 _cf_worker_status() {
     if systemctl is-active --quiet \
             crowdsec-cloudflare-worker-bouncer.service 2>/dev/null; then
@@ -231,8 +290,12 @@ _cf_worker_status() {
     fi
 }
 
+# ---------------------------------------------------------------------------
+# _secrets_health
+#
 # Scans .env for CHANGE_ME / CHANGEME placeholder values and returns a
 # single color-coded status string.
+# ---------------------------------------------------------------------------
 _secrets_health() {
     local env_file="${REPO_ROOT}/.env"
 
@@ -268,6 +331,7 @@ _secrets_health() {
     fi
 }
 
+# ---------------------------------------------------------------------------
 # _last_backup_result
 #
 # Derives the result of the most recent backup run from the artefacts that
@@ -283,9 +347,11 @@ _secrets_health() {
 #
 # No external log file is required; this is entirely artefact-driven and will
 # update on every dashboard refresh after each backup run.
+# ---------------------------------------------------------------------------
 _last_backup_result() {
     local newest_file="" newest_mtime=0
 
+    # Walk every type subdirectory that may exist under BACKUP_DIR.
     local type_dir file file_mtime
     for type_dir in "${BACKUP_DIR}/db" "${BACKUP_DIR}/full" "${BACKUP_DIR}/emergency"; do
         [[ -d "${type_dir}" ]] || continue
@@ -300,11 +366,13 @@ _last_backup_result() {
         done < <(find "${type_dir}" -maxdepth 1 -name '*.age' -type f -print0 2>/dev/null)
     done
 
+    # No archives found at all.
     if [[ -z "${newest_file}" ]]; then
         printf '%s(N/A — no backups found)%s' "${YLW}" "${NC}"
         return
     fi
 
+    # Determine result from sidecar artefacts.
     local sha256_file="${newest_file}.sha256"
     local meta_file="${newest_file}.meta"
 
@@ -317,6 +385,7 @@ _last_backup_result() {
     fi
 }
 
+# ---------------------------------------------------------------------------
 # _rclone_status
 #
 # Returns a single color-coded status line describing rclone availability:
@@ -328,15 +397,19 @@ _last_backup_result() {
 # Intentionally does NOT perform a live network probe (rclone lsd …) because
 # the dashboard redraws every 60 s and a slow / failed network call would
 # stall the UI. The operator can trigger a live sync via the Backup menu.
+# ---------------------------------------------------------------------------
 _rclone_status() {
+    # Check binary availability first.
     if ! command -v rclone &>/dev/null; then
         printf '%sNot installed%s' "${YLW}" "${NC}"
         return
     fi
 
+    # Read the configured remote name from .env.
     local remote_name
     remote_name="$(_read_env_var RCLONE_REMOTE_NAME "")"
 
+    # Strip surrounding whitespace and treat placeholder values as unset.
     remote_name="$(printf '%s' "${remote_name}" | tr -d '[:space:]')"
     local upper_name
     upper_name="$(printf '%s' "${remote_name}" | tr '[:lower:]' '[:upper:]')"
@@ -351,9 +424,13 @@ _rclone_status() {
     printf '%sReady%s  (remote: %s)' "${GRN}" "${NC}" "${remote_name}"
 }
 
+# ---------------------------------------------------------------------------
+# draw_live_stats
+# ---------------------------------------------------------------------------
 draw_live_stats() {
     draw_divider
 
+    # --- Stack Health ---
     local vw_plain vw_stat caddy_stat pf_stat vw_uptime=""
     vw_plain="$(_container_status_plain "${CONTAINER_VW}")"
     if [[ "${vw_plain}" == "Running" ]]; then
@@ -366,6 +443,7 @@ draw_live_stats() {
     pf_stat="$(_container_status "${CONTAINER_POSTFIX}")"
     echo -e " ${BLD}Stack:${NC}  VaultWarden ${vw_stat}${vw_uptime}  |  Caddy ${caddy_stat}  |  Postfix ${pf_stat}"
 
+    # --- Disk Space ---
     local disk_info
     if [[ -d "${STATE_DIR}" ]]; then
         disk_info="$(df -h "${STATE_DIR}" 2>/dev/null \
@@ -375,6 +453,7 @@ draw_live_stats() {
     fi
     echo -e " ${BLD}Disk:${NC}   ${disk_info}"
 
+    # --- CrowdSec bans ---
     local ban_count ban_color
     if systemctl is-active --quiet crowdsec 2>/dev/null; then
         ban_count="$(sudo cscli decisions list -o raw 2>/dev/null \
@@ -393,16 +472,19 @@ draw_live_stats() {
         echo -e " ${BLD}CrowdSec bans:${NC}  ${YLW}${ban_count}${NC}"
     fi
 
+    # --- CrowdSec + CF Worker status ---
     local cs_stat cf_stat
     cs_stat="$(_crowdsec_status)"
     cf_stat="$(_cf_worker_status)"
     echo -e " ${BLD}CrowdSec status:${NC}  ${cs_stat}"
     echo -e " ${BLD}CF Worker status:${NC}  ${cf_stat}"
 
+    # --- Secrets Health (ux.md #23) ---
     local secrets_stat
     secrets_stat="$(_secrets_health)"
     echo -e " ${BLD}Secrets health:${NC}   ${secrets_stat}"
 
+    # --- Last Backup ---
     local last_backup_str newest_age
     newest_age="$(find "${BACKUP_DIR}" -name '*.age' -type f 2>/dev/null \
         | sort | tail -1 || true)"
@@ -416,14 +498,19 @@ draw_live_stats() {
     fi
     echo -e " ${BLD}Last backup:${NC}  ${last_backup_str}"
 
+    # --- Last Backup Result ---
+    # Derived from .sha256 / .meta sidecar artefacts written by backup-run.sh.
+    # Does not rely on any external log file.
     local last_result_str
     last_result_str="$(_last_backup_result)"
     echo -e " ${BLD}Last result:${NC}  ${last_result_str}"
 
+    # --- Rclone Status ---
     local rclone_stat
     rclone_stat="$(_rclone_status)"
     echo -e " ${BLD}Rclone:${NC}  ${rclone_stat}"
 
+    # --- Systemd Timers ---
     local _timer_output
     _timer_output=$(systemctl list-timers --no-pager 2>/dev/null \
         | grep vaultwarden || true)
@@ -435,6 +522,7 @@ draw_live_stats() {
         echo -e " ${BLD}Timers:${NC}  ${YLW}(systemd not available)${NC}"
     fi
 
+    # --- Email Queue ---
     local queue_count=0 queue_str
     if docker ps --format '{{.Names}}' 2>/dev/null \
             | grep -qx "${CONTAINER_POSTFIX}"; then
@@ -451,6 +539,7 @@ draw_live_stats() {
     fi
     echo -e " ${BLD}Email Queue:${NC}  ${queue_str}"
 
+    # --- Recent Auth Failures (last 1h) ---
     local auth_fails=0 auth_color since_ts
     since_ts="$(date -d '1 hour ago' '+%Y-%m-%dT%H:%M:%S' 2>/dev/null \
         || date -v-1H '+%Y-%m-%dT%H:%M:%S' 2>/dev/null || true)"
@@ -474,6 +563,9 @@ draw_live_stats() {
     draw_divider
 }
 
+# ===========================================================================
+# MAIN MENU
+# ===========================================================================
 draw_main_menu() {
     echo -e " ${BLD}Main Menu${NC}"
     echo ""
@@ -502,11 +594,13 @@ handle_main_menu() {
             _check_script "${REPO_ROOT}/startup.sh" || return
             run_sudo_cmd "sudo ./startup.sh --force" \
                 "${REPO_ROOT}/startup.sh" --force
+            # Force live-stats redraw so container state is fresh (ux.md #3).
             ACTIVE_MENU="main"
             ;;
         2)
             if _confirm_destructive "Stop all VaultWarden services"; then
                 run_cmd "make down" make -C "${REPO_ROOT}" down
+                # Force live-stats redraw so container state is fresh (ux.md #3).
                 ACTIVE_MENU="main"
             else
                 echo -e "${YLW} Operation cancelled.${NC}"
@@ -519,6 +613,7 @@ handle_main_menu() {
                 "${REPO_ROOT}/maintenance.sh" health
             ;;
         4)
+            # Subshell + INT trap: Ctrl-C stops the tail, returns to menu (ux.md #33).
             local _log_container="${CONTAINER_VW}"
             local _log_lines=100
             echo ""
@@ -546,6 +641,9 @@ handle_main_menu() {
     esac
 }
 
+# ===========================================================================
+# SUBMENU B — Backup & Restore
+# ===========================================================================
 draw_backup_menu() {
     echo -e " ${BLD}Backup & Restore${NC}"
     echo ""
@@ -586,6 +684,9 @@ handle_backup_menu() {
             run_cmd "make backup-status" make -C "${REPO_ROOT}" backup-status
             ;;
         5)
+            # Sync the most recent backup archive to the configured rclone remote.
+            # backup.sh --rclone is non-fatal on network failure by design, so the
+            # local archive is never at risk.
             _check_script "${REPO_ROOT}/backup.sh" || return
             local remote_name
             remote_name="$(_read_env_var RCLONE_REMOTE_NAME "")"
@@ -600,6 +701,8 @@ handle_backup_menu() {
                 "${REPO_ROOT}/backup.sh" run db --rclone
             ;;
         6)
+            # Full end-to-end verification (decrypt + integrity check) followed
+            # by an rclone sync. Fatal on verification failure before any upload.
             _check_script "${REPO_ROOT}/backup.sh" || return
             local remote_name
             remote_name="$(_read_env_var RCLONE_REMOTE_NAME "")"
@@ -622,6 +725,9 @@ handle_backup_menu() {
     esac
 }
 
+# ===========================================================================
+# SUBMENU S — Security & CrowdSec
+# ===========================================================================
 draw_security_menu() {
     echo -e " ${BLD}Security & CrowdSec${NC}"
     echo ""
@@ -696,6 +802,9 @@ handle_security_menu() {
     esac
 }
 
+# ===========================================================================
+# SUBMENU K — Secrets & Key Management
+# ===========================================================================
 draw_secrets_menu() {
     echo -e " ${BLD}Secrets & Key Management${NC}"
     echo ""
@@ -736,6 +845,9 @@ handle_secrets_menu() {
     esac
 }
 
+# ===========================================================================
+# SUBMENU A — Advanced & Maintenance
+# ===========================================================================
 draw_advanced_menu() {
     echo -e " ${BLD}Advanced & Maintenance${NC}"
     echo ""
@@ -808,6 +920,9 @@ handle_advanced_menu() {
     esac
 }
 
+# ===========================================================================
+# SUBMENU I — Identity, Email & Admin
+# ===========================================================================
 draw_identity_menu() {
     echo -e " ${BLD}Identity, Email & Admin${NC}"
     echo ""
@@ -856,6 +971,9 @@ handle_identity_menu() {
     esac
 }
 
+# ===========================================================================
+# Main event loop
+# ===========================================================================
 main() {
     case "${1:-}" in
         --help|-h|help) show_help; exit 0 ;;
@@ -868,12 +986,14 @@ main() {
         exit 1
     fi
 
+    # Root guard: several operations require sudo; ensure we are running as root.
     if [[ $EUID -ne 0 ]]; then
         echo -e "${RED} Error:${NC} This script must be run as root." >&2
         echo -e " Re-run with: ${BLD}sudo $0${NC}" >&2
         exit 1
     fi
 
+    # Ensure we are running from the repo root so relative paths and make work.
     cd "${REPO_ROOT}"
 
     while true; do
@@ -895,10 +1015,14 @@ main() {
         esac
 
         local opt
+        # Timeout after 60 s and redraw — keeps live stats fresh (ux.md #20).
+        # On non-interactive stdin (piped input) read returns immediately.
         if ! read -r -t 60 -p " Enter option  : " opt 2>/dev/null; then
+            # Timeout — loop back and redraw without processing input.
             continue
         fi
 
+        # Normalize: trim whitespace, convert to lowercase.
         # Use tr instead of ${opt,,} for POSIX portability across all bash
         # versions and OCI image locales (avoids Bash 4.0+ dependency).
         opt="${opt//[[:space:]]/}"
