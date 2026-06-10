@@ -69,6 +69,7 @@ Do not create separate wave reports. Do not require the operator to paste findin
 
 6. **Do not change product behavior.**
    - The only repository file you may create or replace is `PRR-Beta-Findings.md`.
+   - If `PRR-Beta-Findings.md` already exists from a prior audit, replace it entirely with the current audit's self-contained output. Do not append to it or preserve prior findings inside the new report.
    - Do not fix findings during the audit.
    - Do not reformat source files.
    - Do not regenerate committed documentation in place unless you immediately restore it and preserve a clean tree.
@@ -141,6 +142,8 @@ Inventory all files under `lib/`, including the current implementations for:
 
 Pay particular attention to current files such as `lib/defaults.sh`, `lib/schema.sh`, and `lib/migrate.sh`, which were not completely covered by the original A1-era prompt.
 
+For `lib/defaults.sh`, verify that every fallback is safe for production, not merely convenient for development. Cross-check each default against `.env.example`, configuration validation, Compose expansion, systemd environment generation, and documentation. Confirm which defaults are intentionally fixed, which are operator-overridable, and whether any undocumented or insecure default can silently take effect.
+
 ### Secrets architecture
 
 Verify the complete schema-driven secrets lifecycle involving current equivalents of:
@@ -155,6 +158,8 @@ Verify the complete schema-driven secrets lifecycle involving current equivalent
 - secret listing, viewing, testing, recovery-kit, and key-management commands
 - SOPS + Age encrypted storage
 - materialization into Docker secret files
+
+Read `utilities/setup-secrets.sh` in full. Treat it as a central secrets orchestrator rather than a small utility wrapper, and trace all embedded bootstrap, collection, validation, hashing, materialization, recovery, delegation, cleanup, and failure-handling paths.
 
 For `secrets-schema.yaml`, perform a dedicated deep audit:
 
@@ -304,6 +309,7 @@ Audit:
 - architecture-specific download selection for `amd64`, `arm64`, and other supported architectures
 - generated artifacts and drift checks
 - update, health validation, rollback, and recovery after a bad image or dependency release
+- `utilities/maintenance-update.sh` image acceptance and rollback semantics: determine whether pulled images are identified and retained by immutable digest, whether health validation is performed before promotion, whether the prior known-good image identity is recorded, and whether rollback returns to that exact digest rather than merely re-pulling or reusing a mutable tag
 - compatibility of current pins with current upstream releases and security advisories
 
 For current-version and vulnerability claims, verify against authoritative upstream release notes, advisories, or registries. Cite the source and access date. Do not label a dependency outdated or vulnerable from memory alone. If external access is unavailable, mark dependency freshness as unverified.
@@ -338,6 +344,7 @@ Verify:
 - SOPS and Age initialization and key custody
 - permissions and ownership of encrypted files, Age private keys, Docker secret files, temp files, state files, and recovery kits
 - no plaintext leakage through logs, shell history, process arguments, environment dumps, command traces, errors, backups, or generated documentation
+- `.gitignore` coverage for `.env`, decrypted or temporary SOPS content, Age private keys, Docker secret material, recovery kits, generated credentials, backup artifacts, and other sensitive runtime files; also confirm it does not accidentally ignore committed schemas, templates, encrypted source files, or configuration that must remain reviewable
 - schema parser safety and schema/code consistency
 - allowed schema values, unknown fields, duplicate keys, missing keys, conditional groups, service mappings, and schema-version handling
 - placeholder detection before startup
@@ -562,15 +569,17 @@ Verify:
 - direct versus Cloudflare-proxied modes are unambiguous
 - recovery documentation works under stress and does not assume access to a lost key or failed host
 - the command reference and any generated docs match their authoritative sources
+- identify the authoritative generator or source for `docs/COMMAND-REFERENCE.md` and `docs/SECRETS-SCHEMA.md`; regenerate each in a temporary copy or temporary output location and diff it against the committed document
 - stale links, stale script names, stale bouncer names, and contradictory instructions are listed
 - a junior admin can determine whether the system is healthy, when the last valid backup completed, how to test restore, how to unban themselves, and when not to proceed
 - root `edit-secrets.sh`, direct utility invocations, Makefile targets, README guidance, and script references do not present competing authoritative workflows
+- cross-check `RUNBOOK.md` and `docs/TROUBLESHOOTING.md` for duplicated or conflicting guidance on the same incident types; determine which document is authoritative for immediate response, which is authoritative for diagnosis, and whether a junior administrator would know which one to use first
 
 Documentation errors that could cause data loss, lockout, secret exposure, or an insecure deployment are release blockers even when the code is correct.
 
 ## Phase 12 — Failure-mode and threat-model review
 
-Trace at least these scenarios end to end:
+Trace at least these scenarios end to end, and cross-check each scenario against `RUNBOOK.md` and `docs/TROUBLESHOOTING.md`. Report missing, contradictory, or non-actionable incident guidance as a documentation or operational-readiness finding.
 
 1. Cloudflare outage or expired/revoked token
 2. Direct traffic reaching the host while proxy-header trust is enabled
@@ -667,7 +676,7 @@ Run `systemd-analyze verify` against tracked service and timer units where avail
 
 ### Generated documentation drift
 
-Run generators in a temporary copy or restore all generated files afterward. Compare generated output with committed output.
+Run every discovered documentation generator in a temporary copy or direct it to temporary output. Compare generated output with the committed artifact and restore the worktree if any generator writes in place. Explicitly verify both `docs/COMMAND-REFERENCE.md` and `docs/SECRETS-SCHEMA.md`, using their actual authoritative generators or source data rather than assuming they share one generator.
 
 ### Static consistency checks
 
@@ -684,6 +693,7 @@ Check at minimum:
 - documentation commands and flags versus `--help` output
 - root dispatcher commands versus their utility implementations
 - every tracked test and workflow versus the production path it actually covers
+- sensitive generated files versus `.gitignore`, including false negatives and accidental exclusion of reviewable source artifacts
 
 ### Optional disposable integration tests
 
@@ -958,7 +968,7 @@ This map records important files known at the current-state verification baselin
 | `lib/common.sh` | 3 |
 | `lib/config.sh` | 3, 5 |
 | `lib/crypto.sh` | 3, 4 |
-| `lib/defaults.sh` | 1, 3, 5 |
+| `lib/defaults.sh` | 1, 3, 5 — verify safe production defaults and override/documentation consistency |
 | `lib/docker.sh` | 3, 5, 6 |
 | `lib/email.sh` | 3, 9 |
 | `lib/log.sh` | 3, 9 |
@@ -1008,7 +1018,7 @@ This map records important files known at the current-state verification baselin
 | `utilities/setup-storage.sh` | 3, 5, 7 |
 | `utilities/setup-system.sh` | 3, 5 |
 | `utilities/setup-env.sh` | 3, 5 |
-| `utilities/setup-secrets.sh` | 3, 4, 5 |
+| `utilities/setup-secrets.sh` | 3, 4, 5 — central orchestrator; read fully and trace all embedded paths |
 | `utilities/setup-systemd.sh` | 3, 5, 8 |
 | `utilities/setup-firewall.sh` | 3, 5, 6 |
 | `utilities/setup-crowdsec.sh` | 2, 3, 5, 6 |
@@ -1020,7 +1030,7 @@ This map records important files known at the current-state verification baselin
 | `utilities/secrets-list.sh` | 3, 4 |
 | `utilities/secrets-export-recovery-kit.sh` | 3, 4 |
 | `utilities/maintenance-run.sh` | 3, 8 |
-| `utilities/maintenance-update.sh` | 2, 3, 8 |
+| `utilities/maintenance-update.sh` | 2, 3, 8 — verify immutable image identity and exact rollback target |
 | `utilities/maintenance-health.sh` | 3, 8, 9 |
 | `utilities/maintenance-email.sh` | 3, 9 |
 | `utilities/maintenance-db-maint.sh` | 3, 7, 8 |
@@ -1059,7 +1069,7 @@ This map records important files known at the current-state verification baselin
 | `docs/MIGRATION.md` | 7, 11 |
 | `docs/OPERATIONS.md` | 8, 9, 11 |
 | `docs/SCRIPTS.md` | 10, 11 |
-| `docs/SECRETS-SCHEMA.md` | 4, 10, 11 |
+| `docs/SECRETS-SCHEMA.md` | 4, 10, 11 — identify generator/source and verify drift explicitly |
 | `docs/SECURITY.md` | 4, 6, 11, 12 |
 | `docs/TROUBLESHOOTING.md` | 11, 12 |
 | `docs/VOLUME-MIGRATION.md` | 7, 11 |
