@@ -16,11 +16,12 @@ Perform a complete, evidence-driven production readiness audit of:
 - **Branch:** `Beta`
 - **Branch URL:** `https://github.com/killer23d/VaultWarden-OCI/tree/Beta`
 - **Prompt authoring baseline:** `44358e309f33102d04e1c291012101babeba2608`
+- **Current-state coverage verification baseline:** `4a781b4784a5fdf25468f38c3a2fba63e916b786`
 - **Target deployment:** a self-hosted Vaultwarden instance for approximately 10 users
 - **Primary operator:** one junior administrator who is not a Bash expert
 - **Platform goal:** generic Ubuntu hosts, with provider-specific guidance kept optional
 
-Audit the **actual current `Beta` branch**, even if it has advanced beyond the prompt authoring baseline. Record the exact audited commit SHA in the report.
+Audit the **actual current `Beta` branch**, even if it has advanced beyond either baseline. Record the exact audited commit SHA in the report.
 
 Write all results to one file at the repository root:
 
@@ -54,6 +55,7 @@ Do not create separate wave reports. Do not require the operator to paste findin
    - Identify generated artifacts and their authoritative sources.
    - Include any files added after this prompt was authored.
    - Note important runtime files that are intentionally generated or ignored, but do not inspect real secret values.
+   - The current-state coverage map near the end of this prompt is a review aid only. `git ls-files` is authoritative whenever they differ.
 
 4. **Implementation is primary evidence.**
    - Use executable code, configuration, service definitions, tests, and generated artifacts as the primary evidence.
@@ -121,6 +123,10 @@ Inspect the root wrappers and administration interface, including current equiva
 
 Trace each user-facing command to the real implementation. Verify that wrappers preserve exit codes, arguments, privilege requirements, working-directory assumptions, and actionable errors.
 
+Do not assume `setup.sh`, `startup.sh`, or `dashboard.sh` are thin wrappers merely because modular utility scripts exist. Read them fully and audit all embedded orchestration logic. Report duplicated or competing implementation paths only when they create a concrete drift, safety, or maintainability risk.
+
+The root `edit-secrets.sh` is present at the current-state verification baseline and describes itself as a dispatcher. Read it fully and verify every subcommand, preflight check, `exec`, argument vector, working-directory assumption, and exit status against the corresponding `utilities/secrets-*.sh` implementation. Determine whether the root command or utility commands are intended as the authoritative public interface and whether documentation and Makefile targets agree.
+
 ### Core libraries
 
 Inventory all files under `lib/`, including the current implementations for:
@@ -133,7 +139,7 @@ Inventory all files under `lib/`, including the current implementations for:
 - maintenance and email
 - data-volume migration
 
-Pay particular attention to current files such as `lib/schema.sh` and `lib/migrate.sh`, which were not covered by the original A1-era prompt.
+Pay particular attention to current files such as `lib/defaults.sh`, `lib/schema.sh`, and `lib/migrate.sh`, which were not completely covered by the original A1-era prompt.
 
 ### Secrets architecture
 
@@ -149,6 +155,18 @@ Verify the complete schema-driven secrets lifecycle involving current equivalent
 - secret listing, viewing, testing, recovery-kit, and key-management commands
 - SOPS + Age encrypted storage
 - materialization into Docker secret files
+
+For `secrets-schema.yaml`, perform a dedicated deep audit:
+
+- Parse it with `yq` or a safe YAML parser and confirm it is valid YAML.
+- Detect duplicate mapping keys using a parser or loader configured to reject duplicates; do not rely only on a normal last-value-wins parse.
+- Enumerate every secret entry and validate required fields, allowed enum values, unknown fields, key-name syntax, conditional groups, service mappings, and ordering assumptions.
+- Verify `schema_version` exists and that code validates supported and unsupported versions rather than merely reading it.
+- Verify every schema field consumed by `lib/schema.sh` matches the file exactly, including `auto_fn` and any conditional fields.
+- Verify every non-empty `auto_fn` names an implemented, safely callable function in the real collection path; do not assume it belongs to a particular library without tracing the call.
+- Verify every secret can be collected or generated, stored, materialized, rotated, listed, viewed, recovered, and consumed by its declared services.
+- Cross-check schema services against real Compose service names and restart behavior.
+- Confirm the schema contains no real credentials, plaintext examples that could be mistaken for credentials, or unsafe generated defaults.
 
 ### Container and network architecture
 
@@ -182,11 +200,11 @@ Verify the current CrowdSec deployment and all supported bouncer paths, includin
 
 - `crowdsec/acquis.yaml`
 - `crowdsec/profiles.yaml`
-- Cloudflare Worker bouncer configuration
-- firewall bouncer configuration
+- `crowdsec/crowdsec-cloudflare-worker-bouncer.yaml.example`
+- `crowdsec/crowdsec-firewall-bouncer.yaml.example`
 - `utilities/setup-crowdsec.sh`
 
-Do not assume the filenames or architecture from the A1 prompt remain valid.
+Do not assume the filenames or architecture from the A1 prompt remain valid. If older bouncer filenames are referenced anywhere, determine whether they are intentional compatibility references or stale documentation/configuration.
 
 ### Storage, backup, restore, and migration
 
@@ -218,14 +236,34 @@ Inventory the actual `systemd/` directory and the install logic. Verify:
 
 ### CI, tests, and generated documentation
 
+Before evaluating this area, run:
+
+```bash
+git ls-files tests/
+git ls-files .github/
+```
+
+Audit every returned file, not only files named in this prompt.
+
 Inventory:
 
 - all files under `.github/workflows/`
 - all files under `tests/`
 - all repository test targets
-- documentation generators such as the command-reference generator
+- documentation generators such as `utilities/write-command-reference.sh`
+- generated documents such as current command, CrowdSec, and secrets-schema references
 
-Verify that workflows trigger on the branches and events their jobs expect, actions and downloaded tools are pinned appropriately, checksums are validated, permissions are minimal, and CI covers the production-critical code paths.
+For each test, identify whether it is syntax/lint-only, static-consistency, unit-level, integration-level, or behavioral. Map it to the production-critical path it actually validates, state its environmental requirements, and list critical paths with no corresponding test.
+
+For each workflow, verify that:
+
+- triggering events and branch filters cover `Beta` where relevant
+- job-level conditions can actually be reached by the workflow's configured events
+- third-party actions are pinned to immutable commit SHAs where the project requires reproducibility
+- `GITHUB_TOKEN` and job permissions are least privilege
+- downloaded tools are pinned and integrity-checked
+- ShellCheck follows sourced files and includes every tracked shell script
+- no deployment, secret rotation, or infrastructure-changing job can run without an appropriate trust and approval boundary
 
 ---
 
@@ -251,6 +289,7 @@ Perform every phase. Findings should be collected continuously and deduplicated 
 3. Build an execution-flow map from each public command to sourced libraries, generated files, privileged operations, services, and external systems.
 4. Identify duplicate or competing control paths, stale compatibility paths, dead wrappers, generated-file drift risks, and authoritative-source ambiguity.
 5. Record files or subsystems that cannot be meaningfully audited in the available environment.
+6. Create a tracked-file coverage ledger from `git ls-files`; assign every tracked file to at least one phase or explicitly exclude it with a written reason.
 
 ## Phase 2 — Release integrity, reproducibility, and supply chain
 
@@ -311,6 +350,8 @@ Verify:
 - recovery-kit warnings, completeness, storage guidance, and deletion behavior
 - recoverability if the Age key is lost but encrypted secrets remain
 - behavior if a secret is malformed, empty, stale, or still a placeholder
+- the root `edit-secrets.sh` dispatcher versus direct `utilities/secrets-*.sh` invocation, including argument and exit-code preservation
+- the dedicated `secrets-schema.yaml` checks in the architecture section above
 
 ## Phase 5 — Setup, configuration, and deployment safety
 
@@ -332,6 +373,7 @@ Verify:
 - startup waits for meaningful health, not just process existence
 - startup failure diagnostics preserve the original non-zero result
 - degraded mode activation and recovery are explicit, observable, and safe
+- all orchestration embedded in `setup.sh` and `startup.sh`, rather than assuming delegation to utilities
 
 ## Phase 6 — Containers, ingress, firewall, and network security
 
@@ -482,6 +524,7 @@ Verify:
 - logs have rotation, bounded growth, stable paths, safe permissions, and no secret leakage
 - failures are visible without requiring the administrator to inspect multiple unrelated locations
 - the system can detect silent backup failure, a stopped timer, a missing data-volume mount, and a stale installed script copy
+- every substantive code path in `dashboard.sh`, including graceful degradation, privilege behavior, command failures, and the accuracy of displayed status
 
 Assess whether concrete SLIs/SLOs exist. At minimum discuss availability, backup freshness, restore success, alert delivery, and storage capacity. Missing formal SLOs may be a control gap rather than a software defect, but must be included in production sign-off.
 
@@ -501,6 +544,7 @@ Inventory all available test and CI paths, then verify:
 - tests do not require or mutate production credentials or infrastructure
 - generated documentation can be reproduced deterministically
 - the current CI suite would catch a breaking change in a production-critical path
+- every file returned by `git ls-files tests/` and `git ls-files .github/` is individually classified and represented in the validation evidence
 
 Clearly distinguish tests that exist from behaviors they actually validate. A passing shallow test is not evidence for an untested failure path.
 
@@ -520,6 +564,7 @@ Verify:
 - the command reference and any generated docs match their authoritative sources
 - stale links, stale script names, stale bouncer names, and contradictory instructions are listed
 - a junior admin can determine whether the system is healthy, when the last valid backup completed, how to test restore, how to unban themselves, and when not to proceed
+- root `edit-secrets.sh`, direct utility invocations, Makefile targets, README guidance, and script references do not present competing authoritative workflows
 
 Documentation errors that could cause data loss, lockout, secret exposure, or an insecure deployment are release blockers even when the code is correct.
 
@@ -565,14 +610,19 @@ For each scenario, state:
 
 Run as many of the following as the environment safely permits. Record the exact command, result, and limitation.
 
-### Repository integrity
+### Repository integrity and coverage
 
 ```bash
 git status --short
 git rev-parse HEAD
 git rev-parse origin/Beta
 git ls-files
+git ls-files | sort > /tmp/prr-tracked-files.txt
+git ls-files tests/
+git ls-files .github/
 ```
+
+Cross-reference every line in `/tmp/prr-tracked-files.txt` against the current-state coverage map and the audit's own coverage ledger. Every tracked file must be assigned to at least one audit phase or explicitly excluded with a written reason. Record the result in Section 4 of `PRR-Beta-Findings.md`.
 
 ### Shell parsing and linting
 
@@ -603,7 +653,7 @@ Validate all tracked YAML files with the appropriate parser where available. At 
 - `crowdsec/*.yaml` and examples
 - Compose templates
 
-Validate schema enums, duplicate secret keys, required fields, referenced auto-functions, and referenced services against implementation.
+Validate schema enums, duplicate secret keys, required fields, referenced `auto_fn` functions, conditional fields, and referenced services against implementation.
 
 ### Compose validation
 
@@ -632,6 +682,8 @@ Check at minimum:
 - lock paths and owners across all callers
 - image/plugin/tool version variables versus their use sites
 - documentation commands and flags versus `--help` output
+- root dispatcher commands versus their utility implementations
+- every tracked test and workflow versus the production path it actually covers
 
 ### Optional disposable integration tests
 
@@ -727,7 +779,7 @@ Use this exact structure.
 
 - Repository and branch
 - Audited commit SHA
-- Prompt-authoring baseline and whether Beta advanced
+- Prompt-authoring baseline, current-state coverage verification baseline, and whether Beta advanced
 - Audit date/time UTC
 - Auditor/tooling environment
 - Initial worktree status
@@ -763,7 +815,7 @@ Table:
 | Check | Command or Method | Result | Evidence / Limitation |
 |---|---|---|---|
 
-Include every test attempted, including failures, skips, and unavailable tools.
+Include every test attempted, including failures, skips, and unavailable tools. Include the tracked-file coverage ledger result and identify any file that was not assigned or was excluded.
 
 ## 5. Release blockers
 
@@ -869,11 +921,164 @@ State:
 
 ---
 
+## Current-state coverage map
+
+This map records important files known at the current-state verification baseline. It is a completion aid, **not an authoritative inventory**. Before auditing, generate the real list with `git ls-files`; add every unlisted file and assign it to a phase. Never omit a file because it is absent from this map, and never report a listed-but-absent file as a product defect without first checking whether the architecture intentionally changed.
+
+### Root
+
+| File | Primary phase(s) |
+|---|---|
+| `backup.sh` | 3, 5, 7 |
+| `restore.sh` | 3, 5, 7 |
+| `dashboard.sh` | 3, 9 |
+| `edit-secrets.sh` | 1, 3, 4, 11 — verify dispatcher behavior and public-interface authority |
+| `maintenance.sh` | 3, 5, 8 |
+| `setup.sh` | 3, 5 — read fully; do not assume thin-wrapper behavior |
+| `startup.sh` | 3, 5, 6 — read fully; do not assume thin-wrapper behavior |
+| `secrets-schema.yaml` | 1, 4, 10 |
+| `.env.example` | 5, 11 |
+| `docker-compose.yml.example` | 2, 5, 6, 10 |
+| `docker-compose.override.dev.yml.example` | 5, 6, 11 |
+| `Makefile` | 1, 5, 9, 10, 11 |
+| `VERSION` | 2 |
+| `CHANGELOG.md` | 11 |
+| `README.md` | 11 |
+| `RUNBOOK.md` | 11, 12 |
+| `.gitignore` | 1, 4 |
+| `.gitattributes` | 1 |
+| `PRR-Beta.md` | Exclude — audit instrument, not product implementation |
+| `PRR-Beta-Findings.md` | Exclude — audit output file |
+| Any additional tracked root file | Assign dynamically to the applicable phase(s) |
+
+### `lib/`
+
+| File | Primary phase(s) |
+|---|---|
+| `lib/common.sh` | 3 |
+| `lib/config.sh` | 3, 5 |
+| `lib/crypto.sh` | 3, 4 |
+| `lib/defaults.sh` | 1, 3, 5 |
+| `lib/docker.sh` | 3, 5, 6 |
+| `lib/email.sh` | 3, 9 |
+| `lib/log.sh` | 3, 9 |
+| `lib/maintenance-utils.sh` | 3, 8 |
+| `lib/migrate.sh` | 1, 3, 7 |
+| `lib/schema.sh` | 1, 3, 4, 10 |
+| `lib/secrets.sh` | 3, 4 |
+| `lib/storage.sh` | 3, 7 |
+| `lib/backup-utils.sh` | 3, 7 |
+| `lib/validate.sh` | 3, 5 |
+| Any additional tracked `lib/*` file | Assign dynamically to the applicable phase(s) |
+
+### `caddy/`
+
+| File | Primary phase(s) |
+|---|---|
+| `caddy/Caddyfile` | 6 |
+| `caddy/Caddyfile.degraded` | 6, 12 |
+| `caddy/entrypoint.sh` | 3, 6 |
+| `caddy/Dockerfile` | 2, 6 |
+| Any additional tracked `caddy/*` file | Assign dynamically to the applicable phase(s) |
+
+### `crowdsec/`
+
+| File | Primary phase(s) |
+|---|---|
+| `crowdsec/acquis.yaml` | 6 |
+| `crowdsec/profiles.yaml` | 6 |
+| `crowdsec/crowdsec-cloudflare-worker-bouncer.yaml.example` | 2, 6 |
+| `crowdsec/crowdsec-firewall-bouncer.yaml.example` | 2, 6 |
+| Any additional tracked `crowdsec/*` file | Assign dynamically to Phase 6 and any other applicable phase |
+
+### `systemd/`
+
+| File | Primary phase(s) |
+|---|---|
+| Every tracked `systemd/*.service` | 8, plus functional owner phase |
+| Every tracked `systemd/*.timer` | 8 |
+| Any additional tracked `systemd/*` file | 1, 8 |
+
+### `utilities/`
+
+| File | Primary phase(s) |
+|---|---|
+| `utilities/backup-run.sh` | 3, 7 |
+| `utilities/restore-run.sh` | 3, 7 |
+| `utilities/setup-storage.sh` | 3, 5, 7 |
+| `utilities/setup-system.sh` | 3, 5 |
+| `utilities/setup-env.sh` | 3, 5 |
+| `utilities/setup-secrets.sh` | 3, 4, 5 |
+| `utilities/setup-systemd.sh` | 3, 5, 8 |
+| `utilities/setup-firewall.sh` | 3, 5, 6 |
+| `utilities/setup-crowdsec.sh` | 2, 3, 5, 6 |
+| `utilities/smoke-test.sh` | 5, 10 |
+| `utilities/pre-production-drill.sh` | 5, 7, 10 |
+| `utilities/secrets-edit.sh` | 3, 4 |
+| `utilities/secrets-rotate.sh` | 3, 4 |
+| `utilities/secrets-view.sh` | 3, 4 |
+| `utilities/secrets-list.sh` | 3, 4 |
+| `utilities/secrets-export-recovery-kit.sh` | 3, 4 |
+| `utilities/maintenance-run.sh` | 3, 8 |
+| `utilities/maintenance-update.sh` | 2, 3, 8 |
+| `utilities/maintenance-health.sh` | 3, 8, 9 |
+| `utilities/maintenance-email.sh` | 3, 9 |
+| `utilities/maintenance-db-maint.sh` | 3, 7, 8 |
+| `utilities/maintenance-update-dns.sh` | 3, 8 |
+| `utilities/maintenance-update-firewall.sh` | 3, 6, 8 |
+| `utilities/uninstall-vaultwarden.sh` | 3, 5 |
+| `utilities/write-command-reference.sh` | 3, 10, 11 |
+| `utilities/README.md` | 11 |
+| Any additional tracked `utilities/*` file | Assign dynamically to the applicable phase(s) |
+
+### `tests/`
+
+| File | Primary phase(s) |
+|---|---|
+| Every file returned by `git ls-files tests/` | 10, plus the phase for the behavior tested |
+
+### `.github/`
+
+| File | Primary phase(s) |
+|---|---|
+| Every file returned by `git ls-files .github/` | 2, 10 |
+
+### `docs/`
+
+| File | Primary phase(s) |
+|---|---|
+| `docs/ADVANCED-CUSTOMIZATION.md` | 11 |
+| `docs/API.md` | 11 |
+| `docs/BACKUP-RESTORE.md` | 7, 11 |
+| `docs/BOOTSTRAP_KEY_RECOVERY.md` | 4, 11, 12 |
+| `docs/COMMAND-REFERENCE.md` | 10, 11 — generated artifact; verify authoritative source and drift |
+| `docs/CONFIGURATION.md` | 5, 11 |
+| `docs/CROWDSEC.md` | 6, 11 |
+| `docs/DEPLOYMENT.md` | 5, 11 |
+| `docs/EMAIL.md` | 9, 11 |
+| `docs/MIGRATION.md` | 7, 11 |
+| `docs/OPERATIONS.md` | 8, 9, 11 |
+| `docs/SCRIPTS.md` | 10, 11 |
+| `docs/SECRETS-SCHEMA.md` | 4, 10, 11 |
+| `docs/SECURITY.md` | 4, 6, 11, 12 |
+| `docs/TROUBLESHOOTING.md` | 11, 12 |
+| `docs/VOLUME-MIGRATION.md` | 7, 11 |
+| Any additional tracked `docs/*` file | 11 and any applicable functional phase |
+
+---
+
 ## Completion checks
 
 Before finishing:
 
-1. Confirm all tracked files were assigned to an audit area or explicitly excluded with a reason.
+1. Run:
+
+   ```bash
+   git ls-files | sort > /tmp/prr-tracked-files.txt
+   ```
+
+   Cross-reference every line against the current-state coverage map and the audit coverage ledger. Every tracked file must be assigned to at least one audit phase or explicitly excluded with a written reason.
+
 2. Confirm all tests and commands are represented in the validation evidence table.
 3. Confirm every Blocker, Critical, and High issue appears in the release-blocker or conditional-gate sections.
 4. Confirm duplicate findings were merged by root cause.
