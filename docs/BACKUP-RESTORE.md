@@ -30,25 +30,26 @@ Related docs: [OPERATIONS.md](OPERATIONS.md) · [SCRIPTS.md](SCRIPTS.md) · [ADV
 
 | Backup type | Encrypted file | Sidecar files |
 | :-- | :-- | :-- |
-| `db` | `db_backup_YYYYMMDD_HHMMSS.sqlite3.age` | `.sha256`, `.meta` |
-| `full` | `full_backup_YYYYMMDD_HHMMSS.tar.zst.age` | `.sha256`, `.meta` |
-| `emergency` | `emergency_backup_YYYYMMDD_HHMMSS.tar.zst.age` | `.sha256`, `.meta` |
+| `db` | `db_backup_YYYYMMDD_HHMMSS.sqlite3.age` | `.sha256`, `.sha256.hmac`, `.meta` |
+| `full` | `full_backup_YYYYMMDD_HHMMSS.tar.zst.age` | `.sha256`, `.sha256.hmac`, `.meta` |
+| `emergency` | `emergency_backup_YYYYMMDD_HHMMSS.tar.zst.age` | `.sha256`, `.sha256.hmac`, `.meta` |
 
 Full and emergency archives are compressed with **zstd** (threaded, level 3: `zstd -T0 -3`), replacing the previous gzip compression. The `.tar.zst.age` extension reflects this. Database-only backups are a raw SQLite file encrypted directly with Age — no compression layer.
 
-Each backup produces three files:
+Each new backup produces four files:
 
 | File | Purpose |
 | :-- | :-- |
 | `*.age` | Encrypted backup archive |
 | `*.sha256` | Post-encryption SHA-256 checksum (generated automatically) |
+| `*.sha256.hmac` | HMAC-SHA256 authentication of the checksum using the SOPS-managed `file_integrity_hmac_key` |
 | `*.meta` | Metadata (type, timestamp, archive format, version) |
 
 ### Retention age calculation
 
 Retention is based on the **`YYYYMMDD_HHMMSS` timestamp embedded in the filename** (immutable across `cp`, `mv`, `chmod`, `chown`). This prevents a known failure mode where backups restored to a fresh host showed `ctime = now`, appeared 0 days old, and were never pruned. The ctime fallback is used only for files predating the current naming convention.
 
-Orphaned sidecar files (`.meta`, `.sha256`) whose corresponding `.age` primary is absent are removed on every cleanup sweep.
+Orphaned sidecar files (`.meta`, `.sha256`, `.sha256.hmac`) whose corresponding `.age` primary is absent are removed on every cleanup sweep.
 
 ---
 
@@ -102,6 +103,8 @@ sudo ./backup.sh run db --keep 30
 
 `--keep` accepts only positive integers; non-integer or shell-injectable values (e.g. `"14; rm -rf /"`) are rejected immediately after argument parsing.
 
+Configured retention is resolved per type: `BACKUP_RETENTION_DB_DAYS`, `BACKUP_RETENTION_FULL_DAYS`, or `BACKUP_RETENTION_EMERGENCY_DAYS`, then `BACKUP_RETENTION_DAYS`, then the built-in fallback. An explicit `--keep N` overrides every configured value for that invocation.
+
 ---
 
 ## 🔄 Verification Modes
@@ -111,7 +114,7 @@ sudo ./backup.sh run db --keep 30
 | Quick (default) | *(none)* | Seconds | SHA-256 checksum + Age decrypt probe |
 | Full | `--full-verification` | Minutes | Decrypt → extract → DB integrity check |
 
-The quick mode now **always performs an actual Age decrypt probe** (in addition to SHA-256), so corrupt ciphertext is caught even without `--full-verification`. If the Age key file is missing, quick verification fails with a hard error (it no longer silently succeeds).
+The quick mode always performs an Age decrypt probe and verifies the checksum HMAC when available. New installations set `REQUIRE_AUTHENTICATED_INTEGRITY=true`, making a missing or invalid HMAC sidecar a hard failure. Upgraded installations can temporarily leave it false while rotating `file_integrity_hmac_key` and generating new backups.
 
 Use quick for daily automated backups; full for weekly and before major changes.
 
@@ -178,7 +181,15 @@ make key-backup
 
 ## ☁️ Offsite Storage (rclone)
 
-`backup.sh` reads `RCLONE_REMOTE_NAME` from `.env` and syncs the encrypted `.age`, `.meta`, and `.sha256` sidecars to `${RCLONE_REMOTE_NAME}:vaultwarden_backups/${type}/` when `--rclone` is passed.
+`backup.sh` reads `RCLONE_REMOTE_NAME` from `.env` and syncs the encrypted archive plus `.meta`, `.sha256`, and `.sha256.hmac` sidecars to `${RCLONE_REMOTE_NAME}:vaultwarden_backups/${type}/` when `--rclone` is passed.
+
+To backfill every retained local backup to its corresponding remote folder in one operation, use the dashboard Backup menu option **Copy All Local Backups to Rclone Remote** or run:
+
+```bash
+sudo ./backup.sh sync
+```
+
+The command copies rather than mirrors, so it never deletes a remote file merely because the local copy is absent. It applies local retention before upload and the same per-type retention rules to the remote afterward.
 
 **Rclone failure is fatal when `--rclone` is set** — a missing binary or unconfigured remote causes a non-zero exit so monitoring and the systemd timer capture the failure. The rclone config path (`RCLONE_CONFIG`) is validated before use: shell metacharacters, world-writable files, and paths resolving into sensitive system locations are all rejected.
 

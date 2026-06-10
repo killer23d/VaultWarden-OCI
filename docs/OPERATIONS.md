@@ -54,6 +54,8 @@ make restart
 make safe-restart
 ```
 
+`make safe-restart` snapshots the resolved Compose model and current local image IDs, restarts with `--skip-pull`, and restores those snapshots if startup or health checks fail. It does not roll back database migrations or host packages; take a backup and use `maintenance.sh update` for version upgrades, where image pulls are separately snapshot and verified.
+
 ---
 
 ### Health Monitoring

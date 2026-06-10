@@ -189,6 +189,7 @@ smtp_password: "smtp_password"
 push_installation_id: "optional"
 push_installation_key: "optional"
 backup_passphrase: "optional"
+file_integrity_hmac_key: "auto-generated checksum authentication key"
 ```
 
 ### Enhanced Security Features

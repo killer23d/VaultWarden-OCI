@@ -390,9 +390,11 @@ sudo systemctl restart crowdsec
 | `CF_ACCOUNT_ID` | _(required)_ | Your Cloudflare account ID |
 | `CF_FREE_PLAN` | `true` | Enables `only_include_decisions_from` KV write guard |
 | `CF_AUTONOMOUS_MODE` | `false` | `true` = autonomous mode (no persistent daemon) |
-| `CROWDSEC_VERSION` | _(blank = latest)_ | Pin CrowdSec engine version |
-| `CF_WORKER_BOUNCER_VERSION` | _(blank = latest)_ | Pin CF bouncer version |
-| `FIREWALL_BOUNCER_VERSION` | _(blank = latest)_ | Pin firewall bouncer version |
+| `CROWDSEC_VERSION` | `1.7.8` | Pin CrowdSec engine version |
+| `CF_WORKER_BOUNCER_VERSION` | `v0.0.18` | Pin CF bouncer version |
+| `FIREWALL_BOUNCER_VERSION` | `0.0.34` | Pin firewall bouncer version |
+
+The pins above were verified against the official upstream releases on 2026-06-10. Pass `setup.sh install --use-latest` when generating `.env`, or `setup-crowdsec.sh --use-latest` during component setup, to explicitly opt into current upstream versions.
 
 ---
 

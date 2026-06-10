@@ -393,6 +393,7 @@ ADMIN_IP=""
 _CS_FW_BOUNCER_KEY_GENERATED=""
 CROWDSEC_VERSION="${CROWDSEC_VERSION:-}"
 CF_WORKER_BOUNCER_VERSION="${CF_WORKER_BOUNCER_VERSION:-}"
+FIREWALL_BOUNCER_VERSION="${FIREWALL_BOUNCER_VERSION:-}"
 
 show_help() {
     cat <<'HELP'
@@ -424,6 +425,7 @@ ENVIRONMENT:
                                guard. Default: 'true'.
     CROWDSEC_VERSION           Pin a specific CrowdSec version.
     CF_WORKER_BOUNCER_VERSION  Pin a specific Workers bouncer version.
+    FIREWALL_BOUNCER_VERSION   Pin a specific firewall bouncer version.
 
     Cloudflare credentials (in encrypted secrets, not .env):
         sudo ./edit-secrets.sh rotate cf_worker_bouncer_token
@@ -768,8 +770,14 @@ STUB
             log_info "Wrote stub CF bouncer config to satisfy dpkg postinst."
         fi
 
-        log_info "Attempting apt install of crowdsec-cloudflare-worker-bouncer..."
-        if DEBIAN_FRONTEND=noninteractive apt-get install -y crowdsec-cloudflare-worker-bouncer 2>/dev/null; then
+        _cf_deb_pkg="crowdsec-cloudflare-worker-bouncer"
+        if [[ -n "$CF_WORKER_BOUNCER_VERSION" ]]; then
+            _cf_deb_pkg+="=${CF_WORKER_BOUNCER_VERSION#v}"
+            log_info "Attempting apt install of pinned package: ${_cf_deb_pkg}"
+        else
+            log_info "Attempting apt install of latest crowdsec-cloudflare-worker-bouncer..."
+        fi
+        if DEBIAN_FRONTEND=noninteractive apt-get install -y "$_cf_deb_pkg" 2>/dev/null; then
             log_success "Installed crowdsec-cloudflare-worker-bouncer via apt."
             _installed_via_deb=true
             _apt_bin="$(command -v crowdsec-cloudflare-worker-bouncer 2>/dev/null || true)"

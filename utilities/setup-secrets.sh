@@ -435,6 +435,14 @@ SOPS_EOF
             fi
         }
 
+        # Schema condition_fn predicates receive the key name and return 0 when
+        # collection should proceed. Keep predicates side-effect free so they
+        # are safe to reuse for every key in an atomic group.
+        condition_push_enabled() {
+            local _condition_key="$1"
+            [[ -n "$_condition_key" && "$_push_enabled" == "true" ]]
+        }
+
         # Read all key names from the schema once so we don't call yq in a loop.
         local _schema_keys
         if ! _schema_keys=$(schema_keys); then
@@ -452,24 +460,41 @@ SOPS_EOF
         fi
         _email_mode="${_email_mode:-auto}"
         _email_provider="${_email_provider:-mailersend}"
+        local _push_enabled
+        _push_enabled=$(_read_dotenv_value "PUSH_ENABLED" .env)
+        _push_enabled="${_push_enabled:-false}"
 
         # ── Schema-driven dispatch loop ───────────────────────────────────────
         #
         # For each key in schema order:
         #   interactive  → prompt user (hash as required by the key's 'hash' field)
         #   auto         → call the function named in 'auto_fn'
-        #   conditional  → fall through to a verbatim key-specific block below
+        #   conditional  → evaluate condition_fn, then collect or use placeholder
         #   skip         → omit this key entirely
         #
-        # Business logic that is too context-dependent to express in the schema
-        # (email-mode gating, push-notification 3-way conditional) is handled
-        # verbatim inside the matching branch.  The schema drives ordering and
-        # the set of keys; it does not try to replace application logic.
+        # Business logic that is too context-dependent to express as a predicate
+        # (for example email-mode sentinel values) remains in the matching key
+        # branch. The schema drives ordering, collection mode, and simple gates.
 
         while IFS= read -r _key; do
             [[ -z "$_key" ]] && continue
             local _collect_type
             _collect_type=$(schema_collect_type "$_key")
+
+            if [[ "$_collect_type" == "conditional" ]]; then
+                local _condition_fn _placeholder
+                _condition_fn=$(schema_condition_fn "$_key")
+                if [[ -z "$_condition_fn" ]] || ! declare -F "$_condition_fn" >/dev/null 2>&1; then
+                    log_error "collect_secrets: conditional key '${_key}' has invalid condition_fn '${_condition_fn}'"
+                    return 1
+                fi
+                if ! "$_condition_fn" "$_key"; then
+                    _placeholder=$(schema_placeholder_for_key "$_key")
+                    _COLLECTED_SECRETS["$_key"]="$_placeholder"
+                    log_info "${_key}: condition ${_condition_fn} is false; using schema placeholder"
+                    continue
+                fi
+            fi
 
             case "$_key" in
 
@@ -685,14 +710,19 @@ BACKUP_BANNER
                 fi
                 ;;
 
+            # ── file_integrity_hmac_key ───────────────────────────────────────
+            file_integrity_hmac_key)
+                local integrity_key
+                integrity_key=$(auto_generate_secret_field "file_integrity_hmac_key") || {
+                    log_error "Failed to generate file_integrity_hmac_key"
+                    return 1
+                }
+                _COLLECTED_SECRETS["file_integrity_hmac_key"]="$integrity_key"
+                ;;
+
             # ── push_installation_id / push_installation_key ───────────────────
-            # Q1 (conditional collection): PUSH_ENABLED in .env gates collection.
-            #   - AUTO_MODE or PUSH_ENABLED=true  → auto-generate
-            #   - Interactive + user confirms       → collect_secret_field
-            #   - SKIP_OPTIONAL or user declines   → CHANGE_ME_OR_LEAVE_EMPTY
-            # Schema marks these as collect:conditional (forward-declaration only).
-            # FUTURE: extract into condition_fn schema field when a second
-            # conditional key is added. Currently only push keys use this path.
+            # condition_push_enabled has already gated this block through the
+            # schema dispatcher. The two credentials remain an atomic group.
             push_installation_id)
                 if [[ "$SKIP_OPTIONAL" != "true" ]]; then
                     echo ""
@@ -705,6 +735,8 @@ BACKUP_BANNER
                     if [[ "$AUTO_MODE" == "true" ]]; then
                         _COLLECTED_SECRETS["push_installation_id"]=$(auto_generate_secret_field "push_installation_id")
                         _COLLECTED_SECRETS["push_installation_key"]=$(auto_generate_secret_field "push_installation_key")
+                        log_warn "[AUTO] PUSH_ENABLED=true but Bitwarden push credentials cannot be generated automatically."
+                        log_warn "Rotate both push fields before startup."
                     else
                         local do_push
                         if ! read -r -t 30 -p "Configure push notifications? (yes/no): " do_push; then
@@ -945,7 +977,7 @@ BACKUP_BANNER
         for _cleanup_key in \
             admin_token admin_basic_auth_hash \
             caddy_cloudflare_dns_token cf_account_id cf_worker_bouncer_token cloudflare_zone_id \
-            email_api_token smtp_password backup_passphrase \
+            email_api_token smtp_password backup_passphrase file_integrity_hmac_key \
             push_installation_id push_installation_key; do
             unset "SECRET_${_cleanup_key}" 2>/dev/null || true
         done

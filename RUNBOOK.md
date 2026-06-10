@@ -84,6 +84,7 @@ Workers bouncer setup guide.
 | Create emergency backup kit | `make backup-emergency` |
 | List available backups | `make list-backups` |
 | Show backup health summary | `make backup-status` |
+| Copy all retained local backups to rclone | `sudo ./backup.sh sync` |
 | Interactive restore (guided) | `make restore` |
 | Restore from remote storage | `make restore-remote` |
 | Restore database only | `make restore-db` |

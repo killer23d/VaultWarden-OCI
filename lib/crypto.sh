@@ -184,7 +184,7 @@ decrypt_sops_file() {
 
 # Encrypts to a mktemp staging file and atomically renames it over the
 # original only on success, preventing truncation/destruction of the target
-# file on any error (malformed YAML, missing .sops.yaml rule, etc.).
+# file on any error (malformed YAML, invalid recipient, SOPS failure, etc.).
 #
 # chmod 600 is applied to the staging file immediately after mktemp, before
 # any content is written, to eliminate the world-readable race window between
@@ -198,9 +198,9 @@ decrypt_sops_file() {
 # being silently swallowed.
 #
 # After the atomic mv, a sops -d round-trip verifies the ciphertext is
-# readable with the current Age key. sops --encrypt exits 0 even when the
-# recipient key in .sops.yaml is stale or rotated, so the round-trip catches
-# silently unreadable ciphertext before it reaches startup:
+# readable with the current Age key. Encryption passes the derived recipient
+# explicitly, while the generated .sops.yaml supports operator-run SOPS commands
+# and independent recipient health checks.
 #   1. Before mv, write a pre-write backup (install -m 600) of the original
 #      plaintext staging file.
 #   2. After mv succeeds, run `sops -d <live_file> > /dev/null`.
@@ -314,9 +314,8 @@ encrypt_sops_file() {
     if [[ $rt_rc -ne 0 ]]; then
         log_error "encrypt_sops_file: SOPS round-trip validation FAILED for: $file"
         log_error "  The ciphertext was written successfully but cannot be decrypted."
-        log_error "  This typically means the Age public key in .sops.yaml is stale,"
-        log_error "  rotated, or does not match the private key at: $age_key_file"
-        log_error "  Check: cat .sops.yaml   (confirm 'age:' recipient matches your key)"
+        log_error "  The ciphertext recipient does not match the private key at: $age_key_file"
+        log_error "  Also check the generated .sops.yaml before running SOPS manually."
         log_error "  Check: age-keygen -y $age_key_file   (derive the current public key)"
         if [[ -n "${rt_stderr:-}" ]]; then
             log_error "  sops decrypt error: $rt_stderr"
@@ -596,6 +595,8 @@ check_argon2_support() {
             printf 'python\n'
             return 0
         fi
+        log_warn "check_argon2_support: python3 is installed but the argon2 module is missing"
+        log_warn "Install it with: sudo apt install python3-argon2  (or: pip install argon2-cffi)"
     fi
 
     if command -v argon2 >/dev/null 2>&1; then
@@ -828,30 +829,40 @@ verify_file_integrity() {
         fi
 
         local hmac_file="${checksum_file}.hmac"
+        local stored_hmac=""
         if [[ ! -f "$hmac_file" ]]; then
-            log_error "verify_file_integrity: HMAC sidecar missing: $hmac_file (was write_file_integrity() called?)"
-            return 1
+            if [[ "${REQUIRE_AUTHENTICATED_INTEGRITY:-false}" == "true" ]]; then
+                log_error "verify_file_integrity: authenticated integrity is required but HMAC sidecar is missing: $hmac_file"
+                return 1
+            fi
+            log_warn "verify_file_integrity: HMAC sidecar missing for legacy file: $hmac_file"
+            log_warn "  Falling back to plain SHA-256 because REQUIRE_AUTHENTICATED_INTEGRITY is not true."
+        else
+            stored_hmac=$(cat "$hmac_file") || {
+                log_error "verify_file_integrity: failed to read HMAC file: $hmac_file"
+                return 1
+            }
+            stored_hmac=$(awk '{print $1}' <<< "$stored_hmac")
         fi
 
-        local stored_hmac
-        stored_hmac=$(cat "$hmac_file") || {
-            log_error "verify_file_integrity: failed to read HMAC file: $hmac_file"
-            return 1
-        }
-        stored_hmac=$(awk '{print $1}' <<< "$stored_hmac")
+        if [[ -n "$stored_hmac" ]]; then
+            local expected_hmac
+            expected_hmac=$(printf '%s' "$stored_checksum" \
+                            | openssl dgst -sha256 -hmac "${FILE_INTEGRITY_HMAC_KEY}" \
+                            | sed 's/^.* //')
 
-        local expected_hmac
-        expected_hmac=$(printf '%s' "$stored_checksum" \
-                        | openssl dgst -sha256 -hmac "${FILE_INTEGRITY_HMAC_KEY}" \
-                        | sed 's/^.* //')
-
-        if [[ "$expected_hmac" != "$stored_hmac" ]]; then
-            log_error "verify_file_integrity: HMAC verification FAILED for sidecar: $checksum_file"
-            log_error "  Sidecar may have been tampered with alongside the monitored file."
-            return 1
+            if [[ "$expected_hmac" != "$stored_hmac" ]]; then
+                log_error "verify_file_integrity: HMAC verification FAILED for sidecar: $checksum_file"
+                log_error "  Sidecar may have been tampered with alongside the monitored file."
+                return 1
+            fi
+            log_debug "verify_file_integrity: HMAC sidecar authenticated for: $file"
         fi
-        log_debug "verify_file_integrity: HMAC sidecar authenticated for: $file"
     else
+        if [[ "${REQUIRE_AUTHENTICATED_INTEGRITY:-false}" == "true" ]]; then
+            log_error "verify_file_integrity: authenticated integrity is required but FILE_INTEGRITY_HMAC_KEY is not set"
+            return 1
+        fi
         log_warn "verify_file_integrity: FILE_INTEGRITY_HMAC_KEY is not set; sidecar is unauthenticated."
         log_warn "  An attacker who replaces both the file and its .sha256 sidecar will pass this check."
         log_warn "  Set FILE_INTEGRITY_HMAC_KEY and use write_file_integrity() to enable authenticated checking."

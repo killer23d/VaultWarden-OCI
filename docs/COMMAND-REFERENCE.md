@@ -79,6 +79,7 @@ output. Do not edit manually; run `make docs` to regenerate.
 | `make breakglass-status` |  Check break-glass admin account status |
 | `make breakglass-remove` |  Remove break-glass admin account |
 | `make test` |  Run all tests (secrets, config validation) |
+| `make test-unit` |  Run non-destructive shell unit and integration tests |
 | `make test-config` |  Validate docker-compose configuration |
 | `make dry-run` |  Show what startup would do without executing |
 | `make fmt` |  Format Makefile (check only — no auto-format tool available) |
@@ -125,7 +126,7 @@ FULL SETUP OPTIONS (used after install or with top-level --domain / --email):
                       external credentials (CF tokens, SMTP) remain as CHANGE_ME
                       placeholders — the post-install summary lists exact commands
                       to rotate them. Does NOT imply --use-latest.
-  --use-latest        Override pinned container versions with 'latest' tags in .env.
+  --use-latest        Use live upstream container and CrowdSec versions in .env.
   --skip-deps         Skip dependency installation (assumes already installed).
   --force             Overwrite existing .env, secrets, and docker-compose files.
                       WARNING: Also regenerates the Age encryption key. All
@@ -214,9 +215,10 @@ SUBCOMMANDS:
     list [--json]     List existing backups (no root required; JSON optional)
     verify            Verify the most recent backup's integrity
     rotate            Apply retention policy and prune old backups
+    sync               Copy all retained local backups to rclone by type
 
 RUN OPTIONS (used after 'run'):
-    --keep N                 Retention period in days (default: 14)
+    --keep N                 Override configured retention for this run
     --quiet                  Suppress non-error output
     --force                  Ignore locks and force backup
     --email                  Send email notification on completion/failure
@@ -224,6 +226,11 @@ RUN OPTIONS (used after 'run'):
     --full-verification      End-to-end decrypt + integrity check before sync (fatal on failure)
     --skip-full-verification Fast checksum only — explicit default
     --dry-run                Show what would be done without executing
+
+SYNC / ROTATE OPTIONS:
+    --keep N                 Override configured retention for every backup type
+    --quiet                  Suppress non-error output
+    --dry-run                Preview copy or pruning operations
 
 GLOBAL SUBCOMMAND:
     help                     Show this help
@@ -240,6 +247,7 @@ EXAMPLES:
     ./backup.sh list --json                       # Machine-readable backup inventory
     sudo ./backup.sh verify                       # Verify the latest backup
     sudo ./backup.sh rotate --keep 30             # Prune backups older than 30 days
+    sudo ./backup.sh sync                         # Upload db/full/emergency backups
 ```
 
 ### restore.sh
@@ -423,9 +431,10 @@ SUBCOMMANDS:
     list [--json]     List existing backups (no root required; JSON optional)
     verify            Verify the most recent backup's integrity
     rotate            Apply retention policy and prune old backups
+    sync               Copy all retained local backups to rclone by type
 
 RUN OPTIONS (used after 'run'):
-    --keep N                 Retention period in days (default: 14)
+    --keep N                 Override configured retention for this run
     --quiet                  Suppress non-error output
     --force                  Ignore locks and force backup
     --email                  Send email notification on completion/failure
@@ -433,6 +442,11 @@ RUN OPTIONS (used after 'run'):
     --full-verification      End-to-end decrypt + integrity check before sync (fatal on failure)
     --skip-full-verification Fast checksum only — explicit default
     --dry-run                Show what would be done without executing
+
+SYNC / ROTATE OPTIONS:
+    --keep N                 Override configured retention for every backup type
+    --quiet                  Suppress non-error output
+    --dry-run                Preview copy or pruning operations
 
 GLOBAL SUBCOMMAND:
     help                     Show this help
@@ -449,6 +463,7 @@ EXAMPLES:
     ./backup.sh list --json                       # Machine-readable backup inventory
     sudo ./backup.sh verify                       # Verify the latest backup
     sudo ./backup.sh rotate --keep 30             # Prune backups older than 30 days
+    sudo ./backup.sh sync                         # Upload db/full/emergency backups
 ```
 
 ### maintenance-db-maint.sh
@@ -732,6 +747,23 @@ EXAMPLES:
     ./restore.sh list --remote           # List remote backups (no sudo)
 ```
 
+### safe-restart.sh
+
+```
+VaultWarden-OCI Safe Restart
+
+USAGE:
+    sudo ./utilities/safe-restart.sh
+
+DESCRIPTION:
+    Captures the resolved Compose model and current local image IDs, restarts
+    without pulling, and restores the captured model and image tags if startup
+    or health checks fail.
+
+    This restores container configuration and images only. It does not reverse
+    database migrations, host package changes, or operator-edited data.
+```
+
 ### secrets-export-recovery-kit.sh
 
 ```
@@ -875,6 +907,7 @@ ENVIRONMENT:
                                guard. Default: 'true'.
     CROWDSEC_VERSION           Pin a specific CrowdSec version.
     CF_WORKER_BOUNCER_VERSION  Pin a specific Workers bouncer version.
+    FIREWALL_BOUNCER_VERSION   Pin a specific firewall bouncer version.
 
     Cloudflare credentials (in encrypted secrets, not .env):
         sudo ./edit-secrets.sh rotate cf_worker_bouncer_token
@@ -903,7 +936,7 @@ DESCRIPTION:
 OPTIONS:
     --domain DOMAIN       Your domain name (required, e.g. vault.example.com)
     --email EMAIL         Admin email address (required)
-    --use-latest          Set all container versions to 'latest'
+    --use-latest          Set container and CrowdSec component versions to 'latest'
     --data-device DEV     Data volume block device path
     --data-mount PATH     Data volume mount point (default: /mnt/vw-data)
     --force               Overwrite existing .env/docker-compose.yml

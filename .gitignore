@@ -21,6 +21,9 @@ age-key.txt.pre-rotate-*
 secrets.yaml
 secrets.yaml.bak
 
+# Per-installation SOPS creation rules (generated from the local Age public key)
+.sops.yaml
+
 # ---------------------------------------------------------------------------
 # Local Docker Compose overrides — generated from *.example templates
 # ---------------------------------------------------------------------------

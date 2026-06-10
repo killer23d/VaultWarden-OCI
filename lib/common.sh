@@ -268,7 +268,10 @@ _fix_rclone_ownership() {
     local rclone_conf
     if [[ -n "${SUDO_USER:-}" ]]; then
         # Under sudo, HOME is /root; resolve the actual user's home directory.
-        rclone_conf=$(eval echo "~${SUDO_USER}/.config/rclone/rclone.conf")
+        local sudo_user_home
+        sudo_user_home=$(getent passwd "${SUDO_USER}" 2>/dev/null | cut -d: -f6 || true)
+        [[ -n "$sudo_user_home" ]] || return 0
+        rclone_conf="${sudo_user_home}/.config/rclone/rclone.conf"
     else
         rclone_conf="${HOME}/.config/rclone/rclone.conf"
     fi

@@ -37,7 +37,7 @@ DATA_DEVICE ?=
 
 # ── Phony targets ───────────────────────────────────────────────────────────
 .PHONY: help \
-        setup init-secrets edit-secrets test-secrets test-email \
+        setup init-secrets edit-secrets test-secrets test-email test-unit \
         up down restart start stop safe-restart status \
         health health-quick health-report test-email smoke-test drill \
         logs logs-tail logs-vaultwarden logs-caddy logs-postfix logs-crowdsec \
@@ -346,19 +346,7 @@ restart: ## Restart all services (via startup.sh)
 safe-restart: ## Restart with automatic rollback on failure
 	$(call check-docker)
 	@echo "$(BLUE)Safe restart with rollback capability...$(NC)"
-	@PRE_IDS=$$(docker compose ps -q 2>/dev/null || true); \
-	if sudo ./startup.sh --force; then \
-		echo "$(GREEN)Safe restart completed successfully.$(NC)"; \
-	else \
-		echo "$(RED)Restart failed! Attempting rollback...$(NC)"; \
-		if [ -n "$$PRE_IDS" ]; then \
-			docker compose down || true; \
-			docker compose up -d || true; \
-			echo "$(YELLOW)Rollback attempted. Check service status.$(NC)"; \
-		fi; \
-		$(MAKE) status; \
-		exit 1; \
-	fi
+	@sudo ./utilities/safe-restart.sh
 
 status: ## Show service status, backup health, disk usage, and CrowdSec ban summary
 	$(call check-docker)
@@ -880,9 +868,14 @@ breakglass-remove: ## Remove break-glass admin account
 
 test: ## Run all tests (secrets, config validation)
 	@echo "$(BLUE)Running test suite...$(NC)"
+	@$(MAKE) test-unit
 	@$(MAKE) test-secrets
 	@$(MAKE) test-config
 	@echo "$(GREEN)All tests passed.$(NC)"
+
+test-unit: ## Run non-destructive shell unit and integration tests
+	@tests/test-architecture-helpers.sh
+	@tests/test-security-helpers.sh
 
 test-config: ## Validate docker-compose configuration
 	$(call check-docker)

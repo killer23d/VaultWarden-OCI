@@ -223,10 +223,6 @@ schema_key_exists() {
 # Prints the collect type for KEY: one of interactive | auto | conditional | skip.
 # Named accessor so callers can branch cleanly without re-reading the raw field.
 #
-# "conditional" is a forward-declaration marker used by push notification keys.
-# No schema dispatch loop interprets it automatically — the caller must handle
-# it explicitly with a verbatim preserved block.
-#
 # Example:
 #   case "$(schema_collect_type "$key")" in
 #     interactive) ... ;;
@@ -241,10 +237,19 @@ schema_collect_type() {
     schema_field_safe "$key" "collect" "$schema_file"
 }
 
+# Prints the Bash predicate named by condition_fn for a conditional key.
+# The predicate receives the schema key and returns 0 to collect or 1 to write
+# the key's placeholder without prompting.
+schema_condition_fn() {
+    local key="$1"
+    local schema_file="${2:-${SECRETS_SCHEMA_FILE}}"
+    schema_field_safe "$key" "condition_fn" "$schema_file"
+}
+
 export -f _schema_check_prerequisites
 export -f schema_keys schema_field schema_field_safe
 export -f schema_required_keys schema_hinted_keys
 export -f schema_services_for_key schema_placeholder_for_key
-export -f schema_key_exists schema_collect_type
+export -f schema_key_exists schema_collect_type schema_condition_fn
 
 log_debug "Schema library loaded (schema: ${SECRETS_SCHEMA_FILE})"

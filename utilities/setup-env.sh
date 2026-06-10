@@ -51,7 +51,7 @@ DESCRIPTION:
 OPTIONS:
     --domain DOMAIN       Your domain name (required, e.g. vault.example.com)
     --email EMAIL         Admin email address (required)
-    --use-latest          Set all container versions to 'latest'
+    --use-latest          Set container and CrowdSec component versions to 'latest'
     --data-device DEV     Data volume block device path
     --data-mount PATH     Data volume mount point (default: /mnt/vw-data)
     --force               Overwrite existing .env/docker-compose.yml
@@ -174,7 +174,10 @@ create_env_file() {
             # CADDY_VERSION is excluded — it is never set to 'latest'.
             if grep -qE '^VAULTWARDEN_VERSION=latest' "$env_file" && \
                grep -qE '^POSTFIX_VERSION=latest'     "$env_file" && \
-               grep -qE '^BUSYBOX_VERSION=latest'     "$env_file"; then
+               grep -qE '^BUSYBOX_VERSION=latest'     "$env_file" && \
+               grep -qE '^CROWDSEC_VERSION=latest'    "$env_file" && \
+               grep -qE '^CF_WORKER_BOUNCER_VERSION=latest' "$env_file" && \
+               grep -qE '^FIREWALL_BOUNCER_VERSION=latest'  "$env_file"; then
                 latest_matches=true
             fi
         else
@@ -256,6 +259,9 @@ create_env_file() {
             sub(/^VAULTWARDEN_VERSION=.*/, "VAULTWARDEN_VERSION=latest");
             sub(/^POSTFIX_VERSION=.*/,     "POSTFIX_VERSION=latest");
             sub(/^BUSYBOX_VERSION=.*/,     "BUSYBOX_VERSION=latest");
+            sub(/^CROWDSEC_VERSION=.*/,    "CROWDSEC_VERSION=latest");
+            sub(/^CF_WORKER_BOUNCER_VERSION=.*/, "CF_WORKER_BOUNCER_VERSION=latest");
+            sub(/^FIREWALL_BOUNCER_VERSION=.*/,  "FIREWALL_BOUNCER_VERSION=latest");
             print;
         }' "$temp_env" > "$temp2" || { rm -f "$temp_env" "$temp2"; return 1; }
 
