@@ -1,8 +1,9 @@
 # CrowdSec log acquisition configuration — VaultWarden-OCI
-# Installed to /etc/crowdsec/acquis.d/vaultwarden.yaml by setup-crowdsec.sh
+# Installed to /etc/crowdsec/acquis.d/vaultwarden.yaml by
+# utilities/setup-crowdsec.sh.
 #
-# TOKEN_PROJECT_STATE_DIR is substituted at install time by setup-crowdsec.sh
-# with the value of PROJECT_STATE_DIR from .env.
+# TOKEN_PROJECT_STATE_DIR is substituted at install time with the value of
+# PROJECT_STATE_DIR from .env.
 #
 # FIELD NAME REFERENCE (journald source):
 #   Correct : journalctl_filter  (list)   ← mandatory, single unit per document
@@ -10,6 +11,9 @@
 # Ref: https://docs.crowdsec.net/docs/next/log_processor/data_sources/journald/
 
 # ── Vaultwarden application logs ─────────────────────────────────────────────
+# The Dominic-Wagner/vaultwarden parser requires a numeric UTC offset in each
+# timestamp. Keep Vaultwarden's LOG_TIMESTAMP_FORMAT set to:
+#   %Y-%m-%d %H:%M:%S.%3f%z
 source: file
 filenames:
   - TOKEN_PROJECT_STATE_DIR/logs/vaultwarden/vaultwarden.log
@@ -50,15 +54,17 @@ labels:
 
 ---
 
-# ── iptables kernel firewall logs ────────────────────────────────────────────
-# Required by crowdsecurity/iptables collection.
-# iptables must be configured to log DROP/REJECT packets with a prefix, e.g.:
-#   sudo iptables -I INPUT -j LOG --log-prefix "[IPTABLES] " --log-level 4
-# On OCI free-tier the default security list already drops port-scans;
-# this source captures those drops so CrowdSec can correlate scanning activity.
-source: file
-filenames:
-  - /var/log/kern.log
-  - /var/log/messages
+# ── Host firewall/kernel packet logs ─────────────────────────────────────────
+# Required by crowdsecurity/iptables. The iptables parser runs after the syslog
+# parser, so kernel messages must enter the pipeline with type: syslog.
+#
+# Only packets that reach this VM can be observed here. Traffic dropped by an
+# OCI Security List or another provider-side firewall never reaches journald.
+# Configure UFW/iptables/nftables logging for locally dropped packets; avoid
+# acquiring /var/log/kern.log or /var/log/messages in parallel with this source,
+# which would ingest the same events twice on systems forwarding journal logs.
+source: journalctl
+journalctl_filter:
+  - "_TRANSPORT=kernel"
 labels:
-  type: iptables
+  type: syslog
