@@ -39,8 +39,9 @@ grep -q -- "--proto '=https' --tlsv1.2" "$SETUP"
 grep -q 'SHA-256 verification failed' "$SETUP"
 grep -q '^NoNewPrivileges=true$' "$SETUP"
 grep -q '^CapabilityBoundingSet=$' "$SETUP"
-grep -q 'chmod 600.*crowdsec-cloudflare-worker-bouncer' "$SETUP"
-grep -q 'chmod 640.*acquis' "$SETUP"
+grep -q 'chmod 600 "\$config"' "$SETUP"
+grep -q 'chmod 600 "\$dest"' "$SETUP"
+grep -q 'chmod 640 "\$dest"' "$SETUP"
 
 _document_count="$(grep -c '^---$' "$ACQUIS")"
 [[ "$_document_count" -eq 4 ]] || {
