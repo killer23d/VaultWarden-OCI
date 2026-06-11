@@ -24,12 +24,12 @@ jobs:
       - uses: actions/checkout@v4
 
       # yq is required by lib/schema.sh (used by secrets-rotate.sh --help and
-      # write-command-reference.sh).  Installing it here ensures the generated
+      # write-command-reference.sh). Installing it here ensures the generated
       # COMMAND-REFERENCE.md is identical to what was committed (which was
       # produced on a machine that had yq installed).
       #
       # NOTE: 'apt-get install yq' installs python-yq (a jq wrapper), NOT the
-      # mikefarah/yq Go binary.  lib/schema.sh uses mikefarah yq syntax
+      # mikefarah/yq Go binary. lib/schema.sh uses mikefarah yq syntax
       # (e.g. 'yq eval'), so we must install the correct binary directly.
       - name: Install yq
         run: |
@@ -46,7 +46,7 @@ jobs:
           echo "${YQ_SHA256}  /tmp/yq" | sha256sum --check --status
           sudo install -m 755 /tmp/yq /usr/local/bin/yq
           yq --version
-          
+
       - name: Check for known stale terms
         run: |
           STALE_TERMS=(
@@ -101,13 +101,11 @@ jobs:
       - name: Check for unpinned version references
         run: |
           FAIL=0
-          # Guard against @latest Go module references in any script other than
-          # setup-crowdsec.sh and its private core implementation. The @latest
-          # path is reached only when CF_WORKER_BOUNCER_VERSION is empty (i.e.
-          # --use-latest was passed or no pin is set), which is intentional.
+          # setup-crowdsec.sh may use @latest only when --use-latest clears the
+          # configured pin. All other shell scripts must remain reproducible.
           if grep -rn '@latest' utilities/ lib/ --include='*.sh' \
-               | grep -Ev 'utilities/(setup-crowdsec|\.setup-crowdsec-core)\.sh'; then
-            echo "UNPINNED: @latest Go reference found outside CrowdSec setup scripts"
+               | grep -v 'utilities/setup-crowdsec.sh'; then
+            echo "UNPINNED: @latest Go reference found outside setup-crowdsec.sh"
             FAIL=1
           fi
           # Guard against unintended /releases/latest calls in any OTHER script
@@ -188,7 +186,9 @@ jobs:
           sudo install -m 755 /tmp/sops /usr/local/bin/sops
 
       - name: Run focused tests
-        run: make test-unit
+        run: |
+          make test-unit
+          tests/test-crowdsec-config.sh
 
   # ── Shellcheck auto-fix (contents: write, runs only on default branch) ──
   # Separated from the PR check job so untrusted PR code never runs with
