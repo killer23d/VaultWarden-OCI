@@ -163,13 +163,18 @@ The script runs 9 phases:
 |---|---|
 | 1 | Installs CrowdSec from the packagecloud repo |
 | 2 | Installs `crowdsec-cloudflare-worker-bouncer` (apt → tarball → Go source) |
-| 3 | Installs hub collections (linux, caddy, http-cve, vaultwarden) |
+| 3 | Installs hub collections (caddy, linux, iptables, vaultwarden; Hub dependencies resolve automatically) |
 | 4 | Writes the acquisition config (tells CrowdSec which log files to watch) |
 | 5 | Generates and registers the CrowdSec LAPI key for the bouncer |
 | 6 | Renders and writes the bouncer config, starts service |
 | 7 | Applies custom `profiles.yaml` (if present) |
 | 8 | Enables and starts all services (firewall bouncer + CF bouncer) |
 | 9 | Writes your admin IP to the CrowdSec allowlist |
+
+The top-level collection set is intentionally limited to `crowdsecurity/caddy`,
+`crowdsecurity/linux`, `crowdsecurity/iptables`, and
+`Dominic-Wagner/vaultwarden`. AppSec collections are not installed because this
+project does not run a CrowdSec AppSec listener or forward HTTP requests to one.
 
 ### Step 4 — Set Worker route to Fail Open
 
