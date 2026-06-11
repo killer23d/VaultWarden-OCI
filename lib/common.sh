@@ -24,6 +24,13 @@
 #   source "${LIB_DIR}/common.sh"
 #   init_common_lib "$0"
 
+# Enforce Ubuntu 22.04 LTS minimum — Bash 5.0+ required.
+if (( BASH_VERSINFO[0] < 5 )); then
+    echo "ERROR: Bash 5.0+ is required (found ${BASH_VERSION})." \
+         "This project targets Ubuntu 22.04 LTS." >&2
+    exit 1
+fi
+
 [[ -n "${VAULTWARDEN_COMMON_LIB_LOADED:-}" ]] && return 0
 readonly VAULTWARDEN_COMMON_LIB_LOADED=1
 

@@ -55,7 +55,11 @@ command -v docker >/dev/null 2>&1 || {
     exit 1
 }
 
-rollback_dir=$(mktemp -d -p /tmp vaultwarden-safe-restart.XXXXXXXXXX)
+rollback_dir=$(mktemp -d -p /dev/shm 2>/dev/null \
+               || mktemp -d -t vaultwarden-safe-restart.XXXXXXXXXX) || {
+    log_error "Could not create a secure rollback directory."
+    exit 1
+}
 chmod 700 "$rollback_dir"
 compose_snapshot="${rollback_dir}/compose.yaml"
 image_snapshot="${rollback_dir}/images.tsv"

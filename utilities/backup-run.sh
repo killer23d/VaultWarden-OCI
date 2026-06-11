@@ -525,41 +525,9 @@ sync_to_rclone() {
         return 1
     fi
 
-    local rclone_config_arg=()
-    local rclone_config_path
-    rclone_config_path="$(get_config_value "RCLONE_CONFIG" "")"
-
-    if [[ -n "$rclone_config_path" ]]; then
-        if ! validate_rclone_config_path "$rclone_config_path"; then
-            log_error "Refusing to use invalid RCLONE_CONFIG path: $rclone_config_path" >&2
-            return 1
-        fi
-        local canonical_cfg
-        canonical_cfg=$(realpath -e "$rclone_config_path")
-        rclone_config_arg=(--config "$canonical_cfg")
-        backup_log_info "Using rclone config (from .env): $canonical_cfg"
-    else
-        local discovered_cfg
-        if discovered_cfg=$(_resolve_rclone_config); then
-            if ! validate_rclone_config_path "$discovered_cfg"; then
-                log_error "Auto-discovered rclone config failed validation: $discovered_cfg" >&2
-                log_error "Set RCLONE_CONFIG=/path/to/rclone.conf in .env to override." >&2
-                return 1
-            fi
-            local canonical_discovered
-            canonical_discovered=$(realpath -e "$discovered_cfg")
-            rclone_config_arg=(--config "$canonical_discovered")
-            backup_log_info "Using rclone config (auto-discovered): $canonical_discovered"
-            backup_log_info "Tip: set RCLONE_CONFIG=$canonical_discovered in .env to make this explicit."
-        else
-            log_error "No rclone config file found. rclone cannot authenticate." >&2
-            log_error "Options:" >&2
-            log_error "  1. Set RCLONE_CONFIG=/path/to/rclone.conf in .env" >&2
-            log_error "  2. Copy config to /etc/rclone/rclone.conf (system-wide)" >&2
-            log_error "  3. Run: rclone config  (as root, so /root/.config/rclone/rclone.conf is created)" >&2
-            return 1
-        fi
-    fi
+    local -a rclone_config_arg=()
+    _resolve_rclone_config_arg rclone_config_arg || return 1
+    backup_log_info "Using validated rclone config: ${rclone_config_arg[1]}"
 
     local remote_base_path
     remote_base_path="$(get_config_value "RCLONE_REMOTE_PATH" "vaultwarden_backups")"
@@ -679,6 +647,28 @@ sync_to_rclone() {
 
 }
 
+# _resolve_rclone_config_arg NAMEREF_ARRAY
+#
+# Resolves, validates, and canonicalises the rclone config path, then populates
+# the caller's array (passed by nameref) with the --config argument pair.
+# NAMEREF_ARRAY is the caller's variable name without a leading dollar sign.
+# Returns 1 and logs an error when resolution or validation fails.
+# Requires Bash 5.0+ (the project baseline is Ubuntu 22.04 LTS).
+_resolve_rclone_config_arg() {
+    local -n _rca_out="$1"
+    local cfg
+    cfg=$(get_config_value "RCLONE_CONFIG" "") || cfg=""
+    if [[ -z "$cfg" ]]; then
+        cfg=$(_resolve_rclone_config) || {
+            log_error "_resolve_rclone_config_arg: no rclone config file found"
+            return 1
+        }
+    fi
+    validate_rclone_config_path "$cfg" || return 1
+    cfg=$(realpath -e "$cfg") || return 1
+    _rca_out=(--config "$cfg")
+}
+
 sync_all_backups_to_rclone() {
     if ! command -v rclone >/dev/null 2>&1; then
         log_error "rclone not installed — offsite backup cannot proceed."
@@ -693,17 +683,7 @@ sync_all_backups_to_rclone() {
     fi
 
     local -a rclone_config_arg=()
-    local cfg
-    cfg=$(get_config_value "RCLONE_CONFIG" "")
-    if [[ -z "$cfg" ]]; then
-        cfg=$(_resolve_rclone_config) || {
-            log_error "No rclone config file found."
-            return 1
-        }
-    fi
-    validate_rclone_config_path "$cfg" || return 1
-    cfg=$(realpath -e "$cfg")
-    rclone_config_arg=(--config "$cfg")
+    _resolve_rclone_config_arg rclone_config_arg || return 1
 
     backup_log_info "Testing connectivity to rclone remote '${remote_name}'..."
     rclone lsd "${rclone_config_arg[@]}" "${remote_name}:" --contimeout 10s --timeout 30s >/dev/null || {
@@ -754,13 +734,13 @@ sync_all_backups_to_rclone() {
 
 # _prune_remote_backups
 #
-# Prunes backup files older than RETENTION_DAYS from the configured rclone
-# remote. Mirrors the local cleanup_old_backups() retention policy so that
-# remote and local storage stay in sync after each rotation run.
+# Prunes backup files on the configured rclone remote that are older than
+# the per-type retention period. Retention days are read via
+# _retention_days_for_type() for each backup type, mirroring the local
+# cleanup_old_backups() policy on the remote store.
 #
-# Silently skips when rclone is not installed or not configured.
-# Non-fatal: logs a warning and returns 1 on partial failures so the rotate
-# subcommand can report degraded state without aborting.
+# Non-fatal: logs a warning and returns 1 on partial failure so that a single
+# unreachable remote does not abort an otherwise successful backup run.
 _prune_remote_backups() {
     if ! command -v rclone >/dev/null 2>&1; then
         backup_log_info "rclone not installed — skipping remote retention pruning."
@@ -774,31 +754,8 @@ _prune_remote_backups() {
         return 0
     fi
 
-    local rclone_config_arg=()
-    local rclone_config_path
-    rclone_config_path="$(get_config_value "RCLONE_CONFIG" "")"
-    if [[ -n "$rclone_config_path" ]]; then
-        if ! validate_rclone_config_path "$rclone_config_path"; then
-            log_warn "[rotate] Remote prune skipped: invalid RCLONE_CONFIG path." >&2
-            return 0
-        fi
-        local _canonical_cfg
-        _canonical_cfg=$(realpath -e "$rclone_config_path")
-        rclone_config_arg=(--config "$_canonical_cfg")
-    else
-        local _discovered_cfg
-        if _discovered_cfg=$(_resolve_rclone_config 2>/dev/null); then
-            if validate_rclone_config_path "$_discovered_cfg" 2>/dev/null; then
-                local _canonical_disc
-                _canonical_disc=$(realpath -e "$_discovered_cfg")
-                rclone_config_arg=(--config "$_canonical_disc")
-            fi
-        fi
-        if [[ ${#rclone_config_arg[@]} -eq 0 ]]; then
-            backup_log_info "No rclone config found — skipping remote retention pruning."
-            return 0
-        fi
-    fi
+    local -a rclone_config_arg=()
+    _resolve_rclone_config_arg rclone_config_arg || return 1
 
     local remote_base_path
     remote_base_path="$(get_config_value "RCLONE_REMOTE_PATH" "vaultwarden_backups")"

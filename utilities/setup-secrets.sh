@@ -443,6 +443,26 @@ SOPS_EOF
             [[ -n "$_condition_key" && "$_push_enabled" == "true" ]]
         }
 
+        # _dispatch_auto_fn FIELD
+        #
+        # Calls the function declared by FIELD's schema auto_fn and prints the
+        # generated value. Returns 1 when no auto_fn is declared, the function
+        # is unavailable, or generation fails. Requires the schema and secrets
+        # libraries to be loaded in the current Bash 5+ shell.
+        _dispatch_auto_fn() {
+            local _field="$1"
+            local _auto_fn
+            _auto_fn=$(schema_field_safe "$_field" "auto_fn" 2>/dev/null) || _auto_fn=""
+            if [[ -z "$_auto_fn" ]]; then
+                return 1
+            fi
+            if ! declare -F "$_auto_fn" >/dev/null 2>&1; then
+                log_error "_dispatch_auto_fn: function '$_auto_fn' declared in schema for '$_field' but not defined in this shell"
+                return 1
+            fi
+            "$_auto_fn" "$_field"
+        }
+
         # Read all key names from the schema once so we don't call yq in a loop.
         local _schema_keys
         if ! _schema_keys=$(schema_keys); then
@@ -480,6 +500,18 @@ SOPS_EOF
             [[ -z "$_key" ]] && continue
             local _collect_type
             _collect_type=$(schema_collect_type "$_key")
+
+            # backup_passphrase retains its custom banner/plaintext-export UI.
+            # Ordinary auto keys are generated exclusively through schema auto_fn.
+            if [[ "$_collect_type" == "auto" && "$_key" != "backup_passphrase" ]]; then
+                local _auto_value
+                if ! _auto_value=$(_dispatch_auto_fn "$_key"); then
+                    log_error "collect_secrets: auto generation failed for schema key '${_key}'"
+                    return 1
+                fi
+                _COLLECTED_SECRETS["$_key"]="$_auto_value"
+                continue
+            fi
 
             if [[ "$_collect_type" == "conditional" ]]; then
                 local _condition_fn _placeholder
@@ -710,15 +742,8 @@ BACKUP_BANNER
                 fi
                 ;;
 
-            # ── file_integrity_hmac_key ───────────────────────────────────────
-            file_integrity_hmac_key)
-                local integrity_key
-                integrity_key=$(auto_generate_secret_field "file_integrity_hmac_key") || {
-                    log_error "Failed to generate file_integrity_hmac_key"
-                    return 1
-                }
-                _COLLECTED_SECRETS["file_integrity_hmac_key"]="$integrity_key"
-                ;;
+            # file_integrity_hmac_key is auto-generated via _dispatch_auto_fn()
+            # above. Do not add a manual case here; it would bypass the schema.
 
             # ── push_installation_id / push_installation_key ───────────────────
             # condition_push_enabled has already gated this block through the

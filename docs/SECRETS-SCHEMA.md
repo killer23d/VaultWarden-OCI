@@ -246,3 +246,60 @@ sudo ./edit-secrets.sh edit
 ```
 
 > **Note:** Bootstrap will not overwrite an existing `secrets.yaml`. If the file already exists, add the key placeholder manually via `edit`, then set the real value in the same session.
+
+---
+
+## Rotating file_integrity_hmac_key
+
+### Why rotation requires a transition window
+
+Existing `.sha256.hmac` sidecars were signed with the old key. As soon as a new key is loaded, those legacy sidecars fail authentication even when `REQUIRE_AUTHENTICATED_INTEGRITY=false`. That flag permits SHA-256 fallback only when an HMAC sidecar is missing; it never accepts a present sidecar with an invalid HMAC.
+
+Keep an encrypted recovery kit containing the old key until every retained backup predates the rotation window. Legacy sidecars must be quarantined if those backups need SHA-only verification with the new key active.
+
+### Rotation procedure
+
+1. Export and securely store a recovery kit containing the current key:
+
+   ```bash
+   sudo ./edit-secrets.sh export-recovery-kit
+   ```
+
+2. Temporarily set `REQUIRE_AUTHENTICATED_INTEGRITY=false` in `.env`. Before rotating, rename the existing local `.sha256.hmac` files to `.sha256.hmac.pre-rotation` under the configured `BACKUP_DIR`. This preserves them for authenticated recovery with the old key while allowing SHA-256 fallback during the transition:
+
+   ```bash
+   sudo find /path/from/BACKUP_DIR -type f -name '*.sha256.hmac' \
+       -exec sh -c 'for f do mv -- "$f" "$f.pre-rotation"; done' sh {} +
+   ```
+
+3. Generate and store a new 64-character key through the supported SOPS rotation path:
+
+   ```bash
+   sudo ./edit-secrets.sh rotate file_integrity_hmac_key
+   ```
+
+4. Create fresh backups of each scheduled type and upload their newly signed sidecars:
+
+   ```bash
+   sudo ./backup.sh run db
+   sudo ./backup.sh run full
+   sudo ./backup.sh sync
+   ```
+
+5. Confirm the latest backup verifies with the new key:
+
+   ```bash
+   sudo ./backup.sh verify
+   ```
+
+6. Keep `REQUIRE_AUTHENTICATED_INTEGRITY=false` only for the quarantine window. After all pre-rotation backups have aged out under `BACKUP_RETENTION_*_DAYS` and remote pruning has removed them, delete the quarantined sidecars, discard the old recovery material, and restore:
+
+   ```dotenv
+   REQUIRE_AUTHENTICATED_INTEGRITY=true
+   ```
+
+For a legacy restore during the window, retain its quarantined HMAC and recovery kit. To use SHA-only fallback with the new key active, leave the HMAC sidecar quarantined before verification. Restoring its original name correctly requires the old key to be restored temporarily as well. Remote legacy sidecars remain until their archive is pruned; quarantine the downloaded HMAC before verifying an old remote backup with the new key active.
+
+### Emergency recovery when the key is lost
+
+If the old key is unavailable, set `REQUIRE_AUTHENTICATED_INTEGRITY=false` and quarantine the legacy `.sha256.hmac` sidecars as described above. The remaining `.sha256` files can then detect corruption but are not authenticated. Rotate `file_integrity_hmac_key`, create fresh `db` and `full` backups, run `sudo ./backup.sh sync`, and re-enable strict authenticated integrity after the legacy retention window closes.

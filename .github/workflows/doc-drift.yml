@@ -102,12 +102,12 @@ jobs:
         run: |
           FAIL=0
           # Guard against @latest Go module references in any script other than
-          # setup-crowdsec.sh. In setup-crowdsec.sh the @latest path is only
-          # reached at runtime when CF_WORKER_BOUNCER_VERSION is empty (i.e.
+          # setup-crowdsec.sh and its private core implementation. The @latest
+          # path is reached only when CF_WORKER_BOUNCER_VERSION is empty (i.e.
           # --use-latest was passed or no pin is set), which is intentional.
           if grep -rn '@latest' utilities/ lib/ --include='*.sh' \
-               | grep -v 'utilities/setup-crowdsec.sh'; then
-            echo "UNPINNED: @latest Go reference found outside setup-crowdsec.sh"
+               | grep -Ev 'utilities/(setup-crowdsec|\.setup-crowdsec-core)\.sh'; then
+            echo "UNPINNED: @latest Go reference found outside CrowdSec setup scripts"
             FAIL=1
           fi
           # Guard against unintended /releases/latest calls in any OTHER script
