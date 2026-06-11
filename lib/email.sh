@@ -6,11 +6,16 @@
 #               _email_driver_mailgun, _email_driver_postmark,
 #               _email_driver_resend, _email_driver_cyberpersons,
 #               _email_driver_postfix
+#   Attachment: _email_driver_mailgun_attachment, _email_driver_sendgrid_attachment,
+#               _email_driver_mailersend_attachment, _email_driver_postmark_attachment,
+#               _email_driver_resend_attachment, _email_driver_cyberpersons_attachment,
+#               _smtp_send_with_attachment, _dispatch_email_with_attachment
 #   Transport : _email_bearer_post, _smtp_send
 #   Helpers   : _email_json_escape, _email_driver_lookup,
 #               _normalise_email_subject, _resolve_rate_limit_dir,
 #               _rate_limit_check, _resolve_smtp_method,
 #               _build_email_metadata_body
+#   Dispatch  : _dispatch_email_with_attachment
 #   Public    : send_email, send_notification_email, clear_email_rate_limit
 #
 # Depends on / Load order:
@@ -361,6 +366,21 @@ EOF
 }
 
 
+# ---------------------------------------------------------------------------
+# _email_driver_cyberpersons_attachment TO SUBJECT BODY ATT_PATH ATT_NAME
+#
+# CyberPersons does not publish attachment support in their transactional email
+# API documentation (platform.cyberpersons.com/email/v1/send). Falls back to
+# _smtp_send_with_attachment so the encrypted kit is still deliverable when the
+# operator has configured SMTP credentials alongside the CyberPersons driver.
+# ---------------------------------------------------------------------------
+_email_driver_cyberpersons_attachment() {
+    local to="$1" subject="$2" body="$3" att_path="$4" att_name="$5"
+    log_warn "CyberPersons API does not support attachments — falling back to SMTP for attachment delivery."
+    _smtp_send_with_attachment "$to" "$subject" "$body" "$att_path" "$att_name"
+}
+
+
 # DRIVER: host/postfix (EMAIL_MODE=host, postfix sidecar)
 # Implements the EMAIL_MODE=host driver. Pipes a minimal RFC-2822 message to
 # sendmail -t which is provided by the postfix sidecar container. No API token
@@ -668,6 +688,420 @@ _smtp_send() {
 }
 
 
+# ---------------------------------------------------------------------------
+# _smtp_send_with_attachment TO SUBJECT BODY ATTACHMENT_PATH ATTACHMENT_NAME
+#
+# Sends a MIME multipart/mixed email with a single binary attachment via the
+# existing SMTP transport (direct relay or Postfix sidecar). Falls back to a
+# text-only send_email() call if no SMTP credentials are configured.
+#
+# The message file is built on tmpfs at mode 600 and deleted via a RETURN trap.
+# The attachment is base64-encoded inline (RFC 2045, 76-char fold) so no
+# additional temp file is required for the encoded payload.
+# ---------------------------------------------------------------------------
+_smtp_send_with_attachment() {
+    local to="$1" subject="$2" body="$3"
+    local att_path="$4" att_name="$5"
+
+    [[ -z "$to" ]]        && { log_error "_smtp_send_with_attachment: 'to' is empty";                 return 1; }
+    [[ ! -f "$att_path" ]] && { log_error "_smtp_send_with_attachment: attachment not found: $att_path"; return 1; }
+
+    local _from_addr="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
+    local _from_name="${SMTP_FROM_NAME:-VaultWarden}"
+    local _boundary
+    _boundary="=====VW_$(date +%s%N 2>/dev/null | sha256sum 2>/dev/null | head -c 16 || openssl rand -hex 8)====="
+    local _date_str
+    _date_str=$(date -u '+%a, %d %b %Y %H:%M:%S +0000')
+
+    # Base64-encode the attachment — done before opening the message temp file
+    # so that failures abort cleanly without leaving a zero-byte message file.
+    local _att_b64
+    if ! _att_b64=$(base64 < "$att_path" 2>/dev/null); then
+        log_error "_smtp_send_with_attachment: base64 encoding failed"
+        return 1
+    fi
+
+    local _msg_file
+    _msg_file=$(mktemp -p /dev/shm vw-mime.XXXXXX 2>/dev/null || mktemp vw-mime.XXXXXX) || {
+        log_error "_smtp_send_with_attachment: failed to create MIME message temp file"
+        return 1
+    }
+    install -m 600 /dev/null "$_msg_file" 2>/dev/null || chmod 600 "$_msg_file"
+    # shellcheck disable=SC2064  # intentional: expand _msg_file now to capture path
+    trap "rm -f '${_msg_file}' 2>/dev/null; trap - RETURN" RETURN
+
+    {
+        printf 'From: "%s" <%s>\r\n'  "$_from_name" "$_from_addr"
+        printf 'To: %s\r\n'           "$to"
+        printf 'Subject: %s\r\n'      "$(_normalise_email_subject "$subject")"
+        printf 'Date: %s\r\n'         "$_date_str"
+        printf 'MIME-Version: 1.0\r\n'
+        printf 'Content-Type: multipart/mixed; boundary="%s"\r\n' "$_boundary"
+        printf '\r\n'
+        # Part 1: plain text body
+        printf -- '--%s\r\n'          "$_boundary"
+        printf 'Content-Type: text/plain; charset=UTF-8\r\n'
+        printf 'Content-Transfer-Encoding: 7bit\r\n'
+        printf '\r\n'
+        while IFS= read -r _line; do printf '%s\r\n' "$_line"; done <<< "$body"
+        printf '\r\n'
+        # Part 2: binary attachment (base64, RFC 2045 76-char fold)
+        printf -- '--%s\r\n'          "$_boundary"
+        printf 'Content-Type: application/octet-stream\r\n'
+        printf 'Content-Transfer-Encoding: base64\r\n'
+        printf 'Content-Disposition: attachment; filename="%s"\r\n' "$att_name"
+        printf '\r\n'
+        printf '%s' "$_att_b64" | fold -w 76 | while IFS= read -r _b64line; do
+            printf '%s\r\n' "$_b64line"
+        done
+        printf '\r\n'
+        printf -- '--%s--\r\n'        "$_boundary"
+    } > "$_msg_file" || {
+        log_error "_smtp_send_with_attachment: failed to write MIME message"
+        return 1
+    }
+
+    # Route through the same SMTP transport paths as _smtp_send().
+    local _smtp_from_addr="${SMTP_FROM_EMAIL:-${SMTP_FROM:-${SMTP_USERNAME:-}}}"
+
+    if [[ -n "${SMTP_PASSWORD:-}" ]]; then
+        [[ -z "${SMTP_HOST:-}"     ]] && { log_error "_smtp_send_with_attachment: SMTP_HOST not set";     return 1; }
+        [[ -z "${SMTP_USERNAME:-}" ]] && { log_error "_smtp_send_with_attachment: SMTP_USERNAME not set"; return 1; }
+
+        local _smtp_port="${SMTP_PORT:-587}"
+        local _smtp_security="${SMTP_SECURITY:-}"
+        local _smtp_url _smtp_tls_flags=()
+        [[ -z "$_smtp_security" ]] && { [[ "$_smtp_port" == "465" ]] && _smtp_security="tls" || _smtp_security="starttls"; }
+        case "${_smtp_security,,}" in
+            tls|ssl)    _smtp_url="smtps://${SMTP_HOST}:${_smtp_port}" ;;
+            starttls)   _smtp_url="smtp://${SMTP_HOST}:${_smtp_port}";  _smtp_tls_flags=(--ssl-reqd) ;;
+            none|plain) _smtp_url="smtp://${SMTP_HOST}:${_smtp_port}" ;;
+            *) log_error "_smtp_send_with_attachment: unknown SMTP_SECURITY '${_smtp_security}'"; return 1 ;;
+        esac
+
+        local _netrc_file
+        _netrc_file=$(mktemp -p /dev/shm vw-smtp-netrc.XXXXXX 2>/dev/null || mktemp vw-smtp-netrc.XXXXXX)
+        chmod 600 "$_netrc_file"
+        # shellcheck disable=SC2064
+        trap "rm -f '${_netrc_file}' '${_msg_file}' 2>/dev/null; trap - RETURN" RETURN
+        printf 'machine %s\nlogin %s\npassword %s\n' \
+            "$SMTP_HOST" "$SMTP_USERNAME" "$SMTP_PASSWORD" > "$_netrc_file"
+
+        curl -s --connect-timeout 15 --max-time 60 \
+            "${_smtp_tls_flags[@]:-}" \
+            --url "$_smtp_url" \
+            --mail-from "$_smtp_from_addr" \
+            --mail-rcpt "$to" \
+            --netrc-file "$_netrc_file" \
+            --upload-file "$_msg_file"
+        local _rc=$?
+        rm -f "$_netrc_file"
+        return $_rc
+    fi
+
+    # Postfix sidecar path (no SMTP_PASSWORD).
+    local _sidecar_addr="${VW_SMTP_HOST_PORT:-127.0.0.1:587}"
+    curl -s --connect-timeout 5 --max-time 60 \
+        --url "smtp://${_sidecar_addr}" \
+        --mail-from "$_smtp_from_addr" \
+        --mail-rcpt "$to" \
+        --upload-file "$_msg_file"
+}
+
+
+# ---------------------------------------------------------------------------
+# Attachment variant drivers — one per API provider.
+#
+# Each function signature: SUBJECT BODY ATT_PATH ATT_NAME
+# (TO is always ADMIN_EMAIL, resolved inside each driver from the env.)
+#
+# Mailgun: multipart/form-data — no base64 needed; curl streams the file
+#   directly with the @-prefix syntax, which is safer than embedding binary
+#   data inside shell variables and avoids the overhead of a full MIME builder.
+#   This is a superior solution over the generic SMTP MIME approach for Mailgun.
+# ---------------------------------------------------------------------------
+_email_driver_mailgun_attachment() {
+    local subject="$1" body="$2" att_path="$3" att_name="$4"
+    subject="${subject//$'\r'/}"; subject="${subject//$'\n'/}"
+    body="${body//$'\r'/}";       body="${body//$'\n'/ }"
+    local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
+
+    local domain="${MAILGUN_DOMAIN:-}"
+    [[ -z "$domain" ]] && domain="${_from_email##*@}"
+    if [[ -z "$domain" ]]; then
+        log_error "Mailgun attachment driver: cannot determine domain. Set MAILGUN_DOMAIN in .env"
+        return 1
+    fi
+    if [[ ! "$domain" =~ ^[a-zA-Z0-9.-]+$ ]]; then
+        log_error "Mailgun attachment driver: invalid domain '${domain}'"
+        return 1
+    fi
+
+    local mg_region="${MAILGUN_REGION:-us}"
+    local mg_api_host
+    case "${mg_region,,}" in
+        us) mg_api_host="api.mailgun.net" ;;
+        eu) mg_api_host="api.eu.mailgun.net" ;;
+        *)  log_error "Mailgun attachment driver: unrecognised MAILGUN_REGION='${mg_region}'"; return 1 ;;
+    esac
+
+    local tmp cfg code
+    tmp=$(mktemp -t vw_email.XXXXXXXXXX)
+    cfg=$(mktemp -t vw_ecfg.XXXXXXXXXX)
+    if ! install -m 600 /dev/null "$cfg" 2>/dev/null; then
+        rm -f "$tmp" "$cfg"
+        log_error "Mailgun attachment driver: failed to secure curl config temp file"
+        return 1
+    fi
+    trap 'rm -f "$tmp" "$cfg" 2>/dev/null; trap - RETURN' RETURN
+    printf 'user = "api:%s"\n' "${EMAIL_API_TOKEN}" > "$cfg"
+
+    code=$(curl -s \
+        --config "$cfg" \
+        --connect-timeout 10 --max-time 60 \
+        -o "$tmp" -w "%{http_code}" \
+        -X POST "https://${mg_api_host}/v3/${domain}/messages" \
+        -F "from=${SMTP_FROM_NAME:-VaultWarden} <${_from_email}>" \
+        -F "to=${ADMIN_EMAIL}" \
+        -F "subject=${subject}" \
+        -F "text=${body}" \
+        -F "o:tracking=no" \
+        -F "attachment=@${att_path};filename=${att_name}" 2>/dev/null)
+
+    local resp; resp=$(head -c 300 "$tmp" 2>/dev/null | tr -d '\n')
+    [[ "$code" =~ ^2 ]] && return 0
+    log_warn "Mailgun attachment API HTTP ${code}: ${resp}"
+    return 1
+}
+
+
+_email_driver_sendgrid_attachment() {
+    local subject="$1" body="$2" att_path="$3" att_name="$4"
+    local s b fn fe ae
+    s=$(_email_json_escape "$subject")
+    b=$(_email_json_escape "$body")
+    local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
+    fn=$(_email_json_escape "${SMTP_FROM_NAME:-VaultWarden}")
+    fe=$(_email_json_escape "${_from_email}")
+    ae=$(_email_json_escape "${ADMIN_EMAIL}")
+
+    local _att_b64
+    if ! _att_b64=$(base64 < "$att_path" | tr -d '\n' 2>/dev/null); then
+        log_error "SendGrid attachment driver: base64 encoding failed"
+        return 1
+    fi
+    local an; an=$(_email_json_escape "$att_name")
+
+    local payload
+    payload=$(cat <<EOF
+{
+    "personalizations": [ { "to": [ { "email": "${ae}" } ] } ],
+    "from":    { "email": "${fe}", "name": "${fn}" },
+    "subject": "${s}",
+    "content": [ { "type": "text/plain", "value": "${b}" } ],
+    "attachments": [ { "content": "${_att_b64}", "filename": "${an}", "type": "application/octet-stream", "disposition": "attachment" } ],
+    "tracking_settings": {
+        "click_tracking":        { "enable": false },
+        "open_tracking":         { "enable": false },
+        "subscription_tracking": { "enable": false }
+    }
+}
+EOF
+)
+    _email_bearer_post "https://api.sendgrid.com/v3/mail/send" "$payload" && return 0
+    log_warn "SendGrid attachment API HTTP ${_ECURL_CODE}: ${_ECURL_BODY}"
+    return 1
+}
+
+
+_email_driver_mailersend_attachment() {
+    local subject="$1" body="$2" att_path="$3" att_name="$4"
+    local s b fn fe ae
+    s=$(_email_json_escape "$subject")
+    b=$(_email_json_escape "$body")
+    local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
+    fn=$(_email_json_escape "${SMTP_FROM_NAME:-VaultWarden}")
+    fe=$(_email_json_escape "${_from_email}")
+    ae=$(_email_json_escape "${ADMIN_EMAIL}")
+
+    local _att_b64
+    if ! _att_b64=$(base64 < "$att_path" | tr -d '\n' 2>/dev/null); then
+        log_error "MailerSend attachment driver: base64 encoding failed"
+        return 1
+    fi
+    local an; an=$(_email_json_escape "$att_name")
+
+    local payload
+    payload=$(cat <<EOF
+{
+    "from": { "email": "${fe}", "name": "${fn}" },
+    "to":   [ { "email": "${ae}" } ],
+    "subject": "${s}",
+    "text":    "${b}",
+    "attachments": [ { "content": "${_att_b64}", "filename": "${an}" } ],
+    "settings": { "track_clicks": false, "track_opens": false }
+}
+EOF
+)
+    if _email_bearer_post "https://api.mailersend.com/v1/email" "$payload"; then
+        [[ -n "${_ECURL_BODY}" ]] && log_warn "MailerSend attachment: queued with warnings: ${_ECURL_BODY}"
+        return 0
+    fi
+    log_warn "MailerSend attachment API HTTP ${_ECURL_CODE}: ${_ECURL_BODY}"
+    return 1
+}
+
+
+_email_driver_postmark_attachment() {
+    local subject="$1" body="$2" att_path="$3" att_name="$4"
+    local s b fn fe ae
+    s=$(_email_json_escape "$subject")
+    b=$(_email_json_escape "$body")
+    local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
+    fn=$(_email_json_escape "${SMTP_FROM_NAME:-VaultWarden}")
+    fe=$(_email_json_escape "${_from_email}")
+    ae=$(_email_json_escape "${ADMIN_EMAIL}")
+
+    local _att_b64
+    if ! _att_b64=$(base64 < "$att_path" | tr -d '\n' 2>/dev/null); then
+        log_error "Postmark attachment driver: base64 encoding failed"
+        return 1
+    fi
+    local an; an=$(_email_json_escape "$att_name")
+
+    local tmp cfg code
+    tmp=$(mktemp -t vw_email.XXXXXXXXXX)
+    cfg=$(mktemp -t vw_ecfg.XXXXXXXXXX)
+    if ! install -m 600 /dev/null "$cfg" 2>/dev/null; then
+        rm -f "$tmp" "$cfg"
+        log_error "Postmark attachment driver: failed to secure curl config temp file"
+        return 1
+    fi
+    trap 'rm -f "$tmp" "$cfg" 2>/dev/null; trap - RETURN' RETURN
+    printf 'header = "X-Postmark-Server-Token: %s"\n' "${EMAIL_API_TOKEN}" > "$cfg"
+
+    local payload
+    payload=$(cat <<EOF
+{
+    "From":          "${fn} <${fe}>",
+    "To":            "${ae}",
+    "Subject":       "${s}",
+    "TextBody":      "${b}",
+    "MessageStream": "outbound",
+    "Attachments": [ { "Name": "${an}", "Content": "${_att_b64}", "ContentType": "application/octet-stream" } ]
+}
+EOF
+)
+    code=$(curl -s \
+        --config "$cfg" \
+        --connect-timeout 10 --max-time 60 \
+        -o "$tmp" -w "%{http_code}" \
+        -X POST "https://api.postmarkapp.com/email" \
+        -H "Accept: application/json" \
+        -H "Content-Type: application/json" \
+        -d "$payload" 2>/dev/null)
+
+    local resp; resp=$(head -c 300 "$tmp" 2>/dev/null | tr -d '\n')
+    if [[ ! "$code" =~ ^2 ]]; then
+        log_warn "Postmark attachment API HTTP ${code}: ${resp}"
+        return 1
+    fi
+    if echo "$resp" | grep -q '"ErrorCode":0'; then return 0; fi
+    log_warn "Postmark attachment API: HTTP 200 but ErrorCode != 0: ${resp}"
+    return 1
+}
+
+
+_email_driver_resend_attachment() {
+    local subject="$1" body="$2" att_path="$3" att_name="$4"
+    local s b fn fe ae
+    s=$(_email_json_escape "$subject")
+    b=$(_email_json_escape "$body")
+    local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
+    fn=$(_email_json_escape "${SMTP_FROM_NAME:-VaultWarden}")
+    fe=$(_email_json_escape "${_from_email}")
+    ae=$(_email_json_escape "${ADMIN_EMAIL}")
+
+    local _att_b64
+    if ! _att_b64=$(base64 < "$att_path" | tr -d '\n' 2>/dev/null); then
+        log_error "Resend attachment driver: base64 encoding failed"
+        return 1
+    fi
+    local an; an=$(_email_json_escape "$att_name")
+
+    local payload
+    payload=$(cat <<EOF
+{
+    "from":    "${fn} <${fe}>",
+    "to":      ["${ae}"],
+    "subject": "${s}",
+    "text":    "${b}",
+    "attachments": [ { "filename": "${an}", "content": "${_att_b64}" } ]
+}
+EOF
+)
+    _email_bearer_post "https://api.resend.com/emails" "$payload" && return 0
+    log_warn "Resend attachment API HTTP ${_ECURL_CODE}: ${_ECURL_BODY}"
+    return 1
+}
+
+
+# ---------------------------------------------------------------------------
+# _dispatch_email_with_attachment TO SUBJECT BODY ATT_PATH ATT_NAME
+#
+# Mirrors the provider-selection logic of send_email() but routes to the
+# attachment-capable variant of each driver. SMTP is always available as the
+# final fallback via _smtp_send_with_attachment().
+#
+# Does NOT apply rate-limiting (attachment sends are explicit one-shot actions,
+# not automated notifications).
+# ---------------------------------------------------------------------------
+_dispatch_email_with_attachment() {
+    local to="$1" subject="$2" body="$3" att_path="$4" att_name="$5"
+
+    [[ -z "$to" ]]         && { log_error "_dispatch_email_with_attachment: 'to' is empty";                  return 1; }
+    [[ ! -f "$att_path" ]] && { log_error "_dispatch_email_with_attachment: attachment not found: $att_path"; return 1; }
+
+    subject=$(_normalise_email_subject "$subject")
+
+    local mode="${EMAIL_MODE:-auto}"
+    local provider="${EMAIL_PROVIDER:-smtp}"
+    [[ "$provider" == "smtp" ]] && mode="smtp"
+    [[ "$provider" == "host" ]] && mode="smtp"  # host MTA has no attachment support; SMTP fallback
+
+    # Resolve API token once (same logic as send_email).
+    local _api_token="${EMAIL_API_TOKEN:-}"
+    if [[ -z "$_api_token" ]] && declare -f decrypt_secret &>/dev/null; then
+        _api_token="$(decrypt_secret email_api_token 2>/dev/null || true)"
+    fi
+
+    if [[ "$mode" == "auto" || "$mode" == "api" ]]; then
+        local driver_suffix
+        if driver_suffix=$(_email_driver_lookup "$provider" 2>/dev/null); then
+            local att_fn="_email_driver_${driver_suffix}_attachment"
+            if declare -f "$att_fn" &>/dev/null && [[ -n "$_api_token" ]]; then
+                if EMAIL_API_TOKEN="$_api_token" "$att_fn" "$subject" "$body" "$att_path" "$att_name"; then
+                    log_success "Encrypted attachment sent via ${provider} API to ${to}"
+                    return 0
+                fi
+                log_warn "_dispatch_email_with_attachment: ${provider} driver failed — falling back to SMTP"
+            elif [[ -z "$_api_token" ]]; then
+                log_warn "_dispatch_email_with_attachment: EMAIL_API_TOKEN empty for ${provider} — falling back to SMTP"
+            fi
+        fi
+    fi
+
+    # SMTP fallback (or primary path when mode=smtp).
+    if _smtp_send_with_attachment "$to" "$subject" "$body" "$att_path" "$att_name"; then
+        log_success "Encrypted attachment sent via SMTP to ${to}"
+        return 0
+    fi
+
+    log_error "_dispatch_email_with_attachment: all delivery paths failed (provider=${provider})"
+    return 1
+}
+
+
 # send_email [TO] SUBJECT BODY
 #
 # TO is optional; defaults to ${ADMIN_EMAIL}.
@@ -893,6 +1327,10 @@ export -f _email_json_escape _email_bearer_post _email_driver_lookup
 export -f _email_driver_mailersend _email_driver_sendgrid _email_driver_mailgun
 export -f _email_driver_postmark _email_driver_resend _email_driver_postfix
 export -f _email_driver_cyberpersons
+export -f _email_driver_mailgun_attachment _email_driver_sendgrid_attachment
+export -f _email_driver_mailersend_attachment _email_driver_postmark_attachment
+export -f _email_driver_resend_attachment _email_driver_cyberpersons_attachment
+export -f _smtp_send_with_attachment _dispatch_email_with_attachment
 export -f _normalise_email_subject _resolve_rate_limit_dir _rate_limit_reset_message _rate_limit_check
 export -f _resolve_smtp_method _build_email_metadata_body
 export -f _smtp_send send_email send_notification_email clear_email_rate_limit

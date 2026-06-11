@@ -9,6 +9,8 @@
 #                auto_generate_secret_field, export_docker_secrets
 #   Backups    : create_secrets_backup, cleanup_old_secret_backups,
 #                generate_recovery_kit, offer_recovery_kit_export
+#                _check_recovery_kit_email_deps, _encrypt_recovery_kit_attachment,
+#                _offer_email_recovery_kit
 #   Validation : check_placeholder_values, validate_cloudflare_token,
 #                secure_secrets_file
 #
@@ -39,6 +41,7 @@ _SECRETS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 source "${_SECRETS_LIB_DIR}/crypto.sh"
 source "${_SECRETS_LIB_DIR}/schema.sh"
+source "${_SECRETS_LIB_DIR}/email.sh"
 unset _SECRETS_LIB_DIR
 
 # Do NOT set -euo pipefail here — callers own their shell options.
@@ -513,6 +516,198 @@ _tmpfs_dir() {
 
     log_error "_tmpfs_dir: no writable tmpfs candidate found (/dev/shm, /run/user/$uid, /tmp)"
     return 1
+}
+
+
+# ---------------------------------------------------------------------------
+# _check_recovery_kit_email_deps
+#
+# Prints the encryption tool name ("7z" or "zip") if available, returns 1 if
+# neither is installed. Callers should warn and skip gracefully on failure.
+# ---------------------------------------------------------------------------
+_check_recovery_kit_email_deps() {
+    if command -v 7z >/dev/null 2>&1; then
+        printf '7z'
+        return 0
+    fi
+    if command -v zip >/dev/null 2>&1; then
+        printf 'zip'
+        return 0
+    fi
+    log_warn "recovery-kit email: neither 7z nor zip is installed — skipping email option."
+    log_warn "  Install with: sudo apt-get install -y p7zip-full"
+    return 1
+}
+
+
+# ---------------------------------------------------------------------------
+# _encrypt_recovery_kit_attachment PLAINTEXT_FILE OUTPUT_FILE TOOL
+#
+# Encrypts PLAINTEXT_FILE into OUTPUT_FILE using the given TOOL (7z or zip).
+# Passphrase is collected via prompt_password_with_confirmation (min 16 chars).
+# The passphrase is never passed as a CLI argument — it is staged through a
+# mode-600 temp file on tmpfs and shredded immediately after use.
+# Returns 0 on success, 1 on failure. Shreds OUTPUT_FILE on failure.
+# ---------------------------------------------------------------------------
+_encrypt_recovery_kit_attachment() {
+    local plaintext_file="$1"
+    local output_file="$2"
+    local tool="$3"
+
+    local _enc_pass
+    { set +x; } 2>/dev/null
+    _enc_pass=$(prompt_password_with_confirmation \
+        "Passphrase to encrypt emailed attachment" 16) || {
+        unset _enc_pass
+        log_error "Passphrase entry failed or aborted"
+        return 1
+    }
+
+    local _rc=0
+    case "$tool" in
+        7z)
+            # 7z does not support reading the passphrase from a file descriptor;
+            # use a tmpfs-backed mode-600 temp file and shred it immediately.
+            local _pass_file
+            _pass_file=$(mktemp -p /dev/shm vw-enc-pass.XXXXXX 2>/dev/null \
+                || mktemp vw-enc-pass.XXXXXX)
+            install -m 600 /dev/null "$_pass_file"
+            { set +x; } 2>/dev/null
+            printf '%s' "$_enc_pass" > "$_pass_file"
+            unset _enc_pass
+
+            # -tzip  : write a ZIP container (universally openable by WinZip, 7-Zip, etc.)
+            # -mem=AES256 : AES-256 encryption
+            # -mhe=on     : encrypt headers (hides filenames inside the archive)
+            # -mx=0       : no compression (plaintext is already plain text)
+            7z a -tzip -mem=AES256 -mhe=on -mx=0 \
+                "-p$(cat "$_pass_file")" \
+                "$output_file" "$plaintext_file" >/dev/null 2>&1
+            _rc=$?
+            _secure_shred "$_pass_file"
+            ;;
+        zip)
+            local _pass_file
+            _pass_file=$(mktemp -p /dev/shm vw-enc-pass.XXXXXX 2>/dev/null \
+                || mktemp vw-enc-pass.XXXXXX)
+            install -m 600 /dev/null "$_pass_file"
+            { set +x; } 2>/dev/null
+            printf '%s' "$_enc_pass" > "$_pass_file"
+            unset _enc_pass
+
+            zip --encrypt --password "$(cat "$_pass_file")" \
+                "$output_file" "$plaintext_file" >/dev/null 2>&1
+            _rc=$?
+            _secure_shred "$_pass_file"
+            ;;
+        *)
+            unset _enc_pass
+            log_error "_encrypt_recovery_kit_attachment: unknown tool '$tool'"
+            return 1
+            ;;
+    esac
+
+    if [[ $_rc -ne 0 ]]; then
+        _secure_shred "$output_file" 2>/dev/null || true
+        log_error "Encryption failed (${tool} exit ${_rc})"
+        return 1
+    fi
+
+    chmod 600 "$output_file"
+    return 0
+}
+
+
+# ---------------------------------------------------------------------------
+# _offer_email_recovery_kit PLAINTEXT_FILE
+#
+# Called after the kit has been displayed on the TTY. Prompts Y/N, encrypts
+# the kit with 7z or zip (AES-256), sends via _dispatch_email_with_attachment
+# (which respects EMAIL_PROVIDER / EMAIL_MODE), then unconditionally shreds
+# the encrypted attachment regardless of send outcome.
+#
+# Superior solution vs. spec: routes through _dispatch_email_with_attachment
+# rather than hard-wiring _smtp_send_with_attachment, so the active email
+# provider (Mailgun, SendGrid, etc.) is used when configured.
+# ---------------------------------------------------------------------------
+_offer_email_recovery_kit() {
+    local plaintext_file="$1"
+
+    local _tool
+    if ! _tool=$(_check_recovery_kit_email_deps); then
+        return 0   # Warning already printed; skip silently.
+    fi
+
+    echo ""
+    local _yn
+    read -r -t 30 -p "Email an encrypted backup of this document? (y/N): " _yn 2>/dev/null || _yn="n"
+    if [[ "${_yn,,}" != "y" ]]; then
+        return 0
+    fi
+
+    # Both 7z (-tzip) and zip produce .zip containers.
+    local _ext="zip"
+    local _att_name
+    _att_name="important-documents-$(date +%Y%m%d).${_ext}"
+
+    local _att_file
+    _att_file=$(mktemp -p /dev/shm "vw-att.XXXXXX.${_ext}" 2>/dev/null \
+        || mktemp "vw-att.XXXXXX.${_ext}")
+    install -m 600 /dev/null "$_att_file"
+    # shellcheck disable=SC2064  # intentional: expand now to capture path
+    register_cleanup "_secure_shred" "$_att_file"
+
+    if ! _encrypt_recovery_kit_attachment \
+            "$plaintext_file" "$_att_file" "$_tool"; then
+        log_error "Could not encrypt attachment — email skipped"
+        _secure_shred "$_att_file" 2>/dev/null || true
+        return 1
+    fi
+
+    # Obfuscated subject and body — intentionally generic so the email does
+    # not advertise that it contains VaultWarden credentials.
+    local _subject="Do not lose this — important account documents"
+    local _body
+    _body=$(cat <<'BODY'
+Please keep this file somewhere safe.
+
+The attached archive contains important account documents you requested.
+Open it with 7-Zip, WinZip, or the built-in archive manager on your device
+and enter the passphrase you set when it was created.
+
+Do not share this file or the passphrase with anyone.
+If you did not request this, please disregard.
+BODY
+)
+
+    local _to
+    _to=$(_read_dotenv_value "ADMIN_EMAIL" "${PROJECT_ROOT:-.}/.env")
+    if [[ -z "$_to" ]]; then
+        # Fall back to the ADMIN_EMAIL env var already in the environment.
+        _to="${ADMIN_EMAIL:-}"
+    fi
+    if [[ -z "$_to" ]]; then
+        log_error "_offer_email_recovery_kit: ADMIN_EMAIL not set in .env or environment — cannot send"
+        _secure_shred "$_att_file" 2>/dev/null || true
+        return 1
+    fi
+
+    log_info "Sending encrypted attachment to ${_to}..."
+
+    # Route through the active email provider (_dispatch_email_with_attachment
+    # honours EMAIL_PROVIDER / EMAIL_MODE and falls back to SMTP automatically).
+    if _dispatch_email_with_attachment \
+            "$_to" "$_subject" "$_body" "$_att_file" "$_att_name"; then
+        log_success "Encrypted attachment sent to ${_to}"
+    else
+        log_warn "Attachment send failed. The encrypted file was NOT emailed."
+        log_warn "You can send it manually from: ${_att_file}"
+        log_warn "(It will be deleted when this session ends.)"
+    fi
+
+    # Unconditionally shred the attachment — whether send succeeded or failed.
+    _secure_shred "$_att_file" 2>/dev/null || true
+    return 0
 }
 
 validate_cloudflare_token() {
@@ -1127,6 +1322,11 @@ _ork_generate_and_secure() {
     echo ""
     cat "$output_file"
     echo ""
+
+    # --- Optional: email an encrypted copy before deletion ---
+    _offer_email_recovery_kit "$output_file"
+    # --- end email step ---
+
     log_warn "This file will be securely deleted after you press Enter."
     log_warn "If you do not respond within 120 seconds it will be deleted automatically."
     echo ""

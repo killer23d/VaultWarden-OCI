@@ -395,7 +395,7 @@ install_dependencies() {
         log_success "Universe repository enabled"
     fi
 
-    local basic_packages=("age" "make" "nano" "rclone" "sqlite3" "jq" "yq" "ufw" "curl" "wget" "unzip" "git" "gpg" "coreutils" "haveged" "dnsutils" "rsync" "python3" "python3-argon2" "apache2-utils" "cron")
+    local basic_packages=("age" "make" "nano" "rclone" "sqlite3" "jq" "yq" "ufw" "curl" "wget" "unzip" "git" "gpg" "coreutils" "haveged" "dnsutils" "rsync" "python3" "python3-argon2" "apache2-utils" "cron" "p7zip-full")
 
     log_info "Refreshing apt package index..."
     apt-get update -qq || return 1
@@ -422,6 +422,7 @@ install_dependencies() {
         [python3-argon2]=""
         [apache2-utils]=htpasswd
         [cron]=cron
+        [p7zip-full]=7z
     )
 
     local missing_packages=()
