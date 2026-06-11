@@ -916,17 +916,23 @@ fi
 log_info "=== PHASE 3: CrowdSec hub collections ==="
 
 if [[ "$DRY_RUN" == "true" ]]; then
-    log_info "[DRY RUN] Would install hub collections: crowdsecurity/linux, crowdsecurity/caddy, crowdsecurity/http-cve, Dominic-Wagner/vaultwarden"
+    log_info "[DRY RUN] Would install hub collections: crowdsecurity/caddy, crowdsecurity/linux, crowdsecurity/iptables, Dominic-Wagner/vaultwarden"
 else
-    cscli collections install crowdsecurity/linux                   || true
-    cscli collections install crowdsecurity/caddy                   || true
-    cscli collections install crowdsecurity/http-cve                || true
-    cscli collections install crowdsecurity/base-http-scenarios     || true
-    cscli collections install crowdsecurity/appsec-generic-rules    || true
-    cscli collections install crowdsecurity/appsec-virtual-patching || true
-    cscli collections install crowdsecurity/whitelist-good-actors   || true
-    cscli collections install crowdsecurity/iptables                || true
-    cscli collections install Dominic-Wagner/vaultwarden            || true
+    # Keep top-level collections aligned with the log sources this project
+    # actually configures. Dependencies are resolved by CrowdSec Hub metadata;
+    # do not install AppSec collections unless a real AppSec listener and
+    # request-forwarding path are added.
+    cscli collections install crowdsecurity/caddy        || true
+    cscli collections install crowdsecurity/linux        || true
+    cscli collections install crowdsecurity/iptables     || true
+    cscli collections install Dominic-Wagner/vaultwarden || true
+
+    # Earlier Beta builds installed AppSec collections without an AppSec listener.
+    # Remove only those inactive top-level AppSec collections; dependency cleanup
+    # remains CrowdSec's responsibility and operator-owned custom collections are
+    # left untouched.
+    cscli collections remove crowdsecurity/appsec-generic-rules --force    >/dev/null 2>&1 || true
+    cscli collections remove crowdsecurity/appsec-virtual-patching --force >/dev/null 2>&1 || true
     log_success "Hub collections installed."
 fi
 

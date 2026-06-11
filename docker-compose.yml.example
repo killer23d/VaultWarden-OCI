@@ -118,6 +118,7 @@ services:
       ADMIN_TOKEN_FILE: /run/secrets/admin_token
       TZ: ${TZ:-UTC}
       LOG_FILE: /logs/vaultwarden.log
+      LOG_TIMESTAMP_FORMAT: "%Y-%m-%d %H:%M:%S.%3f%z"
       LOG_LEVEL: ${LOG_LEVEL:-warn}
       EXTENDED_LOGGING: ${EXTENDED_LOGGING:-true}
       SIGNUPS_ALLOWED: ${SIGNUPS_ALLOWED:-false}
