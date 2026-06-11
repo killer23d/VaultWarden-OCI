@@ -24,6 +24,13 @@
 #   source "${LIB_DIR}/common.sh"
 #   init_common_lib "$0"
 
+# Enforce Ubuntu 22.04 LTS minimum — Bash 5.0+ required.
+if (( BASH_VERSINFO[0] < 5 )); then
+    echo "ERROR: Bash 5.0+ is required (found ${BASH_VERSION})." \
+         "This project targets Ubuntu 22.04 LTS." >&2
+    exit 1
+fi
+
 [[ -n "${VAULTWARDEN_COMMON_LIB_LOADED:-}" ]] && return 0
 readonly VAULTWARDEN_COMMON_LIB_LOADED=1
 
@@ -268,7 +275,10 @@ _fix_rclone_ownership() {
     local rclone_conf
     if [[ -n "${SUDO_USER:-}" ]]; then
         # Under sudo, HOME is /root; resolve the actual user's home directory.
-        rclone_conf=$(eval echo "~${SUDO_USER}/.config/rclone/rclone.conf")
+        local sudo_user_home
+        sudo_user_home=$(getent passwd "${SUDO_USER}" 2>/dev/null | cut -d: -f6 || true)
+        [[ -n "$sudo_user_home" ]] || return 0
+        rclone_conf="${sudo_user_home}/.config/rclone/rclone.conf"
     else
         rclone_conf="${HOME}/.config/rclone/rclone.conf"
     fi

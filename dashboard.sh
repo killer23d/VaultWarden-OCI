@@ -107,11 +107,23 @@ run_sudo_cmd() {
     echo ""
     echo -e "${BLD} Running: ${label}${NC}"
     echo -e "${CYN}${DIVIDER}${NC}"
-    if (IFS=" "; sudo "$@"); then
+    local rc=0
+    if [[ $EUID -eq 0 ]]; then
+        (IFS=" "; "$@") || rc=$?
+    else
+        if ! sudo -n true 2>/dev/null; then
+            echo -e "${YLW} Sudo credentials are unavailable or expired.${NC}"
+            echo -e " Re-authenticate with ${BLD}sudo -v${NC}, then retry."
+            _press_enter
+            return
+        fi
+        (IFS=" "; sudo "$@") || rc=$?
+    fi
+
+    if (( rc == 0 )); then
         echo -e "${CYN}${DIVIDER}${NC}"
         echo -e "${GRN} Command completed successfully.${NC}"
     else
-        local rc=$?
         echo -e "${CYN}${DIVIDER}${NC}"
         echo -e "${YLW} Command exited with status ${rc}.${NC}"
     fi
@@ -575,7 +587,7 @@ draw_main_menu() {
     echo -e "  [ ${GRN}4${NC} ] View App Logs           (tail)"
     echo -e "  [ ${GRN}d${NC} ] Full Diagnostic Dump    (report)"
     draw_divider
-    echo -e "  [ ${GRN}b${NC} ] Backup & Restore Menu       (6 options)"
+    echo -e "  [ ${GRN}b${NC} ] Backup & Restore Menu       (7 options)"
     echo -e "  [ ${GRN}s${NC} ] Security & CrowdSec Menu    (5 options)"
     echo -e "  [ ${GRN}k${NC} ] Secrets & Key Management    (4 options)"
     echo -e "  [ ${GRN}a${NC} ] Advanced & Maintenance      (7 options)"
@@ -654,10 +666,11 @@ draw_backup_menu() {
     draw_divider
     echo -e "  [ ${GRN}5${NC} ] Sync Latest Backup to Rclone Remote"
     echo -e "  [ ${GRN}6${NC} ] Full Verify + Sync to Rclone Remote"
+    echo -e "  [ ${GRN}7${NC} ] Copy All Local Backups to Rclone Remote"
     draw_divider
     echo -e "  [ ${GRN}b${NC} ] Back to Main Menu"
     echo ""
-    echo -e " ${CYN}Tip:${NC} Options 5 & 6 require RCLONE_REMOTE_NAME to be set in .env."
+    echo -e " ${CYN}Tip:${NC} Options 5-7 require RCLONE_REMOTE_NAME to be set in .env."
     echo -e " ${CYN}Tip:${NC} Use b to return to Main Menu, e/q to exit, Ctrl-C anytime."
     echo ""
 }
@@ -715,6 +728,22 @@ handle_backup_menu() {
             fi
             run_sudo_cmd "sudo ./backup.sh run db --full-verification --rclone" \
                 "${REPO_ROOT}/backup.sh" run db --full-verification --rclone
+            ;;
+        7)
+            # Copy every retained local archive and sidecar to its matching
+            # db/full/emergency remote folder, then apply configured retention.
+            _check_script "${REPO_ROOT}/backup.sh" || return
+            local remote_name
+            remote_name="$(_read_env_var RCLONE_REMOTE_NAME "")"
+            remote_name="$(printf '%s' "${remote_name}" | tr -d '[:space:]')"
+            if [[ -z "${remote_name}" ]]; then
+                echo -e "${YLW} RCLONE_REMOTE_NAME is not set in .env — cannot sync.${NC}"
+                echo -e " Edit .env and add: RCLONE_REMOTE_NAME=<your-remote>"
+                _press_enter
+                return
+            fi
+            run_sudo_cmd "./backup.sh sync" \
+                "${REPO_ROOT}/backup.sh" sync
             ;;
         b) ACTIVE_MENU="main" ;;
         e|q) _cleanup ;;

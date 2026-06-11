@@ -231,7 +231,15 @@ PYEOF
 )
 
     local new_value
-    if [[ "$field" == "email_api_token" ]]; then
+    local auto_fn
+    auto_fn=$(schema_field_safe "$field" "auto_fn" 2>/dev/null) || auto_fn=""
+    if [[ -n "$auto_fn" ]]; then
+        if ! declare -F "$auto_fn" >/dev/null 2>&1; then
+            log_error "rotate: schema auto_fn '$auto_fn' is not defined for '$field'"
+            return 1
+        fi
+        new_value=$("$auto_fn" "$field") || return 1
+    elif [[ "$field" == "email_api_token" ]]; then
         local _ep
         _ep=$(_read_dotenv_value EMAIL_PROVIDER "${PROJECT_ROOT}/.env")
         _ep="${_ep:-email}"

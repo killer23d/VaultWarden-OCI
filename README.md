@@ -85,7 +85,7 @@ exit
 cd VaultWarden-OCI
 ```
 
-> **`--auto` vs `--use-latest`:** `setup.sh install --auto` is fully non-interactive and does not change container version pins. Pass `--use-latest` separately if you want all container image tags set to `latest` instead of the pinned versions in `.env`.
+> **`--auto` vs `--use-latest`:** `setup.sh install --auto` is fully non-interactive and preserves version pins. Pass `--use-latest` separately to opt into live upstream container and CrowdSec component versions instead of the pinned values in `.env`.
 
 > **Separate data volume:** If you have a dedicated block device or mounted filesystem for VaultWarden state, verify it first with `lsblk`, `findmnt`, and `blkid`. Then pass `--data-device DEV` and optionally `--data-mount PATH` to setup. See [Separate Data Volume (Optional)](#separate-data-volume-optional) below.
 
@@ -406,9 +406,10 @@ Three backup tiers with encrypted output (Age key required to restore):
 | **Full system archive** | Sunday 3 AM | 30 days |
 | **On-demand emergency** | Manual | 90 days |
 
-Retention is configurable: pass `--keep N` to `backup.sh` (N must be a positive integer), or edit `KEEP_DAYS` in `.env`. Example — keep 30 days of weekly full backups:
+Retention is configurable: pass `--keep N` to `backup.sh` (N must be a positive integer), or set the `BACKUP_RETENTION_*_DAYS` values in `.env`. Example — keep 30 days of weekly full backups:
 ```bash
 sudo ./backup.sh run full --keep 30
+sudo ./backup.sh sync                  # copy all retained local backups to rclone
 ```
 
 The restore flow now includes an interactive Age decryption key prompt, a pre-restore key round-trip validation, and automatic post-restore key rotation. Pass `--key-file <path>` or set `RESTORE_AGE_KEY_FILE` for non-interactive/CI restores. See [docs/BACKUP-RESTORE.md](docs/BACKUP-RESTORE.md) for the full 12-step restore procedure.

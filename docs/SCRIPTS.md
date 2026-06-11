@@ -52,7 +52,7 @@ sudo ./setup.sh install --domain vault.example.com --email admin@example.com [OP
 | :-- | :-- |
 | `install --domain DOMAIN --email EMAIL` | Run the full install |
 | `--auto` | Automated setup with minimal prompts |
-| `--use-latest` | Use `latest` image tags instead of pinned versions |
+| `--use-latest` | Use live upstream container and CrowdSec component versions instead of pinned values |
 | `--skip-deps` | Skip dependency installation |
 | `--force` | Overwrite existing configuration files |
 | `--dry-run` | Show what would be done without executing |
@@ -216,6 +216,7 @@ make health-quick                  # Quick check — concise output
 | `list` | List existing backups and exit (no root required) |
 | `verify` | Run end-to-end integrity verification on the latest backup |
 | `rotate` | Prune old backups without creating a new one |
+| `sync` | Copy every retained local backup and sidecar to the matching rclone type folder, then prune the remote by configured retention |
 
 **Backup types:**
 
@@ -224,7 +225,7 @@ make health-quick                  # Quick check — concise output
 | `auto` | Auto-selects `db` or `full` based on DB age and last full backup age | — |
 | `db` | SQLite database only | 14 days |
 | `full` | Database + config + Caddy certs + logs (no secrets) | 30 days |
-| `emergency` | Everything including secrets | 90 days |
+| `emergency` | Same archive contents as full; secrets and the Age key remain excluded | 90 days |
 
 **Backup integrity pipeline:**
 1. WAL checkpoint (`PRAGMA wal_checkpoint(TRUNCATE)`) — verified for completion before snapshot
@@ -760,7 +761,7 @@ All common operations have Makefile shortcuts. Run `make help` to see the full t
 | `make up` / `make start` | `./startup.sh` | Start all services |
 | `make down` / `make stop` | `docker compose down` | Graceful shutdown |
 | `make restart` | `sudo ./startup.sh --force` | Force restart all services |
-| `make safe-restart` | `sudo ./startup.sh --force` + health check | Restarts with automatic rollback on failure |
+| `make safe-restart` | `sudo ./utilities/safe-restart.sh` | Restarts without pulling and restores the captured Compose model/image IDs on failure |
 | `make status` | `docker compose ps` | Show service status table |
 | `make health` | `./maintenance.sh health` | Basic health check (`AUTO_RECOVER=true` passes `--fix`) |
 | `make health-quick` | `./maintenance.sh health --quiet` | Quick health check — concise output, non-zero exit on failure |

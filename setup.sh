@@ -89,7 +89,7 @@ FULL SETUP OPTIONS (used after install or with top-level --domain / --email):
                       external credentials (CF tokens, SMTP) remain as CHANGE_ME
                       placeholders — the post-install summary lists exact commands
                       to rotate them. Does NOT imply --use-latest.
-  --use-latest        Override pinned container versions with 'latest' tags in .env.
+  --use-latest        Use live upstream container and CrowdSec versions in .env.
   --skip-deps         Skip dependency installation (assumes already installed).
   --force             Overwrite existing .env, secrets, and docker-compose files.
                       WARNING: Also regenerates the Age encryption key. All

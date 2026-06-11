@@ -595,8 +595,13 @@ cleanup_old_backups() {
     local orphan_count=0
     while IFS= read -r sidecar; do
         if [[ -n "$sidecar" ]]; then
-            local primary="${sidecar%.meta}"
-            primary="${primary%.sha256}"
+            local primary
+            case "$sidecar" in
+                *.sha256.hmac) primary="${sidecar%.sha256.hmac}" ;;
+                *.sha256)      primary="${sidecar%.sha256}" ;;
+                *.meta)        primary="${sidecar%.meta}" ;;
+                *)             continue ;;
+            esac
             if [[ ! -f "$primary" ]]; then
                 log_debug "Removing orphaned sidecar: $(basename "$sidecar")"
                 rm -f "$sidecar" 2>/dev/null

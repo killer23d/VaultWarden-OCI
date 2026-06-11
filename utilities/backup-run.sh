@@ -21,6 +21,7 @@ source "$SCRIPT_DIR/lib/storage.sh"  # provides require_project_state_ready()
 BACKUP_TYPE="auto"    # Backup mode: auto, db, full, or emergency.
 DRY_RUN=false
 KEEP_DAYS=14
+KEEP_DAYS_EXPLICIT=false
 QUIET=false
 FORCE=false
 EMAIL_NOTIFY=false   # Set by --email; send_notification_email() runs on completion.
@@ -44,9 +45,10 @@ SUBCOMMANDS:
     list [--json]     List existing backups (no root required; JSON optional)
     verify            Verify the most recent backup's integrity
     rotate            Apply retention policy and prune old backups
+    sync               Copy all retained local backups to rclone by type
 
 RUN OPTIONS (used after 'run'):
-    --keep N                 Retention period in days (default: 14)
+    --keep N                 Override configured retention for this run
     --quiet                  Suppress non-error output
     --force                  Ignore locks and force backup
     --email                  Send email notification on completion/failure
@@ -54,6 +56,11 @@ RUN OPTIONS (used after 'run'):
     --full-verification      End-to-end decrypt + integrity check before sync (fatal on failure)
     --skip-full-verification Fast checksum only — explicit default
     --dry-run                Show what would be done without executing
+
+SYNC / ROTATE OPTIONS:
+    --keep N                 Override configured retention for every backup type
+    --quiet                  Suppress non-error output
+    --dry-run                Preview copy or pruning operations
 
 GLOBAL SUBCOMMAND:
     help                     Show this help
@@ -70,6 +77,7 @@ EXAMPLES:
     ./backup.sh list --json                       # Machine-readable backup inventory
     sudo ./backup.sh verify                       # Verify the latest backup
     sudo ./backup.sh rotate --keep 30             # Prune backups older than 30 days
+    sudo ./backup.sh sync                         # Upload db/full/emergency backups
 EOF
 }
 
@@ -79,7 +87,7 @@ if [[ $# -eq 0 ]]; then
 fi
 
 case "$1" in
-    run|list|verify|rotate)
+    run|list|verify|rotate|sync)
         _SUBCMD="$1"
         shift
         ;;
@@ -91,7 +99,7 @@ case "$1" in
         ;;
     *)
         log_error "Unknown subcommand: '$1'"
-        log_error "Valid subcommands: run [TYPE] | list | verify | rotate"
+        log_error "Valid subcommands: run [TYPE] | list | verify | rotate | sync"
         log_error "Run './backup.sh help' for usage."
         exit 1
         ;;
@@ -104,7 +112,7 @@ case "$_SUBCMD" in
         fi
         while [[ $# -gt 0 ]]; do
             case $1 in
-                --keep)                   KEEP_DAYS="$2";    shift 2 ;;
+                --keep)                   KEEP_DAYS="$2"; KEEP_DAYS_EXPLICIT=true; shift 2 ;;
                 --quiet)                  QUIET=true;        shift ;;
                 --force)                  FORCE=true;        shift ;;
                 --email)                  EMAIL_NOTIFY=true; shift ;;
@@ -140,10 +148,20 @@ case "$_SUBCMD" in
         LIST_ONLY=false
         while [[ $# -gt 0 ]]; do
             case $1 in
-                --keep)  KEEP_DAYS="$2"; shift 2 ;;
+                --keep)  KEEP_DAYS="$2"; KEEP_DAYS_EXPLICIT=true; shift 2 ;;
                 --quiet) QUIET=true;     shift ;;
                 --dry-run) DRY_RUN=true; shift ;;
                 *) log_error "Unknown option for rotate: $1"; show_help; exit 2 ;;
+            esac
+        done
+        ;;
+    sync)
+        while [[ $# -gt 0 ]]; do
+            case $1 in
+                --keep)  KEEP_DAYS="$2"; KEEP_DAYS_EXPLICIT=true; shift 2 ;;
+                --quiet) QUIET=true; shift ;;
+                --dry-run) DRY_RUN=true; shift ;;
+                *) log_error "Unknown option for sync: $1"; show_help; exit 2 ;;
             esac
         done
         ;;
@@ -152,7 +170,7 @@ case "$_SUBCMD" in
         ;;
 esac
 
-if [[ "$_SUBCMD" == "run" || "$_SUBCMD" == "rotate" ]]; then
+if [[ "$_SUBCMD" == "run" || "$_SUBCMD" == "rotate" || "$_SUBCMD" == "sync" ]]; then
     if ! [[ "$KEEP_DAYS" =~ ^[0-9]+$ ]] || ! (( KEEP_DAYS >= 1 )); then
         log_error "Invalid --keep value: '${KEEP_DAYS}' — must be a positive integer (e.g. 14)"
         exit 2
@@ -162,10 +180,6 @@ fi
 backup_log_info()    { [[ "$QUIET" == "true" ]] || log_info "$*" >&2;    }
 backup_log_success() { [[ "$QUIET" == "true" ]] || log_success "$*" >&2; }
 backup_log_warn()    { [[ "$QUIET" == "true" ]] || log_warn "$*" >&2;    }
-
-# Portable SHA-256 helper: prefer sha256sum (GNU coreutils / Linux), then fall back
-# to shasum -a 256 (macOS / BSD). Output format matches sha256sum: "<hash>  <file>".
-_sha256sum() { sha256sum "$1" 2>/dev/null || shasum -a 256 "$1"; }
 
 TMPDIR_BACKUP=""
 LOCK_FILE=""
@@ -209,6 +223,57 @@ get_backup_dir() {
     local dir="$base_dir/$type"
     ensure_dir "$dir" 750 "$(get_real_user)"
     echo "$dir"
+}
+
+_retention_days_for_type() {
+    local backup_type="$1"
+    if [[ "$KEEP_DAYS_EXPLICIT" == "true" ]]; then
+        printf '%s\n' "$KEEP_DAYS"
+        return 0
+    fi
+
+    local specific_key=""
+    case "$backup_type" in
+        db)        specific_key="BACKUP_RETENTION_DB_DAYS" ;;
+        full)      specific_key="BACKUP_RETENTION_FULL_DAYS" ;;
+        emergency) specific_key="BACKUP_RETENTION_EMERGENCY_DAYS" ;;
+        *) log_error "Unknown backup type for retention: $backup_type"; return 1 ;;
+    esac
+
+    local retention
+    retention=$(get_config_value "$specific_key" "")
+    [[ -n "$retention" ]] || retention=$(get_config_value "BACKUP_RETENTION_DAYS" "$KEEP_DAYS")
+    if ! [[ "$retention" =~ ^[0-9]+$ ]] || (( retention < 1 )); then
+        log_error "Invalid retention value for ${backup_type}: '${retention}'"
+        return 1
+    fi
+    printf '%s\n' "$retention"
+}
+
+_load_integrity_hmac_key() {
+    local state_dir
+    state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
+    local key_file="${state_dir}/secrets/.docker_secrets/file_integrity_hmac_key"
+
+    if [[ -r "$key_file" ]]; then
+        FILE_INTEGRITY_HMAC_KEY=$(<"$key_file")
+        export FILE_INTEGRITY_HMAC_KEY
+    fi
+
+    if [[ -z "${FILE_INTEGRITY_HMAC_KEY:-}" || "${FILE_INTEGRITY_HMAC_KEY}" == CHANGE_ME* ]]; then
+        unset FILE_INTEGRITY_HMAC_KEY
+        if [[ "$DRY_RUN" == "true" ]]; then
+            backup_log_warn "[DRY RUN] Backup integrity HMAC key is unavailable; no files will be written."
+            return 0
+        fi
+        if [[ "${REQUIRE_AUTHENTICATED_INTEGRITY:-false}" == "true" ]]; then
+            log_error "Authenticated backup integrity is required, but file_integrity_hmac_key is unavailable."
+            log_error "Run: sudo ./edit-secrets.sh rotate file_integrity_hmac_key"
+            return 1
+        fi
+        backup_log_warn "Backup integrity HMAC key is unavailable; legacy SHA-256-only mode remains active."
+    fi
+    return 0
 }
 
 
@@ -326,6 +391,15 @@ verify_backup_full() {
 
     backup_log_info "Running full verification (decrypt + integrity check)..."
 
+    if [[ -f "${enc_file}.sha256" ]]; then
+        verify_file_integrity "$enc_file" || return 1
+    elif [[ "${REQUIRE_AUTHENTICATED_INTEGRITY:-false}" == "true" ]]; then
+        log_error "Full verification FAILED: required integrity sidecar is missing for $enc_file" >&2
+        return 1
+    else
+        backup_log_warn "No SHA256 sidecar found — authenticated file check skipped"
+    fi
+
     local age_key_file
     age_key_file=$(_resolve_age_key) || {
         log_error "Age key file not found: $age_key_file" >&2
@@ -405,16 +479,8 @@ verify_backup_quick() {
 
     local sha256_file="${enc_file}.sha256"
     if [[ -f "$sha256_file" ]]; then
-        local stored_hash actual_hash
-        stored_hash=$(cat "$sha256_file")
-        actual_hash=$(_sha256sum "$enc_file" | awk '{print $1}')
-        if [[ "$stored_hash" != "$actual_hash" ]]; then
-            log_error "Quick verify FAILED: SHA256 mismatch for $(basename "$enc_file")" >&2
-            log_error "  stored:  $stored_hash" >&2
-            log_error "  actual:  $actual_hash" >&2
-            return 1
-        fi
-        backup_log_info "SHA256 sidecar matches"
+        verify_file_integrity "$enc_file" || return 1
+        backup_log_info "Integrity sidecar matches"
     else
         backup_log_warn "No SHA256 sidecar found — hash check skipped"
         _quick_verify_hash_skipped=true
@@ -459,41 +525,9 @@ sync_to_rclone() {
         return 1
     fi
 
-    local rclone_config_arg=()
-    local rclone_config_path
-    rclone_config_path="$(get_config_value "RCLONE_CONFIG" "")"
-
-    if [[ -n "$rclone_config_path" ]]; then
-        if ! validate_rclone_config_path "$rclone_config_path"; then
-            log_error "Refusing to use invalid RCLONE_CONFIG path: $rclone_config_path" >&2
-            return 1
-        fi
-        local canonical_cfg
-        canonical_cfg=$(realpath -e "$rclone_config_path")
-        rclone_config_arg=(--config "$canonical_cfg")
-        backup_log_info "Using rclone config (from .env): $canonical_cfg"
-    else
-        local discovered_cfg
-        if discovered_cfg=$(_resolve_rclone_config); then
-            if ! validate_rclone_config_path "$discovered_cfg"; then
-                log_error "Auto-discovered rclone config failed validation: $discovered_cfg" >&2
-                log_error "Set RCLONE_CONFIG=/path/to/rclone.conf in .env to override." >&2
-                return 1
-            fi
-            local canonical_discovered
-            canonical_discovered=$(realpath -e "$discovered_cfg")
-            rclone_config_arg=(--config "$canonical_discovered")
-            backup_log_info "Using rclone config (auto-discovered): $canonical_discovered"
-            backup_log_info "Tip: set RCLONE_CONFIG=$canonical_discovered in .env to make this explicit."
-        else
-            log_error "No rclone config file found. rclone cannot authenticate." >&2
-            log_error "Options:" >&2
-            log_error "  1. Set RCLONE_CONFIG=/path/to/rclone.conf in .env" >&2
-            log_error "  2. Copy config to /etc/rclone/rclone.conf (system-wide)" >&2
-            log_error "  3. Run: rclone config  (as root, so /root/.config/rclone/rclone.conf is created)" >&2
-            return 1
-        fi
-    fi
+    local -a rclone_config_arg=()
+    _resolve_rclone_config_arg rclone_config_arg || return 1
+    backup_log_info "Using validated rclone config: ${rclone_config_arg[1]}"
 
     local remote_base_path
     remote_base_path="$(get_config_value "RCLONE_REMOTE_PATH" "vaultwarden_backups")"
@@ -555,6 +589,18 @@ sync_to_rclone() {
         fi
     fi
 
+    local hmac_file="${enc_file}.sha256.hmac"
+    if [[ -f "$hmac_file" ]]; then
+        local _hmac_exit=0
+        rclone copy "${rclone_config_arg[@]}" "$hmac_file" "$remote_path/" --checksum \
+            2>"${rclone_stderr_tmp}" || _hmac_exit=$?
+        if (( _hmac_exit != 0 )); then
+            log_warn "[backup] Sidecar upload FAILED: $(basename "$hmac_file") (exit ${_hmac_exit}) — authenticated integrity metadata missing from remote." >&2
+            _sidecar_warn=true
+            (( _sidecar_fail++ )) || true
+        fi
+    fi
+
     if [[ "$_sidecar_warn" == "true" ]]; then
         log_warn "[backup] One or more sidecar files could not be uploaded to ${remote_path}/." >&2
         log_warn "[backup] The primary backup archive was delivered. Remote integrity checks will" >&2
@@ -601,18 +647,101 @@ sync_to_rclone() {
 
 }
 
-# _prune_remote_backups BASE_DIR RETENTION_DAYS
+# _resolve_rclone_config_arg NAMEREF_ARRAY
 #
-# Prunes backup files older than RETENTION_DAYS from the configured rclone
-# remote. Mirrors the local cleanup_old_backups() retention policy so that
-# remote and local storage stay in sync after each rotation run.
-#
-# Silently skips when rclone is not installed or not configured.
-# Non-fatal: logs a warning and returns 1 on partial failures so the rotate
-# subcommand can report degraded state without aborting.
-_prune_remote_backups() {
-    local retention_days="$1"
+# Resolves, validates, and canonicalises the rclone config path, then populates
+# the caller's array (passed by nameref) with the --config argument pair.
+# NAMEREF_ARRAY is the caller's variable name without a leading dollar sign.
+# Returns 1 and logs an error when resolution or validation fails.
+# Requires Bash 5.0+ (the project baseline is Ubuntu 22.04 LTS).
+_resolve_rclone_config_arg() {
+    local -n _rca_out="$1"
+    local cfg
+    cfg=$(get_config_value "RCLONE_CONFIG" "") || cfg=""
+    if [[ -z "$cfg" ]]; then
+        cfg=$(_resolve_rclone_config) || {
+            log_error "_resolve_rclone_config_arg: no rclone config file found"
+            return 1
+        }
+    fi
+    validate_rclone_config_path "$cfg" || return 1
+    cfg=$(realpath -e "$cfg") || return 1
+    _rca_out=(--config "$cfg")
+}
 
+sync_all_backups_to_rclone() {
+    if ! command -v rclone >/dev/null 2>&1; then
+        log_error "rclone not installed — offsite backup cannot proceed."
+        return 1
+    fi
+
+    local remote_name
+    remote_name=$(get_config_value "RCLONE_REMOTE_NAME" "")
+    if [[ -z "$remote_name" || "$remote_name" == "CHANGE_ME_RCLONE_REMOTE" ]]; then
+        log_error "RCLONE_REMOTE_NAME is not configured in .env."
+        return 1
+    fi
+
+    local -a rclone_config_arg=()
+    _resolve_rclone_config_arg rclone_config_arg || return 1
+
+    backup_log_info "Testing connectivity to rclone remote '${remote_name}'..."
+    rclone lsd "${rclone_config_arg[@]}" "${remote_name}:" --contimeout 10s --timeout 30s >/dev/null || {
+        log_error "Cannot reach rclone remote '${remote_name}'."
+        return 1
+    }
+
+    local base_dir remote_base
+    base_dir=$(get_config_value "BACKUP_DIR" "$(_default_backup_dir)")
+    remote_base=$(get_config_value "RCLONE_REMOTE_PATH" "vaultwarden_backups")
+    remote_base="${remote_base#/}"
+    remote_base="${remote_base%/}"
+
+    local -a dry_run_arg=()
+    [[ "$DRY_RUN" == "true" ]] && dry_run_arg=(--dry-run)
+
+    local copied_types=0
+    local t local_dir retention
+    for t in db full emergency; do
+        local_dir="${base_dir}/${t}"
+        [[ -d "$local_dir" ]] || continue
+        retention=$(_retention_days_for_type "$t") || return 1
+        if [[ "$DRY_RUN" == "true" ]]; then
+            backup_log_info "[DRY RUN] Would apply ${retention}-day local retention to ${t} backups before upload."
+        else
+            cleanup_old_backups "$local_dir" "$t" "$retention" || return 1
+        fi
+
+        if ! find "$local_dir" -maxdepth 1 -name '*.age' -type f -print -quit | grep -q .; then
+            backup_log_info "No retained ${t} backups to upload."
+            continue
+        fi
+
+        backup_log_info "Copying retained ${t} backups to ${remote_name}:${remote_base}/${t}/"
+        rclone copy "${rclone_config_arg[@]}" "$local_dir/" \
+            "${remote_name}:${remote_base}/${t}/" \
+            --include '*.age' \
+            --include '*.age.sha256' \
+            --include '*.age.sha256.hmac' \
+            --include '*.age.meta' \
+            --checksum "${dry_run_arg[@]}" || return 1
+        (( ++copied_types )) || true
+    done
+
+    _prune_remote_backups || return 1
+    backup_log_success "Rclone backup copy complete (${copied_types} backup type(s))."
+}
+
+# _prune_remote_backups
+#
+# Prunes backup files on the configured rclone remote that are older than
+# the per-type retention period. Retention days are read via
+# _retention_days_for_type() for each backup type, mirroring the local
+# cleanup_old_backups() policy on the remote store.
+#
+# Non-fatal: logs a warning and returns 1 on partial failure so that a single
+# unreachable remote does not abort an otherwise successful backup run.
+_prune_remote_backups() {
     if ! command -v rclone >/dev/null 2>&1; then
         backup_log_info "rclone not installed — skipping remote retention pruning."
         return 0
@@ -625,31 +754,8 @@ _prune_remote_backups() {
         return 0
     fi
 
-    local rclone_config_arg=()
-    local rclone_config_path
-    rclone_config_path="$(get_config_value "RCLONE_CONFIG" "")"
-    if [[ -n "$rclone_config_path" ]]; then
-        if ! validate_rclone_config_path "$rclone_config_path"; then
-            log_warn "[rotate] Remote prune skipped: invalid RCLONE_CONFIG path." >&2
-            return 0
-        fi
-        local _canonical_cfg
-        _canonical_cfg=$(realpath -e "$rclone_config_path")
-        rclone_config_arg=(--config "$_canonical_cfg")
-    else
-        local _discovered_cfg
-        if _discovered_cfg=$(_resolve_rclone_config 2>/dev/null); then
-            if validate_rclone_config_path "$_discovered_cfg" 2>/dev/null; then
-                local _canonical_disc
-                _canonical_disc=$(realpath -e "$_discovered_cfg")
-                rclone_config_arg=(--config "$_canonical_disc")
-            fi
-        fi
-        if [[ ${#rclone_config_arg[@]} -eq 0 ]]; then
-            backup_log_info "No rclone config found — skipping remote retention pruning."
-            return 0
-        fi
-    fi
+    local -a rclone_config_arg=()
+    _resolve_rclone_config_arg rclone_config_arg || return 1
 
     local remote_base_path
     remote_base_path="$(get_config_value "RCLONE_REMOTE_PATH" "vaultwarden_backups")"
@@ -660,6 +766,8 @@ _prune_remote_backups() {
 
     for t in db full emergency; do
         local remote_path="${remote_name}:${remote_base_path}/${t}"
+        local retention_days
+        retention_days=$(_retention_days_for_type "$t") || return 1
 
         local -a remote_files=()
         mapfile -t remote_files < <(
@@ -704,7 +812,7 @@ _prune_remote_backups() {
                     (( ++_deleted_remote )) || true
                     # Remove associated sidecar files; ignore errors (may not exist).
                     local _ext
-                    for _ext in .sha256 .meta; do
+                    for _ext in .sha256 .sha256.hmac .meta; do
                         rclone deletefile "${rclone_config_arg[@]}" \
                             "${remote_path}/${_file}${_ext}" \
                             --contimeout 15s --timeout 60s 2>/dev/null || true
@@ -825,10 +933,13 @@ perform_db_backup() {
 
     rm -f "$snap" 2>/dev/null || true
 
-    _sha256sum "$enc" | awk '{print $1}' > "${enc}.sha256"
-    chmod 600 "${enc}.sha256"
+    write_file_integrity "$enc" || {
+        log_error "Failed to write backup integrity sidecars for: $enc" >&2
+        rm -f "$enc" "${enc}.sha256" "${enc}.sha256.hmac"
+        return 1
+    }
 
-    [[ -s "$enc" ]] || { log_error "Encrypted output is empty" >&2; rm -f "$enc" "${enc}.sha256"; return 1; }
+    [[ -s "$enc" ]] || { log_error "Encrypted output is empty" >&2; rm -f "$enc" "${enc}.sha256" "${enc}.sha256.hmac"; return 1; }
 
     local orig_size
     orig_size=$(stat -c%s "$db_file" 2>/dev/null || stat -f%z "$db_file" 2>/dev/null || echo 0)
@@ -973,10 +1084,13 @@ perform_full_backup() {
     mv "$enc_tmp" "$enc"
     secure_file "$enc" 600
 
-    _sha256sum "$enc" | awk '{print $1}' > "${enc}.sha256"
-    chmod 600 "${enc}.sha256"
+    write_file_integrity "$enc" || {
+        log_error "Failed to write backup integrity sidecars for: $enc" >&2
+        rm -f "$enc" "${enc}.sha256" "${enc}.sha256.hmac"
+        return 1
+    }
 
-    [[ -s "$enc" ]] || { log_error "Encrypted output is empty" >&2; rm -f "$enc" "${enc}.sha256"; return 1; }
+    [[ -s "$enc" ]] || { log_error "Encrypted output is empty" >&2; rm -f "$enc" "${enc}.sha256" "${enc}.sha256.hmac"; return 1; }
 
     if ! create_backup_metadata "$enc" "$backup_label" \
             "$(printf 'archive_format=relative\nversion=2')"; then
@@ -1080,6 +1194,7 @@ main() {
         load_env_file || { log_error "Failed to load .env"; exit 1; }
         auto_fix_critical_permissions "$PROJECT_ROOT"
         require_project_state_ready || exit 1
+        _load_integrity_hmac_key || exit 1
 
         local age_key_file
         age_key_file=$(_resolve_age_key) || {
@@ -1131,11 +1246,35 @@ main() {
         exit 0
     fi
 
+    if [[ "$_SUBCMD" == "sync" ]]; then
+        require_root "$@"
+        auto_fix_critical_permissions "$PROJECT_ROOT"
+        local sync_dry_label=""
+        [[ "$DRY_RUN" == "true" ]] && sync_dry_label=" [DRY RUN]"
+        log_header "VaultWarden-OCI Rclone Backup Copy${sync_dry_label}"
+        load_env_file || { log_error "Failed to load .env"; exit 1; }
+        auto_fix_critical_permissions "$PROJECT_ROOT"
+
+        local old_umask
+        old_umask=$(umask)
+        umask 077
+        TMPDIR_BACKUP="$(mktemp -d -p /dev/shm 2>/dev/null || mktemp -d -t vw_sync.XXXXXXXXXX)" || {
+            log_error "Failed to create secure temporary directory"
+            exit 1
+        }
+        umask "$old_umask"
+
+        sync_all_backups_to_rclone || exit 1
+        exit 0
+    fi
+
     if [[ "$_SUBCMD" == "rotate" ]]; then
         require_root "$@"
         auto_fix_critical_permissions "$PROJECT_ROOT"
 
-        log_header "VaultWarden-OCI Backup Rotation${DRY_RUN:+ [DRY RUN]}"
+        local rotate_dry_label=""
+        [[ "$DRY_RUN" == "true" ]] && rotate_dry_label=" [DRY RUN]"
+        log_header "VaultWarden-OCI Backup Rotation${rotate_dry_label}"
         load_env_file || { log_error "Failed to load .env"; exit 1; }
         auto_fix_critical_permissions "$PROJECT_ROOT"
 
@@ -1146,6 +1285,8 @@ main() {
         for t in db full emergency; do
             local type_dir="$base_dir/$t"
             [[ -d "$type_dir" ]] || continue
+            local retention_days
+            retention_days=$(_retention_days_for_type "$t") || exit 1
 
             if [[ "$DRY_RUN" == "true" ]]; then
                 local would_prune=0
@@ -1153,12 +1294,12 @@ main() {
                     backup_log_info "[DRY RUN] Would remove: $(basename "$f") (and sidecars)"
                     (( ++would_prune )) || true
                 done < <(find "$type_dir" -maxdepth 1 -name "*.age" -type f \
-                             -mtime +"$KEEP_DAYS" -print0 2>/dev/null)
+                             -mtime +"$retention_days" -print0 2>/dev/null)
                 if (( would_prune == 0 )); then
-                    backup_log_info "[DRY RUN] No $t backups older than $KEEP_DAYS days — nothing to prune."
+                    backup_log_info "[DRY RUN] No $t backups older than $retention_days days — nothing to prune."
                 fi
             else
-                cleanup_old_backups "$type_dir" "$t" "$KEEP_DAYS" || rotate_failed=true
+                cleanup_old_backups "$type_dir" "$t" "$retention_days" || rotate_failed=true
             fi
         done
 
@@ -1168,11 +1309,13 @@ main() {
         fi
 
         # Prune remote backups to match the local retention policy.
-        _prune_remote_backups "$KEEP_DAYS" || {
+        _prune_remote_backups || {
             log_warn "[rotate] Remote retention pruning reported errors — local rotation was successful."
         }
 
-        backup_log_success "Rotation complete${DRY_RUN:+ (dry run)}."
+        local rotate_suffix=""
+        [[ "$DRY_RUN" == "true" ]] && rotate_suffix=" (dry run)"
+        backup_log_success "Rotation complete${rotate_suffix}."
         exit 0
     fi
 
@@ -1221,6 +1364,7 @@ main() {
     load_env_file || { log_error "Failed to load .env"; exit 1; }
     auto_fix_critical_permissions "$PROJECT_ROOT"
     require_project_state_ready || exit 1
+    _load_integrity_hmac_key || exit 1
 
     local state_dir
     state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
@@ -1287,7 +1431,7 @@ main() {
         if [[ "$FULL_VERIFY" == "true" ]]; then
             if ! verify_backup_full "$backup_file" "$actual_type" "$TMPDIR_BACKUP"; then
                 log_error "Backup verification failed — discarding corrupt archive."
-                rm -f "$backup_file" "${backup_file}.meta" "${backup_file}.sha256"
+                rm -f "$backup_file" "${backup_file}.meta" "${backup_file}.sha256" "${backup_file}.sha256.hmac"
                 exit 1
             fi
         else
@@ -1331,13 +1475,15 @@ main() {
 
         _log_backup_size "$backup_file"
 
-        backup_log_info "Cleaning up old backups (retention: $KEEP_DAYS days)..."
-        cleanup_old_backups "$backup_dir" "$actual_type" "$KEEP_DAYS" || \
+        local retention_days
+        retention_days=$(_retention_days_for_type "$actual_type") || exit 1
+        backup_log_info "Cleaning up old backups (retention: $retention_days days)..."
+        cleanup_old_backups "$backup_dir" "$actual_type" "$retention_days" || \
             backup_log_warn "Failed to clean up some old backups"
 
         # Prune remote backups to mirror local retention policy
         if [[ "$RCLONE_SYNC" == "true" && "$rclone_failed" == "false" ]]; then
-            _prune_remote_backups "$KEEP_DAYS" || \
+            _prune_remote_backups || \
                 backup_log_warn "Failed to prune some remote backups"
         fi
 

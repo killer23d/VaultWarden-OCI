@@ -8,6 +8,10 @@ on:
       - '*.sh'
       - 'Makefile'
       - 'systemd/**'
+      - 'tests/**'
+      - 'secrets-schema.yaml'
+      - '.env.example'
+      - '.gitignore'
 
 # Global permissions
 permissions:
@@ -98,12 +102,12 @@ jobs:
         run: |
           FAIL=0
           # Guard against @latest Go module references in any script other than
-          # setup-crowdsec.sh. In setup-crowdsec.sh the @latest path is only
-          # reached at runtime when CF_WORKER_BOUNCER_VERSION is empty (i.e.
+          # setup-crowdsec.sh and its private core implementation. The @latest
+          # path is reached only when CF_WORKER_BOUNCER_VERSION is empty (i.e.
           # --use-latest was passed or no pin is set), which is intentional.
           if grep -rn '@latest' utilities/ lib/ --include='*.sh' \
-               | grep -v 'utilities/setup-crowdsec.sh'; then
-            echo "UNPINNED: @latest Go reference found outside setup-crowdsec.sh"
+               | grep -Ev 'utilities/(setup-crowdsec|\.setup-crowdsec-core)\.sh'; then
+            echo "UNPINNED: @latest Go reference found outside CrowdSec setup scripts"
             FAIL=1
           fi
           # Guard against unintended /releases/latest calls in any OTHER script
@@ -112,6 +116,10 @@ jobs:
           # empty CF_WORKER_BOUNCER_VERSION), so it is excluded here.
           if grep -n '/releases/latest' setup.sh 2>/dev/null; then
             echo "UNPINNED: /releases/latest GitHub API call found in setup.sh"
+            FAIL=1
+          fi
+          if grep -Eq '^(CROWDSEC_VERSION|CF_WORKER_BOUNCER_VERSION|FIREWALL_BOUNCER_VERSION)=latest$' .env.example; then
+            echo "UNPINNED: CrowdSec component version in .env.example"
             FAIL=1
           fi
           [[ $FAIL -eq 0 ]] || exit 1
@@ -160,6 +168,27 @@ jobs:
           # -x: follow source statements to avoid SC1091 false positives.
           # --severity=warning: fail on warning or error; info/style are logged only.
           find . -type f -name '*.sh' | xargs shellcheck -x --severity=warning
+
+  functional-tests:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y age apache2-utils python3-argon2
+          curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.53.3/yq_linux_amd64 -o /tmp/yq
+          echo "fa52a4e758c63d38299163fbdd1edfb4c4963247918bf9c1c5d31d84789eded4  /tmp/yq" | sha256sum --check --status
+          sudo install -m 755 /tmp/yq /usr/local/bin/yq
+          curl -fsSL https://github.com/getsops/sops/releases/download/v3.13.1/sops-v3.13.1.linux.amd64 -o /tmp/sops
+          echo "620a9d7e3352ababeca6908cea24a6e8b14ce89a448ddbd3f94f1ef3398f470a  /tmp/sops" | sha256sum --check --status
+          sudo install -m 755 /tmp/sops /usr/local/bin/sops
+
+      - name: Run focused tests
+        run: make test-unit
 
   # ── Shellcheck auto-fix (contents: write, runs only on default branch) ──
   # Separated from the PR check job so untrusted PR code never runs with

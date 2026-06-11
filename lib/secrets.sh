@@ -611,9 +611,13 @@ secure_secrets_file() {
 
 _bcrypt_format_ok() {
     local hash="$1"
-    [[ "$hash" =~ ^\$2[aby]\$[0-9]+\$.{53}$ ]]
+    [[ "$hash" =~ ^\$2[aby]\$[0-9]{2}\$[./A-Za-z0-9]{53}$ ]]
 }
 
+# New auto keys (fields with auto_fn declared in the schema) must NOT be added
+# here. They are dispatched through the schema to auto_generate_secret_field().
+# backup_passphrase remains only as a legacy direct-call compatibility path;
+# file_integrity_hmac_key deliberately rejects interactive collection.
 collect_secret_field() {
     local field="$1"
 
@@ -737,6 +741,11 @@ collect_secret_field() {
             printf '%s' "$passphrase"
             ;;
 
+        file_integrity_hmac_key)
+            log_error "collect_secret_field: '$field' is an auto key. Call auto_generate_secret_field() instead." >&2
+            return 1
+            ;;
+
         *)
             log_error "collect_secret_field: unknown field '$field'" >&2
             return 1
@@ -836,6 +845,16 @@ auto_generate_secret_field() {
             passphrase=$(generate_secure_string 32)
             log_success "Backup passphrase generated (32 characters)" >&2
             printf '%s' "$passphrase"
+            ;;
+
+        # Single source of truth for this auto key.
+        # collect_secret_field() returns an error for auto keys.
+        # _dispatch_auto_fn() in setup-secrets.sh is the sole entry point.
+        file_integrity_hmac_key)
+            local integrity_key
+            integrity_key=$(generate_secure_string 64)
+            log_success "Backup integrity HMAC key generated (64 characters)" >&2
+            printf '%s' "$integrity_key"
             ;;
 
         *)

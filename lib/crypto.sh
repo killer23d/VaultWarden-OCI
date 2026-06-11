@@ -184,7 +184,7 @@ decrypt_sops_file() {
 
 # Encrypts to a mktemp staging file and atomically renames it over the
 # original only on success, preventing truncation/destruction of the target
-# file on any error (malformed YAML, missing .sops.yaml rule, etc.).
+# file on any error (malformed YAML, invalid recipient, SOPS failure, etc.).
 #
 # chmod 600 is applied to the staging file immediately after mktemp, before
 # any content is written, to eliminate the world-readable race window between
@@ -198,9 +198,9 @@ decrypt_sops_file() {
 # being silently swallowed.
 #
 # After the atomic mv, a sops -d round-trip verifies the ciphertext is
-# readable with the current Age key. sops --encrypt exits 0 even when the
-# recipient key in .sops.yaml is stale or rotated, so the round-trip catches
-# silently unreadable ciphertext before it reaches startup:
+# readable with the current Age key. Encryption passes the derived recipient
+# explicitly, while the generated .sops.yaml supports operator-run SOPS commands
+# and independent recipient health checks.
 #   1. Before mv, write a pre-write backup (install -m 600) of the original
 #      plaintext staging file.
 #   2. After mv succeeds, run `sops -d <live_file> > /dev/null`.
@@ -314,9 +314,8 @@ encrypt_sops_file() {
     if [[ $rt_rc -ne 0 ]]; then
         log_error "encrypt_sops_file: SOPS round-trip validation FAILED for: $file"
         log_error "  The ciphertext was written successfully but cannot be decrypted."
-        log_error "  This typically means the Age public key in .sops.yaml is stale,"
-        log_error "  rotated, or does not match the private key at: $age_key_file"
-        log_error "  Check: cat .sops.yaml   (confirm 'age:' recipient matches your key)"
+        log_error "  The ciphertext recipient does not match the private key at: $age_key_file"
+        log_error "  Also check the generated .sops.yaml before running SOPS manually."
         log_error "  Check: age-keygen -y $age_key_file   (derive the current public key)"
         if [[ -n "${rt_stderr:-}" ]]; then
             log_error "  sops decrypt error: $rt_stderr"
@@ -596,6 +595,8 @@ check_argon2_support() {
             printf 'python\n'
             return 0
         fi
+        log_warn "check_argon2_support: python3 is installed but the argon2 module is missing"
+        log_warn "Install it with: sudo apt install python3-argon2  (or: pip install argon2-cffi)"
     fi
 
     if command -v argon2 >/dev/null 2>&1; then
@@ -735,6 +736,53 @@ verify_sha256() {
     fi
 }
 
+# _calculate_hmac_sha256 MESSAGE
+#
+# Calculates HMAC-SHA256 for MESSAGE using FILE_INTEGRITY_HMAC_KEY. The key is
+# delivered to Python over stdin and is cleared from the child environment, so
+# it never appears in process arguments. Prints the lowercase hexadecimal HMAC.
+# Returns 1 when the key or python3 is unavailable or computation fails.
+_calculate_hmac_sha256() {
+    local message="$1"
+
+    if [[ -z "${FILE_INTEGRITY_HMAC_KEY:-}" ]]; then
+        log_error "_calculate_hmac_sha256: FILE_INTEGRITY_HMAC_KEY is not set"
+        return 1
+    fi
+    if ! has_command python3; then
+        log_error "_calculate_hmac_sha256: python3 is required"
+        return 1
+    fi
+
+    # Keep the key out of argv and the child environment. Only the non-secret
+    # checksum string is passed as an argument.
+    local hmac_key="${FILE_INTEGRITY_HMAC_KEY}"
+    local hmac_value=""
+    if ! hmac_value=$(
+        FILE_INTEGRITY_HMAC_KEY='' python3 -c '
+import hashlib
+import hmac
+import sys
+
+key = sys.stdin.buffer.readline().rstrip(b"\n")
+message = sys.argv[1].encode("ascii")
+sys.stdout.write(hmac.new(key, message, hashlib.sha256).hexdigest())
+' "$message" <<< "$hmac_key"
+    ); then
+        unset hmac_key
+        log_error "_calculate_hmac_sha256: HMAC calculation failed"
+        return 1
+    fi
+    unset hmac_key
+
+    if [[ ! "$hmac_value" =~ ^[0-9a-f]{64}$ ]]; then
+        log_error "_calculate_hmac_sha256: invalid HMAC output"
+        return 1
+    fi
+
+    printf '%s\n' "$hmac_value"
+}
+
 # ---------------------------------------------------------------------------
 # write_file_integrity FILE
 #
@@ -771,14 +819,8 @@ write_file_integrity() {
     }
 
     if [[ -n "${FILE_INTEGRITY_HMAC_KEY:-}" ]]; then
-        if ! has_command openssl; then
-            log_warn "write_file_integrity: openssl not available; skipping HMAC sidecar"
-            return 0
-        fi
         local hmac
-        hmac=$(printf '%s' "$checksum" \
-               | openssl dgst -sha256 -hmac "${FILE_INTEGRITY_HMAC_KEY}" \
-               | sed 's/^.* //')
+        hmac=$(_calculate_hmac_sha256 "$checksum") || return 1
         if ! install -m 600 /dev/null "${file}.sha256.hmac" 2>/dev/null; then
             log_warn "write_file_integrity: failed to create ${file}.sha256.hmac with restricted permissions; skipping HMAC sidecar"
             return 0
@@ -822,43 +864,54 @@ verify_file_integrity() {
     stored_checksum=$(awk '{print $1}' <<< "$stored_checksum")
 
     if [[ -n "${FILE_INTEGRITY_HMAC_KEY:-}" ]]; then
-        if ! has_command openssl; then
-            log_error "verify_file_integrity: FILE_INTEGRITY_HMAC_KEY is set but openssl is not available"
-            return 1
-        fi
-
         local hmac_file="${checksum_file}.hmac"
+        local stored_hmac=""
         if [[ ! -f "$hmac_file" ]]; then
-            log_error "verify_file_integrity: HMAC sidecar missing: $hmac_file (was write_file_integrity() called?)"
-            return 1
+            if [[ "${REQUIRE_AUTHENTICATED_INTEGRITY:-false}" == "true" ]]; then
+                log_error "verify_file_integrity: authenticated integrity is required but HMAC sidecar is missing: $hmac_file"
+                return 1
+            fi
+            log_warn "verify_file_integrity: HMAC sidecar missing for legacy file: $hmac_file"
+            log_warn "  Falling back to plain SHA-256 because REQUIRE_AUTHENTICATED_INTEGRITY is not true."
+        else
+            stored_hmac=$(cat "$hmac_file") || {
+                log_error "verify_file_integrity: failed to read HMAC file: $hmac_file"
+                return 1
+            }
+            stored_hmac=$(awk '{print $1}' <<< "$stored_hmac")
         fi
 
-        local stored_hmac
-        stored_hmac=$(cat "$hmac_file") || {
-            log_error "verify_file_integrity: failed to read HMAC file: $hmac_file"
-            return 1
-        }
-        stored_hmac=$(awk '{print $1}' <<< "$stored_hmac")
+        if [[ -n "$stored_hmac" ]]; then
+            local expected_hmac
+            expected_hmac=$(_calculate_hmac_sha256 "$stored_checksum") || return 1
 
-        local expected_hmac
-        expected_hmac=$(printf '%s' "$stored_checksum" \
-                        | openssl dgst -sha256 -hmac "${FILE_INTEGRITY_HMAC_KEY}" \
-                        | sed 's/^.* //')
-
-        if [[ "$expected_hmac" != "$stored_hmac" ]]; then
-            log_error "verify_file_integrity: HMAC verification FAILED for sidecar: $checksum_file"
-            log_error "  Sidecar may have been tampered with alongside the monitored file."
-            return 1
+            if [[ "$expected_hmac" != "$stored_hmac" ]]; then
+                log_error "verify_file_integrity: HMAC verification FAILED for sidecar: $checksum_file"
+                log_error "  Sidecar may have been tampered with alongside the monitored file."
+                return 1
+            fi
+            log_debug "verify_file_integrity: HMAC sidecar authenticated for: $file"
         fi
-        log_debug "verify_file_integrity: HMAC sidecar authenticated for: $file"
     else
+        if [[ "${REQUIRE_AUTHENTICATED_INTEGRITY:-false}" == "true" ]]; then
+            log_error "verify_file_integrity: authenticated integrity is required but FILE_INTEGRITY_HMAC_KEY is not set"
+            return 1
+        fi
         log_warn "verify_file_integrity: FILE_INTEGRITY_HMAC_KEY is not set; sidecar is unauthenticated."
         log_warn "  An attacker who replaces both the file and its .sha256 sidecar will pass this check."
         log_warn "  Set FILE_INTEGRITY_HMAC_KEY and use write_file_integrity() to enable authenticated checking."
     fi
 
-    # Plain SHA-256 comparison (always performed; HMAC authentication above
-    # ensures the stored_checksum value is trustworthy when the key is set).
+    # Verification pipeline — both steps must pass when HMAC is available:
+    #   1. HMAC-SHA256 (above): authenticates the .sha256 sidecar content.
+    #      An attacker who replaces both the backup file and its .sha256 sidecar
+    #      still fails here — they cannot forge the HMAC without the key.
+    #   2. SHA-256 (below): recomputes the digest of $file and compares it to
+    #      the value stored in $checksum_file. Catches file corruption or
+    #      silent replacement.
+    # Note: HMAC authenticates the checksum string, not the backup file directly.
+    # Both checks are required — a passing HMAC proves the sidecar is authentic,
+    # but does not prove the file it was originally computed from has not changed.
     local actual_checksum
     if ! actual_checksum=$(calculate_sha256 "$file"); then
         return 1
@@ -867,12 +920,12 @@ verify_file_integrity() {
     if [[ "$actual_checksum" == "$stored_checksum" ]]; then
         log_debug "File integrity verified: $file"
         return 0
-    else
-        log_error "File integrity check FAILED: $file"
-        log_error "  Expected: $stored_checksum"
-        log_error "  Actual:   $actual_checksum"
-        return 1
     fi
+
+    log_error "File integrity check FAILED: $file"
+    log_error "  Expected: $stored_checksum"
+    log_error "  Actual:   $actual_checksum"
+    return 1
 }
 
 
