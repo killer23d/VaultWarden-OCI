@@ -1,0 +1,498 @@
+name: Merge CrowdSec installer implementation
+
+on:
+  push:
+    branches:
+      - Beta
+    paths:
+      - .github/workflows/merge-crowdsec-installer.yml
+
+permissions:
+  contents: write
+
+jobs:
+  merge-installer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: Beta
+          fetch-depth: 0
+
+      - name: Merge and harden CrowdSec installer
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          root = Path('.')
+          core_path = root / 'utilities/.setup-crowdsec-core.sh'
+          setup_path = root / 'utilities/setup-crowdsec.sh'
+          if not core_path.exists():
+              raise SystemExit('expected utilities/.setup-crowdsec-core.sh')
+
+          text = core_path.read_text()
+
+          def replace_once(old: str, new: str, label: str) -> None:
+              global text
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected one match, found {count}')
+              text = text.replace(old, new, 1)
+
+          replace_once(
+              'set -euo pipefail\n\nSCRIPT_DIR=',
+              'set -euo pipefail\n\n'
+              '# Protect generated API keys, temporary files, and bouncer configs before any\n'
+              '# explicit chmod is applied.\n'
+              'umask 077\n\nSCRIPT_DIR=',
+              'secure umask',
+          )
+
+          replace_once(
+              '''User=root
+          Group=root
+
+          [Install]''',
+              '''User=root
+          Group=root
+
+          # The daemon needs network access and read access to its root-owned mode-600
+          # config, but no Linux capabilities or writable system paths.
+          NoNewPrivileges=true
+          PrivateTmp=true
+          PrivateDevices=true
+          ProtectSystem=strict
+          ProtectHome=true
+          ProtectKernelTunables=true
+          ProtectKernelModules=true
+          ProtectControlGroups=true
+          RestrictSUIDSGID=true
+          CapabilityBoundingSet=
+          AmbientCapabilities=
+          RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+          [Install]''',
+              'systemd hardening',
+          )
+
+          replace_once(
+              '''    # shellcheck disable=SC2064
+              trap "rm -f '$_repo_script'" RETURN''',
+              '''    # Remove the downloaded repository bootstrap on normal exit, errors, and
+              # signals. RETURN is ineffective at script top level; EXIT is intentional.
+              # shellcheck disable=SC2064
+              trap "rm -f '$_repo_script'" EXIT''',
+              'repository script cleanup trap',
+          )
+          replace_once(
+              '''        log_error "Failed to download CrowdSec repository setup script."
+                  rm -f "$_repo_script"
+                  return 1''',
+              '''        log_error "Failed to download CrowdSec repository setup script."
+                  rm -f "$_repo_script"
+                  exit 1''',
+              'download failure exit',
+          )
+          replace_once(
+              '''        log_error "Downloaded repository script does not appear to be a valid shell script — aborting."
+                  rm -f "$_repo_script"
+                  return 1''',
+              '''        log_error "Downloaded repository script does not appear to be a valid shell script — aborting."
+                  rm -f "$_repo_script"
+                  exit 1''',
+              'bootstrap validation exit',
+          )
+          replace_once(
+              '''    bash "$_repo_script"
+              rm -f "$_repo_script"
+
+              _cs_pkg=''',
+              '''    bash "$_repo_script"
+              rm -f "$_repo_script"
+              trap - EXIT
+
+              _cs_pkg=''',
+              'clear cleanup trap',
+          )
+
+          replace_once(
+              '''                if [[ -n "$_download_url" ]]; then
+                              _tmpdir="$(mktemp -d -p /tmp cs-cf-worker.XXXXXX)"''',
+              '''                if [[ -n "$_download_url" && -z "$_sha256_url" ]]; then
+                              log_error "Release tarball has no matching SHA-256 asset; refusing an unverified install."
+                              _download_url=""
+                          fi
+
+                          if [[ -n "$_download_url" ]]; then
+                              _tmpdir="$(mktemp -d -p /tmp cs-cf-worker.XXXXXX)"''',
+              'require checksum asset',
+          )
+          replace_once(
+              '''                    if curl -fsSL "$_download_url" -o "$_tmptar"; then
+                                  if [[ -n "$_sha256_url" ]]; then
+                                      _expected_sha="$(curl -fsSL "$_sha256_url" 2>/dev/null | awk '{print $1}' || true)"
+                                      _actual_sha="$(sha256sum "$_tmptar" | awk '{print $1}')"
+                                      if [[ -n "$_expected_sha" && "$_actual_sha" != "$_expected_sha" ]]; then
+                                          log_error "SHA256 mismatch — aborting tarball install."
+                                          rm -rf "$_tmpdir"
+                                          _tmpdir=""
+                                      fi
+                                  fi
+
+                                  if [[ -n "$_tmpdir" && -f "$_tmptar" ]]; then''',
+              '''                    if curl -fsSL "$_download_url" -o "$_tmptar"; then
+                                  _expected_sha="$(curl -fsSL "$_sha256_url" 2>/dev/null | awk '{print $1}' || true)"
+                                  _actual_sha="$(sha256sum "$_tmptar" | awk '{print $1}')"
+                                  if [[ -z "$_expected_sha" || "$_actual_sha" != "$_expected_sha" ]]; then
+                                      log_error "SHA-256 verification failed — refusing tarball installation."
+                                      rm -rf "$_tmpdir"
+                                      _tmpdir=""
+                                  fi
+
+                                  if [[ -n "$_tmpdir" && -f "$_tmptar" ]]; then''',
+              'strict checksum verification',
+          )
+
+          old_collections = '''if [[ "$DRY_RUN" == "true" ]]; then
+              log_info "[DRY RUN] Would install hub collections: crowdsecurity/linux, crowdsecurity/caddy, crowdsecurity/http-cve, Dominic-Wagner/vaultwarden"
+          else
+              cscli collections install crowdsecurity/linux                   || true
+              cscli collections install crowdsecurity/caddy                   || true
+              cscli collections install crowdsecurity/http-cve                || true
+              cscli collections install crowdsecurity/base-http-scenarios     || true
+              cscli collections install crowdsecurity/appsec-generic-rules    || true
+              cscli collections install crowdsecurity/appsec-virtual-patching || true
+              cscli collections install crowdsecurity/whitelist-good-actors   || true
+              cscli collections install crowdsecurity/iptables                || true
+              cscli collections install Dominic-Wagner/vaultwarden            || true
+              log_success "Hub collections installed."
+          fi'''
+          new_collections = '''# Install only top-level collections that match this host's acquired log sources.
+          # The caddy and linux collections pull their HTTP, SSH, and whitelist dependencies.
+          _recommended_collections=(
+              crowdsecurity/linux
+              crowdsecurity/caddy
+              crowdsecurity/iptables
+              Dominic-Wagner/vaultwarden
+          )
+
+          # These rules are inert without an AppSec acquisition listener and a compatible
+          # request-forwarding remediation component. Remove stale subscriptions rather
+          # than implying that the current Caddy deployment has WAF inspection enabled.
+          _obsolete_collections=(
+              crowdsecurity/appsec-generic-rules
+              crowdsecurity/appsec-virtual-patching
+          )
+
+          if [[ "$DRY_RUN" == "true" ]]; then
+              log_info "[DRY RUN] Would install recommended collections: ${_recommended_collections[*]}"
+              log_info "[DRY RUN] Would remove inactive AppSec collections: ${_obsolete_collections[*]}"
+          else
+              cscli hub update || log_warn "CrowdSec Hub update failed; continuing with the local Hub index."
+
+              _collection_failures=0
+              for _collection in "${_recommended_collections[@]}"; do
+                  if cscli collections install "$_collection"; then
+                      log_info "Collection present: ${_collection}"
+                  else
+                      log_error "Failed to install required CrowdSec collection: ${_collection}"
+                      _collection_failures=1
+                  fi
+              done
+
+              if (( _collection_failures != 0 )); then
+                  log_error "One or more required CrowdSec collections failed to install."
+                  exit 1
+              fi
+
+              for _collection in "${_obsolete_collections[@]}"; do
+                  if cscli collections list 2>/dev/null | grep -Fq "$_collection"; then
+                      if cscli collections remove "$_collection" --purge --force; then
+                          log_success "Removed inactive AppSec collection: ${_collection}"
+                      else
+                          log_warn "Could not remove inactive AppSec collection: ${_collection}"
+                      fi
+                  fi
+              done
+
+              log_success "Recommended CrowdSec hub collections reconciled."
+          fi
+          unset _collection _collection_failures _recommended_collections _obsolete_collections'''
+          replace_once(old_collections, new_collections, 'collection policy')
+
+          replace_once(
+              '''            | tee "$_acquis_dest" >/dev/null
+                  log_success "Acquisition config written to ${_acquis_dest}"''',
+              '''            | tee "$_acquis_dest" >/dev/null
+                  chmod 640 "$_acquis_dest"
+                  log_success "Acquisition config written to ${_acquis_dest}"''',
+              'acquisition permissions',
+          )
+
+          replace_once(
+              '''            if [[ -z "$cf_account_id" || "$cf_account_id" == PLACEHOLDER* || "$cf_account_id" == CHANGE_ME* ]]; then
+                          log_error "cf_account_id is not configured."
+                          log_error "Run: sudo ./edit-secrets.sh rotate cf_account_id"
+                          exit 1
+                      fi
+                      cleanup_secrets_environment''',
+              '''            if [[ -z "$cf_account_id" || "$cf_account_id" == PLACEHOLDER* || "$cf_account_id" == CHANGE_ME* ]]; then
+                          log_error "cf_account_id is not configured."
+                          log_error "Run: sudo ./edit-secrets.sh rotate cf_account_id"
+                          exit 1
+                      fi
+                      if [[ ! "$cloudflare_zone_id" =~ ^[0-9a-fA-F]{32}$ ]]; then
+                          log_error "cloudflare_zone_id must be a 32-character hexadecimal identifier."
+                          exit 1
+                      fi
+                      if [[ ! "$cf_account_id" =~ ^[0-9a-fA-F]{32}$ ]]; then
+                          log_error "cf_account_id must be a 32-character hexadecimal identifier."
+                          exit 1
+                      fi
+                      if [[ ! "$cf_worker_bouncer_token" =~ ^[A-Za-z0-9_-]{20,}$ ]]; then
+                          log_error "cf_worker_bouncer_token contains unexpected characters or is too short."
+                          exit 1
+                      fi
+                      cleanup_secrets_environment''',
+              'Cloudflare identifier validation',
+          )
+          replace_once(
+              '''        if [[ -z "$_domain_name" ]]; then
+                      log_error "Neither DOMAIN_NAME nor DOMAIN is set in .env — cannot derive routes_to_protect."
+                      log_error "Set DOMAIN_NAME=yourdomain.com in .env and re-run."
+                      exit 1
+                  fi
+                  _worker_route="${_domain_name}/*"''',
+              '''        if [[ -z "$_domain_name" ]]; then
+                      log_error "Neither DOMAIN_NAME nor DOMAIN is set in .env — cannot derive routes_to_protect."
+                      log_error "Set DOMAIN_NAME=yourdomain.com in .env and re-run."
+                      exit 1
+                  fi
+                  if [[ ! "$_domain_name" =~ ^[A-Za-z0-9.-]+$ || "$_domain_name" == .* || "$_domain_name" == *. ]]; then
+                      log_error "DOMAIN_NAME contains invalid characters or boundary dots: ${_domain_name}"
+                      exit 1
+                  fi
+                  _worker_route="${_domain_name}/*"''',
+              'domain validation',
+          )
+          replace_once(
+              '''        chmod 600 "$_CF_WORKER_BOUNCER_CONFIG_DEST"
+                  log_success "Cloudflare Workers bouncer config written to ${_CF_WORKER_BOUNCER_CONFIG_DEST} (mode 600)."''',
+              '''        chmod 600 "$_CF_WORKER_BOUNCER_CONFIG_DEST"
+                  unset cf_worker_bouncer_token cloudflare_zone_id cf_account_id
+                  log_success "Cloudflare Workers bouncer config written to ${_CF_WORKER_BOUNCER_CONFIG_DEST} (mode 600)."''',
+              'secret variable cleanup',
+          )
+
+          replace_once(
+              '''    if systemctl is-active --quiet crowdsec; then
+                  systemctl reload crowdsec 2>/dev/null || true
+              fi''',
+              '''    if systemctl is-active --quiet crowdsec; then
+                  if ! systemctl reload crowdsec 2>/dev/null && ! systemctl restart crowdsec 2>/dev/null; then
+                      log_error "CrowdSec rejected the updated configuration."
+                      exit 1
+                  fi
+              fi''',
+              'CrowdSec reload failure',
+          )
+          replace_once(
+              '''    _lapi_port_phase8="$(_cs_resolve_lapi_port)"
+              _cs_wait_for_lapi "$_lapi_port_phase8" || true
+
+              systemctl reset-failed crowdsec-firewall-bouncer 2>/dev/null || true
+              systemctl enable --now crowdsec-firewall-bouncer || true''',
+              '''    _lapi_port_phase8="$(_cs_resolve_lapi_port)"
+              if ! _cs_wait_for_lapi "$_lapi_port_phase8"; then
+                  log_error "CrowdSec LAPI is unavailable; refusing to report bouncer setup as successful."
+                  exit 1
+              fi
+
+              systemctl reset-failed crowdsec-firewall-bouncer 2>/dev/null || true
+              if ! systemctl enable --now crowdsec-firewall-bouncer; then
+                  log_error "Failed to enable or start crowdsec-firewall-bouncer."
+              fi''',
+              'LAPI and firewall bouncer start',
+          )
+          replace_once(
+              '''    else
+                  log_warn "crowdsec-firewall-bouncer did not report active within 15s — check: sudo journalctl -u crowdsec-firewall-bouncer"''',
+              '''    else
+                  log_error "crowdsec-firewall-bouncer did not report active within 15s — check: sudo journalctl -u crowdsec-firewall-bouncer"''',
+              'firewall bouncer severity',
+          )
+          replace_once(
+              '''        if [[ -n "$_fw_journal" ]]; then
+                      log_warn "Last crowdsec-firewall-bouncer journal entries:"
+                      while IFS= read -r _fw_line; do
+                          log_warn "  ${_fw_line}"
+                      done <<< "$_fw_journal"
+                  fi
+              fi''',
+              '''        if [[ -n "$_fw_journal" ]]; then
+                      log_warn "Last crowdsec-firewall-bouncer journal entries:"
+                      while IFS= read -r _fw_line; do
+                          log_warn "  ${_fw_line}"
+                      done <<< "$_fw_journal"
+                  fi
+                  exit 1
+              fi''',
+              'firewall bouncer fail closed',
+          )
+          replace_once(
+              '''    elif _cf_worker_bouncer_service_exists; then
+                  systemctl enable --now crowdsec-cloudflare-worker-bouncer \\
+                      || log_error "crowdsec-cloudflare-worker-bouncer failed to start — enforcement is INACTIVE. Run: journalctl -u crowdsec-cloudflare-worker-bouncer -n 30"
+                  log_success "crowdsec-cloudflare-worker-bouncer enabled and started."
+              else
+                  log_warn "Skipping crowdsec-cloudflare-worker-bouncer enable — service unit not installed yet."
+              fi
+              log_success "Services enabled."''',
+              '''    elif _cf_worker_bouncer_service_exists; then
+                  if systemctl enable --now crowdsec-cloudflare-worker-bouncer; then
+                      log_success "crowdsec-cloudflare-worker-bouncer enabled and started."
+                  else
+                      log_error "crowdsec-cloudflare-worker-bouncer failed to start — enforcement is INACTIVE."
+                      log_error "Run: journalctl -u crowdsec-cloudflare-worker-bouncer -n 30"
+                      exit 1
+                  fi
+              else
+                  log_error "Cloudflare proxy enforcement was requested, but the worker bouncer unit is missing."
+                  exit 1
+              fi
+              log_success "Services enabled."''',
+              'Cloudflare bouncer fail closed',
+          )
+
+          setup_path.write_text(text)
+          setup_path.chmod(0o755)
+          core_path.unlink()
+
+          test = root / 'tests/test-crowdsec-config.sh'
+          test.write_text(r'''#!/usr/bin/env bash
+          # Static regression checks for the VaultWarden-OCI CrowdSec installer.
+
+          set -euo pipefail
+
+          ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+          ACQUIS="${ROOT}/crowdsec/acquis.yaml"
+          SETUP="${ROOT}/utilities/setup-crowdsec.sh"
+          LEGACY_CORE="${ROOT}/utilities/.setup-crowdsec-core.sh"
+
+          bash -n "$SETUP"
+
+          if [[ -e "$LEGACY_CORE" ]]; then
+              echo "Legacy CrowdSec wrapper/core split must not be reintroduced." >&2
+              exit 1
+          fi
+
+          grep -q '"_TRANSPORT=kernel"' "$ACQUIS"
+          grep -A4 '"_TRANSPORT=kernel"' "$ACQUIS" | grep -q 'type: syslog'
+          if grep -q '/var/log/kern.log\|/var/log/messages' "$ACQUIS"; then
+              echo "CrowdSec must not acquire duplicate kernel logs from files and journald." >&2
+              exit 1
+          fi
+
+          grep -q 'crowdsecurity/linux' "$SETUP"
+          grep -q 'crowdsecurity/caddy' "$SETUP"
+          grep -q 'crowdsecurity/iptables' "$SETUP"
+          grep -q 'Dominic-Wagner/vaultwarden' "$SETUP"
+          if grep -Eq '^[[:space:]]*cscli collections install crowdsecurity/(appsec-generic-rules|appsec-virtual-patching)' "$SETUP"; then
+              echo "Inactive AppSec collections must not be installed." >&2
+              exit 1
+          fi
+          grep -q 'collections remove.*--purge.*--force' "$SETUP"
+
+          grep -q '^umask 077$' "$SETUP"
+          grep -q 'refusing an unverified install' "$SETUP"
+          grep -q '^NoNewPrivileges=true$' "$SETUP"
+          grep -q '^CapabilityBoundingSet=$' "$SETUP"
+          grep -q 'chmod 640 "\$_acquis_dest"' "$SETUP"
+
+          _document_count="$(grep -c '^---$' "$ACQUIS")"
+          if [[ "$_document_count" -ne 4 ]]; then
+              echo "Expected five acquisition documents; found $((_document_count + 1))." >&2
+              exit 1
+          fi
+
+          printf 'CrowdSec configuration checks passed.\n'
+          '''.replace('\n          ', '\n').lstrip())
+          test.chmod(0o755)
+
+          workflow = root / '.github/workflows/doc-drift.yml'
+          wf = workflow.read_text()
+          old = '''          # Guard against @latest Go module references in any script other than
+                    # setup-crowdsec.sh and its private core implementation. The @latest
+                    # path is reached only when CF_WORKER_BOUNCER_VERSION is empty (i.e.
+                    # --use-latest was passed or no pin is set), which is intentional.
+                    if grep -rn '@latest' utilities/ lib/ --include='*.sh' \\
+                         | grep -Ev 'utilities/(setup-crowdsec|\\.setup-crowdsec-core)\\.sh'; then
+                      echo "UNPINNED: @latest Go reference found outside CrowdSec setup scripts"'''
+          new = '''          # setup-crowdsec.sh may use @latest only when --use-latest clears the
+                    # configured pin. All other shell scripts must remain reproducible.
+                    if grep -rn '@latest' utilities/ lib/ --include='*.sh' \\
+                         | grep -v 'utilities/setup-crowdsec.sh'; then
+                      echo "UNPINNED: @latest Go reference found outside setup-crowdsec.sh"'''
+          if old not in wf:
+              raise SystemExit('doc-drift core-script exception block not found')
+          wf = wf.replace(old, new, 1)
+          old = '''      - name: Run focused tests
+                  run: make test-unit'''
+          new = '''      - name: Run focused tests
+                  run: |
+                    make test-unit
+                    tests/test-crowdsec-config.sh'''
+          if old not in wf:
+              raise SystemExit('functional test block not found')
+          workflow.write_text(wf.replace(old, new, 1))
+
+          docs = root / 'docs/CROWDSEC.md'
+          doc = docs.read_text()
+          doc = doc.replace('CrowdSec engine          ← detects attacks from log streams\n        │  (LAPI port 8080)',
+                            'CrowdSec engine          ← detects attacks from log streams\n        │  (LAPI port 8090)', 1)
+          doc = doc.replace('| 3 | Installs hub collections (linux, caddy, http-cve, vaultwarden) |',
+                            '| 3 | Reconciles service-matching collections (linux, caddy, iptables, vaultwarden) and removes inactive AppSec-only subscriptions |', 1)
+          doc = doc.replace('| 4 | Writes the acquisition config (tells CrowdSec which log files to watch) |',
+                            '| 4 | Writes the acquisition config for Vaultwarden/Caddy files plus SSH and kernel journald streams |', 1)
+          marker = '| 9 | Writes your admin IP to the CrowdSec allowlist |\n'
+          policy = '''| 9 | Writes your admin IP to the CrowdSec allowlist |
+
+          `base-http-scenarios`, `http-cve`, `sshd`, and `whitelist-good-actors`
+          remain installed as dependencies of the Caddy and Linux collections. The two
+          AppSec rule collections are intentionally removed: rules alone do not inspect
+          requests without an AppSec acquisition listener and a compatible forwarding
+          remediation component. This deployment uses log-based detection plus the host
+          and Cloudflare Workers bouncers.
+          '''.replace('\n          ', '\n')
+          if marker not in doc:
+              raise SystemExit('CrowdSec phase table marker not found')
+          doc = doc.replace(marker, policy, 1)
+          doc = doc.replace('| `crowdsec_config.lapi_url` | `http://127.0.0.1:8080/` | Correct for host-only CrowdSec install |',
+                            '| `crowdsec_config.lapi_url` | `http://127.0.0.1:8090/` | Host-only LAPI port reserved by this project; Caddy owns 8080 |', 1)
+          docs.write_text(doc)
+          PY
+
+      - name: Validate merged installer
+        shell: bash
+        run: |
+          bash -n utilities/setup-crowdsec.sh
+          bash -n tests/test-crowdsec-config.sh
+          tests/test-crowdsec-config.sh
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          shellcheck -x --severity=warning utilities/setup-crowdsec.sh tests/test-crowdsec-config.sh
+          if grep -R -n 'setup-crowdsec-core' utilities tests .github docs; then
+            echo 'stale setup-crowdsec-core reference remains' >&2
+            exit 1
+          fi
+
+      - name: Commit merged installer
+        shell: bash
+        run: |
+          rm -f .github/workflows/merge-crowdsec-installer.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix(crowdsec): merge and harden setup installer"
+          git push origin HEAD:Beta
