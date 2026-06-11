@@ -1,34 +1,51 @@
 #!/usr/bin/env bash
-# Static regression checks for the VaultWarden-OCI CrowdSec policy.
+# Static regression checks for the VaultWarden-OCI CrowdSec installer.
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SETUP="${ROOT}/utilities/setup-crowdsec.sh"
 ACQUIS="${ROOT}/crowdsec/acquis.yaml"
-WRAPPER="${ROOT}/utilities/setup-crowdsec.sh"
-CORE="${ROOT}/utilities/.setup-crowdsec-core.sh"
 
-bash -n "$WRAPPER"
-bash -n "$CORE"
+bash -n "$SETUP"
 
+[[ ! -e "${ROOT}/utilities/.setup-crowdsec-core.sh" ]] || {
+    echo "Legacy CrowdSec wrapper/core split must not be reintroduced." >&2
+    exit 1
+}
+
+# Acquisition must use kernel journald as syslog, without duplicate log files.
 grep -q '"_TRANSPORT=kernel"' "$ACQUIS"
 grep -A4 '"_TRANSPORT=kernel"' "$ACQUIS" | grep -q 'type: syslog'
-
-if grep -q '/var/log/kern.log\|/var/log/messages' "$ACQUIS"; then
-    echo "CrowdSec must not acquire duplicate kernel logs from files and journald." >&2
+if grep -Eq '/var/log/(kern\.log|messages)' "$ACQUIS"; then
+    echo "Kernel events must not be acquired from files and journald together." >&2
     exit 1
 fi
 
-grep -q 'crowdsecurity/appsec-generic-rules' "$WRAPPER"
-grep -q 'crowdsecurity/appsec-virtual-patching' "$WRAPPER"
-grep -q 'collections remove' "$WRAPPER"
-grep -q 'Dominic-Wagner/vaultwarden' "$CORE"
-grep -q 'crowdsecurity/iptables' "$CORE"
+# Only collections matching acquired logs and exposed services are top-level installs.
+grep -q 'crowdsecurity/linux' "$SETUP"
+grep -q 'crowdsecurity/caddy' "$SETUP"
+grep -q 'crowdsecurity/iptables' "$SETUP"
+grep -q 'Dominic-Wagner/vaultwarden' "$SETUP"
+if grep -Eq 'cscli collections install.*crowdsecurity/appsec-' "$SETUP"; then
+    echo "Inactive AppSec-only collections must not be installed." >&2
+    exit 1
+fi
+grep -q 'collections remove.*--purge.*--force' "$SETUP"
+
+# Installer and generated service security invariants.
+grep -q '^umask 077$' "$SETUP"
+grep -q -- "--proto '=https' --tlsv1.2" "$SETUP"
+grep -q 'SHA-256 verification failed' "$SETUP"
+grep -q '^NoNewPrivileges=true$' "$SETUP"
+grep -q '^CapabilityBoundingSet=$' "$SETUP"
+grep -q 'chmod 600.*crowdsec-cloudflare-worker-bouncer' "$SETUP"
+grep -q 'chmod 640.*acquis' "$SETUP"
 
 _document_count="$(grep -c '^---$' "$ACQUIS")"
-if [[ "$_document_count" -ne 4 ]]; then
+[[ "$_document_count" -eq 4 ]] || {
     echo "Expected five acquisition documents; found $((_document_count + 1))." >&2
     exit 1
-fi
+}
 
 printf 'CrowdSec configuration checks passed.\n'
