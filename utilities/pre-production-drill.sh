@@ -148,9 +148,9 @@ drill_secrets() {
         _step_fail "age-key-health" "key health check failed — run: make key-health"
     fi
 
-    local secrets_file="$SCRIPT_DIR/secrets/secrets.yaml"
+    local secrets_file="${SECRETS_FILE:-${PROJECT_ROOT}/secrets/secrets.yaml}"
     if [[ ! -f "$secrets_file" ]]; then
-        _step_fail "secrets-file" "secrets/secrets.yaml not found — run: ./setup.sh secrets"
+        _step_fail "secrets-file" "${secrets_file} not found — run: ./setup.sh secrets"
         return
     fi
 
@@ -160,7 +160,7 @@ drill_secrets() {
         secret_count=$(printf '%s\n' "$sops_out" | grep -c '^\s*[a-zA-Z_].*:' || true)
         _step_pass "secrets-decrypt: ${secret_count} secret(s) decrypted successfully"
     else
-        _step_fail "secrets-decrypt" "SOPS decryption failed — check key and secrets.yaml"
+        _step_fail "secrets-decrypt" "SOPS decryption failed — check key and ${secrets_file}"
     fi
     unset sops_out
 }
