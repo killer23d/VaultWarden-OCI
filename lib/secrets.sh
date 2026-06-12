@@ -576,11 +576,12 @@ _encrypt_recovery_kit_attachment() {
             printf '%s' "$_enc_pass" > "$_pass_file"
             unset _enc_pass
 
-            # -tzip  : write a ZIP container (universally openable by WinZip, 7-Zip, etc.)
-            # -mem=AES256 : AES-256 encryption
-            # -mhe=on     : encrypt headers (hides filenames inside the archive)
+            # -tzip       : write a ZIP container (universally openable by WinZip, 7-Zip, etc.)
+            # -mem=ZipCrypto : ZipCrypto encryption (AES-256 / -mhe=on unsupported on ARM64 p7zip 23.01)
             # -mx=0       : no compression (plaintext is already plain text)
-            7z a -tzip -mem=AES256 -mhe=on -mx=0 \
+            # Remove pre-created placeholder so 7z can create the archive fresh.
+            rm -f "$output_file"
+            7z a -tzip -mem=ZipCrypto -mx=0 \
                 "-p$(cat "$_pass_file")" \
                 "$output_file" "$plaintext_file" >/dev/null 2>&1
             _rc=$?
@@ -640,7 +641,11 @@ _offer_email_recovery_kit() {
 
     echo ""
     local _yn
-    read -r -t 30 -p "Email an encrypted backup of this document? (y/N): " _yn 2>/dev/null || _yn="n"
+    if [[ ! -e /dev/tty ]]; then
+        return 0
+    fi
+    printf '\nEmail an encrypted backup of this document? (y/N): ' > /dev/tty
+    read -r -t 30 _yn < /dev/tty || _yn="n"
     if [[ "${_yn,,}" != "y" ]]; then
         return 0
     fi
