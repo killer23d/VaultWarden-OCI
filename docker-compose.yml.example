@@ -46,7 +46,7 @@ services:
         NOW=$$(date +%s) &&
         SENTINEL_AGE=3600 &&
         if [ -f "$$SENTINEL" ] && [ $$(( NOW - $$(stat -c %Y "$$SENTINEL" 2>/dev/null || echo 0) )) -lt $$SENTINEL_AGE ]; then
-          echo 'Permissions initialized within 24h, skipping full scan.'
+          echo 'Permissions initialized within 1h, skipping full scan.'
           exit 0
         fi &&
 
@@ -83,8 +83,8 @@ services:
         touch /secrets/.docker_secrets/push_installation_id &&
         touch /secrets/.docker_secrets/push_installation_key &&
         chown ${PUID}:${PGID} /secrets/.docker_secrets/push_installation_id /secrets/.docker_secrets/push_installation_key &&
-        chmod 444 /secrets/.docker_secrets/push_installation_id &&
-        chmod 444 /secrets/.docker_secrets/push_installation_key &&
+        chmod 440 /secrets/.docker_secrets/push_installation_id &&
+        chmod 440 /secrets/.docker_secrets/push_installation_key &&
 
         touch "$$SENTINEL" &&
         echo 'Init container completed - permissions set to ${PUID}:${PGID}'
