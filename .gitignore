@@ -10,16 +10,11 @@
 # ---------------------------------------------------------------------------
 .env
 secrets/
-!secrets/.gitkeep
 
 # Age encryption keys — anywhere in the tree
 *.age
 age-key.txt
 age-key.txt.pre-rotate-*
-
-# SOPS encrypted files that are generated at runtime (not templates)
-secrets.yaml
-secrets.yaml.bak
 
 # Per-installation SOPS creation rules (generated from the local Age public key)
 .sops.yaml

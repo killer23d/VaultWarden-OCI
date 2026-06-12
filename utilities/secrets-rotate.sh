@@ -35,7 +35,7 @@ DESCRIPTION:
 SUPPORTED FIELDS:
     Derived at runtime from secrets-schema.yaml.
     Run after setup.sh install for the full schema list, or inspect:
-      secrets/secrets-schema.yaml
+      $SECRETS_SCHEMA_FILE
 
 EMAIL_MODE / EMAIL_PROVIDER quick reference (.env):
     EMAIL_MODE=auto   — tries API → SMTP → Postfix in order

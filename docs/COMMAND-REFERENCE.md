@@ -590,12 +590,12 @@ OPTIONS:
 
 SECRET SOURCE PRIORITY:
     caddy_cloudflare_dns_token — resolved in order:
-        1. decrypt_secret() from encrypted secrets/secrets.yaml
+        1. decrypt_secret() from encrypted $SECRETS_FILE
         2. Host file: $CF_TOKEN_FILE or secrets/.docker_secrets/caddy_cloudflare_dns_token
         3. Caddy container: /run/secrets/caddy_cloudflare_dns_token
 
     cloudflare_zone_id — resolved in order:
-        1. decrypt_secret() from encrypted secrets/secrets.yaml
+        1. decrypt_secret() from encrypted $SECRETS_FILE
         2. CLOUDFLARE_ZONE_ID environment variable / .env
 
 EXIT CODES:
@@ -828,7 +828,7 @@ DESCRIPTION:
 SUPPORTED FIELDS:
     Derived at runtime from secrets-schema.yaml.
     Run after setup.sh install for the full schema list, or inspect:
-      secrets/secrets-schema.yaml
+      $SECRETS_SCHEMA_FILE
 
 EMAIL_MODE / EMAIL_PROVIDER quick reference (.env):
     EMAIL_MODE=auto   — tries API → SMTP → Postfix in order
