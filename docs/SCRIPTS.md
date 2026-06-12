@@ -125,7 +125,7 @@ sudo ./setup.sh systemd install
 ```
 
 **What it does:**
-1. Decrypts the configured secrets file (`secrets/secrets.yaml` by default) once and writes individual Docker secret files to `secrets/.docker_secrets/` (600 permissions)
+1. Decrypts `$SECRETS_FILE` once and writes individual Docker secret files to `secrets/.docker_secrets/` (600 permissions)
 2. Creates `${PROJECT_STATE_DIR}/logs/` subdirectories with correct ownership
 3. Starts all containers with `docker compose up -d`
 4. Updates Cloudflare DNS A record
@@ -908,7 +908,7 @@ Secrets collection, generation, hashing, validation, and recovery kit export. Us
 | `ensure_sops_env` | Set `SOPS_AGE_KEY_FILE` and `SOPS_CONFIG` for sops calls |
 | `cleanup_secrets_environment` | Unset `SOPS_AGE_KEY_FILE` and `SOPS_CONFIG` — call after all sops operations complete |
 | `write_secret_file DEST VALUE` | Write secret to file with umask 077 guard — file is born at mode 600, no world-readable window |
-| `secrets_file_exists` | Check whether the configured secrets file is present |
+| `secrets_file_exists` | Check whether `$SECRETS_FILE` is present |
 | `validate_secrets_decryption` | Assert the secrets file can be decrypted |
 | `validate_required_secrets` | Assert all required keys are present and non-empty |
 | `check_placeholder_values` | Detect any remaining CHANGE_ME / PLACEHOLDER values |
