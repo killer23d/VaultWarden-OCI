@@ -228,7 +228,7 @@ fix-permissions: ## Fix file ownership after sudo operations leave root-owned fi
 	fi; \
 	echo ""; \
 	echo "$(GREEN)File ownership fixed for user $$REAL_USER.$(NC)"; \
-	echo "$(CYAN)Note: secrets/.docker_secrets/ is intentionally left restricted (root:root 444).$(NC)"; \
+	echo "$(CYAN)Note: secrets/.docker_secrets/ is intentionally left restricted (root:root 440).$(NC)"; \
 	echo "$(CYAN)      /etc/vaultwarden/ is intentionally root:<service-group> 750 for service-key access.$(NC)"
 
 init-secrets: ## Initialize secrets file (interactive)
@@ -253,9 +253,23 @@ test-secrets: ## Test secrets decryption
 		exit 1; \
 	fi
 
-test-email: ## Send a test operational alert email (health/backup notification channel)
-	@echo "$(BLUE)Sending a test operational alert email...$(NC)"
-	@./maintenance.sh test-email --verbose
+test-email: ## Send a test email via the configured transport (auto/smtp/host)
+	@echo "$(BLUE)Sending a test email...$(NC)"
+	@EMAIL_MODE=$$(grep '^EMAIL_MODE=' .env 2>/dev/null | cut -d= -f2); \
+	EMAIL_MODE=$${EMAIL_MODE:-auto}; \
+	echo "$(CYAN)  Configured EMAIL_MODE: $$EMAIL_MODE$(NC)"; \
+	case "$$EMAIL_MODE" in \
+	  smtp) \
+	    echo "$(CYAN)  Transport: SMTP (postfix container)$(NC)"; \
+	    ;; \
+	  host) \
+	    echo "$(CYAN)  Transport: host sendmail/msmtp$(NC)"; \
+	    ;; \
+	  auto|*) \
+	    echo "$(CYAN)  Transport: auto-detect$(NC)"; \
+	    ;; \
+	esac; \
+	./maintenance.sh test-email --verbose
 
 # ===========================================================================
 ##@ Service Management
