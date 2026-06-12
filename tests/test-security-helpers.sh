@@ -10,7 +10,8 @@ TEST_TMP=$(mktemp -d -t vw-security-tests.XXXXXXXXXX)
 trap 'rm -rf "$TEST_TMP"' EXIT HUP INT TERM
 
 export PROJECT_ROOT
-export SECRETS_FILE="${TEST_TMP}/secrets.yaml"
+mkdir -p "${TEST_TMP}/secrets"
+export SECRETS_FILE="${TEST_TMP}/secrets/secrets.yaml"
 export SECRETS_SCHEMA_FILE="${PROJECT_ROOT}/secrets-schema.yaml"
 
 source "${PROJECT_ROOT}/lib/log.sh"

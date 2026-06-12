@@ -9,9 +9,9 @@
 #   sudo ./utilities/setup-crowdsec.sh --force
 #
 # Placeholders substituted by utilities/setup-crowdsec.sh at render time:
-#   %%CLOUDFLARE_ZONE_ID%%      <- cloudflare_zone_id from secrets/secrets.yaml
-#   %%CF_ACCOUNT_ID%%           <- cf_account_id from secrets/secrets.yaml
-#   %%CF_WORKER_BOUNCER_TOKEN%% <- cf_worker_bouncer_token from secrets/secrets.yaml
+#   %%CLOUDFLARE_ZONE_ID%%      <- cloudflare_zone_id from $SECRETS_FILE
+#   %%CF_ACCOUNT_ID%%           <- cf_account_id from $SECRETS_FILE
+#   %%CF_WORKER_BOUNCER_TOKEN%% <- cf_worker_bouncer_token from $SECRETS_FILE
 #   %%CROWDSEC_LAPI_KEY%%       <- auto-generated CrowdSec LAPI key (stored in .env)
 #   %%CF_ACCOUNT_NAME%%         <- CF_ACCOUNT_EMAIL from .env
 #   %%WORKER_ROUTE%%            <- derived as DOMAIN_NAME/* from .env

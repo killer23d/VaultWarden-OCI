@@ -216,8 +216,8 @@ yq --version
 **`schema.sh: schema file not found`**
 
 ```bash
-ls -la secrets-schema.yaml
-# File must exist at the project root. If missing, restore from Git:
+ls -la "${SECRETS_SCHEMA_FILE:-${PROJECT_ROOT}/secrets-schema.yaml}"
+# File must exist at SECRETS_SCHEMA_FILE. If missing, restore from Git:
 git checkout Beta -- secrets-schema.yaml
 ```
 
@@ -227,7 +227,7 @@ The `schema_version` field at the top of `secrets-schema.yaml` must be `1`. If y
 
 ```bash
 # Check current value:
-yq '.schema_version' secrets-schema.yaml
+yq '.schema_version' "${SECRETS_SCHEMA_FILE:-${PROJECT_ROOT}/secrets-schema.yaml}"
 
 # Fix:
 # Edit secrets-schema.yaml and set schema_version: 1 as the first key.

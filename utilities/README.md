@@ -40,7 +40,7 @@ re-runnable (idempotent), and accepts `--help` for usage details.
 
 ### `secrets-list.sh` — List secret key names
 
-Lists all secret key names in `secrets/secrets.yaml` without decrypting any values.
+Lists all secret key names in the configured secrets file without decrypting any values.
 Also invocable via `./utilities/secrets-list.sh`.
 
 ```bash
@@ -52,7 +52,7 @@ Also invocable via `./utilities/secrets-list.sh`.
 
 ### `secrets-view.sh` — View decrypted secrets (read-only)
 
-Decrypts and displays `secrets/secrets.yaml` in a read-only pager. No changes
+Decrypts and displays the configured secrets file in a read-only pager. No changes
 are saved. The `view` keyword is accepted as an alias for backward compatibility
 but is not required.
 
@@ -82,7 +82,7 @@ Also invocable via `./utilities/secrets-edit.sh`.
 ### `secrets-rotate.sh` — Rotate a single credential
 
 Re-collects and re-hashes one named credential, atomically re-encrypts
-`secrets/secrets.yaml`, and resyncs Docker secret bind-mount files.
+the configured secrets file, and resyncs Docker secret bind-mount files.
 Pass the field name directly as the first argument. The leading `rotate`
 keyword is accepted as an alias for backward compatibility but is not required.
 

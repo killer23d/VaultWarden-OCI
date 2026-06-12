@@ -180,7 +180,7 @@ Containers (Read-Only Access)
 ### Protected Secrets
 
 ```yaml
-# secrets/secrets.yaml (encrypted)
+# secrets/secrets.yaml (encrypted; default SECRETS_FILE target)
 admin_token: "48-char-alphanumeric-string"
 admin_basic_auth_hash: "admin $2b$14$bcrypt_hash"
 caddy_cloudflare_dns_token: "cloudflare_dns_token"
@@ -218,11 +218,14 @@ The secrets management layer (`lib/secrets.sh`, `utilities/secrets-edit.sh`, `se
 # Validate secrets without editing
 ./utilities/secrets-list.sh
 # or manually:
-sops -d secrets/secrets.yaml > /dev/null && echo "Valid"
+PROJECT_ROOT="${PROJECT_ROOT:-$(pwd)}"
+SECRETS_FILE="${SECRETS_FILE:-${PROJECT_ROOT}/secrets/secrets.yaml}"
+sops -d "$SECRETS_FILE" > /dev/null && echo "Valid"
 
 # Backup secrets manually
-cp secrets/secrets.yaml secrets/secrets.yaml.backup-$(date +%Y%m%d-%H%M%S)
-chmod 600 secrets/secrets.yaml.backup-*
+backup_file="${SECRETS_FILE}.backup-$(date +%Y%m%d-%H%M%S)"
+cp -- "$SECRETS_FILE" "$backup_file"
+chmod 600 "$backup_file"
 ```
 
 ## CrowdSec Detection Configuration

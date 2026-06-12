@@ -1571,7 +1571,7 @@ _warn_if_stack_unavailable() {
 # ---------------------------------------------------------------------------
 # export_docker_secrets DOCKER_DIR [SECRETS_FILE]
 #
-# Decrypt SECRETS_FILE (defaults to $SECRETS_FILE / secrets/secrets.yaml) and
+# Decrypt SECRETS_FILE (defaults to $SECRETS_FILE) and
 # write one flat file per known secret key into DOCKER_DIR (mode 755).
 # Each output file is created mode 444 (via write_secret_file). Placeholder
 # values (CHANGE_ME*, NOT_USED*, null) are skipped with a warning so that

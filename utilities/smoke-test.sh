@@ -232,16 +232,16 @@ check_age_key() {
 
 check_secrets_decryptable() {
     [[ "$QUIET" == false ]] && log_info "Checking secrets decryptable..."
-    local secrets_file="$SCRIPT_DIR/secrets/secrets.yaml"
+    local secrets_file="${SECRETS_FILE:-${PROJECT_ROOT}/secrets/secrets.yaml}"
     if [[ ! -f "$secrets_file" ]]; then
-        _check_fail "secrets-file" "secrets/secrets.yaml not found"
+        _check_fail "secrets-file" "${secrets_file} not found"
         return
     fi
     local key_file="${AGE_KEY_FILE:-${SOPS_AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}}"
     if SOPS_AGE_KEY_FILE="$key_file" sops -d "$secrets_file" >/dev/null 2>&1; then
         _check_pass "secrets-decryptable" "SOPS decryption succeeded"
     else
-        _check_fail "secrets-decryptable" "SOPS decryption failed — check age key and secrets.yaml"
+        _check_fail "secrets-decryptable" "SOPS decryption failed — check age key and ${secrets_file}"
     fi
 }
 
