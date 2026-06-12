@@ -1061,82 +1061,6 @@ simple_verify_age_key() {
     return 0
 }
 
-create_password_manager_escrow() {
-    local age_key
-    age_key=$(resolve_age_key_path) || return 1
-    local output_file="$1"
-
-    if [[ -z "$output_file" ]]; then
-        log_error "Output file path required for escrow creation"
-        return 1
-    fi
-
-    log_info "Creating password manager-ready Age key backup..."
-
-    if ! install -m 600 /dev/null "$output_file"; then
-        log_error "Failed to create secure output file: $output_file"
-        return 1
-    fi
-
-    # shellcheck disable=SC2064  # intentional: expand $output_file now
-    trap "_secure_remove_file '$output_file'" RETURN
-
-    local pub_key
-    if ! pub_key=$(_derive_age_public_key "$age_key"); then
-        log_error "Failed to derive Age public key"
-        return 1
-    fi
-
-    local hostname_val
-    hostname_val=$(hostname)
-    local date_val
-    date_val=$(date)
-
-    cat > "$output_file" << EOF
-═══════════════════════════════════════════════════════════════
-VaultWarden Age Key Backup - $date_val
-═══════════════════════════════════════════════════════════════
-
-🔐 CRITICAL: Store this entire file in your password manager
-   (1Password, Bitwarden, etc.) as a secure note.
-
-📝 Recovery Instructions (choose one path):
-
-   Production server:
-   1. sudo install -m 600 -o \$(logname) age-key.txt /etc/vaultwarden/age-key.txt
-   2. Verify: make key-path
-
-   Dev / fresh clone:
-   1. mkdir -p secrets/keys
-   2. cp age-key.txt secrets/keys/age-key.txt && chmod 600 secrets/keys/age-key.txt
-   3. Verify: make key-path
-
-   Both paths are checked automatically (run: make key-path to confirm).
-   Decrypt backups: age -d -i <resolved-key-path> backup.age
-
-⚠️  If you lose this key, ALL backups are unrecoverable!
-
-───────────────────────────────────────────────────────────────
-AGE PRIVATE KEY (Copy everything below this line):
-───────────────────────────────────────────────────────────────
-$(cat "$age_key")
-───────────────────────────────────────────────────────────────
-Public Key: $pub_key
-Created: $date_val
-Hostname: $hostname_val
-───────────────────────────────────────────────────────────────
-EOF
-
-    chmod 600 "$output_file"
-
-    trap - RETURN
-
-    log_success "Password manager backup created: $output_file"
-    log_warn "⚠️  SECURITY: Delete this file immediately after copying to your password manager:"
-    log_warn "   _secure_remove_file '$output_file'"
-    return 0
-}
-
 # ---------------------------------------------------------------------------
 # _secure_remove_file FILE
 #
@@ -1155,23 +1079,6 @@ _secure_remove_file() {
     [[ -z "$file_size" || "$file_size" -eq 0 ]] && file_size=4096
     dd if=/dev/urandom of="$target" bs="$file_size" count=1 conv=notrunc 2>/dev/null || true
     rm -f "$target"
-}
-
-# ---------------------------------------------------------------------------
-# _html_escape STRING
-#
-# Replaces HTML metacharacters so key_content cannot corrupt
-# the HTML document structure when embedded in the template.
-# ---------------------------------------------------------------------------
-_html_escape() {
-    local raw="$1"
-    # Order matters: & must be first to avoid double-escaping.
-    raw="${raw//&/&amp;}"
-    raw="${raw//</&lt;}"
-    raw="${raw//>/&gt;}"
-    raw="${raw//\"/&quot;}"
-    raw="${raw//\'/&#39;}"
-    printf '%s' "$raw"
 }
 
 verify_key_replica() {
@@ -1306,168 +1213,6 @@ restore_key_from_replica() {
 
     chmod 600 "$primary_key"
     log_success "restore_key_from_replica: primary key restored from replica: $replica_key → $primary_key"
-    return 0
-}
-
-# ---------------------------------------------------------------------------
-# create_printable_key_backup
-#
-# Creates a printable PDF (or HTML fallback) of the age key with QR code.
-# Feeds key via stdin to qrencode to prevent cmdline exposure.
-# ---------------------------------------------------------------------------
-create_printable_key_backup() {
-    local age_key
-    age_key=$(resolve_age_key_path) || return 1
-    local real_user_home
-    real_user_home=$(getent passwd "$(get_real_user)" 2>/dev/null | cut -d: -f6) || real_user_home="${HOME}"
-    local output_pdf="${1:-${real_user_home}/vaultwarden-key-backup.pdf}"
-
-    log_info "Creating printable key backup..."
-
-    if ! command -v qrencode >/dev/null 2>&1; then
-        log_warn "qrencode not found - skipping QR code generation"
-        log_info "Install with: sudo apt install qrencode"
-    fi
-
-    local old_umask
-    old_umask=$(umask)
-    umask 077
-    # Use a .html suffix in the mktemp template so the OS registers the correct
-    # MIME type when the file is opened. This also eliminates the mktemp→mv
-    # TOCTOU window that existed when we created a bare temp file and renamed it.
-    local temp_html
-    temp_html=$(mktemp "${TMPDIR:-/tmp}/vw-key-backup.XXXXXX.html")
-    umask "$old_umask"
-
-    # Scope the temp file cleanup to RETURN, not EXIT, so that callers that
-    # have their own EXIT trap (e.g. via setup_cleanup_trap in common.sh) are
-    # not silently overwritten.
-    # shellcheck disable=SC2064  # intentional: expand $temp_html now
-    trap "_secure_remove_file '$temp_html'" RETURN
-
-    local pub_key
-    pub_key=$(_derive_age_public_key "$age_key")
-    local key_content
-    key_content=$(cat "$age_key")
-    local hostname_val
-    hostname_val=$(hostname)
-    local date_val
-    date_val=$(date)
-
-    local key_content_escaped
-    key_content_escaped=$(_html_escape "$key_content")
-
-    local qr_img_tag=""
-    if command -v qrencode >/dev/null 2>&1; then
-        local qr_base64
-        qr_base64=$(printf '%s' "$key_content" | qrencode -t PNG -o - --read-from=- 2>/dev/null | base64 -w0 || true)
-        if [[ -n "$qr_base64" ]]; then
-            qr_img_tag="<div class='box'><h3>QR Code (Digital Import)</h3><p>Scan to import key:</p><img src='data:image/png;base64,${qr_base64}' style='width: 200px'></div>"
-        fi
-    fi
-
-    cat > "$temp_html" << EOF
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>VaultWarden Key Backup</title>
-    <style>
-        body { font-family: monospace; margin: 2cm; line-height: 1.4; }
-        .box { border: 2px solid black; padding: 15px; margin: 20px 0; page-break-inside: avoid; }
-        .key { background: #f0f0f0; padding: 15px; word-break: break-all; font-weight: bold; font-size: 1.1em; }
-        h1 { color: #cc0000; border-bottom: 2px solid #cc0000; }
-        .warning { background: #fff3cd; padding: 10px; border-left: 5px solid #ffc107; margin-bottom: 20px; }
-        .delete-reminder { background: #f8d7da; padding: 10px; border-left: 5px solid #dc3545; margin-top: 20px; font-size: 0.95em; }
-    </style>
-</head>
-<body>
-    <h1>🔐 VaultWarden Encryption Key</h1>
-
-    <div class="warning">
-        <strong>⚠️ CRITICAL SECURITY DOCUMENT</strong><br>
-        Store in a fireproof safe or safety deposit box.<br>
-        This key is required to decrypt your VaultWarden backups.
-    </div>
-
-    <div class="box">
-        <h2>Age Private Key</h2>
-        <div class="key">${key_content_escaped}</div>
-    </div>
-
-    ${qr_img_tag}
-
-    <div class="box">
-        <h3>Metadata</h3>
-        <strong>Created:</strong> ${date_val}<br>
-        <strong>Hostname:</strong> ${hostname_val}<br>
-        <strong>Public Key:</strong> ${pub_key}
-    </div>
-
-    <div class="box">
-        <h3>Recovery</h3>
-        <strong>Production server:</strong><br>
-        <code>sudo install -m 600 -o &lt;service-user&gt; age-key.txt /etc/vaultwarden/age-key.txt</code><br><br>
-        <strong>Dev / fresh clone:</strong><br>
-        <code>mkdir -p secrets/keys &amp;&amp; cp age-key.txt secrets/keys/age-key.txt &amp;&amp; chmod 600 secrets/keys/age-key.txt</code><br><br>
-        Verify active path: <code>make key-path</code>
-    </div>
-
-    <div class="delete-reminder">
-        <strong>🗑️ DELETE THIS FILE AFTER PRINTING</strong><br>
-        This HTML file contains your plaintext Age private key.<br>
-        After printing or saving to PDF, securely delete it:<br>
-        <code>shred -fuz '${output_pdf%.pdf}.html'</code><br>
-        <em>File created: ${date_val}</em>
-    </div>
-</body>
-</html>
-EOF
-
-    # Unset key_content immediately after the heredoc write so the
-    # plaintext Age key is removed from the process environment as early as
-    # possible. key_content_escaped and qr_base64 are also cleared for the
-    # same reason (qr_base64 holds a base64-encoded copy of the private key).
-    unset key_content
-    unset key_content_escaped
-    unset qr_base64
-
-    if command -v wkhtmltopdf >/dev/null 2>&1; then
-        wkhtmltopdf -q "$temp_html" "$output_pdf"
-        _secure_remove_file "$temp_html"
-        trap - RETURN
-        log_success "Printable PDF backup created: $output_pdf"
-    else
-        local output_html="${output_pdf%.pdf}.html"
-        mv "$temp_html" "$output_html"
-        trap - RETURN
-
-        log_warn "wkhtmltopdf not found. Created HTML instead: $output_html"
-        log_warn "SECURITY: The HTML file contains your plaintext Age key."
-        log_warn "          Store it securely and delete it after printing:"
-        log_warn "          shred -fuz '$output_html'"
-        log_info  "Open in browser and print to PDF manually."
-
-        # Schedule actual auto-DELETION in 30 minutes so the plaintext HTML
-        # is not left on disk indefinitely.
-        # The delete_cmd uses shred for overwrite-capable filesystems, then rm
-        # as a fallback.
-        local delete_cmd="shred -fuz '${output_html}' 2>/dev/null || rm -f '${output_html}'; echo 'vaultwarden-key-backup: plaintext HTML auto-deleted' | logger -t vaultwarden-key-reminder 2>/dev/null"
-        if command -v at >/dev/null 2>&1; then
-            if echo "$delete_cmd" | at "now + 30 minutes" 2>/dev/null; then
-                log_warn "SECURITY: HTML file will be AUTO-DELETED in 30 minutes via at(1)."
-                log_warn "          Open, print to PDF, and store the PDF before then."
-            else
-                log_warn "Could not schedule at(1) auto-delete."
-                log_warn "SECURITY: Manually run: shred -fuz '$output_html'"
-            fi
-        else
-            log_warn "at(1) not available — cannot schedule auto-deletion."
-            log_warn "SECURITY: Manually delete the plaintext key file immediately after printing:"
-            log_warn "          shred -fuz '$output_html'"
-        fi
-    fi
-
     return 0
 }
 
@@ -1910,8 +1655,8 @@ export -f is_sops_encrypted decrypt_sops_file encrypt_sops_file
 export -f ensure_secret_dir generate_age_key get_age_public_key check_age_key encrypt_data decrypt_data
 export -f generate_secure_string generate_secure_password check_argon2_support generate_argon2_hash generate_bcrypt_hash
 export -f calculate_sha256 verify_sha256 write_file_integrity verify_file_integrity secure_delete validate_crypto_environment
-export -f simple_verify_age_key create_password_manager_escrow _secure_remove_file
-export -f create_printable_key_backup verify_key_replica restore_key_from_replica
+export -f simple_verify_age_key _secure_remove_file
+export -f verify_key_replica restore_key_from_replica
 export -f check_age_key_health _sops_yaml_age_recipients
 export -f _stat_owner _stat_group
 export -f validate_file_permissions validate_directory_permissions create_secure_file
