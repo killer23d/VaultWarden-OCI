@@ -953,9 +953,18 @@ handle_advanced_menu() {
 # SUBMENU I — Identity, Email & Admin
 # ===========================================================================
 draw_identity_menu() {
+    local _email_mode
+    _email_mode="$(_read_env_var EMAIL_MODE auto)"
+    local _email_label
+    case "${_email_mode}" in
+        smtp) _email_label="SMTP (postfix)" ;;
+        host) _email_label="host sendmail/msmtp" ;;
+        api)  _email_label="API (${EMAIL_PROVIDER:-provider})" ;;
+        *)    _email_label="auto-detect" ;;
+    esac
     echo -e " ${BLD}Identity, Email & Admin${NC}"
     echo ""
-    echo -e "  [ ${GRN}1${NC} ] Test SMTP Delivery"
+    echo -e "  [ ${GRN}1${NC} ] Test Email Delivery  ${CYN}[${_email_label}]${NC}"
     echo -e "  [ ${GRN}2${NC} ] Tail Auth & Access Drops"
     echo -e "  [ ${GRN}3${NC} ] Rotate Vault Admin Token"
     echo -e "  [ ${GRN}4${NC} ] View Breakglass Status"
@@ -970,7 +979,9 @@ handle_identity_menu() {
     local opt="$1"
     case "${opt}" in
         1)
-            run_cmd "make test-email" make -C "${REPO_ROOT}" test-email
+            local _mode
+            _mode="$(_read_env_var EMAIL_MODE auto)"
+            run_cmd "make test-email  [EMAIL_MODE=${_mode}]" make -C "${REPO_ROOT}" test-email
             ;;
         2)
             echo ""
