@@ -321,8 +321,10 @@ services:
   # -------------------- Optional sidecar: Postfix relay --------------------
   postfix:
     container_name: vaultwarden_postfix
-    image: boky/postfix:${POSTFIX_VERSION:-4.3.0}
+    image: boky/postfix:${POSTFIX_VERSION:-5.1.0}
     restart: unless-stopped
+
+    entrypoint: /postfix-entrypoint.sh
 
     depends_on:
       init-permissions:
@@ -337,12 +339,17 @@ services:
       - POSTFIX_myhostname=${POSTFIX_MYHOSTNAME:-postfix}
       - POSTFIX_smtp_tls_security_level=${POSTFIX_SMTP_TLS_SECURITY_LEVEL:-encrypt}
       - POSTFIX_message_size_limit=${POSTFIX_MESSAGE_SIZE_LIMIT:-10240000}
+      - POSTFIX_alias_maps=
+      - POSTFIX_alias_database=
 
     secrets:
       - smtp_password
 
     ports:
       - "127.0.0.1:587:587"
+
+    volumes:
+      - ./postfix/entrypoint.sh:/postfix-entrypoint.sh:ro
 
     networks:
       # Primary internal mesh: vaultwarden_app reaches postfix via hostname 'postfix'.
@@ -371,12 +378,9 @@ services:
       - ALL
 
     cap_add:
-      - CHOWN
       - SETUID
       - SETGID
       - NET_BIND_SERVICE
-      - DAC_OVERRIDE
-      - FOWNER
 
     logging:
       driver: "json-file"
@@ -384,9 +388,13 @@ services:
         max-size: "5m"
         max-file: "3"
 
+    mem_limit: 256M
+    memswap_limit: 256M
+    pids_limit: 50
+
     # NOTE: deploy.resources is evaluated only in Docker Swarm mode.
     # In standalone 'docker compose', cpu and pid limits are silently ignored.
-    # Memory enforcement uses the top-level mem_limit / memswap_limit above.
+    # Memory/swap/pids enforcement uses the top-level keys above.
     deploy:
       resources:
         limits:
