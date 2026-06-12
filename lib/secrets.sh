@@ -776,8 +776,9 @@ prompt_password_with_confirmation() {
             return 1
         fi
 
-        read -r -s -p "$prompt_text: " password
-        echo ""
+        printf '%s: ' "$prompt_text" >/dev/tty
+        read -r -s password </dev/tty
+        echo "" >/dev/tty
         if [[ -z "$password" ]]; then
             log_error "Password cannot be empty (attempt $attempt/$max_attempts)"
             continue
@@ -786,15 +787,16 @@ prompt_password_with_confirmation() {
             log_error "Password must be at least $min_length characters (attempt $attempt/$max_attempts)"
             continue
         fi
-        read -r -s -p "Confirm password: " password_confirm
-        echo ""
+        printf 'Confirm password: ' >/dev/tty
+        read -r -s password_confirm </dev/tty
+        echo "" >/dev/tty
         if [[ "$password" != "$password_confirm" ]]; then
             log_error "Passwords don't match (attempt $attempt/$max_attempts)"
             continue
         fi
         break
     done
-    printf '%s\n' "$password"
+    printf '%s' "$password"
     return 0
 }
 
