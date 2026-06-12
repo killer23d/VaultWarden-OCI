@@ -44,7 +44,7 @@ services:
 
         SENTINEL='/data/.permissions-initialized' &&
         NOW=$$(date +%s) &&
-        SENTINEL_AGE=86400 &&
+        SENTINEL_AGE=3600 &&
         if [ -f "$$SENTINEL" ] && [ $$(( NOW - $$(stat -c %Y "$$SENTINEL" 2>/dev/null || echo 0) )) -lt $$SENTINEL_AGE ]; then
           echo 'Permissions initialized within 24h, skipping full scan.'
           exit 0
@@ -78,7 +78,7 @@ services:
         chmod 700 /secrets 2>/dev/null || true &&
         chown 0:${PGID} /secrets/.docker_secrets 2>/dev/null || true &&
         chmod 750 /secrets/.docker_secrets 2>/dev/null || true &&
-        find /secrets/.docker_secrets -type f -exec chmod 444 {} + 2>/dev/null || true &&
+        find /secrets/.docker_secrets -type f -exec chmod 440 {} + 2>/dev/null || true &&
 
         touch /secrets/.docker_secrets/push_installation_id &&
         touch /secrets/.docker_secrets/push_installation_key &&
@@ -107,6 +107,7 @@ services:
     # service property — not under deploy.resources.limits — to be applied by
     # docker compose in standalone (non-Swarm) mode.
     mem_limit: 512M
+    pids_limit: 200
     memswap_limit: 512M
 
     depends_on:
@@ -326,6 +327,9 @@ services:
     image: boky/postfix:${POSTFIX_VERSION:-5.1.0}
     restart: unless-stopped
 
+    # Startup script that fixes ownership on Postfix directories, then
+    # launches the standard boky/postfix entrypoint. This removes the need
+    # for CHOWN, DAC_OVERRIDE, and FOWNER capabilities at runtime.
     entrypoint: /postfix-entrypoint.sh
 
     depends_on:
@@ -346,6 +350,13 @@ services:
 
     secrets:
       - smtp_password
+
+    read_only: true
+    tmpfs:
+      - /var/spool/postfix:size=64m,mode=0750
+      - /var/log/postfix:size=32m,mode=0750
+      - /tmp:size=16m,mode=1777
+      - /run:size=8m,mode=0755
 
     ports:
       - "127.0.0.1:587:587"
