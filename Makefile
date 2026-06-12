@@ -44,7 +44,7 @@ DATA_DEVICE ?=
         watch monitor \
         backup backup-full backup-emergency list-backups backup-status \
         restore restore-preflight restore-db restore-remote \
-        key-path key-health key-backup key-escrow key-rotate key-show key-install \
+        key-health key-backup key-rotate key-show key-install \
         update check-updates update-system update-dns \
         maintenance maintenance-full \
         db-maint db-backup \
@@ -691,29 +691,10 @@ key-show: ## Show current age public key and key file path/status
 		echo "  Run: sudo make key-install  (or: sudo make setup)"; \
 	fi
 
-key-backup: ## Backup age key to a secure offline location (interactive)
+key-backup: ## Export full recovery kit (Age key + all secrets) via secrets-export-recovery-kit.sh
 	$(call require-root)
-	@echo "$(BLUE)Age Key Backup$(NC)"
-	@KEY_FILE=$$(grep '^SOPS_AGE_KEY_FILE=' .env 2>/dev/null | cut -d= -f2); \
-	KEY_FILE=$${KEY_FILE:-secrets/keys/age-key.txt}; \
-	if [ ! -f "$$KEY_FILE" ]; then \
-		echo "$(RED)ERROR: Key file not found at $$KEY_FILE$(NC)"; \
-		exit 1; \
-	fi; \
-	BACKUP_DEST="$$HOME/age-key-backup-$$(date +%Y%m%d-%H%M%S).txt"; \
-	cp "$$KEY_FILE" "$$BACKUP_DEST"; \
-	chmod 600 "$$BACKUP_DEST"; \
-	echo "$(GREEN)Key backed up to: $$BACKUP_DEST$(NC)"; \
-	echo "$(YELLOW)Store this file securely offline!$(NC)"
-
-key-escrow: ## Generate encrypted escrow package (requires GPG or another age key)
-	$(call require-root)
-	@echo "$(BLUE)Age Key Escrow$(NC)"
-	@bash -c "source lib/log.sh; source lib/config.sh; source lib/common.sh; init_common_lib startup.sh; \
-        	source lib/crypto.sh; \
-	        KEY_FILE=$$(grep '^SOPS_AGE_KEY_FILE=' .env 2>/dev/null | cut -d= -f2); \
-	        KEY_FILE=$${KEY_FILE:-secrets/keys/age-key.txt}; \
-	        create_key_escrow \"$$KEY_FILE\""
+	@echo "$(BLUE)Recovery Kit Export$(NC)"
+	@./utilities/secrets-export-recovery-kit.sh export-recovery-kit
 
 key-rotate: ## Rotate age encryption key (re-encrypts all secrets)
 	$(call require-root)
