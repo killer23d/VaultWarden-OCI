@@ -11,23 +11,25 @@ cd "$PROJECT_ROOT"
 source "${PROJECT_ROOT}/lib/log.sh"
 source "${PROJECT_ROOT}/lib/config.sh"
 
-# Load the configured delivery mode/provider before init_common_lib and email.sh.
-# A missing .env does not block plaintext export, but email delivery is disabled.
-if [[ -f "${PROJECT_ROOT}/.env" ]]; then
-    if ! load_env_file "${PROJECT_ROOT}/.env"; then
-        log_error "Unable to load ${PROJECT_ROOT}/.env"
-        exit 1
+_load_runtime_libraries() {
+    # Load the configured delivery mode/provider only for a real export. Help
+    # output must remain deterministic and must not require .env, SOPS, or Age.
+    if [[ -f "${PROJECT_ROOT}/.env" ]]; then
+        if ! load_env_file "${PROJECT_ROOT}/.env"; then
+            log_error "Unable to load ${PROJECT_ROOT}/.env"
+            exit 1
+        fi
+    else
+        log_warn ".env not found — recovery-kit email delivery may be unavailable"
     fi
-else
-    log_warn ".env not found — recovery-kit email delivery may be unavailable"
-fi
 
-source "${PROJECT_ROOT}/lib/common.sh"
-init_common_lib "$0"
-source "${PROJECT_ROOT}/lib/crypto.sh"
-source "${PROJECT_ROOT}/lib/secrets.sh"
+    source "${PROJECT_ROOT}/lib/common.sh"
+    init_common_lib "$0"
+    source "${PROJECT_ROOT}/lib/crypto.sh"
+    source "${PROJECT_ROOT}/lib/secrets.sh"
 
-trap perform_cleanup EXIT
+    trap perform_cleanup EXIT
+}
 
 show_help() {
     cat << 'EOF'
@@ -123,6 +125,8 @@ main() {
         "")        ;;
         *) log_error "Unknown option: '$1'"; show_help; exit 1 ;;
     esac
+
+    _load_runtime_libraries
 
     if ! check_prerequisites; then exit 1; fi
     _warn_if_stack_unavailable

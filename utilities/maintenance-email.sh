@@ -53,7 +53,7 @@ EOF
 }
 
 _load_env() {
-    if load_env_file 2>/dev/null; then return 0; fi
+    if load_env_file "${PROJECT_ROOT}/.env" 2>/dev/null; then return 0; fi
     log_warn "No .env file found — relying on environment already set"
     return 0
 }
@@ -168,7 +168,7 @@ Host: $(hostname -f 2>/dev/null || hostname)
 
 If you received this message, email delivery is working correctly."
     log_info "📧 Sending test email to: $TEST_RECIPIENT"
-    if send_notification_email "$test_subject" "$test_body"; then
+    if send_notification_email "$TEST_RECIPIENT" "$test_subject" "$test_body"; then
         log_success "✅ Test email sent successfully!"
         log_info "📬 Please check $TEST_RECIPIENT for the test message"
         log_info "🔍 Check postfix logs: docker compose logs postfix"

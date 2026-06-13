@@ -12,7 +12,8 @@ Related docs: [CONFIGURATION.md](CONFIGURATION.md) · [ADVANCED-CUSTOMIZATION.md
 
 Email is handled by **`lib/email.sh`** — a pure bash + curl multi-provider
 chain. No mail daemon is required for the normal API or SMTP paths. The
-delivery chain has three stages when `EMAIL_MODE=auto`:
+routing matrix is controlled by `EMAIL_MODE`; `EMAIL_PROVIDER` only selects an
+HTTP API implementation:
 
 ```
                 ┌─────────────────────────────────────┐
@@ -20,7 +21,7 @@ delivery chain has three stages when `EMAIL_MODE=auto`:
                 │                                     │
   EMAIL_MODE    │  Stage 1 ── HTTP API                │  MailerSend, SendGrid,
      =auto  ──► │           (curl + JSON)             │  Mailgun, Postmark,
-                │              │ fail                 │  Resend
+                │              │ fail                 │  Resend, CyberPersons
                 │              ▼                      │
                 │  Stage 2 ── SMTP                    │  Direct relay or the
                 │           (curl smtps/starttls)     │  Postfix sidecar
@@ -31,11 +32,20 @@ delivery chain has three stages when `EMAIL_MODE=auto`:
                 └─────────────────────────────────────┘
 ```
 
-The attachment dispatcher uses the same mode semantics. In `auto`, it tries the
-selected HTTP API, then SMTP, then the host MTA. `api` and `smtp` fail
-closed. `host` tries the host MTA first and then SMTP. Every driver receives
-the caller-provided recipient explicitly; `ADMIN_EMAIL` is only the public
-default used when a caller omits `TO`.
+The attachment dispatcher uses the same mode semantics. In `auto`, API
+providers try API → SMTP → host MTA, empty/`smtp` providers try SMTP → host
+MTA, and legacy `host`/`postfix` providers try host MTA → SMTP. `api` and
+`smtp` fail closed. `host` tries the host MTA first and then SMTP. Every driver
+receives the caller-provided recipient explicitly; `ADMIN_EMAIL` is only the
+public default used when a caller omits `TO`. CyberPersons supports ordinary
+API delivery only; attachment fallback is controlled by the dispatcher.
+
+Sensitive curl config, JSON payload, SMTP auth, diagnostic, and MIME message
+temporary files are created with mode `0600`, registered for best-effort
+cleanup on normal shell exit/interruption, and removed explicitly on success or
+failure. As with any Bash process, an uncatchable `SIGKILL` or host crash can
+prevent traps from running; explicit per-function cleanup still handles normal
+transport failures, including nonzero `curl` exits.
 
 Two additional consumers sit outside `lib/email.sh` and use SMTP directly:
 
@@ -75,7 +85,7 @@ proceeding.
 
 ```bash
 EMAIL_MODE=auto
-EMAIL_PROVIDER=mailersend    # change to: sendgrid | mailgun | postmark | resend
+EMAIL_PROVIDER=mailersend    # change to: sendgrid | mailgun | postmark | resend | cyberpersons
 ```
 
 ### 3. Store the API token in secrets
@@ -308,10 +318,10 @@ MAILGUN_DOMAIN=mg.yourdomain.com  # optional — set only if different from SMTP
 
 | Value | Behaviour | When to use |
 | :-- | :-- | :-- |
-| `auto` | Try API → SMTP → host MTA in order | Recommended for all deployments |
-| `api` | HTTP API only; error if token not set | API-only, no SMTP fallback desired |
-| `smtp` | SMTP only (direct relay when `SMTP_PASSWORD` is set, otherwise the Postfix sidecar) | No API provider; reliable SMTP relay |
-| `host` | Host mail/sendmail only | Only when the host already has a working local MTA |
+| `auto` | With a supported API provider: API → SMTP → host MTA. With empty/`smtp`: SMTP → host MTA. With legacy `host`/`postfix`: host MTA → SMTP. Unknown providers fail clearly. | Recommended flexible mode |
+| `api` | HTTP API only; requires a supported API provider and token. Missing token, provider failure, or missing attachment support returns nonzero with no fallback. | API-only, no SMTP fallback desired |
+| `smtp` | SMTP only (direct relay when `SMTP_PASSWORD` is set, otherwise the Postfix sidecar). `EMAIL_PROVIDER` does not redirect this mode. | Force SMTP |
+| `host` | Host mail/sendmail first, then SMTP. `EMAIL_PROVIDER` does not redirect this mode. | Prefer an existing local MTA but allow SMTP fallback |
 
 ---
 
@@ -322,14 +332,15 @@ MAILGUN_DOMAIN=mg.yourdomain.com  # optional — set only if different from SMTP
 | Variable | Default | Description |
 | :-- | :-- | :-- |
 | `EMAIL_MODE` | `auto` | Delivery chain mode |
-| `EMAIL_PROVIDER` | `mailersend` | HTTP API provider |
+| `EMAIL_PROVIDER` | `smtp` | HTTP API provider (`mailersend`, `sendgrid`, `mailgun`, `postmark`, `resend`, `cyberpersons`) or legacy routing preference (`smtp`, `host`, `postfix`) |
 | `SMTP_HOST` | *(empty)* | SMTP relay hostname |
 | `SMTP_PORT` | `587` | SMTP relay port |
 | `SMTP_SECURITY` | `starttls` | `starttls` or `on` (SSL/TLS) |
 | `SMTP_USERNAME` | *(empty)* | SMTP relay username |
 | `SMTP_FROM` | *(empty)* | Sender address for `lib/email.sh` and Postfix relay |
 | `SMTP_FROM_NAME` | `VaultWarden` | Sender display name |
-| `SMTP_TIMEOUT` | `30` | Seconds before curl gives up |
+| `SMTP_TIMEOUT` | `30` | Seconds before SMTP curl gives up |
+| `EMAIL_API_TIMEOUT` | `60` | Seconds before HTTP API curl gives up |
 | `VW_SMTP_HOST` | `postfix` | VaultWarden SMTP host — Postfix sidecar service name |
 | `VW_SMTP_PORT` | `587` | VaultWarden SMTP port — internal Postfix port |
 | `VW_SMTP_SECURITY` | `off` | VaultWarden TLS mode — plain on the internal link |
@@ -371,7 +382,7 @@ prints which tier succeeded or failed.
 ### Check which tier delivered
 
 ```bash
-# lib/common.sh logs to the maintenance log — look for tier labels:
+# lib/email.sh logs to the maintenance log — look for route labels:
 grep -E 'EMAIL|SMTP|MTA|tier' /var/lib/vaultwarden/logs/maintenance.log | tail -30
 ```
 

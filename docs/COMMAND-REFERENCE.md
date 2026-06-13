@@ -766,7 +766,6 @@ DESCRIPTION:
 ### secrets-export-recovery-kit.sh
 
 ```
-[2026-06-13T04:46:59+0000] [log.sh] WARN .env not found — recovery-kit email delivery may be unavailable
 VaultWarden Secrets — export-recovery-kit subcommand
 
 USAGE:

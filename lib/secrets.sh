@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2119
 # lib/secrets.sh — Secret management and recovery helpers for VaultWarden-OCI.
 #
 # Provides:
@@ -36,11 +37,16 @@ _SECRETS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # directly without going through common.sh or a caller that pre-loads log.sh.
 # NOTE: _SECRETS_LIB_DIR is intentionally NOT unset here; it is reused two
 # lines below to source crypto.sh, then unset after that call.
+# shellcheck source=lib/log.sh
 [[ -n "${VW_LOG_LIB_LOADED:-}" ]] || source "${_SECRETS_LIB_DIR}/log.sh"
+# shellcheck source=lib/defaults.sh
 [[ -n "${VAULTWARDEN_DEFAULTS_LOADED:-}" ]] || source "${_SECRETS_LIB_DIR}/defaults.sh"
 
+# shellcheck source=lib/crypto.sh
 source "${_SECRETS_LIB_DIR}/crypto.sh"
+# shellcheck source=lib/schema.sh
 source "${_SECRETS_LIB_DIR}/schema.sh"
+# shellcheck source=lib/email.sh
 source "${_SECRETS_LIB_DIR}/email.sh"
 unset _SECRETS_LIB_DIR
 
@@ -1288,8 +1294,9 @@ END OF RECOVERY KIT
 ════════════════════════════════════════════════════════════════════════
 EOF
 
-    # Unset plaintext Age private key from memory immediately after
-    # the heredoc that wrote it to the output file.
+    # Unset the shell variable holding the plaintext Age private key immediately
+    # after the heredoc that wrote it to the output file. This shortens the
+    # variable lifetime; it is not a guaranteed secure memory-erasure primitive.
     unset priv_key
 
     chmod 600 "$output_file"
