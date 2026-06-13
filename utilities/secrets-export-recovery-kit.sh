@@ -10,6 +10,18 @@ cd "$PROJECT_ROOT"
 
 source "${PROJECT_ROOT}/lib/log.sh"
 source "${PROJECT_ROOT}/lib/config.sh"
+
+# Load the configured delivery mode/provider before init_common_lib and email.sh.
+# A missing .env does not block plaintext export, but email delivery is disabled.
+if [[ -f "${PROJECT_ROOT}/.env" ]]; then
+    if ! load_env_file "${PROJECT_ROOT}/.env"; then
+        log_error "Unable to load ${PROJECT_ROOT}/.env"
+        exit 1
+    fi
+else
+    log_warn ".env not found — recovery-kit email delivery may be unavailable"
+fi
+
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
 source "${PROJECT_ROOT}/lib/crypto.sh"

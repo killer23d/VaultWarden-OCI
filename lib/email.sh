@@ -55,59 +55,74 @@ _email_json_escape() {
 }
 
 
+_email_json_post() {
+    local url="$1" header_name="$2" header_value="$3" payload="$4"
+    local response_file config_file payload_file error_file
+
+    if [[ "$header_name" == *$'\r'* || "$header_name" == *$'\n'* \
+       || "$header_value" == *$'\r'* || "$header_value" == *$'\n'* ]]; then
+        log_error "_email_json_post: invalid newline in HTTP header"
+        return 1
+    fi
+
+    response_file=$(_email_make_temp_file vw-email-response) || return 1
+    config_file=$(_email_make_temp_file vw-email-config) || { rm -f "$response_file"; return 1; }
+    payload_file=$(_email_make_temp_file vw-email-payload) || { rm -f "$response_file" "$config_file"; return 1; }
+    error_file=$(_email_make_temp_file vw-email-error) || {
+        rm -f "$response_file" "$config_file" "$payload_file"
+        return 1
+    }
+
+    local escaped_header
+    escaped_header="${header_name}: ${header_value}"
+    escaped_header="${escaped_header//\\/\\\\}"
+    escaped_header="${escaped_header//\"/\\\"}"
+    printf 'header = "%s"\n' "$escaped_header" > "$config_file"
+    printf '%s' "$payload" > "$payload_file"
+
+    local code="" rc=0
+    code=$(curl --silent --show-error \
+        --config "$config_file" \
+        --connect-timeout 10 \
+        --max-time "${EMAIL_API_TIMEOUT:-60}" \
+        --output "$response_file" \
+        --write-out '%{http_code}' \
+        --request POST "$url" \
+        --header 'Content-Type: application/json' \
+        --data-binary "@${payload_file}" 2>"$error_file") || rc=$?
+
+    if [[ $rc -ne 0 ]]; then
+        _ECURL_CODE="curl:${rc}"
+        _ECURL_BODY=$(head -c 400 "$error_file" 2>/dev/null | tr '\r\n' ' ' || true)
+    else
+        _ECURL_CODE="$code"
+        _ECURL_BODY=$(head -c 400 "$response_file" 2>/dev/null | tr '\r\n' ' ' || true)
+    fi
+
+    rm -f "$response_file" "$config_file" "$payload_file" "$error_file"
+    [[ $rc -eq 0 && "$code" =~ ^2 ]]
+}
+
 _email_bearer_post() {
     local url="$1" payload="$2"
-    local tmp cfg code
-    tmp=$(mktemp -t vw_email.XXXXXXXXXX)
-    # Harden tmp with install -m 600 so the response body file is
-    # never world-readable regardless of the process umask. Matches the
-    # existing pattern used for cfg below and in Mailgun/Postmark drivers.
-    if ! install -m 600 /dev/null "$tmp" 2>/dev/null; then
-        rm -f "$tmp"
-        log_error "_email_bearer_post: failed to secure response temp file"
+    local token="${EMAIL_API_TOKEN:-}"
+    if [[ -z "$token" ]]; then
+        log_error "_email_bearer_post: EMAIL_API_TOKEN is empty"
         return 1
     fi
-    cfg=$(mktemp -t vw_ecfg.XXXXXXXXXX)
-    if ! install -m 600 /dev/null "$cfg" 2>/dev/null; then
-        rm -f "$tmp" "$cfg"
-        log_error "_email_bearer_post: failed to secure curl config temp file"
-        return 1
-    fi
-    trap 'rm -f "$tmp" "$cfg" 2>/dev/null; trap - RETURN' RETURN
-
-    printf 'header = "Authorization: Bearer %s"\n' "${EMAIL_API_TOKEN}" >"$cfg"
-
-    code=$(curl -s \
-        --config "$cfg" \
-        --connect-timeout 10 \
-        --max-time 20 \
-        --retry 2 \
-        --retry-delay 3 \
-        --retry-all-errors \
-        -o "$tmp" \
-        -w "%{http_code}" \
-        -X POST "$url" \
-        -H "Content-Type: application/json" \
-        -d "$payload" 2>/dev/null)
-
-    _ECURL_CODE="$code"
-    _ECURL_BODY=$(head -c 300 "$tmp" 2>/dev/null | tr -d '\n')
-    [[ "$code" =~ ^2 ]] && return 0 || return 1
+    _email_json_post "$url" "Authorization" "Bearer ${token}" "$payload"
 }
 
 # _email_driver_lookup PROVIDER
 # Prints the driver function suffix for PROVIDER, or returns 1 if unknown.
 # Implemented as a single case statement so it works consistently in both the
 # current shell and child subshells without exported registry state.
+# VW_EMAIL_ROUTING_V2: shared provider, validation, and attachment helpers.
 _email_driver_lookup() {
     local provider="${1,,}"
     case "$provider" in
         mailersend|sendgrid|mailgun|postmark|resend|cyberpersons)
             printf '%s' "$provider"
-            return 0
-            ;;
-        host|postfix)
-            printf '%s' "postfix"
             return 0
             ;;
         *)
@@ -116,16 +131,160 @@ _email_driver_lookup() {
     esac
 }
 
+_email_resolve_api_token() {
+    local token="${EMAIL_API_TOKEN:-}"
+    if [[ -z "$token" ]] && declare -f decrypt_secret &>/dev/null; then
+        token="$(decrypt_secret email_api_token 2>/dev/null || true)"
+    fi
+    printf '%s' "$token"
+}
+
+_email_validate_address_value() {
+    local label="$1" value="$2"
+    if [[ -z "$value" ]]; then
+        log_error "${label} is empty"
+        return 1
+    fi
+    if [[ "$value" == *$'\r'* || "$value" == *$'\n'* ]]; then
+        log_error "${label} contains a prohibited newline"
+        return 1
+    fi
+    return 0
+}
+
+_email_safe_attachment_name() {
+    local name
+    name=$(basename -- "${1:-attachment.bin}")
+    name=$(printf '%s' "$name" | LC_ALL=C sed 's/[^A-Za-z0-9._-]/_/g')
+    [[ -n "$name" ]] || name="attachment.bin"
+    printf '%s' "$name"
+}
+
+_email_base64_file() {
+    local path="$1"
+    [[ -f "$path" ]] || return 1
+    (set -o pipefail; base64 < "$path" | tr -d '\r\n')
+}
+
+_email_attachment_content_type() {
+    local name="${1,,}"
+    case "$name" in
+        *.zip) printf 'application/zip' ;;
+        *.txt|*.log|*.csv) printf 'text/plain' ;;
+        *.json) printf 'application/json' ;;
+        *.pdf) printf 'application/pdf' ;;
+        *) printf 'application/octet-stream' ;;
+    esac
+}
+
+_email_mailgun_post() {
+    local to="$1" subject="$2" body="$3"
+    local att_path="${4:-}" att_name="${5:-}"
+    local from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
+
+    _email_validate_address_value "recipient" "$to" || return 1
+    _email_validate_address_value "sender" "$from_email" || return 1
+
+    local domain="${MAILGUN_DOMAIN:-}"
+    [[ -n "$domain" ]] || domain="${from_email##*@}"
+    if [[ -z "$domain" || ! "$domain" =~ ^[A-Za-z0-9.-]+$ ]]; then
+        log_error "Mailgun driver: invalid or missing domain '${domain}'"
+        return 1
+    fi
+
+    local region="${MAILGUN_REGION:-us}" api_host
+    case "${region,,}" in
+        us) api_host="api.mailgun.net" ;;
+        eu) api_host="api.eu.mailgun.net" ;;
+        *)
+            log_error "Mailgun driver: unrecognised MAILGUN_REGION='${region}'. Valid values: us eu"
+            return 1
+            ;;
+    esac
+
+    if [[ -n "$att_path" && ! -f "$att_path" ]]; then
+        log_error "Mailgun attachment driver: attachment not found: $att_path"
+        return 1
+    fi
+
+    local api_token="${EMAIL_API_TOKEN:-}"
+    if [[ -z "$api_token" ]]; then
+        log_error "Mailgun driver: EMAIL_API_TOKEN is empty"
+        return 1
+    fi
+
+    local response_file config_file error_file
+    response_file=$(_email_make_temp_file vw-mailgun-response) || return 1
+    config_file=$(_email_make_temp_file vw-mailgun-config) || { rm -f "$response_file"; return 1; }
+    error_file=$(_email_make_temp_file vw-mailgun-error) || {
+        rm -f "$response_file" "$config_file"
+        return 1
+    }
+
+    local auth_value="api:${api_token}"
+    if [[ "$auth_value" == *$'\r'* || "$auth_value" == *$'\n'* ]]; then
+        rm -f "$response_file" "$config_file" "$error_file"
+        log_error "Mailgun driver: API token contains a prohibited newline"
+        return 1
+    fi
+    auth_value="${auth_value//\\/\\\\}"
+    auth_value="${auth_value//\"/\\\"}"
+    printf 'user = "%s"\n' "$auth_value" > "$config_file"
+    unset auth_value
+
+    subject="${subject//$'\r'/ }"
+    subject="${subject//$'\n'/ }"
+
+    local -a args=(
+        --silent --show-error
+        --config "$config_file"
+        --connect-timeout 10
+        --max-time "${EMAIL_API_TIMEOUT:-60}"
+        --output "$response_file"
+        --write-out '%{http_code}'
+        --request POST "https://${api_host}/v3/${domain}/messages"
+        --form-string "from=${SMTP_FROM_NAME:-VaultWarden} <${from_email}>"
+        --form-string "to=${to}"
+        --form-string "subject=${subject}"
+        --form-string "text=${body}"
+        --form-string "o:tracking=no"
+    )
+
+    if [[ -n "$att_path" ]]; then
+        att_name=$(_email_safe_attachment_name "$att_name")
+        local content_type
+        content_type=$(_email_attachment_content_type "$att_name")
+        args+=(--form "attachment=@${att_path};filename=${att_name};type=${content_type}")
+    fi
+
+    local code="" rc=0
+    code=$(curl "${args[@]}" 2>"$error_file") || rc=$?
+    local response
+    if [[ $rc -ne 0 ]]; then
+        response=$(head -c 400 "$error_file" 2>/dev/null | tr '\r\n' ' ' || true)
+        log_warn "Mailgun transport failed (curl exit ${rc}, region=${region}, host=${api_host}): ${response:-no diagnostic returned}"
+    else
+        response=$(head -c 400 "$response_file" 2>/dev/null | tr '\r\n' ' ' || true)
+        if [[ ! "$code" =~ ^2 ]]; then
+            log_warn "Mailgun API HTTP ${code} (region=${region}, host=${api_host}): ${response}"
+            rc=1
+        fi
+    fi
+
+    rm -f "$response_file" "$config_file" "$error_file"
+    return "$rc"
+}
+
 
 _email_driver_mailersend() {
-    local subject="$1" body="$2"
+    local to="$1" subject="$2" body="$3"
     local s b fn fe ae
     s=$(_email_json_escape "$subject")
     b=$(_email_json_escape "$body")
-    local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
+    local from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
     fn=$(_email_json_escape "${SMTP_FROM_NAME:-VaultWarden}")
-    fe=$(_email_json_escape "${_from_email}")
-    ae=$(_email_json_escape "${ADMIN_EMAIL}")
+    fe=$(_email_json_escape "$from_email")
+    ae=$(_email_json_escape "$to")
 
     local payload
     payload=$(cat <<EOF
@@ -149,14 +308,14 @@ EOF
 
 
 _email_driver_sendgrid() {
-    local subject="$1" body="$2"
+    local to="$1" subject="$2" body="$3"
     local s b fn fe ae
     s=$(_email_json_escape "$subject")
     b=$(_email_json_escape "$body")
-    local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
+    local from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
     fn=$(_email_json_escape "${SMTP_FROM_NAME:-VaultWarden}")
-    fe=$(_email_json_escape "${_from_email}")
-    ae=$(_email_json_escape "${ADMIN_EMAIL}")
+    fe=$(_email_json_escape "$from_email")
+    ae=$(_email_json_escape "$to")
 
     local payload
     payload=$(cat <<EOF
@@ -181,92 +340,20 @@ EOF
 
 
 _email_driver_mailgun() {
-    local subject="$1" body="$2"
-    subject="${subject//$'\r'/}"
-    subject="${subject//$'\n'/}"
-    body="${body//$'\r'/}"
-    body="${body//$'\n'/ }"
-    local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
-
-    local domain="${MAILGUN_DOMAIN:-}"
-    [[ -z "$domain" ]] && domain="${_from_email##*@}"
-    if [[ -z "$domain" ]]; then
-        log_error "Mailgun driver: cannot determine domain. Set MAILGUN_DOMAIN in .env"
-        return 1
-    fi
-
-    if [[ ! "$domain" =~ ^[a-zA-Z0-9.-]+$ ]]; then
-        log_error "Mailgun driver: invalid domain '${domain}' (failed hostname validation). Check MAILGUN_DOMAIN or SMTP_FROM."
-        return 1
-    fi
-
-    local mg_region="${MAILGUN_REGION:-us}"
-    local mg_api_host
-    case "${mg_region,,}" in
-        us)  mg_api_host="api.mailgun.net" ;;
-        eu)  mg_api_host="api.eu.mailgun.net" ;;
-        *)
-            log_error "Mailgun driver: unrecognised MAILGUN_REGION='${mg_region}'. Valid values: us eu"
-            return 1
-            ;;
-    esac
-
-    local tmp cfg code
-    tmp=$(mktemp -t vw_email.XXXXXXXXXX)
-    cfg=$(mktemp -t vw_ecfg.XXXXXXXXXX)
-    if ! install -m 600 /dev/null "$cfg" 2>/dev/null; then
-        rm -f "$tmp" "$cfg"
-        log_error "Mailgun driver: failed to secure curl config temp file"
-        return 1
-    fi
-    trap 'rm -f "$tmp" "$cfg" 2>/dev/null; trap - RETURN' RETURN
-
-    printf 'user = "api:%s"\n' "${EMAIL_API_TOKEN}" >"$cfg"
-
-    code=$(curl -s \
-        --config "$cfg" \
-        --connect-timeout 10 \
-        --max-time 20 \
-        --retry 2 \
-        --retry-delay 3 \
-        --retry-all-errors \
-        -o "$tmp" \
-        -w "%{http_code}" \
-        -X POST "https://${mg_api_host}/v3/${domain}/messages" \
-        -F "from=${SMTP_FROM_NAME:-VaultWarden} <${_from_email}>" \
-        -F "to=${ADMIN_EMAIL}" \
-        -F "subject=${subject}" \
-        -F "text=${body}" \
-        -F "o:tracking=no" 2>/dev/null)
-
-    local resp; resp=$(head -c 300 "$tmp" 2>/dev/null | tr -d '\n')
-    [[ "$code" =~ ^2 ]] && return 0
-    log_warn "Mailgun API HTTP ${code} (region=${mg_region}, host=${mg_api_host}): ${resp}"
-    return 1
+    local to="$1" subject="$2" body="$3"
+    _email_mailgun_post "$to" "$subject" "$body"
 }
 
 
 _email_driver_postmark() {
-    local subject="$1" body="$2"
+    local to="$1" subject="$2" body="$3"
     local s b fn fe ae
     s=$(_email_json_escape "$subject")
     b=$(_email_json_escape "$body")
-    local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
+    local from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
     fn=$(_email_json_escape "${SMTP_FROM_NAME:-VaultWarden}")
-    fe=$(_email_json_escape "${_from_email}")
-    ae=$(_email_json_escape "${ADMIN_EMAIL}")
-
-    local tmp cfg code
-    tmp=$(mktemp -t vw_email.XXXXXXXXXX)
-    cfg=$(mktemp -t vw_ecfg.XXXXXXXXXX)
-    if ! install -m 600 /dev/null "$cfg" 2>/dev/null; then
-        rm -f "$tmp" "$cfg"
-        log_error "Postmark driver: failed to secure curl config temp file"
-        return 1
-    fi
-    trap 'rm -f "$tmp" "$cfg" 2>/dev/null; trap - RETURN' RETURN
-
-    printf 'header = "X-Postmark-Server-Token: %s"\n' "${EMAIL_API_TOKEN}" >"$cfg"
+    fe=$(_email_json_escape "$from_email")
+    ae=$(_email_json_escape "$to")
 
     local payload
     payload=$(cat <<EOF
@@ -280,42 +367,28 @@ _email_driver_postmark() {
 EOF
 )
 
-    code=$(curl -s \
-        --config "$cfg" \
-        --connect-timeout 10 \
-        --max-time 20 \
-        --retry 2 \
-        --retry-delay 3 \
-        --retry-all-errors \
-        -o "$tmp" \
-        -w "%{http_code}" \
-        -X POST "https://api.postmarkapp.com/email" \
-        -H "Accept: application/json" \
-        -H "Content-Type: application/json" \
-        -d "$payload" 2>/dev/null)
-
-    local resp; resp=$(head -c 300 "$tmp" 2>/dev/null | tr -d '\n')
-    if [[ ! "$code" =~ ^2 ]]; then
-        log_warn "Postmark API HTTP ${code}: ${resp}"
+    if ! _email_json_post "https://api.postmarkapp.com/email" \
+            "X-Postmark-Server-Token" "${EMAIL_API_TOKEN}" "$payload"; then
+        log_warn "Postmark API HTTP ${_ECURL_CODE}: ${_ECURL_BODY}"
         return 1
     fi
-    if echo "$resp" | grep -q '"ErrorCode":0'; then
+    if grep -Eq '"ErrorCode"[[:space:]]*:[[:space:]]*0' <<< "${_ECURL_BODY}"; then
         return 0
     fi
-    log_warn "Postmark API: HTTP 200 but ErrorCode != 0: ${resp}"
+    log_warn "Postmark API returned a non-zero ErrorCode: ${_ECURL_BODY}"
     return 1
 }
 
 
 _email_driver_resend() {
-    local subject="$1" body="$2"
+    local to="$1" subject="$2" body="$3"
     local s b fn fe ae
     s=$(_email_json_escape "$subject")
     b=$(_email_json_escape "$body")
-    local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
+    local from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
     fn=$(_email_json_escape "${SMTP_FROM_NAME:-VaultWarden}")
-    fe=$(_email_json_escape "${_from_email}")
-    ae=$(_email_json_escape "${ADMIN_EMAIL}")
+    fe=$(_email_json_escape "$from_email")
+    ae=$(_email_json_escape "$to")
 
     local payload
     payload=$(cat <<EOF
@@ -335,15 +408,14 @@ EOF
 
 
 _email_driver_cyberpersons() {
-    local subject="$1" body="$2"
+    local to="$1" subject="$2" body="$3"
     local s b fn fe ae
     s=$(_email_json_escape "$subject")
     b=$(_email_json_escape "$body")
-
-    local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
+    local from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
     fn=$(_email_json_escape "${SMTP_FROM_NAME:-VaultWarden}")
-    fe=$(_email_json_escape "${_from_email}")
-    ae=$(_email_json_escape "${ADMIN_EMAIL}")
+    fe=$(_email_json_escape "$from_email")
+    ae=$(_email_json_escape "$to")
 
     local payload
     payload=$(cat <<EOF
@@ -360,7 +432,6 @@ EOF
         [[ -n "${_ECURL_BODY}" ]] && log_debug "CyberPersons API response: ${_ECURL_BODY}"
         return 0
     fi
-
     log_warn "CyberPersons API HTTP ${_ECURL_CODE}: ${_ECURL_BODY}"
     return 1
 }
@@ -375,9 +446,9 @@ EOF
 # operator has configured SMTP credentials alongside the CyberPersons driver.
 # ---------------------------------------------------------------------------
 _email_driver_cyberpersons_attachment() {
-    local to="$1" subject="$2" body="$3" att_path="$4" att_name="$5"
-    log_warn "CyberPersons API does not support attachments — falling back to SMTP for attachment delivery."
-    _smtp_send_with_attachment "$to" "$subject" "$body" "$att_path" "$att_name"
+    local _to="$1" _subject="$2" _body="$3" _att_path="$4" _att_name="$5"
+    log_error "CyberPersons API does not support attachments"
+    return 1
 }
 
 
@@ -389,24 +460,8 @@ _email_driver_cyberpersons_attachment() {
 # Usage: set EMAIL_MODE=host and EMAIL_PROVIDER=host (or EMAIL_PROVIDER=postfix)
 # in .env. sendmail must be on PATH (standard in the postfix sidecar image).
 _email_driver_postfix() {
-    local subject="$1" body="$2"
-    local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
-    local from_name="${SMTP_FROM_NAME:-VaultWarden}"
-    local to_addr="${ADMIN_EMAIL:-}"
-
-    if [[ -z "$to_addr" ]]; then
-        log_error "postfix driver: ADMIN_EMAIL is not set"
-        return 1
-    fi
-
-    if ! command -v sendmail >/dev/null 2>&1; then
-        log_error "postfix driver: sendmail not found in PATH — is the postfix sidecar running?"
-        return 1
-    fi
-
-    printf 'From: %s <%s>\nTo: %s\nSubject: %s\n\n%s\n' \
-        "$from_name" "$_from_email" "$to_addr" "$subject" "$body" \
-        | sendmail -t -oi
+    local to="$1" subject="$2" body="$3"
+    _host_send "$to" "$subject" "$body"
 }
 
 
@@ -421,6 +476,8 @@ _email_driver_postfix() {
 # file path.  If the prefix is ever changed it only needs updating here.
 _normalise_email_subject() {
     local subject="$1"
+    subject="${subject//$'\r'/ }"
+    subject="${subject//$'\n'/ }"
     [[ "$subject" != "[VaultWarden]"* ]] && subject="[VaultWarden] ${subject}"
     printf '%s\n' "$subject"
 }
@@ -558,133 +615,19 @@ _build_email_metadata_body() {
 # _resolve_smtp_method().  If a new transport path is ever added, update
 # both functions together.
 _smtp_send() {
-    local to="$1"
-    local subject="$2"
-    local body="$3"
-
-    [[ -z "$to" ]] && { log_error "_smtp_send: recipient (to) is empty"; return 1; }
-
-    local _smtp_from_addr="${SMTP_FROM_EMAIL:-${SMTP_FROM:-${SMTP_USERNAME:-}}}"
-    local _smtp_from_name="${SMTP_FROM_NAME:-VaultWarden}"
-
-    local date_str
-    date_str=$(date -u '+%a, %d %b %Y %H:%M:%S +0000')
-
-    # Write the RFC-5322 message to a temp file rather than capturing in $()
-    # so that the terminating \r\n blank line is preserved — command substitution
-    # strips trailing newlines, which corrupts the MIME body boundary.
-    local _msg_file
-    _msg_file=$(mktemp -t vw_smtp.XXXXXXXXXX) || {
-        log_error "_smtp_send: failed to create SMTP message temp file"
+    local to="$1" subject="$2" body="$3"
+    local message_file rc=0
+    message_file=$(_email_make_temp_file vw-smtp-message) || {
+        log_error "_smtp_send: failed to create message file"
         return 1
     }
-    chmod 600 "$_msg_file"
-    # shellcheck disable=SC2064  # intentional: expand _msg_file now to capture the value
-    trap "rm -f '${_msg_file}' 2>/dev/null; trap - RETURN" RETURN
-
-    {
-        printf 'From: "%s" <%s>\r\n' "$_smtp_from_name" "$_smtp_from_addr"
-        printf 'To: %s\r\n'          "$to"
-        printf 'Subject: %s\r\n'     "$subject"
-        printf 'Date: %s\r\n'        "$date_str"
-        printf 'MIME-Version: 1.0\r\n'
-        printf 'Content-Type: text/plain; charset=UTF-8\r\n'
-        printf 'Content-Transfer-Encoding: 7bit\r\n'
-        printf '\r\n'
-        while IFS= read -r line; do
-            printf '%s\r\n' "$line"
-        done <<< "$body"
-        printf '\r\n'
-    } > "$_msg_file" || {
-        log_error "_smtp_send: failed to write SMTP message to temp file"
-        return 1
-    }
-
-    # Path A: SMTP_PASSWORD present → direct external relay
-    # This branch must stay in sync with _resolve_smtp_method returning
-    # "smtp (direct relay)".
-    if [[ -n "${SMTP_PASSWORD:-}" ]]; then
-        [[ -z "${SMTP_HOST:-}"     ]] && { log_error "_smtp_send: SMTP_HOST is not set";     return 1; }
-        [[ -z "${SMTP_USERNAME:-}" ]] && { log_error "_smtp_send: SMTP_USERNAME is not set"; return 1; }
-
-        local smtp_port="${SMTP_PORT:-587}"
-        local smtp_security="${SMTP_SECURITY:-}"
-        local smtp_url
-        local smtp_tls_flags=()
-
-        [[ -z "$smtp_security" ]] && { [[ "$smtp_port" == "465" ]] && smtp_security="tls" || smtp_security="starttls"; }
-
-        case "${smtp_security,,}" in
-            tls|ssl)    smtp_url="smtps://${SMTP_HOST}:${smtp_port}" ;;
-            starttls)   smtp_url="smtp://${SMTP_HOST}:${smtp_port}"; smtp_tls_flags=(--ssl-reqd) ;;
-            none|plain) smtp_url="smtp://${SMTP_HOST}:${smtp_port}" ;;
-            *)
-                log_error "_smtp_send: Unknown SMTP_SECURITY='${smtp_security}'. Valid: tls starttls none"
-                return 1
-                ;;
-        esac
-
-        # Use --netrc-file to avoid exposing SMTP password in process argv
-        local _netrc_file
-        _netrc_file="$(mktemp -p /dev/shm vw-smtp-netrc.XXXXXX)"
-        chmod 600 "$_netrc_file"
-        # shellcheck disable=SC2064
-        trap "rm -f '$_netrc_file'" RETURN
-        printf 'machine %s\nlogin %s\npassword %s\n' \
-            "$SMTP_HOST" "$SMTP_USERNAME" "$SMTP_PASSWORD" > "$_netrc_file"
-
-        curl -s \
-            --connect-timeout 15 \
-            --max-time 30 \
-            --retry 2 \
-            --retry-delay 5 \
-            "${smtp_tls_flags[@]}" \
-            --url "$smtp_url" \
-            --mail-from "$_smtp_from_addr" \
-            --mail-rcpt "$to" \
-            --netrc-file "$_netrc_file" \
-            --upload-file "$_msg_file"
-        local _smtp_rc=$?
-        rm -f "$_netrc_file"
-        return $_smtp_rc
+    if _email_build_text_message "$to" "$subject" "$body" "$message_file"; then
+        _smtp_upload_message "$to" "$message_file" || rc=$?
+    else
+        rc=$?
     fi
-
-    # Path B: No SMTP_PASSWORD → Postfix sidecar (normal production path)
-    # This branch must stay in sync with _resolve_smtp_method returning
-    # "smtp (postfix sidecar)".
-    local _sidecar_addr="${VW_SMTP_HOST_PORT:-127.0.0.1:587}"
-    local _sidecar_host _sidecar_port
-    _sidecar_host="${_sidecar_addr%:*}"
-    _sidecar_port="${_sidecar_addr##*:}"
-
-    log_debug "_smtp_send: no SMTP_PASSWORD — routing through Postfix sidecar at ${_sidecar_addr}"
-
-    # Fast sidecar liveness probe to avoid long curl timeouts when postfix
-    # is down/unbound on localhost.
-    if command -v nc >/dev/null 2>&1; then
-        if ! nc -z -w 2 "$_sidecar_host" "$_sidecar_port" >/dev/null 2>&1; then
-            log_warn "_smtp_send: Postfix sidecar unreachable at ${_sidecar_addr} (probe failed) — skipping SMTP attempt"
-            return 1
-        fi
-    elif ! (echo >/dev/tcp/"$_sidecar_host"/"$_sidecar_port") >/dev/null 2>&1; then
-        log_warn "_smtp_send: Postfix sidecar unreachable at ${_sidecar_addr} (probe failed) — skipping SMTP attempt"
-        return 1
-    fi
-
-    curl -s \
-        --connect-timeout 5 \
-        --max-time 15 \
-        --retry 1 \
-        --retry-delay 2 \
-        --url "smtp://${_sidecar_host}:${_sidecar_port}" \
-        --mail-from "$_smtp_from_addr" \
-        --mail-rcpt "$to" \
-        --upload-file "$_msg_file"
-    local _rc=$?
-    if [[ $_rc -ne 0 ]]; then
-        log_warn "_smtp_send: Postfix sidecar at ${_sidecar_addr} returned curl exit ${_rc}. Is the container running and port 127.0.0.1:587 bound?"
-    fi
-    return $_rc
+    rm -f "$message_file"
+    return "$rc"
 }
 
 
@@ -700,120 +643,319 @@ _smtp_send() {
 # additional temp file is required for the encoded payload.
 # ---------------------------------------------------------------------------
 _smtp_send_with_attachment() {
-    local to="$1" subject="$2" body="$3"
-    local att_path="$4" att_name="$5"
-
-    [[ -z "$to" ]]        && { log_error "_smtp_send_with_attachment: 'to' is empty";                 return 1; }
-    [[ ! -f "$att_path" ]] && { log_error "_smtp_send_with_attachment: attachment not found: $att_path"; return 1; }
-
-    local _from_addr="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
-    local _from_name="${SMTP_FROM_NAME:-VaultWarden}"
-    local _boundary
-    _boundary="=====VW_$(date +%s%N 2>/dev/null | sha256sum 2>/dev/null | head -c 16 || openssl rand -hex 8)====="
-    local _date_str
-    _date_str=$(date -u '+%a, %d %b %Y %H:%M:%S +0000')
-
-    # Base64-encode the attachment — done before opening the message temp file
-    # so that failures abort cleanly without leaving a zero-byte message file.
-    local _att_b64
-    if ! _att_b64=$(base64 < "$att_path" 2>/dev/null); then
-        log_error "_smtp_send_with_attachment: base64 encoding failed"
-        return 1
-    fi
-
-    local _msg_file
-    _msg_file=$(mktemp -p /dev/shm vw-mime.XXXXXX 2>/dev/null || mktemp vw-mime.XXXXXX) || {
-        log_error "_smtp_send_with_attachment: failed to create MIME message temp file"
+    local to="$1" subject="$2" body="$3" att_path="$4" att_name="$5"
+    local message_file rc=0
+    message_file=$(_email_make_temp_file vw-smtp-attachment) || {
+        log_error "_smtp_send_with_attachment: failed to create message file"
         return 1
     }
-    install -m 600 /dev/null "$_msg_file" 2>/dev/null || chmod 600 "$_msg_file"
-    # shellcheck disable=SC2064  # intentional: expand _msg_file now to capture path
-    trap "rm -f '${_msg_file}' 2>/dev/null; trap - RETURN" RETURN
+    if _email_build_attachment_message \
+            "$to" "$subject" "$body" "$att_path" "$att_name" "$message_file"; then
+        _smtp_upload_message "$to" "$message_file" || rc=$?
+    else
+        rc=$?
+    fi
+    rm -f "$message_file"
+    return "$rc"
+}
+
+# VW_EMAIL_ROUTING_V2: shared RFC-5322/MIME and transport helpers.
+_email_make_temp_file() {
+    local prefix="${1:-vw-email}"
+    local path
+    path=$(mktemp -p /dev/shm "${prefix}.XXXXXX" 2>/dev/null \
+        || mktemp -t "${prefix}.XXXXXX") || return 1
+    if ! install -m 600 /dev/null "$path" 2>/dev/null; then
+        chmod 600 "$path" 2>/dev/null || {
+            rm -f "$path"
+            return 1
+        }
+    fi
+    printf '%s' "$path"
+}
+
+_email_message_id() {
+    local host
+    host=$(hostname -f 2>/dev/null || hostname 2>/dev/null || printf 'localhost')
+    host="${host//[^A-Za-z0-9.-]/-}"
+    printf '<%s.%s.%s@%s>' "$(date +%s)" "$$" "${RANDOM:-0}" "$host"
+}
+
+_email_build_text_message() {
+    local to="$1" subject="$2" body="$3" output_file="$4"
+    local from_addr="${SMTP_FROM_EMAIL:-${SMTP_FROM:-${SMTP_USERNAME:-}}}"
+    local from_name="${SMTP_FROM_NAME:-VaultWarden}"
+
+    _email_validate_address_value "recipient" "$to" || return 1
+    _email_validate_address_value "sender" "$from_addr" || return 1
+
+    from_name="${from_name//$'\r'/ }"
+    from_name="${from_name//$'\n'/ }"
+    subject=$(_normalise_email_subject "$subject")
 
     {
-        printf 'From: "%s" <%s>\r\n'  "$_from_name" "$_from_addr"
-        printf 'To: %s\r\n'           "$to"
-        printf 'Subject: %s\r\n'      "$(_normalise_email_subject "$subject")"
-        printf 'Date: %s\r\n'         "$_date_str"
+        printf 'From: "%s" <%s>\r\n' "$from_name" "$from_addr"
+        printf 'To: %s\r\n' "$to"
+        printf 'Subject: %s\r\n' "$subject"
+        printf 'Date: %s\r\n' "$(date -u '+%a, %d %b %Y %H:%M:%S +0000')"
+        printf 'Message-ID: %s\r\n' "$(_email_message_id)"
         printf 'MIME-Version: 1.0\r\n'
-        printf 'Content-Type: multipart/mixed; boundary="%s"\r\n' "$_boundary"
-        printf '\r\n'
-        # Part 1: plain text body
-        printf -- '--%s\r\n'          "$_boundary"
         printf 'Content-Type: text/plain; charset=UTF-8\r\n'
-        printf 'Content-Transfer-Encoding: 7bit\r\n'
+        printf 'Content-Transfer-Encoding: 8bit\r\n'
         printf '\r\n'
-        while IFS= read -r _line; do printf '%s\r\n' "$_line"; done <<< "$body"
+        while IFS= read -r line; do
+            printf '%s\r\n' "$line"
+        done <<< "$body"
         printf '\r\n'
-        # Part 2: binary attachment (base64, RFC 2045 76-char fold)
-        printf -- '--%s\r\n'          "$_boundary"
-        printf 'Content-Type: application/octet-stream\r\n'
+    } > "$output_file"
+}
+
+_email_build_attachment_message() {
+    local to="$1" subject="$2" body="$3"
+    local att_path="$4" att_name="$5" output_file="$6"
+    local from_addr="${SMTP_FROM_EMAIL:-${SMTP_FROM:-${SMTP_USERNAME:-}}}"
+    local from_name="${SMTP_FROM_NAME:-VaultWarden}"
+
+    _email_validate_address_value "recipient" "$to" || return 1
+    _email_validate_address_value "sender" "$from_addr" || return 1
+    [[ -f "$att_path" ]] || {
+        log_error "Attachment not found: $att_path"
+        return 1
+    }
+
+    from_name="${from_name//$'\r'/ }"
+    from_name="${from_name//$'\n'/ }"
+    subject=$(_normalise_email_subject "$subject")
+    att_name="$(basename -- "$att_name")"
+    att_name="${att_name//$'\r'/_}"
+    att_name="${att_name//$'\n'/_}"
+    att_name="${att_name//\"/_}"
+
+    local boundary content_type
+    boundary="=====VW_$(openssl rand -hex 12 2>/dev/null || printf '%s%s' "$$" "$(date +%s)")====="
+    content_type=$(_email_attachment_content_type "$att_name")
+
+    {
+        printf 'From: "%s" <%s>\r\n' "$from_name" "$from_addr"
+        printf 'To: %s\r\n' "$to"
+        printf 'Subject: %s\r\n' "$subject"
+        printf 'Date: %s\r\n' "$(date -u '+%a, %d %b %Y %H:%M:%S +0000')"
+        printf 'Message-ID: %s\r\n' "$(_email_message_id)"
+        printf 'MIME-Version: 1.0\r\n'
+        printf 'Content-Type: multipart/mixed; boundary="%s"\r\n' "$boundary"
+        printf '\r\n'
+        printf -- '--%s\r\n' "$boundary"
+        printf 'Content-Type: text/plain; charset=UTF-8\r\n'
+        printf 'Content-Transfer-Encoding: 8bit\r\n'
+        printf '\r\n'
+        while IFS= read -r line; do
+            printf '%s\r\n' "$line"
+        done <<< "$body"
+        printf '\r\n'
+        printf -- '--%s\r\n' "$boundary"
+        printf 'Content-Type: %s; name="%s"\r\n' "$content_type" "$att_name"
         printf 'Content-Transfer-Encoding: base64\r\n'
         printf 'Content-Disposition: attachment; filename="%s"\r\n' "$att_name"
         printf '\r\n'
-        printf '%s' "$_att_b64" | fold -w 76 | while IFS= read -r _b64line; do
-            printf '%s\r\n' "$_b64line"
-        done
-        printf '\r\n'
-        printf -- '--%s--\r\n'        "$_boundary"
-    } > "$_msg_file" || {
-        log_error "_smtp_send_with_attachment: failed to write MIME message"
+    } > "$output_file" || return 1
+
+    if ! (set -o pipefail; base64 < "$att_path" | fold -w 76 \
+        | while IFS= read -r line; do printf '%s\r\n' "$line"; done) >> "$output_file"; then
+        log_error "Failed to base64-encode attachment: $att_path"
+        return 1
+    fi
+
+    printf -- '--%s--\r\n' "$boundary" >> "$output_file"
+}
+
+_email_log_curl_failure() {
+    local context="$1" rc="$2" err_file="$3"
+    local detail=""
+    detail=$(head -c 400 "$err_file" 2>/dev/null | tr '\r\n' ' ' || true)
+    log_warn "${context} failed (curl exit ${rc}): ${detail:-no diagnostic returned}"
+}
+
+_smtp_upload_message() {
+    local to="$1" message_file="$2"
+    local from_addr="${SMTP_FROM_EMAIL:-${SMTP_FROM:-${SMTP_USERNAME:-}}}"
+
+    _email_validate_address_value "recipient" "$to" || return 1
+    _email_validate_address_value "sender" "$from_addr" || return 1
+    [[ -s "$message_file" ]] || {
+        log_error "SMTP message file is missing or empty: $message_file"
         return 1
     }
 
-    # Route through the same SMTP transport paths as _smtp_send().
-    local _smtp_from_addr="${SMTP_FROM_EMAIL:-${SMTP_FROM:-${SMTP_USERNAME:-}}}"
+    local err_file
+    err_file=$(_email_make_temp_file vw-smtp-error) || {
+        log_error "Failed to create SMTP diagnostic file"
+        return 1
+    }
 
     if [[ -n "${SMTP_PASSWORD:-}" ]]; then
-        [[ -z "${SMTP_HOST:-}"     ]] && { log_error "_smtp_send_with_attachment: SMTP_HOST not set";     return 1; }
-        [[ -z "${SMTP_USERNAME:-}" ]] && { log_error "_smtp_send_with_attachment: SMTP_USERNAME not set"; return 1; }
+        if [[ -z "${SMTP_HOST:-}" || -z "${SMTP_USERNAME:-}" ]]; then
+            rm -f "$err_file"
+            log_error "Direct SMTP requires SMTP_HOST and SMTP_USERNAME"
+            return 1
+        fi
 
-        local _smtp_port="${SMTP_PORT:-587}"
-        local _smtp_security="${SMTP_SECURITY:-}"
-        local _smtp_url _smtp_tls_flags=()
-        [[ -z "$_smtp_security" ]] && { [[ "$_smtp_port" == "465" ]] && _smtp_security="tls" || _smtp_security="starttls"; }
-        case "${_smtp_security,,}" in
-            tls|ssl)    _smtp_url="smtps://${SMTP_HOST}:${_smtp_port}" ;;
-            starttls)   _smtp_url="smtp://${SMTP_HOST}:${_smtp_port}";  _smtp_tls_flags=(--ssl-reqd) ;;
-            none|plain) _smtp_url="smtp://${SMTP_HOST}:${_smtp_port}" ;;
-            *) log_error "_smtp_send_with_attachment: unknown SMTP_SECURITY '${_smtp_security}'"; return 1 ;;
+        local port="${SMTP_PORT:-587}"
+        local security="${SMTP_SECURITY:-}"
+        local url
+        local -a tls_flags=()
+        [[ -n "$security" ]] || { [[ "$port" == "465" ]] && security="tls" || security="starttls"; }
+
+        case "${security,,}" in
+            tls|ssl|on)
+                url="smtps://${SMTP_HOST}:${port}"
+                ;;
+            starttls)
+                url="smtp://${SMTP_HOST}:${port}"
+                tls_flags=(--ssl-reqd)
+                ;;
+            none|plain|off)
+                url="smtp://${SMTP_HOST}:${port}"
+                ;;
+            *)
+                rm -f "$err_file"
+                log_error "Unknown SMTP_SECURITY='${security}'. Valid: tls starttls none"
+                return 1
+                ;;
         esac
 
-        local _netrc_file
-        _netrc_file=$(mktemp -p /dev/shm vw-smtp-netrc.XXXXXX 2>/dev/null || mktemp vw-smtp-netrc.XXXXXX)
-        chmod 600 "$_netrc_file"
-        # shellcheck disable=SC2064
-        trap "rm -f '${_netrc_file}' '${_msg_file}' 2>/dev/null; trap - RETURN" RETURN
-        printf 'machine %s\nlogin %s\npassword %s\n' \
-            "$SMTP_HOST" "$SMTP_USERNAME" "$SMTP_PASSWORD" > "$_netrc_file"
+        # Store SMTP authentication in a protected curl config rather than
+        # process arguments or .netrc. curl config quoting is supported by the
+        # project's minimum platform and preserves spaces and special characters.
+        local auth_config_file
+        auth_config_file=$(_email_make_temp_file vw-smtp-auth) || {
+            rm -f "$err_file"
+            log_error "Failed to create SMTP authentication config"
+            return 1
+        }
 
-        curl -s --connect-timeout 15 --max-time 60 \
-            "${_smtp_tls_flags[@]:-}" \
-            --url "$_smtp_url" \
-            --mail-from "$_smtp_from_addr" \
+        local auth_value="${SMTP_USERNAME}:${SMTP_PASSWORD}"
+        if [[ "$auth_value" == *$'\r'* || "$auth_value" == *$'\n'* ]]; then
+            rm -f "$auth_config_file" "$err_file"
+            unset auth_value
+            log_error "SMTP credentials contain a prohibited newline"
+            return 1
+        fi
+
+        # Escape the value for curl's double-quoted config-file syntax.
+        auth_value="${auth_value//\\/\\\\}"
+        auth_value="${auth_value//\"/\\\"}"
+        printf 'user = "%s"\n' "$auth_value" > "$auth_config_file"
+        unset auth_value
+
+        local rc=0
+        curl --silent --show-error \
+            --config "$auth_config_file" \
+            --connect-timeout 15 \
+            --max-time "${SMTP_TIMEOUT:-60}" \
+            "${tls_flags[@]}" \
+            --url "$url" \
+            --mail-from "$from_addr" \
             --mail-rcpt "$to" \
-            --netrc-file "$_netrc_file" \
-            --upload-file "$_msg_file"
-        local _rc=$?
-        rm -f "$_netrc_file"
-        return $_rc
+            --upload-file "$message_file" 2>"$err_file" || rc=$?
+
+        rm -f "$auth_config_file"
+
+        if [[ $rc -ne 0 ]]; then
+            _email_log_curl_failure \
+                "Direct SMTP relay ${SMTP_HOST}:${port}" \
+                "$rc" \
+                "$err_file"
+            rm -f "$err_file"
+            return "$rc"
+        fi
+
+        rm -f "$err_file"
+        return 0
     fi
 
-    # Postfix sidecar path (no SMTP_PASSWORD).
-    local _sidecar_addr="${VW_SMTP_HOST_PORT:-127.0.0.1:587}"
-    curl -s --connect-timeout 5 --max-time 60 \
-        --url "smtp://${_sidecar_addr}" \
-        --mail-from "$_smtp_from_addr" \
+    local sidecar_addr="${VW_SMTP_HOST_PORT:-127.0.0.1:587}"
+    local sidecar_host="${sidecar_addr%:*}"
+    local sidecar_port="${sidecar_addr##*:}"
+
+    if command -v nc >/dev/null 2>&1; then
+        if ! nc -z -w 2 "$sidecar_host" "$sidecar_port" >/dev/null 2>&1; then
+            rm -f "$err_file"
+            log_warn "Postfix sidecar unreachable at ${sidecar_addr}"
+            return 1
+        fi
+    elif ! (echo >/dev/tcp/"$sidecar_host"/"$sidecar_port") >/dev/null 2>&1; then
+        rm -f "$err_file"
+        log_warn "Postfix sidecar unreachable at ${sidecar_addr}"
+        return 1
+    fi
+
+    local rc=0
+    curl --silent --show-error \
+        --connect-timeout 5 \
+        --max-time "${SMTP_TIMEOUT:-60}" \
+        --url "smtp://${sidecar_host}:${sidecar_port}" \
+        --mail-from "$from_addr" \
         --mail-rcpt "$to" \
-        --upload-file "$_msg_file"
+        --upload-file "$message_file" 2>"$err_file" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        _email_log_curl_failure "Postfix sidecar ${sidecar_addr}" "$rc" "$err_file"
+        rm -f "$err_file"
+        return "$rc"
+    fi
+    rm -f "$err_file"
+    return 0
+}
+
+_host_send() {
+    local to="$1" subject="$2" body="$3"
+    _email_validate_address_value "recipient" "$to" || return 1
+
+    if command -v sendmail >/dev/null 2>&1; then
+        local message_file rc=0
+        message_file=$(_email_make_temp_file vw-host-mail) || return 1
+        if _email_build_text_message "$to" "$subject" "$body" "$message_file"; then
+            sendmail -t -oi < "$message_file" || rc=$?
+        else
+            rc=$?
+        fi
+        rm -f "$message_file"
+        return "$rc"
+    fi
+
+    if command -v mail >/dev/null 2>&1; then
+        printf '%s' "$body" | mail -s "$(_normalise_email_subject "$subject")" "$to"
+        return $?
+    fi
+
+    log_warn "Host MTA unavailable: neither sendmail nor mail is installed"
+    return 1
+}
+
+_host_send_with_attachment() {
+    local to="$1" subject="$2" body="$3" att_path="$4" att_name="$5"
+    if ! command -v sendmail >/dev/null 2>&1; then
+        log_warn "Host attachment delivery unavailable: sendmail is not installed"
+        return 1
+    fi
+
+    local message_file rc=0
+    message_file=$(_email_make_temp_file vw-host-attachment) || return 1
+    if _email_build_attachment_message \
+            "$to" "$subject" "$body" "$att_path" "$att_name" "$message_file"; then
+        sendmail -t -oi < "$message_file" || rc=$?
+    else
+        rc=$?
+    fi
+    rm -f "$message_file"
+    return "$rc"
 }
 
 
 # ---------------------------------------------------------------------------
 # Attachment variant drivers — one per API provider.
 #
-# Each function signature: SUBJECT BODY ATT_PATH ATT_NAME
-# (TO is always ADMIN_EMAIL, resolved inside each driver from the env.)
+# Each attachment driver signature: TO SUBJECT BODY ATT_PATH ATT_NAME.
+# The dispatcher-provided recipient is authoritative; drivers never read ADMIN_EMAIL.
 #
 # Mailgun: multipart/form-data — no base64 needed; curl streams the file
 #   directly with the @-prefix syntax, which is safer than embedding binary
@@ -821,76 +963,28 @@ _smtp_send_with_attachment() {
 #   This is a superior solution over the generic SMTP MIME approach for Mailgun.
 # ---------------------------------------------------------------------------
 _email_driver_mailgun_attachment() {
-    local subject="$1" body="$2" att_path="$3" att_name="$4"
-    subject="${subject//$'\r'/}"; subject="${subject//$'\n'/}"
-    body="${body//$'\r'/}";       body="${body//$'\n'/ }"
-    local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
-
-    local domain="${MAILGUN_DOMAIN:-}"
-    [[ -z "$domain" ]] && domain="${_from_email##*@}"
-    if [[ -z "$domain" ]]; then
-        log_error "Mailgun attachment driver: cannot determine domain. Set MAILGUN_DOMAIN in .env"
-        return 1
-    fi
-    if [[ ! "$domain" =~ ^[a-zA-Z0-9.-]+$ ]]; then
-        log_error "Mailgun attachment driver: invalid domain '${domain}'"
-        return 1
-    fi
-
-    local mg_region="${MAILGUN_REGION:-us}"
-    local mg_api_host
-    case "${mg_region,,}" in
-        us) mg_api_host="api.mailgun.net" ;;
-        eu) mg_api_host="api.eu.mailgun.net" ;;
-        *)  log_error "Mailgun attachment driver: unrecognised MAILGUN_REGION='${mg_region}'"; return 1 ;;
-    esac
-
-    local tmp cfg code
-    tmp=$(mktemp -t vw_email.XXXXXXXXXX)
-    cfg=$(mktemp -t vw_ecfg.XXXXXXXXXX)
-    if ! install -m 600 /dev/null "$cfg" 2>/dev/null; then
-        rm -f "$tmp" "$cfg"
-        log_error "Mailgun attachment driver: failed to secure curl config temp file"
-        return 1
-    fi
-    trap 'rm -f "$tmp" "$cfg" 2>/dev/null; trap - RETURN' RETURN
-    printf 'user = "api:%s"\n' "${EMAIL_API_TOKEN}" > "$cfg"
-
-    code=$(curl -s \
-        --config "$cfg" \
-        --connect-timeout 10 --max-time 60 \
-        -o "$tmp" -w "%{http_code}" \
-        -X POST "https://${mg_api_host}/v3/${domain}/messages" \
-        -F "from=${SMTP_FROM_NAME:-VaultWarden} <${_from_email}>" \
-        -F "to=${ADMIN_EMAIL}" \
-        -F "subject=${subject}" \
-        -F "text=${body}" \
-        -F "o:tracking=no" \
-        -F "attachment=@${att_path};filename=${att_name}" 2>/dev/null)
-
-    local resp; resp=$(head -c 300 "$tmp" 2>/dev/null | tr -d '\n')
-    [[ "$code" =~ ^2 ]] && return 0
-    log_warn "Mailgun attachment API HTTP ${code}: ${resp}"
-    return 1
+    local to="$1" subject="$2" body="$3" att_path="$4" att_name="$5"
+    _email_mailgun_post "$to" "$subject" "$body" "$att_path" "$att_name"
 }
 
 
 _email_driver_sendgrid_attachment() {
-    local subject="$1" body="$2" att_path="$3" att_name="$4"
+    local to="$1" subject="$2" body="$3" att_path="$4" att_name="$5"
     local s b fn fe ae
     s=$(_email_json_escape "$subject")
     b=$(_email_json_escape "$body")
-    local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
+    local from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
     fn=$(_email_json_escape "${SMTP_FROM_NAME:-VaultWarden}")
-    fe=$(_email_json_escape "${_from_email}")
-    ae=$(_email_json_escape "${ADMIN_EMAIL}")
+    fe=$(_email_json_escape "$from_email")
+    ae=$(_email_json_escape "$to")
 
-    local _att_b64
-    if ! _att_b64=$(base64 < "$att_path" | tr -d '\n' 2>/dev/null); then
+    local att_b64 an content_type
+    att_b64=$(_email_base64_file "$att_path") || {
         log_error "SendGrid attachment driver: base64 encoding failed"
         return 1
-    fi
-    local an; an=$(_email_json_escape "$att_name")
+    }
+    an=$(_email_json_escape "$(_email_safe_attachment_name "$att_name")")
+    content_type=$(_email_json_escape "$(_email_attachment_content_type "$att_name")")
 
     local payload
     payload=$(cat <<EOF
@@ -899,7 +993,7 @@ _email_driver_sendgrid_attachment() {
     "from":    { "email": "${fe}", "name": "${fn}" },
     "subject": "${s}",
     "content": [ { "type": "text/plain", "value": "${b}" } ],
-    "attachments": [ { "content": "${_att_b64}", "filename": "${an}", "type": "application/octet-stream", "disposition": "attachment" } ],
+    "attachments": [ { "content": "${att_b64}", "filename": "${an}", "type": "${content_type}", "disposition": "attachment" } ],
     "tracking_settings": {
         "click_tracking":        { "enable": false },
         "open_tracking":         { "enable": false },
@@ -908,6 +1002,7 @@ _email_driver_sendgrid_attachment() {
 }
 EOF
 )
+    unset att_b64
     _email_bearer_post "https://api.sendgrid.com/v3/mail/send" "$payload" && return 0
     log_warn "SendGrid attachment API HTTP ${_ECURL_CODE}: ${_ECURL_BODY}"
     return 1
@@ -915,21 +1010,21 @@ EOF
 
 
 _email_driver_mailersend_attachment() {
-    local subject="$1" body="$2" att_path="$3" att_name="$4"
+    local to="$1" subject="$2" body="$3" att_path="$4" att_name="$5"
     local s b fn fe ae
     s=$(_email_json_escape "$subject")
     b=$(_email_json_escape "$body")
-    local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
+    local from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
     fn=$(_email_json_escape "${SMTP_FROM_NAME:-VaultWarden}")
-    fe=$(_email_json_escape "${_from_email}")
-    ae=$(_email_json_escape "${ADMIN_EMAIL}")
+    fe=$(_email_json_escape "$from_email")
+    ae=$(_email_json_escape "$to")
 
-    local _att_b64
-    if ! _att_b64=$(base64 < "$att_path" | tr -d '\n' 2>/dev/null); then
+    local att_b64 an
+    att_b64=$(_email_base64_file "$att_path") || {
         log_error "MailerSend attachment driver: base64 encoding failed"
         return 1
-    fi
-    local an; an=$(_email_json_escape "$att_name")
+    }
+    an=$(_email_json_escape "$(_email_safe_attachment_name "$att_name")")
 
     local payload
     payload=$(cat <<EOF
@@ -938,11 +1033,12 @@ _email_driver_mailersend_attachment() {
     "to":   [ { "email": "${ae}" } ],
     "subject": "${s}",
     "text":    "${b}",
-    "attachments": [ { "content": "${_att_b64}", "filename": "${an}" } ],
+    "attachments": [ { "content": "${att_b64}", "filename": "${an}", "disposition": "attachment" } ],
     "settings": { "track_clicks": false, "track_opens": false }
 }
 EOF
 )
+    unset att_b64
     if _email_bearer_post "https://api.mailersend.com/v1/email" "$payload"; then
         [[ -n "${_ECURL_BODY}" ]] && log_warn "MailerSend attachment: queued with warnings: ${_ECURL_BODY}"
         return 0
@@ -953,32 +1049,22 @@ EOF
 
 
 _email_driver_postmark_attachment() {
-    local subject="$1" body="$2" att_path="$3" att_name="$4"
+    local to="$1" subject="$2" body="$3" att_path="$4" att_name="$5"
     local s b fn fe ae
     s=$(_email_json_escape "$subject")
     b=$(_email_json_escape "$body")
-    local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
+    local from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
     fn=$(_email_json_escape "${SMTP_FROM_NAME:-VaultWarden}")
-    fe=$(_email_json_escape "${_from_email}")
-    ae=$(_email_json_escape "${ADMIN_EMAIL}")
+    fe=$(_email_json_escape "$from_email")
+    ae=$(_email_json_escape "$to")
 
-    local _att_b64
-    if ! _att_b64=$(base64 < "$att_path" | tr -d '\n' 2>/dev/null); then
+    local att_b64 an content_type
+    att_b64=$(_email_base64_file "$att_path") || {
         log_error "Postmark attachment driver: base64 encoding failed"
         return 1
-    fi
-    local an; an=$(_email_json_escape "$att_name")
-
-    local tmp cfg code
-    tmp=$(mktemp -t vw_email.XXXXXXXXXX)
-    cfg=$(mktemp -t vw_ecfg.XXXXXXXXXX)
-    if ! install -m 600 /dev/null "$cfg" 2>/dev/null; then
-        rm -f "$tmp" "$cfg"
-        log_error "Postmark attachment driver: failed to secure curl config temp file"
-        return 1
-    fi
-    trap 'rm -f "$tmp" "$cfg" 2>/dev/null; trap - RETURN' RETURN
-    printf 'header = "X-Postmark-Server-Token: %s"\n' "${EMAIL_API_TOKEN}" > "$cfg"
+    }
+    an=$(_email_json_escape "$(_email_safe_attachment_name "$att_name")")
+    content_type=$(_email_json_escape "$(_email_attachment_content_type "$att_name")")
 
     local payload
     payload=$(cat <<EOF
@@ -988,46 +1074,41 @@ _email_driver_postmark_attachment() {
     "Subject":       "${s}",
     "TextBody":      "${b}",
     "MessageStream": "outbound",
-    "Attachments": [ { "Name": "${an}", "Content": "${_att_b64}", "ContentType": "application/octet-stream" } ]
+    "Attachments": [ { "Name": "${an}", "Content": "${att_b64}", "ContentType": "${content_type}" } ]
 }
 EOF
 )
-    code=$(curl -s \
-        --config "$cfg" \
-        --connect-timeout 10 --max-time 60 \
-        -o "$tmp" -w "%{http_code}" \
-        -X POST "https://api.postmarkapp.com/email" \
-        -H "Accept: application/json" \
-        -H "Content-Type: application/json" \
-        -d "$payload" 2>/dev/null)
+    unset att_b64
 
-    local resp; resp=$(head -c 300 "$tmp" 2>/dev/null | tr -d '\n')
-    if [[ ! "$code" =~ ^2 ]]; then
-        log_warn "Postmark attachment API HTTP ${code}: ${resp}"
+    if ! _email_json_post "https://api.postmarkapp.com/email" \
+            "X-Postmark-Server-Token" "${EMAIL_API_TOKEN}" "$payload"; then
+        log_warn "Postmark attachment API HTTP ${_ECURL_CODE}: ${_ECURL_BODY}"
         return 1
     fi
-    if echo "$resp" | grep -q '"ErrorCode":0'; then return 0; fi
-    log_warn "Postmark attachment API: HTTP 200 but ErrorCode != 0: ${resp}"
+    if grep -Eq '"ErrorCode"[[:space:]]*:[[:space:]]*0' <<< "${_ECURL_BODY}"; then
+        return 0
+    fi
+    log_warn "Postmark attachment API returned a non-zero ErrorCode: ${_ECURL_BODY}"
     return 1
 }
 
 
 _email_driver_resend_attachment() {
-    local subject="$1" body="$2" att_path="$3" att_name="$4"
+    local to="$1" subject="$2" body="$3" att_path="$4" att_name="$5"
     local s b fn fe ae
     s=$(_email_json_escape "$subject")
     b=$(_email_json_escape "$body")
-    local _from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
+    local from_email="${SMTP_FROM_EMAIL:-${SMTP_FROM:-}}"
     fn=$(_email_json_escape "${SMTP_FROM_NAME:-VaultWarden}")
-    fe=$(_email_json_escape "${_from_email}")
-    ae=$(_email_json_escape "${ADMIN_EMAIL}")
+    fe=$(_email_json_escape "$from_email")
+    ae=$(_email_json_escape "$to")
 
-    local _att_b64
-    if ! _att_b64=$(base64 < "$att_path" | tr -d '\n' 2>/dev/null); then
+    local att_b64 an
+    att_b64=$(_email_base64_file "$att_path") || {
         log_error "Resend attachment driver: base64 encoding failed"
         return 1
-    fi
-    local an; an=$(_email_json_escape "$att_name")
+    }
+    an=$(_email_json_escape "$(_email_safe_attachment_name "$att_name")")
 
     local payload
     payload=$(cat <<EOF
@@ -1036,10 +1117,11 @@ _email_driver_resend_attachment() {
     "to":      ["${ae}"],
     "subject": "${s}",
     "text":    "${b}",
-    "attachments": [ { "filename": "${an}", "content": "${_att_b64}" } ]
+    "attachments": [ { "filename": "${an}", "content": "${att_b64}" } ]
 }
 EOF
 )
+    unset att_b64
     _email_bearer_post "https://api.resend.com/emails" "$payload" && return 0
     log_warn "Resend attachment API HTTP ${_ECURL_CODE}: ${_ECURL_BODY}"
     return 1
@@ -1059,45 +1141,108 @@ EOF
 _dispatch_email_with_attachment() {
     local to="$1" subject="$2" body="$3" att_path="$4" att_name="$5"
 
-    [[ -z "$to" ]]         && { log_error "_dispatch_email_with_attachment: 'to' is empty";                  return 1; }
-    [[ ! -f "$att_path" ]] && { log_error "_dispatch_email_with_attachment: attachment not found: $att_path"; return 1; }
+    _email_validate_address_value "recipient" "$to" || return 1
+    [[ -f "$att_path" ]] || {
+        log_error "_dispatch_email_with_attachment: attachment not found: $att_path"
+        return 1
+    }
 
     subject=$(_normalise_email_subject "$subject")
 
     local mode="${EMAIL_MODE:-auto}"
     local provider="${EMAIL_PROVIDER:-smtp}"
-    [[ "$provider" == "smtp" ]] && mode="smtp"
-    [[ "$provider" == "host" ]] && mode="smtp"  # host MTA has no attachment support; SMTP fallback
+    mode="${mode,,}"
+    provider="${provider,,}"
 
-    # Resolve API token once (same logic as send_email).
-    local _api_token="${EMAIL_API_TOKEN:-}"
-    if [[ -z "$_api_token" ]] && declare -f decrypt_secret &>/dev/null; then
-        _api_token="$(decrypt_secret email_api_token 2>/dev/null || true)"
-    fi
+    case "$provider" in
+        smtp) mode="smtp" ;;
+        host|postfix) mode="host" ;;
+    esac
 
-    if [[ "$mode" == "auto" || "$mode" == "api" ]]; then
-        local driver_suffix
-        if driver_suffix=$(_email_driver_lookup "$provider" 2>/dev/null); then
-            local att_fn="_email_driver_${driver_suffix}_attachment"
-            if declare -f "$att_fn" &>/dev/null && [[ -n "$_api_token" ]]; then
-                if EMAIL_API_TOKEN="$_api_token" "$att_fn" "$subject" "$body" "$att_path" "$att_name"; then
+    case "$mode" in
+        auto|api|smtp|host) ;;
+        *)
+            log_error "Unknown EMAIL_MODE='${mode}'. Valid values: auto api smtp host"
+            return 1
+            ;;
+    esac
+
+    if [[ "$mode" == "api" || "$mode" == "auto" ]]; then
+        local driver_suffix=""
+        if ! driver_suffix=$(_email_driver_lookup "$provider" 2>/dev/null); then
+            if [[ "$mode" == "api" ]]; then
+                log_error "EMAIL_MODE=api requires an API provider; got EMAIL_PROVIDER='${provider}'"
+                return 1
+            fi
+            if [[ "$provider" != "smtp" && "$provider" != "host" && "$provider" != "postfix" ]]; then
+                log_error "Unknown EMAIL_PROVIDER='${provider}'"
+                return 1
+            fi
+        else
+            local api_token
+            api_token=$(_email_resolve_api_token)
+            if [[ -z "$api_token" ]]; then
+                if [[ "$mode" == "api" ]]; then
+                    log_error "EMAIL_MODE=api but EMAIL_API_TOKEN is empty"
+                    return 1
+                fi
+                log_warn "EMAIL_API_TOKEN is empty for ${provider}; falling back to SMTP"
+            elif [[ "$provider" == "cyberpersons" ]]; then
+                if [[ "$mode" == "api" ]]; then
+                    log_error "CyberPersons API does not support attachment delivery"
+                    return 1
+                fi
+                log_warn "CyberPersons API does not support attachments; falling back to SMTP"
+            else
+                local att_fn="_email_driver_${driver_suffix}_attachment"
+                if ! declare -f "$att_fn" &>/dev/null; then
+                    if [[ "$mode" == "api" ]]; then
+                        log_error "No attachment driver is implemented for ${provider}"
+                        return 1
+                    fi
+                    log_warn "No attachment driver for ${provider}; falling back to SMTP"
+                elif EMAIL_API_TOKEN="$api_token" \
+                        "$att_fn" "$to" "$subject" "$body" "$att_path" "$att_name"; then
                     log_success "Encrypted attachment sent via ${provider} API to ${to}"
                     return 0
+                elif [[ "$mode" == "api" ]]; then
+                    log_error "EMAIL_MODE=api: ${provider} attachment API failed — no fallback configured"
+                    return 1
+                else
+                    log_warn "${provider} attachment driver failed — falling back to SMTP"
                 fi
-                log_warn "_dispatch_email_with_attachment: ${provider} driver failed — falling back to SMTP"
-            elif [[ -z "$_api_token" ]]; then
-                log_warn "_dispatch_email_with_attachment: EMAIL_API_TOKEN empty for ${provider} — falling back to SMTP"
             fi
         fi
     fi
 
-    # SMTP fallback (or primary path when mode=smtp).
-    if _smtp_send_with_attachment "$to" "$subject" "$body" "$att_path" "$att_name"; then
-        log_success "Encrypted attachment sent via SMTP to ${to}"
-        return 0
+    if [[ "$mode" == "host" ]]; then
+        if _host_send_with_attachment "$to" "$subject" "$body" "$att_path" "$att_name"; then
+            log_success "Encrypted attachment sent via host MTA to ${to}"
+            return 0
+        fi
+        log_warn "Host MTA attachment delivery failed — falling back to SMTP"
     fi
 
-    log_error "_dispatch_email_with_attachment: all delivery paths failed (provider=${provider})"
+    if [[ "$mode" == "auto" || "$mode" == "smtp" || "$mode" == "host" ]]; then
+        if _smtp_send_with_attachment "$to" "$subject" "$body" "$att_path" "$att_name"; then
+            log_success "Encrypted attachment sent via SMTP to ${to}"
+            return 0
+        fi
+        [[ "$mode" == "smtp" ]] && {
+            log_error "EMAIL_MODE=smtp: SMTP attachment delivery failed"
+            return 1
+        }
+    fi
+
+    if [[ "$mode" == "auto" ]]; then
+        log_warn "SMTP attachment delivery failed — trying host MTA"
+        if _host_send_with_attachment "$to" "$subject" "$body" "$att_path" "$att_name"; then
+            log_success "Encrypted attachment sent via host MTA to ${to}"
+            return 0
+        fi
+    fi
+
+    log_error "All attachment delivery paths failed (mode=${mode}, provider=${provider})"
     return 1
 }
 
@@ -1125,14 +1270,17 @@ send_email() {
         body="${2:-}"
     fi
 
+    _email_validate_address_value "recipient" "$to" || return 1
+
     local mode="${EMAIL_MODE:-auto}"
     local provider="${EMAIL_PROVIDER:-smtp}"
+    mode="${mode,,}"
+    provider="${provider,,}"
 
-    if [[ "$provider" == "smtp" ]]; then
-        mode="smtp"
-    elif [[ "$provider" == "host" ]]; then
-        mode="host"
-    fi
+    case "$provider" in
+        smtp) mode="smtp" ;;
+        host|postfix) mode="host" ;;
+    esac
 
     case "$mode" in
         auto|api|smtp|host) ;;
@@ -1159,112 +1307,81 @@ send_email() {
     host_fqdn="$(hostname -f 2>/dev/null || hostname)"
     ts="$(date -uIs)"
 
-    local base_body="$body"
-
-    local api_token=""
-    local api_driver_fn=""
-
-    if [[ "$mode" == "auto" || "$mode" == "api" ]]; then
-        local driver_suffix
+    if [[ "$mode" == "api" || "$mode" == "auto" ]]; then
+        local driver_suffix=""
         if ! driver_suffix=$(_email_driver_lookup "$provider" 2>/dev/null); then
-            log_error "Unknown EMAIL_PROVIDER='${provider}'"
-            log_info  "Valid providers: mailersend sendgrid mailgun postmark resend cyberpersons smtp host"
-            [[ "$mode" == "api" ]] && return 1
-        else
-            local driver_fn="_email_driver_${driver_suffix}"
-            local _api_token="${EMAIL_API_TOKEN:-}"
-            if [[ -z "$_api_token" ]] && declare -f decrypt_secret &>/dev/null; then
-                _api_token="$(decrypt_secret email_api_token 2>/dev/null || true)"
+            if [[ "$mode" == "api" ]]; then
+                log_error "EMAIL_MODE=api requires an API provider; got EMAIL_PROVIDER='${provider}'"
+                return 1
             fi
-            api_token="$_api_token"
-            api_driver_fn="$driver_fn"
+            if [[ "$provider" != "smtp" && "$provider" != "host" && "$provider" != "postfix" ]]; then
+                log_error "Unknown EMAIL_PROVIDER='${provider}'"
+                return 1
+            fi
+        else
+            local api_token api_body driver_fn
+            api_token=$(_email_resolve_api_token)
+            api_body=$(_build_email_metadata_body \
+                "$body" "$host_fqdn" "$ts" "$mode" "$provider" "api (${provider})")
+            driver_fn="_email_driver_${driver_suffix}"
 
-            local api_body
-            api_body="$(_build_email_metadata_body \
-                "$base_body" "$host_fqdn" "$ts" "$mode" "$provider" \
-                "api (${provider})")"
-
-            if [[ -z "$_api_token" ]]; then
+            if [[ -z "$api_token" ]]; then
                 if [[ "$mode" == "api" ]]; then
-                    log_error "EMAIL_MODE=api but EMAIL_API_TOKEN is empty — cannot send. Run: ./utilities/secrets-rotate.sh email_api_token"
+                    log_error "EMAIL_MODE=api but EMAIL_API_TOKEN is empty"
                     return 1
                 fi
-                log_warn "EMAIL_PROVIDER=${provider} set but EMAIL_API_TOKEN is empty — falling back to SMTP. Run: ./utilities/secrets-rotate.sh email_api_token"
-            elif EMAIL_API_TOKEN="$_api_token" "$driver_fn" "$subject" "$api_body"; then
+                log_warn "EMAIL_API_TOKEN is empty for ${provider}; falling back to SMTP"
+            elif EMAIL_API_TOKEN="$api_token" "$driver_fn" "$to" "$subject" "$api_body"; then
                 log_success "Email sent via ${provider} API: ${subject}"
-                date +%s > "$stamp_file" 2>/dev/null || true
+                [[ -n "$stamp_file" ]] && date +%s > "$stamp_file" 2>/dev/null || true
                 return 0
+            elif [[ "$mode" == "api" ]]; then
+                log_error "EMAIL_MODE=api: ${provider} API failed — no fallback configured"
+                return 1
             else
-                if [[ "$mode" == "api" ]]; then
-                    log_error "EMAIL_MODE=api: ${provider} API failed — no fallback configured"
-                    return 1
-                fi
-                log_error "${provider} API failed — falling back to SMTP relay"
+                log_warn "${provider} API failed — falling back to SMTP"
             fi
         fi
     fi
 
-    if [[ "$mode" == "auto" || "$mode" == "smtp" ]]; then
-        local smtp_method smtp_body
-        smtp_method="$(_resolve_smtp_method)"
-        smtp_body="$(_build_email_metadata_body \
-            "$base_body" "$host_fqdn" "$ts" "$mode" "$provider" \
-            "$smtp_method")"
+    if [[ "$mode" == "host" ]]; then
+        local host_body
+        host_body=$(_build_email_metadata_body \
+            "$body" "$host_fqdn" "$ts" "$mode" "$provider" "host mta")
+        if _host_send "$to" "$subject" "$host_body"; then
+            log_success "Email sent via host MTA: ${subject}"
+            [[ -n "$stamp_file" ]] && date +%s > "$stamp_file" 2>/dev/null || true
+            return 0
+        fi
+        log_warn "Host MTA failed — falling back to SMTP"
+    fi
 
+    if [[ "$mode" == "auto" || "$mode" == "smtp" || "$mode" == "host" ]]; then
+        local smtp_method smtp_body
+        smtp_method=$(_resolve_smtp_method)
+        smtp_body=$(_build_email_metadata_body \
+            "$body" "$host_fqdn" "$ts" "$mode" "$provider" "$smtp_method")
         if _smtp_send "$to" "$subject" "$smtp_body"; then
-            log_success "Email sent via SMTP relay (${SMTP_HOST:-unconfigured}:${SMTP_PORT:-587}): ${subject}"
-            date +%s > "$stamp_file" 2>/dev/null || true
+            log_success "Email sent via SMTP (${SMTP_HOST:-${VW_SMTP_HOST_PORT:-127.0.0.1:587}}): ${subject}"
+            [[ -n "$stamp_file" ]] && date +%s > "$stamp_file" 2>/dev/null || true
             return 0
         fi
         if [[ "$mode" == "smtp" ]]; then
             log_error "EMAIL_MODE=smtp: SMTP relay failed — no fallback configured"
             return 1
         fi
-        log_warn "SMTP relay failed — falling back to host MTA"
     fi
 
-    local host_mta_failed=false
-    if [[ "$mode" == "auto" || "$mode" == "host" ]]; then
+    if [[ "$mode" == "auto" ]]; then
         local host_body
-        host_body="$(_build_email_metadata_body \
-            "$base_body" "$host_fqdn" "$ts" "$mode" "$provider" \
-            "host mta (sendmail/postfix)")"
-
-        if command -v mail &>/dev/null; then
-            if printf '%s' "$host_body" | mail -s "$subject" "$to" 2>/dev/null; then
-                log_success "Email sent via host MTA: ${subject}"
-                date +%s > "$stamp_file" 2>/dev/null || true
-                return 0
-            fi
-            host_mta_failed=true
-        else
-            host_mta_failed=true
-        fi
-        if [[ "$mode" == "host" ]]; then
-            log_error "EMAIL_MODE=host: host MTA failed or not available — no fallback configured"
-            return 1
-        fi
-    fi
-
-    if [[ "$mode" == "auto" && "$host_mta_failed" == "true" && -n "$api_token" && -n "$api_driver_fn" ]]; then
-        log_error "SMTP/host MTA delivery unavailable — attempting emergency API bypass (${provider})"
-
-        local emergency_body
-        emergency_body="$(_build_email_metadata_body \
-            "$base_body" "$host_fqdn" "$ts" "$mode" "$provider" \
-            "api emergency bypass (${provider})")"
-        emergency_body="${emergency_body}
-
-⚠ Delivery note: Sent via emergency API bypass after SMTP/host MTA failure."
-
-        if EMAIL_API_TOKEN="$api_token" "$api_driver_fn" "$subject" "$emergency_body"; then
-            log_success "Emergency API bypass succeeded via ${provider}: ${subject}"
-            date +%s > "$stamp_file" 2>/dev/null || true
+        host_body=$(_build_email_metadata_body \
+            "$body" "$host_fqdn" "$ts" "$mode" "$provider" "host mta")
+        log_warn "SMTP relay failed — falling back to host MTA"
+        if _host_send "$to" "$subject" "$host_body"; then
+            log_success "Email sent via host MTA: ${subject}"
+            [[ -n "$stamp_file" ]] && date +%s > "$stamp_file" 2>/dev/null || true
             return 0
         fi
-        log_error "Emergency API bypass failed via ${provider}"
-    elif [[ "$mode" == "auto" && "$host_mta_failed" == "true" ]]; then
-        log_error "Emergency API bypass skipped: EMAIL_API_TOKEN not resolved for provider '${provider}' — run: ./utilities/secrets-rotate.sh email_api_token"
     fi
 
     log_error "All email delivery methods failed (mode=${mode}, provider=${provider}, subject=${subject})"
@@ -1323,13 +1440,18 @@ clear_email_rate_limit() {
 }
 
 
-export -f _email_json_escape _email_bearer_post _email_driver_lookup
+export -f _email_json_escape _email_json_post _email_bearer_post _email_driver_lookup
+export -f _email_resolve_api_token _email_validate_address_value
+export -f _email_safe_attachment_name _email_base64_file _email_attachment_content_type _email_mailgun_post
 export -f _email_driver_mailersend _email_driver_sendgrid _email_driver_mailgun
 export -f _email_driver_postmark _email_driver_resend _email_driver_postfix
 export -f _email_driver_cyberpersons
 export -f _email_driver_mailgun_attachment _email_driver_sendgrid_attachment
 export -f _email_driver_mailersend_attachment _email_driver_postmark_attachment
 export -f _email_driver_resend_attachment _email_driver_cyberpersons_attachment
+export -f _email_make_temp_file _email_message_id
+export -f _email_build_text_message _email_build_attachment_message
+export -f _email_log_curl_failure _smtp_upload_message _host_send _host_send_with_attachment
 export -f _smtp_send_with_attachment _dispatch_email_with_attachment
 export -f _normalise_email_subject _resolve_rate_limit_dir _rate_limit_reset_message _rate_limit_check
 export -f _resolve_smtp_method _build_email_metadata_body

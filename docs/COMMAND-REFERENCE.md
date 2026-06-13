@@ -19,7 +19,7 @@ output. Do not edit manually; run `make docs` to regenerate.
 | `make init-secrets` |  Initialize secrets file (interactive) |
 | `make edit-secrets` |  Edit encrypted secrets file |
 | `make test-secrets` |  Test secrets decryption |
-| `make test-email` |  Send a test operational alert email (health/backup notification channel) |
+| `make test-email` |  Send a test email via the configured transport (auto/smtp/host) |
 | `make up` |  Start all services (runs startup.sh for health checks) |
 | `make start` |  Alias for up |
 | `make down` |  Stop all services gracefully |
@@ -58,8 +58,7 @@ output. Do not edit manually; run `make docs` to regenerate.
 | `make key-health` |  Check age key health (permissions, decodability, SOPS_AGE_KEY_FILE) |
 | `make key-install` |  Install Age key from secrets/keys/ to the path in SOPS_AGE_KEY_FILE |
 | `make key-show` |  Show current age public key and key file path/status |
-| `make key-backup` |  Backup age key to a secure offline location (interactive) |
-| `make key-escrow` |  Generate encrypted escrow package (requires GPG or another age key) |
+| `make key-backup` |  Export full recovery kit (Age key + all secrets) via secrets-export-recovery-kit.sh |
 | `make key-rotate` |  Rotate age encryption key (re-encrypts all secrets) |
 | `make update` |  Update all container images and restart |
 | `make check-updates` |  Check for available container image updates (no restart) |
@@ -767,6 +766,7 @@ DESCRIPTION:
 ### secrets-export-recovery-kit.sh
 
 ```
+[2026-06-13T04:46:59+0000] [log.sh] WARN .env not found — recovery-kit email delivery may be unavailable
 VaultWarden Secrets — export-recovery-kit subcommand
 
 USAGE:
