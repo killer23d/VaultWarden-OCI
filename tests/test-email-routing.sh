@@ -4,12 +4,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+PROJECT_ROOT_REAL="$(cd "${SCRIPT_DIR}/.." && pwd)"
+PROJECT_ROOT="$PROJECT_ROOT_REAL"
 TEST_TMP=$(mktemp -d -t vw-email-tests.XXXXXXXXXX)
 trap 'rm -rf "$TEST_TMP"' EXIT HUP INT TERM
 
 export PROJECT_ROOT="$TEST_TMP/project"
-mkdir -p "$PROJECT_ROOT"
+export EMAIL_TEMP_DIR="$TEST_TMP/email-tmp"
+mkdir -p "$PROJECT_ROOT" "$EMAIL_TEMP_DIR"
 export ADMIN_EMAIL="admin@example.test"
 export SMTP_FROM="sender@example.test"
 export SMTP_FROM_NAME="VaultWarden Test"
@@ -26,6 +28,14 @@ pass() { printf 'PASS: %s\n' "$*"; }
 assert_contains() {
     local haystack="$1" needle="$2" label="$3"
     [[ "$haystack" == *"$needle"* ]] || fail "${label}: missing '${needle}' in '${haystack}'"
+}
+
+assert_no_email_temp_files() {
+    local leftovers
+    leftovers=$(find "$EMAIL_TEMP_DIR" -maxdepth 1 -type f \
+        \( -name 'vw-email-*' -o -name 'vw-mailgun-*' -o -name 'vw-smtp-*' -o -name 'vw-host-*' \) \
+        -print)
+    [[ -z "$leftovers" ]] || fail "email temp files not cleaned up: ${leftovers}"
 }
 
 reset_transports() {
@@ -170,17 +180,25 @@ test_attachment_routing_and_mime() {
 }
 
 test_security_cleanup_and_rate_limit() {
-    local mock_bin="${TEST_TMP}/mock-bin" argv_log="${TEST_TMP}/argv" cfg_copy="${TEST_TMP}/config-copy" payload_copy="${TEST_TMP}/payload-copy"
+    local mock_bin="${TEST_TMP}/mock-bin" argv_log="${TEST_TMP}/argv" cfg_copy="${TEST_TMP}/config-copy"
+    local payload_copy="${TEST_TMP}/payload-copy" curl_count="${TEST_TMP}/curl-count" mode_log="${TEST_TMP}/mode-log"
     mkdir -p "$mock_bin"
+    printf '0\n' > "$curl_count"
     cat > "${mock_bin}/curl" <<EOF2
 #!/usr/bin/env bash
-printf '%s\n' "\$*" > "$argv_log"
+count=0
+[[ -f "$curl_count" ]] && count=\$(cat "$curl_count")
+count=\$((count + 1))
+printf '%s\n' "\$count" > "$curl_count"
+printf '%s\n' "\$*" >> "$argv_log"
 while [[ \$# -gt 0 ]]; do
     case \$1 in
-        --config) cp "\$2" "$cfg_copy"; shift 2 ;;
-        --data-binary) cp "\${2#@}" "$payload_copy"; shift 2 ;;
-        --output) printf '{"ErrorCode":0}' > "\$2"; shift 2 ;;
+        --config) stat -c '%a:%n' "\$2" >> "$mode_log"; cp "\$2" "$cfg_copy"; shift 2 ;;
+        --data-binary) stat -c '%a:%n' "\${2#@}" >> "$mode_log"; cp "\${2#@}" "$payload_copy"; shift 2 ;;
+        --output) stat -c '%a:%n' "\$2" >> "$mode_log"; printf '{"ErrorCode":0}' > "\$2"; shift 2 ;;
+        --upload-file) stat -c '%a:%n' "\$2" >> "$mode_log"; shift 2 ;;
         --write-out) shift 2 ;;
+        --form|--form-string|--url|--mail-from|--mail-rcpt|--max-time|--connect-timeout|--request|--header) shift 2 ;;
         *) shift ;;
     esac
 done
@@ -188,16 +206,56 @@ printf '200'
 exit "\${CURL_RC:-0}"
 EOF2
     chmod 700 "${mock_bin}/curl"
+
     local old_path="$PATH"
-    PATH="${mock_bin}:$PATH" EMAIL_API_TIMEOUT=3 _email_json_post "https://example.invalid" "Authorization" 'Bearer tok"with\\slash' '{"ok":true}' || fail "mock bearer post failed"
-    PATH="$old_path"
+    PATH="${mock_bin}:$PATH"
+    EMAIL_API_TIMEOUT=3 _email_json_post "https://example.invalid" "Authorization" 'Bearer tok"with\\slash' '{"ok":true}' \
+        || fail "mock bearer post failed"
+    [[ $(cat "$curl_count") == "1" ]] || fail "curl not invoked exactly once for valid API post"
     ! grep -Fq 'tok"with\slash' "$argv_log" || fail "API token leaked into argv"
     grep -Fq 'header = "Authorization: Bearer tok\"with\\\\slash"' "$cfg_copy" || fail "curl config escaping wrong"
     [[ $(cat "$payload_copy") == '{"ok":true}' ]] || fail "payload file mismatch"
-    ! compgen -G '/dev/shm/vw-email-*' >/dev/null || fail "email temp files left in /dev/shm after success"
+    awk -F: '{ if ($1 != "600") exit 1 }' "$mode_log" || fail "API temp files were not mode 0600"
+    assert_no_email_temp_files
 
-    _email_json_post "https://example.invalid" "Authorization" $'bad\nsecret' '{}' >/dev/null 2>&1 && fail "newline secret accepted"
-    _email_json_post "https://example.invalid" "Authorization" $'bad\001secret' '{}' >/dev/null 2>&1 && fail "control character secret accepted"
+    local before_count
+    before_count=$(cat "$curl_count")
+    _email_json_post "https://example.invalid" "Authorization" $'bad\nsecret' '{}' >/dev/null 2>&1 \
+        && fail "newline secret accepted"
+    [[ $(cat "$curl_count") == "$before_count" ]] || fail "curl invoked for newline secret"
+    _email_json_post "https://example.invalid" "Authorization" $'bad\001secret' '{}' >/dev/null 2>&1 \
+        && fail "control character secret accepted"
+    [[ $(cat "$curl_count") == "$before_count" ]] || fail "curl invoked for control-character secret"
+    assert_no_email_temp_files
+
+    CURL_RC=56 _email_json_post "https://example.invalid" "Authorization" 'Bearer failing-token' '{}' >/dev/null 2>&1 \
+        && fail "failing curl unexpectedly succeeded"
+    assert_no_email_temp_files
+    unset CURL_RC
+
+    : > "$argv_log"; : > "$mode_log"
+    EMAIL_API_TOKEN='mailgun-secret' MAILGUN_DOMAIN=mg.example.test MAILGUN_REGION=us \
+        _email_mailgun_post "to@example.test" "Mailgun" "Body" || fail "mock Mailgun post failed"
+    ! grep -Fq 'mailgun-secret' "$argv_log" || fail "Mailgun token leaked into argv"
+    awk -F: '{ if ($1 != "600") exit 1 }' "$mode_log" || fail "Mailgun temp files were not mode 0600"
+    assert_no_email_temp_files
+
+    : > "$argv_log"; : > "$mode_log"
+    SMTP_PASSWORD='smtp secret' SMTP_USERNAME='smtp-user' SMTP_HOST='smtp.example.test' SMTP_PORT=587 SMTP_SECURITY=starttls \
+        _smtp_send "to@example.test" "SMTP" "Body" || fail "mock direct SMTP failed"
+    ! grep -Fq 'smtp secret' "$argv_log" || fail "SMTP password leaked into argv"
+    awk -F: '{ if ($1 != "600") exit 1 }' "$mode_log" || fail "SMTP temp files were not mode 0600"
+    assert_no_email_temp_files
+
+    cat > "${mock_bin}/sendmail" <<'EOF2'
+#!/usr/bin/env bash
+cat >/dev/null
+exit 0
+EOF2
+    chmod 700 "${mock_bin}/sendmail"
+    _host_send "to@example.test" "Host" "Body" || fail "mock host send failed"
+    assert_no_email_temp_files
+    PATH="$old_path"
 
     rm -rf "$PROJECT_ROOT/.rate-limit"
     reset_transports
@@ -214,6 +272,53 @@ EOF2
     EMAIL_MODE=smtp SMTP_RESULT=1 send_email "rate@example.test" "Failed Subject" "B" >/dev/null 2>&1 && fail "failed send unexpectedly succeeded"
     ! find "$PROJECT_ROOT/.rate-limit" -type f -name '.vw_last_email_*' | grep -q . || fail "failed send wrote rate stamp"
     pass "security cleanup and rate limiting"
+}
+
+test_signal_cleanup_preserves_termination() {
+    local sig expected_rc signal_dir child_script ready_file temp_file prior_file pid rc
+    for sig in TERM INT; do
+        signal_dir="${TEST_TMP}/signal-${sig}"
+        mkdir -p "$signal_dir"
+        ready_file="${signal_dir}/ready"
+        temp_file="${signal_dir}/temp-path"
+        prior_file="${signal_dir}/prior-exit"
+        child_script="${signal_dir}/child.sh"
+        cat > "$child_script" <<EOF2
+#!/usr/bin/env bash
+set -euo pipefail
+trap - TERM HUP
+trap 'exit 130' INT
+export EMAIL_TEMP_DIR="$signal_dir"
+source "${PROJECT_ROOT_REAL}/lib/log.sh"
+source "${PROJECT_ROOT_REAL}/lib/email.sh"
+trap 'printf prior > "$prior_file"; exit 99' EXIT
+_email_make_temp_file_var held_file vw-email-signal
+printf '%s' "\$held_file" > "$temp_file"
+printf ready > "$ready_file"
+while :; do :; done
+EOF2
+        chmod 700 "$child_script"
+        env --default-signal=INT --default-signal=TERM setsid "$child_script" &
+        pid=$!
+        for _ in {1..50}; do
+            [[ -f "$ready_file" ]] && break
+            sleep 0.1
+        done
+        [[ -f "$ready_file" ]] || fail "signal cleanup child did not become ready for ${sig}"
+        local held_file
+        held_file=$(cat "$temp_file")
+        [[ -f "$held_file" ]] || fail "signal cleanup temp file missing before ${sig}"
+        kill -"$sig" -- "-$pid"
+        rc=0
+        wait "$pid" || rc=$?
+        expected_rc=143
+        [[ "$sig" == "INT" ]] && expected_rc=130
+        [[ "$rc" -eq "$expected_rc" ]] || fail "${sig} child exited with ${rc}, expected ${expected_rc}"
+        [[ ! -f "$held_file" ]] || fail "temp file survived ${sig}"
+        [[ -f "$prior_file" ]] || fail "pre-existing EXIT trap was not preserved for ${sig}"
+        assert_no_email_temp_files
+    done
+    pass "signal cleanup preserves termination semantics"
 }
 
 test_recovery_help_and_maintenance_recipient() {
@@ -238,6 +343,7 @@ test_driver_compatibility
 test_routing_matrix
 test_attachment_routing_and_mime
 test_security_cleanup_and_rate_limit
+test_signal_cleanup_preserves_termination
 test_recovery_help_and_maintenance_recipient
 
 printf 'Email routing regression tests passed.\n'

@@ -41,6 +41,7 @@ _ECURL_CODE=""
 _ECURL_BODY=""
 _EMAIL_TEMP_FILES=()
 _EMAIL_CLEANUP_TRAPS_INSTALLED=0
+_EMAIL_PREVIOUS_EXIT_TRAP_ACTION=""
 
 
 _email_cleanup_temp_files() {
@@ -52,18 +53,24 @@ _email_cleanup_temp_files() {
     done
 }
 
+_email_run_exit_cleanup() {
+    local status="${1:-0}"
+    _email_cleanup_temp_files
+    if [[ -n "${_EMAIL_PREVIOUS_EXIT_TRAP_ACTION:-}" ]]; then
+        ( eval "$_EMAIL_PREVIOUS_EXIT_TRAP_ACTION" ) || true
+    fi
+    exit "$status"
+}
+
 _email_install_cleanup_traps() {
     [[ "${_EMAIL_CLEANUP_TRAPS_INSTALLED:-}" == "1" ]] && return 0
     _EMAIL_CLEANUP_TRAPS_INSTALLED=1
-    local sig existing action
-    for sig in EXIT HUP INT TERM; do
-        existing=$(trap -p "$sig" || true)
-        action="_email_cleanup_temp_files"
-        if [[ "$existing" =~ ^trap\ --\ \'(.*)\'\ ${sig}$ ]]; then
-            action="${BASH_REMATCH[1]}; ${action}"
-        fi
-        trap -- "$action" "$sig"
-    done
+    local existing
+    existing=$(trap -p EXIT || true)
+    if [[ "$existing" =~ ^trap\ --\ \'(.*)\'\ EXIT$ ]]; then
+        _EMAIL_PREVIOUS_EXIT_TRAP_ACTION="${BASH_REMATCH[1]}"
+    fi
+    trap -- '_email_run_exit_cleanup "$?"' EXIT
 }
 
 _email_register_temp_file() {
@@ -85,7 +92,12 @@ _email_make_temp_file_var() {
 
 _email_validate_curl_config_value() {
     local label="$1" value="$2"
-    if LC_ALL=C printf '%s' "$value" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+    if [[ "$value" == *$'\r'* || "$value" == *$'\n'* ]]; then
+        log_error "${label} contains a prohibited CR/LF character"
+        return 1
+    fi
+    local control_re=$'[\001-\010\013\014\016-\037\177]'
+    if [[ "$value" =~ $control_re ]]; then
         log_error "${label} contains a prohibited ASCII control character"
         return 1
     fi
@@ -833,9 +845,13 @@ _smtp_send_with_attachment() {
 # VW_EMAIL_ROUTING_V2: shared RFC-5322/MIME and transport helpers.
 _email_make_temp_file() {
     local prefix="${1:-vw-email}"
-    local path
-    path=$(mktemp -p /dev/shm "${prefix}.XXXXXX" 2>/dev/null \
-        || mktemp -t "${prefix}.XXXXXX") || return 1
+    local path temp_dir="${EMAIL_TEMP_DIR:-/dev/shm}"
+    if [[ -n "$temp_dir" && -d "$temp_dir" && -w "$temp_dir" ]]; then
+        path=$(mktemp -p "$temp_dir" "${prefix}.XXXXXX" 2>/dev/null) || return 1
+    else
+        path=$(mktemp -p /dev/shm "${prefix}.XXXXXX" 2>/dev/null \
+            || mktemp -t "${prefix}.XXXXXX") || return 1
+    fi
     if ! install -m 600 /dev/null "$path" 2>/dev/null; then
         chmod 600 "$path" 2>/dev/null || {
             rm -f "$path"
@@ -1666,7 +1682,7 @@ clear_email_rate_limit() {
 
 
 export -f _email_json_escape _email_json_post _email_bearer_post _email_driver_lookup
-export -f _email_cleanup_temp_files _email_install_cleanup_traps _email_register_temp_file
+export -f _email_cleanup_temp_files _email_run_exit_cleanup _email_install_cleanup_traps _email_register_temp_file
 export -f _email_make_temp_file_var
 export -f _email_validate_curl_config_value _email_curl_config_quote
 export -f _email_parse_driver_args _email_parse_attachment_driver_args
