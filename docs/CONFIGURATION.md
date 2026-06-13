@@ -1,6 +1,6 @@
 # Configuration Reference — VaultWarden-OCI
 
-All configuration is split between two files: **`.env`** (non-sensitive settings) and **`secrets/secrets.yaml`** (encrypted with Age + SOPS, edited via `./utilities/secrets-edit.sh`). Both are generated from `.example` templates by `setup.sh` — never edit generated files directly.
+All configuration is split between two files: **`.env`** (non-sensitive settings) and **`$SECRETS_FILE`** (encrypted with Age + SOPS, default: `secrets/secrets.yaml`, edited via `./utilities/secrets-edit.sh`). Both are generated from `.example` templates by `setup.sh` — never edit generated files directly.
 
 Related docs: [DEPLOYMENT.md](DEPLOYMENT.md) · [SECURITY.md](SECURITY.md) · [ADVANCED-CUSTOMIZATION.md](ADVANCED-CUSTOMIZATION.md)
 

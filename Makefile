@@ -22,9 +22,12 @@ CYAN   := \033[0;36m
 NC     := \033[0m
 
 # ── Configuration ────────────────────────────────────────────────────────────
+PROJECT_ROOT         ?= $(shell pwd)
 COMPOSE_FILE         ?= docker-compose.yml
 COMPOSE_PROJECT_NAME ?= vaultwarden-oci
 DOCKER_COMP          ?= $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
+# Resolve SECRETS_FILE from lib/config.sh at make-time; operator may override.
+SECRETS_FILE         ?= $(shell PROJECT_ROOT="$(PROJECT_ROOT)" bash -c '. "$(PROJECT_ROOT)/lib/config.sh" >/dev/null 2>&1; printf "%s" "$$SECRETS_FILE"')
 
 SERVICES          = vaultwarden caddy postfix
 CORE_SERVICES     = vaultwarden caddy
@@ -182,10 +185,10 @@ fix-permissions: ## Fix file ownership after sudo operations leave root-owned fi
 	    [ -e "$$item" ] && chown -R "$$REAL_USER:$$REAL_GROUP" "$$item" 2>/dev/null && \
 	        echo "$(GREEN)  ✓ $$item$(NC)" || true; \
 	done; \
-	if [ -f "secrets/secrets.yaml" ]; then \
-	    chown "$$REAL_USER:$$REAL_GROUP" secrets/secrets.yaml; \
-	    chmod 600 secrets/secrets.yaml; \
-	    echo "$(GREEN)  ✓ secrets/secrets.yaml → $$REAL_USER:$$REAL_GROUP (mode 600)$(NC)"; \
+	if [ -f "$(SECRETS_FILE)" ]; then \
+	    chown "$$REAL_USER:$$REAL_GROUP" "$(SECRETS_FILE)"; \
+	    chmod 600 "$(SECRETS_FILE)"; \
+	    echo "$(GREEN)  ✓ $(SECRETS_FILE) → $$REAL_USER:$$REAL_GROUP (mode 600)$(NC)"; \
 	fi; \
 	find . -maxdepth 1 -name "recovery-kit-*.txt" -exec chown "$$REAL_USER:$$REAL_GROUP" {} \; -exec chmod 600 {} \; 2>/dev/null; \
 	if ls recovery-kit-*.txt 1> /dev/null 2>&1; then \
@@ -233,7 +236,7 @@ fix-permissions: ## Fix file ownership after sudo operations leave root-owned fi
 
 init-secrets: ## Initialize secrets file (interactive)
 	@echo "$(BLUE)Initializing secrets...$(NC)"
-	@if [ ! -f "secrets/secrets.yaml" ]; then \
+	@if [ ! -f "$(SECRETS_FILE)" ]; then \
 		echo "$(BLUE)No secrets file found. Running setup.sh secrets...$(NC)"; \
 		./setup.sh secrets; \
 	else \
@@ -280,7 +283,7 @@ up: ## Start all services (runs startup.sh for health checks)
 		echo "$(RED)       re-run: make up$(NC)"; \
 		exit 1; \
 	fi
-	@if [ ! -f "secrets/secrets.yaml" ]; then \
+	@if [ ! -f "$(SECRETS_FILE)" ]; then \
 		echo "$(YELLOW)No secrets file found. Initializing...$(NC)"; \
 		./setup.sh secrets; \
 	fi
@@ -299,8 +302,8 @@ up: ## Start all services (runs startup.sh for health checks)
 #     continue; startup.sh will decrypt and regenerate the docker-secret files.
 #     If decryption itself fails (wrong/missing Age key), startup.sh's own
 #     check_age_key_health_preflight() provides the actionable error message.
-	@if ! test -f "secrets/secrets.yaml"; then \
-		echo "$(RED)ERROR: secrets/secrets.yaml not found — secrets have never been initialised.$(NC)"; \
+	@if ! test -f "$(SECRETS_FILE)"; then \
+		echo "$(RED)ERROR: $(SECRETS_FILE) not found — secrets have never been initialised.$(NC)"; \
 		echo "$(RED)       Run: ./setup.sh secrets  (or: make init-secrets)$(NC)"; \
 		exit 1; \
 	elif ! test -s "secrets/.docker_secrets/admin_token"; then \

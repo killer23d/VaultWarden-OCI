@@ -140,7 +140,7 @@ docker compose logs caddy | tail -30
 
 # Verify the cost factor of your current hash (factor is between the second and third $)
 # Example hash: $2b$06$... means cost=6 (too low)
-grep admin_basic_auth_hash secrets/secrets.yaml   # encrypted; use utilities/secrets-edit.sh
+grep admin_basic_auth_hash "${SECRETS_FILE:-secrets/secrets.yaml}"   # encrypted; use utilities/secrets-edit.sh
 ./utilities/secrets-list.sh
 ```
 
@@ -331,7 +331,7 @@ chmod 700 secrets/
 chmod 600 secrets/keys/age-key.txt
 
 # Test decryption manually (secrets are SOPS-encrypted; use sops -d)
-sops -d secrets/secrets.yaml
+sops -d "${SECRETS_FILE:-secrets/secrets.yaml}"
 ```
 
 ### Secrets Environment Leaking to Child Processes
@@ -688,7 +688,7 @@ ls backups/db/ | grep -v '[0-9]\{8\}-[0-9]\{6\}'
 sha256sum -c backup.age.sha256
 
 # Test SOPS decryption against backup
-sops -d secrets/secrets.yaml > /dev/null
+sops -d "${SECRETS_FILE:-secrets/secrets.yaml}" > /dev/null
 
 # Check backup metadata
 cat backup.age.meta

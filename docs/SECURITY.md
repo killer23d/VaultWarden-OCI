@@ -180,7 +180,7 @@ Containers (Read-Only Access)
 ### Protected Secrets
 
 ```yaml
-# secrets/secrets.yaml (encrypted)
+# $SECRETS_FILE  (default: secrets/secrets.yaml, encrypted)
 admin_token: "48-char-alphanumeric-string"
 admin_basic_auth_hash: "admin $2b$14$bcrypt_hash"
 caddy_cloudflare_dns_token: "cloudflare_dns_token"

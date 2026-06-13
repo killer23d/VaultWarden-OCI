@@ -590,12 +590,12 @@ OPTIONS:
 
 SECRET SOURCE PRIORITY:
     caddy_cloudflare_dns_token — resolved in order:
-        1. decrypt_secret() from encrypted secrets/secrets.yaml
+        1. decrypt_secret() from encrypted $SECRETS_FILE
         2. Host file: $CF_TOKEN_FILE or secrets/.docker_secrets/caddy_cloudflare_dns_token
         3. Caddy container: /run/secrets/caddy_cloudflare_dns_token
 
     cloudflare_zone_id — resolved in order:
-        1. decrypt_secret() from encrypted secrets/secrets.yaml
+        1. decrypt_secret() from encrypted $SECRETS_FILE
         2. CLOUDFLARE_ZONE_ID environment variable / .env
 
 EXIT CODES:

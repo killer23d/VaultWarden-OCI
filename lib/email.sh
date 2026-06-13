@@ -1102,9 +1102,14 @@ _dispatch_email_with_attachment() {
 }
 
 
-# send_email [TO] SUBJECT BODY
+# send_email [TO] SUBJECT BODY [ATT_PATH [ATT_NAME]]
 #
 # TO is optional; defaults to ${ADMIN_EMAIL}.
+# ATT_PATH is optional; when set to a readable file, the message is sent as a
+#   MIME multipart/mixed attachment via _dispatch_email_with_attachment().
+#   ATT_NAME is the filename shown to the recipient (default: basename of ATT_PATH).
+#   NOTE: attachment delivery bypasses the rate-limit and the auto-fallback loop;
+#   the existing behaviour for non-attachment sends is unchanged.
 # Tries providers in order: HTTP API → SMTP/Postfix sidecar → host MTA.
 #
 # Token resolution for HTTP API providers:
@@ -1114,15 +1119,26 @@ _dispatch_email_with_attachment() {
 #     1. EMAIL_API_TOKEN env var (direct override, e.g. set in shell)
 #     2. decrypt_secret email_api_token  (from secrets.yaml via SOPS/age)
 send_email() {
-    local to subject body
+    local to subject body att_path att_name
     if [[ $# -ge 3 ]]; then
         to="$1"
         subject="${2:-VaultWarden Notification}"
         body="${3:-}"
+        att_path="${4:-}"
+        att_name="${5:-}"
     else
         to="${ADMIN_EMAIL:-}"
         subject="${1:-VaultWarden Notification}"
         body="${2:-}"
+        att_path=""
+        att_name=""
+    fi
+
+    # Attachment fast-path: bypass rate-limit and auto-fallback loop.
+    if [[ -n "$att_path" ]] && [[ -f "$att_path" ]]; then
+        [[ -z "$att_name" ]] && att_name="$(basename "$att_path")"
+        _dispatch_email_with_attachment "$to" "$subject" "$body" "$att_path" "$att_name"
+        return $?
     fi
 
     local mode="${EMAIL_MODE:-auto}"

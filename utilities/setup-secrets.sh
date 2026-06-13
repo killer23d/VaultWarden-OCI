@@ -1882,7 +1882,7 @@ EOF
 
     local age_key_file="${PROJECT_ROOT}/secrets/keys/age-key.txt"
     local sops_config="${PROJECT_ROOT}/.sops.yaml"
-    local secrets_file="${PROJECT_ROOT}/secrets/secrets.yaml"
+    local secrets_file="${SECRETS_FILE:-${PROJECT_ROOT}/secrets/secrets.yaml}"
     local canonical_key="/etc/vaultwarden/age-key.txt"
 
     if [[ "$DRY_RUN" == "true" ]]; then

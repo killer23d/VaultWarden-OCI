@@ -148,9 +148,9 @@ drill_secrets() {
         _step_fail "age-key-health" "key health check failed — run: make key-health"
     fi
 
-    local secrets_file="$SCRIPT_DIR/secrets/secrets.yaml"
+    local secrets_file="${SECRETS_FILE:-${SCRIPT_DIR}/secrets/secrets.yaml}"
     if [[ ! -f "$secrets_file" ]]; then
-        _step_fail "secrets-file" "secrets/secrets.yaml not found — run: ./setup.sh secrets"
+        _step_fail "secrets-file" "secrets file not found: ${secrets_file} — run: ./setup.sh secrets"
         return
     fi
 
