@@ -75,8 +75,8 @@ run_deep_db_maintenance() {
         log_warn "This will stop the VaultWarden container temporarily. (Caddy stays up)"
         log_info "Database: $db_file  |  Current Size: $original_size"
         echo ""
-        read -r -t 30 -p "Continue with deep database maintenance? (Y/n): " confirm || confirm="Y"
-        [[ "$confirm" =~ ^[Nn]$ ]] && { log_info "Deep maintenance cancelled"; return 0; }
+        read -r -t 30 -p "Continue with deep database maintenance? (yes/no): " confirm || confirm="yes"
+        [[ "${confirm,,}" != "yes" ]] && { log_info "Deep maintenance cancelled"; return 0; }
     fi
     local safety_backup_file=""
     local maintenance_successful=false
@@ -99,8 +99,8 @@ run_deep_db_maintenance() {
         rm -f "$backup_ts_marker"
         log_error "Pre-maintenance safety backup failed — aborting deep maintenance"
         if [[ "$DB_DEEP_FORCE" == "false" ]]; then
-            read -r -t 30 -p "Proceed without a safety backup? (y/N): " confirm_no_backup || confirm_no_backup="n"
-            [[ ! "$confirm_no_backup" =~ ^[Yy]$ ]] && { log_info "Maintenance cancelled"; return 1; }
+            read -r -t 30 -p "Proceed without a safety backup? (yes/no): " confirm_no_backup || confirm_no_backup="no"
+            [[ "${confirm_no_backup,,}" != "yes" ]] && { log_info "Maintenance cancelled"; return 1; }
         else
             log_warn "Proceeding without safety backup (--force specified)"
         fi
@@ -181,7 +181,7 @@ run_deep_db_maintenance() {
     elif [[ -n "$safety_backup_file" && -f "$safety_backup_file" ]]; then
         log_warn "Maintenance did not complete successfully. Retaining safety backup: $safety_backup_file"
     fi
-    [[ "$maintenance_successful" == "true" ]]
+    [[  "$maintenance_successful" == "true" ]]
 }
 
 [[ "${1:-}" == "db-maint" ]] && shift
