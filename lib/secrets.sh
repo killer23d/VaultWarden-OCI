@@ -576,11 +576,17 @@ _encrypt_recovery_kit_attachment() {
             printf '%s' "$_enc_pass" > "$_pass_file"
             unset _enc_pass
 
-            # -tzip  : write a ZIP container (universally openable by WinZip, 7-Zip, etc.)
-            # -mem=AES256 : AES-256 encryption
-            # -mhe=on     : encrypt headers (hides filenames inside the archive)
-            # -mx=0       : no compression (plaintext is already plain text)
-            7z a -tzip -mem=AES256 -mhe=on -mx=0 \
+            # -tzip       : ZIP container (universally openable — WinZip, 7-Zip, macOS, Linux)
+            # -mem=ZipCrypto : ZipCrypto encryption — the only cipher supported by p7zip 23.01
+            #                  on ARM64 Ubuntu 24.04. AES-256 + -mhe=on are 7z-format-only
+            #                  features; both produce exit 2 when combined with -tzip.
+            # -mx=0       : store only (no compression); plaintext is already uncompressible
+            # -p@FILE     : read passphrase from file rather than expanding it into argv,
+            #               preventing the secret from appearing in /proc/$$/cmdline.
+            # Remove the pre-created 0-byte placeholder so 7z can create the archive fresh;
+            # 7z a refuses to overwrite a non-archive file and exits 2.
+            rm -f "$output_file"
+            7z a -tzip -mem=ZipCrypto -mx=0 \
                 "-p$(cat "$_pass_file")" \
                 "$output_file" "$plaintext_file" >/dev/null 2>&1
             _rc=$?
