@@ -627,54 +627,69 @@ _encrypt_recovery_kit_attachment() {
 # ---------------------------------------------------------------------------
 # _offer_email_recovery_kit PLAINTEXT_FILE
 #
-# Called after the kit has been displayed on the TTY. Prompts Y/N, encrypts
-# the kit with 7z or zip (AES-256), sends via _dispatch_email_with_attachment
-# (which respects EMAIL_PROVIDER / EMAIL_MODE), then unconditionally shreds
-# the encrypted attachment regardless of send outcome.
-#
-# Superior solution vs. spec: routes through _dispatch_email_with_attachment
-# rather than hard-wiring _smtp_send_with_attachment, so the active email
-# provider (Mailgun, SendGrid, etc.) is used when configured.
+# Sends the encrypted recovery kit only through the SMTP attachment path.
+# The prompt is shown before passphrase collection, and non-secret direct-SMTP
+# settings are validated before encryption so operators fail early.
 # ---------------------------------------------------------------------------
 _offer_email_recovery_kit() {
     local plaintext_file="$1"
 
     local _tool
     if ! _tool=$(_check_recovery_kit_email_deps); then
-        return 0   # Warning already printed; skip silently.
+        return 0
     fi
 
     echo "" >/dev/tty
     local _yn
-    printf 'Email an encrypted backup of this document? (y/N): ' >/dev/tty
+    cat >/dev/tty <<'PROMPT'
+Recovery-kit attachments use SMTP only.
+The HTTP email API is not used for attachments. Delivery first uses the
+Postfix sidecar and falls back to the configured upstream SMTP relay when
+the sidecar is unavailable.
+SMTP_FROM, SMTP_HOST, SMTP_PORT, SMTP_USERNAME, and smtp_password must
+be configured.
+Email an encrypted backup of this document via SMTP? (y/N):
+PROMPT
     read -r -t 30 _yn </dev/tty 2>/dev/null || _yn="n"
     if [[ "${_yn,,}" != "y" ]]; then
         return 0
     fi
 
-    # Both 7z (-tzip) and zip produce .zip containers.
-    local _ext="zip"
-    local _att_name
-    _att_name="important-documents-$(date +%Y%m%d).${_ext}"
+    local _from
+    if ! _from=$(resolve_email_sender); then
+        return 1
+    fi
+    if [[ -z "$_from" || "$_from" == *$'\r'* || "$_from" == *$'\n'* ]]; then
+        log_error "Recovery-kit email preflight: SMTP_FROM is missing or invalid"
+        return 1
+    fi
+    if [[ -z "${SMTP_HOST:-}" || "${SMTP_HOST:-}" == *$'\r'* || "${SMTP_HOST:-}" == *$'\n'* ]]; then
+        log_error "Recovery-kit email preflight: SMTP_HOST is missing or invalid"
+        return 1
+    fi
+    if [[ -z "${SMTP_PORT:-}" || ! "${SMTP_PORT:-}" =~ ^[0-9]+$ ]]; then
+        log_error "Recovery-kit email preflight: SMTP_PORT is missing or invalid"
+        return 1
+    fi
+    if [[ -z "${SMTP_USERNAME:-}" || "${SMTP_USERNAME:-}" == *$'\r'* || "${SMTP_USERNAME:-}" == *$'\n'* ]]; then
+        log_error "Recovery-kit email preflight: SMTP_USERNAME is missing or invalid"
+        return 1
+    fi
+    log_info "Recovery-kit email preflight passed for non-secret SMTP settings; smtp_password will be resolved only if Direct SMTP fallback is needed."
 
-    local _att_file
-    _att_file=$(mktemp -p /dev/shm "vw-att.XXXXXX.${_ext}" 2>/dev/null \
-        || mktemp "vw-att.XXXXXX.${_ext}")
+    local _ext="zip" _att_name _att_file
+    _att_name="important-documents-$(date +%Y%m%d).${_ext}"
+    _att_file=$(mktemp -p /dev/shm "vw-att.XXXXXX.${_ext}" 2>/dev/null || mktemp "vw-att.XXXXXX.${_ext}")
     install -m 600 /dev/null "$_att_file"
-    # shellcheck disable=SC2064  # intentional: expand now to capture path
     register_cleanup "_secure_shred" "$_att_file"
 
-    if ! _encrypt_recovery_kit_attachment \
-            "$plaintext_file" "$_att_file" "$_tool"; then
+    if ! _encrypt_recovery_kit_attachment "$plaintext_file" "$_att_file" "$_tool"; then
         log_error "Could not encrypt attachment — email skipped"
         _secure_shred "$_att_file" 2>/dev/null || true
         return 1
     fi
 
-    # Obfuscated subject and body — intentionally generic so the email does
-    # not advertise that it contains VaultWarden credentials.
-    local _subject="Do not lose this — important account documents"
-    local _body
+    local _subject="Do not lose this — important account documents" _body _to
     _body=$(cat <<'BODY'
 Please keep this file somewhere safe.
 
@@ -686,33 +701,22 @@ Do not share this file or the passphrase with anyone.
 If you did not request this, please disregard.
 BODY
 )
-
-    local _to
     _to=$(_read_dotenv_value "ADMIN_EMAIL" "${PROJECT_ROOT:-.}/.env")
-    if [[ -z "$_to" ]]; then
-        # Fall back to the ADMIN_EMAIL env var already in the environment.
-        _to="${ADMIN_EMAIL:-}"
-    fi
+    [[ -n "$_to" ]] || _to="${ADMIN_EMAIL:-}"
     if [[ -z "$_to" ]]; then
         log_error "_offer_email_recovery_kit: ADMIN_EMAIL not set in .env or environment — cannot send"
         _secure_shred "$_att_file" 2>/dev/null || true
         return 1
     fi
 
-    log_info "Sending encrypted attachment to ${_to}..."
-
-    # Route through the active email provider (_dispatch_email_with_attachment
-    # honours EMAIL_PROVIDER / EMAIL_MODE and falls back to SMTP automatically).
-    if _dispatch_email_with_attachment \
-            "$_to" "$_subject" "$_body" "$_att_file" "$_att_name"; then
+    log_info "Sending encrypted attachment to ${_to} via SMTP attachment path..."
+    if send_smtp_attachment "$_to" "$_subject" "$_body" "$_att_file" "$_att_name"; then
         log_success "Encrypted attachment sent to ${_to}"
     else
         log_warn "Attachment send failed. The encrypted file was NOT emailed."
         log_warn "You can send it manually from: ${_att_file}"
         log_warn "(It will be deleted when this session ends.)"
     fi
-
-    # Unconditionally shred the attachment — whether send succeeded or failed.
     _secure_shred "$_att_file" 2>/dev/null || true
     return 0
 }

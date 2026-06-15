@@ -145,24 +145,24 @@ Manage secrets with `./utilities/secrets-edit.sh`. They are encrypted with Age +
 
 ## 📧 Email Configuration
 
-Email delivery is handled by **`lib/common.sh` (email functions)** — a pure bash + curl multi-provider chain with automatic fallback. SMTP can go either to your external relay or to the Postfix sidecar, and `host` mode is the final local mail/sendmail fallback.
+Email delivery is handled by **`lib/common.sh` (email functions)** — a pure bash + curl multi-provider chain with automatic fallback. SMTP can go either to your external relay or to the Postfix sidecar, and `host` mode is the final local direct upstream SMTP fallback.
 
 ### Delivery Chain
 
 ```
 EMAIL_MODE=auto  →  1. HTTP API    (EMAIL_PROVIDER, curl)
                     2. SMTP        (direct relay or Postfix sidecar)
-                    3. Host MTA    (local mail/sendmail binary)
+                    3. Direct upstream SMTP
 ```
 
 `EMAIL_MODE` controls which path(s) are attempted:
 
 | Value | Behaviour |
 | :-- | :-- |
-| `auto` | Try API → SMTP → host MTA in order (recommended) |
+| `auto` | Try API → SMTP → direct SMTP in order (recommended) |
 | `api` | HTTP API only; fail loudly if token not set |
 | `smtp` | SMTP only (direct relay when `SMTP_PASSWORD` is set, otherwise the Postfix sidecar) |
-| `host` | Host mail/sendmail only |
+| `host` | Deprecated alias for direct |
 
 ### Tier 1 — HTTP API Provider
 
@@ -486,4 +486,17 @@ docker exec vaultwarden_postfix postconf smtp_sasl_auth_enable
 grep PUSH_ENABLED .env
 grep 'internal:' docker-compose.yml
 docker compose logs vaultwarden | grep -i push
+```
+
+
+## Current email routing matrix
+
+```text
+auto   = API → Postfix sidecar → direct upstream SMTP
+api    = API only
+smtp   = Postfix sidecar → direct upstream SMTP
+direct = direct upstream SMTP only
+host   = deprecated alias for direct
+
+No host MTA package is installed or required; mail, mailx, and sendmail are not used. The direct tier bypasses Docker and the Postfix sidecar but still uses the same upstream SMTP provider and credentials; it has no local queue or deferred retry. The Postfix sidecar remains preferred because it provides queueing. Sidecar → Direct SMTP is at-least-once delivery, and an ambiguous network failure could result in a duplicate message. Recovery-kit attachments never use the HTTP API; they always use Sidecar → Direct SMTP. Configure SMTP_FROM, SMTP_HOST, SMTP_PORT, SMTP_USERNAME, and smtp_password to guarantee Direct fallback. SMTP_FROM_EMAIL is deprecated but temporarily supported as an alias for SMTP_FROM. host is deprecated and is no longer a real host-MTA mode.
 ```

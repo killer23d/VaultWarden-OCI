@@ -396,24 +396,24 @@ docker compose run --rm -e DEBUG_ENTRYPOINT=true caddy
 
 ## 📧 Email Customisation
 
-Email delivery is handled by **`lib/common.sh` (email functions)** — a pure bash + curl multi-provider chain. SMTP can go straight to your relay or through the Postfix sidecar; `host` mode is the final local mail/sendmail fallback.
+Email delivery is handled by **`lib/common.sh` (email functions)** — a pure bash + curl multi-provider chain. SMTP can go straight to your relay or through the Postfix sidecar; `host` mode is the deprecated alias for direct upstream SMTP.
 
 ### Delivery Chain
 
 ```
 EMAIL_MODE=auto  →  1. HTTP API    (EMAIL_PROVIDER + API token via curl)
                     2. SMTP        (direct relay or Postfix sidecar)
-                    3. Host MTA    (local mail/sendmail binary)
+                    3. Direct SMTP    (configured upstream provider)
 ```
 
 Set `EMAIL_MODE` in `.env` to control which paths are attempted:
 
 | `EMAIL_MODE` | Behaviour |
 | :-- | :-- |
-| `auto` | Try API → SMTP → host MTA in order (recommended) |
+| `auto` | Try API → SMTP → direct SMTP in order (recommended) |
 | `api` | HTTP API only; fails loudly if token missing |
 | `smtp` | SMTP only (direct relay when `SMTP_PASSWORD` is set, otherwise the Postfix sidecar) |
-| `host` | Host mail/sendmail only |
+| `host` | Deprecated alias for direct upstream SMTP |
 
 ### Tier 1 — Switching Email Provider
 

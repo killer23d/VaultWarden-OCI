@@ -124,7 +124,7 @@ test_crowdsec_integration() {
 }
 
 test_host_script_email() {
-    log_info "Testing host script email functionality..."
+    log_info "Testing host script email configuration and route selection..."
     if [[ -z "$TEST_RECIPIENT" ]]; then
         TEST_RECIPIENT=$(get_config_value "ADMIN_EMAIL" "")
         if [[ -z "$TEST_RECIPIENT" ]]; then
@@ -153,14 +153,14 @@ test_end_to_end_email() {
     log_info "Testing end-to-end email functionality..."
     if [[ "$DRY_RUN" == "true" ]]; then
         log_info "🔍 [DRY RUN] Would send test email to: $TEST_RECIPIENT"
-        log_info "🔍 [DRY RUN] Email would be sent via postfix container (port 587)"
+        log_info "🔍 [DRY RUN] Route depends on EMAIL_MODE: auto API → Postfix sidecar → direct SMTP; smtp Postfix sidecar → direct SMTP; direct direct SMTP only"
         return 0
     fi
     if [[ -z "$TEST_RECIPIENT" ]]; then
         log_error "❌ No test recipient specified"
         return 1
     fi
-    local test_subject; test_subject="VaultWarden Email Test - postfix - $(date)"
+    local test_subject; test_subject="VaultWarden Email Test - email route - $(date)"
     local test_body
     test_body="VaultWarden notification test
 Sent: $(date -Iseconds)
@@ -171,16 +171,15 @@ If you received this message, email delivery is working correctly."
     if send_notification_email "$test_subject" "$test_body"; then
         log_success "✅ Test email sent successfully!"
         log_info "📬 Please check $TEST_RECIPIENT for the test message"
-        log_info "🔍 Check postfix logs: docker compose logs postfix"
+        log_info "🔍 Check configured route logs: API provider, postfix sidecar, or direct upstream SMTP"
     else
         log_error "❌ Failed to send test email"
         log_info "🔍 Debug steps:"
-        log_info "   1. Check postfix logs: docker compose logs postfix"
-        log_info "   2. Check CrowdSec logs: sudo journalctl -u crowdsec -n 50 --no-pager"
-        log_info "   3. Verify SMTP credentials in secrets"
-        log_info "   4. Verify ALLOWED_SENDER_DOMAINS in .env"
-        log_info "   5. Check postfix relay configuration"
-        log_info "   6. Check postfix container permissions: docker compose logs postfix | grep -i permission"
+        log_info "   1. Confirm EMAIL_MODE routing (auto/api/smtp/direct/host alias)"
+        log_info "   2. Check API provider response or postfix logs: docker compose logs postfix"
+        log_info "   3. Verify SMTP_FROM, SMTP_HOST, SMTP_PORT, SMTP_USERNAME, and smtp_password for Direct fallback"
+        log_info "   4. Verify ALLOWED_SENDER_DOMAINS in .env for sidecar delivery"
+        log_info "   5. Check CrowdSec logs: sudo journalctl -u crowdsec -n 50 --no-pager"
         return 1
     fi
     return 0
@@ -208,7 +207,7 @@ run_email_diagnostics() {
     log_info "============================================"
     if [[ $passed_tests -eq $total_tests ]]; then
         log_success "🎉 ALL EMAIL TESTS PASSED!"
-        log_success "✅ Your VaultWarden-OCI email deployment is functioning correctly"
+        log_success "✅ Your VaultWarden-OCI email deployment route is functioning correctly"
         return 0
     else
         log_error "❌ Some email tests failed: ${failed_tests[*]}"

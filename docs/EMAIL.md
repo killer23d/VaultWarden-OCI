@@ -26,8 +26,8 @@ delivery chain has three stages when `EMAIL_MODE=auto`:
                 │           (curl smtps/starttls)     │  Postfix sidecar
                 │              │ fail                 │
                 │              ▼                      │
-                │  Stage 3 ── Host MTA                │  Local mail/sendmail
-                │           (mail binary / sendmail)  │  binary
+                │  Stage 3 ── Direct SMTP                │  Local direct upstream SMTP
+                │           (configured SMTP relay)   │  SMTP provider
                 └─────────────────────────────────────┘
 ```
 
@@ -169,7 +169,7 @@ the Postfix sidecar.
 
 The Postfix sidecar (`boky/docker-postfix`) is the SMTP sidecar used when
 `SMTP_PASSWORD` is blank. It remains the SMTP path for the VaultWarden container.
-`EMAIL_MODE=host` is separate: it tries a local mail/sendmail binary on the
+`EMAIL_MODE=host` is separate: it tries a direct upstream SMTP on the
 host.
 
 ### Postfix and CrowdSec
@@ -300,10 +300,10 @@ MAILGUN_DOMAIN=mg.yourdomain.com  # optional — set only if different from SMTP
 
 | Value | Behaviour | When to use |
 | :-- | :-- | :-- |
-| `auto` | Try API → SMTP → host MTA in order | Recommended for all deployments |
+| `auto` | Try API → SMTP → direct SMTP in order | Recommended for all deployments |
 | `api` | HTTP API only; error if token not set | API-only, no SMTP fallback desired |
 | `smtp` | SMTP only (direct relay when `SMTP_PASSWORD` is set, otherwise the Postfix sidecar) | No API provider; reliable SMTP relay |
-| `host` | Host mail/sendmail only | Only when the host already has a working local MTA |
+| `host` | Deprecated alias for `direct` | Compatibility only; no host MTA is used |
 
 ---
 
@@ -375,7 +375,7 @@ docker compose ps postfix
 docker compose logs postfix --tail 50
 
 # Send a test message through Postfix (from the host)
-echo "Subject: Postfix test" | sendmail -v admin@yourdomain.com
+./maintenance.sh test-email --verbose
 # or via nc:
 echo -e "EHLO test\nQUIT" | nc 127.0.0.1 587
 
@@ -423,8 +423,8 @@ Do you want operational alert emails (backups, health, failures)?
                └─ No  ──► Do you have an SMTP relay (e.g., Gmail, Outlook)?
                             └─ Yes ──► Set EMAIL_MODE=smtp, fill SMTP_* in .env,
                             │          store smtp_password in secrets.
-                            └─ No  ──► Set EMAIL_MODE=host only if the host has
-                                        a working local mail/sendmail binary.
+                            └─ No  ──► Set EMAIL_MODE=direct only if bypassing
+                                        Docker and the sidecar is required.
                                         OCI blocks direct port 25 egress by
                                         default, so an SMTP relay is usually the
                                         safer choice.
@@ -436,3 +436,16 @@ Do you want operational alert emails (backups, health, failures)?
 > SMTP provider. You can request port 25 unblocking via an OCI support ticket,
 > but using a transactional API provider (Tier 1) or SMTP relay (Tier 2) is
 > the simpler path.
+
+
+## Current email routing matrix
+
+```text
+auto   = API → Postfix sidecar → direct upstream SMTP
+api    = API only
+smtp   = Postfix sidecar → direct upstream SMTP
+direct = direct upstream SMTP only
+host   = deprecated alias for direct
+
+No host MTA package is installed or required; mail, mailx, and sendmail are not used. The direct tier bypasses Docker and the Postfix sidecar but still uses the same upstream SMTP provider and credentials; it has no local queue or deferred retry. The Postfix sidecar remains preferred because it provides queueing. Sidecar → Direct SMTP is at-least-once delivery, and an ambiguous network failure could result in a duplicate message. Recovery-kit attachments never use the HTTP API; they always use Sidecar → Direct SMTP. Configure SMTP_FROM, SMTP_HOST, SMTP_PORT, SMTP_USERNAME, and smtp_password to guarantee Direct fallback. SMTP_FROM_EMAIL is deprecated but temporarily supported as an alias for SMTP_FROM. host is deprecated and is no longer a real host-MTA mode.
+```

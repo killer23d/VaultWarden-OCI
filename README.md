@@ -281,7 +281,7 @@ Tier 1 ─ HTTP API       →  MailerSend, SendGrid, Mailgun, Postmark, Resend
 Tier 2 ─ SMTP           →  direct relay or the Postfix sidecar on 127.0.0.1:587
            │ fail
            ▼
-Tier 3 ─ Host MTA       →  local mail/sendmail binary
+Tier 3 ─ Direct SMTP    →  configured upstream SMTP provider
 ```
 
 The VaultWarden container also talks to the internal `postfix`

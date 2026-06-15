@@ -831,10 +831,10 @@ SUPPORTED FIELDS:
       secrets/secrets-schema.yaml
 
 EMAIL_MODE / EMAIL_PROVIDER quick reference (.env):
-    EMAIL_MODE=auto   — tries API → SMTP → Postfix in order
+    EMAIL_MODE=auto   — tries API → Postfix sidecar → direct upstream SMTP in order
     EMAIL_MODE=api    — HTTP API only   (rotate: email_api_token)
-    EMAIL_MODE=smtp   — SMTP relay only (rotate: smtp_password)
-    EMAIL_MODE=host   — Postfix sidecar (no token or password needed)
+    EMAIL_MODE=smtp   — Postfix sidecar → direct SMTP (rotate: smtp_password)
+    EMAIL_MODE=host   — deprecated alias for direct (rotate: smtp_password)
     EMAIL_PROVIDER=mailersend|sendgrid|mailgun|postmark|resend
         → selects which HTTP driver is used at runtime;
           the token is always stored as "email_api_token" in secrets.yaml.
