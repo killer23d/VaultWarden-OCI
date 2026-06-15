@@ -1346,8 +1346,8 @@ _ork_generate_and_secure() {
 
     # shellcheck disable=SC2034  # user_ack is the read target; value not needed, only the timeout/EOF behaviour
     local user_ack
-    # shellcheck disable=SC2034
     printf 'Press Enter once you have saved the recovery kit: ' >/dev/tty
+    # shellcheck disable=SC2034  # intentional: read target used only for its timeout/EOF side-effect
     read -r -t 120 user_ack </dev/tty 2>/dev/null || true
 
     log_info "Securely deleting recovery kit from server..."
