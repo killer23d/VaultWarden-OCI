@@ -732,9 +732,9 @@ key-rotate: ## Rotate age encryption key (re-encrypts all secrets)
 		exit 1; \
 	}
 	@echo ""
-	@printf "Continue with key rotation? [y/N] "; \
+	@printf "Continue with key rotation? (yes/no): "; \
 	read -r confirm; \
-	if [ "$$confirm" != "y" ] && [ "$$confirm" != "Y" ]; then \
+	if [ "$$confirm" != "yes" ]; then \
 		echo "$(YELLOW)Key rotation cancelled.$(NC)"; \
 		exit 0; \
 	fi
@@ -993,9 +993,9 @@ clean: ## Remove generated files (logs, temp files)
 clean-all: ## Remove secrets cache and log files — services will re-init secrets on next start
 	@echo "$(YELLOW)WARNING: This will remove the decoded secrets cache.$(NC)"
 	@echo "$(YELLOW)         Run 'make up' afterwards to regenerate it from secrets.yaml.$(NC)"
-	@printf "Continue? [y/N] "; \
+	@printf "Continue? (yes/no): "; \
 	read -r confirm; \
-	if [ "$$confirm" = "y" ] || [ "$$confirm" = "Y" ]; then \
+	if [ "$$confirm" = "yes" ]; then \
 		rm -f setup.log; \
 		rm -rf secrets/.docker_secrets; \
 		echo "$(GREEN)Full clean complete.$(NC)"; \
@@ -1014,9 +1014,9 @@ prune: ## Remove unused Docker resources (images, containers, networks) — cann
 			exit 1; \
 		fi; \
 		echo "$(YELLOW)WARNING: This will permanently remove unused Docker resources.$(NC)"; \
-		printf "Continue? [y/N] "; \
+		printf "Continue? (yes/no): "; \
 		read -r confirm; \
-		if [ "$$confirm" != "y" ] && [ "$$confirm" != "Y" ]; then \
+		if [ "$$confirm" != "yes" ]; then \
 			echo "Cancelled."; \
 			exit 0; \
 		fi; \
