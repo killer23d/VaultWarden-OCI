@@ -638,9 +638,10 @@ _offer_email_recovery_kit() {
         return 0   # Warning already printed; skip silently.
     fi
 
-    echo ""
+    echo "" >/dev/tty
     local _yn
-    read -r -t 30 -p "Email an encrypted backup of this document? (y/N): " _yn 2>/dev/null || _yn="n"
+    printf 'Email an encrypted backup of this document? (y/N): ' >/dev/tty
+    read -r -t 30 _yn </dev/tty 2>/dev/null || _yn="n"
     if [[ "${_yn,,}" != "y" ]]; then
         return 0
     fi
@@ -771,8 +772,9 @@ prompt_password_with_confirmation() {
             return 1
         fi
 
-        read -r -s -p "$prompt_text: " password
-        echo ""
+        printf '%s: ' "$prompt_text" >/dev/tty
+        read -r -s password </dev/tty
+        echo "" >/dev/tty
         if [[ -z "$password" ]]; then
             log_error "Password cannot be empty (attempt $attempt/$max_attempts)"
             continue
@@ -781,15 +783,16 @@ prompt_password_with_confirmation() {
             log_error "Password must be at least $min_length characters (attempt $attempt/$max_attempts)"
             continue
         fi
-        read -r -s -p "Confirm password: " password_confirm
-        echo ""
+        printf 'Confirm password: ' >/dev/tty
+        read -r -s password_confirm </dev/tty
+        echo "" >/dev/tty
         if [[ "$password" != "$password_confirm" ]]; then
             log_error "Passwords don't match (attempt $attempt/$max_attempts)"
             continue
         fi
         break
     done
-    printf '%s\n' "$password"
+    printf '%s' "$password"
     return 0
 }
 
@@ -1334,10 +1337,8 @@ _ork_generate_and_secure() {
     # shellcheck disable=SC2034  # user_ack is the read target; value not needed, only the timeout/EOF behaviour
     local user_ack
     # shellcheck disable=SC2034
-    if read -r -t 120 -p "Press Enter once you have saved the recovery kit: " user_ack 2>/dev/null \
-       || true; then
-        : 
-    fi
+    printf 'Press Enter once you have saved the recovery kit: ' >/dev/tty
+    read -r -t 120 user_ack </dev/tty 2>/dev/null || true
 
     log_info "Securely deleting recovery kit from server..."
     _secure_shred "$output_file"
