@@ -712,10 +712,21 @@ BODY
     log_info "Sending encrypted attachment to ${_to} via SMTP attachment path..."
     if send_smtp_attachment "$_to" "$_subject" "$_body" "$_att_file" "$_att_name"; then
         log_success "Encrypted attachment sent to ${_to}"
+        printf '\n' >/dev/tty
+        printf '════════════════════════════════════════════════════════════════\n' >/dev/tty
+        printf '  ✅  Encrypted recovery kit emailed to: %s\n' "$_to" >/dev/tty
+        printf '════════════════════════════════════════════════════════════════\n' >/dev/tty
+        printf '\n' >/dev/tty
     else
         log_warn "Attachment send failed. The encrypted file was NOT emailed."
         log_warn "You can send it manually from: ${_att_file}"
         log_warn "(It will be deleted when this session ends.)"
+        printf '\n' >/dev/tty
+        printf '════════════════════════════════════════════════════════════════\n' >/dev/tty
+        printf '  ⚠️   Email delivery FAILED — recovery kit was NOT sent.\n' >/dev/tty
+        printf '       Check SMTP settings and logs above for details.\n' >/dev/tty
+        printf '════════════════════════════════════════════════════════════════\n' >/dev/tty
+        printf '\n' >/dev/tty
     fi
     _secure_shred "$_att_file" 2>/dev/null || true
     return 0
@@ -771,7 +782,7 @@ validate_cloudflare_token() {
 prompt_password_with_confirmation() {
     local prompt_text="$1"
     local min_length="${2:-12}"
-    local max_attempts="${3:-10}"
+    local max_attempts="${3:-3}"
     local password password_confirm
     local attempt=0
 
@@ -1337,7 +1348,8 @@ _ork_generate_and_secure() {
     echo ""
 
     # --- Optional: email an encrypted copy before deletion ---
-    _offer_email_recovery_kit "$output_file"
+    local _email_result=0
+    _offer_email_recovery_kit "$output_file" || _email_result=$?
     # --- end email step ---
 
     log_warn "This file will be securely deleted after you press Enter."
