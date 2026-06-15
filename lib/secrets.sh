@@ -649,9 +649,10 @@ the sidecar is unavailable.
 SMTP_FROM, SMTP_HOST, SMTP_PORT, SMTP_USERNAME, and smtp_password must
 be configured.
 PROMPT
-    printf 'Email an encrypted backup of this document via SMTP? (y/N): ' >/dev/tty
-    read -r -t 30 _yn </dev/tty 2>/dev/null || _yn="n"
-    if [[ "${_yn,,}" != "y" ]]; then
+    printf '\n' >/dev/tty
+    printf 'Email an encrypted backup of this document via SMTP? (yes/no): ' >/dev/tty
+    read -r -t 30 _yn </dev/tty 2>/dev/null || _yn="no"
+    if [[ "${_yn,,}" != "yes" ]]; then
         return 0
     fi
 
