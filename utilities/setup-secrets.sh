@@ -606,7 +606,7 @@ SOPS_EOF
             # placeholder and not empty) so downstream consumers can distinguish
             # "not applicable" from "not configured".
             smtp_password)
-                if [[ "$_email_mode" == "smtp" || "$_email_mode" == "auto" || "$_email_mode" == "host" ]]; then
+                if [[ "$_email_mode" == "smtp" || "$_email_mode" == "auto" || "$_email_mode" == "direct" || "$_email_mode" == "host" ]]; then
                     echo ""
                     log_info " Tier 2 — SMTP Relay Password"
                     log_info "  Secrets key: smtp_password"

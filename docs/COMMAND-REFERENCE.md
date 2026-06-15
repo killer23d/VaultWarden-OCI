@@ -834,6 +834,7 @@ EMAIL_MODE / EMAIL_PROVIDER quick reference (.env):
     EMAIL_MODE=auto   — tries API → Postfix sidecar → direct upstream SMTP in order
     EMAIL_MODE=api    — HTTP API only   (rotate: email_api_token)
     EMAIL_MODE=smtp   — Postfix sidecar → direct SMTP (rotate: smtp_password)
+    EMAIL_MODE=direct — direct SMTP only (rotate: smtp_password)
     EMAIL_MODE=host   — deprecated alias for direct (rotate: smtp_password)
     EMAIL_PROVIDER=mailersend|sendgrid|mailgun|postmark|resend
         → selects which HTTP driver is used at runtime;

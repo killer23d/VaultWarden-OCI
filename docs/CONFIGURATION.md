@@ -145,7 +145,7 @@ Manage secrets with `./utilities/secrets-edit.sh`. They are encrypted with Age +
 
 ## 📧 Email Configuration
 
-Email delivery is handled by **`lib/common.sh` (email functions)** — a pure bash + curl multi-provider chain with automatic fallback. SMTP can go either to your external relay or to the Postfix sidecar, and `host` mode is the final local direct upstream SMTP fallback.
+Email delivery is handled by **`lib/email.sh`** — a Bash + curl multi-provider chain. See [EMAIL.md](EMAIL.md) for the canonical routing matrix; `host` is only a deprecated alias for `direct`.
 
 ### Delivery Chain
 
@@ -489,14 +489,6 @@ docker compose logs vaultwarden | grep -i push
 ```
 
 
-## Current email routing matrix
+## Email routing
 
-```text
-auto   = API → Postfix sidecar → direct upstream SMTP
-api    = API only
-smtp   = Postfix sidecar → direct upstream SMTP
-direct = direct upstream SMTP only
-host   = deprecated alias for direct
-
-No host MTA package is installed or required; mail, mailx, and sendmail are not used. The direct tier bypasses Docker and the Postfix sidecar but still uses the same upstream SMTP provider and credentials; it has no local queue or deferred retry. The Postfix sidecar remains preferred because it provides queueing. Sidecar → Direct SMTP is at-least-once delivery, and an ambiguous network failure could result in a duplicate message. Recovery-kit attachments never use the HTTP API; they always use Sidecar → Direct SMTP. Configure SMTP_FROM, SMTP_HOST, SMTP_PORT, SMTP_USERNAME, and smtp_password to guarantee Direct fallback. SMTP_FROM_EMAIL is deprecated but temporarily supported as an alias for SMTP_FROM. host is deprecated and is no longer a real host-MTA mode.
-```
+See [EMAIL.md](EMAIL.md) for the canonical email routing matrix, Direct SMTP fallback semantics, recovery-kit attachment behavior, and `host` deprecation notes.

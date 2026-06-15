@@ -1097,14 +1097,6 @@ docker compose down
 This troubleshooting guide covers common issues and their solutions for VaultWarden-OCI. For issues not covered here, check the GitHub issues or create a new issue with the diagnostic information collected above.
 
 
-## Current email routing matrix
+## Email routing
 
-```text
-auto   = API → Postfix sidecar → direct upstream SMTP
-api    = API only
-smtp   = Postfix sidecar → direct upstream SMTP
-direct = direct upstream SMTP only
-host   = deprecated alias for direct
-
-No host MTA package is installed or required; mail, mailx, and sendmail are not used. The direct tier bypasses Docker and the Postfix sidecar but still uses the same upstream SMTP provider and credentials; it has no local queue or deferred retry. The Postfix sidecar remains preferred because it provides queueing. Sidecar → Direct SMTP is at-least-once delivery, and an ambiguous network failure could result in a duplicate message. Recovery-kit attachments never use the HTTP API; they always use Sidecar → Direct SMTP. Configure SMTP_FROM, SMTP_HOST, SMTP_PORT, SMTP_USERNAME, and smtp_password to guarantee Direct fallback. SMTP_FROM_EMAIL is deprecated but temporarily supported as an alias for SMTP_FROM. host is deprecated and is no longer a real host-MTA mode.
-```
+See [EMAIL.md](EMAIL.md) for the canonical email routing matrix, Direct SMTP fallback semantics, recovery-kit attachment behavior, and `host` deprecation notes.

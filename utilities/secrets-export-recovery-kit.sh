@@ -10,7 +10,9 @@ cd "$PROJECT_ROOT"
 
 source "${PROJECT_ROOT}/lib/log.sh"
 source "${PROJECT_ROOT}/lib/config.sh"
-load_env_file "${PROJECT_ROOT}/.env" 2>/dev/null || true
+if [[ -f "${PROJECT_ROOT}/.env" ]]; then
+    load_env_file "${PROJECT_ROOT}/.env"
+fi
 source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
 source "${PROJECT_ROOT}/lib/crypto.sh"

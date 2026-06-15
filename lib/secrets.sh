@@ -648,8 +648,8 @@ Postfix sidecar and falls back to the configured upstream SMTP relay when
 the sidecar is unavailable.
 SMTP_FROM, SMTP_HOST, SMTP_PORT, SMTP_USERNAME, and smtp_password must
 be configured.
-Email an encrypted backup of this document via SMTP? (y/N):
 PROMPT
+    printf 'Email an encrypted backup of this document via SMTP? (y/N): ' >/dev/tty
     read -r -t 30 _yn </dev/tty 2>/dev/null || _yn="n"
     if [[ "${_yn,,}" != "y" ]]; then
         return 0
