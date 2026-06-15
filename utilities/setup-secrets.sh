@@ -606,7 +606,7 @@ SOPS_EOF
             # placeholder and not empty) so downstream consumers can distinguish
             # "not applicable" from "not configured".
             smtp_password)
-                if [[ "$_email_mode" == "smtp" || "$_email_mode" == "auto" ]]; then
+                if [[ "$_email_mode" == "smtp" || "$_email_mode" == "auto" || "$_email_mode" == "direct" || "$_email_mode" == "host" ]]; then
                     echo ""
                     log_info " Tier 2 — SMTP Relay Password"
                     log_info "  Secrets key: smtp_password"
@@ -632,9 +632,6 @@ SOPS_EOF
                         fi
                     fi
                     _COLLECTED_SECRETS["smtp_password"]="$smtp_pass"
-                elif [[ "$_email_mode" == "host" ]]; then
-                    _COLLECTED_SECRETS["smtp_password"]="NOT_USED_EMAIL_MODE=host"
-                    log_info "EMAIL_MODE=host: smtp_password not needed (Postfix sidecar handles delivery)"
                 else
                     _COLLECTED_SECRETS["smtp_password"]="NOT_USED_EMAIL_MODE=${_email_mode}"
                 fi
@@ -652,10 +649,10 @@ SOPS_EOF
                 log_info "  EMAIL_PROVIDER = $_email_provider"
                 echo ""
                 log_info "Delivery tiers (controlled by EMAIL_MODE in .env):"
-                log_info "  auto  — try API → SMTP → Postfix sidecar in order (recommended)"
+                log_info "  auto  — try API → Postfix sidecar → direct upstream SMTP in order (recommended)"
                 log_info "  api   — HTTP API only   (requires email_api_token in secrets)"
-                log_info "  smtp  — SMTP relay only (requires smtp_password in secrets)"
-                log_info "  host  — Postfix sidecar only (no token or SMTP password needed)"
+                log_info "  smtp  — Postfix sidecar → direct SMTP (requires smtp_password for direct fallback)"
+                log_info "  host  — deprecated alias for direct (smtp_password required)"
                 echo ""
                 log_info "One token key (email_api_token) works for ALL providers."
                 log_info "To switch providers: change EMAIL_PROVIDER in .env only."
@@ -1030,10 +1027,10 @@ BACKUP_BANNER
             echo "   7. To list secret keys:       sudo utilities/setup-secrets.sh rotate list"
             echo ""
             echo "📧 Email mode reference (set EMAIL_MODE in .env):"
-            echo "   auto  — API → SMTP → Postfix fallback chain (recommended)"
+            echo "   auto  — API → Postfix sidecar → direct upstream SMTP fallback chain (recommended)"
             echo "   api   — HTTP API only  (set EMAIL_PROVIDER + rotate email_api_token)"
-            echo "   smtp  — SMTP relay only (rotate smtp_password)"
-            echo "   host  — Postfix sidecar only (no token or password needed in secrets)"
+            echo "   smtp  — Postfix sidecar → direct SMTP (rotate smtp_password)"
+            echo "   host  — deprecated alias for direct (smtp_password required)"
             echo ""
             log_warn "⚠️  If you used --auto mode, scroll up to save the generated passwords!"
             echo ""

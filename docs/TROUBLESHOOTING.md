@@ -1095,3 +1095,8 @@ docker compose down
 ---
 
 This troubleshooting guide covers common issues and their solutions for VaultWarden-OCI. For issues not covered here, check the GitHub issues or create a new issue with the diagnostic information collected above.
+
+
+## Email routing
+
+See [EMAIL.md](EMAIL.md) for the canonical email routing matrix, Direct SMTP fallback semantics, recovery-kit attachment behavior, and `host` deprecation notes.

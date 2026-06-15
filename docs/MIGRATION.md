@@ -247,7 +247,7 @@ sudo utilities/setup-secrets.sh breakglass create
 | Configuration | Manual | Template-based (`setup.sh`) |
 | Resource limits | Manual / none | Pre-configured limits for 6 GB systems |
 | Security | DIY | CrowdSec (host service) + Cloudflare-only firewall + Caddy `rate_limit` |
-| Email | Manual SMTP daemon | `lib/common.sh` (email functions) multi-provider chain (API → SMTP → host MTA, no sidecar required) |
+| Email | Manual SMTP daemon | `lib/common.sh` (email functions) multi-provider chain (API → SMTP → direct SMTP, no sidecar required) |
 | Caddy | Any version | >= 2.11.0 required; locally built with `mholt/caddy-ratelimit` for in-process rate limiting |
 | Push notifications | Manual | `vaultwarden` network is `internal: true`; add VaultWarden to `caddy_external` network when `PUSH_ENABLED=true` (see `docker-compose.yml.example`) |
 | Backups | Manual | Automated via systemd timers (Mon-Sat DB, Sunday full) |
@@ -335,7 +335,7 @@ sudo systemctl list-timers 'vaultwarden-*'
 ./maintenance.sh test-email --verbose
 ```
 
-> **Email migration note:** `lib/common.sh` (email functions) provides API → SMTP → host-MTA fallback for script-driven alerts. The Postfix sidecar handles VaultWarden container mail, so keep the `postfix` service enabled unless you have deliberately removed those paths. Set `EMAIL_PROVIDER` in `.env`, store `email_api_token` with `./utilities/secrets-rotate.sh email_api_token`, and see [CONFIGURATION.md](CONFIGURATION.md) for the full reference.
+> **Email migration note:** `lib/common.sh` (email functions) provides API → SMTP → direct SMTP fallback for script-driven alerts. The Postfix sidecar handles VaultWarden container mail, so keep the `postfix` service enabled unless you have deliberately removed those paths. Set `EMAIL_PROVIDER` in `.env`, store `email_api_token` with `./utilities/secrets-rotate.sh email_api_token`, and see [CONFIGURATION.md](CONFIGURATION.md) for the full reference.
 
 ### Update Client Applications
 

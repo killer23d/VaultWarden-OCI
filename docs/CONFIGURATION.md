@@ -145,24 +145,24 @@ Manage secrets with `./utilities/secrets-edit.sh`. They are encrypted with Age +
 
 ## 📧 Email Configuration
 
-Email delivery is handled by **`lib/common.sh` (email functions)** — a pure bash + curl multi-provider chain with automatic fallback. SMTP can go either to your external relay or to the Postfix sidecar, and `host` mode is the final local mail/sendmail fallback.
+Email delivery is handled by **`lib/email.sh`** — a Bash + curl multi-provider chain. See [EMAIL.md](EMAIL.md) for the canonical routing matrix; `host` is only a deprecated alias for `direct`.
 
 ### Delivery Chain
 
 ```
 EMAIL_MODE=auto  →  1. HTTP API    (EMAIL_PROVIDER, curl)
                     2. SMTP        (direct relay or Postfix sidecar)
-                    3. Host MTA    (local mail/sendmail binary)
+                    3. Direct upstream SMTP
 ```
 
 `EMAIL_MODE` controls which path(s) are attempted:
 
 | Value | Behaviour |
 | :-- | :-- |
-| `auto` | Try API → SMTP → host MTA in order (recommended) |
+| `auto` | Try API → SMTP → direct SMTP in order (recommended) |
 | `api` | HTTP API only; fail loudly if token not set |
 | `smtp` | SMTP only (direct relay when `SMTP_PASSWORD` is set, otherwise the Postfix sidecar) |
-| `host` | Host mail/sendmail only |
+| `host` | Deprecated alias for direct |
 
 ### Tier 1 — HTTP API Provider
 
@@ -487,3 +487,8 @@ grep PUSH_ENABLED .env
 grep 'internal:' docker-compose.yml
 docker compose logs vaultwarden | grep -i push
 ```
+
+
+## Email routing
+
+See [EMAIL.md](EMAIL.md) for the canonical email routing matrix, Direct SMTP fallback semantics, recovery-kit attachment behavior, and `host` deprecation notes.

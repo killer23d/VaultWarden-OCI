@@ -10,39 +10,37 @@ Related docs: [CONFIGURATION.md](CONFIGURATION.md) · [ADVANCED-CUSTOMIZATION.md
 
 ## Architecture Overview
 
-Email is handled by **`lib/common.sh` (email functions)** — a pure bash + curl multi-provider
-chain. No mail daemon is required for the normal API or SMTP paths. The
-delivery chain has three stages when `EMAIL_MODE=auto`:
+`docs/EMAIL.md` is the canonical routing reference. Email is handled by
+`lib/email.sh` with no host `mail`, `mailx`, or `sendmail` dependency.
 
-```
-                ┌─────────────────────────────────────┐
-                │         lib/common.sh                │
-                │                                     │
-  EMAIL_MODE    │  Stage 1 ── HTTP API                │  MailerSend, SendGrid,
-     =auto  ──► │           (curl + JSON)             │  Mailgun, Postmark,
-                │              │ fail                 │  Resend
-                │              ▼                      │
-                │  Stage 2 ── SMTP                    │  Direct relay or the
-                │           (curl smtps/starttls)     │  Postfix sidecar
-                │              │ fail                 │
-                │              ▼                      │
-                │  Stage 3 ── Host MTA                │  Local mail/sendmail
-                │           (mail binary / sendmail)  │  binary
-                └─────────────────────────────────────┘
-```
+Plain-message routing by `EMAIL_MODE`:
 
-Two additional consumers sit outside `lib/common.sh` (email functions) and use SMTP directly:
+| Mode | Route |
+| :-- | :-- |
+| `auto` | HTTP API → Postfix sidecar SMTP → direct upstream SMTP |
+| `api` | HTTP API only |
+| `smtp` | Postfix sidecar SMTP → direct upstream SMTP |
+| `direct` | direct upstream SMTP only |
+| `host` | deprecated compatibility alias for `direct` |
 
-| Consumer | How it sends email | Variables |
-| :-- | :-- | :-- |
-| **VaultWarden container** | Built-in SMTP client → Postfix sidecar | `VW_SMTP_*` in `.env` |
+Attachments, including recovery-kit exports, never use the HTTP API. They use
+Postfix sidecar SMTP first and direct upstream SMTP only if the sidecar
+submission fails.
 
-> **VaultWarden routes through Postfix, not the external relay directly.**
-> The `VW_SMTP_*` block points at the internal Postfix sidecar
-> (`VW_SMTP_HOST=postfix`, port 587, no auth, no TLS). Postfix then relays
-> outbound using the `SMTP_HOST` / `SMTP_USERNAME` credentials. This means
-> VaultWarden's SMTP settings are fixed and do not need updating when you
-> change your upstream relay provider.
+The direct tier bypasses Docker and the Postfix sidecar, but it still uses the
+same configured upstream SMTP provider (`SMTP_HOST`, `SMTP_PORT`,
+`SMTP_USERNAME`, and `smtp_password`). It has no local queue or deferred retry;
+the Postfix sidecar remains preferred because it provides queueing.
+
+Sidecar → Direct fallback is at-least-once delivery. A network failure after the
+sidecar accepted a message can produce a duplicate when the direct retry also
+succeeds. Direct fallback is intentionally attempted after any sidecar
+submission failure, including SMTP policy rejections, so operators who require
+sidecar policy enforcement should use `EMAIL_MODE=api`, `EMAIL_MODE=direct`, or
+fix the sidecar policy before enabling `auto`/`smtp` fallback.
+
+VaultWarden container mail is separate: the `VW_SMTP_*` settings point the
+VaultWarden application at the Postfix sidecar on the Docker network.
 
 ---
 
@@ -114,19 +112,20 @@ SMTP_FROM_NAME=VaultWarden
 
 ---
 
-## Stage 2 — SMTP (direct relay or Postfix sidecar)
+## SMTP fallback chain — Postfix sidecar → direct upstream SMTP
 
 Used automatically when `EMAIL_MODE=auto` and the API tier fails, or explicitly
-with `EMAIL_MODE=smtp`. This path uses `curl --url smtps://` or
-`--url smtp://` with STARTTLS — no Postfix or local MTA is needed.
+with `EMAIL_MODE=smtp`. Plain SMTP fallback first submits the complete message
+to the local Postfix sidecar and retries the same message through direct
+upstream SMTP only if sidecar submission fails.
 
 ### Configuration in `.env`
 
 ```bash
-EMAIL_MODE=auto           # or: smtp to force this tier
+EMAIL_MODE=auto           # or: smtp to force Sidecar → Direct SMTP
 SMTP_HOST=smtp.mailersend.net
 SMTP_PORT=587
-SMTP_SECURITY=starttls    # starttls (port 587) or on (SSL/TLS, port 465)
+SMTP_SECURITY=starttls    # canonical: starttls, tls, or none
 SMTP_USERNAME=your-smtp-username
 # SMTP_FROM and SMTP_FROM_NAME already set above
 SMTP_TIMEOUT=30
@@ -165,12 +164,12 @@ the Postfix sidecar.
 
 ---
 
-## Postfix Sidecar and Host-MTA Fallback
+## Postfix sidecar and direct fallback
 
-The Postfix sidecar (`boky/docker-postfix`) is the SMTP sidecar used when
-`SMTP_PASSWORD` is blank. It remains the SMTP path for the VaultWarden container.
-`EMAIL_MODE=host` is separate: it tries a local mail/sendmail binary on the
-host.
+The Postfix sidecar (`boky/docker-postfix`) is the preferred SMTP path for host
+scripts and the fixed SMTP path for the VaultWarden container. Host scripts use
+it before Direct SMTP in `auto` and `smtp` modes. `EMAIL_MODE=host` is only a
+deprecated alias for `direct`; it is not a host-MTA mode.
 
 ### Postfix and CrowdSec
 
@@ -300,10 +299,11 @@ MAILGUN_DOMAIN=mg.yourdomain.com  # optional — set only if different from SMTP
 
 | Value | Behaviour | When to use |
 | :-- | :-- | :-- |
-| `auto` | Try API → SMTP → host MTA in order | Recommended for all deployments |
+| `auto` | HTTP API → Postfix sidecar SMTP → direct upstream SMTP | Recommended for all deployments |
 | `api` | HTTP API only; error if token not set | API-only, no SMTP fallback desired |
-| `smtp` | SMTP only (direct relay when `SMTP_PASSWORD` is set, otherwise the Postfix sidecar) | No API provider; reliable SMTP relay |
-| `host` | Host mail/sendmail only | Only when the host already has a working local MTA |
+| `smtp` | Postfix sidecar SMTP → direct upstream SMTP | No API provider; prefer sidecar queueing with direct fallback |
+| `direct` | Direct upstream SMTP only | Bypass Docker/sidecar when they are unavailable; no queueing |
+| `host` | Deprecated alias for `direct` | Compatibility only; no host MTA is used |
 
 ---
 
@@ -375,7 +375,7 @@ docker compose ps postfix
 docker compose logs postfix --tail 50
 
 # Send a test message through Postfix (from the host)
-echo "Subject: Postfix test" | sendmail -v admin@yourdomain.com
+./maintenance.sh test-email --verbose
 # or via nc:
 echo -e "EHLO test\nQUIT" | nc 127.0.0.1 587
 
@@ -407,7 +407,7 @@ docker compose logs vaultwarden | grep -i smtp
 | VaultWarden sends email but `lib/common.sh` (email functions) does not | `SMTP_*` misconfigured; Postfix not relaying | Check Postfix logs: `docker compose logs postfix` |
 | Postfix `SASL authentication failed` | Wrong SMTP password in secrets | `./utilities/secrets-rotate.sh smtp_password` |
 | Mailgun HTTP 404 `Domain not found` | Wrong API region | Set `MAILGUN_REGION=eu` in `.env` for EU accounts |
-| All tiers fail silently on `EMAIL_MODE=auto` | `EMAIL_MODE` typo or not set | `grep EMAIL_MODE .env` — must be `auto`, `api`, `smtp`, or `host` |
+| All tiers fail silently on `EMAIL_MODE=auto` | `EMAIL_MODE` typo or not set | `grep EMAIL_MODE .env` — must be `auto`, `api`, `smtp`, `direct`, or `host` |
 
 ---
 
@@ -423,8 +423,8 @@ Do you want operational alert emails (backups, health, failures)?
                └─ No  ──► Do you have an SMTP relay (e.g., Gmail, Outlook)?
                             └─ Yes ──► Set EMAIL_MODE=smtp, fill SMTP_* in .env,
                             │          store smtp_password in secrets.
-                            └─ No  ──► Set EMAIL_MODE=host only if the host has
-                                        a working local mail/sendmail binary.
+                            └─ No  ──► Set EMAIL_MODE=direct only if bypassing
+                                        Docker and the sidecar is required.
                                         OCI blocks direct port 25 egress by
                                         default, so an SMTP relay is usually the
                                         safer choice.
