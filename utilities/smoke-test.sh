@@ -99,7 +99,7 @@ _http_status() {
 }
 
 _container_running() {
-    docker compose ps --services --filter status=running 2>/dev/null | grep -qx "$1"
+    vw_compose ps --services --filter status=running 2>/dev/null | grep -qx "$1"
 }
 
 check_env_file() {
@@ -128,7 +128,7 @@ check_containers_running() {
         if _container_running "$svc"; then
             local health
             health=$(docker inspect --format '{{.State.Health.Status}}' \
-                "$(docker compose ps -q "$svc" 2>/dev/null)" 2>/dev/null || echo "none")
+                "$(vw_compose ps -q "$svc" 2>/dev/null)" 2>/dev/null || echo "none")
             case "$health" in
                 healthy|none)
                     _check_pass "container-$svc" "running (health: $health)" ;;

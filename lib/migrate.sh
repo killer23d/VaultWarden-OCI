@@ -854,7 +854,7 @@ _mv_step_validate() {
 
     if [[ "${_MV_SKIP_STACK_STOP}" == "true" ]]; then
         local running_containers
-        running_containers="$(docker compose ps --status running --quiet 2>/dev/null \
+        running_containers="$(vw_compose ps --status running --quiet 2>/dev/null \
             | wc -l | tr -d ' ' || true)"
         if (( running_containers > 0 )); then
             if [[ "${DRY_RUN}" == "true" ]]; then
@@ -920,7 +920,7 @@ _mv_step_stop() {
         _mv_log warn "Skipping stack stop (--skip-stack-stop). Proceeding with live stack."
     else
         _mv_log info "Container state before stop:"
-        docker compose ps --format json 2>/dev/null || true
+        vw_compose ps --format json 2>/dev/null || true
 
         if [[ "${DRY_RUN}" == "true" ]]; then
             _mv_log info "[DRY RUN] would: stop VaultWarden stack (stop_services)"
@@ -930,7 +930,7 @@ _mv_step_stop() {
         stop_services   # from lib/docker.sh
 
         _mv_log info "Container state after stop:"
-        docker compose ps --format json 2>/dev/null || true
+        vw_compose ps --format json 2>/dev/null || true
         _mv_log success "Stack stopped."
     fi
 
@@ -1363,7 +1363,7 @@ _mv_step_healthcheck() {
     _mv_log info "── healthcheck ───────────────────────────────────────────────────"
 
     if [[ "${DRY_RUN}" == "true" ]]; then
-        _mv_log info "[DRY RUN] would: poll 'docker compose ps --status running --quiet' for healthy state (up to 120s)"
+        _mv_log info "[DRY RUN] would: poll 'vw_compose ps --status running --quiet' for healthy state (up to 120s)"
         _mv_log info "[DRY RUN] would: write MIGRATION_COMPLETE=true to state file"
         _mv_print_checklist
         return 0
@@ -1382,7 +1382,7 @@ _mv_step_healthcheck() {
                 _mv_log warn "Container ${_cid} has RestartCount=${_rcount} — may be crash-looping."
                 _mv_log warn "  Check logs: docker logs ${_cid}"
             fi
-        done < <(docker compose ps --quiet 2>/dev/null)
+        done < <(vw_compose ps --quiet 2>/dev/null)
 
         local _rocket_port="${ROCKET_PORT:-8080}"
         local _http_healthy=false _http_try=0 _http_max=6
@@ -1406,16 +1406,16 @@ _mv_step_healthcheck() {
             _mv_log error "HTTP health probe failed after $(( _http_try * 10 ))s."
             _mv_log error "Containers are running but /alive did not respond on port ${_rocket_port}."
             _mv_log error "Verify manually: curl -v http://localhost:${_rocket_port}/alive"
-            _mv_log error "Check logs:      docker compose logs vaultwarden"
+            _mv_log error "Check logs:      vw_compose logs vaultwarden"
             _mv_log error "MIGRATION_COMPLETE not written. Fix the issue then resume or abort."
             return 1
         fi
     else
         _mv_log error "Health check timed out or container exited (docker_wait_healthy returned ${_dw_rc})."
         _mv_log error "Current container state:"
-        docker compose ps 2>/dev/null || true
+        vw_compose ps 2>/dev/null || true
         _mv_log error "Recent logs:"
-        docker compose logs --tail=50 2>/dev/null || true
+        vw_compose logs --tail=50 2>/dev/null || true
         _mv_log error "MIGRATION_COMPLETE not written. Investigate and resume or abort."
         return 1
     fi
@@ -1431,7 +1431,7 @@ _mv_print_checklist() {
     printf '  Post-Migration Checklist\n'
     printf '═══════════════════════════════════════════════════════════════\n'
     printf '  1. Log in to VaultWarden and verify your vault data is intact.\n'
-    printf '  2. Run: docker compose ps  — confirm all services are '\''healthy'\''.\n'
+    printf '  2. Run: vw_compose ps  — confirm all services are '\''healthy'\''.\n'
     printf '  3. Run: systemctl status vaultwarden-startup  — confirm unit loads cleanly.\n'
     printf '  4. Run: sudo ./setup.sh systemd install\n'
     printf '     This installs systemd service drop-ins for the new data path\n'
@@ -1443,7 +1443,7 @@ _mv_print_checklist() {
     printf '  7. After a satisfying reboot test, remove the renamed source:\n'
     printf '       sudo rm -rf '\''%s'\''\n' "${renamed_src}"
     printf '  8. (If you added custom services to docker-compose.yml with hardcoded\n'
-    printf '     paths) Verify: docker compose config | grep '\''%s'\''\n' "${_MV_SOURCE}"
+    printf '     paths) Verify: vw_compose config | grep '\''%s'\''\n' "${_MV_SOURCE}"
     printf '     Any remaining references must be updated manually.\n'
     if [[ -n "${_MV_BACKUP_DIR_CUSTOM_WARNING:-}" ]]; then
         printf '  ─────────────────────────────────────────────────────────────────\n'
@@ -1627,7 +1627,7 @@ _mv_do_abort() {
     fi
 
     log_info "Rollback: attempting to start stack from restored source..."
-    start_services || log_warn "start_services failed — check manually: docker compose up -d"
+    start_services || log_warn "start_services failed — check manually: vw_compose up -d"
 
     _mv_warn_fstab_entries
 
@@ -1656,7 +1656,7 @@ _mv_do_abort() {
     _mv_state_clear
     log_success "State file cleared."
     log_warn "Review the rollback above carefully. Some steps may require manual intervention."
-    log_warn "Check: docker compose ps"
+    log_warn "Check: vw_compose ps"
 }
 
 _mv_run_step() {

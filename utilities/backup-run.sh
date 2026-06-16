@@ -359,7 +359,7 @@ wait_for_container_stopped() {
     local status=""
     while (( elapsed < max_wait )); do
         status=$(docker inspect --format '{{.State.Status}}' \
-                     "$(docker compose ps -q "$service" 2>/dev/null || true)" 2>/dev/null \
+                     "$(vw_compose ps -q "$service" 2>/dev/null || true)" 2>/dev/null \
                  || docker ps --filter "name=${service}" --format '{{.Status}}' 2>/dev/null \
                  || echo "unknown")
 
@@ -863,11 +863,11 @@ perform_db_backup() {
         vw_container_name="$(get_config_value "COMPOSE_SERVICE_NAME" "vaultwarden")"
         local container_was_running=false
 
-        if docker compose ps --services --filter status=running 2>/dev/null \
+        if vw_compose ps --services --filter status=running 2>/dev/null \
                 | grep -qx "$vw_container_name"; then
             container_was_running=true
             backup_log_warn "Stopping $vw_container_name before fallback copy..."
-            docker compose stop "$vw_container_name" 2>/dev/null || true
+            vw_compose stop "$vw_container_name" 2>/dev/null || true
 
             if ! wait_for_container_stopped "$vw_container_name" 30; then
                 log_error "Cannot safely copy db.sqlite3: container did not reach stopped state." >&2
@@ -908,7 +908,7 @@ perform_db_backup() {
 
         if [[ "$container_was_running" == "true" ]]; then
             backup_log_info "Restarting $vw_container_name after fallback copy..."
-            docker compose start "$vw_container_name" 2>/dev/null || \
+            vw_compose start "$vw_container_name" 2>/dev/null || \
                 backup_log_warn "Failed to restart $vw_container_name — restart manually"
         fi
 

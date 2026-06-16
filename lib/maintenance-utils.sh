@@ -199,7 +199,7 @@ optimize_database() {
         if [[ "$was_running" == "true" ]]; then
             if ! is_service_running "vaultwarden" 2>/dev/null; then
                 log_warn "optimize_database: safety net restarting VaultWarden..."
-                docker compose up -d vaultwarden 2>&1 || log_error "Safety net restart failed — manual intervention required"
+                vw_compose up -d vaultwarden 2>&1 || log_error "Safety net restart failed — manual intervention required"
             fi
         fi
     }
@@ -210,7 +210,7 @@ optimize_database() {
     log_info "Database size before optimization: ${size_kb_before} KB"
     if [[ "$was_running" == "true" ]]; then
         log_info "Stopping VaultWarden service..."
-        docker compose stop vaultwarden || { log_error "Failed to stop VaultWarden"; return 1; }
+        vw_compose stop vaultwarden || { log_error "Failed to stop VaultWarden"; return 1; }
         log_success "VaultWarden stopped"
         _wait_wal_quiesce "$host_db_path" 30
     fi
@@ -220,14 +220,14 @@ optimize_database() {
     # cannot create a circular dispatcher loop.
     if ! "${PROJECT_ROOT}/utilities/backup-run.sh" run db --skip-ops-lock; then
         log_error "Pre-optimization backup FAILED — aborting to avoid an unsafe rollback point"
-        [[ "$was_running" == "true" ]] && docker compose up -d vaultwarden
+        [[ "$was_running" == "true" ]] && vw_compose up -d vaultwarden
         return 1
     fi
     log_success "Encrypted pre-optimization backup created in backup directory"
     log_info "Verifying integrity before optimization..."
     if ! sqlite3 "$host_db_path" "PRAGMA integrity_check;" | grep -qx "ok"; then
         log_error "Integrity check failed - aborting"
-        [[ "$was_running" == "true" ]] && docker compose up -d vaultwarden
+        [[ "$was_running" == "true" ]] && vw_compose up -d vaultwarden
         return 1
     fi
     log_success "Integrity check passed"
@@ -244,7 +244,7 @@ optimize_database() {
         log_success "Post-optimization integrity check passed"
     fi
     if [[ "$was_running" == "true" ]]; then
-        if docker compose up -d vaultwarden; then
+        if vw_compose up -d vaultwarden; then
             log_success "VaultWarden restarted"
         else
             log_error "Failed to restart VaultWarden"

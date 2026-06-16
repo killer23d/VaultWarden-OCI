@@ -61,7 +61,7 @@ ensure_sops_env() {
         return 1
     fi
     export SOPS_AGE_KEY_FILE="$age_key"
-    export SOPS_CONFIG="${PROJECT_ROOT:-$(pwd)}/.sops.yaml"
+    export SOPS_CONFIG="${SOPS_CONFIG_FILE:-${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}/config/sops-policy.yaml}"
     log_debug "SOPS env set: key=$SOPS_AGE_KEY_FILE  config=$SOPS_CONFIG"
     return 0
 }
@@ -95,7 +95,7 @@ write_secret_file() {
         return 1
     fi
 
-    chmod 444 "$dest"
+    chmod 0400 "$dest"
     return 0
 }
 
@@ -818,6 +818,46 @@ prompt_password_with_confirmation() {
     return 0
 }
 
+
+backup_effective_retention_days() {
+    local global="${BACKUP_RETENTION_DAYS:-30}"
+    local db="${BACKUP_RETENTION_DB_DAYS:-$global}"
+    local full="${BACKUP_RETENTION_FULL_DAYS:-$global}"
+    local emergency="${BACKUP_RETENTION_EMERGENCY_DAYS:-$global}"
+    printf '%s\n' "$db" "$full" "$emergency" | sort -nr | head -1
+}
+
+backup_any_retention_zero() {
+    local global="${BACKUP_RETENTION_DAYS:-30}"
+    [[ "${BACKUP_RETENTION_DB_DAYS:-$global}" == 0 || "${BACKUP_RETENTION_FULL_DAYS:-$global}" == 0 || "${BACKUP_RETENTION_EMERGENCY_DAYS:-$global}" == 0 ]]
+}
+
+backup_rotation_allowed() {
+    local rotated_at="${1:-}"
+    if backup_any_retention_zero; then
+        log_error "Backup key rotation blocked because an effective retention tier is 0. Remove, re-encrypt, or explicitly verify backups protected by previous."
+        return 1
+    fi
+    [[ -z "$rotated_at" || "$rotated_at" == null ]] && return 0
+    local max_days now_ts rotated_ts
+    max_days=$(backup_effective_retention_days)
+    # Ubuntu production hosts use GNU date; -d keeps retention math simple and explicit.
+    now_ts=$(date -u +%s)
+    rotated_ts=$(date -u -d "$rotated_at" +%s 2>/dev/null) || return 1
+    if (( now_ts - rotated_ts < max_days * 86400 )); then
+        log_error "Backup key rotation blocked until longest retention window (${max_days} days) elapses. Remove, re-encrypt, or explicitly verify backups protected by previous."
+        return 1
+    fi
+}
+
+backup_key_candidates() {
+    local current previous
+    current=$(get_secret backup_key_current 2>/dev/null || true)
+    previous=$(get_secret backup_key_previous 2>/dev/null || true)
+    [[ -n "$current" && "$current" != null ]] && printf '%s\n' "$current"
+    [[ -n "$previous" && "$previous" != null ]] && printf '%s\n' "$previous"
+}
+
 secure_secrets_file() {
     local secrets_file="${1:-$SECRETS_FILE}"
     if [[ ! -f "$secrets_file" ]]; then return 0; fi
@@ -836,7 +876,7 @@ _bcrypt_format_ok() {
 
 # New auto keys (fields with auto_fn declared in the schema) must NOT be added
 # here. They are dispatched through the schema to auto_generate_secret_field().
-# backup_passphrase remains only as a legacy direct-call compatibility path;
+# backup_key_current/previous replace the legacy backup_passphrase lifecycle;
 # file_integrity_hmac_key deliberately rejects interactive collection.
 collect_secret_field() {
     local field="$1"
@@ -1585,6 +1625,39 @@ _warn_if_stack_unavailable() {
     return 0
 }
 
+
+vw_run_is_tmpfs() {
+    local run_dir="${1:-/run}"
+    local mountinfo="${VW_TEST_MOUNTINFO_FILE:-/proc/self/mountinfo}"
+    awk -v p="$run_dir" '$5 == p && $0 ~ / - tmpfs / {found=1} END {exit found?0:1}' "$mountinfo" 2>/dev/null
+}
+
+prepare_runtime_secrets_dir() {
+    local runtime_dir="${1:-${_VW_RUNTIME_SECRETS_DIR}}"
+    local parent="/run"
+    [[ "$runtime_dir" == /run/* ]] || { log_error "Runtime secrets must live under /run: $runtime_dir"; return 1; }
+    parent="/run"
+    if ! vw_run_is_tmpfs "$parent"; then
+        log_error "$parent is not tmpfs-backed; refusing to materialize plaintext secrets"
+        return 1
+    fi
+    install -d -m 0700 -o root -g root "$runtime_dir"
+}
+
+materialize_runtime_secrets() {
+    local runtime_dir="${1:-${_VW_RUNTIME_SECRETS_DIR}}"
+    local secrets_file="${2:-${SECRETS_FILE}}"
+    prepare_runtime_secrets_dir "$runtime_dir" || return 1
+    export_docker_secrets "$runtime_dir" "$secrets_file" || return 1
+    local f uid gid
+    uid="${PUID:-${_VW_DEFAULT_PUID}}"; gid="${PGID:-${_VW_DEFAULT_PGID}}"
+    for f in "$runtime_dir"/*; do
+        [[ -f "$f" ]] || continue
+        chmod 0400 "$f"
+        chown "${uid}:${gid}" "$f" 2>/dev/null || true
+    done
+}
+
 # ---------------------------------------------------------------------------
 # export_docker_secrets DOCKER_DIR [SECRETS_FILE]
 #
@@ -1623,7 +1696,7 @@ export_docker_secrets() {
         log_error "export_docker_secrets: failed to create $docker_dir"
         return 1
     fi
-    chmod 755 "$docker_dir"
+    chmod 0700 "$docker_dir"
 
     # Create the SOPS cache file inside the docker_dir (mode 755, not
     # world-listable /tmp), eliminating the TOCTOU
@@ -1730,12 +1803,11 @@ PYEOF
     fi
 
     # crowdsec_cf_firewall_token is intentionally not part of secrets.yaml.
-    # Canonical location is a flat file at:
-    #   ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/secrets/.docker_secrets/crowdsec_cf_firewall_token
+    # Canonical location is a runtime-only flat file under /run/vaultwarden-oci/secrets
     # Mirror it into the active docker secret directory when present.
     local _project_state_dir _cf_flat
     _project_state_dir="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}"
-    _cf_flat="${_project_state_dir}/secrets/.docker_secrets/crowdsec_cf_firewall_token"
+    _cf_flat="${_VW_RUNTIME_SECRETS_DIR}/crowdsec_cf_firewall_token"
     if [[ -f "$_cf_flat" ]]; then
         local _cf_value
         _cf_value=$(tr -d '[:space:]' < "$_cf_flat" 2>/dev/null || true)

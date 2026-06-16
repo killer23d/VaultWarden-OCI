@@ -64,7 +64,7 @@ test_postfix_container() {
     postfix_running=$(docker inspect vaultwarden_postfix --format '{{.State.Running}}' 2>/dev/null || echo "false")
     if [[ "$postfix_running" == "true" ]]; then
         log_success "✅ postfix container is running"
-        verbose_log "Container status: $(docker compose ps postfix --format 'table {{.Name}}\t{{.Status}}\t{{.Ports}}')"
+        verbose_log "Container status: $(vw_compose ps postfix --format 'table {{.Name}}\t{{.Status}}\t{{.Ports}}')"
     else
         log_error "❌ postfix container is not running"
         if [[ "$DRY_RUN" == "true" ]]; then
@@ -72,7 +72,7 @@ test_postfix_container() {
             return 1
         fi
         log_info "Starting postfix container..."
-        if docker compose up -d postfix; then
+        if vw_compose up -d postfix; then
             sleep 15
             log_success "✅ postfix container started successfully"
         else
@@ -80,16 +80,16 @@ test_postfix_container() {
             return 1
         fi
     fi
-    if docker compose exec -T postfix postfix status >/dev/null 2>&1; then
+    if vw_compose exec -T postfix postfix status >/dev/null 2>&1; then
         log_success "✅ postfix health check passed (port 587 responding)"
-        verbose_log "$(docker compose exec -T postfix postfix status 2>&1 || true)"
+        verbose_log "$(vw_compose exec -T postfix postfix status 2>&1 || true)"
     else
         log_error "❌ postfix health check failed (postfix master not running)"
-        log_info "🔍 Check logs: docker compose logs postfix"
+        log_info "🔍 Check logs: vw_compose logs postfix"
         return 1
     fi
     local recent_logs
-    recent_logs=$(docker compose logs --tail 20 postfix 2>/dev/null | grep -i "error\|fatal" | grep -v "warning" || true)
+    recent_logs=$(vw_compose logs --tail 20 postfix 2>/dev/null | grep -i "error\|fatal" | grep -v "warning" || true)
     if [[ -n "$recent_logs" ]]; then
         log_warn "⚠️  Found recent errors in postfix logs:"
         echo "$recent_logs" | while read -r line; do log_warn "    $line"; done
@@ -176,7 +176,7 @@ If you received this message, email delivery is working correctly."
         log_error "❌ Failed to send test email"
         log_info "🔍 Debug steps:"
         log_info "   1. Confirm EMAIL_MODE routing (auto/api/smtp/direct/host alias)"
-        log_info "   2. Check API provider response or postfix logs: docker compose logs postfix"
+        log_info "   2. Check API provider response or postfix logs: vw_compose logs postfix"
         log_info "   3. Verify SMTP_FROM, SMTP_HOST, SMTP_PORT, SMTP_USERNAME, and smtp_password for Direct fallback"
         log_info "   4. Verify ALLOWED_SENDER_DOMAINS in .env for sidecar delivery"
         log_info "   5. Check CrowdSec logs: sudo journalctl -u crowdsec -n 50 --no-pager"

@@ -280,14 +280,16 @@ HELP
                         log_error "Re-generate the Age key and retry."
                         return 1
                     fi
-                    cat > .sops.yaml << SOPS_EOF
+                    local recipients="$age_public_key"
+                    if [[ -n "${OFFLINE_AGE_RECIPIENT:-}" ]]; then recipients="$recipients,${OFFLINE_AGE_RECIPIENT}"; fi
+                    cat > "${SOPS_CONFIG_FILE:-${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}/config/sops-policy.yaml}" << SOPS_EOF
 creation_rules:
   - path_regex: .*\.yaml$
-    age: $age_public_key
+    age: $recipients
 SOPS_EOF
-                    chmod 640 .sops.yaml
-                    chown "$(get_real_user):$(id -g -n "$(get_real_user)")" .sops.yaml 2>/dev/null || true
-                    log_success "SOPS configuration created: .sops.yaml"
+                    chmod 640 "${SOPS_CONFIG_FILE:-${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}/config/sops-policy.yaml}"
+                    chown "$(get_real_user):$(id -g -n "$(get_real_user)")" "${SOPS_CONFIG_FILE:-${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}/config/sops-policy.yaml}" 2>/dev/null || true
+                    log_success "SOPS configuration created: ${SOPS_CONFIG_FILE:-${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}/config/sops-policy.yaml}"
                     ;;
                 directories)
                     log_info "Creating directory structure..."
@@ -1414,11 +1416,11 @@ COMMON EMERGENCY COMMANDS:
 sudo /bin/systemctl restart sshd
 
 # Check system status
-sudo /usr/bin/docker compose ps
+sudo vw_compose ps
 sudo /usr/bin/journalctl -u docker --since "1 hour ago"
 
 # Restart services
-sudo /usr/bin/docker compose restart
+sudo vw_compose restart
 
 SECURITY NOTES:
 - This account does NOT have unrestricted root access
@@ -1708,23 +1710,23 @@ EOF
         local service="${1:-vaultwarden}"
 
         log_info "Restarting $service to re-apply original token..."
-        if docker compose restart "$service"; then
+        if vw_compose restart "$service"; then
             log_success "$service restarted successfully — breakglass token deactivated"
             return 0
         fi
 
         local _rc=$?
-        log_error "CRITICAL: 'docker compose restart $service' failed (exit ${_rc})."
+        log_error "CRITICAL: 'vw_compose restart $service' failed (exit ${_rc})."
         log_error "CRITICAL: The breakglass admin token is still ACTIVE."
         log_error "Manual remediation required:"
-        log_error "  1. Investigate: docker compose logs $service"
+        log_error "  1. Investigate: vw_compose logs $service"
         log_error "  2. Fix the underlying issue (port conflict, OOM, config error)"
-        log_error "  3. Re-run: docker compose restart $service"
+        log_error "  3. Re-run: vw_compose restart $service"
         log_error "  4. Confirm: sudo utilities/setup-secrets.sh breakglass status"
 
         _notify_breakglass_event \
             "DISABLE_FAILED" \
-            "docker compose restart ${service} exited with code ${_rc}. Breakglass token is still ACTIVE." \
+            "vw_compose restart ${service} exited with code ${_rc}. Breakglass token is still ACTIVE." \
             "CRITICAL"
 
         return $_rc
@@ -2016,10 +2018,12 @@ EOF
 
 _write_sops_config() {
     local age_pub="$1" dest="$2"
+    local recipients="$age_pub"
+    if [[ -n "${OFFLINE_AGE_RECIPIENT:-}" ]]; then recipients="$recipients,${OFFLINE_AGE_RECIPIENT}"; fi
     cat > "$dest" << SOPS_EOF
 creation_rules:
   - path_regex: .*\.yaml$
-    age: $age_pub
+    age: $recipients
 SOPS_EOF
     chmod 640 "$dest"
     local real_user; real_user=$(get_real_user)

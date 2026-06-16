@@ -147,7 +147,7 @@ snapshot_image_digests() {
     local images=()
     while IFS= read -r img; do
         [[ -n "$img" ]] && images+=("$img")
-    done < <(docker compose config --images 2>/dev/null || true)
+    done < <(vw_compose config --images 2>/dev/null || true)
     for image in "${images[@]}"; do
         local id; id=$(docker inspect --format='{{.Id}}' "$image" 2>/dev/null || echo "")
         _PRE_PULL_IDS["$image"]="$id"
@@ -187,13 +187,13 @@ rollback_image_digests() {
         else
             log_error "  Rollback FAILED for $image (pre-pull Id: ${pre_id:7:12})"
             log_error "  The pre-pull image layer may have been pruned."
-            log_error "  Run 'docker compose pull' again once the network issue is resolved."
+            log_error "  Run 'vw_compose pull' again once the network issue is resolved."
             (( ++rollback_failed )) || true
         fi
     done
     if (( rollback_failed > 0 )); then
         log_error "Rollback incomplete: $rollback_failed image(s) could not be restored."
-        log_error "Do NOT run 'docker compose up -d' until all images are at consistent versions."
+        log_error "Do NOT run 'vw_compose up -d' until all images are at consistent versions."
         log_error "Pull again from a stable network: sudo ./maintenance.sh update --images"
         return 1
     fi
@@ -211,7 +211,7 @@ check_image_updates() {
     local images=()
     while IFS= read -r img; do
         [[ -n "$img" ]] && images+=("$img")
-    done < <(docker compose config --images 2>/dev/null || true)
+    done < <(vw_compose config --images 2>/dev/null || true)
     if [[ ${#images[@]} -eq 0 ]]; then
         log_warn "No images found in docker-compose.yml"
         return 1
@@ -220,14 +220,14 @@ check_image_updates() {
     local failed=0
     for image in "${images[@]}"; do
         if [[ "$image" == "vaultwarden-oci-caddy" ]]; then
-            log_info "  Checking local custom build image: $image (docker compose build --pull caddy)"
+            log_info "  Checking local custom build image: $image (vw_compose build --pull caddy)"
             if [[ "$DRY_RUN" == "true" ]]; then
                 log_info "  [DRY RUN] Would rebuild local image with updated base layers: caddy"
                 continue
             fi
             local old_id new_id
             old_id=$(docker inspect --format='{{.Id}}' "$image" 2>/dev/null || echo "")
-            if ! docker compose build --pull caddy; then
+            if ! vw_compose build --pull caddy; then
                 log_error "  [FAILED] Could not rebuild local image: $image"
                 (( failed++ )) || true
                 continue
@@ -278,7 +278,7 @@ verify_image_digests() {
     local images=()
     while IFS= read -r img; do
         [[ -n "$img" ]] && images+=("$img")
-    done < <(docker compose config --images 2>/dev/null || true)
+    done < <(vw_compose config --images 2>/dev/null || true)
     local failed=0
     for image in "${images[@]}"; do
         local digest
@@ -296,11 +296,11 @@ verify_image_digests() {
 apply_updates_and_restart() {
     log_info "Applying updates and restarting services..."
     if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would run: docker compose up -d --remove-orphans"
+        log_info "[DRY RUN] Would run: vw_compose up -d --remove-orphans"
         return 0
     fi
     ensure_caddy_entrypoint_executable || return 1
-    if ! docker compose up -d --remove-orphans; then
+    if ! vw_compose up -d --remove-orphans; then
         log_error "Failed to restart services"
         return 1
     fi

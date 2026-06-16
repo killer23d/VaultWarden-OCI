@@ -25,7 +25,7 @@ NC     := \033[0m
 PROJECT_ROOT         ?= $(shell pwd)
 COMPOSE_FILE         ?= docker-compose.yml
 COMPOSE_PROJECT_NAME ?= vaultwarden-oci
-DOCKER_COMP          ?= $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
+DOCKER_COMP          ?= ./maintenance.sh
 # Resolve SECRETS_FILE from lib/config.sh at make-time; operator may override.
 SECRETS_FILE         ?= $(shell PROJECT_ROOT="$(PROJECT_ROOT)" bash -c '. "$(PROJECT_ROOT)/lib/config.sh" >/dev/null 2>&1; printf "%s" "$$SECRETS_FILE"')
 
@@ -267,7 +267,7 @@ test-email: ## Send a test operational alert email (health/backup notification c
 # up / down / restart do NOT require root. The invoking user must be a member
 # of the `docker` group. If not, `check-docker` prints a clear fix command.
 # startup.sh handles secrets initialisation, secrets pre-flight checks, and
-# the post-start health poll — do not replace it with a bare `docker compose up`.
+# the post-start health poll — do not replace it with a bare `vw_compose up`.
 
 up: ## Start all services (runs startup.sh for health checks)
 	$(call check-docker)
@@ -330,7 +330,7 @@ start: up ## Alias for up
 down: ## Stop all services gracefully
 	$(call check-docker)
 	@echo "$(BLUE)Stopping VaultWarden services...$(NC)"
-	@$(DOCKER_COMP) down
+	@./startup.sh stop
 	@echo "$(GREEN)Services stopped.$(NC)"
 
 stop: down ## Alias for down
@@ -354,7 +354,7 @@ safe-restart: ## Restart with automatic rollback on failure
 status: ## Show service status, backup health, disk usage, and CrowdSec ban summary
 	$(call check-docker)
 	@echo "$(BLUE)VaultWarden Service Status:$(NC)"
-	@$(DOCKER_COMP) ps
+	@./maintenance.sh status
 	@echo ""
 	@echo "$(CYAN)Resource usage:$(NC)"
 	@docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}" 2>/dev/null | grep -E "vaultwarden|caddy|postfix" || true
@@ -427,14 +427,14 @@ drill: ## Run non-destructive pre-production dry-run drill
 
 watch: ## Watch service logs in real-time (Ctrl+C to stop)
 	$(call check-docker)
-	@$(DOCKER_COMP) logs -f
+	@./maintenance.sh logs
 
 monitor: ## Continuous health monitoring (30s intervals, Ctrl+C to stop)
 	@echo "$(BLUE)Starting continuous monitoring (30s intervals)...$(NC)"
 	@while true; do \
 		clear; \
 		echo "$(CYAN)=== VaultWarden Monitor — $$(date) ===$(NC)"; \
-		$(DOCKER_COMP) ps; \
+		./maintenance.sh status; \
 		echo ""; \
 		docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}" 2>/dev/null | grep -E "vaultwarden|caddy|postfix" || true; \
 		sleep 30; \
@@ -465,23 +465,23 @@ SERVICE ?= vaultwarden
 
 logs: ## View service logs (SERVICE=<name> to filter, default: vaultwarden)
 	$(call check-docker)
-	@$(DOCKER_COMP) logs -f $(SERVICE)
+	@./maintenance.sh logs $(SERVICE)
 
 logs-tail: ## Tail last 100 lines of all service logs
 	$(call check-docker)
-	@$(DOCKER_COMP) logs --tail=100
+	@./maintenance.sh logs --tail=100
 
 logs-vaultwarden: ## Tail vaultwarden logs
 	$(call check-docker)
-	@$(DOCKER_COMP) logs -f vaultwarden
+	@./maintenance.sh logs vaultwarden
 
 logs-caddy: ## Tail caddy logs
 	$(call check-docker)
-	@$(DOCKER_COMP) logs -f caddy
+	@./maintenance.sh logs caddy
 
 logs-postfix: ## Tail postfix logs
 	$(call check-docker)
-	@$(DOCKER_COMP) logs -f postfix
+	@./maintenance.sh logs postfix
 
 logs-crowdsec: ## Tail CrowdSec logs
 	@sudo journalctl -u crowdsec -f --no-pager
@@ -949,12 +949,12 @@ diagnose: ## Full diagnostic dump (versions, status, health, key, logs tail)
 	@echo ""
 	@echo "$(CYAN)--- Tool Versions ---$(NC)"
 	@docker --version 2>/dev/null || echo "docker: not found"
-	@docker compose version 2>/dev/null || echo "docker compose: not found"
+	@vw_compose version 2>/dev/null || echo "vw_compose: not found"
 	@sops --version 2>/dev/null || echo "sops: not found"
 	@age --version 2>/dev/null || echo "age: not found"
 	@echo ""
 	@echo "$(CYAN)--- Container Status ---$(NC)"
-	@$(DOCKER_COMP) ps 2>/dev/null || echo "docker compose: not available"
+	@./maintenance.sh status 2>/dev/null || echo "vw_compose: not available"
 	@echo ""
 	@echo "$(CYAN)--- Storage ---$(NC)"
 	@STATE_DIR=$$(grep '^PROJECT_STATE_DIR=' .env 2>/dev/null | cut -d= -f2-); \

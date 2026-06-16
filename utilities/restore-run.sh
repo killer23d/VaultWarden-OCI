@@ -1819,15 +1819,15 @@ main() {
         local rc=$?
         if [[ $rc -ne 0 ]]; then
             log_warn "Restore encountered an error (exit $rc) — attempting to restart services..."
-            docker compose up -d --remove-orphans 2>/dev/null || \
-                log_error "CRITICAL: Failed to restart services after restore error. Manual intervention required: docker compose up -d"
+            vw_compose up -d --remove-orphans 2>/dev/null || \
+                log_error "CRITICAL: Failed to restart services after restore error. Manual intervention required: vw_compose up -d"
         fi
         # Preserve the cleanup contract: remove decrypted temp material.
         cleanup
     }
 
     if [[ "$DRY_RUN" != "true" ]]; then
-        docker compose stop
+        vw_compose stop
     fi
     trap _restore_safety_net ERR HUP INT TERM
 
@@ -1899,9 +1899,9 @@ main() {
 
     if [[ "$DRY_RUN" != "true" ]]; then
         log_info "Starting services..."
-        if ! docker compose up -d --remove-orphans; then
+        if ! vw_compose up -d --remove-orphans; then
             log_error "Failed to start services after restore."
-            log_error "Investigate with: docker compose logs --tail=50"
+            log_error "Investigate with: vw_compose logs --tail=50"
             exit 1
         fi
         # Services are now running — clear the safety-net ERR trap so that
@@ -1920,7 +1920,7 @@ main() {
             log_info "Invoking: ${PROJECT_ROOT}/utilities/maintenance-health.sh"
             "${PROJECT_ROOT}/utilities/maintenance-health.sh" || {
                 log_warn "Health check reported issues after restore."
-                log_warn "Investigate with: docker compose logs --tail=50"
+                log_warn "Investigate with: vw_compose logs --tail=50"
             }
         fi
     fi

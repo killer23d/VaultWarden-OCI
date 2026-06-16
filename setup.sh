@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP_WORKDIR"' EXIT
 trap 'rm -rf "${TMP_WORKDIR:-}"; exit 130' INT
 trap 'rm -rf "${TMP_WORKDIR:-}"; exit 143' TERM
 
-REQUIRED_LIBS=("lib/log.sh" "lib/validate.sh" "lib/config.sh" "lib/common.sh" "lib/crypto.sh" "lib/docker.sh" "lib/backup-utils.sh" "lib/secrets.sh" "lib/storage.sh")
+REQUIRED_LIBS=("lib/log.sh" "lib/validate.sh" "lib/config.sh" "lib/common.sh" "lib/crypto.sh" "lib/docker.sh" "lib/backup-utils.sh" "lib/secrets.sh" "lib/storage.sh" "lib/recovery.sh" "lib/state-migration.sh")
 for lib in "${REQUIRED_LIBS[@]}"; do
     if [[ ! -f "${SCRIPT_DIR}/${lib}" ]]; then
         echo "ERROR: Required library not found: ${SCRIPT_DIR}/${lib}" >&2
@@ -46,6 +46,10 @@ source "${SCRIPT_DIR}/lib/docker.sh"
 source "${SCRIPT_DIR}/lib/backup-utils.sh"
 source "${SCRIPT_DIR}/lib/secrets.sh"
 source "${SCRIPT_DIR}/lib/storage.sh"
+source "${SCRIPT_DIR}/lib/recovery.sh"
+source "${SCRIPT_DIR}/lib/state-migration.sh"
+if [[ "${1:-}" == "recover" ]]; then shift; run_recovery "$@"; exit $?; fi
+if [[ "${1:-}" == "migrate-state" ]]; then shift; migrate_legacy_state_copy "$@"; exit $?; fi
 source "${SCRIPT_DIR}/lib/defaults.sh"
 
 DOMAIN=""

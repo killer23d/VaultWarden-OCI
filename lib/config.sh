@@ -21,16 +21,80 @@ readonly VW_CONFIG_LIB_LOADED=1
 _VW_CONFIG_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -n "${VW_LOG_LIB_LOADED:-}" ]] || source "${_VW_CONFIG_LIB_DIR}/log.sh"
 
-_ENV_FILE_SEARCH_PATHS=(
-    "${PROJECT_ROOT:-$(cd "${_VW_CONFIG_LIB_DIR}/.." && pwd)}/.env"
-    "/etc/vaultwarden/vaultwarden.env"
-)
+[[ -n "${VAULTWARDEN_DEFAULTS_LOADED:-}" ]] || source "${_VW_CONFIG_LIB_DIR}/defaults.sh"
+# Bootstrap note: setup.sh recover --state-dir establishes PROJECT_STATE_DIR
+# during recovery. Normal operation resolves it from configured/default state.
+# VW_ENV_FILE is only for explicit testing/migration overrides; repository-local
+# .env is intentionally not a fallback.
+_ENV_FILE_SEARCH_PATHS=("${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}/config/install.env" "/etc/vaultwarden/vaultwarden.env")
 unset _VW_CONFIG_LIB_DIR
 
 _get_file_perms() {
     stat -c '%a' "$1" 2>/dev/null \
         || stat -f '%OLp' "$1" 2>/dev/null \
         || printf 'unknown'
+}
+
+
+vw_install_env_file() {
+    if [[ -n "${VW_ENV_FILE:-}" ]]; then
+        printf '%s\n' "$VW_ENV_FILE"
+        return 0
+    fi
+    printf '%s\n' "${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}/config/install.env"
+}
+
+load_install_env() {
+    local env_file="${1:-$(vw_install_env_file)}"
+    if [[ ! -f "$env_file" ]]; then
+        log_error "install.env not found: $env_file"
+        return 1
+    fi
+
+    local line key raw_value value lineno=0
+    local -A seen=()
+    local -a errors=()
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        (( lineno++ )) || true
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+        if [[ "$line" != *=* ]]; then
+            errors+=("line ${lineno}: expected KEY=VALUE")
+            continue
+        fi
+        key="${line%%=*}"
+        raw_value="${line#*=}"
+        if [[ ! "$key" =~ ^[A-Z][A-Z0-9_]*$ ]]; then
+            errors+=("line ${lineno}: invalid key '$key'")
+            continue
+        fi
+        if [[ -n "${seen[$key]:-}" ]]; then
+            errors+=("line ${lineno}: duplicate key '$key'")
+            continue
+        fi
+        seen[$key]=1
+        if [[ "$key" =~ (PASSWORD|TOKEN|SECRET|PRIVATE_KEY|API_KEY|PASSPHRASE) ]]; then
+            errors+=("line ${lineno}: credential-like key '$key' is forbidden in install.env")
+            continue
+        fi
+        value="$raw_value"
+        if { [[ "$value" == \"*\" && "$value" == *\" ]] || [[ "$value" == \'*\' && "$value" == *\' ]]; } && (( ${#value} >= 2 )); then
+            value="${value:1:${#value}-2}"
+        fi
+        if [[ "$value" == *'$('* || "$value" == *'`'* || "$value" == *'${'* ]]; then
+            errors+=("line ${lineno}: shell substitution/expansion is forbidden for '$key'")
+            continue
+        fi
+        printf -v "$key" '%s' "$value"
+        export "$key"
+    done < "$env_file"
+
+    if (( ${#errors[@]} > 0 )); then
+        log_error "install.env validation failed: $env_file"
+        local err
+        for err in "${errors[@]}"; do log_error "  $err"; done
+        return 1
+    fi
+    return 0
 }
 
 load_env_file() {
@@ -219,7 +283,7 @@ _read_env_value() {
         | tail -1 | cut -d= -f2- | tr -d "\"'" || true
 }
 
-export -f load_env_file get_config_value require_config
+export -f vw_install_env_file load_install_env load_env_file get_config_value require_config
 export -f _get_file_perms _set_env_var _read_env_value
 
 # ---------------------------------------------------------------------------
@@ -236,10 +300,12 @@ export -f _get_file_perms _set_env_var _read_env_value
 _VW_CONFIG_PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 
 AGE_KEY_FILE="${AGE_KEY_FILE:-/etc/vaultwarden/age-key.txt}"
-SECRETS_FILE="${SECRETS_FILE:-${_VW_CONFIG_PROJECT_ROOT}/secrets/secrets.yaml}"
+PROJECT_STATE_DIR="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}"
+SECRETS_FILE="${SECRETS_FILE:-${PROJECT_STATE_DIR}/secrets/secrets.sops.yaml}"
+SOPS_CONFIG_FILE="${SOPS_CONFIG_FILE:-${PROJECT_STATE_DIR}/config/sops-policy.yaml}"
 SOPS_AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-${AGE_KEY_FILE}}"
 
-export AGE_KEY_FILE SECRETS_FILE SOPS_AGE_KEY_FILE
+export PROJECT_STATE_DIR AGE_KEY_FILE SECRETS_FILE SOPS_CONFIG_FILE SOPS_AGE_KEY_FILE
 unset _VW_CONFIG_PROJECT_ROOT
 
 log_debug "Config library loaded"

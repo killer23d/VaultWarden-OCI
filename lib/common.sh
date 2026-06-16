@@ -39,6 +39,10 @@ readonly VAULTWARDEN_COMMON_LIB_LOADED=1
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$LIB_DIR/.." && pwd)"
+# Load the canonical Compose wrapper for scripts that historically invoked
+# Compose directly after sourcing common.sh. docker.sh does not depend on
+# common.sh, so this avoids a circular dependency.
+[[ -n "${VAULTWARDEN_DOCKER_LIB_LOADED:-}" ]] || source "${LIB_DIR}/docker.sh"
 
 has_command() {
     local cmd="$1"

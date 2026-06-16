@@ -131,12 +131,12 @@ _print_rotation_receipt() {
         printf '  %sServices requiring restart:%s\n' "${COLOR_BOLD}" "${COLOR_RESET}"
         local svc
         for svc in $services_list; do
-            printf '    %s→%s docker compose restart %s\n' \
+            printf '    %s→%s vw_compose restart %s\n' \
                 "${COLOR_CYAN}" "${COLOR_RESET}" "$svc"
         done
     else
         printf '  %sServices requiring restart:%s\n' "${COLOR_BOLD}" "${COLOR_RESET}"
-        printf '    %s→%s docker compose restart <service>\n' \
+        printf '    %s→%s vw_compose restart <service>\n' \
             "${COLOR_CYAN}" "${COLOR_RESET}"
     fi
 

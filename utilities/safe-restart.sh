@@ -66,7 +66,7 @@ image_snapshot="${rollback_dir}/images.tsv"
 trap 'rm -rf "$rollback_dir"' EXIT HUP INT TERM
 
 log_info "Capturing the current resolved Compose model and local image IDs..."
-docker compose config > "$compose_snapshot" || {
+vw_compose config > "$compose_snapshot" || {
     log_error "Current Compose configuration is invalid; restart was not attempted."
     exit 1
 }
@@ -77,7 +77,7 @@ while IFS= read -r image_ref; do
     [[ -n "$image_ref" ]] || continue
     image_id=$(docker image inspect --format '{{.Id}}' "$image_ref" 2>/dev/null || true)
     printf '%s\t%s\n' "$image_ref" "$image_id" >> "$image_snapshot"
-done < <(docker compose config --images | sort -u)
+done < <(vw_compose config --images | sort -u)
 chmod 600 "$image_snapshot"
 
 log_info "Restarting with the existing image set (--skip-pull)..."
@@ -96,7 +96,7 @@ while IFS=$'\t' read -r image_ref image_id; do
     fi
 done < "$image_snapshot"
 
-if ! docker compose \
+if ! vw_compose \
         --project-directory "$PROJECT_ROOT" \
         -f "$compose_snapshot" \
         up -d --force-recreate --no-build --pull never; then
@@ -105,7 +105,7 @@ if ! docker compose \
 fi
 
 if [[ "$rollback_failed" == "true" ]]; then
-    log_error "Rollback was incomplete. Inspect: docker compose ps && docker compose logs"
+    log_error "Rollback was incomplete. Inspect: vw_compose ps && vw_compose logs"
     exit 2
 fi
 

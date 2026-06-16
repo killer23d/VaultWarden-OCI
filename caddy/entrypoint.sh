@@ -108,7 +108,7 @@ if [ "$_log_touch_failed" = "true" ]; then
     log_warn "  sudo chmod 640 \"\$LOG_DIR/access.log\" \"\$LOG_DIR/security.log\""
     log_warn "  sudo chown 2000:2000 \"\$LOG_DIR\""
     log_warn "  sudo chmod 750 \"\$LOG_DIR\""
-    log_warn "  cd ~/VaultWarden-OCI && docker compose restart caddy"
+    log_warn "  cd ~/VaultWarden-OCI && vw_compose restart caddy"
     log_warn ""
     log_warn "setup.sh performs this automatically for new installs."
     log_warn "Caddy will start with stdout logging only — set CADDY_DEGRADED in health check."
@@ -126,7 +126,7 @@ if [ "$CADDY_DEGRADED" = "false" ] && ! test -w /var/log/caddy/access.log; then
     log_warn "  sudo chmod 640 \"\$LOG_DIR/access.log\" \"\$LOG_DIR/security.log\""
     log_warn "  sudo chown 2000:2000 \"\$LOG_DIR\""
     log_warn "  sudo chmod 750 \"\$LOG_DIR\""
-    log_warn "  cd ~/VaultWarden-OCI && docker compose restart caddy"
+    log_warn "  cd ~/VaultWarden-OCI && vw_compose restart caddy"
     export CADDY_DEGRADED=true
 fi
 

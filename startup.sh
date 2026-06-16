@@ -33,7 +33,7 @@ SKIP_EGRESS_FIX=false
 
 _STARTUP_WARNINGS=()
 
-DOCKER_SECRETS_DIR="${PROJECT_ROOT}/secrets/.docker_secrets"
+DOCKER_SECRETS_DIR="${_VW_RUNTIME_SECRETS_DIR}"
 
 show_help() {
 cat << 'EOF'
@@ -44,12 +44,12 @@ USAGE:
   ./startup.sh stop              # Stop all services
 
 SUBCOMMANDS:
-  stop             Stop all services (delegates to docker compose down)
+  stop             Stop all services (delegates to vw_compose down)
 
 STARTUP OPTIONS:
   --force          Force restart of all services
   --skip-health    Skip post-startup health check
-  --skip-pull      Skip docker compose pull (use for systemd restarts
+  --skip-pull      Skip vw_compose pull (use for systemd restarts
                    or when images are already current)
   --background     Start services in background (daemon mode)
   --skip-egress-fix  Skip automatic egress NAT remediation for
@@ -113,7 +113,7 @@ if [[ "$DO_DOWN" == "true" ]]; then
     exit 1
   fi
   log_info "Stopping VaultWarden services..."
-  docker compose down
+  vw_compose down
   log_success "Services stopped successfully"
   exit 0
 fi
@@ -257,7 +257,7 @@ validate_prerequisites() {
 
 
 # Ensure all PROJECT_STATE_DIR subdirectories required by Docker bind mounts
-# exist on the host before `docker compose up`. Use absolute paths so
+# exist on the host before `vw_compose up`. Use absolute paths so
 # separate-volume installs create directories on the data volume rather than
 # under PROJECT_ROOT.
 #
@@ -518,7 +518,7 @@ prepare_docker_secrets() {
   fi
 
   check_age_key_health_preflight || return 1
-  export_docker_secrets "$DOCKER_SECRETS_DIR" || return 1
+  materialize_runtime_secrets "$DOCKER_SECRETS_DIR" || return 1
   log_success "Docker secrets prepared"
   return 0
 }
@@ -545,22 +545,22 @@ cleanup_orphaned_resources() {
 # Refresh images through maintenance.sh update or a manual ./startup.sh run
 # without --skip-pull.
 #
-# Use direct `docker compose pull` so output streams to the journal without
+# Use direct `vw_compose pull` so output streams to the journal without
 # buffering.
 _startup_pull_images() {
   if [[ "$SKIP_PULL" == "true" ]]; then
-    log_info "Skipping docker compose pull (--skip-pull)"
+    log_info "Skipping vw_compose pull (--skip-pull)"
     return 0
   fi
 
   log_info "Pulling latest container images..."
 
   if [[ "$DRY_RUN" == "true" ]]; then
-    log_info "[DRY RUN] Would run: docker compose pull"
+    log_info "[DRY RUN] Would run: vw_compose pull"
     return 0
   fi
 
-  docker compose pull --quiet
+  vw_compose pull --quiet
   log_success "Images pulled successfully"
   return 0
 }
@@ -601,11 +601,11 @@ _startup_start_services() {
   fi
 
   if [[ "$DRY_RUN" == "true" ]]; then
-    log_info "[DRY RUN] Would run: docker compose ${compose_args[*]}"
+    log_info "[DRY RUN] Would run: vw_compose ${compose_args[*]}"
     return 0
   fi
 
-  docker compose "${compose_args[@]}"
+  vw_compose "${compose_args[@]}"
   log_success "Services started"
   return 0
 }
@@ -711,7 +711,7 @@ run_health_check() {
 
 show_status() {
   log_info "Current service status:"
-  docker compose ps || true
+  vw_compose ps || true
 }
 
 # #26 — Emit the accumulated warnings banner unconditionally so it is always

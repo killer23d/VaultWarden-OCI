@@ -86,7 +86,7 @@ run_deep_db_maintenance() {
         if [[ "$was_running" == "true" ]]; then
             if ! is_service_running "vaultwarden" 2>/dev/null; then
                 log_warn "run_deep_db_maintenance: safety net restarting VaultWarden..."
-                docker compose up -d vaultwarden 2>&1 || log_error "Safety net restart failed — manual intervention required"
+                vw_compose up -d vaultwarden 2>&1 || log_error "Safety net restart failed — manual intervention required"
             fi
         fi
     }
@@ -111,7 +111,7 @@ run_deep_db_maintenance() {
         rm -f "$backup_ts_marker"
     fi
     log_info "Stopping VaultWarden container..."
-    if docker compose stop vaultwarden; then
+    if vw_compose stop vaultwarden; then
         log_success "VaultWarden container stopped"
     else
         log_warn "Failed to stop vaultwarden container"
@@ -121,7 +121,7 @@ run_deep_db_maintenance() {
     log_info "Step 2/6: Checking database integrity..."
     if ! sqlite3 "$db_file" "PRAGMA integrity_check;" | grep -q "ok"; then
         log_error "Integrity check FAILED. Aborting. Restarting services..."
-        docker compose up -d vaultwarden; return 1
+        vw_compose up -d vaultwarden; return 1
     fi
     log_success "Database integrity check passed"
     log_info "Step 3/6: Committing WAL file (PRAGMA wal_checkpoint(TRUNCATE))..."
@@ -139,7 +139,7 @@ run_deep_db_maintenance() {
     log_info "Step 5/6: Reclaiming free space (VACUUM)... This may take a moment."
     if ! sqlite3 "$db_file" "VACUUM;" >/dev/null 2>&1; then
         log_error "VACUUM FAILED. Aborting. Restarting services..."
-        docker compose up -d vaultwarden; return 1
+        vw_compose up -d vaultwarden; return 1
     fi
     log_success "Database VACUUM completed"
     log_info "Step 6/6: Gathering statistics..."
@@ -147,14 +147,14 @@ run_deep_db_maintenance() {
     new_size=$(du -h "$db_file" | cut -f1)
     new_bytes=$(stat -c%s "$db_file" 2>/dev/null || echo "0")
     log_info "Restarting VaultWarden container..."
-    docker compose up -d vaultwarden || { log_error "Failed to restart VaultWarden!"; return 1; }
+    vw_compose up -d vaultwarden || { log_error "Failed to restart VaultWarden!"; return 1; }
     log_info "Waiting for services to become healthy (timeout: 45s)..."
     if wait_for_service_ready "vaultwarden" 45; then
         log_success "All critical services are healthy"
         maintenance_successful=true
     else
         log_error "vaultwarden did not become healthy in time"
-        log_info "Check logs: docker compose logs vaultwarden"
+        log_info "Check logs: vw_compose logs vaultwarden"
     fi
     log_success "VaultWarden is back online"
     echo ""

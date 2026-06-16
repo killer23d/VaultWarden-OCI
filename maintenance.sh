@@ -20,6 +20,8 @@ DESCRIPTION:
 SUBCOMMANDS:
     run               Full routine maintenance (cleanup + optimize + health)
     run --comprehensive   Full routine + firewall + DNS updates
+    status            Show Compose service status
+    logs              Follow Compose service logs
     health            Run system health checks
     update            Update system packages and/or Docker images
     db-maint          Deep offline database maintenance (VACUUM + checkpoint)
@@ -56,6 +58,14 @@ _TASK="${1}"
 shift
 
 case "$_TASK" in
+    status)
+        source "$SCRIPT_DIR/lib/log.sh"; source "$SCRIPT_DIR/lib/defaults.sh"; source "$SCRIPT_DIR/lib/config.sh"; source "$SCRIPT_DIR/lib/docker.sh"
+        vw_compose ps "$@"
+        ;;
+    logs)
+        source "$SCRIPT_DIR/lib/log.sh"; source "$SCRIPT_DIR/lib/defaults.sh"; source "$SCRIPT_DIR/lib/config.sh"; source "$SCRIPT_DIR/lib/docker.sh"
+        vw_compose logs -f "$@"
+        ;;
     health)
         exec "$SCRIPT_DIR/utilities/maintenance-health.sh" "$@"
         ;;

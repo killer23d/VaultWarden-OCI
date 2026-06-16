@@ -392,10 +392,10 @@ info "Step 1: Stopping Docker Compose stack..."
 
 if command -v docker &>/dev/null; then
     if [[ -f "${PROJECT_DIR}/docker-compose.yml" ]]; then
-        docker compose -f "${PROJECT_DIR}/docker-compose.yml" down \
+        vw_compose -f "${PROJECT_DIR}/docker-compose.yml" down \
             --volumes --remove-orphans --timeout 30 2>/dev/null \
             && success "Docker Compose stack stopped and volumes removed." \
-            || warn "docker compose down had errors (containers may already be gone)."
+            || warn "vw_compose down had errors (containers may already be gone)."
     fi
 
     for svc in vaultwarden caddy postfix; do

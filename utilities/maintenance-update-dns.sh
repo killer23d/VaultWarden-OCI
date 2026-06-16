@@ -101,7 +101,7 @@ _resolve_cf_token() {
     fi
 
     # 3. Caddy container secret (fallback when host file is absent).
-    token=$(docker compose exec -T caddy \
+    token=$(vw_compose exec -T caddy \
         cat /run/secrets/caddy_cloudflare_dns_token 2>/dev/null) \
         || { log_error "Cannot read Cloudflare API token (host file: $token_file not found, Caddy container may be stopped)"; return 1; }
     log_debug "Cloudflare token loaded from Caddy container secret"

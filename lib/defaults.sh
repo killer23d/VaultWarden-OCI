@@ -20,6 +20,7 @@ readonly VAULTWARDEN_DEFAULTS_LOADED=1
 # ---------------------------------------------------------------------------
 readonly _VW_DEFAULT_STATE_DIR="${_VW_DEFAULT_STATE_DIR:-/var/lib/vaultwarden}"
 readonly _VW_DEFAULT_DATA_MOUNT="${_VW_DEFAULT_DATA_MOUNT:-/opt/vaultwarden/data}"
+readonly _VW_RUNTIME_SECRETS_DIR="${_VW_RUNTIME_SECRETS_DIR:-/run/vaultwarden-oci/secrets}"
 
 # ---------------------------------------------------------------------------
 # Service user identity
@@ -37,7 +38,7 @@ readonly -a _VW_DEFAULT_LOG_SERVICES=(
     postfix
 )
 
-# Critical services that startup.sh waits on after `docker compose up`.
+# Critical services that startup.sh waits on after `vw_compose up`.
 # Add a new sidecar here when the compose stack grows.
 readonly -a _VW_DEFAULT_CRITICAL_SERVICES=(
     vaultwarden

@@ -318,8 +318,8 @@ _phase_iptables() {
     local -a NETWORK_NAMES=()
     set +e
     mapfile -t NETWORK_NAMES < <(
-        docker compose -f "${PROJECT_ROOT}/${compose_file}" config --services >/dev/null 2>&1 &&
-        docker compose -f "${PROJECT_ROOT}/${compose_file}" config --format json 2>/dev/null |
+        vw_compose -f "${PROJECT_ROOT}/${compose_file}" config --services >/dev/null 2>&1 &&
+        vw_compose -f "${PROJECT_ROOT}/${compose_file}" config --format json 2>/dev/null |
         python3 -c '
 import json, sys
 c = json.load(sys.stdin)
@@ -345,7 +345,7 @@ for name, cfg in nets.items():
     local net subnet full_name
     for net in "${NETWORK_NAMES[@]}"; do
         # Resolve the subnet directly from JSON to avoid fragile YAML awk parsing.
-        subnet=$(docker compose -f "${PROJECT_ROOT}/${compose_file}" config --format json 2>/dev/null | \
+        subnet=$(vw_compose -f "${PROJECT_ROOT}/${compose_file}" config --format json 2>/dev/null | \
             python3 -c "
 import json, sys
 c = json.load(sys.stdin)
@@ -357,7 +357,7 @@ print(cfgs[0]['subnet'] if cfgs else '')
 
         # Fall back to inspecting the running network when no static subnet is pinned.
         if [[ -z "${subnet:-}" ]]; then
-            full_name=$(docker compose -f "${PROJECT_ROOT}/${compose_file}" config --format json 2>/dev/null | \
+            full_name=$(vw_compose -f "${PROJECT_ROOT}/${compose_file}" config --format json 2>/dev/null | \
                 python3 -c "
 import json, sys
 c = json.load(sys.stdin)

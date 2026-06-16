@@ -730,7 +730,7 @@ create_backup_metadata() {
 
     local vw_version="unknown"
     if require_docker >/dev/null 2>&1; then
-        vw_version=$(docker compose exec -T vaultwarden /vaultwarden --version 2>/dev/null | head -1 || echo "unknown")
+        vw_version=$(vw_compose exec -T vaultwarden /vaultwarden --version 2>/dev/null | head -1 || echo "unknown")
     fi
 
     install -m 600 /dev/null "$metadata_file" || {

@@ -32,13 +32,23 @@ readonly VAULTWARDEN_DOCKER_LIB_LOADED=1
 # directly without going through common.sh or a caller that pre-loads log.sh.
 _VW_DOCKER_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -n "${VW_LOG_LIB_LOADED:-}" ]] || source "${_VW_DOCKER_LIB_DIR}/log.sh"
+[[ -n "${VW_CONFIG_LIB_LOADED:-}" ]] || source "${_VW_DOCKER_LIB_DIR}/config.sh"
 unset _VW_DOCKER_LIB_DIR
+
+vw_compose() {
+    local env_file compose_file project_name
+    env_file="$(vw_install_env_file)"
+    compose_file="${PROJECT_ROOT:-$(pwd)}/docker-compose.yml"
+    project_name="${COMPOSE_PROJECT_NAME:-vaultwarden-oci}"
+    docker compose --env-file "$env_file" -f "$compose_file" -p "$project_name" "$@"
+}
+
 
 # Override DOCKER_PROJECT_LABEL in .env if this host uses a non-default Compose project name.
 if [[ -z "${DOCKER_PROJECT_LABEL:-}" ]]; then
     _COMPOSE_PROJECT_NAME=""
     if command -v jq >/dev/null 2>&1; then
-        _COMPOSE_PROJECT_NAME=$(docker compose config --format json 2>/dev/null \
+        _COMPOSE_PROJECT_NAME=$(vw_compose config --format json 2>/dev/null \
             | jq -r '.name // empty' 2>/dev/null || true)
     fi
     if [[ -n "${_COMPOSE_PROJECT_NAME:-}" ]]; then
@@ -65,7 +75,7 @@ check_docker_available() {
 }
 
 check_compose_available() {
-    docker compose version >/dev/null 2>&1
+    vw_compose version >/dev/null 2>&1
 }
 
 require_docker() {
@@ -92,7 +102,7 @@ require_jq() {
 }
 
 
-# docker compose ps --format json returns a JSON array when multiple replicas
+# vw_compose ps --format json returns a JSON array when multiple replicas
 # are running. The jq filter handles both scalar and array.
 # Validates raw output is valid JSON before piping to jq; returns "not_found"
 # gracefully on Compose v1 plain-text or other non-JSON output.
@@ -110,11 +120,11 @@ get_service_status() {
     fi
 
     local raw_json
-    raw_json=$(docker compose ps "$service" --format json 2>/dev/null)
+    raw_json=$(vw_compose ps "$service" --format json 2>/dev/null)
 
     # Guard against non-JSON output (Compose v1, plain-text mode)
     if ! printf '%s' "$raw_json" | jq -e . >/dev/null 2>&1; then
-        log_debug "get_service_status: non-JSON output from docker compose ps for '$service'; falling back to not_found"
+        log_debug "get_service_status: non-JSON output from vw_compose ps for '$service'; falling back to not_found"
         echo "not_found"
         return 0
     fi
@@ -134,7 +144,7 @@ is_service_running() {
     [[ "$status" == "running" ]]
 }
 
-# docker compose ps --format json returns a JSON array when multiple replicas
+# vw_compose ps --format json returns a JSON array when multiple replicas
 # are running. The jq filter handles both scalar and array.
 # An empty Health field (no HEALTHCHECK defined) is explicitly mapped to
 # "none" so callers never see an empty string.
@@ -153,11 +163,11 @@ get_service_health() {
     fi
 
     local raw_json
-    raw_json=$(docker compose ps "$service" --format json 2>/dev/null)
+    raw_json=$(vw_compose ps "$service" --format json 2>/dev/null)
 
     # Guard against non-JSON output (Compose v1, plain-text mode)
     if ! printf '%s' "$raw_json" | jq -e . >/dev/null 2>&1; then
-        log_debug "get_service_health: non-JSON output from docker compose ps for '$service'; falling back to none"
+        log_debug "get_service_health: non-JSON output from vw_compose ps for '$service'; falling back to none"
         echo "none"
         return 0
     fi
@@ -204,12 +214,12 @@ start_services() {
     local services=("$@")
     if ! require_docker; then return 1; fi
     if [[ ${#services[@]} -eq 0 ]]; then
-        if ! docker compose up -d --remove-orphans; then
+        if ! vw_compose up -d --remove-orphans; then
             log_error "Failed to start all services"
             return 1
         fi
     else
-        if ! docker compose up -d --remove-orphans "${services[@]}"; then
+        if ! vw_compose up -d --remove-orphans "${services[@]}"; then
             log_error "Failed to start services: ${services[*]}"
             return 1
         fi
@@ -221,12 +231,12 @@ stop_services() {
     local services=("$@")
     if ! require_docker; then return 1; fi
     if [[ ${#services[@]} -eq 0 ]]; then
-        if ! docker compose stop; then
+        if ! vw_compose stop; then
             log_error "Failed to stop all services"
             return 1
         fi
     else
-        if ! docker compose stop "${services[@]}"; then
+        if ! vw_compose stop "${services[@]}"; then
             log_error "Failed to stop services: ${services[*]}"
             return 1
         fi
@@ -238,12 +248,12 @@ restart_services() {
     local services=("$@")
     if ! require_docker; then return 1; fi
     if [[ ${#services[@]} -eq 0 ]]; then
-        if ! docker compose restart; then
+        if ! vw_compose restart; then
             log_error "Failed to restart all services"
             return 1
         fi
     else
-        if ! docker compose restart "${services[@]}"; then
+        if ! vw_compose restart "${services[@]}"; then
             log_error "Failed to restart services: ${services[*]}"
             return 1
         fi
@@ -255,12 +265,12 @@ recreate_services() {
     local services=("$@")
     if ! require_docker; then return 1; fi
     if [[ ${#services[@]} -eq 0 ]]; then
-        if ! docker compose up -d --force-recreate --remove-orphans; then
+        if ! vw_compose up -d --force-recreate --remove-orphans; then
             log_error "Failed to recreate all services"
             return 1
         fi
     else
-        if ! docker compose up -d --force-recreate --remove-orphans "${services[@]}"; then
+        if ! vw_compose up -d --force-recreate --remove-orphans "${services[@]}"; then
             log_error "Failed to recreate services: ${services[*]}"
             return 1
         fi
@@ -277,16 +287,16 @@ recreate_services() {
 #
 # stderr is merged and passed through `tail -5` so only the last 5 lines
 # (summary digests or any error message) reach the journal. Pull errors are
-# still surfaced: docker compose pull --quiet exits non-zero on failure and
+# still surfaced: vw_compose pull --quiet exits non-zero on failure and
 # the error text appears in the final tail output.
 pull_images() {
     local services=("$@")
     if ! require_docker; then return 1; fi
     local pull_output pull_rc
     if [[ ${#services[@]} -eq 0 ]]; then
-        pull_output=$(docker compose pull --quiet 2>&1); pull_rc=$?
+        pull_output=$(vw_compose pull --quiet 2>&1); pull_rc=$?
     else
-        pull_output=$(docker compose pull --quiet "${services[@]}" 2>&1); pull_rc=$?
+        pull_output=$(vw_compose pull --quiet "${services[@]}" 2>&1); pull_rc=$?
     fi
     printf '%s\n' "$pull_output" | tail -5
     if [[ $pull_rc -ne 0 ]]; then
@@ -353,7 +363,7 @@ exec_in_service() {
         log_error "Service $service is not running"
         return 1
     fi
-    if ! docker compose exec "$service" "${cmd[@]}"; then
+    if ! vw_compose exec "$service" "${cmd[@]}"; then
         log_error "Failed to execute command in service: $service"
         return 1
     fi
@@ -385,7 +395,7 @@ exec_oneshot_in_service() {
     fi
 
     local image
-    image=$(docker compose config --format json 2>/dev/null \
+    image=$(vw_compose config --format json 2>/dev/null \
         | jq -r ".services.\"${service}\".image // empty" 2>/dev/null)
     if [[ -z "$image" ]]; then
         log_error "exec_oneshot_in_service: could not resolve image for service '$service'"
@@ -427,7 +437,7 @@ exec_oneshot_in_service() {
 
 # run_in_service_full_env  — full service environment
 #
-# Unlike exec_oneshot_in_service(), this function uses `docker compose run
+# Unlike exec_oneshot_in_service(), this function uses `vw_compose run
 # --rm` which inherits ALL service settings from docker-compose.yml:
 # environment variables, volume mounts, network aliases, labels, etc.
 # Works against both running and stopped services.
@@ -435,7 +445,7 @@ exec_oneshot_in_service() {
 # Usage:
 #   run_in_service_full_env <service> <cmd> [args...]
 #
-# NOTE: `docker compose run --rm` will start the service's depends_on
+# NOTE: `vw_compose run --rm` will start the service's depends_on
 # containers if they are not already running. If the depends_on containers
 # have health conditions, this may block until they are healthy.
 run_in_service_full_env() {
@@ -445,7 +455,7 @@ run_in_service_full_env() {
 
     if ! require_docker; then return 1; fi
 
-    if ! docker compose run --rm "$service" "${cmd[@]}"; then
+    if ! vw_compose run --rm "$service" "${cmd[@]}"; then
         log_error "run_in_service_full_env: command failed in service '$service'"
         return 1
     fi
@@ -519,7 +529,7 @@ cleanup_images() {
 #
 # Fix: detect the Docker Engine major version at call time.
 #   >= 25 → use docker volume prune -f with label filter (original behaviour)
-#   <  25 → fall back to `docker compose down -v` which is correctly scoped
+#   <  25 → fall back to `vw_compose down -v` which is correctly scoped
 #            to this project on all Engine versions.
 cleanup_volumes() {
     if ! require_docker; then return 1; fi
@@ -541,7 +551,7 @@ cleanup_volumes() {
     else
         # Docker Engine < 25 does not support label filters on volume prune.
         # `docker volume prune` without a label filter would erase anonymous
-        # volumes from ALL projects on the host. `docker compose down -v`
+        # volumes from ALL projects on the host. `vw_compose down -v`
         # would stop the running stack and delete its named volumes — a full
         # outage plus potential data loss of the VaultWarden SQLite DB and
         # Caddy TLS certs. Skip volume pruning entirely and warn instead.
@@ -581,7 +591,7 @@ get_service_logs() {
     local service="$1"
     local lines="${2:-250}"
     if ! require_docker; then return 1; fi
-    if ! docker compose logs --tail="$lines" "$service"; then
+    if ! vw_compose logs --tail="$lines" "$service"; then
         log_error "Failed to get logs for service: $service"
         return 1
     fi
@@ -591,7 +601,7 @@ get_service_logs() {
 follow_service_logs() {
     local service="$1"
     if ! require_docker; then return 1; fi
-    if ! docker compose logs -f "$service"; then
+    if ! vw_compose logs -f "$service"; then
         log_error "Failed to follow logs for service: $service"
         return 1
     fi
@@ -614,10 +624,10 @@ wait_for_service_ready() {
 
     while [[ $count -lt $timeout ]]; do
         local current_status current_health raw_json
-        # Wrap docker compose ps in a timeout so a hung Docker daemon
+        # Wrap vw_compose ps in a timeout so a hung Docker daemon
         # does not block the entire polling loop indefinitely.
-        raw_json=$(timeout 10 docker compose ps "$service" --format json 2>/dev/null) || {
-            log_warn "wait_for_service_ready: docker compose ps timed out — daemon may be unresponsive"
+        raw_json=$(timeout 10 vw_compose ps "$service" --format json 2>/dev/null) || {
+            log_warn "wait_for_service_ready: vw_compose ps timed out — daemon may be unresponsive"
             sleep 2
             count=$(( count + 1 ))
             continue
@@ -663,7 +673,7 @@ validate_compose_file() {
         log_error "Compose file not found: $compose_file"
         return 1
     fi
-    if ! docker compose -f "$compose_file" config --quiet >/dev/null 2>&1; then
+    if ! vw_compose -f "$compose_file" config --quiet >/dev/null 2>&1; then
         log_error "Compose file validation failed: $compose_file"
         return 1
     fi

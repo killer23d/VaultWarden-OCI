@@ -449,7 +449,7 @@ install_dependencies() {
         install_docker || return 1
     fi
 
-    if ! docker compose version >/dev/null 2>&1; then
+    if ! vw_compose version >/dev/null 2>&1; then
         DEBIAN_FRONTEND=noninteractive apt-get install -y docker-compose-plugin || return 1
     fi
 
@@ -529,7 +529,7 @@ verify_dependencies() {
 
     require_commands "${required_commands[@]}" || return 1
     python3 -c "from argon2 import PasswordHasher" 2>/dev/null || return 1
-    docker compose version >/dev/null 2>&1 || return 1
+    vw_compose version >/dev/null 2>&1 || return 1
     return 0
 }
 

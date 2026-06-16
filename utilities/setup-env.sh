@@ -304,7 +304,7 @@ create_docker_compose() {
     fi
 
     if [[ -f "$compose_file" ]] && [[ "$FORCE" != "true" ]]; then
-        docker compose -f "$compose_file" config >/dev/null 2>&1 && return 0
+        vw_compose -f "$compose_file" config >/dev/null 2>&1 && return 0
     fi
 
     local real_user real_group

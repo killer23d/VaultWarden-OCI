@@ -321,21 +321,21 @@ drill_email() {
 drill_stack_restart_sequence() {
     _step_header "Stack Restart Sequence (non-destructive)"
 
-    log_info "  Verifying 'docker compose config' is valid..."
-    if docker compose config --quiet 2>/dev/null; then
+    log_info "  Verifying 'vw_compose config' is valid..."
+    if vw_compose config --quiet 2>/dev/null; then
         _step_pass "compose-config: docker-compose.yml is syntactically valid"
     else
-        _step_fail "compose-config" "docker compose config reported errors"
+        _step_fail "compose-config" "vw_compose config reported errors"
         return
     fi
 
     log_info "  Checking all expected services are defined in compose file..."
     # init-permissions has restart:"no" so it won't be running, but it must be
-    # defined. The 'docker compose config --services' output lists all defined
+    # defined. The 'vw_compose config --services' output lists all defined
     # services regardless of restart policy.
     local expected_services=(vaultwarden caddy postfix init-permissions)
     local defined_services
-    defined_services=$(docker compose config --services 2>/dev/null || true)
+    defined_services=$(vw_compose config --services 2>/dev/null || true)
     for svc in "${expected_services[@]}"; do
         if printf '%s\n' "$defined_services" | grep -qx "$svc"; then
             _step_pass "compose-service-$svc: defined in compose file"

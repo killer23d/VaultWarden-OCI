@@ -31,13 +31,13 @@ services:
       - sh
       - -c
       - |
-        [ -d /secrets/.docker_secrets ] || {
-          echo 'ERROR: /secrets/.docker_secrets not found.' >&2
+        [ -d /run/secrets ] || {
+          echo 'ERROR: /run/secrets not found.' >&2
           echo '       Run: sudo make setup  (or: sudo ./setup.sh --domain <domain> --email <email>)' >&2
           exit 1
         } &&
-        [ -f /secrets/.docker_secrets/admin_token ] || {
-          echo 'ERROR: /secrets/.docker_secrets/admin_token missing — setup may be incomplete.' >&2
+        [ -f /run/secrets/admin_token ] || {
+          echo 'ERROR: /run/secrets/admin_token missing — setup may be incomplete.' >&2
           echo '       Run: sudo make setup' >&2
           exit 1
         } &&
@@ -76,15 +76,15 @@ services:
         chmod 750 /config/caddy &&
 
         chmod 700 /secrets 2>/dev/null || true &&
-        chown 0:${PGID} /secrets/.docker_secrets 2>/dev/null || true &&
-        chmod 750 /secrets/.docker_secrets 2>/dev/null || true &&
-        find /secrets/.docker_secrets -type f -exec chmod 444 {} + 2>/dev/null || true &&
+        chown 0:${PGID} /run/secrets 2>/dev/null || true &&
+        chmod 750 /run/secrets 2>/dev/null || true &&
+        find /run/secrets -type f -exec chmod 444 {} + 2>/dev/null || true &&
 
-        touch /secrets/.docker_secrets/push_installation_id &&
-        touch /secrets/.docker_secrets/push_installation_key &&
-        chown ${PUID}:${PGID} /secrets/.docker_secrets/push_installation_id /secrets/.docker_secrets/push_installation_key &&
-        chmod 444 /secrets/.docker_secrets/push_installation_id &&
-        chmod 444 /secrets/.docker_secrets/push_installation_key &&
+        touch /run/secrets/push_installation_id &&
+        touch /run/secrets/push_installation_key &&
+        chown ${PUID}:${PGID} /run/secrets/push_installation_id /run/secrets/push_installation_key &&
+        chmod 444 /run/secrets/push_installation_id &&
+        chmod 444 /run/secrets/push_installation_key &&
 
         touch "$$SENTINEL" &&
         echo 'Init container completed - permissions set to ${PUID}:${PGID}'
@@ -94,7 +94,6 @@ services:
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/logs:/logs
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/data:/data/caddy
       - ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/caddy/config:/config/caddy
-      - ./secrets:/secrets
 
   # -------------------- Core service: VaultWarden --------------------
   vaultwarden:
@@ -400,17 +399,17 @@ services:
 # =============================================================================
 secrets:
   admin_token:
-    file: ./secrets/.docker_secrets/admin_token
+    file: /run/vaultwarden-oci/secrets/admin_token
   admin_basic_auth_hash:
-    file: ./secrets/.docker_secrets/admin_basic_auth_hash
+    file: /run/vaultwarden-oci/secrets/admin_basic_auth_hash
   smtp_password:
-    file: ./secrets/.docker_secrets/smtp_password
+    file: /run/vaultwarden-oci/secrets/smtp_password
   push_installation_id:
-    file: ./secrets/.docker_secrets/push_installation_id
+    file: /run/vaultwarden-oci/secrets/push_installation_id
   push_installation_key:
-    file: ./secrets/.docker_secrets/push_installation_key
+    file: /run/vaultwarden-oci/secrets/push_installation_key
   caddy_cloudflare_dns_token:
-    file: ./secrets/.docker_secrets/caddy_cloudflare_dns_token
+    file: /run/vaultwarden-oci/secrets/caddy_cloudflare_dns_token
 
 # =============================================================================
 # Networks
