@@ -164,7 +164,6 @@ EXAMPLES:
 
     # ── Systemd timer management ──────────────────────────────────
     sudo ./setup.sh systemd install      # Install and enable all timers
-    sudo ./setup.sh systemd validate     # Detect split-brain vs /opt/
 ```
 
 ### startup.sh
@@ -177,12 +176,12 @@ USAGE:
   ./startup.sh stop              # Stop all services
 
 SUBCOMMANDS:
-  stop             Stop all services (delegates to docker compose down)
+  stop             Stop all services (delegates to vw_compose down)
 
 STARTUP OPTIONS:
   --force          Force restart of all services
   --skip-health    Skip post-startup health check
-  --skip-pull      Skip docker compose pull (use for systemd restarts
+  --skip-pull      Skip vw_compose pull (use for systemd restarts
                    or when images are already current)
   --background     Start services in background (daemon mode)
   --skip-egress-fix  Skip automatic egress NAT remediation for
@@ -330,6 +329,8 @@ DESCRIPTION:
 SUBCOMMANDS:
     run               Full routine maintenance (cleanup + optimize + health)
     run --comprehensive   Full routine + firewall + DNS updates
+    status            Show Compose service status
+    logs              Follow Compose service logs
     health            Run system health checks
     update            Update system packages and/or Docker images
     db-maint          Deep offline database maintenance (VACUUM + checkpoint)
