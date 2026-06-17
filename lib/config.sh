@@ -17,6 +17,14 @@
 [[ -n "${VW_CONFIG_LIB_LOADED:-}" ]] && return 0
 readonly VW_CONFIG_LIB_LOADED=1
 
+if [[ -z "${_VW_CALLER_OVERRIDES_CAPTURED:-}" ]]; then
+    _VW_CALLER_PROJECT_STATE_DIR="${PROJECT_STATE_DIR:-}"
+    _VW_CALLER_DATA_VOLUME_DEVICE="${DATA_VOLUME_DEVICE:-}"
+    _VW_CALLER_DATA_VOLUME_MOUNT="${DATA_VOLUME_MOUNT:-}"
+    _VW_CALLER_SOPS_AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-}"
+    _VW_CALLER_OVERRIDES_CAPTURED=1
+fi
+
 # Self-load log.sh if not already loaded so this lib can be sourced standalone.
 _VW_CONFIG_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -n "${VW_LOG_LIB_LOADED:-}" ]] || source "${_VW_CONFIG_LIB_DIR}/log.sh"
@@ -217,10 +225,10 @@ _read_env_value_awk() {
 }
 
 load_project_environment() {
-    local override_state="${PROJECT_STATE_DIR:-}"
-    local override_device="${DATA_VOLUME_DEVICE:-}"
-    local override_mount="${DATA_VOLUME_MOUNT:-}"
-    local override_key="${SOPS_AGE_KEY_FILE:-}"
+    local override_state="${_VW_CALLER_PROJECT_STATE_DIR:-}"
+    local override_device="${_VW_CALLER_DATA_VOLUME_DEVICE:-}"
+    local override_mount="${_VW_CALLER_DATA_VOLUME_MOUNT:-}"
+    local override_key="${_VW_CALLER_SOPS_AGE_KEY_FILE:-}"
 
     local root="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
     local default_state_dir="${_VW_DEFAULT_STATE_DIR:-/var/lib/vaultwarden}"

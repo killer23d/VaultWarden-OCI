@@ -252,26 +252,39 @@ _retention_days_for_type() {
 }
 
 _load_integrity_hmac_key() {
-    FILE_INTEGRITY_HMAC_KEY="$(
+    local raw_value=""
+    local pipeline_rc=0
+
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        backup_log_warn "[DRY RUN] Backup integrity HMAC key is unavailable; no files will be written."
+        return 0
+    fi
+
+    if raw_value="$(
         SOPS_AGE_KEY_FILE="$SOPS_AGE_KEY_FILE" \
             sops -d "$SECRETS_FILE" \
             | yq -r '.file_integrity_hmac_key // ""'
-    )"
-    export FILE_INTEGRITY_HMAC_KEY
+    )"; then
+        pipeline_rc=0
+    else
+        pipeline_rc=$?
+    fi
 
-    if [[ -z "${FILE_INTEGRITY_HMAC_KEY:-}" || "${FILE_INTEGRITY_HMAC_KEY}" == CHANGE_ME* ]]; then
+    if [[ $pipeline_rc -ne 0 || -z "$raw_value" || "$raw_value" == CHANGE_ME* ]]; then
         unset FILE_INTEGRITY_HMAC_KEY
-        if [[ "$DRY_RUN" == "true" ]]; then
-            backup_log_warn "[DRY RUN] Backup integrity HMAC key is unavailable; no files will be written."
-            return 0
-        fi
+
         if [[ "${REQUIRE_AUTHENTICATED_INTEGRITY:-false}" == "true" ]]; then
             log_error "Authenticated backup integrity is required, but file_integrity_hmac_key is unavailable."
             log_error "Run: sudo ./edit-secrets.sh rotate file_integrity_hmac_key"
             return 1
         fi
+
         backup_log_warn "Backup integrity HMAC key is unavailable; legacy SHA-256-only mode remains active."
+        return 0
     fi
+
+    FILE_INTEGRITY_HMAC_KEY="$raw_value"
+    export FILE_INTEGRITY_HMAC_KEY
 }
 
 

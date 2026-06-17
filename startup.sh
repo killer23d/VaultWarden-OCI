@@ -336,10 +336,6 @@ prepare_log_directories() {
 prepare_push_secret_placeholders() {
   local secrets_dir="$DOCKER_SECRETS_DIR"
 
-  local puid pgid
-  puid=$(get_config_value "PUID" "${_VW_DEFAULT_PUID}")
-  pgid=$(get_config_value "PGID" "${_VW_DEFAULT_PGID}")
-
   if [[ "$DRY_RUN" == "true" ]]; then
     log_info "[DRY RUN] Would enforce push secret placeholder permissions in ${secrets_dir}"
     return 0
@@ -351,12 +347,12 @@ prepare_push_secret_placeholders() {
   local dir_owner dir_mode
   dir_owner=$(stat -c '%u:%g' "$secrets_dir" 2>/dev/null || echo "")
   dir_mode=$(stat -c '%a' "$secrets_dir" 2>/dev/null || echo "")
-  if [[ "$dir_owner" != "0:${pgid}" ]]; then
-    _maybe_sudo chown root:"${pgid}" "$secrets_dir" || return 1
+  if [[ "$dir_owner" != "0:0" ]]; then
+    _maybe_sudo chown root:root "$secrets_dir" || return 1
     changed=true
   fi
-  if [[ "$dir_mode" != "755" ]]; then
-    _maybe_sudo chmod 755 "$secrets_dir" || return 1
+  if [[ "$dir_mode" != "700" ]]; then
+    _maybe_sudo chmod 700 "$secrets_dir" || return 1
     changed=true
   fi
 
@@ -364,14 +360,14 @@ prepare_push_secret_placeholders() {
   for key in push_installation_id push_installation_key; do
     path="${secrets_dir}/${key}"
     if [[ ! -f "$path" ]]; then
-      _maybe_sudo touch "$path" || return 1
+      _maybe_sudo install -m 0444 -o root -g root /dev/null "$path" || return 1
       changed=true
     fi
 
     owner=$(stat -c '%u:%g' "$path" 2>/dev/null || echo "")
     mode=$(stat -c '%a' "$path" 2>/dev/null || echo "")
-    if [[ "$owner" != "${puid}:${pgid}" ]]; then
-      _maybe_sudo chown "${puid}:${pgid}" "$path" || return 1
+    if [[ "$owner" != "0:0" ]]; then
+      _maybe_sudo chown root:root "$path" || return 1
       changed=true
     fi
     if [[ "$mode" != "444" ]]; then
@@ -380,10 +376,17 @@ prepare_push_secret_placeholders() {
     fi
   done
 
+  dir_owner=$(stat -c '%u:%g' "$secrets_dir" 2>/dev/null || echo "")
+  dir_mode=$(stat -c '%a' "$secrets_dir" 2>/dev/null || echo "")
+  if [[ "$dir_owner" != "0:0" || "$dir_mode" != "700" ]]; then
+    log_error "Runtime secret directory must remain root:root 0700: ${secrets_dir}"
+    return 1
+  fi
+
   if [[ "$changed" == "true" ]]; then
-    log_success "Push secret placeholders remediated for VaultWarden readability"
+    log_success "Push secret placeholders remediated with host-private permissions"
   else
-    log_success "Push secret placeholders already readable for VaultWarden"
+    log_success "Push secret placeholders already host-private"
   fi
 }
 

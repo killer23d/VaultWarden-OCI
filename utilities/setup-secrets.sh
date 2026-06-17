@@ -1989,8 +1989,11 @@ EOF
         fi
     fi
 
-    local tmp_secrets
-    tmp_secrets=$(mktemp "${PROJECT_ROOT}/secrets/vwsecrets.XXXXXXXXXX.yaml") || return 1
+    local tmp_plain_dir tmp_secrets cipher_stage
+    tmp_plain_dir="/run/vaultwarden-oci/tmp"
+    install -d -m 0700 -o root -g root "$tmp_plain_dir" || return 1
+    tmp_secrets=$(mktemp -p "$tmp_plain_dir" vwsecrets.XXXXXXXXXX.yaml) || return 1
+    trap 'rm -f "$tmp_secrets" "${cipher_stage:-}"' RETURN INT TERM
     # Build placeholder YAML body from secrets-schema.yaml so that every key
     # defined in the schema is bootstrapped automatically — no lines here need
     # to change when a key is added or renamed.
@@ -2021,26 +2024,55 @@ EOF
 }
 
 
-_valid_age_recipient() { [[ "${1:-}" =~ ^age1[a-z0-9]{58}$ ]]; }
+_valid_age_recipient() {
+    [[ "${1:-}" =~ ^age1[a-z0-9]{58}$ ]]
+}
+
+_policy_recipients() {
+    local file="$1" age_value=""
+    [[ -f "$file" ]] || return 0
+    if command -v yq >/dev/null 2>&1; then
+        age_value="$(yq -r '.creation_rules[0].age // ""' "$file" 2>/dev/null || true)"
+    else
+        age_value="$(awk -F: '/^[[:space:]]*age:/ { gsub(/[ "'"'"']/, "", $2); print $2; exit }' "$file")"
+    fi
+    tr ',' '\n' <<< "$age_value" | sed '/^$/d'
+}
+
 _resolve_offline_recipient() {
-    local operational="$1" manifest="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/config/dr-manifest.env" candidate=""
-    if _valid_age_recipient "${OFFLINE_AGE_RECIPIENT:-}"; then printf '%s' "$OFFLINE_AGE_RECIPIENT"; return 0; fi
+    local operational="$1" manifest="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/config/dr-manifest.env"
+    local candidate="" unknown=() recipient
+
+    if [[ -n "${OFFLINE_AGE_RECIPIENT:-}" ]]; then
+        _valid_age_recipient "$OFFLINE_AGE_RECIPIENT" || { log_error "Invalid OFFLINE_AGE_RECIPIENT format"; return 1; }
+        printf '%s' "$OFFLINE_AGE_RECIPIENT"
+        return 0
+    fi
+
     if [[ -f "$manifest" ]]; then
         candidate="$(_read_env_value OFFLINE_AGE_RECIPIENT "$manifest")"
-        if _valid_age_recipient "$candidate"; then printf '%s' "$candidate"; return 0; fi
+        if [[ -n "$candidate" ]]; then
+            _valid_age_recipient "$candidate" || { log_error "Invalid OFFLINE_AGE_RECIPIENT in $manifest"; return 1; }
+            printf '%s' "$candidate"
+            return 0
+        fi
     fi
-    if [[ -f "$PROJECT_ROOT/.sops.yaml" ]] && command -v yq >/dev/null 2>&1; then
-        local age_value unknown=() recipient
-        age_value="$(yq -r '.creation_rules[0].age // ""' "$PROJECT_ROOT/.sops.yaml" 2>/dev/null || true)"
-        IFS=',' read -ra _recipients <<< "$age_value"
-        for recipient in "${_recipients[@]}"; do
-            recipient="${recipient// /}"
-            [[ "$recipient" == "$operational" ]] && continue
-            _valid_age_recipient "$recipient" && unknown+=("$recipient")
-        done
-        if (( ${#unknown[@]} == 1 )); then printf '%s' "${unknown[0]}"; return 0; fi
-        if (( ${#unknown[@]} > 1 )); then log_error "Multiple unknown recipients in .sops.yaml — review manually before continuing."; return 1; fi
+
+    while IFS= read -r recipient; do
+        recipient="${recipient// /}"
+        [[ -z "$recipient" || "$recipient" == "$operational" ]] && continue
+        _valid_age_recipient "$recipient" && unknown+=("$recipient")
+    done < <(_policy_recipients "$PROJECT_ROOT/.sops.yaml")
+
+    if (( ${#unknown[@]} == 1 )); then
+        printf '%s' "${unknown[0]}"
+        return 0
     fi
+    if (( ${#unknown[@]} > 1 )); then
+        log_error "Multiple unknown recipients in .sops.yaml — review manually before continuing."
+        return 1
+    fi
+
     if [[ -t 0 ]]; then
         read -r -p "Enter offline recovery Age public key (press Enter to skip): " candidate
         if [[ -n "$candidate" ]]; then
@@ -2049,8 +2081,11 @@ _resolve_offline_recipient() {
         fi
     fi
 }
+
 _update_dr_manifest_offline_recipient() {
-    local recipient="$1" manifest_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/config" manifest="$manifest_dir/dr-manifest.env"
+    local recipient="$1"
+    local manifest_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/config"
+    local manifest="$manifest_dir/dr-manifest.env"
     mkdir -p "$manifest_dir" || return 1
     [[ -f "$manifest" ]] || : > "$manifest"
     _set_env_var OFFLINE_AGE_RECIPIENT "$recipient" "$manifest"
@@ -2059,30 +2094,33 @@ _update_dr_manifest_offline_recipient() {
 
 _write_sops_config() {
     local age_pub="$1" dest="$2" offline_recipient="${3:-}"
+    local recipients="$age_pub"
+    local tmp
+
     if [[ -z "$offline_recipient" ]]; then
         offline_recipient="$(_resolve_offline_recipient "$age_pub")" || return 1
     fi
+    if [[ -n "$offline_recipient" && "$offline_recipient" != "$age_pub" ]]; then
+        recipients="${age_pub},${offline_recipient}"
+    fi
+
+    tmp=$(mktemp -p "$(dirname "$dest")" .sops.yaml.XXXXXXXXXX) || return 1
     {
-        printf 'creation_rules:
-'
-        printf "  - path_regex: '.*\\.yaml$'
-"
+        printf 'creation_rules:\n'
+        printf "  - path_regex: '.*\\.yaml$'\n"
         if [[ -n "$offline_recipient" ]]; then
-            printf '    # Offline recovery key — USB only, never stored on server
-'
-            printf '    age: "%s,%s"
-' "$age_pub" "$offline_recipient"
-            _update_dr_manifest_offline_recipient "$offline_recipient" || return 1
-        else
-            printf '    age: "%s"
-' "$age_pub"
+            printf '    # Offline recovery key — USB only, never stored on server\n'
         fi
-    } > "$dest"
-    chmod 640 "$dest"
+        printf '    age: "%s"\n' "$recipients"
+    } > "$tmp" || { rm -f "$tmp"; return 1; }
+    chmod 640 "$tmp"
     local real_user; real_user=$(get_real_user)
-    chown "${real_user}:$(id -g -n "$real_user")" "$dest" 2>/dev/null || true
+    chown "${real_user}:$(id -g -n "$real_user")" "$tmp" 2>/dev/null || true
+    mv "$tmp" "$dest"
+    [[ -n "$offline_recipient" ]] && _update_dr_manifest_offline_recipient "$offline_recipient"
     log_success "SOPS config written: $dest"
 }
+
 
 main() {
     local subcmd="${1:-}"

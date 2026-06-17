@@ -13,6 +13,10 @@ WorkingDirectory=@PROJECT_ROOT@
 ExecStart=/bin/bash @PROJECT_ROOT@/startup.sh --skip-pull
 Restart=on-failure
 RestartSec=10
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+NoNewPrivileges=true
 
 [Install]
 WantedBy=multi-user.target

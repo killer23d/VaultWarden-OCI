@@ -28,6 +28,7 @@ OPT_SCRIPTS_DIR="/opt/vaultwarden-scripts"
 ENV_DIR="/etc/vaultwarden"
 ENV_FILE="${ENV_DIR}/vaultwarden.env"
 AGE_KEY_DEST="${ENV_DIR}/age-key.txt"
+STARTUP_SERVICE="vaultwarden-startup.service"
 load_project_environment || exit 1
 
 TIMERS=(
@@ -456,22 +457,67 @@ DROPIN
 }
 
 
+
+_resolve_environment_source() {
+    local persistent_env="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/config/install.env"
+    local repo_env="${PROJECT_ROOT}/.env"
+
+    if [[ -f "$persistent_env" ]]; then
+        printf '%s\n' "$persistent_env"
+        return 0
+    fi
+    if [[ -f "$repo_env" ]]; then
+        log_warn "Using repository .env as legacy systemd environment fallback; migrate to $persistent_env"
+        printf '%s\n' "$repo_env"
+        return 0
+    fi
+
+    log_error "No environment source found for systemd install. Expected $persistent_env or $repo_env."
+    return 1
+}
+
+_install_environment_file() {
+    local source_file="$1"
+    local service_group="$2"
+
+    log_info "Installing EnvironmentFile from $source_file -> $ENV_FILE"
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would atomically install $source_file as $ENV_FILE (600 root:root)"
+        return 0
+    fi
+
+    install -d -m 750 -o root -g "$service_group" "$ENV_DIR"
+    local tmp
+    tmp=$(mktemp -p "$ENV_DIR" vaultwarden.env.XXXXXXXXXX) || return 1
+    if ! install -m 600 -o root -g root "$source_file" "$tmp"; then
+        rm -f "$tmp"
+        return 1
+    fi
+    mv "$tmp" "$ENV_FILE"
+}
+
+_render_startup_expected() {
+    local dest="$1"
+    local template="$UNIT_SOURCE_DIR/$STARTUP_SERVICE"
+    sed -e "s|@PROJECT_ROOT@|$PROJECT_ROOT|g" \
+        -e "s|@PROJECT_STATE_DIR@|${PROJECT_STATE_DIR:-/var/lib/vaultwarden}|g" \
+        "$template" > "$dest"
+}
+
 _render_startup_service() {
-    local template="$UNIT_SOURCE_DIR/vaultwarden-startup.service"
-    local dest="$UNIT_DEST_DIR/vaultwarden-startup.service"
+    local template="$UNIT_SOURCE_DIR/$STARTUP_SERVICE"
+    local dest="$UNIT_DEST_DIR/$STARTUP_SERVICE"
     [[ -f "$template" ]] || { log_error "Missing startup service template: $template"; return 1; }
     if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would render vaultwarden-startup.service with PROJECT_ROOT=$PROJECT_ROOT PROJECT_STATE_DIR=${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
+        log_info "[DRY RUN] Would render $STARTUP_SERVICE with PROJECT_ROOT=$PROJECT_ROOT PROJECT_STATE_DIR=${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
         return 0
     fi
     local tmp
-    tmp=$(mktemp -p "$UNIT_DEST_DIR" vaultwarden-startup.service.XXXXXX) || return 1
-    sed -e "s|@PROJECT_ROOT@|$PROJECT_ROOT|g" \
-        -e "s|@PROJECT_STATE_DIR@|${PROJECT_STATE_DIR:-/var/lib/vaultwarden}|g" \
-        "$template" > "$tmp" || { rm -f "$tmp"; return 1; }
+    tmp=$(mktemp -p "$UNIT_DEST_DIR" "${STARTUP_SERVICE}.XXXXXXXXXX") || return 1
+    _render_startup_expected "$tmp" || { rm -f "$tmp"; return 1; }
     chmod 0644 "$tmp" || { rm -f "$tmp"; return 1; }
     mv "$tmp" "$dest" || { rm -f "$tmp"; return 1; }
-    log_success "Installed unit: vaultwarden-startup.service"
+    log_success "Installed unit: $STARTUP_SERVICE"
 }
 
 install_units() {
@@ -585,90 +631,10 @@ install_units() {
     service_user="${service_identity%%:*}"
     service_group="${service_identity##*:}"
 
-    log_info "Setting up EnvironmentFile at $ENV_FILE ..."
-    if [[ "$DRY_RUN" == "false" ]]; then
-        # Use install -d to create the directory with the correct
-        # mode atomically. The previous mkdir -p + chmod 700 two-step had a
-        # TOCTOU race window between mkdir and chmod where a concurrent
-        # non-root process could list $ENV_DIR before permissions were
-        # restricted. install(1) creates the directory with the correct mode
-        # and ownership in a single syscall, eliminating the window.
-        install -d -m 750 -o root -g "$service_group" "$ENV_DIR"
-        if [[ ! -f "$ENV_FILE" ]]; then
-            if [[ -f "$PROJECT_ROOT/.env" ]]; then
-                cp "$PROJECT_ROOT/.env" "$ENV_FILE"
-                chmod 600 "$ENV_FILE"
-                chown root:root "$ENV_FILE"
-                log_success "Copied .env -> $ENV_FILE"
-            else
-                log_warn ".env not found -- creating empty $ENV_FILE"
-                log_warn "Populate $ENV_FILE with ADMIN_EMAIL, EMAIL_PROVIDER credentials, etc."
-                touch "$ENV_FILE"
-                chmod 600 "$ENV_FILE"
-                chown root:root "$ENV_FILE"
-            fi
-        else
-            # On re-install, perform a safe additive merge instead of a full
-            # overwrite.
-            #
-            # Strategy:
-            #   - Lines already present in the installed file are NEVER touched
-            #     (live credentials, tokens, and operator overrides are preserved).
-            #   - Keys present in repo .env but ABSENT from the installed file
-            #     are APPENDED as a clearly-marked block.
-            #   - If every key is already present (files may still differ in
-            #     value), a checksum comparison is shown so the operator can
-            #     review value drift intentionally.
-            #
-            # This eliminates the persistent DRIFT DETECTED warning on every
-            # --install while keeping the installed file safe from blind overwrites.
-            log_info "$ENV_FILE already exists -- checking for drift ..."
-            if [[ -f "$PROJECT_ROOT/.env" ]]; then
-                local repo_sum installed_sum
-                repo_sum=$(_sha256 "$PROJECT_ROOT/.env")
-                installed_sum=$(_sha256 "$ENV_FILE")
-                if [[ "$repo_sum" == "$installed_sum" ]]; then
-                    log_success "$ENV_FILE is identical to repo .env (checksums match)"
-                else
-                    local missing_keys=()
-                    while IFS= read -r line; do
-                        [[ -z "$line" || "$line" == '#'* ]] && continue
-                        local key="${line%%=*}"
-                        [[ -z "$key" ]] && continue
-                        if ! grep -q "^${key}=" "$ENV_FILE" 2>/dev/null; then
-                            missing_keys+=("$line")
-                        fi
-                    done < "$PROJECT_ROOT/.env"
-                    if [[ "${#missing_keys[@]}" -gt 0 ]]; then
-                        log_info "Merging ${#missing_keys[@]} new variable(s) from repo .env into $ENV_FILE ..."
-                        {
-                            printf '\n# --- Merged by setup-systemd.sh install on %s ---\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-                            for entry in "${missing_keys[@]}"; do
-                                printf '%s\n' "$entry"
-                            done
-                        } >> "$ENV_FILE"
-                        log_success "Merged new keys into $ENV_FILE -- review and set their values:"
-                        for entry in "${missing_keys[@]}"; do
-                            log_info "  + ${entry%%=*}"
-                        done
-                        log_info "Edit: sudo nano $ENV_FILE"
-                    else
-                        log_info "────────────────────────────────────────────────────────────────"
-                        log_info "NOTE: $ENV_FILE has the same keys as repo .env but values differ."
-                        log_info "  repo .env  sha256: $repo_sum"
-                        log_info "  installed  sha256: $installed_sum"
-                        log_info "This is normal if you have set live credentials or custom values."
-                        log_info "To review:  diff $PROJECT_ROOT/.env $ENV_FILE"
-                        log_info "────────────────────────────────────────────────────────────────"
-                    fi
-                fi
-            else
-                log_info "No repo .env found -- skipping drift check"
-            fi
-        fi
-    else
-        log_info "[DRY RUN] Would create/check $ENV_FILE from .env"
-    fi
+    local environment_source
+    environment_source="$(_resolve_environment_source)" || return 1
+    _install_environment_file "$environment_source" "$service_group" || return 1
+    log_success "Installed authoritative environment: $environment_source -> $ENV_FILE"
 
     # Install the age key into /etc/vaultwarden/age-key.txt because
     # ProtectHome=yes makes /home/ubuntu/ inaccessible to service processes.
@@ -826,8 +792,8 @@ install_units() {
         _run systemctl enable --now "$timer"
         log_success "Enabled: $timer"
     done
-    _run systemctl enable vaultwarden-startup.service
-    log_success "Enabled: vaultwarden-startup.service"
+    _run systemctl enable "$STARTUP_SERVICE"
+    log_success "Enabled: $STARTUP_SERVICE"
 
     # Verify managed timers are healthy after enablement.
     # list-timers output can lag briefly right after daemon-reload/enable.
@@ -870,7 +836,7 @@ install_units() {
     fi
 
     log_info "Clearing stale failed status from all managed services ..."
-    for svc in "${SERVICES[@]}"; do
+    for svc in "${SERVICES[@]}" "$STARTUP_SERVICE"; do
         [[ "$svc" == *"@"* ]] && continue  # skip template unit
         _run systemctl reset-failed "$svc" 2>/dev/null || true
     done
@@ -901,7 +867,7 @@ remove_units() {
         fi
     done
 
-    for unit in "${TIMERS[@]}" "${SERVICES[@]}"; do
+    for unit in "${TIMERS[@]}" "${SERVICES[@]}" "$STARTUP_SERVICE"; do
         local dest="$UNIT_DEST_DIR/$unit"
         if [[ -f "$dest" ]]; then
             _run rm -f "$dest"
@@ -1040,6 +1006,26 @@ validate_installation() {
         fi
     done
 
+    local startup_dest="$UNIT_DEST_DIR/$STARTUP_SERVICE"
+    if [[ ! -f "$startup_dest" ]]; then
+        log_error "  MISSING: $startup_dest"
+        (( errors++ )) || true
+    elif grep -qE '@PROJECT_ROOT@|@PROJECT_STATE_DIR@' "$startup_dest"; then
+        log_error "  UNRENDERED PLACEHOLDER: $startup_dest"
+        (( errors++ )) || true
+    else
+        local expected
+        expected=$(mktemp) || return 1
+        _render_startup_expected "$expected"
+        if cmp -s "$expected" "$startup_dest"; then
+            log_success "  OK: $startup_dest"
+        else
+            log_error "  DRIFT: $startup_dest does not match freshly rendered template"
+            (( errors++ )) || true
+        fi
+        rm -f "$expected"
+    fi
+
     log_info "[4/9] Checking systemd drop-in files ..."
     for unit in "${_IDENTITY_DROPIN_UNITS[@]}"; do
         local dropin="$UNIT_DEST_DIR/${unit}.d/20-identity.conf"
@@ -1137,6 +1123,12 @@ validate_installation() {
             (( errors++ )) || true
         fi
     done
+    if systemctl is-enabled "$STARTUP_SERVICE" &>/dev/null; then
+        log_success "  ENABLED:     $STARTUP_SERVICE"
+    else
+        log_error   "  NOT ENABLED: $STARTUP_SERVICE"
+        (( errors++ )) || true
+    fi
 
     log_info "[8/9] Checking for split-brain (sha256 repo vs installed) ..."
     for script in "${scripts_to_check[@]}"; do
@@ -1204,7 +1196,7 @@ show_status() {
     echo ""
     systemctl list-timers --all 2>/dev/null | grep vaultwarden || log_info "No vaultwarden timers active."
     echo ""
-    for svc in "${SERVICES[@]}"; do
+    for svc in "${SERVICES[@]}" "$STARTUP_SERVICE"; do
         [[ "$svc" == *"@"* ]] && continue
         log_info "--- $svc ---"
         { systemctl status "$svc" --no-pager -l 2>/dev/null | head -20; } || true
