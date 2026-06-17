@@ -204,50 +204,7 @@ EXAMPLES:
 ### backup.sh
 
 ```
-VaultWarden-OCI Backup Script
-
-USAGE:
-    sudo ./backup.sh <subcommand> [options]
-    ./backup.sh list                                    # No root required
-
-SUBCOMMANDS:
-    run [TYPE]        Create a backup  (TYPE: auto | db | full | emergency)
-    list [--json]     List existing backups (no root required; JSON optional)
-    verify            Verify the most recent backup's integrity
-    rotate            Apply retention policy and prune old backups
-    sync               Copy all retained local backups to rclone by type
-
-RUN OPTIONS (used after 'run'):
-    --keep N                 Override configured retention for this run
-    --quiet                  Suppress non-error output
-    --force                  Ignore locks and force backup
-    --email                  Send email notification on completion/failure
-    --rclone                 Sync encrypted backup to rclone remote after creation
-    --full-verification      End-to-end decrypt + integrity check before sync (fatal on failure)
-    --skip-full-verification Fast checksum only — explicit default
-    --dry-run                Show what would be done without executing
-
-SYNC / ROTATE OPTIONS:
-    --keep N                 Override configured retention for every backup type
-    --quiet                  Suppress non-error output
-    --dry-run                Preview copy or pruning operations
-
-GLOBAL SUBCOMMAND:
-    help                     Show this help
-
-GLOBAL OPTIONS:
-    --version, -V            Print the VaultWarden-OCI version and exit
-
-EXAMPLES:
-    sudo ./backup.sh run                # Auto-mode backup (db or full based on schedule)
-    sudo ./backup.sh run db             # Database-only backup
-    sudo ./backup.sh run full           # Full state backup
-    sudo ./backup.sh run db --keep 30             # Keep 30 days of backups
-    ./backup.sh list                              # List existing backups (no sudo)
-    ./backup.sh list --json                       # Machine-readable backup inventory
-    sudo ./backup.sh verify                       # Verify the latest backup
-    sudo ./backup.sh rotate --keep 30             # Prune backups older than 30 days
-    sudo ./backup.sh sync                         # Upload db/full/emergency backups
+(--help not available or requires root)
 ```
 
 ### restore.sh
@@ -354,38 +311,7 @@ Run './maintenance.sh <subcommand> --help' for subcommand-specific options.
 ### edit-secrets.sh
 
 ```
-VaultWarden-OCI Secrets Editor
-
-USAGE:
-    ./edit-secrets.sh <subcommand> [options]
-
-DESCRIPTION:
-    Thin dispatcher for VaultWarden secrets management operations. Delegates
-    to utilities/secrets-*.sh subcommands. Manage credentials using SOPS
-    Age encryption — secrets are never stored in plaintext on disk.
-
-SUBCOMMANDS:
-    edit                    Interactively edit decrypted secrets, then re-encrypt
-    view                    View decrypted secrets read-only (no changes saved)
-    list                    List secret key names only (no values shown)
-    rotate FIELD            Re-collect and re-hash a single named field
-    export-recovery-kit     Generate a recovery document with unencrypted secrets
-    help                    Show this help
-
-OPTIONS:
-    --help, -h              Show this help
-    --version, -V           Print the VaultWarden-OCI version and exit
-
-EXAMPLES:
-    ./edit-secrets.sh edit
-    ./edit-secrets.sh edit --editor vim
-    ./edit-secrets.sh view
-    ./edit-secrets.sh list
-    ./edit-secrets.sh rotate admin_token
-    ./edit-secrets.sh rotate email_api_token --dry-run
-    ./edit-secrets.sh export-recovery-kit
-
-Run './edit-secrets.sh <subcommand> --help' for subcommand-specific options.
+(--help not available or requires root)
 ```
 
 ### dashboard.sh
@@ -420,50 +346,7 @@ EXAMPLES:
 ### backup-run.sh
 
 ```
-VaultWarden-OCI Backup Script
-
-USAGE:
-    sudo ./backup.sh <subcommand> [options]
-    ./backup.sh list                                    # No root required
-
-SUBCOMMANDS:
-    run [TYPE]        Create a backup  (TYPE: auto | db | full | emergency)
-    list [--json]     List existing backups (no root required; JSON optional)
-    verify            Verify the most recent backup's integrity
-    rotate            Apply retention policy and prune old backups
-    sync               Copy all retained local backups to rclone by type
-
-RUN OPTIONS (used after 'run'):
-    --keep N                 Override configured retention for this run
-    --quiet                  Suppress non-error output
-    --force                  Ignore locks and force backup
-    --email                  Send email notification on completion/failure
-    --rclone                 Sync encrypted backup to rclone remote after creation
-    --full-verification      End-to-end decrypt + integrity check before sync (fatal on failure)
-    --skip-full-verification Fast checksum only — explicit default
-    --dry-run                Show what would be done without executing
-
-SYNC / ROTATE OPTIONS:
-    --keep N                 Override configured retention for every backup type
-    --quiet                  Suppress non-error output
-    --dry-run                Preview copy or pruning operations
-
-GLOBAL SUBCOMMAND:
-    help                     Show this help
-
-GLOBAL OPTIONS:
-    --version, -V            Print the VaultWarden-OCI version and exit
-
-EXAMPLES:
-    sudo ./backup.sh run                # Auto-mode backup (db or full based on schedule)
-    sudo ./backup.sh run db             # Database-only backup
-    sudo ./backup.sh run full           # Full state backup
-    sudo ./backup.sh run db --keep 30             # Keep 30 days of backups
-    ./backup.sh list                              # List existing backups (no sudo)
-    ./backup.sh list --json                       # Machine-readable backup inventory
-    sudo ./backup.sh verify                       # Verify the latest backup
-    sudo ./backup.sh rotate --keep 30             # Prune backups older than 30 days
-    sudo ./backup.sh sync                         # Upload db/full/emergency backups
+(--help not available or requires root)
 ```
 
 ### maintenance-db-maint.sh
@@ -767,114 +650,25 @@ DESCRIPTION:
 ### secrets-export-recovery-kit.sh
 
 ```
-VaultWarden Secrets — export-recovery-kit subcommand
-
-USAGE:
-    ./utilities/secrets-export-recovery-kit.sh export-recovery-kit [OPTIONS]
-    ./edit-secrets.sh export-recovery-kit [OPTIONS]
-
-DESCRIPTION:
-    Decrypts secrets.yaml, validates that no PLACEHOLDER values remain, then
-    exports a plaintext recovery document containing the Age private key and
-    all credentials. The output file is written to a tmpfs-backed directory
-    (e.g. /dev/shm) with mode 0600 and an auto-delete scheduled after 30
-    minutes via at(1).
-
-    This is the canonical standalone entry point for recovery kit export.
-    setup-secrets.sh delegates its post-setup export prompt here.
-
-FLAGS:
-    --help, -h    Show this help
-
-EXAMPLES:
-    ./utilities/secrets-export-recovery-kit.sh export-recovery-kit
-    ./edit-secrets.sh export-recovery-kit
+(--help not available or requires root)
 ```
 
 ### secrets-list.sh
 
 ```
-VaultWarden Secrets — list subcommand
-
-USAGE:
-    ./utilities/secrets-list.sh list [OPTIONS]
-    ./edit-secrets.sh list
-
-DESCRIPTION:
-    Lists secret key names only — no values are decrypted or displayed.
-
-FLAGS:
-    --help, -h    Show this help
-
-EXAMPLES:
-    ./utilities/secrets-list.sh list
-    ./edit-secrets.sh list
+(--help not available or requires root)
 ```
 
 ### secrets-rotate.sh
 
 ```
-VaultWarden Secrets — rotate subcommand
-
-USAGE:
-    ./utilities/secrets-rotate.sh FIELD [OPTIONS]
-    ./utilities/secrets-rotate.sh rotate FIELD [OPTIONS]  # 'rotate' accepted as alias
-    ./edit-secrets.sh rotate FIELD [OPTIONS]
-
-DESCRIPTION:
-    Re-collects and re-hashes a single named credential, then atomically
-    re-encrypts secrets.yaml and resyncs Docker secret bind-mount files.
-
-SUPPORTED FIELDS:
-    Derived at runtime from secrets-schema.yaml.
-    Run after setup.sh install for the full schema list, or inspect:
-      secrets/secrets-schema.yaml
-
-EMAIL_MODE / EMAIL_PROVIDER quick reference (.env):
-    EMAIL_MODE=auto   — tries API → Postfix sidecar → direct upstream SMTP in order
-    EMAIL_MODE=api    — HTTP API only   (rotate: email_api_token)
-    EMAIL_MODE=smtp   — Postfix sidecar → direct SMTP (rotate: smtp_password)
-    EMAIL_MODE=direct — direct SMTP only (rotate: smtp_password)
-    EMAIL_MODE=host   — deprecated alias for direct (rotate: smtp_password)
-    EMAIL_PROVIDER=mailersend|sendgrid|mailgun|postmark|resend
-        → selects which HTTP driver is used at runtime;
-          the token is always stored as "email_api_token" in secrets.yaml.
-
-FLAGS:
-    --dry-run     Preview what would change without writing
-    --no-backup   Skip creating backup before rotation
-    --help, -h    Show this help
-    --version, -V Print the VaultWarden-OCI version and exit
-
-EXAMPLES:
-    ./utilities/secrets-rotate.sh admin_token
-    ./utilities/secrets-rotate.sh cf_worker_bouncer_token
-    ./utilities/secrets-rotate.sh email_api_token --dry-run
-    ./edit-secrets.sh rotate smtp_password
-    ./edit-secrets.sh rotate backup_passphrase --no-backup
+(--help not available or requires root)
 ```
 
 ### secrets-view.sh
 
 ```
-VaultWarden Secrets — view subcommand
-
-USAGE:
-    ./utilities/secrets-view.sh [OPTIONS]
-    ./utilities/secrets-view.sh view [OPTIONS]  # 'view' accepted as alias
-    ./edit-secrets.sh view [OPTIONS]
-
-DESCRIPTION:
-    Decrypts and displays secrets in read-only mode. No changes are saved.
-
-FLAGS:
-    --editor EDITOR    Override pager/viewer (default: less, then $EDITOR -R)
-    --help, -h         Show this help
-
-EXAMPLES:
-    ./utilities/secrets-view.sh
-    ./utilities/secrets-view.sh --editor vim
-    ./edit-secrets.sh view
+(--help not available or requires root)
 ```
 
 ### setup-crowdsec.sh
@@ -999,39 +793,7 @@ EXAMPLES:
 ### setup-secrets.sh
 
 ```
-VaultWarden-OCI Secrets Management
-
-USAGE:
-    sudo utilities/setup-secrets.sh SUBCOMMAND [OPTIONS]
-
-DESCRIPTION:
-    Manages VaultWarden-OCI secrets: bootstrap Age encryption, configure
-    credentials interactively or automatically, rotate fields, and export
-    recovery kits. Delegates to specialized scripts.
-
-SUBCOMMANDS:
-    bootstrap           Bootstrap Age key, SOPS config, and placeholder secrets
-                        (called automatically by setup.sh install phase)
-    configure           Full interactive/auto secrets setup (replaces setup.sh secrets)
-    rotate [KEY]        Rotate one or all credentials (delegates to utilities/secrets-edit.sh)
-    export-recovery-kit Export encrypted recovery kit (delegates to utilities/secrets-edit.sh)
-    breakglass [FLAGS]  Emergency break-glass admin account management
-    help, --help, -h    Show this help
-
-OPTIONS:
-    --help, -h          Show this help
-    --version, -V       Print the VaultWarden-OCI version and exit
-
-Run: setup-secrets.sh SUBCOMMAND --help  for subcommand-specific help.
-
-EXAMPLES:
-    sudo utilities/setup-secrets.sh bootstrap
-    sudo utilities/setup-secrets.sh configure
-    sudo utilities/setup-secrets.sh configure --auto
-    sudo utilities/setup-secrets.sh rotate email_api_token
-    sudo utilities/setup-secrets.sh export-recovery-kit
-    sudo utilities/setup-secrets.sh breakglass create
-    sudo utilities/setup-secrets.sh breakglass status
+(--help not available or requires root)
 ```
 
 ### setup-storage.sh
@@ -1115,55 +877,7 @@ EXAMPLES:
 ### setup-systemd.sh
 
 ```
-VaultWarden-OCI systemd Timer Installer
-
-USAGE:
-    sudo utilities/setup-systemd.sh <action> [OPTIONS]
-    sudo utilities/setup-systemd.sh install    # Install and enable all timers
-    sudo utilities/setup-systemd.sh remove     # Disable and remove all timers
-    sudo utilities/setup-systemd.sh validate   # Verify installed state vs repo
-    sudo utilities/setup-systemd.sh status     # Show timer and service status
-
-DESCRIPTION:
-    Installs, removes, validates, or shows the status of VaultWarden-OCI
-    systemd timers. Run after every 'git pull' to keep /opt/ in sync.
-
-ACTIONS:
-    install   Install and enable all systemd timer units
-    remove    Disable and remove all systemd timer units
-    validate  Verify installed state matches repo; detect split-brain
-    status    Show timer and service status
-
-OPTIONS:
-    --dry-run     Print actions without executing
-    --help, -h    Show this help
-    --version, -V Print the VaultWarden-OCI version and exit
-
-WHAT install DOES:
-    1. Copies scripts to /opt/vaultwarden-scripts/ (root:root 700):
-         maintenance.sh  backup.sh  restore.sh
-         utilities/setup-firewall.sh
-         utilities/maintenance-run.sh      utilities/maintenance-health.sh
-         utilities/maintenance-update.sh   utilities/maintenance-db-maint.sh
-         utilities/maintenance-email.sh    utilities/maintenance-update-dns.sh
-         utilities/maintenance-update-firewall.sh
-         utilities/backup-run.sh           utilities/restore-run.sh
-       Scripts are self-locating via BASH_SOURCE[0]. The utilities/ subdirectory
-       structure is preserved at the destination.
-    2. Copies lib/ -> /opt/vaultwarden-scripts/lib/ (root:root 644)
-    3. Installs the authoritative environment file to /etc/vaultwarden/vaultwarden.env (root:root 600)
-       using ${PROJECT_STATE_DIR}/config/install.env when present, with repository .env as a legacy fallback.
-    4. Copies secrets/keys/age-key.txt -> /etc/vaultwarden/age-key.txt
-    5. Copies systemd/*.{service,timer} and renders vaultwarden-startup.service -> /etc/systemd/system/
-    6. systemctl daemon-reload
-    7. systemctl enable --now for all 6 timers and enables vaultwarden-startup.service
-    8. Verifies all managed timers are active and have a next trigger
-
-EXAMPLES:
-    sudo utilities/setup-systemd.sh install
-    sudo utilities/setup-systemd.sh install --dry-run
-    sudo utilities/setup-systemd.sh validate
-    sudo utilities/setup-systemd.sh status
+(--help not available or requires root)
 ```
 
 ### smoke-test.sh
