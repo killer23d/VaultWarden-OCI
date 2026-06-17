@@ -204,6 +204,55 @@ Run through these items after every bare-metal restore to confirm the stack is f
 | 9 | Backup verification passes | `sudo ./backup.sh verify` |
 | 10 | Comprehensive health report clean | `sudo ./maintenance.sh health --comprehensive` |
 
+## Non-production USB recovery rehearsal
+
+Perform one recovery rehearsal during a planned maintenance or testing window
+using a disposable Ubuntu VM or another isolated test VM. Attach only a
+snapshot or copy of the production state volume: never mount or modify the live
+production state volume. Use a copy of the offline USB Age key, never its only
+existing copy.
+
+Keep the rehearsal isolated from production DNS and inbound production traffic.
+Do not use the production hostname unless DNS resolution and network routing
+are safely overridden so no test traffic can reach or replace production.
+
+> **Warning:** `recover.sh` may rekey and modify the state supplied to it. A
+> disposable state-volume copy is mandatory; this procedure is not safe against
+> the live production state directory.
+
+On the isolated VM, run:
+
+```bash
+sudo ./recover.sh \
+  --state-dir <copied-state-path> \
+  --key <copied-usb-key-path>
+```
+
+After recovery, run the standard verification:
+
+```bash
+sudo ./utilities/smoke-test.sh
+```
+
+Confirm and record that:
+
+- Docker Compose configuration is valid;
+- `/etc/systemd/system/vaultwarden-startup.service` validates;
+- `vaultwarden-startup.service` is active;
+- `/run/vaultwarden-oci/secrets` is owned by `root:root` with mode `0700`;
+- each runtime secret file is owned by `root:root` with mode `0444`;
+- the persistent SOPS ciphertext decrypts successfully without displaying
+  plaintext;
+- the Vaultwarden `/api/alive` endpoint responds successfully;
+- the copied state volume, not production state, was used; and
+- production state and production availability remained untouched.
+
+After recording a non-secret date and pass/fail result, stop the isolated test
+VM. Securely erase or destroy the copied Age key, destroy the copied state
+volume or snapshot clone, and destroy the disposable VM when it is no longer
+needed. Confirm that no plaintext recovery output remains on the VM. This is a
+manual, isolated rehearsal—not automated recovery CI.
+
 ## Backup Type Reference
 
 Both **Full** and **Emergency** backups call `perform_full_backup()` identically. The only difference is when and why they are triggered — their archive contents are the same. Neither type includes the `secrets/` directory or the Age key.
