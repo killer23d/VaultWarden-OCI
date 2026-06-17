@@ -110,6 +110,11 @@ assert_no_plaintext_outside_tmp() {
     ! find "$VW_SETUP_SECRETS_TMP_DIR" -type f -print 2>/dev/null | grep -q . || fail 'plaintext staging file left behind'
 }
 
+assert_no_transaction_leftovers() {
+    local d="$1"
+    ! find "$d" \( -name '.sops.yaml.*' -o -name 'dr-manifest.env.*' -o -name 'tmp.*.yaml' -o -name 'secrets.yaml.bak' -o -name 'sops.yaml.bak' -o -name 'dr-manifest.env.bak' \) -print | grep -q . || fail 'transaction staging or backup file left behind'
+}
+
 run_test() {
     local name="$1"; shift
     TESTS_RUN=$((TESTS_RUN + 1))
@@ -184,8 +189,110 @@ test_staged_update_failure() {
     rm -f "$plain"
     assert_no_plaintext_outside_tmp "$d"
     ! find "$d/state/secrets" -name '*.yaml' ! -name 'secrets.yaml' -print | grep -q . || fail 'ciphertext staging file left behind'
+    assert_no_transaction_leftovers "$d"
 }
 
+test_manifest_promotion_failure_preserves_artifacts() {
+    local d; d=$(case_dir)
+    PROJECT_STATE_DIR="$d/state"
+    export OFFLINE_AGE_RECIPIENT="$OFF"
+    local final policy plain
+    final="$d/state/secrets/secrets.yaml"
+    policy="$d/policy/.sops.yaml"
+    plain="$(_ss_make_plaintext_temp)"
+    printf 'admin_token: PLACEHOLDER\n' > "$plain"
+    printf 'live-cipher\n' > "$final"
+    printf 'live-policy\n' > "$policy"
+    printf 'OFFLINE_AGE_RECIPIENT=%s\nMANIFEST_UPDATED_AT=original\n' "$OFF2" > "$d/state/config/dr-manifest.env"
+    cp "$final" "$d/final.before"
+    cp "$policy" "$d/policy.before"
+    cp "$d/state/config/dr-manifest.env" "$d/manifest.before"
+    mv() {
+        if [[ "${MOCK_FAIL_MANIFEST_PROMOTE:-}" == "1" && "${*: -1}" == "$d/state/config/dr-manifest.env" ]]; then
+            return 55
+        fi
+        command mv "$@"
+    }
+    if MOCK_FAIL_MANIFEST_PROMOTE=1 _ss_commit_ciphertext_transaction "$plain" "$d/key.txt" "$OP" "$final" "$policy" plaintext; then
+        unset -f mv
+        fail 'manifest promotion failure unexpectedly succeeded'
+    fi
+    unset -f mv
+    cmp -s "$d/final.before" "$final" || fail 'live ciphertext changed on manifest promotion failure'
+    cmp -s "$d/policy.before" "$policy" || fail 'live policy changed on manifest promotion failure'
+    cmp -s "$d/manifest.before" "$d/state/config/dr-manifest.env" || fail 'manifest changed on manifest promotion failure'
+    rm -f "$plain"
+    assert_no_transaction_leftovers "$d"
+}
+
+test_manifest_promotion_failure_preserves_absent_manifest() {
+    local d; d=$(case_dir)
+    PROJECT_STATE_DIR="$d/state"
+    export OFFLINE_AGE_RECIPIENT="$OFF"
+    local final policy plain
+    final="$d/state/secrets/secrets.yaml"
+    policy="$d/policy/.sops.yaml"
+    plain="$(_ss_make_plaintext_temp)"
+    printf 'admin_token: PLACEHOLDER\n' > "$plain"
+    printf 'live-cipher\n' > "$final"
+    printf 'live-policy\n' > "$policy"
+    rm -f "$d/state/config/dr-manifest.env"
+    cp "$final" "$d/final.before"
+    cp "$policy" "$d/policy.before"
+    mv() {
+        if [[ "${MOCK_FAIL_MANIFEST_PROMOTE:-}" == "1" && "${*: -1}" == "$d/state/config/dr-manifest.env" ]]; then
+            return 55
+        fi
+        command mv "$@"
+    }
+    if MOCK_FAIL_MANIFEST_PROMOTE=1 _ss_commit_ciphertext_transaction "$plain" "$d/key.txt" "$OP" "$final" "$policy" plaintext; then
+        unset -f mv
+        fail 'absent manifest promotion failure unexpectedly succeeded'
+    fi
+    unset -f mv
+    cmp -s "$d/final.before" "$final" || fail 'live ciphertext changed on absent manifest promotion failure'
+    cmp -s "$d/policy.before" "$policy" || fail 'live policy changed on absent manifest promotion failure'
+    [[ ! -e "$d/state/config/dr-manifest.env" ]] || fail 'absent manifest was created on failed transaction'
+    rm -f "$plain"
+    assert_no_transaction_leftovers "$d"
+}
+
+test_term_after_ciphertext_promotion_rolls_back_and_preserves_traps() {
+    local d; d=$(case_dir)
+    PROJECT_STATE_DIR="$d/state"
+    export OFFLINE_AGE_RECIPIENT="$OFF"
+    local final policy plain before_return before_int before_term after_return after_int after_term status
+    final="$d/state/secrets/secrets.yaml"
+    policy="$d/policy/.sops.yaml"
+    plain="$(_ss_make_plaintext_temp)"
+    printf 'admin_token: PLACEHOLDER\n' > "$plain"
+    printf 'live-cipher\n' > "$final"
+    cp "$final" "$d/final.before"
+    rm -f "$policy" "$d/state/config/dr-manifest.env"
+    trap 'printf outer-return-trap >/dev/null' RETURN
+    trap 'printf outer-int-trap >/dev/null' INT
+    trap 'printf outer-term-trap >/dev/null' TERM
+    before_return="$(trap -p RETURN)"
+    before_int="$(trap -p INT)"
+    before_term="$(trap -p TERM)"
+    set +e
+    SETUP_SECRETS_TEST_TERM_AFTER_CIPHERTEXT_PROMOTION=1 _ss_commit_ciphertext_transaction "$plain" "$d/key.txt" "$OP" "$final" "$policy" plaintext
+    status=$?
+    set -e
+    after_return="$(trap -p RETURN)"
+    after_int="$(trap -p INT)"
+    after_term="$(trap -p TERM)"
+    trap - RETURN INT TERM
+    [[ "$status" -eq 143 ]] || fail "TERM transaction returned $status instead of 143"
+    [[ "$after_return" == "$before_return" ]] || fail 'outer RETURN trap was not preserved after TERM'
+    [[ "$after_int" == "$before_int" ]] || fail 'outer INT trap was not preserved after TERM'
+    [[ "$after_term" == "$before_term" ]] || fail 'outer TERM trap was not preserved after TERM'
+    cmp -s "$d/final.before" "$final" || fail 'ciphertext not restored after TERM'
+    [[ ! -e "$policy" ]] || fail 'absent policy created after TERM rollback'
+    [[ ! -e "$d/state/config/dr-manifest.env" ]] || fail 'absent manifest created after TERM rollback'
+    rm -f "$plain"
+    assert_no_transaction_leftovers "$d"
+}
 
 test_preserves_outer_return_trap() {
     local d; d=$(case_dir)
@@ -211,6 +318,9 @@ source_helpers
 run_test 'fresh bootstrap stages plaintext in tmpfs and installs recipients' test_fresh_bootstrap
 run_test 'adding offline recipient rekeys existing ciphertext metadata' test_add_offline_recipient_existing_ciphertext
 run_test 'staged update failure preserves live artifacts and cleans staging' test_staged_update_failure
+run_test 'manifest promotion failure preserves existing live artifacts' test_manifest_promotion_failure_preserves_artifacts
+run_test 'manifest promotion failure preserves absent manifest' test_manifest_promotion_failure_preserves_absent_manifest
+run_test 'TERM after ciphertext promotion rolls back artifacts and preserves traps' test_term_after_ciphertext_promotion_rolls_back_and_preserves_traps
 run_test 'successful transaction preserves existing caller return trap' test_preserves_outer_return_trap
-[[ "$TESTS_RUN" -eq 4 ]] || fail "expected 4 tests, ran $TESTS_RUN"
+[[ "$TESTS_RUN" -eq 7 ]] || fail "expected 7 tests, ran $TESTS_RUN"
 printf '1..%s\n' "$TESTS_RUN"

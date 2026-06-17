@@ -1963,8 +1963,26 @@ _ss_write_policy_file() {
     chmod 0640 "$dest"
 }
 
-_ss_update_manifest_after_validation() {
-    local desired_csv="$1" manifest_dir manifest offline=""
+_ss_set_env_var_in_file() {
+    local key="$1" value="$2" file="$3"
+    local escaped_key tmp_file escaped_value
+    escaped_key=$(printf '%s' "$key" | sed 's/[]\/$*.^[]/\\&/g')
+    tmp_file="$(dirname "$file")/.env.tmp.$$"
+    if grep -q "^${escaped_key}=" "$file" 2>/dev/null; then
+        escaped_value="${value//\\/\\\\}"
+        escaped_value="${escaped_value//&/\\&}"
+        escaped_value="${escaped_value//|/\\|}"
+        sed "s|^${escaped_key}=.*|${key}=${escaped_value}|" "$file" > "$tmp_file" || { rm -f "$tmp_file"; return 1; }
+    else
+        cp "$file" "$tmp_file" || { rm -f "$tmp_file"; return 1; }
+        printf '%s=%s\n' "$key" "$value" >> "$tmp_file" || { rm -f "$tmp_file"; return 1; }
+    fi
+    chmod --reference="$file" "$tmp_file" 2>/dev/null || true
+    mv "$tmp_file" "$file" || { rm -f "$tmp_file"; return 1; }
+}
+
+_ss_stage_manifest_update() {
+    local desired_csv="$1" manifest_stage="$2" manifest_dir manifest offline=""
     if [[ "$desired_csv" == *,* ]]; then
         offline="${desired_csv#*,}"
     fi
@@ -1972,9 +1990,13 @@ _ss_update_manifest_after_validation() {
     manifest="$(_ss_manifest_file)"
     manifest_dir="$(dirname "$manifest")"
     mkdir -p "$manifest_dir" || return 1
-    [[ -f "$manifest" ]] || : > "$manifest"
-    _set_env_var OFFLINE_AGE_RECIPIENT "$offline" "$manifest"
-    _set_env_var MANIFEST_UPDATED_AT "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$manifest"
+    if [[ -f "$manifest" ]]; then
+        cp "$manifest" "$manifest_stage" || return 1
+    else
+        : > "$manifest_stage" || return 1
+    fi
+    _ss_set_env_var_in_file OFFLINE_AGE_RECIPIENT "$offline" "$manifest_stage" || return 1
+    _ss_set_env_var_in_file MANIFEST_UPDATED_AT "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$manifest_stage" || return 1
 }
 
 _ss_restore_or_remove() {
@@ -1988,7 +2010,7 @@ _ss_restore_or_remove() {
 
 _ss_commit_ciphertext_transaction() {
     local plaintext_file="$1" operational_key="$2" operational_recipient="$3" final_file="$4" policy_file="$5" mode="${6:-plaintext}" desired_csv="${7:-}"
-    local policy_stage ciphertext_stage backup_dir ciphertext_backup policy_backup manifest_backup manifest_file caller_return_trap
+    local policy_stage ciphertext_stage manifest_stage backup_dir ciphertext_backup policy_backup manifest_backup manifest_file caller_return_trap caller_int_trap caller_term_trap
     local ciphertext_existed=false policy_existed=false manifest_existed=false ciphertext_promoted=false policy_promoted=false manifest_promoted=false
 
     if [[ -z "$desired_csv" ]]; then
@@ -1996,6 +2018,8 @@ _ss_commit_ciphertext_transaction() {
     fi
     manifest_file="$(_ss_manifest_file)"
     caller_return_trap="$(trap -p RETURN)"
+    caller_int_trap="$(trap -p INT)"
+    caller_term_trap="$(trap -p TERM)"
 
     if [[ "$mode" == "rekey" && -f "$final_file" ]] \
         && _ss_recipients_match "$desired_csv" "$policy_file" policy \
@@ -2004,21 +2028,36 @@ _ss_commit_ciphertext_transaction() {
         return 0
     fi
 
-    mkdir -p "$(dirname "$final_file")" "$(dirname "$policy_file")" || return 1
+    mkdir -p "$(dirname "$final_file")" "$(dirname "$policy_file")" "$(dirname "$manifest_file")" || return 1
     backup_dir=$(mktemp -d) || return 1
     policy_stage=$(mktemp -p "$(dirname "$policy_file")" .sops.yaml.XXXXXXXXXX) || { rm -rf "$backup_dir"; return 1; }
     ciphertext_stage=$(mktemp --suffix=.yaml --tmpdir="$(dirname "$final_file")") || { rm -rf "$backup_dir"; rm -f "$policy_stage"; return 1; }
+    manifest_stage=$(mktemp -p "$(dirname "$manifest_file")" dr-manifest.env.XXXXXXXXXX) || { rm -rf "$backup_dir"; rm -f "$policy_stage" "$ciphertext_stage"; return 1; }
     ciphertext_backup="$backup_dir/secrets.yaml.bak"
     policy_backup="$backup_dir/sops.yaml.bak"
     manifest_backup="$backup_dir/dr-manifest.env.bak"
-    _ss_tx_cleanup() { rm -f "${policy_stage:-}" "${ciphertext_stage:-}"; rm -rf "${backup_dir:-}"; }
-    _ss_tx_fail() { local code="${1:-1}"; _ss_tx_cleanup; return "$code"; }
+    _ss_tx_restore_traps() {
+        if [[ -n "$caller_return_trap" ]]; then eval "$caller_return_trap"; else trap - RETURN; fi
+        if [[ -n "$caller_int_trap" ]]; then eval "$caller_int_trap"; else trap - INT; fi
+        if [[ -n "$caller_term_trap" ]]; then eval "$caller_term_trap"; else trap - TERM; fi
+    }
+    _ss_tx_cleanup() { rm -f "${policy_stage:-}" "${ciphertext_stage:-}" "${manifest_stage:-}"; rm -rf "${backup_dir:-}"; }
+    _ss_tx_rollback() {
+        [[ "$ciphertext_promoted" == "true" ]] && _ss_restore_or_remove "$ciphertext_existed" "$ciphertext_backup" "$final_file"
+        [[ "$policy_promoted" == "true" ]] && _ss_restore_or_remove "$policy_existed" "$policy_backup" "$policy_file"
+        [[ "$manifest_promoted" == "true" ]] && _ss_restore_or_remove "$manifest_existed" "$manifest_backup" "$manifest_file"
+    }
+    _ss_tx_fail() { local code="${1:-1}"; _ss_tx_rollback; _ss_tx_cleanup; _ss_tx_restore_traps; return "$code"; }
+    _ss_tx_signal() { local code="$1"; _ss_tx_fail "$code"; return "$code"; }
+    trap '_ss_tx_signal 130; return 130' INT
+    trap '_ss_tx_signal 143; return 143' TERM
 
     if [[ -f "$final_file" ]]; then cp "$final_file" "$ciphertext_backup"; ciphertext_existed=true; fi
     if [[ -f "$policy_file" ]]; then cp "$policy_file" "$policy_backup"; policy_existed=true; fi
     if [[ -f "$manifest_file" ]]; then cp "$manifest_file" "$manifest_backup"; manifest_existed=true; fi
 
     _ss_write_policy_file "$policy_stage" "$desired_csv" || { _ss_tx_fail 1; return 1; }
+    _ss_stage_manifest_update "$desired_csv" "$manifest_stage" || { _ss_tx_fail 1; return 1; }
 
     if [[ "$mode" == "rekey" ]]; then
         cp "$final_file" "$ciphertext_stage" || { _ss_tx_fail 1; return 1; }
@@ -2036,33 +2075,50 @@ _ss_commit_ciphertext_transaction() {
         return 1
     fi
     ciphertext_promoted=true
+    if [[ "${SETUP_SECRETS_TEST_TERM_AFTER_CIPHERTEXT_PROMOTION:-}" == "1" ]]; then
+        kill -TERM $$
+    fi
 
     if ! mv "$policy_stage" "$policy_file"; then
-        _ss_restore_or_remove "$ciphertext_existed" "$ciphertext_backup" "$final_file"
         _ss_tx_fail 1
         return 1
     fi
     policy_promoted=true
 
-    if ! _ss_update_manifest_after_validation "$desired_csv"; then
-        if [[ -n "$caller_return_trap" ]]; then eval "$caller_return_trap"; else trap - RETURN; fi
-        _ss_restore_or_remove "$ciphertext_existed" "$ciphertext_backup" "$final_file"
-        _ss_restore_or_remove "$policy_existed" "$policy_backup" "$policy_file"
-        _ss_tx_fail 1
-        return 1
+    if [[ -s "$manifest_stage" ]]; then
+        if ! mv "$manifest_stage" "$manifest_file"; then
+            _ss_tx_fail 1
+            return 1
+        fi
+        manifest_promoted=true
+    else
+        rm -f "$manifest_stage"
     fi
-    if [[ -n "$caller_return_trap" ]]; then eval "$caller_return_trap"; else trap - RETURN; fi
-    manifest_promoted=true
 
     if ! SOPS_AGE_KEY_FILE="$operational_key" sops -d "$final_file" >/dev/null; then
-        [[ "$ciphertext_promoted" == "true" ]] && _ss_restore_or_remove "$ciphertext_existed" "$ciphertext_backup" "$final_file"
-        [[ "$policy_promoted" == "true" ]] && _ss_restore_or_remove "$policy_existed" "$policy_backup" "$policy_file"
-        [[ "$manifest_promoted" == "true" ]] && _ss_restore_or_remove "$manifest_existed" "$manifest_backup" "$manifest_file"
         _ss_tx_fail 1
         return 1
     fi
 
     _ss_tx_cleanup
+    _ss_tx_restore_traps
+}
+
+_ss_update_manifest_after_validation() {
+    local desired_csv="$1" manifest_dir manifest manifest_stage
+    manifest="$(_ss_manifest_file)"
+    manifest_dir="$(dirname "$manifest")"
+    mkdir -p "$manifest_dir" || return 1
+    manifest_stage=$(mktemp -p "$manifest_dir" dr-manifest.env.XXXXXXXXXX) || return 1
+    if ! _ss_stage_manifest_update "$desired_csv" "$manifest_stage"; then
+        rm -f "$manifest_stage"
+        return 1
+    fi
+    if [[ -s "$manifest_stage" ]]; then
+        mv "$manifest_stage" "$manifest"
+    else
+        rm -f "$manifest_stage"
+    fi
 }
 
 # Bootstrap the Age key, SOPS config, and placeholder secrets file.
