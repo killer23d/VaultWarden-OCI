@@ -793,7 +793,39 @@ EXAMPLES:
 ### setup-secrets.sh
 
 ```
-(--help not available or requires root)
+VaultWarden-OCI Secrets Management
+
+USAGE:
+    sudo utilities/setup-secrets.sh SUBCOMMAND [OPTIONS]
+
+DESCRIPTION:
+    Manages VaultWarden-OCI secrets: bootstrap Age encryption, configure
+    credentials interactively or automatically, rotate fields, and export
+    recovery kits. Delegates to specialized scripts.
+
+SUBCOMMANDS:
+    bootstrap           Bootstrap Age key, SOPS config, and placeholder secrets
+                        (called automatically by setup.sh install phase)
+    configure           Full interactive/auto secrets setup (replaces setup.sh secrets)
+    rotate [KEY]        Rotate one or all credentials (delegates to utilities/secrets-edit.sh)
+    export-recovery-kit Export encrypted recovery kit (delegates to utilities/secrets-edit.sh)
+    breakglass [FLAGS]  Emergency break-glass admin account management
+    help, --help, -h    Show this help
+
+OPTIONS:
+    --help, -h          Show this help
+    --version, -V       Print the VaultWarden-OCI version and exit
+
+Run: setup-secrets.sh SUBCOMMAND --help  for subcommand-specific help.
+
+EXAMPLES:
+    sudo utilities/setup-secrets.sh bootstrap
+    sudo utilities/setup-secrets.sh configure
+    sudo utilities/setup-secrets.sh configure --auto
+    sudo utilities/setup-secrets.sh rotate email_api_token
+    sudo utilities/setup-secrets.sh export-recovery-kit
+    sudo utilities/setup-secrets.sh breakglass create
+    sudo utilities/setup-secrets.sh breakglass status
 ```
 
 ### setup-storage.sh
@@ -877,7 +909,55 @@ EXAMPLES:
 ### setup-systemd.sh
 
 ```
-(--help not available or requires root)
+VaultWarden-OCI systemd Timer Installer
+
+USAGE:
+    sudo utilities/setup-systemd.sh <action> [OPTIONS]
+    sudo utilities/setup-systemd.sh install    # Install and enable all timers
+    sudo utilities/setup-systemd.sh remove     # Disable and remove all timers
+    sudo utilities/setup-systemd.sh validate   # Verify installed state vs repo
+    sudo utilities/setup-systemd.sh status     # Show timer and service status
+
+DESCRIPTION:
+    Installs, removes, validates, or shows the status of VaultWarden-OCI
+    systemd timers. Run after every 'git pull' to keep /opt/ in sync.
+
+ACTIONS:
+    install   Install and enable all systemd timer units
+    remove    Disable and remove all systemd timer units
+    validate  Verify installed state matches repo; detect split-brain
+    status    Show timer and service status
+
+OPTIONS:
+    --dry-run     Print actions without executing
+    --help, -h    Show this help
+    --version, -V Print the VaultWarden-OCI version and exit
+
+WHAT install DOES:
+    1. Copies scripts to /opt/vaultwarden-scripts/ (root:root 700):
+         maintenance.sh  backup.sh  restore.sh
+         utilities/setup-firewall.sh
+         utilities/maintenance-run.sh      utilities/maintenance-health.sh
+         utilities/maintenance-update.sh   utilities/maintenance-db-maint.sh
+         utilities/maintenance-email.sh    utilities/maintenance-update-dns.sh
+         utilities/maintenance-update-firewall.sh
+         utilities/backup-run.sh           utilities/restore-run.sh
+       Scripts are self-locating via BASH_SOURCE[0]. The utilities/ subdirectory
+       structure is preserved at the destination.
+    2. Copies lib/ -> /opt/vaultwarden-scripts/lib/ (root:root 644)
+    3. Installs the authoritative environment file to /etc/vaultwarden/vaultwarden.env (root:root 600)
+       using ${PROJECT_STATE_DIR}/config/install.env when present, with repository .env as a legacy fallback.
+    4. Copies secrets/keys/age-key.txt -> /etc/vaultwarden/age-key.txt
+    5. Copies systemd/*.{service,timer} and renders vaultwarden-startup.service -> /etc/systemd/system/
+    6. systemctl daemon-reload
+    7. systemctl enable --now for all 6 timers and enables vaultwarden-startup.service
+    8. Verifies all managed timers are active and have a next trigger
+
+EXAMPLES:
+    sudo utilities/setup-systemd.sh install
+    sudo utilities/setup-systemd.sh install --dry-run
+    sudo utilities/setup-systemd.sh validate
+    sudo utilities/setup-systemd.sh status
 ```
 
 ### smoke-test.sh
