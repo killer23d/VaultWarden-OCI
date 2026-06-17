@@ -29,7 +29,6 @@ ENV_DIR="/etc/vaultwarden"
 ENV_FILE="${ENV_DIR}/vaultwarden.env"
 AGE_KEY_DEST="${ENV_DIR}/age-key.txt"
 STARTUP_SERVICE="vaultwarden-startup.service"
-load_project_environment || exit 1
 
 TIMERS=(
     vaultwarden-maintenance.timer
@@ -1217,6 +1216,11 @@ show_status() {
 }
 
 main() {
+    case "${1:-}" in
+        help|--help|-h) show_help; exit 0 ;;
+        --version|-V) print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"; exit 0 ;;
+    esac
+    load_project_environment || exit 1
     (( EUID == 0 )) || { log_error "Must run as root."; exit 1; }
 
     if [[ "$STATUS" == "true" ]]; then

@@ -33,9 +33,6 @@ init_common_lib "$0"
 source "${PROJECT_ROOT}/lib/email.sh"
 source "${PROJECT_ROOT}/lib/crypto.sh"
 source "${PROJECT_ROOT}/lib/secrets.sh"
-if [[ "${SETUP_SECRETS_TRANSACTION_TESTING:-}" != "source-only" ]]; then
-    load_project_environment || exit 1
-fi
 SOPS_CONFIG_FILE="${PROJECT_ROOT}/.sops.yaml"
 export SOPS_CONFIG_FILE
 
@@ -911,7 +908,7 @@ BACKUP_BANNER
         local _operational_key _operational_recipient
         _operational_key="${SOPS_AGE_KEY_FILE:-${AGE_KEY_FILE:-}}"
         _operational_recipient="$(get_age_public_key "$_operational_key")" || return 1
-        if ! _ss_commit_ciphertext_transaction "$temp_file" "$_operational_key" "$_operational_recipient" "$SECRETS_FILE" "$SOPS_CONFIG_FILE" plaintext; then
+        if ! _ss_commit_ciphertext_transaction "$temp_file" "$_operational_key" "$_operational_recipient" "$SECRETS_FILE" "$SOPS_CONFIG_FILE" plaintext "$(_ss_desired_recipients_csv "$_operational_recipient")"; then
             log_error "Failed to stage, validate, and promote encrypted secrets"
             return 1
         fi
@@ -1990,12 +1987,15 @@ _ss_restore_or_remove() {
 }
 
 _ss_commit_ciphertext_transaction() {
-    local plaintext_file="$1" operational_key="$2" operational_recipient="$3" final_file="$4" policy_file="$5" mode="${6:-plaintext}"
-    local desired_csv policy_stage ciphertext_stage backup_dir ciphertext_backup policy_backup manifest_backup manifest_file
+    local plaintext_file="$1" operational_key="$2" operational_recipient="$3" final_file="$4" policy_file="$5" mode="${6:-plaintext}" desired_csv="${7:-}"
+    local policy_stage ciphertext_stage backup_dir ciphertext_backup policy_backup manifest_backup manifest_file caller_return_trap
     local ciphertext_existed=false policy_existed=false manifest_existed=false ciphertext_promoted=false policy_promoted=false manifest_promoted=false
 
-    desired_csv="$(_ss_desired_recipients_csv "$operational_recipient")" || return 1
+    if [[ -z "$desired_csv" ]]; then
+        desired_csv="$(_ss_desired_recipients_csv "$operational_recipient")" || return 1
+    fi
     manifest_file="$(_ss_manifest_file)"
+    caller_return_trap="$(trap -p RETURN)"
 
     if [[ "$mode" == "rekey" && -f "$final_file" ]] \
         && _ss_recipients_match "$desired_csv" "$policy_file" policy \
@@ -2011,56 +2011,58 @@ _ss_commit_ciphertext_transaction() {
     ciphertext_backup="$backup_dir/secrets.yaml.bak"
     policy_backup="$backup_dir/sops.yaml.bak"
     manifest_backup="$backup_dir/dr-manifest.env.bak"
-    trap 'rm -f "${policy_stage:-}" "${ciphertext_stage:-}"; rm -rf "${backup_dir:-}"' RETURN
-    trap 'rm -f "${policy_stage:-}" "${ciphertext_stage:-}"; rm -rf "${backup_dir:-}"; exit 130' INT
-    trap 'rm -f "${policy_stage:-}" "${ciphertext_stage:-}"; rm -rf "${backup_dir:-}"; exit 143' TERM
+    _ss_tx_cleanup() { rm -f "${policy_stage:-}" "${ciphertext_stage:-}"; rm -rf "${backup_dir:-}"; }
+    _ss_tx_fail() { local code="${1:-1}"; _ss_tx_cleanup; return "$code"; }
 
     if [[ -f "$final_file" ]]; then cp "$final_file" "$ciphertext_backup"; ciphertext_existed=true; fi
     if [[ -f "$policy_file" ]]; then cp "$policy_file" "$policy_backup"; policy_existed=true; fi
     if [[ -f "$manifest_file" ]]; then cp "$manifest_file" "$manifest_backup"; manifest_existed=true; fi
 
-    _ss_write_policy_file "$policy_stage" "$desired_csv" || return 1
+    _ss_write_policy_file "$policy_stage" "$desired_csv" || { _ss_tx_fail 1; return 1; }
 
     if [[ "$mode" == "rekey" ]]; then
-        cp "$final_file" "$ciphertext_stage" || return 1
+        cp "$final_file" "$ciphertext_stage" || { _ss_tx_fail 1; return 1; }
     else
-        SOPS_AGE_KEY_FILE="$operational_key" sops --config "$policy_stage" --encrypt --output "$ciphertext_stage" "$plaintext_file" || return 1
+        SOPS_AGE_KEY_FILE="$operational_key" sops --config "$policy_stage" --encrypt --output "$ciphertext_stage" "$plaintext_file" || { _ss_tx_fail 1; return 1; }
     fi
 
-    SOPS_AGE_KEY_FILE="$operational_key" sops --config "$policy_stage" updatekeys --yes "$ciphertext_stage" || return 1
-    SOPS_AGE_KEY_FILE="$operational_key" sops -d "$ciphertext_stage" >/dev/null || return 1
-    _ss_recipients_match "$desired_csv" "$policy_stage" policy || { log_error "Staged policy recipients do not match desired recipient set"; return 1; }
-    _ss_recipients_match "$desired_csv" "$ciphertext_stage" cipher || { log_error "Staged ciphertext recipients do not match desired recipient set"; return 1; }
+    SOPS_AGE_KEY_FILE="$operational_key" sops --config "$policy_stage" updatekeys --yes "$ciphertext_stage" || { _ss_tx_fail 1; return 1; }
+    SOPS_AGE_KEY_FILE="$operational_key" sops -d "$ciphertext_stage" >/dev/null || { _ss_tx_fail 1; return 1; }
+    _ss_recipients_match "$desired_csv" "$policy_stage" policy || { log_error "Staged policy recipients do not match desired recipient set"; _ss_tx_fail 1; return 1; }
+    _ss_recipients_match "$desired_csv" "$ciphertext_stage" cipher || { log_error "Staged ciphertext recipients do not match desired recipient set"; _ss_tx_fail 1; return 1; }
 
     if ! mv "$ciphertext_stage" "$final_file"; then
+        _ss_tx_fail 1
         return 1
     fi
     ciphertext_promoted=true
 
     if ! mv "$policy_stage" "$policy_file"; then
         _ss_restore_or_remove "$ciphertext_existed" "$ciphertext_backup" "$final_file"
+        _ss_tx_fail 1
         return 1
     fi
     policy_promoted=true
 
     if ! _ss_update_manifest_after_validation "$desired_csv"; then
+        if [[ -n "$caller_return_trap" ]]; then eval "$caller_return_trap"; else trap - RETURN; fi
         _ss_restore_or_remove "$ciphertext_existed" "$ciphertext_backup" "$final_file"
         _ss_restore_or_remove "$policy_existed" "$policy_backup" "$policy_file"
+        _ss_tx_fail 1
         return 1
     fi
+    if [[ -n "$caller_return_trap" ]]; then eval "$caller_return_trap"; else trap - RETURN; fi
     manifest_promoted=true
 
     if ! SOPS_AGE_KEY_FILE="$operational_key" sops -d "$final_file" >/dev/null; then
         [[ "$ciphertext_promoted" == "true" ]] && _ss_restore_or_remove "$ciphertext_existed" "$ciphertext_backup" "$final_file"
         [[ "$policy_promoted" == "true" ]] && _ss_restore_or_remove "$policy_existed" "$policy_backup" "$policy_file"
         [[ "$manifest_promoted" == "true" ]] && _ss_restore_or_remove "$manifest_existed" "$manifest_backup" "$manifest_file"
+        _ss_tx_fail 1
         return 1
     fi
 
-    rm -rf "$backup_dir"
-    trap - RETURN
-    trap - INT
-    trap - TERM
+    _ss_tx_cleanup
 }
 
 # Bootstrap the Age key, SOPS config, and placeholder secrets file.
@@ -2189,7 +2191,7 @@ EOF
             return 0
         fi
         log_info "Existing secrets.yaml decrypts but recipient state is not current; staging rekey"
-        if ! _ss_commit_ciphertext_transaction "" "$age_key_file" "$age_public_key" "$secrets_file" "$sops_config" rekey; then
+        if ! _ss_commit_ciphertext_transaction "" "$age_key_file" "$age_public_key" "$secrets_file" "$sops_config" rekey "$desired_recipients"; then
             log_error "Failed to rekey existing secrets.yaml"
             return 1
         fi
@@ -2218,7 +2220,7 @@ EOF
         done <<< "$_bkeys"
     } > "$tmp_secrets"
     chmod 600 "$tmp_secrets"
-    if ! _ss_commit_ciphertext_transaction "$tmp_secrets" "$age_key_file" "$age_public_key" "$secrets_file" "$sops_config" plaintext; then
+    if ! _ss_commit_ciphertext_transaction "$tmp_secrets" "$age_key_file" "$age_public_key" "$secrets_file" "$sops_config" plaintext "$desired_recipients"; then
         rm -f "$tmp_secrets"
         return 1
     fi
@@ -2341,14 +2343,19 @@ main() {
     shift || true
 
     case "$subcmd" in
+        help|--help|-h)      show_help; exit 0 ;;
+        --version|-V)        print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"; exit 0 ;;
+        "")  log_error "Subcommand required. Use --help for usage."; show_help; exit 1 ;;
+    esac
+
+    load_project_environment || exit 1
+
+    case "$subcmd" in
         bootstrap)           _cmd_bootstrap "$@" ;;
         configure)           _cmd_configure "$@" ;;
         rotate)              _cmd_rotate "$@" ;;
         export-recovery-kit) _cmd_export_recovery_kit "$@" ;;
         breakglass)          _cmd_breakglass "$@" ;;
-        help|--help|-h)      show_help; exit 0 ;;
-        --version|-V)        print_project_version "VaultWarden-OCI" "$PROJECT_ROOT"; exit 0 ;;
-        "")  log_error "Subcommand required. Use --help for usage."; show_help; exit 1 ;;
         *)   log_error "Unknown subcommand: ${subcmd}"; show_help; exit 1 ;;
     esac
 }

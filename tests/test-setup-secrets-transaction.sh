@@ -186,10 +186,31 @@ test_staged_update_failure() {
     ! find "$d/state/secrets" -name '*.yaml' ! -name 'secrets.yaml' -print | grep -q . || fail 'ciphertext staging file left behind'
 }
 
+
+test_preserves_outer_return_trap() {
+    local d; d=$(case_dir)
+    PROJECT_STATE_DIR="$d/state"
+    export OFFLINE_AGE_RECIPIENT="$OFF"
+    local plain final policy before after
+    plain="$(_ss_make_plaintext_temp)"
+    printf 'admin_token: PLACEHOLDER\n' > "$plain"
+    final="$d/state/secrets/secrets.yaml"
+    policy="$d/policy/.sops.yaml"
+    trap 'printf outer-return-trap >/dev/null' RETURN
+    before="$(trap -p RETURN)"
+    _ss_commit_ciphertext_transaction "$plain" "$d/key.txt" "$OP" "$final" "$policy" plaintext "$OP,$OFF"
+    after="$(trap -p RETURN)"
+    trap - RETURN
+    rm -f "$plain"
+    [[ "$after" == "$before" ]] || fail 'outer RETURN trap was not preserved after transaction success'
+    [[ -f "$final" ]] || fail 'ciphertext not installed with outer trap present'
+}
+
 write_stubs
 source_helpers
 run_test 'fresh bootstrap stages plaintext in tmpfs and installs recipients' test_fresh_bootstrap
 run_test 'adding offline recipient rekeys existing ciphertext metadata' test_add_offline_recipient_existing_ciphertext
 run_test 'staged update failure preserves live artifacts and cleans staging' test_staged_update_failure
-[[ "$TESTS_RUN" -eq 3 ]] || fail "expected 3 tests, ran $TESTS_RUN"
+run_test 'successful transaction preserves existing caller return trap' test_preserves_outer_return_trap
+[[ "$TESTS_RUN" -eq 4 ]] || fail "expected 4 tests, ran $TESTS_RUN"
 printf '1..%s\n' "$TESTS_RUN"
