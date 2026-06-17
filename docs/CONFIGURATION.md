@@ -1,6 +1,14 @@
 # Configuration Reference — VaultWarden-OCI
 
-All configuration is split between two files: **`.env`** (non-sensitive settings) and **`$SECRETS_FILE`** (encrypted with Age + SOPS, default: `secrets/secrets.yaml`, edited via `./utilities/secrets-edit.sh`). Both are generated from `.example` templates by `setup.sh` — never edit generated files directly.
+Configuration is split by lifetime and sensitivity:
+
+- `${PROJECT_STATE_DIR}/config/install.env` is the authoritative persistent non-secret environment on the state volume.
+- Repository `.env` is a compatibility/bootstrap fallback generated from `.env.example` by setup.
+- `/etc/vaultwarden/vaultwarden.env` is the installed systemd bootstrap fallback.
+- `${PROJECT_STATE_DIR}/secrets/secrets.yaml` is the persistent encrypted SOPS file edited through `./utilities/secrets-edit.sh`.
+- `/run/vaultwarden-oci/secrets/` contains transient runtime Docker secret source files recreated at startup.
+
+SOPS uses the operational Age recipient and may include an optional offline USB Age recipient for recovery. Never edit generated files directly unless a utility explicitly instructs you to do so.
 
 Related docs: [DEPLOYMENT.md](DEPLOYMENT.md) · [SECURITY.md](SECURITY.md) · [ADVANCED-CUSTOMIZATION.md](ADVANCED-CUSTOMIZATION.md)
 

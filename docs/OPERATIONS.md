@@ -638,8 +638,8 @@ sudo ./setup.sh install --domain vault.example.com --email admin@example.com --f
 # 1. Validate compose config
 docker compose config
 
-# 2. Check secrets exist
-ls -la secrets/.docker_secrets/
+# 2. Check transient runtime secrets exist
+sudo ls -la /run/vaultwarden-oci/secrets/
 
 # 3. View startup errors
 docker compose up

@@ -93,7 +93,7 @@ cd VaultWarden-OCI
 
 ### Step 3 — Configure Environment & External Credentials
 
-**Edit `.env` first** — set non-secret email/runtime values, then configure Cloudflare CrowdSec secrets in `secrets/secrets.yaml`.
+**Edit `.env` first** — set non-secret email/runtime values, then configure Cloudflare CrowdSec secrets in `${PROJECT_STATE_DIR}/secrets/secrets.yaml`.
 
 ```bash
 nano .env
