@@ -888,3 +888,9 @@ make shell SERVICE=caddy # Shell in specific container
 ---
 
 > **Next step →** [Backup & Restore](BACKUP-RESTORE.md)
+
+## Resilient state operations
+
+Persistent environment state is `${PROJECT_STATE_DIR}/config/install.env`; repository `.env` and `/etc/vaultwarden/vaultwarden.env` are compatibility/bootstrap fallbacks. The encrypted secrets file is `${PROJECT_STATE_DIR}/secrets/secrets.yaml`. Plaintext runtime secret files are recreated only in `/run/vaultwarden-oci/secrets/`.
+
+Keep the offline Age private key on USB only. Add or rotate the offline recipient through `utilities/setup-secrets.sh`; reprint `${PROJECT_STATE_DIR}/config/recovery-card.md` whenever the manifest, repository commit, domain, or offline key changes. Removal is manual and must use a staged ciphertext update with explicit `sops --config "$PWD/.sops.yaml" updatekeys --yes "$staging"` followed by decryption validation before promotion.

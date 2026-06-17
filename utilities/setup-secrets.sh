@@ -33,6 +33,9 @@ init_common_lib "$0"
 source "${PROJECT_ROOT}/lib/email.sh"
 source "${PROJECT_ROOT}/lib/crypto.sh"
 source "${PROJECT_ROOT}/lib/secrets.sh"
+load_project_environment || exit 1
+SOPS_CONFIG_FILE="${PROJECT_ROOT}/.sops.yaml"
+export SOPS_CONFIG_FILE
 
 show_help() {
     cat << 'EOF'
@@ -280,19 +283,13 @@ HELP
                         log_error "Re-generate the Age key and retry."
                         return 1
                     fi
-                    cat > .sops.yaml << SOPS_EOF
-creation_rules:
-  - path_regex: .*\.yaml$
-    age: $age_public_key
-SOPS_EOF
-                    chmod 640 .sops.yaml
-                    chown "$(get_real_user):$(id -g -n "$(get_real_user)")" .sops.yaml 2>/dev/null || true
+                    _write_sops_config "$age_public_key" ".sops.yaml" || return 1
                     log_success "SOPS configuration created: .sops.yaml"
                     ;;
                 directories)
                     log_info "Creating directory structure..."
-                    mkdir -p secrets/keys secrets/.docker_secrets
-                    chmod 700 secrets/keys secrets/.docker_secrets
+                    mkdir -p secrets/keys /run/vaultwarden-oci/secrets
+                    chmod 700 secrets/keys /run/vaultwarden-oci/secrets
                     log_success "Directories created"
                     ;;
             esac
@@ -915,8 +912,17 @@ BACKUP_BANNER
         fi
 
         log_info "Encrypting secrets with SOPS + Age..."
-        if ! sops --encrypt --in-place "$temp_file" 2>&1; then
+        if ! sops --config "$SOPS_CONFIG_FILE" --encrypt --in-place "$temp_file" 2>&1; then
             log_error "Failed to encrypt secrets file"
+            return 1
+        fi
+
+        if ! sops --config "$SOPS_CONFIG_FILE" updatekeys --yes "$temp_file"; then
+            log_error "Failed to synchronize SOPS recipients"
+            return 1
+        fi
+        if ! SOPS_AGE_KEY_FILE="$SOPS_AGE_KEY_FILE" sops -d "$temp_file" >/dev/null; then
+            log_error "Staged encrypted secrets failed validation"
             return 1
         fi
 
@@ -932,14 +938,14 @@ BACKUP_BANNER
 
         log_success "Secrets encrypted and written to: $SECRETS_FILE"
 
-        local docker_secrets_dir="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}/secrets/.docker_secrets"
+        local docker_secrets_dir="/run/vaultwarden-oci/secrets"
         if [[ ! -d "$docker_secrets_dir" ]]; then
             mkdir -p "$docker_secrets_dir"
             chmod 700 "$docker_secrets_dir"
             log_info "Created Docker secrets directory: $docker_secrets_dir"
         fi
 
-        if ! export_docker_secrets "${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}/secrets/.docker_secrets"; then
+        if ! export_docker_secrets "/run/vaultwarden-oci/secrets"; then
             log_error "Failed to export Docker secret files — run sudo utilities/setup-secrets.sh configure again"
             return 1
         fi
@@ -1013,7 +1019,7 @@ BACKUP_BANNER
             log_success "✅ Caddy admin hash in htpasswd format: admin:\$2y\$14\$..."
             log_success "✅ VaultWarden admin hash in Argon2id format"
             log_success "✅ All secrets protected with Age encryption"
-            log_success "✅ Docker secret files written to: secrets/.docker_secrets/"
+            log_success "✅ Docker secret files written to: /run/vaultwarden-oci/secrets/"
             echo ""
             echo "📋 Next Steps:"
             echo "   1. Verify .env settings:      nano .env"
@@ -1888,8 +1894,8 @@ EOF
     fi
 
     # Create the directory structure.
-    mkdir -p "${PROJECT_ROOT}/secrets/keys" "${PROJECT_ROOT}/secrets/.docker_secrets" || return 1
-    chmod 700 "${PROJECT_ROOT}/secrets/keys" "${PROJECT_ROOT}/secrets/.docker_secrets" || return 1
+    mkdir -p "${PROJECT_ROOT}/secrets/keys" "/run/vaultwarden-oci/secrets" || return 1
+    chmod 700 "${PROJECT_ROOT}/secrets/keys" "/run/vaultwarden-oci/secrets" || return 1
 
     # Create or validate the repository Age key.
     if [[ -f "$age_key_file" ]] && [[ "$FORCE" != "true" ]]; then
@@ -2014,13 +2020,64 @@ EOF
     return 0
 }
 
+
+_valid_age_recipient() { [[ "${1:-}" =~ ^age1[a-z0-9]{58}$ ]]; }
+_resolve_offline_recipient() {
+    local operational="$1" manifest="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/config/dr-manifest.env" candidate=""
+    if _valid_age_recipient "${OFFLINE_AGE_RECIPIENT:-}"; then printf '%s' "$OFFLINE_AGE_RECIPIENT"; return 0; fi
+    if [[ -f "$manifest" ]]; then
+        candidate="$(_read_env_value OFFLINE_AGE_RECIPIENT "$manifest")"
+        if _valid_age_recipient "$candidate"; then printf '%s' "$candidate"; return 0; fi
+    fi
+    if [[ -f "$PROJECT_ROOT/.sops.yaml" ]] && command -v yq >/dev/null 2>&1; then
+        local age_value unknown=() recipient
+        age_value="$(yq -r '.creation_rules[0].age // ""' "$PROJECT_ROOT/.sops.yaml" 2>/dev/null || true)"
+        IFS=',' read -ra _recipients <<< "$age_value"
+        for recipient in "${_recipients[@]}"; do
+            recipient="${recipient// /}"
+            [[ "$recipient" == "$operational" ]] && continue
+            _valid_age_recipient "$recipient" && unknown+=("$recipient")
+        done
+        if (( ${#unknown[@]} == 1 )); then printf '%s' "${unknown[0]}"; return 0; fi
+        if (( ${#unknown[@]} > 1 )); then log_error "Multiple unknown recipients in .sops.yaml — review manually before continuing."; return 1; fi
+    fi
+    if [[ -t 0 ]]; then
+        read -r -p "Enter offline recovery Age public key (press Enter to skip): " candidate
+        if [[ -n "$candidate" ]]; then
+            _valid_age_recipient "$candidate" || { log_error "Invalid offline Age recipient format"; return 1; }
+            printf '%s' "$candidate"
+        fi
+    fi
+}
+_update_dr_manifest_offline_recipient() {
+    local recipient="$1" manifest_dir="${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/config" manifest="$manifest_dir/dr-manifest.env"
+    mkdir -p "$manifest_dir" || return 1
+    [[ -f "$manifest" ]] || : > "$manifest"
+    _set_env_var OFFLINE_AGE_RECIPIENT "$recipient" "$manifest"
+    _set_env_var MANIFEST_UPDATED_AT "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$manifest"
+}
+
 _write_sops_config() {
-    local age_pub="$1" dest="$2"
-    cat > "$dest" << SOPS_EOF
-creation_rules:
-  - path_regex: .*\.yaml$
-    age: $age_pub
-SOPS_EOF
+    local age_pub="$1" dest="$2" offline_recipient="${3:-}"
+    if [[ -z "$offline_recipient" ]]; then
+        offline_recipient="$(_resolve_offline_recipient "$age_pub")" || return 1
+    fi
+    {
+        printf 'creation_rules:
+'
+        printf "  - path_regex: '.*\\.yaml$'
+"
+        if [[ -n "$offline_recipient" ]]; then
+            printf '    # Offline recovery key — USB only, never stored on server
+'
+            printf '    age: "%s,%s"
+' "$age_pub" "$offline_recipient"
+            _update_dr_manifest_offline_recipient "$offline_recipient" || return 1
+        else
+            printf '    age: "%s"
+' "$age_pub"
+        fi
+    } > "$dest"
     chmod 640 "$dest"
     local real_user; real_user=$(get_real_user)
     chown "${real_user}:$(id -g -n "$real_user")" "$dest" 2>/dev/null || true

@@ -1589,7 +1589,7 @@ _warn_if_stack_unavailable() {
 # export_docker_secrets DOCKER_DIR [SECRETS_FILE]
 #
 # Decrypt SECRETS_FILE (defaults to $SECRETS_FILE / secrets/secrets.yaml) and
-# write one flat file per known secret key into DOCKER_DIR (mode 755).
+# write one flat file per known secret key into DOCKER_DIR (mode 0700).
 # Each output file is created mode 444 (via write_secret_file). Placeholder
 # values (CHANGE_ME*, NOT_USED*, null) are skipped with a warning so that
 # genuinely-empty optional secrets do not overwrite populated files.
@@ -1623,9 +1623,9 @@ export_docker_secrets() {
         log_error "export_docker_secrets: failed to create $docker_dir"
         return 1
     fi
-    chmod 755 "$docker_dir"
+    chmod 0700 "$docker_dir"
 
-    # Create the SOPS cache file inside the docker_dir (mode 755, not
+    # Create the SOPS cache file inside the docker_dir (mode 0700, not
     # world-listable /tmp), eliminating the TOCTOU
     # window between mktemp and the subsequent chmod on a shared host.
     local _eds_cache
@@ -1704,6 +1704,8 @@ PYEOF
     unset _key
     unset _eds_allowed_keys
 
+    find "$docker_dir" -maxdepth 1 -type f -exec chmod 0444 {} + 2>/dev/null || true
+
     # Sanity-check: if any output file starts with "ENC[", SOPS produced
     # raw ciphertext — fail loudly before containers start.
     local _bad_secrets=()
@@ -1731,11 +1733,11 @@ PYEOF
 
     # crowdsec_cf_firewall_token is intentionally not part of secrets.yaml.
     # Canonical location is a flat file at:
-    #   ${PROJECT_STATE_DIR:-/var/lib/vaultwarden}/secrets/.docker_secrets/crowdsec_cf_firewall_token
+    #   /run/vaultwarden-oci/secrets/crowdsec_cf_firewall_token
     # Mirror it into the active docker secret directory when present.
     local _project_state_dir _cf_flat
     _project_state_dir="${PROJECT_STATE_DIR:-${_VW_DEFAULT_STATE_DIR}}"
-    _cf_flat="${_project_state_dir}/secrets/.docker_secrets/crowdsec_cf_firewall_token"
+    _cf_flat="/run/vaultwarden-oci/secrets/crowdsec_cf_firewall_token"
     if [[ -f "$_cf_flat" ]]; then
         local _cf_value
         _cf_value=$(tr -d '[:space:]' < "$_cf_flat" 2>/dev/null || true)

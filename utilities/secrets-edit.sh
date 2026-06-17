@@ -14,6 +14,9 @@ source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
 source "${PROJECT_ROOT}/lib/crypto.sh"
 source "${PROJECT_ROOT}/lib/secrets.sh"
+load_project_environment || exit 1
+SOPS_CONFIG_FILE="${PROJECT_ROOT}/.sops.yaml"
+export SOPS_CONFIG_FILE
 
 trap perform_cleanup EXIT
 
@@ -287,6 +290,17 @@ do_edit() {
 
     if ! encrypt_sops_file "$encrypted_temp" "$AGE_KEY_FILE"; then
         log_error "Failed to encrypt secrets"
+        rm -f "$encrypted_temp"
+        return 1
+    fi
+
+    if ! sops --config "$SOPS_CONFIG_FILE" updatekeys --yes "$encrypted_temp"; then
+        log_error "Failed to synchronize SOPS recipients"
+        rm -f "$encrypted_temp"
+        return 1
+    fi
+    if ! SOPS_AGE_KEY_FILE="$SOPS_AGE_KEY_FILE" sops -d "$encrypted_temp" >/dev/null; then
+        log_error "Staged encrypted secrets failed validation"
         rm -f "$encrypted_temp"
         return 1
     fi

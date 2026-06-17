@@ -33,7 +33,7 @@ SKIP_EGRESS_FIX=false
 
 _STARTUP_WARNINGS=()
 
-DOCKER_SECRETS_DIR="${PROJECT_ROOT}/secrets/.docker_secrets"
+DOCKER_SECRETS_DIR="/run/vaultwarden-oci/secrets"
 
 show_help() {
 cat << 'EOF'
@@ -188,8 +188,6 @@ load_environment() {
     real_group=$(id -gn "${real_user}" 2>/dev/null || echo "${real_user}")
     env_owner=$(stat -c '%U' ".env" 2>/dev/null || echo "unknown")
 
-    # Auto-remediate a root-owned .env when startup is invoked by a non-root
-    # user, such as via sudo. This keeps non-root tooling functional.
     if [[ "$env_owner" == "root" && "$real_user" != "root" ]]; then
       if _maybe_sudo chown "${real_user}:${real_group}" ".env" \
         && _maybe_sudo chmod 600 ".env"; then
@@ -199,22 +197,17 @@ load_environment() {
       fi
     fi
 
-    # Fail early when .env is unreadable so non-root tooling does not break later.
     if [[ ! -r ".env" ]]; then
       log_error ".env is not readable by the current user ($(id -un))."
       log_error "Fix ownership: sudo chown $(id -un):$(id -gn) .env"
       return 1
     fi
-    set -a
-    # shellcheck disable=SC1091
-    source ".env"
-    set +a
-    log_success "Environment loaded from .env"
-  else
-    log_error ".env file not found!"
-    log_info "Copy .env.example to .env and configure it first"
-    return 1
   fi
+
+  load_project_environment || return 1
+  DOCKER_SECRETS_DIR="/run/vaultwarden-oci/secrets"
+  export DOCKER_SECRETS_DIR
+  log_success "Environment loaded"
 }
 
 # Required commands are declared in _VW_DEFAULT_REQUIRED_COMMANDS (lib/defaults.sh).

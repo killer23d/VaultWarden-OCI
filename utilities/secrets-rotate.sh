@@ -14,6 +14,9 @@ source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
 source "${PROJECT_ROOT}/lib/crypto.sh"
 source "${PROJECT_ROOT}/lib/secrets.sh"
+load_project_environment || exit 1
+SOPS_CONFIG_FILE="${PROJECT_ROOT}/.sops.yaml"
+export SOPS_CONFIG_FILE
 
 log_debug "secrets-rotate: SECRETS_FILE resolved to: ${SECRETS_FILE}"
 
@@ -351,6 +354,17 @@ PYEOF
         return 1
     fi
 
+    if ! sops --config "$SOPS_CONFIG_FILE" updatekeys --yes "$temp_enc"; then
+        log_error "Failed to synchronize SOPS recipients"
+        rm -f "$temp_enc"
+        return 1
+    fi
+    if ! SOPS_AGE_KEY_FILE="$SOPS_AGE_KEY_FILE" sops -d "$temp_enc" >/dev/null; then
+        log_error "Staged encrypted secrets failed validation"
+        rm -f "$temp_enc"
+        return 1
+    fi
+
     if ! mv "$temp_enc" "$SECRETS_FILE"; then
         log_error "Atomic mv failed — encrypted output in: $temp_enc"
         return 1
@@ -362,7 +376,7 @@ PYEOF
     local _affected_service="${_FIELD_SERVICES[$field]:-}"
 
     log_info "Redeploying Docker secret files..."
-    local docker_dir="${PROJECT_ROOT}/secrets/.docker_secrets"
+    local docker_dir="/run/vaultwarden-oci/secrets"
     local _docker_synced="false"
     if export_docker_secrets "$docker_dir" "$SECRETS_FILE" 2>/dev/null; then
         log_success "Docker secret files updated"

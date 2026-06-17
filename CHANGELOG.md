@@ -6,6 +6,9 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 ---
 ## [Unreleased]
 
+- Add resilient persistent state and disaster recovery: authoritative state-volume `install.env`, persistent SOPS ciphertext, transient `/run` Docker secret files, operational plus offline Age recipients, standalone recovery, and a printable recovery card.
+
+
 _(No unreleased changes yet — add entries here as work is merged.)_
 
 ---

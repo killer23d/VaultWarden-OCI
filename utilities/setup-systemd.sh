@@ -28,6 +28,7 @@ OPT_SCRIPTS_DIR="/opt/vaultwarden-scripts"
 ENV_DIR="/etc/vaultwarden"
 ENV_FILE="${ENV_DIR}/vaultwarden.env"
 AGE_KEY_DEST="${ENV_DIR}/age-key.txt"
+load_project_environment || exit 1
 
 TIMERS=(
     vaultwarden-maintenance.timer
@@ -454,6 +455,25 @@ DROPIN
     done
 }
 
+
+_render_startup_service() {
+    local template="$UNIT_SOURCE_DIR/vaultwarden-startup.service"
+    local dest="$UNIT_DEST_DIR/vaultwarden-startup.service"
+    [[ -f "$template" ]] || { log_error "Missing startup service template: $template"; return 1; }
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would render vaultwarden-startup.service with PROJECT_ROOT=$PROJECT_ROOT PROJECT_STATE_DIR=${PROJECT_STATE_DIR:-/var/lib/vaultwarden}"
+        return 0
+    fi
+    local tmp
+    tmp=$(mktemp -p "$UNIT_DEST_DIR" vaultwarden-startup.service.XXXXXX) || return 1
+    sed -e "s|@PROJECT_ROOT@|$PROJECT_ROOT|g" \
+        -e "s|@PROJECT_STATE_DIR@|${PROJECT_STATE_DIR:-/var/lib/vaultwarden}|g" \
+        "$template" > "$tmp" || { rm -f "$tmp"; return 1; }
+    chmod 0644 "$tmp" || { rm -f "$tmp"; return 1; }
+    mv "$tmp" "$dest" || { rm -f "$tmp"; return 1; }
+    log_success "Installed unit: vaultwarden-startup.service"
+}
+
 install_units() {
     if [[ $EUID -ne 0 ]]; then log_error "This script must be run as root."; exit 1; fi
     log_header "VaultWarden-OCI systemd Timer Installation"
@@ -771,6 +791,8 @@ install_units() {
         log_warn "Some unit files were missing -- check the systemd/ directory."
     fi
 
+    _render_startup_service || return 1
+
     _ensure_lock_group "$service_user"
     _ensure_runtime_lock_files "$service_user" "$service_group"
     _install_service_identity_dropin "$service_user" "$service_group"
@@ -804,6 +826,8 @@ install_units() {
         _run systemctl enable --now "$timer"
         log_success "Enabled: $timer"
     done
+    _run systemctl enable vaultwarden-startup.service
+    log_success "Enabled: vaultwarden-startup.service"
 
     # Verify managed timers are healthy after enablement.
     # list-timers output can lag briefly right after daemon-reload/enable.

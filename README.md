@@ -464,3 +464,9 @@ make version                           # Stack version from VERSION file
 ## 📄 License
 
 MIT License — see LICENSE file for details.
+
+## Resilient state and disaster recovery
+
+VaultWarden-OCI now treats `${PROJECT_STATE_DIR}/config/install.env` as the authoritative persistent environment. The repository `.env` remains a compatibility/bootstrap copy, and `/etc/vaultwarden/vaultwarden.env` is an installed bootstrap fallback for systemd. Encrypted secrets live at `${PROJECT_STATE_DIR}/secrets/secrets.yaml`; decrypted Docker secret source files are recreated only under `/run/vaultwarden-oci/secrets/`.
+
+SOPS policies use an operational Age recipient plus an optional offline recovery recipient. Keep the offline private key on USB only. The rendered recovery card is written to `${PROJECT_STATE_DIR}/config/recovery-card.md`; print it after setup and after changing the offline recovery key.

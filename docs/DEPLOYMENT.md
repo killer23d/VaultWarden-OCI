@@ -394,3 +394,9 @@ sudo systemctl status vaultwarden-health.timer      # check a specific timer
 ---
 
 > **Next step →** [Operations](OPERATIONS.md)
+
+## Resilient deployment artifacts
+
+Use Ubuntu 24.04 LTS where available; Ubuntu 22.04 or later is supported. Setup creates persistent configuration at `${PROJECT_STATE_DIR}/config/install.env`, a recovery manifest at `${PROJECT_STATE_DIR}/config/dr-manifest.env`, encrypted secrets at `${PROJECT_STATE_DIR}/secrets/secrets.yaml`, and a rendered recovery card at `${PROJECT_STATE_DIR}/config/recovery-card.md`.
+
+During secrets setup, provide the offline recovery Age public key when prompted. Runtime Docker secret files are transient and are written only to `/run/vaultwarden-oci/secrets/`.

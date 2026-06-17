@@ -17,6 +17,7 @@ source "${PROJECT_ROOT}/lib/common.sh"
 init_common_lib "$0"
 source "${PROJECT_ROOT}/lib/crypto.sh"
 source "${PROJECT_ROOT}/lib/secrets.sh"
+load_project_environment || exit 1
 
 trap perform_cleanup EXIT
 

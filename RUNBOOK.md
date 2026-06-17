@@ -239,3 +239,15 @@ sudo ./utilities/setup-crowdsec.sh --force
 |------|---------|
 | Preview uninstall (dry run) | `make uninstall-dry-run` |
 | Full uninstall (interactive) | `make uninstall` |
+
+## Resilient recovery quick reference
+
+Run recovery on the replacement VM after attaching and mounting the data volume:
+
+```bash
+sudo ./recover.sh --state-dir /mnt/vw-data --key /media/usb/age-key.txt
+```
+
+Environment precedence is persistent install env, repository `.env`, then installed systemd env. Runtime secrets are regenerated in `/run/vaultwarden-oci/secrets/` on startup by `vaultwarden-startup.service`; they are not persistent and disappear on reboot.
+
+Offline-key resolution is environment, manifest, existing policy, TTY prompt, then deliberate skip. To remove an offline recipient, make a staged ciphertext copy, update `.sops.yaml` deliberately, run `sops --config "$PWD/.sops.yaml" updatekeys --yes "$staging"`, validate decryption, then promote with `mv`.

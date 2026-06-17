@@ -17,6 +17,7 @@ source "$SCRIPT_DIR/lib/docker.sh"
 source "$SCRIPT_DIR/lib/backup-utils.sh"
 source "$SCRIPT_DIR/lib/crypto.sh"
 source "$SCRIPT_DIR/lib/storage.sh"  # provides require_project_state_ready()
+load_project_environment || exit 1
 
 BACKUP_TYPE="auto"    # Backup mode: auto, db, full, or emergency.
 DRY_RUN=false
@@ -251,14 +252,12 @@ _retention_days_for_type() {
 }
 
 _load_integrity_hmac_key() {
-    local state_dir
-    state_dir=$(get_config_value "PROJECT_STATE_DIR" "/var/lib/vaultwarden")
-    local key_file="${state_dir}/secrets/.docker_secrets/file_integrity_hmac_key"
-
-    if [[ -r "$key_file" ]]; then
-        FILE_INTEGRITY_HMAC_KEY=$(<"$key_file")
-        export FILE_INTEGRITY_HMAC_KEY
-    fi
+    FILE_INTEGRITY_HMAC_KEY="$(
+        SOPS_AGE_KEY_FILE="$SOPS_AGE_KEY_FILE" \
+            sops -d "$SECRETS_FILE" \
+            | yq -r '.file_integrity_hmac_key // ""'
+    )"
+    export FILE_INTEGRITY_HMAC_KEY
 
     if [[ -z "${FILE_INTEGRITY_HMAC_KEY:-}" || "${FILE_INTEGRITY_HMAC_KEY}" == CHANGE_ME* ]]; then
         unset FILE_INTEGRITY_HMAC_KEY
@@ -273,7 +272,6 @@ _load_integrity_hmac_key() {
         fi
         backup_log_warn "Backup integrity HMAC key is unavailable; legacy SHA-256-only mode remains active."
     fi
-    return 0
 }
 
 
